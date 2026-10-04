@@ -15,6 +15,9 @@
 - 详见 `02-progress.md` 同名节与 `TESTS.md`。
 
 - b4g（2026-10-04）：`gateway_parts/event_points._enabled_event_config` 为可选观察的安全开关读取；提示/回合/命令入口只在开启后读取事件字段，各自隔离观察装配异常。不会吞掉调用方的入队、权限或回合执行异常，缺上下文的收口直接返回。
+## Gateway 写入点私有写第三批（pw3/pw3r，2026-10-04）
+
+- `http_handlers.py` 旧 /ask inbox、`stream_writer.py` 流事件与 chunk 目录、`adapter.py` outbox 与目录、`adapter_late.py` 迟到登记、`request_history.py` message_repairs 统一走私有写（0600/原子/0700）；`scoped_locks.py` 锁记录由 sclk 覆盖。序列化格式与读取路径逐字节不变。详见 `02-progress.md` 同名节。
 
 - G6 网络出口：`tooling/web.py` 将 G4 `gateway_bound_ports()` 进程注册表与正数 `gateway_port` 配置后备结构化传入 `contracts/gates/network_safety.py`；命中端口后用逐目标、无缓存 UDP bind 判本机，`web_fetch`/`watch_stream` 每个重定向跳沿固定 IP 重验，不能附本机客户端凭据。G6 与 G4/G5 `gateway_isolation` 状态无关；OS 沙箱不可用时，`run_command` 仍可能访问 Gateway。
 

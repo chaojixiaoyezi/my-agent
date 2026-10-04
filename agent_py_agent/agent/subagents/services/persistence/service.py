@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from ....common.cache_freshness import CACHE_TRUST_AGE_SECONDS, cache_stat_signature
-from ....common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
+from ....common.json_io import (
+    locked_json_path,
+    read_json_object_report,
+    write_private_json_file_atomic,
+)
 from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import sequence_strings
 from ....concurrency.exceptions import ConcurrencyConflictError
@@ -450,13 +454,13 @@ class SubAgentPersistenceService:
             canonical_ref = _canonical_state_ref_from_payload(payload)
             if not canonical_ref:
                 raise FileNotFoundError(f"canonical subagent state missing for runner session: {run_id}")
-            write_json_file_atomic(Path(canonical_ref), payload)
+            write_private_json_file_atomic(Path(canonical_ref), payload)
             # list_runs 的文件指纹来自 locator；只刷新这个轻量文件，
             # 让列表入口及时看到新 heartbeat，不重建其余派生投影。
             locator = read_json_object_report(locator_path).payload
             if locator:
                 locator["updated_at"] = now
-                write_json_file_atomic(locator_path, locator)
+                write_private_json_file_atomic(locator_path, locator)
         return True
 
 
@@ -608,11 +612,11 @@ def _prepare_and_write_state(
     write_agent_run_state(state)
     locator_payload = build_agent_state_locator(task, state)
     locator_dir = service.workspace / _directory_id_for_task(service, task)
-    locator_dir.mkdir(parents=True, exist_ok=True)
-    write_json_file_atomic(locator_dir / "task.json", locator_payload)
-    write_json_file_atomic(locator_dir / "run.json", locator_payload)
-    write_json_file_atomic(task_dir / "task.json", locator_payload)
-    write_json_file_atomic(task_dir / "run.json", locator_payload)
+    # locator 目录缺失时由首次私有写按 0700 建；已存在的目录一律不动。
+    write_private_json_file_atomic(locator_dir / "task.json", locator_payload)
+    write_private_json_file_atomic(locator_dir / "run.json", locator_payload)
+    write_private_json_file_atomic(task_dir / "task.json", locator_payload)
+    write_private_json_file_atomic(task_dir / "run.json", locator_payload)
     return task_dir, build_owner_agent_projection(task, state)
 
 

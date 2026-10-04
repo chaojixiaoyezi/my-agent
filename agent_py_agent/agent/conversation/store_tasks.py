@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import jsonl_lines, write_text_file_atomic
+from ..common.json_io import jsonl_lines, write_private_text_file_atomic
 from ..gateway_parts.io import (
     locked_file_transition,
     update_json_file_atomic,
@@ -212,7 +212,9 @@ def _sync_task_workspace_summary_status(
     next_text = "\n".join(next_lines) + ("\n" if lines else "")
     current_text = summary_path.read_text(encoding="utf-8")
     if next_text != current_text:
-        write_text_file_atomic(summary_path, next_text)
+        # 任务摘要含任务标题与步骤，私有落盘：目录缺失按 0700 建、文件出生 0600、原子替换；
+        # 文本内容与原来逐字节一致。
+        write_private_text_file_atomic(summary_path, next_text)
 
 
 # LLM: 重复绑定保留终态/身份/已发布路径及选择marker；typed pending只传给真正新建分支，不为旧任务补资格。

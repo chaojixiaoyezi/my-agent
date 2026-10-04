@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..common.json_io import read_json_object_report, write_json_object
+from ..common.json_io import read_json_object_report, write_private_json_object
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.opaque_id import validate_opaque_id
 from ..runtime_errors import runtime_error_report
 
@@ -20,7 +21,8 @@ class SessionManager:
     def __init__(self, config: AgentConfig):
         self.config = config
         self._session_root = Path(config.session_workspace)
-        self._session_root.mkdir(parents=True, exist_ok=True)
+        # 缺失目录经统一私有原语逐级按 0700 新建（pbfix 口径）；已存在的目录一律不动。
+        ensure_private_dir(self._session_root)
 
     def _get_session_path(self, session_id: str) -> Path:
         """获取会话文件路径（B.2：ID 拼路径前必须过拒绝式校验）。"""
@@ -38,7 +40,7 @@ class SessionManager:
 
         session_id = generate_session_id()
         now_time = time.time()
-        write_json_object(
+        write_private_json_object(
             self._get_session_path(session_id),
             {
                 "session_id": session_id,
@@ -76,7 +78,7 @@ class SessionManager:
         return _read_session_report(session_file, session_id)
 
     def save_session(self, session: Session) -> None:
-        write_json_object(self._get_session_path(session.session_id), session.to_dict())
+        write_private_json_object(self._get_session_path(session.session_id), session.to_dict())
 
     def touch_session(self, session_id: str, channel: str | None = None) -> bool:
         session = self.load_session(session_id)

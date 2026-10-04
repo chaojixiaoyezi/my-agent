@@ -622,6 +622,24 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
 - **基线复核**：`test_supervision_kills_fully_stalled_source_worker_host` 在基线 `39350230a`（临时 worktree 复核）同样失败——环境相关既有失败，非本修正引入。
 
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，已并入 step17j `1a21ae0d9`）
+## 宿主私有写入第三批（pw3，2026-10-04；pw3r 已搬到 17j 头 `35b1647e8`，待非作者初审，之后交 9b）
+
+- **改了什么**：17 个产品文件里的宿主写入点改走私有写（0600/原子/0700），覆盖 Gateway（旧 /ask inbox、流事件、adapter outbox、迟到登记、message_repairs）、会话与存储（Todo 账本、任务摘要、session.json、channels.json）、子代理与运行数据（投影/locator/canonical、LocalStore blob、rotating_log、启动 spec、备份清单、配额迁移）。格式与读取路径不变；pw3r 在 17j 上核对：scoped_locks 由 sclk 覆盖、optimistic_lock 按 ds10/ds1 裁定恢复原样（均未搬）；保留原样的点与理由见 DESIGN_LEDGER 同名节。
+- **用例**（新增 `agent_py_agent/tests/test_private_writes_batch3.py`，14 条）：每个改过的写入点断言新文件 0600、新目录 0700、旧数据照常可读；另有一条原子性用例（monkeypatch `_replace_with_retry` 抛错 → 目标文件保持旧内容、临时文件已清理）。
+- **命令与结果（pw3r，17j 头 `35b1647e8`，`--basetemp=/private/tmp/claude-501/m-pw3r`）**：
+  - 新文件：`... -m pytest agent_py_agent/tests/test_private_writes_batch3.py -q` → **14 passed**。
+  - 相关回归（31 文件：私有写整包 7 个测试 + scoped lock 权限 + 私有目录策略 + gateway adapter/late/streaming/verbose/http + rotating_log + cross_channel + local_storage records/store + home_backup×2 + process_session_store + session/concurrency 组）→ **459 passed / 1 skipped**。
+  - pw3 轮 3 个变异（流事件追加、Todo 落盘、迟到登记各退回普通写 → 全部被用例杀死）对这批实现仍有效（pw3r 未改这些路径的实现）。
+  - 收尾门禁：guards9、import boundaries / ruff / doc sync / strict code-size / diff check / clean-package / size_diff 结果见交接报告（跑完 code-size 后 `git checkout -- CODE_SIZE_REPORT.md`）。
+- **未验证**：Windows/无 dir_fd 平台。（原先"旧 /ask 与 message_repairs 两点没有各自独立的用例"这条，已由 pw3t2 补上，见下。）
+- **补测（pw3t，2026-10-04）**：初审发现 `session/manager.py` 与 `session/cross_channel.py` 的 `ensure_private_dir(self._session_root)` **没有用例覆盖**（只构造对象时 `<sessions>` 根仍是 0755，两条既有用例只断言更深一级的子目录）。本次各补 2 条：umask 022 下 `_session_root` 是 0700（证明来自显式 mode）、已存在的 0755 目录一位不动。`test_private_writes_batch3.py` 现 18 条。
+- **9b 终审补测（pw3t2，2026-10-04，基于 pw3t `bb476bd33`）**：
+  - **必须修**：`test_plugin_event_gateway.py::test_prompt_fault_or_disable_never_breaks_queue[queue_error]` 在 pw3r 上失败（期望 500 实得 202）——这条 B4 用例给 `Path.write_text` 打桩模拟队列写失败，而旧 /ask 已改走私有原子写，桩落空、故障没注入。改成给模块属性 `http_handlers.write_private_json_file_atomic_no_newline` 打桩抛 OSError；并在**不注入故障**的 `disabled` / `publish_error` 两个参数里加断言：inbox 队列文件恰好一个且权限 0600。这条同时成了旧 /ask 私有写的端到端用例。
+  - **建议补**：`test_private_writes_batch3.py` 新增 `TestMessageRepairs`，直接调 `_queue_gateway_conversation_repair`，断言 `message_repairs/<id>-assistant.json` 是 0600、其父目录（刻意缺省）由私有写建成 0700。
+  - **变异复跑**：P1（旧 /ask 退回普通 `write_text`）**KILLED**（三个参数全红：`queue_error` 得 202、另两个的 0600 断言失败）；P2（message_repairs 退回非私有 `write_json_file`）**KILLED**（`0o644` vs 期望 `0o600`）。两个变异跑完都从备份还原、`git status` 干净。
+  - **命令与结果**：`test_plugin_event_gateway.py::test_prompt_fault_or_disable_never_breaks_queue` 3 passed；`test_private_writes_batch3.py` 19 passed（14 基线 + pw3t 4 + pw3t2 1）；级联门禁见交接报告。
+
+## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，待复审）
 
 - **改了什么**：检查程序每条错误可选带 `hint`（字符串）；宿主只转这一个自由文本字段——换行压空格、去控制字符和双向控制符、最多 200 个字符（超了截到 199 加省略号）；无 hint 照旧；hint 走与 location 相同的宿主路径脱敏；判定与计数只看 code。改动：`pack_verifier_runner.py`（`_error_samples` / `_clean_hint` / 两个新常数）、`pack_verifier_redaction.py`（`_redact_sample`）、`pack_verification_service.py`（`_sample_text`）；合同写进 `docs/design/CAPABILITY_PACKS_V2.md` 第 3 节输出合同。
 - **用例**（`agent_py_agent/tests/test_pack_verification_post_write_feedback.py` 新增 5 条）：

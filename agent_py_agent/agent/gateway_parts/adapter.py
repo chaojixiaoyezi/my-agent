@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.nofollow_fs import ensure_private_dir
 from .adapter_late import _record_late_pending, check_late_responses
-from .io import read_json_file, read_json_file_report, write_json_file
+from .io import read_json_file, read_json_file_report, write_json_file_atomic
 from .logging import _report_gateway_side_effect_error
 from .paths import AdapterPaths, GatewayPaths
 from .recovery import _archive_gateway_request
@@ -66,7 +67,7 @@ def _process_single_adapter_message(
     output_path = _adapter_output_path(adapter_paths_obj, message_id)
     started_at = time.time()
     if not prompt:
-        write_json_file(output_path, _empty_prompt_adapter_response(message_id, payload, processing_path, started_at))
+        write_json_file_atomic(output_path, _empty_prompt_adapter_response(message_id, payload, processing_path, started_at))
         _archive_adapter_message(processing_path, adapter_paths_obj.failed)
         return True
     request_id, request_path, gateway_response = _submit_adapter_gateway_request(
@@ -90,7 +91,7 @@ def _process_single_adapter_message(
             "started_at": started_at,
         }
     )
-    write_json_file(output_path, adapter_response)
+    write_json_file_atomic(output_path, adapter_response)
     _archive_adapter_message(
         processing_path,
         adapter_paths_obj.done if adapter_response["ok"] else adapter_paths_obj.failed,
@@ -215,9 +216,12 @@ def process_file_adapter_once(
     return processed
 
 
+# LLM: adapter 五个工作目录含提示词与回复正文，属宿主私有状态区；建目录一律走统一私有原语，
+#   不在这里各写一套 mkdir。原语逐级建缺失段、每级 0700，已存在的目录一律不动（只动自己新建的东西）。
+# 函数用途: 准备 adapter 的 inbox/processing/done/failed/outbox 五个目录，缺失时按 0700 建。
 def _ensure_adapter_dirs(paths: AdapterPaths) -> None:
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.outbox):
-        path.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(path)
 
 
 def _claim_adapter_message(message_path: Path, paths: AdapterPaths) -> Path | None:
@@ -239,7 +243,7 @@ def _process_claimed_adapter_message(
     payload_report = read_json_file_report(processing_path, context="gateway.adapter.message.read")
     if payload_report.load_error is not None:
         message_id = processing_path.stem
-        write_json_file(
+        write_json_file_atomic(
             _adapter_output_path(options.adapter_paths_obj, message_id),
             _message_load_error_adapter_response(
                 message_id,

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from ...common.json_io import write_json_file_atomic
+from ...common.json_io import write_private_json_file_atomic
 from ...model_visible_refs import has_placeholder_path_segment
 from ..models import SubAgentTask
 
@@ -177,8 +177,8 @@ def is_agent_state_locator(payload: dict[str, Any]) -> bool:
 def write_agent_run_state(state: AgentRunState) -> None:
     if state.canonical_path is None:
         return
-    state.canonical_path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_file_atomic(state.canonical_path, state.payload)
+    # canonical 状态含子代理全部运行事实，私有落盘：目录缺失按 0700 建、文件 0600、原子替换。
+    write_private_json_file_atomic(state.canonical_path, state.payload)
 
 
 def _declared_output_refs(task: SubAgentTask) -> list[str]:

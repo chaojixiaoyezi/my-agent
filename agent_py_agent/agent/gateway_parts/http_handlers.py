@@ -4,7 +4,7 @@
 # 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
 from __future__ import annotations
 
-from ..common.json_io import jsonl_lines
+from ..common.json_io import jsonl_lines, write_private_json_file_atomic_no_newline
 from ..contracts.model_call_ledger import model_call_inflight_snapshot
 
 """Endpoint handlers used by the gateway HTTP server.
@@ -705,10 +705,9 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     try:
         pending_path = server.paths.inbox / f"{request_id}.json"
-        pending_path.write_text(
-            json.dumps(request_data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # 旧 /ask 无幂等 ID 路径：提示词正文写进 inbox 队列，必须私有落盘——目录 0700、文件出生 0600、
+        # 原子替换（半写不留残档）。输出格式与原来逐字节一致：indent=2、不排序、无尾换行。
+        write_private_json_file_atomic_no_newline(pending_path, request_data, sort_keys=False)
         from ..observability.concurrency_metrics import gateway_request_enqueued
 
         gateway_request_enqueued()

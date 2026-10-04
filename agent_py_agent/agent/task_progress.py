@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .common.json_io import write_private_json_file_atomic_no_newline
 from .common.safe_id import safe_id
 from .common.value_parsing import dedupe_strings, string_list
 from .runtime_errors import DataCorruptionError, runtime_error_report
@@ -964,16 +964,9 @@ def _first_load_error(value: object) -> dict[str, Any] | None:
 
 
 def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+    # Todo/覆盖清单含任务标题与备注，私有落盘：目录缺失按 0700 建、文件出生 0600、原子替换；
+    # 输出格式与原来逐字节一致（indent=2、sort_keys、无尾换行）。
+    write_private_json_file_atomic_no_newline(path, payload, sort_keys=True)
 
 
 __all__ = [

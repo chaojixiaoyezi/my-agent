@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..common.json_io import read_json_object, read_json_object_report, write_json_object
+from ..common.json_io import read_json_object, read_json_object_report, write_private_json_object
 from .home_layout import MyAgentHomePaths
 
 
@@ -55,9 +55,9 @@ def create_home_backup_manifest(home: MyAgentHomePaths, *, reason: str = "") -> 
         "included_roots": list(included),
         "mode": "manifest_only",
     }
-    backup_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = backup_dir / "manifest.json"
-    write_json_object(manifest_path, payload)
+    # 清单含宿主路径，私有落盘：目录缺失按 0700 建、文件出生 0600、原子替换。
+    write_private_json_object(manifest_path, payload)
     return HomeBackupManifest(backup_dir=backup_dir, manifest_path=manifest_path, reason=str(reason or ""), included_roots=included)
 
 
@@ -214,7 +214,7 @@ def _update_manifest(path: Path, updates: dict[str, object]) -> None:
         payload = {}
     payload.update(updates)
     payload["updated_at"] = _now_iso()
-    write_json_object(path, payload)
+    write_private_json_object(path, payload)
 
 
 def _timestamp() -> str:

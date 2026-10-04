@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .json_io import read_json_object, write_json_file_atomic
+from .json_io import append_private_text, read_json_object, write_private_json_file_atomic
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,8 @@ def _update_meta(path: Path, *, appended: int = 0, pruned: int = 0) -> None:
     meta = read_json_object(_meta_path(path))
     meta["appended_lines"] = _safe_int(meta.get("appended_lines")) + appended
     meta["pruned_lines"] = _safe_int(meta.get("pruned_lines")) + pruned
-    write_json_file_atomic(_meta_path(path), meta)
+    # sidecar 与主日志同口径私有：目录 0700、文件出生 0600、原子替换。
+    write_private_json_file_atomic(_meta_path(path), meta)
 
 
 def _count_lines_any(p: Path) -> int:
@@ -136,7 +137,7 @@ def append_with_rotation(
     line_count:本次 blob 的逻辑行数(调用方知道则传,用于 O(1) 维护累计 appended_lines);
     None 则数 blob 的换行数。累计写进 sidecar,供 total_line_count() O(1) 读出做对账。
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 目录缺失由 append_private_text 按 0700 建（不再自行 mkdir）；已存在目录一律不动。
     # 接管已有旧档(有内容却无 sidecar):先把现有行数纳入 appended 基线,避免对账少计。
     if path.exists() and "appended_lines" not in read_json_object(_meta_path(path)):
         _update_meta(path, appended=online_line_count(path))
@@ -145,11 +146,9 @@ def append_with_rotation(
     if policy.enabled and path.exists() and path.stat().st_size + len(data) > policy.max_bytes:
         _rollover(path, policy)
         result.rotated = True
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
+    # 主日志含模型输出等正文，追加走私有原语：新文件出生 0600、已有宽权限文件先收紧再追加；
+    # 写入内容与原来逐字节一致（blob 原样）。
+    append_private_text(path, blob)
     if policy.enabled:
         result.pruned_segments, result.pruned_lines = _enforce_retention(path, policy)
     added = blob.count("\n") if line_count is None else line_count

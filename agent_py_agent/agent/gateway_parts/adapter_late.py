@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..common.json_io import jsonl_lines
+from ..common.json_io import append_private_text, jsonl_lines, write_private_text_file_atomic
 
 """late gateway responses for file adapter requests."""
 
@@ -37,8 +37,9 @@ def _record_late_pending(paths: AdapterPaths, request_id: str, original_timeout:
         "checked": False,
     }
     try:
-        with late_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # 迟到请求登记含请求正文元数据，追加走私有原语：新文件出生 0600、已有宽权限文件先收紧、
+        # 缺失目录按 0700 建；序列化格式与原来逐字节一致（ensure_ascii=False、行尾换行）。
+        append_private_text(late_path, json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError as exc:
         _report_gateway_side_effect_error("record_late_pending", request_id, exc)
 
@@ -128,6 +129,7 @@ def _rewrite_unchecked_late_entries(late_path: Path, entries: list[dict], raw_un
     lines.extend(raw_unreadable_lines or [])
     content = "\n".join(lines) + ("\n" if lines else "")
     try:
-        late_path.write_text(content, encoding="utf-8")
+        # 重写同格式整文件，走私有原子替换：半写不留残档、文件 0600、缺失目录 0700。
+        write_private_text_file_atomic(late_path, content)
     except OSError as exc:
         _report_gateway_side_effect_error("check_late_responses_cleanup", "", exc)

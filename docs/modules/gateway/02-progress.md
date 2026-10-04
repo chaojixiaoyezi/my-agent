@@ -30,6 +30,10 @@
 
 - `gateway_parts/scoped_locks.py` 建锁文件与锁目录改走 `common/nofollow_fs.open_private_lock_beneath`：新锁文件 0600、新锁目录 0700（不再跟 umask 走），已存在的目录一律不改权限；`O_CREAT|O_EXCL` 的"已存在即失败"互斥语义由该函数新增的 `exclusive=True` 参数保留。
 - 同批核对：`agent/task_progress.py:79` 是普通状态原子写（非锁创建点）；`concurrency/optimistic_lock.py:28` 是子代理工作区任务目录（非私有状态目录，未改）；`user_space/run_workspace.py:137` 是白名单集合（非创建点）。详见 DESIGN_LEDGER 同名节与 TESTS。
+## Gateway 写入点私有写第三批（pw3，2026-10-04；pw3r 已搬到 17j 头 `35b1647e8`，待非作者初审，之后交 9b）
+
+- 旧 /ask（无幂等 ID）inbox 写入 → `write_private_json_file_atomic_no_newline(sort_keys=False)`；流事件追加 → `append_private_text`、chunk 目录 0700；adapter outbox 三处 → 已私有的 `write_json_file_atomic`、adapter 五目录 0700；adapter_late 迟到登记追加/重写 → 私有 append/原子；message_repairs → 已私有的 `write_json_file_atomic`；scoped lock 由 17j sclk 覆盖（本批未重复改）。
+- 格式与读取路径不变；建目录口径（显式准备目录已改用 pbfix 的 `nofollow_fs.ensure_private_dir`）与保留项见 DESIGN_LEDGER 同名节。
 
 ## G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
 

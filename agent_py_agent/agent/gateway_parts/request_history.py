@@ -633,9 +633,10 @@ def _queue_gateway_conversation_repair(
         filename = f"{request_id}-{role}.json"
     path = Path(root) / "message_repairs" / filename
     try:
-        from .io import write_json_file
+        from .io import write_json_file_atomic
 
-        write_json_file(path, payload)
+        # message_repairs 含消息正文，落盘走已私有的原子写（目录 0700、文件出生 0600）。
+        write_json_file_atomic(path, payload)
         indexed = getattr(agent, "_conversation_indexed_threads", set())
         indexed.discard(conversation.thread_id)
     except Exception as exc:

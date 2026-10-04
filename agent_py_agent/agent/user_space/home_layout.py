@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..common.json_io import write_json_file_atomic
+from ..common.json_io import write_private_json_file_atomic
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
 from .home_memory_seeds import (
     default_memory_hot_md,
@@ -331,7 +331,8 @@ def _upgrade_default_quota_policy(paths: MyAgentHomePaths) -> None:
     try:
         payload = json.loads(paths.owner_quota_json.read_text(encoding="utf-8"))
         if payload == legacy_default:
-            write_json_file_atomic(paths.owner_quota_json, default_quota_payload())
+            # 配额策略是宿主运行状态，私有落盘：目录缺失按 0700 建、文件出生 0600、原子替换。
+            write_private_json_file_atomic(paths.owner_quota_json, default_quota_payload())
     except (OSError, json.JSONDecodeError):
         return
 

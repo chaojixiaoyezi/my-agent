@@ -15,7 +15,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from ....common.json_io import write_json_file_atomic
+from ....common.json_io import (
+    append_private_text,
+    write_private_json_file_atomic,
+    write_private_text_file_atomic,
+)
 from ....contracts.protocol_status import TOOL_STATUS_FAILED
 from ....user_space.home_indexes import (
     AgentIndexRef,
@@ -79,7 +83,7 @@ def sync_derived_projections(
     run_step("status_report", lambda: _write_status_report(task))
     run_step(
         "thought_markdown",
-        lambda: (projection_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8"),
+        lambda: write_private_text_file_atomic(projection_dir / "thought.md", render_thought_markdown(task)),
     )
     run_step("owner_agent_projection", lambda: _write_owner_agent_projection(manager, task, owner_projection))
     run_step("owner_runtime_indexes", lambda: register_owner_runtime_indexes(manager, task))
@@ -111,7 +115,7 @@ def rebuild_derived_projections(manager: Any, run_id: str) -> tuple[ProjectionRe
 def _write_status_report(task: SubAgentTask) -> None:
     if not task.status_report_json:
         return
-    write_json_file_atomic(Path(task.status_report_json), asdict(task.latest_status_report))
+    write_private_json_file_atomic(Path(task.status_report_json), asdict(task.latest_status_report))
 
 
 def render_thought_markdown(task: SubAgentTask) -> str:
@@ -170,7 +174,7 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         return
     root = Path(owner_home) / "agents" / task.id
     root.mkdir(parents=True, exist_ok=True)
-    write_json_file_atomic(root / "state.json", projection)
+    write_private_json_file_atomic(root / "state.json", projection)
     refs = {
         "schema_version": "owner-agent-projection.v1",
         "run_id": task.id,
@@ -184,7 +188,7 @@ def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: 
         "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
         "updated_at": task.updated_at,
     }
-    write_json_file_atomic(root / "refs.json", refs)
+    write_private_json_file_atomic(root / "refs.json", refs)
 
 
 # LLM: A descendant owns only its run/agent projections. A standalone manager
@@ -249,8 +253,8 @@ def _projection_ledger_lines(records: list[ProjectionRecord]) -> list[str]:
 
 def _append_jsonl_lines(path: Path, lines: list[str]) -> None:
     try:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.writelines(f"{line}\n" for line in lines)
+        # 投影台账含运行状态与错误信息，追加走私有原语：新文件出生 0600、缺失目录 0700。
+        append_private_text(path, "".join(f"{line}\n" for line in lines))
     except OSError:
         return
 
@@ -273,7 +277,7 @@ def _write_projection_warnings(task_dir: Path, records: list[ProjectionRecord]) 
             pass
         return
     try:
-        write_json_file_atomic(
+        write_private_json_file_atomic(
             path,
             {
                 "schema_version": "subagent_projection_warnings.v1",

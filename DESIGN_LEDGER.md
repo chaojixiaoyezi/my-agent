@@ -1,5 +1,23 @@
 # 设计台账
 
+## 9b 终审 pw3r 的必须修：只改用例（pw3t2，2026-10-04，分支 `worker/pw3r-tests`，基于 pw3t `bb476bd33`；只改用例；9b 复跑通过，已并入 step17j）
+
+- **来源**：9b 对 pw3r（`5f34d1548`）+ pw3t（`bb476bd33`）的安全终审结论——产品代码没问题，1 条必须修，只改用例。证据 `~/.my-agent/decision-evidence/review-pw3r-5f34d1548/9b/`。
+- **必须修**：`test_plugin_event_gateway.py::test_prompt_fault_or_disable_never_breaks_queue[queue_error]` 失败（期望 500 实得 202）。原因是这条 B4 用例给 `Path.write_text` 打桩模拟队列写失败，而 pw3r 把旧 /ask 改成私有原子写（`http_handlers.py:710`）后不再走 `Path.write_text`，桩落空、故障没真正注入。修法：给模块属性 `http_handlers.write_private_json_file_atomic_no_newline` 打桩抛 OSError（调用点 `http_handlers.py:7` 就是按这个名字导入的，模块属性打桩才命中真调用点）；在不注入故障的 `disabled` / `publish_error` 两个参数里补断言：inbox 队列文件恰好一个、权限 0600。这样它同时成为旧 /ask 私有写的端到端用例，也覆盖了 9b 的 P1 变异。
+- **建议补**：`test_private_writes_batch3.py` 新增 `TestMessageRepairs`，直接调 `_queue_gateway_conversation_repair`（`request_history.py:578`），断言 `message_repairs/<id>-assistant.json` 是 0600、父目录（刻意缺省）由私有写建成 0700；覆盖 9b 的 P2 变异（message_repairs 退回非私有写）。
+- **变异复跑**：P1（旧 /ask 退回普通 `write_text`）KILLED；P2（message_repairs 退回 `write_json_file`）KILLED。两个都还原、`git status` 干净。
+- **未验证**：只改用例，没有改产品行为；Windows/无 dir_fd 平台照旧未实测。
+
+## pw3r 初审补测（pw3t，2026-10-04，分支 `worker/pw3r-tests`，基于 pw3r `5f34d1548`；只补用例、注释与文档；已并入 step17j）
+
+- **来源**：pw3r 非作者初审（pw3rr）的三条小问题。实测变异 M3/M4 存活，确认下面第 1 条是真实覆盖缺口，不是"用例写得太浅"的错觉。
+- **做了什么**：
+  1. `session/manager.py:25`、`session/cross_channel.py:39` 的 `ensure_private_dir(self._session_root)` 各补 2 条用例：umask 022 下 `_session_root`（`<sessions>` 这一级）是 0700（证明权限来自显式 mode，不跟 umask 走）、已存在的 0755 目录一位不动。原有用例只断言更深一级的子目录（那一级是私有写函数建的），所以 `__init__` 的建目录没人钉。
+  2. `gateway_parts/adapter.py` 的 `_ensure_adapter_dirs` 补双层注释（`# LLM:` + `# 函数用途:`），写清建 inbox/processing/done/failed/outbox 五个目录、缺失时 0700、已存在不动。
+  3. TESTS.md 的 pw3 同名节：把"未验证"里 `http_handlers` 旧 /ask 与 `request_history` message_repairs 两点写清（无独立端到端用例、只由同原语 + 静态核对覆盖），并补本次补测记录。
+- **验证**：`test_private_writes_batch3.py` 14→18 条全过；M3/M4 变异（把 `__init__` 的 `ensure_private_dir` 退回 `mkdir`）现在被新用例杀死。详细命令与结果见 TESTS.md 同名节。
+- **未验证**：只加用例与注释，没有改产品行为，也没有跑真实 Gateway；Windows/无 dir_fd 平台照旧未实测。
+
 ## B7 Linux 前缀别名与受限策略接口（b7fix，2026-10-04，分支 `worker/m1-b7-on17j`，基于 `1da20daac`；已并入 step17j，3a 沙箱外 Mac 验证通过，Linux 车道与 9b 终审待做）
 
 - **起因**：sol1 复审发现 Linux bwrap 在 tmpfs 隐藏 Gateway 用户家目录后，只挂回 Python 安装前缀的 realpath，丢失家目录内的 symlink alias；另缺少给后续旧插件权限复用的受限 R/W/E 规格工厂，且启用注释/进程沙箱文档已过期。
@@ -262,6 +280,18 @@
 - **既有失败（非本片引入）**：`test_dispatch_liveness_and_revive.py::test_supervision_kills_fully_stalled_source_worker_host:893`（`running_reclaimed` 期望 2 实得 0）在 `312a4fec4` 与 `39350230a` **两个基线**上同样失败，与本片改动无关，照实保留、未跳过。
 - **未验证**：真实 Gateway 端到端未跑（规则禁止连真实 Gateway）；留给 3a/9b 复核。
 
+## 宿主私有写入第三批（pw3，2026-10-04，分支 `worker/private-writes-batch3`，基于 17j 头 `1a21ae0d9`；pw3r 已搬到 17j 头 `35b1647e8`；ds1 初审、9b 终审通过（含 pw3t、pw3t2），已并入 step17j）
+
+- **背景**：9b 终审私有写整包时指出，下列写入点带了内容（提示词、模型输出、回复、任务摘要），却还没走私有写——新文件 0644、有的也不是原子写；ds3 简报第 3 节另列了一张同类表。
+- **改法**：逐个改走整包现有私有写函数（新文件出生 0600、缺失目录按 0700 建、原子替换），格式、调用方语义、读取路径不变：
+  - Gateway：`http_handlers.py` 旧 /ask（无幂等 ID）inbox 写入 → `write_private_json_file_atomic_no_newline(sort_keys=False)`；`stream_writer.py` 流事件追加 → `append_private_text`，chunk 目录 0700；`adapter.py` outbox 三处改用已私有的 `write_json_file_atomic`，adapter 五目录 0700；`adapter_late.py` 迟到登记追加/重写 → 私有 append/私有原子；`request_history.py` message_repairs 改用已私有的 `write_json_file_atomic`；`scoped_locks.py` 的锁记录 0600/锁目录 0700 在 17j 已由 sclk（`open_private_lock_beneath` exclusive）覆盖，本批未重复改（pw3r）。
+  - 会话与存储：`task_progress.py` Todo 账本 → `write_private_json_file_atomic_no_newline`（与旧输出逐字节一致：indent=2、sort_keys、无尾换行）；`store_tasks.py` 任务摘要 → `write_private_text_file_atomic`；`session/manager.py` session.json → `write_private_json_object`、会话根 0700；`session/cross_channel.py` channels.json → 私有原子（indent=2、不排序、无尾换行）。
+  - 子代理与运行数据：`subagents/services/persistence/{projections,service,agent_run_state}.py` 投影/状态/locator → 私有写；`local_storage/records.py` blob 正文 → `write_private_text_file_atomic`；`common/rotating_log.py` 主日志追加与 sidecar → 私有 append/私有原子；`tooling/background_process_launch.py` 启动 spec → `write_private_json_file_atomic`（去掉显式 mkdir/chmod，交给私有原语）；`user_space/home_backup.py` 备份清单 → `write_private_json_object`；`user_space/home_layout.py` 配额策略迁移 → 私有原子。（pw3r：`concurrency/optimistic_lock.py` 的版本锁记录与任务目录恢复原样——ds10/ds1 裁定该目录在子代理工作区（用户可见产出区）、非私有范围；17j sclk 段已登记“非私有状态目录，未改”。）
+- **建目录口径**：能由私有写函数顺带建缺失目录的一律交给它们（rotating_log、background_process_launch、local_storage、home_backup、subagents locator、adapter_late）；显式准备的目录（chunk、adapter 五目录、session 根、通道目录）在 pw3r 已改用 pbfix 的统一原语 `nofollow_fs.ensure_private_dir`（缺失段逐级 0700、已存在一律不动），不再用 `mkdir(mode=0o700)`（它只保证最后一级）。
+- **保留原样（理由）**：`home_layout.py` 的初始化种子写入（`_write_seed_file`/`_write_seed_json`/模板升级）——写的是用户直接阅读编辑的文档种子（SOUL/USER/AGENTS/记忆模板），属用户资产，保持默认权限；`memory_store/migration.py` 一次性迁移工具本批未动（写迁移目标与记录，需单独判定）；`optimistic_lock.py` 按裁定恢复原样（见上）、`run_workspace.py:137` 是白名单集合不是创建点；`gateway_parts/io.py` 的 `write_json_file` 定义保留（本批只把 adapter、request_history 两个调用方迁到私有原子版）。
+- **验证**：见 TESTS.md 同名节（pw3 轮 3 个变异——流事件追加、Todo 落盘、迟到登记各退回普通写——全部被用例杀死；pw3r 在 17j 头 `35b1647e8` 复跑：新增 14 条用例 + 相关回归 459 passed / 1 skipped + guards9 与静态门禁全过）。
+- **pw3r 搬运说明（相对原 `cab1f7702`）**：① `scoped_locks.py` 未搬——17j 的 sclk2/sclk3 已用 `open_private_lock_beneath(exclusive=True)` 覆盖本批要做的锁记录 0600/锁目录 0700；② `constants_catalog.json` 未搬目录变更——17j 已由 3a 重新生成，本批在 17j 上重新生成核对（897 项一致）；③ `optimistic_lock.py` 恢复原样（裁定见上）；④ 显式 mkdir 点（chunk、adapter 五目录、session 根、通道目录）改用 pbfix 的 `nofollow_fs.ensure_private_dir`；⑤ 其余 17 个产品文件、测试与文档段按原样搬入。
+- **未验证**：Windows/无 dir_fd 平台未实测（与整包同一残余风险）；存量旧文件只在下次写入收紧；`http_handlers.py` 旧 /ask 与 `request_history.py` message_repairs 两点由同原语+静态核对覆盖，没有各自独立的端到端用例（入口深、依赖 handler/agent 装配）。
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，ds7 初审可以交终审（变异 5/5），9b 看脱敏与清洗两处，已并入 step17j）
 
 - **背景**：能力包重跑里 B 包两例不合格，都是交接文件的一个字段填错；检查程序报了错、宿主核验判失败、返工了好几次，模型还是改不对——返工提示里每条错误只有 code 和 location，看不出“应该填什么”。ds7 在做 B 包 0.3.2：检查程序的报错会带上期望值（hint），宿主不转模型就看不到。

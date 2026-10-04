@@ -4,6 +4,9 @@
 
 - 子代理侧建目录点（debug_trace / execution.report / manager_work_orders / services.actions.records / task_trash）统一改 `nofollow_fs.ensure_private_dir`：缺失段逐级 0700、已存在一律不动。
 - 详见 `02-progress.md` 同名节与 `TESTS.md`。
+## 子代理持久化/投影私有写入（pw3/pw3r，2026-10-04）
+
+- `services/persistence/projections.py`、`services/persistence/service.py`、`services/agent_run_state.py` 的宿主状态/投影写入（canonical state、locator、owner 投影、投影台账、warnings）统一走 `common/json_io` 私有写：目录 0700、文件 0600、原子替换；JSON/JSONL 序列化格式逐字节不变，读取方（loaders、列表缓存）不受影响。详见 `02-progress.md` 同名节。
 
 ## 私有写只动自己建的东西（pdp，2026-10-03）
 

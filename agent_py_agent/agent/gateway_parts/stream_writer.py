@@ -9,6 +9,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..common.json_io import append_private_text
+from ..common.nofollow_fs import ensure_private_dir
 from ..conversation.channels import (
     project_host_paths_for_channel,
     redact_structured_identifiers,
@@ -33,19 +35,21 @@ _CHUNK_STREAM_FLUSH_CHARS = 128
 
 
 # LLM: 仅准备原请求的 chunk 目录；事件文件由首次追加创建，结束后须保留供客户端补读。
+#   目录缺失时经统一私有原语逐级按 0700 新建（pbfix 口径：中间层同样 0700）；已存在的目录一律不动。
 # 函数用途: 建立流文件所在目录并返回既有路径和创建时刻。
 def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
-    chunk_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(chunk_path.parent)
     return chunk_path, time.time()
 
 
 # LLM: typed progress 与模型 delta 共用归档文件但保留 kind，客户端不得再解析“[工具]”正文猜状态。
+#   追加走私有原语：新文件出生 0600、已有宽权限文件先收紧再追加、缺失目录按 0700 建；
+#   序列化格式与原来逐字节一致（ensure_ascii=False、行尾换行）。
 # 函数用途: 追加一个带类型的 Gateway 流事件；展示写入失败不改变请求结果。
 def write_chunk_event(chunk_path: Path, payload: dict[str, object]) -> None:
     try:
         line = json.dumps({"t": time.time(), **payload}, ensure_ascii=False)
-        with open(chunk_path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        append_private_text(chunk_path, line + "\n")
     except OSError:
         pass
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import write_text_file_atomic
+from ..common.json_io import write_private_text_file_atomic
 from .models import PREVIEW_CHARS, LocalSearchResult
 
 
@@ -149,9 +149,8 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
         clean_title = params.title.strip() or clean_source_id
         clean_record_id = params.record_id or self.make_record_id(clean_source_type, clean_source_id)
         content_path = self._content_file(clean_record_id)
-        content_path.parent.mkdir(parents=True, exist_ok=True)
-        # 原子写:blob 内容半写即损坏(体检实锤),统一走 json_io 原子文本写。
-        write_text_file_atomic(content_path, params.content)
+        # 原子写:blob 内容半写即损坏(体检实锤),统一走私有原子文本写：目录缺失按 0700 建、文件 0600。
+        write_private_text_file_atomic(content_path, params.content)
         metadata = params.metadata or {}
         return _PreparedRecord(
             record_id=clean_record_id,
@@ -237,7 +236,7 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
 
         content_path = self._resolve_content_path(str(row["content_path"] or ""))
         # Wipe first. If unlink later fails, no plaintext remains in the file.
-        write_text_file_atomic(content_path, "")
+        write_private_text_file_atomic(content_path, "")
         with self._connection() as conn:
             conn.execute("PRAGMA secure_delete=ON")
             if self.fts_available:

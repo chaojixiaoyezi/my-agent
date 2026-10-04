@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.json_io import write_private_json_file_atomic_no_newline
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from ..runtime_errors import runtime_error_report
 
@@ -33,7 +35,8 @@ class CrossChannelSession:
     def __init__(self, config: AgentConfig):
         self.config = config
         self._session_root = Path(config.session_workspace)
-        self._session_root.mkdir(parents=True, exist_ok=True)
+        # 缺失目录经统一私有原语逐级按 0700 新建（pbfix 口径）；已存在的目录一律不动。
+        ensure_private_dir(self._session_root)
 
     def _get_channels_path(self, session_id: str) -> Path:
         """获取通道配置文件路径（B.2：ID 拼路径前必须过拒绝式校验，G1 补齐）。"""
@@ -64,8 +67,9 @@ class CrossChannelSession:
     def _save_channels(self, session_id: str, data: dict) -> None:
         """保存通道配置。"""
         path = self._get_channels_path(session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 通道配置含绑定信息，私有落盘：目录缺失按 0700 建、文件出生 0600、原子替换；
+        # 输出格式与原来逐字节一致（indent=2、不排序、无尾换行）。
+        write_private_json_file_atomic_no_newline(path, data, sort_keys=False)
 
     def bind_session(self, session_id: str, channel: str, user_id: str | None = None) -> bool:
         data = self._load_channels(session_id)

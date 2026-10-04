@@ -112,7 +112,7 @@ def test_control_real_receipt_emits_only_first_completion(gateway):
 
 @pytest.mark.parametrize('fault', ['disabled', 'publish_error', 'queue_error'])
 def test_prompt_fault_or_disable_never_breaks_queue(gateway, monkeypatch, fault):
-    from pathlib import Path
+    import stat
 
     agent, paths, server, events = gateway
     if fault == 'disabled':
@@ -123,16 +123,19 @@ def test_prompt_fault_or_disable_never_breaks_queue(gateway, monkeypatch, fault)
             raise RuntimeError('plugin observation unavailable')
         monkeypatch.setattr(plugin_panels_http, 'publish_plugin_event', fail)
     if fault == 'queue_error':
-        original = Path.write_text
-        def write(path, *args, **kwargs):
-            if path.parent == paths.inbox:
-                raise OSError('queue unavailable')
-            return original(path, *args, **kwargs)
-        monkeypatch.setattr(Path, 'write_text', write)
+        # 旧 /ask 现在经 http_handlers 的私有原子写落盘（不再走 Path.write_text）；按模块属性打桩才能命中真调用点。
+        def fail_write(*_args, **_kwargs):
+            raise OSError('queue unavailable')
+        monkeypatch.setattr(http_handlers, 'write_private_json_file_atomic_no_newline', fail_write)
     handler = _Handler({'prompt': 'normal', 'conversation_id': 'c-1'})
     http_handlers.handle_ask(handler, server, lambda: 'fault-1')
     assert handler.replies[-1][0] == (500 if fault == 'queue_error' else 202)
     assert not events
+    if fault != 'queue_error':
+        # 不注入故障时，这条用例同时是旧 /ask 私有写的端到端检查：inbox 队列文件必须 0600。
+        queued = list(paths.inbox.glob('*.json'))
+        assert len(queued) == 1
+        assert stat.S_IMODE(queued[0].stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize('failure', [False, True])
