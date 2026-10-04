@@ -675,3 +675,58 @@ def test_unknown_gateway_never_receives_deepseek_thinking_field():
     backend.generate("继续", tools=_TOOLS, messages=_tool_call_round_messages(None))
 
     assert "thinking" not in captured["payload"], "未知网关不得被强塞专有字段"
+
+
+# --------------------------------------------------------------------------- #
+# 10-04 DeepSeek 官网实测（~/.my-agent/decision-evidence/deepseek-cache-audit-1004/server_probe_facts.md）：
+# 思考模式只要求“最后一条 user 之后”的 assistant 都带 reasoning_content（缺了 400，纯文本也一样）；更早轮次的不带也接受。
+# 关思考是另一个缓存分区（整段上下文按未命中重算），所以只能在本轮真缺思考时才关，旧答复缺思考不能连累整条线程。
+# --------------------------------------------------------------------------- #
+
+
+def _two_turn_messages(previous_reasoning, current_reasoning):
+    """上一轮一条纯文本答复 + 本轮一次工具调用；reasoning 为 None 表示那条消息没有思考块。"""
+    previous = [{"type": "thinking", "thinking": previous_reasoning}] if previous_reasoning is not None else []
+    current = [{"type": "thinking", "thinking": current_reasoning}] if current_reasoning is not None else []
+    current.append({"type": "tool_use", "id": "call_2", "name": "read_file", "input": {"path": "b.txt"}})
+    return [
+        {"role": "user", "content": [{"type": "text", "text": "上一轮的问题"}]},
+        {"role": "assistant", "content": [*previous, {"type": "text", "text": "上一轮的答复"}]},
+        {"role": "user", "content": [{"type": "text", "text": "这一轮的问题"}]},
+        {"role": "assistant", "content": current},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_2", "content": "内容"}]},
+    ]
+
+
+def test_previous_turn_answer_without_reasoning_keeps_thinking_mode():
+    captured = {}
+    backend = _openai_backend_capturing(captured)
+    backend.generate("继续", tools=_TOOLS, messages=_two_turn_messages(None, "这一轮要读 b"))
+
+    payload = captured["payload"]
+    assert "thinking" not in payload, "上一轮答复缺思考不在本轮，不能关思考（关思考会换缓存分区并让模型不再思考）"
+    assistants = [m for m in payload["messages"] if m.get("role") == "assistant"]
+    assert "reasoning_content" not in assistants[0], "不补造旧答复的思考"
+    assert assistants[1]["reasoning_content"] == "这一轮要读 b"
+
+
+def test_current_turn_tool_call_without_reasoning_still_disables_thinking():
+    captured = {}
+    backend = _openai_backend_capturing(captured)
+    backend.generate("继续", tools=_TOOLS, messages=_two_turn_messages("上一轮有思考", None))
+
+    assert captured["payload"]["thinking"] == {"type": "disabled"}, "本轮内缺思考上游会 400，必须显式关思考"
+
+
+def test_thinking_rule_only_checks_assistants_after_last_user():
+    from agent_py_agent.agent.backends.openai_chat import _thinking_mode_supported
+
+    call = {"id": "c", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+    old_text = {"role": "assistant", "content": "旧答复"}
+    thought_call = {"role": "assistant", "content": "", "reasoning_content": "要读", "tool_calls": [call]}
+    tool_result = {"role": "tool", "tool_call_id": "c", "content": "内容"}
+    user = {"role": "user", "content": "问题"}
+    assert _thinking_mode_supported([user, old_text, user, thought_call, tool_result])
+    assert not _thinking_mode_supported([user, old_text, thought_call, tool_result]), "最后一条 user 之后的纯文本也要思考"
+    assert not _thinking_mode_supported([old_text, thought_call]), "没有 user 时整段都算本轮"
+    assert _thinking_mode_supported([{"role": "system", "content": "s"}, user])

@@ -1,5 +1,14 @@
 # 设计台账
 
+## DeepSeek 思考开关只看本轮（thinking-rule，2026-10-04，3a，分支 `claude/3a-thinking-rule`，基于 17j `15feb6b91`；用户点名的缓存费用底座修复；9b 终审通过，已并入 step17j）
+
+- **问题**：`backends/openai_chat.py` 的 `_thinking_mode_supported` 要求出站历史里每一条 assistant 都带 `reasoning_content`，否则整条请求写 `thinking: disabled`。模型的最终答复经常没有思考内容，于是之后的请求都被切到“关思考”。
+- **为什么是费用问题**：DeepSeek 官网的上下文缓存按“思考开关 + 推理强度”分区（不带档位、high、显式开思考共用一份；low、max、关思考各自一份），切换就从头全不命中，连 system 都不命中；模型也从此不再思考。
+- **服务端真实要求**（官网实测，事实文件 `~/.my-agent/decision-evidence/deepseek-cache-audit-1004/server_probe_facts.md`）：最后一条 user 之后的 assistant 都必须带 reasoning，纯文本也一样，缺了就 400；最后一条 user 之前的不带也接受。
+- **修法**：只检查最后一条 user 之后的 assistant；本轮内真缺思考时仍显式关思考，避免 400。属于让 R233 原意准确生效的 bug fix，不加开关。
+- **上线影响**：以前被卡在“关思考”的老会话，新一轮会重新思考，输出 token 会变多；用户想关思考，用显式档位 off（reasoning_control.py）。9b 另测了 opencode Go（/zen/go/v1），新规则在那边也不会引出 400。
+- **未做**：压缩请求的档位对齐（luna3 `worker/cache-compact`）、跨轮和重新加载的前缀一致性（sol1、ds7）、诊断补全（ds3）另行交付。
+
 ## 只看档加进管理员 /settings 白名单（obsset，2026-10-04，分支 `worker/obs-user-setting`，基于 17j 头 `35b1647e8`；3a 初审、9b 终审通过，已并入 step17j）
 
 - **来源**：用户拍板 17j 上线后在生产打开屏幕观察的“只看档”（`computer_use_observation_enabled=true`），完整档 `computer_use_enabled` 保持关；上线清单与验收手册 A4 都写“用 /settings 设”。3a 在隔离环境实测 17j 头：管理员 `/settings` 作用域里 `set computer_use_observation_enabled true` 返回 **PARAMETER_BOUNDARY**——该键在 `parameter_registry._BOUNDARY_NAMES` 里，但不在 `settings/user_config_capability.USER_SETTINGS_BOUNDARY_KEYS` 白名单里。

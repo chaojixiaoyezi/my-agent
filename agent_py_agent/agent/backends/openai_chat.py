@@ -406,10 +406,14 @@ def _openai_non_stream_response(
     )
 
 
-# LLM: 已知思考方言要求完整 assistant reasoning；空串不补造历史，调用方只对已核对端点显式关闭思考。
-# 函数用途: 判断本次出站历史能否满足思考模式，不满足则显式请求关闭思考。
+# LLM: 已知思考方言只要求“最后一条 user 之后”的 assistant 都带 reasoning（DeepSeek 官网 2026-10-04 实测：这一段里
+#   缺了就 400，纯文本消息也一样；最后一条 user 之前的不带也接受）。只按这一段判断：以前查全部历史，一条没思考的旧答复
+#   就会让之后每次请求都关思考，而关思考是另一个缓存分区，整段上下文按未命中重算，模型也从此不再思考。
+#   空串不补造历史，调用方只对已核对端点显式关闭思考；改这里要同步 test_backends_openai_native_tool_use 的思考用例。
+# 函数用途: 判断本次出站历史能否满足思考模式（只看最后一条 user 之后的 assistant），不满足则显式请求关闭思考。
 def _thinking_mode_supported(messages: list[dict[str, Any]]) -> bool:
-    for message in messages:
+    last_user = max((index for index, message in enumerate(messages) if message.get("role") == "user"), default=-1)
+    for message in messages[last_user + 1:]:
         if message.get("role") != "assistant":
             continue
         if not str(message.get("reasoning_content") or "").strip():

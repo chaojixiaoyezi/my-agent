@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## DeepSeek 思考开关只看本轮（thinking-rule，3a，2026-10-04，`claude/3a-thinking-rule`）
+
+- `test_backends_openai_native_tool_use.py` 新增 3 条：
+  - 上一轮答复缺思考时不关思考；
+  - 本轮工具调用缺思考时仍关思考；
+  - `_thinking_mode_supported` 的边界：没有 user 时整段都算本轮，最后一条 user 之后的纯文本也要有思考。
+- 变异：退回“查全部历史”、检查范围弄反，两处都被抓住（rc=1）。依据是官网实测，见 `~/.my-agent/decision-evidence/deepseek-cache-audit-1004/`。
+
 ## 17j 验收手册修 rm 场景、冷启动耗时与两处前提（rb6，2026-10-04，分支 `worker/17j-runbook-6`，基于 17j 头 `f8858179c`）
 
 - 来源：sol2 写 B5 联合测试时发现 rm-guard 场景走不到插件（证据 `~/.my-agent/decision-evidence/review-b5-17j/jb5-wip-sol2.md:29`）；ds10 的 b5b7x 建议补冷启动耗时；7.1 要与设计稿对齐；A4 有 obsset 前置。**本分支只改手册，没跑任何一步真实验收。**
