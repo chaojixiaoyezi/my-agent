@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..common.json_io import append_private_text
+from ..common.nofollow_fs import ensure_private_dir
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,8 @@ class TaskTrashMoveResult:
 def ensure_task_trash(task_dir: str | Path, trash_dir: str | Path = "") -> Path:
     task = Path(task_dir).expanduser().resolve()
     trash = _resolve_trash_dir(task, trash_dir)
-    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-    trash.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+    ensure_private_dir(trash)
     manifest = trash / "manifest.jsonl"
     manifest.touch(exist_ok=True)
     return trash

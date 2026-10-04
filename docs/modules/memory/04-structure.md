@@ -1,5 +1,11 @@
 # Memory Structure
 
+## 私有写整包 9b 终审修复（pbfix，2026-10-04）
+
+- 删掉 `memory_archive/tokens.py` 的普通 mkdir（目录交给私有写的 `ensure_private_dir`）；`memory_store/retention_apply._trash_conversation` 3 处改走 `ensure_private_dir`。
+- 记忆侧建目录点（candidates / lessons / daily / jsonl / curator_commit / runtime_fact_source / task_workspace / agent_run_workspace）统一改 `nofollow_fs.ensure_private_dir`：缺失段**逐级** 0700（原 `mkdir(parents=True, mode=0o700)` 只保最后一级）、已存在一律不动。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 ## 私有写只动自己建的东西（pdp，2026-10-03）
 
 - `common/json_io._ensure_private_dir`：缺失目录按 0700 新建（no-follow 逐段），已存在的目录一律不动；`write_private_*` / `append_private_*` 全部继承这一口径。

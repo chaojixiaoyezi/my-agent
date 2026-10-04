@@ -20,16 +20,16 @@ class TestFileIoExports:
         from agent_py_agent.agent.io import append_jsonl
         assert callable(append_jsonl)
 
-    def test_imports_append_line_locked(self) -> None:
-        """测试 file_io 导出 append_line_locked。"""
-        from agent_py_agent.agent.io import append_line_locked
-        assert callable(append_line_locked)
+    def test_append_line_locked_not_exported(self) -> None:
+        """pbfix 2026-10-04：该原语无调用方已删除，不再导出。"""
+        from agent_py_agent.agent import io
+        assert not hasattr(io, "append_line_locked")
 
     def test_exports_list(self) -> None:
         """测试 __all__ 导出列表。"""
         from agent_py_agent.agent import io
         assert "append_jsonl" in io.__all__
-        assert "append_line_locked" in io.__all__
+        assert "append_line_locked" not in io.__all__
 
 
 class TestAppendJsonlSignature:
@@ -47,24 +47,6 @@ class TestAppendJsonlSignature:
         from agent_py_agent.agent.io import append_jsonl
         sig = inspect.signature(append_jsonl)
         assert len(sig.parameters) >= 2
-
-
-class TestAppendLineLockedSignature:
-    """测试 append_line_locked 函数签名。"""
-
-    def test_function_exists(self) -> None:
-        """测试 append_line_locked 函数存在。"""
-        from agent_py_agent.agent.io import append_line_locked
-        assert callable(append_line_locked)
-
-    def test_function_takes_path_and_line(self) -> None:
-        """测试函数接受 path 和 line 参数。"""
-        import inspect
-
-        from agent_py_agent.agent.io import append_line_locked
-        sig = inspect.signature(append_line_locked)
-        params = list(sig.parameters.keys())
-        assert len(params) >= 2
 
 
 class TestAppendJsonlBehavior:

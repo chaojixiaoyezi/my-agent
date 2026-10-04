@@ -11,6 +11,8 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from ..common.nofollow_fs import ensure_private_dir
+
 # FTS5 records 索引的 schema 版本。中文检索失灵根因:默认 unicode61 把一整段汉字
 # 当作 1 个 token(实测 sqlite 3.53 下 '记忆推送模式...' 整串=单 token),子串/词
 # 永远 MATCH 不中,FTS5 对中文形同虚设(只能靠 LIKE 兜底,零排序、只扫 preview)。
@@ -199,9 +201,9 @@ _TOOL_OPERATIONS_SQL = (
 class LocalStoreSchemaMixin:
 
     def _init_schema(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.files_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_private_dir(self.root)
+        ensure_private_dir(self.files_dir)
+        ensure_private_dir(self.events_path.parent)
         # FTS schema 升级(unicode61 -> trigram)需要 DROP+重建索引,重建后必须用
         # records 正文回填。回填走 maintenance.rebuild_fts(读内容文件),那在 schema
         # 事务外做,这里只记一个待回填标记。

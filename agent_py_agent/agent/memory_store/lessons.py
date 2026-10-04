@@ -16,6 +16,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from ..common.json_io import jsonl_lines, locked_json_path, write_private_text_file_atomic_unlocked
+from ..common.nofollow_fs import ensure_private_dir
 from .candidate_models import MemoryCandidate, utc_now_iso
 from .security import scan_memory_content
 
@@ -82,10 +83,9 @@ class LessonRepository:
     def __init__(self, lessons_dir: str | Path, routing_index_path: str | Path) -> None:
         self.lessons_dir = Path(lessons_dir)
         self.routing_index_path = Path(routing_index_path)
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        self.lessons_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        self.routing_index_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(self.lessons_dir)
+        ensure_private_dir(self.routing_index_path.parent)
 
     # LLM: lesson 晋升要求审核、证据和跨任务/运行/日期重复；confidence 不能替代这些闸。lesson 文件按私有原子写落盘。
     # 函数用途: 幂等创建一个正式 lesson（仅本人可读写）并重建 routing index。
@@ -183,8 +183,8 @@ class HotRuleRepository:
     # 函数用途: 初始化当前 owner 的高频短规则仓库。
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(self.path.parent)
 
     # LLM: HOT 需要 approved hot candidate、默认三次观察和至少两个独立任务/运行/日期证据。
     # 函数用途: 将一个短规则绑定到正式 lesson 并幂等写入 HOT。

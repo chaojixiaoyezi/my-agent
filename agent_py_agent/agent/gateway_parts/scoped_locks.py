@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..common.nofollow_fs import open_private_lock_beneath, split_existing_anchor
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .daemon_metadata import (
     _build_pid_record,
@@ -98,11 +99,21 @@ def _remove_lock_file(lock_path: Path) -> None:
 
 
 # LLM: O_CREAT|O_EXCL 原子创建是进程间互斥的根基;FileExistsError=别人先到,返回 False。
+#   权限走统一私有锁原语(common/nofollow_fs 的 open_private_lock_beneath,exclusive=True):
+#   新锁文件 0600、新目录 0700,不再跟着 umask 走;已存在的目录不改权限(不动别人建的布局)。
+#   根路径从 _get_lock_dir() 出发用 split_existing_anchor 拆"最近已存在祖先 + 其余缺失段":
+#   原语要求 root 已经存在，而 XDG_STATE_HOME/my-agent 两级都可能不存在（全新机器、自定义 XDG_STATE_HOME）；
+#   不从 lock_path.parent.parent 反推，锁路径以后多一层也不会让 root 悄悄上移。
 #   写 JSON 失败时回滚删文件再抛,避免留下半截锁。副作用:创建并写入锁文件。
 # 函数用途: 原子地"先到先得"创建锁文件并写入持有记录,创建失败说明锁已被占。
 def _create_lock_file(lock_path: Path, record: dict) -> bool:
+    # 相对段取"锁目录起、到锁文件为止"的整条路径：锁目录自己缺失多少段由 split_existing_anchor 决定，
+    # 锁路径以后多嵌一层也不会被丢掉（anchor 是最近已存在的祖先，parts 是它下面要新建/打开的各段）。
+    lock_dir = _get_lock_dir()
+    anchor, missing = split_existing_anchor(lock_dir)
+    relative_parts = (*missing, *lock_path.relative_to(lock_dir).parts)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = open_private_lock_beneath(anchor, relative_parts, exclusive=True)
     except FileExistsError:
         return False
     try:
@@ -163,7 +174,6 @@ def acquire_scoped_lock(
     scope: str, identity: str, metadata: dict[str, Any] | None = None
 ) -> tuple[bool, dict | None]:
     lock_path = _get_scope_lock_path(scope, identity)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
     record = _build_scope_lock_record(scope, identity, metadata)
     existing, load_error = _read_lock_record_report(lock_path)
     if load_error is not None:

@@ -414,7 +414,6 @@ def _mutate_persona_document(
     if request.action not in {"add", "replace", "remove", "rollback"}:
         raise ValueError(f"unsupported persona action: {request.action}")
     path = repository.path_for(request.target)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked_json_path(path):
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise PersonaSecurityError("persona target must be a regular file")
@@ -446,7 +445,6 @@ def _mutate_persona_batch_document(
         if operation.action not in {"add", "replace", "remove"}:
             raise ValueError("persona batch supports add/replace/remove only")
     path = repository.path_for(request.target)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked_json_path(path):
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise PersonaSecurityError("persona target must be a regular file")

@@ -12,6 +12,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_text_file_atomic,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.path_segments import safe_path_segment
 from .home_layout import MyAgentHomePaths
 
@@ -165,7 +166,7 @@ def lookup_provider_identity_report(
 def ensure_canonical_user_profile(home: MyAgentHomePaths, canonical_user_id: str, *, display_name: str = "") -> Path:
     canonical_id = safe_path_segment(canonical_user_id)
     profile = home.canonical_users_dir / canonical_id / "profile.json"
-    profile.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_private_dir(profile.parent)
     if not profile.exists():
         payload = {
             "schema_version": "canonical-user.v1",

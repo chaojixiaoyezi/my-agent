@@ -16,6 +16,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.text_norm import fold_key
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_models import (
@@ -66,8 +67,8 @@ class CandidateService:
         quota_enforcer: OwnerQuotaEnforcer | None = None,
     ) -> None:
         self.path = Path(path)
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(self.path.parent)
         self.quota_enforcer = quota_enforcer
 
     # LLM: 重放同一 observation key 只更新时间和 refs，不增加 occurrence_count。

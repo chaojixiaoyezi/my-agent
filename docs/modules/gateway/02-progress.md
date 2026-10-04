@@ -1,5 +1,15 @@
 # Gateway 维护状态
 
+## 私有写整包 9b 终审修复（pbfix，2026-10-04）
+
+- `gateway_parts/io.write_json_file`、`scheduler/repository` 的建目录点改 `nofollow_fs.ensure_private_dir`（缺失段逐级 0700、已存在一律不动）。
+- 锁只剩 5 处调用方，"找最近的已存在祖先"循环收进 `nofollow_fs.split_existing_anchor`；`open_private_lock_beneath_tightened` 加 `hasattr(os, "fchmod")` 守卫（Windows 无此函数不再抛 AttributeError）。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+## Gateway scoped lock 收私（sclk，2026-10-04，worker/scoped-locks-private，待复审）
+
+- `gateway_parts/scoped_locks.py` 建锁文件与锁目录改走 `common/nofollow_fs.open_private_lock_beneath`：新锁文件 0600、新锁目录 0700（不再跟 umask 走），已存在的目录一律不改权限；`O_CREAT|O_EXCL` 的"已存在即失败"互斥语义由该函数新增的 `exclusive=True` 参数保留。
+- 同批核对：`agent/task_progress.py:79` 是普通状态原子写（非锁创建点）；`concurrency/optimistic_lock.py:28` 是子代理工作区任务目录（非私有状态目录，未改）；`user_space/run_workspace.py:137` 是白名单集合（非创建点）。详见 DESIGN_LEDGER 同名节与 TESTS。
+
 ## G1 加固（2026-10-03，g1h，worker/g1-hardening，待 9b 核对）
 
 - 真实 `home_paths` 合同作为凭据根来源；路径只经 `agent_home_root_for_owner` 从 owner home 推导并与 `home_paths.root` 核对。缺失属性是 `agent_contract`，没有 Agent 则 `LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT`，不会从队列目录写入。

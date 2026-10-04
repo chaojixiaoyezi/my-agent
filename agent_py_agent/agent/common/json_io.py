@@ -19,9 +19,9 @@ from ..runtime_errors import runtime_error_report
 from . import cache_freshness
 from .cache_freshness import cache_stat_signature
 from .nofollow_fs import (
-    open_directory_beneath,
+    ensure_private_dir,
     open_private_lock_beneath_tightened,
-    resolve_existing_symlink_anchor,
+    split_existing_anchor,
 )
 
 try:
@@ -300,9 +300,9 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
         _unlink_tmp_file(tmp)
 
 
-# LLM: 默认只收紧直接父目录；若调用方已完成目录链准备或要保留符号链接目标权限，可关闭该步，临时文件仍出生即 0600。
-#   调用方必须保证父目录存在，并已决定是否允许对它 chmod；路径锁仍由调用方持有。
-# 函数用途: 在既有锁内以 0600 临时文件原子替换正文，可按目录链结果跳过父目录 chmod。
+# LLM: 默认确保直接父目录存在（缺失按 0700 逐级新建、已存在一律不动，见 nofollow_fs.ensure_private_dir）；
+#   若调用方已完成目录链准备或要保留符号链接目标权限，可关闭该步，临时文件仍出生即 0600；路径锁仍由调用方持有。
+# 函数用途: 在既有锁内以 0600 临时文件原子替换正文，可按目录链结果跳过父目录确保步骤。
 def write_private_text_file_atomic_unlocked(
     path: Path,
     content: str,
@@ -310,7 +310,7 @@ def write_private_text_file_atomic_unlocked(
     ensure_parent_private: bool = True,
 ) -> None:
     if ensure_parent_private:
-        _ensure_private_dir(path.parent)
+        ensure_private_dir(path.parent)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -322,26 +322,7 @@ def write_private_text_file_atomic_unlocked(
         _unlink_tmp_file(tmp)
 
 
-# LLM: 私有写只动自己新建的东西（pdp 2026-10-03，3a 裁定，与锁收私 ds8 同口径）：缺失目录按 0700 新建、
-#   逐段不跟随符号链接；已存在的目录——不管是谁建的、权限多宽——一律不改。文件 0600 已经挡住内容；
-#   调用方可能把目录指到用户可见的位置（如 shell_gateway_execution 的 artifact_dir），收紧会误伤；
-#   存量宿主目录的收紧归 owner 维护负责，不在每次写入时做。复用锁的“已存在最近祖先 + 缺失段”手法，
-#   让缺失目录统一经 no-follow 原语创建（mkdir 的 mode 不受 umask 放宽）。
-#   最近已存在的祖先本身是符号链接时允许跟随一次（pdp 2026-10-04：用户工作区常指到外置盘），
-#   到它的真实目录再往下建；目标不是目录（断链/指向文件）保持拒绝，新建段仍逐段 no-follow。
-# 函数用途: 确保私有文件所在目录存在；缺失则按 0700 新建，已存在（含符号链接）则完全不动。
-def _ensure_private_dir(directory: Path) -> None:
-    target = Path(os.path.abspath(directory))
-    anchor, parts = target, ()
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
-    if not parts:
-        return
-    os.close(open_directory_beneath(resolve_existing_symlink_anchor(anchor), parts, create=True))
-
-
-# LLM: 仅在 memory_archive 锚点下逐级创建/收紧目录；发现符号链接时保留目标权限并返回结构化原因码，调用方仍可私有写文件。
+# LLM: 仅在 memory_archive 锚点下逐级确保目录存在（缺失按 0700 逐级新建、已存在一律不动）；发现符号链接时保留目标权限并返回结构化原因码，调用方仍可私有写文件。
 # 函数用途: 准备私有目录链；符号链接及其下级目录不收紧，但确保快照目录存在。
 def ensure_private_directory_chain(
     root: Path,
@@ -360,7 +341,7 @@ def ensure_private_directory_chain(
         current = current / component
         if current.is_symlink():
             return _skip_private_directory_chain(anchor, target, current)
-        _ensure_private_dir(current)
+        ensure_private_dir(current)
     return PrivateDirectoryChainResult(anchor, target, True)
 
 
@@ -381,8 +362,8 @@ def _skip_private_directory_chain(
     return PrivateDirectoryChainResult(anchor, target, False, warning)
 
 
-# LLM: 使用与 write_text_file_atomic 相同的 per-path 线程锁 + fcntl；父目录收紧可由显式参数关闭，防止链接目标被 chmod。
-# 函数用途: 自取锁，以 0600 文件原子替换文本；仅在 ensure_parent_private 为真时收紧直接父目录。
+# LLM: 使用与 write_text_file_atomic 相同的 per-path 线程锁 + fcntl；父目录确保可由显式参数关闭，防止链接目标被改动。
+# 函数用途: 自取锁，以 0600 文件原子替换文本；仅在 ensure_parent_private 为真时确保直接父目录存在（缺失 0700 逐级新建）。
 def write_private_text_file_atomic(
     path: Path,
     content: str,
@@ -427,7 +408,7 @@ def write_private_json_file_atomic_no_newline(path: Path, payload: object, *, so
 def write_private_json_file_atomic_no_newline_unlocked(
     path: Path, payload: object, *, sort_keys: bool = True
 ) -> None:
-    _ensure_private_dir(path.parent)
+    ensure_private_dir(path.parent)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -460,7 +441,7 @@ def write_private_jsonl_records(path: Path, records: list[dict[str, object]], *,
 #   锁沿用 locked_json_path（与 append_jsonl_records 同一协议）。调用方负责序列化格式。
 # 函数用途: 以仅本人可读写的权限向文本文件追加内容（写文件、可能 chmod 文件与目录）。
 def append_private_text(path: Path, content: str) -> None:
-    _ensure_private_dir(path.parent)
+    ensure_private_dir(path.parent)
     with _locked_json_path(path):
         _ensure_private_file(path)
         _tighten_private_file(path)
@@ -483,7 +464,7 @@ def append_private_jsonl_records(path: Path, records: list[dict[str, object]], *
 #   写入格式与 append_jsonl_capped 逐字节一致（ensure_ascii=False、无 sort_keys、每行尾换行）。
 # 函数用途: 以仅本人可读写的权限有界追加一条 JSONL 记录（只保留最近 max_records 条）。
 def append_private_jsonl_capped(path: Path, record: dict[str, object], *, max_records: int) -> None:
-    _ensure_private_dir(path.parent)
+    ensure_private_dir(path.parent)
     with _locked_json_path(path):
         records = read_jsonl_objects_report(path).records
         records.append(record)
@@ -571,16 +552,13 @@ def _locked_file_path(path: Path, *, blocking: bool = True):
         os.close(descriptor)
 
 
-# LLM: 调用方给的是完整锁路径；原语按受信根 + 相对段打开，这里把绝对路径拆成“已存在的最近父目录 + 其余段”，
-#   与 directory_lock._existing_anchor 同一手法，让缺失目录仍统一经 no-follow 原语创建（0700；已存在的目录一律不动）。
+# LLM: 调用方给的是完整锁路径；这里把绝对路径拆成“已存在的最近祖先 + 其余缺失段”（与其余锁/目录调用点共用
+#   nofollow_fs.split_existing_anchor），让缺失目录仍统一经 no-follow 原语创建（0700；已存在的目录一律不动）。
 # 函数用途: 打开一个私有锁文件描述符，顺带把已存在的宽权限锁收紧到 0600。
 def _open_private_lock_descriptor(lock_path: Path) -> int:
     lock_path = Path(os.path.abspath(lock_path))
-    anchor, parts = lock_path.parent, (lock_path.name,)
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
-    return open_private_lock_beneath_tightened(anchor, parts)
+    anchor, missing = split_existing_anchor(lock_path.parent)
+    return open_private_lock_beneath_tightened(anchor, (*missing, lock_path.name))
 
 
 # LLM: 不支持 OS 锁的平台沿原告警策略；支持时两种等待模式使用同一 flock，默认行为不变。

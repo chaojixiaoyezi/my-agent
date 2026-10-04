@@ -232,27 +232,59 @@ def resolve_existing_symlink_anchor(anchor: str | Path) -> Path:
     return resolved
 
 
+# LLM: 私有写/私有锁共用的“最近已存在祖先”拆分（pbfix 2026-10-04：原来 6 处各抄一遍同样的循环）：
+#   从路径向上找到第一个存在（或为符号链接）的段，返回它和其余缺失段；调用方决定新建还是拒绝。
+# 函数用途: 把路径拆成“已存在的最近祖先 + 其余缺失段（相对该祖先，按路径顺序）”。
+def split_existing_anchor(path: str | Path) -> tuple[Path, tuple[str, ...]]:
+    anchor = Path(path)
+    parts: tuple[str, ...] = ()
+    while not anchor.exists() and not anchor.is_symlink():
+        parts = (anchor.name, *parts)
+        anchor = anchor.parent
+    return anchor, parts
+
+
+# LLM: 私有写与私有锁统一的“确保目录存在”（原 json_io._ensure_private_dir 公开版，pbfix）：缺失段经
+#   no-follow 原语逐段按 0700 新建——中间各级同样是 0700（mkdir(parents=True, mode=0o700) 只保证最后一级）；
+#   已存在的目录一律不动；最近已存在祖先是有效符号链接时跟随一次，断链/指向文件保持拒绝。
+# 函数用途: 确保一个宿主私有目录存在；缺失则逐级按 0700 新建，已存在（含符号链接）则完全不动。
+def ensure_private_dir(directory: str | Path) -> None:
+    anchor, parts = split_existing_anchor(Path(os.path.abspath(directory)))
+    if not parts:
+        return
+    os.close(open_directory_beneath(resolve_existing_symlink_anchor(anchor), parts, create=True))
+
+
 # LLM: 永久锁仅允许单链接普通文件；先排他创建，已存在再打开，避免并发非排他创建的歧义；调用方关闭 fd。
 #   锁只动自己新建的东西：缺失目录经 no-follow 原语按 0700 建（mkdir 的 mode 不受 umask 放宽），锁文件 0600；
 #   已存在的目录——不管是宿主其它模块建的还是 owner 维护的符号链接布局——一律不改权限。同机他用户抢锁要先能
 #   打开 0600 的锁文件，目录权限不是防线；收紧已存在目录会破坏上下文快照“链接所在级和下级目录不动”的口径。
 #   锚点本身是符号链接时允许跟随一次（见 resolve_existing_symlink_anchor，与私有写同一规则）。
+#   exclusive=True 时走"先到先得"语义：已存在就抛 FileExistsError（不打开、不改权限），给把锁文件当互斥体的
+#   调用方（gateway scoped lock）；默认 False 保持原 flock 语义（已存在则打开复用同一 inode）。
 # 函数用途: 安全创建私有锁目录并打开不截断的锁文件，避免目录预检后再次按路径跟随链接。
-def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> int:
+def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...], *, exclusive: bool = False) -> int:
     _validate_relative_parts(relative_parts)
     root = resolve_existing_symlink_anchor(root)
     if not _supports_dir_fd():
-        return _open_private_lock_portable(root, relative_parts)
+        return _open_private_lock_portable(root, relative_parts, exclusive=exclusive)
     parent_fd = open_directory_beneath(root, relative_parts[:-1], create=True)
     try:
-        try:
-            return _openat_file(
-                parent_fd, relative_parts[-1], os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
-            )
-        except FileExistsError:
-            return _openat_file(parent_fd, relative_parts[-1], os.O_RDWR, 0o600)
+        return _open_lock_leaf(parent_fd, relative_parts[-1], exclusive=exclusive)
     finally:
         os.close(parent_fd)
+
+
+# LLM: 排他创建永远是第一步（原子先到先得）；只有非排他模式才在 FileExistsError 后打开已存在的锁复用同一 inode。
+#   排他模式不触碰已存在的文件（不打开、不改权限），把"已存在"如实抛给调用方当互斥信号。
+# 函数用途: 在父目录 fd 下创建（或按模式打开）私有锁叶子，返回描述符。
+def _open_lock_leaf(parent_fd: int, name: str, *, exclusive: bool) -> int:
+    try:
+        return _openat_file(parent_fd, name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if exclusive:
+            raise
+        return _openat_file(parent_fd, name, os.O_RDWR, 0o600)
 
 
 # LLM: 存量锁可能是在本修复之前按 umask 建的 0644；打开分支不重建 inode，故必须显式收紧，
@@ -263,7 +295,9 @@ def open_private_lock_beneath(root: str | Path, relative_parts: tuple[str, ...])
 def open_private_lock_beneath_tightened(root: str | Path, relative_parts: tuple[str, ...]) -> int:
     descriptor = open_private_lock_beneath(root, relative_parts)
     try:
-        if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
+        # Windows 的 Python 3.12 没有 os.fchmod：没有就跳过自愈（该平台没有 POSIX 权限位语义），
+        # 不影响其它平台把存量 0644 锁收紧到 0600。
+        if hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
             os.fchmod(descriptor, 0o600)
     except OSError:
         pass
@@ -271,8 +305,9 @@ def open_private_lock_beneath_tightened(root: str | Path, relative_parts: tuple[
 
 
 # LLM: 缺少 dir_fd 时仍检查父链、锁叶子与打开后身份；无法承诺 POSIX 的目录替换竞态强度。
+#   exclusive=True 时不落进"已存在就打开"分支：把 FileExistsError 原样抛给调用方当互斥信号。
 # 函数用途: 在 portable 平台打开永久锁，拒绝已有链接或特殊文件，不截断原锁。
-def _open_private_lock_portable(root: str | Path, parts: tuple[str, ...]) -> int:
+def _open_private_lock_portable(root: str | Path, parts: tuple[str, ...], *, exclusive: bool = False) -> int:
     target = _portable_path(root, parts, create=True)
     try:
         before = target.lstat()
@@ -280,6 +315,8 @@ def _open_private_lock_portable(root: str | Path, parts: tuple[str, ...]) -> int
         before = None
     if before is not None and (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1):
         raise NoFollowPathError("managed lock is not a regular file")
+    if exclusive and before is not None:
+        raise FileExistsError(str(target))
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(target, flags | os.O_CREAT | os.O_EXCL, 0o600)
@@ -613,7 +650,9 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 __all__ = [
     "NoFollowPathError",
     "append_text_beneath",
+    "ensure_private_dir",
     "resolve_existing_symlink_anchor",
+    "split_existing_anchor",
     "open_private_lock_beneath",
     "list_names_beneath",
     "open_directory_beneath",

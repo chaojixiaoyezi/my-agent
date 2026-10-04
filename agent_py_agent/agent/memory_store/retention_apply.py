@@ -17,6 +17,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_private_json_file_atomic,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..conversation.models import ConversationThread
 from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
 from .candidates import CandidateService
@@ -290,7 +291,9 @@ def _trash_conversation(
         bindings = _read_index(bindings_path)
         latest = _read_index(latest_path)
         destination = _validated_destination(home, action)
-        destination.mkdir(parents=True, exist_ok=False)
+        # 落点目录逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir）。
+        ensure_private_dir(destination.parent)
+        destination.mkdir(mode=0o700)
         payload_root = destination / "payload"
         moved: list[tuple[Path, Path]] = []
         _write_tombstone(
@@ -306,7 +309,7 @@ def _trash_conversation(
                     continue
                 relative = source.relative_to(root)
                 target = payload_root / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_dir(target.parent)
                 shutil.move(str(source), str(target))
                 moved.append((source, target))
             update_json_file_atomic(
@@ -335,7 +338,7 @@ def _trash_conversation(
         except Exception:
             for source, target in reversed(moved):
                 if target.exists():
-                    source.parent.mkdir(parents=True, exist_ok=True)
+                    ensure_private_dir(source.parent)
                     shutil.move(str(target), str(source))
             # 回滚写回同样走私有原子写（0600/0700），存量宽权限索引下次写入即收紧；内容逐字节不变。
             write_private_json_file_atomic(bindings_path, bindings)

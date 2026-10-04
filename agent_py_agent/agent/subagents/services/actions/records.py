@@ -227,8 +227,6 @@ def append_task_work_log(manager: Any, task: SubAgentTask, message: str) -> None
     from ....common.json_io import append_private_text, write_private_text_file_atomic
 
     path = Path(task.work_log_file)
-    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not path.exists():
         # 子代理工作日志属宿主运行数据：私有写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
         write_private_text_file_atomic(path, "# WORK_LOG\n\n")

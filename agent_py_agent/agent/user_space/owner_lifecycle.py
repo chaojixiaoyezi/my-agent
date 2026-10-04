@@ -12,6 +12,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_private_text_file_atomic,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from .owner_resolver import OwnerHomeResult
 
 
@@ -72,7 +73,7 @@ def update_owner_lifecycle(owner: OwnerHomeResult, *, status: str, reason: str =
         "previous_status": previous.status,
         "updated_at": _now_iso(),
     }
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_private_dir(path.parent)
     # 私有原子写：0600/0700，存量宽权限状态文件下次写入即收紧；序列化内容逐字节不变。
     write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
     # 私有追加：0600/0700，存量宽权限 owner 审计账下次写入即收紧；内容逐字节不变。

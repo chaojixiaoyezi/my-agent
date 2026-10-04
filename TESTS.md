@@ -1,5 +1,47 @@
 # 测试与发布验收
 
+## 私有写整包 9b 终审修复（pbfix，2026-10-04，分支 `worker/private-bundle-fixes`）
+
+- **改了什么**：①删 `memory_archive/tokens.py` 的普通 mkdir、`retention_apply._trash_conversation` 3 处改 `ensure_private_dir`；②公开 `nofollow_fs.ensure_private_dir`，34 处建目录点改用它或删掉紧跟私有写的 mkdir；③`open_private_lock_beneath_tightened` 加 `hasattr(os, "fchmod")` 守卫；④注释改准确、`split_existing_anchor` 收拢 6 处循环、删除无调用方的 `append_line_locked`。
+- **新增用例**：`test_private_dirs_policy.py::test_ensure_private_dir_creates_every_missing_level_with_0700`（`a/b/c` 三级都是 0700）。
+- **改动用例**：`test_file_io.py` 的逐行追加类改为覆盖 `append_jsonl`（原断言按 JSONL 行语义等价保留）；`test_file_io_class.py` 改为"不再导出 append_line_locked"；`test_private_lock_permissions.py` 的 jsonl 锁用例改用 `append_jsonl`。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pbfix*`）：
+  - 直接相关 5 文件（memory_archive_permissions + private_dirs_policy + private_lock_permissions + file_io + file_io_class）→ **56 passed**；
+  - 22 个相关文件（私有写入 6 组、私有锁、nofollow ×2、context bundle、memory_archive、gateway_io、memory_file、global_index ×2、daily、local_store、file_io ×2、jsonl_capped）→ **200 passed**；
+  - **guards9**（10 文件）→ **178 passed**；
+  - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；
+  - `check_doc_sync.py --base 312a4fec4` → **DOC_SYNC_PASS**；
+  - `check_code_size.py --mode strict` → `hard=0 blocked=False`（报告已还原）；`git diff --check` 干净；`check_clean_package.py .` → OK；`size_diff.sh` → 新增告警 0。
+- **变异（2 个，均 KILLED、原字节还原 sha256 一致）**：
+  1. `ensure_private_dir` 退回 `mkdir(parents=True, exist_ok=True, mode=0o700)` → `test_ensure_private_dir_creates_every_missing_level_with_0700` 变红（`(448, 493, 493) != (448, 448, 448)`）；
+  2. `tokens.py` 加回普通 `mkdir` → `test_memory_archive_permissions` 回归复红。
+- **未验证**：Windows 平台（`hasattr` 守卫只能在本平台验证"不影响其它平台"）；`scoped_locks` 同类点由 ds10 另分支处理。
+
+## Gateway scoped lock 收私（sclk2，2026-10-04，分支 `worker/scoped-locks-private-v2`，在 pbfix `3b5144114` 之上重做；含 ds1 必须改）
+
+- 改了：`common/nofollow_fs.open_private_lock_beneath` 加显式 `exclusive` 参数（True 时"已存在即抛 FileExistsError"，保持 O_EXCL 互斥语义；False 维持原 flock 语义），portable 分支同步；`gateway_parts/scoped_locks._create_lock_file` 改走统一私有原语（新文件 0600、新目录 0700），`acquire_scoped_lock` 里裸 `mkdir` 删除（已存在目录不改权限）。
+- **sclk2 返工（2026-10-04，在 pbfix `3b5144114` 之上重做；含 ds1 必须改）**：
+  - `_create_lock_file` 改从 `_get_lock_dir()` 出发用 `nofollow_fs.split_existing_anchor` 拿"最近已存在祖先 + 其余各段"，相对段取"锁目录起、到锁文件为止"的整条路径；不再从 `lock_path.parent.parent` 反推（原写法在 `<XDG_STATE_HOME>/my-agent` 与 `locks` 两级都不存在时抛 FileNotFoundError，基线能建出来）。
+  - 新增 3 条用例：两级都缺时 acquire 成功且每级 0700、锁文件 0600；root 跟随 `_get_lock_dir`（锁路径多嵌一层）；portable 分支独占语义与私有权限（含嵌套变体）。
+  - 命令：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_scoped_lock_private_permissions.py agent_py_agent/tests/test_private_lock_permissions.py agent_py_agent/tests/test_private_dirs_policy.py agent_py_agent/tests/test_concurrency_write_hardening.py agent_py_agent/tests/test_directory_lock_wait.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sclk2e` → **44 passed / 1 failed**；唯一失败 `test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`，已在基线 `d05a0d075` 临时 worktree 复跑，**基线同样失败**（沙箱限制）。
+  - **guards9 → 178 passed**；变异 3 个全 KILLED（去掉 walk-up / 去掉 portable 独占检查 / root 回到 parent.parent），原字节还原。
+  - 另修：`test_private_dirs_policy.py` 4 个测试名少了下划线（`testensure_` → `test_ensure_`，3a 复核 pbfix 时发现）。
+- 命令（工作树根，代号 sclk）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_scoped_lock_private_permissions.py \
+    agent_py_agent/tests/test_daemon_control.py \
+    agent_py_agent/tests/test_concurrency_write_hardening.py \
+    agent_py_agent/tests/test_nofollow_binary_io.py agent_py_agent/tests/test_nofollow_tree.py \
+    agent_py_agent/tests/test_jsonl_capped_append.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sclk
+  ```
+  结果：新增 **3 passed**；相关组除 1 条既有失败外全过（见下）。
+- 新增用例（`test_scoped_lock_private_permissions.py`）：新建锁目录 0700 + 锁文件 0600（显式设 umask 022 证明权限来自显式 mode）；已存在目录权限不变（0750 保持）；`_create_lock_file` 第二次调用返回 False 且不覆盖已有内容（O_EXCL 互斥语义）。
+- 变异（`tasks/2026-10-04/sclk-scoped-locks-private/mutations.py` + 单点补跑）：锁文件 mode 放宽到 0666 → 杀；目录 mode 放宽到 0777 → 杀；改回裸 `os.open` → 杀；丢掉 `exclusive` 分支（已存在也成功）→ 杀。
+- **既有失败（非本次引入）**：`test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`。在基线 worktree（`312a4fec4`，`git merge-base claude/3a-step17i` 即该提交）上跑同一文件得到**同样 1 failed / 3 passed**，确认既有（沙箱里没有受管后台启动器身份）。
+
 ## B9 模板补参数级 deny 示例（tdeny，2026-10-04，worker/b9-template-deny-example，基于 17j 头 477611a6d，待复审）
 
 - **改了什么**：两个技能模板各加一个通用参数级 deny 示例（NUL 空字节 → `deny` + `MALFORMED_ARGUMENTS`）；技能测试加两帧断言（无截断 / 有截断都 deny）；B8 样例测试的 `_assert_truncation_behavior` 补 `# LLM:` 契约注释；author-contract 补一句指向新示例。

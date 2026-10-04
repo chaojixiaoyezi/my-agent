@@ -13,19 +13,16 @@ import uuid
 from pathlib import Path
 from typing import TextIO
 
-from ....common.nofollow_fs import open_private_lock_beneath_tightened
+from ....common.nofollow_fs import open_private_lock_beneath_tightened, split_existing_anchor
 
 
-# LLM: 调用方给的是完整锁路径，私有原语按“受信根 + 相对段”打开；这里先向上找到已存在的最近父目录，
-#   把缺失的段并入相对路径，让每一级缺失目录仍统一经 no-follow 原语按 0700 创建（原来 mkdir 默认 0755）。
+# LLM: 调用方给的是完整锁路径；这里拆成“已存在的最近祖先 + 其余缺失段”（nofollow_fs.split_existing_anchor），
+#   让每一级缺失目录仍统一经 no-follow 原语按 0700 创建（原来 mkdir 默认 0755）。
 # 函数用途: 打开派工锁描述符，缺失目录按 0700 创建，已存在锁顺带收紧到 0600。
 def _open_dispatch_lock_descriptor(path: Path) -> int:
     path = Path(os.path.abspath(path))
-    anchor, parts = path.parent, (path.name,)
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
-    return open_private_lock_beneath_tightened(anchor, parts)
+    anchor, missing = split_existing_anchor(path.parent)
+    return open_private_lock_beneath_tightened(anchor, (*missing, path.name))
 
 
 # LLM: Non-blocking acquisition keeps supervision ticks cheap. POSIX uses flock like 会话运行时's

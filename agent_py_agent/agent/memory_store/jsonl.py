@@ -21,6 +21,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.text_norm import fold_key, nfc
 from ..retrieval.embedding_usage import EMBEDDING_USAGE, counted_as, embedding_input_type
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
@@ -195,7 +196,8 @@ class _JsonlMemoryIdentityMixin:
         self.local_store = local_store
         self.ops_path = Path(ops_path) if ops_path is not None else None
         self.candidate_service = candidate_service
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(self.path.parent)
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
         self._semantic_status = dict(semantic_status or {"state": "configured" if embedder is not None else "disabled"})
         self._semantic_errors: dict[str, str] = {}

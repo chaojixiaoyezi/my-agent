@@ -17,6 +17,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_models import normalize_iso_time, normalize_reference_list, normalize_string_list
 
@@ -112,7 +113,8 @@ class DailyMemoryStore:
         quota_enforcer: OwnerQuotaEnforcer | None = None,
     ) -> None:
         self.daily_dir = Path(daily_dir)
-        self.daily_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(self.daily_dir)
         self.quota_enforcer = quota_enforcer
 
     # LLM: 相同 event_id 重放必须返回既有记录；相同 ID 不同内容必须 fail closed。

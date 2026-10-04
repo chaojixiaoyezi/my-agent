@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ...common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
+from ...common.nofollow_fs import ensure_private_dir
 from ...common.path_segments import safe_path_segment
 from ..agent_run_workspace import (
     AgentRunWorkspacePaths,
@@ -402,7 +403,8 @@ def _ensure_directories(paths: TaskWorkspacePaths) -> None:
         paths.agents_dir,
         paths.agent_adapter_dir,
     ]:
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(directory)
 
 
 __all__ = [

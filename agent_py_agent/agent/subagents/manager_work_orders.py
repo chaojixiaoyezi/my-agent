@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import write_private_text_file_atomic
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.opaque_id import validate_opaque_id
 from .models import SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .policies import _default_forbidden_write_roots
@@ -97,8 +98,8 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
         task.logs_dir,
         task.scratch_dir,
     ]:
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(Path(directory))
 
     _write_if_missing(Path(task.status_file), _status_content(task))
     _write_if_missing(Path(task.work_log_file), _WORK_LOG_TMPL.format(

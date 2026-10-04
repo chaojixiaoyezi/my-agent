@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .nofollow_fs import open_private_lock_beneath
+from .nofollow_fs import open_private_lock_beneath, split_existing_anchor
 
 try:
     import fcntl
@@ -91,10 +91,8 @@ def _acquire_mutex(lock, wait_check: Callable[[], None] | None) -> Iterator[None
 # LLM: 原进程 Store 可能首次使用尚不存在的私有根；只向上找已有锚点，不创建目录也不解析链接。
 # 函数用途: 把缺失根的固定后缀并入相对路径，让创建仍统一经过 no-follow 原语。
 def _existing_anchor(root: Path, parts: tuple[str, ...]) -> tuple[Path, tuple[str, ...]]:
-    while not root.exists() and not root.is_symlink():
-        parts = (root.name, *parts)
-        root = root.parent
-    return root, parts
+    anchor, missing = split_existing_anchor(root)
+    return anchor, (*missing, *parts)
 
 
 # LLM: 有回调时以同一 OS 锁非阻塞重试，只重试锁冲突；回调失败在取得文件锁前退出，不替换锁身份。

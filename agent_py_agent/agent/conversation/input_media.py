@@ -11,6 +11,8 @@ import re
 import tempfile
 from pathlib import Path
 
+from ..common.nofollow_fs import ensure_private_dir
+
 # 单条输入媒体默认最大 16 MiB：超出拒绝，防超大附件拖垮请求。
 DEFAULT_MEDIA_BYTES = 16 * 1024 * 1024
 # 一次请求默认最多 8 个媒体文件：限制批量上传成本。
@@ -48,7 +50,7 @@ def import_input_media(source: Path, root: Path, *, max_bytes: int = DEFAULT_MED
     kind = media_type_for_path(source, media_type)
     if not source.is_file() or source.stat().st_size > max_bytes:
         raise InputMediaError(f"附件不是普通文件或超过 {max_bytes // 1024 // 1024} MiB 上限。")
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_private_dir(root)
     digest, size = hashlib.sha256(), 0
     fd, temporary = tempfile.mkstemp(prefix=".import-", dir=root)
     try:

@@ -46,6 +46,7 @@ from ..common.cancellation import (
     current_cancellation_token,
     register_cancellation_callback,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from .background_process_launch import (
     BACKGROUND_START_SETTLE_SECONDS,
     BackgroundLaunchError,
@@ -1276,7 +1277,7 @@ class ShellTool(BaseTool):
                                             self.protected_persona_root, *sandbox_roots,
                                             private_roots=self.host_private_roots)
             jobs_dir = self.workspace_root / ".background_jobs"
-            jobs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(jobs_dir)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
             log_path.touch(exist_ok=False)
             request = BackgroundLaunchRequest(

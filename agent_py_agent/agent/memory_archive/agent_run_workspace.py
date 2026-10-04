@@ -24,6 +24,7 @@ from ..common.json_io import (
     write_private_jsonl_records,
     write_private_text_file_atomic,
 )
+from ..common.nofollow_fs import ensure_private_dir
 
 
 # LLM: 这里是 agent-run 工作区各文件路径的唯一声明；lessons_jsonl 只登记位置，由 record_lesson 工具经
@@ -147,7 +148,8 @@ def _ensure_directories(paths: AgentRunWorkspacePaths) -> None:
         paths.artifacts_dir / "tool_outputs",
         paths.artifacts_dir / "reports",
     ]:
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(directory)
 
 
 def agent_run_artifact_records(

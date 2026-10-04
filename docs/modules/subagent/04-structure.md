@@ -1,5 +1,10 @@
 # Subagent Structure
 
+## 私有写整包 9b 终审修复（pbfix，2026-10-04）
+
+- 子代理侧建目录点（debug_trace / execution.report / manager_work_orders / services.actions.records / task_trash）统一改 `nofollow_fs.ensure_private_dir`：缺失段逐级 0700、已存在一律不动。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 ## 私有写只动自己建的东西（pdp，2026-10-03）
 
 - `common/json_io._ensure_private_dir` 只对缺失目录按 0700 新建、已存在的目录一律不动；子代理侧私有写（debug_trace / execution.report / manager_work_orders / actions.records / task_trash）的建目录点同步 `mkdir(..., mode=0o700)`。

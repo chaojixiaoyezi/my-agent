@@ -97,8 +97,6 @@ def write_test_execution_report(
     """Persist test execution records as JSON and Markdown."""
 
     root = Path(output_dir)
-    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     opts = options or TestExecutionReportOptions()
     report = _build_report(
         records,

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..common.nofollow_fs import ensure_private_dir
+
 
 class LocalStoreMaintenanceMixin:
 
@@ -37,7 +39,7 @@ class LocalStoreMaintenanceMixin:
             conn.execute("DELETE FROM records")
             conn.commit()
         if reset_events_file:
-            self.events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(self.events_path.parent)
             self.events_path.write_text("", encoding="utf-8")
         if remove_content_files:
             self._remove_content_files()

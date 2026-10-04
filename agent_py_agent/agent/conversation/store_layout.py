@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.opaque_id import validate_opaque_id, validate_path_segment
 from .models import WakeSignal
 from .store_index import ScanIndexes
@@ -79,7 +80,7 @@ class ConversationStorage:
     def ensure_dirs(self) -> None:
         for path in self.managed_dirs():
             # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(path)
 
     # LLM: 目录集合是初始化唯一来源，不引入按任务命名的新数据目录。
     # 函数用途: 列出本会话存储管理的固定目录，供初始化和维护核对。

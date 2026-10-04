@@ -14,6 +14,7 @@ from ..common.json_io import (
     write_private_json_file_atomic_unlocked,
     write_private_text_file_atomic,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..contracts.state_machine import REGISTERED_STATES, VERIFICATION_STATES
 from .home_layout import task_workspace_path
 from .task_title import (
@@ -278,7 +279,7 @@ def activate_run_workspace(
         paths.artifacts_dir,
         paths.summaries_dir,
     ):
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_private_dir(directory)
     _write_task_yaml(paths.task_yaml, request)
     # work/ 下的运行投影走私有写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
     write_private_json_file_atomic(

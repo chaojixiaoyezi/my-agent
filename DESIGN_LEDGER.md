@@ -1,5 +1,32 @@
 # 设计台账
 
+## 私有写整包 9b 终审修复（pbfix，2026-10-04，分支 `worker/private-bundle-fixes`，基于 17j 头 `312a4fec4`；9b 复核通过，已并入 step17j）
+
+9b 终审结论：两条裁定（只动自己建的、有效目录链接跟随一次）在实现里都成立，5 个变异全杀，no-follow 与 TOCTOU 成立；以下 2 条必须修。
+
+- **修复 1（回归）**：`test_memory_archive_permissions.py::test_archive_writes_create_private_json_files_and_directories` 在 `632b53592`/`2ad257314` 失败（`22e02c668`/`73de50cb8` 通过）。根因：`memory_archive/tokens.py` 先用普通 `mkdir` 建目录（0755），pdp 之后私有写不再收紧已存在目录，目录停在 0755。修法：删掉这处 mkdir（目录已由 `write_private_text_file_atomic` 内部的 `ensure_private_dir` 负责），并清理同类点——`memory_store/retention_apply._trash_conversation` 3 处（落点目录、payload 子路径、回滚源父目录）改走 `ensure_private_dir`；`agent_core/run_task_workspace_writer` 是用户工作区产出，按裁定不动。
+- **修复 2（多级 0700）**：`mkdir(parents=True, exist_ok=True, mode=0o700)` 只保证最后一级 0700，中间新建各级仍是 0755（9b 实测 `a/b/c` → a、b 是 0755）。修法：把原 `json_io._ensure_private_dir` 公开成 `nofollow_fs.ensure_private_dir`（缺失段逐级经 no-follow 原语按 0700 建、已存在一律不动、有效符号链接锚点跟随一次），pdp 新增的这批建目录点改用它；紧跟着私有写的直接删掉 mkdir。
+- **修复 3（Windows）**：`os.fchmod` 在 Windows 的 Python 3.12 不存在，每次加锁会抛 AttributeError；`open_private_lock_beneath_tightened` 加 `hasattr` 守卫，没有就跳过自愈（不影响其它平台）。
+- **修复 4（9b 不阻塞建议）**：①注释改准确（`ensure_parent_private` 参数说明、`ensure_private_directory_chain` 的"收紧"、`json_io` 锁描述）；②"找最近的已存在祖先"循环原来复制了 6 份，收进 `nofollow_fs.split_existing_anchor`（json_io / io.jsonl / gateway io / daemon_metadata / dispatch lock / directory_lock 全部改用它）；③删除无调用方的 `io/jsonl.append_line_locked`（含 `io/__init__` 导出与三个测试文件的引用，行为由 `append_jsonl` 覆盖）。
+- **用例**：新增 `test_ensure_private_dir_creates_every_missing_level_with_0700`（`a/b/c` 三级都必须 0700）；回归用例转绿；`append_line_locked` 相关用例改为覆盖 `append_jsonl`。
+- **变异**：①`ensure_private_dir` 退回 `mkdir(parents=True, mode=0o700)` → 多级用例变红（`(448, 493, 493) != (448, 448, 448)`）；②`tokens.py` 加回普通 mkdir → archive 回归复红。均 KILLED、原字节还原。
+- **scoped_locks 的同类点由 ds10 在另一分支处理**，本批不碰。
+- **验证**：见 TESTS.md 同名节。
+
+## Gateway scoped lock 收私（sclk2，2026-10-04，分支 `worker/scoped-locks-private-v2`，在 pbfix `3b5144114` 之上重做；含 ds1 必须改；已并入 step17j，待 9b 复核）
+
+- **起因**：ds3 给 9b 写终审简报时扫出 `gateway_parts/scoped_locks.py` 建锁文件用裸 `os.open(O_CREAT|O_EXCL|O_WRONLY)`（不带 mode），`mkdir` 也不带 mode，权限跟着 umask 走（umask 022 下世界可读 0644）。整包其它锁都已走 `common/nofollow_fs` 的私有锁原语。
+- **改法**：`open_private_lock_beneath` 加显式 `exclusive` 参数（任务书授权在统一函数里加参数，不另写一套）：`exclusive=True` 保持 `O_CREAT|O_EXCL` 的"已存在抛 FileExistsError"语义（不打开、不改权限），默认 `False` 维持原 flock 语义。`scoped_locks._create_lock_file` 改走它（新文件 0600、新目录 0700 由原语保证），`acquire_scoped_lock` 里的裸 `mkdir` 删除（目录创建交给原语；已存在的目录一律不改权限）。portable 分支同步支持 `exclusive`。
+- **同批核对的三处**：① `agent/task_progress.py:79` —— 调本模块自己的 `_write_json_file_atomic`（temp+replace 的普通状态写），**不是锁或私有凭据创建点**，未改。② `concurrency/optimistic_lock.py:28` —— `task_dir.mkdir(parents=True, exist_ok=True)` **确实是不带 mode 的目录创建点**，但它是子代理工作区里的任务目录（用户可见工作产物），不属 XDG 私有状态目录；不在本次范围，**未改**（建议作为独立一项评估，见交接报告）。③ `user_space/run_workspace.py:137` —— 那是**白名单集合**（`allowed_files` 里允许的文件名），**不是创建点**，未改。
+- **验证**：见 TESTS「Gateway scoped lock 收私（sclk2）」；4 个变异（文件 mode 放宽、目录 mode 放宽、回裸 open、丢 O_EXCL）全部被新用例杀死。
+- **未验证**：真实 gateway 启动路径下的锁文件权限未实测（需真实 Gateway 运行），由 3a 在沙箱外复核。
+- **sclk2 返工（2026-10-04，在 pbfix `3b5144114` 之上重做，含 ds1 必须改）**：sclk 从 `lock_path.parent.parent` 反推 root，而原语要求 root 已存在；`<XDG_STATE_HOME>/my-agent` 与 `locks` 两级都不存在时（全新机器、自定义 XDG_STATE_HOME）基线能建出来、sclk 抛 FileNotFoundError。现在从 `_get_lock_dir()` 出发用 `split_existing_anchor` 拆"最近已存在祖先 + 其余缺失段"，相对段取锁目录到锁文件的整条路径（锁路径以后多一层也不会被丢）。新增 3 条用例（两级都缺、root 不随层数漂移、portable 分支独占）与 3 个变异（去掉 walk-up / 去掉 portable 独占检查 / root 回到 parent.parent）全部 KILLED。
+- **另修**：`test_private_dirs_policy.py` 4 个测试名少下划线（`testensure_` → `test_ensure_`），pytest 能收集但名字不对；3a 复核 pbfix 时发现。
+- **sclk2 重做 + ds1 必须改（2026-10-04）**：sclk 在 pbfix 之前从 `312a4fec4` 分叉，本次在 pbfix `3b5144114` 之上重做（`nofollow_fs.py` 冲突按"两边都要"解决：保留 pbfix 的 `ensure_private_dir`、`split_existing_anchor`、`fchmod` 守卫，加上 sclk 的 `exclusive` 参数与 `_open_lock_leaf`）。
+  - **必须改**：sclk 从 `lock_path.parent.parent` 反推 root，而原语要求 root 已存在（`_open_verified_root` 第一步就 `root.lstat()`）；`<XDG_STATE_HOME>/my-agent` 与 `locks` 两级都不存在时（全新机器、自定义 XDG_STATE_HOME）基线能建出来、sclk 抛 FileNotFoundError。现在 `_create_lock_file` 从 `_get_lock_dir()` 出发，用 `split_existing_anchor` 拿"最近已存在祖先 + 其余各段"，相对段取"锁目录起、到锁文件为止"的整条路径（锁路径以后多一层也不会被丢）。
+  - **用例**：状态目录两级都不存在 → acquire 成功且每一级 0700、锁文件 0600；root 跟随 `_get_lock_dir` 而非 `path.parent.parent`（锁路径多嵌一层）；portable 分支（强制 `_supports_dir_fd()=False`）独占语义与私有权限（首次 True/0600、第二次 False），含嵌套变体。
+  - **变异（3 个，均 KILLED、原字节还原）**：①去掉 walk-up（`anchor, missing = lock_dir, ()`）→ 两级缺失用例变红；②去掉 portable 分支独占检查（ds1 的 M5，原分支存活）→ portable 用例变红；③root 回到 `lock_path.parent.parent` → 多嵌一层用例变红。
+
 ## B9 模板补参数级 deny 示例（tdeny，2026-10-04，worker/b9-template-deny-example，基于 17j 头 477611a6d；3a 复审通过，已并入 step17j）
 
 - **背景**：luna2 对 trs 的初审建议——B9 写插件技能的两个模板只有"看到 `rm -rf` 升 ask"的示例，没有"看参数就直接拒绝"的示例，所以"截断不能把看到的拒绝降级"这条规则在模板上体现不出来（两种结构在模板上等价已由 luna2、ds6 确认）。

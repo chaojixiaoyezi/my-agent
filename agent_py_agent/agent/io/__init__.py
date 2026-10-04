@@ -7,6 +7,6 @@ from __future__ import annotations
 只要函数开始有业务语义，就应该放回对应业务目录，不要把这里变成杂物间。
 """
 
-from .jsonl import append_jsonl, append_line_locked
+from .jsonl import append_jsonl
 
-__all__ = ["append_jsonl", "append_line_locked"]
+__all__ = ["append_jsonl"]

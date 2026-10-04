@@ -80,7 +80,6 @@ def append_session_token_usage(
 ) -> dict[str, Any]:
 
     path = token_ledger_dir(root) / f"{usage.session_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

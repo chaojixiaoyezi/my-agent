@@ -1,7 +1,7 @@
 """pdp：私有写只动自己建的东西（3a 2026-10-03 裁定，与锁收私 ds8 同口径）回归。
 
 钉三件事：
-1. _ensure_private_dir 独立方向：缺失目录按 0700 新建；已存在的 0755 目录（含符号链接）一位不动。
+1. ensure_private_dir 独立方向：缺失目录按 0700 新建；已存在的 0755 目录（含符号链接）一位不动。
 2. 可配置的宿主数据路径（audit_log_path 单文件形态、LocalStore 的 events 目录）指向已存在的 0755
    用户目录时，写入只新增 0600 的私有文件，目录与旁边的兄弟文件完全不受影响。
 3. 本批改过的“先普通 mkdir 再私有写”建目录点：umask 0o022 下缺失目录新建出来是 0700。
@@ -17,12 +17,8 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus, LogParams
-from agent_py_agent.agent.common.json_io import (
-    _ensure_private_dir,
-    append_private_jsonl_capped,
-    locked_json_path,
-)
-from agent_py_agent.agent.common.nofollow_fs import open_directory_beneath
+from agent_py_agent.agent.common.json_io import append_private_jsonl_capped, locked_json_path
+from agent_py_agent.agent.common.nofollow_fs import ensure_private_dir, open_directory_beneath
 from agent_py_agent.agent.gateway_parts.io import write_json_file
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.memory_store.candidates import CandidateService
@@ -61,17 +57,27 @@ def _log_one(logger: AuditLogger, task_id: str):
     )
 
 
-# ---- 1. _ensure_private_dir 独立方向（X_M8 两个方向都必须被抓到）----
+# ---- 1. ensure_private_dir 独立方向（X_M8 两个方向都必须被抓到）----
 
 
 @_POSIX_ONLY
 def test_ensure_private_dir_creates_missing_directories_with_0700(tmp_path: Path) -> None:
     target = tmp_path / "fresh" / "leaf"
 
-    _ensure_private_dir(target)
+    ensure_private_dir(target)
 
     assert _mode(target) == 0o700
     assert _mode(target.parent) == 0o700, "缺失的中间目录同样按 0700 建（no-follow 原语逐段创建）"
+
+
+@_POSIX_ONLY
+def test_ensure_private_dir_creates_every_missing_level_with_0700(tmp_path: Path) -> None:
+    """pbfix 2026-10-04：多级新建时每一级都是 0700（mkdir(parents=True, mode=0o700) 只保最后一级）。"""
+    target = tmp_path / "a" / "b" / "c"
+
+    ensure_private_dir(target)
+
+    assert (_mode(target), _mode(target.parent), _mode(target.parent.parent)) == (0o700, 0o700, 0o700)
 
 
 @_POSIX_ONLY
@@ -80,7 +86,7 @@ def test_ensure_private_dir_keeps_existing_directory_mode(tmp_path: Path) -> Non
     target.mkdir()
     os.chmod(target, 0o755)
 
-    _ensure_private_dir(target)
+    ensure_private_dir(target)
 
     assert _mode(target) == 0o755, "已存在的目录不管权限多宽都一位不动"
 
@@ -93,7 +99,7 @@ def test_ensure_private_dir_does_not_touch_symlinked_directory(tmp_path: Path) -
     link = tmp_path / "link"
     os.symlink(real, link, target_is_directory=True)
 
-    _ensure_private_dir(link)
+    ensure_private_dir(link)
 
     assert link.is_symlink(), "符号链接本身不许被替换"
     assert _mode(real) == 0o755, "链接目标权限一位不动"
@@ -128,14 +134,14 @@ def test_private_dir_rejects_symlink_segment_with_unusable_target(tmp_path: Path
 
     (real / ".background_jobs").symlink_to(tmp_path / "missing-target", target_is_directory=True)
     with pytest.raises(OSError):
-        _ensure_private_dir(link / ".background_jobs" / "sub")
+        ensure_private_dir(link / ".background_jobs" / "sub")
 
     (real / ".background_jobs").unlink()
     plain = tmp_path / "plain.txt"
     plain.write_text("x", encoding="utf-8")
     (real / ".background_jobs").symlink_to(plain)
     with pytest.raises(OSError):
-        _ensure_private_dir(link / ".background_jobs" / "sub")
+        ensure_private_dir(link / ".background_jobs" / "sub")
 
     # 原语层：从真实目录往下建缺失段时，段里已存在的符号链接一律拒绝（不跟随）。
     outside = tmp_path / "outside"

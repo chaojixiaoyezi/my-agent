@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..common.nofollow_fs import open_private_lock_beneath_tightened
+from ..common.nofollow_fs import open_private_lock_beneath_tightened, split_existing_anchor
 
 try:
     import fcntl
@@ -231,16 +231,13 @@ def _flocked_sidecar(path: Path):
         os.close(descriptor)
 
 
-# LLM: 写锁 sidecar 的路径由调用方给出（宿主运行目录 / XDG 状态目录），这里按“已存在的最近父目录 +
-#   其余段”交给 no-follow 原语，缺失目录按 0700 创建、已存在的目录一律不动。
+# LLM: 写锁 sidecar 的路径由调用方给出（宿主运行目录 / XDG 状态目录），这里按“已存在的最近祖先 +
+#   其余缺失段”（nofollow_fs.split_existing_anchor）交给 no-follow 原语，缺失目录逐级按 0700 创建、已存在的目录一律不动。
 # 函数用途: 打开一个私有写锁描述符，顺带把已存在的宽权限 wlock 收紧到 0600。
 def _open_private_wlock_descriptor(lock_path: Path) -> int:
     lock_path = Path(os.path.abspath(lock_path))
-    anchor, parts = lock_path.parent, (lock_path.name,)
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
-    return open_private_lock_beneath_tightened(anchor, parts)
+    anchor, missing = split_existing_anchor(lock_path.parent)
+    return open_private_lock_beneath_tightened(anchor, (*missing, lock_path.name))
 
 
 # LLM: 不支持 OS 锁的平台沿原告警策略；支持时加锁与解锁共用同一个 fd 上的 flock，阻塞语义不变。

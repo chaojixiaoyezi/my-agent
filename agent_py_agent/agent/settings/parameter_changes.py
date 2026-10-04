@@ -22,6 +22,7 @@ from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
 from .parameter_registry import (
     SOURCE_AGENT,
@@ -316,7 +317,7 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
 #   调用方只在确认不存在时才调用。之后的写回由 config_io 保留这个权限。
 # 函数用途: 以仅本人可读写的权限新建一份只含说明行的配置文件。副作用：新建文件。
 def _create_config_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_private_dir(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write("# 由参数中心创建（只含被改的键，其余按随包默认）\n")

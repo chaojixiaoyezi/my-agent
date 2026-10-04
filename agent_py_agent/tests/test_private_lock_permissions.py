@@ -20,7 +20,7 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.lock import _Dispatc
 from agent_py_agent.agent.common.json_io import locked_json_path
 from agent_py_agent.agent.common.nofollow_fs import open_private_lock_beneath_tightened
 from agent_py_agent.agent.gateway_parts.daemon_metadata import _flocked_sidecar
-from agent_py_agent.agent.io.jsonl import append_line_locked
+from agent_py_agent.agent.io.jsonl import append_jsonl
 
 _POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX 权限位语义")
 
@@ -52,11 +52,11 @@ def test_locked_json_path_lock_is_private(tmp_path, default_umask):
 @_POSIX_ONLY
 def test_locked_text_file_lock_is_private(tmp_path, default_umask):
     target = tmp_path / "index" / "active_tasks.jsonl"
-    append_line_locked(target, '{"a": 1}')
+    append_jsonl(target, {"a": 1})
     lock = target.with_name(target.name + ".lock")
     assert _mode(lock) == 0o600, "jsonl 锁必须私有，且不靠 umask"
     assert lock.read_bytes() == b"", "只 flock，不写内容"
-    # pdp 2026-10-03：append_line_locked 的缺失目录按 0700 新建（不再跟随 umask）；锁只动自己新建的东西。
+    # pbfix 2026-10-04：该原语已删，append_jsonl 走同一把私有锁；缺失目录由锁原语逐级按 0700 新建。
     assert _mode(lock.parent) == 0o700, "jsonl 数据目录按 0700 新建，锁不替调用方收紧"
 
 
@@ -91,7 +91,7 @@ def test_existing_world_readable_locks_are_tightened_on_next_acquire(tmp_path, d
 
     with locked_json_path(json_target):
         pass
-    append_line_locked(text_target, '{"a": 1}')
+    append_jsonl(text_target, {"a": 1})
     with _DispatchWatchLock(dispatch_lock):
         pass
 

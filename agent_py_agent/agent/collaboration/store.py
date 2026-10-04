@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_private_jsonl_records, locked_json_path
+from ..common.nofollow_fs import ensure_private_dir
 from ..gateway_parts.io import read_json_file, update_json_file_atomic, write_json_file_atomic
 from ..runtime_errors import runtime_error_report
 from .coverage import case_response_coverage
@@ -83,7 +84,7 @@ class CollaborationBaseStore:
             self.participants_dir,
             self.decisions_dir,
         ):
-            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(path)
 
     def _write_case(self, case: CollaborationCase) -> None:
         write_json_file_atomic(self._case_path(case.case_id), case.to_dict())

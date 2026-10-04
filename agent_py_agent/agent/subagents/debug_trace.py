@@ -85,8 +85,6 @@ def write_subagent_debug_detail(request: SubAgentDebugDetailRequest) -> str:
         return ""
     run_id = str(getattr(request.task, "id", "") or "unknown")
     detail_dir = Path(request.manager.workspace) / "debug_traces" / "details" / _safe_name(run_id)
-    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-    detail_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     detail_file = (
         detail_dir
         / f"{int(time.time() * 1000)}-{_safe_name(request.event_type)}-{_safe_name(request.label)}.txt"

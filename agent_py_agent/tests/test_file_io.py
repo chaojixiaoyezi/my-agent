@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.io.jsonl import _LOCKS, _LOCKS_GUARD, append_jsonl, append_line_locked
+from agent_py_agent.agent.io.jsonl import _LOCKS, _LOCKS_GUARD, append_jsonl
 
 
 @pytest.fixture
@@ -66,42 +66,35 @@ class TestAppendJsonl:
             assert isinstance(parsed, dict)
 
 
-class TestAppendLineLocked:
-    """append_line_locked 函数测试。"""
+class TestAppendJsonlSingleWriter:
+    """原逐行追加测试（pbfix 2026-10-04）：该原语无调用方已删除，行为由 append_jsonl 覆盖。"""
 
-    def test_append_line_creates_file(self, temp_jsonl: Path):
+    def test_append_creates_file(self, temp_jsonl: Path):
         """验证创建文件。"""
-        append_line_locked(temp_jsonl, "plain text line")
+        append_jsonl(temp_jsonl, {"line": "plain text line"})
         assert temp_jsonl.exists()
 
-    def test_append_line_single(self, temp_jsonl: Path):
+    def test_append_single(self, temp_jsonl: Path):
         """追加单行。"""
-        append_line_locked(temp_jsonl, "line content")
+        append_jsonl(temp_jsonl, {"line": "line content"})
         content = temp_jsonl.read_text(encoding="utf-8")
-        assert content == "line content\n"
+        assert content == '{"line": "line content"}\n'
 
-    def test_append_line_removes_existing_newline(self, temp_jsonl: Path):
-        """追加时去除原有换行符。"""
-        append_line_locked(temp_jsonl, "line\n")
-        content = temp_jsonl.read_text(encoding="utf-8")
-        assert not content.endswith("\n\n")
-        assert content == "line\n"
-
-    def test_append_line_multiple_sequential(self, temp_jsonl: Path):
+    def test_append_multiple_sequential(self, temp_jsonl: Path):
         """顺序追加多行。"""
         for i in range(3):
-            append_line_locked(temp_jsonl, f"line{i}")
-        content = temp_jsonl.read_text(encoding="utf-8")
-        assert content == "line0\nline1\nline2\n"
+            append_jsonl(temp_jsonl, {"line": f"line{i}"})
+        lines = [json.loads(line)["line"] for line in temp_jsonl.read_text(encoding="utf-8").splitlines()]
+        assert lines == ["line0", "line1", "line2"]
 
-    def test_append_line_concurrent(self, temp_jsonl: Path):
+    def test_append_concurrent(self, temp_jsonl: Path):
         """验证并发追加安全性。"""
         num_threads = 10
         lines_per_thread = 50
 
         def writer(thread_id: int):
             for i in range(lines_per_thread):
-                append_line_locked(temp_jsonl, f"t{thread_id}-l{i}")
+                append_jsonl(temp_jsonl, {"line": f"t{thread_id}-l{i}"})
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = [executor.submit(writer, i) for i in range(num_threads)]
@@ -112,11 +105,11 @@ class TestAppendLineLocked:
         expected = num_threads * lines_per_thread
         assert len(lines) == expected
 
-    def test_append_line_empty_content(self, temp_jsonl: Path):
-        """追加空行。"""
-        append_line_locked(temp_jsonl, "")
+    def test_append_empty_payload(self, temp_jsonl: Path):
+        """追加空对象行。"""
+        append_jsonl(temp_jsonl, {})
         content = temp_jsonl.read_text(encoding="utf-8")
-        assert content == "\n"
+        assert content == "{}\n"
 
 
 class TestConcurrentSafety:
@@ -154,11 +147,11 @@ class TestConcurrentSafety:
         file2 = tmp_path / "file2.jsonl"
 
         # 同时向两个文件写入
-        append_line_locked(file1, "file1 content")
-        append_line_locked(file2, "file2 content")
+        append_jsonl(file1, {"content": "file1 content"})
+        append_jsonl(file2, {"content": "file2 content"})
 
-        assert file1.read_text() == "file1 content\n"
-        assert file2.read_text() == "file2 content\n"
+        assert file1.read_text() == '{"content": "file1 content"}\n'
+        assert file2.read_text() == '{"content": "file2 content"}\n'
 
 
 class TestJsonlContent:

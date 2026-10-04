@@ -20,6 +20,7 @@ from ..common.json_io import (
     write_json_file_atomic,
     write_private_text_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import ensure_private_dir
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import CandidateService, merge_candidate_observations
@@ -102,8 +103,8 @@ class CuratorBatchCommitter:
         self.run_log = run_log
         self.memory_root = _memory_root(candidate_service, daily_store, state_store, run_log)
         self.transactions_dir = self.state.path.parent / "transactions"
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        self.transactions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+        ensure_private_dir(self.transactions_dir)
 
     # LLM: All target content is computed and quota-checked before the first canonical replace;
     # an exception restores every preimage while locks are still held.

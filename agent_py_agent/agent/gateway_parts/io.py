@@ -28,7 +28,11 @@ from ..common.json_io import (
     write_private_json_file_atomic_no_newline_unlocked,
     write_private_text_file_atomic,
 )
-from ..common.nofollow_fs import open_private_lock_beneath_tightened
+from ..common.nofollow_fs import (
+    ensure_private_dir,
+    open_private_lock_beneath_tightened,
+    split_existing_anchor,
+)
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .paths import GatewayPaths
 
@@ -138,8 +142,8 @@ def _path_lock(path: Path) -> threading.Lock:
 
 def write_json_file(path: Path, payload: dict) -> None:
 
-    # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+    ensure_private_dir(path.parent)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -337,16 +341,13 @@ def _open_lock_handle(path: Path):
     return os.fdopen(descriptor, "a+", encoding="utf-8")
 
 
-# LLM: 调用方给的是完整锁路径；原语按受信根 + 相对段打开，这里把绝对路径拆成“已存在的最近父目录 + 其余段”，
-#   与 json_io / directory_lock 同一手法，让缺失目录仍统一经 no-follow 原语按 0700 创建。
+# LLM: 调用方给的是完整锁路径；这里把绝对路径拆成“已存在的最近祖先 + 其余缺失段”（与其余锁调用点共用
+#   nofollow_fs.split_existing_anchor），让缺失目录仍统一经 no-follow 原语按 0700 创建。
 # 函数用途: 打开一个私有锁文件描述符。
 def _open_private_lock_descriptor(lock_path: Path) -> int:
     lock_path = Path(os.path.abspath(lock_path))
-    anchor, parts = lock_path.parent, (lock_path.name,)
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
-    return open_private_lock_beneath_tightened(anchor, parts)
+    anchor, missing = split_existing_anchor(lock_path.parent)
+    return open_private_lock_beneath_tightened(anchor, (*missing, lock_path.name))
 
 
 # LLM: POSIX flock and Windows byte-range locking implement the same blocking cross-process

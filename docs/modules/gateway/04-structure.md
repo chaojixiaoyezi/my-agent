@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## 私有写整包 9b 终审修复（pbfix，2026-10-04）
+
+- `gateway_parts/io.write_json_file`、`scheduler/repository` 的建目录点改 `nofollow_fs.ensure_private_dir`（缺失段逐级 0700、已存在一律不动）。
+- 锁只剩 5 处调用方，"找最近的已存在祖先"循环收进 `nofollow_fs.split_existing_anchor`；`open_private_lock_beneath_tightened` 加 `hasattr(os, "fchmod")` 守卫（Windows 无此函数不再抛 AttributeError）。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 - G6 网络出口：`tooling/web.py` 将 G4 `gateway_bound_ports()` 进程注册表与正数 `gateway_port` 配置后备结构化传入 `contracts/gates/network_safety.py`；命中端口后用逐目标、无缓存 UDP bind 判本机，`web_fetch`/`watch_stream` 每个重定向跳沿固定 IP 重验，不能附本机客户端凭据。G6 与 G4/G5 `gateway_isolation` 状态无关；OS 沙箱不可用时，`run_command` 仍可能访问 Gateway。
 
 - （mtc，2026-10-03）`response_renderer` 的两个“文件就绪才读”入口（未处理响应投影、唯一终态归档）改用 `common/cache_freshness` 的五元指纹，并且 mtime 在 2 秒窗口内时不信任上次签名、总是重读；调用方都是“读到就退出”的等待循环，重读幂等。
@@ -2047,7 +2053,8 @@ Gateway 负责把外部请求落成可审计队列，并由 worker 调用 Simple
 - `agent/gateway_parts/scoped_locks.py`：机器级【进程单例】锁（pid+进程启动时间判归属，
   长期助手 风格）。用于"同一台机器同一 scope+identity 只有一个活进程持有"的网关身份独占；
   持有进程重复 acquire = 刷新心跳，死进程残留锁自动接管。`daemon_control.py` 是它的
-  公共 API 转口。
+  公共 API 转口。锁文件与锁目录走统一私有原语（`open_private_lock_beneath(exclusive=True)`，
+  sclk 2026-10-04）：新锁文件 0600、新目录 0700，已存在目录不动权限，`O_EXCL` 先到先得语义保留。
 - `agent/gateway_parts/daemon_metadata.py`：统一提供 process-domain（machine-id / macOS 硬件 UUID / 主机名 + PID namespace）、
   PID 和 start_time 身份。后台会话 claim 与 gateway PID record 共用，不复制一套存活判定。`process_host_id` 一个进程只算一次
   （`_cached_process_host_id`），macOS 硬件 UUID 走 libc `gethostuuid`（`_macos_platform_uuid`），不起子进程。

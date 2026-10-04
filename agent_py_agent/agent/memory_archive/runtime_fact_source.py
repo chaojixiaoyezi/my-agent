@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import write_private_text_file_atomic
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.safe_id import safe_id
 from ..common.value_parsing import dedupe_strings
 from ..run_intent import build_run_intent, run_intent_payload
@@ -70,7 +71,8 @@ def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.request_id)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
+    ensure_private_dir(root)
     payload = _runtime_fact_payload(request)
     _write_json_atomic(root / "task.json", payload)
     return str(root)
@@ -113,7 +115,7 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
     if not request.fact_id:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.fact_id)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_private_dir(root)
     payload = _approved_fact_payload(request, _read_json_dict(root / "task.json"))
     _write_json_atomic(root / "task.json", payload)
     return str(root)

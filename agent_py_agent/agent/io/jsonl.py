@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, TextIO
 
-from ..common.nofollow_fs import open_private_lock_beneath_tightened
+from ..common.nofollow_fs import open_private_lock_beneath_tightened, split_existing_anchor
 
 try:
     import fcntl
@@ -44,19 +44,9 @@ def append_jsonl(path: str | Path, payload: dict[str, Any], *, sort_keys: bool =
     another record."""
 
     line = json.dumps(payload, ensure_ascii=False, sort_keys=sort_keys)
-    append_line_locked(path, line)
-
-
-def append_line_locked(path: str | Path, line: str) -> None:
-    """Append one text line while holding a lock beside the target file.
-
-    The caller passes the line content without the trailing newline. This keeps
-    every append operation shaped the same way and avoids half-written JSONL
-    rows when local workers run concurrently."""
-
     target = Path(path)
-    # 目录缺失时按 0700 新建（pdp 2026-10-03：与私有写/锁同口径，只动自己建的东西；已存在一律不动）。
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 目录由下面的私有锁原语负责（缺失逐级按 0700 新建、已存在一律不动）；原来这行 mkdir 只保最后一级 0700
+    # （pbfix 2026-10-04 删除无调用方的 append_line_locked 时一并去掉）。
     with _locked_text_file(target) as handle:
         handle.write(line.rstrip("\n") + "\n")
         handle.flush()
@@ -92,11 +82,8 @@ def _open_lock_descriptor(lock_path: Path) -> int:
     已存在的目录一律不动）。"""
 
     lock_path = Path(os.path.abspath(lock_path))
-    anchor, parts = lock_path.parent, (lock_path.name,)
-    while not anchor.exists() and not anchor.is_symlink():
-        parts = (anchor.name, *parts)
-        anchor = anchor.parent
-    return open_private_lock_beneath_tightened(anchor, parts)
+    anchor, missing = split_existing_anchor(lock_path.parent)
+    return open_private_lock_beneath_tightened(anchor, (*missing, lock_path.name))
 
 
 def _acquire_lock_entry(resolved: str) -> _PathLockEntry:

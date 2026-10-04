@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..common.json_io import append_private_jsonl_records
+from ..common.nofollow_fs import ensure_private_dir
 from ..runtime_errors import runtime_error_report
 from .paths import resolve_audit_paths
 from .records import (
@@ -70,7 +71,7 @@ class AuditLogger:
         self._audit_root = paths.root
         self._audit_file = paths.log_file
         if self.enabled:
-            self._audit_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(self._audit_root)
 
     def _generate_entry_id(self) -> str:
         """生成条目 ID:秒级戳(可读/可排序)+ UUID4(122 位,无碰撞)。
