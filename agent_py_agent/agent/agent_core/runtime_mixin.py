@@ -545,7 +545,17 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
 
     非终态统一分族收口（不可续跑族落 failed、可续跑族保留），杜绝 attempt
     悬挂——见 _settle_main_agent_run_status 注释。
+
+    task_local（子代理）例外（rcob2，2026-10-04）：子代理回合的 run_id 就是子代理
+    自己的 canonical run，它的权威终态只由 commit_runner_result / runtime_closeout
+    在结果落盘后按 runner 结论收口。这里再按"主代理回合收口"分族写一遍，会把
+    BLOCKED 这种可恢复等待的 runner 结果提前落成 run=failed（rco 把 one-shot 兜底
+    推广到所有路径后暴露），随后 runner_result_admission 以"与运行账终态冲突"拒收
+    合法结果，run_subagent 便返回 RUNNING，父级拿不到 BLOCKED 收口——两条 halt
+    用例钉住的就是这条合同。故 task_local 回合在此直接返回，不碰运行账。
     """
+    if str(getattr(params, "context_scope", "") or "") == "task_local":
+        return
     if _task_local_continuation_keeps_attempt_open(agent, params, result):
         return
     runtime_status = str(getattr(result, "runtime_status", "") or "").strip()

@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## rco 的子代理 halt 收口回归（rcob2，2026-10-04，worker/rco-blocked-halt-v2；基于 17j 头 a1a849c55；3a 复审（task_local 只有真实子代理回合会用，预检那处只是内存投影），已并入 step17j）
+
+- 来源：rco + rcb 合入（`39350230a`）后，两条 halt 用例失败（`test_subagent_authorization_failure_halt.py:358`、`test_subagent_identical_failure_halt.py:164`），都是 `assert (result.status, result.turn_end_reason) == ("BLOCKED", "blocked")` 实得 `("RUNNING", "")`；rcob 没修好。
+- 基线复核（分离检出，跑完删除）：`312a4fec4`（rco 前，`/private/tmp/rcob2-pre`）**两条通过**；`39350230a`（rco+rcb，`/private/tmp/rcob2-post`）**两条失败**。
+- 改动：`agent_py_agent/agent/agent_core/runtime_mixin.py` 的 `_settle_main_agent_run` 对 `context_scope == "task_local"`（子代理回合）直接返回，不碰运行账；子代理 run 的权威终态仍由 `commit_runner_result` / `runtime_closeout` 收口。只加这一处早返回，测试预期零改动。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_subagent_authorization_failure_halt.py agent_py_agent/tests/test_subagent_identical_failure_halt.py agent_py_agent/tests/test_dispatch_liveness_and_revive.py agent_py_agent/tests/test_run_closeout_settlement.py agent_py_agent/tests/test_run_closeout_backfill.py agent_py_agent/tests/test_run_audit_terminal.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-rcob2
+  ```
+- 结果：
+  - 两条目标用例 **2 passed**（修复前 FAILED）。
+  - `test_dispatch_liveness_and_revive.py::test_blocked_runner_result_does_not_settle_runtime_run`（rcob 钉住的那条）**通过**。
+  - `test_run_closeout_settlement.py` + `test_run_audit_terminal.py` + `test_run_closeout_backfill.py` + 两条 halt 文件共 **86 passed**。
+  - `test_dispatch_liveness_and_revive.py` 整文件：**除 1 条既有失败外全绿**（见下）。
+- **既有失败（非本片引入，两个基线同样红）**：`test_dispatch_liveness_and_revive.py::test_supervision_kills_fully_stalled_source_worker_host:893` — `assert summary["running_reclaimed"] == 2` 实得 `0`。在 `312a4fec4`（`/private/tmp/rcob2-pre`）与 `39350230a`（`/private/tmp/rcob2-post`）上分别单跑该用例，**均失败、均 0**。未跳过、未放宽。
+- guards9：**187 passed / 0 failed**。
+- 变异 3 个（驱动脚本 `/private/tmp/rcob2_mutate.py`、`/private/tmp/rcob2_mutate_m3.py`，不入库，按备份原字节还原；还原后 sha256 与工作区一致）：
+  ① 删掉 `task_local` 早返回 → 两条 halt 用例变红（`RUNNING` / `''`）；
+  ② 把 BLOCKED 放回失败族（`runtime_closeout._RESUMABLE_WAIT_TASK_STATUSES` 置空）→ rcob 的 `test_blocked_runner_result_does_not_settle_runtime_run` 变红（"可恢复等待不得被收口成任何终态（观测到 'failed'）"）；
+  ③ 把判据放宽成对所有 scope 生效 → 主代理收口 8 条用例变红（`test_run_audit_terminal.py`、`test_run_closeout_settlement.py`），证明判据只对子代理生效。
+- 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、strict code-size `hard=0`、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失告警 39**。
+- 未验证：真实 Gateway / TUI 端到端未跑（规则禁止连真实 Gateway）；留给 3a/9b 复核。
+
 ## M1 B4 全入口观察装配故障隔离（b4g，2026-10-04，`worker/b4-event-context-guard`；ds2 初审可以挑入，已并入 step17j）
 
 - **来源**：3a 在 17j `2ad257314` 指出工具 `_tool_event_context` 直接读 agent.config；后补 prompt_queued 同类缺口。工具回归先复现缺配置/getter/路由/装配异常；Gateway 回归复现缺配置入队、关闭仍读事件字段及 experiment 两个老入口失败。

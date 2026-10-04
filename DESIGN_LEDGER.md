@@ -179,6 +179,16 @@
 - **历史记录（不修数据，后续项）**：已经停在 created 的历史悬挂记录（判定条件：attempt 已终态（`ended_at>0` 且无在途操作）且 `agent_run.status ∈ {'', 'created'}` 且无执行权锁）由 owner 维护 / 发现层补收口为对应终态（failed / cancelled 按结构化 `runtime_reason` 选），判定只读结构化字段，不解析文案；本分支不修数据。
 - **未验证**：真实 Gateway / TUI / IM 端到端与生产历史悬挂记录补收口未跑（规则禁止连真实 Gateway、不读生产数据）；留给 3a/9b 复核。
 
+### 补（rcob2，2026-10-04，分支 `worker/rco-blocked-halt-v2`，基于 17j 头 `a1a849c55`；3a 复审，已并入 step17j）
+
+- **现象**：从 rco + rcb 合入（`39350230a`）起，`test_subagent_authorization_failure_halt.py::test_child_stops_blocked_and_parent_receives_structured_lifecycle_event`（:358）与 `test_subagent_identical_failure_halt.py::test_fake_llm_child_stops_blocked_and_parent_wake_carries_identical_reason`（:164）两条失败，都是 `assert (result.status, result.turn_end_reason) == ("BLOCKED", "blocked")` 实得 `("RUNNING", "")`；rcob（`ebe621d87`）没有修好它们。已在 `312a4fec4`（rco 前）与 `39350230a`（rco+rcb）两个分离检出上复核：前者两条通过、后者两条失败。
+- **根因**：子代理 `task_local` 回合的 `RunParams.run_id` **就是子代理自己的 canonical run id**（`subagent/run_flow.py:515`），回合结束时同样走 `_settle_main_agent_run`（`runtime_mixin.py:692`）。rco 把"不可续跑族收 failed"从只作用于 CLI one-shot 推广到**所有路径**（`runtime_mixin.py:484-489`），于是 halt 收口那轮的 `runtime_status=blocked` / `runtime_reason=REPEATED_TOOL_AUTHORIZATION_FAILURE` 被主代理侧收口逻辑落成 `run.status=failed`。随后 runner 结果落盘走准入 `reject_stale_runner_result` → `_managed_runtime_result_conflict`（`runner_result_admission.py:130-146`），判定"与运行账终态冲突"（`run=failed`、incoming 非终态），拒收这条合法结果，返回 `make_rejected_runner_result`；它把仍停在 RUNNING 的 task 状态回填给调用方，`run_subagent` 于是返回 `("RUNNING", "")`，父级也拿不到 BLOCKED 收口。逐层证据见探针 trace（`_settle_main_agent_run` → `settle_agent_run(status=failed, payload runtime_status=blocked)`）。
+- **修法（最小、只堵这条越界）**：`_settle_main_agent_run` 在 `context_scope == "task_local"` 时直接返回——子代理 run 的权威终态只由 `commit_runner_result` / `runtime_closeout` 在结果落盘后按 runner 结论收口（rcob 已把 BLOCKED 排除出失败族），主代理回合收口不该代劳。主代理与 CLI 路径的收口分族完全不变。**不改测试预期**，两条用例钉住的合同（halt 以 BLOCKED 收口、父级收到 BLOCKED + 原因码）原样保留。
+- **两侧合同同时成立**：halt 两条转绿；rcob 的 `test_blocked_runner_result_does_not_settle_runtime_run` 继续绿（BLOCKED 仍不进失败族、不被 settle 成 failed）。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「rco 的子代理 halt 收口回归（rcob2）」小节。3 个变异全被抓：①把 task_local 早返回删掉 → 两条 halt 用例红；②把 BLOCKED 放回失败族（`_RESUMABLE_WAIT_TASK_STATUSES` 置空）→ rcob 那条红；③把判据放宽成对所有 scope 生效 → 主代理收口 8 条用例红（证明判据只对子代理生效）。
+- **既有失败（非本片引入）**：`test_dispatch_liveness_and_revive.py::test_supervision_kills_fully_stalled_source_worker_host:893`（`running_reclaimed` 期望 2 实得 0）在 `312a4fec4` 与 `39350230a` **两个基线**上同样失败，与本片改动无关，照实保留、未跳过。
+- **未验证**：真实 Gateway 端到端未跑（规则禁止连真实 Gateway）；留给 3a/9b 复核。
+
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，ds7 初审可以交终审（变异 5/5），9b 看脱敏与清洗两处，已并入 step17j）
 
 - **背景**：能力包重跑里 B 包两例不合格，都是交接文件的一个字段填错；检查程序报了错、宿主核验判失败、返工了好几次，模型还是改不对——返工提示里每条错误只有 code 和 location，看不出“应该填什么”。ds7 在做 B 包 0.3.2：检查程序的报错会带上期望值（hint），宿主不转模型就看不到。
