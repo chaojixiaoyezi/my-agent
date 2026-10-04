@@ -1,5 +1,30 @@
 # 测试与发布验收
 
+## DeepSeek 跨轮思考分区非作者复核（cachecmp，2026-10-04，WIP：完整宿主重放另线核对）
+
+- 非作者复核3a的 `a2f7aca08286570bcacf3c60893cdb2edfc4f7dd`，本树 cherry-pick 为 `34810dc5f82d37f342f2b46b4bb2aa39a5a8dc8e`；顶部文档冲突保留本树历史后追加3a原文。没有自行再改支持规则；产品 `openai_chat.py` 与原提交字节相同。原提交完整 `test_backends_openai_native_tool_use.py` **40 passed / 0 failed / 0 errors / 0 skipped**，`tmp/cachecmp/a2f-review.xml`。此前错误的“仅检查工具assistant”方案已撤回，不作为修复交付。
+- 本线新增13个参数实例，通过真实 `generate` 的假JSON/流传输截取最终payload，不连官网或Gateway：流/非流×开/关思考四例验证最终答复无思考后，新user追加不改system/tools/原历史前缀/思考及max；当前工具缺思考None/空/空白三例仍关闭并不发档位；插话/运行时事实/压缩摘要三种IR最终user边界；主/子线程两例从真实 `_do_backend_generate` 逐次记录auto→none→auto→required→specific→auto的分区例外；当前纯文本缺思考一例仍关闭。原测试不删、不skip、不放宽。
+- **最终当前版本19文件：591 passed / 0 failed / 0 errors / 0 skipped**，退出0，执行至100%；其中OpenAI目标文件 **53 passed**、实时guards9完整十一文件（含packaging/constants_catalog）**187 passed**。先前590项是在最后纯文本用例加入前，不能作为最终版本结果。最终日志/XML：`tmp/cachecmp/related-final.log`、`related-final.xml`；精确汇总 `verification.json`。命令（指定Python、工作树根，不跑全仓）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_backends_openai_native_tool_use.py agent_py_agent/tests/test_reasoning_effort.py agent_py_agent/tests/test_provider_sampling.py agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_tool_request_projection.py agent_py_agent/tests/test_subagent_first_request_selection.py agent_py_agent/tests/test_backends.py agent_py_agent/tests/test_backends_native_tool_use.py agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-cachecmp --junitxml=tmp/cachecmp/related-final.xml
+  ```
+- 三个独立出站变异（只在测试进程临时替换 `_request_payload`，不改支持规则或磁盘产品）：去tools、换system、历史头插user，每项 **4 failed / 0 errors / 0 skipped**，恢复后同四目标 **4 passed**。证据 `tmp/cachecmp/mutations.json` 及各项red/green XML/log；产品SHA256恢复并始终与3a提交相同。它们保护builder前缀合同，不代表真实线程持久化重载已经验证。
+- 全范围Ruff通过，import boundaries `findings=0`；strict-size退出0、`blocked=False`（strict_scope_total=2203、hard=0、high-risk=1506、soft=697、test_advisory=1234）。size_diff完整输出 **新增告警: 0 / 消失告警: 40**，不是本段整改40条；生成报告已还原、baseline不改。最终四文件暂存后doc-sync普通及staged两入口均DOC_SYNC_PASS、clean-package未发现发布阻塞项、普通/cached diff-check均退出0；不为仅文档变化重跑有效产品验证。静态入口：
+  ```bash
+  $PY -m ruff check agent_py_agent scripts
+  $PY scripts/check_import_boundaries.py
+  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  git checkout HEAD -- CODE_SIZE_REPORT.md
+  bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+  $PY scripts/check_doc_sync.py
+  $PY scripts/check_doc_sync.py --staged
+  git diff --check
+  git diff --cached --check
+  $PY scripts/check_clean_package.py .
+  ```
+- **复核结论**：3a最后user后全部assistant的规则在所测协议入口成立，本轮缺思考仍安全降为关闭；旧无思考答复不再连累下一轮，档位max在常规路径不丢。none/required/specific的现有强制关闭及线程读取回退仍可能换分区，本线未改。实际N轮落盘→N+1轮宿主恢复、真实自然答复/续跑全链、官网命中率/费用改善均未验证；压缩/重载分别归luna3/ds7，不以这些局部全绿宣称跨轮问题全部解决。
+
 ## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2；基于 g2bfix1b 头 e8c4b6d2d）
 
 - 来源：g2bfix1br 初审在全面 grep 时查出——`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）也是裸 `_send_json(status, body)`；它在同一条"降匿名读路径"上，普通用户拿 403 却仍不带码。已实测：匿名请求一个结构损坏的归档 → 403 无码；包上 `_denial_body` 后 → 403 带 `LOCAL_CREDENTIAL_REQUIRED`。

@@ -1,5 +1,15 @@
 # 设计台账
 
+## DeepSeek 跨轮思考分区复核（cachecmp，2026-10-04，worker/cache-prefix；规则复核通过；本段测试与文档已并入 step17j，其余排查 WIP）
+
+- **来源与变更归属**：按3a最新官网实测，只查最终出站最后一条 `user` 后的所有 `assistant`，纯文本同样必须有非空思考。非作者复核 `a2f7aca08`，本树 cherry-pick 为 `34810dc5f`；产品文件逐字节相同，本线没有再改 `_thinking_mode_supported`，新增离线载荷合同与记录。此前只查工具 assistant 的未提交方案已撤回，不是交付实现。
+- **第一个已确认分叉**：旧轮最终答复无思考，使旧 `_thinking_mode_supported` 对整段历史判否，出站新增 `thinking: disabled` 并去掉 `reasoning_effort: max`；不是 JSON 键顺序问题。该路径足以改变3a实测的缓存分区，但没有据此断言所有约16万token未命中都由它造成。
+- **离线证据**：真实 OpenAI builder 假传输捕获流/非流、开/关思考的相邻调用；固定历史逐条、system、tools及工具参数保持相等，无思考最终答复追加后再追加下一轮user，开思考与max不丢。本轮最后user之后工具/纯文本缺思考仍禁用，避免400；不伪造reasoning。`UserTurn`（插话）、`RuntimeFactsTurn`、`CompactionSummary` 最终均为user；纯tool_result的中间user容器最终转tool，不重置边界。
+- **扫描仍有明确例外**：真实 `_do_backend_generate` 把任何非auto的工具选择视为forced，none/required/specific均关思考且不带max，回到auto又恢复max；主/子线程两条路径均离线复现。因此不能写“全线程相邻分区始终一致”。普通无工具/auto续跑按现读线程档位；档位读失败/空值仍回全局默认。原生工具能力探针当前auto且不传线程档位，属于独立探针身份，不能直接认定它造成主对话断缓存。
+- **边界与分工**：本轮捕获是合成历史经真实builder/请求入口，不是实际N轮落盘后N+1轮宿主重新加载全链。历史重放/存储改动归ds7，压缩请求档位及前缀归luna3，本线未修改两路。其它强制策略是否取消none的关闭、完整自然答复/续跑宿主链需后续裁定/复核，不用大重构冒充小修。
+- **3a 官网补测（10-04，合成内容，见 decision-evidence/deepseek-cache-audit-1004/ds_probe4、ds_probe5）**：开思考 + max 时 tool_choice=none 被接受，required/指定工具回 400（Thinking mode does not support this tool_choice），所以 required/specific 继续按 forced 关思考是对的。但 none 时服务端不渲染工具定义（prompt token 等于不带 tools），前缀在 system 之后就和 auto 请求分叉，长历史命中 0；所以“none 不再关思考”也换不回主对话缓存。压缩/辅助请求要复用主对话缓存，必须同一套 tools + auto + 同档思考 + 逐字节相同的 system 与历史，压缩指令放最后一条 user（已转 luna3 cachecompact 按此收口）。
+- **条件估算而非实测**：若总输入354000、仅尾部追加2000 token，历史前缀及思考/档位分区均保持且服务端缓存有效，则历史全命中对应99.44%；受影响的跨轮开头至多避免约16万输入token按未命中价重算。费用差额为 `160000 × (未命中单价－命中单价) / 1000000`，未取得本轮单价/真实usage，不报实测金额或整体新命中率。详见 [智能程度第12节](docs/design/REASONING_EFFORT.md#12-deepseek-跨轮思考分区复核2026-10-04cachecmp)。
+
 ## G2b 读路径补最后一处：归档读不出的 403 也带缺凭据码（g2bfix1c，2026-10-04，worker/g2b-denial-server-fix2，基于 g2bfix1b 头 `e8c4b6d2d`；9b 终审通过，已并入 step17j）
 
 - **来源**：g2bfix1br 初审做全面 grep 时查出——`_send_archived_terminal_result` 的 `load_error` 分支（归档文件存在但读不出）仍是裸 `_send_json(status, body)`。它与已修的三处同在"三个读端点降匿名后自行拒绝"这条路径上，普通用户拿 403 却不带码，客户端在"归档坏掉"时仍只能靠状态码猜。

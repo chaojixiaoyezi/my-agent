@@ -730,3 +730,125 @@ def test_thinking_rule_only_checks_assistants_after_last_user():
     assert not _thinking_mode_supported([user, old_text, thought_call, tool_result]), "最后一条 user 之后的纯文本也要思考"
     assert not _thinking_mode_supported([old_text, thought_call]), "没有 user 时整段都算本轮"
     assert _thinking_mode_supported([{"role": "system", "content": "s"}, user])
+
+
+# LLM: 捕获真正进入 Chat 假传输的载荷；流/非流只返回合成无思考最终答复，不发网络、不输出认证头。
+# 函数用途: 比较相邻请求的最终 JSON，而不是仅测内部支持函数。
+def _capture_thinking_payloads(backend):
+    captured = []
+
+    def transport(path, payload, headers):
+        del path, headers
+        captured.append(json.loads(json.dumps(payload)))
+        return {"choices": [{"message": {"content": "本轮结束，没有思考字段。"}, "finish_reason": "stop"}]}
+
+    def stream(path, payload, headers):
+        obj = transport(path, payload, headers)
+        message = obj["choices"][0]["message"]
+        return [json.dumps({"choices": [{"delta": message, "finish_reason": "stop"}]}), "[DONE]"]
+
+    backend.request_json = transport
+    backend.request_stream = stream
+    return captured
+
+
+# LLM: 只构造合成官网选项，不读生产配置、凭据或历史；档位由请求参数单独传递。
+# 函数用途: 建立 max 档位的离线协议测试后端。
+def _deepseek_history_backend(stream=False):
+    return OpenAICompatibleBackend(replace(_OPTIONS, api_base="https://api.deepseek.com/v1",
+        model_name="deepseek-v4-flash", stream_enabled=stream, reasoning_control="effort"))
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("thinking_disabled", [False, True])
+def test_deepseek_final_without_reasoning_keeps_next_turn_thinking_and_effort(stream, thinking_disabled):
+    backend = _deepseek_history_backend(stream)
+    captured = _capture_thinking_payloads(backend)
+    history = _tool_call_round_messages("真实工具思考")
+    prompt = CacheStructuredPrompt("稳定规则", "")
+    options = ProviderRequestOptions(reasoning_effort="max", thinking_disabled=thinking_disabled)
+    final = backend.generate(prompt, tools=_TOOLS, messages=history, request_options=options)
+    assert all(b["type"] != "thinking" for b in final.assistant_content_blocks)
+    history += [{"role": "assistant", "content": final.assistant_content_blocks},
+                {"role": "user", "content": [{"type": "text", "text": "下一轮任务"}]}]
+    before = json.dumps(history, ensure_ascii=False)
+    backend.generate(prompt, tools=_TOOLS, messages=history, request_options=options)
+    previous, following = captured
+    assert following["messages"][:len(previous["messages"])] == previous["messages"]
+    assert following.get("tools") == previous["tools"] and following["tool_choice"] == previous["tool_choice"]
+    assert following.get("thinking") == previous.get("thinking") == ({"type": "disabled"} if thinking_disabled else None)
+    assert following.get("reasoning_effort") == previous.get("reasoning_effort") == (None if thinking_disabled else "max")
+    assert json.dumps(history, ensure_ascii=False) == before
+
+
+@pytest.mark.parametrize("reasoning", [None, "", " \n\t"])
+def test_deepseek_current_tool_call_without_reasoning_still_disables_thinking(reasoning):
+    backend = _deepseek_history_backend()
+    captured = _capture_thinking_payloads(backend)
+    history = _tool_call_round_messages(reasoning)
+    before = json.dumps(history, ensure_ascii=False)
+    backend.generate(CacheStructuredPrompt("稳定规则", ""), tools=_TOOLS, messages=history,
+                     request_options=ProviderRequestOptions(reasoning_effort="max"))
+    payload = captured[0]
+    assert payload["messages"][-1]["role"] == "tool", "tool_result 的原生 user 容器不重置最终 user 边界"
+    assert payload["thinking"] == {"type": "disabled"} and "reasoning_effort" not in payload
+    assert "reasoning_content" not in payload["messages"][-2]
+    assert json.dumps(history, ensure_ascii=False) == before
+
+
+@pytest.mark.parametrize("kind", ["user", "runtime", "summary"])
+def test_deepseek_ir_user_facts_and_summary_reset_wire_boundary(kind):
+    from agent_py_agent.agent.backends.message_adapter import AnthropicMessageAdapter
+    from agent_py_agent.agent.backends.tool_ir import CompactionSummary, RuntimeFactsTurn, UserTurn
+
+    backend = _deepseek_history_backend()
+    captured = _capture_thinking_payloads(backend)
+    item = {"user": UserTurn("插话"), "runtime": RuntimeFactsTurn("事实", source="fixture"),
+            "summary": CompactionSummary("摘要")}[kind]
+    history = [*_tool_call_round_messages(None), *AnthropicMessageAdapter().to_provider_messages([item])]
+    backend.generate(CacheStructuredPrompt("稳定规则", ""), tools=_TOOLS, messages=history,
+                     request_options=ProviderRequestOptions(reasoning_effort="max"))
+    payload = captured[0]
+    assert payload["messages"][-1] == {"role": "user", "content": item.text}
+    assert "thinking" not in payload and payload["reasoning_effort"] == "max"
+
+
+@pytest.mark.parametrize("thread_key", ["conversation_thread_id", "agent_thread_id"])
+def test_main_and_child_request_paths_capture_forced_partition_changes(thread_key):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolChoice
+
+    backend = _deepseek_history_backend()
+    captured = _capture_thinking_payloads(backend)
+    loaded = []
+    def load(thread):
+        loaded.append(thread)
+        return SimpleNamespace(reasoning_effort="max")
+    agent = SimpleNamespace(config=SimpleNamespace(model_reasoning_effort="low"),
+                            conversation_store=SimpleNamespace(threads=SimpleNamespace(load=load)))
+    state = SimpleNamespace(agent=agent, params=SimpleNamespace(task_attributes={thread_key: "fixture-thread"}),
+        tools=_TOOLS, messages=_two_turn_messages(None, "新轮思考"), on_chunk=None, tool_rounds=1,
+        system_instruction="稳定规则", first_token_timeout_seconds=1)
+    choices = [ToolChoice.auto(), ToolChoice.none("natural"), ToolChoice.auto(),
+               ToolChoice.required(), ToolChoice.specific("read_file"), ToolChoice.auto()]
+    for choice in choices:
+        state.tool_choice = choice
+        _do_backend_generate(backend, CacheStructuredPrompt("", ""), state)
+    assert loaded == ["fixture-thread"] * len(choices)
+    # 记录现有强制策略的真实例外，不把 none/required/specific 的关思考包装成“相邻分区始终一致”。
+    assert [p.get("thinking") for p in captured] == [None, {"type": "disabled"}, None,
+                                                   {"type": "disabled"}, {"type": "disabled"}, None]
+    assert [p.get("reasoning_effort") for p in captured] == ["max", None, "max", None, None, "max"]
+    assert all(p["tools"] == captured[0]["tools"] and p["messages"] == captured[0]["messages"] for p in captured)
+
+
+def test_deepseek_current_plain_assistant_without_reasoning_still_disables_thinking():
+    backend = _deepseek_history_backend()
+    captured = _capture_thinking_payloads(backend)
+    history = [{"role": "user", "content": "本轮任务"}, {"role": "assistant", "content": "本轮无思考文本"}]
+    backend.generate(CacheStructuredPrompt("稳定规则", ""), tools=_TOOLS, messages=history,
+                     request_options=ProviderRequestOptions(reasoning_effort="max"))
+    assert captured[0]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in captured[0]
