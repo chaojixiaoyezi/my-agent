@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+## B4 全入口观察装配隔离（b4g，2026-10-04；ds2 初审可以挑入，已并入 step17j）
+
+- 提示入队、回合开始/收口与命令观察统一安全检查开关，缺配置/getter/字段/装配异常不发事件、不反噬业务；关闭不读取请求、回执、响应或 owner。worker owner 同源门不变。
+- 原 experiment 两个 HTTP 入队老例、正常真实 HTTP 与 Gateway 事件回归均纳入 33 文件 803 passed/2 skipped；跳过与未验边界见 TESTS，未动生产服务。
+
 ## 宿主私有 JSON 写保持 0600（sclk3，2026-10-04）
 
 - `gateway_parts/daemon_metadata._write_json_file`（PID 记录 / 运行时状态 / 停止请求 / scoped lock 心跳刷新）临时文件按 0600 排他新建再替换，上级目录改 `ensure_private_dir`；修 9b 复核 sclk2 时发现的“刷新后锁文件变回 0644”。

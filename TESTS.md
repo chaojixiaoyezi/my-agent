@@ -1,5 +1,66 @@
 # 测试与发布验收
 
+## M1 B4 全入口观察装配故障隔离（b4g，2026-10-04，`worker/b4-event-context-guard`；ds2 初审可以挑入，已并入 step17j）
+
+- **来源**：3a 在 17j `2ad257314` 指出工具 `_tool_event_context` 直接读 agent.config；后补 prompt_queued 同类缺口。工具回归先复现缺配置/getter/路由/装配异常；Gateway 回归复现缺配置入队、关闭仍读事件字段及 experiment 两个老入口失败。
+- **实现**：工具观察及 Registry 转交异常返回 None；Gateway 四入口安全先读开关，关闭不读事件字段，全部可选装配异常隔离。不修改权限、写边界、核验或业务异常处理。配置 getter 故障只注入观察装配接缝，真实工具权限链仍用原 Agent；不把不可读权限配置变成授权。
+- **有效红→绿**：新增工具直接文件修前 `6 failed, 5 passed`（缺配置、config getter、开关 getter、路由、装配及 Registry 观察读取故障）；修后加原四老文件 `159 passed, 2 skipped in 14.23s`。早期 frozen 参数赋值、遗漏 write_boundary 和误写队列 prompt 字段属于测试准备错误，已改为 replace/原必填参数/实际 goal 字段，不充当产品红证据。
+- **源码副本变异**：独立固定 Python 进程用 AST compile/exec 注入函数副本，不写磁盘源码。①工具装配移除 try/except 且回退直接 agent.config：新增故障回归与 `test_tool_operation_managed_gate.py`、`test_operation_store_robustness.py`、`test_runtime_gate_ledger.py`、`test_pack_verification_service.py` 四个老文件均红；② Registry 转交去保护：新增真实 handler 回归红；③将 Gateway 四事件入口替换为 `2ad257314` 的未保护函数：`17 failed`，其中 experiment 老入队两例、提示配置三例、关闭 turn/command/ended 与坏路由回归均红。每项要求子进程 pytest exit=1、零 collection error，外层核对预期 FAILED；3/3 抓到，各磁盘源码 SHA256 前后一致。
+- **当前版本最终定向回归**（33 文件，工作树根，唯一指定 Python；完整 guards9 含 packaging，不跑全仓）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_hub.py \
+    agent_py_agent/tests/test_plugin_channel_pool.py agent_py_agent/tests/test_plugin_channel_lifecycle.py \
+    agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_gateway_request_runtime_errors.py \
+    agent_py_agent/tests/test_gateway_strict_request.py agent_py_agent/tests/test_gateway_control_operation.py \
+    agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_runtime_scope.py \
+    agent_py_agent/tests/test_executor_decision_message.py agent_py_agent/tests/test_executor_exit_recovery.py \
+    agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_runtime.py \
+    agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_decision_action_execute.py \
+    agent_py_agent/tests/test_gateway_per_user_scoping.py agent_py_agent/tests/test_gateway_bounded_http_server.py \
+    agent_py_agent/tests/test_tool_operation_managed_gate.py agent_py_agent/tests/test_operation_store_robustness.py \
+    agent_py_agent/tests/test_runtime_gate_ledger.py agent_py_agent/tests/test_pack_verification_service.py \
+    agent_py_agent/tests/test_decision_experiment_command.py \
+    agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py \
+    agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+    agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py \
+    agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+    agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py \
+    -q --tb=short -rs -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-b4g
+  ```
+  **`803 passed, 2 skipped in 73.97s`**。随后仅将测试 helper/分派拆平（无产品代码、输入或观察断言变化），两个改动直接文件按同一 pytest 参数复跑：**`43 passed in 6.40s`**。两项 skip 为 `test_pack_verification_service.py:480/555` 的“本机平台沙箱不可用”；未执行该两项的目标沙箱观察点，不推断 OS 隔离已通过，交 3a 沙箱外复核。
+- **门禁（当前产品源码）**：`$PY scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts`：`All checks passed!`；`$PY scripts/check_doc_sync.py`：`DOC_SYNC_PASS`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：`strict_scope_total=2207 hard=0 high-risk=1509 soft=698 test_advisory=1234 blocked=False`；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"`：**新增告警 0、消失告警 35**。先前测试 helper 的嵌套/参数告警已拆平，断言不删除不放宽。生成报告已还原 HEAD，不提交；`git diff --check` 干净；`$PY scripts/check_clean_package.py .`：`OK: . 未发现发布阻塞项`。
+- **3a 追加覆盖（产品源码仍为 `821ed5d65`）**：八文件合跑 **`233 passed, 2 skipped, 20 xfailed in 29.33s`**，无失败。使用指定 Python 的 `pytest.main` 和下列同一参数，由只读报告插件汇总逐文件；以下为同入口复现命令。20 个 xfail 未作为通过，两项平台沙箱 skip 未改变。
+
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_gateway_auth_hardening.py \
+    agent_py_agent/tests/test_gateway_identity_trust.py \
+    agent_py_agent/tests/test_tools/test_tool_loop.py \
+    agent_py_agent/tests/test_tool_operation_managed_gate.py \
+    agent_py_agent/tests/test_operation_store_robustness.py \
+    agent_py_agent/tests/test_runtime_gate_ledger.py \
+    agent_py_agent/tests/test_pack_verification_service.py \
+    agent_py_agent/tests/test_decision_experiment_command.py \
+    -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-b4g
+  ```
+
+  | 文件 | 实测结果 |
+  |---|---|
+  | `test_gateway_auth_hardening.py` | 8 passed；trusted_channel_user、loopback_terminal 两个点名用例通过 |
+  | `test_gateway_identity_trust.py` | 17 passed；channel_identity、adapter_submit 两个点名用例通过 |
+  | `test_tools/test_tool_loop.py` | 24 passed、20 xfailed；one_shot_key、overlapping_single_child 两个点名用例通过 |
+  | `test_tool_operation_managed_gate.py` | 24 passed；f2、h、h2、h3、n_long 五个等待 handler 的用例均通过 |
+  | `test_operation_store_robustness.py` | 32 passed |
+  | `test_runtime_gate_ledger.py` | 41 passed |
+  | `test_pack_verification_service.py` | 51 passed、2 skipped；tool_execution_seam_calls_both_hooks 通过 |
+  | `test_decision_experiment_command.py` | 36 passed；http_ingress 两个参数化用例均通过 |
+
+  本次只补覆盖与文档，不修改产品或测试；先前当前版本的 B4 回归、去保护变异、guards9 和静态门禁证据保持适用，不重复冒充 Linux/沙箱外复验。
+- **未验证**：生产 Gateway/真实模型/TUI/IM、B7 插件安装启用与沙箱断网、text 确认许可链未验证；原 393 文件外部范围本轮未重跑，不能把本轮定向范围扩大到全部。
+
 ## 带前缀凭据键名打码（rkey + rkey2，2026-10-04，worker/redaction-var-refs-v2；9b 复跑 9 样本、回溯计时、误伤反例都通过，已并入 step17j）
 
 - **rkey2：修 ReDoS（同一分支接着 `6a5440cf9`）**。键名前缀的嵌套量词 `(?:[A-Za-z0-9_.]*[_-])*` 改成

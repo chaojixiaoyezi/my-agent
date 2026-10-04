@@ -6,6 +6,8 @@
 - 锁只剩 5 处调用方，"找最近的已存在祖先"循环收进 `nofollow_fs.split_existing_anchor`；`open_private_lock_beneath_tightened` 加 `hasattr(os, "fchmod")` 守卫（Windows 无此函数不再抛 AttributeError）。
 - 详见 `02-progress.md` 同名节与 `TESTS.md`。
 
+- b4g（2026-10-04）：`gateway_parts/event_points._enabled_event_config` 为可选观察的安全开关读取；提示/回合/命令入口只在开启后读取事件字段，各自隔离观察装配异常。不会吞掉调用方的入队、权限或回合执行异常，缺上下文的收口直接返回。
+
 - G6 网络出口：`tooling/web.py` 将 G4 `gateway_bound_ports()` 进程注册表与正数 `gateway_port` 配置后备结构化传入 `contracts/gates/network_safety.py`；命中端口后用逐目标、无缓存 UDP bind 判本机，`web_fetch`/`watch_stream` 每个重定向跳沿固定 IP 重验，不能附本机客户端凭据。G6 与 G4/G5 `gateway_isolation` 状态无关；OS 沙箱不可用时，`run_command` 仍可能访问 Gateway。
 
 - （mtc，2026-10-03）`response_renderer` 的两个“文件就绪才读”入口（未处理响应投影、唯一终态归档）改用 `common/cache_freshness` 的五元指纹，并且 mtime 在 2 秒窗口内时不信任上次签名、总是重读；调用方都是“读到就退出”的等待循环，重读幂等。

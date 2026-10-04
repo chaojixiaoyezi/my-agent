@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -224,3 +225,96 @@ def test_active_turn_steer_does_not_publish_a_second_prompt_submitted(gateway):
     _owner, event = events[0]
     assert event.facts["request_id"] == request_id
     assert event.facts["chars"] == len("开始任务")
+
+
+class _EventConfigUnavailable:
+    @property
+    def config(self):
+        raise RuntimeError('optional event config unavailable')
+
+
+class _EventFlagUnavailable:
+    @property
+    def plugin_events_enabled(self):
+        raise RuntimeError('optional event flag unavailable')
+
+
+class _UnreadableEventFields:
+    def __init__(self, reads):
+        self.reads = reads
+
+    def __getattr__(self, name):
+        self.reads.append(name)
+        raise RuntimeError('disabled observation must not read event fields')
+
+
+class _BrokenEventFields(dict):
+    def get(self, *_args):
+        raise RuntimeError('optional event field failed')
+
+    def __getattr__(self, _name):
+        raise RuntimeError('optional event receipt failed')
+
+
+@pytest.mark.parametrize('fault', ['missing_config', 'config_read', 'switch_read'])
+def test_prompt_optional_config_failure_keeps_successful_ingress(gateway, fault):
+    _agent, paths, server, events = gateway
+    server.agent = (object() if fault == 'missing_config' else _EventConfigUnavailable()
+                    if fault == 'config_read' else SimpleNamespace(config=_EventFlagUnavailable()))
+    handler = _Handler({'prompt': 'normal', 'conversation_id': 'c-1'})
+    http_handlers.handle_ask(handler, server, lambda: 'config-fault-1')
+    assert handler.replies == [(202, {'request_id': 'config-fault-1', 'status': 'queued'})]
+    assert json.loads((paths.inbox / 'config-fault-1.json').read_text())['goal'] == 'normal'
+    assert events == []
+
+
+@pytest.mark.parametrize('entry', ['prompt', 'turn', 'command'])
+@pytest.mark.parametrize('fault', ['missing_config', 'config_read', 'switch_read'])
+def test_gateway_event_entries_config_fail_closed_without_business_exception(entry, fault):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent = (object() if fault == 'missing_config' else _EventConfigUnavailable()
+             if fault == 'config_read' else SimpleNamespace(config=_EventFlagUnavailable()))
+    if entry == 'prompt':
+        assert event_points.prompt_queued(SimpleNamespace(agent=agent), {}) is None
+    elif entry == 'turn':
+        assert event_points.turn_started(agent, {}) is None
+    else:
+        receipt = SimpleNamespace(channel='local', conversation_id='thread', command_kind='verbose',
+                                  operation_id='event-op', result={'ok': True})
+        assert event_points.command_completed(agent, receipt) is None
+
+
+@pytest.mark.parametrize('entry', ['prompt', 'turn', 'command', 'ended'])
+def test_gateway_event_entries_disabled_never_read_routing_or_receipt(gateway, entry):
+    from agent_py_agent.agent.gateway_parts import event_points
+    from agent_py_agent.agent.plugin_events.points import EventPointContext
+
+    reads = []
+    agent, _paths, server, events = gateway
+    agent.config.plugin_events_enabled = False
+    source = _UnreadableEventFields(reads)
+    context = EventPointContext(agent.config, lambda e: events.append(e))
+    calls = {'prompt': partial(event_points.prompt_queued, server, source),
+             'turn': partial(event_points.turn_started, agent, source),
+             'command': partial(event_points.command_completed, agent, source),
+             'ended': partial(event_points.turn_ended, context, source, 1)}
+    assert calls[entry]() is None
+    assert reads == []
+    assert events == []
+
+
+@pytest.mark.parametrize('entry', ['prompt', 'turn', 'command', 'ended'])
+def test_gateway_event_entries_bad_routing_never_escapes(gateway, monkeypatch, entry):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, server, events = gateway
+    broken = _BrokenEventFields()
+    monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
+    context = event_points.gateway_event_context(agent, {}, server=server)
+    calls = {'prompt': partial(event_points.prompt_queued, server, broken),
+             'turn': partial(event_points.turn_started, agent, broken),
+             'command': partial(event_points.command_completed, agent, broken),
+             'ended': partial(event_points.turn_ended, context, broken, 1)}
+    assert calls[entry]() is None
+    assert events == []

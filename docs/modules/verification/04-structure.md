@@ -1,5 +1,7 @@
 # Verification：结构
 
+- b4g（2026-10-04）：`tool_call_runtime._tool_event_context` 仅隔离配置/路由/事件装配；`tooling.registry._host_event_context` 只隔离严格类型观察转交。异常边界不覆盖权限、write_boundary、Executor、真实 handler 或原核验链，配置不可读不能据此放宽授权。
+
 ## M1 B4 真实 HTTP 认领证据（m1b4，2026-10-04）
 
 `test_plugin_event_e2e` 新增回环 HTTP 组合保留真实 AuthMiddleware、请求 worker 扫描/claim、owner 解析、Agent 回合和 canonical terminal。认领探针仅记录真实 attempt/lease_epoch；不手动搬 inbox、不写假终态。提示归属复用 worker 解析，关闭零解析、解析未知零提示；原唯一执行器/被动核验链未变，真实生产边界见 TESTS。

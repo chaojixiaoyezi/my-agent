@@ -1,6 +1,8 @@
 """B4 生产工具入口的宿主身份传递，不直接构造 ToolExecutorRequest。"""
 from __future__ import annotations
 
+from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,16 @@ from agent_py_agent.agent.agent_core.tool_call_runtime import (
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallExecuteParams
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.tests.test_plugin_event_gateway import gateway
+from agent_py_agent.tests.test_tool_operation_managed_gate import (
+    _direct_register_chain,
+    _gate_call,
+    _managed_chain,
+    _repo,
+    _store,
+)
+from agent_py_agent.tests.test_tool_operation_managed_gate import (
+    _params as _managed_params,
+)
 from agent_py_agent.tests.test_tool_runtime_scope import _register_run
 from agent_py_agent.tests.test_tool_runtime_unification import _CountingTool, _snapshot
 
@@ -88,3 +100,116 @@ def test_j16_host_action_passes_decision_identity_to_real_runtime(gateway):
     assert tool.executions == 1
     assert [e.type for _, e in events] == ['tool_call_started', 'tool_call_finished']
     assert {e.actor for _, e in events} == {'decision'}
+
+
+class _UnreadableConfigAgent(SimpleNamespace):
+    @property
+    def config(self):
+        raise RuntimeError('config read failed')
+
+
+class _UnreadableEventSwitch:
+    @property
+    def plugin_events_enabled(self):
+        raise RuntimeError('event switch read failed')
+
+
+# LLM: 故障仅限可选观察配置视图，执行器/权限/核验仍使用原 Agent；复用真实装配函数，不伪造返回结果。
+# 函数用途: 给装配边界注入 getter 故障，并将原请求原样交回正式观察函数。
+def _assemble_with_config_view(view, request, scope):
+    assemble, agent = view
+    return assemble(replace(request, agent=agent), scope)
+
+
+@pytest.mark.parametrize('fault', ['missing_config', 'config_read', 'switch_read', 'disabled'])
+def test_optional_event_config_fault_never_aborts_real_tool(tmp_path, monkeypatch, fault):
+    from agent_py_agent.agent.agent_core import tool_call_runtime
+    from agent_py_agent.agent.gateway_parts import plugin_panels_http
+
+    repo, store, tool = _repo(tmp_path), _store(tmp_path), _CountingTool()
+    _agent_run_id, attempt_id = _direct_register_chain(repo, 'event-run')
+    agent = _managed_chain(repo, store, [tool], tmp_path)
+    configs = {'switch_read': _UnreadableEventSwitch(), 'disabled': SimpleNamespace(plugin_events_enabled=False)}
+    if fault in configs:
+        agent.config = configs[fault]
+    if fault == 'config_read':
+        # 故障只注入可选观察装配；原 write_boundary 的配置读取属于权限链，不能吞掉它的失败。
+        original_context = tool_call_runtime._tool_event_context
+        broken_agent = _UnreadableConfigAgent(**vars(agent))
+        monkeypatch.setattr(tool_call_runtime, '_tool_event_context',
+                            partial(_assemble_with_config_view, (original_context, broken_agent)))
+    events = []
+    monkeypatch.setattr(plugin_panels_http, 'publish_plugin_event', lambda *args: events.append(args))
+    snapshot = _snapshot(tool, run_id='event-run')
+    params = replace(_managed_params('event-run', 'task-event-run', snapshot=snapshot), attempt_id=attempt_id)
+    call = _gate_call(run_id='event-run', tool_name=tool.model_spec.name, snapshot=snapshot,
+                      arguments={'value': 'hello'}, attempt_id=attempt_id)
+    execution = execute_traced_tool_call(ToolCallRuntimeRequest(agent, ToolCallExecuteParams(params, 1, 1, call), call))
+    assert execution.result.ok, execution.result.error_code
+    assert execution.result.handler_executed is True
+    assert tool.executions == 1
+    assert events == []
+
+
+@pytest.mark.parametrize('fault', ['routing_read', 'assembler'])
+def test_optional_event_assembly_fault_never_aborts_real_tool(gateway, monkeypatch, fault):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    class Routing(dict):
+        def get(self, key, default=None):
+            if key == 'plugin_event_channel':
+                raise RuntimeError('routing read failed')
+            return super().get(key, default)
+
+    agent, _paths, _server, events = gateway
+    tool = _CountingTool()
+    params = _params(agent, tool)
+    if fault == 'routing_read':
+        params = replace(params, task_attributes=Routing(params.task_attributes))
+    else:
+        def broken_assembly(*_args, **_kwargs):
+            raise RuntimeError('event assembly failed')
+        monkeypatch.setattr(event_points, 'gateway_event_context', broken_assembly)
+    call = ToolCall(call_id='event-call', tool_name=tool.model_spec.name, arguments={'value': 'hello'},
+                    source_protocol='native', schema_hash=tool.model_spec.schema_hash,
+                    run_id=params.run_id, turn_id='event-turn', attempt_id=params.attempt_id)
+    execution = execute_traced_tool_call(ToolCallRuntimeRequest(agent, ToolCallExecuteParams(params, 1, 1, call), call))
+    assert execution.result.ok, execution.result.error_code
+    assert execution.result.handler_executed is True
+    assert tool.executions == 1
+    assert events == []
+
+
+def test_event_switch_off_never_reads_optional_routing_or_assembler(monkeypatch):
+    from agent_py_agent.agent.agent_core.tool_call_runtime import _tool_event_context
+
+    class Request:
+        @property
+        def params(self):
+            pytest.fail('disabled observation must not read routing')
+
+    agent = SimpleNamespace(config=SimpleNamespace(plugin_events_enabled=False))
+    assert _tool_event_context(SimpleNamespace(agent=agent, request=Request()), object()) is None
+
+
+def test_registry_optional_event_context_read_failure_does_not_abort_real_handler(gateway):
+    class Context(dict):
+        def get(self, key, default=None):
+            if key == 'plugin_event_context':
+                raise RuntimeError('context projection failed')
+            return super().get(key, default)
+
+    from agent_py_agent.agent.agent_core.tool_loop.recovery import runtime_run_scope
+
+    agent, _paths, _server, events = gateway
+    tool = _CountingTool()
+    params = _params(agent, tool)
+    call = ToolCall(call_id='registry-event-call', tool_name=tool.model_spec.name, arguments={'value': 'hello'},
+                    source_protocol='native', schema_hash=tool.model_spec.schema_hash,
+                    run_id=params.run_id, turn_id='event-turn', attempt_id=params.attempt_id)
+    execution = agent.tools.execute_tool(call, write_boundary={}, runtime_snapshot=params.tool_runtime_snapshot,
+        trusted_run_context=Context(run_scope=runtime_run_scope(agent, params).to_dict()))
+    assert execution.result.ok, execution.result.error_code
+    assert execution.result.handler_executed is True
+    assert tool.executions == 1
+    assert events == []

@@ -802,13 +802,16 @@ def _registry_approval_mode(registry):
         return "unavailable"
 
 
-# LLM: 上下文由宿主请求装配；只接严格类型的观察对象，不从 ToolCall.arguments 或内部工具参数找身份。
-# 函数用途: 在注册表转交执行器时保留可信的事件接缝，裸注册表调用默认没有观察。
+# LLM: 只接宿主装配的严格类型观察对象；读取或导入异常只关闭观察，不从工具参数找身份，不包住执行器或权限门。
+# 函数用途: 安全转交可选事件接缝；缺失或装配故障不影响真实 handler，联测 test_plugin_event_runtime。
 def _host_event_context(trusted_run_context):
-    from ..plugin_events.points import EventPointContext
+    try:
+        from ..plugin_events.points import EventPointContext
 
-    context = (trusted_run_context or {}).get("plugin_event_context")
-    return context if isinstance(context, EventPointContext) else None
+        context = (trusted_run_context or {}).get("plugin_event_context")
+        return context if isinstance(context, EventPointContext) else None
+    except Exception:  # noqa: BLE001 观察装配失败不改变原执行结果或权限裁决
+        return None
 
 
 # LLM: Tool authorization, resource locks, filesystem aliases and shell handlers must receive the

@@ -1,5 +1,10 @@
 # Verification：开发推进
 
+## B4 工具观察故障不阻断核验链（b4g，2026-10-04，待复审）
+
+- `_tool_event_context` 与 Registry 观察转交失败降为 None，真实工具仍走原唯一执行器、被动核验和能力包钩子；正常 main/subagent/decision 两事件不变。
+- 真实 handler 新回归与四老文件绿；去保护源码变异令对应新老例红。完整定向 803 passed/2 skipped，平台沙箱两例未执行，详见 TESTS，不代替生产验收。
+
 ## 2026-10-04 M1 B4 HTTP / owner 回归（m1b4，已实施，待复审）
 
 - HTTP 提交后的请求由原 worker 真实 claim、真实 owner 解析及终态归档；探针只原样转交并记录 claim/owner 返回事实，不伪造执行或核验结果。

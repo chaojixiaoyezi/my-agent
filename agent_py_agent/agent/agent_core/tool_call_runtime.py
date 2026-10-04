@@ -212,21 +212,25 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     return execution
 
 
-# LLM: 关闭先返回；只读宿主不可变请求的 actor 与 RunScope，沿 Gateway 唯一发布口装配，不从 arguments 或正文推断身份。
-# 函数用途: 将真实主、子代理与决策自动执行请求的身份传到已有执行器事件接缝。
+# LLM: 可选观察装配独立隔离异常；缺配置、读取或装配故障均返回 None，不影响唯一工具执行链。关闭先返回，零路由读取/导入/发布。
+# 只读宿主不可变 actor 与 RunScope，沿 Gateway 唯一发布口装配；同步检查 Registry 接缝与 test_plugin_event_runtime。
+# 函数用途: 安全传递主、子代理与决策工具观察身份；观察不可用时不发事件，工具仍按原权限合同执行。
 def _tool_event_context(runtime_request: ToolCallRuntimeRequest, scope):
-    agent = runtime_request.agent
-    if getattr(agent.config, "plugin_events_enabled", False) is not True:
-        return None
-    from ..gateway_parts.event_points import gateway_event_context
+    try:
+        agent = runtime_request.agent
+        if getattr(getattr(agent, "config", None), "plugin_events_enabled", False) is not True:
+            return None
+        from ..gateway_parts.event_points import gateway_event_context
 
-    request = runtime_request.request
-    attrs = request.params.task_attributes or {}
-    actor = "subagent" if scope.agent_kind in {"subagent", "child_agent", "grandchild_agent"} else "main"
-    if request.actor == "decision":
-        actor = "decision"
-    return gateway_event_context(agent, {"actor": actor, "thread_id": scope.session_id,
-        "channel": attrs.get("plugin_event_channel") or "local"})
+        request = runtime_request.request
+        attrs = request.params.task_attributes or {}
+        actor = "subagent" if scope.agent_kind in {"subagent", "child_agent", "grandchild_agent"} else "main"
+        if request.actor == "decision":
+            actor = "decision"
+        return gateway_event_context(agent, {"actor": actor, "thread_id": scope.session_id,
+            "channel": attrs.get("plugin_event_channel") or "local"})
+    except Exception:  # noqa: BLE001 只隔离可选观察，权限、核验与 handler 异常不在此范围
+        return None
 
 
 # LLM: 工具参数是原始请求事实；任务晋升只登记运行身份，不重写路径、内容或 cwd。
