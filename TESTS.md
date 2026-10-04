@@ -1,5 +1,36 @@
 # 测试与发布验收
 
+## 沙箱内按能力跳过、沙箱外强制真跑（capsk + capsk2，2026-10-04，`worker/sandbox-cap-skips-v2`；已并入 step17j）
+
+- 3a 沙箱外复跑（7 个文件）：默认模式 252 passed、2 skipped；`MY_AGENT_TEST_REQUIRE_CAPABILITIES=1` 强制模式同样 252 passed、2 skipped，没有任何能力门跳过或失败，57 条依赖能力的用例都真跑通过。两个跳过都是环境原因：本机没有非回环地址；本机能力齐全，验证不了缺失分支。
+
+- 修正：强制/默认能力门移入 `conftest.py` 既有 `pytest_runtest_setup` 包装钩子，在内层 pytest hook（含 `skipif`）先运行后直接 `pytest.fail` / `pytest.skip`；不再动态追加失效的 `usefixtures`。错误带稳定原因码 `SANDBOX_CAPABILITY_MISSING[能力名]`，并写入 `user_properties.sandbox_capability_missing`。
+- 探测：`ps -o pid= -p <pid>` 只有返回码为 0 且去空白输出恰等于自身 PID 才算可用。Seatbelt 用例恢复 macOS `skipif`；POSIX PTY 用例仅在 Darwin 声明嵌套 Seatbelt 能力。
+- 范围：删除四个文件的模块级标记，只标实测依赖后台身份的单测；`test_background_handoff` 中 23 条不需要启动器身份的模拟/状态用例保持运行。LAN Seatbelt 项仅在有非回环地址时适用。
+- 命令（在工作树根；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  FILES='agent_py_agent/tests/test_sandbox_capabilities.py agent_py_agent/tests/test_gateway_port_deny.py agent_py_agent/tests/test_gateway_conversation_control.py agent_py_agent/tests/test_background_handoff.py agent_py_agent/tests/test_plugin_activation_ref.py agent_py_agent/tests/test_plugin_deactivation.py agent_py_agent/tests/test_plugin_sandbox.py'
+  env -u MY_AGENT_TEST_REQUIRE_CAPABILITIES PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $FILES -q -ra --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-luna2-default-summary
+  MY_AGENT_TEST_REQUIRE_CAPABILITIES=1 PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $FILES -q -ra --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-luna2-force --junitxml=/private/tmp/claude-501/m-luna2-force.xml
+  ```
+- 矩阵结果（254 个 test case）：默认 **196 passed / 58 skipped**，其中能力缺失跳过 57（nested sandbox 11、后台身份 46），另 1 条因无非回环 LAN 地址按前置条件 skip。强制模式 **196 passed / 57 setup errors / 1 skip**；pytest 将 setup 阶段 `pytest.fail` 记为 error，JUnit XML 核对为 57 errors、0 failures，全部 57 条都带 `SANDBOX_CAPABILITY_MISSING[...]` 且有缺失能力 user property（nested 11、后台身份 46）。
+- 移除旧宽泛标记后的实跑（逐文件）：`test_background_handoff` 22 failed/23 passed；`test_plugin_activation_ref` 7 failed/16 passed；`test_plugin_deactivation` 13 failed；`test_plugin_sandbox` 4 failed/6 passed；资源控制参数化用例 3 failed；`test_gateway_port_deny` 8 failed/13 passed/1 条无 LAN 地址 skip。合计 57 个能力依赖失败；四条模拟 fixture 用例通过且未标记。
+- 失败原因：Seatbelt 进程返回码 71（`Operation not permitted`）；后台启动器链路抛 `OSError: managed background launcher identity unavailable`，停用测试外层归类为 `outcome_unknown`。具体能力失败数与默认能力跳过数相等；平台/LAN 前置 skip 独立计数。
+- 收尾命令：
+  ```bash
+  $PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna2-guards9
+  $PY scripts/check_import_boundaries.py
+  $PY -m ruff check agent_py_agent scripts
+  $PY scripts/check_doc_sync.py
+  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  git checkout -- CODE_SIZE_REPORT.md
+  git diff --check
+  $PY scripts/check_clean_package.py .
+  bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
+  ```
+  结果：guards9 **11 文件 exit 0**；导入边界 `findings=0`；Ruff `All checks passed!`；doc sync `DOC_SYNC_PASS`；clean-package `OK: . 未发现发布阻塞项`；`git diff --check` exit 0。代码尺寸 `hard=0`、`blocked=False`（strict scope total=2207）；size-diff **新增告警 0、消失告警 35**。`CODE_SIZE_REPORT.md` 已按约定恢复。
+- 未验证：沙箱外和 Linux 车道的实际全能力运行结果；当前宿主不能证明这些能力齐全时的业务通过。由 3a 在沙箱外以强制模式复跑。
+
 ## 补上 `POST /stop` 的前置条件（skipfix2，2026-10-04，同一分支 `worker/skipfix`，接在 `65366d700` 之后；已并入 step17j）
 
 - 3a 挑入后在沙箱外复跑改过的 10 个测试文件：216 passed、0 skipped（含整文件 test_host_files_access.py 与本机 PostgreSQL 那组）。

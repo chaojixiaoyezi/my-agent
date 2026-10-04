@@ -18,6 +18,10 @@ from types import SimpleNamespace
 
 import pytest
 
+_requires_background_launcher_identity = pytest.mark.sandbox_capability(
+    "background_launcher_identity"
+)
+
 from agent_py_agent.agent import plugin_enable_tool, plugin_management, plugin_runtime
 from agent_py_agent.agent.plugin_management import PluginManagement
 from agent_py_agent.agent.plugin_runtime import PluginMCPClient, plugin_data_dir, plugin_tool_name
@@ -106,6 +110,7 @@ def test_read_only_root_layout_keeps_reads_and_binds_only_write_roots(tmp_path):
     assert "--ro-bind / /" not in " ".join(plain)
 
 
+@_requires_background_launcher_identity
 def test_client_wraps_launch_and_points_tmpdir_into_data_dir(tmp_path, monkeypatch):
     service = _enabled_writer(tmp_path, process_sandbox=False)
     owner, entry = service.context.owner, service.installations.snapshot()[0]
@@ -127,6 +132,7 @@ def test_client_wraps_launch_and_points_tmpdir_into_data_dir(tmp_path, monkeypat
     assert spec.private_read_roots == () and spec.read_only_root
 
 
+@_requires_background_launcher_identity
 def test_unavailable_sandbox_refuses_enable_and_explicit_calls(tmp_path, monkeypatch):
     unavailable = lambda enabled, home: "sandbox_unavailable" if enabled else ""  # noqa: E731
     monkeypatch.setattr(plugin_enable_tool, "plugin_sandbox_problem", unavailable)
@@ -152,6 +158,7 @@ def test_unavailable_sandbox_refuses_enable_and_explicit_calls(tmp_path, monkeyp
 
 
 # LLM: 真实平台沙箱：启用验收的候选进程与业务进程都在沙箱里启动；只验写边界与读放行，不验网络或进程隔离细节。
+@_requires_background_launcher_identity
 def test_real_platform_sandbox_blocks_writes_outside_the_data_dir(tmp_path):
     if plugin_sandbox_problem(True, tmp_path):
         pytest.skip("本机平台沙箱不可用（Linux 需要可用的 bwrap，macOS 需要 sandbox-exec）")
@@ -188,6 +195,7 @@ def test_real_platform_sandbox_blocks_writes_outside_the_data_dir(tmp_path):
 # LLM: 解释器类型在沙箱里也要能读到固定的解释器（例如 Homebrew Cellar 下的 node）、随包文件与按次授权的工作区；
 #   停用后沙箱包装进程与内层解释器进程都不能残留。
 @pytest.mark.skipif(shutil.which("node") is None, reason="本机没有 node")
+@_requires_background_launcher_identity
 def test_node_sample_runs_inside_the_platform_sandbox(tmp_path):
     if plugin_sandbox_problem(True, tmp_path):
         pytest.skip("本机平台沙箱不可用（Linux 需要可用的 bwrap，macOS 需要 sandbox-exec）")

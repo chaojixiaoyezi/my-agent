@@ -7,6 +7,10 @@ from dataclasses import replace
 
 import pytest
 
+_requires_background_launcher_identity = pytest.mark.sandbox_capability(
+    "background_launcher_identity"
+)
+
 from agent_py_agent.agent.plugin_activation import PluginActivationRequest
 from agent_py_agent.agent.plugin_activation_record import PluginActivation
 from agent_py_agent.agent.plugin_activation_ref import PluginActivationRef
@@ -123,6 +127,7 @@ def test_launch_refuses_noncanonical_resource_store_before_creating_it(tmp_path)
     assert not (tmp_path / "unrelated").exists()
 
 
+@_requires_background_launcher_identity
 def test_host_fresh_check_rejects_revocation_after_launcher_precheck(tmp_path, monkeypatch):
     installations, entry, ref, _ = plugin_reference(tmp_path)
     request = activated_request(tmp_path, ref)
@@ -148,6 +153,7 @@ def test_host_fresh_check_rejects_revocation_after_launcher_precheck(tmp_path, m
 
 
 @pytest.mark.parametrize("kind", ["missing", "wrong-generation", "wrong-owner"])
+@_requires_background_launcher_identity
 def test_host_refuses_missing_or_conflicting_activation_reference(tmp_path, kind):
     _, _, ref, _ = plugin_reference(tmp_path)
     request = activated_request(tmp_path, ref)
@@ -164,6 +170,7 @@ def test_host_refuses_missing_or_conflicting_activation_reference(tmp_path, kind
 
 
 @pytest.mark.parametrize("checkpoint", [1, 2, 3])
+@_requires_background_launcher_identity
 def test_launcher_revocation_at_each_admission_prevents_handoff(tmp_path, checkpoint):
     installations, entry, ref, _ = plugin_reference(tmp_path)
     checks = []

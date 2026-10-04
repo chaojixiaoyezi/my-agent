@@ -120,6 +120,7 @@ markers = [
   "security: permission, auth, and boundary tests",
   "contract: schema and interface contract tests",
   "regression: tests for previously fixed bugs",
+  "sandbox_capability(*names): 需要 my-agent 会话沙箱里不可用的能力（/bin/ps、嵌套 sandbox-exec、后台启动器身份）；缺失时按环境 skip，设 MY_AGENT_TEST_REQUIRE_CAPABILITIES=1 时 fail",
 ]
 
 [tool.coverage.run]

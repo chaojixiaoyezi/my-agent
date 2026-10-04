@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 import urllib.request
@@ -11,6 +12,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+_requires_nested_sandbox_exec = (
+    pytest.mark.sandbox_capability("nested_sandbox_exec")
+    if sys.platform == "darwin"
+    else pytest.mark.skipif(False, reason="Linux POSIX PTY 不依赖 macOS Seatbelt")
+)
 
 from agent_py_agent.agent.agent_core.runtime.guidance import (
     acknowledge_injected_turn_input,
@@ -2086,6 +2093,7 @@ def test_stop_also_pauses_goal_between_model_turns(tmp_path) -> None:
 
 @pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX PTY 生命周期")
 @pytest.mark.parametrize("command,stop_resource", [("/goal pause", False), ("/goal clear", False), ("/stop", True)])
+@_requires_nested_sandbox_exec
 def test_goal_and_task_resource_controls_are_independent(tmp_path, command, stop_resource):
     import shlex
     import sys

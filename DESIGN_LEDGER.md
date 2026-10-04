@@ -1,5 +1,13 @@
 # 设计台账
 
+## 沙箱内按能力跳过、沙箱外强制真跑（capsk + capsk2，2026-10-04，分支 `worker/sandbox-cap-skips-v2`；3a 沙箱外默认、强制两种模式复跑验收，已并入 step17j）
+
+- **问题**：共享测试设施的能力门曾在收集阶段后加 `usefixtures`，未进入已收集用例的 fixture 列表，导致强制失败不可靠；模块级标记还会跳过无关模拟测试；Seatbelt 用例缺少 macOS 平台条件；`ps` 只看返回码会把空/错误 PID 输出误判为可用。
+- **改法**：`_probe_ps` 用 `ps -o pid= -p <pid>`，必须返回码为 0 且去空白输出精确等于本进程 PID。能力门与既有桌面守卫共用唯一 `pytest_runtest_setup` 包装钩子：先进入内层 hook 让 `skipif` 处理平台条件，再读取 `sandbox_capability` marker；缺能力默认 `pytest.skip`，强制模式直接 `pytest.fail`。原因码 `SANDBOX_CAPABILITY_MISSING[能力名]` 与 `user_properties.sandbox_capability_missing` 同时保留缺项，不解析说明文案。
+- **范围**：六个文件移除模块级标记，按无标记实测只标真正需要后台身份/Seatbelt 的 test function；macOS Seatbelt 用例保留 `skipif(not IS_MACOS)`，LAN case 还有非回环地址前置 skip。POSIX PTY 资源控制只在 Darwin 标记 nested Seatbelt，Linux 路径不因该能力恒不可用而误报。
+- **验证**：7 个直接相关文件共 254 个 test case。默认模式 196 passed、58 skipped，其中能力缺失 57（nested 11、后台身份 46），另 1 条无 LAN 地址 skip；强制模式 196 passed、57 个 setup error、1 skip。JUnit XML 显示 57 errors、0 failures，全部错误都含能力门原因码且缺项 user property 齐全。拆除宽泛标记的实跑表和命令见 `TESTS.md`。
+- **未验证**：当前宿主缺少上述能力，不能据本地结果判断能力齐全环境、沙箱外 macOS 或 Linux lane 的实际业务路径；由 3a 按强制模式复跑后确认。
+
 ## 补上 `POST /stop` 用例的前置条件（skipfix2，2026-10-04，分支 `worker/skipfix`，接在 `65366d700` 之后；3a 复审通过，已并入 step17j）
 
 - **背景**：skipfix 收窄宽 except 后暴露出 `test_stop_endpoint` 一直吃 `HTTP Error 409`。**这是测试缺前置条件，不是产品问题**：`MockGatewayPaths` 从不登记 gateway 进程身份，`handle_stop` 拿不到身份就按设计回 409（`http_handlers.py` 的 `POST /stop`：先 `get_running_pid`，再 `write_targeted_gateway_stop_request`，拿不到身份回 `409 gateway process identity unavailable`）。

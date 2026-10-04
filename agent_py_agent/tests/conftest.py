@@ -30,6 +30,11 @@ from agent_py_agent.tests._repo_tree_guard import (
     tracked_report_failure_message,
     tracked_report_fingerprint,
 )
+from agent_py_agent.tests._sandbox_capabilities import (
+    capabilities_required,
+    missing_capabilities,
+    missing_capability_reason,
+)
 from agent_py_agent.tests._screen_capture_guard import (
     LANE_SKIP_MARKER,
     forbidden_real_macos_frameworks,
@@ -82,11 +87,32 @@ def plugin_submit_variant(request):
     )
 
 
+# LLM: pytest_configure 是测试共享 marker 的唯一注册入口；pyproject 和本 hook 的名称必须一致。
+# 函数用途: 注册桌面防线与沙箱能力 marker，保证收集和报告都使用同一协议。
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         f"{REAL_DESKTOP_MARKER}: 测试确实需要调用真实的 open/xdg-open/osascript/通知/剪贴板程序；默认全部被测试防线拦截",
     )
+    config.addinivalue_line(
+        "markers",
+        "sandbox_capability(*names): 需要 my-agent 会话沙箱里不可用的能力（ps、nested_sandbox_exec、"
+        "background_launcher_identity）；缺失时按环境 skip，设 MY_AGENT_TEST_REQUIRE_CAPABILITIES=1 时 fail",
+    )
+
+
+# LLM: 能力判定集中在公共层，用例只声明 marker；缺能力时默认 skip、强制开关打开时 fail，
+#   这样"沙箱里跳过"和"沙箱外必须真跑"用同一处逻辑，不会各文件各写一套。
+# 函数用途: 读 marker 并返回动作、结构化缺项和固定失败原因。
+def _capability_gate_action(item) -> tuple[str, list[str], str] | None:
+    marker = item.get_closest_marker("sandbox_capability")
+    if marker is None or not marker.args:
+        return None
+    missing = missing_capabilities([str(name) for name in marker.args])
+    if not missing:
+        return None
+    kind = "FAIL" if capabilities_required() else "SKIP"
+    return kind, missing, missing_capability_reason(missing)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -141,12 +167,24 @@ def _desktop_open_guard_per_test(request, _desktop_open_guard):
         yield
 
 
+# LLM: 保持桌面守卫先记录游标；先委托给 pytest 内层 setup hook 处理 skipif，
+#   再用同一个包装钩子应用能力门，防止平台不适用的测试被能力失败覆盖。
+# 函数用途: 记录桌面守卫游标，并在 pytest 平台跳过检查之后按 marker skip 或 fail。
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_setup(item):
-    """在任何 fixture 生效之前记下本测试的游标（记录文件的字节长度，不读内容）。"""
+    """先留存桌面防线游标，再在内层 pytest skipif 返回后执行能力门。"""
     if _DESKTOP_GUARD is not None:
         item._desktop_guard_mark = _DESKTOP_GUARD.mark()
-    return (yield)
+    result = yield
+    action = _capability_gate_action(item)
+    if action is None:
+        return result
+    kind, missing, reason = action
+    item.user_properties.append(("sandbox_capability_missing", ",".join(missing)))
+    if kind == "FAIL":
+        pytest.fail(reason, pytrace=False)
+    pytest.skip(reason)
+    return result
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

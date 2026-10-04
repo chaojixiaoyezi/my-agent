@@ -5,6 +5,10 @@ from dataclasses import replace
 
 import pytest
 
+_requires_background_launcher_identity = pytest.mark.sandbox_capability(
+    "background_launcher_identity"
+)
+
 from agent_py_agent.agent.plugin_deactivation import deactivate_plugin
 from agent_py_agent.agent.plugin_installation import PluginInstallationError
 from agent_py_agent.agent.plugin_management import PluginManagement
@@ -29,6 +33,7 @@ def installed_manager(tmp_path, **changes):
 
 @pytest.mark.parametrize("running", [False, True])
 @pytest.mark.parametrize("phase", ["preparing", "active"])
+@_requires_background_launcher_identity
 def test_management_disable_revokes_and_cleans_both_exact_resource_kinds(tmp_path, running, phase):
     service = installed_manager(tmp_path)
     with activation_component(service, tmp_path, running=running, phase=phase) as state:
@@ -71,6 +76,7 @@ def test_management_disable_revokes_and_cleans_both_exact_resource_kinds(tmp_pat
 
 
 @pytest.mark.parametrize("permission", ["is_admin", "disable_allowed", "enabled"])
+@_requires_background_launcher_identity
 def test_disable_denial_and_stale_catalog_preserve_current_activation(tmp_path, permission):
     service = installed_manager(tmp_path)
     with activation_component(service, tmp_path, preparation=False) as state:
@@ -83,6 +89,7 @@ def test_disable_denial_and_stale_catalog_preserve_current_activation(tmp_path, 
         assert stale["error_code"] == "PLUGIN_CATALOG_STALE"
 
 
+@_requires_background_launcher_identity
 def test_disable_without_activation_checks_original_revision_and_is_idempotent(tmp_path):
     service = installed_manager(tmp_path)
     inactive = service.installations.snapshot()[0]
@@ -96,6 +103,7 @@ def test_disable_without_activation_checks_original_revision_and_is_idempotent(t
 
 
 @pytest.mark.parametrize("damage", ["owner", "operation", "chain", "scopes"])
+@_requires_background_launcher_identity
 def test_bad_original_preparation_binding_does_not_stop_unrelated_attempt(tmp_path, damage):
     service = installed_manager(tmp_path)
     with activation_component(service, tmp_path, preparation=False) as state:
@@ -122,6 +130,7 @@ def test_bad_original_preparation_binding_does_not_stop_unrelated_attempt(tmp_pa
         assert repo.get_attempt(binding.attempt_id)["status"] == "done"
 
 
+@_requires_background_launcher_identity
 def test_cleanup_unknown_keeps_revoked_state_and_original_resource_evidence(tmp_path, monkeypatch):
     from agent_py_agent.agent import plugin_deactivation
 

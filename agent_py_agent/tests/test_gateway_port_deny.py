@@ -34,7 +34,25 @@ from agent_py_agent.agent.attempt.sandbox import (
 )
 
 IS_MACOS = sys.platform == "darwin"
-needs_macos = pytest.mark.skipif(not IS_MACOS, reason="macOS Seatbelt 沙箱")
+needs_macos = pytest.mark.skipif(not IS_MACOS, reason="macOS Seatbelt 用例")
+needs_nested_sandbox_exec = pytest.mark.sandbox_capability("nested_sandbox_exec")
+
+
+# LLM: LAN Seatbelt 用例只有在本机有非回环 IPv4 地址时才适用；先取本机事实，
+#   让平台/前置条件 skip 在能力门之前生效，避免把本来无需运行的 case 计作能力缺失。
+# 函数用途: 读取本机用于 LAN 规则测试的 IPv4 地址；无法解析时返回空串并跳过该测试。
+def _local_lan_address() -> str:
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return ""
+
+
+_LAN_ADDRESS = _local_lan_address()
+needs_lan_address = pytest.mark.skipif(
+    not _LAN_ADDRESS or _LAN_ADDRESS.startswith("127."),
+    reason="没有非回环本机地址",
+)
 
 # 沙箱里跑的客户端：连 host:port，回报成功或 errno。只连不收发，立即关闭。
 _CLIENT = r"""
@@ -174,6 +192,7 @@ def _blocked(outcome: dict) -> bool:
 
 
 @needs_macos
+@needs_nested_sandbox_exec
 def test_localhost_rule_is_bypassed_by_mapped_v4_but_star_rule_is_not(tmp_path):
     """没有端口规则时 ::ffff:127.0.0.1 能连上只绑 IPv4 的 Gateway 式监听、服务端认成 127.0.0.1（= 本机管理员）；
     这正是必须用 `*:<port>` 而不是 localhost:<port> 的原因。"""
@@ -192,6 +211,7 @@ def test_localhost_rule_is_bypassed_by_mapped_v4_but_star_rule_is_not(tmp_path):
 
 
 @needs_macos
+@needs_nested_sandbox_exec
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "0.0.0.0"])
 def test_star_rule_blocks_every_gateway_port_target(tmp_path, host):
     listener = _Listener()
@@ -209,10 +229,10 @@ def test_star_rule_blocks_every_gateway_port_target(tmp_path, host):
 
 
 @needs_macos
+@needs_lan_address
+@needs_nested_sandbox_exec
 def test_star_rule_blocks_lan_address_for_gateway_port(tmp_path):
-    lan = socket.gethostbyname(socket.gethostname())
-    if lan.startswith("127."):
-        pytest.skip("没有非回环本机地址")
+    lan = _LAN_ADDRESS
     listener = _Listener()
     sandbox = AttemptExecutionSandbox(_spec(tmp_path, ports=(listener.port,)))
     if not sandbox.probe().ready:
@@ -225,6 +245,7 @@ def test_star_rule_blocks_lan_address_for_gateway_port(tmp_path):
 
 
 @needs_macos
+@needs_nested_sandbox_exec
 def test_other_ports_and_self_listen_still_work(tmp_path):
     gateway = _Listener()
     other = _Listener()
@@ -243,6 +264,7 @@ def test_other_ports_and_self_listen_still_work(tmp_path):
 
 
 @needs_macos
+@needs_nested_sandbox_exec
 def test_full_access_also_blocks_gateway_port(tmp_path):
     listener = _Listener()
     sandbox = AttemptExecutionSandbox(_spec(tmp_path, ports=(listener.port,), full_access=True))

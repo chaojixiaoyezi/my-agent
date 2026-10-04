@@ -14,6 +14,11 @@ from types import SimpleNamespace
 
 import pytest
 
+# 仅真实创建/接管 launcher 的用例声明依赖；合成状态机用例不应被环境跳过。
+_requires_background_launcher_identity = pytest.mark.sandbox_capability(
+    "background_launcher_identity"
+)
+
 from agent_py_agent.agent.common.cancellation import (
     CancellationToken,
     ToolCancelled,
@@ -99,6 +104,7 @@ def test_cancel_at_host_exit_prevents_startup_handoff(startup_exit_window):
 
 
 @pytest.mark.parametrize("checkpoint", [1, 2, 3])
+@_requires_background_launcher_identity
 def test_revoked_original_authority_blocks_reservation_spawn_or_handoff(tmp_path, checkpoint):
     calls = []
 
@@ -121,6 +127,7 @@ def test_revoked_original_authority_blocks_reservation_spawn_or_handoff(tmp_path
     assert result.effect_outcome == ("failed" if checkpoint == 3 else "not_started")
 
 
+@_requires_background_launcher_identity
 def test_cancel_during_last_authority_read_cleans_pre_handoff_child(tmp_path):
     token = CancellationToken()
     calls = []
@@ -142,6 +149,7 @@ def test_cancel_during_last_authority_read_cleans_pre_handoff_child(tmp_path):
     assert _background_launch_failure("run_command", error).error_code == "CANCELLED"
 
 
+@_requires_background_launcher_identity
 def test_stop_freezes_startup_before_handoff(tmp_path, monkeypatch):
     request = managed_request(tmp_path)
     observed = launch._observe_startup
@@ -160,6 +168,7 @@ def test_stop_freezes_startup_before_handoff(tmp_path, monkeypatch):
     assert not caught.value.record["handoff_confirmed"]
 
 
+@_requires_background_launcher_identity
 def test_launcher_crash_before_handoff_is_recovered_by_host(tmp_path):
     script = "\n".join(
         [
@@ -197,6 +206,7 @@ def test_launcher_crash_before_handoff_is_recovered_by_host(tmp_path):
         stop_process_session(store, store.load(selected["session_id"]).record)
 
 
+@_requires_background_launcher_identity
 def test_explicit_attached_lifetime_stops_after_launcher_crash_even_after_handoff(tmp_path):
     script = "\n".join([
         "import os", "from pathlib import Path",
@@ -225,6 +235,7 @@ def test_explicit_attached_lifetime_stops_after_launcher_crash_even_after_handof
         stop_process_session(store, store.load(selected["session_id"]).record)
 
 
+@_requires_background_launcher_identity
 def test_host_enforces_original_deadline_after_handoff_without_parent_polling(tmp_path):
     request = managed_request(tmp_path, deadline_monotonic=time.monotonic() + 3)
     hosted = launch.start_background_process(request)
@@ -245,6 +256,7 @@ def test_launch_lifetime_rejects_invalid_values_before_store_writes(tmp_path, va
     assert not (tmp_path / "authority").exists()
 
 
+@_requires_background_launcher_identity
 def test_expired_deadline_cannot_start_child(tmp_path):
     with pytest.raises(launch.BackgroundLaunchError) as error:
         launch.start_background_process(managed_request(tmp_path, deadline_monotonic=time.monotonic() - 1))
@@ -252,6 +264,7 @@ def test_expired_deadline_cannot_start_child(tmp_path):
     assert not error.value.record["child_launch_started"]
 
 
+@_requires_background_launcher_identity
 def test_host_loss_does_not_fake_child_exit_and_exact_stop_recovers(tmp_path):
     hosted = launch.start_background_process(managed_request(tmp_path))
     registry = ProcessRegistry()
@@ -273,6 +286,7 @@ def test_host_loss_does_not_fake_child_exit_and_exact_stop_recovers(tmp_path):
         assert stopped["status"] == "killed"
 
 
+@_requires_background_launcher_identity
 def test_one_session_stop_does_not_stop_another_session_of_same_task(tmp_path):
     first_request = managed_request(tmp_path / "a")
     second_request = replace(first_request, log_path=tmp_path / "b.log")
@@ -290,6 +304,7 @@ def test_one_session_stop_does_not_stop_another_session_of_same_task(tmp_path):
         registry.kill(b.session_id)
 
 
+@_requires_background_launcher_identity
 def test_healthy_terminal_read_reaps_local_host_without_replacing_child_code(tmp_path):
     hosted = launch.start_background_process(
         managed_request(tmp_path, "import time; time.sleep(1); raise SystemExit(7)")
@@ -305,6 +320,7 @@ def test_healthy_terminal_read_reaps_local_host_without_replacing_child_code(tmp
     assert hosted.process.returncode is not None
 
 
+@_requires_background_launcher_identity
 def test_hot_cache_reads_current_revision_and_bad_redo_cannot_restore_stale_success(tmp_path):
     request = managed_request(tmp_path)
     store = ProcessSessionStore(request.store_root)
@@ -321,6 +337,7 @@ def test_hot_cache_reads_current_revision_and_bad_redo_cannot_restore_stale_succ
     assert rows == [] and errors
 
 
+@_requires_background_launcher_identity
 def test_same_session_id_in_two_stores_remains_separate(tmp_path):
     registry = ProcessRegistry()
     for name in ("a", "b"):
@@ -369,6 +386,7 @@ def _bound_record(tmp_path, status="running"):
     return store, store.write(record)
 
 
+@_requires_background_launcher_identity
 def test_unresolved_descendant_cannot_be_hidden_by_terminal_parent_status(tmp_path, monkeypatch):
     store, record = _bound_record(tmp_path, "exited")
     receipt = ProcessTerminationReceipt("SIGTERM->SIGKILL", False, 0, 3, (8125,))
@@ -378,6 +396,7 @@ def test_unresolved_descendant_cannot_be_hidden_by_terminal_parent_status(tmp_pa
     assert not result.confirmed and result.terminations[0].unresolved_pids == (8125,)
 
 
+@_requires_background_launcher_identity
 def test_cleanup_after_signals_preserves_receipts_when_final_save_fails(tmp_path, monkeypatch):
     store, record = _bound_record(tmp_path)
     receipt = ProcessTerminationReceipt("SIGTERM", True, -15, 2)
@@ -399,6 +418,7 @@ def test_cleanup_after_signals_preserves_receipts_when_final_save_fails(tmp_path
     assert store.load(record["session_id"]).record["status"] == "running"
 
 
+@_requires_background_launcher_identity
 def test_uncertain_cleanup_cannot_use_old_reservation_as_not_started(tmp_path):
     record = launch._reservation(managed_request(tmp_path), "bg-unreadable")
     error = launch.BackgroundLaunchError(OSError("authority unavailable"), record, False)
@@ -430,6 +450,7 @@ def test_initial_result_does_not_promote_killed_or_unknown_to_success(
         assert payload["exit_code"] == code
 
 
+@_requires_background_launcher_identity
 def test_other_pending_transaction_is_not_this_sessions_stop_commit(tmp_path):
     from agent_py_agent.agent.tooling.process_session_commit import (
         ProcessSessionCommitPendingError,
@@ -456,6 +477,7 @@ def test_other_pending_transaction_is_not_this_sessions_stop_commit(tmp_path):
     assert "bg-other" not in json.dumps(error.report)
 
 
+@_requires_background_launcher_identity
 def test_pending_stop_commit_is_reported_without_signalling_or_losing_receipt(
     tmp_path, monkeypatch
 ):
@@ -486,6 +508,7 @@ def test_pending_stop_commit_is_reported_without_signalling_or_losing_receipt(
     assert store.load(record["session_id"]).record["stop_requested"]
 
 
+@_requires_background_launcher_identity
 def test_refresh_failure_does_not_escape_tool_or_use_running_cache(tmp_path, monkeypatch):
     from agent_py_agent.agent.tooling.process_session_store import process_session_store_root
     from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
@@ -528,6 +551,7 @@ def test_refresh_failure_does_not_escape_tool_or_use_running_cache(tmp_path, mon
     assert result.result_envelope["load_error"]["error_type"] == "OSError"
 
 
+@_requires_background_launcher_identity
 def test_no_host_created_can_be_stopped_again_only_with_cleanup_proof(tmp_path):
     calls = []
 
@@ -544,6 +568,7 @@ def test_no_host_created_can_be_stopped_again_only_with_cleanup_proof(tmp_path):
     assert stop_process_session(ProcessSessionStore(request.store_root), record).confirmed
 
 
+@_requires_background_launcher_identity
 def test_other_owners_corrupt_store_does_not_break_new_handoff(tmp_path):
     registry = ProcessRegistry()
     old_store, old_record = _bound_record(tmp_path / "old", "exited")

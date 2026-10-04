@@ -40,6 +40,44 @@ repeatable fixture or replay case.
 
 真实任务只负责暴露新问题；一旦发现问题，必须尽快沉淀成可重复跑的 fixture 或 replay case。
 
+### 1.1.1 Sandbox Capability Skips / 沙箱能力跳过
+
+Some focused tests depend on host capabilities unavailable in a particular agent sandbox: `/bin/ps`, nested `sandbox-exec` (macOS Seatbelt), or managed-background process identity. Do not apply a module-level marker: pure fixtures in the same file must still run. Mark only the individual test cases whose unmarked run was reproduced failing for that capability.
+
+部分定向用例依赖特定宿主能力（`/bin/ps`、嵌套 `sandbox-exec`、后台启动器身份）。不要使用模块级 `pytestmark`；只给去标记后实测确实因该能力失败的具体测试函数加标记，避免跳过同文件的纯模拟用例：
+
+```python
+@pytest.mark.sandbox_capability("background_launcher_identity")
+def test_managed_launcher_identity_is_required():
+    ...
+```
+
+Available names are `ps`, `nested_sandbox_exec`, and
+`background_launcher_identity`. Probes run once per session and are cached. The
+`ps` probe checks both a zero return code and that stripped `ps -o pid=` output
+is exactly the current PID; probes do not parse explanatory text.
+
+可用能力名是 `ps`、`nested_sandbox_exec`、`background_launcher_identity`。探测按会话缓存，只读取结构化结果；`ps` 必须同时满足返回码为 0、`ps -o pid=` 去空白后精确等于当前 PID，不解析说明文字。
+
+The shared `pytest_runtest_setup` wrapper delegates to inner pytest hooks first, so platform `skipif` marks take precedence; only then does the capability marker skip or fail. Keep macOS-only Seatbelt tests guarded by `skipif(not IS_MACOS)`: `nested_sandbox_exec` is unavailable on Linux by definition. Forced failures carry `SANDBOX_CAPABILITY_MISSING[<name>]` and structured `sandbox_capability_missing` report metadata.
+
+公共 `pytest_runtest_setup` 包装钩子先委托内层 pytest hook，让平台 `skipif` 优先；平台适用后才按能力标记 skip/fail。只在 macOS 跑的 Seatbelt 用例必须保留 `skipif(not IS_MACOS)`，因为 Linux 上 `nested_sandbox_exec` 恒不可用。强制失败包含 `SANDBOX_CAPABILITY_MISSING[能力名]`，并在报告元数据中结构化记录 `sandbox_capability_missing`。
+
+**Never let a skip hide a real problem.** Outside the sandbox and on the Linux
+lanes, run with the switch set; a missing required capability then fails during
+setup instead of skipping:
+
+**不能让跳过掩盖真问题。** 沙箱外及 Linux lane 使用以下开关；缺少该用例实际需要的能力时会在 setup 阶段失败，而不是跳过：
+
+```bash
+MY_AGENT_TEST_REQUIRE_CAPABILITIES=1 python -m pytest ...
+```
+
+Only the exact value `1` enables it. Add a marker only after reproducing the
+unmarked failure and confirming its structured cause is the declared capability.
+
+只有显式值 `1` 才启用强制模式。加标记前先实测去标记失败，并确认结构化原因确实是所声明能力。
+
 ---
 
 ## 2. Test File Naming and Location / 测试文件命名与位置
