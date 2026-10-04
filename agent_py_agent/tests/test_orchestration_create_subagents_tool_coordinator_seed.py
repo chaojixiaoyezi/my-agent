@@ -933,6 +933,8 @@ class TestResourceScopePolicyNormalizationPerSeq269:
             owner_scope_root="",
             owner_type="main_agent",
             cancellation_token=SimpleNamespace(cancelled=False),
+            # 与真实 ToolExecutionRequest 对齐：B4 起执行器会读这个可选观察钩子（默认 None）。
+            on_handler_started=None,
         )
         call = SimpleNamespace(
             tool_name=tool_name,

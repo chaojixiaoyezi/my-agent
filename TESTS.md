@@ -1,5 +1,10 @@
 # 测试与发布验收
 
+## 执行器请求替身补 on_handler_started（3a，2026-10-04，17j）
+
+- 17j Linux 全量车道（33d903aab）唯一剩下的新失败：`test_orchestration_create_subagents_tool_coordinator_seed.py::TestResourceScopePolicyNormalizationPerSeq269::test_executor_entry_read_only_bypasses_resource_scope_resolution` 报 `'types.SimpleNamespace' object has no attribute 'on_handler_started'`（`tooling/executor.py:726`）。B4（73de50cb8）给真实 `ToolExecutionRequest` 加了可选观察钩子 `on_handler_started`（默认 None），这条用例手拼的请求替身没跟上；上一次车道（ebe621d87）也有这条，当时 3a 提取失败清单的脚本漏了它。
+- 修法：替身补 `on_handler_started=None` 与真实类型对齐，不改产品代码（真实请求一定带这个字段）。整个测试文件 29 passed。
+
 ## rco 的子代理 halt 收口回归（rcob2，2026-10-04，worker/rco-blocked-halt-v2；基于 17j 头 a1a849c55；3a 复审（task_local 只有真实子代理回合会用，预检那处只是内存投影），已并入 step17j）
 
 - 来源：rco + rcb 合入（`39350230a`）后，两条 halt 用例失败（`test_subagent_authorization_failure_halt.py:358`、`test_subagent_identical_failure_halt.py:164`），都是 `assert (result.status, result.turn_end_reason) == ("BLOCKED", "blocked")` 实得 `("RUNNING", "")`；rcob 没修好。
