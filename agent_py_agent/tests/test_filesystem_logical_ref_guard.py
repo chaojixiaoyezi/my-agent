@@ -10,7 +10,10 @@ from agent_py_agent.agent.common.logical_reference_ids import (
     RUN_REQUEST_ID_PREFIX,
     is_logical_reference_segment,
 )
+from agent_py_agent.agent.tooling._filesystem_edit import EditFileTool
+from agent_py_agent.agent.tooling._filesystem_patch import ApplyPatchTool
 from agent_py_agent.agent.tooling._filesystem_read import FileSystemTool, WriteScopeError
+from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 from agent_py_agent.agent.tooling.filesystem_artifact_guard import (
     logical_reference_write_path_error,
 )
@@ -59,3 +62,38 @@ def test_normal_relative_path_still_writes(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("ok", encoding="utf-8")
     assert (tmp_path / "notes" / "gwreq-notes.md").read_text(encoding="utf-8") == "ok"
+
+
+# LLM: 校验真实文件工具均将路径错误作为结构化失败返回，并在任何创建/修改前拦截；回执不可包含宿主临时根。
+# 函数用途: 验证 write_file、edit_file、apply_patch 三个公开写入口拒绝逻辑引用且错误码对模型可见。
+def test_all_write_tools_reject_logical_reference_without_disk_effect(tmp_path: Path) -> None:
+    scoped = f"{GATEWAY_REQUEST_ID_PREFIX}x:call_y"
+    logical_dir = tmp_path / scoped
+    logical_dir.mkdir()
+    existing = logical_dir / "existing.md"
+    existing.write_text("before\n", encoding="utf-8")
+    write_target = logical_dir / "new.md"
+    patch_target = logical_dir / "patch.md"
+    patch = (
+        "*** Begin Patch\n"
+        f"*** Add File: {scoped}/patch.md\n"
+        "+new\n"
+        "*** End Patch"
+    )
+    outcomes = (
+        WriteFileTool(tmp_path).execute({"path": f"{scoped}/new.md", "content": "new"}),
+        EditFileTool(tmp_path).execute(
+            {"path": f"{scoped}/existing.md", "old_string": "before", "new_string": "after"}
+        ),
+        ApplyPatchTool(tmp_path).execute({"patch": patch}),
+    )
+    for outcome in outcomes:
+        assert outcome.ok is False
+        assert outcome.error_code == "ARTIFACT_REF_AS_WRITE_PATH"
+        assert outcome.reported_error_code == "ARTIFACT_REF_AS_WRITE_PATH"
+        prompt = outcome.render_for_prompt()
+        assert "error_code=ARTIFACT_REF_AS_WRITE_PATH" in prompt
+        assert str(tmp_path) not in prompt
+    assert existing.read_text(encoding="utf-8") == "before\n"
+    assert not write_target.exists()
+    assert not patch_target.exists()

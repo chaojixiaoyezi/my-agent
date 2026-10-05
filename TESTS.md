@@ -11,10 +11,10 @@
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_filesystem_logical_ref_guard.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_gateway_io.py -q --tb=line -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-artref
   ```
 
-- **结果**：新用例 **4 passed**（判定集合、绝对路径不拦与中间段命中、集成拒绝零落盘、正常路径照常写）；回归一批 **87 passed / 0 failed**（含 blobs/tool_outputs 重定向回归、文件工具、gateway io）。
+- **结果**：新用例 **5 passed**（判定集合、绝对路径不拦与中间段命中、resolver 拒绝零落盘、正常路径照常写、write_file/edit_file/apply_patch 真实入口均返回新错误码且无创建/修改，模型回执不泄宿主临时路径）；回归一批 **87 passed / 0 failed**（含 blobs/tool_outputs 重定向回归、文件工具、gateway io）。
 - **变异**（`/private/tmp/artref_mutate.py`，单处修改 + 原字节 sha256 校验）：去 `:call_` 检查、去前缀检查、写入口不挂守卫、守卫只查首段 → **4/4 KILLED**。
 - **常数目录**：只收"右值可静态求出数值"的常量，字符串前缀本就不收录；重跑生成器后 `--check` 一致（912 项，无变化）。
-- **门禁**：guards9 12 文件全过；ruff 全过、import boundaries=0、DOC_SYNC_PASS（gateway 02/04 已同步）、strict code-size `hard=0 blocked=False`、size_diff 新增 0 / 消失 N、`git diff --check` 干净、clean-package OK。
+- **门禁**：guards9 12 文件全过；改动测试文件 ruff 全过（全仓 ruff 有 2 个 C420，均位于未改动 `plugins/event-watch/src/server.py`）；import boundaries=0、DOC_SYNC_PASS（gateway 02/04 已同步）、strict code-size `hard=0 blocked=False`、size_diff 新增 0 / 消失 58、`git diff --check` 干净、clean-package OK。
 - **未验证**：真实会话里模型行为回归（需真实链路观察）；非作者初审。
 
 - 背景、证据与改法见 `DESIGN_LEDGER.md` 同名小节。
