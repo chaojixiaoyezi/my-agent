@@ -234,6 +234,20 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - guards9（12 文件）**190 passed**；ruff `All checks passed!`；`check_import_boundaries` findings=0；`check_doc_sync --base 07d7b3306` DOC_SYNC_PASS；strict code-size `blocked=False`（报告已还原）；size_diff 新增告警 0 / 消失 55；clean package OK；`git diff --check` 干净。
 - **未验证**：真实 websockets 服务端、真实 ChatGPT 订阅链路（需真实账号）。
 
+## 逻辑回合身份覆盖 native 出站内容（retrycount-fix，2026-10-05，worker/retrycount；待复审）
+
+- 来源：luna5 初审 retrycount 的必须改（native 修复注入改变 provider messages 但身份不变、超时门槛误拒新回合重试）。修法见 DESIGN_LEDGER 同名段。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  # 相关 10 文件批次（model_call_ledger / tool_loop_model_turn / provider_transient / timeout 系列）221 passed
+  # tool_ir 与 native 投影 7 文件 85 passed；guards9 十二文件 190 passed
+  # ruff / boundaries=0 / doc_sync(--base 100df7ad7) / strict code-size(hard=0) / size_diff(新增 0、消失 55) / diff-check / clean-package 全过
+  ```
+- 新增用例 6 条（`test_model_call_ledger.py`）：① 参数化三类出站内容变化（修复注入 `tool_context` / 运行事实 IR / 插话 `UserTurn`）→ 新身份；② 指引迁移（tool_context → IR + seen）前后断流重试身份不变；③ 超时门槛只数新回合自己的物理尝试；④ 记录层聚合 logical=2 / physical=3 / retry=1。
+- 变异 4 个（脚本 `/private/tmp/claude-501/retrycount-fix/mutate.py`，逐个 sha256 还原一致）：种子不纳入指纹 / 忽略 guidance / 忽略 IR → KILLED；不做 seen 去重 → SURVIVED（等价变异：record 层按同 source+text 去重兜底，真实重试路径不出现部分转发状态）。
+- 文档：cherry-pick luna5 的 `de32e4604`（MODEL_TERMINAL_DIAGNOSTICS 身份语义）→ 本分支 `72736e123`。
+- 未验证：真实 provider 端到端（沙箱不连真实模型）。
+
 ## 逻辑回合身份去 input_tokens（retrycount，2026-10-05，分支 `worker/retrycount`，基于 17k 头 `100df7ad7`；待复审）
 
 - 来源：streamretryr 初审发现的 `model_retry_count` 少算（断流响应带 usage → `input_tokens` 被校准 → 同一回合拆成两个逻辑回合）。修法见 DESIGN_LEDGER 同名段。
@@ -262,6 +276,7 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
   3. 物理号不递增 → KILLED（既有 attempt [1,2] 断言 + 校准用例红）。
   4. 种子去掉 prompt 指纹 → KILLED（内容变化用例红）。
 - 兼容：旧持久化记录不改（`metadata` 原值保留）；聚合按字符串去重，新旧一视同仁——既有 `test_summary_counts_all_calls_after_detail_retention_limit` 用手工 logical id 证明聚合不依赖格式。
+- **修订**：retrycount-fix（2026-10-05，见上段）把 native 出站 messages 指纹纳入种子，其余结论不变。
 - 未验证：真实 DeepSeek/Anthropic 断流端到端；跨版本部署瞬间的记录归并（要求会话空闲，实际不出现）。
 
 ## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）

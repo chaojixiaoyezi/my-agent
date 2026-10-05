@@ -443,15 +443,20 @@ def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
     )
 
 
-# LLM: 逻辑回合身份只由重试间稳定的事实决定：请求/运行/任务身份、工具轮次与请求内容指纹。
-#   不能把 input_tokens 等会被响应 usage 校准改变的量放进种子——断流响应带 usage 时，同一回合的
-#   第二次尝试会算出新身份，把一次重试拆成两个逻辑回合（model_retry_count 少算；2026-10-05
-#   retrycount 修复）。重试（响应级/异常）重建的 prompt 逐字节稳定（工作区块快照与执行事实在
-#   run 内冻结），所以重试与首次尝试得到同一身份；内容真变化（压缩重试、修复注入）按新回合计。
-#   改动时同步核对 start_model_call_record 的调用点与 model_call_ledger._logical_call_id 的聚合口径。
+# LLM: 逻辑回合身份只由重试间稳定的事实决定：请求/运行/任务身份、工具轮次、渲染 prompt 指纹与
+#   native 出站 provider messages 指纹。不能把 input_tokens 等会被响应 usage 校准改变的量放进种子
+#   （断流响应带 usage 时会把一次重试拆成两个逻辑回合，model_retry_count 少算；2026-10-05 retrycount）。
+#   native 下 tool_context/IR 变化不反映在渲染 prompt 上（工具内容单独投影成 messages），只认 prompt
+#   指纹会把内容真变化的重跑误并进旧回合；provider_messages_fingerprint 与真实出站同源，且在同一
+#   请求的断流重试之间稳定（未转发指引先经 tool_context、再经 IR 投影，两次输出一致），所以重试归并、
+#   内容真变化（修复注入、压缩、插话）按新回合计。改动时同步核对 start_model_call_record 的调用点、
+#   tool_ir_history.provider_messages_fingerprint 与 model_call_ledger._logical_call_id 的聚合口径。
 # 函数用途: 计算一次模型调用的逻辑回合身份，让同一回合的物理重试在账本里归并计数。
 def logical_model_call_id(request: object) -> str:
     params = getattr(request, "params", None)
+    # 延迟 import：出站投影层只在身份计算时读取，避免记账模块与 IR 模块形成导入环。
+    from ..tool_ir_history import provider_messages_fingerprint
+
     seed = "|".join(
         [
             str(getattr(params, "request_id", "") or ""),
@@ -459,6 +464,7 @@ def logical_model_call_id(request: object) -> str:
             str(getattr(params, "task_id", "") or ""),
             str(getattr(request, "tool_rounds", 0)),
             hashlib.sha256(str(getattr(request, "prompt", "") or "").encode("utf-8")).hexdigest()[:16],
+            provider_messages_fingerprint(params) if params is not None else "",
         ]
     )
     return f"model-call:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"

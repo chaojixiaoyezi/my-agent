@@ -13,6 +13,7 @@ from agent_py_agent.agent.agent_core.model.call_monitor import (
     is_cache_suspected,
 )
 from agent_py_agent.agent.agent_core.model.call_runtime import (
+    logical_model_call_id,
     model_call_summary,
     record_model_call_finished,
     start_model_call_record,
@@ -20,6 +21,8 @@ from agent_py_agent.agent.agent_core.model.call_runtime import (
 from agent_py_agent.agent.agent_core.model.context_pressure import (
     ModelVisibleContextSnapshot,
 )
+from agent_py_agent.agent.agent_core.tool_ir_history import record_runtime_facts_turn_ir
+from agent_py_agent.agent.backends.tool_ir import UserTurn
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFailureParams,
@@ -572,6 +575,100 @@ def test_changed_request_content_starts_a_new_logical_turn() -> None:
     assert summary["logical_model_turn_count"] == 2
     assert summary["physical_model_attempt_count"] == 2
     assert summary["model_retry_count"] == 0
+
+
+# LLM: 以下四条用例钉住 native 出站内容的身份口径（2026-10-05 retrycount-fix）：tool_context/IR
+#   变化不一定反映在渲染 prompt 上，必须靠 provider messages 指纹区分；同一次请求的断流重试在
+#   指引迁移前后身份不变；超时门槛按新身份计数，新回合能拿到它的一次重试。
+# 函数用途: 构造带 native IR 与 tool_context 的可变 params，供出站指纹用例复用。
+def _native_params():
+    return SimpleNamespace(
+        request_id="request-1",
+        run_id="run-1",
+        task_id="task-1",
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id="run-1", source_protocol="native"),
+        tool_ir_history=[],
+        tool_context=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda params: params.tool_context.append("纠正：刚才的输出缺了来源说明"),
+        lambda params: record_runtime_facts_turn_ir(params, "运行事实快照", source="runtime.guidance"),
+        lambda params: params.tool_ir_history.append(UserTurn(text="插话：先看附录 A", input_ids=("m-1",))),
+    ],
+    ids=["repair-guidance", "runtime-facts", "steer-user-turn"],
+)
+def test_native_provider_content_change_gets_new_logical_turn_id(mutate) -> None:
+    """native 修复注入/IR 事实/插话改变出站 messages 时，即使渲染 prompt 与 tool_rounds
+    不变，逻辑回合身份也必须变化（否则重跑会被误并进旧回合、超时门槛误拒重试）。"""
+    params = _native_params()
+    request = SimpleNamespace(
+        agent=_logical_turn_agent(), prompt="same prompt", tool_rounds=2, params=params
+    )
+
+    before = logical_model_call_id(request)
+    mutate(params)
+    after = logical_model_call_id(request)
+
+    assert before != after
+
+
+def test_native_retry_keeps_identity_across_guidance_migration() -> None:
+    """同一次请求的断流重试：未转发指引先经 tool_context 投影、再经 IR 投影，身份必须相同。"""
+    params = _native_params()
+    params.tool_context.append("纠正：刚才的输出缺了来源说明")
+    request = SimpleNamespace(
+        agent=_logical_turn_agent(), prompt="same prompt", tool_rounds=2, params=params
+    )
+
+    before = logical_model_call_id(request)
+    # 模拟真实出站（_native_provider_messages）的副作用：指引写入 IR，seen 登记同文本。
+    record_runtime_facts_turn_ir(params, "纠正：刚才的输出缺了来源说明", source="runtime.guidance")
+    params.live_archive_state = {"_forwarded_runtime_guidance": {"纠正：刚才的输出缺了来源说明"}}
+    after = logical_model_call_id(request)
+
+    assert before == after, "同一请求的断流重试必须保持同一身份"
+
+
+def test_timeout_gate_counts_only_the_new_logical_turn_after_content_change() -> None:
+    """内容真变化产生新身份后，超时"至多一次重试"的门槛只数新回合自己的物理尝试：
+    旧回合（含一次超时重试）的两条记录不会误拒新回合该有的重试。"""
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        _logical_physical_attempt_count,
+    )
+
+    sink = _TurnSink()
+    agent = _logical_turn_agent()
+    request = _logical_turn_request(agent, sink)
+    request.params.tool_ir_history = []
+    request.params.tool_context = []
+    start_model_call_record(request, context_snapshot=_context_snapshot(current_tokens=9477))
+    start_model_call_record(request, context_snapshot=_context_snapshot(current_tokens=9477))
+    request.params.tool_context.append("纠正：刚才的输出缺了来源说明")
+    start_model_call_record(request, context_snapshot=_context_snapshot(current_tokens=9477))
+
+    assert _logical_physical_attempt_count(request) == 1, "新回合只应数到自己的首次尝试"
+
+
+def test_native_content_change_moves_ledger_retry_count_to_new_turn() -> None:
+    """记录层：内容变化前后的物理尝试按两个逻辑回合聚合（旧回合的重试不再吞掉新回合）。"""
+    sink = _TurnSink()
+    agent = _logical_turn_agent()
+    request = _logical_turn_request(agent, sink)
+    request.params.tool_ir_history = []
+    request.params.tool_context = []
+    start_model_call_record(request, context_snapshot=_context_snapshot(current_tokens=9477))
+    start_model_call_record(request, context_snapshot=_context_snapshot(current_tokens=9477))
+    request.params.tool_context.append("纠正：刚才的输出缺了来源说明")
+    start_model_call_record(request, context_snapshot=_context_snapshot(current_tokens=9477))
+
+    summary = model_call_summary(agent, request_id="request-1")
+    assert summary["logical_model_turn_count"] == 2
+    assert summary["physical_model_attempt_count"] == 3
+    assert summary["model_retry_count"] == 1
 
 
 def test_isolated_presentation_call_keeps_accounting_but_not_context_projection() -> None:

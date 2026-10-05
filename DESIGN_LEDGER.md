@@ -148,12 +148,21 @@
 - **变异 4 个（全部抓住）**：idle 截止不取 min；到期不关连接；idle 阶段 stage 写错；去掉逐消息检查。
 - **未验证**：真实 websockets 服务端与真实 ChatGPT 订阅链路（需真实账号）。
 
+## 逻辑回合身份覆盖 native 出站内容（retrycount-fix，2026-10-05，分支 `worker/retrycount`，基于 `eb8680753`；待复审）
+
+- **起因**：luna5 初审 retrycount 发现必须改——身份种子只有渲染 prompt 指纹，而 native 模式下工具内容与修复注入是单独投影成 provider messages 的（`tool_ir_history.project_native_provider_messages`）。修复路径把纠正内容追加到 `tool_context` 后，provider messages 变了、渲染 prompt 与 `tool_rounds` 不变 → 身份不变：重跑被误并进旧回合，超时"至多一次重试"的门槛也按旧身份计数、误拒新回合该有的重试（去掉 input_tokens 之前这类内容变化会顺带改身份，洞没暴露）。
+- **改法**：新增 `tool_ir_history.provider_messages_fingerprint(params)`——对"此刻会出站的 native messages"做规范化指纹（与真实出站同源的纯投影 `project_native_provider_messages`；只读：不消费 seen、不写 IR；判定或投影失败返回空串，绝不中断模型主链）；`call_runtime.logical_model_call_id` 的种子新增该项（text 模式为空串，保持 prompt 指纹语义）。同一次请求的断流重试在指引迁移（tool_context → IR）前后指纹一致，身份稳定；内容真变化（修复注入、压缩、插话）按新回合计。
+- **验证**：见 TESTS「逻辑回合身份覆盖 native 出站内容（retrycount-fix）」；变异 4 个：种子不纳入指纹 / 忽略 guidance / 忽略 IR → KILLED；不做 seen 去重 → SURVIVED（等价变异：record 层按同 source+text 去重兜底，真实重试路径不出现部分转发状态）。
+- **已知边界**：指纹覆盖 provider messages 与渲染 prompt 两类出站内容；`_native_provider_messages` 的其它行为差异（如孤儿清扫细节）不单独入种子。luna5 的模块文档 `de32e4604` 已摘入（`72736e123`）。
+- **未验证**：真实 provider 端到端（沙箱不连真实模型）。
+
 ## 逻辑回合身份去 input_tokens（retrycount，2026-10-05，分支 `worker/retrycount`，基于 17k 头 `100df7ad7`；待复审）
 
 - **起因**：streamretryr 初审发现的 `model_retry_count` 少算——断流响应带 usage 时，第一次响应的 usage 会校准第二次的 `input_tokens` 估算，而 `logical_model_call_id` 的种子含 `input_tokens`，同一回合的重试被拆成两个逻辑回合（实测 `logical=2 physical=2 retry=0`，应为 1）。
 - **改法（唯一权威位置）**：`agent_core/model/call_runtime.py::logical_model_call_id` 的种子去掉 `input_tokens`，只保留重试间稳定的事实：`request_id | run_id | task_id | tool_rounds | prompt 指纹`。重试（响应级/异常）重建的 prompt 逐字节稳定（工作区块快照与执行事实在 run 内冻结、插话未确认投递被 retry_guard 挡住），所以重试与首次尝试得到同一身份；内容真变化（压缩重试、修复注入）按新回合计。聚合端 `contracts/model_call_ledger._logical_call_id` 不改：按 `metadata.logical_call_id` 字符串去重，新旧记录一视同仁；旧持久化记录保持原值。
 - **验证**：见 TESTS「逻辑回合身份去 input_tokens（retrycount）」；4 个变异 KILLED（身份加回 input_tokens / 种子去掉 tool_rounds / 物理号不递增 / 种子去掉 prompt 指纹）。
 - **已知边界**：重试期间若 prompt 因运行时状态刷新（如子代理状态变化）而变，仍按新回合计——语义上属于"请求内容真变化"；部署切换瞬间同一回合跨新旧算法的记录不会归并（部署要求会话空闲，实际不出现）。
+- **修订**：retrycount-fix（2026-10-05，见上段）把 native 出站 messages 指纹纳入种子——本节"只保留 prompt 指纹"的表述被其上修订取代，其余结论不变。
 - **未验证**：真实 DeepSeek/Anthropic 断流端到端（沙箱不连真实 provider）；跨版本旧记录的实机聚合数据。
 
 ## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）

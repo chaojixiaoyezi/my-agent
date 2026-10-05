@@ -42,6 +42,8 @@ text 协议路径一字不动。
 锚点，内联时保留有界正文），保证 IR 与文本两轨的「给模型看到的结果」口径一致。
 """
 
+import hashlib
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -140,6 +142,33 @@ def project_native_provider_messages(
     prior = [deepcopy(item) for item in list(prior_messages or []) if isinstance(item, dict)]
     current = AnthropicMessageAdapter().to_provider_messages(projected.tool_ir_history)
     return strip_orphaned_tool_blocks([*prior, *current])
+
+
+# LLM: 逻辑回合身份要覆盖"实际出站内容"：native 下 tool_context/IR 变化不反映在渲染 prompt 上，
+#   只认 prompt 指纹会把内容真变化的重跑误并进旧回合。这里对与真实出站同源的纯投影结果做规范化
+#   指纹（只读：投影只改内部副本，不消费 seen、不写 IR）。同一请求的断流重试里，未转发指引先经
+#   tool_context、再经 IR 投影，两次输出一致，因此身份稳定。判定或投影失败时返回空串，身份退化为
+#   prompt 指纹，绝不中断模型主链。改动时同步核对 call_runtime.logical_model_call_id 与
+#   tool_model_generation._native_provider_messages 的出站口径。
+# 函数用途: 计算此刻会出站的 native provider messages 指纹；text 模式或不可判定时返回空串。
+def provider_messages_fingerprint(params: object) -> str:
+    from .native_tool_protocol import native_tool_use_active
+
+    try:
+        if not native_tool_use_active(params):
+            return ""
+        state = getattr(params, "live_archive_state", None)
+        seen = state.get("_forwarded_runtime_guidance") if isinstance(state, dict) else None
+        messages = project_native_provider_messages(
+            getattr(params, "tool_ir_history", None),
+            prior_messages=getattr(params, "provider_history_messages", None),
+            tool_context=getattr(params, "tool_context", None),
+            forwarded_guidance=seen if isinstance(seen, set) else (),
+        )
+        encoded = json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return ""
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 # LLM: compact 摘要与真实 UserTurn 类型分开；每次安装只替换 thread/live summary，
@@ -439,6 +468,7 @@ __all__ = [
     "open_assistant_turn_ir",
     "record_runtime_facts_turn_ir",
     "project_native_prompt_history",
+    "provider_messages_fingerprint",
     "replace_compaction_summary_ir",
     "record_tool_call_ir",
     "record_unexecuted_response_ir",
