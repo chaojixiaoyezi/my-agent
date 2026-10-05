@@ -1817,14 +1817,12 @@ class RuntimeRepository(
         )
 
     # ------------------------------------------------------ R1-03 辅助
+    # LLM: 锁记录的启动指纹必须与读端 holder_is_alive 同源（common.heartbeat 的跨平台字符串：
+    #   Linux /proc ticks、macOS ps lstart）；旧实现只读 /proc 且用全文 split，comm 含空格时取错
+    #   字段，与读端（rsplit）比较不等而误判死。读不到返回空串（空=不可核验，保守判活）。
+    # 函数用途: 返回本进程的启动指纹，供执行权锁写入与 PID 复用核验。
     def _start_token(self) -> str:
-        """本进程 /proc/<pid>/stat 第 22 字段（starttime）——PID 复用防护锚。"""
-        try:
-            with open(f"/proc/{os.getpid()}/stat", encoding="utf-8") as fh:
-                fields = fh.read().split()
-            return fields[21] if len(fields) >= 22 else ""
-        except OSError:
-            return ""
+        return _proc_start_time(os.getpid()) or ""
 
     def _lock_is_takeoverable(self, lock: sqlite3.Row, now: float) -> bool:
         """R1-03 锁接管判定：持主已确认死亡即可立即接管。

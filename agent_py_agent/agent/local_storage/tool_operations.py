@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..common.heartbeat import process_start_time
+from ..common.heartbeat import process_start_time, start_time_matches
 
 TOOL_OPERATION_RUNNING = "running"
 TOOL_OPERATION_SUCCEEDED = "succeeded"
@@ -775,7 +775,7 @@ def _operation_holder_is_live(record: ToolOperationRecord, now: float) -> bool:
     actual = process_start_time(record.holder_pid)
     if not expected or actual is None:
         return True
-    return expected == actual
+    return start_time_matches(expected, actual)
 
 
 # LLM: Reconciliation ownership lives inside the existing result JSON to avoid a second authority
@@ -803,7 +803,7 @@ def _reconciliation_marker_is_live(marker: dict[str, Any], now: float) -> bool:
         return False
     expected = str(holder.get("process_start_token") or "")
     actual = process_start_time(pid)
-    return True if not expected or actual is None else expected == actual
+    return True if not expected or actual is None else start_time_matches(expected, actual)
 
 
 # LLM: Holder serialization is structural and must stay aligned with ToolOperationHolder fields.

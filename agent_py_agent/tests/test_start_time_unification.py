@@ -17,6 +17,7 @@ from agent_py_agent.agent.local_storage import tool_operations
 from agent_py_agent.agent.local_storage.tool_operations import (
     ToolOperationRecord,
     _operation_holder_is_live,
+    _reconciliation_marker_is_live,
 )
 from agent_py_agent.agent.runtime_db.operations import holder_is_alive
 
@@ -208,3 +209,91 @@ def test_holder_is_alive_detects_pid_reuse_on_macos_lstart(monkeypatch):
     )
     assert holder_is_alive(os.getpid(), "Fri Oct  3 09:00:00 2026") is False
     assert holder_is_alive(os.getpid(), "Sat Oct  4 10:00:00 2026") is True
+
+
+# ---------------------------------------------------------------- 锁写读同源（starttime3）
+
+
+def test_start_token_uses_heartbeat_reader(monkeypatch):
+    """写端必须走 heartbeat 读取（打桩它即生效），不再自解析 /proc。"""
+    from agent_py_agent.agent.runtime_db import repository as rt_repo
+
+    monkeypatch.setattr(rt_repo, "_proc_start_time", lambda _pid: "777777")
+    assert rt_repo.RuntimeRepository._start_token(None) == "777777"
+
+
+def test_lock_write_and_read_share_fingerprint(monkeypatch):
+    """锁写端 _start_token 与读端 holder_is_alive 同源：写端值直接可被读端核验；指纹不同判死。"""
+    from agent_py_agent.agent.runtime_db import repository as rt_repo
+
+    monkeypatch.setattr(rt_repo, "_proc_start_time", lambda _pid: "12345")
+    token = rt_repo.RuntimeRepository._start_token(None)
+    assert token == "12345"
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: "12345"
+    )
+    assert holder_is_alive(os.getpid(), token) is True
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: "99999"
+    )
+    assert holder_is_alive(os.getpid(), token) is False
+
+
+def test_lock_macos_lstart_write_then_pid_reuse_detected(monkeypatch):
+    """macOS：写端写入 lstart 指纹后读端能识别 pid 复用（此前写端恒空、读端恒判活）。"""
+    from agent_py_agent.agent.runtime_db import repository as rt_repo
+
+    lstart = "Fri Oct  3 09:00:00 2026"
+    monkeypatch.setattr(rt_repo, "_proc_start_time", lambda _pid: lstart)
+    token = rt_repo.RuntimeRepository._start_token(None)
+    assert token == lstart
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time",
+        lambda _pid: "Sat Oct  4 10:00:00 2026",
+    )
+    assert holder_is_alive(os.getpid(), token) is False
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: lstart
+    )
+    assert holder_is_alive(os.getpid(), token) is True
+
+
+def test_lock_start_token_empty_when_unreadable(monkeypatch):
+    """写端读不到指纹时写空串（不可核验，读端保守判活），不猜。"""
+    from agent_py_agent.agent.runtime_db import repository as rt_repo
+
+    monkeypatch.setattr(rt_repo, "_proc_start_time", lambda _pid: None)
+    assert rt_repo.RuntimeRepository._start_token(None) == ""
+    assert holder_is_alive(os.getpid(), "") is True
+
+
+# ---------------------------------------------------------------- 旧数字 token 兼容（starttime3）
+
+
+def test_holder_conservatively_live_for_legacy_numeric_token(monkeypatch, _local_holder):
+    """旧数字 token（"12345.0"）与字符串指纹（"12345"）数值等价 → 不判死。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "12345")
+    record = _record_with_token(os.getpid(), "12345.0")
+    assert _operation_holder_is_live(record, time.time()) is True
+
+
+def test_holder_dead_for_legacy_numeric_token_mismatch(monkeypatch, _local_holder):
+    """旧数字 token 与不同指纹 → 判死（兼容不等于全放行）。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "99999")
+    record = _record_with_token(os.getpid(), "12345.0")
+    assert _operation_holder_is_live(record, time.time()) is False
+
+
+def test_reconciliation_marker_conservatively_live_for_legacy_numeric_token(monkeypatch, _local_holder):
+    """核对标记同口径：旧数字 token 数值等价 → 不判死。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "12345")
+    marker = {
+        "lease_expires_at": time.time() + 3600.0,
+        "holder": {
+            "holder_id": "h1",
+            "host": "h",
+            "pid": os.getpid(),
+            "process_start_token": "12345.0",
+        },
+    }
+    assert _reconciliation_marker_is_live(marker, time.time()) is True
