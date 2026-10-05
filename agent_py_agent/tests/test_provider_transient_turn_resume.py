@@ -207,3 +207,57 @@ def test_resume_count_accumulates_and_survives_restart_marker(tmp_path, monkeypa
     )
     assert marker["provider_resume_count"] == 2
     assert marker["unplanned_resume_count"] == 1
+
+
+# ds10 初审补钉：取消、坏计数、重排失败退回三条原先没有用例（变异删检查能全绿）。
+# 函数用途: 钉住“执行中用户发停止的回合不重排回队列，按取消收口”。
+def test_mid_turn_cancel_does_not_requeue(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-cancel")
+
+    def _fail_and_cancel(context):
+        payload = json.loads(context.request_path.read_text(encoding="utf-8"))
+        payload["cancel_requested"] = True
+        context.request_path.write_text(json.dumps(payload), encoding="utf-8")
+        return _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=3)
+
+    monkeypatch.setattr(request_execution, "_run_gateway_ask", _fail_and_cancel)
+
+    response = _run_turn(agent, paths, "gwreq-cancel")
+
+    assert "provider_transient_resume" not in response
+    assert response["status"] == "interrupted"
+    assert not (paths.inbox / "gwreq-cancel.json").exists()
+
+
+# 函数用途: 钉住坏计数 fail-closed——不重排、按失败收口，不把已用次数重置成 0。
+def test_corrupt_resume_count_fails_closed(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-badcount", active_turn_recovery={
+        "schema_version": "gateway_active_turn_recovery.v1", "provider_resume_count": "abc"})
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=3))
+
+    response = _run_turn(agent, paths, "gwreq-badcount")
+
+    assert "provider_transient_resume" not in response
+    assert response["status"] == "failed"
+    _assert_failed_closeout(paths, "gwreq-badcount")
+
+
+# 函数用途: 钉住重排写盘失败退回正常失败归档——请求不留在 processing 卡死。
+def test_requeue_failure_falls_back_to_failure_archive(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-rqfail")
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=3))
+    monkeypatch.setattr(recovery, "requeue_provider_transient_processing",
+                        lambda *_args, **_kwargs: False)
+
+    _run_turn(agent, paths, "gwreq-rqfail")
+
+    assert not (paths.processing / "gwreq-rqfail.json").exists()
+    assert (paths.failed / "gwreq-rqfail.json").exists()
