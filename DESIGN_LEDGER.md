@@ -1,5 +1,12 @@
 # 设计台账
 
+## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）
+
+- **撤回原因（Linux 车道发现，macOS 复现）**：`test_compact_text_source.py::test_many_message_summary_avoids_whole_json_copy` 断言压缩取材峰值低于整段 JSON 的一半，estcache 后峰值 2,385,150 > 1,239,645。3a 实测：对 1200 条（每条约 2KB）消息估算一次，估算缓存留住约 1.6MB 的指纹结构（嵌套元组，平均每条约 1.3KB，`tokens.py:229/252/253/264`），被算进压缩峰值——不是整段拷贝，但指纹留存过重。二分：630be9dcc 通过、2b059ec2d 失败。
+- **漏网原因**：该用例不直接引用估算器（经压缩层间接调用），按引用 grep 的连带清单没有收进它。
+- **退回作者的要求**：缓存键改成紧凑摘要（如单个整数或短字节摘要，写清碰撞口径），缓存留存按字节或条目给出可测上界；本用例与全部 tracemalloc 内存用例（`git grep -l tracemalloc agent_py_agent/tests`）必须通过；估算数值逐位不变的对拍保留。
+- 撤回提交：`c3333797d`（注释校准）、`33602a988`（estcache 本体）。
+
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，基于 17l 头 `630be9dcc`；待非作者初审）
 
 - **来源（隔离测试实例的结构化事实）**：小说方向 DeepSeek deepseek-v4-flash 6 次中 1 次失败（NOV02-ds-t2）：`request_state=failed`、`error_code=MODEL_RESPONSE_TRUNCATED`、`turn_end_reason=max-tokens`，16 次调用、401.9 秒。逐次事件：末次调用输出恰为 **65536 tokens 且全部是思考**（thinking_delta 65536 条、无正文、无工具调用）——模型把 64K 上限全花在推理上、没产出任何可交付物；写文件参数没有被截断（两次 write_file 参数进度 2.2KB 都正常 ready）。
