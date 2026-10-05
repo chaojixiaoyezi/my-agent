@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## TUI 状态刷新失败的客户端去抖（tuisync，2026-10-04，分支 `worker/tui-sync`，基于 17j 头 `f45e20dac`；已完成；ds10 初审，3a 终审补成功重置用例，已并入 step17k）
+
+- 3a 终审补 `test_notice_debounce_success_resets_count_and_time_base`：成功后计数清零、时间基准刷新。原先存活的“计数不清零”“时间基准不刷新”两个变异现在都被抓到。
+
+- 来源：用户反馈 TUI 偶发"状态刷新失败，显示上次状态；正在重试"；3a 排查见 `~/.my-agent/decision-evidence/final-report-1004/tui-refresh-fail-1004.md`（客户端 2 秒期限 + 生产 Gateway CPU 饱和 → 可见降级，非数据错）。
+- 改动：`tui_threading.py` 加 `TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT=2`、`TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS=3.0`，循环只在两门槛同时满足时发布未同步；成功立即清除；退避与轮询节奏不变。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_background_notice_display.py agent_py_agent/tests/test_tui_renderer.py \
+    agent_py_agent/tests/test_tui_transcript.py agent_py_agent/tests/test_tui_input.py \
+    agent_py_agent/tests/test_tui_injected_input_states.py agent_py_agent/tests/test_tui_threading.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-tuisync/final   # 255 passed
+  ```
+  guards9 十一文件 **187 passed**；ruff `All checks passed!`；boundaries=0；doc_sync(--base f45e20dac) `DOC_SYNC_PASS`；strict code-size `hard=0 blocked=False`；diff-check 干净；clean-package OK；**size_diff 新增 0、消失 43**。
+- 常数目录：新增常量按规则命名（`_COUNT`/`_SECONDS` 单位后缀 + 上方中文说明），`build_constants_catalog.py` 重新生成后 **901 项**、`--check` 一致。首版曾因常量名缺单位后缀 + 目录未重生成，被 guards9 的 `test_constants_catalog.py` 两条用例抓到，已修。
+- 尺寸：去抖逻辑首版给 `_background_notice_loop` 添了 2 条 soft 告警（function + nesting），抽成模块级 `_NoticeWarnDebounce` 后 size_diff 回到新增 0；相关测试与两个变异在重构后重跑，行为不变、变异仍 2/2 KILLED。
+- 变异 2 个（脚本 `/private/tmp/claude-501/m-tuisync/mut.py`，逐个 sha256 还原、`还原一致=True`）：
+  - V1 去掉连续次数门槛（只看时间）→ **KILLED**（打掉 `test_tui_notice_loop_needs_failure_count_even_when_slow`）。首轮曾 SURVIVED，暴露出缺这条用例，补上后杀掉。
+  - V2 去掉时间门槛（只看次数）→ **KILLED**（打掉 `test_tui_notice_loop_needs_both_thresholds`）。
+- **测量（合成数据，未连真实 Gateway；数字只进交接报告，不进仓库）**：
+  - 合成线程：2000 条消息 / 约 30 万 token / 4 个子代理 run / 60 条进度 → 整次 `read_gateway_client_notices` p50 **0.81ms**、p95 0.96ms。**结论：耗时与线程大小基本无关**（分页 + 游标只读增量）。
+  - 步骤拆解（各 60 次）：permission_requests ≈0ms、transcript_events ≈0ms、agent_activity p50 0.42ms、notices_page p50 0.32ms。
+  - 加负载（17 线程每 1 秒轮询 + 2 个 CPU 密集线程反复 `json.dumps` 1.5MB 请求体）：p50 **1249.81ms**、p95 **1672.86ms**、max 1825.21ms → **正好压在客户端 2 秒期限上**，与生产 CPU 饱和现象一致。
+  - cProfile 前 10（30 次调用累计 0.050s）：`read_gateway_client_notices` 0.052s → `read_background_response_page` 0.027s → `page_after_offset_report` 0.022s → `read_message_page` 0.022s；`conversation_agent_activity` 0.021s，其中 `store_threads.load_report` 被调 **240 次**（30 次调用 × 8 次线程加载）。
+- **服务端"无变化"快速路径方案（只写方案，未实现）**：见本轮交接报告。
+- **未验证**：真实 TUI 端到端与真实 Gateway 下的效果（本树只有合成负载测量）；服务端快速路径未实现。测量数字只进交接报告，不进仓库。
+
 ## cachecompact 压缩缓存前缀与线程推理档位（2026-10-04，worker/cache-compact；已rebase17j，非作者初审完成）
 
 - **fake transport payload 合同**：`agent_py_agent/tests/test_compact_reasoning_options.py` 捕获 OpenAI-compatible 后端最终 JSON，不访问供应商；**14 passed**。覆盖 max/off 两档、`conversation_compact_summary` 与 `conversation_compact_media_digest` 的选项换算、历史 tool-call 往返、system/messages（reasoning/tool ID/参数）、tools/schema、`auto`、thinking/reasoning_effort；bounded 与 live 的 typed `CacheStructuredPrompt` 路径均核实同一 system/tools/历史，仅在最后 user 内容追加 Compact 指令；carried 文本和分段核实其非完整前缀边界；结构化工具调用不执行，仅额外尝试一次无工具/`none`。tool-loop 包装器与 active-turn 包装器另有线程身份转接断言。

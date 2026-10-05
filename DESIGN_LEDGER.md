@@ -1,5 +1,16 @@
 # 设计台账
 
+## TUI 状态刷新失败的客户端去抖（tuisync，2026-10-04，分支 `worker/tui-sync`，基于 17j 头 `f45e20dac`；ds10 初审，3a 终审，已并入 step17k）
+
+- **起因**：用户反馈 TUI 时不时显示"状态刷新失败，显示上次状态；正在重试"、头部变"! 状态未同步"。3a 只读排查（`~/.my-agent/decision-evidence/final-report-1004/tui-refresh-fail-1004.md`）：`_background_notice_loop` 每轮 POST `/client/notices`、客户端只等 2 秒，**第一次失败就提示**；生产 Gateway CPU 采样 99% 超 100%（中位 138%），连最轻的 `/status` 60 次里 5 次超 2 秒 → 属于过载下的可见降级，不是数据错。
+- **本次改动（客户端去抖）**：`tui_threading.py` 新增两个常量 `TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT=2`、`TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS=3.0`，并把判定抽成模块级 `_NoticeWarnDebounce`；循环只在"连续失败 ≥2 次 **且** 距上次成功 >3 秒"时才发布 `ok=False`，成功立即清除。退避节奏（0.5 翻倍到 8 秒）与轮询节奏（1 秒/空闲 5 秒）**未改**。
+- **用例**：`test_background_notice_display.py` 新增/更新 5 条——单次超时不提示、两个门槛都要满足、时间够但次数不够仍不报、达到门槛才报、恢复后立即清除；既有 `test_notice_loop_exposes_failed_refresh_without_changing_task` 的期望按去抖后的真实行为更新（第 1 轮失败不置位、第 2 轮才置位）。
+- **变异**：V1 去掉次数门槛、V2 去掉时间门槛，**两个都 KILLED**（各自打掉一条门槛用例）。V1 首轮曾 SURVIVED，暴露出缺一条"时间够、次数不够"的用例，已补 `test_tui_notice_loop_needs_failure_count_even_when_slow` 后杀掉。重构后（见下）重跑仍 2/2 KILLED。
+- **尺寸与常数目录**：去抖逻辑首版把 `_background_notice_loop` 撑出 2 条 soft 告警（function + nesting），已抽成模块级 `_NoticeWarnDebounce` 小类（`should_publish(snapshot_ok, now)`），size_diff 回到**新增 0**；新增常量按目录规则命名为 `TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT`（`_COUNT` 单位后缀）与 `TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS`，并重新生成 `constants_catalog.json`（901 项，`--check` 一致）。
+- **验证**：相关 6 文件 255 passed；guards9 187 passed；ruff / boundaries=0 / doc_sync(--base f45e20dac) / strict code-size(hard=0) / diff-check / clean-package 全过；size_diff 新增 0、消失 43。
+- **服务端"无变化"快速路径**：按任务要求**只写方案、未实现**（方案在交接报告）。
+- **未验证**：真实 TUI 端到端与真实 Gateway 下的效果（本树只有合成负载测量）；测量数字只进交接报告，不进仓库。
+
 ## cachecompact：压缩请求沿用主线程缓存前缀（2026-10-04，worker/cache-compact；已并入 step17k，部分生效，两处遗漏待补）
 
 - **3a 挑入时核实（10-05）**：ds7 用两条独立构造路径做字节级比较，tool-loop 路径通过（压缩请求 = 主请求完整字节 + 末尾压缩指令，tools 与档位一致）。两处遗漏：① Gateway 前台压缩路径（cachesim 护栏 test_compaction_call_reuses_the_conversation_history_prefix）仍落在 (enabled, default) 分区，没带线程的 max 档位，护栏继续 strict xfail；② active-turn 路径不带之前的历史（provider_history 从空记录重放），第 1 条消息就分叉。已转作者 luna3 补，补完去掉护栏标记。

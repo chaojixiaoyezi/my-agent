@@ -1180,6 +1180,157 @@ def test_tui_notice_loop_backs_off_and_resets_after_success(monkeypatch) -> None
     assert waits == [0.5, 1.0, 2.0, 1.0, 0.5, 1.0]
 
 
+def _run_notice_loop(monkeypatch, outcomes, rounds, clock_start=100.0):
+    """驱动 _background_notice_loop 跑固定轮数，返回发布的 ok 序列。
+
+    rounds 与发布次数解耦——去抖下失败轮不一定发布，用发布数当停止条件会多跑。
+   时钟按"每轮实际耗时"推进：这样时间门槛是否满足由测试显式控制，不靠真实等待。
+    """
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    published: list[bool] = []
+    waits: list[float] = []
+    clock = [clock_start]
+    feed = iter(outcomes)
+
+    class _StopEvent:
+        def is_set(self):
+            return len(waits) >= rounds
+
+        def wait(self, delay):
+            waits.append(delay)
+            clock[0] += delay
+            return len(waits) >= rounds
+
+    runtime = SimpleNamespace(
+        publish_background_sync_status=lambda *, ok: published.append(ok) or True
+    )
+    monkeypatch.setattr(
+        tui_threading, "_consume_background_notices", lambda *_a, **_k: next(feed, True)
+    )
+    monkeypatch.setattr(tui_threading.time, "monotonic", lambda: clock[0])
+    tui_threading._background_notice_loop(
+        _StopEvent(), object(), "session-debounce", runtime, [None], foreground_running_ref=[True]
+    )
+    return published
+
+
+def test_tui_notice_loop_debounces_single_timeout(monkeypatch) -> None:
+    """单次超时不提示：连次数门槛都没到，界面不该闪一条"状态未同步"。"""
+    published = _run_notice_loop(monkeypatch, (False, True, True, True), rounds=3)
+    # 第 1 轮失败（次数与时间都不够）→ 不发布；随后两轮成功 → 各发布一次 True
+    assert published == [True, True]
+
+
+def test_tui_notice_loop_needs_both_thresholds(monkeypatch) -> None:
+    """两个门槛都要满足：连续失败够次数、但距上次成功还不到 3 秒时，仍然不报。"""
+    published = _run_notice_loop(monkeypatch, (False, False, False), rounds=2)
+    # 两轮都失败，但每轮只等 0.5+1.0=1.5 秒 < 3 秒 → 一次都没报
+    assert published == []
+
+
+def test_tui_notice_loop_needs_failure_count_even_when_slow(monkeypatch) -> None:
+    """时间门槛单独满足也不报：距上次成功很久，但只失败了一次，仍不该提示。"""
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    published: list[bool] = []
+    waits: list[float] = []
+    clock = [400.0]
+    # 先成功一轮（建立 last_success_at 基准）→ 长时间空闲 → 再单次失败
+    feed = iter((True, False, True))
+
+    class _StopEvent:
+        def is_set(self):
+            return len(waits) >= 3
+
+        def wait(self, delay):
+            waits.append(delay)
+            # 每轮推进 30 秒：单次失败时距上次成功远超 3 秒时间门槛
+            clock[0] += 30.0
+            return len(waits) >= 3
+
+    runtime = SimpleNamespace(
+        publish_background_sync_status=lambda *, ok: published.append(ok) or True
+    )
+    monkeypatch.setattr(
+        tui_threading, "_consume_background_notices", lambda *_a, **_k: next(feed, True)
+    )
+    monkeypatch.setattr(tui_threading.time, "monotonic", lambda: clock[0])
+    tui_threading._background_notice_loop(
+        _StopEvent(), object(), "session-count", runtime, [None], foreground_running_ref=[True]
+    )
+
+    # 第 1 轮成功 → True；第 2 轮失败：时间早就够了但次数只有 1 → 不报；第 3 轮成功 → True
+    assert published == [True, True]
+
+
+def test_tui_notice_loop_warns_after_threshold(monkeypatch) -> None:
+    """连续失败达到次数门槛、且距上次成功超过时间门槛，才报未同步。"""
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    published: list[bool] = []
+    waits: list[float] = []
+    # 每轮固定 2 秒：第 2 轮失败时距上次成功 4 秒 > 3 秒，两个门槛都到
+    clock = [200.0]
+    feed = iter((False, False, True, True))
+
+    class _StopEvent:
+        def is_set(self):
+            return len(waits) >= 3
+
+        def wait(self, delay):
+            waits.append(delay)
+            clock[0] += delay + 3.5
+            return len(waits) >= 3
+
+    runtime = SimpleNamespace(
+        publish_background_sync_status=lambda *, ok: published.append(ok) or True
+    )
+    monkeypatch.setattr(
+        tui_threading, "_consume_background_notices", lambda *_a, **_k: next(feed, True)
+    )
+    monkeypatch.setattr(tui_threading.time, "monotonic", lambda: clock[0])
+    tui_threading._background_notice_loop(
+        _StopEvent(), object(), "session-warn", runtime, [None], foreground_running_ref=[True]
+    )
+
+    # 第 1 轮失败：次数不足 → 不报；第 2 轮失败：两门槛都到 → False；第 3 轮成功 → 立刻 True
+    assert published == [False, True]
+
+
+def test_tui_notice_loop_clears_warning_on_recovery(monkeypatch) -> None:
+    """恢复后立即清除：一旦成功立刻回到 ok=True，不等下一轮。"""
+    from agent_py_agent.cli.chat_parts import tui_threading
+
+    published: list[bool] = []
+    waits: list[float] = []
+    clock = [300.0]
+    feed = iter((False, False, True, True))
+
+    class _StopEvent:
+        def is_set(self):
+            return len(waits) >= 3
+
+        def wait(self, delay):
+            waits.append(delay)
+            clock[0] += delay + 3.5
+            return len(waits) >= 3
+
+    runtime = SimpleNamespace(
+        publish_background_sync_status=lambda *, ok: published.append(ok) or True
+    )
+    monkeypatch.setattr(
+        tui_threading, "_consume_background_notices", lambda *_a, **_k: next(feed, True)
+    )
+    monkeypatch.setattr(tui_threading.time, "monotonic", lambda: clock[0])
+    tui_threading._background_notice_loop(
+        _StopEvent(), object(), "session-recover", runtime, [None], foreground_running_ref=[True]
+    )
+
+    assert published == [False, True]
+    assert published[-1] is True
+
+
 def test_tui_notice_loop_slows_healthy_idle_sessions(monkeypatch) -> None:
     """后台与前台都空闲时按五秒刷新，避免退出观察后的 tmux 窗口压垮 Gateway。"""
     from agent_py_agent.cli.chat_parts import tui_threading
@@ -1213,6 +1364,7 @@ def test_tui_notice_loop_slows_healthy_idle_sessions(monkeypatch) -> None:
 
 
 def test_notice_loop_exposes_failed_refresh_without_changing_task(monkeypatch) -> None:
+    """连续失败才对外报未同步；单次失败不打扰用户，且不改变任务状态。"""
     from agent_py_agent.cli.chat_parts import tui_threading
     from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 
@@ -1222,10 +1374,11 @@ def test_notice_loop_exposes_failed_refresh_without_changing_task(monkeypatch) -
     outcomes = iter((False, False, True))
     observed = []
     redraws = []
+    clock = [500.0]
 
     class StopEvent:
         def is_set(self):
-            return False
+            return len(observed) >= 3
 
         def wait(self, delay):
             snapshot = runtime.store.snapshot()
@@ -1233,17 +1386,20 @@ def test_notice_loop_exposes_failed_refresh_without_changing_task(monkeypatch) -
             assert snapshot.active_blocks == before.active_blocks
             assert snapshot.status == before.status
             assert snapshot.pending_steers == before.pending_steers
-            return len(observed) == 3
+            clock[0] += delay + 3.5
+            return len(observed) >= 3
 
     monkeypatch.setattr(
         tui_threading, "_consume_background_notices", lambda *args: next(outcomes)
     )
+    monkeypatch.setattr(tui_threading.time, "monotonic", lambda: clock[0])
     tui_threading._background_notice_loop(
         StopEvent(), object(), runtime.session_id, runtime,
         [SimpleNamespace(invalidate=lambda: redraws.append(True))],
     )
 
-    assert observed == [(True, 0.5), (True, 1.0), (False, 1.0)]
+    # 第 1 轮失败（去抖未触发）仍显示未失败；第 2 轮失败达到门槛才置未同步；第 3 轮成功清除
+    assert observed == [(False, 0.5), (True, 1.0), (False, 1.0)]
     assert len(redraws) == 2
 
 
@@ -1843,3 +1999,23 @@ def test_main_activity_elapsed_never_falls_back_to_old_panel_start() -> None:
 
     assert "Working · main · 等待 1 个子代理 · 0:00" in rendered
     assert "15:00" not in rendered
+
+
+# LLM: 去抖状态机的“成功即清零”有两半：失败计数清零、成功时刻刷新。任一半退化都会让成功之后的单次或短时失败立刻报警
+#   （ds10 tuisyncr 小问题 1：m1“时间基准不刷新”、m4“计数不清零”两个变异原先存活）。用显式时刻驱动，不依赖真实时钟。
+# 函数用途: 断言成功一次后失败计数与时间基准都重置，单次失败与成功后短时连败都不报警。
+def test_notice_debounce_success_resets_count_and_time_base() -> None:
+    from agent_py_agent.cli.chat_parts.tui_threading import _NoticeWarnDebounce
+
+    debounce = _NoticeWarnDebounce()
+    debounce.last_success_at = 0.0
+    assert debounce.should_publish(False, 1.0) is False
+    assert debounce.should_publish(True, 2.0) is True
+    # 计数必须清零：成功后 3.5 秒的第一次失败只算 1 次，不报警。
+    assert debounce.should_publish(False, 5.5) is False
+    assert debounce.should_publish(False, 6.0) is True
+    assert debounce.should_publish(True, 10.0) is True
+    # 时间基准必须刷新：成功后 1 秒内连败两次，时间门槛没到，不报警。
+    assert debounce.should_publish(False, 10.5) is False
+    assert debounce.should_publish(False, 11.0) is False
+    assert debounce.should_publish(False, 13.5) is True

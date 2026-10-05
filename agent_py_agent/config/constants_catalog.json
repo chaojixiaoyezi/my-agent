@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 899,
+  "count": 901,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -6794,6 +6794,22 @@
       "unit": "秒",
       "category": "其它",
       "description": "当前 HTTP 兼容协议在有任务时按 1 秒刷新，完全空闲时降到 5 秒，兼顾近实时与单 Gateway 负载。"
+    },
+    {
+      "name": "TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT",
+      "file": "agent_py_agent/cli/chat_parts/tui_threading.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "不该在界面上闪一条警告——用户看到的多是噪声，恢复时又要闪一次。取 2 表示\"至少两次连续失败\"。"
+    },
+    {
+      "name": "TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS",
+      "file": "agent_py_agent/cli/chat_parts/tui_threading.py",
+      "value": 3.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "3 秒按 1 秒轮询节奏相当于\"连续三个周期都没拿到\"，足够排除单次抖动。"
     },
     {
       "name": "TUI_REFRESH_INTERVAL_SECONDS",

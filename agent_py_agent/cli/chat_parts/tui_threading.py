@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -22,6 +23,12 @@ TUI_BACKGROUND_NOTICE_IDLE_INTERVAL_SECONDS = 5.0
 TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS = 0.5
 # 后台通知拉取失败的重试间隔封顶 8 秒
 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS = 8.0
+# 去抖：连续失败到这个次数才提示"状态未同步"。单次超时（例如 Gateway 正忙、恰好一次压线）
+# 不该在界面上闪一条警告——用户看到的多是噪声，恢复时又要闪一次。取 2 表示"至少两次连续失败"。
+TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT = 2
+# 去抖：距上一次成功超过这个秒数才提示。和次数门槛同时满足才显示，避免在快速恢复时误报；
+# 3 秒按 1 秒轮询节奏相当于"连续三个周期都没拿到"，足够排除单次抖动。
+TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS = 3.0
 
 
 # LLM: config factory 透传同一 queue/refs/runtime/local_run_ref；不得复制状态或创建第二个控制句柄。
@@ -107,9 +114,35 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
     ).start()
 
 
+# LLM: 去抖状态机：单次超时（Gateway 正忙、恰好压线）不提示，避免警告一闪一灭；只有连续失败
+#   达到次数门槛、且距上次成功超过时间门槛才对外报未同步；一旦成功立即清零并刷新成功时刻。
+# 类用途: 保存后台通知循环的去抖状态，判定本轮是否应发布同步状态。
+class _NoticeWarnDebounce:
+    # 函数用途: 建立失败计数与成功时刻基准。
+    def __init__(self) -> None:
+        self.consecutive_failures = 0
+        self.last_success_at = time.monotonic()
+
+    # LLM: 每轮都必须调用（即使没有发布者），否则失败计数与时间基准会漂移。成功恒返回 True，
+    #   失败只在两个门槛都满足时返回 True。
+    # 函数用途: 记录本轮结果，返回是否应发布本轮同步状态。
+    def should_publish(self, snapshot_ok: bool, now: float) -> bool:
+        if snapshot_ok:
+            self.consecutive_failures = 0
+            self.last_success_at = now
+            return True
+        self.consecutive_failures += 1
+        return (
+            self.consecutive_failures >= TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT
+            and now - self.last_success_at >= TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS
+        )
+
+
 # LLM: The first snapshot is immediate. Foreground/background-active sessions poll at one second;
 # inactive sessions poll at five seconds. Transport failures use a separate exponential backoff
 # that resets after the next valid snapshot, so detached TUIs cannot storm the single Gateway.
+# "Unsynced" is debounced by _NoticeWarnDebounce: a single over-deadline round must not flash a
+# warning, and any success clears it immediately.
 # 函数用途: 按游标读取会话更新，近期通知去重有界；失败退避并标记未同步，不终止后台任务。
 def _background_notice_loop(
     stop_event: threading.Event,
@@ -123,6 +156,7 @@ def _background_notice_loop(
     seen = TuiIdentityWindow()
     event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
+    debounce = _NoticeWarnDebounce()
     while not stop_event.is_set():
         try:
             snapshot_ok = _consume_background_notices(
@@ -137,8 +171,9 @@ def _background_notice_loop(
         except Exception:
             # 监视失败不改业务状态；显示旧快照警告后沿原退避合同等待下一轮。
             snapshot_ok = False
+        should_publish = debounce.should_publish(snapshot_ok, time.monotonic())
         health_publisher = getattr(tui_runtime, "publish_background_sync_status", None)
-        if callable(health_publisher) and health_publisher(ok=snapshot_ok):
+        if should_publish and callable(health_publisher) and health_publisher(ok=snapshot_ok):
             if app_ref and app_ref[0] is not None:
                 app_ref[0].invalidate()
         if snapshot_ok:
