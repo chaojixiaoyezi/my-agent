@@ -6,6 +6,7 @@
 - **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_observation_screenshot.py agent_py_agent/tests/test_screen_observation_core.py agent_py_agent/tests/test_computer_use_observation_tools.py agent_py_agent/tests/test_mcp_observation_binding.py agent_py_agent/tests/test_computer_use_observe_only.py agent_py_agent/tests/test_mcp_client.py agent_py_agent/tests/test_plugin_observation.py -q` → 170 条：169 passed、1 failed（`test_mcp_client::test_client_reconnects_same_binding_after_stdio_server_dies` 既有失败，merge-base `d05a0d0753` 复核同样失败，非本次引入）。
 - **变异**（4/4 KILLED，按字节还原）：`_screenshot_requested` 恒 True；去掉注入前档案复核；`pop` 改 `get`；执行器不注入 `__observation_screenshot`。
 - **门禁**：guards9 存在的 11 文件 187 passed（第 12 个 `test_backend_signature_guardrails.py` 不在本分支，属主线新增）；ruff、import boundaries 0、`check_doc_sync --base 32e8f8745` PASS、strict code-size hard=0、`size_diff.sh` 新增 0/消失 50、`git diff --check`、clean package 全过。
+- **3a 终审补充**：`test_observation_screenshot.py` +2（非观察工具的图片原样保留、观察被核验拒绝时只剥离不落盘），构造用的观察结果补上 `observation` 信封；变异 2/2 KILLED（去掉信封门、拒绝也落盘）。
 - **未验证**：真实适配器生成与真实模型看图行为（同 vision1）；`_meta` 协商在真实 Gateway 全链的端到端（单测覆盖到 binding/执行器/适配器各层）。
 
 ## J16 第 9 节 观察截图附给能看图的模型（vision1，2026-10-05，worker/vision1）

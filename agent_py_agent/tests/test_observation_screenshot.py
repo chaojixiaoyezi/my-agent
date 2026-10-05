@@ -13,6 +13,7 @@ import stat
 import struct
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,7 +61,8 @@ def _outcome_with_image(png_b64: str) -> ToolHandlerOutcome:
         ],
         "structuredContent": {"window": "win:b:1", "generation": "b-1-1"},
     }
-    return ToolHandlerOutcome("observe_window", True, json.dumps(payload, ensure_ascii=False))
+    return ToolHandlerOutcome("observe_window", True, json.dumps(payload, ensure_ascii=False),
+                              result_envelope={"observation": {"observation_id": "obs-vision"}})
 
 
 def _native_params():
@@ -120,6 +122,28 @@ def test_model_without_image_declaration_gets_no_screenshot(tmp_path):
     params = _native_params()
     messages = _native_provider_messages(agent, params)
     assert not _has_image(messages)
+
+
+# 函数用途: 没有观察核验事实的工具（任意 MCP 工具返回图片）结果原样保留：不剥离、不落盘、不登记（3a 终审收紧）。
+def test_non_observation_tool_images_are_left_untouched(tmp_path):
+    agent = _fake_agent(tmp_path, ["text", "image"])
+    png_b64 = base64.b64encode(TINY_PNG).decode("ascii")
+    outcome = replace(_outcome_with_image(png_b64), result_envelope={})
+
+    kept, ref = extract_observation_screenshot(agent, outcome)
+    assert kept is outcome and ref is None, "非观察工具的图片不能被当成观察截图"
+    assert not (tmp_path / "media").exists()
+
+
+# 函数用途: 观察记录被宿主核验拒绝时，图片块照样剥离但不落盘、不登记（截图来自未核验的观察）。
+def test_rejected_observation_strips_image_without_storing(tmp_path):
+    agent = _fake_agent(tmp_path, ["text", "image"])
+    png_b64 = base64.b64encode(TINY_PNG).decode("ascii")
+    outcome = replace(_outcome_with_image(png_b64), result_envelope={"observation_rejected": "OBSERVATION_STALE"})
+
+    stripped, ref = extract_observation_screenshot(agent, outcome)
+    assert ref is None and not (tmp_path / "media").exists()
+    assert '"image"' not in stripped.output and png_b64 not in stripped.output
 
 
 def test_observation_screenshot_respects_pixel_and_byte_caps():

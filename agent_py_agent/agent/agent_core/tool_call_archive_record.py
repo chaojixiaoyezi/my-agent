@@ -128,12 +128,17 @@ def archive_tool_output_projection(
     return ToolOutputProjection(content_blocks=tuple(blocks), refs=refs, metadata=metadata)
 
 
-# LLM: 观察截图（J16 第 9 节）是宿主补充的临时视觉事实：只在档案声明含 image 时把 MCP image 内容块落盘成
-#   owner 附件引用；其它情况（没声明、坏数据、落盘失败）一律剥离图片块并返回 None，绝不影响观察结果本身。
+# LLM: 观察截图（J16 第 9 节）是宿主补充的临时视觉事实。只处理宿主核验过的观察结果：结果信封里有
+#   observation_binding.attach 写入的 observation（核验通过）或 observation_rejected（核验拒绝）才动；其它工具的
+#   image 块保持原样，不能被当成观察截图注入。核验通过且档案声明含 image 时把 MCP image 内容块落盘成 owner 附件引用；
+#   其它情况（拒绝、没声明、坏数据、落盘失败）一律剥离图片块并返回 None，绝不影响观察结果本身。
 #   剥离后的 outcome 继续走归档与模型投影，保证 base64 不进归档正文、不进模型可见结果。
 #   档案判定复用 conversation.input_media.model_accepts_images（与观察协商、注入前复核同源，vision2）。
-# 函数用途: 从工具结果里取出观察截图：按档案模态决定是否落盘，返回（剥离图片块后的结果，附件引用或 None）。
+# 函数用途: 从观察工具结果里取出截图：按核验结果和档案模态决定是否落盘，返回（剥离图片块后的结果，附件引用或 None）。
 def extract_observation_screenshot(agent: object, outcome: ToolHandlerOutcome) -> tuple[ToolHandlerOutcome, dict | None]:
+    envelope = outcome.result_envelope if isinstance(outcome.result_envelope, dict) else {}
+    if not any(key in envelope for key in _OBSERVATION_ENVELOPE_KEYS):
+        return outcome, None
     output = str(outcome.output or "")
     if '"image"' not in output:
         return outcome, None
@@ -149,9 +154,13 @@ def extract_observation_screenshot(agent: object, outcome: ToolHandlerOutcome) -
         return outcome, None
     kept = [block for block in blocks if block not in images]
     stripped = replace(outcome, output=json.dumps({**payload, "content": kept}, ensure_ascii=False))
-    if not model_accepts_images(agent):
+    if not isinstance(envelope.get("observation"), dict) or not model_accepts_images(agent):
         return stripped, None
     return stripped, _store_observation_screenshot(agent, images[0])
+
+
+# 观察绑定写进结果信封的核验事实键：observation = 核验通过的观察记录，observation_rejected = 核验拒绝码。
+_OBSERVATION_ENVELOPE_KEYS = ("observation", "observation_rejected")
 
 
 # LLM: 落盘复用入站附件的同一 owner 私有内容寻址目录与导入函数；base64 坏数据、缺 owner home、写盘失败
