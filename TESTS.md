@@ -180,6 +180,22 @@
 
 - **3a 终审补充**：`test_pty_sessions.py` +1（并发设置空闲阈值只启动一条巡检线程，假线程在首次 start 时插入并发调用者，结果不依赖调度时机）；`test_pty_turn_lifecycle.py` +1（effective owner 为空时按 canonical owner home 回收）；变异 2/2 KILLED（锁外启动、只用 effective）。前端目录重新生成到 261 个字段。
 
+## scheduler 判活跨平台启动指纹（schedstart，2026-10-05，基于 17l `dea220623`；待初审）
+
+- **改动**：`scheduler/repository.py`（删本地 `_process_start_time`，改用 `common/heartbeat.process_start_time`；`_runner_liveness` 字符串/旧数字双口径，新增 `_legacy_numeric_liveness`）、`runtime_db/repository.py` 与 `runtime_db/executor_liveness.py`（随迁指纹来源；executor_liveness 新增 `_same_start_token`）。测试更新 3 文件（`test_scheduler_repository.py`、`test_scheduler_unknown_recovery.py`、`test_runtime_db_recover_stale.py`），新增 2 条用例（macOS 风格指纹判死、旧数字记录三态兼容）。
+- **命令**（工作树根；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_scheduler_repository.py agent_py_agent/tests/test_scheduler_unknown_recovery.py agent_py_agent/tests/test_runtime_db_recover_stale.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-schedstart
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_executor_exit_recovery.py agent_py_agent/tests/test_runtime_db.py agent_py_agent/tests/test_runtime_db_main_chain.py agent_py_agent/tests/test_runtime_db_operations.py agent_py_agent/tests/test_host_command_execution.py -q --tb=line -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-schedstart
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <scheduler 17 文件清单见交接报告> -q --tb=line -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-schedstart
+  ```
+
+- **结果**：三个直接文件 **47 passed**；runtime_db 相关组 6 文件 **0 failed**；scheduler 17 文件 **9 failed**（全部 `test_scheduler_waiting_deadlock.py::TestPendingProcessCompletion`，`ValueError: managed process instance is partially bound`——沙箱内托管进程身份不可用）。基线 `dea220623` 临时工作树（`/private/tmp/claude-501/schedstart-base`）同文件同样 **9 failed**，失败节点逐条 diff 一致（`FAILED_NODES_IDENTICAL`）。
+- **变异**（`/private/tmp/schedstart_mutate.py`，每项单处修改、原字节恢复 + sha256 校验）：去掉字符串指纹分支 → macOS 用例红；旧数字不可比判死 → 兼容用例红；指纹不同也判活 → 复用判死用例红；取不到指纹判死 → fail-closed 用例红。**4/4 KILLED**。
+- **门禁**：guards9 12 文件全过；ruff 全过、import boundaries=0、DOC_SYNC_PASS（gateway 02-progress/04-structure 已同步）、strict code-size `hard=0 blocked=False`、size_diff 新增 0 / 消失 57、`git diff --check` 干净、clean-package OK。
+- **未验证**：真实 macOS ps 输出链路（沙箱内用替身覆盖）、生产 claim 恢复真实场景、非作者初审。
+
 ## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05；已实现，待 3a 复审）
 
 - **实现**：普通 `claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime 三态死亡证明；lease 过期但 runner 活着或身份不可核验时不另发 claim。death proof 后先持久 CAS 为 `queued`，再以递增 `claim_epoch` 领取；旧 heartbeat/release/mark-running/finish 按 claim id 与 epoch 双重 CAS 拒绝。misfire grace 合同未改。

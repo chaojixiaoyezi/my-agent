@@ -172,6 +172,14 @@
 - **3a 终审修正**：① 新配置项 `pty_session_idle_timeout_minutes` 同步重新生成前端配置目录（ds10 初审的必须改项，原先 `test_backend_config_catalog.py` 红）；② 巡检线程改为持锁登记并启动——原实现在锁外 `start()`，并发设置阈值时可多开巡检线程；③ 补用例钉住“effective_owner_scope_root 为空时仍按 home_paths 的 canonical owner home 回收”。
 - **未验证 / 已知边界**：真机（沙箱外）sandbox-exec 路径与 `termination.confirmed=True` 由 3a 用强制能力模式复跑（`test_reclaim_pty_sessions_confirms_termination_outside_sandbox`）；子代理树根差异只做了合并回执设计，没有真机子代理用例；**Gateway 停机路径没有新增回收调用**（本次范围只到回合/任务收口；停机时 PTY master 关闭会给前台进程组发 SIGHUP，但忽略 HUP 的进程仍可能残留，交由空闲兜底与后续 17k 计划评估）；真实 Gateway/TUI/IM 端到端未跑。
 
+## scheduler 判活跨平台启动指纹（schedstart，2026-10-05，基于 17l `dea220623`；待初审）
+
+- **来源**：SLP-2A 终审接受的已知边界——`scheduler/repository._process_start_time` 只读 Linux /proc，macOS（生产）恒 None，判活只剩“进程号在不在”，PID 复用会一直判活、旧 claim 卡住。
+- **改法**：runner 启动指纹改用 `common/heartbeat.process_start_time`（Linux /proc、其它平台 `ps -o lstart`，统一字符串），记录（`claim_run` 的 `runner_start_time`）与比较（`_runner_liveness`）同一种表示。兼容旧落盘记录：数字（/proc ticks）只在当前指纹可转数字（Linux）时比较，转不了（macOS lstart）一律 unverifiable、不判死；None 仍只看进程号。三态语义不变：只有“进程不存在”或“指纹可读且不同”才算死亡。
+- **共用方随迁**：`runtime_db/repository` 与 `runtime_db/executor_liveness` 原借用 scheduler 的 `_process_start_time`（RUN-01 共用判死实现，注释即“禁止另写第二份”），随迁到 heartbeat；executor_liveness 的 replaced 判定改为字符串直接比、数字仅在可转时比，不可比不报替换（不误判死亡）。
+- **验收**：新增 macOS 风格指纹判死、旧数字记录三态兼容用例；改写现有判活用例全部通过；4 个单点变异全 KILLED；scheduler 17 文件与 runtime_db 相关组通过（9 项 `test_scheduler_waiting_deadlock` fixture 失败为基线既有、节点一致）。命令见 TESTS。
+- **盘点（未改）**：另有 4 处各自实现的启动令牌/时间：`local_storage/tool_operations._read_process_start_token`、`tooling/process_registry.capture_process_birth_token`、`runtime_db/repository._start_token`、`gateway_parts/daemon_metadata._get_process_start_time`；收口建议与迁移注意见本轮交接报告（3a 收进问题清单）。
+- **未验证**：真实 macOS 的 ps 输出链路（沙箱内用替身覆盖）、生产 claim 恢复真实场景、非作者初审。
 
 ## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05，基于 17k `812828b98`；ds8 初审通过，3a 终审修正后挑入 17l）
 

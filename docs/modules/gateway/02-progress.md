@@ -671,6 +671,8 @@ owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-d
 
 SLP-2A scheduler claim 栅栏（2026-10-05，`worker/slp2a`；状态：已实现，待 3a 复审）：`claim_run` 与 `recover_interrupted_executions` 现共用 PID/starttime 三态死亡证明；expired+live/unverifiable 保留当前 claim，dead proof 后先 CAS 为 queued，再由普通 claim 生成递增 epoch token；迟到 heartbeat/finish 的 epoch 写入会被拒。misfire policy 和 `scheduler/service.py` 未变；SLP-2B 的 action operation identity 仍待实现。19 文件 sweep 的 9 项 `test_scheduler_waiting_deadlock.py` fixture 失败已在基线 `812828b98` 复现，其余相关用例通过；guards9 前 11 项通过（基线无第 12 项），静态与尺寸门禁通过。命令和未验证项见 `TESTS.md` 的 SLP-2A 小节。
 
+schedstart scheduler 判活跨平台指纹（2026-10-05，`worker/schedstart`；状态：已实现，待初审）：`scheduler/repository` 的 runner 启动指纹改用 `common/heartbeat.process_start_time`（Linux 读 /proc、其它平台 `ps -o lstart`，统一字符串），记录与比较同一种表示；已落盘的旧数字记录只在当前指纹可转数字（Linux ticks）时核验，转不了（macOS lstart）一律 unverifiable、不判死。`runtime_db/repository` 与 `runtime_db/executor_liveness` 两处共用方随迁到 heartbeat（executor_liveness 的指纹比较改双口径：字符串直接比、数字仅在可转时比，不可比不报 replaced）。`test_scheduler_waiting_deadlock.py` 的 9 项 fixture 失败为沙箱内托管进程身份不可用的既有失败，失败节点与基线 `dea220623` 一致。命令与结果见 `TESTS.md`。
+
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。
 - 现在由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得 capability 配置，作为关键字参数只交给这两个视图。

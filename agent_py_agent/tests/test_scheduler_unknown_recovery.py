@@ -57,7 +57,7 @@ def _force_crash_state(repo: SchedulerRepository, run_id: str, *, pid: int) -> N
     run = store["runs"][run_id]
     run["claim_expires_at"] = 1_005.0  # 过期(now=1_006 时)
     run["runner_pid"] = pid
-    run["runner_start_time"] = 7.0
+    run["runner_start_time"] = "7"
     store["runs"][run_id] = run
     repo.store_path.write_text(
         json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -121,7 +121,7 @@ def test_live_process_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:
     run_id = _make_claimed_run(repo)
     _force_crash_state(repo, run_id, pid=71)
     monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
-    monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: 7.0)
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "7")
 
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == []  # 未证实死亡, 不动
@@ -169,7 +169,7 @@ def test_pid_reuse_detected_by_start_time_then_requeued(tmp_path, monkeypatch) -
     run = store["runs"][run_id]
     run["claim_expires_at"] = 1_005.0
     run["runner_pid"] = 71  # pid 存活(复用场景)
-    run["runner_start_time"] = 1.0  # 记录的启动时刻(旧)
+    run["runner_start_time"] = "1"  # 记录的启动指纹(旧代)
     store["runs"][run_id] = run
     repo.store_path.write_text(
         json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -177,7 +177,7 @@ def test_pid_reuse_detected_by_start_time_then_requeued(tmp_path, monkeypatch) -
     )
     # 当前进程实际 start_time 与记录不同(模拟 pid 复用): 死亡证明成立
     monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
-    monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: 999.0)
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "999")
 
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == [run_id]  # pid 复用 = 原进程已死
@@ -185,6 +185,62 @@ def test_pid_reuse_detected_by_start_time_then_requeued(tmp_path, monkeypatch) -
     assert queued["status"] == "queued" and queued["claim_id"] == ""
     replacement = repo.claim_run(run_id, lease_seconds=10, now=1_007.0)
     assert replacement["claim_epoch"] == first["claim_epoch"] + 1
+
+
+# LLM: macOS 没有 /proc，指纹是 ps lstart 字符串；同 pid 但指纹不同同样构成死亡证明（schedstart 跨平台口径）。
+# 函数用途: 验证非 Linux 的字符串指纹在可读且不同时判死并重排队，不需要真实 macOS。
+def test_macos_style_fingerprint_mismatch_proves_pid_reuse(tmp_path, monkeypatch) -> None:
+    repo = _repository(tmp_path)
+    run_id = _make_claimed_run(repo)
+    first = repo.get_active_run(run_id)
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    run = store["runs"][run_id]
+    run["claim_expires_at"] = 1_005.0
+    run["runner_pid"] = 71
+    run["runner_start_time"] = "Fri Oct  3 09:00:00 2026"
+    store["runs"][run_id] = run
+    repo.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "Sat Oct  4 10:00:00 2026")
+
+    recovered = repo.recover_interrupted_executions(now=1_006.0)
+    assert recovered == [run_id]  # 同 pid 但指纹不同 = 原进程已死
+    queued = repo.get_active_run(run_id)
+    assert queued["status"] == "queued" and queued["claim_id"] == ""
+    replacement = repo.claim_run(run_id, lease_seconds=10, now=1_007.0)
+    assert replacement["claim_epoch"] == first["claim_epoch"] + 1
+
+
+# LLM: 旧落盘记录是 /proc ticks 数字；只有当前指纹可转数字（Linux）时才比较，转不了（macOS lstart）不可核验、绝不判死。
+# 函数用途: 验证旧数字记录的三种兼容结果：不可比保持、可比且相等保持、可比且不同判死。
+def test_legacy_numeric_record_only_compared_when_convertible(tmp_path, monkeypatch) -> None:
+    repo = _repository(tmp_path)
+    run_id = _make_claimed_run(repo)
+    _force_crash_state(repo, run_id, pid=71)
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    store["runs"][run_id]["runner_start_time"] = 7.0  # 旧口径数字记录
+    repo.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
+
+    # macOS 形态：当前指纹是 ps lstart，转不了数字 → 不可核验，保持原态
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "Fri Oct  3 09:00:00 2026")
+    assert repo.recover_interrupted_executions(now=1_006.0) == []
+    assert repo.get_active_run(run_id)["status"] == "claimed"
+
+    # Linux 形态：当前指纹是同值 ticks 字符串，可转数字且相等 → 存活
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "7")
+    assert repo.recover_interrupted_executions(now=1_006.0) == []
+
+    # Linux 形态：可转但不同 → pid 复用判死
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "999")
+    assert repo.recover_interrupted_executions(now=1_006.0) == [run_id]
+    assert repo.get_active_run(run_id)["status"] == "queued"
 
 
 def test_unverifiable_oserror_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:

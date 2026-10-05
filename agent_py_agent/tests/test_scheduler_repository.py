@@ -70,13 +70,13 @@ def _claimed_due_run(repository: SchedulerRepository) -> dict[str, object]:
 
 
 # LLM: Mutate only the pytest temporary owner ledger to model an expired runner identity.
-# 函数用途: 为死亡证明测试准备可控的 lease/PID/starttime，避免依赖真实进程状态。
+# 函数用途: 为死亡证明测试准备可控的 lease/PID/starttime（字符串指纹或旧数字记录），避免依赖真实进程状态。
 def _expire_claim(
     repository: SchedulerRepository,
     claim: dict[str, object],
     *,
     runner_pid: int,
-    runner_start_time: float | None,
+    runner_start_time: str | float | None,
 ) -> None:
     store = json.loads(repository.store_path.read_text(encoding="utf-8"))
     run_id = str(claim["run_id"])
@@ -235,9 +235,9 @@ def test_misfire_claim_takeover_finish_and_history(tmp_path, monkeypatch) -> Non
 def test_expired_claim_does_not_transfer_while_runner_is_alive(tmp_path, monkeypatch) -> None:
     repository = _repository(tmp_path)
     first = _claimed_due_run(repository)
-    _expire_claim(repository, first, runner_pid=71, runner_start_time=7.0)
+    _expire_claim(repository, first, runner_pid=71, runner_start_time="7")
     monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
-    monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: 7.0)
+    monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: "7")
 
     replacement = repository.claim_run(str(first["run_id"]), lease_seconds=10, now=1_012)
 
@@ -254,16 +254,16 @@ def test_expired_claim_fails_closed_without_death_proof(tmp_path, monkeypatch, u
     if unverifiable == "missing_pid":
         _expire_claim(repository, first, runner_pid=0, runner_start_time=None)
     else:
-        _expire_claim(repository, first, runner_pid=71, runner_start_time=7.0)
+        _expire_claim(repository, first, runner_pid=71, runner_start_time="7")
     if unverifiable == "permission_error":
         def deny_process_probe(_pid, _signal):
             raise PermissionError("process existence cannot be confirmed")
 
         monkeypatch.setattr(repository_module.os, "kill", deny_process_probe)
-        monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: None)
+        monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: None)
     elif unverifiable == "missing_start_time":
         monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
-        monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: None)
+        monkeypatch.setattr(repository_module, "process_start_time", lambda _pid: None)
 
     replacement = repository.claim_run(str(first["run_id"]), lease_seconds=10, now=1_012)
 
@@ -276,7 +276,7 @@ def test_expired_claim_fails_closed_without_death_proof(tmp_path, monkeypatch, u
 def test_dead_runner_is_cas_cleared_before_one_new_epoch_claim(tmp_path, monkeypatch) -> None:
     repository = _repository(tmp_path)
     first = _claimed_due_run(repository)
-    _expire_claim(repository, first, runner_pid=71, runner_start_time=7.0)
+    _expire_claim(repository, first, runner_pid=71, runner_start_time="7")
     monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
     writes: list[str] = []
     write_store = repository._write_store_unlocked

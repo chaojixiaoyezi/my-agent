@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.heartbeat import process_start_time
 from ..common.json_io import (
     append_private_jsonl_records,
     locked_json_path,
@@ -436,9 +437,9 @@ class _SchedulerRunOperations:
                 "claimed_at": current,
                 "claim_expires_at": current + max(1, int(lease_seconds or 1)),
                 # P0-4: 记录持有 claim 的进程身份(崩溃恢复判活的死亡证明来源);
-                # runner_start_time 供 pid 复用核对(seq1562 收口), 不可读时 None。
+                # runner_start_time 是跨平台启动指纹字符串(schedstart 统一口径), 不可读时 None。
                 "runner_pid": os.getpid(),
-                "runner_start_time": _process_start_time(os.getpid()),
+                "runner_start_time": process_start_time(os.getpid()),
                 "updated_at": current,
             }
             store["runs"][run_id] = claimed
@@ -1316,22 +1317,9 @@ def _process_state(pid: int) -> str:
         return "unverifiable"
 
 
-def _process_start_time(pid: int) -> float | None:
-    """进程启动时刻(Linux /proc/<pid>/stat 字段 22, starttime ticks)。
-
-    供 P0-4 的 pid 复用核对: pid 存活但启动时刻与 claim 记录不匹配 = 原
-    进程已死、pid 被复用(死亡证明)。跨平台不可读时返回 None(调用方仅做
-    pid 探活, fail-closed 不猜)。
-    """
-    try:
-        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
-        fields = stat.rsplit(")", 1)[-1].split()
-        return float(fields[19])  # starttime 是第 22 个字段(0-based 19)
-    except (OSError, ValueError, IndexError, TypeError):
-        return None
-
-
 # LLM: Lease expiry is not proof of death; only a missing PID or a verified PID/starttime mismatch is reclaimable.
+#   启动指纹统一用 common.heartbeat.process_start_time 的跨平台字符串；旧数字记录只在 Linux（/proc ticks）可比，
+#   比较不了（例如 macOS 的 ps lstart 无法转数字）一律 unverifiable，绝不据此判死。
 # 函数用途: 普通 claim 和恢复器共用 runner 三态判断，身份读不出时返回 unverifiable 并阻止接管。
 def _runner_liveness(run: dict[str, object]) -> str:
     raw_pid = run.get("runner_pid")
@@ -1349,22 +1337,25 @@ def _runner_liveness(run: dict[str, object]) -> str:
     recorded_start = run.get("runner_start_time")
     if recorded_start is None:
         return "alive"
-    try:
-        expected_start = float(recorded_start)
-    except (TypeError, ValueError):
-        return "unverifiable"
-    if not math.isfinite(expected_start):
-        return "unverifiable"
-    current_start = _process_start_time(pid)
+    current_start = process_start_time(pid)
     if current_start is None:
         return "unverifiable"
+    if isinstance(recorded_start, str):
+        return "alive" if current_start == recorded_start else "dead"
+    return _legacy_numeric_liveness(recorded_start, current_start)
+
+
+# LLM: 旧落盘记录是 /proc ticks 数字；Linux 上新指纹是同值字符串，可转数字比较；其它平台转不了就不可核验。
+# 函数用途: 兼容旧数字 runner_start_time 的指纹比对，不把"格式对不上"当死亡证据。
+def _legacy_numeric_liveness(recorded_start: object, current_start: str) -> str:
     try:
-        actual_start = float(current_start)
+        expected = float(recorded_start)  # type: ignore[arg-type]
+        actual = float(current_start)
     except (TypeError, ValueError):
         return "unverifiable"
-    if not math.isfinite(actual_start):
+    if not math.isfinite(expected) or not math.isfinite(actual):
         return "unverifiable"
-    return "alive" if actual_start == expected_start else "dead"
+    return "alive" if actual == expected else "dead"
 
 
 # LLM: Build recovery updates from one owner-store snapshot; callers apply the returned patch under the existing store lock.

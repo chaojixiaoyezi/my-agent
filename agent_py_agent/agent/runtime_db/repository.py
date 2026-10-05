@@ -35,13 +35,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+# LLM: 与 scheduler P0-4 共用同一套进程死亡证明判定（RUN-01），禁止另写第二份判死实现；
+#   启动指纹统一取自 common.heartbeat（跨平台字符串），比较处只在可转数字时核验、否则 fail-closed。
+from ..common.heartbeat import process_start_time as _proc_start_time
 from ..common.id_generator import new_id
 from ..common.strict_json import load_strict_json
-
-# LLM: 与 scheduler P0-4 共用同一套进程死亡证明判定（RUN-01），禁止另写第二份判死实现。
-from ..scheduler.repository import (
-    _process_start_time as _proc_start_time,
-)
 from ..scheduler.repository import (
     _process_state as _proc_state,
 )

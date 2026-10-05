@@ -130,12 +130,12 @@ def test_stale_main_run_blocks_auto_mount_until_explicit_recovery(tmp_path):
 # 函数用途: 验证并发运行中的真实 attempt 不会被误调和。
 def test_alive_pid_with_matching_start_time_kept(tmp_path):
     repo = _make_repo(tmp_path)
-    from agent_py_agent.agent.scheduler.repository import _process_start_time
+    from agent_py_agent.agent.common.heartbeat import process_start_time
 
     agent_run_id = _seed_run(
         repo,
         status="running",
-        metadata={"runner_pid": os.getpid(), "runner_start_time": _process_start_time(os.getpid())},
+        metadata={"runner_pid": os.getpid(), "runner_start_time": process_start_time(os.getpid())},
     )
     assert repo.recover_stale_attempts() == []
     with repo._runtime_connection() as conn:

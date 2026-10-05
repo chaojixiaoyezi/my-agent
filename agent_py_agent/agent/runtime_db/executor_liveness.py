@@ -1,5 +1,6 @@
 # LLM: 执行器身份属于 exact attempt 元数据，内存登记仅证明本进程执行区间是否仍存在。
 # 不按心跳、token 速度或 lease 年龄判死；状态投影和通知仍由子代理收口服务负责。
+#   启动指纹统一取自 common.heartbeat.process_start_time（跨平台字符串），旧数字记录只在可转数字时比较。
 # 模块用途: 记录真实执行边界，识别进程退出和同宿主执行器退出，避免把活着的 Gateway 当成活着的子代理。
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from ..scheduler.repository import _process_start_time, _process_state
+from ..common.heartbeat import process_start_time
+from ..scheduler.repository import _process_state
 from .operations import RuntimeConflictError
 
 _EPOCH = uuid.uuid4().hex
@@ -45,7 +47,7 @@ def attempt_executor(repo: Any, run_id: str, attempt_id: str):
     token = uuid.uuid4().hex
     executor = {
         "schema_version": _SCHEMA, "token": token, "process_epoch": _EPOCH,
-        "pid": os.getpid(), "start_time": _process_start_time(os.getpid()),
+        "pid": os.getpid(), "start_time": process_start_time(os.getpid()),
         "status": "running", "started_at": time.time(),
     }
     with _LOCK:
@@ -118,10 +120,21 @@ def executor_exit_reason(metadata: dict[str, Any]) -> str:
     if state == "dead":
         return "executor_process_died"
     if state == "alive" and start_time is not None:
-        current = _process_start_time(pid)
-        if current is not None and current != float(start_time):
+        current = process_start_time(pid)
+        if current is not None and not _same_start_token(current, start_time):
             return "executor_process_replaced"
     return ""
+
+
+# LLM: 新记录是跨平台字符串指纹；旧记录是 /proc ticks 数字，只有当前指纹可转数字时才比较，否则保守视为相同。
+# 函数用途: 判断当前启动指纹与记录的指纹是否代表同一进程；不可比时不报"已替换"。
+def _same_start_token(current: str, recorded: object) -> bool:
+    if isinstance(recorded, str):
+        return current == recorded
+    try:
+        return float(current) == float(recorded)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
 
 
 # LLM: 扫描必须重复核对 current pointer；未登记、正常等待、旧 attempt 和状态未知都不是无结果退出。
