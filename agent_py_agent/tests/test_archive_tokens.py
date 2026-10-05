@@ -268,18 +268,13 @@ def test_small_json_uses_direct_encoding_and_large_payload_stays_streamed(monkey
     calls = []
 
     def bounded_dumps(payload, **kwargs):
-        # 合成路径逐元素物化；记录必须在任何断言前，否则断言失败会被合成层回退捕获吞掉。
+        assert payload is small, "大来源不能恢复整份JSON副本"
         calls.append(payload)
         return original(payload, **kwargs)
 
     monkeypatch.setattr(json, "dumps", bounded_dumps)
     assert [tokens.estimate_tokens(payload) for payload in (small, large)] == expected
-    assert calls, "小来源仍应走有界直接编码"
-    for call in calls:
-        assert call is not large, "大来源不能恢复整份JSON副本"
-        assert tokens._bounded_json_size(call, tokens._SMALL_JSON_MAX_BYTES) is not None, (
-            "不能物化未证明有界的来源"
-        )
+    assert calls == [small]
 
 
 @pytest.mark.parametrize("payload", [
@@ -316,16 +311,12 @@ def test_unproven_shapes_keep_original_streaming_semantics(monkeypatch, shape):
     else:
         payload = Path("example/file.txt") if shape == "unknown" else CustomList([1, "中文"])
     expected = _legacy_token_estimate(payload)
-    calls = []
 
-    def reject_direct_encoding(*args, **_kwargs):
-        # 记录必须在抛出前：合成层会把异常吞成回退，末尾的 calls 断言才是可靠守卫。
-        calls.append(args[0])
-        raise TypeError("未证明有界的结构必须保留流式编码")
+    def reject_direct_encoding(*_args, **_kwargs):
+        pytest.fail("未证明有界的结构必须保留流式编码")
 
     monkeypatch.setattr(json, "dumps", reject_direct_encoding)
     assert tokens.estimate_tokens(payload) == expected
-    assert calls == [], "未证明有界的结构不能被合成路径物化编码"
 
 
 def test_size_probe_does_not_invoke_custom_conversion_or_type_comparison():
@@ -366,130 +357,3 @@ def test_json_failure_still_precedes_utf8_failure_in_both_encoding_paths(large, 
     else:
         with pytest.raises(UnicodeEncodeError):
             tokens.estimate_tokens(payload)
-
-
-# LLM: estcache 契约：合成缓存必须与逐段编码逐位一致（冷/热都相等）、命中后不再编码、内容变化
-#   必须失效、上限按 LRU 淘汰；随机结构用固定种子保证可复现。清缓存保证用例间确定性。
-class TestComposedLengthCache:
-    """缓存版估算与原口径的等价性与缓存行为。"""
-
-    @pytest.fixture(autouse=True)
-    def _isolate_length_cache(self):
-        from agent_py_agent.agent.memory_archive import tokens
-
-        tokens._ITEM_LENGTH_CACHE.clear()
-        yield
-        tokens._ITEM_LENGTH_CACHE.clear()
-
-    @staticmethod
-    def _legacy(payload):
-        from agent_py_agent.agent.memory_archive import tokens
-
-        return tokens._tokens_from_lengths(*tokens._payload_lengths(payload), payload)
-
-    def _assert_matches_legacy(self, payload):
-        from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
-
-        assert estimate_tokens(payload) == self._legacy(payload)
-
-    def test_mixed_message_shapes_match_legacy_cold_and_warm(self):
-        body = "工具结果内容与中文说明" * 60
-        messages = [
-            {"role": "user", "content": "第一问"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "call_1", "type": "function",
-                 "function": {"name": "read_file", "arguments": '{"path": "a.py"}'}},
-            ]},
-            {"role": "tool", "tool_call_id": "call_1", "content": body},
-            {"role": "assistant", "content": "🪴非BMP🧪" * 40},
-            {"role": "user", "content": [
-                {"type": "text", "text": "看这张图"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-            ]},
-            {"role": "tool", "tool_call_id": "call_9", "content": "x" * 600_000},
-        ]
-        payload = {
-            "system_instruction": "系统提示" * 100,
-            "prompt_adjunct": "提示附件🪴" * 50,
-            "messages": messages,
-            "tools": [{"type": "function", "function": {"name": "read_file"}}],
-        }
-        for shape in (messages, payload, [], {}, (1, "a", None)):
-            self._assert_matches_legacy(shape)  # 冷
-            self._assert_matches_legacy(shape)  # 热（命中缓存）
-
-    def test_random_structures_match_legacy(self):
-        import random
-
-        rng = random.Random(20261005)
-
-        def rand_value(depth):
-            if depth > 3:
-                return rng.choice([rng.randint(-10**6, 10**6), rng.random(), "字" * rng.randint(0, 30),
-                                   True, False, None, "🪴"])
-            kind = rng.randint(0, 7)
-            if kind <= 2:
-                return rng.choice([rng.randint(-10**6, 10**6), rng.random(), "文" * rng.randint(0, 50),
-                                   True, None, float(rng.randint(-5, 5)), "🪴🌱"])
-            if kind == 3:
-                return [rand_value(depth + 1) for _ in range(rng.randint(0, 5))]
-            if kind <= 5:
-                return {f"k{rng.randint(0, 9)}": rand_value(depth + 1) for _ in range(rng.randint(0, 5))}
-            return (rand_value(depth + 1), rand_value(depth + 1))
-
-        for _ in range(200):
-            self._assert_matches_legacy(rand_value(0))
-
-    def test_repeated_estimate_hits_cache_without_reencoding(self, monkeypatch):
-        from agent_py_agent.agent.memory_archive import tokens
-
-        messages = [
-            {"role": "tool", "tool_call_id": f"call-{index}", "content": "结果" * 60}
-            for index in range(50)
-        ]
-        calls = []
-        original = tokens._encode_element_lengths
-
-        def counting_encode(item):
-            calls.append(1)
-            return original(item)
-
-        monkeypatch.setattr(tokens, "_encode_element_lengths", counting_encode)
-        first = tokens.estimate_tokens(messages)
-        assert calls, "冷缓存必须实际编码"
-        calls.clear()
-        assert tokens.estimate_tokens(messages) == first
-        assert calls == [], "同对象重复估算必须全部命中、零编码"
-        fresh = [dict(message) for message in messages]
-        calls.clear()
-        assert tokens.estimate_tokens(fresh) == first
-        assert calls == [], "内容相同的新对象也必须命中（指纹按内容）"
-
-    def test_mutated_message_invalidates_cached_lengths(self):
-        from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
-
-        message = {"role": "tool", "content": "原始内容" * 20}
-        messages = [message]
-        first = estimate_tokens(messages)
-        message["content"] = "修改后的内容明显更长" * 20
-        second = estimate_tokens(messages)
-        assert second != first
-        assert second == self._legacy(messages)
-
-    def test_cache_eviction_is_bounded_and_lru(self, monkeypatch):
-        from agent_py_agent.agent.memory_archive import tokens
-
-        monkeypatch.setattr(tokens, "_ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT", 2)
-        first = {"v": "A" * 50}
-        second = {"v": "B" * 50}
-        third = {"v": "C" * 50}
-        tokens.estimate_tokens([first, second])
-        tokens.estimate_tokens([first])  # 访问 A，刷新 LRU
-        tokens.estimate_tokens([third])  # 插入 C，应淘汰最久未用的 B
-        assert len(tokens._ITEM_LENGTH_CACHE) <= 2
-        key_first = tokens._item_length_fingerprint(first)
-        key_second = tokens._item_length_fingerprint(second)
-        assert key_first in tokens._ITEM_LENGTH_CACHE
-        assert key_second not in tokens._ITEM_LENGTH_CACHE
-        # 淘汰后重算仍与旧口径一致
-        assert tokens.estimate_tokens([first, second, third]) == self._legacy([first, second, third])

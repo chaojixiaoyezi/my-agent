@@ -101,26 +101,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - 变异 2/2 KILLED（脚本 `tasks/2026-10-05/cachereport-mutations/mutations.py`，sha256 还原一致）：cache_write 混进命中 → 2 条用例红；估算调用数混进供应商调用数 → 4 条红。
 - 未验证：真实 owner home 数据（沙箱规则不读）；"省钱生效"的真机核对由 3a 用真实数据跑。
 
-## 容器估算合成缓存（estcache，2026-10-05，`worker/estcache`，基线 `6145136a8`；定向验证完成）
-
-- **来源/改法**：luna2 剖析指出每次模型调用把整段历史估算两遍；给 `memory_archive/tokens.py` 加"内容指纹 → 直接子项长度"进程内 LRU 缓存与序列/映射逐位合成，失败回退原口径。
-- **等价性（新增 `TestComposedLengthCache` + 更新两处守护）**：
-  - `test_mixed_message_shapes_match_legacy_cold_and_warm`：文本/工具调用/工具结果/图块/超长/非 BMP 消息与 payload、空容器、元组，冷/热各与原口径逐位相等；
-  - `test_random_structures_match_legacy`：固定种子 200 个随机结构逐位相等；
-  - `test_repeated_estimate_hits_cache_without_reencoding`：同对象重复估算零编码（monkeypatch `_encode_element_lengths` 计数）、内容相同新对象也命中；
-  - `test_mutated_message_invalidates_cached_lengths`：同一 dict 内容改后统计更新且等于原口径；
-  - `test_cache_eviction_is_bounded_and_lru`：上限 2 时插入第三个淘汰最久未用的（LRU），淘汰后重算仍一致；
-  - 更新 `test_small_json_uses_direct_encoding_and_large_payload_stays_streamed`（断言改为"任何被物化对象必须通过 512 KiB 有界证明、大来源不得整份 dumps"）与 `test_unproven_shapes_keep_original_streaming_semantics`（记录 + 末尾断言"合成路径零物化"，不再依赖被回退捕获吞掉的 pytest.fail）。
-- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
-  - `test_archive_tokens.py` → **51 passed**；
-  - context_pressure/压缩相关 8 文件（runtime_context_pressure、context_pressure_media_reserve、context_pressure_native_trigger、context_calibration_carry、compact_capacity_facts、compact_landmarks、applied_compact_context、memory_compact_defaults）→ **87 passed**；
-  - 模型回合 2 文件（tool_loop_model_turn、test_tools/test_tool_loop）→ 全过（含既有 xfail）；
-  - guards9 全 12 文件 → **192 passed**；ruff `All checks passed!`；boundaries=0；doc_sync `--base 6145136a8` PASS；strict code-size `hard=0 blocked=False`；diff-check 干净；clean-package OK；**size_diff 新增 0 / 消失 56**（首轮两条嵌套告警——`_composed_mapping_lengths` hard、`_composed_sequence_lengths` high-risk——抽出 `_required_*` 单层助手后归零）。
-  - 常数目录：新常量 `_ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT` 带 `_COUNT` 单位后缀与中文说明，`build_constants_catalog.py` 重新生成（908 项）。
-- **变异 4 个**（脚本 `/private/tmp/claude-501/m-estcache/mut_est.py`，逐个 sha256 还原、`还原一致=True`）：V1 缓存键退化 `id()` → KILLED（mutate 失效等 4 条）；V2 漏算 ", " 分隔符 → KILLED（数值契约 + 等价性）；V3 去掉上限淘汰 → KILLED；V4 去掉元素有界检查 → KILLED（dumps 守护 + deep）。**4/4 KILLED**。
-- **收益实测（合成历史、假后端、3 次模型调用；脚本 `/private/tmp/claude-501/m-estcache/probe2.py`，数字只作交接参考、不进仓库）**：35 万 token 回合 estimate 55 次合计 583.1→131.8ms、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms、整轮 1722.4→1060.9ms。
-- **未验证**：真实 Gateway/TUI/IM 与生产负载；`estimate_tokens_from_json_parts` 路径未改；沙箱外复跑由 3a 安排。
-
 ## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；定向验证完成，WIP：完整守卫缺文件待补）
 
 - **来源/改法**：cachediag2r 两条必须改反例。累计值与已计数调用 SHA256 集合同快照持久化/恢复；较新快照整体选取。长度变化缺共同末点时采用不可比方案（`comparable=false / partial=true`），而非猜测纯追加/截短。

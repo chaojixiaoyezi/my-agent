@@ -1,7 +1,4 @@
 # LLM: 本模块拥有唯一估算口径及用量账；有界小对象直接编码，其余流式统计，不改变UTF8/字符上界、结构开销或异常回退，联测容量调用方。
-#   2026-10-05 estcache：容器估算加"内容指纹 → 单条长度"进程内 LRU 缓存与序列/映射合成——只在
-#   能证明"逐元素独立编码与整段编码逐位一致"时走合成；指纹不可用（非 str 键、未知对象）或元素
-#   编码抛 TypeError/ValueError 时整体回退原口径；缓存不落盘、不跨进程，估算值不因缓存状态改变。
 # 模块用途: 为记忆及模型输入提供保守估算和账本记录；估算不是供应商实耗，读取估算本身不写账。
 
 from __future__ import annotations
@@ -15,7 +12,6 @@ from __future__ import annotations
 
 import json
 import math
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,19 +35,12 @@ class TurnTokenUsage:
 _SMALL_JSON_MAX_BYTES = 512 * 1024
 # 小 JSON 判定允许的最大嵌套深度；超过视为大对象，按大对象路径处理（无物理单位）。
 _SMALL_JSON_MAX_DEPTH = 64
-# 单条长度缓存的条目上限：一个模型回合的活跃消息为千条量级，4096 条覆盖整批历史加少量抖动。
-_ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT = 4096
-# 进程内单条长度缓存：指纹 → (字符数, UTF8字节数)；有界 LRU，满了淘汰最久未用条目。
-_ITEM_LENGTH_CACHE: OrderedDict[object, tuple[int, int]] = OrderedDict()
 
 
 # LLM: 同一sort/default JSON序列按结构上界选择有界直接编码或流式累计；估算数值及异常回退不变，最大单值/字典排序仍需内存。
 # 函数用途: 有界估算输入，避免大历史副本和高频小请求的编码器积累，保持既有预算口径，不发请求或写账。
 def estimate_tokens(payload: Any) -> int:
-    composed = _composed_lengths(payload)
-    if composed is None:
-        composed = _payload_lengths(payload)
-    chars, utf8_bytes = composed
+    chars, utf8_bytes = _payload_lengths(payload)
     return _tokens_from_lengths(chars, utf8_bytes, payload)
 
 
@@ -217,175 +206,3 @@ def _structured_overhead(payload: Any) -> int:
     if isinstance(payload, list | tuple | set):
         return max(1, len(payload) // 4)
     return 0
-
-
-# LLM: 缓存正确性边界：指纹相同 ⟹ JSON 编码相同才允许命中。str 用 hash 摘要，标量与 float 用值/repr
-#   本身（避开 int/float/bool 的相等陷阱与 -0.0），容器递归组合；非 str 键与未知对象一律返回 None——
-#   该值不缓存、dict 值遇到它放弃合成，回退原口径。缓存不落盘、不跨进程。
-# 函数用途: 计算一个 JSON 值的内容指纹；不能证明与编码一一对应时返回 None（宁慢勿错）。
-def _item_length_fingerprint(value: Any) -> object | None:
-    kind = type(value)
-    if kind is str:
-        return ("s", hash(value))
-    if kind is bool or value is None:
-        return ("b", value)
-    if kind is int:
-        return ("i", value)
-    if kind is float:
-        return ("f", repr(value))
-    if kind is dict:
-        return _mapping_fingerprint(value)
-    if kind is list or kind is tuple:
-        return _sequence_fingerprint(value)
-    return None
-
-
-# 函数用途: 字典指纹：键必须是 str（否则 None），值递归取指纹；frozenset 让键顺序不影响摘要。
-def _mapping_fingerprint(value: dict) -> object | None:
-    entries: list[tuple[str, object]] = []
-    for key, item in value.items():
-        if type(key) is not str:
-            return None
-        item_fingerprint = _item_length_fingerprint(item)
-        if item_fingerprint is None:
-            return None
-        entries.append((key, item_fingerprint))
-    return ("d", frozenset(entries))
-
-
-# 函数用途: 序列指纹：逐元素递归；任一元素不能取指纹就整体返回 None。
-def _sequence_fingerprint(value: list | tuple) -> object | None:
-    items: list[object] = []
-    for item in value:
-        item_fingerprint = _item_length_fingerprint(item)
-        if item_fingerprint is None:
-            return None
-        items.append(item_fingerprint)
-    return ("l", tuple(items))
-
-
-# LLM: 命中判断只做"取表 + 刷新 LRU 位置"，绝不改动统计值；未命中先纯计算再记账。缓存只记"顶层容器
-#   的直接子项"（消息、schema），子结构纯算不记账——避免每层节点挤爆上限引发反复淘汰。
-# 函数用途: 取一个列表元素/字典值的（字符数、UTF8字节数）；指纹不可用或不能合成时返回 None。
-def _cached_element_lengths(item: Any) -> tuple[int, int] | None:
-    fingerprint = _item_length_fingerprint(item)
-    if fingerprint is None:
-        return None
-    cached = _ITEM_LENGTH_CACHE.pop(fingerprint, None)
-    if cached is not None:
-        _ITEM_LENGTH_CACHE[fingerprint] = cached  # pop+重插即 LRU 刷新，且无并发 KeyError
-        return cached
-    lengths = _encode_element_lengths(item)
-    if lengths is None:
-        return None
-    _ITEM_LENGTH_CACHE[fingerprint] = lengths
-    while len(_ITEM_LENGTH_CACHE) > _ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT:
-        _ITEM_LENGTH_CACHE.popitem(last=False)
-    return lengths
-
-
-# 函数用途: 纯计算（不记账）的单值编码：str 按 JSON 值编码（含引号转义），容器递归，标量直接编码。
-def _encode_element_lengths(item: Any) -> tuple[int, int] | None:
-    if _bounded_json_size(item, _SMALL_JSON_MAX_BYTES) is None:
-        # 超大或不能证明有界的元素不逐元素物化编码，放弃合成交原逻辑流式处理。
-        return None
-    if isinstance(item, str):
-        return _json_string_lengths(item)
-    kind = type(item)
-    if kind is list or kind is tuple:
-        return _composed_sequence_lengths(item, False)
-    if kind is dict:
-        return _composed_mapping_lengths(item, False)
-    if kind is bool or kind is int or kind is float or item is None:
-        return _payload_lengths(item)
-    return None
-
-
-# 函数用途: 一个"作为 JSON 值"的字符串的编码长度（含引号与转义）；顶层裸文本不走这里。
-def _json_string_lengths(value: str) -> tuple[int, int]:
-    text = json.dumps(value, ensure_ascii=False)
-    return len(text), len(text.encode("utf-8"))
-
-
-# LLM: 合成只覆盖可证明与整段编码逐位一致的容器：JSON 数组元素独立编码、", " 连接；元素/值不能
-#   证明或出现异常（环、编码失败、自定义转换）时放弃合成，最终回退/抛出都由原逻辑决定。
-#   use_cache=True 表示"本层直接子项记账"；容器值直接下钻一层，由下一层子项记账。
-# 函数用途: 顶层合成分派；返回 (字符数, UTF8字节数)，不能安全合成时返回 None。
-def _composed_lengths(payload: Any) -> tuple[int, int] | None:
-    kind = type(payload)
-    if kind is list or kind is tuple:
-        return _composed_sequence_lengths(payload, True)
-    if kind is dict:
-        return _composed_mapping_lengths(payload, True)
-    return None
-
-
-# LLM: 合成内部信号：某元素/值无法证明与整段编码一致（不可缓存形状、超界、非 str 键）时抛出，
-#   由合成顶层统一吞成"回退原口径"，绝不让它离开本模块。
-# 类用途: 标记"这一层容器不能安全合成"，不是用户可见错误。
-class _CompositionUnsupported(Exception):
-    pass
-
-
-# 函数用途: 合成序列的（字符数、UTF8字节数）="[" + 各元素编码 + ", " 连接 + "]"；元素按 use_cache 取。
-def _composed_sequence_lengths(items: list | tuple, use_cache: bool) -> tuple[int, int] | None:
-    chars = utf8_bytes = 0
-    try:
-        for item in items:
-            item_chars, item_bytes = _required_element_lengths(item, use_cache)
-            chars += item_chars + 2
-            utf8_bytes += item_bytes + 2
-    except Exception:  # noqa: BLE001 - 环/编码失败/自定义转换异常都放弃合成，最终行为由原逻辑决定
-        return None
-    return max(chars, 2), max(utf8_bytes, 2)
-
-
-# 函数用途: 取一个序列元素的长度；不能安全合成时抛内部信号让容器层整体回退。
-def _required_element_lengths(item: Any, use_cache: bool) -> tuple[int, int]:
-    if use_cache:
-        lengths = _cached_element_lengths(item)
-    else:
-        lengths = _encode_element_lengths(item)
-    if lengths is None:
-        raise _CompositionUnsupported()
-    return lengths
-
-
-# 函数用途: 合成 sort_keys 字典的（字符数、UTF8字节数）；只处理全 str 键，值下钻容器或独立编码。
-def _composed_mapping_lengths(mapping: dict, use_cache: bool) -> tuple[int, int] | None:
-    chars = utf8_bytes = 0
-    try:
-        for key in sorted(mapping):
-            entry_chars, entry_bytes = _required_mapping_entry_lengths(mapping, key, use_cache)
-            chars += entry_chars + 2
-            utf8_bytes += entry_bytes + 2
-    except Exception:  # noqa: BLE001 - 环/编码失败/自定义转换异常都放弃合成，最终行为由原逻辑决定
-        return None
-    return max(chars, 2), max(utf8_bytes, 2)
-
-
-# 函数用途: 取一个字典条目 "键: 值" 的编码长度；不能安全合成时抛内部信号。
-def _required_mapping_entry_lengths(mapping: dict, key: object, use_cache: bool) -> tuple[int, int]:
-    if type(key) is not str:
-        raise _CompositionUnsupported()
-    value_lengths = _composed_value_lengths(mapping[key], use_cache)
-    if value_lengths is None:
-        raise _CompositionUnsupported()
-    key_text = json.dumps(key, ensure_ascii=False)
-    return len(key_text) + 2 + value_lengths[0], len(key_text.encode("utf-8")) + 2 + value_lengths[1]
-
-
-# 函数用途: 一个字典值的编码长度：序列/字典继续合成，str 与标量独立编码，超大/未知对象放弃合成。
-def _composed_value_lengths(value: Any, use_cache: bool) -> tuple[int, int] | None:
-    kind = type(value)
-    if kind is list or kind is tuple:
-        return _composed_sequence_lengths(value, use_cache)
-    if kind is dict:
-        return _composed_mapping_lengths(value, use_cache)
-    if kind is str:
-        if _bounded_json_size(value, _SMALL_JSON_MAX_BYTES) is None:
-            return None
-        return _json_string_lengths(value)
-    if kind is bool or kind is int or kind is float or value is None:
-        return _payload_lengths(value)
-    return None

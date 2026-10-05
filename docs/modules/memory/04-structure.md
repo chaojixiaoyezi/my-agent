@@ -340,7 +340,6 @@ system/tools/messages 前缀及同 thread 的 thinking/reasoning_effort；有工
 ## 流式估算与消息扫描
 
 `memory_archive/tokens.py` 唯一估算器按原JSON编码顺序累积字符和UTF8字节，保持旧预算数值与异常回退；仅精确内置、无环、深度有限且最坏JSON UTF8上界不超过512 KiB的小载荷使用公开dumps，避免密集估算累积编码器闭包；其它载荷仍流式，单个JSON值和字典排序仍可能较大。估算不写实际用量账。
-2026-10-05 estcache：容器估算加"内容指纹 → 直接子项长度"进程内 LRU 缓存（上限 `_ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT`，只记顶层容器的直接子项，子结构纯算不记账），序列/映射按 `"[" + 元素编码 + ", " 连接 + "]"` 逐位合成；指纹相同 ⟹ JSON 编码相同是命中前提，非 str 键、未知对象、超大（未过 512 KiB 有界证明）元素、环与编码异常一律放弃合成回退原口径。缓存不落盘、不跨进程，估算数值不因缓存状态变化。
 `conversation/message_scan.py` 接收canonical路径，复用`store_io.complete_jsonl_end`；有界页只返回完整行和字节游标。append_once在原锁内逐行读到冻结尾界，首个key命中后仍查坏行；Unicode空白按原规则跳过，字段溢出归data_corruption，缺LF尾行禁止追加且不自动修复。分页原语不授予摘要覆盖或scope身份。
 
 
