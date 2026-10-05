@@ -60,6 +60,8 @@ class StopNamedWorkTool(BaseTool):
                 "The user did not identify an exact persistent work name",
             ),
             keywords=("stop named audit", "stop named goal", "cancel persistent work", "停止命名审计", "取消命名目标"),
+            default_deferred=True,
+            deferred_summary="停止或取消当前会话里点名的一个持续目标或审计",
         ),
     )
     runtime_policy = ToolRuntimePolicy(

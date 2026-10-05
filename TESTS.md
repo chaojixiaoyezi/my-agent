@@ -22,6 +22,16 @@
 - **opp 新文件（仅当前分支有，10 个）**：失败 1 条 `test_plugin_legacy_transport.py::test_im_and_tui_client_preserve_full_long_preview_and_exact_confirm_command`（沙箱/预览类，与既有沙箱失败同族）。
 - **门禁**：guards9 12 文件 190 passed；ruff All checks passed；import boundaries 0；DOC_SYNC_PASS（--base e665afdb6）；strict code-size hard=0；size_diff 新增 0/消失 57；git diff --check 0；check_clean_package OK。
 
+## 工具默认收起第二阶段与观测增强（toolfold，2026-10-05，分支 `worker/toolfold`；待初审）
+
+- **改动**：6 个工具补 `default_deferred`（cancel_session_task、memory_search、publish_audit_update、send_message、send_session_message、stop_named_work）；`tool_default_deferral_enabled` 出厂默认改 true（YAML+dataclass）；`cache_diagnostics` 增工具名清单摘要/个数与首次调用基线字段。
+- **测试命令与结果**：
+  - `pytest test_tool_default_deferral.py test_cache_diagnostics.py test_conversation_goal_tools.py test_tool_progressive_disclosure.py` → 114 passed；
+  - 连带清单（git grep 命中的 25 个测试文件，去掉辅助 `test_tools/backends.py` 后逐个核对）中，与本改动直接相关的 4 个全过；`test_background_main_agent_runtime.py::test_background_runtime_snapshot_contains_continuation_tools[scheduled_job_due]` 失败（默认值变更引起，见 DESIGN_LEDGER 已知边界，未改测试）；`test_mcp_registration.py`、`test_process_sessions.py`、`test_tool_presentation_projection.py` 的失败未做基线核对（沙箱环境限制可能既有），待初审复核；
+  - guards9 12 文件 192 passed；ruff、check_import_boundaries=0、DOC_SYNC_PASS、strict code-size hard=0、size_diff 新增 0/消失 57、clean-package OK、git diff --check 通过。
+- **变异（4/4 KILLED，脚本 /private/tmp/claude-501/m-ds4/mutate_toolfold.py，sha256 还原一致）**：M1 名字摘要恒空；M2 首次调用去掉基线字段；M3 公开摘要不做 hex 校验；M4 撤回 cancel_session_task 标记。
+- **未验证**：真实模型/网关下的折叠与找回行为、后台续跑语义裁定、生产端到端。
+
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
 
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）

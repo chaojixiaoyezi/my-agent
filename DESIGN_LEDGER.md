@@ -27,6 +27,14 @@
 - **新增回归（必须修）**：`test_plugin_configuration.py::test_v1_is_read_only_until_atomic_migration_with_configuration` 在基线上通过、在本分支稳定失败（`PluginInstallationError: 安装状态不可读`，`plugin_install_store.py:77`）——opp 的 v1/v2/v3 迁移链改动使 **v1 安装表解码失败**（只读 `snapshot()` 即抛）。属产品回归；修后重跑该文件与全批。
 - **沙箱外必跑清单**（沙箱内 75 条既有失败 + 1 条回归）：test_plugin_any_language*、test_plugin_enable、test_plugin_invocation、test_plugin_mcp_transport、test_plugin_registry、test_plugin_release、test_plugin_removal、test_plugin_update、test_plugin_workspace_context、test_plugin_sandbox_v8、test_workspace_peek_package、test_host_command_stream、test_plugin_m1_joint_*、test_plugin_legacy_*。
 
+## 工具默认收起第二阶段与出厂默认开启（toolfold，2026-10-05，分支 `worker/toolfold`，基于 17l `e665afdb6`；待初审）
+
+- **背景**：10-02 工具瘦身第一期已给 8 个“又大又少用”的工具声明 `default_deferred`（开关默认关）；生产按用户授权开启三天，每次调用 `tool_schema_tokens` 约 1.7 万且全程稳定（评测出厂默认下为 28.3K）。本段按“生产近 3 天 + 评测 90 次运行双零使用”再收 6 个管理/通道类工具：`cancel_session_task`、`memory_search`、`publish_audit_update`、`send_message`、`send_session_message`、`stop_named_work`（合计约 4.4K token/次；生产口径每次调用从 ~21.4K 降到 ~17.0K）。
+- **出厂默认改开启**：`tool_default_deferral_enabled` 默认值 YAML 与 `AgentConfig` 同步改 `true`（依据：10-02 用户授权“工具这一块按你的来，别影响工作”、生产开启三天无异常、省量见上）；关回 `false` 即恢复全量直出，注释写明方法。
+- **保持直出的既有合同**：`audit_records`（I6 实测收起后模型没去搜索、IM 用户自查失败）、`create_goal`/`update_goal`/`cancel_subagents`（递归代理和持续目标控制属于主链，orchestration/goal 默认直出）、生产在用的 `terminal_session`/`read_artifact`/`session_search`/`process_session` 等。
+- **观测增强（不改判定）**：`cache_diagnostics.request_surface` 增记工具名清单摘要（SHA256）与工具个数；`compare_request_surfaces` 在 run 第一次调用（无 previous）也附上本次自己的 `current_tool_count`/`current_tool_names_digest`，供下次定位“第一次调用后收窄”的机制；公开投影按白名单只收数字与 64 位十六进制摘要。
+- **已知边界**：`memory_search` 默认不注册（`enable_memory_search_tool` 默认关），其标记只在开启时生效；`publish_audit_update` 只在 Audit 准备回合可用，测试按快照可用性跳过。**后台续跑（scheduled_job_due、allowed_tools=None 场景）在默认开启后会把声明收起的工具挡在可见面外**——`test_background_main_agent_runtime.py::test_background_runtime_snapshot_contains_continuation_tools` 因此失败，涉及“后台续跑是否走渐进披露”的产品语义，未改测试、待 3a 裁定。
+
 ## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现，macOS 复现）**：`test_compact_text_source.py::test_many_message_summary_avoids_whole_json_copy` 断言压缩取材峰值低于整段 JSON 的一半，estcache 后峰值 2,385,150 > 1,239,645。3a 实测：对 1200 条（每条约 2KB）消息估算一次，估算缓存留住约 1.6MB 的指纹结构（嵌套元组，平均每条约 1.3KB，`tokens.py:229/252/253/264`），被算进压缩峰值——不是整段拷贝，但指纹留存过重。二分：630be9dcc 通过、2b059ec2d 失败。

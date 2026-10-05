@@ -72,6 +72,8 @@ def build_memory_search_model_spec() -> ToolModelSpec:
                 '{"tool":"memory_search","query":"图书借阅服务端口"}',
                 '{"tool":"memory_search","query":"moneywise 时区","kind":"project","limit":3}',
             ),
+            default_deferred=True,
+            deferred_summary="按关键词检索自己的长期记忆（自动召回漏掉时补查）",
         ),
     )
 

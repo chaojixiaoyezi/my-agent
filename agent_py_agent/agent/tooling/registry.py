@@ -122,7 +122,8 @@ class ToolRegistryParams:
     catalog_categories: list[str] | None = None
     catalog_deferred_categories: list[str] | None = None
     catalog_include_examples: bool = False
-    # 工具自己声明 default_deferred 的“默认收起”是否生效（配置 tool_default_deferral_enabled，默认关）；只改展示，不改授权。
+    # 工具自己声明 default_deferred 的“默认收起”是否生效；由 core 装配时从 config.tool_default_deferral_enabled 传入
+    # （用户配置默认开）；这里保持 False 作为未传参调用方（测试/探针）的保守默认。只改展示，不改授权。
     catalog_default_deferral_enabled: bool = False
     catalog_entry_max_chars: int = 700
     # 参数减量第 3 批：目录分页/截断提示固定开启，原配置项 tool_catalog_show_truncated_notice 已删除。

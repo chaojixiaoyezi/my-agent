@@ -381,6 +381,8 @@ def build_send_session_message_model_spec() -> ToolModelSpec:
             examples=(
                 '{"tool":"send_session_message","target_thread_id":"thread-abc","message":"构建完成后把产物路径发我。"}',
             ),
+            default_deferred=True,
+            deferred_summary="给同一用户下的另一个会话发一条消息",
         ),
     )
 

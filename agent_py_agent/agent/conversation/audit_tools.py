@@ -193,6 +193,8 @@ class PublishAuditUpdateTool(BaseTool):
                     "The current turn is not an /audit <name> prepare turn",
                 ),
                 keywords=("publish audit update", "apply audit preparation", "生效审计配置"),
+                default_deferred=True,
+                deferred_summary="向当前 /audit 发布验证过的运维笔记（只在 Audit 准备回合可用）",
                 examples=(
                     '{"tool":"publish_audit_update","effective_prompt":"完整生效要求","validation_status":"not_required"}',
                     '{"tool":"publish_audit_update","effective_prompt":"经过探针验证的完整要求","validation_status":"passed","validation_refs":["output/source-a-profile.json"],"source_probe_refs":["ws-ab12cd34ef"]}',

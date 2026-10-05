@@ -283,3 +283,33 @@ def test_unaligned_tail_does_not_hide_a_proven_earlier_rewrite_or_option_change(
     options = compare_request_surfaces(before, request_surface({**_messages(4098), "thinking": "off"}, "endpoint"))
     assert options["changes"] == ["thinking_changed"]
     assert options["comparable"] is False and options["partial"] is True
+
+
+def test_surface_and_first_call_carry_a_tool_baseline():
+    """工具名清单摘要/个数进请求面；run 第一次调用（无 previous）也带自己的工具面基线，供事后定位收窄。"""
+    payload = {"model": "m", "messages": [{"role": "user", "content": "x"}],
+               "tools": [{"name": "read_file"}, {"name": "write_file"}]}
+    surface = request_surface(payload, "endpoint")
+    assert surface["tool_count"] == 2
+    assert len(surface["tool_names_digest"]) == 64
+    first = compare_request_surfaces({}, surface)
+    assert first["baseline_available"] is False
+    assert first["current_tool_count"] == 2
+    assert first["current_tool_names_digest"] == surface["tool_names_digest"]
+    reordered = request_surface({**payload, "tools": [{"name": "write_file"}, {"name": "read_file"}]}, "endpoint")
+    assert reordered["tool_names_digest"] != surface["tool_names_digest"], "顺序变化要反映在名字清单摘要里"
+    assert reordered["tool_count"] == surface["tool_count"]
+    assert "tools_changed" in compare_request_surfaces(surface, reordered)["changes"]
+
+
+def test_public_diagnostic_keeps_only_safe_tool_baseline_fields():
+    """公开投影只保留数字与 64 位十六进制摘要；坏形状清成默认值，不猜测、不回显原文。"""
+    digest = "a" * 64
+    kept = public_cache_diagnostic({"baseline_available": False, "changes": [],
+                                    "current_tool_count": 3, "current_tool_names_digest": digest})
+    assert kept["current_tool_count"] == 3
+    assert kept["current_tool_names_digest"] == digest
+    bad = public_cache_diagnostic({"baseline_available": True, "changes": [],
+                                   "current_tool_count": "3", "current_tool_names_digest": "not-a-digest"})
+    assert bad["current_tool_count"] == 0
+    assert bad["current_tool_names_digest"] == ""

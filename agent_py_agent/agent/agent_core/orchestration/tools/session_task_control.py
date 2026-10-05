@@ -472,6 +472,8 @@ def build_cancel_session_task_model_spec() -> ToolModelSpec:
             use_cases=("派出去的任务不再需要", "发现派错了想撤回"),
             avoid_when=("只是想看状态用 get_session_task",),
             keywords=("取消任务", "撤回", "cancel session task"),
+            default_deferred=True,
+            deferred_summary="取消一条尚未结束的会话间任务",
             examples=('{"tool":"cancel_session_task","task_id":"stask-abc"}',),
         ),
     )

@@ -246,9 +246,10 @@ class _ToolConfigFields:
     tool_catalog_deferred_categories: list[str] = field(
         default_factory=lambda: ["collaboration", "web", "vision", "meta", "mcp"]
     )
-    # 工具在自己规格里声明的“默认收起”（又大又少用的工具）是否生效；默认关，打开后前台回合不再每轮发它们的 Schema，
-    # 目录末尾留“名字：一句用途”的索引，用到时 tool_search 一步加载。显式 allowed_tools 的回合不受影响。
-    tool_default_deferral_enabled: bool = False
+    # 工具在自己规格里声明的“默认收起”（又大又少用的工具）是否生效；默认开（2026-10-02 用户授权、生产开启三天
+    # 无异常），前台回合不再每轮发它们的 Schema，目录末尾留“名字：一句用途”的索引，用到时 tool_search 一步加载；
+    # 关回 false 即恢复全量直出。显式 allowed_tools 的回合不受影响。
+    tool_default_deferral_enabled: bool = True
     # 推荐区和 tool_search 的检索容量已降为 agent/core.py 的具名常量 TOOL_RETRIEVAL_LIMIT_COUNT（2026-09-28 参数减量）。
     # 工具语义检索开关；向量来自与记忆语义召回共用的嵌入服务 embedding_*（没配模型时只走关键词）。
     tool_vector_search_enabled: bool = True

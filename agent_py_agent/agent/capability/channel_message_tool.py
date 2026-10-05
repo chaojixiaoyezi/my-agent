@@ -92,6 +92,7 @@ def build_send_message_model_spec() -> ToolModelSpec:
                 '{"tool":"send_message","message":"文件写好了。","attachments":["<Recent Artifact Refs path>"]}',
                 '{"tool":"send_message","attachments":["<已登记产物的完整 path>"]}',
             ),
+            default_deferred=True, deferred_summary="通过已连接的消息通道给当前用户发消息（含附件）",
         ),
     )
 

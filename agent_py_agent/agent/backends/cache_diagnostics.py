@@ -59,6 +59,8 @@ def _chain_checkpoints(rows: list) -> list[dict]:
 
 # LLM: 只保存固定数量的检查点摘要和组件摘要，链值仍扫描全部消息；快照 partial 说明检查点窗口被裁、定位有限。
 #   比较层还会在末块缺证据时置 partial，不能把它读成“整段历史都稳定”；旧 partial 同样保守表示证明不完整。
+#   另存工具名清单的摘要与个数：与全量 tools 摘要互补（名字集合变了还是同一集合内容变了），
+#   且 run 第一次调用也能留下自己的基线，供事后定位“第一次调用后收窄”。
 # 函数用途: 在真正 HTTP 请求处提取诊断事实，兼容 chat/messages/responses 三种字段形态。
 def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
     messages = payload.get("messages", payload.get("input", []))
@@ -68,8 +70,11 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
         system = [row for row in rows if isinstance(row, dict) and row.get("role") in {"system", "developer"}]
     options = {key: value for key, value in payload.items() if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream"}}
     checkpoints = _chain_checkpoints(rows)
+    tools = payload.get("tools", [])
+    tool_names = [str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
     return {"schema": "request_surface.v2", "endpoint": _digest(endpoint), "model": _digest(payload.get("model")),
-            "system": _digest(system), "tools": _digest(payload.get("tools", [])), "options": _digest(options),
+            "system": _digest(system), "tools": _digest(tools), "options": _digest(options),
+            "tool_count": len(tool_names), "tool_names_digest": _digest(tool_names),
             # 分区选项单独留摘要：只有这几个键会切换服务端缓存分区，混在 options 里看不出是换了分区。
             "partition_options": {key: _digest(options.get(key)) for key in sorted(_PARTITION_OPTION_KEYS) if key in options},
             "chain_checkpoints": checkpoints, "message_count": len(rows),
@@ -111,7 +116,8 @@ def _history_changes(previous: dict, current: dict) -> tuple[list[str], int | No
     return [], None, shared, True
 
 
-# LLM: 变化是客户端可证实事实，不是缓存失效的因果证明；首次调用和裁剪窗口外不伪造比较基线。
+# LLM: 变化是客户端可证实事实，不是缓存失效的因果证明；首次调用没有可比的 previous，但仍附上本次自己的
+#   工具名清单摘要与个数（current_tool_*），供事后对比“第一次调用后收窄”；裁剪窗口外不伪造比较基线。
 #   选项变化分成“会切换缓存分区的”与“其它”两类：thinking_changed / reasoning_effort_changed 说明整段前缀不再共享缓存，
 #   其它选项仍只报 options_changed。历史变化用链式检查点定位：不同就报 history_prefix_changed 并带上第一个不同的块，
 #   共享前缀只报到它之前的相同检查点（不虚报）。基线 schema 与本次不同（旧 v1 快照没有链式检查点）时历史不可比：
@@ -119,8 +125,14 @@ def _history_changes(previous: dict, current: dict) -> tuple[list[str], int | No
 #   partial=True 表示历史证明不完整；组件/选项仍独立比较，不因历史不可比而隐去已证实的变化。
 # 函数用途: 给诊断账本写简明原因码，不触发 Compact、重试或删历史。
 def compare_request_surfaces(previous: dict, current: dict) -> dict[str, object]:
+    # 本次调用自己的工具面基线：第一次调用也带上，事后可对比“第一次 vs 第二次”的工具名清单是否收窄。
+    tool_count = current.get("tool_count")
+    current_tools = {
+        "current_tool_count": tool_count if type(tool_count) is int and tool_count >= 0 else 0,
+        "current_tool_names_digest": str(current.get("tool_names_digest") or ""),
+    }
     if not previous:
-        return {"baseline_available": False, "changes": [], "server_cache_state": "unknown"}
+        return {"baseline_available": False, "changes": [], "server_cache_state": "unknown", **current_tools}
     comparable = previous.get("schema") == current.get("schema")
     changes = [key + "_changed" for key in ("endpoint", "model", "system", "tools") if previous.get(key) != current.get(key)]
     if comparable:
@@ -135,7 +147,7 @@ def compare_request_surfaces(previous: dict, current: dict) -> dict[str, object]
     return {"baseline_available": True, "comparable": comparable, "changes": changes,
             "shared_message_prefix": shared, "changed_block_index": divergent,
             "partial": bool(previous.get("partial") or current.get("partial") or not comparable),
-            "server_cache_state": "unknown"}
+            "server_cache_state": "unknown", **current_tools}
 
 
 # LLM: 只按 payload 的结构化键比较，不解析正文；reasoning 与 reasoning_effort 是同一档位的两个键名，
@@ -170,9 +182,19 @@ def _reasoning_digest(options: dict) -> object:
     return options.get("reasoning")
 
 
+# LLM: 公开投影只收本模块自己算出的 64 位小写十六进制摘要；其它形状按“无”处理，不猜测、不回显原文。
+# 函数用途: 校验一个摘要字段是不是可安全保存的 SHA256 文本。
+def _public_digest(value: object) -> str:
+    text = str(value or "")
+    if len(text) == 64 and all(char in "0123456789abcdef" for char in text):
+        return text
+    return ""
+
+
 # LLM: 诊断展示只保留已定义原因码和计数，不允许摘要、正文、URL 或密钥混入持久会话投影。
 #   缺 block 键的旧记录按“没有定位信息”给 None，不猜测块号，也不让旧格式读失败；
 #   comparable=False 表示版本不兼容或缺同范围末点、历史无法确定分类（旧记录缺该键按可比较读）；partial 保留证明不完整。
+#   current_tool_* 是本次调用自己的工具名清单摘要与个数（不可逆摘要），第一次调用也有，供事后核对收窄。
 # 函数用途: 把最近一次请求比较写成可安全保存的诊断快照，重启后仍能解释最近缓存读数。
 def public_cache_diagnostic(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or not isinstance(value.get("baseline_available"), bool):
@@ -181,12 +203,15 @@ def public_cache_diagnostic(value: object) -> dict[str, object]:
     changes = value.get("changes")
     count = value.get("shared_message_prefix")
     block = value.get("changed_block_index")
+    tool_count = value.get("current_tool_count")
     return {
         "baseline_available": value["baseline_available"],
         "comparable": value.get("comparable") is not False,
         "changes": [item for item in changes if isinstance(item, str) and item in allowed][:8] if isinstance(changes, list) else [],
         "shared_message_prefix": max(0, count) if type(count) is int else 0,
         "changed_block_index": block if type(block) is int and block > 0 else None,
+        "current_tool_count": max(0, tool_count) if type(tool_count) is int else 0,
+        "current_tool_names_digest": _public_digest(value.get("current_tool_names_digest")),
         "partial": value.get("partial") is True,
         "server_cache_state": "unknown",
     }
