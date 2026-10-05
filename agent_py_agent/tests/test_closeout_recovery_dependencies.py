@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -165,3 +166,175 @@ def test_none_repository_and_absent_task_lister_remain_noop():
         None, load_task=unexpected, save_task=unexpected, list_tasks=None, notify_result=unexpected,
     )
     assert all(value == 0 for value in summary.values())
+
+
+# ------------------------------------------------------------------ obsfix12
+# LLM: 生产每天 400–1000 条 status_conflict 全来自同一个 unknown run：执行器死亡把 run 置
+#   unknown（只有人工 /recover 能变），收口 WAL 每 60 秒重试一次 settle，每次都写一条
+#   无去重的诊断事件。以下用例用真实 sqlite 运行库造出该形态，钉住四件事：诊断只写一次、
+#   重试退避不再空转、人工 /recover 后恢复链能重新推进、旧 WAL 不会误收口新回合。
+# 函数用途: 造一条"unknown run + unknown attempt + 待重试收口 WAL"的真实运行库形态。
+def _unknown_run_closeout(tmp_path, *, attempts=None, closeout_state="unknown_status"):
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    repo = RuntimeRepository(tmp_path / "runtime.db")
+    chain = repo.record_run_creation(owner_id="local/main", run_id="child-unknown", goal="g")
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status = 'unknown' WHERE agent_run_id = ?",
+            (chain["agent_run_id"],),
+        )
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'unknown', ended_at = ? WHERE attempt_id = ?",
+            (time.time(), chain["attempt_id"]),
+        )
+    task, fact, _, _ = _pending_task(tmp_path, "child-unknown")
+    fact["attempt_id"] = chain["attempt_id"]
+    fact["agent_run_id"] = chain["agent_run_id"]
+    fact["closeout_state"] = closeout_state
+    if attempts is not None:
+        fact["attempts"] = attempts
+    task.attributes = {closeout.RUNTIME_CLOSEOUT_ATTR: fact}
+    return repo, chain, task
+
+
+# LLM: 修法 A 的验收：同 run 的 unknown 诊断跨多次重试只写一条，重试本身照常发生。
+# 函数用途: 验证反复重试 unknown run 时 status_conflict 事件恰好一条。
+def test_unknown_status_conflict_event_written_once_across_retries(tmp_path):
+    repo, chain, task = _unknown_run_closeout(tmp_path)
+    settle_calls = []
+    original_settle = repo.settle_agent_run
+
+    def counting_settle(**kwargs):
+        settle_calls.append(str(kwargs.get("agent_run_id") or ""))
+        return original_settle(**kwargs)
+
+    repo.settle_agent_run = counting_settle
+
+    def run_scan():
+        return closeout.recover_pending_closeouts(
+            repo, load_task=lambda run_id: task, save_task=lambda saved: None,
+            list_tasks=lambda: [task], notify_result=lambda *args, **kwargs: "delivered",
+        )
+
+    # 三次连跑：attempts 从 0 涨到 3，前三次都未过退避阈值，三次都真的重试。
+    for _ in range(3):
+        run_scan()
+
+    assert len(settle_calls) == 3, settle_calls
+    events = repo.events_for_attempt(chain["attempt_id"], limit=100)
+    conflicts = [event for event in events if event["event_type"] == "status_conflict"]
+    assert len(conflicts) == 1, conflicts
+    fact = closeout.pending_closeout(task)
+    assert fact is not None and int(fact["attempts"]) == 3
+
+
+# LLM: 修法 B 的验收：超过重试阈值的可重试形态按 attempts 拉长间隔，窗口内不再 settle。
+# 函数用途: 验证退避窗口内不再尝试 settle，事实保留且诊断不增长。
+def test_unknown_closeout_retry_backoff_stops_repeated_settle(tmp_path):
+    repo, chain, task = _unknown_run_closeout(
+        tmp_path, attempts=closeout.CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT
+    )
+    settle_calls = []
+    original_settle = repo.settle_agent_run
+
+    def counting_settle(**kwargs):
+        settle_calls.append(str(kwargs.get("agent_run_id") or ""))
+        return original_settle(**kwargs)
+
+    repo.settle_agent_run = counting_settle
+
+    def run_scan():
+        return closeout.recover_pending_closeouts(
+            repo, load_task=lambda run_id: task, save_task=lambda saved: None,
+            list_tasks=lambda: [task], notify_result=lambda *args, **kwargs: "delivered",
+        )
+
+    first, second, third = run_scan(), run_scan(), run_scan()
+
+    # 第 1 次照常重试（attempts=2 未过阈值），此后 attempts=3 进入退避：第 2/3 次不再 settle。
+    assert len(settle_calls) == 1, settle_calls
+    assert first["runtime_closeouts_pending"] == 1, first
+    assert second["runtime_closeouts_pending"] == 1 and third["runtime_closeouts_pending"] == 1
+    fact = closeout.pending_closeout(task)
+    assert fact is not None and int(fact["attempts"]) == 3
+    outcome = closeout.advance_pending_closeout(
+        repo, task, fact, save_task=lambda saved: None,
+        notify_result=lambda *args, **kwargs: pytest.fail("退避期间不得通知"),
+    )
+    assert outcome["state"] == "backoff_wait", outcome
+    assert outcome["retry_after_seconds"] > 0
+    events = repo.events_for_attempt(chain["attempt_id"], limit=100)
+    conflicts = [event for event in events if event["event_type"] == "status_conflict"]
+    assert len(conflicts) == 1, conflicts
+
+
+# LLM: 人工 /recover 是 unknown 的唯一出口；恢复后恢复链必须能重新推进（退避最多延迟
+#   1 小时，不能永远挡住）。
+# 函数用途: 验证 /recover 释放 unknown 后收口 WAL 能成功推进、清账并通知一次。
+def test_manual_recovery_resumes_closeout_after_backoff_window(tmp_path):
+    repo, chain, task = _unknown_run_closeout(
+        tmp_path, attempts=closeout.CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT
+    )
+    notified = []
+
+    def run_scan():
+        return closeout.recover_pending_closeouts(
+            repo, load_task=lambda run_id: task, save_task=lambda saved: None,
+            list_tasks=lambda: [task],
+            notify_result=lambda actual, result, payload, *, attempt_id: (
+                notified.append(attempt_id) or "delivered"
+            ),
+        )
+
+    run_scan()
+    assert closeout.pending_closeout(task) is not None
+    recovered = repo.recover_attempt_unknown(
+        chain["attempt_id"], operator="test", effect_disposition="confirmed_noop",
+    )
+    assert recovered["recovered"] is True, recovered
+    assert repo.agent_run_for_run_id("child-unknown")["status"] == "created"
+    # 模拟退避窗口已过：把事实的刷新时间拨到过去，恢复链下一巡即可推进。
+    fact = closeout.pending_closeout(task)
+    fact["updated_at"] = 0.0
+    task.attributes = {closeout.RUNTIME_CLOSEOUT_ATTR: fact}
+
+    summary = run_scan()
+
+    assert summary["runtime_closeouts_recovered"] == 1, summary
+    assert repo.agent_run_for_run_id("child-unknown")["status"] == "done"
+    assert closeout.pending_closeout(task) is None
+    assert notified == [chain["attempt_id"]]
+
+
+# LLM: 旧 WAL 的 exact attempt 在换代后失去执行权；恢复链必须拒绝它并清账，
+#   绝不能把新回合的 run 按旧结果收口。
+# 函数用途: 验证 /recover 后新回合开始时旧 WAL 被拒（stale_attempt）且 run 不被误收口。
+def test_stale_wal_after_new_attempt_is_rejected_not_settled(tmp_path):
+    repo, chain, task = _unknown_run_closeout(
+        tmp_path, attempts=closeout.CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT
+    )
+    def run_scan():
+        return closeout.recover_pending_closeouts(
+            repo, load_task=lambda run_id: task, save_task=lambda saved: None,
+            list_tasks=lambda: [task], notify_result=lambda *args, **kwargs: "delivered",
+        )
+
+    run_scan()
+    recovered = repo.recover_attempt_unknown(
+        chain["attempt_id"], operator="test", effect_disposition="confirmed_noop",
+    )
+    assert recovered["recovered"] is True, recovered
+    repo.create_attempt(chain["agent_run_id"])
+    fact = closeout.pending_closeout(task)
+    fact["updated_at"] = 0.0
+    task.attributes = {closeout.RUNTIME_CLOSEOUT_ATTR: fact}
+
+    summary = run_scan()
+
+    assert summary["runtime_closeouts_rejected"] == 1, summary
+    assert repo.agent_run_for_run_id("child-unknown")["status"] == "created"
+    assert closeout.pending_closeout(task) is None
+    events = repo.events_for_attempt(chain["attempt_id"], limit=100)
+    blocked = [event for event in events if event["event_type"] == "closeout_blocked"]
+    assert blocked, events

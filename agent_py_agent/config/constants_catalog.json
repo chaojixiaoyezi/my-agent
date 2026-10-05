@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 914,
+  "count": 917,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5218,6 +5218,30 @@
       "unit": "个",
       "category": "上限预算",
       "description": "文件锁账本最多保留的条目数；防止一次任务锁太多文件导致账本膨胀。"
+    },
+    {
+      "name": "CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT",
+      "file": "agent_py_agent/agent/subagents/services/runtime_closeout.py",
+      "value": 2,
+      "unit": "个",
+      "category": "重试",
+      "description": "退避起点：重试次数超过这个值后开始拉长间隔。"
+    },
+    {
+      "name": "CLOSEOUT_RETRY_BACKOFF_BASE_SECONDS",
+      "file": "agent_py_agent/agent/subagents/services/runtime_closeout.py",
+      "value": 60,
+      "unit": "秒",
+      "category": "重试",
+      "description": "退避基数：单次等待 = 基数 × 重试次数。"
+    },
+    {
+      "name": "CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS",
+      "file": "agent_py_agent/agent/subagents/services/runtime_closeout.py",
+      "value": 3600,
+      "unit": "秒",
+      "category": "重试",
+      "description": "退避上限：单次等待最多 1 小时，保证 /recover 后最迟 1 小时内推进。"
     },
     {
       "name": "_MAX_HEADING_COUNT",

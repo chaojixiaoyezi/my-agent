@@ -1,5 +1,12 @@
 # 子代理维护状态
 
+## runner 收口 unknown 空转与终态 attempt 孤儿操作修复（obsfix12，2026-10-05，分支 `worker/obsfix12`，基于 17l 头 `f7849d7ff`）
+
+- 两条底座修复，各一个提交：
+  - **status_conflict 空转**（生产每天 400–1000 条重复全来自同一个 unknown run）：`settle_agent_run` 的 unknown 分支按同 `agent_run_id` + `reason=unknown_run_status` 只写一次诊断；`advance_pending_closeout` 对可重试形态在 `attempts > CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT` 后按 `min(3600, 60×attempts)` 退避，退避窗口内不 settle、不刷新事实、不写事件。
+  - **终态 attempt 孤儿操作**（生产 11 条 EXECUTING 从 9 月挂到现在）：`reconcile_superseded_attempts` 同一巡清扫——终态 attempt 下残留的 CLAIMED/EXECUTING 翻 UNKNOWN（`terminal_attempt_op_cleanup` + 每条一条审计事件），不动 attempt/run/锁，幂等。
+- 用例、变异与门禁见 TESTS.md obsfix12 节；设计见 DESIGN_LEDGER 同名两节。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - 子代理侧建目录点（debug_trace / execution.report / manager_work_orders / services.actions.records / task_trash）统一改 `nofollow_fs.ensure_private_dir`：缺失段逐级 0700、已存在一律不动。

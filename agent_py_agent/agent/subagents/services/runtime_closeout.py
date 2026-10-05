@@ -79,6 +79,18 @@ _RUN_STATUS_FOR_TASK_STATUS = {
 _DELIVERY_PENDING = "pending"
 _DELIVERY_DELIVERED = "delivered"
 
+# LLM: 收口重试退避（obsfix12 2026-10-05 生产实证）：unknown run 只有人工 /recover 能变，
+#   60 秒一巡的恢复链却会永远重试同一条 WAL，每次 settle 都写一条 status_conflict——生产
+#   每天 400–1000 条重复就是这么来的。重试超过阈值后按 attempts 拉长间隔（60s×attempts，
+#   封顶 1 小时），让"永远不会成功"的形态退化为每小时最多一次，同时保证 /recover 后最迟
+#   1 小时内重新推进。三处常量与 test_unknown_closeout_retry_backoff 用例同步。
+# 退避起点：重试次数超过这个值后开始拉长间隔。
+CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT = 2
+# 退避基数：单次等待 = 基数 × 重试次数。
+CLOSEOUT_RETRY_BACKOFF_BASE_SECONDS = 60
+# 退避上限：单次等待最多 1 小时，保证 /recover 后最迟 1 小时内推进。
+CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS = 3600
+
 
 # LLM: 通知能力只接当前恢复结果及 exact attempt；装配方绑定所需服务，不能传入完整 manager。
 # 类用途: 约定恢复通知的窄调用形状，保证 attempt 以命名参数交给原父级通知入口。
@@ -417,6 +429,25 @@ def deliver_parent_wake(notify_parent: Callable[[], str]) -> str:
     return str(outcome or "delivered")
 
 
+# LLM: 只读 fact 的结构化字段判断"现在该不该再试"，不解析文本、不改任何状态。
+#   只对"以后可能落成"的可重试形态退避：已交付/已一致的清账与补通知是本地推进，不能被
+#   退避拖慢；runner_result_missing 等事实不一致也不在退避范围。缺少 attempts/updated_at
+#   的历史事实按"可以重试"处理（fail-open 到重试一次，它们本来就该被尽快推进）。
+# 函数用途: 返回距离下次可重试还需等待的秒数，0 表示现在可以重试。
+def _closeout_retry_backoff_remaining(fact: dict[str, Any], now: float) -> float:
+    if str(fact.get("closeout_state") or "") not in RETRYABLE_CLOSEOUT_STATES:
+        return 0.0
+    attempts = int(fact.get("attempts") or 0)
+    if attempts <= CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT:
+        return 0.0
+    interval = min(
+        CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS,
+        CLOSEOUT_RETRY_BACKOFF_BASE_SECONDS * attempts,
+    )
+    updated_at = float(fact.get("updated_at") or 0)
+    return max(0.0, interval - (now - updated_at))
+
+
 # LLM: 本入口只持有原 RuntimeDB、save 与窄通知能力，装配在既有 sweep 调用方完成；
 # 恢复链只做两件事：补收口（settle 权威 run）与补通知（父级 wake）。
 # 它必须能安全重复执行：settle 是 CAS 幂等、wake 有去重键 + 回执，因此"重复恢复"不会产生
@@ -431,6 +462,12 @@ def advance_pending_closeout(
     if result is None:
         # runner_result 落盘缺失说明事实与持久化结果不一致：保持事实并留诊断，绝不伪造结论。
         return {"advanced": False, "state": "runner_result_missing"}
+    remaining = _closeout_retry_backoff_remaining(fact, time.time())
+    if remaining > 0:
+        # LLM: 退避窗口内不重试、不刷新事实、不写事件——避免每 60 秒一次的无谓 settle 与
+        #   诊断洪泛；窗口到期后自然回到正常推进链，/recover 改变 run 状态后同样如此。
+        return {"advanced": False, "state": "backoff_wait",
+                "retry_after_seconds": round(remaining, 3)}
     outcome = settle_runtime_run_for_result(repo, params=params, task=task, result=result)
     if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
         # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。
@@ -665,6 +702,9 @@ __all__ = [
     "CLOSEOUT_UNPERSISTED_EVENT",
     "CLOSEOUT_CONFLICT",
     "CLOSEOUT_NOT_APPLICABLE",
+    "CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT",
+    "CLOSEOUT_RETRY_BACKOFF_BASE_SECONDS",
+    "CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS",
     "CLOSEOUT_SETTLED",
     "CLOSEOUT_STALE_ATTEMPT",
     "CLOSEOUT_UNKNOWN_STATUS",

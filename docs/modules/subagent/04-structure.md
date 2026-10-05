@@ -362,6 +362,16 @@ incoming=failed`——只有 `failed+failed` 才放行。若在「run 收口后�
    `ConversationStore.wake_delivery_receipt()` 回执查询；同一 attempt 已 pending/handled 时回报
    `already_delivered` 不重发，换代后的新 attempt 仍正常通知。
 
+**重试退避与诊断去重**（obsfix12 2026-10-05）：可重试形态（`write_error`/`unknown_status`/
+`missing_run`）的重试次数超过 `CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT` 后，按
+`min(CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS, CLOSEOUT_RETRY_BACKOFF_BASE_SECONDS × attempts)` 拉长间隔——
+退避窗口内不 settle、不刷新事实、不写事件，让"永远不会成功"的形态退化为每小时最多一次；
+`settle_agent_run` 对 unknown run 的 `status_conflict` 诊断按同 `agent_run_id` +
+`reason=unknown_run_status` 只写一次（照 `orphan_reclaim_blocked` 的"同身份+原因只写一次"模式）。
+unknown 只有人工 `/recover` 能变，这两条让收口链不再每 60 秒空转、不再刷事件。同批在
+`reconcile_superseded_attempts` 同一巡加了终态 attempt 孤儿操作清扫（`terminal_attempt_op_cleanup`，
+每个操作一条 `tool_operation.terminal_attempt_cleanup` 审计事件，不动 attempt/run/锁，幂等）。
+
 **验收**：`test_closeout_interrupted_before_notify_recovers_once`（收口后通知前中断 → 恢复恰补一次）、
 `test_closeout_write_failure_leaves_retryable_fact_then_recovers`（写库一次失败 → 留事实、不通知、
 恢复后补收口+补通知）、`test_repeated_closeout_recovery_is_idempotent`（重复恢复幂等）、

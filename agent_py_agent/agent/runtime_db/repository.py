@@ -2297,15 +2297,27 @@ class RuntimeRepository(
             cur_status = str(row["run_status"] or "")
             if cur_status not in RUN_STATUS_LEGACY_CREATED and \
                     cur_status not in AGENT_RUN_TERMINAL_STATUSES:
-                # 未知状态 fail-closed：不写 settled，留诊断事件
-                self._append_event_conn(
-                    conn, event_type="status_conflict",
-                    attempt_id=str(row["current_attempt_id"] or ""),
-                    agent_run_id=agent_run_id,
-                    task_run_id=str(row["task_run_id"] or ""),
-                    payload={"status": cur_status, "action": "settle_blocked",
-                             "reason": "unknown_run_status"},
-                )
+                # 未知状态 fail-closed：不写 settled，留诊断事件。
+                # LLM: 诊断必须幂等（obsfix12 2026-10-05 生产实证）：unknown run 的收口 WAL
+                #   每 60 秒重试一次 settle，此前每次重试都追加一条 status_conflict——生产
+                #   每天 400–1000 条重复全来自同一个 run（unknown 只有人工 /recover 能变，
+                #   自动重试永远失败）。照 orphan_reclaim_blocked 的"同身份+原因只写一次"
+                #   模式：同一 agent_run_id 已有 reason=unknown_run_status 的 status_conflict
+                #   时跳过写入。状态机与返回值语义不变。
+                existing = conn.execute(
+                    "SELECT 1 FROM runtime_events WHERE event_type = 'status_conflict' "
+                    "AND agent_run_id = ? AND payload_json LIKE ? LIMIT 1",
+                    (agent_run_id, '%"reason": "unknown_run_status"%'),
+                ).fetchone()
+                if existing is None:
+                    self._append_event_conn(
+                        conn, event_type="status_conflict",
+                        attempt_id=str(row["current_attempt_id"] or ""),
+                        agent_run_id=agent_run_id,
+                        task_run_id=str(row["task_run_id"] or ""),
+                        payload={"status": cur_status, "action": "settle_blocked",
+                                 "reason": "unknown_run_status"},
+                    )
                 return {"settled": False, "reason": "unknown_status"}
             if str(attempt_id or "").strip():
                 if str(row["current_attempt_id"] or "") != attempt_id:
