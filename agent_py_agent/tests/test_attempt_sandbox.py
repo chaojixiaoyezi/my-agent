@@ -879,7 +879,10 @@ def test_platform_system_read_roots_are_structured_and_not_broad_aliases():
 
 def test_system_read_root_validation_rejects_root_and_forbidden_symlink_alias(tmp_path, monkeypatch):
     from agent_py_agent.agent.attempt import sandbox as attempt_sandbox
-    from agent_py_agent.agent.attempt.sandbox import SandboxUnavailableError, system_read_roots_for_platform
+    from agent_py_agent.agent.attempt.sandbox import (
+        SandboxUnavailableError,
+        system_read_roots_for_platform,
+    )
     from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
 
     alias = tmp_path / "system-root-alias"
