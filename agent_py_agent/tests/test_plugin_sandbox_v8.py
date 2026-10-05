@@ -262,40 +262,53 @@ def test_v8_spec_reads_base_is_env_not_owner_home(tmp_path):
     assert spec.network_access is False and spec.read_only_root is True
 
 
+def _restricted_policy_symlink_fixture(tmp_path):
+    home, data_root, env, data_dir = _layout(tmp_path)
+    read_target, write_target = tmp_path / "read-real", tmp_path / "write-real"
+    program_target = tmp_path / "tools" / "plugin-runner"
+    read_target.mkdir()
+    write_target.mkdir()
+    program_target.parent.mkdir()
+    program_target.write_text("host-verified program", encoding="utf-8")
+    aliases = tuple(home / name for name in ("allowed-read", "allowed-write", "plugin-runner"))
+    for alias, target in zip(aliases, (read_target, write_target, program_target), strict=True):
+        alias.symlink_to(target, target_is_directory=target.is_dir())
+    policy = PluginRestrictedSandbox(
+        read_roots=(aliases[0],), write_roots=(aliases[1],), execute_roots=(aliases[2],),
+        network=False, hidden_read_root=home,
+    )
+    spec = plugin_sandbox_spec(cwd=env, data_dir=data_dir,
+                               owner_home=data_root / "owners/local/main", sandbox_policy=policy)
+    return spec, home, data_dir, (*aliases, read_target, write_target, program_target)
+
+
+def _assert_restricted_policy_seatbelt_paths(spec, home, paths):
+    from agent_py_agent.agent.attempt.sandbox import _spec_rules
+
+    rules = "\n".join(_spec_rules(spec))
+    assert all(f"(allow file-read* (subpath {json.dumps(str(path))}))" in rules for path in paths)
+    assert f"(deny file-read* (subpath {json.dumps(str(home))}))" in rules
+    profile = AttemptExecutionSandbox._macos_profile(
+        attempt_view=spec.attempt_view, staging=spec.staging_root, shared=spec.shared_workspace,
+        write_roots=spec.extra_write_roots, implicit_attempt_write_roots=False,
+    )
+    write_allow = next(line for line in profile.splitlines() if line.startswith("(allow file-write*"))
+    assert f"(subpath {json.dumps(str(paths[4]))})" in write_allow
+    assert f"(subpath {json.dumps(str(paths[1]))})" not in write_allow
+
+
 def test_restricted_policy_spec_maps_read_write_network_and_file_program_roots(tmp_path):
     from agent_py_agent import agent
 
-    home, data_root, env, data_dir = _layout(tmp_path)
-    read_root = home / "allowed-read"
-    write_root = home / "allowed-write"
-    program_root = home / "tools" / "plugin-runner"
-    read_root.mkdir()
-    write_root.mkdir()
-    program_root.parent.mkdir()
-    program_root.write_text("host-verified program", encoding="utf-8")
-    policy_type = getattr(agent.plugin_sandbox, "PluginRestrictedSandbox", None)
-    assert policy_type is not None, "B7 must expose one shared restricted sandbox policy"
-
-    policy = policy_type(
-        read_roots=(read_root,),
-        write_roots=(write_root,),
-        execute_roots=(program_root,),
-        network=False,
-        hidden_read_root=home,
-    )
-    spec = plugin_sandbox_spec(
-        cwd=env,
-        data_dir=data_dir,
-        owner_home=data_root / "owners/local/main",
-        sandbox_policy=policy,
-    )
-
+    spec, home, data_dir, paths = _restricted_policy_symlink_fixture(tmp_path)
+    assert getattr(agent.plugin_sandbox, "PluginRestrictedSandbox", None) is not None
     assert spec.private_read_roots == (home.resolve(strict=True),)
-    assert {read_root, read_root.resolve(strict=True), program_root,
-            program_root.resolve(strict=True)} <= set(spec.public_read_roots)
-    assert program_root.parent not in spec.public_read_roots
-    assert {data_dir, write_root, write_root.resolve(strict=True)} <= set(spec.extra_write_roots)
+    assert {paths[0], paths[3], paths[5]} <= set(spec.public_read_roots)
+    assert paths[2].parent not in spec.public_read_roots
+    assert {data_dir, paths[1], paths[4]} <= set(spec.extra_write_roots)
+    assert paths[4].parent not in spec.extra_write_roots
     assert spec.read_only_root is True and spec.network_access is False
+    _assert_restricted_policy_seatbelt_paths(spec, home, paths)
 
 
 class _TestActivationRef:
@@ -511,6 +524,12 @@ def _restricted_policy_case(tmp_path):
     denied = home / "denied"
     for path in (allowed_read, allowed_write, denied):
         path.mkdir()
+    package_root = tmp_path / "allowed-package"
+    package = package_root / "b7lnx_probe"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 'SYMLINK_EXEC_ROOT_OK'\n", encoding="utf-8")
+    interpreter_alias = home / "python-alias"
+    interpreter_alias.symlink_to(Path(sys.executable))
     readable = allowed_read / "value.txt"
     unreadable = denied / "secret.txt"
     readable.write_text("READABLE", encoding="utf-8")
@@ -518,20 +537,20 @@ def _restricted_policy_case(tmp_path):
     allowed_write_file = allowed_write / "created.txt"
     denied_write_file = denied / "created.txt"
     policy = PluginRestrictedSandbox(
-        read_roots=(allowed_read,),
+        read_roots=(allowed_read, package_root),
         write_roots=(allowed_write,),
-        execute_roots=(Path(sys.executable),),
+        execute_roots=(interpreter_alias,),
         network=False,
         hidden_read_root=home,
     )
     spec = plugin_sandbox_spec(cwd=env, data_dir=data_dir,
                                owner_home=data_root / "owners/local/main", sandbox_policy=policy)
-    return AttemptExecutionSandbox(spec), readable, unreadable, allowed_write_file, denied_write_file
+    return AttemptExecutionSandbox(spec), readable, unreadable, allowed_write_file, denied_write_file, interpreter_alias, package_root
 
 
 @pytest.mark.skipif(not (IS_LINUX or IS_MACOS), reason="Linux bwrap / macOS Seatbelt")
 def test_restricted_policy_real_process_enforces_read_write_and_offline_roots(tmp_path):
-    sandbox, readable, unreadable, allowed_write_file, denied_write_file = _restricted_policy_case(tmp_path)
+    sandbox, readable, unreadable, allowed_write_file, denied_write_file, _, _ = _restricted_policy_case(tmp_path)
     if not sandbox.probe().ready:
         pytest.skip("当前平台的沙箱自检未就绪")
     try:
@@ -547,13 +566,28 @@ def test_restricted_policy_real_process_enforces_read_write_and_offline_roots(tm
     finally:
         listener.close()
 
-    report = json.loads(result.stdout.strip())
     assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip())
     assert report["read_allowed"] == "READABLE"
     assert report["read_denied"].startswith("DENIED:")
     assert report["write_allowed"] == "OK"
     assert report["write_denied"].startswith("DENIED:")
     assert report["network"].startswith("DENIED:")
+
+
+@needs_linux
+def test_linux_restricted_policy_symlink_execute_root_runs_and_reads_package(tmp_path):
+    from agent_py_agent.agent.tooling.sandbox import find_bwrap
+
+    if not find_bwrap():
+        pytest.skip("无 bwrap")
+    sandbox, _, _, _, _, interpreter, package_root = _restricted_policy_case(tmp_path)
+    if not sandbox.probe().ready:
+        pytest.skip("Linux bwrap 沙箱自检未就绪")
+    code = "import sys; sys.path.insert(0, sys.argv[1]); import b7lnx_probe; print(b7lnx_probe.VALUE)"
+    result = sandbox.run([str(interpreter), "-c", code, str(package_root)], timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "SYMLINK_EXEC_ROOT_OK"
 
 
 @needs_linux
@@ -597,6 +631,7 @@ def test_linux_python_prefix_symlink_alias_runs_and_reads_package(tmp_path, monk
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ALIAS_PACKAGE"
+
 
 
 def _expect_hidden_home(report: dict, *, allowed_home_names: list[str] | None = None) -> None:

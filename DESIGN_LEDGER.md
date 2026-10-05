@@ -1,5 +1,11 @@
 # 设计台账
 
+## B7 受限策略的符号链接执行根（b7lnx，2026-10-04，`worker/b7lnx`，基于 `c544b358d`；已并入 step17k，3a 沙箱外 macOS 强制模式复跑通过，Linux 真进程用例由 17k 车道验证）
+
+- **问题**：B7 的统一受限策略已保留 R/W/E 根的 alias 与 realpath，但 bwrap 将 alias 也作为 bind destination；执行根若是 `/usr/local/bin/python` 这类符号链接，bubblewrap 会拒绝挂到 symlink destination，导致子进程无输出且无法启动。
+- **改动**：沿用收窄读的 alias 处理入口；Linux 只挂载已核验的 realpath，再用 `--symlink <realpath> <alias>` 恢复授权的读、写、执行根入口。Seatbelt 以精确路径规则同时允许 alias 与目标；写授权仍只对应解析后的已核验写根，不放宽到父目录。候选预检、业务连接、面板连接仍共用 `plugin_sandbox_spec` / `AttemptSandboxSpec`，G5 Landlock 端口拒绝未改。
+- **验证状态**：读/写/执行 alias argv 与受限策略 Seatbelt/spec 聚焦用例通过；移除 alias 恢复调用的变异被 argv 用例抓住，恢复后 SHA-256 一致且同用例通过。三文件相关测试集本机退出 1（环境观察与门禁见 `TESTS.md`）；guards9 与规定静态门禁通过。Linux 真解释器 symlink 启动/读包用例已补，但本机 Darwin 跳过，必须由 3a Linux lane 实跑。
+
 ## B5×B7 接线：总开关收口 + `/plugins info` 原因 + 收紧预算管理员可改（b5b7wire，2026-10-04，分支 `worker/b5b7wire`，基于 17j 头 `662439745`；ds4 初审无必须改，3a 终审通过并补用例，已并入 step17k）
 
 - **终审补件（3a）**：ds4 小问题 1“总开关关着 + 宿主 deny 无用例”。补 `test_host_deny_never_relaxed_with_or_without_reviews`：宿主 deny 在无征询、插件放行、插件 ask 三种情况下都保持 deny。首版只测放行时，删掉 merge 里 deny 短路的变异存活，加上插件 ask 后变异被杀。小问题 2（`is not True` 与 `is False` 当前等价，无法区分）记为已知，现写法是 fail-closed，不改。

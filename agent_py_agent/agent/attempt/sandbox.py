@@ -416,6 +416,7 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
         spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
         *spec.public_read_roots, *spec.extra_write_roots)}
     visible.update(Path(path).expanduser().absolute() for path in spec.public_read_roots)
+    visible.update(Path(path).expanduser().absolute() for path in spec.extra_write_roots)
     allowed = sorted(json.dumps(str(path)) for path in visible)
     return [*(f"(deny file-read* (subpath {json.dumps(str(root))}))" for root in hidden),
             *(f"(allow file-read* (subpath {path}))" for path in allowed),

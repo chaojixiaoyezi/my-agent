@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## B7 受限策略 symlink 执行根（b7lnx，2026-10-04，`worker/b7lnx`，基于 `c544b358d`；已并入 step17k）
+
+- 3a 沙箱外（MY_AGENT_TEST_REQUIRE_CAPABILITIES=1）复跑 3 个沙箱文件：分支 52 passed、14 skipped，17j 基线 52 passed、13 skipped，多出的 1 个跳过是 Linux 专属真进程用例；作者在会话沙箱里看到的 10 项失败都是沙箱环境造成的。并入 17k 后同样 52 passed、14 skipped。
+
+- **问题与实现**：受限策略把宿主核验的原路径 alias 和 strict realpath 都交给 `--ro-bind`，当执行根 alias 的目标是现存 symlink destination（如 `/usr/local/bin/python`）时 bwrap 不能启动。现在 shared read-only-root 构造只 bind 真实目标，再以 `--symlink` 重建宿主已核验的读/写/执行入口；写根只对真实目标 `--bind`。Seatbelt 规则逐根允许 alias 与目标，写规则仍只允许真实写根。三路都汇入相同规格工厂，G5 Landlock 实现未改。
+- **回归用例**：`test_restricted_policy_real_process_enforces_read_write_and_offline_roots` 先断言 returncode（失败时附 stderr），再解析 JSON。新增 `test_linux_restricted_policy_symlink_execute_root_runs_and_reads_package`：在隐藏 home 下以 symlink 形式调用解释器并导入临时包；`@needs_linux`，没有 bwrap 或 readiness 不通过时按既有方式 skip。`test_linux_readonly_root_keeps_symlink_alias_and_realpath_in_argv` 检查读/写/执行根的真实目标 bind 与 alias symlink pair；受限策略 spec 用例还检查 Seatbelt 对 alias/目标的读放行和只给真实写根的写规则。
+- **变异**：临时移除 `_read_only_root_argv` 的 `_append_symlink_aliases` 调用后，`test_linux_readonly_root_keeps_symlink_alias_and_realpath_in_argv` 按预期失败（R/W/E alias pair 缺失）。恢复后 `agent_py_agent/agent/tooling/sandbox.py` SHA-256 与变异前均为 `20d5a9249b1c7e9f9ecec52599df2cecfb42b0cbd12754397d53090809eac6da`，同一 argv 用例重跑通过。本机非 Linux，真实 Linux 进程用例跳过，不能把此变异结果当 Linux 真实启动验收。
+- **相关测试命令**（指定 CI Python，工作树根）：`$PYTHON -m pytest agent_py_agent/tests/test_plugin_sandbox_v8.py agent_py_agent/tests/test_plugin_sandbox.py agent_py_agent/tests/test_attempt_sandbox.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna5-final3`；退出码 1，观察到 10 项失败。3 个 v8 Seatbelt 真进程场景和 `test_macos_view_write_allowed` 明确报 `sandbox_apply: Operation not permitted`；插件启用状态断言失败 4 项；`test_macos_private_read_root_hides_other_owners_and_config` 的 `can_read` 断言失败，`test_registry_built_shell_cannot_read_other_owners_or_config_on_macos` 超时 30 秒。其余原因未在本机确认；不称为基线失败，也没有据此归因于本次实现。3a 提供的 B7 沙箱外结果只作为 B7 历史核查，不替代 b7lnx Linux 实跑。
+- **门禁**：guards9 清单 11 个测试文件退出码 0；当前版本 import boundaries `findings=0`、Ruff `All checks passed!`、doc sync `DOC_SYNC_PASS`、`git diff --check` 退出码 0；strict code-size `strict_scope_total=2200, hard=0, blocked=False`，执行后已还原 `CODE_SIZE_REPORT.md`；clean-package 输出 `OK: . 未发现发布阻塞项`。最后一次 `size_diff.sh` 为新增告警 **0**、消失 **43**。
+- **待做/边界**：Linux 真实 bwrap 用例仍需 3a lane 实跑；Mac 真 Seatbelt 和安全终审由 3a/9b 后续验收。本机结构化 argv/spec 测试通过不代表 Linux 子进程已启动。
+
 ## B5×B7 接线：总开关收口、`/plugins info` 原因、收紧预算管理员可改（b5b7wire，2026-10-04，基于 17j 头 `662439745`；已并入 step17k）
 
 - 3a 挑入 17k 后复跑 11 个相关文件：296 passed；前端目录同步（260 字段）。新增 `test_host_deny_never_relaxed_with_or_without_reviews`，去掉 merge 里 deny 短路的变异被抓到，按备份还原。

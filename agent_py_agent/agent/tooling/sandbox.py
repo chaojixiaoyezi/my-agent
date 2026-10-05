@@ -140,7 +140,7 @@ class SandboxSpec:
     # 整根只读形态：根文件系统先只读挂载，hidden_paths 可再覆盖隐藏区域并只重挂授权读根；write_roots 单独可写。
     # 默认 False 时两种既有形态的 argv 逐字节不变。
     read_only_root: bool = False
-    # B7：收窄读形态下保留宿主已核验的符号链接别名与真实目标两条挂载路径。
+    # B7：收窄读形态只挂真实目标，再用 --symlink 恢复宿主已核验的入口路径。
     preserve_public_read_root_aliases: bool = False
     # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
     hidden_paths: tuple[Path, ...] = ()
@@ -282,13 +282,14 @@ def _read_only_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
     for root in _normalized_write_roots(spec.write_roots):
         if root.exists():
             argv += ["--bind", str(root), str(root)]
+    _append_symlink_aliases(argv, spec)
     _append_readonly_mounts(argv, spec.read_only_paths)
     argv += ["--chdir", str(spec.workspace)]
     return argv
 
 
-# LLM: B7 收窄读：private_read_roots 由调用方并入 hidden_paths（v8 隐藏 Gateway 用户家目录），先 tmpfs 覆盖，再只读挂回工作目录与
-#   显式授权根，并在写根阶段按原权限挂回；隐藏根内未授权项目仍不可见。保留原路径别名开关可让符号链接入口与 realpath 都被挂回。
+# LLM: B7 收窄读：private_read_roots 由调用方并入 hidden_paths（v8 隐藏 Gateway 用户家目录），先 tmpfs 覆盖，再挂回工作目录与
+#   显式授权的真实读根；符号链接别名稍后以 --symlink 重建，写根仍按原权限挂回，隐藏根内未授权项目仍不可见。
 #   没有 hidden_paths 时什么都不加，既有整根只读 argv 逐字节不变。
 # 函数用途: 整根只读形态下把隐藏根 tmpfs 覆盖并挂回工作目录与授权读根。
 def _append_hidden_root_remounts(argv: list[str], spec: SandboxSpec) -> None:
@@ -326,26 +327,49 @@ def _normalized_write_roots(raw_roots: tuple[Path, ...] | None) -> tuple[Path, .
 def _normalized_read_roots(
     raw_roots: tuple[Path, ...], preserve_aliases: bool = False
 ) -> tuple[Path, ...]:
-    # LLM: 标准 shell 读根按 realpath 合并；插件收窄读会显式保留宿主已核验的 symlink 别名与真实目标，
-    #   因为隐藏家目录后，单挂目标路径不会恢复原来位于家目录内的入口。
-    # 函数用途: 规范只读挂载根并按需保留符号链接别名映射。
+    # LLM: 标准 shell 读根按 realpath 合并；收窄读保留每个授权根的真实目标，别名由统一 symlink helper 重建。
+    # 函数用途: 规范只读挂载根，并在受限形态下避免把别名当作挂载目标。
     if preserve_aliases:
         return _preserved_read_roots(raw_roots)
     return _canonical_read_roots(raw_roots)
 
 
-# LLM: alias 与目标属于不同的挂载路径；按字面路径去重，避免 realpath 包含关系把别名折叠掉。
-# 函数用途: 保留每个只读根的原始入口和规范化目标。
+# LLM: symlink destination 不能作为 bwrap bind mount 目标；收窄读只挂 strict realpath，入口另用 --symlink 恢复。
+# 函数用途: 得到不包含符号链接目的地的受限只读挂载根。
 def _preserved_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
     roots: list[Path] = []
     for raw in raw_roots:
         try:
-            original = Path(raw).expanduser().absolute()
-            resolved = original.resolve(strict=False)
+            resolved = Path(raw).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             continue
-        roots = list(dict.fromkeys((*roots, original, resolved)))
+        roots = list(dict.fromkeys((*roots, resolved)))
     return tuple(roots)
+
+
+# LLM: 只重建调用方已显式给出的 symlink 根，目标须严格解析且由同一 policy 根集合挂载，不从父目录扩权。
+# 函数用途: 找出授权路径中“真实目标 + 原始别名”的稳定映射。
+def _symlink_root_aliases(raw_roots: tuple[Path, ...]) -> tuple[tuple[Path, Path], ...]:
+    aliases: list[tuple[Path, Path]] = []
+    for raw in raw_roots:
+        try:
+            alias = Path(raw).expanduser().absolute()
+            target = alias.resolve(strict=True)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if alias.is_symlink() and alias != target and (target, alias) not in aliases:
+            aliases.append((target, alias))
+    return tuple(aliases)
+
+
+# LLM: --symlink 只补回 policy 明确授权的入口；必须在目标根挂载后、最后只读覆盖前执行。
+# 函数用途: 在收窄读 bwrap 视图里恢复 R/W/E 根的 symlink 名称，不把别名父目录挂进沙箱。
+def _append_symlink_aliases(argv: list[str], spec: SandboxSpec) -> None:
+    if not spec.preserve_public_read_root_aliases:
+        return
+    roots = (*spec.public_ro_roots, *(spec.write_roots or ()))
+    for target, alias in _symlink_root_aliases(roots):
+        argv += ["--symlink", str(target), str(alias)]
 
 
 # LLM: 非收窄读调用沿用 realpath 祖先合并，保持已有 bwrap shell 挂载集合不变。

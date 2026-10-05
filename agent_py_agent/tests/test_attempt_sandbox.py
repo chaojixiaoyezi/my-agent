@@ -417,24 +417,38 @@ def test_linux_full_access_with_persona_binds_host_and_ro_overlays_persona(tmp_p
     assert (str(persona / "SOUL.md"), str(persona / "SOUL.md")) in ro_pairs
 
 
+# LLM: 测试辅助只读取 argv 的结构化 option/value 位置，不执行 bwrap 或推断平台效果。
+# 函数用途: 收集一种挂载参数对应的源/目标路径对，便于断言别名和真实根。
+def _argv_mount_pairs(argv, option):
+    return {(argv[index + 1], argv[index + 2]) for index, item in enumerate(argv) if item == option}
+
+
 def test_linux_readonly_root_keeps_symlink_alias_and_realpath_in_argv(tmp_path):
     from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
 
     hidden = tmp_path / "home"
     real = tmp_path / "python-prefix"
+    write_real = tmp_path / "write-real"
+    execute_real = tmp_path / "bin" / "python3.12"
     workspace = tmp_path / "plugin-files"
     data_dir = tmp_path / "plugin-data"
-    for path in (hidden, real, workspace, data_dir):
+    for path in (hidden, real, write_real, workspace, data_dir):
         path.mkdir()
+    execute_real.parent.mkdir()
+    execute_real.write_text("verified interpreter", encoding="utf-8")
     alias = hidden / "python-prefix"
+    write_alias = hidden / "write-alias"
+    execute_alias = hidden / "python"
     alias.symlink_to(real, target_is_directory=True)
+    write_alias.symlink_to(write_real, target_is_directory=True)
+    execute_alias.symlink_to(execute_real)
     sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
         attempt_view=workspace,
         staging_root=data_dir,
         shared_workspace=workspace,
         owner_home=workspace,
-        extra_write_roots=(data_dir,),
-        public_read_roots=(alias, real),
+        extra_write_roots=(data_dir, write_alias),
+        public_read_roots=(alias, real, execute_alias, execute_real),
         private_read_roots=(hidden,),
         implicit_attempt_write_roots=False,
         read_only_root=True,
@@ -445,14 +459,17 @@ def test_linux_readonly_root_keeps_symlink_alias_and_realpath_in_argv(tmp_path):
 
     argv = sandbox.build_argv(["true"])
 
-    ro_pairs = {
-        (argv[index + 1], argv[index + 2])
-        for index, item in enumerate(argv)
-        if item == "--ro-bind"
-    }
+    ro_pairs = _argv_mount_pairs(argv, "--ro-bind")
+    bind_pairs = _argv_mount_pairs(argv, "--bind")
+    symlink_pairs = _argv_mount_pairs(argv, "--symlink")
     assert argv[argv.index("--tmpfs") + 1] == str(hidden)
-    assert (str(alias), str(alias)) in ro_pairs
     assert (str(real), str(real)) in ro_pairs
+    assert (str(execute_real), str(execute_real)) in ro_pairs
+    assert (str(write_real), str(write_real)) in bind_pairs
+    assert {(str(real), str(alias)), (str(write_real), str(write_alias)),
+            (str(execute_real), str(execute_alias))} <= symlink_pairs
+    assert (str(alias), str(alias)) not in ro_pairs
+    assert (str(write_alias), str(write_alias)) not in bind_pairs
 
 
 def test_linux_explicit_write_roots_do_not_make_readonly_cwd_writable(tmp_path):
