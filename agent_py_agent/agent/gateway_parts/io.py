@@ -432,6 +432,62 @@ def _is_file_lock_contention(exc: OSError) -> bool:
     return getattr(exc, "winerror", None) in {33}
 
 
+# 孤儿锁 sidecar 的最小年龄：24 小时宽限，避开“文件刚删、别的进程还握着旧句柄读写”的窗口，又让清理每天都能收掉积压；纯维护动作，不加配置开关。
+_ORPHAN_LOCK_MIN_AGE_SECONDS = 24 * 3600
+
+
+# LLM: 请求队列的读写都会给数据文件建 <name>.lock sidecar（_open_lock_handle/_locked_file_path），
+#   文件归档/删除后 sidecar 没有任何删除路径，会长期累积（真机 3000+ 空锁文件）。清理只删同时满足三条的：
+#   对应数据文件已不存在、mtime 早于宽限（见上）、且能非阻塞拿到 flock（拿不到=有人正持锁）。
+#   数据文件还在、宽限内、拿不到锁的一律不动；单文件失败只跳过，绝不把异常抛给维护巡。
+# 函数用途: 清扫一个目录里的孤儿锁 sidecar，返回删掉的数量。
+def cleanup_orphan_lock_files(directory: Path, *, now: float | None = None) -> int:
+    if not directory.is_dir():
+        return 0
+    current = time.time() if now is None else now
+    try:
+        candidates = sorted(directory.glob("*.lock"))
+    except OSError:
+        return 0
+    return sum(1 for lock_path in candidates if _cleanup_one_orphan_lock(lock_path, current=current))
+
+
+# LLM: 三条判据（孤儿、超宽限、非活锁）逐条早返回，单文件失败只跳过；拆出来同时压平整轮清扫的嵌套。
+# 函数用途: 判断并尝试删除单个孤儿锁文件，真的删掉返回 True。
+def _cleanup_one_orphan_lock(lock_path: Path, *, current: float) -> bool:
+    if len(lock_path.name) <= len(".lock"):
+        return False
+    try:
+        modified_at = lock_path.stat().st_mtime
+    except OSError:
+        return False
+    if current - modified_at < _ORPHAN_LOCK_MIN_AGE_SECONDS:
+        return False
+    if lock_path.with_name(lock_path.name[: -len(".lock")]).exists():
+        return False
+    try:
+        return _remove_orphan_lock_file(lock_path)
+    except Exception:  # noqa: BLE001 单个坏锁文件不能中断整轮清扫
+        return False
+
+
+# LLM: 先按同一条 _open_lock_handle 原语非阻塞试锁；拿不到说明有活进程正在用这把锁，直接放行不动文件。
+#   拿到后先关句柄再删名（Windows 上打开着的文件删不掉；删名窗口里对应数据文件已不存在，晚到的锁只会锁到孤儿锚点）。
+# 函数用途: 非阻塞试锁并删掉一个孤儿锁文件，真的删掉返回 True。
+def _remove_orphan_lock_file(lock_path: Path) -> bool:
+    handle = _open_lock_handle(lock_path)
+    try:
+        if not _try_flock_exclusive(handle):
+            return False
+    finally:
+        handle.close()
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 # 流式 chunk 文件单次读取上限：整体 f.read() 无上限会 MemoryError，按上限分块读、剩余部分下一拍继续
 # （CLI 与 TUI 两个网关客户端共用这一份）。
 STREAM_CHUNK_READ_MAX_BYTES = 8 * 1024 * 1024
@@ -499,6 +555,22 @@ def new_gateway_request_id() -> str:
 def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
 
     return paths.responses / f"{request_id}.json"
+
+
+# LLM: 这些目录的 JSON 读/写都走 _locked_file_path（<name>.lock sidecar），文件归档/删除后 sidecar 会累积；
+#   锁清理巡只扫这一份清单（队列四个目录 + 终态副本 + 响应 + 每个请求都会建锁的 turn_transitions），
+#   新增别的锁目录要同步加进来。清理只删孤儿（见 cleanup_orphan_lock_files），活锁与在用文件不动。
+# 函数用途: 列出会积累锁 sidecar 的 Gateway 目录，供周期清理。
+def gateway_lock_sidecar_dirs(paths: GatewayPaths) -> tuple[Path, ...]:
+    return (
+        paths.inbox,
+        paths.processing,
+        paths.done,
+        paths.failed,
+        paths.terminal,
+        paths.responses,
+        paths.root / "turn_transitions",
+    )
 
 
 # LLM: 队列计数只投影目录事实，不读取请求或参与准入；scandir 复用目录类型，避免逐文件 stat 抢占状态线程。

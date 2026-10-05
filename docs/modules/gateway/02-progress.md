@@ -2,6 +2,13 @@
 
 ## Adapter 外发恢复（slp5，2026-10-05；已实现，待初审）
 
+## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，worker/obsfix34；待非作者初审）
+
+- **背景（结构化事实）**：生产 Gateway `requests/pending` 1435 个、`processing` 1588 个空 `.lock` 文件，最老超过 7 天，真正在跑的请求只有 19 个。
+- **根因**：请求文件的每次读/写都经 `_locked_file_path` 给数据文件建同名 sidecar `<name>.lock`；flock 锁 inode，释放时不能顺手 unlink（会拆散等待者与后到者的互斥），全仓也没有任何删除路径，于是队列四个目录、终态副本、响应目录与 `turn_transitions` 都在累积。
+- **改法**：派发 tick 新增第五个后台段（`cli/gateway_loops.py`，节拍 1 小时、独立退避），`gateway_parts/io.py:cleanup_orphan_lock_files` 只删**同时满足**“数据文件已不存在 + mtime 早于 24 小时宽限 + 非阻塞 flock 拿得到”的 sidecar；活锁、数据文件还在、宽限内的一律不动；单文件失败只跳过。
+- 详见 DESIGN_LEDGER / TESTS 同名节。
+
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，worker/artrefguard；待初审）
 
 - `agent/common/logical_reference_ids.py`（新增）：产品编号前缀的共享常量（gwreq-/run-/subagent- 与 call_ 前缀）与 `is_logical_reference_segment` 形态判定；`gateway_parts/io.new_gateway_request_id` 与 run 号生成点改为引用同一常量（禁止各写一份字面量）。

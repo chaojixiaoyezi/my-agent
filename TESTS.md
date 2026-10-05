@@ -90,6 +90,16 @@
   - guards9（12 文件）→ 全绿；`scripts/check_import_boundaries.py` → findings=0（白名单常量放 gateway 层，守住 gateway_parts 不能导入 agent_core 的层边界）；`ruff check agent_py_agent scripts` → All checks passed。
 - 新增用例：`test_incomplete_with_tool_rounds_requeues_for_resume`、`test_retry_budget_exceeded_requeues_for_resume`、`test_request_rejected_does_not_requeue`、`test_zero_output_stream_incomplete_does_not_requeue`、`test_resume_limit_exhausted_fails_normally`、`test_switch_off_does_not_requeue`、`test_resume_count_accumulates_and_survives_restart_marker`。
 
+## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，分支 `worker/obsfix34`，待非作者初审）
+
+- 背景、根因与改法见 `DESIGN_LEDGER.md` 同名小节。
+- 新增用例（`test_gateway_io.py::TestCleanupOrphanLockFiles`，3 条）：`test_removes_only_orphan_old_unlocked_sidecar`（a 数据文件在、b 孤儿旧、c 孤儿但被活锁、d 孤儿但 mtime 新 → 只删 b；条件不变再跑一遍返回 0）、`test_missing_directory_is_noop`、`test_sidecar_dirs_cover_queue_terminal_and_transitions`。
+- 命令与结果（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_io.py agent_py_agent/tests/test_gateway_loops_resilience.py -q` → **44 passed**。
+  - guards9 全部 12 个文件 → **全绿**；`ruff`、`check_import_boundaries`=0、`check_doc_sync --base f7849d7ff`、strict code-size（hard=0 blocked=False）、`size_diff`（**新增 0 / 消失 57**）、`git diff --check`、`check_clean_package` 全过。
+  - 常数目录重新生成：`scripts/build_constants_catalog.py`（912 → 914 项）；`test_constants_catalog.py` + `test_constant_names_unique.py` → 13 passed。
+- 未验证：真实 Gateway 上 `.lock` 数量的实际下降（沙箱不跑真实 Gateway，由 3a 真机观察）；Windows 删名路径只有代码保证、未实测。
+
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
 - 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。

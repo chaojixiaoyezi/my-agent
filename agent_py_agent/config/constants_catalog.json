@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 918,
+  "count": 920,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3090,6 +3090,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "（CLI 与 TUI 两个网关客户端共用这一份）。"
+    },
+    {
+      "name": "_ORPHAN_LOCK_MIN_AGE_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/io.py",
+      "value": 86400,
+      "unit": "秒",
+      "category": "其它",
+      "description": "孤儿锁 sidecar 的最小年龄：24 小时宽限，避开“文件刚删、别的进程还握着旧句柄读写”的窗口，又让清理每天都能收掉积压；纯维护动作，不加配置开关。"
     },
     {
       "name": "GATEWAY_HEARTBEAT_INTERVAL_SECONDS",
@@ -7178,6 +7186,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "调度器存活心跳节流(秒):>5 分钟没更新即疑死,配合 systemd 快速定位。"
+    },
+    {
+      "name": "_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 3600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "锁 sidecar 清扫节拍：孤儿锁宽限 24 小时（gateway_parts.io._ORPHAN_LOCK_MIN_AGE_SECONDS），每小时扫一遍目录就够，不必跟着秒级 tick 跑。"
     },
     {
       "name": "_MEMORY_CURATOR_WORKER_COUNT",

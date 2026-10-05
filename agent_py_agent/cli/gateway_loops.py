@@ -34,6 +34,7 @@ from ..agent.gateway_parts.input_delivery_service import (
     raise_if_input_reconcile_unsettled,
     reconcile_gateway_input_receipts,
 )
+from ..agent.gateway_parts.io import cleanup_orphan_lock_files, gateway_lock_sidecar_dirs
 from ..agent.gateway_parts.lease_service import GATEWAY_HEARTBEAT_INTERVAL_SECONDS
 from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.gateway_parts.queue_service import GatewayClaim
@@ -174,11 +175,14 @@ def _note_loop_tick_error(site: _LoopSite, exc: BaseException, backoff: LoopErro
         _print_gateway_loop_error(site.context, site.worker_id, exc)
 
 
-# 派发 tick 里四个段的落点：计数都在 loop "dispatcher" 下，打印各以自己的 worker_id 出现。
+# 派发 tick 里五个段的落点：计数都在 loop "dispatcher" 下，打印各以自己的 worker_id 出现。
 _DISPATCH_SEGMENT_SITE = _LoopSite("dispatcher", "gateway_request_dispatch.iteration", "dispatcher")
 _RECOVERY_SITE = _LoopSite("dispatcher", "gateway_request_recovery.iteration", "recovery")
 _PROJECTION_SITE = _LoopSite("dispatcher", "gateway_terminal_projection.iteration", "terminal-projector")
 _RECONCILE_SITE = _LoopSite("dispatcher", "gateway_input_reconcile.iteration", "input-reconciler")
+# 锁 sidecar 清扫节拍：孤儿锁宽限 24 小时（gateway_parts.io._ORPHAN_LOCK_MIN_AGE_SECONDS），每小时扫一遍目录就够，不必跟着秒级 tick 跑。
+_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS = 3600.0
+_LOCK_SIDECAR_CLEANUP_SITE = _LoopSite("dispatcher", "gateway_lock_sidecar_cleanup.iteration", "lock-sidecar-cleanup")
 
 
 # LLM: 单一 tick 的后台循环（维护、调度器到期、孤儿恢复）统一节奏：成功等 interval 并清零退避，出错记账、限流打印、
@@ -243,6 +247,8 @@ class _RequestDispatcher:
         self._recovery_backoff = LoopErrorBackoff()
         self._projection_backoff = LoopErrorBackoff()
         self._reconcile_backoff = LoopErrorBackoff()
+        self._lock_cleanup_backoff = LoopErrorBackoff()
+        self._next_lock_cleanup_at = 0.0
 
     # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，只给它们记结构化等待事实，留给接班进程处理；
     # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
@@ -275,6 +281,11 @@ class _RequestDispatcher:
         if now >= self._next_input_reconcile_at:
             delay = self._run_segment(_RECONCILE_SITE, self._reconcile_backoff, self._reconcile_inputs_once)
             self._next_input_reconcile_at = now + max(0.75, delay)
+        if now >= self._next_lock_cleanup_at:
+            delay = self._run_segment(
+                _LOCK_SIDECAR_CLEANUP_SITE, self._lock_cleanup_backoff, self._cleanup_lock_sidecars_once
+            )
+            self._next_lock_cleanup_at = now + max(_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS, delay)
         return dispatched
 
     # LLM: 后台修复段的统一跑法：成功清零该段退避并返回 0；失败记账（loop "dispatcher"）、按该段自己的退避限流打印，
@@ -310,6 +321,13 @@ class _RequestDispatcher:
         raise_if_input_reconcile_unsettled(
             reconcile_gateway_input_receipts(self.paths, self.bootstrap_agent, limit=64)
         )
+
+    # LLM: 锁 sidecar 清扫段：只删数据文件已不存在、超过 24 小时宽限、且非阻塞拿得到 flock 的 <name>.lock；
+    #   活锁、数据文件还在、宽限内的一律不动；单文件失败在 cleanup_orphan_lock_files 内只跳过。
+    # 函数用途: 清理请求目录里累积的孤儿锁文件，失败不拖垮其它段。
+    def _cleanup_lock_sidecars_once(self) -> None:
+        for directory in gateway_lock_sidecar_dirs(self.paths):
+            cleanup_orphan_lock_files(directory)
 
     def _submit(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
         self._executor.submit(self._execute, claim, user_key, conversation_key)

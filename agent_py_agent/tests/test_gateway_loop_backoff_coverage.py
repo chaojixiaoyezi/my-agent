@@ -153,6 +153,35 @@ def test_dispatcher_segment_errors_back_off_when_idle_and_count(printed, monkeyp
     assert snapshot["dispatch_tick_count"] == 11, "段内出错的 tick 照样记起止"
 
 
+def test_lock_sidecar_cleanup_segment_runs_when_due_then_waits_a_hour(monkeypatch, tmp_path) -> None:
+    """锁 sidecar 清扫段：到点扫全部登记目录，下一拍按 1 小时节拍不再扫。"""
+    paths = _paths(tmp_path)
+    admission = rw.GatewayAdmission()
+    monkeypatch.setattr(rw, "admission", admission)
+    monkeypatch.setattr(gateway_loops, "admission", admission)
+    dispatcher = _stub_dispatcher(paths, [], threading.Event())
+    dispatcher._next_lock_cleanup_at = 0.0
+    monkeypatch.setattr(gateway_loops, "dispatch_pending_requests", lambda *args, **kwargs: 0)
+    scanned: list = []
+    monkeypatch.setattr(
+        gateway_loops,
+        "gateway_lock_sidecar_dirs",
+        lambda paths_: (tmp_path / "inbox", tmp_path / "processing"),
+    )
+    monkeypatch.setattr(
+        gateway_loops,
+        "cleanup_orphan_lock_files",
+        lambda directory, **kwargs: scanned.append(directory) or 0,
+    )
+
+    dispatcher.tick()
+    assert scanned == [tmp_path / "inbox", tmp_path / "processing"], "到点的清扫段必须扫全部登记目录"
+
+    scanned.clear()
+    dispatcher.tick()
+    assert scanned == [], "清扫节拍 1 小时：紧接着的下一拍不再扫"
+
+
 def test_recovery_segment_failures_never_slow_dispatch_polling(printed, monkeypatch, tmp_path) -> None:
     paths = _paths(tmp_path)
     admission = rw.GatewayAdmission()

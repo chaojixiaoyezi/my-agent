@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -430,3 +432,68 @@ class TestGatewayResponsePath:
 
         result = gateway_response_path(paths, "req_123")
         assert result == tmp_path / "gateway/responses/req_123.json"
+
+
+class TestCleanupOrphanLockFiles:
+    """清理孤儿锁 sidecar：数据文件已删、超宽限、非活锁三条同时满足才删。"""
+
+    _DAY = 24 * 3600
+
+    def _age(self, path: Path, seconds: float) -> None:
+        """把文件的 mtime 拨到 seconds 秒之前。"""
+        stamp = time.time() - seconds
+        os.utime(path, (stamp, stamp))
+
+    def test_removes_only_orphan_old_unlocked_sidecar(self, tmp_path: Path):
+        """a 数据在、b 孤儿旧、c 孤儿但活锁、d 孤儿但新：只删 b；再跑幂等。"""
+        from agent_py_agent.agent.gateway_parts.io import (
+            _flock_exclusive,
+            _open_lock_handle,
+            cleanup_orphan_lock_files,
+        )
+
+        (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+        keep_with_data = tmp_path / "a.json.lock"
+        orphan = tmp_path / "b.json.lock"
+        locked = tmp_path / "c.json.lock"
+        fresh = tmp_path / "d.json.lock"
+        for path in (keep_with_data, orphan, locked):
+            path.write_text("", encoding="utf-8")
+            self._age(path, self._DAY + 3600)
+        fresh.write_text("", encoding="utf-8")
+
+        handle = _open_lock_handle(locked)
+        _flock_exclusive(handle)
+        try:
+            assert cleanup_orphan_lock_files(tmp_path) == 1
+            # 幂等：条件没变（c 仍被活锁），再来一遍不再删任何文件。
+            assert cleanup_orphan_lock_files(tmp_path) == 0
+        finally:
+            handle.close()
+
+        assert keep_with_data.exists()
+        assert not orphan.exists()
+        assert locked.exists()
+        assert fresh.exists()
+
+    def test_missing_directory_is_noop(self, tmp_path: Path):
+        """目录不存在时返回 0，不抛。"""
+        from agent_py_agent.agent.gateway_parts.io import cleanup_orphan_lock_files
+
+        assert cleanup_orphan_lock_files(tmp_path / "nope") == 0
+
+    def test_sidecar_dirs_cover_queue_terminal_and_transitions(self, tmp_path: Path):
+        """清理巡的目录清单覆盖队列、终态、响应与 turn_transitions。"""
+        from agent_py_agent.agent.gateway_parts.io import gateway_lock_sidecar_dirs
+        from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+        paths = gateway_paths_from_root(tmp_path / "gateway")
+        assert set(gateway_lock_sidecar_dirs(paths)) == {
+            paths.inbox,
+            paths.processing,
+            paths.done,
+            paths.failed,
+            paths.terminal,
+            paths.responses,
+            tmp_path / "gateway" / "turn_transitions",
+        }

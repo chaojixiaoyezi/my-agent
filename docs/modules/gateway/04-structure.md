@@ -2,6 +2,11 @@
 
 ## Adapter dispatch 状态（slp5，2026-10-05；已实现，待初审）
 
+## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，worker/obsfix34；待非作者初审）
+
+- `agent/gateway_parts/io.py`：新增 `cleanup_orphan_lock_files(directory)`（清扫一个目录的孤儿 `<name>.lock`）、`_cleanup_one_orphan_lock`（单文件三判据早返回）、`_remove_orphan_lock_file`（非阻塞试锁后删名）与 `gateway_lock_sidecar_dirs(paths)`（inbox/processing/done/failed/terminal/responses/turn_transitions 清单）；常数 `_ORPHAN_LOCK_MIN_AGE_SECONDS=24h`。
+- `cli/gateway_loops.py`：`_RequestDispatcher.tick` 新增 `_LOCK_SIDECAR_CLEANUP_SITE` 段（`_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS=1h`），`_cleanup_lock_sidecars_once` 遍历上述目录调清理；失败走段退避、不拖垮派发。
+
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，worker/artrefguard；待初审）
 
 - `agent/common/logical_reference_ids.py`：逻辑引用前缀（gwreq-/run-/subagent- + call_）的唯一共享常量与形态判定；`gateway_parts/io.new_gateway_request_id`、`agent_core/runtime/run_params.py`、`agent_core/_finalization_service.py` 的生成点引用同一常量。

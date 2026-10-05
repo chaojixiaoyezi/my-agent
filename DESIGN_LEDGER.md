@@ -95,6 +95,14 @@
 - **未验证 / 已知边界**：macOS 上 `holder_is_alive` 没有 /proc 时一律判活——本次只在交接记录，不改（另有 scheduler 判活补丁在审）。
 - **验证**：见 `TESTS.md` obsfix12 节。
 
+## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，分支 `worker/obsfix34`，基于 17l 头 `f7849d7ff`；待非作者初审）
+
+- **来源（结构化事实）**：生产 Gateway `requests/pending` 下 1435 个、`processing` 下 1588 个空 `.lock` 文件，最老超过 7 天，而真正在跑的请求只有 19 个（obsfix 只读调查第 3 条）。
+- **根因**：请求文件的每次读/写都经 `_locked_file_path` 给数据文件建同名 sidecar `<name>.lock`（`gateway_parts/io.py` 与 `common/json_io.py` 同一写法）；flock 锁的是 inode，**不能**在释放时顺手 unlink（等待者会锁到旧 inode、新读者锁到新 inode，互斥失效），于是所有建过锁的目录（队列四个目录、终态副本、响应目录、每个请求都会建锁的 `turn_transitions`）都在累积，且全仓没有任何删除路径。
+- **改法**：新增周期安全清理，挂在派发 tick 的第五个后台段（`cli/gateway_loops.py`，节拍 1 小时、独立退避），实现 `gateway_parts/io.py:cleanup_orphan_lock_files`。只删**同时满足**三条的 sidecar：① 对应数据文件已不存在；② mtime 早于 24 小时宽限（`_ORPHAN_LOCK_MIN_AGE_SECONDS`，避开“文件刚删、旧句柄还在读”的窗口）；③ 非阻塞 `flock(LOCK_EX|LOCK_NB)` 拿得到（拿不到=活锁，跳过）。单文件失败只跳过，绝不抛给维护巡；宽限不设配置开关（纯维护动作、无行为影响）。
+- **边界**：只清孤儿 sidecar，不动数据文件、不动活锁；`turn_transitions/*.transition.lock` 同机制同清理（`.transition` 数据文件存在则保留）。
+- **验证**：见 `TESTS.md` 同名小节（a/b/c/d 四态用例 + 幂等 + 目录清单；常数目录 912→914）。
+
 ## 自改工作树提示补一句“按集成者指定的工作树做”（selfdevrule，2026-10-05，3a）
 
 - **问题**：Owner Scope 提示词的“my-agent 自身代码”一段写着“不改其他检出目录”。10-05 sol3（gpt-6.1-sol）把它当成高于任务的规则，两次拒绝在集成者分派的 worker 工作树里改代码，只能改派。

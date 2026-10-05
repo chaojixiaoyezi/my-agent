@@ -91,6 +91,8 @@ def _stub_dispatcher(paths: GatewayPaths, claims: list[str], stop_event: threadi
     dispatcher._recovery_backoff = LoopErrorBackoff()
     dispatcher._projection_backoff = LoopErrorBackoff()
     dispatcher._reconcile_backoff = LoopErrorBackoff()
+    dispatcher._lock_cleanup_backoff = LoopErrorBackoff()
+    dispatcher._next_lock_cleanup_at = float("inf")
 
     def submit(claim, user_key, conversation_key):
         claims.append(claim.request_id)
