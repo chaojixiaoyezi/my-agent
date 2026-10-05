@@ -324,6 +324,25 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - 门禁：ruff / boundaries=0 / doc_sync(--base 768c73272) / strict code-size(hard=0 blocked=False) / diff-check / clean-package 全过。
 - 未验证：真实 DeepSeek 流切断的端到端（沙箱不连真实 provider）。
 
+## stale-waiting 睡眠恢复测试准备（slp4，2026-10-05，WIP，部署窗口检查点）
+
+- **来源与进度**：任务基线 `875eb7b74`；收到 3a 的 17k 部署窗口通知，停止扩展实现，提交当前测试准备。产品 `scheduler/active_run_closeout.py` 未改，修复仍未完成。
+- **准备做法**：`test_scheduler_waiting_deadlock.py::_fresh_throttles` 隔离 `_absent_since`；预留进程内双钟样本表，并为既有用例的显式 `now` 配同速单调钟，表示普通时间流逝。后续睡眠用例将分别注入 wall/monotonic；原业务断言与结算条件未改。
+- **短检查命令**（工作树根，固定 Python，合成私有 home；按任务原文使用 ds2 临时目录）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  MY_AGENT_HOME=/private/tmp/claude-501/m-ds2-home-slp4 \
+    PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_scheduler_waiting_deadlock.py \
+    -k 'TestStaleWaitingExit or TestUnreadableFollowUp' \
+    -o addopts='' -q --tb=short -p no:cacheprovider \
+    --basetemp=/private/tmp/claude-501/m-ds2 \
+    --junitxml=tmp/slp4-deploy-checkpoint.xml
+  ```
+  结果：首跑 **14 passed、72 deselected，3.62s**；整理注释/import 后同入口复跑 **14 passed、72 deselected，2.55s**（两轮不累加）。仅证明当前测试夹具保留该子集的既有 waiting/unreadable 行为，不证明睡眠恢复已修好。
+- **短静态检查**：固定 Python 的 `-m ruff check agent_py_agent/tests/test_scheduler_waiting_deadlock.py` 与 `git diff --check` 通过；不是全量静态门禁。
+- **未运行/未验证**：新增睡眠业务红测、live/unverifiable 保护、暂停与冷启动回归、三项变异、scheduler 全部相关文件、完整 12 文件 guards、全量 Ruff/导入/doc-sync/strict/size-diff/clean-package；真实睡眠、Gateway、TUI/IM 与部署均未验证。部署后在原树完成实现再执行完整门禁，不提高尺寸基线，不将本 WIP 挑入 17k。
+
 ## Anthropic 非流式绝对期限与 OAuth 后台预算（3a，2026-10-05，ds6 fix3ar 复核实测）
 
 - 问题：① `anthropic.py::_generate_non_stream` 不把辅助调用的绝对期限交给 `request_json`，`stream_enabled=False` 的 Anthropic 兼容后端（及 OAuth Messages）上辅助调用没有绝对期限；② OAuth 的 `_gateway_request` 用裸 `request_timeout`，后台预算（`provider_request_budget`）在订阅账号上既收不紧也放不宽单次超时。

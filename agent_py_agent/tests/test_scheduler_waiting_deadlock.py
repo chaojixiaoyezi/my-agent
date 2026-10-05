@@ -91,13 +91,30 @@ def _facts(agent, thread_id, task_id, **options):
     return task_follow_up_facts(agent, FollowUpQuery(thread_id, task_id, ignored, **options), recent_seconds=recent)
 
 
+# LLM: 仅隔离 waiting 判定的进程内测试状态，并同步旧用例的双钟流逝；睡眠场景另注入独立时钟，不替换业务判据。
+# 函数用途: 保持每个 waiting 回归独立，为后续暂停故障注入准备普通流逝对照。
 @pytest.fixture(autouse=True)
 def _fresh_throttles(monkeypatch):
-    from agent_py_agent.agent.scheduler import active_run_closeout
+    from agent_py_agent.agent.scheduler import active_run_closeout, service
 
     monkeypatch.setattr(active_run_closeout, "_unreadable_warned_at", {})
     monkeypatch.setattr(active_run_closeout, "_stale_checked_at", {})
     monkeypatch.setattr(active_run_closeout, "_unreadable_since", {})
+    monkeypatch.setattr(active_run_closeout, "_absent_since", {})
+    monkeypatch.setattr(active_run_closeout, "_waiting_clock_samples", {}, raising=False)
+
+    # 旧用例的显式 now 表示正常流逝，单调钟同步推进；睡眠用例另注入独立双钟。
+    monotonic = [0.0]
+    monkeypatch.setattr(active_run_closeout, "time", SimpleNamespace(time=time.time, monotonic=lambda: monotonic[0]))
+    settle = service.settle_stale_waiting
+
+    # LLM: 只给被测收口入口提供同速单调样本，不改传入的墙钟、原函数或断言。
+    # 函数用途: 给原入口的合成墙钟配同速单调钟，不改业务结果或断言。
+    def with_elapsed_clock(service, run, *, now):
+        monotonic[0] = float(time.time() if now is None else now)
+        return settle(service, run, now=now)
+
+    monkeypatch.setattr(service, "settle_stale_waiting", with_elapsed_clock)
 
 
 # 函数用途: 按"没有后续工作"结算要两次确认：at 时第一次看到只记下、不结算，隔一个 60 秒判定周期再确认才结算。

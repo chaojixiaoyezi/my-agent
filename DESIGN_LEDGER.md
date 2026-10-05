@@ -197,6 +197,13 @@
 - **验证**：见 TESTS「模型流未完整结束的回合内重试」；变异 2/2 KILLED（去掉响应级重试 → 4 条用例红；去掉"工具已开始不重试" → tool-trace 用例红）。
 - **未验证**：真实 DeepSeek 流被切断的端到端（沙箱不连真实 provider）；本树用假后端走完整模型回合 + 真实账本验证。真机复测建议在 DeepSeek 高峰时段观察"流被切断后同回合自动重试、账本出现 retry 计数"。
 
+## stale-waiting 睡眠恢复（slp4，2026-10-05，worker/slp4；WIP，部署窗口暂停）
+
+- **当前范围**：基线 `875eb7b74`，承接 [SLEEP_RESUME.md 第 3.4 节](docs/design/SLEEP_RESUME.md#34-风险四长暂停让-stale-waiting-收口过早)。只允许修改 `scheduler/active_run_closeout.py` 和聚焦测试，后续进 17l，不进 17k；不改并行的 conversation claim、scheduler repository/service 或 tooling。
+- **已核对**：waiting 会清 scheduler `claim_id/claim_expires_at`，遗留 `runner_pid` 不证明当前尝试仍在执行。已有 `ClaimStore.load_report` 能区分空记录和坏账；共享车道与 `detached_task_claim_scope_id` 定位的独立任务车道需分别按精确 task/thread、claim_id、status、owner_process 核对。`conversation_task_execution_state` 受 TTL 和进度策略影响，不能直接当死亡证明。
+- **仅完成测试准备**：既有显式 `now` 的时间推进用例配同步单调钟，隔离缺失确认计数和拟用的进程内样本表；原断言未删改。短检查 14 passed / 72 deselected，详见 TESTS。
+- **未实施**：存活/不可核验保护、暂停后确认重置、冷启动新用例、至少三个变异及完整门禁。产品文件未改，设计 3.4 仍未标为“已实现”；不把本检查点当修复或集成交付。按 3a 的 17k 部署窗口通知暂停，部署后同代号、原工作树续做。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，分支 `worker/g2bfix4`，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言（TUI 侧用替身构造，两层接缝没有端到端钉住）；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`（项目里 `InterruptedError` 是真实中断信号）；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A（不存在的记录回 404、无权限保持 403、客户端不改），由初审者直接修。
