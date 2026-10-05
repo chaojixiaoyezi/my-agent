@@ -345,3 +345,185 @@ def test_committed_retry_skips_rebuild_recycle_and_input_injection(monkeypatch):
         ("select", committed, "已提交候选请求"),
         ("request", committed, "已提交候选请求"),
     ]
+
+
+# LLM: 响应级重试用例组：只覆盖 model_turn 的判定与采纳顺序，等待/阶梯用 monkeypatch 固定；
+#   真实的账本重试计数与回合完成在 provider_transient_auto_resume 的集成用例里验证。
+# 函数用途: 造一条"流未完整结束"的结构化响应，供响应级重试判定用例复用。
+def _stream_incomplete_response(**overrides):
+    fields = {
+        "text": "",
+        "backend": "fake",
+        "runtime_status": "error",
+        "runtime_reason": "MODEL_STREAM_INCOMPLETE",
+        "runtime_source": "model_provider",
+        "turn_end_reason": "error",
+        "truncated": True,
+    }
+    fields.update(overrides)
+    return ModelResponse(**fields)
+
+
+def test_stream_incomplete_first_event_retries_once_then_succeeds(monkeypatch):
+    """流在首个事件后被切断（零文本零工具）→ 重试一次后成功，只采纳成功那次。"""
+    events = []
+    typed = []
+    response = ModelResponse("重试后的完整回复", "fake")
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0,))
+    monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: events.append("wait"))
+    monkeypatch.setattr(retry, "apply_retry_jitter", lambda value: value)
+
+    class _Sink:
+        def __call__(self, _text):
+            events.append("legacy")
+
+        def write_provider_retry(self, **payload):
+            typed.append(dict(payload))
+            return True
+
+    def request():
+        events.append("request")
+        if events.count("request") == 1:
+            return ModelTurnRequest("原请求", _stream_incomplete_response(), object())
+        return ModelTurnRequest("原请求", response, object())
+
+    turn = sample_and_accept_model_response(
+        request,
+        retry_allowed=lambda: True,
+        account_response=lambda _params, _response: events.append("account"),
+        restore_rejected_input=lambda _params: events.append("restore"),
+        acknowledge_input=lambda _params: events.append("ack"),
+        on_chunk=_Sink(),
+    )
+
+    assert turn.response is response
+    assert events == ["request", "wait", "request", "account", "ack"]
+    assert [item["error_type"] for item in typed] == ["ProviderStreamIncompleteError"]
+    assert typed[0]["attempt"] == 1 and typed[0]["total"] == 1
+
+
+def test_stream_incomplete_exhausted_schedule_returns_last_response(monkeypatch):
+    """一直被切断 → 跑满阶梯后返回最后一个未完整响应本身（不抛异常），保持既有失败语义。"""
+    calls = []
+    waits = []
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0, 2.0))
+    monkeypatch.setattr(retry, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(retry, "apply_retry_jitter", lambda value: value)
+
+    def request():
+        calls.append(1)
+        return ModelTurnRequest("原请求", _stream_incomplete_response(), object())
+
+    turn = sample_and_accept_model_response(
+        request,
+        retry_allowed=lambda: True,
+        account_response=lambda *_args: None,
+        restore_rejected_input=lambda *_args: None,
+        acknowledge_input=lambda *_args: None,
+    )
+
+    assert len(calls) == 3, "两次重试 + 最后一次原样尝试"
+    assert waits == [1.0, 2.0]
+    assert turn.response.runtime_reason == "MODEL_STREAM_INCOMPLETE"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"truncated_tool_names": ["write_file"]},
+        {"text": "已经输出了一半的正文"},
+    ],
+    ids=["tool-trace", "visible-text"],
+)
+def test_stream_incomplete_with_visible_content_is_not_replayed(monkeypatch, overrides):
+    """工具调用已开始或已输出文本后被切断 → 不重试，原样返回（不重放、不制造重复内容）。"""
+    calls = []
+    response = _stream_incomplete_response(**overrides)
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0,))
+    monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: calls.append("wait"))
+
+    def request():
+        calls.append("request")
+        return ModelTurnRequest("原请求", response, object())
+
+    turn = sample_and_accept_model_response(
+        request,
+        retry_allowed=lambda: True,
+        account_response=lambda *_args: None,
+        restore_rejected_input=lambda *_args: None,
+        acknowledge_input=lambda *_args: None,
+    )
+
+    assert calls == ["request"], "不重试、不等待"
+    assert turn.response is response
+
+
+def test_stream_incomplete_with_non_provider_source_is_not_replayed(monkeypatch):
+    """runtime_source 不是 model_provider 的 incomplete 不重试：判据只放行供应商流断。"""
+    calls = []
+    response = _stream_incomplete_response(runtime_source="provider_error")
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0,))
+    monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: calls.append("wait"))
+
+    def request():
+        calls.append("request")
+        return ModelTurnRequest("原请求", response, object())
+
+    turn = sample_and_accept_model_response(
+        request,
+        retry_allowed=lambda: True,
+        account_response=lambda *_args: None,
+        restore_rejected_input=lambda *_args: None,
+        acknowledge_input=lambda *_args: None,
+    )
+
+    assert calls == ["request"], "非供应商来源不重试、不等待"
+    assert turn.response is response
+
+
+def test_stream_incomplete_with_tool_use_blocks_is_not_replayed(monkeypatch):
+    """响应带工具调用块（纵深防御组合）不重试：避免重放已开始的工具调用。"""
+    calls = []
+    response = _stream_incomplete_response(
+        tool_use_blocks=[{"id": "call-1", "name": "write_file", "input": {"path": "a.txt"}}]
+    )
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0,))
+    monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: calls.append("wait"))
+
+    def request():
+        calls.append("request")
+        return ModelTurnRequest("原请求", response, object())
+
+    turn = sample_and_accept_model_response(
+        request,
+        retry_allowed=lambda: True,
+        account_response=lambda *_args: None,
+        restore_rejected_input=lambda *_args: None,
+        acknowledge_input=lambda *_args: None,
+    )
+
+    assert calls == ["request"], "带工具块不重试、不等待"
+    assert turn.response is response
+
+
+def test_stream_incomplete_retry_guard_denial_returns_result_without_wait(monkeypatch):
+    """retry_guard 拒绝（如插话未确认投递）时不重发：原样返回未完整响应，不等待。"""
+    calls = []
+    response = _stream_incomplete_response()
+    monkeypatch.setattr(retry, "provider_transient_retry_delays", lambda _policy: (1.0,))
+    monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: calls.append("wait"))
+
+    def request():
+        calls.append("request")
+        return ModelTurnRequest("原请求", response, object())
+
+    turn = sample_and_accept_model_response(
+        request,
+        retry_allowed=lambda: False,
+        account_response=lambda *_args: None,
+        restore_rejected_input=lambda *_args: None,
+        acknowledge_input=lambda *_args: None,
+    )
+
+    assert calls == ["request"], "guard 拒绝不重发、不等待"
+    assert turn.response is response

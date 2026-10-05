@@ -144,6 +144,15 @@ class ProviderTransientError(ProviderRecoverableError):
     """The provider returned a temporary overload/rate-limit/disconnect error."""
 
 
+# LLM: 流在完成标记前结束（provider 侧 EOF）是结构化可重试事实：backend 已丢弃不完整响应的
+#   工具块、整轮零执行，只要响应里还没有对外文本就可以原样重发同一采样请求。类型归 transient
+#   族，与异常重试路径共用放行口径；当前只由响应级重试构造进重试通知（不抛）。改动时同步核对
+#   response_completion 的 stream_eof 投影与 provider_transient_auto_resume 的响应级重试。
+# 类用途: 表示模型流在完成前被切断，本次采样请求可安全重试。
+class ProviderStreamIncompleteError(ProviderTransientError):
+    """The provider stream ended before its completion marker."""
+
+
 class ProviderUsageLimitError(ProviderTransientError):
     """The provider reported a structured usage/rate limit for this turn."""
 

@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）
+
+- 来源：DeepSeek 长回复流频繁被切断（`MODEL_STREAM_INCOMPLETE`），原语义是整个回合直接失败。修法见 DESIGN_LEDGER 同名段：响应级重试复用 `run_with_provider_transient_auto_resume` 的阶梯/预算/通知，耗尽时返回原响应（不抛异常）。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_backends.py agent_py_agent/tests/test_provider_completion_boundary.py \
+    agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_model_call_ledger_partitions.py \
+    agent_py_agent/tests/test_tool_loop_model_turn.py agent_py_agent/tests/test_provider_transient_auto_resume.py \
+    agent_py_agent/tests/test_provider_transient_retry_budget.py agent_py_agent/tests/test_provider_retry_final_sink.py \
+    agent_py_agent/tests/test_tool_model_generation.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-streamretry   # 215 passed
+  # 拆平后复跑调用点相关 7 文件 114 passed；guards9 十一文件 187 passed
+  ```
+- 新增用例 6 条：
+  - `test_tool_loop_model_turn.py`：首个事件后切断 → 重试一次后成功（含 typed 通知 attempt=1/1、error_type=ProviderStreamIncompleteError）；一直切断 → 跑满阶梯返回最后一个未完整响应（不抛）；`[tool-trace]`/`[visible-text]` 参数化 → 不重试不等待。
+  - `test_provider_transient_auto_resume.py`：集成（SimpleAgent + 假后端）重试一次后回合完成 + 账本 `model_retry_count == 1`（两次物理尝试同 logical turn）；一直切断 → 3 次尝试（2 重试 + 最后 1 次）后按原错误失败。
+- 变异 2 个（脚本 `tasks/2026-10-05/streamretry-mutations/mutations.py`，逐个 sha256 还原一致）：
+  1. 判定恒 False（去掉响应级重试）→ KILLED（4 条用例红）。
+  2. 去掉"truncated_tool_names 非空不重试" → KILLED（`[tool-trace]` 红）。
+- size_diff 首跑 1 条新增告警（`run_with_provider_transient_auto_resume` 5 参数），把 retry_guard/should_retry_result 收成 `ProviderTransientRetryCallbacks` 后 **新增 0 / 消失 50**。
+- 门禁：ruff / boundaries=0 / doc_sync(--base 768c73272) / strict code-size(hard=0 blocked=False) / diff-check / clean-package 全过。
+- 未验证：真实 DeepSeek 流切断的端到端（沙箱不连真实 provider）。
+
 ## Anthropic 非流式绝对期限与 OAuth 后台预算（3a，2026-10-05，ds6 fix3ar 复核实测）
 
 - 问题：① `anthropic.py::_generate_non_stream` 不把辅助调用的绝对期限交给 `request_json`，`stream_enabled=False` 的 Anthropic 兼容后端（及 OAuth Messages）上辅助调用没有绝对期限；② OAuth 的 `_gateway_request` 用裸 `request_timeout`，后台预算（`provider_request_budget`）在订阅账号上既收不紧也放不宽单次超时。

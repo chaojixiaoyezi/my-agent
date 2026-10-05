@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ..backends import (
+    ProviderStreamIncompleteError,
     is_provider_recoverable_error,
     is_provider_stream_timeout_error,
     is_provider_transient_error,
@@ -35,6 +36,17 @@ class _RetryNotice:
     error: BaseException
     # 到总时长上限的收口提示：不再有下一次等待，文案与普通重试进度不同。
     final: bool = False
+
+
+# LLM: 两个重试回调收成一个不可变载体，保持主入口参数不增长（code-size 参数守卫）：
+#   retry_guard 决定"还允不允许重试"（如插话未确认投递），should_retry_result 决定
+#   "这次正常返回的结果值不值得原样重发"（如模型流未完整结束）。新增回调时只扩展本载体，
+#   不要往 run_with_provider_transient_auto_resume 上加参数。
+# 类用途: 保存 run_with_provider_transient_auto_resume 的重试门与响应级重试判定。
+@dataclass(frozen=True)
+class ProviderTransientRetryCallbacks:
+    retry_guard: Callable[[], bool] | None = None
+    should_retry_result: Callable[[object], bool] | None = None
 
 
 def provider_transient_retry_delays(policy: RuntimeGuardPolicy | None = None) -> tuple[float, ...]:
@@ -75,13 +87,22 @@ def provider_transient_total_budget_seconds(policy: RuntimeGuardPolicy | None = 
     return parsed
 
 
+# LLM: 共用瞬断恢复器：异常路径按结构化分类放行退避重试；响应级路径（callbacks.should_retry_result）
+#   只对调用方声明的"零副作用可原样重发结果"生效（如模型流未完整结束）。两条路径共用同一
+#   延迟阶梯、总预算、重试通知与中断检查点；异常耗尽时原样上抛，响应级耗尽时返回结果本身
+#   （保持上层既有失败语义，不把响应级失败改写成异常）。中断绝不重试；retry_guard 拒绝时
+#   不进入等待。改动时同步核对 model_turn 的响应级判定与既有退避/预算测试。
+# 函数用途: 在可恢复的模型故障中按配置阶梯退避并重试当前调用，不重放任何工具副作用。
 def run_with_provider_transient_auto_resume(
     operation: Callable[[], _T],
     *,
     on_chunk: Callable[[str], object] | None = None,
     policy: RuntimeGuardPolicy | None = None,
-    retry_guard: Callable[[], bool] | None = None,
+    callbacks: ProviderTransientRetryCallbacks | None = None,
 ) -> _T:
+    resolved = callbacks or ProviderTransientRetryCallbacks()
+    retry_guard = resolved.retry_guard
+    should_retry_result = resolved.should_retry_result
     delays = provider_transient_retry_delays(policy)
     # 预算从第一次尝试开始计时：尝试耗时、退避等待和它的抖动都算在里面。
     budget = provider_transient_total_budget_seconds(policy)
@@ -89,7 +110,7 @@ def run_with_provider_transient_auto_resume(
     for attempt, delay in enumerate(delays, start=1):
         _raise_if_interrupted()
         try:
-            return operation()
+            result = operation()
         except InterruptedError:
             raise  # 用户/任务中断绝不重试: 中断标记必须被消费, 不能进入退避重连
         except Exception as exc:
@@ -106,6 +127,21 @@ def run_with_provider_transient_auto_resume(
                 raise
             _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), wait, exc))
             _raise_if_interrupted()
+            continue
+        # 响应级重试：operation 正常返回但结果被调用方判为可原样重发（零工具执行、无对外
+        # 文本，如模型流未完整结束）。等待/显示/预算与异常重试完全同一口径；与异常路径的
+        # 唯一差异是耗尽时返回结果本身（不抛异常），保持上层既有失败语义。
+        if not (callable(should_retry_result) and should_retry_result(result)):
+            return result
+        if callable(retry_guard) and not retry_guard():
+            return result
+        wait = apply_retry_jitter(delay)
+        incomplete = ProviderStreamIncompleteError("model stream ended before completion")
+        if _budget_exhausted(budget, started_at, wait):
+            _emit_retry_notice(on_chunk, _RetryNotice(attempt, len(delays), wait, incomplete, final=True))
+            return result
+        _wait_before_retry(on_chunk, _RetryNotice(attempt, len(delays), wait, incomplete))
+        _raise_if_interrupted()
     _raise_if_interrupted()
     if callable(retry_guard) and not retry_guard():
         raise RuntimeError("provider retry blocked by durable request state")

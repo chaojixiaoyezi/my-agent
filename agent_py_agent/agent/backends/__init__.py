@@ -23,6 +23,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ProviderRecoverableError": ("errors", "ProviderRecoverableError"),
     "ProviderRequestRejectedError": ("errors", "ProviderRequestRejectedError"),
     "ProviderResponseError": ("errors", "ProviderResponseError"),
+    "ProviderStreamIncompleteError": ("errors", "ProviderStreamIncompleteError"),
     "ProviderTimeoutError": ("errors", "ProviderTimeoutError"),
     "ProviderTransientError": ("errors", "ProviderTransientError"),
     "ProviderUsageLimitError": ("errors", "ProviderUsageLimitError"),

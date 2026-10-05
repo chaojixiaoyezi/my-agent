@@ -1,5 +1,14 @@
 # 设计台账
 
+## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）
+
+- **起因**：10-05 凌晨 DeepSeek 长回复流频繁被中途切断（近一小时三成请求失败，码 `MODEL_STREAM_INCOMPLETE`），每次切断整个回合直接失败、会话从头再来（费时费钱）。链路核查：流在完成标记前结束 → `stream_parsers` 返回 `stream_eof` → `response_completion.incomplete_response_fields` 归一成**响应字段**（`runtime_status=error`、`runtime_reason=MODEL_STREAM_INCOMPLETE`、`truncated=True`；工具块被丢弃、`truncated_tool_names` 保留）——它不是异常，所以只重试异常的 `run_with_provider_transient_auto_resume` 没有机会介入；工具循环 `_no_tool_calls_decision` 见 `_is_runtime_status_response` 直接 break，回合以 error 收口。
+- **改法（复用既有设施，不新造）**：`run_with_provider_transient_auto_resume` 增加**响应级重试**——新增可选 `callbacks.should_retry_result`，operation 正常返回但结果被判为"可原样重发"时，走与异常重试**完全相同**的延迟阶梯（10/25/45/100/180 秒 + 抖动）、总预算（1800 秒）、重试通知与中断检查点；**耗尽时返回结果本身（不抛异常）**，保持上层既有失败语义（异常路径仍原样上抛）。两个重试回调收成 `ProviderTransientRetryCallbacks` 载体，主入口保持 4 参数（code-size 参数守卫）。
+- **判定（`model_turn._stream_incomplete_retryable`）**：只读结构化字段——`runtime_reason == MODEL_STREAM_INCOMPLETE` 且 `runtime_source == model_provider`，且 **text 为空、`truncated_tool_names` 为空、`tool_use_blocks` 为空**。已输出文本或已开始工具调用的不重试（避免重复内容与重放副作用）；判据不解析正文。
+- **记账与可见进度**：每次重试都经 `generate_model_response → _start_model_generation` 新建物理尝试记录（同一 logical turn），账本 `model_retry_count` 自动 +1；重试通知走既有 `write_provider_retry` typed sink / 文本回调（"模型接口临时不可用或被限流，等待 X 秒后自动重试当前模型回合"）。
+- **验证**：见 TESTS「模型流未完整结束的回合内重试」；变异 2/2 KILLED（去掉响应级重试 → 4 条用例红；去掉"工具已开始不重试" → tool-trace 用例红）。
+- **未验证**：真实 DeepSeek 流被切断的端到端（沙箱不连真实 provider）；本树用假后端走完整模型回合 + 真实账本验证。真机复测建议在 DeepSeek 高峰时段观察"流被切断后同回合自动重试、账本出现 retry 计数"。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，分支 `worker/g2bfix4`，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言（TUI 侧用替身构造，两层接缝没有端到端钉住）；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`（项目里 `InterruptedError` 是真实中断信号）；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A（不存在的记录回 404、无权限保持 403、客户端不改），由初审者直接修。

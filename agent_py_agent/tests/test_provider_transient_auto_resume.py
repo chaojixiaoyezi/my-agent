@@ -453,3 +453,143 @@ def test_programming_error_fails_fast_without_retry_or_wait(monkeypatch) -> None
     assert str(exc_info.value) == "f() got an unexpected keyword argument 'total_deadline_seconds'"
     assert calls == 1
     assert waits == [], "编程错误不进入退避等待"
+
+
+# LLM: 响应级重试的回合级验收：真实 SimpleAgent + 假后端走完整模型回合；第一次返回
+#   MODEL_STREAM_INCOMPLETE（零文本零工具）→ 同回合内重发，账本用同一 logical turn 的
+#   物理尝试数证明"重试计数进账本"。只 mock 退避等待与延迟阶梯，不 mock 判定与设施。
+# 类用途: 造一个前 N 次返回"流未完整结束"、之后成功的假后端。
+class _StreamIncompleteThenOkBackend:
+    name = "fake_stream_incomplete_then_ok"
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+        self.calls += 1
+        if self.calls <= self.failures:
+            return ModelResponse(
+                text="",
+                backend=self.name,
+                runtime_status="error",
+                runtime_reason="MODEL_STREAM_INCOMPLETE",
+                runtime_source="model_provider",
+                turn_end_reason="error",
+                truncated=True,
+            )
+        return ModelResponse(text="重试后完整完成。", backend=self.name)
+
+
+def test_stream_incomplete_retry_completes_turn_and_records_ledger(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """流被切断（零文本零工具）→ 同回合重试一次后成功；账本记下这次物理重试。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", sleeps.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.backend = _StreamIncompleteThenOkBackend(failures=1)
+
+    chunks: list[str] = []
+    result = agent.run("做一个长任务，流断了就继续。", save=False, on_chunk=chunks.append)
+
+    assert result.response == "重试后完整完成。"
+    assert agent.backend.calls == 2
+    assert len(sleeps) == 1, "重试一次只等待一次"
+    assert "秒后自动重试当前模型回合" in "".join(chunks)
+
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import summarize_model_call_records
+
+    records = [
+        record
+        for record in model_call_ledger(agent).records()
+        if record.backend == "fake_stream_incomplete_then_ok"
+    ]
+    assert len(records) == 2, "两次物理尝试都进账本"
+    summary = summarize_model_call_records(records)
+    assert summary["model_retry_count"] == 1, "重试计数进账本"
+
+
+def test_stream_incomplete_exhausted_keeps_original_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """一直切断 → 跑满阶梯后按原错误失败（响应级），不抛异常、不无限重试。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", sleeps.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.backend = _StreamIncompleteThenOkBackend(failures=99)
+
+    result = agent.run("做一个长任务。", save=False)
+
+    assert agent.backend.calls == 3, "两次重试 + 最后一次原样尝试"
+    assert len(sleeps) == 2
+    assert result.response == "", "未完整响应保持原失败语义（不抛异常）"
+
+
+def test_response_level_budget_exhausted_returns_result_with_final_notice(monkeypatch) -> None:
+    """响应级重试到总时长上限：发收口通知后返回结果本身（不抛异常、不再等待、不再尝试）。"""
+    typed: list[dict[str, object]] = []
+    waits: list[float] = []
+
+    class Sink:
+        def __call__(self, _text: str) -> None:
+            return None
+
+        def write_provider_retry(self, **payload: object) -> bool:
+            typed.append(dict(payload))
+            return True
+
+    calls: list[int] = []
+
+    def operation() -> str:
+        calls.append(1)
+        return "incomplete"
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0,),
+    )
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_total_budget_seconds",
+        lambda _policy=None: 5.0,
+    )
+
+    result = provider_transient_auto_resume.run_with_provider_transient_auto_resume(
+        operation,
+        on_chunk=Sink(),
+        callbacks=provider_transient_auto_resume.ProviderTransientRetryCallbacks(
+            should_retry_result=lambda value: value == "incomplete",
+        ),
+    )
+
+    assert result == "incomplete", "到上限返回结果本身，不抛异常"
+    assert len(calls) == 1, "到上限不再尝试"
+    assert waits == [], "到上限不再等待"
+    assert typed and typed[0]["params"] == {
+        "final": True,
+        "error_code": provider_transient_auto_resume.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED,
+    }, "收口通知带结构化 final/error_code"
