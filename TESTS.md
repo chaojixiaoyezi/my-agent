@@ -1,5 +1,76 @@
 # 测试与发布验收
 
+## selfix3 并入 17k 时补的骨架页续页用例（3a，2026-10-05）
+
+- 问题：份额连 1 个字都放不下、只交付骨架页时，续页写死 `max_chars: 1`；模型照着续读会一次只读 1 个字、白耗调用。改为骨架续页不带 `max_chars`，下一次读取按 reader 默认页长。
+- 新用例 `test_capability_package_entry_context.py::test_skeleton_continuation_does_not_force_one_char_reads`：从 0 到整页逐个份额调用 `_fit_entry_page`，找出所有骨架结果，断言续页 offset 不变、不带 `max_chars`。变异（改回 1 字）被抓住。能力包与子代理入口全部测试加 guards9：1133 passed。
+
+## 选包入口独立计费（selfix3，2026-10-05，worker/selfix3；已执行门禁通过，2项沙箱skip，待3a终审）
+
+- 来源及计费上界见 DESIGN_LEDGER 顶部本节。新增 `test_heterogeneous_entries_have_identical_delivery_in_every_fresh_home_order`：两包总预算978正反序、三包1800六排列，各次独立私有 home 且起始无 pin；同组原样复用合成归档字节，避免 ZIP 时间戳使摘要漂移。比较实际正文、全部分页与来源字段及 entry_status（只排除重装 activation），不是只比 status 或固定数量；仍核总预算、原历史不变、每包读成功精确固定及正确续页。
+- 红测：指定原版本1400fe725上两条都出现真实交付差异，**2 failed、0 errors/skipped**，原 XML 为 `tmp/selfix3-red.xml`。早期独立计费试跑暴露默认 JSON 排版导致978份额连骨架也放不下，以及合成 ZIP 摘要漂移，未算通过；改成相同紧凑编码（分项包含一个逗号）、各顺序复用同归档字节后复跑，未放宽非空投递或正文断言。
+- 原取消用例改为在裁剪中的实际 JSON 编码后注入取消并断言编码已执行，保留已读 pin、零正文投递及原历史不变；不是进入 fit 前提前取消。
+- 固定Python：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；全部在树根、禁字节码/pytest缓存，同树不并发pytest/code-size。最终21显式文件命令如下，**491 passed、2 skipped、0 failed/errors**（114.02秒，493项，`tmp/selfix3-focused-guards.xml`）；完整guards9现场11个文件逐项核对无遗漏，含packaging。两个skip是 `test_real_sandbox_post_write_and_closeout` / `test_location_host_paths_are_redacted_before_reaching_the_model`，原原因“本机平台沙箱不可用”，不是通过，未作既有失败归因。
+
+```bash
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+ agent_py_agent/tests/test_capability_package_entry_context.py \
+ agent_py_agent/tests/test_capability_package_selection_runtime.py \
+ agent_py_agent/tests/test_subagent_package_entries.py \
+ agent_py_agent/tests/test_capability_package_selection.py \
+ agent_py_agent/tests/test_pack_verification_matching.py \
+ agent_py_agent/tests/test_pack_verification_service.py \
+ agent_py_agent/tests/test_pack_verification_deliverables.py \
+ agent_py_agent/tests/test_capability_package.py \
+ agent_py_agent/tests/test_capability_package_read.py \
+ agent_py_agent/tests/test_capability_package_task_refs.py \
+ agent_py_agent/tests/test_architecture_guardrails.py \
+ agent_py_agent/tests/test_config_field_readers.py \
+ agent_py_agent/tests/test_constant_names_unique.py \
+ agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+ agent_py_agent/tests/test_parameter_registry.py \
+ agent_py_agent/tests/test_recovery_actions.py \
+ agent_py_agent/tests/test_recovery_code_policy.py \
+ agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+ agent_py_agent/tests/test_subagent_config_inheritance.py \
+ agent_py_agent/tests/test_packaging.py \
+ agent_py_agent/tests/test_constants_catalog.py \
+ -q --tb=short -p no:cacheprovider -o addopts='' \
+ --basetemp=/private/tmp/claude-501/m-sol3 --junitxml=tmp/selfix3-focused-guards.xml
+```
+
+- 两个因果变异逐次真实执行，均只跑上面入口文件加 `-k heterogeneous`：M1改回传previous、按整体token差裁剪 → **1 failed、1 passed**（三包交付317/318字符差异）；M2后续页仅给半份 → **2 failed**（两包/三包投递差异）。均exit1、0 errors/skips，非准备失败。每次立即按备份原字节恢复后全入口文件 **33 passed**，恢复前后SHA256均 `e5121e4933c753d1b24424dc582be0bbb96cf28e3874df7a05b1ccea630381ca`；原XML、输出和备份在 `tmp/selfix3-m1-whole-token-difference*`、`tmp/selfix3-m2-unequal-later-share*`、`tmp/selfix3-context-before-mutations.py`，摘要 `tmp/selfix3-mutation-summary.json`。恢复及聚焦轮与最终491重叠，不累加。
+- 静态门禁：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts` 全过；同前缀 `$PY scripts/check_import_boundaries.py` → findings=0；`$PY scripts/check_doc_sync.py --base 1400fe725` → DOC_SYNC_PASS；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2200、hard=0、blocked=False（`tmp/selfix3-strict.txt`）；`git diff --check`、`$PY scripts/check_clean_package.py .` 通过。报告执行 `git checkout -- CODE_SIZE_REPORT.md` 还原，不提交、不提高baseline。
+- 尺寸身份差集：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` → **新增告警: 0；消失告警: 43**。产品/测试输入未再改，复用同版本有效结果；只补本节记录后重核doc_sync/diff。完整机读回执、skip及守卫清单核对见 `tmp/selfix3-verification-facts.json`。
+- 未验证：真实 Gateway/模型正反 selected_ids、真实子入口全部排列、TUI/IM 可见链路、沙箱外 checker、生产部署及全仓；线上CI不作证据，全量由3a Linux12片复核。下方保留 selfix2 的历史结果，不冒充本轮证据。
+
+## 选包入口预算均分 + 选中即固定（selfix2，2026-10-04，分支 `worker/selection-pins`，待非作者初审）
+
+- 背景与改法见 `DESIGN_LEDGER.md` 同名小节。定稿判据是三分法：准入不过不 pin；读不出有效页不 pin；读出有效页但预算放不下正文仍要 pin。
+- 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_capability_package_entry_context.py agent_py_agent/tests/test_capability_package_selection_runtime.py agent_py_agent/tests/test_subagent_package_entries.py agent_py_agent/tests/test_capability_package_selection.py -q --tb=short` → **147 passed**。
+  - `agent_py_agent/tests/test_pack_verification_matching.py`、`test_pack_verification_service.py`、`test_pack_verification_deliverables.py`、`test_capability_package.py`、`test_capability_package_read.py`、`test_capability_package_task_refs.py` → **149 passed, 2 skipped**（跳过项为原有用例自带 skip，非本次引入）。
+  - guards9 清单全绿（见下）。
+- 新用例（`test_capability_package_entry_context.py`）：
+  - `test_access_denied_selected_package_is_never_pinned[ask/deny]`（判据①，参数化 2 条）
+  - `test_unreadable_selected_package_is_never_pinned`（判据②，篡改内容摘要）
+  - `test_readable_but_unaffordable_entry_is_pinned_and_marked_not_delivered[body/empty]`（判据③，参数化 2 条）
+  - `test_zero_budget_still_reads_and_pins_selected_package`（判据③极端：预算 0 仍读仍 pin）
+  - `test_two_selected_packages_share_budget_and_are_both_pinned_in_either_order`（[A,B] 与 [B,A] 两个包都固定、status 集合与顺序无关）
+  - `test_entry_share_is_equal_split_and_order_independent`（份额边界：单包全给、两包均分丢余数、预算不足包头为 0）
+  - `test_single_package_with_ample_budget_delivers_full_entry[body/empty]`（单包与旧行为一致）
+  - `test_cancellation_before_read_does_not_pin`（读之前取消不 pin）
+  - `test_cancellation_during_page_fitting_keeps_read_success_pin_but_delivers_nothing`（读成功后取消：pin 保留、正文不投递、异常上抛）
+  - `test_child_two_packages_share_budget_and_are_both_pinned`（`test_subagent_package_entries.py`：子授权入口两包同轮都进上下文、都进孩子 pins）
+- **旧合同用例改写理由**：`test_multiple_packages_cannot_pin_a_later_entry_omitted_by_total_budget`、`test_budget_too_small_for_source_receipt_does_not_pin_an_invisible_package`（另含 `test_capability_package_selection_runtime.py::test_body_budget_failure_finishes_selected_with_no_read_or_pin`）钉的是“预算不足 → 不读不 pin”。按判据③，预算不足**只**影响投递形态，不影响引用归属，所以这三条按新合同改写/替换为“读成功即固定、预算不足记 `not_delivered`”的断言（改名 `test_body_budget_failure_still_reads_and_pins_selected_package`）。
+- 变异（4 个，全部 KILLED；脚本 `/private/tmp/claude-501/selfix3/mut3.py`，跑完产品与测试文件字节还原、`git status` 只余有意改动）：
+  - M1 退回按顺序扣预算（用剩余预算而非均分份额）→ KILLED（2 条用例红）。
+  - M2 退回“不投递就不固定”（屏蔽 reader 内部 pin）→ KILLED（36 条红）。
+  - M3 pin 挪到“投递成功”之后（屏蔽 reader pin + 只在 success 分支补 pin）→ KILLED。
+  - M4 份额不均分（偏向先到的）→ KILLED（3 条红）。
+  - 说明：M2/M3 必须同时屏蔽 `package_read.read_package_page` 内部的 pin 才等价于“pin 只跟投递走”；只改 `package_selection_context` 不改 reader 会得到等价变异（reader 自己仍会 pin）。
+- **未验证**：真实 Gateway 两包同轮选中的端到端；`test_pack_verification*.py` 未跑该目录全部文件（只跑相关子集）；子入口未做独立行为差异实测；本机未验证真模型下 `selected_ids` 两种顺序的完整链路。
+
 ## shellwrap 并入 17k 时的联合用例调整（3a，2026-10-05）
 
 - `test_plugin_m1_joint_tool_gate.py` 原先用 `sh -c "rm -rf build"` 当“宿主放行、只有 rm-guard 要求确认”的差集命令；shellwrap 起包一层的删除由宿主硬拒，5 条用例的前提断言失败。差集改为模块常量 `_GUARD_ONLY_COMMAND = 'echo rm -rf build'`（宿主放行、无删除副作用，rm-guard 文字规则仍回 ask/RM_RF），测的仍是插件收紧链路。联合两文件 11 passed / 1 skipped。

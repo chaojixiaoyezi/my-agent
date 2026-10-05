@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import replace
+from itertools import permutations
 from types import SimpleNamespace
 
 import pytest
@@ -38,16 +39,13 @@ from agent_py_agent.tests.test_capability_package import content_bundle
 
 # LLM: 只在 pytest 私有 home 安装合成内容，绑定真实 TaskStore；authority 替身只消费本地取消令牌，不冒充 managed attempt 验收。
 # 函数用途: 装配宿主准备所需的原安装快照、工具策略、任务身份和可观察资源读取。
-def _fixture(tmp_path, *, bodies=(b"entry-a",), max_chars=10000):
+def _fixture(tmp_path, *, bodies=(b"entry-a",), max_chars=10000, bundles=None):
     agent = SimpleAgent(AgentConfig(enable_plugins=True, prompt_files=[], tool_read_max_chars=max_chars), tmp_path / "repo")
     store = PluginInstallStore(resolve_owner_home(agent.home_paths.root))
     installed = []
-    for index, body in enumerate(bodies):
+    for index, bundle in enumerate(_entry_bundles(bodies) if bundles is None else bundles):
         package_id = f"entry-{index}"
-        package = inspect_plugin_package(content_bundle(
-            files={"CAPABILITY.md": body, "methods/private.md": b"PRIVATE-UNREAD"},
-            change=lambda row, name=package_id: row.update(plugin_id=name),
-        ))
+        package = inspect_plugin_package(bundle)
         row = store.install(PluginInstallRequest(package, f"install-{index}", 0)).installation
         activation = PluginContentActivation(f"enable-{index}", package_id, row.package_sha256,
                                              row.revision, row.settings_revision)
@@ -96,10 +94,72 @@ def _prepare(fixture, *, budget=10000, refs=None):
     )
 
 
+# LLM: 同组顺序用例复用同一合成归档字节；不把 ZIP 创建时间导致的包摘要变化混作投递顺序变化。
+# 函数用途: 一次生成每包输入，再在各独立 home 原样安装，只有激活代次允许不同。
+def _entry_bundles(bodies):
+    return [content_bundle(files={"CAPABILITY.md": body, "methods/private.md": b"PRIVATE-UNREAD"},
+                           change=lambda row, name=f"entry-{index}": row.update(plugin_id=name))
+            for index, body in enumerate(bodies)]
+
+
 # LLM: 解析实际对主模型可见的 JSON，不拿 loaded_count 或 pins 代替已展示正文。
 # 函数用途: 取回宿主上下文中的完整来源和实际可见页。
 def _entries(result):
     return json.loads(result.text.split("\n", 2)[-1])["entries"] if result.text else []
+
+
+# LLM: 各顺序独立安装产生不同 activation；仅去掉这两个代次字段，其余正文、来源、分页与投递诊断逐字段比较。
+# 函数用途: 比较独立 home 的同一包交付，不把完整来源或续页差异藏成只比较 status。
+def _stable_receipt(value):
+    if isinstance(value, dict):
+        return {key: _stable_receipt(item) for key, item in value.items()
+                if key not in ("activation_id", "expected_activation_id")}
+    if isinstance(value, list):
+        return [_stable_receipt(item) for item in value]
+    return value
+
+
+# LLM: 解析真实 RuntimeFacts 正文并按包关联结构化诊断；未投递页的缺席也必须参与比较。
+# 函数用途: 取得每包完整可见页和投递形态，不拿 pin 或总数代替正文。
+def _delivery_by_package(result):
+    rows = {row["package_id"]: _stable_receipt(row) for row in result.entry_status}
+    for page in _entries(result):
+        rows[page["package_id"]]["page"] = _stable_receipt(page)
+    return rows
+
+
+@pytest.mark.parametrize("case", [
+    ((b"A" * 4000, ("甲🙂\\\n" * 1000).encode()), 978),
+    ((b"A" * 4000, ("甲🙂\\\n" * 1000).encode(), ('"\\\t<&>Z' * 600).encode()), 1800),
+])
+def test_heterogeneous_entries_have_identical_delivery_in_every_fresh_home_order(tmp_path, monkeypatch, case):
+    bodies, budget = case
+    baseline = None
+    bundles = _entry_bundles(bodies)
+    for index, order in enumerate(permutations(range(len(bodies)))):
+        monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / f"home-{index}"))
+        fixture = _fixture(tmp_path / f"run-{index}", bundles=bundles)
+        tasks = fixture.agent.conversation_store.tasks
+        assert tasks.load(fixture.link.task_id).skill_snapshot_refs == ()
+        history = deepcopy(fixture.params.tool_ir_history)
+        refs = [package.to_ref() for package in fixture.scope.skills.packages]
+        result = _prepare(fixture, budget=budget, refs=[refs[position] for position in order])
+        assert estimate_tokens(result.text) <= budget
+        assert fixture.params.tool_ir_history == history
+        assert {ref["package_id"] for ref in tasks.load(fixture.link.task_id).skill_snapshot_refs} == {
+            ref["package_id"] for ref in refs}
+        assert len(fixture.reads) == len(bodies)
+        assert result.loaded_count > 0  # 防止用完全不投递制造空集合“换序一致”。
+        delivery = _delivery_by_package(result)
+        if baseline is None:
+            baseline = delivery
+        assert delivery == baseline
+        for page in _entries(result):
+            source = bodies[int(page["package_id"].split("-")[-1])].decode()
+            assert page["body"] == source[:len(page["body"])] and page["offset"] == 0
+            assert page["total_chars"] == len(source)
+            assert page["continuation"]["offset"] == len(page["body"])
+            assert page["continuation"]["max_chars"] == max(1, len(page["body"]))
 
 
 def test_original_installation_reader_and_visible_entries_have_exactly_matching_pins(tmp_path):
@@ -146,32 +206,117 @@ def test_total_budget_includes_json_receipts_and_partial_page_continues_without_
     assert "".join(chunks).encode() == body.encode()
 
 
-@pytest.mark.parametrize("body", [b"entry-a", b""])
-def test_budget_too_small_for_source_receipt_does_not_pin_an_invisible_package(tmp_path, body):
-    fixture = _fixture(tmp_path, bodies=(body,))
-    budget = estimate_tokens(entry_context._render([])) + 1
-    result = _prepare(fixture, budget=budget)
-    assert result.text == "" and result.loaded_count == 0
-    assert result.warning_codes == ("CAPABILITY_SELECTION_ENTRY_BUDGET_EXHAUSTED",)
+
+# LLM: 三分法是本次改动的核心合同，三条分别对应“准入不过”“读不出”“读得出但塞不下”。
+# 函数用途: 三条判据各一条用例，钉住 pin 与读成功绑定、与投递解耦。
+@pytest.mark.parametrize("decision", ["ask", "deny"])
+def test_access_denied_selected_package_is_never_pinned(tmp_path, decision):
+    # 判据①：准入不通过（ask/deny/越权）不 pin，也不读页。
+    fixture = _fixture(tmp_path)
+    runtime = fixture.scope.tools.runtime("skill_search")
+    if decision == "ask":
+        runtime = replace(runtime, runtime_policy=replace(runtime.runtime_policy, approval_policy=ApprovalPolicy("always")))
+    else:
+        runtime = replace(runtime, exposure=replace(runtime.exposure, model_visible=False))
+    fixture.scope = replace(fixture.scope, tools=replace(fixture.scope.tools, runtimes=(runtime,), snapshot_hash=""))
+    result = _prepare(fixture)
+    assert fixture.reads == []
+    assert [row["status"] for row in result.entry_status] == ["not_delivered"]
+    assert result.entry_status[0]["reason"] == "not_authorized"
     assert fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs == ()
+
+
+def test_unreadable_selected_package_is_never_pinned(tmp_path):
+    # 判据②：准入通过但读不出有效页（内容被篡改）不 pin。
+    fixture = _fixture(tmp_path, bodies=(b"broken", b"working"))
+    first, second = fixture.scope.skills.packages
+    first = replace(first, reader=lambda _path: b"tampered")
+    fixture.scope = replace(fixture.scope, skills=replace(fixture.scope.skills, packages=(first, second)))
+    result = _prepare(fixture)
+    pins = fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs
+    assert [ref["package_id"] for ref in pins] == ["entry-1"]
+    assert {row["package_id"]: row["status"] for row in result.entry_status} == {
+        "entry-0": "not_delivered", "entry-1": "full"}
+
+
+@pytest.mark.parametrize("body", [b"entry-" + b"x" * 3000, b""])
+def test_readable_but_unaffordable_entry_is_pinned_and_marked_not_delivered(tmp_path, body):
+    # 判据③：读得出有效页、只是总预算放不下正文 → 仍然 pin（这正是 B05 的根因）。
+    fixture = _fixture(tmp_path, bodies=(body,))
+    header = estimate_tokens(entry_context._render([]))
+    # 总预算只够放包头：连最小骨架都放不下 → 该包 not_delivered，但读成功已经固定引用。
+    result = _prepare(fixture, budget=header + 1)
+    assert result.loaded_count == 0 and result.text == ""
+    assert [row["status"] for row in result.entry_status] == ["not_delivered"]
+    assert result.entry_status[0]["reason"] == "budget_exhausted"
     assert fixture.reads == [("entry-0", "CAPABILITY.md")]
-
-
-def test_multiple_packages_cannot_pin_a_later_entry_omitted_by_total_budget(tmp_path):
-    fixture = _fixture(tmp_path, bodies=(b"first", b"second"))
-    first_only = _prepare(fixture, refs=[fixture.scope.skills.packages[0].to_ref()])
-    budget = estimate_tokens(first_only.text) + 1
-    result = _prepare(fixture, budget=budget)
-    pages = _entries(result)
-    assert [page["package_id"] for page in pages] == ["entry-0"]
-    assert estimate_tokens(result.text) <= budget
-    assert "CAPABILITY_SELECTION_ENTRY_BUDGET_EXHAUSTED" in result.warning_codes
     pins = fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs
     assert [ref["package_id"] for ref in pins] == ["entry-0"]
 
 
-@pytest.mark.parametrize("refs,budget", [([], 0), ([], 10000), (None, 0)])
-def test_no_entries_or_no_budget_has_no_reader_pin_or_history_side_effect(tmp_path, refs, budget):
+
+# 函数用途: 只放得下骨架时，续页不能把下一次读取压成 1 个字（模型照做会逐字读、白耗调用）；3a 挑入 selfix3 时补。
+def test_skeleton_continuation_does_not_force_one_char_reads(tmp_path):
+    fixture = _fixture(tmp_path, bodies=(("入口正文" * 600).encode(),))
+    package = fixture.scope.skills.packages[0]
+    page = read_package_page(fixture.agent, fixture.scope.skills, package.package_id)
+    full = estimate_tokens(json.dumps(page, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + ",")
+    fitted = (entry_context._fit_entry_page(fixture.scope.skills, page, allowance) for allowance in range(full))
+    skeletons = [row for row in fitted if row is not None and row["body"] == ""]
+    assert skeletons, "前提：应存在只放得下骨架的份额"
+    for row in skeletons:
+        assert row["has_more"] is True
+        assert row["continuation"]["offset"] == page["offset"]
+        assert "max_chars" not in row["continuation"]
+
+def test_two_selected_packages_share_budget_and_are_both_pinned_in_either_order(tmp_path):
+    # 新合同：预算在选中包之间均分，且结果与 refs 顺序无关；两个包都固定。
+    fixture = _fixture(tmp_path, bodies=(b"A" * 4000, b"B" * 4000))
+    refs = [package.to_ref() for package in fixture.scope.skills.packages]
+    budget = 900
+    forward = _prepare(fixture, budget=budget, refs=refs)
+    backward = _prepare(fixture, budget=budget, refs=list(reversed(refs)))
+    # 两种顺序都固定了两个包（pin 跟“读成功”走；pin 列表按引用去重）。
+    pins = fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs
+    assert [ref["package_id"] for ref in pins] == ["entry-0", "entry-1"]
+    assert [row["package_id"] for row in forward.entry_status] == ["entry-0", "entry-1"]
+    assert [row["package_id"] for row in backward.entry_status] == ["entry-1", "entry-0"]
+    assert estimate_tokens(forward.text) <= budget and estimate_tokens(backward.text) <= budget
+    # 两边顺序得到相同的 status 集合 —— 与 refs 顺序无关。
+    forward_status = {row["package_id"]: row["status"] for row in forward.entry_status}
+    backward_status = {row["package_id"]: row["status"] for row in backward.entry_status}
+    assert forward_status == backward_status
+
+
+# LLM: 边界用例：份额恰好等于“包头 + k”、均分有余数、单包与旧行为一致。
+# 函数用途: 钉住 _entry_share 的整除与余数行为，保证份额只跟包数/总预算有关。
+def test_entry_share_is_equal_split_and_order_independent():
+    header = estimate_tokens(entry_context._render([]))
+    # 单包：可用预算全给这一个包。
+    assert entry_context._entry_share(header + 700, 1) == 700
+    # 两个包：均分，余数丢弃（不留半份）；与包的身份/顺序无关。
+    assert entry_context._entry_share(header + 700, 2) == 350
+    assert entry_context._entry_share(header + 701, 2) == 350
+    # 预算不足包头：份额为 0。
+    assert entry_context._entry_share(header - 1, 2) == 0
+
+
+@pytest.mark.parametrize("body", [b"entry-a", b""])
+def test_single_package_with_ample_budget_delivers_full_entry(tmp_path, body):
+    # 单包且预算充足：与旧行为一致，整页投递、status=full、pin 一个。
+    fixture = _fixture(tmp_path, bodies=(body,))
+    result = _prepare(fixture)
+    assert result.loaded_count == 1
+    assert [row["status"] for row in result.entry_status] == ["full"]
+    assert result.warning_codes == ()
+    assert [page["body"] for page in _entries(result)] == [body.decode()]
+    pins = fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs
+    assert [ref["package_id"] for ref in pins] == ["entry-0"]
+
+
+@pytest.mark.parametrize("refs,budget", [([], 0), ([], 10000)])
+def test_no_selected_refs_has_no_reader_pin_or_history_side_effect(tmp_path, refs, budget):
+    # 没有选中任何包：不读、不 pin、不写历史（这条与新判据无关，是空集合基线）。
     fixture = _fixture(tmp_path)
     before = fixture.agent.conversation_store.tasks.load(fixture.link.task_id)
     history = deepcopy(fixture.params.tool_ir_history)
@@ -179,6 +324,17 @@ def test_no_entries_or_no_budget_has_no_reader_pin_or_history_side_effect(tmp_pa
     assert result.text == "" and result.loaded_count == 0 and fixture.reads == []
     assert fixture.agent.conversation_store.tasks.load(fixture.link.task_id) == before
     assert fixture.params.tool_ir_history == history
+
+
+def test_zero_budget_still_reads_and_pins_selected_package(tmp_path):
+    # 判据③的极端：预算为 0 但仍有选中包——读成功就固定；正文放不下记 not_delivered。
+    fixture = _fixture(tmp_path)
+    result = _prepare(fixture, budget=0)
+    assert result.loaded_count == 0 and result.text == ""
+    assert [row["status"] for row in result.entry_status] == ["not_delivered"]
+    assert fixture.reads == [("entry-0", "CAPABILITY.md")]
+    pins = fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs
+    assert [ref["package_id"] for ref in pins] == ["entry-0"]
 
 
 def test_empty_entry_has_complete_receipt_without_fake_continuation(tmp_path):
@@ -293,16 +449,39 @@ def test_revocation_after_successful_read_preserves_history_but_never_revives_ol
     assert fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs == pins
 
 
-def test_cancellation_during_page_fitting_does_not_pin_or_deliver_accepted_projection(tmp_path, monkeypatch):
+def test_cancellation_during_page_fitting_keeps_read_success_pin_but_delivers_nothing(tmp_path, monkeypatch):
+    # pin 时机定稿后：pin 与“读成功”绑定。取消发生在读成功之后、裁剪投递之前时，
+    # 取消照常上抛，正文不投递；但这一包已经读成功，引用归属按原语义保留。
+    fixture = _fixture(tmp_path, bodies=(b"entry-" + b"x" * 3000,))
+    original = entry_context.json.dumps
+    encoded = []
+    history = deepcopy(fixture.params.tool_ir_history)
+
+    def cancel_during_encoding(value, *args, **kwargs):
+        text = original(value, *args, **kwargs)
+        if isinstance(value, dict) and value.get("package_id") == "entry-0" and "body" in value:
+            encoded.append(value["package_id"])
+            fixture.params.cancellation_token.cancel("stop during page encoding")
+        return text
+
+    monkeypatch.setattr(entry_context.json, "dumps", cancel_during_encoding)
+    # 预算只给一点：整页放不下，必然走到 _fit_entry_page 裁剪（注意用 _prepare 的 budget 参数，不是 scope 配置）。
+    with pytest.raises(ToolCancelled):
+        _prepare(fixture, budget=200)
+    assert encoded and fixture.params.tool_ir_history == history
+    # 取消发生在读成功之后：pin 已按“读成功即固定”落下（判据③），但这一页不投递、异常上抛。
+    pins = fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs
+    assert [ref["package_id"] for ref in pins] == ["entry-0"]
+
+
+def test_cancellation_before_read_does_not_pin(tmp_path):
+    # 判据②：取消发生在读之前（没读成功）→ 不 pin，照常上抛。
     fixture = _fixture(tmp_path)
-    original = entry_context._fit_entry_page
 
-    def cancel_after_fit(*args):
-        fitted = original(*args)
-        fixture.params.cancellation_token.cancel("stop after fitting")
-        return fitted
+    def stop(*_args):
+        raise ToolCancelled("stop before read")
 
-    monkeypatch.setattr(entry_context, "_fit_entry_page", cancel_after_fit)
+    fixture.authority.check = stop
     with pytest.raises(ToolCancelled):
         _prepare(fixture)
     assert fixture.agent.conversation_store.tasks.load(fixture.link.task_id).skill_snapshot_refs == ()

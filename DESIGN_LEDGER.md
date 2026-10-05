@@ -1,5 +1,29 @@
 # 设计台账
 
+## 选包入口独立计费，消除投递顺序偏置（selfix3，2026-10-05，worker/selfix3；本地实现及已执行门禁通过，2项沙箱skip，待3a终审）
+
+- **来源**：selfix2r 初审用两个异质入口、978 总预算及独立 home 证明，原均分后仍用加入前后的整体 token 差裁剪，受前页编码和上取整影响；三包也能出现交付字符数差异。下节保留 selfix2 当时记录，其中“换序结果相同”的承诺由本节修正，不能当作旧版本已验证结论。
+- **通用改法及上界**：扣公共头后剩余预算整除为每包份额，余数、失败包份额不转借，份额可为零。每页只紧凑编码自己的完整回执、正文和 continuation，加一个逗号后独立估算，不读取前页或剩余预算；最终文本使用相同紧凑编码并仅按结构化 package_id 排列可见正文，诊断保持输入顺序。紧凑编码只去掉 JSON 排版空格，不改变原正文/字段。原字符串估算按 UTF8 字节/3 上取整，分项上取整之和不小于拼接整体；公共头已含空数组，实际n页仅需n-1个逗号而分项预留n个，因此公共头预算加各份额覆盖最终文本，无需按顺序二次删页。
+- **三分法不变**：准入不过不 pin、无有效页不 pin、读成功但放不下仍 pin。唯一 pin 在原 reader 校验后、返回有效页之前的任务锁内完成；caller 不补 pin。读成功后裁剪内部取消保留已固定版本，交付前复查上抛取消，不交付正文。
+- **诊断与核验边界**：entry_status 只记录投递形态；当前主/子调用方仅消费 text/warning_codes，not_delivered 不能表示是否已固定，更不表示模型采用。宿主匹配仍在每包自己的 deliverables/verifiers 内完成；合法重叠声明可以双匹配，不能无条件承诺某包永不检查另一任务产物。
+- **验证与后续**：同归档字节分别安装到独立 home 的两包978正反序、三包1800六排列，比较完整正文、来源和续页（仅排除重新安装的 activation）；21显式文件（含完整11文件guards9及packaging）491 passed、2 skipped。退回整体差计费被三包用例抓住，偏向先到的份额被两/三包用例抓住；每次字节恢复、33项入口回归通过。静态门禁和尺寸新增0详见 TESTS 本节。未运行真实 Gateway、模型、TUI/IM 或沙箱外检查器；本节不宣称部署、方法采用或全仓通过，不改默认预算/权限/原 pin 账。
+
+## 选包入口预算均分 + 选中即固定（selfix/selfix2，2026-10-04，分支 `worker/selection-pins`，基于 17j 头 `1e1aadb80`；待非作者初审）
+
+- **来源（故障）**：能力包 B 0.3.3 冻结重跑里 `B05-t501/t502` 两次都按 A 包交付。selb05 只读调查定责为**宿主选包底座**，不是模型也不是 B 包描述：`prepare_package_entry_context`（`package_selection_context.py`）**按 `references` 顺序逐个读入口、边读边扣预算**，`remaining <= 0` 就 `break`。`capability_bundle_max_tokens` 默认 **3000**，而单个入口文档（`CAPABILITY.md`）实测 A 包 3479 token、B 0.3.3 3504 token——**任一单包都超总预算**，所以 `selected_count=2` 时必然“第一个活、第二个被 `CAPABILITY_SELECTION_ENTRY_BUDGET_EXHAUSTED` 丢掉”；谁排第一取决于模型返回的 `selected_ids` 顺序。被丢掉的包不会被 pin（pin 当时只在 `read_package_page` 成功交付后发生），于是 `selected_count=2` 而 `pins` 只有 1 个。证据 `capability-packs-v2-b8/rerun-b033-166e8c372/selb05-ds1.md`。
+- **改法（3a 裁定，不改默认预算）**：
+  1. **pin 与“读成功”绑定、与“投递多少正文”解耦**（三分法）：① 准入不通过（ask/deny/越权）→ 不 pin；② 准入通过但读不出有效页（撤销、激活代次失效、取消、读失败）→ 不 pin，取消照常上抛；③ 准入通过且读出有效页、只是总预算放不下正文 → **要 pin**。实现上不再有“为预算补 pin”的独立调用：`read_package_page` 在页通过校验后 pin 的动作本身就落在“读成功之后、裁剪之前”，正是判据③要求的位置。裁剪期间可能已被取消，交付前再 `authority.check()` 一次，取消照常上抛、这一页不投递。
+  2. **预算在选中包之间均分**，不再先到先得：`_entry_share(max_tokens, count) = (max_tokens - 包头) // count`，只取决于包数与总预算，**与 refs / 模型返回顺序无关**；每个包只用自己的份额裁剪（`_fit_entry_page(..., allowance=min(max(剩余,0), share))`）。同一组选中包换个顺序得到同样的投递形态。
+  3. **告警码语义按新规则写清**：`CAPABILITY_SELECTION_ENTRY_PARTIAL` = 这一包读到了但正文只交付一段（`has_more`）；`CAPABILITY_SELECTION_ENTRY_BUDGET_EXHAUSTED` = 准入通过、读成功后，这一包的份额放不下最小骨架，正文一律不投递（`entry_status.status = not_delivered`，引用仍已固定）。两者都不再表示“引用丢没丢”。
+  4. **回执加结构化 `entry_status`**：每个选中包一行 `{package_id, status: full|partial|not_delivered, reason?, has_more?, delivered_chars?, total_chars?, continuation?}`，投递形态不再靠告警码拼。
+- **改动文件**：`agent_py_agent/agent/capability/package_selection_context.py`（核心；删掉死代码 `_pin_selected_reference`，原有 `_budget_plan`/`_skeleton_cost` 收敛成 `_entry_share`）。`subagent_package_entries.py` **不需要改代码**：它 `:107` 用的是同一个 `capability_bundle_max_tokens`、`:111` 调的是同一个 `prepare_package_entry_context`，行为自动一致（见“核对结论”）。
+- **核对结论（selfix 第 4 点两问）**：
+  1. **宿主核验不会串到别的包**。`pack_verification_scope.py:48 pinned_verification_packages()` 逐条取本任务 pins，按 `activation_id` 从安装表取原安装项并要求 `entry.package_sha256 == ref["content_sha256"]`，只把有核验声明的包列进来；真正决定“哪个检查器跑在哪个产物上”的是 `pack_verification_service.py:269 _applicable()`——`relpath` 先按**该包自己的 `deliverables` 路径模式**匹配，再取 `verifier.applies_to in ids` 的检查器。A 包被固定不会让 B 任务的产物去跑 A 的检查器。
+  2. **子授权入口是同一个问题、同一份实现**，所以一起改（本次未单独验证子入口的独立行为差异，只验证它随共享函数变化——新增用例见 TESTS）。
+- **旧合同用例改写**：`test_multiple_packages_cannot_pin_a_later_entry_omitted_by_total_budget`、`test_budget_too_small_for_source_receipt_does_not_pin_an_invisible_package` 两条旧用例钉的是“预算不足 → 不读不 pin”旧语义，与新判据③冲突，已删除并由 `test_readable_but_unaffordable_entry_is_pinned_and_marked_not_delivered`、`test_zero_budget_still_reads_and_pins_selected_package`、`test_access_denied_selected_package_is_never_pinned`、`test_unreadable_selected_package_is_never_pinned` 四条新用例取代（理由见 TESTS.md 同名小节）。
+- **验证**：见 `TESTS.md`“选包入口预算均分 + 选中即固定（selfix2）”小节。
+- **未验证**：真实 Gateway 里两包同轮选中的端到端没跑（不启 Gateway 是工作规则）；窗口实现细节（`_entry_share` 的均分与余数）只由单测钉住；`test_pack_verification*.py` 只跑相关子集，未跑该目录全部；子入口未做独立行为差异实测。
+
 ## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`；初审 shellwrapr 两处真漏已修，终审又发现 xargs 选项解析真漏、shellwrap3 修复；待 3a 终审）
 
 - **问题（9b 证据 review-rm-wrap-gap）**：裸 rm/rmdir/unlink 被 `command_policy` 硬拒，但 `sh -c "rm -rf …"`、`bash -c`、`env sh -c`、`cd … && sh -c`、`eval`、`xargs rm`、`find … -delete` 都判 unknown/read_only、没有 finding；ActionPolicy 对 unknown 直接放行，Full Access 下会真执行。

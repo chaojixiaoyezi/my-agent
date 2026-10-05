@@ -224,6 +224,16 @@ outcome=failed 且是辅助调用抛异常时，标记另带 `failure`：只含�
 活动回合锁只包有限本地领取/读取/提交，模型I/O在锁外；原停止或失效attempt沿取消异常上抛，不当成普通选包失败。
 选择assistant/schema信封不入业务历史；有界入口作为原`RuntimeFactsTurn`进入原预算、历史、Compact、自动选模捕获及实际请求。
 
+入口投递预算（selfix3，2026-10-05，本地实现、待3a终审）：扣公共头后剩余预算均分并丢余数；
+失败包、放不下页的份额不转借，份额允许为零。每包只按自己的完整紧凑 JSON 页加一个逗号独立估算和裁剪，
+不按前页与整体 token 差计费；最终文本使用相同紧凑编码，不改变正文/来源字段。分项上取整之和保守覆盖整体估算，
+公共头含空数组，实际n页只需n-1个逗号而这里留n个；最后按结构化 package_id 固定排列可见正文。
+三分法是准入不过不固定、读不出有效页不固定、读成功但预算不足仍固定；唯一固定动作在共享 reader 校验后、返回前完成，
+caller 没有补固定路径。读成功后裁剪内部取消保留已固定版本但不交付正文，沿原取消异常上抛。
+`entry_status` 只作投递诊断；当前主/子调用方仅消费 text/warnings，not_delivered 不能推断是否固定或方法采用。
+宿主核验按每包自己的 deliverables/verifier 匹配，合法重叠声明允许双匹配，不能据包身份无条件保证与其它任务产物无交集。
+两包978独立 home 正反序与三包六排列、完整回执比较及两个变异见 TESTS 顶部 selfix3；不替代真实 Gateway/模型/沙箱外验收。
+
 ## 主任务、子代理和长任务
 
 显式能力包经`allowed_skills=["capability:<package_id>"]`传给孩子；批量可逐项填写`item.allowed_skills`，未单列项沿用顶层默认列表，goal或input_refs提及包不授予读取范围。缺少能力时孩子沿原`capability_request.requested_skills`申请同一stable_id。自动路由先完成原owner路径判断，遇到包命名域后整条保留OPEN/PARENT_RESOLUTION_REQUIRED；包与工具混合申请也不能部分自动结清。该记录不证明父级有权批准；原直属父级resolve继续按当前快照验证，生成完整七字段ref并写原canonical grant。未知包批准失败时保持OPEN，可由原deny关闭；不隐式转换裸包名或资源路径，不补首请求marker、不增加安装或授权账。对应组件111项通过，模型自然采用仍须原生复验。

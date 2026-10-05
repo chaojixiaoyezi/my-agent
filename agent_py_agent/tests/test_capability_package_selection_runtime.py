@@ -445,13 +445,17 @@ def test_claim_left_by_interrupted_attempt_is_not_retried_by_new_attempt(tmp_pat
     assert len(fixture.agent.backend.calls) == 1 and not fixture.reads and not params.tool_ir_history
 
 
-def test_body_budget_failure_finishes_selected_with_no_read_or_pin(tmp_path, monkeypatch):
+def test_body_budget_failure_still_reads_and_pins_selected_package(tmp_path, monkeypatch):
+    # 新合同（3a 判据③）：预算放不下正文时仍要读、仍要固定引用，只是 entry_status 记 not_delivered。
     fixture = _runtime(tmp_path, monkeypatch, config="capability_bundle_max_tokens: 1\n")
     prepare_capability_package_selection(fixture.agent, fixture.params)
     task = _task(fixture)
     assert task.capability_selection.outcome == "selected"
     assert "CAPABILITY_SELECTION_ENTRY_BUDGET_EXHAUSTED" in task.capability_selection.warning_codes
-    assert not task.skill_snapshot_refs and not _facts(fixture) and not fixture.reads
+    # 选中即固定：即使一个字都放不下，引用也已归属本任务；正文读了一页（用于判断可达性）。
+    assert [ref["stable_id"] for ref in task.skill_snapshot_refs] == ["capability:story-a"]
+    assert fixture.reads
+    assert not _facts(fixture)  # 没有可见入口正文写进 RuntimeFacts
     assert len(fixture.agent.backend.calls) == 1
 
 

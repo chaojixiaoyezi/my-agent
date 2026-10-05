@@ -129,6 +129,10 @@ auto_promote_to_parent_memory。旧记录里残留的三个键没有任何读取
 
 能力包子入口（2026-09-27，本地已实现，组合验收中）：新建child可复用原首请求marker准备已显式授权且同代pin的包入口，
 入口沿原RuntimeFacts进入业务请求，不新增辅助选包模型。旧无marker线程不回填，关闭配置不加载，方法仍按需读取。
+2026-10-05 selfix3（本地实现，待3a终审）：共享入口扣公共头后均分，逐包紧凑编码完整页及一个逗号并独立计费，最终可见页按 package_id 排列；
+余数、未投递包份额不转借，零份额仍沿原 reader 验证读取。准入/有效页/固定三分法和 child 原 canonical 授权/pins 保持，
+entry_status 仅诊断，不能代替权限、固定或采用事实；主/子目前只消费 text/warnings。精确两/三包回归和变异见 TESTS 顶部 selfix3，
+真实子入口全部排列、Gateway/模型/沙箱外checker仍未验证，不覆盖或回填下方历史失败。
 原25文件570项通过；显式选模令Jev建议retained后入口资格被错误跳过的缺口已修，marker CAS独立领取包准备，pending advice只约束建议采用，相关十文件254项及独立11项/6组探针通过。claim提取早返回helper后，新冻结源码的三片35文件977项再次通过，Ruff与严格尺寸通过。
 文档及最终组合由root负责；真实私有运行仍旧f6，原四子代理任务质量失败不回填。见[能力包合同](../../design/CAPABILITY_PACKS.md#主任务子代理和长任务)。
 

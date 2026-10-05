@@ -335,6 +335,37 @@ def test_child_budget_delivers_full_reference_and_exact_continuation(tmp_path, m
     assert page["has_more"] is True
 
 
+def test_child_two_packages_share_budget_and_are_both_pinned(tmp_path, monkeypatch):
+    # 子入口与主入口共用同一个 prepare_package_entry_context，所以“均分预算 + 选中即固定”自动生效。
+    # 这条钉住：两个授权包在紧预算下都进上下文（各自可能只有骨架），且都被固定到孩子引用里。
+    from agent_py_agent.agent.plugin_activation import PluginActivationRequest
+    from agent_py_agent.agent.plugin_content_activation import PluginContentActivation
+    from agent_py_agent.agent.plugin_installation import PluginInstallRequest
+    from agent_py_agent.agent.plugin_package import inspect_plugin_package
+    from agent_py_agent.tests.test_capability_package import content_bundle
+
+    agent, store, _ = _fixture(tmp_path)
+    agent.capability_config_path.write_text(
+        "enable_capability_package_selection: true\ncapability_bundle_max_tokens: 1000\n", encoding="utf-8")
+    for name in ("entry-one", "entry-two"):
+        package = inspect_plugin_package(content_bundle(files={"CAPABILITY.md": ("方法。" * 3000).encode()},
+                                                        change=lambda row, nm=name: row.update(plugin_id=nm)))
+        row = store.install(PluginInstallRequest(package, f"install-{name}", 0)).installation
+        activation = PluginContentActivation(f"enable-{name}", name, row.package_sha256, row.revision, row.settings_revision)
+        store.change_activation(PluginActivationRequest(f"enable-{name}", row.revision, activation))
+    child = _child(agent, allowed=["capability:entry-one", "capability:entry-two"])
+    seen, _ = _provider(agent, child, monkeypatch)
+    agent.run_subagent(child.id, dry_run=False, probe=False)
+    texts = [part["text"] for message in seen[0]["messages"] for part in message["content"]
+             if isinstance(part, dict) and part.get("type") == "text"]
+    text, = [item for item in texts if item.startswith("[能力包入口参考]")]
+    entries = json.loads(text.split("\n", 2)[-1])["entries"]
+    # 两个包都进了可见上下文（谁也没被“先到先得”挤掉）。
+    assert {page["stable_id"] for page in entries} == {"capability:entry-one", "capability:entry-two"}
+    pins = json.dumps(agent.subagents.load(child.id).attributes["skill_snapshot_refs"], sort_keys=True)
+    assert "capability:entry-one" in pins and "capability:entry-two" in pins
+
+
 def test_causal_mutation_missing_package_claim_is_detected(tmp_path, monkeypatch):
     import inspect
 
