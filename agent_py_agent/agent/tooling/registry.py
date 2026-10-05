@@ -111,6 +111,8 @@ class ToolRegistryParams:
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
+    # 顶层命令源长度上限（来自配置 command_policy_max_source_chars；0=不限制），注册时注入命令策略。
+    command_policy_max_source_chars: int = 65_536
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）；装配点据此配置进程级 PTY 注册表。
     pty_session_idle_timeout_minutes: int = 30
     background_process_listen_scope_enforce: bool = True

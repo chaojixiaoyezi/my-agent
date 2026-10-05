@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 命令源长度上限 cmdcap（2026-10-05，worker/cmdcap，基于 81254d4a5）
+
+- **用例**：新增 `agent_py_agent/tests/test_command_policy_source_limit.py`（8 条）——默认 64K 且正常/60K 命令通过；1MB 超限在解析前拒绝且 <50ms；analyze_command 同样报 COMMAND_SOURCE_TOO_LARGE；配置改小生效（100/101 边界）；0 不限制；坏值恢复默认；argv 形态不受闸；错误码登记且恢复提示含 write_file。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_command_policy_source_limit.py -q` → 8 passed；连带 8 文件（test_command_policy、test_command_policy_wrapped_delete、test_plugin_m1_joint_tool_gate、test_pty_sessions、test_recovery_code_policy、test_regression_matrix_gates、test_subagent_shell_gateway、test_unknown_command_allowlist）→ 除 test_pty_sessions 5 条（基线 `81254d4a5` 复核同样失败的沙箱进程限制）外全过。
+- **变异**（3/3 KILLED，按备份还原、sha256 一致）：去掉 evaluate 长度闸门（2 红）；command_source_max_chars 忽略注入值（2 红）；0 不再表示不限制（1 红）。
+- **配置与前端**：`node frontend/scripts/sync-backend-config.mjs` 同步（262 字段）；`--check` 复检 in sync；`test_backend_config_catalog.py` + `test_config_defaults_parity.py` + `test_config_field_readers.py` → 全过；常数目录重生成 914 项。
+- **门禁**：guards9 全过；ruff；import boundaries 0；DOC_SYNC_PASS --base 81254d4a5；strict code-size hard=0；size_diff 新增 0/消失 57；`git diff --check`；clean package（暂存后）。
+- **未验证**：真实 1MB 命令经 run_command 的端到端（组件层覆盖策略层；沙箱不跑真实执行链）；子代理 shell 网关的真实调用（同一入口，组件已覆盖）。
+
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
 
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）

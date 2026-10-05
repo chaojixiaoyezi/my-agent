@@ -1,5 +1,13 @@
 # 设计台账
 
+## 命令源长度上限：解析前的结构化拒绝（cmdcap，2026-10-05，worker/cmdcap，基于 17l 头 81254d4a5；本地验收完成，待 3a 终审）
+
+- **来源（结构化事实）**：ds5 初审 shellwrap5 时实测，顶层命令没有长度上限：1MB 的单个参数在命令策略检查里光 stdlib shlex.split 就要 18.4 秒（纯 Python 逐字符），会卡住对应线程；嵌套源已有 32K 上限（COMMAND_NESTED_SOURCE_TOO_LARGE）。
+- **做法**：`contracts/gates/command_policy.py` 的 `evaluate_command_policy` 与 `analyze_command`（两条 shlex 入口）在解析前加长度闸门：str 形态超限直接返回 `COMMAND_SOURCE_TOO_LARGE`（新登记码：与嵌套码并列、恢复提示面向"整条命令太长"场景，写"大段内容请改用 write_file 写文件"；argv 形态不经过 shlex 不做闸）。实测 1MB 拒绝耗时 0.01ms（原 18.4s）。
+- **可配置**：`agent_config.yaml` 加 `command_policy_max_source_chars`（默认 65536、0=不限制、注释含 1KB/64KB/256KB/1MB 实测耗时）；`AgentConfig`/`RegistryParams` 同步；`registry_bootstrap.register_base_tools` 注册时 `configure_command_source_max_chars(params...)` 注入进程级策略——所有经两条入口的调用点（run_command、PTY、后台、子代理 shell 网关、插件钩子路径）共用同一上限，未注入时默认 64K，不存在无闸入口。
+- **验证**：新测试 `test_command_policy_source_limit.py` 8 条；3 变异全杀；连带 8 个测试文件跑过（pty 5 条为基线 `81254d4a5` 复核同样失败的沙箱进程限制）；前端配置目录已同步（262 字段，--check in sync）；常数目录重生成 914 项；门禁全过（见 TESTS）。
+- **已知边界**：argv（list）形态不受闸（不经过 shlex）；上限按字符数（非字节）。
+
 ## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现，macOS 复现）**：`test_compact_text_source.py::test_many_message_summary_avoids_whole_json_copy` 断言压缩取材峰值低于整段 JSON 的一半，estcache 后峰值 2,385,150 > 1,239,645。3a 实测：对 1200 条（每条约 2KB）消息估算一次，估算缓存留住约 1.6MB 的指纹结构（嵌套元组，平均每条约 1.3KB，`tokens.py:229/252/253/264`），被算进压缩峰值——不是整段拷贝，但指纹留存过重。二分：630be9dcc 通过、2b059ec2d 失败。

@@ -1584,6 +1584,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "拆成更小的独立命令，不得原样重试。"
         ),
     ),
+    # cmdcap：顶层命令源在 shlex 解析前的长度闸门（与嵌套码并列，恢复提示面向"整条命令太长"的场景）。
+    "COMMAND_SOURCE_TOO_LARGE": ErrorContract(
+        code="COMMAND_SOURCE_TOO_LARGE",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "整条命令超过长度上限，解析前即被拒绝；大段内容请改用 write_file 写文件，"
+            "命令里只引用文件，不要原样重试。"
+        ),
+    ),
     "COMMAND_XARGS_UNKNOWN_OPTION": ErrorContract(
         code="COMMAND_XARGS_UNKNOWN_OPTION",
         category="permission",
