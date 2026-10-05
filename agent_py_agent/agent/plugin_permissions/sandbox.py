@@ -48,23 +48,36 @@ def _fixed_grant(installation) -> dict:
 
 
 # LLM: 迁移兼容记录没有 plan/权限，只有身份字段；新授权比对完整计划与身份，两者都不接受换绑。
+#   legacy_compat 走专用比对（记录里没有 plugin_id，见 _verify_legacy_compat_identity 的注释）。
 #   installation_ref 随每次提交（preparing/active）漂移，只用于确认码绑定，不作为启动复核判据。
 # 函数用途: 比对固定授权与当前插件、包、激活身份及计划，任何差异都拒绝启动。
 def _verify_identity(installation, grant) -> None:
     mode = grant.get("mode")
     if mode not in {"restricted", "wide", "legacy_compat"}:
         raise LegacyLaunchDenied("legacy_permission_invalid", "固定授权记录无效，本次没有启动。")
+    if mode == "legacy_compat":
+        _verify_legacy_compat_identity(installation, grant)
+        return
     identity = (installation.manifest.plugin_id, installation.package_sha256, installation.activation_id)
     recorded = (grant.get("plugin_id"), grant.get("package_sha256"), grant.get("activation_id"))
     if recorded != identity:
         raise LegacyLaunchDenied("legacy_permission_changed", "安装或激活身份已变化，本次没有启动。")
-    if mode == "legacy_compat":
-        return
     plan = grant.get("plan")
     if not isinstance(plan, dict) or set(plan) != {field.name for field in fields(PluginEnvironmentPlan)}:
         raise LegacyLaunchDenied("legacy_permission_invalid", "固定授权计划无效，本次没有启动。")
     if canonical_permission_json(asdict(installation.activation.plan)) != canonical_permission_json(plan):
         raise LegacyLaunchDenied("legacy_permission_changed", "激活计划已变化，本次没有启动。")
+
+
+# LLM: v3 迁移记录只冻结 activation_id 与 package_sha256（validate_legacy_permission 的六字段集合）；
+#   plugin_id 不在记录里——旧表按插件名查找、不重复存，插件名由当前安装 manifest 提供。
+#   所以这里只比对记录中实际存在的字段：有的字段必须全部相等，缺字段有结构化理由，不放宽成不比对。
+# 函数用途: 复核 legacy_compat 记录的包摘要与激活号仍与当前安装一致，按冻结策略继续启动。
+def _verify_legacy_compat_identity(installation, grant) -> None:
+    recorded = (grant.get("package_sha256"), grant.get("activation_id"))
+    expected = (installation.package_sha256, installation.activation_id)
+    if recorded != expected:
+        raise LegacyLaunchDenied("legacy_permission_changed", "安装或激活身份已变化，本次没有启动。")
 
 
 # LLM: 受限根重读 inode/内容，解释器经运行时 pin 复核（stat 优先、变化才重算摘要）；任一变化都拒绝。

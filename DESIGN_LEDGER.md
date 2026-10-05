@@ -274,6 +274,8 @@
 - **四入口接线**：`PluginMCPClient.__init__`（候选 `_candidate` 与业务/面板构造共用）复核并投影 `PluginRestrictedSandbox`；覆盖 `start()` 在真正拉起进程前再复核一次（业务 registry、面板连接池、`reconnect()` 都走同一入口）。restricted 强制进统一底座（与 v8 同 `plugin_sandbox_spec` + `sandboxed_plugin_argv`），`_require_legacy_policy_ready` 与启用预检 `_legacy_sandbox_problem` 两处对沙箱不可用（含 Linux `network:true` 端口隔离缺口）结构化拒绝；wide/`legacy_compat` 只复核身份、不进受限沙箱。
 - **清理**：`_retire_before_enable` 移除 `legacy_sandbox_pending` 拒绝（restricted 正常走准备→候选→发布）；`retirement_committed` 与 `_LegacyRetireFacts` 未用字段随删；`sandbox_status` 由 `pending_b7` 改为 `platform_sandbox`；确认文案改为"收紧模式由统一 B7 沙箱底座在每次启动时施加"。
 - **验收**：新 `test_plugin_legacy_launch_guard.py` 7 用例（四入口"事实变化 → 零启动"、撤销拒绝、restricted argv/spec 合同、wide 显式模式）；`test_plugin_legacy_management/transitions/drift` 改断言（restricted 经沙箱启动、假 report 在有旧代时 `revision_conflict`）；新增预检强制沙箱用例。5 个单点变异全 KILLED（构造不复核、start 不复核、绕过 B7、变化不拒绝、预检不强制）。既有沙箱失败与改动前逐条一致（13+3）。
+- **初审补强（opp6-idtest，2026-10-05）**：补 `test_construct_rejects_tampered_fixed_identity`（固定授权身份与安装不符 → 构造拒绝、零启动）；初审 M2 变异（`_verify_identity` 身份比对恒假）由存活变 KILLED。
+- **legacyid 修复（2026-10-05）**：`_verify_identity` 对 legacy_compat 只比对记录里实际存在的 `package_sha256`/`activation_id`（v3 迁移六字段集合不含 `plugin_id`）；修复前 legacy_compat 记录在身份复核恒被拒，违背 4.1“冻结策略可启动”口径。3 个变异 KILLED；48 文件连带测试与基线 `d46515d2c` 失败名单逐条一致（无新增）。
 - **未验证**：真实 macOS/Linux 沙箱子进程（沙箱内不可嵌套，3a 沙箱外复跑）；真实 TUI/飞书/桌面链；生产回滚；本段非作者/9b 终审。整系列仍不可单独部署。
 
 ## opp 变基到 17k（opp6 第一步，2026-10-05，WIP，B7 第四段待接，整系列不可挑入）
