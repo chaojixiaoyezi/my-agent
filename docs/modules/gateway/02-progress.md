@@ -1493,3 +1493,4 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **Gateway 侧改动**：失败收口新增 `request_execution._provider_transient_turn_resume_marker` 判定（白名单 + 开关 + 上限 + “有已完成工具往返”）；命中不写终态，worker 收尾经 `recovery.requeue_provider_transient_processing` 把请求重排回 inbox（固定退避 30/120 秒、active_turn_recovery 记 cause 与累计次数）；`_active_turn_recovery_marker` 重启重排时保留 `provider_resume_count`；提示文案进 `conversation/turn_resume_notice`。
 - **边界**：403/请求拒绝类不续跑；零产出流中断照旧响应级重试；用户已停止不续跑；重排失败退回失败归档；不改发给供应商的请求内容（与手动“继续”同一组装路径）。
 - **验证**：见 `TESTS.md` 同名节（7 新用例、3 变异全杀、58 相关文件、guards9）。
+- **初审修正（tresume2，10-05，`worker/ds10-tresume-fix`）**：用满（`count >= max_count`）时失败答复附 `PROVIDER_RESUME_LIMIT_NOTICE`（“这一轮被模型接口故障反复打断，已停止自动续跑；发‘继续’可以接着做。”，TUI/IM 同源 user_error/error）；重排写盘失败退回正常归档前清掉 `provider_transient_resume` 标记；删 `recovery.py` 一段重复注释。验证见 TESTS.md 同名节（12 passed、m6/m7 变异全杀）。

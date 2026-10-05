@@ -16,6 +16,16 @@
 - **边界**：文本协议下 provider 长度截断此前直接 break（f0f7fdedd 起），修复后与原生协议一致进入同一续跑预算；native 写恢复仍只在原生协议生效（`test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope` 已按新语义更新并保留原守卫断言）。续跑预算用尽后仍按 unfinished/MODEL_RESPONSE_TRUNCATED 收口（不吞供应商终态）；部分正文随响应对象保留，请求级失败语义不变。
 - **验证**：见 `TESTS.md` 同名小节（provider 形态 3 条新用例 + 全量引用文件清扫 + 4 变异全杀）。
 
+## tresume 初审修正（tresume2，2026-10-05，分支 `worker/ds10-tresume-fix`，在 `4a6c66f31` 之后；待 3a 复核）
+
+- **来源**：ds10 初审（必须改 1 + 小问题 2）；3a 10-05 裁定必须改按推荐 a 落地。
+- **改法**：
+  - 用满提示：`conversation/turn_resume_notice` 新增 `PROVIDER_RESUME_LIMIT_NOTICE`（“这一轮被模型接口故障反复打断，已停止自动续跑；发‘继续’可以接着做。”）；`request_execution._provider_transient_turn_resume_marker` 在 `count >= max_count` 时把该句写进失败答复的 `user_error`/`error`，TUI 与 IM 从同一份答复字段读取（沿用 TURN_RESUME_LIMIT 先例的三处一致口径）。
+  - 标记清理：`request_worker._finish_claimed_gateway_request` 在重排写盘失败退回正常归档前清掉 `provider_transient_resume`，不让它落进终态响应与 responses 投影。
+  - 删除 `recovery.py` 里一段重复的函数注释（refactor 复制残留）。
+- **验证**：见 TESTS.md 同名节（用例 12 passed；m6/m7 变异全杀；12 文件必跑 173 passed；guards9 全绿；门禁全过）。
+- **未验证**：真实 Gateway 上用满场景的 TUI/IM 端到端（3a 真机复核）。
+
 ## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，分支 `worker/tresume`，基于 17l 头 `630be9dcc`；待非作者初审）
 
 - **来源**：transient-investigate 只读调查 + 3a 裁定：允许回合级供应商故障自动续跑（与进程崩溃重排同族，不违背“普通任务不自动续跑”的 wake 口径）；每个请求最多 2 次、跨 Gateway 重启累计；加配置开关；白名单只认结构化错误码；续跑从已落盘历史继续、不重放工具；提示走 turn_resume_notice；不改发给供应商的请求内容。

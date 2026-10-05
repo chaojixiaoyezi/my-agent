@@ -867,11 +867,6 @@ def _requeue_stale_processing(
     return "requeued"
 
 
-# LLM: 供应商临时故障的回合级重排：请求保留同一身份写回 inbox（status=pending、priority=recovery、
-#   not_before_at 退避），active_turn_recovery 标记写 cause=provider_transient_resume 与累计次数；
-#   与 _requeue_stale_processing 的差别只在触发来源与退避值，共用 turn 锁与死 attempt 的 guidance 释放。
-#   重排不重放工具：下一轮从会话里已落盘的完成工具往返继续。写失败返回 False，由调用方照常收失败终态。
-# 函数用途: 把因供应商临时故障失败的长回合重排回队列，等待下一轮自动续跑。
 # LLM: 供应商故障自动续跑的输入载体：次数、错误码与调用方会话存储收在一起，保持主函数参数不增长
 #   （code-size 参数守卫）；只承载结构化事实，不改任何状态。
 # 类用途: 保存一次供应商故障重排要用的结构化输入。

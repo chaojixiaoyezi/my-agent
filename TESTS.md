@@ -57,6 +57,13 @@
   - M4 清扫不写审计事件 → KILLED：事件断言找不到。
 - 未验证：真实生产库的存量清扫效果（11 条 EXECUTING）由部署后首次 reconcile 巡验证；macOS 判活边界见 DESIGN_LEDGER。
 
+## tresume 初审修正（tresume2，2026-10-05，分支 `worker/ds10-tresume-fix`）
+
+- 改动：用满时失败答复附“发继续接着做”提示（`PROVIDER_RESUME_LIMIT_NOTICE`，TUI/IM 同源 user_error/error）；重排失败退回前清 `provider_transient_resume` 标记；删 recovery.py 重复注释。
+- 用例：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_provider_transient_turn_resume.py -q` → **12 passed**（新增“用满出现提示”“未用满不出现”；扩展“重排失败退回”断言 responses/terminal 无标记）。
+- 变异（`tasks/2026-10-05/tresume-review/mutations.py`，每次只改一处、按字节还原）：m6 去提示、m7 不清标记 → **2/2 KILLED**。
+- 复跑：12 文件（11 必跑 + test_tui_runtime）→ **173 passed / 1 skip**；guards9（12 文件）→ 全绿；ruff / boundaries=0 / doc_sync / strict code-size / size_diff / diff --check / clean_package → 全过（见交接报告）。
+
 ## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，分支 `worker/tresume`，待非作者初审）
 
 - 背景与设计见 `DESIGN_LEDGER.md` 同名小节。

@@ -1044,12 +1044,12 @@ def _finish_claimed_gateway_request(
         raise DataCorruptionError(
             "gateway terminal response identity conflicts with the claimed request"
         )
-    if isinstance(response.get("provider_transient_resume"), dict) and _requeue_provider_transient_resume(
-        paths, processing_path, response, conversation_store
-    ):
-        # 供应商临时故障自动续跑：回合不写终态，请求重排回队列（退避与累计次数在 recovery 里写）；
-        # 重排失败退回正常归档，不让请求卡死。
-        return
+    if isinstance(response.get("provider_transient_resume"), dict):
+        if _requeue_provider_transient_resume(paths, processing_path, response, conversation_store):
+            # 供应商临时故障自动续跑：回合不写终态，请求重排回队列（退避与累计次数在 recovery 里写）。
+            return
+        # 重排失败退回正常归档：标记只服务重排判定，先清掉，不让它落进终态响应与 responses 投影。
+        response.pop("provider_transient_resume", None)
     if isinstance(response.get("restart_resume"), dict):
         # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
         # request_execution._host_shutdown_resume_marker）。

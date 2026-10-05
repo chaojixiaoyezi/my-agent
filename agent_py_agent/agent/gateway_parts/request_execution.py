@@ -48,7 +48,7 @@ from ..conversation.host_notices import (
     host_notices_from,
     pending_host_notices,
 )
-from ..conversation.turn_resume_notice import turn_resumed_notice_text
+from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..tooling.operation_verification import public_operation_verification
 from . import (
@@ -1313,6 +1313,7 @@ def _host_shutdown_resume_marker(failure: Exception | None, request_path: Path, 
 #   部分历史已由 partial 回调落盘），零产出的照旧走响应级重试；用户已停止的回合不续跑。
 #   命中时回合不写失败终态，由 worker 收尾把请求重排回队列（recovery.requeue_provider_transient_processing），
 #   下一轮从已落盘历史继续、不重放工具。坏计数 fail-closed 按不续跑处理。
+#   用满（count >= max_count）时不再续跑，但按 TURN_RESUME_LIMIT 先例给失败答复附“发继续接着做”提示。
 #   改动同步 test_provider_transient_turn_resume 与 turn_resume_notice。
 # 函数用途: 判断这次失败要不要交给“供应商故障自动续跑”；要就返回结构化标记，否则 None。
 def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk_writer) -> dict | None:
@@ -1339,6 +1340,8 @@ def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk
     except Exception:  # noqa: BLE001 坏计数 fail-closed：不续跑，按失败收口
         return None
     if count >= max_count:
+        # 用满：不再续跑，但要让用户知道可以发“继续”手动接着做（TUI/IM 从 user_error/error 读同一句）。
+        response.update({"user_error": PROVIDER_RESUME_LIMIT_NOTICE, "error": PROVIDER_RESUME_LIMIT_NOTICE})
         return None
     return {
         "schema_version": "gateway_provider_transient_resume.v1",

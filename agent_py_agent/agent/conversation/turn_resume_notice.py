@@ -22,6 +22,9 @@ TURN_RESUME_LIMIT_NOTICE = "这一轮被打断太多次，已停止自动续跑�
 TURN_RESUME_LIMIT_BACKUP_NOTICE = "这一轮被打断太多次，已停止自动续跑；你补充的话会作为新的一轮马上处理。"
 # 同上，但用户补充的话已经写进会话历史、不会再单独跑一轮，发“继续”时和原任务一起处理。
 TURN_RESUME_LIMIT_RECORDED_NOTICE = "这一轮被打断太多次，已停止自动续跑；你补充的话已记在会话里，发‘继续’会一起处理。"
+# 供应商故障自动续跑次数用完、这一轮按失败收口时的提示（3a 10-05 定）：与非计划重启的 TURN_RESUME_LIMIT 同族，
+#   都告诉用户发“继续”接着做；由 request_execution 写进失败结果的 user_error/error，TUI 和 IM 同源显示。
+PROVIDER_RESUME_LIMIT_NOTICE = "这一轮被模型接口故障反复打断，已停止自动续跑；发‘继续’可以接着做。"
 # 插话在收口时被拒收、又没有可重放的结构化输入（没有入口请求号，也拿不到会话身份）时的提示（3a 10-03 定的原话）。
 #   steer 收口先试着把它排成备用下一轮，只有排不了才发这句：内容没有别的去向，必须让用户知道要重发。
 STEER_CLOSEOUT_UNAVAILABLE_NOTICE = "你刚才补充的话没有被处理，请重新发送。"
@@ -45,6 +48,7 @@ def turn_resume_limit_notice(*, backup_turns: int, recorded_in_transcript: int) 
 
 
 __all__ = [
+    "PROVIDER_RESUME_LIMIT_NOTICE",
     "STEER_CLOSEOUT_UNAVAILABLE_NOTICE",
     "TURN_RESUMED_FALLBACK_NOTICE",
     "TURN_RESUMED_NOTICES",

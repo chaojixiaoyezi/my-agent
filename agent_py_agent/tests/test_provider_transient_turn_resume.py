@@ -17,6 +17,7 @@ from agent_py_agent.agent.backends.errors import (
     ProviderRequestRejectedError,
     ProviderTransientError,
 )
+from agent_py_agent.agent.conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE
 from agent_py_agent.agent.gateway_parts import recovery, request_execution
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_worker import _finish_claimed_gateway_request
@@ -261,3 +262,39 @@ def test_requeue_failure_falls_back_to_failure_archive(tmp_path, monkeypatch):
 
     assert not (paths.processing / "gwreq-rqfail.json").exists()
     assert (paths.failed / "gwreq-rqfail.json").exists()
+    # 重排失败退回时标记必须先清掉：不许落进终态响应与 responses 投影（ds10 初审小问题 1）。
+    responses = json.loads((paths.responses / "gwreq-rqfail.json").read_text(encoding="utf-8"))
+    terminal = json.loads((paths.terminal / "gwreq-rqfail.json").read_text(encoding="utf-8"))
+    assert "provider_transient_resume" not in responses
+    assert "provider_transient_resume" not in terminal
+
+
+# 函数用途: 钉住用满时失败答复附“发继续接着做”提示（TUI/IM 同源 user_error/error，3a 10-05 裁定）。
+def test_resume_limit_exhausted_shows_continue_notice(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-limit", active_turn_recovery={
+        "schema_version": "gateway_active_turn_recovery.v1", "provider_resume_count": 2})
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=5))
+
+    response = _run_turn(agent, paths, "gwreq-limit")
+
+    assert response["user_error"] == PROVIDER_RESUME_LIMIT_NOTICE
+    assert response["error"] == PROVIDER_RESUME_LIMIT_NOTICE
+    assert "provider_transient_resume" not in response
+
+
+# 函数用途: 钉住未用满（照常重排）时不出现“停止自动续跑”提示。
+def test_not_exhausted_has_no_limit_notice(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=3)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-under", active_turn_recovery={
+        "schema_version": "gateway_active_turn_recovery.v1", "provider_resume_count": 1})
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=5))
+
+    response = _run_turn(agent, paths, "gwreq-under")
+
+    assert response["provider_transient_resume"]["resume_count"] == 2
+    assert response.get("user_error") != PROVIDER_RESUME_LIMIT_NOTICE
