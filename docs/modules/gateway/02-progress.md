@@ -50,6 +50,16 @@
 
 - `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
 
+## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，基于 `54b48b625`；待非作者初审）
+
+- **来源**：rejectdiag 初审必须改项（正文摘要未清洗，服务端回显密钥会原样进回执/落盘/审计）+ 两条小问题（头个数无上限、展示出口没有原因码）。
+- **摘要清洗**：`_safe_body_excerpt` 固定"折叠→`sanitize_credentials`（与其它出站诊断同源）→截断"；`common/log_redaction.py` 凭据词表补 `cookie`（`set-cookie` 以 `-cookie` 结尾自动命中）。
+- **头上限**：`rejection_headers` 返回 `(headers, truncated)`，条数 ≤16 / 总量 ≤1024 字符，固定名单优先于 x-ratelimit-* 前缀；诊断新增结构化 `headers_truncated`。
+- **展示出口**（3a 裁定要显示）：失败提示唯一投影位置是 `user_error`（TUI/IM/CLI 同源）；`request_execution` 失败分支在投影合流后追加"原因码 + 请求编号 + 已清洗的服务端说明"（`provider_rejection_user_notice`），不另开通道；模型可见投影与瞬时族投影键集合不变。
+- **error 字段**：`response["error"]` 入账前过同一清洗（它会随 response 落盘并进审计索引）。
+- **验证**：见 TESTS「供应商拒绝诊断收尾（rejectdiag2）」；5 个变异全杀；单元 15 条 + 集成 1 条。
+- **未验证**：真实供应商 403 端到端（沙箱不连真实 provider）。
+
 ## 供应商拒绝诊断（rejectdiag，2026-10-05，基于 17l 头 `6145136a8`；待终审）
 
 - **背景**：17k 上线后 5 个 ChatGPT 订阅会话同分钟收到 HTTP 403 空响应体，回执只有“具体原因请查看请求诊断”，但投影里没有任何原因——`gateway_provider_error_projection` 刻意只暴露 typed `http_status`，诊断无处可取。

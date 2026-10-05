@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 925,
+  "count": 927,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -954,6 +954,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "单个头值上限；超长截断（头值可能被中间层塞入长内容）。"
+    },
+    {
+      "name": "_REJECTION_HEADERS_TOTAL_CHARS",
+      "file": "agent_py_agent/agent/backends/rejection_diagnostics.py",
+      "value": 1024,
+      "unit": "字符",
+      "category": "其它",
+      "description": "白名单头名字+值总字符上限：单值已限 120，总量再限一档，防止几十个头把诊断和落盘记录撑大。"
+    },
+    {
+      "name": "_REJECTION_HEADER_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/backends/rejection_diagnostics.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "白名单头条数上限：x-ratelimit-* 前缀可能一次回很多个，超出只收前若干条并记 headers_truncated。"
     },
     {
       "name": "_MAX_MESSAGE_BYTES",

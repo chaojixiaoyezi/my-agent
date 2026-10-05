@@ -25,6 +25,7 @@ _SENSITIVE_FIELD_NAMES = frozenset(
         "app_secret",
         "authorization",
         "client_secret",
+        "cookie",
         "credential",
         "encrypt_key",
         "id_token",
@@ -65,8 +66,10 @@ _AUTHORIZATION_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)([^\s,;]+)
 # 反例必须挡住：max_tokens（复数 token 不以它结尾）、token_count、password_hint 都不能被误打码。
 # 两份词表各管一处、不共用：common/ 不能反向依赖 settings/（import boundaries 会拦），且这里还要认
 # `-` 连接的写法（命令行/HTTP 头风格），settings 那份只管下划线参数键。
+# rejectdiag2：cookie 也是 HTTP 凭据头（服务端回显 Cookie/set-cookie 时不能漏遮），补进词表；
+# `set-cookie` 以 `-cookie` 结尾，自动命中。
 _CREDENTIAL_KEY_NAMES = (
-    r"access_key|access-token|access_token|api-key|api_key|apikey|app_secret|client_secret|credential|"
+    r"access_key|access-token|access_token|api-key|api_key|apikey|app_secret|client_secret|cookie|credential|"
     r"encrypt_key|id_token|master_key|password|passwd|private_key|pwd|refresh_token|secret|signature|"
     r"tenant_access_token|ticket|token|verification_token|x-amz-credential|x-amz-signature"
 )

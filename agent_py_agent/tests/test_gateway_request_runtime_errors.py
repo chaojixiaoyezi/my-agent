@@ -4,11 +4,16 @@ from agent_py_agent.agent.gateway_parts import request_binding, request_context,
 
 """Gateway request execution should surface bad request files as runtime errors."""
 
+import io
 import json
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.backends.gateway_helpers import _runtime_http_error
+from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.io import gateway_response_path, read_json_file
@@ -1096,3 +1101,72 @@ def test_finish_claimed_request_archives_authoritative_interrupted_status(tmp_pa
 
     archived_request = read_json_file(paths.done / f"{request_id}.json")
     assert archived_request["status"] == "interrupted"
+
+
+def _seed_rejection_probe_request(paths, request_id: str) -> Path:
+    """rejectdiag2 辅助：写一条 processing 状态的 ask 请求（含会话身份）供失败分支用例消费。"""
+    request_path = paths.processing / f"{request_id}.json"
+    request_path.write_text(json.dumps({
+        "id": request_id, "kind": "ask", "status": "processing", "turn_phase": "open", "prompt": "测试",
+        "execution_attempt_id": f"claimed-{request_id}",
+        "conversation": {"channel": "chat", "channel_conversation_id": f"{request_id}-session",
+                         "channel_user_id": "local-agent", "canonical_user_id": "local-agent"},
+    }), encoding="utf-8")
+    return request_path
+
+
+def _rejection_echo_http_error(secret: str) -> urllib.error.HTTPError:
+    """rejectdiag2 辅助：构造带白名单编号头、正文回显密钥的供应商 403。"""
+    message = Message()
+    message["x-request-id"] = "req-redact-1"
+    return urllib.error.HTTPError(
+        "https://provider.example.test/v1/messages", 403, "rejected", message,
+        io.BytesIO(('{"error": "invalid api key ' + secret + '"}').encode()))
+
+
+def test_provider_rejection_redacts_credentials_across_response_terminal_and_audit(tmp_path, monkeypatch):
+    """rejectdiag2：服务端回显密钥时，回执、落盘的 response、审计索引里都只剩清洗后的占位。"""
+    secret = "sk-live-ABC1234567890"
+    agent, paths = _make_agent(tmp_path)
+    request_id = "gw-redact-echo"
+    request_path = _seed_rejection_probe_request(paths, request_id)
+    http_error = _rejection_echo_http_error(secret)
+
+    def run(*_args, **_kwargs):
+        raise _runtime_http_error(http_error)
+
+    audit_calls: list[dict] = []
+    original_log_record = agent.local_store.log_record
+
+    def spy_log_record(**kwargs):
+        audit_calls.append(kwargs)
+        return original_log_record(**kwargs)
+
+    monkeypatch.setattr(agent, "run", run)
+    monkeypatch.setattr(agent.local_store, "log_record", spy_log_record)
+
+    response = _handle_gateway_request(agent, request_path)
+
+    # 1) 回执：诊断、展示提示、内部 error 全部只剩占位；展示带原因码与请求编号。
+    assert response["ok"] is False and response["status"] == "failed"
+    assert secret not in json.dumps(response, ensure_ascii=False)
+    assert "[REDACTED]" in response["rejection_diagnostic"]["body_excerpt"]
+    assert "原因码：forbidden_unknown" in response["user_error"]
+    assert "请求编号：x-request-id=req-redact-1" in response["user_error"]
+
+    _finish_claimed_gateway_request(
+        paths, request_path, request_id, response, conversation_store=agent.conversation_store,
+    )
+    # 2) 落盘 response、终态信封与审计索引：不含原始密钥。
+    archived = read_json_file(gateway_response_path(paths, request_id))
+    terminal = read_json_file(paths.terminal / request_path.name)
+    gateway_records = [call for call in audit_calls if call.get("source_type") == "gateway_request"]
+    assert gateway_records
+    assert secret not in json.dumps([archived, terminal], ensure_ascii=False)
+    assert secret not in json.dumps(gateway_records, ensure_ascii=False)
+    # 3) 模型可见历史：展示用的原因码/请求编号不进模型上下文。
+    thread = agent.conversation_store.threads.list()[0]
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
+    history_rendered = json.dumps(list(provider_history_messages_from_rows(rows)), ensure_ascii=False)
+    assert "forbidden_unknown" not in history_rendered
+    assert "req-redact-1" not in history_rendered

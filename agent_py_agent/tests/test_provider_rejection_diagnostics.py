@@ -13,7 +13,10 @@ from agent_py_agent.agent.backends.errors import (
 )
 from agent_py_agent.agent.backends.gateway_helpers import _runtime_http_error
 from agent_py_agent.agent.backends.rejection_diagnostics import public_rejection_diagnostic
-from agent_py_agent.agent.gateway_parts.request_errors import gateway_provider_error_projection
+from agent_py_agent.agent.gateway_parts.request_errors import (
+    gateway_provider_error_projection,
+    provider_rejection_user_notice,
+)
 
 
 # LLM: 测试辅助：构造带结构化头与正文的 HTTPError，模拟供应商 4xx/5xx 响应。
@@ -120,3 +123,86 @@ def test_transient_projection_appends_only_diagnostic_without_user_error():
     assert set(projection) == {"rejection_diagnostic", "cause_code"}
     assert "user_error" not in projection
     assert is_provider_recoverable_error(error) is True
+
+
+# LLM: rejectdiag2 必须改项：服务端错误正文可能回显请求凭据（sk-/Bearer/cookie），摘要必须走统一凭据清洗。
+# 函数用途: 钉住 sk-/Bearer 回显在诊断序列化里只剩占位符。
+def test_body_excerpt_redacts_credential_shapes_from_provider_echo():
+    body = (b'{"error": "invalid api key sk-live-ABC1234567890; '
+            b'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdef"}')
+    error = _runtime_http_error(_http_error(403, body))
+    diagnostic = error.details["rejection_diagnostic"]
+    rendered = json.dumps(diagnostic, ensure_ascii=False)
+    assert "sk-live-ABC1234567890" not in rendered
+    assert "eyJhbGciOiJIUzI1NiJ9" not in rendered
+    assert "[REDACTED]" in diagnostic["body_excerpt"]
+
+
+# LLM: rejectdiag2：cookie 也是 HTTP 凭据头（词表补入）；服务端回显 Cookie/set-cookie 时不能漏遮。
+# 函数用途: 钉住 cookie 样式回显在诊断里被清洗。
+def test_body_excerpt_redacts_cookie_style_echo():
+    error = _runtime_http_error(_http_error(
+        403, b'{"error": "bad cookie", "cookie": "session=abc123456"}'))
+    diagnostic = error.details["rejection_diagnostic"]
+    rendered = json.dumps(diagnostic, ensure_ascii=False)
+    assert "session=abc123456" not in rendered
+    assert "[REDACTED]" in diagnostic["body_excerpt"]
+
+
+# LLM: rejectdiag2：x-ratelimit-* 可能一次回很多个；条数与总量双上限必须截断并记结构化标记，
+#   且固定名单（请求编号类）优先保留，不被限流头挤掉。
+# 函数用途: 钉住头截断行为、headers_truncated 标记与固定名单优先。
+def test_rejection_headers_cap_count_and_total_chars_with_marker():
+    headers = {f"x-ratelimit-{index}": "1" * 60 for index in range(200)}
+    headers["x-request-id"] = "req-123"
+    error = _runtime_http_error(_http_error(429, b"", headers))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert diagnostic["headers_truncated"] is True
+    assert len(diagnostic["headers"]) <= 16
+    assert diagnostic["headers"]["x-request-id"] == "req-123"
+    assert len(json.dumps(diagnostic, ensure_ascii=False)) < 2000
+
+
+# LLM: rejectdiag2：正常少量白名单头不应触发截断标记，避免客户端把正常诊断当被裁剪的。
+# 函数用途: 钉住 headers_truncated 在未超限时为 False。
+def test_rejection_headers_small_set_not_truncated():
+    error = _runtime_http_error(_http_error(403, b"", {"x-request-id": "req-1"}))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert diagnostic["headers_truncated"] is False
+    assert diagnostic["headers"]["x-request-id"] == "req-1"
+
+
+# LLM: rejectdiag2 展示出口：失败提示（user_error）要带原因码与请求编号，且绝不带未清洗凭据；
+#   摘要只在清洗后出现（服务端说明来自已清洗的 body_excerpt）。
+# 函数用途: 钉住 provider_rejection_user_notice 的展示内容与安全边界。
+def test_user_notice_adds_cause_and_request_id_without_credentials():
+    error = _runtime_http_error(_http_error(
+        403, b'{"error": "invalid api key sk-live-ABC1234567890"}',
+        {"x-request-id": "req-9", "retry-after": "30"}))
+    projection = gateway_provider_error_projection(error)
+    notice = provider_rejection_user_notice("模型请求 HTTP 403：模型服务拒绝了本次请求。", projection)
+    assert "原因码：forbidden_unknown" in notice
+    assert "请求编号：x-request-id=req-9" in notice
+    assert "retry-after=30" in notice
+    assert "sk-live-ABC1234567890" not in notice
+    assert "[REDACTED]" in notice
+
+
+# LLM: rejectdiag2：瞬时族展示同样带原因码与 retry-after，但投影键集合保持 {rejection_diagnostic, cause_code}
+#   （与 rejectdiag 合同一致，不新增 user_error 键）。
+# 函数用途: 钉住瞬时族的展示追加与投影键集合不漂移。
+def test_user_notice_transient_keeps_projection_keys_and_adds_cause():
+    error = _runtime_http_error(_http_error(429, b'{"error": "rate"}', {"retry-after": "30"}))
+    projection = gateway_provider_error_projection(error)
+    assert set(projection) == {"rejection_diagnostic", "cause_code"}
+    notice = provider_rejection_user_notice("模型服务暂时不可用，请稍后重试。", projection)
+    assert "原因码：rate_limited" in notice
+    assert "retry-after=30" in notice
+
+
+# LLM: rejectdiag2：没有拒绝诊断的失败提示必须原样返回，不能凭空追加括号或空字段。
+# 函数用途: 钉住无诊断输入的恒等行为。
+def test_user_notice_without_diagnostic_is_unchanged():
+    assert provider_rejection_user_notice("普通失败", {}) == "普通失败"
+    assert provider_rejection_user_notice("普通失败", None) == "普通失败"
+    assert provider_rejection_user_notice("普通失败", {"cause_code": "x"}) == "普通失败"

@@ -352,6 +352,30 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **收益实测（合成历史、假后端、3 次模型调用；脚本 `/private/tmp/claude-501/m-estcache/probe2.py`，数字只作交接参考、不进仓库）**：35 万 token 回合 estimate 55 次合计 583.1→131.8ms、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms、整轮 1722.4→1060.9ms。
 - **未验证**：真实 Gateway/TUI/IM 与生产负载；`estimate_tokens_from_json_parts` 路径未改；沙箱外复跑由 3a 安排。
 
+## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，分支 `worker/rejectdiag2`，基于 `54b48b625`；待非作者初审）
+
+**来源**：rejectdiag 初审必须改项（正文摘要未清洗、服务端回显密钥实测复现）+ 两条小问题（头个数无上限、展示出口没有原因码）。
+
+**改动**：
+- `backends/rejection_diagnostics.py`：`_safe_body_excerpt`（折叠→`sanitize_credentials`→截断）；`rejection_headers` 返回 `(headers, truncated)`，条数 ≤16 / 总量 ≤1024 字符，固定名单优先；诊断新增 `headers_truncated`。
+- `common/log_redaction.py`：凭据词表补 `cookie`（`set-cookie` 以 `-cookie` 结尾自动命中）。
+- `gateway_parts/request_errors.py`：新增 `provider_rejection_user_notice`（展示追加：原因码 + 请求编号 + 已清洗的服务端说明）。
+- `gateway_parts/request_execution.py`：失败分支 error 过同一清洗 + user_error 追加。
+- `constants_catalog.json` 重新生成（909→911 项）。
+
+**新增用例**：
+- `test_provider_rejection_diagnostics.py`（+7 条）：sk-/Bearer 回显清洗、cookie 回显清洗、头上限+`headers_truncated`、少量头不截断、notice 带原因码/编号/服务端说明且不带凭据、瞬时族 notice 与投影键集合、无诊断恒等。
+- `test_gateway_request_runtime_errors.py::test_provider_rejection_redacts_credentials_across_response_terminal_and_audit`：真实失败分支 → 回执、落盘 response、终态信封、审计索引（local_store 记录）、模型可见历史五处断言。
+
+**变异（5 个，全部 KILLED，原样还原）**：
+- m1 去摘要清洗 → notice 用例红；m2 去头上限 → 头上限用例红；m3 展示漏原因码 → notice 用例红；m4 error 不清洗 → 集成用例红；m5 cookie 词表移除 → cookie 用例红。
+
+**命令与结果**：
+- 单元 15 passed（`test_provider_rejection_diagnostics.py`）；集成 1 passed；相关回归 9 文件 **333 passed**；guards9（12 文件）**190 passed**；`test_constants_catalog.py` 通过（911 项）。
+- ruff 全过；import findings=0；`check_doc_sync --base 54b48b625` DOC_SYNC_PASS；strict code-size `blocked=False`（报告已还原）；size_diff 新增 0 / 消失 56；clean package OK；`git diff --check` 干净。
+- 已知环境类失败：`test_mcp_client.py::test_client_reconnects_same_binding_after_stdio_server_dies` 在基线 `54b48b625` 上同样失败（MCP 子进程清理确认不了，沙箱限制），非本批引入。
+- **未验证**：真实供应商 403 端到端（沙箱不连真实 provider）。
+
 ## 供应商拒绝诊断（rejectdiag，2026-10-05，分支 `worker/rejectdiag`，基于 17l 头 `6145136a8`；待初审）
 
 **来源**：17k 上线后 5 个 ChatGPT 订阅会话的 403 空响应体“无诊断可看”；本批让下一次能直接分清限流/额度/鉴权/内容拦截。

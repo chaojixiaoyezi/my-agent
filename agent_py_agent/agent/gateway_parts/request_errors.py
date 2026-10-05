@@ -208,6 +208,40 @@ def gateway_provider_error_projection(exc: BaseException) -> dict:
     return projection
 
 
+# LLM: 失败提示（user_error）是 TUI/IM/CLI 共用的展示字段；有拒绝诊断时在文案后追加结构化摘要
+#   （原因码 + 白名单编号类字段 + 已清洗的正文摘要）。只读结构化字段、不解析语言；瞬时族的投影键集合
+#   不变，本函数只改展示文本，不改异常类型、错误码或恢复语义。调用方：request_execution 失败分支，
+#   必须在投影合流之后调用（拒绝族投影会先覆盖 user_error），不另开展示通道。
+# 函数用途: 给 provider 拒绝的失败提示补上"原因码 + 请求编号 + 服务端说明"，让用户能对账；无诊断时原样返回。
+def provider_rejection_user_notice(user_error: object, projection: object) -> str:
+    text = str(user_error or "")
+    diagnostic = projection.get("rejection_diagnostic") if isinstance(projection, dict) else None
+    if not isinstance(diagnostic, dict):
+        return text
+    parts: list[str] = []
+    cause = str(diagnostic.get("cause_code") or "")
+    if cause:
+        parts.append(f"原因码：{cause}")
+    headers = diagnostic.get("headers")
+    if isinstance(headers, dict):
+        identifiers = [
+            f"{name}={headers[name]}"
+            for name in ("x-request-id", "cf-ray")
+            if headers.get(name)
+        ]
+        if identifiers:
+            parts.append("请求编号：" + "、".join(identifiers))
+        retry_after = str(headers.get("retry-after") or "")
+        if retry_after:
+            parts.append(f"retry-after={retry_after}")
+    excerpt = str(diagnostic.get("body_excerpt") or "")
+    if excerpt:
+        parts.append(f"服务端说明：{excerpt}")
+    if not parts:
+        return text
+    return f"{text}（{'；'.join(parts)}）"
+
+
 def gateway_request_load_error_response(
     request_path: Path,
     load_error: dict,

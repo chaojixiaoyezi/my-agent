@@ -43,6 +43,14 @@
 
 - `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
 
+## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，基于 `54b48b625`；待非作者初审）
+
+- `agent/backends/rejection_diagnostics.py`：`body_excerpt` 先过统一凭据清洗（`sanitize_credentials`）再折叠截断；`rejection_headers` 加条数/总量双上限并返回截断标记，诊断带 `headers_truncated`；固定名单优先于 `x-ratelimit-*`。
+- `agent/common/log_redaction.py`：凭据词表补 `cookie`（HTTP 凭据头）。
+- `agent/gateway_parts/request_errors.py`：新增 `provider_rejection_user_notice`——失败提示（user_error）追加"原因码 + 请求编号类字段 + 已清洗的服务端说明"；投影函数键集合不变。
+- `agent/gateway_parts/request_execution.py`：失败分支 `error` 过同一清洗、`user_error` 在投影合流后追加展示摘要。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 ## 供应商拒绝诊断（rejectdiag，2026-10-05，基于 17l 头 `6145136a8`；待终审）
 
 - `agent/backends/rejection_diagnostics.py`（新）：拒绝诊断唯一构造点——白名单响应头、`rejection_cause_code`（429→rate_limited / 402→quota / 401→auth / 403→forbidden_unknown）、正文摘要（去控制字符、200 字）；`public_rejection_diagnostic` 是投影/持久化共用清洗。

@@ -51,6 +51,7 @@ from ..conversation.host_notices import (
 from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..runtime_errors import fallback_error_code
+from ..tooling.mcp_client import sanitize_credentials
 from ..tooling.operation_verification import public_operation_verification
 from . import (
     request_binding,
@@ -1248,23 +1249,32 @@ def _handle_gateway_request(
         _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
         _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
     except Exception as exc:
-        from .request_errors import gateway_provider_error_projection
+        from .request_errors import (
+            gateway_provider_error_projection,
+            provider_rejection_user_notice,
+        )
 
         failure = exc
         # LLM: 无码异常不能把类名大写当错误码泄漏给客户端；fallback_error_code 按异常类型映射到
         #   error_taxonomy 登记码（provider timeout→PROVIDER_TIMEOUT、transient→TRANSIENT_ERROR、
         #   RuntimeConflictError→RUNTIME_CONFLICT，其余→UNKNOWN_ERROR），已有 error_code 原样保留。
         error_code = response.get("error_code") or fallback_error_code(exc)
+        projection = gateway_provider_error_projection(exc)
         response.update(
             {
                 "ok": False,
                 "status": "failed",
                 "error_code": error_code,
-                "error": f"{type(exc).__name__}: {exc}",
+                # rejectdiag2：error 会随 response 落盘并进审计索引，先过统一凭据清洗再入账。
+                "error": sanitize_credentials(f"{type(exc).__name__}: {exc}"),
                 "user_error": _gateway_user_error(agent, context["request"], error_code),
-                **gateway_provider_error_projection(exc),
+                **projection,
             }
         )
+        # rejectdiag2：展示提示（user_error）是 TUI/IM/CLI 共用的失败提示字段，补上结构化拒绝摘要
+        # （原因码 + 请求编号 + 已清洗的服务端说明）；投影键集合不变，只在文案后追加。
+        response["user_error"] = provider_rejection_user_notice(
+            response.get("user_error"), projection)
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()

@@ -297,6 +297,19 @@
 - **实测收益（合成历史、假后端、3 次模型调用，数字只作交接参考）**：35 万 token 回合估算 583.1→131.8ms（-77.4%）、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms（-72.0%）、整轮 1722.4→1060.9ms。
 - **状态/边界**：不加配置开关（内部性能优化、结果不变）；真实 Gateway/TUI/IM 与生产负载未验证；`estimate_tokens_from_json_parts` 未改。
 
+## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，分支 `worker/rejectdiag2`，基于 `54b48b625`；待非作者初审）
+
+- **来源**：rejectdiag 初审（ds9）一条必须改 + 两条小问题：正文摘要会原样带出服务端回显的密钥（实测复现）；白名单头个数无上限（探针 200 个头撑到 16.6KB）；展示出口（TUI/飞书失败提示）没有原因码。
+- **改法**：
+  - 摘要清洗：`provider_rejection_diagnostic` 的 `body_excerpt` 先过统一凭据清洗（`sanitize_credentials`，与其它出站诊断同源）再折叠截断；顺序固定"折叠→清洗→截断"，避免截断把密钥切成半截逃过匹配。
+  - 词表补漏：`common/log_redaction.py` 凭据词表补入 `cookie`（HTTP 凭据头；`set-cookie` 以 `-cookie` 结尾自动命中），服务端回显 Cookie/set-cookie 时不再漏遮。
+  - 头上限：`rejection_headers` 加条数（≤16）与总量（≤1024 字符）双上限，超出丢弃尾部并记结构化 `headers_truncated` 标记；固定名单（x-request-id/cf-ray/retry-after/www-authenticate）优先于 x-ratelimit-* 前缀，重要字段不被限流头挤掉。
+  - 展示出口：3a 裁定要显示。失败提示唯一投影位置=`user_error`（TUI 直接显示、IM 公开结果 error 回填 user_error、CLI 同源）；在 `request_execution` 失败分支（投影合流后）追加"原因码 + 请求编号类字段 + 已清洗的服务端说明"（`provider_rejection_user_notice`），不另开展示通道。模型可见投影与瞬时族投影键集合不变。
+  - error 字段：`response["error"]` 会随 response 落盘并进审计索引，先过同一凭据清洗再入账。
+- **边界**：`_dump_provider_rejection`（显式 `MY_AGENT_PROVIDER_DUMP` 调试通道）仍写原始正文，属用户显式开启的调试工具，不在本批范围。
+- **验证**：见 TESTS；5 个变异全杀（去清洗、去头上限、展示漏原因码、error 不清洗、cookie 词表移除）；单元 15 条 + 集成 1 条。
+- **未验证**：真实供应商 403 端到端（沙箱不连真实 provider）。
+
 ## 供应商拒绝诊断（rejectdiag，2026-10-05，分支 `worker/rejectdiag`，基于 17l 头 `6145136a8`；待初审）
 
 - **背景**：17k 上线后 5 个 ChatGPT 订阅会话同分钟收到 HTTP 403 空响应体；回执只有“模型服务拒绝了本次请求，具体原因请查看请求诊断”，但“请求诊断”投影（`gateway_provider_error_projection`）刻意只暴露 typed `http_status`，403 空体没有任何可看的原因。
