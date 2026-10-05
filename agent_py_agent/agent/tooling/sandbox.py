@@ -450,8 +450,9 @@ def _preserved_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(roots)
 
 
-# LLM: 只重建调用方已显式给出的 symlink 根，目标须严格解析且由同一 policy 根集合挂载，不从父目录扩权。
-# 函数用途: 找出授权路径中“真实目标 + 原始别名”的稳定映射。
+# LLM: 仅恢复明确授权根；途中目录含软链接时，即使终端文件不是 symlink 也须恢复原始入口。
+#   直接指向同一获准 realpath 绕过中间目录链，不挂父目录或兄弟数据，不推导新读根。
+# 函数用途: 找出授权根真实目标与原始入口，不再仅检查最后一个节点是否为软链接。
 def _symlink_root_aliases(raw_roots: tuple[Path, ...]) -> tuple[tuple[Path, Path], ...]:
     aliases: list[tuple[Path, Path]] = []
     for raw in raw_roots:
@@ -460,7 +461,7 @@ def _symlink_root_aliases(raw_roots: tuple[Path, ...]) -> tuple[tuple[Path, Path
             target = alias.resolve(strict=True)
         except (OSError, RuntimeError, TypeError, ValueError):
             continue
-        if alias.is_symlink() and alias != target and (target, alias) not in aliases:
+        if alias != target and (target, alias) not in aliases:
             aliases.append((target, alias))
     return tuple(aliases)
 

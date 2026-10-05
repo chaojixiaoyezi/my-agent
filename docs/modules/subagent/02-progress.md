@@ -13,6 +13,11 @@
   - **终态 attempt 孤儿操作**（生产 11 条 EXECUTING 从 9 月挂到现在）：`reconcile_superseded_attempts` 同一巡清扫——终态 attempt 下残留的 CLAIMED/EXECUTING 翻 UNKNOWN（`terminal_attempt_op_cleanup` + 每条一条审计事件），不动 attempt/run/锁，幂等。
 - 用例、变异与门禁见 TESTS.md obsfix12 节；设计见 DESIGN_LEDGER 同名两节。
 
+## 共用 Attempt 沙箱链接链（rdfloor2，2026-10-05，WIP）
+
+- 两读模式共用逐分量链接解析，40 次解引用上限，节点只放 metadata literal；allowlist 补根一级启动 read-data literal `/`。
+- 核心 9 passed、1 skipped，三变异被抓住；完整相关回归超时 600 秒，十二守卫未跑，真实进程未验。见 TESTS 与 PLUGIN_PROCESS_SANDBOX，不称完整验收通过。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - 子代理侧建目录点（debug_trace / execution.report / manager_work_orders / services.actions.records / task_trash）统一改 `nofollow_fs.ensure_private_dir`：缺失段逐级 0700、已存在一律不动。

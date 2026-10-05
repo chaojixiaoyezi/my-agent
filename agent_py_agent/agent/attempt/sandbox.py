@@ -1,4 +1,5 @@
-# LLM: attempt 沙箱负责平台执行边界；同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
+# LLM: attempt 沙箱负责平台执行边界；Seatbelt 读规则含根一级最低启动读取和链节点精确 metadata，不据规则形状宣称真进程成功。
+#   同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
 # 模块用途: 为不同平台构造执行隔离，批处理等待可被本 run 取消，不消费 Gateway 输入、不绕过隔离。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -456,7 +458,7 @@ def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
 # LLM: Seatbelt 规则“后写覆盖先写”（本机实测 2026-09-26：先拒绝根再放行子目录，子目录可读；顺序颠倒则子目录也被拒）。
 #   公开解释器根可能有 symlink 别名；拒读范围按真实路径裁决，但显式授权的原路径和 realpath 都必须放行。
 #   所以先写全部拒读根（my-agent 根，开关打开时还有用户家目录），再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；
-#   与 Linux 挂载视图对齐。只动 file-read*，写规则保持原样。改动须同步 test_attempt_sandbox.py 里的真实 sandbox-exec 用例。
+#   与 Linux 挂载视图对齐；途中软链接仅补 literal metadata，不授予别名父目录读取。写规则保持原样。
 # 函数用途: 生成 owner 隔离形态下宿主私有目录的读拒绝与放行规则；Full Access 或没有拒读根时返回空列表。
 def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     if spec.full_access or not spec.private_read_roots:
@@ -464,17 +466,19 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     hidden = tuple(sorted({Path(path).resolve(strict=False) for path in spec.private_read_roots}))
     visible = {Path(path).resolve(strict=False) for path in (
         spec.owner_home, spec.shared_workspace, spec.attempt_view, spec.staging_root,
-        *spec.public_read_roots, *spec.extra_write_roots)}
+        *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)}
     visible.update(Path(path).expanduser().absolute() for path in spec.public_read_roots)
     visible.update(Path(path).expanduser().absolute() for path in spec.extra_write_roots)
     allowed = sorted(json.dumps(str(path)) for path in visible)
     return [*(f"(deny file-read* (subpath {json.dumps(str(root))}))" for root in hidden),
             *(f"(allow file-read* (subpath {path}))" for path in allowed),
+            *_symlink_metadata_rules((*visible, *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)),
             *_ancestor_metadata_rules(hidden, visible)]
 
 
-# LLM: allowlist 的 file-read* 总门必须先拒绝，再仅放行系统、R/E、R/W 授权根；祖先只获 literal metadata，不可列目录。
-# 函数用途: 生成有限读 Seatbelt 规则，保留 symlink alias 与 realpath 的同一读授权。
+# LLM: allowlist 先拒读再放授权根；3a 在 macOS 26.4 沙箱外实测仅 metadata 的 / 导致 SIGABRT，根一级 read-data 才能启动。
+#   / 只用 literal，风险是可见顶层目录名，不可读其子目录；路径链节点只补 metadata，不能给 subpath/data。
+# 函数用途: 生成有限读 Seatbelt 规则，保留最小启动读取与软链接链解析，不递归开放宿主根。
 def _allowlist_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     visible: set[Path] = set()
     for raw in (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots):
@@ -485,8 +489,58 @@ def _allowlist_read_rules(spec: AttemptSandboxSpec) -> list[str]:
             continue
     allowed = sorted(json.dumps(str(path)) for path in visible)
     return ["(deny file-read*)",
+            '(allow file-read-data (literal "/"))',
             *(f"(allow file-read* (subpath {path}))" for path in allowed),
+            *_symlink_metadata_rules((*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)),
             *_ancestor_metadata_rules((Path("/"),), visible)]
+
+
+# LLM: 仅 lstat/readlink 当前节点；不存在或不可读取时不猜目标、不扩权。逐分量链解析调用，无写入副作用。
+# 函数用途: 读取一个真实软链接的目标文本，普通路径或不可核验节点返回 None。
+def _readlink_node(path: Path) -> str | None:
+    try:
+        if not stat.S_ISLNK(path.lstat().st_mode):
+            return None
+        return os.readlink(path)
+    except OSError:
+        return None
+
+
+# LLM: 逐分量 lstat/readlink，最多解引用 40 个软链接；相对目标和 .. 按当时当前位置处理，不能提前 normpath 跳掉节点。
+#   只返回经过的链接名称，不授权目标/父目录数据；循环、缺路径仅保留已观察到的 metadata，不据此判启动成功。
+# 函数用途: 找齐放行路径途中的软链接节点，避免仅 realpath 和原路径漏掉中间目录别名。
+def _symlink_path_nodes(raw: Path) -> tuple[Path, ...]:
+    try:
+        parts = Path(raw).expanduser().absolute().parts
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ()
+    pending = deque(parts[1:])
+    current, hops = Path("/"), 0
+    nodes: list[Path] = []
+    while pending and hops < 40:
+        part = pending.popleft()
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        target = _readlink_node(candidate)
+        if target is None:
+            current = candidate
+            continue
+        nodes.append(candidate)
+        hops += 1
+        parsed = Path(target)
+        if parsed.is_absolute():
+            current = Path("/")
+        pending.extendleft(reversed(parsed.parts[1:] if parsed.is_absolute() else parsed.parts))
+    return tuple(dict.fromkeys(nodes))
+
+
+# LLM: 两种 Seatbelt 读模式复用同一链事实；每个链接只获 file-read-metadata literal，不能变成 subpath 或 read-data。
+# 函数用途: 将所有放行根解析途中的软链接名称转为精确元数据规则。
+def _symlink_metadata_rules(roots: tuple[Path, ...]) -> list[str]:
+    paths = sorted({json.dumps(str(node)) for root in roots for node in _symlink_path_nodes(root)})
+    return [f"(allow file-read-metadata (literal {path}))" for path in paths]
 
 
 # LLM: 拒读根按 subpath 连同根目录本身一起拒绝；放行子目录之后，根与放行目录之间的上层目录仍拿不到元数据。git、node 的

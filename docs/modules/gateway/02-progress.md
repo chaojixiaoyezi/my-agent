@@ -46,6 +46,11 @@
 - 睡眠恢复仍是**未落地后续项，状态：待设计**；风险包括校时/长调度停顿误判、重复计费、重放已提交工具副作用、接受迟到结果，见 `DESIGN_LEDGER.md` 顶部。
 - CAB 本机慢滴流复现确认 Compact auxiliary 预算缺口：首事件未传动态预算，慢 body 的非流式调用可超过 `request_timeout`，而主模型被总时长守卫截断。修法和 streaming 总时长取舍待 3a 决定；本轮只补测试/文档，没有改产品代码。
 
+## 插件有限读最低启动读取（rdfloor2，2026-10-05，WIP）
+
+- 按 3a 外部实测补 macOS 根 read-data literal `/` 与链接节点 metadata；hide_home 共用，Linux 精确恢复含祖先别名的授权入口。
+- 核心 9 passed、1 skipped，三变异已抓住；相关回归超时 600 秒、十二守卫未跑，真实插件/Gateway 未运行或连接。见 TESTS，不称生产可用。
+
 ## G2b 拒绝路径的客户端收口（g2bfix2 + g2bfix2b，2026-10-04；9b 终审通过，已并入 step17j）
 
 - 强制档下 401/403 是确定性鉴权拒绝，客户端不再按暂时性错误处理：飞书轮询把 auth 类隔离转成一条用户可见的失败回复再写 quarantined 终态（其它隔离保持静默），`/ask` 提交把 401/403 收口成 G3 同款 credential_error 而不是无上限退避；TUI 插话按 REJECTED 处理并提示重启，持久 outbox 条目收终态、重启后不重发。

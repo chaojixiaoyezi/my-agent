@@ -975,3 +975,107 @@ def test_restricted_read_mode_rejects_unknown_value_on_each_platform(tmp_path, m
 
     with pytest.raises(SandboxUnavailableError, match="RESTRICTED_READ_MODE_INVALID"):
         sandbox.build_argv(["/bin/true"])
+
+
+# LLM: 仅在 pytest tmp 中造两级软链接，真实文件和未授权兄弟目录分开；不依赖任何宿主解释器布局。
+# 函数用途: 构造“程序链接→目录别名/bin/程序→真实目录”并返回可复核路径。
+def _read_chain_layout(tmp_path):
+    real = tmp_path / "prefix-versioned"
+    (real / "bin").mkdir(parents=True)
+    binary = real / "bin" / "python"
+    binary.write_text("fixture", encoding="utf-8")
+    alias = tmp_path / "prefix-current"
+    alias.symlink_to(real.name, target_is_directory=True)
+    entry = tmp_path / "python"
+    entry.symlink_to(alias.name + "/bin/python")
+    return real, alias, entry, binary
+
+
+def test_allowlist_root_data_is_literal_only():
+    from agent_py_agent.agent.attempt.sandbox import _allowlist_read_rules
+
+    root = Path("/rdfloor-fixture")
+    spec = AttemptSandboxSpec(attempt_view=root, staging_root=root,
+                              shared_workspace=root, owner_home=root, read_mode="allowlist")
+    rules = _allowlist_read_rules(spec)
+    assert [rule for rule in rules if rule.startswith("(allow file-read-data ")] == [
+        '(allow file-read-data (literal "/"))'
+    ]
+    assert '(allow file-read* (subpath "/"))' not in rules
+
+
+@pytest.mark.parametrize("read_mode", ["allowlist", "hide_home"])
+@pytest.mark.parametrize("grant", ["system_read_roots", "public_read_roots", "extra_write_roots"])
+def test_read_rules_expand_chain_nodes_as_metadata_not_subpaths(tmp_path, read_mode, grant):
+    from agent_py_agent.agent.attempt.sandbox import _spec_rules
+
+    real, alias, entry, _ = _read_chain_layout(tmp_path)
+    fields = {grant: (real, entry)}
+    spec = AttemptSandboxSpec(attempt_view=tmp_path / "env", staging_root=tmp_path / "data",
+                              shared_workspace=tmp_path / "env", owner_home=tmp_path / "env",
+                              private_read_roots=(tmp_path,), read_mode=read_mode, **fields)
+    rules = _spec_rules(spec)
+    metadata = "\n".join(rule for rule in rules if rule.startswith("(allow file-read-metadata "))
+    for node in (alias, entry):
+        assert f'(literal "{node}")' in metadata
+    assert "subpath" not in metadata and "file-read-data" not in metadata
+    assert f'(allow file-read* (subpath "{real}"))' in rules
+    assert not any(f'(subpath "{alias}")' in rule for rule in rules if rule.startswith("(allow file-read"))
+
+
+@pytest.mark.parametrize("read_mode", ["allowlist", "hide_home"])
+def test_bwrap_restores_authorized_root_below_directory_alias(tmp_path, monkeypatch, read_mode):
+    from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    real, alias, _, binary = _read_chain_layout(tmp_path)
+    entry = alias / "bin" / binary.name
+    env, data = tmp_path / "env", tmp_path / "data"
+    env.mkdir()
+    data.mkdir()
+    spec = AttemptSandboxSpec(attempt_view=env, staging_root=data, shared_workspace=env,
+                              owner_home=env, public_read_roots=(env, real, entry),
+                              extra_write_roots=(data,), system_read_roots=(Path("/usr/bin"),),
+                              private_read_roots=(tmp_path,), read_only_root=True,
+                              implicit_attempt_write_roots=False, read_mode=read_mode, bwrap_path="/fake/bwrap")
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+    monkeypatch.setattr(tooling_sandbox, "_proc_mount_args", lambda: ["--dir", "/proc"])
+    argv = sandbox.build_argv([str(entry), "-c", "pass"])
+    assert (str(binary.resolve()), str(entry)) in _argv_mount_pairs(argv, "--symlink")
+    assert (str(real.resolve()), str(real.resolve())) in _argv_mount_pairs(argv, "--ro-bind")
+    assert (str(tmp_path), str(tmp_path)) not in _argv_mount_pairs(argv, "--ro-bind")
+    assert (str(alias), str(alias)) not in _argv_mount_pairs(argv, "--ro-bind")
+
+
+@pytest.mark.skipif(not (IS_LINUX or IS_MACOS), reason="Linux bwrap / macOS Seatbelt")
+@pytest.mark.sandbox_capability(*(("nested_sandbox_exec",) if IS_MACOS else ()))
+def test_allowlist_real_process_through_external_directory_symlink_chain(tmp_path):
+    import sys
+
+    from agent_py_agent.agent.attempt.sandbox import system_read_roots_for_platform
+
+    prefix = Path(sys.base_prefix).resolve(strict=True)
+    binary = prefix / "bin" / Path(sys.executable).resolve(strict=True).name
+    assert binary.is_file(), "真实解释器必须位于已核验 base_prefix/bin 中"
+    directory_alias = tmp_path / "prefix-alias"
+    directory_alias.symlink_to(prefix, target_is_directory=True)
+    entry = tmp_path / "python"
+    entry.symlink_to(directory_alias / "bin" / binary.name)
+    env, data, hidden = (tmp_path / name for name in ("env", "data", "hidden"))
+    for root in (env, data, hidden):
+        root.mkdir()
+    spec = AttemptSandboxSpec(attempt_view=env, staging_root=data, shared_workspace=env,
+                              owner_home=env, public_read_roots=(env, prefix, entry),
+                              extra_write_roots=(data,), system_read_roots=system_read_roots_for_platform(),
+                              private_read_roots=(hidden,), hidden_paths=(hidden,), read_only_root=True,
+                              implicit_attempt_write_roots=False, read_mode="allowlist")
+    sandbox = AttemptExecutionSandbox(spec)
+    if not sandbox.probe().ready:
+        pytest.skip("目标平台沙箱未就绪；需在沙箱外/真实 Linux 车道复跑")
+    result = sandbox.run([str(entry), "-I", "-S", "-c", "import json; print(json.dumps({'started': True}))"], timeout=30)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    import json
+
+    assert json.loads(result.stdout) == {"started": True}

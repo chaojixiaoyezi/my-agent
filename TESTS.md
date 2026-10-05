@@ -1205,6 +1205,18 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **缓存命中估算（非实测）**：只在同模型/同 thread 分区、服务端未逐出缓存且完整历史前缀逐字节命中时，按约 2.2% system-only 旧命中线索估计输入 token 命中可接近 98%；尾部指令/动态字段略降。修后真实 DeepSeek 命中率、费用未测。
 - **初审与协作注意**：非作者只读初审未发现阻断性逻辑缺陷；该审查未复跑测试，也未连 DeepSeek 实测。`compact_request_budget.py` 涉及单次/分段分流，CAB ds5 合入时需留意，避免覆盖超时修复。
 
+## rdfloor2：最低启动读取与通用链接链（2026-10-05，基线 `4a935d200`，WIP：完整验收未齐）
+
+- **实现**：按 3a 外部实测补 allowlist 根 read-data literal `/`；逐分量解析路径链接、40 次解引用上限，链节点仅 metadata literal；hide_home 共用。bwrap 恢复只有祖先是链接的授权根入口，不挂未授权父目录。无配置/依赖/新事实源。
+- **执行口径**：树根使用 `PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`env -i HOME=$PWD/tmp/rdfloor2-home MY_AGENT_HOME=$PWD/tmp/rdfloor2-home/data PATH=/usr/bin:/bin PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`；pytest 固定 `-q --tb=short -p no:cacheprovider -o addopts=''`，独立 basetemp `/private/tmp/claude-501/m-sol2-<组名>`；可重建完整命令/回执在本树 `tmp/rdfloor2/`，这些临时文件不提交。
+- **红绿**：`$PY -m pytest agent_py_agent/tests/test_attempt_sandbox.py -k 'root_data_is_literal_only or read_rules_expand_chain_nodes or bwrap_restores_authorized_root_below' ... --basetemp=/private/tmp/claude-501/m-sol2` 首轮 7 个有效规则断言失败，另 2 个 Linux 夹具 PRIVATE_READ_ROOT_MISSING 是准备失败，不计行为红。修正夹具后备份两产品文件，临时装入 `git show 4a935d200:<文件>` 的真实基线字节；Linux 两项均有效断言失败、errors=0，finally 原样恢复。没有把超时完整回归称作既有失败。
+- **当前核心**：变异恢复后选择器增加 `or allowlist_real_process_through_external`，实际 **9 passed、1 skipped、41 deselected，0.21s，exit 0**。覆盖根仅 literal read-data、两读模式×系统/public/write 六组合、Linux 两模式精确入口。真进程通过正式 sandbox_capability 门因缺 nested_sandbox_exec 跳过，不是启动成功；强制 `MY_AGENT_TEST_REQUIRE_CAPABILITIES=1` 时缺失能力会失败。
+- **真实失败保留**：首轮新测试能力 marker 名写错、未生效，有 UnknownMarkWarning；真实 sandbox-exec 返回 **71，sandbox_apply: Operation not permitted**，该轮 1 failed、9 passed、1 warning，不算通过。改成本树正式标记后当前无该警告。未删测试或放宽启动断言，沙箱外须真跑。
+- **三变异**：M1 去根 read-data，1 断言失败；M2 去链节点展开投影，6 断言失败；M3 链节点 literal 改 subpath，6 断言失败。每项 7 cases、exit 1、errors=0，全部 KILLED；独立 `m-sol2-M1/M2/M3`，finally 拷回、字节一致。还原 SHA256 `5a556146a6e7fa31c59c22ebb54c12ead2364fdfa242be016c4639a55b355c40`；复现脚本 `$PY tmp/rdfloor2/verify_mutations.py`，完整日志/JUnit 为 M1/M2/M3.log/.xml。
+- **完整回归未完成**：脚本首先串行运行五文件 `test_attempt_sandbox.py test_sandbox.py test_plugin_sandbox.py test_plugin_sandbox_v8.py test_shell_sandbox_boundary_facts.py`，超时 **600 秒，return_code=-15**。当前无 regression.xml/.log 或该轮 closeout-results.json 产出，不能提供通过数、不能定位具体卡在哪个用例，也不能仅凭超时归因沙箱。宿主确认超时命令树已回收，不重复长命令；后续十二文件 guards9（含 packaging）**未执行**。
+- **实际短门禁**：超时后只跑静态门禁：全 Ruff 通过；imports findings=0；strict-size：strict_scope_total=2199、hard=0、high-risk=1503、soft=696、test_advisory=1234、blocked=False，exit 0。`git checkout -- CODE_SIZE_REPORT.md` 成功恢复。线上 size_diff 原输出 `新增告警: 0`、`消失告警: 44`；clean-package、普通 diff check 通过。doc-sync 与暂存 diff 以提交前最终回执为准，不据计划称完成。消失告警不能全归因本片，也不代表没有存量尺寸债务。
+- **待验**：五文件完整回归、十二守卫、真实 Seatbelt 链启动、真实 Linux bwrap 链启动、真实插件安装/启用与生产 Gateway 均未验。没有运行/连接 Gateway、读取真实 owner/凭据或联网安装。按窗口先交 WIP；3a 沙箱外优先新链用例和 `test_restricted_policy_allowlist_limits_reads_and_preserves_ancestor_metadata`，再串行回归、守卫、最终门禁。
+
 ## B7 老格式插件有限读底图（rdfloor，2026-10-05，`worker/rdfloor`，基于 step17k `602d276e7`；已实现，待 3a 终审和沙箱外真进程验收）
 
 - **解决的问题与实现**：旧格式受限策略需要“只读获准根”，不能复用只隐藏 HOME 的 `hide_home` 读法。公共 `PluginRestrictedSandbox.read_mode` 新增 `allowlist`；Seatbelt 先拒绝读取再逐根放行，父目录只授予元数据，不能列目录。Linux bwrap 从空 tmpfs 根构造系统与授权读根的只读视图、明确写根；R/W/E symlink alias 沿用 b7lnx 的真实目标挂载方式。v8 显式固定 `hide_home`，profile 与 argv 由快照用例守护不漂移。

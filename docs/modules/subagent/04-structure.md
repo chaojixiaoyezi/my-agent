@@ -1,5 +1,10 @@
 # Subagent Structure
 
+## rdfloor2 共用路径解析（2026-10-05，WIP）
+
+- `attempt/sandbox.py` 的 `_symlink_path_nodes` 按 lstat/readlink 解析分量，`_readlink_node` 只读文件系统事实，`_symlink_metadata_rules` 给两读模式投影精确元数据。不新造执行链、不据规则形状称启动成功。
+- `tooling/sandbox.py::_symlink_root_aliases` 恢复明确授权根原入口，即使仅祖先为链接；仍只挂获准 realpath，不带父目录数据。真实 bwrap 效果待验。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - 子代理侧建目录点（debug_trace / execution.report / manager_work_orders / services.actions.records / task_trash）统一改 `nofollow_fs.ensure_private_dir`：缺失段逐级 0700、已存在一律不动。
