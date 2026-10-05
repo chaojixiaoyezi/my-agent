@@ -223,6 +223,16 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - **初审变异（4 个，脚本 `tasks/2026-10-05/sessrecr-review/mutations.py`，sha256 还原一致）**：删审计 enabled 检查 → KILLED（审计关闭反例红）；吞审计写失败 → KILLED（审计写失败反例红）；审计挪到建登记之后 → KILLED（先建后报错反例红）；绑定匹配放宽为只看 conversation_id → SURVIVED（**冗余防线**：渠道过滤已在 `_find_session_recovery_thread` 的查询条件里发生，`_session_thread_matches_owner` 的绑定检查是第二道纵深，两道都保留）。
 - **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cli_chat.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sessrecr` → **59 passed**（含 7 条新反例）。
 
+## Adapter 外发意图恢复（slp5，2026-10-05；WIP，基线 `e180f4185`）
+
+- 新增 `test_adapter_delivery_resume.py`：真实 pending/sent 和 worker、假进程/provider，覆盖意图写前/外部接受前后崩溃、活或未知不接管、死亡后同键恢复或 unknown、去重超窗、查询确认、迟到 epoch、progress/final 独立身份。首轮 16 项行为失败后转绿；渠道声明另经先红后修。旧 manager 模拟重启补明确死亡证明，进度游标写失败接缝复验已通过。
+- 根目录使用发布测试 Python `ci-venv-312/bin/python`；`env -i` 隔离 `HOME=$PWD/tmp/slp5-test-home`、`MY_AGENT_HOME=$PWD/tmp/slp5-test-home/data`、`PATH=/usr/bin:/bin`、`PYTHONPATH=$PWD`、`PYTHONDONTWRITEBYTECODE=1`；pytest 使用 `-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-ds2`。
+- 文件选择：`rg -l '(agent\.adapter|GatewayReplyDelivery|FeishuAdapter|QQAdapter|TUIAdapter|_reply_delivery|gateway_reply_delivery)' agent_py_agent/tests --glob '*.py'`，传入 pytest 得 **500 passed，1 条 Starlette 弃用警告**；未跑全仓。尚须补文件名筛选漏项（如 adapter_daemon_cli、adapter_late）。
+- 十二文件 guards9：**189 passed、1 failed**，`test_catalog_matches_source` 指目录过期，不能称既有失败。全 Ruff：All checks passed；imports：findings=0。
+- 变异首轮 basetemp 冲突是准备失败，不算 KILLED；独立目录 M1 不写意图造成产品 ValueError，未取得预期断言失败；M2/M3 未执行。每次 finally 原样恢复产品。**三项有效变异尚未完成**。
+- 未完成：刷新常数投影并复跑 guards、补通道测试漏项、三变异、doc_sync --base e180f4185、strict code-size、size_diff、clean-package。未连接真实渠道/Gateway，真实睡眠、真实送达未验证。
+- 飞书依据：<https://raw.githubusercontent.com/larksuite/oapi-sdk-go/v3_main/service/im/v1/model.go> 的 create/reply uuid 只保证一小时内去重；声明窗口 3600 秒，超窗/墙钟倒退不自动重发。补完上述缺项后再交初审。
+
 ## WebSocket 流在信封绝对期限处收口（wsdeadline，2026-10-05，分支 `worker/wsdeadline`，基于 17k 头 `07d7b3306`；待初审）
 
 **来源**：fix3ar 初审探针 B3 实测的漏网（idle 每次事件刷新截止 + 检查只在 recv 超时分支 → 持续滴事件时绝对期限不生效）；3a 裁定随 17k 修。

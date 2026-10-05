@@ -1,5 +1,9 @@
 # Gateway Structure
 
+## Adapter dispatch 状态（slp5，2026-10-05；WIP）
+
+`adapter/delivery.py` 的标记与 claim 共存在原 pending，记录 owner/process、epoch、message_sequence/key、SHA256、首次开始时间和下一游标；终态仍写原 sent。claim 不把 expiry 当死亡，外发前 CAS 写意图，恢复先查询或核渠道去重窗口，不可确认收 unknown。进度游标与 final 回执分别消费身份，不增加平行存储；有效变异和完整门禁尚待补齐。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - `agent/gateway_parts/http_handlers.py`：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access` 分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。

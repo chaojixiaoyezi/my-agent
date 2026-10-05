@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+## Adapter 外发恢复（slp5，2026-10-05；WIP）
+
+原 pending/sent 外发前记 dispatch-started，旧进程活着/不可核验不接管；明确死亡后按查询或稳定键窗口恢复，否则 unknown。progress/final 分身份，飞书仅一小时去重，QQ/默认不支持。500 项相关回归通过，但常数目录守卫、三变异及其余门禁待补，未验真实渠道/Gateway，不可直接集成；详见 TESTS。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A，本批由初审者直接修。

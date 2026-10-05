@@ -62,6 +62,9 @@
 
 ### 3.5 风险五：Adapter 外部发送成功、回执未持久化，接管后重复发消息
 
+- **切片状态（2026-10-05，slp5）**：已实现，待审（WIP，验收未齐）。500 项相关离线回归通过；十二守卫的常数投影仍失败，三有效变异及剩余门禁待补，不代表整体设计完成。
+- **渠道边界**：飞书已有 create/reply uuid，仅保证一小时内去重；用首次 dispatch 时间核窗，超窗或时间倒退收 unknown。QQ/默认无幂等/查询能力。progress/final 分身份，旧 epoch 不覆盖新状态。
+
 - **成立条件**：外部渠道已接受回复，但进程在 sent receipt 持久化前退出或写回执失败；原 claim 到期后新 worker 看不到 durable sent 标记而重发。若原 worker仍运行，epoch 可以拒绝旧写回，但不能撤销已经发出的消息。
 - **实现证据**：`agent_py_agent/agent/adapter/delivery.py:241-288` 通过 owner/递增 epoch/expiry 领取，领取前查 `was_sent`；`:290-313` 对 owner/epoch 精确提交 claim 更新。`:1115-1148` 先调用 `_deliver_response`，返回 sent 后才调用 `_record_sent`；`:1231-1246` 写同 epoch 的 sent 终态，持久化 OSError 时记录“已发送但回执失败”。
 - **现有保护**：稳定 pending id、claim owner/epoch/expiry、外发前 sent 检查、旧 epoch 不能覆盖新状态；发送成功后尽快写 terminal receipt。结构化本地 CAS 不等于各外部渠道接受稳定幂等键，不能证明该时间窗无重复消息。

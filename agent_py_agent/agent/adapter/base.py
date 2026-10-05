@@ -1,5 +1,7 @@
 
 
+# LLM: 渠道统一接口保持原发送合同；恢复能力必须由 adapter 显式声明，不能从名字猜测。
+# 模块用途: 提供渠道生命周期和发送入口，缺省不承诺外部去重或只读查询。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -9,9 +11,14 @@ from typing import Any
 from .protocol import IncomingMessage, OutgoingMessage
 
 
+# LLM: 默认无 provider 幂等/查询保证；仅显式支持的子类允许不确定外发的安全恢复。
+# 类用途: 声明通道的实际原生能力，TUI/本地或其它未声明渠道均保持不支持。
 class BaseChannelAdapter(ABC):
 
     adapter_name: str = "base"
+    provider_idempotent_delivery: bool = False
+    provider_delivery_queryable: bool = False
+    provider_idempotency_window_seconds: float = 0.0
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config

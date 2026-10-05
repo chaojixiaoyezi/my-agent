@@ -115,9 +115,13 @@ def _qq_fetch_gateway_url(self, token: str) -> str | None:
         logger.error(f"获取 QQ gateway URL 失败: {exc}")
         return None
 
+# LLM: 当前 QQ 外发只传 content/msg_type，没有稳定消息键或按逻辑键查询合同。
+# 类用途: 声明 QQ 原生通道能力；未确认外发不能通过自动重发来恢复。
 class QQAdapter(BaseChannelAdapter):
 
     adapter_name = "qq"
+    provider_idempotent_delivery = False
+    provider_delivery_queryable = False
 
     def __init__(
         self,

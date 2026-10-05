@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""LLM: Gateway 负责执行请求，本模块只持久化回送路由并轮询既有 request_id，禁止重提任务。
+"""LLM: Gateway 负责执行请求；本模块在原 pending/sent 中记录 dispatch 意图、进程身份和 epoch，禁止 TTL 直接授权重发。
 
 模块用途: 让飞书等交互通道的回调立即返回；长任务完成后由可恢复后台线程把真实结果送回用户。
 """
@@ -13,16 +13,16 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
 
 _LOGGER = logging.getLogger(__name__)
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 # 已外发回执正文保留 7 天：足够排查与重放，又不长期占用会话存储。
 _SENT_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
-# 认领一次外部投递的默认租约 120 秒：超时未提交就让位，避免进程崩溃后锁死待发唤醒。
+# 认领一次外部投递的默认租约 120 秒；已开始外发时还必须核验旧执行者，过期不等于死亡。
 _DEFAULT_CLAIM_TTL_SECONDS = 120.0
 # 投递循环同类异常日志的限频窗口 60 秒：轮询约每秒一轮，持续失败时同一异常在窗口内只记一次，
 # 既保留"还在失败"的可观测性，又不把日志刷爆。
@@ -37,6 +37,99 @@ _CONTROL_RECEIPT_STATES = frozenset(
 #   不再拿原因字符串做正则匹配（AGENTS.md：机器判断只用结构化事实）。`auth` 才给用户可见回复。
 QUARANTINE_CATEGORY_AUTH = "auth"
 QUARANTINE_CATEGORY_CONFIG = "config"
+
+
+# LLM: 新字段损坏时不能退回“未外发”；旧 schema 的空标记仍按原路径读取。
+# 函数用途: 校验当前 pending 的外发意图，防止丢身份后错误重发。
+def _validated_dispatch(value: object, epoch: int) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("invalid gateway reply dispatch marker")
+    if not value:
+        return {}
+    marker = dict(value)
+    if marker.get("state") not in {"dispatch-started", "retryable"}:
+        raise ValueError("invalid gateway reply dispatch state")
+    marker_epoch = int(marker.get("claim_epoch") or 0)
+    if not 0 < marker_epoch <= epoch or not marker.get("owner"):
+        raise ValueError("invalid gateway reply dispatch claim")
+    if not marker.get("message_key") or not marker.get("message_sequence"):
+        raise ValueError("missing gateway reply dispatch message identity")
+    digest = str(marker.get("payload_sha256") or "")
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("invalid gateway reply dispatch payload digest")
+    return marker
+
+
+# LLM: TTL 与 attempt 死亡是不同事实；结束后明确可重试的标记由当前 worker 持久提交，不靠墙钟猜。
+# 函数用途: 决定旧外发是否阻止另一 worker 领取。
+def _dispatch_claim_blocked(record: PendingGatewayReply) -> bool:
+    marker = record.dispatch
+    if not marker or marker.get("state") == "retryable":
+        return False
+    return _dispatch_owner_live(marker.get("owner_process")) is not False
+
+
+# LLM: 原进程核验的 is_pid_alive 把所有 OSError 当死；先排除权限/不可读，再复用 host/PID/start_time 判定。
+# 函数用途: 只在当前进程域有明确死亡证据时允许接管，异常与字段缺失一律未知。
+def _dispatch_owner_live(identity: object) -> bool | None:
+    from ..gateway_parts.daemon_metadata import process_host_id, process_identity_is_live
+
+    if not isinstance(identity, dict) or identity.get("host_id") != process_host_id():
+        return None
+    try:
+        pid = int(identity.get("pid") or 0)
+        if pid <= 0:
+            return None
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, ValueError, TypeError):
+        return None
+    try:
+        return process_identity_is_live(identity)
+    except Exception:
+        return None
+
+
+# LLM: 能力只取回调所属 adapter 或其唯一注册表，不按 channel 名/方法文本猜支持。
+# 函数用途: 在不改 ChannelManager 接线的情况下取它已注册的实际 adapter；缺声明按不支持。
+def _delivery_adapter(callback: object, channel: str) -> object | None:
+    receiver = getattr(callback, "__self__", None)
+    registry = getattr(receiver, "_delivery_registry", None)
+    if registry is not None:
+        return registry.adapter_for(channel)
+    return receiver if receiver is not None else getattr(callback, "delivery_adapter", None)
+
+
+# LLM: provider 去重可能只有有限窗口；时间倒退或超过首次 dispatch 的窗口都不能盲目重发。
+# 函数用途: 核对原标记是否仍可用渠道稳定键安全重放。
+def _provider_replay_allowed(adapter: object, marker: dict[str, object]) -> bool:
+    if getattr(adapter, "provider_idempotent_delivery", False) is not True:
+        return False
+    window = float(getattr(adapter, "provider_idempotency_window_seconds", 0.0) or 0.0)
+    elapsed = time.time() - float(marker.get("started_at") or 0.0)
+    return elapsed >= 0 and (window <= 0 or elapsed < window)
+
+
+# LLM: message key 复用 manager 的既有结构生成器，不带 claim_epoch；epoch 只用于本地栅栏。
+# 函数用途: 为当前逻辑消息构造外发前落盘的意图，进度与最终回复独立。
+def _dispatch_marker(record: PendingGatewayReply, text: str, message: tuple[str, int]) -> dict[str, object]:
+    from ..gateway_parts.daemon_metadata import build_process_identity
+    from .manager import _gateway_delivery_key
+
+    sequence, next_cursor = message
+    phase = "progress" if sequence.startswith("progress:") else "final"
+    return {
+        "state": "dispatch-started", "owner": record.claim_owner,
+        "claim_epoch": record.claim_epoch, "owner_process": build_process_identity(),
+        "message_sequence": sequence, "next_cursor": next_cursor,
+        "message_key": _gateway_delivery_key(
+            message_id=record.message_id, request_id=record.stable_id,
+            phase=phase, progress_cursor=record.progress_cursor,
+        ),
+        "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "started_at": record.dispatch.get("started_at", time.time()),
+    }
 
 
 # LLM: 用户可见文案按结构化原因码二选一；不解析服务端 message，也不把内部 reason 串露出给用户。
@@ -118,7 +211,7 @@ class GatewayClaimLeaseConfig:
         )
 
 
-# LLM: PendingGatewayReply 只保存回送所需身份，不保存 prompt、回复正文或凭据。
+# LLM: PendingGatewayReply 只保存回送身份及当前外发意图；正文只保存 SHA256，恢复前核同一消息序号和 epoch。
 # 类用途: 表示一个已经提交 Gateway、等待送回原通道的回复。
 @dataclass(frozen=True)
 class PendingGatewayReply:
@@ -141,6 +234,7 @@ class PendingGatewayReply:
     claim_owner: str = ""
     claim_epoch: int = 0
     claim_expires_at: float = 0.0
+    dispatch: dict[str, object] = field(default_factory=dict)
 
     # LLM: watch_kind is a closed transport state, not a display label; invalid values must fail
     # before a record can be persisted or polled through the wrong endpoint.
@@ -177,10 +271,15 @@ class PendingGatewayReply:
         object.__setattr__(self, "claim_owner", claim_owner)
         object.__setattr__(self, "claim_epoch", claim_epoch)
         object.__setattr__(self, "claim_expires_at", claim_expires_at)
+        object.__setattr__(self, "dispatch", _validated_dispatch(self.dispatch, claim_epoch))
 
+    # LLM: schema 7 仅在原记录增加 dispatch；不迁移路径，不保存正文或新的平行回执。
+    # 函数用途: 把当前路由、租约和外发标记一起序列化。
     def to_dict(self) -> dict[str, object]:
         return {"schema_version": _SCHEMA_VERSION, **asdict(self)}
 
+    # LLM: 旧记录无 dispatch 时按尚未外发读取；损坏的新标记必须拒绝，不能丢标记后重发。
+    # 函数用途: 从原 pending JSON 恢复同一投递状态。
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> PendingGatewayReply:
         request_id = str(data.get("request_id") or "").strip()
@@ -212,6 +311,7 @@ class PendingGatewayReply:
             claim_owner=str(data.get("claim_owner") or "").strip(),
             claim_epoch=max(0, int(data.get("claim_epoch") or 0)),
             claim_expires_at=max(0.0, float(data.get("claim_expires_at") or 0.0)),
+            dispatch=data.get("dispatch", {}),
         )
 
     # LLM: Control operations are keyed by their independent operation receipt, never by the target
@@ -238,9 +338,8 @@ class GatewayReplyReceiptCallbacks:
 # locks, and receipt lookups; no network or provider callback belongs in these methods.
 # 类用途: 把 claim/commit/release/退避集中成独立的跨进程 fencing 能力，缩短主存储类但不新增状态源。
 class _GatewayReplyClaimStoreMixin:
-    # LLM: Cross-process workers acquire one short record-file claim before polling or provider IO.
-    # Expired claims are fenced by a strictly increasing epoch.
-    # 函数用途: 领取待回送记录的 owner/epoch/expiry 租约，不在锁内执行网络或通道调用。
+    # LLM: claim 在原文件锁内递增 epoch；dispatch-started 即使已过期也要旧进程明确死亡才可接管。
+    # 函数用途: 核验旧外发执行者后领取回送租约，不在锁内执行渠道 IO。
     def claim(
         self,
         observed: PendingGatewayReply,
@@ -263,6 +362,8 @@ class _GatewayReplyClaimStoreMixin:
                     return None
                 if current.claim_owner and current.claim_expires_at > now:
                     return None
+                if _dispatch_claim_blocked(current):
+                    return None
                 claimed = replace(
                     current,
                     claim_owner=normalized_owner,
@@ -280,6 +381,8 @@ class _GatewayReplyClaimStoreMixin:
                 if current != observed or current is None:
                     return None
                 if current.claim_owner and current.claim_expires_at > now:
+                    return None
+                if _dispatch_claim_blocked(current):
                     return None
                 claimed = replace(
                     current,
@@ -569,9 +672,8 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
                 )
                 pending_path.unlink(missing_ok=True)
 
-    # LLM: Terminalization after external IO is a same-epoch CAS. Sent, consumed, unknown, and
-    # quarantine receipts share one durable schema and never depend on display text.
-    # 函数用途: 在当前 owner/epoch 仍有效时写终态回执并移除 pending 记录。
+    # LLM: 原 sent 回执保留逻辑消息序号和实际 claim epoch；旧 owner/epoch 不能覆盖新的 unknown/sent。
+    # 函数用途: 以同一文件 CAS 提交外发终态及其消息身份，成功后删除 pending。
     def mark_terminal_claimed(
         self,
         record: PendingGatewayReply,
@@ -589,6 +691,9 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             "operation_id": record.operation_id,
             "sent_at": time.time(),
             "disposition": str(disposition or "unknown").strip().lower(),
+            "claim_epoch": record.claim_epoch,
+            "message_sequence": str(record.dispatch.get("message_sequence") or ""),
+            "message_key": str(record.dispatch.get("message_key") or ""),
         }
         if reason:
             receipt["reason"] = str(reason)
@@ -721,7 +826,9 @@ class _GatewayQuarantineTerminalizeMixin:
     ) -> bool:
         if str(category or "").strip().lower() == QUARANTINE_CATEGORY_AUTH:
             try:
-                self._deliver_response(record, _gateway_denial_text(denial_code))
+                record, _sent = self._dispatch_message(record, _gateway_denial_text(denial_code), ("final", 0))
+                if record is None:
+                    return False
             except Exception as exc:
                 _LOGGER.warning(
                     "gateway auth denial reply failed request_id=%s error=%s",
@@ -964,23 +1071,7 @@ class _GatewayControlReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
                 reason="control_receipt_completed_without_message",
             )
             return 0
-        try:
-            delivered = bool(self._deliver_response(record, result.message))
-        except Exception as exc:
-            _LOGGER.warning(
-                "gateway control receipt delivery failed operation_id=%s error=%s",
-                record.operation_id,
-                exc,
-            )
-            delivered = False
-        if not delivered:
-            self.store.defer_claimed(
-                record,
-                owner=self._claim_owner,
-                epoch=record.claim_epoch,
-            )
-            return 0
-        return 1 if self._record_sent(record) else 0
+        return self._deliver_final(record, result.message)
 
     # LLM: The first non-empty target observed for a control operation is a same-epoch one-way bind.
     # Later GET responses may omit it but can never replace it with another turn.
@@ -1017,11 +1108,121 @@ class _GatewayControlReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
             release=False,
         )
 
-# LLM: Worker 永久轮询既有 request_id，模型耗时不设 60 秒终止窗；投递失败只退避重试发送。
+# LLM: 共用原 worker/store，以消息序号持久意图后才调用渠道；恢复必须先核验进程与 provider 能力。
+# 类用途: 封装最终/进度消息的外发栅栏和 unknown 收口，不引入另一套线程或账本。
+class _GatewayReplyDispatchWorkerMixin:
+    # LLM: progress 和 final 分别消费各自已配置的 callback，能力声明来自该 callback 的宿主注册事实。
+    # 函数用途: 按结构化消息序号取当前渠道发送入口。
+    def _dispatch_callback(self, sequence: str):
+        return self._deliver_progress if sequence.startswith("progress:") else self._deliver_response
+
+    # LLM: marker 的 owner 已在 claim 中确认死亡；无幂等/查询能力时绝不调用第二次渠道发送。
+    # 函数用途: 对账旧外发意图，返回可继续的记录或已收口的终态计数。
+    def _reconcile_dispatch(self, record: PendingGatewayReply) -> tuple[PendingGatewayReply | None, int]:
+        marker = record.dispatch
+        if not marker:
+            return record, 0
+        adapter = _delivery_adapter(self._dispatch_callback(str(marker["message_sequence"])), record.channel)
+        confirmed = self._query_dispatch(adapter, str(marker["message_key"]))
+        if confirmed is True:
+            return self._acknowledge_dispatch(record)
+        if confirmed is False:
+            updated = replace(record, dispatch={**marker, "state": "retryable", "retry_reason": "not_started"})
+            return self.store.commit_claim(record, updated, owner=self._claim_owner, epoch=record.claim_epoch, release=False), 0
+        if marker.get("retry_reason") == "not_started" or _provider_replay_allowed(adapter, marker):
+            return record, 0
+        self._terminalize_without_reply(record, disposition="unknown", reason="channel_dispatch_unverifiable")
+        return None, 0
+
+    # LLM: 查询是显式声明的只读能力；只接受 bool，缺接口、异常及模糊结果一律未知。
+    # 函数用途: 用稳定 message key 查询外部消息是否已接受。
+    def _query_dispatch(self, adapter: object, key: str) -> bool | None:
+        if getattr(adapter, "provider_delivery_queryable", False) is not True:
+            return None
+        query = getattr(adapter, "query_delivery", None)
+        if not callable(query):
+            return None
+        try:
+            result = query(key)
+            return result if type(result) is bool else None
+        except Exception:
+            return None
+
+    # LLM: 已查询确认的 progress 只推进原游标；final 才写 sent 终态，两种身份不互相消费。
+    # 函数用途: 不重发消息，把查询回执提交到原 pending/sent。
+    def _acknowledge_dispatch(self, record: PendingGatewayReply) -> tuple[PendingGatewayReply | None, int]:
+        if record.dispatch["message_sequence"] == "final":
+            return None, int(self._record_sent(record))
+        updated = replace(record, progress_cursor=int(record.dispatch["next_cursor"]), dispatch={})
+        return self.store.commit_claim(record, updated, owner=self._claim_owner, epoch=record.claim_epoch, release=False), 0
+
+    # LLM: 重放必须保持同一逻辑序号和正文摘要；新 epoch 只替换本地 owner，不改变 provider message key。
+    # 函数用途: 同 epoch 持久写 dispatch-started；落盘失败或旧 claim 失权时不触发外发。
+    def _start_dispatch(self, record: PendingGatewayReply, text: str, message: tuple[str, int]) -> PendingGatewayReply | None:
+        marker = _dispatch_marker(record, text, message)
+        if record.dispatch and (
+            record.dispatch["message_sequence"] != marker["message_sequence"]
+            or record.dispatch["payload_sha256"] != marker["payload_sha256"]
+            or record.dispatch["message_key"] != marker["message_key"]
+        ):
+            self._terminalize_without_reply(record, disposition="unknown", reason="channel_dispatch_payload_changed")
+            return None
+        return self.store.commit_claim(
+            record, replace(record, dispatch=marker), owner=self._claim_owner,
+            epoch=record.claim_epoch, release=False,
+        )
+
+    # LLM: callback 不持 store 锁；BaseException 模拟/真实退出保持标记，普通异常只成为未确认回执。
+    # 函数用途: 先写外发意图，再调用原渠道 callback，返回实际使用的 claim 快照。
+    def _dispatch_message(self, record: PendingGatewayReply, text: str, message: tuple[str, int]) -> tuple[PendingGatewayReply | None, bool]:
+        started = self._start_dispatch(record, text, message)
+        if started is None:
+            return None, False
+        try:
+            return started, bool(self._dispatch_callback(message[0])(started, text))
+        except Exception as exc:
+            _LOGGER.warning("gateway reply dispatch failed request_id=%s error=%s", record.request_id, exc)
+            return started, False
+
+    # LLM: bool False 不证明未发生；只有仍在去重窗口内的 provider 才能退避原键重发，其余收 unknown。
+    # 函数用途: 明确记录当前发送尝试已返回，决定安全退避或停止自动重发。
+    def _dispatch_failed(self, record: PendingGatewayReply) -> None:
+        adapter = _delivery_adapter(self._deliver_response, record.channel)
+        if not _provider_replay_allowed(adapter, record.dispatch):
+            self._terminalize_without_reply(record, disposition="unknown", reason="channel_dispatch_result_unknown")
+            return
+        finished = replace(record, dispatch={**record.dispatch, "state": "retryable", "retry_reason": "provider_idempotent"})
+        committed = self.store.commit_claim(record, finished, owner=self._claim_owner, epoch=record.claim_epoch, release=False)
+        if committed is not None:
+            self.store.defer_claimed(committed, owner=self._claim_owner, epoch=committed.claim_epoch)
+
+    # LLM: 普通最终回复和控制回执共用同一外发栅栏，sent 回执必须提交实际调用渠道的快照。
+    # 函数用途: 安全发送一次最终消息并写入同 epoch 终态。
+    def _deliver_final(self, record: PendingGatewayReply, text: str) -> int:
+        started, sent = self._dispatch_message(record, text, ("final", 0))
+        if started is None:
+            return 0
+        if not sent:
+            self._dispatch_failed(started)
+            return 0
+        return int(self._record_sent(started))
+
+    # LLM: 已发送进度的游标写入偶发失败时，仅原 attempt 立即重试同 epoch 本地提交一次，不再调用 provider。
+    # 函数用途: 原子推进进度游标并清除当前外发意图；持续写失败仍保留可恢复标记。
+    def _commit_progress(self, record: PendingGatewayReply, next_cursor: int) -> PendingGatewayReply | None:
+        updated = replace(record, progress_cursor=next_cursor, dispatch={})
+        try:
+            return self.store.commit_claim(record, updated, owner=self._claim_owner, epoch=record.claim_epoch, release=False)
+        except OSError:
+            return self.store.commit_claim(record, updated, owner=self._claim_owner, epoch=record.claim_epoch, release=False)
+
+
+# LLM: Worker 永久轮询既有 request_id，模型耗时不设 60 秒终止窗；外发恢复沿 dispatch 合同而非盲目退避。
 # 类用途: 在一个后台线程中恢复并送达待回送结果，成功后写回执防止重发。
 class GatewayReplyDeliveryWorker(
     _GatewayReplyReceiptWorkerMixin,
     _GatewayControlReceiptWorkerMixin,
+    _GatewayReplyDispatchWorkerMixin,
 ):
     """一个可恢复轮询线程，不对模型响应设置期限。"""
 
@@ -1119,6 +1320,8 @@ class GatewayReplyDeliveryWorker(
         finally:
             self._run_lock.release()
 
+    # LLM: 外发意图在新 claim 后、所有轮询/渠道副作用前对账；旧进程未知时 claim 已短路。
+    # 函数用途: 沿唯一 worker 入口恢复旧意图，再处理输入、控制或最终消息。
     def _process_record(self, record: PendingGatewayReply, now: float) -> int:
         if self._stop.is_set() or record.next_delivery_at > now:
             return 0
@@ -1130,6 +1333,9 @@ class GatewayReplyDeliveryWorker(
         )
         if claimed is None:
             return 0
+        claimed, reconciled = self._reconcile_dispatch(claimed)
+        if claimed is None:
+            return reconciled
         if claimed.watch_kind == "input_receipt":
             return self._process_input_receipt(claimed)
         if claimed.watch_kind == "control_receipt":
@@ -1140,19 +1346,7 @@ class GatewayReplyDeliveryWorker(
         claimed, response = polled
         if self.store.was_sent(claimed.stable_id):
             return 0
-        try:
-            sent = bool(self._deliver_response(claimed, response))
-        except Exception as exc:
-            _LOGGER.warning("gateway reply delivery failed request_id=%s error=%s", claimed.request_id, exc)
-            sent = False
-        if not sent:
-            self.store.defer_claimed(
-                claimed,
-                owner=self._claim_owner,
-                epoch=claimed.claim_epoch,
-            )
-            return 0
-        return 1 if self._record_sent(claimed) else 0
+        return self._deliver_final(claimed, response)
 
     # LLM: 先把进度快照送达并推进游标，再取最终回复；任一步隔离已收口或归还认领时返回 None，
     #   调用方直接结束本次处理，不进入投递。
@@ -1177,17 +1371,15 @@ class GatewayReplyDeliveryWorker(
             return None
         return progressed, response
 
-    # LLM: 本函数自身的 poll/deliver 失败都已就地降级（返回 record / sent=False），不改调用方语义。
-    #   但调用方是经 _quarantine_aware 包裹的：commit_claim（进度游标落盘）或其它未捕获异常会被它兜住，
-    #   记 warning 并 release_claim 供稍后重试——这是有意的（进度是展示用，重试成本低；释放认领比让异常
-    #   冒泡中断整个回送 worker 更安全）。该捕获面比 g2bfix2 之前的"只有 _poll_response 一处 except"更宽，
-    #   回归见 TESTS.md 的 g2bfix2b 段。
-    # 函数用途: 轮询并投递一次进度快照，推进本地进度游标。
+    # LLM: progress 先写独立 dispatch 意图；原 attempt 的确认只推进游标，final 的恢复不再次轮询进度。
+    # 函数用途: 投递一个进度批次，游标提交偶发失败只重试本地 CAS，不重复外发。
     def _deliver_available_progress(
         self,
         record: PendingGatewayReply,
     ) -> PendingGatewayReply | None:
         if self._poll_progress is None or self._deliver_progress is None:
+            return record
+        if record.dispatch.get("message_sequence") == "final":
             return record
         try:
             messages, next_cursor = self._poll_progress(record)
@@ -1201,40 +1393,16 @@ class GatewayReplyDeliveryWorker(
             )
             return record
         if messages:
-            try:
-                sent = bool(self._deliver_progress(record, "\n".join(messages)))
-            except Exception as exc:
-                _LOGGER.warning(
-                    "gateway progress delivery failed request_id=%s error=%s",
-                    record.request_id,
-                    exc,
-                )
-                sent = False
-            if not sent:
-                # Commentary/tool progress is presentation-only and at-most-once.
-                # Retrying it every poll can flood a broken IM route and must not
-                # delay the durable final response.
-                updated = replace(record, progress_cursor=next_cursor)
-                return self.store.commit_claim(
-                    record,
-                    updated,
-                    owner=self._claim_owner,
-                    epoch=record.claim_epoch,
-                    release=False,
-                )
+            record, _sent = self._dispatch_message(record, "\n".join(messages), (f"progress:{record.progress_cursor}", next_cursor))
+            if record is None:
+                return None
+            # 原 attempt 收到返回后按原 at-most-once 合同消费进度，不因 False 反复刷屏。
         if next_cursor <= record.progress_cursor:
             return record
-        updated = replace(record, progress_cursor=next_cursor)
-        return self.store.commit_claim(
-            record,
-            updated,
-            owner=self._claim_owner,
-            epoch=record.claim_epoch,
-            release=False,
-        )
+        return self._commit_progress(record, next_cursor)
 
-    # LLM: Provider acceptance is recorded only under the same claim epoch that performed delivery.
-    # 函数用途: 持久写入 sent 回执；旧 epoch 被接管时不覆盖新状态。
+    # LLM: sent 只提交实际 dispatch 快照；失败保留 dispatch，活进程/未知进程不能重领并再次发送。
+    # 函数用途: 持久写同 epoch sent 回执；写失败不丢外发意图，不把旧回执覆盖到新状态。
     def _record_sent(self, record: PendingGatewayReply) -> bool:
         try:
             return self.store.mark_terminal_claimed(

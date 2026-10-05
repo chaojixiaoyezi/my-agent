@@ -1,5 +1,7 @@
 
 
+# LLM: 飞书沿既有 provider uuid 对消息与分片去重；恢复保证只覆盖声明的去重时间窗，不作无限幂等承诺。
+# 模块用途: 管理飞书入站与原生发送接口，声明稳定键支持但无按逻辑键查询接口。
 from __future__ import annotations
 
 import hashlib
@@ -409,10 +411,14 @@ def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
         return False
 
 
+# LLM: 原 send/reply 已派生最长 50 字符的分片 uuid；本声明只供 delivery 在有效窗口内恢复同一逻辑消息。
+# 类用途: 提供飞书发送、回复和媒体能力；没有 UUID 到消息的只读查询保证。
 class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapter):
-    # LLM: Feishu 消息、回复和媒体发送都把稳定投递键派生为 provider uuid；恢复重放不会生成第二条逻辑消息。
+    # LLM: uuid 是有限窗口去重，不覆盖跨窗口重发；channel delivery 必须先查首次 dispatch 时间。
     # 字段用途: 向统一通道注册表声明 provider 原生幂等能力。
     provider_idempotent_delivery = True
+    provider_delivery_queryable = False
+    provider_idempotency_window_seconds = 3600.0
 
     adapter_name = "feishu"
 

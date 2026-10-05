@@ -1500,7 +1500,10 @@ class TestChannelManagerDurableDelivery:
             "_poll_gateway_once",
             return_value="崩溃点前平台已接收的回复",
         ), patch.object(second._reply_delivery, "_poll_progress", return_value=([], 0)):
-            assert second._reply_delivery.run_once() == 1
+            # 租约过期但旧进程仍存在时不得重发；模拟重启必须另外注入明确死亡事实。
+            assert second._reply_delivery.run_once() == 0
+            with patch("agent_py_agent.agent.adapter.delivery._dispatch_owner_live", return_value=False):
+                assert second._reply_delivery.run_once() == 1
 
         assert attempts == [
             "gateway-reply:om-provider-crash:req-provider-crash:final",
