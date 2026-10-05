@@ -36,7 +36,7 @@ from agent_py_agent.agent.plugin_runtime_facts import (
 )
 from agent_py_agent.agent.plugin_skills import enabled_plugin_skill_roots
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
-from agent_py_agent.tests.plugin_enable_fixtures import confirm_enable
+from agent_py_agent.tests.plugin_enable_fixtures import confirm_legacy_enable
 from agent_py_agent.tests.plugin_environment_fixtures import (
     environment_operation,
     prepare_environment,
@@ -280,7 +280,7 @@ def test_executable_plugin_needs_user_confirmation_then_runs_and_releases(tmp_pa
     assert not (owner.plugins_dir / "data" / PLUGIN_ID / "started").exists()
     wrong = _enable(service, "wrong", "0" * 12)
     assert wrong["state"] == "failed" and wrong["details"]["reason"] == "confirmation_required", wrong
-    enabled = confirm_enable(service, first)
+    enabled = confirm_legacy_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     entry = service.installations.snapshot()[0]
     assert entry.enabled and entry.activation.phase == "active" and entry.activation_id == permission["activation_id"]
@@ -311,7 +311,7 @@ def _enabled_interpreter_plugin(tmp_path, monkeypatch):
     interpreter = _fake_interpreter(tmp_path, monkeypatch)
     service = _installed(tmp_path, _declaration("interpreter", interpreter="fixture-python"), {"server.py": _SERVER})
     first = _enable(service, "enable")
-    enabled = confirm_enable(service, first)
+    enabled = confirm_legacy_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     return service, interpreter, first
 
@@ -374,7 +374,7 @@ def test_launch_rehashes_only_when_interpreter_stat_changes(tmp_path, monkeypatc
     interpreter = _fake_interpreter(tmp_path, monkeypatch)
     service = _installed(tmp_path, _declaration("interpreter", interpreter="fixture-python"), {"server.py": _SERVER})
     first = _enable(service, "enable")
-    assert confirm_enable(service, first)["state"] == "succeeded"
+    assert confirm_legacy_enable(service, first)["state"] == "succeeded"
     owner, entry = service.context.owner, service.installations.snapshot()[0]
     environment = owner.plugins_dir / "environments" / entry.activation.plan.environment_ref
     fingerprint = entry.activation.plan.interpreter_fingerprint
@@ -408,7 +408,7 @@ def test_launch_rehashes_only_when_interpreter_stat_changes(tmp_path, monkeypatc
 def test_executable_environment_refuses_other_platform(tmp_path, monkeypatch):
     service = _installed(tmp_path, _declaration(), {"bin/server.py": _SERVER})
     first = _enable(service, "enable")
-    assert confirm_enable(service, first)["state"] == "succeeded"
+    assert confirm_legacy_enable(service, first)["state"] == "succeeded"
     monkeypatch.setattr(plugin_runtime_facts, "host_platform_tag", lambda: "plan9-mips")
     with pytest.raises(PluginRuntimeError) as changed:
         PluginMCPClient(service.context.owner, service.installations.snapshot()[0])
@@ -458,7 +458,7 @@ def test_prepared_files_match_declaration_and_skills_are_exposed(tmp_path):
         assert target.read_bytes() == content
         assert stat.S_IMODE(target.stat().st_mode) == (0o500 if path == "bin/server.py" else 0o400)
     first = _enable(service, "enable")
-    assert confirm_enable(service, first)["state"] == "succeeded"
+    assert confirm_legacy_enable(service, first)["state"] == "succeeded"
     entry = service.installations.snapshot()[0]
     roots = enabled_plugin_skill_roots(owner)
     expected = owner.plugins_dir / "environments" / entry.activation.plan.environment_ref / "files" / "skills"

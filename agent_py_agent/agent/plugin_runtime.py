@@ -17,6 +17,7 @@ from .plugin_entry import FILES_DIRECTORY
 from .plugin_host_api import HOST_API_READ, issue_host_api_env
 from .plugin_installation import PluginInstallation
 from .plugin_manifest import PluginToolDeclaration, canonical_plugin_settings
+from .plugin_permissions.sandbox import LegacyLaunchDenied, legacy_launch_policy
 from .plugin_runtime_facts import verified_runtime_command
 from .plugin_sandbox import (
     SANDBOX_TMP_DIRECTORY,
@@ -205,6 +206,14 @@ def _plugin_v8_sandbox(owner, installation: PluginInstallation, command: str) ->
     return v8
 
 
+# LLM: 受限策略与 v8 共用同一就绪门：网络 true 在 Linux 需要端口隔离，平台沙箱不可用一律拒绝，不退回无沙箱。
+# 函数用途: 老格式 restricted 在构造与启动前确认统一沙箱底座可用。
+def _require_legacy_policy_ready(owner, policy) -> None:
+    problem = plugin_sandbox_problem(True, owner.home_dir, sandbox_policy=policy)
+    if problem:
+        raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
+
+
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
@@ -233,13 +242,17 @@ class PluginMCPClient(MCPStdioClient):
         os.close(descriptor)
         # B7：v8 事件插件（声明了 permissions）无条件强制进沙箱——不管调用方传的 process_sandbox 开没开；
         # 按声明断网、隐藏 Gateway 整个家目录，只放行插件环境/数据目录与解释器安装前缀。
+        # 老格式 restricted 走同一底座：构造前复核固定授权，策略来自固定 permission_json，不再停 pending。
         v8_permissions = installation.manifest.permissions
+        legacy_policy = legacy_launch_policy(owner, installation) if v8_permissions is None else None
         sandbox_env = {}
-        if process_sandbox or v8_permissions is not None:
+        if process_sandbox or v8_permissions is not None or legacy_policy is not None:
             os.close(open_directory_beneath(owner.root, (*data_dir.relative_to(owner.root).parts, SANDBOX_TMP_DIRECTORY),
                                             create=True))
-            v8 = _plugin_v8_sandbox(owner, installation, command)
-            spec = plugin_sandbox_spec(cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=v8)
+            policy = _plugin_v8_sandbox(owner, installation, command) if v8_permissions is not None else legacy_policy
+            if legacy_policy is not None:
+                _require_legacy_policy_ready(owner, legacy_policy)
+            spec = plugin_sandbox_spec(cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=policy)
             command, *args = sandboxed_plugin_argv([command, *args], spec)
             sandbox_env = {"TMPDIR": str(data_dir / SANDBOX_TMP_DIRECTORY)}
         settings = canonical_plugin_settings(load_strict_json(installation.settings_json or "{}"),
@@ -255,6 +268,26 @@ class PluginMCPClient(MCPStdioClient):
             env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir), **host_api_env, **sandbox_env},
             catalog_category="plugins",
         ), activation=self.activation_ref)
+
+    # LLM: 每次启动（业务首次拉起、面板、候选、重连）都重核固定激活与授权事实；失败结构化拒绝、不启动进程。
+    # 函数用途: 老格式插件在真正拉起进程前复核；v8/内容包保持原启动路径。
+    def start(self):
+        self._require_legacy_launch_facts()
+        return super().start()
+
+    # LLM: 先鲜活读表确认固定激活仍在（未撤销、未换代），再按固定 permission_json 重算全部事实。
+    # 函数用途: 为本次启动复核老格式插件授权；事实变化一律拒绝，不自动换绑、不降 wide。
+    def _require_legacy_launch_facts(self) -> None:
+        installation = self.installation
+        if installation.manifest.permissions is not None or installation.manifest.is_content_only:
+            return
+        try:
+            current = self.activation_ref.require(allow_preparing=True)
+        except (OSError, ValueError) as exc:
+            raise LegacyLaunchDenied("legacy_permission_changed", "固定激活已不可用，本次没有启动。") from exc
+        if current != installation:
+            raise LegacyLaunchDenied("legacy_permission_changed", "固定激活已变化，本次没有启动。")
+        legacy_launch_policy(self.activation_ref.owner(), current)
 
     # LLM: 原 Store 同代资源是唯一事实源；其他运行实例可共存，未知和未确认停止不能靠新客户端绕过。
     # 函数用途: 在模型或显式命令建立业务连接前，核对这个激活留下的资源清理结果。

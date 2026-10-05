@@ -21,7 +21,7 @@ from agent_py_agent.agent.plugin_entry import host_platform_tag
 from agent_py_agent.agent.plugin_runtime import plugin_tool_name
 from agent_py_agent.agent.workspace_read_context import WorkspaceReadContext
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
-from agent_py_agent.tests.plugin_enable_fixtures import confirm_enable, preview_enable
+from agent_py_agent.tests.plugin_enable_fixtures import confirm_legacy_enable, preview_legacy_enable
 from agent_py_agent.tests.test_plugin_management import manager
 from scripts.build_plugin_api import ROOT
 from scripts.build_plugin_files_package import build_files_package
@@ -106,8 +106,8 @@ def _install_and_confirm(tmp_path, package):
     result = service.command(f'/plugins install "{package}"', revision=service.catalog().revision, request_id="install")
     assert result["state"] == "succeeded", result
     plugin_id = service.installations.snapshot()[0].manifest.plugin_id
-    first = preview_enable(service, plugin_id)
-    enabled = confirm_enable(service, first)
+    first = preview_legacy_enable(service, plugin_id)
+    enabled = confirm_legacy_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     entry = service.installations.snapshot()[0]
     assert entry.enabled and entry.activation.phase == "active"

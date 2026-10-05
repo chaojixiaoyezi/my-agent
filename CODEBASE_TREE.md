@@ -82,6 +82,7 @@
 |-- agent_py_agent/tests/test_plugin_legacy_transitions.py # 兼容/restricted/wide 更新重装与重新授权矩阵，旧授权/旧码不复活
 |-- agent_py_agent/tests/test_plugin_legacy_rollback.py # 固定17i原读取函数、v4 fail-closed、导出保安装/启用、CLI损失/确认/拒覆盖
 |-- agent_py_agent/tests/test_plugin_legacy_drift.py # 真实权限维度/根inode/程序内容/身份漂移、授权绑定与撤旧提交事实（外部进程替身）
+|-- agent_py_agent/tests/test_plugin_legacy_launch_guard.py # 四启动入口的固定授权事实复核（构造/start/reconnect）、restricted 经 B7 包装与 wide 显式模式（替身就绪）
 |-- agent_py_agent/tests/plugin_enable_fixtures.py # 真实启用回归的完整预览/授权命令与显式测试wide模式，不替换准备或MCP
 |-- agent_py_agent/tests/test_plugin_legacy_candidate.py # 候选异常/退出未知、各候选边界漂移、并发配置与解释器替换拒发布
 |-- agent_py_agent/tests/test_plugin_legacy_transport.py # 原客户端/IM/HTTP handler长完整预览、回填确认/重送与UNKNOWN有限观察；非真实网络

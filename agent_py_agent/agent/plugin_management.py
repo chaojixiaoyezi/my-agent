@@ -160,6 +160,18 @@ def plugin_management_context(
                                    events_owner_allowed=is_complete_local_admin_owner(home))
 
 
+# LLM: 老格式授权输入随管理上下文冻结传入；v8/内容包同样携带但不会走 legacy 分流，判定在启用工具内部。
+# 函数用途: 为一次启用组装策略输入，避免长参数散在调用点。
+def _enable_policy(context, arguments) -> PluginEnablePolicy:
+    roots = tuple(path for path in (context.owner.root, context.path_policy.agent_home_root) if path)
+    return PluginEnablePolicy(process_sandbox=context.process_sandbox,
+                              events_enabled=context.plugin_events_enabled,
+                              events_owner_allowed=context.events_owner_allowed,
+                              legacy_arguments=arguments,
+                              legacy_sandbox_default=context.legacy_sandbox_default,
+                              legacy_forbidden_roots=roots)
+
+
 # LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。
 # 类用途: 承接管理和业务命令，安装默认停用、调用遵守审批、撤销精确资源，查询区分业务结束与运行收尾。
 class PluginManagement:
@@ -476,14 +488,8 @@ class PluginManagement:
             return PluginConfigureTool(self.installations, context.path_policy, context.workspace,
                                        binding.request.operation_id, existing, catalog_revision)
         if tool_name == PLUGIN_ENABLE_TOOL:
-            roots = tuple(path for path in (context.owner.root, context.path_policy.agent_home_root) if path)
-            policy = PluginEnablePolicy(process_sandbox=context.process_sandbox,
-                                        events_enabled=context.plugin_events_enabled,
-                                        events_owner_allowed=context.events_owner_allowed,
-                                        legacy_arguments=arguments,
-                                        legacy_sandbox_default=context.legacy_sandbox_default,
-                                        legacy_forbidden_roots=roots)
-            return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision, policy=policy)
+            return PluginEnableTool(context.owner, repo, binding, existing, catalog_revision,
+                                    policy=_enable_policy(context, arguments))
         if tool_name == PLUGIN_REMOVE_TOOL:
             return PluginRemoveTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)
         return PluginDisableTool(context.owner, repo, binding.request.operation_id, existing, catalog_revision)

@@ -31,8 +31,8 @@ from .plugin_permissions.enable import (
     refresh_enable_authorization,
     require_enable_authorization,
     retire_for_enable,
-    retirement_committed,
 )
+from .plugin_permissions.sandbox import policy_from_grant
 from .plugin_permissions.state import canonical_permission_json
 from .plugin_runtime import PluginMCPClient
 from .plugin_runtime_facts import (
@@ -101,7 +101,8 @@ class PluginEnableTool(BaseTool):
         self._verifier_consent = ""
         self.previous_cleanup = None
         self.target = self.plan = self.grant = None
-        self.context = self._legacy_context(policy) if self._is_legacy else None
+        wiring = _LegacyWiring(self.owner, self.repository, self.binding, self.process_sandbox)
+        self.context = _legacy_context(wiring, policy) if self._is_legacy else None
         # v8 与旧版可执行插件一样要构造运行计划（它们都有 entry、不是内容包）；老格式不管激活状态都要预测撤旧后的目标。
         needs_plan = installation is not None and ((self._is_v8 and installation.activation is None)
                                                    or self._is_legacy)
@@ -128,18 +129,18 @@ class PluginEnableTool(BaseTool):
     #   老格式先核对权限码与授权身份（漂移另发下一确认请求），确认后才进入撤旧与启用。
     # 函数用途: 先拒绝未具安全底座的订阅包，再处理老格式授权与旧版确认，将实际提交状态交回原工具账。
     def execute(self, params: dict) -> ToolHandlerOutcome:
-        failure = self._preflight_failure(params)
+        failure = _preflight_failure(self, params)
         if failure is not None:
             return failure
         if self.grant is not None:
             confirmation = self._permission_confirmation(params)
             if confirmation is not None:
                 return confirmation
-        elif self.runtime is not None:
+        if self.grant is None and self.runtime is not None:
             confirmation = self._confirmation()
             if params.get("confirm") != confirmation["confirm_code"]:
                 return _confirmation_required(confirmation)
-        if self._needs_verifier_consent():
+        if _needs_verifier_consent(self.installation):
             # 能力包 v2：声明了检查程序的内容包，启用即同意宿主自动运行这些包内程序，必须先给管理员看并凭确认码继续
             details = verifier_confirmation_details(self.installation.manifest, self.installation.package_sha256)
             if params.get("confirm") != verifier_confirmation_code(details):
@@ -161,42 +162,6 @@ class PluginEnableTool(BaseTool):
             return self._failure("activation_unconfirmed", "TOOL_EXECUTION_FAILED", "unknown", "unknown")
         return ToolHandlerOutcome(PLUGIN_ENABLE_TOOL, True, "包版本已启用，新任务将读取该代贡献。",
                                   result_envelope={PLUGIN_ENABLE_TOOL: result})
-
-    # LLM: 启用前只检查固定快照、宿主策略和本机沙箱能力；拒绝结果不准备环境，也不改变激活状态。
-    # 函数用途: 把启用前置检查集中起来，保证安全拒绝都发生在确认与副作用之前。
-    def _preflight_failure(self, params: dict) -> ToolHandlerOutcome | None:
-        if params["catalog_revision"] != self.catalog_revision:
-            return self._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
-        if self.installation is None or self.installation.manifest.plugin_id != params["plugin"]:
-            return self._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
-        if self._is_v8 and not self.events_enabled:
-            return self._failure("plugin_events_disabled", "TOOL_EXECUTION_FAILED", "not_started")
-        if self._is_v8 and not self.events_owner_allowed:
-            return self._failure("plugin_events_owner_not_allowed", "TOOL_EXECUTION_FAILED", "not_started")
-        if self.runtime_error:
-            return self._failure(self.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")
-        problem = self._sandbox_problem()
-        if problem:
-            return self._failure(problem, _sandbox_error_code(problem), "not_started")
-        return None
-
-    # LLM: 沙箱检查使用 v8 清单中的网络、解释器和隐藏根规格；不能因规格推导失败而退回普通沙箱。
-    # 函数用途: 在启用准备开始前确认当前插件所需的进程沙箱可用。
-    def _sandbox_problem(self) -> str:
-        if self.plan is None:
-            return ""
-        v8_sandbox = None
-        if self._is_v8:
-            v8_sandbox, problem = plugin_v8_sandbox_options(
-                self.owner.home_dir,
-                network=bool(self.installation.manifest.permissions.network),
-                interpreter=_v8_interpreter_paths(self.installation.manifest, self.runtime),
-            )
-            if problem:
-                return problem
-        if v8_sandbox is None:
-            return plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir)
-        return plugin_sandbox_problem(self.process_sandbox, self.owner.home_dir, sandbox_policy=v8_sandbox)
 
     # LLM: 构造与执行间刷新 self.* 是有意的；旧码对不上新事实就重给完整预览，只有码/身份匹配最新授权才进入 _enable。
     # 函数用途: 让 _enable 消费用户最后确认的那份授权，不用构造时缓存，刷新无效事实不启动、不撤旧代。
@@ -231,13 +196,6 @@ class PluginEnableTool(BaseTool):
         except (OSError, ValueError):
             self.runtime_error = "legacy_permission_invalid"
 
-    # LLM: 上下文只由管理宿主注入的冻结输入组装；owner/repo/binding 与工具构造参数同源，不重复传参。
-    # 函数用途: 把 policy 里的老格式授权输入组装成 LegacyEnableContext。
-    def _legacy_context(self, policy: PluginEnablePolicy) -> LegacyEnableContext:
-        return LegacyEnableContext(self.owner, self.repository, self.binding,
-                                   dict(policy.legacy_arguments or {}), self.process_sandbox,
-                                   policy.legacy_sandbox_default, tuple(policy.legacy_forbidden_roots))
-
     # LLM: 激活 CAS、环境副作用、握手目录和退出确认按序发生；老格式先精确撤旧代并复核预测 target 与清理确认。
     #   原安装先复核 CAS，启动/发布重核固定授权，restricted 缺 B7 拒启动；候选只作验收，确认退出后才发布。
     # 函数用途: 在固定版本上完成启用；安装或权限漂移不发布，旧资源退出未知不开放新代。
@@ -254,15 +212,8 @@ class PluginEnableTool(BaseTool):
             if next((row for row in store.snapshot() if row.manifest.plugin_id == entry.manifest.plugin_id), None) != entry:
                 raise PluginInstallationError("revision_conflict", "安装事实已变化，请重新取得完整预览。")
             self._require_authorization()
-            entry, self.previous_cleanup = retire_for_enable(self.context, entry)
-            if self.previous_cleanup is not None and (not self.previous_cleanup["cleanup_confirmed"] or not self.previous_cleanup["released"]):
-                raise PluginInstallationError("previous_cleanup_unconfirmed", "旧代退出尚未确认，未开放新代。", commit_state="unknown")
-            if entry != self.target:
-                raise PluginInstallationError("revision_conflict", "清理后安装版本与确认不符。")
-            if self.grant["mode"] == "restricted":
-                raise PluginInstallationError("legacy_sandbox_pending", "统一 B7 底座尚未接入，未启动收紧插件。",
-                                              commit_state="committed" if retirement_committed(self.installation, entry,
-                                                  self.binding.request.operation_id) else "not_committed")
+            facts = _LegacyRetireFacts(self.context, self.target)
+            entry, self.previous_cleanup = _retire_before_enable(entry, facts)
         package = inspect_plugin_package(store.package_bytes(entry))
         operation = PluginEnvironmentOperation.bind(self.owner, self.repository, self.binding, self.plan)
         preparing = (PluginActivation(self.plan, "preparing", permission_json=canonical_permission_json(self.grant))
@@ -342,15 +293,6 @@ class PluginEnableTool(BaseTool):
         details = confirmation_details(self.installation.manifest, package.sha256, self.runtime, inspect_plugin_files(package))
         return {**details, "confirm_code": confirmation_code(details)}
 
-    # LLM: 只对尚未激活、声明了检查程序的纯内容包要求执行同意；已激活版本走原“保持不变”分支，不重复询问。
-    # 函数用途: 判断这次启用是否需要检查程序的执行确认。
-    def _needs_verifier_consent(self) -> bool:
-        entry = self.installation
-        capability = getattr(entry.manifest, "capability", None) if entry is not None else None
-        verification = getattr(capability, "verification", None)
-        return (entry is not None and entry.activation is None and entry.manifest.is_content_only
-                and verification is not None and verification.runs_package_code)
-
     # LLM: 失败保存旧代清理事实，UNKNOWN 不洗成未发生；不回显配置或底层异常。
     # 函数用途: 让原请求区分新启用失败和旧代已撤销、退出未知。
     def _failure(self, reason, error_code, effect, commit_state="not_committed") -> ToolHandlerOutcome:
@@ -358,6 +300,103 @@ class PluginEnableTool(BaseTool):
                                   error_code=error_code, effect_outcome=effect,
                                   result_envelope={PLUGIN_ENABLE_TOOL: {"reason": reason, "commit_state": commit_state,
                                       **({"previous_cleanup": self.previous_cleanup} if self.previous_cleanup else {})}})
+
+
+# LLM: 启用前只检查固定快照、宿主策略和本机沙箱能力；拒绝结果不准备环境，也不改变激活状态。
+# 函数用途: 把启用前置检查集中起来，保证安全拒绝都发生在确认与副作用之前。
+def _preflight_failure(tool, params: dict) -> ToolHandlerOutcome | None:
+    if params["catalog_revision"] != tool.catalog_revision:
+        return tool._failure("stale_catalog", "PLUGIN_CATALOG_STALE", "not_started")
+    if tool.installation is None or tool.installation.manifest.plugin_id != params["plugin"]:
+        return tool._failure("plugin_missing", "TOOL_INVALID_ARGUMENTS", "not_started")
+    if tool._is_v8 and not tool.events_enabled:
+        return tool._failure("plugin_events_disabled", "TOOL_EXECUTION_FAILED", "not_started")
+    if tool._is_v8 and not tool.events_owner_allowed:
+        return tool._failure("plugin_events_owner_not_allowed", "TOOL_EXECUTION_FAILED", "not_started")
+    if tool.runtime_error:
+        return tool._failure(tool.runtime_error, "TOOL_EXECUTION_FAILED", "not_started")
+    problem = _sandbox_problem(tool)
+    if problem:
+        return tool._failure(problem, _sandbox_error_code(problem), "not_started")
+    return None
+
+
+# LLM: 沙箱检查使用 v8 清单中的网络、解释器和隐藏根规格；不能因规格推导失败而退回普通沙箱。
+#   老格式 restricted 用固定授权投影的策略走同一就绪门，网络 true 在 Linux 同样要求端口隔离。
+# 函数用途: 在启用准备开始前确认当前插件所需的进程沙箱可用。
+def _sandbox_problem(tool) -> str:
+    if tool.plan is None:
+        return ""
+    if tool._is_legacy:
+        return _legacy_sandbox_problem(tool)
+    v8_sandbox = None
+    if tool._is_v8:
+        v8_sandbox, problem = plugin_v8_sandbox_options(
+            tool.owner.home_dir,
+            network=bool(tool.installation.manifest.permissions.network),
+            interpreter=_v8_interpreter_paths(tool.installation.manifest, tool.runtime),
+        )
+        if problem:
+            return problem
+    if v8_sandbox is None:
+        return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir)
+    return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir, sandbox_policy=v8_sandbox)
+
+
+# LLM: 老格式 restricted 强制走统一底座（不管 process_sandbox 开关），wide/legacy_compat 维持原开关语义。
+# 函数用途: 老格式插件的启用前沙箱检查；restricted 用固定授权投影的策略做同一就绪门检查。
+def _legacy_sandbox_problem(tool) -> str:
+    if tool.grant is None:
+        return ""
+    if tool.grant["mode"] != "restricted":
+        return plugin_sandbox_problem(tool.process_sandbox, tool.owner.home_dir)
+    return plugin_sandbox_problem(True, tool.owner.home_dir, sandbox_policy=policy_from_grant(tool.grant))
+
+
+# LLM: 组装 LegacyEnableContext 需要 owner/repo/binding 与沙箱档；收成一份冻结线束避免长参数接口。
+# 类用途: 承载老格式授权上下文组装用的宿主冻结线束。
+@dataclass(frozen=True)
+class _LegacyWiring:
+    owner: object
+    repository: object
+    binding: object
+    process_sandbox: bool
+
+
+# LLM: 上下文只由管理宿主注入的冻结输入组装；owner/repo/binding 与工具构造参数同源，不重复传参。
+# 函数用途: 把 policy 里的老格式授权输入组装成 LegacyEnableContext。
+def _legacy_context(wiring: _LegacyWiring, policy: PluginEnablePolicy) -> LegacyEnableContext:
+    return LegacyEnableContext(wiring.owner, wiring.repository, wiring.binding,
+                               dict(policy.legacy_arguments or {}), wiring.process_sandbox,
+                               policy.legacy_sandbox_default, tuple(policy.legacy_forbidden_roots))
+
+
+# LLM: 撤旧校验需要冻结的授权上下文与预测 target；收成一份事实避免长参数接口。
+# 类用途: 承载一次老格式撤旧校验的冻结输入。
+@dataclass(frozen=True)
+class _LegacyRetireFacts:
+    context: object
+    target: object
+
+
+# LLM: 撤旧后任何偏差（清理未确认、版本与预测不符）都不发布；restricted 的沙箱施加留给启动复核。
+# 函数用途: 执行老格式撤旧并校验清理确认与预测 target，返回实际释放记录供后续发布。
+def _retire_before_enable(entry, facts: _LegacyRetireFacts):
+    entry, cleanup = retire_for_enable(facts.context, entry)
+    if cleanup is not None and (not cleanup["cleanup_confirmed"] or not cleanup["released"]):
+        raise PluginInstallationError("previous_cleanup_unconfirmed", "旧代退出尚未确认，未开放新代。", commit_state="unknown")
+    if entry != facts.target:
+        raise PluginInstallationError("revision_conflict", "清理后安装版本与确认不符。")
+    return entry, cleanup
+
+
+# LLM: 只对尚未激活、声明了检查程序的纯内容包要求执行同意；已激活版本走原“保持不变”分支，不重复询问。
+# 函数用途: 判断这次启用是否需要检查程序的执行确认。
+def _needs_verifier_consent(entry) -> bool:
+    capability = getattr(entry.manifest, "capability", None) if entry is not None else None
+    verification = getattr(capability, "verification", None)
+    return (entry is not None and entry.activation is None and entry.manifest.is_content_only
+            and verification is not None and verification.runs_package_code)
 
 
 # LLM: 只对尚未激活的 v6 非 Python 包解析运行时事实（读 PATH 与解释器文件，不执行）；失败原因交给 execute 结构化返回。

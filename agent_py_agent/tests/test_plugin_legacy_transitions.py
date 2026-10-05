@@ -13,6 +13,7 @@ from agent_py_agent.tests.test_plugin_activation import publication
 from agent_py_agent.tests.test_plugin_legacy_management import (
     confirm,
     fake_processes,
+    fake_sandbox_ready,
     fake_settled_deactivation,
     installed_manager,
     preview,
@@ -43,6 +44,7 @@ def test_update_reinstall_end_old_grant_and_require_fresh_complete_confirmation(
     from agent_py_agent.agent.plugin_permissions import enable
 
     service = installed_manager(tmp_path)
+    fake_sandbox_ready(monkeypatch)
     old = active_source(service, mode)
     old_preview = preview(service, request="old-preview")
     source = tmp_path / "next.zip"
@@ -70,12 +72,14 @@ def test_update_reinstall_end_old_grant_and_require_fresh_complete_confirmation(
     assert facts["mode"] == "restricted" and facts["confirm_code"] != old_preview["details"]["confirmation"]["confirm_code"]
     calls = fake_processes(monkeypatch)
     result = confirm(service, fresh)
-    assert result["details"]["reason"] == "legacy_sandbox_pending" and calls == []
+    assert result["state"] == "succeeded", result
+    assert calls == ["prepare", "client"]
 
 
 @pytest.mark.parametrize("mode,default", [("legacy_compat", True), ("wide", True), ("restricted", False)])
-def test_single_mode_decision_reenable_retires_old_grant_but_never_starts_without_b7(tmp_path, monkeypatch, mode, default):
+def test_single_mode_decision_reenable_retires_old_grant_and_starts_through_b7(tmp_path, monkeypatch, mode, default):
     service = installed_manager(tmp_path, legacy_sandbox_default=default)
+    fake_sandbox_ready(monkeypatch)
     old = active_source(service, mode)
     calls = fake_settled_deactivation(monkeypatch)
     response = preview(service)
@@ -83,6 +87,7 @@ def test_single_mode_decision_reenable_retires_old_grant_but_never_starts_withou
     assert service.installations.snapshot()[0] == old and calls == []
     startups = fake_processes(monkeypatch)
     result = confirm(service, response)
-    assert result["details"]["reason"] == "legacy_sandbox_pending" and calls == [old.activation_id]
-    assert startups == [] and service.installations.snapshot()[0].activation is None
-    assert legacy_permissions(service.installations.snapshot()[0]) is None
+    assert result["state"] == "succeeded", result
+    assert calls == [old.activation_id] and startups == ["prepare", "client"]
+    current = service.installations.snapshot()[0]
+    assert current.activation is not None and legacy_permissions(current)["mode"] == "restricted"

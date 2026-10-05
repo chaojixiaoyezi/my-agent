@@ -70,5 +70,5 @@ def permission_details(entry, plan, selection: PermissionSelection, mode: str) -
         "activation_id": PluginActivation(plan, "preparing").activation_id,
         "plan": asdict(plan), "permissions": asdict(selection),
         "entry_module": entry.manifest.entry_module, "entry": asdict(entry.manifest.entry) if entry.manifest.entry else None,
-        "host_api": list(entry.manifest.host_api), "sandbox_status": "pending_b7" if mode == "restricted" else "not_required",
+        "host_api": list(entry.manifest.host_api), "sandbox_status": "platform_sandbox" if mode == "restricted" else "not_required",
     }

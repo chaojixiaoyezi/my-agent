@@ -358,6 +358,38 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 实测暴露并修掉的两个真缺陷：`change_codes()` 初版漏收三个 `history_*` 历史码；`_add_cache_change_counts(None, …)` 对 `None` 取 `items()` 抛异常（被外层兜底吞掉，表现为整条统计丢失）。
 
 未验证：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；sol1 / luna3 的修复不在本分支。
+## B7 第四段：四启动入口复核与 restricted 经统一底座施加（opp6，2026-10-05，WIP）
+
+- **范围**：`worker/opp5` 上实现（基线为 17k 头 `02acd6446` 变基后的 `65ebf6317` 之后）。产品改动：`plugin_permissions/sandbox.py`（重写为 `legacy_launch_policy`/`policy_from_grant`/`LegacyLaunchDenied`）、`plugin_runtime.py`（构造复核 + `start()` 覆盖）、`plugin_enable_tool.py`（移除 pending 拒绝、restricted 预检）、`confirmation.py`（文案）、`grants.py`/`records.py`（`sandbox_status=platform_sandbox`）。
+- **新用例**（`agent_py_agent/tests/test_plugin_legacy_launch_guard.py`，7 条）：候选/业务/面板/重连四入口"构造后事实变化 → 拒绝且零启动"；撤销后 start 拒绝；restricted 启动命令与 `plugin_sandbox_spec` + `sandboxed_plugin_argv` 输出全等（spec 收窄读/写/网络、隐藏根为 Gateway 用户家目录）；wide 不进受限沙箱。手工夹具建环境目录并发布带固定 permission_json 的激活，不启动真实插件进程。
+- **改写的既有用例**：`test_plugin_legacy_management.py`（restricted 确认后经沙箱启动、`fake_sandbox_ready` 替身、Linux `network:true` 预检拒绝分支、新增 `test_restricted_preflight_requires_unified_sandbox`）；`test_plugin_legacy_transitions.py`（`test_single_mode_decision_..._starts_through_b7`、断言发布成功）；`test_plugin_legacy_drift.py`（`test_cleanup_report_presence...` 改为有旧代 + 假 report → `revision_conflict`；`test_actual_old_release_reenables_restricted_through_b7`）；`test_plugin_legacy_permissions.py`（接缝测试改为 `policy_from_grant` 投影）。
+- **命令**（工作树根；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_management.py agent_py_agent/tests/test_plugin_legacy_transitions.py agent_py_agent/tests/test_plugin_legacy_drift.py agent_py_agent/tests/test_plugin_legacy_launch_guard.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp6
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_any_language_samples.py agent_py_agent/tests/test_plugin_enable.py agent_py_agent/tests/test_plugin_sandbox.py agent_py_agent/tests/test_shuohao_novel_gates.py agent_py_agent/tests/test_plugin_legacy_candidate.py agent_py_agent/tests/test_plugin_legacy_config.py agent_py_agent/tests/test_plugin_legacy_drift.py agent_py_agent/tests/test_plugin_legacy_launch_guard.py agent_py_agent/tests/test_plugin_legacy_management.py agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_records.py agent_py_agent/tests/test_plugin_legacy_rollback.py agent_py_agent/tests/test_plugin_legacy_state.py agent_py_agent/tests/test_plugin_legacy_transitions.py agent_py_agent/tests/test_plugin_legacy_transport.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugins_chat_control.py -q --tb=line -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp6
+  ```
+
+- **结果**：五个核心文件全绿（含新 7 条与新增预检条）。opp 相关 18 文件集合（17 + 新 guard）**13 failed**：`test_plugin_any_language` 6、`test_plugin_any_language_samples` 2、`test_plugin_enable` 3、`test_shuohao_novel_gates` 1、`test_plugin_legacy_transport` 1；失败节点与失败原因在改动前（`65ebf6317` 临时工作树，`/private/tmp/claude-501/opp6-b7base`）逐条一致（插件宿主/真实进程类既有沙箱失败）。B7 集合 3 failed（`test_plugin_sandbox_v8` 嵌套 Seatbelt 类）与变基基线一致。guards9 12 文件全过。
+- **变异**（`/private/tmp/opp6_mutate.py`，每项单处修改、原字节恢复 + sha256 校验）：构造不复核 → 候选用例红；start 不复核 → 业务/面板/重连用例红；restricted 绕过 B7 → 合同用例红；事实变化不拒绝 → 候选用例红；预检不强制 → 预检用例红。**5/5 KILLED**。
+- **静态门禁**：ruff 全过、import boundaries=0、DOC_SYNC_PASS、strict code-size `hard=0 blocked=False`、`size_diff` 新增 0 / 消失 55、`git diff --check`（含提交区间）干净；clean-package 在新测试文件入库后复跑 `OK: . 未发现发布阻塞项`。
+- **未验证**：真实沙箱子进程（沙箱内不可嵌套 Seatbelt/bwrap，3a 沙箱外复跑）；真实 TUI/飞书/桌面链；生产回滚；非作者/9b 终审。
+
+## opp 变基到 17k：两组测试对照（opp6 第一步，2026-10-05，WIP，B7 第四段待接）
+
+- **变基**：`worker/opp5` 6 个提交逐个重放到 17k 头 `02acd6446`（重放头 `96a565ace`→`75d33ea2e`→`a065ea50f`→`b874a17fb`→`36279bdca`→`65ebf6317`）。唯一代码冲突在 `agent_py_agent/agent/settings/user_config_capability.py` 的 `USER_SETTINGS_BOUNDARY_KEYS`：17k 要 `plugin_tool_gate_timeout_ms`、opp 要 `plugin_legacy_sandbox_default`，合并为**单个 frozenset 且两键都在**；DESIGN_LEDGER / TESTS 顶部插入冲突两段都保留。
+- **对照方法**：变基前 `758eac616` 用 `git worktree add --detach /private/tmp/claude-501/opp6-base` 检出（跑完已 remove），变基前后各跑同一组命令，JUnit XML 落 `tmp/opp6/{before,after}-{opp,b7}.xml`，对照脚本输出 `tmp/opp6/compare.json`。命令（工作树根；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_any_language.py agent_py_agent/tests/test_plugin_any_language_samples.py agent_py_agent/tests/test_plugin_enable.py agent_py_agent/tests/test_plugin_sandbox.py agent_py_agent/tests/test_shuohao_novel_gates.py agent_py_agent/tests/test_plugin_legacy_candidate.py agent_py_agent/tests/test_plugin_legacy_config.py agent_py_agent/tests/test_plugin_legacy_drift.py agent_py_agent/tests/test_plugin_legacy_management.py agent_py_agent/tests/test_plugin_legacy_permissions.py agent_py_agent/tests/test_plugin_legacy_records.py agent_py_agent/tests/test_plugin_legacy_rollback.py agent_py_agent/tests/test_plugin_legacy_state.py agent_py_agent/tests/test_plugin_legacy_transitions.py agent_py_agent/tests/test_plugin_legacy_transport.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugins_chat_control.py -q --tb=no -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp6 --junitxml=tmp/opp6/after-opp.xml
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_sandbox.py agent_py_agent/tests/test_plugin_sandbox_v8.py agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_plugin_event_display.py agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_runtime.py -q --tb=no -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-opp6 --junitxml=tmp/opp6/after-b7.xml
+  ```
+
+- **对照结果（失败节点逐条一致，无变基引入差异）**：
+  - opp 17 文件：变基前后都是 **284 tests / 13 failed / 0 errors / 5 skipped**，失败节点集合差集为 0。13 条为既有沙箱失败：`test_plugin_any_language` 6、`test_plugin_any_language_samples` 2、`test_plugin_enable` 3、`test_shuohao_novel_gates` 1、`test_plugin_legacy_transport` 1。
+  - B7 集合：两边失败都是同 **3 条**（`test_plugin_sandbox_v8` 的 macOS 网络、python 前缀、node realpath，嵌套 Seatbelt 类）。变基后 302 tests / 11 skipped vs 变基前 300 tests / 10 skipped：多出的 2 条为 17k 新增用例（`test_plugin_event_display::test_v8_plugin_shows_events_disabled_reason_when_switch_off` 通过、`test_plugin_sandbox_v8::test_linux_restricted_policy_symlink_execute_root_runs_and_reads_package` 沙箱内 skip），无 only-before 节点。
+- **冒烟**：`test_plugin_legacy_drift.py` 重跑 **34 passed**（含两条守卫用例）。
+- **未验证**：13 条失败未逐条复核底层原因（节点与变基前一致，属插件宿主/嵌套 Seatbelt 类既有沙箱失败）；B7 第四段未接；整系列仍不可挑入。
 
 ## TUI 本地会话登记恢复（sessrec，2026-10-05；待非作者初审）
 
@@ -1367,6 +1399,15 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - 变异：`_thinking_mode_supported` 退回“遍历全部历史” → 用例变红，报“历史里有缺思考的旧答复（最多 5 条）时，请求被切到了关思考分区：第 [2, 3, 4, 5, 6, 7] 次调用”；产品文件按字节还原（sha256 一致）。
 - 未验证：真实 API 端到端读数（需联网与密钥）；跨轮历史改写（sol1/ds7）没有独立 xfail 用例。
 
+## opp 变基到 17j：两条守卫用例与尺寸拆平（opp5a2，2026-10-05）
+
+- 范围：`worker/opp5` 5 个提交逐个重放到 17j 头 `da6e38093`（重放头 `4a8cbb10d`）。产品只做尺寸拆平（抽模块级函数/数据类），行为由下面用例与变异钉住；设计侧记录见 DESIGN_LEDGER 同名节。
+- 两条新用例（`agent_py_agent/tests/test_plugin_legacy_drift.py`）：`test_retirement_changing_installation_version_never_publishes`（撤旧真实发生但换另一撤旧操作 → 同版本号不同事实，必须 `revision_conflict` + 零发布）、`test_refresh_requires_new_preview_when_facts_changed`（同身份、新事实下旧码重预览 + 零执行，新预览的码可继续）。drift 文件 **34 passed**。
+- 失败集合对比：`git worktree add --detach /private/tmp/claude-501/opp5a2-base 4a8cbb10d`（跑完已 remove），opp 17 文件在变基点与工作树均 **13 个失败、节点逐条 diff 一致**（插件宿主/嵌套 Seatbelt/子进程类既有沙箱失败）；B7 集合 3 条 nested sandbox-exec（rc=71）在基线同样失败。
+- guards9：11 个存在文件 **188 passed**；清单里的 `test_backend_signature_guardrails.py` 在本树不存在（如实记录，未跑）。
+- 变异（`/private/tmp/opp5a2_mutate2.py`，每项原字节还原并 sha256 校验）：删 M3 第二道守卫 → M3 用例红；刷新后直接放行 → M3 + 刷新负例红；删 refresh → 漂移用例红。**3/3 KILLED**。
+- 静态：ruff 全过、import boundaries=0、DOC_SYNC_PASS、`git diff --check` 干净、clean-package OK；strict code-size `hard=0 blocked=False`；`size_diff` **新增 0 / 消失 44**。
+- 未验证：真实 TUI/飞书/OS 隔离、生产回滚、B7 第四段（未接）及本段非作者/9b 终审。
 
 ## 沙箱内按能力跳过、沙箱外强制真跑（capsk + capsk2，2026-10-04，`worker/sandbox-cap-skips-v2`；已并入 step17j）
 

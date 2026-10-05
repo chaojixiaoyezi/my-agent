@@ -19,15 +19,15 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
     plugin_registry,
 )
 from agent_py_agent.tests.plugin_enable_fixtures import (
-    confirm_enable,
-    preview_enable,
+    confirm_legacy_enable,
+    preview_legacy_enable,
     unrestricted_service,
 )
 
 
 def test_enable_active_is_unchanged_and_missing_plugin_has_explicit_failure(tmp_path, monkeypatch):
     service = unrestricted_service(installed_runtime_plugin(tmp_path))
-    initial = confirm_enable(service, preview_enable(service, "sample-peek"))
+    initial = confirm_legacy_enable(service, preview_legacy_enable(service, "sample-peek"))
     assert initial["state"] == "succeeded", initial
     before = service.installations.snapshot()
     assert before[0].enabled and before[0].activation.phase == "active"
@@ -49,14 +49,14 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
     registry = plugin_registry(service)
     view = registry.with_access_policy(access_mode="full-access", path_access_mode="full", owner_scope_root="")
     assert registry._mcp_clients == [] and view._mcp_clients is registry._mcp_clients
-    first = preview_enable(service, "sample-peek")
-    enabled = confirm_enable(service, first)
+    first = preview_legacy_enable(service, "sample-peek")
+    enabled = confirm_legacy_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     assert enabled["details"]["candidate_cleanup"]["confirmed"]
     assert "private-settings-value" not in json.dumps(enabled)
     entry = service.installations.snapshot()[0]
     assert entry.enabled and entry.activation.phase == "active"
-    replay = confirm_enable(service, first)
+    replay = confirm_legacy_enable(service, first)
     assert replay["details"] == enabled["details"]
     owner = service.context.owner
     store = ProcessSessionStore(process_session_store_root(owner.home_dir, owner.home_dir))
@@ -97,7 +97,7 @@ def test_actual_enable_and_registry_view_call_then_disable(tmp_path):
         registry.prepare_for_run()
         assert name not in view.tools and name not in registry.tools
         assert "read_file" in registry.tools
-        new = confirm_enable(service, preview_enable(service, "sample-peek", "reenable"))
+        new = confirm_legacy_enable(service, preview_legacy_enable(service, "sample-peek", "reenable"))
         assert new["state"] == "succeeded", new
         assert service.installations.snapshot()[0].activation_id != old_entry.activation_id
         replay = service.command("/plugins disable sample-peek", revision=disable_revision, request_id="disable")
@@ -132,7 +132,7 @@ def test_bad_complete_directory_never_publishes(tmp_path, change):
         tool["inputSchema"]["properties"]["path"] = {"type": "integer"}
     service = unrestricted_service(installed_runtime_plugin(tmp_path, tools_override=tools,
         module_source="raise RuntimeError('fixture startup failure')" if change == "startup" else None))
-    result = confirm_enable(service, preview_enable(service, "sample-peek"))
+    result = confirm_legacy_enable(service, preview_legacy_enable(service, "sample-peek"))
     assert result["state"] != "succeeded", result
     entry = service.installations.snapshot()[0]
     assert not entry.enabled and entry.activation.phase == "preparing"
@@ -171,7 +171,7 @@ def test_candidate_cleanup_storage_failure_prevents_active(tmp_path, monkeypatch
     from agent_py_agent.agent.tooling.process_session_store import ProcessSessionTransaction
 
     service = unrestricted_service(installed_runtime_plugin(tmp_path))
-    first = preview_enable(service, "sample-peek")
+    first = preview_legacy_enable(service, "sample-peek")
     original = ProcessSessionTransaction.write
     initialize, clients = PluginMCPClient.__init__, []
 
@@ -189,7 +189,7 @@ def test_candidate_cleanup_storage_failure_prevents_active(tmp_path, monkeypatch
     try:
         with monkeypatch.context() as patch:
             patch.setattr(ProcessSessionTransaction, "write", fail_candidate_cleanup)
-            result = confirm_enable(service, first)
+            result = confirm_legacy_enable(service, first)
         assert result["state"] == "outcome_unknown", result
         entry = service.installations.snapshot()[0]
         assert not entry.enabled and entry.activation.phase == "preparing"

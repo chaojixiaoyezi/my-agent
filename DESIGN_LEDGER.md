@@ -268,6 +268,19 @@
 - **active-turn边界**：该摘要只合并上一代 thread summary 与当前选中的工具 IR，不携带完整主线程 provider history；因此明确不承诺主请求缓存前缀。为此请求显式发送空工具目录与 `ToolChoice.none("active_turn_summary_no_prefix")`；bounded 路径只对非空工具目录强制 `auto`，空目录的 none 保持至出站，避免无谓工具选择与额外重试。真实 HTTP 假传输测试检查出站字段、一次请求完成；将 active-turn 改回带 surface.tools 的单次变异被 none 断言抓红。
 - **区分其他路径**：完整缓存面可复用的单次 transcript/tool-loop 摘要仍保留 system/tools/history 与 `auto`；结构化工具调用不执行，走已有的一次无工具/`none`重试。超窗分段、active-turn 窄视图和 `compact_carried_summary` 均不宣称与主请求共享完整前缀。
 - **证据边界**：当前只有本地 Gateway/假传输及缓存模拟器证据；真实 DeepSeek 缓存命中率、服务端计费和实际节省未验证，不以旧估算冒充实测。完整测试与门禁结果见 `TESTS.md` 本节后续记录。
+## B7 第四段：老格式插件启动复核与 restricted 经统一底座施加（opp6，2026-10-05，WIP，待沙箱外复跑与终审）
+
+- **实现**：`plugin_permissions/sandbox.py` 重写为 `legacy_launch_policy(owner, installation)`：每次启动读固定 `permission_json`，重算插件/包/激活身份、激活计划（canonical JSON 全等）、受限根 inode 与程序内容（`permission_paths` 重读）、解释器事实（`verified_runtime_command`，stat 优先）、模式与网络；变化抛结构化 `LegacyLaunchDenied`（`legacy_permission_changed`/`legacy_permission_missing`/`legacy_permission_invalid`）。`installation_ref` 随提交漂移，只用于确认码绑定，不作复核判据（实测坑：准备/发布后 ref 变化，最初把它当判据导致全部复核误拒）。
+- **四入口接线**：`PluginMCPClient.__init__`（候选 `_candidate` 与业务/面板构造共用）复核并投影 `PluginRestrictedSandbox`；覆盖 `start()` 在真正拉起进程前再复核一次（业务 registry、面板连接池、`reconnect()` 都走同一入口）。restricted 强制进统一底座（与 v8 同 `plugin_sandbox_spec` + `sandboxed_plugin_argv`），`_require_legacy_policy_ready` 与启用预检 `_legacy_sandbox_problem` 两处对沙箱不可用（含 Linux `network:true` 端口隔离缺口）结构化拒绝；wide/`legacy_compat` 只复核身份、不进受限沙箱。
+- **清理**：`_retire_before_enable` 移除 `legacy_sandbox_pending` 拒绝（restricted 正常走准备→候选→发布）；`retirement_committed` 与 `_LegacyRetireFacts` 未用字段随删；`sandbox_status` 由 `pending_b7` 改为 `platform_sandbox`；确认文案改为"收紧模式由统一 B7 沙箱底座在每次启动时施加"。
+- **验收**：新 `test_plugin_legacy_launch_guard.py` 7 用例（四入口"事实变化 → 零启动"、撤销拒绝、restricted argv/spec 合同、wide 显式模式）；`test_plugin_legacy_management/transitions/drift` 改断言（restricted 经沙箱启动、假 report 在有旧代时 `revision_conflict`）；新增预检强制沙箱用例。5 个单点变异全 KILLED（构造不复核、start 不复核、绕过 B7、变化不拒绝、预检不强制）。既有沙箱失败与改动前逐条一致（13+3）。
+- **未验证**：真实 macOS/Linux 沙箱子进程（沙箱内不可嵌套，3a 沙箱外复跑）；真实 TUI/飞书/桌面链；生产回滚；本段非作者/9b 终审。整系列仍不可单独部署。
+
+## opp 变基到 17k（opp6 第一步，2026-10-05，WIP，B7 第四段待接，整系列不可挑入）
+
+- **变基**：`worker/opp5` 6 个提交逐个重放到 17k 头 `02acd6446`（重放头 `96a565ace`→`75d33ea2e`→`a065ea50f`→`b874a17fb`→`36279bdca`→`65ebf6317`）。合并方向与 17j 版（opp5a2 段）相同；唯一代码冲突是 `USER_SETTINGS_BOUNDARY_KEYS` 合并为单 frozenset（`plugin_tool_gate_timeout_ms` + `plugin_legacy_sandbox_default` 两键都在），DESIGN_LEDGER / TESTS 顶部插入两段都保留。
+- **对照**：opp 17 文件与 B7 集合在变基前（`758eac616`，临时工作树 `/private/tmp/claude-501/opp6-base`）与变基后失败节点逐条一致（13 + 3 条既有沙箱失败）；17k 新增 2 条用例（1 通过、1 沙箱内 skip）。命令、XML 与精确集合见 `TESTS.md` 同名节。
+- **状态**：B7 第四段（四种启动入口重核授权事实 + restricted 经 B7 施加）未接；真实链、OS 隔离与生产回滚仍未验证；整系列仍不可单独部署。
 
 ## TUI 本地会话登记恢复（sessrec，2026-10-05；待非作者初审）
 
@@ -669,6 +682,14 @@
 - **验证**：见 `TESTS.md`“缓存修复回归护栏（cachesim）”小节。
 - **未验证 / 未做**：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；跨轮历史改写（sol1/ds7）没有独立的 xfail 用例——本轮只覆盖了思考开关这一条已知未修；压缩档位修复合入后需去掉 xfail 并复跑。
 
+## opp 变基到 17j（opp5a2，2026-10-05，WIP，B7 未接，整系列不可挑入）
+
+- **变基**：`worker/opp5` 5 个提交逐个重放到 17j 头 `da6e38093`（重放头 `48bcec9f3`→`5561c9598`→`e4b0ff6f8`→`39238c85f`→`4a8cbb10d`）。合并按 sol1 方案第五节：保留 17j 的 `PluginEnablePolicy` 构造入口与 v8 判定，不让 opp 覆盖 B7 前置门；老格式 v1–v6 授权链作受控分流（policy 带可选授权输入，工具内组装 `LegacyEnableContext`）；按包类型显式三分支（v8 / 内容包 / 老格式），不把“不是 v8”当老格式；`self.plan` 只留一个，刷新时 runtime/target/plan/grant 同组更新。
+- **冲突解法**：`plugin_enable_tool.py` 按上述分流重写合并；`plugin_management.py` 保留 17j 的 policy 构造点、老格式输入进 policy；`test_plugin_manifest_v8.py` 的 v8 用例继续走 `PluginEnablePolicy(...)`、v6 用例走真实管理链取完整确认命令与授权身份；DESIGN_LEDGER/LLM_GUIDE/TESTS/02-progress 顶部两段都保留。
+- **两条守卫用例（ds4 opp4r 小问题 1、2）**：撤旧换操作号 → 同版本号不同事实必须 `revision_conflict`、零发布（钉 `retire_for_enable` 后的第二道 `entry != target` 守卫）；同身份、新事实下旧确认码必须重新预览、零执行。
+- **小修**：夹具 `preview_enable`/`confirm_enable` 改名 `preview_legacy_enable`/`confirm_legacy_enable`，名字写明只给老格式真实链，防 v6/内容包用例误用。
+- **尺寸拆平**：变基引入 3 条新增告警——抽 `_preflight_failure`/`_sandbox_problem`/`_legacy_context`/`_retire_before_enable`/`_needs_verifier_consent` 到模块级、`execute` 的 `elif` 链扁平化；`size_diff` 回到 **新增 0 / 消失 44**，strict code-size `hard=0 blocked=False`。
+- **验证与边界**：opp 17 文件失败集合与变基点 `4a8cbb10d` 逐条一致（13 条既有沙箱失败）；drift 34 全绿；guards9 188 passed；3 个独立变异全 KILLED。真实链/OS/渠道、B7 第四段与本段非作者/9b 终审仍待；整系列仍不可单独部署。
 
 ## 沙箱内按能力跳过、沙箱外强制真跑（capsk + capsk2，2026-10-04，分支 `worker/sandbox-cap-skips-v2`；3a 沙箱外默认、强制两种模式复跑验收，已并入 step17j）
 

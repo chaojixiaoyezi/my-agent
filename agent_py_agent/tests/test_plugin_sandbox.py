@@ -30,7 +30,7 @@ from agent_py_agent.agent.settings import load_config
 from agent_py_agent.agent.settings.config import AgentConfig, normalize_agent_config
 from agent_py_agent.agent.tooling.sandbox import SandboxSpec, build_bwrap_argv
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
-from agent_py_agent.tests.plugin_enable_fixtures import confirm_enable, preview_enable
+from agent_py_agent.tests.plugin_enable_fixtures import confirm_legacy_enable, preview_legacy_enable
 from agent_py_agent.tests.test_plugin_any_language import (
     _TOOL,
     PLUGIN_ID,
@@ -85,7 +85,7 @@ def _enabled_writer(tmp_path, *, process_sandbox: bool):
     assert installed["state"] == "succeeded", installed
     first = _enable(service, "enable")
     assert first["details"]["reason"] == "confirmation_required", first
-    enabled = confirm_enable(service, first)
+    enabled = confirm_legacy_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     assert service.installations.snapshot()[0].activation.phase == "active"
     return service
@@ -144,16 +144,16 @@ def test_unavailable_sandbox_refuses_enable_and_explicit_calls(tmp_path, monkeyp
     source = _package(tmp_path, _declaration(tools=[_TOOL, _WRITE_TOOL]), {"bin/server.py": _WRITER})
     assert service.command(f'/plugins install "{source}"', revision=service.catalog().revision,
                            request_id="install")["state"] == "succeeded"
-    first = preview_enable(service, PLUGIN_ID)
-    refused = confirm_enable(service, first)
+    first = preview_legacy_enable(service, PLUGIN_ID)
+    refused = confirm_legacy_enable(service, first)
     assert refused["state"] == "failed" and refused["details"]["reason"] == "sandbox_unavailable", refused
     assert "沙箱不可用" in refused["message"]
     assert service.installations.snapshot()[0].activation is None
     environments = service.context.owner.plugins_dir / "environments"
     assert not environments.exists() or not any(environments.iterdir())
     relaxed = PluginManagement(replace(service.context, process_sandbox=False))
-    off = preview_enable(relaxed, PLUGIN_ID, "enable-off")
-    assert confirm_enable(relaxed, off)["state"] == "succeeded"
+    off = preview_legacy_enable(relaxed, PLUGIN_ID, "enable-off")
+    assert confirm_legacy_enable(relaxed, off)["state"] == "succeeded"
     (tmp_path / "input.txt").write_text("x")
     call = service.command(f'/plugins@{PLUGIN_ID} read "{tmp_path / "input.txt"}"', revision=service.catalog().revision,
                            request_id="call")
@@ -209,8 +209,8 @@ def test_node_sample_runs_inside_the_platform_sandbox(tmp_path):
     package = build_files_package(declaration, project, tmp_path / "hello-node.zip")
     assert service.command(f'/plugins install "{package}"', revision=service.catalog().revision,
                            request_id="install")["state"] == "succeeded"
-    first = preview_enable(service, "hello-node")
-    enabled = confirm_enable(service, first)
+    first = preview_legacy_enable(service, "hello-node")
+    enabled = confirm_legacy_enable(service, first)
     assert enabled["state"] == "succeeded", enabled
     assert service.installations.snapshot()[0].activation.phase == "active"
     (tmp_path / "notes.txt").write_text("沙箱里的笔记", encoding="utf-8")

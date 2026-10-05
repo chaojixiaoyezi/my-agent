@@ -57,6 +57,21 @@ def fake_processes(monkeypatch):
     return calls
 
 
+def fake_sandbox_ready(monkeypatch):
+    """沙箱内没有嵌套 Seatbelt/bwrap；只放行平台就绪检查。
+
+    真实隔离由沙箱外车道与合同用例（argv 包装、spec 字段）覆盖，不把替身当 OS 验收。
+    """
+    monkeypatch.setattr("agent_py_agent.agent.plugin_sandbox.AttemptExecutionSandbox.require_ready",
+                        lambda _self: None)
+
+
+def _sandbox_unavailable(_self):
+    from agent_py_agent.agent.attempt.sandbox import SandboxUnavailableError
+
+    raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: test")
+
+
 def fake_settled_deactivation(monkeypatch, *, settled=True):
     """注入清理证明边界；撤销/释放仍在原安装 Store，明确不作 OS 退出证据。"""
     from agent_py_agent.agent.plugin_install_store import PluginInstallStore
@@ -82,12 +97,22 @@ def fake_settled_deactivation(monkeypatch, *, settled=True):
 
 
 def test_admin_flags_complete_preview_and_confirm_reaches_restricted_gate(tmp_path, monkeypatch):
+    import platform as platform_module
+
     service = installed_manager(tmp_path)
+    fake_sandbox_ready(monkeypatch)
     root = (tmp_path / "project").resolve()
     root.mkdir()
     program = root / "program"
     program.write_bytes(b"fixture extra program, never executed")
     flags = f"--read-root {shlex.quote(str(root))} --write-root {shlex.quote(str(root))} --network --program-root {shlex.quote(str(program))}"
+    if platform_module.system() == "Linux":
+        # Linux 端口隔离未接入前，network:true 的收紧插件在预览阶段就结构化拒绝、零副作用。
+        refused = service.command(f"/plugins enable sample-peek {flags}",
+                                  revision=service.catalog().revision, request_id="linux-network")
+        assert refused["details"]["reason"] == "gateway_port_isolation_unavailable", refused
+        assert service.installations.snapshot()[0].activation is None
+        return
     response = preview(service, flags)
     facts = response["details"]["confirmation"]
     assert facts["kind"] == "plugin_legacy_permissions"
@@ -98,8 +123,19 @@ def test_admin_flags_complete_preview_and_confirm_reaches_restricted_gate(tmp_pa
     assert "--authorization" in facts["confirm_command"] and "--read-root" in facts["confirm_command"]
     calls = fake_processes(monkeypatch)
     result = confirm(service, response)
-    assert result["details"]["reason"] == "legacy_sandbox_pending", result
-    assert calls == [] and service.installations.snapshot()[0].activation is None
+    assert result["state"] == "succeeded", result
+    assert calls == ["prepare", "client"]
+    assert service.installations.snapshot()[0].activation is not None
+
+
+def test_restricted_preflight_requires_unified_sandbox(tmp_path, monkeypatch):
+    """restricted 预检必须要求统一沙箱可用；不可用时结构化拒绝、零副作用。"""
+    service = installed_manager(tmp_path)
+    monkeypatch.setattr("agent_py_agent.agent.plugin_sandbox.AttemptExecutionSandbox.require_ready",
+                        _sandbox_unavailable)
+    result = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="no-sandbox")
+    assert result["details"]["reason"] == "sandbox_unavailable", result
+    assert service.installations.snapshot()[0].activation is None
 
 
 def test_wide_still_requires_confirmation_and_persists_actual_plan(tmp_path, monkeypatch):
@@ -119,8 +155,9 @@ def test_wide_still_requires_confirmation_and_persists_actual_plan(tmp_path, mon
     assert replay["details"] == result["details"] and calls == ["prepare", "client"]
 
 
-def test_changed_permission_or_path_identity_invalidates_confirmation(tmp_path):
+def test_changed_permission_or_path_identity_invalidates_confirmation(tmp_path, monkeypatch):
     service = installed_manager(tmp_path)
+    fake_sandbox_ready(monkeypatch)
     root = (tmp_path / "project").resolve()
     root.mkdir()
     first = preview(service, f"--read-root {shlex.quote(str(root))}")
@@ -132,8 +169,9 @@ def test_changed_permission_or_path_identity_invalidates_confirmation(tmp_path):
     assert service.installations.snapshot()[0].activation is None
 
 
-def test_nonadmin_cannot_submit_permission_flags_or_read_preview(tmp_path):
+def test_nonadmin_cannot_submit_permission_flags_or_read_preview(tmp_path, monkeypatch):
     service = installed_manager(tmp_path)
+    fake_sandbox_ready(monkeypatch)
     response = preview(service)
     user = PluginManagement(replace(service.context, is_admin=False))
     before = (service.installations.root / "installations.json").read_bytes()
@@ -191,17 +229,21 @@ def test_default_off_never_downgrades_current_restricted_activation(tmp_path, mo
     prepared = service.installations.change_activation(PluginActivationRequest(
         plan.operation_id, entry.revision, PluginActivation(plan, "preparing", permission_json=canonical_permission_json(grant))))
     service.installations.change_activation(publication(prepared))
+    fake_sandbox_ready(monkeypatch)
     response = preview(service)
     assert response["details"]["confirmation"]["mode"] == "restricted"
     fake_settled_deactivation(monkeypatch)
     calls = fake_processes(monkeypatch)
     result = confirm(service, response)
-    assert result["details"]["reason"] == "legacy_sandbox_pending", result
-    assert calls == [] and service.installations.snapshot()[0].activation is None
+    assert result["state"] == "succeeded", result
+    assert calls == ["prepare", "client"]
+    current = service.installations.snapshot()[0]
+    assert current.activation is not None and legacy_permissions(current)["mode"] == "restricted"
 
 
-def test_complete_preview_has_no_twenty_path_truncation(tmp_path):
+def test_complete_preview_has_no_twenty_path_truncation(tmp_path, monkeypatch):
     service = installed_manager(tmp_path)
+    fake_sandbox_ready(monkeypatch)
     roots = [(tmp_path / f"project-{i}").resolve() for i in range(25)]
     for root in roots:
         root.mkdir()
@@ -237,11 +279,10 @@ def test_loaded_legacy_default_reaches_real_management_executor(tmp_path, monkey
         load_config(path), original.context.threads, actor_id="tester", channel="chat", conversation_id="session", is_admin=True)
     service = PluginManagement(context)
     calls = fake_processes(monkeypatch)
+    fake_sandbox_ready(monkeypatch)
     response = preview(service)
     assert response["details"]["confirmation"]["mode"] == mode
     result = confirm(service, response)
-    if mode == "restricted":
-        assert result["details"]["reason"] == "legacy_sandbox_pending" and calls == []
-    else:
-        assert result["state"] == "succeeded" and legacy_permissions(service.installations.snapshot()[0])["mode"] == mode
-        assert calls == ["prepare", "client"]
+    assert result["state"] == "succeeded", result
+    assert legacy_permissions(service.installations.snapshot()[0])["mode"] == mode
+    assert calls == ["prepare", "client"]

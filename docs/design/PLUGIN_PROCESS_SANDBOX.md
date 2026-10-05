@@ -77,6 +77,7 @@
 - 网络：`network:false` 时 Linux `--unshare-net`、macOS `(deny network*)`；macOS `network:true` 仍由 G4 实际绑定端口表拒绝 Gateway 端口。Linux 在 v8 插件沙箱接入 G5 Landlock `CONNECT_TCP` 端口拒绝前，以 `gateway_port_isolation_unavailable` 拒绝 `network:true`，接入并验证端口边界后才可放开。MCP 的宿主通信仍走标准输入输出。
 - 收窄读：隐藏 Gateway 用户整个家目录；在其中只放行插件自己的环境、自己的数据目录及宿主核验的解释器前缀。数据根、会话、记忆、secrets、`.ssh` 等其它家目录内容均不可见。macOS 用 `private_read_roots` 拒读 + `_ancestor_metadata_rules`；Linux 整根只读形态先 tmpfs 覆盖隐藏根，再将授权根挂回。
 - 共用受限策略入口：`plugin_restricted_sandbox_spec(*, cwd, data_dir, owner_home, policy: PluginRestrictedSandbox) -> AttemptSandboxSpec`；`plugin_sandbox_spec(..., sandbox_policy=...)` 将 v8 与老插件受限策略路由到同一构造器。`policy` 由宿主提供有限 `read_roots`、`write_roots`、`execute_roots`、`network` 和 `hidden_read_root`，候选预检、业务连接及面板连接只复用规格，不复制 Seatbelt/bwrap 规则。根路径必须是仍存在的普通目录或文件；目录根只开放该目录，文件型程序根只开放真实文件，不扩大到父目录。Linux 收窄读形态只对真实目标 bind，再用 `--symlink` 重建经核验的原始入口；Seatbelt 逐条允许 alias 与 realpath，写规则仍只落已授权写目标。读/执行根或写根若覆盖隐藏根则失败关闭。`execute_roots` 表示宿主核验的启动程序可见根，不替代更广义的子进程 `execve` 策略。
+- 老插件受限策略接线（opp 第四段，2026-10-05）：v1–v6 restricted 的 `PluginRestrictedSandbox` 由固定 `permission_json` 经 `policy_from_grant` 投影（隐藏 Gateway 用户家目录）；候选/业务/面板/重连在 `PluginMCPClient` 构造与 `start()` 前复核完整授权事实，随后经 `plugin_sandbox_spec` + `sandboxed_plugin_argv` 同一入口包装，不再停在 `legacy_sandbox_pending`。真实子进程验收由沙箱外车道执行。
 - 详见 DESIGN_LEDGER 的 B7 条目与 `PLUGIN_EVENT_HOOKS.md` 第 10、16 节。
 
 ## B7 老格式受限策略的读取底图（rdfloor，2026-10-05）

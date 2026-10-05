@@ -1,5 +1,6 @@
 """3a 裁定的授权合同；只使用临时文件，不运行插件或 OS 沙箱。"""
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -9,7 +10,7 @@ from agent_py_agent.agent.plugin_permissions.grants import (
     permission_mode,
     select_permissions,
 )
-from agent_py_agent.agent.plugin_permissions.sandbox import SandboxBase, sandbox_for_permissions
+from agent_py_agent.agent.plugin_permissions.sandbox import policy_from_grant
 from agent_py_agent.agent.plugin_runtime_facts import confirmation_code
 from agent_py_agent.tests.test_plugin_activation import activation_fixture
 
@@ -92,18 +93,13 @@ def test_program_content_change_invalidates_confirmation(tmp_path):
     assert confirmation_code(before) != confirmation_code(after)
 
 
-def test_b7_missing_fails_closed_and_contract_includes_extra_programs(tmp_path):
+def test_restricted_policy_projects_roots_network_and_hidden_root(tmp_path):
     _, entry, request = activation_fixture(tmp_path)
     project, program = roots(tmp_path)
     details = permission_details(entry, request.activation.plan,
                                  select_permissions({"read_roots": [str(project)], "program_roots": [str(program)], "network": True}),
                                  "restricted")
-    base = SandboxBase("/fixed/package", "/fixed/data", "/fixed/python", ("/fixed/system",))
-    with pytest.raises(RuntimeError, match="legacy_sandbox_pending"):
-        sandbox_for_permissions(details, base)
-    received = []
-    sandbox_for_permissions(details, base, lambda contract: received.append(contract))
-    assert len(received) == 1
-    assert received[0].network is True and received[0].program_roots == (str(program),)
-    assert received[0].read_roots == (str(project),)
-    assert received[0].base == base
+    policy = policy_from_grant(details)
+    assert policy.network is True and policy.execute_roots == (program,)
+    assert policy.read_roots == (project,) and policy.write_roots == ()
+    assert policy.hidden_read_root == Path.home()

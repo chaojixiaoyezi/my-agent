@@ -16,6 +16,7 @@ from agent_py_agent.agent.runtime_db.host_commands import HostCommandIdentity
 from agent_py_agent.tests.test_plugin_legacy_management import (
     confirm,
     fake_processes,
+    fake_sandbox_ready,
     fake_settled_deactivation,
     installed_manager,
     preview,
@@ -200,31 +201,31 @@ def test_nonadmin_authorization_never_rewrites_request_or_creates_owner(tmp_path
 
 def test_cleanup_report_presence_cannot_claim_old_authority_was_revoked(tmp_path, monkeypatch):
     service = installed_manager(tmp_path)
-    first = preview(service)
-    before = service.installations.snapshot()[0]
-    assert before.activation is None
+    fake_sandbox_ready(monkeypatch)
+    calls = fake_processes(monkeypatch)
+    assert confirm(service, preview(service))["state"] == "succeeded"
+    old = service.installations.snapshot()[0]
     monkeypatch.setattr("agent_py_agent.agent.plugin_enable_tool.retire_for_enable", lambda context, entry: (
         entry, {"cleanup_confirmed": True, "released": True, "authority_revoked": True}))
-    calls = fake_processes(monkeypatch)
-    result = confirm(service, first)
-    assert result["details"]["reason"] == "legacy_sandbox_pending", result
+    result = confirm(service, preview(service, request="reenable"))
+    assert result["details"]["reason"] == "revision_conflict", result
     assert result["details"]["commit_state"] == "not_committed", result
-    assert service.installations.snapshot()[0] == before and calls == []
+    assert service.installations.snapshot()[0] == old and calls == ["prepare", "client"]
 
 
-def test_actual_old_release_marks_restricted_pending_as_committed(tmp_path, monkeypatch):
+def test_actual_old_release_reenables_restricted_through_b7(tmp_path, monkeypatch):
     service = installed_manager(tmp_path, legacy_sandbox_default=False)
     calls = fake_processes(monkeypatch)
+    fake_sandbox_ready(monkeypatch)
     assert confirm(service, preview(service))["state"] == "succeeded"
     old = service.installations.snapshot()[0]
     retired = fake_settled_deactivation(monkeypatch)
     service = PluginManagement(replace(service.context, legacy_sandbox_default=True))
     result = confirm(service, preview(service, request="reenable"))
-    assert result["details"]["reason"] == "legacy_sandbox_pending", result
-    assert result["details"]["commit_state"] == "committed", result
+    assert result["state"] == "succeeded", result
+    assert retired == [old.activation_id] and calls == ["prepare", "client", "prepare", "client"]
     current = service.installations.snapshot()[0]
-    assert current.activation is None and current.last_commit.action == "release"
-    assert retired == [old.activation_id] and calls == ["prepare", "client"]
+    assert current.activation is not None and current.activation_id != old.activation_id
 
 
 @pytest.mark.parametrize("kind", ["read_inode", "write_inode", "program_inode", "program_content"])
@@ -287,3 +288,45 @@ def test_changed_installation_snapshot_before_retirement_preserves_old_active(tm
     assert observed == [True]
     assert service.installations.snapshot()[0] == old and old.enabled and old.activation.phase == "active"
     assert retired == [] and calls == ["prepare", "client"]
+
+
+def test_retirement_changing_installation_version_never_publishes(tmp_path, monkeypatch):
+    """撤旧过程本身换掉安装版本：与预测 target 不符时必须拒绝、零发布（M3 第二道守卫）。"""
+    service = installed_manager(tmp_path, legacy_sandbox_default=False)
+    calls = fake_processes(monkeypatch)
+    assert confirm(service, preview(service))["state"] == "succeeded"
+    old = service.installations.snapshot()[0]
+    retired = fake_settled_deactivation(monkeypatch)
+    first = preview(service, request="reenable")
+    from agent_py_agent.agent.plugin_permissions import enable as enable_module
+
+    def drifted_retire(context, entry):
+        # 撤旧真实发生，但换了另一个撤旧操作：产生同版本号、不同事实的快照，与确认时预测的 target 不符。
+        result = enable_module.deactivate_plugin(context.owner, context.repository, entry, "fixture-retirement-drift")
+        return result.installation, None
+
+    monkeypatch.setattr("agent_py_agent.agent.plugin_enable_tool.retire_for_enable", drifted_retire)
+    result = confirm(service, first)
+    assert result["state"] == "failed" and result["details"]["reason"] == "revision_conflict", result
+    current = service.installations.snapshot()[0]
+    assert current.revision == old.revision + 2 and current.activation is None and not current.enabled
+    assert retired == [old.activation_id]
+    assert calls == ["prepare", "client"]
+
+
+def test_refresh_requires_new_preview_when_facts_changed(tmp_path, monkeypatch):
+    """同身份、新事实：刷新后确认码不匹配，必须重新预览、零执行；新预览的码可继续。"""
+    service = installed_manager(tmp_path, legacy_sandbox_default=False)
+    path, flags = permission_target(tmp_path, "read_inode")
+    first = preview(service, flags)
+    before = service.installations.snapshot()[0]
+    calls = fake_processes(monkeypatch)
+    change_target(path, "read_inode")
+    stale = confirm(service, first)
+    assert stale.get("error_code") == "PLUGIN_CONFIRMATION_REQUIRED", stale
+    fresh = stale["details"]["confirmation"]
+    assert fresh["confirm_code"] != first["details"]["confirmation"]["confirm_code"]
+    assert fresh["authorization_id"] != first["details"]["confirmation"]["authorization_id"]
+    assert fresh["confirm_command"] in stale["message"]
+    assert service.installations.snapshot()[0] == before and calls == []
+    assert confirm(service, stale, "fresh-transport")["state"] == "succeeded"

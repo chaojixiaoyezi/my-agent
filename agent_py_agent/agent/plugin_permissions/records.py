@@ -60,7 +60,7 @@ def validate_activation_permission(activation) -> None:
         raise ValueError("持久授权记录字段无效")
     if (value["kind"] != "plugin_legacy_permissions" or type(value["policy_version"]) is not int
             or value["policy_version"] != 1 or value["mode"] not in {"restricted", "wide"}
-            or value["sandbox_status"] != ("pending_b7" if value["mode"] == "restricted" else "not_required")):
+            or value["sandbox_status"] != ("platform_sandbox" if value["mode"] == "restricted" else "not_required")):
         raise ValueError("持久授权策略无效")
     if (value["activation_id"] != activation.activation_id or value["plan"] != asdict(activation.plan)
             or value["plugin_id"] != activation.plan.plugin_id or value["package_sha256"] != activation.plan.package_sha256):

@@ -1,6 +1,6 @@
 # 老格式插件权限盘点与收严方案（opp）
 
-当前实施状态（2026-10-04）：第三段本身经9b终审通过（3a转交，含外部wide真实链探针）；opp4补真实启用回归协议、准备前/撤旧前守卫用例与刷新不变式。B7仍未接，整系列WIP、不可部署，见6.5–6.6及台账顶部。以下初始状态、1–5节源码盘点与7节只读验证是2026-10-03的历史阶段记录，不能当作当前产品状态。
+当前实施状态（2026-10-05）：第三段本身经9b终审通过（3a转交，含外部wide真实链探针）；opp4补真实启用回归协议、准备前/撤旧前守卫用例与刷新不变式；opp6 已接 B7 第四段（四启动入口复核 + restricted 经统一底座施加，见6.6）。整系列仍 WIP、待沙箱外复跑与终审，暂不可部署，见6.5–6.6及台账顶部。以下初始状态、1–5节源码盘点与7节只读验证是2026-10-03的历史阶段记录，不能当作当前产品状态。
 
 状态：**方案待 3a 定**。日期：2026-10-03。盘点基点：`worker/plugin-legacy-permissions`，step17i `c47d023b61bc1acb211326d731d0f98bb2e00383`。
 
@@ -258,21 +258,21 @@ v7 不在 `plugins/` 的 17 个样例中；补看 `examples/capability-packages/
 
 ds1 第二段必须改（3a转述）：C10 两例期望“启用前需要你确认”前缀。采用产品保留原首句、追加5.1节所需完整新段，原测试断言不变。亲自以 `git merge-base origin/main HEAD` 的 `22e02c668b88a4685738d43e0b02f53d4fb1675f` 导出基线并运行同两例：基线通过、原本树失败，格式修复后绿，不是既有失败。
 
-建议项一起处理：显式 authorization 必须匹配本次 request_id 且带 permit 前缀，独立负例不靠确认码兜住；非管理员带授权不改运输请求身份、不创建 owner、不读预览；authorization_target 与 retire_for_enable 有意各算一次 retirement_operation，执行器核实际释放记录与完整预测目标相等；restricted 未接 B7 的失败 commit_state 以旧激活和原表同撤旧子提交 release 回执为依据，不以报告存在推定已撤权。
+建议项一起处理：显式 authorization 必须匹配本次 request_id 且带 permit 前缀，独立负例不靠确认码兜住；非管理员带授权不改运输请求身份、不创建 owner、不读预览；authorization_target 与 retire_for_enable 有意各算一次 retirement_operation，执行器核实际释放记录与完整预测目标相等；restricted 未接 B7 时的失败 commit_state 曾以旧激活和原表同撤旧子提交 release 回执为依据（opp6 接 B7 后该 pending 失败点随 `retirement_committed` 一并移除，撤旧守卫由 `entry != target` 比对继续承担），不以报告存在推定已撤权。
 
 验证：相关15文件337项、guards完整十文件173项，均零失败/错误/跳过；八个本段单处变异均行为红、原字节/SHA恢复、同目标绿，包含 ds1 原存活的请求绑定点。32个中文空格长路径预览经原客户端、IM/HTTP handler、真实管理与原请求重送完整保留并回填；HTTP、准备、MCP及退出边界是替身，**真实 TUI 渲染、飞书分段完整送达/送达门与 OS 隔离未验证**，源码复验也不是原子 OS 路径隔离。详见 TESTS 第三段实际命令与失败/修复记录。
 
-断点：统一候选/业务/面板的 B7 精确接口和实际底座仍未接；真实 macOS/Linux、样例/桌面/G2b、生产回滚与本段非作者/9b终审仍待。restricted 当前继续明确 `legacy_sandbox_pending`、不启动候选；不复制 Seatbelt/bwrap 规则、不把授权、请求构造或单测当真实隔离，不可部署。
+断点：B7 第四段已由 opp6 接上（候选/业务/面板/重连统一经 `PluginMCPClient` 复核并复用 B7 公共规格）；真实 macOS/Linux、样例/桌面/G2b、生产回滚与本段非作者/9b终审仍待。restricted 现经统一底座在每次启动时施加；不复制 Seatbelt/bwrap 规则、不把授权、请求构造或单测当真实隔离，不可部署。
 
 ### 6.6 启用回归与启动复验验收（opp4，2026-10-04，WIP）
 
 原五文件21条真实启用回归仍保留：测试夹具显式选不受限模式，拿完整权限预览，原样提交 `confirm_command`，用该次 `authorization_id` 作为确认请求编号；v6运行事实从 `runtime` 读取，不再只补旧确认码。Python、Node、Go、沙箱与五工具用例继续使用实际环境准备和候选/业务进程，原成功/active、目录拒发布、固定解释器、写边界、清理及UNKNOWN断言不删除、不跳过。已经active的进程插件重新启用必须先完整预览，未确认仍保持旧代，不再断言旧 enabled 免确认旁路。
 
-权限用例继续保护产品默认true、restricted在B7未接时明确拒绝且零启动；wide只是本组回归的显式测试模式，不修改配置默认或用它代表收紧验收。ds8 M1在preparing提交后、prepare之前注入漂移，必须零prepare；M3在确认检查后、撤旧前的真实执行器快照边界注入安装版本变化，必须revision_conflict、零撤旧且原active记录不变。替身仅用于这两条时序探针的进程边界，不替换五文件真实链。
+权限用例继续保护产品默认true；restricted 在 B7 未接时曾明确拒绝且零启动（opp6 接上 B7 后改为经统一底座施加，见下段）；wide只是本组回归的显式测试模式，不修改配置默认或用它代表收紧验收。ds8 M1在preparing提交后、prepare之前注入漂移，必须零prepare；M3在确认检查后、撤旧前的真实执行器快照边界注入安装版本变化，必须revision_conflict、零撤旧且原active记录不变。替身仅用于这两条时序探针的进程边界，不替换五文件真实链。
 
 `_permission_confirmation` 刷新 `self.runtime/target/plan/grant` 是有意的：旧码一旦不匹配刷新后的事实，只能给下一次完整预览；仅最新确认码和授权身份均匹配才调用 `_enable`，其消费的就是管理员最后确认的授权。不能在刷新后追加“自动沿用旧同意”的逻辑。
 
-**B7第四段必须实现并验收（本次未实现）**：候选、业务、面板、重连每次启动都重新核对完整授权事实与固定激活的 `permission_json` 一致；覆盖根inode/程序内容/解释器、包/安装/代次/策略/网络的变化，拒绝且零启动，不自动换绑、扩权或降wide。只在启用时验证不足以覆盖9b接受的最后复核→发布TOCTOU边界；OS规则由B7公共规格施加，不复制第二套规则。
+**B7第四段（opp6 已实现并验收，2026-10-05）**：候选、业务、面板、重连四个启动入口都经 `PluginMCPClient` 的构造与 `start()` 复核：鲜活读表确认固定激活仍在（未撤销、未换代），再按固定 `permission_json` 重算安装/包/激活身份、激活计划、受限根 inode 与程序内容、解释器事实（`verified_runtime_command`，stat 优先）与模式/网络；任何变化抛结构化 `LegacyLaunchDenied`（`legacy_permission_changed` 等），零启动、不自动换绑、不扩权、不降 wide。`installation_ref` 随提交漂移，只用于确认码绑定，不作为复核判据。restricted 不再停在 `legacy_sandbox_pending`：策略由 `policy_from_grant` 投影为 B7 的 `PluginRestrictedSandbox`，启动命令经 `plugin_sandbox_spec` + `sandboxed_plugin_argv`（与 v8 同一入口）包装，读写墙与网络由统一底座施加；沙箱不可用（含 Linux `network:true` 的端口隔离缺口）在启用预检与启动构造两处结构化拒绝。wide/`legacy_compat` 只复核身份与策略、不进受限沙箱，`plugin_legacy_sandbox_default=true` 不变。验收：四入口"事实变化 → 零启动"用例、restricted 经 B7 施加的 argv/spec 合同用例、wide 显式模式用例见 TESTS；5 个单点变异全部杀死；真实沙箱子进程与沙箱外复跑由 3a 执行。
 
 3a路线：不降低 `plugin_legacy_sandbox_default=true`；B7正式接口接上后整个opp系列同批进17j，赶不上整体17k。v4表及显式回滚成本不拆两次上线。当前版本的外部五文件与真实链探针仍待9b复跑；本线实际失败/跳过及两版对照见TESTS，不能用旧探针或基线替当前OS/渠道验收。
 
