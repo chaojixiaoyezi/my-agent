@@ -1,5 +1,12 @@
 # 记忆与上下文维护状态
 
+## 缓存诊断组合反例返工（cachediag3，2026-10-05，本地定向验证完成，WIP：完整守卫缺文件；待非作者复审与 3a 终审）
+
+- 累计与已计数身份同快照保存、整体恢复；旧内存重发和交错重发不再重复累计，不新增费用账本。
+- 长度变化缺可比末点时明确不可比，而非猜测纯追加/截短；已证明的改写和组件变化保留。
+- 九文件 273 passed、原十一守卫 187 passed、三变异 KILLED、新增尺寸告警 0；外部清单第十二项不在本树，完整清单未通过，不能写全门禁完成。
+- 详细合同见本模块 `04-structure.md` 与 `docs/design/LONG_RUNNING_EXECUTION.md`；实际验证记录见 `TESTS.md` 的 cachediag3 节。
+
 ## cachecompact/cachecompact2 压缩缓存前缀（2026-10-05，worker/cache-compact；本地实现，待终审）
 
 - 可容纳的单次压缩请求携带与主请求相同的 system/tools/native messages，并将 `tool_choice` 设为 `auto`；压缩目的按 thread 读取相同 thinking/reasoning_effort。结构化工具调用不会执行，只触发一次无工具/`none` 重试。

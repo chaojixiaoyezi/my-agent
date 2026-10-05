@@ -1,5 +1,93 @@
 # 测试与发布验收
 
+## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；定向验证完成，WIP：完整守卫缺文件待补）
+
+- **来源/改法**：cachediag2r 两条必须改反例。累计值与已计数调用 SHA256 集合同快照持久化/恢复；较新快照整体选取。长度变化缺共同末点时采用不可比方案（`comparable=false / partial=true`），而非猜测纯追加/截短。
+- **复现入口**：`test_tui_model_metrics` 复用真实结算、`provider_attempt`、`publish_model_metrics` 与 `ConversationStore` 重载；stale/cleared 两状态下同 call-b 重发必须仍 1，交错 B/C/B 必须仍 2，身份与计数一起读回，身份投影不得带原文。尾块用 `request_surface`、比较与公共投影核 31→32、4097→4098。
+- **先红证据**：产品仍为 `ffca71c54` 时，下列定向命令实际 **10 failed、50 deselected（exit 1）**：两反例错误报追加；同 call-b 重发两参数计数 2≠1；交错重发 3≠2；身份字段缺失。没有导入/准备失败。
+- **旧场景保留且收紧证明**：原 1→2、4096→4095 输入没有删除，新增 `comparable=false / partial=true` 与共享前缀断言；增加 32→33→32、4096→4064，保留可证明纯追加/截短的原原因码断言。不齐块纯追加亦有严格不可比回归。旧期望按本次明确授权的不可比合同改正，不以跳过或字段存在代替行为。
+- **运行口径**：工作树根，唯一 Python；pytest 显式文件、串行、`--basetemp=/private/tmp/claude-501/m-ds2`（任务指定代号）；`-o addopts=''` 仅为了保留汇总，不改变断言或跳过测试。
+
+```sh
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/tests/test_tui_model_metrics.py -k 'unaligned or missing_shortened_tail or persisted_newer_identity or interleaved_settled or counted_call_projection' -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-ds2
+```
+
+- **当前版本回归**：相关九文件 **273 passed / 31.63s**，无 skip/xfail；下面命令显式列文件，实际串行执行。初次全文件曾 2 failed / 58 passed，原因是旧 1→2、4096→4095 期望仍把未证明末块当纯追加/截短；按授权保守合同收紧标志和前缀断言，并保留原输入，之后九文件全绿。
+
+```sh
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/tests/test_tui_model_metrics.py agent_py_agent/tests/test_decision_usage_metrics.py agent_py_agent/tests/test_decision_model_call.py agent_py_agent/tests/test_reasoning_effort.py agent_py_agent/tests/test_subagent_first_request_selection.py agent_py_agent/tests/test_tool_request_projection.py agent_py_agent/tests/test_context_calibration_carry.py agent_py_agent/tests/test_context_pressure_native_trigger.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-ds2
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py agent_py_agent/tests/test_constants_catalog.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-ds2
+```
+
+- **守卫真实边界**：上面本树存在的原十一文件 **187 passed / 40.68s**，包括 packaging。当前外部 `guards9.txt` 实际多了第十二项 `agent_py_agent/tests/test_backend_signature_guardrails.py`；首次照十二项完整执行，**exit 4 / no tests ran**（找不到该文件），不是产品断言失败，也未把它算作 skip 或通过。`find_files` 无命中，`git ls-tree ffca71c54 -- <该路径>` 输出为空；未改外部清单、未借其它版本伪补守卫。**完整清单未通过**，待 3a 在匹配版本上补此项，因此本件以 WIP 交接。
+- **三独立单点变异（最终实现与收参后的 helper）**：用指定 Python 的 `inspect.getsource` 复制单函数，仅替换一处表达式、内存 `exec`/替换原模块函数，不改磁盘；`pytest.main` 跑上面的同参数目标节点（仅变异仪器设置 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`，两目标为同步产品入口）。每个均发生 test call 阶段断言失败，非 collection/setup 错误；`finally` 立即恢复函数 identity 和两产品文件 SHA256。变异前 **2 passed / 0.75s**，全部恢复后 **2 passed / 0.10s**。
+
+| 变异 | 单处改法 | 实际结果 |
+| --- | --- | --- |
+| M1 已计数身份不持久化 | `public_model_metrics` 的 `counted_calls = public_cache_counted_calls(...)` 改为空列表 | stale 同 call-b 回放 2≠1；1 failed / exit 1，KILLED |
+| M2 漏比末块直接归追加 | `_history_changes` 的 `shared < min(...)` 分支改为 `if False` | 31→32 改写＋追加错误报 `history_appended`；1 failed / exit 1，KILLED |
+| M3 不可比仍报可比 | `_history_changes` 的 `return [], None, shared, False` 改为 True | `comparable` True≠False；1 failed / exit 1，KILLED |
+
+- **其余门禁**：`$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_import_boundaries.py` → findings=0；`$PY scripts/check_doc_sync.py --base ffca71c54` → DOC_SYNC_PASS；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2202、hard=0、high-risk=1505、soft=697、test_advisory=1234、blocked=False；`git diff --check` 通过；`$PY scripts/check_clean_package.py .` → OK，无发布阻塞项。
+- **尺寸差集**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` 最终 **新增告警 0、消失告警 41**。初次抓到测试 helper `_cache_call` 四参数新增 1 条；把夹具三项收成一个 sample 入参后重跑上述当前版本回归、三变异和尺寸差集归零。生成 `CODE_SIZE_REPORT.md` 按规则恢复，不提交。
+- **旧节口径**：下面 cachediag/cachediag2 数字保留作者当时回执，不作为本次验证结果；当前数字以上述实际命令为准。
+- **未验证**：真实端点缓存、生产重启/重放、真实 TUI/IM、Linux 全量；本轮不联网、不启动 Gateway、不读取真实会话或凭据。
+
+## 缓存诊断修正：共享前缀证明边界、v1 基线、发布幂等、跨重启累计、别名去重（cachediag2，2026-10-05，分支 `worker/cache-diag`，待 sol3 复审）
+
+- 改动：`agent_py_agent/agent/backends/cache_diagnostics.py`（`_divergence_point`/`_history_changes` 按 index 对齐并收窄共享前缀、`comparable` 结构化标志、别名签名去重、`change_codes()` 注释）、`agent_py_agent/agent/conversation/model_metrics.py`（发布幂等、跨重启基数、`_merge_response_metrics` 拆分）。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD $PY -m pytest test_cache_diagnostics.py test_tui_model_metrics.py test_decision_usage_metrics.py test_decision_model_call.py test_reasoning_effort.py test_subagent_first_request_selection.py test_tool_request_projection.py test_context_calibration_carry.py test_context_pressure_native_trigger.py -q` → **266 passed**。
+  - guards9（11 文件）→ 全过；ruff 通过；import boundaries 0；`check_doc_sync --base f8858179c` PASS；strict code-size hard=0；`git diff --check` 干净；clean package OK；size_diff 新增告警 0（先抓到 `_publish_metrics` 变长 1 条，抽 `_merge_response_metrics` 拆平后归零）。
+- 新用例（`test_cache_diagnostics.py`）：共享前缀证明边界（64 改第 1 条=0、改第 33 条=32）；v1 基线 `comparable=False` 且投影保留标志；别名只报一次（换写法与真换档位都一次）；窗口滚动 4096→4097 追加、4096→4095 截短；10000 条宽松性能守卫。
+- 新用例（`test_tui_model_metrics.py`）：重发布不重复累加（`thinking_changed` 保持 1，内存与持久都不变）；换新 ledger + 清空状态后计数保持（跨重启只增不减）。
+- 旧断言按新语义更新（不删断言）：追加/截短从 `history_prefix_changed` 改为 `history_appended`/`history_shortened`；600 条改第 600 条的共享前缀从 599 改为 576（只能证明到上一个相同检查点）。
+- 变异（各只改一处，按字节还原）：
+  | 变异 | 结果 |
+  | --- | --- |
+  | 共享前缀退回虚报（divergent-1） | KILLED（assert 31 == 0） |
+  | v1 基线当成可比（comparable 恒 True） | KILLED（assert True is False） |
+  | 发布幂等回退（无条件从 payload 诊断累加） | KILLED（thinking_changed 2 == 1） |
+  | 跨重启基数丢掉持久来源 | KILLED（KeyError: cache_change_counts） |
+  | 别名比较丢掉键名（退回纯值摘要） | KILLED（options_changed == reasoning_effort_changed） |
+  | 窗口滚动退回按列表位置 zip | KILLED（history_prefix_changed == history_appended） |
+- 性能实测（本机，`request_surface`）：2000 条约 4.7 ms、4000 条约 9.5 ms、10000 条约 23 ms，低于 50 ms 阈值，未做增量化。
+- 未验证：真实 API 端到端读数（需联网与密钥）；`test_cache_prefix_*.py` 在另一个工作树，未跨分支跑。
+
+## 缓存诊断补全：链式摘要、分区选项单报、累计计数（cachediag，2026-10-04，分支 `worker/cache-diag`，待初审）
+
+改动：`agent_py_agent/agent/backends/cache_diagnostics.py`（`request_surface.v2` 链式检查点、`compare_request_surfaces` 分块定位与分区原因码、`public_cache_diagnostic` 新键与 `partial` 新语义）、`agent_py_agent/agent/conversation/model_metrics.py`（`cache_change_counts` 累计与投影白名单）。
+
+关键上限（写进代码注释，不新增配置项）：块大小 32 条、最多 128 个检查点、覆盖上限 4096 条；超过后只保留尾部窗口并置 `partial=true`。选这个上限的理由：旧实现 512 条是“扫描规模”与“可见范围”被同一常量绑死；拆开后按块抽稀，128 块把可证范围放大 8 倍，保存量仍是固定 128 条摘要（每块一个），不会随线程长度增长。
+
+命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`PYTHONPATH=$PWD`）：
+
+```text
+$PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/tests/test_tui_model_metrics.py agent_py_agent/tests/test_decision_usage_metrics.py -q → 56 passed
+```
+
+新用例：
+
+- `test_rewrite_far_past_the_old_512_limit_is_reported_with_its_block`（`test_cache_diagnostics.py`）：600 条历史里改写第 600 条 → 报 `history_prefix_changed`、块号 600、共享前缀 599；改写第 10 条 → 块号 32。旧实现只能看到前 512 条。
+- `test_thinking_and_reasoning_effort_changes_get_their_own_codes`：thinking 变化报 `thinking_changed`；`reasoning_effort` 从无到有、从 high 到 low 都报 `reasoning_effort_changed`；其它选项仍只报 `options_changed`，分区变化时不重复报。
+- `test_change_counts_accumulate_across_calls_and_never_decrease`：三次比较累计只增不减；未知码不进计数。
+- `test_legacy_records_without_new_fields_still_read`：旧格式（无 `cache_change_counts`、无 `changed_block_index`）照常读，缺失字段不补 0。
+- `test_cache_change_counts_accumulate_and_survive_store_reload`（`test_tui_model_metrics.py`）：走真实 `publish_model_metrics` 三次调用（前缀改写 + 推理强度分区），累计写在会话记录里、`ConversationStore` 重载后仍是同一份。
+- 旧用例按新语义更新（断言未删）：`test_append_and_compact_are_different_diagnostics`（追加也报 `history_prefix_changed`，带块号）、`test_large_history_is_explicitly_partial`（600 条不再 partial，4097 条才 partial）、`test_public_diagnostic_never_persists_raw_values_or_server_guesses`（共享前缀不再截到 512）。
+
+变异（每次只改一处，跑完按字节还原）：
+
+| 变异 | 结果 |
+| --- | --- |
+| M1 链式摘要退回“只散列本条” | KILLED（600 条改写用例） |
+| M2 分区选项混回 `options_changed` | KILLED（跨调用累计用例） |
+| M3 累计只取本次、不累加历史 | KILLED（跨调用累计用例） |
+
+实测暴露并修掉的两个真缺陷：`change_codes()` 初版漏收三个 `history_*` 历史码；`_add_cache_change_counts(None, …)` 对 `None` 取 `items()` 抛异常（被外层兜底吞掉，表现为整条统计丢失）。
+
+未验证：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；sol1 / luna3 的修复不在本分支。
+
 ## TUI 本地会话登记恢复（sessrec，2026-10-05；待非作者初审）
 
 - **复现与修复**：隔离 `tmp_path` owner home 中创建登记后调用 `SessionManager.delete_session`，保留同 owner 的 canonical `ConversationStore` thread。修复前恢复正例失败（resume 返回 3）；修复后登记重建、resume 转入 chat、审计条目存在且无正文。owner_id 和 owner_home 各一条不匹配负例均拒绝。

@@ -352,7 +352,17 @@ system/tools/messages 前缀及同 thread 的 thinking/reasoning_effort；有工
 ## 缓存前缀诊断
 
 `backends/cache_diagnostics.py` 在 HTTP 实际出站处生成摘要，`ModelCallLedger` 按同 thread 比较。
-只追加、历史缩短及 system/tools/model/选项变化分开，超过 512 消息明确部分比较；不改变 Compact 或记忆。
+2026-10-04（cachediag）起摘要是链式的：每条消息的链值把上一条链值算进去，再按 32 条一块抽稀成最多 128 个检查点
+（4096 条内可保留全部块检查点，末尾消息必是检查点）。共同检查点按自身 `index` 对齐；首个不同链值证明改写，报
+`history_prefix_changed` 与块号；`shared_message_prefix` 只报到它之前最后一个相同检查点，不声称块内更早消息相同。
+链值扫描全部消息，窗口外改写仍会影响后续链值，但超过 128 个检查点只保留尾部，定位能力有限；旧 v1 不能与 v2 比历史。
+2026-10-05（cachediag3）起，长度变化又缺少较短历史末点的共同证据时，保留已证明前缀，`comparable=false / partial=true`，
+不报纯追加或纯截短；31→32、4097→4098 即使实际上只追加也如此。只有较短历史完整被相同检查点证明，才报追加/截短。
+`partial` 表示定位/比较证明不完整，不再是“截到 512 条”。组件及分区选项仍独立比较；`thinking_changed`、
+`reasoning_effort_changed` 单报，其余选项为 `options_changed`；客户端诊断不能证明服务端缓存命中。
+`cache_change_counts` 与 `cache_counted_calls`（调用身份 SHA256）来自同一较新 `model_metrics` 快照并一起经原线程保存/恢复，
+不再拼接持久基数与旧回合身份；同调用或交错重发不重复累计。新结算时身份集合随账本保留明细收敛，已裁掉调用没有新诊断可再累计；
+无新诊断则不裁身份。旧记录缺身份仍可读、历史次数保留，但不能倒推出升级前哪些调用已计数。不改变 Compact 或记忆，不新增用量账。
 采集本身常开：`backends/cache_diagnostics.py` 的开关已降为读取点旁的具名常量，不再可配置，不新增另一份用量账。
 context-pressure 的连接校准指纹（2026-09-30 起）只收跨进程稳定、不含凭据的分词身份：模型档案、地址、`model_backend`、鉴权方式
 （`auth_ref` 只取 `mode`），不再经进程加盐摘要，所以 Gateway 重启后线程上的校准仍可用；密钥与请求头不进指纹。

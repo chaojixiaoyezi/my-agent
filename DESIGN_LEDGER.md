@@ -1,5 +1,45 @@
 # 设计台账
 
+## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；本地实现及定向验证完成，WIP：完整守卫缺文件；待非作者复审及 3a 终审）
+
+- **来源**：cachediag2r 初审两条产品入口反例获 3a 认可：新持久基数＋旧内存身份重发把 1 算成 2；31→32、4097→4098 旧末块改写后追加误报纯追加。旧节为历史实施记录，以本节合同为准。
+- **累计同源**：`cache_change_counts` 与不可逆调用身份集合 `cache_counted_calls` 同属较新 `model_metrics` 快照，经原 `model_usage.update_metrics` 和线程锁一起持久化、恢复；移除回合内单独身份及逐码 max 拼接。旧状态、清状态、交错重发均按同一身份集合去重。
+- **有界身份**：新结算时收敛到原账本仍保留的调用明细；裁掉的调用无法经 exact call 再取到诊断，不会加次数。没有新诊断时不裁恢复的身份。只保存 SHA256，不保存 call_id 原文；旧快照缺身份可读且保留次数，但不反推升级前已计数调用。
+- **尾块选保守不可比**：不加快照字段、不保存额外摘要、不重算正文。同 index 的共同链值不同仍证明改写；若没有改写证据，又没有共同点证明较短历史完整稳定，则 `comparable=false / partial=true`、不报历史原因，只保留已证明前缀。实际只追加也不能越过这条证明边界；组件/分区选项继续独立报告。
+- **明确边界**：4096→4097 可证明纯追加；4096→4064 可证明纯截短；4096→4095 缺末点不可比，保留共享 4064。链值仍扫描全部消息，128 点仅限制定位，不是旧“只散列 512 条”。
+- **验证/状态**：反例先红（10 项失败），相关九文件 273 passed、原十一守卫 187 passed、三处独立变异全部 KILLED；其余静态与尺寸差集通过、新增告警 0。当前外部清单第十二项 backend_signature_guardrails 不在本树或基线，完整清单执行 exit 4，待补，详见 `TESTS.md`。不改请求组装、预算、Compact，不加配置；真实 DeepSeek、真实 Gateway/TUI/IM 未验证。
+
+## 缓存诊断修正：共享前缀证明边界、v1 基线、发布幂等、跨重启累计、别名去重（cachediag2，2026-10-05，分支 `worker/cache-diag`，基于 `c17b3596b`；待 sol3 复审）
+
+- **来源**：sol3 对 cachediag 的初审判“必须改”（报告 `decision-evidence/deepseek-cache-audit-1004/cachediagr-review-sol3.md`，原始事实 `/private/tmp/claude-501/m-cachediagr/checkpoint-facts.json`），五个问题逐条修，每条配用例；另修窗口滚动定位并给 `change_codes()` 补 LLM 注释。
+- **改法（`backends/cache_diagnostics.py`）**：
+  - **共享前缀不再虚报**：`_divergence_point` 按检查点自己的 index 对齐比较（窗口滚动会裁掉最前面的检查点，不能按列表位置 zip），共享前缀只报到“第一个不同检查点之前的那个相同检查点”为止；检查点不同只能定位到块，不能声称块内更早的消息相同（64 条改第 1 条从“报 31”改为 0；600 条改第 600 条从“报 599”改为 576）。
+  - **v1 基线不再误报**：基线 schema 与本次不同（旧 v1 快照没有链式检查点）时 `comparable=False`，不报 `history_*`，只比较两边都有的组件与整体 options；投影层保留该结构化标志（旧记录缺该键按可比较读）。
+  - **别名去重**：`reasoning` 与 `reasoning_effort` 用“键名集合 + 有效档位摘要”签名比较，换写法与真换档位都只报一次（原来报两条 `reasoning_effort_changed`，或落进 `options_changed` 兜底）。
+  - **窗口滚动定位**：4096→4097 只追加不再误报成块 32 的改写（现在报 `history_appended`、共享前缀 4096）；4096→4095 报 `history_shortened`（共享前缀 4064，只报到最后一个共同检查点）。
+  - `change_codes()` 补 LLM 层注释（说明它是持久化白名单单一来源）。
+- **改法（`conversation/model_metrics.py`）**：
+  - **发布幂等**：只有“带调用身份的新结算诊断”才累加一次；重发布同一份统计（无新模型调用、pending 状态刷新）不重复计数——原来会把继承的诊断再累加（1 → 2）。
+  - **跨重启只增不减**：累计基数取内存显示副本与持久线程记录里同一原因码的较大值；换新 ledger、清空回合状态后从持久记录恢复（原来内存和持久计数都会变空）。结算时找不到调用记录不再把已持久化的最近一次诊断清掉。
+- **性能实测**（`request_surface` 全历史链式扫描，本机）：2000 条约 4.7 ms、4000 条约 9.5 ms、10000 条约 23 ms——低于任务给的 50 ms 阈值，**不实现增量化**；用例里留一个 2 秒的宽松守卫只抓数量级退化（防慢 CI 假红）。
+- **变异**：六个修复点各一个，全部 KILLED（共享前缀退回虚报、v1 当成可比、发布幂等回退、跨重启丢持久基数、别名比较丢键名、窗口滚动退回位置 zip），产品文件按字节还原。
+- **验证**：见 `TESTS.md`“缓存诊断修正（cachediag2）”小节。
+- **未验证**：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；`test_cache_prefix_*.py` 在 `worker/cache-sim` 分支、本工作树没有，未跨分支跑（本分支只动诊断与投影，未改那组测试覆盖的接口）。
+
+## 缓存诊断补全：链式摘要去盲区、分区选项单报、累计计数（cachediag，2026-10-04，分支 `worker/cache-diag`，基于 17j 头 `f8858179c`；待初审）
+
+- **来源**：用户点名的 DeepSeek 缓存底座配套件。3a 官网实测（`decision-evidence/deepseek-cache-audit-1004/server_probe_facts.md`）：缓存按“思考开关 + 推理强度”分区，换任何一个整段不命中；两个根因（思考被误关、压缩请求档位不一致）分别由 sol1、luna3 修。产品自带的诊断有三个缺口：① 只散列前 512 条消息，长线程一律 `partial=true`，第 512 条之后被改写看不见；② `options_changed` 把 thinking / reasoning_effort 和别的选项混在一起，看不出换了缓存分区；③ 只保存最近一次比较，历史上断了多少次、因为什么断，事后查不到。
+- **改法（只动诊断模块、账本比较点和指标投影；不碰 `openai_chat.py` 与压缩请求组装）**：
+  - `backends/cache_diagnostics.py` 换成 **`request_surface.v2`**：每条消息的链值把上一条链值算进去（`_chained_digest`），再按 **32 条一块** 抽稀成检查点，**最多 128 块**，并保证最后一条消息本身也是一个检查点（末链值）。覆盖上限 = 32 × 128 = **4096 条**；超过就只保留尾部窗口，`partial` 为真。比较时先比末链值，不同就用 `_first_divergent_index` 找出第一个链值不同的块，报 `history_prefix_changed` 并带 `changed_block_index` 与 `shared_message_prefix`。
+  - `partial` 语义重定义（写进模块注释与 `public_cache_diagnostic`）：**不再表示“截到 512 条”，而是“尾部窗口之外还有消息没被链覆盖”**。旧记录里的 `partial=true` 按同一含义读，不会被当成另一种状态。
+  - 选项变化分两类：`thinking` / `reasoning_effort`（含 `reasoning` 别名）各自报 `thinking_changed` / `reasoning_effort_changed`——它们会切换服务端缓存分区；其余选项仍报 `options_changed`，且分区选项已变时不重复报第二条。只看 payload 的结构化键，不解析正文。
+  - `conversation/model_metrics.py` 新增 `cache_change_counts`：在 `_publish_metrics` 里按原因码逐次累加（只增不减），随显示副本持久化；白名单与 `cache_diagnostics.change_codes()` 共用一份，避免名单漂移。
+- **持久字段安全性**：`model_metrics` 在 `conversation/models.MODEL_HIDDEN_THREAD_FIELDS` 里，不进模型上下文；grep 过 `conversation/` 全目录，**没有任何对 thread 或 model_metrics 做内容摘要/指纹的地方**，新增键不会让旧记录读失败，也不会让已有摘要变样。新键只在有值时出现（无变化时不写空字典），旧记录缺它时按“从未发生”读。
+- **顺带修掉两个真缺陷**（都是写用例时实测暴露的）：`change_codes()` 初版漏收 `history_prefix_changed` / `history_shortened` / `history_appended` 三个历史码，会让累计计数静默丢原因；`_add_cache_change_counts(None, …)` 对 `None` 取 `items()` 会抛异常（被 `publish_model_metrics` 的兜底吞掉，表现为整条统计丢失）。
+- **验证**：见 `TESTS.md`“缓存诊断补全（cachediag）”小节。
+- **未验证**：真实 DeepSeek 请求上的端到端读数（需要联网与密钥，本轮不跑）；sol1 的思考开关修复、luna3 的压缩档位修复在本分支不存在，本件只保证“修复后有没有回退”能从结构化事实看出来。
+- **不做**：不改 `openai_chat.py`、不改压缩请求组装、不新增配置项。
+
 ## cachecompact2：Gateway压缩分区与active-turn前缀边界（2026-10-05，worker/cache-compact；本地实现与回归/静态门禁通过，真实服务指标未验证）
 
 - **Gateway遗漏复核**：旧 strict xfail 测试使用非生产 purpose=`compact`，且构造的辅助请求没有线程历史、tools；它不能证明 Gateway 前台压缩真的落在 default 分区。测试现改走真实 Gateway ask，首次成功请求建立历史，typed overflow 后由原恢复链执行 Compact，再重发业务请求。真实摘要入口传 `conversation_compact_summary` 与精确 thread_id，主/摘要请求同为 `(deepseek-v4-flash, enabled, max)`，模拟前缀命中达到 90% 门槛；生产线程档位转接无缺陷，已去掉 xfail。单次变异移除该 purpose 识别后，分区断言按 default/max 不一致变红。

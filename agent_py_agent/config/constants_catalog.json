@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 906,
+  "count": 907,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -820,12 +820,20 @@
       "description": "这是残留资源保护上限，不是业务并发配置；不能由单次调用放大，optional 必须为基础调用保留一席。"
     },
     {
-      "name": "_MESSAGE_HASH_LIMIT_COUNT",
+      "name": "_CHAIN_BLOCK_SIZE_COUNT",
       "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
-      "value": 512,
+      "value": 32,
+      "unit": "个",
+      "category": "其它",
+      "description": "链式摘要每个检查点之间的消息条数：块越小，定位越准，但保存的检查点越多。"
+    },
+    {
+      "name": "_CHAIN_CHECKPOINT_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
+      "value": 128,
       "unit": "个",
       "category": "上限预算",
-      "description": "缓存诊断一次最多散列 512 条消息：控制诊断扫描规模，防止超大缓存拖垮查询。"
+      "description": "现在按 32 条一块、最多 128 块覆盖 4096 条消息；再长的线程只保留最后 128 块，并在 partial 上说明。"
     },
     {
       "name": "MAX_DECISION_INPUT_BYTES",

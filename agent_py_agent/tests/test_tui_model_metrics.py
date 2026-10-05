@@ -1,4 +1,6 @@
 """模型统计的确定性验证；真实模型与 TUI 验收单独记录。"""
+import copy
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +85,150 @@ def test_cache_comparison_survives_store_reload_with_same_response_metrics(tmp_p
     assert metrics["cache_percent"] == 75
     assert metrics["cache_diagnostic"]["baseline_available"] is False
     assert model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id) == metrics
+
+
+# LLM: 累计计数是持久字段：多次调用要只增不减，并且跟着显示副本写进会话记录、重启后还能读回来。
+#   只由结构化原因码驱动，不解析正文；这也是“修复以后有没有回退”能不能从记录看出来的依据。
+# 函数用途: 核对 cache_change_counts 跨调用累加、跨 store 重载保留、且不掺入未知码。
+def test_cache_change_counts_accumulate_and_survive_store_reload(tmp_path):
+    from agent_py_agent.agent.backends.cache_diagnostics import request_surface
+
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    # 一次模型调用只记一个 request_surface，所以三次请求用三次独立调用（call-1 / call-2 / call-3）。
+    def call(call_id: str, surface: dict) -> dict:
+        response = settled(agent, params, clock, call_id=call_id)
+        agent._model_call_ledger.provider_attempt(ModelCallProviderAttemptParams(
+            call_id, f"{call_id}-attempt", "finished", request_surface=surface))
+        return publish_model_metrics(agent, params, pending=False, response=response, call_id=call_id)
+
+    first = request_surface({"model": "m", "messages": [{"role": "user", "content": "a"}]}, "endpoint")
+    metrics = call("call-1", first)
+    assert "cache_change_counts" not in metrics, "首次调用没有可用基线，不应产生原因码"
+
+    # 第二次请求：消息前缀被改写 + 换推理强度分区，两条原因都要记上。
+    second = request_surface({"model": "m", "reasoning_effort": "low",
+                              "messages": [{"role": "user", "content": "rewritten"}]}, "endpoint")
+    metrics = call("call-2", second)
+    assert metrics["cache_change_counts"] == {"history_prefix_changed": 1, "reasoning_effort_changed": 1}
+
+    # 第三次请求：只有前缀变化，累计只增不减，且不会被未知码污染。
+    third = request_surface({"model": "m", "reasoning_effort": "low",
+                             "messages": [{"role": "user", "content": "rewritten once more"}]}, "endpoint")
+    metrics = call("call-3", third)
+    assert metrics["cache_change_counts"] == {"history_prefix_changed": 2, "reasoning_effort_changed": 1}
+    reloaded = model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id)
+    assert reloaded["cache_change_counts"] == metrics["cache_change_counts"]
+    assert all(code in {"history_prefix_changed", "history_shortened", "history_appended", "reasoning_effort_changed",
+                        "thinking_changed", "tools_changed", "system_changed", "model_changed", "endpoint_changed",
+                        "options_changed"} for code in reloaded["cache_change_counts"])
+
+
+# LLM: 发布幂等：没有新模型调用、只是再次发布统计（pending 状态刷新）时，累计计数不能重复累加；
+#   去重按模型调用身份，重发布不带身份、不累加。
+# 函数用途: 核对重发布同一份统计不会把 cache_change_counts 加上去（内存与持久值都不变）。
+def test_display_republish_does_not_accumulate_counts_twice(tmp_path):
+    from agent_py_agent.agent.backends.cache_diagnostics import request_surface
+
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+
+    def call(call_id: str, surface: dict) -> dict:
+        response = settled(agent, params, clock, call_id=call_id)
+        agent._model_call_ledger.provider_attempt(ModelCallProviderAttemptParams(
+            call_id, f"{call_id}-attempt", "finished", request_surface=surface))
+        return publish_model_metrics(agent, params, pending=False, response=response, call_id=call_id)
+
+    call("call-1", request_surface({"model": "m", "messages": [{"role": "user", "content": "a"}]}, "endpoint"))
+    metrics = call("call-2", request_surface({"model": "m", "thinking": {"type": "disabled"},
+                                              "messages": [{"role": "user", "content": "a"}]}, "endpoint"))
+    assert metrics["cache_change_counts"] == {"thinking_changed": 1}
+    # 没有新模型调用，仅再次发布统计：计数不能变成 2。
+    replay = publish_model_metrics(agent, params, pending=True)
+    assert replay["cache_change_counts"] == {"thinking_changed": 1}
+    assert publish_model_metrics(agent, params, pending=True)["cache_change_counts"] == {"thinking_changed": 1}
+    persisted = model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id)
+    assert persisted["cache_change_counts"] == {"thinking_changed": 1}
+
+
+# LLM: 累计计数跨重启只增不减：换新 ledger、清空回合状态后，已持久化的计数要当作基数恢复，
+#   内存和持久值都不能变空（诊断的“修复后有没有回退”依赖它）。
+# 函数用途: 核对重启路径（新 ledger + 清状态 + 原发布保存路径）下计数保持不变。
+def test_cache_change_counts_survive_new_ledger_and_cleared_state(tmp_path):
+    from agent_py_agent.agent.backends.cache_diagnostics import request_surface
+
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+
+    def call(call_id: str, surface: dict) -> dict:
+        response = settled(agent, params, clock, call_id=call_id)
+        agent._model_call_ledger.provider_attempt(ModelCallProviderAttemptParams(
+            call_id, f"{call_id}-attempt", "finished", request_surface=surface))
+        return publish_model_metrics(agent, params, pending=False, response=response, call_id=call_id)
+
+    call("call-1", request_surface({"model": "m", "messages": [{"role": "user", "content": "a"}]}, "endpoint"))
+    call("call-2", request_surface({"model": "m", "thinking": {"type": "disabled"},
+                                    "messages": [{"role": "user", "content": "a"}]}, "endpoint"))
+    before = model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id)["cache_change_counts"]
+    assert before == {"thinking_changed": 1}
+    # 模拟重启：换新 ledger、清空回合状态，再走原发布与保存路径。
+    agent._model_call_ledger = ModelCallLedger()
+    params.live_archive_state.clear()
+    replay = publish_model_metrics(agent, params, pending=False)
+    assert replay["cache_change_counts"] == before, "重启后的重发布把已持久化的计数弄丢了"
+    persisted = model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id)
+    assert persisted["cache_change_counts"] == before
+
+
+# LLM: 复用真实结算、provider_attempt、发布和线程保存入口；只生成合成消息，不联网。
+# 函数用途: 发布带一次 thinking 诊断的合成调用，返回响应供同身份重放。
+def _cache_call(sample, call):
+    from agent_py_agent.agent.backends.cache_diagnostics import request_surface
+
+    agent, params, clock = sample
+    call_id, thinking = call
+    response = settled(agent, params, clock, call_id=call_id)
+    surface = request_surface({"model": "m", "messages": [], "thinking": thinking}, "endpoint")
+    agent._model_call_ledger.provider_attempt(ModelCallProviderAttemptParams(
+        call_id, f"{call_id}-attempt", "finished", request_surface=surface))
+    return response, publish_model_metrics(agent, params, pending=False, response=response, call_id=call_id)
+
+
+@pytest.mark.parametrize("state_kind", ["stale", "cleared"])
+def test_persisted_newer_identity_and_counts_restore_together_on_response_replay(tmp_path, state_kind):
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    _cache_call((agent, params, clock), ("call-a", "on"))
+    stale = copy.deepcopy(params.live_archive_state)
+    response, metrics = _cache_call((agent, params, clock), ("call-b", "off"))
+    assert metrics["cache_change_counts"] == {"thinking_changed": 1}
+    agent.conversation_store = ConversationStore(tmp_path)
+    params.live_archive_state = stale if state_kind == "stale" else {}
+    replay = publish_model_metrics(agent, params, pending=False, response=response, call_id="call-b")
+    assert replay["cache_change_counts"] == {"thinking_changed": 1}, "同一个已持久调用被重复累计"
+    persisted = model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id)
+    assert persisted["cache_change_counts"] == replay["cache_change_counts"]
+    assert hashlib.sha256(b"call-b").hexdigest() in persisted["cache_counted_calls"]
+    assert persisted["cache_counted_calls"] == replay["cache_counted_calls"]
+    assert "call-b" not in str(persisted["cache_counted_calls"])
+
+
+def test_interleaved_settled_response_replay_keeps_dedup_with_retained_records(tmp_path):
+    agent, params, clock, _runtime, thread = fixture(tmp_path)
+    _cache_call((agent, params, clock), ("call-a", "on"))
+    response, _metrics = _cache_call((agent, params, clock), ("call-b", "off"))
+    _cache_call((agent, params, clock), ("call-c", "on"))
+    params.live_archive_state.clear()
+    replay = publish_model_metrics(agent, params, pending=False, response=response, call_id="call-b")
+    assert replay["cache_change_counts"] == {"thinking_changed": 2}
+    persisted = model_metrics_from_thread(ConversationStore(tmp_path), thread.thread_id)
+    assert persisted["cache_change_counts"] == replay["cache_change_counts"]
+    assert set(persisted["cache_counted_calls"]) == {hashlib.sha256(row.call_id.encode()).hexdigest()
+                                                  for row in agent._model_call_ledger.records()}
+
+
+def test_counted_call_projection_keeps_only_irreversible_identities():
+    identity = hashlib.sha256(b"call-b").hexdigest()
+    result = public_model_metrics({"schema": "model_runtime_metrics.v1",
+                                   "cache_counted_calls": [identity, identity, "private-call", 3, {}]})
+    assert result.get("cache_counted_calls") == [identity]
+    assert "private" not in str(result)
 
 
 @pytest.mark.parametrize("usage,expected", [

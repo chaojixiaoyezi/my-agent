@@ -1,7 +1,8 @@
-# LLM: 这是原 ModelCallLedger 的显示投影；用途分区不重复累计，不改变预算/输入/任务，主子按 exact thread 隔离。
+# LLM: 这是原 ModelCallLedger 的显示投影；缓存累计与去重身份同快照保存/恢复，不建第二份账本，不改变预算/输入/任务，主子按 exact thread 隔离。
 # 模块用途: 提供原模型统计行及决策输入与成败次数，未知保留未知，后台新用量让旧显示基数失效。
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import time
@@ -21,6 +22,74 @@ _DECISION_COUNTS = ("decision_input_reported_calls", "decision_success_count", "
                     "decision_unfinished_calls", "decision_estimated_tokens", "decision_unknown_failures")
 
 
+# LLM: 缓存前缀变化按原因码累计，只增不减：一次比较只说明“这一次调用换过什么”，累计次数才能回答
+#   “修复之后有没有回退”。累计对着原因码逐个加，未出现过的不写 0（缺失即从未发生）。
+# 函数用途: 把新一次比较的原因码累加进已有的累计计数。
+def _add_cache_change_counts(previous: object, diagnostic: object) -> dict[str, int]:
+    from ..backends.cache_diagnostics import change_codes
+
+    allowed = change_codes()
+    # previous 可能是 None（首次发布、或上一份显示副本被清掉），此时从零开始累计，不能对 None 取 items。
+    counts = {key: int(value) for key, value in (previous.items() if isinstance(previous, Mapping) else ())
+              if key in allowed and type(value) is int and value > 0}
+    changes = diagnostic.get("changes") if isinstance(diagnostic, Mapping) else None
+    for code in changes if isinstance(changes, list) else []:
+        if isinstance(code, str) and code in allowed:
+            counts[code] = counts.get(code, 0) + 1
+    return counts
+
+
+# LLM: 累计计数走与单次诊断同一套原因码白名单（cache_diagnostics.change_codes），避免两处名单漂移；
+#   旧记录没有这个键时返回空字典，不补全 0，也不让缺字段变成读取失败。
+# 函数用途: 清洗持久化的 cache_change_counts，只保留已知原因码的正整数计数。
+def public_cache_change_counts(value: object) -> dict[str, object]:
+    from ..backends.cache_diagnostics import change_codes
+
+    if not isinstance(value, Mapping):
+        return {}
+    allowed = change_codes()
+    return {key: int(count) for key, count in value.items()
+            if key in allowed and type(count) is int and count > 0}
+
+
+# LLM: 身份只允许 SHA256 小写十六进制串，不允许 call_id 原文或任意嵌套正文进入持久/通道显示副本。
+#   去重集合与累计值同属 model_metrics；合法身份排序去重，旧记录缺字段时不猜测旧调用是否已累计。
+# 函数用途: 清洗已累计调用的不可逆身份，供原线程快照保存和恢复。
+def public_cache_counted_calls(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({item for item in value if isinstance(item, str) and len(item) == 64
+                   and not set(item) - set("0123456789abcdef")})
+
+
+# LLM: 基数与已计数身份只能取同一份较新 model_metrics 快照；不再从旧回合状态单独读身份。
+#   只有 exact call 的新诊断才加一次；身份散列随同累计值返回，走原线程原子保存。新结算时身份集合
+#   收敛到账本仍保留的调用：被裁掉的调用已无诊断可重新累计；无新诊断时完整保留恢复事实。
+# 函数用途: 计算本次缓存累计与去重身份，支持旧内存重发、状态清空和交错重放，不写旁路文件。
+def _cache_change_counts_for_publish(base: dict, ledger: object, identity: str, diagnostic: object) -> dict:
+    counts = public_cache_change_counts(base.get("cache_change_counts"))
+    counted = set(public_cache_counted_calls(base.get("cache_counted_calls")))
+    if identity and isinstance(diagnostic, Mapping):
+        digest = hashlib.sha256(identity.encode()).hexdigest()
+        if digest not in counted:
+            counts = _add_cache_change_counts(counts, diagnostic)
+        retained = {hashlib.sha256(row.call_id.encode()).hexdigest() for row in ledger.records()}
+        counted = (counted & retained) | {digest}
+    return {"cache_change_counts": counts, "cache_counted_calls": sorted(counted)}
+
+
+# LLM: 结算时把本次调用的响应指标并进 payload；没有新诊断（例如找不到调用记录）时不覆盖上一份，
+#   保留已持久化的最近一次诊断，避免诊断被空值清掉。
+# 函数用途: 合并响应指标并返回本次的新缓存诊断（没有则为 None）。
+def _merge_response_metrics(payload: dict, response: object, ledger: object, call_id: str) -> object:
+    response_metrics = _last_response_metrics(response, ledger, call_id)
+    diagnostic = response_metrics.get("cache_diagnostic")
+    if diagnostic is None:
+        response_metrics.pop("cache_diagnostic", None)
+    payload.update(response_metrics)
+    return diagnostic
+
+
 # LLM: 数值白名单不接受 bool、负数和无穷大，调用方不得借此传递提示词或工具参数。
 # 函数用途: 检查可展示的计数字段，缺失值保持未知。
 def _number(value: object) -> float | None:
@@ -36,6 +105,7 @@ def _number(value: object) -> float | None:
 # LLM: 通道共用数值白名单；决策输入缺报保持 None，另带已报调用数与成败次数，不从空值猜供应商零消耗。
 #   失败构成出现前写下的旧快照没有 decision_unknown_failures 键：与 unfinished_usage_facts 对旧用量行同一规则，
 #   失败整体记为分不清是否发出，不能补 0（补 0 会让 split_unsent_failures 把旧失败说成“根本没发出去”）。
+#   缓存累计与不可逆去重身份一起清洗，原线程保存及通道投影不得只保留其中一半。
 # 函数用途: 清洗统计条、决策输入与成败次数及缓存诊断，拒绝未知 schema 和任意嵌套正文。
 def public_model_metrics(value: object) -> dict[str, object]:
     from ..backends.cache_diagnostics import public_cache_diagnostic
@@ -43,6 +113,8 @@ def public_model_metrics(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping) or value.get("schema") != _SCHEMA:
         return {}
     diagnostic = public_cache_diagnostic(value.get("cache_diagnostic"))
+    change_counts = public_cache_change_counts(value.get("cache_change_counts"))
+    counted_calls = public_cache_counted_calls(value.get("cache_counted_calls"))
     decision_calls = int(_number(value.get("decision_call_count")) or 0)
     decision_input = _number(value.get("decision_input_tokens"))
     decision = {key: int(_number(value.get(key)) or 0) for key in _DECISION_COUNTS}
@@ -57,6 +129,8 @@ def public_model_metrics(value: object) -> dict[str, object]:
         "pending": value.get("pending") is True,
         "totals_known": value.get("totals_known") is True,
         **({"cache_diagnostic": diagnostic} if diagnostic else {}),
+        **({"cache_change_counts": change_counts} if change_counts else {}),
+        **({"cache_counted_calls": counted_calls} if counted_calls else {}),
         **({"decision_call_count": decision_calls,
             "decision_input_tokens": int(decision_input) if decision_input is not None else None,
             **decision}
@@ -186,7 +260,7 @@ def publish_model_metrics(agent: object, params: object, *, pending: bool, tool_
 
 
 # LLM: 使用原范围账本快照；决策分区不计普通轮，usage_only 不覆盖生成状态或等待写锁，异常交外层隔离。
-# 显示写入走 model_usage 组件的原线程更新能力，不给统计页增加持久写入入口。
+# 显示写入走 model_usage 的原线程更新能力；缓存累计与去重身份选同一较新快照，不能拼接不同来源。
 # 函数用途: 实现一次模型边界的统计采样和发布，不在 UI 渲染线程扫描数据。
 def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count: int | None, response: object, call_id: str, usage_only: bool) -> dict[str, object]:
     if str(getattr(params, "context_scope", "") or "").lower() == "isolated":
@@ -200,9 +274,11 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     thread_id = str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "")
     summary = summary_reader(request_id=str(getattr(params, "request_id", "") or ""), run_id=str(getattr(params, "run_id", "") or "")) or {}
     state = getattr(params, "live_archive_state", None)
-    previous = state.get("_model_metrics_current", {}) if isinstance(state, dict) else {}
-    if usage_only:
-        previous = newer_model_metrics(previous, model_metrics_from_thread(getattr(agent, "conversation_store", None), thread_id))
+    store = getattr(agent, "conversation_store", None)
+    # 整份选较新快照，基数与身份同源；持久较新时不能取旧内存身份再对新基数重复加一。
+    persisted = model_metrics_from_thread(store, thread_id)
+    state_previous = state.get("_model_metrics_current", {}) if isinstance(state, dict) else {}
+    previous = newer_model_metrics(state_previous, persisted)
     totals = _previous_totals(agent, params, thread_id, str(summary.get("usage_scope_id") or ""))
     _add_usage(totals, summary)
     payload = {**previous, **totals, "schema": _SCHEMA, "sampled_at_ns": time.time_ns()}
@@ -211,12 +287,13 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
         payload.update(model_rounds=int(summary.get("logical_model_turn_count") or 0) - int(decision.get("logical_model_turn_count") or 0),
             retry_count=sum(int(summary.get(key) or 0) - int(decision.get(key) or 0) for key in ("model_retry_count", "provider_http_retry_count")),
             tool_count=tool_count, pending=pending)
-    if response is not None and not usage_only:
-        payload.update(_last_response_metrics(response, ledger, call_id))
+    fresh = response is not None and not usage_only
+    fresh_diagnostic = _merge_response_metrics(payload, response, ledger, call_id) if fresh else None
+    # 同一快照里的累计基数和身份一起更新，随后一起清洗并通过原线程保存入口持久化。
+    payload.update(_cache_change_counts_for_publish(previous, ledger, call_id if fresh else "", fresh_diagnostic))
     public = public_model_metrics(payload)
     if isinstance(state, dict):
         state["_model_metrics_current"] = public
-    store = getattr(agent, "conversation_store", None)
     updater = getattr(getattr(store, "model_usage", None), "update_metrics", None)
     try:
         if not usage_only and thread_id and callable(updater):
