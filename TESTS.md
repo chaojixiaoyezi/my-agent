@@ -1,5 +1,66 @@
 # 测试与发布验收
 
+## jb6b：B5 联合用例转正 + 三个 ask 出口的真实账本（2026-10-05，worker/jb6b，基于 17k 头 `9d5165809`，待 3a 复审）
+
+- **来源**：sol3 的 jb6（`61c730cf4`）留了两条 strict xfail，原因写的是"B5 审批出口不承接门决定条目，归 `worker/b5fix9b`"。b5fix9b（`b037ce5e8`）已挑进 17k，所以这两条应当转正。
+- **rebase**：`git rebase 9d5165809`。冲突 6 个文档文件（`DESIGN_LEDGER.md`、`TESTS.md`、gateway/verification 各自的 `02-progress.md`、`04-structure.md`），都是"两边各自在顶部加了自己的小节"。**处理：两边都保留**（jb6 小节在前、17k 小节随后），没有丢任何一侧内容；两个测试文件自动合并成功。
+- **转正**：去掉两条 `@pytest.mark.xfail(strict=True, ...)`；`_PendingGateLedger` 这个"空账本就豁免"的专用异常类一并删除，`_assert_ledger_and_info` 改成无条件 `len(rows) == 1`——**读到 0 行现在就是真实失败**，不再有豁免分支。转正后两条都真实通过（此前是 XPASS(strict)，即产品已修好、只是标记还挂着）。
+- **新增 4 条用例**（`test_plugin_m1_joint_tool_gate.py`，都走真实 gateway 回合 + 真实审批链 + 真实 runtime.db + 真实 `/plugins info`）：
+  - `test_rm_rf_confirmation_approved_runs_handler_and_keeps_ledger`：用户批准 → 计数探针证明 handler 真跑（与拒绝路径零执行互为反证）→ 账本仍读到那一次征询、`/plugins info` 有该行。
+  - `test_rm_rf_confirmation_unavailable_projects_unavailable_final_status`：客户端不声明 `tool_approval`（宿主事实"这里没人能当场审批"）→ 插件 ask 收紧为 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`、handler 零执行 → 账本 `final_status` 投影为不可审批、`/plugins info` 显示"无法审批：1 次"。
+  - `test_rm_rf_confirmation_consumer_unavailable_projects_unavailable_final_status`：执行器当时看到可交互（插件收到 ask），但**审批消费者答 unavailable** → 终态只能在审批阶段投影。这条专门钉 b5fix9b 的 `unavailable=True` 承接。
+  - `test_recent_decisions_are_rendered_newest_first`：同 owner 两次征询 → 库里两行（seq 递增、gate_id 分别是 `guard-delete`/`guard-rm`）→ `/plugins info` 的最新一条排在旧的前面。
+- **驱动改造**（只动测试，产品零改动）：`_run_case` 收一个 `_RunSpec(name, arguments, decision, interactive)` 小对象，替代原来的四个位置参数；审批侧只换"用户选了哪个决定词"这一处（`approved`/`denied`/`unavailable`），发布、等待、binding 核验、执行器、归档一律走原真实路径。跨轮帧按基线做增量断言（客户端会累积）。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-jb6b*`）：
+  - 两个联合文件：**11 passed / 1 skipped / 0 failed / 0 xfailed**（转正前是 2 strict xfailed）。
+  - 两联合 + TESTS.md b5s5 节 27 文件清单：**606 passed / 1 skipped / 0 failed**（唯一 skip 仍是仓库缺 Node event-watch 样例）。
+  - guards9（11 文件）全过；ruff All checks passed；`check_import_boundaries.py` findings=0；`check_doc_sync.py --base 9d5165809` DOC_SYNC_PASS；`git diff --check` 干净；strict code-size `hard=0 blocked=False`；size_diff **新增告警 0 / 消失 50**；clean-package OK。
+- **变异 2/2 KILLED**（脚本 `/private/tmp/claude-501/jb6b/mutate.py`，只改 `round_execution.py`，跑完按原字节还原并校验一致）：
+  - 去掉拒绝出口的承接（`_rejected_approval_execution` 外面那层）→ 两条转正用例 + 排序用例变红。
+  - 去掉无法审批出口的承接（`plugin_gate_approval_unavailable` 外面那层，508/581 两处都要改）→ 审批阶段那条变红。（第一次只替了第一处，变异存活；把两处都改掉才被杀——记下来，免得下次误判成用例没覆盖。）
+- **一个观察（不在本用例断言范围，交 3a/9b 判定）**：同一回合里，turn 事件（`prompt_submitted`/`turn_started`/`turn_ended`）的 `thread_ref` 来自 `conversation.channel_conversation_id`，tool 事件（`tool_call_started`/`tool_call_finished`）的 `thread_ref` 来自 task attribute `conversation_thread_id`，**两者取值不同**（隔离回合实测 `joint-gate-thread` vs `thread-00318810477a4d4a`）。插件若想按会话把两类事件归到一起会归不上。已核实两处来源（`gateway_parts/event_points.py` 的 `prompt_queued` 与 `agent_core/tool_loop/recovery.py:runtime_run_scope`），**是产品行为不是用例问题**；本用例因此只断言工具事件内部一致，没有把跨族相等写成断言。
+- **未验证**：真实 Gateway 进程、真实 TUI/飞书渠道、真实安装启用与 B7 沙箱；隔离联合结果不能外推为生产端到端通过。
+
+## jb6：真实17j上的B5联合用例（2026-10-04，worker/jb6，WIP，ask账本待worker/b5fix9b）
+
+- 基线 `1ec5ed155d6b393f6112c3e3341c4f935bb94dc8`；从 `git show e388b85e7` 取两联合文件。原样实际8项：4 failed/3 passed/1 skipped（`tmp/jb6-original.xml`）。先只改样例activation身份，两项定向1 passed/1 strict XPASS（`tmp/jb6-activation-only.xml`）：普通删除完整观察/唯一行/info通过，可见截断已符合新裁定，故去xfail转普通断言。
+- 未以空集合消观察失败：夹具同activation使B2复用rm连接，事件握手不声明而unavailable；各插件独立激活后仍一个真实共用池，新增两连接身份/三事件正对照/零failed与unavailable。裸rm原宿主硬拒保持；差集命令只交计数handler探针，不执行Shell删除。
+- 新联合真正暴露产品漏账：用户拒绝插件ask后重建ToolResult丢原门决定，实际库0行（`tmp/jb6-current.xml`）。该次29文件589 passed/2 failed/1 skipped，另一个失败是新测试错把CommandAnalysis当CommandPolicyDecision，已改读正确evaluate接口；只有0行这一项是有效产品业务红。修复仅保留原宿主专键，经原归档/唯一writer写账，不补插行、不改变用户deny授权。
+- 临时保留专键的实验版29文件曾 **591 passed/1 skipped，0 failed/errors/xfail，140.95秒**（`tmp/jb6-final.xml`）。之后3a明确同处产品修复归ds6 `worker/b5fix9b`，本线产品全部恢复基线；此结果仅实验历史，不代当前交付。
+- **当前交付**：撤销版重新完整跑相同29文件 **589 passed/1 skipped/2 strict xfailed，0 failed/errors，72.13秒**（`tmp/jb6-handoff.xml`）。两直接deny包含可见截断普通断言，实际唯一行和info通过；两ask先实际征询、用户拒绝、目标event-watch三事件正对照/零工具事件，再真实SQL/info读到空账本才抛专用异常xfail。xfail原因写 `worker/b5fix9b`；其他异常或业务失败不匹配，ds6修好会strict XPASS要求转正。唯一Node skip为缺样例；必需B5字段改强断言，不能结构skip假绿。
+- 实际命令在树根；从下方b5s5段只读提取27个明确路径，前置两联合路径，总29个无重复，并用指定Python启动pytest。对应可直接复跑：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+ agent_py_agent/tests/test_plugin_m1_joint_e2e.py agent_py_agent/tests/test_plugin_m1_joint_tool_gate.py \
+ agent_py_agent/tests/test_plugin_tool_gate_logic.py agent_py_agent/tests/test_plugin_tool_gate_execution.py \
+ agent_py_agent/tests/test_plugin_gate_approval.py agent_py_agent/tests/test_plugin_gate_consumers.py \
+ agent_py_agent/tests/test_plugin_gate_reapproval.py agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py \
+ agent_py_agent/tests/test_plugin_gate_event_combination.py agent_py_agent/tests/test_plugin_event_points.py \
+ agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_e2e.py \
+ agent_py_agent/tests/test_plugin_event_display.py agent_py_agent/tests/test_plugin_m1_b8_samples.py \
+ agent_py_agent/tests/test_tool_round_execution.py agent_py_agent/tests/test_tool_display_archive.py \
+ agent_py_agent/tests/test_compact_tool_ref_archive_chain.py agent_py_agent/tests/test_shutdown_turn_resume.py \
+ agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py \
+ agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+ agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py \
+ agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+ agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py \
+ agent_py_agent/tests/test_constants_catalog.py -q --tb=short -rsx -p no:cacheprovider -o addopts='' \
+ --basetemp=/private/tmp/claude-501/m-sol3 --junitxml=tmp/jb6-handoff.xml
+```
+
+- 实验阶段两内存反证已核：移除当时专键保留让两ask读0行而各业务失败，恢复同activation让普通删除在真实目标观察失败，均exit1/0errors/0skip、源字节未变（`tmp/jb6-mutations.json`）。产品修复已撤，ledger反证不作为当前头有效结果；当前只重跑activation反证，实得exit1/1业务failure/0errors/0skip（`tmp/jb6-handoff-activation.txt`），目标event-watch客户端不存在的断言抓住错连接。
+- **当前门禁**：指定Python重跑全Ruff、import boundaries（findings=0）、doc-sync、strict code-size、diff及clean-package全exit0。strict正文为total=2200/hard=0/high-risk=1503/soft=697/test_advisory=1234/blocked=False（`tmp/jb6-handoff-strict.txt`）；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"`实际输出“新增告警: 0 / 消失告警: 43”（`tmp/jb6-handoff-size.txt`）。生成报告两次恢复、baseline不升；程序核产品agent/scripts/plugins及保护文件相对1ec5ed155全部未变，最终只交测试/文档。两联合8项中5通过、2预期失败、1无Node样例skip；完整guards11的187项在当前29范围内，不重复累加。
+- 非作者初审仅内联静态审查，无命令或文件复跑。已采纳必需B5字段不能skip及目标插件帧归属两项；原因码本已精确比较SQL及info实际值，不是只查标题；单行用例不证明多行“最近”排序，等ds6合入后用两个真实征询补证。批准/取消、无法审批终态、生产interactive与多行最近排序**未验证**；ds6修复与9b归集成者安排。安装/启用、B7/断网、自动worker、TUI/IM/Gateway/Linux全量亦未验证，本线最终不带产品修复、不执行真实删除、不部署。
+
+## 插件第一期联合测试阶段交接（jb5，2026-10-04，历史WIP，来源e388b85e7）
+
+- 旧联合仅为隔离handler/执行路径接真实样例，processing手动推进；合成安装/启动不证明产品安装/启用或B7。旧测试取 `804a0fbb3..d6617f196`；源分支基于 `73de50cb8` 无B5，结构化缺字段skip，不按文件/import猜。
+- 当时临时detach组合 `73de50cb8`＋ `b6ede99e0..57f465dca`、`57f465dca..8becb64c5` 两联合4 failed/3 passed/1 skipped/3.91秒；回源分支加B8为7 passed/5 skipped/3.15秒（四缺B5，一个无Node样例），不能代B5通过。命令为指定Python、树根、两联合路径，`-q --tb=short -rsx -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-jb5`。
+- 当时Ruff/doc-sync/import0/diff/clean-package通过，size差集新增0/消失34；未追加guards9或独立strict。裸rm前置拒绝，patch观察空，SQL/info尚未执行到；可见截断专用异常strict xfail不吞前置失败。接口交接和边界见DESIGN_LEDGER历史jb5节；这些源回执不是本树当前结果。
+
 ## 出站字节稳定补丁：结构化路径护栏、声明外键与块列表边界（ck3fix，2026-10-05，worker/ck3fix；基于 d76f04e61；待复审）
 
 **来源**：cachekey3 初审（cachekey3r）的小问题 1/4/5 与块列表边界，经 3a 裁定由审阅人直接补测试与注释；产品逻辑不动。

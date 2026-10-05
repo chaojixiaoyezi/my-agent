@@ -1,5 +1,9 @@
 # Verification：开发推进
 
+## jb6联合观察与拒绝账本（2026-10-04，WIP，待worker/b5fix9b）
+
+承接jb5真实样例/手工队列观察点，已证实并修测试激活碰撞；恢复观察后ask用户拒绝真实库0行，按3a指令交ds6 worker/b5fix9b，本线临时产品修复已撤。两直接deny唯一行/info通过，可见截断strict XPASS后转普通断言；两ask仅空账本专用strict xfail，原观察/协议/审批断言不吞。当前29文件589 passed/1缺Node样例skip/2 xfailed；生产安装启用/B7/客户端及多行最近排序未验，见TESTS。
+
 ## B5 审批阶段门决定承接与 interactive 取证（b5fix9b，2026-10-04，待 9b 复核）
 
 - 9b 终审两条必须修：审批出口换掉 result 后丢掉第一次真实征询的条目（批准/拒绝为空、无法审批 `final_status` 错记 `ask`）；生产接线把"有 request_permission 方法"当成可交互，插件看到假 true。

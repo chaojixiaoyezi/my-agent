@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+## jb6联合用例（2026-10-04，WIP，待worker/b5fix9b）
+
+承接sol2 e388b85e7两个联合文件及旧边界。观察空根因为夹具同activation让共用池取错连接，已改独立激活并核event-watch目标三事件。3a将漏账/interactive/无法审批修复交ds6 worker/b5fix9b，本线已撤全部产品改动，两ask的空账本专用strict xfail不吞观察/审批错误。当前29文件589 passed/1缺Node样例skip/2 xfailed；两直接deny唯一行/info通过，完整ask链待修。手工processing不代自动worker/生产入口，详见TESTS。
+
 ## 断网时模型调用卡住不超时（hang，2026-10-04，调查阶段结论；产品代码未改）
 
 - 3a 补充的 `pmset` 记录确认测试时段包含 Clamshell Sleep，8 个结构化失败结果均早于完全唤醒；睡眠期间的墙钟跨度不能当作连续运行的超时证据。SSE / 首事件、重试预算与压缩调用各自时钟及 DarkWake 对齐见 `TESTS.md` hang 节。

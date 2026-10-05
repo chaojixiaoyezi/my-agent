@@ -1,5 +1,9 @@
 # Gateway Structure
 
+## jb6联合观察点（2026-10-04）
+
+从jb5迁入的 `test_plugin_m1_joint_e2e` 保留原样stdio/B3/B2/展示，手工processing不代自动worker。`test_plugin_m1_joint_tool_gate` 要求本17j的reviewer必备字段，用同一池各插件独立激活核目标观察/审批/归档/info。两ask空决定用专用strict xfail等待worker/b5fix9b；本线不带工具轮或其他产品修改，不新建writer。安装/启用/B7/生产入口未验。
+
 ## G2b 拒绝路径的客户端收口（g2bfix2 + g2bfix2b，2026-10-04；9b 终审通过，已并入 step17j）
 
 - `adapter/delivery.py`：`GatewayReplyQuarantineError` 带 `denial_code`，`_terminalize_quarantine` 对 auth 类隔离（g2bfix2b 起只读结构化 `category` 字段，manager 按状态码与 `error_code` 生成）先发可见原因再写终态；`adapter/manager.py` 轮询入口把 403 响应体的 `error_code` 带进隔离，`/ask` 提交把 401/403 转成 `LocalClientCredentialError`（复用 G3 收口）。

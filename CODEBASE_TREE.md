@@ -50,6 +50,8 @@
 |-- agent_py_agent/tests/test_plugin_gate_cross_bfail.py # B5×B7跨件：冷启动撞预算/沙箱起不来/进程被杀都收紧成ask；只替插件进程
 |-- agent_py_agent/tests/test_plugin_gate_reapproval.py # B5六身份精确批准重跑、主子实际批准/再问/拒绝及鲜活换代，不读真实owner
 |-- agent_py_agent/tests/test_plugin_gate_event_combination.py # 17j B5/B4/B8组合：拒绝零handler/零工具事件，原归档/唯一写账→真实临时库→B6 info；三项转正
+|-- agent_py_agent/tests/test_plugin_m1_joint_e2e.py # jb6：真实样例stdio、B3/B2与只读展示，队列手工推进，不代宿主启用/B7
+|-- agent_py_agent/tests/test_plugin_m1_joint_tool_gate.py # jb6/jb6b：目标插件非空观察、实际B5拒绝链；ask 批准/不可交互/消费者答 unavailable 三出口账本与最近决定排序
 |-- agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py # B5决定字段/全部review/批准排除/单门多门与canonical信封组件反证
 |-- agent_py_agent/tests/fixtures/plugin_tool_gate_mutation_probe.py # B5 第一段五个真实内存变异，保留 pytest 退出码，不写产品源码
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
@@ -1584,6 +1586,8 @@ docs/
 
 ### 关键文件说明
 
+- `agent_py_agent/tests/test_plugin_m1_joint_e2e.py`：迁入sol2联合观察点，真实样例进程、Hub合并计数和只读展示共用原单池，临时各插件激活独立；手工processing、合成安装与启动适配不代产品启用/B7；缺Node event-watch样例时单独skip。
+- `agent_py_agent/tests/test_plugin_m1_joint_tool_gate.py`：强断言17j必备B5字段，四联合严格核真实征询、用户拒绝、零handler及目标event-watch非空三事件；两直接deny唯一行/info通过；jb6b 起两条 ask 账本用例转正（删掉空账本豁免），另补批准出口、不可交互、消费者答 unavailable 与同 owner 多行排序 4 条。无真实删除，非整期验收。
 - `plugin_events/tool_gate_review.py`：共用 B2 池、共享单次预算、握手和安装快照追新；不创建第二池或批准账。
 - `tooling/plugin_gate_policy.py`：将插件纯协议事实接到唯一执行器，来源只取宿主请求，模型参数不能获得豁免。
 

@@ -1,5 +1,31 @@
 # 设计台账
 
+## B5 联合用例转正与 ask 三出口账本（jb6b，2026-10-05，分支 `worker/jb6b`，基于 17k 头 `9d5165809`；待 3a 复审）
+
+- **来源**：jb6（sol3）留了两条 strict xfail，理由写的是"B5 审批出口不承接门决定条目"，修复归 `worker/b5fix9b`。b5fix9b（`b037ce5e8`）已挑进 17k，两条应当转正——本轮把它转正并补齐同一族缺口。
+- **rebase**：`git rebase 9d5165809`。6 个文档文件冲突（两边各自在顶部加小节），**两边都保留**；两个测试文件自动合并。
+- **转正**：删掉两条 `@pytest.mark.xfail`，同时删掉 `_PendingGateLedger` 这个"空账本就豁免"的专用异常与 `_assert_ledger_and_info` 里的豁免分支——**读到 0 行现在直接失败**。
+- **新增 4 条联合用例**（真实 gateway 回合 → 真实审批链 → 真实 runtime.db → 真实 `/plugins info`）：批准后 handler 真跑且账本留行；不可交互（客户端未声明 `tool_approval`）时 ask 收紧为 `PLUGIN_GATE_APPROVAL_UNAVAILABLE` 且终态投影正确；审批消费者答 unavailable 时终态在审批阶段投影（专门钉 b5fix9b 的 `unavailable=True` 承接）；同 owner 多行"最近决定"按新到旧渲染。
+- **测试驱动改造（产品零改动）**：`_run_case` 收 `_RunSpec(name, arguments, decision, interactive)`；审批侧只替换"用户选了哪个决定词"，其余走原真实链路。
+- **一个观察（交 3a/9b 判定，本轮不修）**：同一回合里 turn 事件的 `thread_ref` 来自 `conversation.channel_conversation_id`，tool 事件的 `thread_ref` 来自 task attribute `conversation_thread_id`，**取值不同**（实测 `joint-gate-thread` vs `thread-00318810477a4d4a`）。两处来源已核实（`gateway_parts/event_points.py::prompt_queued` 与 `agent_core/tool_loop/recovery.py::runtime_run_scope`），是产品行为不是用例问题；插件按会话归并两类事件会归不上。
+- **验证**：两联合 11 passed / 1 skipped / 0 xfailed；两联合 + b5s5 节 27 文件清单 **606 passed**；guards9 全过；ruff / boundaries=0 / DOC_SYNC_PASS / diff-check / strict code-size hard=0 / size_diff 新增 0 / clean-package 全过。变异 2/2 KILLED（去掉拒绝出口承接、去掉无法审批出口承接）。详见 TESTS。
+
+## B5真实样例联合验收（jb6，2026-10-04，worker/jb6，WIP：观察已证实，ask账本待worker/b5fix9b）
+
+- **来源与基线**：从真实17j头 `1ec5ed155d6b393f6112c3e3341c4f935bb94dc8` 开出，`git show e388b85e7` 取sol2两个联合文件和七份文档差异；文档适配现有17j上下文，保留下方jb5历史，不搬临时B5产品或重放已集成提交。
+- **观察根因**：原样复现4 failed/3 passed/1 skipped。夹具给rm-guard和event-watch同一个 `joint-activation`，B2按owner/activation复用rm连接，事件能力未声明而unavailable；只改测试的各插件独立激活就让普通删除观察/真实写账/info断言通过。新增共用池两连接归属、真实三事件正对照与failed/unavailable零断言，不新建池、不用空帧冒充零工具事件。
+- **账本待外线修复**：观察恢复后，插件ask被用户拒绝的canonical结果重建丢门决定，实际库0行。本轮曾临时验证保留专键的修复；3a随后明确同处账本、UNAVAILABLE终态及interactive归ds6 `worker/b5fix9b`（基于 `4081a0df3`），已撤销本线全部产品修改。两ask后SQL/info用例仅匹配专用 `_PendingGateLedger` 的strict xfail，原因标外线；此前观察/协议/审批失败仍普通报红，不吞断言、不手补行。
+- **命令与截断**：裸rm宿主硬拒断言保留；用已有规则差集 `sh -c "rm -rf build"` 进入零副作用计数handler的原执行器，由真实样例ask/RM_RF并消费用户拒绝，绝不真正运行删除命令。当前样例已保截断可见deny，原strict xfail实际XPASS后转普通断言；不可见删除仍ask/ARGUMENTS_TRUNCATED。
+- **当前验证**：撤销产品修复后显式29文件（两联合＋原b5s5 27清单，含B8及完整guards11）589 passed/1 skipped/2 strict xfailed，0失败/错误；唯一skip为无Node event-watch样例。四B5联合实际跑观察/协议及原拒绝；两直接deny真实唯一行/info通过，两ask确实到SQL读0行才xfail，完整账本未通过。旧591是临时修复实验结果，不代当前头；命令、反证、门禁见TESTS。
+- **初审与下一步**：已接非作者内联静态初审，采纳必备B5字段改强断言、只读event-watch目标帧并核三事件/同thread_ref；不是独立运行复审或9b终审。多行“最近”排序、批准/取消/无法审批及interactive须等ds6修复后真实联合补证。安装/激活与启动适配、手工processing不代表生产启用/B7/worker/TUI/IM/Gateway/Linux；未部署、不push，不改保护文档。
+
+## 插件第一期联合证据收窄与收紧联合草稿（jb5，2026-10-04，历史WIP，来自e388b85e7）
+
+- **解决问题与来源**：按3a和luna1对 `d6617f196` 的复核，仅迁入 `804a0fbb3..d6617f196` 的联合测试，不带临时B8产品提交。口径是“隔离handler/执行路径接真实样例，队列消费手动推进”，不是worker自动认领测试。
+- **真实部分与边界**：原样event-watch/rm-guard stdio、B3 Hub、B2共用池、展示；安装记录合成、启动测试适配，不证明产品安装/启用或B7。旧AST导入后pytest.fail提醒换为真实收紧草稿，缺B5仅按执行器结构字段skip。
+- **当时事实**：临时 `73de50cb8` 组合B5两段，仅验证、不提交产品；两文件4 failed/3 passed/1 skipped。rm宿主前置硬拒；三个patch观察空/unavailable；账本/info未执行到，根因当时未确认。可见删除截断专用strict xfail不能吞观察/账本失败。新阶段事实以上方jb6为准，历史不回写成通过。
+- **接口交接**：第3/4段变化时同步guard_joint组合根/reviewer、_run_case执行/审批消费、查询/binding；S5/B6另核SQL/info。源命令、验证与旧边界见TESTS历史jb5节。
+
 ## 出站字节稳定补丁：结构化路径护栏与已知边界（ck3fix，2026-10-05，分支 `worker/ck3fix`，基于 `d76f04e61`；待复审）
 
 - **来源**：cachekey3 初审（cachekey3r）结论「小问题 5 项」；按 3a 新规则，只涉及测试与注释的小问题由审阅人直接补。产品逻辑不动。
