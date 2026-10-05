@@ -508,3 +508,26 @@ def test_titles_starting_with_the_alias_prefix_are_alias_only():
     error = _not_found(observer, "win:real")
     assert error.code == "window_not_found" and [row["title"] for row in error.details["windows"]] == ["win:real", "表单 窗口"]
     assert observer.observe("win:b00t:2")["title"] == "win:real"
+
+
+# 函数用途: 观察核心只在 want_screenshot 为真时调用缩略图生成（计数探针）；缺省（旧宿主）不生成（vision2）。
+def test_observe_generates_screenshot_only_when_requested(monkeypatch):
+    from agent_py_agent.agent.tooling import screen_observation as screen_mod
+
+    calls = {"count": 0}
+    real = screen_mod.observation_screenshot
+
+    def _counting(buffer):
+        calls["count"] += 1
+        return real(buffer)
+
+    monkeypatch.setattr(screen_mod, "observation_screenshot", _counting)
+
+    _backend, observer = _observer()
+    plain = observer.observe()
+    assert calls["count"] == 0, "缺省不要图：不生成缩略图"
+    assert screen_mod.OBSERVATION_SCREENSHOT_KEY not in plain
+
+    wanted = observer.observe(want_screenshot=True)
+    assert calls["count"] == 1, "要图时恰好生成一次"
+    assert isinstance(wanted.get(screen_mod.OBSERVATION_SCREENSHOT_KEY), str)

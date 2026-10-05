@@ -140,6 +140,7 @@ def _audit_source_worker_tool_scope_result(
 # 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
 # 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
+    from ..conversation.input_media import model_accepts_images
     from ..conversation.process_events import process_completion_target
     from .tool_call_archive_record import archive_tool_output_projection
     from .tool_loop.recovery import runtime_run_scope
@@ -184,6 +185,9 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
             ),
             "run_scope": run_scope.to_dict(),
             "plugin_event_context": _tool_event_context(runtime_request, run_scope),
+            # 观察截图意愿（J16 第 9 节 vision2）：宿主按当前模型档案的结构化模态决定，经内部参数传给观察工具，
+            # 由绑定层转成 _meta 协商字段；只读 model_input_modalities，不按模型名猜。
+            "observation_screenshot": model_accepts_images(runtime_request.agent),
         },
         cancellation_token=getattr(runtime_request.request.params, "cancellation_token", None),
         required_action=_required_action_for_call(runtime_request),

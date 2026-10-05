@@ -768,6 +768,9 @@ def _handler_arguments(
     if "__process_completion_target" in internal_parameters:
         trusted = request.trusted_run_context or {}
         payload["__process_completion_target"] = dict(trusted.get("process_completion_target") or {})
+    if "__observation_screenshot" in internal_parameters:
+        trusted = request.trusted_run_context or {}
+        payload["__observation_screenshot"] = trusted.get("observation_screenshot") is True
     return payload
 
 

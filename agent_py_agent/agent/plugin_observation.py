@@ -26,6 +26,10 @@ OBSERVATION_SCHEMA = "plugin_observation.v1"
 # 动作调用时宿主附给插件的 _meta 扩展键与版本
 OBSERVATION_META_EXTENSION = "my-agent/observation"
 OBSERVATION_META_VERSION = "1"
+# 观察调用时宿主附给提供方的截图意愿扩展键与版本（J16 第 9 节 vision2）：适配器只认版本匹配且 enabled 为 true 才生成缩略图；
+#   缺键、版本不符或形状不对一律按"不要图"处理（旧宿主从严），旧适配器不认识该键则保持原行为、由宿主兜底剥离。
+OBSERVATION_SCREENSHOT_META_EXTENSION = "my-agent/observation-screenshot"
+OBSERVATION_SCREENSHOT_META_VERSION = "1"
 # 宿主发送前复核的结构化拒绝码
 OBSERVATION_STALE = "OBSERVATION_STALE"
 OBSERVATION_CANDIDATE_UNKNOWN = "OBSERVATION_CANDIDATE_UNKNOWN"
@@ -468,7 +472,8 @@ def observation_event_payload_from_envelope(envelope: object, *, task_id: str, o
 
 __all__ = [
     "MAX_ACTION_COUNT", "MAX_CANDIDATE_COUNT", "MAX_LABEL_CHARS", "OBSERVATION_CANDIDATE_UNKNOWN", "OBSERVATION_ERROR_KEY",
-    "OBSERVATION_KEY", "OBSERVATION_META_EXTENSION", "OBSERVATION_META_VERSION", "OBSERVATION_SCHEMA", "OBSERVATION_STALE",
+    "OBSERVATION_KEY", "OBSERVATION_META_EXTENSION", "OBSERVATION_META_VERSION", "OBSERVATION_SCHEMA",
+    "OBSERVATION_SCREENSHOT_META_EXTENSION", "OBSERVATION_SCREENSHOT_META_VERSION", "OBSERVATION_STALE",
     "ObservationCandidate", "ObservationDeclarationError", "ObservationHostContext", "ObservationRecord", "ObservationRejected",
     "PluginToolObservation", "PluginToolObservationRef", "current_observation", "observation_action_payload_from_envelope",
     "observation_actions", "observation_event_payload_from_envelope", "observation_is_current", "observation_meta",

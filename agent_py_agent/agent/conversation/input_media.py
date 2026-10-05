@@ -33,6 +33,15 @@ def input_media_root(agent: object) -> Path:
     return Path(agent.home_paths.owner_home_dir) / "media" / "input"
 
 
+# LLM: 只认档案显式声明的模态（model_input_modalities 含 "image"）；空 = 未知，按不支持处理，不按模型名猜。
+#   宿主侧多处共用（观察截图落盘、观察工具截图协商、注入前复核换模型）；判定只读结构化字段。
+# 函数用途: 当前模型档案是否声明了图片输入。
+def model_accepts_images(agent: object) -> bool:
+    config = getattr(agent, "config", None)
+    modalities = getattr(config, "model_input_modalities", None)
+    return isinstance(modalities, (list, tuple)) and "image" in modalities
+
+
 # LLM: MIME 属于开放世界；显式类型可覆盖系统推断，已知 MOV 仅修正标准库在平台间的差异。
 # 函数用途: 判断文件属于图片或视频，未知扩展名可由调用者提供明确 MIME。
 def media_type_for_path(path: Path, declared: str = "") -> str:
@@ -70,6 +79,37 @@ def import_input_media(source: Path, root: Path, *, max_bytes: int = DEFAULT_MED
         os.replace(temporary, destination)
         return {"path": str(destination.resolve()), "sha256": sha,
                 "media_type": kind, "size_bytes": size, "name": source.name}
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+# LLM: 宿主自己生成的二进制内容（如屏幕观察截图）也走同一 owner 私有内容寻址目录：先算 sha256，写临时文件后原子替换；
+#   文件名就是哈希，相同内容重复导入自动复用同一文件。数据必须已按调用方上限编码（有界），本函数不再截断。
+# 函数用途: 把内存里的图片字节保存为与用户附件同规的私有引用，返回不含二进制的引用字典。
+def import_input_media_bytes(data: bytes, root: Path, *, media_type: str = "image/png",
+                             name: str = "") -> dict:
+    if not data:
+        raise InputMediaError("附件为空，未添加。")
+    if not str(media_type or "").startswith(("image/", "video/")):
+        raise InputMediaError("附件必须是图片或视频。")
+    ensure_private_dir(root)
+    sha = hashlib.sha256(data).hexdigest()
+    destination = root / sha
+    if not destination.exists():
+        _write_bytes_atomically(destination, data, root)
+    return {"path": str(destination.resolve()), "sha256": sha, "media_type": media_type,
+            "size_bytes": len(data), "name": name or sha}
+
+
+# 函数用途: 把字节写进目标路径（同目录临时文件 + 原子替换），失败清理临时文件。
+def _write_bytes_atomically(destination: Path, data: bytes, root: Path) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".import-", dir=root)
+    try:
+        with os.fdopen(fd, "wb") as target:
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, destination)
     finally:
         Path(temporary).unlink(missing_ok=True)
 

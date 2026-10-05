@@ -16,6 +16,8 @@ from ..plugin_observation import (
     OBSERVATION_ERROR_KEY,
     OBSERVATION_KEY,
     OBSERVATION_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_VERSION,
     OBSERVATION_STALE,
     ObservationHostContext,
     ObservationRejected,
@@ -61,19 +63,34 @@ class ObservationBinding:
     # 函数用途: 带观察合同地执行一次调用。
     def execute(self, params: dict[str, Any], context: ToolInvocationContext | None, send: ObservationSend) -> ToolHandlerOutcome:
         extra_meta = None
+        action_meta = None
         if self.observation_ref is not None:
             try:
-                extra_meta = self.action_meta(params)
+                action_meta = self.action_meta(params)
             except ObservationRejected as exc:
                 return self._rejected_outcome(exc.code)
+            extra_meta = action_meta
+        elif self.observation is not None:
+            extra_meta = self.screenshot_meta(params)
         outcome = send(params, context, extra_meta)
         if self.observation is not None and outcome.ok:
             outcome = self.attach(outcome, params, context)
-        if extra_meta is not None:
-            outcome = self._with_action_fact(outcome, params, extra_meta)
+        if action_meta is not None:
+            outcome = self._with_action_fact(outcome, params, action_meta)
             if not outcome.ok:
                 outcome = self.lift_error(outcome)
         return outcome
+
+    # LLM: 观察工具（observe 类）把宿主"要不要截图"的结构化决定附进 _meta 新扩展键：值来自执行器注入的内部参数
+    #   __observation_screenshot（缺省或旧宿主为 False，从严按不要图）；判定只信宿主注入的布尔值，不从模型参数或正文猜。
+    # 函数用途: 生成观察调用要附给提供方的截图意愿 _meta。
+    def screenshot_meta(self, params: dict[str, Any]) -> dict[str, object]:
+        return {
+            OBSERVATION_SCREENSHOT_META_EXTENSION: {
+                "version": OBSERVATION_SCREENSHOT_META_VERSION,
+                "enabled": params.get("__observation_screenshot") is True,
+            }
+        }
 
     # LLM: 事实只取宿主复核过的 _meta 里的观察编号与模型填的候选编号（已过复核），工具名是本绑定的注册名；写进 result_envelope，
     #   由归档与 tool_completed 事件沿同一投影落库。不改输出正文。

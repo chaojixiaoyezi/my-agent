@@ -1,5 +1,18 @@
 # Verification：开发推进
 
+## J16 第 9 节：观察截图 _meta 协商（vision2，2026-10-05，待非作者复审）
+
+- 宿主按当前模型档案的结构化 `model_input_modalities` 决定"要不要截图"：`tool_call_runtime` 写进 `trusted_run_context` → `executor._handler_arguments` 注入内部参数 `__observation_screenshot` → `mcp_registration._declared_proxy` 只给观察工具声明 → `observation_binding` 附进 `_meta` 扩展键 `my-agent/observation-screenshot`（v1）。
+- 适配器只在收到"要图"（版本匹配且 enabled 为 true）时生成缩略图并返回 image 内容块；缺键、旧宿主或坏形状一律不要图。不要图时工具结果正文与 vision1 之前逐字节相同（无占位行）。
+- 注入侧按当前档案复核：落盘时支持图、注入时换到不支持图的模型 → pending 丢弃、不注入。
+- 详见 [TESTS](../../../TESTS.md) 同名节与 DESIGN_LEDGER。
+
+## J16 第 9 节：观察截图随结果附给能看图的模型（vision1，2026-10-05，待非作者初审）
+
+- `tool_call_archive_record.extract_observation_screenshot`：工具结果里出现 MCP image 内容块时，先按档案 `model_input_modalities` 判定；声明含 `image` 才把 PNG 落盘为 owner 附件引用（复用 `conversation/input_media.import_input_media_bytes`），图片块一律从结果里剥离（base64 不进归档/模型正文），失败 fail-open。
+- 引用经 `ToolResult.metadata.observation_screenshot` → `tool_ir_history.record_tool_call_ir` 登记 pending → `tool_model_generation._native_provider_messages` 注入一次并消费；持久化投影不经过注入点，图片不进 IR/transcript。
+- 详见 [TESTS](../../../TESTS.md) 同名节与 DESIGN_LEDGER。
+
 ## jb6联合观察与拒绝账本（2026-10-04，WIP，待worker/b5fix9b）
 
 承接jb5真实样例/手工队列观察点，已证实并修测试激活碰撞；恢复观察后ask用户拒绝真实库0行，按3a指令交ds6 worker/b5fix9b，本线临时产品修复已撤。两直接deny唯一行/info通过，可见截断strict XPASS后转普通断言；两ask仅空账本专用strict xfail，原观察/协议/审批断言不吞。当前29文件589 passed/1缺Node样例skip/2 xfailed；生产安装启用/B7/客户端及多行最近排序未验，见TESTS。

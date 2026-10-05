@@ -231,6 +231,22 @@ def record_tool_call_ir(
     turn = _ensure_assistant_turn(history, tool_rounds, "")
     turn.tool_calls.append(call)
     history.append(result)
+    _remember_pending_observation_screenshot(params, result)
+
+
+# 宿主附加的观察截图引用在运行状态里的键：下一次出站投影注入一次后消费；不进 IR、不进 transcript。
+OBSERVATION_SCREENSHOT_PENDING_KEY = "_pending_observation_screenshot"
+
+
+# LLM: 观察截图引用只挂在宿主 metadata（tool_call_archive_record 落盘后写入）；这里只把它登记到本回合运行状态，
+#   由下一次出站投影注入并消费。新观察覆盖旧值（每次只给最新一张），不解析正文、不改 IR。
+# 函数用途: 把工具结果携带的观察截图引用登记为"下一次模型请求待注入"。
+def _remember_pending_observation_screenshot(params: object, result: ToolResult) -> None:
+    metadata = getattr(result, "metadata", None)
+    ref = metadata.get("observation_screenshot") if isinstance(metadata, dict) else None
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(ref, dict) and str(ref.get("sha256") or "") and isinstance(state, dict):
+        state[OBSERVATION_SCREENSHOT_PENDING_KEY] = dict(ref)
 
 
 # LLM: 成对回收不改变原始账本；完整摘要存在时才能删除已无工具的 assistant 轮及连续退休前缀内的旧

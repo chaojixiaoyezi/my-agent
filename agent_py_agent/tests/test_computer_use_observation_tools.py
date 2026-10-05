@@ -12,6 +12,8 @@ import pytest
 
 from agent_py_agent.agent.plugin_observation import (
     OBSERVATION_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_VERSION,
     PluginToolObservation,
     PluginToolObservationRef,
 )
@@ -74,11 +76,13 @@ class _Observer:
 
     def __init__(self):
         self.calls, self.error = [], None
+        self.want_screenshot = None
         self.result = {"window": "win:b:1", "generation": "b-1-1", "candidate_count": 1,
                        "my_agent_observation": {"schema": "plugin_observation.v1", "target": {"ref": "win:b:1", "generation": "b-1-1"}, "candidates": []}}
 
-    def observe(self, window=None):
+    def observe(self, window=None, *, want_screenshot=False):
         self.calls.append(("observe", window))
+        self.want_screenshot = want_screenshot
         if self.error:
             raise self.error
         return dict(self.result)
@@ -412,13 +416,13 @@ def test_lowlevel_handler_runs_observations_off_the_event_loop_one_at_a_time(mon
     depth = {"now": 0, "max": 0, "thread_names": set()}
 
     class _SlowObserver(_Observer):
-        def observe(self, window=None):
+        def observe(self, window=None, *, want_screenshot=False):
             depth["now"] += 1
             depth["max"] = max(depth["max"], depth["now"])
             depth["thread_names"].add(threading.current_thread().name)
             time.sleep(0.05)
             depth["now"] -= 1
-            return super().observe(window)
+            return super().observe(window, want_screenshot=want_screenshot)
 
     async def delegate(request):
         return "delegated"
@@ -442,9 +446,9 @@ def test_cancelled_click_queued_behind_a_cancelled_slow_observation_never_clicks
     monkeypatch.setitem(sys.modules, "mcp.types", types)
 
     class _Slow(_Observer):
-        def observe(self, window=None):
+        def observe(self, window=None, *, want_screenshot=False):
             time.sleep(0.3)
-            return super().observe(window)
+            return super().observe(window, want_screenshot=want_screenshot)
 
     observer = _Slow()
 
@@ -502,3 +506,27 @@ def test_window_errors_carry_the_structured_window_listing():
     observer.error = ObservationError("stale", "候选区域的像素已变")
     assert glue.call_observation_tool(observer, "click_candidate", {"candidate_id": "x"}, None)[1] == {"my_agent_observation_error": {"code": "stale"}}
     assert "完全相同的文字" in glue.observe_window.__doc__ and "win:" in glue.observe_window.__doc__
+
+
+# 函数用途: 截图意愿只认宿主 _meta 新扩展键的严格形状；缺键、版本不符或形状不对一律不要图（vision2）。
+def test_observe_screenshot_wish_comes_only_from_strict_host_meta(monkeypatch):
+    types = _fake_types()
+    monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(types=types))
+    monkeypatch.setitem(sys.modules, "mcp.types", types)
+
+    def observed_wish(meta_extra):
+        observer = _Observer()
+        handler = glue.observation_call_handler(lambda request: "delegated", observer)
+        meta = None if meta_extra is None else SimpleNamespace(model_extra=meta_extra)
+        request = SimpleNamespace(params=SimpleNamespace(name="observe_window", arguments={}, meta=meta))
+        asyncio.run(handler(request))
+        return observer.want_screenshot
+
+    key = OBSERVATION_SCREENSHOT_META_EXTENSION
+    assert observed_wish(None) is False, "旧宿主/没有 _meta 从严不要图"
+    assert observed_wish({}) is False
+    assert observed_wish({key: {"version": OBSERVATION_SCREENSHOT_META_VERSION, "enabled": True}}) is True
+    assert observed_wish({key: {"version": "2", "enabled": True}}) is False
+    assert observed_wish({key: {"version": OBSERVATION_SCREENSHOT_META_VERSION, "enabled": False}}) is False
+    assert observed_wish({key: {"version": OBSERVATION_SCREENSHOT_META_VERSION}}) is False
+    assert observed_wish({key: True}) is False

@@ -1,5 +1,25 @@
 # 设计台账
 
+## J16 第 9 节：观察截图 _meta 协商（vision2，2026-10-05，worker/vision2，基于 d2ef24d53；待非作者复审）
+
+- **目标**：采纳 vision1r 初审结论，把"要不要截图"从"适配器无条件生成 + 宿主兜底剥离"改成宿主按档案结构化协商——一次修掉三件事：没声明时正文多一行 `[image content, mimeType=image/png]` 占位（与"逐字节相同"冲突）、适配器白付的缩略图成本、占位对不支持图模型的误导。
+- **协商链**：`tool_call_runtime` 把 `model_accepts_images(agent)` 写进 `trusted_run_context` → `executor._handler_arguments` 注入内部参数 `__observation_screenshot`（模板同 `__process_completion_target`）→ `mcp_registration._declared_proxy` 只给观察工具（`observation` 类）声明该参数 → `observation_binding.screenshot_meta` 附进 `_meta` 扩展键 `my-agent/observation-screenshot`（v1，常量在 `plugin_observation`）→ 适配器 `_screenshot_requested` 从严解析（版本匹配且 enabled 为 true；缺键、旧宿主、坏形状一律不要图）→ `ScreenObserver.observe(want_screenshot=...)` 才生成缩略图。
+- **从严与兼容**：旧适配器不认识新键 → 保持原行为，宿主侧 vision1 的剥离/落盘兜底不动；旧宿主不发键 → 适配器默认不要图。`observation_binding.execute` 的动作后处理收窄到 action_meta，观察工具不再误走 `_with_action_fact`。
+- **注入侧换模型**：`_with_pending_observation_screenshot` 注入前按当前档案复核；落盘时支持图、注入时换到不支持图的模型 → pending 丢弃（已 pop）、不注入。
+- **共享判定**：`_model_accepts_images` 从 `tool_call_archive_record` 提为 `conversation/input_media.model_accepts_images`（归档、协商、注入三处同源）。
+- **验证**：新增 6 条用例（适配器计数探针、_meta 严格形状、真实渲染路正文逐字节/无占位、换模型丢弃、中断/重试不重复注入、执行器注入）+ 4 个假 observer 签名更新 + binding 断言更新；相关 7 文件 170 条（1 条既有失败 `test_mcp_client`，merge-base `d05a0d0753` 复核同败）；guards9 存在的 11 文件 187 passed（第 12 个 `test_backend_signature_guardrails.py` 本分支不存在）；变异 4/4 全杀；门禁全过（size_diff 新增 0/消失 50）。详见 TESTS 同名节。
+- **已知边界**：真实适配器（macOS 真机）与真实模型看到附图后的行为仍未验证；缩略图文件按内容寻址留 owner 附件目录，暂无自动清理（vision1 既有）。
+
+## J16 第 9 节：观察截图随观察结果附给能看图的模型（vision1，2026-10-05，worker/vision1；待非作者初审）
+
+- **目标**：档案声明 `input_modalities` 含 `image` 时，`observe_window` 的结果附一张缩小后的窗口截图；没声明时行为完全不变；截图只给当次模型请求，不写进会话持久历史。
+- **做法**：复用 ef 第 14 条"owner 附件 + 用户轮媒体块"的图片通道，不另开一条。适配器 `screen_observation.observation_screenshot` 生成缩略 PNG（宽度 ≤ `OBSERVATION_SCREENSHOT_MAX_WIDTH_PX`=1024、字节 ≤ `OBSERVATION_SCREENSHOT_MAX_BYTES`=256KB，纯标准库 zlib，失败静默）→ `computer_use_observation_tools.encode_call_result` 把截图转成独立 MCP image 内容块（不进正文/structuredContent）→ 宿主 `tool_call_archive_record.extract_observation_screenshot` 在归档投影前剥离图片块，并按档案模态决定是否落盘（`conversation/input_media.import_input_media_bytes`，与入站附件同一内容寻址目录）→ 引用进 `ToolResult.metadata.observation_screenshot` → `tool_ir_history.record_tool_call_ir` 登记 pending → `tool_model_generation._native_provider_messages` 注入一次（user 消息 + `local_file` 图片块）并消费。持久化路径（`_completed_turn_native_messages` 直接走 adapter 投影）不经过注入点，图片不进 IR/transcript。
+- **为什么落盘**：通道的发送边界只展开 `local_file` 媒体块（哈希校验 + 体积上限）；内存直传会变成第二条通道。单张 ≤256KB，内容寻址写在 owner 私有附件目录。
+- **fail-open**：没声明、坏 base64、缺 owner home、写盘失败都只剥离图片块，观察结果照常返回。适配器总是生成缩略图（档案判定在宿主侧；跨进程"要不要图"协商留待后续）。
+- **验证**：用例 4 条（声明了附图、没声明不附、尺寸/字节上限、不进持久历史+只注入一次）+ 2 条接口用例；变异 2 个全杀；相关 9 文件 145 passed、guards9 全过；ruff/import boundaries/doc sync/strict code-size/clean package/diff-check 全过。
+- **补单位表**：`_PX`（像素）补进 `scripts/build_constants_catalog.py` 的单位后缀表并重新生成目录（902 项）。
+- **已知边界**：①没声明图的模型也会让适配器生成一次缩略图（CPU+传输，成本有界）；②档案不支持时工具结果正文里仍有 `[image content, mimeType=image/png]` 占位文本；③缩略图文件按内容寻址留在 owner 附件目录，暂无自动清理；④真实适配器（macOS 真机）与真实模型看到附图后的行为未验证。
+
 ## 缓存命中运维报告脚本（cachereport，2026-10-05，分支 `worker/cachereport`，基于 17k 头 `02acd6446`；待初审）
 
 - **起因**：17k 上线（压缩调用也命中缓存）后要核对"省钱是否真的生效"，此前只能临时写脚本统计。本件把口径固化成仓库内只读工具 `scripts/cache_hit_report.py`。

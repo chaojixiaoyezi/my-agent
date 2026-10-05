@@ -3,6 +3,9 @@
 # 模块用途: 归档输出、原始调用身份和文件交接；复用 tooling 的有界清理投影，与耐久索引恢复保持一致。
 from __future__ import annotations
 
+import base64
+import json
+from dataclasses import replace
 from pathlib import Path
 
 from ..artifacts.registry import (
@@ -12,6 +15,11 @@ from ..artifacts.registry import (
     SHELL_PREIMAGE_POLICY_METADATA_KEY,
     ArtifactRegistration,
     register_artifact,
+)
+from ..conversation.input_media import (
+    import_input_media_bytes,
+    input_media_root,
+    model_accepts_images,
 )
 from ..memory_archive import (
     ExternalizeToolOutputRequest,
@@ -51,6 +59,7 @@ def archive_tool_output_projection(
 ) -> ToolOutputProjection:
     """Archive the raw handler body before any model-facing projection is applied."""
 
+    outcome, observation_screenshot = extract_observation_screenshot(agent, outcome)
     runtime_snapshot = getattr(params, "tool_runtime_snapshot", None)
     runtime = runtime_snapshot.runtime(call.tool_name) if runtime_snapshot is not None else None
     output_policy = (
@@ -107,17 +116,60 @@ def archive_tool_output_projection(
     if body:
         blocks.append(ToolContentBlock("text", text=body))
     blocks.extend(ToolContentBlock("ref", ref=ref.ref) for ref in refs)
-    return ToolOutputProjection(
-        content_blocks=tuple(blocks),
-        refs=refs,
-        metadata={
-            "archive_output_record": output_record,
-            "raw_output_chars": len(str(outcome.output or "")),
-            "raw_output_bytes": int(output_record.get("output_size_bytes") or 0),
-            "raw_output_sha256": str(output_record.get("output_hash") or ""),
-            "projection_truncated": use_preview,
-        },
-    )
+    metadata: dict[str, object] = {
+        "archive_output_record": output_record,
+        "raw_output_chars": len(str(outcome.output or "")),
+        "raw_output_bytes": int(output_record.get("output_size_bytes") or 0),
+        "raw_output_sha256": str(output_record.get("output_hash") or ""),
+        "projection_truncated": use_preview,
+    }
+    if observation_screenshot:
+        metadata["observation_screenshot"] = observation_screenshot
+    return ToolOutputProjection(content_blocks=tuple(blocks), refs=refs, metadata=metadata)
+
+
+# LLM: 观察截图（J16 第 9 节）是宿主补充的临时视觉事实：只在档案声明含 image 时把 MCP image 内容块落盘成
+#   owner 附件引用；其它情况（没声明、坏数据、落盘失败）一律剥离图片块并返回 None，绝不影响观察结果本身。
+#   剥离后的 outcome 继续走归档与模型投影，保证 base64 不进归档正文、不进模型可见结果。
+#   档案判定复用 conversation.input_media.model_accepts_images（与观察协商、注入前复核同源，vision2）。
+# 函数用途: 从工具结果里取出观察截图：按档案模态决定是否落盘，返回（剥离图片块后的结果，附件引用或 None）。
+def extract_observation_screenshot(agent: object, outcome: ToolHandlerOutcome) -> tuple[ToolHandlerOutcome, dict | None]:
+    output = str(outcome.output or "")
+    if '"image"' not in output:
+        return outcome, None
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError):
+        return outcome, None
+    blocks = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(blocks, list):
+        return outcome, None
+    images = [block for block in blocks if isinstance(block, dict) and block.get("type") == "image"]
+    if not images:
+        return outcome, None
+    kept = [block for block in blocks if block not in images]
+    stripped = replace(outcome, output=json.dumps({**payload, "content": kept}, ensure_ascii=False))
+    if not model_accepts_images(agent):
+        return stripped, None
+    return stripped, _store_observation_screenshot(agent, images[0])
+
+
+# LLM: 落盘复用入站附件的同一 owner 私有内容寻址目录与导入函数；base64 坏数据、缺 owner home、写盘失败
+#   都返回 None（fail-open），观察结果照常返回，只是没有附图。
+# 函数用途: 把 image 内容块解码并保存为 owner 附件引用；失败返回 None。
+def _store_observation_screenshot(agent: object, block: dict) -> dict | None:
+    data = block.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    try:
+        raw = base64.b64decode(data, validate=True)
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            return None
+        media_type = str(block.get("mimeType") or block.get("mime_type") or "image/png")
+        return import_input_media_bytes(raw, input_media_root(agent), media_type=media_type,
+                                        name="observation-screenshot.png")
+    except Exception:  # noqa: BLE001 截图只是增强，任何失败都不影响工具结果
+        return None
 
 
 def _projection_refs(

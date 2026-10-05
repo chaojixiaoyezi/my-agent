@@ -340,3 +340,14 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
 - 声明 `idempotency_scope=business` 的工具必须覆盖 `business_idempotency_key`；键只能来自 typed
   owner/request/目标和规范参数，不能含模型 call id，也不能由用户自然语言推断。能查询外部操作状态时
   才覆盖 `reconcile_operation`；没有证据就保留 unknown。
+
+## J16 第 9 节：观察截图（vision1，2026-10-05）
+
+- `tool_call_archive_record.extract_observation_screenshot` 是观察截图的宿主入口：在归档投影前剥离 MCP image 内容块、按档案 `model_input_modalities` 决定是否落盘（`conversation/input_media.import_input_media_bytes`），引用写进 projection metadata；失败 fail-open。
+- 引用沿 `ToolResult.metadata` → `tool_ir_history` 的 pending 键 → `tool_model_generation._native_provider_messages` 注入一次，不进 IR/transcript；适配器侧缩略图在 `screen_observation.observation_screenshot`（纯标准库 PNG，≤1024px/≤256KB）。
+
+
+## J16 第 9 节：观察截图 _meta 协商（vision2，2026-10-05）
+
+- 截图意愿由宿主结构化决定、经 `_meta` 扩展键 `my-agent/observation-screenshot` 协商：`tool_call_runtime` → `executor._handler_arguments`（内部参数 `__observation_screenshot`）→ `observation_binding.screenshot_meta`；`computer_use_observation_tools._screenshot_requested` 从严解析（版本匹配且 enabled 为 true），`ScreenObserver.observe(want_screenshot=...)` 才生成缩略图。
+- `input_media.model_accepts_images` 是共享判定（归档落盘、协商发送、注入前复核三处同源）；`tool_model_generation` 注入前复核换模型并丢弃 pending。

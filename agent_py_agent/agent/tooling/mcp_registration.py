@@ -507,8 +507,11 @@ def _declared_proxy(proxy: MCPProxyTool, declarations: ResolvedServerDeclaration
             action_tools=declarations.action_tools(kind, lambda name: mcp_tool_name(source.server_name, name)),
             repo=source.repo,
         )
+        # 观察工具（observe 类）额外声明截图意愿内部参数：执行器按它把宿主的结构化决定注入 __observation_screenshot，
+        # 绑定再转成 _meta 扩展字段；动作工具不需要（只发候选复核上下文）。
+        screenshot_param = ("__observation_screenshot",) if declared.observation is not None else ()
         policy = replace(policy, input_policy=ToolInputPolicy(internal_parameters=tuple(dict.fromkeys(
-            (*policy.input_policy.internal_parameters, "__operation_id", "__run_scope")))))
+            (*policy.input_policy.internal_parameters, "__operation_id", "__run_scope", *screenshot_param)))))
     declared_proxy = MCPProxyTool(proxy.client, proxy.remote_tool, proxy.model_spec, policy, transport=proxy.transport)
     declared_proxy.observation_binding = binding
     return declared_proxy

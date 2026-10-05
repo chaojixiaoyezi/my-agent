@@ -86,6 +86,7 @@ def test_unit_inference():
     assert unit_for_name("REQUEST_TIMEOUT_SECONDS") == "秒"
     assert unit_for_name("_MAX_BODY_BYTES") == "字节"
     assert unit_for_name("RESPONSE_PREVIEW_CHARS") == "字符"
+    assert unit_for_name("SCREENSHOT_MAX_WIDTH_PX") == "像素"
     assert unit_for_name("TOKEN_BUDGET") == ""
     assert unit_for_name("DEFAULT_PORT") == ""
 

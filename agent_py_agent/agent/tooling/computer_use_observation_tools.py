@@ -16,9 +16,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ..plugin_observation import OBSERVATION_ERROR_KEY, OBSERVATION_META_EXTENSION
+from ..plugin_observation import (
+    OBSERVATION_ERROR_KEY,
+    OBSERVATION_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_VERSION,
+)
 from .computer_use_profile import OBSERVATION_ENV_FLAG, OBSERVE_ONLY_ENV_FLAG
-from .screen_observation import ObservationError
+from .screen_observation import OBSERVATION_SCREENSHOT_KEY, ObservationError
 
 OBSERVATION_TOOL_NAMES = ("observe_window", "click_candidate", "type_into_candidate")
 # LLM: 只看档下唯一允许执行的工具名；集中成常量，避免"档位判定"和"目录注册"两处各写一份字面量后走偏。
@@ -28,12 +33,14 @@ OBSERVE_ONLY_TOOL_NAME = "observe_window"
 # LLM: 一次调用的宿主侧事实：_meta 里的观察上下文、"宿主已取消"的判定、以及本次进程的档位。cancelled 由接管层按协程取消设置，
 #   观察核心在拿到锁后、复核完真正点击前各看一次，已取消就零副作用返回；observe_only 是结构化档位（不是从工具名或调用方猜的），
 #   摆在上下文里让执行面在同一处拿到"这次允许做什么"，也避免执行函数参数膨胀。
+#   want_screenshot 是宿主经 _meta 协商的截图意愿（缺省/旧宿主/坏形状一律 False，从严按不要图），只影响 observe_window 是否生成缩略图。
 # 类用途: 观察工具调用的上下文（不是模型参数）。
 @dataclass(frozen=True)
 class CallContext:
     meta: object = None
     cancelled: Callable[[], bool] = lambda: False
     observe_only: bool = False
+    want_screenshot: bool = False
 
 
 # LLM: 两个标记都是"要装载观察工具"的同源事实：完整档写观察标记，只看档只写只看标记（宿主在只看档不写观察标记）。
@@ -50,6 +57,16 @@ def observation_tools_enabled(environ: Mapping[str, str]) -> bool:
 # 函数用途: 判定本次适配器进程是否为只看档。
 def observe_only_enabled(environ: Mapping[str, str]) -> bool:
     return str(environ.get(OBSERVE_ONLY_ENV_FLAG) or "") == "1"
+
+
+# LLM: 截图意愿只认宿主 _meta 新扩展键的严格形状（版本匹配且 enabled 为 true）：缺键、旧宿主、版本不符或形状不对
+#   一律 False（从严按不要图）；不从模型参数、工具名或正文猜。
+# 函数用途: 从 MCP _meta 读取宿主"要不要截图"的结构化决定。
+def _screenshot_requested(extra: Mapping[str, object]) -> bool:
+    value = extra.get(OBSERVATION_SCREENSHOT_META_EXTENSION)
+    if not isinstance(value, Mapping):
+        return False
+    return value.get("version") == OBSERVATION_SCREENSHOT_META_VERSION and value.get("enabled") is True
 
 
 # LLM: 只提供 tools/list 的签名与说明；真正执行在 observation_call_handler。
@@ -118,8 +135,9 @@ def _observe(observer: Any, arguments: Mapping[str, Any], context: CallContext) 
     window = arguments.get("window")
     if window is not None and not isinstance(window, str):
         raise ObservationError("invalid_arguments", "window 必须是字符串")
-    result = observer.observe(window or None)
-    return {key: value for key, value in result.items() if key != "my_agent_observation"}, result
+    result = observer.observe(window or None, want_screenshot=context.want_screenshot)
+    return {key: value for key, value in result.items()
+            if key not in {"my_agent_observation", OBSERVATION_SCREENSHOT_KEY}}, result
 
 
 # 函数用途: click_candidate 分支：candidate_id 必须是非空字符串，候选事实只来自 _meta；复核完真正点击前再看一次是否已取消。
@@ -147,12 +165,18 @@ _BRANCHES: dict[str, Callable[[Any, Mapping[str, Any], CallContext], tuple[dict,
 }
 
 
-# 函数用途: 把三元组编码成底层 Server 的 ServerResult(CallToolResult)。
+# LLM: 观察截图是宿主专用数据（structured 的 _observation_screenshot 键）：取出后编码成独立 MCP image 内容块（base64），
+#   不重复进正文或 structuredContent；宿主侧再按档案模态决定是否落盘成附件。没有截图时输出与原行为逐字一致。
+# 函数用途: 把三元组编码成底层 Server 的 ServerResult(CallToolResult)，观察截图作为独立 image 块。
 def encode_call_result(body: dict, structured: dict | None, is_error: bool) -> Any:
     from mcp import types
 
+    content = [types.TextContent(type="text", text=json.dumps(body, ensure_ascii=False))]
+    screenshot = structured.pop(OBSERVATION_SCREENSHOT_KEY, None) if isinstance(structured, dict) else None
+    if isinstance(screenshot, str) and screenshot:
+        content.append(types.ImageContent(type="image", data=screenshot, mimeType="image/png"))
     return types.ServerResult(types.CallToolResult(
-        content=[types.TextContent(type="text", text=json.dumps(body, ensure_ascii=False))],
+        content=content,
         structuredContent=structured, isError=is_error,
     ))
 
@@ -179,7 +203,8 @@ def observation_call_handler(delegate: Callable[[Any], Any], observer: Any, *,
             return await delegate(request)
         extra = getattr(getattr(params, "meta", None), "model_extra", None) or {}
         cancelled = threading.Event()
-        context = CallContext(meta=extra.get(OBSERVATION_META_EXTENSION), cancelled=cancelled.is_set, observe_only=observe_only)
+        context = CallContext(meta=extra.get(OBSERVATION_META_EXTENSION), cancelled=cancelled.is_set, observe_only=observe_only,
+                              want_screenshot=_screenshot_requested(extra))
         try:
             body, structured, is_error = await asyncio.get_running_loop().run_in_executor(None, run, params.name, dict(params.arguments or {}), context)
         except asyncio.CancelledError:

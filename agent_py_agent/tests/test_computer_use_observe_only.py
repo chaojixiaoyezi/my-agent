@@ -153,7 +153,7 @@ def _install_fake_mcp(monkeypatch):
 class _FakeObserver:
     supports_ui_candidates = True
 
-    def observe(self, window=None):
+    def observe(self, window=None, *, want_screenshot=False):
         return {"ok": True}
 
 
@@ -240,7 +240,7 @@ class _CountingObserver:
     def __init__(self):
         self.clicks, self.types, self.observes = 0, 0, 0
 
-    def observe(self, window=None):
+    def observe(self, window=None, *, want_screenshot=False):
         self.observes += 1
         return {"window": "win:b:1", "generation": "b-1-1", "candidate_count": 0}
 

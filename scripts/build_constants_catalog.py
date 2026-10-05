@@ -36,6 +36,7 @@ _UNIT_SUFFIXES = (
     ("_DAYS", "天"),
     ("_CHARS", "字符"),
     ("_BYTES", "字节"),
+    ("_PX", "像素"),
     ("_TOKENS", "tokens"),
     ("_TOKEN", "tokens"),
     ("_COUNT", "个"),

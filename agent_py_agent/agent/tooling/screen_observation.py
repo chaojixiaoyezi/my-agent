@@ -17,9 +17,12 @@
 # 模块用途: "看一眼窗口、给出可点的候选、点之前再确认一遍没变"的全部判断逻辑，可在没有桌面的机器上用假后端完整测试。
 from __future__ import annotations
 
+import base64
 import math
+import struct
 import time
 import unicodedata
+import zlib
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
@@ -65,6 +68,14 @@ WINDOW_TITLE_MAX_CHARS = 64
 WINDOW_LIST_MAX_COUNT = 16
 # window 参数以它开头就只按别名解析，真实标题以它开头的窗口不能按标题选
 WINDOW_ALIAS_PREFIX = "win:"
+# 观察截图的目标宽度上限（像素）：窗口像素宽超过它时等比缩小；只控制给模型的视觉信息量，不参与观察判定。
+OBSERVATION_SCREENSHOT_MAX_WIDTH_PX = 1024
+# 观察截图 PNG 的字节上限：编码后超过就逐级缩小重试，仍超就放弃附图（观察结果本身照常返回）。
+OBSERVATION_SCREENSHOT_MAX_BYTES = 256 * 1024
+# 逐级缩小重试的最小宽度；到它仍超字节上限就放弃附图。
+OBSERVATION_SCREENSHOT_MIN_WIDTH_PX = 256
+# 观察结果里宿主专用键：截图 base64 不属于观察载荷，由适配器接管层取出后转成 MCP image 内容块。
+OBSERVATION_SCREENSHOT_KEY = "_observation_screenshot"
 
 
 # LLM: code 是稳定机器码，进 structuredContent.my_agent_observation_error.code；message 是中文说明，不含路径、标题正文或坐标。
@@ -170,8 +181,9 @@ class ScreenObserver:
     #   遮挡事实只从 backend.above_rects 取：后端负责按系统结构排除不代表遮挡的背景面，核心统一判完全覆盖与部分 occluded。
     #   候选 = 控件树（后端 ui_scan，读不全或读不到只降级、不失败，结果顶层带 ui_tree{status, reason}）+ OCR，合并去重见
     #   screen_ui_candidates。没有候选时结果里不带 my_agent_observation（不凭空造候选），但快照照样记。
+    #   want_screenshot 是宿主经 _meta 协商后的截图意愿（缺省 False = 旧宿主/旧调用方，从严不生成）；只有它为真才生成缩略图。
     # 函数用途: 采样一个窗口并返回给模型的结果（含观察载荷）。
-    def observe(self, window: str | None = None) -> dict[str, object]:
+    def observe(self, window: str | None = None, *, want_screenshot: bool = False) -> dict[str, object]:
         windows = self._refresh_listing()
         target = self._target(windows, window)
         if not target.visible_now():
@@ -192,6 +204,10 @@ class ScreenObserver:
         )
         self.store.record(snapshot)
         result = self._result(snapshot, target, candidates, capture)
+        if want_screenshot:
+            screenshot = observation_screenshot(capture.buffer)
+            if screenshot:
+                result[OBSERVATION_SCREENSHOT_KEY] = screenshot
         if scan.status:
             result["ui_tree"] = {"status": scan.status, **({"reason": scan.reason} if scan.reason else {})}
         return result
@@ -354,6 +370,66 @@ class ScreenObserver:
         return result
 
 
+# LLM: 给能看图的模型附的缩小截图（J16 第 9 节）：只做等比缩小 + PNG 编码，不改任何观察判定；
+#   返回 base64 字符串（MCP image 内容块的 data），任何一步失败都返回 None 让观察结果照常返回。
+#   调用方（适配器接管层）负责把它从 structured 取出转成独立 image 块，宿主侧再按档案模态决定是否落盘。
+# 函数用途: 把一次窗口截图缩到尺寸/字节上限内并编码成 base64 PNG；失败返回 None。
+def observation_screenshot(buffer: PixelBuffer) -> str | None:
+    if buffer.width <= 0 or buffer.height <= 0:
+        return None
+    width = min(buffer.width, OBSERVATION_SCREENSHOT_MAX_WIDTH_PX)
+    height = max(1, round(buffer.height * width / buffer.width))
+    png = b""
+    for _ in range(4):
+        try:
+            scaled = scale_pixel_buffer(buffer, width, height)
+            png = encode_png_rgb(scaled.width, scaled.height, scaled.rgb)
+        except Exception:  # noqa: BLE001 截图只是附加信息，编码失败不能影响观察
+            return None
+        if len(png) <= OBSERVATION_SCREENSHOT_MAX_BYTES or width <= OBSERVATION_SCREENSHOT_MIN_WIDTH_PX:
+            break
+        width = max(OBSERVATION_SCREENSHOT_MIN_WIDTH_PX, width * 3 // 4)
+        height = max(1, round(buffer.height * width / buffer.width))
+    if not png or len(png) > OBSERVATION_SCREENSHOT_MAX_BYTES:
+        return None
+    return base64.b64encode(png).decode("ascii")
+
+
+# LLM: 最近邻采样缩放：缩略图只服务模型目视，不做抗锯齿；按目标像素数循环，纯 Python 成本有界。
+# 函数用途: 把像素缓冲等比缩到指定宽高，返回新的 PixelBuffer。
+def scale_pixel_buffer(buffer: PixelBuffer, width: int, height: int) -> PixelBuffer:
+    if width == buffer.width and height == buffer.height:
+        return buffer
+    stride = buffer.width * 3
+    rows = []
+    for y in range(height):
+        base = min(buffer.height - 1, y * buffer.height // height) * stride
+        row = bytearray()
+        for x in range(width):
+            offset = base + min(buffer.width - 1, x * buffer.width // width) * 3
+            row += buffer.rgb[offset:offset + 3]
+        rows.append(bytes(row))
+    return PixelBuffer(width, height, b"".join(rows))
+
+
+# LLM: 纯标准库 PNG（真彩色、无滤波）：zlib 是 C 实现，编码快且不需要 Pillow 之类新依赖；
+#   只被观察截图使用，输出字节由 observation_screenshot 的字节上限约束。
+# 函数用途: 把行优先 RGB 缓冲编码成 PNG 字节。
+def encode_png_rgb(width: int, height: int, rgb: bytes) -> bytes:
+    stride = width * 3
+    raw = b"".join(b"\x00" + rgb[y * stride:(y + 1) * stride] for y in range(height))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", header)
+            + _png_chunk(b"IDAT", zlib.compress(raw, 6))
+            + _png_chunk(b"IEND", b""))
+
+
+# 函数用途: 拼一个 PNG 数据块（长度 + 类型 + 数据 + CRC32）。
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
 # LLM: scale 按截图算：宽 = 像素宽 ÷ 点宽，高 = 像素高 ÷ 点高；两轴差出一个像素以上（不是同一个缩放）就判 capture_failed。
 #   主路径按显示器缩放出图（Retina 为 2），按名义分辨率出图的回退为 1；核心的 click_point = origin + region / scale 两种都对。
 # 函数用途: 由列表几何与截图像素算出这次截图的几何（原点、尺寸照抄，scale 取截图自己的像素/点比）。
@@ -477,8 +553,9 @@ def _clip_region(region: object, buffer: PixelBuffer) -> tuple[int, int, int, in
 
 
 __all__ = [
-    "CLICK_ACTION", "OBSERVATION_SPACE", "OCR_ROLE", "SCREEN_REGION_CAPTURE", "TYPE_ACTION", "TYPE_INTO_FOCUS_POLL_SECONDS",
+    "CLICK_ACTION", "OBSERVATION_SCREENSHOT_KEY", "OBSERVATION_SCREENSHOT_MAX_BYTES", "OBSERVATION_SCREENSHOT_MAX_WIDTH_PX",
+    "OBSERVATION_SCREENSHOT_MIN_WIDTH_PX", "OBSERVATION_SPACE", "OCR_ROLE", "SCREEN_REGION_CAPTURE", "TYPE_ACTION", "TYPE_INTO_FOCUS_POLL_SECONDS",
     "TYPE_INTO_FOCUS_WAIT_SECONDS", "TYPE_INTO_TEXT_MAX_CHARS", "UI_SCAN_FAILED_REASON", "WINDOW_IMAGE_CAPTURE", "WINDOW_TARGET_KIND",
     "ObservationError", "ScreenCapture", "ScreenObserver", "TextRegion", "WindowInfo", "captured_geometry", "check_typed_text", "click_point", "covering_scale",
-    "point_in_rect", "rect_contains", "rects_intersect", "sanitize_label", "window_rect",
+    "encode_png_rgb", "observation_screenshot", "point_in_rect", "rect_contains", "rects_intersect", "sanitize_label", "scale_pixel_buffer", "window_rect",
 ]

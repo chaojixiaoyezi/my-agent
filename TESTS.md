@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## J16 第 9 节 观察截图 _meta 协商（vision2，2026-10-05，worker/vision2）
+
+- **用例**：`test_observation_screenshot.py` +4（真实 MCP 渲染路正文逐字节/无占位对照、换模型丢弃 pending、中断/重试不重复注入、执行器按内部参数注入）；`test_computer_use_observation_tools.py` +1（`_meta` 严格形状端到端）；`test_screen_observation_core.py` +1（计数探针：不要图时不调用缩略图生成）；`test_mcp_observation_binding.py` +1（观察工具 `_meta` 携带截图意愿）；假 observer 签名与内部参数集断言同步更新。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_observation_screenshot.py agent_py_agent/tests/test_screen_observation_core.py agent_py_agent/tests/test_computer_use_observation_tools.py agent_py_agent/tests/test_mcp_observation_binding.py agent_py_agent/tests/test_computer_use_observe_only.py agent_py_agent/tests/test_mcp_client.py agent_py_agent/tests/test_plugin_observation.py -q` → 170 条：169 passed、1 failed（`test_mcp_client::test_client_reconnects_same_binding_after_stdio_server_dies` 既有失败，merge-base `d05a0d0753` 复核同样失败，非本次引入）。
+- **变异**（4/4 KILLED，按字节还原）：`_screenshot_requested` 恒 True；去掉注入前档案复核；`pop` 改 `get`；执行器不注入 `__observation_screenshot`。
+- **门禁**：guards9 存在的 11 文件 187 passed（第 12 个 `test_backend_signature_guardrails.py` 不在本分支，属主线新增）；ruff、import boundaries 0、`check_doc_sync --base 32e8f8745` PASS、strict code-size hard=0、`size_diff.sh` 新增 0/消失 50、`git diff --check`、clean package 全过。
+- **未验证**：真实适配器生成与真实模型看图行为（同 vision1）；`_meta` 协商在真实 Gateway 全链的端到端（单测覆盖到 binding/执行器/适配器各层）。
+
+## J16 第 9 节 观察截图附给能看图的模型（vision1，2026-10-05，worker/vision1）
+
+- **用例**：`agent_py_agent/tests/test_observation_screenshot.py`（6 条）——声明含 image 时落盘+注入（内容寻址文件校验、base64 不进正文）；没声明时不落盘不注入（图片块照样剥离）；尺寸/字节上限（800×400 高熵图逐级缩小到 ≤1024px/≤256KB、小图不缩放）；不进持久历史且只注入一次（IR/持久化投影无图片块，第二次请求无图）；`encode_call_result` 转 image 块且截图键不进 structuredContent；`_observe` 正文不含截图键。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_observation_screenshot.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds7` → **6 passed**；相关回归 9 文件 **145 passed**；guards9（11 文件）+ 本文件全过。
+- **变异**（均已还原，sha256 一致）：`_model_accepts_images` 恒真 → "没声明不附"红；`state.pop` 改 `state.get`（不消费 pending）→ "只注入一次"红。
+- **门禁**：ruff、`check_import_boundaries.py`（0 条）、`check_doc_sync.py`、strict code-size（hard=0）、`check_clean_package.py`、`git diff --check` 全过；`size_diff.sh` 新增 0。
+- **未验证**：真实适配器（macOS 真机）生成截图、真实模型（DeepSeek/M3）看到附图后的行为、缩略图在 Retina 窗口上的可读性。
+
 ## 缓存命中运维报告（cachereport，2026-10-05，分支 `worker/cachereport`，基于 17k 头 `02acd6446`；待初审）
 
 - 新增 `scripts/cache_hit_report.py`（只读运维工具）与 `agent_py_agent/tests/test_cache_hit_report.py`（11 条）。

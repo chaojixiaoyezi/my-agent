@@ -17,6 +17,8 @@ from agent_py_agent.agent.plugin_observation import (
     OBSERVATION_KEY,
     OBSERVATION_META_EXTENSION,
     OBSERVATION_SCHEMA,
+    OBSERVATION_SCREENSHOT_META_EXTENSION,
+    OBSERVATION_SCREENSHOT_META_VERSION,
     OBSERVATION_STALE,
     PluginToolObservation,
     PluginToolObservationRef,
@@ -179,7 +181,7 @@ def test_published_read_tool_mints_host_ids_with_mcp_provider_and_connection_gen
     registry = _published(repo, client)
     read = registry.tools["mcp__srv__read"]
     assert read.runtime_policy.approval_policy.mode == "always" and read.runtime_policy.effect_resolver.default_effect == "read_only"
-    assert set(read.runtime_policy.input_policy.internal_parameters) == {"__operation_id", "__run_scope"}
+    assert set(read.runtime_policy.input_policy.internal_parameters) == {"__operation_id", "__run_scope", "__observation_screenshot"}
     outcome = _recorded(repo, registry)
     assert outcome.ok and client.sent[0]["arguments"] == {"window": "main"}, "宿主参数不转发"
     visible = json.loads(outcome.output)["structuredContent"][OBSERVATION_KEY]
@@ -320,3 +322,19 @@ def test_register_rejects_the_declared_server_only_and_keeps_the_other_one():
     finally:
         for client in clients:
             client.stop()
+
+
+# 函数用途: 观察工具把宿主注入的 __observation_screenshot 附进 _meta 新扩展键；缺省从严 False（vision2）。
+def test_observe_tool_meta_carries_strict_screenshot_wish():
+    def meta_for(extra):
+        repo, client = _Repo(), _Client(_config(), _read_result(_observation()))
+        registry = _published(repo, client)
+        read = registry.tools["mcp__srv__read"]
+        read.execute({"window": "main", "__run_scope": RUN_SCOPE, "__operation_id": "op-1", **extra})
+        assert client.sent[0]["arguments"] == {"window": "main"}, "宿主参数不转发"
+        return client.sent[0]["meta"].get(OBSERVATION_SCREENSHOT_META_EXTENSION)
+
+    assert meta_for({"__observation_screenshot": True}) == {
+        "version": OBSERVATION_SCREENSHOT_META_VERSION, "enabled": True}
+    assert meta_for({}) == {"version": OBSERVATION_SCREENSHOT_META_VERSION, "enabled": False}, "缺省从严不要图"
+    assert meta_for({"__observation_screenshot": False})["enabled"] is False

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 907,
+  "count": 910,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5818,6 +5818,30 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "沙箱事实里每条允许目录路径最多展示多少字符（更长的整条跳过，原账不变）。"
+    },
+    {
+      "name": "OBSERVATION_SCREENSHOT_MAX_BYTES",
+      "file": "agent_py_agent/agent/tooling/screen_observation.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "观察截图 PNG 的字节上限：编码后超过就逐级缩小重试，仍超就放弃附图（观察结果本身照常返回）。"
+    },
+    {
+      "name": "OBSERVATION_SCREENSHOT_MAX_WIDTH_PX",
+      "file": "agent_py_agent/agent/tooling/screen_observation.py",
+      "value": 1024,
+      "unit": "像素",
+      "category": "上限预算",
+      "description": "观察截图的目标宽度上限（像素）：窗口像素宽超过它时等比缩小；只控制给模型的视觉信息量，不参与观察判定。"
+    },
+    {
+      "name": "OBSERVATION_SCREENSHOT_MIN_WIDTH_PX",
+      "file": "agent_py_agent/agent/tooling/screen_observation.py",
+      "value": 256,
+      "unit": "像素",
+      "category": "其它",
+      "description": "逐级缩小重试的最小宽度；到它仍超字节上限就放弃附图。"
     },
     {
       "name": "TYPE_INTO_FOCUS_POLL_SECONDS",

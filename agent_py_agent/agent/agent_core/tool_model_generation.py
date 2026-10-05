@@ -767,9 +767,39 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     # tool_result，保证出站永不带孤儿。
     # 非工具运行时指引已经在翻译前写入 RuntimeFactsTurn；后续请求会永久带着它，
     # 不再出现“首轮发送、下一轮因 seen 去重反而消失”的瞬态消息。
-    return project_native_provider_messages(
-        history, prior_messages=getattr(params, "provider_history_messages", None),
+    return _with_pending_observation_screenshot(
+        project_native_provider_messages(
+            history, prior_messages=getattr(params, "provider_history_messages", None),
+        ),
+        params,
+        agent,
     )
+
+
+# 注入观察截图时给模型的固定说明：说明这是宿主补充的视觉材料，不是用户消息。
+_OBSERVATION_SCREENSHOT_HINT = "（宿主补充：这是刚才 observe_window 的窗口截图，供辅助判断候选位置与画面状态。）"
+
+
+# LLM: 观察截图是宿主补充的临时视觉事实（J16 第 9 节）：只在观察后的下一次请求注入一次，注入即消费；
+#   它不在 IR、不在 provider_history、不写 transcript，历史前缀保持逐字稳定。落盘与档案判定已在
+#   tool_call_archive_record 提取时完成，这里只负责把它拼成消息尾部的一条 user 消息。
+#   注入前再按当前档案复核一次：落盘时支持图、注入时已换到不支持图的模型 → pending 丢弃（已 pop），不再注入。
+# 函数用途: 把待注入的观察截图作为消息列表尾部的一条 user 消息附加给本次模型请求。
+def _with_pending_observation_screenshot(messages: list[dict], params: object, agent: object) -> list[dict]:
+    from ..conversation.input_media import input_media_blocks, model_accepts_images
+    from .tool_ir_history import OBSERVATION_SCREENSHOT_PENDING_KEY
+
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return messages
+    ref = state.pop(OBSERVATION_SCREENSHOT_PENDING_KEY, None)
+    if not isinstance(ref, dict) or not str(ref.get("sha256") or ""):
+        return messages
+    if not model_accepts_images(agent):
+        return messages
+    content = [{"type": "text", "text": _OBSERVATION_SCREENSHOT_HINT}]
+    content.extend(input_media_blocks([ref]))
+    return [*messages, {"role": "user", "content": content}]
 
 
 def _remember_model_turn_tool_choice(params: object, choice: ToolChoice) -> None:
