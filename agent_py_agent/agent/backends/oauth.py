@@ -48,11 +48,13 @@ class _OAuthMixin:
             raise ValueError("OAuth 登录不能与 API Key 混用。")
 
     # LLM: 签名必须与 HttpBackend._gateway_request 一致（StreamCall 或 path/payload/headers，加 options），
-    #   基类 request_json/request_stream/request_stream_iter 都按新形态调进来；首包预算与绝对期限沿用基类口径。
+    #   基类 request_json/request_stream/request_stream_iter 都按新形态调进来；首包预算、绝对期限和后台预算
+    #   （provider_request_timeout）都沿用基类口径——fix3ar 实测原先用裸 request_timeout，后台预算在订阅账号上不生效。
     #   每次物理请求使用同一份刷新结果，认证头覆盖生成期旧值；禁止重定向投递 token。同步 test_model_oauth_transport。
     # 函数用途: 用原传输封装发送带账号信息的请求，不增加自动重试或新后台线程。
     def _gateway_request(self, call, payload=None, headers=None, *, options=None):
         from ..settings.model_oauth import request_credentials
+        from .request_scope import provider_request_timeout
 
         path, payload, headers = stream_call_parts(call, payload, headers)
         options = options or StreamCallOptions()
@@ -61,7 +63,8 @@ class _OAuthMixin:
         clean.update(Authorization="Bearer " + key, **account_headers)
         base, suffix = endpoint_parts(self.api_base, path)
         return GatewayRequest(api_base=base, path=suffix, api_key=key, payload=payload,
-            headers=request_headers(clean, self.custom_headers, self.session_header), timeout=self.request_timeout,
+            headers=request_headers(clean, self.custom_headers, self.session_header),
+            timeout=provider_request_timeout(self.request_timeout),
             connect_timeout=self.connect_timeout, first_event_timeout=options.first_event_timeout_seconds,
             deadline=stream_call_deadline(options), allow_redirects=False)
 

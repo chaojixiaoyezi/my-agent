@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## Anthropic 非流式绝对期限与 OAuth 后台预算（3a，2026-10-05，ds6 fix3ar 复核实测）
+
+- 问题：① `anthropic.py::_generate_non_stream` 不把辅助调用的绝对期限交给 `request_json`，`stream_enabled=False` 的 Anthropic 兼容后端（及 OAuth Messages）上辅助调用没有绝对期限；② OAuth 的 `_gateway_request` 用裸 `request_timeout`，后台预算（`provider_request_budget`）在订阅账号上既收不紧也放不宽单次超时。
+- 改法：Anthropic 非流式经 `_request_messages` 按 Chat 同口径传 `total_deadline_seconds`（不设时调用形态不变）；OAuth 信封的 timeout 改为 `provider_request_timeout(self.request_timeout)`。
+- 用例：`test_backends.py::test_anthropic_non_stream_deadline`（有/无期限两种，最底层截信封）；`test_responses_websocket.py::test_oauth_envelope_timeout_follows_provider_request_budget`；`test_compact_request_budget.py` 的非流式用例补“期限已传”断言（替身改收 `**options`）。变异 2/2 KILLED。ds6 的 24 项信封探针在 17k 上全部 OK；WebSocket 空闲阶段的绝对期限由 ds6 另修（wsdeadline）。后端相关与守卫：1211 passed。
+
 ## g2bfix4 并入 17k 时的纠正：锁正忙不再让投递线程退出（3a，2026-10-05）
 
 - 问题：3a 给 g2bfix4 的任务里要求把 `InterruptedError`、`BlockingIOError` 都从投递循环兜底里放行。但本项目里 `BlockingIOError` 表示“锁正忙”（`json_io` 非阻塞锁、目录锁），是临时状态；放行会让一次锁冲突就永久停掉投递线程，之后所有通道回复都停。

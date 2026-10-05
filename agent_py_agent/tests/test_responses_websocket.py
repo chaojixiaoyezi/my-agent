@@ -244,6 +244,26 @@ def test_oauth_backends_accept_the_base_stream_call_and_deadline_options(tmp_pat
         assert json_request.first_event_timeout is None
         assert before + 30.0 <= json_request.deadline <= time.monotonic() + 30.0
 
+
+# LLM: fix3ar 实测：OAuth 的 _gateway_request 原先用裸 request_timeout，后台预算（provider_request_budget）在
+#   订阅账号上既收不紧也放不宽单次 HTTP 超时；现在与基类一样走 provider_request_timeout。
+# 函数用途: 钉住 OAuth 信封的单次超时跟随后台预算的剩余时长。
+def test_oauth_envelope_timeout_follows_provider_request_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.http import StreamCall
+    from agent_py_agent.agent.backends.request_scope import provider_request_budget
+
+    alice = host(tmp_path / "budget")
+    key = setup(alice, "oauth_device")
+    login(alice, monkeypatch)
+    execute_model_profile_operation(alice, "set_default", {"profile_id": key})
+    config = selected_model_config(alice)
+    backend = get_backend(config.model_backend, config)
+    call = StreamCall(path="/responses", payload={"model": "m"}, headers={})
+    assert backend._gateway_request(call).timeout == backend.request_timeout
+    with provider_request_budget(3.0):
+        budgeted = backend._gateway_request(call).timeout
+    assert 0 < budgeted <= 3.0 and budgeted != backend.request_timeout
+
 # ---------------------------------------------------------------- 握手超时归 first_event（2026-10-03）
 
 # LLM: 假连接记录 send 次数和 close 次数；recv 永远抛 TimeoutError（调用方给多少 timeout 都算超时），

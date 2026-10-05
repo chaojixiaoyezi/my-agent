@@ -250,3 +250,28 @@ def test_none_choice_preserves_catalog_in_actual_protocol_payload(monkeypatch, p
         assert "tools" not in payload
         assert payload.get("tool_choice") == ("none" if protocol == "chat" else None)
     assert "thinking" not in payload and "reasoning_effort" not in payload and "reasoning" not in payload
+
+
+# LLM: fix3ar 实测：Anthropic 非流式路径原先不把辅助调用的绝对期限交给 request_json，stream_enabled=False 的
+#   Anthropic 兼容后端（及继承它的 OAuth Messages）上辅助调用没有绝对期限。这里不替换后端方法，只在最底层
+#   post_json 截信封，核对期限进了信封；不设期限时调用形态不变。
+# 函数用途: 钉住 Anthropic 非流式把绝对期限送进真实信封。
+@pytest.mark.parametrize("total_deadline", [50.0, None])
+def test_anthropic_non_stream_deadline(monkeypatch, total_deadline):
+    import time
+
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+
+    backend = AnthropicCompatibleBackend(replace(_ANTHROPIC_OPTIONS, stream_enabled=False))
+    seen = []
+    reply = {"content": [{"type": "text", "text": "好"}], "stop_reason": "end_turn",
+             "usage": {"input_tokens": 3, "output_tokens": 1}}
+    monkeypatch.setattr("agent_py_agent.agent.backends.http.post_json", lambda req: seen.append(req) or reply)
+    before = time.monotonic()
+    result = backend.generate("你好", request_options=ProviderRequestOptions(total_deadline_seconds=total_deadline))
+    assert result.text == "好"
+    request_seen, = seen
+    if total_deadline is None:
+        assert request_seen.deadline is None
+    else:
+        assert before + total_deadline <= request_seen.deadline <= time.monotonic() + total_deadline

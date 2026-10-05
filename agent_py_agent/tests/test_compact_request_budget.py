@@ -99,9 +99,12 @@ def test_fitting_compact_keeps_schema_and_auto_in_actual_provider_payload(monkey
     from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 
     captured = []
+    json_options = []
 
-    def capture_json(_backend, _path, payload, _headers):
-        captured.append(deepcopy(payload))
+    def capture_json(_backend, *call, **options):
+        # call = (path, payload, headers)；只取请求体，期限等关键字另记。
+        captured.append(deepcopy(call[1]))
+        json_options.append(options)
         return {"content": [{"type": "text", "text": "摘要"}], "stop_reason": "end_turn"}
 
     def capture_stream(_backend, _path, payload, _headers, **_kwargs):
@@ -130,6 +133,8 @@ def test_fitting_compact_keeps_schema_and_auto_in_actual_provider_payload(monkey
     response = budget_module.generate_bounded_compact_response(request)
 
     assert response.text == "摘要" and len(captured) == 1
+    # 非流式压缩调用必须把辅助调用的绝对期限交给传输层（fix3ar：Anthropic 非流式原先漏传）。
+    assert stream or json_options[0].get("total_deadline_seconds")
     payload = captured[0]
     assert payload["tool_choice"] == {"type": "auto"}
     assert payload["tools"] == [{**schema, "cache_control": {"type": "ephemeral"}}]

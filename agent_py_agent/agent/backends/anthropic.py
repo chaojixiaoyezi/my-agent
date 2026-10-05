@@ -375,19 +375,31 @@ class AnthropicCompatibleBackend(HttpBackend):
                     total_deadline_seconds=request.total_deadline_seconds,
                 ),
             )
-        return self._generate_non_stream(payload, headers)
+        return self._generate_non_stream(payload, headers, total_deadline_seconds=request.total_deadline_seconds)
+
+    # LLM: 与 Chat 后端同口径：只在有绝对期限时才带关键字，旧替身的三参 request_json 不受影响；
+    #   期限按每次物理请求重新计时（非流式只有“仅思考无正文”时才会再请求一次）。同步 test_anthropic_non_stream_deadline。
+    # 函数用途: 发一次非流式 /v1/messages 请求，有绝对期限时一并交给传输层。
+    def _request_messages(
+        self, payload: dict[str, Any], headers: dict[str, str], total_deadline_seconds: float | None,
+    ) -> dict[str, Any]:
+        if total_deadline_seconds is None:
+            return self.request_json("/v1/messages", payload, headers)
+        return self.request_json("/v1/messages", payload, headers, total_deadline_seconds=total_deadline_seconds)
 
     # LLM: 非流式响应按同一合同保留正文/思考；合法思考不得隐藏重试，坏参数仍整轮零执行。
+    #   total_deadline_seconds 是辅助调用的绝对期限（cabfix），经 _request_messages 交给 request_json；
+    #   主模型不设时为 None，调用形态与改动前完全一样（fix3ar 实测这里原先漏传，Anthropic 非流式没有绝对期限）。
     # 函数用途: 请求一次非流式 Anthropic-compatible 响应，并整理成运行时统一结果。
     def _generate_non_stream(
-        self, payload: dict[str, Any], headers: dict[str, str]
+        self, payload: dict[str, Any], headers: dict[str, str], *, total_deadline_seconds: float | None = None,
     ) -> ModelResponse:
         obj: dict[str, Any] = {}
         text = ""
         blocks: list[dict[str, Any]] = []
         assistant_blocks: list[dict[str, Any]] = []
         for attempt in range(2):
-            obj = self.request_json("/v1/messages", payload, headers)
+            obj = self._request_messages(payload, headers, total_deadline_seconds)
             try:
                 text = _anthropic_text_from_response(obj)
                 blocks, malformed, dropped_names = _anthropic_tool_use_blocks(obj)
