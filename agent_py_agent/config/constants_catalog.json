@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 923,
+  "count": 925,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -938,6 +938,22 @@
       "unit": "tokens",
       "category": "上限预算",
       "description": "思考预算按档位取值，最终夹到 [1024, max_tokens-1024]；空区间不发送，不能以抬高下界伪装成合法夹紧。"
+    },
+    {
+      "name": "_BODY_EXCERPT_CHARS",
+      "file": "agent_py_agent/agent/backends/rejection_diagnostics.py",
+      "value": 200,
+      "unit": "字符",
+      "category": "其它",
+      "description": "响应体摘要上限：只保留开头若干字符，避免把整段服务端正文带进账本或展示。"
+    },
+    {
+      "name": "_HEADER_VALUE_CHARS",
+      "file": "agent_py_agent/agent/backends/rejection_diagnostics.py",
+      "value": 120,
+      "unit": "字符",
+      "category": "其它",
+      "description": "单个头值上限；超长截断（头值可能被中间层塞入长内容）。"
     },
     {
       "name": "_MAX_MESSAGE_BYTES",

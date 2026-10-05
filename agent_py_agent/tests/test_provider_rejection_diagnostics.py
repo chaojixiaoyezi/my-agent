@@ -1,0 +1,95 @@
+"""供应商拒绝诊断（rejectdiag）：4xx/5xx 拒绝的结构化诊断与回执投影。
+
+覆盖：403 空响应体、429 带 retry-after、401 带 www-authenticate、敏感头不落盘、正文摘要去控制字符。
+"""
+import io
+import json
+import urllib.error
+from email.message import Message
+
+from agent_py_agent.agent.backends.gateway_helpers import _runtime_http_error
+from agent_py_agent.agent.backends.rejection_diagnostics import public_rejection_diagnostic
+from agent_py_agent.agent.gateway_parts.request_errors import gateway_provider_error_projection
+
+
+# LLM: 测试辅助：构造带结构化头与正文的 HTTPError，模拟供应商 4xx/5xx 响应。
+# 函数用途: 给拒绝诊断用例提供统一的 HTTPError 输入。
+def _http_error(status, body=b"", headers=None):
+    message = Message()
+    for name, value in (headers or {}).items():
+        message[name] = value
+    return urllib.error.HTTPError(
+        "https://provider.example.test/v1/messages", status, "rejected", message, io.BytesIO(body))
+
+
+# LLM: 403 空响应体是 17k 现场的真实形状：诊断必须给出“拒绝但无更多线索”的原因码，而不是空。
+# 函数用途: 钉住 403 空体的结构化诊断与回执投影。
+def test_403_empty_body_records_forbidden_unknown_and_projects_cause():
+    error = _runtime_http_error(_http_error(403, b""))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert diagnostic["status_code"] == 403
+    assert diagnostic["cause_code"] == "forbidden_unknown"
+    assert diagnostic["body_bytes"] == 0 and diagnostic["body_excerpt"] == ""
+    projection = gateway_provider_error_projection(error)
+    assert projection["http_status"] == 403
+    assert projection["cause_code"] == "forbidden_unknown"
+    assert projection["rejection_diagnostic"]["status_code"] == 403
+
+
+# LLM: 429 是瞬时族（ProviderUsageLimitError），投影只追加诊断与原因码，不改原有错误文案与恢复语义。
+# 函数用途: 钉住 429 带 retry-after 的诊断与投影。
+def test_429_retry_after_is_recorded_and_projected():
+    error = _runtime_http_error(_http_error(
+        429, b'{"error": "rate"}', {"retry-after": "30", "x-ratelimit-remaining": "0"}))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert diagnostic["cause_code"] == "rate_limited"
+    assert diagnostic["headers"]["retry-after"] == "30"
+    assert diagnostic["headers"]["x-ratelimit-remaining"] == "0"
+    projection = gateway_provider_error_projection(error)
+    assert projection["cause_code"] == "rate_limited"
+    assert projection["rejection_diagnostic"]["headers"]["retry-after"] == "30"
+
+
+# LLM: www-authenticate 只留方案名；realm/error 参数可能含细节，不进入诊断。
+# 函数用途: 钉住 401 的诊断原因与鉴权方案裁剪。
+def test_401_www_authenticate_keeps_only_the_scheme():
+    error = _runtime_http_error(_http_error(
+        401, b"", {"www-authenticate": 'Bearer realm="x", error="invalid_token"'}))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert diagnostic["cause_code"] == "auth"
+    assert diagnostic["headers"]["www-authenticate"] == "Bearer"
+
+
+# LLM: 认证/会话类头绝不进诊断（任务硬约束）；只保留白名单内的结构化头。
+# 函数用途: 钉住敏感响应头不落盘、白名单头保留。
+def test_sensitive_headers_never_land_in_diagnostic():
+    error = _runtime_http_error(_http_error(403, b"", {
+        "authorization": "Bearer secret-token", "set-cookie": "session=abc",
+        "cookie": "sid=1", "x-request-id": "req-1"}))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert diagnostic["headers"] == {"x-request-id": "req-1"}
+    rendered = json.dumps(diagnostic, ensure_ascii=False)
+    assert "secret-token" not in rendered and "session=abc" not in rendered
+
+
+# LLM: 正文摘要必须去控制字符并截断；坏字节经 replace 解码后仍安全。
+# 函数用途: 钉住 body_excerpt 的安全边界与 body_bytes 的事实口径。
+def test_body_excerpt_strips_control_chars_and_truncates():
+    error = _runtime_http_error(_http_error(403, ("bad\x00news\n" * 100).encode()))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert "\x00" not in diagnostic["body_excerpt"] and "\n" not in diagnostic["body_excerpt"]
+    assert len(diagnostic["body_excerpt"]) <= 200
+    assert diagnostic["body_bytes"] > 200
+
+
+# LLM: 清洗层是投影/持久化共用的安全闸：坏状态码整体拒绝，白名单外的头与非法原因码被丢弃。
+# 函数用途: 钉住 public_rejection_diagnostic 的输入清洗。
+def test_public_rejection_diagnostic_cleans_inputs():
+    assert public_rejection_diagnostic(None) == {}
+    assert public_rejection_diagnostic({"status_code": "403"}) == {}
+    cleaned = public_rejection_diagnostic({
+        "status_code": 403, "cause_code": "made_up", "body_excerpt": "x\x00y",
+        "headers": {"authorization": "Bearer x", "cf-ray": "r1"}, "body_bytes": -5})
+    assert "cause_code" not in cleaned
+    assert cleaned["headers"] == {"cf-ray": "r1"}
+    assert cleaned["body_bytes"] == 0 and "\x00" not in cleaned["body_excerpt"]

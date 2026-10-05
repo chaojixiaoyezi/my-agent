@@ -1760,6 +1760,37 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="模型供应商明确拒绝了请求；按结构化错误修正请求或切换后端，不要原样重放。",
     ),
+    # 以下四个是拒绝诊断（rejection_diagnostic.cause_code）的登记码（rejectdiag）：错误码本身仍是
+    # PROVIDER_REQUEST_REJECTED，单列让回执与排障能说清“限流 / 额度 / 鉴权 / 其它拒绝”；
+    # 判定只按 HTTP 状态码与白名单响应头，不解析自然语言。
+    "PROVIDER_REJECTION_RATE_LIMITED": ErrorContract(
+        code="PROVIDER_REJECTION_RATE_LIMITED",
+        category="model",
+        retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="供应商限流（HTTP 429）；按诊断里的 retry-after 等待后重试，不要缩短间隔连打。",
+    ),
+    "PROVIDER_REJECTION_QUOTA": ErrorContract(
+        code="PROVIDER_REJECTION_QUOTA",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="供应商账户额度不足（HTTP 402）；补充额度或切换可用配置后重试。",
+    ),
+    "PROVIDER_REJECTION_AUTH": ErrorContract(
+        code="PROVIDER_REJECTION_AUTH",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="供应商鉴权失败（HTTP 401）；检查凭据是否有效、是否属于该端点，不要原样重放。",
+    ),
+    "PROVIDER_REJECTION_FORBIDDEN_UNKNOWN": ErrorContract(
+        code="PROVIDER_REJECTION_FORBIDDEN_UNKNOWN",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="供应商拒绝（HTTP 403）且白名单头没有更多线索；查看诊断里的请求编号/边缘编号与服务商核对，不要原样重放。",
+    ),
     "PROVIDER_REQUEST_SHAPE_INVALID": ErrorContract(
         code="PROVIDER_REQUEST_SHAPE_INVALID",
         category="model",

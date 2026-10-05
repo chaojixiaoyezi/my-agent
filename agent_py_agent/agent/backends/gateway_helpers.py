@@ -1193,29 +1193,44 @@ def _dump_provider_rejection(exc: urllib.error.HTTPError) -> None:
 # 函数用途: 保留请求拒绝、额度、上下文超限与临时服务失败的区别，供主子代理同样处理。
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     """Classify provider HTTP errors at the backend boundary."""
+    from .rejection_diagnostics import provider_rejection_diagnostic
+
     detail = _http_error_detail(exc)
     code = int(getattr(exc, "code", 0) or 0)
+    # LLM: 每个 HTTP 错误分支都携带同一份结构化拒绝诊断（状态码/白名单头/体量/摘要/原因码）；
+    #   诊断只含白名单事实，供回执投影在“原因未定”时给出可行动方向（rejectdiag）。
+    diagnostic = provider_rejection_diagnostic(
+        status_code=code, headers=getattr(exc, "headers", None), body=detail)
     if code in _CONTEXT_WINDOW_HTTP_STATUS_CODES and _provider_error_indicates_context_window(
         detail
     ):
         return ProviderContextWindowError(
             f"HTTP {exc.code}: {detail}",
-            details={"status_code": code, "provider_error": _provider_error_payload(detail)},
+            details={"status_code": code, "provider_error": _provider_error_payload(detail),
+                     "rejection_diagnostic": diagnostic},
         )
     if code == 429:
         payload = _provider_error_payload(detail)
         if _provider_error_indicates_quota_exhausted(detail):
             return ProviderQuotaExhaustedError(
                 f"HTTP {exc.code}: {detail}",
-                details={"status_code": code, "provider_error": payload},
+                details={"status_code": code, "provider_error": payload,
+                         "rejection_diagnostic": diagnostic},
             )
-        return ProviderUsageLimitError(f"HTTP {exc.code}: {detail}")
+        return ProviderUsageLimitError(
+            f"HTTP {exc.code}: {detail}",
+            details={"status_code": code, "rejection_diagnostic": diagnostic},
+        )
     if code in _RETRYABLE_HTTP_STATUS_CODES or code >= 500:
-        return ProviderTransientError(f"HTTP {exc.code}: {detail}")
+        return ProviderTransientError(
+            f"HTTP {exc.code}: {detail}",
+            details={"status_code": code, "rejection_diagnostic": diagnostic},
+        )
     return ProviderRequestRejectedError(
         f"HTTP {exc.code}: {detail}",
         status_code=code,
-        details={"status_code": code, "provider_error": _provider_error_payload(detail)},
+        details={"status_code": code, "provider_error": _provider_error_payload(detail),
+                 "rejection_diagnostic": diagnostic},
     )
 
 

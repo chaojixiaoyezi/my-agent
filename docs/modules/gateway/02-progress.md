@@ -50,6 +50,15 @@
 
 - `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
 
+## 供应商拒绝诊断（rejectdiag，2026-10-05，基于 17l 头 `6145136a8`；待终审）
+
+- **背景**：17k 上线后 5 个 ChatGPT 订阅会话同分钟收到 HTTP 403 空响应体，回执只有“具体原因请查看请求诊断”，但投影里没有任何原因——`gateway_provider_error_projection` 刻意只暴露 typed `http_status`，诊断无处可取。
+- **改法**：新增 `backends/rejection_diagnostics.py`（白名单响应头 + 状态码原因码 + 正文安全摘要）；`_runtime_http_error` 的每个分支（4xx/429/5xx/上下文超限）把 `rejection_diagnostic` 放进异常 details；`gateway_provider_error_projection` 对拒绝族追加 `cause_code` 与结构化诊断，对 429 等瞬时族只追加诊断与原因码（不改文案与恢复语义）；WebSocket 握手 403 走同一 `_runtime_http_error`，自动获得诊断。
+- **安全**：只记白名单头（x-request-id/cf-ray/retry-after/x-ratelimit-*/www-authenticate 方案名）；认证、cookie、完整响应头一律不落；正文摘要去控制字符并截断 200 字。
+- **错误码**：`PROVIDER_REJECTION_RATE_LIMITED / QUOTA / AUTH / FORBIDDEN_UNKNOWN` 登记进 error_taxonomy（error_code 本身仍是 PROVIDER_REQUEST_REJECTED）。
+- **验证**：见 TESTS「供应商拒绝诊断（rejectdiag）」；3 个变异全杀；相关文件与 guards9（12 文件）全过，静态门禁全过。
+- **未验证**：真实供应商 403 端到端（沙箱不连真实 provider）。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A，本批由初审者直接修。

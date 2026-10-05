@@ -586,3 +586,20 @@ def test_websocket_stream_without_deadline_keeps_live_events():
     finally:
         generator.close()
     assert produced >= 10, f"1 秒内应持续产出事件，实际 {produced}"
+
+
+# LLM: rejectdiag：WebSocket 握手 403 与 HTTP 403 走同一分类与诊断（_handshake_error 把状态码/头/正文
+#   交给 _runtime_http_error），回执投影必须能给出 forbidden_unknown 而不是“原因未定”。
+# 函数用途: 钉住握手拒绝也携带结构化诊断（含白名单头）。
+def test_handshake_403_records_structured_diagnostic(monkeypatch):
+    def failing_connect(request):
+        raise InvalidStatus(Response(403, "status", Headers({
+            "Content-Type": "application/json", "X-Request-Id": "ws-req-1"}), b""))
+
+    monkeypatch.setattr(ws, "_connect", failing_connect)
+    with pytest.raises(ProviderRequestRejectedError) as caught:
+        list(ws.iter_responses_websocket(request()))
+    diagnostic = caught.value.details["rejection_diagnostic"]
+    assert diagnostic["status_code"] == 403
+    assert diagnostic["cause_code"] == "forbidden_unknown"
+    assert diagnostic["headers"]["x-request-id"] == "ws-req-1"

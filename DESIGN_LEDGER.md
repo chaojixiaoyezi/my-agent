@@ -297,6 +297,15 @@
 - **实测收益（合成历史、假后端、3 次模型调用，数字只作交接参考）**：35 万 token 回合估算 583.1→131.8ms（-77.4%）、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms（-72.0%）、整轮 1722.4→1060.9ms。
 - **状态/边界**：不加配置开关（内部性能优化、结果不变）；真实 Gateway/TUI/IM 与生产负载未验证；`estimate_tokens_from_json_parts` 未改。
 
+## 供应商拒绝诊断（rejectdiag，2026-10-05，分支 `worker/rejectdiag`，基于 17l 头 `6145136a8`；待初审）
+
+- **背景**：17k 上线后 5 个 ChatGPT 订阅会话同分钟收到 HTTP 403 空响应体；回执只有“模型服务拒绝了本次请求，具体原因请查看请求诊断”，但“请求诊断”投影（`gateway_provider_error_projection`）刻意只暴露 typed `http_status`，403 空体没有任何可看的原因。
+- **改法**：新增 `backends/rejection_diagnostics.py`——拒绝诊断唯一构造点：状态码、内容类型、响应体字节数、正文安全摘要（去控制字符、截断 200 字）、白名单响应头（x-request-id / cf-ray / retry-after / x-ratelimit-* / www-authenticate 方案名）、原因码（429→rate_limited、402→quota、401→auth、403→forbidden_unknown；其它不猜）。`_runtime_http_error` 各分支把诊断放进异常 details；`gateway_provider_error_projection` 对拒绝族追加 `cause_code`+诊断、对 429 等瞬时族只追加诊断与原因码（不改 user_error 与恢复语义）；WebSocket 握手 403 走同一 `_runtime_http_error` 自动获得诊断。
+- **安全边界**：请求头、认证、cookie、完整响应头一律不记；白名单之外的头一律不记；正文摘要先替换 C0/C1 控制字符再折叠截断。
+- **错误码**：4 个 cause 码登记进 error_taxonomy（`PROVIDER_REJECTION_*`；回执 error_code 仍是 `PROVIDER_REQUEST_REJECTED`）。
+- **验证**：见 TESTS；3 个变异（白名单失效、控制字符不去、WS 不接头信息）全杀；guards9（12 文件）与静态门禁全过。
+- **未验证**：真实供应商 403 端到端（沙箱不连真实 provider）。
+
 ## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；本地实现及定向验证完成，WIP：完整守卫缺文件；待非作者复审及 3a 终审）
 
 - **来源**：cachediag2r 初审两条产品入口反例获 3a 认可：新持久基数＋旧内存身份重发把 1 算成 2；31→32、4097→4098 旧末块改写后追加误报纯追加。旧节为历史实施记录，以本节合同为准。

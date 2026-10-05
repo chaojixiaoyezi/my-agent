@@ -352,6 +352,29 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **收益实测（合成历史、假后端、3 次模型调用；脚本 `/private/tmp/claude-501/m-estcache/probe2.py`，数字只作交接参考、不进仓库）**：35 万 token 回合 estimate 55 次合计 583.1→131.8ms、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms、整轮 1722.4→1060.9ms。
 - **未验证**：真实 Gateway/TUI/IM 与生产负载；`estimate_tokens_from_json_parts` 路径未改；沙箱外复跑由 3a 安排。
 
+## 供应商拒绝诊断（rejectdiag，2026-10-05，分支 `worker/rejectdiag`，基于 17l 头 `6145136a8`；待初审）
+
+**来源**：17k 上线后 5 个 ChatGPT 订阅会话的 403 空响应体“无诊断可看”；本批让下一次能直接分清限流/额度/鉴权/内容拦截。
+
+**改动**：
+- 新增 `agent_py_agent/agent/backends/rejection_diagnostics.py`（诊断构造 + 白名单 + 清洗）。
+- `gateway_helpers.py::_runtime_http_error` 各分支携带 `rejection_diagnostic`；`errors.py::ProviderTransientError` 支持可选 `details`。
+- `request_errors.py::gateway_provider_error_projection` 追加 `cause_code`/`rejection_diagnostic`。
+- `error_taxonomy.py` 登记 `PROVIDER_REJECTION_RATE_LIMITED / QUOTA / AUTH / FORBIDDEN_UNKNOWN`；`constants_catalog.json` 重新生成（909 项）。
+
+**新增用例**：
+- `test_provider_rejection_diagnostics.py`（6 条）：403 空体（forbidden_unknown+投影）、429 retry-after、401 www-authenticate 方案名、敏感头不落盘、正文摘要去控制字符与截断、清洗层。
+- `test_responses_websocket.py::test_handshake_403_records_structured_diagnostic`：握手 403 带结构化诊断与白名单头。
+
+**变异（3 个，全部 KILLED，原样还原）**：
+- M1 白名单失效（记录所有头）→ 敏感头用例红；
+- M2 不去控制字符 → 正文摘要用例红；
+- M3 WS 握手不接响应头 → WS 用例红（x-request-id 缺失）。
+
+**命令与结果**：
+- 相关 9 文件 **310 passed**；guards9（12 文件）**190 passed**；ruff `All checks passed!`；import findings=0；`check_doc_sync --base 6145136a8` DOC_SYNC_PASS；strict code-size `blocked=False`（报告已还原）；size_diff 新增 0 / 消失 56；clean package OK；`git diff --check` 干净。
+- **未验证**：真实供应商 403 端到端（沙箱不连真实 provider）。
+
 ## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；定向验证完成，WIP：完整守卫缺文件待补）
 
 - **来源/改法**：cachediag2r 两条必须改反例。累计值与已计数调用 SHA256 集合同快照持久化/恢复；较新快照整体选取。长度变化缺共同末点时采用不可比方案（`comparable=false / partial=true`），而非猜测纯追加/截短。

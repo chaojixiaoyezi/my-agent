@@ -143,6 +143,12 @@ class ProviderTimeoutError(ProviderRecoverableError):
 class ProviderTransientError(ProviderRecoverableError):
     """The provider returned a temporary overload/rate-limit/disconnect error."""
 
+    # LLM: details 只承载结构化诊断（如 rejection_diagnostic）；不参与分类与恢复判定，分类只看异常类型与状态码。
+    # 函数用途: 让瞬时族（含限流子类）能携带拒绝诊断，供回执投影展示。
+    def __init__(self, message: str, *, details: object | None = None) -> None:
+        super().__init__(message)
+        self.details = details
+
 
 # LLM: 流在完成标记前结束（provider 侧 EOF）是结构化可重试事实：backend 已丢弃不完整响应的
 #   工具块、整轮零执行，只要响应里还没有对外文本就可以原样重发同一采样请求。类型归 transient

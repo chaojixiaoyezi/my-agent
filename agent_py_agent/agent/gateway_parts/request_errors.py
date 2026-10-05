@@ -8,7 +8,12 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..backends.errors import ProviderRequestRejectedError, provider_error_http_status
+from ..backends.errors import (
+    ProviderRequestRejectedError,
+    ProviderTransientError,
+    provider_error_http_status,
+)
+from ..backends.rejection_diagnostics import public_rejection_diagnostic
 from ..runtime_errors import runtime_error_report
 from ..turn_end import result_turn_end_reason
 
@@ -175,8 +180,19 @@ def gateway_model_response_error_projection(result: object) -> dict:
 
 
 # LLM: 仅 typed 请求拒绝追加来源和 HTTP 白名单；不公开 details/body/headers，也不凭文本把主请求归咎子代理。
-# 函数用途: 给当前请求失败补上可见状态码，让用户定位这一轮，未知原因仍保持未知。
+#   rejectdiag：只从 typed details 的 rejection_diagnostic 键读已白名单化的拒绝诊断（状态码/白名单头/体量/
+#   摘要/原因码），不透明透传 details；cause_code 是给用户看的可行动方向，判定不读语言。
+# 函数用途: 给当前请求失败补上可见状态码与可能原因，让用户定位这一轮，未知原因仍保持未知。
 def gateway_provider_error_projection(exc: BaseException) -> dict:
+    details = getattr(exc, "details", None)
+    diagnostic = public_rejection_diagnostic(
+        details.get("rejection_diagnostic") if isinstance(details, dict) else None)
+    if isinstance(exc, ProviderTransientError) and diagnostic:
+        # rejectdiag：429 限流等瞬时族只追加结构化诊断与原因码，不改原有错误文案与恢复语义。
+        projection = {"rejection_diagnostic": diagnostic}
+        if diagnostic.get("cause_code"):
+            projection["cause_code"] = diagnostic["cause_code"]
+        return projection
     if not isinstance(exc, ProviderRequestRejectedError):
         return {}
     status = provider_error_http_status(exc)
@@ -185,6 +201,10 @@ def gateway_provider_error_projection(exc: BaseException) -> dict:
     if status is not None:
         projection["http_status"] = status
         projection["user_error"] = f"模型请求 HTTP {status}：{message}"
+    if diagnostic:
+        projection["rejection_diagnostic"] = diagnostic
+        if diagnostic.get("cause_code"):
+            projection["cause_code"] = diagnostic["cause_code"]
     return projection
 
 

@@ -43,6 +43,13 @@
 
 - `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
 
+## 供应商拒绝诊断（rejectdiag，2026-10-05，基于 17l 头 `6145136a8`；待终审）
+
+- `agent/backends/rejection_diagnostics.py`（新）：拒绝诊断唯一构造点——白名单响应头、`rejection_cause_code`（429→rate_limited / 402→quota / 401→auth / 403→forbidden_unknown）、正文摘要（去控制字符、200 字）；`public_rejection_diagnostic` 是投影/持久化共用清洗。
+- `agent/backends/gateway_helpers.py`：`_runtime_http_error` 各分支携带 `rejection_diagnostic`；`agent/backends/errors.py`：`ProviderTransientError` 支持可选 `details`。
+- `agent/gateway_parts/request_errors.py`：`gateway_provider_error_projection` 对拒绝族追加 `cause_code`+诊断、对瞬时族只追加诊断（不改 user_error 与恢复语义）。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - `agent/gateway_parts/http_handlers.py`：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access` 分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。
