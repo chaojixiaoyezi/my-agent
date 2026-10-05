@@ -1,5 +1,13 @@
 # 设计台账
 
+## 编程错误不再按消息文字被判可重试（progerr，2026-10-05，worker/progerr，基于 17k 头 `9e2f0eb69`；待 3a 复审）
+
+- **问题**：裸的编程错误（TypeError/AttributeError/KeyError 等）走 `contracts/provider_error_classifier` 的文本兜底，消息里恰好含 `deadline`/`timeout`/`rate_limit` 之类的词就被判成可重试，进入 `provider_transient_auto_resume` 的退避重试，白白等到预算用完、界面一直显示"正在重试"，把真实问题掩盖成"供应商故障"（3a 在 17k 头实测：`TypeError("...total_deadline_seconds")` → TIMEOUT/retryable；`AttributeError("...timeout")`、`KeyError("rate_limit")` 同理）。
+- **修法（唯一权威位置：分类器）**：新增 `_PROGRAMMING_ERROR_TYPES` 名单（TypeError、AttributeError、NameError、LookupError 含 KeyError/IndexError、AssertionError、NotImplementedError、ImportError、SyntaxError），在 typed 检查之后、文本/状态码兜底之前按类型拦截为 `UNKNOWN`/不重试；不提取消息里的数字当状态码。**ValueError 故意不在名单里**（JSONDecodeError 是它的子类，截断的供应商响应可能需要重试），保持文字兜底原行为。
+- **为什么改分类器而不是重试判断**：全仓 grep 确认 `classify_provider_error` 生产调用方只有 `provider_transient_auto_resume.py` 一处、其 `.retryable` 是唯一消费点，无展示/记账消费；分类器是"给异常定性"的权威位置，改这里后未来任何消费方都拿到正确分类，重试判断一行未动（避免两处各改一半）。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「编程错误不按消息文字判可重试」小节。15 个直接 import 相关模块的测试文件 **313 passed / 1 skipped**；guards9（11 文件）**187 passed**；4 个变异全 KILLED（删 TypeError、改按消息文字、LookupError 收窄成 KeyError、ValueError 误加名单）。
+- **未验证**：没有连真实 provider 构造"编程错误链"端到端（规则禁止联网）；17k 收口时建议在沙箱外复核一次真实链。
+
 ## B5 联合用例转正与 ask 三出口账本（jb6b，2026-10-05，分支 `worker/jb6b`，基于 17k 头 `9d5165809`；待 3a 复审）
 
 - **来源**：jb6（sol3）留了两条 strict xfail，理由写的是"B5 审批出口不承接门决定条目"，修复归 `worker/b5fix9b`。b5fix9b（`b037ce5e8`）已挑进 17k，两条应当转正——本轮把它转正并补齐同一族缺口。

@@ -5,8 +5,10 @@
 #   分类器在其上做语义归并 + HTTP 状态码/文本特征兜底);③动作映射:
 #   rate_limit/overloaded/server_error/timeout → retryable(jittered backoff),
 #   context_overflow → should_compress(交既有 ptl_retry 链),auth/billing/
-#   format/unknown → 不自动重试(快速浮出,unknown 保守)。改动时同步检查
-#   provider_transient_auto_resume 接线与 tests/test_provider_error_classifier.py。
+#   format/unknown → 不自动重试(快速浮出,unknown 保守);④编程错误
+#   (TypeError/AttributeError/NameError/LookupError 等,见 _PROGRAMMING_ERROR_TYPES)
+#   是代码 bug 不是供应商故障:按类型拦截为 unknown/不重试,不按消息文字兜底。
+#   改动时同步检查 provider_transient_auto_resume 接线与 tests/test_provider_error_classifier.py。
 # 模块用途: 模型接口出错时,框架先分清"这是哪种错、该怎么救",而不是一律
 #   重试或一律崩——限频就退避、上下文爆就压缩、没权限就别白试。
 from __future__ import annotations
@@ -70,9 +72,25 @@ _RETRYABLE = frozenset(
     }
 )
 
+# LLM: 编程错误名单：代码自身 bug 的异常形态，不是供应商故障。对它们一律跳过文本/状态码兜底——
+#   否则消息里恰好含 deadline/timeout/rate_limit 之类的词就会被判成可重试，让一次代码 bug 白白
+#   退避到预算用完（3a 在 17k 头实测：TypeError 含 'total_deadline_seconds' → TIMEOUT/retryable）。
+#   ValueError 故意不在名单里：JSON 解析失败（JSONDecodeError）是它的子类，截断的供应商响应可能
+#   需要重试，保持原行为。改动时同步检查 tests/test_provider_error_classifier.py 的编程错误用例。
+_PROGRAMMING_ERROR_TYPES: tuple[type[BaseException], ...] = (
+    TypeError,
+    AttributeError,
+    NameError,
+    LookupError,  # 覆盖 KeyError / IndexError 等子类
+    AssertionError,
+    NotImplementedError,
+    ImportError,
+    SyntaxError,
+)
 
-# LLM: 分类唯一入口。优先级:typed 错误和 status_code > 裸异常文本 > unknown；配置/请求拒绝绝不被正文升级为重试或压缩。
-#   unknown 保守不重试(掩盖真实故障比多失败一次更糟)。
+
+# LLM: 分类唯一入口。优先级:typed 错误 > 编程错误按类型拦截 > status_code/裸异常文本 > unknown；
+#   配置/请求拒绝绝不被正文升级为重试或压缩；unknown 保守不重试(掩盖真实故障比多失败一次更糟)。
 # 函数用途: 给一个 provider 异常定性:什么错、能不能重试、要不要先压缩。
 def classify_provider_error(exc: BaseException) -> ClassifiedProviderError:
     message = str(exc or "")[:500]
@@ -92,6 +110,11 @@ def classify_provider_error(exc: BaseException) -> ClassifiedProviderError:
         return ClassifiedProviderError(
             ProviderFailureReason.CONTEXT_OVERFLOW, retryable=False, should_compress=True, message=message
         )
+    # LLM: 编程错误放在 typed 检查之后、文本/状态码兜底之前：typed 供应商错误优先（本名单与
+    #   ProviderRecoverableError 系无交集）；编程错误绝不按文字放大成可重试，也不把消息里的数字
+    #   当状态码提取（同样是噪声）。归 UNKNOWN 与既有"保守不重试"口径一致。
+    if isinstance(exc, _PROGRAMMING_ERROR_TYPES):
+        return ClassifiedProviderError(ProviderFailureReason.UNKNOWN, retryable=False, message=message)
     status_code = _status_code(message)
     reason = _reason_from_status(status_code) or _reason_from_text(message)
     if reason is None and is_provider_transient_error(exc):

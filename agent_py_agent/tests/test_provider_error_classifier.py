@@ -142,3 +142,52 @@ def test_typed_timeout_retry_uses_structured_stage() -> None:
             )
     # 裸异常(无 typed 形态)仍走文本分类器:rate_limit 放行重试
     _raise_unless_provider_transient(RuntimeError("429 rate limit"))
+
+
+# LLM: 编程错误（代码自身 bug）不按消息文字兜底——消息里恰好含 deadline/timeout/rate_limit
+#   之类的词不能把它放大成可重试（3a 在 17k 头实测：TypeError 含 'total_deadline_seconds'
+#   → TIMEOUT/retryable，让一次代码 bug 白白退避到预算用完）。ValueError 故意不在名单里。
+# 函数用途: 验证编程错误类型一律按类型拦截为 unknown/不重试，不进入文本兜底。
+@pytest.mark.parametrize(
+    "error",
+    [
+        TypeError("f() got an unexpected keyword argument 'total_deadline_seconds'"),
+        AttributeError("'NoneType' object has no attribute 'timeout'"),
+        NameError("name 'rate_limit' is not defined"),
+        KeyError("rate_limit"),
+        IndexError("deadline exceeded"),
+        AssertionError("HTTP 429 from fake backend"),
+        NotImplementedError("overloaded path not implemented"),
+        ImportError("cannot import provider client: 503"),
+        SyntaxError("unexpected timeout token"),
+    ],
+)
+def test_programming_errors_skip_text_fallback(error: Exception) -> None:
+    result = classify_provider_error(error)
+    assert result.reason is ProviderFailureReason.UNKNOWN
+    assert result.retryable is False
+    assert result.should_compress is False
+    assert result.status_code is None
+
+
+# 函数用途: 钉住 17k 头五条实测：前三条编程错误不可重试；RuntimeError("429") 照旧可重试；
+#   ValueError 行为不变（不在名单里，继续走文字兜底）。
+@pytest.mark.parametrize(
+    "error,retryable",
+    [
+        (TypeError("f() got an unexpected keyword argument 'total_deadline_seconds'"), False),
+        (AttributeError("'NoneType' object has no attribute 'timeout'"), False),
+        (KeyError("rate_limit"), False),
+        (RuntimeError("429"), True),
+        (ValueError("connection reset"), False),
+    ],
+)
+def test_17k_measured_error_shapes(error: Exception, retryable: bool) -> None:
+    assert classify_provider_error(error).retryable is retryable
+
+
+# 函数用途: ValueError 不在编程错误名单里——JSON 解析失败（JSONDecodeError）是它的子类，
+#   截断的供应商响应可能需要重试；带可重试特征的 ValueError 保持文字兜底原行为。
+def test_value_error_stays_in_text_fallback() -> None:
+    assert classify_provider_error(ValueError("HTTP 429 rate limit")).retryable is True
+    assert classify_provider_error(ValueError("connection reset")).retryable is False

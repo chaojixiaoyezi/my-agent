@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 编程错误不按消息文字判可重试（progerr，2026-10-05，worker/progerr，基于 17k 头 `9e2f0eb69`，待 3a 复审）
+
+- 改动：`agent_py_agent/agent/contracts/provider_error_classifier.py` 新增 `_PROGRAMMING_ERROR_TYPES` 名单并在文本/状态码兜底前按类型拦截（UNKNOWN/不重试）；`test_provider_error_classifier.py` 新增 9 类编程错误参数化（消息均带可重试特征词，旧逻辑会误判）+ 17k 五条实测 + ValueError 钉住用例；`test_provider_transient_auto_resume.py` 新增端到端用例（operation 抛 TypeError 只调用 1 次、不调 wait、类型与消息原样）。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_provider_error_classifier.py agent_py_agent/tests/test_provider_transient_auto_resume.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-progerr
+  ```
+- 结果：两文件 **47 passed**；15 个直接 import 相关模块的测试文件 **313 passed / 1 skipped**；guards9（11 文件）**187 passed**。
+- 变异 4 个全 KILLED（脚本 `/private/tmp/claude-501/mutate_progerr.py`，按备份原字节还原、sha 一致）：
+  ① 名单删掉 TypeError → TypeError 参数化、17k 实测与端到端用例红；② 类型判断改成按消息文字 → 其余编程错误条红；③ LookupError 收窄成只有 KeyError → IndexError 条红；④ ValueError 误加进名单 → ValueError 文字兜底用例红。
+- 静态门禁：`IMPORT_BOUNDARIES findings=0`、ruff `All checks passed!`、`DOC_SYNC_PASS`（--base 9e2f0eb69）、strict code-size `hard=0 blocked=False`（报告已还原）、`check_clean_package` OK、`git diff --check` 干净、size_diff **新增告警 0 / 消失 50**。
+- 未验证：没有连真实 provider 构造"编程错误链"端到端（规则禁止联网）。
+
 ## jb6b：B5 联合用例转正 + 三个 ask 出口的真实账本（2026-10-05，worker/jb6b，基于 17k 头 `9d5165809`，待 3a 复审）
 
 - **来源**：sol3 的 jb6（`61c730cf4`）留了两条 strict xfail，原因写的是"B5 审批出口不承接门决定条目，归 `worker/b5fix9b`"。b5fix9b（`b037ce5e8`）已挑进 17k，所以这两条应当转正。

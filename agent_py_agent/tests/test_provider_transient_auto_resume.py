@@ -421,3 +421,35 @@ def test_subagent_compaction_quota_is_quota_exhausted_not_runner_error() -> None
     assert _subagent_run_failure_type(by_code) == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
     assert _subagent_run_failure_type(by_cause) == FailureType.PROVIDER_QUOTA_EXHAUSTED.value
     assert _subagent_run_failure_type(other) == FailureType.RUNNER_ERROR.value
+
+
+def test_programming_error_fails_fast_without_retry_or_wait(monkeypatch) -> None:
+    """编程错误（TypeError 等）原样上抛：只调用 1 次、不进入退避等待。
+
+    消息里含 deadline 之类的词也不重试——编程错误按类型拦截，不按文字放大
+    （3a 在 17k 头实测：TypeError 含 'total_deadline_seconds' 会被文本规则判成
+    可重试，让一次代码 bug 白白退避到预算用完、掩盖真实问题）。
+    """
+
+    calls = 0
+    waits: list[float] = []
+
+    def operation() -> None:
+        nonlocal calls
+        calls += 1
+        raise TypeError("f() got an unexpected keyword argument 'total_deadline_seconds'")
+
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", waits.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    import pytest
+
+    with pytest.raises(TypeError) as exc_info:
+        provider_transient_auto_resume.run_with_provider_transient_auto_resume(operation)
+    assert str(exc_info.value) == "f() got an unexpected keyword argument 'total_deadline_seconds'"
+    assert calls == 1
+    assert waits == [], "编程错误不进入退避等待"
