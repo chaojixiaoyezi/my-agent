@@ -163,21 +163,11 @@ def _invoke_auxiliary_generate(
     def _observe_provider_attempt(event: dict[str, object]) -> None:
         record_model_provider_attempt(ledger, call_id, event)
 
-    prompt = request.prompt if isinstance(request.prompt, str) else str(request.prompt or "")
     with provider_runtime_scope(request.agent, request), provider_attempt_observer(_observe_provider_attempt):
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
-                return _call_backend(
-                    generate,
-                    prompt,
-                    request.messages,
-                    on_chunk,
-                    tools=request.tools,
-                    tool_choice=request.tool_choice,
-                    system_instruction=request.system_instruction,
-                    response_schema=request.response_schema,
-                )
+                return _call_backend(generate, request, on_chunk)
             finally:
                 llm_inflight(-1)
 
@@ -212,45 +202,75 @@ def _auxiliary_chunk_observer(ledger: object, call_id: str) -> object:
     return _on_chunk
 
 
-# LLM: 发送前检查签名，不用 TypeError 重试；显式 schema/历史/工具/system 不支持就失败，不能静默丢掉声明。
-# 函数用途: 将通用辅助输入交给原后端方法，普通 Compact 的参数形态保持不变。
-def _call_backend(
-    generate: object,
-    prompt: str,
-    messages: list[dict[str, Any]] | None,
-    on_chunk: object,
-    *,
-    tools: list[dict[str, Any]] | None,
-    tool_choice: ToolChoice | None,
-    system_instruction: str,
-    response_schema: dict[str, Any] | None = None,
-) -> object:
+# LLM: 仅压缩类同线程辅助请求沿主请求读取同一档位；普通辅助任务不得因共享 thread_id 改变采样策略。
+#   none 是摘要拒绝工具的选项，不代表主回合 forced；缓存面的 system 仍逐请求原样传递。
+# 函数用途: 为明确标记的压缩请求构造与主生成相同的思考开关和档位。
+def _auxiliary_provider_options(request: AuxiliaryModelCallRequest) -> ProviderRequestOptions | None:
+    backend = getattr(request.agent, "backend", None)
+    system_instruction = str(request.system_instruction or "")
+    if not bool(getattr(backend, "supports_provider_request_options", False)):
+        return ProviderRequestOptions(system_instruction=system_instruction) if system_instruction else None
+
+    thinking_disabled = False
+    reasoning_effort = ""
+    if _is_compact_purpose(request.purpose) and str(request.thread_id or "").strip():
+        from ..settings.reasoning_effort import request_reasoning_options
+
+        params = SimpleNamespace(
+            task_attributes={"conversation_thread_id": str(request.thread_id).strip()}
+        )
+        thinking_disabled, reasoning_effort = request_reasoning_options(
+            request.agent, params, backend, forced=False,
+        )
+    if not (system_instruction or thinking_disabled or reasoning_effort):
+        return None
+    return ProviderRequestOptions(
+        system_instruction=system_instruction,
+        thinking_disabled=thinking_disabled,
+        reasoning_effort=reasoning_effort,
+    )
+
+
+# LLM: Purpose 是宿主给定的结构化路由标签；仅压缩目的共用缓存分区，其它辅助请求保持旧默认。
+# 函数用途: 判断辅助目的是否属于对话压缩，不从提示正文推断行为。
+def _is_compact_purpose(purpose: str) -> bool:
+    return str(purpose or "") in {
+        "conversation_compact_summary",
+        "conversation_compact_media_digest",
+        "compact_live_tool_summary",
+        "compact_carried_summary",
+    }
+
+
+# LLM: 发送前检查签名，不用 TypeError 重试；显式 schema/历史/工具/system/options 不支持就失败，不能静默丢掉声明。
+# 函数用途: 将通用辅助输入交给原后端方法，保留同线程选项并维持普通调用的原参数形态。
+def _call_backend(generate: object, request: AuxiliaryModelCallRequest, on_chunk: object) -> object:
     kwargs: dict[str, object] = {}
-    if response_schema is not None:
+    if request.response_schema is not None:
         if not _accepts_keyword(generate, "response_schema"):
             raise TypeError("auxiliary model backend does not accept response_schema")
-        kwargs["response_schema"] = response_schema
+        kwargs["response_schema"] = request.response_schema
     if _accepts_keyword(generate, "on_chunk"):
         kwargs["on_chunk"] = on_chunk
-    if messages is not None:
+    if request.messages is not None:
         if not _accepts_keyword(generate, "messages"):
             raise TypeError("auxiliary model backend does not accept native messages")
-        kwargs["messages"] = list(messages)
-    if tools is not None:
+        kwargs["messages"] = list(request.messages)
+    if request.tools is not None:
         if not _accepts_keyword(generate, "tools"):
             raise TypeError("auxiliary model backend does not accept native tools")
         if not _accepts_keyword(generate, "tool_choice"):
             raise TypeError("auxiliary model backend does not accept tool_choice")
-        kwargs["tools"] = list(tools)
-        kwargs["tool_choice"] = tool_choice or ToolChoice.auto(
+        kwargs["tools"] = list(request.tools)
+        kwargs["tool_choice"] = request.tool_choice or ToolChoice.auto(
             "auxiliary_cache_surface"
         )
-    if system_instruction:
+    options = _auxiliary_provider_options(request)
+    if options is not None:
         if not _accepts_keyword(generate, "request_options"):
             raise TypeError("auxiliary model backend does not accept request_options")
-        kwargs["request_options"] = ProviderRequestOptions(
-            system_instruction=str(system_instruction)
-        )
+        kwargs["request_options"] = options
+    prompt = request.prompt if isinstance(request.prompt, str) else str(request.prompt or "")
     return generate(prompt, **kwargs)
 
 

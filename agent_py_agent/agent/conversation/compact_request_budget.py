@@ -86,16 +86,15 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
     return _request_tokens(request, source)
 
 
-# LLM: 可容纳请求保持原 prompt/messages/system/tools，只将已有工具面的选择设为 none；工具/system 缓存前缀不改，
-# 不承诺 messages 缓存命中不变。仅超量或 typed 窗口错误进入原分段链；I/O 前后复查取消，legacy tools=None 不添接口要求。
+# LLM: 可容纳单次摘要保留原 system/messages/tools 并使用 tool_choice=auto，以便服务端在工具定义后继续对齐历史缓存。
+# 若真实响应含结构化工具调用，响应不得采用，最多额外发一次 no-tools/none 请求；分段路径只摘要局部源，明确不承诺与主历史共享前缀。
+# 超量或 typed 窗口错误仍走原分段链；I/O 前后复查取消，legacy tools=None 不添接口要求。
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
-# COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片，转分段等于同一请求内静默退回 A）。
-# 单次摘要设了 none 仍返回工具调用（2026-09-26 真机：MiniMax-M2.7 经 Anthropic 兼容协议带工具+none 仍回 tool_use）时，
-#   改走同一分段链（文本化来源、空工具、none，带原有纠正与确定性摘录），让模型重写而不是直接退成机械摘要；
-#   分段链只因"来源不能文本化"或"严格来源不接受降级摘录"失败时，交回原回复，由上层照旧做机械回退，不比原行为更差；
-#   来源在分段期间变化等其它 typed 错误照常上抛，不能拿旧回复掩盖（2026-09-26 Codex 复核）。
-# 函数用途: 窗口够用时沿用单次摘要；不够时逐段覆盖全部历史，避免反复重发超大请求；随图摘要只允许单次请求。
+# COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片）。
+# 分段链使用 summary-only system、空工具和 none，因它不再是原历史的连续前缀；源不能文本化或严格来源不接受降级摘录时按旧语义失败。
+# 函数用途: 窗口够用时发送可缓存的完整摘要请求；超量时逐段覆盖源历史，随图摘要只允许单次请求。
+
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
     *,
@@ -109,34 +108,141 @@ def generate_bounded_compact_response(
     if message_source is not None and request.messages is not None:
         raise ValueError('compact summary requires one message source')
     if request.tools is not None:
-        request = replace(request, tool_choice=ToolChoice.none("compact_summary_only"))
+        request = replace(request, tool_choice=ToolChoice.auto("compact_cache_surface"))
     budget = compact_summary_budget(request.agent)
     raise_if_compact_interrupted(interrupt_check)
     if vision_summary:
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
-    tool_call_reply = None
-    if _request_tokens(request, message_source) <= budget:
-        try:
-            raise_if_compact_interrupted(interrupt_check)
-            response = _generate_materialized_response(request, message_source)
-            raise_if_compact_interrupted(interrupt_check)
-            if preserve_complete_fallback and getattr(response, "truncated", False):
-                compact_summary_response_outcome(response, request=request)
-                raise ConversationCompactError("摘要回复被截断，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
-            if not getattr(response, "tool_use_blocks", None):
-                return response
-            compact_summary_response_outcome(response, request=request)
-            tool_call_reply = response
-        except ProviderContextWindowError:
-            # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
-            budget = max(1, budget // 2)
+    attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
+    result = _try_cached_compact_requests(request, attempt) if _request_tokens(request, message_source) <= budget else None
+    if result is not None:
+        if result.response is not None:
+            return result.response
+        attempt = replace(
+            attempt,
+            budget=result.budget,
+            tool_call_reply=result.tool_call_reply,
+        )
+    return _summarize_or_return_tool_call(request, attempt, source_progress)
+
+
+# LLM: Context holds only per-generation controls so the cache request and its one none retry share exact policy.
+# 类用途: 传递当前预算、取消边界、来源投影与完整回退约束。
+@dataclass(frozen=True)
+class _CompactAttemptContext:
+    budget: int
+    interrupt_check: CompactInterruptCheck | None
+    preserve_complete_fallback: bool
+    message_source: CompactMessageSource | None
+    retry: bool = False
+    tool_call_reply: object | None = None
+
+
+# LLM: Result separates usable text response from a rejected structured tool response retained only for old fallback behavior.
+# 类用途: 把一次 auto/none 请求链的结果交给原有分段候选路径。
+@dataclass(frozen=True)
+class _CompactAttemptResult:
+    response: object | None
+    tool_call_reply: object | None
+    budget: int
+
+
+# LLM: Only explicit provider window errors shrink the segment budget; structured tool calls never execute.
+# 函数用途: 尝试缓存前缀请求和至多一次 none/no-tools 重试，保留取消、截断与结构化响应语义。
+def _try_cached_compact_requests(
+    request: AuxiliaryModelCallRequest,
+    attempt: _CompactAttemptContext,
+) -> _CompactAttemptResult:
+    rejected_response = None
     try:
-        return _summarize_segments(request, budget, interrupt_check, source_progress, preserve_complete_fallback,
-                                   message_source)
+        raise_if_compact_interrupted(attempt.interrupt_check)
+        response = _generate_materialized_response(request, attempt.message_source)
+        raise_if_compact_interrupted(attempt.interrupt_check)
+        _raise_if_preserved_compact_truncation(response, request, attempt)
+        if not _response_has_tool_calls(response):
+            return _CompactAttemptResult(response, None, attempt.budget)
+        compact_summary_response_outcome(response, request=request)
+        rejected_response = response
+        retry = _none_tool_compact_retry_request(request)
+        if _request_tokens(retry, attempt.message_source) > attempt.budget:
+            return _CompactAttemptResult(None, rejected_response, attempt.budget)
+        return _retry_without_compact_tools(retry, attempt)
+    except ProviderContextWindowError:
+        # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
+        return _CompactAttemptResult(None, rejected_response, max(1, attempt.budget // 2))
+
+
+# LLM: The none request preserves the same thread reasoning options; its structured calls remain data, never execution.
+# 函数用途: 执行唯一无工具重试，成功直接返回，否则保留 typed 失败回到已有分段策略。
+def _retry_without_compact_tools(
+    request: AuxiliaryModelCallRequest,
+    attempt: _CompactAttemptContext,
+) -> _CompactAttemptResult:
+    retry_attempt = replace(attempt, retry=True)
+    raise_if_compact_interrupted(retry_attempt.interrupt_check)
+    response = _generate_materialized_response(request, retry_attempt.message_source)
+    raise_if_compact_interrupted(retry_attempt.interrupt_check)
+    _raise_if_preserved_compact_truncation(response, request, retry_attempt)
+    if not _response_has_tool_calls(response):
+        return _CompactAttemptResult(response, None, attempt.budget)
+    compact_summary_response_outcome(response, request=request)
+    return _CompactAttemptResult(None, response, attempt.budget)
+
+
+# LLM: Complete-source candidates cannot silently accept a truncated provider result.
+# 函数用途: 保留原有严格截断诊断并拒绝不能覆盖完整来源的摘要。
+def _raise_if_preserved_compact_truncation(
+    response: object,
+    request: AuxiliaryModelCallRequest,
+    attempt: _CompactAttemptContext,
+) -> None:
+    if not attempt.preserve_complete_fallback or not getattr(response, "truncated", False):
+        return
+    compact_summary_response_outcome(response, request=request)
+    message = "无工具摘要重试被截断" if attempt.retry else "摘要回复被截断"
+    raise ConversationCompactError(f"{message}，保留原始来源", code="COMPACT_SUMMARY_TRUNCATED")
+
+
+# LLM: Only TOOL_CALL failures can fall back to the rejected response; other segment failures remain visible.
+# 函数用途: 延续原分段覆盖策略，并仅在明确工具调用失败时返回不执行工具的旧结果。
+def _summarize_or_return_tool_call(
+    request: AuxiliaryModelCallRequest,
+    attempt: _CompactAttemptContext,
+    source_progress: Callable[[int, int], object] | None,
+) -> object:
+    try:
+        return _summarize_segments(
+            request,
+            attempt.budget,
+            attempt.interrupt_check,
+            source_progress,
+            attempt.preserve_complete_fallback,
+            attempt.message_source,
+        )
     except ConversationCompactError as exc:
-        if tool_call_reply is None or exc.code not in _TOOL_CALL_FALLBACK_CODES:
-            raise
-        return tool_call_reply
+        if attempt.tool_call_reply is not None and exc.code in _TOOL_CALL_FALLBACK_CODES:
+            return attempt.tool_call_reply
+        raise
+
+
+# LLM: 只读规范化响应里的结构化工具块；不解析正文，因摘要调用不拥有执行权。
+# 函数用途: 判断模型是否尝试发起工具调用，以便拒绝该摘要响应并切到无工具重试。
+def _response_has_tool_calls(response: object) -> bool:
+    return bool(
+        getattr(response, "tool_use_blocks", None)
+        or getattr(response, "tool_calls", None)
+    )
+
+
+# LLM: 仅在 auto 请求返回结构化工具调用后构造一次降级请求；保留输入/线程档位，移除工具定义并明确 none。
+# 函数用途: 防止摘要模型执行工具，同时复用原请求内容重试一次，不让无效工具响应成为摘要。
+def _none_tool_compact_retry_request(request: AuxiliaryModelCallRequest) -> AuxiliaryModelCallRequest:
+    return replace(
+        request,
+        tools=[],
+        tool_choice=ToolChoice.none("compact_summary_only"),
+        system_instruction=_SUMMARY_SYSTEM_INSTRUCTION,
+    )
 
 
 # LLM: B 路径只有一次请求：预算不够、ProviderContextWindowError、InputMediaError、截断都变成 typed
@@ -152,6 +258,21 @@ def _generate_vision_summary_response(request, source, budget, interrupt_check, 
     except (ProviderContextWindowError, InputMediaError) as exc:
         raise ConversationCompactError(f"随图摘要请求失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED) from exc
     raise_if_compact_interrupted(interrupt_check)
+    if _response_has_tool_calls(response):
+        compact_summary_response_outcome(response, request=request)
+        no_tools = _none_tool_compact_retry_request(request)
+        if _request_tokens(no_tools, source) + max(0, int(media_reserve_tokens)) > budget:
+            raise ConversationCompactError("随图无工具重试超出摘要预算", code=COMPACT_VISION_SUMMARY_FAILED)
+        try:
+            response = _generate_materialized_response(no_tools, source)
+        except (ProviderContextWindowError, InputMediaError) as exc:
+            raise ConversationCompactError(
+                f"随图无工具重试失败：{type(exc).__name__}", code=COMPACT_VISION_SUMMARY_FAILED
+            ) from exc
+        raise_if_compact_interrupted(interrupt_check)
+        if _response_has_tool_calls(response):
+            compact_summary_response_outcome(response, request=no_tools)
+            raise ConversationCompactError("随图无工具重试仍返回工具调用", code=COMPACT_VISION_SUMMARY_FAILED)
     if getattr(response, "truncated", False):
         compact_summary_response_outcome(response, request=request)
         raise ConversationCompactError("随图摘要回复被截断", code=COMPACT_VISION_SUMMARY_FAILED)

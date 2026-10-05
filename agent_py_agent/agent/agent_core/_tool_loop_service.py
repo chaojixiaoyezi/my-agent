@@ -1264,10 +1264,7 @@ def _native_tool_history_summary(
     config = semantic_summary_config(agent)
     if not config.enabled:
         return ""
-    from ..model_guidance import provider_system_instruction
-    from .native_tool_protocol import resolve_native_tools
-
-    tools = resolve_native_tools(agent, params)
+    surface = _native_compact_summary_surface(agent, params)
     return summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
             history=history,
@@ -1276,21 +1273,50 @@ def _native_tool_history_summary(
             request_id=str(getattr(params, "request_id", "") or ""),
             run_id=str(getattr(params, "run_id", "") or ""),
             task_id=str(getattr(params, "task_id", "") or ""),
+            thread_id=surface.thread_id,
             task_prompt=str(getattr(params, "user_prompt", "") or ""),
             previous_summary=str(previous_summary or ""),
             max_output_chars=config.max_input_chars,
             provider_prompt=provider_prompt,
-            provider_history_messages=tuple(
-                deepcopy(item)
-                for item in list(getattr(params, "provider_history_messages", None) or [])
-                if isinstance(item, dict)
-            ),
-            tools=tuple(deepcopy(tools or [])),
-            system_instruction=provider_system_instruction(
-                getattr(agent, "backend", None)
-            ),
+            provider_history_messages=surface.provider_history_messages,
+            tools=surface.tools,
+            system_instruction=surface.system_instruction,
             interrupt_check=partial(_native_compact_interrupted, params),
         )
+    )
+
+
+# LLM: Resolve all provider prefix components from the same active turn, without rebuilding or rewriting history.
+# 类用途: 携带 live compact 请求所需的 thread 与序列化缓存面字段。
+@dataclass(frozen=True)
+class _NativeCompactSummarySurface:
+    thread_id: str
+    provider_history_messages: tuple[dict, ...]
+    tools: tuple[dict, ...]
+    system_instruction: str
+
+
+# LLM: The primary provider surface is copied into the auxiliary request; this helper only projects existing turn state.
+# 函数用途: 取得 live 摘要要复用的线程 ID、历史消息、工具 schema 和 system 指令。
+def _native_compact_summary_surface(
+    agent: object,
+    params: ToolLoopExecuteParams,
+) -> _NativeCompactSummarySurface:
+    from ..model_guidance import provider_system_instruction
+    from ..settings.reasoning_effort import run_thread_id
+    from .native_tool_protocol import resolve_native_tools
+
+    provider_messages = tuple(
+        deepcopy(item)
+        for item in list(getattr(params, "provider_history_messages", None) or [])
+        if isinstance(item, dict)
+    )
+    tools = tuple(deepcopy(resolve_native_tools(agent, params) or []))
+    return _NativeCompactSummarySurface(
+        thread_id=run_thread_id(params),
+        provider_history_messages=provider_messages,
+        tools=tools,
+        system_instruction=provider_system_instruction(getattr(agent, "backend", None)),
     )
 
 

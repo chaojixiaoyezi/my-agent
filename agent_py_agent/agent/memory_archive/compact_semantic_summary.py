@@ -157,6 +157,7 @@ class SemanticSummaryRequest:
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
+    thread_id: str = ""
 
 
 # LLM: live 候选携带原历史和只读停止回调；完整机械回退只由显式开关启用，分段仍观察同一取消信号。
@@ -171,6 +172,7 @@ class LiveToolHistorySummaryRequest:
     request_id: str = ""
     run_id: str = ""
     task_id: str = ""
+    thread_id: str = ""
     task_prompt: str = ""
     previous_summary: str = ""
     max_output_chars: int = _DEFAULT_MAX_INPUT_CHARS
@@ -540,13 +542,7 @@ def _summarize_or_none(
     stats.tail_records = tail_n
     stats.middle_records = len(middle_records)
 
-    generate = _resolve_generate(
-        request.backend,
-        agent=request.agent,
-        request_id=request.request_id,
-        run_id=request.run_id,
-        task_id=request.task_id,
-    )
+    generate = _resolve_generate(request)
     if generate is None:
         stats.skip_reason = "no_backend"
         return None
@@ -735,19 +731,10 @@ def _safe_generate(generate: Callable[[str], str], prompt: str) -> str:
         return ""
 
 
-def _resolve_generate(
-    backend: Any,
-    *,
-    agent: Any = None,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
-) -> Callable[[str], str] | None:
-    """把任意 backend 包成 ``(prompt)->str``;无 generate 能力返回 None(=回退机械)。
-
-    carried archive 摘要刻意只用文本协议形态(``generate(prompt)``),不带 tools/messages,
-    这样 echo/伪后端无需实现原生消息也能运行；live native 摘要使用下方单独的 messages 包装。
-    """
+# LLM: Carried 摘要仅保持文本协议，不带 tools/messages；辅助请求仍绑定原 thread_id 以继承该线程的思考分区。
+# 函数用途: 把携带归档请求包成文本生成接口；无后端时保留机械重建，不从正文猜会话身份。
+def _resolve_generate(request: SemanticSummaryRequest) -> Callable[[str], str] | None:
+    backend = request.backend
     if backend is None:
         return None
     generate = getattr(backend, "generate", None)
@@ -755,7 +742,7 @@ def _resolve_generate(
         return None
 
     def _call(prompt: str) -> str:
-        if agent is not None:
+        if request.agent is not None:
             from ..conversation.auxiliary_model_call import (
                 AuxiliaryModelCallRequest,
                 generate_auxiliary_model_response,
@@ -763,11 +750,12 @@ def _resolve_generate(
 
             response = generate_auxiliary_model_response(
                 AuxiliaryModelCallRequest(
-                    agent=agent,
+                    agent=request.agent,
                     prompt=prompt,
-                    request_id=request_id,
-                    run_id=run_id,
-                    task_id=task_id,
+                    request_id=request.request_id,
+                    run_id=request.run_id,
+                    task_id=request.task_id,
+                    thread_id=request.thread_id,
                     purpose="compact_carried_summary",
                 )
             )
@@ -827,6 +815,7 @@ def _resolve_generate_with_messages(
                     request_id=request.request_id,
                     run_id=request.run_id,
                     task_id=request.task_id,
+                    thread_id=request.thread_id,
                     purpose="compact_live_tool_summary",
                 ),
                 interrupt_check=request.interrupt_check,

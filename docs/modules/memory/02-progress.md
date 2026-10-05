@@ -1,5 +1,10 @@
 # 记忆与上下文维护状态
 
+## cachecompact 压缩缓存前缀（2026-10-04，worker/cache-compact；待集成终审）
+
+- 可容纳的单次压缩请求携带与主请求相同的 system/tools/native messages，并将 `tool_choice` 设为 `auto`；压缩目的按 thread 读取相同 thinking/reasoning_effort。结构化工具调用不会执行，只触发一次无工具/`none` 重试。
+- Live 原生历史摘要保留可共享前缀并在末尾加摘要指令；carried 文本协议和超窗分段缺少完整主历史/tools或只覆盖局部区间，明确不承诺同样缓存命中。详细设计和实测边界见 DESIGN_LEDGER 与 TESTS.md 的 cachecompact 节。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - 删掉 `memory_archive/tokens.py` 的普通 mkdir（目录交给私有写的 `ensure_private_dir`）；`memory_store/retention_apply._trash_conversation` 3 处改走 `ensure_private_dir`。

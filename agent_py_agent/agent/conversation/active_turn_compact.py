@@ -519,6 +519,7 @@ def _active_turn_replacement_summary(
         semantic_summary_config,
         summarize_live_tool_history,
     )
+    from ..settings.reasoning_effort import run_thread_id
     from .compact_provider_surface import (
         conversation_compact_provider_messages,
         conversation_compact_provider_prompt,
@@ -546,6 +547,7 @@ def _active_turn_replacement_summary(
             request_id=str(request.request_id or ""),
             run_id=scope_id,
             task_id=scope_id,
+            thread_id=run_thread_id(request),
             task_prompt=str(request.task_prompt or "继续当前任务。"),
             previous_summary=previous_summary,
             max_output_chars=config.max_input_chars,

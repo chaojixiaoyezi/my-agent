@@ -80,21 +80,21 @@ def segment_part(text: str) -> tuple[int, int, int, str]:
 
 
 @pytest.mark.parametrize("vision_summary", [False, True])
-def test_fitting_request_preserves_cache_surface_with_summary_only_choice(monkeypatch, vision_summary):
+def test_fitting_request_preserves_cache_surface_with_auto_choice(monkeypatch, vision_summary):
     request = _request("记住蓝色项目，稍后继续")
     calls = []
     monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or "result")
     assert budget_module.generate_bounded_compact_response(request, vision_summary=vision_summary) == "result"
     assert len(calls) == 1
-    assert calls[0].tool_choice.mode == "none"
-    assert calls[0].tool_choice.reason == "compact_summary_only"
+    assert calls[0].tool_choice.mode == "auto"
+    assert calls[0].tool_choice.reason == "compact_cache_surface"
     assert calls[0] == replace(request, tool_choice=calls[0].tool_choice)
     assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
     assert request.tool_choice is None
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_fitting_compact_keeps_schema_and_none_in_actual_provider_payload(monkeypatch, stream):
+def test_fitting_compact_keeps_schema_and_auto_in_actual_provider_payload(monkeypatch, stream):
     from agent_py_agent.agent.backends import AnthropicCompatibleBackend, BackendOptions
     from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
 
@@ -131,7 +131,7 @@ def test_fitting_compact_keeps_schema_and_none_in_actual_provider_payload(monkey
 
     assert response.text == "摘要" and len(captured) == 1
     payload = captured[0]
-    assert payload["tool_choice"] == {"type": "none"}
+    assert payload["tool_choice"] == {"type": "auto"}
     assert payload["tools"] == [{**schema, "cache_control": {"type": "ephemeral"}}]
     assert "只总结历史" in json.dumps(payload["messages"][-1], ensure_ascii=False)
     assert "稳定前缀" in json.dumps(payload, ensure_ascii=False)
@@ -280,7 +280,7 @@ def test_typed_provider_overflow_reduces_request_without_losing_source(monkeypat
     budget_module.generate_bounded_compact_response(request)
     assert calls[0] == replace(request, tool_choice=calls[0].tool_choice)
     assert all(getattr(calls[0], name) is value for name, value in vars(request).items() if name != "tool_choice")
-    assert calls[0].tool_choice.mode == "none"
+    assert calls[0].tool_choice.mode == "auto"
     assert len(calls) > 1
     assert "".join(segment_part(r.prompt)[3] for r in calls[1:]) == json.dumps(request.messages, ensure_ascii=False)
 
@@ -463,7 +463,7 @@ def _scripted(monkeypatch, replies):
 
 
 def test_tool_call_reply_is_rewritten_through_the_text_segment_chain(monkeypatch, caplog):
-    # 2026-09-26 真机：带工具+none 的单次摘要仍回 tool_use。改走分段链（文本化来源、空工具）让模型重写，不直接退成机械摘要。
+    # 可共享前缀的首发请求用 auto；结构化工具调用被作废，再用无工具/none 请求一次。
     tool_call = ModelResponse(text="", backend="fake", tool_use_blocks=[{"name": "run_command"}], stop_reason="tool_use")
     calls = _scripted(monkeypatch, [tool_call, ModelResponse(text="分段重写的摘要", backend="fake")])
     request = replace(_request("记住蓝色项目，稍后继续"), request_id="req-1", thread_id="thread-1")
@@ -471,7 +471,7 @@ def test_tool_call_reply_is_rewritten_through_the_text_segment_chain(monkeypatch
     result = budget_module.generate_bounded_compact_response(request)
 
     assert "分段重写的摘要" in result.text and "source_range" not in result.text
-    assert calls[0].tools == [{"name": "read_file"}] and calls[0].tool_choice.mode == "none"
+    assert calls[0].tools == [{"name": "read_file"}] and calls[0].tool_choice.mode == "auto"
     assert len(calls) == 2 and calls[1].tools == [] and calls[1].tool_choice.mode == "none"
     shape = next(record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape"))
     assert (shape["reason"], shape["tool_use_count"], shape["stop_reason"]) == ("TOOL_CALL", 1, "tool_use")
@@ -485,9 +485,11 @@ def test_tool_call_reply_is_returned_when_the_source_cannot_be_segmented(monkeyp
     request = replace(_request("看图"), messages=[{"role": "user", "content": [
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}]}])
 
-    # 带图来源不能文本化分段：交回原回复，由上层照旧机械回退，不比原行为更差。
+    # 带图来源不能文本化分段；auto 首发与一次 none 重试均返回工具块后，交回末次无工具响应做原机械回退。
     assert budget_module.generate_bounded_compact_response(request) is tool_call
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[0].tool_choice.mode == "auto"
+    assert calls[1].tool_choice.mode == "none" and calls[1].tools == []
 
 
 def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_source(monkeypatch):
@@ -496,7 +498,7 @@ def test_tool_call_reply_is_returned_when_strict_segments_cannot_cover_the_sourc
 
     # 严格来源不接受降级摘录：分段链报 typed 错误时同样交回原回复，保留原机械回退与完整来源行为。
     assert budget_module.generate_bounded_compact_response(_request("严格来源"), preserve_complete_fallback=True) is tool_call
-    assert len(calls) == 1 + 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
+    assert len(calls) == 2 + 1 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
 
 
 def test_tool_call_fallback_does_not_hide_a_source_that_changed_during_segments(monkeypatch):

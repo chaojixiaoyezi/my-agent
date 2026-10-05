@@ -222,7 +222,7 @@ def test_three_real_turns_keep_the_cache_prefix_hot(tmp_path, monkeypatch):
     assert len(simulator.report()["partitions"]) == 1, f"出现了分区切换：{simulator.report()['partitions']}"
 
 
-@pytest.mark.xfail(strict=True, reason="压缩请求与主对话对齐未修：luna3（worker/cache-compact）修好后去掉本标记")
+@pytest.mark.xfail(strict=True, reason="Gateway 前台压缩路径仍落在 default 档位分区（cachecompact c290e99ab 只修了 tool-loop 路径）：luna3 补完后去掉本标记")
 def test_compaction_call_reuses_the_conversation_history_prefix(tmp_path, monkeypatch):
     """压缩类辅助调用必须复用主对话的缓存前缀。
 

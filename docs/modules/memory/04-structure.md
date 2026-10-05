@@ -290,8 +290,8 @@ runner 准备只消费副本，不修改待提交任务。正式 `persistence/se
 `agent_core/_tool_loop_service.py::_native_tool_history_summary` 将同一工作片的停止检查传给
 `memory_archive/compact_semantic_summary.py::summarize_live_tool_history`。真实 agent 请求沿原
 `conversation/compact_request_budget.py::generate_bounded_compact_response` 发出：可容纳时保持原生
-system/tools/messages 前缀，超窗时按原分段合同覆盖完整历史。每段取消和传输失败只使候选失败；
-源 IR 回收及 Compact 代次提交仍由上层原事务控制。裸 backend 测试适配保持直接调用，不能当作真实窗口保证。
+system/tools/messages 前缀及同 thread 的 thinking/reasoning_effort；有工具时使用 `tool_choice=auto`。
+若结构化响应仍含工具调用，不执行它，最多追加一次无工具/`none` 重试。超窗分段只覆盖局部区间，改用摘要 system、空工具和 `none`，不属于完整主请求缓存前缀。Carried 文本协议摘要也没有主请求 tools/history，不能声称前缀完全命中。每段取消和传输失败只使候选失败；源 IR 回收及 Compact 代次提交仍由上层原事务控制。裸 backend 测试适配保持直接调用，不能当作真实窗口保证。
 
 ## 原召回结果中的可选排序
 

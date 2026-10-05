@@ -8,6 +8,7 @@ import json
 import logging
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
+from types import SimpleNamespace
 
 from ...capability.config import CapabilityConfig
 from ...capability.runtime_config_reload import capability_config_for_agent
@@ -1268,9 +1269,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         carried_records,
         model_visible_records=[] if native_carry is not None else model_visible_archive_tool_calls,
         agent=None if native_carry is not None else agent,
-        request_id=params.request_id,
-        run_id=params.run_id,
-        task_id=params.task_id,
+        request_context=params,
     )
     tool_context: list[str] = list(native_carry.tool_context) if native_carry is not None else reconstructed.tool_context
     active_turn_user_inputs = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
@@ -1386,17 +1385,14 @@ class _ReconstructedRuntimeState:
     loaded_tool_names: set[str]
 
 
-# LLM: Full records restore tool rounds, one-shot keys, executed names and loaded tools. The optional
-# model-visible subset may affect only tool_context, so Compact cannot reset budgets or replay effects.
-# 函数用途: 从完整工具账恢复运行控制状态，同时可用已压缩后的子集生成模型可见历史。
+# LLM: 完整记录恢复执行状态；可见子集只影响 tool_context。request_context 仅提供辅助摘要的准确身份和 thread 档位来源。
+# 函数用途: 从完整工具账恢复运行状态，同时按原请求上下文生成模型可见历史。
 def _reconstructed_runtime_state(
     records: list[dict[str, object]],
     *,
     model_visible_records: list[dict[str, object]] | None = None,
     agent: object = None,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
+    request_context: object = None,
 ) -> _ReconstructedRuntimeState:
     """从 carried 的 archive 记录重建 compact 续跑要保留的四项运行时状态（H1）。
 
@@ -1434,9 +1430,7 @@ def _reconstructed_runtime_state(
             visible_records,
             mechanical_entries,
             agent,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
+            request_context=request_context,
         ),
         tool_rounds=len(valid_records),
         one_shot_tool_calls={
@@ -1464,20 +1458,19 @@ def reconstructed_model_tool_context(
         records,
         model_visible_records=records,
         agent=agent,
-        request_id=request_id,
-        run_id=run_id,
-        task_id=task_id,
+        request_context=SimpleNamespace(
+            request_id=request_id, run_id=run_id, task_id=task_id, task_attributes={}
+        ),
     ).tool_context
 
 
+# LLM: 辅助摘要身份与thread档位只从当前结构化请求上下文读取；摘要失败仍逐字节回退，不改归档或运行预算。
+# 函数用途: 可用时压缩携带历史中段；否则保留原机械条目并沿用同线程推理档位。
 def _tool_context_with_optional_semantic_summary(
     records: list[dict[str, object]],
     mechanical_entries: list[str],
     agent: object,
-    *,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
+    request_context: object = None,
 ) -> list[str]:
     """中段语义摘要的薄接线：可用则折叠中段，否则原样返回机械逐条列表（失败必回退）。
 
@@ -1492,6 +1485,7 @@ def _tool_context_with_optional_semantic_summary(
         semantic_summary_config,
         summarize_carried_tool_context,
     )
+    from ...settings.reasoning_effort import run_thread_id
 
     config = semantic_summary_config(agent)
     if not config.enabled:
@@ -1503,9 +1497,10 @@ def _tool_context_with_optional_semantic_summary(
             config=config,
             backend=getattr(agent, "backend", None),
             agent=agent,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
+            request_id=str(getattr(request_context, "request_id", "") or ""),
+            run_id=str(getattr(request_context, "run_id", "") or ""),
+            task_id=str(getattr(request_context, "task_id", "") or ""),
+            thread_id=run_thread_id(request_context),
         )
     )
     if outcome is None:

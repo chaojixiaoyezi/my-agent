@@ -259,11 +259,13 @@ def test_active_turn_summary_uses_applied_view_base(monkeypatch) -> None:
             },),
         ),
         ActiveTurnArchiveCompactRequest(
-            task_attributes={}, request_id="request-1", attempt_id="attempt-1",
+            task_attributes={"conversation_thread_id": "thread-active-compact"},
+            request_id="request-1", attempt_id="attempt-1",
             compact_context=_context(),
         ),
     )
     assert result == "下一轮摘要"
+    assert requests[0].thread_id == "thread-active-compact"
     assert requests[0].previous_summary == "本轮局部摘要"
     assert "本次完整工具材料" in requests[0].history[0].text
     assert "model-turn-2" in requests[0].history[0].text

@@ -80,7 +80,7 @@ v4.1-flash 的关闭思考现在都生效。结论不变的：opencode v4-flash 
 2. 子代理：`create_subagents` 的 `effort` 参数（整批或逐项）。省略时冻结父级本轮的实际档位（线程设置，否则全局默认）。写进 `host_reasoning_effort.v1`（宿主属性，伪造值会先被移除），物化子线程时写进子线程；恢复和重放不改。孙代理同理，继承直接父级。`effort` 也计入派工去重身份，同目标、不同档位的对比不会被合并。
 3. 每次模型请求时，按本轮参数里的 `agent_thread_id` / `conversation_thread_id` 现读线程。读取失败时回落全局默认，绝不阻断请求。
 
-真实请求（`tool_model_generation._provider_request_options`）和两处载荷投影（网关自动选模 `gateway_model_adoption._payload`、子代理首轮选模）都调用 `settings/reasoning_effort.request_reasoning_options`。投影与真实发送的载荷逐字比对因此保持一致。压缩摘要、Curator 等后台辅助调用不带档位，用服务商默认。
+真实请求（`tool_model_generation._provider_request_options`）和两处载荷投影（网关自动选模 `gateway_model_adoption._payload`、子代理首轮选模）都调用 `settings/reasoning_effort.request_reasoning_options`。投影与真实发送的载荷逐字比对因此保持一致。显式标记的同线程压缩辅助请求也复用该换算，避免切换 DeepSeek 缓存分区；Curator、能力选择等非压缩辅助任务仍不带线程档位，使用原服务商默认。
 
 ## 5. 用户入口
 

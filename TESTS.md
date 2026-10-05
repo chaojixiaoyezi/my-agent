@@ -1,5 +1,56 @@
 # 测试与发布验收
 
+## cachecompact 压缩缓存前缀与线程推理档位（2026-10-04，worker/cache-compact；已rebase17j，非作者初审完成）
+
+- **fake transport payload 合同**：`agent_py_agent/tests/test_compact_reasoning_options.py` 捕获 OpenAI-compatible 后端最终 JSON，不访问供应商；**14 passed**。覆盖 max/off 两档、`conversation_compact_summary` 与 `conversation_compact_media_digest` 的选项换算、历史 tool-call 往返、system/messages（reasoning/tool ID/参数）、tools/schema、`auto`、thinking/reasoning_effort；bounded 与 live 的 typed `CacheStructuredPrompt` 路径均核实同一 system/tools/历史，仅在最后 user 内容追加 Compact 指令；carried 文本和分段核实其非完整前缀边界；结构化工具调用不执行，仅额外尝试一次无工具/`none`。tool-loop 包装器与 active-turn 包装器另有线程身份转接断言。
+- **fake transport 命令**（工作树根执行）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_compact_reasoning_options.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3` → **14 passed**。
+- **三类变异**（均预期失败，已还原生产代码）：删除 tools → 合同因 `tools` 字段缺失变红；替换 system → system message 不等；历史开头插入 user → messages 序列不等。
+- **压缩全集**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  FILES=$(find agent_py_agent/tests -maxdepth 1 -type f -name 'test_*compact*.py' -print | sort)
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $FILES -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3
+  ```
+  结果：74 个 `test_*compact*.py` 文件通过。首次运行发现三处旧断言仍要求 `none`，按新 `auto`/一次 `none` 重试合同更新后完整重跑全绿。
+- **OpenAI-compatible 与档位回归**：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  FILES=$(find agent_py_agent/tests -maxdepth 1 -type f -name 'test_backends*.py' -print | sort)
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $FILES agent_py_agent/tests/test_reasoning_effort.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3
+  ```
+  结果：全部通过。
+- **guards9**：11 个文件全部通过：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py \
+    agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+    agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py \
+    agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+    agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py \
+    agent_py_agent/tests/test_constants_catalog.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3
+  ```
+- **静态/发布门禁**（均退出码 0）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  $PY scripts/check_import_boundaries.py
+  $PY -m ruff check agent_py_agent scripts
+  $PY scripts/check_doc_sync.py
+  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+  git checkout HEAD -- CODE_SIZE_REPORT.md
+  $PY scripts/check_clean_package.py .
+  git diff --check
+  bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
+  ```
+  输出：import boundaries 0 findings；DOC_SYNC_PASS；strict code-size hard=0；clean-package 未发现阻塞。`size_diff.sh`：
+  ```text
+  新增告警: 0
+  消失告警: 50
+  ```
+- **缓存命中估算（非实测）**：只在同模型/同 thread 分区、服务端未逐出缓存且完整历史前缀逐字节命中时，按约 2.2% system-only 旧命中线索估计输入 token 命中可接近 98%；尾部指令/动态字段略降。修后真实 DeepSeek 命中率、费用未测。
+- **初审与协作注意**：非作者只读初审未发现阻断性逻辑缺陷；该审查未复跑测试，也未连 DeepSeek 实测。`compact_request_budget.py` 涉及单次/分段分流，CAB ds5 合入时需留意，避免覆盖超时修复。
+
 ## B7 受限策略 symlink 执行根（b7lnx，2026-10-04，`worker/b7lnx`，基于 `c544b358d`；已并入 step17k）
 
 - 3a 沙箱外（MY_AGENT_TEST_REQUIRE_CAPABILITIES=1）复跑 3 个沙箱文件：分支 52 passed、14 skipped，17j 基线 52 passed、13 skipped，多出的 1 个跳过是 Linux 专属真进程用例；作者在会话沙箱里看到的 10 项失败都是沙箱环境造成的。并入 17k 后同样 52 passed、14 skipped。

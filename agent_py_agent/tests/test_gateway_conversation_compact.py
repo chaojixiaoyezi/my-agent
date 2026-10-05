@@ -496,11 +496,14 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     )
 
     assert compacted.compact_generation == 1
-    # 单次摘要回 tool_use 后改走分段链（空工具）重写；假后端始终调工具，分段按原纠正上限后留带标注的确定性摘录。
+    # auto 单次摘要和一次 none 重试都回 tool_use 后，才改走空工具分段；分段按原纠正上限留确定性摘录。
     assert "- reason: TOOL_CALL" in compacted.compact_summary
     assert not (tmp_path / "compact-tool-must-not-run.txt").exists()
-    assert backend.calls == 2 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
-    assert backend.kwargs[0].get("tools") and all(not kwargs.get("tools") for kwargs in backend.kwargs[1:])
+    assert backend.calls == 3 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
+    assert backend.kwargs[0].get("tools")
+    assert backend.kwargs[0].get("tool_choice").mode == "auto"
+    assert backend.kwargs[1].get("tool_choice").mode == "none"
+    assert all(not kwargs.get("tools") for kwargs in backend.kwargs[1:])
     diagnostic = [record.compact_response_shape for record in caplog.records
                   if hasattr(record, "compact_response_shape")]
     assert {item["reason"] for item in diagnostic} == {"TOOL_CALL"} and diagnostic[0]["tool_use_count"] == 1
@@ -1710,7 +1713,7 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
     assert "You maintain a conversation summary" in layout.volatile_suffix
     tools = backend.kwargs[0].get("tools")
     assert isinstance(tools, list) and tools
-    assert getattr(backend.kwargs[0].get("tool_choice"), "mode", "") == "none"
+    assert getattr(backend.kwargs[0].get("tool_choice"), "mode", "") == "auto"
     projection = anthropic_prompt_cache_projection(
         system_instruction="",
         prompt=backend.prompts[0],

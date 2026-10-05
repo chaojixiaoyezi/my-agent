@@ -1,5 +1,16 @@
 # 设计台账
 
+## cachecompact：压缩请求沿用主线程缓存前缀（2026-10-04，worker/cache-compact；已并入 step17k，部分生效，两处遗漏待补）
+
+- **3a 挑入时核实（10-05）**：ds7 用两条独立构造路径做字节级比较，tool-loop 路径通过（压缩请求 = 主请求完整字节 + 末尾压缩指令，tools 与档位一致）。两处遗漏：① Gateway 前台压缩路径（cachesim 护栏 test_compaction_call_reuses_the_conversation_history_prefix）仍落在 (enabled, default) 分区，没带线程的 max 档位，护栏继续 strict xfail；② active-turn 路径不带之前的历史（provider_history 从空记录重放），第 1 条消息就分叉。已转作者 luna3 补，补完去掉护栏标记。
+
+- **目标与范围**：只修压缩请求缓存面，不接 CAB 超时修复。显式压缩 purpose 按 thread 读取主请求 reasoning options；非压缩辅助任务不改。
+- **单次可容纳请求**：使用同一 system/tools/历史和 `tool_choice=auto`。若结构化 `tool_use_blocks`/`tool_calls` 出现，丢弃且不执行，只追加一次无 tools/`none` 的摘要重试；保留同 thread thinking/reasoning_effort。
+- **路径首个分叉点**：`conversation_compact_summary` 与 `compact_live_tool_summary`（tool-loop、active-turn）先复用 system/tools/历史；第一个新内容是尾部 user 压缩指令。`compact_carried_summary` 为文本协议，没有主请求 system/tools/历史，第一条 user 内容即不同。超窗分段先换摘要专用 system，再省 tools 并用 `none`，messages 只含局部区间；不声称完整主前缀命中。
+- **验证**：payload fake transport 14 passed（含 media digest 目的及 tool-loop 线程上下文）；bounded 与 live 的 typed `CacheStructuredPrompt` 实际出站 payload 均断言 system/tools/历史相等、压缩指令只追加在最后 user 内容；active-turn 也断言传递线程 ID。全部 `test_*compact*.py`（74个文件）、`test_backends*.py` + `test_reasoning_effort.py`、guards9（11个文件）通过。删 tools/改 system/历史头部插入三种变异均被合同抓红且已还原。import boundaries=0、Ruff、DOC_SYNC、strict code-size、clean-package、diff-check全过；`size_diff.sh` 新增0、消失50。
+- **实测边界与估算**：非作者只读初审未发现阻断问题；尚未实测修后DeepSeek缓存命中率或费用。若同模型/同thread分区且完整历史前缀仍驻留、逐字节命中，基于旧2.2% system-only命中线索估算理想输入token命中可接近98%，尾部指令/动态字段会降低比例。
+- **协作注意**：本次改 `compact_request_budget.py` 的单次/分段分流；CAB ds5 合入时对照该文件，避免覆盖超时修复。
+
 ## B7 受限策略的符号链接执行根（b7lnx，2026-10-04，`worker/b7lnx`，基于 `c544b358d`；已并入 step17k，3a 沙箱外 macOS 强制模式复跑通过，Linux 真进程用例由 17k 车道验证）
 
 - **问题**：B7 的统一受限策略已保留 R/W/E 根的 alias 与 realpath，但 bwrap 将 alias 也作为 bind destination；执行根若是 `/usr/local/bin/python` 这类符号链接，bubblewrap 会拒绝挂到 symlink destination，导致子进程无输出且无法启动。
