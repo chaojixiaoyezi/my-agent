@@ -676,6 +676,63 @@ node frontend/scripts/sync-backend-config.mjs && node frontend/scripts/sync-back
 - 追加写账用例：ask/deny/allow混合每门一条同final_status；非ask也有条目；明确无交互终态按 `PLUGIN_GATE_APPROVAL_UNAVAILABLE` 投影给B6计数；假顶层条目不能替代canonical信封；真实精确批准重跑metadata零决定。白名单仍不容message或工具参数。全生产AST核对 `append_plugin_gate_decision` 只有 `tool_runtime_ledger.py` 的一个调用点，新增第二点先加幂等键。
 - 收尾新增终态反证：`interactive=False`且混合ask/deny时，实际拒绝已是 `PLUGIN_GATE_DENIED`，账本却错记无法审批；独立用例真实1 failed、0 errors（`tmp/b5s5-terminal-red.xml`）。只把无法审批投影条件收窄为“合并后仍为ask且有插件要求”，保留实际最严deny及B6计数口径。修正后同下方27文件清单完整重跑 **563 passed，0 failed/errors/skipped/xfail，73.12秒**（`tmp/b5s5-final-current.xml`）；不是把旧562外推到新版本。
 
+### b5fix9bt 审批解析出口完整链回读补齐（2026-10-05，worker/b5fix9bt，测试与文档限定）
+
+- 在 `test_plugin_gate_approval_ledger_carry.py` 为七类出口补齐：发审批前关门、无 consumer、等待中关门、批准后重跑新增插件、consumer 返回 unavailable、拒绝/取消、重复拒绝。每例走 `_resolve_tool_approval` → `_compact_result_envelope` → 生产归档 builder → `persist_tool_runtime_ledger` → 临时 owner `RuntimeRepository` → 实际 `/plugins info`；以结构字段断言 verdict、`final_status`、原因码和条目数，不直接插入决定行。
+- 批准后插件集合变化夹具在审批重跑时才把第二个已安装测试插件加入 reviewer；归档和两个插件各自的 `/plugins info` 均读到恰好一条原/新 ask。未启用真实插件进程、未启动 Gateway。
+- 定向命令（工作树根，指定 Python，`-rA` 仅为显式列出结果）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_gate_approval_ledger_carry.py \
+    -q --tb=short -p no:cacheprovider -rA \
+    --basetemp=/private/tmp/claude-501/m-b5fix9bt
+  ```
+
+  **16 passed，exit 0**。
+- 七个单点变异逐一去掉对应出口的 `carry_gate_decisions`，均以预期业务断言失败被抓住：审批前关门 1、无 consumer 1、等待中关门 1、批准后新插件重跑 1、consumer unavailable 1、拒绝/取消 2、重复拒绝 1；每项 pytest `rc=1`、errors=0、skipped=0。每项立即恢复源码；恢复后的 `round_execution.py` SHA256 为 `af658f601e6cc5f6154206cd9a5f916f83e5542c6e27e1837bb17314fadc2fe5`。
+- 当前版本完整聚焦命令：b5s5 的 27 个显式文件，加 `test_plugin_gate_cross_bfail.py` 与两个审批测试文件；27 个路径与紧接下方历史矩阵相同：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_plugin_tool_gate_logic.py \
+    agent_py_agent/tests/test_plugin_tool_gate_execution.py \
+    agent_py_agent/tests/test_plugin_gate_approval.py \
+    agent_py_agent/tests/test_plugin_gate_consumers.py \
+    agent_py_agent/tests/test_plugin_gate_reapproval.py \
+    agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py \
+    agent_py_agent/tests/test_plugin_gate_event_combination.py \
+    agent_py_agent/tests/test_plugin_event_points.py \
+    agent_py_agent/tests/test_plugin_event_gateway.py \
+    agent_py_agent/tests/test_plugin_event_e2e.py \
+    agent_py_agent/tests/test_plugin_event_display.py \
+    agent_py_agent/tests/test_plugin_m1_b8_samples.py \
+    agent_py_agent/tests/test_tool_round_execution.py \
+    agent_py_agent/tests/test_tool_display_archive.py \
+    agent_py_agent/tests/test_compact_tool_ref_archive_chain.py \
+    agent_py_agent/tests/test_shutdown_turn_resume.py \
+    agent_py_agent/tests/test_architecture_guardrails.py \
+    agent_py_agent/tests/test_config_field_readers.py \
+    agent_py_agent/tests/test_constant_names_unique.py \
+    agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+    agent_py_agent/tests/test_parameter_registry.py \
+    agent_py_agent/tests/test_recovery_actions.py \
+    agent_py_agent/tests/test_recovery_code_policy.py \
+    agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+    agent_py_agent/tests/test_subagent_config_inheritance.py \
+    agent_py_agent/tests/test_packaging.py \
+    agent_py_agent/tests/test_constants_catalog.py \
+    agent_py_agent/tests/test_plugin_gate_cross_bfail.py \
+    agent_py_agent/tests/test_plugin_gate_approval_ledger_carry.py \
+    agent_py_agent/tests/test_plugin_gate_interactive_and_writer_guard.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider -rA \
+    --basetemp=/private/tmp/claude-501/m-b5fix9bt
+  ```
+
+  结果：**621 passed，0 failed，0 errors，0 skipped，0 xfailed，0 xpassed**。该 30 文件集合包含 b5s5 的完整 11 文件 guards9 清单；它们与联合回归同次执行，未再重复跑。`ruff check agent_py_agent scripts`：**All checks passed!**；文档最终更新后 `check_doc_sync.py --base 52fa62e37` 输出 `DOC_SYNC_PASS`，`git diff --check` exit 0。全仓测试、真实 Gateway、真实插件进程未在本轮范围内。
+
 ### 显式27文件联合回归（含现场完整11文件guards9）
 
 全部在工作树根、指定Python、禁缓存，同树未并发pytest或code-size。命令实际执行：
