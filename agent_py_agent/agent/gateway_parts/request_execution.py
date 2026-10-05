@@ -1175,8 +1175,8 @@ def _executing_owner_id(agent: object) -> str:
 
 
 # LLM: v2（tref2）：turn 类事件用本回合解析后的会话线程（与工具事件同源），不用渠道会话号。
-#   这里在回合开始前做一次只读 preflight——与执行路径同一解析入口（get_or_create 幂等），
-#   取消/跳过执行的路径在调用之前就返回、不经过本函数；解析失败留空，绝不影响执行。
+#   只在插件事件开启时由 turn_started 惰性调用：回合开始前做一次只读 preflight——与执行路径同一解析入口
+#   （get_or_create 幂等），取消/跳过执行的路径在调用之前就返回、不经过本函数；解析失败留空，绝不影响执行。
 # 函数用途: 解析本回合的会话线程 id，供 turn_started/turn_ended 的事件使用。
 def _gateway_turn_thread_id(agent: SimpleAgent, context: dict, on_chunk) -> str:
     try:
@@ -1240,7 +1240,7 @@ def _handle_gateway_request(
 
     execution_started_mono = time.monotonic()
     event_context = turn_started(agent, context['request'],
-                                 thread_id=_gateway_turn_thread_id(agent, context, chunk_writer))
+                                 thread_id_of=lambda: _gateway_turn_thread_id(agent, context, chunk_writer))
     failure: Exception | None = None
     try:
         _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])

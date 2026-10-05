@@ -7,6 +7,7 @@
 - **变异**（均已还原、sha256 一致）：`turn_started` 改回渠道号 → e2e 红；`prompt_submitted` 用渠道号（破坏 A2）→ e2e 红；`channel_conversation_ref` 丢失 → e2e 红。
 - **门禁**：guards9 前 11 文件全过（基线无 `test_backend_signature_guardrails.py`，第 12 个未跑、已注明）；`check_import_boundaries.py` 0 条；ruff 全过；`check_doc_sync.py --base 100df7ad7` DOC_SYNC_PASS；strict code-size `hard=0 blocked=False`；`check_clean_package.py .` OK；`git diff --check` 干净；`size_diff.sh` 新增 0、消失 55。
 - **未验证**：真实 IM 通道（真飞书）与真实插件消费新字段的行为；跨版本切换点的插件侧索引断裂只写进发布说明，无自动迁移。
+- **3a 终审补充**：`test_gateway_disabled_entries_do_not_warn_or_read_fields` 加断言——事件关闭时 `turn_started` 不调用线程解析；变异 2/2 KILLED（关闭时也解析线程 → 该用例红；回合事件不带线程 → e2e 红）。
 
 ## J16 第 9 节 观察截图 _meta 协商（vision2，2026-10-05，worker/vision2）
 

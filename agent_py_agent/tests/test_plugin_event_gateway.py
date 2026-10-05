@@ -415,10 +415,10 @@ def test_gateway_disabled_entries_do_not_warn_or_read_fields(gateway, event_warn
     context = EventPointContext(agent.config, lambda e: events.append(e))
     assert event_points.gateway_event_context(agent, _UnreadableEventFields(reads), server=server) is None
     assert event_points.prompt_queued(server, source) is None
-    assert event_points.turn_started(agent, source) is None
+    assert event_points.turn_started(agent, source, thread_id_of=lambda: reads.append('thread') or 'thread-x') is None
     assert event_points.command_completed(agent, source) is None
     assert event_points.turn_ended(context, source, 1) is None
-    assert reads == [] and events == []
+    assert reads == [] and events == [], "关闭时不读字段，也不为事件解析会话线程"
     assert not any(r.name.endswith('plugin_events.points') for r in event_warning_log.records)
 
 
