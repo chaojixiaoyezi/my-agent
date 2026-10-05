@@ -352,7 +352,8 @@ def test_i4_gateway_resume_reasks_plugin_and_needs_new_decision(tmp_path, monkey
     _i4_transport(monkeypatch, harness)
     original_wait = stream_approval.wait_for_gateway_permission_decision
     monkeypatch.setattr(stream_approval, "wait_for_gateway_permission_decision", _shutdown_i4_wait)
-    agent = _real_agent(tmp_path)
+    # B5×B7：总开关关着时装配点不接收紧征询；本用例要测真实征询链，所以构造时就打开。
+    agent = _real_agent(tmp_path, plugin_events_enabled=True)
     paths = _gateway(agent)
     owner = agent.home_paths.owner_id
     path = _processing(paths, "gate-i4", prompt="读取当前目录", client_capabilities={"tool_approval": True},
@@ -367,7 +368,7 @@ def test_i4_gateway_resume_reasks_plugin_and_needs_new_decision(tmp_path, monkey
     monkeypatch.setattr(model_call_ledger, "_ADMISSION_REGISTRY", model_call_ledger._ModelCallAdmissionRegistry())
     monkeypatch.setattr(store_claims, "process_identity_is_live", lambda _identity: False)
     monkeypatch.setattr(stream_approval, "wait_for_gateway_permission_decision", original_wait)
-    successor = _real_agent(tmp_path)
+    successor = _real_agent(tmp_path, plugin_events_enabled=True)
     recovered = recover_gateway_processing_requests(paths, startup=True, agent=successor, planned_restart=True)
     assert recovered["requeued"] == 1
     assert read_json_file(paths.inbox / path.name)["active_turn_recovery"]["cause"] == "gateway_safe_restart"

@@ -220,13 +220,15 @@ class _ShutdownWire:
         return _reply(payload, "SR-DONE 续跑完成。", None, seq)
 
 
-def _real_agent(tmp_path) -> SimpleAgent:
+def _real_agent(tmp_path, *, plugin_events_enabled: bool = False) -> SimpleAgent:
     return SimpleAgent(AgentConfig(
         model_backend="openai_compatible", api_base="http://127.0.0.1:9/v1", model_name="sr-scripted",
         api_key="sr-fake-key-not-a-credential", stream_enabled=False, model_context_window_tokens=200_000,
         enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
         gateway_workspace="gateway", orphan_supervision_interval_seconds=0, memory_curator_enabled=False,
         enable_self_learning=False,
+        # B5×B7：总开关关着时装配点不接收紧征询；本 helper 默认关，需要征询的用例显式打开。
+        plugin_events_enabled=plugin_events_enabled,
     ), tmp_path / "root")
 
 

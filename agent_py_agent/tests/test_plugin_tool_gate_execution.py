@@ -290,7 +290,8 @@ def test_composition_root_builds_owner_reviewer_without_starting_gateway(tmp_pat
     monkeypatch.setattr(plugin_panels_http, "current_plugin_channel_pool", lambda: h.pool, raising=False)
     agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path))
     build = getattr(core, "_build_plugin_gate_reviewer", lambda _agent, _config: None)
-    callback = build(agent, AgentConfig())
+    # B5×B7：总开关关着时装配点直接不接（见配套用例）；这里显式打开以覆盖"接上后真的征询"。
+    callback = build(agent, AgentConfig(plugin_events_enabled=True))
     assert callback is not None
     assert len(callback(h.call(tmp_path))) == 1 and len(h.sent) == 1
 

@@ -1103,7 +1103,11 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 
 
 # LLM: 组合根注入规范 owner 与 config，池提供方只取 Gateway 已有池；构造不读安装表、不起进程或监听器。
-# 函数用途: 给主代理和同进程子代理的工具表接入 B5 共用池征询。
+#   B5×B7 接线：M 线总开关（plugin_events_enabled）关着时 v8 插件"收紧不问"（设计稿 267/337 行裁定），
+#   这里返回 None 就等于"没有门"——执行器照宿主原裁决走，收紧不会因此变松（关掉开关只会少一层收紧，
+#   绝不会把 ask/deny 变成 allow）。选装配点而不是征询点的理由：这是唯一拿得到宿主 config 的权威位置，
+#   且与 B7 的启用闸同一时机，开关语义与 yaml"修改后重启 Gateway 生效"完全一致。
+# 函数用途: 给主代理和同进程子代理的工具表接入 B5 共用池征询；总开关关着时不接。
 def _build_plugin_gate_reviewer(agent: SimpleAgent, config: AgentConfig):
     from .gateway_parts.plugin_panels_http import current_plugin_channel_pool
     from .plugin_events.tool_gate_review import (
@@ -1113,6 +1117,8 @@ def _build_plugin_gate_reviewer(agent: SimpleAgent, config: AgentConfig):
     )
 
     if not config.enable_plugins or not config.enable_tools:
+        return None
+    if getattr(config, "plugin_events_enabled", False) is not True:
         return None
     owner = resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config))
     return PluginGateReviewer(GateWiring(owner, config, current_plugin_channel_pool, enabled_gate_installations)).review

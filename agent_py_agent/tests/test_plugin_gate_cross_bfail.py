@@ -240,3 +240,146 @@ def test_executor_after_kill_still_requires_user(tmp_path):
     assert probe2.executed == [] and second.result.handler_executed is False
     requirements = second.decision.evidence["plugin_requirements"]
     assert requirements[0]["reason_code"].startswith("PLUGIN_GATE_")
+
+
+# LLM: 收紧层最不该放松的组合是“宿主已拒绝”：总开关关着时没有征询结果，开着时插件即使回 allow_as_is，
+#   合并结果都必须仍是 deny（ds4 b5b7wirer 小问题 1：此前只有宿主 allow、ask 两种覆盖）。
+# 函数用途: 断言宿主 deny 在无征询和插件放行两种情况下都不会被放松。
+def test_host_deny_never_relaxed_with_or_without_reviews():
+    h = _Harness()
+    row = h.rows[0]
+    declaration = row.manifest.tool_gates[0]
+    target = GateTarget(row.manifest.plugin_id, row.manifest.version, row.activation.activation_id, declaration)
+    allow = GateReview(target, GateReply("allow_as_is", "OK"), "ok")
+    ask = GateReview(target, GateReply("ask", "NEEDS_USER"), "ok")
+    assert PluginToolGate.merge("deny", ()).status == "deny"
+    assert PluginToolGate.merge("deny", (allow,)).status == "deny"
+    # 插件回 ask 时最容易被“放松”成 ask：宿主 deny 必须原样保留。
+    assert PluginToolGate.merge("deny", (ask,)).status == "deny"
+
+
+# --- 4. 总开关关掉时不再征询（B5×B7 接线的第四条） ---
+
+
+# LLM: 总开关（plugin_events_enabled）关着时装配点直接不接 reviewer——池的 request 一次都不该被调到，
+#   结果等于宿主原裁决（这里宿主是 ask，所以仍 ask；关键是没有征询、也没因此变松）。
+# 函数用途: 断言关掉总开关后不征询、结果等于宿主原裁决。
+def test_events_switch_off_means_no_review_and_host_verdict_stands(tmp_path):
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    h = _Harness()
+    agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path))
+    assert core._build_plugin_gate_reviewer(agent, AgentConfig(plugin_events_enabled=False)) is None
+    # 装配点返回 None：没有 reviewer 可接，执行器只会照宿主原裁决走，池一次都没被碰。
+    # 这里宿主裁决是 allow，所以 handler 照常执行——这正是"关掉开关=少一层收紧，不是变松"的含义：
+    # 收紧层本来就不放行任何东西，它只会把 allow 收紧；少了它，决定权完全回到宿主原裁决。
+    call, probe, snapshot = h.call(tmp_path)
+    execution = ToolExecutor().execute(ToolExecutorRequest(
+        call, snapshot, tmp_path, operation_store_required=False, plugin_gate_reviewer=None))
+    assert execution.decision.status == "allow" and probe.executed == [{}] and h.sent == []
+
+
+# LLM: 同一条链再打开开关必须恢复征询（证明上面的"不征询"是开关造成，不是链坏了）。
+# 函数用途: 断言打开总开关后装配点重新接上并真的发出征询。
+def test_events_switch_on_resumes_review(tmp_path):
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    h = _Harness()
+    agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path))
+    callback = core._build_plugin_gate_reviewer(agent, AgentConfig(plugin_events_enabled=True))
+    assert callback is not None, "打开开关后装配点必须接上"
+    # 装配点读的是真实安装表（本测试没有真安装），所以这里只钉"接上了"；
+    # "接上后真的会征询"由本文件其它用例用注入安装表的 harness 覆盖。
+    assert callable(callback)
+
+
+# LLM: /plugins info 在总开关关着时，订阅与收紧两段要写结构化原因（复用既有原因码），
+#   不能让用户以为"这个插件没声明能力"。TUI 与 IM 走同一个渲染函数，所以这里钉渲染输出。
+# 函数用途: 断言关掉总开关时两段都显示原因码。
+def test_plugins_info_shows_disabled_reason_when_switch_off():
+    from agent_py_agent.agent.plugin_commands import (
+        PluginEventDetails,
+        render_plugin_event_details,
+    )
+    from agent_py_agent.agent.plugin_events.declarations import (
+        PluginEventDeclaration,
+        PluginEventPermissions,
+        PluginToolGateDeclaration,
+    )
+
+    details = PluginEventDetails(
+        events=(PluginEventDeclaration("prompt_submitted", "none"),),
+        tool_gates=(PluginToolGateDeclaration("check", ("gate_probe",), (), "none"),),
+        permissions=PluginEventPermissions(network=False),
+        events_disabled=True,
+    )
+    text = render_plugin_event_details(details)
+    assert "plugin_events_disabled" in text
+    assert text.count("plugin_events_disabled") == 2, text
+    assert "总开关" in text and "/settings" in text
+
+
+# LLM: 开着时不能出现"未生效"字样（反向对照，防止原因码恒真显示）。
+# 函数用途: 断言总开关打开时两段照常显示声明的能力。
+def test_plugins_info_shows_declared_capabilities_when_switch_on():
+    from agent_py_agent.agent.plugin_commands import (
+        PluginEventDetails,
+        render_plugin_event_details,
+    )
+    from agent_py_agent.agent.plugin_events.declarations import (
+        PluginEventDeclaration,
+        PluginEventPermissions,
+        PluginToolGateDeclaration,
+    )
+
+    details = PluginEventDetails(
+        events=(PluginEventDeclaration("prompt_submitted", "none"),),
+        tool_gates=(PluginToolGateDeclaration("check", ("gate_probe",), (), "none"),),
+        permissions=PluginEventPermissions(network=False),
+        events_disabled=False,
+    )
+    text = render_plugin_event_details(details)
+    assert "plugin_events_disabled" not in text
+    assert "事件订阅：" in text and "收紧工具：" in text
+
+
+# --- 5. plugin_tool_gate_timeout_ms：管理员可改、模型不可改（B5 参数白名单） ---
+
+
+# LLM: 这个参数登记成边界是为了防模型放大预算；管理员经 /settings 应当能改（调大只会多等，
+#   超时仍收紧成 ask，不会变松）。判据只看 _writable_spec 的两个结构化输入。
+# 函数用途: 断言 gate 预算在管理员白名单里，且管理员作用域可写、模型作用域被边界拒绝。
+def test_gate_budget_admin_writable_model_denied():
+    from agent_py_agent.agent.settings import parameter_changes as changes
+
+    key = "plugin_tool_gate_timeout_ms"
+    assert key in changes.USER_SETTINGS_BOUNDARY_KEYS
+    token = changes._USER_SETTINGS_WRITE.set(True)  # 管理员 /settings 作用域
+    try:
+        spec = changes._writable_spec(key)
+    finally:
+        changes._USER_SETTINGS_WRITE.reset(token)
+    assert spec.key == key
+
+    # 模型作用域（默认 False）：同一键必须按边界拒绝，模型不能放大预算。
+    assert changes._USER_SETTINGS_WRITE.get() is False
+    try:
+        changes._writable_spec(key)
+    except changes.ParameterChangeError as exc:
+        assert exc.code == "PARAMETER_BOUNDARY"
+    else:  # pragma: no cover - 失败时才走到
+        raise AssertionError("模型作用域必须被边界拒绝")
+
+
+# LLM: 值范围仍是登记的 200–10000；管理员改大只影响等待时长，收紧结论不变（超时仍 ask）。
+# 函数用途: 断言管理员写入后，预算读取路径仍把超时收紧成 ask。
+def test_gate_budget_change_does_not_loosen_tightening(tmp_path):
+    from agent_py_agent.agent.plugin_events.tool_gate_review import plugin_gate_timeout_seconds
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    assert plugin_gate_timeout_seconds(AgentConfig(plugin_tool_gate_timeout_ms=10000)) == 10.0
+    h = _Harness(timeout_ms=200, delay_seconds=0.6)
+    execution, probe = _execute(tmp_path, h)
+    assert execution.decision.status == "ask" and probe.executed == []

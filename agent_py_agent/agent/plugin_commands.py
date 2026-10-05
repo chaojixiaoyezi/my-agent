@@ -252,17 +252,34 @@ class PluginEventDetails:
     decisions: tuple = ()
     unavailable_count: int = 0
     observed: dict | None = None
+    # LLM: M 线总开关关着时为真：订阅与收紧两项能力都没生效（设计稿 267/337 行裁定）。
+    #   展示层据此显示结构化原因，而不是让用户以为"没订阅/没收紧"。
+    events_disabled: bool = False
 
 
 # LLM: 四段展示的唯一渲染点：TUI 直连、TUI 经 Gateway、IM 三条入口都调这里，保证同一份文字；
 #   只读结构化事实，不读消息原文、不翻译错误码。格式变化时联测展示合同测试的逐字断言。
 # 函数用途: 渲染 /plugins info 的事件订阅、收紧工具、网络沙箱、最近决定与观察计数四段。
 def render_plugin_event_details(details: PluginEventDetails) -> str:
+    # LLM: 只有确实声明过能力（v8）的插件才用"关着"的解释；旧版插件本来就没有这两项声明，
+    #   照旧显示"没有订阅/不适用"，否则会把"这插件不提供"说成"开关关着"，误导用户去改开关。
+    if details.events_disabled and (details.events or details.tool_gates):
+        # LLM: 关掉时两段都写清原因（复用既有原因码 plugin_events_disabled，不新造近义词），
+        #   后面三段（网络沙箱、决定、计数）照旧展示，方便用户确认插件本身没问题。
+        lines = [f"事件订阅：未生效（原因码 {_EVENTS_DISABLED_CODE}：M 线事件插件总开关关着，去 /settings 打开后重启 Gateway）。",
+                 f"收紧工具：未生效（原因码 {_EVENTS_DISABLED_CODE}：M 线事件插件总开关关着，去 /settings 打开后重启 Gateway）。",
+                 _network_sandbox_line(details.permissions)]
+        lines.extend(_decision_lines(details.decisions, details.unavailable_count, details.observed))
+        return "\n".join(lines)
     lines = ["事件订阅：" + _events_line(details.events),
              "收紧工具：" + _gates_line(details.tool_gates),
              _network_sandbox_line(details.permissions)]
     lines.extend(_decision_lines(details.decisions, details.unavailable_count, details.observed))
     return "\n".join(lines)
+
+
+# LLM: 与 B7 启用闸同一个原因码（plugin_enable_tool 拒绝 v8 时用它），不新造近义码。
+_EVENTS_DISABLED_CODE = "plugin_events_disabled"
 
 
 # 函数用途: 一行订阅说明；没有声明时说“没有订阅”，不报错。

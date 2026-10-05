@@ -259,12 +259,22 @@ def test_legacy_plugin_and_empty_v8_show_placeholders(tmp_path):
     assert "无法审批：0 次" in message
     assert "观察计数：暂无记录" in message
 
-    fresh = v8_service(tmp_path / "v8")
+    # B5×B7：要展示声明就必须打开总开关（关着时按设计只显示原因，见下一条用例）。
+    fresh = v8_service(tmp_path / "v8", plugin_events_enabled=True)
     v8_message = info_message(fresh)
     assert "事件订阅：prompt_submitted（不含正文）" in v8_message
     assert "收紧门 guard-rm：能看到这些工具的完整参数：run_command（脱敏后最多4000字）。" in v8_message
     assert "网络与沙箱：禁止联网（含本机回环）；沙箱要求强制使用插件进程沙箱，不可用时不得启用。" in v8_message
     assert "暂无记录" in v8_message
+
+
+# LLM: B5×B7 接线：总开关关着时，声明过能力的 v8 插件两段要写结构化原因，而不是照旧列能力。
+# 函数用途: 断言关掉总开关后 /plugins info 显示原因码。
+def test_v8_plugin_shows_events_disabled_reason_when_switch_off(tmp_path):
+    service = v8_service(tmp_path / "off", plugin_events_enabled=False)
+    message = info_message(service)
+    assert message.count("plugin_events_disabled") == 2
+    assert "总开关" in message
 
 
 def test_observed_counts_rendered_and_missing_hub_degrades(tmp_path):

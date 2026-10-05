@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## B5×B7 接线：总开关收口、`/plugins info` 原因、收紧预算管理员可改（b5b7wire，2026-10-04，基于 17j 头 `662439745`；已并入 step17k）
+
+- 3a 挑入 17k 后复跑 11 个相关文件：296 passed；前端目录同步（260 字段）。新增 `test_host_deny_never_relaxed_with_or_without_reviews`，去掉 merge 里 deny 短路的变异被抓到，按备份还原。
+
+- 改了什么：`core._build_plugin_gate_reviewer` 在总开关 `plugin_events_enabled` 关着时返回 None（唯一权威判定点，与 B7 启用闸同一时机、与 yaml"重启生效"一致）；`plugin_commands.render_plugin_event_details` 在关着时把"事件订阅/收紧工具"两段改成结构化原因（复用 `plugin_events_disabled`）；`PluginEventDetails` 增 `events_disabled`，由 `plugin_management._event_details` 从 context 填；`plugin_tool_gate_timeout_ms` 加进 `USER_SETTINGS_BOUNDARY_KEYS`（管理员可改、模型仍拒）；前端目录重新生成。
+- 命令（工作树根，代号 ds10）：相关文件 = `test_plugin_gate_cross_bfail.py` + `test_plugin_tool_gate_execution.py` + `test_plugin_gate_consumers.py` + `test_shutdown_turn_resume.py` + `test_plugin_management.py` + `test_plugin_manifest_v8.py` + `test_parameter_*.py` + B5 27 文件清单 + guards9。
+- 结果：跨件文件 **12 passed**；相关组 77 + 155 + 137 passed；B5 34 文件 + 跨件 **723 passed**；guards9 **187 passed**（详见交接报告）。
+- 变异（脚本 `tasks/2026-10-04/b5b7wire-cross-wiring/mutations.py`，逐个 sha256 还原，基线 12 passed）：
+  1. 装配点不再判总开关 → 杀（1 failed）
+  2. `/plugins info` 关着时不显示原因 → 杀（1 failed）
+  3. 参数白名单退回（管理员也不能改）→ 杀（1 failed）
+- 既有用例场景更新：`test_composition_root_builds_owner_reviewer_without_starting_gateway` 与 I4 恢复用例原来用默认关的配置，现显式打开总开关（它们要测的是真实征询链）；`test_shutdown_turn_resume._real_agent` 增可选 `plugin_events_enabled` 参数。
+
 ## 模拟器 tool_choice 规则与压缩用例最终口径（cachesim2，2026-10-04，分支 `worker/cache-sim`；已并入 step17k）
 
 - 改动：`agent_py_agent/tests/cache_prefix_simulator.py` 补两条实测规则（思考模式 tool_choice 只认 auto/none，否则 400；none 不渲染 tools、前缀等价于不带 tools）并修探针响应形状；`agent_py_agent/tests/test_cache_prefix_regression.py` 的压缩用例改成新口径；新增 `agent_py_agent/tests/test_cache_prefix_simulator.py`（4 条单测）。仍**不改产品代码**。

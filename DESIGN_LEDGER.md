@@ -1,5 +1,17 @@
 # 设计台账
 
+## B5×B7 接线：总开关收口 + `/plugins info` 原因 + 收紧预算管理员可改（b5b7wire，2026-10-04，分支 `worker/b5b7wire`，基于 17j 头 `662439745`；ds4 初审无必须改，3a 终审通过并补用例，已并入 step17k）
+
+- **终审补件（3a）**：ds4 小问题 1“总开关关着 + 宿主 deny 无用例”。补 `test_host_deny_never_relaxed_with_or_without_reviews`：宿主 deny 在无征询、插件放行、插件 ask 三种情况下都保持 deny。首版只测放行时，删掉 merge 里 deny 短路的变异存活，加上插件 ask 后变异被杀。小问题 2（`is not True` 与 `is False` 当前等价，无法区分）记为已知，现写法是 fail-closed，不改。
+
+- **裁定落地**：设计稿 267/337 行——总开关 `plugin_events_enabled` 关掉后，已启用的 v8 插件"事件不投、收紧不问"。B4 的事件点已先判，B5 这次补上。
+- **只在装配点判一次**（`core._build_plugin_gate_reviewer`）：这是唯一拿得到宿主 config 的权威位置，且与 B7 启用闸同一时机，语义与 yaml"修改后重启 Gateway 生效"一致。关掉时 reviewer 为 None，执行器照宿主原裁决走——**少一层收紧，不是变松**（收紧层只会把 allow 变严，从不放行）。
+- **`/plugins info`**：关着时"事件订阅"与"收紧工具"两段写结构化原因（复用既有原因码 `plugin_events_disabled`，不新造近义码）；TUI 与飞书走同一渲染函数，文字一致。
+- **收紧预算进管理员白名单**：`plugin_tool_gate_timeout_ms` 加进 `USER_SETTINGS_BOUNDARY_KEYS`——管理员可改（调大只会多等，超时仍 ask），模型 set/reset/revert 仍按边界拒。前端目录重新生成（260 字段，`--check` 通过）。
+- **已知边界（B7）**：v8 沙箱隐藏的是 `Path.home()`（整个家目录），**家目录以外的公共目录（如 `/tmp`）对插件可读**。要"补全被截断的参数"仍不现实，但用户放在公共同步目录的敏感文件插件读得到——记在这里，施工和评审都按这条理解。
+- **预热协同（B4/B5）**：两者共用 B2 池，插件进程懒启动 + 常驻（空闲 120 秒关），冷启动多发生在"本回合第一次工具调用"或"空闲 120 秒后的第一次"；写进设计稿 16.1。
+- **验证**：见 TESTS「B5×B7 接线」；变异 3/3 被杀（装配点不判开关、info 不显示原因、参数白名单退回）。
+
 ## 模拟器补 tool_choice 两条规则 + 压缩用例最终口径（cachesim2，2026-10-04，分支 `worker/cache-sim`，基于 `6e31e5855`；3a 复审通过，已并入 step17k）
 
 - **来源**：3a 追加实测（`ds_probe4/5.out.txt`）：① 开思考时 `tool_choice=none` 被接受，`required` 和指定工具回 400（“Thinking mode does not support this tool_choice”）；② `tool_choice=none` 时服务端不渲染工具定义，prompt token 等于“不带 tools”（4029 对 4029，auto 是 4430），所以 none 的前缀在 system 之后就和 auto 请求分叉，长历史命中 0；压缩或辅助请求要复用主对话缓存，必须同分区 + 同一套 tools + auto + system 和历史逐条相同，压缩指令放最后一条 user。

@@ -547,7 +547,8 @@ class PluginManagement:
         decisions, unavailable = _gate_ledger(runtime_db_path(self.context.owner.home_dir), manifest.plugin_id)
         observed = _observed_counts(self.context.event_hub, self.context.owner, manifest.plugin_id)
         return PluginEventDetails(manifest.events, manifest.tool_gates, manifest.permissions,
-                                  tuple(decisions), unavailable, observed)
+                                  tuple(decisions), unavailable, observed,
+                                  events_disabled=not bool(self.context.plugin_events_enabled))
 
 
 # 常量用途: 插件管理请求各结构化状态的默认中文说明；不在表里的状态用通用说明。
