@@ -137,6 +137,18 @@ def gateway_client_error_message(error_code: object) -> str:
 PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT = "已到自动重试总时长上限，已停止重试"
 
 
+# LLM: 允许“回合级供应商故障自动续跑”的结构化错误码白名单（集中常量）：MODEL_STREAM_INCOMPLETE 只在
+#   本回合已有已完成工具往返时生效（零产出走响应级重试）；请求拒绝类一律不续跑。未来码表映射落地后
+#   补 TRANSIENT_ERROR 与 PROVIDER_TIMEOUT 两个登记码。改动同步 request_execution 的判定与
+#   test_provider_transient_turn_resume。放在 gateway 层是为了守住 import 边界（gateway_parts 不能
+#   导入 agent_core）；码值本身与 provider_transient_auto_resume 的常量一致。
+# 函数用途: 供 Gateway 失败收口判定哪些错误码可以自动重排续跑。
+PROVIDER_TRANSIENT_TURN_RESUME_CODES = frozenset({
+    "MODEL_STREAM_INCOMPLETE",
+    "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
+})
+
+
 # LLM: 只投影宿主 typed provider error 或空正文截断；显式完成优先，不解析正文/思考、不修改结果或启动重试。
 # 函数用途: 防止模型有半句正文就掩盖坏工具参数等错误；保留本轮真实技术终态，不否认已有工作。
 def gateway_model_response_error_projection(result: object) -> dict:

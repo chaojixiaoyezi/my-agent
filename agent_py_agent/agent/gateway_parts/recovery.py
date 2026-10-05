@@ -867,9 +867,77 @@ def _requeue_stale_processing(
     return "requeued"
 
 
+# LLM: 供应商临时故障的回合级重排：请求保留同一身份写回 inbox（status=pending、priority=recovery、
+#   not_before_at 退避），active_turn_recovery 标记写 cause=provider_transient_resume 与累计次数；
+#   与 _requeue_stale_processing 的差别只在触发来源与退避值，共用 turn 锁与死 attempt 的 guidance 释放。
+#   重排不重放工具：下一轮从会话里已落盘的完成工具往返继续。写失败返回 False，由调用方照常收失败终态。
+# 函数用途: 把因供应商临时故障失败的长回合重排回队列，等待下一轮自动续跑。
+def requeue_provider_transient_processing(
+    paths: GatewayPaths,
+    processing_path: Path,
+    request_id: str,
+    *,
+    resume_count: int,
+    error_code: str,
+    conversation_store: object | None = None,
+) -> bool:
+    try:
+        with gateway_turn_transition(paths, request_id):
+            report = read_json_file_report(
+                processing_path, context="gateway.recovery.provider_transient.read"
+            )
+            if report.load_error is not None or not isinstance(report.payload, dict):
+                return False
+            fresh = report.payload
+            dead_attempt_id = str(fresh.get("execution_attempt_id") or "").strip()
+            _release_dead_attempt_guidance(conversation_store, request_id, dead_attempt_id=dead_attempt_id)
+            now = time.time()
+            requeued = dict(fresh)
+            requeued.update(
+                {
+                    "status": "pending",
+                    "priority": "recovery",
+                    "requeued_at": now,
+                    "not_before_at": now + _provider_transient_resume_delay(resume_count),
+                    "last_error": f"provider transient failure: {error_code}",
+                    "active_turn_recovery": {
+                        "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
+                        "request_id": request_id,
+                        "dead_execution_attempt_id": dead_attempt_id,
+                        "requeued_at": now,
+                        "cause": "provider_transient_resume",
+                        "unplanned_resume_count": _unplanned_resume_count(fresh),
+                        "provider_resume_count": max(0, int(resume_count)),
+                    },
+                }
+            )
+            for key in (
+                "execution_attempt_id",
+                "lease_owner",
+                "lease_started_at",
+                "lease_heartbeat_at",
+                "lease_process_identity",
+            ):
+                requeued.pop(key, None)
+            write_json_file_atomic(processing_path, requeued)
+            processing_path.replace(paths.inbox / processing_path.name)
+    except OSError as exc:
+        _report_gateway_side_effect_error("requeue_provider_transient_request", request_id, exc)
+        return False
+    return True
+
+
+# LLM: 退避固定 30/120 秒：回合内重试已耗尽分钟级预算，续跑是最后手段，30 秒给服务端瞬态恢复窗口；
+#   第二次 120 秒避免两次续跑紧挨着打在同一故障上。两个值都是内部常量，不进配置。
+# 函数用途: 按已用次数给出下一次续跑的固定退避秒数。
+def _provider_transient_resume_delay(resume_count: int) -> float:
+    return 120.0 if max(0, int(resume_count)) > 1 else 30.0
+
+
 # LLM: 续跑标记只由 recovery 写：身份字段供续跑核对，cause 供排序和提示；unplanned_resume_count 在旧标记基础上
 #   按 _counts_as_unplanned_resume 累加，安全重启接班和服务内租约过期原样带过去。认领时整条请求记录原样保留，
-#   所以计数能跨重启累计；用户发的新请求没有这个标记，从 0 开始。
+#   所以计数能跨重启累计；用户发的新请求没有这个标记，从 0 开始。provider_resume_count 是供应商故障
+#   自动续跑的独立计数，重启重排时原样带过去，不重置已用次数。
 # 函数用途: 生成重排请求要写的 active_turn_recovery 标记。
 def _active_turn_recovery_marker(
     request_id: str,
@@ -886,6 +954,7 @@ def _active_turn_recovery_marker(
         "unplanned_resume_count": (
             _unplanned_resume_count(fresh) + (1 if _counts_as_unplanned_resume(context) else 0)
         ),
+        "provider_resume_count": provider_resume_count(fresh),
     }
 
 
@@ -905,6 +974,20 @@ def _unplanned_resume_count(payload: dict) -> int:
     value = marker.get("unplanned_resume_count", 0)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise DataCorruptionError("invalid gateway active_turn_recovery.unplanned_resume_count")
+    return value
+
+
+# LLM: 供应商故障自动续跑的计数与 unplanned_resume_count 分开落盘在同一标记里；没有标记或旧版标记按 0，
+#   坏值按数据损坏 fail-closed（同 unplanned_resume_count 的约定），重启重排时由 _active_turn_recovery_marker
+#   原样带过去。Gateway 失败收口与恢复重排共用这一份读法。
+# 函数用途: 读出这个请求已经因供应商临时故障自动续跑了几次。
+def provider_resume_count(payload: dict) -> int:
+    marker = payload.get("active_turn_recovery")
+    if not isinstance(marker, dict):
+        return 0
+    value = marker.get("provider_resume_count", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DataCorruptionError("invalid gateway active_turn_recovery.provider_resume_count")
     return value
 
 

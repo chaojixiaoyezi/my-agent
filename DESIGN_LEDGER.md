@@ -16,6 +16,19 @@
 - **边界**：文本协议下 provider 长度截断此前直接 break（f0f7fdedd 起），修复后与原生协议一致进入同一续跑预算；native 写恢复仍只在原生协议生效（`test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope` 已按新语义更新并保留原守卫断言）。续跑预算用尽后仍按 unfinished/MODEL_RESPONSE_TRUNCATED 收口（不吞供应商终态）；部分正文随响应对象保留，请求级失败语义不变。
 - **验证**：见 `TESTS.md` 同名小节（provider 形态 3 条新用例 + 全量引用文件清扫 + 4 变异全杀）。
 
+## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，分支 `worker/tresume`，基于 17l 头 `630be9dcc`；待非作者初审）
+
+- **来源**：transient-investigate 只读调查 + 3a 裁定：允许回合级供应商故障自动续跑（与进程崩溃重排同族，不违背“普通任务不自动续跑”的 wake 口径）；每个请求最多 2 次、跨 Gateway 重启累计；加配置开关；白名单只认结构化错误码；续跑从已落盘历史继续、不重放工具；提示走 turn_resume_notice；不改发给供应商的请求内容。
+- **改法**：
+  - `gateway_parts/request_execution._provider_transient_turn_resume_marker`：失败收口按白名单（`request_errors.PROVIDER_TRANSIENT_TURN_RESUME_CODES`：MODEL_STREAM_INCOMPLETE 需本回合已有完成工具往返、PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED 无条件）+ 配置开关 + 未达上限（`provider_resume_count` 跨重启累计）判定；命中返回 `provider_transient_resume` 标记，回合不写失败终态。
+  - `gateway_parts/request_worker._finish_claimed_gateway_request`：收尾见到该标记时调 `recovery.requeue_provider_transient_processing` 把请求重排回 inbox（status=pending、priority=recovery、固定退避 30/120 秒、active_turn_recovery 写 cause=provider_transient_resume）；重排失败退回正常失败归档。
+  - `gateway_parts/recovery`：新 `requeue_provider_transient_processing`、`provider_resume_count`；`_active_turn_recovery_marker` 重启重排时原样保留 provider_resume_count（跨 Gateway 重启累计）。
+  - `conversation/turn_resume_notice`：新 cause 文案“模型接口临时故障打断了这一轮，已自动续跑。”；用满上限走现有 TURN_RESUME_LIMIT 提示。
+  - 配置：`agent_config.yaml` + `AgentConfig.provider_transient_turn_resume_max_count: 2`（0=关闭）；前端配置目录已重新生成。
+- **边界**：请求拒绝类（403）不续跑；零产出流中断照旧走响应级重试；用户已停止不续跑；坏计数 fail-closed 不续跑。续跑那一轮与用户手动“继续”走同一条组装路径。
+- **验证**：新用例 7 条 + 3 变异全 KILLED；58 个相关测试文件全跑（2 个沙箱基线失败；1 个既有断言按新字段更新后全绿）；guards9 全绿。见 `TESTS.md` 同名节。
+- **未验证**：真实 Gateway 上的供应商故障端到端（需要真实故障注入）；Linux 车道由 3a 跑。
+
 ## SLP-1A 挑入 17l 后撤回（slp1a，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现）**：过期 claim 的原执行者进程仍存活时（常见于同一个 Gateway 进程里某回合异常结束、没释放 claim），SLP-1A 判为 recovery_pending；而 `_acquire_conversation_run_claim` 的等待循环没有时限，`test_plugin_m1_joint_tool_gate.py` 卡在 run_claim.py 的领取循环 40 分钟。生产上会让该会话之后所有回合一直“等待执行车道”，直到重启 Gateway。

@@ -1486,3 +1486,10 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **变异**：把 IM 链的 hub 退回从 `server.agent` 取（`http_handlers.py` 的 `event_hub=getattr(server.agent, "plugin_event_hub", None)`），**被 `test_tui_http_and_im_render_byte_identical_text` 抓到**（IM 变“暂无记录”、与 TUI 不再逐字相同）。
 - **给 B5 的接缝（payload 形状）**：`plugin_gate.decided` 行的字段必须写在 `payload_json` 里（`plugin_id`/`version`/`activation_id`/`gate_id`/`tool`/`call_id`/`operation_id`/`args_hash`/`actor`/`outcome`/`verdict`/`reason_code`/`latency_ms`/`host_status`/`final_status`），查询用 `json_extract(payload_json, '$.plugin_id')` 过滤。**B5 必须照这个形状写，否则查询会静默返回空**。
 - **已知边界（只增不减）**：“无法审批”计数不设窗口、只增不减（`plugin_gate_unavailable_count` 全表统计，不受最近 10 条窗口影响）。以后再定要不要改成“最近 N 天”或“本激活代次内”。
+
+## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，`worker/tresume`，待非作者初审）
+
+- **背景**：长回合被供应商临时错误（响应流未完整结束、自动重试总时长用尽）打断后直接失败，只能等用户手动“继续”。3a 裁定允许回合级自动续跑（与进程崩溃恢复同族），每个请求最多 2 次、跨 Gateway 重启累计。
+- **Gateway 侧改动**：失败收口新增 `request_execution._provider_transient_turn_resume_marker` 判定（白名单 + 开关 + 上限 + “有已完成工具往返”）；命中不写终态，worker 收尾经 `recovery.requeue_provider_transient_processing` 把请求重排回 inbox（固定退避 30/120 秒、active_turn_recovery 记 cause 与累计次数）；`_active_turn_recovery_marker` 重启重排时保留 `provider_resume_count`；提示文案进 `conversation/turn_resume_notice`。
+- **边界**：403/请求拒绝类不续跑；零产出流中断照旧响应级重试；用户已停止不续跑；重排失败退回失败归档；不改发给供应商的请求内容（与手动“继续”同一组装路径）。
+- **验证**：见 `TESTS.md` 同名节（7 新用例、3 变异全杀、58 相关文件、guards9）。

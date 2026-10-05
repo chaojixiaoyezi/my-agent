@@ -489,6 +489,10 @@ gateway_processing_timeout_seconds: 900
 # 一个请求失败后最多尝试几次（含第一次）。
 # 上游不稳定时可以调大，但重试也会消耗用量。
 gateway_request_max_attempts: 2
+# 模型接口临时故障（响应流未完整结束、自动重试总时长用尽）导致回合失败时，自动重排续跑的最大次数。
+# 0 表示关闭；每个请求跨 Gateway 重启累计，用满后按失败收口（发“继续”可以手动接着做）。
+# 只对已有完成工具往返的回合生效：重排从已落盘历史继续，不重放工具，退避 30/120 秒。
+provider_transient_turn_resume_max_count: 2
 # 后台会话全局线程池上限；不同 owner 和不同 thread 都可并发，同 thread
 # 仍由持久 run claim 保证单飞。超出的会话留在持久队列，不丢弃。
 background_owner_workers: 8

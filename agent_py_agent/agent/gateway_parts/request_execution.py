@@ -77,8 +77,9 @@ from .paths import (
     claimed_request_chunk_path,
     gateway_paths,
 )
-from .recovery import _gateway_request_attempts
+from .recovery import _gateway_request_attempts, provider_resume_count
 from .request_errors import (
+    PROVIDER_TRANSIENT_TURN_RESUME_CODES,
     ActiveTurnOutcomeUncertainError,
     ConversationPersistenceError,
     SystemCommandRoutingError,
@@ -1266,16 +1267,22 @@ def _handle_gateway_request(
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
         resume_marker = _host_shutdown_resume_marker(failure, request_path, context["request_id"])
+        resume_field = "restart_resume" if resume_marker is not None else ""
+        if resume_marker is None:
+            resume_marker = _provider_transient_turn_resume_marker(agent, context, response, chunk_writer)
+            if resume_marker is not None:
+                resume_field = "provider_transient_resume"
         # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
         # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
-        # 留给重启续跑的回合不收口：和进程消失一样，由重启恢复按死掉的 attempt 释放预留，续跑回合再认领。
+        # 留给重启/续跑的回合不收口：和进程消失一样，由恢复按死掉的 attempt 释放预留，续跑回合再认领。
         if resume_marker is None:
             _settle_pending_gateway_guidance(agent, context["request_id"], failure)
         _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
         stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
     if resume_marker is not None:
-        # I4：不写终态、不记审计，请求原样留在 processing；worker 收尾见 request_worker._finish_claimed_gateway_request。
-        response["restart_resume"] = resume_marker
+        # 不写终态、不记审计：重启类原样留在 processing 等恢复；供应商故障类由 worker 收尾重排回队列
+        # （request_worker._finish_claimed_gateway_request → recovery.requeue_provider_transient_processing）。
+        response[resume_field] = resume_marker
         turn_ended(event_context, response, (time.monotonic() - execution_started_mono) * 1000)
         return response
     _project_observed_gateway_run_facts(response, chunk_writer)
@@ -1299,6 +1306,47 @@ def _host_shutdown_resume_marker(failure: Exception | None, request_path: Path, 
         return None
     return {"schema_version": "gateway_restart_resume.v1", "error_code": admission.error_code,
             "reason_code": admission.closure.error_code}
+
+
+# LLM: 供应商临时故障的回合级自动续跑判定：只认结构化错误码白名单（PROVIDER_TRANSIENT_TURN_RESUME_CODES）
+#   + 配置开关（provider_transient_turn_resume_max_count，0=关闭）+ 未达续跑上限（provider_resume_count
+#   跨 Gateway 重启累计）；MODEL_STREAM_INCOMPLETE 还要求本回合已有已完成工具往返（tool_rounds>0，
+#   部分历史已由 partial 回调落盘），零产出的照旧走响应级重试；用户已停止的回合不续跑。
+#   命中时回合不写失败终态，由 worker 收尾把请求重排回队列（recovery.requeue_provider_transient_processing），
+#   下一轮从已落盘历史继续、不重放工具。坏计数 fail-closed 按不续跑处理。
+#   改动同步 test_provider_transient_turn_resume 与 turn_resume_notice。
+# 函数用途: 判断这次失败要不要交给“供应商故障自动续跑”；要就返回结构化标记，否则 None。
+def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk_writer) -> dict | None:
+    if response.get("ok") is not False:
+        return None
+    if request_binding.gateway_cancel_requested(context["request_path"], context["request_id"]):
+        return None
+    max_count = int(
+        getattr(getattr(agent, "config", None), "provider_transient_turn_resume_max_count", 0) or 0
+    )
+    if max_count <= 0:
+        return None
+    error_code = str(response.get("error_code") or "").strip()
+    if error_code not in PROVIDER_TRANSIENT_TURN_RESUME_CODES:
+        return None
+    tool_rounds = max(
+        int(response.get("tool_rounds") or 0),
+        int(getattr(chunk_writer, "observed_tool_rounds", 0) or 0),
+    )
+    if error_code == "MODEL_STREAM_INCOMPLETE" and tool_rounds <= 0:
+        return None
+    try:
+        count = provider_resume_count(context["request"])
+    except Exception:  # noqa: BLE001 坏计数 fail-closed：不续跑，按失败收口
+        return None
+    if count >= max_count:
+        return None
+    return {
+        "schema_version": "gateway_provider_transient_resume.v1",
+        "error_code": error_code,
+        "resume_count": count + 1,
+        "tool_rounds": tool_rounds,
+    }
 
 
 # LLM: 插话持久操作经 guidance 领域组件； 回合结束时未消费的 steer/guidance 必须收口（reject），否则残留消息占住

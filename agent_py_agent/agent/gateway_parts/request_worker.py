@@ -1025,6 +1025,21 @@ def _finish_claimed_gateway_request(
         raise DataCorruptionError(
             "gateway terminal response identity conflicts with the claimed request"
         )
+    if isinstance(response.get("provider_transient_resume"), dict):
+        # 供应商临时故障自动续跑：回合不写终态，由本处把请求重排回队列（带退避与累计次数），
+        # 下一轮从已落盘历史继续；重排失败退回正常归档，不让请求卡死。
+        from .recovery import requeue_provider_transient_processing
+
+        marker = response["provider_transient_resume"]
+        if requeue_provider_transient_processing(
+            paths,
+            processing_path,
+            request_id,
+            resume_count=int(marker.get("resume_count") or 0),
+            error_code=str(marker.get("error_code") or ""),
+            conversation_store=conversation_store,
+        ):
+            return
     if isinstance(response.get("restart_resume"), dict):
         # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
         # request_execution._host_shutdown_resume_marker）。

@@ -1265,6 +1265,7 @@ agent_py_agent/
 |   |-- test_restart_gate.py            # 工具关口：关闭时停在领取前、重开放行、中断按未启动收口、执行中计数与等待
 |   |-- test_gateway_safe_restart.py    # 安全重启：合并/冷却/防循环、两段排空与超时取消、标记、续跑优先、接班与 /restart
 |   |-- test_shutdown_turn_resume.py    # 停机准入拒绝的回合留给重启续跑（I4）：不写终态、用户停止优先、TUI/IM 同一句提示、真实链路续跑完成
+|   |-- test_provider_transient_turn_resume.py # tresume：供应商故障回合级自动续跑（白名单/开关/上限/跨重启计数、重排与失败收尾边界）
 |   |-- test_turn_resume_limit.py       # 非计划重启续跑最多 3 次：计数跨重启累计、安全重启/租约过期不计、用完收成 failed 并提示、真实链路“继续”是新回合
 |   |-- test_turn_resume_limit_steer.py # 续跑上限收口时插话的终态：已取走被杀/未取走→备用下一轮、已在历史→不送两遍、封存后补交、提示分句
 |   |-- test_gateway_restart_tool.py    # restart_gateway：只在 Gateway 内、立即返回、冷却拒绝、只注册给管理员主代理

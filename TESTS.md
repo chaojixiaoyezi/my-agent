@@ -57,6 +57,17 @@
   - M4 清扫不写审计事件 → KILLED：事件断言找不到。
 - 未验证：真实生产库的存量清扫效果（11 条 EXECUTING）由部署后首次 reconcile 巡验证；macOS 判活边界见 DESIGN_LEDGER。
 
+## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，分支 `worker/tresume`，待非作者初审）
+
+- 背景与设计见 `DESIGN_LEDGER.md` 同名小节。
+- 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 新用例：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_provider_transient_turn_resume.py -q` → **7 passed**。
+  - 变异（`/private/tmp/claude-501/tresume-mutate.py`，每次只改一处、按字节还原）：去掉白名单 / 去掉上限 / 去掉“有部分历史”条件 → **3/3 KILLED**（分别打红 403、上限、零产出三条用例）。
+  - 相关回归（git grep 全部引用 + 任务点名必跑清单，58 文件分批、每批 subprocess 900 秒超时）：**56 文件全绿**；2 个失败均在基线 `630be9dcc` 复现（`test_gateway_chat_conversation_context::test_first_gateway_shell_keeps_explicit_working_dir`、`test_shell_sandbox_boundary_facts` 的 2 条——沙箱限制）；`test_local_store_gateway_recovery::test_gateway_startup_requeued_request_does_not_block_fresh_pending` 因 marker 新增 `provider_resume_count` 字段按新契约更新断言后转绿（非放宽：字段是有意新增的持久化事实）。
+  - 受影响文件复跑：`test_local_store_gateway_recovery.py + test_turn_resume_limit.py + test_turn_resume_limit_steer.py + test_shutdown_turn_resume.py + test_provider_transient_turn_resume.py` → **49 passed**。
+  - guards9（12 文件）→ 全绿；`scripts/check_import_boundaries.py` → findings=0（白名单常量放 gateway 层，守住 gateway_parts 不能导入 agent_core 的层边界）；`ruff check agent_py_agent scripts` → All checks passed。
+- 新增用例：`test_incomplete_with_tool_rounds_requeues_for_resume`、`test_retry_budget_exceeded_requeues_for_resume`、`test_request_rejected_does_not_requeue`、`test_zero_output_stream_incomplete_does_not_requeue`、`test_resume_limit_exhausted_fails_normally`、`test_switch_off_does_not_requeue`、`test_resume_count_accumulates_and_survives_restart_marker`。
+
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
 - 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。

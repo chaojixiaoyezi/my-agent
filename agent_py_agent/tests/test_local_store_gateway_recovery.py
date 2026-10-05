@@ -235,6 +235,7 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
         old_payload = read_json_file(old_pending)
         assert old_payload["not_before_at"] > time.time()
         assert old_payload["priority"] == "recovery"
+        # provider_resume_count 是供应商故障自动续跑的独立计数（tresume）：重启重排原样带过，新请求从 0。
         assert old_payload["active_turn_recovery"] == {
             "schema_version": "gateway_active_turn_recovery.v1",
             "request_id": "gwreq-old",
@@ -242,6 +243,7 @@ def test_gateway_startup_requeued_request_does_not_block_fresh_pending():
             "requeued_at": old_payload["requeued_at"],
             "cause": "gateway_restart",
             "unplanned_resume_count": 1,
+            "provider_resume_count": 0,
         }
 
         fresh_id, fresh_path, _ = submit_gateway_ask(

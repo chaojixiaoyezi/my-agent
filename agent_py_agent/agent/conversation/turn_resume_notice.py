@@ -12,6 +12,7 @@ TURN_RESUMED_NOTICES = {
     "gateway_safe_restart": "Gateway 安全重启打断了这一轮，已自动续跑。",
     "gateway_restart": "Gateway 重启打断了这一轮，已自动续跑。",
     "processing_lease_expired": "这一轮执行超时中断，Gateway 已自动续跑。",
+    "provider_transient_resume": "模型接口临时故障打断了这一轮，已自动续跑。",
 }
 # 不认识的 cause 用的通用提示。
 TURN_RESUMED_FALLBACK_NOTICE = "这一轮执行被打断，已自动续跑。"

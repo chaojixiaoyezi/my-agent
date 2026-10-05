@@ -2726,3 +2726,11 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - `plugin_command_service._scope_management(base, scope, is_admin=None, *, event_hub=None)`：`event_hub` 是唯一新增的只读依赖，写进 `PluginManagementContext.event_hub`；TUI 的 `/client/plugins` 从 `server.plugin_event_hub` 取（没有就是 None）。
 - `plugin_command_service._hub_for_control(base)`：IM 控制链（`execute_plugin_control`）读 `base.plugin_event_hub`；IM 没有 handler，只能读已有实例，不新建。
 - `control_service.execute_gateway_conversation_control` / `control_operation_service.execute_gateway_control_operation` / `http_handlers._handle_persistent_control_operation`：签名与语义不变，B6 未在这三处加参数（尺寸守卫限制，且 hub 可从 base 取到）。
+
+## 供应商故障自动续跑的接线（tresume，2026-10-05）
+
+- `gateway_parts/request_execution.py`：`_provider_transient_turn_resume_marker`（失败收口判定；白名单在 `request_errors.PROVIDER_TRANSIENT_TURN_RESUME_CODES`；`provider_resume_count` 从请求的 active_turn_recovery 读，坏值 fail-closed）；`_handle_gateway_request` 失败路径按 `resume_field` 区分 `restart_resume`（等重启）与 `provider_transient_resume`（worker 主动重排）。
+- `gateway_parts/request_worker.py`：`_finish_claimed_gateway_request` 见到 `provider_transient_resume` 标记时调 recovery 重排；重排失败退回正常失败归档。
+- `gateway_parts/recovery.py`：`requeue_provider_transient_processing`（写回 inbox、固定退避 30/120 秒、写 cause=provider_transient_resume 与累计次数）、`provider_resume_count`（唯一读法）；`_active_turn_recovery_marker` 重启重排保留该计数。
+- `conversation/turn_resume_notice.py`：新增 cause `provider_transient_resume` 文案。
+- 配置：`provider_transient_turn_resume_max_count`（agent_config.yaml / AgentConfig，0=关闭）。
