@@ -353,6 +353,31 @@ def test_allowed_commands_do_not_allow_nested_protected_target() -> None:
     assert "COMMAND_DANGEROUS_PATTERN_BLOCKED" in decision.finding_codes
 
 
+def test_command_string_values_respect_allowed_commands() -> None:
+    """命令字符串值的递归沿用同一 allowlist：ds5 初审变异把递归处的 allowed_commands 丢弃为
+    frozenset() 时无用例变红（MUT-D SURVIVED），这里钉住 allowlist 在 command_options 路径的传递。"""
+    assert _decision('env -S "rm x"', allowed_commands=["rm"]).allowed is True
+    assert _decision("flock /tmp/l -c 'rm x'", allowed_commands=["rm"]).allowed is True
+    assert _decision('env --split-string="rm x"', allowed_commands=["rm"]).allowed is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env MY_VAR=1 rm -rf /tmp/x",
+        "env -- MY_VAR=1 rm -rf /tmp/x",
+        'sh -c "env MY_VAR=1 rm -rf /tmp/x"',
+    ],
+)
+def test_underscore_assignments_still_block_delete(command: str) -> None:
+    """下划线变量名（主流写法）同样被赋值扫描跳过：ds5 初审变异去掉 looks_like_assignment 的
+    下划线支持时无用例变红（MUT-E SURVIVED），这里钉住三条路径（直接、`--` 之后、嵌套）。"""
+    decision = _decision(command)
+
+    assert decision.allowed is False
+    assert "COMMAND_DESTRUCTIVE_DELETE_BLOCKED" in decision.finding_codes
+
+
 def test_two_layer_wrapping_is_still_blocked() -> None:
     decision = _decision('sh -c \'bash -c "rm -rf x"\'')
 
