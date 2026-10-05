@@ -264,8 +264,10 @@ def _sequence_fingerprint(value: list | tuple) -> object | None:
     return ("l", tuple(items))
 
 
-# LLM: 命中判断只做"取表 + 刷新 LRU 位置"，绝不改动统计值；未命中先纯计算再记账。缓存只记"顶层容器
-#   的直接子项"（消息、schema），子结构纯算不记账——避免每层节点挤爆上限引发反复淘汰。
+# LLM: 命中判断只做"取表 + 刷新 LRU 位置"，绝不改动统计值；未命中先纯计算再记账。记账范围是顶层容器的
+#   直接子项，以及顶层字典里列表值的元素（如 payload["messages"] 里的每条消息、schema 列表）；更深的子结构
+#   纯算不记账——避免每层节点挤爆上限引发反复淘汰。缓存无显式锁：依赖 CPython GIL 保证单次 dict 操作原子，
+#   并发时最坏是重复计算和淘汰顺序抖动，同指纹必得同一长度，数值不会错；改用无 GIL 解释器时这里要加锁。
 # 函数用途: 取一个列表元素/字典值的（字符数、UTF8字节数）；指纹不可用或不能合成时返回 None。
 def _cached_element_lengths(item: Any) -> tuple[int, int] | None:
     fingerprint = _item_length_fingerprint(item)
