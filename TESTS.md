@@ -7,6 +7,110 @@
 - 新用例 `test_provider_timeout_acceptance.py::test_auxiliary_call_estimates_input_once_for_ledger_and_timeouts`：流式 + 动态超时形态下只估算 1 次，账本 input_tokens、传给后端的首包预算与绝对期限都出自这一份。
 - 变异 3/3 KILLED：时限计划改回复算估算、绝对期限丢掉首包预算、时限计划不用记账估算。辅助调用相关 5 个文件 134 passed。
 
+## B 包 0.3.3 初审补用例（3a，2026-10-04，分支 `claude/3a-pack-b-033-fixup`，基于 `f9f8511af`）
+
+- `test_capability_package_drama_workflow_v033.py` 新增 2 条（9 → 11 passed）：`test_unreferenced_planned_reference_needs_no_handoff_entry`钉住“没被镜头引用的 planned 参考不强制登记”的豁免（去掉 `identifier in referenced` 过滤的变异被抓住）；`test_empty_singular_character_id_is_a_known_boundary` 钉住空字符串单数 `character_id` 的已知边界（`check_continuity.py` 第 293、330 行把空串也当角色的两个变异都被抓住）。PROVENANCE 0.3.3 节补已知边界说明。来源：ds6 pb33r 初审两条小问题。
+
+## B 包 0.3.3：出镜缺参考升级为错误 + 计划中参考的交接登记（2026-10-04，pb33，worker/pack-b-033，待复审）
+
+### 改了什么
+
+- `examples/capability-packages/drama-workflow-b/scripts/check_continuity.py`：`PACKAGE_VERSION` 升 0.3.3；`shot_character_reference_missing` 从提醒升为错误（`check_shot_character_references`）；新增 `check_handoff_reference_coverage` / `project_index` 与错误码 `handoff_missing_planned_reference_entry`；`beat_characters` 不再把空字符串音数 `character_id` 当角色（与 0.3.1 口径一致）。
+- `resources/example-project.json`：SH02 补 `REF-C02`（示例自身合规）。
+- `CAPABILITY.md`、`methods/workflow.md`：两条新检查写法 + “交付只写工作区 `output/` 下”；`PROVENANCE.md` 加 0.3.3 修订节（含接受集合变化）；`declaration.json` 升 0.3.3。
+
+### 每条用例选哪种（3a 第三轮裁定的 (a)/(b) 决策表）
+
+(a) = 把示例本意就是“素材已经有了”的参考改成 `provided`；(b) = 被镜头引用、仍是 planned 的参考在交接里补登记。**本包全部选 (b)，(a) 不适用**：示例项目（`resources/example-project.json`）没有真实素材文件，`CAPABILITY.md` 与 `methods/workflow.md` 都明说“确有参考计划但没有媒体时写 `planned`，不能虚构 `provided`”——把状态改成 `provided` 会与包自己的规则冲突，也没有能说明“已提供”的字段可填。逐处对应关系：
+
+| 红用例 | 选哪种 | 具体做法 |
+| --- | --- | --- |
+| `test_speaker_swap_on_same_beat_is_flagged`（参数化 2 条） | (b) | 示例 SH02 补 `REF-C02`；换说话人后两处都合规 |
+| `test_real_change_without_any_handoff_address_is_reported` | (b) | 默认交接已逐条登记 planned 参考 |
+| `test_handoff_address_covers_the_change_only_when_it_points_at_it`（3 条） | (b) | 同上，地址覆盖判断不受影响 |
+| `test_claimed_addition_that_already_existed_is_an_error` | (b) | `additions=[*_planned_reference_additions(before), *要测的条目]`，断言不动 |
+| `test_claimed_omission_that_is_still_present_is_an_error` | (b) | 同上（该用例走默认登记） |
+| `test_real_addition_declared_in_handoff_is_accepted` | (b) | 同上，`additions` 追加真实新增条 |
+| `test_baseline_change_listed_in_the_handoff_is_accepted`（host/bindings 2 条） | (b) | 默认登记 planned 参考 |
+| `test_handoff_address_elsewhere_does_not_list_the_change` | (b) | 同上 |
+| `test_stale_handoff_digest_gets_its_own_warning` | (b) | 同上 |
+| `test_mapping_between_identical_objects_is_a_false_change_claim` | (b) | 同上 |
+| `test_mapping_with_a_real_change_is_not_a_false_claim` | (b) | 同上 |
+| `test_host_mode_binds_handoff_files_by_digest_and_skips_unknown_ones` | (b) | 同上 |
+| `test_empty_singular_value_does_not_trigger_the_new_error` | 不涉及 | 修 `beat_characters` 过滤空字符串（示例改 SH02 后暴露） |
+| `test_cli_is_standalone_and_reports_separate_check_scopes` | (b) | `material` fixture 本来就按 `/references/<下标>` 登记，不用改 |
+| `test_project_snapshot_is_reused_by_handoff_in_same_cli_evaluation` | (b) | 同上（复用 `material`） |
+| `test_lexical_alias_cannot_reuse_another_path_snapshot[symlink_bound_digest--project]` | (b) | alias 的字节不是项目，指向它的登记没法成立；把项目本身也列进 `files` 并指向 `/references/<下标>` |
+
+### 跑过什么（真实结果）
+
+命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`PYTHONPATH=$PWD`）：
+
+```text
+$PY -m pytest agent_py_agent/tests/test_capability_package_drama_workflow_{baseline,handoff,v03,v031,duration}.py -q   → 181 passed
+$PY -m pytest agent_py_agent/tests/test_capability_package_drama_workflow_v033.py -q                                    → 9 passed
+$PY -m pytest test_capability_package_{baseline,duration,handoff,v03,v031,v033,b_template,examples,host_mode_robustness,verification_blocks}.py -q → 278 passed
+$PY -m pytest agent_py_agent/tests/test_capability_package*.py -q                                                       → 870 passed
+$PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q                                        → 180 passed（11 个文件）
+$PY scripts/check_import_boundaries.py  → findings=0
+$PY -m ruff check agent_py_agent scripts → All checks passed!
+$PY scripts/check_doc_sync.py → DOC_SYNC_PASS
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json → hard=0 blocked=False（跑后 git checkout -- CODE_SIZE_REPORT.md）
+$PY scripts/check_clean_package.py . → 通过（新测试文件先 git add 后复跑）
+git diff --check → 干净
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD → 新增告警 0 / 消失告警 31
+```
+
+### 新用例（`test_capability_package_drama_workflow_v033.py`，9 条）
+
+1. `test_every_hint_code_leaves_no_placeholder_braces` —— **通用守卫，放第一个**：遍历 `GENERIC_HINTS` 全部码与 `error_hint()` 按结构化字段现算的全部分支（`object_id_mismatch`、`bounded_references_required`、`shot_character_reference_missing`、`handoff_missing_planned_reference_entry`），断言 hint 非空、不含 `{`/`}`，并断言两条新 hint 带上具体的镜头号/角色 ID/参考 ID。
+2. `test_missing_shot_character_reference_error_clears_when_reference_is_linked` —— 新错误码反例 + 正例。
+3. `test_pure_environment_shot_is_not_flagged` —— 纯环境镜头不报。
+4. `test_planned_character_reference_missing_from_handoff_is_reported` —— 人物参考缺登记。
+5. `test_planned_location_reference_missing_from_handoff_is_reported` —— 地点参考缺登记。
+6. `test_planned_prop_reference_missing_from_handoff_is_reported` —— 道具参考缺登记（B10-t401 形状）。
+7. `test_b05_t401_shape_shot_link_and_handoff_record_are_both_incomplete` —— 上一轮四例之一：出镜缺参考 + 缺登记同时报。
+8. `test_b10_t402_shape_planned_reference_exists_but_is_not_linked_to_the_shot` —— 上一轮四例之一：参考存在但没连镜头。
+9. `test_b05_t402_shape_new_planned_references_linked_and_registered_pass` —— 上一轮唯一的合格写法做成通过样例。
+
+### 变异（每次只改一处，跑完按字节还原，sha256 一致）
+
+| 变异 | 结果 |
+| --- | --- |
+| M1 去掉升级（出镜缺参考退回不报） | KILLED（`test_on_screen_character_without_a_shot_reference_is_an_error`） |
+| M2 去掉 handoff 交叉核对 | KILLED（`test_b05_t401_shape_...`） |
+| M3 hint 里的镜头号写死成 SH01 | KILLED（`test_b05_t401_shape_...`） |
+| M4 `beat_characters` 不再跳过空字符串 | KILLED（`test_empty_singular_value_does_not_trigger_the_new_error`） |
+
+### 防泄露复查
+
+`$PY ~/.my-agent/releases/claude-tools/b8-harness/leak_check.py examples/capability-packages/drama-workflow-b B 6` 与 `... B 5`：都只有 3 处 ≥6 字重合，全部是 `declaration.json` 里已接受的「短剧制作资料」（与 0.3.2 结果一致）。
+
+### 未验证 / 未做
+
+- 真实模型重跑 B05、B10 各两次没做（由 3a 安排）。
+- 宿主把 `hint` 转给模型这一步在本分支不可验证（跨分支）。
+
+## B 包 0.3.2：交接报错带出“该填什么”（2026-10-03，pb32，worker/pack-b-032，待复审）
+
+- 来源：B 包 0.3.1 重跑第一批业务审阅两个不合格（B10-t301 把字段名当对象 ID；B05-t303 未决差异 `refs` 空数组），都是交接结构问题。
+- 改动：`examples/capability-packages/drama-workflow-b/scripts/check_continuity.py` 新增 `expected_object_id` / `object_identity_error` / `bounded_references_error`，改 `check_address` 与 `check_handoff_relations` 的报错条目；`host_items` 投影时按错误码和结构化字段现算可选 `hint`（`error_hint` / `object_id_hint` / `GENERIC_HINTS`），不写进核心错误条目，所以 `drama_workflow_check.v2` 的条目形状不变；`PACKAGE_VERSION` 与 `declaration.json` 升 0.3.2；`methods/workflow.md`、`CAPABILITY.md`、`PROVENANCE.md`、`examples/capability-packages/README.md` 同步写法和版本。
+- **接受集合变化（0.3.1 → 0.3.2，3a 裁定）**：`object_id` 从“必须直接指向带 `id` 的对象”改为“填指针所指位置**所在对象**的 ID”（`/shots/0/seconds`、`/shots/0/reference_ids` 都写 `SH01`）——这一处**是放宽**，不是“判定口径不变”；字段名、与所在对象 ID 不符、指针不存在仍是错误。`refs` 判定不变（至少一条、只能指向该阶段输入或输出），只是报错更具体。
+- **hint 不许诱导“一删了之”（3a 复审指出，2026-10-04）**：模型为了让检查通过可能直接删剧情。凡删掉会丢交付内容的错误，hint 一律先引导“补上/改对”，删除放最后并写清条件。已改两处：`uncovered_beat` 原来是“加进某个镜头的 beat_ids 或删掉这个节拍”，现在先说“把它加进讲到这段内容的镜头的 beat_ids；只有这个节拍本来就不该存在时才删除”；`unexpected_field` 从“删掉它”改成“把里面的内容移到约定字段里；确认它确实不该存在时才删除”。`unknown_reference_mention`（删的是引用句）和 `handoff_claim_without_change`（删的是虚假声明）删了不丢交付内容，按 3a 裁定保留原措辞。用例 `test_actionable_hints_do_not_tell_the_model_to_delete_content_first` 用字面顺序钉住：`beat_ids` 必须出现在“删除”之前，内容必须先“移到”。
+- 新增用例（`agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py`）：`test_object_id_must_name_the_owning_object_not_a_field_name`（字段名当对象 ID → `expected_object_id` 是所在镜头 ID、`actual_object_id` 是写错的值、`pointer` 指向该字段）、`test_object_id_pointing_into_an_object_passes_with_the_owning_id`（写对所在对象 ID 通过）、`test_unresolved_differences_need_at_least_one_explained_ref`（空 `refs` → `index`/`count`/`requirement`/`message`）、`test_unresolved_differences_with_a_ref_to_the_involved_object_pass`（refs 写对通过）、`test_host_item_hint_for_object_id_matches_structured_fields`（host 条目的 hint 含指针/期望值/实际值，且以“改成 <期望值>”结尾、不含“改成 <实际值>”）、`test_host_item_hint_for_empty_refs_says_what_to_add`（refs 的 hint 说明要加 file_id + pointer）、`test_host_items_omit_hint_when_no_actionable_fix_is_known`（给不出改法时不给 hint）。版本断言四处随包更新（`test_capability_package_drama_workflow_v031.py`、`..._v03.py`、`..._duration.py`、`test_capability_package_b_template.py`）；`test_capability_package_drama_workflow_v03.py` 里三处 host 输出断言改成“code + location 命中即可”，因为宿主条目从 0.3.2 起允许带可选 `hint`。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pb32`）：
+  - B 包 6 个测试文件（`..._handoff.py`、`..._v031.py`、`..._v03.py`、`..._baseline.py`、`..._duration.py`、`test_capability_package_b_template.py`）：**202 passed**。
+  - guards9 全部 10 个文件：**173 passed**。
+  - `test_memory_compact_runtime_handoff.py` + `test_subagent_failure_handoff.py` + `test_subagent_registered_artifact_handoff.py`：**30 passed**。
+  - `test_background_handoff.py`：22 failed。在真基线 `ce646f783`（`git merge-base claude/3a-step17i HEAD`，临时树 `/private/tmp/claude-501/pb32-base`，用完已 `git worktree remove --force`）上**同样是 22 failed、名单逐条相同**，属沙箱环境既有失败（`managed background launcher identity unavailable`）。
+  - 静态门禁：`check_import_boundaries.py` findings=0、`ruff check` All checks passed、`check_doc_sync.py` DOC_SYNC_PASS、`git diff --check` 干净、`check_clean_package.py .` OK、`check_code_size.py --mode strict` hard=0 blocked=False（跑完已 `git checkout -- CODE_SIZE_REPORT.md`）、`size_diff.sh` 新增告警 0 / 消失 31。
+  - 防泄露：`python3 ~/.my-agent/releases/claude-tools/b8-harness/leak_check.py examples/capability-packages/drama-workflow-b B 6` → 只有 `declaration.json` 的「短剧制作资料」×3（3a 已裁定为领域通用词）；`B 5` 同样只有这 3 处，无新命中。
+- 变异三组共 11 个（驱动脚本 `/private/tmp/claude-501/pb32_mutate.py`、`pb32_mutate2.py`、`pb32w_mutate.py`，每次只改一处、跑完按原字节还原）：
+  - 第一组 6 个：① 对象 ID 报错退回只有 `code`+`path`；② 对象 ID 判定放宽（有期望值也不比对）；③ `refs` 报错退回只有 `code`+`path`；④ `refs` 判定放宽（空数组不报）；⑤ `PACKAGE_VERSION` 回退 0.3.1；⑥ `declaration.json` 版本回退 0.3.1。**全部被抓**。
+  - 第二组 3 个（hint）：⑦ host 条目不再带 `hint`；⑧ hint 把期望值和实际值写反；⑨ refs 的 hint 不再说明要加什么。**全部被抓**；其中 ⑧ **首轮存活**——原断言只检查两个值都出现、抓不住顺序，补上“hint 必须以『改成 <期望值>』结尾且不含『改成 <实际值>』”后才被抓。
+  - 第三组 2 个（pb32w 措辞）：⑩ `uncovered_beat` 退回“加进某个镜头的 beat_ids 或删掉这个节拍”；⑪ `unexpected_field` 退回“删掉它”。**都被抓**——字面顺序断言（`beat_ids` 在“删除”之前、先“移到”）拦住把删除放前面的写法。
+- 未验证：真实模型重跑 B 类 9 例未做；**宿主真的把 `hint` 转给模型这一步没在我这边验证**——宿主侧由 ds4（worker/pack-host-hints）改投影，跨分支，等 17j 合并后复核。检查器侧已按新合同在 `--host-json` 输出里给出 `hint`。
+
 ## 辅助调用可靠时限（cabfix，2026-10-04，worker/cab-fix；基于 luna3 的 c39250781，待初审）
 
 - 来源：luna3 的刻画测试（`test_provider_timeout_acceptance.py` CAB 段）原本"记录现状"——辅助流未传首事件预算、非流式无总期限、持续有效事件可无限续期。本片把它们改成断言修复后行为。

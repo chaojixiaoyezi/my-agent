@@ -7,17 +7,21 @@
 输入是本次故事、制作目标和已有资料。输出一份 `drama_workflow_project.v1` JSON，以及用户可读的核对报告。`templates/project.json` 展示完整占位条目，须按本次资料填写，空 ID、空引用和 null 秒数不是交付；公开合成例子见 `resources/example-project.json`。按制作阶段或跨包交接时另填 `templates/handoff.json`，记录真实文件字节摘要及对象转换。
 资料将剧集、大纲要点、人物、地点、道具、场次节拍、镜头与参考图计划分别记录，再用 ID 连接。它不是上游五份 JSON 的原样格式。
 
-## 交付规则（0.3.1）
+## 交付规则（0.3.3）
 
 - **整理不等于改写**：在已有资料上整理时，节拍编号、台词、镜头时长、分集目标和 schema 名保持不变，镜头和节拍、参考的对应关系也不变；用户要求改的，必须逐处写进交接（`templates/handoff.json`），写成“基线值 → 新值：为什么改”。
 - **不编造参考 ID**：只用输入里或本次 `references` 表里真有的参考 ID；缺项说明、未决说明里提到的参考 ID 也要真实存在。
 - **交一套制作资料**：交付的是人物、地点、道具、分集、场次、镜头、参考七张表齐全、外键（`episode_id`、`location_id`、`scene_id`、`subject_id`）都填了的项目文件，不是一份审阅报告。
 - **另存新文件**：不覆盖用户给的输入；最终答复写出交付物路径。
 - **交接只列真实改动**：交接里写的改动必须在改前和改后之间真实存在。
-- **检查结论以宿主为准**：宿主开启了包检查时，写交付物后写工具回执里会附宿主用本包原版检查程序得出的结论（`pack_verification`），收尾时宿主还会再查一次。不要复制、改写或自己写检查程序来代替；口头说“已验证”不算数。
+- **检查结论以宿主为准**：宿主开启了包检查时，写交付物后写工具回执里会附宿主用本包原版检查程序得出的结论（`pack_verification`），收尾时宿主还会再查一次。**核验没通过就按报错把文件改对再收尾，不要只回复“等待核验”就结束**；不要复制、改写或自己写检查程序来代替；口头说“已验证”不算数。
 - **交接只保留一份**：`drama_workflow_handoff.v2` 交接文件整个工作区只保留一份（建议 `output/handoff.json`）；不要把模板或草稿另存到 `tmp/` 或第二个位置——宿主按“本回合写出的、字段匹配的交接文件恰好一份”自动找它，多份或零份等于没有，基线对比会把所有改动当成“没列出”。写在哪、叫什么、怎么绑的清单和完整示例见 `methods/workflow.md`。
 - **动作节拍用 `character_ids`（列表）**：动作节拍的角色写进 `character_ids` 列表；写成单数 `character_id` 是字段名错误（检查器报 `beat_character_id_singular`）；对白节拍仍用单数 `character_id`。
+- **交接地址写对对象**：`source`/`target`/`refs[]` 里的 `object_id` 填**指针所指位置所在对象**的 ID（如指向镜头 `SH01` 里的字段就写 `SH01`，不能写字段名）；每条 `unresolved_differences` 至少带一条 `refs`，指向这条差异涉及的对象。写法、正反例和通用例子见 `methods/workflow.md`。
 - **“缺什么”先回产物复核**：报告与回复里每一条缺项或“建议补 X”，都要先回到产物文件里逐项确认它真的不存在或不满足；表格、清单和结论必须一致，不能把已列出的条目再写成缺失，也不能建议补一个已经存在的条目。完整核对规则见 `methods/review.md`。
+- **出镜人物必须有参考**：项目里有人物参考计划时，某个镜头引用的节拍里出现的角色，这一镜的 `reference_ids` 里必须连到他的参考；没有就报 `shot_character_reference_missing` 错误（0.3.3 起从提醒升级），要新建一条 `state=planned` 的参考或连上已有的那条。纯环境镜头（引用的节拍里没有角色）不要求；项目完全没有人物参考计划时不要求虚构参考。
+- **计划中的参考要在交接里登记**：被至少一个镜头的 `reference_ids` 引用、且状态为 `planned` 或 `missing` 的参考（人物、地点、道具都算），必须在交接的 `additions` 或 `unresolved_differences` 里有一条指向它的登记（指针指向 `/references/<下标>`），否则报 `handoff_missing_planned_reference_entry`。没被任何镜头引用的参考不强制登记。
+- **交付只写在工作区的 `output/` 下**：所有交付物（项目 JSON、交接 JSON、报告）都写在本次工作区内，建议统一放 `output/`；不要在工作区之外（例如用户主目录根部）另写一份 `project.json`、`handoff.json` 副本或任何其它交付副本。工作区边界由宿主判定，这里只写清做法。
 
 ## 使用步骤
 
@@ -58,7 +62,7 @@ python3 scripts/check_continuity.py --project output/project.json --handoff outp
 python3 scripts/check_continuity.py --project output/project.json --baseline-project <改动前的项目.json>
 ```
 
-`--baseline-project` 给了改动前的项目时，0.3.0 起节拍增删或台词改动、镜头和节拍/参考的对应关系、schema 名、镜头秒数和分集目标的改动，没在交接里列出就是错误；其它差异仍是提醒。0.3.1 起动作节拍写成单数 `character_id`（非空）报 `beat_character_id_singular` 错误；完全没写角色字段仍是 `beat_character_missing` 提醒。`--host-json` 只给宿主用，输出 `pack_verifier_result.v1`，这时交接文件按 `files[].sha256` 对应宿主交来的项目和基线，不需要 `--input-file`。
+`--baseline-project` 给了改动前的项目时，0.3.0 起节拍增删或台词改动、镜头和节拍/参考的对应关系、schema 名、镜头秒数和分集目标的改动，没在交接里列出就是错误；其它差异仍是提醒。0.3.1 起动作节拍写成单数 `character_id`（非空）报 `beat_character_id_singular` 错误；完全没写角色字段仍是 `beat_character_missing` 提醒。0.3.2 起 `object_id` 按“指针所指位置所在对象”核对，写成字段名报 `object_id_mismatch` 且报错带期望对象 ID、实际值和指针；未决差异的 `refs` 空数组或坏形状报 `bounded_references_required` 且报错带是哪一条、当前条数和要写什么。`--host-json` 只给宿主用，输出 `pack_verifier_result.v1`，这时交接文件按 `files[].sha256` 对应宿主交来的项目和基线，不需要 `--input-file`。
 
 相对脚本路径指经过授权物化的包资源。例中的 F01/F02 必须对应本次 `files[].id`，绑定每一份交接文件；本次 cwd 下的绑定路径须与交接所声明路径一致。脚本只读显式输入、写 stdout，不根据交接或参考图文字自行打开其它路径，不生成图像/视频、不写项目文件。脚本仍为可单独物化运行的一份标准库 Python 文件，无隐藏辅助资源依赖。
 本片没有上游全部视觉质量门、五份报告交互、Codex imagegen 或 H3 视频生成。M3 视觉理解也不能替代这些生成能力。

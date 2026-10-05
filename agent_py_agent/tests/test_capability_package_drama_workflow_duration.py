@@ -98,7 +98,8 @@ def test_positive_tiny_duration_does_not_get_an_absolute_error_allowance(check_p
 def test_many_small_shots_keep_their_contribution_to_duration(check_project):
     project = _fixture("drama-workflow-b", "example-project.json")
     first = project["shots"][0]
-    first.update(seconds=1.0, beat_ids=[beat["id"] for beat in project["scenes"][0]["beats"]])
+    first.update(seconds=1.0, beat_ids=[beat["id"] for beat in project["scenes"][0]["beats"]],
+                 reference_ids=["REF-C01", "REF-C02", "REF-L01"])
     project["shots"] = [first, *[
         {**first, "id": f"small-{index}", "seconds": 1e-16} for index in range(12000)
     ]]
@@ -214,5 +215,5 @@ def test_cli_reports_actual_result_without_changing_input(tmp_path, target, exit
 def test_package_declares_new_version_without_adding_an_executor():
     package = EXAMPLES / "drama-workflow-b"
     declaration = json.loads((package / "declaration.json").read_text(encoding="utf-8"))
-    assert declaration["version"] == "0.3.1"
+    assert declaration["version"] == "0.3.3"
     assert not {"entry", "tools", "actions", "skills", "wheels"} & declaration.keys()

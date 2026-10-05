@@ -3,6 +3,10 @@
 #   改动和“handoff 声称改了其实没改”；--host-json 输出宿主核验结果，宿主模式下交接文件按摘要和宿主给的文件对应，不读别的路径。
 #   0.3.1 把动作节拍写成单数 character_id（非空字符串）从 beat_character_missing 提醒升级为 beat_character_id_singular 错误；
 #   完全没写角色字段的纯环境动作仍是提醒，对白节拍的单数 character_id 不受影响。
+#   0.3.2 object_id 按“指针所指位置所在对象”核对，失败报错带期望对象 ID、实际值和指针（算不出时明确说明）；
+#   refs 不合规的报错带下标、当前条数和指向规则说明。
+#   0.3.3 出镜人物缺参考从提醒升级为 shot_character_reference_missing 错误；被镜头引用且仍 planned/missing 的参考
+#   （人物/地点/道具）必须在 handoff 的 additions 或 unresolved_differences 里用指向它的指针登记，否则 handoff_missing_planned_reference_entry。
 # 模块用途: 只读制作资料、明确绑定的交接文件和可选基线项目，用同次字节核对摘要、对象地址与逐 ID 差异，向 stdout 输出分项结果或已转义的静态报告。
 
 from __future__ import annotations
@@ -25,12 +29,54 @@ MAX_JSON_DEPTH = 64
 MAX_POINTER_CHARS = 2048
 MAX_POINTER_PARTS = 64
 PACKAGE_ID = "drama-workflow-b"
-PACKAGE_VERSION = "0.3.1"
+PACKAGE_VERSION = "0.3.3"
 PROJECT_TABLES = ("episodes", "characters", "locations", "props", "scenes", "shots", "references")
 MAX_DIFF_ITEMS = 100
 HOST_RESULT_SCHEMA = "pack_verifier_result.v1"
 # 宿主核验合同建议 metrics 平铺成“键 → 数字”且不超过 16 个键。
 HOST_METRICS_MAX_COUNT = 16
+# 宿主只把每条错误的 hint 转给模型（最多 200 字符），所以 hint 必须是“照着改”的一句话，这里再截断兜底。
+HOST_HINT_MAX_CHARS = 200
+# 通用改法表：{path} 换成该条错误的路径。只收“改法明确”的错误码；判断不出怎么改的不写（宿主就不转提示）。
+# 为什么放在投影层而不是错误条目里：drama_workflow_check.v2 的条目形状是既有契约（用例按 {code, path} 精确比对），
+# 结构化的期望值/实际值/指针照旧留在条目里，给模型看的 hint 在 host_json 投影时另算。
+GENERIC_HINTS = {
+    "unsupported_schema": "schema 要写 drama_workflow_project.v1（交接文件要写 drama_workflow_handoff.v2）",
+    "missing_table": "补上 {path} 这张表（除 episodes/scenes/shots 外可以是空数组）",
+    "missing_foreign_key": "补上 {path}，值要指向对应表里真实存在的 ID",
+    "unknown_reference": "{path} 要指向对应表里真实存在的 ID",
+    "unknown_scene": "{path} 的 scene_id 要指向 scenes 表里真实存在的场次 ID",
+    "unknown_reference_subject": "{path} 的 kind 要是 character/location/prop，subject_id 要在对应表里真实存在",
+    "unknown_reference_mention": "这里提到的参考 ID 在 references 表里没有，改成表里真实存在的 ID 或删掉这句",
+    "invalid_reference_state": "{path} 只能写 planned（还没有素材）或 provided（已有素材）",
+    "nonempty_required": "{path} 不能为空，至少写一条真实条目",
+    "field_required": "{path} 是必填字段，补上它",
+    "unexpected_field": "{path} 是多余字段：把里面的内容移到约定字段里；确认它确实不该存在时才删除",
+    "text_required": "{path} 要写实际内容，不能是空字符串",
+    "placeholder_text": "{path} 还是模板的 <…> 占位符，替换成本次任务的真实内容",
+    "object_required": "{path} 要是一个 JSON 对象",
+    "list_required": "{path} 必须是数组（没有内容时写 []）",
+    "references_required": "{path} 必须是数组，元素是 files[].id",
+    "duplicate_reference": "{path} 里有重复的 ID，同一个 ID 只写一次",
+    "invalid_or_duplicate_id": "{path} 的 id 要非空、不重复、不超过 128 字符",
+    "invalid_path": "{path} 要写本次工作区里真实存在的文件路径",
+    "invalid_sha256": "{path} 要是该文件真实字节的 64 位小写十六进制摘要",
+    "sha256_mismatch": "{path} 的 sha256 和实际字节不符，重新计算后更新 files[].sha256",
+    "input_not_authorized": "{path} 要和 --input-file 里对应的路径写成同一个",
+    "positive_seconds_required": "{path} 要填一个大于 0 的有限秒数",
+    "positive_target_seconds_required": "{path} 要填一个大于 0 的有限秒数",
+    "episode_duration_mismatch": "{path} 这一集的镜头秒数合计和分集目标不一致，改目标或改镜头秒数让两者相等",
+    "beat_text_required": "{path} 要写这一节拍的动作或台词正文",
+    "beat_character_id_singular": "{path} 是动作节拍，角色要写成 character_ids 列表，不要用单数 character_id",
+    "beat_reference_required": "{path} 至少要引用本场一个真实存在的节拍 ID",
+    "speaker_outside_scene": "{path} 要写本场角色之一，并确认该角色已在场次 character_ids 里",
+    "unknown_beat_kind": "{path} 只能写 action（动作）或 dialogue（对白）",
+    "uncovered_beat": "{path} 没有被任何镜头引用：把它加进讲到这段内容的镜头的 beat_ids；只有这个节拍本来就不该存在时才删除",
+    "file_outside_stage": "{path} 不在本阶段的输入或输出里，换成该阶段声明的文件 ID",
+    "unknown_stage": "{path} 的 stage_id 要指向 stages 里真实存在的阶段 ID",
+    "handoff_claim_without_change": "{path} 的 source 和 target 值一样，删掉这条或改成真实改动",
+    "change_not_declared_in_handoff": "{path} 这处改动没在交接里列出，加一条指向它的 source/target/refs",
+}
 # 宿主模式下输入读不了时，按参数换成宿主读的结构化码。
 HOST_UNREADABLE_CODES = {"--project": "target_unreadable", "--handoff": "handoff_unreadable",
                          "--baseline-project": "baseline_unreadable"}
@@ -253,10 +299,11 @@ def action_beat_characters(beat: dict, beat_id: str, scene_characters: set[str],
 
 
 # LLM: 镜头的出镜角色 = 它引用的节拍里的说话人和动作角色。项目里有人物参考时，出镜角色在本镜 reference_ids 里没有一条
-#   kind=character 的参考就提醒；项目完全没有人物参考计划时不提醒（不要求虚构参考）。只比 ID；subject_id 不是字符串的
-#   参考不参与（形状错误另由 check_project 报 error），提醒本身不能崩溃。
-# 函数用途: 提醒出镜人物缺本镜人物参考。
-def shot_reference_warnings(catalog: dict, beat_catalog: dict, warnings: list[dict]) -> None:
+#   kind=character 的参考就是错误（0.3.3 起，原来只是提醒——B 类重跑里模型看到提醒就没改，3 例不过）；项目完全没有人物
+#   参考计划时不报（不要求虚构参考）。只比 ID；subject_id 不是字符串的参考不参与（形状错误另由 check_project 报 error），
+#   判定本身不能崩溃。错误条目带 character_id 供 hint 按结构化字段现算。
+# 函数用途: 核对每个镜头的出镜角色都有本镜人物参考。
+def check_shot_character_references(catalog: dict, beat_catalog: dict, errors: list[dict]) -> None:
     subjects = {identifier: row["subject_id"] for identifier, row in catalog["references"].items()
                 if row.get("kind") == "character" and isinstance(row.get("subject_id"), str)}
     if not subjects:
@@ -267,9 +314,11 @@ def shot_reference_warnings(catalog: dict, beat_catalog: dict, warnings: list[di
         reference_ids = shot.get("reference_ids") if isinstance(shot.get("reference_ids"), list) else []
         covered = {subjects[value] for value in reference_ids if isinstance(value, str) and value in subjects}
         for character in sorted(beat_characters(beats, beat_ids) - covered):
-            warnings.append({"code": "shot_character_reference_missing", "path": identifier, "character_id": character})
+            errors.append({"code": "shot_character_reference_missing", "path": identifier, "character_id": character})
 
 
+# LLM: 只收非空字符串：0.3.1 起空字符串的单数 character_id 表示“没写角色”（action_beat_characters 只给提醒），
+#   这里同步跳过，不能把它当成一个叫 "" 的角色去要求人物参考。
 # 函数用途: 取一组节拍里的说话人和动作角色 ID。
 def beat_characters(beats: dict, beat_ids: list) -> set[str]:
     result = set()
@@ -277,11 +326,12 @@ def beat_characters(beats: dict, beat_ids: list) -> set[str]:
         beat = beats.get(value) if isinstance(value, str) else None
         if not isinstance(beat, dict):
             continue
-        if isinstance(beat.get("character_id"), str):
-            result.add(beat["character_id"])
+        singular = beat.get("character_id")
+        if isinstance(singular, str) and singular:
+            result.add(singular)
         values = beat.get("character_ids")
         if isinstance(values, list):
-            result.update(item for item in values if isinstance(item, str))
+            result.update(item for item in values if isinstance(item, str) and item)
     return result
 
 
@@ -387,7 +437,7 @@ def check_project(project: object) -> dict:
         if reference.get("state") not in ("planned", "provided"):
             errors.append({"code": "invalid_reference_state", "path": identifier})
         warnings.append({"code": "reference_media_not_verified", "path": identifier})
-    shot_reference_warnings(catalog, beat_catalog, warnings)
+    check_shot_character_references(catalog, beat_catalog, errors)
     errors.extend(reference_mentions(project, catalog["references"]))
     warnings.append({"code": "creative_quality_and_media_not_checked"})
     total_seconds = duration_sum(shot_seconds, "shots", errors)
@@ -502,7 +552,43 @@ def pointer_value(document: object, parts: list[str]) -> object:
     return value
 
 
-# LLM: 先验证地址的文件权限和语法；documents=None 只检查声明，不读取正文或替模型猜对象。
+# LLM: object_id 的期望值是“指针所指位置所在对象的 id”：指针直接指向带 id 的对象时是它自己，否则沿指针路径
+#   向上找最近的带 id 对象（0.3.2 起在报错里给出期望值，模型不用猜“该填什么”）；找不到就明确返回没有，
+#   不猜、不把字段名或标量当对象身份。
+# 函数用途: 计算地址上 object_id 应匹配的对象 ID；该位置没有可判定的对象 ID 时返回 None。
+def expected_object_id(document: object, parts: list[str]) -> str | None:
+    for length in range(len(parts), -1, -1):
+        try:
+            value = pointer_value(document, parts[:length])
+        except InputProblem:
+            return None
+        if isinstance(value, dict) and isinstance(value.get("id"), str) and value["id"].strip():
+            return value["id"]
+    return None
+
+
+# LLM: 失败条目除 code/path 外带 pointer、expected_object_id、actual_object_id 和 message，让作者直接知道
+#   该填什么；算不出期望值时 expected_object_id 为 null 并在 message 里说明“这个位置没有对象 ID”。
+# 函数用途: 核对 object_id 与指针所指位置所在对象是否一致；不一致或算不出时返回带期望值和指针的错误条目。
+def object_identity_error(document: object, parts: list[str], reference: dict, at: str) -> dict | None:
+    if "object_id" not in reference:
+        return None
+    actual = reference["object_id"]
+    pointer = reference["pointer"]
+    expected = expected_object_id(document, parts)
+    if expected is None:
+        return {"code": "object_id_mismatch", "path": at, "pointer": pointer,
+                "expected_object_id": None, "actual_object_id": actual,
+                "message": f"指针 {pointer} 这个位置没有对象 ID，这里写的是 {actual}"}
+    if expected == actual:
+        return None
+    return {"code": "object_id_mismatch", "path": at, "pointer": pointer,
+            "expected_object_id": expected, "actual_object_id": actual,
+            "message": f"指针 {pointer} 所在对象是 {expected}，这里写的是 {actual}"}
+
+
+# LLM: 先验证地址的文件权限和语法；documents=None 只检查声明，不读取正文或替模型猜对象。0.3.2 起 object_id
+#   按“指针所指位置所在对象”核对，失败条目带期望值、实际值和指针；算不出期望值时明确说明该位置没有对象 ID。
 # 函数用途: 核对一个来源/目标地址，第二阶段再验证实际对象及可选 ID。
 def check_address(reference: object, allowed: set[str], files: dict, documents: dict | None,
                   at: str, errors: list[dict]) -> None:
@@ -520,11 +606,29 @@ def check_address(reference: object, allowed: set[str], files: dict, documents: 
     try:
         parts = pointer_parts(reference["pointer"])
         if documents is not None and identifier in documents:
-            value = pointer_value(documents[identifier], parts)
-            if "object_id" in reference and (not isinstance(value, dict) or value.get("id") != reference["object_id"]):
-                raise InputProblem("object_id_mismatch")
+            pointer_value(documents[identifier], parts)
+            problem = object_identity_error(documents[identifier], parts, reference, at)
+            if problem is not None:
+                errors.append(problem)
     except InputProblem as exc:
         errors.append({"code": exc.code, "path": at})
+
+
+# LLM: refs 是未决差异的受限对象引用；0.3.2 起不合规报错要说清是哪一条（下标）、当前条数和要求什么：
+#   至少一条、每条用 file_id + pointer 指向这条差异涉及的对象（只能指向该阶段的输入或输出文件）。
+# 函数用途: 为不合规的 refs 生成带下标、条数和要求说明的错误条目。
+def bounded_references_error(refs: object, at: str, index: int) -> dict:
+    requirement = "至少要有一条 refs，每条用 file_id + pointer 指向这条差异涉及的对象（只能指向该阶段的输入或输出文件）"
+    count = len(refs) if isinstance(refs, list) else None
+    if count is None:
+        detail = f"{at}.refs 必须是数组；{requirement}"
+    elif count == 0:
+        detail = f"{at}.refs 是空数组；{requirement}"
+    else:
+        requirement = f"最多 {MAX_ROWS} 条"
+        detail = f"{at}.refs 最多 {MAX_ROWS} 条，现在是 {count} 条"
+    return {"code": "bounded_references_required", "path": f"{at}.refs", "index": index,
+            "count": count, "requirement": requirement, "message": detail}
 
 
 # LLM: 每个转换显式隶属一个阶段，来源只取该阶段输入、目标只取输出；语义理由和内容真伪不在此判定。
@@ -543,7 +647,7 @@ def check_handoff_relations(rows: dict, files: dict, stages: dict, documents: di
                     check_text(row[field], f"{at}.{field}", errors)
                 refs = row["refs"]
                 if not isinstance(refs, list) or not refs or len(refs) > MAX_ROWS:
-                    errors.append({"code": "bounded_references_required", "path": f"{at}.refs"})
+                    errors.append(bounded_references_error(refs, at, position))
                     continue
                 for index, reference in enumerate(refs):
                     check_address(reference, inputs | outputs, files, documents, f"{at}.refs[{index}]", errors)
@@ -552,6 +656,51 @@ def check_handoff_relations(rows: dict, files: dict, stages: dict, documents: di
                 for field, allowed in (("source", inputs), ("target", outputs)):
                     if field in row:
                         check_address(row[field], allowed, files, documents, f"{at}.{field}", errors)
+
+
+# LLM: 交叉核对只需要“参考表 + 镜头表 + 参考在数组里的下标”三样；坏行在这里静默跳过（形状错误已由别的检查报过），不重复报、也不让缺表的项目崩掉。
+# 函数用途: 为交接交叉核对照出参考与镜头索引，以及“数组下标 → 参考 ID”的映射；项目不可用时返回两个空索引。
+def project_index(project: object) -> tuple[dict, dict]:
+    if not isinstance(project, dict) or not isinstance(project.get("references"), list):
+        return {}, {}
+    catalog = {"references": index_rows(project, "references", []),
+               "shots": index_rows(project, "shots", [])}
+    if not catalog["references"]:
+        return {}, {}
+    positions, seen = {}, set()
+    for position, row in enumerate(project["references"]):
+        if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"] not in seen:
+            seen.add(row["id"])
+            positions[position] = row["id"]
+    return catalog, positions
+
+
+# LLM: 0.3.3 交叉核对（3a 定口径）：被至少一个镜头引用（出现在某 shot 的 reference_ids 里）、状态是 planned/missing 的参考
+#   ——人物、地点、道具都算——必须在 handoff 的 additions 或 unresolved_differences 里登记。没被任何镜头引用的参考不强制
+#   （不增加噪音）；只查人物会漏掉地点和道具（上一轮 B05-t402 的正确写法正是把四类参考逐项列为尚未制作）。
+#   登记 = 有一条 target/refs 指针指向该参考（/references/<下标>，下标按本项目 references 数组算）；只认结构化地址，不解析 reason 等说明文字。
+#   只在给了 --handoff 时调用。project_index 静默跳过坏行是有意的：坏行已由别的检查报错，这里不重复报。
+# 函数用途: 核对每个“被镜头引用且仍计划中”的参考都在交接的 additions 或 unresolved_differences 里被指向过。
+def check_handoff_reference_coverage(catalog: dict, positions: dict, rows: dict, errors: list[dict]) -> None:
+    referenced = {value for shot in catalog["shots"].values()
+                  for value in (shot.get("reference_ids") if isinstance(shot.get("reference_ids"), list) else [])
+                  if isinstance(value, str)}
+    planned = {identifier for identifier, row in catalog["references"].items()
+               if identifier in referenced and row.get("state") in ("planned", "missing")}
+    if not planned:
+        return
+    registered: set[str] = set()
+    for section in ("additions", "unresolved_differences"):
+        for row in rows.get(section, []):
+            candidates = row.get("refs") if section == "unresolved_differences" else [row.get("target")]
+            for reference in candidates if isinstance(candidates, list) else []:
+                pointer = reference.get("pointer") if isinstance(reference, dict) else None
+                match = re.fullmatch(r"/references/(0|[1-9][0-9]*)(/.*)?", pointer) if isinstance(pointer, str) else None
+                if match and int(match.group(1)) in positions:
+                    registered.add(positions[int(match.group(1))])
+    for identifier in sorted(planned - registered):
+        errors.append({"code": "handoff_missing_planned_reference_entry",
+                       "path": identifier, "reference_id": identifier})
 
 
 # LLM: CLI 的 file_id=path 才是文件授权；任何 JSON 路径、摘要或未知 ID 都不能扩大集合；全量预检失败即零文件读取。
@@ -603,7 +752,7 @@ def load_handoff_documents(files: dict, bindings: dict[str, Path], snapshots: di
 #   那份文档，其余条目记 handoff_file_not_available 提醒、不读，结论不依赖它们。
 # 函数用途: 两阶段验证交接，先拒绝畸形声明与越权文件，再检查原字节摘要和真实对象地址。
 def check_handoff(handoff: object, bindings: dict[str, Path] | None, snapshots: dict | None = None,
-                  known: dict[str, object] | None = None) -> dict:
+                  known: dict[str, object] | None = None, project: object = None) -> dict:
     errors, warnings = [], [{"code": "handoff_semantics_and_execution_not_checked"}]
     fields = {
         "files": {"id", "path", "sha256"},
@@ -640,6 +789,9 @@ def check_handoff(handoff: object, bindings: dict[str, Path] | None, snapshots: 
         elif not errors:
             documents = load_handoff_documents(files, bindings, snapshots if snapshots is not None else {}, errors)
             check_handoff_relations(rows, files, stages, documents, errors)
+        coverage_catalog, coverage_positions = project_index(project)
+        if coverage_catalog:
+            check_handoff_reference_coverage(coverage_catalog, coverage_positions, rows, errors)
         if not errors:
             errors.extend(false_change_claims(rows, stages, documents))
             errors.extend(mapping_claims_without_change(rows, documents))
@@ -989,7 +1141,7 @@ def evaluate_inputs(project_path: Path, handoff_path: Path | None, binding_value
         try:
             handoff = read_document(handoff_path)
             known = known_documents(project_sha256, project, baseline_input) if host_mode and not binding_values else None
-            handoff_check = check_handoff(handoff, bindings, snapshots, known)
+            handoff_check = check_handoff(handoff, bindings, snapshots, known, project)
             handoff_check["errors"].extend(reference_mentions(handoff, project_objects(project)["references"]))
             handoff_check.setdefault("warnings", []).extend(handoff_target_warning(handoff, project_sha256, baseline_input))
         except InputProblem as exc:
@@ -1032,15 +1184,50 @@ def known_documents(project_sha256: str | None, project: object, baseline: dict)
 
 # LLM: 宿主核验合同 pack_verifier_result.v1 的条目只带 code 和 location（沿本报告的 path）；宿主模式下输入读不了的 invalid_input
 #   按参数换成 target_unreadable 等结构化码（HOST_UNREADABLE_CODES），不带 message、cause 或 scope。
-# 函数用途: 把报告里的错误或警告列表投影成宿主读的条目。
+#   0.3.2 起带可选 hint（宿主只把 hint 转给模型，最多 200 字符）：hint 在投影这一层现算，不写进检查器的错误条目，
+#   所以 drama_workflow_check.v2 的条目形状和既有断言完全不变。
+# 函数用途: 把报告里的错误或警告列表投影成宿主读的条目，并附上照着改的 hint。
 def host_items(rows: list[dict]) -> list[dict]:
     items = []
     for row in rows:
         code, path = str(row.get("code") or ""), str(row.get("path") or "$")
         if code == "invalid_input" and path in HOST_UNREADABLE_CODES:
             code, path = HOST_UNREADABLE_CODES[path], "$"
-        items.append({"code": code, "location": path})
+        item = {"code": code, "location": path}
+        hint = error_hint(code, path, row)[:HOST_HINT_MAX_CHARS]
+        if hint:
+            item["hint"] = hint
+        items.append(item)
     return items
+
+
+# LLM: hint 只从这条错误自己的结构化字段推出来（对象 ID 类的期望值/实际值/指针、refs 类的条数），不编造路径或原文；
+#   问不出明确改法的错误码直接返回空串，宁可不给也不硬凑（宿主只转有 hint 的条目）。
+# 函数用途: 按错误码和结构化字段生成一句“照着改”的提示。
+def error_hint(code: str, path: str, row: dict) -> str:
+    if code == "object_id_mismatch":
+        return object_id_hint(row)
+    if code == "bounded_references_required":
+        at = path[:-5] if path.endswith(".refs") else path
+        if row.get("count") == 0:
+            return f"{at} 的 refs 是空的，至少加一条 file_id + pointer 指向这条差异涉及的对象"
+        return f"{at} 的 refs 要是一个数组，至少一条、最多 {MAX_ROWS} 条"
+    if code == "shot_character_reference_missing":
+        character = row.get("character_id")
+        return (f"镜头 {path} 有角色 {character} 但没连到它的参考：给 {character} 新建一条 status=planned 的参考"
+                f"（或连上已有的），并在 handoff 里登记")
+    if code == "handoff_missing_planned_reference_entry":
+        reference = row.get("reference_id")
+        return f"参考 {reference} 还没做，但交接里没列：在 handoff 的 additions（或 unresolved_differences）里加一条指向它的登记"
+    return GENERIC_HINTS.get(code, "").replace("{path}", path)
+
+
+# 函数用途: 由 object_id_mismatch 的期望值、实际值和指针拼出“改成 X”的提示。
+def object_id_hint(row: dict) -> str:
+    pointer, expected, actual = row.get("pointer"), row.get("expected_object_id"), row.get("actual_object_id")
+    if expected is None:
+        return f"指针 {pointer} 指向的位置没有对象 ID，去掉这里的 object_id，或改成它所在对象的 ID"
+    return f"指针 {pointer} 所在对象是 {expected}，这里写的是 {actual}，改成 {expected}"
 
 
 # LLM: --host-json 时输出 pack_verifier_result.v1（ae 块 2/3 定）：valid 必须等于“errors 为空”；metrics 只留顶层数字（不含布尔、

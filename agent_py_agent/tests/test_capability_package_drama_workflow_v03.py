@@ -56,6 +56,18 @@ def _beat(project: dict, identifier: str) -> dict:
 
 # LLM: 交接里 F1 是基线、F2 是本次项目，摘要按实际写出的字节算；宿主模式靠摘要对应，普通模式另给 --input-file。
 # 函数用途: 写出基线、项目和一份可定制的交接，返回交接文件名。
+# LLM: 示例项目自带三条被镜头引用的 planned 参考（REF-C01/C02/L01）；0.3.3 起它们必须在交接里登记，
+#   所以默认交接把它们逐条列进 additions（与 B05-t402 的正面样本一致），需要时调用方可以覆盖。
+# 函数用途: 返回示例项目 planned 参考的默认 additions 登记。
+def _planned_reference_additions(before: dict) -> list[dict]:
+    referenced = {value for shot in before.get("shots", [])
+                  for value in (shot.get("reference_ids") if isinstance(shot.get("reference_ids"), list) else [])}
+    return [{"stage_id": "ST1", "target": {"file_id": "F2", "pointer": f"/references/{index}"},
+             "reason": f"{row['id']} 尚未制作，登记为本阶段计划项"}
+            for index, row in enumerate(before.get("references", []))
+            if row.get("state") == "planned" and row.get("id") in referenced]
+
+
 def _handoff(tmp_path: Path, before: dict, after: dict, **rows) -> dict:
     files = {"b.json": before, "p.json": after}
     for name, data in files.items():
@@ -65,7 +77,8 @@ def _handoff(tmp_path: Path, before: dict, after: dict, **rows) -> dict:
                          for fid, name in (("F1", "b.json"), ("F2", "p.json"))],
                "stages": [{"id": "ST1", "scope": "按用户要求整理", "input_file_ids": ["F1"], "output_file_ids": ["F2"],
                            "review_notes": "测试"}],
-               "object_mappings": [], "omissions": [], "additions": [], "unresolved_differences": []}
+               "object_mappings": [], "omissions": [], "additions": _planned_reference_additions(before),
+               "unresolved_differences": []}
     handoff.update(rows)
     return handoff
 
@@ -76,7 +89,7 @@ BASELINE = ("--project", "p.json", "--baseline-project", "b.json")
 def test_example_is_clean_under_all_new_checks(tmp_path):
     report = _run(tmp_path, {"p.json": _project(), "b.json": _project()}, *BASELINE)
     assert report["structure_valid"], report["errors"]
-    assert report["checker"]["package_version"] == "0.3.1"
+    assert report["checker"]["package_version"] == "0.3.3"
     new = {"missing_table", "missing_foreign_key", "unknown_reference_mention", "beat_character_missing",
            "shot_character_reference_missing", "baseline_relation_changed", "baseline_beat_changed",
            "baseline_schema_or_duration_changed", "handoff_claim_without_change"}
@@ -139,7 +152,9 @@ def test_reference_id_invented_in_handoff_text_is_an_error(tmp_path):
         {"stage_id": "ST1", "refs": [{"file_id": "F2", "pointer": "/shots/0"}], "difference": "REF-C07 缺图",
          "next_step": "补 REF-C01 的图"}])
     report = _run(tmp_path, {"h.json": handoff}, *BASELINE, "--handoff", "h.json", "--host-json")
-    assert {"code": "unknown_reference_mention", "location": "/unresolved_differences/0/difference"} in report["errors"]
+    # 宿主条目从 0.3.2 起可带可选 hint，所以只断言 code 和 location 命中，不锁死条目形状。
+    assert any(item.get("code") == "unknown_reference_mention"
+               and item.get("location") == "/unresolved_differences/0/difference" for item in report["errors"])
     assert len(_found(report, "errors", "unknown_reference_mention")) == 1
 
 
@@ -167,13 +182,14 @@ def test_action_beat_character_outside_the_scene_is_an_error(tmp_path):
 
 # ---- shot_character_reference_missing（B08-t4：出镜人物没有人物参考）----
 
-def test_on_screen_character_without_a_shot_reference_warns(tmp_path):
+def test_on_screen_character_without_a_shot_reference_is_an_error(tmp_path):
     project = _project()
     _row(project, "shots", "SH03")["reference_ids"] = ["REF-L01"]
     report = _run(tmp_path, {"p.json": project}, "--project", "p.json")
-    assert report["structure_valid"]
-    assert [(item["path"], item["character_id"]) for item in _found(report, "warnings", "shot_character_reference_missing")] == [
+    assert not report["structure_valid"]
+    assert [(item["path"], item["character_id"]) for item in _found(report, "errors", "shot_character_reference_missing")] == [
         ("SH03", "C02")]
+    assert not _found(report, "warnings", "shot_character_reference_missing")
 
 
 def test_project_without_any_character_reference_plan_does_not_warn(tmp_path):
@@ -196,7 +212,7 @@ def _seconds_changed() -> dict:
 
 def _relation_changed() -> dict:
     project = _project()
-    _row(project, "shots", "SH02")["reference_ids"] = ["REF-L01", "REF-C01", "REF-C02"]
+    _row(project, "shots", "SH02")["reference_ids"] = ["REF-L01", "REF-C01"]
     return project
 
 
@@ -288,7 +304,8 @@ def test_mapping_between_identical_objects_is_a_false_change_claim(tmp_path):
                "target": {"file_id": "F2", "pointer": "/props/0", "object_id": "P01"}, "reason": "补填道具连续性说明"}
     handoff = _handoff(tmp_path, _project(), _project(), object_mappings=[mapping])
     report = _run(tmp_path, {"h.json": handoff}, *BASELINE, "--handoff", "h.json", "--host-json")
-    assert {"code": "handoff_claim_without_change", "location": "object_mappings[0]"} in report["errors"]
+    assert any(item.get("code") == "handoff_claim_without_change"
+               and item.get("location") == "object_mappings[0]" for item in report["errors"])
 
 
 def test_mapping_with_a_real_change_is_not_a_false_claim(tmp_path):
@@ -311,7 +328,8 @@ def test_copied_template_hint_in_handoff_text_is_a_placeholder(tmp_path):
     _row(after, "props", "P01")["continuity_note"] = "红色绳结，右侧打结"
     handoff = _handoff(tmp_path, _project(), after, object_mappings=[mapping])
     report = _run(tmp_path, {"h.json": handoff}, *BASELINE, "--handoff", "h.json", "--host-json")
-    assert {"code": "placeholder_text", "location": "object_mappings[0].reason"} in report["errors"]
+    assert any(item.get("code") == "placeholder_text"
+               and item.get("location") == "object_mappings[0].reason" for item in report["errors"])
 
 
 # ---- --host-json：pack_verifier_result.v1，交接按摘要对应 ----

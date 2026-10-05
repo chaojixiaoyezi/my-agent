@@ -122,6 +122,18 @@ def test_unreadable_baseline_fails_only_the_baseline_scope(tmp_path):
 
 # LLM: 交接覆盖用例：输入/输出都是项目 v1，同一阶段；地址用 JSON Pointer。
 # 函数用途: 构造一份摘要正确、映射可定制的最小交接。
+# LLM: 示例项目自带三条被镜头引用的 planned 参考（REF-C01/C02/L01）；0.3.3 起它们必须在交接里登记，
+#   所以默认交接把它们逐条列进 additions（与 B05-t402 的正面样本一致），需要时调用方可以覆盖。
+# 函数用途: 返回示例项目 planned 参考的默认 additions 登记。
+def _planned_reference_additions(before: dict) -> list[dict]:
+    referenced = {value for shot in before.get("shots", [])
+                  for value in (shot.get("reference_ids") if isinstance(shot.get("reference_ids"), list) else [])}
+    return [{"stage_id": "ST1", "target": {"file_id": "F2", "pointer": f"/references/{index}"},
+             "reason": f"{row['id']} 尚未制作，登记为本阶段计划项"}
+            for index, row in enumerate(before.get("references", []))
+            if row.get("state") == "planned" and row.get("id") in referenced]
+
+
 def _handoff(tmp_path, before: dict, after: dict, **rows) -> tuple[dict, dict]:
     files = {"before.json": before, "after.json": after}
     for name, data in files.items():
@@ -131,7 +143,8 @@ def _handoff(tmp_path, before: dict, after: dict, **rows) -> tuple[dict, dict]:
                          for fid, name in (("F1", "before.json"), ("F2", "after.json"))],
                "stages": [{"id": "ST1", "scope": "合成修改", "input_file_ids": ["F1"], "output_file_ids": ["F2"],
                            "review_notes": "测试"}],
-               "object_mappings": [], "omissions": [], "additions": [], "unresolved_differences": []}
+               "object_mappings": [], "omissions": [], "additions": _planned_reference_additions(before),
+               "unresolved_differences": []}
     handoff.update(rows)
     return handoff, {}
 
@@ -173,7 +186,8 @@ def test_claimed_addition_that_already_existed_is_an_error(tmp_path):
     before, after = _project(), _project()
     target = {"file_id": "F2", "pointer": "/props/0", "object_id": after["props"][0]["id"]}
     handoff, _ = _handoff(tmp_path, before, after,
-                          additions=[{"stage_id": "ST1", "target": target, "reason": "声称新增"}])
+                          additions=[*_planned_reference_additions(before),
+                                     {"stage_id": "ST1", "target": target, "reason": "声称新增"}])
     report = _run_handoff(tmp_path, handoff)
     assert not report["structure_valid"]
     assert {(row["code"], row["scope"]) for row in report["errors"]} == {("declared_addition_already_present", "handoff")}
@@ -195,7 +209,8 @@ def test_real_addition_declared_in_handoff_is_accepted(tmp_path):
     after["props"].append(new)
     target = {"file_id": "F2", "pointer": f"/props/{len(after['props']) - 1}", "object_id": new["id"]}
     handoff, _ = _handoff(tmp_path, before, after,
-                          additions=[{"stage_id": "ST1", "target": target, "reason": "真实新增"}])
+                          additions=[*_planned_reference_additions(before),
+                                     {"stage_id": "ST1", "target": target, "reason": "真实新增"}])
     report = _run_handoff(tmp_path, handoff)
     assert report["structure_valid"]
     assert "change_not_declared_in_handoff" not in [row["code"] for row in report["warnings"]]

@@ -1,5 +1,35 @@
 # 设计台账
 
+## B 包 0.3.3：出镜缺参考升级为错误 + 计划中参考的交接登记（pb33，2026-10-04，分支 `worker/pack-b-033`，基于 ds7 的 B 0.3.2 `c779811bc`；待复审）
+
+- **来源**：B 包 0.3.2 重跑上一轮没过的 B05、B10 各两次，独立业务审阅 4 例都不合格（结构检查全过）。两类不合格：① B-RELATIONS 3 例——镜头里出现的角色没连到参考（如 SH03 的动作节拍有 C02，`references` 里却根本没有 REF-C02，SH03 只连了 REF-L01），检查器当时报 `shot_character_reference_missing` 但只算提醒，模型看到提醒就没改；② B-MEDIA 2 例——交接里没把这些缺的参考列成缺项。合格的 B05-t402 正是给 C02、P01 各新建一条 `planned` 参考、连进镜头并在 `additions` 里登记，说明模型做得到、只缺硬要求。另有 B05-t401 的 C-BOUNDARY：模型在工作区外 owner 根下的 `output/` 又写了一份 `project.json`、`handoff.json` 副本（模型行为，包只能在说明里写清楚）。
+- **改法（两条都收紧判定，不是放松）**：
+  - `scripts/check_continuity.py`：`shot_reference_warnings` → `check_shot_character_references`，`shot_character_reference_missing` 从提醒升为**错误**，条目带 `{path, character_id}`；纯环境镜头（引用节拍里没有角色字段）不报，项目完全没有人物参考计划时不报。
+  - 新增 `check_handoff_reference_coverage` + `project_index`：被至少一个镜头 `reference_ids` 引用、且 `state` 是 `planned`/`missing` 的参考（人物、地点、道具都算）必须在交接的 `additions` 或 `unresolved_differences` 里有一条**指向它**的登记（指针指向 `/references/<下标>`），否则报 `handoff_missing_planned_reference_entry` 错误。没被任何镜头引用的参考不强制；只在给了 `--handoff` 时核对。
+  - 两条新 hint 在 `error_hint()` 里按结构化字段现算（`shot_character_reference_missing` 报镜头号+角色 ID，`handoff_missing_planned_reference_entry` 报参考 ID）；0.3.2 那批写进 `GENERIC_HINTS` 的占位符条目已删（`error_hint()` 只替换 `{path}`，别的占位符会原样漏给模型——上一轮的真实缺陷，本轮用通用用例钉住）。
+  - `CAPABILITY.md`、`methods/workflow.md` 写清两条新规则，并加“交付只写本次工作区内（建议 `output/`），不在工作区外另写副本”。
+  - 示例数据同步：`resources/example-project.json` 的 SH02 补上 `REF-C02`（它引用的 B02 说话人就是 C02，0.3.3 起这处原本就缺人物参考）；示例项目必须自身合规。
+  - 版本：`declaration.json` 与脚本 `PACKAGE_VERSION` 同步升 0.3.3；`PROVENANCE.md` 新增 0.3.3 修订节（含接受集合变化）。**接受集合变化**：`shot_character_reference_missing` 由提醒变错误（会触发返工）；新增 `handoff_missing_planned_reference_entry`。
+- **handoff 登记语义的口径（本轮关键修正）**：3a 第三轮裁定以 (b) 为主——参考“已登记”指交接里有一条地址**指向该参考**（`additions[].target` 或 `unresolved_differences[].refs[]` 的指针为 `/references/<下标>`），只认结构化地址、不解析 `reason` 等说明文字。第一版实现按文字里出现 ID 来认，导致示例自带的三条 `planned` 参考（写进 reason 也没用）在 8 条既有用例里仍被判“没登记”；改为按指针认定后 10 条红用例全绿。
+- **验证**：见 `TESTS.md`“B 包 0.3.3（pb33）”小节。
+- **未验证**：真实模型重跑 B05、B10 各两次没做（按 3a 安排，等本包挑入后由 3a 打包重跑）；宿主侧是否把 `hint` 转给模型这一步在本分支不可验证（跨分支，等合并后复核）。
+
+## B 包 0.3.2：交接报错带出“该填什么”（pb32，2026-10-03，worker/pack-b-032，待复审；等 B 类 9 例审完可能再补）
+
+- **来源**：B 包 0.3.1 重跑的第一批业务审阅两个不合格，都是交接文件的结构问题、内容侧没问题。① 交接里某条映射的指针指向镜头内的 `reference_ids` 字段，模型把 `object_id` 写成了字段名 `reference_ids`（应写所在镜头的 ID）；检查器只报“对不上”，没说该填什么，宿主三次核验全失败、模型返工后仍照错写。② 另一条未决差异的 `refs` 写成空数组，报 `bounded_references_required`，模型只回了一句“等待宿主核验”就收手，交接没修完。
+- **改法**（只增强报错与指引，不放松判定）：
+  - 检查器 `scripts/check_continuity.py` 的 `object_id_mismatch` 报错带上 `pointer`、`expected_object_id`（指针所指位置所在对象的 ID）、`actual_object_id` 和一句 `message`；算不出所在对象 ID 时 `expected_object_id` 为 `null` 并在 `message` 里说明“这个位置没有对象 ID”，不再笼统报“对不上”。
+  - `bounded_references_required` 报错带上 `index`（是哪一条）、`count`（当前条数）、`requirement`（至少一条、每条用 file_id + pointer 指向这条差异涉及的对象）和 `message`。
+  - 判定口径明确化（3a 裁定，接受集合确有放宽）：0.3.1 要求 `object_id` 必须**直接**指向带 `id` 的对象，指针指向对象内部字段时一律算错；0.3.2 起改为填“指针所指位置所在对象”的 ID 即可——`/shots/0`、`/shots/0/seconds`、`/shots/0/reference_ids` 都写 `SH01`。字段名、与所在对象 ID 不符、指针不存在仍是错误；该位置往上层找不到带 `id` 的对象仍报错（expected 为 null）。`refs` 判定不变（至少一条、只能指向该阶段输入或输出），只是报错更具体。
+  - 报错可照做：0.3.2 起 `--host-json` 的每条错误可带可选 `hint`（宿主只转这一句、最多 200 字符）：`object_id_mismatch` 说清指针、实际值和该改成什么；`bounded_references_required` 说清是哪一条、refs 要加什么；另有 30 多个改法明确的错误码各有通用改法，判断不出怎么改的不给 hint。
+  - **hint 不许诱导模型"一删了之"**（3a 复审指出）：凡删掉会丢交付内容的错误，hint 一律先引导"补上/改对"，删除放最后并写清条件。已改两处：`uncovered_beat` 从"加进某个镜头的 beat_ids 或删掉这个节拍"改成"把它加进讲到这段内容的镜头的 beat_ids；只有这个节拍本来就不该存在时才删除"；`unexpected_field` 从"删掉它"改成"把里面的内容移到约定字段里；确认它确实不该存在时才删除"。删了不丢交付内容的（`unknown_reference_mention`、`handoff_claim_without_change`）按 3a 裁定保留原措辞。用例钉住这两句的先后顺序。
+  - 包内指引：`methods/workflow.md` 写清 `object_id` 是“指针所指位置所在对象的 ID，不是字段名”，给通用正反例；每条未决差异至少一条 `refs`，给通用例子和“不要留空数组”；并写明宿主核验没通过要按报错把文件改对再收尾、别只回复“等待核验”。`CAPABILITY.md` 同步一句规则和版本说明。
+- **同时修的第二类（B05-t303）**：未决差异的 `refs` 写成空数组，`bounded_references_required` 只说“不满足”，模型没修完就收尾。检查器报错带上是哪一条（下标）、当前条数和要求说明；`methods/workflow.md` 补每条未决差异至少一条 `refs` 的写法与通用例子；两处文档写明宿主核验没通过要按报错把文件改对再收尾，别只回复“等待核验”。
+- **版本与文档**：0.3.2 同步到 `declaration.json`、脚本 `PACKAGE_VERSION`、`CAPABILITY.md`、`PROVENANCE.md`（新增 0.3.2 修订节，只写问题类别）、`examples/capability-packages/README.md` 与四处测试断言。
+- **验证**：B 包 6 个测试文件 202 passed（含 hint 三例与措辞一条）；guards9 173 passed；三个 `test_handoff_*` 30 passed；`test_background_handoff.py` 22 个失败在真基线 `ce646f783`（`git merge-base claude/3a-step17i HEAD`）上同样 22 个、名单完全相同，属沙箱环境既有失败；变异三组共 11 个全部被抓（第二轮 3 个：hint 丢掉 / 期望值与实际值写反 / refs hint 不说明加什么，其中“写反”首轮存活、补强断言后才被抓；第三轮 2 个：`uncovered_beat` 与 `unexpected_field` 退回“一删了之”的旧措辞）；`leak_check.py` 6 字/5 字除已接受的「短剧制作资料」外无新命中；`import_boundaries` 0、ruff 通过、`DOC_SYNC_PASS`、`git diff --check` 干净、`check_clean_package.py` OK、strict code-size `hard=0 blocked=False`、size_diff 新增 0。命令与真实结果见 TESTS.md。
+- **未验证**：真实模型重跑 B 类 9 例没做（等 3a 安排）。宿主侧由 ds4（worker/pack-host-hints）配合改投影：宿主只转 `hint`。我这边已把检查器侧的 `hint` 供出来，**宿主真的把 hint 转给模型这一步没在我这边验证**（跨分支，等 17j 合并后复核）。
+- **不做**：B 类其余审阅结果对应的改动，等 3a 另外派。
+
 ## 辅助（压缩）调用的可靠时限（cabfix→cabfix2，2026-10-04/05，worker/cab-fix，基于 luna3 调查提交 `c39250781`；cabfix2 已按 3a 裁定修完初审风险 1 与联动口径，待 3a 复审）
 
 - **来源**：luna3 的调查（`decision-evidence/compact-aux-timeouts-cab-luna3.md`）证明压缩这类辅助调用没有任何可靠的调用级时限：①主模型有按输入估算的动态首包预算，压缩没传，大上下文的压缩会被基础读超时过早判成 `first_event` 超时；②socket 读超时是"两次读之间的间隔"不是调用总期限，慢滴流能无限期拖住一次压缩；③只要一直有有效事件，流式就能无限续期。1800 秒重试预算只在异常返回后决定要不要再试，也不是单次调用的硬期限。

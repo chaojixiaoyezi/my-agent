@@ -187,7 +187,7 @@ def test_handoff_and_complete_template_are_declared_private_resources(tmp_path):
     declaration = json.loads((PACKAGE_ROOT / "declaration.json").read_text(encoding="utf-8"))
     bundle = build_capability_package(declaration, PACKAGE_ROOT, tmp_path / "package.zip")
     manifest = inspect_plugin_package(bundle.read_bytes()).manifest
-    assert manifest.version == "0.3.1"
+    assert manifest.version == "0.3.3"
     assert manifest.is_content_only and not manifest.skills and not manifest.tools
     files = {member.path: member for member in manifest.files}
     with ZipFile(bundle) as archive:

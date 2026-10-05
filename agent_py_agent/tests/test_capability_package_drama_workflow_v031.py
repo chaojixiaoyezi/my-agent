@@ -54,10 +54,10 @@ def test_empty_singular_value_does_not_trigger_the_new_error(tmp_path):
     assert not _found(report, "errors", "beat_character_id_singular")
 
 
-def test_clean_example_has_no_new_error_and_reports_031(tmp_path):
+def test_clean_example_has_no_new_error_and_reports_032(tmp_path):
     report = _run(tmp_path, {"p.json": _project()}, "--project", "p.json")
     assert report["structure_valid"]
-    assert report["checker"]["package_version"] == "0.3.1"
+    assert report["checker"]["package_version"] == "0.3.3"
     assert not _found(report, "errors", "beat_character_id_singular")
 
 

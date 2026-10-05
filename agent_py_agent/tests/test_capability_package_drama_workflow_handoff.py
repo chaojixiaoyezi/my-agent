@@ -45,7 +45,9 @@ def material(tmp_path):
         "object_mappings": [{"stage_id": "ST1", "source": reference, "target": target, "reason": "合成映射"}],
         "omissions": [{"stage_id": "ST1", "source": {"file_id": "F1", "pointer": "/items/1", "object_id": "SRC2"},
                        "reason": "合成省略"}],
-        "additions": [],
+        "additions": [{"stage_id": "ST1", "target": {"file_id": "F2", "pointer": f"/references/{index}"},
+                       "reason": f"{row['id']} 尚未制作，登记为计划项"}
+                      for index, row in enumerate(project_data["references"]) if row["state"] == "planned"],
         "unresolved_differences": [],
     }
     return handoff, {"F1": source, "F2": project}
@@ -120,6 +122,29 @@ def test_pointer_resolves_escaped_keys_and_scalars_without_claiming_object_ident
     assert checker["check_handoff"](handoff, bindings)["structure_valid"]
     handoff["object_mappings"][0]["source"]["object_id"] = "7"
     assert "object_id_mismatch" in _codes(checker["check_handoff"](handoff, bindings))
+
+
+def test_object_id_must_name_the_owning_object_not_a_field_name(checker, material):
+    handoff, bindings = material
+    expected = json.loads(bindings["F2"].read_bytes())["shots"][0]["id"]
+    handoff["object_mappings"][0]["target"] = {"file_id": "F2", "pointer": "/shots/0/reference_ids",
+                                               "object_id": "reference_ids"}
+    report = checker["check_handoff"](handoff, bindings)
+    assert not report["structure_valid"]
+    failures = [item for item in report["errors"] if item["code"] == "object_id_mismatch"]
+    assert failures, report
+    assert failures[0]["pointer"] == "/shots/0/reference_ids"
+    assert failures[0]["expected_object_id"] == expected
+    assert failures[0]["actual_object_id"] == "reference_ids"
+    assert expected in failures[0]["message"] and "reference_ids" in failures[0]["message"]
+
+
+def test_object_id_pointing_into_an_object_passes_with_the_owning_id(checker, material):
+    handoff, bindings = material
+    expected = json.loads(bindings["F2"].read_bytes())["shots"][0]["id"]
+    handoff["object_mappings"][0]["target"] = {"file_id": "F2", "pointer": "/shots/0/reference_ids",
+                                               "object_id": expected}
+    assert checker["check_handoff"](handoff, bindings)["structure_valid"]
 
 
 @pytest.mark.parametrize("section", ["files", "stages"])
@@ -201,6 +226,94 @@ def test_additions_and_unresolved_keep_explicit_stage_references(checker, materi
     assert "unresolved_differences_present" in {item["code"] for item in report["warnings"]}
     handoff["unresolved_differences"][0]["refs"][0]["file_id"] = "UNKNOWN"
     assert "unknown_reference" in _codes(checker["check_handoff"](handoff, bindings))
+
+
+def test_unresolved_differences_need_at_least_one_explained_ref(checker, material):
+    handoff, bindings = material
+    handoff["unresolved_differences"] = [{"stage_id": "ST1", "refs": [], "difference": "合成未决差异",
+                                          "next_step": "合成审阅动作"}]
+    report = checker["check_handoff"](handoff, bindings)
+    assert not report["structure_valid"]
+    failures = [item for item in report["errors"] if item["code"] == "bounded_references_required"]
+    assert failures, report
+    assert failures[0]["path"] == "unresolved_differences[0].refs"
+    assert failures[0]["index"] == 0
+    assert failures[0]["count"] == 0
+    assert "至少" in failures[0]["requirement"] and "refs" in failures[0]["requirement"]
+    assert "refs" in failures[0]["message"]
+
+
+def test_unresolved_differences_with_a_ref_to_the_involved_object_pass(checker, material):
+    handoff, bindings = material
+    project_data = json.loads(bindings["F2"].read_bytes())
+    handoff["unresolved_differences"] = [{"stage_id": "ST1",
+                                          "refs": [{"file_id": "F2", "pointer": "/props/0",
+                                                    "object_id": project_data["props"][0]["id"]}],
+                                          "difference": "合成未决差异", "next_step": "合成审阅动作"}]
+    assert checker["check_handoff"](handoff, bindings)["structure_valid"]
+
+
+# LLM: 宿主只把 hint 转给模型，所以 hint 必须真的出现在 host JSON 里、和同条目里的结构化字段一致、且在 200 字以内；
+#   走 host_result 投影，验证“给模型看的那份”而不只是检查器内部条目。两类错误各自独立成例：
+#   检查器在同一份交接里报 refs 错时不会继续读文档（对象 ID 校验在第二阶段），所以不能混在一份里测。
+# 函数用途: 证明 object_id_mismatch 的 host 条目带可照做的 hint，且与结构化字段一致。
+def test_host_item_hint_for_object_id_matches_structured_fields(checker, material):
+    handoff, bindings = material
+    handoff["object_mappings"][0]["target"] = {"file_id": "F2", "pointer": "/shots/0/reference_ids",
+                                               "object_id": "reference_ids"}
+    report = checker["check_handoff"](handoff, bindings)
+    host = checker["host_result"]({"errors": report["errors"], "warnings": report["warnings"], "metrics": {}})
+    item = next(entry for entry in host["errors"] if entry["code"] == "object_id_mismatch")
+    detail = next(entry for entry in report["errors"] if entry["code"] == "object_id_mismatch")
+    assert item["location"] == "object_mappings[0].target"
+    assert detail["pointer"] in item["hint"]
+    assert detail["expected_object_id"] in item["hint"]
+    assert detail["actual_object_id"] in item["hint"]
+    # 光断言两个值都出现抓不住“写反”：必须断言 hint 让人改成的是期望值，不是实际值。
+    assert item["hint"].endswith(f"改成 {detail['expected_object_id']}")
+    assert f"改成 {detail['actual_object_id']}" not in item["hint"]
+    assert detail["expected_object_id"] != detail["actual_object_id"]
+    assert len(item["hint"]) <= checker["HOST_HINT_MAX_CHARS"]
+
+
+# 函数用途: 证明 bounded_references_required 的 host 条目带可照做的 hint。
+def test_host_item_hint_for_empty_refs_says_what_to_add(checker, material):
+    handoff, bindings = material
+    handoff["unresolved_differences"] = [{"stage_id": "ST1", "refs": [], "difference": "合成未决差异",
+                                          "next_step": "合成审阅动作"}]
+    report = checker["check_handoff"](handoff, bindings)
+    host = checker["host_result"]({"errors": report["errors"], "warnings": report["warnings"], "metrics": {}})
+    item = next(entry for entry in host["errors"] if entry["code"] == "bounded_references_required")
+    assert item["location"] == "unresolved_differences[0].refs"
+    assert "refs" in item["hint"] and "file_id" in item["hint"]
+    assert len(item["hint"]) <= checker["HOST_HINT_MAX_CHARS"]
+
+
+# 函数用途: 证明给不出明确改法的错误不带 hint（不硬凑）。
+def test_host_items_omit_hint_when_no_actionable_fix_is_known(checker, material):
+    handoff, bindings = material
+    handoff["unresolved_differences"] = [{"stage_id": "ST1", "refs": [], "difference": "合成未决差异",
+                                          "next_step": "合成审阅动作"}]
+    report = checker["check_handoff"](handoff, bindings)
+    host = checker["host_result"]({"errors": report["errors"], "warnings": report["warnings"], "metrics": {}})
+    assert all("hint" in entry for entry in host["errors"])  # 本轮这些错误都已知改法
+    assert checker["error_hint"]("creative_quality_and_media_not_checked", "$", {}) == ""
+    assert checker["error_hint"]("不存在的码", "$", {}) == ""
+
+
+# LLM: 模型为了“让检查通过”可能直接删剧情，内容就丢了。凡删掉会丢交付内容的 hint，都必须先说补上/改对，
+#   删除放最后并写清条件；下面几条是本包里最容易被“一删了之”的，用字面断言钉住，防以后被改回去。
+# 函数用途: 钉住“先补上、删除放最后”的 hint 措辞。
+def test_actionable_hints_do_not_tell_the_model_to_delete_content_first(checker):
+    uncovered = checker["error_hint"]("uncovered_beat", "SC01.B07", {})
+    assert "加进" in uncovered and "beat_ids" in uncovered
+    assert uncovered.index("beat_ids") < uncovered.index("删除")
+    extra = checker["error_hint"]("unexpected_field", "object_mappings[0].field", {})
+    assert extra.index("移到") < extra.index("删除")
+    assert "确实不该存在" in extra
+    # 删了不丢交付内容的这两条允许保留“删掉”的说法。
+    assert "删掉这句" in checker["error_hint"]("unknown_reference_mention", "$", {})
+    assert "删掉这条" in checker["error_hint"]("handoff_claim_without_change", "object_mappings[0]", {})
 
 
 def test_same_snapshot_supplies_hash_and_json_once(checker, material, monkeypatch):
@@ -312,12 +425,20 @@ def test_lexical_alias_cannot_reuse_another_path_snapshot(checker, material, tmp
         (actual_parent / project.name).write_bytes(b'{"different_file": true}\n')
         (tmp_path / "alias").symlink_to(actual_parent / "inside", target_is_directory=True)
     digest = hashlib.sha256(project.read_bytes()).hexdigest()
-    paths = {"ALIAS": alias} if snapshot_origin == "project" else {"FIRST": project, "ALIAS": alias}
+    project_data = json.loads(project.read_bytes())
+    # 0.3.3 起被镜头引用的 planned 参考要在交接里登记；这里把项目本身也列进 files，
+    # 用指向 /references/<下标> 的登记（ALIAS 的字节不是项目，指向它的登记没法成立）。
+    project_file = "PROJ" if snapshot_origin == "project" else "FIRST"
+    paths = {project_file: project, "ALIAS": alias}
     handoff = {"schema": "drama_workflow_handoff.v2",
                "files": [{"id": key, "path": str(path), "sha256": digest} for key, path in paths.items()],
                "stages": [{"id": "S", "scope": "合成路径检查", "input_file_ids": [],
                            "output_file_ids": list(paths), "review_notes": "只核实际绑定字节"}],
-               "object_mappings": [], "omissions": [], "additions": [], "unresolved_differences": []}
+               "object_mappings": [], "omissions": [],
+               "additions": [{"stage_id": "S", "target": {"file_id": project_file, "pointer": f"/references/{index}"},
+                              "reason": f"{row['id']} 尚未制作，登记为计划项"}
+                             for index, row in enumerate(project_data["references"]) if row["state"] == "planned"],
+               "unresolved_differences": []}
     if alias_kind == "symlink_bound_digest":
         handoff["files"][-1]["sha256"] = hashlib.sha256(alias.read_bytes()).hexdigest()
     if snapshot_origin == "project":

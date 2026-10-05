@@ -28,6 +28,8 @@
 
 在本次工作区写出**一份** `drama_workflow_handoff.v2` 交接文件（建议 `output/handoff.json`）。v1 的自由字段不会被猜成 v2 地址；旧文件保留原结果，需要按新合同显式重新编写。列表按实际数量增减；没有映射、省略、新增或未决差异时用空列表，不留下空占位行。
 
+**交付位置**：本次交付的项目 JSON、交接 JSON 和说明都写在本次工作区内（建议统一放 `output/`，例如 `output/project.json`、`output/handoff.json`）。不要在工作区之外另写一份副本——例如在工作区外或用户主目录根部再写一个 `output/project.json`、`output/handoff.json`。工作区边界由宿主判定，包只负责把交付物只落在工作区内。
+
 ### 交接文件清单（写在哪、叫什么、怎么绑进标准链）
 
 1. **只保留一份**：整个工作区里只能有一份 `schema` 为 `drama_workflow_handoff.v2` 的 JSON 文件。不要把模板另存到 `tmp/`、不要把草稿写到第二个位置、不要在交付后再留同名副本。宿主按“本回合写出的、字段匹配的交接文件恰好一份”自动找它；出现两份（或零份）时交接不会进入标准检查链，基线对比会把所有改动当成“没列出”。
@@ -35,7 +37,7 @@
 3. **六个键都写上**：`files`、`stages`、`object_mappings`、`omissions`、`additions`、`unresolved_differences`；没有内容的用 `[]`。
 4. **摘要来自真实字节**：`files[].sha256` 用该文件读取时的完整 64 位小写 SHA-256；资料改动后重新计算，再更新交接。
 5. **手动检查时显式绑定**：自己运行检查器时传 `--handoff output/handoff.json`，并对 `files` 里每个 ID 传一个 `--input-file FILE_ID=PATH`；绑定路径与 `files[].path` 按同一 cwd 比较。
-6. **交给宿主自动核验**：宿主开启包检查时，写出交付物和交接后，工具回执里会附宿主用本包原版检查程序得出的结论（`pack_verification`）；按它修订，不要复制、改写或自写检查程序。
+6. **交给宿主自动核验**：宿主开启包检查时，写出交付物和交接后，工具回执里会附宿主用本包原版检查程序得出的结论（`pack_verification`）；**核验没通过就按报错把文件改对再收尾，不要只回复“等待核验”就结束**；不要复制、改写或自写检查程序。
 
 完整示例（公开合成故事《最后一班夜车》，假设把 `inputs/project.json` 整理成 `output/project.json`；示例里的路径、摘要和文字都要换成本次任务的真实值，摘要不能照抄）：
 
@@ -86,9 +88,13 @@
 - `stages`：记录唯一阶段 ID、`scope`、实际消费的 `input_file_ids`、实际产出的非空 `output_file_ids` 和 `review_notes`；文件 ID 指向 `files`，列表不重复。没有文件输入的原创阶段可用空输入列表，没有实际产物就不把计划列为已产出。填写这些字段不证明实际执行。
 - `object_mappings`：每行填写 `stage_id/source/target/reason`；source 只能引用该阶段输入文件，target 只能引用其输出。一对多或多对一用多行表示，不把多个 ID 拼成一个字符串。
 - `omissions` / `additions`：分别填写 `stage_id/source/reason` 或 `stage_id/target/reason`；新增内容不能冒充原输入已提供的事实。
-- `unresolved_differences`：填写 `stage_id/refs/difference/next_step`，非空 `refs` 只指向该阶段输入或输出，保留具体差异和下一步审阅动作；未决项是警告，不因结构通过而删除。
+- `unresolved_differences`：填写 `stage_id/refs/difference/next_step`；**每条至少要有一条 `refs`，每条 `refs` 用 `file_id` + `pointer` 指向这条差异涉及的对象**（只能指向该阶段的输入或输出文件；空数组或坏形状会报 `bounded_references_required`，报错里会给出是哪一条和要写什么），保留具体差异和下一步审阅动作；未决项是警告，不因结构通过而删除。通用例子：一条差异说“镜头 SH07 还缺人物参考图”，这条差异涉及的是镜头对象本身，`refs` 就写 `[{"file_id":"F07","pointer":"/shots/6","object_id":"SH07"}]`（地址按你项目里该镜头的实际位置）；不要留空数组，也不要为了让 `refs` 有东西可指而虚构对象。
 
-`source/target/refs[]` 使用相同地址：`{"file_id":"F02","pointer":"/shots/0","object_id":"SH01"}`。`pointer` 是严格 JSON Pointer，按实际 JSON 字段和从零开始的数组下标定位；`~0` 表示键中的波浪号，`~1` 表示斜线，空字符串明确表示整份 JSON。不接受表达式、通配符、URI fragment、`-` 或 `01` 数组下标。若填写 `object_id`，目标必须是含相同 `id` 的对象；定位标量字段（例如 `/shots/0/seconds`）时省略 `object_id`，不能留下空占位。每个地址只指一个实际位置；理由可以说明合并、拆分或派生，但检查器不证明理由为真，也不假定来源值等于目标值。
+`source/target/refs[]` 使用相同地址：`{"file_id":"F02","pointer":"/shots/0","object_id":"SH01"}`。`pointer` 是严格 JSON Pointer，按实际 JSON 字段和从零开始的数组下标定位；`~0` 表示键中的波浪号，`~1` 表示斜线，空字符串明确表示整份 JSON。不接受表达式、通配符、URI fragment、`-` 或 `01` 数组下标。若填写 `object_id`，它必须是**指针所指位置所在对象**的 `id`：指针直接指向对象本身时就是该对象的 `id`（`/shots/0` → `SH01`），指向对象内部的字段时是那个对象的 `id`（`/shots/0/seconds`、`/shots/0/reference_ids` 都写 `SH01`）——**绝不能写字段名**（写 `reference_ids` 会报 `object_id_mismatch`，报错里会给出期望的对象 ID）；指针位置往上层都找不到带 `id` 的对象时不要填 `object_id`（填了会报“这个位置没有对象 ID”），不要留下空占位。每个地址只指一个实际位置；理由可以说明合并、拆分或派生，但检查器不证明理由为真，也不假定来源值等于目标值。
+
+对象 ID 的正反例（假设某个镜头对象是 `{"id":"SH07","seconds":5,"reference_ids":["REF-L02"]}`，位于你项目里的 `/shots/6`）：
+- 正：`{"file_id":"F07","pointer":"/shots/6","object_id":"SH07"}`；要指出它里面的字段时，指针写 `/shots/6/reference_ids`（或 `/shots/6/seconds`），`object_id` 仍然写 `SH07`。
+- 反：`"object_id": "reference_ids"` 或 `"object_id": "seconds"`——字段名不是对象 ID，报 `object_id_mismatch`，报错里会给出期望的 `SH07`。
 
 交接本身不授予读取其它文件的权限。运行脚本时逐一传入 `--input-file FILE_ID=PATH`；每个 `files.id` 必须恰有一项明确绑定，不能缺项、多余或重复。`files.path` 与绑定路径都按**本次命令 cwd**词法规范化后比较，不以 handoff 文件父目录为基准，不展开 `~` 或环境变量。正文路径只有比较作用，绝不拿来打开文件；不一致在读取绑定资料前拒绝。所有绑定文件须是普通 UTF-8 JSON 文件，拒绝叶子符号链接、FIFO 等特殊文件。命令行本身仍须服从本次任务已有工具权限，包不能借绑定扩大宿主授权。
 
@@ -128,6 +134,8 @@ CLI 报告升级为 `drama_workflow_check.v2`：`checks.project` 与 `checks.han
 - **表和外键齐全**：七张表缺了哪张报 `missing_table`；场次缺 `episode_id`/`location_id`、镜头缺 `scene_id`、参考缺 `subject_id` 这几个键报 `missing_foreign_key`。键在但值不对，仍是原来的 `unknown_reference` 等错误。
 - **动作节拍写角色（字段名 `character_ids`，列表）**：动作节拍的角色写进 `character_ids` 列表，列出参与动作的本场角色；对白节拍仍用单数 `character_id`。完全没写角色字段报 `beat_character_missing` 提醒（纯环境动作可以没有角色）；写成单数 `character_id`（非空）报 `beat_character_id_singular` 错误（0.3.1 起，会触发返工）；写了不是本场角色报错。
 - **出镜人物要有参考**：项目里有人物参考时，一个镜头引用的节拍里出现的角色（说话人和动作角色），这一镜的 `reference_ids` 里要有他的人物参考，否则报 `shot_character_reference_missing` 提醒。项目完全没有人物参考计划时不提醒。
+- **出镜人物缺参考是错误（0.3.3 起）**：上一条的 `shot_character_reference_missing` 从提醒升级为**错误**（会触发返工）。修法：给缺参考的角色新建一条 `state=planned` 的参考并连进这一镜的 `reference_ids`，或连上已有的那条。纯环境镜头（引用的节拍里没有角色）不要求；项目完全没有人物参考计划时不要求虚构参考。
+- **计划中的参考必须在交接里登记（0.3.3 起）**：被至少一个镜头的 `reference_ids` 引用、且 `state` 是 `planned` 或 `missing` 的参考（人物、地点、道具都算），必须在交接的 `additions` 或 `unresolved_differences` 里有一条**指向它**的登记，否则报 `handoff_missing_planned_reference_entry`（错误，带 hint 说明是哪条参考）。登记指：`additions[].target` 或 `unresolved_differences[].refs[]` 的指针指向 `/references/<下标>`（下标按你项目 `references` 数组的实际位置）。没被任何镜头引用的参考不强制登记；只查“被镜头引用且还没做”的那批，避免把没派上用场的参考也算进来。
 - **不编造参考 ID**：检查器从本项目 `references` 的 ID 推出写法（如 `REF-`），在整份项目和交接的所有文字里找这种写法的 ID，表里没有就报 `unknown_reference_mention` 错误。
 - **改动前后对比更严**：带 `--baseline-project` 时，下面这些改动没在交接里列出就是错误，`checks.baseline` 记 `failed`：
   - `baseline_beat_changed`：节拍增删（包括重新编号）或台词改动；

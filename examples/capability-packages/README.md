@@ -5,7 +5,7 @@
 | 包 | 当前源码版本 | 特点 | 交付与边界 |
 | --- | --- | --- | --- |
 | `drama-text-a` | `0.5.4` | 原文改编及成稿人物依据回填 | 文本方案、来源/时长声明、具名覆盖警告、可选台词/逐字引用/道具状态核对、占位与改编原文核对、来源与改编标注核对、台词引号与镜内交接核对；不判在场或媒体 |
-| `drama-workflow-b` | `0.3.1` | 五类制作资料的结构和交接 | 跨表关系、分集时长、静态报告、可选基线对比与交接覆盖、未列出改动报错、交接文件唯一性；不具备上游全部报告交互 |
+| `drama-workflow-b` | `0.3.3` | 五类制作资料的结构和交接 | 跨表关系、分集时长、静态报告、可选基线对比与交接覆盖、未列出改动报错、交接文件唯一性、出镜缺参考报错与计划参考的交接登记；不具备上游全部报告交互 |
 | `security-evidence` | `0.1.0` | 范围明确的既有证据整理 | 证据摘要、来源去重、发现引用和待复核报告；不扫描、不验证漏洞 |
 
 `CAPABILITY.md` 是包入口。`methods/`、`templates/`、`resources/`、`scripts/` 只属于本包；三个包都有 `methods/review.md`，内容各不相同，不能按裸文件名覆盖。
@@ -38,6 +38,8 @@ A0.5.4（能力包 v2 块 8 重跑归因，9 例业务审阅过 1 例）：逐�
 
 B0.3.1（能力包 v2 块 8 归因）：按冻结重跑业务审阅补交接文件清单与完整示例（写在哪、只保留一份、怎么绑进标准链）、动作节拍 `character_ids` 口径统一（单数 `character_id` 升级为 `beat_character_id_singular` 错误）和“角色、道具、镜头参考各写各的”拆分指引。详见 B 包 PROVENANCE。
 
+B0.3.2（能力包 v2 块 8 重跑归因）：按重跑业务审阅补 `object_id` 的“所在对象 ID”口径与正反例（`object_id_mismatch` 报错带期望对象 ID、实际值和指针）、未决差异 `refs` 必填与写法（`bounded_references_required` 报错带下标、条数和要求说明），并写明宿主核验没通过要按报错改对再收尾。详见 B 包 PROVENANCE。
+
 A0.4.0 / B0.2.0（C13 第二部分）：A 新增可选 `lines`、`source_quotes`、`props`/`prop_states` 及对应核对，B 新增 `--baseline-project` 逐 ID 对比、交接覆盖真实改动与虚假新增/省略核对，两包报告都带 `checker` 身份；格式版本不变，详见各自 PROVENANCE。
 
 B0.1.4 沿用0.1.3的 `drama_workflow_handoff.v2`，使用明确的文件编号、JSON Pointer、对象编号及阶段范围；本次仅澄清场次/镜头自身 ID 与镜头场次外键的映射，脚本、格式和模板不变。
@@ -52,7 +54,7 @@ A0.3.0与B0.1.3已有私有原生使用记录；B0.1.4已通过原生TUI热更�
 
 ```bash
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.5.4.zip
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.3.1.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.3.3.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/security-evidence/declaration.json --files-root examples/capability-packages/security-evidence --output /tmp/security-evidence.zip
 ```
 

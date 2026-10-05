@@ -96,3 +96,34 @@
 - **升级安全性评估**（不误伤合法写法）：触发条件只有“`character_ids` 缺失或为空，且 `character_id` 是非空字符串”。正确写法（非空列表）、完全没写角色字段的纯环境动作、空字符串或非字符串值都保持原提醒；对白节拍的 `character_id` 不受影响。动作节拍用单数本来就是包约定的字段名误用（0.3.0 起模板与方法均为 `character_ids`），升级只影响结构与返工提示，不判断创作语义。
 
 **仍不判断的事**：改动是不是用户要求的、改得合不合理、交接说明文字是否真实、媒体是否完成；组件结果与真实模型采用分别记账。
+
+## 本包 0.3.2 修订（能力包 v2 块 8 重跑归因）
+
+依据重跑的独立业务审阅逐条归因，改检查器报错和包内指引两类问题；仍是仓库自写，不是上游脚本移植；项目 v1、交接 v2 格式不变。
+
+- **对象 ID 误写成字段名**：交接地址里的 `object_id` 是“指针所指位置所在对象的 ID”，不是字段名。检查器的 `object_id_mismatch` 报错现在带上期望对象 ID、实际值、指针和一句说明（算不出期望值时明确说“这个位置没有对象 ID”）；`methods/workflow.md` 与 `CAPABILITY.md` 补写法和正反例。归因：指针指向对象内的字段、`object_id` 填成字段名时，检查器只报“对不上”，没有告诉作者该填什么，返工后仍然错。
+- **未决差异的 refs 留空**：每条 `unresolved_differences` 至少要有一条 `refs`，指向这条差异涉及的对象（对象在文件里已存在，不是必须为差异新建一个对象）。检查器的 `bounded_references_required` 报错现在带上是哪一条（下标）、当前条数和要求说明；`methods/workflow.md` 补写法、通用例子和“不要留空数组”的说明。归因：未决差异的 `refs` 写成空数组后，没有按报错修完就收尾。
+- **核验没通过要改对再收尾**：`methods/workflow.md` 与 `CAPABILITY.md` 写明宿主核验没通过时按报错把文件改对再结束回合，不要只回复“等待核验”。
+
+**接受集合变化（0.3.1 → 0.3.2，3a 裁定、确有放宽）**：0.3.1 要求 `object_id` 必须**直接**指向带 `id` 的对象，指针指向对象内部字段（如 `/shots/0/reference_ids`）时一律算错；0.3.2 把它明确成“`object_id` 填指针所指位置**所在对象**的 ID”，所以 `/shots/0`、`/shots/0/seconds`、`/shots/0/reference_ids` 都写 `SH01` 都算对。字段名、与所在对象 ID 不符、指针本身不存在仍是错误；该位置往上层找不到带 `id` 的对象仍是错误（`expected_object_id` 为 `null`）。`refs` 判定不变（至少一条、只能指向该阶段输入或输出），只是报错更具体。
+
+**给模型的提示**：0.3.2 起 `--host-json` 的每条错误可带可选 `hint`（宿主只把这一句转给模型，最多 200 字符）：`object_id_mismatch` 和 `bounded_references_required` 按本条的结构化字段现算，另有 30 多个改法明确的错误码给通用改法；判断不出怎么改的不给 hint，不硬凑。
+
+## 本包 0.3.3 修订（能力包 v2 块 8 第三轮归因）
+
+依据第三轮重跑的独立业务审阅逐条归因（B 类 4 例都不合格，结构检查全过）：改检查器和包内指引两类问题，仍为仓库自写，不是上游脚本移植；项目 v1、交接 v2 格式不变。
+
+- **出镜人物缺参考从提醒升级为错误**：项目里有人物参考计划时，某镜头引用的节拍里出现的角色（说话人和动作角色），这一镜的 `reference_ids` 里必须连到他的参考，否则报 `shot_character_reference_missing` 错误（0.3.3 起；0.3.0–0.3.2 是提醒）。报错带 `character_id`，`--host-json` 的 hint 按结构化字段现算出镜头号和角色 ID。归因：上一轮重跑里模型看到提醒就没改，3 例因镜头人物参考没连上而不合格。
+- **计划中的参考必须在交接里登记**：被至少一个镜头的 `reference_ids` 引用、且状态是 `planned` 或 `missing` 的参考（人物、地点、道具都算），必须在交接的 `additions` 或 `unresolved_differences` 里有一条指针指向它的登记（`/references/<下标>`），否则报 `handoff_missing_planned_reference_entry` 错误（带该参考 ID 的 hint）。没被任何镜头引用的参考不强制。归因：上一轮 B-MEDIA 两例不过就是交接没把这些缺的参考列成缺项；合格的 B05-t402 正是给 C02、P01 各新建 planned 参考、连进镜头并在 `additions` 里登记。
+- **交付只写在工作区 `output/` 下**：`CAPABILITY.md` 和 `methods/workflow.md` 写明交付物只写本次工作区内（建议 `output/`），不要在工作区之外另写副本。归因：上一轮 B05-t401 模型在工作区外 owner 根下的 `output/` 又写了一份 `project.json`、`handoff.json` 副本（这是模型行为，包只能在说明里写清楚；工作区边界由宿主判定，不归包管）。
+
+**接受集合变化（0.3.2 → 0.3.3，两条收紧）**：
+
+1. 原来只报提醒的 `shot_character_reference_missing` 变成错误，`structure_valid` 会因此为 false。不误伤合法写法的边界：纯环境镜头（引用的节拍里没有角色字段）不报；项目完全没有人物参考计划（`references` 里没有 `kind=character` 的条目）时不报；只有“项目有人物参考计划、某镜节的拍里出现角色、这一镜又没连到该角色参考”才报。
+2. 新增 `handoff_missing_planned_reference_entry`。只在给了 `--handoff` 时核对；只查“被至少一个镜头 `reference_ids` 引用、且 `state` 是 `planned`/`missing`”的参考；登记可用 `additions[].target` 或 `unresolved_differences[].refs[]`，指针须指向 `/references/<下标>`（按本项目 `references` 数组的位置）。
+
+**同时修正的判定细节**：`beat_characters` 不再把空字符串的音数 `character_id` 当成一个角色（与 0.3.1 里“空字符串表示没写角色”的口径一致），避免对空 ID 要求人物参考。
+
+**已知边界（0.3.3 初审记录，3a 裁定本轮不改接受集合）**：动作节拍只写了空字符串的单数 `character_id: ""`（没写 `character_ids`）时，沿用 0.3.1 起“空字符串表示没写角色”的口径——既不报字段名错误 `beat_character_id_singular`（它只对非空单数报），也不要求这一镜连人物参考，结构检查会静默通过。如果重跑里真出现这种写法，再把空字符串单数也收紧成字段名错误。另外，“没被任何镜头引用的 planned 参考不强制登记”这条豁免现在有用例守着。
+
+**示例数据同步**：`resources/example-project.json` 的 SH02 补上 `REF-C02`（它引用的 B02 说话人是 C02）——0.3.3 起那处原本就缺人物参考；示例项目必须自身合规。
