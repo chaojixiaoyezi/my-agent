@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 903,
+  "count": 905,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1842,6 +1842,22 @@
       "unit": "",
       "category": "上限预算",
       "description": "合同追踪最多展开的层数；防环状引用导致递归无限加深（无物理单位）。"
+    },
+    {
+      "name": "_NESTED_SHELL_DEPTH_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/contracts/gates/command_policy.py",
+      "value": 4,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "fail-closed 给 finding 不放行；4 层覆盖真实常见包装，更深的写法交给沙箱边界（见文件头覆盖边界注）。"
+    },
+    {
+      "name": "_NESTED_SHELL_SOURCE_MAX_CHARS",
+      "file": "agent_py_agent/agent/contracts/gates/command_policy.py",
+      "value": 32768,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "单条嵌套程序的字符上限：解析是线性的，超长输入不再递归（fail-closed 给 finding）。32k 足够容纳真实包装文本。"
     },
     {
       "name": "DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT",

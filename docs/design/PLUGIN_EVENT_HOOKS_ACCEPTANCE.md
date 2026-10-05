@@ -196,10 +196,11 @@ SQL
 | --- | --- | --- |
 | 裸 `rm` / `rmdir` / `unlink`（含 `rm -rf <workspace 内路径>`） | **直接拒绝**，回执 `COMMAND_POLICY_BLOCKED`，找不到 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 也找不到 gate 行；handler 未启动 | `command_policy.py:11` 把这三个可执行文件列入 `_MANAGED_DELETE_EXECUTABLES`；`command_policy.py:423-433` 对不在显式白名单里的它们一律产出 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；`shell.py:1079-1089` 命中即返回、不执行 |
 | `rm` 删除受保护前缀（`/`、`/etc`、`~`、`$HOME/…` 等） | 更早更严的拒绝 `COMMAND_DANGEROUS_PATTERN_BLOCKED`（pattern `RM_PROTECTED_TARGET`） | `command_policy.py:368-375`、`_PROTECTED_DELETE_PREFIXES`（`command_policy.py:12-29`） |
-| `sh -c "rm -rf <路径>"`、`bash -c "…"`、`env sh -c "…"`、`cd … && sh -c "…"` | **宿主放行**（`sh`/`bash` 段判为 unknown，不触发删除硬门；`allow_shell_operators=True` 下也不拦） | 实测：`analyze_command('sh -c "rm -rf …"')` 返回 `classification=unknown`、无 finding；`command_policy.py:513-514` 的 dangerous 仅含 `shutdown`/`reboot`/`halt`/`poweroff`/`telinit`/`mkfs*` 与 `_CATASTROPHIC_EXECUTABLES` |
-| `find … -delete`、`python3 -c "import shutil; …"` | 宿主放行（`find` 判只读、`python3 -c` 判 mutating，都不到删除硬门） | 实测（`find`→`read_only`，`python3 -c`→`mutating`，均无 finding） |
+| `sh -c "rm -rf <路径>"`、`bash -c "…"`、`env sh -c "…"`、`cd … && sh -c "…"` | **直接拒绝**（shellwrap 修复后：`-c` 字面程序递归拆包，嵌套 `rm` 同样产出 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；回执 `COMMAND_POLICY_BLOCKED`，没有 gate 行） | 实测：`analyze_command('sh -c "rm -rf …"')` 返回 `classification=dangerous`、finding `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；实现见 `command_policy.py` 的 `_nested_wrapper_findings` 与 `contracts/gates/shell_source.py` |
+| `find … -delete` | **直接拒绝**（`-delete` 按受管删除处理） | 实测：`find m1ar-probes -delete` → `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；`find … -exec rm` 同拒 |
+| `python3 -c "import shutil; …"` | 宿主放行（`python3 -c` 判 mutating，不到删除硬门） | 实测 `mutating`、无 finding；解释器代码是开放世界，不在前置拒绝覆盖范围（边界是执行层沙箱） |
 
-> 触发陷阱：**模型常把 `rm -rf <目录>` 直接写进 `run_command`，那样永远走不到插件**。这不是插件没生效，而是宿主先按自己的安全边界拒了。要验插件，必须让命令形状落在"宿主放行、由插件按自己声明的门收紧"的格子里——本手册第 5、6.2、7.1 节统一改用 `sh -c "rm -rf <目标>"`。
+> 触发陷阱：**模型常把 `rm -rf <目录>` 直接写进 `run_command`，那样永远走不到插件**。这不是插件没生效，而是宿主先按自己的安全边界拒了（shellwrap 之后 `sh -c "rm -rf …"` 一类包装写法同样被宿主拒）。要验插件，必须让命令形状落在"宿主放行、由插件按自己声明的门收紧"的格子里——本手册第 5、6.2、7.1 节统一改用**数据里带 `rm -rf` 的 printf 探针**：`run_command: printf '%s\n' 'rm -rf placeholder' > m1ar-probes/<渠道>/rm-guard-probe/ran.txt`。宿主判 `mutating` 放行（`rm -rf` 只是字符串数据），插件字面规则命中回 `ask/RM_RF`；拒绝后 `ran.txt` 不存在，就是"未执行"的文件证据。门失效放行时也只会多出一个 `ran.txt`，不会删任何东西。
 
 **怎么区分是谁拦的**（每次触发都按这三条一起判）：
 
@@ -216,7 +217,7 @@ SQL
 | 动作 | 可复现输入 | 通过所需结构化事实 |
 | --- | --- | --- |
 | 六类观察事件 | 通过 Gateway TUI 发：“请用 `read_file` 读取 `m1ar-probes/joint/read-probe.txt`，只回复该文件里的 M1 标记。”；再发送 `/status` | `/plugins info event-watch` 六类事件各有 `delivered >= 1`；`failed=0`、`unavailable=0`。因队列合并，`coalesced` 可非零，不要求精确等于请求数 |
-| rm 命令 ask | 请模型对 `m1ar-probes/joint/rm-guard-probe/` 执行 `run_command: sh -c "rm -rf m1ar-probes/joint/rm-guard-probe"`（**必须是 `sh -c` 包起来的形状**：裸 `rm -rf …` 会被宿主以 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 前置拒绝，插件一次都问不到，见 §4.1）；在出现 `[插件 rm-guard 要求确认：RM_RF …]` 后明确拒绝 | rm-guard（两个 guard 都启用时含 Node）各有 `verdict=ask`、`reason_code=RM_RF`、`host_status=allow`、`final_status=ask` 的账本行；关联回执为 `APPROVAL_REJECTED`；`sentinel.txt` 仍存在、命令未执行。**宿主侧先决条件**：同一形状在只读预检里 `analyze_command` 返回 `classification=unknown`、无 finding（§4.1 已实测），即"宿主放行、由插件收紧" |
+| rm 命令 ask | 请模型对 `m1ar-probes/joint/rm-guard-probe/` 执行 `run_command: printf '%s\n' 'rm -rf placeholder' > m1ar-probes/joint/rm-guard-probe/ran.txt`（**数据里带 `rm -rf` 的 printf 探针**：裸 `rm -rf …` 与 `sh -c "rm -rf …"` 都会被宿主以 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 前置拒绝，插件一次都问不到，见 §4.1）；在出现 `[插件 rm-guard 要求确认：RM_RF …]` 后明确拒绝 | rm-guard（两个 guard 都启用时含 Node）各有 `verdict=ask`、`reason_code=RM_RF`、`host_status=allow`、`final_status=ask` 的账本行；关联回执为 `APPROVAL_REJECTED`；`sentinel.txt` 仍存在、`ran.txt` 不存在（未执行的文件证据）。**宿主侧先决条件**：同一形状在只读预检里 `evaluate_command_policy` 返回 `allowed=True`、无 finding、`classification=mutating`（§4.1 已实测），即"宿主放行、由插件收紧" |
 | 补丁删除 deny | 要求模型**只使用 `apply_patch`** 删除 `m1ar-probes/joint/patch-delete-probe.txt`，使用下面的真实多行补丁 | 对每个已启用 guard 的对应行 `tool=apply_patch`、`verdict=deny`、`reason_code=DELETE_FILE_BLOCKED`、`final_status=deny`；工具回执 `error_code=PLUGIN_GATE_DENIED`，handler 未执行，原文件仍存在 |
 | **安全命令照常放行（allow_as_is）** | 要求模型对 `m1ar-probes/joint/` 执行一条**无害**的 `run_command`，例如 `ls -la m1ar-probes/joint`（不含任何删除动作） | 对每个已启用 guard 的对应行 `tool=run_command`、`verdict=allow_as_is`、`reason_code=NO_MATCH`、`host_status=allow`、`final_status=allow_as_is`；**不出现审批框**；工具回执正常（非 `PLUGIN_GATE_DENIED`、非 `APPROVAL_REJECTED`），handler 正常执行并输出 `ls` 结果。三种裁决里唯一"照常放行"的一支，缺它只验了两种 |
 | **超长参数被截断** | 1）**无害但截断**：让模型用 `run_command` 执行一条**远超 4000 字**、可见片段不含 `rm -rf` 的命令。2）**已 deny 仍 deny**：让模型用 `apply_patch` 提交一个**超长但含 `*** Delete File: ` 删除段**的补丁 | 1）账本行 `verdict=ask`、`reason_code=ARGUMENTS_TRUNCATED`、`final_status=ask`。2）账本行仍是 `verdict=deny`、`reason_code=DELETE_FILE_BLOCKED`（**截断不放松已看到的拒绝**，原因码保持原样）。3）可见片段本来就 `ask` 时**保留原 `RM_RF`**、消息追加"参数还被截断了"，不得改成 `ARGUMENTS_TRUNCATED` |
@@ -238,8 +239,8 @@ SQL
 PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
 PYTHONPATH=<候选代码树> "$PY" -c 'import sys; from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command_policy as e; \
 c=sys.argv[1]; d=e(c, allow_shell_operators=True); print(d.allowed, d.finding_codes)' \
-  'sh -c "rm -rf m1ar-probes/joint/rm-guard-probe"'
-# 期望输出：True ()   —— 宿主放行，才会走到插件
+  "printf '%s\n' 'rm -rf placeholder' > m1ar-probes/joint/rm-guard-probe/ran.txt"
+# 期望输出：True ()   —— 宿主放行（printf + 重定向判 mutating），才会走到插件
 ```
 
 **三条裁决的完整口径**（以 `plugins/rm-guard/src/server.py` 的 `review_gate` 为准，Node 版逐条对齐）：
@@ -261,9 +262,9 @@ c=sys.argv[1]; d=e(c, allow_shell_operators=True); print(d.allowed, d.finding_co
 
 ### 6.2 rm-guard 要求确认并被拒绝（含首次征询冷启动耗时）
 
-**命令形状必须先落在"宿主放行、由插件收紧"上**：请模型执行 `run_command: sh -c "rm -rf m1ar-probes/tui/rm-guard-probe"`（TUI）/ `sh -c "rm -rf m1ar-probes/feishu/rm-guard-probe"`（飞书）。**不要再写裸 `rm -rf <目录>`**——裸 `rm`/`rmdir`/`unlink` 会被宿主在 `ActionPolicy` 阶段以 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 前置拒绝（`command_policy.py:11`、`:423-433`；`shell.py:1079-1089`），插件一次都问不到，账本不会有 `plugin_gate.decided` 行。判据见 §4.1。
+**命令形状必须先落在"宿主放行、由插件收紧"上**：请模型执行 `run_command: printf '%s\n' 'rm -rf placeholder' > m1ar-probes/tui/rm-guard-probe/ran.txt`（TUI）/ `printf '%s\n' 'rm -rf placeholder' > m1ar-probes/feishu/rm-guard-probe/ran.txt`（飞书）。**不要写裸 `rm -rf <目录>`，也不要写 `sh -c "rm -rf …"`**——裸 `rm`/`rmdir`/`unlink` 与包一层 shell 的 `-c` 程序都会被宿主前置拒绝（shellwrap 后递归拆包；`_MANAGED_DELETE_EXECUTABLES` 与 `_nested_wrapper_findings`；`shell.py:1079-1089`），插件一次都问不到，账本不会有 `plugin_gate.decided` 行。printf 探针里 `rm -rf` 只是字符串数据，宿主判 `mutating` 放行、插件字面规则命中。判据见 §4.1。
 
-仅当审批文案含 `[插件 rm-guard 要求确认：RM_RF …]` 才进入拒绝步骤；TUI 选择"拒绝"，飞书按审批卡片或当前提示用管理员审批拒绝命令。回执结构化 `error_code=APPROVAL_REJECTED`，`call_id` 对上 `runtime_events` 的 ask 行，`verdict=ask`、`reason_code=RM_RF`。对应目录和 `sentinel.txt` 必须仍在。若没有插件前缀、转成普通审批、没有调用 `run_command` 或看不到 ask 行，记失败/未命中，**不得批准或让命令继续执行**。
+仅当审批文案含 `[插件 rm-guard 要求确认：RM_RF …]` 才进入拒绝步骤；TUI 选择"拒绝"，飞书按审批卡片或当前提示用管理员审批拒绝命令。回执结构化 `error_code=APPROVAL_REJECTED`，`call_id` 对上 `runtime_events` 的 ask 行，`verdict=ask`、`reason_code=RM_RF`。对应目录和 `sentinel.txt` 必须仍在，且 `ran.txt` **必须不存在**（探针未执行的文件证据）。若没有插件前缀、转成普通审批、没有调用 `run_command` 或看不到 ask 行，记失败/未命中，**不得批准或让命令继续执行**。
 
 **同时记录首次征询的冷启动耗时**（ds10 b5b7x 建议）：这是本渠道**第一次**命中插件门的调用，计时要包含插件进程首次启动/握手——多插件共用池上的第一次往往明显大于后续。做法：
 
@@ -544,7 +545,7 @@ cat "$M1_WORKSPACE/m1ar-probes/joint/read-probe.txt"
 
 参数中心的配置在 Gateway 重启后生效。用本手册环境变量在**同一隔离 home/配置/端口**上只重启测试 Gateway（`my-agent gateway stop` 后 `my-agent gateway start`），然后用 `my-agent gateway status` 核对 `http_port` 仍为测试端口、`workspace` 仍在隔离 home，并用 `/settings show` 核对 `false`。不要连接 8420。重启后 event-watch 的内存观察计数从空开始，禁止拿重启前后累计值直接比较。
 
-在 TUI、Feishu 各发一次安全普通提示、读取本渠道探针文件（TUI：`m1ar-probes/tui/read-probe.txt`；Feishu：`m1ar-probes/feishu/read-probe.txt`）与 `/status`；再各触发一次受控 rm-guard 请求（TUI：`run_command: sh -c "rm -rf m1ar-probes/tui/rm-guard-probe"`；Feishu：`run_command: sh -c "rm -rf m1ar-probes/feishu/rm-guard-probe"`——**必须用 `sh -c` 包起来的形状**：裸 `rm -rf …` 会被宿主前置拒（§4.1），那样即使插件照常征询也看不到区别，这个用例就失去意义）。插件前缀不应出现，`runtime_events` 不应新增这两个 guard 的 `plugin_gate.decided` 行，event-watch 不应产生任何观察计数。宿主自己的普通审批仍可能出现；若出现只作普通拒绝，不批准、不执行。`/plugins info` 应显示 `plugin_events_disabled` 原因/能力关闭（该原因码由 B7 提供；未合入时本项记「未执行」）。原因码、无新行和测试对象未改变三者必须一起核对，不能把宿主审批当作插件征询。**再次强调**：`sh -c "rm -rf …"` 在开关打开时**会**产生 ask 行（§6.2），所以"开关关闭后无新行"才有对照意义；用裸 `rm` 做的对照在两种状态下都没有 gate 行，等于没测。
+在 TUI、Feishu 各发一次安全普通提示、读取本渠道探针文件（TUI：`m1ar-probes/tui/read-probe.txt`；Feishu：`m1ar-probes/feishu/read-probe.txt`）与 `/status`；再各触发一次受控 rm-guard 请求（TUI：`run_command: printf '%s\n' 'rm -rf placeholder' > m1ar-probes/tui/rm-guard-probe/ran.txt`；Feishu：`printf '%s\n' 'rm -rf placeholder' > m1ar-probes/feishu/rm-guard-probe/ran.txt`——**必须用 printf 探针形状**：裸 `rm -rf …` 与 `sh -c "rm -rf …"` 都会被宿主前置拒（§4.1），那样即使插件照常征询也看不到区别，这个用例就失去意义）。插件前缀不应出现，`runtime_events` 不应新增这两个 guard 的 `plugin_gate.decided` 行，event-watch 不应产生任何观察计数。宿主自己的普通审批仍可能出现；若出现只作普通拒绝，不批准、不执行。`/plugins info` 应显示 `plugin_events_disabled` 原因/能力关闭（该原因码由 B7 提供；未合入时本项记「未执行」）。原因码、无新行和测试对象未改变三者必须一起核对，不能把宿主审批当作插件征询。**再次强调**：printf 探针在开关打开时**会**产生 ask 行（§6.2），所以"开关关闭后无新行"才有对照意义；用裸 `rm` 或 `sh -c "rm -rf …"` 做的对照在两种状态下都会被宿主先拒（都没有 gate 行），等于没测。
 
 随后恢复 `/settings set plugin_events_enabled true`、重启同一隔离 Gateway 并读回 `true`，以便完成插件停用检查。若切换后必须重启的语义与 17j 实际实现不符，记录实际结构化回执并停止修改生产配置。
 
@@ -558,12 +559,12 @@ cat "$M1_WORKSPACE/m1ar-probes/joint/read-probe.txt"
 | --- | --- | --- |
 | 版本及隔离 | 17j 含 B3–B9/B1/B2/H3；进程、配置、home、owner、端口都指向隔离测试实例，端口不是 8420 | 分支缺块、复审未完、B8 仍是 delete_file、配置/身份来源不明、碰到 8420、沙箱不可用 |
 | 联合冒烟 | 同一真实 Gateway 下三插件安装启用；6 类事件都有 delivered；Python/Node 的 ask 与 patch-delete deny 均有结构化行及正确码 | 假 Gateway/假池；少事件/字段错；Node 未运行却报全过；工具走错或 handler 执行 |
-| TUI | 走 Gateway；event-watch 6 类满足计数；`run_command: sh -c "rm -rf …"`（宿主放行形状，§4.1）ask 后 `APPROVAL_REJECTED` 且未删；apply_patch deny 为 `PLUGIN_GATE_DENIED` / `DELETE_FILE_BLOCKED` 且文件仍在 | 本地直连TUI代替、用户未拒绝、没有插件前缀/结构化行、目标已变、只看聊天正文；**用裸 `rm -rf` 触发而宿主先拒**（没有 gate 行，不是插件结果） |
-| 飞书 | 专用 Bot 私聊已绑定为 local/main；相同事件、ask、deny 和 /plugins info 都有可复核事实 | 用生产Bot/群聊/非管理员 owner；无 `APPROVAL_REJECTED` / `PLUGIN_GATE_DENIED`；凭口头承诺判断；用裸 `rm -rf` 触发而宿主先拒 |
+| TUI | 走 Gateway；event-watch 6 类满足计数；`run_command: printf '%s\n' 'rm -rf placeholder' > …/ran.txt` 探针（宿主放行形状，§4.1）ask 后 `APPROVAL_REJECTED` 且未删、`ran.txt` 不存在；apply_patch deny 为 `PLUGIN_GATE_DENIED` / `DELETE_FILE_BLOCKED` 且文件仍在 | 本地直连TUI代替、用户未拒绝、没有插件前缀/结构化行、目标已变、只看聊天正文；**用裸 `rm -rf` 或 `sh -c "rm -rf …"` 触发而宿主先拒**（没有 gate 行，不是插件结果） |
+| 飞书 | 专用 Bot 私聊已绑定为 local/main；相同事件、ask、deny 和 /plugins info 都有可复核事实 | 用生产Bot/群聊/非管理员 owner；无 `APPROVAL_REJECTED` / `PLUGIN_GATE_DENIED`；凭口头承诺判断；用裸 `rm -rf` 或 `sh -c "rm -rf …"` 触发而宿主先拒 |
 | 总开关/停用 | 开关 false 后两渠道事件无计数、插件 gate 无新行；恢复 true 后停用 event-watch，计数快照冻结 | 只读设置值未测生效；把宿主普通审批误当 plugin gate；停用后计数仍增加或没有可比较观察 |
 | 展示/账本 | `/plugins info` 最近决定、原原因码和“无法审批”字段；SQL 仅筛 `plugin_gate.decided` allowlist；工具回执能以 call_id 对上 | 读完整对话/日志代替结构化证据；错插件/错 run；把 `暂无记录` 写成通过 |
 | 三裁决齐全 | `allow_as_is`（`NO_MATCH`，无审批、handler 执行）、`ask`（`RM_RF`，拒绝后 `APPROVAL_REJECTED`）、`deny`（`DELETE_FILE_BLOCKED`，handler 未执行）各有结构化行 | 只验了 ask/deny 两支；allow 那支被跳过或没抓到 `NO_MATCH` 行 |
-| **宿主删除硬拒对照**（§4.1 的负例，专门防止把宿主当插件） | 让模型对同一目标执行**裸** `run_command: rm -rf m1ar-probes/<渠道>/rm-guard-probe`：回执 `error_code=COMMAND_POLICY_BLOCKED`；`runtime_events` 里这两个 guard **没有**对应 `plugin_gate.decided` 行；目录与 `sentinel.txt` 仍在 | 把它当成"插件拦住了"记通过；或该形状竟然出现了 gate 行（说明 §4.1 的宿主规则前提变了，停下重新核代码再继续） |
+| **宿主删除硬拒对照**（§4.1 的负例，专门防止把宿主当插件） | 让模型对同一目标分别执行两种形状——**裸** `run_command: rm -rf m1ar-probes/<渠道>/rm-guard-probe` 与包一层 shell 的 `run_command: sh -c "rm -rf m1ar-probes/<渠道>/rm-guard-probe"`：两种都应回执 `error_code=COMMAND_POLICY_BLOCKED`；`runtime_events` 里这两个 guard **没有**对应 `plugin_gate.decided` 行；目录与 `sentinel.txt` 仍在 | 把它当成"插件拦住了"记通过；或任一形状竟然出现了 gate 行（说明 §4.1 的宿主规则前提变了，停下重新核代码再继续） |
 | 截断只加严 | 无害但截断 → `ARGUMENTS_TRUNCATED`；已 deny 仍 `DELETE_FILE_BLOCKED`；已 ask 保留原 `RM_RF` 只补消息 | 把已 deny/ask 的结果改成 `ARGUMENTS_TRUNCATED`；用真值 `1`/`"true"` 当截断 |
 | B7 断网/收窄读 | **先做宿主侧对照**（直连 example.com:443 / Gateway 端口在监听 / 读得到哨兵三条都成功），再在插件进程里自查五项：外网、回环、宿主敏感区全 `blocked`；自己的包+数据目录、解释器全 `allowed`。结论看账本 `reason_code`（`PROBE_ALL_PASS` / `PROBE_FAIL_<项名>`），逐项明细看插件数据目录的 `probe-result.json` | 用 `read_file` 等宿主工具代证；缺 `allowed` 两项（无法区分"沙箱正确"与"什么都读不到"）；探针绕过 `/plugins enable`；从账本读 `message`（账本不存这个字段）；**没做对照或对照不成立却判了通过**（外网直连本来就通不了时，那一项记「对照不成立、未执行」） |
 | 非 local/main 负例 | 第二身份 `/plugins enable` 被拒且码为 `plugin_events_owner_not_allowed`；无新 `plugin_gate.decided` 行；原 local/main 状态未变 | 允许启用、码不对、或起了新代；放宽 owner 限定后重试 |

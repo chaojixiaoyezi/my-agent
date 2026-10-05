@@ -321,11 +321,18 @@ def _assert_ledger_and_info(bundle, case):
     assert f"结论 {case.reply['verdict']}" in text
 
 
+# 宿主放行、只有 rm-guard 要求确认的差集命令（无删除副作用）。shellwrap 以后 sh -c 包一层的 rm -rf 由宿主硬拒，
+# 不能再当差集用；改动时先确认 evaluate_command_policy(...).allowed 仍为真、插件仍回 ask/RM_RF。
+_GUARD_ONLY_COMMAND = 'echo rm -rf build'
+
+
 def test_rm_rf_forces_confirmation_and_user_denial_never_enters_handler(guard_joint, monkeypatch):
     # 裸rm仍由宿主硬拒；只在无副作用计数handler上选现有规则的差集，不放宽宿主策略。
+    # shellwrap 起 sh -c 包一层的删除也由宿主硬拒，差集改用 echo：宿主放行（无删除），
+    # rm-guard 的文字规则（独立 rm 词 + 递归 + 强制）仍要求确认——测的是插件收紧链路，不是删除本身。
     assert evaluate_command_policy('rm -rf build', allow_shell_operators=True).finding_codes == (
         'COMMAND_DESTRUCTIVE_DELETE_BLOCKED',)
-    command = 'sh -c "rm -rf build"'
+    command = _GUARD_ONLY_COMMAND
     assert evaluate_command_policy(command, allow_shell_operators=True).allowed
     case = _run_case(guard_joint, monkeypatch, _RunSpec('run_command', {'command': command}))
     _assert_query(case, 'guard-rm')
@@ -374,7 +381,7 @@ def test_truncated_patch_with_visible_delete_remains_denied(guard_joint, monkeyp
 #   条目必须仍然留在账本里（9b 实测原来批准路径也是空账本）。用零副作用计数探针证明"真跑了"。
 # 函数用途: 断言批准后 handler 真执行，且账本与 /plugins info 仍读到那一次征询。
 def test_rm_rf_confirmation_approved_runs_handler_and_keeps_ledger(guard_joint, monkeypatch):
-    command = 'sh -c "rm -rf build"'
+    command = _GUARD_ONLY_COMMAND
     case = _run_case(guard_joint, monkeypatch, _RunSpec('run_command', {'command': command}, decision='approved'))
     _assert_query(case, 'guard-rm')
     assert case.reply['verdict'] == 'ask' and case.reply['reason_code'] == 'RM_RF'
@@ -412,7 +419,7 @@ def _assert_tool_events_visible(bundle):
 #   否则 B6 的"无法审批"计数会漏掉所有审批阶段才判定的情况。handler 必须零执行。
 # 函数用途: 断言非交互请求下 ask 收紧为不可审批、账本终态与计数都对。
 def test_rm_rf_confirmation_unavailable_projects_unavailable_final_status(guard_joint, monkeypatch):
-    command = 'sh -c "rm -rf build"'
+    command = _GUARD_ONLY_COMMAND
     case = _run_case(guard_joint, monkeypatch, _RunSpec('run_command', {'command': command}, interactive=False))
     _assert_query(case, 'guard-rm', interactive=False)
     assert case.reply['verdict'] == 'ask' and case.reply['reason_code'] == 'RM_RF'
@@ -433,7 +440,7 @@ def test_rm_rf_confirmation_unavailable_projects_unavailable_final_status(guard_
 #   所以这条专门钉 b5fix9b 的 unavailable 承接；漏了它 B6 的计数会漏掉整类"审批时才判定"的情况。
 # 函数用途: 断言审批阶段判定不可用时，账本终态仍投影成不可审批。
 def test_rm_rf_confirmation_consumer_unavailable_projects_unavailable_final_status(guard_joint, monkeypatch):
-    command = 'sh -c "rm -rf build"'
+    command = _GUARD_ONLY_COMMAND
     case = _run_case(guard_joint, monkeypatch,
                      _RunSpec('run_command', {'command': command}, decision='unavailable'))
     _assert_query(case, 'guard-rm')  # 客户端声明了 tool_approval，所以插件看到的是可交互
@@ -455,7 +462,7 @@ def test_rm_rf_confirmation_consumer_unavailable_projects_unavailable_final_stat
 def test_recent_decisions_are_rendered_newest_first(guard_joint, monkeypatch):
     older = _run_case(guard_joint, monkeypatch, _RunSpec('apply_patch', {'patch': _DELETE_PATCH}))
     newer = _run_case(guard_joint, monkeypatch,
-                      _RunSpec('run_command', {'command': 'sh -c "rm -rf build"'}))
+                      _RunSpec('run_command', {'command': _GUARD_ONLY_COMMAND}))
     assert older.reply['reason_code'] == 'DELETE_FILE_BLOCKED'
     assert newer.reply['reason_code'] == 'RM_RF'
 

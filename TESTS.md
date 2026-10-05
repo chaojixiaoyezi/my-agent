@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## shellwrap 并入 17k 时的联合用例调整（3a，2026-10-05）
+
+- `test_plugin_m1_joint_tool_gate.py` 原先用 `sh -c "rm -rf build"` 当“宿主放行、只有 rm-guard 要求确认”的差集命令；shellwrap 起包一层的删除由宿主硬拒，5 条用例的前提断言失败。差集改为模块常量 `_GUARD_ONLY_COMMAND = 'echo rm -rf build'`（宿主放行、无删除副作用，rm-guard 文字规则仍回 ask/RM_RF），测的仍是插件收紧链路。联合两文件 11 passed / 1 skipped。
+
+## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`，待 3a 终审）
+
+- **改了什么**：`contracts/gates/command_policy.py` 嵌套 Shell 程序递归检查（sh -c / eval / xargs / find 动作；深度上限 4、源长上限 32k，超限 fail-closed）；新增 `contracts/gates/shell_source.py` 唯一提取器（shell_syntax 改导入）；find 带写/执行动作不再算只读；两个新 finding code 注册进 error_taxonomy；常数目录重生成（901 项）。**shellwrap2 补**：`_XARGS_VALUE_OPTIONS` 加 `-a`/`-J`、长选项两种写法都消耗值（抽 `_xargs_after_long_option`）；find 动作扫描改用命令位到 argv 末尾的完整序列（`;` 只当段终止符）。
+- **用例**（新增 `agent_py_agent/tests/test_command_policy_wrapped_delete.py`，44 条）：19 个正例（各 shell -c 组合、env、cd &&、两层、eval、xargs、find -delete/-exec）全拒且 finding 带 nested_depth；8 个反例（echo/printf/grep/git -m/python -c/sh -c "ls"）不误伤；受保护目标、allowed_commands、深度边界（4 层放行 8 层拒）、40k 超长 fail-closed、10k 性能 <0.1s；四个调用点各一条接线。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 新文件 + test_command_policy.py → **85 passed**；guards9 三个新失败修复后复跑（test_recovery_code_policy、test_constants_catalog）→ **27 passed**。
+  - 变异 5 个（脚本 `tmp/shellwrap-mutations/mutations.py`，逐个改完自动还原）：m1 去掉递归 / m2 深度上限失效 / m3 find -delete 不拦 / m4 find 退回只读 / m5 xargs 不拆包 → **5/5 KILLED，restored=True**。
+  - **环境类失败（已在基线 `6e31e5855` 临时 worktree 逐文件对照，失败序列逐字符一致）**：sandbox_boundary_facts 的 2 个真实 Seatbelt 测试（失败/卡）、test_pty_sessions（`F............FF.F.F..`）、批 A tooling_shell 等（`..F.FFFF............F...F..F.FFFFFFF......`+超时）、test_shell_stdin（`F..F..`）、test_shell_orphan_kill（`FFFFFFF..............`）——沙箱不允许嵌套 Seatbelt / 进程组类操作，与本批无关。
+- **收尾（接着做）**：手册 §4.1/5/6.2/7.1 探针改 printf 形状、DEVELOPMENT_RULES 加覆盖边界段；完整 guards9 全过（11 文件）；ruff、doc_sync、strict code-size（2199/hard=0/blocked=False）、`git diff --check`、clean-package、size_diff（新增 0 / 消失 44）全过。待非作者初审，之后交 9b 终审。
+- **shellwrap2 修复与复验（初审 shellwrapr 两处真漏）**：
+  - 用例新增：xargs `-a file`、`-J %`、`--max-args 1`、`--max-args=1` 四条正例；find 多段 `-exec echo {} \; -exec rm {} \;`（含 `+`、引号形式）四条正例；`find . -name x \; rm -rf y` 单列一条（`;` 后接 shell 命令，rm 由自己的命令位拦）；误伤回归加 `xargs grep`、`find . -exec grep {} \;`、`find . -name x -print`。
+  - 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：新文件 + `test_command_policy.py` → **97 passed**；guards9 十一文件全过。
+  - 变异 4 个（脚本 `/private/tmp/claude-501/m-shellwrap2/mut.py`，逐个 sha256 还原、`还原一致=True`）：M2' `+` 终止符改 `;` → KILLED（`find . -exec echo {} + -exec rm {} ;`）；M4' xargs 不跳值选项 → KILLED（`xargs -a file`/`-J %`）；M6 回退 find 截断扫描 → KILLED（三条多段用例）；M7 长选项不消耗值 → KILLED（`xargs --max-args 1 rm -rf`）。**4/4 KILLED**（M2'/M4' 是初审时存活的两个，现均可杀）。
+  - 门禁：ruff `All checks passed!`；boundaries=0；doc_sync `--base a2f5f1b2e` PASS；strict code-size `hard=0 blocked=False`；diff-check 干净；clean-package OK；**size_diff 新增 0 / 消失 44**（首轮曾因 `_xargs_findings` nesting 新增 1 条，抽 `_xargs_after_long_option` 后归零）。
+- **shellwrap3 修复与复验（3a 终审实测的 xargs 选项解析真漏）**：
+  - 用例新增：12 条原放行写法（`--null`/`--no-run-if-empty`/`--verbose`/`--nu`/`--eof`/`--replace`/`--max-lines`/`-0n 1`/`-rn 1`/`-tI {}`/`-R 1`/`-S 255`）全部转拦；3 条照旧拦（`--max-args 1`/`-n1`/`--null --`）；6 条误伤回归（`xargs grep foo`/`-n 1 grep foo`/`--max-args=1 echo hi`/`-0 -I {} cp`/`--null grep foo`/`-tn 2 echo`）；`--nu` 与 `-z` 单列断言 `COMMAND_XARGS_UNKNOWN_OPTION`（含 recovery 字段）。
+  - 命令与结果：新文件 + `test_command_policy.py` → **119 passed**；guards9 十一文件全过。
+  - 变异 4 个（脚本 `/private/tmp/claude-501/m-shellwrap2/mut3.py`，逐个 sha256 还原、`还原一致=True`）：N1 从开关表删 `--null` → KILLED（正例 + 误伤回归一起红）；N2 删取值字母 `S` → KILLED；N3 未知长选项不再给 finding → KILLED（单列用例）；N4 从开关表删 `--eof` → KILLED。**4/4 KILLED**。
+  - 门禁：ruff/boundaries/doc_sync（--base 897388630）/strict code-size/diff-check/clean-package 全过；**size_diff 新增 0 / 消失 44**（首轮 `_xargs_after_short_options` nesting 新增 1 条，扁平化后归零）。新 finding `COMMAND_XARGS_UNKNOWN_OPTION` 已注册 `error_taxonomy`（含恢复提示：改用 `--选项=值` 或 `--`）。
+
 ## 编程错误不按消息文字判可重试（progerr，2026-10-05，worker/progerr，基于 17k 头 `9e2f0eb69`，待 3a 复审）
 
 - 改动：`agent_py_agent/agent/contracts/provider_error_classifier.py` 新增 `_PROGRAMMING_ERROR_TYPES` 名单并在文本/状态码兜底前按类型拦截（UNKNOWN/不重试）；`test_provider_error_classifier.py` 新增 9 类编程错误参数化（消息均带可重试特征词，旧逻辑会误判）+ 17k 五条实测 + ValueError 钉住用例；`test_provider_transient_auto_resume.py` 新增端到端用例（operation 抛 TypeError 只调用 1 次、不调 wait、类型与消息原样）。

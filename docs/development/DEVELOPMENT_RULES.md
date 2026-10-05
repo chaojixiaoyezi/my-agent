@@ -288,6 +288,14 @@ before changing code.
   deleting `/`, deleting system/home roots, writing raw disks with `dd`,
   formatting disks, or shutting down/rebooting remain hard-blocked even when
   `access_mode=full-access`.
+- The command-policy delete gate is a structural interception of common shapes,
+  not a security boundary: it statically unwraps literal `sh -c` programs, `eval`,
+  `xargs`, and `find -exec/-delete` (bounded depth and source size, fail-closed)
+  so those shapes cannot bypass `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`, and it
+  routes the model to recoverable deletion (`apply_patch` / task trash).
+  Open-world forms (`python -c`, `perl -e`, `node -e`, script files) are
+  intentionally not covered and never string-scanned; the real boundary is the
+  execution sandbox (write roots, protected paths, task trash).
 - `run_command` must protect already-ready deliverables generically. Before shell
   execution, snapshot every `ready` artifact registry record that still points to
   a file. After shell exits, compare path existence, size and hash; if a file

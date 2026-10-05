@@ -1,11 +1,17 @@
 
+# LLM: 覆盖边界（9b 2026-10-04 定）：本模块结构化拦截的是"常见写法的删除命令"——裸 rm/rmdir/unlink、
+#   sh -c 一类字面 -c 程序、eval、xargs、find -delete/-exec 这些能被静态拆开的形状；命中的命令被拒并
+#   引导到可恢复删除（apply_patch / task_trash）。python -c、perl -e、node -e、脚本文件等开放世界写法
+#   不在覆盖范围，不做字符串扫描；真正的安全边界是执行层沙箱的写根、受保护路径和任务回收站。
 from __future__ import annotations
 
 import re
 import shlex
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
+
+from .shell_source import shell_command_source
 
 _CATASTROPHIC_EXECUTABLES = frozenset({"shutdown", "reboot", "halt", "poweroff", "telinit"})
 _MANAGED_DELETE_EXECUTABLES = frozenset({"rm", "rmdir", "unlink"})
@@ -28,6 +34,33 @@ _PROTECTED_DELETE_PREFIXES = (
     "/var",
 )
 _SHELL_EXECUTABLES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+# 嵌套 Shell 程序（sh -c / eval / xargs / find -exec）递归检查的深度上限：超过按"无法解析"处理，
+# fail-closed 给 finding 不放行；4 层覆盖真实常见包装，更深的写法交给沙箱边界（见文件头覆盖边界注）。
+_NESTED_SHELL_DEPTH_LIMIT_COUNT = 4
+# 单条嵌套程序的字符上限：解析是线性的，超长输入不再递归（fail-closed 给 finding）。32k 足够容纳真实包装文本。
+_NESTED_SHELL_SOURCE_MAX_CHARS = 32_768
+# xargs 选项表（来源：GNU findutils xargs 手册 + macOS/BSD xargs 手册，2026-10-05 shellwrap3 逐项核对）。
+#   拆包的关键是"这个选项到底吃不吃下一个词"：吃错了就会把后面的命令当成选项值而跳过，真删就会放行。
+#   所以只认表内完整选项名；不在表里的（含 GNU 长选项缩写）一律从严给 finding——宁可多拦，不猜缩写，
+#   提示改用 `--选项=值`（明确带值、不会吃下一个词）或在命令前加 `--` 终止符。
+_XARGS_LONG_VALUE_OPTIONS = frozenset(
+    {"--arg-file", "--delimiter", "--max-chars", "--max-procs", "--max-args", "--process-slot-var"}
+)
+_XARGS_LONG_FLAG_OPTIONS = frozenset(
+    {
+        "--null", "--no-run-if-empty", "--verbose", "--interactive", "--open-tty", "--exit",
+        "--show-limits", "--help", "--version", "--eof", "--replace", "--max-lines",
+    }
+)
+# 短选项按字母逐个走（GNU 与 BSD 并集）：取值字母后面还有字符算连写值，没有就吃下一个词；
+# 可选值字母（GNU -e/-i/-l 的 [值] 形式）后面的字符都算它的值，绝不吃下一个词；开关字母继续往后看。
+_XARGS_SHORT_VALUE_LETTERS = frozenset("adEIJLnPRsS")
+_XARGS_SHORT_OPTIONAL_LETTERS = frozenset("eil")
+_XARGS_SHORT_FLAG_LETTERS = frozenset("0oprtx")
+# find 动作：-delete 按受管删除拦；-exec/-ok 族按嵌套命令检查；写文件动作让 find 不再算只读。
+_FIND_DELETE_ACTION = "-delete"
+_FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_FIND_WRITE_ACTIONS = frozenset({"-fprint", "-fprint0", "-fprintf", "-fls"})
 _DOWNLOAD_EXECUTABLES = frozenset({"curl", "wget"})
 _FORK_BOMB_RE = re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:")
 _READ_ONLY_EXECUTABLES = frozenset(
@@ -180,10 +213,12 @@ def evaluate_command_policy(
     parsed = _parse_command_value(command)
     if parsed.findings:
         return parsed
+    allowed = frozenset(allowed_commands)
     findings, covered_positions = _dangerous_pattern_findings(parsed.argv)
     if not allow_shell_operators:
         findings.extend(_shell_operator_findings(parsed.argv, _raw_command_text(command)))
-    findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions, frozenset(allowed_commands)))
+    findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions, allowed))
+    findings.extend(_nested_wrapper_findings(parsed.argv, allowed, 0))
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
 
 
@@ -282,6 +317,11 @@ def _segment_classification(segment: CommandSegment) -> str:
             else "mutating"
         )
     if executable == "sed" and any(arg in {"-i", "--in-place"} or arg.startswith("-i") for arg in args):
+        return "mutating"
+    if executable == "find" and _find_has_write_action(args):
+        # find 带删除/执行/写文件动作时不再算只读；-delete 的删除 finding 在策略层单独拦。
+        # 嵌套分类只按"更严"方向影响外层：外层包装（sh/bash/xargs）的分类不低于 unknown，
+        # 嵌套只读不会把外层降级，嵌套危险由 findings 路径覆盖为 dangerous。
         return "mutating"
     if executable in {"python", "python3"} and _python_read_only_module(args):
         return "read_only"
@@ -436,6 +476,238 @@ def _dangerous_executable_findings(
                 CommandPolicyFinding("COMMAND_DANGEROUS_EXECUTABLE_BLOCKED", {"executable": executable})
             )
     return findings
+
+
+# LLM: 包一层 shell（sh -c / eval / xargs / find -exec）会把删除命令藏进参数文本；这里用与顶层相同的
+#   解析器和危险模式/受管删除检查递归拆包，超深或超长按"无法解析"fail-closed。只做结构化提取，
+#   不扫原始字符串；python -c / perl -e / 脚本文件是开放世界，不在覆盖范围（安全边界是 OS 沙箱）。
+# 函数用途: 找出 argv 里的嵌套程序（sh -c、eval、xargs、find 动作）并递归检查，返回带 nested_depth 的 finding。
+def _nested_wrapper_findings(
+    argv: tuple[str, ...],
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    findings: list[CommandPolicyFinding] = []
+    for position in effective_command_positions(argv):
+        findings.extend(_wrapper_position_findings(argv, position, allowed_commands, depth))
+    return findings
+
+
+# 函数用途: 检查一个命令位是不是嵌套包装（sh -c / eval / xargs / find），是则交给对应拆包检查。
+def _wrapper_position_findings(
+    argv: tuple[str, ...],
+    position: int,
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    executable = command_name(argv[position])
+    args = _command_args(argv, position)
+    if executable in _SHELL_EXECUTABLES:
+        source = shell_command_source(tuple(args))
+        return _nested_program_findings(source, allowed_commands, depth + 1) if source is not None else []
+    if executable == "eval":
+        source = " ".join(args).strip()
+        return _nested_program_findings(source, allowed_commands, depth + 1) if source else []
+    if executable == "xargs":
+        return _xargs_findings(args, allowed_commands, depth + 1)
+    if executable == "find":
+        # find 的动作扫描用从命令位到 argv 末尾的完整序列（不按 shell operator 截断）：
+        # `;` 在 find 语法里是 -exec 段终止符，转义 `\;` 解析后与 shell 分隔符同形，
+        # 按截断处理会丢掉第二个及以后的 -exec 段（shellwrapr 初审漏 2）；宁严跨段继续扫。
+        return _find_action_findings(list(argv[position + 1:]), allowed_commands, depth + 1)
+    return []
+
+
+# 函数用途: 解析一条嵌套 Shell 程序文本并检查危险模式、受管删除和更深嵌套；超深/超长/解析失败 fail-closed。
+def _nested_program_findings(
+    source: str,
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    if depth > _NESTED_SHELL_DEPTH_LIMIT_COUNT:
+        return [CommandPolicyFinding("COMMAND_NESTED_DEPTH_EXCEEDED", {"nested_depth": depth})]
+    if len(source) > _NESTED_SHELL_SOURCE_MAX_CHARS:
+        return [CommandPolicyFinding("COMMAND_NESTED_SOURCE_TOO_LARGE", {"nested_depth": depth})]
+    parsed = _parse_command_value(source)
+    if parsed.findings:
+        return _tag_nested_depth(list(parsed.findings), depth)
+    return _nested_argv_findings(parsed.argv, allowed_commands, depth)
+
+
+# 函数用途: 对一段嵌套 argv（文本解析结果或 find/xargs 拆出的命令）跑危险模式与受管删除检查并继续递归。
+def _nested_argv_findings(
+    argv: tuple[str, ...],
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    if depth > _NESTED_SHELL_DEPTH_LIMIT_COUNT:
+        return [CommandPolicyFinding("COMMAND_NESTED_DEPTH_EXCEEDED", {"nested_depth": depth})]
+    findings, covered_positions = _dangerous_pattern_findings(argv)
+    findings.extend(_dangerous_executable_findings(argv, covered_positions, allowed_commands))
+    findings.extend(_nested_wrapper_findings(argv, allowed_commands, depth))
+    return _tag_nested_depth(findings, depth)
+
+
+# 函数用途: 拆开 xargs 的选项，把其后的命令按嵌套 argv 检查；未知选项从严给 finding 不放行。
+def _xargs_findings(
+    args: list[str],
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    index, option_findings = _xargs_scan_options(args)
+    if index >= len(args):
+        return option_findings
+    nested = _nested_argv_findings(tuple(args[index:]), allowed_commands, depth)
+    return [*option_findings, *nested]
+
+
+# LLM: 选项解析必须是线性一遍扫描：每读一个选项就决定它是否吃掉下一个词，不做"多种解释"的分叉
+#   （嵌套 xargs 时分叉组合会指数爆炸）。长短选项分开处理，表外的选项一律从严（见选项表注释）。
+# 函数用途: 扫描 xargs 的选项，返回命令起始下标与需要拦截的未知选项 finding。
+def _xargs_scan_options(args: list[str]) -> tuple[int, list[CommandPolicyFinding]]:
+    findings: list[CommandPolicyFinding] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return index + 1, findings
+        if not token.startswith("-") or token == "-":
+            return index, findings
+        if token.startswith("--"):
+            index = _xargs_after_long_option(args, index, findings)
+        else:
+            index = _xargs_after_short_options(args, index, findings)
+    return index, findings
+
+
+# LLM: 长选项只认表内完整名：`--opt=value` 无歧义（不吃下一个词）整体跳过；必须带值的吃下一个词；
+#   开关/可选值不吃；表外的（含 GNU 缩写）给 finding——缩写可能属于带值选项，猜错就会放走命令。
+# 函数用途: 按已知长选项表决定跳过几个 token；未知选项追加一条拦截 finding。
+def _xargs_after_long_option(
+    args: list[str], index: int, findings: list[CommandPolicyFinding]
+) -> int:
+    token = args[index]
+    if "=" in token:
+        return index + 1
+    if token in _XARGS_LONG_VALUE_OPTIONS:
+        return index + 2 if index + 1 < len(args) else index + 1
+    if token in _XARGS_LONG_FLAG_OPTIONS:
+        return index + 1
+    findings.append(_xargs_unknown_option_finding(token))
+    return index + 1
+
+
+# LLM: 短选项串按字母逐个走：取值字母后面还有字符就是连写值（同一 token），没有就吃下一个词；
+#   可选值字母（-e/-i/-l）后面的字符都算它的值、绝不吃下一个词；开关字母继续；未知字母给 finding。
+# 函数用途: 解析一个短选项串，返回下一个待读下标；未知字母追加一条拦截 finding。
+def _xargs_after_short_options(
+    args: list[str], index: int, findings: list[CommandPolicyFinding]
+) -> int:
+    letters = args[index][1:]
+    for position, letter in enumerate(letters):
+        if letter in _XARGS_SHORT_VALUE_LETTERS:
+            # 后面还有字符就是连写值（同一 token）；没有就吃下一个词（越界则到尾部为止）。
+            consumed = index + 1 if letters[position + 1 :] else index + 2
+            return min(consumed, len(args))
+        if letter in _XARGS_SHORT_OPTIONAL_LETTERS:
+            return index + 1
+        if letter not in _XARGS_SHORT_FLAG_LETTERS:
+            findings.append(_xargs_unknown_option_finding(args[index]))
+            return index + 1
+    return index + 1
+
+
+# 函数用途: 生成 xargs 未知选项的拦截 finding，附可恢复的两种明确写法建议。
+def _xargs_unknown_option_finding(token: str) -> CommandPolicyFinding:
+    return CommandPolicyFinding(
+        "COMMAND_XARGS_UNKNOWN_OPTION",
+        {
+            "option": str(token)[:40],
+            "recovery": "use --option=value or -- before the command",
+        },
+    )
+
+
+# 函数用途: 检查 find 的 -delete（按受管删除）与 -exec/-execdir/-ok/-okdir（按嵌套命令）；返回 finding。
+def _find_action_findings(
+    args: list[str],
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    findings: list[CommandPolicyFinding] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == _FIND_DELETE_ACTION:
+            findings.append(_find_delete_finding(depth))
+            index += 1
+            continue
+        if token in _FIND_EXEC_ACTIONS:
+            segment_findings, index = _find_exec_findings(args, index + 1, allowed_commands, depth)
+            findings.extend(segment_findings)
+            continue
+        index += 1
+    return findings
+
+
+# 函数用途: 生成 find -delete 的受管删除 finding（与嵌套 rm 同一 code 与替换建议）。
+def _find_delete_finding(depth: int) -> CommandPolicyFinding:
+    return CommandPolicyFinding(
+        "COMMAND_DESTRUCTIVE_DELETE_BLOCKED",
+        {
+            "executable": "find",
+            "action": _FIND_DELETE_ACTION,
+            "replacement": "apply_patch_or_task_trash",
+            "nested_depth": depth,
+        },
+    )
+
+
+# 函数用途: 检查一段 find -exec 嵌套命令；返回 finding 与下一个待扫描位置。
+def _find_exec_findings(
+    args: list[str],
+    start: int,
+    allowed_commands: frozenset[str],
+    depth: int,
+) -> tuple[list[CommandPolicyFinding], int]:
+    segment, next_index = _find_exec_segment(args, start)
+    if not segment:
+        return [], next_index
+    return _nested_argv_findings(segment, allowed_commands, depth), next_index
+
+
+# 函数用途: 取 find -exec 动作后的嵌套命令（到 + 或段尾）；返回命令段与下一个待扫描位置。
+def _find_exec_segment(args: list[str], start: int) -> tuple[tuple[str, ...], int]:
+    segment: list[str] = []
+    index = start
+    while index < len(args):
+        token = args[index]
+        if token in {";", "+"}:
+            return tuple(segment), index + 1
+        segment.append(token)
+        index += 1
+    return tuple(segment), index
+
+
+# 函数用途: 给嵌套层产生的 finding 补 nested_depth；更深处已带的 finding 不被覆盖。
+def _tag_nested_depth(
+    findings: list[CommandPolicyFinding],
+    depth: int,
+) -> list[CommandPolicyFinding]:
+    return [
+        finding
+        if "nested_depth" in finding.evidence
+        else replace(finding, evidence={**finding.evidence, "nested_depth": depth})
+        for finding in findings
+    ]
+
+
+# 函数用途: 判断 find 是否带删除/执行/写文件动作；带则不再算只读。
+def _find_has_write_action(args: list[str]) -> bool:
+    return any(
+        token == _FIND_DELETE_ACTION or token in _FIND_EXEC_ACTIONS or token in _FIND_WRITE_ACTIONS
+        for token in args
+    )
 
 
 def _command_args(argv: tuple[str, ...], position: int) -> list[str]:

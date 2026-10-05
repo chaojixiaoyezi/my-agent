@@ -1564,6 +1564,37 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             + _MANAGED_DELETE_RECOVERY_HINT
         ),
     ),
+    "COMMAND_NESTED_DEPTH_EXCEEDED": ErrorContract(
+        code="COMMAND_NESTED_DEPTH_EXCEEDED",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "命令嵌套的 shell 程序层数超过解析上限，宿主无法确认实际执行内容；"
+            "拆成更少层的独立调用，不得原样重试。"
+        ),
+    ),
+    "COMMAND_NESTED_SOURCE_TOO_LARGE": ErrorContract(
+        code="COMMAND_NESTED_SOURCE_TOO_LARGE",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "作为程序传入的文本超过解析上限，宿主无法确认实际执行内容；"
+            "拆成更小的独立命令，不得原样重试。"
+        ),
+    ),
+    "COMMAND_XARGS_UNKNOWN_OPTION": ErrorContract(
+        code="COMMAND_XARGS_UNKNOWN_OPTION",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "xargs 选项不在宿主已知选项表里（含长选项缩写），宿主无法确认它是否吃掉下一个词、"
+            "也就无法确认实际执行的命令；改用完整写法 `--选项=值`，或在命令前加 `--` 终止符，"
+            "不得原样重试。"
+        ),
+    ),
     "COMMAND_SHELL_OPERATOR_BLOCKED": ErrorContract(
         code="COMMAND_SHELL_OPERATOR_BLOCKED",
         category="permission",

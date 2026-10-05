@@ -1,5 +1,25 @@
 # 设计台账
 
+## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`；初审 shellwrapr 两处真漏已修，终审又发现 xargs 选项解析真漏、shellwrap3 修复；待 3a 终审）
+
+- **问题（9b 证据 review-rm-wrap-gap）**：裸 rm/rmdir/unlink 被 `command_policy` 硬拒，但 `sh -c "rm -rf …"`、`bash -c`、`env sh -c`、`cd … && sh -c`、`eval`、`xargs rm`、`find … -delete` 都判 unknown/read_only、没有 finding；ActionPolicy 对 unknown 直接放行，Full Access 下会真执行。
+- **修法（9b 定方向，唯一权威入口 contracts/gates/command_policy.py）**：
+  - 新增 `contracts/gates/shell_source.py`：`-c` 字面程序提取与 heredoc 剔除下沉为唯一提取器；`tooling/shell_syntax.py` 改为导入（依赖方向 tooling → contracts 不变）。
+  - `evaluate_command_policy` 递归拆包：sh/bash/zsh/dash/ksh 的 `-c` 程序、`eval` 参数、`xargs`（跳过 -n/-I/-L/-P/-s/-d/-E/-a/-J 及值、长选项 `--opt=value`/`--opt value` 两种写法都消耗值）、`find -exec/-execdir/-ok/-okdir`（到 `+`/`;`/段尾）按嵌套 argv 重跑危险模式与受管删除检查；`find -delete` 按受管删除拦；finding evidence 带 `nested_depth`。
+  - 深度上限 4（超限 `COMMAND_NESTED_DEPTH_EXCEEDED`）、单条嵌套源 32k 字符上限（超限 `COMMAND_NESTED_SOURCE_TOO_LARGE`），都 fail-closed 不放行；两个新 code 已注册进 `error_taxonomy`。
+  - 分类取更严：find 带 -delete/-exec*/-ok*/-fprint*/-fls 不再算只读（mutating）；外层包装保持 unknown 不因嵌套只读降级（`bash -lc "ls"` 仍 unknown）。
+- **覆盖边界（9b 定）**：这条前置拒绝是"常见写法的结构化拦截 + 引导到可恢复删除"（apply_patch / task_trash），不是安全边界；python -c、perl -e、node -e、脚本文件等开放世界写法不覆盖、不做字符串扫描；真正边界是执行层沙箱。已写进 command_policy 模块头、DEVELOPMENT_RULES 与手册 §4.1/5/6.2/7.1（探针统一换 printf 形状）。
+- **验证**：见 TESTS.md 同名节（44 条新用例 + 5 变异全 KILLED；环境类失败已逐文件在基线 `6e31e5855` 对照）。
+- **收尾（接着做）**：手册 `PLUGIN_EVENT_HOOKS_ACCEPTANCE.md` 的 rm-guard 探针统一改为 `printf '%s\n' 'rm -rf placeholder' > …/rm-guard-probe/ran.txt`（宿主判 mutating 放行、插件字面命中；被拒后 `ran.txt` 不存在即"未执行"证据），§4.1 规则表同步（`sh -c "rm -rf …"` 与 `find -delete` 改判"直接拒绝"），"宿主删除硬拒对照"负例同时放裸 rm 与 sh -c rm；DEVELOPMENT_RULES 已加覆盖边界段。完整 guards9 全过；ruff、doc_sync、strict code-size（2199/hard=0/blocked=False）、`git diff --check`、clean-package、size_diff（新增 0 / 消失 44）全过。待非作者初审，之后交 9b 终审。
+- **shellwrap2 修复（初审 shellwrapr 的两处真漏）**：
+  - **漏 1（xargs 值选项不全）**：`-a file`（GNU 从文件读输入）、`-J %`（BSD/macOS 替换串）、`--max-args 1`（长选项空格形式）会让值被当成命令、其后的 rm 逃过拆包。修法：`_XARGS_VALUE_OPTIONS` 补 `-a`/`-J`；长选项按 `--opt=value`（单 token）与 `--opt value`（分离，保守消耗下一个非选项值）两种写法处理，`--` 作选项终止符不消耗；抽出单层 `_xargs_after_long_option` 避免尺寸告警。
+  - **漏 2（find 多段终止符被截断）**：`_command_args` 在第一个 `;`（shell operator）处截断，转义 `\;` 解析后与分隔符同形，导致 `find . -exec echo {} \; -exec rm {} \;` 第二个及以后的 `-exec` 段被丢弃。修法：find 的动作扫描改用从命令位到 argv 末尾的完整序列，`;` 只当 find 段终止符继续往后扫（宁严；`;` 后的独立命令仍由自己的命令位拦）。
+  - 用例：xargs 新形状 4 条、find 多段 4 条 + `;` 后接 shell 命令 1 条、误伤回归 3 条；变异 4 个（M2' `+` 改 `;`、M4' xargs 不跳值选项、M6 回退截断、M7 长选项不消耗值）**4/4 KILLED**（含初审时存活的两个）。相关 97 passed、guards9 全过；ruff、doc_sync（--base a2f5f1b2e）、strict code-size、diff-check、size_diff（新增 0）全过。
+- **shellwrap3 修复（3a 终审实测的第三类真漏：xargs 选项解析）**：
+  - **问题**：`_xargs_after_long_option` 把"长选项后面跟一个不以 - 开头的词"一律当值吃掉，短选项连写整块当开关跳过、值选项清单缺 `-R`/`-S`。实测放行的有：开关型长选项吃掉命令（`--null`/`--no-run-if-empty`/`--verbose`/缩写 `--nu`）、可选值长选项（`--eof`/`--replace`/`--max-lines`，只能用 = 带值）、短选项连写（`-0n 1`/`-rn 1`/`-tI {}`）、BSD 取值选项（`-R`/`-S`）。
+  - **修法**：改成**按已知选项表逐个判定**、线性一遍扫描。长选项：带 `=` 整体跳过；必须带值的（`--arg-file`/`--delimiter`/`--max-chars`/`--max-procs`/`--max-args`/`--process-slot-var`）吃下一个词；开关与可选值（`--null`/`--no-run-if-empty`/`--verbose`/`--interactive`/`--open-tty`/`--exit`/`--show-limits`/`--help`/`--version`/`--eof`/`--replace`/`--max-lines`）不吃；表外的（含 GNU 缩写）给新 finding `COMMAND_XARGS_UNKNOWN_OPTION`（已注册 error_taxonomy），提示改用 `--选项=值` 或 `--`。短选项按字母走：取值字母（`adEIJLnPRsS`）连写或吃下一个词、可选值字母（`eil`）不吃下一个词、开关字母（`0oprtx`）继续、未知字母给同一 finding。选项表放模块常量并注明来源（GNU findutils xargs 与 macOS/BSD 手册）。
+  - 用例：12 条原放行写法全部转拦 + 3 条照旧拦 + 6 条误伤回归；`--nu`/`-z` 单列断言 unknown finding。变异 4 个（N1 删 `--null`、N2 删 `S`、N3 未知不给 finding、N4 删 `--eof`）**4/4 KILLED**。相关 119 passed、guards9 全过；ruff、doc_sync（--base 897388630）、strict code-size、diff-check、size_diff（新增 0，首轮 `_xargs_after_short_options` nesting 拆平后归零）全过。
+
 ## 编程错误不再按消息文字被判可重试（progerr，2026-10-05，worker/progerr，基于 17k 头 `9e2f0eb69`；待 3a 复审）
 
 - **问题**：裸的编程错误（TypeError/AttributeError/KeyError 等）走 `contracts/provider_error_classifier` 的文本兜底，消息里恰好含 `deadline`/`timeout`/`rate_limit` 之类的词就被判成可重试，进入 `provider_transient_auto_resume` 的退避重试，白白等到预算用完、界面一直显示"正在重试"，把真实问题掩盖成"供应商故障"（3a 在 17k 头实测：`TypeError("...total_deadline_seconds")` → TIMEOUT/retryable；`AttributeError("...timeout")`、`KeyError("rate_limit")` 同理）。
