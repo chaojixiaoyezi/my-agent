@@ -41,8 +41,9 @@ _SMALL_JSON_MAX_BYTES = 512 * 1024
 _SMALL_JSON_MAX_DEPTH = 64
 # 单条长度缓存的条目上限：一个模型回合的活跃消息为千条量级，4096 条覆盖整批历史加少量抖动。
 _ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT = 4096
-# 进程内单条长度缓存：指纹 → (字符数, UTF8字节数)；有界 LRU，满了淘汰最久未用条目。
-_ITEM_LENGTH_CACHE: OrderedDict[object, tuple[int, int]] = OrderedDict()
+# 进程内单条长度缓存：指纹(int) → 打包长度(int)；有界 LRU，满了淘汰最久未用条目。
+# 上界：4096 条 × 每条（两个 int + 字典槽）约 200 字节 ≈ 800KB；实测 1200 条 2KB 消息约 0.2MB。
+_ITEM_LENGTH_CACHE: OrderedDict[int, int] = OrderedDict()
 
 
 # LLM: 同一sort/default JSON序列按结构上界选择有界直接编码或流式累计；估算数值及异常回退不变，最大单值/字典排序仍需内存。
@@ -219,20 +220,24 @@ def _structured_overhead(payload: Any) -> int:
     return 0
 
 
-# LLM: 缓存正确性边界：指纹相同 ⟹ JSON 编码相同才允许命中。str 用 hash 摘要，标量与 float 用值/repr
-#   本身（避开 int/float/bool 的相等陷阱与 -0.0），容器递归组合；非 str 键与未知对象一律返回 None——
-#   该值不缓存、dict 值遇到它放弃合成，回退原口径。缓存不落盘、不跨进程。
-# 函数用途: 计算一个 JSON 值的内容指纹；不能证明与编码一一对应时返回 None（宁慢勿错）。
-def _item_length_fingerprint(value: Any) -> object | None:
+# LLM: 缓存正确性边界：指纹相同 ⟹ JSON 编码相同才允许命中。str 用内置 hash，标量与 float 用值/repr
+#   本身（避开 int/float/bool 的相等陷阱与 -0.0），容器边遍历边把子摘要折进滚动摘要；非 str 键与
+#   未知对象一律返回 None——该值不缓存、dict 值遇到它放弃合成，回退原口径。缓存不落盘、不跨进程。
+#   estcache2（17l 撤回修复）：指纹是单个 64 位整数，不再保留与消息同量级的嵌套 tuple/frozenset——
+#   旧结构 1200 条消息要 1.6MB，把压缩链的内存峰值顶穿。碰撞口径：两条内容不同的条目摘要碰撞概率
+#   约 2^-64/对（1200 条约 4e-14）；碰撞后果是那一条统计取错、估算数值偏差（估算本身是启发式，
+#   不影响任何状态机）。字典按插入顺序折入：内容同序必同摘要，键序不同只是多算一次，方向安全。
+# 函数用途: 计算一个 JSON 值的内容摘要（64 位整数）；不能证明与编码一一对应时返回 None（宁慢勿错）。
+def _item_length_fingerprint(value: Any) -> int | None:
     kind = type(value)
     if kind is str:
-        return ("s", hash(value))
+        return hash(value)
     if kind is bool or value is None:
-        return ("b", value)
+        return hash(("b", value))
     if kind is int:
-        return ("i", value)
+        return hash(("i", value))
     if kind is float:
-        return ("f", repr(value))
+        return hash(("f", repr(value)))
     if kind is dict:
         return _mapping_fingerprint(value)
     if kind is list or kind is tuple:
@@ -240,28 +245,28 @@ def _item_length_fingerprint(value: Any) -> object | None:
     return None
 
 
-# 函数用途: 字典指纹：键必须是 str（否则 None），值递归取指纹；frozenset 让键顺序不影响摘要。
-def _mapping_fingerprint(value: dict) -> object | None:
-    entries: list[tuple[str, object]] = []
+# 函数用途: 字典摘要：键必须是 str（否则 None），值递归折入滚动摘要；不保留中间集合。
+def _mapping_fingerprint(value: dict) -> int | None:
+    digest = len(value)
     for key, item in value.items():
         if type(key) is not str:
             return None
         item_fingerprint = _item_length_fingerprint(item)
         if item_fingerprint is None:
             return None
-        entries.append((key, item_fingerprint))
-    return ("d", frozenset(entries))
+        digest = hash((digest, key, item_fingerprint))
+    return hash(("d", digest))
 
 
-# 函数用途: 序列指纹：逐元素递归；任一元素不能取指纹就整体返回 None。
-def _sequence_fingerprint(value: list | tuple) -> object | None:
-    items: list[object] = []
+# 函数用途: 序列摘要：逐元素递归折入滚动摘要；任一元素不能取摘要就整体返回 None。
+def _sequence_fingerprint(value: list | tuple) -> int | None:
+    digest = len(value)
     for item in value:
         item_fingerprint = _item_length_fingerprint(item)
         if item_fingerprint is None:
             return None
-        items.append(item_fingerprint)
-    return ("l", tuple(items))
+        digest = hash((digest, item_fingerprint))
+    return hash(("l", digest))
 
 
 # LLM: 命中判断只做"取表 + 刷新 LRU 位置"，绝不改动统计值；未命中先纯计算再记账。记账范围是顶层容器的
@@ -276,14 +281,26 @@ def _cached_element_lengths(item: Any) -> tuple[int, int] | None:
     cached = _ITEM_LENGTH_CACHE.pop(fingerprint, None)
     if cached is not None:
         _ITEM_LENGTH_CACHE[fingerprint] = cached  # pop+重插即 LRU 刷新，且无并发 KeyError
-        return cached
+        return _unpack_lengths(cached)
     lengths = _encode_element_lengths(item)
     if lengths is None:
         return None
-    _ITEM_LENGTH_CACHE[fingerprint] = lengths
+    _ITEM_LENGTH_CACHE[fingerprint] = _pack_lengths(lengths)
     while len(_ITEM_LENGTH_CACHE) > _ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT:
         _ITEM_LENGTH_CACHE.popitem(last=False)
     return lengths
+
+
+# LLM: 缓存值打包成单个整数（字符数左移 63 位 | UTF8 字节数）：比 tuple + 两个 int 省约六成内存。
+#   两个计数都远小于 2^63（受内存约束），不存在溢出；解码见 _unpack_lengths。
+# 函数用途: 把（字符数、UTF8字节数）打包成缓存值。
+def _pack_lengths(lengths: tuple[int, int]) -> int:
+    return (lengths[0] << 63) | lengths[1]
+
+
+# 函数用途: 还原打包的（字符数、UTF8字节数）。
+def _unpack_lengths(packed: int) -> tuple[int, int]:
+    return packed >> 63, packed & ((1 << 63) - 1)
 
 
 # 函数用途: 纯计算（不记账）的单值编码：str 按 JSON 值编码（含引号转义），容器递归，标量直接编码。

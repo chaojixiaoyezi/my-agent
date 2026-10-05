@@ -116,6 +116,15 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - 变异 2/2 KILLED（脚本 `tasks/2026-10-05/cachereport-mutations/mutations.py`，sha256 还原一致）：cache_write 混进命中 → 2 条用例红；估算调用数混进供应商调用数 → 4 条红。
 - 未验证：真实 owner home 数据（沙箱规则不读）；"省钱生效"的真机核对由 3a 用真实数据跑。
 
+## 容器估算缓存的指纹内存修复（estcache2，2026-10-05，`worker/estcache`，在 `02614e198` 之后；定向验证完成）
+
+- **来源/修法**：estcache 车道回归——指纹从嵌套 tuple/frozenset 改成单个 64 位整数摘要（边遍历边折入），缓存值打包成单 int；碰撞口径与上界见 DESIGN_LEDGER。
+- **先红**：`test_many_message_summary_avoids_whole_json_copy` 实测 peak=2,430,329 vs 阈值 1,239,645（复现车道）。
+- **内存实测**：1200 条 2KB 消息估算缓存留存 1.61MB → **173KB**（阈值 242KB，通过）；新增用例 `test_estimate_cache_memory_stays_below_share_of_json` 钉住 < 整段 JSON 10%。
+- **对拍**：3017 形状 0 不符 + `test_tricky_shapes_match_legacy` 53 个固定形状（float 特例/混合键/非 BMP/嵌套/空容器/长串）。
+- **验收**：`test_compact_text_source.py` 15 passed；43 文件（estimate_tokens 35 ∪ tracemalloc 9）约 3700 条全过；guards9 192 passed；ruff/boundaries/doc_sync（--base 02614e198）/strict code-size/diff-check/clean-package 全过；**size_diff 新增 0 / 消失 56**。
+- **性能**：35 万档 estimate 131.8→65.7ms、整轮 697.9→362.5ms；85 万档 348.1→126.4ms、整轮 1060.9→438.8ms。
+
 ## 容器估算合成缓存（estcache，2026-10-05，`worker/estcache`，基线 `6145136a8`；定向验证完成）
 
 - **来源/改法**：luna2 剖析指出每次模型调用把整段历史估算两遍；给 `memory_archive/tokens.py` 加"内容指纹 → 直接子项长度"进程内 LRU 缓存与序列/映射逐位合成，失败回退原口径。

@@ -368,6 +368,36 @@ def test_json_failure_still_precedes_utf8_failure_in_both_encoding_paths(large, 
             tokens.estimate_tokens(payload)
 
 
+# LLM: estcache2 固定对拍集：50+ 个刁钻形状（float 特例、混合键、非 BMP、嵌套、空容器、长串），
+#   钉住"缓存版与原口径逐位一致"在类型边界上不回归；孤立 surrogate 不在参数化里（pytest id 编码
+#   受限），由 test_json_failure_still_precedes_utf8_failure_in_both_encoding_paths 覆盖。
+_TRICKY_SHAPES = [
+    # float 特例：-0.0/NaN/Inf/极值与精度边界
+    -0.0, 0.0, float("nan"), float("inf"), float("-inf"), 5e-324,
+    1.7976931348623157e308, 1.5, -1.25, 1e-10,
+    # 标量、布尔与大小整数
+    True, False, None, 0, 1, -1, -2, 10**70, -10**70, 2**63,
+    # 字符串边界：空串、转义、控制符、非 BMP、长串
+    "", "a", '"\\\n\t\r', "\x00\x01\x02\x1f", "中文🪴🌱", "mixed 文本",
+    "x" * 5000,
+    # 空与浅容器
+    [], {}, (), [[]], [{}], {"a": []}, {"a": {}}, [(), {}],
+    # 非 str 键（原逻辑路径）
+    {1: "x"}, {None: 1}, {True: 1}, {-1.25: "f"}, {"a": 1, 2: "b"},
+    # 嵌套
+    [[[[["deep"]]]]], {"a": {"b": {"c": [1, 2, {"d": None}]}}},
+    [1, "a", None, True, 1.5], {"m": [1, "a", None, True, 1.5, {"n": []}]},
+    # 重复与同内容
+    [{"v": "same"}, {"v": "same"}], {"x": [1, 1, 1], "y": (2, 2)},
+    # 长容器
+    list(range(50)), {f"k{i}": i for i in range(30)},
+    # 转义与标点
+    {"k": "值 with \"quotes\" and \\slash"}, ["a:b", "c,d"], ["[", "]", "{", "}"],
+    # 浮点键/值混合
+    {1.5: [0.1, 0.2]}, [1e300, -1e300],
+]
+
+
 # LLM: estcache 契约：合成缓存必须与逐段编码逐位一致（冷/热都相等）、命中后不再编码、内容变化
 #   必须失效、上限按 LRU 淘汰；随机结构用固定种子保证可复现。清缓存保证用例间确定性。
 class TestComposedLengthCache:
@@ -493,3 +523,30 @@ class TestComposedLengthCache:
         assert key_second not in tokens._ITEM_LENGTH_CACHE
         # 淘汰后重算仍与旧口径一致
         assert tokens.estimate_tokens([first, second, third]) == self._legacy([first, second, third])
+
+    @pytest.mark.parametrize("payload", _TRICKY_SHAPES)
+    def test_tricky_shapes_match_legacy(self, payload):
+        self._assert_matches_legacy(payload)
+
+    def test_estimate_cache_memory_stays_below_share_of_json(self):
+        """estcache2：估算缓存有可测上界——1200 条 2KB 消息估算后留存 < 整段 JSON 的 10%。"""
+        import gc
+        import tracemalloc
+
+        from agent_py_agent.agent.memory_archive import tokens
+
+        messages = [
+            {"role": "user", "content": [{"type": "text", "text": f"行{i}:" + "x" * 2000}]}
+            for i in range(1200)
+        ]
+        whole_json_bytes = len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
+        tokens._ITEM_LENGTH_CACHE.clear()
+        gc.collect()
+        tracemalloc.start()
+        try:
+            tokens.estimate_tokens(messages)
+            gc.collect()
+            current, _peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert current < whole_json_bytes // 10, (current, whole_json_bytes)

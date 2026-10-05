@@ -1,5 +1,10 @@
 # 记忆与上下文维护状态
 
+## 容器估算缓存的指纹内存修复（estcache2，2026-10-05，worker/estcache，本地验证完成，待复审）
+
+- estcache 车道回归（tracemalloc 峰值超半）修复：指纹从嵌套 tuple/frozenset 改为单个 64 位整数摘要（边遍历边折入、不保留嵌套结构），缓存值打包成单 int；1200 条 2KB 消息留存 1.61MB → 173KB（< 整段 JSON 10%）。
+- 对拍 3017 + 53 形状 0 不符；43 文件（estimate_tokens 35 ∪ tracemalloc 9）约 3700 条全过；guards9 192 passed；性能 35 万档 131.8→65.7ms、85 万档 348.1→126.4ms。详见根 `TESTS.md` 的 estcache2 节。
+
 ## 容器估算合成缓存（estcache，2026-10-05，worker/estcache，本地实现，待复审）
 
 - 模型回合里同一批消息被反复估算（payload 与 messages 各一遍、压缩试算逐次重估）；给 `memory_archive/tokens.py` 的容器估算加"内容指纹 → 直接子项长度"进程内 LRU 缓存与序列/映射逐位合成，估算数值与逐段编码逐位一致（3017 个形状对比 0 不符）。
