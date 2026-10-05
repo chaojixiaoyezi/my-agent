@@ -274,7 +274,8 @@ def test_event_watch_real_gateway_six_counts_and_readonly(gateway, watch, monkey
         'my-agent/events': {'versions': ['1']}, 'my-agent/display': {'versions': ['1']}}
     events = _delivered(watch)
     assert Counter(event['type'] for event in events) == Counter(dict.fromkeys(PLUGIN_EVENT_TYPES, 1))
-    public = {'event_id', 'type', 'seq', 'occurred_at', 'dropped_before', 'channel', 'thread_ref', 'actor', 'facts'}
+    public = {'event_id', 'type', 'seq', 'occurred_at', 'dropped_before', 'channel', 'thread_ref',
+              'channel_conversation_ref', 'actor', 'facts'}
     assert all(set(event) == public for event in events)
     assert all(set(event['facts']) == _FIELDS[event['type']] for event in events)
     assert all(event['dropped_before'] == 0 for event in events)

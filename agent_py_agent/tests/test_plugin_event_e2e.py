@@ -131,8 +131,9 @@ def _assert_v2_thread_refs(events, rejected):
     assert channel_ref and by_type['turn_ended']['channel_conversation_ref'] == channel_ref
     assert by_type['prompt_submitted']['channel_conversation_ref'] == channel_ref
     assert by_type['command_executed']['channel_conversation_ref'] == channel_ref
-    # 新会话第一次提交：入队时点线程还没解析，thread_ref 留空（A2）。
-    assert by_type['prompt_submitted']['thread_ref'] == ''
+    # 新会话第一次提交：提交时点也解析会话线程（与执行路径同一预检入口，get_or_create 幂等），
+    # prompt_submitted 与回合事件同一非空引用。
+    assert by_type['prompt_submitted']['thread_ref'] == turn_ref
 
 
 def _prepare_case(agent, monkeypatch, case):
@@ -289,10 +290,8 @@ def _assert_http_events(events, request_id, prompt):
     assert all(set(event) == public and set(event['facts']) == _FIELDS[event['type']] for event in events)
     assert [event['seq'] for event in events] == [1, 2, 3]
     assert len({event['event_id'] for event in events}) == 3
-    # v2（tref2）：提交时点线程可能还没解析，prompt_submitted 的 thread_ref 留空（A2）；
-    #   turn 类事件必须同一会话线程且非空。渠道会话哈希三个事件都有且一致。
-    assert events[0]['thread_ref'] == ''
-    assert events[1]['thread_ref'] and events[1]['thread_ref'] == events[2]['thread_ref']
+    # v2（tref2b）：提交时点也解析会话线程，三个事件同一非空 thread_ref；渠道会话哈希三个事件都有且一致。
+    assert events[0]['thread_ref'] and events[0]['thread_ref'] == events[1]['thread_ref'] == events[2]['thread_ref']
     assert len({event['channel_conversation_ref'] for event in events}) == 1
     assert events[0]['channel_conversation_ref'] != ''
     assert all(event['actor'] == 'main' and event['channel'] == 'local' and event['dropped_before'] == 0 for event in events)

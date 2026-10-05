@@ -18,9 +18,9 @@
 - 执行者判定通过后，继续原 follow-up 重读、两次缺失确认、unreadable 六倍宽限、active→blocked CAS 与 waiting-run finish CAS。
 - 聚焦覆盖与基线 fixture 失败见 `TESTS.md` 的 SLP-4B 条目；真实 Gateway 与生产恢复链未验证。
 
-## 插件事件 thread_ref 统一（tref2，2026-10-05，worker/tref2；待非作者初审）
+## 插件事件 thread_ref 统一（tref2/tref2b，2026-10-05，worker/tref2b；待非作者初审）
 
-- `agent/gateway_parts/event_points.py`：Gateway 侧四事件的 `thread_ref` 来源统一——`turn_started` 接收调用方解析的会话线程，`prompt_submitted` 留空（A2）+ `channel_conversation_ref` 有值，`command_executed` 用回执 `conversation_thread_id`；`gateway_event_context` 透传渠道会话号。
+- `agent/gateway_parts/event_points.py`：Gateway 侧四事件的 `thread_ref` 来源统一——`turn_started` 接收调用方解析的会话线程，`prompt_submitted` 在提交时点解析线程（与执行路径同一预检入口；非空）+ `channel_conversation_ref` 有值，`command_executed` 用回执 `conversation_thread_id`；`gateway_event_context` 透传渠道会话号。
 - `agent/gateway_parts/request_execution.py`：`_gateway_turn_thread_id` 在 `_handle_gateway_request` 里做一次只读 preflight（与执行路径同一解析入口）供 `turn_started`/`turn_ended` 使用。
 - `agent/gateway_parts/control_operation_service.py`：回执新增 `conversation_thread_id`，新执行路径写盘前解析一次（`_with_control_conversation_thread` / `_control_operation_thread_id` / `_control_operation_agent`）。
 

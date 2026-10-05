@@ -67,10 +67,28 @@ def _prompt_has_base_owner(agent, request: dict) -> bool:
         return False
 
 
+# LLM: 合同要求每个回合事件的会话引用非空；提交时点与执行路径共用同一预检入口解析线程
+#   （get_or_create 幂等，同一渠道键解析出同一线程），确认启用后才调用，关闭时一次都不解析。
+# 函数用途: 在提示入队时点解析会话线程 id；失败或不可用时返回空串，由调用方决定不发事件。
+def _prompt_thread_id(agent, request: dict) -> str:
+    try:
+        from .request_context import GatewayConversationLoadRequest, preflight_gateway_conversation
+
+        request_id = str(request.get('id') or '')
+        prompt = str(request.get('prompt') or request.get('goal') or '').strip()
+        preflight = preflight_gateway_conversation(GatewayConversationLoadRequest(
+            agent, request, request_id, prompt,
+        ))
+        return str(preflight.thread_id or '')
+    except Exception:  # noqa: BLE001 事件身份解析失败不能阻断入队
+        return ''
+
+
 # LLM: 开关先于 owner/路由读取；观察装配异常隔离，确认启用后只记一次固定原因，不影响已成功入队事实。
-#   v2（tref2）：入队时点线程可能还没解析（新会话第一次必然没有），thread_ref 留空（A2）；
-#   渠道会话号此时已有，进 channel_conversation_ref 供插件在提交时点归组。
-# 函数用途: 首次排队后仅向基础 owner 发提示观察；缺配置、字段或装配故障不发，关闭不读取请求。
+#   v2（tref2b）：合同要求每个回合事件的会话引用非空，所以提交时点也解析会话线程——与执行路径共用同一
+#   预检入口（get_or_create 幂等，同一渠道键解析出同一线程）；解析不出线程时不发事件（不发残缺引用）。
+#   渠道会话号进 channel_conversation_ref 供插件在提交时点归组。两者都不从正文推断。
+# 函数用途: 首次排队后仅向基础 owner 发提示观察；缺配置、字段、线程或装配故障不发，关闭不读取请求。
 def prompt_queued(server, request: dict) -> None:
     enabled = False
     try:
@@ -83,8 +101,11 @@ def prompt_queued(server, request: dict) -> None:
         metadata = request.get('metadata') or {}
         channel = str(metadata.get('channel') or '')
         conversation = request.get('conversation') or {}
+        thread_id = _prompt_thread_id(agent, request)
+        if not thread_id:
+            return
         context = gateway_event_context(agent, {'channel': channel,
-            'thread_id': '',
+            'thread_id': thread_id,
             'channel_conversation_id': conversation.get('channel_conversation_id') or ''}, server=server)
         if context is None:
             return

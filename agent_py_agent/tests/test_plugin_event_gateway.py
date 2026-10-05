@@ -74,6 +74,48 @@ def test_prompt_only_after_queue_commit_and_no_replay(gateway, idempotent):
         assert len(events) == 1
 
 
+# LLM: 合同（m1_joint）要求每个回合事件都有非空会话引用；提交时点与执行路径共用同一预检入口解析线程，
+#   所以 prompt_submitted 也带非空 thread_ref。这里钉入口行为：解析一次、发出的事件带线程。
+# 函数用途: 断言提交时点解析会话线程且事件 thread_ref 非空（64 位哈希）。
+def test_prompt_queued_resolves_thread_at_submit_time(gateway):
+    _agent, _paths, server, events = gateway
+    handler = _Handler({'prompt': 'resolve-marker', 'conversation_id': 'thread-resolve'})
+    http_handlers.handle_ask(handler, server, lambda: 'resolve-1')
+    assert handler.replies[-1][0] == 202
+    assert len(events) == 1
+    event = events[0][1]
+    assert event.type == 'prompt_submitted'
+    assert len(event.thread_ref) == 64
+    assert event.channel_conversation_ref and len(event.channel_conversation_ref) == 64
+    assert event.thread_ref != event.channel_conversation_ref
+
+
+# LLM: 关闭零开销（91664648d 初衷）：事件关闭时连线程解析都不调用，更不发事件；解析发生在确认启用之后。
+# 函数用途: 断言关闭时 prompt_queued 不调用线程解析、不发事件。
+def test_prompt_queued_disabled_never_resolves_thread(gateway, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, server, events = gateway
+    agent.config.plugin_events_enabled = False
+    monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
+    calls = []
+    monkeypatch.setattr(event_points, '_prompt_thread_id', lambda *_: calls.append(True) or 'thread-x')
+    assert event_points.prompt_queued(server, {'id': 'x', 'prompt': 'p'}) is None
+    assert calls == [] and events == []
+
+
+# LLM: 解析不出线程时不发残缺事件（合同"每个事件都有非空会话引用"）：不发比发空引用好，入队结果不受影响。
+# 函数用途: 断言线程解析为空时 prompt_submitted 不发出。
+def test_prompt_queued_without_resolvable_thread_emits_nothing(gateway, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    _agent, _paths, server, events = gateway
+    monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
+    monkeypatch.setattr(event_points, '_prompt_thread_id', lambda *_: '')
+    assert event_points.prompt_queued(server, {'id': 'x', 'prompt': 'p'}) is None
+    assert events == []
+
+
 def test_turn_real_gateway_path_has_exact_fields(gateway, monkeypatch):
     from agent_py_agent.agent.agent_core.models import AgentRunResult
 

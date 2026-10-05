@@ -82,7 +82,7 @@
 - **边界**：实现限于 scheduler repository 与聚焦测试；未改 `scheduler/service.py`，未碰 conversation/tooling；SLP-2B operation_id/操作账本接线仍未做。misfire grace 政策未改。因 `check_doc_sync` 要求同步模块文档，另更新 Gateway 进度与结构文档。
 - **验证结论**：最终 19 文件 scheduler sweep 仅有 `test_scheduler_waiting_deadlock.py` 9 项失败，均在任务基线 `812828b98` 复现；其余相关测试通过。guards9 前 11 项通过，第 12 项因基线缺该测试文件而未运行；import boundaries 0 findings、Ruff、doc-sync、strict code-size、size_diff（新增告警 0）通过。具体命令及结果见 [TESTS.md](TESTS.md) SLP-2A 节；设计合同见 [SLEEP_RESUME.md](docs/design/SLEEP_RESUME.md)。
 
-## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2，2026-10-05，worker/tref2；**已从 17l 撤回，退回作者修**）
+## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2/tref2b，2026-10-05，worker/tref2b；**撤回原因已修复，待非作者初审**）
 
 - **撤回原因（3a，10-05 10:5x，Linux 车道发现、macOS 复现）**：`test_plugin_m1_joint_tool_gate.py` 7 条失败——同一回合 3 个事件的 thread_ref 出现两种值（prompt_submitted 为空、其余为线程哈希），违反“每个事件的会话引用不许为空、同一回合只有一个引用”；`test_plugin_m1_joint_e2e.py::test_event_watch_real_gateway_six_counts_and_readonly` 也失败。挑入时只跑了插件事件三个测试文件，漏了这两组联动测试。撤回提交 9e3073882、c7851feef，代码回到挑入前。
 
@@ -92,6 +92,7 @@
 - **兼容**：字段名与值形态不变、旧插件无需改码；按旧语义建过索引的插件在切换点断一次（发布说明）。宿主不落观察事件（PLUGIN_EVENT_HOOKS D6），无账本回填对象；runtime.db 的 `plugin_gate.decided` 行字段白名单不含会话字段，不受影响。
 - **验证**：见 TESTS 同名节（167 passed、3 变异全杀、门禁结果）。
 - **3a 终审收紧**：`turn_started` 改收 `thread_id_of`（可调用），确认插件事件开启后才解析会话线程；关闭时（生产默认）一次都不调，不为事件多查一次会话库。ds8 提的两条风险按现状接受：握手版本不升、旧插件按旧语义建的索引在切换点断一次（写进发布说明）；`channel_conversation_ref` 与 `thread_ref` 同为 sha256 哈希，对所有事件订阅者可见，插件由管理员安装，暂不加按字段的权限门。
+- **tref2b 返工（2026-10-05，worker/tref2b）**：撤回原因根因是 `prompt_queued` 的 `thread_id` 硬编码为空（A2 设计）；m1_joint 合同（“每个回合事件都有非空会话引用”）不接受留空。修法：提交时点用与执行路径同一预检入口（`preflight_gateway_conversation`，`get_or_create` 幂等）解析会话线程，解析不出线程时不发事件；关闭零解析（91664648d 初衷）保持；`channel_conversation_ref` 语义不变。A2 与“prompt_submitted thread_ref 为空”的旧断言全部修订；m1_joint_e2e 事件字段集合随 v2 目录加 `channel_conversation_ref`（合同演进，非放宽）。4 变异 KILLED；25 文件连带测试仅 3 条嵌套沙箱既有失败（基线 `31492d002` 复核一致）。
 
 ## J16 第 9 节：观察截图 _meta 协商（vision2，2026-10-05，worker/vision2，基于 d2ef24d53；ds8 初审通过并补断言 7960c7577，3a 终审收紧后挑入 17l）
 

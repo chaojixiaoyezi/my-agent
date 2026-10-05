@@ -109,12 +109,20 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 ## 插件事件 thread_ref 统一与 channel_conversation_ref（tref2，2026-10-05，worker/tref2）
 
-- **用例**：`test_plugin_event_points.py` 新增双通道（tui / feishu）投影用例——同一会话里 turn 类与 tool 类事件 `thread_ref` 相同、渠道哈希只在 Gateway 侧事件上有值且与线程哈希不同、payload 不含原文；A2 用例（`prompt_submitted` 在 thread 未解析时 `thread_ref` 为空、渠道 ref 有值；`command_executed` 两个引用都有）。`test_plugin_event_e2e.py`：六事件真回合加断言（turn/tool/command 的 `thread_ref` 同源非空、`channel_conversation_ref` 存在且一致、`prompt_submitted` 的 `thread_ref` 为空、工具事件无渠道 ref），HTTP worker 用例加 feishu 身份变体并更新 v2 断言。
+- **用例**：`test_plugin_event_points.py` 新增双通道（tui / feishu）投影用例——同一会话里 turn 类与 tool 类事件 `thread_ref` 相同、渠道哈希只在 Gateway 侧事件上有值且与线程哈希不同、payload 不含原文；空线程上下文投影用例（空入空出；tref2b 后产品层不再发出这种事件）与 `command_executed` 双引用用例。`test_plugin_event_e2e.py`：六事件真回合加断言（turn/tool/command 的 `thread_ref` 同源非空、`channel_conversation_ref` 存在且一致、`prompt_submitted` 的 `thread_ref` 与回合事件同一非空引用（tref2b 修订）、工具事件无渠道 ref），HTTP worker 用例加 feishu 身份变体并更新 v2 断言。
 - **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugin_event_display.py agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_plugin_event_runtime.py agent_py_agent/tests/test_gateway_control_operation.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds2` → **167 passed**。
 - **变异**（均已还原、sha256 一致）：`turn_started` 改回渠道号 → e2e 红；`prompt_submitted` 用渠道号（破坏 A2）→ e2e 红；`channel_conversation_ref` 丢失 → e2e 红。
 - **门禁**：guards9 前 11 文件全过（基线无 `test_backend_signature_guardrails.py`，第 12 个未跑、已注明）；`check_import_boundaries.py` 0 条；ruff 全过；`check_doc_sync.py --base 100df7ad7` DOC_SYNC_PASS；strict code-size `hard=0 blocked=False`；`check_clean_package.py .` OK；`git diff --check` 干净；`size_diff.sh` 新增 0、消失 55。
 - **未验证**：真实 IM 通道（真飞书）与真实插件消费新字段的行为；跨版本切换点的插件侧索引断裂只写进发布说明，无自动迁移。
 - **3a 终审补充**：`test_gateway_disabled_entries_do_not_warn_or_read_fields` 加断言——事件关闭时 `turn_started` 不调用线程解析；变异 2/2 KILLED（关闭时也解析线程 → 该用例红；回合事件不带线程 → e2e 红）。
+- **tref2b 返工（2026-10-05，worker/tref2b；撤回提交 c7851feef/9e3073882）**：
+  - **复现**：挑回 `2b9e64c74`+`f7872d96b` 后跑 `test_plugin_m1_joint_tool_gate.py`+`test_plugin_m1_joint_e2e.py` → **8 failed**（7+1）：`prompt_submitted` 的 `thread_ref` 为空（同一回合两个引用值），违反 m1_joint 合同“每个回合事件都有非空会话引用”。
+  - **根因**：`gateway_parts/event_points.py::prompt_queued` 的 `thread_id` 硬编码为空（tref2 的 A2 设计）。
+  - **修法**：提交时点（字段读取后）用与执行路径同一预检入口 `preflight_gateway_conversation`（`get_or_create` 幂等）解析会话线程；解析不出线程时不发事件；关闭零解析与 `channel_conversation_ref` 语义不变。
+  - **命令与结果**：9 文件（`test_plugin_event_*` + `test_gateway_control_operation` + `test_plugin_m1_joint_*`）→ **181 passed、1 skipped**；m1_joint 两文件 12 条全过（原 8 条失败全修复）。
+  - **变异**（4/4 KILLED，原字节还原）：`thread_id` 换回硬编码空 → gateway 3 条 + m1_joint 7 条红；`_prompt_thread_id` 直接返回空 → gateway 4 条红；解析挪到关闭检查之前 → 2 条红；去掉解析为空提前返回 → 解析失败不发用例红。
+  - **连带测试**：`git grep -l`（plugin_events / event_points / thread_ref / channel_conversation_ref）命中 25 个 test 文件整跑（subprocess timeout=900，163 秒）→ 仅 `test_plugin_sandbox_v8.py` 3 条嵌套 Seatbelt 失败；基线 `31492d002`（17l 头）同文件同 3 条，非本次引入。
+  - **用例更新**：m1_joint_e2e 字段集合随 v2 目录加 `channel_conversation_ref`（合同演进，非放宽）；gateway 新增 3 条（提交时点解析、关闭零解析、解析失败不发）。
 
 ## J16 第 9 节 观察截图 _meta 协商（vision2，2026-10-05，worker/vision2）
 

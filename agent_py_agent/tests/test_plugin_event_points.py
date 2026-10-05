@@ -226,8 +226,9 @@ def test_v2_turn_and_tool_events_share_thread_ref_across_channels(channel):
     assert "conv-1" not in json.dumps(payload) and "thread-abc" not in json.dumps(payload)
 
 
-def test_v2_prompt_submitted_before_thread_resolution_keeps_empty_thread_ref():
-    # v2（tref2）A2：入队时点线程可能还没解析，thread_ref 留空；渠道会话哈希此时已有值。
+def test_v2_empty_thread_context_projects_empty_thread_ref():
+    # v2 投影层通用规则：上下文线程为空时投影出空引用（产品层由 prompt_queued 保证解析不出线程就不发事件，
+    # 见 test_plugin_event_gateway 的提交时点用例）；渠道会话哈希仍按输入投影。
     point = EventPointContext(SimpleNamespace(plugin_events_enabled=True), lambda event: None,
                               "tui", "", "main", "conv-1")
     fact = project_event(point, "prompt_submitted", SOURCE)
