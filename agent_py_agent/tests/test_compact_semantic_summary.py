@@ -379,7 +379,7 @@ def test_live_compact_anthropic_payload_has_task_once_and_instruction_last() -> 
     captured: dict[str, object] = {}
     backend = AnthropicCompatibleBackend(_capture_options("claude-test"))
 
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         captured["payload"] = payload
         return {"content": [{"type": "text", "text": _VALID_LIVE_SUMMARY}], "usage": {}}
 
@@ -400,7 +400,7 @@ def test_live_compact_openai_payload_has_task_once_and_instruction_last() -> Non
     captured: dict[str, object] = {}
     backend = OpenAICompatibleBackend(_capture_options("gpt-test"))
 
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         captured["payload"] = payload
         return {
             "choices": [
@@ -425,7 +425,7 @@ def test_live_compact_cache_safe_fork_reuses_parent_request_prefix() -> None:
     captured: list[dict[str, object]] = []
     backend = AnthropicCompatibleBackend(_capture_options("claude-cache-test"))
 
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         captured.append(payload)
         return {"content": [{"type": "text", "text": _VALID_LIVE_SUMMARY}], "usage": {}}
 
