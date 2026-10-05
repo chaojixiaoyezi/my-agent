@@ -31,6 +31,15 @@ _VENDOR_BWRAP = Path(__file__).resolve().parents[2] / "vendor" / "bin" / "bwrap.
 # 命令运行需要的系统只读根(库/工具/证书目录)。只 bind 存在的。
 _SYSTEM_RO_ROOTS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/alternatives")
 
+# B7 allowlist 底图按宿主平台列出最小系统依赖目录；不以根目录、用户目录或 private 别名兜底。
+SYSTEM_READ_ROOTS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
+    "Linux": (
+        "/bin", "/sbin", "/lib", "/lib64", "/usr/bin", "/usr/sbin",
+        "/usr/lib", "/usr/lib64", "/usr/share", "/etc/alternatives",
+    ),
+    "Darwin": ("/System/Library", "/usr/bin", "/usr/lib", "/usr/share", "/bin", "/sbin"),
+}
+
 # /proc 挂载方式探测结果缓存: "proc"=真实 procfs 可用, "dir"=必须空目录, None=未探测。
 _PROC_MOUNT_KIND: str | None = None
 
@@ -117,8 +126,9 @@ class SandboxReadiness:
         return asdict(self)
 
 
-# LLM: SandboxSpec 是唯一 bwrap 挂载合同，workspace 必须已由 PathAccessPolicy 裁决。
-# 类用途: 描述当前用户可写 home、已授权工作目录和可选公共只读目录。
+# LLM: SandboxSpec 是唯一 bwrap 挂载合同，workspace 必须已由 PathAccessPolicy 裁决；allowlist 不挂根文件系统。
+#   新 system_read_roots 只承载平台底图，不能替代 public_ro_roots 的宿主授权事实。
+# 类用途: 描述已裁决工作目录、读模式、系统读根和本轮明确可写目录。
 @dataclass(frozen=True)
 class SandboxSpec:
     owner_home: Path           # 自己 owner home；默认读写，任务边界存在时改为只读底图
@@ -140,6 +150,10 @@ class SandboxSpec:
     # 整根只读形态：根文件系统先只读挂载，hidden_paths 可再覆盖隐藏区域并只重挂授权读根；write_roots 单独可写。
     # 默认 False 时两种既有形态的 argv 逐字节不变。
     read_only_root: bool = False
+    # B7 插件只读根模式；None/hide_home 保持旧实现，allowlist 从空根构造有限视图。
+    read_mode: str | None = None
+    # allowlist 模式下，宿主平台所需的系统只读根；与用户授权根分开投影。
+    system_read_roots: tuple[Path, ...] = ()
     # B7：收窄读形态只挂真实目标，再用 --symlink 恢复宿主已核验的入口路径。
     preserve_public_read_root_aliases: bool = False
     # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
@@ -154,6 +168,12 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     bwrap = spec.bwrap_path or find_bwrap()
     if not bwrap:
         raise SandboxUnavailable("bwrap 不可用(仓库内置缺失且系统未装)")
+    if spec.read_mode not in (None, "hide_home", "allowlist"):
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID")
+    if spec.read_mode == "allowlist":
+        if not spec.read_only_root or spec.full_access or spec.write_roots is None:
+            raise SandboxUnavailable("SANDBOX_UNAVAILABLE: ALLOWLIST_SCOPE_INVALID")
+        return _allowlist_root_argv(bwrap, spec)
     if spec.read_only_root:
         return _read_only_root_argv(bwrap, spec)
     if spec.full_access:
@@ -268,6 +288,90 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     return argv
 
 
+# LLM: allowlist 从空 tmpfs 根搭视图，不挂宿主 /；只读系统/授权根与显式写根分层覆盖，别名只恢复获准入口。
+# 函数用途: 构造 B7 有限读 bwrap 视图，未列出的宿主目录不会进入插件进程。
+def _allowlist_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
+    if spec.write_roots is None or not spec.system_read_roots:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: ALLOWLIST_ROOTS_UNAVAILABLE")
+    mount_roots = (*spec.system_read_roots, *spec.public_ro_roots,
+                   *spec.write_roots, *spec.hidden_paths, *spec.read_only_paths)
+    argv = [
+        bwrap, "--die-with-parent", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+        "--share-net" if spec.network_access else "--unshare-net", "--new-session", "--tmpfs", "/",
+    ]
+    _append_allowlist_scaffold(argv, mount_roots)
+    argv += ["--dev", "/dev", *_proc_mount_args()]
+    _append_allowlist_system_mounts(argv, spec.system_read_roots)
+    for root in _preserved_read_roots(spec.public_ro_roots):
+        if root.exists():
+            argv += ["--ro-bind", str(root), str(root)]
+    for root in _normalized_write_roots(spec.write_roots):
+        if root.exists():
+            argv += ["--bind", str(root), str(root)]
+    _append_allowlist_symlink_aliases(argv, spec)
+    _append_hidden_mounts(argv, spec.hidden_paths)
+    _append_readonly_mounts(argv, spec.read_only_paths)
+    argv += ["--remount-ro", "/", "--chdir", str(spec.workspace)]
+    return argv
+
+
+# LLM: 空根没有宿主祖先目录；先创建绑定点和 /dev、/proc、/tmp 的骨架，内容仍由后续精确挂载决定。
+# 函数用途: 为有限读 bwrap 挂载准备最少的目录入口，不复制未授权父目录内容。
+def _append_allowlist_scaffold(argv: list[str], roots: tuple[Path, ...]) -> None:
+    directories = {Path("/dev"), Path("/proc"), Path("/tmp")}
+    for raw in roots:
+        path = Path(raw).expanduser().absolute()
+        target = path if path.is_dir() else path.parent
+        directories.add(target)
+        directories.update(target.parents)
+    for directory in sorted(directories, key=lambda item: (len(item.parts), str(item))):
+        if directory != Path("/"):
+            argv += ["--dir", str(directory)]
+
+
+# LLM: 系统目录 symlink 以已解析来源挂到空 root 的原始位置和真实位置，避免把符号链接当作 mount destination。
+# 函数用途: 将平台系统根挂为只读，并保留系统命令使用的标准目录别名。
+def _append_allowlist_system_mounts(argv: list[str], roots: tuple[Path, ...]) -> None:
+    mounts: list[tuple[Path, Path]] = []
+    for raw in roots:
+        original = Path(raw).expanduser().absolute()
+        try:
+            resolved = original.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_dir():
+            continue
+        mounts.extend(((resolved, resolved), (resolved, original)))
+    for source, target in dict.fromkeys(mounts):
+        argv += ["--ro-bind", str(source), str(target)]
+
+
+# LLM: root 已按 realpath 只读挂载时，只在更宽的已挂目录未包含别名的情况下补 --symlink，避免覆盖系统目录自带入口。
+# 函数用途: 恢复显式 R/W/E symlink 根，同时不重复创建已由系统或授权父目录带入的别名。
+def _append_allowlist_symlink_aliases(argv: list[str], spec: SandboxSpec) -> None:
+    roots = (*spec.public_ro_roots, *(spec.write_roots or ()))
+    mounted_directories = [
+        root for root in (*spec.system_read_roots, *_preserved_read_roots(spec.public_ro_roots),
+                          *_normalized_write_roots(spec.write_roots))
+        if Path(root).is_dir()
+    ]
+    for target, alias in _symlink_root_aliases(roots):
+        alias_path = Path(alias).expanduser().absolute()
+        if any(_lexically_within(alias_path, Path(root).expanduser().absolute()) for root in mounted_directories):
+            continue
+        argv += ["--symlink", str(target), str(alias)]
+
+
+# LLM: 别名是否已被父级挂载覆盖按字符串路径层级检查，不解析 alias，否则 symlink 会被误认成目标自身。
+# 函数用途: 判断一个挂载路径是否在另一个目录挂载之下。
+def _lexically_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 # LLM: 整根只读后再挂新的 /dev、/proc，最后逐个可写绑定 write_roots；受保护只读路径最后覆盖。不挂私有 /tmp：
 #   owner home 或工作区可能就在 /tmp 下（测试与部分部署），tmpfs 会把它们整个盖住；需要临时文件的进程应由调用方把
 #   TMPDIR 指到某个写根里。不收窄读范围、不隔离网络，只防改写——这是插件进程试点的边界，不能替代 owner 墙形态。
@@ -288,10 +392,9 @@ def _read_only_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
     return argv
 
 
-# LLM: B7 收窄读：private_read_roots 由调用方并入 hidden_paths（v8 隐藏 Gateway 用户家目录），先 tmpfs 覆盖，再挂回工作目录与
-#   显式授权的真实读根；符号链接别名稍后以 --symlink 重建，写根仍按原权限挂回，隐藏根内未授权项目仍不可见。
-#   没有 hidden_paths 时什么都不加，既有整根只读 argv 逐字节不变。
-# 函数用途: 整根只读形态下把隐藏根 tmpfs 覆盖并挂回工作目录与授权读根。
+# LLM: B7 hide_home 保留原行为：private_read_roots 并入 hidden_paths 后先 tmpfs 覆盖，再挂回工作目录与授权读根；
+#   符号链接别名以 --symlink 重建，写根仍按原权限挂回。allowlist 独立走 _allowlist_root_argv，不修改本路径。
+# 函数用途: 在 hide_home 的整根只读视图里隐藏指定根，再恢复插件工作目录和授权读根。
 def _append_hidden_root_remounts(argv: list[str], spec: SandboxSpec) -> None:
     hidden = _normalized_read_roots(spec.hidden_paths)
     if not hidden:
@@ -631,6 +734,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 __all__ = [
+    "SYSTEM_READ_ROOTS_BY_PLATFORM",
     "SandboxReadiness",
     "SandboxSpec",
     "SandboxUnavailable",

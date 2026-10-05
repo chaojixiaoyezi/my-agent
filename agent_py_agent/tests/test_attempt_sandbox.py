@@ -724,3 +724,169 @@ def test_agent_wires_its_home_root_into_the_shell_tool(tmp_path):
 
     # 开关默认关闭：只拒读 my-agent 根，不含用户家目录。
     assert shell.host_private_roots == (str(agent.home_paths.root),)
+
+
+def test_hide_home_profile_matches_pre_allowlist_snapshot():
+    from agent_py_agent.agent.attempt.sandbox import AttemptSandboxSpec
+
+    root = Path("/rdfloor-fixture")
+    env, data, home, runtime = (root / name for name in ("env", "data", "home", "runtime"))
+    spec = AttemptSandboxSpec(
+        attempt_view=env, staging_root=data, shared_workspace=env, owner_home=env,
+        extra_write_roots=(data,), public_read_roots=(runtime,), private_read_roots=(home,),
+        hidden_paths=(root / "agent" / "secrets", root / "agent"),
+        implicit_attempt_write_roots=False, read_only_root=True, read_mode="hide_home",
+        network_access=False, macos_sandbox_exec="/fake/sandbox-exec",
+    )
+
+    profile = AttemptExecutionSandbox(spec)._macos_argv(["/fake/python", "-c", "pass"])[2]
+
+    assert profile == (
+        '(version 1)\n(allow default)\n(deny file-write*)\n'
+        '(allow file-write* (subpath "/dev") (literal "/dev/null") '
+        '(subpath "/rdfloor-fixture/data"))\n'
+        '(deny file-read* (subpath "/rdfloor-fixture/home"))\n'
+        '(allow file-read* (subpath "/rdfloor-fixture/data"))\n'
+        '(allow file-read* (subpath "/rdfloor-fixture/env"))\n'
+        '(allow file-read* (subpath "/rdfloor-fixture/runtime"))\n'
+        '(deny file-write* (literal "/") (literal "/rdfloor-fixture") '
+        '(literal "/rdfloor-fixture/agent"))\n'
+        '(deny file-read* file-write* (subpath "/rdfloor-fixture/agent"))\n'
+        '(deny file-read* file-write* (subpath "/rdfloor-fixture/agent/secrets"))\n'
+        '(deny network*)'
+    )
+
+
+def test_hide_home_bwrap_argv_matches_pre_allowlist_snapshot(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    root = tmp_path
+    home, env, data, runtime = (root / name for name in ("home", "env", "data", "runtime"))
+    agent, secrets = root / "agent", root / "agent" / "secrets"
+    for path in (home, env, data, runtime, agent, secrets):
+        path.mkdir(parents=True, exist_ok=True)
+    spec = AttemptSandboxSpec(
+        attempt_view=env, staging_root=data, shared_workspace=env, owner_home=env,
+        extra_write_roots=(data,), public_read_roots=(runtime,), private_read_roots=(home,),
+        hidden_paths=(secrets, agent), implicit_attempt_write_roots=False,
+        read_only_root=True, read_mode="hide_home", network_access=False, bwrap_path="/fake/bwrap",
+    )
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+    monkeypatch.setattr(tooling_sandbox, "_proc_mount_args", lambda: ["--dir", "/proc"])
+
+    argv = sandbox.build_argv(["/fake/python", "-c", "pass"])
+    canonical = str(root.resolve())
+    literal = str(root)
+    actual = [arg.replace(canonical, "<TMP>").replace(literal, "<TMP>") for arg in argv]
+
+    assert actual == [
+        "/fake/bwrap", "--die-with-parent", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+        "--unshare-net", "--new-session", "--ro-bind", "/", "/", "--dev", "/dev", "--dir", "/proc",
+        "--tmpfs", "<TMP>/home", "--tmpfs", "<TMP>/agent", "--ro-bind", "<TMP>/env", "<TMP>/env",
+        "--ro-bind", "<TMP>/runtime", "<TMP>/runtime", "--bind", "<TMP>/data", "<TMP>/data",
+        "--chdir", "<TMP>/env", "--", "/fake/python", "-c", "pass",
+    ]
+
+
+def test_allowlist_seatbelt_rules_default_deny_and_preserve_ancestor_metadata():
+    from agent_py_agent.agent.attempt.sandbox import _spec_rules
+
+    root = Path("/rdfloor-fixture")
+    read_root, write_root, system_root = root / "project", root / "output", Path("/usr")
+    spec = AttemptSandboxSpec(
+        attempt_view=read_root, staging_root=write_root, shared_workspace=read_root,
+        owner_home=read_root, extra_write_roots=(write_root,), public_read_roots=(read_root,),
+        system_read_roots=(system_root,), implicit_attempt_write_roots=False,
+        read_only_root=True, read_mode="allowlist",
+    )
+
+    rules = _spec_rules(spec)
+
+    assert "(deny file-read*)" in rules
+    assert f'(allow file-read* (subpath "{read_root}"))' in rules
+    assert f'(allow file-read* (subpath "{write_root}"))' in rules
+    assert f'(allow file-read* (subpath "{system_root}"))' in rules
+    metadata = next((rule for rule in rules if rule.startswith("(allow file-read-metadata ")), "")
+    assert metadata and f'(literal "{root}")' in metadata
+    assert "subpath" not in metadata and '(allow file-read* (subpath "/"))' not in rules
+
+
+def test_allowlist_bwrap_uses_empty_readonly_root_and_keeps_symlink_aliases(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    home, read_real, write_real = (tmp_path / name for name in ("home", "read-real", "write-real"))
+    runner = tmp_path / "bin" / "python3.12"
+    workspace, output = tmp_path / "plugin-files", tmp_path / "output"
+    for path in (home, read_real, write_real, runner.parent, workspace, output):
+        path.mkdir(parents=True, exist_ok=True)
+    runner.write_text("verified", encoding="utf-8")
+    read_alias, write_alias, runner_alias = home / "allowed-read", home / "allowed-write", home / "python"
+    read_alias.symlink_to(read_real, target_is_directory=True)
+    write_alias.symlink_to(write_real, target_is_directory=True)
+    runner_alias.symlink_to(runner)
+    spec = AttemptSandboxSpec(
+        attempt_view=workspace, staging_root=output, shared_workspace=workspace, owner_home=workspace,
+        extra_write_roots=(output, write_alias),
+        public_read_roots=(read_alias, read_real, runner_alias, runner),
+        system_read_roots=(Path("/usr"),), implicit_attempt_write_roots=False,
+        read_only_root=True, read_mode="allowlist", bwrap_path="/fake/bwrap",
+    )
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+    monkeypatch.setattr(tooling_sandbox, "_proc_mount_args", lambda: ["--dir", "/proc"])
+
+    argv = sandbox.build_argv([str(runner_alias), "-c", "pass"])
+
+    ro_pairs = _argv_mount_pairs(argv, "--ro-bind")
+    write_pairs = _argv_mount_pairs(argv, "--bind")
+    symlinks = _argv_mount_pairs(argv, "--symlink")
+    assert ("/", "/") not in ro_pairs and ("/", "/") not in write_pairs
+    assert argv[argv.index("--tmpfs") + 1] == "/"
+    assert argv[argv.index("--remount-ro") + 1] == "/"
+    assert (str(Path("/usr")), "/usr") in ro_pairs
+    assert (str(read_real.resolve()), str(read_real.resolve())) in ro_pairs
+    assert (str(runner.resolve()), str(runner.resolve())) in ro_pairs
+    assert (str(write_real.resolve()), str(write_real.resolve())) in write_pairs
+    assert (str(read_real.resolve()), str(read_alias)) in symlinks
+    assert (str(write_real.resolve()), str(write_alias)) in symlinks
+    assert (str(runner.resolve()), str(runner_alias)) in symlinks
+    assert (str(tmp_path.resolve()), str(tmp_path.resolve())) not in ro_pairs
+
+
+def test_platform_system_read_roots_are_structured_and_not_broad_aliases():
+    import platform
+
+    from agent_py_agent.agent.tooling.sandbox import SYSTEM_READ_ROOTS_BY_PLATFORM
+
+    prohibited = {Path("/"), Path("/Users"), Path("/home"), Path("/private")}
+    assert set(SYSTEM_READ_ROOTS_BY_PLATFORM) == {"Linux", "Darwin"}
+    for roots in SYSTEM_READ_ROOTS_BY_PLATFORM.values():
+        assert roots
+        for raw in roots:
+            path = Path(raw)
+            assert path.is_absolute()
+            assert path not in prohibited
+    for raw in SYSTEM_READ_ROOTS_BY_PLATFORM[platform.system()]:
+        resolved = Path(raw).resolve(strict=False)
+        assert resolved not in prohibited
+        assert not any(parent in {Path("/Users"), Path("/home"), Path("/private")} for parent in resolved.parents)
+
+
+def test_system_read_root_validation_rejects_root_and_forbidden_symlink_alias(tmp_path, monkeypatch):
+    from agent_py_agent.agent.attempt import sandbox as attempt_sandbox
+    from agent_py_agent.agent.attempt.sandbox import SandboxUnavailableError, system_read_roots_for_platform
+    from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
+
+    alias = tmp_path / "system-root-alias"
+    alias.symlink_to(Path("/"), target_is_directory=True)
+    roots_by_platform = {"Synthetic": ("/",), "Alias": (str(alias),), "Private": ("/private",)}
+    monkeypatch.setattr(tooling_sandbox, "SYSTEM_READ_ROOTS_BY_PLATFORM", roots_by_platform)
+    monkeypatch.setattr(attempt_sandbox, "SYSTEM_READ_ROOTS_BY_PLATFORM", roots_by_platform)
+    for platform_name in ("Synthetic", "Alias", "Private"):
+        with pytest.raises(SandboxUnavailableError, match="SYSTEM_READ_ROOT_INVALID"):
+            system_read_roots_for_platform(platform_name)

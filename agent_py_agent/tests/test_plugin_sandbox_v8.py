@@ -118,6 +118,40 @@ print(json.dumps({'read_allowed': read(sys.argv[1]), 'read_denied': read(sys.arg
                   'network': network}))
 """
 
+_ALLOWLIST_PROBE = """
+import json, os, sys
+def read(path):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            return stream.read()
+    except OSError:
+        return 'DENIED'
+def write(path):
+    try:
+        with open(path, 'w', encoding='utf-8') as stream:
+            stream.write('x')
+        return 'OK'
+    except OSError:
+        return 'DENIED'
+def can_stat(path):
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+def names(path):
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return None
+with open(sys.argv[5], 'rb') as stream:
+    system_read = 'OK' if stream.read(1) else 'EMPTY'
+print(json.dumps({'read_allowed': read(sys.argv[1]), 'read_denied': read(sys.argv[2]),
+                   'write_allowed': write(sys.argv[3]), 'write_denied': write(sys.argv[4]),
+                   'system_read': system_read, 'ancestor_stat': can_stat(sys.argv[6]),
+                   'denied_stat': can_stat(sys.argv[7]), 'ancestor_names': names(sys.argv[6])}))
+"""
+
 
 def _layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     home = tmp_path / "home"
@@ -517,7 +551,7 @@ def test_linux_v8_narrows_read_real_process(tmp_path):
     _expect_hidden_home(report)
 
 
-def _restricted_policy_case(tmp_path):
+def _restricted_policy_case(tmp_path, read_mode="hide_home"):
     home, data_root, env, data_dir = _layout(tmp_path)
     allowed_read = home / "allowed-read"
     allowed_write = home / "allowed-write"
@@ -536,12 +570,16 @@ def _restricted_policy_case(tmp_path):
     unreadable.write_text("HIDDEN", encoding="utf-8")
     allowed_write_file = allowed_write / "created.txt"
     denied_write_file = denied / "created.txt"
+    read_roots = (allowed_read, package_root)
+    if read_mode == "allowlist":
+        read_roots = (*read_roots, env, *_python_prefixes())
     policy = PluginRestrictedSandbox(
-        read_roots=(allowed_read, package_root),
+        read_roots=read_roots,
         write_roots=(allowed_write,),
         execute_roots=(interpreter_alias,),
         network=False,
         hidden_read_root=home,
+        read_mode=read_mode,
     )
     spec = plugin_sandbox_spec(cwd=env, data_dir=data_dir,
                                owner_home=data_root / "owners/local/main", sandbox_policy=policy)
@@ -575,13 +613,43 @@ def test_restricted_policy_real_process_enforces_read_write_and_offline_roots(tm
     assert report["network"].startswith("DENIED:")
 
 
+@pytest.mark.skipif(not (IS_LINUX or IS_MACOS), reason="Linux bwrap / macOS Seatbelt")
+def test_restricted_policy_allowlist_limits_reads_and_preserves_ancestor_metadata(tmp_path):
+    sandbox, readable, unreadable, allowed_write_file, denied_write_file, _, _ = _restricted_policy_case(
+        tmp_path, read_mode="allowlist"
+    )
+    if not sandbox.probe().ready:
+        pytest.skip("当前平台的沙箱自检未就绪")
+    try:
+        sandbox.require_ready()
+    except SandboxUnavailableError as exc:
+        pytest.skip(f"当前环境未能执行受限沙箱：{exc}")
+    result = sandbox.run([
+        sys.executable, "-c", _ALLOWLIST_PROBE, str(readable), str(unreadable),
+        str(allowed_write_file), str(denied_write_file), "/usr/bin/env",
+        str(unreadable.parent.parent), str(unreadable.parent),
+    ], timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip())
+    assert report["read_allowed"] == "READABLE"
+    assert report["read_denied"] == "DENIED"
+    assert report["write_allowed"] == "OK"
+    assert report["write_denied"] == "DENIED"
+    assert report["system_read"] == "OK"
+    assert report["ancestor_stat"] is True
+    assert report["denied_stat"] is False
+    assert report["ancestor_names"] is None or "denied" not in report["ancestor_names"]
+
+
 @needs_linux
-def test_linux_restricted_policy_symlink_execute_root_runs_and_reads_package(tmp_path):
+@pytest.mark.parametrize("read_mode", ["hide_home", "allowlist"])
+def test_linux_restricted_policy_symlink_execute_root_runs_and_reads_package(tmp_path, read_mode):
     from agent_py_agent.agent.tooling.sandbox import find_bwrap
 
     if not find_bwrap():
         pytest.skip("无 bwrap")
-    sandbox, _, _, _, _, interpreter, package_root = _restricted_policy_case(tmp_path)
+    sandbox, _, _, _, _, interpreter, package_root = _restricted_policy_case(tmp_path, read_mode=read_mode)
     if not sandbox.probe().ready:
         pytest.skip("Linux bwrap 沙箱自检未就绪")
     code = "import sys; sys.path.insert(0, sys.argv[1]); import b7lnx_probe; print(b7lnx_probe.VALUE)"
@@ -839,3 +907,65 @@ def test_missing_interpreter_prefix_is_structured_sandbox_unavailable(tmp_path, 
         owner_home=data_root / "owners/local/main", network=False,
         interpreter=PluginInterpreterPaths("python3", Path(sys.executable), Path(sys.executable)))
     assert options is None and reason == "sandbox_unavailable"
+
+
+def test_restricted_sandbox_spec_propagates_allowlist_read_mode(tmp_path):
+    home, data_root, env, data_dir = _layout(tmp_path)
+    policy = PluginRestrictedSandbox(
+        read_roots=(env,), write_roots=(), execute_roots=(), network=False, hidden_read_root=home
+    )
+    object.__setattr__(policy, "read_mode", "allowlist")
+
+    spec = plugin_sandbox_spec(
+        cwd=env, data_dir=data_dir, owner_home=data_root / "owners/local/main", sandbox_policy=policy
+    )
+
+    assert getattr(spec, "read_mode", None) == "allowlist"
+
+
+def test_v8_spec_keeps_hide_home_read_mode(tmp_path):
+    home, data_root, env, data_dir = _layout(tmp_path)
+    spec = plugin_sandbox_spec(
+        cwd=env,
+        data_dir=data_dir,
+        owner_home=data_root / "owners/local/main",
+        sandbox_policy=PluginV8Sandbox(network=False, hidden_read_root=home, public_read_roots=()),
+    )
+
+    assert spec.read_mode == "hide_home"
+
+
+def test_allowlist_mode_does_not_implicitly_reopen_cwd(tmp_path):
+    from agent_py_agent.agent.attempt.sandbox import SandboxUnavailableError
+
+    home, data_root, env, data_dir = _layout(tmp_path)
+    allowed = home / "allowed"
+    allowed.mkdir()
+    policy = PluginRestrictedSandbox(
+        read_roots=(allowed,), write_roots=(), execute_roots=(), network=False,
+        hidden_read_root=None, read_mode="allowlist",
+    )
+
+    with pytest.raises(SandboxUnavailableError, match="RESTRICTED_CWD_NOT_ALLOWLISTED"):
+        plugin_sandbox_spec(
+            cwd=env, data_dir=data_dir, owner_home=data_root / "owners/local/main", sandbox_policy=policy
+        )
+
+
+def test_allowlist_mode_can_omit_hidden_root_but_keeps_system_roots_separate(tmp_path):
+    from agent_py_agent.agent.attempt.sandbox import system_read_roots_for_platform
+
+    home, data_root, env, data_dir = _layout(tmp_path)
+    policy = PluginRestrictedSandbox(
+        read_roots=(env,), write_roots=(), execute_roots=(), network=False,
+        hidden_read_root=None, read_mode="allowlist",
+    )
+
+    spec = plugin_sandbox_spec(
+        cwd=env, data_dir=data_dir, owner_home=data_root / "owners/local/main", sandbox_policy=policy
+    )
+
+    assert spec.read_mode == "allowlist"
+    assert spec.private_read_roots == ()
+    assert spec.system_read_roots == system_read_roots_for_platform()
+    assert not set(spec.system_read_roots) & set(spec.public_read_roots)

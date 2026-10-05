@@ -70,3 +70,15 @@
 - 收窄读：隐藏 Gateway 用户整个家目录；在其中只放行插件自己的环境、自己的数据目录及宿主核验的解释器前缀。数据根、会话、记忆、secrets、`.ssh` 等其它家目录内容均不可见。macOS 用 `private_read_roots` 拒读 + `_ancestor_metadata_rules`；Linux 整根只读形态先 tmpfs 覆盖隐藏根，再将授权根挂回。
 - 共用受限策略入口：`plugin_restricted_sandbox_spec(*, cwd, data_dir, owner_home, policy: PluginRestrictedSandbox) -> AttemptSandboxSpec`；`plugin_sandbox_spec(..., sandbox_policy=...)` 将 v8 与老插件受限策略路由到同一构造器。`policy` 由宿主提供有限 `read_roots`、`write_roots`、`execute_roots`、`network` 和 `hidden_read_root`，候选预检、业务连接及面板连接只复用规格，不复制 Seatbelt/bwrap 规则。根路径必须是仍存在的普通目录或文件；目录根只开放该目录，文件型程序根只开放真实文件，不扩大到父目录。Linux 收窄读形态只对真实目标 bind，再用 `--symlink` 重建经核验的原始入口；Seatbelt 逐条允许 alias 与 realpath，写规则仍只落已授权写目标。读/执行根或写根若覆盖隐藏根则失败关闭。`execute_roots` 表示宿主核验的启动程序可见根，不替代更广义的子进程 `execve` 策略。
 - 详见 DESIGN_LEDGER 的 B7 条目与 `PLUGIN_EVENT_HOOKS.md` 第 10、16 节。
+
+## B7 老格式受限策略的读取底图（rdfloor，2026-10-05）
+
+`PluginRestrictedSandbox.read_mode` 是结构化字段：`hide_home`（默认）保留 v8 既有“根只读、隐藏 HOME、重挂授权根”行为；`allowlist` 则只开放 `read_roots`、`write_roots`、`execute_roots` 及平台系统必要根。v8 显式使用 `hide_home`，Seatbelt profile 和 bwrap argv 通过固定快照确保逐字节不漂移。
+
+`allowlist` 不自动放开 `cwd`、`owner_home` 或解释器父目录；工作目录必须被明确读/写根或系统根覆盖，否则 fail-closed。执行根仍只暴露已核验文件及真实目标，原路径 alias 由公共 B7 symlink 处理重建。写权限只给明确写根与插件私有 data；不存在整根 bind 或从 cwd 推写权限的回退。
+
+Seatbelt 规则先 `(deny file-read*)`，再允许每个系统/授权根；未开放根之间的祖先只可 `file-read-metadata`（供 `stat`/路径规范化），不能列目录或读取兄弟路径。隐藏凭据规则保持最后拒绝。
+
+Linux 从空 `tmpfs /` 创建 `/dev`、`/proc`、`/tmp` 和挂载点骨架，系统根与授权读根只读 bind，显式写根 bind，最后 remount 根只读。R/W/E symlink alias 在真实根挂载之后恢复；alias 已包含在另一个授权父目录或系统根时不重复覆盖。系统目录按平台放在 `SYSTEM_READ_ROOTS_BY_PLATFORM`：Linux 为 `/bin`、`/sbin`、`/lib`、`/lib64`、`/usr/bin`、`/usr/sbin`、`/usr/lib`、`/usr/lib64`、`/usr/share`、`/etc/alternatives`；Darwin 为 `/System/Library`、`/usr/bin`、`/usr/lib`、`/usr/share`、`/bin`、`/sbin`。不把整个 `/usr` 或宿主 `/` 当系统根；解释器前缀仍须由宿主作为授权读根提供。解析后若落到 `/`、用户 home 或 `/private` 边界则拒绝；`/dev`、`/proc`、`/tmp` 是沙箱自身构造的伪文件系统/骨架，不作为宿主整目录挂载。
+
+策略构造与平台规则测试命令、真实 Seatbelt/bwrap 的未验证边界见 `TESTS.md` 的 rdfloor 小节。组件测试不等同于真实进程或生产插件端到端验收。

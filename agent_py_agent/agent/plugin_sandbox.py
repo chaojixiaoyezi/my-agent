@@ -1,5 +1,6 @@
 # LLM: 旧版插件进程沙箱受 plugin_process_sandbox 控制，复用 AttemptExecutionSandbox；启用沙箱时保留 G1 凭据路径的 H2 隐藏。
-#   v8 事件插件无条件强制沙箱，隐藏 Gateway 用户家目录，仅放行插件环境、插件数据和核验过的解释器前缀。
+#   v8 事件插件无条件强制沙箱，默认 hide_home：隐藏 Gateway 用户家目录，仅放行插件环境、插件数据和核验过的解释器前缀。
+#   旧格式受限策略可显式选择 allowlist；系统必要读根按平台窄列，不能借 /、/Users、/home 或 /private 扩大底图。
 #   v8 与旧插件受限策略共用同一 AttemptSandboxSpec 工厂；network:false 全断网，network:true 仍受 G4/G5 端口边界约束。
 #   沙箱不可用时调用方须在启动前结构化拒绝，不能退回无沙箱启动。
 #   改动须同步 plugin_runtime、plugin_enable_tool、plugin_management、tooling/sandbox 与测试。
@@ -15,8 +16,10 @@ from pathlib import Path
 from .attempt.sandbox import (
     AttemptExecutionSandbox,
     AttemptSandboxSpec,
+    SandboxReadMode,
     SandboxUnavailableError,
     gateway_bound_ports,
+    system_read_roots_for_platform,
 )
 from .gateway_parts.local_client_token import local_client_credential_path
 from .path_access_policy import agent_home_root_for_owner
@@ -36,8 +39,9 @@ class PluginV8Sandbox:
     public_read_roots: tuple[Path, ...] = ()
 
 
-# LLM: 仅承载宿主核验后的有限读、写、程序根与网络事实；程序根可为单文件，构造规格时不扩大到其父目录。
-# 类用途: 为旧插件权限接入提供与 v8 相同 AttemptSandboxSpec 的受限策略输入。
+# LLM: 仅承载宿主核验后的有限读、写、程序根、网络和读模式事实；hide_home 保持 B7 原行为，allowlist 不隐式公开 cwd。
+#   程序根可为单文件，构造规格时不扩大到其父目录；平台系统根由沙箱底座按结构化清单另行加入。
+# 类用途: 为 v8 与旧格式策略共用的沙箱工厂提供受限权限输入。
 @dataclass(frozen=True)
 class PluginRestrictedSandbox:
     read_roots: tuple[Path, ...]
@@ -45,6 +49,7 @@ class PluginRestrictedSandbox:
     execute_roots: tuple[Path, ...]
     network: bool
     hidden_read_root: Path | None
+    read_mode: SandboxReadMode = "hide_home"
 
 
 PluginSandboxPolicy = PluginV8Sandbox | PluginRestrictedSandbox
@@ -77,6 +82,7 @@ def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
             execute_roots=(),
             network=sandbox_policy.network,
             hidden_read_root=sandbox_policy.hidden_read_root,
+            read_mode="hide_home",
         )
     return plugin_restricted_sandbox_spec(
         cwd=cwd, data_dir=data_dir, owner_home=owner_home, policy=sandbox_policy
@@ -91,19 +97,37 @@ def plugin_restricted_sandbox_spec(
 ) -> AttemptSandboxSpec:
     if type(policy.network) is not bool:
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_NETWORK_INVALID")
-    hidden_root = _required_directory(policy.hidden_read_root)
+    if policy.read_mode not in ("hide_home", "allowlist"):
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID")
+    hidden_root = (
+        _required_directory(policy.hidden_read_root)
+        if policy.read_mode == "hide_home" or policy.hidden_read_root is not None
+        else None
+    )
     data_root = _required_directory(data_dir)
     public_roots = _verified_access_roots((*policy.read_roots, *policy.execute_roots))
     write_roots = _verified_access_roots((*policy.write_roots, data_root))
-    if any(hidden_root.is_relative_to(Path(root).resolve(strict=True))
-           for root in (*public_roots, *write_roots)):
+    system_roots = (
+        system_read_roots_for_platform()
+        if policy.read_mode == "allowlist"
+        else ()
+    )
+    if hidden_root is not None and any(
+        hidden_root.is_relative_to(Path(root).resolve(strict=True))
+        for root in (*system_roots, *public_roots, *write_roots)
+    ):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_ROOT_COVERS_HIDDEN_ROOT")
+    if policy.read_mode == "allowlist" and not _allowlisted_directory(
+        cwd, (*system_roots, *public_roots, *write_roots)
+    ):
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
     credential = local_client_credential_path(agent_home_root_for_owner(owner_home) or owner_home)
     return AttemptSandboxSpec(
         attempt_view=cwd, staging_root=data_dir, shared_workspace=cwd, owner_home=cwd,
         extra_write_roots=write_roots, implicit_attempt_write_roots=False, read_only_root=True,
-        hidden_paths=(credential, credential.parent),
-        network_access=policy.network, private_read_roots=(hidden_root,), public_read_roots=public_roots,
+        hidden_paths=(credential, credential.parent), network_access=policy.network,
+        private_read_roots=(hidden_root,) if policy.read_mode == "hide_home" else (),
+        public_read_roots=public_roots, read_mode=policy.read_mode, system_read_roots=system_roots,
         deny_gateway_ports=gateway_bound_ports(),
     )
 
@@ -221,6 +245,16 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+# LLM: allowlist 模式不得隐式重开 cwd；只有 cwd 被系统根、只读授权根或写根覆盖时，才能交给平台 chdir。
+# 函数用途: 判断插件工作目录是否已包含在显式开放的根中。
+def _allowlisted_directory(path: Path, roots: tuple[Path, ...]) -> bool:
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return any(_is_relative_to(resolved, Path(root).resolve(strict=True)) for root in roots)
 
 
 # LLM: 规格由调用方用 plugin_sandbox_spec 从宿主事实构造后传入（唯一 spec 工厂，避免这里再长一套参数）；

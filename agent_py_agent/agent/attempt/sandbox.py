@@ -33,10 +33,11 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..common.cancellation import raise_if_cancelled
 from ..tooling.sandbox import (
+    SYSTEM_READ_ROOTS_BY_PLATFORM,
     SandboxReadiness,
     SandboxSpec,
     SandboxUnavailable,
@@ -47,6 +48,8 @@ from ..tooling.sandbox import (
 from . import landlock_launcher
 from .process_run import run_sandbox_process
 
+SandboxReadMode = Literal["hide_home", "allowlist"]
+
 
 class SandboxUnavailableError(SandboxUnavailable):
     """SANDBOX_UNAVAILABLE：节点缺隔离能力时 handler=0 的载体。
@@ -56,9 +59,42 @@ class SandboxUnavailableError(SandboxUnavailable):
     """
 
 
-# LLM: AttemptSandboxSpec separates readable cwd from explicit writable roots. Production process
-# tools must set implicit_attempt_write_roots=False whenever a host write boundary is present.
-# 类用途: 描述一次命令可读、可写、受保护和网络范围，供 Linux/macOS 共用。
+# LLM: allowlist 的系统底图只能取当前平台声明的窄目录；解析后的根不得成为用户目录或 /private 下的别名。
+# 函数用途: 校验并展开当前平台必需的只读系统目录，缺失/越界时失败关闭。
+def system_read_roots_for_platform(platform_name: str | None = None) -> tuple[Path, ...]:
+    selected = platform_name or platform.system()
+    raw_roots = SYSTEM_READ_ROOTS_BY_PLATFORM.get(selected)
+    if raw_roots is None:
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: SYSTEM_READ_ROOTS_UNAVAILABLE")
+    roots: list[Path] = []
+    for raw in raw_roots:
+        original = Path(raw).expanduser()
+        if not original.is_absolute() or _is_forbidden_system_root(original):
+            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: SYSTEM_READ_ROOT_INVALID")
+        try:
+            resolved = original.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if _is_forbidden_system_root(resolved):
+            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: SYSTEM_READ_ROOT_INVALID")
+        if not resolved.is_dir():
+            continue
+        roots.extend((original.absolute(), resolved))
+    if not roots:
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: SYSTEM_READ_ROOTS_UNAVAILABLE")
+    return tuple(dict.fromkeys(roots))
+
+
+# LLM: 系统白名单根既拒绝直接宽根，也拒绝解析后落入用户家目录或 private 的符号链接。
+# 函数用途: 判断平台系统目录是否越过允许的底图边界。
+def _is_forbidden_system_root(path: Path) -> bool:
+    forbidden = (Path("/Users"), Path("/home"), Path("/private"))
+    return path == Path("/") or any(root == path or root in path.parents for root in forbidden)
+
+
+# LLM: AttemptSandboxSpec separates readable cwd from explicit writable roots; read_mode=allowlist must not infer cwd access.
+#   Production process tools set implicit_attempt_write_roots=False with an explicit host boundary; hide_home keeps its prior projection.
+# 类用途: 描述一次命令的读模式、授权根、保护路径和网络范围，供 Linux/macOS 共用。
 @dataclass(frozen=True)
 class AttemptSandboxSpec:
     """attempt 级沙箱合同：独立 attempt 写 view/staging；生产调用服从显式写根。"""
@@ -83,6 +119,10 @@ class AttemptSandboxSpec:
     # 整根只读形态：Linux 根文件系统只读，private_read_roots 可 tmpfs 隐藏并按 public_read_roots / extra_write_roots 重挂授权范围；
     # macOS 仍由 Seatbelt 读拒绝规则表达同一合同，写权限只落显式写根。
     read_only_root: bool = False
+    # B7 只读根模式；None 保留非插件调用的历史语义，hide_home 继续走原实现。
+    read_mode: SandboxReadMode | None = None
+    # allowlist 专用的平台系统只读根，和宿主授权的 public_read_roots 分开记录。
+    system_read_roots: tuple[Path, ...] = ()
     # owner 隔离形态下要拒读的宿主根：总有 my-agent 家目录根（其它 owner、配置与密钥、发布记录），开关打开时对非本机管理员
     # 再加用户家目录。拒读后仍放行本 owner home、attempt view、staging、授权读根和写根。Linux bwrap 本来就不挂载这些路径；
     # macOS 由 Seatbelt 读拒绝实现。full_access 不生效。
@@ -245,6 +285,12 @@ class AttemptExecutionSandbox:
     # task work 临时根；v8 隐藏根必须仍存在才能挂 tmpfs，缺失要失败关闭；写根顺序保持原合同。
     # 函数用途: 为 Linux 组装 bwrap 参数，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
+        if self.spec.read_mode not in (None, "hide_home", "allowlist"):
+            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID")
+        if self.spec.read_mode == "allowlist" and (
+            not self.spec.read_only_root or self.spec.full_access or self.spec.implicit_attempt_write_roots
+        ):
+            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: ALLOWLIST_SCOPE_INVALID")
         if self.spec.read_only_root and any(
             not Path(root).is_dir() for root in self.spec.private_read_roots
         ):
@@ -268,6 +314,8 @@ class AttemptExecutionSandbox:
             full_access=self.spec.full_access,
             network_access=self.spec.network_access,
             read_only_root=self.spec.read_only_root,
+            read_mode=self.spec.read_mode,
+            system_read_roots=self.spec.system_read_roots,
             preserve_public_read_root_aliases=self.spec.read_only_root,
             # B7：整根只读形态下，private_read_roots（v8/受限策略的隐藏根）并进 hidden_paths，由 _read_only_root_argv
             # tmpfs 盖住再把工作目录/写根挂回去；H2 的 hidden_paths（插件库）照旧。owner 隔离形态的 private_read_roots
@@ -423,6 +471,22 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
             *_ancestor_metadata_rules(hidden, visible)]
 
 
+# LLM: allowlist 的 file-read* 总门必须先拒绝，再仅放行系统、R/E、R/W 授权根；祖先只获 literal metadata，不可列目录。
+# 函数用途: 生成有限读 Seatbelt 规则，保留 symlink alias 与 realpath 的同一读授权。
+def _allowlist_read_rules(spec: AttemptSandboxSpec) -> list[str]:
+    visible: set[Path] = set()
+    for raw in (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots):
+        try:
+            path = Path(raw).expanduser().absolute()
+            visible.update((path, path.resolve(strict=False)))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+    allowed = sorted(json.dumps(str(path)) for path in visible)
+    return ["(deny file-read*)",
+            *(f"(allow file-read* (subpath {path}))" for path in allowed),
+            *_ancestor_metadata_rules((Path("/"),), visible)]
+
+
 # LLM: 拒读根按 subpath 连同根目录本身一起拒绝；放行子目录之后，根与放行目录之间的上层目录仍拿不到元数据。git、node 的
 #   realpath、python -m venv 规范化路径时要逐级 lstat，会报 Operation not permitted 退出（2026-09-26 本机复现，owner 工作区
 #   在 ~/.my-agent 之下）。所以只对这些上层目录按 literal 放行 file-read-metadata：能 stat 目录本身，仍不能列目录、不能读同级。
@@ -489,7 +553,8 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 #   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
 # 函数用途: 汇总按 spec 生成的 macOS 附加规则。
 def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
-    return [*_private_read_rules(spec), *_ancestor_write_denies(spec), *_pattern_write_denies(spec.protected_write_patterns),
+    read_rules = _allowlist_read_rules(spec) if spec.read_mode == "allowlist" else _private_read_rules(spec)
+    return [*read_rules, *_ancestor_write_denies(spec), *_pattern_write_denies(spec.protected_write_patterns),
             *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access),
             *_gateway_port_denies(spec.deny_gateway_ports)]
 
@@ -659,7 +724,9 @@ def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
 __all__ = [
     "AttemptSandboxSpec",
     "AttemptExecutionSandbox",
+    "SandboxReadMode",
     "SandboxUnavailableError",
+    "system_read_roots_for_platform",
     "sandbox_hides_host_paths",
     "register_gateway_bound_port",
     "unregister_gateway_bound_port",
