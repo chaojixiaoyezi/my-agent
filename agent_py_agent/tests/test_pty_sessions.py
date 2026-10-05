@@ -578,3 +578,38 @@ def test_subprocess_env_keeps_explicit_pagers(monkeypatch):
     env = _subprocess_text_env(None)
     # 调用方显式给了值就尊重。
     assert env["PAGER"] == "less" and env["GIT_PAGER"] == "delta"
+
+
+# 函数用途: 并发设置空闲阈值只启动一条巡检线程（3a 终审：原实现在锁外 start，“已登记未启动”窗口里并发调用者会再开一条）。
+def test_idle_sweeper_starts_once_under_concurrent_configure(monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling import pty_sessions as module
+
+    registry = module.PtySessionRegistry()
+    starts = []
+    rivals = []
+
+    class _ProbeThread:
+        def __init__(self, target=None, args=(), name="", daemon=None):
+            self.started = False
+
+        def is_alive(self):
+            return self.started
+
+        def start(self):
+            starts.append(self)
+            if len(starts) == 1:
+                # 在“已登记、尚未启动完成”的窗口里插入一个并发调用者
+                rival = threading.Thread(target=module._configure_idle_timeout, args=(registry, 30))
+                rivals.append(rival)
+                rival.start()
+                rival.join(0.3)
+            self.started = True
+
+    monkeypatch.setattr(module, "threading", SimpleNamespace(Thread=_ProbeThread, Lock=threading.Lock))
+    module._configure_idle_timeout(registry, 30)
+    for rival in rivals:
+        rival.join(5)
+    assert len(starts) == 1, "并发设置只能启动一条巡检线程"

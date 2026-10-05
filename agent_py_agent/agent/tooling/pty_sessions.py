@@ -465,7 +465,9 @@ pty_session_registry = PtySessionRegistry()
 
 # LLM: 空闲阈值归一化、空闲巡检、终态裁剪和 fd 关闭都在模块级实现（只操作注册表/会话已有状态），
 #   注册表类保留同名薄方法维持 API，类体量回到软阈值内。改动须同步类方法与调用点。
-# 函数用途: 归一化分钟阈值并在开启时启动唯一巡检线程；重复设置幂等。
+#   线程在持锁期间登记并启动：若在锁外 start，并发调用者会在“已登记未启动”的窗口里看到线程不活而再开一个
+#   （ds10 初审探针实测多开 3 条）。巡检循环先 sleep 再取锁，持锁启动不会自锁。
+# 函数用途: 归一化分钟阈值并在开启时启动唯一巡检线程；重复设置、并发设置都只开一条。
 def _configure_idle_timeout(registry: PtySessionRegistry, minutes: object) -> None:
     try:
         value = float(minutes)
@@ -480,7 +482,7 @@ def _configure_idle_timeout(registry: PtySessionRegistry, minutes: object) -> No
         thread = threading.Thread(target=_idle_sweeper_loop, args=(registry,),
                                   name="pty-idle-sweeper", daemon=True)
         registry._idle_thread = thread
-    thread.start()
+        thread.start()
 
 
 # LLM: 同步关闭空闲会话：进程树终止有界，巡检线程可以承受；回执就是各会话自己的 termination。

@@ -24,6 +24,8 @@
 - 未验证：真机 sandbox-exec 路径下的回收与 `termination.confirmed=True`（能力门用例由 3a 沙箱外跑）；真实 Gateway/TUI/IM 端到端；Gateway 停机路径未加回收调用（见 DESIGN_LEDGER 边界）。
 
 
+- **3a 终审补充**：`test_pty_sessions.py` +1（并发设置空闲阈值只启动一条巡检线程，假线程在首次 start 时插入并发调用者，结果不依赖调度时机）；`test_pty_turn_lifecycle.py` +1（effective owner 为空时按 canonical owner home 回收）；变异 2/2 KILLED（锁外启动、只用 effective）。前端目录重新生成到 261 个字段。
+
 ## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05；已实现，待 3a 复审）
 
 - **实现**：普通 `claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime 三态死亡证明；lease 过期但 runner 活着或身份不可核验时不另发 claim。death proof 后先持久 CAS 为 `queued`，再以递增 `claim_epoch` 领取；旧 heartbeat/release/mark-running/finish 按 claim id 与 epoch 双重 CAS 拒绝。misfire grace 合同未改。

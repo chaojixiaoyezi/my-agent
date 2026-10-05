@@ -116,3 +116,23 @@ def test_turn_end_without_task_identity_falls_back_to_run(tmp_path, _unsandboxed
 
     _wait_pty_dead(session)
     assert other.process.poll() is None
+
+
+# 函数用途: Full Access 管理员下 effective_owner_scope_root 为空时，回合收口仍按 home_paths 的 canonical owner home 回收
+#   （3a 终审补：ds10 变异“只用 effective_owner_scope_root”原先存活）。
+def test_turn_reclaim_uses_canonical_owner_home_when_effective_scope_is_empty(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent import path_access_policy
+    from agent_py_agent.agent.agent_core import _finalization_service as finalization
+
+    calls = []
+    monkeypatch.setattr(path_access_policy, "effective_owner_scope_root", lambda *a, **k: "")
+    monkeypatch.setattr(pty, "reclaim_pty_sessions", lambda owner_home, **kw: calls.append((owner_home, kw)) or
+                        {"scope": owner_home, "status": "ok", "session_ids": []})
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=str(tmp_path / "owner")))
+    ctx = SimpleNamespace(context_scope="", task_attributes={"conversation_thread_id": "th-1", "conversation_task_id": "task-1"},
+                          task_id="task-1", run_id="run-1")
+    receipt = finalization._reclaim_turn_pty_sessions(agent, ctx)
+    assert receipt["status"] == "ok"
+    assert calls == [(str(tmp_path / "owner"), {"thread_id": "th-1", "root_task_id": "task-1", "run_id": "run-1"})]

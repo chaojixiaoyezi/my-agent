@@ -1,6 +1,6 @@
 # 设计台账
 
-## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，基于 17j 头 `da6e38093`；待非作者初审）
+## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，基于 17j 头 `da6e38093`；ds10 初审，3a 终审修正后挑入 17l）
 
 - **来源（真机实锤）**：生产 Gateway 名下 `bash -o pipefail -c git grep ... && git grep ...` 进程挂约 9 小时（CPU 0；0/1/2 号文件都是伪终端 `/dev/ttys024`；子进程 git grep 处 S+）。判断：命令在 PTY 会话里跑，git 看到 TTY 起分页器等按键永不退出；回合早已结束，PTY 会话没有被收回。
 - **根因**：`pty_sessions.py` 的会话只在显式停止路径（`/stop`、`freeze_process_stop`、子代理取消、后台资源报告）经 `request_stop` 收回；**回合正常收口与任务结束都没有回收调用点**。`_prune_finished` 只清“已结束且 fd 已关”的历史对象；`_drain` 读不到 EOF 不退出。分页器等按键的进程永远不产生 EOF，于是进程与会话永久残留。
@@ -10,6 +10,7 @@
   3. **防呆默认**：`_subprocess_text_env` 默认 `PAGER=cat`、`GIT_PAGER=cat`（宿主环境已显式设置的值保持不动），PTY 与普通命令共用同一环境构造函数，git 不再起分页器。
 - **配置三处同步**：`agent_config.yaml`（中文注释）、`AgentConfig` dataclass（默认 30）、参数登记（`parameter_registry` 从 AgentConfig 自动派生）；并显式登记 `_BOUNDARY_NAMES`——模型不能把它调大或关掉（同 `plugin_tool_gate_timeout_ms` 口径），用户改配置文件。
 - **验证**：见 `TESTS.md`“PTY 会话泄漏修复（ptyleak）”小节（含 3 个变异与全门禁结果）。
+- **3a 终审修正**：① 新配置项 `pty_session_idle_timeout_minutes` 同步重新生成前端配置目录（ds10 初审的必须改项，原先 `test_backend_config_catalog.py` 红）；② 巡检线程改为持锁登记并启动——原实现在锁外 `start()`，并发设置阈值时可多开巡检线程；③ 补用例钉住“effective_owner_scope_root 为空时仍按 home_paths 的 canonical owner home 回收”。
 - **未验证 / 已知边界**：真机（沙箱外）sandbox-exec 路径与 `termination.confirmed=True` 由 3a 用强制能力模式复跑（`test_reclaim_pty_sessions_confirms_termination_outside_sandbox`）；子代理树根差异只做了合并回执设计，没有真机子代理用例；**Gateway 停机路径没有新增回收调用**（本次范围只到回合/任务收口；停机时 PTY master 关闭会给前台进程组发 SIGHUP，但忽略 HUP 的进程仍可能残留，交由空闲兜底与后续 17k 计划评估）；真实 Gateway/TUI/IM 端到端未跑。
 
 
