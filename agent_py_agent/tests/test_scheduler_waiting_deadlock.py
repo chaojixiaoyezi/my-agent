@@ -101,7 +101,7 @@ def _fresh_throttles(monkeypatch):
     monkeypatch.setattr(active_run_closeout, "_stale_checked_at", {})
     monkeypatch.setattr(active_run_closeout, "_unreadable_since", {})
     monkeypatch.setattr(active_run_closeout, "_absent_since", {})
-    monkeypatch.setattr(active_run_closeout, "_waiting_clock_samples", {}, raising=False)
+    monkeypatch.setattr(active_run_closeout, "_last_waiting_clock_sample", None, raising=False)
 
     # 旧用例的显式 now 表示正常流逝，单调钟同步推进；睡眠用例另注入独立双钟。
     monotonic = [0.0]
@@ -127,6 +127,26 @@ def _reconcile_confirmed(agent, run_id, at):
 def _lifecycle_wake(store, thread, claim):
     return store.wakes.raise_signal({"thread_id": thread.thread_id, "root_task_id": claim.run_id,
                                      "reason": "subagent_runner_finished", "urgency": "normal", "now": 1_002})
+
+
+# LLM: 仅在合成 owner 存储中建立真实 ClaimStore 记录，并替换身份构造避免启动系统进程探测。
+# 函数用途: 为 stale-waiting 回归准备一条可按 task/thread/scope 核对的运行租约。
+def _claim_waiting_task(monkeypatch, service, run, *, claim_scope_id=""):
+    from agent_py_agent.agent.conversation import store_claims
+
+    monkeypatch.setattr(
+        store_claims,
+        "build_process_identity",
+        lambda _pid=None: {"host_id": "test-host", "pid": 4242, "start_time": 1},
+    )
+    return service.conversation_store.claims.acquire({
+        "thread_id": str(run["thread_id"]),
+        "task_id": str(run["run_id"]),
+        "claim_scope_id": claim_scope_id,
+        "reason": "scheduled_job_due",
+        "lease_seconds": 300,
+        "now": float(run.get("waiting_since") or 1_000.0),
+    })
 
 
 def _history(agent):
@@ -372,7 +392,11 @@ def test_follow_up_unreadable_code_is_registered_for_manual_review():
     assert contract.recommended_action == RecoveryAction.MANUAL_REVIEW.value
 
 
-class TestStaleWaitingExit:
+# LLM: 两个 stale-waiting 用例组共用同一套真实调度/会话夹具，只创建待对账 run，不改变生产状态判断。
+# 类用途: 集中构造等待中的 scheduler run，供执行者与时间边界测试复用。
+class _StaleWaitingRunFixture:
+    # LLM: 创建真实存储里的等待 run，并返回其 TaskLink 身份与首次等待时间。
+    # 函数用途: 为 stale-waiting 结算和执行者核验用例准备统一现场。
     def _parked(self, tmp_path):
         agent, store, thread, claim = _setup(tmp_path)
         wake = _lifecycle_wake(store, thread, claim)
@@ -380,6 +404,244 @@ class TestStaleWaitingExit:
         waiting = agent.scheduler_repository.get_active_run(claim.run_id)
         assert waiting["status"] == "waiting"
         return agent, store, thread, claim, wake, float(waiting["waiting_since"])
+
+
+class TestStaleWaitingExecutorClaims(_StaleWaitingRunFixture):
+
+    @pytest.mark.parametrize("execution_state", [True, None])
+    def test_cold_start_live_or_unverifiable_claim_keeps_stale_run_waiting(
+        self, tmp_path, monkeypatch, execution_state,
+    ):
+        from agent_py_agent.agent.gateway_parts import daemon_metadata
+        from agent_py_agent.agent.scheduler import active_run_closeout
+
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        run = agent.scheduler_repository.get_active_run(claim.run_id)
+        assert active_run_closeout._last_waiting_clock_sample is None
+        record = _claim_waiting_task(monkeypatch, agent.scheduler_service, run)
+        assert record["status"] == "running"
+        monkeypatch.setattr(
+            daemon_metadata, "process_identity_is_live", lambda _identity: execution_state,
+        )
+
+        for at in (since + GRACE, since + GRACE + CONFIRM):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert _history(agent) == []
+
+    def test_detached_claim_in_exact_task_lane_keeps_stale_run_waiting(
+        self, tmp_path, monkeypatch,
+    ):
+        from agent_py_agent.agent.conversation.run_claim import detached_task_claim_scope_id
+        from agent_py_agent.agent.gateway_parts import daemon_metadata
+
+        agent, store, thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        store.tasks.bind({
+            "thread_id": thread.thread_id, "task_id": claim.run_id, "status": "active",
+            "work_kind": "audit", "work_name": "slp4-test", "cancellation_scope": "detached",
+            "context_anchor_message_id": "", "now": since,
+        })
+        run = agent.scheduler_repository.get_active_run(claim.run_id)
+        scope = detached_task_claim_scope_id(thread.thread_id, claim.run_id)
+        assert _claim_waiting_task(
+            monkeypatch, agent.scheduler_service, run, claim_scope_id=scope,
+        )["status"] == "running"
+        monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: True)
+
+        for at in (since + GRACE, since + GRACE + CONFIRM):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+
+    def test_dead_executor_in_exact_claim_lane_allows_stale_settlement(self, tmp_path, monkeypatch):
+        from agent_py_agent.agent.gateway_parts import daemon_metadata
+
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        run = agent.scheduler_repository.get_active_run(claim.run_id)
+        record = _claim_waiting_task(monkeypatch, agent.scheduler_service, run)
+        assert record["thread_id"] == run["thread_id"]
+        assert record["task_id"] == run["run_id"]
+        assert record["claim_scope_id"] == run["thread_id"]
+        monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: False)
+
+        assert _reconcile_confirmed(agent, claim.run_id, since + GRACE) is not None
+        assert store.tasks.load(claim.run_id).status == "blocked"
+        assert _history(agent)[0]["error_code"] == SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP
+
+    def test_unrelated_shared_claim_does_not_hold_stale_run(self, tmp_path, monkeypatch):
+        from agent_py_agent.agent.gateway_parts import daemon_metadata
+
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        run = dict(agent.scheduler_repository.get_active_run(claim.run_id))
+        run["run_id"] = "unrelated-task"
+        assert _claim_waiting_task(monkeypatch, agent.scheduler_service, run)["status"] == "running"
+        monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: True)
+
+        assert _reconcile_confirmed(agent, claim.run_id, since + GRACE) is not None
+        assert store.tasks.load(claim.run_id).status == "blocked"
+
+    def test_dead_running_claim_without_exact_scope_keeps_stale_run_waiting(
+        self, tmp_path, monkeypatch,
+    ):
+        from agent_py_agent.agent.gateway_parts import daemon_metadata
+
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        run = agent.scheduler_repository.get_active_run(claim.run_id)
+        _claim_waiting_task(monkeypatch, agent.scheduler_service, run)
+        original_load = store.claims.load_report
+
+        # LLM: 保留真实 claim 文件，只模拟它缺少车道归属字段的结构化读取结果。
+        # 函数用途: 验证不完整 scope 不能作为“执行者已死亡”的证明。
+        def missing_scope(thread_id, *, claim_scope_id=""):
+            record, error = original_load(thread_id, claim_scope_id=claim_scope_id)
+            return {key: value for key, value in record.items() if key != "claim_scope_id"}, error
+
+        monkeypatch.setattr(store.claims, "load_report", missing_scope)
+        monkeypatch.setattr(daemon_metadata, "process_identity_is_live", lambda _identity: False)
+
+        for at in (since + GRACE, since + GRACE + CONFIRM):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert _history(agent) == []
+
+    def test_unreadable_claim_report_keeps_stale_run_waiting(self, tmp_path, monkeypatch):
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        monkeypatch.setattr(
+            store.claims, "load_report",
+            lambda _thread_id, *, claim_scope_id="": ({}, {"error_code": "data_parse:JSONDecodeError"}),
+        )
+
+        for at in (since + GRACE, since + GRACE + CONFIRM):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert _history(agent) == []
+
+    def test_unknown_task_link_scope_keeps_stale_run_waiting(self, tmp_path, monkeypatch):
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        original_load = store.tasks.load_report
+
+        # LLM: TaskStore 的真实读取仍负责身份和错误，替身只暴露不合法的空 scope 字段。
+        # 函数用途: 防止未知任务车道被当成共享前台车道而清算。
+        def empty_scope(task_id):
+            link, error = original_load(task_id)
+            return (replace(link, cancellation_scope="") if link else None), error
+
+        monkeypatch.setattr(store.tasks, "load_report", empty_scope)
+
+        for at in (since + GRACE, since + GRACE + CONFIRM):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert _history(agent) == []
+
+    @pytest.mark.parametrize("missing_field", ["thread_id", "task_id", "claim_scope_id", "claim_id"])
+    def test_terminal_claim_without_exact_identity_keeps_stale_run_waiting(
+        self, tmp_path, monkeypatch, missing_field,
+    ):
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        run = agent.scheduler_repository.get_active_run(claim.run_id)
+        record = dict(_claim_waiting_task(monkeypatch, agent.scheduler_service, run))
+        record["status"] = "finished"
+        record.pop(missing_field)
+        monkeypatch.setattr(
+            store.claims, "load_report",
+            lambda _thread_id, *, claim_scope_id="": (record, None),
+        )
+
+        for at in (since + GRACE, since + GRACE + CONFIRM):
+            assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=at) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert _history(agent) == []
+
+class TestStaleWaitingConfirmation(_StaleWaitingRunFixture):
+    def test_new_follow_up_between_missing_confirmations_restarts_confirmation(self, tmp_path):
+        from agent_py_agent.agent.scheduler import active_run_closeout
+
+        agent, store, thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        first_check = since + GRACE
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=first_check) is None
+        assert active_run_closeout._absent_since[claim.run_id] == first_check
+
+        _lifecycle_wake(store, thread, claim)
+        assert agent.scheduler_service.reconcile_waiting_run(
+            claim.run_id, now=first_check + CONFIRM,
+        ) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert store.tasks.load(claim.run_id).status == "active"
+        assert claim.run_id not in active_run_closeout._absent_since
+        assert _history(agent) == []
+
+    def test_concurrent_terminal_task_transition_wins_stale_block_cas(self, tmp_path, monkeypatch):
+        from agent_py_agent.agent.scheduler import active_run_closeout
+
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        original_follow_up = active_run_closeout._follow_up
+        follow_up_calls = [0]
+
+        # LLM: 在第二次结构化事实读取后模拟另一执行者先提交 TaskLink 终态。
+        # 函数用途: 验证 stale 结算的 active→blocked CAS 不会覆盖并发完成。
+        def transition_after_follow_up(service, run, ignored, *, now):
+            facts = original_follow_up(service, run, ignored, now=now)
+            follow_up_calls[0] += 1
+            if follow_up_calls[0] == 2:
+                store.tasks.update_status({
+                    "task_id": claim.run_id, "status": "completed",
+                    "expected_status": "active", "now": now,
+                })
+            return facts
+
+        monkeypatch.setattr(active_run_closeout, "_follow_up", transition_after_follow_up)
+        first_check = since + GRACE
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=first_check) is None
+        assert agent.scheduler_service.reconcile_waiting_run(
+            claim.run_id, now=first_check + CONFIRM,
+        ) is None
+        assert store.tasks.load(claim.run_id).status == "completed"
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert _history(agent) == []
+
+        assert agent.scheduler_service.reconcile_waiting_run(
+            claim.run_id, now=first_check + CONFIRM + 1,
+        ) is not None
+        assert _history(agent)[0]["status"] == "done"
+
+    def test_resume_restarts_the_missing_confirmation_interval(self, tmp_path, monkeypatch):
+        from agent_py_agent.agent.scheduler import active_run_closeout
+
+        agent, store, _thread, claim, wake, since = self._parked(tmp_path)
+        store.wakes.mark_handled(wake.wake_signal_id, now=since)
+        wall, monotonic = [since + GRACE], [10.0]
+        monkeypatch.setattr(
+            active_run_closeout, "time",
+            SimpleNamespace(time=lambda: wall[0], monotonic=lambda: monotonic[0]),
+        )
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=wall[0]) is None
+        wall[0] += 2 * GRACE  # 模拟墙钟跨过暂停；单调钟没有前进。
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=wall[0]) is None
+        assert active_run_closeout._absent_since[claim.run_id] == wall[0]
+        wall[0] += CONFIRM - 1
+        monotonic[0] += CONFIRM - 1
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=wall[0]) is None
+        assert agent.scheduler_repository.get_active_run(claim.run_id)["status"] == "waiting"
+        wall[0] += 1
+        monotonic[0] += 1
+
+        assert agent.scheduler_service.reconcile_waiting_run(claim.run_id, now=wall[0]) is not None
+        assert _history(agent)[0]["error_code"] == SCHEDULED_TASK_WAITING_WITHOUT_FOLLOW_UP
 
     def test_waiting_without_follow_up_is_settled_after_the_grace_period(self, tmp_path):
         agent, store, thread, claim, wake, since = self._parked(tmp_path)

@@ -197,7 +197,15 @@
 - **验证**：见 TESTS「模型流未完整结束的回合内重试」；变异 2/2 KILLED（去掉响应级重试 → 4 条用例红；去掉"工具已开始不重试" → tool-trace 用例红）。
 - **未验证**：真实 DeepSeek 流被切断的端到端（沙箱不连真实 provider）；本树用假后端走完整模型回合 + 真实账本验证。真机复测建议在 DeepSeek 高峰时段观察"流被切断后同回合自动重试、账本出现 retry 计数"。
 
-## stale-waiting 睡眠恢复（slp4，2026-10-05，worker/slp4；WIP，部署窗口暂停）
+## stale-waiting 睡眠恢复（slp4b，2026-10-05，worker/slp4b；已实现，待审）
+
+- **范围**：从指定基线 `875eb7b74` 接手；产品实现仅限 `agent/scheduler/active_run_closeout.py` 与聚焦测试，另外按守卫重生成派生常数目录，并同步 `DESIGN_LEDGER.md`、`TESTS.md`、`SLEEP_RESUME.md` 与 gateway 模块文档。不改 scheduler repository/service、conversation 或 tooling 的实现。
+- **实现**：stale-waiting 收口前按准确 TaskLink 读取 `cancellation_scope` 并选择共享/独立 ClaimStore lane；先核验 claim 的 thread、scope、task、claim_id，再解释 status。只有精确匹配的 running claim 且 `process_identity_is_live(...) is False` 才能作为执行者已死亡的证据；live、unverifiable、读错或身份字段不全一律继续 waiting。合法 foreground 默认来自 ThreadTaskLink 结构化模型，detached 只使用精确 `detached_task_claim_scope_id`。
+- **暂停处理**：同进程墙钟相对单调钟多走超过 60 秒只清空缺失确认，不代表执行者死亡；样本更新与重置由同一把锁保护。冷启动没有旧样本时不推断暂停，仍查 claim。
+- **保留合同**：follow-up 每次重读、两次缺失确认及至少 60 秒间隔、unreadable 六倍宽限、blocked 与 waiting-run finish CAS 均保持。
+- **验证状态**：stale-waiting 相关子集 39 passed；12 个相邻 scheduler 文件 142 passed，另 5 个 claim/endtask/store 文件 117 passed；guards9 190 passed。全量范围内的 process-completion fixture 错误已在 `875eb7b74` 复现；Ruff、import-boundary、doc-sync、strict code-size、clean-package 与 size_diff 均有本地证据，详见 TESTS。本节只表示本地实现待审，不表示生产部署或真实 Gateway 验收。
+
+## stale-waiting 睡眠恢复初始测试准备（sol3，2026-10-05，worker/slp4；历史检查点）
 
 - **当前范围**：基线 `875eb7b74`，承接 [SLEEP_RESUME.md 第 3.4 节](docs/design/SLEEP_RESUME.md#34-风险四长暂停让-stale-waiting-收口过早)。只允许修改 `scheduler/active_run_closeout.py` 和聚焦测试，后续进 17l，不进 17k；不改并行的 conversation claim、scheduler repository/service 或 tooling。
 - **已核对**：waiting 会清 scheduler `claim_id/claim_expires_at`，遗留 `runner_pid` 不证明当前尝试仍在执行。已有 `ClaimStore.load_report` 能区分空记录和坏账；共享车道与 `detached_task_claim_scope_id` 定位的独立任务车道需分别按精确 task/thread、claim_id、status、owner_process 核对。`conversation_task_execution_state` 受 TTL 和进度策略影响，不能直接当死亡证明。

@@ -9,6 +9,15 @@
 
 `adapter/delivery.py` 的标记与 claim 共存在原 pending，记录 owner/process、epoch、message_sequence/key、SHA256、首次开始时间和下一游标；终态仍写原 sent。claim 不把 expiry 当死亡，外发前 CAS 写意图，恢复先查询或核渠道去重窗口，不可确认收 unknown。进度游标与 final 回执分别消费身份，不增加平行存储；`_terminal_claim_receipt` 只装配原回执，`_dispatch_auth_denial` 沿同一发送栅栏，不建影子链路。当前离线回归、三变异及门禁已补齐，真实渠道/Gateway 未验证；详见 TESTS。
 
+## SLP-4B stale-waiting closeout 流程（slp4b，2026-10-05；已实现，待审）
+
+- 入口仍是 `scheduler/service.py::reconcile_waiting_run` → `scheduler/active_run_closeout.py::settle_stale_waiting`；本片没有新增 executor/恢复状态源。
+- settle 先比较同进程墙钟/单调钟样本，检测到超过 60 秒的暂停差值时重置两次缺失确认（样本与重置同锁）；没有前样本时不推断暂停。
+- 再读精确 TaskLink：foreground 选共享 claim lane，结构化 `cancellation_scope == "detached"` 时选 `detached_task_claim_scope_id(thread_id, task_id)`；其它未知/错误保持 waiting。
+- ClaimStore 返回记录先核对 thread、scope、task、claim_id；身份不完整不因 terminal label 结算。目标 running claim 只在 `process_identity_is_live(owner_process) is False` 才被认作死亡；True、None、异常均等待。合法空 claim 按原读取合同代表无当前 claim。
+- 执行者判定通过后，继续原 follow-up 重读、两次缺失确认、unreadable 六倍宽限、active→blocked CAS 与 waiting-run finish CAS。
+- 聚焦覆盖与基线 fixture 失败见 `TESTS.md` 的 SLP-4B 条目；真实 Gateway 与生产恢复链未验证。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - `agent/gateway_parts/http_handlers.py`：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access` 分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。

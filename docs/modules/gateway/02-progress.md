@@ -11,6 +11,14 @@
 
 原 pending/sent 外发前记 dispatch-started，旧进程活着/不可核验不接管；明确死亡后按查询或稳定键窗口恢复，否则 unknown。progress/final 分身份，飞书仅一小时去重，QQ 继承 Base 默认不支持。续做脚本刷新常数投影；35 文件相关回归 510 passed，十二守卫 190 passed，三变异全杀，完整本地门禁已执行，线上尺寸身份新增 0/消失 55。仅离线 fake process/provider 范围，未验真实渠道/Gateway，须独立初审和 3a 终审后再集成；详见 TESTS。
 
+## SLP-4B stale-waiting 长暂停收口保护（slp4b，2026-10-05；已实现，待审）
+
+- **问题与范围**：定时任务醒来时墙钟可能已跨过 stale grace，但单凭等待年龄与短暂读不到 follow-up 会误把仍有执行者的任务收口。本片以 `875eb7b74` 为基线，仅改 scheduler closeout 与聚焦测试，另外重生成只读常数目录；不改 scheduler repository/service 或 conversation/tooling 实现。
+- **修复**：closeout 先按精确 TaskLink `cancellation_scope` 定位 shared/detached ClaimStore lane，检查 claim thread/scope/task/claim_id；live、无法核验、缺身份或读取报错均继续 waiting。匹配的 running claim 仅在 `process_identity_is_live` 明确 False 时视为无执行者。墙钟相对单调钟多走 60 秒只重置缺失确认，冷启动无旧样本；两次缺失、60 秒间隔、unreadable 六倍宽限和 blocked/finish CAS 保持。
+- **验证**：stale-waiting 核心子集 39 passed；guards9 190 passed；其余 scheduler 文件组 142 passed，另外 5 个 claim/endtask/store 文件 117 passed。
+- **已知隔离**：process-completion fixtures 有 `ValueError: managed process instance is partially bound`（`TestPendingProcessCompletion` 9 项、`test_process_completion_events.py` 7 项），在任务指定 detached 基线 `875eb7b74` 复现同类失败，见 `TESTS.md`；未把它们归因于 SLP-4B。
+- **边界**：未做真实系统睡眠、Gateway、TUI/IM、生产部署或沙箱外验收；其余本地门禁与尺寸检查结果以 `TESTS.md` 收尾记录为准。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A，本批由初审者直接修。

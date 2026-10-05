@@ -53,12 +53,14 @@
 
 ### 3.4 风险四：长暂停让 stale-waiting 收口过早
 
+- **状态**：已实现，待审（slp4b，基于 `875eb7b74`；不表示已部署或完成真实 Gateway 验收）。
+
 - **成立条件**：`waiting_since` 的墙钟年龄因睡眠超过 grace；醒后暂时读不到有效 follow-up，缺失确认又达到条件，任务因此被阻塞并失败收口。它是误终止风险，不等于已有证据证明会发生。
-- **实现证据**：`agent_py_agent/agent/scheduler/active_run_closeout.py:133-165` 以 `time.time()` 算 `waiting_since` 年龄；节流后重新读取结构化 follow-up facts；缺失需两次确认；不可读走更长宽限；先 CAS 成 blocked，再写失败终态。
-- **现有保护**：多次缺失确认、最短检查间隔、重新读取 follow-up、unreadable 延长宽限、blocked/finish CAS。它们防止瞬时抖动，但睡眠本身可跨过宽限；当前片段未展示执行者存活证明与 wake 后额外宽限。
-- **修法与入口**：收口前读取对应 run/attempt 的结构化存活与恢复状态；live 或 unverifiable 时保持 waiting/recovery_pending。若同进程观测到暂停，恢复屏障完成前不消费缺失确认；屏障后重新开始两次确认间隔，而不是把睡眠时长算成“后续事实连续缺失”。保留现有 follow-up 与 CAS 合同。入口：`agent_py_agent/agent/scheduler/active_run_closeout.py:settle_stale_waiting`、调用它的 reconcile/owner tick，以及 follow-up 结构化事实读取器。
-- **故障注入用例**：将 wall clock 一次推进超过 grace，仍有 live/unknown follow-up executor 时不得 block/failed；模拟连续两次真实确认缺失并经过最短间隔，才允许按原 CAS 收口；测试 unreadable 宽限、并发 follow-up 到达时的 CAS；测试没有 resume 观测样本的冷启动仍依赖执行者事实，不误用单调时钟旧值。
-- **估时**：约 **2–4 agent 小时**。
+- **实现与证据**：`active_run_closeout.settle_stale_waiting` 继续按墙钟计算等待宽限并重读结构化 follow-up。新增 ClaimStore 复核：只有准确 TaskLink 对应 lane 的 claim 身份完整且明确无 live executor 时，才进入原缺失确认；身份缺失、读取错误、live/unverifiable 均保持 waiting。foreground 共享 lane 与 `cancellation_scope == "detached"` 的精确任务 lane 分别读取，不把无关共享 claim 计入目标任务。
+- **暂停与冷启动**：同进程前后墙钟/单调钟差超过 60 秒只重置“两次缺失确认”的计时，不作死亡证明；重置与样本更新同步。进程冷启动没有前样本，不采用持久化的旧单调值，直接依赖 claim 身份事实。
+- **保留合同及验证**：follow-up 重读、两次确认、60 秒最短检查间隔、unreadable 六倍宽限、blocked/finish CAS 保留。合成焦点测试 39 passed；guards9 190 passed。过程发现的 process-completion fixture 错误已在指定基线 `875eb7b74` 复现，完整测试边界和未跑门禁见 `TESTS.md`。
+- **未验证**：真实系统睡眠、真实 Gateway/TUI/IM、生产部署以及沙箱外完整验收。
+- **故障注入覆盖**：wall clock 跨过 grace 时 live/unverifiable 不结算；死 executor 仅在 exact lane 放行；连续缺失经过 60 秒才收口；unreadable 六倍宽限、两次确认之间的新 follow-up、TaskLink 终态 CAS、detached lane 与无冷启动单调样本均有假时钟/结构字段测试。
 
 ### 3.5 风险五：Adapter 外部发送成功、回执未持久化，接管后重复发消息
 

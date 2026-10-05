@@ -324,7 +324,26 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - 门禁：ruff / boundaries=0 / doc_sync(--base 768c73272) / strict code-size(hard=0 blocked=False) / diff-check / clean-package 全过。
 - 未验证：真实 DeepSeek 流切断的端到端（沙箱不连真实 provider）。
 
-## stale-waiting 睡眠恢复测试准备（slp4，2026-10-05，WIP，部署窗口检查点）
+## stale-waiting 睡眠恢复（slp4b，2026-10-05，已实现，待审）
+
+- **范围与实现**：基线 `875eb7b74`；只读精确 TaskLink/ClaimStore 的结构化身份。目标 claim 的 thread/scope 不匹配或身份字段缺失时按未知执行者保留 waiting；task_id 明确指向其它任务时，共享 lane 不把无关 claim 计入本 run，detached lane 身份不符则保守等待。精确匹配的 running claim 只有 process identity 明确死亡才放行。暂停检测只重置两次缺失确认，不证明死亡；冷启动没有旧单调样本时仍依赖 claim。follow-up 重读、两次确认、60 秒最短间隔、unreadable 六倍宽限和 blocked/finish CAS 保留。
+- **聚焦命令与结果**（固定 Python；状态表隔离于 `/private/tmp`）：
+  ```bash
+  PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_scheduler_waiting_deadlock.py \
+    -k 'TestCloseActiveRun or TestUnreadableFollowUp or TestStaleWaitingExecutorClaims or TestStaleWaitingConfirmation' \
+    -o addopts='' -q --tb=short -p no:cacheprovider \
+    --basetemp=/private/tmp/claude-501/m-ds2
+  ```
+  **39 passed、62 deselected，4.79s**。新增边界覆盖含 exact dead/live/unverifiable claim、缺失身份、坏 scope、claim 读取错误、detached lane、暂停、两次缺失间隔、follow-up 重读及 TaskLink 终态 CAS。至少三个独立单点变异分别被 live/unverifiable、暂停、detached 用例杀死，随后均已恢复；恢复后同一聚焦入口通过。
+- **scheduler 相关测试文件**：12 个 `test_scheduler_*.py`（不含 waiting 专项）**142 passed**；另外 `test_background_claim_attempt_observer.py`、`test_background_claim_execution.py`、`test_background_claim_interrupt_scope.py`、`test_end_task_control.py`、`test_conversation_store.py` **117 passed**。`test_scheduler_waiting_deadlock.py -k 'not TestPendingProcessCompletion'` 当前 **89 passed、12 deselected，8.00s**。
+- **既有 process-completion 失败**：本树 `TestPendingProcessCompletion` 的 9 项及 `test_process_completion_events.py` 的 7 项在 fixture 构造时报 `ValueError: managed process instance is partially bound`。在任务指定 detached 基线 `875eb7b74`，前者同样 9 项失败；后者按相同的 7 项筛选复现 7 failed、10 deselected。失败原因是 fixture 写入 managed process record 时字段部分绑定，不能归因于 closeout。当前完整 `test_process_completion_events.py` 观察为 **7 failed、10 passed**；当前 waiting 文件余下测试有上述 89 项通过。
+- **常数投影**：新阈值按 AST 目录规则进入派生 `agent_py_agent/config/constants_catalog.json`；生成 **907 项**，`scripts/build_constants_catalog.py --check` 显示一致。
+- **本地门禁**：guards9 **190 passed，74.42s**；Ruff `All checks passed!`；`check_import_boundaries.py` 为 **0 findings**；`check_doc_sync.py --base 875eb7b74` 为 `DOC_SYNC_PASS`；严格 code-size `strict_scope_total=2188 hard=0 high-risk=1493 soft=695 test_advisory=1234 blocked=False`；clean-package 为 `OK`；size_diff **新增告警 0、消失 55**；`git diff --check` 通过。`CODE_SIZE_REPORT.md` 已按约定还原，不提交。
+- **未验证**：真实系统睡眠、Gateway、TUI/IM、外部端到端、部署和沙箱外验收；上述 process-completion fixture 错误仍需独立修复/复核。
+
+## stale-waiting 睡眠恢复初始测试准备（sol3，2026-10-05，历史检查点）
 
 - **来源与进度**：任务基线 `875eb7b74`；收到 3a 的 17k 部署窗口通知，停止扩展实现，提交当前测试准备。产品 `scheduler/active_run_closeout.py` 未改，修复仍未完成。
 - **准备做法**：`test_scheduler_waiting_deadlock.py::_fresh_throttles` 隔离 `_absent_since`；预留进程内双钟样本表，并为既有用例的显式 `now` 配同速单调钟，表示普通时间流逝。后续睡眠用例将分别注入 wall/monotonic；原业务断言与结算条件未改。

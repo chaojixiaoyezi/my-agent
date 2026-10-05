@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 912,
+  "count": 913,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4738,6 +4738,14 @@
       "unit": "",
       "category": "比例阈值",
       "description": "宽限期按孤儿巡查间隔的 5 倍放大（无物理单位，倍数）：巡查发现越慢，给子代理的自救时间越多。"
+    },
+    {
+      "name": "_WAITING_PAUSE_DETECTION_THRESHOLD_SECONDS",
+      "file": "agent_py_agent/agent/scheduler/active_run_closeout.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "比例阈值",
+      "description": "墙钟相对单调钟多走超过此秒数时只提示可能暂停，并重置缺失确认；不能据此判断执行者死亡。"
     },
     {
       "name": "_MANUAL_DISPATCH_DELAY_SECONDS",
