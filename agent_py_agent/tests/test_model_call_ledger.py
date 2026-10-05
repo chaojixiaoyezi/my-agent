@@ -17,6 +17,9 @@ from agent_py_agent.agent.agent_core.model.call_runtime import (
     record_model_call_finished,
     start_model_call_record,
 )
+from agent_py_agent.agent.agent_core.model.context_pressure import (
+    ModelVisibleContextSnapshot,
+)
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFailureParams,
@@ -442,6 +445,133 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
             },
         },
     }
+
+
+# LLM: 以下三条用例钉住逻辑回合身份的归并口径（2026-10-05 retrycount）：同一回合的重试必须归并，
+#   即使 input_tokens 被响应 usage 校准而改变；工具轮次或请求内容真变化必须分开。helper 只搭
+#   账本需要的最小结构化事实，不引入产品路径。
+# 类用途: 记录上下文投影行，供逻辑回合身份用例复用。
+class _TurnSink:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, object]] = []
+
+    def write_context_usage(self, usage: dict[str, object]) -> bool:
+        self.rows.append(dict(usage))
+        return True
+
+
+# 函数用途: 构造一次逻辑回合身份用例共用的最小请求参数。
+def _logical_turn_request(agent, sink, *, prompt="same prompt", tool_rounds=2):
+    return SimpleNamespace(
+        agent=agent,
+        prompt=prompt,
+        tool_rounds=tool_rounds,
+        params=SimpleNamespace(
+            request_id="request-1",
+            run_id="run-1",
+            task_id="task-1",
+            tool_protocol_snapshot=make_test_protocol_snapshot(
+                run_id="run-1", source_protocol="native"
+            ),
+            effective_on_chunk=sink,
+        ),
+    )
+
+
+# 函数用途: 构造只改 current_tokens 的上下文快照，模拟 usage 校准前后的估算差异。
+def _context_snapshot(*, current_tokens: int) -> ModelVisibleContextSnapshot:
+    return ModelVisibleContextSnapshot(
+        context_window_tokens=100_000,
+        compact_trigger_tokens=90_000,
+        current_tokens=current_tokens,
+        prompt_tokens=current_tokens,
+        messages_tokens=0,
+        runtime_guidance_tokens=0,
+        tool_schema_tokens=0,
+        protocol="native",
+        raw_estimated_tokens=current_tokens,
+        context_surface_fingerprint="fp-retrycount",
+    )
+
+
+# 函数用途: 建立逻辑回合身份用例共用的最小 agent（backend/config 事实）。
+def _logical_turn_agent():
+    return SimpleNamespace(
+        backend=SimpleNamespace(
+            name="test-backend",
+            model_name="test-model",
+            max_tokens=128,
+        ),
+        config=SimpleNamespace(request_timeout=10),
+    )
+
+
+def test_logical_turn_identity_survives_input_token_calibration() -> None:
+    """同一回合的重试即使上下文估算被校准（input_tokens 变化）仍归并同一逻辑回合。
+
+    2026-10-05 retrycount：断流响应带 usage 时，第一次响应的 usage 会校准第二次的
+    input_tokens 估算；旧种子含 input_tokens，会把一次重试拆成两个逻辑回合、
+    model_retry_count 少算。修复后身份只由重试间稳定的事实决定。
+    """
+    sink = _TurnSink()
+    agent = _logical_turn_agent()
+    request = _logical_turn_request(agent, sink)
+
+    first_ledger, first_call_id, _ = start_model_call_record(
+        request, context_snapshot=_context_snapshot(current_tokens=9477)
+    )
+    second_ledger, second_call_id, _ = start_model_call_record(
+        request, context_snapshot=_context_snapshot(current_tokens=1234)
+    )
+    records = first_ledger.records()
+
+    assert first_ledger is second_ledger
+    assert first_call_id != second_call_id
+    assert records[0].input_tokens != records[1].input_tokens, "校准必须真的改变了第二次估算"
+    assert records[0].metadata["logical_call_id"] == records[1].metadata["logical_call_id"]
+    assert [record.metadata["physical_attempt"] for record in records] == [1, 2]
+    summary = model_call_summary(agent, request_id="request-1")
+    assert summary["logical_model_turn_count"] == 1
+    assert summary["physical_model_attempt_count"] == 2
+    assert summary["model_retry_count"] == 1
+
+
+def test_distinct_tool_rounds_keep_distinct_logical_turn_ids() -> None:
+    """真正不同的模型回合（工具轮次不同）仍是两个逻辑回合，不被错误归并。"""
+    sink = _TurnSink()
+    agent = _logical_turn_agent()
+
+    start_model_call_record(
+        _logical_turn_request(agent, sink, tool_rounds=2),
+        context_snapshot=_context_snapshot(current_tokens=9477),
+    )
+    start_model_call_record(
+        _logical_turn_request(agent, sink, tool_rounds=3),
+        context_snapshot=_context_snapshot(current_tokens=9477),
+    )
+    records = model_call_summary(agent, request_id="request-1")
+    assert records["logical_model_turn_count"] == 2
+    assert records["physical_model_attempt_count"] == 2
+    assert records["model_retry_count"] == 0
+
+
+def test_changed_request_content_starts_a_new_logical_turn() -> None:
+    """同一轮内请求内容真变化（如压缩重试换 prompt）按新逻辑回合计，不错误归并。"""
+    sink = _TurnSink()
+    agent = _logical_turn_agent()
+
+    start_model_call_record(
+        _logical_turn_request(agent, sink, prompt="prompt before reclaim"),
+        context_snapshot=_context_snapshot(current_tokens=9477),
+    )
+    start_model_call_record(
+        _logical_turn_request(agent, sink, prompt="prompt after reclaim"),
+        context_snapshot=_context_snapshot(current_tokens=9477),
+    )
+    summary = model_call_summary(agent, request_id="request-1")
+    assert summary["logical_model_turn_count"] == 2
+    assert summary["physical_model_attempt_count"] == 2
+    assert summary["model_retry_count"] == 0
 
 
 def test_isolated_presentation_call_keeps_accounting_but_not_context_projection() -> None:

@@ -234,6 +234,36 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - guards9（12 文件）**190 passed**；ruff `All checks passed!`；`check_import_boundaries` findings=0；`check_doc_sync --base 07d7b3306` DOC_SYNC_PASS；strict code-size `blocked=False`（报告已还原）；size_diff 新增告警 0 / 消失 55；clean package OK；`git diff --check` 干净。
 - **未验证**：真实 websockets 服务端、真实 ChatGPT 订阅链路（需真实账号）。
 
+## 逻辑回合身份去 input_tokens（retrycount，2026-10-05，分支 `worker/retrycount`，基于 17k 头 `100df7ad7`；待复审）
+
+- 来源：streamretryr 初审发现的 `model_retry_count` 少算（断流响应带 usage → `input_tokens` 被校准 → 同一回合拆成两个逻辑回合）。修法见 DESIGN_LEDGER 同名段。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_model_call_ledger.py agent_py_agent/tests/test_model_call_ledger_partitions.py \
+    agent_py_agent/tests/test_provider_transient_auto_resume.py agent_py_agent/tests/test_tool_loop_model_turn.py \
+    agent_py_agent/tests/test_tool_model_generation.py agent_py_agent/tests/test_provider_timeout_continuation.py \
+    agent_py_agent/tests/test_provider_timeout_resume_probe.py agent_py_agent/tests/test_provider_timeout_acceptance.py \
+    agent_py_agent/tests/test_provider_timeout_resume_narrowing.py agent_py_agent/tests/test_timeout_gate5_retry.py \
+    agent_py_agent/tests/test_tui_model_metrics.py agent_py_agent/tests/test_reproject_model_usage.py \
+    agent_py_agent/tests/test_decision_model_call.py agent_py_agent/tests/test_decision_audit_controls.py \
+    agent_py_agent/tests/test_decision_stats_display.py agent_py_agent/tests/test_decision_usage_metrics.py \
+    agent_py_agent/tests/test_conversation_store.py agent_py_agent/tests/test_store_usage_open_world.py \
+    agent_py_agent/tests/test_gateway_model_adoption.py agent_py_agent/tests/test_memory_runtime_basics.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-retrycount-all   # 472 passed
+  # guards9 十二文件 190 passed；ruff / boundaries=0 / doc_sync(--base 100df7ad7) / strict code-size(hard=0) / size_diff(新增 0、消失 55) / diff-check / clean-package 全过
+  ```
+- 新增用例 6 条：
+  - `test_model_call_ledger.py`：① 同一回合两次调用、上下文快照 `current_tokens` 变化（模拟 usage 校准）→ 同 logical id、attempt [1,2]、retry=1；② 不同 `tool_rounds` → 两个逻辑回合；③ 同轮不同 prompt（内容真变化）→ 两个逻辑回合。
+  - `test_provider_transient_auto_resume.py`：④ 断流重试（参数化带/不带 usage）→ logical=1/physical=2/retry=1（带 usage 时先断言校准真的改变了第二次估算，防用例没测到目标场景）；⑤ 异常重试 → 同样归并。
+- 变异 4 个（脚本 `/private/tmp/claude-501/retrycount/mutate.py`，逐个 sha256 还原一致）：
+  1. 身份加回 input_tokens → KILLED（组件校准用例 + 集成带 usage 用例红）。
+  2. 种子去掉 tool_rounds → KILLED（不同轮次用例红）。
+  3. 物理号不递增 → KILLED（既有 attempt [1,2] 断言 + 校准用例红）。
+  4. 种子去掉 prompt 指纹 → KILLED（内容变化用例红）。
+- 兼容：旧持久化记录不改（`metadata` 原值保留）；聚合按字符串去重，新旧一视同仁——既有 `test_summary_counts_all_calls_after_detail_retention_limit` 用手工 logical id 证明聚合不依赖格式。
+- 未验证：真实 DeepSeek/Anthropic 断流端到端；跨版本部署瞬间的记录归并（要求会话空闲，实际不出现）。
+
 ## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）
 
 - 来源：DeepSeek 长回复流频繁被切断（`MODEL_STREAM_INCOMPLETE`），原语义是整个回合直接失败。修法见 DESIGN_LEDGER 同名段：响应级重试复用 `run_with_provider_transient_auto_resume` 的阶梯/预算/通知，耗尽时返回原响应（不抛异常）。

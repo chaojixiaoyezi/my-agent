@@ -85,7 +85,7 @@ def start_model_call_record(
             options=first_token_timeout_options(getattr(request, "agent", None)),
         )
     )
-    logical_call_id = logical_model_call_id(request, input_tokens)
+    logical_call_id = logical_model_call_id(request)
     physical_attempt = 1 + sum(
         str(record.metadata.get("logical_call_id") or "") == logical_call_id
         for record in ledger.records()
@@ -443,7 +443,14 @@ def first_token_timeout_options(agent: object) -> FirstTokenTimeoutOptions:
     )
 
 
-def logical_model_call_id(request: object, input_tokens: int) -> str:
+# LLM: 逻辑回合身份只由重试间稳定的事实决定：请求/运行/任务身份、工具轮次与请求内容指纹。
+#   不能把 input_tokens 等会被响应 usage 校准改变的量放进种子——断流响应带 usage 时，同一回合的
+#   第二次尝试会算出新身份，把一次重试拆成两个逻辑回合（model_retry_count 少算；2026-10-05
+#   retrycount 修复）。重试（响应级/异常）重建的 prompt 逐字节稳定（工作区块快照与执行事实在
+#   run 内冻结），所以重试与首次尝试得到同一身份；内容真变化（压缩重试、修复注入）按新回合计。
+#   改动时同步核对 start_model_call_record 的调用点与 model_call_ledger._logical_call_id 的聚合口径。
+# 函数用途: 计算一次模型调用的逻辑回合身份，让同一回合的物理重试在账本里归并计数。
+def logical_model_call_id(request: object) -> str:
     params = getattr(request, "params", None)
     seed = "|".join(
         [
@@ -451,7 +458,6 @@ def logical_model_call_id(request: object, input_tokens: int) -> str:
             str(getattr(params, "run_id", "") or ""),
             str(getattr(params, "task_id", "") or ""),
             str(getattr(request, "tool_rounds", 0)),
-            str(input_tokens),
             hashlib.sha256(str(getattr(request, "prompt", "") or "").encode("utf-8")).hexdigest()[:16],
         ]
     )

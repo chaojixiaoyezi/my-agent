@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.agent_core import provider_transient_auto_resume
 from agent_py_agent.agent.backends import (
     ModelResponse,
@@ -27,6 +29,35 @@ class _TransientThenOkBackend:
         if self.calls <= self.failures:
             raise ProviderTransientError("HTTP 429: rate limited")
         return ModelResponse(text="已继续完成。", backend=self.name)
+
+
+# LLM: 断流重试用例的假后端：第一次返回"流未完整结束"（可带 usage，模拟被切断响应已报用量），
+#   之后成功；不模拟真实网络，只供账本归并口径用例使用。
+class _UsageStreamIncompleteThenOkBackend:
+    name = "fake_usage_stream_incomplete_then_ok"
+
+    def __init__(self, *, with_usage: bool) -> None:
+        self.with_usage = with_usage
+        self.calls = 0
+
+    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text="",
+                backend=self.name,
+                runtime_status="error",
+                runtime_reason="MODEL_STREAM_INCOMPLETE",
+                runtime_source="model_provider",
+                turn_end_reason="error",
+                truncated=True,
+                usage=(
+                    {"prompt_tokens": 1234, "completion_tokens": 7}
+                    if self.with_usage
+                    else {}
+                ),
+            )
+        return ModelResponse(text="重试后完整完成。", backend=self.name)
 
 
 def test_provider_transient_model_turn_retries_with_configured_schedule(
@@ -593,3 +624,93 @@ def test_response_level_budget_exhausted_returns_result_with_final_notice(monkey
         "final": True,
         "error_code": provider_transient_auto_resume.PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED,
     }, "收口通知带结构化 final/error_code"
+
+
+# LLM: 以下两条用例钉住"重试归并同一逻辑回合"的账本口径（2026-10-05 retrycount）：断流重试
+#   （含被切断响应带 usage、input_tokens 被校准的场景）与异常重试都必须只算一个逻辑回合；
+#   model_retry_count = 物理尝试数 - 逻辑回合数，不得因重试间的估算变化而少算。
+# 函数用途: 断言一次重试在账本里归并为单逻辑回合，并核对物理尝试与重试计数。
+def _assert_single_logical_turn(agent, *, backend_name: str, expect_calibration: bool) -> None:
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.contracts.model_call_ledger import summarize_model_call_records
+
+    records = [
+        record
+        for record in model_call_ledger(agent).records()
+        if record.backend == backend_name
+    ]
+    assert len(records) == 2, "两次物理尝试都进账本"
+    if expect_calibration:
+        assert records[0].input_tokens != records[1].input_tokens, (
+            "usage 校准必须真的改变了第二次估算，否则用例没测到目标场景"
+        )
+    summary = summarize_model_call_records(records)
+    assert summary["logical_model_turn_count"] == 1
+    assert summary["physical_model_attempt_count"] == 2
+    assert summary["model_retry_count"] == 1
+
+
+@pytest.mark.parametrize("with_usage", [True, False], ids=["with-usage", "without-usage"])
+def test_stream_incomplete_retry_keeps_single_logical_turn(
+    tmp_path: Path,
+    monkeypatch,
+    with_usage: bool,
+) -> None:
+    """断流重试（无论被切断响应是否带 usage）都归并同一逻辑回合：logical=1、retry=1。
+
+    带 usage 时第一次响应的 usage 会校准第二次的 input_tokens 估算；旧逻辑回合身份
+    种子含 input_tokens，会把一次重试拆成两个逻辑回合、model_retry_count 少算。
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", sleeps.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.backend = _UsageStreamIncompleteThenOkBackend(with_usage=with_usage)
+
+    result = agent.run("做一个长任务，流断了就继续。", save=False)
+
+    assert result.response == "重试后完整完成。"
+    assert agent.backend.calls == 2
+    _assert_single_logical_turn(
+        agent,
+        backend_name="fake_usage_stream_incomplete_then_ok",
+        expect_calibration=with_usage,
+    )
+
+
+def test_transient_error_retry_keeps_single_logical_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """异常重试（transient 错误后重发）同样归并同一逻辑回合：retry=1，计数口径不变。"""
+    sleeps: list[float] = []
+    monkeypatch.setattr(provider_transient_auto_resume, "wait_interruptibly", sleeps.append)
+    monkeypatch.setattr(
+        provider_transient_auto_resume,
+        "provider_transient_retry_delays",
+        lambda _policy=None: (10.0, 25.0),
+    )
+
+    agent = SimpleAgent(
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
+        tmp_path,
+    )
+    agent.backend = _TransientThenOkBackend(failures=1)
+
+    result = agent.run("做一个长任务，限流就继续。", save=False)
+
+    assert result.response == "已继续完成。"
+    assert agent.backend.calls == 2
+    _assert_single_logical_turn(
+        agent,
+        backend_name="fake_provider_transient_then_ok",
+        expect_calibration=False,
+    )

@@ -148,6 +148,14 @@
 - **变异 4 个（全部抓住）**：idle 截止不取 min；到期不关连接；idle 阶段 stage 写错；去掉逐消息检查。
 - **未验证**：真实 websockets 服务端与真实 ChatGPT 订阅链路（需真实账号）。
 
+## 逻辑回合身份去 input_tokens（retrycount，2026-10-05，分支 `worker/retrycount`，基于 17k 头 `100df7ad7`；待复审）
+
+- **起因**：streamretryr 初审发现的 `model_retry_count` 少算——断流响应带 usage 时，第一次响应的 usage 会校准第二次的 `input_tokens` 估算，而 `logical_model_call_id` 的种子含 `input_tokens`，同一回合的重试被拆成两个逻辑回合（实测 `logical=2 physical=2 retry=0`，应为 1）。
+- **改法（唯一权威位置）**：`agent_core/model/call_runtime.py::logical_model_call_id` 的种子去掉 `input_tokens`，只保留重试间稳定的事实：`request_id | run_id | task_id | tool_rounds | prompt 指纹`。重试（响应级/异常）重建的 prompt 逐字节稳定（工作区块快照与执行事实在 run 内冻结、插话未确认投递被 retry_guard 挡住），所以重试与首次尝试得到同一身份；内容真变化（压缩重试、修复注入）按新回合计。聚合端 `contracts/model_call_ledger._logical_call_id` 不改：按 `metadata.logical_call_id` 字符串去重，新旧记录一视同仁；旧持久化记录保持原值。
+- **验证**：见 TESTS「逻辑回合身份去 input_tokens（retrycount）」；4 个变异 KILLED（身份加回 input_tokens / 种子去掉 tool_rounds / 物理号不递增 / 种子去掉 prompt 指纹）。
+- **已知边界**：重试期间若 prompt 因运行时状态刷新（如子代理状态变化）而变，仍按新回合计——语义上属于"请求内容真变化"；部署切换瞬间同一回合跨新旧算法的记录不会归并（部署要求会话空闲，实际不出现）。
+- **未验证**：真实 DeepSeek/Anthropic 断流端到端（沙箱不连真实 provider）；跨版本旧记录的实机聚合数据。
+
 ## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）
 
 - **起因**：10-05 凌晨 DeepSeek 长回复流频繁被中途切断（近一小时三成请求失败，码 `MODEL_STREAM_INCOMPLETE`），每次切断整个回合直接失败、会话从头再来（费时费钱）。链路核查：流在完成标记前结束 → `stream_parsers` 返回 `stream_eof` → `response_completion.incomplete_response_fields` 归一成**响应字段**（`runtime_status=error`、`runtime_reason=MODEL_STREAM_INCOMPLETE`、`truncated=True`；工具块被丢弃、`truncated_tool_names` 保留）——它不是异常，所以只重试异常的 `run_with_provider_transient_auto_resume` 没有机会介入；工具循环 `_no_tool_calls_decision` 见 `_is_runtime_status_response` 直接 break，回合以 error 收口。
