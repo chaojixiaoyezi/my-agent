@@ -358,6 +358,9 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 response_guard,
                 request.timeout,
                 idle_deadline=initial_deadline,
+                # LLM: cabfix：只有调用方显式要了总期限（request.deadline）才有硬上限；
+                #   主模型与旧调用方的 deadline 仍是 None，持续有效事件照旧不被总墙钟误杀。
+                hard_deadline=request.deadline,
             )
             watchdog.start()
 
@@ -413,10 +416,15 @@ class _StreamIdleWatchdog:
         timeout: int | float,
         *,
         idle_deadline: float,
+        hard_deadline: float | None = None,
     ) -> None:
         self._response_guard = response_guard
         self._timeout = _stream_deadline_offset(timeout)
         self._idle_deadline = idle_deadline
+        # LLM: cabfix：可选的、**不可续期**的整次请求硬期限。idle_deadline 会被每个有效
+        #   事件推迟（健康长流本该如此），hard_deadline 不会——它专门堵住"一直有有效事件
+        #   就能无限续期"那条路径。None 保持原语义（主模型与旧调用方不设总时限）。
+        self._hard_deadline = hard_deadline
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._cancelled = False
@@ -425,7 +433,18 @@ class _StreamIdleWatchdog:
 
     def start(self) -> None:
         with self._lock:
-            self._schedule_locked(self._idle_deadline - time.monotonic())
+            # LLM: cabfix2：touch 只推 idle、**不重排定时器**（重排只发生在 _check 里），所以首次
+            #   排程必须自己把 hard 算进去——否则 idle（首包预算，可配到 10800 秒）远大于 hard
+            #   （辅助流 1800 秒档）时，硬期限要等第一次 _check 才参与，等于首包阶段没有硬顶。
+            #   hard 为 None 时退化为原语义（只按 idle 排）。
+            self._schedule_locked(self._first_deadline_locked() - time.monotonic())
+
+    # LLM: 首次定时器要覆盖的最早期限：空闲期限与（可选的）硬期限取更早的那个；两者都没有时用 idle。
+    # 函数用途: 算出首次排程应使用的绝对时刻（monotonic）。
+    def _first_deadline_locked(self) -> float:
+        if self._hard_deadline is None:
+            return self._idle_deadline
+        return min(self._idle_deadline, self._hard_deadline)
 
     # LLM: A touch is valid only for parsed SSE data and atomically switches the watchdog into rolling-idle phase.
     # 函数用途: 记录真实模型事件并延长下一事件的空闲截止时间。
@@ -460,7 +479,11 @@ class _StreamIdleWatchdog:
         with self._lock:
             if self._cancelled:
                 return
-            remaining = self._idle_deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = self._idle_deadline - now
+            # LLM: 硬期限与空闲期限取更早的那个：事件只推后 idle，永远推不动 hard。
+            if self._hard_deadline is not None:
+                remaining = min(remaining, self._hard_deadline - now)
             if remaining > 0:
                 self._schedule_locked(remaining)
                 return

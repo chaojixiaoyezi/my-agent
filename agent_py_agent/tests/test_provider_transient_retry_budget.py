@@ -307,3 +307,17 @@ def test_runtime_error_report_swaps_message_only_for_budget_code() -> None:
     assert report["recoverable"] is baseline["recoverable"], "可恢复性不变"
     assert "系统会自动退避重试" not in report["model_message"]
     assert "总时长上限" in report["model_message"] and "已停止自动重试" in report["model_message"]
+
+
+def test_retry_budget_does_not_interrupt_one_inflight_success(monkeypatch) -> None:
+    """1800 秒预算只在异常后决定是否再试；一次调用正常迟归并不会被中断。"""
+    clock = _FakeClock()
+    waits = _prepare(monkeypatch, clock, delays=(10.0,), budget=1800.0)
+
+    def operation() -> str:
+        clock.advance(2400.0)
+        return "late response"
+
+    assert resume.run_with_provider_transient_auto_resume(operation) == "late response"
+    assert clock.now - 1000.0 == 2400.0
+    assert waits == [], "成功返回路径不检查 retry budget，也不主动中断在途调用"

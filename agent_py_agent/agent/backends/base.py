@@ -92,6 +92,12 @@ class ProviderRequestOptions:
     #   bounded_output_tokens 与后端配置取小，绝不放大既有上限。
     # 字段用途: 携带调用方显式给出的本次请求输出 token 上限，供适配器构造请求体。
     max_output_tokens: int | None = None
+    # LLM: cabfix：一次调用的绝对墙钟上界（秒），None=不设总期限（主模型与旧调用方保持原语义）。
+    #   与 first_event_timeout_seconds 的区别：后者是"等首个事件"的窗口，收到事件后可续期；
+    #   本字段是整次调用的硬上限，无论有没有事件到达都不延长。辅助调用用它堵住
+    #   "慢滴流可以无限拖住一次压缩"和"有效事件流无限续期"两条路径。
+    # 字段用途: 携带调用方给出的本次请求总期限，供传输层在发送前算进绝对 deadline。
+    total_deadline_seconds: float | None = None
 
 
 # LLM: 后端 capability flag 决定上层能否传真实 system instruction；未声明支持的旧实现保持原关键字形态。

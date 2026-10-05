@@ -3399,7 +3399,7 @@
           {
             "key": "dynamic_timeout_max",
             "label": "dynamic_timeout_max（dynamic timeout max）",
-            "description": "自动估算请求超时时允许的最大值（秒）。 只有合法任务确实需要跑更久、却被超时打断时才需要调大。",
+            "description": "自动估算请求超时时允许的最大值（秒）。 只有合法任务确实需要跑更久、却被超时打断时才需要调大。 口径：这个上限也参与压缩等辅助调用的流式总时限——那里的硬期限取 max(1800 秒, 首包预算 + request_timeout)，所以调大本项会同步放宽辅助调用的总时限， 不会出现\"配置放开了、辅助调用仍被 1800 秒截断\"的情况。",
             "type": "number",
             "defaultValue": 10800,
             "currentValue": 10800,

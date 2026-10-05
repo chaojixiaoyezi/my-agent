@@ -38,7 +38,7 @@ def test_auxiliary_payload_uses_same_thread_reasoning_partition(
 
     # LLM: This transport records the exact payload and returns a synthetic terminal reply.
     # 函数用途: 截获序列化结果，不建立任何网络连接。
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         payloads.append(dict(payload))
         return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
 
@@ -97,7 +97,7 @@ def _threaded_backend(level):
 def _capture_transport(backend, responses=None):
     payloads = []
 
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         payloads.append(deepcopy(payload))
         if responses is not None:
             return next(responses)
@@ -252,7 +252,7 @@ def test_structured_tool_call_is_discarded_then_retried_once_without_tools():
 
     # LLM: This transport records the exact payload and returns a synthetic terminal reply.
     # 函数用途: 截获序列化结果，不建立任何网络连接。
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         payloads.append(deepcopy(payload))
         return next(responses)
 
@@ -445,7 +445,7 @@ def test_carried_text_summary_uses_thread_reasoning_options(level):
 
     # LLM: This transport records the exact payload and returns a synthetic terminal reply.
     # 函数用途: 截获序列化结果，不建立任何网络连接。
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         payloads.append(deepcopy(payload))
         return {"choices": [{"message": {"content": "中段携带摘要"}, "finish_reason": "stop"}]}
 
@@ -488,7 +488,7 @@ def test_segmented_compact_keeps_thread_reasoning_options(monkeypatch, level):
 
     # LLM: This transport records the exact payload and returns a synthetic terminal reply.
     # 函数用途: 截获序列化结果，不建立任何网络连接。
-    def request_json(_path, payload, _headers):
+    def request_json(_path, payload, _headers, **_options):
         payloads.append(deepcopy(payload))
         return {"choices": [{"message": {"content": "本片摘要"}, "finish_reason": "stop"}]}
 

@@ -28,10 +28,16 @@
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 from dataclasses import dataclass, replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
@@ -47,15 +53,22 @@ from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
 )
 from agent_py_agent.agent.agent_core.tool_model_generation import (
     ModelGenerateParams,
+    _generate_through_wall_guard,
     _ir_last_tool_use_confirmed,
     _logical_physical_attempt_count,
     _retry_once_after_timeout,
+    _start_model_generation,
     generate_model_response,
     provider_timeout_resume_eligible,
 )
-from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.backends import BackendOptions, ModelResponse
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.tool_ir import AssistantTurn
+from agent_py_agent.agent.conversation.auxiliary_model_call import (
+    AuxiliaryModelCallRequest,
+    generate_auxiliary_model_response,
+)
 from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
 from agent_py_agent.tests._tool_runtime_harness import (
@@ -833,3 +846,540 @@ def test_gate_second_physical_attempt_refuses_a_third(tmp_path) -> None:
     assert params.live_archive_state.get("_model_turn_sequence") == sequence_after_retry
     assert len(_fact_entries(params)) == 1
     assert response.text == _PROMISE
+
+
+# LLM: Loopback only; each route holds either the first SSE event, streams valid deltas, or slowly supplies JSON bytes.
+# 类用途: 为主模型与 Compact auxiliary 的超时层提供不触网的真实 HTTP 慢响应证据。
+class _CompactTimeoutHandler(BaseHTTPRequestHandler):
+    def _write(self, value: bytes) -> bool:
+        try:
+            self.wfile.write(value)
+            self.wfile.flush()
+        except OSError:
+            return False
+        return True
+
+    # LLM: Consume the request body before replying; routing uses only the local URL path, not prompt content.
+    # 函数用途: 将请求分流给 SSE 或 JSON 慢响应，不在入口里叠加计时分支。
+    def do_POST(self) -> None:  # noqa: N802
+        size = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(size)
+        mode = self.path.split("/")[1]
+        if json.loads(body).get("stream"):
+            self._serve_sse(mode)
+            return
+        self._serve_slow_json()
+
+    # LLM: Keep stream setup separate from scenario timing so every test uses the same HTTP/SSE framing.
+    # 函数用途: 发送统一 SSE 响应头，再按场景发首事件或慢滴流。
+    def _serve_sse(self, mode: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        finished = {
+            "late": self._serve_late_first_event,
+            "endless": self._serve_endless_drip,
+        }.get(mode, self._serve_data_drip)()
+        if finished:
+            self._finish_sse()
+
+    # LLM: Comments keep the socket active but must not count as semantic provider progress.
+    # 函数用途: 延迟首个有效 data 行，期间只吐注释保活。
+    def _serve_late_first_event(self) -> bool:
+        for _ in range(4):
+            if not self._write(b": keepalive\n\n"):
+                return False
+            time.sleep(0.4)
+        return self._write(_CAB_SSE_CHUNK)
+
+    # LLM: Every valid data row arrives within the idle window, isolating the absence of a total deadline.
+    # 函数用途: 每 0.45 秒推送有效 data，直到服务端主动结束。
+    def _serve_data_drip(self) -> bool:
+        if not self._write(_CAB_SSE_CHUNK):
+            return False
+        time.sleep(0.45)
+        for _ in range(5):
+            if not self._write(_CAB_SSE_CHUNK):
+                return False
+            time.sleep(0.45)
+        return True
+
+    # LLM: cabfix: this route keeps sending valid events far past any reasonable test deadline, so the
+    # absence of a total limit would hang the suite. It stops early only when the client closes the socket.
+    # 函数用途: 无限推送有效 data（每 0.05 秒），直到客户端断开或超过安全上限。
+    def _serve_endless_drip(self) -> bool:
+        for _ in range(400):
+            if not self._write(_CAB_SSE_CHUNK):
+                return False
+            time.sleep(0.05)
+        return True
+
+    # LLM: Separate terminators make the bounded healthy-stream fixture deterministic.
+    # 函数用途: 写入 stop 与 [DONE] 终止事件。
+    def _finish_sse(self) -> None:
+        if self._write(_CAB_SSE_DONE):
+            self._write(b"data: [DONE]\n\n")
+
+    # LLM: Every body fragment arrives inside the socket read timeout while whole-response time exceeds it.
+    # 函数用途: 分片写完合法 JSON，验证非流式请求是否有独立总期限。
+    def _serve_slow_json(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(_CAB_JSON_RESPONSE)))
+        self.end_headers()
+        for offset in range(0, len(_CAB_JSON_RESPONSE), 8):
+            if not self._write(_CAB_JSON_RESPONSE[offset:offset + 8]):
+                return
+            time.sleep(0.4)
+
+    def log_message(self, *_args: object) -> None:
+        return
+
+
+_CAB_SSE_CHUNK = b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":null}]}\n\n'
+_CAB_SSE_DONE = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+_CAB_JSON_RESPONSE = b'{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}'
+
+
+# LLM: Bind an ephemeral loopback-only server and always release it after the test.
+# 函数用途: 提供真实 socket 但绝不连接外网、真实 Gateway 或模型的慢响应服务。
+@pytest.fixture
+
+def _compact_timeout_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CompactTimeoutHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+# LLM: Use a test-only key string and per-scenario path; no environment or real provider configuration is read.
+# 函数用途: 构造连接 loopback 假服务的真实 OpenAI-compatible 后端。
+def _cab_backend(server, route: str, *, stream: bool) -> OpenAICompatibleBackend:
+    return OpenAICompatibleBackend(BackendOptions(
+        api_base=f"http://127.0.0.1:{server.server_address[1]}/{route}",
+        api_key="test-only-not-a-credential",
+        model_name="cab-loopback",
+        request_timeout=1,
+        connect_timeout=1,
+        max_tokens=8,
+        stream_enabled=stream,
+    ))
+
+
+# LLM: Reuse the normal model request, ledger and backend path; only the loopback endpoint is fake.
+# 函数用途: 通过主模型生成入口执行一次本地服务请求并返回实测耗时。
+def _cab_main_call(agent: _FakeAgent, run_id: str, prompt: str):
+    params = replace(_params(run_id=run_id), user_prompt=prompt)
+    request = ModelGenerateParams(agent=agent, params=params, prompt=prompt, tool_rounds=1)
+    started = time.monotonic()
+    response = generate_model_response(request)
+    return response, time.monotonic() - started
+
+
+# LLM: Compact uses its real auxiliary ledger and backend dispatch; only the destination is loopback.
+# 函数用途: 通过 auxiliary_model_call 执行一次本地 Compact 样式请求并返回实测耗时。
+def _cab_auxiliary_call(backend, prompt: str, *, agent=None):
+    agent = agent or _cab_auxiliary_agent(backend)
+    request = AuxiliaryModelCallRequest(agent=agent, prompt=prompt, purpose="conversation_compact_summary")
+    started = time.monotonic()
+    response = generate_auxiliary_model_response(request)
+    return response, time.monotonic() - started
+
+
+# LLM: Auxiliary calls now share the main path's dynamic-budget config surface; tests must supply the same
+# two timeout bounds so the input estimate is actually reachable. request_timeout stays 1s to keep the
+# distinction visible: base read timeout vs. dynamic first-event budget vs. absolute deadline.
+# 函数用途: 构造带动态超时上下限配置的辅助调用假 Agent，供首事件预算与总期限用例复用。
+def _cab_auxiliary_agent(backend, *, dynamic_min: int = 3, dynamic_max: int = 4):
+    return SimpleNamespace(
+        backend=backend,
+        config=SimpleNamespace(
+            model_name="cab-loopback", request_timeout=1, max_tokens=8, my_agent_owner_id="",
+            dynamic_timeout_min=dynamic_min, dynamic_timeout_max=dynamic_max,
+            estimated_output_tokens_per_second=100_000,
+        ),
+    )
+
+
+# LLM: cabfix2 的联动用例要调真实的 request_timeout 与 dynamic_timeout_max（默认 240 / 10800），
+#   用来证明"配置放开后辅助调用的流式硬期限也同步放宽"；与上面的缩放版本分开，避免改坏既有断言。
+# 函数用途: 构造按生产默认档配置的辅助调用假 Agent（可覆盖 request_timeout / dynamic_max）。
+def _cab_auxiliary_agent_dynamic(*, request_timeout: int = 240, dynamic_max: int = 10800):
+    return SimpleNamespace(
+        backend=None,
+        config=SimpleNamespace(
+            model_name="cab-loopback", request_timeout=request_timeout, max_tokens=8, my_agent_owner_id="",
+            dynamic_timeout_min=30, dynamic_timeout_max=dynamic_max,
+            estimated_output_tokens_per_second=20.0,
+        ),
+    )
+
+
+def test_main_stream_input_estimate_allows_late_first_event(_compact_timeout_server, tmp_path):
+    """主模型输入估算可把首事件窗口扩到 3s，超过基础 1s 后仍能收到首事件。"""
+    backend = _cab_backend(_compact_timeout_server, "late", stream=True)
+    agent = _FakeAgent(backend, _RecordingPrompts(), tmp_path)
+    agent.config.request_timeout = 1
+    agent.config.dynamic_timeout_min = 3
+    agent.config.dynamic_timeout_max = 4
+    agent.config.estimated_output_tokens_per_second = 100_000
+    response, elapsed = _cab_main_call(agent, "cab-main-late", "长历史片段。" * 800)
+    assert response is not None
+    assert elapsed > 1.3, f"main_first_event_elapsed={elapsed:.3f}s"
+    print(f"CAB main stream late-first wait={elapsed:.3f}s outcome=completed; dynamic budget >=3s")
+
+
+def test_compact_stream_uses_input_estimate_for_late_first_event(_compact_timeout_server):
+    """cabfix 修法①：辅助流现在也按输入估算首事件预算，晚首事件不再被基础 1s 过早判超时。"""
+    backend = _cab_backend(_compact_timeout_server, "late", stream=True)
+    agent = _cab_auxiliary_agent(backend, dynamic_min=3, dynamic_max=4)
+    started = time.monotonic()
+    response, _ = _cab_auxiliary_call(
+        backend, "长历史片段。" * 800, agent=agent,
+    )
+    elapsed = time.monotonic() - started
+    assert response is not None
+    assert elapsed > 1.3, f"compact_first_event_elapsed={elapsed:.3f}s"
+    print(f"CAB compact stream late-first wait={elapsed:.3f}s outcome=completed; dynamic budget >=3s")
+
+
+@pytest.mark.parametrize("entrypoint", ["main", "compact"])
+def test_valid_sse_drips_keep_each_stream_path_alive(_compact_timeout_server, tmp_path, entrypoint):
+    """每 0.45s 有有效 data 的 1s idle 流可越过多个窗口，直到服务端结束。"""
+    backend = _cab_backend(_compact_timeout_server, "drip", stream=True)
+    started = time.monotonic()
+    if entrypoint == "main":
+        agent = _FakeAgent(backend, _RecordingPrompts(), tmp_path)
+        agent.config.request_timeout = 1
+        agent.config.dynamic_timeout_min = 1
+        agent.config.dynamic_timeout_max = 1
+        agent.config.estimated_output_tokens_per_second = 100_000
+        response, elapsed = _cab_main_call(agent, "cab-main-drip", "短提示")
+    else:
+        response, elapsed = _cab_auxiliary_call(backend, "短历史")
+    assert response is not None
+    assert elapsed > 2.0
+    print(f"CAB {entrypoint} stream valid-drip wait={elapsed:.3f}s outcome=completed >2 idle windows")
+
+
+def test_main_nonstream_slow_body_is_cut_by_outer_total_guard(_compact_timeout_server, tmp_path, monkeypatch):
+    """主模型非流式慢滴流由外层 1s wall_clock 总期限收口，而不是等 JSON EOF。"""
+    from agent_py_agent.agent.agent_core import tool_model_generation as generation
+
+    monkeypatch.setattr(generation, "_retry_once_after_timeout", lambda *_args: None)
+    backend = _cab_backend(_compact_timeout_server, "drip", stream=False)
+    agent = _FakeAgent(backend, _RecordingPrompts(), tmp_path)
+    agent.config.request_timeout = 1
+    agent.config.dynamic_timeout_min = 1
+    agent.config.dynamic_timeout_max = 1
+    agent.config.estimated_output_tokens_per_second = 100_000
+    started = time.monotonic()
+    with pytest.raises(ProviderTimeoutError) as error:
+        _cab_main_call(agent, "cab-main-json-drip", "短提示")
+    elapsed = time.monotonic() - started
+    assert error.value.stage == "wall_clock"
+    assert 0.7 <= elapsed < 2.5, f"main_nonstream_elapsed={elapsed:.3f}s"
+    print(f"CAB main nonstream slow-body wait={elapsed:.3f}s outcome=wall_clock timeout")
+
+
+def test_compact_nonstream_slow_body_is_cut_by_absolute_deadline(_compact_timeout_server, monkeypatch):
+    """cabfix 修法②：辅助非流式调用有绝对期限，慢滴流在期限处结构化超时（wall_clock）。"""
+    from agent_py_agent.agent.conversation import auxiliary_model_call as cab
+
+    # 把兜底窗口压到 1.5 秒，让"到期"在测试时间内可观测；判据是"有没有绝对期限"，不是具体数值。
+    monkeypatch.setattr(cab, "AUXILIARY_CALL_FLOOR_SECONDS", 1.5)
+    backend = _cab_backend(_compact_timeout_server, "drip", stream=False)
+    agent = _cab_auxiliary_agent(backend)
+    started = time.monotonic()
+    with pytest.raises(ProviderTimeoutError) as error:
+        _cab_auxiliary_call(backend, "短历史", agent=agent)
+    elapsed = time.monotonic() - started
+    assert error.value.stage == "wall_clock", f"stage={error.value.stage}"
+    assert 1.0 <= elapsed < 3.0, f"compact_nonstream_elapsed={elapsed:.3f}s"
+    print(f"CAB compact nonstream slow-body wait={elapsed:.3f}s outcome=wall_clock absolute deadline")
+
+
+def test_compact_nonstream_timeout_is_recorded_as_timed_out(_compact_timeout_server, monkeypatch):
+    """cabfix 修法②的收口要求：超时必须以 timed_out 落在模型调用账上，而不是只抛异常。"""
+    from agent_py_agent.agent.agent_core.model.call_runtime import model_call_ledger
+    from agent_py_agent.agent.conversation import auxiliary_model_call as cab
+
+    monkeypatch.setattr(cab, "AUXILIARY_CALL_FLOOR_SECONDS", 1.5)
+    backend = _cab_backend(_compact_timeout_server, "drip", stream=False)
+    agent = _cab_auxiliary_agent(backend)
+    with pytest.raises(ProviderTimeoutError):
+        _cab_auxiliary_call(backend, "短历史", agent=agent)
+    records = model_call_ledger(agent).records()
+    timeout_records = [item for item in records if item.status == "timed_out"]
+    assert timeout_records, f"应有一条 timed_out 记录，实际状态: {[item.status for item in records]}"
+    assert timeout_records[-1].timeout_stage == "wall_clock"
+
+
+def test_compact_stream_endless_valid_events_stop_at_total_deadline(_compact_timeout_server, monkeypatch):
+    """cabfix 修法③：一直有有效事件的辅助流不再无限续期，在总时限处停止。"""
+    from agent_py_agent.agent.conversation import auxiliary_model_call as cab
+
+    # 流式总时限压到 2 秒：服务端一直发有效事件，旧行为会一直续期直到服务端自己停。
+    monkeypatch.setattr(cab, "AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS", 2.0)
+    backend = _cab_backend(_compact_timeout_server, "endless", stream=True)
+    agent = _cab_auxiliary_agent(backend)
+    started = time.monotonic()
+    with pytest.raises(ProviderTimeoutError) as error:
+        _cab_auxiliary_call(backend, "短历史", agent=agent)
+    elapsed = time.monotonic() - started
+    assert error.value.stage in {"wall_clock", "stream_idle"}, f"stage={error.value.stage}"
+    assert 1.5 <= elapsed < 6.0, f"compact_stream_endless_elapsed={elapsed:.3f}s"
+    print(f"CAB compact stream endless-drip wait={elapsed:.3f}s outcome={error.value.stage} at total deadline")
+
+
+# --- cabfix2：硬期限必须在首次排程就算进去、且不得早于首包预算（g2/cab 返工） --------
+
+
+# LLM: cabfix2 覆盖的是初审查出的真实缺陷：watchdog.start() 原先只按 idle_deadline 排首次
+#   定时器，而 touch() 不重排定时器——idle（首包预算）远大于 hard（流式总时限）时，硬顶在
+#   首包阶段形同虚设。这里把几何缩放后直接盯住 watchdog 本身，不依赖网络时序。
+# 类用途: 记录 watchdog 到点时是否真的调用了 abort（不需要真实响应对象）。
+class _RecordingGuard:
+    # 函数用途: 建一个只记录 abort 是否发生的假 guard。
+    def __init__(self) -> None:
+        self.aborted = threading.Event()
+
+    # 函数用途: 记录一次中止请求。
+    def abort(self) -> None:
+        self.aborted.set()
+
+
+# 函数用途: 按给定 idle/hard 建一个 watchdog，返回（watchdog, guard, 起始时刻）。
+def _cabfix2_watchdog(idle_seconds: float, hard_seconds: float | None):
+    from agent_py_agent.agent.backends.gateway_helpers import _StreamIdleWatchdog
+
+    guard = _RecordingGuard()
+    started = time.monotonic()
+    watchdog = _StreamIdleWatchdog(
+        guard,
+        300.0,  # 基础空闲窗口给大些，让 idle 与 hard 的先后完全由入参决定
+        idle_deadline=started + idle_seconds,
+        hard_deadline=None if hard_seconds is None else started + hard_seconds,
+    )
+    return watchdog, guard, started
+
+
+# 函数用途: 首包预算(缩放为 2s) 大于总时限(缩放为 0.6s) 时，硬期限仍在首次排程生效。
+def test_watchdog_hard_deadline_earlier_than_idle_fires_at_start():
+    watchdog, guard, _ = _cabfix2_watchdog(idle_seconds=2.0, hard_seconds=0.6)
+    watchdog.start()
+    try:
+        fired = guard.aborted.wait(timeout=1.6)
+        assert fired, "hard 早于 idle 时，首次排程就必须覆盖 hard（旧缺陷：只按 idle 排）"
+        assert watchdog.timed_out, "到点必须记 timed_out（不是 failed）"
+        assert watchdog.timeout_stage in {"first_event", "stream_idle"}
+    finally:
+        watchdog.cancel()
+
+
+# 函数用途: 硬期限晚于 idle 时，仍按 idle 到点（不因为加了 min 而改变原语义）。
+def test_watchdog_idle_earlier_than_hard_fires_at_idle():
+    watchdog, guard, _ = _cabfix2_watchdog(idle_seconds=0.5, hard_seconds=3.0)
+    watchdog.start()
+    try:
+        assert guard.aborted.wait(timeout=1.5), "idle 更早时应在 idle 处到点"
+        assert watchdog.timed_out
+    finally:
+        watchdog.cancel()
+
+
+# 函数用途: 没有硬期限（主模型/旧调用方）时行为原样——只按 idle 排，不会被 hard 影响。
+def test_watchdog_without_hard_deadline_keeps_idle_only_semantics():
+    watchdog, guard, _ = _cabfix2_watchdog(idle_seconds=0.5, hard_seconds=None)
+    watchdog.start()
+    try:
+        assert guard.aborted.wait(timeout=1.5)
+        assert watchdog.timed_out and watchdog.timeout_stage == "first_event"
+    finally:
+        watchdog.cancel()
+
+
+# 函数用途: 流式总时限与配置联动——输入量足够大时，硬期限 ≥ 首包预算 + request_timeout。
+def test_auxiliary_stream_total_deadline_covers_first_event_budget():
+    from agent_py_agent.agent.conversation import auxiliary_model_call as cab
+
+    agent = _cab_auxiliary_agent_dynamic(request_timeout=240, dynamic_max=10800)
+    # 输入量要真的到 20 万 token 档，预算才会超过默认 1800 秒总时限（估算按字符粗算，留足余量）。
+    request = SimpleNamespace(agent=agent, prompt="历史片段。" * 60_000, messages=[], tools=[],
+                              system_instruction="", response_schema=None)
+    input_tokens = cab._auxiliary_input_tokens(request)
+    first_event = cab._auxiliary_first_event_budget(request, input_tokens)
+    assert input_tokens >= 200_000, f"前提：本用例输入量应到 20 万 token 档，实际 {input_tokens}"
+    assert first_event is not None and first_event > cab.AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS, (
+        f"前提：该输入的首包预算应超过默认流式总时限，实际 {first_event}"
+    )
+    total = cab._auxiliary_absolute_timeout(request, streaming=True)
+    assert total >= first_event + 240, (
+        f"流式硬期限必须≥首包预算+request_timeout，实际 total={total} first_event={first_event}"
+    )
+    # 非流式口径不变：max(request_timeout, 240)。
+    assert cab._auxiliary_absolute_timeout(request, streaming=False) == 240.0
+
+
+# 函数用途: 主模型形态（不设 total_deadline）仍不产生硬期限，deadline 为 None。
+def test_main_path_request_has_no_total_deadline():
+    from agent_py_agent.agent.backends.http import HttpBackend, StreamCall, StreamCallOptions
+
+    backend = object.__new__(HttpBackend)
+    backend.api_base = "http://127.0.0.1:9"
+    backend.api_key = "k"
+    backend.custom_headers = {}
+    backend.session_header = ""
+    backend.request_timeout = 5
+    backend.connect_timeout = 1
+    plain = backend._gateway_request(StreamCall(path="/v1/chat", payload={}, headers={}))
+    assert plain.deadline is None, "主模型路径不应设硬期限"
+    bounded = backend._gateway_request(
+        StreamCall(path="/v1/chat", payload={}, headers={}),
+        options=StreamCallOptions(total_deadline_seconds=1800.0),
+    )
+    assert bounded.deadline is not None, "显式给了总期限才设"
+
+
+# --- cabfix2 护栏：生产流式链上必须有人接受 options（第 1 档），否则静默丢掉硬期限 --------
+
+
+# LLM: request_stream_lines 按被调方签名分三档：① 接受 options（首包预算+总期限一起送达）
+#   ② 只接受 total_deadline_seconds ③ 只接受 first_event_timeout_seconds。第 ③ 档会**静默丢掉**
+#   硬期限。生产链上真正会被传进去的目标是**各后端类自己的流式入口**（HttpBackend 子类覆写或
+#   继承的 request_stream / request_stream_iter）——gateway_helpers 的 post_stream 系收发的是
+#   已经构造好的 GatewayRequest（选项在那之前就由 _gateway_request 消化成 deadline 了），
+#   不是 request_stream_lines 的被调方。
+# 函数用途: 从一个后端类里取出它的两个流式入口（不存在返回空列表）。
+def _backend_stream_entries(value, http_module):
+    if not isinstance(value, type) or not issubclass(value, http_module.HttpBackend):
+        return []
+    entries = []
+    for method in ("request_stream", "request_stream_iter"):
+        entry = getattr(value, method, None)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+# LLM: 模块级遍历拆成独立生成器，让两个函数的嵌套深度都落在 code-size 软限内；
+#   去重语义保持"同一函数只留首次出现的标签"（跨模块重复时标签来自更早的模块）。
+# 函数用途: 遍历一个后端模块里所有后端类的流式入口，产出（来源标签, 函数对象）。
+def _module_stream_entries(module, http_module):
+    for name, value in vars(module).items():
+        for entry in _backend_stream_entries(value, http_module):
+            yield f"{module.__name__}.{name}.{entry.__name__}", entry
+
+
+# 函数用途: 收集生产后端所有会作为流式入口的函数对象及其来源标签。
+def _production_stream_targets():
+    from agent_py_agent.agent.backends import anthropic, http, openai_chat
+
+    by_id: dict[int, tuple[str, object]] = {}
+    for module in (http, openai_chat, anthropic):
+        for label, entry in _module_stream_entries(module, http):
+            by_id.setdefault(id(entry), (label, entry))
+    return list(by_id.values())
+
+
+# 函数用途: 断言生产后端的流式入口都接受 options（第 1 档），没有只认 first_event 的静默降级点。
+def test_production_stream_targets_accept_options_so_hard_deadline_survives():
+    from agent_py_agent.agent.backends.http import _accepts_kwarg
+
+    targets = _production_stream_targets()
+    assert targets, "应至少找到一个生产后端流式入口；找不到说明探测方式失效"
+    missing = [label for label, entry in targets if not _accepts_kwarg(entry, "options")]
+    assert not missing, (
+        "这些生产后端流式入口不接受 options，硬期限会静默丢掉（request_stream_lines 退到第 ③ 档）："
+        + ", ".join(missing)
+    )
+
+
+# 函数用途: 反向锁定传输层的约定——post_stream 系收的是已构造好的 GatewayRequest，其 deadline 字段承载硬期限。
+def test_gateway_request_envelope_carries_deadline_for_transport():
+    import inspect
+
+    from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest
+
+    assert "deadline" in GatewayRequest.__dataclass_fields__, "硬期限必须在信封上有字段"
+    for entry_name in ("post_stream", "post_stream_iter"):
+        from agent_py_agent.agent.backends import gateway_helpers
+
+        entry = getattr(gateway_helpers, entry_name)
+        params = list(inspect.signature(entry).parameters)
+        assert params and params[0] == "request", (
+            f"{entry_name} 的第一参数应是已构造好的 GatewayRequest，实际 {params}"
+        )
+
+
+# LLM: 三个分派档位的替身统一用这个小数据类承载捕获结果，替身函数保持不超过 4 个参数
+#   （与产品的参数门禁同一口径，避免测试自己长出一个高参数告警）。
+# 类用途: 记录流式入口替身实际收到了哪些关键字与位置参数。
+@dataclass
+class _StreamTargetCapture:
+    first_event: object = None
+    total: object = None
+    options: object = None
+    total_first_event: object = None
+    total_positional: tuple = ()
+
+
+# 函数用途: 造三个只收部分关键字、但参数个数不超过 4 的分派替身。
+def _make_stream_targets(capture: _StreamTargetCapture) -> dict[str, object]:
+    def options_target(path, payload, headers, *, options=None):
+        capture.options = options
+        return ["ok"]
+
+    # LLM: 第 2 档替身必须同时接住两个超时关键字；不能收 **kwargs——_accepts_kwarg 把
+    #   VAR_KEYWORD 也算作"接受 options"，收 **kwargs 会让分派器误走第 1 档。三个位置参数
+    #   收进 *args 把参数个数从 5 降到 3（过 code-size 门禁），内容由断言核对。
+    # 函数用途: 第 2 档替身——接住两个超时关键字并记录位置参数。
+    def total_target(*args, first_event_timeout_seconds=None, total_deadline_seconds=None):
+        capture.total = total_deadline_seconds
+        capture.total_first_event = first_event_timeout_seconds
+        capture.total_positional = args
+        return []
+
+    def first_event_target(path, payload, headers, *, first_event_timeout_seconds=None):
+        capture.first_event = first_event_timeout_seconds
+        return []
+
+    return {"options": options_target, "total": total_target, "first_event": first_event_target}
+
+
+# 函数用途: 反向锁定分派优先级——目标接受 options 时必须走第 1 档，两个超时字段一起送达。
+def test_request_stream_lines_prefers_options_tier():
+    from agent_py_agent.agent.backends import http
+
+    capture = _StreamTargetCapture()
+    result = http.request_stream_lines(_make_stream_targets(capture)["options"], ("p", {}, {}, 3.0, 1800.0))
+    assert result == ["ok"]
+    assert capture.options is not None, "接受 options 的目标必须走第 1 档"
+    assert getattr(capture.options, "total_deadline_seconds", None) == 1800.0
+    assert getattr(capture.options, "first_event_timeout_seconds", None) == 3.0
+
+
+# 函数用途: 只接受 total_deadline_seconds 的第 2 档仍能拿到硬期限（不静默丢）。
+def test_request_stream_lines_second_tier_keeps_total_deadline():
+    from agent_py_agent.agent.backends import http
+
+    capture = _StreamTargetCapture()
+    http.request_stream_lines(_make_stream_targets(capture)["total"], ("p", {}, {}, 3.0, 1800.0))
+    assert capture.total == 1800.0, "第 2 档必须把总期限传下去"
+    assert capture.total_first_event == 3.0, "第 2 档同时送达首包预算"
+    assert capture.total_positional == ("p", {}, {}), "第 2 档仍按位置把请求材料传给被调方"
+
+
+# 函数用途: 第 3 档（只认 first_event）确实会丢硬期限——把这条静默降级事实钉住，防止有人误以为它也安全。
+def test_request_stream_lines_third_tier_loses_total_deadline_by_design():
+    from agent_py_agent.agent.backends import http
+
+    capture = _StreamTargetCapture()
+    http.request_stream_lines(_make_stream_targets(capture)["first_event"], ("p", {}, {}, 3.0, 1800.0))
+    assert capture.first_event == 3.0
+    assert capture.total is None and capture.options is None, "第 3 档按设计拿不到硬期限；生产后端不得停留在这一档"

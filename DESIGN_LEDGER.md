@@ -1,5 +1,35 @@
 # 设计台账
 
+## 辅助（压缩）调用的可靠时限（cabfix→cabfix2，2026-10-04/05，worker/cab-fix，基于 luna3 调查提交 `c39250781`；cabfix2 已按 3a 裁定修完初审风险 1 与联动口径，待 3a 复审）
+
+- **来源**：luna3 的调查（`decision-evidence/compact-aux-timeouts-cab-luna3.md`）证明压缩这类辅助调用没有任何可靠的调用级时限：①主模型有按输入估算的动态首包预算，压缩没传，大上下文的压缩会被基础读超时过早判成 `first_event` 超时；②socket 读超时是"两次读之间的间隔"不是调用总期限，慢滴流能无限期拖住一次压缩；③只要一直有有效事件，流式就能无限续期。1800 秒重试预算只在异常返回后决定要不要再试，也不是单次调用的硬期限。
+- **修法**：
+  - ① `auxiliary_model_call._auxiliary_first_event_budget` 复用主模型同一个估算函数（`estimate_first_token_timeout` + `first_token_timeout_options`），按辅助调用自己的输入量算，不另写一套；估不出或没开动态超时配置时返回 None，退回原基础读超时。
+  - ②③ 新增 `AUXILIARY_CALL_FLOOR_SECONDS`（240 秒兜底）与 `AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS`（1800 秒流式总时限）。非流式取 `max(request_timeout, 兜底)`；流式取 `max(request_timeout, 流式总时限, 首包预算 + request_timeout)`（最后一项是 cabfix2 的联动修正，见下）——**流式不叠兜底**，否则兜底会顶掉更小的总时限、让"宽但有限"这个口径失真。
+  - 绝对期限走既有 `ProviderRequestOptions.total_deadline_seconds` → `GatewayRequest.deadline` → `_StreamIdleWatchdog.hard_deadline`（新增的不可续期硬期限：有效事件只推后 idle，推不动 hard）。**不新增配置项**：两个窗口都从既有 `request_timeout` 同源推导，避免又多一个几乎不会调的用户旋钮。
+  - 超时按结构化原因收口：`_record_auxiliary_failure` 把 `ProviderTimeoutError` 记成账本的 `timed_out`（带 `timeout_stage`），其余异常仍记 `failed`；记账失败不顶掉原始异常。
+- **cabfix2（按 3a 裁定修初审风险）**：
+  - **风险 1（首次排程忽略 hard）**：`_StreamIdleWatchdog.start()` 原来只按 `_idle_deadline` 排首次定时器，而首包预算上限来自 `dynamic_timeout_max`（默认 10800 秒），大于 1800 秒总时限——大上下文压缩卡在首包前时硬顶形同虚设。改成 `_first_deadline_locked()`：hard 为 None 时退化为原值，否则取 `min(idle_deadline, hard_deadline)`；注释写明"touch 只推 idle、不重排定时器，所以首次排程必须把 hard 算进去"。
+  - **流式总时限与配置联动**：流式分支从 `max(base, 1800)` 改成 `max(base, 1800, 首包预算 + base)`，让 `dynamic_timeout_max` 真的生效（调大它会同步放宽硬期限）；`agent_config.yaml` 的 `dynamic_timeout_max` 中文注释补了这条口径。非流式 `max(request_timeout, 240)` 不变。
+  - **风险 3 护栏**：新增静态用例确认所有生产后端的流式入口（`request_stream`/`request_stream_iter`）都接受 `options`（第 1 档），将来有人加只接受 `first_event_timeout_seconds` 的后端会变红；另锁 `GatewayRequest.deadline` 字段与 `post_stream` 首参契约。不改分派逻辑。
+  - **拆平 size_diff**：新用例引入两条新增告警（`_production_stream_targets` nesting、`total_target` 参数个数），已拆平：抽 `_module_stream_entries` 生成器（嵌套 4→2）、第 2 档替身改 `*args` + 两个 kw-only（参数 5→3；不能收 `**kwargs`——`_accepts_kwarg` 把 VAR_KEYWORD 误判成接受 `options`，会让分派器走错档）；补两条断言核对关键字与位置参数送达。
+- **不改主模型路径**：`total_deadline_seconds` 默认 None，主模型的 `deadline` 仍是 None、持续有效事件照旧不被总墙钟误杀（`gateway_helpers` 里那句"持续有效 data 不得再被整次请求的总墙钟误杀"的语义保持）。
+- **签名兼容**：`request_stream_lines` / `_gateway_request` 按被调方签名分派，旧替身和假后端保持原调用形态；新参数收进 `StreamCallOptions` / `StreamCall` / `_StreamObservers` / `AuxiliaryTimeoutPlan` / `AuxiliaryBackendSurface` 等小数据类，参数门禁从 hard=1 回到 0。
+- **验证与变异**：见 [TESTS](TESTS.md) 顶部「辅助调用可靠时限（cabfix）」小节。luna3 的刻画测试从"记录现状"改成"断言修复后行为"（晚首事件不再过早超时、慢 body 在绝对期限处结构化超时、持续有效事件在总时限处停止）。cabfix 3 个变异全被抓（去掉首事件预算、去掉非流式绝对期限、watchdog 忽略硬期限）；cabfix2 复核 4 个变异全 KILLED（start 退回只按 idle、流式硬期限退回固定 1800、删 options 第 1 档分派、第 2 档替身改 **kwargs），size_diff 新增告警归零（0 / 消失 35）。
+
+## 断网时模型调用卡住不超时（hang，2026-10-04，睡眠归因已记录；睡眠恢复待设计）
+
+- **调查结论**：3a 的电源日志显示 2026-10-03 17:17:38 合盖进入 Clamshell Sleep，直到 2026-10-04 04:29:12 才完全唤醒。8 个结构化请求结果全部早于完全唤醒，且集中在 DarkWake 或睡眠转换边缘；墙钟事件跨度不能证明进程在睡眠时持续执行。当前证据更支持“单调时钟/等待在系统睡眠期间暂停，短暂唤醒时请求继续并失败”，而不是已经证明 240 秒超时失效。DarkWake 仅是电源状态事实，不证明请求线程连续得到调度或网络可用。
+- **计时边界**：`request_timeout=240` 的流式首事件/idle watchdog 和 socket 读取使用 `time.monotonic()`；只有完整 SSE `data:` 行刷新 idle，不是收到任意字节就刷新。`dynamic_timeout_max=10800` 是动态估算上限，不是每次请求固定等待 3 小时。回合级重试预算默认 1800 秒，同样按单调时钟，仅在异常返回后决定是否发起下一次重试，不会中止正在进行的请求；传输层 2/5/15 秒重试另算。Compact 的真实慢滴流对照见 `TESTS.md` CAB 节：辅助 stream 首事件没有主链的输入动态预算，辅助 non-stream 慢 body 超过基础 `request_timeout` 仍成功，说明存在睡眠无关的预算缺口。
+- **睡眠恢复后续（状态：待设计，未落地）**：优先评估平台睡眠/唤醒通知与墙钟—单调钟差值作为审计信号的组合；只有确认真实 suspend/resume 后，才关闭在途 socket、记录结构化 `interrupted_by_sleep`，并进入可验证的 provider retry / 回合续跑链。**风险清单**：①系统校时或长调度停顿不能误判成睡眠；②重试可能重复供应商计费；③不能重放已提交工具副作用；④不能接受已放弃 attempt 的迟到响应；⑤必须正确释放中断句柄、连接及 Compact 账本。DarkWake 不证明网络恢复；跨 macOS/Linux 检测与 exactly-once 语义需单独设计，本次不实现。
+- 逐文件电源时点、代码位置、假服务测试命令及未验证边界见 `TESTS.md` 同名节。没有连外网/真实 Gateway，没有让机器睡眠，也没有修改产品代码；没有将任何失败判作“既有失败”。
+
+## Compact 辅助调用预算（cab，2026-10-04，本机复现确认；修法待 3a 决定）
+
+- 慢滴流 loopback 假服务已分别走主模型与 `auxiliary_model_call`。`request_timeout=1s` 时：大提示主模型 stream 的动态首事件预算（下限 3s）在 1.626s 收到事件；Compact stream 因回退基础 timeout 在 1.009s 以 `first_event` 超时。每 0.45s 一个有效 SSE data 的健康流，主模型/Compact 分别 2.736/2.730s 完成，说明 idle watchdog 可被有效事件持续刷新。
+- non-stream 慢 JSON body 的主模型在 1.012s 由外层 `wall_clock` 守卫终止；Compact 在 3.231s 仍完整返回（body 每 0.4s 送片），说明 auxiliary 的 socket read timeout 不是单次调用总期限。Fake monotonic 又验证单个 operation 即使跨过 1800s 重试预算才成功返回，也不被重试包装中断。
+- **结论：独立的 Compact 预算缺陷，应修；不是睡眠事故根因证据。** 修法建议：对出站输入计算并传入 request-local 动态首事件预算；non-stream auxiliary 加绝对请求期限，超时用结构化 `ProviderTimeoutError` 和 timed-out 台账结算；另由 3a 决定是否给 Compact stream 加总 active-time 上限（否则持续有效 data 可以无限续期，1800s 预算不取消 in-flight）。实现与本机回归约 1–2 小时。此轮只加测试/文档，未改产品代码。详见 `TESTS.md` CAB 节。
+
 ## A 包 0.5.4 复审问题收敛（pa54fix，2026-10-05；3a 终审通过，已并入 step17k）
 
 - **3a 终审（10-05）**：核对 QUOTE_PAIRS 统一后半角 `"` 的开闭交替正确；所有出现位置的检查做了“只看第一次出现”的变异，用例抓到。A 包相关 34 个测试文件 878 passed，leak_check A 6 无重合。A 包 0.5.2→0.5.4 全线（含 pah、pahfix）并入 17k；版本仍是 0.5.4，真实模型重跑 A 类没过的用例由 3a 安排。

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 901,
+  "count": 903,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2042,6 +2042,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "来源探测引用最多 256 个：限制审计输出体积。"
+    },
+    {
+      "name": "AUXILIARY_CALL_FLOOR_SECONDS",
+      "file": "agent_py_agent/agent/conversation/auxiliary_model_call.py",
+      "value": 240.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "字段用途: 辅助调用总时限的兜底窗口（秒），与 agent.request_timeout 取较大值。"
+    },
+    {
+      "name": "AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/conversation/auxiliary_model_call.py",
+      "value": 1800.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "用户需要理解、却又几乎不会调的旋钮。"
     },
     {
       "name": "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT",

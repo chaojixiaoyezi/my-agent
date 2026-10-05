@@ -1,5 +1,118 @@
 # 测试与发布验收
 
+## 辅助调用可靠时限（cabfix，2026-10-04，worker/cab-fix；基于 luna3 的 c39250781，待初审）
+
+- 来源：luna3 的刻画测试（`test_provider_timeout_acceptance.py` CAB 段）原本"记录现状"——辅助流未传首事件预算、非流式无总期限、持续有效事件可无限续期。本片把它们改成断言修复后行为。
+- 改动：`auxiliary_model_call.py`（首事件预算复用主模型估算、两个绝对期限常量、timed_out 收口）、`backends/base.py`（`ProviderRequestOptions.total_deadline_seconds`）、`backends/http.py`（`StreamCall`/`StreamCallOptions`、按签名分派传参）、`backends/gateway_helpers.py`（`_StreamIdleWatchdog.hard_deadline`）、`backends/openai_chat.py` + `backends/anthropic.py`（`_StreamObservers`/`_StreamCallbacks` 收参、接线）。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_provider_timeout_acceptance.py agent_py_agent/tests/test_backends.py agent_py_agent/tests/test_compact_request_budget.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_gateway_helpers.py agent_py_agent/tests/test_backends_base.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds5
+  ```
+- 结果：**304 passed**（六个文件；逐个文件单跑同样全绿）。三条刻画测试的实测：晚首事件 **>1.3s 完成**（旧行为 1.009s 超时）、非流式慢 body 在 **1.51s 以 wall_clock 超时**（旧行为 3.23s 静默成功）、持续有效事件在总时限处停止。
+- guards9：全绿。
+- 变异 3 个（驱动脚本 `/private/tmp/cabfix_mutate.py`，按备份原字节还原，还原后 sha256 与工作区一致）：
+  ① 首事件预算永远返回 None → 晚首事件用例红；② 非流式绝对期限返回 0 → 两条非流式用例红；③ watchdog 忽略硬期限 → 持续有效事件用例红。**三个全部被抓**。
+- 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、strict code-size `hard=0`、`git diff --check` 干净、clean-package OK；size_diff **新增告警 0 / 消失告警 35**。
+- 过程记录：新增两个数值常量后**必须重新生成常数目录**（`scripts/build_constants_catalog.py`，895 → 897），否则 `test_constants_catalog.py` 会红——基线 `c39250781` 上该用例是绿的，所以这条是本片引入、已修。
+- 未验证：没有连真实 provider 测大上下文压缩的实际耗时（规则禁止联网）；三个窗口的实际生产取值是否合适需要上线后观察。
+
+### cabfix2（按 3a 裁定修初审风险 1、联动口径与护栏；2026-10-05，worker/cab-fix；WIP `59d46f207`、拆平 `451036b00`、台账 `973aea023`，待 3a 复审）
+
+- 改动：`gateway_helpers.py`（`_first_deadline_locked`：首次排程按 min(idle, hard)，hard 为 None 退化）、`auxiliary_model_call.py`（流式硬期限改 `max(base, 1800, 首包预算 + base)`；抽 `_auxiliary_base_request_timeout`）、`agent_config.yaml`（`dynamic_timeout_max` 注释补联动口径）、`test_provider_timeout_acceptance.py`（新增 10 条用例）。
+- 新增用例覆盖：硬期限早于 idle 的首包几何（缩放 idle=2s/hard=0.6s，到点触发、timed_out、stage 正确）、idle 早于 hard 不变、无 hard 保持原语义、总时限与配置联动（20 万 token 档首包预算 >1800、硬期限 ≥ 首包预算 + 240）、主模型不产生 total_deadline、生产后端流式入口 options 护栏、`GatewayRequest.deadline` 信封契约、三档分派逐档行为。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_provider_timeout_acceptance.py agent_py_agent/tests/test_backends.py agent_py_agent/tests/test_backends_base.py agent_py_agent/tests/test_compact_request_budget.py agent_py_agent/tests/test_compact_semantic_summary.py agent_py_agent/tests/test_gateway_helpers.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds8
+  ```
+- 结果：6 个文件 **314 passed**；guards9（11 文件）**184 passed**；`IMPORT_BOUNDARIES findings=0`、ruff `All checks passed!`、`DOC_SYNC_PASS`（--base d05a0d075）、strict code-size `hard=0 blocked=False`、`check_clean_package` OK、`git diff --check` 干净；size_diff **新增告警 0 / 消失 35**。
+- 变异 4 个全 KILLED（脚本 `/private/tmp/claude-501/mutate_cabfix2.py`、`mutate_cabfix2b.py`；按备份原字节还原，三个产品文件 sha 与还原前一致）：
+  ① `start()` 退回只按 idle → 首包>总时限的几何用例红；② 流式硬期限退回固定 `max(base, 1800)` → 联动用例红；③ 删掉 options 第 1 档分派 → 护栏 + 5 条既有流用例红；④ 第 2 档替身改 `**kwargs`（`_accepts_kwarg` 误判接受 options，分派误走第 1 档）→ 第 2 档用例红。
+- 拆平记录：新用例曾引入 size_diff 两条新增告警（`_production_stream_targets` nesting soft、`total_target` params high-risk），已拆平（抽 `_module_stream_entries` 生成器 + `*args` 替身）；新旧实现输出逐项一致（对比脚本 `/private/tmp/claude-501/cabfix2_equiv.py`：labels 与 entry id 序列均相同）。
+- 未验证：没有连真实 provider 测大上下文压缩的实际耗时（规则禁止联网）；硬期限与 `dynamic_timeout_max` 联动的生产实际取值待上线后观察。
+
+## 断网时模型调用卡住不超时（hang，2026-10-04，调查结论；无产品代码改动）
+
+### 电源事件与请求结果对齐
+
+用户后补的 `pmset -g log` 结构化电源事实：2026-10-03 17:17:38 Clamshell Sleep；2026-10-04 04:29:12 Full Wake（接入 AC）；两者间筛出 49 条 Sleep/DarkWake/Wake 记录。JSONL 只含结构化事件，未读正文或凭据。以下结果时点由 `request_id` 的 epoch 加结果 `duration_seconds` 换算，与多条结尾事件 `t` 对得上；它们是结果时点，不是 CPU/网络持续运行的观测：
+
+| 请求文件 | 结构化结果 | 结果墙钟时点 | 与最近电源变化的关系 |
+| --- | --- | --- | --- |
+| `ds2-g2b-cont.jsonl` | `MODEL_STREAM_INCOMPLETE` | 10-03 20:51:29 | 20:51:05 DarkWake 后约 24.0 秒 |
+| `ds3-pdp-cont.jsonl` | `MODEL_STREAM_INCOMPLETE` | 10-03 20:51:24 | 20:51:05 DarkWake 后约 19.5 秒 |
+| `ds9-run-closeout-cont.jsonl` | `PROVIDERTRANSIENTERROR` | 10-04 02:25:45 | 02:25:41 DarkWake 后约 4.3 秒 |
+| `luna2-bizreview-a3b.jsonl` | `PROVIDERTRANSIENTERROR` | 10-04 04:27:21 | 04:26:42 DarkWake 后约 39.2 秒；Full Wake 前约 111 秒 |
+| `luna5-b7-cont2.jsonl` | `PROVIDERTRANSIENTERROR` | 10-04 03:41:18 | 落在 03:41:14 Sleep 与 03:41:19 DarkWake 的转换边界；时序映射约为 Sleep 后 4.6 秒、DarkWake 前，不能解读为连续在线 |
+| `luna6-b4full-cont.jsonl` | `PROVIDERTRANSIENTERROR` | 10-04 02:25:48 | 02:25:41 DarkWake 后约 7.2 秒 |
+| `sol1-legacy-cont.jsonl` | `PROVIDERTRANSIENTERROR` | 10-04 02:25:41 | DarkWake 起点后约 0.8 秒 |
+| `sol3-b5-cont.jsonl` | `COMPACT_PROVIDERTRANSIENTERROR` | 10-04 02:26:17 | 02:25:41 DarkWake 后约 36.9 秒 |
+
+所有 8 个结果均早于 04:29:12 完全唤醒；没有一个证据中的回合在 Full Wake 后仍未决。DarkWake 只能证明电源状态，不证明请求线程获得连续调度或网络可用。`ds2`、`ds3` 的约 10,950 秒 metrics 间隙覆盖了睡眠时段，不能当作 10,950 秒连续清醒无事件。
+
+### 代码确认的时钟与边界
+
+- `request_timeout=240`：`agent_py_agent/config/agent_config.yaml:743-745` 定义为非流式总时长下限、流式滚动空闲窗口。SSE 首事件/空闲 watchdog 与 socket 读取位于 `agent_py_agent/agent/backends/gateway_helpers.py:347-377,405-476,852-874`，截止计算用 `time.monotonic()`；只有完整 `data:` 行会触发 `_touch_data_line`，空注释/保活行不刷新。macOS 合盖时该单调钟/等待暂停；这解释墙钟跨度大于清醒等待预算，不证明超时逻辑失效。
+- 动态预算：`agent_py_agent/agent/agent_core/model/call_monitor.py:69-81,145-162` 按输入量估首事件；`agent_py_agent/agent/agent_core/model/call_runtime.py:400-443,492-509` 用 `dynamic_timeout_max` 夹住动态估算，生成层再组合首事件与输出预算。`10800` 是动态估算的上限，不是固定等待三小时；主模型外层期限/流式例外见 `agent_py_agent/agent/agent_core/tool_model_generation.py:1091-1161`。
+- 回合重试：`agent_py_agent/agent/agent_core/provider_transient_auto_resume.py:23-27,85-121` 默认 `[10,25,45,100,180]`，总预算 1800 秒；`agent_py_agent/config/runtime_guard_config.yaml:150-166` 说明范围。两者从首次尝试起按 `time.monotonic()` 计，预算在失败返回后、决定是否启动下一次重试时检查，不会取消在途请求。HTTP 传输层 2/5/15 秒错误重试另在 `agent_py_agent/agent/backends/gateway_helpers.py:635-720,1111-1120`，等待通过 `wait_interruptibly` 调用 `threading.Event.wait`（`agent_py_agent/agent/concurrency/interrupt.py:185-200`）；它是可中断退避，不是请求硬截止，也未验证可按墙钟穿越睡眠。
+- 压缩：`agent_py_agent/agent/conversation/compact_request_budget.py:163-175` 使用同一回合瞬时错误重试包装；`agent_py_agent/agent/conversation/auxiliary_model_call.py:71-106,148-180,217-254` 直接调用后端，不经过主模型动态首事件/外层总时长守卫。CAB 的本机慢首事件、有效 SSE 慢滴流和非流式 JSON 慢滴流测量见下节；确认辅助流首事件预算短于主链、辅助非流式慢读能越过 `request_timeout`。
+
+### 本地复现与验证边界
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_stream_timeout_contract.py \
+  agent_py_agent/tests/test_timeout_budget_locked.py \
+  agent_py_agent/tests/test_provider_transient_retry_budget.py \
+  agent_py_agent/tests/test_dynamic_timeout.py \
+  -q --tb=short -rX -p no:cacheprovider \
+  --basetemp=/private/tmp/claude-501/m-hang
+```
+
+结果：退出码 0，`......X............................................ [100%]`。`test_timeout_budget_locked.py::test_native_protocol_unified_counts_ir` 显示 XPASS（原有 xfail 标记下通过；原因注释为 token 恒等锚点待核对），不是失败；其余本次选择用例正常完成。流式测试使用本机 loopback 假 SSE 服务/假钟，覆盖长健康流、首事件等待、首事件后 idle 以及只发注释保活不算事件；重试预算测试覆盖尝试耗时和退避。本轮未真实让系统睡眠、未连外网或真实 Gateway、未改产品代码，因此没有跑产品代码 guards9/全仓测试，也没有变异检查。未把任何用例失败称作“既有失败”，无需用本分支自证基线。文档门禁：`scripts/check_doc_sync.py` 输出 `DOC_SYNC_PASS`；`git diff --check` 退出码 0；`size_diff.sh` 输出新增告警 0、消失告警 31。
+
+### 睡眠恢复后续（状态：待设计，未落地）
+
+- 若要实现，优先评估 macOS/Linux 睡眠/唤醒通知与墙钟—单调钟差值作为辅助信号；确认 suspend/resume 后才关闭在途连接并写结构化中断，再进入可续跑链。**风险清单**：①不能把系统校时或长调度停顿误判成睡眠；②重试不能默认为不会重复计费；③不能重放已提交的工具副作用；④不能接受被放弃 attempt 的迟到响应；⑤中断句柄、连接和 Compact 账本必须正确收尾。DarkWake 不证明网络已恢复。这些取舍留待单独设计，本轮未实现。
+
+## Compact 辅助调用慢滴流复现（cab，2026-10-04；本机测试完成，产品修法待 3a 决定）
+
+### 假服务实测
+
+测试运行真实 OpenAI-compatible HTTP 后端和真实主模型/Compact auxiliary 调用入口，但目标只绑定随机 127.0.0.1 端口，连接 `test-only` 假服务，不连外网/Gateway。将 `request_timeout` 缩放为 1 秒；SSE 注释或 JSON body 分片每 0.4–0.45 秒到达，以短周期复现“单次 read 都没超时、整体调用仍很长”。
+
+| 入口与传输 | 假服务剧本 | 实测等待 / 结束原因 |
+| --- | --- | --- |
+| 主模型，stream | 大提示；前 1.6 秒仅 SSE 注释，之后给有效 data；动态首事件下限设 3 秒 | 1.626 秒完成；首事件预算延长，超过基础 1 秒 |
+| Compact auxiliary，stream | 同一 1.6 秒首事件；期间只有注释保活 | 1.009 秒 `first_event` 超时；未传动态预算，回落基础 1 秒 |
+| 主模型，stream | 每 0.45 秒给有效 `data:`，总流约 2.73 秒 | 2.736 秒完成；有效事件持续刷新 idle，没有固定总期限 |
+| Compact auxiliary，stream | 相同有效 SSE 慢滴流 | 2.730 秒完成；同样没有固定总期限 |
+| 主模型，non-stream | 约 3.2 秒内缓慢送完整 JSON，单次字节间隔小于 1 秒 | 1.012 秒以 `wall_clock` 超时；主生成外层总时长守卫起效 |
+| Compact auxiliary，non-stream | 相同慢滴 JSON | 3.231 秒完整返回，超过基础 `request_timeout=1`；仅每次 socket read 间隔受限，无调用总期限 |
+
+1800 秒重试预算用假时钟另验：把一次 operation 内部推进 2400 秒后正常返回，`run_with_provider_transient_auto_resume` 仍返回成功、没有触发停止或退避。这证明预算只在异常后决定是否再试，不是单次 Compact 的运行期限。无限期不返回的服务不能在有限用例里等到“永远”；以上 slow-body 对照与调用链表明，若服务持续每次 read 前送字节，Compact non-stream 可一直等；若 stream 持续送有效事件也不会触发 idle timeout。
+
+完整相关回归命令（含 CAB 实测用例，`-s` 输出各场景耗时）：
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_provider_timeout_acceptance.py \
+  agent_py_agent/tests/test_provider_transient_retry_budget.py \
+  agent_py_agent/tests/test_stream_timeout_contract.py \
+  agent_py_agent/tests/test_compact_request_budget.py \
+  -q -s --tb=short -p no:cacheprovider \
+  --basetemp=/private/tmp/claude-501/m-cab
+```
+
+结果：退出码 0；上述四个定向测试文件均执行完成，`-q` 输出没有汇总测试数量。表中耗时来自重构慢服务 handler 后的这次完整回归。另在迭代时跑过仅筛 CAB 的 7 个用例，退出码 0。首轮新用例曾因假定主模型流式 `response.text` 会保留已交付给 `on_chunk` 的文本而失败；已改为核对返回状态/实测等待，并在最终完整回归复验通过，不涉及产品代码故障。附加检查：两份修改的测试文件 Ruff `All checks passed!`；`scripts/check_doc_sync.py` 输出 `DOC_SYNC_PASS`；`git diff --check` 退出码 0；`size_diff.sh` 输出新增告警 0、消失告警 31。因未修改产品代码，没有跑 guards9 或其他产品代码门禁。
+
+### 判断与最小修法（本轮不改产品代码）
+
+**结论：构成睡眠无关的 Compact 预算缺陷，应修；不是本次 8 个睡眠事故的已证根因。** 直接证据是 Compact non-stream 慢滴流耗时 3.231 秒仍成功，而同设置主模型在 1.012 秒被总期限守卫终止；另有大提示首事件预算差异（主模型成功、Compact 在基础 1 秒超时）。`request_timeout` 在配置中承诺非流式总时长下限，auxiliary 路径未兑现这一合同；1800 秒逻辑重试预算也不会中断这一次 in-flight 调用。
+
+建议修法：Compact auxiliary 用与出站请求一致的 token 估算计算动态首事件窗口，并通过 request-local `ProviderRequestOptions` 传给 streaming backend；non-stream 为 HTTP 调用设置绝对 `provider_request_budget`，到限产生结构化 `ProviderTimeoutError(stage=wall_clock)`，在 auxiliary model ledger 记作 timed-out，再让既有重试包装决定是否有预算再试。另需 3a 决定是否对 Compact streaming 加独立总 active-time 上限：只用 idle watchdog 会允许有效 data 无限续期，1800 秒 retry budget 不负责中断 in-flight。修法需避免修改共享 backend timeout、避免将慢健康摘要过早截断，并确保迟到响应不能结算为当前结果。估时：实现与最小本机回归约 1–2 小时；限额语义需 3a 先定，本轮仅提供复现和方案。
+
 ## A 包 hint 守卫与动态 ID 加固（2026-10-04，pahfix，0.5.4，ds5 初审通过；R5 已由 pa54fix 补守卫，待终审）
 
 - **起因与范围**：接续 pah 初审的两条必须改项：原测试只触发少量带 hint 错误，且 U+0085 变异存活。本轮不改包版本、schema 或真实业务数据。

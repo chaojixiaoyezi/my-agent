@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import secrets
 import threading
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
@@ -102,22 +104,65 @@ def _fail_probe_call(scope: object | None, call_id: str, exc: BaseException) -> 
 
 
 # LLM: HTTP 请求控制只在显式给出时透传；流入口与测试替身须保持既有调用合同，不在此重试。
+#   cabfix：多一个可选的绝对期限——两者都没给时才退回最简两参调用，保持旧后端/替身零改动。
 # 函数用途: 调用流式传输入口，按需附加当前请求的首事件等待预算。
 def request_stream_lines(
     lines,
-    path: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-    first_event_timeout_seconds: float | None,
+    request_args: tuple[str, dict[str, Any], dict[str, str], float | None, float | None],
 ):
-    if first_event_timeout_seconds is None:
+    path, payload, headers, first_event_timeout_seconds, total_deadline_seconds = request_args
+    if first_event_timeout_seconds is None and total_deadline_seconds is None:
         return lines(path, payload, headers)
-    return lines(
-        path,
-        payload,
-        headers,
-        first_event_timeout_seconds=first_event_timeout_seconds,
+    # LLM: 两条出口都按被调方签名选择，不用 TypeError 试探——一次失败可能被上层当成可重试
+    #   而重复发送。③ 新形态 options=；② 只认首包预算；① 最简三参（旧替身/假后端）。
+    if _accepts_kwarg(lines, "options"):
+        return lines(
+            path, payload, headers,
+            options=StreamCallOptions(
+                first_event_timeout_seconds=first_event_timeout_seconds,
+                total_deadline_seconds=total_deadline_seconds,
+            ),
+        )
+    if _accepts_kwarg(lines, "total_deadline_seconds"):
+        return lines(
+            path, payload, headers,
+            first_event_timeout_seconds=first_event_timeout_seconds,
+            total_deadline_seconds=total_deadline_seconds,
+        )
+    return lines(path, payload, headers, first_event_timeout_seconds=first_event_timeout_seconds)
+
+
+# LLM: 只读 callable 签名；探测失败（内建/无签名）时不加新关键字，保持原调用形态。
+# 函数用途: 判断流式入口是否接受某个关键字参数。
+def _accepts_kwarg(callable_obj: object, keyword: str) -> bool:
+    import inspect
+
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+    return keyword in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
     )
+
+
+# LLM: cabfix：流式/非流式入口的请求材料与超时选项各收成一个数据类，避免每加一项
+#   超时事实就拉长一组公开函数签名（code-size 参数门禁也会拦）。
+# 类用途: 携带一次 HTTP 调用的路径、请求体与请求头。
+@dataclass(frozen=True)
+class StreamCall:
+    path: str
+    payload: dict[str, Any]
+    headers: dict[str, str]
+
+
+# LLM: 两个字段都可能为 None，表示沿用该调用方原有的超时语义（不设首包预算 / 不设总期限）。
+# 类用途: 携带一次 HTTP 调用的首事件预算与绝对期限。
+@dataclass(frozen=True)
+class StreamCallOptions:
+    first_event_timeout_seconds: float | None = None
+    total_deadline_seconds: float | None = None
 
 
 # LLM: 所有内置 HTTP backend 都必须把 system_instruction 映射到供应商真实高优先级字段，而非拼回 user prompt。
@@ -282,14 +327,18 @@ class HttpBackend(BaseBackend):
     # LLM: HTTP JSON 请求必须经过唯一 GatewayRequest 和共享传输；OAuth 覆盖认证封装，需联合取消与认证回归。
     # 函数用途: 检查凭据并发送一次非流式请求，返回供应商 JSON，错误沿原传输合同上抛。
     def request_json(
-        self, path: str, payload: dict[str, Any], headers: dict[str, str]
+        self, path: str, payload: dict[str, Any], headers: dict[str, str],
+        *, total_deadline_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Send a JSON request through the shared gateway helper."""
 
         if not self.api_key:
             raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
-        return post_json(self._gateway_request(path, payload, headers))
+        return post_json(self._gateway_request(
+            StreamCall(path=path, payload=payload, headers=headers),
+            options=StreamCallOptions(total_deadline_seconds=total_deadline_seconds),
+        ))
 
     # LLM: Streaming collection forwards request-local first-event budget without changing backend-wide idle configuration.
     # 函数用途: 发起并完整收集一条流式 provider 请求，供非增量调用方使用。
@@ -299,17 +348,12 @@ class HttpBackend(BaseBackend):
         payload: dict[str, Any],
         headers: dict[str, str],
         *,
-        first_event_timeout_seconds: float | None = None,
+        options: StreamCallOptions | None = None,
     ) -> list[str]:
         """Send a streaming request and collect all data lines."""
-        return post_stream(
-            self._gateway_request(
-                path,
-                payload,
-                headers,
-                first_event_timeout_seconds=first_event_timeout_seconds,
-            )
-        )
+        return post_stream(self._gateway_request(
+            StreamCall(path=path, payload=payload, headers=headers), options=options,
+        ))
 
     # LLM: The iterator preserves provider data order and per-request first-event timing for live consumers.
     # 函数用途: 发起流式请求并逐条交付 data，使 TUI 能实时显示正文、思考和工具参数进度。
@@ -319,32 +363,42 @@ class HttpBackend(BaseBackend):
         payload: dict[str, Any],
         headers: dict[str, str],
         *,
-        first_event_timeout_seconds: float | None = None,
+        options: StreamCallOptions | None = None,
     ):
         """Send a streaming request and yield data lines as they arrive."""
-        yield from post_stream_iter(
-            self._gateway_request(
-                path,
-                payload,
-                headers,
-                first_event_timeout_seconds=first_event_timeout_seconds,
-            )
-        )
+        yield from post_stream_iter(self._gateway_request(
+            StreamCall(path=path, payload=payload, headers=headers), options=options,
+        ))
 
     # LLM: 唯一传输封装应用显式请求头和宿主会话；后台预算与首包预算保持 request-local，不改共享配置。
+    #   cabfix：total_deadline_seconds 是调用方给的绝对墙钟上界，换算成 monotonic 时刻存进信封的
+    #   deadline 字段——传输层已有该字段的完整机制（发送前、读正文、流式都共享同一条时限），
+    #   不必另造一套。None 表示不设总期限，主模型与旧调用方语义完全不变。
     # 函数用途: 组装统一 HTTP 请求，把已授权后台预算传到底层；普通流式空闲/取消语义不变。
     def _gateway_request(
         self,
-        path: str,
-        payload: dict[str, Any],
-        headers: dict[str, str],
+        call: StreamCall | str,
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         *,
-        first_event_timeout_seconds: float | None = None,
+        options: StreamCallOptions | None = None,
     ) -> GatewayRequest:
         """Build the immutable gateway request envelope used by all HTTP calls."""
         from .request_scope import provider_request_timeout
 
+        # LLM: 兼容两种调用形态：新的 (StreamCall, options) 与既有 (path, payload, headers, ...)；
+        #   后者仍被大量旧调用方和测试使用，不能强制它们一次改完。
+        if isinstance(call, StreamCall):
+            path, payload, headers = call.path, call.payload, call.headers
+        elif payload is None or headers is None:
+            raise TypeError("_gateway_request 需要 StreamCall 或 path/payload/headers")
+        else:
+            path = call
+        options = options or StreamCallOptions()
         api_base, path = endpoint_parts(self.api_base, path)
+        deadline = None
+        if options.total_deadline_seconds is not None and float(options.total_deadline_seconds) > 0:
+            deadline = time.monotonic() + float(options.total_deadline_seconds)
         return GatewayRequest(
             api_base=api_base,
             api_key=self.api_key,
@@ -353,7 +407,8 @@ class HttpBackend(BaseBackend):
             headers=request_headers(headers, self.custom_headers, self.session_header),
             timeout=provider_request_timeout(self.request_timeout),
             connect_timeout=self.connect_timeout,
-            first_event_timeout=first_event_timeout_seconds,
+            first_event_timeout=options.first_event_timeout_seconds,
+            deadline=deadline,
         )
 
     # LLM: 供应商上下文窗口只从模型 metadata API 的结构化字段读取；失败或字段缺失返回 0，

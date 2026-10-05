@@ -36,6 +36,18 @@ from .usage_metadata import (
 )
 
 
+# LLM: cabfix：流式观察回调与两个超时事实合成一个数据类，避免 _generate_stream 参数表
+#   随每个新观察点增长（code-size 参数门禁也会拦）。
+# 类用途: 携带一次 OpenAI 流式调用要用的观察回调和超时选项。
+@dataclass(frozen=True)
+class _StreamObservers:
+    on_chunk: Callable[[str], None] | None = None
+    on_thinking_delta: Callable[[str], None] | None = None
+    on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
+    first_event_timeout_seconds: float | None = None
+    total_deadline_seconds: float | None = None
+
+
 # LLM: OpenAI 请求对象按 typed 字段保留 system 和请求级思考控制；子适配器只发送其协议支持的字段。
 # 类用途: 汇总一次 OpenAI-compatible 调用的规则、用户输入、工具、思考开关和输出格式选项。
 @dataclass(frozen=True)
@@ -53,6 +65,8 @@ class _OpenAIGenerateRequest:
     thinking_disabled: bool = False
     max_output_tokens: int | None = None
     first_event_timeout_seconds: float | None = None
+    # cabfix：调用方给的本次请求绝对墙钟上界（秒）；None=不设总期限，主模型路径保持原语义。
+    total_deadline_seconds: float | None = None
     # 智能程度用户档位或空串；off 已折为开关，两个新档按协议与声明换算，不能直接透传。
     reasoning_effort: str = ""
 
@@ -128,6 +142,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 thinking_disabled=provider_options.thinking_disabled,
                 max_output_tokens=provider_options.max_output_tokens,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
+                total_deadline_seconds=provider_options.total_deadline_seconds,
                 reasoning_effort=provider_options.reasoning_effort,
             )
         )
@@ -278,12 +293,21 @@ class OpenAICompatibleBackend(HttpBackend):
             return self._generate_stream(
                 payload,
                 headers,
-                on_chunk=request.on_chunk,
-                on_thinking_delta=request.on_thinking_delta,
-                on_tool_input_progress=request.on_tool_input_progress,
-                first_event_timeout_seconds=request.first_event_timeout_seconds,
+                _StreamObservers(
+                    on_chunk=request.on_chunk,
+                    on_thinking_delta=request.on_thinking_delta,
+                    on_tool_input_progress=request.on_tool_input_progress,
+                    first_event_timeout_seconds=request.first_event_timeout_seconds,
+                    total_deadline_seconds=request.total_deadline_seconds,
+                ),
             )
-        obj = self.request_json("/chat/completions", payload, headers)
+        if request.total_deadline_seconds is None:
+            obj = self.request_json("/chat/completions", payload, headers)
+        else:
+            obj = self.request_json(
+                "/chat/completions", payload, headers,
+                total_deadline_seconds=request.total_deadline_seconds,
+            )
         return _openai_non_stream_response(
             obj,
             backend_name=self.name,
@@ -297,24 +321,20 @@ class OpenAICompatibleBackend(HttpBackend):
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
-        on_chunk: Callable[[str], None] | None = None,
-        on_thinking_delta: Callable[[str], None] | None = None,
-        first_event_timeout_seconds: float | None = None,
-        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
+        observers: _StreamObservers,
     ) -> ModelResponse:
         """Parse OpenAI SSE and concatenate delta.content chunks."""
+        on_chunk = observers.on_chunk
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
         text, usage, blocks, completion = collect_openai_stream_with_completion(
             request_stream_lines(
                 lines,
-                "/chat/completions",
-                openai_stream_payload(payload),
-                headers,
-                first_event_timeout_seconds,
+                (   "/chat/completions", openai_stream_payload(payload), headers,
+                    observers.first_event_timeout_seconds, observers.total_deadline_seconds, ),
             ),
             on_chunk=on_chunk,
-            on_thinking_delta=on_thinking_delta,
-            on_tool_input_progress=on_tool_input_progress,
+            on_thinking_delta=observers.on_thinking_delta,
+            on_tool_input_progress=observers.on_tool_input_progress,
         )
         assistant_blocks = _openai_assistant_content_blocks(
             reasoning=_openai_reasoning_from_completion(completion),

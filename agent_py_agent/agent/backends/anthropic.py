@@ -53,6 +53,8 @@ class _AnthropicGenerateRequest:
     on_thinking_delta: Callable[[str], None] | None = None
     on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
     first_event_timeout_seconds: float | None = None
+    # cabfix：本次调用的绝对墙钟上界；None=不设总期限，主模型路径保持原语义。
+    total_deadline_seconds: float | None = None
     # 用户档位或空串；off 已折为开关，xhigh/ultra 只在唯一换算点转成协议字段。
     reasoning_effort: str = ""
 
@@ -65,21 +67,8 @@ class _StreamCallbacks:
     on_thinking_delta: Callable[[str], None] | None = None
     on_tool_input_progress: Callable[[dict[str, object]], None] | None = None
     first_event_timeout_seconds: float | None = None
-
-
-# 函数用途: 把流式观察者回调与首事件等待预算收成一个不可变回调包，保持调用点紧凑。
-def _stream_callbacks(
-    on_chunk: Callable[[str], None] | None,
-    on_thinking_delta: Callable[[str], None] | None,
-    on_tool_input_progress: Callable[[dict[str, object]], None] | None,
-    first_event_timeout_seconds: float | None,
-) -> _StreamCallbacks:
-    return _StreamCallbacks(
-        on_chunk=on_chunk,
-        on_thinking_delta=on_thinking_delta,
-        on_tool_input_progress=on_tool_input_progress,
-        first_event_timeout_seconds=first_event_timeout_seconds,
-    )
+    # cabfix：调用方给的整次调用绝对上界；None=不设总期限，主模型路径保持原语义。
+    total_deadline_seconds: float | None = None
 
 
 # LLM: 关闭思考优先（兼容 Anthropic 官方 thinking 参数，不识别的端点如 MiniMax 静默忽略）；否则按档位经
@@ -115,10 +104,13 @@ def _anthropic_stream_text_once(
     return collect_anthropic_stream_with_completion(
         request_stream_lines(
             lines,
-            "/v1/messages",
-            payload,
-            headers,
-            callbacks.first_event_timeout_seconds,
+            (
+                "/v1/messages",
+                payload,
+                headers,
+                callbacks.first_event_timeout_seconds,
+                getattr(callbacks, "total_deadline_seconds", None),
+            ),
         ),
         on_chunk=callbacks.on_chunk,
         on_thinking_delta=callbacks.on_thinking_delta,
@@ -206,6 +198,7 @@ class AnthropicCompatibleBackend(HttpBackend):
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
+                total_deadline_seconds=provider_options.total_deadline_seconds,
                 reasoning_effort=provider_options.reasoning_effort,
             )
         )
@@ -374,10 +367,13 @@ class AnthropicCompatibleBackend(HttpBackend):
             return self._generate_stream(
                 payload,
                 headers,
-                on_chunk=request.on_chunk,
-                on_thinking_delta=request.on_thinking_delta,
-                on_tool_input_progress=request.on_tool_input_progress,
-                first_event_timeout_seconds=request.first_event_timeout_seconds,
+                _StreamCallbacks(
+                    on_chunk=request.on_chunk,
+                    on_thinking_delta=request.on_thinking_delta,
+                    on_tool_input_progress=request.on_tool_input_progress,
+                    first_event_timeout_seconds=request.first_event_timeout_seconds,
+                    total_deadline_seconds=request.total_deadline_seconds,
+                ),
             )
         return self._generate_non_stream(payload, headers)
 
@@ -444,22 +440,17 @@ class AnthropicCompatibleBackend(HttpBackend):
         self,
         payload: dict[str, Any],
         headers: dict[str, str],
-        on_chunk: Callable[[str], None] | None = None,
-        on_thinking_delta: Callable[[str], None] | None = None,
-        on_tool_input_progress: Callable[[dict[str, object]], None] | None = None,
-        first_event_timeout_seconds: float | None = None,
+        callbacks: _StreamCallbacks | None = None,
     ) -> ModelResponse:
         """保留已生成的思考；真正空流才沿既有预算重试一次。"""
+        callbacks = callbacks or _StreamCallbacks()
         text, usage, blocks, completion = "", {}, [], StreamCompletion()
         for attempt in range(2):
             text, usage, blocks, completion = _anthropic_stream_text_once(
                 self,
                 payload,
                 headers,
-                _stream_callbacks(
-                    on_chunk, on_thinking_delta, on_tool_input_progress,
-                    first_event_timeout_seconds,
-                ),
+                callbacks,
             )
             incomplete = incomplete_response_fields(
                 completion.stop_reason, incomplete_reason=completion.incomplete_reason

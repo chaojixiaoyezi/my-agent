@@ -31,12 +31,39 @@ from ..contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFirstTokenParams,
     ModelCallStartedParams,
+    ModelCallTimeoutParams,
 )
 from ..memory_archive import estimate_tokens
 from ..tooling.runtime_contracts import ToolChoice
 
 # LLM: 辅助模型共享调用账与并发入口；精确 thread 写入 metadata，独立快照身份归原 store，不解析正文身份。
 # 模块用途: 让压缩等辅助请求进入统一消耗与成本统计，原快照去重允许迟到物理事实补记。
+
+# LLM: cabfix（2026-10-04）：辅助（压缩）调用此前没有任何可靠的调用级时限——
+#   ①首事件：主模型按出站可见输入量估算动态首包预算并传给传输层，压缩没传，于是
+#   大上下文的压缩会被基础读超时过早判成 first_event 超时（真机 ~1s）；
+#   ②非流式：socket 读超时是"两次读之间的间隔"，不是调用总期限，慢滴流可以
+#   无限期拖住一次压缩（真机可远超 request_timeout）；
+#   ③流式：只要一直有有效事件就无限续期，没有总时限。
+#   本模块统一给辅助调用补齐这三样，且不改变主模型/子代理路径的任何行为。
+#
+#   绝对期限的存在理由：压缩是在一个正在进行的用户回合里跑的辅助工作，它必须
+#   有上界——否则一次卡住的压缩会把这个回合永久占住。上界取"比主模型对应总时限
+#   更宽"，因为压缩通常是整段历史里最大的一次预填充，本该得到更多耐心。
+#
+# 字段用途: 辅助调用总时限的兜底窗口（秒），与 agent.request_timeout 取较大值。
+AUXILIARY_CALL_FLOOR_SECONDS = 240.0
+# LLM: 流式辅助调用的总时长上限。默认 1800 秒（30 分钟）：
+#   - 比主模型对应总时限宽——主模型的 wall guard 用 max(request_timeout, 动态估算)，
+#     压缩是历史里最大的一次预填充，理应有更大的预算；
+#   - 但必须有上限：只要一直有有效事件就无限续期的流，会把一个用户回合永久占住，
+#     这是 cabfix 要修的缺陷本身。30 分钟足够任何真实压缩完成，又不会无限。
+#   - cabfix2：硬期限不能早于首包预算，否则"首包阶段"的耐心会被总时限反过来削掉；
+#     实际取 max(本常量, 首包预算 + request_timeout)——这让 dynamic_timeout_max 这个
+#     用户配置真的生效，而不是被一个写死的窗口静默覆盖。
+#   不新增配置项：与 request_timeout / dynamic_timeout_max 同源推导，避免又多一个
+#   用户需要理解、却又几乎不会调的旋钮。
+AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS = 1800.0
 
 
 # LLM: 这里只投影精确 call_id 的原账；LRU 已移除该记录时次数为 None，不能编造零 HTTP。
@@ -89,11 +116,9 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         )
         record_model_call_finished(ledger, call_id, response)
     except Exception as exc:
-        record_model_call_failed(ledger, call_id, exc)
-        try:
-            record_llm_call(label, time.monotonic() - started_at, None, ok=False)
-        except Exception:
-            pass
+        _record_auxiliary_failure(ledger, _AuxiliaryFailureCall(
+            call_id=call_id, exc=exc, started_at=started_at, label=label,
+        ))
         raise
     finally:
         if request.on_observation is not None:
@@ -104,6 +129,61 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         pass
     _record_auxiliary_cost(request, response)
     return response
+
+
+# LLM: cabfix 修法②的收口要求：超时必须落成结构化的"时间到"，而不是只留一个异常类型。
+#   账本层已有 timed_out 这个终态（contracts/model_call_ledger），这里按超时阶段区分——
+#   ProviderTimeoutError 用它的 stage，其余异常仍走原来的 failed，不夸大也不掩盖。
+#   任何记账失败都不得顶掉原始异常：调用方要拿到真实原因。
+# 类用途: 一次辅助调用失败要写账的最小事实（身份、异常、起止与后端标签）。
+@dataclass(frozen=True)
+class _AuxiliaryFailureCall:
+    call_id: str
+    exc: BaseException
+    started_at: float
+    label: str
+
+
+# 函数用途: 把辅助调用的失败写进模型账，超时记 timed_out、其它记 failed。
+def _record_auxiliary_failure(ledger: object, call: _AuxiliaryFailureCall) -> None:
+    call_id, exc = call.call_id, call.exc
+    started_at, label = call.started_at, call.label
+    try:
+        from ..backends.errors import ProviderTimeoutError
+
+        if isinstance(exc, ProviderTimeoutError):
+            ledger.timeout(
+                ModelCallTimeoutParams(
+                    call_id=call_id,
+                    timeout_stage=str(getattr(exc, "stage", "") or "provider_wall"),
+                    timeout_seconds=float(getattr(exc, "timeout_seconds", 0.0) or 0.0),
+                    elapsed_seconds=max(0.0, time.monotonic() - started_at),
+                )
+            )
+        else:
+            record_model_call_failed(ledger, call_id, exc)
+    except Exception:  # noqa: BLE001 - 记账失败不能顶掉原始异常
+        pass
+    try:
+        record_llm_call(label, time.monotonic() - started_at, None, ok=False)
+    except Exception:
+        pass
+
+
+# LLM: 首事件预算必须按"实际发出去的量"估算，与 _start_auxiliary_call 记账用同一份材料，
+#   否则同一次调用在账本和传输层会用两个不同的输入量推算耐心。
+# 函数用途: 复算辅助调用的输入估算（与记账同口径），供首事件预算使用。
+def _auxiliary_input_tokens(request: AuxiliaryModelCallRequest) -> int:
+    material = {
+        "prompt": str(request.prompt or ""), "messages": list(request.messages or []),
+        "tools": list(request.tools or []), "system_instruction": str(request.system_instruction or ""),
+    }
+    if request.response_schema is not None:
+        material["response_schema"] = request.response_schema
+    try:
+        return int(estimate_tokens(material))
+    except Exception:  # noqa: BLE001 - 估算失败退回零，预算函数会按最小值处理
+        return 0
 
 
 # LLM: I/O 前冻结真实身份和输入估算；仅结构化请求增加 schema，普通请求的估算对象保持原样，正文不进 metadata。
@@ -145,7 +225,65 @@ def _start_auxiliary_call(
     return ledger, call_id
 
 
+# LLM: cabfix 修法①：首事件预算复用主模型的同一个估算函数（estimate_first_token_timeout +
+#   first_token_timeout_options），不另写一套——两处口径必须一致，否则压缩与主模型会对
+#   同样大的输入给出不同耐心。输入量用上面已算好的 input_tokens（与账本同一份估算），
+#   估算失败或无动态超时配置时返回 None，让传输层保持原有基础读超时（不引入新行为）。
+# 函数用途: 按辅助调用自己的输入估算，给出应当传给传输层的首事件预算秒数。
+def _auxiliary_first_event_budget(request: AuxiliaryModelCallRequest, input_tokens: int) -> float | None:
+    try:
+        from ..agent_core.model.call_monitor import (
+            FirstTokenTimeoutParams,
+            estimate_first_token_timeout,
+        )
+        from ..agent_core.model.call_runtime import (
+            first_token_timeout_options,
+            has_dynamic_timeout_config,
+        )
+
+        if not has_dynamic_timeout_config(request.agent):
+            return None
+        estimate = estimate_first_token_timeout(
+            FirstTokenTimeoutParams(
+                input_tokens=max(0, int(input_tokens)),
+                ledger=model_call_ledger(request.agent),
+                options=first_token_timeout_options(request.agent),
+            )
+        )
+        return max(0.0, float(estimate.timeout_seconds)) or None
+    except Exception:  # noqa: BLE001 - 估算是增强；失败退回基础读超时，不改变调用成败
+        return None
+
+
+# LLM: cabfix 修法②③：辅助调用的绝对期限。非流式取 request_timeout 与兜底窗口的较大值——
+#   请求基础超时是运维已经调好的刻度，不该被辅助调用缩得更短；兜底窗口保证即使
+#   配置成很小的值，辅助调用也不会完全没有上界。
+#   流式不叠兜底窗口，而是取 max(流式总时限, 首包预算 + request_timeout)（cabfix2）：
+#   ① 叠兜底会让 240 顶掉总时限，"宽但有限"失真；
+#   ② 硬期限若短于首包预算，首包阶段的耐心会被总时限静默削掉（dynamic_timeout_max
+#      配到 10800 时尤其明显）——加一个 request_timeout 的余量，让首包预算真正可用。
+# 函数用途: 算出一次辅助调用的绝对秒数上界；非流式与流式各用一档。
+def _auxiliary_absolute_timeout(request: AuxiliaryModelCallRequest, *, streaming: bool) -> float:
+    base = _auxiliary_base_request_timeout(request)
+    if streaming:
+        first_event = _auxiliary_first_event_budget(request, _auxiliary_input_tokens(request)) or 0.0
+        return max(base, AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS, first_event + base)
+    return max(base, AUXILIARY_CALL_FLOOR_SECONDS)
+
+
+# LLM: 读不到配置时退回 0，让两个分支各自的兜底常量决定下限（不引入新行为）。
+# 函数用途: 取本次辅助调用对应 agent 的请求基础超时秒数，读不到返回 0。
+def _auxiliary_base_request_timeout(request: AuxiliaryModelCallRequest) -> float:
+    try:
+        from ..agent_core.model.call_runtime import model_request_timeout_seconds
+
+        return float(model_request_timeout_seconds(request.agent))
+    except Exception:  # noqa: BLE001 - 读不到配置就用兜底常量
+        return 0.0
+
+
 # LLM: 两种生成共享原 admission、provider scope 和观察者；schema 不启动工具循环，取消与后端异常原样退出。
+#   cabfix：这里是所有辅助调用的唯一咽喉，首事件预算和绝对期限都从这一处注入，不散落到各调用方。
 # 函数用途: 在原并发槽调用已选方法，把实际流事件和 HTTP 尝试记入原模型账。
 def _invoke_auxiliary_generate(
     request: AuxiliaryModelCallRequest,
@@ -167,7 +305,21 @@ def _invoke_auxiliary_generate(
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
-                return _call_backend(generate, request, on_chunk)
+                return _call_backend(
+                    generate,
+                    request,
+                    on_chunk,
+                    timeouts=AuxiliaryTimeoutPlan(
+                        first_event_budget_seconds=_auxiliary_first_event_budget(
+                            request, _auxiliary_input_tokens(request),
+                        ),
+                        total_deadline_seconds=_auxiliary_absolute_timeout(
+                            request,
+                            streaming=bool(getattr(getattr(request, "agent", None), "backend", None)
+                                           and getattr(request.agent.backend, "stream_enabled", False)),
+                        ),
+                    ),
+                )
             finally:
                 llm_inflight(-1)
 
@@ -202,33 +354,58 @@ def _auxiliary_chunk_observer(ledger: object, call_id: str) -> object:
     return _on_chunk
 
 
-# LLM: 仅压缩类同线程辅助请求沿主请求读取同一档位；普通辅助任务不得因共享 thread_id 改变采样策略。
-#   none 是摘要拒绝工具的选项，不代表主回合 forced；缓存面的 system 仍逐请求原样传递。
-# 函数用途: 为明确标记的压缩请求构造与主生成相同的思考开关和档位。
-def _auxiliary_provider_options(request: AuxiliaryModelCallRequest) -> ProviderRequestOptions | None:
+# LLM: cabfix 的两个超时事实合成一个小数据类；两个字段都可能为 None，表示沿用原行为（不设该预算）。
+# 类用途: 携带一次辅助调用的首事件预算与绝对期限。
+@dataclass(frozen=True)
+class AuxiliaryTimeoutPlan:
+    first_event_budget_seconds: float | None = None
+    total_deadline_seconds: float | None = None
+
+
+# LLM: 一次辅助调用的请求选项唯一组装点（cachecompact + cabfix 合并）：
+#   - 压缩类同线程请求沿主请求读取同一档思考和档位（普通辅助任务不因共享 thread_id 改变采样策略）；
+#     none 是摘要拒绝工具的选项，不代表主回合 forced；
+#   - cabfix 的首包预算与绝对期限走同一个 ProviderRequestOptions 通道。
+#   后端不接收 request_options 时：带了 system、思考或档位这类声明的必须失败，不能静默丢掉；
+#   只有超时增强时静默缺席（测试替身或旧实现，没有真实传输需要保护）。
+# 函数用途: 为辅助调用组装思考档位、系统指令和期限选项；没有可传项时返回 None。
+def _auxiliary_provider_options(
+    generate: object,
+    request: AuxiliaryModelCallRequest,
+    timeouts: AuxiliaryTimeoutPlan | None,
+) -> ProviderRequestOptions | None:
     backend = getattr(request.agent, "backend", None)
     system_instruction = str(request.system_instruction or "")
-    if not bool(getattr(backend, "supports_provider_request_options", False)):
-        return ProviderRequestOptions(system_instruction=system_instruction) if system_instruction else None
-
-    thinking_disabled = False
-    reasoning_effort = ""
-    if _is_compact_purpose(request.purpose) and str(request.thread_id or "").strip():
-        from ..settings.reasoning_effort import request_reasoning_options
-
-        params = SimpleNamespace(
-            task_attributes={"conversation_thread_id": str(request.thread_id).strip()}
-        )
-        thinking_disabled, reasoning_effort = request_reasoning_options(
-            request.agent, params, backend, forced=False,
-        )
-    if not (system_instruction or thinking_disabled or reasoning_effort):
+    timeouts = timeouts or AuxiliaryTimeoutPlan()
+    thinking_disabled, reasoning_effort = _compact_reasoning_options(request, backend)
+    declared = bool(system_instruction or thinking_disabled or reasoning_effort)
+    has_timeouts = timeouts.first_event_budget_seconds is not None or timeouts.total_deadline_seconds is not None
+    if not (declared or has_timeouts):
+        return None
+    if not _accepts_keyword(generate, "request_options"):
+        if declared:
+            raise TypeError("auxiliary model backend does not accept request_options")
         return None
     return ProviderRequestOptions(
         system_instruction=system_instruction,
         thinking_disabled=thinking_disabled,
         reasoning_effort=reasoning_effort,
+        first_event_timeout_seconds=timeouts.first_event_budget_seconds,
+        total_deadline_seconds=timeouts.total_deadline_seconds,
     )
+
+
+# LLM: 只有后端声明支持 provider 请求选项、且是明确标记的压缩目的、带线程身份时，才按线程读取思考档位。
+# 函数用途: 返回压缩请求应沿用的 (thinking_disabled, reasoning_effort)；不适用时返回 (False, "")。
+def _compact_reasoning_options(request: AuxiliaryModelCallRequest, backend: object) -> tuple[bool, str]:
+    if not bool(getattr(backend, "supports_provider_request_options", False)):
+        return False, ""
+    if not (_is_compact_purpose(request.purpose) and str(request.thread_id or "").strip()):
+        return False, ""
+    from ..settings.reasoning_effort import request_reasoning_options
+
+    params = SimpleNamespace(task_attributes={"conversation_thread_id": str(request.thread_id).strip()})
+    return request_reasoning_options(request.agent, params, backend, forced=False)
 
 
 # LLM: Purpose 是宿主给定的结构化路由标签；仅压缩目的共用缓存分区，其它辅助请求保持旧默认。
@@ -243,8 +420,15 @@ def _is_compact_purpose(purpose: str) -> bool:
 
 
 # LLM: 发送前检查签名，不用 TypeError 重试；显式 schema/历史/工具/system/options 不支持就失败，不能静默丢掉声明。
-# 函数用途: 将通用辅助输入交给原后端方法，保留同线程选项并维持普通调用的原参数形态。
-def _call_backend(generate: object, request: AuxiliaryModelCallRequest, on_chunk: object) -> object:
+#   cabfix 的期限计划随 timeouts 传入，并入同一份 request_options。
+# 函数用途: 将通用辅助输入交给原后端方法，保留同线程选项与期限，并维持普通调用的原参数形态。
+def _call_backend(
+    generate: object,
+    request: AuxiliaryModelCallRequest,
+    on_chunk: object,
+    *,
+    timeouts: AuxiliaryTimeoutPlan | None = None,
+) -> object:
     kwargs: dict[str, object] = {}
     if request.response_schema is not None:
         if not _accepts_keyword(generate, "response_schema"):
@@ -265,13 +449,13 @@ def _call_backend(generate: object, request: AuxiliaryModelCallRequest, on_chunk
         kwargs["tool_choice"] = request.tool_choice or ToolChoice.auto(
             "auxiliary_cache_surface"
         )
-    options = _auxiliary_provider_options(request)
+    options = _auxiliary_provider_options(generate, request, timeouts)
     if options is not None:
-        if not _accepts_keyword(generate, "request_options"):
-            raise TypeError("auxiliary model backend does not accept request_options")
         kwargs["request_options"] = options
     prompt = request.prompt if isinstance(request.prompt, str) else str(request.prompt or "")
     return generate(prompt, **kwargs)
+
+
 
 
 # LLM: 只读精确调用记录，观察者异常只留类型无关警告、不影响原模型结果；缺记录保持未知而非零请求。
