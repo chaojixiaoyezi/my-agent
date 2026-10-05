@@ -898,3 +898,58 @@ def test_system_read_root_validation_rejects_root_and_forbidden_symlink_alias(tm
     for platform_name in ("Synthetic", "Alias", "Private"):
         with pytest.raises(SandboxUnavailableError, match="SYSTEM_READ_ROOT_INVALID"):
             system_read_roots_for_platform(platform_name)
+
+
+def test_system_read_roots_exclude_overbroad_host_directories():
+    """系统读根表不得放进整根或用户级目录（/usr、/usr/local、/opt、/opt/homebrew、/etc、/var、/tmp 等）。
+
+    rdfloor 初审补充：原用例只钉 /、/Users、/home、/private 四个禁用根，表里加宽根（如 /usr）
+    不会被抓到（变异存活）。这里把明显过宽的宿主目录钉成负向断言，防底图悄悄变宽。
+    """
+    from agent_py_agent.agent.tooling.sandbox import SYSTEM_READ_ROOTS_BY_PLATFORM
+
+    overbroad = {
+        Path("/"), Path("/usr"), Path("/usr/local"), Path("/opt"), Path("/opt/homebrew"),
+        Path("/etc"), Path("/var"), Path("/tmp"), Path("/Users"), Path("/home"), Path("/private"),
+    }
+    for platform_name, roots in SYSTEM_READ_ROOTS_BY_PLATFORM.items():
+        for raw in roots:
+            assert Path(raw) not in overbroad, f"{platform_name} 表包含过宽根: {raw}"
+
+
+def test_allowlist_symlink_alias_inside_mounted_root_is_not_recreated(tmp_path, monkeypatch):
+    """alias 已落在已挂载根内时不重复 --symlink；未覆盖的别名仍按真实目标恢复。
+
+    rdfloor 初审补充：跳过分支（alias 在挂载目录之下）原来没有用例，去掉跳过逻辑不会被
+    抓到（变异存活）。这里钉住：命中跳过分支的别名不出现在 --symlink 参数里。
+    """
+    from agent_py_agent.agent.attempt.sandbox import (
+        AttemptExecutionSandbox,
+        AttemptSandboxSpec,
+    )
+    from agent_py_agent.agent.tooling import sandbox as tooling_sandbox
+    from agent_py_agent.agent.tooling.sandbox import SandboxReadiness
+
+    real, sysdir = tmp_path / "real", tmp_path / "sys"
+    real.mkdir()
+    sysdir.mkdir()
+    alias_inside = sysdir / "alias"
+    alias_inside.symlink_to(real, target_is_directory=True)
+    alias_outside = tmp_path / "outside-alias"
+    alias_outside.symlink_to(real, target_is_directory=True)
+    spec = AttemptSandboxSpec(
+        attempt_view=tmp_path, staging_root=tmp_path, shared_workspace=tmp_path,
+        owner_home=tmp_path, extra_write_roots=(),
+        public_read_roots=(sysdir, alias_inside, real, alias_outside),
+        system_read_roots=(sysdir,), implicit_attempt_write_roots=False,
+        read_only_root=True, read_mode="allowlist", bwrap_path="/fake/bwrap",
+    )
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = "Linux"
+    sandbox._ready = SandboxReadiness(True, "SANDBOX_READY", "ok")
+    monkeypatch.setattr(tooling_sandbox, "_proc_mount_args", lambda: ["--dir", "/proc"])
+
+    symlinks = _argv_mount_pairs(sandbox.build_argv(["/fake/python", "-c", "pass"]), "--symlink")
+
+    assert (str(real.resolve()), str(alias_inside)) not in symlinks, "已挂载根内的别名不应重复创建"
+    assert (str(real.resolve()), str(alias_outside)) in symlinks, "未覆盖的别名仍按真实目标恢复"
