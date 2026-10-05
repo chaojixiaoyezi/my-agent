@@ -1,5 +1,14 @@
 # 设计台账
 
+## 缓存命中运维报告脚本（cachereport，2026-10-05，分支 `worker/cachereport`，基于 17k 头 `02acd6446`；待初审）
+
+- **起因**：17k 上线（压缩调用也命中缓存）后要核对"省钱是否真的生效"，此前只能临时写脚本统计。本件把口径固化成仓库内只读工具 `scripts/cache_hit_report.py`。
+- **口径（与 `store_usage.ModelUsageStore.summary` 同源）**：provider 分区取 call_count/input_tokens/cache_read_input_tokens/output_tokens；命中率 = Σcache_read ÷ Σinput（cache_write 不算命中）；estimated 分区单列——`estimated.call_count` 是缺报调用数（供应商未回报、只有本地估算），不与供应商口径混加；`purpose_breakdown` 是互斥分区（有则用、无则回退根 usage_breakdown 标 "(未分区)"）；天分组按本地时区。
+- **路径发现**：复用 `scripts/reproject_model_usage.discover_ledger_paths`（owner home 三种已知布局：workspace/runtime/workspaces/*/conversations、conversations、data/conversations），不写死路径。
+- **输出**：日期×用途表格（--by-source/--by-model 可选细分、`conversation_compact` 单独成行）；--since/--until 时间窗；--compare 输出基准日前后两列（调用数/输入/命中率/未命中）；--json 机器可读。只读、不写文件；坏行与读不了的文件跳过计数、不中断。
+- **验证**：见 TESTS「缓存命中运维报告」；变异 2/2 KILLED（cache_write 混进命中、估算混进供应商调用数）。
+- **未验证**：真实 owner home 数据（沙箱不读真实 owner home）；"省钱生效"的真机核对由 3a 用真实数据跑。
+
 ## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；本地实现及定向验证完成，WIP：完整守卫缺文件；待非作者复审及 3a 终审）
 
 - **来源**：cachediag2r 初审两条产品入口反例获 3a 认可：新持久基数＋旧内存身份重发把 1 算成 2；31→32、4097→4098 旧末块改写后追加误报纯追加。旧节为历史实施记录，以本节合同为准。

@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 缓存命中运维报告（cachereport，2026-10-05，分支 `worker/cachereport`，基于 17k 头 `02acd6446`；待初审）
+
+- 新增 `scripts/cache_hit_report.py`（只读运维工具）与 `agent_py_agent/tests/test_cache_hit_report.py`（11 条）。
+- 口径：`usage_breakdown.provider` 的 call_count/input/cache_read/output；命中率=Σcache_read÷Σinput（cache_write 不算命中）；`estimated.call_count`=缺报调用数单列、不与供应商口径混加；`purpose_breakdown` 互斥分区（无分区回退根级、标 "(未分区)"）；`--by-source` 时 `conversation_compact` 单独成行。
+- 路径发现复用 `scripts/reproject_model_usage.discover_ledger_paths`（owner home 三种已知布局，不写死）；只读、不写文件；坏行与读不了的文件跳过计数、不中断。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cache_hit_report.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-cachereport   # 11 passed
+  ```
+  guards9 前 11 文件 **187 passed**（本树无 `test_backend_signature_guardrails.py`，按 1005-continue 说明只跑前 11 个）；ruff / boundaries=0 / doc_sync(--base 02acd6446) / strict code-size(hard=0 blocked=False) / **size_diff 新增 0、消失 55** / diff-check / clean-package 全过。
+- 变异 2/2 KILLED（脚本 `tasks/2026-10-05/cachereport-mutations/mutations.py`，sha256 还原一致）：cache_write 混进命中 → 2 条用例红；估算调用数混进供应商调用数 → 4 条红。
+- 未验证：真实 owner home 数据（沙箱规则不读）；"省钱生效"的真机核对由 3a 用真实数据跑。
+
 ## 缓存诊断组合反例返工（cachediag3，2026-10-05，`worker/cachediag3`，基线 `ffca71c54`；定向验证完成，WIP：完整守卫缺文件待补）
 
 - **来源/改法**：cachediag2r 两条必须改反例。累计值与已计数调用 SHA256 集合同快照持久化/恢复；较新快照整体选取。长度变化缺共同末点时采用不可比方案（`comparable=false / partial=true`），而非猜测纯追加/截短。

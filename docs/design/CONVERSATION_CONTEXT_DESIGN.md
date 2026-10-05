@@ -310,6 +310,19 @@ Anthropic 请求只推进一个 message-level `cache_control`，该断点始终�
 模型服务器复用尽可能长的 KV 前缀。任务工作区会在首工具前后变化，因此必须放在动态尾部；这不是对上下文
 的裁剪。只有真正 Compact 可以把旧 messages 前缀一次替换为新的 committed summary，之后重新建立稳定前缀。
 
+### 缓存命中运维报告（scripts/cache_hit_report.py）
+
+`python scripts/cache_hit_report.py --owner-home <owner home>` 只读汇总该 owner 的
+`model_usage/*.jsonl`（按代码里的 canonical 布局发现，覆盖 workspace 与直连两种形态）：
+
+- 默认输出「日期 × 用途」表格：调用数、输入 tokens、缓存读取、命中率（= Σcache_read ÷ Σinput，
+  cache_write 不算命中）、输出 tokens、缺报调用（只有本地估算、无供应商回报的调用数）。
+- `--by-source` / `--by-model` 再按来源（如 `conversation_compact` 单独成行）或模型细分；
+  `--since/--until YYYY-MM-DD` 限时间窗；`--compare YYYY-MM-DD` 输出基准日前后两列
+  （调用数、输入、命中率、未命中 token）；`--json` 机器可读。
+- 只读、不写文件；坏行与读不了的文件跳过计数、不中断。口径与 `store_usage` 的
+  provider/estimated 分区同源，估算口径不与供应商口径混加。
+
 ## Turn scheduling boundary
 
 同一 thread 仍只有一条历史，实际新建的 Gateway 请求按顺序执行；同一工具循环内到达的新用户输入按
