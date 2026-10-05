@@ -872,59 +872,98 @@ def _requeue_stale_processing(
 #   与 _requeue_stale_processing 的差别只在触发来源与退避值，共用 turn 锁与死 attempt 的 guidance 释放。
 #   重排不重放工具：下一轮从会话里已落盘的完成工具往返继续。写失败返回 False，由调用方照常收失败终态。
 # 函数用途: 把因供应商临时故障失败的长回合重排回队列，等待下一轮自动续跑。
+# LLM: 供应商故障自动续跑的输入载体：次数、错误码与调用方会话存储收在一起，保持主函数参数不增长
+#   （code-size 参数守卫）；只承载结构化事实，不改任何状态。
+# 类用途: 保存一次供应商故障重排要用的结构化输入。
+@dataclass(frozen=True)
+class ProviderTransientResume:
+    resume_count: int
+    error_code: str
+    conversation_store: object | None = None
+
+
+# LLM: 供应商临时故障的回合级重排：请求保留同一身份写回 inbox（status=pending、priority=recovery、
+#   not_before_at 退避），active_turn_recovery 标记写 cause=provider_transient_resume 与累计次数；
+#   与 _requeue_stale_processing 的差别只在触发来源与退避值，共用 turn 锁与死 attempt 的 guidance 释放。
+#   重排不重放工具：下一轮从会话里已落盘的完成工具往返继续。写失败返回 False，由调用方照常收失败终态。
+# 函数用途: 把因供应商临时故障失败的长回合重排回队列，等待下一轮自动续跑。
 def requeue_provider_transient_processing(
     paths: GatewayPaths,
     processing_path: Path,
     request_id: str,
-    *,
-    resume_count: int,
-    error_code: str,
-    conversation_store: object | None = None,
+    resume: ProviderTransientResume,
 ) -> bool:
     try:
         with gateway_turn_transition(paths, request_id):
-            report = read_json_file_report(
-                processing_path, context="gateway.recovery.provider_transient.read"
-            )
-            if report.load_error is not None or not isinstance(report.payload, dict):
-                return False
-            fresh = report.payload
-            dead_attempt_id = str(fresh.get("execution_attempt_id") or "").strip()
-            _release_dead_attempt_guidance(conversation_store, request_id, dead_attempt_id=dead_attempt_id)
-            now = time.time()
-            requeued = dict(fresh)
-            requeued.update(
-                {
-                    "status": "pending",
-                    "priority": "recovery",
-                    "requeued_at": now,
-                    "not_before_at": now + _provider_transient_resume_delay(resume_count),
-                    "last_error": f"provider transient failure: {error_code}",
-                    "active_turn_recovery": {
-                        "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
-                        "request_id": request_id,
-                        "dead_execution_attempt_id": dead_attempt_id,
-                        "requeued_at": now,
-                        "cause": "provider_transient_resume",
-                        "unplanned_resume_count": _unplanned_resume_count(fresh),
-                        "provider_resume_count": max(0, int(resume_count)),
-                    },
-                }
-            )
-            for key in (
-                "execution_attempt_id",
-                "lease_owner",
-                "lease_started_at",
-                "lease_heartbeat_at",
-                "lease_process_identity",
-            ):
-                requeued.pop(key, None)
-            write_json_file_atomic(processing_path, requeued)
-            processing_path.replace(paths.inbox / processing_path.name)
+            return _provider_transient_requeue_locked(paths, processing_path, request_id, resume)
     except OSError as exc:
         _report_gateway_side_effect_error("requeue_provider_transient_request", request_id, exc)
         return False
+
+
+# LLM: turn 锁内的重排动作：读请求、释放死 attempt 的预留、写回 inbox；任何一步失败返回 False，
+#   由调用方照常收失败终态，不把请求留在 processing 卡死。读不到合法请求文件时不重排。
+# 函数用途: 在回合锁内完成一次供应商故障重排。
+def _provider_transient_requeue_locked(
+    paths: GatewayPaths,
+    processing_path: Path,
+    request_id: str,
+    resume: ProviderTransientResume,
+) -> bool:
+    report = read_json_file_report(
+        processing_path, context="gateway.recovery.provider_transient.read"
+    )
+    if report.load_error is not None or not isinstance(report.payload, dict):
+        return False
+    fresh = report.payload
+    dead_attempt_id = str(fresh.get("execution_attempt_id") or "").strip()
+    _release_dead_attempt_guidance(
+        resume.conversation_store, request_id, dead_attempt_id=dead_attempt_id
+    )
+    requeued = _provider_transient_requeued_payload(fresh, request_id, dead_attempt_id, resume)
+    write_json_file_atomic(processing_path, requeued)
+    processing_path.replace(paths.inbox / processing_path.name)
     return True
+
+
+# LLM: 重排请求的字段构造保持纯函数：status/priority/退避/恢复标记一次写全，lease 字段全部清掉；
+#   不读文件、不写盘，便于单测与审阅。
+# 函数用途: 生成重排后要写回 inbox 的请求 payload。
+def _provider_transient_requeued_payload(
+    fresh: dict,
+    request_id: str,
+    dead_attempt_id: str,
+    resume: ProviderTransientResume,
+) -> dict:
+    now = time.time()
+    requeued = dict(fresh)
+    requeued.update(
+        {
+            "status": "pending",
+            "priority": "recovery",
+            "requeued_at": now,
+            "not_before_at": now + _provider_transient_resume_delay(resume.resume_count),
+            "last_error": f"provider transient failure: {resume.error_code}",
+            "active_turn_recovery": {
+                "schema_version": _ACTIVE_TURN_RECOVERY_SCHEMA,
+                "request_id": request_id,
+                "dead_execution_attempt_id": dead_attempt_id,
+                "requeued_at": now,
+                "cause": "provider_transient_resume",
+                "unplanned_resume_count": _unplanned_resume_count(fresh),
+                "provider_resume_count": max(0, int(resume.resume_count)),
+            },
+        }
+    )
+    for key in (
+        "execution_attempt_id",
+        "lease_owner",
+        "lease_started_at",
+        "lease_heartbeat_at",
+        "lease_process_identity",
+    ):
+        requeued.pop(key, None)
+    return requeued
 
 
 # LLM: 退避固定 30/120 秒：回合内重试已耗尽分钟级预算，续跑是最后手段，30 秒给服务端瞬态恢复窗口；

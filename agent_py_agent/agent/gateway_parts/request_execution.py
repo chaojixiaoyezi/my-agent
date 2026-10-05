@@ -1266,12 +1266,11 @@ def _handle_gateway_request(
     finally:
         _stop_gateway_request_lease(lease_stop, lease_thread)
         chunk_writer.close()
-        resume_marker = _host_shutdown_resume_marker(failure, request_path, context["request_id"])
-        resume_field = "restart_resume" if resume_marker is not None else ""
-        if resume_marker is None:
-            resume_marker = _provider_transient_turn_resume_marker(agent, context, response, chunk_writer)
-            if resume_marker is not None:
-                resume_field = "provider_transient_resume"
+        restart_marker = _host_shutdown_resume_marker(failure, request_path, context["request_id"])
+        resume_marker = restart_marker if restart_marker is not None else _provider_transient_turn_resume_marker(
+            agent, context, response, chunk_writer
+        )
+        resume_field = "restart_resume" if restart_marker is not None else "provider_transient_resume"
         # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
         # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
         # 留给重启/续跑的回合不收口：和进程消失一样，由恢复按死掉的 attempt 释放预留，续跑回合再认领。

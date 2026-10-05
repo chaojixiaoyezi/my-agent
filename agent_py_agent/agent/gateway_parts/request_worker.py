@@ -1010,6 +1010,25 @@ def _request_lease_epoch(request_payload: dict) -> int:
         return 0
 
 
+# LLM: 供应商故障重排的统一出口：从响应标记读次数与错误码，调 recovery 写回队列；重排失败返回 False，
+#   由调用方照常收失败终态（不让请求卡死）。身份取响应里的请求编号，与 processing 文件同源。
+# 函数用途: 把带 provider_transient_resume 标记的请求重排回队列。
+def _requeue_provider_transient_resume(paths, processing_path, response, conversation_store) -> bool:
+    from .recovery import ProviderTransientResume, requeue_provider_transient_processing
+
+    marker = response["provider_transient_resume"]
+    return requeue_provider_transient_processing(
+        paths,
+        processing_path,
+        str(response.get("id") or ""),
+        ProviderTransientResume(
+            resume_count=int(marker.get("resume_count") or 0),
+            error_code=str(marker.get("error_code") or ""),
+            conversation_store=conversation_store,
+        ),
+    )
+
+
 def _finish_claimed_gateway_request(
     paths: GatewayPaths,
     processing_path: Path,
@@ -1025,21 +1044,12 @@ def _finish_claimed_gateway_request(
         raise DataCorruptionError(
             "gateway terminal response identity conflicts with the claimed request"
         )
-    if isinstance(response.get("provider_transient_resume"), dict):
-        # 供应商临时故障自动续跑：回合不写终态，由本处把请求重排回队列（带退避与累计次数），
-        # 下一轮从已落盘历史继续；重排失败退回正常归档，不让请求卡死。
-        from .recovery import requeue_provider_transient_processing
-
-        marker = response["provider_transient_resume"]
-        if requeue_provider_transient_processing(
-            paths,
-            processing_path,
-            request_id,
-            resume_count=int(marker.get("resume_count") or 0),
-            error_code=str(marker.get("error_code") or ""),
-            conversation_store=conversation_store,
-        ):
-            return
+    if isinstance(response.get("provider_transient_resume"), dict) and _requeue_provider_transient_resume(
+        paths, processing_path, response, conversation_store
+    ):
+        # 供应商临时故障自动续跑：回合不写终态，请求重排回队列（退避与累计次数在 recovery 里写）；
+        # 重排失败退回正常归档，不让请求卡死。
+        return
     if isinstance(response.get("restart_resume"), dict):
         # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
         # request_execution._host_shutdown_resume_marker）。
