@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _WARNED_PLUGIN_EVENT_ASSEMBLY_REASONS: set[str] = set()
 _PLUGIN_EVENT_ASSEMBLY_WARNINGS_LOCK = threading.Lock()
 
-# 事件目录 v1 的精确标量集合；额外输入（参数、输出、路径）永远不复制。
+# 事件目录各事件的精确标量 facts 白名单（v1 起未变；v2 只改公共字段）；额外输入（参数、输出、路径）永远不复制。
 _EVENT_FACT_FIELDS = {
     "prompt_submitted": ("request_id", "chars", "has_attachments"),
     "turn_started": ("request_id", "model_name"),

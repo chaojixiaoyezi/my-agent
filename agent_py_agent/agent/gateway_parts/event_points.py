@@ -2,6 +2,7 @@
 # 模块用途: 把 Gateway 的提示、回合和控制收口接到六事件投影，观察失败不改变业务。
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -120,16 +121,17 @@ def command_completed(agent, receipt) -> None:
 
 
 # LLM: 开关先于请求字段读取；装配异常返回 None，启用后的固定原因诊断不包含通道/会话/模型或错误正文。
-#   v2（tref2）：thread_id 由调用方在回合解析后传入（与工具事件同源）；渠道会话号从请求里读，
-#   进 channel_conversation_ref。两者都不从正文推断。
-# 函数用途: 请求真正开始前发最小回合观察；缺失或关闭时不读路由，不带服务商或密钥。
-def turn_started(agent, request: dict, *, thread_id: str = "") -> EventPointContext | None:
+#   v2（tref2）：会话线程由调用方给的 thread_id_of 在确认开启后才解析（与工具事件同源；关闭时一次都不调，
+#   不为事件多查会话库）；渠道会话号从请求里读，进 channel_conversation_ref。两者都不从正文推断。
+# 函数用途: 请求真正开始前发最小回合观察；缺失或关闭时不读路由、不解析线程，不带服务商或密钥。
+def turn_started(agent, request: dict, *, thread_id_of: Callable[[], str] | None = None) -> EventPointContext | None:
     enabled = False
     try:
         config = _enabled_event_config(agent)
         if config is None:
             return None
         enabled = True
+        thread_id = str(thread_id_of() or "") if thread_id_of is not None else ""
         conversation = request.get('conversation') or {}
         metadata = request.get('metadata') or {}
         context = gateway_event_context(agent, {'channel': conversation.get('channel') or metadata.get('channel') or '',
