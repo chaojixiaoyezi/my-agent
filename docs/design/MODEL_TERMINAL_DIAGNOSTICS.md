@@ -58,9 +58,11 @@
 
 ## 逻辑回合身份与重试计数（retrycount，2026-10-05）
 
-模型调用账本以 `logical_model_call_id` 区分逻辑回合、以每条 `call_id` 记录物理尝试。身份种子只取结构化 `request_id`、`run_id`、`task_id`、`tool_rounds` 和 prompt 指纹；不包括 `input_tokens`，因为响应 usage 会校准后续尝试的输入估算。
+模型调用账本以 `logical_model_call_id` 区分逻辑回合、以每条 `call_id` 记录物理尝试。身份种子包含结构化 `request_id`、`run_id`、`task_id`、`tool_rounds` 和渲染 prompt 指纹；native 协议另加入与实际出站同源的规范化 provider messages 指纹。不包括 `input_tokens`，因为响应 usage 会校准后续尝试的输入估算。
 
-- 当这些字段在重试间保持不变时，异常或流断重试共享逻辑 ID；工具轮次前进或压缩、修复注入导致 prompt 内容变化时产生新逻辑 ID。待确认投递的插话会被 `retry_guard` 阻止重试，输入被采纳后沿重建 prompt 再请求。
+- 当身份种子中的事实在重试间保持不变时，异常或流断重试共享逻辑 ID；工具轮次前进、prompt 内容变化或 native 出站 messages 变化时产生新逻辑 ID。未确认投递的插话会被 `retry_guard` 阻止重试；输入被采纳后沿重建 prompt 和 native 历史再请求。
+- native messages 指纹覆盖实际出站的历史消息和待发送运行指引；修复注入、运行事实 IR、用户插话等变化即使不改变渲染 prompt，也会改变身份。同一重试中的待发送指引从 `tool_context` 迁入 IR 并登记为已转发后，投影结果保持一致，不把一次重试拆成两个回合。
+- 指纹投影只读，不消费 seen、不改写 IR 或会话状态。投影失败时返回空指纹，主调用继续并退化为 prompt 指纹；此时仅发生 native messages 变化可能仍被合并，这是保住主链可用性的降级边界。
 - 每次 prompt 组装会刷新运行时子代理状态；若该状态变化使 prompt 指纹变化，物理重试会被统计为新逻辑回合，这是按请求内容变化分类的已知边界。
 - 聚合方把 `metadata.logical_call_id` 作为不透明字符串，按用途桶分组而不解析格式；历史 ID 原样保留。跨版本时同一未完成回合的旧/新 ID 不会自动合并，因此版本切换须满足会话空闲条件。
 
