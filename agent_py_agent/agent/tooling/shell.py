@@ -448,6 +448,11 @@ def _subprocess_text_env(
 
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # ptyleak 根因（2026-10-05）：PTY 里 git 等命令看到 TTY 就起分页器等按键，命令永不退出、
+    # 会话永不被回收（真机实锤：git grep 挂 9 小时）。这里默认禁用分页；宿主环境已显式设置的
+    # PAGER/GIT_PAGER 保持不动（用户自己配的分页器优先）。
+    env.setdefault("PAGER", "cat")
+    env.setdefault("GIT_PAGER", "cat")
     # H3：沙箱里宿主状态只读，告诉命令里的 my-agent CLI（cli/host_state_guard）；只有宿主能设，不进沙箱的命令不带它。
     env.pop(HOST_STATE_READ_ONLY_ENV, None)
     if sandboxed:

@@ -111,6 +111,8 @@ class ToolRegistryParams:
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
     shell_tool_output_max_chars: int = 12_000
+    # PTY 会话空闲兜底回收阈值（分钟，0=不限制）；装配点据此配置进程级 PTY 注册表。
+    pty_session_idle_timeout_minutes: int = 30
     background_process_listen_scope_enforce: bool = True
     # 来自配置 shell_sandbox_boundary_facts：owner 隔离 Shell 失败时是否附带沙箱边界事实。
     shell_sandbox_boundary_facts: bool = True

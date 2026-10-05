@@ -1008,21 +1008,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
     effective_path_access_mode = (
         "full" if access_mode == "full-access" and not owner_scope_root else config.path_access_mode
     )
-    computer_use_enabled = bool(getattr(config, "computer_use_enabled", False))
-    observation_enabled = bool(getattr(config, "computer_use_observation_enabled", False))
-    mcp_servers = with_computer_use_observation(
-        computer_use_mcp_servers(
-            getattr(config, "mcp_servers", {}),
-            ComputerUseTier(
-                enabled=computer_use_enabled,
-                is_local_admin=is_local_admin_owner(agent.home_paths),
-                access_mode=access_mode,
-                # 只看档：总开关关、只开观察时仍装配同一个服务，但只交出 observe_window，不 import 上游执行器。
-                observe_only=not computer_use_enabled and observation_enabled,
-            ),
-        ),
-        enabled=observation_enabled,
-    )
+    mcp_servers = _tool_registry_mcp_servers(agent, config, access_mode)
     source_resolver = None
     source_ref_schema = None
     if config.enable_plugins and config.enable_tools:
@@ -1071,6 +1057,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
+            pty_session_idle_timeout_minutes=config.pty_session_idle_timeout_minutes,
             background_process_listen_scope_enforce=config.background_process_listen_scope_enforce,
             shell_sandbox_boundary_facts=config.shell_sandbox_boundary_facts,
             path_access_mode=effective_path_access_mode,
@@ -1099,6 +1086,26 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             approval_mode_reader=partial(read_approval_mode, agent.home_paths),
             plugin_gate_reviewer=_build_plugin_gate_reviewer(agent, config),
         )
+    )
+
+
+# LLM: 计算机使用 MCP 装配（含只看档收窄）单独成函数，保持 _build_tool_registry 在函数硬阈值内；
+#   总开关关、只开观察时仍装配同一个服务，但只交出 observe_window，不 import 上游执行器。
+# 函数用途: 按配置和 owner 身份组装计算机使用 MCP 服务表，交给工具注册参数。
+def _tool_registry_mcp_servers(agent: SimpleAgent, config: AgentConfig, access_mode: str):
+    computer_use_enabled = bool(getattr(config, "computer_use_enabled", False))
+    observation_enabled = bool(getattr(config, "computer_use_observation_enabled", False))
+    return with_computer_use_observation(
+        computer_use_mcp_servers(
+            getattr(config, "mcp_servers", {}),
+            ComputerUseTier(
+                enabled=computer_use_enabled,
+                is_local_admin=is_local_admin_owner(agent.home_paths),
+                access_mode=access_mode,
+                observe_only=not computer_use_enabled and observation_enabled,
+            ),
+        ),
+        enabled=observation_enabled,
     )
 
 

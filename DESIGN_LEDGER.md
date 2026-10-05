@@ -1,5 +1,18 @@
 # 设计台账
 
+## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，基于 17j 头 `da6e38093`；待非作者初审）
+
+- **来源（真机实锤）**：生产 Gateway 名下 `bash -o pipefail -c git grep ... && git grep ...` 进程挂约 9 小时（CPU 0；0/1/2 号文件都是伪终端 `/dev/ttys024`；子进程 git grep 处 S+）。判断：命令在 PTY 会话里跑，git 看到 TTY 起分页器等按键永不退出；回合早已结束，PTY 会话没有被收回。
+- **根因**：`pty_sessions.py` 的会话只在显式停止路径（`/stop`、`freeze_process_stop`、子代理取消、后台资源报告）经 `request_stop` 收回；**回合正常收口与任务结束都没有回收调用点**。`_prune_finished` 只清“已结束且 fd 已关”的历史对象；`_drain` 读不到 EOF 不退出。分页器等按键的进程永远不产生 EOF，于是进程与会话永久残留。
+- **改法（三层网）**：
+  1. **回合/任务收口回收**：`FinalizationService.finalize()` 收尾调用 `_reclaim_turn_pty_sessions()`（`agent_core/_finalization_service.py`）。身份只取宿主结构化字段——owner 地址与工具侧同源（工具拿的是写边界 `canonical_owner_home_root` ← `home_paths.owner_home_dir`，**不是** `effective_owner_scope_root`：本机管理员 Full Access 时后者为空，用它会对不上而静默漏收）；线程取 `task_attributes.conversation_thread_id`；任务取 `conversation_task_id` 或本轮 `task_id`；run 取本轮 `run_id`。回收实现 `reclaim_pty_sessions()`（`pty_sessions.py`）：先按 (owner, thread, task) 收整个任务，再叠一次按 run 精确收（覆盖子代理树根差异），去重后写结构化回执 `{scope, status, session_ids, error_type}`；`finalize` 里回收失败只记回执、不影响收口结果。
+  2. **空闲兜底**：`PtySessionRegistry.set_idle_timeout_minutes()` + `sweep_idle()` + 唯一 daemon 巡检线程（间隔=阈值/4，夹在 0.5~30 秒）。阈值来自新配置 `pty_session_idle_timeout_minutes`（默认 30 分钟，0=不限制）；装配点在 `registry_bootstrap._register_network_tools`，未装配时注册表保持关闭（单测/嵌入式不受打扰）。
+  3. **防呆默认**：`_subprocess_text_env` 默认 `PAGER=cat`、`GIT_PAGER=cat`（宿主环境已显式设置的值保持不动），PTY 与普通命令共用同一环境构造函数，git 不再起分页器。
+- **配置三处同步**：`agent_config.yaml`（中文注释）、`AgentConfig` dataclass（默认 30）、参数登记（`parameter_registry` 从 AgentConfig 自动派生）；并显式登记 `_BOUNDARY_NAMES`——模型不能把它调大或关掉（同 `plugin_tool_gate_timeout_ms` 口径），用户改配置文件。
+- **验证**：见 `TESTS.md`“PTY 会话泄漏修复（ptyleak）”小节（含 3 个变异与全门禁结果）。
+- **未验证 / 已知边界**：真机（沙箱外）sandbox-exec 路径与 `termination.confirmed=True` 由 3a 用强制能力模式复跑（`test_reclaim_pty_sessions_confirms_termination_outside_sandbox`）；子代理树根差异只做了合并回执设计，没有真机子代理用例；**Gateway 停机路径没有新增回收调用**（本次范围只到回合/任务收口；停机时 PTY master 关闭会给前台进程组发 SIGHUP，但忽略 HUP 的进程仍可能残留，交由空闲兜底与后续 17k 计划评估）；真实 Gateway/TUI/IM 端到端未跑。
+
+
 ## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05，基于 17k `812828b98`；ds8 初审通过，3a 终审修正后挑入 17l）
 
 - **3a 终审修正（必须改项）**：死亡证明成立后按结构化状态分流——`claimed`（还没 mark running，动作未开始）转 `queued` 由新 epoch 领取；`running`（动作可能已产生副作用）转 `unknown` 终态、不自动重跑，与 SLP-2A 之前的崩溃恢复一致。原实现把 running 也重新排队，在 SLP-2B（定时动作复用 operation_id、经操作账本回放）接好之前会重复副作用，违背 SLEEP_RESUME 第 3.2 节“确认死亡后再决定恢复、unknown 或终态”和“未知不自动重试”。

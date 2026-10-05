@@ -110,6 +110,7 @@ class FinalizationService:
         if conversation_task_completed(ctx.task_attributes):
             _request_memory_curator(self._agent, "task_complete")
             _request_skill_learning(self._agent, ctx)
+        _reclaim_turn_pty_sessions(self._agent, ctx)
         return result
 
     def _write_runtime_fact_source_if_needed(
@@ -398,6 +399,35 @@ def _request_skill_learning(agent: object, ctx: FinalizeContext) -> None:
         enqueue(ctx)
     except Exception:
         return
+
+
+# LLM: 回合收口是 PTY 会话的第一道回收点（真机实锤：git grep 在 PTY 里起分页器等按键，挂 9 小时没人收）。
+#   owner 地址必须与工具侧同源：工具拿的是写边界 canonical_owner_home_root（来自 home_paths，Full Access
+#   也不为空），不是 effective_owner_scope_root（本机管理员 Full Access 时为空，用它会对不上而静默漏收）。
+#   其余身份只取宿主结构化字段：会话线程、任务与本次 run；回收失败不影响收口结果（空闲兜底与显式停止
+#   路径仍在兜底），但回执必须结构化可查。
+# 函数用途: 回合/任务结束时按结构化归属收回该归属的 PTY 会话，返回回执；任何异常都只记在回执里。
+def _reclaim_turn_pty_sessions(agent: object, ctx: FinalizeContext) -> dict:
+    import logging
+
+    from ..path_access_policy import effective_owner_scope_root
+    from ..tooling.pty_sessions import reclaim_pty_sessions
+
+    try:
+        canonical = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
+        owner_home = canonical or effective_owner_scope_root(agent, context_scope=ctx.context_scope)
+        attrs = ctx.task_attributes if isinstance(ctx.task_attributes, dict) else {}
+        receipt = reclaim_pty_sessions(
+            owner_home,
+            thread_id=str(attrs.get("conversation_thread_id") or ""),
+            root_task_id=str(attrs.get("conversation_task_id") or ctx.task_id or ""),
+            run_id=str(ctx.run_id or ""),
+        )
+    except Exception as exc:
+        receipt = {"scope": "", "status": "error", "session_ids": [], "error_type": type(exc).__name__}
+    if receipt.get("session_ids") or receipt.get("status") == "error":
+        logging.getLogger(__name__).info("回合收口收回 PTY 会话: %s", receipt)
+    return receipt
 
 
 def _current_model_call_summary(

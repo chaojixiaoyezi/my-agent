@@ -972,6 +972,10 @@ access_mode: workspace-write
 # run_command 工具默认超时秒数
 tool_shell_timeout: 240
 
+# PTY 交互终端会话空闲多久后由宿主自动收回（分钟；0 表示不限制）
+# 分页器（less 等）看到终端会等按键、命令永远不退出，超时后宿主会杀掉整个进程组回收
+pty_session_idle_timeout_minutes: 30
+
 # run_command 的 stdout/stderr 分别最多回显多少字符
 # 超出时只回显预览、总字符数和截断标记，完整大输出后续应走 artifact/日志引用
 tool_shell_output_max_chars: 12000

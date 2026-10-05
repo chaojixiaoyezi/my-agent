@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 910,
+  "count": 912,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5740,6 +5740,14 @@
       "description": "PTY 会话单次读取默认 32000 字节：平衡吞吐与响应延迟。"
     },
     {
+      "name": "_IDLE_SWEEP_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/tooling/pty_sessions.py",
+      "value": 30.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "空闲兜底巡检间隔上限 30 秒：默认 30 分钟的空闲阈值不需要更密的检查。"
+    },
+    {
       "name": "_MAX_BUFFER_BYTES",
       "file": "agent_py_agent/agent/tooling/pty_sessions.py",
       "value": 1000000,
@@ -5778,6 +5786,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "PTY 单次写入最多 64 KiB：控制单次写入体积。"
+    },
+    {
+      "name": "_MIN_IDLE_SWEEP_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/tooling/pty_sessions.py",
+      "value": 0.5,
+      "unit": "秒",
+      "category": "其它",
+      "description": "空闲巡检间隔下限 0.5 秒：测试/极小阈值时也要有界，不把巡检打成忙循环。"
     },
     {
       "name": "_WRITE_TIMEOUT_SECONDS",

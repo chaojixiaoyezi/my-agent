@@ -1,10 +1,14 @@
 # LLM: PTY 使用 process_scope 的执行身份合同；注册表独占容量、启动预留与终止回执，身份不授予访问权限。
+#   回收三层网：回合/任务收口（reclaim_pty_sessions，按 owner/thread/task 与 run）、显式停止
+#   （request_stop）、空闲兜底（set_idle_timeout_minutes + sweep_idle）。分页器等按键会让命令永不退出，
+#   所以每层都必须真的杀进程树，不能只关 fd。
 # 模块用途: 提供有界交互终端并按任务归属收回进程；Windows 暂无 ConPTY，不虚报支持。
 from __future__ import annotations
 
 """Bounded interactive PTY sessions using the same shell policy and sandbox gate."""
 
 import json
+import logging
 import os
 import select
 import subprocess
@@ -61,6 +65,10 @@ _DEFAULT_READ_BYTES = 32_000
 _MAX_TERMINAL_COLUMN_COUNT = 1000
 # PTY 终端行数上限 1000：防畸形尺寸请求。
 _MAX_TERMINAL_ROW_COUNT = 1000
+# 空闲兜底巡检间隔上限 30 秒：默认 30 分钟的空闲阈值不需要更密的检查。
+_IDLE_SWEEP_INTERVAL_SECONDS = 30.0
+# 空闲巡检间隔下限 0.5 秒：测试/极小阈值时也要有界，不把巡检打成忙循环。
+_MIN_IDLE_SWEEP_INTERVAL_SECONDS = 0.5
 
 
 # LLM: 访问快照与执行归属分别冻结；close_lock 串行同一进程的终止，回执确认后才宣称已停止。
@@ -188,6 +196,10 @@ class PtySessionRegistry:
         self._counter = 0
         self._lock = threading.Lock()
         self._pending_starts: dict[str, _PtyStart] = {}
+        # 空闲兜底阈值（秒，0=不限制）与唯一巡检线程；由工具装配点按配置设置，
+        # 未装配时保持 0，单元测试与嵌入式使用不会被后台线程打扰。
+        self.idle_timeout_seconds = 0.0
+        self._idle_thread: threading.Thread | None = None
 
     # LLM: 容量和执行身份一起预留；所有 spawn 成败路径释放同一预留，不吞掉宿主取消。
     # 函数用途: 有界创建终端，让明确的资源停止请求可以命中尚未完成的启动。
@@ -208,7 +220,7 @@ class PtySessionRegistry:
         raise_if_cancelled()
         execution_scope = ProcessExecutionScope.from_run_scope(run_scope, owner_home)
         with self._lock:
-            self._prune_finished()
+            _prune_finished_sessions(self)
             active = sum(session.process.poll() is None for session in self._sessions.values())
             if active + len(self._pending_starts) >= _MAX_SESSION_COUNT:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSION_COUNT}")
@@ -287,13 +299,6 @@ class PtySessionRegistry:
             raise ToolCancelled("PTY 启动已被取消")
         threading.Thread(target=self._drain, args=(session,), daemon=True).start()
         return session
-
-    # LLM: 调用方持有 registry 锁；仅淘汰已结束且 fd 已关闭的历史，不中断任何活跃进程。
-    # 函数用途: 保留最近 32 个已结束 PTY，避免常驻 Gateway 累积历史对象和缓冲。
-    def _prune_finished(self) -> None:
-        finished = [key for key, item in self._sessions.items() if item.closed and item.process.poll() is not None]
-        for key in finished[:-_MAX_SESSION_COUNT]:
-            del self._sessions[key]
 
     # LLM: Listing is an exact-scope projection over the bounded in-memory registry; never expose
     # sessions from another owner/conversation or use session-id knowledge as authorization.
@@ -389,7 +394,7 @@ class PtySessionRegistry:
                     if code is not None else terminate_process_tree(session.process.pid, session.process)
                 )
             if session.termination.confirmed:
-                self._close_fd(session)
+                _close_session_fd(session)
         return session
 
     # LLM: 使用 process_scope 的精确选择合同，不以访问范围代替执行归属。
@@ -416,6 +421,17 @@ class PtySessionRegistry:
                              name=f"stop-{session.session_id}", daemon=True).start()
         return tuple(dict.fromkeys([*pending, *(session.session_id for session in sessions)]))
 
+    # LLM: 空闲兜底是回合/任务收口之外的第三道网：没等到收口的会话（崩溃回合、宿主停摆）按 last_active_at
+    #   自动回收。阈值 0=不限制；实现放模块级保持类体量在软阈值内，本方法只保留注册表 API。
+    # 函数用途: 设置空闲阈值（分钟）并在开启时启动唯一巡检线程；重复设置幂等。
+    def set_idle_timeout_minutes(self, minutes: object) -> None:
+        _configure_idle_timeout(self, minutes)
+
+    # LLM: 同步关闭空闲会话：进程树终止有界，巡检线程可以承受；回执就是各会话自己的 termination。
+    # 函数用途: 收掉空闲超时的活跃会话，返回被收回的 session_id 元组。
+    def sweep_idle(self, now: float | None = None) -> tuple[str, ...]:
+        return _sweep_idle_sessions(self, now)
+
     def clear(self) -> None:
         with self._lock:
             ids = list(self._sessions)
@@ -439,23 +455,122 @@ class PtySessionRegistry:
             if not chunk:
                 break
             session.append(chunk)
-        self._close_fd(session)
+        _close_session_fd(session)
         with self._lock:
-            self._prune_finished()
-
-    @staticmethod
-    def _close_fd(session: PtySession) -> None:
-        with session.lock:
-            if session.closed:
-                return
-            session.closed = True
-            try:
-                os.close(session.master_fd)
-            except OSError:
-                pass
+            _prune_finished_sessions(self)
 
 
 pty_session_registry = PtySessionRegistry()
+
+
+# LLM: 空闲阈值归一化、空闲巡检、终态裁剪和 fd 关闭都在模块级实现（只操作注册表/会话已有状态），
+#   注册表类保留同名薄方法维持 API，类体量回到软阈值内。改动须同步类方法与调用点。
+# 函数用途: 归一化分钟阈值并在开启时启动唯一巡检线程；重复设置幂等。
+def _configure_idle_timeout(registry: PtySessionRegistry, minutes: object) -> None:
+    try:
+        value = float(minutes)
+    except (TypeError, ValueError):
+        value = 0.0
+    registry.idle_timeout_seconds = max(0.0, value) * 60.0
+    if registry.idle_timeout_seconds <= 0:
+        return
+    with registry._lock:
+        if registry._idle_thread is not None and registry._idle_thread.is_alive():
+            return
+        thread = threading.Thread(target=_idle_sweeper_loop, args=(registry,),
+                                  name="pty-idle-sweeper", daemon=True)
+        registry._idle_thread = thread
+    thread.start()
+
+
+# LLM: 同步关闭空闲会话：进程树终止有界，巡检线程可以承受；回执就是各会话自己的 termination。
+# 函数用途: 收掉空闲超时的活跃会话，返回被收回的 session_id 元组。
+def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None) -> tuple[str, ...]:
+    timeout = float(registry.idle_timeout_seconds or 0.0)
+    if timeout <= 0:
+        return ()
+    moment = time.time() if now is None else float(now)
+    with registry._lock:
+        expired = [
+            session for session in registry._sessions.values()
+            if session.process.poll() is None and moment - session.last_active_at > timeout
+        ]
+    reclaimed = []
+    for session in expired:
+        registry.close(session.session_id)
+        reclaimed.append(session.session_id)
+    with registry._lock:
+        _prune_finished_sessions(registry)
+    return tuple(reclaimed)
+
+
+# LLM: 调用方持有 registry 锁；仅淘汰已结束且 fd 已关闭的历史，不中断任何活跃进程。
+# 函数用途: 保留最近 32 个已结束 PTY，避免常驻 Gateway 累积历史对象和缓冲。
+def _prune_finished_sessions(registry: PtySessionRegistry) -> None:
+    finished = [
+        key for key, item in registry._sessions.items()
+        if item.closed and item.process.poll() is not None
+    ]
+    for key in finished[:-_MAX_SESSION_COUNT]:
+        del registry._sessions[key]
+
+
+# LLM: fd 关闭不等于进程退出；重复关闭幂等，关掉的 fd 不再被读写。
+# 函数用途: 幂等关闭会话 master fd 并标记 closed。
+def _close_session_fd(session: PtySession) -> None:
+    with session.lock:
+        if session.closed:
+            return
+        session.closed = True
+        try:
+            os.close(session.master_fd)
+        except OSError:
+            pass
+
+
+# LLM: 巡检周期按阈值收敛（阈值/4，夹在 0.5~30 秒）：默认 30 分钟阈值下每 30 秒查一次，
+#   小阈值测试里也能在几秒内触发；线程是 daemon，不阻塞进程退出。放模块级保持注册表类体量在阈值内。
+# 函数用途: 后台循环按间隔调用注册表的 sweep_idle，自动回收空闲 PTY 会话。
+def _idle_sweeper_loop(registry: PtySessionRegistry) -> None:
+    while True:
+        interval = min(_IDLE_SWEEP_INTERVAL_SECONDS,
+                       max(_MIN_IDLE_SWEEP_INTERVAL_SECONDS, registry.idle_timeout_seconds / 4.0))
+        time.sleep(interval)
+        try:
+            registry.sweep_idle()
+        except Exception:
+            logging.getLogger(__name__).warning("PTY 空闲巡检失败，保留原会话；下轮重试", exc_info=False)
+
+
+# LLM: 回合/任务收口的统一入口：按 (owner, thread, root task) 收整个任务的会话，再叠一次按 run 精确收，
+#   覆盖任务键对不上的边角（子代理树根差异），两次命中同一会话时去重。只消费宿主已校验的结构化身份，
+#   不扫全表、不按访问范围代替执行归属。请求异步发出（request_stop 内部线程终止进程树），
+#   回执里的 status=requested 不代表已确认退出，确认以各会话的 termination 为准。
+# 函数用途: 回合或任务结束时收回该归属的 PTY 会话，返回结构化回执供调用方记账/展示。
+def reclaim_pty_sessions(owner_home: object, *, thread_id: str = "", root_task_id: str = "",
+                         run_id: str = "") -> dict:
+    if not str(owner_home or "").strip():
+        return {"scope": "", "status": "not_selected", "session_ids": [], "error_type": ""}
+    calls: list[tuple[str, dict]] = []
+    if str(thread_id or "").strip() and str(root_task_id or "").strip():
+        calls.append(("task", {"thread_id": thread_id, "task_id": root_task_id}))
+    if str(run_id or "").strip():
+        calls.append(("run", {"run_id": run_id}))
+    if not calls:
+        return {"scope": "", "status": "not_selected", "session_ids": [], "error_type": ""}
+    found_ids: list[str] = []
+    scopes: list[str] = []
+    error = ""
+    for scope, kwargs in calls:
+        try:
+            found_ids.extend(pty_session_registry.request_stop(owner_home=owner_home, **kwargs))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            error = error or type(exc).__name__
+            continue
+        scopes.append(scope)
+    session_ids = list(dict.fromkeys(found_ids))
+    status = "requested" if session_ids else ("error" if error else "not_selected")
+    return {"scope": "+".join(scopes), "status": status, "session_ids": session_ids, "error_type": error}
 
 
 # LLM: 写错误携带已接受字节数；既有会话不因输入失败被销毁或假装没有执行。
@@ -863,4 +978,4 @@ def _pty_session_summary(session: PtySession) -> dict[str, object]:
     }
 
 
-__all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry"]
+__all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry", "reclaim_pty_sessions"]

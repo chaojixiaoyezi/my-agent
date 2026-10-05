@@ -61,6 +61,8 @@ _BOUNDARY_NAMES = frozenset({
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
     "cli_audit_cleanup_days", "plugin_tool_gate_timeout_ms",
+    # ptyleak：PTY 空闲兜底阈值是资源保护，模型不能把它调大或关掉（0=不限制），只能用户改配置文件。
+    "pty_session_idle_timeout_minutes",
     # B7：M 线事件插件总开关是安全边界，只能用户经 /settings 改；显式列名，不靠键名记号猜。
     "plugin_events_enabled",
 })

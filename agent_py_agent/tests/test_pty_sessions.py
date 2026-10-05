@@ -10,7 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.tooling.pty_sessions import TerminalSessionTool, pty_session_registry
+from agent_py_agent.agent.tooling.pty_sessions import (
+    TerminalSessionTool,
+    pty_session_registry,
+    reclaim_pty_sessions,
+)
 from agent_py_agent.agent.tooling.shell import ShellTool, ShellToolOptions
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="stdlib pty is POSIX-only")
@@ -440,3 +444,137 @@ def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeyp
     # start 打包后交给 _spawn，再原样交给沙箱，不在途中丢掉拒读根。
     assert captured["owner_home"] == tmp_path
     assert captured["private_roots"] == (str(tmp_path / "home"),)
+
+
+# ---------------------------------------------------------------------------
+# ptyleak（2026-10-05）：回合/任务收口与空闲兜底回收。
+# 本环境不能嵌套 Seatbelt（sandbox-exec 起不来），下面这些用例把 _sandbox_exec 换成直跑命令，
+# 专测注册表的“按归属收回”语义；真实沙箱路径由上面的既有用例覆盖（沙箱外复核）。
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def _unsandboxed_spawn(monkeypatch):
+    from agent_py_agent.agent.tooling import pty_sessions as pty
+
+    monkeypatch.setattr(pty, "_sandbox_exec", lambda command, target, owner_home=None, **kw: (command, True))
+
+
+# LLM: 回收的判定是“进程真的退出 + 有终止回执”；真机可观测时 termination.confirmed 也应为 True，
+#   本环境内核观测受限，不能把 confirmed 当作唯一事实。
+# 函数用途: 有界等待测试 PTY 进程被收回并断言回执存在。
+def _wait_pty_dead(session, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and session.process.poll() is None:
+        time.sleep(0.02)
+    assert session.process.poll() is not None, "PTY 进程未被收回"
+    while time.monotonic() < deadline and session.termination is None:
+        time.sleep(0.02)
+    assert session.termination is not None, "缺少终止回执"
+
+
+def test_reclaim_pty_sessions_kills_task_sessions_and_preserves_others(tmp_path, _unsandboxed_spawn):
+    first = _start_owned_pty(tmp_path)
+    other = _start_owned_pty(tmp_path, root_task_id="task-b", run_id="run-b")
+
+    receipt = reclaim_pty_sessions(str(tmp_path), thread_id="thread-a", root_task_id="task-a", run_id="run-a")
+
+    assert receipt["status"] == "requested"
+    assert receipt["session_ids"] == [first.session_id]
+    _wait_pty_dead(first)
+    assert other.process.poll() is None
+
+
+def test_reclaim_pty_sessions_task_scope_covers_other_runs_of_same_task(tmp_path, _unsandboxed_spawn):
+    # 任务范围收回覆盖同一任务其它 run 遗留的会话（回合收口扫全任务），别的任务不受影响。
+    earlier = _start_owned_pty(tmp_path, run_id="run-old")
+    other = _start_owned_pty(tmp_path, root_task_id="task-b", run_id="run-b")
+
+    receipt = reclaim_pty_sessions(str(tmp_path), thread_id="thread-a", root_task_id="task-a", run_id="run-new")
+
+    assert receipt["session_ids"] == [earlier.session_id]
+    _wait_pty_dead(earlier)
+    assert other.process.poll() is None
+
+
+def test_reclaim_pty_sessions_falls_back_to_run_identity(tmp_path, _unsandboxed_spawn):
+    session = _start_owned_pty(tmp_path)
+    other = _start_owned_pty(tmp_path, run_id="run-b")
+
+    receipt = reclaim_pty_sessions(str(tmp_path), run_id="run-a")
+
+    assert receipt["scope"] == "run" and receipt["session_ids"] == [session.session_id]
+    _wait_pty_dead(session)
+    assert other.process.poll() is None
+
+
+def test_reclaim_pty_sessions_without_owner_or_identity_is_not_selected(tmp_path, _unsandboxed_spawn):
+    session = _start_owned_pty(tmp_path)
+    try:
+        assert reclaim_pty_sessions("")["status"] == "not_selected"
+        assert reclaim_pty_sessions(str(tmp_path))["status"] == "not_selected"
+        assert session.process.poll() is None
+    finally:
+        pty_session_registry.close(session.session_id)
+
+
+def test_idle_sweep_reclaims_idle_sessions_only(tmp_path, _unsandboxed_spawn):
+    idle = _start_owned_pty(tmp_path)
+    busy = _start_owned_pty(tmp_path, run_id="run-b")
+    pty_session_registry.idle_timeout_seconds = 60.0
+    try:
+        idle.last_active_at = time.time() - 120
+        busy.last_active_at = time.time()
+        assert pty_session_registry.sweep_idle() == (idle.session_id,)
+        _wait_pty_dead(idle)
+        assert busy.process.poll() is None
+        # 阈值 0 = 不限制：再空闲也不收。
+        pty_session_registry.idle_timeout_seconds = 0.0
+        busy.last_active_at = time.time() - 10_000
+        assert pty_session_registry.sweep_idle() == ()
+        assert busy.process.poll() is None
+    finally:
+        pty_session_registry.idle_timeout_seconds = 0.0
+
+
+def test_idle_sweeper_thread_starts_once_and_is_daemon(tmp_path, _unsandboxed_spawn):
+    pty_session_registry.set_idle_timeout_minutes(30)
+    thread = pty_session_registry._idle_thread
+    assert thread is not None and thread.is_alive() and thread.daemon
+    pty_session_registry.set_idle_timeout_minutes(30)
+    assert pty_session_registry._idle_thread is thread
+    pty_session_registry.idle_timeout_seconds = 0.0
+
+
+# LLM: 终止确认依赖宿主能读完整进程表（本沙箱 /bin/ps 不可用，confirmed 恒为 False）并真跑沙箱内 PTY；
+#   这条只在具备能力的环境跑：默认缺能力按环境 skip，MY_AGENT_TEST_REQUIRE_CAPABILITIES=1 时缺能力直接失败，
+#   防止 3a 沙箱外复跑时静默漏跑（与 b7lnx 同一开关与 marker 机制）。
+# 函数用途: 在真机上断言回收回执 termination.confirmed=True。
+@pytest.mark.sandbox_capability("ps", "nested_sandbox_exec")
+def test_reclaim_pty_sessions_confirms_termination_outside_sandbox(tmp_path):
+    session = _start_owned_pty(tmp_path)
+    receipt = reclaim_pty_sessions(str(tmp_path), thread_id="thread-a", root_task_id="task-a", run_id="run-a")
+    assert receipt["status"] == "requested" and receipt["session_ids"] == [session.session_id]
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not (session.termination and session.termination.confirmed):
+        time.sleep(0.02)
+    assert session.termination is not None and session.termination.confirmed is True
+    assert session.process.poll() is not None
+
+
+def test_subprocess_env_defaults_pagers_to_cat(monkeypatch):
+    from agent_py_agent.agent.tooling.shell import _subprocess_text_env
+
+    monkeypatch.delenv("PAGER", raising=False)
+    monkeypatch.delenv("GIT_PAGER", raising=False)
+    env = _subprocess_text_env(None)
+    # PTY/交互命令默认不分页：分页器等按键会让命令永不退出（ptyleak 根因）。
+    assert env["PAGER"] == "cat" and env["GIT_PAGER"] == "cat"
+
+
+def test_subprocess_env_keeps_explicit_pagers(monkeypatch):
+    from agent_py_agent.agent.tooling.shell import _subprocess_text_env
+
+    monkeypatch.setenv("PAGER", "less")
+    monkeypatch.setenv("GIT_PAGER", "delta")
+    env = _subprocess_text_env(None)
+    # 调用方显式给了值就尊重。
+    assert env["PAGER"] == "less" and env["GIT_PAGER"] == "delta"

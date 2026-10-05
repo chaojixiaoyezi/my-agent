@@ -21,7 +21,7 @@ from .models import (
     VectorToolSearchProvider,
 )
 from .process_sessions import ProcessSessionTool
-from .pty_sessions import TerminalSessionTool
+from .pty_sessions import TerminalSessionTool, pty_session_registry
 from .shell import ShellTool, ShellToolOptions
 from .web import WebFetchTool
 from .web_search import WebSearchTool
@@ -141,6 +141,10 @@ def _register_network_tools(registry: Any, params: Any) -> None:
         )
     )
     registry.register(TerminalSessionTool(shell_tool))
+    # ptyleak：装配点按配置给进程级 PTY 注册表设置空闲兜底阈值；0=不限制，未设置时注册表保持关闭。
+    pty_session_registry.set_idle_timeout_minutes(
+        getattr(params, "pty_session_idle_timeout_minutes", 30)
+    )
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool())

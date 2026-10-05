@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
+
+- 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。
+- 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_pty_sessions.py agent_py_agent/tests/test_pty_turn_lifecycle.py -q` → **33 项：27 passed、5 failed、1 skipped**。5 条失败与基线一致（见下）；1 条 skip 是能力门（见下）。
+  - guards9 前 11 个文件（第 12 个 `test_backend_signature_guardrails.py` 属 17k，本分支基线没有）→ **全绿 187 项**（72+72+43）。
+  - `scripts/check_import_boundaries.py` → findings=0；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py --base da6e38093` → DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → hard=0 blocked=False；`size_diff.sh` → **新增告警 0 / 消失告警 44**；`scripts/check_clean_package.py .` → OK；`git diff --check` → 干净。
+  - 新增两个模块常量后重新生成常数目录：`scripts/build_constants_catalog.py`（899 → 901 项），`test_constants_catalog.py` 通过。
+- 新增用例：
+  - `test_pty_sessions.py`（8 条常规 + 1 条能力门）：`test_reclaim_pty_sessions_kills_task_sessions_and_preserves_others`、`test_reclaim_pty_sessions_task_scope_covers_other_runs_of_same_task`、`test_reclaim_pty_sessions_falls_back_to_run_identity`、`test_reclaim_pty_sessions_without_owner_or_identity_is_not_selected`、`test_idle_sweep_reclaims_idle_sessions_only`、`test_idle_sweeper_thread_starts_once_and_is_daemon`、`test_subprocess_env_defaults_pagers_to_cat`、`test_subprocess_env_keeps_explicit_pagers`、`test_reclaim_pty_sessions_confirms_termination_outside_sandbox`。
+  - `test_pty_turn_lifecycle.py`（新文件，3 条）：`test_turn_end_reclaims_pty_sessions_of_the_conversation_task`、`test_task_sweep_reclaims_earlier_runs_of_the_same_task`、`test_turn_end_without_task_identity_falls_back_to_run`——走真实 `agent.run`（echo 后端）收口链，断言回合结束时该归属的会话被收回、别的任务不受影响。
+  - 能力门：`test_reclaim_pty_sessions_confirms_termination_outside_sandbox` 带 `@pytest.mark.sandbox_capability("ps", "nested_sandbox_exec")`——本沙箱默认 **SKIPPED**（`SANDBOX_CAPABILITY_MISSING[ps,nested_sandbox_exec]`），`MY_AGENT_TEST_REQUIRE_CAPABILITIES=1` 时缺能力直接 **ERROR**（不会静默漏跑）。3a 沙箱外用强制能力模式复跑它。
+  - 沙箱说明：本沙箱不能嵌套 Seatbelt（`sandbox_apply: Operation not permitted`）且不允许 /bin/ps，PTY 子进程起不来、进程表读不全；新增用例把 `_sandbox_exec` 换成直跑命令来测回收语义（进程真的起来、真的被杀），真实沙箱路径由上述能力门用例与既有用例在沙箱外复核。`_wait_pty_dead` 的判定是“进程真的退出 + 有终止回执”；`termination.confirmed=True` 由能力门用例在真机断言。
+- 既有失败归因（基线 `da6e38093` 临时工作树复核，同一测试文件同命令）：
+  - `test_pty_sessions.py` 5 条（`test_terminal_session_runs_real_interactive_pty`、`test_task_stop_survives_tool_return_and_preserves_other_tasks_and_resume`、`test_run_stop_uses_exact_attempt_and_requires_owner`、`test_stop_during_start_closes_late_process[True]`、`test_unconfirmed_close_keeps_live_session_and_unknown_effect`）在基线同样失败（PTY 子进程起不来 / confirmed 观测受限）。
+  - `test_tooling_shell.py` 8 条在基线同样失败（嵌套沙箱起不了 shell 命令，TOOL_TIMEOUT）。
+- 变异（3 个，全部 KILLED；脚本 `/private/tmp/claude-501/ptyleak/mut.py`，跑完用备份字节还原、`git status` 只余有意改动）：
+  - M1 去掉回合收口回收（`finalize` 不再调 `_reclaim_turn_pty_sessions`）→ KILLED：`test_pty_turn_lifecycle.py` 3 条全红。
+  - M2 去掉空闲兜底（`_sweep_idle_sessions` 直接返回空）→ KILLED：`test_idle_sweep_reclaims_idle_sessions_only` 红。
+  - M3 去掉 PAGER 默认（不设 `PAGER/GIT_PAGER=cat`）→ KILLED：`test_subprocess_env_defaults_pagers_to_cat` 红。
+  - 尺寸收口：拆分 `_build_tool_registry` 的 MCP 段（`_tool_registry_mcp_servers`）把函数拉回硬阈值；`PtySessionRegistry` 把空闲阈值归一化/空闲巡检/终态裁剪/fd 关闭移到模块级（类保留薄方法），类体量 250→242 回到基线身份；测试 helper `_start_session` 收成 3 参数。`size_diff` 复跑 **新增 0**。
+- 未验证：真机 sandbox-exec 路径下的回收与 `termination.confirmed=True`（能力门用例由 3a 沙箱外跑）；真实 Gateway/TUI/IM 端到端；Gateway 停机路径未加回收调用（见 DESIGN_LEDGER 边界）。
+
+
 ## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05；已实现，待 3a 复审）
 
 - **实现**：普通 `claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime 三态死亡证明；lease 过期但 runner 活着或身份不可核验时不另发 claim。death proof 后先持久 CAS 为 `queued`，再以递增 `claim_epoch` 领取；旧 heartbeat/release/mark-running/finish 按 claim id 与 epoch 双重 CAS 拒绝。misfire grace 合同未改。
