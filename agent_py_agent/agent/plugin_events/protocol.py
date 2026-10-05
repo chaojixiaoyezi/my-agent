@@ -26,6 +26,9 @@ MAX_PROMPT_CONTENT_CHARS = 4000
 # LLM: 调用方给 hub 的一条观察事实；hub 只把它当数据，不改写 facts。
 #   类型校验放在发布入口（normalize_event_fact）而不是构造器：构造永不抛，坏数据在门外被丢弃。
 #   content 只有提示提交事件可能带（B4 投影后传入），hub 再按插件声明决定是否真的发给该插件。
+#   v2（tref2）：channel_conversation_ref 是渠道会话号的哈希，与 thread_ref 同一哈希规则、语义不同——
+#   thread_ref 是会话线程（ConversationStore thread_id，权威），channel_conversation_ref 是渠道那一端的
+#   会话键；Gateway 侧事件两者都有（prompt_submitted 的 thread_ref 可能为空，见 A2），工具事件只有 thread_ref。
 # 类用途: 打包一条待投递事件的结构化事实与公开字段。
 @dataclass(frozen=True)
 class EventFact:
@@ -35,6 +38,7 @@ class EventFact:
     thread_ref: str = ""
     actor: str = "main"
     content: str = ""
+    channel_conversation_ref: str = ""
 
 
 # LLM: 事件能力缺失不是连接故障：调用方按"不可用"计数并丢弃该批，不退避整条连接（与请求级错误同级）。
@@ -83,6 +87,7 @@ def normalize_event_fact(value) -> EventFact | None:
         thread_ref=_ref(value.thread_ref),
         actor=actor,
         content=_ref(value.content, MAX_PROMPT_CONTENT_CHARS) if value.type == "prompt_submitted" else "",
+        channel_conversation_ref=_ref(value.channel_conversation_ref),
     )
 
 
@@ -95,6 +100,7 @@ def build_event_payload(envelope: EventEnvelope) -> dict:
         "event_id": envelope.event_id, "type": fact.type, "seq": envelope.seq,
         "occurred_at": envelope.occurred_at, "dropped_before": envelope.dropped_before,
         "channel": fact.channel, "thread_ref": fact.thread_ref,
+        "channel_conversation_ref": fact.channel_conversation_ref,
         "actor": fact.actor, "facts": dict(fact.facts),
     }
     if envelope.include_content and fact.content:

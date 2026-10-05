@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 插件事件 thread_ref 统一与 channel_conversation_ref（tref2，2026-10-05，worker/tref2）
+
+- **用例**：`test_plugin_event_points.py` 新增双通道（tui / feishu）投影用例——同一会话里 turn 类与 tool 类事件 `thread_ref` 相同、渠道哈希只在 Gateway 侧事件上有值且与线程哈希不同、payload 不含原文；A2 用例（`prompt_submitted` 在 thread 未解析时 `thread_ref` 为空、渠道 ref 有值；`command_executed` 两个引用都有）。`test_plugin_event_e2e.py`：六事件真回合加断言（turn/tool/command 的 `thread_ref` 同源非空、`channel_conversation_ref` 存在且一致、`prompt_submitted` 的 `thread_ref` 为空、工具事件无渠道 ref），HTTP worker 用例加 feishu 身份变体并更新 v2 断言。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugin_event_display.py agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_plugin_event_runtime.py agent_py_agent/tests/test_gateway_control_operation.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds2` → **167 passed**。
+- **变异**（均已还原、sha256 一致）：`turn_started` 改回渠道号 → e2e 红；`prompt_submitted` 用渠道号（破坏 A2）→ e2e 红；`channel_conversation_ref` 丢失 → e2e 红。
+- **门禁**：guards9 前 11 文件全过（基线无 `test_backend_signature_guardrails.py`，第 12 个未跑、已注明）；`check_import_boundaries.py` 0 条；ruff 全过；`check_doc_sync.py --base 100df7ad7` DOC_SYNC_PASS；strict code-size `hard=0 blocked=False`；`check_clean_package.py .` OK；`git diff --check` 干净；`size_diff.sh` 新增 0、消失 55。
+- **未验证**：真实 IM 通道（真飞书）与真实插件消费新字段的行为；跨版本切换点的插件侧索引断裂只写进发布说明，无自动迁移。
+
 ## J16 第 9 节 观察截图 _meta 协商（vision2，2026-10-05，worker/vision2）
 
 - **用例**：`test_observation_screenshot.py` +4（真实 MCP 渲染路正文逐字节/无占位对照、换模型丢弃 pending、中断/重试不重复注入、执行器按内部参数注入）；`test_computer_use_observation_tools.py` +1（`_meta` 严格形状端到端）；`test_screen_observation_core.py` +1（计数探针：不要图时不调用缩略图生成）；`test_mcp_observation_binding.py` +1（观察工具 `_meta` 携带截图意愿）；假 observer 签名与内部参数集断言同步更新。

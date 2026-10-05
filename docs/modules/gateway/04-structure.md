@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## 插件事件 thread_ref 统一（tref2，2026-10-05，worker/tref2；待非作者初审）
+
+- `agent/gateway_parts/event_points.py`：Gateway 侧四事件的 `thread_ref` 来源统一——`turn_started` 接收调用方解析的会话线程，`prompt_submitted` 留空（A2）+ `channel_conversation_ref` 有值，`command_executed` 用回执 `conversation_thread_id`；`gateway_event_context` 透传渠道会话号。
+- `agent/gateway_parts/request_execution.py`：`_gateway_turn_thread_id` 在 `_handle_gateway_request` 里做一次只读 preflight（与执行路径同一解析入口）供 `turn_started`/`turn_ended` 使用。
+- `agent/gateway_parts/control_operation_service.py`：回执新增 `conversation_thread_id`，新执行路径写盘前解析一次（`_with_control_conversation_thread` / `_control_operation_thread_id` / `_control_operation_agent`）。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - `agent/gateway_parts/http_handlers.py`：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access` 分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。

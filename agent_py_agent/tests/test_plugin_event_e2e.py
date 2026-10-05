@@ -115,6 +115,26 @@ def _assert_canonical_result(execution, client_events, case):
     assert 'approval_pending' in execution.states and 'user_denied' in execution.states
 
 
+# v2（tref2）：turn 类与 tool 类事件的 thread_ref 同源（本系统会话线程），command_executed 也带线程；
+#   渠道会话哈希只在 Gateway 侧事件上有值。独立成函数，避免主用例超尺寸。
+def _assert_v2_thread_refs(events, rejected):
+    by_type = {event['type']: event for event in events}
+    turn_ref = by_type['turn_started']['thread_ref']
+    assert turn_ref and by_type['turn_ended']['thread_ref'] == turn_ref
+    assert by_type['command_executed']['thread_ref'] == turn_ref
+    if not rejected:
+        assert by_type['tool_call_started']['thread_ref'] == turn_ref
+        assert by_type['tool_call_finished']['thread_ref'] == turn_ref
+        assert by_type['tool_call_started']['channel_conversation_ref'] == ''
+        assert by_type['tool_call_finished']['channel_conversation_ref'] == ''
+    channel_ref = by_type['turn_started']['channel_conversation_ref']
+    assert channel_ref and by_type['turn_ended']['channel_conversation_ref'] == channel_ref
+    assert by_type['prompt_submitted']['channel_conversation_ref'] == channel_ref
+    assert by_type['command_executed']['channel_conversation_ref'] == channel_ref
+    # 新会话第一次提交：入队时点线程还没解析，thread_ref 留空（A2）。
+    assert by_type['prompt_submitted']['thread_ref'] == ''
+
+
 def _prepare_case(agent, monkeypatch, case):
     tool = _CountingTool(command=case == 'policy_denied')
     if case in {'policy_denied', 'user_denied'}:
@@ -169,8 +189,11 @@ def test_six_events_reach_handshake_plugin_on_real_gateway_turn(gateway, monkeyp
         events = [event for plugin in harness.plugins for _, body in plugin.calls for event in body['events']]
         expected_types = set(_FIELDS) - ({'tool_call_started', 'tool_call_finished'} if rejected else set())
         assert {event['type'] for event in events} == expected_types
-        public = {'event_id', 'type', 'seq', 'occurred_at', 'dropped_before', 'channel', 'thread_ref', 'actor', 'facts'}
+        public = {'event_id', 'type', 'seq', 'occurred_at', 'dropped_before', 'channel', 'thread_ref',
+                  'channel_conversation_ref', 'actor', 'facts'}
         assert all(set(event) == public and set(event['facts']) == _FIELDS[event['type']] for event in events)
+        # v2（tref2）：thread_ref 同源与渠道哈希断言集中在 helper（主用例控尺寸）。
+        _assert_v2_thread_refs(events, rejected)
         assert 'private-marker' not in json.dumps(events)
         ended = next(event['facts'] for event in events if event['type'] == 'turn_ended')
         assert ended['status'] == 'done' and ended['tool_calls'] == 1
@@ -261,11 +284,17 @@ def http_gateway(tmp_path, monkeypatch):
 def _assert_http_events(events, request_id, prompt):
     expected = ['prompt_submitted', 'turn_started', 'turn_ended']
     assert [event['type'] for event in events] == expected
-    public = {'event_id', 'type', 'seq', 'occurred_at', 'dropped_before', 'channel', 'thread_ref', 'actor', 'facts'}
+    public = {'event_id', 'type', 'seq', 'occurred_at', 'dropped_before', 'channel', 'thread_ref',
+              'channel_conversation_ref', 'actor', 'facts'}
     assert all(set(event) == public and set(event['facts']) == _FIELDS[event['type']] for event in events)
     assert [event['seq'] for event in events] == [1, 2, 3]
     assert len({event['event_id'] for event in events}) == 3
-    assert len({event['thread_ref'] for event in events}) == 1
+    # v2（tref2）：提交时点线程可能还没解析，prompt_submitted 的 thread_ref 留空（A2）；
+    #   turn 类事件必须同一会话线程且非空。渠道会话哈希三个事件都有且一致。
+    assert events[0]['thread_ref'] == ''
+    assert events[1]['thread_ref'] and events[1]['thread_ref'] == events[2]['thread_ref']
+    assert len({event['channel_conversation_ref'] for event in events}) == 1
+    assert events[0]['channel_conversation_ref'] != ''
     assert all(event['actor'] == 'main' and event['channel'] == 'local' and event['dropped_before'] == 0 for event in events)
     assert all(event['facts']['request_id'] == request_id for event in events)
     assert events[0]['facts'] == {'request_id': request_id, 'chars': len(prompt), 'has_attachments': False}
@@ -278,6 +307,7 @@ def _assert_http_events(events, request_id, prompt):
     (('local-agent', 'local'), OwnerIdentity.local_main()),
     (('alice', 'local'), OwnerIdentity.provider_user('local', 'alice')),
     (('alice', 'tui'), OwnerIdentity.provider_user('tui', 'alice')),
+    (('alice', 'feishu'), OwnerIdentity.provider_user('feishu', 'alice')),
 ])
 def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeypatch, identity, owner):
     agent, paths, server, harness, published, workers = http_gateway

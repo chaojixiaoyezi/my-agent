@@ -1,5 +1,13 @@
 # 设计台账
 
+## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2，2026-10-05，worker/tref2；待非作者初审）
+
+- **问题（ds4 在 jb6b 发现，tref 只读调查）**：同一回合里插件事件的 `thread_ref` 两类取值不同——Gateway 侧四事件（prompt_submitted / turn_started / turn_ended / command_executed）取 `channel_conversation_id`（渠道会话号），工具侧两事件（tool_call_started / tool_call_finished）取 task attribute `conversation_thread_id`（ConversationStore 线程），插件按会话归组会归不上。
+- **权威判定**：会话线程的权威是 `ConversationStore thread_id`（`request_execution.py` 写进 task attributes 的 `conversation_thread_id`/`session_id`，注释“结构化 thread 是当前长期 IM/TUI 对话的耐久身份”；记忆 recall canonicalize 为 `session:<thread_id>`）；`channel_conversation_id` 是渠道侧键（ChannelBinding），不是线程身份。
+- **修法（3a 裁定采纳方案 A，不加配置开关，事件目录升 v2）**：`thread_ref` 统一为会话线程哈希（`plugin_events/points.py` 的哈希规则不变，改喂给它的输入）；Gateway 侧事件新增 `channel_conversation_ref`（渠道会话哈希，同一规则）。逐点：turn_started/turn_ended 在回合解析后传入线程（`request_execution._gateway_turn_thread_id`，只读 preflight、与执行路径同一解析入口，取消/跳过路径不经过；解析失败留空）；prompt_submitted 入队时点线程可能未解析 → `thread_ref` 留空 + 渠道 ref 有值（A2）；command_executed 回执新增 `conversation_thread_id`（`control_operation_service` 执行时按冻结渠道身份只读解析一次，多 owner 先物化 owner agent，失败留空；重放/对账路径不重解析、不回填旧行）；工具侧不改（本就是线程）。
+- **兼容**：字段名与值形态不变、旧插件无需改码；按旧语义建过索引的插件在切换点断一次（发布说明）。宿主不落观察事件（PLUGIN_EVENT_HOOKS D6），无账本回填对象；runtime.db 的 `plugin_gate.decided` 行字段白名单不含会话字段，不受影响。
+- **验证**：见 TESTS 同名节（167 passed、3 变异全杀、门禁结果）。
+
 ## J16 第 9 节：观察截图 _meta 协商（vision2，2026-10-05，worker/vision2，基于 d2ef24d53；ds8 初审通过并补断言 7960c7577，3a 终审收紧后挑入 17l）
 
 - **目标**：采纳 vision1r 初审结论，把"要不要截图"从"适配器无条件生成 + 宿主兜底剥离"改成宿主按档案结构化协商——一次修掉三件事：没声明时正文多一行 `[image content, mimeType=image/png]` 占位（与"逐字节相同"冲突）、适配器白付的缩略图成本、占位对不支持图模型的误导。
