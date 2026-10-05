@@ -44,8 +44,7 @@ def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointCon
         owner = _EventOwner(agent.home_paths.owner_home_dir, agent.home_paths.owner_plugins_dir)
         return EventPointContext(config, partial(plugin_panels_http.publish_plugin_event, server, owner),
                                  str(routing.get('channel') or ''), str(routing.get('thread_id') or ''),
-                                 str(routing.get('actor') or 'main'),
-                                 str(routing.get('channel_conversation_id') or ''))
+                                 str(routing.get('actor') or 'main'))
     except Exception:  # noqa: BLE001 观察装配故障不能中止入队或模型执行
         if enabled:
             warn_event_assembly_failure('PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED')
@@ -67,8 +66,6 @@ def _prompt_has_base_owner(agent, request: dict) -> bool:
 
 
 # LLM: 开关先于 owner/路由读取；观察装配异常隔离，确认启用后只记一次固定原因，不影响已成功入队事实。
-#   v2（tref2）：入队时点线程可能还没解析（新会话第一次必然没有），thread_ref 留空（A2）；
-#   渠道会话号此时已有，进 channel_conversation_ref 供插件在提交时点归组。
 # 函数用途: 首次排队后仅向基础 owner 发提示观察；缺配置、字段或装配故障不发，关闭不读取请求。
 def prompt_queued(server, request: dict) -> None:
     enabled = False
@@ -83,8 +80,7 @@ def prompt_queued(server, request: dict) -> None:
         channel = str(metadata.get('channel') or '')
         conversation = request.get('conversation') or {}
         context = gateway_event_context(agent, {'channel': channel,
-            'thread_id': '',
-            'channel_conversation_id': conversation.get('channel_conversation_id') or ''}, server=server)
+            'thread_id': conversation.get('channel_conversation_id') or ''}, server=server)
         if context is None:
             return
         emit_event(context, 'prompt_submitted', {'request_id': request.get('id') or '',
@@ -97,8 +93,6 @@ def prompt_queued(server, request: dict) -> None:
 
 
 # LLM: 控制回执由唯一执行服务冻结 owner；关闭零回执读取，启用后字段/装配异常仅一次固定原因日志，不改变控制结果。
-#   v2（tref2）：thread_ref 用回执里执行时解析的 conversation_thread_id（权威会话线程），
-#   渠道会话号另进 channel_conversation_ref。
 # 函数用途: 将新 completed 回执减量为命令名和状态；缺上下文不发，不带参数或错误正文。
 def command_completed(agent, receipt) -> None:
     enabled = False
@@ -106,9 +100,7 @@ def command_completed(agent, receipt) -> None:
         if _enabled_event_config(agent) is None:
             return
         enabled = True
-        context = gateway_event_context(agent, {'channel': receipt.channel,
-            'thread_id': receipt.conversation_thread_id,
-            'channel_conversation_id': receipt.conversation_id})
+        context = gateway_event_context(agent, {'channel': receipt.channel, 'thread_id': receipt.conversation_id})
         if context is None:
             return
         emit_event(context, 'command_executed', {'command': '/' + receipt.command_kind,
@@ -120,10 +112,8 @@ def command_completed(agent, receipt) -> None:
 
 
 # LLM: 开关先于请求字段读取；装配异常返回 None，启用后的固定原因诊断不包含通道/会话/模型或错误正文。
-#   v2（tref2）：thread_id 由调用方在回合解析后传入（与工具事件同源）；渠道会话号从请求里读，
-#   进 channel_conversation_ref。两者都不从正文推断。
 # 函数用途: 请求真正开始前发最小回合观察；缺失或关闭时不读路由，不带服务商或密钥。
-def turn_started(agent, request: dict, *, thread_id: str = "") -> EventPointContext | None:
+def turn_started(agent, request: dict) -> EventPointContext | None:
     enabled = False
     try:
         config = _enabled_event_config(agent)
@@ -133,8 +123,7 @@ def turn_started(agent, request: dict, *, thread_id: str = "") -> EventPointCont
         conversation = request.get('conversation') or {}
         metadata = request.get('metadata') or {}
         context = gateway_event_context(agent, {'channel': conversation.get('channel') or metadata.get('channel') or '',
-            'thread_id': thread_id,
-            'channel_conversation_id': conversation.get('channel_conversation_id') or ''})
+            'thread_id': conversation.get('channel_conversation_id') or ''})
         if context is None:
             return None
         emit_event(context, 'turn_started', {'request_id': request.get('id') or '',

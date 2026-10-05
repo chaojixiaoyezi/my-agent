@@ -1174,24 +1174,6 @@ def _executing_owner_id(agent: object) -> str:
     return str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "local/main")
 
 
-# LLM: v2（tref2）：turn 类事件用本回合解析后的会话线程（与工具事件同源），不用渠道会话号。
-#   这里在回合开始前做一次只读 preflight——与执行路径同一解析入口（get_or_create 幂等），
-#   取消/跳过执行的路径在调用之前就返回、不经过本函数；解析失败留空，绝不影响执行。
-# 函数用途: 解析本回合的会话线程 id，供 turn_started/turn_ended 的事件使用。
-def _gateway_turn_thread_id(agent: SimpleAgent, context: dict, on_chunk) -> str:
-    try:
-        from .request_context import GatewayConversationLoadRequest, preflight_gateway_conversation
-
-        request = context["request"]
-        prompt = str(request.get("prompt") or request.get("goal") or "").strip()
-        preflight = preflight_gateway_conversation(GatewayConversationLoadRequest(
-            agent, request, context["request_id"], prompt, on_chunk,
-        ))
-        return str(preflight.thread_id or "")
-    except Exception:  # noqa: BLE001 事件身份解析失败不能阻断回合执行
-        return ""
-
-
 # LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
 #   带续跑标记的请求在执行前经同一 writer 写一次 turn_resumed 边界；取消提前返回时不写。
 # 函数用途: 执行一条 Gateway 请求并发布开始/收口观察；提前拒绝不冒充执行，观察不改 lease 和业务响应。
@@ -1239,8 +1221,7 @@ def _handle_gateway_request(
     )
 
     execution_started_mono = time.monotonic()
-    event_context = turn_started(agent, context['request'],
-                                 thread_id=_gateway_turn_thread_id(agent, context, chunk_writer))
+    event_context = turn_started(agent, context['request'])
     failure: Exception | None = None
     try:
         _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
