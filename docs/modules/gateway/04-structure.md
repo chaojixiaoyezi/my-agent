@@ -1,8 +1,8 @@
 # Gateway Structure
 
-## Adapter dispatch 状态（slp5，2026-10-05；WIP）
+## Adapter dispatch 状态（slp5，2026-10-05；已实现，待初审）
 
-`adapter/delivery.py` 的标记与 claim 共存在原 pending，记录 owner/process、epoch、message_sequence/key、SHA256、首次开始时间和下一游标；终态仍写原 sent。claim 不把 expiry 当死亡，外发前 CAS 写意图，恢复先查询或核渠道去重窗口，不可确认收 unknown。进度游标与 final 回执分别消费身份，不增加平行存储；有效变异和完整门禁尚待补齐。
+`adapter/delivery.py` 的标记与 claim 共存在原 pending，记录 owner/process、epoch、message_sequence/key、SHA256、首次开始时间和下一游标；终态仍写原 sent。claim 不把 expiry 当死亡，外发前 CAS 写意图，恢复先查询或核渠道去重窗口，不可确认收 unknown。进度游标与 final 回执分别消费身份，不增加平行存储；`_terminal_claim_receipt` 只装配原回执，`_dispatch_auth_denial` 沿同一发送栅栏，不建影子链路。当前离线回归、三变异及门禁已补齐，真实渠道/Gateway 未验证；详见 TESTS。
 
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 

@@ -1,8 +1,8 @@
 # Gateway 维护状态
 
-## Adapter 外发恢复（slp5，2026-10-05；WIP）
+## Adapter 外发恢复（slp5，2026-10-05；已实现，待初审）
 
-原 pending/sent 外发前记 dispatch-started，旧进程活着/不可核验不接管；明确死亡后按查询或稳定键窗口恢复，否则 unknown。progress/final 分身份，飞书仅一小时去重，QQ/默认不支持。500 项相关回归通过，但常数目录守卫、三变异及其余门禁待补，未验真实渠道/Gateway，不可直接集成；详见 TESTS。
+原 pending/sent 外发前记 dispatch-started，旧进程活着/不可核验不接管；明确死亡后按查询或稳定键窗口恢复，否则 unknown。progress/final 分身份，飞书仅一小时去重，QQ 继承 Base 默认不支持。续做脚本刷新常数投影；35 文件相关回归 510 passed，十二守卫 190 passed，三变异全杀，完整本地门禁已执行，线上尺寸身份新增 0/消失 55。仅离线 fake process/provider 范围，未验真实渠道/Gateway，须独立初审和 3a 终审后再集成；详见 TESTS。
 
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 

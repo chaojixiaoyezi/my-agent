@@ -25,7 +25,7 @@ class _Crash(BaseException):
     pass
 
 
-# LLM: 模拟 provider 对稳定键的真实折叠；支持与不支持幂等时分别计数外部可见消息。
+# LLM: 模拟 provider 对传入稳定键的真实折叠；不可从展示正文猜消息身份，否则共身份变异会被夹具掩盖。
 # 类用途: 在发送前或接受后崩溃，保留跨 worker 的外部效果供恢复断言。
 class _Provider:
     provider_delivery_queryable = False
@@ -48,10 +48,9 @@ class _Provider:
             assert self.store.pending()[0] == record
             assert marker["claim_epoch"] == record.claim_epoch
             assert marker["owner"] == record.claim_owner
-        phase = "progress" if text == "进度" else "final"
-        key = _gateway_delivery_key(
+        key = marker.get("message_key") or _gateway_delivery_key(
             message_id=record.message_id, request_id=record.stable_id,
-            phase=phase, progress_cursor=record.progress_cursor,
+            phase="final", progress_cursor=record.progress_cursor,
         )
         self.attempts.append(key)
         if self.stage == "before_accept":
@@ -280,3 +279,39 @@ def test_channel_recovery_capabilities_are_explicit_and_windowed():
     assert FeishuAdapter.provider_idempotent_delivery is True
     assert getattr(FeishuAdapter, "provider_delivery_queryable", None) is False
     assert getattr(FeishuAdapter, "provider_idempotency_window_seconds", None) == 3600.0
+
+
+@pytest.mark.parametrize("stage", ["before_accept", "after_accept"])
+def test_progress_crash_recovery_keeps_final_independent(tmp_path, world, stage):
+    provider = _Provider(None)
+    first = _worker(tmp_path, provider)
+    first._poll_progress = lambda record: (["进度"] if record.progress_cursor == 0 else [], 3)
+    first._deliver_progress = provider.send
+    _enqueue(first)
+    _crash(first, provider, stage)
+    assert first.store.pending()[0].dispatch["message_sequence"] == "progress:0"
+    world.update(now=1010.0, live=False)
+    second = _worker(tmp_path, provider, "second")
+    second._poll_progress = first._poll_progress
+    second._deliver_progress = provider.send
+    assert second.run_once() == 1
+    assert list(provider.messages.values()) == ["进度", "最终回复"]
+    assert provider.attempts[0] == provider.attempts[1]
+    assert provider.attempts[-1] != provider.attempts[0]
+    assert second.store.terminal_receipt("req-resume")["message_sequence"] == "final"
+
+
+@pytest.mark.parametrize("now", [999.0, 4600.0])
+def test_clock_reversal_or_exact_window_boundary_never_replays(tmp_path, world, now):
+    provider = _Provider(None)
+    provider.provider_idempotency_window_seconds = 3600.0
+    first = _worker(tmp_path, provider)
+    _enqueue(first)
+    _crash(first, provider, "after_accept")
+    # 仅推进认领到期事实；回拨时旧 expiry 尚未到，仍须禁止第二次外发。
+    world.update(now=now, live=False)
+    second = _worker(tmp_path, provider, "second")
+    assert second.run_once() == 0
+    assert len(provider.attempts) == 1
+    if now >= 1005.0:
+        assert second.store.terminal_receipt("req-resume")["disposition"] == "unknown"

@@ -62,11 +62,12 @@
 
 ### 3.5 风险五：Adapter 外部发送成功、回执未持久化，接管后重复发消息
 
-- **切片状态（2026-10-05，slp5）**：已实现，待审（WIP，验收未齐）。500 项相关离线回归通过；十二守卫的常数投影仍失败，三有效变异及剩余门禁待补，不代表整体设计完成。
+- **切片状态（2026-10-05，slp5）**：已实现，待初审。35 文件相关离线回归 510 passed，十二守卫 190 passed，三有效变异 3/3 KILLED；本片门禁已执行、线上尺寸身份差集新增 0。仅限 fake process/provider 的离线范围，不代表真实渠道、真实睡眠或整体设计完成，详见 TESTS。
 - **渠道边界**：飞书已有 create/reply uuid，仅保证一小时内去重；用首次 dispatch 时间核窗，超窗或时间倒退收 unknown。QQ/默认无幂等/查询能力。progress/final 分身份，旧 epoch 不覆盖新状态。
 
 - **成立条件**：外部渠道已接受回复，但进程在 sent receipt 持久化前退出或写回执失败；原 claim 到期后新 worker 看不到 durable sent 标记而重发。若原 worker仍运行，epoch 可以拒绝旧写回，但不能撤销已经发出的消息。
-- **实现证据**：`agent_py_agent/agent/adapter/delivery.py:241-288` 通过 owner/递增 epoch/expiry 领取，领取前查 `was_sent`；`:290-313` 对 owner/epoch 精确提交 claim 更新。`:1115-1148` 先调用 `_deliver_response`，返回 sent 后才调用 `_record_sent`；`:1231-1246` 写同 epoch 的 sent 终态，持久化 OSError 时记录“已发送但回执失败”。
+- **基线风险证据（`e180f4185`，不是当前实现行号）**：`agent_py_agent/agent/adapter/delivery.py:241-288` 通过 owner/递增 epoch/expiry 领取，领取前查 `was_sent`；`:290-313` 对 owner/epoch 精确提交 claim 更新。`:1115-1148` 先调用 `_deliver_response`，返回 sent 后才调用 `_record_sent`；`:1231-1246` 写同 epoch 的 sent 终态，持久化 OSError 时记录“已发送但回执失败”。
+- **当前实现入口**：同文件的 `claim` 前置旧 dispatch owner 核验，`_dispatch_message` 在渠道 IO 前 CAS 写入 marker，`_record_sent` 与 `mark_terminal_claimed` 对精确 epoch 提交原 sent 回执；回执装配和鉴权提示抽为小函数，仅拆平、不新增状态源。
 - **现有保护**：稳定 pending id、claim owner/epoch/expiry、外发前 sent 检查、旧 epoch 不能覆盖新状态；发送成功后尽快写 terminal receipt。结构化本地 CAS 不等于各外部渠道接受稳定幂等键，不能证明该时间窗无重复消息。
 - **修法与入口**：在现有 pending/sent store 中，于 `_deliver_response` 外发前按 `(stable_id, message_sequence, claim_epoch)` 持久记录 dispatch-started；新 claimant 看到 dispatch-started 且无 sent receipt 时，先核验旧 owner/attempt，再按渠道幂等键或只读查询 reconcile。若渠道不能查询/幂等，使用现有 `unknown` terminal disposition 并停止自动重发；本地 epoch CAS 不能撤回已经发出的网络请求。渠道支持时将稳定 message key 传给 provider。progress 与 final reply 使用不同 message operation identity。入口：`agent_py_agent/agent/adapter/delivery.py` 的 `claim`、`_process_record`、`_deliver_response`、`_record_sent`；由各渠道 adapter 实现稳定键或“不可查询则 unknown”的能力声明。
 - **故障注入用例**：在 dispatch-started 写入前崩溃，恢复后可发送一次；写入 dispatch-started 后、外部响应前后分别崩溃，重启新 worker 必须先读 marker，旧 owner live/unverifiable 时不接管，dead 后对可幂等渠道使用同一 message key 查询/重试且只出现一条消息，对不可查询渠道收 `unknown` 且不自动重发；旧 epoch 迟到回执不能覆盖新状态；progress 和 final 分别各发一次。

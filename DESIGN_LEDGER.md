@@ -146,12 +146,13 @@
 - **选择与边界**：采用 resume 时恢复登记，而非给无法证明被调用的删除 API 增加 Gateway 活动探测。仅使用 `ConversationStore` 的 `chat/local-agent + session_id` 精确绑定，且 `owner_id` 与解析后的 `owner_home` 都须与当前 owner 一致；先写 `SESSION_REGISTRY_RESTORE_AUTHORIZED` 审计，再重建相同 ID 的本地登记。审计关闭、thread 不存在/损坏或任一归属不匹配都拒绝；不从请求正文、ID 名称或其他用户记录推断。
 - **验证与状态**：tmp_path 隔离 home 下删除登记、保留同 owner thread 后恢复成功并核对无正文审计；owner_id 与 owner_home 两个负例及对应单点变异均验证。详细测试与本地门禁见 `TESTS.md`；状态为待非作者初审，未读取真实 owner home，也未推断这次历史丢失的具体触发入口。
 
-## Adapter 外发意图恢复（slp5，2026-10-05；WIP，基线 `e180f4185`）
+## Adapter 外发意图恢复（slp5，2026-10-05；已实现，待初审，基线 `e180f4185`）
 
 - 来源：睡眠恢复设计第 3.5 节。原 pending/sent schema 7 增 dispatch-started，外发前记录消息序号、稳定键、正文摘要、进程身份和 epoch，不另建存储。
 - 旧 owner 活着或不可核验时不接管；明确死亡后先查询或在渠道去重窗口内同键恢复，否则收现有 unknown 停止自动重发。progress/final 分身份，迟到 epoch 不覆盖新态；进度游标偶发写失败只重试同 epoch 本地 CAS。
-- 飞书现有 create/reply 已接 uuid，本片补一小时去重能力声明，不承诺无限期幂等。QQ/默认无幂等及查询声明。
-- 相关离线回归 500 passed；十二守卫 189 passed、1 failed（常数投影过期）；Ruff、imports 通过。三有效变异和其余门禁未齐，因约 120 分钟窗口收 WIP，不可直接集成。详见 TESTS。
+- 飞书现有 create/reply 已接 uuid，本片补一小时去重能力声明，不承诺无限期幂等。QQ 继承 Base 默认无幂等/查询声明，不复制第二份能力事实。
+- 续做已由脚本刷新常数投影，35 文件相关回归 **510 passed**（1 条 Starlette 弃用警告）；十二守卫 **190 passed**，三单点变异 **3/3 KILLED**，逐次备份/还原字节一致。全 Ruff、imports、doc-sync、strict size、clean-package、diff 已执行；线上告警身份差集新增 **0**、消失 **55**，生成的 CODE_SIZE_REPORT 已还原。严格扫描仍含存量告警，不等于全仓无尺寸债务。
+- `6777f8c95` 是前轮 WIP 检查点；本轮仅收本切片离线证据，待独立初审、3a 终审。未连接真实渠道/Gateway，真实睡眠与真实送达仍未验证；详见 TESTS。
 
 ## WebSocket 流在信封绝对期限处收口（wsdeadline，2026-10-05，分支 `worker/wsdeadline`，基于 17k 头 `07d7b3306`；待初审）
 

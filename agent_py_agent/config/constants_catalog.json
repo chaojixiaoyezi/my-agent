@@ -9,7 +9,7 @@
       "value": 120.0,
       "unit": "秒",
       "category": "其它",
-      "description": "认领一次外部投递的默认租约 120 秒：超时未提交就让位，避免进程崩溃后锁死待发唤醒。"
+      "description": "认领一次外部投递的默认租约 120 秒；已开始外发时还必须核验旧执行者，过期不等于死亡。"
     },
     {
       "name": "_LOOP_ERROR_LOG_INTERVAL_SECONDS",

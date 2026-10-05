@@ -132,6 +132,24 @@ def _dispatch_marker(record: PendingGatewayReply, text: str, message: tuple[str,
     }
 
 
+# LLM: 只装配原 sent 回执字段，持久化与 epoch CAS 仍由 store 负责，不产生另一份事实源。
+# 函数用途: 集中构造当前逻辑消息的终态回执，避免写盘方法混入字段装配而越过尺寸边界。
+def _terminal_claim_receipt(record: PendingGatewayReply, disposition: str, reason: str) -> dict[str, object]:
+    receipt: dict[str, object] = {
+        "schema_version": _SCHEMA_VERSION,
+        "request_id": record.request_id,
+        "operation_id": record.operation_id,
+        "sent_at": time.time(),
+        "disposition": str(disposition or "unknown").strip().lower(),
+        "claim_epoch": record.claim_epoch,
+        "message_sequence": str(record.dispatch.get("message_sequence") or ""),
+        "message_key": str(record.dispatch.get("message_key") or ""),
+    }
+    if reason:
+        receipt["reason"] = str(reason)
+    return receipt
+
+
 # LLM: 用户可见文案按结构化原因码二选一；不解析服务端 message，也不把内部 reason 串露出给用户。
 # 函数用途: 给鉴权拒绝生成一句中文的、告诉用户怎么办的提示。
 def _gateway_denial_text(denial_code: str) -> str:
@@ -236,9 +254,8 @@ class PendingGatewayReply:
     claim_expires_at: float = 0.0
     dispatch: dict[str, object] = field(default_factory=dict)
 
-    # LLM: watch_kind is a closed transport state, not a display label; invalid values must fail
-    # before a record can be persisted or polled through the wrong endpoint.
-    # 函数用途: 校验待回送记录当前监听的是输入去向还是任务结果。
+    # LLM: watch_kind 是结构化监听阶段；dispatch 身份损坏必须拒绝，不能丢掉外发意图后重新发送。
+    # 函数用途: 在持久化或轮询前校验监听阶段、原路由和外发身份。
     def __post_init__(self) -> None:
         normalized = str(self.watch_kind or "").strip().lower()
         if normalized not in _PENDING_WATCH_KINDS:
@@ -685,18 +702,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
     ) -> bool:
         if record.claim_owner != owner or record.claim_epoch != int(epoch):
             return False
-        receipt: dict[str, object] = {
-            "schema_version": _SCHEMA_VERSION,
-            "request_id": record.request_id,
-            "operation_id": record.operation_id,
-            "sent_at": time.time(),
-            "disposition": str(disposition or "unknown").strip().lower(),
-            "claim_epoch": record.claim_epoch,
-            "message_sequence": str(record.dispatch.get("message_sequence") or ""),
-            "message_key": str(record.dispatch.get("message_key") or ""),
-        }
-        if reason:
-            receipt["reason"] = str(reason)
+        receipt = _terminal_claim_receipt(record, disposition, reason)
         stable_id = record.stable_id
         with self._lock:
             if self.was_sent(stable_id):
@@ -812,6 +818,16 @@ class _GatewayQuarantineTerminalizeMixin:
             reason=reason,
         )
 
+    # LLM: 沿同一 dispatch 栅栏发送鉴权提示；异常时返回原快照供既有隔离收口，不新增外发路径。
+    # 函数用途: 把鉴权提示的发送与异常降级抽平，未获 claim 时返回 None 阻止旧回执提交。
+    def _dispatch_auth_denial(self, record: PendingGatewayReply, denial_code: str) -> PendingGatewayReply | None:
+        try:
+            started, _sent = self._dispatch_message(record, _gateway_denial_text(denial_code), ("final", 0))
+            return started
+        except Exception as exc:
+            _LOGGER.warning("gateway auth denial reply failed request_id=%s error=%s", record.request_id, exc)
+            return record
+
     # LLM: 隔离的统一收口：auth 类（构造时按状态码 + error_code 定的结构化类别，见 QUARANTINE_CATEGORY_*）
     #   先给用户一句可见原因，再写终态；其它隔离保持静默（清占位 + 写 quarantined），两种语义同时成立，
     #   互不覆盖。发不出去也不改变终态结果。判据只读 category 字段，不做原因字符串匹配。
@@ -825,16 +841,9 @@ class _GatewayQuarantineTerminalizeMixin:
         category: str = "",
     ) -> bool:
         if str(category or "").strip().lower() == QUARANTINE_CATEGORY_AUTH:
-            try:
-                record, _sent = self._dispatch_message(record, _gateway_denial_text(denial_code), ("final", 0))
-                if record is None:
-                    return False
-            except Exception as exc:
-                _LOGGER.warning(
-                    "gateway auth denial reply failed request_id=%s error=%s",
-                    record.request_id,
-                    exc,
-                )
+            record = self._dispatch_auth_denial(record, denial_code)
+            if record is None:
+                return False
         return self._terminalize_without_reply(
             record,
             disposition="quarantined",

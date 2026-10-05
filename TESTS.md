@@ -223,15 +223,19 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - **初审变异（4 个，脚本 `tasks/2026-10-05/sessrecr-review/mutations.py`，sha256 还原一致）**：删审计 enabled 检查 → KILLED（审计关闭反例红）；吞审计写失败 → KILLED（审计写失败反例红）；审计挪到建登记之后 → KILLED（先建后报错反例红）；绑定匹配放宽为只看 conversation_id → SURVIVED（**冗余防线**：渠道过滤已在 `_find_session_recovery_thread` 的查询条件里发生，`_session_thread_matches_owner` 的绑定检查是第二道纵深，两道都保留）。
 - **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cli_chat.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sessrecr` → **59 passed**（含 7 条新反例）。
 
-## Adapter 外发意图恢复（slp5，2026-10-05；WIP，基线 `e180f4185`）
+## Adapter 外发意图恢复（slp5，2026-10-05；已实现，待初审，基线 `e180f4185`）
 
 - 新增 `test_adapter_delivery_resume.py`：真实 pending/sent 和 worker、假进程/provider，覆盖意图写前/外部接受前后崩溃、活或未知不接管、死亡后同键恢复或 unknown、去重超窗、查询确认、迟到 epoch、progress/final 独立身份。首轮 16 项行为失败后转绿；渠道声明另经先红后修。旧 manager 模拟重启补明确死亡证明，进度游标写失败接缝复验已通过。
 - 根目录使用发布测试 Python `ci-venv-312/bin/python`；`env -i` 隔离 `HOME=$PWD/tmp/slp5-test-home`、`MY_AGENT_HOME=$PWD/tmp/slp5-test-home/data`、`PATH=/usr/bin:/bin`、`PYTHONPATH=$PWD`、`PYTHONDONTWRITEBYTECODE=1`；pytest 使用 `-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-ds2`。
-- 文件选择：`rg -l '(agent\.adapter|GatewayReplyDelivery|FeishuAdapter|QQAdapter|TUIAdapter|_reply_delivery|gateway_reply_delivery)' agent_py_agent/tests --glob '*.py'`，传入 pytest 得 **500 passed，1 条 Starlette 弃用警告**；未跑全仓。尚须补文件名筛选漏项（如 adapter_daemon_cli、adapter_late）。
-- 十二文件 guards9：**189 passed、1 failed**，`test_catalog_matches_source` 指目录过期，不能称既有失败。全 Ruff：All checks passed；imports：findings=0。
-- 变异首轮 basetemp 冲突是准备失败，不算 KILLED；独立目录 M1 不写意图造成产品 ValueError，未取得预期断言失败；M2/M3 未执行。每次 finally 原样恢复产品。**三项有效变异尚未完成**。
-- 未完成：刷新常数投影并复跑 guards、补通道测试漏项、三变异、doc_sync --base e180f4185、strict code-size、size_diff、clean-package。未连接真实渠道/Gateway，真实睡眠、真实送达未验证。
-- 飞书依据：<https://raw.githubusercontent.com/larksuite/oapi-sdk-go/v3_main/service/im/v1/model.go> 的 create/reply uuid 只保证一小时内去重；声明窗口 3600 秒，超窗/墙钟倒退不自动重发。补完上述缺项后再交初审。
+- 文件选择：原内容筛选 `rg -l '(agent\.adapter|GatewayReplyDelivery|FeishuAdapter|QQAdapter|TUIAdapter|_reply_delivery|gateway_reply_delivery)' agent_py_agent/tests --glob '*.py'`，与 `git ls-files 'agent_py_agent/tests/test_adapter*.py' 'agent_py_agent/tests/test_feishu*.py' 'agent_py_agent/tests/test_channel_adapter.py'` 取排序去重并集，显式传入 pytest。**35 文件，510 passed，1 条 Starlette 弃用警告，68.85s**，exit 0；包含 adapter_daemon_cli、adapter_late，未跑全仓。
+- `scripts/build_constants_catalog.py` 生成 906 项目录，只改变默认 claim TTL 的中文说明投影，不手改 JSON；目录单文件 **11 passed**，随后十二文件 guards9（含 packaging）**190 passed，64.38s**，exit 0。当前目录不再过期。
+- 三项当前版本单点变异 **3/3 KILLED**：M1 `_start_dispatch` 只返回内存 marker、不 commit（`test_dispatch_is_durable_before_provider_io`，1 个断言失败）；M2 不可查询恢复跳过 unknown 而重发（`test_dead_non_queryable_dispatch_is_unknown_without_resend`，接受前后 2 个断言失败）；M3 `_dispatch_marker` 把两阶段共用 final 身份（`test_progress_and_final_have_distinct_durable_message_identities`，外部只见进度、final 丢失，1 个断言失败）。夹具使用传入 message_key，不从正文猜阶段。每项使用独立 basetemp 和原字节备份、finally 还原；JUnit errors=0 且 failure 为行为断言，准备/collection 错误不计 KILLED。
+- 新增进度接受前后崩溃恢复、租约未到时回拨不得重发及精确去重窗口边界用例；新增文件单独 **21 passed**，与 510 重叠不累加。当前三变异还原的 delivery SHA256 为 `9011163b2aefe99e21e2e25fa157a2cb5e467c23a8aeda22480b1e96250428b3`，恢复后完整相关回归和守卫重新执行。
+- 全 `python -m ruff check agent_py_agent scripts`：All checks passed；`scripts/check_import_boundaries.py`：findings=0；`scripts/check_doc_sync.py --base e180f4185`：DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：hard=0、blocked=False；`scripts/check_clean_package.py .` 及 `git diff --check` 通过。尺寸生成报告还原到提交前 HEAD，不入提交。
+- 线上尺寸差集脚本首次新增 3/消失 55，不能绕过；回执字段装配提为小函数、鉴权外发抽平、QQ 继承 Base 默认声明后重跑。最终输出：**新增告警: 0；消失告警: 55**，exit 0；按 kind/path/name/severity 身份比较，不以总量替代。
+- 复现参数：相关用例/守卫分别使用 `--basetemp=/private/tmp/claude-501/m-ds2-slp5-receipt-regression` 和 `m-ds2-slp5-receipt-guards`；变异使用 `m-ds2-slp5-continue-final-M1/M2/M3`，以 `-k` 指定上述测试并输出 JUnit。35 文件清单和最后完整输出留在本树 `tmp/slp5-continue/{related-tests.txt,regression.log,guards.log,strict-size.log,size-diff.log}`，变异回执在 `mutations/`；临时证据可重建，不作为产品状态源或发布文件。
+- 前轮 WIP `6777f8c95` 的 500/189+1、目录过期、无效首轮变异是真实历史，不称既有失败。续做补齐后再交独立初审；本轮收尾超出约 90 分钟窗口，不把实际超时写成按时完成。完整工具输出引用失效后仅为采集可核对回执重跑必要验证，当前日志直接留在本树。
+- 未连接真实渠道/Gateway，真实睡眠、真实送达以及专门的真实 ChannelManager + 飞书假 HTTP 冷恢复组合入口未验证；本树已跑 manager/Feishu 各自既有回归，不外推该组合或生产。真实 PID 复用/start/boot/跨 host 场景未实测。飞书依据：<https://raw.githubusercontent.com/larksuite/oapi-sdk-go/v3_main/service/im/v1/model.go> 的 create/reply uuid 只保证一小时内去重；超窗/墙钟倒退不自动重发，保守 unknown 可能需要人工核对。
 
 ## WebSocket 流在信封绝对期限处收口（wsdeadline，2026-10-05，分支 `worker/wsdeadline`，基于 17k 头 `07d7b3306`；待初审）
 
