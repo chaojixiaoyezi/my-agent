@@ -269,10 +269,14 @@ class AttemptExecutionSandbox:
         return self._ready
 
     # ---------------------------------------------------------------- 执行
+    # LLM: 先验证跨平台共享的受限读模式；None 保留旧调用合同，未知值必须在平台分派前拒绝。
+    # 函数用途: 检查平台就绪状态和读模式，再组装对应平台的命令包装参数。
     def build_argv(self, command_argv: list[str]) -> list[str]:
         """把命令包装进平台沙箱（E.9：LSP/构建器/validator/后台 shell/脚本
         子进程同一网关入口）。不探测直接构造——调用方必须先 require_ready。"""
         self.require_ready()
+        if self.spec.read_mode not in (None, "hide_home", "allowlist"):
+            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID")
         if self._platform == "Linux":
             return self._linux_argv(command_argv)
         if self._platform == "Darwin":
@@ -285,8 +289,6 @@ class AttemptExecutionSandbox:
     # task work 临时根；v8 隐藏根必须仍存在才能挂 tmpfs，缺失要失败关闭；写根顺序保持原合同。
     # 函数用途: 为 Linux 组装 bwrap 参数，并让任务临时区与当前项目目录分离。
     def _linux_argv(self, command_argv: list[str]) -> list[str]:
-        if self.spec.read_mode not in (None, "hide_home", "allowlist"):
-            raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID")
         if self.spec.read_mode == "allowlist" and (
             not self.spec.read_only_root or self.spec.full_access or self.spec.implicit_attempt_write_roots
         ):

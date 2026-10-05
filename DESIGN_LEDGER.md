@@ -577,13 +577,14 @@
 - **实测边界与估算**：非作者只读初审未发现阻断问题；尚未实测修后DeepSeek缓存命中率或费用。若同模型/同thread分区且完整历史前缀仍驻留、逐字节命中，基于旧2.2% system-only命中线索估算理想输入token命中可接近98%，尾部指令/动态字段会降低比例。
 - **协作注意**：本次改 `compact_request_budget.py` 的单次/分段分流；CAB ds5 合入时对照该文件，避免覆盖超时修复。
 
-## B7 读模式与有限读底图（rdfloor，2026-10-05，`worker/rdfloor`，基于 step17k `602d276e7`；本地实现，待初审与沙箱外真进程验收）
+## B7 读模式与有限读底图（rdfloor，2026-10-05，`worker/rdfloor`，基于 step17k `602d276e7`；已实现，待 3a 终审和沙箱外真进程验收）
 
 - **问题**：B7 当前 `hide_home` 形态是整根只读后隐藏 Gateway 用户家目录、再开放有限根；老格式 restricted 策略需要的是“只可读列出的根”，不能靠隐藏单个 HOME 冒充全盘白名单。
 - **公共合同**：`PluginRestrictedSandbox.read_mode` 只有 `hide_home` 与 `allowlist` 两种结构化值，默认 `hide_home`；v8 显式映射 `hide_home`。allowlist 不因 cwd、owner_home 或执行根而隐式扩大读权限，cwd 必须被系统、显式读根或写根覆盖。
 - **平台实现**：Seatbelt 先拒绝所有文件读取，再逐根放行平台系统根、宿主授权读根和写根；父目录只获 `file-read-metadata`，不获列目录权限。Linux bwrap 从空 tmpfs 根创建最小目录骨架、挂载系统与授权只读根、只挂明确写根为可写，最后锁只读底图；不再 `--ro-bind / /`。R/W/E 符号链接仍挂真实目标并恢复经核验 alias，隐藏路径的最终拒绝保持。
 - **系统根边界**：Linux 与 Darwin 分别使用结构化目录表，并对绝对路径、realpath 和 `/`、`/Users`、`/home`、`/private` 及其别名做失败关闭校验；`/dev`、`/proc` 与 `/tmp` 是隔离器的特殊空/伪文件系统入口，不作为宿主目录白名单挂载。
 - **兼容与状态**：v8 `hide_home` 的 Seatbelt profile 与 bwrap argv 以改前快照钉住；本地已补有限读、系统根、祖先 metadata 与 symlink 执行根覆盖。真实 Seatbelt 与 Linux bwrap 进程由 3a 沙箱外车道验收后，才能判定完整隔离链成立；结果见 `TESTS.md` rdfloor 小节。
+- **初审修正**：读模式在跨平台 `build_argv` 分派前统一校验，未知值在 Linux/macOS 都以 `SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID` 结构化拒绝，不再由 macOS 静默降级到 `hide_home`。ds4 补件 `11d914773` 已摘入；系统读根宽度、symlink alias 跳过分支均有用例，祖先目录读测试直接断言不能列目录。
 
 ## B7 受限策略的符号链接执行根（b7lnx，2026-10-04，`worker/b7lnx`，基于 `c544b358d`；已并入 step17k，3a 沙箱外 macOS 强制模式复跑通过，Linux 真进程用例由 17k 车道验证）
 

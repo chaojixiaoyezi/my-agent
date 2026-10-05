@@ -953,3 +953,25 @@ def test_allowlist_symlink_alias_inside_mounted_root_is_not_recreated(tmp_path, 
 
     assert (str(real.resolve()), str(alias_inside)) not in symlinks, "已挂载根内的别名不应重复创建"
     assert (str(real.resolve()), str(alias_outside)) in symlinks, "未覆盖的别名仍按真实目标恢复"
+
+
+@pytest.mark.parametrize("platform_name", ["Linux", "Darwin"])
+def test_restricted_read_mode_rejects_unknown_value_on_each_platform(tmp_path, monkeypatch, platform_name):
+    """两个平台对未知受限读模式都必须拒绝，不能静默退回较宽策略。"""
+    spec = AttemptSandboxSpec(
+        attempt_view=tmp_path,
+        staging_root=tmp_path,
+        shared_workspace=tmp_path,
+        owner_home=tmp_path,
+        extra_write_roots=(),
+        read_only_root=True,
+        read_mode="unknown",
+        bwrap_path="/fake/bwrap",
+        macos_sandbox_exec="/fake/sandbox-exec",
+    )
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = platform_name
+    monkeypatch.setattr(sandbox, "require_ready", lambda: None)
+
+    with pytest.raises(SandboxUnavailableError, match="RESTRICTED_READ_MODE_INVALID"):
+        sandbox.build_argv(["/bin/true"])

@@ -73,7 +73,7 @@
 
 ## B7 老格式受限策略的读取底图（rdfloor，2026-10-05）
 
-`PluginRestrictedSandbox.read_mode` 是结构化字段：`hide_home`（默认）保留 v8 既有“根只读、隐藏 HOME、重挂授权根”行为；`allowlist` 则只开放 `read_roots`、`write_roots`、`execute_roots` 及平台系统必要根。v8 显式使用 `hide_home`，Seatbelt profile 和 bwrap argv 通过固定快照确保逐字节不漂移。
+`PluginRestrictedSandbox.read_mode` 是结构化字段：`hide_home`（默认）保留 v8 既有“根只读、隐藏 HOME、重挂授权根”行为；`allowlist` 则只开放 `read_roots`、`write_roots`、`execute_roots` 及平台系统必要根。v8 显式使用 `hide_home`，Seatbelt profile 和 bwrap argv 通过固定快照确保逐字节不漂移。未知读模式在 Linux/macOS 分派前统一结构化拒绝 `SANDBOX_UNAVAILABLE: RESTRICTED_READ_MODE_INVALID`，绝不回退到更宽的 `hide_home`。
 
 `allowlist` 不自动放开 `cwd`、`owner_home` 或解释器父目录；工作目录必须被明确读/写根或系统根覆盖，否则 fail-closed。执行根仍只暴露已核验文件及真实目标，原路径 alias 由公共 B7 symlink 处理重建。写权限只给明确写根与插件私有 data；不存在整根 bind 或从 cwd 推写权限的回退。
 

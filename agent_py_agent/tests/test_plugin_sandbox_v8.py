@@ -639,7 +639,7 @@ def test_restricted_policy_allowlist_limits_reads_and_preserves_ancestor_metadat
     assert report["system_read"] == "OK"
     assert report["ancestor_stat"] is True
     assert report["denied_stat"] is False
-    assert report["ancestor_names"] is None or "denied" not in report["ancestor_names"]
+    assert report["ancestor_names"] is None
 
 
 @needs_linux
@@ -912,9 +912,9 @@ def test_missing_interpreter_prefix_is_structured_sandbox_unavailable(tmp_path, 
 def test_restricted_sandbox_spec_propagates_allowlist_read_mode(tmp_path):
     home, data_root, env, data_dir = _layout(tmp_path)
     policy = PluginRestrictedSandbox(
-        read_roots=(env,), write_roots=(), execute_roots=(), network=False, hidden_read_root=home
+        read_roots=(env,), write_roots=(), execute_roots=(), network=False, hidden_read_root=home,
+        read_mode="allowlist",
     )
-    object.__setattr__(policy, "read_mode", "allowlist")
 
     spec = plugin_sandbox_spec(
         cwd=env, data_dir=data_dir, owner_home=data_root / "owners/local/main", sandbox_policy=policy
