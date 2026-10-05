@@ -1,9 +1,12 @@
 # 记忆与上下文维护状态
 
-## cachecompact 压缩缓存前缀（2026-10-04，worker/cache-compact；待集成终审）
+## cachecompact/cachecompact2 压缩缓存前缀（2026-10-05，worker/cache-compact；本地实现，待终审）
 
 - 可容纳的单次压缩请求携带与主请求相同的 system/tools/native messages，并将 `tool_choice` 设为 `auto`；压缩目的按 thread 读取相同 thinking/reasoning_effort。结构化工具调用不会执行，只触发一次无工具/`none` 重试。
 - Live 原生历史摘要保留可共享前缀并在末尾加摘要指令；carried 文本协议和超窗分段缺少完整主历史/tools或只覆盖局部区间，明确不承诺同样缓存命中。详细设计和实测边界见 DESIGN_LEDGER 与 TESTS.md 的 cachecompact 节。
+- Gateway 前台路径现由真实 ask 和 typed overflow 触发原 Compact 恢复链，测试核对辅助请求使用 `conversation_compact_summary`、准确 thread ID，且落在主请求的同一分区和历史前缀。
+- active-turn replacement 只合并上一代摘要和本轮选中工具 IR，不包含完整主线程历史；因此不承诺前缀命中，显式传空工具列表与 `ToolChoice.none`，避免工具选择和重试。通用 bounded 路径仅在工具列表非空时覆盖为 `auto`。
+- 本地 Compact/cache-prefix 指定回归集与 guards9 已跑过；真实 DeepSeek 服务端缓存、计费与收益仍未验证，详见根目录 `TESTS.md`。
 
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 

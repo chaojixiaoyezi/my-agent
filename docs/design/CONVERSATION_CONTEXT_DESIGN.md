@@ -125,10 +125,9 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 
 ## 摘要请求的工具控制与诊断（2026-09-26，集成方已吸收 Codex `d4dd6c094` 并补违规兜底，分支 `claude/curator-budget`）
 
-摘要只归纳已有材料，没有业务工具执行权。非分段请求仍保留原system/tools缓存前缀，
-但通过既有`ToolChoice.none("compact_summary_only")`表达禁止工具；分段请求原本工具目录为空，继续保持。
-`none`禁止选择而不隐式删除调用方已给的目录，三协议共用适配层；返回违规调用仍由原协议门拒绝，
-辅助摘要入口也没有工具执行循环。不增设auto重试、文本原因识别或另一份摘要账本。
+摘要只归纳已有材料，没有业务工具执行权。具有完整主请求缓存面的单次 transcript/tool-loop 摘要保留原 system/tools/history 并使用 `auto`，让工具 schema 继续位于缓存前缀；结构化工具调用只作为违规响应、绝不执行，沿原有界链最多再尝试一次无工具/`none` 摘要。
+
+active-turn carried replacement 是有意例外：它只组合上一代 thread summary 与本轮选中的工具 IR，不携带完整主线程 provider history，因此不承诺主请求前缀命中。该路径不发送工具定义，并显式使用 `ToolChoice.none("active_turn_summary_no_prefix")`；不能把主请求工具 schema 加回这份窄输入。分段摘要同样换成 summary-only system、无工具/`none`，只覆盖局部文本片段，不保证完整主前缀。辅助摘要入口没有工具执行循环，不新增账本。
 
 违规兜底（2026-09-26 集成方补）：真机样本里 MiniMax-M2.7 经 Anthropic 兼容协议，带工具加 `none` 仍返回 tool_use。
 - **做法**：单次摘要一旦返回工具调用，就改走原有分段链。分段链把来源文本化、工具为空、选择为 `none`，沿用原纠正提示与确定性摘录，让模型重写，不直接退成机械摘要。

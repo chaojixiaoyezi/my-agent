@@ -1,5 +1,10 @@
 # Memory Structure
 
+## Compact 语义摘要的工具选择边界（cachecompact2，2026-10-05）
+
+- `LiveToolHistorySummaryRequest.tool_choice` 是可选显式选择字段，位于 dataclass 末尾以保持已有位置参数顺序。
+- `_resolve_generate_with_messages` 在显式选择存在时保留空 `tools=[]`；bounded helper 只在 tools 非空时切换为 `auto`。active-turn 调用固定为无工具/`none`，完整缓存面摘要仍保留真实工具目录。
+
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 
 - 删掉 `memory_archive/tokens.py` 的普通 mkdir（目录交给私有写的 `ensure_private_dir`）；`memory_store/retention_apply._trash_conversation` 3 处改走 `ensure_private_dir`。

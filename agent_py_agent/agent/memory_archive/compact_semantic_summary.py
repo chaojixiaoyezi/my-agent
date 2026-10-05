@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..tooling.output_projection import project_tool_output_body
+from ..tooling.runtime_contracts import ToolChoice
 from .tool_output_externalizer import model_visible_tool_parameters
 
 _LOGGER = logging.getLogger(__name__)
@@ -182,6 +183,8 @@ class LiveToolHistorySummaryRequest:
     system_instruction: str = ""
     interrupt_check: Callable[[], bool] | None = None
     preserve_complete_fallback: bool = False
+    # LLM: active-turn 窄摘要要显式保留 none；将字段放末尾避免改变已有位置参数的含义。
+    tool_choice: ToolChoice | None = None
 
 
 # LLM: 只从 agent.config 读 enabled；首尾保护、中段阈值和输入预算已是本模块常量（2026-09-28 参数减量），
@@ -800,7 +803,7 @@ def _resolve_generate_with_messages(
             )
         # 兼容路径继续用 prompt 承载真实任务并在 messages 尾部放 Compact 指令；结构化
         # 缓存路径的任务已经在完整原生历史里，outgoing_prompt 只携带稳定前缀与动态尾部。
-        tools = list(request.tools) or None
+        tools = list(request.tools) if request.tools or request.tool_choice is not None else None
         if request.agent is not None:
             from ..conversation.auxiliary_model_call import AuxiliaryModelCallRequest
             from ..conversation.compact_request_budget import generate_bounded_compact_response
@@ -817,6 +820,7 @@ def _resolve_generate_with_messages(
                     task_id=request.task_id,
                     thread_id=request.thread_id,
                     purpose="compact_live_tool_summary",
+                    tool_choice=request.tool_choice,
                 ),
                 interrupt_check=request.interrupt_check,
                 preserve_complete_fallback=request.preserve_complete_fallback,

@@ -5,8 +5,7 @@
 组包与工具循环，只把供应商传输换成模拟器（agent_py_agent/tests/cache_prefix_simulator.py），所以谁改了组包、
 历史拼装或档位传递，命中率掉下来 CI 直接红。
 
-判定只看结构化事实：模拟器记录的每次调用（分区、命中计量、是否被判 400）。已有未修复项用 strict xfail 标出
-（原因写对应修复分支名），修复合入时 strict 会以 XPASS 失败，提醒去掉标记。
+判定只看结构化事实：模拟器记录的每次调用（分区、命中计量、是否被判 400）。压缩用例从真实 Gateway ask 触发 transcript Compact；异常路径只用 typed overflow 注入，供应商传输仍由缓存模拟器替换。
 """
 
 from __future__ import annotations
@@ -20,6 +19,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.backends import http
+from agent_py_agent.agent.backends.errors import ProviderContextWindowError
+from agent_py_agent.agent.conversation import compact_request_budget
 from agent_py_agent.agent.gateway_parts import request_context, request_execution
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests.cache_prefix_simulator import (
@@ -47,6 +48,8 @@ class CacheScenarioWire:
     def __init__(self, simulator: PrefixCacheSimulator) -> None:
         self.simulator = simulator
         self.turns: list[dict] = []
+        self.payloads: list[dict] = []
+        self._overflowed_markers: set[str] = set()
         # 每轮已经发出过几次工具调用；用结构化标记定位“本轮”，避免跨轮累加导致永远不出最终答复。
         self._tool_calls_in_turn: dict[str, int] = {}
         self._last_marker = ""
@@ -67,10 +70,14 @@ class CacheScenarioWire:
         texts = [_text_of(message.get("content")) for message in payload.get("messages") or []
                  if message.get("role") == "user"]
         marker = _last_marker(payload)
+        if marker.startswith("SIM-COMPACT-NEXT") and marker not in self._overflowed_markers:
+            self._overflowed_markers.add(marker)
+            raise ProviderContextWindowError("测试触发的 Gateway 前台 overflow")
         if marker != self._last_marker:
             self._last_marker = marker
             self._tool_calls_in_turn[marker] = 0
         scripted = self._script_for(marker, self._tool_calls_in_turn.get(marker, 0))
+        self.payloads.append(payload)
         response, _ = self.simulator.serve(payload)
         if "error" in response:
             return response
@@ -85,6 +92,8 @@ class CacheScenarioWire:
 
     # 函数用途: 按结构化标记决定这一轮返工具调用还是最终答复（含“最终答复没有思考内容”那一种）。
     def _script_for(self, marker: str, tool_calls_done: int) -> dict:
+        if marker.startswith("SIM-COMPACT-SEED"):
+            return {"text": "SIM-COMPACT-SEED-DONE", "reasoning": "种子回合的思考。"}
         if marker.startswith("SIM-TURN1"):
             if tool_calls_done == 0:
                 return {"tool": "list_files", "arguments": {"path": "."}}
@@ -222,41 +231,67 @@ def test_three_real_turns_keep_the_cache_prefix_hot(tmp_path, monkeypatch):
     assert len(simulator.report()["partitions"]) == 1, f"出现了分区切换：{simulator.report()['partitions']}"
 
 
-@pytest.mark.xfail(strict=True, reason="Gateway 前台压缩路径仍落在 default 档位分区（cachecompact c290e99ab 只修了 tool-loop 路径）：luna3 补完后去掉本标记")
-def test_compaction_call_reuses_the_conversation_history_prefix(tmp_path, monkeypatch):
-    """压缩类辅助调用必须复用主对话的缓存前缀。
+# LLM: 只观察 conversation_compact_summary 这一种摘要请求：记录请求对象和它在模拟器里的调用区间，原样转发不改行为。
+# 函数用途: 给 Gateway 前台 Compact 的摘要入口挂观察点，返回（摘要请求列表，[(请求, 起始调用号, 结束调用号)]）。
+def _observe_compact_requests(monkeypatch, simulator) -> tuple[list, list]:
+    compact_requests = []
+    compact_request_call_ranges = []
+    original_send = compact_request_budget._generate_auxiliary_with_retry
 
-    官网实测（ds_probe4/5）：压缩类请求要复用主对话缓存，必须同分区、带同一套 tools、用 auto、
-    system 和历史逐条相同（压缩指令放最后一条 user）；否则前缀在 system 之后分叉，命中为 0。
-    现状（本分支基点对照实测）：压缩请求不带 reasoning_effort、不带历史，落在 `(model, enabled, default)`，
-    prompt 只有 46 字符、命中 0 —— 这正是压缩命中率低的成因。修复方向在 luna3 手上（worker/cache-compact）；
-    这里按已知未修标 strict xfail，修好会 XPASS 失败，提醒去掉标记。
-    """
-    chain, simulator, _scenario = _environment(tmp_path, monkeypatch)
-    chain.ask("SIM", "SIM-TURN1 第一条：看一下工作区。")
-    chat = [record for record in simulator.calls if not record.rejected]
-    assert chat, "主对话没有产生模型调用，场景没跑起来"
-    # “主对话历史前缀”取主对话已建立的最长前缀（最后一条请求的完整 prompt 计量）。
-    history_prefix = max(record.prompt_tokens for record in chat)
+    def observe_compact_request(request):
+        if request.purpose != "conversation_compact_summary":
+            return original_send(request)
+        compact_requests.append(request)
+        call_start = len(simulator.calls)
+        try:
+            return original_send(request)
+        finally:
+            compact_request_call_ranges.append((request, call_start, len(simulator.calls)))
 
-    # 压缩调用走真实辅助模型入口；用调用前后的记录差识别它，不解析 payload 正文。
-    from agent_py_agent.agent.conversation.auxiliary_model_call import (
-        AuxiliaryModelCallRequest,
-        generate_auxiliary_model_response,
+    monkeypatch.setattr(compact_request_budget, "_generate_auxiliary_with_retry", observe_compact_request)
+    return compact_requests, compact_request_call_ranges
+
+
+# LLM: 失败信息带出 follow-up 后每次调用的分区/命中与出站形状，方便定位是没走 Compact 还是没对齐前缀；不读正文。
+# 函数用途: 断言 follow-up 确实先进入 transcript Compact 摘要入口、再发送业务请求。
+def _assert_compact_entered(scenario, compact_calls, compact_requests, calls_before_followup) -> None:
+    assert compact_requests, (
+        "真实 Gateway follow-up 未进入 transcript Compact 摘要入口；"
+        f"calls={[(call.partition, call.rejected, call.hit_tokens, call.prompt_tokens, call.units) for call in compact_calls]}；"
+        f"wire_shapes={[{'tool_count': len(payload.get('tools') or []), 'tool_choice': payload.get('tool_choice'), 'roles': [row.get('role') for row in payload.get('messages') or []]} for payload in scenario.payloads[calls_before_followup:]]}；"
+        f"turns={scenario.turns[-4:]}"
     )
-    before = len(simulator.calls)
-    generate_auxiliary_model_response(AuxiliaryModelCallRequest(
-        agent=chain.agent, prompt="把以上对话压缩成摘要。", purpose="compact",
-        thread_id=chain.threads["SIM"], request_id="sim-compact", run_id="sim-compact-run",
-    ))
-    compact = simulator.calls[before:]
-    assert compact, "压缩调用没有走辅助模型入口，场景没跑起来"
-    assert all(not record.rejected for record in compact), "压缩请求被模拟服务端拒绝"
+    assert len(compact_calls) >= 2, "follow-up 没有先做 Compact 再发送业务请求"
 
-    chat_partitions = {record.partition for record in chat}
-    assert {record.partition for record in compact} <= chat_partitions, (
-        f"压缩调用落在不同分区：压缩 {[r.partition for r in compact]} vs 对话 {chat_partitions}")
-    hit = max(record.hit_tokens for record in compact)
-    assert hit >= CROSS_TURN_HIT_FLOOR * history_prefix, (
-        f"压缩请求没有复用主对话历史前缀：命中 {hit}，主对话历史前缀 {history_prefix}；"
-        "对齐后应当命中 system/tools/历史的绝大部分（≥90%）")
+
+def test_compaction_call_reuses_the_conversation_history_prefix(tmp_path, monkeypatch):
+    """真实 Gateway 前台 Compact 的摘要请求必须复用主请求分区与已提交历史前缀。"""
+    chain, simulator, scenario = _environment(tmp_path, monkeypatch)
+    compact_requests, compact_request_call_ranges = _observe_compact_requests(monkeypatch, simulator)
+    seed_prompt = "SIM-COMPACT-SEED\n" + ("stable prior conversation text " * 3_000)
+    chain.ask("SIM", seed_prompt)
+    prior_chat = simulator.calls[-1]
+    calls_before_followup = len(simulator.calls)
+
+    chain.ask("SIM", "SIM-COMPACT-NEXT\n继续核对。")
+
+    compact_calls = simulator.calls[calls_before_followup:]
+    _assert_compact_entered(scenario, compact_calls, compact_requests, calls_before_followup)
+    assert compact_request_call_ranges, "Compact 摘要请求没有对应的模拟器传输调用"
+    observed_request, call_start, call_end = compact_request_call_ranges[0]
+    assert observed_request is compact_requests[0]
+    assert call_end > call_start, "Compact 摘要请求没有进入模拟器传输"
+    assert call_start >= calls_before_followup
+    assert simulator.calls[call_start] in compact_calls
+    assert compact_requests[0].thread_id == chain.threads["SIM"]
+    assert compact_requests[0].purpose == "conversation_compact_summary"
+    compact_call = simulator.calls[call_start]
+    assert not compact_call.rejected, "Gateway Compact 摘要请求被模拟服务端拒绝"
+    assert compact_call.partition == prior_chat.partition, (
+        f"Gateway Compact 落在不同分区：Compact {compact_call.partition} vs 主请求 {prior_chat.partition}")
+    assert compact_call.hit_tokens >= CROSS_TURN_HIT_FLOOR * prior_chat.prompt_tokens, (
+        f"Gateway Compact 未复用主请求前缀：命中 {compact_call.hit_tokens}，"
+        f"主请求前缀 {prior_chat.prompt_tokens}；出站messages={len(scenario.payloads[calls_before_followup].get('messages') or [])}")
+    assert not compact_calls[-1].rejected, "Compact 后重新发送的业务请求被模拟服务端拒绝"
+    assert scenario.turns[-1]["marker"] == "SIM-COMPACT-NEXT"
+    assert scenario.turns[-1]["kind"] == "final"

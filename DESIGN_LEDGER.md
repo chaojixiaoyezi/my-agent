@@ -1,5 +1,12 @@
 # 设计台账
 
+## cachecompact2：Gateway压缩分区与active-turn前缀边界（2026-10-05，worker/cache-compact；本地实现与回归/静态门禁通过，真实服务指标未验证）
+
+- **Gateway遗漏复核**：旧 strict xfail 测试使用非生产 purpose=`compact`，且构造的辅助请求没有线程历史、tools；它不能证明 Gateway 前台压缩真的落在 default 分区。测试现改走真实 Gateway ask，首次成功请求建立历史，typed overflow 后由原恢复链执行 Compact，再重发业务请求。真实摘要入口传 `conversation_compact_summary` 与精确 thread_id，主/摘要请求同为 `(deepseek-v4-flash, enabled, max)`，模拟前缀命中达到 90% 门槛；生产线程档位转接无缺陷，已去掉 xfail。单次变异移除该 purpose 识别后，分区断言按 default/max 不一致变红。
+- **active-turn边界**：该摘要只合并上一代 thread summary 与当前选中的工具 IR，不携带完整主线程 provider history；因此明确不承诺主请求缓存前缀。为此请求显式发送空工具目录与 `ToolChoice.none("active_turn_summary_no_prefix")`；bounded 路径只对非空工具目录强制 `auto`，空目录的 none 保持至出站，避免无谓工具选择与额外重试。真实 HTTP 假传输测试检查出站字段、一次请求完成；将 active-turn 改回带 surface.tools 的单次变异被 none 断言抓红。
+- **区分其他路径**：完整缓存面可复用的单次 transcript/tool-loop 摘要仍保留 system/tools/history 与 `auto`；结构化工具调用不执行，走已有的一次无工具/`none`重试。超窗分段、active-turn 窄视图和 `compact_carried_summary` 均不宣称与主请求共享完整前缀。
+- **证据边界**：当前只有本地 Gateway/假传输及缓存模拟器证据；真实 DeepSeek 缓存命中率、服务端计费和实际节省未验证，不以旧估算冒充实测。完整测试与门禁结果见 `TESTS.md` 本节后续记录。
+
 ## TUI 本地会话登记恢复（sessrec，2026-10-05；待非作者初审）
 
 - **调查**：单会话目录的直接删除入口是 `SessionManager.delete_session`（`agent/session/manager.py`），全仓未发现生产调用方；未找到 TUI 退出、TTL 或会话专用维护回收。`OwnerObjectStore.restore` 会先递归删除整个 `owner_home` 再按清单恢复，清单缺少的会话文件可能随之消失；仅凭当前源码不能认定它就是这次丢失的实际原因。新会话由 CLI chat 创建，显式 resume 在本地登记缺失时原本 fail-closed。
@@ -278,7 +285,7 @@
 - **服务端"无变化"快速路径**：按任务要求**只写方案、未实现**（方案在交接报告）。
 - **未验证**：真实 TUI 端到端与真实 Gateway 下的效果（本树只有合成负载测量）；测量数字只进交接报告，不进仓库。
 
-## cachecompact：压缩请求沿用主线程缓存前缀（2026-10-04，worker/cache-compact；已并入 step17k，部分生效，两处遗漏待补）
+## cachecompact 初始阶段记录（2026-10-04，worker/cache-compact；历史状态，以本节上方 2026-10-05 跟进为准）
 
 - **3a 挑入时核实（10-05）**：ds7 用两条独立构造路径做字节级比较，tool-loop 路径通过（压缩请求 = 主请求完整字节 + 末尾压缩指令，tools 与档位一致）。两处遗漏：① Gateway 前台压缩路径（cachesim 护栏 test_compaction_call_reuses_the_conversation_history_prefix）仍落在 (enabled, default) 分区，没带线程的 max 档位，护栏继续 strict xfail；② active-turn 路径不带之前的历史（provider_history 从空记录重放），第 1 条消息就分叉。已转作者 luna3 补，补完去掉护栏标记。
 

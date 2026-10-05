@@ -86,9 +86,9 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
     return _request_tokens(request, source)
 
 
-# LLM: 可容纳单次摘要保留原 system/messages/tools 并使用 tool_choice=auto，以便服务端在工具定义后继续对齐历史缓存。
+# LLM: 有工具定义的可缓存摘要保留原 system/messages/tools 并使用 tool_choice=auto，以便服务端继续对齐缓存前缀。
 # 若真实响应含结构化工具调用，响应不得采用，最多额外发一次 no-tools/none 请求；分段路径只摘要局部源，明确不承诺与主历史共享前缀。
-# 超量或 typed 窗口错误仍走原分段链；I/O 前后复查取消，legacy tools=None 不添接口要求。
+# 显式空工具列表可携带 tool_choice=none；超量或 typed 窗口错误仍走原分段链，I/O 前后复查取消，legacy tools=None 不添接口要求。
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
 # COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片）。
@@ -107,7 +107,7 @@ def generate_bounded_compact_response(
 ) -> object:
     if message_source is not None and request.messages is not None:
         raise ValueError('compact summary requires one message source')
-    if request.tools is not None:
+    if request.tools:
         request = replace(request, tool_choice=ToolChoice.auto("compact_cache_surface"))
     budget = compact_summary_budget(request.agent)
     raise_if_compact_interrupted(interrupt_check)

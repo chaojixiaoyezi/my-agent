@@ -507,8 +507,9 @@ def _active_turn_fixed_tokens(
     return calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
 
 
-# LLM: 摘要读取全部选中工具的原逐条模型投影，不使用截短handoff；scope/base与provider面保持，过长沿原分段器。
-# 函数用途: 复用已冻结供应商缓存面与停止信号，生成可独立替代前摘要的跨片交接。
+# LLM: Active-turn 只把上一代摘要与选中的当前工具 IR 合成替换摘要，不重放完整线程历史；它不承诺缓存前缀复用。
+#   因此摘要请求必须不带业务工具且显式 tool_choice=none，避免工具执行权与无意义的额外工具调用重试。
+# 函数用途: 按当前回合的工具往返生成独立交接摘要，保留冻结的 system 面与停止信号。
 def _active_turn_replacement_summary(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -520,6 +521,7 @@ def _active_turn_replacement_summary(
         summarize_live_tool_history,
     )
     from ..settings.reasoning_effort import run_thread_id
+    from ..tooling.runtime_contracts import ToolChoice
     from .compact_provider_surface import (
         conversation_compact_provider_messages,
         conversation_compact_provider_prompt,
@@ -553,7 +555,8 @@ def _active_turn_replacement_summary(
             max_output_chars=config.max_input_chars,
             provider_prompt=conversation_compact_provider_prompt(surface, "") if surface is not None else "",
             provider_history_messages=provider_history,
-            tools=surface.tools or () if surface is not None else (),
+            tools=(),
+            tool_choice=ToolChoice.none("active_turn_summary_no_prefix"),
             system_instruction=surface.system_instruction if surface is not None else "",
             interrupt_check=request.interrupt_check,
         )

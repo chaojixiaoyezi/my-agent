@@ -10,8 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
+from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.http import HttpBackend
+from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.conversation import compact as compact_module
 from agent_py_agent.agent.conversation.active_turn_compact import (
@@ -40,6 +42,9 @@ from agent_py_agent.agent.conversation.compact_summary_view import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import compact_semantic_summary, estimate_tokens
+from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
+    summarize_live_tool_history as _real_summarize_live_tool_history,
+)
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
@@ -385,7 +390,11 @@ def test_existing_provider_surface_and_applied_summary_reach_original_summary_ap
     request = case.summaries[-1]
     assert result.compacted and result.thread.compact_generation == 2
     assert len(case.summaries) == 2
-    assert request.tools is tools and request.system_instruction == surface.system_instruction
+    assert surface.tools is tools
+    assert request.tools == ()
+    assert request.tool_choice is not None
+    assert (request.tool_choice.mode, request.tool_choice.reason) == ("none", "active_turn_summary_no_prefix")
+    assert request.system_instruction == surface.system_instruction
     assert request.interrupt_check is interrupt_check
     assert prompt_cache_layout(request.provider_prompt).stable_prefix == surface.stable_prompt_prefix
     history = json.dumps(request.provider_history_messages, ensure_ascii=False)
@@ -451,3 +460,52 @@ def test_scoped_active_checkpoint_inherits_its_distinct_evidence_not_global(carr
     checkpoint = committed_compact_checkpoint_chain(case.agent, committed)[-1]
     assert checkpoint["summary_base_checkpoint_id"] == local.checkpoint_id
     assert checkpoint["operation_evidence"] == local.operation_evidence
+
+
+def test_active_turn_summary_without_prefix_contract_sends_none_without_retry(carried_case, monkeypatch):
+    case = carried_case
+    case.agent.backend = OpenAICompatibleBackend(BackendOptions(
+        api_base="https://api.deepseek.com/v1", api_key="offline", model_name="deepseek-v4-flash",
+        max_tokens=1_000, context_window_tokens=10_000, reasoning_control="effort", stream_enabled=False,
+    ))
+    monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history", _real_summarize_live_tool_history)
+    payloads = []
+    tool = {"type": "function", "function": {
+        "name": "read_file", "description": "读取文件", "parameters": {"type": "object", "properties": {}}
+    }}
+
+    def post_json(request):
+        payload = json.loads(json.dumps(request.payload))
+        payloads.append(payload)
+        if payload.get("tools") and payload.get("tool_choice") != "none":
+            message = {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call-active-compact-retry", "type": "function",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }]}
+            finish_reason = "tool_calls"
+        else:
+            message = {"role": "assistant", "content": _SUMMARY}
+            finish_reason = "stop"
+        return {
+            "id": "chatcmpl-active-compact", "object": "chat.completion", "created": 1,
+            "model": "deepseek-v4-flash",
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+        }
+
+    monkeypatch.setattr(http, "post_json", post_json)
+    surface = ConversationCompactProviderSurface("主请求稳定前缀", (tool,), "主请求 system 指令")
+    result = _compact(
+        case, provider_surface=surface,
+        request_projector=lambda *_: ConversationCompactProjection(100, object()),
+    )
+
+    assert result.compacted
+    assert len(payloads) == 1, f"不应触发工具调用后的额外无工具重试：{len(payloads)} 次"
+    payload = payloads[0]
+    choice = payload.get("tool_choice")
+    mode = choice if isinstance(choice, str) else str(
+        (choice or {}).get("type") or (choice or {}).get("mode") or ""
+    )
+    assert mode == "none", f"active-turn 摘要必须明确禁止工具选择：{choice!r}"
+    assert not payload.get("tools"), "active-turn 摘要不承诺主请求前缀，不应发送工具定义"

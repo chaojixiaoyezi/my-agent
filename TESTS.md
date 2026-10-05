@@ -710,6 +710,23 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 ## cachecompact 压缩缓存前缀与线程推理档位（2026-10-04，worker/cache-compact；已rebase17j，非作者初审完成）
 
+### 2026-10-05 cachecompact2 跟进
+
+- **Gateway 前台压缩用例纠正**：旧 strict xfail 测试手工调用 `generate_auxiliary_model_response`，传入非生产 purpose=`compact`，且不带 thread 历史/tools；它测到的 default 分区是测试构造问题，不能证明 Gateway 产品链有缺陷。现用真实 Gateway ask 建立前一轮，再以模拟的 typed `ProviderContextWindowError` 触发原 Gateway Compact 恢复；实际 `_generate_auxiliary_with_retry` 捕获 `purpose=conversation_compact_summary` 与真实 thread ID。模拟器观察到 Compact 与主请求同为 `(deepseek-v4-flash, enabled, max)`，且命中已建立历史前缀不少于 90%。严格 xfail 已移除。
+- **active-turn 前缀边界**：该摘要仅用上一代 thread summary 加本轮被选中的工具 IR，不持有完整主线程 provider history，因此明确不承诺缓存前缀复用。真实 `OpenAICompatibleBackend` 假传输捕获 `_active_turn_replacement_summary` 的最终 JSON，断言只发一次、`tool_choice=none`、没有 tools。active-turn 将工具面置空；通用 bounded helper 保留空列表上的显式 none，不重新改成 auto。
+- **定向命令与结果**（指定 CI Python；代号 luna3）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cache_prefix_regression.py -k compaction -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_active_turn_compact_projection.py -k active_turn_summary_without_prefix_contract -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3
+  ```
+  两条目标用例均以退出码 0 结束。
+- **变异**：① 临时删除 `_is_compact_purpose` 对 `conversation_compact_summary` 的识别，Gateway 测试在分区断言处变红（摘要 default、主请求 max）；② 临时让 active-turn 重新传递 `surface.tools`，测试在 tool_choice 断言处变红（出站 auto）。两处原代码均已还原，各自再跑通过。
+- **全量压缩与 cache-prefix 回归**：对 `test_*compact*.py` 与 `test_cache_prefix_*.py` 文件集合，使用指定 CI Python 跑完整套件。首次运行以退出码 1 暴露旧断言仍要求 `request.tools is tools`；按 active-turn 新合同保留 system、历史、线程上下文和摘要基线断言，改为核验空 tools + `ToolChoice.none`。再跑两个相关聚焦用例（2 项）通过。独立审查指出 Gateway 命中断言最初未显式关联到摘要调用；现测试在 `_generate_auxiliary_with_retry` 周围记录模拟器调用区间，明确断言区间首项就是对应的 `conversation_compact_summary` 调用，并验证摘要后业务请求以 `SIM-COMPACT-NEXT` final 收口。修正后完整集合重新跑至 100%、退出码 0。
+- **guards9**：`guards9.txt` 后来增至 12 项，其中 `test_backend_signature_guardrails.py` 不在 pinned HEAD `9d5165809`（`git ls-tree` 无此文件；其源在提交 `07d7b3306`）。精确列表首次运行因缺文件退出码 4。为覆盖当前列表，临时从该提交取出这份守卫测试到同一路径，运行完整 12 项至 100%、退出码 0 后立即删除临时文件；不纳入交付 diff。单独重跑 pinned HEAD 自带的 11 项同样到 100%、退出码 0。
+- **最终静态门禁**：`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2193 hard=0 blocked=False`；`git diff --check` 退出码 0、无输出。code-size 曾生成的 `CODE_SIZE_REPORT.md` 已按约定还原，未留在改动中。首轮 Ruff 找到 `ToolChoice` 注解缺导入及导入排序问题，首轮 doc sync 指出 memory 模块进度/结构文档未同步；均已修复后重新通过。
+- **复审与未验证边界**：独立只读审查最初指出 Gateway 调用/缓存断言映射不够显式，上述区间追踪与 final 收口断言已补；复审未发现剩余严重/重要问题。active-turn 复审疑点源于首份摘录省略了 payload `tool_choice` 解码，当前测试实际读取最终 JSON 并断言 `none`，且无 tools。未连接真实 DeepSeek、未测服务端缓存命中率或实际费用；本地前缀模拟器仅验证本地 payload 顺序/分区。
+
 - **fake transport payload 合同**：`agent_py_agent/tests/test_compact_reasoning_options.py` 捕获 OpenAI-compatible 后端最终 JSON，不访问供应商；**14 passed**。覆盖 max/off 两档、`conversation_compact_summary` 与 `conversation_compact_media_digest` 的选项换算、历史 tool-call 往返、system/messages（reasoning/tool ID/参数）、tools/schema、`auto`、thinking/reasoning_effort；bounded 与 live 的 typed `CacheStructuredPrompt` 路径均核实同一 system/tools/历史，仅在最后 user 内容追加 Compact 指令；carried 文本和分段核实其非完整前缀边界；结构化工具调用不执行，仅额外尝试一次无工具/`none`。tool-loop 包装器与 active-turn 包装器另有线程身份转接断言。
 - **fake transport 命令**（工作树根执行）：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 ~/.my-agent/releases/claude-tools/ci-venv-312/bin/python -m pytest agent_py_agent/tests/test_compact_reasoning_options.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna3` → **14 passed**。
 - **三类变异**（均预期失败，已还原生产代码）：删除 tools → 合同因 `tools` 字段缺失变红；替换 system → system message 不等；历史开头插入 user → messages 序列不等。
