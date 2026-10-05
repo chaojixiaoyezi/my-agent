@@ -90,6 +90,15 @@
   - guards9（12 文件）→ 全绿；`scripts/check_import_boundaries.py` → findings=0（白名单常量放 gateway 层，守住 gateway_parts 不能导入 agent_core 的层边界）；`ruff check agent_py_agent scripts` → All checks passed。
 - 新增用例：`test_incomplete_with_tool_rounds_requeues_for_resume`、`test_retry_budget_exceeded_requeues_for_resume`、`test_request_rejected_does_not_requeue`、`test_zero_output_stream_incomplete_does_not_requeue`、`test_resume_limit_exhausted_fails_normally`、`test_switch_off_does_not_requeue`、`test_resume_count_accumulates_and_survives_restart_marker`。
 
+## 请求锁 sidecar 清理协议加固 obsfix34b（2026-10-05，worker/obsfix34b，基于 2a3a7f21c）
+
+- **用例**：新增 `agent_py_agent/tests/test_lock_sidecar_cleanup_protocol.py`（5 条）——真实持有者持锁时绝不删除（回归双重后缀 bug）；持锁 unlink 失败（Windows 语义）放弃删除；清理者+阻塞迟到者+新来者交错时任何时刻最多一方在临界区（unlink 钩子确定性时序）；身份核对重试有上限（`BlockingIOError`）；json_io 加锁路径重置换锁后正常进入。更新 `test_gateway_io.py` 活锁构造（锁文件本体持锁）、`test_error_code_fallback.py` 加 quota 自带码用例。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_lock_sidecar_cleanup_protocol.py agent_py_agent/tests/test_gateway_io.py agent_py_agent/tests/test_error_code_fallback.py agent_py_agent/tests/test_timeout_budget_locked.py agent_py_agent/tests/test_concurrency_hardening.py agent_py_agent/tests/test_gateway_request_runtime_errors.py agent_py_agent/tests/test_common_safe_id_and_paths.py agent_py_agent/tests/test_config_write_permissions.py -q` → 全过（含 1 xfail）；guards9 12 文件全过；`test_constant_names_unique`/`test_constants_catalog` 通过（常量以 `_COUNT` 后缀命名 + 目录重生成 916 项）。
+- **变异**（4/4 KILLED，按备份还原、sha256 一致）：恢复双重后缀打开（2 红）；去掉加锁方身份核对（2 红）；重试上限写死成 3（1 红）；去掉 quota 映射（存活 → 证明该分支是死代码：quota 异常自带 `error_code`，实现已撤销、改为钉住自带码来源）。
+- **性能**：`locked_json_path` 单次 52.0µs（3000 次均值，含 fstat+stat 身份核对）。
+- **门禁**：guards9；ruff；import boundaries 0；DOC_SYNC_PASS --base f7849d7ff；strict code-size hard=0；size_diff 新增 0/消失 57；`git diff --check`；clean package（暂存后复跑）。
+- **未验证**：真实 Windows 的 unlink 失败分支（只按 OSError 语义实现与测试）；生产流量下的真实锁竞争分布（协议语义已在组件层覆盖）。
+
 ## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，分支 `worker/obsfix34`，待非作者初审）
 
 - 背景、根因与改法见 `DESIGN_LEDGER.md` 同名小节。

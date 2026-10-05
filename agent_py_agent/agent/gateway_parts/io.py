@@ -280,6 +280,11 @@ def try_locked_file_transition(path: Path):
         if not os_lock_acquired:
             yield False
             return
+        # LLM: 锁文件可能刚被孤儿清理器换掉：身份不符说明拿到的不是当前锁文件的锁，探测不能获得授权
+        #   （fail-closed）；按"没拿到"返回，让调用方保留原事实。
+        if not _lock_handle_matches_path(handle, path.with_name(path.name + ".lock")):
+            yield False
+            return
         yield True
     finally:
         if handle is not None:
@@ -319,16 +324,51 @@ def try_gateway_turn_transition(paths: GatewayPaths, request_id: str):
         yield acquired
 
 
+# LLM: 锁文件可能被孤儿清理器删除或替换（gateway 请求锁 sidecar）：拿到 flock 后核对 fd 与锁路径的
+#   (st_dev, st_ino) 一致；不一致说明名字已换或已删——在旧 inode 上持锁不再是互斥保证（阻塞迟到者场景），
+#   close 后重开重试。超上限按锁竞争失败（BlockingIOError），与既有线程锁失败语义一致。
+_LOCK_IDENTITY_RETRY_COUNT = 5
+
+
 # LLM: 锁与数据文件同口径私有（0600/0700）；缺失目录经 no-follow 原语按 0700 建、已存在一律不动（lkp/pdp）；保留 blocking=False 非阻塞语义。
 # 函数用途: 在 <path>.lock 上取排他锁，包裹调用方的临界区。
 @contextmanager
 def _locked_file_path(path: Path):
-    with _open_lock_handle(path) as handle:
-        _flock_exclusive(handle)
+    handle = _acquire_verified_lock(path)
+    try:
+        yield
+    finally:
+        _flock_unlock(handle)
+        handle.close()
+
+
+# LLM: 取锁重试循环独立成函数（压平临界区的嵌套）：每轮"打开→阻塞取锁→核对身份"；身份不符说明锁文件
+#   被清理器换掉，关闭后重开重试；取锁本身异常时关闭句柄再冒泡，不泄漏 fd；超上限抛 BlockingIOError。
+# 函数用途: 反复取锁直到 fd 与锁路径身份一致，返回已验证的锁句柄。
+def _acquire_verified_lock(path: Path):
+    lock_path = path.with_name(path.name + ".lock")
+    for _ in range(_LOCK_IDENTITY_RETRY_COUNT):
+        handle = _open_lock_handle(path)
         try:
-            yield
-        finally:
-            _flock_unlock(handle)
+            _flock_exclusive(handle)
+        except BaseException:
+            handle.close()
+            raise
+        if _lock_handle_matches_path(handle, lock_path):
+            return handle
+        handle.close()
+    raise BlockingIOError("锁文件身份反复变化，放弃取锁")
+
+
+# LLM: 身份核对只比较 (st_dev, st_ino)，不看 mtime/权限；路径缺失或不可 stat 一律视为不匹配（fail-closed）。
+# 函数用途: 核对锁句柄与锁路径当前指向同一个 inode。
+def _lock_handle_matches_path(handle, lock_path: Path) -> bool:
+    try:
+        fd_stat = os.fstat(handle.fileno())
+        path_stat = os.stat(lock_path)
+    except OSError:
+        return False
+    return (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
 
 
 # LLM: 锁文件与数据文件同口径私有（文件 0600、父目录 0700、不跟随符号链接）：原来 lock_path.open("a+")+mkdir
@@ -471,21 +511,27 @@ def _cleanup_one_orphan_lock(lock_path: Path, *, current: float) -> bool:
         return False
 
 
-# LLM: 先按同一条 _open_lock_handle 原语非阻塞试锁；拿不到说明有活进程正在用这把锁，直接放行不动文件。
-#   拿到后先关句柄再删名（Windows 上打开着的文件删不掉；删名窗口里对应数据文件已不存在，晚到的锁只会锁到孤儿锚点）。
-# 函数用途: 非阻塞试锁并删掉一个孤儿锁文件，真的删掉返回 True。
+# LLM: 必须在锁文件本体上试锁：_open_lock_handle 是"数据文件路径"入口，会再加一层 .lock，
+#   用它探测会永远拿得到 <name>.lock.lock，活锁保护形同虚设（obsfix34b 实测：真实持有者持锁时照样被删）。
+#   拿不到锁说明有活进程正在用这把锁，直接放行不动文件。拿到后在持锁状态下 unlink 再 close：
+#   POSIX 下删名后新来者只能创建新 inode，不会出现"旧 inode 持有者与新 inode 持有者同时进临界区"。
+#   Windows 上打开着的文件删不掉：unlink 失败就放弃本次删除（宁可留孤儿，不回退成先 close 再删，
+#   那会重新引入竞态窗口）。
+# 函数用途: 非阻塞试锁并在持锁状态下删掉一个孤儿锁文件，真的删掉返回 True。
 def _remove_orphan_lock_file(lock_path: Path) -> bool:
-    handle = _open_lock_handle(lock_path)
+    handle = os.fdopen(_open_private_lock_descriptor(lock_path), "a+", encoding="utf-8")
     try:
         if not _try_flock_exclusive(handle):
             return False
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        return True
     finally:
         handle.close()
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        return False
-    return True
 
 
 # 流式 chunk 文件单次读取上限：整体 f.read() 无上限会 MemoryError，按上限分块读、剩余部分下一拍继续

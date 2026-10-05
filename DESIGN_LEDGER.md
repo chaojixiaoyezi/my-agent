@@ -95,6 +95,15 @@
 - **未验证 / 已知边界**：macOS 上 `holder_is_alive` 没有 /proc 时一律判活——本次只在交接记录，不改（另有 scheduler 判活补丁在审）。
 - **验证**：见 `TESTS.md` obsfix12 节。
 
+## 请求锁 sidecar 清理协议加固（obsfix34b，2026-10-05，worker/obsfix34b，基于 2a3a7f21c；本地验收完成，待 3a 终审）
+
+- **背景**：obsfix34 初审用探针实证"先 close 再 unlink"竞态窗口；3a 补充判断"阻塞等待的迟到者"在持锁 unlink 下仍可拿到旧 inode 锁。本件按"两边一起改"的标准协议修复，并实证了初审未发现的两个问题。
+- **清理者**（`gateway_parts/io._remove_orphan_lock_file`）：① 改为在**锁文件本体**上非阻塞试锁——原实现经 `_open_lock_handle`（数据文件路径入口）会再加一层 `.lock`，实际探测 `<name>.lock.lock`，**活锁保护形同虚设**（探针实测：真实持有者持锁时照样删）；② 试锁成功后**持锁 unlink** 再 close；Windows 上 unlink 失败放弃本次删除（不回退成先 close 再删）。
+- **加锁方**（`gateway_parts/io._locked_file_path`、`common/json_io._locked_file_path`、`try_locked_file_transition`）：拿锁后核对 `os.fstat(fd)` 与 `os.stat(路径)` 的 `(st_dev, st_ino)` 一致；不一致说明锁文件被换/删（阻塞迟到者场景），close 后重开重试（上限 `_LOCK_IDENTITY_RETRY_COUNT`/`_JSON_LOCK_IDENTITY_RETRY_COUNT`=5），超上限抛 `BlockingIOError`；非阻塞探测路径身份不符按"没拿到"返回（fail-closed）。
+- **quota 映射核实**：任务第 3 条的前提不成立——`ProviderQuotaExhaustedError` **自带 `error_code='PROVIDER_QUOTA_EXHAUSTED'`**，`fallback_error_code` 第一步原样保留，从未落 `UNKNOWN_ERROR`；已撤销临时映射分支并加用例钉住真实来源。
+- **验证**：新测试 `test_lock_sidecar_cleanup_protocol.py` 5 条（活锁不删回归、Windows unlink 失败不删、清理+阻塞迟到者+新来者交错 max_active==1、重试上限、json_io 重置换锁后正常）；`test_gateway_io` 活锁构造改用锁文件本体持锁；4 变异全杀（双重后缀、去核对、上限写死、quota 映射）；性能实测单次 `locked_json_path` 52µs（含 fstat+stat）；相关 8 文件 + guards9 全过；size_diff 新增 0（首轮 2 条 nesting 经拆平归零）。
+- **已知边界**：Windows 分支只按"unlink 抛 OSError 即放弃"实现与测试，未在真实 Windows 跑；inode 复用（unlink 后立即创建复用同一 inode）会让核对恰好通过——不影响正确性（同 inode 即同锁）。
+
 ## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，分支 `worker/obsfix34`，基于 17l 头 `f7849d7ff`；待非作者初审）
 
 - **来源（结构化事实）**：生产 Gateway `requests/pending` 下 1435 个、`processing` 下 1588 个空 `.lock` 文件，最老超过 7 天，而真正在跑的请求只有 19 个（obsfix 只读调查第 3 条）。

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from agent_py_agent.agent.backends.errors import (
     ProviderConnectionError,
+    ProviderQuotaExhaustedError,
     ProviderStreamIncompleteError,
     ProviderTimeoutError,
     ProviderTransientError,
@@ -17,7 +18,13 @@ from agent_py_agent.agent.contracts.error_taxonomy import ERROR_CONTRACTS
 from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
 from agent_py_agent.agent.runtime_errors import fallback_error_code
 
-_FALLBACK_CODES = ("PROVIDER_TIMEOUT", "TRANSIENT_ERROR", "RUNTIME_CONFLICT", "UNKNOWN_ERROR")
+_FALLBACK_CODES = (
+    "PROVIDER_TIMEOUT",
+    "PROVIDER_QUOTA_EXHAUSTED",
+    "TRANSIENT_ERROR",
+    "RUNTIME_CONFLICT",
+    "UNKNOWN_ERROR",
+)
 
 
 def test_provider_timeout_maps_to_registered_timeout_code() -> None:
@@ -54,3 +61,12 @@ def test_existing_error_code_is_preserved() -> None:
 def test_mapped_codes_are_registered_in_taxonomy() -> None:
     for code in _FALLBACK_CODES:
         assert code in ERROR_CONTRACTS, code
+
+
+def test_provider_quota_exhausted_keeps_its_registered_code() -> None:
+    # obsfix34b 验证：quota 异常自带 error_code，fallback 第一步原样保留——不是靠类型映射；
+    # 若未来去掉该属性，需要补类型映射并让本用例继续通过。
+    exc = ProviderQuotaExhaustedError("quota gone")
+    assert exc.error_code == "PROVIDER_QUOTA_EXHAUSTED"
+    assert fallback_error_code(exc) == "PROVIDER_QUOTA_EXHAUSTED"
+    assert ERROR_CONTRACTS["PROVIDER_QUOTA_EXHAUSTED"].retryable is False

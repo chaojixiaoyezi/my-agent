@@ -537,19 +537,49 @@ def _locked_json_path(path: Path, *, blocking: bool = True):
 #   会按 umask 落成 0644/0755，同机他用户能打开并 flock(LOCK_EX) 卡住宿主写入（be 2026-10-03 实测 2158 个 0644）。
 #   改成经 open_private_lock_beneath 拿 fd 再 flock；只 flock、不写内容；保留 blocking=False（同一 OS 锁的 LOCK_NB）
 #   与进程内线程锁层。已存在的 0644 锁在打开时无条件收紧到 0600（自愈存量），只做在我们已知的锁路径上。
+# LLM: 锁文件可能被孤儿清理器删除或替换（gateway 请求锁 sidecar）：拿锁后核对 fd 与锁路径的
+#   (st_dev, st_ino) 一致；不一致说明名字已换或已删——在旧 inode 上持锁不再是互斥保证（阻塞迟到者场景），
+#   close 后重开重试；超上限按锁竞争失败（BlockingIOError），与既有线程锁失败语义一致。
+_JSON_LOCK_IDENTITY_RETRY_COUNT = 5
+
+
 # 函数用途: 在原同名锁文件上获取排他权，忙碌或异常时关闭文件句柄。
 @contextmanager
 def _locked_file_path(path: Path, *, blocking: bool = True):
-    lock_path = path.with_name(path.name + ".lock")
-    descriptor = _open_private_lock_descriptor(lock_path)
+    descriptor = _acquire_verified_lock_descriptor(path, blocking=blocking)
     try:
-        _flock_descriptor(descriptor, blocking=blocking)
-        try:
-            yield
-        finally:
-            _funlock_descriptor(descriptor)
+        yield
     finally:
+        _funlock_descriptor(descriptor)
         os.close(descriptor)
+
+
+# LLM: 取锁重试循环独立成函数（压平临界区的嵌套）：每轮"打开→取锁→核对身份"；身份不符说明锁文件
+#   被清理器换掉，关闭后重开重试；取锁本身异常时关闭描述符再冒泡；超上限抛 BlockingIOError。
+# 函数用途: 反复取锁直到 fd 与锁路径身份一致，返回已验证的锁描述符。
+def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True) -> int:
+    lock_path = path.with_name(path.name + ".lock")
+    for _ in range(_JSON_LOCK_IDENTITY_RETRY_COUNT):
+        descriptor = _open_private_lock_descriptor(lock_path)
+        try:
+            _flock_descriptor(descriptor, blocking=blocking)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        if _descriptor_matches_lock_path(descriptor, lock_path):
+            return descriptor
+        os.close(descriptor)
+    raise BlockingIOError("锁文件身份反复变化，放弃取锁")
+
+
+# 函数用途: 核对锁文件描述符与锁路径当前指向同一个 inode。
+def _descriptor_matches_lock_path(descriptor: int, lock_path: Path) -> bool:
+    try:
+        fd_stat = os.fstat(descriptor)
+        path_stat = os.stat(lock_path)
+    except OSError:
+        return False
+    return (fd_stat.st_dev, fd_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
 
 
 # LLM: 调用方给的是完整锁路径；这里把绝对路径拆成“已存在的最近祖先 + 其余缺失段”（与其余锁/目录调用点共用

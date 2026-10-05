@@ -61,7 +61,8 @@ def is_structured_error_code(value: object) -> bool:
 
 # LLM: 无码异常的兜底码必须落在 contracts/error_taxonomy 的登记码里：把异常类名大写直接当码
 #   （PROVIDERTRANSIENTERROR 等）没有文案、没有恢复语义，还会污染请求账本。映射只按异常类型、
-#   不解析文本；异常自带 error_code 属性时一律原样保留（那才是权威）。Gateway 请求失败
+#   不解析文本；异常自带 error_code 属性时一律原样保留（那才是权威）——ProviderQuotaExhaustedError
+#   自带 PROVIDER_QUOTA_EXHAUSTED，走的就是这条原样保留分支，不需要再按类型映射。Gateway 请求失败
 #   （gateway_parts/request_execution.py）与后台 wake 收口（conversation/runtime.py）两处共用这一份，
 #   禁止各写一份；改动时联查 test_error_code_fallback.py。
 # 函数用途: 给没有 error_code 的异常选一个已登记的错误码。

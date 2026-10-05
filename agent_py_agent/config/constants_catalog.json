@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 920,
+  "count": 922,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1796,6 +1796,14 @@
       "description": "可能发生原子替换（inode 复用、时间戳同片）。窗口内读到的结果只返回、不放进缓存。"
     },
     {
+      "name": "_JSON_LOCK_IDENTITY_RETRY_COUNT",
+      "file": "agent_py_agent/agent/common/json_io.py",
+      "value": 5,
+      "unit": "个",
+      "category": "重试",
+      "description": "close 后重开重试；超上限按锁竞争失败（BlockingIOError），与既有线程锁失败语义一致。"
+    },
+    {
       "name": "_TEXT_LINES_CACHE_MAX_COUNT",
       "file": "agent_py_agent/agent/common/json_io.py",
       "value": 64,
@@ -3090,6 +3098,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "（CLI 与 TUI 两个网关客户端共用这一份）。"
+    },
+    {
+      "name": "_LOCK_IDENTITY_RETRY_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/io.py",
+      "value": 5,
+      "unit": "个",
+      "category": "重试",
+      "description": "close 后重开重试。超上限按锁竞争失败（BlockingIOError），与既有线程锁失败语义一致。"
     },
     {
       "name": "_ORPHAN_LOCK_MIN_AGE_SECONDS",

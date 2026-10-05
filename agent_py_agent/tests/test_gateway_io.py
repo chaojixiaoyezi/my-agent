@@ -448,7 +448,7 @@ class TestCleanupOrphanLockFiles:
         """a 数据在、b 孤儿旧、c 孤儿但活锁、d 孤儿但新：只删 b；再跑幂等。"""
         from agent_py_agent.agent.gateway_parts.io import (
             _flock_exclusive,
-            _open_lock_handle,
+            _open_private_lock_descriptor,
             cleanup_orphan_lock_files,
         )
 
@@ -462,7 +462,9 @@ class TestCleanupOrphanLockFiles:
             self._age(path, self._DAY + 3600)
         fresh.write_text("", encoding="utf-8")
 
-        handle = _open_lock_handle(locked)
+        # 真实持有者（与 _locked_file_path 相同）：在锁文件本体上持锁；不能用 _open_lock_handle——
+        # 那是"数据文件路径"入口，会再加一层 .lock，锁到 <name>.lock.lock 而不是被清理的锁文件。
+        handle = os.fdopen(_open_private_lock_descriptor(locked), "a+", encoding="utf-8")
         _flock_exclusive(handle)
         try:
             assert cleanup_orphan_lock_files(tmp_path) == 1
