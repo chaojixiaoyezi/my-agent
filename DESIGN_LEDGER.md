@@ -1,5 +1,29 @@
 # 设计台账
 
+## 出站字节稳定补丁：结构化路径护栏与已知边界（ck3fix，2026-10-05，分支 `worker/ck3fix`，基于 `d76f04e61`；待复审）
+
+- **来源**：cachekey3 初审（cachekey3r）结论「小问题 5 项」；按 3a 新规则，只涉及测试与注释的小问题由审阅人直接补。产品逻辑不动。
+- **补了什么**：
+  1. 结构化 prompt（`CacheStructuredPrompt`）路径的重载字节一致用例——该路径是宿主真实主路径（`tool_ir_history`/`builder`/`compact_semantic_summary`/`compact_provider_surface` 等 5 个生产构造点），原来只有 legacy 路径有对照用例；现在两条路径都有回归钉。
+  2. 声明外键保留用例——声明表之外的键必须追加保留（不丢字段），此前无用例。
+  3. `tool_result.content` 块列表的已知边界：注释写明「不递归、嵌套键序保持原样；当前生产构造点恒为字符串，不触发分叉；将来改递归时边界用例会红提醒」，并补行为用例记录当前行为。
+  4. WS 首包 ensure_ascii 变化核实：`\uXXXX` 转义与 UTF-8 原文 JSON 解析等价、token 不变；字节层只有切换瞬间的一次性变化；WS 与 HTTP 统一到唯一编码器后不再有口径漂移。无功能影响，无需改产品代码。
+- **变异**：3 个（分别对应 3 条新用例），全部抓住；产品文件原样还原（sha256 一致）。
+- **未验证**：真实服务端缓存命中率改善（需联网与真实账号）；真实 Gateway 端到端。
+
+## 出站字节稳定：只规范化历史消息块，不碰工具与 schema（cachekey3，2026-10-04，分支 `worker/cache-key2`，基于 17j 头 `c544b358d`；本轮返工，含 cachekey2 的最终口径；待复审）
+
+- **背景**：cachereload（`8b42b07b5`）修了 OpenAI/Responses 路径「工具参数 JSON 键序在重载前后不同」。cachekey2 查其它出站协议，发现 Anthropic 路径分叉更大：`tool_use.input` 是 **JSON 对象**而不是字符串，整个请求体由唯一编码器 `gateway_helpers.gateway_request_body` 落字节；实测重载前后请求体有 **24 段差异**——不只是 `input` 的键序，`{"type","text"}`、`{"type","thinking",…}`、`{"type","tool_use",…}`、`{"type","tool_result",…}` 等**所有消息块的键序**都变（磁盘读回是字母序，进程内构造是自然序）。
+- **cachekey2 的修法被否（3a 裁定，理由成立）**：在唯一编码器里整包 `sort_keys` 会顺带改掉两类**与缓存无关**的顺序——工具 JSON Schema 的属性顺序、结构化输出 schema 的顺序。后者会改变模型行为：严格结构化输出按 schema 顺序生成字段，curator 的 `content` 会被排到 `confidence`、`conflicts_with` 之后，等于让模型「先写结论、后写依据」。这是夹带的模型行为变化，不能接受。
+- **最终修法（cachekey3）**：
+  1. `gateway_request_body` **恢复不排序**，保持「调用方给的键序就是线上字节」的原合同；`test_gateway_strict_request.py` 两条测试恢复原断言。
+  2. 稳定性只做在**来自历史的部分**：`anthropic_prompt_cache.anthropic_messages_with_optional_cache`（Anthropic 消息的唯一投影入口）先调 `normalize_anthropic_history_blocks`，按 `_BLOCK_KEY_ORDER` 声明重写**已知块**的键序；`tool_use.input` 用排序往返固定（与 `_openai_function_call` 同口径）。声明外的键追加在后面、保持相对顺序，未知块类型原样返回——不丢字段、不猜结构。**工具定义与任何 schema 完全不经过这里。**
+  3. 选「按块重建」而不是「整棵 messages 子树排序」：子树排序会把 `tool_result.content` 里的 JSON、媒体块 `source` 等**与历史键序无关**的嵌套结构也改掉；按块重建只动已知块自己的键，影响面最小且可枚举。
+  4. `responses_websocket._send_create_message` **保留**复用 `gateway_request_body`：WebSocket 首包本质就是模型请求体，本来就该走唯一编码器，不能自己另写一份 `json.dumps` 而与 HTTP 口径漂移（现在的口径是「保持调用方顺序」，与 HTTP 一致）。
+- **已核无需改**：工具结果结构化内容、媒体块元数据、`RuntimeFactsTurn`、`CompactionSummary` 只产出 dict，最终统一经唯一编码器；`input_media.py` 与 `decision_protocol.py` 各自的 `json.dumps` 已是 `sort_keys=True`。
+- **老会话的影响**：**没有额外的一次性未命中**。老 transcript 里的 envelope 本来就是字母序写入；规范化后当轮新构造的部分也产出同一规范序，两边第一次请求即一致。唯一过渡是上线瞬间服务端缓存里存的仍是旧字节，首次请求对不上、之后稳定。
+- **测试**：`test_backends_provider_history_reload_identical.py` 保留 Anthropic 重载字节一致，新增「三个后端工具 schema 顺序不变」「openai/anthropic 结构化输出 schema 顺序不变」「tool_use.input 规范键序」「唯一编码器保持调用方顺序」；`test_responses_websocket.py` 的首包用例改成「走同一编码器且保持调用方顺序」。结果见 TESTS。
+
 ## B 包 0.3.3：出镜缺参考升级为错误 + 计划中参考的交接登记（pb33，2026-10-04，分支 `worker/pack-b-033`，基于 ds7 的 B 0.3.2 `c779811bc`；待复审）
 
 - **来源**：B 包 0.3.2 重跑上一轮没过的 B05、B10 各两次，独立业务审阅 4 例都不合格（结构检查全过）。两类不合格：① B-RELATIONS 3 例——镜头里出现的角色没连到参考（如 SH03 的动作节拍有 C02，`references` 里却根本没有 REF-C02，SH03 只连了 REF-L01），检查器当时报 `shot_character_reference_missing` 但只算提醒，模型看到提醒就没改；② B-MEDIA 2 例——交接里没把这些缺的参考列成缺项。合格的 B05-t402 正是给 C02、P01 各新建一条 `planned` 参考、连进镜头并在 `additions` 里登记，说明模型做得到、只缺硬要求。另有 B05-t401 的 C-BOUNDARY：模型在工作区外 owner 根下的 `output/` 又写了一份 `project.json`、`handoff.json` 副本（模型行为，包只能在说明里写清楚）。

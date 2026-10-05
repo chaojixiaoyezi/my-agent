@@ -1,5 +1,64 @@
 # 测试与发布验收
 
+## 出站字节稳定补丁：结构化路径护栏、声明外键与块列表边界（ck3fix，2026-10-05，worker/ck3fix；基于 d76f04e61；待复审）
+
+**来源**：cachekey3 初审（cachekey3r）的小问题 1/4/5 与块列表边界，经 3a 裁定由审阅人直接补测试与注释；产品逻辑不动。
+
+**改动（只测试、注释）**：
+1. 新增 `test_structured_prompt_request_body_matches_across_reload`：结构化 prompt（CacheStructuredPrompt）路径在「同进程」与「磁盘重载」下出站字节一致——钉住规范化对 structured_native_layout_active 分支同样生效，不再只靠「规范化在入口函数顶部」这个实现细节。
+2. 新增 `test_anthropic_history_normalization_keeps_undeclared_block_keys`：已知块带声明外键时，外键追加保留并保持相对顺序（不丢字段、不按字母序重排）。
+3. 新增 `test_anthropic_history_normalization_does_not_recurse_into_tool_result_blocks`：记录「tool_result.content 块列表不递归」的已知边界（嵌套键序保持原样）；将来改成递归时该用例会红提醒。
+4. `normalize_anthropic_history_blocks` 的 LLM 注释写明块列表边界与将来改递归的要求；`_send_create_message` 的 LLM 注释修正（首包编码走唯一编码器）并写明 ensure_ascii 变化性质。
+
+**WS 首包 ensure_ascii 变化核实（小问题 5）**：`_send_create_message` 从 `json.dumps(..., ensure_ascii=False)` 改为唯一编码器 `gateway_request_body`（`json.dumps` 默认转义）。核实结论：
+- 服务端语义：`\uXXXX` 转义与 UTF-8 原文 JSON 解析后完全等价，模型可见内容与 token 不变。
+- 缓存：若服务端按字节前缀匹配，切换瞬间产生一次性字节变化（此后稳定）；纯 ASCII 请求字节无差异。
+- 一致性：此前 WS（False）与 HTTP（True）口径不同，现在统一到唯一编码器；`responses_websocket.py` 内只有一处发送点（首包），无第二编码口径。
+- 字节量：含中文时请求体字节数增加（转义），属可接受成本。
+结论：无功能影响，无需改产品代码；性质写入 `_send_create_message` 注释与本段。
+
+**变异（每条新用例配一个，全部原样还原，还原后 sha256 一致）**：
+- M1 规范化只留 legacy（结构化失去规范化）→ `test_structured_prompt_request_body_matches_across_reload` 红。
+- M2 丢掉声明外键追加 → `test_anthropic_history_normalization_keeps_undeclared_block_keys` 红。
+- M3 块列表改成递归 → `test_anthropic_history_normalization_does_not_recurse_into_tool_result_blocks` 红。
+
+**命令与结果**：
+- `test_backends_provider_history_reload_identical.py`（12 用例）**12 passed**。
+- 相关回归 8 文件（重载/WS/strict_request/gateway_helpers/conversation_compact/backends/backends_base/native_tool_use）**382 passed**。
+- guards9 11 文件 **187 passed**；ruff `All checks passed!`；`check_import_boundaries` findings=0；`check_doc_sync --base c544b358d` DOC_SYNC_PASS；strict code-size `blocked=False`（报告已还原）；size_diff 新增告警 0 / 消失 43；clean package OK；`git diff --check` 干净。
+
+## 出站字节稳定：只规范化历史消息块，不碰工具与 schema（cachekey3，2026-10-04，worker/cache-key2；基于 17j 头 c544b358d；本轮返工，含 cachekey2 最终口径）
+
+**来源**：cachereload 修了 OpenAI/Responses 路径「工具参数键序在重载前后不同」；cachekey2 查其它出站协议，发现 Anthropic 路径分叉更大。
+
+**cachekey2 的修法被否（3a 裁定）**：在唯一编码器里整包 `sort_keys` 会顺带改掉工具 JSON Schema 与结构化输出 schema 的顺序——后者会改变模型行为（严格结构化输出按 schema 顺序生成字段，curator 的 `content` 被排到 `confidence`/`conflicts_with` 之后，模型就「先写结论后写依据」）。
+
+**最终修法**：
+1. `gateway_request_body` **恢复不排序**（保持「调用方键序就是线上字节」的原合同），`test_gateway_strict_request.py` 两条恢复原断言。
+2. 稳定性只做在历史部分：`anthropic_prompt_cache.anthropic_messages_with_optional_cache` 先调 `normalize_anthropic_history_blocks`，按 `_BLOCK_KEY_ORDER` 重写已知块键序，`tool_use.input` 用排序往返固定。工具定义与 schema 完全不经过。
+3. 选「按块重建」而非「整棵 messages 子树排序」：子树排序会连 `tool_result.content` 内的 JSON、媒体块 `source` 等无关嵌套一起改。
+4. `responses_websocket._send_create_message` **保留**复用 `gateway_request_body`：首包本质是模型请求体，应走同一编码器（口径＝保持调用方顺序）。
+
+**测试变更**：
+- 保留 `test_anthropic_request_body_matches_across_reload`（重载字节一致）。
+- 新增护栏：`test_tool_schema_key_order_is_preserved_across_backends`（三后端工具 schema 顺序）、`test_response_schema_key_order_is_preserved_across_backends`（openai/anthropic 结构化输出 schema 顺序，用真实 `build_curator_response_schema`）、`test_anthropic_history_normalization_sorts_tool_use_input_only`、`test_single_encoder_preserves_caller_key_order`。
+- `test_responses_websocket.py` 首包用例改为「走同一编码器且保持调用方顺序」。
+
+**命令与结果**：
+- 相关回归 10 文件：**265 passed**。
+- guards9（11 文件）：**全通过**。
+- `check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py --base c544b358d` `DOC_SYNC_PASS`；strict code-size `hard=0 blocked=False`；`git diff --check` 干净；`check_clean_package.py .` **OK**；`size_diff.sh` 新增告警 **0** / 消失 43。
+- 变异 3 个（每项只改一处，跑完原样还原，还原后 sha256 一致）：
+  - **M1** 编码器整包排序 → **KILLED**（schema 顺序护栏红）；
+  - **M2** 去掉 `tool_use.input` 排序往返 → **KILLED**（重载用例红）；
+  - **M3** 去掉块重建（normalize 原样返回）→ **KILLED**（重载用例红）。
+
+**第 3 项结论（老会话 transcript）**：**没有额外的一次性未命中**。老 envelope 本就字母序写入，规范化后当轮新构造部分也产出同一规范序。唯一过渡是上线瞬间服务端缓存存的仍是旧字节，首次请求对不上、之后稳定。
+
+**未验证**：真实模型/真实 Gateway 的命中率改善（需联网与真实账号）；Anthropic 兼容档案真实端点行为只按代码路径推断。
+
+## 磁盘重载后 provider payload 逐字一致（cachereload，2026-10-04，worker/cache-reload；基于 17j 头 f8858179c；已并入 step17j）
+
 ## OAuth 与 Responses 后端跟上 cabfix 的新传输签名（3a，2026-10-05，17k Linux 车道实测）
 
 - 问题：cabfix 把 `HttpBackend._gateway_request`/`request_stream_iter` 改成 `(StreamCall, options)` 后，两处没跟上：

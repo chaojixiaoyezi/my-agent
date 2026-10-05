@@ -38,6 +38,7 @@ from .gateway_helpers import (
     _should_retry_network_error,
     _stream_first_event_timeout,
     _stream_timeout_error,
+    gateway_request_body,
 )
 from .gateway_request_limits import remaining_deadline_seconds
 
@@ -129,7 +130,12 @@ def _connect(request: GatewayRequest):
 #   计时器到期先关当前 socket 唤醒发送线程，超时仍归原 first_event 合同，不新增重试分类。
 # 函数用途: 为 response.create 的网络写入复用当前请求首包预算，避免连接建立后卡在发送阶段。
 def _send_create_message(connection, request: GatewayRequest) -> None:
-    message = json.dumps({"type": "response.create", **request.payload}, ensure_ascii=False)
+    # LLM: WebSocket 首包不经 HTTP（直接 socket.send），编码仍复用唯一编码器 gateway_request_body：
+    #   历史结构化对象的键序同样受磁盘重排影响，与 HTTP 路径共用「同一语义 → 同一字节」口径。
+    #   编码器用 json.dumps 默认转义（含中文时输出 \uXXXX，JSON 解析语义等价）；旧实现
+    #   ensure_ascii=False 只在切换瞬间产生一次性字节变化，不改变服务端可见内容或 token。
+    #   改首包格式须同步 test_responses_websocket.py 的首包用例。
+    message = gateway_request_body({"type": "response.create", **request.payload}).decode("utf-8")
     timed_out = Event()
     timer = Timer(_stream_first_event_timeout(request), _expire_websocket_send, args=(connection, timed_out))
     timer.daemon = True

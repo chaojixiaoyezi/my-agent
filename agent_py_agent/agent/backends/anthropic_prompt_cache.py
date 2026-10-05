@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +12,67 @@ from ..prompting_parts.cache_layout import prompt_cache_layout
 
 _EPHEMERAL_CACHE_CONTROL = {"type": "ephemeral"}
 _CACHEABLE_CONTENT_TYPES = frozenset({"text", "tool_use", "tool_result"})
+
+# 每种消息块的规范键序。历史从磁盘 transcript 读回时嵌套 dict 已按字母序（写入端 sort_keys），
+# 进程内构造则是自然序；不统一会让同一条历史在重载前后发出不同字节，按前缀匹配的提示缓存
+# 从第一个键序不同的块起整段失效。这里只固定**已知块的键名顺序**，不排序工具定义或 schema。
+_BLOCK_KEY_ORDER: dict[str, tuple[str, ...]] = {
+    "text": ("type", "text", "cache_control"),
+    "thinking": ("type", "thinking", "signature"),
+    "redacted_thinking": ("type", "data"),
+    "tool_use": ("type", "id", "name", "input"),
+    "tool_result": ("type", "tool_use_id", "content", "is_error"),
+    "image": ("type", "source"),
+    "video": ("type", "source"),
+}
+
+
+# LLM: 只规范化历史消息块的键序，供 Anthropic 出站复用；不触碰工具定义、JSON Schema 或任何
+#   调用方给的结构化输出 schema（那些顺序会进模型）。tool_use.input 是模型给的参数对象，
+#   键序无语义，用与 _openai_function_call 相同的「排序往返」口径固定。
+#   已知边界：tool_result.content 是块列表时**不递归**规范化，嵌套块键序保持原样；当前生产
+#   构造点（message_adapter._tool_result_block 与孤儿结果 stub）恒为字符串，所以不触发重载
+#   分叉；将来工具结果真的出现块列表时必须改成递归，并同步更新边界用例
+#   （test_anthropic_history_normalization_does_not_recurse_into_tool_result_blocks 会变红提醒）。
+# 函数用途: 让同一条历史在「同进程续跑」与「磁盘重载」两条路径上产出相同的消息块字节。
+def normalize_anthropic_history_blocks(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_normalize_anthropic_message(row) for row in messages]
+
+
+# LLM: 只重建已知块类型的键序；未知块类型原样返回，不猜字段、不丢内容。
+# 函数用途: 单条消息的块列表规范化；content 不是列表时原样返回。
+def _normalize_anthropic_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+    blocks = [
+        _normalize_anthropic_block(block) if isinstance(block, dict) else block
+        for block in content
+    ]
+    return {**message, "content": blocks}
+
+
+# LLM: 键序按 _BLOCK_KEY_ORDER 里的声明重建，声明外的键追加在后面并保持相对顺序，
+#   保证新增字段不会被丢掉；input 与 tool_result 的嵌套结构按各自语义处理。
+# 函数用途: 规范化一个 Anthropic 消息块，返回键序固定的新 dict。
+def _normalize_anthropic_block(block: dict[str, Any]) -> dict[str, Any]:
+    block_type = str(block.get("type") or "")
+    order = _BLOCK_KEY_ORDER.get(block_type)
+    if order is None:
+        return block
+    normalized: dict[str, Any] = {}
+    for key in order:
+        if key not in block:
+            continue
+        value = block[key]
+        if key == "input" and isinstance(value, dict):
+            # 与 _openai_function_call 同口径：模型给的参数对象键序无语义，排序往返固定字节。
+            value = json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        normalized[key] = value
+    for key, value in block.items():
+        if key not in normalized:
+            normalized[key] = value
+    return normalized
 
 
 # LLM: This projection is the only place that may move a typed stable prefix into Anthropic's
@@ -85,6 +147,7 @@ def anthropic_messages_with_optional_cache(
         messages = [{**row, "content": [block for block in row["content"] if block.get("type") != "responses_reasoning"]}
                     if isinstance(row.get("content"), list) else row for row in messages]
         messages = [row for row in messages if row.get("content")]
+        messages = normalize_anthropic_history_blocks(messages)
     if structured_native_layout_active and messages is not None:
         prepared_messages = _append_only_structured_messages(
             stable_user_prefix=stable_user_prefix,

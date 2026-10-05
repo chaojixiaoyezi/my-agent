@@ -413,3 +413,30 @@ def test_handshake_timeout_is_left_for_the_turn_layer_by_generation():
         request,
         ProviderTimeoutError("handshake", stage="first_event"),
     ) is None
+
+
+# LLM: WebSocket 首包是模型请求体的一部分，必须走同一个唯一编码器（保持调用方顺序），
+#   不能自己另写一份 json.dumps 而与 HTTP 路径口径漂移。历史重放的键序稳定性由消息层负责，
+#   不在编码器里排序。这里直接抓原始文本，不经 json.loads（会丢键序）。
+# 函数用途: 钉住 response.create 首包字节与唯一编码器一致、且保持调用方给的键序。
+def test_create_message_bytes_are_stable_across_key_insertion_order():
+    from agent_py_agent.agent.backends.gateway_helpers import gateway_request_body
+
+    class RawConnection:
+        def __init__(self):
+            self.raw = []
+
+        def send(self, text):
+            self.raw.append(text)
+
+    payload = {"model": "m", "input": [{"type": "function_call", "call_id": "c1",
+                                       "name": "read_file", "arguments": '{"path":"a"}'}]}
+    request = GatewayRequest(api_base="http://127.0.0.1:1", api_key="<redacted>",
+                             path="/v1/responses", payload=payload, headers={}, timeout=10)
+    connection = RawConnection()
+    ws._send_create_message(connection, request)
+
+    expected = gateway_request_body({"type": "response.create", **payload}).decode("utf-8")
+    assert connection.raw == [expected]
+    assert expected == json.dumps({"type": "response.create", **payload},
+                                  ensure_ascii=False), "首包必须保持调用方给的键序"

@@ -634,7 +634,10 @@ def _provider_is_interrupted() -> bool:
 
 
 # LLM: 这是 POST JSON 线上正文的唯一编码器；普通请求字节必须与迁出前的 json.dumps(...).encode("utf-8") 完全相同，
-# 决策实验的输入上界与发送许可摘要也只能复用它，不能另写紧凑编码冒充实际 wire 字节。
+#   决策实验的输入上界与发送许可摘要也只能复用它，不能另写紧凑编码冒充实际 wire 字节。
+#   这里**不排序**：调用方给的键序就是线上字节（工具 JSON Schema 的属性顺序会进模型，
+#   结构化输出 schema 的顺序会决定严格模式生成字段的先后）。历史重放的键序稳定性在下游
+#   按子树规范化，不能在编码器里整包重排。
 # 函数用途: 把请求载荷（或其中一段）编码成与实际发送一致的 UTF-8 JSON 字节，无网络副作用。
 def gateway_request_body(payload: object) -> bytes:
     return json.dumps(payload).encode("utf-8")

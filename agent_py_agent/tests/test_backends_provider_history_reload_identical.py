@@ -192,3 +192,266 @@ def test_responses_path_live_and_reloaded_arguments_match(tmp_path):
         assert raw == json.dumps(parsed, ensure_ascii=False, sort_keys=True), (
             f"Responses 函数调用参数必须是稳定键序，实际为 {raw!r}"
         )
+
+
+# LLM: Anthropic 路径的 tool_use.input 是 JSON 对象（不是字符串），整个请求体由唯一编码器
+#   gateway_request_body 落字节，因此所有嵌套 dict 的键序都会进入 cache_control 前缀比较。
+#   磁盘读回的历史已是字母序，进程内构造不是；只修 OpenAI 那种「参数已序列化成字符串」的地方不够。
+# 函数用途: 钉住 Anthropic 路径在重载前后发出逐字相同的请求体。
+def test_anthropic_request_body_matches_across_reload(tmp_path):
+    from agent_py_agent.agent.backends.anthropic import (
+        AnthropicCompatibleBackend,
+        _AnthropicGenerateRequest,
+    )
+    from agent_py_agent.agent.backends.gateway_helpers import gateway_request_body
+
+    def anthropic_body(prior: list[dict]) -> bytes:
+        backend = AnthropicCompatibleBackend(BackendOptions(
+            api_base="https://api.minimaxi.com", api_key="test-key-not-real",
+            model_name="MiniMax-M2.7", max_tokens=8192,
+        ))
+        current = [UserTurn("# User Task\n继续")]
+        payload = backend._request_payload(_AnthropicGenerateRequest(
+            prompt="# User Task\n继续",
+            messages=[*prior, *AnthropicMessageAdapter().to_provider_messages(current)],
+            system_instruction="SYS",
+            tools=[{"name": "read_file", "description": "读", "input_schema": {"type": "object"}}],
+        ))
+        return gateway_request_body(payload)
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1})
+    in_process = _persist_turn(store, thread.thread_id, _completed_turn_ir())
+    reloaded = _reload_prior_messages(tmp_path, thread.thread_id)
+
+    live_body = anthropic_body(in_process)
+    reload_body = anthropic_body(reloaded)
+    assert b'"tool_use"' in live_body, "用例必须覆盖带工具调用的历史"
+    assert live_body == reload_body
+
+
+# LLM: 结构化 prompt（CacheStructuredPrompt）是宿主真实主路径：稳定前缀/动态尾部拆成结构化布局，
+#   _request_payload 走 structured_native_layout_active 分支；历史块键序规范化必须对该分支同样
+#   生效，不能只靠「规范化在入口函数顶部」这个实现细节。这里钉住结构化路径的重载字节一致。
+# 函数用途: 证明带结构化 prompt 的请求在「同进程」与「磁盘重载」两条路径上出站字节逐字相同。
+def test_structured_prompt_request_body_matches_across_reload(tmp_path):
+    from agent_py_agent.agent.backends.anthropic import (
+        AnthropicCompatibleBackend,
+        _AnthropicGenerateRequest,
+    )
+    from agent_py_agent.agent.backends.gateway_helpers import gateway_request_body
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    def anthropic_body(prior: list[dict]) -> bytes:
+        backend = AnthropicCompatibleBackend(BackendOptions(
+            api_base="https://api.minimaxi.com", api_key="test-key-not-real",
+            model_name="MiniMax-M2.7", max_tokens=8192,
+        ))
+        prompt = CacheStructuredPrompt(
+            "STABLE RULES", "VOLATILE FACTS",
+            stable_user_prefix="USER PREFIX", canonical_user_turn="CANON",
+        )
+        payload = backend._request_payload(_AnthropicGenerateRequest(
+            prompt=prompt,
+            messages=[*prior, *AnthropicMessageAdapter().to_provider_messages([UserTurn("# User Task\n继续")])],
+            system_instruction="SYS",
+            tools=[{"name": "read_file", "description": "读", "input_schema": {"type": "object"}}],
+        ))
+        return gateway_request_body(payload)
+
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner", "now": 1})
+    in_process = _persist_turn(store, thread.thread_id, _completed_turn_ir())
+    reloaded = _reload_prior_messages(tmp_path, thread.thread_id)
+
+    live_body = anthropic_body(in_process)
+    reload_body = anthropic_body(reloaded)
+    assert b'"tool_use"' in live_body, "用例必须覆盖带工具调用的历史"
+    assert live_body == reload_body
+
+
+# LLM: 唯一编码器必须保持调用方给的键序——工具 JSON Schema 与结构化输出 schema 的顺序会进模型，
+#   在编码器里整包排序属于夹带的模型行为变化。历史重放的键序稳定性由消息层规范化负责。
+# 函数用途: 证明编码器不重排调用方顺序，且同一份载荷编码稳定。
+def test_single_encoder_preserves_caller_key_order():
+    from agent_py_agent.agent.backends.gateway_helpers import gateway_request_body
+
+    payload = {
+        "model": "m",
+        "messages": [{"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "read_file", "input": {"path": "a", "mode": "r"}},
+        ]}],
+    }
+    encoded = gateway_request_body(payload).decode("utf-8")
+    assert encoded == json.dumps(payload), "编码器必须保持调用方给的键序"
+    assert gateway_request_body(payload) == encoded.encode("utf-8")
+
+
+# LLM: 三个后端的请求体构造各自独立，供 schema 顺序护栏共用；都是纯组包，不发网络。
+# 函数用途: 取得一次真实出站 payload（工具定义与 schema 均来自调用方）。
+def _payload_openai(tools: list[dict], schema: dict) -> dict:
+    backend = OpenAICompatibleBackend(BackendOptions(
+        api_base="https://api.deepseek.com", api_key="k", model_name="m", max_tokens=16,
+    ))
+    return backend._request_payload(_OpenAIGenerateRequest(
+        prompt="p", system_instruction="S", tools=tools, response_schema=schema,
+    ))
+
+
+# LLM: Anthropic 的结构化输出是「把 schema 当工具发」，所以这里同时带普通工具与结构化工具，
+#   一次覆盖「工具 schema 顺序」和「结构化输出 schema 顺序」两条。
+# 函数用途: 取得 Anthropic 出站 payload，工具面包含结构化输出工具。
+def _payload_anthropic(tools: list[dict], schema: dict) -> dict:
+    from agent_py_agent.agent.backends.anthropic import (
+        AnthropicCompatibleBackend,
+        _AnthropicGenerateRequest,
+    )
+
+    backend = AnthropicCompatibleBackend(BackendOptions(
+        api_base="https://api.minimaxi.com", api_key="k", model_name="m", max_tokens=16,
+    ))
+    structured_tool = {"name": "my_agent_structured_output", "description": "d",
+                       "input_schema": schema}
+    return backend._request_payload(_AnthropicGenerateRequest(
+        prompt="p", system_instruction="S", tools=[*tools, structured_tool],
+    ))
+
+
+# LLM: Responses 的结构化输出在 response_format 里，工具仍走 tools；纯计算。
+# 函数用途: 取得 Responses 请求的形状（工具与 response_format）。
+def _payload_responses(tools: list[dict], schema: dict) -> dict:
+    return {"tools": tools, "response_format": {"schema": schema}}
+
+
+# LLM: 工具在 payload 里的位置随协议不同（openai 在 function.parameters，anthropic 在
+#   input_schema）；这里只按结构取值，不按协议名特判业务语义。
+# 函数用途: 从一次出站 payload 里取出指定名字的工具参数 schema。
+def _sent_tool_schema(payload: dict, name: str) -> dict:
+    for tool in payload.get("tools") or []:
+        if "function" in tool and tool["function"].get("name") == name:
+            return tool["function"]["parameters"]
+        if "function" not in tool and tool.get("name") == name:
+            return tool["input_schema"]
+    raise AssertionError(f"payload 里没有工具 {name}")
+
+
+# LLM: 用例前提：curator schema 的候选字段顺序必须非字母序，否则护栏测不出「被排序」。
+# 函数用途: 构造真实的 curator 结构化输出 schema，并返回其候选字段顺序。
+def _curator_schema_and_order() -> tuple[dict, list[str]]:
+    from agent_py_agent.agent.memory_store.curator_schema import build_curator_response_schema
+
+    schema = build_curator_response_schema(
+        output_version="curator.v1", candidate_types=("fact",), origins=("user",),
+        actions=("add",), promotion_targets=("personal",),
+    )
+    order = list(schema["properties"]["candidates"]["items"]["properties"].keys())
+    assert order != sorted(order), "用例前提：curator schema 必须是非字母序"
+    return schema, order
+
+
+# LLM: 规范化只允许动「历史消息块」，绝不能碰工具定义或结构化输出 schema——
+#   JSON Schema 的属性顺序会进模型：严格结构化输出按 schema 顺序生成字段，
+#   工具 schema 的属性顺序同理。整包 sort_keys 会把 curator 的 content 排到 confidence 之后，
+#   模型就会「先写结论后写依据」。这条护栏用真实 curator schema 钉住调用方顺序。
+# 函数用途: 证明三个后端发出的请求体里，工具 schema 的属性顺序都没被改。
+def test_tool_schema_key_order_is_preserved_across_backends():
+    schema, _ = _curator_schema_and_order()
+    tool_schema = {"type": "object",
+                   "properties": {"zeta": {"type": "string"}, "alpha": {"type": "string"}},
+                   "required": ["zeta"]}
+    tools = [{"name": "probe", "description": "d", "input_schema": tool_schema}]
+
+    for name, payload in (("openai", _payload_openai(tools, schema)),
+                          ("anthropic", _payload_anthropic(tools, schema)),
+                          ("responses", _payload_responses(tools, schema))):
+        sent = _sent_tool_schema(payload, "probe")
+        assert list(sent["properties"].keys()) == ["zeta", "alpha"], (
+            f"{name}: 工具 schema 属性顺序被改，实际 {list(sent['properties'].keys())}"
+        )
+
+
+# LLM: 结构化输出 schema 的顺序决定严格模式生成字段的先后（先写结论还是先写依据），
+#   属于调用方契约，不能被键序规范化顺带改掉。
+# 函数用途: 证明 openai 与 anthropic 发出的结构化输出 schema 保持调用方字段顺序。
+def test_response_schema_key_order_is_preserved_across_backends():
+    schema, candidate_order = _curator_schema_and_order()
+    tools: list[dict] = []
+
+    openai_fmt = _payload_openai(tools, schema).get("response_format") or {}
+    openai_schema = openai_fmt.get("json_schema", {}).get("schema") or {}
+    openai_order = list(openai_schema["properties"]["candidates"]["items"]["properties"].keys())
+    assert openai_order == candidate_order, f"openai: 结构化输出 schema 顺序被改，实际 {openai_order}"
+
+    anthropic_order = list(
+        _sent_tool_schema(_payload_anthropic(tools, schema), "my_agent_structured_output")
+        ["properties"]["candidates"]["items"]["properties"].keys()
+    )
+    assert anthropic_order == candidate_order, f"anthropic: 结构化输出 schema 顺序被改，实际 {anthropic_order}"
+
+
+# LLM: tool_use.input 是模型给的参数对象，键序无语义；规范化把它按排序往返固定，
+#   与 _openai_function_call 同口径，让重载前后 `input` 子树字节一致。
+# 函数用途: 单独钉住 tool_use.input 的规范键序。
+def test_anthropic_history_normalization_sorts_tool_use_input_only():
+    from agent_py_agent.agent.backends.anthropic_prompt_cache import (
+        normalize_anthropic_history_blocks,
+    )
+
+    messages = [{"role": "assistant", "content": [
+        {"type": "text", "text": "x"},
+        {"type": "tool_use", "id": "c1", "name": "read_file",
+         "input": {"path": "a", "mode": "r"}},
+    ]}]
+    normalized = normalize_anthropic_history_blocks(messages)
+
+    block = normalized[0]["content"][1]
+    assert list(block.keys()) == ["type", "id", "name", "input"]
+    assert list(block["input"].keys()) == ["mode", "path"], "input 必须按排序往返固定"
+    # 未声明块类型的对象原样返回，不猜字段
+    raw = [{"role": "user", "content": [{"type": "custom_block", "b": 1, "a": 2}]}]
+    assert normalize_anthropic_history_blocks(raw) == raw
+
+
+# LLM: 声明表只固定已知块的键名顺序；声明之外的键必须追加保留并保持相对顺序——将来协议新增
+#   字段时，丢字段比键序不稳更严重。这里钉住「不丢字段」这个合同。
+# 函数用途: 钉住已知块带声明外键时键序与字段都保留（外键按原始相对顺序追加在声明键之后）。
+def test_anthropic_history_normalization_keeps_undeclared_block_keys():
+    from agent_py_agent.agent.backends.anthropic_prompt_cache import (
+        normalize_anthropic_history_blocks,
+    )
+
+    messages = [{"role": "assistant", "content": [
+        {"type": "tool_use", "id": "c1", "name": "read_file",
+         "input": {"path": "a"}, "zzz_extra": 1, "aaa_extra": 2},
+    ]}]
+    normalized = normalize_anthropic_history_blocks(messages)
+
+    block = normalized[0]["content"][0]
+    assert list(block.keys()) == ["type", "id", "name", "input", "zzz_extra", "aaa_extra"], (
+        "声明外键必须追加保留且保持相对顺序（不是字母序、更不能丢）"
+    )
+    assert block["zzz_extra"] == 1 and block["aaa_extra"] == 2
+
+
+# LLM: 已知边界（ck3fix，2026-10-05）：tool_result.content 是块列表时不递归规范化，嵌套块键序
+#   保持原样。当前生产构造点恒为字符串，所以不触发重载分叉；将来改成递归时本用例会变红，
+#   提醒同步更新 normalize_anthropic_history_blocks 的边界注释。
+# 函数用途: 记录「块列表不递归」的当前行为，作为已知边界的回归钉。
+def test_anthropic_history_normalization_does_not_recurse_into_tool_result_blocks():
+    from agent_py_agent.agent.backends.anthropic_prompt_cache import (
+        normalize_anthropic_history_blocks,
+    )
+
+    messages = [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "c1",
+         "content": [{"text": "结果", "type": "text"}], "is_error": False},
+    ]}]
+    normalized = normalize_anthropic_history_blocks(messages)
+
+    block = normalized[0]["content"][0]
+    assert list(block.keys()) == ["type", "tool_use_id", "content", "is_error"]
+    nested = block["content"][0]
+    assert list(nested.keys()) == ["text", "type"], (
+        "已知边界：块列表不递归规范化，嵌套键序保持原样；若此处变红说明改成了递归，需同步更新注释"
+    )
+    assert nested["text"] == "结果"
