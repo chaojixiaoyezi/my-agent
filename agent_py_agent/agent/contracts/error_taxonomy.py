@@ -1595,6 +1595,17 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不得原样重试。"
         ),
     ),
+    "COMMAND_WRAPPER_UNKNOWN_OPTION": ErrorContract(
+        code="COMMAND_WRAPPER_UNKNOWN_OPTION",
+        category="permission",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint=(
+            "前缀运行器（sudo/env/nice/timeout/stdbuf 等）带了不在宿主已知选项表里的选项，"
+            "宿主无法确认它是否吃掉下一个词、也就无法确认实际执行的命令；"
+            "去掉该选项或在命令前加 `--` 终止符，不得原样重试。"
+        ),
+    ),
     "COMMAND_SHELL_OPERATOR_BLOCKED": ErrorContract(
         code="COMMAND_SHELL_OPERATOR_BLOCKED",
         category="permission",

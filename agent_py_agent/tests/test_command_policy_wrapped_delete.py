@@ -63,6 +63,8 @@ def _decision(command: str, **kwargs):
         r"find . -exec echo {} \; -exec rm {} +",
         "find . -exec echo '{}' ';' -exec rm '{}' ';'",
         "find . -exec echo {} + -exec rm {} ;",
+        "timeout 5 stdbuf -o0 xargs --null rm -rf x",
+        "stdbuf -o0 sh -c 'rm -rf x'",
     ],
 )
 def test_wrapped_delete_is_blocked(command: str) -> None:
@@ -71,6 +73,44 @@ def test_wrapped_delete_is_blocked(command: str) -> None:
     assert decision.allowed is False
     assert decision.finding_codes == ("COMMAND_DESTRUCTIVE_DELETE_BLOCKED",)
     assert decision.findings[0].evidence["nested_depth"] >= 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sudo rm -rf /tmp/x",
+        "sudo -u root rm -rf /tmp/x",
+        "env rm -rf /tmp/x",
+        "env FOO=1 rm -rf /tmp/x",
+        "nice rm -rf /tmp/x",
+        "nice -n 10 rm -rf /tmp/x",
+        "timeout 5 rm -rf /tmp/x",
+        "nohup rm -rf /tmp/x",
+        "time rm -rf /tmp/x",
+        "command rm -rf /tmp/x",
+        "exec rm -rf /tmp/x",
+        "builtin rm -rf /tmp/x",
+        "stdbuf -o0 rm -rf /tmp/x",
+        "stdbuf -oL rm -rf /tmp/x",
+        "stdbuf --output=L rm -rf /tmp/x",
+        "ionice -c 3 rm -rf /tmp/x",
+        "chrt -f 50 rm -rf /tmp/x",
+        "taskset -c 0 rm -rf /tmp/x",
+        "setsid rm -rf /tmp/x",
+        "flock /tmp/l rm -rf /tmp/x",
+        "caffeinate rm -rf /tmp/x",
+        "unbuffer rm -rf /tmp/x",
+        "sudo nice -n 5 rm -rf /tmp/x",
+    ],
+)
+def test_prefix_runner_wrapped_delete_is_blocked(command: str) -> None:
+    """前缀运行器（sudo/env/nice/...）解包到内层 rm 后由顶层路径拦下：finding 带 executable 证据，
+    不是嵌套程序路径，所以不带 nested_depth（那是 sh -c/xargs/find 拆包才有的标记）。"""
+    decision = _decision(command)
+
+    assert decision.allowed is False
+    assert decision.finding_codes == ("COMMAND_DESTRUCTIVE_DELETE_BLOCKED",)
+    assert decision.findings[0].evidence["executable"] == "rm"
 
 
 def test_wrapped_rm_of_protected_target_keeps_pattern_finding() -> None:
@@ -106,6 +146,23 @@ def test_xargs_unknown_short_letter_is_blocked() -> None:
     assert "COMMAND_XARGS_UNKNOWN_OPTION" in decision.finding_codes
 
 
+def test_wrapper_unknown_option_is_blocked_and_recoverable() -> None:
+    """前缀运行器的表外选项从严：按“不吃值”继续检查（后面的命令仍在扫描范围内），
+    内层 rm 照样被拦，并给可恢复写法建议。"""
+    decision = _decision("sudo --weird rm -rf /tmp/x")
+
+    assert decision.allowed is False
+    assert "COMMAND_DESTRUCTIVE_DELETE_BLOCKED" in decision.finding_codes
+    assert "COMMAND_WRAPPER_UNKNOWN_OPTION" in decision.finding_codes
+    unknown = next(
+        finding
+        for finding in decision.findings
+        if finding.code == "COMMAND_WRAPPER_UNKNOWN_OPTION"
+    )
+    assert unknown.evidence.get("option") == "--weird"
+    assert "recovery" in unknown.evidence
+
+
 def test_find_semicolon_followed_by_shell_command_is_blocked() -> None:
     """`;` 之后是另一个 shell 命令时也要拦：find 段扫描跨段、rm 由自己的命令位拦。"""
     decision = _decision(r"find . -name x \; rm -rf y")
@@ -134,6 +191,13 @@ def test_find_semicolon_followed_by_shell_command_is_blocked() -> None:
         "xargs -0 -I {} cp {} /tmp/out",
         "xargs --null grep foo",
         "xargs -tn 2 echo",
+        "timeout 60 python3 x.py",
+        "nice -n 10 make",
+        "env FOO=1 pytest -q",
+        "stdbuf -oL tail -f log",
+        "sudo -u root ls",
+        "flock /tmp/l echo hi",
+        "caffeinate -t 60 make",
     ],
 )
 def test_data_arguments_are_not_treated_as_programs(command: str) -> None:

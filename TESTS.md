@@ -432,7 +432,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 - `test_plugin_m1_joint_tool_gate.py` 原先用 `sh -c "rm -rf build"` 当“宿主放行、只有 rm-guard 要求确认”的差集命令；shellwrap 起包一层的删除由宿主硬拒，5 条用例的前提断言失败。差集改为模块常量 `_GUARD_ONLY_COMMAND = 'echo rm -rf build'`（宿主放行、无删除副作用，rm-guard 文字规则仍回 ask/RM_RF），测的仍是插件收紧链路。联合两文件 11 passed / 1 skipped。
 
-## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`，待 3a 终审）
+## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3 + shellwrap4，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`，待 3a 终审）
 
 - **改了什么**：`contracts/gates/command_policy.py` 嵌套 Shell 程序递归检查（sh -c / eval / xargs / find 动作；深度上限 4、源长上限 32k，超限 fail-closed）；新增 `contracts/gates/shell_source.py` 唯一提取器（shell_syntax 改导入）；find 带写/执行动作不再算只读；两个新 finding code 注册进 error_taxonomy；常数目录重生成（901 项）。**shellwrap2 补**：`_XARGS_VALUE_OPTIONS` 加 `-a`/`-J`、长选项两种写法都消耗值（抽 `_xargs_after_long_option`）；find 动作扫描改用命令位到 argv 末尾的完整序列（`;` 只当段终止符）。
 - **用例**（新增 `agent_py_agent/tests/test_command_policy_wrapped_delete.py`，44 条）：19 个正例（各 shell -c 组合、env、cd &&、两层、eval、xargs、find -delete/-exec）全拒且 finding 带 nested_depth；8 个反例（echo/printf/grep/git -m/python -c/sh -c "ls"）不误伤；受保护目标、allowed_commands、深度边界（4 层放行 8 层拒）、40k 超长 fail-closed、10k 性能 <0.1s；四个调用点各一条接线。
@@ -451,6 +451,12 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   - 命令与结果：新文件 + `test_command_policy.py` → **119 passed**；guards9 十一文件全过。
   - 变异 4 个（脚本 `/private/tmp/claude-501/m-shellwrap2/mut3.py`，逐个 sha256 还原、`还原一致=True`）：N1 从开关表删 `--null` → KILLED（正例 + 误伤回归一起红）；N2 删取值字母 `S` → KILLED；N3 未知长选项不再给 finding → KILLED（单列用例）；N4 从开关表删 `--eof` → KILLED。**4/4 KILLED**。
   - 门禁：ruff/boundaries/doc_sync（--base 897388630）/strict code-size/diff-check/clean-package 全过；**size_diff 新增 0 / 消失 44**（首轮 `_xargs_after_short_options` nesting 新增 1 条，扁平化后归零）。新 finding `COMMAND_XARGS_UNKNOWN_OPTION` 已注册 `error_taxonomy`（含恢复提示：改用 `--选项=值` 或 `--`）。
+- **shellwrap4 修复与复验（3a 终审发现的既有缺口：前缀运行器后面的删除没拆开）**：
+  - **问题**：env/nice/timeout 能拦靠的是 `_unwrap_command_position` 里硬编码的 `_skip_env_wrapper`/`_skip_timeout_wrapper`/`_skip_nice_wrapper`；stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer 不在任何表里、全放行；`sudo -u root rm -rf /tmp/x` 也放行（`_skip_simple_wrapper` 只跳 `-` 开头的 token，`root` 被当命令）。
+  - **修法**：前缀运行器改表驱动——`_CommandWrapperSpec`（取值选项 / 开关选项 / 固定位置参数个数 / 是否跳过 `NAME=VALUE` 与 `-`）+ `_COMMAND_WRAPPER_SPECS` 登记 16 个运行器（sudo/env/nice/timeout/nohup/time/command/exec/builtin/stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer；来源：POSIX/coreutils/sudo/util-linux/macOS/expect 手册）；`_unwrap_wrapper_chain` 沿链推进到内层命令并收集表外选项；表外选项从严（按"不吃值"继续检查、给新 finding `COMMAND_WRAPPER_UNKNOWN_OPTION`，已注册 error_taxonomy）；解析线性一遍扫描；旧 `_COMMAND_WRAPPERS` 常量与四个 `_skip_*_wrapper` 函数删除。
+  - **用例新增**：23 条前缀运行器"包着 rm -rf 必须拦"单列成组（`test_prefix_runner_wrapped_delete_is_blocked`；finding 带 `executable` 证据、不是嵌套程序路径所以不带 nested_depth——首轮误放进带 nested_depth 断言的参数化组，跑出 23 条 KeyError 后拆组修正）；2 条组合（`timeout 5 stdbuf -o0 xargs --null rm -rf x`、`stdbuf -o0 sh -c 'rm -rf x'`，带 nested_depth）留在原嵌套组；单列 `sudo --weird rm -rf /tmp/x` 断言两个 code + option/recovery 证据；误伤回归 7 条（`timeout 60 python3 x.py`、`nice -n 10 make`、`env FOO=1 pytest -q`、`stdbuf -oL tail -f log`、`sudo -u root ls`、`flock /tmp/l echo hi`、`caffeinate -t 60 make`）。
+  - 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：新文件 → **109 passed**；新文件 + `test_command_policy.py` → **152 passed**；guards9 现存 11 文件（`test_backend_signature_guardrails.py` 本树没有、跳过）→ **187 passed**。
+  - 门禁：ruff `All checks passed!`；boundaries=0；doc_sync `--base 993357744` PASS；strict code-size（2199/hard=0/blocked=False）；diff-check 干净；clean-package OK；**size_diff 新增 0 / 消失 44**。
 
 ## 编程错误不按消息文字判可重试（progerr，2026-10-05，worker/progerr，基于 17k 头 `9e2f0eb69`，待 3a 复审）
 

@@ -218,6 +218,7 @@ def evaluate_command_policy(
     if not allow_shell_operators:
         findings.extend(_shell_operator_findings(parsed.argv, _raw_command_text(command)))
     findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions, allowed))
+    findings.extend(_wrapper_option_findings(parsed.argv))
     findings.extend(_nested_wrapper_findings(parsed.argv, allowed, 0))
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
 
@@ -818,7 +819,94 @@ __all__ = [
 # ---- 原 command/positions.py 并入 ----
 from pathlib import Path
 
-_COMMAND_WRAPPERS = frozenset({"sudo", "command", "exec", "builtin", "nohup", "time"})
+
+# LLM: 前缀运行器只描述"跳过多少 token 能看到内层命令"；不执行、不解析值的语义，也不碰沙箱。
+# 类用途: 登记一个前缀运行器的选项形态：取值选项（吃一个词）、开关选项、固定位置参数个数、
+#   是否跳过 NAME=VALUE 与 "-"（env/sudo 支持）。
+@dataclass(frozen=True)
+class _CommandWrapperSpec:
+    value_options: frozenset[str] = frozenset()
+    flag_options: frozenset[str] = frozenset()
+    positional_count: int = 0
+    assignments: bool = False
+
+
+# LLM: 前缀运行器表（来源：各命令手册，2026-10-05 shellwrap4 逐项核对——sudo/env/nice/timeout/nohup/
+#   time/command/exec/builtin 为 POSIX/coreutils 与 sudo 手册，stdbuf 为 coreutils，ionice/chrt/
+#   taskset/setsid/flock 为 util-linux，caffeinate 为 macOS，unbuffer 为 expect）。拆包的关键是
+#   "这个运行器吃掉几个词才能看到真正的命令"：吃错了内层 rm 就会逃过检查。位置参数按手册登记
+#   （timeout 的时长、flock 的锁文件、chrt/taskset 的优先级或掩码）。表外选项从严：不猜它是否
+#   吃值，直接给 finding 不放行（与 xargs 同一处理口径）。
+_COMMAND_WRAPPER_SPECS: dict[str, _CommandWrapperSpec] = {
+    "sudo": _CommandWrapperSpec(
+        frozenset(
+            {"-u", "-g", "-p", "-C", "-D", "-h", "-r", "-t", "-U", "-T", "--user", "--group",
+             "--prompt", "--chdir", "--chroot", "--role", "--type", "--other-user",
+             "--command-timeout", "--close-from"}
+        ),
+        frozenset(
+            {"-i", "-s", "-n", "-k", "-A", "-E", "-b", "-H", "-P", "-S", "-e", "-v", "-l", "-V",
+             "--login", "--shell", "--non-interactive", "--reset-timestamp", "--remove-timestamp",
+             "--askpass", "--preserve-env", "--set-home", "--stdin", "--edit", "--validate",
+             "--list", "--version", "--help", "--background", "--bell"}
+        ),
+        assignments=True,
+    ),
+    "env": _CommandWrapperSpec(
+        frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+        frozenset({"-i", "-0", "-v", "--ignore-environment", "--null", "--debug"}),
+        assignments=True,
+    ),
+    "nice": _CommandWrapperSpec(frozenset({"-n", "--adjustment"})),
+    "timeout": _CommandWrapperSpec(
+        frozenset({"-k", "-s", "--kill-after", "--signal"}),
+        frozenset({"--preserve-status", "--foreground", "-v", "--verbose"}),
+        positional_count=1,
+    ),
+    "nohup": _CommandWrapperSpec(),
+    "time": _CommandWrapperSpec(flag_options=frozenset({"-p", "--portability"})),
+    "command": _CommandWrapperSpec(flag_options=frozenset({"-p", "-v", "-V"})),
+    "exec": _CommandWrapperSpec(frozenset({"-a"}), frozenset({"-c", "-l"})),
+    "builtin": _CommandWrapperSpec(),
+    "stdbuf": _CommandWrapperSpec(
+        frozenset({"-i", "-o", "-e", "--input", "--output", "--error"})
+    ),
+    "ionice": _CommandWrapperSpec(
+        frozenset({"-c", "-n", "-p", "--class", "--classdata", "--pid"}),
+        frozenset({"-t", "--ignore"}),
+    ),
+    "chrt": _CommandWrapperSpec(
+        frozenset(
+            {"-p", "-T", "-P", "-D", "--pid", "--sched-runtime", "--sched-period", "--sched-deadline"}
+        ),
+        frozenset(
+            {"-b", "-d", "-f", "-i", "-o", "-r", "-a", "-m", "-R", "-v", "-V", "--batch",
+             "--deadline", "--fifo", "--idle", "--other", "--rr", "--all-tasks", "--max",
+             "--reset-on-fork", "--verbose", "--version"}
+        ),
+        positional_count=1,
+    ),
+    "taskset": _CommandWrapperSpec(
+        frozenset(),
+        frozenset({"-a", "-c", "-p", "-h", "-V", "--all-tasks", "--cpu-list", "--pid",
+                   "--help", "--version"}),
+        positional_count=1,
+    ),
+    "setsid": _CommandWrapperSpec(
+        flag_options=frozenset({"-c", "-f", "-w", "--ctty", "--fork", "--wait"})
+    ),
+    "flock": _CommandWrapperSpec(
+        frozenset({"-w", "-E", "-c", "--wait", "--timeout", "--conflict-exit-code", "--command"}),
+        frozenset({"-s", "-x", "-n", "-o", "-u", "-F", "--shared", "--exclusive", "--nonblock",
+                   "--close", "--unlock", "--no-fork"}),
+        positional_count=1,
+    ),
+    "caffeinate": _CommandWrapperSpec(
+        frozenset({"-t", "-w"}),
+        frozenset({"-d", "-i", "-s", "-u"}),
+    ),
+    "unbuffer": _CommandWrapperSpec(flag_options=frozenset({"-p"})),
+}
 
 
 def command_name(value: object) -> str:
@@ -861,52 +949,95 @@ def looks_like_assignment(token: str) -> bool:
     return bool(separator and name.replace("_", "").isalnum() and not name[0].isdigit())
 
 
-def _unwrap_command_position(argv: tuple[str, ...], position: int) -> int:
+# LLM: 表驱动的前缀解包：沿运行器链推进到内层命令，途中收集表外选项名。表外选项按"不吃值"处理
+#   （从严：不猜它是否吃值，后面的词仍按命令继续检查，宁可多拦）。线性一遍扫描。
+# 函数用途: 返回 (内层命令位置, 表外选项名列表)；找不到内层命令时返回原位置。
+def _unwrap_wrapper_chain(
+    argv: tuple[str, ...], position: int
+) -> tuple[int, list[str]]:
     current = position
+    unknown: list[str] = []
     while current < len(argv):
-        executable = command_name(argv[current])
-        if executable in _COMMAND_WRAPPERS:
-            current = _skip_simple_wrapper(argv, current, executable)
+        spec = _COMMAND_WRAPPER_SPECS.get(command_name(argv[current]))
+        if spec is None:
+            return current, unknown
+        next_position, chain_unknown = _skip_wrapper_options(argv, current, spec)
+        unknown.extend(chain_unknown)
+        if next_position <= current:
+            return current, unknown
+        current = next_position
+    return position, unknown
+
+
+def _unwrap_command_position(argv: tuple[str, ...], position: int) -> int:
+    return _unwrap_wrapper_chain(argv, position)[0]
+
+
+# 函数用途: 按 spec 跳过运行器的选项与固定位置参数，返回内层命令位置与表外选项名。
+def _skip_wrapper_options(
+    argv: tuple[str, ...], position: int, spec: _CommandWrapperSpec
+) -> tuple[int, list[str]]:
+    index = position + 1
+    remaining = spec.positional_count
+    unknown: list[str] = []
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            return index + 1, unknown
+        if token.startswith("-") and token != "-":
+            index = _skip_wrapper_option_token(argv, index, spec, unknown)
             continue
-        if executable == "env":
-            current = _skip_env_wrapper(argv, current)
+        if spec.assignments and (token == "-" or looks_like_assignment(token)):
+            index += 1
             continue
-        if executable == "timeout":
-            current = _skip_timeout_wrapper(argv, current)
-            continue
-        if executable == "nice":
-            current = _skip_nice_wrapper(argv, current)
-            continue
-        return current
-    return position
+        if remaining <= 0:
+            return index, unknown
+        remaining -= 1
+        index += 1
+    return index, unknown
 
 
-def _skip_simple_wrapper(argv: tuple[str, ...], current: int, executable: str) -> int:
-    current += 1
-    if executable == "sudo":
-        while current < len(argv) and argv[current].startswith("-"):
-            current += 1
-    return current
+# 函数用途: 跳过运行器的一个选项 token；取值选项连带其值，表外选项记名并按"不吃值"跳过。
+def _skip_wrapper_option_token(
+    argv: tuple[str, ...], index: int, spec: _CommandWrapperSpec, unknown: list[str]
+) -> int:
+    token = argv[index]
+    if token in spec.value_options:
+        return index + 2 if index + 1 < len(argv) else index + 1
+    if token in spec.flag_options or "=" in token:
+        return index + 1
+    if _wrapper_value_option_prefix(token, spec.value_options):
+        # 取值选项粘连值（-n10、-oL）：值在同一 token 里，不额外吃词。
+        return index + 1
+    unknown.append(token)
+    return index + 1
 
 
-def _skip_env_wrapper(argv: tuple[str, ...], current: int) -> int:
-    current += 1
-    while current < len(argv) and (argv[current].startswith("-") or looks_like_assignment(argv[current])):
-        current += 1
-    return current
+# 函数用途: 判断短选项 token 是否"取值选项 + 粘连值"；长选项不按前缀猜（含 = 的已整体跳过）。
+def _wrapper_value_option_prefix(token: str, value_options: frozenset[str]) -> bool:
+    if token.startswith("--"):
+        return False
+    return any(
+        len(token) > len(option) and not option.startswith("--") and token.startswith(option)
+        for option in value_options
+    )
 
 
-def _skip_timeout_wrapper(argv: tuple[str, ...], current: int) -> int:
-    current += 1
-    while current < len(argv) and argv[current].startswith("-"):
-        current += 1
-    return current + 1 if current < len(argv) else current
+# 函数用途: 找出所有前缀运行器上的表外选项，返回带可恢复提示的 finding（从严不放行）。
+def _wrapper_option_findings(argv: tuple[str, ...]) -> list[CommandPolicyFinding]:
+    findings: list[CommandPolicyFinding] = []
+    for position in command_positions(argv):
+        _inner, unknown = _unwrap_wrapper_chain(argv, position)
+        findings.extend(_wrapper_unknown_option_finding(token) for token in unknown)
+    return findings
 
 
-def _skip_nice_wrapper(argv: tuple[str, ...], current: int) -> int:
-    current += 1
-    if current < len(argv) and argv[current] == "-n":
-        return current + 2
-    if current < len(argv) and argv[current].startswith("-"):
-        return current + 1
-    return current
+# 函数用途: 生成前缀运行器表外选项的拦截 finding，附可恢复的写法建议。
+def _wrapper_unknown_option_finding(token: str) -> CommandPolicyFinding:
+    return CommandPolicyFinding(
+        "COMMAND_WRAPPER_UNKNOWN_OPTION",
+        {
+            "option": str(token)[:40],
+            "recovery": "remove the option or put -- before the command",
+        },
+    )

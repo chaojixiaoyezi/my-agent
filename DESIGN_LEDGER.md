@@ -211,7 +211,7 @@
 - **验证**：见 `TESTS.md`“选包入口预算均分 + 选中即固定（selfix2）”小节。
 - **未验证**：真实 Gateway 里两包同轮选中的端到端没跑（不启 Gateway 是工作规则）；窗口实现细节（`_entry_share` 的均分与余数）只由单测钉住；`test_pack_verification*.py` 只跑相关子集，未跑该目录全部；子入口未做独立行为差异实测。
 
-## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`；初审 shellwrapr 两处真漏已修，终审又发现 xargs 选项解析真漏、shellwrap3 修复；待 3a 终审）
+## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3 + shellwrap4，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`；初审 shellwrapr 两处真漏已修，终审又发现 xargs 选项解析真漏（shellwrap3）和前缀运行器缺口（shellwrap4）；待 3a 终审）
 
 - **问题（9b 证据 review-rm-wrap-gap）**：裸 rm/rmdir/unlink 被 `command_policy` 硬拒，但 `sh -c "rm -rf …"`、`bash -c`、`env sh -c`、`cd … && sh -c`、`eval`、`xargs rm`、`find … -delete` 都判 unknown/read_only、没有 finding；ActionPolicy 对 unknown 直接放行，Full Access 下会真执行。
 - **修法（9b 定方向，唯一权威入口 contracts/gates/command_policy.py）**：
@@ -230,6 +230,11 @@
   - **问题**：`_xargs_after_long_option` 把"长选项后面跟一个不以 - 开头的词"一律当值吃掉，短选项连写整块当开关跳过、值选项清单缺 `-R`/`-S`。实测放行的有：开关型长选项吃掉命令（`--null`/`--no-run-if-empty`/`--verbose`/缩写 `--nu`）、可选值长选项（`--eof`/`--replace`/`--max-lines`，只能用 = 带值）、短选项连写（`-0n 1`/`-rn 1`/`-tI {}`）、BSD 取值选项（`-R`/`-S`）。
   - **修法**：改成**按已知选项表逐个判定**、线性一遍扫描。长选项：带 `=` 整体跳过；必须带值的（`--arg-file`/`--delimiter`/`--max-chars`/`--max-procs`/`--max-args`/`--process-slot-var`）吃下一个词；开关与可选值（`--null`/`--no-run-if-empty`/`--verbose`/`--interactive`/`--open-tty`/`--exit`/`--show-limits`/`--help`/`--version`/`--eof`/`--replace`/`--max-lines`）不吃；表外的（含 GNU 缩写）给新 finding `COMMAND_XARGS_UNKNOWN_OPTION`（已注册 error_taxonomy），提示改用 `--选项=值` 或 `--`。短选项按字母走：取值字母（`adEIJLnPRsS`）连写或吃下一个词、可选值字母（`eil`）不吃下一个词、开关字母（`0oprtx`）继续、未知字母给同一 finding。选项表放模块常量并注明来源（GNU findutils xargs 与 macOS/BSD 手册）。
   - 用例：12 条原放行写法全部转拦 + 3 条照旧拦 + 6 条误伤回归；`--nu`/`-z` 单列断言 unknown finding。变异 4 个（N1 删 `--null`、N2 删 `S`、N3 未知不给 finding、N4 删 `--eof`）**4/4 KILLED**。相关 119 passed、guards9 全过；ruff、doc_sync（--base 897388630）、strict code-size、diff-check、size_diff（新增 0，首轮 `_xargs_after_short_options` nesting 拆平后归零）全过。
+- **shellwrap4 修复（3a 终审发现的既有缺口：前缀运行器后面的删除没拆开）**：
+  - **问题**：env/nice/timeout 能拦靠的是 `_unwrap_command_position` 里硬编码的 `_skip_env_wrapper`/`_skip_timeout_wrapper`/`_skip_nice_wrapper`；stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer 不在任何表里、全放行；`sudo -u root rm -rf /tmp/x` 也放行（`_skip_simple_wrapper` 只跳 `-` 开头的 token，`root` 被当命令）。
+  - **修法**：前缀运行器改表驱动——`_CommandWrapperSpec`（取值选项 / 开关选项 / 固定位置参数个数 / 是否跳过 `NAME=VALUE` 与 `-`），`_COMMAND_WRAPPER_SPECS` 登记 16 个运行器（sudo/env/nice/timeout/nohup/time/command/exec/builtin/stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer；来源：POSIX/coreutils/sudo/util-linux/macOS/expect 手册）；`_unwrap_wrapper_chain` 沿链推进到内层命令并收集表外选项；表外选项从严（按“不吃值”继续检查、给新 finding `COMMAND_WRAPPER_UNKNOWN_OPTION`，已注册 error_taxonomy，与 xargs 同一处理口径）；解析线性一遍扫描；旧 `_COMMAND_WRAPPERS` 常量与四个 `_skip_*_wrapper` 函数删除。
+  - **用例**：23 条前缀运行器“包着 rm -rf 必须拦”（finding 带 `executable` 证据、不是嵌套程序路径所以不带 nested_depth）+ 2 条组合（`timeout 5 stdbuf -o0 xargs --null rm -rf x`、`stdbuf -o0 sh -c 'rm -rf x'`，带 nested_depth）+ 单列 `sudo --weird rm -rf /tmp/x`（`COMMAND_WRAPPER_UNKNOWN_OPTION` + `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 两个 code，带 option/recovery 证据）+ 误伤回归 7 条（`timeout 60 python3 x.py`、`nice -n 10 make`、`env FOO=1 pytest -q`、`stdbuf -oL tail -f log`、`sudo -u root ls`、`flock /tmp/l echo hi`、`caffeinate -t 60 make`）。
+  - **门禁**：相关 152 passed（新文件 109 + test_command_policy 43）、guards9 现存 11 文件 187 passed；ruff、doc_sync（--base 993357744）、strict code-size（2199/hard=0/blocked=False）、diff-check、clean-package、size_diff（新增 0 / 消失 44）全过。
 
 ## 编程错误不再按消息文字被判可重试（progerr，2026-10-05，worker/progerr，基于 17k 头 `9e2f0eb69`；待 3a 复审）
 
