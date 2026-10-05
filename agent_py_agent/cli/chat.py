@@ -247,9 +247,131 @@ def _ensure_chat_memory_limit(args) -> None:
         args.memory_limit = _CLI_CHAT_MEMORY_COUNT
 
 
-# 函数用途: 显式 resume <session_id> 只连接指定会话(owner seq1943 语义③ +
+# LLM: Only canonical chat/local-agent bindings can identify a recoverable session; read failures are fail-closed and never fall back to request text.
+# 函数用途: 从当前 Agent 的持久会话库按精确通道绑定读取 thread。
+def _find_session_recovery_thread(agent, session_id: str):
+    from ..agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
+
+    store = getattr(agent, "conversation_store", None)
+    resolver = getattr(getattr(store, "threads", None), "resolve_report", None)
+    if not callable(resolver):
+        return None
+    try:
+        thread, error = resolver(
+            channel=LOCAL_CHAT_CHANNEL,
+            channel_conversation_id=session_id,
+            channel_user_id=LOCAL_AGENT_USER_ID,
+        )
+    except Exception:
+        return None
+    return thread if error is None else None
+
+
+# LLM: Rebuild is authorized only by exact binding and the same frozen owner identity and home; missing legacy facts remain denied.
+# 函数用途: 校验 thread 绑定和 owner 身份，避免跨用户恢复。
+def _session_thread_matches_owner(agent, session_id: str, thread) -> bool:
+    from pathlib import Path
+
+    from ..agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
+
+    owner = getattr(agent, "home_paths", None)
+    owner_id = str(getattr(owner, "owner_id", "") or "").strip()
+    owner_home = str(getattr(owner, "owner_home_dir", "") or "").strip()
+    bindings = getattr(thread, "channel_bindings", ())
+    if not owner_id or not owner_home or not isinstance(bindings, (list, tuple)):
+        return False
+    if str(getattr(thread, "owner_id", "") or "").strip() != owner_id:
+        return False
+    if not str(getattr(thread, "thread_id", "") or "").strip():
+        return False
+    if not any(
+        item.channel == LOCAL_CHAT_CHANNEL
+        and item.channel_conversation_id == session_id
+        and item.channel_user_id == LOCAL_AGENT_USER_ID
+        for item in bindings
+    ):
+        return False
+    recorded_home = str(getattr(thread, "owner_home", "") or "").strip()
+    if not recorded_home:
+        return False
+    try:
+        return Path(owner_home).expanduser().resolve() == Path(recorded_home).expanduser().resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+# LLM: Restore audit must be durable and enabled before writing the local session projection; details contain identity refs only, never transcript.
+# 函数用途: 记录恢复登记的授权审计，不写入会话正文。
+def _audit_session_registration_restore(agent, session_id: str, thread) -> bool:
+    from ..agent.audit.logger import AuditLogger
+    from ..agent.audit.records import AuditStatus, LogParams
+    from ..agent.conversation.channels import LOCAL_CHAT_CHANNEL
+
+    config = getattr(agent, "config", None)
+    user_id = str(getattr(config, "user_id", "") or "").strip()
+    owner_id = str(getattr(thread, "owner_id", "") or "").strip()
+    thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    if not config or not user_id or not owner_id or not thread_id:
+        return False
+    try:
+        audit = AuditLogger(config)
+        if not audit.enabled:
+            return False
+        audit.log(LogParams(
+            action="SESSION_REGISTRY_RESTORE_AUTHORIZED",
+            user_id=user_id,
+            channel=LOCAL_CHAT_CHANNEL,
+            target_type="session",
+            target_id=session_id,
+            status=AuditStatus.SUCCESS,
+            details={
+                "decision": "restore_registration",
+                "source": "conversation_thread",
+                "owner_id": owner_id,
+                "thread_id": thread_id,
+            },
+        ))
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+# LLM: Explicit resume alone may rebuild the owner-local registry projection, and only after the canonical thread and audit checks pass.
+# 函数用途: 用同一 owner 的持久 Gateway thread 恢复丢失的本地会话登记。
+def _restore_missing_session_registration(agent, manager, session_id: str) -> bool:
+    from ..agent.conversation.channels import LOCAL_CHAT_CHANNEL
+    from ..agent.session.models import Session
+
+    thread = _find_session_recovery_thread(agent, session_id)
+    if thread is None or not _session_thread_matches_owner(agent, session_id, thread):
+        return False
+    if manager.session_exists(session_id):
+        return True
+    if not _audit_session_registration_restore(agent, session_id, thread):
+        return False
+    user_id = str(getattr(agent.config, "user_id", "") or "").strip()
+    try:
+        created_at = float(getattr(thread, "created_at", 0.0) or 0.0)
+        updated_at = float(getattr(thread, "updated_at", 0.0) or created_at)
+        manager.save_session(Session(
+            session_id=session_id,
+            user_id=user_id,
+            created_at=created_at,
+            updated_at=updated_at,
+            last_active_channel=LOCAL_CHAT_CHANNEL,
+            metadata={
+                "restored_from": "conversation_thread",
+                "thread_id": str(thread.thread_id),
+            },
+        ))
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+# LLM: 显式 resume <session_id> 只连接指定会话(owner seq1943 语义③ +
 # 双席 seq1958 fail-closed): session 不存在/无效 → 报错退出(非 0), 绝不
-# 静默创建新会话或回退到其他历史。session/task/run/attempt 四层保持分开——
+# 静默创建新会话或回退到其他历史；仅同 owner 的精确 Gateway thread 可触发登记恢复。session/task/run/attempt 四层保持分开——
 # 本命令只决定"接哪条会话", 会话下的任务续跑仍由共享权威(runtime.db)驱动。
 def cmd_resume(args) -> int:
     from ..agent.session.manager import SessionManager
@@ -273,12 +395,13 @@ def cmd_resume(args) -> int:
         print(f"初始化失败: {exc}", file=sys.stderr)
         return 3
     if not manager.session_exists(session_id):
-        print(
-            f"会话 {session_id} 不存在; resume 只连接已存在的会话"
-            f"(用 my-agent chat 创建新会话)",
-            file=sys.stderr,
-        )
-        return 3
+        if not _restore_missing_session_registration(agent, manager, session_id):
+            print(
+                f"会话 {session_id} 不存在; resume 只连接已存在的会话"
+                f"(用 my-agent chat 创建新会话)",
+                file=sys.stderr,
+            )
+            return 3
     # 跨用户负例(双席 seq1966): session 归属校验——session 的 user_id 与
     # 当前用户不符 → fail-closed 拒绝(拿到别人 session_id 也不能恢复)。
     current_user = str(getattr(agent.config, "user_id", "") or "")

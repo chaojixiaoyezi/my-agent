@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1027,3 +1028,286 @@ class TestChatSessionIdFailClosed:
         rc = chat_mod.cmd_chat(_Args())
         assert rc == 3
         assert called == []  # 未初始化聊天状态
+
+
+# LLM: 恢复用例要构造的 canonical thread 形状收成一个不可变载体，保持 helper 参数不增长（code-size 参数守卫）。
+# 类用途: 保存测试替身 thread 的绑定与归属字段。
+@dataclass(frozen=True)
+class _ThreadShape:
+    owner_id: str = "local/main"
+    owner_home: object = None
+    channel: str = "chat"
+    channel_user_id: str = "local-agent"
+    create: bool = True
+
+
+# 用途: 默认 thread 形状的模块级不可变单例，避免在参数默认值里做函数调用（lint B008）。
+_DEFAULT_THREAD_SHAPE = _ThreadShape()
+
+
+def _make_missing_registration_agent(
+    tmp_path,
+    session_id: str,
+    thread: _ThreadShape = _DEFAULT_THREAD_SHAPE,
+):
+    """在 pytest 隔离 home 中保留 Gateway thread、删除 CLI 登记并组装 Agent。"""
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.session import Session
+    from agent_py_agent.agent.session.manager import SessionManager
+
+    owner_home = tmp_path / "owner-home"
+    owner_home.mkdir()
+    config = SimpleNamespace(
+        session_workspace=str(owner_home / "sessions"),
+        user_id="current-user",
+        audit_enabled=True,
+        audit_log_path=str(tmp_path / "audit.jsonl"),
+    )
+    manager = SessionManager(config)
+    manager.save_session(Session(
+        session_id=session_id,
+        user_id=config.user_id,
+        created_at=100.0,
+        updated_at=101.0,
+    ))
+    assert manager.delete_session(session_id) is True
+
+    store = ConversationStore(tmp_path / "conversation-store")
+    if thread.create:
+        store.threads.get_or_create({
+            "canonical_user_id": "local-agent",
+            "channel": thread.channel,
+            "channel_conversation_id": session_id,
+            "channel_user_id": thread.channel_user_id,
+            "owner_id": thread.owner_id,
+            "owner_home": str(thread.owner_home or owner_home),
+            "title": "isolated recovery fixture",
+        })
+    agent = SimpleNamespace(
+        config=config,
+        home_paths=SimpleNamespace(owner_id="local/main", owner_home_dir=owner_home),
+        conversation_store=store,
+    )
+    return agent
+
+
+class TestResumeMissingRegistrationRecovery:
+    def test_resume_recovers_deleted_registration_from_same_owner_thread(
+        self, monkeypatch, tmp_path
+    ):
+        """丢失登记时仅凭同 owner 的持久 Gateway thread 恢复，并写审计。"""
+        import json
+
+        from agent_py_agent.agent.session.manager import SessionManager
+        from agent_py_agent.cli import chat as chat_mod
+
+        session_id = "sess_1791197000_a1b2c3d4"
+        agent = _make_missing_registration_agent(tmp_path, session_id)
+        resumed = []
+        monkeypatch.setattr(chat_mod, "make_agent", lambda _args: agent)
+        monkeypatch.setattr(
+            chat_mod, "cmd_chat", lambda args: resumed.append(args) or 0
+        )
+
+        result = chat_mod.cmd_resume(SimpleNamespace(session_id=session_id))
+
+        manager = SessionManager(agent.config)
+        restored = manager.load_session(session_id)
+        assert result == 0
+        assert len(resumed) == 1
+        assert restored is not None
+        assert restored.session_id == session_id
+        assert restored.user_id == "current-user"
+        audit = json.loads((tmp_path / "audit.jsonl").read_text(encoding="utf-8"))
+        assert audit["action"] == "SESSION_REGISTRY_RESTORE_AUTHORIZED"
+        assert audit["target_type"] == "session"
+        assert audit["target_id"] == session_id
+        assert audit["details"]["source"] == "conversation_thread"
+        assert "content" not in audit["details"]
+
+    @pytest.mark.parametrize(
+        ("thread_owner_id", "thread_owner_home"),
+        [
+            ("providers/feishu/users/other", None),
+            ("local/main", "different-owner-home"),
+        ],
+    )
+    def test_resume_does_not_recover_when_thread_owner_differs(
+        self, monkeypatch, tmp_path, thread_owner_id, thread_owner_home
+    ):
+        """owner_id 或 owner_home 任一不精确匹配，都必须拒绝恢复。"""
+        from agent_py_agent.agent.session.manager import SessionManager
+        from agent_py_agent.cli import chat as chat_mod
+
+        session_id = "sess_1791197001_a1b2c3d4"
+        agent = _make_missing_registration_agent(
+            tmp_path,
+            session_id,
+            thread=_ThreadShape(
+                owner_id=thread_owner_id,
+                owner_home=(
+                    tmp_path / thread_owner_home if thread_owner_home else None
+                ),
+            ),
+        )
+        resumed = []
+        monkeypatch.setattr(chat_mod, "make_agent", lambda _args: agent)
+        monkeypatch.setattr(
+            chat_mod, "cmd_chat", lambda args: resumed.append(args) or 0
+        )
+
+        result = chat_mod.cmd_resume(SimpleNamespace(session_id=session_id))
+
+        assert result == 3
+        assert resumed == []
+        assert not SessionManager(agent.config).session_exists(session_id)
+        assert not (tmp_path / "audit.jsonl").exists()
+
+
+class TestResumeMissingRegistrationRecoveryRejections:
+    """sessrecr 初审补充：绑定与审计维度的反例，全部必须拒绝且不落本地登记。"""
+
+    def _resume(self, monkeypatch, agent, session_id):
+        from agent_py_agent.cli import chat as chat_mod
+
+        resumed = []
+        monkeypatch.setattr(chat_mod, "make_agent", lambda _args: agent)
+        monkeypatch.setattr(chat_mod, "cmd_chat", lambda args: resumed.append(args) or 0)
+        result = chat_mod.cmd_resume(SimpleNamespace(session_id=session_id))
+        return result, resumed
+
+    @pytest.mark.parametrize(
+        ("thread_channel", "thread_channel_user_id"),
+        [
+            ("feishu", "local-agent"),
+            ("chat", "someone-else"),
+        ],
+        ids=["other-channel", "other-channel-user"],
+    )
+    def test_resume_rejects_thread_with_wrong_binding(
+        self, monkeypatch, tmp_path, thread_channel, thread_channel_user_id
+    ):
+        """渠道或 channel_user_id 任一不精确匹配，都必须拒绝恢复。"""
+        from agent_py_agent.agent.session.manager import SessionManager
+
+        session_id = "sess_1791197002_a1b2c3d4"
+        agent = _make_missing_registration_agent(
+            tmp_path,
+            session_id,
+            thread=_ThreadShape(
+                channel=thread_channel,
+                channel_user_id=thread_channel_user_id,
+            ),
+        )
+
+        result, resumed = self._resume(monkeypatch, agent, session_id)
+
+        assert result == 3
+        assert resumed == []
+        assert not SessionManager(agent.config).session_exists(session_id)
+        assert not (tmp_path / "audit.jsonl").exists()
+
+    def test_resume_rejects_when_thread_missing(self, monkeypatch, tmp_path):
+        """thread 缺失（无持久会话）时必须拒绝，不能凭登记名字猜归属。"""
+        from agent_py_agent.agent.session.manager import SessionManager
+
+        session_id = "sess_1791197003_a1b2c3d4"
+        agent = _make_missing_registration_agent(
+            tmp_path, session_id, thread=_ThreadShape(create=False)
+        )
+
+        result, resumed = self._resume(monkeypatch, agent, session_id)
+
+        assert result == 3
+        assert resumed == []
+        assert not SessionManager(agent.config).session_exists(session_id)
+
+    def test_resume_rejects_when_audit_disabled(self, monkeypatch, tmp_path):
+        """审计关闭时拒绝恢复，登记不得落盘。"""
+        from agent_py_agent.agent.session.manager import SessionManager
+
+        session_id = "sess_1791197004_a1b2c3d4"
+        agent = _make_missing_registration_agent(tmp_path, session_id)
+        agent.config.audit_enabled = False
+
+        result, resumed = self._resume(monkeypatch, agent, session_id)
+
+        assert result == 3
+        assert resumed == []
+        assert not SessionManager(agent.config).session_exists(session_id)
+        assert not (tmp_path / "audit.jsonl").exists()
+
+    def test_resume_rejects_when_audit_write_fails_before_registry_rebuild(
+        self, monkeypatch, tmp_path
+    ):
+        """审计写失败时必须在建登记之前收口：拒绝恢复且不落任何登记。"""
+        from agent_py_agent.agent.audit import logger as audit_logger
+        from agent_py_agent.agent.session.manager import SessionManager
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("audit write failed")
+
+        monkeypatch.setattr(audit_logger, "append_private_jsonl_records", _boom)
+        session_id = "sess_1791197005_a1b2c3d4"
+        agent = _make_missing_registration_agent(tmp_path, session_id)
+
+        result, resumed = self._resume(monkeypatch, agent, session_id)
+
+        assert result == 3
+        assert resumed == []
+        assert not SessionManager(agent.config).session_exists(session_id)
+
+    def test_restored_registration_uses_canonical_thread_fields(self, monkeypatch, tmp_path):
+        """恢复出的登记与 Session 模型字段一致：ID 相同、归属当前用户、时间来自 thread。"""
+        from agent_py_agent.agent.conversation.channels import LOCAL_CHAT_CHANNEL
+        from agent_py_agent.agent.session.manager import SessionManager
+
+        session_id = "sess_1791197006_a1b2c3d4"
+        agent = _make_missing_registration_agent(tmp_path, session_id)
+
+        result, resumed = self._resume(monkeypatch, agent, session_id)
+
+        assert result == 0 and len(resumed) == 1
+        restored = SessionManager(agent.config).load_session(session_id)
+        assert restored is not None
+        thread, error = agent.conversation_store.threads.resolve_report(
+            channel=LOCAL_CHAT_CHANNEL,
+            channel_conversation_id=session_id,
+            channel_user_id="local-agent",
+        )
+        assert error is None and thread is not None
+        assert restored.session_id == session_id
+        assert restored.user_id == "current-user"
+        assert restored.created_at == float(thread.created_at)
+        assert restored.updated_at == float(thread.updated_at)
+        assert restored.last_active_channel == LOCAL_CHAT_CHANNEL
+        assert restored.metadata == {
+            "restored_from": "conversation_thread",
+            "thread_id": str(thread.thread_id),
+        }
+
+    def test_session_lookup_rejects_traversal_id_before_touching_files(self, tmp_path):
+        """session_id 走统一拒绝式校验：路径穿越形态在读/写文件之前就被拒。"""
+        from agent_py_agent.agent.common.opaque_id import OpaqueIdError
+        from agent_py_agent.agent.session import Session
+        from agent_py_agent.agent.session.manager import SessionManager
+
+        config = SimpleNamespace(
+            session_workspace=str(tmp_path / "owner-home" / "sessions"),
+            user_id="current-user",
+            audit_enabled=True,
+            audit_log_path=str(tmp_path / "audit.jsonl"),
+        )
+        manager = SessionManager(config)
+
+        with pytest.raises(OpaqueIdError):
+            manager.session_exists("../escape")
+        with pytest.raises(OpaqueIdError):
+            manager.save_session(Session(
+                session_id="../escape",
+                user_id="current-user",
+                created_at=1.0,
+                updated_at=1.0,
+            ))
+        assert not (tmp_path / "owner-home" / "escape").exists()
+        assert not (tmp_path / "escape").exists()

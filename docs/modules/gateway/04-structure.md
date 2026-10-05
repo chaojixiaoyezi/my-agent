@@ -1422,6 +1422,7 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 - `/sessions` 从当前 owner 的 `SessionManager` 读取 canonical 会话记录，倒序、有界展示并生成精确
   `my-agent resume <session_id>`；坏记录只计数，不中断其余列表。命令不写 transcript、不调用模型、不触碰
   其他 owner。
+- CLI `resume` 遇到登记缺失时只可按当前 owner 的精确 `chat/local-agent + session_id` thread 绑定恢复；thread 的 `owner_id` 与 `owner_home` 都必须匹配，恢复前追加不含正文的审计。任一事实缺失、损坏、跨 owner 或审计关闭均拒绝，不由 Gateway 请求正文补造登记。
 - 当前 TUI 不支持只替换 session id 的原地切换。完整 picker 需要像 会话运行时/终端交互 一样同时重建
   transcript、active turn、Compact、task link、权限和视图滚动状态；在该合同落地前，退出再 resume 是唯一
   正确恢复路径。

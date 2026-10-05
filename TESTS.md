@@ -1,5 +1,19 @@
 # 测试与发布验收
 
+## TUI 本地会话登记恢复（sessrec，2026-10-05；待非作者初审）
+
+- **复现与修复**：隔离 `tmp_path` owner home 中创建登记后调用 `SessionManager.delete_session`，保留同 owner 的 canonical `ConversationStore` thread。修复前恢复正例失败（resume 返回 3）；修复后登记重建、resume 转入 chat、审计条目存在且无正文。owner_id 和 owner_home 各一条不匹配负例均拒绝。
+- **定向回归**（工作树根，`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 /Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：`-m pytest agent_py_agent/tests/test_session.py agent_py_agent/tests/test_session_class.py agent_py_agent/tests/test_session_owner_isolation.py agent_py_agent/tests/test_session_resume.py agent_py_agent/tests/test_cli_chat.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_tui_upgrade_follow.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna6` → 全部通过（return code 0）。
+- **架构守卫**：同一 Python/pytest 参数运行 `guards9.txt` 的 11 个文件（含 `test_packaging.py`）→ 全部通过（return code 0）。
+- **变异**：移除 owner_id 精确比较时跨 owner_id 用例失败；移除 owner_home 精确比较时不同 home 用例失败。两次各只变一处，完成后立即还原；当前源码回归仍绿。
+- **本地门禁**：Import boundaries `findings=0`；Ruff `All checks passed!`；doc-sync `DOC_SYNC_PASS`；strict code-size `strict_scope_total=2193`、`hard=0`、`blocked=False`（`CODE_SIZE_REPORT.md` 已还原）；`size_diff.sh` 新增告警 **0**、消失 50；`git diff --check` 干净；clean-package 输出 `OK: . 未发现发布阻塞项`。
+
+## TUI 本地会话登记恢复——sessrecr 初审补充反例（2026-10-05，分支 `worker/sessrecr-fix`）
+
+- **补充反例（7 条）**：`test_cli_chat.py::TestResumeMissingRegistrationRecoveryRejections`——飞书渠道绑定、别的 channel_user_id、thread 缺失、审计关闭、审计写失败（必须在建登记之前收口、登记不得落盘）、重建字段与 `Session` 模型一致（ID 同、归属当前用户、时间来自 thread）、路径穿越形态的 session_id 在读写文件之前被 `validate_opaque_id` 拒绝。全部通过：当前产品行为在这些维度都正确拒绝。
+- **初审变异（4 个，脚本 `tasks/2026-10-05/sessrecr-review/mutations.py`，sha256 还原一致）**：删审计 enabled 检查 → KILLED（审计关闭反例红）；吞审计写失败 → KILLED（审计写失败反例红）；审计挪到建登记之后 → KILLED（先建后报错反例红）；绑定匹配放宽为只看 conversation_id → SURVIVED（**冗余防线**：渠道过滤已在 `_find_session_recovery_thread` 的查询条件里发生，`_session_thread_matches_owner` 的绑定检查是第二道纵深，两道都保留）。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_cli_chat.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sessrecr` → **59 passed**（含 7 条新反例）。
+
 ## WebSocket 流在信封绝对期限处收口（wsdeadline，2026-10-05，分支 `worker/wsdeadline`，基于 17k 头 `07d7b3306`；待初审）
 
 **来源**：fix3ar 初审探针 B3 实测的漏网（idle 每次事件刷新截止 + 检查只在 recv 超时分支 → 持续滴事件时绝对期限不生效）；3a 裁定随 17k 修。

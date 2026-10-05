@@ -60,6 +60,8 @@ user 注入、签名和参数留在服务端；显示事件不回灌模型。can
 原问答预览仍保留原调用方，缓存、Compact 和原生请求拼装不因 UI 恢复改变。当前恢复范围受已有历史读取窗口
 约束；Compact 前完整过程与长会话分页仍待 P1 验收，不能凭已有 native 尾部声明完整归档已恢复。
 
+CLI 的 `sessions/<session_id>/session.json` 是本地入口登记，不是 Gateway 对话事实源。显式 `resume` 在该登记缺失时，只有从当前 owner 的 `ConversationStore` 读到精确的 `chat/local-agent + session_id` thread 绑定，且 thread 的 `owner_id`、`owner_home` 同时与当前 owner 完全相符，才可重建同一 ID 的登记；重建前写 `SESSION_REGISTRY_RESTORE_AUTHORIZED` 审计，不记录 transcript。找不到 thread、审计关闭或归属有任何缺失/不符都继续 fail-closed；不能从 pending 请求正文、session ID 命名或另一 owner 的数据回填。代码中直接删除单个登记的 `SessionManager.delete_session` 目前没有生产调用方；OwnerObjectStore 的整 owner-home 快照恢复会删后重建目录，可能丢掉快照清单之外的文件，但不能据此断言历史事故由它触发。
+
 owner-scoped `ConversationStore` 中的 raw JSONL transcript 是唯一对话事实源。thread JSON 只保存同一历史的
 compact summary、精确消息/字节 cursor、generation、live checkpoint pointer、累计来源消息/工具往返、
 连续失败状态和 `/verbose` 设置。compact 不删除或改写 raw 消息：旧段被摘要后，新的 user/assistant 消息
