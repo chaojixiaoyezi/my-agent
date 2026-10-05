@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -315,3 +316,30 @@ def test_clock_reversal_or_exact_window_boundary_never_replays(tmp_path, world, 
     assert len(provider.attempts) == 1
     if now >= 1005.0:
         assert second.store.terminal_receipt("req-resume")["disposition"] == "unknown"
+
+
+# LLM: schema 7 的新标记损坏时整条记录必须被拒绝；丢标记会被当成“未外发”而重发已开始的外发。
+# 函数用途: 直接构造损坏的 dispatch 标记，钉住 _validated_dispatch 的 fail-closed 拒绝。
+def _claimed_record():
+    return PendingGatewayReply(
+        "req-corrupt", "fixture", "user", "message", claim_owner="x", claim_epoch=5,
+    )
+
+
+@pytest.mark.parametrize("dispatch", [
+    {"state": "bogus"},
+    {"state": "dispatch-started", "claim_epoch": 0, "owner": "x", "message_key": "k",
+     "message_sequence": "final", "payload_sha256": "0" * 64},
+    {"state": "dispatch-started", "claim_epoch": 1, "owner": "x", "message_key": "k",
+     "message_sequence": "final", "payload_sha256": "not-a-64-hex-digest"},
+])
+def test_corrupt_dispatch_marker_is_rejected_not_treated_unsent(dispatch):
+    with pytest.raises(ValueError):
+        replace(_claimed_record(), dispatch=dict(dispatch))
+
+
+def test_valid_dispatch_marker_roundtrips():
+    marker = {"state": "dispatch-started", "claim_epoch": 1, "owner": "x", "message_key": "k",
+              "message_sequence": "final", "payload_sha256": "0" * 64}
+    updated = replace(_claimed_record(), dispatch=marker)
+    assert updated.dispatch["state"] == "dispatch-started"
