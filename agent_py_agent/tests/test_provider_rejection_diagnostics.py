@@ -7,6 +7,10 @@ import json
 import urllib.error
 from email.message import Message
 
+from agent_py_agent.agent.backends.errors import (
+    ProviderTransientError,
+    is_provider_recoverable_error,
+)
 from agent_py_agent.agent.backends.gateway_helpers import _runtime_http_error
 from agent_py_agent.agent.backends.rejection_diagnostics import public_rejection_diagnostic
 from agent_py_agent.agent.gateway_parts.request_errors import gateway_provider_error_projection
@@ -93,3 +97,26 @@ def test_public_rejection_diagnostic_cleans_inputs():
     assert "cause_code" not in cleaned
     assert cleaned["headers"] == {"cf-ray": "r1"}
     assert cleaned["body_bytes"] == 0 and "\x00" not in cleaned["body_excerpt"]
+
+
+# LLM: 初审补钉（V1 缺口）：原因码只由状态码判定，不解析响应体语言；正文里出现 auth/rate/quota
+#   字样不得改变分类（此前无用例钉住，变异“按正文改判 auth”会存活）。
+# 函数用途: 钉住 cause_code 只看结构化状态码、不被正文文本带偏。
+def test_cause_code_follows_status_code_not_body_text():
+    body = b'{"error": "auth rate limited quota forbidden"}'
+    for status, expected in ((403, "forbidden_unknown"), (429, "rate_limited"),
+                             (401, "auth"), (402, "quota")):
+        error = _runtime_http_error(_http_error(status, body))
+        assert error.details["rejection_diagnostic"]["cause_code"] == expected
+
+
+# LLM: 初审补钉（V4 缺口）：瞬时族投影只追加结构化诊断与原因码，不覆盖/不添加 user_error，
+#   可恢复语义不变（此前无用例钉住，变异“投影附带 user_error”会存活）。
+# 函数用途: 钉住 429 投影的键集合与可恢复判定，防止诊断改动原有错误文案。
+def test_transient_projection_appends_only_diagnostic_without_user_error():
+    error = _runtime_http_error(_http_error(429, b'{"error": "rate"}', {"retry-after": "30"}))
+    assert isinstance(error, ProviderTransientError)
+    projection = gateway_provider_error_projection(error)
+    assert set(projection) == {"rejection_diagnostic", "cause_code"}
+    assert "user_error" not in projection
+    assert is_provider_recoverable_error(error) is True
