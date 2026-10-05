@@ -35,6 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..common.heartbeat import process_start_time, start_time_matches
 from ..common.id_generator import new_id
 from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 
@@ -90,12 +91,16 @@ def attempt_status_is_terminal(status: object) -> bool:
     return str(status or "") in _ATTEMPT_TERMINAL_STATUSES
 
 
+# LLM: 持主判死的唯一口径：pid 不存在 → 死；启动指纹"确证不同" → 死（PID 复用）；其余
+#   （读不到指纹、记录为空、跨表示不可比）一律保守判活。指纹读取统一走 common.heartbeat
+#   （与写端 _start_token 同源），比较走 start_time_matches（兼容旧数字记录）。
+# 函数用途: 判断执行权锁记录的持主是否仍活着，供锁接管与孤儿回收使用。
 def holder_is_alive(pid: int, start_token: str = "") -> bool:
     """R1-03 持主判死：pid 不存在 → 死；start_token 失配（PID 复用）→ 死。
 
-    pid<=0 或无法读取 /proc（非 Linux）→ 保守视为存活（fail-closed：
-    无法证明死亡就不接管）。start_token 是 /proc/<pid>/stat 第 22 字段
-    （starttime），进程启动时记录，比对防 PID 复用。
+    读不到指纹（含非 Linux 无 ps 权限）或记录为空 → 保守视为存活（fail-closed：
+    无法证明死亡就不接管）。指纹统一取 common.heartbeat 的跨平台字符串
+    （Linux /proc ticks、macOS ps lstart）。
     """
     if int(pid or 0) <= 0:
         return True
@@ -105,12 +110,7 @@ def holder_is_alive(pid: int, start_token: str = "") -> bool:
         return False
     if not start_token:
         return True
-    try:
-        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as fh:
-            fields = fh.read().split()
-        return len(fields) >= 22 and fields[21] == str(start_token)
-    except OSError:
-        return True
+    return start_time_matches(str(start_token), process_start_time(int(pid)))
 
 
 # G.12 mutation 状态。

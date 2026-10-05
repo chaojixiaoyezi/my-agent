@@ -87,7 +87,7 @@
 
 - **来源**：schedstart（`41991b6b0`）初审"必须改"两条——① runtime_db 的 runner 指纹比较仍是 `float()` 比较，与 heartbeat 字符串指纹不等，Linux 活进程会被误标 unknown；② heartbeat 的 ps 读取不看返回码，非零返回码带输出被当有效指纹。本分支 cherry-pick 后一并修复，并继续 starttime2 原计划（统一其余读取点）。
 - **schedstart 修正**：heartbeat 新增 `start_time_matches`（旧数字记录与新字符串指纹双口径；任一侧缺失、跨表示、非有限一律不可核验、不判死）；`_read_ps_starttime` 对非零返回码/超时/空输出一律 None；runtime_db `_mark_dead_runner_attempt_unknown` 改用双口径比较；executor_liveness 本地 `_same_start_token` 删除、改用同一函数。迁移口径：旧数字记录在 Linux 上按数值与字符串指纹比较；macOS 的 lstart 与数字不可比时不判死。
-- **starttime2 原计划**：`local_storage/tool_operations` 的启动标记读取（原含 Linux /proc 与 darwin /bin/ps 两条分支）与 `runtime_db._start_token`（原仅 Linux /proc，comm 含空格会错位、非 Linux 恒空）统一走 `common.heartbeat.process_start_time`；落盘类型（字符串）与比较语义（空值保守判活）不变；Linux 值逐字节不变，macOS 由 `/bin/ps` 等价改为 `ps`。
+- **starttime2 原计划**：`local_storage/tool_operations` 的启动标记读取（原含 Linux /proc 与 darwin /bin/ps 两条分支）与 `runtime_db._start_token`（原仅 Linux /proc，comm 含空格会错位、非 Linux 恒空）统一走 `common.heartbeat.process_start_time`；落盘类型（字符串）与比较语义（空值保守判活）不变；Linux 值逐字节不变，macOS 由 `/bin/ps` 等价改为 `ps`。**读端一并统一**：`runtime_db/operations.holder_is_alive` 的内联 /proc 读取同改（否则写端 rsplit 与读端 split 在 comm 含空格时不一致；macOS 也因此首次能核对启动指纹，存量空指纹记录仍保守判活）。
 - **未改（下一刀）**：`gateway_parts/daemon_metadata._get_process_start_time`、`tooling/process_registry.capture_process_birth_token`；差异盘点见本轮交接报告。
 - **验证**：新增/改写用例（ps 三态、/proc 解析、比较矩阵、runtime_db 新旧格式矩阵、tool_operations 判活三态）；变异 3/3 KILLED；连带测试与门禁结果见 TESTS.md 同名小节。未验证：真实 macOS ps 输出链路（沙箱内 ps 被禁，用打桩覆盖）、非作者初审。
 

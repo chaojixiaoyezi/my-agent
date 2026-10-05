@@ -156,9 +156,9 @@
 
 ## starttime2 启动指纹读取统一 + schedstart 初审修正（2026-10-05，待初审）
 
-- **改动**：见 DESIGN_LEDGER 同名小节。产品文件 4 个（`common/heartbeat.py`、`local_storage/tool_operations.py`、`runtime_db/repository.py`、`runtime_db/executor_liveness.py`），测试 2 个（新 `test_start_time_unification.py`、改写 `test_runtime_db_recover_stale.py` 参数表并新增双口径矩阵用例）。
+- **改动**：见 DESIGN_LEDGER 同名小节。产品文件 5 个（`common/heartbeat.py`、`local_storage/tool_operations.py`、`runtime_db/repository.py`、`runtime_db/executor_liveness.py`、`runtime_db/operations.py`），测试 2 个（新 `test_start_time_unification.py`、改写 `test_runtime_db_recover_stale.py` 参数表并新增双口径矩阵用例）。
 - **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
-  - 新文件 → **22 passed**；`test_runtime_db_recover_stale.py` → **30 passed**。
+  - 新文件 → **26 passed**（含 runtime_db 读端 `holder_is_alive` 四例）；`test_runtime_db_recover_stale.py` → **30 passed**。
   - 连带组（direct 13 文件 / runtime_db 4 文件 / mandatory 6 文件，subprocess timeout=900）→ **三组 rc=0、0 failures**（含 `test_plugin_m1_joint_*.py`、`test_background_claim_*.py`、`test_session_task_claim_binding.py`）。
   - 其余 grep 命中 11 文件 → 1 个失败（`test_plugin_preparation_operation.py::test_host_executor_claim_precedes_real_preparation_and_replay_does_not_launch_again`，`outcome_unknown != succeeded`）；已在基线 `33a569b3e` 临时工作树复核同文件同用例**同样失败**（既有失败，非本次引入）。
   - guards9 12 文件 → **194 passed**；变异（`/private/tmp/starttime2_mutate.py`，逐项原字节还原+sha256）：MUT-1 退回 float 比较 → KILLED（5 用例红）；MUT-2 去掉 ps 返回码检查 → KILLED；MUT-3 跨表示判死 → KILLED。**3/3 KILLED**。

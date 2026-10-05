@@ -18,6 +18,7 @@ from agent_py_agent.agent.local_storage.tool_operations import (
     ToolOperationRecord,
     _operation_holder_is_live,
 )
+from agent_py_agent.agent.runtime_db.operations import holder_is_alive
 
 _FAKE_PID = 4_000_000_000  # 不存在的 pid：/proc 与真实 ps 都读不到，保证走打桩路径
 
@@ -169,3 +170,41 @@ def test_holder_conservatively_live_when_token_missing(monkeypatch, _local_holde
     """旧记录 token 为空 → 不看指纹（空值=不可核验），保守判活。"""
     monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "anything")
     assert _operation_holder_is_live(_record_with_token(os.getpid(), ""), time.time()) is True
+
+
+# ---------------------------------------------------------------- runtime_db 读端：holder_is_alive（锁接管判死）
+
+
+def test_holder_is_alive_reads_fingerprint_consistently(monkeypatch):
+    """读端与写端同源：指纹一致 → 活；不同 → 死（PID 复用）。"""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: "999"
+    )
+    assert holder_is_alive(os.getpid(), "999") is True
+    assert holder_is_alive(os.getpid(), "1000") is False
+
+
+def test_holder_is_alive_conservative_when_unreadable(monkeypatch):
+    """读不到指纹（如沙箱禁 ps / 无 /proc）→ 保守判活，不接管。"""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: None
+    )
+    assert holder_is_alive(os.getpid(), "999") is True
+
+
+def test_holder_is_alive_conservative_for_legacy_empty_token(monkeypatch):
+    """旧记录指纹为空 → 不比较、保守判活（存量迁移口径）。"""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: "anything"
+    )
+    assert holder_is_alive(os.getpid(), "") is True
+
+
+def test_holder_is_alive_detects_pid_reuse_on_macos_lstart(monkeypatch):
+    """macOS：lstart 指纹不同 → 判死（此前读不到 /proc 恒判活，本次起可核对）。"""
+    monkeypatch.setattr(
+        "agent_py_agent.agent.runtime_db.operations.process_start_time",
+        lambda _pid: "Sat Oct  4 10:00:00 2026",
+    )
+    assert holder_is_alive(os.getpid(), "Fri Oct  3 09:00:00 2026") is False
+    assert holder_is_alive(os.getpid(), "Sat Oct  4 10:00:00 2026") is True
