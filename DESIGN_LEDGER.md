@@ -1,5 +1,22 @@
 # 设计台账
 
+## G2b 客户端收尾小修（g2bfix4，2026-10-05，分支 `worker/g2bfix4`，基于 g2bfix3 头 `51b3efb20`；待终审）
+
+- **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言（TUI 侧用替身构造，两层接缝没有端到端钉住）；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`（项目里 `InterruptedError` 是真实中断信号）；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A（不存在的记录回 404、无权限保持 403、客户端不改），由初审者直接修。
+- **② 投递兜底加固**（`agent/adapter/delivery.py`）：`_run` 增加 `except (InterruptedError, BlockingIOError): raise` 显式放行中断类；`except Exception` 保持只捕 Exception（KeyboardInterrupt/SystemExit 等 BaseException 穿过兜底，补护栏用例）；新增 `_log_loop_error` 按 60 秒窗口（`_LOOP_ERROR_LOG_INTERVAL_SECONDS`）对同一异常限频——窗口内只累计次数、下次真正记录时先输出被抑制条数。
+- **① 解码层置位断言**（测试侧）：新增 `test_active_turn_input_result_sets_auth_denied_only_for_typed_denials` 直接调用 `_active_turn_input_result` 覆盖五格（401/403/带码 404 置位；无码 404、普通 202 不置位），两条既有端到端用例补 `auth_denied` 断言。
+- **③ /progress 三态**（`agent/gateway_parts/http_handlers.py`）：`_can_read_finished_request` 由 bool 改为三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED），`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access`（管理员）分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。
+- **验证**：见 TESTS「G2b 客户端收尾小修（g2bfix4）」；6 个变异全杀（去限频、去中断放行、吞 BaseException、不置位 auth_denied、未找到当允许、未找到回 403）；相关 7 文件 307 passed / 1 skipped、guards9 187 passed，静态门禁全过，size_diff 新增 0。
+- **未验证**：真实 TUI/飞书端到端与真实 Gateway 仍由 3a 在沙箱外复核；本树覆盖解码层、投递循环与 `/progress` HTTP 层。
+
+## G2b 客户端线收 9b 三条建议（g2bfix3，2026-10-04，分支 `worker/g2bfix3`，基于 17j 头 `45d8cdcc5`；待初审）
+
+- **TUI 鉴权分流按结构化标志**（9b 建议 2）：`ActiveTurnInputResult` 新增 `auth_denied`（由状态码决定：401/403、以及带码 404），对账器按它分流到 `on_auth_rejected`，不再按 `reason_code` 是否为空。修前不带码的 401/403 会错走 `on_rejected`——提示"当前回合结束，已排到下一轮"并把同一条消息**重发一次**，`on_auth_rejected` 的通用文案分支永远走不到。远程 TUI 带错 token 会碰到。
+- **投递线程加兜底**（9b 建议 3）：`GatewayReplyDeliveryWorker._run` 单轮意外异常（如持续落盘失败时 `release_claim` 抛错）原来会让线程静默退出——线程一死之后所有通道回复都停了且无信号。现在记 warning 后按轮询间隔退避继续，停止请求仍生效。
+- **`/progress` 无码 403**（9b 建议 4，**只核清未实现**）：服务端 `handle_progress` 先过 `_can_read_finished_request`，请求记录（processing/inbox/terminal/done/failed）**不存在时直接返回 False → 403 且不带码**（`_denial_body` 只在"强制档+回环+没带凭据"那一格加码）。客户端按"401/403 一律 auth"处理，会给用户发"鉴权失败，请重启"。只在请求记录消失后还在轮询时出现（以前是静默隔离）。两种做法见交接报告，推荐服务端改 404；**等 3a 定，本次不实现**。
+- **验证**：见 TESTS「G2b 客户端线收 9b 建议」；变异 2/2 被杀（TUI 退回按 reason_code 分流、投递循环去掉兜底）；7 项静态门禁全过，size_diff 拆平后新增 0（测试 helper 参数收成 `_AuthRejection` 数据类 + 模块级单例）。
+
+
 ## 后端传输签名守卫（sigguard，2026-10-05，分支 `worker/sigguard`，基于 17k 头 `75a26ca37`；待初审）
 
 - **起因**：cabfix 把 `HttpBackend._gateway_request`、`request_stream_iter` 改成 `(StreamCall, options)` 后，OAuth 两个覆盖与 Responses 流式调用点没跟上，账号登录与 Responses 请求直接 TypeError；Mac 测试因替身 `**kwargs` 遮住签名错位全过，最后靠 Linux 车道抓到（修复 `75a26ca37`）。本件只加防复发守卫，不改产品代码。

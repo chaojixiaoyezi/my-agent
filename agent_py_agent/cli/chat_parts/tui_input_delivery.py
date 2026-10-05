@@ -220,9 +220,11 @@ class TuiActiveInputReconciler:
             ):
                 return
         elif result.delivery is ActiveTurnInputDelivery.REJECTED:
-            # LLM: G2b 鉴权拒绝（带结构化原因码）与普通的"回合已结束、改排队"不是一回事：前者重发也不会成功，
-            #   必须直接收敛成终态并让用户看到原因，不能走排下一轮那条路。判据只用结构化 reason_code。
-            if result.reason_code:
+            # LLM: G2b 鉴权拒绝与普通的"回合已结束、改排队"不是一回事：前者重发也不会成功，
+            #   必须直接收敛成终态并让用户看到原因，不能走排下一轮那条路。
+            #   判据是结构化的 auth_denied（由状态码决定）：不带码的 401/403 同样是鉴权拒绝，
+            #   只是文案退回通用的——按 reason_code 是否为空分流会让它错走"排下一轮"并重发一次。
+            if result.auth_denied:
                 if self._finish(entry.message_id, lambda: self.on_auth_rejected(entry, result.reason_code)):
                     return
             elif self._finish(entry.message_id, lambda: self.on_rejected(entry)):

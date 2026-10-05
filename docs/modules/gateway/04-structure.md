@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
+
+- `agent/gateway_parts/http_handlers.py`：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access` 分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。
+- `agent/adapter/delivery.py`：`_run` 显式放行 `InterruptedError`/`BlockingIOError`（OSError 子类，项目约定的中断信号），BaseException 穿过兜底；新增 `_log_loop_error` 按 60 秒窗口对同一异常限频。
+- 详见 `02-progress.md` 同名节与 `TESTS.md`。
+
 ## jb6联合观察点（2026-10-04）
 
 从jb5迁入的 `test_plugin_m1_joint_e2e` 保留原样stdio/B3/B2/展示，手工processing不代自动worker。`test_plugin_m1_joint_tool_gate` 要求本17j的reviewer必备字段，用同一池各插件独立激活核目标观察/审批/归档/info。两ask空决定用专用strict xfail等待worker/b5fix9b；本线不带工具轮或其他产品修改，不新建writer。安装/启用/B7/生产入口未验。

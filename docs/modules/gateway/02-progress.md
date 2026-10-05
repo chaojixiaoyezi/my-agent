@@ -1,5 +1,14 @@
 # Gateway 维护状态
 
+## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
+
+- **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A，本批由初审者直接修。
+- **② 投递兜底加固**：`_run` 增加 `except (InterruptedError, BlockingIOError): raise` 显式放行中断类（两者都是 OSError 子类，项目里 `InterruptedError` 是真实中断信号）；新增 `_log_loop_error` 按 60 秒窗口对同一异常限频（窗口内只累计次数、下次真正记录时先输出被抑制条数）；KeyboardInterrupt/SystemExit 等 BaseException 穿过兜底并补护栏用例。
+- **① 解码层置位断言**：新增直接调用 `_active_turn_input_result` 的五格用例（401/403/带码 404 置位；无码 404、普通 202 不置位），两条既有端到端用例补 `auth_denied` 断言。
+- **③ /progress 三态**：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access`（管理员）分支不变。
+- **验证**：见 TESTS「G2b 客户端收尾小修（g2bfix4）」；6 个变异全杀；相关文件与 guards9 全过，静态门禁全过。
+- **未验证**：真实 TUI/飞书端到端与真实 Gateway 仍由 3a 在沙箱外复核；本树覆盖解码层、投递循环与 `/progress` HTTP 层。
+
 ## jb6联合用例（2026-10-04，WIP，待worker/b5fix9b）
 
 承接sol2 e388b85e7两个联合文件及旧边界。观察空根因为夹具同activation让共用池取错连接，已改独立激活并核event-watch目标三事件。3a将漏账/interactive/无法审批修复交ds6 worker/b5fix9b，本线已撤全部产品改动，两ask的空账本专用strict xfail不吞观察/审批错误。当前29文件589 passed/1缺Node样例skip/2 xfailed；两直接deny唯一行/info通过，完整ask链待修。手工processing不代自动worker/生产入口，详见TESTS。

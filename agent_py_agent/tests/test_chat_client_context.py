@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -704,6 +705,7 @@ def test_active_turn_input_403_is_rejected_with_reason_code(monkeypatch, tmp_pat
     )
     assert result.delivery is ActiveTurnInputDelivery.REJECTED
     assert result.reason_code == "LOCAL_CREDENTIAL_REQUIRED"
+    assert result.auth_denied is True
 
 
 # LLM: 没有结构化 error_code 的 401 仍然是 auth 类：按 REJECTED 收口，原因码留空由 UI 用通用文案兜底。
@@ -745,9 +747,6 @@ def test_active_turn_input_401_without_code_is_rejected(monkeypatch, tmp_path) -
 #   客户端必须认这个带码 404 是拒绝（重启即可），而不是 UNKNOWN 无限重排；真 404（不带码）仍按未知重试。
 # 函数用途: 断言带码 404 判 REJECTED、不带码 404 仍判 UNKNOWN。
 def test_active_turn_input_credential_404_is_rejected_but_plain_404_is_not(monkeypatch, tmp_path) -> None:
-    import urllib.error
-    from io import BytesIO
-
     from agent_py_agent.cli.chat_client_context import (
         ActiveTurnInputDelivery,
         GatewayChatClientAgent,
@@ -776,6 +775,7 @@ def test_active_turn_input_credential_404_is_rejected_but_plain_404_is_not(monke
     result = make_client().request_active_turn_input_status("gwreq-msg-404")
     assert result.delivery is ActiveTurnInputDelivery.REJECTED
     assert result.reason_code == "LOCAL_CREDENTIAL_REQUIRED"
+    assert result.auth_denied is True
 
     def plain_404(_request, timeout):
         del timeout
@@ -790,3 +790,39 @@ def test_active_turn_input_credential_404_is_rejected_but_plain_404_is_not(monke
     monkeypatch.setattr("urllib.request.urlopen", plain_404)
     result = make_client().request_active_turn_input_status("gwreq-msg-missing")
     assert result.delivery is ActiveTurnInputDelivery.UNKNOWN
+    assert result.auth_denied is False
+
+
+# LLM: 解码层置位 auth_denied 的直接断言（g2bfix4 ①）：TUI 分流只看这个结构化标志，置位规则
+#   一旦漂移，401/403（含无码）和带码 404 会被错判成普通拒绝或 UNKNOWN。这里直接调用解码函数
+#   覆盖五格：401/403/带码 404 置位；无码 404 与普通 202 不置位。
+# 函数用途: 直接断言 _active_turn_input_result 的 auth_denied 置位规则。
+def test_active_turn_input_result_sets_auth_denied_only_for_typed_denials() -> None:
+    from agent_py_agent.cli.chat_client_context import (
+        ActiveTurnInputDelivery,
+        _active_turn_input_result,
+    )
+
+    forbidden = _active_turn_input_result(403, {"error": "forbidden"})
+    assert (forbidden.delivery, forbidden.auth_denied) == (ActiveTurnInputDelivery.REJECTED, True)
+
+    unauthorized = _active_turn_input_result(401, {})
+    assert (unauthorized.delivery, unauthorized.auth_denied) == (
+        ActiveTurnInputDelivery.REJECTED,
+        True,
+    )
+
+    credential_404 = _active_turn_input_result(
+        404, {"error": "not_found", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}
+    )
+    assert (credential_404.delivery, credential_404.auth_denied) == (
+        ActiveTurnInputDelivery.REJECTED,
+        True,
+    )
+
+    plain_404 = _active_turn_input_result(404, {"error": "not_found"})
+    assert (plain_404.delivery, plain_404.auth_denied) == (ActiveTurnInputDelivery.UNKNOWN, False)
+
+    queued = _active_turn_input_result(202, {"disposition": "queued", "request_id": "gwreq-1"})
+    assert queued.delivery is ActiveTurnInputDelivery.QUEUED
+    assert queued.auth_denied is False

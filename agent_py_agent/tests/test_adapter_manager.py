@@ -7,6 +7,7 @@ gateway HTTP 调用使用 mock，不实际发起网络请求。
 
 from __future__ import annotations
 
+import logging
 import tempfile
 import threading
 import time
@@ -1554,3 +1555,150 @@ def test_result_poll_credential_404_becomes_typed_quarantine(tmp_path) -> None:
             manager._poll_gateway_once(record, interval=0.0)
     assert caught.value.reason == "gateway_result_auth_http_404"
     assert caught.value.denial_code == "LOCAL_CREDENTIAL_REQUIRED"
+
+
+# LLM: 投递线程的兜底：单轮意外异常（例如持续落盘失败时 release_claim 抛错）不能让 `_run` 静默退出——
+#   线程一死之后所有通道回复都停了且没有信号。这里用真实 `_run` 循环，让 run_once 第一次抛、
+#   第二次照常投递，断言线程活着、异常被记下、后续投递仍然发生。
+# 函数用途: 断言投递循环在单轮异常后继续工作。
+def test_delivery_loop_survives_one_unexpected_error_and_keeps_delivering() -> None:
+    from agent_py_agent.agent.adapter.delivery import GatewayReplyDeliveryWorker
+
+    delivered: list[str] = []
+    calls = {"n": 0}
+
+    def deliver(_record, text):
+        delivered.append(text)
+        return True
+
+    worker = GatewayReplyDeliveryWorker(
+        GatewayReplyDeliveryStore(None),
+        poll_response=MagicMock(return_value="final reply"),
+        deliver_response=deliver,
+    )
+
+    # 用真实 _run 循环：包一层 run_once，第一次抛意外异常，之后走真实实现。
+    real_run_once = worker.run_once
+
+    def flaky_run_once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full while releasing claim")
+        return real_run_once()
+
+    worker.run_once = flaky_run_once
+    worker._poll_interval = 0.01
+    thread = threading.Thread(target=worker._run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not delivered:
+            time.sleep(0.01)
+        assert thread.is_alive(), "投递线程不能在单轮异常后退出"
+        assert calls["n"] >= 2, calls
+    finally:
+        worker._stop.set()
+        worker._wake.set()
+        thread.join(timeout=3)
+    assert not thread.is_alive()
+
+
+# LLM: 兜底只捕 Exception，停止信号必须原样上抛：项目约定 InterruptedError（OSError 子类）是真实停止信号，
+#   被当成"单轮意外"吞掉会让上层的中断处置失效。BlockingIOError 是“锁正忙”的临时状态，见下一条用例。
+#   第二次被调用说明异常确实被吞了：停住循环，让 pytest.raises 以"没有抛出"干净失败，避免挂死。
+# 函数用途: 断言投递循环对停止信号直接放行、不再继续轮询。
+@pytest.mark.parametrize("exc_type", [InterruptedError])
+def test_delivery_loop_propagates_interrupt_signals(exc_type) -> None:
+    worker = GatewayReplyDeliveryWorker(
+        GatewayReplyDeliveryStore(None),
+        poll_response=MagicMock(return_value=None),
+        deliver_response=MagicMock(return_value=True),
+        poll_interval=0.01,
+    )
+    calls = {"n": 0}
+
+    def interrupted():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            worker._stop.set()
+            return 0
+        raise exc_type("interrupted while waiting")
+
+    worker.run_once = interrupted
+    with pytest.raises(exc_type):
+        worker._run()
+
+
+
+# LLM: BlockingIOError 在本项目表示“锁正忙”（json_io 非阻塞锁、目录锁），是临时状态：投递线程遇到它必须
+#   记录后继续下一轮，不能退出——否则一次锁冲突就会永久停掉所有通道回复（3a 挑入 g2bfix4 时纠正）。
+# 函数用途: 断言锁正忙时投递循环不退出、下一轮照常再试。
+def test_delivery_loop_keeps_running_after_lock_busy() -> None:
+    worker = GatewayReplyDeliveryWorker(
+        GatewayReplyDeliveryStore(None),
+        poll_response=MagicMock(return_value=None),
+        deliver_response=MagicMock(return_value=True),
+        poll_interval=0.01,
+    )
+    calls = {"n": 0}
+
+    def busy_then_stop():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise BlockingIOError("共享文件线程锁繁忙")
+        worker._stop.set()
+        return 0
+
+    worker.run_once = busy_then_stop
+    worker._run()
+    assert calls["n"] == 2
+
+# LLM: BaseException 护栏：KeyboardInterrupt/SystemExit 不是"单轮意外"，必须穿过兜底，
+#   否则"停止/退出"类信号会被吞掉、循环继续跑。第二次被调用说明被吞了：停住循环让断言失败。
+# 函数用途: 断言投递循环不吞 KeyboardInterrupt 和 SystemExit。
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_delivery_loop_does_not_swallow_base_exceptions(exc_type) -> None:
+    worker = GatewayReplyDeliveryWorker(
+        GatewayReplyDeliveryStore(None),
+        poll_response=MagicMock(return_value=None),
+        deliver_response=MagicMock(return_value=True),
+        poll_interval=0.01,
+    )
+    calls = {"n": 0}
+
+    def fatal():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            worker._stop.set()
+            return 0
+        raise exc_type()
+
+    worker.run_once = fatal
+    with pytest.raises(exc_type):
+        worker._run()
+
+
+# LLM: 持续失败日志限频：同类异常在 60 秒窗口内只记一条并累计次数，窗口过后输出被抑制的汇总；
+#   没有限频的话轮询约每秒一轮，持续异常会把日志刷爆（g2bfix4 ②）。
+# 函数用途: 断言同一异常重复出现只记一次、窗口过后带被抑制计数再记。
+def test_delivery_loop_error_logging_is_rate_limited(caplog) -> None:
+    worker = GatewayReplyDeliveryWorker(
+        GatewayReplyDeliveryStore(None),
+        poll_response=MagicMock(return_value=None),
+        deliver_response=MagicMock(return_value=True),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            worker._log_loop_error(OSError("disk full while releasing claim"))
+    first_batch = [r for r in caplog.records if "delivery loop error" in r.getMessage()]
+    assert len(first_batch) == 1
+
+    # 把上次记录时间拨回限频窗口之前，模拟 60 秒后同类异常再次出现：
+    # 先输出一条被抑制次数，再记当前一条。
+    worker._loop_error_log_at -= 61.0
+    with caplog.at_level(logging.WARNING):
+        worker._log_loop_error(OSError("disk full while releasing claim"))
+    messages = [r.getMessage() for r in caplog.records if "delivery loop error" in r.getMessage()]
+    assert len(messages) == 3
+    assert "repeated 4 more times" in messages[-2]

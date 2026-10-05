@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 905,
+  "count": 906,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -10,6 +10,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "认领一次外部投递的默认租约 120 秒：超时未提交就让位，避免进程崩溃后锁死待发唤醒。"
+    },
+    {
+      "name": "_LOOP_ERROR_LOG_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/adapter/delivery.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "既保留\"还在失败\"的可观测性，又不把日志刷爆。"
     },
     {
       "name": "_SENT_RECEIPT_RETENTION_SECONDS",

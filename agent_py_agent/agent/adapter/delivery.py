@@ -24,6 +24,9 @@ _SCHEMA_VERSION = 6
 _SENT_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 # 认领一次外部投递的默认租约 120 秒：超时未提交就让位，避免进程崩溃后锁死待发唤醒。
 _DEFAULT_CLAIM_TTL_SECONDS = 120.0
+# 投递循环同类异常日志的限频窗口 60 秒：轮询约每秒一轮，持续失败时同一异常在窗口内只记一次，
+# 既保留"还在失败"的可观测性，又不把日志刷爆。
+_LOOP_ERROR_LOG_INTERVAL_SECONDS = 60.0
 _PENDING_WATCH_KINDS = frozenset(
     {"input_receipt", "request_result", "control_receipt"}
 )
@@ -1054,6 +1057,10 @@ class GatewayReplyDeliveryWorker(
         self._state_lock = threading.Lock()
         self._run_lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        # 投递循环异常日志的限频状态：只在投递线程内访问，不需要加锁。
+        self._loop_error_last = ""
+        self._loop_error_log_at = 0.0
+        self._loop_error_suppressed = 0
 
     # LLM: Enqueue is put-if-absent; the caller receives the authoritative existing record so a
     # duplicate inbound callback cannot replace another user's route or progress handle.
@@ -1247,9 +1254,41 @@ class GatewayReplyDeliveryWorker(
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            self.run_once()
+            # LLM: 单轮意外异常（例如持续落盘失败时 release_claim 抛错）不能让投递线程静默退出——
+            #   线程一死，之后所有通道回复都停了，而且没有任何信号。这里记 warning 并按轮询间隔退避后继续，
+            #   既保留可观测性又不打满 CPU；停止请求仍然生效。
+            #   InterruptedError 是项目约定的停止信号（OSError 子类），必须显式放行交给上层，不能被兜底吞掉；
+            #   KeyboardInterrupt/SystemExit 等 BaseException 同样穿过本兜底。BlockingIOError 不放行：
+            #   本项目用它表示“锁正忙”（json_io 非阻塞锁、目录锁），是临时状态——放行会让一次锁冲突
+            #   就永久停掉投递线程，所以按普通单轮异常记录（限频）后下一轮再试。
+            try:
+                self.run_once()
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 投递线程必须活着，异常只记录不上抛
+                self._log_loop_error(exc)
             self._wake.wait(self._poll_interval)
             self._wake.clear()
+
+    # LLM: 同类异常按时间窗限频：轮询约每秒一轮，持续失败时不能一秒一条 warning 刷日志；
+    #   窗口内相同异常只累计计数，下一次真正记录时先输出被抑制的次数。只在投递线程内调用，不加锁。
+    # 函数用途: 记录投递循环的意外异常，并对持续重复的同一异常限频。
+    def _log_loop_error(self, exc: BaseException) -> None:
+        now = time.monotonic()
+        message = f"{type(exc).__name__}: {exc}"
+        if message == self._loop_error_last and now - self._loop_error_log_at < _LOOP_ERROR_LOG_INTERVAL_SECONDS:
+            self._loop_error_suppressed += 1
+            return
+        if self._loop_error_suppressed:
+            _LOGGER.warning(
+                "gateway reply delivery loop error repeated %d more times: %s",
+                self._loop_error_suppressed,
+                self._loop_error_last,
+            )
+        _LOGGER.warning("gateway reply delivery loop error: %s", message)
+        self._loop_error_last = message
+        self._loop_error_log_at = now
+        self._loop_error_suppressed = 0
 
 
 # LLM: Immutable route comparison covers stable id, one-way watch transition, operation receipt,

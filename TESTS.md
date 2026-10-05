@@ -1,5 +1,75 @@
 # 测试与发布验收
 
+## g2bfix4 并入 17k 时的纠正：锁正忙不再让投递线程退出（3a，2026-10-05）
+
+- 问题：3a 给 g2bfix4 的任务里要求把 `InterruptedError`、`BlockingIOError` 都从投递循环兜底里放行。但本项目里 `BlockingIOError` 表示“锁正忙”（`json_io` 非阻塞锁、目录锁），是临时状态；放行会让一次锁冲突就永久停掉投递线程，之后所有通道回复都停。
+- 改法：`delivery.py::_run` 只放行 `InterruptedError`（停止信号），`BlockingIOError` 按普通单轮异常限频记录后下一轮再试。
+- 用例：`test_delivery_loop_propagates_interrupt_signals` 只保留 `InterruptedError`；新增 `test_delivery_loop_keeps_running_after_lock_busy`（第一轮锁正忙、第二轮照常执行）。变异（锁正忙也放行）被抓住。G2b 相关 5 个文件加 guards9：436 passed。
+
+## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`）
+
+- 改了什么（按 g2bfix3r 初审三条）：
+  1. **② 投递兜底加固**：`agent/adapter/delivery.py` 的 `_run` 显式放行 `InterruptedError`/`BlockingIOError`（OSError 子类、项目约定的中断信号，不再被 `except Exception` 吞掉）；新增 `_log_loop_error` 按 60 秒窗口（`_LOOP_ERROR_LOG_INTERVAL_SECONDS`）对同一异常限频——窗口内只累计次数，下次真正记录时先输出被抑制条数；KeyboardInterrupt/SystemExit 等 BaseException 穿过兜底（兜底只捕 Exception）。
+  2. **① 解码层置位断言**：`test_chat_client_context.py` 新增 `test_active_turn_input_result_sets_auth_denied_only_for_typed_denials` 直接调用 `_active_turn_input_result` 覆盖五格（401/403/带码 404 置位；无码 404、普通 202 不置位）；两条既有端到端用例补 `assert result.auth_denied is True/False`。
+  3. **③ /progress 三态**：`agent/gateway_parts/http_handlers.py` 的 `_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`；`handle_progress` 未找到回 404、无权限保持 403（两者都经 `_denial_body` 补缺凭据码）；`test_gateway_local_credential_required_code.py` 里 `/progress/fixture-request` 无凭据预期 403 → 404，并新增 `test_progress_missing_record_is_404_and_other_owner_is_403`（普通用户 404/403/本人 200 + 无凭据回环两种形状带码）。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds9`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_adapter_manager.py agent_py_agent/tests/test_chat_client_context.py \
+    agent_py_agent/tests/test_gateway_local_credential_required_code.py \
+    -q --tb=short -p no:cacheprovider                      # 102 passed
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_gateway_http.py agent_py_agent/tests/test_gateway_verbose_progress.py \
+    agent_py_agent/tests/test_tui_input.py agent_py_agent/tests/test_gateway_local_trust_enforcement.py \
+    -q --tb=short -p no:cacheprovider                      # 205 passed, 1 skipped
+  ```
+- 7 文件终态复跑（上面两组合并）→ 307 passed, 1 skipped；新增/改动用例过滤复跑（`-k "delivery_loop or progress_missing or typed_denials or self_judging_read_endpoints"`）→ 11 passed。
+- guards9（11 文件）→ 187 passed（首跑 constants_catalog 失败：新增 `_LOOP_ERROR_LOG_INTERVAL_SECONDS` 后目录过期；`scripts/build_constants_catalog.py` 重生成 899 → 900 项后复跑全过）。
+- 变异（脚本 `tmp/g2bfix4-mutations/mutations.py`，逐个替换 → 跑定向用例 → finally 原样写回）→ **6/6 KILLED**：
+  1. m1 去掉日志限频（条件恒 False）→ 限频用例红；
+  2. m2 去掉中断放行 → `test_delivery_loop_propagates_interrupt_signals` 红；
+  3. m3 兜底改成吞 BaseException → 护栏用例红；
+  4. m4 解码层不置位 auth_denied → 置位用例红；
+  5. m5 未找到记录也当允许 → 404 用例红；
+  6. m6 handle_progress 未找到也回 403 → 404 用例红。
+- **门禁（工作树根）**：
+  - `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`
+  - `$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`
+  - `$PY scripts/check_doc_sync.py --base 51b3efb20` → `DOC_SYNC_PASS`（首跑要求补 `docs/modules/gateway/02-progress.md`、`04-structure.md`，补后通过）
+  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2199 hard=0 high-risk=1503 soft=696 blocked=False`
+  - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0 / 消失告警: 44`
+  - `git diff --check` → 干净；`$PY scripts/check_clean_package.py .` → `OK: 未发现发布阻塞项`
+- **size_diff 拆平记录**：首跑报 1 条新增告警 `('function', 'agent_py_agent/tests/test_chat_client_context.py', 'test_active_turn_input_credential_404_is_rejected_but_plain_404_is_not', 'high-risk')`——加了两行断言后函数 48 行踩 near-soft。把函数内重复的 `import urllib.error`（顶部已有）和 `from io import BytesIO` 上提，函数回到 45 行，复跑 `新增告警: 0`。
+- **未验证**：真实 TUI/飞书端到端与真实 Gateway 仍由 3a 在沙箱外复核；本树覆盖解码层、投递循环与 `/progress` HTTP 层。
+
+## G2b 客户端线收 9b 三条建议（g2bfix3，2026-10-04，基于 17j 头 `45d8cdcc5`）
+
+- 改了什么：`cli/chat_client_context.ActiveTurnInputResult` 新增 `auth_denied`（由状态码决定），解码层在 401/403 与带码 404 时置位；`cli/chat_parts/tui_input_delivery._reconcile_one` 改按它分流（不带码的 401/403 也走 `on_auth_rejected`，不重排、不重发）；`agent/adapter/delivery.GatewayReplyDeliveryWorker._run` 给单轮加 try/except，记 warning 后退避继续。
+- 命令（工作树根，代号 ds10）：
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_adapter_manager.py agent_py_agent/tests/test_adapter_ingress.py \
+    agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_tui_input.py \
+    agent_py_agent/tests/test_gateway_client_credentials.py \
+    -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-g2bfix3
+  ```
+- 新增用例 2 条：`test_auth_rejected_without_reason_code_is_not_requeued`（不带码 403 → 走鉴权回调、不重排、条目收终态）、`test_delivery_loop_survives_one_unexpected_error_and_keeps_delivering`（单轮异常后线程活着、继续投递）。
+- 变异（脚本 `tasks/2026-10-04/g2bfix3-9b-suggestions/mutations.py`，逐个 sha256 还原，基线 174 passed）：
+  1. TUI 分流退回按 `reason_code` 判 → 杀（1 failed，正是不带码那条用例）
+  2. 投递循环去掉兜底 → 杀（1 failed）
+- 未实现（等 3a 定）：`/progress` 对不存在记录的无码 403。见 DESIGN_LEDGER 与交接报告。
+- **门禁（部署窗口后复跑，工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）**：
+  - `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`
+  - `$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`
+  - `$PY scripts/check_doc_sync.py --base 45d8cdcc5` → `DOC_SYNC_PASS`
+  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2199 hard=0 high-risk=1503 soft=696 blocked=False`
+  - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0 / 消失告警: 44`
+  - `git diff --check` → 干净；`$PY scripts/check_clean_package.py .` → `OK: 未发现发布阻塞项`
+- **size_diff 拆平记录**：首跑报 1 条新增告警 `('params', 'agent_py_agent/tests/test_tui_input.py', '_auth_rejecting_reconciler', 'high-risk')`——helper 5 个参数（3 位置 + 2 关键字）。把 `reason_code`/`auth_denied` 收成 frozen dataclass `_AuthRejection`，默认值用模块级单例 `_AUTH_REJECTION_DEFAULT`（ruff B008：参数默认值里不做函数调用）；helper 回到 4 个参数后复跑 `新增告警: 0`。
+- **复跑（拆平后）**：`test_tui_input.py` 120 全过；guards9（11 个文件）187 全过。
+
+
 ## 后端传输签名守卫（sigguard，2026-10-05，分支 `worker/sigguard`，基于 17k 头 `75a26ca37`；待初审）
 
 - 来源：cabfix 改传输签名后 OAuth 覆盖与 Responses 调用点没跟上，Mac 测试被 **kwargs 替身遮住（修复见 75a26ca37）。本件只加防复发守卫，不改产品代码。

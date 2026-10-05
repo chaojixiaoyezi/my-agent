@@ -2181,10 +2181,24 @@ def test_large_tmux_selection_uses_stdin_instead_of_argv(monkeypatch) -> None:
     assert calls[0][1]["input"] == text
 
 
+# LLM: 鉴权拒绝替身响应的字段收成一个不可变载体，避免 helper 参数超过 4 个；
+#   默认是本机凭据缺失（带码），不带码场景由用例显式覆盖。
+# 用途: 保存替身 /input-status 返回的鉴权拒绝字段。
+@dataclass(frozen=True)
+class _AuthRejection:
+    reason_code: str = "LOCAL_CREDENTIAL_REQUIRED"
+    auth_denied: bool = True
+
+
+# 用途: 默认鉴权拒绝形状的模块级不可变单例，避免在参数默认值里做函数调用（lint B008）。
+_AUTH_REJECTION_DEFAULT = _AuthRejection()
+
+
 # LLM: G2b 拒绝路径：鉴权拒绝（带结构化原因码）是确定性的，必须把持久 outbox 条目收成终态，
 #   重启后不再重发；普通 rejected 仍走原来"排下一轮"的语义。这层判据只用结构化 reason_code。
 # 函数用途: 造一个只做显式对账、不启动后台线程的 TUI outbox reconciler。
-def _auth_rejecting_reconciler(path, auth_calls, rejected_calls):
+def _auth_rejecting_reconciler(path, auth_calls, rejected_calls,
+                               rejection=_AUTH_REJECTION_DEFAULT):
     from agent_py_agent.cli.chat_client_context import (
         ActiveTurnInputDelivery,
         ActiveTurnInputResult,
@@ -2194,7 +2208,8 @@ def _auth_rejecting_reconciler(path, auth_calls, rejected_calls):
     def status(_request_id):
         return ActiveTurnInputResult(
             ActiveTurnInputDelivery.REJECTED,
-            reason_code="LOCAL_CREDENTIAL_REQUIRED",
+            reason_code=rejection.reason_code,
+            auth_denied=rejection.auth_denied,
         )
 
     reconciler = TuiActiveInputReconciler(
@@ -2245,3 +2260,31 @@ def test_auth_rejected_outbox_entry_is_final_and_not_resent(tmp_path):
     restarted = _auth_rejecting_reconciler(outbox, auth_calls, rejected_calls)
     assert restarted._read_entries() == {}
     assert len(auth_calls) == 1
+
+
+# LLM: G2b 拒绝路径：不带码的 401/403 同样是鉴权拒绝（只有远程 TUI 带错 token 才会碰到）。
+#   判据必须是结构化的 auth_denied，不能按 reason_code 是否为空分流——否则它会错走"排下一轮"
+#   并重发一次，用户还会看到"当前回合结束，已排到下一轮"这种错误提示。
+# 函数用途: 断言不带码的鉴权拒绝不重排、走鉴权专用回调（通用文案分支）。
+def test_auth_rejected_without_reason_code_is_not_requeued(tmp_path):
+    from agent_py_agent.cli.chat_parts.tui_input_delivery import TuiActiveInputOutboxEntry
+
+    outbox = tmp_path / "outbox.json"
+    auth_calls: list[tuple] = []
+    rejected_calls: list[tuple] = []
+
+    entry = TuiActiveInputOutboxEntry(
+        message_id="steer-auth-nocode",
+        expected_turn_id="gwreq-active-nocode",
+        text="不带码也要明确拒绝",
+        display_text="不带码也要明确拒绝",
+        request_id="gwreq-msg-app-1",
+    )
+    reconciler = _auth_rejecting_reconciler(
+        outbox, auth_calls, rejected_calls, _AuthRejection(reason_code=""))
+    reconciler.enqueue(entry)
+    reconciler._reconcile_one(entry)
+
+    assert auth_calls == [(entry, "")], auth_calls
+    assert rejected_calls == [], "不能走'排下一轮'那条路"
+    assert reconciler._read_entries() == {}

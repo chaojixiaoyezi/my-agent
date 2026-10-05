@@ -187,7 +187,7 @@ def test_guarded_endpoints_carry_code_without_credential(enforced_listener, meth
 
 # 三个自判读端点：降匿名后由端点自己判 403/404，同样要能分辨"是没带凭据"。
 @pytest.mark.parametrize("method,path,expected_status", [
-    ("GET", "/progress/fixture-request", 403),
+    ("GET", "/progress/fixture-request", 404),
     ("GET", "/input-status/fixture-request", 404),
     ("GET", "/result/fixture-request", 404),
 ])
@@ -205,6 +205,50 @@ def test_self_judging_read_endpoints_carry_code_without_credential(
         assert with_cred_status == 200
     else:
         assert with_cred_status == 404
+
+
+# --- /progress 三态：记录不存在 404 / 无权限 403（g2bfix4 做法 A）----------------
+#
+# LLM: 普通客户端（有效凭据 + 非终端身份头）查 /progress：记录不存在回 404、记录属于别人回 403，
+#   与 /result、/input-status 同口径；两种拒绝都干净（凭据有效，不带缺凭据码）。同一端口上
+#   无凭据回环请求（强制档）两种形状仍各带 LOCAL_CREDENTIAL_REQUIRED。
+# 函数用途: 造"别人的记录"，在强制档端口上钉住 /progress 的 404/403 分流与缺凭据码两侧。
+def test_progress_missing_record_is_404_and_other_owner_is_403(tmp_path):
+    root = tmp_path / "data-root"
+    credential = ensure_local_client_credential(root)
+    paths = gateway_paths_from_root(tmp_path / "queue")
+    other_id = "fixture-progress-other"
+    write_json_file_atomic(paths.inbox / f"{other_id}.json", {"user_id": "someone-else"})
+    server = GatewayHTTPServer(0, paths,
+                               params=GatewayHTTPServerParams(agent=_agent_with_root(root),
+                                                              auth_middleware=_middleware(True, credential),
+                                                              require_local_credential=True))
+    server.start()
+    try:
+        port = server.server.server_address[1]
+        assert port != 8420
+        user_headers = {"X-Gateway-Token": credential, "X-User-Id": "local-user", "X-Channel": "feishu"}
+        # 记录不存在：干净 404（凭据有效，不带缺凭据码）。
+        status, body = _request(port, "GET", "/progress/fixture-progress-missing", user_headers)
+        assert (status, body["error"]) == (404, "not found")
+        assert "error_code" not in body
+        # 别人的记录：403。
+        status, body = _request(port, "GET", f"/progress/{other_id}", user_headers)
+        assert (status, body["error"]) == (403, "forbidden")
+        assert "error_code" not in body
+        # 本人的记录：放行（chunk 还不存在时是 200 空事件）。
+        own_id = "fixture-progress-own"
+        write_json_file_atomic(paths.inbox / f"{own_id}.json", {"user_id": "local-user"})
+        status, body = _request(port, "GET", f"/progress/{own_id}", user_headers)
+        assert status == 200
+        assert body == {"request_id": own_id, "events": [], "next": 0}
+        # 无凭据回环（强制档）：记录缺失与别人的记录都仍带缺凭据码。
+        status, body = _request(port, "GET", "/progress/fixture-progress-missing")
+        assert (status, body.get("error_code")) == (404, LOCAL_CREDENTIAL_REQUIRED)
+        status, body = _request(port, "GET", f"/progress/{other_id}")
+        assert (status, body.get("error_code")) == (403, LOCAL_CREDENTIAL_REQUIRED)
+    finally:
+        server.stop()
 
 
 def test_guarded_endpoint_and_read_endpoint_switch_off_have_no_code(migration_listener):

@@ -74,6 +74,9 @@ class ActiveTurnInputResult:
     disposition: str = ""
     # LLM: 只承载服务端返回的结构化原因码（如 LOCAL_CREDENTIAL_REQUIRED）；UI 按它挑提示文案，不解析 message。
     reason_code: str = ""
+    # LLM: 由状态码决定的结构化"这次是鉴权拒绝"标志（401/403，以及带码 404）。UI 按它分流到
+    #   鉴权专用提示，不按 reason_code 是否为空分流——不带码的 401/403 同样是鉴权拒绝，只是文案用通用的。
+    auth_denied: bool = False
 
 
 # LLM: G2b 拒绝的结构化判据只有响应体里的 error_code 字段；缺失或类型不对时留空，由 UI 用通用鉴权文案兜底。
@@ -594,6 +597,7 @@ def _active_turn_input_result(
         return ActiveTurnInputResult(
             ActiveTurnInputDelivery.REJECTED,
             reason_code=reason_code,
+            auth_denied=True,
         )
     if status not in {200, 202}:
         return ActiveTurnInputResult(ActiveTurnInputDelivery.UNKNOWN)

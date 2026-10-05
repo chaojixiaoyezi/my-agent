@@ -19,6 +19,7 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -126,8 +127,8 @@ def _request_identity(handler) -> tuple[str, Any]:
 #   "真的越权"或"这条记录不存在"一模一样。本函数只补一个机器可读的区分码：当中间件报告这是
 #   "强制档 + 回环 + 没带凭据"时，把 LOCAL_CREDENTIAL_REQUIRED 加进响应体；判定只读结构化事实
 #   （mw.needs_local_credential），不解析路径、正文或文案，也不改变任何状态码。
-#   这三个端点自己判的每一处拒绝都必须经本函数返回，别再手写裸 403：handle_progress 的读权限拒绝、
-#   handle_input_status 的读权限拒绝、_send_archived_terminal_result 的归档读不出与读权限拒绝、
+#   这三个端点自己判的每一处拒绝都必须经本函数返回，别再手写裸 403：handle_progress 的读权限拒绝与
+#   记录缺失（403/404）、handle_input_status 的读权限拒绝、_send_archived_terminal_result 的归档读不出与读权限拒绝、
 #   _send_pending_state 的损坏与非本人两个分支——否则同一条降级路径上会出现"有的 403 带码、有的
 #   不带"，客户端又只能靠状态码猜。管理员侧（500/200）不受影响：本函数只在"强制档 + 回环 +
 #   没带凭据"这一格为真，而那一格普通用户恒走 403。
@@ -377,6 +378,8 @@ def _send_archived_terminal_result(
 
 
 # LLM: progress 读取沿用 result 的请求 owner 鉴权；chunk 正文和 response 都不能自证身份。
+#   记录不存在回 404、存在但无权限保持 403，与 /result、/input-status 同口径；两种拒绝都经
+#   _denial_body 补"缺本机凭据"码，客户端不再需要从 403 里猜"记录不存在"。
 # 函数用途: 按行游标返回当前 request 已启用的 typed 工具进度。
 def handle_progress(handler, server) -> None:
     parsed = urlsplit(handler.path)
@@ -389,7 +392,11 @@ def handle_progress(handler, server) -> None:
         return
     user_id, permission = _request_identity(handler)
     access = _ResultAccessContext(request_id, user_id, permission)
-    if not _can_read_finished_request(server.paths, access):
+    access_state = _can_read_finished_request(server.paths, access)
+    if access_state is _FinishedRequestAccess.NOT_FOUND:
+        handler._send_json(404, _denial_body(handler, {"error": "not found", "request_id": request_id}))
+        return
+    if access_state is not _FinishedRequestAccess.ALLOWED:
         handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": request_id}))
         return
     raw_since = parse_qs(parsed.query).get("since", ["0"])[0]
@@ -565,15 +572,24 @@ def _public_result(result: dict) -> dict[str, object]:
     return public
 
 
-def _can_read_finished_request(paths, access: _ResultAccessContext) -> bool:
-    """Authorize a finished response from its request record, never its output body.
+# LLM: /progress 读权限判定的三态：ALLOWED 放行；NOT_FOUND 表示请求记录在热队列与终态目录里
+#   都不存在（调用方回 404）；DENIED 表示记录存在但读不出或身份不符（调用方保持 403）。
+#   调用方只能按本枚举分流，不得把结果再压回 bool。
+# 类用途: 描述一次 /progress 读权限判定的结果类别。
+class _FinishedRequestAccess(Enum):
+    ALLOWED = "allowed"
+    NOT_FOUND = "not_found"
+    DENIED = "denied"
 
-    Request identity stays authoritative while the record moves from the hot queue
-    into done/failed. Missing, unreadable, or conflicting copies therefore deny a
-    USER by default; trusted admin callers keep their existing all-user access.
-    """
+
+# LLM: /progress 读权限的唯一权威判定：只看请求记录里的结构化 user_id 与当前身份，不读输出正文；
+#   请求身份在记录从热队列移到终态目录期间始终是权威，记录不存在返回 NOT_FOUND（调用方回 404），
+#   记录存在但读不出或身份不符返回 DENIED（回 403）；管理员保持全用户访问（ALLOWED），
+#   普通用户的任何不确定情形都 fail-closed。
+# 函数用途: 判定当前身份能否读取一条请求的进度流，并区分"记录不存在"与"无权限"。
+def _can_read_finished_request(paths, access: _ResultAccessContext) -> _FinishedRequestAccess:
     if _all_user_access(access):
-        return True
+        return _FinishedRequestAccess.ALLOWED
     found_request = False
     for folder in (paths.processing, paths.inbox, paths.terminal, paths.done, paths.failed):
         request_path = folder / f"{access.request_id}.json"
@@ -585,8 +601,8 @@ def _can_read_finished_request(paths, access: _ResultAccessContext) -> bool:
             context="gateway.http_result_request.read",
         )
         if load_error or not _can_read_payload(payload, access.user_id, access.permission):
-            return False
-    return found_request
+            return _FinishedRequestAccess.DENIED
+    return _FinishedRequestAccess.ALLOWED if found_request else _FinishedRequestAccess.NOT_FOUND
 
 
 def _read_payload(path) -> dict:
