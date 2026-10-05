@@ -621,15 +621,20 @@ def test_macos_private_read_root_hides_other_owners_and_config(tmp_path):
     if not _ready(sandbox):
         pytest.skip("sandbox-exec 不可用")
 
-    def can_read(path: Path) -> bool:
-        return sandbox.run(["/bin/cat", str(path)], timeout=30).returncode == 0
+    def read_result(path: Path):
+        return sandbox.run(["/bin/cat", str(path)], timeout=30)
 
-    assert can_read(spec.owner_home / "note.md")
-    assert can_read(root / "shared" / "pkg" / "SKILL.md")
-    assert not can_read(root / "owners" / "providers" / "feishu" / "users" / "u-other" / "memory.md")
-    assert not can_read(root / "config" / "desktop.yaml")
+    owner_read = read_result(spec.owner_home / "note.md")
+    assert owner_read.returncode == 0, (owner_read.returncode, owner_read.stderr)
+    shared_read = read_result(root / "shared" / "pkg" / "SKILL.md")
+    assert shared_read.returncode == 0, (shared_read.returncode, shared_read.stderr)
+    other_owner = read_result(root / "owners" / "providers" / "feishu" / "users" / "u-other" / "memory.md")
+    assert other_owner.returncode != 0, (other_owner.returncode, other_owner.stderr)
+    config_read = read_result(root / "config" / "desktop.yaml")
+    assert config_read.returncode != 0, (config_read.returncode, config_read.stderr)
     # 一般宿主路径仍可读（macOS 回执如实说明），写入仍只落写根。
-    assert can_read(tmp_path / "outside.txt")
+    outside_read = read_result(tmp_path / "outside.txt")
+    assert outside_read.returncode == 0, (outside_read.returncode, outside_read.stderr)
     write = sandbox.run(["/bin/sh", "-c", f"printf ok > {spec.attempt_view / 'out.txt'}"], timeout=30)
     assert write.returncode == 0 and (spec.attempt_view / "out.txt").read_text(encoding="utf-8") == "ok"
 
