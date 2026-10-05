@@ -23,7 +23,7 @@ from .contracts.model_call_ledger import (
     ModelCallAdmissionClosedError,
     find_model_call_admission_error,
 )
-from .runtime_db.operations import RuntimeExecutionBusyError
+from .runtime_db.operations import RuntimeConflictError, RuntimeExecutionBusyError
 
 # 错误文本最多回 300 字符：超长截断，防错误信息撑爆回执。
 _MAX_ERROR_TEXT_CHARS = 300
@@ -57,6 +57,25 @@ _GUIDANCE_CONTEXT_PREFIXES = (
 # 函数用途: 判断一个值是不是合规的结构化错误码。
 def is_structured_error_code(value: object) -> bool:
     return isinstance(value, str) and STRUCTURED_ERROR_CODE_PATTERN.fullmatch(value) is not None
+
+
+# LLM: 无码异常的兜底码必须落在 contracts/error_taxonomy 的登记码里：把异常类名大写直接当码
+#   （PROVIDERTRANSIENTERROR 等）没有文案、没有恢复语义，还会污染请求账本。映射只按异常类型、
+#   不解析文本；异常自带 error_code 属性时一律原样保留（那才是权威）。Gateway 请求失败
+#   （gateway_parts/request_execution.py）与后台 wake 收口（conversation/runtime.py）两处共用这一份，
+#   禁止各写一份；改动时联查 test_error_code_fallback.py。
+# 函数用途: 给没有 error_code 的异常选一个已登记的错误码。
+def fallback_error_code(exc: BaseException) -> str:
+    code = str(getattr(exc, "error_code", "") or "")
+    if code:
+        return code
+    if is_provider_timeout_error(exc):
+        return "PROVIDER_TIMEOUT"
+    if is_provider_transient_error(exc):
+        return "TRANSIENT_ERROR"
+    if isinstance(exc, RuntimeConflictError):
+        return "RUNTIME_CONFLICT"
+    return "UNKNOWN_ERROR"
 
 
 class RecoverableRuntimeError(RuntimeError):

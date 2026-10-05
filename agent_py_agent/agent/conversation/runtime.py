@@ -23,7 +23,7 @@ from ..backends.errors import (
     is_provider_usage_limit_error,
 )
 from ..concurrency.interrupt import is_interrupted
-from ..runtime_errors import compact_error_message
+from ..runtime_errors import compact_error_message, fallback_error_code
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
 from ..settings.runtime_guard_config import runtime_guard_int
 from ..settings.thread_model_selection import is_model_configuration_unavailable
@@ -4141,7 +4141,7 @@ def _handle_nonquota_wake_error(
             terminal = scheduler.scheduler_service.finish(
                 claim,
                 status="failed",
-                error_code=type(error).__name__.upper(),
+                error_code=fallback_error_code(error),
                 error_message=compact_error_message(error),
                 now=observed_at,
             )

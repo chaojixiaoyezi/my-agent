@@ -490,6 +490,15 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="/recover 没有改变执行状态（状态已变化或不是可人工恢复的未知执行轮）；重新查看或查看运行诊断。",
     ),
+    # obsfix34：无码 RuntimeConflictError 的兜底码（runtime_errors.fallback_error_code）；
+    # 状态类冲突不可原样重试，先重读运行状态再决定。
+    "RUNTIME_CONFLICT": ErrorContract(
+        code="RUNTIME_CONFLICT",
+        category="state",
+        retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="权威运行库状态冲突（执行权、换代或版本失配）；先读取最新运行状态再决定，不要原样重放同一请求。",
+    ),
     "END_TASK_ADMIN_ONLY": ErrorContract(
         code="END_TASK_ADMIN_ONLY",
         category="permission",

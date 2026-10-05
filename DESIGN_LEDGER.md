@@ -103,6 +103,13 @@
 - **边界**：只清孤儿 sidecar，不动数据文件、不动活锁；`turn_transitions/*.transition.lock` 同机制同清理（`.transition` 数据文件存在则保留）。
 - **验证**：见 `TESTS.md` 同名小节（a/b/c/d 四态用例 + 幂等 + 目录清单；常数目录 912→914）。
 
+## 兜底错误码映射到已登记码（obsfix34 问题4，2026-10-05，分支 `worker/obsfix34`，基于 17l 头 `f7849d7ff`；待非作者初审）
+
+- **来源（结构化事实）**：失败请求的 error_code 里出现 PROVIDERTRANSIENTERROR、PROVIDERTIMEOUTERROR、RUNTIMECONFLICTERROR、VALUEERROR 这类“异常类名大写”的码（obsfix 只读调查第 4 条）——两处兜底直接把 `type(exc).__name__.upper()` 当码写账。
+- **根因**：`gateway_parts/request_execution.py`（请求失败兜底）与 `conversation/runtime.py`（后台 wake claim 失败收口）都没有把无码异常映射到 `contracts/error_taxonomy` 的登记码；`ProviderTransientError`/`ProviderTimeoutError`（无 error_code 属性）与 `RuntimeConflictError`、裸 `ValueError` 都会泄漏类名，客户端拿不到文案与恢复语义。
+- **改法**：新增唯一映射 `runtime_errors.fallback_error_code(exc)`——保留异常自带 `error_code` 第一优先；`ProviderTimeoutError→PROVIDER_TIMEOUT`、`ProviderTransientError` 族（含子类）`→TRANSIENT_ERROR`、`RuntimeConflictError→RUNTIME_CONFLICT`、其余（含 ValueError）`→UNKNOWN_ERROR`；两处调用点共用这一份。`RUNTIME_CONFLICT` 在 `contracts/error_taxonomy` 新登记（category=state、不可原样重试、先重读运行状态再决定）。
+- **验证**：见 `TESTS.md` 同名小节（四类映射 + 未知兜底 + 已有码保留 + 登记守卫，6 条）。
+
 ## 自改工作树提示补一句“按集成者指定的工作树做”（selfdevrule，2026-10-05，3a）
 
 - **问题**：Owner Scope 提示词的“my-agent 自身代码”一段写着“不改其他检出目录”。10-05 sol3（gpt-6.1-sol）把它当成高于任务的规则，两次拒绝在集成者分派的 worker 工作树里改代码，只能改派。

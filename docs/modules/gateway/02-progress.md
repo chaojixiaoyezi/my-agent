@@ -9,6 +9,12 @@
 - **改法**：派发 tick 新增第五个后台段（`cli/gateway_loops.py`，节拍 1 小时、独立退避），`gateway_parts/io.py:cleanup_orphan_lock_files` 只删**同时满足**“数据文件已不存在 + mtime 早于 24 小时宽限 + 非阻塞 flock 拿得到”的 sidecar；活锁、数据文件还在、宽限内的一律不动；单文件失败只跳过。
 - 详见 DESIGN_LEDGER / TESTS 同名节。
 
+## 兜底错误码映射到已登记码（obsfix34 问题4，2026-10-05，worker/obsfix34；待非作者初审）
+
+- 请求失败兜底（`gateway_parts/request_execution.py`）与后台 wake 收口（`conversation/runtime.py`）不再把异常类名大写当 error_code；统一走 `runtime_errors.fallback_error_code` 映射到 `contracts/error_taxonomy` 登记码（timeout/transient/runtime conflict/unknown），异常自带 `error_code` 仍优先。
+- 新增登记码 `RUNTIME_CONFLICT`（state、不可原样重试）；客户端文案与恢复语义从此有登记可依。
+- 详见 DESIGN_LEDGER / TESTS 同名节。
+
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，worker/artrefguard；待初审）
 
 - `agent/common/logical_reference_ids.py`（新增）：产品编号前缀的共享常量（gwreq-/run-/subagent- 与 call_ 前缀）与 `is_logical_reference_segment` 形态判定；`gateway_parts/io.new_gateway_request_id` 与 run 号生成点改为引用同一常量（禁止各写一份字面量）。

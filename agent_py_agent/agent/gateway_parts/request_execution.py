@@ -50,6 +50,7 @@ from ..conversation.host_notices import (
 )
 from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
+from ..runtime_errors import fallback_error_code
 from ..tooling.operation_verification import public_operation_verification
 from . import (
     request_binding,
@@ -1250,9 +1251,10 @@ def _handle_gateway_request(
         from .request_errors import gateway_provider_error_projection
 
         failure = exc
-        error_code = response.get("error_code") or str(
-            getattr(exc, "error_code", "") or type(exc).__name__.upper()
-        )
+        # LLM: 无码异常不能把类名大写当错误码泄漏给客户端；fallback_error_code 按异常类型映射到
+        #   error_taxonomy 登记码（provider timeout→PROVIDER_TIMEOUT、transient→TRANSIENT_ERROR、
+        #   RuntimeConflictError→RUNTIME_CONFLICT，其余→UNKNOWN_ERROR），已有 error_code 原样保留。
+        error_code = response.get("error_code") or fallback_error_code(exc)
         response.update(
             {
                 "ok": False,

@@ -94,11 +94,21 @@
 
 - 背景、根因与改法见 `DESIGN_LEDGER.md` 同名小节。
 - 新增用例（`test_gateway_io.py::TestCleanupOrphanLockFiles`，3 条）：`test_removes_only_orphan_old_unlocked_sidecar`（a 数据文件在、b 孤儿旧、c 孤儿但被活锁、d 孤儿但 mtime 新 → 只删 b；条件不变再跑一遍返回 0）、`test_missing_directory_is_noop`、`test_sidecar_dirs_cover_queue_terminal_and_transitions`。
+- 清扫段接线与 stub：`test_gateway_loop_backoff_coverage.py` 新增 `test_lock_sidecar_cleanup_segment_runs_when_due_then_waits_a_hour`（到点扫全部登记目录、下一拍按 1 小时节拍不再扫）；`test_gateway_dispatcher_resilience.py` 的 `_stub_dispatcher` 补 `_lock_cleanup_backoff`/`_next_lock_cleanup_at` 两个新字段（新段所需，缺了会让三个既有 dispatcher 用例变红）。
 - 命令与结果（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
   - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_gateway_io.py agent_py_agent/tests/test_gateway_loops_resilience.py -q` → **44 passed**。
   - guards9 全部 12 个文件 → **全绿**；`ruff`、`check_import_boundaries`=0、`check_doc_sync --base f7849d7ff`、strict code-size（hard=0 blocked=False）、`size_diff`（**新增 0 / 消失 57**）、`git diff --check`、`check_clean_package` 全过。
   - 常数目录重新生成：`scripts/build_constants_catalog.py`（912 → 914 项）；`test_constants_catalog.py` + `test_constant_names_unique.py` → 13 passed。
 - 未验证：真实 Gateway 上 `.lock` 数量的实际下降（沙箱不跑真实 Gateway，由 3a 真机观察）；Windows 删名路径只有代码保证、未实测。
+
+## 兜底错误码映射到已登记码（obsfix34 问题4，2026-10-05，分支 `worker/obsfix34`，待非作者初审）
+
+- 背景、根因与改法见 `DESIGN_LEDGER.md` 同名小节。
+- 新增用例（`test_error_code_fallback.py`，6 条）：`ProviderTimeoutError→PROVIDER_TIMEOUT`；`ProviderTransientError`/`ProviderStreamIncompleteError`/`ProviderUsageLimitError→TRANSIENT_ERROR`；`RuntimeConflictError→RUNTIME_CONFLICT`；`ValueError→UNKNOWN_ERROR`；自带 `error_code` 原样保留；四个兜底码都在 `ERROR_CONTRACTS` 登记。
+- 命令与结果（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_error_code_fallback.py agent_py_agent/tests/test_gateway_request_runtime_errors.py -q` → **70 passed**。
+  - 门禁（guards9 12 文件、ruff、check_import_boundaries、doc_sync --base f7849d7ff、strict code-size、size_diff、git diff --check、check_clean_package）见交接报告最终复跑。
+- 未验证：真实请求上四类错误码的落账（需要真实 provider 故障或运行库冲突；由 3a 真机或后续故障样本观察）。
 
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
