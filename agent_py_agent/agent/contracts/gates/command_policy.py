@@ -204,6 +204,9 @@ class CommandAnalysis:
         return "mutating"
 
 
+# LLM: 在执行前以解析后的 argv 和结构化包装器规格统一拒绝删除/危险命令；新增包装器语义必须同时接入
+#   顶层与嵌套 argv 检查，不能把“值看起来像参数”当作命令边界。
+# 函数用途: 对一次待执行命令做静态策略判定；只返回 decision/finding，不执行命令。
 def evaluate_command_policy(
     command: object,
     *,
@@ -218,7 +221,7 @@ def evaluate_command_policy(
     if not allow_shell_operators:
         findings.extend(_shell_operator_findings(parsed.argv, _raw_command_text(command)))
     findings.extend(_dangerous_executable_findings(parsed.argv, covered_positions, allowed))
-    findings.extend(_wrapper_option_findings(parsed.argv))
+    findings.extend(_wrapper_option_findings(parsed.argv, allowed, 0))
     findings.extend(_nested_wrapper_findings(parsed.argv, allowed, 0))
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
 
@@ -535,7 +538,9 @@ def _nested_program_findings(
     return _nested_argv_findings(parsed.argv, allowed_commands, depth)
 
 
-# 函数用途: 对一段嵌套 argv（文本解析结果或 find/xargs 拆出的命令）跑危险模式与受管删除检查并继续递归。
+# LLM: 嵌套 argv 是 sh/eval/xargs/find 或命令字符串选项复用的统一检查入口；unknown wrapper option 必须同样
+#   fail-closed，新增解析路径须保留 depth 计数和同一 allowlist。
+# 函数用途: 对嵌套 argv 检查危险模式、受管删除、包装器选项和更深嵌套。
 def _nested_argv_findings(
     argv: tuple[str, ...],
     allowed_commands: frozenset[str],
@@ -545,6 +550,7 @@ def _nested_argv_findings(
         return [CommandPolicyFinding("COMMAND_NESTED_DEPTH_EXCEEDED", {"nested_depth": depth})]
     findings, covered_positions = _dangerous_pattern_findings(argv)
     findings.extend(_dangerous_executable_findings(argv, covered_positions, allowed_commands))
+    findings.extend(_wrapper_option_findings(argv, allowed_commands, depth))
     findings.extend(_nested_wrapper_findings(argv, allowed_commands, depth))
     return _tag_nested_depth(findings, depth)
 
@@ -820,23 +826,24 @@ __all__ = [
 from pathlib import Path
 
 
-# LLM: 前缀运行器只描述"跳过多少 token 能看到内层命令"；不执行、不解析值的语义，也不碰沙箱。
+# LLM: 前缀运行器规格只描述选项、位置参数及可嵌套的命令字符串值；它不执行命令，策略入口负责将命令值
+#   送进统一嵌套检查，避免把运行器的 shell 程序误当普通数据。
 # 类用途: 登记一个前缀运行器的选项形态：取值选项（吃一个词）、开关选项、固定位置参数个数、
-#   是否跳过 NAME=VALUE 与 "-"（env/sudo 支持）。
+#   是否跳过 NAME=VALUE 与 "-"（env/sudo 支持），以及值本身是一条命令的选项。
 @dataclass(frozen=True)
 class _CommandWrapperSpec:
     value_options: frozenset[str] = frozenset()
     flag_options: frozenset[str] = frozenset()
     positional_count: int = 0
     assignments: bool = False
+    command_options: frozenset[str] = frozenset()
 
 
 # LLM: 前缀运行器表（来源：各命令手册，2026-10-05 shellwrap4 逐项核对——sudo/env/nice/timeout/nohup/
 #   time/command/exec/builtin 为 POSIX/coreutils 与 sudo 手册，stdbuf 为 coreutils，ionice/chrt/
 #   taskset/setsid/flock 为 util-linux，caffeinate 为 macOS，unbuffer 为 expect）。拆包的关键是
-#   "这个运行器吃掉几个词才能看到真正的命令"：吃错了内层 rm 就会逃过检查。位置参数按手册登记
-#   （timeout 的时长、flock 的锁文件、chrt/taskset 的优先级或掩码）。表外选项从严：不猜它是否
-#   吃值，直接给 finding 不放行（与 xargs 同一处理口径）。
+#   "这个运行器吃掉几个词才能看到真正的命令"：吃错了内层 rm 就会逃过检查。命令字符串选项单独标记，
+#   其值会进入同一嵌套解析；位置参数按手册登记（timeout 时长、flock 锁文件等）。表外选项从严，不猜是否吃值。
 _COMMAND_WRAPPER_SPECS: dict[str, _CommandWrapperSpec] = {
     "sudo": _CommandWrapperSpec(
         frozenset(
@@ -853,9 +860,10 @@ _COMMAND_WRAPPER_SPECS: dict[str, _CommandWrapperSpec] = {
         assignments=True,
     ),
     "env": _CommandWrapperSpec(
-        frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+        frozenset({"-u", "-C", "--unset", "--chdir"}),
         frozenset({"-i", "-0", "-v", "--ignore-environment", "--null", "--debug"}),
         assignments=True,
+        command_options=frozenset({"-S", "--split-string"}),
     ),
     "nice": _CommandWrapperSpec(frozenset({"-n", "--adjustment"})),
     "timeout": _CommandWrapperSpec(
@@ -896,14 +904,15 @@ _COMMAND_WRAPPER_SPECS: dict[str, _CommandWrapperSpec] = {
         flag_options=frozenset({"-c", "-f", "-w", "--ctty", "--fork", "--wait"})
     ),
     "flock": _CommandWrapperSpec(
-        frozenset({"-w", "-E", "-c", "--wait", "--timeout", "--conflict-exit-code", "--command"}),
+        frozenset({"-w", "-E", "--wait", "--timeout", "--conflict-exit-code"}),
         frozenset({"-s", "-x", "-n", "-o", "-u", "-F", "--shared", "--exclusive", "--nonblock",
                    "--close", "--unlock", "--no-fork"}),
         positional_count=1,
+        command_options=frozenset({"-c", "--command"}),
     ),
     "caffeinate": _CommandWrapperSpec(
         frozenset({"-t", "-w"}),
-        frozenset({"-d", "-i", "-s", "-u"}),
+        frozenset({"-d", "-i", "-m", "-s", "-u"}),
     ),
     "unbuffer": _CommandWrapperSpec(flag_options=frozenset({"-p"})),
 }
@@ -949,86 +958,118 @@ def looks_like_assignment(token: str) -> bool:
     return bool(separator and name.replace("_", "").isalnum() and not name[0].isdigit())
 
 
-# LLM: 表驱动的前缀解包：沿运行器链推进到内层命令，途中收集表外选项名。表外选项按"不吃值"处理
-#   （从严：不猜它是否吃值，后面的词仍按命令继续检查，宁可多拦）。线性一遍扫描。
-# 函数用途: 返回 (内层命令位置, 表外选项名列表)；找不到内层命令时返回原位置。
+# LLM: 表驱动的前缀解包沿运行器链前进，收集未知选项和标记为命令的值；未知选项不吞下一个词，
+#   命令值由调用方按统一深度限制递归检查。解析只向前扫描。
+# 函数用途: 返回内层命令位置、未知选项和待嵌套解析的命令字符串。
 def _unwrap_wrapper_chain(
     argv: tuple[str, ...], position: int
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], list[str]]:
     current = position
     unknown: list[str] = []
+    command_sources: list[str] = []
     while current < len(argv):
         spec = _COMMAND_WRAPPER_SPECS.get(command_name(argv[current]))
         if spec is None:
-            return current, unknown
-        next_position, chain_unknown = _skip_wrapper_options(argv, current, spec)
+            return current, unknown, command_sources
+        next_position, chain_unknown, chain_sources = _skip_wrapper_options(argv, current, spec)
         unknown.extend(chain_unknown)
+        command_sources.extend(chain_sources)
         if next_position <= current:
-            return current, unknown
+            return current, unknown, command_sources
         current = next_position
-    return position, unknown
+    return position, unknown, command_sources
 
 
 def _unwrap_command_position(argv: tuple[str, ...], position: int) -> int:
     return _unwrap_wrapper_chain(argv, position)[0]
 
 
-# 函数用途: 按 spec 跳过运行器的选项与固定位置参数，返回内层命令位置与表外选项名。
+# LLM: `--` 只终止选项解析，不终止 env/sudo 规格声明的 NAME=VALUE 扫描；命令字符串选项捕获原始参数值，
+#   不在此处执行或按字符串关键字分类。
+# 函数用途: 按 spec 跳过选项、赋值与固定位置参数，返回内层命令位置及待检查信息。
 def _skip_wrapper_options(
     argv: tuple[str, ...], position: int, spec: _CommandWrapperSpec
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], list[str]]:
     index = position + 1
     remaining = spec.positional_count
     unknown: list[str] = []
+    command_sources: list[str] = []
+    options_ended = False
     while index < len(argv):
         token = argv[index]
-        if token == "--":
-            return index + 1, unknown
-        if token.startswith("-") and token != "-":
-            index = _skip_wrapper_option_token(argv, index, spec, unknown)
+        if not options_ended and token == "--":
+            options_ended = True
+            index += 1
+            continue
+        if not options_ended and token.startswith("-") and token != "-":
+            index, option_unknown, command_source = _skip_wrapper_option_token(argv, index, spec)
+            unknown.extend((option_unknown,) if option_unknown is not None else ())
+            command_sources.extend((command_source,) if command_source is not None else ())
             continue
         if spec.assignments and (token == "-" or looks_like_assignment(token)):
             index += 1
             continue
         if remaining <= 0:
-            return index, unknown
+            return index, unknown, command_sources
         remaining -= 1
         index += 1
-    return index, unknown
+    return index, unknown, command_sources
 
 
-# 函数用途: 跳过运行器的一个选项 token；取值选项连带其值，表外选项记名并按"不吃值"跳过。
+# LLM: 只按规格表的完整选项名识别选项；`--name=value` 仅当 name 确实登记时才消费，
+#   命令字符串值单独返回供嵌套解析，未知项保留原 token 并 fail-closed。
+# 函数用途: 解析一个运行器选项，返回下标、未知选项及可选命令字符串值。
 def _skip_wrapper_option_token(
-    argv: tuple[str, ...], index: int, spec: _CommandWrapperSpec, unknown: list[str]
-) -> int:
+    argv: tuple[str, ...], index: int, spec: _CommandWrapperSpec
+) -> tuple[int, str | None, str | None]:
     token = argv[index]
+    if token in spec.command_options:
+        if index + 1 < len(argv):
+            return index + 2, None, argv[index + 1]
+        return index + 1, token, None
     if token in spec.value_options:
-        return index + 2 if index + 1 < len(argv) else index + 1
-    if token in spec.flag_options or "=" in token:
-        return index + 1
-    if _wrapper_value_option_prefix(token, spec.value_options):
+        return (index + 2 if index + 1 < len(argv) else index + 1), None, None
+    if token in spec.flag_options:
+        return index + 1, None, None
+    if "=" in token:
+        option, _separator, value = token.partition("=")
+        if option in spec.command_options:
+            return index + 1, None, value
+        if option in spec.value_options:
+            return index + 1, None, None
+        return index + 1, token, None
+    command_value = _wrapper_option_attached_value(token, spec.command_options)
+    if command_value is not None:
+        return index + 1, None, command_value
+    if _wrapper_option_attached_value(token, spec.value_options) is not None:
         # 取值选项粘连值（-n10、-oL）：值在同一 token 里，不额外吃词。
-        return index + 1
-    unknown.append(token)
-    return index + 1
+        return index + 1, None, None
+    return index + 1, token, None
 
 
-# 函数用途: 判断短选项 token 是否"取值选项 + 粘连值"；长选项不按前缀猜（含 = 的已整体跳过）。
-def _wrapper_value_option_prefix(token: str, value_options: frozenset[str]) -> bool:
+# LLM: 仅对登记为取值选项的短选项识别粘连值，长选项必须精确匹配；未知 token 由调用方 fail-closed。
+# 函数用途: 提取短选项 token 中已登记选项后面的粘连值。
+def _wrapper_option_attached_value(token: str, options: frozenset[str]) -> str | None:
     if token.startswith("--"):
-        return False
-    return any(
-        len(token) > len(option) and not option.startswith("--") and token.startswith(option)
-        for option in value_options
-    )
+        return None
+    for option in options:
+        if not option.startswith("--") and len(token) > len(option) and token.startswith(option):
+            return token[len(option) :]
+    return None
 
 
-# 函数用途: 找出所有前缀运行器上的表外选项，返回带可恢复提示的 finding（从严不放行）。
-def _wrapper_option_findings(argv: tuple[str, ...]) -> list[CommandPolicyFinding]:
+# LLM: 包装器的未知选项与命令字符串必须在顶层和嵌套 argv 共用此入口；字符串只送入现有嵌套解析器，
+#   深度从当前层加一并沿原上限 fail-closed。
+# 函数用途: 收集未知选项 finding，并递归验证规格标记为命令的选项值。
+def _wrapper_option_findings(
+    argv: tuple[str, ...], allowed_commands: frozenset[str], depth: int
+) -> list[CommandPolicyFinding]:
     findings: list[CommandPolicyFinding] = []
     for position in command_positions(argv):
-        _inner, unknown = _unwrap_wrapper_chain(argv, position)
+        _inner, unknown, command_sources = _unwrap_wrapper_chain(argv, position)
         findings.extend(_wrapper_unknown_option_finding(token) for token in unknown)
+        for source in command_sources:
+            findings.extend(_nested_program_findings(source, allowed_commands, depth + 1))
     return findings
 
 

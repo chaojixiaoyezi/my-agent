@@ -453,7 +453,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   - 门禁：ruff/boundaries/doc_sync（--base 897388630）/strict code-size/diff-check/clean-package 全过；**size_diff 新增 0 / 消失 44**（首轮 `_xargs_after_short_options` nesting 新增 1 条，扁平化后归零）。新 finding `COMMAND_XARGS_UNKNOWN_OPTION` 已注册 `error_taxonomy`（含恢复提示：改用 `--选项=值` 或 `--`）。
 - **shellwrap4 修复与复验（3a 终审发现的既有缺口：前缀运行器后面的删除没拆开）**：
   - **问题**：env/nice/timeout 能拦靠的是 `_unwrap_command_position` 里硬编码的 `_skip_env_wrapper`/`_skip_timeout_wrapper`/`_skip_nice_wrapper`；stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer 不在任何表里、全放行；`sudo -u root rm -rf /tmp/x` 也放行（`_skip_simple_wrapper` 只跳 `-` 开头的 token，`root` 被当命令）。
-  - **修法**：前缀运行器改表驱动——`_CommandWrapperSpec`（取值选项 / 开关选项 / 固定位置参数个数 / 是否跳过 `NAME=VALUE` 与 `-`）+ `_COMMAND_WRAPPER_SPECS` 登记 16 个运行器（sudo/env/nice/timeout/nohup/time/command/exec/builtin/stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer；来源：POSIX/coreutils/sudo/util-linux/macOS/expect 手册）；`_unwrap_wrapper_chain` 沿链推进到内层命令并收集表外选项；表外选项从严（按"不吃值"继续检查、给新 finding `COMMAND_WRAPPER_UNKNOWN_OPTION`，已注册 error_taxonomy）；解析线性一遍扫描；旧 `_COMMAND_WRAPPERS` 常量与四个 `_skip_*_wrapper` 函数删除。
+  - **修法**：前缀运行器改表驱动——`_CommandWrapperSpec`（取值选项 / 开关选项 / 固定位置参数个数 / 是否跳过 `NAME=VALUE` 与 `-`）+ `_COMMAND_WRAPPER_SPECS` 登记 17 个运行器（sudo/env/nice/timeout/nohup/time/command/exec/builtin/stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer；来源：POSIX/coreutils/sudo/util-linux/macOS/expect 手册）；`_unwrap_wrapper_chain` 沿链推进到内层命令并收集表外选项；表外选项从严（按"不吃值"继续检查、给新 finding `COMMAND_WRAPPER_UNKNOWN_OPTION`，已注册 error_taxonomy）；解析线性一遍扫描；旧 `_COMMAND_WRAPPERS` 常量与四个 `_skip_*_wrapper` 函数删除。
   - **用例新增**：23 条前缀运行器"包着 rm -rf 必须拦"单列成组（`test_prefix_runner_wrapped_delete_is_blocked`；finding 带 `executable` 证据、不是嵌套程序路径所以不带 nested_depth——首轮误放进带 nested_depth 断言的参数化组，跑出 23 条 KeyError 后拆组修正）；2 条组合（`timeout 5 stdbuf -o0 xargs --null rm -rf x`、`stdbuf -o0 sh -c 'rm -rf x'`，带 nested_depth）留在原嵌套组；单列 `sudo --weird rm -rf /tmp/x` 断言两个 code + option/recovery 证据；误伤回归 7 条（`timeout 60 python3 x.py`、`nice -n 10 make`、`env FOO=1 pytest -q`、`stdbuf -oL tail -f log`、`sudo -u root ls`、`flock /tmp/l echo hi`、`caffeinate -t 60 make`）。
   - 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：新文件 → **109 passed**；新文件 + `test_command_policy.py` → **152 passed**；guards9 现存 11 文件（`test_backend_signature_guardrails.py` 本树没有、跳过）→ **187 passed**。
   - 变异 4 个（脚本 `/private/tmp/claude-501/m-shellwrap2/mut4.py`，逐个 sha256 还原、`还原一致=True`）：P1 删 stdbuf 表项 → KILLED（stdbuf 3 条正例 + 2 条组合一起红）；P2 timeout 位置参数改 0 → KILLED（`timeout 5 rm -rf` 与组合）；P3 flock 位置参数改 0 → KILLED（`flock /tmp/l rm -rf`）；P4 表外选项不再给 finding → KILLED（`sudo --weird` 单列用例）。**4/4 KILLED**。
@@ -1337,6 +1337,16 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 **已报告、未在本轮修改的现象**（交 sol1）：`_thinking_mode_supported` 要求历史里每条 assistant 都有非空 `reasoning_content`，而 DeepSeek 服务端只要求「最后一条 user 之后、带 tool_calls 的 assistant」有；一条无思考的最终答复就会让请求写成 `thinking={"type":"disabled"}`（同时丢掉 `reasoning_effort`）并切到另一缓存分区。实测**与重载无关**，同进程每轮都发生。
 
 **未验证**：真实模型/真实 Gateway 上的端到端命中率改善（需联网与真实 DeepSeek 账号）；重启/换版、内存淘汰、子代理续跑、TUI 重连四种触发方式在真实进程上的表现只用了同一套重建链路推断。
+
+## shellwrap5 前缀运行器命令值安全拆包（2026-10-05，本地实施，待原作者 ds2 初审）
+
+- **解决问题与修法**：`env --` 后继续识别规格声明的 `NAME=VALUE`；为 `env -S/--split-string` 与 `flock -c/--command` 增加通用 `command_options` 元数据，按既有 shell 解析与嵌套深度上限 4 检查命令值；`--option=value` 仅在完整选项名已登记时消费，嵌套 argv 同样 fail-closed 并发 `COMMAND_WRAPPER_UNKNOWN_OPTION`；补齐 caffeinate `-m`，保持 `sudo -u nobody ls` 放行。
+- **定向回归**：新增 env 终止符赋值直接/嵌套拦截及无害放行、env/flock 命令字符串的分离值与 `--option=value`、引号数据不误伤、4/5 层深度边界、等号/嵌套 unknown 与恢复提示、`caffeinate -m` 误伤回归。自写例仅调用 `evaluate_command_policy`，不实际执行删除命令。
+- **命令与结果**（工作树根，指定 CI Python）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_command_policy.py agent_py_agent/tests/test_command_policy_wrapped_delete.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds2-shellwrap5-post-size` → 两文件跑至 100%，退出码 0。
+  - guards9 清单 12 个测试文件跑至 100%，退出码 0。基线 `a12453874` 不含第 12 项 `test_backend_signature_guardrails.py`，本次为完整守卫运行临时从已有提交 `07d7b3306` 还原，测试后删除，未纳入提交。
+- **变异**：M1 恢复 env 遇 `--` 立即返回；M2 跳过命令字符串值递归；M3 移除嵌套 unknown 检查；M4 接受未知 `--option=value`。四个独立单点变异均 **4/4 KILLED**，每次立即还原，源文件 SHA-256 均还原为 `d2d3798febcac578836aaa53a897897628fafc1de3c01be5a495af43b099c41f`。
+- **门禁**：Ruff `All checks passed!`；`check_import_boundaries.py` 为 0；`check_doc_sync.py --base a12453874` → `DOC_SYNC_PASS`；strict code-size `2199 / hard=0 / blocked=False`；`check_clean_package.py .` → `OK`；`git diff --check` 干净；`size_diff.sh` → 新增告警 0、消失告警 44。`CODE_SIZE_REPORT.md` 已还原。
 
 ## DeepSeek 思考开关只看本轮（thinking-rule，3a，2026-10-04，`claude/3a-thinking-rule`）
 

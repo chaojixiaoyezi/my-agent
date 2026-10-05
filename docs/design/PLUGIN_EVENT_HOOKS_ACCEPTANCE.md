@@ -197,10 +197,11 @@ SQL
 | 裸 `rm` / `rmdir` / `unlink`（含 `rm -rf <workspace 内路径>`） | **直接拒绝**，回执 `COMMAND_POLICY_BLOCKED`，找不到 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 也找不到 gate 行；handler 未启动 | `command_policy.py:11` 把这三个可执行文件列入 `_MANAGED_DELETE_EXECUTABLES`；`command_policy.py:423-433` 对不在显式白名单里的它们一律产出 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；`shell.py:1079-1089` 命中即返回、不执行 |
 | `rm` 删除受保护前缀（`/`、`/etc`、`~`、`$HOME/…` 等） | 更早更严的拒绝 `COMMAND_DANGEROUS_PATTERN_BLOCKED`（pattern `RM_PROTECTED_TARGET`） | `command_policy.py:368-375`、`_PROTECTED_DELETE_PREFIXES`（`command_policy.py:12-29`） |
 | `sh -c "rm -rf <路径>"`、`bash -c "…"`、`env sh -c "…"`、`cd … && sh -c "…"` | **直接拒绝**（shellwrap 修复后：`-c` 字面程序递归拆包，嵌套 `rm` 同样产出 `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；回执 `COMMAND_POLICY_BLOCKED`，没有 gate 行） | 实测：`analyze_command('sh -c "rm -rf …"')` 返回 `classification=dangerous`、finding `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；实现见 `command_policy.py` 的 `_nested_wrapper_findings` 与 `contracts/gates/shell_source.py` |
+| 前缀运行器包装删除：`env -- FOO=1 rm -rf <路径>`、`env -S 'rm -rf <路径>'`、`flock <锁文件> -c 'rm -rf <路径>'`、`timeout 5 stdbuf -o0 rm -rf <路径>` | **直接拒绝**，命令字符串选项进入统一嵌套检查并沿用深度上限 4 | `command_policy.py` 的 `_COMMAND_WRAPPER_SPECS` / `command_options` 与 `evaluate_command_policy`；以 evaluator 结构化 finding 核验，不实际运行删除命令 |
 | `find … -delete` | **直接拒绝**（`-delete` 按受管删除处理） | 实测：`find m1ar-probes -delete` → `COMMAND_DESTRUCTIVE_DELETE_BLOCKED`；`find … -exec rm` 同拒 |
 | `python3 -c "import shutil; …"` | 宿主放行（`python3 -c` 判 mutating，不到删除硬门） | 实测 `mutating`、无 finding；解释器代码是开放世界，不在前置拒绝覆盖范围（边界是执行层沙箱） |
 
-> 触发陷阱：**模型常把 `rm -rf <目录>` 直接写进 `run_command`，那样永远走不到插件**。这不是插件没生效，而是宿主先按自己的安全边界拒了（shellwrap 之后 `sh -c "rm -rf …"` 一类包装写法同样被宿主拒）。要验插件，必须让命令形状落在"宿主放行、由插件按自己声明的门收紧"的格子里——本手册第 5、6.2、7.1 节统一改用**数据里带 `rm -rf` 的 printf 探针**：`run_command: printf '%s\n' 'rm -rf placeholder' > m1ar-probes/<渠道>/rm-guard-probe/ran.txt`。宿主判 `mutating` 放行（`rm -rf` 只是字符串数据），插件字面规则命中回 `ask/RM_RF`；拒绝后 `ran.txt` 不存在，就是"未执行"的文件证据。门失效放行时也只会多出一个 `ran.txt`，不会删任何东西。
+> 触发陷阱：**模型常把 `rm -rf <目录>` 直接写进 `run_command`，那样永远走不到插件**。这不是插件没生效，而是宿主先按自己的安全边界拒了（shellwrap 后 `sh -c` 和已知前缀运行器包裹的删除命令同样被宿主拒）。要验插件，必须让命令形状落在"宿主放行、由插件按自己声明的门收紧"的格子里——本手册第 5、6.2、7.1 节统一改用**数据里带 `rm -rf` 的 printf 探针**：`run_command: printf '%s\n' 'rm -rf placeholder' > m1ar-probes/<渠道>/rm-guard-probe/ran.txt`。宿主判 `mutating` 放行（`rm -rf` 只是字符串数据），插件字面规则命中回 `ask/RM_RF`；拒绝后 `ran.txt` 不存在，就是"未执行"的文件证据。门失效放行时也只会多出一个 `ran.txt`，不会删任何东西。
 
 **怎么区分是谁拦的**（每次触发都按这三条一起判）：
 

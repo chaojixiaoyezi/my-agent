@@ -163,6 +163,121 @@ def test_wrapper_unknown_option_is_blocked_and_recoverable() -> None:
     assert "recovery" in unknown.evidence
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -- FOO=1 rm -rf /tmp/x",
+        'sh -c "env -- FOO=1 rm -rf /tmp/x"',
+    ],
+)
+def test_env_assignments_after_option_terminator_still_block_delete(command: str) -> None:
+    decision = _decision(command)
+
+    assert decision.allowed is False
+    assert "COMMAND_DESTRUCTIVE_DELETE_BLOCKED" in decision.finding_codes
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -- FOO=1 ls",
+        'sh -c "env -- FOO=1 ls"',
+    ],
+)
+def test_env_assignments_after_option_terminator_keep_safe_command(command: str) -> None:
+    assert _decision(command).allowed is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'env -S "rm -rf /tmp/x"',
+        'env --split-string="rm -rf /tmp/x"',
+        'env --split-string "rm -rf /tmp/x"',
+        "flock /tmp/l -c 'rm -rf /tmp/x'",
+        "flock /tmp/l --command='rm -rf /tmp/x'",
+        "flock /tmp/l --command 'rm -rf /tmp/x'",
+        'sh -c "env -S \'rm -rf /tmp/x\'"',
+        'sh -c "flock /tmp/l -c \'rm -rf /tmp/x\'"',
+    ],
+)
+def test_command_string_wrapper_options_block_delete(command: str) -> None:
+    decision = _decision(command)
+
+    assert decision.allowed is False
+    assert "COMMAND_DESTRUCTIVE_DELETE_BLOCKED" in decision.finding_codes
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'env -S "echo \'rm -rf /tmp/x\'"',
+        'env --split-string="echo \'rm -rf /tmp/x\'"',
+        'flock /tmp/l -c "echo \'rm -rf /tmp/x\'"',
+        'flock /tmp/l --command="echo \'rm -rf /tmp/x\'"',
+    ],
+)
+def test_command_string_wrapper_options_preserve_quoted_data(command: str) -> None:
+    assert _decision(command).allowed is True
+
+
+def test_command_string_wrapper_options_use_existing_nested_depth_limit() -> None:
+    source = "rm -rf x"
+    for _ in range(4):
+        source = f"env -S {shlex.quote(source)}"
+
+    within_limit = _decision(source)
+    assert within_limit.allowed is False
+    assert "COMMAND_DESTRUCTIVE_DELETE_BLOCKED" in within_limit.finding_codes
+    assert "COMMAND_NESTED_DEPTH_EXCEEDED" not in within_limit.finding_codes
+
+    source = f"env -S {shlex.quote(source)}"
+    beyond_limit = _decision(source)
+    assert beyond_limit.allowed is False
+    assert "COMMAND_NESTED_DEPTH_EXCEEDED" in beyond_limit.finding_codes
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sudo --weird=foo ls",
+        'sh -c "sudo --weird=foo ls"',
+        'sh -c "sudo --weird ls"',
+    ],
+)
+def test_wrapper_unknown_options_with_equals_or_nested_are_blocked(command: str) -> None:
+    decision = _decision(command)
+
+    assert decision.allowed is False
+    assert "COMMAND_WRAPPER_UNKNOWN_OPTION" in decision.finding_codes
+    unknown = next(
+        finding
+        for finding in decision.findings
+        if finding.code == "COMMAND_WRAPPER_UNKNOWN_OPTION"
+    )
+    assert unknown.evidence.get("recovery") == "remove the option or put -- before the command"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env --unset=FOO ls",
+        "timeout --signal=TERM 5 ls",
+        "sudo -u nobody ls",
+        "caffeinate -m make",
+    ],
+)
+def test_known_equals_options_and_caffeinate_m_remain_allowed(command: str) -> None:
+    assert _decision(command).allowed is True
+
+
+def test_caffeinate_m_still_blocks_wrapped_delete() -> None:
+    decision = _decision("caffeinate -m rm -rf /tmp/x")
+
+    assert decision.allowed is False
+    assert decision.finding_codes == ("COMMAND_DESTRUCTIVE_DELETE_BLOCKED",)
+
+
 def test_find_semicolon_followed_by_shell_command_is_blocked() -> None:
     """`;` 之后是另一个 shell 命令时也要拦：find 段扫描跨段、rm 由自己的命令位拦。"""
     decision = _decision(r"find . -name x \; rm -rf y")

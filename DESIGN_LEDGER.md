@@ -211,6 +211,12 @@
 - **验证**：见 `TESTS.md`“选包入口预算均分 + 选中即固定（selfix2）”小节。
 - **未验证**：真实 Gateway 里两包同轮选中的端到端没跑（不启 Gateway 是工作规则）；窗口实现细节（`_entry_share` 的均分与余数）只由单测钉住；`test_pack_verification*.py` 只跑相关子集，未跑该目录全部；子入口未做独立行为差异实测。
 
+## 前缀运行器命令值的删除拦截修复（shellwrap5，2026-10-05，本地已实施，待 ds2 初审）
+
+- **解决问题**：`env --` 后的 `NAME=VALUE`、`env -S/--split-string` 与 `flock -c/--command` 命令字符串曾被解析器当作普通参数跳过，导致内层删除命令未进入统一策略检查；表外 `--option=value` 和嵌套 argv 的 unknown option 也曾漏报。
+- **修法**：运行器规格使用结构化 `command_options` 标记命令字符串值，按现有 shell 解析和 nested depth=4 复用同一危险检查；`--` 只结束选项扫描，不结束规格声明的赋值扫描；表外等号选项及嵌套未知选项统一 fail-closed。caffeinate 补齐 `-m` 已知开关。
+- **状态与验证**：实现与测试已提交本地分支，等待 ds2 初审；定向测试、变异、guards9 和本地严格门禁结果见 TESTS.md 同名节。本地证据不代替 3a 集成或真实端到端验收。
+
 ## 包一层 shell 的删除命令绕过修复（shellwrap + shellwrap2 + shellwrap3 + shellwrap4，2026-10-04/05，分支 `worker/shellwrap` → `worker/shellwrap2`，基于 17j 头 `6e31e5855`；初审 shellwrapr 两处真漏已修，终审又发现 xargs 选项解析真漏（shellwrap3）和前缀运行器缺口（shellwrap4）；待 3a 终审）
 
 - **问题（9b 证据 review-rm-wrap-gap）**：裸 rm/rmdir/unlink 被 `command_policy` 硬拒，但 `sh -c "rm -rf …"`、`bash -c`、`env sh -c`、`cd … && sh -c`、`eval`、`xargs rm`、`find … -delete` 都判 unknown/read_only、没有 finding；ActionPolicy 对 unknown 直接放行，Full Access 下会真执行。
@@ -232,7 +238,7 @@
   - 用例：12 条原放行写法全部转拦 + 3 条照旧拦 + 6 条误伤回归；`--nu`/`-z` 单列断言 unknown finding。变异 4 个（N1 删 `--null`、N2 删 `S`、N3 未知不给 finding、N4 删 `--eof`）**4/4 KILLED**。相关 119 passed、guards9 全过；ruff、doc_sync（--base 897388630）、strict code-size、diff-check、size_diff（新增 0，首轮 `_xargs_after_short_options` nesting 拆平后归零）全过。
 - **shellwrap4 修复（3a 终审发现的既有缺口：前缀运行器后面的删除没拆开）**：
   - **问题**：env/nice/timeout 能拦靠的是 `_unwrap_command_position` 里硬编码的 `_skip_env_wrapper`/`_skip_timeout_wrapper`/`_skip_nice_wrapper`；stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer 不在任何表里、全放行；`sudo -u root rm -rf /tmp/x` 也放行（`_skip_simple_wrapper` 只跳 `-` 开头的 token，`root` 被当命令）。
-  - **修法**：前缀运行器改表驱动——`_CommandWrapperSpec`（取值选项 / 开关选项 / 固定位置参数个数 / 是否跳过 `NAME=VALUE` 与 `-`），`_COMMAND_WRAPPER_SPECS` 登记 16 个运行器（sudo/env/nice/timeout/nohup/time/command/exec/builtin/stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer；来源：POSIX/coreutils/sudo/util-linux/macOS/expect 手册）；`_unwrap_wrapper_chain` 沿链推进到内层命令并收集表外选项；表外选项从严（按“不吃值”继续检查、给新 finding `COMMAND_WRAPPER_UNKNOWN_OPTION`，已注册 error_taxonomy，与 xargs 同一处理口径）；解析线性一遍扫描；旧 `_COMMAND_WRAPPERS` 常量与四个 `_skip_*_wrapper` 函数删除。
+  - **修法**：前缀运行器改表驱动——`_CommandWrapperSpec`（取值选项 / 开关选项 / 固定位置参数个数 / 是否跳过 `NAME=VALUE` 与 `-`），`_COMMAND_WRAPPER_SPECS` 登记 17 个运行器（sudo/env/nice/timeout/nohup/time/command/exec/builtin/stdbuf/ionice/chrt/taskset/setsid/flock/caffeinate/unbuffer；来源：POSIX/coreutils/sudo/util-linux/macOS/expect 手册）；`_unwrap_wrapper_chain` 沿链推进到内层命令并收集表外选项；表外选项从严（按“不吃值”继续检查、给新 finding `COMMAND_WRAPPER_UNKNOWN_OPTION`，已注册 error_taxonomy，与 xargs 同一处理口径）；解析线性一遍扫描；旧 `_COMMAND_WRAPPERS` 常量与四个 `_skip_*_wrapper` 函数删除。
   - **用例**：23 条前缀运行器“包着 rm -rf 必须拦”（finding 带 `executable` 证据、不是嵌套程序路径所以不带 nested_depth）+ 2 条组合（`timeout 5 stdbuf -o0 xargs --null rm -rf x`、`stdbuf -o0 sh -c 'rm -rf x'`，带 nested_depth）+ 单列 `sudo --weird rm -rf /tmp/x`（`COMMAND_WRAPPER_UNKNOWN_OPTION` + `COMMAND_DESTRUCTIVE_DELETE_BLOCKED` 两个 code，带 option/recovery 证据）+ 误伤回归 7 条（`timeout 60 python3 x.py`、`nice -n 10 make`、`env FOO=1 pytest -q`、`stdbuf -oL tail -f log`、`sudo -u root ls`、`flock /tmp/l echo hi`、`caffeinate -t 60 make`）。
   - **变异**：4 个（P1 删 stdbuf 表项、P2 timeout 位置参数改 0、P3 flock 位置参数改 0、P4 表外选项不再给 finding）**4/4 KILLED**，逐个 sha256 还原、还原一致。
   - **门禁**：相关 152 passed（新文件 109 + test_command_policy 43）、guards9 现存 11 文件 187 passed；ruff、doc_sync（--base 993357744）、strict code-size（2199/hard=0/blocked=False）、diff-check、clean-package、size_diff（新增 0 / 消失 44）全过。
