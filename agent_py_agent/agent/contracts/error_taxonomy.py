@@ -1977,6 +1977,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.READ_ARTIFACT_REF.value,
         recovery_hint="这是已外置工具输出；停止重试 read_file，照抄 suggested_tool_call 改用 read_artifact。",
     ),
+    "ARTIFACT_REF_AS_WRITE_PATH": ErrorContract(
+        code="ARTIFACT_REF_AS_WRITE_PATH",
+        category="artifact",
+        retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="写路径里用了逻辑引用编号（形如 gwreq-…:call_…），它不是文件/目录；读取用 read_artifact，写产物改到任务工作区路径后重试。",
+    ),
     # —— read_artifact / reader / read_modes 语义错误码：底层产出小写码（artifact_not_registered 等），
     #    经 error_contract 的大小写归一化命中下列注册；缺注册会回落 UNKNOWN_ERROR 误导模型放弃。——
     "MISSING_ARTIFACT_REF": ErrorContract(

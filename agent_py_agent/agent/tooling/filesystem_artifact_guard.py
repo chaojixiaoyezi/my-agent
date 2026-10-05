@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..common.logical_reference_ids import is_logical_reference_segment
 from .models import ToolHandlerOutcome
 
 _BLOB_TOOL_OUTPUT_ARTIFACT_PARTS = ("blobs", "tool_outputs")
@@ -88,3 +89,21 @@ def mark_tool_output_artifact_result(result: ToolHandlerOutcome) -> ToolHandlerO
         result.result_envelope["tool_output_policy"] = policy
     policy.update({"trust": "external_data", "redaction": "default"})
     return result
+
+
+# LLM: 相对写路径里出现"编号 + 冒号 + call 编号"的段，说明模型把归档的逻辑引用（scoped_call_id）
+#   当成了目录名；写工具必须在任何解析/落盘之前拒绝，否则会在 cwd（可能是 owner home 根）下
+#   创建垃圾目录。绝对路径不受影响，blobs/tool_outputs 的既有重定向保持原样。
+# 函数用途: 返回逻辑引用误当写路径时的结构化拒绝消息；没有命中返回空串。
+def logical_reference_write_path_error(raw_path: str | Path) -> str:
+    raw = str(raw_path or "")
+    if not raw or Path(raw).is_absolute():
+        return ""
+    for segment in Path(raw).parts:
+        if is_logical_reference_segment(segment):
+            return (
+                f"写入被阻止: 路径段 {segment} 是逻辑引用编号（工具输出/会话编号），不是文件或目录。"
+                "读取该工具输出请用 read_artifact（artifact_ref 照抄工具结果里的 output_scoped_call_id）；"
+                "写产物请写到任务工作区（例如 tasks/<日期>/<任务>/ 下的相对路径）。"
+            )
+    return ""

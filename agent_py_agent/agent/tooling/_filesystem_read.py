@@ -30,6 +30,7 @@ from ._filesystem_helpers import (
 )
 from .filesystem_artifact_guard import (
     ToolOutputArtifactRedirectError,
+    logical_reference_write_path_error,
     tool_output_artifact_typo_hint,
 )
 from .filesystem_read_file import execute_read_file
@@ -276,6 +277,9 @@ class FileSystemTool(BaseTool):
     # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd，也防止直接改宿主配置和宿主账本。
     def resolve_write_path(self, raw_path: str | Path) -> Path:
         """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
+        reference_error = logical_reference_write_path_error(raw_path)
+        if reference_error:
+            raise WriteScopeError(reference_error, access_code="ARTIFACT_REF_AS_WRITE_PATH")
         try:
             candidate = self.resolve_path(raw_path)
         except PathAccessError as exc:

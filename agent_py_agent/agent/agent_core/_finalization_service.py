@@ -6,6 +6,7 @@ import time as time_module
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.logical_reference_ids import RUN_REQUEST_ID_PREFIX
 from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import (
     archive_run_turn,
@@ -69,7 +70,7 @@ class FinalizationService:
                 source=ctx.source,
                 current_task_id=ctx.task_id,
             )
-        run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
+        run_request_id = ctx.request_id or f"{RUN_REQUEST_ID_PREFIX}{time_module.time_ns()}"
 
         archive_params = ArchiveRunParams(
             do_save=ctx.do_save,

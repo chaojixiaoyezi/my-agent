@@ -1776,6 +1776,7 @@ docs/
 - `agent_py_agent/agent/tooling/process_cleanup_evidence.py`：原资源记录的最小身份摘要及完整退出证明，旧引用不能删除同 ID 新实例；不另建持久状态。
 - `agent_py_agent/agent/common/nofollow_tree.py`：使用已验证父目录描述符递归删除固定目录，不沿链接越界；调用方负责先确认原进程和执行器已退出。
 - `agent_py_agent/agent/common/cancellation.py`：原取消令牌、异常、ContextVar 和回调的唯一实现；全部调用方直接依赖公共层，旧 tooling 入口删除，不管理持久任务或 OS 资源。
+- `agent_py_agent/agent/common/logical_reference_ids.py`：逻辑引用编号前缀（gwreq-/run-/subagent- + call_）的唯一共享常量与"前缀:call_"形态判定；编号生成点与文件写守卫共用，不参与路径解析。
 - `agent_py_agent/agent/common/directory_lock.py`、`nofollow_fs.py` 与 `strict_json.py`：分别维护永久互斥、受信根文件原语和严格 JSON；这些公共原语不裁决领域授权或替代操作账本。
 - `agent_py_agent/agent/common/json_io.py` 的私有写与私有锁（锁收私 + 私有写入两批 + pdp）：新建文件出生 0600、缺失目录经 no-follow 原语按 0700 建（`mkdir` 的 mode 不受 umask 放宽），存量宽权限文件下次写入收紧；**已存在的目录一律不改权限**（只动自己建的东西），符号链接段被拒。锁与数据文件同口径（0600/0700、不跟随符号链接、`blocking=False` 语义不变），覆盖 `locked_json_path` / `io/jsonl` / 派工锁 / Gateway 文件锁四处写法。宿主数据写入点（审计、协作账、run workspace、子代理账与工作日志、记忆候选/日事件/lesson/HOT、global_index、会话与用量）统一走这些原语；存量宿主目录的收紧归 owner 维护，不在每次写入时做。
 - `agent_py_agent/tests/test_private_lock_permissions.py`、`test_private_writes_*.py`（conversation / audit_events / collaboration / subagents / memory / batch2）与 `test_private_dirs_policy.py`：私有写与私有锁的组件验收。前几组钉「新文件 0600、新目录 0700、存量宽权限下次写入收紧且内容逐字节不变、既有 0755 目录不再被收紧」；`test_private_dirs_policy.py`（pdp）钉 `_ensure_private_dir` 缺失按 0700 建、已存在目录（含符号链接）一位不动、可配置路径指向用户目录时只新增 0600 文件、umask 022 下建目录点仍 0700。运行时生成物不逐条列，位置见同目录 Tree 段。

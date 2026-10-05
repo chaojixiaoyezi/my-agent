@@ -2,6 +2,11 @@
 
 ## Adapter dispatch 状态（slp5，2026-10-05；已实现，待初审）
 
+## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，worker/artrefguard；待初审）
+
+- `agent/common/logical_reference_ids.py`：逻辑引用前缀（gwreq-/run-/subagent- + call_）的唯一共享常量与形态判定；`gateway_parts/io.new_gateway_request_id`、`agent_core/runtime/run_params.py`、`agent_core/_finalization_service.py` 的生成点引用同一常量。
+- 文件写工具统一入口 `FileSystemTool.resolve_write_path`（write_file/apply_patch/edit_file 共用）先过 `logical_reference_write_path_error`：相对路径命中即 `ARTIFACT_REF_AS_WRITE_PATH` 拒绝、零落盘；绝对路径与 blobs/tool_outputs 重定向保持原样。
+
 `adapter/delivery.py` 的标记与 claim 共存在原 pending，记录 owner/process、epoch、message_sequence/key、SHA256、首次开始时间和下一游标；终态仍写原 sent。claim 不把 expiry 当死亡，外发前 CAS 写意图，恢复先查询或核渠道去重窗口，不可确认收 unknown。进度游标与 final 回执分别消费身份，不增加平行存储；`_terminal_claim_receipt` 只装配原回执，`_dispatch_auth_denial` 沿同一发送栅栏，不建影子链路。当前离线回归、三变异及门禁已补齐，真实渠道/Gateway 未验证；详见 TESTS。
 
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）

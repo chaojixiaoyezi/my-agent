@@ -28,6 +28,7 @@ from ..common.json_io import (
     write_private_json_file_atomic_no_newline_unlocked,
     write_private_text_file_atomic,
 )
+from ..common.logical_reference_ids import GATEWAY_REQUEST_ID_PREFIX
 from ..common.nofollow_fs import (
     ensure_private_dir,
     open_private_lock_beneath_tightened,
@@ -487,9 +488,12 @@ def tail_lines(path: Path, line_count: int) -> list[str]:
     return lines[-line_count:]
 
 
+# LLM: 前缀与工具层守卫共用 common.logical_reference_ids 的同一常量（禁止另写一份字面量）；
+#   守卫按"前缀 + 冒号 + call 编号"形态拒绝把逻辑引用当写路径。
+# 函数用途: 生成一次 Gateway 请求号（gwreq-<时间戳>-<随机 hex>）。
 def new_gateway_request_id() -> str:
 
-    return f"gwreq-{int(time.time())}-{uuid.uuid4().hex}"
+    return f"{GATEWAY_REQUEST_ID_PREFIX}{int(time.time())}-{uuid.uuid4().hex}"
 
 
 def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:

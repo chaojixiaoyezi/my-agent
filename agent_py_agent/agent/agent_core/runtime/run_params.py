@@ -4,6 +4,7 @@ from __future__ import annotations
 import time as time_module
 from dataclasses import dataclass, replace
 
+from ...common.logical_reference_ids import RUN_REQUEST_ID_PREFIX
 from .loop_support import RunParams, run_params_from_values
 
 
@@ -54,7 +55,7 @@ def run_params_from_keywords(params: RunParams, fields: RunKeywordFields) -> Run
 
 
 def run_params_with_request_id(params: RunParams) -> RunParams:
-    request_id = params.request_id or f"run-{time_module.time_ns()}"
+    request_id = params.request_id or f"{RUN_REQUEST_ID_PREFIX}{time_module.time_ns()}"
     attempt_id = params.attempt_id or f"attempt-{time_module.time_ns()}"
     run_id = params.run_id or request_id
     task_id = params.task_id or run_id

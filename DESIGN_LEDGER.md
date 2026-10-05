@@ -21,6 +21,14 @@
 - **撤回原因（Linux 车道发现）**：过期 claim 的原执行者进程仍存活时（常见于同一个 Gateway 进程里某回合异常结束、没释放 claim），SLP-1A 判为 recovery_pending；而 `_acquire_conversation_run_claim` 的等待循环没有时限，`test_plugin_m1_joint_tool_gate.py` 卡在 run_claim.py 的领取循环 40 分钟。生产上会让该会话之后所有回合一直“等待执行车道”，直到重启 Gateway。
 - **退回作者的要求**：同进程且没有活动续租的过期 claim 允许接管（或以进程内注册表判活）；等待有上限并给出结构化结果；挑入前补跑 test_plugin_m1_joint_tool_gate.py、test_plugin_m1_joint_e2e.py 等用到会话车道的联动测试。撤回提交 39f9f45cd、efa6a0496，代码回到挑入前。
 
+## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）
+
+- **来源**：owner home 调查（ownerhome-investigate）确认 `gwreq-…:call_…` 目录是模型把工具输出的逻辑引用（scoped_call_id）当相对路径传给文件写工具、在 cwd（无任务工作区时 = owner home 根）下落地的垃圾；本件是三层修法的第一层（守卫）。
+- **实现**：新增 `common/logical_reference_ids.py`——产品编号前缀（gwreq-/run-/subagent-）与 call_ 前缀的唯一共享常量 + `is_logical_reference_segment`（前缀开头且含 ":call_"）；`gateway_parts/io.new_gateway_request_id`、`agent_core/runtime/run_params.py`、`agent_core/_finalization_service.py` 的生成点改为引用同一常量。`filesystem_artifact_guard.logical_reference_write_path_error` 对相对路径逐段判定；写工具统一入口 `resolve_write_path` 在任何解析/落盘前拒绝（`WriteScopeError` + `ARTIFACT_REF_AS_WRITE_PATH`，error_taxonomy 已登记为 artifact 类、REPAIR_TOOL_ARGUMENTS）。绝对路径与既有 blobs/tool_outputs 重定向不变。
+- **边界**：`request-` 前缀没有产品生成点（只在历史正则出现），未纳入；subagent- 的复合形态（"subagent-run:xxx:call_…"）按前缀开头判定命中。
+- **验证**：新 `test_filesystem_logical_ref_guard.py` 4 用例（判定集合/绝对路径不拦/集成拒绝零落盘/正常路径照常写）；相关回归一批 87 项全过；4 个单点变异全 KILLED；常数目录无变化（只收数值常量，`--check` 一致）。命令见 TESTS。
+- **未验证**：真实会话里模型行为回归（需真实链路观察）、非作者初审。
+
 ## 自改工作树提示补一句“按集成者指定的工作树做”（selfdevrule，2026-10-05，3a）
 
 - **问题**：Owner Scope 提示词的“my-agent 自身代码”一段写着“不改其他检出目录”。10-05 sol3（gpt-6.1-sol）把它当成高于任务的规则，两次拒绝在集成者分派的 worker 工作树里改代码，只能改派。

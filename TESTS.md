@@ -2,6 +2,21 @@
 
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
 
+## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）
+
+- **改动**：新增 `agent/common/logical_reference_ids.py`、`agent_py_agent/tests/test_filesystem_logical_ref_guard.py`；修改 `tooling/filesystem_artifact_guard.py`（守卫函数）、`tooling/_filesystem_read.py`（`resolve_write_path` 挂守卫）、`contracts/error_taxonomy.py`（新码 `ARTIFACT_REF_AS_WRITE_PATH`）、`gateway_parts/io.py`/`agent_core/runtime/run_params.py`/`agent_core/_finalization_service.py`（生成点引用共享常量）。
+- **命令**（工作树根；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_filesystem_logical_ref_guard.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tooling_filesystem.py agent_py_agent/tests/test_gateway_io.py -q --tb=line -rf -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-artref
+  ```
+
+- **结果**：新用例 **4 passed**（判定集合、绝对路径不拦与中间段命中、集成拒绝零落盘、正常路径照常写）；回归一批 **87 passed / 0 failed**（含 blobs/tool_outputs 重定向回归、文件工具、gateway io）。
+- **变异**（`/private/tmp/artref_mutate.py`，单处修改 + 原字节 sha256 校验）：去 `:call_` 检查、去前缀检查、写入口不挂守卫、守卫只查首段 → **4/4 KILLED**。
+- **常数目录**：只收"右值可静态求出数值"的常量，字符串前缀本就不收录；重跑生成器后 `--check` 一致（912 项，无变化）。
+- **门禁**：guards9 12 文件全过；ruff 全过、import boundaries=0、DOC_SYNC_PASS（gateway 02/04 已同步）、strict code-size `hard=0 blocked=False`、size_diff 新增 0 / 消失 N、`git diff --check` 干净、clean-package OK。
+- **未验证**：真实会话里模型行为回归（需真实链路观察）；非作者初审。
+
 - 背景、证据与改法见 `DESIGN_LEDGER.md` 同名小节。
 - 新增用例（`test_truncated_output_resume.py`）：`test_provider_shaped_truncation_resumes_in_turn`（参数化：纯思考顶满 / 有正文被截断——带 runtime 三件套的响应返回 continue、写入 output-limit-resume 指令、计数 +1）、`test_provider_shaped_truncation_stops_after_limit`（达上限 break、runtime 字段原样保留、不再追加指令）、`test_other_runtime_status_breaks_without_truncation_resume`（MODEL_STREAM_INCOMPLETE 不吃截断预算）。
 - 更新用例：`test_native_truncated_write_recovery.py::test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope` 按新语义改为断言 continue + 不给 native 分块写 header + 不消费写预算（原守卫意图保留）。

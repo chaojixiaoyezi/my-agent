@@ -2,6 +2,13 @@
 
 ## Adapter 外发恢复（slp5，2026-10-05；已实现，待初审）
 
+## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，worker/artrefguard；待初审）
+
+- `agent/common/logical_reference_ids.py`（新增）：产品编号前缀的共享常量（gwreq-/run-/subagent- 与 call_ 前缀）与 `is_logical_reference_segment` 形态判定；`gateway_parts/io.new_gateway_request_id` 与 run 号生成点改为引用同一常量（禁止各写一份字面量）。
+- `agent/tooling/filesystem_artifact_guard.py`：新增 `logical_reference_write_path_error`——相对路径里出现"产品前缀 + 冒号 + call 编号"段（scoped_call_id 形态）时给结构化拒绝消息。
+- `agent/tooling/_filesystem_read.py`：写工具统一入口 `resolve_write_path` 在任何解析/落盘前调用守卫，命中即以 `ARTIFACT_REF_AS_WRITE_PATH` 拒绝（零落盘）；绝对路径与既有 blobs/tool_outputs 重定向不变。
+- `agent/contracts/error_taxonomy.py`：登记 `ARTIFACT_REF_AS_WRITE_PATH`（artifact 类、参数可修复）。用例与变异见 TESTS。
+
 原 pending/sent 外发前记 dispatch-started，旧进程活着/不可核验不接管；明确死亡后按查询或稳定键窗口恢复，否则 unknown。progress/final 分身份，飞书仅一小时去重，QQ 继承 Base 默认不支持。续做脚本刷新常数投影；35 文件相关回归 510 passed，十二守卫 190 passed，三变异全杀，完整本地门禁已执行，线上尺寸身份新增 0/消失 55。仅离线 fake process/provider 范围，未验真实渠道/Gateway，须独立初审和 3a 终审后再集成；详见 TESTS。
 
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
