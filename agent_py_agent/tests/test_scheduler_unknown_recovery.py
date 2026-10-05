@@ -75,6 +75,7 @@ def test_dead_runner_is_cleared_then_reclaimed_with_one_new_epoch(tmp_path, monk
 
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == [run_id]
+    assert repo.recover_interrupted_executions(now=1_006.5) == [], "第二个回收者看到已清成 queued，不再动"
     queued = repo.get_active_run(run_id)
     assert queued is not None
     assert queued["status"] == "queued" and queued["claim_id"] == ""
@@ -92,6 +93,26 @@ def test_dead_runner_is_cleared_then_reclaimed_with_one_new_epoch(tmp_path, monk
             SchedulerRunFinish(status="done", now=1_010),
         )
     assert repo.get_active_run(run_id) == replacement
+
+
+# 函数用途: 已 mark running 的 run 执行者死亡后落 unknown 终态，不重新排队、不能再领取（SLP-2B 接线前不自动重跑）。
+@pytest.mark.parametrize("entry", ["recover", "claim"])
+def test_dead_runner_after_running_becomes_unknown_not_requeued(tmp_path, monkeypatch, entry) -> None:
+    repo = _repository(tmp_path)
+    run_id = _make_claimed_run(repo)
+    first = repo.get_active_run(run_id)
+    repo.mark_run_running(run_id, str(first["claim_id"]), now=1_063.0)
+    _force_crash_state(repo, run_id, pid=71)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+
+    if entry == "recover":
+        assert repo.recover_interrupted_executions(now=1_006.0) == [run_id]
+    else:
+        assert repo.claim_run(run_id, lease_seconds=10, now=1_006.0) is None
+    assert repo.get_active_run(run_id) is None, "unknown 是终态"
+    assert repo.claim_run(run_id, lease_seconds=10, now=1_007.0) is None
+    store = json.loads(repo.store_path.read_text(encoding="utf-8"))
+    assert store["runs"][run_id]["status"] == "unknown"
 
 
 def test_live_process_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:

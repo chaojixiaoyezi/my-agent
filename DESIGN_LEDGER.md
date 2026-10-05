@@ -1,6 +1,9 @@
 # 设计台账
 
-## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05，基于 17k `812828b98`；状态：已实现，待 3a 复审）
+## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05，基于 17k `812828b98`；ds8 初审通过，3a 终审修正后挑入 17l）
+
+- **3a 终审修正（必须改项）**：死亡证明成立后按结构化状态分流——`claimed`（还没 mark running，动作未开始）转 `queued` 由新 epoch 领取；`running`（动作可能已产生副作用）转 `unknown` 终态、不自动重跑，与 SLP-2A 之前的崩溃恢复一致。原实现把 running 也重新排队，在 SLP-2B（定时动作复用 operation_id、经操作账本回放）接好之前会重复副作用，违背 SLEEP_RESUME 第 3.2 节“确认死亡后再决定恢复、unknown 或终态”和“未知不自动重试”。
+- **已知边界（接受）**：macOS 没有 /proc，`_process_start_time` 读不到，判活只剩进程号；进程号被复用时会判活并一直保持旧 claim（fail-closed，不误领但可能卡住，需人工或 SLP 后续补 macOS 启动时间）。
 
 - **改动**：普通 `claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime 三态死亡证明；lease 过期但 runner 活着或身份不可核验时不另发 claim。death proof 后先在同一 owner store 锁内持久 CAS 为 `queued`，之后只由 `claim_run` 生成 `claim_epoch + 1` 的新 token。heartbeat、release、mark-running、finish 校验 claim id 与 epoch；旧 run 缺 epoch 时按 legacy epoch 0 读取。
 - **边界**：实现限于 scheduler repository 与聚焦测试；未改 `scheduler/service.py`，未碰 conversation/tooling；SLP-2B operation_id/操作账本接线仍未做。misfire grace 政策未改。因 `check_doc_sync` 要求同步模块文档，另更新 Gateway 进度与结构文档。

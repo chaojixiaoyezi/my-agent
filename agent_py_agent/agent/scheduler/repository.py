@@ -926,7 +926,7 @@ class _SchedulerStoreSupport:
         *,
         now: float | None = None,
     ) -> list[str]:
-        """清除已证实死亡 runner 的过期 claim，为新 epoch 领取保留明确 queued 状态。"""
+        """清除已证实死亡 runner 的过期 claim：未开跑的转 queued 供新 epoch 领取，已开跑的转 unknown 终态。"""
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             recovered = _collect_expired_dead_runs(
@@ -1387,7 +1387,9 @@ def _collect_expired_dead_runs(
 
 
 # LLM: Both ordinary claims and crash recovery must use this single expiry/death-proof decision; None means hold the old claim.
-# 函数用途: 只在 claim 到期且旧 runner 被证实死亡时生成 queued 过渡，其余情况保留或阻止接管。
+#   死亡证明成立后按结构化状态分流：claimed（还没 mark running，动作未开始）转 queued 可重领；running（动作可能已产生
+#   副作用）转 unknown 终态、不自动重跑——定时动作的 operation_id 重放（SLP-2B）接好之前，不能把“可能做过”当“没做过”。
+# 函数用途: 只在 claim 到期且旧 runner 被证实死亡时生成 queued 或 unknown 过渡，其余情况保留或阻止接管。
 def _resolve_expired_claim(
     run: dict[str, object], current: float
 ) -> dict[str, object] | None:
@@ -1397,7 +1399,15 @@ def _resolve_expired_claim(
         return None
     if _runner_liveness(run) != "dead":
         return None
+    if run["status"] == "running":
+        return _unknown_after_dead_runner(run, now=current)
     return _queued_after_dead_runner(run, now=current)
+
+
+# LLM: 已开跑 run 的执行者死亡后只能落 unknown 终态（与 SLP-2A 之前的崩溃恢复同形）；不清 claim 字段，留作核对证据。
+# 函数用途: 生成“执行者已死、动作结果未知”的终态记录，之后不会再被领取。
+def _unknown_after_dead_runner(run: dict[str, object], *, now: float) -> dict[str, object]:
+    return {**run, "status": "unknown", "ended_at": now, "updated_at": now}
 
 
 # LLM: This transition is allowed only after _runner_liveness proves the old owner dead; the next claim increments the preserved epoch.

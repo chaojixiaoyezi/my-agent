@@ -7,6 +7,7 @@
 - **变异**：最终代码的 3 个单点变异均被对应测试抓住并立即还原：绕过死亡证明导致活 runner 被重领；finish 仅比较 claim_id 时 epoch 失配迟到写入未被拒；不递增 epoch 时死亡 run 重领 epoch 未增加。
 - **scheduler sweep**：全部 19 个相关文件已在修正 synthetic fixture 后重跑。仅 `test_scheduler_waiting_deadlock.py` 有 9 项失败，均为 fixture 写入时 `ValueError: managed process instance is partially bound`；9 项已在真正任务基线 `812828b98` 原样复现。其余用例通过。此 sweep 的退出码为 1，不记为全绿。
 - **guards9**：当前清单 12 项；分支基线中不存在新增的 `test_backend_signature_guardrails.py`，按 continue-after-17k 指示跑前 11 项，全部通过；第 12 项未运行。
+- **3a 终审补充**：`test_scheduler_unknown_recovery.py` 新增 `test_dead_runner_after_running_becomes_unknown_not_requeued`（recover / claim 两个入口参数化：已开跑 run 的执行者死亡后落 unknown、不能再领取），死亡重领用例加“第二个回收者返回空”断言（ds8 建议）；变异 2/2 KILLED（已开跑也重排、未开跑也记 unknown）。
 - **静态与尺寸**：`check_import_boundaries.py` 为 0 findings；Ruff、`check_doc_sync.py --base 812828b98`、strict code-size、`size_diff.sh` 均通过。strict code-size：`strict_scope_total=2187, hard=0, high-risk=1493, soft=694, test_advisory=1234, blocked=False`；size diff 新增告警 0、消失 56。`check_clean_package.py .` 输出 `OK: . 未发现发布阻塞项`；`git diff --check` 通过。
 
 复跑命令（固定 Python：`/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；均在 worktree 根目录运行）:
