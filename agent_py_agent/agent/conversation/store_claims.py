@@ -80,18 +80,6 @@ def _claim_lease_seconds(value: object) -> int:
         return max(1, int(default_config_value("background_claim_ttl_seconds")))
 
 
-# LLM: Existing records without an epoch begin at one; malformed epoch data cannot authorize a
-# takeover because the store cannot prove that the next fencing value is monotonic.
-# 函数用途: 在持久化文件锁内计算下一代 claim_epoch，损坏值返回 None 以阻止不安全接管。
-def _next_claim_epoch(data: dict[str, Any]) -> int | None:
-    if "claim_epoch" not in data:
-        return 1
-    current = data.get("claim_epoch")
-    if type(current) is not int or current < 0:
-        return None
-    return current + 1
-
-
 # LLM: 只接受协议中明确终态；不从自然语言推断成功或失败。
 # 函数用途: 校验调用方提交的 claim 终态。
 def _finish_status(value: object) -> str:
@@ -134,7 +122,6 @@ def _previous_claim_summary(data: dict[str, Any], current: float) -> dict[str, A
     expires_at = float_value(data.get("expires_at"))
     return {
         "claim_id": str(data.get("claim_id") or ""),
-        "claim_epoch": data.get("claim_epoch"),
         "status": status,
         "reason": str(data.get("reason") or ""),
         "task_id": str(data.get("task_id") or ""),
@@ -163,62 +150,6 @@ def _claim_acquisition_reason(data: dict[str, Any], current: float) -> str:
     return f"previous_{status or 'unknown'}"
 
 
-# LLM: Keep atomically evaluated claim inputs together so the JSON updater remains a thin adapter.
-# 类用途: 汇集取得下一代 claim 所需的既有快照与执行归属。
-@dataclass(frozen=True)
-class ClaimAcquisitionContext:
-    current: float
-    claim: dict[str, Any]
-    task_id: str
-    recover_same_task_only: bool
-
-
-# LLM: A pending takeover keeps the existing owner and epoch; liveness is structured metadata,
-# never inferred from an error message.
-# 函数用途: 写入待恢复标记而不授予第二个执行权。
-def _recovery_pending_claim(
-    data: dict[str, Any], reason: str, owner_liveness: str = ""
-) -> dict[str, Any]:
-    takeover = {"allowed": False, "reason": reason}
-    if owner_liveness:
-        takeover["owner_liveness"] = owner_liveness
-    return {**data, "phase": "recovery_pending", "takeover": takeover}
-
-
-# LLM: Decide under the store's file lock; only this updater can replace the current epoch.
-# 函数用途: 按归属、期限与明确的进程死亡证明决定保留旧 claim、等待恢复或安装下一代。
-def _claim_acquisition_update(
-    data: dict[str, Any], context: ClaimAcquisitionContext
-) -> tuple[dict[str, Any], bool]:
-    if (
-        data.get("status") == "running"
-        and data.get("recover_same_task_only") is True
-        and (not context.recover_same_task_only or data.get("task_id") != context.task_id)
-    ):
-        return data, False
-    running = str(data.get("status") or "") == "running"
-    expired = float_value(data.get("expires_at")) <= context.current
-    owner_liveness = process_identity_is_live(data.get("owner_process")) if running else None
-    owner_stale = running and owner_liveness is False
-    if running and not expired and not owner_stale:
-        return data, False
-    if running and expired and not owner_stale:
-        liveness = "alive" if owner_liveness is True else "unverifiable"
-        return _recovery_pending_claim(data, "recovery_pending", liveness), False
-    next_epoch = _next_claim_epoch(data)
-    if next_epoch is None:
-        return _recovery_pending_claim(data, "claim_epoch_unreadable"), False
-    reason = "owner_process_stale" if owner_stale else _claim_acquisition_reason(
-        data, context.current
-    )
-    return {
-        **context.claim,
-        "claim_epoch": next_epoch,
-        "acquisition": {"reason": reason},
-        "previous_claim": _previous_claim_summary(data, context.current),
-    }, True
-
-
 # LLM: 损坏必须以 load_error 返回，不能伪装成正常空记录后抢占执行。
 # 函数用途: 读取原 claim JSON 及明确损坏事实，不写文件。
 def _read_claim_report(path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -243,9 +174,9 @@ def _claim_load_error(exc: BaseException, path: Path) -> dict[str, Any]:
     return report
 
 
-# LLM: Serialize each claim in the owner store; expiry is not death, and every takeover advances
-# claim_epoch in this same atomic record. Terminal cleanup is exact-claim CAS, not a second ledger.
-# 类用途: 管理前后台共用执行租约，以存活核验和单调 epoch 防止过期后出现双执行者。
+# LLM: Serialize each claim in the owner store; death/TTL cannot transfer recoverable foreground
+# ownership to another task. Terminal cleanup is exact-task CAS, not a directory or quality lock.
+# 类用途: 管理前后台共用执行租约，确保重启恢复和请求结束都能正确交接。
 class ClaimStore:
     # LLM: 与所有领域共用唯一 storage；线程能力只用于存在性验证，不建立运行或租约副本。
     # 函数用途: 连接执行租约与原线程读取入口，初始化不读写持久文件。
@@ -261,9 +192,8 @@ class ClaimStore:
         self._load_thread = load_thread
 
 
-    # LLM: Atomically acquire a claim; expiry plus live/unverifiable owner remains pending, while
-    # only death proof or a non-running prior claim may install the next epoch.
-    # 函数用途: 领取执行权；先核验旧执行者，再在原子记录里递增 epoch 后允许唯一接管。
+    # LLM: Atomically acquire a claim; only the original host-bound task can resume a pinned claim.
+    # 函数用途: 领取执行权；普通后台维持租约接管，尚未收尾的前台请求不因超时被另一执行者抢走。
     def acquire(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
@@ -286,18 +216,35 @@ class ClaimStore:
                 recover_same_task_only=recover_same_task_only,
             )
         )
-        context = ClaimAcquisitionContext(
-            current, claim, task_id, recover_same_task_only
-        )
         claimed = False
 
-        # LLM: The small callback delegates only the atomic decision; all affinity and epoch
-        # checks remain inside this file lock.
-        # 函数用途: 让共享 JSON 原子更新器执行本次 claim 状态裁决。
+        # LLM: Called under the claim JSON lock; affinity is checked before TTL/dead-owner takeover.
+        # 函数用途: 原子核对旧租约归属，再按真实租约和宿主状态决定是否替换。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal claimed
-            updated, claimed = _claim_acquisition_update(data, context)
-            return updated
+            if (
+                data.get("status") == "running"
+                and data.get("recover_same_task_only") is True
+                and (not recover_same_task_only or data.get("task_id") != task_id)
+            ):
+                return data
+            active = (
+                str(data.get("status") or "") == "running"
+                and float_value(data.get("expires_at")) > current
+            )
+            owner_stale = active and process_identity_is_live(data.get("owner_process")) is False
+            if active and not owner_stale:
+                claimed = False
+                return data
+            claimed = True
+            acquisition_reason = (
+                "owner_process_stale" if owner_stale else _claim_acquisition_reason(data, current)
+            )
+            return {
+                **claim,
+                "acquisition": {"reason": acquisition_reason},
+                "previous_claim": _previous_claim_summary(data, current),
+            }
 
         updated = update_json_file_atomic(
             self.storage.background_claim_path(claim_scope_id),
@@ -331,14 +278,12 @@ class ClaimStore:
         selected_scope = str(claim_scope_id or thread_id or "").strip()
         return _read_claim_report(self.storage.background_claim_path(selected_scope))
 
-    # LLM: Renew only the exact running claim and, when supplied, its epoch; late old heartbeats
-    # cannot touch a replacement. Missing epoch is accepted only for legacy callers using claim_id.
-    # 函数用途: 延长当前执行租约，并在原文件锁内同时核对 claim_id 与可用的 epoch。
+    # LLM: 只续原 running claim ID，线程不可读或身份冲突保持原失败边界。
+    # 函数用途: 延长当前执行租约，并在原文件锁内校验归属。
     def renew(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
-        expected_epoch = request.get("claim_epoch")
         # 续租只作用于 claim 租约文件（按 thread_id 定位），不需要线程对象。若线程此刻不可读
         # （边缘/竞态：外部清理、长跑中线程消失、极端下 store 根不一致），续租已无意义——返回 None
         # 让后台心跳线程按既有 `renewed is None → 停机` 契约优雅收尾，绝不抛 KeyError 裸崩 daemon 线程。
@@ -362,18 +307,11 @@ class ClaimStore:
             if (
                 str(data.get("claim_id") or "") != str(claim_id or "")
                 or str(data.get("status") or "") != "running"
-                or (expected_epoch is not None and data.get("claim_epoch") != expected_epoch)
             ):
                 renewed = False
                 return data
             renewed = True
-            payload = {**data, "heartbeat_at": current, "expires_at": current + lease}
-            if data.get("phase") == "recovery_pending":
-                payload.update(
-                    phase="claimed",
-                    takeover={"allowed": False, "reason": "claim_running"},
-                )
-            return payload
+            return {**data, "heartbeat_at": current, "expires_at": current + lease}
 
         updated = update_json_file_atomic(
             self.storage.background_claim_path(claim_scope_id),
@@ -381,14 +319,13 @@ class ClaimStore:
         )
         return updated if renewed else None
 
-    # LLM: Finish by exact claim ID/epoch, or by the existing host-published exact-task recovery
-    # contract; stale epochs never write terminal state into a replacement claim.
-    # 函数用途: 原子释放租约并保留真实终态；旧 epoch 的迟到收尾不能关闭新执行者。
+    # LLM: Finish by exact claim ID, or by host-published exact task at Gateway terminal commit.
+    # Task-only cleanup requires recovery affinity and running state; it cannot close a later task.
+    # 函数用途: 原子释放租约并保留真实终态；重启后的失败收尾不依赖线程仍能读取。
     def finish(self, request: dict) -> dict[str, Any] | None:
         thread_id = str(request.get("thread_id") or "")
         claim_scope_id = str(request.get("claim_scope_id") or thread_id).strip()
         claim_id = str(request.get("claim_id") or "")
-        expected_epoch = request.get("claim_epoch")
         expected_task_id = str(request.get("expected_task_id") or "").strip()
         finish_recovery_task = request.get("recover_same_task_only") is True
         if not claim_id and not (expected_task_id and finish_recovery_task):
@@ -419,8 +356,6 @@ class ClaimStore:
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal finished
             if claim_id and data.get("claim_id") != claim_id:
-                return data
-            if expected_epoch is not None and data.get("claim_epoch") != expected_epoch:
                 return data
             if expected_task_id and (
                 data.get("task_id") != expected_task_id or data.get("thread_id") != thread_id

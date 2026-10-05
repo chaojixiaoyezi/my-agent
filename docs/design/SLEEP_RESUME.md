@@ -1,6 +1,6 @@
 # 睡眠与长暂停后的执行恢复设计
 
-**状态：设计已由 3a 定稿；SLP-2A、SLP-1A 已实现并挑入 17l**
+**状态：设计已由 3a 定稿；SLP-2A 已实现，待审**
 
 **日期：2026-10-05**
 
@@ -24,15 +24,14 @@
 
 ## 3. 条件风险前五与实施设计
 
-### 3.1 风险一：会话执行 claim 过期，旧回合与接管者并发，重复有副作用的操作（SLP-1A：已实现，待审）
+### 3.1 风险一：会话执行 claim 过期，旧回合与接管者并发，重复有副作用的操作
 
 - **成立条件**：会话回合睡过普通 claim 的墙钟期限；另一领取者在旧回合退出前调用 acquire。旧报告记录的默认 lease 是 90 秒（原报告 `slp2-sleep-trace-luna1.md:15-18`；实施时应以目标分支配置为准）。旧回合若已越过外部效果边界、但结果未提交，接管后重跑可能重复效果。
-- **实现证据**：`agent_py_agent/agent/conversation/store_claims.py` 的 `ClaimStore.acquire` 在同一原子更新中核验 owner liveness；expired 且 live/unverifiable 保留原 claim 并写结构化 `phase=recovery_pending`，只有死亡证明才递增 `claim_epoch` 并创建新 claim。`renew`、`finish` 可核对 epoch。`agent_py_agent/agent/conversation/run_claim.py` 的 heartbeat 随 lane claim 透传 epoch；renew 返回 `None`、异常或回执 epoch 不匹配时，将结构化 `claim_lost` 写入本回合 claim 视图，并经原执行线程的中断作用域通知安全点停止后续动作。
-- **现有保护及边界**：claim 原子更新、同一 `claim_id` 才能续租、`recover_same_task_only` 归属限制仍保留；失权中断依赖协作式 interrupt 安全点，不是 handler 前的原子副作用栅栏。当前 yielded claim 提供 `claim_epoch`，但 `ToolOperationExecutionRequest` 的 handler 前 epoch 核验尚未接线；必须由 SLP-1B 在既有 `ToolOperationCoordinator`/managed operation store 内完成，不在此新建账本。
-- **后续入口与修法**：SLP-1A 的实现入口为 `agent_py_agent/agent/conversation/store_claims.py` 与 `agent_py_agent/agent/conversation/run_claim.py`；SLP-1B 只接入 `agent_py_agent/agent/tooling/executor.py`、`agent_py_agent/agent/tooling/tool_operation_coordinator.py` 与既有 managed operation store，在 handler 开始前校验父 `claim_epoch`，并从同一持久化 ToolCall 保留 operation 身份。操作账本不可用仍 fail-closed，不新增平行账本。
-- **SLP-1B 接口字段冻结**：SLP-1B 从当前 lane claim 读取父 `claim_epoch`，与原 `ToolCall.attempt_id` 一同透传到已有 `ToolOperationExecutionRequest` / operation claim；恢复同一 ToolCall 保留其 `operation_id/idempotency_key`。不得在 `tooling/` 另建账本或用新 attempt 重建操作身份。
-- **SLP-1A 故障注入**：显式 `now` 推进 wall clock，结合 fake owner liveness 覆盖 expired+live/unverifiable 不重领、dead proof 后并发 claimant 仅一个新 epoch、旧心跳先续租/新 claim 先到、旧 epoch renew/finish 拒绝，以及 renew `None`/异常/epoch mismatch 后产生结构化失权并中断安全点。8 个新增用例通过，不等待真实 Mac 睡眠。SLP-1B 尚需验证 handler 前拒绝旧 epoch、副作用零启动、同一持久 ToolCall 的回执回放与 unknown reconcile。
-- **估时与状态**：设计估计总计约 **7 agent 小时**，按 SLP-1A（3h）和 SLP-1B（4h）拆分；SLP-1A 核心已实现并提交，前一阶段 WIP 检查点为 `70154d347`，当前状态“已实现，待审”。本 slice 未接 handler 前 epoch 栅栏；该项由 SLP-1B 完成。
+- **实现证据**：`agent_py_agent/agent/conversation/store_claims.py:231-247` 仅当 `expires_at > current` 时认为 claim active；active 且进程未被明确判死会拒绝接管，但过期后该存活检查不再阻止新 claim。`agent_py_agent/agent/conversation/run_claim.py:110-131` 心跳用 `time.time()` 续约；renew 返回 `None` 或异常后线程退出，本处没有触发回合中断。另一方面，`agent_py_agent/agent/tooling/executor.py:545-563` 将 `operation_id/idempotency_key/attempt_id` 交给现有 coordinator；`agent_py_agent/agent/tooling/tool_operation_coordinator.py:261-298,315-373` 支持已完成操作回放和 unknown 核对。`agent_py_agent/agent/tooling/runtime_contracts.py:127-170,712-714` 的默认 operation_id 由 run、attempt、call 身份推导；恢复若重建为新 attempt/call，默认会成为另一操作，不能自动去重。
+- **现有保护**：claim 原子更新、同一 claim_id 才能续租、`recover_same_task_only` 限制特定任务接管；17k 代码对未过期 claim 检查 owner process liveness。工具侧已有 `ToolOperationCoordinator` 的 claim、持久结果回放和 unknown reconcile，且操作账本不可用时可在 handler 前 fail-closed。当前 `ToolOperationExecutionRequest` 带 `attempt_id`，但没有父会话 `claim_epoch`；过期会话 claim 的替换也不由这个工具账本决定。
+- **修法与入口**：到期拆成 `expired + owner_dead/live/unverifiable`；live 或 unverifiable 不交给新执行者，先置 `recovery_pending`，并在替换 claim 前栅栏旧 attempt。接管确认后递增 claim_epoch，续租丢失要结构化中断旧回合。重放时复用持久化的原 `ToolCall.operation_id/idempotency_key`，并把父 `claim_epoch` 透传到现有 `ToolOperationExecutionRequest`/operation claim，在 handler 开始前核对；不能用新 attempt 重新生成一个“看起来不同”的 operation_id 后盲目重跑。继续使用 `ToolOperationCoordinator` 与 managed operation store，不建新账本。入口：`agent_py_agent/agent/conversation/store_claims.py`、`agent_py_agent/agent/conversation/run_claim.py`、`agent_py_agent/agent/tooling/executor.py`、`agent_py_agent/agent/tooling/tool_operation_coordinator.py` 及相应 runtime store。
+- **故障注入用例**：假时钟将 wall clock 前跳超过 lease、保持旧进程和 attempt 存活，验证第二 claimant 不会启动工具；打乱“旧心跳先续租/新 claim 先到”的顺序，验证 epoch 只有一个有效 owner；旧 attempt 在 handler 前失去 claim 时不得开始副作用；注入 provider 已接受、持久回执未写的崩溃，验证从已保存的同一个 `ToolCall` 恢复时复用原 `operation_id/idempotency_key`，只回放或只读 reconcile、不二次调用 handler；若只能重建新 attempt/call，则不能仅靠同参数哈希假装是原操作；确认新逻辑调用即使参数相同也有新 operation_id。
+- **估时**：总计约 **7 agent 小时**，按下方 SLP-1A（3h）和 SLP-1B（4h）拆分；若要给多种外部工具适配幂等 API，另估。
 
 ### 3.2 风险二：定时 run claim 过期后重复领取同一计划动作
 
@@ -76,7 +75,7 @@
 
 | 切片 | 估时 | 独占范围与产出 | 验收条件 | 依赖 |
 | --- | ---: | --- | --- | --- |
-| **SLP-1A 会话 claim 栅栏（已实现，待审）** | 3h | `agent_py_agent/agent/conversation/store_claims.py`、`agent_py_agent/agent/conversation/run_claim.py` 及聚焦测试；返回 claim 结构含单调 `claim_epoch`，续租丢失产生结构化失权事实并通知旧线程。前序阶段 WIP `70154d347`；本次续作已正式提交。 | expired+live/unverifiable 不分配第二个执行者；dead proof 后只有一个新 epoch；旧 epoch renew/finish 被拒，失权后旧回合经 interrupt 安全点不再起后续动作。handler 前原子副作用校验由 SLP-1B 完成。 | 无；供 SLP-1B 冻结透传原 `ToolCall.attempt_id` + 父 `claim_epoch`。
+| **SLP-1A 会话 claim 栅栏** | 3h | `agent_py_agent/agent/conversation/store_claims.py`、`agent_py_agent/agent/conversation/run_claim.py` 及其聚焦测试；把 expired+live/unverifiable 与 dead 分流，续租丢失产生结构化取消/失权事实，旧 epoch 不能再开始动作。 | 超租约但 owner 活着/不可验证均不会分配第二个可执行回合；dead proof 后只产生一个新 epoch；旧 claim 的 renew/finish/action 均不能改新状态。 | 无；为 SLP-1B 定义 attempt/epoch 传递字段。
 | **SLP-1B 现有操作账本恢复栅栏** | 4h | `agent_py_agent/agent/tooling/executor.py`、`agent_py_agent/agent/tooling/tool_operation_coordinator.py`、`agent_py_agent/agent/runtime_db/managed_operation_store.py` 及聚焦测试；给现有请求/claim 加父 claim_epoch 栅栏，恢复同一持久化 ToolCall 时保留原 operation_id/idempotency_key，不新增账本或状态枚举。 | handler 前校验 claim epoch；同一 operation_id 已 succeeded 时只回放，unknown 只 reconcile、不自动再 dispatch；明确 safe_to_retry 才能按原幂等键续作；同参数的新逻辑调用必须有新 operation_id；操作账本不可用时副作用零启动。 | SLP-1A 确认 attempt/epoch 字段；对不能查询/幂等的 handler 保留现有 unknown 处理。
 | **SLP-2A Scheduler claim 栅栏** | 3h | 只改 `agent_py_agent/agent/scheduler/repository.py` 与其聚焦测试；让普通 `claim_run` 与 process-death recovery 共用 structured owner 判定和 CAS epoch。**状态：已实现并挑入 17l；死亡证明后 claimed 转 queued、running 转 unknown（SLP-2B 前不自动重跑）。** | expired+live/unverifiable runner 不会被第二 worker 执行；dead proof 后先 CAS 为明确状态再有且仅有一个新 claim；旧 heartbeat/finish 不改变新 claim。 | 可与 SLP-1A 并行，文件范围不重叠。
 | **SLP-2B Scheduler 操作身份接线** | 3h | 只改 `agent_py_agent/agent/scheduler/service.py` 的 scheduled action→existing ToolOperationCoordinator 身份接线及测试；不改 repository claim 逻辑或 SLP-1B 的 coordinator/store。 | 同一持久化 scheduled action 恢复时复用原 operation_id/idempotency_key；同一 run 的不同动作不互相去重；sleep/misfire 不多建 run；原 operation 是 unknown 时不自动重发。 | 依赖 SLP-2A、SLP-1B 完成并冻结接口。
