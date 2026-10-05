@@ -54,6 +54,9 @@ def run_params_from_keywords(params: RunParams, fields: RunKeywordFields) -> Run
     )
 
 
+# LLM: 运行编号补齐的唯一入口：只在缺 request_id/attempt_id/run_id/task_id 时生成，已有值原样保留；request_id 前缀取
+#   common/logical_reference_ids 的共享常量（与“逻辑引用误当写路径”守卫同源），不读模型参数。改动须同步该守卫的用例。
+# 函数用途: 给一次运行补齐请求、尝试、运行、任务编号；四个编号都已齐全时返回同一个对象。
 def run_params_with_request_id(params: RunParams) -> RunParams:
     request_id = params.request_id or f"{RUN_REQUEST_ID_PREFIX}{time_module.time_ns()}"
     attempt_id = params.attempt_id or f"attempt-{time_module.time_ns()}"

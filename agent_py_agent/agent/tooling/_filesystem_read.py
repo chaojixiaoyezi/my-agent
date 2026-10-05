@@ -274,7 +274,9 @@ class FileSystemTool(BaseTool):
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
     #   H3：任何模式下宿主托管文件（配置、运行状态）都拒写（拒写码随 WriteScopeError.access_code 上报），在墙外授权复核之后、
     #   工作区范围之前判定，所以 Full Access 管理员与声明了自家根的隔离 owner 同样被拒。
-    # 人类: 这是文件写工具统一硬门，防止模型用绝对路径写进全局 service-cwd，也防止直接改宿主配置和宿主账本。
+    #   逻辑引用编号形态的相对路径段（产品编号前缀 + :call_）在任何解析与落盘之前拒绝，access_code=ARTIFACT_REF_AS_WRITE_PATH。
+    # 函数用途: 文件写工具（write_file/apply_patch/edit_file）的统一硬门：先拒绝把逻辑引用编号当写路径（零落盘），
+    #   再防止模型用绝对路径写进全局 service-cwd，也防止直接改宿主配置和宿主账本。
     def resolve_write_path(self, raw_path: str | Path) -> Path:
         """解析写路径，并在多用户模式下强制命中本轮已授权工作区。"""
         reference_error = logical_reference_write_path_error(raw_path)
