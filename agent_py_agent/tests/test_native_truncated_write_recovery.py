@@ -270,11 +270,15 @@ def test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope(t
         run_id="run-1", source_protocol="text",
     ))
     decision = _decide(_decision_agent(tmp_path), response, params)
-    assert decision.action == "break"
-    assert decision.response is response
+    # 文本协议仍不进入 native 写恢复（不给分块写 header、不消费写预算）；但供应商长度截断的
+    # 通用轮内续跑对两种协议都生效（2026-10-05 修复：真实截断响应带 runtime 字段，此前在
+    # 通用 runtime-status break 前被拦下，续跑对任何协议都不可达；见 test_truncated_output_resume）。
+    assert decision.action == "continue"
     assert decision.calls == []
     assert decision.counters.truncated_write_repairs == 0
-    assert params.tool_context == []
+    instructions = [str(item) for item in params.tool_context]
+    assert any("output-limit-resume" in item for item in instructions)
+    assert all("第一块用 mode=" not in item for item in instructions)
     assert len(requests) == 1
 
 

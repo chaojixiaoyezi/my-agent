@@ -1,5 +1,14 @@
 # 设计台账
 
+## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，基于 17l 头 `630be9dcc`；待非作者初审）
+
+- **来源（隔离测试实例的结构化事实）**：小说方向 DeepSeek deepseek-v4-flash 6 次中 1 次失败（NOV02-ds-t2）：`request_state=failed`、`error_code=MODEL_RESPONSE_TRUNCATED`、`turn_end_reason=max-tokens`，16 次调用、401.9 秒。逐次事件：末次调用输出恰为 **65536 tokens 且全部是思考**（thinking_delta 65536 条、无正文、无工具调用）——模型把 64K 上限全花在推理上、没产出任何可交付物；写文件参数没有被截断（两次 write_file 参数进度 2.2KB 都正常 ready）。
+- **上限出处**：`DEFAULT_MODEL_MAX_TOKENS = 65536`（`settings/defaults.py:10`，用户 2026-09-27 定的"所有模型统一 64K"）；`effective_max_output_tokens = min(配置值, 窗口//4)`（窗口 1M → 仍是 65536），后端工厂把它写进 `backend.max_tokens` 并作为请求的 `max_tokens` 发送（`backends/factory.py:54`、`backends/http.py:214`）。代码里没有 deepseek-v4-flash 的单独输出上限登记（`sampling.py` 只处理 top_p）；官方上限未联网核对。**结论：不是配置错误**——供应商按 65536 执行，问题在恢复链。
+- **根因**：`agent_core/tool_loop/response_decision.py` 的 R248 轮内续跑（`_TRUNCATED_OUTPUT_RESUME`，预算 2 次）挂在"无 runtime 字段"分支上；而 `backends/response_completion.py:36` 对 length/max_tokens 停因**总会**写 runtime 三件套（unfinished / MODEL_RESPONSE_TRUNCATED / model_provider），`_no_tool_calls_decision` 的通用 runtime-status break（`response_decision.py:855`）先命中，续跑对真实截断**永远不可达**（本运行续跑 0 次；写恢复 `_native_truncated_write_decision` 也 0 次，因为写没被截断）。单测 `test_truncated_output_resume.py` 用的是不带 runtime 字段的响应形态，所以合同一直绿、真实路径一直死。
+- **改法（最小通用）**：`_no_tool_calls_decision` 的 runtime-status 分支先试 `_truncated_output_resume_decision`——只认既有结构化三件套（`_is_provider_length_truncated`），消费同一条 `truncated_output_repairs` 预算（2 次），超限或非长度截断原样 break；续跑指令补一句"上一轮只有推理顶到上限时不要再展开长推理、直接产出第一块"。写恢复与 native 协议门不动。
+- **边界**：文本协议下 provider 长度截断此前直接 break（f0f7fdedd 起），修复后与原生协议一致进入同一续跑预算；native 写恢复仍只在原生协议生效（`test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope` 已按新语义更新并保留原守卫断言）。续跑预算用尽后仍按 unfinished/MODEL_RESPONSE_TRUNCATED 收口（不吞供应商终态）；部分正文随响应对象保留，请求级失败语义不变。
+- **验证**：见 `TESTS.md` 同名小节（provider 形态 3 条新用例 + 全量引用文件清扫 + 4 变异全杀）。
+
 ## SLP-1A 挑入 17l 后撤回（slp1a，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现）**：过期 claim 的原执行者进程仍存活时（常见于同一个 Gateway 进程里某回合异常结束、没释放 claim），SLP-1A 判为 recovery_pending；而 `_acquire_conversation_run_claim` 的等待循环没有时限，`test_plugin_m1_joint_tool_gate.py` 卡在 run_claim.py 的领取循环 40 分钟。生产上会让该会话之后所有回合一直“等待执行车道”，直到重启 Gateway。

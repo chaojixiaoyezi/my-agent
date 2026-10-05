@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
+
+- 背景、证据与改法见 `DESIGN_LEDGER.md` 同名小节。
+- 新增用例（`test_truncated_output_resume.py`）：`test_provider_shaped_truncation_resumes_in_turn`（参数化：纯思考顶满 / 有正文被截断——带 runtime 三件套的响应返回 continue、写入 output-limit-resume 指令、计数 +1）、`test_provider_shaped_truncation_stops_after_limit`（达上限 break、runtime 字段原样保留、不再追加指令）、`test_other_runtime_status_breaks_without_truncation_resume`（MODEL_STREAM_INCOMPLETE 不吃截断预算）。
+- 更新用例：`test_native_truncated_write_recovery.py::test_real_length_stream_does_not_enter_native_write_recovery_in_text_scope` 按新语义改为断言 continue + 不给 native 分块写 header + 不消费写预算（原守卫意图保留）。
+- 命令与结果（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 引用 `response_decision` 的全部 18 个测试文件逐个跑（每文件 900 秒子进程超时）：17 个全绿；`test_pack_verification_cancellation.py` 1 条失败=沙箱不允许嵌套 Seatbelt（`sandbox_apply: Operation not permitted`），**已在干净基线 `630be9dcc` 临时工作树复现同样失败**，与本改动无关，真机由 3a 沙箱外复跑。
+  - `test_truncated_output_resume.py` 7 passed；`test_native_truncated_write_recovery.py` 26 passed；`test_model_output_cap.py` 14 passed（上限公式 `effective_max_output_tokens` 现成覆盖，配置值生效）。
+  - 变异 4/4 KILLED（脚本 `tasks/2026-10-05/truncfix-mutations/mutations.py`，备份字节还原 sha256 一致）：m1 去掉新接线、m2 绕过预算、m3 去掉长度三件套检查、m4 去掉"不要再展开长推理"句。
+  - guards9 12 文件、ruff、boundaries、doc_sync、strict code-size、size_diff、diff --check、clean_package 结果见交接报告。
+- 未验证：真实 DeepSeek 复跑（修复效果需 3a 用同样 6 次重跑观察失败率）；修复前从未续跑过，本轮只保证恢复可达且有界。
+
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
 - 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。

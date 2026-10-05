@@ -67,3 +67,15 @@
 - 聚合方把 `metadata.logical_call_id` 作为不透明字符串，按用途桶分组而不解析格式；历史 ID 原样保留。跨版本时同一未完成回合的旧/新 ID 不会自动合并，因此版本切换须满足会话空闲条件。
 
 未来有界诊断字段应复用原调用身份与运行账另行设计，不能在本片默认保存原参数或个人路径。
+
+## 输出上限截断的轮内续跑可达性修复（2026-10-05，truncfix）
+
+- **背景**：`unfinished / MODEL_RESPONSE_TRUNCATED / model_provider` 的真实响应带 runtime 三件套；`_no_tool_calls_decision`
+  的通用 runtime-status break 先于 R248 续跑分支命中，`_TRUNCATED_OUTPUT_RESUME`（预算 2 次）对真实截断不可达
+  （真机 NOV02-ds-t2：16 次调用、末次纯思考顶满 65536 后整轮失败，续跑 0 次、约 400 秒白花）。
+- **现在**：runtime-status 分支先试 `_truncated_output_resume_decision`——只认既有结构化三件套（`_is_provider_length_truncated`），
+  消费同一条 `truncated_output_repairs` 预算（2 次），超限/非长度截断原样 break；续跑指令补一句
+  "上一轮只有推理顶到上限时不要再展开长推理、直接产出第一块"。文本协议同样进入该预算；native 写恢复仍只在原生协议生效。
+- **不变**：断流/过滤/坏参数等其它 runtime 终态照旧直接结束；预算用尽仍按 unfinished/MODEL_RESPONSE_TRUNCATED 收口；
+  Gateway 错误投影与用户提示不变。
+- **验证**：`test_truncated_output_resume.py` 7 项（含 provider 形态 3 条新用例）、引用 `response_decision` 的 18 个测试文件全量清扫、4 变异全杀。

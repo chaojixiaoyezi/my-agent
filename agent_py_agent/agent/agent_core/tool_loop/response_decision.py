@@ -107,6 +107,7 @@ _TRUNCATED_OUTPUT_RESUME = (
     "不要道歉、不要复述已经写过的内容、不要总结。"
     "把剩余工作拆成更小的块，每块做完立刻落盘或执行，再继续下一块；"
     "需要调用工具就直接调用。本条指令不指定任何具体工具，也不假定上一轮调用了哪个工具。"
+    "如果上一轮还没有产出正文或工具调用（只有推理先顶到了上限），不要再展开长推理，直接产出第一块。"
 )
 
 # LLM: 供应商超时续跑与输出截断续跑是两件事：前者针对「本轮模型调用被供应商超时打断、
@@ -846,6 +847,21 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
     return {"tool": call.tool_name, "call_id": call.call_id, **call.arguments}
 
 
+# LLM: 供应商长度截断的真实响应一定带 runtime 字段（unfinished/MODEL_RESPONSE_TRUNCATED/model_provider），
+#   会在下面的通用 runtime-status break 之前被拦下；R248 的轮内续跑若只挂在"无 runtime 字段"分支上，
+#   对真实截断永远不可达（真机 NOV02-ds-t2 2026-10-05：16 次调用、末次纯思考顶满 65536 后整轮失败，
+#   续跑 0 次、约 400 秒白花）。这里按既有结构化三件套识别长度截断，先消费同一条有界续跑预算；
+#   其它 runtime 状态（断流、过滤、坏参数等）原样直接 break，不给续跑。
+# 函数用途: 给"最终答复或仅思考被输出上限截断"的零工具响应补一次轮内续跑；超限或非长度截断返回 None。
+def _truncated_output_resume_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision | None:
+    if not _is_provider_length_truncated(request.response):
+        return None
+    if request.counters.truncated_output_repairs >= _TRUNCATED_OUTPUT_RESUME_COUNT:
+        return None
+    request.params.tool_context.append(_TRUNCATED_OUTPUT_RESUME)
+    return ToolLoopResponseDecision("continue", None, [], _inc_truncated_output(request.counters))
+
+
 # LLM: 取消前后都复查本 run 令牌；核验取消后不得被交付或截断修复复活。仅思考仍沿原空正文预算，不解析思考内容。
 # 函数用途: 裁决零工具响应，取消时写核验事实并沿原取消终态收口，其余保留既有有界续跑。
 def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
@@ -853,6 +869,9 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         _pack_verification_closeout(request)
         return _cancelled_closeout_decision(request)
     if _is_runtime_status_response(request.response):
+        truncated_resume = _truncated_output_resume_decision(request)
+        if truncated_resume is not None:
+            return truncated_resume
         return ToolLoopResponseDecision("break", request.response, [], request.counters)
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
         _unresolved_runtime_issue_request(request)
