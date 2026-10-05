@@ -1,7 +1,8 @@
 # LLM: 供应商拒绝诊断只从 typed HTTP 事实构造：状态码、白名单响应头、响应体安全摘要。
 #   绝不记录请求头、cookie、完整响应头、认证信息或正文原文；白名单之外的头一律不记（见下方常量）。
-#   正文摘要先过全局凭据清洗（服务端可能在错误正文里回显请求密钥）再截断；头集合有条数与总量上限，
-#   超出时丢弃尾部并记 headers_truncated。判定只按状态码和白名单头，不解析自然语言，不猜测服务端语义。
+#   正文摘要与白名单头值都先过全局凭据清洗（服务端可能在错误正文或头值里回显请求密钥）再截断；
+#   头集合有条数与总量上限，超出时丢弃尾部并记 headers_truncated。判定只按状态码和白名单头，
+#   不解析自然语言，不猜测服务端语义。
 # 模块用途: 让 4xx/5xx 拒绝在下一次能直接分清限流/额度/鉴权/内容拦截，而不是“原因未定”。
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from ..tooling.mcp_client import sanitize_credentials
+from ..common.log_redaction import redact_sensitive_text
 
 # 响应头白名单：只有这些头名（或前缀）允许进诊断。带注释说明用途；不认识的头一律不记。
 _REJECTION_HEADER_ALLOWLIST = frozenset({
@@ -39,11 +40,18 @@ def _collapse_text(value: object) -> str:
     return " ".join(_CONTROL_CHARS.sub(" ", str(value or "")).split())
 
 
+# LLM: 统一凭据清洗的正式实现在 common/log_redaction；tooling/mcp_client.sanitize_credentials 只是
+#   兼容别名，按"一个概念一个权威位置"直接引用正式实现；参数与别名保持一致（正文摘要与头值共用）。
+# 函数用途: 用进程统一的凭据清洗规则打码任意文本。
+def _redact_credentials(text: str) -> str:
+    return redact_sensitive_text(text, redacted_marker="[REDACTED]", redact_assignment_labels=True)
+
+
 # LLM: 摘要顺序固定为"折叠→清洗→截断"：先折叠让清洗正则不被控制字符打断；先清洗再截断，
 #   避免截断把密钥切成半截后逃过匹配。清洗用项目统一凭据清洗（与其它出站诊断同源）。
 # 函数用途: 生成服务端响应正文的安全摘要（去控制字符、凭据打码、≤200 字）。
 def _safe_body_excerpt(text: str) -> str:
-    return sanitize_credentials(_collapse_text(text))[:_BODY_EXCERPT_CHARS]
+    return _redact_credentials(_collapse_text(text))[:_BODY_EXCERPT_CHARS]
 
 # cause_code 词表：只按状态码判定，四个值对应用户可行动的方向；其它状态码不猜（空串）。
 _CAUSE_BY_STATUS = {429: "rate_limited", 402: "quota", 401: "auth", 403: "forbidden_unknown"}
@@ -56,10 +64,12 @@ def rejection_cause_code(status_code: int) -> str:
     return _CAUSE_BY_STATUS.get(int(status_code or 0), "")
 
 
-# LLM: 头值先折叠（去控制字符）再截断；www-authenticate 只留方案名，避免把 realm/token 参数带出。
+# LLM: 头值顺序同正文摘要"折叠 → 清洗 → 截断"（rejectdiag2 初审缺口 B）：先清洗保证服务端回显的
+#   密钥完整命中词表/已知形状，再截断，避免截断把密钥切成半截后逃过匹配；www-authenticate 只留
+#   方案名的裁剪放在清洗之后，值里混入的凭据先被打码再裁。
 # 函数用途: 把一个白名单头值整理成安全、有界的字符串。
 def _safe_header_value(name: str, value: object) -> str:
-    text = _collapse_text(value)
+    text = _redact_credentials(_collapse_text(value))
     if name == "www-authenticate":
         return text.split(" ", 1)[0][:_HEADER_VALUE_CHARS]
     return text[:_HEADER_VALUE_CHARS]

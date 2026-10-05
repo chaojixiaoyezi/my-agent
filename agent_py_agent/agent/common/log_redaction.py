@@ -59,7 +59,13 @@ _SENSITIVE_QUERY_PREFIX = (
 _SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}({_URL_VALUE})")
 # 日志不按源码标点分段：逗号、引号或括号可能就是真凭证的一部分，宁可隐藏尾部标点也不能泄漏尾段。
 _LOG_SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}([^&#\s]+)")
-_AUTHORIZATION_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)([^\s,;]+)")
+# LLM: 授权头三种键值形状（无引号头、JSON 双/单引号键、等号赋值）共用这一条规则：键名后可带
+#   一层引号与冒号/等号；值前的方案名（Bearer）留在结构里，值部分过 _mask_secret_value（纯变量
+#   引用保留语义不变）；组 3 吃掉值后的闭引号。authorization 不进 _CREDENTIAL_KEY_NAMES——词表
+#   路径会让无引号头被 _SECRET_ASSIGNMENT_RE 二次处理、把方案名当值打码（rejectdiag3 实测回归）。
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)(\bauthorization\b[\"']?\s*[:=]\s*[\"']?(?:Bearer\s+)?)([^\"'\s,;&]{1,})([\"']?)"
+)
 # 键名按"完整末尾片段"认，与 settings/user_config_capability.is_credential_key 同口径：键名等于凭据词，
 # 或以 `_凭据词`/`-凭据词` 结尾才算，不按子串匹配。原来键名前是 \b，而 `_` 是单词字符，\b 断不开，
 # 于是 DB_PASSWORD=hunter22、api_token=abcd1234、MY_SECRET: xyz12345 这些带前缀的键名基线里就不打码。
@@ -68,6 +74,9 @@ _AUTHORIZATION_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)([^\s,;]+)
 # `-` 连接的写法（命令行/HTTP 头风格），settings 那份只管下划线参数键。
 # rejectdiag2：cookie 也是 HTTP 凭据头（服务端回显 Cookie/set-cookie 时不能漏遮），补进词表；
 # `set-cookie` 以 `-cookie` 结尾，自动命中。
+# rejectdiag3：authorization **不进词表**——实测词表路径会让无引号授权头被 `_SECRET_ASSIGNMENT_RE`
+# 二次处理，把方案名当值打码，破坏 rdv2 的“纯变量引用保留”合同；三种键值形状（JSON 双/单引号键、
+# 等号赋值）改由 `_AUTHORIZATION_RE` 扩形状覆盖（见该常量注释）。
 _CREDENTIAL_KEY_NAMES = (
     r"access_key|access-token|access_token|api-key|api_key|apikey|app_secret|client_secret|cookie|credential|"
     r"encrypt_key|id_token|master_key|password|passwd|private_key|pwd|refresh_token|secret|signature|"
@@ -223,7 +232,7 @@ def redact_sensitive_text(
         lambda match: (
             redacted_marker
             if redact_assignment_labels
-            else match.group(1) + _mask_secret_value(match.group(2), redacted_marker)
+            else match.group(1) + _mask_secret_value(match.group(2), redacted_marker) + match.group(3)
         ),
         text,
     )

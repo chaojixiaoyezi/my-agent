@@ -193,3 +193,21 @@ def test_log_query_credentials_do_not_leak_after_source_delimiters(secret: str) 
 def test_log_userinfo_credentials_do_not_leak_after_source_delimiters(secret: str, scheme: str) -> None:
     safe = redact_sensitive_text(f'{scheme}://user:{secret}@host/path status=200')
     assert safe == f'{scheme}://user:<redacted>@host/path status=200'
+
+
+# LLM: rejectdiag3：authorization 补进文本清洗词表（rejectdiag2 初审实测 JSON 形状漏遮）；覆盖
+#   JSON 双/单引号键、等号赋值与无引号 Bearer 头三种形状；authorization_mode、unauthorized 这类
+#   不以凭据词结尾的键名不受影响（后缀判定口径不变）。
+# 函数用途: 钉住 authorization 词表的覆盖范围与误伤边界。
+def test_authorization_key_shapes_masked_without_false_positives() -> None:
+    for raw, secret in (
+        ('{"authorization": "Bearer JSONSECRETTOKEN000"}', "JSONSECRETTOKEN000"),
+        ("{'authorization': 'Bearer SINGLESECRETTOKEN01'}", "SINGLESECRETTOKEN01"),
+        ("authorization=BASICSECRETVALUE0002", "BASICSECRETVALUE0002"),
+        ("Authorization: Bearer PLAINBEARERSECRET0003", "PLAINBEARERSECRET0003"),
+    ):
+        assert secret not in redact_sensitive_text(raw), raw
+    kept = redact_sensitive_text("authorization_mode=verbose unauthorized=true my_authorized=yes")
+    assert "authorization_mode=verbose" in kept
+    assert "unauthorized=true" in kept
+    assert "my_authorized=yes" in kept

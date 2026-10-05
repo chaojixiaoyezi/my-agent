@@ -352,6 +352,18 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **收益实测（合成历史、假后端、3 次模型调用；脚本 `/private/tmp/claude-501/m-estcache/probe2.py`，数字只作交接参考、不进仓库）**：35 万 token 回合 estimate 55 次合计 583.1→131.8ms、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms、整轮 1722.4→1060.9ms。
 - **未验证**：真实 Gateway/TUI/IM 与生产负载；`estimate_tokens_from_json_parts` 路径未改；沙箱外复跑由 3a 安排。
 
+## 拒绝诊断凭据清洗补全（rejectdiag3，2026-10-05，分支 `worker/rejectdiag3`）
+
+- 背景与两条改法见 `DESIGN_LEDGER.md` 同名小节。
+- 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_log_redaction_variable_refs.py agent_py_agent/tests/test_provider_rejection_diagnostics.py agent_py_agent/tests/test_gateway_request_runtime_errors.py -q` → **213 passed**。
+  - guards9 全部 12 个文件 → **190 passed**；`check_import_boundaries.py` → findings=0；ruff 过；`check_doc_sync.py --base 54b48b625` → DOC_SYNC_PASS；strict code-size hard=0；`size_diff.sh` → **新增 0 / 消失 56**；`check_clean_package.py .` → OK；`git diff --check` 干净。
+- 新增用例：`test_authorization_key_shapes_masked_without_false_positives`、`test_body_excerpt_redacts_authorization_key_shapes`、`test_header_values_redact_credentials_without_masking_request_ids`、`test_content_type_redacts_embedded_credential`、`test_redaction_before_truncation_leaves_no_secret_prefix`、`test_rejection_credentials_never_reach_response_files_or_audit`（落盘/审计/user_error 三处端到端）。
+- 变异（3 个，全部 KILLED；脚本 `/private/tmp/claude-501/rejectdiag3/mut.py`，跑完字节还原、`git status` 只余有意改动）：去头值清洗、去授权头引号形状识别、清洗与截断顺序颠倒。
+- **实现过程中的实测回归与修正**：初版把 `authorization` 补进 `_CREDENTIAL_KEY_NAMES`，被 `test_log_redaction_variable_refs.py::test_bearer_pure_variable_reference_is_kept` 抓住（无引号授权头的方案名被 `_SECRET_ASSIGNMENT_RE` 二次打码），已改为扩 `_AUTHORIZATION_RE`；该用例保持通过。
+- 既有失败复核（59 文件逐个跑、各套 600s 超时；失败在基线 `54b48b625` 临时工作树复现）：`test_gateway_chat_conversation_context.py::test_first_gateway_shell_keeps_explicit_working_dir`、`test_shell_sandbox_boundary_facts.py::test_real_seatbelt_denial_comes_back_as_boundary_facts`、`test_shell_sandbox_boundary_facts.py::test_model_sees_the_boundary_facts_on_its_next_request` —— 3 条均为沙箱环境类失败（shell/嵌套沙箱起不来、TOOL_TIMEOUT），基线同样失败，与本次改动无关。
+- 未验证：真实供应商在头值/正文回显密钥的线上行为未验证；`Authorization: Basic …`（非 Bearer 方案）只打码方案名、值部分按既有 assignment 口径处理（边界记录）。
+
 ## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，分支 `worker/rejectdiag2`，基于 `54b48b625`；待非作者初审）
 
 **来源**：rejectdiag 初审必须改项（正文摘要未清洗、服务端回显密钥实测复现）+ 两条小问题（头个数无上限、展示出口没有原因码）。

@@ -206,3 +206,54 @@ def test_user_notice_without_diagnostic_is_unchanged():
     assert provider_rejection_user_notice("普通失败", {}) == "普通失败"
     assert provider_rejection_user_notice("普通失败", None) == "普通失败"
     assert provider_rejection_user_notice("普通失败", {"cause_code": "x"}) == "普通失败"
+
+
+# LLM: rejectdiag3 缺口 A：JSON/键值形状的 authorization 键也要打码（此前只有无引号 Bearer 形态被
+#   _AUTHORIZATION_RE 覆盖，rejectdiag2 初审实测 JSON 形状泄漏）；三种形状都过文本清洗词表。
+# 函数用途: 钉住正文摘要里 authorization 键值形状的凭据清洗。
+def test_body_excerpt_redacts_authorization_key_shapes():
+    cases = (
+        (b'{"authorization": "Bearer JSONSECRETTOKEN000"}', "JSONSECRETTOKEN000"),
+        (b"{'authorization': 'Bearer SINGLESECRETTOKEN01'}", "SINGLESECRETTOKEN01"),
+        (b"authorization=BASICSECRETVALUE0002", "BASICSECRETVALUE0002"),
+    )
+    for body, secret in cases:
+        diagnostic = _runtime_http_error(_http_error(403, body)).details["rejection_diagnostic"]
+        assert secret not in json.dumps(diagnostic, ensure_ascii=False), body
+
+
+# LLM: rejectdiag3 缺口 B：白名单头值在折叠后、截断前过同一份凭据清洗；服务端在 x-request-id 等
+#   头值里回显密钥形状时必须打码，正常请求编号与 cf-ray 值不受影响。
+# 函数用途: 钉住头值路径的凭据清洗与不误伤。
+def test_header_values_redact_credentials_without_masking_request_ids():
+    error = _runtime_http_error(_http_error(403, b"", {
+        "x-request-id": "sk-HEADERSECRETVALUE123456",
+        "cf-ray": "8f3a2b1c9d0e4f5a-LAX",
+        "retry-after": "30",
+    }))
+    diagnostic = error.details["rejection_diagnostic"]
+    assert "HEADERSECRETVALUE123456" not in json.dumps(diagnostic, ensure_ascii=False)
+    assert diagnostic["headers"]["cf-ray"] == "8f3a2b1c9d0e4f5a-LAX"
+    assert diagnostic["headers"]["retry-after"] == "30"
+
+
+# LLM: rejectdiag3 缺口 B：content_type 参数里的密钥同样要打码（与头值同一函数），正常类型串不变。
+# 函数用途: 钉住 content_type 的凭据清洗。
+def test_content_type_redacts_embedded_credential():
+    error = _runtime_http_error(_http_error(
+        403, b"", {"content-type": 'text/html; x-key="sk-CONTENTSECRETVALUE12345"'}))
+    assert "CONTENTSECRETVALUE12345" not in json.dumps(
+        error.details["rejection_diagnostic"], ensure_ascii=False)
+    plain = _runtime_http_error(_http_error(403, b"", {"content-type": "application/json"}))
+    assert plain.details["rejection_diagnostic"]["content_type"] == "application/json"
+
+
+# LLM: rejectdiag3：清洗必须发生在截断之前——密钥被 120/200 截断点切剩前缀碎片时不能残留
+#   （先截断会让 sk- 前缀逃过 {10,} 长度门槛）。构造密钥完整跨过截断点的输入。
+# 函数用途: 钉住头值与正文摘要的"清洗先于截断"顺序。
+def test_redaction_before_truncation_leaves_no_secret_prefix():
+    header_error = _runtime_http_error(_http_error(
+        403, b"", {"x-request-id": "a" * 116 + " sk-SECRETVALUE1234"}))
+    assert "sk-" not in header_error.details["rejection_diagnostic"]["headers"]["x-request-id"]
+    body_error = _runtime_http_error(_http_error(403, b"a" * 196 + b" sk-ABCDEFGHIJ"))
+    assert "sk-" not in body_error.details["rejection_diagnostic"]["body_excerpt"]

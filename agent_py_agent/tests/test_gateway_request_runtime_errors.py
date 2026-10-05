@@ -1170,3 +1170,65 @@ def test_provider_rejection_redacts_credentials_across_response_terminal_and_aud
     history_rendered = json.dumps(list(provider_history_messages_from_rows(rows)), ensure_ascii=False)
     assert "forbidden_unknown" not in history_rendered
     assert "req-redact-1" not in history_rendered
+
+
+# LLM: rejectdiag3：拒绝诊断的凭据明文不能出现在临时目录任何落盘文件（终态/响应投影/LocalStore
+#   审计索引都在 tmp_path 下），用字节级扫描做最强断言。
+# 函数用途: 扫描临时目录全部文件，断言给定明文一个都不落盘。
+def _assert_secrets_never_persisted(tmp_path, secrets):
+    leaked = [
+        (str(path), secret)
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+        for secret in secrets
+        if secret.encode() in path.read_bytes()
+    ]
+    assert not leaked, leaked
+
+
+# LLM: rejectdiag3：拒绝诊断的凭据清洗必须在三个落点同时生效——回执 response、落盘文件（终态/
+#   响应投影/LocalStore 审计索引）、展示提示 user_error；构造服务端回显三种凭据形状的拒绝响应，
+#   遍历临时目录全部文件字节断言明文不落盘。
+# 函数用途: 端到端钉住供应商拒绝凭据不进回执、不进落盘、不进审计索引。
+def test_rejection_credentials_never_reach_response_files_or_audit(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.gateway_helpers import _runtime_http_error
+
+    agent, paths = _make_agent(tmp_path)
+    request_id = "gw-rejectdiag-credentials"
+    request_path = paths.processing / f"{request_id}.json"
+    request_path.write_text(json.dumps({
+        "id": request_id, "kind": "ask", "status": "processing", "turn_phase": "open",
+        "prompt": "继续",
+        "execution_attempt_id": "claimed-rejectdiag-attempt",
+        "conversation": {"channel": "chat", "channel_conversation_id": "rejectdiag-session",
+                         "channel_user_id": "local-agent", "canonical_user_id": "local-agent"},
+    }), encoding="utf-8")
+
+    body = json.dumps({
+        "error": "invalid api key sk-BODYSECRETVALUE123456",
+        "authorization": "Bearer JSONSECRETTOKEN000",
+    }).encode()
+    message = Message()
+    message["x-request-id"] = "sk-HEADERSECRETVALUE123456"
+    message["content-type"] = "text/html; x=sk-CONTENTSECRETVALUE12345"
+    provider_error = urllib.error.HTTPError(
+        "https://provider.example.test/v1/messages", 403, "rejected", message, io.BytesIO(body))
+
+    def run(*_args, **_kwargs):
+        raise _runtime_http_error(provider_error)
+
+    monkeypatch.setattr(agent, "run", run)
+    response = _handle_gateway_request(agent, request_path)
+
+    secrets = ("BODYSECRETVALUE123456", "JSONSECRETTOKEN000",
+               "HEADERSECRETVALUE123456", "CONTENTSECRETVALUE12345")
+    rendered = json.dumps(response, ensure_ascii=False)
+    for secret in secrets:
+        assert secret not in rendered, secret
+    assert "原因码：forbidden_unknown" in response["user_error"]
+    assert "x-request-id=" in response["user_error"]
+
+    _finish_claimed_gateway_request(
+        paths, request_path, request_id, response, conversation_store=agent.conversation_store,
+    )
+    _assert_secrets_never_persisted(tmp_path, secrets)

@@ -297,6 +297,15 @@
 - **实测收益（合成历史、假后端、3 次模型调用，数字只作交接参考）**：35 万 token 回合估算 583.1→131.8ms（-77.4%）、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms（-72.0%）、整轮 1722.4→1060.9ms。
 - **状态/边界**：不加配置开关（内部性能优化、结果不变）；真实 Gateway/TUI/IM 与生产负载未验证；`estimate_tokens_from_json_parts` 未改。
 
+## 拒绝诊断凭据清洗补全（rejectdiag3，2026-10-05，分支 `worker/rejectdiag3`，基于 9ffe07fc1）
+
+- **来源（rejectdiag2 初审实测）**：两个清洗缺口——① JSON/键值形状的 `authorization` 键不被文本清洗覆盖（`{"authorization": "Bearer …"}`、`authorization=…` 原样泄漏；`_AUTHORIZATION_RE` 只认无引号 `Authorization: Bearer 值` 一种形态）；② `_safe_header_value`（白名单头值与 content_type 共用）只折叠+截断、不过凭据清洗，服务端在 x-request-id 等头值里回显密钥时明文进诊断、落盘与展示。
+- **改法 A（授权头形状）**：扩 `_AUTHORIZATION_RE` 覆盖三种键值形状（无引号头、JSON 双/单引号键、等号赋值，大小写不敏感）：键名后可带一层引号与 `:`/`=`，值前的方案名（Bearer）留在结构里、值部分仍过 `_mask_secret_value`（rdv2"纯变量引用保留"合同不变），组 3 吃掉闭引号。**authorization 不进 `_CREDENTIAL_KEY_NAMES`**——实测词表路径会让无引号头被 `_SECRET_ASSIGNMENT_RE` 二次处理、把方案名当值打码（`Bearer $TOKEN` 变 `<redacted> $TOKEN`，被既有用例抓住），破坏合同；两份词表分工保持"文本清洗词表管普通键值对、授权头由专用规则管"。
+- **改法 B（头值清洗）**：`_safe_header_value` 顺序改为"折叠 → 清洗 →（www-authenticate 裁剪方案名）→ 截断"，与正文摘要同口径；清洗先于截断，密钥被截断点切剩前缀碎片时不残留。
+- **改法 C（权威入口）**：`rejection_diagnostics.py` 不再从 `tooling.mcp_client` 引兼容别名 `sanitize_credentials`，直接引 `common/log_redaction.redact_sensitive_text`（参数与别名一致：`redacted_marker="[REDACTED]"`、`redact_assignment_labels=True`），按"一个概念一个权威位置"收口。
+- **用例**：授权头三形状打码 + 反例（authorization_mode/unauthorized 不误伤）；头值与 content_type 清洗 + 反例（req 编号、cf-ray 值不变）；清洗先于截断（跨边界无前缀残留）；集成用例遍历临时目录全部文件字节，断言明文不进回执、落盘与审计索引。
+- **验证**：见 `TESTS.md` rejectdiag3 节（含 3 个变异、门禁与 2 个既有失败的基线复核）。
+
 ## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，分支 `worker/rejectdiag2`，基于 `54b48b625`；待非作者初审）
 
 - **来源**：rejectdiag 初审（ds9）一条必须改 + 两条小问题：正文摘要会原样带出服务端回显的密钥（实测复现）；白名单头个数无上限（探针 200 个头撑到 16.6KB）；展示出口（TUI/飞书失败提示）没有原因码。
