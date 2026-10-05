@@ -12,6 +12,14 @@
 - **验证**：见 TESTS.md 同名节（9 条新用例 + 3 变异全杀 + 38 文件连带 + 配置类 3 文件 + guards9）。
 - **已知边界**：argv（list）形态不受闸（不经过 shlex）；上限按字符数（非字节）。
 
+## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`，基于 17l 头 `e665afdb6`；WIP：1 条回归待修）
+
+- **范围**：opp 线 11 个提交按序 cherry-pick 到 17l 头，并压成 5 个正式提交（盘点文档 → 授权事实与管理员配置 → 确认与重新启用 → B7 启动复核 → 身份比对修复与用例）。冲突只在 DESIGN_LEDGER/TESTS 顶部插入：两边内容都保留；撤回的 tref2/SLP-1A/estcache 段落是 17l 现状，未被 opp 上下文带回。常数目录重生一致（912 项，无 diff）。
+- **数据迁移（上线口径）**：v3 安装表在加载时按显式旧来源迁移；`migrate_v3_entry` 只把"升级前已启用、非内容型、无新权限"的激活标成 `legacy_compat`（六字段：policy_version/mode/source_schema/activation_id/package_sha256/installation_ref）；迁移是纯重放、幂等（v4 表不再迁移），新表随下一次写操作落盘；失败/超预算抛错不覆盖原表，原字节摘要存 `migration.source_sha256`，17i 回滚用 `export_plugin_installations_v3.py` 导出。停用的老插件与已重新确认的不加兼容，需管理员按新规则重新确认。
+- **验证**：72 个引用文件分批跑（每批 subprocess 超时 900s）；与基线 `e665afdb6` 逐条对照（交集 61 文件）：基线 75 条失败 vs 当前 76 条，**新增 1 条回归**（见下），无"变好"项；guards9 190 passed；ruff/import/doc_sync（--base e665afdb6）/code-size hard=0/size_diff 新增 0/diff-check/clean 全过。
+- **新增回归（必须修）**：`test_plugin_configuration.py::test_v1_is_read_only_until_atomic_migration_with_configuration` 在基线上通过、在本分支稳定失败（`PluginInstallationError: 安装状态不可读`，`plugin_install_store.py:77`）——opp 的 v1/v2/v3 迁移链改动使 **v1 安装表解码失败**（只读 `snapshot()` 即抛）。属产品回归；修后重跑该文件与全批。
+- **沙箱外必跑清单**（沙箱内 75 条既有失败 + 1 条回归）：test_plugin_any_language*、test_plugin_enable、test_plugin_invocation、test_plugin_mcp_transport、test_plugin_registry、test_plugin_release、test_plugin_removal、test_plugin_update、test_plugin_workspace_context、test_plugin_sandbox_v8、test_workspace_peek_package、test_host_command_stream、test_plugin_m1_joint_*、test_plugin_legacy_*。
+
 ## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现，macOS 复现）**：`test_compact_text_source.py::test_many_message_summary_avoids_whole_json_copy` 断言压缩取材峰值低于整段 JSON 的一半，estcache 后峰值 2,385,150 > 1,239,645。3a 实测：对 1200 条（每条约 2KB）消息估算一次，估算缓存留住约 1.6MB 的指纹结构（嵌套元组，平均每条约 1.3KB，`tokens.py:229/252/253/264`），被算进压缩峰值——不是整段拷贝，但指纹留存过重。二分：630be9dcc 通过、2b059ec2d 失败。

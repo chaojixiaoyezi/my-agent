@@ -9,6 +9,15 @@
 - **配置与前端**：`command_policy_max_source_chars` 全链删除（yaml / AgentConfig / RegistryParams / 注册入口，3a 裁定）；`node frontend/scripts/sync-backend-config.mjs` 同步（262 字段）且 `--check` in sync；常数目录重生成 918 项。
 - **未验证**：真实 1MB 命令经 run_command 的端到端（组件层覆盖策略层；沙箱不跑真实执行链）；子代理 shell 网关的真实调用（同一入口，组件已覆盖）。
 
+## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`）
+
+- **命令**：72 个引用文件（`git grep -l "plugin_permissions|plugin_runtime|plugin_management|plugin_enable_tool|plugin_installation|PluginActivation"` + `test_plugin_m1_joint_*`）分 4 批，每批 `subprocess.run(timeout=900)`：
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <batch> -q --tb=no -rf -p no:cacheprovider`。
+- **对照**：基线 `e665afdb6` 临时工作树（`/private/tmp/claude-501/opp-final-base`）跑同一批次（取两边都存在的 61 文件）——基线 **75 条失败** / 当前交集部分 **76 条**：新增 1 条、消失 0。
+- **新增回归**：`test_plugin_configuration.py::test_v1_is_read_only_until_atomic_migration_with_configuration`——基线单跑通过（`.`），当前单跑稳定失败（`PluginInstallationError: 安装状态不可读`）。需修后重跑。
+- **opp 新文件（仅当前分支有，10 个）**：失败 1 条 `test_plugin_legacy_transport.py::test_im_and_tui_client_preserve_full_long_preview_and_exact_confirm_command`（沙箱/预览类，与既有沙箱失败同族）。
+- **门禁**：guards9 12 文件 190 passed；ruff All checks passed；import boundaries 0；DOC_SYNC_PASS（--base e665afdb6）；strict code-size hard=0；size_diff 新增 0/消失 57；git diff --check 0；check_clean_package OK。
+
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
 
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）
