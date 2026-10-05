@@ -166,10 +166,16 @@
 - **验证**：见 TESTS「后端传输签名守卫」；变异 4/4 KILLED（两个 75a26ca37 回退各打红一个守卫 + 两个新变异）。
 - **建议**：把 `test_backend_signature_guardrails.py` 加进 guards9 清单（跨文件签名合同，收尾必跑）。
 
-## 睡眠与长暂停后的执行恢复（sleepdesign，2026-10-05，分支 `worker/sleepdesign`；状态：设计，待 3a 定）
+## SLP-1A 会话 claim 栅栏（2026-10-05，分支 `worker/slp1a`；已实现，待审）
+
+- **改动**：claim 到期不再等同 owner 死亡。owner 存活或不可核验时保留原 claim 并标记 `recovery_pending`；只有明确死亡证明才在原子更新中递增 `claim_epoch` 并授予一个新 claim。旧 epoch 的续租与收尾不能覆盖当前记录；心跳丢失会发布结构化 `claim_lost` 并经既有线程中断作用域通知旧回合。
+- **边界与后续接口**：只改 `conversation/store_claims.py`、`conversation/run_claim.py` 和聚焦测试，未新增 runtime store 字段或修改 `tooling/`。SLP-1B 透传原 `ToolCall.attempt_id` 与本 slice 返回的 `claim_epoch` 到既有 `ToolOperationExecutionRequest` / operation claim，并保留原 `operation_id/idempotency_key`；handler 前的副作用 epoch 栅栏由 SLP-1B 接线。
+- **阶段验证**：新增故障注入 8 项通过；最终 31 文件矩阵为 1 failed、3 skipped，其余项目通过。唯一失败 `test_first_gateway_shell_keeps_explicit_working_dir` 在基线 `812828b98` 同样失败，具体原因未确认。三项单点变异均在最终实现上被对应断言抓住；guards9 可用前 11 项、Ruff、import boundaries、doc-sync、strict code-size、size_diff（新增告警 0）、clean-package 均已验证。前一阶段检查点为 WIP `70154d347`，此后在本分支完成正式收尾提交。
+
+## 睡眠与长暂停后的执行恢复（sleepdesign，2026-10-05，分支 `worker/sleepdesign`；设计已由 3a 定稿并入 17k `812828b98`）
 
 - **问题**：墙钟 lease 到期可能早于执行者或具体 attempt 结束；外部副作用与本地回执之间存在不确定窗口，睡眠后只凭 TTL 恢复可能重复执行、重复领取或过早终止。本文不把八个失败回合归因于睡眠。
-- **设计**：风险前五、结构化执行者/attempt/epoch 与副作用回执、时钟边界、故障注入矩阵及首两项的可派工切片见 [SLEEP_RESUME.md](docs/design/SLEEP_RESUME.md)。证据按指定 slp2 报告，并以 step17k 的已提交 HEAD `43b320bcd` 只读复核；本轮未改产品代码。
+- **设计**：风险前五、结构化执行者/attempt/epoch 与副作用回执、时钟边界、故障注入矩阵及首两项的可派工切片见 [SLEEP_RESUME.md](docs/design/SLEEP_RESUME.md)。原设计证据按指定 slp2 报告，并以 step17k 的已提交 HEAD `43b320bcd` 只读复核；SLP-1A 实施状态与边界见本台账首节。
 
 ## 选包入口独立计费，消除投递顺序偏置（selfix3，2026-10-05，worker/selfix3；本地实现及已执行门禁通过，2项沙箱skip，待3a终审）
 

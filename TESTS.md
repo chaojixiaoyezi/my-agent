@@ -1,5 +1,51 @@
 # 测试与发布验收
 
+## SLP-1A 会话 claim 栅栏（2026-10-05，worker/slp1a；实现待审）
+
+- **实现范围**：`agent_py_agent/agent/conversation/store_claims.py`、`agent_py_agent/agent/conversation/run_claim.py`、`agent_py_agent/tests/test_run_claim_probe_paths.py`。未改 `tooling/` 或 runtime store 字段。
+- **新增故障注入**：显式传 `now` 推进墙钟，patch owner liveness 模拟 alive/dead/unverifiable；覆盖过期后不得抢占、死亡证明后并发领取仅一个 epoch、旧心跳先续租与新 claim 先到、旧 epoch renew/finish、续租 `None`/异常/epoch mismatch 时结构化 `claim_lost` 与中断安全点。没有等待真实租约或 Mac 睡眠。
+- **TDD 红测**：实现前执行下方新增用例筛选，原代码 **6 failed**；失败点是过期的 live/unverifiable owner 仍被重领、无 `claim_epoch`、续租丢失未中断。实现后扩展为 **8 passed**。
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_run_claim_probe_paths.py \
+  -k 'expired_live_or_unverifiable or dead_owner_takeover or old_heartbeat_first or old_epoch or lost_claim' \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-slp1a
+```
+
+- **最终聚焦回归**：从最终实现和变异恢复后的 `test_run_claim_probe_paths.py -k 'expired_live_or_unverifiable or dead_owner_takeover or old_heartbeat_first or old_epoch or lost_claim'` 再跑，**8 passed**。最终 31 文件矩阵包含 5 个 claim/run_claim 聚焦文件；全矩阵只有已基线复现的 shell 用例失败，另有 3 skipped。
+- **grep 相关矩阵**：合并会话 claim/run_claim/后台领取/恢复的显式测试共 31 个文件。最终重跑仍有 3 skipped 和 1 failed；`test_gateway_chat_conversation_context.py::test_first_gateway_shell_keeps_explicit_working_dir` 在真实基线 `812828b98` 上同样失败，`ToolResult.status=failed`，底层原因未确认。首轮出现的 `test_background_main_agent_runtime.py::test_failed_policy_run_records_backoff_and_retires_after_three` 在基线通过；增加心跳内部 interrupt registration 后独立复跑通过，且最终矩阵不再出现。
+- **变异**（当前最终实现上，每次只改一处，立即从备份恢复；三次恢复的源码 sha256 均与备份 `486d112c54190ade86a2db34e8abbbd1d93809d829962f4233cbfacebf9eb51d` 一致）：①禁用 expired+live/unverifiable 分流，两个参数用例都失败；②epoch 永远写成 1，死亡接管用例在期望 epoch 2 处失败；③跳过 finish 的 epoch 比较，旧 epoch finish 用例失败。三项均由预期断言抓住。
+- **基线复核**：在临时 detached worktree `812828b98` 同命令复跑两个矩阵失败；策略失败测试通过，shell working_dir 测试以相同结果失败。临时 worktree 状态干净后已移除；不将 shell 测试的根因归因于沙箱或权限层。
+- **门禁已执行**：guards9 现有前 11 个文件通过（exit 0）；第 12 个 `test_backend_signature_guardrails.py` 在当前基线中不存在，按续作任务未运行。Ruff 输出 `All checks passed!`；import boundaries `findings=0`；strict code-size：`hard=0, blocked=False`；`size_diff.sh`：`新增告警 0，消失告警 56`；clean-package：`OK: . 未发现发布阻塞项`；`check_doc_sync.py --base 812828b98` 输出 `DOC_SYNC_PASS`；`git diff --check` exit 0。
+
+```bash
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_architecture_guardrails.py \
+  agent_py_agent/tests/test_config_field_readers.py \
+  agent_py_agent/tests/test_constant_names_unique.py \
+  agent_py_agent/tests/test_main_agent_has_no_case_runtime.py \
+  agent_py_agent/tests/test_parameter_registry.py \
+  agent_py_agent/tests/test_recovery_actions.py \
+  agent_py_agent/tests/test_recovery_code_policy.py \
+  agent_py_agent/tests/test_skill_snapshot_error_codes.py \
+  agent_py_agent/tests/test_subagent_config_inheritance.py \
+  agent_py_agent/tests/test_packaging.py \
+  agent_py_agent/tests/test_constants_catalog.py \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-slp1a-final-guards11
+$PY -m ruff check agent_py_agent scripts
+$PY scripts/check_import_boundaries.py
+$PY scripts/check_doc_sync.py --base 812828b98
+$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
+$PY scripts/check_clean_package.py .
+git diff --check
+```
+
+- **实际运行边界**：未启动 Gateway、未做真实系统睡眠或真实副作用验收；SLP-1B handler 前 `claim_epoch` 原子栅栏尚未实施。
+
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
 - 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。
