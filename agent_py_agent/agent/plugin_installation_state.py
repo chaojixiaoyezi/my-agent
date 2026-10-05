@@ -70,13 +70,20 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
     return PluginInstallationState(rows, json.dumps(migration, sort_keys=True, separators=(",", ":")))
 
 
+# LLM: v4 起顶层多一个 legacy_permission_grant；旧表迁移忽略它的存在与取值（迁移产物强制 None），
+#   既兼容"由新格式删字段模拟出的旧表"，也不给新权限任何 grandfather 入口。
+# 函数用途: 旧版本记录字段集检查：除可忽略的顶层 legacy_permission_grant 外必须恰好相等。
+def _legacy_fields_match(value: object, expected: set[str]) -> bool:
+    return isinstance(value, dict) and set(value) - {"legacy_permission_grant"} == expected
+
+
 # LLM: 旧 v1/v2 都只接纳停用且空激活；旧回执摘要保持原值，补字段仅存在于这个明确迁移入口。
 # 函数用途: 将严格合法的旧安装/配置记录转换成等价 v3 内存对象，不写文件。
 def _migrate_record(value: object, version: str) -> PluginInstallation:
     expected = {"manifest", "package_sha256", "revision", "last_commit", "enabled", "activation_id"}
     if version == _V2:
         expected |= {"settings_json", "settings_revision"}
-    if not isinstance(value, dict) or set(value) != expected:
+    if not _legacy_fields_match(value, expected):
         raise ValueError("旧安装记录字段无效")
     if value["enabled"] is not False or value["activation_id"] != "":
         raise ValueError("旧安装协议不能声明激活")
@@ -129,7 +136,7 @@ def _migrate_v3_record(value: object) -> PluginInstallation:
     from .plugin_permissions.state import migrate_v3_entry
 
     old_fields = {"manifest", "package_sha256", "revision", "last_commit", "settings_json", "settings_revision", "activation"}
-    if not isinstance(value, dict) or set(value) != old_fields:
+    if not _legacy_fields_match(value, old_fields):
         raise ValueError("旧 v3 安装记录字段无效")
     activation = value["activation"]
     if isinstance(activation, dict) and "permission_grant" in activation:

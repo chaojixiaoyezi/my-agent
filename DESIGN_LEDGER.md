@@ -14,6 +14,8 @@
 
 ## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`，基于 17l 头 `e665afdb6`；WIP：1 条回归待修）
 
+- **修复补记（opp-final-fix，2026-10-05）**：v1 解码回归根因——旧协议迁移（v1/v2/v3）的字段集检查不认 v4 新增的顶层 `legacy_permission_grant`，而"由新格式删字段模拟的旧表"会带上它。修法：`_legacy_fields_match` 在三个旧协议入口允许并忽略该字段（迁移产物强制 None，不给新权限任何 grandfather 入口）；schema 断言一行随 v4 升级更新。全批对照新增 0。
+
 - **范围**：opp 线 11 个提交按序 cherry-pick 到 17l 头，并压成 5 个正式提交（盘点文档 → 授权事实与管理员配置 → 确认与重新启用 → B7 启动复核 → 身份比对修复与用例）。冲突只在 DESIGN_LEDGER/TESTS 顶部插入：两边内容都保留；撤回的 tref2/SLP-1A/estcache 段落是 17l 现状，未被 opp 上下文带回。常数目录重生一致（912 项，无 diff）。
 - **数据迁移（上线口径）**：v3 安装表在加载时按显式旧来源迁移；`migrate_v3_entry` 只把"升级前已启用、非内容型、无新权限"的激活标成 `legacy_compat`（六字段：policy_version/mode/source_schema/activation_id/package_sha256/installation_ref）；迁移是纯重放、幂等（v4 表不再迁移），新表随下一次写操作落盘；失败/超预算抛错不覆盖原表，原字节摘要存 `migration.source_sha256`，17i 回滚用 `export_plugin_installations_v3.py` 导出。停用的老插件与已重新确认的不加兼容，需管理员按新规则重新确认。
 - **验证**：72 个引用文件分批跑（每批 subprocess 超时 900s）；与基线 `e665afdb6` 逐条对照（交集 61 文件）：基线 75 条失败 vs 当前 76 条，**新增 1 条回归**（见下），无"变好"项；guards9 190 passed；ruff/import/doc_sync（--base e665afdb6）/code-size hard=0/size_diff 新增 0/diff-check/clean 全过。

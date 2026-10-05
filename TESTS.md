@@ -11,6 +11,8 @@
 
 ## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`）
 
+- **修复补记（opp-final-fix）**：v1 解码回归已修——`_legacy_fields_match` 允许旧协议迁移忽略 v4 顶层 `legacy_permission_grant`（产物强制 None）；`test_plugin_configuration.py` 的 schema 断言随 v4 升级更新一行（`plugin_installations.v4`）。新增 `test_plugin_installation_migration_paths.py` 4 条（v1/v2/v3 只读解码不写盘+提交后 v4 迁移来源正确；坏表不覆盖原字节）。全批重跑与基线对照：**新增 0 / 修复 0**（75 vs 75）。该文件 26+4 passed。
+
 - **命令**：72 个引用文件（`git grep -l "plugin_permissions|plugin_runtime|plugin_management|plugin_enable_tool|plugin_installation|PluginActivation"` + `test_plugin_m1_joint_*`）分 4 批，每批 `subprocess.run(timeout=900)`：
   `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <batch> -q --tb=no -rf -p no:cacheprovider`。
 - **对照**：基线 `e665afdb6` 临时工作树（`/private/tmp/claude-501/opp-final-base`）跑同一批次（取两边都存在的 61 文件）——基线 **75 条失败** / 当前交集部分 **76 条**：新增 1 条、消失 0。
