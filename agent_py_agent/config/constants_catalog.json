@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 912,
+  "count": 913,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3970,6 +3970,14 @@
       "unit": "个",
       "category": "其它",
       "description": "恢复简报最多推荐的读取路径条数；推荐太多失去优先级意义。"
+    },
+    {
+      "name": "_ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT",
+      "file": "agent_py_agent/agent/memory_archive/tokens.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单条长度缓存的条目上限：一个模型回合的活跃消息为千条量级，4096 条覆盖整批历史加少量抖动。"
     },
     {
       "name": "_SMALL_JSON_MAX_BYTES",
