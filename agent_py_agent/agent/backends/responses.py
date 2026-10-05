@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ..conversation.input_media import project_input_media
 from .base import ModelResponse
-from .http import bounded_output_tokens
+from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
 from .responses_wire import collect_response, input_items, response_fields
 from .tool_protocol_adapter import tools_for_choice
@@ -63,16 +63,26 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         validate_responses_input(payload["input"])
         payload.update(_session_cache_key())
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        obj = self._send_responses_request(payload, headers, request)
+        return ModelResponse(backend=self.name, **response_fields(obj, self.model_name))
+
+    # LLM: 流式与 Chat 后端同一个分派入口 request_stream_lines，按被调方签名传首包预算与绝对期限（cabfix 起
+    #   HttpBackend 收 options）；直接写旧关键字会让所有 Responses 流式请求 TypeError（17k Linux 车道实测）。
+    #   非流式只在有绝对期限时才带关键字，旧替身的三参 request_json 不受影响。同步 test_responses_backend。
+    # 函数用途: 把组装好的 Responses 请求发出去（流式边收边转观察者），返回供应商的完整响应对象。
+    def _send_responses_request(self, payload: dict, headers: dict, request) -> dict:
         if self.stream_enabled:
             payload["stream"] = True
-            lines = self.request_stream_iter("/responses", payload, headers, first_event_timeout_seconds=request.first_event_timeout_seconds)
+            lines = request_stream_lines(self.request_stream_iter, (
+                "/responses", payload, headers, request.first_event_timeout_seconds, request.total_deadline_seconds,
+            ))
             try:
-                obj = collect_response(lines, request.on_chunk, request.on_thinking_delta)
+                return collect_response(lines, request.on_chunk, request.on_thinking_delta)
             finally:
                 lines.close()
-        else:
-            obj = self.request_json("/responses", payload, headers)
-        return ModelResponse(backend=self.name, **response_fields(obj, self.model_name))
+        if request.total_deadline_seconds is None:
+            return self.request_json("/responses", payload, headers)
+        return self.request_json("/responses", payload, headers, total_deadline_seconds=request.total_deadline_seconds)
 
 
 # LLM: 参考官方 Codex：同一会话的请求带稳定缓存键（宿主绑定的 owner+thread 摘要，不含凭据），让服务商把同一会话

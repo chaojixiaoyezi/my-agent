@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## OAuth 与 Responses 后端跟上 cabfix 的新传输签名（3a，2026-10-05，17k Linux 车道实测）
+
+- 问题：cabfix 把 `HttpBackend._gateway_request`/`request_stream_iter` 改成 `(StreamCall, options)` 后，两处没跟上：
+  ① `oauth.py` 的 `_gateway_request`、`request_stream_iter` 覆盖仍是旧签名，账号登录的非流式请求和非订阅流式请求一调就 TypeError；
+  ② `responses.py` 直接写旧关键字 `first_event_timeout_seconds`，所有 Responses 流式请求都 TypeError。原有替身用 `**kwargs` 替换 `request_stream_iter`，把签名错位遮住了；Mac 上按改动挑的测试文件也没覆盖到，12 片 Linux 车道的 `test_only_the_subscription_login_uses_websocket` 抓到。
+- 改法：`http.py` 抽出 `stream_call_parts`（拆两种调用形态）和 `stream_call_deadline`（绝对期限换算），基类与 OAuth 共用；OAuth 覆盖改成与基类同签名；Responses 流式改走 `request_stream_lines` 按签名分派，非流式把绝对期限传给 `request_json`。
+- 新用例：`test_responses_websocket.py::test_oauth_backends_accept_the_base_stream_call_and_deadline_options`（订阅与设备两种登录，经基类 `request_json`、`request_stream_iter` 走到 OAuth 覆盖，核对账号头、禁重定向、首包预算、绝对期限）；`test_responses_backend.py::test_responses_backend_forwards_timeouts_through_the_real_http_entry`（流式/非流式，不替换后端方法，只在 `post_stream_iter`/`post_json` 截信封）。
+- 变异 4/4 KILLED：Responses 流式回到旧关键字、Responses 非流式丢期限、OAuth 信封丢期限、OAuth 覆盖退回要求三段参数。后端、超时、供应商相关 49 个文件 993 passed。
+
 ## 辅助调用只估算一次输入（3a，2026-10-05，17k 终审 cabfix 时发现）
 
 - 问题：cabfix 合并后，一次辅助调用会估算输入 2–3 次（记账一次、首包预算一次、流式绝对期限再一次）。大压缩请求的材料有几十万 token，重复估算是纯 CPU 浪费；`test_capability_package_selection.py::test_auxiliary_input_estimate_includes_schema_without_changing_plain_estimate` 因估算顺序被打乱而失败。

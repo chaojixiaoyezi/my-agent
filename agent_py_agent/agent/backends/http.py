@@ -165,6 +165,31 @@ class StreamCallOptions:
     total_deadline_seconds: float | None = None
 
 
+# LLM: _gateway_request 的两种调用形态只在这里拆：新的 (StreamCall, options) 与既有 (path, payload, headers)；
+#   后者仍被大量旧调用方和测试使用。覆盖 _gateway_request 的子类（OAuth）必须用它并保持与基类相同的签名，
+#   否则基类 request_json/request_stream/request_stream_iter 调进来就是 TypeError（17k Linux 车道实测）。
+# 函数用途: 把 StreamCall 或旧的三段参数拆成 (path, payload, headers)；缺段时报 TypeError。
+def stream_call_parts(
+    call: StreamCall | str,
+    payload: dict[str, Any] | None,
+    headers: dict[str, str] | None,
+) -> tuple[str, dict[str, Any], dict[str, str]]:
+    if isinstance(call, StreamCall):
+        return call.path, call.payload, call.headers
+    if payload is None or headers is None:
+        raise TypeError("_gateway_request 需要 StreamCall 或 path/payload/headers")
+    return call, payload, headers
+
+
+# LLM: cabfix：调用方给的绝对墙钟上界换算成 monotonic 时刻，放进信封的 deadline 字段（传输层发送前、读正文、
+#   流式共用这一条时限）。None 或非正数表示不设总期限，主模型与旧调用方语义不变。基类与 OAuth 共用这一处。
+# 函数用途: 由请求选项算出信封里的绝对截止时刻；不设总期限时返回 None。
+def stream_call_deadline(options: StreamCallOptions) -> float | None:
+    if options.total_deadline_seconds is not None and float(options.total_deadline_seconds) > 0:
+        return time.monotonic() + float(options.total_deadline_seconds)
+    return None
+
+
 # LLM: 所有内置 HTTP backend 都必须把 system_instruction 映射到供应商真实高优先级字段，而非拼回 user prompt。
 # 类用途: 共享真实模型 HTTP、能力探针、连接和 metadata 逻辑，并声明支持独立 system 指令。
 # LLM: HTTP 主链统一应用连接和会话头；新的协议必须复用同一传输、取消与超时语义。
@@ -386,19 +411,10 @@ class HttpBackend(BaseBackend):
         """Build the immutable gateway request envelope used by all HTTP calls."""
         from .request_scope import provider_request_timeout
 
-        # LLM: 兼容两种调用形态：新的 (StreamCall, options) 与既有 (path, payload, headers, ...)；
-        #   后者仍被大量旧调用方和测试使用，不能强制它们一次改完。
-        if isinstance(call, StreamCall):
-            path, payload, headers = call.path, call.payload, call.headers
-        elif payload is None or headers is None:
-            raise TypeError("_gateway_request 需要 StreamCall 或 path/payload/headers")
-        else:
-            path = call
+        path, payload, headers = stream_call_parts(call, payload, headers)
         options = options or StreamCallOptions()
         api_base, path = endpoint_parts(self.api_base, path)
-        deadline = None
-        if options.total_deadline_seconds is not None and float(options.total_deadline_seconds) > 0:
-            deadline = time.monotonic() + float(options.total_deadline_seconds)
+        deadline = stream_call_deadline(options)
         return GatewayRequest(
             api_base=api_base,
             api_key=self.api_key,

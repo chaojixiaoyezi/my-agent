@@ -132,3 +132,33 @@ def test_duplicate_and_partial_item_cannot_execute():
     for calls in [[call, call], [{**call, "status": "in_progress"}]]:
         result = response_fields(completed(calls), "model")
         assert result["truncated"] and not result["tool_use_blocks"]
+
+
+# LLM: 17k Linux 车道实测：cabfix 把 HttpBackend.request_stream_iter 改成只收 options 后，Responses 后端仍直接写
+#   旧关键字 first_event_timeout_seconds，所有 Responses 流式请求都会 TypeError；原有替身用 **kwargs 替换
+#   request_stream_iter，把签名错位遮住了。这里不替换后端方法，只在最底层 post_stream_iter/post_json 截信封。
+# 函数用途: 钉住普通 Responses 后端流式与非流式都把首包预算、绝对期限送进真实信封。
+@pytest.mark.parametrize("stream_enabled", [True, False])
+def test_responses_backend_forwards_timeouts_through_the_real_http_entry(monkeypatch, stream_enabled):
+    import time
+
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+
+    backend = OpenAIResponsesBackend(BackendOptions("https://example.test/v1", "secret", "model",
+                                                    stream_enabled=stream_enabled))
+    seen = []
+    events = [json.dumps({"type": "response.completed", "response": completed(
+        [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好"}]}])})]
+    monkeypatch.setattr("agent_py_agent.agent.backends.http.post_stream_iter",
+                        lambda req: seen.append(req) or iter(events))
+    monkeypatch.setattr("agent_py_agent.agent.backends.http.post_json",
+                        lambda req: seen.append(req) or completed(
+                            [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "好"}]}]))
+    before = time.monotonic()
+    result = backend.generate("你好", request_options=ProviderRequestOptions(
+        first_event_timeout_seconds=5.0, total_deadline_seconds=50.0))
+    assert result.text == "好"
+    request_seen, = seen
+    assert request_seen.path.endswith("/responses")
+    assert before + 50.0 <= request_seen.deadline <= time.monotonic() + 50.0
+    assert request_seen.first_event_timeout == (5.0 if stream_enabled else None)

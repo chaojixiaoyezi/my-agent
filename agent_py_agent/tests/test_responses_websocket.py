@@ -4,6 +4,7 @@
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,40 @@ def test_only_the_subscription_login_uses_websocket(tmp_path, monkeypatch):
         assert response.text == "完整回复" and [kind for kind, _ in used] == [expected]
         assert used[0][1].headers["Authorization"] == "Bearer private-access"
 
+
+
+# LLM: 17k Linux 车道实测：cabfix 把 HttpBackend 的 _gateway_request/request_stream_iter 改成 (StreamCall, options) 后，
+#   OAuth 的两个覆盖仍是旧签名，账号登录的非流式请求和非订阅流式请求一调就 TypeError。这里经基类公开入口
+#   （request_json、request_stream_iter）走到 OAuth 覆盖，核对账号头、禁重定向、首包预算和绝对期限都进了信封。
+# 函数用途: 钉住 OAuth 覆盖与基类同签名，两种登录模式的流式与非流式都带上期限选项。
+def test_oauth_backends_accept_the_base_stream_call_and_deadline_options(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.http import StreamCallOptions
+
+    for mode in ("chatgpt", "oauth_device"):
+        alice = host(tmp_path / f"options-{mode}")
+        key = setup(alice, mode)
+        login(alice, monkeypatch)
+        execute_model_profile_operation(alice, "set_default", {"profile_id": key})
+        config = selected_model_config(alice)
+        backend = get_backend(config.model_backend, config)
+        seen = []
+        monkeypatch.setattr(ws, "_connect", lambda req, seen=seen: seen.append(req) or FakeConnection(completed_events()))
+        monkeypatch.setattr("agent_py_agent.agent.backends.http.post_stream_iter",
+                            lambda req, seen=seen: seen.append(req) or iter(completed_events()))
+        monkeypatch.setattr("agent_py_agent.agent.backends.http.post_json",
+                            lambda req, seen=seen: seen.append(req) or {"ok": True})
+        before = time.monotonic()
+        options = StreamCallOptions(first_event_timeout_seconds=7.0, total_deadline_seconds=60.0)
+        list(backend.request_stream_iter("/responses", {"model": "m"}, {}, options=options))
+        assert backend.request_json("/responses", {"model": "m"}, {}, total_deadline_seconds=30.0) == {"ok": True}
+        stream_request, json_request = seen
+        for request_seen in seen:
+            assert request_seen.headers["Authorization"] == "Bearer private-access"
+            assert request_seen.allow_redirects is False
+        assert stream_request.first_event_timeout == 7.0
+        assert before + 60.0 <= stream_request.deadline <= time.monotonic() + 60.0
+        assert json_request.first_event_timeout is None
+        assert before + 30.0 <= json_request.deadline <= time.monotonic() + 30.0
 
 # ---------------------------------------------------------------- 握手超时归 first_event（2026-10-03）
 

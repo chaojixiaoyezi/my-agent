@@ -45,6 +45,7 @@
   - **拆平 size_diff**：新用例引入两条新增告警（`_production_stream_targets` nesting、`total_target` 参数个数），已拆平：抽 `_module_stream_entries` 生成器（嵌套 4→2）、第 2 档替身改 `*args` + 两个 kw-only（参数 5→3；不能收 `**kwargs`——`_accepts_kwarg` 把 VAR_KEYWORD 误判成接受 `options`，会让分派器走错档）；补两条断言核对关键字与位置参数送达。
 - **不改主模型路径**：`total_deadline_seconds` 默认 None，主模型的 `deadline` 仍是 None、持续有效事件照旧不被总墙钟误杀（`gateway_helpers` 里那句"持续有效 data 不得再被整次请求的总墙钟误杀"的语义保持）。
 - **签名兼容**：`request_stream_lines` / `_gateway_request` 按被调方签名分派，旧替身和假后端保持原调用形态；新参数收进 `StreamCallOptions` / `StreamCall` / `_StreamObservers` / `AuxiliaryTimeoutPlan` / `AuxiliaryBackendSurface` 等小数据类，参数门禁从 hard=1 回到 0。
+- **传输签名一处收口（3a，10-05，17k Linux 车道实测）**：`_gateway_request` 的两种调用形态与绝对期限换算只在 `http.stream_call_parts`/`stream_call_deadline`；覆盖 `_gateway_request`/`request_stream_iter` 的子类（OAuth）必须与基类同签名，协议后端调流式入口一律经 `request_stream_lines` 按签名分派。见 [TESTS](TESTS.md)「OAuth 与 Responses 后端跟上 cabfix 的新传输签名」。
 - **只估算一次（3a，10-05，17k 终审）**：一次辅助调用的输入只在记账时估算一次，首包预算和绝对期限都用这一份（`_auxiliary_timeout_plan`）；不要在分派或期限函数里复算。见 [TESTS](TESTS.md)「辅助调用只估算一次输入」。
 - **验证与变异**：见 [TESTS](TESTS.md) 顶部「辅助调用可靠时限（cabfix）」小节。luna3 的刻画测试从"记录现状"改成"断言修复后行为"（晚首事件不再过早超时、慢 body 在绝对期限处结构化超时、持续有效事件在总时限处停止）。cabfix 3 个变异全被抓（去掉首事件预算、去掉非流式绝对期限、watchdog 忽略硬期限）；cabfix2 复核 4 个变异全 KILLED（start 退回只按 idle、流式硬期限退回固定 1800、删 options 第 1 档分派、第 2 档替身改 **kwargs），size_diff 新增告警归零（0 / 消失 35）。
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from .anthropic import AnthropicCompatibleBackend
 from .base import BackendOptions
 from .gateway_helpers import GatewayRequest
+from .http import StreamCall, StreamCallOptions, stream_call_deadline, stream_call_parts
 from .openai_chat import OpenAICompatibleBackend
 from .provider_headers import endpoint_parts, request_headers
 from .responses import OpenAIResponsesBackend
@@ -46,18 +47,23 @@ class _OAuthMixin:
         if value:
             raise ValueError("OAuth 登录不能与 API Key 混用。")
 
-    # LLM: 每次物理请求使用同一份刷新结果，认证头覆盖生成期旧值；禁止重定向投递 token。
+    # LLM: 签名必须与 HttpBackend._gateway_request 一致（StreamCall 或 path/payload/headers，加 options），
+    #   基类 request_json/request_stream/request_stream_iter 都按新形态调进来；首包预算与绝对期限沿用基类口径。
+    #   每次物理请求使用同一份刷新结果，认证头覆盖生成期旧值；禁止重定向投递 token。同步 test_model_oauth_transport。
     # 函数用途: 用原传输封装发送带账号信息的请求，不增加自动重试或新后台线程。
-    def _gateway_request(self, path, payload, headers, *, first_event_timeout_seconds=None):
+    def _gateway_request(self, call, payload=None, headers=None, *, options=None):
         from ..settings.model_oauth import request_credentials
 
+        path, payload, headers = stream_call_parts(call, payload, headers)
+        options = options or StreamCallOptions()
         key, account_headers = request_credentials(self.auth_ref, self.api_base)
         clean = {name: value for name, value in headers.items() if name.lower() not in {"authorization", "x-api-key", "chatgpt-account-id"}}
         clean.update(Authorization="Bearer " + key, **account_headers)
         base, suffix = endpoint_parts(self.api_base, path)
         return GatewayRequest(api_base=base, path=suffix, api_key=key, payload=payload,
             headers=request_headers(clean, self.custom_headers, self.session_header), timeout=self.request_timeout,
-            connect_timeout=self.connect_timeout, first_event_timeout=first_event_timeout_seconds, allow_redirects=False)
+            connect_timeout=self.connect_timeout, first_event_timeout=options.first_event_timeout_seconds,
+            deadline=stream_call_deadline(options), allow_redirects=False)
 
     # LLM: OAuth 用户必须显式填写容量，不能以 metadata 探针向另一条 API 路径附送订阅凭据。
     # 函数用途: 保持容量来自用户配置；目录发现仍是独立显式菜单动作。
@@ -84,10 +90,10 @@ class OAuthResponsesBackend(_OAuthMixin, OpenAIResponsesBackend):
     #   官方命令行默认也用它；普通 SSE 长输出会在服务端中途卡住（09-30 实测）。请求信封（地址、认证头、请求体）仍由
     #   _gateway_request 统一生成，事件文本交原 collect_response；其它登录模式保持 SSE。同步 test_responses_websocket。
     # 函数用途: 按登录模式选择流式传输：订阅账号走 WebSocket，其余走原 SSE。
-    def request_stream_iter(self, path, payload, headers, *, first_event_timeout_seconds=None):
+    def request_stream_iter(self, path, payload, headers, *, options=None):
         if self.auth_ref["mode"] != "chatgpt":
-            return super().request_stream_iter(path, payload, headers, first_event_timeout_seconds=first_event_timeout_seconds)
+            return super().request_stream_iter(path, payload, headers, options=options)
         from .responses_websocket import iter_responses_websocket
 
         return iter_responses_websocket(
-            self._gateway_request(path, payload, headers, first_event_timeout_seconds=first_event_timeout_seconds))
+            self._gateway_request(StreamCall(path=path, payload=payload, headers=headers), options=options))
