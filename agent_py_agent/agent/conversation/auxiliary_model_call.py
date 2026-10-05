@@ -103,17 +103,14 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     if not callable(generate):
         raise RuntimeError("auxiliary model backend is unavailable")
 
-    ledger, call_id = _start_auxiliary_call(request, backend)
+    ledger, call_id, input_tokens = _start_auxiliary_call(request, backend)
     started_at = time.monotonic()
     label = type(backend).__name__
     response: object | None = None
     try:
-        response = _invoke_auxiliary_generate(
-            request,
-            generate,
-            ledger,
-            call_id,
-        )
+        response = _invoke_auxiliary_generate(request, generate, _AuxiliaryCallRef(
+            ledger=ledger, call_id=call_id, timeouts=_auxiliary_timeout_plan(request, input_tokens),
+        ))
         record_model_call_finished(ledger, call_id, response)
     except Exception as exc:
         _record_auxiliary_failure(ledger, _AuxiliaryFailureCall(
@@ -170,9 +167,10 @@ def _record_auxiliary_failure(ledger: object, call: _AuxiliaryFailureCall) -> No
         pass
 
 
-# LLM: 首事件预算必须按"实际发出去的量"估算，与 _start_auxiliary_call 记账用同一份材料，
-#   否则同一次调用在账本和传输层会用两个不同的输入量推算耐心。
-# 函数用途: 复算辅助调用的输入估算（与记账同口径），供首事件预算使用。
+# LLM: 一次辅助调用只估算一次输入：_start_auxiliary_call 调这里记账，并把同一个数交给时限计划，
+#   账本和传输层的耐心必须出自同一份估算。大压缩请求的材料有几十万 token，重复估算是纯 CPU 浪费
+#   （Gateway 进程本就 CPU 吃紧）；不要在别处再调本函数复算。估算失败照记账原口径抛出。
+# 函数用途: 按实际发出的材料（普通请求不含 schema，结构化请求加 schema）估算本次辅助调用的输入 token。
 def _auxiliary_input_tokens(request: AuxiliaryModelCallRequest) -> int:
     material = {
         "prompt": str(request.prompt or ""), "messages": list(request.messages or []),
@@ -180,29 +178,21 @@ def _auxiliary_input_tokens(request: AuxiliaryModelCallRequest) -> int:
     }
     if request.response_schema is not None:
         material["response_schema"] = request.response_schema
-    try:
-        return int(estimate_tokens(material))
-    except Exception:  # noqa: BLE001 - 估算失败退回零，预算函数会按最小值处理
-        return 0
+    return int(estimate_tokens(material))
 
 
 # LLM: I/O 前冻结真实身份和输入估算；仅结构化请求增加 schema，普通请求的估算对象保持原样，正文不进 metadata。
-# 函数用途: 为辅助请求登记调用及归属，把实际声明的 schema 成本纳入同一本账。
+#   返回的 input_tokens 就是记账用的那一份，调用方拿它算时限计划，不得再复算。
+# 函数用途: 为辅助请求登记调用及归属，把实际声明的 schema 成本纳入同一本账；返回账本、调用号和输入估算。
 def _start_auxiliary_call(
     request: AuxiliaryModelCallRequest,
     backend: object,
-) -> tuple[object, str]:
+) -> tuple[object, str, int]:
     ledger = model_call_ledger(request.agent)
     identity = uuid.uuid4().hex
     logical_call_id = f"auxiliary:{_purpose(request.purpose)}:{identity[:24]}"
     call_id = f"{logical_call_id}:attempt-1:{identity[24:32]}"
-    material = {
-        "prompt": str(request.prompt or ""), "messages": list(request.messages or []),
-        "tools": list(request.tools or []), "system_instruction": str(request.system_instruction or ""),
-    }
-    if request.response_schema is not None:
-        material["response_schema"] = request.response_schema
-    input_tokens = estimate_tokens(material)
+    input_tokens = _auxiliary_input_tokens(request)
     ledger.started(
         ModelCallStartedParams(
             call_id=call_id,
@@ -222,7 +212,7 @@ def _start_auxiliary_call(
             },
         )
     )
-    return ledger, call_id
+    return ledger, call_id, input_tokens
 
 
 # LLM: cabfix 修法①：首事件预算复用主模型的同一个估算函数（estimate_first_token_timeout +
@@ -262,13 +252,31 @@ def _auxiliary_first_event_budget(request: AuxiliaryModelCallRequest, input_toke
 #   ① 叠兜底会让 240 顶掉总时限，"宽但有限"失真；
 #   ② 硬期限若短于首包预算，首包阶段的耐心会被总时限静默削掉（dynamic_timeout_max
 #      配到 10800 时尤其明显）——加一个 request_timeout 的余量，让首包预算真正可用。
+#   first_event 是 _auxiliary_timeout_plan 已算好的首包预算（None 表示没有），这里不复算。
 # 函数用途: 算出一次辅助调用的绝对秒数上界；非流式与流式各用一档。
-def _auxiliary_absolute_timeout(request: AuxiliaryModelCallRequest, *, streaming: bool) -> float:
+def _auxiliary_absolute_timeout(
+    request: AuxiliaryModelCallRequest,
+    *,
+    streaming: bool,
+    first_event: float | None,
+) -> float:
     base = _auxiliary_base_request_timeout(request)
     if streaming:
-        first_event = _auxiliary_first_event_budget(request, _auxiliary_input_tokens(request)) or 0.0
-        return max(base, AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS, first_event + base)
+        return max(base, AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS, (first_event or 0.0) + base)
     return max(base, AUXILIARY_CALL_FLOOR_SECONDS)
+
+
+# LLM: 时限计划只在发起前算一次：首包预算按记账那份输入估算推出，绝对期限再复用这个首包预算；
+#   流式与否看后端 stream_enabled（和传输层实际走的分支一致）。
+# 函数用途: 由本次辅助调用的输入估算，一次算出首事件预算和绝对期限。
+def _auxiliary_timeout_plan(request: AuxiliaryModelCallRequest, input_tokens: int) -> AuxiliaryTimeoutPlan:
+    backend = getattr(getattr(request, "agent", None), "backend", None)
+    streaming = bool(backend is not None and getattr(backend, "stream_enabled", False))
+    first_event = _auxiliary_first_event_budget(request, input_tokens)
+    return AuxiliaryTimeoutPlan(
+        first_event_budget_seconds=first_event,
+        total_deadline_seconds=_auxiliary_absolute_timeout(request, streaming=streaming, first_event=first_event),
+    )
 
 
 # LLM: 读不到配置时退回 0，让两个分支各自的兜底常量决定下限（不引入新行为）。
@@ -288,12 +296,12 @@ def _auxiliary_base_request_timeout(request: AuxiliaryModelCallRequest) -> float
 def _invoke_auxiliary_generate(
     request: AuxiliaryModelCallRequest,
     generate: object,
-    ledger: object,
-    call_id: str,
+    call: _AuxiliaryCallRef,
 ) -> object:
     from ..llm_scale.hot_path import global_llm_admission_slot
     from ..observability.concurrency_metrics import llm_inflight
 
+    ledger, call_id = call.ledger, call.call_id
     on_chunk = _auxiliary_chunk_observer(ledger, call_id)
 
     # LLM: 只向当前 call_id 追加传输事实，不改请求或用量；消费者不得用此计数补猜 token。
@@ -305,21 +313,7 @@ def _invoke_auxiliary_generate(
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
-                return _call_backend(
-                    generate,
-                    request,
-                    on_chunk,
-                    timeouts=AuxiliaryTimeoutPlan(
-                        first_event_budget_seconds=_auxiliary_first_event_budget(
-                            request, _auxiliary_input_tokens(request),
-                        ),
-                        total_deadline_seconds=_auxiliary_absolute_timeout(
-                            request,
-                            streaming=bool(getattr(getattr(request, "agent", None), "backend", None)
-                                           and getattr(request.agent.backend, "stream_enabled", False)),
-                        ),
-                    ),
-                )
+                return _call_backend(generate, request, on_chunk, timeouts=call.timeouts)
             finally:
                 llm_inflight(-1)
 
@@ -360,6 +354,16 @@ def _auxiliary_chunk_observer(ledger: object, call_id: str) -> object:
 class AuxiliaryTimeoutPlan:
     first_event_budget_seconds: float | None = None
     total_deadline_seconds: float | None = None
+
+
+# LLM: 一次辅助调用发起时的全部句柄：账本与调用号用于流事件和 HTTP 尝试记账，timeouts 是按记账那份
+#   输入估算算好的时限计划；分派函数只读这三项，不再自己估算。
+# 类用途: 打包一次辅助调用在账本里的身份和它的时限计划，传给分派函数。
+@dataclass(frozen=True)
+class _AuxiliaryCallRef:
+    ledger: object
+    call_id: str
+    timeouts: AuxiliaryTimeoutPlan
 
 
 # LLM: 一次辅助调用的请求选项唯一组装点（cachecompact + cabfix 合并）：

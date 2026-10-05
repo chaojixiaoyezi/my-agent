@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## 辅助调用只估算一次输入（3a，2026-10-05，17k 终审 cabfix 时发现）
+
+- 问题：cabfix 合并后，一次辅助调用会估算输入 2–3 次（记账一次、首包预算一次、流式绝对期限再一次）。大压缩请求的材料有几十万 token，重复估算是纯 CPU 浪费；`test_capability_package_selection.py::test_auxiliary_input_estimate_includes_schema_without_changing_plain_estimate` 因估算顺序被打乱而失败。
+- 改法：`_start_auxiliary_call` 返回记账用的那份估算；`_auxiliary_timeout_plan` 用它一次算出首包预算和绝对期限；`_invoke_auxiliary_generate` 改收 `_AuxiliaryCallRef`（账本、调用号、时限计划），不再自己估算。
+- 新用例 `test_provider_timeout_acceptance.py::test_auxiliary_call_estimates_input_once_for_ledger_and_timeouts`：流式 + 动态超时形态下只估算 1 次，账本 input_tokens、传给后端的首包预算与绝对期限都出自这一份。
+- 变异 3/3 KILLED：时限计划改回复算估算、绝对期限丢掉首包预算、时限计划不用记账估算。辅助调用相关 5 个文件 134 passed。
+
 ## 辅助调用可靠时限（cabfix，2026-10-04，worker/cab-fix；基于 luna3 的 c39250781，待初审）
 
 - 来源：luna3 的刻画测试（`test_provider_timeout_acceptance.py` CAB 段）原本"记录现状"——辅助流未传首事件预算、非流式无总期限、持续有效事件可无限续期。本片把它们改成断言修复后行为。

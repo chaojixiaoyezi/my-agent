@@ -425,7 +425,7 @@ def test_auxiliary_success_metrics_are_recorded(monkeypatch):
     response = ModelResponse(text="摘要", backend="fake")
     recorded = []
     agent = SimpleNamespace(backend=SimpleNamespace(generate=lambda *a, **k: response))
-    monkeypatch.setattr(auxiliary, "_start_auxiliary_call", lambda *a: (object(), "call"))
+    monkeypatch.setattr(auxiliary, "_start_auxiliary_call", lambda *a: (object(), "call", 0))
     monkeypatch.setattr(auxiliary, "_invoke_auxiliary_generate", lambda *a: response)
     monkeypatch.setattr(auxiliary, "record_model_call_finished", lambda *a: None)
     monkeypatch.setattr(auxiliary, "_record_auxiliary_cost", lambda *a: None)

@@ -1218,12 +1218,45 @@ def test_auxiliary_stream_total_deadline_covers_first_event_budget():
     assert first_event is not None and first_event > cab.AUXILIARY_STREAM_TOTAL_TIMEOUT_SECONDS, (
         f"前提：该输入的首包预算应超过默认流式总时限，实际 {first_event}"
     )
-    total = cab._auxiliary_absolute_timeout(request, streaming=True)
+    total = cab._auxiliary_absolute_timeout(request, streaming=True, first_event=first_event)
     assert total >= first_event + 240, (
         f"流式硬期限必须≥首包预算+request_timeout，实际 total={total} first_event={first_event}"
     )
     # 非流式口径不变：max(request_timeout, 240)。
-    assert cab._auxiliary_absolute_timeout(request, streaming=False) == 240.0
+    assert cab._auxiliary_absolute_timeout(request, streaming=False, first_event=first_event) == 240.0
+
+
+# 函数用途: 一次辅助调用只估算一次输入——记账和时限计划共用同一个数（流式 + 动态超时是原先估三遍的形态）。
+def test_auxiliary_call_estimates_input_once_for_ledger_and_timeouts(monkeypatch):
+    from agent_py_agent.agent.conversation import auxiliary_model_call as cab
+    from agent_py_agent.agent.conversation.auxiliary_model_call import (
+        AuxiliaryModelCallRequest,
+        generate_auxiliary_model_response,
+    )
+
+    materials = []
+    monkeypatch.setattr(cab, "estimate_tokens", lambda value: materials.append(value) or 200_000)
+    seen = []
+    response = ModelResponse("摘要", "fake")
+
+    def generate(prompt, *, on_chunk=None, request_options=None):
+        seen.append(request_options)
+        return response
+
+    agent = _cab_auxiliary_agent_dynamic(request_timeout=240, dynamic_max=10800)
+    agent.backend = SimpleNamespace(name="fake", stream_enabled=True, generate=generate)
+    assert generate_auxiliary_model_response(AuxiliaryModelCallRequest(agent, "压缩这段历史")) is response
+    dict_materials = [m for m in materials if isinstance(m, dict)]
+    assert len(dict_materials) == 1, f"一次辅助调用只应估算一次输入，实际 {len(dict_materials)} 次"
+    record, = agent._model_call_ledger.records()
+    assert record.input_tokens == 200_000
+    first_event = cab._auxiliary_first_event_budget(SimpleNamespace(agent=agent), 200_000)
+    assert first_event is not None
+    options, = seen
+    assert options.first_event_timeout_seconds == first_event
+    assert options.total_deadline_seconds == cab._auxiliary_absolute_timeout(
+        SimpleNamespace(agent=agent), streaming=True, first_event=first_event,
+    )
 
 
 # 函数用途: 主模型形态（不设 total_deadline）仍不产生硬期限，deadline 为 None。
