@@ -19,6 +19,13 @@
 - **已知隔离**：process-completion fixtures 有 `ValueError: managed process instance is partially bound`（`TestPendingProcessCompletion` 9 项、`test_process_completion_events.py` 7 项），在任务指定 detached 基线 `875eb7b74` 复现同类失败，见 `TESTS.md`；未把它们归因于 SLP-4B。
 - **边界**：未做真实系统睡眠、Gateway、TUI/IM、生产部署或沙箱外验收；其余本地门禁与尺寸检查结果以 `TESTS.md` 收尾记录为准。
 
+## 插件事件 thread_ref 统一（tref2，2026-10-05，worker/tref2；待非作者初审）
+
+- `gateway_parts/event_points.py`：`prompt_queued` 的 `thread_ref` 留空（入队时点线程可能未解析，A2），渠道会话号进 `channel_conversation_ref`；`turn_started` 增加 `thread_id` 参数（由调用方在回合解析后传入）；`command_completed` 用回执的 `conversation_thread_id`；`gateway_event_context` 透传渠道会话号。
+- `gateway_parts/request_execution.py`：新增 `_gateway_turn_thread_id`（回合开始前只读 preflight 解析会话线程，与执行路径同一入口；取消/跳过路径不经过；失败留空），`turn_started` 用解析出的线程。
+- `gateway_parts/control_operation_service.py`：`GatewayControlOperationReceipt` 新增 `conversation_thread_id`（执行时按冻结渠道身份只读解析一次，多 owner 先物化 owner agent，失败留空；重放/对账不回填旧行）。
+- 详见 DESIGN_LEDGER / TESTS 同名节与 `docs/design/PLUGIN_EVENT_HOOKS.md` 第 6 节（事件目录 v2）。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A，本批由初审者直接修。

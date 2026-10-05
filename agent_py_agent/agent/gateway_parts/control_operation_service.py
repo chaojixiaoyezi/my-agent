@@ -109,6 +109,8 @@ class GatewayControlOperationReceipt:
     result: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] = field(default_factory=dict)
     updated_at: float = 0.0
+    # v2（tref2）：本回合的会话线程 id（执行时解析一次，与工具事件同源）；旧回执没有该字段时为空。
+    conversation_thread_id: str = ""
     workspace: object = None
 
     # LLM: 保存固定身份、可选目录与摘要版本；准备后执行和对账只能读回执，不重读当前 HTTP 输入。
@@ -123,6 +125,7 @@ class GatewayControlOperationReceipt:
             "user_id": self.user_id,
             "channel": self.channel,
             "conversation_id": self.conversation_id,
+            "conversation_thread_id": self.conversation_thread_id,
             "channel_chat_type": self.channel_chat_type,
             "channel_chat_id": self.channel_chat_id,
             "owner_provider": self.owner_provider,
@@ -179,6 +182,7 @@ class GatewayControlOperationReceipt:
             user_id=str(data.get("user_id") or "").strip(),
             channel=str(data.get("channel") or "").strip(),
             conversation_id=str(data.get("conversation_id") or "").strip(),
+            conversation_thread_id=str(data.get("conversation_thread_id") or "").strip(),
             channel_chat_type=str(data.get("channel_chat_type") or "").strip().lower(),
             channel_chat_id=str(data.get("channel_chat_id") or "").strip(),
             owner_provider=str(data.get("owner_provider") or "").strip(),
@@ -330,6 +334,7 @@ def _execute_gateway_control_operation_locked(
     )
     if receipt.state in {"completed", "terminal_unknown"}:
         return _reconcile_control_operation_locked(agent, paths, receipt)
+    receipt = _with_control_conversation_thread(agent, receipt, scope)
     if receipt.state == "executing":
         uncertain = replace(
             receipt,
@@ -382,6 +387,48 @@ def _execute_gateway_control_operation_locked(
     )
     command_completed(agent, completed)
     return completed
+
+
+# LLM: v2（tref2）：命令事件要用权威会话线程（与工具事件同源）。新执行的回执在写盘前按冻结的渠道
+#   身份只读解析一次；解析不到（新绑定/多 owner 未挂载）留空，绝不影响控制命令本身。
+#   已存在的回执（重放/对账路径）不经过这里，不回填旧行。
+# 函数用途: 给新执行的回执补上本回合会话线程 id；已有值或解析失败时原样返回。
+def _with_control_conversation_thread(
+    agent: object, receipt: GatewayControlOperationReceipt, scope: GatewayControlScope
+) -> GatewayControlOperationReceipt:
+    if receipt.conversation_thread_id:
+        return receipt
+    thread_id = _control_operation_thread_id(agent, scope)
+    return replace(receipt, conversation_thread_id=thread_id) if thread_id else receipt
+
+
+# LLM: 只读解析：按回执冻结的 (channel, conversation_id, user_id) 查渠道绑定；多 owner 时先物化
+#   scope 指向的 owner agent（与控制命令执行同一解析），失败退回传入的 agent；任何异常都按解析不到处理。
+# 函数用途: 解析一条控制命令对应的会话线程 id，失败返回空串。
+def _control_operation_thread_id(agent: object, scope: GatewayControlScope) -> str:
+    try:
+        store = getattr(_control_operation_agent(agent, scope), "conversation_store", None)
+        thread = store.threads.resolve(
+            channel=str(scope.channel or "").strip(),
+            channel_conversation_id=str(scope.conversation_id or "").strip(),
+            channel_user_id=str(scope.user_id or "").strip(),
+        )
+        return str(getattr(thread, "thread_id", "") or "")
+    except Exception:  # noqa: BLE001 事件身份解析失败不能阻断控制命令
+        return ""
+
+
+# 函数用途: 取 scope 指向 owner 的 agent；没有 owner 信息或物化失败时退回 base agent。
+def _control_operation_agent(agent: object, scope: GatewayControlScope):
+    owner = getattr(scope, "resolved_owner", None)
+    if owner is None:
+        return agent
+    try:
+        from .request_worker import _resolve_request_agent_for_owner
+
+        return _resolve_request_agent_for_owner(agent, owner)
+    except Exception:  # noqa: BLE001 退回 base agent，解析线程失败时同样留空
+        return agent
 
 
 # LLM: GET/status reconciliation is read-only with respect to control effects. Only the existing

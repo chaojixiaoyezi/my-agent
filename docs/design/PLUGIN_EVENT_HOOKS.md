@@ -143,9 +143,11 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - `message` 可选，纯文本，宿主截到 80 字、去掉控制字符和换行后才展示；
 - 其它字段一律忽略，不能借回复改参数。
 
-## 6. 事件目录 v1
+## 6. 事件目录 v2
 
-公共字段：`event_id`、`type`、`seq`（按「owner × 插件激活」各自计数、从 1 开始单调递增；换代重装后从 1 重新开始——插件从序号里看不出没订阅的类型或别的 owner 发生过什么）、`occurred_at`、`dropped_before`（这个插件的槽建立之后、同类事件被合并掉没送达的条数：中途启用从当前最新一条开始收、第一条为 0；换代丢旧待发后同样从 0 起算）、`channel`（`tui` / `feishu` / …）、`thread_ref`（会话编号的哈希，不是原编号）、`actor`（`main`、`subagent` 或 `decision`；`decision` 是决策模型的宿主自动执行，J16 片 D 也走同一个执行器）。**默认不含任何正文、路径、参数或输出。**
+公共字段：`event_id`、`type`、`seq`（按「owner × 插件激活」各自计数、从 1 开始单调递增；换代重装后从 1 重新开始——插件从序号里看不出没订阅的类型或别的 owner 发生过什么）、`occurred_at`、`dropped_before`（这个插件的槽建立之后、同类事件被合并掉没送达的条数：中途启用从当前最新一条开始收、第一条为 0；换代丢旧待发后同样从 0 起算）、`channel`（`tui` / `feishu` / …）、`thread_ref`（**会话线程** `ConversationStore thread_id` 的哈希，不是原编号；工具事件与回合事件同源；`prompt_submitted` 在入队时点线程可能还没解析，此时为空）、`channel_conversation_ref`（**渠道会话号**的哈希，同一哈希规则；只有 Gateway 侧事件有值，工具事件为空）、`actor`（`main`、`subagent` 或 `decision`；`decision` 是决策模型的宿主自动执行，J16 片 D 也走同一个执行器）。**默认不含任何正文、路径、参数或输出。**
+
+**v1 → v2（tref2，2026-10-05）**：v1 的 `thread_ref` 在两类事件上混用了两个不同的来源——Gateway 侧（`prompt_submitted` / `turn_started` / `turn_ended` / `command_executed`）取渠道会话号（`channel_conversation_id`），工具侧（`tool_call_started` / `tool_call_finished`）取会话线程（task attribute `conversation_thread_id`），插件想按会话归组会归不上。v2 把 `thread_ref` 统一为**会话线程**的哈希（工具事件原样；Gateway 侧改取回合解析出的线程，`command_executed` 用回执里执行时解析的 `conversation_thread_id`），并新增 `channel_conversation_ref` 承载渠道会话号。已安装插件无需改代码（字段名与值形态不变，新字段可忽略）；若插件按旧 `thread_ref` 建过会话索引，升级切换点会断一次。宿主账本不记录观察事件（设计 D6），无需回填。
 
 | 事件 | 结构化事实（facts） | 可选正文（声明 `content: "text"` 且确认码同意） | 事件点 |
 | --- | --- | --- | --- |

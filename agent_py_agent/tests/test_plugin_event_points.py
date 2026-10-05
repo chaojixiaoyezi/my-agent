@@ -15,7 +15,8 @@ FIELDS = {
     "tool_call_finished": {"call_id", "tool", "ok", "error_code", "failure_stage", "duration_ms", "handler_executed"},
     "command_executed": {"command", "operation_id", "state"},
 }
-PUBLIC = {"event_id", "type", "seq", "occurred_at", "dropped_before", "channel", "thread_ref", "actor", "facts"}
+PUBLIC = {"event_id", "type", "seq", "occurred_at", "dropped_before", "channel", "thread_ref",
+          "channel_conversation_ref", "actor", "facts"}
 SOURCE = {
     "request_id": "request-1", "prompt": "PRIVATE-PROMPT-MARKER", "has_attachments": True,
     "model_name": "test-model", "status": "done", "duration_ms": 12, "tool_calls": 2, "error_code": "",
@@ -201,6 +202,40 @@ def test_projection_does_not_copy_nested_values_or_command_parameters():
     })
     assert fact.facts["command"] == "" and fact.facts["operation_id"] == ""
     assert "MARKER" not in json.dumps(fact.facts)
+
+
+@pytest.mark.parametrize("channel", ["tui", "feishu"])
+def test_v2_turn_and_tool_events_share_thread_ref_across_channels(channel):
+    # v2（tref2）：同一会话里 turn 类与 tool 类事件的 thread_ref 同源（本系统会话线程）；
+    # 渠道会话哈希只在 Gateway 侧事件上有值（工具侧的宿主上下文不带渠道会话号），
+    # 且与线程哈希不是同一个值。
+    gateway_point = EventPointContext(SimpleNamespace(plugin_events_enabled=True), lambda event: None,
+                                      channel, "thread-abc", "main", "conv-1")
+    tool_point = EventPointContext(SimpleNamespace(plugin_events_enabled=True), lambda event: None,
+                                   channel, "thread-abc", "main")
+    turn = project_event(gateway_point, "turn_started", SOURCE)
+    started = project_event(tool_point, "tool_call_started", SOURCE)
+    finished = project_event(tool_point, "tool_call_finished", SOURCE)
+    assert turn.thread_ref == started.thread_ref == finished.thread_ref
+    assert len(turn.thread_ref) == 64
+    assert turn.channel_conversation_ref and len(turn.channel_conversation_ref) == 64
+    assert turn.channel_conversation_ref != turn.thread_ref
+    assert started.channel_conversation_ref == "" and finished.channel_conversation_ref == ""
+    payload = build_event_payload(EventEnvelope(turn, "ev", 1, 0, 1.0))
+    assert payload["channel_conversation_ref"] == turn.channel_conversation_ref
+    assert "conv-1" not in json.dumps(payload) and "thread-abc" not in json.dumps(payload)
+
+
+def test_v2_prompt_submitted_before_thread_resolution_keeps_empty_thread_ref():
+    # v2（tref2）A2：入队时点线程可能还没解析，thread_ref 留空；渠道会话哈希此时已有值。
+    point = EventPointContext(SimpleNamespace(plugin_events_enabled=True), lambda event: None,
+                              "tui", "", "main", "conv-1")
+    fact = project_event(point, "prompt_submitted", SOURCE)
+    assert fact is not None and fact.thread_ref == ""
+    assert len(fact.channel_conversation_ref) == 64
+    command = project_event(EventPointContext(SimpleNamespace(plugin_events_enabled=True), lambda event: None,
+                                              "tui", "thread-abc", "main", "conv-1"), "command_executed", SOURCE)
+    assert len(command.thread_ref) == 64 and len(command.channel_conversation_ref) == 64
 
 
 def test_handler_parameter_preparation_failure_is_not_observed(tmp_path, monkeypatch):

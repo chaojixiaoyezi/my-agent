@@ -51,6 +51,9 @@ def warn_event_assembly_failure(reason_code: str) -> None:
 
 
 # LLM: 身份、配置和发布回调只由宿主构造；正文与工具参数不能改变这些字段。
+#   v2（tref2）：thread_id 是会话线程（ConversationStore thread_id，权威；Gateway 侧由回合解析后传入，
+#   入队时点可能为空）；channel_conversation_id 是渠道会话号，只在 Gateway 侧事件有值，投影成
+#   channel_conversation_ref。两者不混用：一个概念一个权威位置。
 # 类用途: 保存事件点的可信上下文，不持久化或创建插件连接。
 @dataclass(frozen=True)
 class EventPointContext:
@@ -59,6 +62,7 @@ class EventPointContext:
     channel: str = ""
     thread_id: str = ""
     actor: str = "main"
+    channel_conversation_id: str = ""
 
 
 # LLM: 精确白名单字段来自设计第 6 节；只保留标量，命令仅接受命令名；B3 逐插件核对已确认激活的 text 声明。
@@ -75,8 +79,16 @@ def project_event(context: EventPointContext, event_type: str, source: dict) -> 
         facts["has_attachments"] = bool(source.get("has_attachments", False))
         content = redact_sensitive_value(prompt)[:MAX_PROMPT_CONTENT_CHARS]
     actor = context.actor if context.actor in EVENT_ACTOR_KINDS else "main"
-    thread_ref = hashlib.sha256(context.thread_id.encode("utf-8")).hexdigest() if context.thread_id else ""
-    return EventFact(event_type, facts, context.channel, thread_ref, actor, content)
+    return EventFact(event_type, facts, context.channel, _hash_ref(context.thread_id), actor, content,
+                     channel_conversation_ref=_hash_ref(context.channel_conversation_id))
+
+
+# LLM: v2：会话编号只以哈希出站（thread_ref=会话线程、channel_conversation_ref=渠道会话），两者同一
+#   哈希规则；空值给空串——插件不能从字段有无反推宿主内部结构。纯函数。
+# 函数用途: 把一个会话编号哈希成事件里公开的引用字段。
+def _hash_ref(value: str) -> str:
+    text = str(value or "")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
 
 
 # LLM: 事件目录只允许标量；嵌套 arguments/output 不能借合法字段名混入，命令参数必须留在控制回执而不是观察里。
