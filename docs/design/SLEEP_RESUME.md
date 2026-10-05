@@ -1,6 +1,6 @@
 # 睡眠与长暂停后的执行恢复设计
 
-**状态：设计，待 3a 定**
+**状态：设计已由 3a 定稿；SLP-2A 已实现，待审**
 
 **日期：2026-10-05**
 
@@ -36,9 +36,9 @@
 ### 3.2 风险二：定时 run claim 过期后重复领取同一计划动作
 
 - **成立条件**：同一 scheduler run 处于 `claimed/running`，墙钟越过 `claim_expires_at`，旧 runner 尚未退出而另一 worker 再次调用 `claim_run`。旧报告记录默认 scheduler lease 为 300 秒（报告 `:20-23`；实施时以目标分支值为准）。这不是 due/misfire 补跑多次：`reserve_due_runs` 为 job 保留活动 run 并按 misfire grace 处理错过的周期（`agent_py_agent/agent/scheduler/repository.py:296-344`），风险是**同一个 run 的 claim 接管**。
-- **实现证据**：`agent_py_agent/agent/scheduler/repository.py:403-438` 对 `claimed/running` 只在 expiry 仍未来时拒绝，过期后创建新 claim_id 并写入当前 PID/start time；该入口没有先查 runner PID。`:452-474` 心跳按 claim_id 更新 expiry，旧 claim 被覆盖后不能续租。`:915-955` 的 crash recovery 则采取较严规则：必须 lease 到期并有 PID 死亡证明才转 `unknown`；PID 存活或不可验证都保留原态。`agent_py_agent/agent/scheduler/service.py:63-75,94-105,193-230` 是心跳与 wake-claim 调用入口。
-- **现有保护**：每个 run 有稳定 run_id；scheduler wake 有身份核对；heartbeat 仅接受相同 claim_id；中断恢复路径对 PID/start_time 做 fail-closed 检查。但普通 `claim_run` 的过期重领逻辑没有复用该死亡证明；稳定 run_id 也不能阻止同一 run 的业务副作用再执行一次。
-- **修法与入口**：统一普通 claim 和 crash recovery 的状态裁决：expiry 到期后，存活或不可验证的执行者进入 recovery_pending，不返回第二个可执行 claim；确认死亡后先对同一 run 做 CAS，推进新的 attempt/claim_epoch，再决定恢复、unknown 或终态。scheduler 派发的逻辑动作携带稳定 operation_id（run_id 绑定已持久化动作序号），通过 3.1 共用操作账本重放已提交结果；不能把 scheduler run_id 单独当成一个 run 内所有不同动作共用的幂等键。入口：`agent_py_agent/agent/scheduler/repository.py:claim_run/heartbeat_run/recover_interrupted_executions`、`agent_py_agent/agent/scheduler/service.py:claim_wake` 与 runner 执行接缝。
+- **基线问题证据（812828b98）**：在本切片前，`claim_run` 对 `claimed/running` 只在 expiry 仍未来时拒绝，过期后就创建新 `claim_id` 并写入当前 PID/start time；此入口没有先查 runner PID。`:452-474` 心跳按 claim_id 更新 expiry。`:915-955` 的 crash recovery 则必须 lease 到期并有 PID 死亡证明才转 `unknown`；PID 存活或不可验证都保留原态。`agent_py_agent/agent/scheduler/service.py:63-75,94-105,193-230` 是心跳与 wake-claim 调用入口。
+- **切片前已有保护**：每个 run 有稳定 run_id；scheduler wake 有身份核对；heartbeat 仅接受相同 claim_id；中断恢复路径对 PID/start_time 做 fail-closed 检查。但普通 `claim_run` 的过期重领逻辑没有复用该死亡证明；稳定 run_id 也不能阻止同一 run 的业务副作用再执行一次。SLP-2A 修复见下条。
+- **修法与入口**：SLP-2A 已在 `scheduler/repository.py` 落地：普通 `claim_run` 与 `recover_interrupted_executions` 共用 `_runner_liveness` 三态判定；lease 过期但 runner live/unverifiable 时保留旧 claim、不返回新执行权；只有 death proof 才先在 owner store 锁内 CAS 为 `queued`，之后 `claim_run` 生成递增的 `claim_epoch` 新 token。heartbeat、release、mark-running 与 finish 按 `claim_id + claim_epoch` 做 CAS。此切片状态：已实现，待审。SLP-2B 的 scheduled action `operation_id` 复用和现有操作账本恢复仍另行接线，不由此切片宣称完成。
 - **故障注入用例**：超 lease 保持旧 PID/start_time 存活，普通 `claim_run` 不创建第二个执行者；PID 缺失、权限错误或无法读 start_time 时 fail-closed，不把 run 自动标成死；确认原进程死亡后只产生一个新 epoch；旧 claim 的迟到 heartbeat/finish 被 CAS 拒绝；同一个 run 恢复时 operation_id 不变并读取旧回执，两个不同逻辑动作则使用不同 operation_id；注入睡眠跨过 misfire grace，验证每个 job 仍按现有 misfire 合同最多保留一条应运行的预约。
 - **估时**：总计约 **6 agent 小时**，按 SLP-2A（3h）及依赖操作账本的 SLP-2B（3h）拆分。
 
@@ -77,7 +77,7 @@
 | --- | ---: | --- | --- | --- |
 | **SLP-1A 会话 claim 栅栏** | 3h | `agent_py_agent/agent/conversation/store_claims.py`、`agent_py_agent/agent/conversation/run_claim.py` 及其聚焦测试；把 expired+live/unverifiable 与 dead 分流，续租丢失产生结构化取消/失权事实，旧 epoch 不能再开始动作。 | 超租约但 owner 活着/不可验证均不会分配第二个可执行回合；dead proof 后只产生一个新 epoch；旧 claim 的 renew/finish/action 均不能改新状态。 | 无；为 SLP-1B 定义 attempt/epoch 传递字段。
 | **SLP-1B 现有操作账本恢复栅栏** | 4h | `agent_py_agent/agent/tooling/executor.py`、`agent_py_agent/agent/tooling/tool_operation_coordinator.py`、`agent_py_agent/agent/runtime_db/managed_operation_store.py` 及聚焦测试；给现有请求/claim 加父 claim_epoch 栅栏，恢复同一持久化 ToolCall 时保留原 operation_id/idempotency_key，不新增账本或状态枚举。 | handler 前校验 claim epoch；同一 operation_id 已 succeeded 时只回放，unknown 只 reconcile、不自动再 dispatch；明确 safe_to_retry 才能按原幂等键续作；同参数的新逻辑调用必须有新 operation_id；操作账本不可用时副作用零启动。 | SLP-1A 确认 attempt/epoch 字段；对不能查询/幂等的 handler 保留现有 unknown 处理。
-| **SLP-2A Scheduler claim 栅栏** | 3h | 只改 `agent_py_agent/agent/scheduler/repository.py` 与其聚焦测试；让普通 `claim_run` 与 process-death recovery 共用 structured owner 判定和 CAS epoch。 | expired+live/unverifiable runner 不会被第二 worker 执行；dead proof 后先 CAS 为明确状态再有且仅有一个新 claim；旧 heartbeat/finish 不改变新 claim。 | 可与 SLP-1A 并行，文件范围不重叠。
+| **SLP-2A Scheduler claim 栅栏** | 3h | 只改 `agent_py_agent/agent/scheduler/repository.py` 与其聚焦测试；让普通 `claim_run` 与 process-death recovery 共用 structured owner 判定和 CAS epoch。**状态：已实现，待审。** | expired+live/unverifiable runner 不会被第二 worker 执行；dead proof 后先 CAS 为明确状态再有且仅有一个新 claim；旧 heartbeat/finish 不改变新 claim。 | 可与 SLP-1A 并行，文件范围不重叠。
 | **SLP-2B Scheduler 操作身份接线** | 3h | 只改 `agent_py_agent/agent/scheduler/service.py` 的 scheduled action→existing ToolOperationCoordinator 身份接线及测试；不改 repository claim 逻辑或 SLP-1B 的 coordinator/store。 | 同一持久化 scheduled action 恢复时复用原 operation_id/idempotency_key；同一 run 的不同动作不互相去重；sleep/misfire 不多建 run；原 operation 是 unknown 时不自动重发。 | 依赖 SLP-2A、SLP-1B 完成并冻结接口。
 
 可以先并行 SLP-1A 与 SLP-2A，两片分别只占 conversation 与 scheduler repository。SLP-1A 完成后做 SLP-1B；SLP-2B 等 SLP-2A 与 SLP-1B 的接口都确定后再做，仅改 scheduler service。不同切片不得同时改同一文件；若已存在的 ToolOperationCoordinator/managed operation store 能满足某项，必须复用，不能新建平行账本。

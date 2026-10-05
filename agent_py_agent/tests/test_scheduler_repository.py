@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
+import agent_py_agent.agent.scheduler.repository as repository_module
 from agent_py_agent.agent.scheduler.repository import (
     SchedulerConflictError,
     SchedulerJobCreateRequest,
@@ -53,6 +56,40 @@ def _create(
             source_request_id=source_request_id,
             now=now,
         )
+    )
+
+
+# LLM: Test-only helpers build a real persisted scheduler run and alter only its isolated claim facts.
+# 函数用途: 统一准备到期 run，确保 claim fencing 用例经过真实 repository，而不是手拼模型。
+def _claimed_due_run(repository: SchedulerRepository) -> dict[str, object]:
+    _create(repository)
+    run = repository.reserve_due_runs(now=1_000)[0]
+    claimed = repository.claim_run(str(run["run_id"]), lease_seconds=10, now=1_001)
+    assert claimed is not None
+    return claimed
+
+
+# LLM: Mutate only the pytest temporary owner ledger to model an expired runner identity.
+# 函数用途: 为死亡证明测试准备可控的 lease/PID/starttime，避免依赖真实进程状态。
+def _expire_claim(
+    repository: SchedulerRepository,
+    claim: dict[str, object],
+    *,
+    runner_pid: int,
+    runner_start_time: float | None,
+) -> None:
+    store = json.loads(repository.store_path.read_text(encoding="utf-8"))
+    run_id = str(claim["run_id"])
+    run = store["runs"][run_id]
+    run["claim_expires_at"] = 1_011.0
+    run["runner_pid"] = runner_pid
+    if runner_start_time is None:
+        run.pop("runner_start_time", None)
+    else:
+        run["runner_start_time"] = runner_start_time
+    repository.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
 
 
@@ -151,7 +188,8 @@ def test_due_reservation_poll_without_state_change_is_read_only(tmp_path, monkey
     assert repository.store_path.stat().st_mtime_ns == original_mtime
 
 
-def test_misfire_claim_takeover_finish_and_history(tmp_path) -> None:
+def test_misfire_claim_takeover_finish_and_history(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
     repository = _repository(tmp_path)
     skipped_job, _ = _create(
         repository,
@@ -192,6 +230,108 @@ def test_misfire_claim_takeover_finish_and_history(tmp_path) -> None:
     assert errors == []
     assert history[0]["response"] == "finished"
     assert repository.get_active_run(str(run["run_id"])) is None
+
+
+def test_expired_claim_does_not_transfer_while_runner_is_alive(tmp_path, monkeypatch) -> None:
+    repository = _repository(tmp_path)
+    first = _claimed_due_run(repository)
+    _expire_claim(repository, first, runner_pid=71, runner_start_time=7.0)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
+    monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: 7.0)
+
+    replacement = repository.claim_run(str(first["run_id"]), lease_seconds=10, now=1_012)
+
+    assert replacement is None
+    current = repository.get_active_run(str(first["run_id"]))
+    assert current["claim_id"] == first["claim_id"]
+    assert current["claim_epoch"] == first["claim_epoch"]
+
+
+@pytest.mark.parametrize("unverifiable", ["missing_pid", "permission_error", "missing_start_time"])
+def test_expired_claim_fails_closed_without_death_proof(tmp_path, monkeypatch, unverifiable) -> None:
+    repository = _repository(tmp_path)
+    first = _claimed_due_run(repository)
+    if unverifiable == "missing_pid":
+        _expire_claim(repository, first, runner_pid=0, runner_start_time=None)
+    else:
+        _expire_claim(repository, first, runner_pid=71, runner_start_time=7.0)
+    if unverifiable == "permission_error":
+        def deny_process_probe(_pid, _signal):
+            raise PermissionError("process existence cannot be confirmed")
+
+        monkeypatch.setattr(repository_module.os, "kill", deny_process_probe)
+        monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: None)
+    elif unverifiable == "missing_start_time":
+        monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
+        monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: None)
+
+    replacement = repository.claim_run(str(first["run_id"]), lease_seconds=10, now=1_012)
+
+    assert replacement is None
+    current = repository.get_active_run(str(first["run_id"]))
+    assert current["claim_id"] == first["claim_id"]
+    assert current["status"] == "claimed"
+
+
+def test_dead_runner_is_cas_cleared_before_one_new_epoch_claim(tmp_path, monkeypatch) -> None:
+    repository = _repository(tmp_path)
+    first = _claimed_due_run(repository)
+    _expire_claim(repository, first, runner_pid=71, runner_start_time=7.0)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
+    writes: list[str] = []
+    write_store = repository._write_store_unlocked
+
+    # LLM: 观察真实 repository 持锁写出的中间状态，不替换状态迁移实现。
+    # 函数用途: 证明死亡证明先把旧 claim CAS 回 queued，之后才持久化唯一新 epoch。
+    def capture_write(store, admission, *, history_records=None):
+        writes.append(str(store["runs"][str(first["run_id"])]["status"]))
+        return write_store(store, admission, history_records=history_records)
+
+    monkeypatch.setattr(repository, "_write_store_unlocked", capture_write)
+
+    replacement = repository.claim_run(str(first["run_id"]), lease_seconds=10, now=1_012)
+
+    assert replacement is not None
+    assert writes == ["queued", "claimed"]
+    assert replacement["claim_epoch"] == first["claim_epoch"] + 1
+    assert repository.claim_run(str(first["run_id"]), lease_seconds=10, now=1_013) is None
+
+
+def test_finish_and_heartbeat_reject_claim_epoch_mismatch(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    claim = _claimed_due_run(repository)
+    store = json.loads(repository.store_path.read_text(encoding="utf-8"))
+    run = store["runs"][str(claim["run_id"])]
+    run["claim_epoch"] = int(run.get("claim_epoch") or 0) + 1
+    repository.store_path.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    assert repository.heartbeat_run(
+        str(claim["run_id"]), str(claim["claim_id"]), lease_seconds=10, now=1_002
+    ) is False
+    with pytest.raises(SchedulerConflictError):
+        repository.finish_run(
+            str(claim["run_id"]),
+            str(claim["claim_id"]),
+            SchedulerRunFinish(status="done", now=1_003),
+        )
+
+
+def test_sleep_past_misfire_grace_keeps_one_skipped_run_per_job(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    first, _ = _create(repository, name="first", source_request_id="first", grace=30)
+    second, _ = _create(repository, name="second", source_request_id="second", grace=30)
+
+    assert repository.reserve_due_runs(now=10_000) == []
+    history, errors = repository.history()
+    assert errors == []
+    assert len(history) == 2
+    assert {str(run["job_id"]) for run in history} == {str(first["job_id"]), str(second["job_id"])}
+    assert all(run["status"] == "skipped" for run in history)
+    assert repository.reserve_due_runs(now=10_001) == []
+    assert len(repository.history()[0]) == 2
 
 
 def test_owner_identity_and_corrupt_store_fail_closed(tmp_path) -> None:

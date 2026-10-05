@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05；已实现，待 3a 复审）
+
+- **实现**：普通 `claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime 三态死亡证明；lease 过期但 runner 活着或身份不可核验时不另发 claim。death proof 后先持久 CAS 为 `queued`，再以递增 `claim_epoch` 领取；旧 heartbeat/release/mark-running/finish 按 claim id 与 epoch 双重 CAS 拒绝。misfire grace 合同未改。
+- **定向回归**：最终代码下 `test_scheduler_repository.py`、`test_scheduler_unknown_recovery.py`、`test_scheduler_service.py` 与 `test_scheduler_scan_costs.py::test_waiting_runs_in_process_mutation_is_visible` 一次运行通过；测试命令见下。
+- **变异**：最终代码的 3 个单点变异均被对应测试抓住并立即还原：绕过死亡证明导致活 runner 被重领；finish 仅比较 claim_id 时 epoch 失配迟到写入未被拒；不递增 epoch 时死亡 run 重领 epoch 未增加。
+- **scheduler sweep**：全部 19 个相关文件已在修正 synthetic fixture 后重跑。仅 `test_scheduler_waiting_deadlock.py` 有 9 项失败，均为 fixture 写入时 `ValueError: managed process instance is partially bound`；9 项已在真正任务基线 `812828b98` 原样复现。其余用例通过。此 sweep 的退出码为 1，不记为全绿。
+- **guards9**：当前清单 12 项；分支基线中不存在新增的 `test_backend_signature_guardrails.py`，按 continue-after-17k 指示跑前 11 项，全部通过；第 12 项未运行。
+- **静态与尺寸**：`check_import_boundaries.py` 为 0 findings；Ruff、`check_doc_sync.py --base 812828b98`、strict code-size、`size_diff.sh` 均通过。strict code-size：`strict_scope_total=2187, hard=0, high-risk=1493, soft=694, test_advisory=1234, blocked=False`；size diff 新增告警 0、消失 56。`check_clean_package.py .` 输出 `OK: . 未发现发布阻塞项`；`git diff --check` 通过。
+
+复跑命令（固定 Python：`/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；均在 worktree 根目录运行）:
+
+```bash
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_scheduler_repository.py \
+  agent_py_agent/tests/test_scheduler_unknown_recovery.py \
+  agent_py_agent/tests/test_scheduler_service.py \
+  agent_py_agent/tests/test_scheduler_scan_costs.py::test_waiting_runs_in_process_mutation_is_visible \
+  -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds2
+```
+
+宽 sweep 使用 `agent_py_agent/tests/test_scheduler*.py`，并附加 `test_adapter_manager.py`、`test_private_dirs_policy.py`、`test_adapter_ingress.py`、`test_operation_store_robustness.py`、`test_r103_closeout_gate.py`、`test_end_task_control.py`；实际执行的 19 个文件与 summary 留在任务运行记录中。
+
 ## 插件事件 thread_ref 统一与 channel_conversation_ref（tref2，2026-10-05，worker/tref2）
 
 - **用例**：`test_plugin_event_points.py` 新增双通道（tui / feishu）投影用例——同一会话里 turn 类与 tool 类事件 `thread_ref` 相同、渠道哈希只在 Gateway 侧事件上有值且与线程哈希不同、payload 不含原文；A2 用例（`prompt_submitted` 在 thread 未解析时 `thread_ref` 为空、渠道 ref 有值；`command_executed` 两个引用都有）。`test_plugin_event_e2e.py`：六事件真回合加断言（turn/tool/command 的 `thread_ref` 同源非空、`channel_conversation_ref` 存在且一致、`prompt_submitted` 的 `thread_ref` 为空、工具事件无渠道 ref），HTTP worker 用例加 feishu 身份变体并更新 v2 断言。

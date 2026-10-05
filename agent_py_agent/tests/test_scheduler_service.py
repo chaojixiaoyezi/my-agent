@@ -305,9 +305,11 @@ def test_admission_settlement_failure_is_not_reported_as_a_closed_claim(tmp_path
 def test_replaced_claim_during_admission_does_not_consume_pending_wake(
     tmp_path, monkeypatch, task_status,
 ) -> None:
+    import agent_py_agent.agent.scheduler.repository as repository_module
     from agent_py_agent.agent.conversation.runtime import _claim_scheduler_wake
 
     store, thread, repository, service, signal = _queued_execution(tmp_path)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
     store.tasks.bind({
         "thread_id": thread.thread_id, "task_id": signal.root_task_id,
         "status": task_status, "goal": "原任务",

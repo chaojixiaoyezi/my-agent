@@ -379,6 +379,8 @@ Gateway 维护摘要 `[gateway-owner-maintenance]` 只打印、不落盘。其�
 
 `SchedulerService.claim_wake`核对wake与canonical run身份，在原repository领取后准确回读pending，再调用`_prepare_task_link`：原TaskStore任务锁内只为首次新运行建立链接，已有链接只读复核。合法冻结只保留原claim用于原回复交付；无冻结的active任务才标记running并交后台模型，无冻结终态按唯一既有映射结算。无法确认pending时释放claim并保留待处理；准入结算只有原CAS实际成功才返回stale，claim已被接手时返回busy，不能确认掉新持有者的wake。TaskStore仍唯一保存pins/选包marker，不新增调度专用任务账或Skill豁免。
 
+`SchedulerRepository.claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime tri-state proof；只有 expired runner 被证明死亡后才先 CAS 为 `queued`，再由 claim 路径递增 `claim_epoch` 并生成嵌入 epoch 的 `claim_id`。旧 claim 的 heartbeat、release、running transition 与 finish 统一按 identity+epoch 拒绝。历史 run 缺 epoch 按 0 读取；SLP-2A 已实现，待 3a 复审。最终 19 文件 sweep 的 9 个 fixture failures 在基线 `812828b98` 复现，其余相关测试通过；guards9 前 11 项通过，静态与尺寸门禁通过，详情见 `TESTS.md`。operation_id 接线归 SLP-2B。
+
 `goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。
 
 `request_context._gateway_history_source` 把已裁决的来源行冻结为只读 `ConversationHistorySource`（地址视图加 `history_projection` 原单行选择与投影），`GatewayConversationContext.history_source` 是唯一历史载体，不再同时持有具体 history/canonical 副本。`request_prompt.gateway_conversation_history_seed` 把来源交给种子，恢复候选沿同一规则；只在原 native/text 准备边界解析，纯 `ToolLoopRequestInput` 投影不读盘。摘要期旧完整请求的释放属于 2b。

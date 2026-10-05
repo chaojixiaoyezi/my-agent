@@ -242,8 +242,9 @@ def test_waiting_runs_three_state_consistency(tmp_path, waiting_projection) -> N
     assert _wanting_ids(rewritten_rows) == ["srun_000", "srun_002"]
 
 
-def test_waiting_runs_in_process_mutation_is_visible(tmp_path, waiting_projection) -> None:
+def test_waiting_runs_in_process_mutation_is_visible(tmp_path, waiting_projection, monkeypatch) -> None:
     """本进程内 park/finish 走同一把权威写:下一轮对账必须立刻看到新状态。"""
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
     root = tmp_path / "owner" / "scheduler"
     root.mkdir(parents=True)
     _write_store(

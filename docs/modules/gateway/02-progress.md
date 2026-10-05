@@ -605,6 +605,8 @@ owner 维护顺带回收正文哈希缓存的孤儿键（分支 `my-agent/self-d
 读不出从首次观察到“只剩读不出”起计时；子代理血缘记录按 id 精确读，缺失或损坏记为读不出。
 复审 B 跟进：按“没有后续工作”结算要隔 60 秒两次确认（健康长 Goal 的续跑空隙不再被误结算）；本任务血缘子代理的坏完成唤醒按可能属于本任务处理。
 
+SLP-2A scheduler claim 栅栏（2026-10-05，`worker/slp2a`；状态：已实现，待 3a 复审）：`claim_run` 与 `recover_interrupted_executions` 现共用 PID/starttime 三态死亡证明；expired+live/unverifiable 保留当前 claim，dead proof 后先 CAS 为 queued，再由普通 claim 生成递增 epoch token；迟到 heartbeat/finish 的 epoch 写入会被拒。misfire policy 和 `scheduler/service.py` 未变；SLP-2B 的 action operation identity 仍待实现。19 文件 sweep 的 9 项 `test_scheduler_waiting_deadlock.py` fixture 失败已在基线 `812828b98` 复现，其余相关用例通过；guards9 前 11 项通过（基线无第 12 项），静态与尺寸门禁通过。命令和未验证项见 `TESTS.md` 的 SLP-2A 小节。
+
 capability 配置缺文件用默认值（分支 `claude/9a-capcfg-missing-defaults`，2026-09-28）：
 - `/settings` 与 `/settings all` 的配置告警原本从主配置对象上找 `capability_config`，但 AgentConfig 没有这个属性，所以 capability 文件里没生效的键在生产上从来显示不出来。
 - 现在由 `execute_settings_control` 经 `capability_config_for_agent(base_agent)` 取得 capability 配置，作为关键字参数只交给这两个视图。

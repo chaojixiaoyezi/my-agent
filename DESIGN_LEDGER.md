@@ -1,5 +1,11 @@
 # 设计台账
 
+## SLP-2A Scheduler claim 栅栏（slp2a，2026-10-05，基于 17k `812828b98`；状态：已实现，待 3a 复审）
+
+- **改动**：普通 `claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime 三态死亡证明；lease 过期但 runner 活着或身份不可核验时不另发 claim。death proof 后先在同一 owner store 锁内持久 CAS 为 `queued`，之后只由 `claim_run` 生成 `claim_epoch + 1` 的新 token。heartbeat、release、mark-running、finish 校验 claim id 与 epoch；旧 run 缺 epoch 时按 legacy epoch 0 读取。
+- **边界**：实现限于 scheduler repository 与聚焦测试；未改 `scheduler/service.py`，未碰 conversation/tooling；SLP-2B operation_id/操作账本接线仍未做。misfire grace 政策未改。因 `check_doc_sync` 要求同步模块文档，另更新 Gateway 进度与结构文档。
+- **验证结论**：最终 19 文件 scheduler sweep 仅有 `test_scheduler_waiting_deadlock.py` 9 项失败，均在任务基线 `812828b98` 复现；其余相关测试通过。guards9 前 11 项通过，第 12 项因基线缺该测试文件而未运行；import boundaries 0 findings、Ruff、doc-sync、strict code-size、size_diff（新增告警 0）通过。具体命令及结果见 [TESTS.md](TESTS.md) SLP-2A 节；设计合同见 [SLEEP_RESUME.md](docs/design/SLEEP_RESUME.md)。
+
 ## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2，2026-10-05，worker/tref2；ds8 初审通过，3a 终审收紧后挑入 17l）
 
 - **问题（ds4 在 jb6b 发现，tref 只读调查）**：同一回合里插件事件的 `thread_ref` 两类取值不同——Gateway 侧四事件（prompt_submitted / turn_started / turn_ended / command_executed）取 `channel_conversation_id`（渠道会话号），工具侧两事件（tool_call_started / tool_call_finished）取 task attribute `conversation_thread_id`（ConversationStore 线程），插件按会话归组会归不上。

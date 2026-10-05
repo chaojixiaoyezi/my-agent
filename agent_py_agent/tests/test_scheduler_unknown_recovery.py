@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-"""HANDOFF P0-4 验收测试: 崩溃执行按进程死亡证明归 unknown(fail-closed)。
+"""SLP-2A scheduler claim 栅栏回归：租约过期后只有死亡证明才清除旧 claim。
 
-HANDOFF_reliability-gaps-20260813.md P0-4: 崩溃/被杀进程留下的 run 只靠
-租约过期回收, 无 completed/failed/unknown 三态分类; 缺「owner 进程死亡
-证明」(pid 探活)后的结构化归类。进程未证实死亡保持原态(fail-closed 不猜)。
+活着或身份不可核验时保留原 claim；死亡后先转 queued，再用新 epoch 唯一领取。
 """
 
 import json
-import os
 
-from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest, SchedulerRepository
+import pytest
+
+import agent_py_agent.agent.scheduler.repository as repository_module
+from agent_py_agent.agent.scheduler.repository import (
+    SchedulerConflictError,
+    SchedulerJobCreateRequest,
+    SchedulerRepository,
+    SchedulerRunFinish,
+)
 
 
 def _repository(tmp_path) -> SchedulerRepository:
@@ -44,12 +49,15 @@ def _make_claimed_run(repo: SchedulerRepository) -> str:
     return run_id
 
 
+# LLM: Change only a temporary scheduler ledger so recovery tests use deterministic process identities.
+# 函数用途: 在隔离存储里注入过期 lease 与假 PID/starttime，不探测真实 runner。
 def _force_crash_state(repo: SchedulerRepository, run_id: str, *, pid: int) -> None:
     """模拟崩溃残留: 租约过期 + 指定 runner_pid。"""
     store = json.loads(repo.store_path.read_text(encoding="utf-8"))
     run = store["runs"][run_id]
     run["claim_expires_at"] = 1_005.0  # 过期(now=1_006 时)
     run["runner_pid"] = pid
+    run["runner_start_time"] = 7.0
     store["runs"][run_id] = run
     repo.store_path.write_text(
         json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -57,25 +65,42 @@ def _force_crash_state(repo: SchedulerRepository, run_id: str, *, pid: int) -> N
     )
 
 
-def test_crashed_run_recovered_to_unknown(tmp_path) -> None:
-    """租约过期 + 进程证实死亡(pid 不存在) -> 归 unknown 终态。"""
+def test_dead_runner_is_cleared_then_reclaimed_with_one_new_epoch(tmp_path, monkeypatch) -> None:
+    """死亡证明先清除旧 claim；只有一次新 epoch 可重新领取。"""
     repo = _repository(tmp_path)
     run_id = _make_claimed_run(repo)
-    _force_crash_state(repo, run_id, pid=999_999)  # 不存在的进程
+    first = repo.get_active_run(run_id)
+    _force_crash_state(repo, run_id, pid=71)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "dead")
 
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == [run_id]
-    run = repo.get_active_run(run_id)
-    assert run is None  # unknown 是终态, 不再 active
-    # 终态不可复活: 不能再 claim
-    assert repo.claim_run(run_id, lease_seconds=10, now=1_007.0) is None
+    queued = repo.get_active_run(run_id)
+    assert queued is not None
+    assert queued["status"] == "queued" and queued["claim_id"] == ""
+    assert queued["claim_epoch"] == first["claim_epoch"]
+
+    replacement = repo.claim_run(run_id, lease_seconds=10, now=1_007.0)
+    assert replacement is not None
+    assert replacement["claim_epoch"] == first["claim_epoch"] + 1
+    assert repo.claim_run(run_id, lease_seconds=10, now=1_008.0) is None
+    assert repo.heartbeat_run(run_id, str(first["claim_id"]), lease_seconds=10, now=1_009) is False
+    with pytest.raises(SchedulerConflictError):
+        repo.finish_run(
+            run_id,
+            str(first["claim_id"]),
+            SchedulerRunFinish(status="done", now=1_010),
+        )
+    assert repo.get_active_run(run_id) == replacement
 
 
-def test_live_process_keeps_state_fail_closed(tmp_path) -> None:
+def test_live_process_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:
     """租约过期但进程存活 -> 保持原态(fail-closed 不猜), 不归 unknown。"""
     repo = _repository(tmp_path)
     run_id = _make_claimed_run(repo)
-    _force_crash_state(repo, run_id, pid=os.getpid())  # 当前测试进程存活
+    _force_crash_state(repo, run_id, pid=71)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
+    monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: 7.0)
 
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == []  # 未证实死亡, 不动
@@ -114,16 +139,15 @@ def test_missing_pid_keeps_state_fail_closed(tmp_path) -> None:
     assert repo.get_active_run(run_id)["status"] == "claimed"  # fail-closed 保持
 
 
-def test_pid_reuse_detected_by_start_time(tmp_path, monkeypatch) -> None:
-    """pid 存活但 start_time 不匹配(pid 复用) -> 原进程已死, 归 unknown。"""
-    import agent_py_agent.agent.scheduler.repository as repo_mod
-
+def test_pid_reuse_detected_by_start_time_then_requeued(tmp_path, monkeypatch) -> None:
+    """pid 存活但 start_time 不匹配(pid 复用) -> 旧 claim 清成 queued。"""
     repo = _repository(tmp_path)
     run_id = _make_claimed_run(repo)
+    first = repo.get_active_run(run_id)
     store = json.loads(repo.store_path.read_text(encoding="utf-8"))
     run = store["runs"][run_id]
     run["claim_expires_at"] = 1_005.0
-    run["runner_pid"] = os.getpid()  # pid 存活(复用场景)
+    run["runner_pid"] = 71  # pid 存活(复用场景)
     run["runner_start_time"] = 1.0  # 记录的启动时刻(旧)
     store["runs"][run_id] = run
     repo.store_path.write_text(
@@ -131,23 +155,25 @@ def test_pid_reuse_detected_by_start_time(tmp_path, monkeypatch) -> None:
         encoding="utf-8",
     )
     # 当前进程实际 start_time 与记录不同(模拟 pid 复用): 死亡证明成立
-    monkeypatch.setattr(repo_mod, "_process_start_time", lambda pid: 999.0)
+    monkeypatch.setattr(repository_module, "_process_state", lambda _pid: "alive")
+    monkeypatch.setattr(repository_module, "_process_start_time", lambda _pid: 999.0)
 
     recovered = repo.recover_interrupted_executions(now=1_006.0)
     assert recovered == [run_id]  # pid 复用 = 原进程已死
-    assert repo.get_active_run(run_id) is None  # 归 unknown 终态
+    queued = repo.get_active_run(run_id)
+    assert queued["status"] == "queued" and queued["claim_id"] == ""
+    replacement = repo.claim_run(run_id, lease_seconds=10, now=1_007.0)
+    assert replacement["claim_epoch"] == first["claim_epoch"] + 1
 
 
 def test_unverifiable_oserror_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:
     """os.kill 抛非 ProcessLookupError 的 OSError(不可判定) -> 保持原态。"""
-    import agent_py_agent.agent.scheduler.repository as repo_mod
-
     repo = _repository(tmp_path)
     run_id = _make_claimed_run(repo)
     store = json.loads(repo.store_path.read_text(encoding="utf-8"))
     run = store["runs"][run_id]
     run["claim_expires_at"] = 1_005.0
-    run["runner_pid"] = os.getpid()
+    run["runner_pid"] = 71
     store["runs"][run_id] = run
     repo.store_path.write_text(
         json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -157,6 +183,6 @@ def test_unverifiable_oserror_keeps_state_fail_closed(tmp_path, monkeypatch) -> 
     def _raising_kill(pid, sig):  # 非 ProcessLookupError 的 OSError(不可判定)
         raise OSError("unverifiable")
 
-    monkeypatch.setattr(repo_mod.os, "kill", _raising_kill)
+    monkeypatch.setattr(repository_module.os, "kill", _raising_kill)
     assert repo.recover_interrupted_executions(now=1_006.0) == []
     assert repo.get_active_run(run_id)["status"] == "claimed"  # fail-closed 保持

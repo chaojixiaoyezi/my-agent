@@ -12,12 +12,13 @@ the durable pre-admission pattern used by 通道运行时 and 长期助手.
 import hashlib
 import json
 import logging
+import math
 import os
 import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -400,6 +401,8 @@ class _SchedulerRunOperations:
             }
             self._write_store_unlocked(store, admission)
 
+    # LLM: Expiry only opens runner-identity verification; reclaims require death proof and a locked queued CAS.
+    # 函数用途: 领取已排队 run；旧 runner 活着或身份不明时，不分配第二个执行权。
     def claim_run(
         self,
         run_id: str,
@@ -413,18 +416,23 @@ class _SchedulerRunOperations:
             run, _error = self._parse_run(raw)
             if run is None:
                 return None
-            expires = float(run.get("claim_expires_at") or 0.0)
-            if run["status"] == "waiting":
+            resolved = _resolve_expired_claim(run, current)
+            if resolved is None:
                 return None
-            if run["status"] in {"claimed", "running"} and expires > current:
-                return None
+            if resolved is not run:
+                run = resolved
+                store["runs"][run_id] = run
+                # 先落盘死亡证明后的明确 queued 状态，再独立提交新 epoch。
+                self._write_store_unlocked(store, admission)
             if run["status"] not in _ACTIVE_RUN_STATUSES:
                 return None
-            claim_id = f"claim_{uuid.uuid4().hex}"
+            claim_epoch = int(run.get("claim_epoch") or 0) + 1
+            claim_id = f"claim_{claim_epoch}_{uuid.uuid4().hex}"
             claimed = {
                 **run,
                 "status": "claimed",
                 "claim_id": claim_id,
+                "claim_epoch": claim_epoch,
                 "claimed_at": current,
                 "claim_expires_at": current + max(1, int(lease_seconds or 1)),
                 # P0-4: 记录持有 claim 的进程身份(崩溃恢复判活的死亡证明来源);
@@ -449,6 +457,8 @@ class _SchedulerRunOperations:
             }
             self._write_store_unlocked(store, admission)
 
+    # LLM: Heartbeat is a CAS on claim identity and monotonic epoch; a late old owner cannot extend a replacement.
+    # 函数用途: 仅为当前 claim epoch 续租，旧 runner 的迟到心跳返回 False。
     def heartbeat_run(
         self,
         run_id: str,
@@ -461,7 +471,7 @@ class _SchedulerRunOperations:
         with self._mutation_scope() as (store, admission):
             raw = store["runs"].get(run_id)
             run, _error = self._parse_run(raw)
-            if run is None or run.get("claim_id") != claim_id:
+            if run is None or not _claim_matches(run, claim_id):
                 return False
             if run["status"] not in {"claimed", "running"}:
                 return False
@@ -473,12 +483,14 @@ class _SchedulerRunOperations:
             self._write_store_unlocked(store, admission)
         return True
 
+    # LLM: Release uses the same identity/epoch CAS as heartbeat and finish, so stale owners cannot requeue a newer claim.
+    # 函数用途: 只释放当前 runner 的租约，避免旧执行者把新 epoch 退回队列。
     def release_run_claim(self, run_id: str, claim_id: str, *, now: float | None = None) -> bool:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             raw = store["runs"].get(run_id)
             run, _error = self._parse_run(raw)
-            if run is None or run.get("claim_id") != claim_id:
+            if run is None or not _claim_matches(run, claim_id):
                 return False
             store["runs"][run_id] = {
                 **run,
@@ -907,55 +919,23 @@ class _SchedulerStoreSupport:
             "corrupt": bool(job_errors or run_errors),
         }
 
+    # LLM: Expired runs use the same structured PID/starttime proof as claim_run; only dead owners are CAS-cleared to queued.
+    # 函数用途: 把已证实死亡的过期执行清成可领取状态；活着或不可核验的 runner 保持原记录。
     def recover_interrupted_executions(
         self,
         *,
         now: float | None = None,
     ) -> list[str]:
-        """P0-4(HANDOFF 文档线): 崩溃 run 按进程死亡证明归 unknown 终态。
-
-        仅当租约已过期(claim_expires_at <= now)且 runner 进程被证实死亡
-        (pid 探活失败)才置 unknown; 进程仍存活(心跳慢/时钟偏差)保持原态
-        (fail-closed 不猜)。返回本次归 unknown 的 run_id 列表。
-        """
+        """清除已证实死亡 runner 的过期 claim，为新 epoch 领取保留明确 queued 状态。"""
         current = _now(now)
-        recovered: list[str] = []
         with self._mutation_scope() as (store, admission):
-            for run_id, raw in list(store["runs"].items()):
-                run, _error = self._parse_run(raw)
-                if run is None:
-                    continue
-                if run["status"] not in {"claimed", "running"}:
-                    continue
-                if float(run.get("claim_expires_at") or 0.0) > current:
-                    continue  # 租约未过期, 不是崩溃候选
-                # P0-4 收口(seq1562): fail-closed 判定——
-                # ① unverifiable(pid 缺失/<=0/OSError): 保持原态(不归 unknown)
-                # ② alive 且 start_time 匹配(可核对时): 保持原态
-                # ③ alive 但 start_time 不匹配: pid 复用 = 原进程已死(死亡证明)
-                # ④ 仅 dead(ProcessLookupError 明确查无此进程)才是死亡证明
-                pid = int(run.get("runner_pid") or 0)
-                recorded_start = run.get("runner_start_time")
-                state = _process_state(pid)
-                if state == "unverifiable":
-                    continue  # 不可证实, fail-closed 保持原态
-                if state == "alive":
-                    if recorded_start is None:
-                        continue  # 无 start_time 可核对: 仅 pid 存活即保持
-                    current_start = _process_start_time(pid)
-                    if current_start is None or current_start == float(recorded_start):
-                        continue  # 同一进程存活(或当前不可读), 保持原态
-                    # current_start 可读且 != recorded_start: pid 复用, 原进程已死
-                store["runs"][run_id] = {
-                    **run,
-                    "status": "unknown",
-                    "ended_at": current,
-                    "updated_at": current,
-                }
-                recovered.append(run_id)
+            recovered = _collect_expired_dead_runs(
+                store["runs"], self._parse_run, current
+            )
             if recovered:
+                store["runs"].update(recovered)
                 self._write_store_unlocked(store, admission)
-        return recovered
+        return list(recovered)
 
     def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         """逐条解析 runs: 坏记录跳过并收集错误(与 _valid_jobs 同容错模式)。"""
@@ -1003,6 +983,8 @@ class _SchedulerStoreSupport:
         except (TypeError, ValueError, ScheduleValidationError):
             return None, "SCHEDULER_JOB_INVALID"
 
+    # LLM: Legacy runs default to epoch 0; malformed, boolean, or negative epochs are rejected before any claim mutation.
+    # 函数用途: 解析新旧 scheduler run 并为旧记录补出 epoch 0，确保后续 CAS 有确定基线。
     def _parse_run(
         self,
         raw: object,
@@ -1023,7 +1005,12 @@ class _SchedulerStoreSupport:
                 raise ValueError("run status")
             if not str(raw.get("job_id") or "").startswith("job_"):
                 raise ValueError("job id")
-            return dict(raw), ""
+            claim_epoch = raw.get("claim_epoch", 0)
+            if isinstance(claim_epoch, bool) or not isinstance(claim_epoch, int) or claim_epoch < 0:
+                raise ValueError("claim epoch")
+            parsed = dict(raw)
+            parsed["claim_epoch"] = claim_epoch
+            return parsed, ""
         except (TypeError, ValueError):
             return None, "SCHEDULER_RUN_INVALID"
 
@@ -1055,11 +1042,13 @@ class _SchedulerStoreSupport:
             raise SchedulerNotFoundError(f"scheduler run not found: {run_id}")
         return run
 
+    # LLM: Mutating completion paths must match claim_id and embedded claim_epoch before touching the owner ledger.
+    # 函数用途: 为 running、finish 等写操作核对当前领取者身份，旧 epoch 不得改写新 claim。
     def _require_claim(
         self, store: dict[str, Any], run_id: str, claim_id: str
     ) -> dict[str, object]:
         run = self._require_run(store, run_id)
-        if run.get("claim_id") != str(claim_id or ""):
+        if not _claim_matches(run, claim_id):
             raise SchedulerConflictError("scheduler run claim changed")
         return run
 
@@ -1342,6 +1331,121 @@ def _process_start_time(pid: int) -> float | None:
         return None
 
 
+# LLM: Lease expiry is not proof of death; only a missing PID or a verified PID/starttime mismatch is reclaimable.
+# 函数用途: 普通 claim 和恢复器共用 runner 三态判断，身份读不出时返回 unverifiable 并阻止接管。
+def _runner_liveness(run: dict[str, object]) -> str:
+    raw_pid = run.get("runner_pid")
+    if isinstance(raw_pid, bool):
+        return "unverifiable"
+    try:
+        pid = int(raw_pid or 0)
+    except (TypeError, ValueError):
+        return "unverifiable"
+    state = _process_state(pid)
+    if state == "dead":
+        return "dead"
+    if state != "alive":
+        return "unverifiable"
+    recorded_start = run.get("runner_start_time")
+    if recorded_start is None:
+        return "alive"
+    try:
+        expected_start = float(recorded_start)
+    except (TypeError, ValueError):
+        return "unverifiable"
+    if not math.isfinite(expected_start):
+        return "unverifiable"
+    current_start = _process_start_time(pid)
+    if current_start is None:
+        return "unverifiable"
+    try:
+        actual_start = float(current_start)
+    except (TypeError, ValueError):
+        return "unverifiable"
+    if not math.isfinite(actual_start):
+        return "unverifiable"
+    return "alive" if actual_start == expected_start else "dead"
+
+
+# LLM: Build recovery updates from one owner-store snapshot; callers apply the returned patch under the existing store lock.
+# 函数用途: 挑出已过期且死亡证明成立的 run，给 recovery 与普通 claim 共用同一裁决。
+def _collect_expired_dead_runs(
+    runs: dict[str, object],
+    parse_run: Callable[[object], tuple[dict[str, object] | None, str]],
+    current: float,
+) -> dict[str, dict[str, object]]:
+    recovered: dict[str, dict[str, object]] = {}
+    for run_id, raw in runs.items():
+        run, _error = parse_run(raw)
+        if run is None:
+            continue
+        resolved = _resolve_expired_claim(run, current)
+        if resolved is None or resolved is run:
+            continue
+        recovered[run_id] = resolved
+    return recovered
+
+
+# LLM: Both ordinary claims and crash recovery must use this single expiry/death-proof decision; None means hold the old claim.
+# 函数用途: 只在 claim 到期且旧 runner 被证实死亡时生成 queued 过渡，其余情况保留或阻止接管。
+def _resolve_expired_claim(
+    run: dict[str, object], current: float
+) -> dict[str, object] | None:
+    if run["status"] not in {"claimed", "running"}:
+        return run
+    if float(run.get("claim_expires_at") or 0.0) > current:
+        return None
+    if _runner_liveness(run) != "dead":
+        return None
+    return _queued_after_dead_runner(run, now=current)
+
+
+# LLM: This transition is allowed only after _runner_liveness proves the old owner dead; the next claim increments the preserved epoch.
+# 函数用途: 清掉死亡 runner 的租约并落成 queued，保留 run 内容供下一位唯一领取者继续。
+def _queued_after_dead_runner(run: dict[str, object], *, now: float) -> dict[str, object]:
+    return {
+        **run,
+        "status": "queued",
+        "claim_id": "",
+        "claimed_at": 0.0,
+        "claim_expires_at": 0.0,
+        "runner_pid": 0,
+        "runner_start_time": None,
+        "updated_at": now,
+    }
+
+
+# LLM: New claim_<epoch>_<nonce> tokens fence writes without changing SchedulerService's claim_id-only API; legacy claim_<nonce> means epoch 0.
+# 函数用途: 从不透明 claim_id 中提取旧版 epoch 0 或新格式中的正整数 epoch。
+def _claim_epoch_from_id(claim_id: str) -> int | None:
+    parts = str(claim_id or "").split("_", 2)
+    if len(parts) == 2 and parts[0] == "claim":
+        return 0
+    if len(parts) != 3 or parts[0] != "claim" or not parts[2]:
+        return None
+    try:
+        epoch = int(parts[1])
+    except ValueError:
+        return None
+    return epoch if epoch > 0 else None
+
+
+# LLM: Every mutation validates both the current opaque claim and its monotonic epoch, fencing stale scheduler workers.
+# 函数用途: 同时核对 claim_id 和 epoch，供心跳、释放、运行态变更及终态提交共用。
+def _claim_matches(run: dict[str, object], claim_id: str) -> bool:
+    expected_id = str(claim_id or "")
+    if not expected_id or str(run.get("claim_id") or "") != expected_id:
+        return False
+    token_epoch = _claim_epoch_from_id(expected_id)
+    if token_epoch is None:
+        return False
+    try:
+        current_epoch = int(run.get("claim_epoch") or 0)
+    except (TypeError, ValueError):
+        return False
+    return current_epoch == token_epoch
+
+
 def _new_job_payload(
     *,
     owner: dict[str, str],
@@ -1430,6 +1534,8 @@ def _updated_job(
     }
 
 
+# LLM: New durable runs start at epoch 0; every executable claim advances it and embeds it in claim_id for CAS validation.
+# 函数用途: 构造初始 queued run，固定 scheduler 持久字段，供普通领取与恢复流程沿同一 epoch 递增。
 def _reserved_run(
     job: dict[str, object],
     *,
@@ -1455,6 +1561,7 @@ def _reserved_run(
         "status": "queued",
         "wake_signal_id": "",
         "claim_id": "",
+        "claim_epoch": 0,
         "claimed_at": 0.0,
         "claim_expires_at": 0.0,
         "created_at": now,
