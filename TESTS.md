@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## 后端传输签名守卫（sigguard，2026-10-05，分支 `worker/sigguard`，基于 17k 头 `75a26ca37`；待初审）
+
+- 来源：cabfix 改传输签名后 OAuth 覆盖与 Responses 调用点没跟上，Mac 测试被 **kwargs 替身遮住（修复见 75a26ca37）。本件只加防复发守卫，不改产品代码。
+- 新增 `agent_py_agent/tests/test_backend_signature_guardrails.py`（3 条）：
+  1. 覆盖签名一致性：按类关系发现 backends 包全部 HttpBackend 子类（含 mixin 祖先，不写死类名），四个传输方法（`_gateway_request`/`request_json`/`request_stream`/`request_stream_iter`）的覆盖必须与基类同参数名/同种类/同默认值有无，失败信息带类名、方法名、逐位差异；
+  2. 调用点关键字：ast 扫描产品代码（tests/ 除外）的 `self.xxx(...)`/`super().xxx(...)`，关键字必须 ∈ 基类签名（`request_stream_lines` 按签名分派不算，`**kwargs` 展开跳过）；
+  3. 比较器自检：名字/种类/默认值三类变化必须判为不同。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  ```bash
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+    agent_py_agent/tests/test_backend_signature_guardrails.py \
+    agent_py_agent/tests/test_backends*.py agent_py_agent/tests/test_model_oauth*.py agent_py_agent/tests/test_responses*.py \
+    -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sigguard   # 401 passed
+  ```
+  guards9 十一文件 **187 passed**；ruff / boundaries=0 / doc_sync(--base 75a26ca37) / strict code-size(hard=0 blocked=False) / diff-check / clean-package 全过；**size_diff 新增 0、消失 54**（首版 3 条 nesting 告警已把循环体内层抽成小函数拆平）。
+- 变异 4/4 KILLED（脚本 `tasks/2026-10-05/sigguard-mutations/mutations.py`，逐个 sha256 还原一致）：
+  1. OAuth `_gateway_request` 退回旧签名（75a26ca37 回退）→ 守卫 1 红；
+  2. Responses 流式写回旧关键字（75a26ca37 回退）→ 守卫 2 红；
+  3. OAuth `request_stream_iter` 去掉 keyword-only（新变异）→ 守卫 1 红；
+  4. 调用点改传签名外关键字（新变异）→ 守卫 2 红。
+- **建议 3a 把本文件加进 guards9 清单**：它守的是跨文件签名合同（覆盖 + 调用点），适合放进每次收尾的架构守卫集。
+- 未验证：真实 OAuth 账号登录/Responses 端到端（沙箱不连真实 provider；修复本身已在 Linux 车道实测）。
+
 ## selfix3 并入 17k 时补的骨架页续页用例（3a，2026-10-05）
 
 - 问题：份额连 1 个字都放不下、只交付骨架页时，续页写死 `max_chars: 1`；模型照着续读会一次只读 1 个字、白耗调用。改为骨架续页不带 `max_chars`，下一次读取按 reader 默认页长。

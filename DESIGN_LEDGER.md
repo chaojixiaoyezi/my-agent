@@ -1,5 +1,13 @@
 # 设计台账
 
+## 后端传输签名守卫（sigguard，2026-10-05，分支 `worker/sigguard`，基于 17k 头 `75a26ca37`；待初审）
+
+- **起因**：cabfix 把 `HttpBackend._gateway_request`、`request_stream_iter` 改成 `(StreamCall, options)` 后，OAuth 两个覆盖与 Responses 流式调用点没跟上，账号登录与 Responses 请求直接 TypeError；Mac 测试因替身 `**kwargs` 遮住签名错位全过，最后靠 Linux 车道抓到（修复 `75a26ca37`）。本件只加防复发守卫，不改产品代码。
+- **守卫一（覆盖签名）**：按类关系发现 `backends` 包全部 `HttpBackend` 子类（不写死类名；含 mixin 祖先，如 `_OAuthMixin`），四个传输方法（`_gateway_request`/`request_json`/`request_stream`/`request_stream_iter`）的覆盖必须与基类同参数名/同种类（位置 vs 关键字专用）/同默认值有无；失败信息带类名、方法名、逐位差异。防"守卫空转"下界：至少检查到 2 个覆盖。
+- **守卫二（调用点）**：ast 扫描产品代码（`agent_py_agent` 包，tests/ 除外）的 `self.xxx(...)`/`super().xxx(...)` 直接调用，关键字必须 ∈ 基类签名；`request_stream_lines` 按签名分派不算；`**kwargs` 展开跳过。
+- **验证**：见 TESTS「后端传输签名守卫」；变异 4/4 KILLED（两个 75a26ca37 回退各打红一个守卫 + 两个新变异）。
+- **建议**：把 `test_backend_signature_guardrails.py` 加进 guards9 清单（跨文件签名合同，收尾必跑）。
+
 ## 睡眠与长暂停后的执行恢复（sleepdesign，2026-10-05，分支 `worker/sleepdesign`；状态：设计，待 3a 定）
 
 - **问题**：墙钟 lease 到期可能早于执行者或具体 attempt 结束；外部副作用与本地回执之间存在不确定窗口，睡眠后只凭 TTL 恢复可能重复执行、重复领取或过早终止。本文不把八个失败回合归因于睡眠。
