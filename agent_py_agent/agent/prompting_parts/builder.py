@@ -508,6 +508,7 @@ def _home_directory_guide(builder: PromptBuilder) -> str:
 #   self_dev_worktree 必须是已存在的 git 工作树绝对路径（有 .git），任一不满足返回空串、提示词不变。这里只写工作约定，
 #   写权限仍由 Full Access 的结构化边界裁决，文字不放宽也不收紧；子代理继承时 access_mode 降为 workspace-write，看不到这段。
 #   属于准备层（会 stat 工作树）；改动须同步 agent_config.yaml 的 self_dev_worktree 注释与 test_prompting_builder.py。
+#   “不改其他检出目录”是默认约定，集成者分派并行任务时会明确指定各自的工作树（10-05 sol3 因这句拒绝分派而停工）。
 # 函数用途: 告诉管理员主代理正在运行的代码在哪（只读参考）、改自己代码去哪个开发工作树、改完怎么交接，避免读错源码目录。
 def _self_development_guide(builder: PromptBuilder) -> str:
     config = getattr(builder, "config", None)
@@ -523,7 +524,8 @@ def _self_development_guide(builder: PromptBuilder) -> str:
         f"- 正在运行的代码: {_builtin_prompt_root()}。部署会整体替换它，只用来核对当前行为，不在这里改。\n"
         f"- 开发工作树: {worktree}（独立分支的 git 工作树）。用户要你改 my-agent 自己的功能或修 bug 时在这里改："
         "先读相关模块、合同和测试，改完跑相关测试（不接管道），提交到当前分支，把分支名和提交号告诉用户，"
-        "由集成者审核、合并和部署。不推送远端，不切换分支，不改其他检出目录。\n"
+        "由集成者审核、合并和部署。不推送远端，不切换分支，不改其他检出目录；"
+        "集成者在任务里明确指定了别的工作树时，就在那个工作树里做。\n"
         "- 只调参数时用 user_config 工具，不手改配置文件。"
     )
 

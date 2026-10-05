@@ -195,6 +195,7 @@ class TestPromptBuilderInit:
         running = Path(__file__).resolve().parents[1]
         assert f"正在运行的代码: {running}。" in rendered
         assert "不推送远端" in rendered and "user_config" in rendered
+        assert "集成者在任务里明确指定了别的工作树时，就在那个工作树里做" in rendered
 
     @pytest.mark.parametrize("case", ["workspace_write", "remote_owner", "not_git", "relative", "unset"])
     def test_dev_worktree_guide_needs_admin_full_access_and_real_worktree(self, tmp_path, monkeypatch, case):
