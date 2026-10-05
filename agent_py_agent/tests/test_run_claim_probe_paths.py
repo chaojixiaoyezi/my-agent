@@ -577,3 +577,30 @@ def test_lost_claim_is_structured_and_interrupts_before_next_action(
     assert len(heartbeats) == 1
     assert store.claims.load(thread_id)["status"] == "cancelled"
     assert not is_interrupted(), "中断标志应在心跳内部作用域退出时清理"
+
+
+def test_corrupted_claim_epoch_blocks_takeover_and_marks_recovery_pending(tmp_path, monkeypatch):
+    """损坏的 claim_epoch 不能被当成可递增的代数：保留原 claim、标 recovery_pending，不接管。
+
+    ds4 初审补充：坏值保护（`_next_claim_epoch` 返回 None → `claim_epoch_unreadable`）原先没有
+    用例，变异（坏值返回 1 后直接接管）存活。这里钉住：非 int 的 epoch 在死亡证明下也不授予新 claim。
+    """
+    import json
+    from pathlib import Path
+
+    store, thread_id = _store_and_thread(tmp_path, "corrupted-epoch")
+    original = _acquire_at(store, thread_id, "old-attempt", 100.0)
+    assert original is not None
+    claim_path = Path(_lane_key(store, thread_id))
+    corrupted = json.loads(claim_path.read_text(encoding="utf-8"))
+    corrupted["claim_epoch"] = "corrupted"
+    claim_path.write_text(json.dumps(corrupted), encoding="utf-8")
+    monkeypatch.setattr(store_claims_module, "process_identity_is_live", lambda _identity: False)
+
+    replacement = _acquire_at(store, thread_id, "new-attempt", 111.0)
+
+    assert replacement is None, "损坏的 epoch 不能授权接管"
+    current = store.claims.load(thread_id)
+    assert current["claim_id"] == original["claim_id"]
+    assert current["phase"] == "recovery_pending"
+    assert current["takeover"] == {"allowed": False, "reason": "claim_epoch_unreadable"}
