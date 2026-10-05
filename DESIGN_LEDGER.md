@@ -1,5 +1,16 @@
 # 设计台账
 
+## WebSocket 流在信封绝对期限处收口（wsdeadline，2026-10-05，分支 `worker/wsdeadline`，基于 17k 头 `07d7b3306`；待初审）
+
+- **来源**：fix3ar 初审实测（探针 B3）：`_events` 的期限检查只在 `recv` 超时分支执行，且 idle 阶段每次事件把截止刷新为 `now + request.timeout`——服务端持续滴事件时信封绝对期限（`request.deadline`）永远不生效，与 HTTP 路径 `_StreamIdleWatchdog` 的不可续期 hard_deadline 不一致。3a 裁定随 17k 修。
+- **修法**（`responses_websocket._events`，两处配合）：
+  1. idle 阶段的截止取 `min(now + request.timeout, request.deadline)`（无 deadline 时行为不变）；
+  2. 每条已收消息也检查一次当前阶段截止——不能只靠 recv 超时分支：持续滴事件时 recv 每次都成功，检查会被跳过（假连接实测只有 ① 时仍不收口，这是 ① 单独不够的原因）。
+- **收口口径**：到点抛 `ProviderTimeoutError`，stage 与 HTTP 路径一致（`_StreamIdleWatchdog.timeout_stage`：首包阶段 `first_event`、见过数据后 `stream_idle`）；异常沿原 `iter_responses_websocket` finally 走 `close_socket()`，连接不泄漏、半截事件不当完成。
+- **用例**：`test_websocket_stream_stops_at_envelope_deadline_despite_live_events`（滴流 + 0.5s 期限：stream_idle、<2s 收口、连接已关、滴数受限）；`test_websocket_stream_without_deadline_keeps_live_events`（无期限对照，主模型长流不受影响）。
+- **变异 4 个（全部抓住）**：idle 截止不取 min；到期不关连接；idle 阶段 stage 写错；去掉逐消息检查。
+- **未验证**：真实 websockets 服务端与真实 ChatGPT 订阅链路（需真实账号）。
+
 ## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）
 
 - **起因**：10-05 凌晨 DeepSeek 长回复流频繁被中途切断（近一小时三成请求失败，码 `MODEL_STREAM_INCOMPLETE`），每次切断整个回合直接失败、会话从头再来（费时费钱）。链路核查：流在完成标记前结束 → `stream_parsers` 返回 `stream_eof` → `response_completion.incomplete_response_fields` 归一成**响应字段**（`runtime_status=error`、`runtime_reason=MODEL_STREAM_INCOMPLETE`、`truncated=True`；工具块被丢弃、`truncated_tool_names` 保留）——它不是异常，所以只重试异常的 `run_with_provider_transient_auto_resume` 没有机会介入；工具循环 `_no_tool_calls_decision` 见 `_is_runtime_status_response` 直接 break，回合以 error 收口。

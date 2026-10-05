@@ -460,3 +460,87 @@ def test_create_message_bytes_are_stable_across_key_insertion_order():
     assert connection.raw == [expected]
     assert expected == json.dumps({"type": "response.create", **payload},
                                   ensure_ascii=False), "首包必须保持调用方给的键序"
+
+
+# ---------------------------------------------------------------- 信封绝对期限在 WebSocket 流上的收口（wsdeadline，2026-10-05）
+
+# LLM: 滴流假连接：每次 recv 间隔 0.05 秒返回一条非终止事件；记录发送、关闭路径与滴数。
+#   覆盖"服务端持续有事件"这一条路径（绝对期限此前只在连接前检查，idle 每次事件刷新）。
+# 函数用途: 为绝对期限收口用例提供持续滴事件的假连接。
+class DripConnection:
+    def __init__(self, interval=0.05):
+        self.interval = interval
+        self.count = 0
+        self.sent = []
+        self.closed = False
+        self.closed_socket = False
+
+    def send(self, text):
+        self.sent.append(text)
+
+    def recv(self, timeout=None):
+        time.sleep(self.interval)
+        self.count += 1
+        return json.dumps({"type": "response.in_progress"})
+
+    def close(self):
+        self.closed = True
+
+    def close_socket(self):
+        self.closed_socket = True
+
+
+# LLM: wsdeadline：idle 阶段的截止取「常规空闲窗口」与「信封绝对期限」更早者（与 HTTP 路径
+#   _StreamIdleWatchdog 的 hard_deadline 同口径）。服务端持续滴非终止事件时，绝对期限必须终止流：
+#   结构化 ProviderTimeoutError（stage=stream_idle，与 HTTP 硬期限在见过数据后的取值一致）、连接已关、
+#   不把半截事件当完成。3 秒上限保护：实现回退时用例变红而不是挂起。
+# 函数用途: 钉住 WebSocket 流在信封绝对期限处收口。
+def test_websocket_stream_stops_at_envelope_deadline_despite_live_events(monkeypatch):
+    connection = DripConnection()
+    monkeypatch.setattr(ws, "_connect", lambda request: connection)
+    request = GatewayRequest(
+        api_base="https://chatgpt.example.test/backend-api/codex", api_key="k", path="/responses",
+        payload={"model": "m", "stream": True, "input": []},
+        headers={"Authorization": "Bearer private-token"},
+        timeout=10, first_event_timeout=1.0, deadline=time.monotonic() + 0.5)
+    started = time.monotonic()
+    hit_stage = None
+    generator = ws.iter_responses_websocket(request)
+    try:
+        while time.monotonic() - started <= 3.0:
+            next(generator)
+    except ProviderTimeoutError as exc:
+        hit_stage = exc.stage
+    except StopIteration:
+        pass
+    finally:
+        generator.close()
+    elapsed = time.monotonic() - started
+    assert hit_stage == "stream_idle", f"绝对期限未按 stream_idle 收口（hit={hit_stage!r}，{elapsed:.2f}s）"
+    assert elapsed < 2.0, f"应在 0.5s 期限附近收口，实际 {elapsed:.2f}s"
+    assert connection.closed_socket, "到期后必须关 socket，不能泄漏连接"
+    assert connection.count < 30, f"不得跑满 3 秒的滴数（实际 {connection.count}）"
+
+
+# LLM: 对照：信封没有绝对期限时（主模型路径），持续有效事件照旧按 request.timeout 滚动，不被截断——
+#   本次改动只影响带 deadline 的调用（辅助调用/探针），主模型长流语义不变。
+# 函数用途: 证明无 deadline 时 WebSocket 流不被新逻辑截断。
+def test_websocket_stream_without_deadline_keeps_live_events():
+    connection = DripConnection()
+    request = GatewayRequest(
+        api_base="https://chatgpt.example.test/backend-api/codex", api_key="k", path="/responses",
+        payload={"model": "m", "stream": True, "input": []},
+        headers={"Authorization": "Bearer private-token"},
+        timeout=10, first_event_timeout=1.0, deadline=None)
+    started = time.monotonic()
+    produced = 0
+    generator = ws._events(connection, request)
+    try:
+        while time.monotonic() - started < 1.0:
+            next(generator)
+            produced += 1
+    except Exception as exc:  # noqa: BLE001 - 无期限时不应有任何超时
+        raise AssertionError(f"无 deadline 的流不应被截断: {exc!r}") from exc
+    finally:
+        generator.close()
+    assert produced >= 10, f"1 秒内应持续产出事件，实际 {produced}"

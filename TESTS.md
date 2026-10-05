@@ -1,5 +1,28 @@
 # 测试与发布验收
 
+## WebSocket 流在信封绝对期限处收口（wsdeadline，2026-10-05，分支 `worker/wsdeadline`，基于 17k 头 `07d7b3306`；待初审）
+
+**来源**：fix3ar 初审探针 B3 实测的漏网（idle 每次事件刷新截止 + 检查只在 recv 超时分支 → 持续滴事件时绝对期限不生效）；3a 裁定随 17k 修。
+
+**改动**（`agent_py_agent/agent/backends/responses_websocket.py`）：
+- `_events` idle 阶段截止改 `min(now + request.timeout, request.deadline)`；每条已收消息加一次截止检查（两处配合才完整：假连接实测只有 min 时，滴流场景检查仍被跳过）。
+- 模块注释与 `_events` 注释同步；stage 口径与 HTTP `_StreamIdleWatchdog` 一致（first_event / stream_idle）。
+
+**新增用例**（`test_responses_websocket.py`）：
+- `test_websocket_stream_stops_at_envelope_deadline_despite_live_events`：0.05s 滴流 + deadline=+0.5s → stream_idle 超时、<2s 收口、连接已关、滴数受限。
+- `test_websocket_stream_without_deadline_keeps_live_events`：无 deadline 时 1s 内持续产出，不被截断。
+
+**变异（4 个，全部 KILLED，原样还原）**：
+- M1 idle 截止不取 min → 目标用例红；
+- M2 到期不关连接 → 连接断言红；
+- M3 idle 阶段 stage 写错 → stage 断言红；
+- M4 去掉逐消息检查 → 目标用例红（假连接下 recv 永不超时，检查是唯一收口路径）。
+
+**命令与结果**：
+- responses 全家 + oauth 三件套（8 文件）**117 passed**；超时相关 3 文件 **54 passed**；本文件 **21 passed**（含新 2 条）。
+- guards9（12 文件）**190 passed**；ruff `All checks passed!`；`check_import_boundaries` findings=0；`check_doc_sync --base 07d7b3306` DOC_SYNC_PASS；strict code-size `blocked=False`（报告已还原）；size_diff 新增告警 0 / 消失 55；clean package OK；`git diff --check` 干净。
+- **未验证**：真实 websockets 服务端、真实 ChatGPT 订阅链路（需真实账号）。
+
 ## 模型流未完整结束的回合内重试（streamretry，2026-10-05，分支 `worker/streamretry`，基于 17k 头 `768c73272`；待初审）
 
 - 来源：DeepSeek 长回复流频繁被切断（`MODEL_STREAM_INCOMPLETE`），原语义是整个回合直接失败。修法见 DESIGN_LEDGER 同名段：响应级重试复用 `run_with_provider_transient_auto_resume` 的阶梯/预算/通知，耗尽时返回原响应（不抛异常）。

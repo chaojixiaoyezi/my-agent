@@ -2,7 +2,8 @@
 #   prefer_websockets）。同一个 GatewayRequest（地址、认证头、请求体）改用 wss 发送 {"type": "response.create", ...}，
 #   逐条产出与 SSE data 相同的 JSON 事件文本，交给 responses_wire.collect_response，不另建解析或状态。
 #   09-30 实测：普通 SSE 长输出在服务端中途卡住、约 60 秒后被关（gpt-6-luna 4/4），同一请求走 WebSocket 2/2 完整。
-#   超时语义与 SSE 相同：发送/首个事件各有首包预算，之后按 request.timeout 滚动空闲；/stop 直接关 socket，
+#   超时语义与 SSE 相同：发送/首个事件各有首包预算，之后按 request.timeout 滚动空闲（信封带绝对期限时与
+#   request.deadline 取更早者，与 HTTP 路径的硬期限同口径）；/stop 直接关 socket，
 #   不等对端关闭握手，再抛 InterruptedError；
 #   握手失败沿 HTTP 同一分类（_runtime_http_error / _runtime_network_error）并按同一有限次数重试；握手阶段的超时
 #   （TLS/升级握手，response.create 还没发出）照 SSE 归 first_event，交给回合层退避重试，不落 provider_declared；
@@ -162,8 +163,10 @@ def _expire_websocket_send(connection, timed_out: Event) -> None:
         return
 
 
-# LLM: 首条事件用首包预算，之后每条有效消息把期限滚动到 request.timeout；每秒醒一次检查停止。
-#   回复完成前连接断开：用户停止→InterruptedError；否则可恢复的 ProviderTransientError（不当成完整回复），
+# LLM: 首条事件用首包预算，之后每条有效消息把期限滚动到 request.timeout——信封带绝对期限
+#   （request.deadline，cabfix 起辅助调用会给）时与它取更早者，与 HTTP 路径 _StreamIdleWatchdog 的
+#   hard_deadline 同口径：持续有效事件也不能越过绝对期限；None 时行为与旧版完全一致。
+#   每秒醒一次检查停止；回复完成前连接断开：用户停止→InterruptedError；否则可恢复的 ProviderTransientError（不当成完整回复），
 #   文本附当前阶段（first_event/stream_idle）、连接后秒数和关闭帧信息，只作诊断，不参与任何判定。
 #   终态事件（completed/incomplete/failed/error）产出后即结束，只读结构化 type 字段判断。
 # 函数用途: 逐条读取服务端事件，处理空闲超时、用户停止和中途断开。
@@ -187,11 +190,17 @@ def _events(connection, request: GatewayRequest) -> Iterator[str]:
                 f"{time.monotonic() - started:.1f} 秒，{_close_detail(exc)}）。本次请求可由重试/恢复/接管继续处理；"
                 f"底层错误: {type(exc).__name__}") from exc
         _raise_if_stopped()
+        # LLM: 期限检查不能只放在 recv 超时分支：服务端持续滴事件时 recv 每次都成功，跳过检查会让
+        #   绝对期限永远不生效（wsdeadline 用例实测）。这里对每条已收消息也检查一次当前阶段截止。
+        if time.monotonic() >= deadline:
+            raise _stream_timeout_error(request, stage) from None
         text = message if isinstance(message, str) else bytes(message).decode("utf-8", "replace")
         yield text
         if _event_type(text) in _TERMINAL_EVENT_TYPES:
             return
-        deadline, stage = time.monotonic() + max(1.0, float(request.timeout or 0)), "stream_idle"
+        idle_deadline = time.monotonic() + max(1.0, float(request.timeout or 0))
+        deadline = idle_deadline if request.deadline is None else min(idle_deadline, request.deadline)
+        stage = "stream_idle"
 
 
 # LLM: 只取 websockets 关闭异常上的结构化关闭帧（先看服务端 rcvd，再看本端 sent）；原因文本截到 120 字。
