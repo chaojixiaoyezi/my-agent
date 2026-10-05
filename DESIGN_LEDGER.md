@@ -1,5 +1,26 @@
 # 设计台账
 
+## 模拟器补 tool_choice 两条规则 + 压缩用例最终口径（cachesim2，2026-10-04，分支 `worker/cache-sim`，基于 `6e31e5855`；3a 复审通过，已并入 step17k）
+
+- **来源**：3a 追加实测（`ds_probe4/5.out.txt`）：① 开思考时 `tool_choice=none` 被接受，`required` 和指定工具回 400（“Thinking mode does not support this tool_choice”）；② `tool_choice=none` 时服务端不渲染工具定义，prompt token 等于“不带 tools”（4029 对 4029，auto 是 4430），所以 none 的前缀在 system 之后就和 auto 请求分叉，长历史命中 0；压缩或辅助请求要复用主对话缓存，必须同分区 + 同一套 tools + auto + system 和历史逐条相同，压缩指令放最后一条 user。
+- **模拟器**（`cache_prefix_simulator.py`）：新增 `unsupported_tool_choice`（思考模式只认 auto/none）与 `renders_tools`（none 时不把 tools 放进前缀序列），`prefix_units` 与 `serve` 按它们分支；两种 400 各带对应官网原文。顺带把 `wire` 的探针分支从纯文本改成带同一 nonce 的结构化工具调用（原来按文档直接 `monkeypatch.setattr(http, "post_json", sim.wire)` 用时探针会判“不支持原生工具”而跑不起来；新增单测钉住）。
+- **用例**：新增 `test_cache_prefix_simulator.py`（4 条纯单测：tool_choice 400、none 前缀等于不带 tools、400 只在思考模式生效、探针响应形状）。压缩那条 strict xfail 改成新口径 `test_compaction_call_reuses_the_conversation_history_prefix`：用调用前后记录差识别压缩调用，断言它与主对话**同分区**、**命中量 ≥ 主对话历史前缀的 90%**（luna3 的 `worker/cache-compact` 修好会 XPASS，届时去掉标记）。现状对照实测：压缩请求落在 `(model, enabled, default)`、不带历史（prompt 46 字符）、命中 0。
+- **变异**：① 去掉“none 不渲染 tools”→ `test_none_tool_choice_prefix_equals_a_request_without_tools` 变红；② 去掉 400 规则 → `test_thinking_mode_rejects_required_and_named_tool_choice` 变红。两个都按字节还原。
+- **验证**：见 `TESTS.md`“模拟器 tool_choice 规则与压缩用例最终口径（cachesim2）”小节。
+- **未验证 / 未做**：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；压缩修复合入前，压缩用例按已知未修保持 xfail。
+
+## 缓存修复回归护栏：模拟 DeepSeek 前缀缓存（cachesim，2026-10-04，分支 `worker/cache-sim`，基于 17j 头 `6e31e5855`；3a 复审通过，已并入 step17k）
+
+- **来源**：用户要求“保证后续 API 价格能降下来”，修好缓存（sol1 的思考开关、luna3 的压缩档位）以后不能悄悄回退。3a 官网实测（`decision-evidence/deepseek-cache-audit-1004/server_probe_facts.md`）：缓存按 `(model, thinking 开关, reasoning_effort)` 分区，换任何一个整段不命中；思考模式下最后一条 user 之后的 assistant 缺 `reasoning_content` 会被 400。
+- **做法**：新增**测试辅助** `agent_py_agent/tests/cache_prefix_simulator.py`（前缀缓存模拟器 + 假传输层）与端到端用例 `agent_py_agent/tests/test_cache_prefix_regression.py`。只替换 `backends.http.post_json`，其余走真实代码：真 SimpleAgent、真 Gateway 前台回合（`_run_gateway_ask`）、真 openai_compatible 组包、真工具循环。**不改任何产品代码**。
+- **模拟规则（全部来自实测，不连网）**：分区键 = `(model, thinking 分区, reasoning_effort 分区)`，其中“不带档位 / high / 显式开思考”同区，`low`、`max`、`disabled` 各自独立；命中量 = 同分区里以前请求的最长公共前缀（按 system → tools → messages 逐条比较，字符数当 token 近似值）；思考模式下最后一条 user 之后的 assistant 缺 `reasoning_content` → 回 400。
+- **场景**：三轮真实对话，每轮一次工具调用；第二轮最终答复**故意不带思考内容**（官网实测这种答复合法，但旧实现会因此把之后所有请求关思考）；中间插一条用户消息；线程档位 `max`（与生产一致）；端点用真实 `api.deepseek.com` 主机名——思考开关只对已核对端点生效，换别的地址会绕过要护栏的那条分支。
+- **断言与现状**：跨轮首调命中 ≥ **90%**（实测 0.956–0.967；阈值理由见用例注释）；整个场景只有一个缓存分区；没有请求被判 400；**历史里确实累积着缺思考的旧答复时，请求不得被切到 `disabled` 分区**。压缩类调用一条按现有事实标 **strict xfail（原因写 luna3 的 `worker/cache-compact`）**；该用例已在 cachesim2 里改成“同分区 + 命中量 ≥ 主对话历史前缀 90%”的最终口径，修好会 XPASS 失败提醒去掉标记。
+- **变异**：把 `_thinking_mode_supported` 退回“查全部历史”，护栏用例变红并明确指出第 2–7 次调用被切到关思考分区；原文件按字节还原。
+- **验证**：见 `TESTS.md`“缓存修复回归护栏（cachesim）”小节。
+- **未验证 / 未做**：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；跨轮历史改写（sol1/ds7）没有独立的 xfail 用例——本轮只覆盖了思考开关这一条已知未修；压缩档位修复合入后需去掉 xfail 并复跑。
+
+
 ## 沙箱内按能力跳过、沙箱外强制真跑（capsk + capsk2，2026-10-04，分支 `worker/sandbox-cap-skips-v2`；3a 沙箱外默认、强制两种模式复跑验收，已并入 step17j）
 
 - **问题**：共享测试设施的能力门曾在收集阶段后加 `usefixtures`，未进入已收集用例的 fixture 列表，导致强制失败不可靠；模块级标记还会跳过无关模拟测试；Seatbelt 用例缺少 macOS 平台条件；`ps` 只看返回码会把空/错误 PID 输出误判为可用。

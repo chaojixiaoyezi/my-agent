@@ -1,5 +1,29 @@
 # 测试与发布验收
 
+## 模拟器 tool_choice 规则与压缩用例最终口径（cachesim2，2026-10-04，分支 `worker/cache-sim`；已并入 step17k）
+
+- 改动：`agent_py_agent/tests/cache_prefix_simulator.py` 补两条实测规则（思考模式 tool_choice 只认 auto/none，否则 400；none 不渲染 tools、前缀等价于不带 tools）并修探针响应形状；`agent_py_agent/tests/test_cache_prefix_regression.py` 的压缩用例改成新口径；新增 `agent_py_agent/tests/test_cache_prefix_simulator.py`（4 条单测）。仍**不改产品代码**。
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD $PY -m pytest agent_py_agent/tests/test_cache_prefix_regression.py agent_py_agent/tests/test_cache_prefix_simulator.py -q` → **5 passed, 1 xfailed**（xfail 是压缩用例，按 luna3 未修如实失败）。
+  - `PYTHONPATH=$PWD $PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt | tr '\n' ' ') -q` → 见交接报告。
+- 压缩用例现状对照（实测）：压缩请求落在 `(model, enabled, default)`、不带历史（prompt 46 字符）、命中 0；主对话在 `(model, enabled, max)`、前缀 79597 字符。修复后（同分区、同 tools、auto、system/历史逐条相同）命中应 ≥90%，届时 XPASS 提醒去掉 xfail。
+- 变异（各只改一处，按字节还原）：
+  | 变异 | 结果 |
+  | --- | --- |
+  | 去掉“none 不渲染 tools” | KILLED（`test_none_tool_choice_prefix_equals_a_request_without_tools`） |
+  | 去掉 400 规则 | KILLED（`test_thinking_mode_rejects_required_and_named_tool_choice`） |
+- 未验证：真实 API 端到端读数（需联网与密钥）；压缩修复合入前该用例保持 xfail。
+
+## 缓存修复回归护栏：模拟 DeepSeek 前缀缓存（cachesim，2026-10-04，分支 `worker/cache-sim`；已并入 step17k）
+
+- 新增测试辅助 `agent_py_agent/tests/cache_prefix_simulator.py`（模拟器 + 假传输）、用例 `agent_py_agent/tests/test_cache_prefix_regression.py`。**不改产品代码。**
+- 命令（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：`PYTHONPATH=$PWD $PY -m pytest agent_py_agent/tests/test_cache_prefix_regression.py -q` → **1 passed, 1 xfailed**。
+- 正向对照（`test_three_real_turns_keep_the_cache_prefix_hot`）：三轮真实回合 + 一次插话，实测每次调用命中率 `[0.0, 0.956, 0.961, 0.964, 0.958, 0.967]` 中的跨轮首调都 ≥ 0.90；全程只有一个分区 `(deepseek-v4-flash, enabled, max)`；无 400；历史里累积的“缺思考旧答复”最多 5 条，请求仍未被切到关思考分区。
+- 现状对照（压缩用例，`@pytest.mark.xfail(strict=True, reason="压缩请求与主对话对齐未修：luna3（worker/cache-compact）")`）：压缩辅助调用落在 `(model, enabled, default)`、不带历史，与主对话 `(model, enabled, max)` 不同分区——**当前如实失败**；该用例已在 cachesim2 里改成“同分区 + 命中量 ≥ 主对话历史前缀 90%”的最终口径，修好后会 XPASS 失败，提醒去掉标记。
+- 变异：`_thinking_mode_supported` 退回“遍历全部历史” → 用例变红，报“历史里有缺思考的旧答复（最多 5 条）时，请求被切到了关思考分区：第 [2, 3, 4, 5, 6, 7] 次调用”；产品文件按字节还原（sha256 一致）。
+- 未验证：真实 API 端到端读数（需联网与密钥）；跨轮历史改写（sol1/ds7）没有独立 xfail 用例。
+
+
 ## 沙箱内按能力跳过、沙箱外强制真跑（capsk + capsk2，2026-10-04，`worker/sandbox-cap-skips-v2`；已并入 step17j）
 
 - 3a 沙箱外复跑（7 个文件）：默认模式 252 passed、2 skipped；`MY_AGENT_TEST_REQUIRE_CAPABILITIES=1` 强制模式同样 252 passed、2 skipped，没有任何能力门跳过或失败，57 条依赖能力的用例都真跑通过。两个跳过都是环境原因：本机没有非回环地址；本机能力齐全，验证不了缺失分支。
