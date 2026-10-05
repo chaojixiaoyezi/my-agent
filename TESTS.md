@@ -27,6 +27,19 @@
   - guards9 12 文件、ruff、boundaries、doc_sync、strict code-size、size_diff、diff --check、clean_package 结果见交接报告。
 - 未验证：真实 DeepSeek 复跑（修复效果需 3a 用同样 6 次重跑观察失败率）；修复前从未续跑过，本轮只保证恢复可达且有界。
 
+## 清扫与收口诊断的两处收口修正（obsfix12b，2026-10-05，分支 `worker/obsfix12`）
+
+- 背景与修法见 `DESIGN_LEDGER.md` 同名小节。
+- 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_closeout_recovery_dependencies.py agent_py_agent/tests/test_runtime_db_operations.py -q` → **113 passed**。
+  - guards9 全部 12 个文件 → **190 passed**；`check_import_boundaries.py` → findings=0；ruff 过；`check_doc_sync.py` → DOC_SYNC_PASS；strict code-size hard=0；`size_diff.sh` → **新增 0 / 消失 57**；`check_clean_package.py .` → OK；`git diff --check` 干净。
+- 新增用例：`test_cleanup_keeps_unstarted_claimed_operation_recoverable`（含未启动占位的死亡根回合清扫后仍 recovered=True 且占位被取消）、`test_status_conflict_written_again_for_new_attempt`（换代后新 attempt 仍写自己的诊断）、`test_cleanup_skips_terminal_status_with_zero_ended_at`（ended_at=0 不清扫、两巡幂等）。
+- 变异（3 个，全部 KILLED；脚本 `/private/tmp/claude-501/ds2b/mut.py`，跑完字节还原、`git status` 只余有意改动）：清扫回退（不排除未启动 CLAIMED）、去重去掉 attempt_id、清扫去掉 ended_at>0。
+- 连带测试（9 文件，含必跑 m1_joint×2 / background_claim×3 / claim_binding）与基线复核：
+  - **m1_joint 7 个失败**（`thread_ref` 空串 vs 哈希）只在本分支（f7849d7ff 线）出现；换到 **17l 当前头 `b6c79cbce` 临时工作树全部通过**——属已撤回 tref2 的遗留，与本次改动无关。
+  - `test_dispatch_liveness_and_revive.py::test_supervision_kills_fully_stalled_source_worker_host`（assert 0 == 2）在 `f7849d7ff` 与 `b6c79cbce` 两个临时工作树均同样失败——跨版本既有失败（真实子进程 terminate 路径在本沙箱不可用），交 3a 沙箱外复核。
+- 未验证：真实 Gateway/子代理端到端未跑；本分支线的其余差异由 3a 车道全量覆盖。
+
 ## runner 收口 unknown 空转与终态 attempt 孤儿操作修复（obsfix12，2026-10-05，分支 `worker/obsfix12`）
 
 - 背景、根因与两条修法见 `DESIGN_LEDGER.md` 同名两节。

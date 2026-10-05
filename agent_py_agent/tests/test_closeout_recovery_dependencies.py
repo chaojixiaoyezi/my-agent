@@ -338,3 +338,42 @@ def test_stale_wal_after_new_attempt_is_rejected_not_settled(tmp_path):
     events = repo.events_for_attempt(chain["attempt_id"], limit=100)
     blocked = [event for event in events if event["event_type"] == "closeout_blocked"]
     assert blocked, events
+
+
+# LLM: obsfix12b：status_conflict 去重身份必须带 attempt_id——/recover 后新执行者再次死亡时，
+#   第二次诊断不能被旧 attempt 的记录吞掉（此前只按 agent_run_id 查重）。
+# 函数用途: 验证同一 run 换代后的新 attempt 仍能写出自己的 status_conflict。
+def test_status_conflict_written_again_for_new_attempt(tmp_path):
+    repo, chain, task = _unknown_run_closeout(tmp_path)
+
+    def conflict_attempts():
+        with repo._runtime_connection() as conn:
+            rows = conn.execute(
+                "SELECT attempt_id FROM runtime_events WHERE event_type = 'status_conflict' "
+                "AND agent_run_id = ? ORDER BY seq",
+                (chain["agent_run_id"],),
+            ).fetchall()
+        return [str(row["attempt_id"] or "") for row in rows]
+
+    repo.settle_agent_run(
+        agent_run_id=chain["agent_run_id"], status="done", attempt_id=chain["attempt_id"])
+    repo.settle_agent_run(
+        agent_run_id=chain["agent_run_id"], status="done", attempt_id=chain["attempt_id"])
+    assert conflict_attempts() == [chain["attempt_id"]]
+
+    repo.recover_attempt_unknown(
+        chain["attempt_id"], operator="test", effect_disposition="confirmed_noop")
+    new_attempt = repo.create_attempt(chain["agent_run_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status = 'unknown' WHERE agent_run_id = ?",
+            (chain["agent_run_id"],),
+        )
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'unknown', ended_at = ? WHERE attempt_id = ?",
+            (time.time(), new_attempt["attempt_id"]),
+        )
+    repo.settle_agent_run(
+        agent_run_id=chain["agent_run_id"], status="done", attempt_id=new_attempt["attempt_id"])
+
+    assert conflict_attempts() == [chain["attempt_id"], new_attempt["attempt_id"]]

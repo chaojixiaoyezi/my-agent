@@ -550,3 +550,57 @@ def test_recorded_active_turn_recovery_blocks_dirty_resource(tmp_path):
     assert result["status"] == "blocked"
     assert result["reason"] == "resource_state_uncertain"
     assert result["blocking_mutation_ids"] == ["mutation-dirty"]
+
+
+# LLM: obsfix12b 初审必须改：清扫不得抢先翻"未启动 CLAIMED"（handler_started_at=0）——它是
+#   _active_turn_operation_recovery_report 唯一可安全忽略的形态；被翻成 UNKNOWN 后
+#   recover_recorded_active_turn_attempt 会从 recovered 变 blocked（operation_outcome_uncertain），
+#   卡死唯一的自动恢复出口。
+# 函数用途: 验证含未启动工具占位的死亡根回合，清扫后仍能自动恢复。
+def test_cleanup_keeps_unstarted_claimed_operation_recoverable(tmp_path):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-unstarted-claim-recovery"
+    record = repo.record_run_creation(
+        owner_id="local/main",
+        goal="恢复同一回合",
+        conversation_task_id=request_id,
+        run_id=request_id,
+        role="main",
+    )
+    operation = repo.create_tool_operation(
+        agent_run_id=record["agent_run_id"],
+        attempt_id=record["attempt_id"],
+        operation_type="write_file",
+    )
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='unknown', ended_at=? WHERE attempt_id=?",
+            (time.time(), record["attempt_id"]),
+        )
+        conn.execute(
+            "UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=?",
+            (time.time(), record["agent_run_id"]),
+        )
+
+    repo.reconcile_superseded_attempts(now=12345.0)
+
+    row = repo.get_operation(operation["operation_id"])
+    assert row["status"] == "CLAIMED" and float(row["handler_started_at"]) == 0, dict(row)
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=str(record["task_id"]),
+        run_id=request_id,
+        recorded_operation_facts={},
+        operator="test-cleanup-recovery",
+    )
+    assert result["status"] == "recovered", result
+    with repo._runtime_connection() as conn:
+        attempt = conn.execute(
+            "SELECT status FROM agent_attempts WHERE attempt_id=?",
+            (record["attempt_id"],),
+        ).fetchone()
+        cancelled = conn.execute(
+            "SELECT status FROM tool_operations WHERE operation_id=?",
+            (operation["operation_id"],),
+        ).fetchone()
+    assert attempt["status"] == "recovered"
+    assert cancelled["status"] == "CANCELLED"

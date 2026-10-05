@@ -29,6 +29,14 @@
 - **验证**：新 `test_filesystem_logical_ref_guard.py` 5 用例（判定集合/绝对路径不拦与中间段命中/统一 resolver 拒绝/正常路径/三写工具真实入口错误码、零文件效应及模型视图无宿主临时路径）；相关回归一批 87 项全过；4 个单点变异全 KILLED；常数目录无变化（只收数值常量，`--check` 一致）。命令见 TESTS。
 - **未验证**：真实会话里模型行为回归（需真实链路观察）、非作者初审。
 
+## 清扫与收口诊断的两处收口修正（obsfix12b，2026-10-05，分支 `worker/obsfix12`，基于 `fe40b3bc7`）
+
+- **来源（obsfix12 初审判"必须改"）**：第 2 条的清扫把"未启动 CLAIMED"（handler_started_at=0）也翻成 UNKNOWN——它是 `_active_turn_operation_recovery_report` 唯一可安全忽略的形态（其余一律进 blockers），清扫抢先翻后 `recover_recorded_active_turn_attempt` 从 recovered 变 blocked（operation_outcome_uncertain），唯一的自动恢复出口被卡死。**修法选"清扫排除未启动 CLAIMED"**（而非直接写 CANCELLED）：与既有语义分工一致——未启动没有副作用风险，留给恢复报告的安全忽略与 `_cancel_unstarted_tool_operations` 的取消路径；清扫的"翻 UNKNOWN"语义前提是"副作用可能已发生"，对确定未启动的占位不适用。已启动的 CLAIMED（handler_started_at>0）与 EXECUTING 照翻。
+- **小问题 1**：status_conflict 去重查询补 attempt_id——/recover 后新执行者再次死亡时，第二次诊断不再被旧 attempt 的记录吞掉。
+- **小问题 2**：补"attempt 状态终态但 ended_at=0 不清扫"的负例（初审判定 `aa.ended_at > 0` 条件缺用例）。
+- **用例**：含未启动工具占位的死亡根回合清扫后仍能自动恢复（recovered=True 且占位被取消）；同一 run 换代后的新 attempt 仍能写出自己的 status_conflict；ended_at=0 不清扫（两巡幂等）。
+- **验证**：见 `TESTS.md` obsfix12b 节（含 3 个变异、连带测试与基线复核）。
+
 ## runner 收口 unknown 空转修复（obsfix12 第 1 条，2026-10-05，分支 `worker/obsfix12`，基于 17l 头 `f7849d7ff`）
 
 - **来源（生产实证）**：每天 400–1000 条 `status_conflict` 事件全是同一个 unknown run 刷出来的。根因：执行器死亡把 run 置 `unknown`（`executor_liveness.mark_exited_attempt_unknown`；unknown 只有人工 /recover 能变），该 run 有一条子代理结果收口 WAL，60 秒一巡的 `recover_pending_closeouts` 每次重试 `settle_agent_run` 都 fail-closed 追加一条无去重的 `status_conflict`，返回被当成"可重试"。

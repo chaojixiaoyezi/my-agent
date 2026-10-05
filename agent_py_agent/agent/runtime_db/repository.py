@@ -948,7 +948,12 @@ class RuntimeRepository(
     #   都不翻 op；find_orphaned_attempts 又只看非终态 attempt 的锁——生产有 11 条 EXECUTING
     #   从 9 月挂到现在。本清扫按 mark_operation_unknown 的语义只翻 op（保留 claim 元数据 +
     #   原因码）、每个操作一条审计事件；不动 attempt/run/锁（终态 attempt 的锁各自路径已处置）。
-    #   幂等：只匹配 CLAIMED/EXECUTING，翻成 UNKNOWN 后不再匹配，重复巡检无副作用。
+    #   幂等：只匹配未结状态，翻成 UNKNOWN 后不再匹配，重复巡检无副作用。
+    #   obsfix12b 初审修正：未启动的 CLAIMED（handler_started_at=0）不翻——它没有副作用风险，
+    #   是 _active_turn_operation_recovery_report 唯一可安全忽略的形态、也是
+    #   _cancel_unstarted_tool_operations 的取消对象；清扫抢先翻 UNKNOWN 会把
+    #   recover_recorded_active_turn_attempt 从 recovered 打成 blocked（operation_outcome_uncertain），
+    #   卡死唯一的自动恢复出口。已启动的 CLAIMED（handler_started_at>0）与 EXECUTING 照翻。
     # 函数用途: 把终态执行轮下残留的未结工具操作翻成 UNKNOWN 并留下审计事件。
     def _cleanup_terminal_attempt_operations_conn(
         self, conn: sqlite3.Connection, *, now: float
@@ -960,9 +965,9 @@ class RuntimeRepository(
             "aa.agent_run_id, aa.status AS attempt_status "
             "FROM tool_operations op JOIN agent_attempts aa "
             "ON aa.attempt_id = op.attempt_id "
-            f"WHERE op.status IN (?, ?) AND aa.ended_at > 0 "
-            f"AND aa.status IN ({placeholders})",
-            (OP_CLAIMED, OP_EXECUTING, *terminal),
+            f"WHERE aa.ended_at > 0 AND aa.status IN ({placeholders}) "
+            "AND (op.status = ? OR (op.status = ? AND op.handler_started_at > 0))",
+            (*terminal, OP_EXECUTING, OP_CLAIMED),
         ).fetchall()
         return [
             str(row["operation_id"])
@@ -2370,12 +2375,15 @@ class RuntimeRepository(
                 #   每 60 秒重试一次 settle，此前每次重试都追加一条 status_conflict——生产
                 #   每天 400–1000 条重复全来自同一个 run（unknown 只有人工 /recover 能变，
                 #   自动重试永远失败）。照 orphan_reclaim_blocked 的"同身份+原因只写一次"
-                #   模式：同一 agent_run_id 已有 reason=unknown_run_status 的 status_conflict
-                #   时跳过写入。状态机与返回值语义不变。
+                #   模式：同一 agent_run_id + 同一 attempt 已有 reason=unknown_run_status 的
+                #   status_conflict 时跳过写入。去重身份必须带 attempt_id（obsfix12b 初审）：
+                #   /recover 后新执行者再次死亡时，第二次诊断不能被旧 attempt 的记录吞掉。
+                #   状态机与返回值语义不变。
                 existing = conn.execute(
                     "SELECT 1 FROM runtime_events WHERE event_type = 'status_conflict' "
-                    "AND agent_run_id = ? AND payload_json LIKE ? LIMIT 1",
-                    (agent_run_id, '%"reason": "unknown_run_status"%'),
+                    "AND agent_run_id = ? AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
+                    (agent_run_id, str(row["current_attempt_id"] or ""),
+                     '%"reason": "unknown_run_status"%'),
                 ).fetchone()
                 if existing is None:
                     self._append_event_conn(

@@ -1555,3 +1555,25 @@ def test_legacy_artifact_schema_migrates_pk_and_backfills_digest(tmp_path):
     assert row["artifact_record_id"] == "abc123digest"
     assert row["content_digest"] == "abc123digest"  # 旧值回填
     assert row["content_path"] == ""  # 无 store 内容 → load 回退 live
+
+
+# LLM: obsfix12b：清扫要求 attempt 已终态且 ended_at>0——状态是终态但 ended_at=0 的行不在清扫
+#   范围（ended_at=0 表示结束时间未落账，不能当"终态已确认"的证据；初审判定该条件缺用例）。
+# 函数用途: 验证终态状态但 ended_at=0 的 attempt 下 op 不被清扫。
+def test_cleanup_skips_terminal_status_with_zero_ended_at(ctx):
+    chain, repo = ctx
+    op = repo.create_tool_operation(
+        agent_run_id=chain["agent_run_id"], attempt_id=chain["attempt_id"],
+        operation_type="run_command",
+    )
+    repo.mark_operation_executing(op["operation_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'unknown', ended_at = 0 WHERE attempt_id = ?",
+            (chain["attempt_id"],),
+        )
+
+    assert repo.reconcile_superseded_attempts(now=12345.0) == []
+    assert repo.get_operation(op["operation_id"])["status"] == "EXECUTING"
+    assert repo.reconcile_superseded_attempts(now=12346.0) == []
+    assert repo.get_operation(op["operation_id"])["status"] == "EXECUTING"
