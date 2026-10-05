@@ -538,6 +538,92 @@ def test_g4_periodic_reconcile_repairs_legacy_noncurrent_active_attempt(ctx):
     assert events[-1]["payload"]["reason"] == "stale_noncurrent_reconcile"
 
 
+# LLM: obsfix12 第 2 条——造出"终态 attempt + 残留未结 op"的四种形态：A=current unknown+
+#   EXECUTING、B=recovered+EXECUTING、C=cancelled+CLAIMED(handler 已启动)、D=running+EXECUTING
+#   （current，应被跳过）。直接 INSERT 是为了绕开换代事务的自动收尾——现实里这些行由崩溃与
+#   人工恢复留下。
+# 函数用途: 造清扫用例所需的 attempt 与工具操作行，返回 A 的 op 行与各 attempt ID。
+def _seed_terminal_attempt_operations(repo, chain):
+    run_id = chain["agent_run_id"]
+    op_a = repo.create_tool_operation(
+        agent_run_id=run_id, attempt_id=chain["attempt_id"], operation_type="run_command",
+    )
+    repo.mark_operation_executing(op_a["operation_id"])
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status = 'unknown', ended_at = 1.0 WHERE attempt_id = ?",
+            (chain["attempt_id"],),
+        )
+    attempts = {}
+    with repo.transaction() as conn:
+        for suffix, generation, status, ended in (
+            ("b", 2, "recovered", 2.0), ("c", 3, "cancelled", 3.0), ("d", 4, "running", 0.0),
+        ):
+            attempt_id = f"{chain['attempt_id']}-{suffix}"
+            attempts[suffix] = attempt_id
+            conn.execute(
+                "INSERT INTO agent_attempts(attempt_id, agent_run_id, attempt_generation, "
+                "status, started_at, ended_at, metadata_json) "
+                "VALUES(?, ?, ?, ?, 1.0, ?, '{}')",
+                (attempt_id, run_id, generation, status, ended),
+            )
+            conn.execute(
+                "INSERT INTO tool_operations(operation_id, agent_run_id, attempt_id, "
+                "attempt_generation, tool_operation_generation, operation_type, status, "
+                "handler_started_at, outcome_json, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, 1, 'run_command', ?, 1.0, '{\"kept\": true}', 1.0, 1.0)",
+                (f"op-{suffix}", run_id, attempt_id, generation,
+                 "EXECUTING" if suffix != "c" else "CLAIMED"),
+            )
+        conn.execute(
+            "UPDATE agent_runs SET current_attempt_id = ?, current_attempt_generation = 4 "
+            "WHERE agent_run_id = ?",
+            (attempts["d"], run_id),
+        )
+    return op_a, attempts
+
+
+# LLM: obsfix12 第 2 条——终态 attempt 下残留的 CLAIMED/EXECUTING 操作此前没有任何回收
+#   路径（EXECUTING→UNKNOWN 只在换代事务里发生），生产有 11 条从 9 月挂到现在。本用例钉住
+#   同巡清扫：终态 attempt 的未结 op 翻 UNKNOWN + 审计事件、claim 元数据保留；非终态 attempt
+#   的活跃 op 不动；attempt/run/current pointer 不变；重复巡检幂等。
+# 函数用途: 验证 reconcile_superseded_attempts 顺带清扫终态 attempt 的孤儿操作。
+def test_reconcile_cleans_orphan_operations_under_terminal_attempts(ctx):
+    chain, repo = ctx
+    op_a, attempts = _seed_terminal_attempt_operations(repo, chain)
+
+    assert repo.reconcile_superseded_attempts(now=12345.0) == []
+
+    for op_id in (op_a["operation_id"], "op-b", "op-c"):
+        row = repo.get_operation(op_id)
+        assert row["status"] == "UNKNOWN", (op_id, dict(row))
+        payload = json.loads(row["outcome_json"])
+        assert payload["reason"] == "terminal_attempt_op_cleanup"
+        assert payload["unknown_reason"] == "terminal_attempt_op_cleanup"
+    # claim 元数据保留：B 行原有的 kept 键不被整段覆盖。
+    assert json.loads(repo.get_operation("op-b")["outcome_json"])["kept"] is True
+    # 非终态 attempt 的活跃操作不受影响；attempt/run/current pointer 不动。
+    assert repo.get_operation("op-d")["status"] == "EXECUTING"
+    assert repo.get_attempt(chain["attempt_id"])["status"] == "unknown"
+    assert str(repo.agent_run_for_run_id("run-main")["current_attempt_id"]) == attempts["d"]
+    cleaned = [
+        event for event in repo.events_for_attempt(attempts["b"], limit=100)
+        if event["event_type"] == "tool_operation.terminal_attempt_cleanup"
+    ]
+    assert len(cleaned) == 1, cleaned
+
+    # 幂等：再跑一巡不重复翻、不重复写事件。
+    assert repo.reconcile_superseded_attempts(now=12346.0) == []
+    for op_id in (op_a["operation_id"], "op-b", "op-c"):
+        assert repo.get_operation(op_id)["status"] == "UNKNOWN"
+    assert repo.get_operation("op-d")["status"] == "EXECUTING"
+    cleaned = [
+        event for event in repo.events_for_attempt(attempts["b"], limit=100)
+        if event["event_type"] == "tool_operation.terminal_attempt_cleanup"
+    ]
+    assert len(cleaned) == 1, cleaned
+
+
 # ------------------------------------------------------------------- 资源锁
 def test_acquire_sorted_all_or_nothing(ctx):
     chain, repo = ctx

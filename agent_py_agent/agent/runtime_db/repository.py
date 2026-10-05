@@ -938,7 +938,75 @@ class RuntimeRepository(
                         reason="stale_noncurrent_reconcile",
                     )
                 )
+            # LLM: 同一巡顺带清扫终态 attempt 下残留的未结工具操作（obsfix12 第 2 条）——
+            #   这类孤儿不在上面的换代范围内（ended_at>0 已被排除），需要独立清扫。
+            self._cleanup_terminal_attempt_operations_conn(conn, now=current)
         return reconciled
+
+    # LLM: 终态 attempt 下残留的 CLAIMED/EXECUTING 操作没有任何回收路径：EXECUTING→UNKNOWN
+    #   只在换代事务里发生，而执行器死亡（attempt 直接标 unknown）、孤儿回收与人工 /recover
+    #   都不翻 op；find_orphaned_attempts 又只看非终态 attempt 的锁——生产有 11 条 EXECUTING
+    #   从 9 月挂到现在。本清扫按 mark_operation_unknown 的语义只翻 op（保留 claim 元数据 +
+    #   原因码）、每个操作一条审计事件；不动 attempt/run/锁（终态 attempt 的锁各自路径已处置）。
+    #   幂等：只匹配 CLAIMED/EXECUTING，翻成 UNKNOWN 后不再匹配，重复巡检无副作用。
+    # 函数用途: 把终态执行轮下残留的未结工具操作翻成 UNKNOWN 并留下审计事件。
+    def _cleanup_terminal_attempt_operations_conn(
+        self, conn: sqlite3.Connection, *, now: float
+    ) -> list[str]:
+        terminal = sorted(_ATTEMPT_TERMINAL_STATUSES)
+        placeholders = ",".join("?" for _ in terminal)
+        rows = conn.execute(
+            "SELECT op.operation_id, op.attempt_id, op.status, op.outcome_json, "
+            "aa.agent_run_id, aa.status AS attempt_status "
+            "FROM tool_operations op JOIN agent_attempts aa "
+            "ON aa.attempt_id = op.attempt_id "
+            f"WHERE op.status IN (?, ?) AND aa.ended_at > 0 "
+            f"AND aa.status IN ({placeholders})",
+            (OP_CLAIMED, OP_EXECUTING, *terminal),
+        ).fetchall()
+        return [
+            str(row["operation_id"])
+            for row in rows
+            if self._cleanup_one_terminal_attempt_operation_conn(conn, row, now=now)
+        ]
+
+    # LLM: 单条清扫保持与 mark_operation_unknown 同语义：保留 claim 元数据，只并入
+    #   reason/unknown_reason 两个键；CAS 只匹配未结状态，已 settle/已翻过时安全返回 False。
+    # 函数用途: 翻一条终态 attempt 残留操作为 UNKNOWN 并写审计事件；返回本次是否真的翻转。
+    def _cleanup_one_terminal_attempt_operation_conn(
+        self, conn: sqlite3.Connection, row: sqlite3.Row, *, now: float
+    ) -> bool:
+        payload: dict[str, Any] = {}
+        try:
+            loaded = json.loads(row["outcome_json"])
+        except (TypeError, json.JSONDecodeError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            payload = dict(loaded)
+        payload["reason"] = "terminal_attempt_op_cleanup"
+        payload["unknown_reason"] = "terminal_attempt_op_cleanup"
+        updated = conn.execute(
+            "UPDATE tool_operations SET status = ?, outcome_json = ?, updated_at = ? "
+            "WHERE operation_id = ? AND status IN (?, ?)",
+            (OP_UNKNOWN, json.dumps(payload, ensure_ascii=False), now,
+             str(row["operation_id"]), OP_CLAIMED, OP_EXECUTING),
+        ).rowcount
+        if updated != 1:
+            return False
+        self._append_event_conn(
+            conn,
+            event_type="tool_operation.terminal_attempt_cleanup",
+            attempt_id=str(row["attempt_id"]),
+            agent_run_id=str(row["agent_run_id"]),
+            payload={
+                "operation_id": str(row["operation_id"]),
+                "previous_status": str(row["status"]),
+                "status": OP_UNKNOWN,
+                "reason": "terminal_attempt_op_cleanup",
+                "attempt_status": str(row["attempt_status"]),
+            },
+        )
+        return True
 
     def task_id_for_run_id(self, run_id: str) -> str:
         """授权门同款 JOIN：run_id → 权威链 task_id（runner 身份回填用）。"""

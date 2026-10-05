@@ -29,6 +29,22 @@
 - **验证**：新 `test_filesystem_logical_ref_guard.py` 5 用例（判定集合/绝对路径不拦与中间段命中/统一 resolver 拒绝/正常路径/三写工具真实入口错误码、零文件效应及模型视图无宿主临时路径）；相关回归一批 87 项全过；4 个单点变异全 KILLED；常数目录无变化（只收数值常量，`--check` 一致）。命令见 TESTS。
 - **未验证**：真实会话里模型行为回归（需真实链路观察）、非作者初审。
 
+## runner 收口 unknown 空转修复（obsfix12 第 1 条，2026-10-05，分支 `worker/obsfix12`，基于 17l 头 `f7849d7ff`）
+
+- **来源（生产实证）**：每天 400–1000 条 `status_conflict` 事件全是同一个 unknown run 刷出来的。根因：执行器死亡把 run 置 `unknown`（`executor_liveness.mark_exited_attempt_unknown`；unknown 只有人工 /recover 能变），该 run 有一条子代理结果收口 WAL，60 秒一巡的 `recover_pending_closeouts` 每次重试 `settle_agent_run` 都 fail-closed 追加一条无去重的 `status_conflict`，返回被当成"可重试"。
+- **修法 A（诊断去重）**：`settle_agent_run` 的 unknown 分支写事件前查同 `agent_run_id` + `reason=unknown_run_status` 的既有 `status_conflict`，有则不写（照 `orphan_reclaim_blocked` 的"同身份+原因只写一次"模式）。状态机与返回值不变。
+- **修法 B（收口重试退避）**：`runtime_closeout.advance_pending_closeout` 在 settle 前做退避——`closeout_state` 属于可重试集（write_error/unknown_status/missing_run）且 `attempts > CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT` 时，要求 `now − updated_at ≥ min(CLOSEOUT_RETRY_BACKOFF_MAX_SECONDS, CLOSEOUT_RETRY_BACKOFF_BASE_SECONDS × attempts)` 才再试，否则返回 `backoff_wait`，不刷新事实、不写事件。选退避而非"移出可重试改挂起"的理由：退避对所有可重试形态一并生效、避免扫描风暴，且 /recover 后最迟 1 小时内自动重新推进，不需要新增唤醒路径；"挂起"会让 run 修好后也要再等一次人工触发。三处常量在模块内并带中文说明。
+- **用例**（`test_closeout_recovery_dependencies.py`）：三连跑 status_conflict 恰好 1 条且三次都真的重试；attempts 恰在阈值时第 2/3 次退避不再 settle（计数替身）、诊断不增长；/recover 后窗口期过即成功收口、清账、通知一次；/recover + 新回合后旧 WAL 被拒（stale_attempt）且 run 不被误收口。
+- **验证**：见 `TESTS.md` obsfix12 节（含 4 个变异与门禁结果）。
+
+## 终态 attempt 孤儿工具操作清扫（obsfix12 第 2 条，2026-10-05，分支 `worker/obsfix12`）
+
+- **来源（生产实证）**：11 条 `EXECUTING` 工具操作从 9 月挂到现在。根因：`EXECUTING→UNKNOWN` 只有换代事务（`_supersede_noncurrent_attempts_conn`）一条路；执行器死亡（attempt 直接标 unknown）、孤儿回收、人工 /recover 都不翻 op，`find_orphaned_attempts` 又只看非终态 attempt 的锁，看不到终态 attempt 下的残留。
+- **改法**：`reconcile_superseded_attempts` 同一巡加清扫 `_cleanup_terminal_attempt_operations_conn`——attempt 已终态（done/failed/cancelled/unknown/recovered 且 ended_at>0）而 op 仍 CLAIMED/EXECUTING 时，按 `mark_operation_unknown` 语义只翻 op 为 UNKNOWN（保留 claim 元数据 + 原因码 `terminal_attempt_op_cleanup`），每个 op 一条 `tool_operation.terminal_attempt_cleanup` 审计事件；不动 attempt/run/锁。幂等：只匹配未结状态，翻过不再匹配。
+- **用例**（`test_runtime_db_operations.py`）：unknown+EXECUTING、recovered+EXECUTING、cancelled+CLAIMED(已开始) 三条被翻并留事件、claim 元数据保留；running+EXECUTING 跳过；重复巡检幂等。
+- **未验证 / 已知边界**：macOS 上 `holder_is_alive` 没有 /proc 时一律判活——本次只在交接记录，不改（另有 scheduler 判活补丁在审）。
+- **验证**：见 `TESTS.md` obsfix12 节。
+
 ## 自改工作树提示补一句“按集成者指定的工作树做”（selfdevrule，2026-10-05，3a）
 
 - **问题**：Owner Scope 提示词的“my-agent 自身代码”一段写着“不改其他检出目录”。10-05 sol3（gpt-6.1-sol）把它当成高于任务的规则，两次拒绝在集成者分派的 worker 工作树里改代码，只能改派。

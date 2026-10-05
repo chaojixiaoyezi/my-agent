@@ -27,6 +27,23 @@
   - guards9 12 文件、ruff、boundaries、doc_sync、strict code-size、size_diff、diff --check、clean_package 结果见交接报告。
 - 未验证：真实 DeepSeek 复跑（修复效果需 3a 用同样 6 次重跑观察失败率）；修复前从未续跑过，本轮只保证恢复可达且有界。
 
+## runner 收口 unknown 空转与终态 attempt 孤儿操作修复（obsfix12，2026-10-05，分支 `worker/obsfix12`）
+
+- 背景、根因与两条修法见 `DESIGN_LEDGER.md` 同名两节。
+- 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_closeout_recovery_dependencies.py agent_py_agent/tests/test_runtime_db_operations.py -q` → **87 passed**（含 4 + 1 条新用例）。
+  - guards9 全部 12 个文件 → **190 passed**；`scripts/check_import_boundaries.py` → findings=0；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py --base f7849d7ff` → DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → hard=0 blocked=False；`size_diff.sh` → **新增告警 0 / 消失 57**；`scripts/check_clean_package.py .` → OK；`git diff --check` → 干净。
+  - 新增 3 个模块常量后重新生成常数目录：`scripts/build_constants_catalog.py`（912 → 915 项），`test_constants_catalog.py` 通过。
+- 新增用例：
+  - `test_closeout_recovery_dependencies.py`：`test_unknown_status_conflict_event_written_once_across_retries`、`test_unknown_closeout_retry_backoff_stops_repeated_settle`、`test_manual_recovery_resumes_closeout_after_backoff_window`、`test_stale_wal_after_new_attempt_is_rejected_not_settled`。
+  - `test_runtime_db_operations.py`：`test_reconcile_cleans_orphan_operations_under_terminal_attempts`（造数抽到 `_seed_terminal_attempt_operations`）。
+- 变异（4 个，全部 KILLED；脚本 `/private/tmp/claude-501/obsfix12/mut.py`，跑完字节还原、`git status` 只余有意改动）：
+  - M1 去 settle 去重（`if existing is None` → `if True`）→ KILLED：诊断去重用例红。
+  - M2 去收口退避（remaining 恒 0）→ KILLED：退避用例红（第 2 次也 settle）。
+  - M3 清扫漏掉已开始 CLAIMED → KILLED：op-c 不翻。
+  - M4 清扫不写审计事件 → KILLED：事件断言找不到。
+- 未验证：真实生产库的存量清扫效果（11 条 EXECUTING）由部署后首次 reconcile 巡验证；macOS 判活边界见 DESIGN_LEDGER。
+
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
 - 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。
