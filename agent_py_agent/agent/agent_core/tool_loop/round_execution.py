@@ -35,6 +35,7 @@ from ...tooling.action_policy import ActionDecision
 from ...tooling.concurrency import ToolConcurrencyDescriptor, describe_tool_concurrency
 from ...tooling.executor import ToolExecution
 from ...tooling.plugin_gate_policy import (
+    carry_gate_decisions,
     plugin_gate_approval_request,
     plugin_gate_approval_unavailable,
     plugin_gate_rejection_message,
@@ -500,11 +501,11 @@ def _resolve_tool_approval(
     if execution.decision.status != "ask":
         return execution
     if (closed := _closed_admission_execution(request, original_call)) is not None:
-        return closed  # 发审批请求前宿主已停机关门：不再询问
+        return carry_gate_decisions(execution, closed)  # 发审批请求前宿主已停机关门：不再询问
     on_chunk = getattr(request.params, "effective_on_chunk", None)
     consumer = getattr(on_chunk, "request_permission", None)
     if not callable(consumer):
-        return plugin_gate_approval_unavailable(execution)
+        return carry_gate_decisions(execution, plugin_gate_approval_unavailable(execution), unavailable=True)
     approval_request = build_tool_approval_request(
         execution.call,
         request_id=request.params.request_id,
@@ -520,10 +521,13 @@ def _resolve_tool_approval(
         prior_decision = str(prior_rejection.get("decision") or "denied")
         if prior_decision not in {"denied", "cancelled"}:
             prior_decision = "denied"
-        return _rejected_approval_execution(
+        return carry_gate_decisions(
             execution,
-            ToolApprovalDecision(approval_request.permission_id, prior_decision),
-            repeated=True,
+            _rejected_approval_execution(
+                execution,
+                ToolApprovalDecision(approval_request.permission_id, prior_decision),
+                repeated=True,
+            ),
         )
     try:
         raw_decision = consumer(
@@ -543,7 +547,7 @@ def _resolve_tool_approval(
         return execution
     if decision.approved:
         if (closed := _closed_admission_execution(request, original_call)) is not None:
-            return closed  # 等审批期间宿主停机关门：批准了也不再执行
+            return carry_gate_decisions(execution, closed)  # 等审批期间宿主停机关门：批准了也不再执行
         approved_actions = getattr(request.params, "runtime_approved_actions", None)
         if not isinstance(approved_actions, list):
             return execution
@@ -572,13 +576,13 @@ def _resolve_tool_approval(
                     "[tool-approval-feedback]\n"
                     f"用户批准 {original_call.tool_name} 时补充：{decision.feedback}"
                 )
-        return resumed
+        return carry_gate_decisions(execution, resumed)
     if decision.decision == "unavailable":
-        return plugin_gate_approval_unavailable(execution)
+        return carry_gate_decisions(execution, plugin_gate_approval_unavailable(execution), unavailable=True)
     rejected_actions = getattr(request.params, "runtime_rejected_actions", None)
     if isinstance(rejected_actions, list):
         rejected_actions.append(approval_request.rejected_binding(decision))
-    return _rejected_approval_execution(execution, decision)
+    return carry_gate_decisions(execution, _rejected_approval_execution(execution, decision))
 
 
 # LLM: 精确重跑裁决allow才附宿主批准事实；等待中换代导致ask/deny不贴已应用，原批准后precheck拒绝也保留未执行。

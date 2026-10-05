@@ -175,7 +175,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
         trusted_run_context={
-            "interactive": callable(getattr(getattr(runtime_request.request.params, "effective_on_chunk", None), "request_permission", None)),
+            "interactive": _interactive_approvals(runtime_request),
             "process_completion_target": process_completion_target(runtime_request.agent, runtime_request.request.params),
             "task_attributes": dict(
                 runtime_request.request.params.task_attributes
@@ -211,6 +211,20 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return execution
+
+
+# LLM: 9b 必须修 2：interactive 是"这次调用有没有人能当场审批"的宿主事实，不能拿"写入器碰巧有 request_permission 方法"
+#   当判据——Gateway 的流写入器总有这个方法，非管理员 IM 与没声明 tool_approval 的客户端 interactive_approvals=False，
+#   后台 sink 也总有这个方法。拿方法当判据会让插件收到 interactive=true、自己选 ask，到审批时才变成无法审批；
+#   设计 8.5 承诺的是插件能看到"不可交互"、可以自己选 deny。所以先读 on_chunk 上 bool 型的 interactive_approvals；
+#   没有这个属性（后台 sink 要在等待期才知道有没有消费者）才沿用原 callable 判断，由结算时投影纠正。
+# 函数用途: 从消费者结构化能力判断这次调用到底能不能当场收集审批意见。
+def _interactive_approvals(runtime_request: ToolCallRuntimeRequest) -> bool:
+    on_chunk = getattr(runtime_request.request.params, "effective_on_chunk", None)
+    declared = getattr(on_chunk, "interactive_approvals", None)
+    if isinstance(declared, bool):
+        return declared
+    return callable(getattr(on_chunk, "request_permission", None))
 
 
 # LLM: 可选观察装配独立隔离；关闭零路由读取/导入/发布。启用后先备诊断再导入 Gateway，导入/装配故障均仅固定原因。

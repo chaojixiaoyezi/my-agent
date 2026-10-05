@@ -1,5 +1,7 @@
 # Verification：结构
 
+- b5fix9b（2026-10-04）：`tool_call_runtime._interactive_approvals` 先读 `effective_on_chunk.interactive_approvals`（严格 bool）判定可交互，缺该属性才退回 `request_permission` callable 判断——后台 sink 要在等待期才知道有没有消费者，保留 true 由审批结算投影纠正。审批侧 `_resolve_tool_approval` 每个换结果出口经 `plugin_gate_policy.carry_gate_decisions` 承接本次真实征询条目（按门身份去重），无法审批时投影 `final_status=PLUGIN_GATE_APPROVAL_UNAVAILABLE`；不新增执行、核验或状态源。
+
 - b4gs（2026-10-04）：`_tool_event_context` 确认严格 True 后先取得 `points` 共享诊断，再导入 Gateway 装配入口；导入、路由或构造抛错固定为 `PLUGIN_EVENT_TOOL_CONTEXT_FAILED`，只丢观察。共用进程级原因去重，不增加执行、核验、账本或状态源；配置读取未知仍静默，唯一权限与真实 handler 边界不变。
 
 - b4g（2026-10-04）：`tool_call_runtime._tool_event_context` 仅隔离配置/路由/事件装配；`tooling.registry._host_event_context` 只隔离严格类型观察转交。异常边界不覆盖权限、write_boundary、Executor、真实 handler 或原核验链，配置不可读不能据此放宽授权。

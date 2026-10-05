@@ -113,6 +113,18 @@
 - **不改拒绝语义**：允许/拒绝结果、状态码、既有 error/message 全部不变，只多一个可选字段。回环带错或过期凭据同样带码（9b 终审更正：代码与用例本来如此，处置同为重启客户端）；远程不可信来源、来源未知、开关关着（迁移档）不带这个码。
 - **判定只读结构化事实**：开关档位、对端 IP、凭据常量时间比对结果；不解析路径、正文或 message（g2bad 里强调的纪律）。
 - **验证与变异**：见 [TESTS](TESTS.md) 顶部「G2b 本机凭据缺失码（g2bfix1）」小节。覆盖挂闸三个入口（`/ask`、`/control`、`/client/notices`）+ 三个自判读端点 + 开关关着不变 + 远程不带码。3 个变异全被抓：① 去掉中间件的 error_code；② 去掉回环判断让远程也带码；③ 开关关着也返回码。
+## B5 审批阶段的门决定承接与 interactive 取证（b5fix9b，2026-10-04，worker/b5fix9b，基于 17j 头 `4081a0df3`；ds5 复核无功能缺陷，已并入 step17k；出口用例由 luna1 b5fix9bt 补齐）
+
+- **来源**：9b 对 B5 的终审结论——拦截这一层成立，但有两条"记下的结构化事实不对"：
+  1. 插件要求确认之后，`_resolve_tool_approval` 每个出口都换掉了 result，换出来的 result 不带 metadata，第一次真实征询的条目就丢了：批准、拒绝两条路交给归档的都是空；无法审批那条条目还在但 `final_status` 记成 `ask`。设计第 9 节"每次收紧征询一条"在最主要的 ask 路径上不成立，B6 的"最近 10 次决定"和"无法审批"计数都漏。
+  2. 生产接线用"on_chunk 有没有 `request_permission` 方法"判断 `interactive`，但 Gateway 流写入器总有这个方法；非管理员 IM 与没声明 tool_approval 的客户端 `interactive_approvals=False` 却仍被传成 true，插件据此选 ask，到审批时才变无法审批（handler 没跑，安全结果对，但设计 8.5 承诺插件能看到"不可交互"、自己选 deny）。
+- **修法 1（条目承接）**：`plugin_gate_policy.carry_gate_decisions(original, replacement, *, unavailable=False)`——把原 execution 的条目与替换结果自带的新增条目按门身份 `(plugin_id, activation_id, gate_id, call_id, outcome)` 去重后合并，写回替换结果的 metadata；`unavailable=True` 时把 `final_status` 投影成 `PLUGIN_GATE_APPROVAL_UNAVAILABLE`。接在 `_resolve_tool_approval` 的各个"返回的不是原 execution"的出口：发审批前关门、无 consumer、等审批中关门、批准后重跑、无法审批、拒绝/取消、重复拒绝。
+  - **去重不是可选项**：`plugin_gate_approval_unavailable` 自己就复制原 metadata，不按身份去重会把同一次征询写两遍（实测发现，已写进注释与用例）。
+  - 用户的选择仍沿审批事实走，不改条目的 `verdict`。
+- **修法 2（interactive 取证）**：`tool_call_runtime._interactive_approvals` 先读 `on_chunk.interactive_approvals`（bool 才认），没有这个属性才沿用原 callable 判断——后台 sink 要在等待期才知道有没有消费者，保留 true 由结算时投影纠正。
+- **结构守卫（9b 裁定，不改运行时）**：现在**不加** `call_id + gate_id + activation_id` 去重——I4 续跑会对同一调用合法地再问一次，按门身份去重会吞掉真实的第二次征询。改为一条 AST 静态扫描用例，确认 `append_plugin_gate_decision` 与 `persist_tool_runtime_ledger` 各只有一个生产调用点。将来真要加第二个写入点，正确做法是在 `GateReview` 构造时生成征询 ID、按 `(call_id, 征询 ID)` 去重，而不是按门身份——这条约定写在用例注释里。
+- **验证**：见 TESTS.md 同名节（四条出口各一条走完 resolve→归档的用例 + "每条只写一条不重复" + interactive 两条真实链路用例 + 两条结构守卫；4 个变异全部被抓）。
+- **未验证**：真实插件子进程与真实 Gateway 端到端未跑；9b 复核时要重跑它的两个探针并复看每个出口的变异。
 
 ## M1 B4 直接隔离与一次性装配诊断（b4gs，2026-10-04，基于 `33d903aab`；已实施，待非作者复审）
 

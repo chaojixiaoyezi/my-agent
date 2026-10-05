@@ -252,6 +252,21 @@
   ② 去掉回环判断（远程也带码）→ 判定单元 + 远程参数化 + `test_remote_peer_denial_never_carries_code` 变红；
   ③ 开关关着也返回码 → 开关关两条用例变红。**三个全部被抓**。
 - 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、`git diff --check` 干净。
+## B5 审批阶段门决定承接与 interactive 取证（b5fix9b，2026-10-04，worker/b5fix9b，基于 17j 头 `4081a0df3`；ds5 复核无功能缺陷，已并入 step17k；出口用例由 luna1 b5fix9bt 补齐）
+
+- 来源：9b 对 B5 的终审两条必须修（详见 DESIGN_LEDGER 同名节）。都是"记下的结构化事实不对"，不影响拦不拦。
+- 改动文件：`agent/tooling/plugin_gate_policy.py`（新增 `carry_gate_decisions` + `_gate_decision_metadata` + `_gate_decision_identity`）、`agent/agent_core/tool_loop/round_execution.py`（`_resolve_tool_approval` 各出口接上承接、导入它）、`agent/agent_core/tool_call_runtime.py`（新增 `_interactive_approvals`，`trusted_run_context["interactive"]` 改用它）。
+- 新增用例：
+  - `agent_py_agent/tests/test_plugin_gate_approval_ledger_carry.py`（8 条）：四条出口（批准/拒绝/取消/无法审批）各一条走完 `_resolve_tool_approval` → `_compact_result_envelope` → `plugin_gate_decisions_from_archive`，断言条目与 `final_status`；再一条参数化断言"每个出口恰好一条、不重复"。
+  - `agent_py_agent/tests/test_plugin_gate_interactive_and_writer_guard.py`（5 条）：真实 `execute_traced_tool_call` + `BufferedChunkStreamWriter(interactive_approvals=False/True)` 两条，断言插件看到的值、决定状态与账本 `final_status`；一条"写入器没声明该属性时沿用 callable 兜底"；两条 AST 结构守卫（两个门决定写入函数各只有一个生产调用点，排除 `tests/`）。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 两个新文件：**13 passed**。
+  - B5 全套（b5s5 节清单 19 文件 + `test_plugin_gate_cross_bfail.py` + 两个新文件）＝ **21 文件 368 passed**。
+  - guards9（11 文件）：**187 passed**。
+  - `check_import_boundaries.py` findings=0；`ruff` All checks passed；`check_doc_sync.py` DOC_SYNC_PASS；strict code-size `hard=0 blocked=False`；`git diff --check` 干净；clean-package OK；`size_diff.sh` 新增告警 **0**。
+- 9b 的两个探针复跑（原件在审查目录，本次复制进 `tests/` 跑完即删、未提交）：批准/拒绝的 `archived_entries` 从 `[]` 变成 `[('ask','ask')]`；无法审批从 `('ask','ask')` 变成 `('ask','PLUGIN_GATE_APPROVAL_UNAVAILABLE')`；`interactive_approvals=False` 时插件从看到 `true` 变成 `false`、决定同步收紧。
+- 变异（4 个，逐个按原字节还原、sha256 与工作区一致）：批准出口不承接→**2 failed**；拒绝/取消不承接→**4 failed**；`unavailable` 不投影终态→**1 failed**；`_interactive_approvals` 退回 callable→**1 failed**。
+- 未验证：真实插件子进程与真实 Gateway 端到端。
 
 ## M1 B4 直接隔离与一次性装配诊断（b4gs，2026-10-04，`worker/b4g-small`，基线 `33d903aab`；已实施，待非作者复审）
 

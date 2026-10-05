@@ -162,3 +162,57 @@ def _requirement(review: GateReview) -> dict:
     return {"plugin_id": review.target.plugin_id, "version": review.target.version,
             "activation_id": review.target.activation_id, "gate_id": review.target.declaration.id,
             "reason_code": review.reply.reason_code, "message": review.reply.message}
+
+
+# LLM: 9b 必须修 1：_resolve_tool_approval 的每个"返回的不是原 execution"的出口都会换掉 result，
+#   换出来的 result 默认不带 metadata，于是第一次真实征询的 plugin_gate_decisions 就丢了。
+#   本函数把原 execution 的条目带到最终结果里；两个来源各自独立、都只来自结构化字段：
+#   - original：本次审批之前那次执行真正记下的征询（approval_applied 的精确批准跳过门按约定不在其中）；
+#   - replacement：换出来的结果自己已经带的条目（批准后重跑时新发生的真实征询，例如重跑时新启用的插件）。
+#   合并按"原条目在前、替换结果新增条目在后"的原序拼接，并按门身份去重——unavailable 分支的替换结果
+#   自己就带着原 metadata（`plugin_gate_approval_unavailable` 会复制），不去重会把同一次征询记两遍，
+#   B6 的"最近 10 次"与"无法审批"计数都会翻倍。门身份取 (plugin_id, activation_id, gate_id, call_id)。
+#   unavailable 传 True 时把所有条目的 final_status 投影成 PLUGIN_GATE_APPROVAL_UNAVAILABLE——
+#   审批阶段才判定无人可批，执行器阶段那次投影看不到这个结论。
+#   取值口径与归档侧 plugin_gate_decisions_from_archive 同键（metadata 与信封都用 PLUGIN_GATE_DECISION_EVIDENCE_KEY）。
+# 函数用途: 把本次征询的门决定条目接到最终结果上，必要时投影无法审批终态。
+def carry_gate_decisions(
+    original: object,
+    replacement: object,
+    *,
+    unavailable: bool = False,
+) -> object:
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+    for row in (_gate_decision_metadata(getattr(getattr(original, "result", None), "metadata", None))
+                + _gate_decision_metadata(getattr(getattr(replacement, "result", None), "metadata", None))):
+        identity = _gate_decision_identity(row)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(row)
+    if not merged:
+        return replacement
+    entries = ([{**row, "final_status": "PLUGIN_GATE_APPROVAL_UNAVAILABLE"} for row in merged]
+               if unavailable else merged)
+    metadata = dict(getattr(replacement.result, "metadata", None) or {})
+    metadata[PLUGIN_GATE_DECISION_EVIDENCE_KEY] = entries
+    return replace(replacement, result=replace(replacement.result, metadata=metadata))
+
+
+# LLM: 门身份只取宿主已写入的字符串字段；缺字段用空串参与比较，仍能保证"同一条被复制一遍"被识别出来。
+# 函数用途: 给一条门决定条目算出用于去重的稳定身份键。
+def _gate_decision_identity(row: dict) -> tuple:
+    return tuple(str(row.get(key) or "") for key in
+                 ("plugin_id", "activation_id", "gate_id", "call_id", "outcome"))
+
+
+# LLM: 只认白名单键下的字典条目，非列表或非字典一律丢弃；不解析其它 metadata 键，也不从消息原文恢复。
+# 函数用途: 从一次工具结果 metadata 里取出已记录的门决定条目列表。
+def _gate_decision_metadata(metadata: object) -> list[dict]:
+    if not isinstance(metadata, dict):
+        return []
+    value = metadata.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY)
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, dict)]

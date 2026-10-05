@@ -1,5 +1,11 @@
 # Verification：开发推进
 
+## B5 审批阶段门决定承接与 interactive 取证（b5fix9b，2026-10-04，待 9b 复核）
+
+- 9b 终审两条必须修：审批出口换掉 result 后丢掉第一次真实征询的条目（批准/拒绝为空、无法审批 `final_status` 错记 `ask`）；生产接线把"有 request_permission 方法"当成可交互，插件看到假 true。
+- 改法：`plugin_gate_policy.carry_gate_decisions` 按门身份去重承接条目并在不可审批时投影终态，接在 `_resolve_tool_approval` 各出口；`tool_call_runtime._interactive_approvals` 先读 `interactive_approvals` 布尔声明、缺属性才退回 callable。
+- 结果：B5 全套 21 文件 **368 passed**、guards9 **187 passed**、四个变异全杀、size_diff 新增 0。详见 TESTS 同名节。
+
 ## B4 启用装配故障诊断（b4gs，2026-10-04，待非作者复审）
 
 - 工具上下文读取/装配失败后仅写一次固定原因 warning，真实 handler 和原核验链照常执行；关闭不读路由、不装配、不记日志。logger 故障不能反噬业务。
