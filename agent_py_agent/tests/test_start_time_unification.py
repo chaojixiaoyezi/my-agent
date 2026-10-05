@@ -1,0 +1,171 @@
+# LLM: starttime2 的回归锚点——启动指纹"读取统一 + 双口径比较"（schedstart 修正 + starttime2 统一）。
+#   读取统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS ps lstart）；比较走
+#   heartbeat.start_time_matches：旧数字记录与新字符串指纹都可核验，核验不了不判死（宁多等 lease）。
+#   本文件覆盖：ps 返回码/超时/空输出口径、/proc 解析（含 comm 空格）、比较矩阵、tool_operations 判活三态。
+# 模块用途: 钉住跨平台启动指纹读取与判活语义，防止 PID 复用误判与"格式差异当死亡证据"误杀活进程。
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+
+import pytest
+
+from agent_py_agent.agent.common import heartbeat as hb
+from agent_py_agent.agent.common.heartbeat import process_start_time, start_time_matches
+from agent_py_agent.agent.local_storage import tool_operations
+from agent_py_agent.agent.local_storage.tool_operations import (
+    ToolOperationRecord,
+    _operation_holder_is_live,
+)
+
+_FAKE_PID = 4_000_000_000  # 不存在的 pid：/proc 与真实 ps 都读不到，保证走打桩路径
+
+
+class _CompletedPs:
+    """subprocess.run 的替身：只需要 returncode 与 stdout 两个字段。"""
+
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+# ---------------------------------------------------------------- heartbeat：ps 读取（macOS 等无 /proc 平台）
+
+
+def test_ps_success_returns_fingerprint(monkeypatch):
+    """fake ps 返回码 0 且有输出：指纹可用。"""
+    monkeypatch.setattr(
+        hb.subprocess, "run", lambda *_a, **_k: _CompletedPs(0, "Fri Oct  3 09:00:00 2026\n")
+    )
+    assert process_start_time(_FAKE_PID) == "Fri Oct  3 09:00:00 2026"
+
+
+def test_ps_nonzero_returncode_is_unverifiable(monkeypatch):
+    """fake ps 返回码非 0：即使 stdout 有内容也不可核验（返回 None）——初审阻塞 2 的钉点。"""
+    monkeypatch.setattr(
+        hb.subprocess, "run", lambda *_a, **_k: _CompletedPs(1, "ps: No such process\n")
+    )
+    assert process_start_time(_FAKE_PID) is None
+
+
+def test_ps_timeout_is_unverifiable(monkeypatch):
+    """fake ps 超时：不可核验（返回 None）。"""
+
+    def _timeout(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="ps", timeout=5)
+
+    monkeypatch.setattr(hb.subprocess, "run", _timeout)
+    assert process_start_time(_FAKE_PID) is None
+
+
+def test_ps_empty_output_is_unverifiable(monkeypatch):
+    """fake ps 返回码 0 但输出为空：不可核验（返回 None）。"""
+    monkeypatch.setattr(hb.subprocess, "run", lambda *_a, **_k: _CompletedPs(0, ""))
+    assert process_start_time(_FAKE_PID) is None
+
+
+# ---------------------------------------------------------------- heartbeat：/proc 解析（Linux 读取）
+
+
+def test_proc_starttime_parsed_from_tail_after_comm(tmp_path):
+    """Linux /proc/<pid>/stat：从最后一个 `)` 之后数第 20 个字段取 starttime。"""
+    stat = tmp_path / "stat"
+    stat.write_text(
+        "1234 (python3) S 1 1234 1234 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 1 0 424242 0 0\n",
+        encoding="utf-8",
+    )
+    assert hb._read_proc_starttime(str(stat)) == "424242"
+
+
+def test_proc_starttime_handles_comm_with_spaces(tmp_path):
+    """comm 含空格时（`(my app)`）仍按最后一个 `)` 切分，字段不错位。"""
+    stat = tmp_path / "stat"
+    stat.write_text(
+        "1234 (my app) S 1 1234 1234 0 -1 4194304 100 0 0 0 1 2 0 0 20 0 1 0 777777 0 0\n",
+        encoding="utf-8",
+    )
+    assert hb._read_proc_starttime(str(stat)) == "777777"
+
+
+def test_proc_starttime_missing_fields_returns_none(tmp_path):
+    """stat 字段不足（损坏数据）：返回 None（不可核验），不猜。"""
+    stat = tmp_path / "stat"
+    stat.write_text("1234 (python3) S 1 2\n", encoding="utf-8")
+    assert hb._read_proc_starttime(str(stat)) is None
+
+
+# ---------------------------------------------------------------- heartbeat：新旧指纹比较矩阵
+
+
+@pytest.mark.parametrize(
+    "recorded,current,expected",
+    [
+        ("123", "123", True),  # 新格式字符串：相同
+        ("123", "124", False),  # 新格式字符串：不同 → 判死
+        (123.0, "123", True),  # 旧数字记录 vs 新字符串指纹：数值匹配 → 活
+        (123, "123", True),
+        (123.0, "124", False),  # 旧数字记录 vs 不同字符串 → 判死
+        ("Fri Oct  3 09:00:00 2026", "Fri Oct  3 09:00:00 2026", True),  # macOS lstart 相同
+        ("Fri Oct  3 09:00:00 2026", "Sat Oct  4 10:00:00 2026", False),  # macOS lstart 不同 → 判死
+        (123.0, "Fri Oct  3 09:00:00 2026", True),  # 跨表示不可核验 → 不判死
+        (123.0, None, True),  # 当前读不到 → 不判死
+        (None, "123", True),  # 记录缺失 → 不判死
+        (float("nan"), "123", True),  # 非有限值 → 不判死
+    ],
+)
+def test_start_time_matches_matrix(recorded, current, expected):
+    assert start_time_matches(recorded, current) is expected
+
+
+# ---------------------------------------------------------------- tool_operations：持有者判活三态
+
+
+def _record_with_token(pid: int, token: str) -> ToolOperationRecord:
+    return ToolOperationRecord(
+        owner_id="owner-a",
+        run_id="run-1",
+        task_id="run-1",
+        operation_id="op-1",
+        tool="t",
+        args_hash="h",
+        idempotency_key="k",
+        idempotency_scope="operation",
+        idempotency_namespace="t",
+        status="RUNNING",
+        holder_id="holder-1",
+        holder_host="h",
+        holder_pid=pid,
+        holder_process_start_token=token,
+        generation=1,
+        lease_expires_at=time.time() + 3600.0,
+    )
+
+
+@pytest.fixture
+def _local_holder(monkeypatch):
+    monkeypatch.setattr(tool_operations, "tool_operation_host_id", lambda: "h")
+
+
+def test_holder_live_when_fingerprint_matches(monkeypatch, _local_holder):
+    """同一进程启动指纹一致 → 活。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "999")
+    assert _operation_holder_is_live(_record_with_token(os.getpid(), "999"), time.time()) is True
+
+
+def test_holder_dead_when_fingerprint_mismatches(monkeypatch, _local_holder):
+    """PID 复用（启动指纹不同）→ 死，可接管。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "1000")
+    assert _operation_holder_is_live(_record_with_token(os.getpid(), "999"), time.time()) is False
+
+
+def test_holder_conservatively_live_when_fingerprint_unreadable(monkeypatch, _local_holder):
+    """读不到启动指纹（如沙箱禁 ps）→ 保持原语义：保守判活，不接管。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: None)
+    assert _operation_holder_is_live(_record_with_token(os.getpid(), "999"), time.time()) is True
+
+
+def test_holder_conservatively_live_when_token_missing(monkeypatch, _local_holder):
+    """旧记录 token 为空 → 不看指纹（空值=不可核验），保守判活。"""
+    monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: "anything")
+    assert _operation_holder_is_live(_record_with_token(os.getpid(), ""), time.time()) is True

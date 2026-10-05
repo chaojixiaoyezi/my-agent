@@ -10,13 +10,12 @@ therefore fails closed.
 
 import json
 import os
-import subprocess
-import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
+
+from ..common.heartbeat import process_start_time
 
 TOOL_OPERATION_RUNNING = "running"
 TOOL_OPERATION_SUCCEEDED = "succeeded"
@@ -773,7 +772,7 @@ def _operation_holder_is_live(record: ToolOperationRecord, now: float) -> bool:
     if not _pid_exists(record.holder_pid):
         return False
     expected = str(record.holder_process_start_token or "")
-    actual = _read_process_start_token(record.holder_pid)
+    actual = process_start_time(record.holder_pid)
     if not expected or actual is None:
         return True
     return expected == actual
@@ -803,7 +802,7 @@ def _reconciliation_marker_is_live(marker: dict[str, Any], now: float) -> bool:
     if pid <= 0 or not _pid_exists(pid):
         return False
     expected = str(holder.get("process_start_token") or "")
-    actual = _read_process_start_token(pid)
+    actual = process_start_time(pid)
     return True if not expected or actual is None else expected == actual
 
 
@@ -830,35 +829,14 @@ def _pid_exists(pid: int) -> bool:
         return False
 
 
+# LLM: 进程启动标记统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS ps lstart，
+#   与 scheduler/runtime_db 同一读取权威）；进程内缓存一次，避免每个工具轮都调 ps。
+# 函数用途: 返回本进程的启动标记；读不到时为空串（空值=不可核验，判活保守）。
 def _process_start_token() -> str:
     global _PROCESS_START_TOKEN
     if not _PROCESS_START_TOKEN:
-        _PROCESS_START_TOKEN = _read_process_start_token(os.getpid()) or ""
+        _PROCESS_START_TOKEN = process_start_time(os.getpid()) or ""
     return _PROCESS_START_TOKEN
-
-
-def _read_process_start_token(pid: int) -> str | None:
-    if sys.platform.startswith("linux"):
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        except OSError:
-            return None
-        end = stat.rfind(")")
-        fields = stat[end + 1 :].strip().split() if end >= 0 else []
-        return fields[19] if len(fields) > 19 else None
-    if sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return result.stdout.strip() or None
-    return None
 
 
 def _select_operation(

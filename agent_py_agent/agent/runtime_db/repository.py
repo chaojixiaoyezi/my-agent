@@ -36,8 +36,14 @@ from pathlib import Path
 from typing import Any
 
 # LLM: 与 scheduler P0-4 共用同一套进程死亡证明判定（RUN-01），禁止另写第二份判死实现；
-#   启动指纹统一取自 common.heartbeat（跨平台字符串），比较处只在可转数字时核验、否则 fail-closed。
-from ..common.heartbeat import process_start_time as _proc_start_time
+#   启动指纹统一取自 common.heartbeat（跨平台字符串），比较走 start_time_matches 双口径
+#   （旧数字记录与字符串指纹都能核验，核验不了不判死）。
+from ..common.heartbeat import (
+    process_start_time as _proc_start_time,
+)
+from ..common.heartbeat import (
+    start_time_matches,
+)
 from ..common.id_generator import new_id
 from ..common.strict_json import load_strict_json
 from ..scheduler.repository import (
@@ -166,8 +172,8 @@ def _json_object(value: object) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-# LLM: 崩溃调和（RUN-01）依赖 attempt 记录的 runner 身份；start_time 仅 Linux /proc 可读，
-# 其他平台为 None（判死时仅做 pid 探活，fail-closed 不猜）。
+# LLM: 崩溃调和（RUN-01）依赖 attempt 记录的 runner 身份；start_time 统一取 common.heartbeat
+#   （Linux /proc ticks、其它平台 ps lstart，字符串指纹），判死比较走 start_time_matches。
 # 函数用途: 构造当前进程身份元数据（pid + 启动时刻），随 attempt 落账供崩溃恢复使用。
 def _runner_identity_metadata() -> dict[str, object]:
     return {
@@ -176,8 +182,8 @@ def _runner_identity_metadata() -> dict[str, object]:
     }
 
 
-# LLM: CLI startup and exact owner-turn recovery share the same process-death proof and
-# current-attempt CAS. Missing/unverifiable process identity never authorizes takeover.
+# LLM: CLI 启动与精确 owner 回合恢复共用同一死亡证明与 current-attempt CAS；身份缺失或不可核验
+#   一律不接管。指纹比较走 start_time_matches：旧数字记录与新字符串指纹双口径，不误杀活进程。
 # 函数用途: 证实原进程已死后，将仍是 current 的运行轮记为 unknown；不按时长猜死，也不动新执行者。
 def _mark_dead_runner_attempt_unknown(conn, row, current: float) -> bool:
     try:
@@ -189,8 +195,7 @@ def _mark_dead_runner_attempt_unknown(conn, row, current: float) -> bool:
         if state != "dead":
             if state != "alive" or meta.get("runner_start_time") is None:
                 return False
-            live_start = _proc_start_time(pid)
-            if live_start is None or live_start == float(meta["runner_start_time"]):
+            if start_time_matches(meta.get("runner_start_time"), _proc_start_time(pid)):
                 return False
     except (AttributeError, TypeError, ValueError):
         return False

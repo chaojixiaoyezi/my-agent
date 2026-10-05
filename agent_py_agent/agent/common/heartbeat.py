@@ -10,6 +10,7 @@ from __future__ import annotations
 # LLM: 进程身份必须联合 PID 与启动时间判断；调用方不能把普通心跳年龄当成进程退出证据。
 # 模块用途: 为后台服务保存心跳与精确进程身份，避免 PID 复用导致错误判活。
 
+import math
 import os
 import subprocess
 import time
@@ -21,10 +22,21 @@ def _read_proc_starttime(proc_stat: str) -> str | None:
     return after[19] if len(after) > 19 else None  # ) 之后第 20 个 = stat 第 22 域 starttime
 
 
+# LLM: ps 的返回码是"能否核验"的一部分：非零返回码、超时、空输出一律返回 None（不可核验），
+#   不得把带错误输出的调用当成有效指纹。
+# 函数用途: 用 ps 读进程启动时刻（macOS 等无 /proc 平台）；读不到返回 None。
 def _read_ps_starttime(pid: int) -> str | None:
-    out = subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5
-    )
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
     return out.stdout.strip() or None
 
 
@@ -43,6 +55,31 @@ def process_start_time(pid: int) -> str | None:
         return _read_ps_starttime(pid)
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+# LLM: 启动指纹比较是"是否同一进程"的共用口径；旧落盘记录可能是 /proc ticks 数字，
+#   新记录是 process_start_time 的字符串。只在"两侧都可读且确证不同"时返回 False；
+#   任一侧缺失、格式不可比（数字 vs macOS lstart）、非有限值一律返回 True（不可核验），
+#   调用方不得据此判死（宁可多等 lease，不误杀活进程）。
+# 函数用途: 判断记录中的启动指纹与当前读取是否视为同一进程（含旧数字记录兼容）。
+def start_time_matches(recorded: object, current: str | None) -> bool:
+    if current is None or recorded is None:
+        return True
+    if isinstance(recorded, str):
+        if current == recorded:
+            return True
+        try:
+            return float(recorded) == float(current)
+        except (TypeError, ValueError):
+            return False
+    try:
+        expected = float(recorded)  # type: ignore[arg-type]
+        actual = float(current)
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(expected) or not math.isfinite(actual):
+        return True
+    return actual == expected
 
 
 def process_alive(pid: int, *, start_time: str | None = None) -> bool:

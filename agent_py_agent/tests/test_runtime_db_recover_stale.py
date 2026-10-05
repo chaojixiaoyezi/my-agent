@@ -350,11 +350,11 @@ def test_recorded_active_turn_recovery_allows_exact_terminal_operation(tmp_path)
 
 
 @pytest.mark.parametrize("process_state,start,expected", [
-    ("dead", 123.0, "recovered"),
-    ("alive", 123.0, "blocked"),
+    ("dead", "123", "recovered"),
+    ("alive", "123", "blocked"),  # 真实 heartbeat 读取是字符串指纹（初审阻塞 1 的替身口径）
     ("alive", None, "blocked"),
-    ("alive", 124.0, "recovered"),
-    ("unverifiable", 123.0, "blocked"),
+    ("alive", "124", "recovered"),
+    ("unverifiable", "123", "blocked"),
 ])
 def test_exact_owner_recovery_requires_process_death(tmp_path, monkeypatch, process_state, start, expected):
     repo = _make_repo(tmp_path)
@@ -380,6 +380,37 @@ def test_exact_owner_recovery_requires_process_death(tmp_path, monkeypatch, proc
     assert result["status"] == expected
     assert repo.get_attempt(record["attempt_id"])["status"] == ("recovered" if expected == "recovered" else "running")
     assert repo.get_attempt(other["attempt_id"])["status"] == "running"
+
+
+@pytest.mark.parametrize("case", [
+    (123.0, "123", "blocked"),  # 旧数字记录 vs 新字符串指纹：数值匹配 → 不判死
+    (123.0, "124", "recovered"),  # 旧数字记录 vs 不同字符串 → 判死
+    (123.0, "Fri Oct  3 09:00:00 2026", "blocked"),  # 旧数字 vs lstart 不可比 → 不判死
+    ("123", "123", "blocked"),  # 新字符串记录：匹配
+    ("123", "124", "recovered"),  # 新字符串记录：不同 → 判死
+    ("Fri Oct  3 09:00:00 2026", "Sat Oct  4 10:00:00 2026", "recovered"),  # lstart 不同 → 判死
+    ("Fri Oct  3 09:00:00 2026", "Fri Oct  3 09:00:00 2026", "blocked"),  # lstart 相同
+])
+def test_exact_owner_recovery_handles_legacy_and_string_fingerprints(tmp_path, monkeypatch, case):
+    """schedstart 初审阻塞 1：旧数字记录与新字符串指纹必须双口径比较，绝不把活进程判死。"""
+    recorded, current, expected = case
+    repo = _make_repo(tmp_path)
+    request_id = "gw-fingerprint-matrix"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id)
+    with repo.transaction() as conn:
+        conn.execute(
+            "UPDATE agent_attempts SET status='running', ended_at=0, metadata_json=? WHERE attempt_id=?",
+            (json.dumps({"runner_pid": 1234, "runner_start_time": recorded}), record["attempt_id"]),
+        )
+        conn.execute("UPDATE agent_runs SET status='created' WHERE agent_run_id=?", (record["agent_run_id"],))
+    monkeypatch.setattr("agent_py_agent.agent.runtime_db.repository._proc_state", lambda _pid: "alive")
+    monkeypatch.setattr("agent_py_agent.agent.runtime_db.repository._proc_start_time", lambda _pid: current)
+    result = repo.recover_recorded_active_turn_attempt(
+        task_id=request_id, run_id=request_id, expected_attempt_id=record["attempt_id"],
+        expected_agent_run_id=record["agent_run_id"], operator="test-fingerprint-matrix",
+        recorded_operation_facts={operation_id: {"status": "succeeded", "operation_type": "write_file"}},
+    )
+    assert result["status"] == expected
 
 
 @pytest.mark.parametrize("mismatch", ["attempt", "agent_run"])
