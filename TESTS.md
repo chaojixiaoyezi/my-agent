@@ -32,6 +32,13 @@
 - **变异（4/4 KILLED，脚本 /private/tmp/claude-501/m-ds4/mutate_toolfold.py，sha256 还原一致）**：M1 名字摘要恒空；M2 首次调用去掉基线字段；M3 公开摘要不做 hex 校验；M4 撤回 cancel_session_task 标记。
 - **未验证**：真实模型/网关下的折叠与找回行为、后台续跑语义裁定、生产端到端。
 
+### toolfold-finish（2026-10-05，同分支 `worker/toolfold`）
+
+- **后台续跑豁免**：`background_tool_policy.BACKGROUND_CONTINUATION_REQUIRED_TOOLS` + `registry._declared_deferred_names` 引用；`test_background_runtime_snapshot_contains_continuation_tools` 不改断言通过；新增豁免用例 `test_continuation_required_tools_stay_direct_and_other_declared_still_fold` + 变异 M5（去掉豁免）KILLED。
+- **基线复核**：`test_mcp_registration.py`（3 失败）、`test_process_sessions.py`（8 失败）、`test_tool_presentation_projection.py`（1 失败）在 17l 头 `c78898071` 的临时工作树失败集合与本地完全一致 → 既有沙箱限制（进程/插件类），非本改动引入；已清理临时工作树。
+- **门禁**：相关 118 passed、guards9 12 文件 192 passed、变异 5/5 KILLED、ruff、import boundaries=0、DOC_SYNC_PASS、strict code-size hard=0、size_diff 新增 0/消失 57、clean-package OK、git diff --check 通过。
+- **生产收益**：见 DESIGN_LEDGER（生产再省 ~184 token/次；新装用户再省 ~1.46K token/次）。
+
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
 
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）

@@ -74,6 +74,18 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = _with_direct_child_controls(DEFAULT_BACKGRO
 GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = _with_direct_child_controls(GOAL_BACKGROUND_ALLOWED_TOOLS)
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
 
+# LLM: 后台续跑合同声明的“续跑必需工具”并集（所有后台 profile 的公共基座与各自扩展）；这些工具
+#   不受 default_deferred 的默认折叠影响、始终直出——后台回合没有用户在场，靠 tool_search 找回
+#   工具的窗口极窄。过滤处（registry._declared_deferred_names）引用本常量，不另写第二份名单。
+#   改动时同步 test_background_main_agent_runtime 的续跑目录用例与 test_tool_default_deferral 的豁免用例。
+BACKGROUND_CONTINUATION_REQUIRED_TOOLS = frozenset({
+    *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
+    *AUDIT_FINDING_ALLOWED_TOOLS,
+    *SESSION_TASK_WAKE_ALLOWED_TOOLS,
+    *GOAL_BACKGROUND_ALLOWED_TOOLS,
+    *SUBAGENT_INTEGRATION_ALLOWED_TOOLS,
+})
+
 # 扩展目录处理方式。默认 profile 只能枚举核心工具，而插件/普通 MCP 代理是开放目录（名字随安装变化），
 # 所以由后台运行构造方按注册表的结构化类型事实并入（inherit）；显式配置或任务 allowed_tools 是精确名单，
 # 不并入（none）。这里只产出决策字段，不读注册表。

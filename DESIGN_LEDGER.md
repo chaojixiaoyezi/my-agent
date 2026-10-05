@@ -33,7 +33,9 @@
 - **出厂默认改开启**：`tool_default_deferral_enabled` 默认值 YAML 与 `AgentConfig` 同步改 `true`（依据：10-02 用户授权“工具这一块按你的来，别影响工作”、生产开启三天无异常、省量见上）；关回 `false` 即恢复全量直出，注释写明方法。
 - **保持直出的既有合同**：`audit_records`（I6 实测收起后模型没去搜索、IM 用户自查失败）、`create_goal`/`update_goal`/`cancel_subagents`（递归代理和持续目标控制属于主链，orchestration/goal 默认直出）、生产在用的 `terminal_session`/`read_artifact`/`session_search`/`process_session` 等。
 - **观测增强（不改判定）**：`cache_diagnostics.request_surface` 增记工具名清单摘要（SHA256）与工具个数；`compare_request_surfaces` 在 run 第一次调用（无 previous）也附上本次自己的 `current_tool_count`/`current_tool_names_digest`，供下次定位“第一次调用后收窄”的机制；公开投影按白名单只收数字与 64 位十六进制摘要。
-- **已知边界**：`memory_search` 默认不注册（`enable_memory_search_tool` 默认关），其标记只在开启时生效；`publish_audit_update` 只在 Audit 准备回合可用，测试按快照可用性跳过。**后台续跑（scheduled_job_due、allowed_tools=None 场景）在默认开启后会把声明收起的工具挡在可见面外**——`test_background_main_agent_runtime.py::test_background_runtime_snapshot_contains_continuation_tools` 因此失败，涉及“后台续跑是否走渐进披露”的产品语义，未改测试、待 3a 裁定。
+- **后台续跑豁免（3a 2026-10-05 裁定）**：`background_tool_policy.BACKGROUND_CONTINUATION_REQUIRED_TOOLS`（所有后台 profile 工具目录的并集）里的工具不受 `default_deferred` 折叠、始终直出——后台回合没有用户在场，靠 tool_search 找回工具的窗口极窄；过滤处 `registry._declared_deferred_names` 引用该常量，不另写名单。`test_background_runtime_snapshot_contains_continuation_tools` 不改断言通过；豁免作用于同一过滤入口（前台同样直出），非续跑声明工具照常收起。
+- **收益口径（2026-10-05 精算）**：新装用户（默认配置、全工具注册）相比本次改动前再省 **~1.46K token/次**（memory_search 312 + publish_audit_update 961 + stop_named_work 184；cancel_session_task/send_message/send_session_message 因进入后台续跑目录被豁免）。**生产（现状基线）实际再省 ~184 token/次**（stop_named_work；其余 5 个：3 豁免 + memory_search 未注册 + publish_audit_update 普通会话不可用）。生产实测 tool_schema 约 1.7 万，改动后约 16.8K。
+- **已知边界**：`memory_search` 默认不注册（`enable_memory_search_tool` 默认关），其标记只在开启时生效；`publish_audit_update` 只在 Audit 准备回合可用，测试按快照可用性跳过。
 
 ## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）
 

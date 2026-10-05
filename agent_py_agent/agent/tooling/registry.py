@@ -951,6 +951,8 @@ def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categor
 
 # LLM: 工具自己声明的默认收起（ToolModelHints.default_deferred）只在开关打开、本轮没有显式 allowed_tools、且原 tool_search
 #   在本快照里可用、模型可见、没被类别收起时生效，否则返回空集——宁可多展示，也不能把工具藏到找不回来。发现入口永不收起。
+#   后台续跑合同声明的“续跑必需工具”（background_tool_policy.BACKGROUND_CONTINUATION_REQUIRED_TOOLS）不参与声明收起：
+#   后台回合没有用户在场，靠 tool_search 找回工具的窗口极窄（3a 2026-10-05 裁定，始终直出）。
 #   只读快照，不改注册表、授权或 snapshot_hash；改判定要同步 test_tool_default_deferral。
 # 函数用途: 算出本轮因工具声明而默认收起的工具名，供可见 Schema、收起搜索范围和目录索引共用。
 def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
@@ -961,9 +963,13 @@ def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories:
     if (search is None or not search.availability.available or not search.exposure.model_visible
             or search.model_spec.category in deferred_categories):
         return frozenset()
+    from ..conversation.background_tool_policy import BACKGROUND_CONTINUATION_REQUIRED_TOOLS
+
     return frozenset(
         runtime.model_spec.name for runtime in snapshot.runtimes
-        if runtime.model_spec.hints.default_deferred and runtime.model_spec.name not in TOOL_DISCOVERY_ENTRY_NAMES
+        if runtime.model_spec.hints.default_deferred
+        and runtime.model_spec.name not in TOOL_DISCOVERY_ENTRY_NAMES
+        and runtime.model_spec.name not in BACKGROUND_CONTINUATION_REQUIRED_TOOLS
     )
 
 

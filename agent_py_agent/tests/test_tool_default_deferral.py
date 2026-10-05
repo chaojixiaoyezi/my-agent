@@ -12,6 +12,9 @@ from dataclasses import replace
 
 import pytest
 
+from agent_py_agent.agent.conversation.background_tool_policy import (
+    BACKGROUND_CONTINUATION_REQUIRED_TOOLS,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import TOOL_DISCOVERY_ENTRY_NAMES, ToolModelHints
@@ -28,6 +31,10 @@ DECLARED = {
     "send_message", "send_session_message", "stop_named_work", "update_persona",
     "user_config", "watch_stream",
 }
+
+# 实际生效的声明收起 = 声明集合 - 后台续跑必需（豁免）：后台回合没有用户在场，靠 tool_search
+# 找回工具的窗口极窄，这些工具始终直出（3a 2026-10-05 裁定，清单来自 background_tool_policy）。
+DEFERRED_EFFECTIVE = DECLARED - BACKGROUND_CONTINUATION_REQUIRED_TOOLS
 
 
 def _agent(tmp_path, **overrides) -> SimpleAgent:
@@ -54,13 +61,17 @@ def test_switch_defaults_off_and_keeps_surface_and_catalog_unchanged(tmp_path):
 def test_declared_tools_leave_the_native_surface_and_get_a_compact_index(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     visible = _visible(agent)
-    assert visible.isdisjoint(DECLARED)
+    assert visible.isdisjoint(DEFERRED_EFFECTIVE)
+    # 续跑必需工具里由声明豁免的都应直出；watch_stream 例外——它由 web 类别折叠（与声明收起无关），
+    # 不可用/未注册的工具（如测试环境的 send_message）按快照可用性排除。
+    available = set(agent.tools.runtime_snapshot().available_tool_names)
+    assert (DECLARED & BACKGROUND_CONTINUATION_REQUIRED_TOOLS - {"watch_stream"}) & available <= visible, "后台续跑必需工具始终直出"
     assert TOOL_DISCOVERY_ENTRY_NAMES & set(agent.tools.tools) <= visible
     assert {"read_file", "write_file", "run_command", "create_subagents", "remember"} <= visible
     section = agent.tools.render_catalog_section()
     index = section.split("默认收起的工具", 1)[1]
     available = set(agent.tools.runtime_snapshot().available_tool_names)
-    for name in sorted(DECLARED & available):
+    for name in sorted(DEFERRED_EFFECTIVE & available):
         summary = agent.tools.tools[name].model_spec.hints.deferred_summary
         assert f"\n  - {name}：{summary}" in index
     names_line = section.split("默认收起的工具", 1)[0].rsplit("⊞", 1)[1]
@@ -96,7 +107,6 @@ def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
     ("明天早上提醒我", "schedule"),
     ("重启网关", "restart_gateway"),
     ("gateway 状态", "gateway_status"),
-    ("以后叫我小王", "update_persona"),
     ("关闭某个用户的决策模型", "admin_controls"),
 ])
 def test_natural_requests_find_each_declared_tool(tmp_path, query, tool):
@@ -113,7 +123,9 @@ def test_explicit_allowed_tools_stay_fully_visible(tmp_path):
 def test_declared_deferral_needs_an_available_visible_tool_search(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     snapshot = agent.tools.runtime_snapshot()
-    assert _declared_deferred_names(snapshot, [], enabled=True) == frozenset(DECLARED & snapshot.available_tool_names)
+    assert _declared_deferred_names(snapshot, [], enabled=True) == frozenset(
+        DEFERRED_EFFECTIVE & snapshot.available_tool_names
+    )
     assert _declared_deferred_names(snapshot, [], enabled=False) == frozenset()
     assert _declared_deferred_names(snapshot, ["system"], enabled=True) == frozenset(), "tool_search 被类别收起时不再额外收起"
     runtimes = tuple(runtime for runtime in snapshot.runtimes if runtime.model_spec.name != "tool_search")
@@ -128,7 +140,7 @@ def test_decision_projection_and_declared_deferral_merge(tmp_path):
     projected = replace(base, presentation_deferred_names=frozenset({"session_search"}),
                         presentation_shortlist_names=frozenset({"read_file"}))
     visible = _visible(agent, runtime_snapshot=projected)
-    assert "session_search" not in visible and visible.isdisjoint(DECLARED)
+    assert "session_search" not in visible and visible.isdisjoint(DEFERRED_EFFECTIVE)
     searchable = {spec.name for spec in agent.tools.search_deferred_specs("session_search", runtime_snapshot=projected)}
     assert "session_search" in searchable
     section = agent.tools.render_catalog_section(runtime_snapshot=projected)
@@ -256,9 +268,17 @@ def test_blind_call_already_loaded_is_left_alone(tmp_path):
 ])
 def test_handler_side_argument_errors_also_reload_the_schema(tmp_path, stage, error_code, reloads):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
-    hint, loaded = _blind_call(agent, _failed_record("update_persona", stage, error_code))
-    assert (loaded == {"update_persona"}) is reloads
+    hint, loaded = _blind_call(agent, _failed_record("user_config", stage, error_code))
+    assert (loaded == {"user_config"}) is reloads
     assert bool(hint) is reloads
+
+
+def test_continuation_required_tools_stay_direct_and_other_declared_still_fold(tmp_path):
+    """后台续跑必需工具始终直出；不在续跑目录里的声明工具照常收起。"""
+    agent = _agent(tmp_path, tool_default_deferral_enabled=True)
+    visible = _visible(agent)
+    assert {"update_persona", "remember", "skill_search", "run_command"} <= visible, "续跑必需工具直出"
+    assert {"user_config", "schedule", "manage_models"}.isdisjoint(visible), "非续跑声明工具仍收起"
 
 
 # 本批（toolfold）新收起的工具：每个都要能被 tool_search 一步找回（各自一条断言）。
@@ -271,7 +291,9 @@ def test_tool_search_finds_each_newly_declared_tool(tmp_path):
     }
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     available = set(agent.tools.runtime_snapshot().available_tool_names)
-    registered = sorted(new_names & available)
+    # cancel_session_task、send_message、send_session_message 进入后台续跑目录（豁免直出），不参与找回。
+    effective = new_names - BACKGROUND_CONTINUATION_REQUIRED_TOOLS
+    registered = sorted(effective & available)
     assert registered, f"本批新工具在测试环境应至少可用一个：{sorted(new_names & set(agent.tools.tools))}"
     for name in registered:
         result = agent.tools.tools["tool_search"].execute({"query": name, "limit": 3})
