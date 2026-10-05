@@ -525,7 +525,8 @@ def test_pty_write_backpressure_and_history_are_bounded(monkeypatch):
         os.close(slave)
     for n in range(100):
         registry._sessions[str(n)] = SimpleNamespace(closed=True, process=SimpleNamespace(poll=lambda: 0))
-    registry._prune_finished()
+    with registry._lock:  # ptyleak 把裁剪挪成模块级函数（调用方持锁）
+        pty._prune_finished_sessions(registry)
     assert len(registry._sessions) == 33
 
 

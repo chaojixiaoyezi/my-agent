@@ -1,5 +1,10 @@
 # 设计台账
 
+## SLP-1A 挑入 17l 后撤回（slp1a，2026-10-05，3a）
+
+- **撤回原因（Linux 车道发现）**：过期 claim 的原执行者进程仍存活时（常见于同一个 Gateway 进程里某回合异常结束、没释放 claim），SLP-1A 判为 recovery_pending；而 `_acquire_conversation_run_claim` 的等待循环没有时限，`test_plugin_m1_joint_tool_gate.py` 卡在 run_claim.py 的领取循环 40 分钟。生产上会让该会话之后所有回合一直“等待执行车道”，直到重启 Gateway。
+- **退回作者的要求**：同进程且没有活动续租的过期 claim 允许接管（或以进程内注册表判活）；等待有上限并给出结构化结果；挑入前补跑 test_plugin_m1_joint_tool_gate.py、test_plugin_m1_joint_e2e.py 等用到会话车道的联动测试。撤回提交 39f9f45cd、efa6a0496，代码回到挑入前。
+
 ## 自改工作树提示补一句“按集成者指定的工作树做”（selfdevrule，2026-10-05，3a）
 
 - **问题**：Owner Scope 提示词的“my-agent 自身代码”一段写着“不改其他检出目录”。10-05 sol3（gpt-6.1-sol）把它当成高于任务的规则，两次拒绝在集成者分派的 worker 工作树里改代码，只能改派。
@@ -29,7 +34,9 @@
 - **边界**：实现限于 scheduler repository 与聚焦测试；未改 `scheduler/service.py`，未碰 conversation/tooling；SLP-2B operation_id/操作账本接线仍未做。misfire grace 政策未改。因 `check_doc_sync` 要求同步模块文档，另更新 Gateway 进度与结构文档。
 - **验证结论**：最终 19 文件 scheduler sweep 仅有 `test_scheduler_waiting_deadlock.py` 9 项失败，均在任务基线 `812828b98` 复现；其余相关测试通过。guards9 前 11 项通过，第 12 项因基线缺该测试文件而未运行；import boundaries 0 findings、Ruff、doc-sync、strict code-size、size_diff（新增告警 0）通过。具体命令及结果见 [TESTS.md](TESTS.md) SLP-2A 节；设计合同见 [SLEEP_RESUME.md](docs/design/SLEEP_RESUME.md)。
 
-## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2，2026-10-05，worker/tref2；ds8 初审通过，3a 终审收紧后挑入 17l）
+## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2，2026-10-05，worker/tref2；**已从 17l 撤回，退回作者修**）
+
+- **撤回原因（3a，10-05 10:5x，Linux 车道发现、macOS 复现）**：`test_plugin_m1_joint_tool_gate.py` 7 条失败——同一回合 3 个事件的 thread_ref 出现两种值（prompt_submitted 为空、其余为线程哈希），违反“每个事件的会话引用不许为空、同一回合只有一个引用”；`test_plugin_m1_joint_e2e.py::test_event_watch_real_gateway_six_counts_and_readonly` 也失败。挑入时只跑了插件事件三个测试文件，漏了这两组联动测试。撤回提交 9e3073882、c7851feef，代码回到挑入前。
 
 - **问题（ds4 在 jb6b 发现，tref 只读调查）**：同一回合里插件事件的 `thread_ref` 两类取值不同——Gateway 侧四事件（prompt_submitted / turn_started / turn_ended / command_executed）取 `channel_conversation_id`（渠道会话号），工具侧两事件（tool_call_started / tool_call_finished）取 task attribute `conversation_thread_id`（ConversationStore 线程），插件按会话归组会归不上。
 - **权威判定**：会话线程的权威是 `ConversationStore thread_id`（`request_execution.py` 写进 task attributes 的 `conversation_thread_id`/`session_id`，注释“结构化 thread 是当前长期 IM/TUI 对话的耐久身份”；记忆 recall canonicalize 为 `session:<thread_id>`）；`channel_conversation_id` 是渠道侧键（ChannelBinding），不是线程身份。
