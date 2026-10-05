@@ -103,7 +103,7 @@ def test_samples_build_reproducibly_and_expose_only_one_package(package, tmp_pat
     assert "declaration.json" not in members
     assert all(item.executable is False for item in members.values())
     if package == "drama-text-a":
-        assert manifest.version == "0.5.1"
+        assert manifest.version == "0.5.4"
         assert len(members) == 15 and "methods/visible-characters.md" in members
     with ZipFile(first) as archive:
         assert set(archive.namelist()) == {"plugin.json", *members}
@@ -134,7 +134,7 @@ def test_text_sample_checks_complete_source_and_shot_coverage(tmp_path):
                                  "scene_shot_seconds": {"S01": 20.0, "S02": 20.0, "S03": 20.0},
                                  "target_declared": True, "target_seconds": 60.0, "target_delta_seconds": 0.0,
                                  "dialogue_lines": 2, "dialogue_lines_by_speaker": {"C01": 1, "C02": 1},
-                                 "shots_with_lines": 2, "source_quotes": 2, "props": 1, "prop_state_pairs_checked": 2,
+                                 "shots_with_lines": 2, "shots_with_structured_lines": 3, "source_quotes": 2, "props": 1, "prop_state_pairs_checked": 2,
                                  "source_sha256_actual": report["metrics"]["source_sha256_actual"]}
     assert {item["code"] for item in report["warnings"]} == {
         "creative_quality_and_media_not_checked", "shot_adaptations_need_review",

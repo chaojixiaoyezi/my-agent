@@ -23,6 +23,10 @@ def _delivery() -> dict:
     extras = {row["id"]: row for row in example["shots"]}
     for shot in delivery["shots"]:
         shot.update({key: extras[shot["id"]][key] for key in ("lines", "source_quotes", "prop_states")})
+        # 0.5.3 起“未标改编”规则要求新增台词有 adaptations 兜底；示例本来就带这组字段，一起拷过来，
+        # 否则夹具会造出“有台词但没标改编”的交付，被新规则正确拦下（那不是用例想测的场景）。
+        if "adaptations" in extras[shot["id"]]:
+            shot["adaptations"] = extras[shot["id"]]["adaptations"]
     return delivery
 
 
@@ -49,6 +53,7 @@ def test_example_with_structured_fields_passes_and_reports_counts(tmp_path):
     assert report["structure_valid"], report["errors"]
     metrics = report["metrics"]
     assert metrics["dialogue_lines"] == 2 and metrics["dialogue_lines_by_speaker"] == {"C01": 1, "C02": 1}
+    assert metrics["shots_with_structured_lines"] == 3 and metrics["shots_with_lines"] == 2
     assert metrics["source_quotes"] == 2 and metrics["props"] == 1 and metrics["prop_state_pairs_checked"] == 2
     assert "dialogue_not_structured" not in _warnings(report) and "no_dialogue_lines" not in _warnings(report)
 
@@ -132,16 +137,24 @@ def test_no_normalization_of_punctuation_or_spacing_in_quotes(tmp_path):
     assert "quote_not_verbatim" in _errors(report)
 
 
-def test_adjacent_prop_state_mismatch_warns_unless_a_break_is_declared(tmp_path):
+def test_adjacent_prop_state_mismatch_is_an_error_unless_a_break_is_declared(tmp_path):
     delivery = _delivery()
-    _shot(delivery, "SH02")["prop_states"]["start"] = [{"prop_id": "PR01", "holder_id": "C01", "state": "撕破"}]
+    _shot(delivery, "SH02")["prop_states"]["start"] = [{"prop_id": "PR01", "holder_id": "C01", "state": "状态乙"}]
     report = _check(tmp_path, delivery)
-    assert report["structure_valid"]
-    item = next(row for row in report["warnings"] if row["code"] == "prop_state_discontinuity")
+    assert not report["structure_valid"]
+    item, = [row for row in report["errors"] if row["code"] == "prop_state_discontinuity"]
     assert (item["path"], item["previous_shot"], item["prop_id"]) == ("SH02", "SH01", "PR01")
-    assert item["previous_end"] == {"holder_id": "C01", "state": "淋湿"}
-    _shot(delivery, "SH02")["continuity_break"] = "跳到第二天"
-    assert "prop_state_discontinuity" not in _warnings(_check(tmp_path, delivery))
+    assert item["hint"] and len(item["hint"]) <= 200
+    _shot(delivery, "SH02")["continuity_break"] = "明确的有意跳接"
+    legal_exit = _check(tmp_path, delivery)
+    assert legal_exit["structure_valid"] and not [row for row in legal_exit["errors"]
+                                                   if row["code"] == "prop_state_discontinuity"]
+
+
+def test_matching_adjacent_prop_states_pass(tmp_path):
+    report = _check(tmp_path, _delivery())
+    assert report["structure_valid"]
+    assert not [row for row in report["errors"] if row["code"] == "prop_state_discontinuity"]
 
 
 def test_prop_holder_must_be_declared_in_the_shot_and_offscreen_holder_warns(tmp_path):

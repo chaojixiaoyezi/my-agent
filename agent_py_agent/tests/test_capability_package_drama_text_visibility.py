@@ -30,26 +30,25 @@ def _name_warnings(report: dict) -> list[dict]:
             if row["code"] in {"named_character_unaccounted", "ambiguous_character_name"}]
 
 
-def test_unaccounted_name_is_warning_with_original_unicode_span(tmp_path):
-    text = "🙂小明走到窗前。"
+def test_unaccounted_unique_name_is_error_with_original_unicode_span(tmp_path):
+    text = "🙂小明在镜头描述中出现。"
     report = _check(tmp_path, _document(text))
-    assert report["structure_valid"], report["errors"]
-    warning, = _name_warnings(report)
-    assert warning == {
-        "code": "named_character_unaccounted", "path": "SH01.action", "start": 1, "end": 3,
-        "text_name_preview": "小明", "text_name_length": 2,
-        "candidate_character_ids": ["C01"], "declared_candidate_ids": [],
-    }
-    assert text[warning["start"]:warning["end"]] == "小明"
+    assert not report["structure_valid"]
+    error, = [row for row in report["errors"] if row["code"] == "named_character_unaccounted"]
+    assert (error["path"], error["start"], error["end"]) == ("SH01.action", 1, 3)
+    assert error["candidate_character_ids"] == ["C01"] and error["declared_candidate_ids"] == []
+    assert error["hint"] and len(error["hint"]) <= 200
+    assert text[error["start"]:error["end"]] == "小明"
     assert report["name_diagnostics"]["status"] == "complete"
     assert report["name_diagnostics"]["match_count"] == 1
+    assert report["name_diagnostics"]["error_count"] == 1
 
 
 @pytest.mark.parametrize("text", ["没有小明。", "屏幕写着小明。", "她说：‘小明的包。’"])
-def test_mentions_negation_and_quotes_do_not_decide_presence(tmp_path, text):
+def test_mentions_negation_and_quotes_do_not_override_missing_classification(tmp_path, text):
     report = _check(tmp_path, _document(text))
-    assert report["structure_valid"]
-    assert len(_name_warnings(report)) == 1
+    assert not report["structure_valid"]
+    assert len([row for row in report["errors"] if row["code"] == "named_character_unaccounted"]) == 1
 
 
 @pytest.mark.parametrize("field", ["visible_character_ids", "offscreen_character_ids"])
@@ -143,15 +142,20 @@ def test_display_and_skip_declarations_are_consistent(tmp_path, field, value, co
     assert code in {row["code"] for row in report["errors"]}
 
 
-def test_explicit_opt_out_retains_other_names_and_reports_scope(tmp_path):
+def test_explicit_opt_out_is_a_legal_exit_and_other_unclassified_name_fails(tmp_path):
     delivery = _document("小明和小红。")
-    delivery["cast"][0].update(text_names=[], text_match_skip_reason="名字与常用词重合。")
+    delivery["cast"][0].update(text_names=[], text_match_skip_reason="该姓名本次不参与字面匹配。")
     report = _check(tmp_path, delivery)
-    assert report["structure_valid"]
+    assert not report["structure_valid"]
     assert report["name_diagnostics"]["skipped_character_ids"] == ["C01"]
     assert report["name_diagnostics"]["match_count"] == 1
-    assert _name_warnings(report)[0]["candidate_character_ids"] == ["C02"]
+    item, = [row for row in report["errors"] if row["code"] == "named_character_unaccounted"]
+    assert item["candidate_character_ids"] == ["C02"]
     assert {"code": "character_text_match_disabled", "character_ids": ["C01"]} in report["warnings"]
+
+    delivery["cast"][1].update(text_names=[], text_match_skip_reason="该姓名本次不参与字面匹配。")
+    exited = _check(tmp_path, delivery)
+    assert not [row for row in exited["errors"] if row["code"] == "named_character_unaccounted"]
 
 
 def test_all_names_opted_out_is_not_a_zero_match_success(tmp_path):
@@ -181,20 +185,22 @@ def test_shared_name_is_ambiguous_regardless_of_cast_order(tmp_path, reverse):
 
 def test_only_valid_longer_name_suppresses_a_fully_contained_short_name(tmp_path):
     report = _check(tmp_path, _document("甲乙丙，甲乙。", (["甲乙"], ["甲乙丙"])))
-    assert {(row["text_name_preview"], row["start"], row["end"]) for row in _name_warnings(report)} == {
+    assert {(row["text_name_preview"], row["start"], row["end"])
+            for row in report["errors"] if row["code"] == "named_character_unaccounted"} == {
         ("甲乙丙", 0, 3), ("甲乙", 4, 6),
     }
 
 
 def test_invalid_long_name_boundary_cannot_hide_valid_short_name(tmp_path):
     report = _check(tmp_path, _document("甲乙AB", (["甲乙"], ["甲乙A"])))
-    warning, = _name_warnings(report)
-    assert warning["text_name_preview"] == "甲乙" and warning["candidate_character_ids"] == ["C01"]
+    error, = [row for row in report["errors"] if row["code"] == "named_character_unaccounted"]
+    assert error["text_name_preview"] == "甲乙" and error["candidate_character_ids"] == ["C01"]
 
 
-def test_partially_overlapping_names_are_both_retained(tmp_path):
+def test_partially_overlapping_unclassified_names_are_both_errors(tmp_path):
     report = _check(tmp_path, _document("甲乙丙", (["甲乙"], ["乙丙"])))
-    assert {row["text_name_preview"] for row in _name_warnings(report)} == {"甲乙", "乙丙"}
+    assert {row["text_name_preview"] for row in report["errors"]
+            if row["code"] == "named_character_unaccounted"} == {"甲乙", "乙丙"}
 
 
 @pytest.mark.parametrize("text,count", [
@@ -239,19 +245,20 @@ def test_budget_skip_preserves_other_checks_and_nulls_match_counts(tmp_path):
     assert _name_warnings(report) == []
 
 
-def test_warning_output_cap_does_not_abort_scan_or_hide_exact_omitted_count(tmp_path):
+def test_error_output_cap_does_not_abort_scan_or_hide_exact_omitted_count(tmp_path):
     report = _check(tmp_path, _document("小明 " * 137))
     diagnostics = report["name_diagnostics"]
     assert diagnostics["status"] == "complete"
-    assert diagnostics["match_count"] == diagnostics["warning_count"] == 137
-    assert diagnostics["emitted_warning_count"] == len(_name_warnings(report)) == 100
-    assert diagnostics["omitted_warning_count"] == 37 and diagnostics["warnings_truncated"] is True
+    assert diagnostics["match_count"] == diagnostics["error_count"] == 137
+    emitted = [row for row in report["errors"] if row["code"] == "named_character_unaccounted"]
+    assert diagnostics["emitted_error_count"] == len(emitted) == 100
+    assert diagnostics["omitted_error_count"] == 37
 
 
-def test_overlapping_repeated_long_names_are_bounded_and_keep_original_spans(tmp_path):
+def test_name_scan_cap_preserves_original_spans_for_unaccounted_name_errors(tmp_path):
     report = _check(tmp_path, _document("甲" * 4000, (["甲" * 400], ["小红"])))
     diagnostics = report["name_diagnostics"]
     assert diagnostics["status"] == "complete" and diagnostics["match_count"] == 3601
-    warning = _name_warnings(report)[0]
-    assert warning["text_name_length"] == warning["end"] - warning["start"] == 400
-    assert len(warning["text_name_preview"]) == 80
+    error = next(row for row in report["errors"] if row["code"] == "named_character_unaccounted")
+    assert error["text_name_length"] == error["end"] - error["start"] == 400
+    assert len(error["text_name_preview"]) == 80

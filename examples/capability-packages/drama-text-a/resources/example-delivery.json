@@ -27,7 +27,11 @@
     {
       "id": "PR01",
       "name": "旧书",
-      "origin": "P01：打烊前出现在店门口，无人持有。"
+      "origin": {
+        "kind": "source",
+        "source_id": "P01",
+        "quote": "被雨淋湿的旧书"
+      }
     }
   ],
   "scenes": [
@@ -116,7 +120,8 @@
             "state": "淋湿"
           }
         ]
-      }
+      },
+      "prop_handoffs": []
     },
     {
       "id": "SH02",
@@ -163,7 +168,8 @@
             "state": "淋湿"
           }
         ]
-      }
+      },
+      "prop_handoffs": []
     },
     {
       "id": "SH03",
@@ -204,7 +210,14 @@
             "state": "装进防水袋"
           }
         ]
-      }
+      },
+      "prop_handoffs": [
+        {
+          "prop_id": "PR01",
+          "to_holder_id": "C02",
+          "note": "店员把装好的书交给赶车人"
+        }
+      ]
     }
   ],
   "omitted_passages": [],

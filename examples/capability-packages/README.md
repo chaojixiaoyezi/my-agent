@@ -4,7 +4,7 @@
 
 | 包 | 当前源码版本 | 特点 | 交付与边界 |
 | --- | --- | --- | --- |
-| `drama-text-a` | `0.5.0` | 原文改编及成稿人物依据回填 | 文本方案、来源/时长声明、具名覆盖警告、可选台词/逐字引用/道具状态核对、占位与改编原文核对；不判在场或媒体 |
+| `drama-text-a` | `0.5.4` | 原文改编及成稿人物依据回填 | 文本方案、来源/时长声明、具名覆盖警告、可选台词/逐字引用/道具状态核对、占位与改编原文核对、来源与改编标注核对、台词引号与镜内交接核对；不判在场或媒体 |
 | `drama-workflow-b` | `0.3.1` | 五类制作资料的结构和交接 | 跨表关系、分集时长、静态报告、可选基线对比与交接覆盖、未列出改动报错、交接文件唯一性；不具备上游全部报告交互 |
 | `security-evidence` | `0.1.0` | 范围明确的既有证据整理 | 证据摘要、来源去重、发现引用和待复核报告；不扫描、不验证漏洞 |
 
@@ -30,6 +30,12 @@
 A0.3.0 的交付/报告显式升为 `drama_text_delivery.v3` / `drama_text_check.v3`，保留逐镜依据/改编/未知，增加显式代称与可见/画外声明；只诊断成稿字面覆盖，不判原文语义、真实在场或持物因果。新脚本不自动补旧v1/v2。具体方法、预算与未检查语义见[人物依据](drama-text-a/methods/visible-characters.md)，来源改写和缺项见[来源说明](drama-text-a/PROVENANCE.md#030-修订范围)。
 A0.5.0 / B0.3.0（能力包 v2 块 7）：按冻结重跑逐条归因补检查器盲区和流程模板——A 新增占位、内嵌引文、改编原文、道具状态/来源、画外点名、过短镜头 7 项检查，B 新增缺表/缺外键、编造参考 ID、动作节拍缺角色、出镜人物缺参考，以及未在交接列出的节拍/对应关系/schema/时长改动和“声称改了其实没改”；两包都加 `--host-json` 输出宿主核验用的 `pack_verifier_result.v1`。详见各自 PROVENANCE。
 
+A0.5.2（能力包 v2 块 8 归因）：把结构可判的道具连续性、动作提及却缺状态、未分类人名、缺少或不可逐字核对的道具来源从提醒升级为错误；道具来源改用来源段落 ID 加逐字片段，新增/推断才用不带段落 ID 的结构化标记；新错误向宿主附带短 `hint`。
+
+A0.5.3（能力包 v2 块 8 重跑归因）：按重跑业务审阅补来源与改编标注的三条结构规则——道具名在原文里却标成新增（`prop_origin_marked_new_but_in_source`）、台词字幕既非原文也没标改编（`adaptation_unmarked`，含极短语气词/纯标点/称呼/占位的字面豁免）、说明声称“原文未出现”而其实在原文里（`adaptation_claim_contradicts_source`）；每条都带 ≤200 字的 `hint`。详见 A 包 PROVENANCE。
+
+A0.5.4（能力包 v2 块 8 重跑归因，9 例业务审阅过 1 例）：逐条归因后补两条只用结构化字段就能判的检查——标了 `verbatim_source_id` 的台词必须落在段落引号内（`verbatim_not_quoted`；段落通篇无引号时不报，避免误伤），镜内道具持有人变化提醒补 `prop_handoffs`（`intra_shot_handoff_unstated`，警告而非错误）。其余为语义问题，列进 PROVENANCE 已知边界不做。详见 A 包 PROVENANCE。
+
 B0.3.1（能力包 v2 块 8 归因）：按冻结重跑业务审阅补交接文件清单与完整示例（写在哪、只保留一份、怎么绑进标准链）、动作节拍 `character_ids` 口径统一（单数 `character_id` 升级为 `beat_character_id_singular` 错误）和“角色、道具、镜头参考各写各的”拆分指引。详见 B 包 PROVENANCE。
 
 A0.4.0 / B0.2.0（C13 第二部分）：A 新增可选 `lines`、`source_quotes`、`props`/`prop_states` 及对应核对，B 新增 `--baseline-project` 逐 ID 对比、交接覆盖真实改动与虚假新增/省略核对，两包报告都带 `checker` 身份；格式版本不变，详见各自 PROVENANCE。
@@ -45,7 +51,7 @@ A0.3.0与B0.1.3已有私有原生使用记录；B0.1.4已通过原生TUI热更�
 在仓库根目录运行，输出目录由操作者指定，目标文件必须不存在：
 
 ```bash
-python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.5.0.zip
+python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-text-a/declaration.json --files-root examples/capability-packages/drama-text-a --output /tmp/drama-text-a-0.5.4.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/drama-workflow-b/declaration.json --files-root examples/capability-packages/drama-workflow-b --output /tmp/drama-workflow-b-0.3.1.zip
 python3 scripts/build_capability_package.py --declaration examples/capability-packages/security-evidence/declaration.json --files-root examples/capability-packages/security-evidence --output /tmp/security-evidence.zip
 ```

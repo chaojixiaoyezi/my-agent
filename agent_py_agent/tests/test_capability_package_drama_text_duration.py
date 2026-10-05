@@ -91,7 +91,7 @@ def test_multiple_shots_per_scene_are_summed_without_count_assumptions(tmp_path)
     first = delivery["shots"][0]
     first["seconds"] = 7.5
     second = copy.deepcopy(first)
-    second.update(id="SH01-detail", seconds=12.5)
+    second.update(id="SH01-detail", seconds=12.5, continuity_break="测试中的独立细节镜头")
     delivery["shots"].insert(1, second)
     report = _check(tmp_path, source, delivery)
 
@@ -110,6 +110,7 @@ def test_roundoff_is_allowed_without_story_specific_tolerance(tmp_path):
         for suffix, value in (("a", 0.1), ("b", 0.2)):
             shot = copy.deepcopy(original)
             shot.update(id=original["id"] + suffix, seconds=value)
+            shot["continuity_break"] = "计量样例中的独立切分"
             shots.append(shot)
     delivery["shots"] = shots
     report = _check(tmp_path, source, delivery)

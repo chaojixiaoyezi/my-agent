@@ -1,8 +1,11 @@
 # LLM: 能力包 A 的单文件私有资源，核对 v3 声明并给出字面人物诊断；可选 lines/source_quotes/props/prop_states 只在出现时检查；
-#   0.5.0 加占位文字、内嵌引文、改编原文引用、道具状态/来源、画外点名、过短镜头 7 项确定性检查，以及 --host-json 宿主核验输出；
-#   同步 workflow、review-continuity、visible-characters 方法及 basis/duration/visibility/lines/v05/examples 测试，不改变宿主状态。
-# 模块用途: 只读原文与交付，核对来源、时长、可见/画外声明、结构化台词与逐字引用、道具状态接续；名称出现不证明在场，
-#   不替旧版本补字段或声称语义、媒体已验证。
+#   0.5.2 将结构可判的道具连续性、来源归属、未分类人名及动作道具状态问题作为错误，并把有限 hint 投影给宿主。
+#   0.5.3 再补三类来源/改编标注规则：道具名在原文里却标成新增、台词字幕既非原文也没标改编、说明声称原文没有而其实有；
+#   全部只按逐字子串与结构化字段判断，误伤面用字面豁免（极短语气词、纯标点、称呼、占位）兜住。
+#   0.5.4 按 0.5.2 三批业务审阅再补两条：标了 verbatim_source_id 的台词必须落在段落引号内（verbatim_not_quoted，错误）；
+#   镜内道具持有人变化但没写 prop_handoffs 时提醒（intra_shot_handoff_unstated，警告，因为无法证明作者没写对）。
+#   同步 workflow、review-continuity、visible-characters 方法及 drama-text 测试；不改变宿主状态或解析自然语言。
+# 模块用途: 只读原文与交付，核对来源、时长、人物声明、结构化台词与道具状态；只按明确字段判错，不替作品作语义结论。
 # 名称算法改写自 drama-skills@0e8929881bb59248618c4f402707c64723adc017 的 creator_markdown_check.py；MIT 声明见 licenses/drama-skills-LICENSE，差异见 PROVENANCE.md。
 
 from __future__ import annotations
@@ -24,8 +27,12 @@ ASCII_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX
 MAX_NAME_SCAN_WORK = 2_000_000
 MAX_NAME_WARNINGS = 100
 PACKAGE_ID = "drama-text-a"
-PACKAGE_VERSION = "0.5.1"
+PACKAGE_VERSION = "0.5.4"
 MIN_QUOTE_CHARS = 2
+# “未标改编”规则的豁免下限：去掉标点空白后不足这么多字就算极短语气词，不查（有效汉字/字母数）。
+MIN_UNMARKED_QUOTE_CHARS = 3
+# 整条就是称呼/招呼时豁免（如“哥”“老板”“喂”）；只匹配这些字面构成的整条，不按语义判断。
+ADDRESS_ONLY = re.compile(r"[喂哎诶欸嗨哟噢哦嗯]{1,4}|[你您他她它咱咱家]{0,2}[哥姐弟妹叔姨伯婶爷奶爸妈]{1,2}[好呀啊哈]?")
 # 单镜秒数低于它只提醒（shot_too_short），可用 --min-shot-seconds 改；单位：秒。
 MIN_SHOT_SECONDS_DEFAULT = 2.0
 # 整段就是这些写法时算占位（不区分大小写）；尖括号包起来的整段（模板里的填写提示）和纯标点、符号也算。
@@ -35,6 +42,48 @@ PLACEHOLDER_PREFIX = re.compile(r"(todo|tbd|fixme)(?![a-z])")
 HOST_RESULT_SCHEMA = "pack_verifier_result.v1"
 # 宿主核验合同建议 metrics 平铺成“键 → 数字”且不超过 16 个键。
 HOST_METRICS_MAX_COUNT = 16
+PROP_CONTINUITY_HINT = "请对齐相邻镜头的道具起止状态；若是有意跳接，在后一镜填写 continuity_break 并说明。"
+PROP_STATE_HINT = "请为动作中出现的已登记道具填写本镜 prop_states；若只是文字提及而非画面道具，请调整表述或移出道具登记。"
+PROP_ORIGIN_HINT = "原文来源请填写 source_id 和逐字 quote；推断或新增请标 kind=adaptation 并写 text，不要伪标段落来源。"
+CHARACTER_VISIBILITY_HINT = "请把该人物列入本镜 visible_character_ids 或 offscreen_character_ids；确实不参与字面匹配时使用已有退出理由。"
+# 改编说明里被括起来的引语（成对引号，含直角引号）；只取引号内的内容当“被声称不存在的原句”。
+# 所有引号消费者都从这里取成对定义，避免改编说明和逐字台词各自接受不同字符集合。
+QUOTE_PAIRS = (("「", "」"), ("『", "』"), ("“", "”"), ("‘", "’"), ('"', '"'))
+QUOTED_SPAN = re.compile("|".join(
+    re.escape(opening) + "([^" + re.escape(closing) + "]+)" + re.escape(closing)
+    for opening, closing in QUOTE_PAIRS
+))
+# 改编说明声称“原文未出现”时用的固定短语；只认这些字面，不做语义推断。
+CLAIMED_ABSENT_MARKERS = ("原文未出现", "原文没有", "原文里没有", "原文中未出现", "原文中未提及", "原文未提及",
+                          "并非原文", "不是原文", "原文无此", "原文亦无")
+# 道具名逐字出现在原文、却把来源标成新增/推断时：给出它出现的段落 ID，让作者改成 source 或调整命名。
+PROP_ORIGIN_IN_SOURCE_HINT = "道具名在原文段落里逐字出现（见 hint 末尾的段落 ID），请把 origin 改成 kind=source 并填该段落的 source_id 与逐字 quote；确实不是同一件道具时请改名。"
+# 镜头里的台词/字幕既非原文逐字、也没被引用覆盖、又没标改编时：给出两种合法退出。
+ADAPTATION_UNMARKED_HINT = "这段文字既不是原文逐字，也没有被 source_quotes / verbatim_source_id / embedded_quotes 覆盖：请在 adaptations 里补一条原文不等于它的说明，或把它改为原文逐字。"
+# 改编说明声称“原文未出现”，但原句其实能在原文里找到时。
+ADAPTATION_CLAIM_CONTRADICTED_HINT = "这条说明称原文未出现该内容，但 original_quote 能在原文段落里逐字找到；请改成 kind=source 的引用，或改掉“原文未出现”的说法。"
+# 台词标了 verbatim_source_id，但它不在段落引号内（多半是把第三人称叙述当成了对白）。
+VERBATIM_QUOTED_HINT = "这句标了 verbatim_source_id，但它不在原文段落的引号内；verbatim_source_id 只用来标原文里人物真的说出口的话，叙述句请改用 source_quotes 或写进 adaptations。"
+INTRA_SHOT_HANDOFF_HINT = "这件道具在本镜从 "
+MAX_HINT_CHARS = 200
+MAX_HINT_FRAGMENT_CHARS = 20
+MAX_HINT_SOURCE_IDS = 3
+
+# 带 hint 的错误/警告码集中登记，并由各发射点通过该表取模板；新增 hint 码必须补真实触发样例。
+HINT_CODE_TEMPLATES = {
+    "named_character_unaccounted": CHARACTER_VISIBILITY_HINT,
+    "prop_state_discontinuity": PROP_CONTINUITY_HINT,
+    "prop_states_missing": PROP_STATE_HINT,
+    "prop_origin_shape": PROP_ORIGIN_HINT,
+    "prop_origin_source_unknown": PROP_ORIGIN_HINT,
+    "prop_origin_quote_not_verbatim": PROP_ORIGIN_HINT,
+    "prop_origin_unstated": PROP_ORIGIN_HINT,
+    "prop_origin_marked_new_but_in_source": PROP_ORIGIN_IN_SOURCE_HINT,
+    "adaptation_unmarked": ADAPTATION_UNMARKED_HINT,
+    "adaptation_claim_contradicts_source": ADAPTATION_CLAIM_CONTRADICTED_HINT,
+    "verbatim_not_quoted": VERBATIM_QUOTED_HINT,
+    "intra_shot_handoff_unstated": INTRA_SHOT_HANDOFF_HINT,
+}
 
 
 # LLM: 保留唯一 JSON 键，避免重复字段在模型输出与校验器之间产生不同含义。
@@ -191,8 +240,8 @@ def unchecked_name_diagnostics(reason: str) -> dict:
             "emitted_warning_count": None, "omitted_warning_count": None, "warnings_truncated": None}
 
 
-# LLM: 调用方已确认是未覆盖/歧义且在输出上限内才构造明细；名字出现只作 warning，位置保持原 Unicode 字符下标。
-# 函数用途: 为需要保留的命中创建有限名称预览和候选列表，裁剪后的命中不再重复排序大候选集合。
+# LLM: 调用方已确认名字命中需要报告且在输出上限内才构造明细；位置保持原 Unicode 字符下标。
+# 函数用途: 为未分类或歧义命中创建有限预览和候选列表，裁剪后的命中不再重复排序大候选集合。
 def name_warning(match: tuple[str, int, int], candidates: set[str], declared: set[str], at: str) -> dict:
     name, start, end = match
     return {"code": "ambiguous_character_name" if len(candidates) > 1 else "named_character_unaccounted",
@@ -201,10 +250,11 @@ def name_warning(match: tuple[str, int, int], candidates: set[str], declared: se
             "declared_candidate_ids": sorted(candidates & declared)}
 
 
-# LLM: 原结构有效才扫描三字段；成本估算含名称长度，超额不给部分零计数；裁剪后继续计数但不构造明细，不能提前停止扫描。
-# 函数用途: 汇总名字的真实命中/歧义/漏声明次数，显式暴露退出角色、未检查与警告裁剪范围。
-def diagnose_names(owners: dict, shots: dict, declared: dict, skipped: list[str],
-                   errors: list[dict], warnings: list[dict]) -> dict:
+# LLM: 原结构有效才扫描三字段；唯一命中却未分类是错误，歧义仍是警告；其 hint 必须从 HINT_CODE_TEMPLATES 取，码表由真实触发守卫覆盖。
+# 函数用途: 汇总显式名字命中，把可确定的漏分类交返工，并暴露歧义、退出和扫描范围。
+def diagnose_names(owners: dict, shots: dict, context: dict, findings: dict) -> dict:
+    declared, skipped = context["declared"], context["skipped"]
+    errors, warnings = findings["errors"], findings["warnings"]
     result = unchecked_name_diagnostics("structure_errors")
     result.update({"declared_name_count": len(owners), "skipped_character_ids": skipped,
                    "scan_work_limit": MAX_NAME_SCAN_WORK})
@@ -220,21 +270,32 @@ def diagnose_names(owners: dict, shots: dict, declared: dict, skipped: list[str]
         warnings.append({"code": "name_diagnostic_not_checked", "reason": result["reason"]})
         return result
     names = sorted(owners, key=lambda name: (-len(name), name))
-    matches, warning_count, emitted = 0, 0, 0
+    matches, error_count, warning_count, emitted_errors, emitted_warnings = 0, 0, 0, 0, 0
     for identifier, row in shots.items():
-        for key in SHOT_TEXT_FIELDS:
-            for match in literal_name_matches(row[key], names):
-                matches += 1
-                candidates = owners[match[0]]
-                if len(candidates) > 1 or not candidates <= declared[identifier]:
-                    warning_count += 1
-                    if emitted < MAX_NAME_WARNINGS:
-                        warnings.append(name_warning(match, candidates, declared[identifier], f"{identifier}.{key}"))
-                        emitted += 1
+        field_matches = ((key, match) for key in SHOT_TEXT_FIELDS
+                         for match in literal_name_matches(row[key], names))
+        for key, match in field_matches:
+            matches += 1
+            candidates = owners[match[0]]
+            if len(candidates) == 1 and not candidates <= declared[identifier]:
+                error_count += 1
+                if emitted_errors < MAX_NAME_WARNINGS:
+                    item = name_warning(match, candidates, declared[identifier], f"{identifier}.{key}")
+                    item["hint"] = HINT_CODE_TEMPLATES["named_character_unaccounted"]
+                    errors.append(item)
+                    emitted_errors += 1
+            elif len(candidates) > 1:
+                warning_count += 1
+                if emitted_warnings < MAX_NAME_WARNINGS:
+                    warnings.append(name_warning(match, candidates, declared[identifier], f"{identifier}.{key}"))
+                    emitted_warnings += 1
     del result["reason"]
     result.update({"status": "complete", "checked_field_count": len(shots) * len(SHOT_TEXT_FIELDS),
-                   "match_count": matches, "warning_count": warning_count, "emitted_warning_count": emitted,
-                   "omitted_warning_count": warning_count - emitted, "warnings_truncated": warning_count > emitted})
+                   "match_count": matches, "warning_count": warning_count, "emitted_warning_count": emitted_warnings,
+                   "omitted_warning_count": warning_count - emitted_warnings,
+                   "warnings_truncated": warning_count > emitted_warnings,
+                   "error_count": error_count, "emitted_error_count": emitted_errors,
+                   "omitted_error_count": error_count - emitted_errors})
     return result
 
 
@@ -393,6 +454,52 @@ def check_quote(source_id: object, text: str, at: str, passages: dict, shot_sour
                        "text_length": len(text), "found_in_source_ids": found})
 
 
+# LLM: `verbatim_source_id` 代表原文里人物说出口的话；本检查只在 passage 有成对引号时核对，没引号时提前返回是明确已知边界而非合规结论。
+#   有引号时，必须找到台词文本的至少一个完整出现位置落在引号内部；检查重复出现的所有位置，避免只看第一次。
+# 函数用途: 核对标为逐字的台词是否能在原文的引号内找到，不能据无引号段落推断台词身份。
+def check_verbatim_is_quoted(line: dict, at: str, passages: dict, errors: list[dict]) -> None:
+    source_id = line.get("verbatim_source_id")
+    text = line.get("text")
+    if not isinstance(source_id, str) or source_id not in passages or not isinstance(text, str) or not text:
+        return
+    passage = passages[source_id].get("text")
+    if not isinstance(passage, str):
+        return
+    spans = quoted_spans(passage)
+    if not spans:
+        return
+    if not _has_quoted_occurrence(text, passage, spans):
+        errors.append({"code": "verbatim_not_quoted", "path": f"{at}.verbatim_source_id",
+                       "hint": HINT_CODE_TEMPLATES["verbatim_not_quoted"]})
+
+
+# LLM: 同一段落可多次出现同一台词；逐个搜索每个起点，只有至少一个完整出现落在任何引用区间内才视为逐字台词。
+# 函数用途: 检查文本的所有出现位置，避免首个叙述用法遮蔽后续引号内原话。
+def _has_quoted_occurrence(text: str, passage: str, spans: list[tuple[int, int]]) -> bool:
+    position = passage.find(text)
+    while position != -1:
+        if any(start <= position and position + len(text) <= end for start, end in spans):
+            return True
+        position = passage.find(text, position + 1)
+    return False
+
+
+# LLM: 引号区间与 QUOTED_SPAN 正则共用 QUOTE_PAIRS；每一对独立匹配，闭合后清空起点，以正确处理同类多组引号。
+#   无引号段落返回空 spans 是已知边界，由调用者保留不触发行为，不代表台词语义被证明。
+# 函数用途: 把段落中的每个成对引号转换成半开内容区间，供逐字台词检查定位。
+def quoted_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    for opening, closing in QUOTE_PAIRS:
+        start = None
+        for index, char in enumerate(text):
+            if char == opening and start is None:
+                start = index + 1
+            elif char == closing and start is not None:
+                spans.append((start, index))
+                start = None
+    return sorted(spans)
+
+
 # LLM: lines 是可选结构化台词；说话人取 cast ID 或 null（旁白/字幕），必须在本镜可见或画外声明里；不评价台词质量或字数。
 # 函数用途: 校验一镜的台词条目并核对标了 verbatim_source_id 的逐字台词，返回合格条目；没有 lines 键返回 None。
 def check_shot_lines(row: dict, identifier: str, context: dict, shot_sources: set[str], errors: list[dict]) -> list[dict] | None:
@@ -418,6 +525,7 @@ def check_shot_lines(row: dict, identifier: str, context: dict, shot_sources: se
             errors.append({"code": "line_speaker_undeclared", "path": f"{at}.speaker_id", "character_id": speaker})
         if "verbatim_source_id" in line:
             check_quote(line["verbatim_source_id"], line["text"], at, context["passages"], shot_sources, errors)
+            check_verbatim_is_quoted(line, at, context["passages"], errors)
         if "embedded_quotes" in line:
             check_embedded_quotes(line, at, context["passages"], shot_sources, errors)
         valid.append(line)
@@ -444,8 +552,9 @@ def check_embedded_quotes(line: dict, at: str, passages: dict, shot_sources: set
 
 
 # LLM: 改编条目的 original_quote 是作者声明“原文里被改写的那句”，必须是原文某一段的逐字子串（不限本镜段落，改编常跨段）；
-#   留空表示纯新增，不查。不判断改编本身是否合适，也不判断“原文已有却标成改编”（那要读懂内容）。
-# 函数用途: 核对改编条目引用的原文确实存在于本次原文里。
+#   留空表示纯新增，不查。0.5.3 起再加一条：说明自称“原文未出现/没有/并非原文”之类，而 original_quote 或说明文字里
+#   引到的原句其实存在于原文时，就是自相矛盾。动态段落 ID 从统一码表出 hint，并在拼接前净化与截短。
+# 函数用途: 核对改编条目引用的原文确实存在于本次原文里，并抓“声称原文没有但其实有”的矛盾。
 def check_adaptation_quotes(row: dict, identifier: str, passages: dict, errors: list[dict]) -> None:
     values = row.get("adaptations") if isinstance(row.get("adaptations"), list) else []
     texts = [passage["text"] for passage in passages.values() if isinstance(passage.get("text"), str)]
@@ -454,9 +563,101 @@ def check_adaptation_quotes(row: dict, identifier: str, passages: dict, errors: 
         if isinstance(quote, str) and quote.strip() and not any(quote in text for text in texts):
             errors.append({"code": "adaptation_original_not_in_source",
                            "path": f"{identifier}.adaptations[{position}].original_quote"})
+        claimed_new = claimed_source_absent(value)
+        if claimed_new:
+            found = source_ids_containing(claimed_new, passages)
+            if found:
+                errors.append({"code": "adaptation_claim_contradicts_source",
+                               "path": f"{identifier}.adaptations[{position}].text",
+                               "text": claimed_new, "found_in_source_ids": found,
+                               "hint": _dynamic_hint("adaptation_claim_contradicts_source", [" 段落：", _joined_source_ids(found)])})
 
 
-# LLM: source_quotes 是作者显式声明的原文短句依据，同样只做逐字子串核对；不扫描散文里的引号。
+# LLM: 只认固定的“原文没有”说法（中文和少量英文），不接受自然语言推断；被声称“不存在”的那段文字，
+#   只能从 original_quote 或说明里成对引号括起来的内容取——不能把 marker 之后的整句都当引用，那必然不是原文子串。
+#   取到的文字要够长才算证据，太短（如“没有”本身）不当引用，避免把普通行文当引用。
+# 函数用途: 从一条改编说明里取出作者声称“原文未出现”的那段文字，取不到返回空串。
+def claimed_source_absent(value: object) -> str:
+    if not isinstance(value, dict) or not claims_source_absent(value):
+        return ""
+    quote = value.get("original_quote")
+    if isinstance(quote, str) and quote.strip():
+        return quote
+    for field in ("text", "note", "reason"):
+        text = value.get(field)
+        if not isinstance(text, str):
+            continue
+        for match in QUOTED_SPAN.finditer(text):
+            candidate = next((group for group in match.groups() if group), "")
+            if len(candidate.strip()) >= MIN_QUOTE_CHARS:
+                return candidate.strip()
+    return ""
+
+
+# LLM: 只按字面找固定的“原文没有”短语，不做同义改写或语义推断。
+# 函数用途: 判断一条改编说明是否声称“这段内容原文里没有”。
+def claims_source_absent(value: dict) -> bool:
+    return any(isinstance(value.get(field), str) and marker in value[field]
+               for field in ("text", "note", "reason") for marker in CLAIMED_ABSENT_MARKERS)
+
+
+# LLM: 0.5.3 规则：镜头里的台词或字幕必须能说清“是原文”还是“是新增”。
+#   一条线文本同时满足以下三条才算合规：① 是某个本镜所引段落的逐字子串（整句照搬）；② 或被本条的
+#   verbatim_source_id / embedded_quotes 覆盖；③ 或本镜 adaptations 里至少有一条说明（作者承认这是改编）。
+#   三条都不满足就报 adaptation_unmarked：这段文字既没标原文依据，也没标新增；提示模板由统一码表登记。
+#   豁免（宁可漏报也不误伤）：整条去掉标点/空白后不足 MIN_UNMARKED_QUOTE_CHARS 字（极短语气词）；
+#   整条只有标点符号；整条是纯称呼/人名（用 cast 里出现过的名字字面命中）；整条是占位文本。
+#   只做逐字子串与结构化字段判断，不读语义、不判断改编好坏。
+# 函数用途: 找出既非原文可溯源、又没有改编标注的镜头台词/字幕。
+def check_unmarked_adaptations(row: dict, identifier: str, passages: dict, shot_sources: set[str],
+                               errors: list[dict]) -> None:
+    values = row.get("lines") if isinstance(row.get("lines"), list) else []
+    if not values:
+        return
+    covered = any(isinstance(value, dict) and str(value.get("text") or "").strip()
+                  for value in (row.get("adaptations") if isinstance(row.get("adaptations"), list) else []))
+    if covered:
+        return
+    for position, line in enumerate(values):
+        text = line.get("text") if isinstance(line, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if is_exempt_unmarked(text):
+            continue
+        if line_has_source(text, line, passages, shot_sources):
+            continue
+        errors.append({"code": "adaptation_unmarked", "path": f"{identifier}.lines[{position}].text",
+                       "hint": HINT_CODE_TEMPLATES["adaptation_unmarked"]})
+
+
+# LLM: 豁免只看字面形状：太短、无实义标点、纯称呼、占位。这些都不该被“未标改编”拦下（误伤代价高于漏报）。
+# 函数用途: 判断一条台词是否属于“未标改编”规则的合理豁免。
+def is_exempt_unmarked(text: str) -> bool:
+    stripped = text.strip()
+    if is_placeholder(stripped):
+        return True
+    meaningful = [char for char in stripped if not unicodedata.category(char).startswith("P")]
+    if not any(char.strip() for char in meaningful):
+        return True
+    if len("".join(char for char in meaningful if char.strip())) < MIN_UNMARKED_QUOTE_CHARS:
+        return True
+    return bool(ADDRESS_ONLY.fullmatch(stripped))
+
+
+# LLM: “这算原文”只看两种结构化声明：整句是本镜所引段落的逐字子串，或被本条的逐字/内嵌引文覆盖。
+#   不做模糊匹配（相似度、词序重排都算没覆盖），因为那会放过真正的未标新增。
+# 函数用途: 判断一条台词是否已被原文引用覆盖。
+def line_has_source(text: str, line: dict, passages: dict, shot_sources: set[str]) -> bool:
+    if any(isinstance(row.get("text"), str) and isinstance(source_id, str) and source_id in shot_sources
+           and text in row["text"] for source_id, row in passages.items()):
+        return True
+    verbatim = line.get("verbatim_source_id")
+    if isinstance(verbatim, str) and verbatim in shot_sources:
+        return True
+    embedded = line.get("embedded_quotes")
+    return bool(isinstance(embedded, list) and any(
+        isinstance(quote, dict) and isinstance(quote.get("text"), str) and quote["text"].strip()
+        and quote["text"] in text for quote in embedded))
 # 函数用途: 核对一镜的原文引用条目，返回条目数。
 def check_source_quotes(row: dict, identifier: str, passages: dict, shot_sources: set[str], errors: list[dict]) -> int:
     if "source_quotes" not in row:
@@ -501,9 +702,9 @@ def moment_prop_states(entries: object, at: str, shot: dict, context: dict, erro
     return states
 
 
-# LLM: 数组顺序即叙事顺序；上一镜终点和下一镜起点都声明了同一道具时，持有人或标签不同且下一镜没写 continuity_break 才提醒。
-# 函数用途: 逐对比较相邻镜头的道具状态，返回比较过的对数。
-def prop_continuity(states: list[tuple[str, dict, dict]], warnings: list[dict]) -> int:
+# LLM: 数组顺序即叙事顺序；上一镜终点和下一镜起点都声明了同一道具时，持有人或标签不同且下一镜没写 continuity_break 就报错；hint 模板由统一码表提供。
+# 函数用途: 逐对比较相邻镜头的道具状态并附可执行修订提示，返回比较过的对数。
+def prop_continuity(states: list[tuple[str, dict, dict]], errors: list[dict]) -> int:
     pairs = 0
     for (previous_id, _, previous), (identifier, row, current) in zip(states, states[1:]):
         declared_break = isinstance(row.get("continuity_break"), str) and row["continuity_break"].strip()
@@ -511,9 +712,10 @@ def prop_continuity(states: list[tuple[str, dict, dict]], warnings: list[dict]) 
             pairs += 1
             before, after = previous["end"][prop], current["start"][prop]
             if before != after and not declared_break:
-                warnings.append({"code": "prop_state_discontinuity", "path": identifier, "prop_id": prop,
-                                 "previous_shot": previous_id, "previous_end": {"holder_id": before[0], "state": before[1]},
-                                 "start": {"holder_id": after[0], "state": after[1]}})
+                errors.append({"code": "prop_state_discontinuity", "path": identifier, "prop_id": prop,
+                               "previous_shot": previous_id, "previous_end": {"holder_id": before[0], "state": before[1]},
+                               "start": {"holder_id": after[0], "state": after[1]},
+                               "hint": HINT_CODE_TEMPLATES["prop_state_discontinuity"]})
     return pairs
 
 
@@ -530,15 +732,54 @@ def shot_prop_states(row: dict, identifier: str, context: dict, errors: list[dic
         return {}
     offscreen = row.get("offscreen_character_ids")
     shot = {"id": identifier, "offscreen": {x for x in offscreen if isinstance(x, str)} if isinstance(offscreen, list) else set()}
-    return {moment: moment_prop_states(value[moment], f"{identifier}.prop_states.{moment}", shot, context, errors, warnings)
-            for moment in ("start", "end") if moment in value}
+    moments = {moment: moment_prop_states(value[moment], f"{identifier}.prop_states.{moment}", shot, context, errors, warnings)
+               for moment in ("start", "end") if moment in value}
+    check_intra_shot_handoffs(row, identifier, moments, warnings)
+    return moments
 
 
-# LLM: 已登记道具的名字（≥2 字）按字面出现在本镜 action 里，而本镜 prop_states 的 start/end 都没写这个道具时提醒；
-#   只比字面，不推断道具是否真在画面里，也不要求没出现在动作里的道具写状态。坏形状的 prop_id（列表、对象）只当没写，
-#   不能让提醒本身崩溃（宿主模式崩溃会丢掉整次检查结论；形状错误另由 moment_prop_states 报 error）。
-# 函数用途: 提醒作者给动作里用到的已登记道具写状态。
-def prop_mention_warnings(props: dict, shots: dict, warnings: list[dict]) -> None:
+# LLM: 0.5.4 提醒（warning，不是 error）：同一镜头里同一件道具从一个人手里换到另一个人手里
+#   （prop_states.start → end 的 holder_id 不同），表示镜内发生了一次交接。制作人员只看状态表会以为道具凭空换了人，
+#   所以建议给它补一条结构化记录。
+#   为什么用 warning 不用 error：作者完全可能觉得"action 里已经写了递灯"就够了，这条规则无法证明他没写对，
+#   强判错误会误伤合法写法。作为提醒推动补字段，零误伤。
+#   两种合法补法：① 在 shot.prop_handoffs 里写一条 {prop_id, to_holder_id, note}；② 把 prop_states 改回同一持有人。
+#   只在一端为 null（放下/拿起）以外、两端是不同角色时才提醒；动态 ID 拼接前过滤 Unicode C 类并限制长度。
+# 函数用途: 提醒作者为镜头内的道具交接补结构化记录。
+def check_intra_shot_handoffs(row: dict, identifier: str, moments: dict, warnings: list[dict]) -> None:
+    start, end = moments.get("start") or {}, moments.get("end") or {}
+    declared = declared_handoffs(row)
+    for prop_id, (from_holder, _label) in start.items():
+        to_holder = (end.get(prop_id) or (None, None))[0]
+        if from_holder is None or to_holder is None or from_holder == to_holder or prop_id in declared:
+            continue
+        warnings.append({
+            "code": "intra_shot_handoff_unstated", "path": f"{identifier}.prop_handoffs",
+            "prop_id": prop_id, "from_holder_id": from_holder, "to_holder_id": to_holder,
+            "hint": _dynamic_hint("intra_shot_handoff_unstated", [
+                _hint_fragment(from_holder), " 转到了 ", _hint_fragment(to_holder),
+                "，但镜头内没有交接记录；建议在 prop_handoffs 里写一条 ", _hint_fragment(prop_id),
+                " 的交接（给谁、为什么），或把 prop_states 改回同一持有人。",
+            ]),
+        })
+
+
+# LLM: prop_handoffs 是 0.5.4 新增的可选字段，只取结构化的 prop_id；形状错误不在这里报（另有字段校验），
+#   坏形状当作没声明，避免提醒本身崩溃。
+# 函数用途: 取一镜里已声明交接的道具 ID 集合。
+def declared_handoffs(row: dict) -> set[str]:
+    values = row.get("prop_handoffs")
+    if not isinstance(values, list):
+        return set()
+    return {entry["prop_id"] for entry in values
+            if isinstance(entry, dict) and isinstance(entry.get("prop_id"), str)}
+
+
+# LLM: 已登记道具的名字（≥2 字）按字面出现在本镜 action 里，而本镜 prop_states 的 start/end 都没写这个道具时报错；
+#   只比字面，不推断道具是否真在画面里，也不要求没出现在动作里的道具写状态；hint 模板从统一码表取。
+#   坏形状的 prop_id（列表、对象）只当没写，不能让提醒本身崩溃（形状错误另由 moment_prop_states 报 error）。
+# 函数用途: 要求作者为动作里用到的已登记道具写状态。
+def prop_mention_errors(props: dict, shots: dict, errors: list[dict]) -> None:
     for identifier, row in shots.items():
         action = row.get("action") if isinstance(row.get("action"), str) else ""
         states = row.get("prop_states") if isinstance(row.get("prop_states"), dict) else {}
@@ -547,34 +788,109 @@ def prop_mention_warnings(props: dict, shots: dict, warnings: list[dict]) -> Non
         for prop_id, prop in props.items():
             name = prop.get("name").strip() if isinstance(prop.get("name"), str) else ""
             if len(name) >= 2 and name in action and prop_id not in declared:
-                warnings.append({"code": "prop_states_missing", "path": f"{identifier}.prop_states", "prop_id": prop_id})
+                errors.append({"code": "prop_states_missing", "path": f"{identifier}.prop_states",
+                               "prop_id": prop_id, "hint": HINT_CODE_TEMPLATES["prop_states_missing"]})
 
 
-# LLM: 按 shots 数组顺序找道具第一次出现在 prop_states 的时刻（同一镜先 start 后 end）：那一刻已经有持有人，而道具表没写
-#   origin（来源或交接说明）时提醒。只看 origin 是否填写，不解析内容；第一次出现时无人持有（例如放在地上）不提醒。
-# 函数用途: 提醒作者交代道具第一次出现时从哪来、谁交给谁。
-def prop_origin_warnings(props: dict, states: list[tuple[str, dict, dict]], warnings: list[dict]) -> None:
+# LLM: origin.kind=source 必须引用存在的段落和逐字片段；kind=adaptation 只写新增说明且不带段落 ID；各错误 hint 码从 HINT_CODE_TEMPLATES 取。
+#   0.5.3 起 adaptation 分支加一条：道具名逐字出现在原文段落里时，说明作者标错了来源（道具其实来自原文），
+#   动态段落 ID 拼接前由共享 helper 净化和截短；只按逐字子串判断，不读段落语义，也不猜是不是同一件道具。
+# 函数用途: 检查单个道具来源的结构，复用统一引文校验，并为作者给出可执行修订提示。
+def check_prop_origin(prop_id: str, name: str, origin: object, passages: dict, errors: list[dict]) -> None:
+    at = f"{prop_id}.origin"
+    if not isinstance(origin, dict):
+        errors.append({"code": "prop_origin_shape", "path": at, "hint": HINT_CODE_TEMPLATES["prop_origin_shape"]})
+        return
+    kind = origin.get("kind")
+    if kind == "source":
+        if (set(origin) != {"kind", "source_id", "quote"} or not isinstance(origin.get("source_id"), str)
+                or not isinstance(origin.get("quote"), str) or not origin["quote"].strip()):
+            errors.append({"code": "prop_origin_shape", "path": at, "hint": HINT_CODE_TEMPLATES["prop_origin_shape"]})
+        elif origin["source_id"] not in passages:
+            errors.append({"code": "prop_origin_source_unknown", "path": at,
+                           "hint": HINT_CODE_TEMPLATES["prop_origin_source_unknown"]})
+        else:
+            before = len(errors)
+            check_quote(origin["source_id"], origin["quote"], at, passages, set(passages), errors,
+                        code="prop_origin_quote_not_verbatim")
+            for error in errors[before:]:
+                error["hint"] = HINT_CODE_TEMPLATES["prop_origin_quote_not_verbatim"]
+    elif kind == "adaptation":
+        if (set(origin) != {"kind", "text"} or not isinstance(origin.get("text"), str)
+                or not origin["text"].strip()):
+            errors.append({"code": "prop_origin_shape", "path": at, "hint": HINT_CODE_TEMPLATES["prop_origin_shape"]})
+        else:
+            found = source_ids_containing(name, passages)
+            if found:
+                errors.append({"code": "prop_origin_marked_new_but_in_source", "path": at, "prop_id": prop_id,
+                               "name": name, "found_in_source_ids": found,
+                               "hint": _dynamic_hint("prop_origin_marked_new_but_in_source", [" 段落：", _joined_source_ids(found)])})
+    else:
+        errors.append({"code": "prop_origin_shape", "path": at, "hint": HINT_CODE_TEMPLATES["prop_origin_shape"]})
+
+
+# LLM: 只在段落 text 是字符串时做逐字子串判断，和 check_quote 同一口径（不做空白/标点/全半角归一化）；
+#   返回排序后的段落 ID，便于在 hint 里给作者定位。
+# 函数用途: 列出逐字包含给定文字的所有原文段落 ID。
+def source_ids_containing(text: str, passages: dict) -> list[str]:
+    if not isinstance(text, str) or not text.strip():
+        return []
+    return sorted(key for key, row in passages.items()
+                  if isinstance(row, dict) and isinstance(row.get("text"), str) and text in row["text"])
+
+
+# LLM: 来源 ID 是输入数据，先移除 Unicode 类别 C、逐项截短并限制数量，避免控制码注入和宿主丢弃长 hint。
+# 函数用途: 把安全处理后的段落 ID 列表拼成给作者看的短串。
+def _joined_source_ids(identifiers: list[str]) -> str:
+    safe_ids = [_hint_fragment(identifier) for identifier in identifiers[:MAX_HINT_SOURCE_IDS]]
+    visible_ids = [identifier for identifier in safe_ids if identifier]
+    return "、".join(visible_ids) + ("等" if len(identifiers) > MAX_HINT_SOURCE_IDS else "")
+
+
+# LLM: 拼入动态 hint 前统一移除所有 General Category 以 C 开头的字符、转义 ASCII 花括号，并按码点数截短。
+# 函数用途: 让输入 ID 片段只包含可显示的有限长度内容。
+def _hint_fragment(value: str) -> str:
+    printable = "".join(char for char in value if not unicodedata.category(char).startswith("C"))
+    printable = printable.replace("{", "｛").replace("}", "｝")
+    return printable[:MAX_HINT_FRAGMENT_CHARS]
+
+
+# LLM: 动态 hint 必须使用登记过的 code，且最终文本不能超过宿主 200 字上限。
+# 函数用途: 把统一模板与净化过的动态片段组成可投影提示。
+def _dynamic_hint(code: str, fragments: list[str]) -> str:
+    return (HINT_CODE_TEMPLATES[code] + "".join(fragments))[:MAX_HINT_CHARS]
+
+
+# LLM: 按 shots 数组顺序找道具首次出现时刻；持有人已存在但缺 origin 是错误，明确 source/adaptation 均可通过；错误 hint 从统一码表取。
+# 函数用途: 核验道具来源声明；无持有人首次出现且未声明来源是合法情况。
+def prop_origin_errors(props: dict, states: list[tuple[str, dict, dict]], passages: dict,
+                       errors: list[dict]) -> None:
     first: dict[str, tuple[str, object]] = {}
     for identifier, _, moments in states:
-        for moment in ("start", "end"):
-            for prop_id, (holder, _label) in moments.get(moment, {}).items():
-                first.setdefault(prop_id, (f"{identifier}.prop_states.{moment}", holder))
-    for prop_id, (where, holder) in first.items():
-        origin = props.get(prop_id, {}).get("origin")
-        if holder is not None and not (isinstance(origin, str) and origin.strip()):
-            warnings.append({"code": "prop_origin_unstated", "path": where, "prop_id": prop_id})
+        occurrences = ((moment, prop_id, holder)
+                       for moment in ("start", "end")
+                       for prop_id, (holder, _label) in moments.get(moment, {}).items())
+        for moment, prop_id, holder in occurrences:
+            first.setdefault(prop_id, (f"{identifier}.prop_states.{moment}", holder))
+    for prop_id, prop in props.items():
+        if "origin" in prop:
+            name = prop.get("name").strip() if isinstance(prop.get("name"), str) else ""
+            check_prop_origin(prop_id, name, prop["origin"], passages, errors)
+        elif prop_id in first and first[prop_id][1] is not None:
+            errors.append({"code": "prop_origin_unstated", "path": first[prop_id][0], "prop_id": prop_id,
+                           "hint": HINT_CODE_TEMPLATES["prop_origin_unstated"]})
 
 
-# LLM: 可选扩展字段统一在原结构检查后核对；不出现就不查，并用计数（0）和 dialogue_not_structured 让“没查”可见。
-# 函数用途: 核对台词、逐字引用、道具表与道具状态接续，返回报告 metrics 增量。
-def check_extended_fields(delivery: dict, context: dict, shots: dict, scene_sources: dict,
-                          errors: list[dict], warnings: list[dict]) -> dict:
+# LLM: 可选扩展字段统一在原结构检查后核对；上下文含 shots/scene_sources，结果写入共享 findings。
+# 函数用途: 核对台词、逐字引用、道具表与道具状态接续，返回数字化交付事实。
+def check_extended_fields(delivery: dict, context: dict, errors: list[dict], warnings: list[dict]) -> dict:
+    shots, scene_sources = context["shots"], context["scene_sources"]
     props = index_rows(delivery, "props", errors) if "props" in delivery else {}
     for identifier, row in props.items():
         if not isinstance(row.get("name"), str) or not row["name"].strip():
             errors.append({"code": "prop_name_required", "path": f"{identifier}.name"})
     context = {**context, "props": props}
-    lines_total, by_speaker, shots_with_lines, structured, quotes, states = 0, {}, 0, False, 0, []
+    lines_total, by_speaker, shots_with_lines, structured_shots, quotes, states = 0, {}, 0, 0, 0, []
     for identifier, row in shots.items():
         scene_id = row.get("scene_id")
         allowed = scene_sources.get(scene_id, set()) if isinstance(scene_id, str) else set()
@@ -582,7 +898,7 @@ def check_extended_fields(delivery: dict, context: dict, shots: dict, scene_sour
         shot_sources = {value for value in declared_sources if isinstance(value, str)} & allowed
         lines = check_shot_lines(row, identifier, context, shot_sources, errors)
         if lines is not None:
-            structured = True
+            structured_shots += 1
             shots_with_lines += bool(lines)
             lines_total += len(lines)
             for line in lines:
@@ -590,15 +906,17 @@ def check_extended_fields(delivery: dict, context: dict, shots: dict, scene_sour
                 by_speaker[speaker] = by_speaker.get(speaker, 0) + 1
         quotes += check_source_quotes(row, identifier, context["passages"], shot_sources, errors)
         check_adaptation_quotes(row, identifier, context["passages"], errors)
+        check_unmarked_adaptations(row, identifier, context["passages"], shot_sources, errors)
         states.append((identifier, row, shot_prop_states(row, identifier, context, errors, warnings)))
-    pairs = prop_continuity(states, warnings)
-    prop_mention_warnings(props, shots, warnings)
-    prop_origin_warnings(props, states, warnings)
-    if not structured:
+    pairs = prop_continuity(states, errors)
+    prop_mention_errors(props, shots, errors)
+    prop_origin_errors(props, states, context["passages"], errors)
+    if not structured_shots:
         warnings.append({"code": "dialogue_not_structured"})
     elif not lines_total:
         warnings.append({"code": "no_dialogue_lines"})
     return {"dialogue_lines": lines_total, "dialogue_lines_by_speaker": by_speaker, "shots_with_lines": shots_with_lines,
+            "shots_with_structured_lines": structured_shots,
             "source_quotes": quotes, "props": len(props), "prop_state_pairs_checked": pairs}
 
 
@@ -631,7 +949,7 @@ def short_shot_warnings(shots: dict, min_seconds: float, warnings: list[dict]) -
 
 
 # LLM: 本包只核对显式 v3 声明及字面诊断，covered_passages 仍指场次采用；旧 schema 不自动升级，不能据此授予宿主完成状态。
-# 函数用途: 查找来源、人物和时长声明缺项，保留名字、改编和未知警告；创作忠实、在场与接续真实性仍交独立阅读。
+# 函数用途: 查找来源、人物和时长声明缺项；可判结构问题报错，无法由字段确定的语义质量仍交独立阅读。
 def check_delivery(source: object, delivery: object, source_sha256: str,
                    min_shot_seconds: float = MIN_SHOT_SECONDS_DEFAULT) -> dict:
     errors, warnings = [], []
@@ -701,10 +1019,12 @@ def check_delivery(source: object, delivery: object, source_sha256: str,
         warnings.append({"code": "explicit_omissions_need_review", "count": len(omitted)})
     durations = duration_metrics(source, scenes, shots, errors)
     short_shot_warnings(shots, min_shot_seconds, warnings)
-    diagnostics = diagnose_names(name_owners, shots, declared, skipped, errors, warnings)
+    diagnostics = diagnose_names(name_owners, shots, {"declared": declared, "skipped": skipped},
+                                 {"errors": errors, "warnings": warnings})
     offscreen_name_warnings(name_owners, shots, diagnostics, warnings)
-    extended = check_extended_fields(delivery, {"cast": cast, "declared": declared, "passages": passages}, shots,
-                                     scene_sources, errors, warnings)
+    extended_context = {"cast": cast, "declared": declared, "passages": passages, "shots": shots,
+                        "scene_sources": scene_sources}
+    extended = check_extended_fields(delivery, extended_context, errors, warnings)
     warnings.append({"code": "creative_quality_and_media_not_checked"})
     return {"schema": "drama_text_check.v3", "structure_valid": not errors, "checker": checker_identity(),
             "errors": errors, "warnings": warnings, "name_diagnostics": diagnostics,
@@ -713,16 +1033,21 @@ def check_delivery(source: object, delivery: object, source_sha256: str,
             "source_sha256_actual": source_sha256}}
 
 
-# LLM: 宿主核验合同 pack_verifier_result.v1 的条目只带 code 和 location（沿本报告的 path，资料内 ID 路径；没有 path 记 "$"），
-#   不带 message 和其它细节。
-# 函数用途: 把报告里的错误或警告列表投影成宿主读的条目。
+# LLM: 宿主核验合同 pack_verifier_result.v1 使用 code/location，并仅对明确短提示透传可选 hint；不解释其它诊断内容。
+# 函数用途: 把报告条目投影成宿主可处理的结构事实，hint 最长 200 字。
 def host_items(rows: list[dict]) -> list[dict]:
-    return [{"code": str(row.get("code") or ""), "location": str(row.get("path") or "$")} for row in rows]
+    items = []
+    for row in rows:
+        item = {"code": str(row.get("code") or ""), "location": str(row.get("path") or "$")}
+        hint = row.get("hint")
+        if isinstance(hint, str) and 0 < len(hint) <= 200:
+            item["hint"] = hint
+        items.append(item)
+    return items
 
 
-# LLM: --host-json 时输出宿主核验合同 pack_verifier_result.v1（ae 块 2/3 定）：valid 必须等于“errors 为空”，宿主会硬校验；
-#   errors/warnings 只有 code 和 location；metrics 只留数字（不含布尔、逐场字典、摘要字符串），最多 16 个键。宿主只读这些
-#   结构化字段，不解释说明文字；不加参数时原 drama_text_check.v3 报告逐字节不变。
+# LLM: --host-json 时输出宿主核验合同 pack_verifier_result.v1：valid 必须等于“errors 为空”；条目只投影 code/location/可选短 hint。
+#   metrics 只留数字（不含布尔、逐场字典、摘要字符串），最多 16 个键；不加参数时仍输出 drama_text_check.v3。
 # 函数用途: 把检查报告投影成宿主读的结构化结果。
 def host_result(report: dict) -> dict:
     numbers = [(key, value) for key, value in report.get("metrics", {}).items()

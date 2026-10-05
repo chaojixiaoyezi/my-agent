@@ -114,6 +114,9 @@
 |-- agent_py_agent/tests/test_capability_package_drama_text_visibility.py # A包人物字面覆盖、画外声明及有界诊断
 |-- agent_py_agent/tests/test_capability_package_drama_text_lines.py # A包0.4.0可选台词、逐字引用、道具状态接续与检查器身份
 |-- agent_py_agent/tests/test_capability_package_drama_text_v05.py # A包0.5.0新增7项检查（占位、内嵌引文、改编原文、道具状态/来源、画外点名、过短镜头）与--host-json宿主核验输出
+|-- agent_py_agent/tests/test_capability_package_drama_text_source_marks.py # A包0.5.3来源与改编标注三条规则（道具来源标错、未标改编、说明与原文矛盾）与hint
+|-- agent_py_agent/tests/test_capability_package_drama_text_hint_guard.py # A包hint通用守卫：无未替换占位符、≤200字、无控制字符，清单从脚本现取
+|-- agent_py_agent/tests/test_capability_package_drama_text_review_fixes.py # A包0.5.4：台词逐字必须在段落引号内、镜内道具交接提醒补prop_handoffs
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
 |-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
 |-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
@@ -1610,6 +1613,9 @@ docs/
 - `agent_py_agent/tests/test_capability_package_drama_workflow_v03.py`：B 包 0.3.0（能力包 v2 块 7）的新检查各一个正例一个反例；带基线时未在交接列出的改动报错、列出的放行（宿主按摘要对应和 `--input-file` 两种模式）；`--host-json` 只输出 v1 结构化字段。
 - `agent_py_agent/tests/test_capability_package_drama_workflow_v031.py`：B 包 0.3.1（能力包 v2 块 8 归因）的动作节拍字段名收紧——缺 `character_ids` 且写了非空单数 `character_id` 报 `beat_character_id_singular` 错误；纯缺失、空值和对白字段保持原语义；只读公开合成项目。
 - `agent_py_agent/tests/test_capability_package_drama_text_lines.py`：A 包 0.4.0 可选字段——台词结构与说话人声明、逐字引用只按子串（不归一化）、道具持有人/相邻状态接续与 `continuity_break`、报告 `checker` 身份与声明版本一致。
+- `agent_py_agent/tests/test_capability_package_drama_text_source_marks.py`：A 包 0.5.3（能力包 v2 块 8 重跑归因）来源与改编标注三条规则——道具名在原文里却标成新增、台词字幕既非原文也没标改编（含极短语气词/纯标点/称呼/占位的字面豁免）、说明声称"原文未出现"而其实在原文里；每条各写正例、反例、合法退出，并断言新错误都带 ≤200 字 `hint`。
+- `agent_py_agent/tests/test_capability_package_drama_text_hint_guard.py`：A 包 hint 的通用守卫（来源是 ds3 在 B 包踩到的"模板占位符没被替换就漏给模型"）。hint 清单从脚本模块现取——扫所有 `*_HINT` 常数，另真实触发一遍走 `host_result` 投影覆盖 f-string 拼接的两条；逐条断言无 `{占位符}`、≤200 字、无控制字符，并自带一条"坏样本"用例证明守卫会红。
+- `agent_py_agent/tests/test_capability_package_drama_text_review_fixes.py`：A 包 0.5.4（9 例业务审阅归因）两条新检查——标了 `verbatim_source_id` 的台词必须落在段落引号内（段落无引号时不报，避免误伤）、镜内道具持有人变化提醒补 `prop_handoffs`（一端为 `null` 不算交接）。样例形状按审阅失败形状自己构造，不拷产物正文。
 - `agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py`：B 包 0.2.0——`--baseline-project` 的换说话人（含重编号）、节拍类型改变、对象删除提醒，交接覆盖真实改动（根地址不算）、虚假新增/省略报错、检查器身份与项目摘要。
 - `examples/capability-packages/drama-text-a/methods/visible-characters.md`：A0.3.0 人物依据回填的私有方法与v3诊断合同；只说明字面覆盖，不生成宿主完成状态。
 - `agent_py_agent/tests/test_capability_package_b_template.py`：用完整占位填写公开合成资料，核对 B 的原检查器、私有交接模板及真实隔离派工授权。

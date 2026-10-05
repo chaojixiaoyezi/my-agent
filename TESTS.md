@@ -1,5 +1,64 @@
 # 测试与发布验收
 
+## A 包 hint 守卫与动态 ID 加固（2026-10-04，pahfix，0.5.4，ds5 初审通过；R5 已由 pa54fix 补守卫，待终审）
+
+- **起因与范围**：接续 pah 初审的两条必须改项：原测试只触发少量带 hint 错误，且 U+0085 变异存活。本轮不改包版本、schema 或真实业务数据。
+- **实现**：检查器结构化列出 12 个 hint code，实际触发样例覆盖所有 code，registry 与真实 output 双向核对；对 hint 检查残留 `{name}`/`{reference_id}`、长度 ≤200 和 Unicode General Category `C*`。动态段落/holder/prop ID 在拼接前过滤所有 C 类、ASCII 花括号转全角、每片截短至 20 字符、段落 ID 最多 3 个，最后仍有 200 字硬上限。没有允许换行的 hint；当前 hint 都须保持无 C 类字符。
+- **定向测试**：`test_capability_package_drama_text_hint_guard.py` 7 个测试通过（原 6 项加 AST hint 来源守卫 1 项），含真实触发全码、控制字符/JSON 花括号正反例、长 ID 片段与 host 投影保留。
+- **测试集合**：`test_capability_package_drama_text*.py` 与 `test_capability_pack*.py` 全集通过；`guards9.txt` 中 11 个测试文件通过。
+- **变异验证**：①移除 verbatim 真实触发后，全码覆盖断言报告缺 `verbatim_not_quoted`；②把控制字符判定退回 `ord(ch) < 32` 后，U+0085 用例失败；③动态拼接前不滤 C 类后，来源 ID 测试失败；④移除每片截短后，长 ID 的片段计数超上限、用例失败。每次只改一处并立即恢复。
+- **防泄露**：`leak_check.py ... A 6` 和 `A 5` 都无命中。
+- **静态门禁**：`check_import_boundaries.py` → `findings=0`；Ruff → `All checks passed!`；`check_doc_sync.py --base e4817232d` → `DOC_SYNC_PASS`；strict code-size → `strict_scope_total=2204`、`hard=0`、`blocked=False`（报告已还原）；`size_diff.sh` → 新增告警 **0**、消失 39；`git diff --check` 干净；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`。版本保持 0.5.4。
+
+## A 包 0.5.4 初审修正（2026-10-05，pa54fix，待非作者初审）
+
+- **改动**：不增加语义判据；无引号叙述原文是 `verbatim_not_quoted` 的已知边界，A05-t401 重新归为“③ 需语义判断，未解决”。`QUOTE_PAIRS` 统一 `QUOTED_SPAN` 与 `quoted_spans` 的引号集合（含半角双引号）；台词检查遍历所有匹配位置。版本保持 0.5.4。
+- **测试数**：`review_fixes.py` 的原始 10 项经 `--co` 核对；当前 `review_fixes.py` 13 项、`hint_guard.py` 7 项。
+- **回归验证**：重复子串与半角引号用例先红后绿；定向选择 5 项通过。A 包相关 globs `test_capability_package_drama_text*.py`、`test_capability_pack*.py` 最终状态通过；guards9.txt 所列 11 个测试文件通过。
+- **pahfix R5 变异**：把 `prop_origin_unstated` 字典的 hint 值改为硬编码 `PROP_ORIGIN_HINT`，AST 守卫失败并指出对应行；已立即还原，恢复后守卫通过。
+- **防泄露**：`leak_check.py ... A 6` 与 `A 5` 均无命中；两次各载入 9 个 A 类试次原文。
+- **静态门禁**：Import boundaries `findings=0`；Ruff（`agent_py_agent`、`scripts` 与本次包检查器）通过；doc-sync `DOC_SYNC_PASS`；strict code-size `strict_scope_total=2204`、`hard=0`、`blocked=False`（报告已还原）；`size_diff.sh` 新增告警 0、消失 39；clean-package 通过；最终 `git diff --check` 干净。
+- **未验证**：真实模型重跑 A 类 9 例及生产/部署验收未做。
+
+## A 包 0.5.4：按 9 例业务审阅补两条结构检查（2026-10-04，pa54，worker/pack-a-053，待非作者初审）
+
+- 来源：A 0.5.2 三批业务审阅 9 例过 1 例。归类表（8 例逐条）见 PROVENANCE 0.5.4 节；本轮只做其中两条纯结构化可判的规则。
+- 改动：`examples/capability-packages/drama-text-a/scripts/check_delivery.py` 新增 `verbatim_not_quoted`（错误，标了 `verbatim_source_id` 的台词要落在段落引号内）与 `intra_shot_handoff_unstated`（警告，镜内道具持有人变化提醒补 `prop_handoffs`），配套 `check_verbatim_is_quoted` / `quoted_spans` / `check_intra_shot_handoffs` / `declared_handoffs`；新增可选字段 `shot.prop_handoffs[]`。版本升 0.5.4（declaration、PACKAGE_VERSION、CAPABILITY.md、PROVENANCE.md、workflow.md、README、两处测试断言）。示例与模板同步补 `prop_handoffs`。
+- 新增用例：`agent_py_agent/tests/test_capability_package_drama_text_review_fixes.py`，**10 个（0.5.4 原始用例，初审工作树 `--co` 实测 10 项）**，覆盖两条规则的正例、反例、合法退出与低误报边界（无引号段落是已知边界，不是合规证明；一端为 null 不算交接；同一持有人不算交接），并按审阅失败形状**自己构造**样例（不拷贝产物正文）。pa54fix 另加 3 个引号回归，当前该文件共 13 项，见本节上方 pa54fix 条目。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pa54`）：
+  - 能力包相关 9 个测试文件（新增的 `..._review_fixes.py` 加原有 8 个）：**301 passed**（含 ds6 复审四条里的 5 条新用例）。
+  - `resources/example-delivery.json` 与 `templates/delivery.json` 通过。
+- **ds6 对 0.5.3 的初审（`pa53-initial-review-ds6.md`）四条小问题一并处理**：① 补两条测试盲区用例（名字含原文单字但整名不在原文、hint 必须带段落 ID）；② `QUOTED_SPAN` 与 `quoted_spans` 一并补直角引号 `「」`/`『』`，规则③ 与 0.5.4 台词出处用同一套引号集合，各补用例；③ 0.5.3 的数字更正为 272；④ PROVENANCE「已知边界」明写动作层新增未标不在覆盖范围。
+- 变异 4 个（驱动脚本 `/private/tmp/claude-501/pa54_mutate.py`，每次只改一处、按原字节还原）：① 引号检查关掉；② 镜内交接提醒关掉；③ 交接判定放宽（一端为 null 也算交接）；④ 有引号也放过（`return` 提前）。**4 个全部被抓**，还原后均复绿。
+- 防泄露：`leak_check.py examples/capability-packages/drama-text-a A 6` 与 `A 5` 均**无命中**。
+- 未验证：真实模型重跑 A 类 9 例未做。
+
+## A 包 hint 通用守卫（2026-10-04，pah，worker/pack-a-053，待复审）
+
+- 来源：ds3 在 B 包 0.3.3 踩到"hint 写成带 `{reference_id}` 的模板，生成时只替换 `{path}`，占位符原样漏给模型"。A 包同属"每条错误可带 hint"，补一条通用用例。
+- 改动：新增 `agent_py_agent/tests/test_capability_package_drama_text_hint_guard.py`（4 个用例）。**不改产品代码**。
+- 用例怎么取清单（不手写）：① 用 `runpy` 加载检查器脚本，取模块里所有 `*_HINT` 常数（当前 7 条，以后新增自动纳入）；② 另造一份会触发带 hint 错误的合成交付，跑真实检查再走 `host_result` 投影，抓哪些 code 实际带 hint——这一路覆盖 f-string 拼接的两条（`prop_origin_marked_new_but_in_source`、`adaptation_claim_contradicts_source`），常数检查抓不到它们。
+- 断言：不留 `{[A-Za-z_]+}` 占位符、长度 ≤200、不含控制字符（<32 或 ==127）。另有一条"坏样本"用例，对人为构造的坏 hint 跑同一套断言，证明守卫真的会拦（不是恒真）。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pah`）：
+  - 能力包相关 8 个测试文件（新增的 `..._hint_guard.py` 加原有 7 个）：**279 passed**。
+- 变异 5 个（驱动脚本 `/private/tmp/claude-501/pah_mutate.py`，每次只改一处、跑完按原字节还原）：
+  - ① `PROP_STATE_HINT` 里塞未替换占位符 `{prop_id}`（照 ds3 的坑）；② `PROP_ORIGIN_HINT` 拼到超过 200 字；③ `PROP_CONTINUITY_HINT` 里塞换行控制符；④ f-string 拼接处追加未替换的 `{reference_id}`（**直接复刻 ds3 的坑**）；⑤ 未标改编的 hint 改成 f-string 拼未替换的 `{shot_id}`/`{state}`。**5 个全部被抓**，还原后均复绿。
+- 未验证：真实模型重跑 A 类 9 例未做。
+
+## A 包 0.5.3：来源与改编标注（2026-10-04，pa53，worker/pack-a-053，待复审）
+
+- 来源：A 包 0.5.2 重跑业务审阅第三批的不合格项（来源和改编标注）。本轮只做这一类，别的没动。
+- 改动：`examples/capability-packages/drama-text-a/scripts/check_delivery.py` 新增 `prop_origin_marked_new_but_in_source`、`adaptation_unmarked`、`adaptation_claim_contradicts_source` 三个错误码与对应 hint；新增 `check_unmarked_adaptations` / `is_exempt_unmarked` / `line_has_source` / `claimed_source_absent` / `claims_source_absent` / `source_ids_containing`；`check_prop_origin` 加 `name` 参数并在 adaptation 分支查名字是否出现在原文。版本升 0.5.3（`declaration.json`、`PACKAGE_VERSION`、`CAPABILITY.md`、`PROVENANCE.md`、`methods/workflow.md`、`examples/capability-packages/README.md`、两处测试断言）。
+- 新增用例：`agent_py_agent/tests/test_capability_package_drama_text_source_marks.py`，**13 个**，覆盖三条规则各自的正例、反例、合法退出、豁免，以及"三条新错误都带 ≤200 字 hint"。
+- 夹具改动：`..._text_lines.py` 的 `_delivery()` 原来从示例只拷 `lines`/`source_quotes`/`prop_states`，会造出"有新增台词但没标 adaptations"的交付，被新规则正确拦下；补成同时拷 `adaptations`（示例本来就带），因为那不是该用例想测的场景。
+- 命令与结果（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-pa53`）：
+  - 能力包相关 7 个测试文件（`..._source_marks.py`、`..._v05.py`、`..._lines.py`、`..._visibility.py`、`..._duration.py`、`..._basis.py`、`test_capability_package_examples.py`）：**272 passed**。
+  - **数字更正（ds6 初审提出）**：本条原先写 274，把后来新增的两个测试文件也算进去了。在 0.5.3 头 `5af47daca` 上开临时工作树实跑同一批 7 个文件，确认是 **272 passed**。
+  - `resources/example-delivery.json` 未改即通过。
+- 变异 5 个（驱动脚本 `/private/tmp/claude-501/pa53_mutate.py`，每次只改一处、按原字节还原）：① 道具来源标错不报；② 未标改编完全不报；③ 矛盾检查关掉；④ 豁免放宽到"整条都能豁免"；⑤ 道具来源检查传空串。**5 个全部被抓**，还原后均复绿。
+- 防泄露：`leak_check.py examples/capability-packages/drama-text-a A 6` → **未发现任何 ≥6 字重合**；`A 5` 同样无命中。
+- 未验证：真实模型重跑 A 类 9 例未做；本轮只做组件级验证。
+
 ## TUI 状态刷新失败的客户端去抖（tuisync，2026-10-04，分支 `worker/tui-sync`，基于 17j 头 `f45e20dac`；已完成；ds10 初审，3a 终审补成功重置用例，已并入 step17k）
 
 - 3a 终审补 `test_notice_debounce_success_resets_count_and_time_base`：成功后计数清零、时间基准刷新。原先存活的“计数不清零”“时间基准不刷新”两个变异现在都被抓到。

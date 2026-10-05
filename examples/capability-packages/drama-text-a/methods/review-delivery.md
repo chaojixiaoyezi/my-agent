@@ -23,6 +23,7 @@
 | 拟汇报内容 | 核对来源 | 不一致时如何反馈 |
 | --- | --- | --- |
 | 交付了哪些文件、镜头和场次 | 当前实际文件；原检查 `metrics.shots/scenes` | 列出实际数量及缺项，不能照抄计划或子任务总结 |
+| 台词字段覆盖 | `metrics.shots_with_structured_lines`、`metrics.shots_with_lines` 与 `metrics.shots` | 仅当结构化台词字段覆盖全部镜头且有台词镜头数等于镜头总数时，才能说逐镜都有台词；自然语言答复不是机器校验源 |
 | 总时长及逐场时长 | `shot_seconds`、`scene_seconds`、`scene_shot_seconds` | 列明实际值，不用集数或分组说明改变加总结果 |
 | 是否达到目标 | `target_declared/target_seconds/target_delta_seconds` | 目标缺省、目标非法、实际不符分开；差异不为零就保留差异 |
 | 来源覆盖 | `covered_passages/omitted_passages` 与已读镜头/原文 | 场次声明覆盖只能这样称呼，不能升级为语义无遗漏 |

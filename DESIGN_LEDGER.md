@@ -1,5 +1,51 @@
 # 设计台账
 
+## A 包 0.5.4 复审问题收敛（pa54fix，2026-10-05；3a 终审通过，已并入 step17k）
+
+- **3a 终审（10-05）**：核对 QUOTE_PAIRS 统一后半角 `"` 的开闭交替正确；所有出现位置的检查做了“只看第一次出现”的变异，用例抓到。A 包相关 34 个测试文件 878 passed，leak_check A 6 无重合。A 包 0.5.2→0.5.4 全线（含 pah、pahfix）并入 17k；版本仍是 0.5.4，真实模型重跑 A 类没过的用例由 3a 安排。
+
+- **来源与边界**：ds4 初审指出 `verbatim_not_quoted` 在 A 类无引号散文素材上不会触发；按 3a 裁定不新增语义判据，明确它只适用于带成对引号的原文，A05-t401 改归“③ 需语义判断，未解决”。
+- **引号检查**：同一句在引号外先出现时，继续检查 passage 的所有匹配位置；必须至少有一个完整匹配位于引号内容区间。`QUOTE_PAIRS` 是唯一引号对定义，供 `QUOTED_SPAN` 和 `quoted_spans` 共用，含半角双引号；跨闭引号文本仍报错。
+- **hint 来源守卫**：源码 AST 测试扫描所有含 `"hint"` 键的字典字面量，只允许 `HINT_CODE_TEMPLATES[...]` 或 `_dynamic_hint(...)`。pahfix 的 R5 硬编码 `PROP_ORIGIN_HINT` 变异已被该测试抓住；逐码真实触发与宿主投影守卫仍保留。
+- **文档与版本**：同步 `PROVENANCE.md`、`CAPABILITY.md`、`TESTS.md`；包版本保持 0.5.4，不升 0.5.5。
+- **状态**：最终 A 包测试 globs 与 guards9 全部通过；防泄露 A6/A5 均无命中；import boundaries、Ruff、doc-sync、strict code-size、`size_diff`、clean-package 与 `git diff --check` 均通过。修复已正式提交，版本仍为 0.5.4，等待非作者初审。
+
+## A 包 hint 守卫与动态 ID 加固（pahfix，2026-10-04，0.5.4，ds5 初审通过，R5 已在 pa54fix 收口；已并入 step17k）
+
+- **来源**：pahr 初审发现原守卫没有真实触发所有带 hint 的错误/警告，且 U+0085 控制字符变异存活。
+- **改动**：检查器结构化登记全部 12 个 hint code；静态提示由发射点读取登记表，动态提示经 `_dynamic_hint(...)` 按登记码构造。源码 AST 守卫检查所有带 `"hint"` 键的字典字面量，值只能是 `HINT_CODE_TEMPLATES[...]` 或 `_dynamic_hint(...)`；真实合成交付仍逐码触发，并核对 registry 与实际输出的 hint code 双向相等。
+- **输入安全**：所有动态来源段落 ID、镜内交接 holder/prop ID 在拼接前过滤 Unicode General Category `C*`、ASCII 花括号转全角；每片最多 20 字符、来源 ID 最多列 3 个，最终 hint 不超过 200 字。检测器仅输出单行提示，不涉及允许换行的 hint。
+- **版本**：0.5.4 尚未打包，保留版本号，不升 0.5.5；`PROVENANCE.md` 的 0.5.4 节已注明本轮修订。
+- **状态**：已提交到本地分支；ds5 初审确认 R1–R4 被抓，R5 的源码来源缺口已由 pa54fix 的 AST 守卫补上并实测拦截。版本仍为 0.5.4，待非作者终审。
+
+## A 包 0.5.4：按 9 例业务审阅补两条结构检查（pa54，2026-10-04，worker/pack-a-053；ds4 复审，问题由 pa54fix 收口；已并入 step17k）
+
+- **来源**：A 0.5.2 三批业务审阅 9 例只过 1 例（A10-t403）。先做了失败归类表（8 例逐条，见 PROVENANCE 0.5.4 节的表），分三类：① 0.5.3 已覆盖、② 能做成结构检查、③ 只能靠模型质量的语义问题。
+- **① 逐例核实**：用 0.5.3 的检查器跑 8 例真实产物，规则①（道具名在原文里却标成新增）确实抓住了 A05-t402 的纸袋、A10-t402 的停航牌；规则③抓住了说明与原文矛盾；规则②抓住了新增对白未标。这部分不需新工作。
+- **② 本次做两条**（只做误报风险低的）：
+  - `verbatim_not_quoted`（错误）：只在原文段落带成对引号时，核对台词是否有完整出现位于引号内部；原文无引号时不触发，是明确已知边界，不证明第三人称叙述确为台词。A05-t401 的 P02 无引号，仍属③需语义判断、未解决。
+  - `intra_shot_handoff_unstated`（**警告**）：同一镜头内道具从一个人换到另一个人手里（`prop_states` start→end 的 `holder_id` 不同）时提醒。A10-t401 的 SH06 就是这类。**为什么是警告**：作者可能觉得"action 里已经写了递灯"就够了，规则无法证明他写错，强判错误会误伤；作为提醒推动补 `prop_handoffs`。一端为 `null`（拿起/放下）不算交接。
+  - 新增可选字段 `shot.prop_handoffs[]`（`{prop_id, to_holder_id, note}`）；示例与模板都补了该字段。
+- **③ 不做**（写进 PROVENANCE 已知边界）：自由文字里的新增细节没标改编、可见性声明与 action 文字矛盾、prop_states 与叙事结局冲突、对白质量。**特别说明**：3a 提的"动作节拍 `character_ids`"是 **B 包**字段，A 包 `shots` 没有它，所以那条在 A 包不适用。
+- **版本与文档**：0.5.4 同步 `declaration.json`、`PACKAGE_VERSION`、`CAPABILITY.md`、`PROVENANCE.md`（新增 0.5.4 节，含归类表、接受集合变化、已知边界）、`methods/workflow.md`（新增写法节）、`examples/capability-packages/README.md` 与两处测试断言。
+- **验证**：能力包相关 9 个测试文件 **292 passed**（含新文件 10 个用例）；变异 4 个全部被抓；`leak_check.py` A 6/5 字均无命中；`resources/example-delivery.json` 与模板通过。命令与真实结果见 TESTS.md。
+- **未验证**：真实模型重跑 A 类 9 例未做（等 3a 打包后跑）。
+
+## A 包 0.5.3：来源与改编标注（pa53，2026-10-04，worker/pack-a-053，待复审）
+
+- **来源**：A 包 0.5.2 重跑的业务审阅第三批，结构检查和宿主核验全过，但不合格集中在来源与改编标注：道具在原文里逐字有、却标成"新增/推断"；改编说明和它引用的原句对不上；新增的对白/字幕大面积没标 `adaptations`（6 个镜头只有 1 个有）。这些以前只靠作者自觉（0.5.1 的 PROVENANCE 里就写着"第 2 条漏标新增完全靠作者自觉"）。
+- **改法**（只加通用字段规则，不写入任何特定任务的人物、道具、情节或原文片段）：
+  - `prop_origin_marked_new_but_in_source`：道具 `origin.kind=adaptation` 时，若 `name` 逐字出现在某个原文段落里，报错并带 `found_in_source_ids`。退出：改成 `kind=source` 并引该段落，或确认不是同一件道具后改名。
+  - `adaptation_unmarked`：镜头台词/字幕要能说清"是原文"还是"是新增"。合规路径任一：整句是某段原文逐字子串 / 被 `verbatim_source_id` 或 `embedded_quotes` 覆盖 / 本镜 `adaptations` 非空。三条都不满足才报错。
+  - `adaptation_claim_contradicts_source`：说明里用了"原文未出现/原文没有/并非原文"这类固定短语，而它引用的原句（`original_quote`，或说明里成对引号括起来的内容）其实能在原文里逐字找到，就报错并给段落 ID。
+  - 三条都带 ≤200 字 `hint`，都给了合法退出写法。
+- **豁免设计（宁可漏报也不误伤）**：`adaptation_unmarked` 对四类字面形状放行——去掉标点空白后不足 3 字（极短语气词）、整条只有标点、整条是称呼/招呼（如"哥""老板"）、占位文本。不做相似度判断，避免放过真正的未标新增。另外只要本镜有任意一条非空 `adaptations`，本镜就不再逐句检查（查的是"有没有标"，不是"标得对不对"）。
+- **版本与文档**：0.5.3 同步到 `declaration.json`、脚本 `PACKAGE_VERSION`、`CAPABILITY.md`、`PROVENANCE.md`（新增 0.5.3 节）、`methods/workflow.md`（新增方法节）、`examples/capability-packages/README.md`（表格、构建命令、A0.5.2/A0.5.3 修订段）与两处测试断言。
+- **验证**：能力包相关 7 个测试文件 **274 passed**（含新文件 13 个用例）；变异 5 个全部被抓；`leak_check.py` A 6 字与 5 字**均无命中**；`resources/example-delivery.json` 未改即通过。命令与真实结果见 TESTS.md。
+- **补一条通用守卫（pah）**：ds3 在 B 包 0.3.3 踩到"几条 hint 写成带 `{reference_id}` 的模板，但生成时只替换 `{path}`，占位符原样漏给模型"。A 包同属"每条错误可带 hint"的口径，已加 `test_capability_package_drama_text_hint_guard.py`：hint 清单**从脚本模块现取**（扫所有 `*_HINT` 常数 + 真实触发一遍走 `host_result` 投影），逐条断言不留 `{占位符}`、≤200 字、无控制字符；另自带一条"坏样本"用例证明守卫真的会红。见 TESTS.md。
+- **未验证**：真实模型重跑 A 类 9 例未做（等 3a 安排）；本轮只做了组件级验证。
+- **注意**：本轮由 ds7 实现，下一轮 A 的业务审阅不会派给同一人。
+
 ## TUI 状态刷新失败的客户端去抖（tuisync，2026-10-04，分支 `worker/tui-sync`，基于 17j 头 `f45e20dac`；ds10 初审，3a 终审，已并入 step17k）
 
 - **起因**：用户反馈 TUI 时不时显示"状态刷新失败，显示上次状态；正在重试"、头部变"! 状态未同步"。3a 只读排查（`~/.my-agent/decision-evidence/final-report-1004/tui-refresh-fail-1004.md`）：`_background_notice_loop` 每轮 POST `/client/notices`、客户端只等 2 秒，**第一次失败就提示**；生产 Gateway CPU 采样 99% 超 100%（中位 138%），连最轻的 `/status` 60 次里 5 次超 2 秒 → 属于过载下的可见降级，不是数据错。

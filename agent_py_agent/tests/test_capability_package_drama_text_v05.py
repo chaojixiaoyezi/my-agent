@@ -60,14 +60,16 @@ def _shot(delivery: dict, identifier: str) -> dict:
 
 
 NEW_CODES = {"placeholder_text", "embedded_quote_not_verbatim", "embedded_quote_not_in_line",
-             "adaptation_original_not_in_source", "prop_states_missing", "prop_origin_unstated",
-             "named_character_offscreen", "shot_too_short"}
+             "adaptation_original_not_in_source", "prop_states_missing", "prop_state_discontinuity",
+             "prop_origin_unstated", "prop_origin_shape", "prop_origin_source_unknown",
+             "prop_origin_quote_not_verbatim", "named_character_unaccounted", "named_character_offscreen",
+             "shot_too_short"}
 
 
 def test_example_passes_without_any_new_finding(tmp_path):
     report, code = _run(tmp_path, _delivery())
     assert report["structure_valid"] and code == 0, report["errors"]
-    assert report["checker"]["package_version"] == "0.5.1"
+    assert report["checker"]["package_version"] == "0.5.4"
     assert not NEW_CODES & {item["code"] for item in report["errors"] + report["warnings"]}
 
 
@@ -161,19 +163,24 @@ def test_adaptation_object_needs_text_and_string_quote(tmp_path, entry):
     assert "SH01.adaptations[0]" in {item["path"] for item in _found(report, "errors", "nonempty_text_required")}
 
 
-# ---- prop_states_missing（A08-t6：前两镜没有 prop_states）----
+# ---- prop_states_missing ----
 
-def test_prop_named_in_action_without_state_warns_and_declared_state_does_not(tmp_path):
+def test_prop_named_in_action_needs_a_state_and_action_without_prop_is_a_legal_exit(tmp_path):
     delivery = _delivery()
     shot = _shot(delivery, "SH02")
-    shot["action"] = "赶车人翻开旧书，指出夹在书页中的便条。"
+    shot["action"] = f"角色检查{delivery['props'][0]['name']}并指出其中的线索。"
     declared, _ = _run(tmp_path, json.loads(json.dumps(delivery)))
-    assert not _found(declared, "warnings", "prop_states_missing")
+    assert not _found(declared, "errors", "prop_states_missing")
     shot.pop("prop_states")
     report, _ = _run(tmp_path, delivery)
-    assert [(item["path"], item["prop_id"]) for item in _found(report, "warnings", "prop_states_missing")] == [
-        ("SH02.prop_states", "PR01")]
-    assert report["structure_valid"]
+    item, = _found(report, "errors", "prop_states_missing")
+    assert (item["path"], item["prop_id"]) == ("SH02.prop_states", "PR01")
+    assert item["hint"] and len(item["hint"]) <= 200
+    assert not report["structure_valid"]
+
+    shot["action"] = "角色继续整理场景。"
+    legal_exit, _ = _run(tmp_path, delivery)
+    assert not _found(legal_exit, "errors", "prop_states_missing")
 
 
 # ---- prop_origin_unstated（A08-t5：电池灯从哪来、谁交给谁没写）----
@@ -189,18 +196,19 @@ def test_prop_first_seen_already_held_needs_an_origin(tmp_path, change, where):
         states["start"] = []
     delivery["props"][0].pop("origin")
     report, _ = _run(tmp_path, delivery)
-    assert [(item["path"], item["prop_id"]) for item in _found(report, "warnings", "prop_origin_unstated")] == [
-        (where, "PR01")]
-    delivery["props"][0]["origin"] = "店员从柜台下取出。"
+    item, = _found(report, "errors", "prop_origin_unstated")
+    assert item["path"] == where and item["prop_id"] == "PR01"
+    assert item["hint"] and len(item["hint"]) <= 200
+    delivery["props"][0]["origin"] = {"kind": "adaptation", "text": "按制作需要新增来源说明。"}
     stated, _ = _run(tmp_path, delivery)
-    assert not _found(stated, "warnings", "prop_origin_unstated")
+    assert not _found(stated, "errors", "prop_origin_unstated")
 
 
 def test_prop_first_seen_unheld_needs_no_origin(tmp_path):
     delivery = _delivery()
     delivery["props"][0].pop("origin")
     report, _ = _run(tmp_path, delivery)
-    assert not _found(report, "warnings", "prop_origin_unstated")
+    assert not _found(report, "errors", "prop_origin_unstated")
 
 
 # ---- named_character_offscreen（A10-t6、A08-t4、A10-t4：动作点名的人物被列为画外）----
@@ -280,3 +288,66 @@ def test_host_json_unreadable_target_is_a_structured_error_without_message(tmp_p
     assert code == 0
     assert report == {"schema": "pack_verifier_result.v1", "valid": False,
                       "errors": [{"code": "target_unreadable", "location": "$"}], "warnings": [], "metrics": {}}
+
+
+# ---- 0.5.2 structured origin, verifiable citations, and host hints ----
+
+def test_prop_origin_quote_is_checked_and_adaptation_is_a_legal_non_source_exit(tmp_path):
+    delivery = _delivery()
+    valid, _ = _run(tmp_path, delivery)
+    assert valid["structure_valid"], valid["errors"]
+
+    origin = delivery["props"][0]["origin"]
+    origin["quote"] = "x" * len(origin["quote"])
+    invalid, _ = _run(tmp_path, delivery)
+    item, = _found(invalid, "errors", "prop_origin_quote_not_verbatim")
+    assert item["path"] == "PR01.origin"
+    assert item["hint"] and len(item["hint"]) <= 200
+
+    origin.clear()
+    origin.update(kind="adaptation", text="由作者新增或推断的来源说明。")
+    added, _ = _run(tmp_path, delivery)
+    assert not {"prop_origin_shape", "prop_origin_quote_not_verbatim"} & _errors(added)
+
+
+def test_prop_origin_source_id_must_exist_and_adaptation_omits_it(tmp_path):
+    delivery = _delivery()
+    assert not _found(_run(tmp_path, delivery)[0], "errors", "prop_origin_source_unknown")
+
+    delivery["props"][0]["origin"]["source_id"] = "not-a-source"
+    unknown, _ = _run(tmp_path, delivery)
+    item, = _found(unknown, "errors", "prop_origin_source_unknown")
+    assert item["hint"] and len(item["hint"]) <= 200
+
+    delivery["props"][0]["origin"] = {"kind": "adaptation", "text": "新增或推断说明。"}
+    adapted, _ = _run(tmp_path, delivery)
+    assert not _found(adapted, "errors", "prop_origin_source_unknown")
+
+
+def test_legacy_free_text_origin_is_rejected_but_unheld_origin_may_be_omitted(tmp_path):
+    delivery = _delivery()
+    delivery["props"][0]["origin"] = "legacy free text"
+    legacy, _ = _run(tmp_path, delivery)
+    shape, = _found(legacy, "errors", "prop_origin_shape")
+    assert shape["hint"] and len(shape["hint"]) <= 200
+
+    delivery = _delivery()
+    delivery["props"][0].pop("origin")
+    assert not _found(_run(tmp_path, delivery)[0], "errors", "prop_origin_shape")
+
+
+def test_host_json_preserves_optional_bounded_error_hint_and_numeric_facts(tmp_path):
+    delivery = _delivery()
+    shot = _shot(delivery, "SH02")
+    shot["action"] += delivery["props"][0]["name"]
+    shot.pop("prop_states")
+    report, code = _run(tmp_path, delivery, ("--host-json",))
+    assert code == 0 and report["valid"] is False
+    item, = _found(report, "errors", "prop_states_missing")
+    assert item["hint"] and len(item["hint"]) <= 200
+    assert report["metrics"]["shots"] == 3
+    assert report["metrics"]["shots_with_lines"] == 2
+    assert report["metrics"]["shots_with_structured_lines"] == 3
+    assert report["metrics"]["shot_seconds"] == 60.0
+    assert all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               for value in report["metrics"].values())

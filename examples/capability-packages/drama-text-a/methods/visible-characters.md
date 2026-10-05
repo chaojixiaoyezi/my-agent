@@ -26,13 +26,13 @@
 
 只独立扫描每镜 `start_state`、`action`、`end_state`，不拼接字段，不扫描场次摘要、改编说明或整个原文段落。`source_ids` 指向整段，不能证明段中所有人物都应出现在本镜；SHT-26 的镜头来源短引文检查尚未迁入。
 
-- 精确名字命中后，唯一对应人物未列在可见或画外中，产生 `named_character_unaccounted` 警告。
-- 同一写法对应多人，产生 `ambiguous_character_name`，保留全部候选及已声明候选；不任取第一人、不要求所有人可见。
+- 精确名字命中后，唯一对应人物未列在可见或画外中，产生 `named_character_unaccounted` 错误；把人物列入 `visible_character_ids` 或 `offscreen_character_ids` 是合法分类，已有 `text_names: []` + 非空 `text_match_skip_reason` 也仍是退出方式。
+- 同一写法对应多人，产生 `ambiguous_character_name` 提示，保留全部候选及已声明候选；不任取第一人、不要求所有人可见。
 - ASCII 名称首尾及相邻字符若同属 `A-Za-z0-9_-`，粘连的部分不算独立名字，例如 `Tom_1` 不命中 `Tom`。这不是中文分词或完整 Unicode 词边界。
 - 边界有效的长名字才抑制其完全包含的短名字；相交但不包含的名字各自保留。同长度不按遍历顺序吞掉。无效长名不得隐藏有效短名。
 - 引号、否定句或“某人的包”仍是字面出现；不根据措辞判在场。仅列出人物却未在正文具名，也不能据此判定多列。
 
-警告位置是当前原字段的 Unicode 字符下标：从 0 开始，`end` 不含末端；不是 JSON 文件字节偏移。`text_name_preview` 最多 80 字符，完整长度另记。名称扫描不改变 `structure_valid`、退出码或宿主任务状态；新字段的缺失、类型、引用或互斥错误仍是资料结构错误。
+位置是当前原字段的 Unicode 字符下标：从 0 开始，`end` 不含末端；不是 JSON 文件字节偏移。`text_name_preview` 最多 80 字符，完整长度另记。唯一名字未被列为可见/画外会影响 `structure_valid` 并交宿主返工；`named_character_offscreen` 仍是提示，因为字面名字本身不能证明人物实际在画面里，须由作者修正文案或人工核对。
 
 ## 预算与回执
 

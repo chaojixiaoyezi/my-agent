@@ -8,11 +8,16 @@
 
 交付为制作方案和 `drama_text_delivery.v3` JSON：当前原文字节摘要、角色、场次、镜头、主动省略及原因、未决事项。**交付文件固定叫 `output/drama_text_delivery.json`**（扩展名必须是 `.json`，正文里的 `"schema"` 仍是 `drama_text_delivery.v3`）：宿主按 `.json` 路径模式认交付物，名字写成没有扩展名的 `drama_text_delivery.v3` 之类会认不出来。0.4.0 起可选写结构化台词 `lines`、原文短句 `source_quotes` 和道具状态 `props`/`prop_states`；0.5.0 起改编条目可带 `original_quote`，台词可带 `embedded_quotes`，道具可带 `origin`。写法见 workflow 方法。资料内 ID 不是宿主任务编号。
 
-## 交付规则（0.5.1）
+## 交付规则（0.5.4）
 
 - **引文逐字**：标成原文的文字（逐字台词、`source_quotes`、`embedded_quotes`、改编条目的 `original_quote`）必须和原文一字不差。
 - **原文已有的不算改编**：原文已经写了的事实，不能标成改编或新增。
 - **新增的必须逐条标注**：凡原文没写、由你补出来的内容——动作、台词、道具状态或道具交接——都要写进本镜 `adaptations`，一条一件；不能因为"看起来是顺带补的"就留空数组。
+- **来源要标对**：道具写 `origin.kind=adaptation`（新增/推断）时，如果道具名在原文里逐字出现过，就是标错了来源（`prop_origin_marked_new_but_in_source`）——改成 `kind=source` 并引该段落，或确认不是同一件道具后改名。
+- **台词/字幕要有出处或标注**：镜头里每句台词或字幕，要么是原文某段的逐字片段，要么被 `verbatim_source_id`/`embedded_quotes` 覆盖，要么本镜有 `adaptations` 说明它是新增；三者都没有会报 `adaptation_unmarked`。极短语气词、纯标点、称呼、占位文本豁免。
+- **说明不能和原文打架**：改编说明里写"原文未出现/原文没有"这类话时，它引用的原句必须真的不在原文里；否则报 `adaptation_claim_contradicts_source`。
+- **`verbatim_source_id` 只标原话**：它表示"这是原文里人物说出口的话"。本规则只在原文段落带 `QUOTE_PAIRS` 中的成对引号（`「」`、`『』`、`“”`、`‘’`、半角双引号 `""`）时生效；无引号的叙述原文不生效，属于已知边界，不能据此认定叙述句已被检查。带引号时，标了 `verbatim_source_id` 的台词必须至少有一个完整出现落在引号内部；第三人称叙述若只出现在引号外会报 `verbatim_not_quoted`。叙述依据改用 `source_quotes`。
+- **镜内交接要写 `prop_handoffs`**：同一镜头里道具从一个人换到另一个人手里时，写一条 `prop_handoffs`（`{prop_id, to_holder_id, note}`）；不写会收到 `intra_shot_handoff_unstated` 提醒。没有交接写 `[]`。
 - **不改原意**：不改结局，不改因果；结局里的动作、朝向、状态默认原样保留。
 - **不用占位**：场次摘要、镜头起止状态和动作、台词、道具状态都写实际内容，不用 `{}`、`[]`、TODO 或模板里 `<…>` 的提示文字。
 - **另存新文件**：交付写成 `output/drama_text_delivery.json`，不覆盖输入的原文；最终答复写出这个路径。
@@ -60,4 +65,19 @@ python3 scripts/check_delivery.py --source <本任务原文资料.json> --delive
 
 可选参数：`--min-shot-seconds <秒>` 改单镜时长下限（默认 2 秒，低于它报 `shot_too_short` 提醒）；`--host-json` 只给宿主用，输出 `pack_verifier_result.v1`。
 
-路径相对授权物化位置，不能猜安装目录。输出 `drama_text_check.v3`，核对摘要、声明覆盖、依据字段、ID、时长与镜头状态；另对启用的显式人名报告字面覆盖警告。`name_diagnostics` 区分完整扫描、退出、预算未检查及输出裁剪，详见人物方法。0.4.0 起还核对写了的台词说话人、逐字引用和道具状态接续，报告带 `checker` 身份（脚本 sha256）。0.5.0 起再查占位文字、台词内嵌引文、改编条目引的原文、动作里用到却没写状态的道具、第一次出现就有人拿着却没交代来源的道具、被点名却列为画外的人物、过短的镜头。它不证明在场、原文支持、持物因果、对白质量、审美、媒体或用户接受，不生成宿主完成或发布状态。
+路径相对授权物化位置，不能猜安装目录。输出 `drama_text_check.v3`，核对摘要、声明覆盖、依据字段、ID、时长与镜头状态；另对启用的显式人名报告字面覆盖警告。`name_diagnostics` 区分完整扫描、退出、预算未检查及输出裁剪，详见人物方法。0.4.0 起还核对写了的台词说话人、逐字引用和道具状态接续，报告带 `checker` 身份（脚本 sha256）。0.5.0 起再查占位文字、台词内嵌引文、改编条目引的原文、动作里用到却没写状态的道具、第一次出现就有人拿着却没交代来源的道具、被点名却列为画外的人物、过短的镜头。0.5.3 起再查道具名在原文里出现却标成新增的来源标错，以及台词/字幕既非原文也没标改编、改编说明声称原文没有而其实有。0.5.4 起再查标了 `verbatim_source_id` 的台词是否落在段落引号内，并提醒镜内道具交接没写 `prop_handoffs`。它不证明在场、原文支持、持物因果、对白质量、审美、媒体或用户接受，不生成宿主完成或发布状态。新增的结构错误都带一句短 `hint`（最长 200 字），说出该改成什么，或给一条合法的退出写法。
+
+
+## A 0.5.2：结构错误与数量事实
+
+以下 JSON 片段只是字段格式示例，不是素材，也不是原文依据：
+
+```json
+{"kind":"source","source_id":"<原文段落ID>","quote":"<原文逐字连续片段>"}
+{"kind":"adaptation","text":"<新增或推断说明>"}
+```
+
+- `prop_state_discontinuity`、`prop_states_missing`、`prop_origin_unstated`、`prop_origin_shape`、`prop_origin_source_unknown`、`prop_origin_quote_not_verbatim` 和 `named_character_unaccounted` 都会使结构检查失败。`prop_state_discontinuity` 可在后一镜写明非空 `continuity_break` 退出；缺道具状态须补状态，若只是文字提及则改写动作或移出道具登记；人物名须列为可见或画外，或对确实不参与匹配的人物使用已有退出理由。
+- `origin.kind=source` 必须包含真实段落 ID 和其中逐字连续的 quote；推断、新增须用 `kind=adaptation`，不要携带段落 ID。旧自由文本不会被自然语言解析，改成上述结构后再交付。
+- 宿主模式错误条目可包含不超过 200 字的 `hint`。答复的自然语言不由检查器比对；报告数字只能引用结构化 metrics。`shots_with_structured_lines` 说明多少镜填写了台词字段，`shots_with_lines` 说明其中多少镜至少有一条台词，`shots` 是镜头总数，`shot_seconds` 是计划总时长。台词字段没有覆盖每镜时，不要声称已逐镜核实台词。
+- 这些规则核对字段声明，不证明来源语义、真实可见性、动作合理性或创作质量。特别是人物字面命中被列为画外时，仍需人类核对是否与本镜描述矛盾；不要靠改写字段掩盖真实内容问题。
