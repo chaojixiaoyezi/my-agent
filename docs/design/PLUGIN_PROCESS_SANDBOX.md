@@ -1,11 +1,12 @@
 # 插件进程 OS 沙箱（试点）
 
-## rdfloor2：macOS 26 最低启动读取与链节点元数据（2026-10-05，WIP，完整验收未齐）
+## rdfloor2：macOS 26 最低启动读取、链元数据与同步 cwd（2026-10-05，已实现，待 3a 外部复验）
 
 - **macOS allowlist 进程启动的最低读需求**：3a 在 macOS 26.4 / Darwin 25.4 沙箱外实测，deny file-read* 后仅放 `/` metadata，env、echo、真实 Python 均 SIGABRT（-6/134）；补 `(allow file-read-data (literal "/"))` 后返回 0。必须是 literal，不能 subpath `/`；代价是根一级顶层目录名可见，不是递归读取子目录，不增开 Cryptex。除这个启动例外，非放行祖先仍只有 metadata。这是外部任务依据，不是当前作者启动成功的证据。
 - **软链接链节点元数据**：系统/R/E/W 根（解释器前缀及 execute_roots 沿既有公共读根进入 spec）逐分量 lstat/readlink，最多 40 次解引用防环。相对目标与 `..` 按当时当前位置展开，不提前折叠掉节点。所有经过链接只补 file-read-metadata literal，不补 read-data/subpath；原/真实授权根沿既有语义放行。不可核验节点不猜目标，metadata 可见不代表可执行。hide_home 与 allowlist 共用解析，最终敏感路径拒绝顺序不变。
 - **Linux**：终端链接原本直接映射到同一授权 realpath；祖先目录是链接而终端是普通文件的根也应恢复精确入口。本片不挂其父目录，只恢复目标→原始授权根映射。argv 形状已测，真实 Linux 命名空间及 exec 未验证。
-- 核心 9 passed、1 skipped，三变异 3/3 抓住；新真进程用例在 tmp 造目录链接→真实 sys.base_prefix、程序链接→目录别名/bin/真实解释器名，只放真实前缀与精确程序入口。首轮真实返回 71 / sandbox_apply EPERM；纠正能力标记后当前缺嵌套 Seatbelt 而 skip，强制能力模式缺失会 fail。相关回归超时、守卫未跑，3a 沙箱外与 Linux 车道须复核，详见 TESTS。
+- **同步 cwd 与唯一授权判定**：3a 外部旧 WIP 六文件 129 passed、16 skipped、1 failed，已不 SIGABRT/execvp EPERM；剩下 import/getcwd PermissionError 是 Darwin 同步 Popen 没有 cwd、继承白名单外工作树。现将插件原判定移到 `tooling/sandbox.py::allowlisted_directory`，工厂和同步 run 共用同一函数。只在系统、显式只读或写根覆盖时 chdir；不覆盖则 Popen 前抛 `RESTRICTED_CWD_NOT_ALLOWLISTED`，不继承宿主目录、不推新授权或宽读回退。Darwin 传 `spec.attempt_view`；Linux cwd=None，由 bwrap `--chdir` 在命名空间内切换。
+- `SandboxProcessOptions` 只携带 cwd/期限/宽限/捕获参数，不是第二执行器；原取消、DEVNULL stdin、独立会话与 143 超时回执保持。最终核心＋cwd＋取消/正常完成局部用例 20 passed、1 skipped；新增两变异 2/2 抓住、还原一致。十一适用守卫 187 passed，任务基线缺第十二按通知不补版本。原真实测试仍保留失败/超时，基线同点失败/卡住；真实新版本 getcwd/import 与 Linux 启动未验证，不能据参数形状或旧外部结果称完整隔离通过。详见 TESTS。
 
 状态：2026-09-25 本地实现、组件验证与真实 TUI 验收完成（macOS Seatbelt、测试机 Linux bubblewrap 0.8.0），默认关闭；尚未合并部署。
 来源：用户对任意语言插件的第 4 项决定“OS 级沙箱可以试试”。

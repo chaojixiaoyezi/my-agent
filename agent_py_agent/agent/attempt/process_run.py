@@ -1,4 +1,4 @@
-# LLM: attempt 同步执行共用进程回收，不含能力包业务；取消使用当前 ContextVar 令牌，TERM→宽限→KILL 只作用于本次新建会话的组。
+# LLM: attempt 同步执行共用进程回收与显式 cwd 传递，不含能力包业务或目录授权判定；TERM→宽限→KILL 只作用于本次新建会话的组。
 #   回调与超时串行且幂等；退出前撤销回调、等在途清理完成，不能让旧取消控制后续命令。联测 cancellation 与 shell_stdin。
 # 模块用途: 等待沙箱批处理命令时响应取消，并回收本次命令的完整进程组，不接管其它宿主进程。
 from __future__ import annotations
@@ -8,6 +8,8 @@ import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 from ..common.cancellation import (
     cancellation_requested,
@@ -52,16 +54,29 @@ class _ProcessRun:
             self._closed = True
 
 
-# LLM: argv 已由唯一沙箱入口校验，不在这里改权限或绕过隔离；取消前后都检查，关闭 stdin 和独立会话契约保持。
+# LLM: 只承载已经过沙箱入口裁决的启动/等待参数；cwd=None 保留命名空间的 --chdir，不在此补根或猜 cwd。
+# 类用途: 将同步命令的期限、回收宽限、捕获与工作目录打包，避免接口参数超过四个。
+@dataclass(frozen=True)
+class SandboxProcessOptions:
+    timeout: float
+    grace_seconds: float
+    capture_output: bool
+    cwd: Path | None
+
+
+# LLM: argv/cwd 已由唯一沙箱入口校验，Popen 必须显式接收 cwd，不继承一个白名单外的宿主目录；不在此裁决权限。
+#   取消前后都检查，DEVNULL stdin、独立会话、回调撤销及 143 超时合同保持不变。
 # 函数用途: 启动一次非交互命令，注册取消回收并等待终态；取消抛共用 ToolCancelled，超时仍返回 143。
-def run_sandbox_process(argv: list[str], timeout: float, grace_seconds: float, capture_output: bool) -> subprocess.CompletedProcess:
+def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
     raise_if_cancelled()
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if capture_output else None,
-                            stderr=subprocess.PIPE if capture_output else None, text=capture_output, start_new_session=True)
-    state = _ProcessRun(proc, grace_seconds)
+    proc = subprocess.Popen(argv, cwd=options.cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE if options.capture_output else None,
+                            stderr=subprocess.PIPE if options.capture_output else None,
+                            text=options.capture_output, start_new_session=True)
+    state = _ProcessRun(proc, options.grace_seconds)
     try:
         with register_cancellation_callback(state.stop):
-            return _wait_for_process(state, argv, timeout)
+            return _wait_for_process(state, argv, options.timeout)
     finally:
         state.close()
         _close_process_pipes(proc)

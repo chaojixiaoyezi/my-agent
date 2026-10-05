@@ -43,12 +43,13 @@ from ..tooling.sandbox import (
     SandboxReadiness,
     SandboxSpec,
     SandboxUnavailable,
+    allowlisted_directory,
     build_bwrap_argv,
     find_bwrap,
     probe_sandbox,
 )
 from . import landlock_launcher
-from .process_run import run_sandbox_process
+from .process_run import SandboxProcessOptions, run_sandbox_process
 
 SandboxReadMode = Literal["hide_home", "allowlist"]
 
@@ -372,7 +373,8 @@ class AttemptExecutionSandbox:
         ), *_spec_rules(self.spec)])
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
-    # LLM: 就绪与 argv 仍走唯一平台边界；启动前复查取消，等待和 TERM→宽限→KILL 共用 process_run，不改显式 PTY 通道。
+    # LLM: 就绪/argv 仍走唯一平台边界；allowlist cwd 复用插件工厂的同一根覆盖判定，未获准则 Popen 前结构化拒绝。
+    #   macOS 显式传工作目录，Linux 仍靠 bwrap --chdir；等待/取消回收共用 process_run，不改显式 PTY 通道。
     # 函数用途: 执行非交互沙箱命令并响应本 run 的取消；已取消不启动，运行中取消回收完整组后抛 ToolCancelled。
     def run(
         self,
@@ -386,7 +388,9 @@ class AttemptExecutionSandbox:
         raise_if_cancelled()
         self.require_ready()
         argv = self.build_argv(command_argv)
-        return run_sandbox_process(argv, timeout, grace_seconds, capture_output)
+        options = SandboxProcessOptions(timeout, grace_seconds, capture_output,
+                                        _sandbox_process_cwd(self.spec, self._platform))
+        return run_sandbox_process(argv, options)
 
     # ------------------------------------------------------ macOS SBPL 构造
     # LLM: The profile is a pure projection of structured sandbox facts. Full Access omits the
@@ -445,6 +449,16 @@ class AttemptExecutionSandbox:
     def sandbox_readiness_dict() -> dict[str, Any]:
         """跨平台 readiness 汇总（诊断/CLI 用）。"""
         return {"platform": platform.system()}
+
+
+# LLM: 两平台同步 run 与插件工厂共用 allowlisted_directory；白名单外 cwd 直接拒绝，不继承宿主 cwd、不扩权或回退宽读。
+#   macOS 用 Popen cwd 显式切目录；Linux cwd=None 由已构造 argv 的 --chdir 在命名空间内切换。
+# 函数用途: 决定同步沙箱启动使用的工作目录，未获准时在启动前抛结构化不可用错误。
+def _sandbox_process_cwd(spec: AttemptSandboxSpec, platform_name: str) -> Path | None:
+    roots = (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)
+    if spec.read_mode == "allowlist" and not allowlisted_directory(spec.attempt_view, roots):
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
+    return spec.attempt_view if platform_name == "Darwin" else None
 
 
 # LLM: 只读隔离事实由平台沙箱实现决定，是 Shell 回执 external_host_paths_hidden 的唯一来源：Linux bwrap 只挂载授权根，

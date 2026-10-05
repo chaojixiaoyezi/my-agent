@@ -1205,7 +1205,37 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **缓存命中估算（非实测）**：只在同模型/同 thread 分区、服务端未逐出缓存且完整历史前缀逐字节命中时，按约 2.2% system-only 旧命中线索估计输入 token 命中可接近 98%；尾部指令/动态字段略降。修后真实 DeepSeek 命中率、费用未测。
 - **初审与协作注意**：非作者只读初审未发现阻断性逻辑缺陷；该审查未复跑测试，也未连 DeepSeek 实测。`compact_request_budget.py` 涉及单次/分段分流，CAB ds5 合入时需留意，避免覆盖超时修复。
 
-## rdfloor2：最低启动读取与通用链接链（2026-10-05，基线 `4a935d200`，WIP：完整验收未齐）
+## rdfloor2-continue：共用 cwd 裁决与逐文件诊断（2026-10-05；实现待 3a 外部复验）
+
+- 来源：`1005-sol2-rdfloor2-continue.prompt.md` 八行。原 WIP `dbaf575ed` 的外部六文件 129 passed、16 skipped、1 failed 是 3a 提供的旧版本记录；剩余 Python 3.12 import/getcwd PermissionError。续修前 `run_sandbox_process` 未传 cwd，Linux 有 `--chdir` 而 Darwin 继承了工作树目录。
+- 做法：插件原 `_allowlisted_directory` 移到 `tooling/sandbox.py::allowlisted_directory`，两入口共用同一实现。Darwin 同步 run 显式传 spec 工作目录；Linux Popen cwd=None，保持 bwrap 命名空间切目录。allowlist 未覆盖时报 `SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED`，Popen 零调用；不推新读写根、不宽读回退。四字段 `SandboxProcessOptions` 保持接口参数不超过四个，取消、DEVNULL stdin、独立会话和超时 143 合同未放宽。
+- 新八项形状/拒绝用例，先 **5 failed、3 passed、errors=0**（Darwin 三项缺 cwd；两平台两项未拒绝），再八项通过。与旧根/链形状合跑 **17 passed、1 skipped**；最后补取消前零启动、正常捕获/不捕获及 stdin EOF/callback 撤销，**20 passed、1 skipped、62 deselected，0.55s**，exit=0。参数组合仅打包为 case，六个正例/两个拒绝例输入和断言不减。真实解释器链缺 nested_sandbox_exec 被已有能力标记跳过，不算启动成功。
+- M4 去 `cwd=options.cwd`：3 个断言失败；M5 去 allowlist cwd 拒绝：2 个 DID NOT RAISE 行为失败；均 errors=0/exit=1，**2/2 KILLED**，finally 原字节还原。恢复 process_run SHA256 `74169912a9aaef48b8e1e1e235fb84540726bd4cf4741c3935e6e14e36128432`、attempt/sandbox SHA256 `6fe318b7b1af26085d395bcd61b1a74b80903a7c45d51be97896c9a317d13c83`。首轮三项根/链变异所守函数未改，记录保留，不把不同批次简单加成一套完整验收。
+
+### 相关回归：逐文件真实结果，不算全部通过
+
+指定 PY 为 `/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，树根 `env -i HOME=$PWD/tmp/rdfloor2-home MY_AGENT_HOME=$PWD/tmp/rdfloor2-home/data PATH=/usr/bin:/bin PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`；先创建隔离 HOME/data。各文件 `$PY -u -m pytest <单文件> -q -vv --tb=short -p no:cacheprovider -o addopts='' -o faulthandler_timeout=45 --basetemp=/private/tmp/claude-501/m-sol2-continue-<组> --junitxml=tmp/rdfloor2-continue/<组>.xml > tmp/rdfloor2-continue/<组>.log 2>&1`，每套工具期限 150 秒，不跑全仓。同树 pytest/code-size 串行。
+
+| 文件 | 实际结果 |
+| --- | --- |
+| test_attempt_sandbox.py | 46 passed、10 skipped、3 failed；31.81s；两个 sandbox_apply EPERM/71，registry 另有同 stderr 和 30s/identity_unavailable |
+| test_sandbox.py | 30 passed；0.29s；exit=0 |
+| test_plugin_sandbox.py | 准备修正后 9 passed、4 skipped；无失败 |
+| test_plugin_sandbox_v8.py | 准备修正后 16 passed、10 skipped、2 failed；两真实进程 sandbox_apply EPERM/71 |
+| test_shell_sandbox_boundary_facts.py | 150s 工具超时、return_code=-15；九个前置用例已打印 PASSED，一个真实用例 FAILED、最后真实用例等待中；无完整 JUnit/汇总，不能写成九通过两失败的完整套结果 |
+
+- 准备纠正：先前隔离 HOME 不存在，导致插件三项和 v8 一项早报 sandbox_unavailable。只创建本树 tmp HOME/data，未改产品或原测试，随后两文件合跑 25 passed、14 skipped、2 failed，5.54s；按 JUnit classname 拆出上表。第一轮准备失败不算产品缺陷，不将合跑结果假装两次独立执行。
+- 卡点定位：流式日志和 45 秒 faulthandler 显示 `test_real_seatbelt_denial_comes_back_as_boundary_facts`（源码 202 调 scan）、`test_model_sees_the_boundary_facts_on_its_next_request`（源码 295）都停在 `tooling/shell.py::_communicate_process`（当前 567）。启动权限拒绝与进程 identity_unavailable/等待超时是分别观察到的事实，未进一步证实其因果关系，不凭空归因。
+- 真实基线复核：临时 detached `/private/tmp/claude-501/rdfloor2-cwd-baseline`，HEAD=`4a935d200288758f5ef650bb716430f36cc402f9`，相同指定 Python/env/真实原用例。attempt 三项＋v8 两项仍 **5 failed、1 skipped、63 deselected，31.19s**，相同 71/EPERM 和 registry 超时；shell 两项同入口、同 150 秒超时，同 `_communicate_process` 栈。日志/XML复制回本树 `tmp/rdfloor2-continue/baseline-*`，临时树收尾移除；未动其他既有树/分支。
+
+### 守卫与收尾
+
+- 外部 guards9 十二名单中 `test_backend_signature_guardrails.py` 在本 HEAD 和任务基线都不存在；两次含该文件的执行 exit=4/no tests ran，不算守卫红。按 `1005-continue-after-17k.md` 第五条仅跑前十一（含 packaging），**187 passed，48.58s，exit=0**；未从别的版本补文件。最终源码未再改，复用该有效结果。
+- 首次 strict-size hard=0/blocked=False，但线上 size_diff **新增1、消失44、exit=1**，新增是本片正例测试函数参数超四个；随后将平台/模式成对打包，保留所有组合与断言。不得把 strict 绿当线上零新增。
+- 最终门禁：全 Ruff `agent_py_agent scripts` exit=0；imports findings=0；doc-sync `--base 4a935d200` 为 DOC_SYNC_PASS；strict-size strict_scope_total=2199、hard=0、high-risk=1503、soft=696、test_advisory=1234、blocked=False；线上逐身份 size_diff **新增0、消失44、exit=0**；clean-package “OK: . 未发现发布阻塞项”、普通 diff check 均 exit=0。CODE_SIZE_REPORT 已恢复并以 git diff --exit-code 核无改动，不提交；仍有存量尺寸债务。临时静态驱动沿用首轮提示“REGRESSION TIMED OUT; GUARDS NOT RUN”仅表示它跳过长测试，不能覆盖本轮单独已执行的十一守卫事实。
+- 当前真实原 allowlist import/getcwd、解释器链、Linux bwrap、插件安装/启用与生产 Gateway **未验证**。未连接真实 Gateway/渠道、不联网安装、不结束其他宿主进程、不改原真实测试断言/加 skip。续做已超原约 90 分钟窗口，不能声称按时或完整通过。
+
+## rdfloor2：最低启动读取与通用链接链（2026-10-05，基线 `4a935d200`；首轮 WIP `dbaf575ed` 历史记录）
 
 - **实现**：按 3a 外部实测补 allowlist 根 read-data literal `/`；逐分量解析路径链接、40 次解引用上限，链节点仅 metadata literal；hide_home 共用。bwrap 恢复只有祖先是链接的授权根入口，不挂未授权父目录。无配置/依赖/新事实源。
 - **执行口径**：树根使用 `PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`env -i HOME=$PWD/tmp/rdfloor2-home MY_AGENT_HOME=$PWD/tmp/rdfloor2-home/data PATH=/usr/bin:/bin PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`；pytest 固定 `-q --tb=short -p no:cacheprovider -o addopts=''`，独立 basetemp `/private/tmp/claude-501/m-sol2-<组名>`；可重建完整命令/回执在本树 `tmp/rdfloor2/`，这些临时文件不提交。

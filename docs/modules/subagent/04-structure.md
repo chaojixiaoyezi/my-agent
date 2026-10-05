@@ -1,9 +1,10 @@
 # Subagent Structure
 
-## rdfloor2 共用路径解析（2026-10-05，WIP）
+## rdfloor2 共用路径解析与 cwd（2026-10-05，已实现，待外部复验）
 
 - `attempt/sandbox.py` 的 `_symlink_path_nodes` 按 lstat/readlink 解析分量，`_readlink_node` 只读文件系统事实，`_symlink_metadata_rules` 给两读模式投影精确元数据。不新造执行链、不据规则形状称启动成功。
 - `tooling/sandbox.py::_symlink_root_aliases` 恢复明确授权根原入口，即使仅祖先为链接；仍只挂获准 realpath，不带父目录数据。真实 bwrap 效果待验。
+- cwd 由 tooling/sandbox.py::allowlisted_directory 统一判定，插件和同步 Attempt.run 不复制逻辑。同步 run 向同一 process_run 传四字段 SandboxProcessOptions：Darwin Popen cwd 为 spec 工作目录；Linux None/--chdir；未授权目录 Popen 前拒绝。取消/超时/管道回收仍是原实现，真实新版本复验归 3a，局部形状、变异与基线失败见 TESTS。
 
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 

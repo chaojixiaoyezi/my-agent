@@ -288,6 +288,16 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     return argv
 
 
+# LLM: allowlist 不得隐式重开 cwd；插件规格工厂与 Attempt 同步 run 共用这个真实路径根覆盖判定，不按字符串前缀放行兄弟目录。
+# 函数用途: 判断工作目录是否已经包含在系统、只读授权或写根中，只读文件系统事实，不新授权限。
+def allowlisted_directory(path: Path, roots: tuple[Path, ...]) -> bool:
+    try:
+        resolved = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return any(_is_relative_to(resolved, Path(root).resolve(strict=True)) for root in roots)
+
+
 # LLM: allowlist 从空 tmpfs 根搭视图，不挂宿主 /；只读系统/授权根与显式写根分层覆盖，别名只恢复获准入口。
 # 函数用途: 构造 B7 有限读 bwrap 视图，未列出的宿主目录不会进入插件进程。
 def _allowlist_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:

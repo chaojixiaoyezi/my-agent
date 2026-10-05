@@ -1079,3 +1079,66 @@ def test_allowlist_real_process_through_external_directory_symlink_chain(tmp_pat
     import json
 
     assert json.loads(result.stdout) == {"started": True}
+
+
+# LLM: 只截取正式 process_run 交给 Popen 的参数，不启动真实进程、不替换权限判定或等待入口。
+# 函数用途: 用可立即 communicate 的假进程记录启动 argv/cwd，给两平台参数形状测试复用。
+@pytest.fixture
+def captured_sandbox_popen(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.attempt import process_run
+
+    calls = []
+    proc = SimpleNamespace(pid=987654321, stdout=None, stderr=None, returncode=0,
+                           communicate=lambda timeout: ("", ""))
+
+    def capture(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return proc
+
+    monkeypatch.setattr(process_run.subprocess, "Popen", capture)
+    return calls
+
+
+@pytest.mark.parametrize("case", [(mode, platform) for mode in (None, "hide_home", "allowlist") for platform in ("Darwin", "Linux")])
+def test_run_uses_explicit_macos_cwd_and_linux_namespace_chdir(tmp_path, monkeypatch, captured_sandbox_popen, case):
+    read_mode, platform_name = case
+    env, data = tmp_path / "env", tmp_path / "data"
+    env.mkdir()
+    data.mkdir()
+    spec = AttemptSandboxSpec(attempt_view=env, staging_root=data, shared_workspace=env,
+                              owner_home=env, public_read_roots=(env,), extra_write_roots=(data,),
+                              system_read_roots=(Path("/usr/bin"),), read_only_root=True,
+                              implicit_attempt_write_roots=False, read_mode=read_mode,
+                              macos_sandbox_exec="/fake/sandbox-exec", bwrap_path="/fake/bwrap")
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = platform_name
+    monkeypatch.setattr(sandbox, "require_ready", lambda: None)
+    result = sandbox.run(["/bin/echo", "ok"])
+    assert result.returncode == 0
+    argv, kwargs = captured_sandbox_popen[0]
+    if platform_name == "Darwin":
+        assert kwargs.get("cwd") == spec.attempt_view
+    else:
+        assert kwargs.get("cwd") is None
+        assert argv[argv.index("--chdir") + 1] == str(spec.attempt_view)
+    assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["start_new_session"] is True
+
+
+@pytest.mark.parametrize("platform_name", ["Darwin", "Linux"])
+def test_allowlist_run_refuses_unlisted_cwd_before_popen(tmp_path, monkeypatch, captured_sandbox_popen, platform_name):
+    env, data = tmp_path / "unlisted", tmp_path / "data"
+    env.mkdir()
+    data.mkdir()
+    spec = AttemptSandboxSpec(attempt_view=env, staging_root=data, shared_workspace=env,
+                              owner_home=env, public_read_roots=(), extra_write_roots=(data,),
+                              system_read_roots=(Path("/usr/bin"),), read_only_root=True,
+                              implicit_attempt_write_roots=False, read_mode="allowlist",
+                              macos_sandbox_exec="/fake/sandbox-exec", bwrap_path="/fake/bwrap")
+    sandbox = AttemptExecutionSandbox(spec)
+    sandbox._platform = platform_name
+    monkeypatch.setattr(sandbox, "require_ready", lambda: None)
+    with pytest.raises(SandboxUnavailableError, match="RESTRICTED_CWD_NOT_ALLOWLISTED"):
+        sandbox.run(["/bin/echo", "ok"])
+    assert captured_sandbox_popen == []

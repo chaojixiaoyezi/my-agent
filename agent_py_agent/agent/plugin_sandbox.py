@@ -3,6 +3,7 @@
 #   旧格式受限策略可显式选择 allowlist；系统必要读根按平台窄列，不能借 /、/Users、/home 或 /private 扩大底图。
 #   v8 与旧插件受限策略共用同一 AttemptSandboxSpec 工厂；network:false 全断网，network:true 仍受 G4/G5 端口边界约束。
 #   沙箱不可用时调用方须在启动前结构化拒绝，不能退回无沙箱启动。
+#   allowlist cwd 覆盖判定与同步 Attempt.run 共用 tooling/sandbox，不在两条入口各写一套。
 #   改动须同步 plugin_runtime、plugin_enable_tool、plugin_management、tooling/sandbox 与测试。
 # 模块用途: 为插件候选、业务与面板共用平台沙箱规格，并提供启动前能力检查。
 
@@ -23,6 +24,7 @@ from .attempt.sandbox import (
 )
 from .gateway_parts.local_client_token import local_client_credential_path
 from .path_access_policy import agent_home_root_for_owner
+from .tooling.sandbox import allowlisted_directory
 
 # 插件数据目录下给沙箱内进程用的临时目录名；TMPDIR 指向它，保证临时文件也落在唯一可写处
 SANDBOX_TMP_DIRECTORY = ".tmp"
@@ -90,7 +92,7 @@ def plugin_sandbox_spec(*, cwd: Path, data_dir: Path, owner_home: Path,
 
 
 # LLM: 这是候选预检、插件业务连接与面板连接共同使用的受限规格入口；根须已由宿主权限层核验且必须仍存在。
-#   目录根只开放该目录；文件型 execute_root 只开放原文件及其严格 realpath，不把父目录顺带放行。
+#   目录根只开放该目录；文件型 execute_root 不带父目录；cwd 根覆盖判定与 Attempt.run 共用同一函数。
 # 函数用途: 将有限 R/W/E 根、网络开关和隐藏根投影为跨平台 AttemptSandboxSpec。
 def plugin_restricted_sandbox_spec(
     *, cwd: Path, data_dir: Path, owner_home: Path, policy: PluginRestrictedSandbox
@@ -117,7 +119,7 @@ def plugin_restricted_sandbox_spec(
         for root in (*system_roots, *public_roots, *write_roots)
     ):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_ROOT_COVERS_HIDDEN_ROOT")
-    if policy.read_mode == "allowlist" and not _allowlisted_directory(
+    if policy.read_mode == "allowlist" and not allowlisted_directory(
         cwd, (*system_roots, *public_roots, *write_roots)
     ):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
@@ -245,16 +247,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-# LLM: allowlist 模式不得隐式重开 cwd；只有 cwd 被系统根、只读授权根或写根覆盖时，才能交给平台 chdir。
-# 函数用途: 判断插件工作目录是否已包含在显式开放的根中。
-def _allowlisted_directory(path: Path, roots: tuple[Path, ...]) -> bool:
-    try:
-        resolved = Path(path).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return False
-    return any(_is_relative_to(resolved, Path(root).resolve(strict=True)) for root in roots)
 
 
 # LLM: 规格由调用方用 plugin_sandbox_spec 从宿主事实构造后传入（唯一 spec 工厂，避免这里再长一套参数）；

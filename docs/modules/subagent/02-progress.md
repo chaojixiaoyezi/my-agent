@@ -13,10 +13,10 @@
   - **终态 attempt 孤儿操作**（生产 11 条 EXECUTING 从 9 月挂到现在）：`reconcile_superseded_attempts` 同一巡清扫——终态 attempt 下残留的 CLAIMED/EXECUTING 翻 UNKNOWN（`terminal_attempt_op_cleanup` + 每条一条审计事件），不动 attempt/run/锁，幂等。
 - 用例、变异与门禁见 TESTS.md obsfix12 节；设计见 DESIGN_LEDGER 同名两节。
 
-## 共用 Attempt 沙箱链接链（rdfloor2，2026-10-05，WIP）
+## 共用 Attempt 沙箱链接链与 cwd（rdfloor2，2026-10-05，已实现，待外部复验）
 
 - 两读模式共用逐分量链接解析，40 次解引用上限，节点只放 metadata literal；allowlist 补根一级启动 read-data literal `/`。
-- 核心 9 passed、1 skipped，三变异被抓住；完整相关回归超时 600 秒，十二守卫未跑，真实进程未验。见 TESTS 与 PLUGIN_PROCESS_SANDBOX，不称完整验收通过。
+- 同步 run 的 Darwin Popen cwd 不再继承宿主；allowlist 与插件共用根覆盖判定，未覆盖在启动前拒绝，Linux 保留 namespace --chdir。最终局部 20 passed、1 skipped、新两变异抓住，十一适用守卫 187 passed（基线缺第十二）；相关真实测试仍失败/超时且基线同点复现，真实新版本未验。见 TESTS，不称完整验收通过。
 
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 

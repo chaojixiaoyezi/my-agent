@@ -577,12 +577,15 @@
 - **实测边界与估算**：非作者只读初审未发现阻断问题；尚未实测修后DeepSeek缓存命中率或费用。若同模型/同thread分区且完整历史前缀仍驻留、逐字节命中，基于旧2.2% system-only命中线索估算理想输入token命中可接近98%，尾部指令/动态字段会降低比例。
 - **协作注意**：本次改 `compact_request_budget.py` 的单次/分段分流；CAB ds5 合入时对照该文件，避免覆盖超时修复。
 
-## B7 最低启动读取与软链接链（rdfloor2，2026-10-05，`worker/rdfloor2`，基线 `4a935d200`；WIP，完整验收未齐）
+## B7 最低启动读取、链接链与同步 cwd（rdfloor2，2026-10-05，`worker/rdfloor2`，基线 `4a935d200`；已实现，待 3a 沙箱外复验）
 
 - 按 3a 在 macOS 26.4 / Darwin 25.4 沙箱外的实测修规则：allowlist 仅补 literal `/` read-data；逐分量 lstat/readlink，最多 40 次解引用，所有系统/R/E/W 放行根的链接节点仅获 metadata literal，hide_home 共用。不写 uv 专用分支、不加配置/依赖/状态源。
 - Linux 显式终端 symlink 原本会直接恢复到获准 realpath；但终端为普通文件、只有中间目录为链接时，旧 is_symlink 筛选漏入口。本片按原路径与 realpath 差异恢复授权根的精确入口，不挂未授权父目录/兄弟数据。argv 单测从真实基线转红再转绿，真实 bwrap 启动未验证。
-- 当前核心 9 passed、1 skipped，三项单点变异全部被行为断言抓住、errors=0，并原样还原。完整五文件回归超时 600 秒，无完整结果；十二守卫未执行。全 Ruff、imports=0、strict-size、clean-package、diff 通过；线上尺寸新增 0、消失 44，报告已恢复。不是完整验收通过。
-- 详见 [PLUGIN_PROCESS_SANDBOX.md](docs/design/PLUGIN_PROCESS_SANDBOX.md) 与 TESTS 顶部；本轮按窗口先交 WIP，待同代号续派或 3a 外部验收，不直接集成。
+- 首轮 WIP `dbaf575ed` 后，3a 报告外部六文件 129 passed、16 skipped、1 failed，启动不再 SIGABRT/execvp EPERM；余下 import/getcwd PermissionError 来自同步 Popen 继承白名单外 cwd。这是旧版本外部记录，不替代续修后的复验。
+- 将插件原目录根覆盖判定移动到 `tooling/sandbox.py::allowlisted_directory` 唯一实现；插件工厂与同步 run 共用。Darwin 显式 `Popen(cwd=spec.attempt_view)`，Linux 保留命名空间 `--chdir`。allowlist 未覆盖时在 Popen 前以 `RESTRICTED_CWD_NOT_ALLOWLISTED` 拒绝，无继承宿主 cwd、扩读写根或降宽回退。四字段 `SandboxProcessOptions` 只传参数，不新增执行链。
+- 新 cwd 八项先得五项有效红、再全绿；最终核心/参数及取消前零启动、正常 stdin/callback 用例 20 passed、1 skipped。新增两单点变异去 cwd 传递/去拒绝分别三/两项行为失败、errors=0，原样还原；首轮三项未改规则的有效变异记录继续保留。十一适用守卫 187 passed，基线缺第十二文件，按 17k 续做通知不跨版补入。
+- 五文件逐文件限时已执行，但不全绿：attempt 三项失败、v8 两项失败，真实 Seatbelt 返回 71/sandbox_apply EPERM；任务真实基线同五项失败。shell 边界文件 150 秒超时，卡在两个真实用例的 `_communicate_process`，基线同点同超时；不删测试或加 skip 压绿，旧 600 秒没有日志的结果不冒充通过。
+- 详见 [PLUGIN_PROCESS_SANDBOX.md](docs/design/PLUGIN_PROCESS_SANDBOX.md) 与 TESTS 顶部。实现与局部验证可交审，完整真实隔离、插件及生产 Gateway 未验证；本次续做超原约 90 分钟窗口，不以局部绿或正式提交代替外部验收。
 
 ## B7 读模式与有限读底图（rdfloor，2026-10-05，`worker/rdfloor`，基于 step17k `602d276e7`；已实现，待 3a 终审和沙箱外真进程验收）
 
