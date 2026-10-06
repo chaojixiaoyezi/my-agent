@@ -91,6 +91,12 @@
 - **未改（下一刀）**：`gateway_parts/daemon_metadata._get_process_start_time`、`tooling/process_registry.capture_process_birth_token`；差异盘点见本轮交接报告。
 - **验证**：新增/改写用例（ps 三态、/proc 解析、比较矩阵、runtime_db 新旧格式矩阵、tool_operations 判活三态）；变异 3/3 KILLED；连带测试与门禁结果见 TESTS.md 同名小节。未验证：真实 macOS ps 输出链路（沙箱内 ps 被禁，用打桩覆盖）、非作者初审。
 
+## starttime3：锁写端 _start_token 统一与 tool_operations 比较双口径（starttime3，2026-10-05，在 c16ec16da 之后；待初审）
+
+- **修正 starttime2 的不实描述（3a 核对）**：上一轮报告/注释声称 `runtime_db._start_token`（写端）已统一走 heartbeat，实际代码从未改过（仍是 /proc 全文 split、非 Linux 恒空）。后果：macOS 锁记录指纹恒空（读端保守判活，"可核对"未实现）；Linux 进程名含空格时写端取错字段、读端（rsplit）正确，比较不等 → 活持有者的锁可能被接管。本提交把 `_start_token` 改走 `_proc_start_time`（heartbeat 字符串指纹），与读端 `holder_is_alive` 真正同源。
+- **tool_operations 比较双口径**：`_operation_holder_is_live` / `_reconciliation_marker_is_live` 由 `expected == actual` 改走 `start_time_matches`（旧数字 token 与字符串指纹数值等价时不判死；确证不同才判死）。
+- **验证**：新增 7 用例（写端走 heartbeat、写读同源、macOS lstart 写读、空值、旧数字 token 三态）；变异 3/3 KILLED；连带全量清单 211 文件分批跑完（含 batch3 拆小重跑），失败 57 条全部在基线 `c16ec16da` 复现（含 `test_host_files_access.py` 超时——基线同样超时），无本轮引入失败；门禁全过。见 TESTS.md 同名小节。
+
 ## SLP-1A 挑入 17l 后撤回（slp1a，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现）**：过期 claim 的原执行者进程仍存活时（常见于同一个 Gateway 进程里某回合异常结束、没释放 claim），SLP-1A 判为 recovery_pending；而 `_acquire_conversation_run_claim` 的等待循环没有时限，`test_plugin_m1_joint_tool_gate.py` 卡在 run_claim.py 的领取循环 40 分钟。生产上会让该会话之后所有回合一直“等待执行车道”，直到重启 Gateway。

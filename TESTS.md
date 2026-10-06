@@ -165,6 +165,16 @@
   - 门禁：ruff All checks passed；import boundaries=0；DOC_SYNC_PASS；strict code-size `hard=0 blocked=False`；size_diff **新增 0 / 消失 57**；`git diff --check` 干净；clean-package OK。
 - **未验证**：真实 macOS ps 输出链路（沙箱内 ps 被禁，用打桩覆盖）；真实 claim 恢复场景；非作者初审。
 
+## starttime3 锁写端统一与比较双口径（2026-10-05，待初审）
+
+- **改动**：见 DESIGN_LEDGER 同名小节。`runtime_db/repository._start_token` 改走 heartbeat；`local_storage/tool_operations` 两处比较改 `start_time_matches`；`test_start_time_unification.py` +7 例。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - 核心 4 文件（新文件 + recover_stale + host_identity + r103）→ **98 passed**；新文件共 33 例。
+  - 变异（`/private/tmp/starttime3_mutate.py`）：写端退回 /proc split → KILLED（3 例红）；tool_operations 两处比较退回精确相等 → KILLED（各 1 例红）。**3/3 KILLED**。
+  - 连带全量清单（`git grep -lE` 8 词并集，211 文件）分批（每批 30，subprocess timeout=900）：batch1 0 失败；batch2 2；**batch3 超时**（拆小重跑：b3-1/b3-2 全过；b3-3 再拆 10 个单跑，9 个通过、`test_host_files_access.py` 超时——基线 `c16ec16da` 同样超时，既有）；batch4 28、batch5 20，其余批 0 或少量；host_command_stream 8。**失败合计 57 条，全部在基线 `c16ec16da` 临时工作树复现（节点一致）**，无本轮引入失败。
+  - guards9 12 文件 **194 passed**；ruff、import boundaries=0、DOC_SYNC_PASS、strict code-size `hard=0 blocked=False`、size_diff **新增 0 / 消失 57**、diff-check 干净、clean-package OK。
+- **未验证**：真实 macOS ps 链路（沙箱禁 ps，打桩覆盖）；非作者初审。本分支未变基到 886965f3a（本任务不依赖 17l 新代码；如需可在挑入时处理）。
+
 ## PTY 会话泄漏修复（ptyleak，2026-10-05，分支 `worker/ptyleak`，待非作者初审）
 
 - 背景、根因与三层网设计见 `DESIGN_LEDGER.md` 同名小节。
