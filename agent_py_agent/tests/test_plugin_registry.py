@@ -16,13 +16,16 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
     installed_runtime_plugin,
     plugin_registry,
 )
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 
 
 @pytest.mark.parametrize("phase", ["construct", "resources"])
 def test_close_collects_client_registered_after_first_close_snapshot(tmp_path, monkeypatch, phase):
-    service = installed_runtime_plugin(tmp_path)
-    enabled = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-    assert enabled["state"] == "succeeded", enabled
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
+    enable_with_confirmation(service, "sample-peek")
     registry = plugin_registry(service)
     view = registry.with_access_policy(access_mode="full-access", path_access_mode="full", owner_scope_root="")
     entered, release, created = threading.Event(), threading.Event(), []
@@ -77,9 +80,8 @@ def test_private_owner_stays_fixed_across_full_access_view(tmp_path):
 
 
 def test_new_registry_does_not_bypass_persisted_cleanup_unknown(tmp_path, monkeypatch):
-    service = installed_runtime_plugin(tmp_path)
-    enabled = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-    assert enabled["state"] == "succeeded", enabled
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
+    enable_with_confirmation(service, "sample-peek")
     owner = service.context.owner
     store = ProcessSessionStore(process_session_store_root(owner.home_dir, owner.home_dir))
     records, _ = store.list_records()

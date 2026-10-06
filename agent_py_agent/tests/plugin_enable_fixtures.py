@@ -30,3 +30,19 @@ def preview_legacy_enable(service, plugin_id, request_id="enable"):
 def confirm_legacy_enable(service, response):
     facts = response["details"]["confirmation"]
     return service.command(facts["confirm_command"], revision=facts["catalog_revision"], request_id=facts["authorization_id"])
+
+
+# LLM: 老格式插件“启用后再测别的”用例的统一入口：先走真实预览拿完整确认事实，再用同次预览的确认命令提交，
+#   断言最终 succeeded；额外参数（如 request_permission）原样透传给两步命令。不放宽任何原有断言，只把
+#   “一条命令启用”换成两步确认协议（opp 两步确认是安全边界，测试不得绕过）。
+# 函数用途: 以两步确认协议启用老格式插件，返回 (预览结果, 最终成功结果)，成功操作的编号是授权编号。
+def enable_with_confirmation(service, plugin_id, request_id="enable", **kwargs):
+    preview = service.command(f"/plugins enable {plugin_id}", revision=service.catalog().revision,
+                              request_id=request_id, **kwargs)
+    assert preview["state"] == "failed" and preview["error_code"] == "PLUGIN_CONFIRMATION_REQUIRED", preview
+    assert preview["details"]["reason"] == "confirmation_required", preview
+    facts = preview["details"]["confirmation"]
+    result = service.command(facts["confirm_command"], revision=facts["catalog_revision"],
+                             request_id=facts["authorization_id"], **kwargs)
+    assert result["state"] == "succeeded", result
+    return preview, result

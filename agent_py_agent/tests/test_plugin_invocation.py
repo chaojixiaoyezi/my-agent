@@ -17,6 +17,10 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
     installed_runtime_plugin,
     plugin_registry,
 )
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 from agent_py_agent.tests.test_plugin_package import _manifest
 
 
@@ -33,9 +37,8 @@ def enabled_plugin(tmp_path):
         '            counter.write("called\\n")\n'
         '        value = path.read_text()',
     )
-    service = installed_runtime_plugin(tmp_path, module_source=source)
-    result = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-    assert result["state"] == "succeeded", result
+    service = unrestricted_service(installed_runtime_plugin(tmp_path, module_source=source))
+    enable_with_confirmation(service, "sample-peek")
     input_file = tmp_path / "中文 input.txt"
     input_file.write_text("插件原生结果")
     return service, input_file, f'/plugins@sample-peek read "{input_file}"'
@@ -142,7 +145,8 @@ def test_static_errors_and_disabled_tools_do_not_start_plugin_or_create_business
     assert not source.with_suffix(".calls").exists()
     repo = RuntimeRepository(runtime_db_path(service.context.owner.home_dir))
     with repo._runtime_connection() as conn:
-        assert conn.execute("SELECT count(*) FROM agent_attempts").fetchone()[0] == 2  # 安装、启用
+        # 安装 1 条 + 启用两步确认 2 条（预览与确认都经真实 HostCommand）；被拒、帮助、参数错误都不新增。
+        assert conn.execute("SELECT count(*) FROM agent_attempts").fetchone()[0] == 3
 
 
 def test_duplicate_and_disable_during_approval_cannot_execute_old_or_new_activation(tmp_path):
@@ -162,8 +166,7 @@ def test_duplicate_and_disable_during_approval_cannot_execute_old_or_new_activat
             assert duplicate["state"] == "running" and "connection_cleanup" not in duplicate
             stopped = service.command("/plugins disable sample-peek", revision=service.catalog().revision, request_id="stop")
             assert stopped["state"] == "succeeded" and stopped["details"]["released"], stopped
-            restarted = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="restart")
-            assert restarted["state"] == "succeeded", restarted
+            enable_with_confirmation(service, "sample-peek", request_id="restart")
         finally:
             release.set()
         result = future.result(timeout=15)

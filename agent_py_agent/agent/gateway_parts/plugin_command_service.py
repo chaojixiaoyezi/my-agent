@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import replace
+from dataclasses import is_dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -158,7 +158,10 @@ def execute_plugin_control(base, command: ConversationControlCommand, scope, *, 
         # hub 优先取显式入参（后台/无 scope 的调用），否则取 scope 上带下来的；两者都为空就按“暂无记录”展示。
         # 这里只补 scope 上的展示依赖，不改身份字段；scope 不是本模块的 dataclass 时也不许因此报错。
         hub = event_hub if event_hub is not None else getattr(scope, "event_hub", None)
-        manager = _scope_management(base, replace(scope, event_hub=hub))
+        # 只有 dataclass 实例才能 replace；否则原样交给管理服务（3a 10-05：此前 replace(None) 抛 TypeError，
+        #   被下面的兜底吞成 OUTCOME_UNKNOWN，管理员看到“未能确认插件请求结果”而不是真实回执）。
+        scoped = replace(scope, event_hub=hub) if is_dataclass(scope) and not isinstance(scope, type) else scope
+        manager = _scope_management(base, scoped)
         result = manager.command(command.value, revision=manager.catalog().revision, request_id=request_id)
     except Exception:  # noqa: BLE001 副作用可能已发生；不泄露内部路径，不自动重试。
         result = plugin_command_unknown(request_id)

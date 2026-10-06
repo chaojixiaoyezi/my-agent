@@ -10,6 +10,10 @@ from agent_py_agent.agent.plugin_installation import PluginInstallationError
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.plugin_update import PluginUpdateRequest, plan_package_update
 from agent_py_agent.tests.plugin_activation_fixtures import _SERVER, installed_runtime_plugin
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 from agent_py_agent.tests.plugin_wheel_fixtures import make_wheel
 from agent_py_agent.tests.test_plugin_package import _manifest
 
@@ -77,9 +81,8 @@ def test_update_clears_incompatible_settings_and_reports_it(tmp_path):
 
 
 def test_update_refuses_enabled_plugin_and_requires_matching_identity(tmp_path):
-    service = installed_runtime_plugin(tmp_path, configure=True)
-    enabled = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-    assert enabled["state"] == "succeeded", enabled
+    service = unrestricted_service(installed_runtime_plugin(tmp_path, configure=True))
+    enable_with_confirmation(service, "sample-peek")
     v2 = _v2_bundle(tmp_path)
     try:
         refused = service.command(f'/plugins update sample-peek "{v2}"', revision=service.catalog().revision, request_id="update-enabled")

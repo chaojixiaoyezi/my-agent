@@ -23,6 +23,10 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
     invoke_registered_tool,
     plugin_registry,
 )
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 from agent_py_agent.tests.test_mcp_client import _ECHO_SERVER, _config
 from agent_py_agent.tests.test_plugin_package import _manifest
 from agent_py_agent.tests.test_workspace_read_context import read_context
@@ -137,9 +141,8 @@ def test_explicit_and_registry_calls_use_same_host_context_chain(tmp_path):
     source = _SERVER.replace("__TOOLS__", repr(tools)).replace('"capabilities": {"tools": {}}', f'"capabilities": {capability!r}')
     source = source.replace('value = Path(request["params"]["arguments"]["path"]).read_text()',
                             'value = json.dumps(request["params"], ensure_ascii=False)')
-    service = installed_runtime_plugin(tmp_path, module_source=source)
-    result = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-    assert result["state"] == "succeeded", result
+    service = unrestricted_service(installed_runtime_plugin(tmp_path, module_source=source))
+    enable_with_confirmation(service, "sample-peek")
     registry = plugin_registry(service)
     try:
         explicit = service.command('/plugins@sample-peek read "中文 input.txt"', revision=service.catalog().revision,

@@ -18,6 +18,10 @@ from agent_py_agent.agent.tooling.mcp_client import MCPStdioClient
 from agent_py_agent.agent.workspace_read_context import WORKSPACE_READ_EXTENSION
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
 from agent_py_agent.tests.plugin_activation_fixtures import invoke_registered_tool, plugin_registry
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 from agent_py_agent.tests.test_mcp_client import _config
 from agent_py_agent.tests.test_plugin_api_build import installed_sdk  # noqa: F401
 from agent_py_agent.tests.test_plugin_management import manager
@@ -242,9 +246,14 @@ def test_invalid_json_does_not_break_next_protocol_request(installed_peek):
 
 # LLM: 管理命令始终读取原目录版本，失败立即暴露；审批回调只用于开发组件，不计真实用户审批或 TUI。
 # 函数用途: 经原管理入口执行一项成功操作，供实际包生命周期组合复用。
+# 测试里的业务审批一律同意（只给本文件的真实链路用例）。
+def _approve(value, **_):
+    return {"permission_id": value["permission_id"], "decision": "approved"}
+
+
 def manage(service, command, request_id):
     result = service.command(command, revision=service.catalog().revision, request_id=request_id,
-        request_permission=lambda value, **_: {"permission_id": value["permission_id"], "decision": "approved"})
+        request_permission=_approve)
     assert result["state"] == "succeeded", result
     return result
 
@@ -252,6 +261,8 @@ def manage(service, command, request_id):
 def test_actual_package_original_install_call_disable_reenable_remove(installed_peek, tmp_path):
     _, _, bundle = installed_peek
     service, source = manager(tmp_path)
+    # 本例测安装/调用/停用/再启用/卸载的真实链路，不测沙箱：按 opp 夹具显式选不受限模式（与 opp 之前的运行条件一致）。
+    service = unrestricted_service(service)
     source.write_bytes(bundle.read_bytes())
     revision = service.catalog().revision
     installed = manage(service, f'/plugins install "{source}"', "install")
@@ -276,11 +287,13 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
     assert service.installations.snapshot()[0].settings_json is None
     settings.write_text(json.dumps({"page_bytes": 4}))
     manage(service, f'/plugins configure workspace-peek --file "{settings}"', "configure")
-    enabled = manage(service, "/plugins enable workspace-peek", "enable")
+    enable_preview, enabled = enable_with_confirmation(service, "workspace-peek", request_permission=_approve)
+    # 两步确认后，成功的那次操作编号是同次预览给出的授权编号（不再是 "enable"）。
+    enable_authorization = enable_preview["details"]["confirmation"]["authorization_id"]
     assert enabled["details"]["candidate_cleanup"]["confirmed"]
     assert "workspace-peek 0.1.1（启用）" in enabled["message"]
     assert "普通中文示例：" in enabled["message"] and "/plugins remove workspace-peek" in enabled["message"]
-    assert enabled["message"].endswith("查询：/plugins status enable")
+    assert enabled["message"].endswith(f"查询：/plugins status {enable_authorization}")
     explicit = manage(service, "/plugins@workspace-peek show input.txt", "explicit")
     assert json.loads(json.loads(explicit["output"])["result"])["text"] == text[:4]
     assert explicit["connection_cleanup"]["confirmed"]
@@ -299,10 +312,10 @@ def test_actual_package_original_install_call_disable_reenable_remove(installed_
         assert rejected["state"] == "failed", rejected
         registry.prepare_for_run()
         assert name not in registry.tools and "read_file" in registry.tools
-        reenabled = manage(service, "/plugins enable workspace-peek", "reenable")
+        _, reenabled = enable_with_confirmation(service, "workspace-peek", request_id="reenable", request_permission=_approve)
         assert "普通中文示例：" in reenabled["message"]
         assert service.installations.snapshot()[0].activation_id != activation_id
-        old_enable = service.command("/plugins status enable", revision="", request_id="old-enable-query")
+        old_enable = service.command(f"/plugins status {enable_authorization}", revision="", request_id="old-enable-query")
         assert old_enable["state"] == "succeeded" and "普通中文示例：" not in old_enable["message"]
         again = manage(service, "/plugins@workspace-peek show input.txt --bytes 16", "again")
         assert json.loads(json.loads(again["output"])["result"])["text"] == text

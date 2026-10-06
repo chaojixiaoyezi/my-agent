@@ -5,6 +5,10 @@
 - `agent/gateway_parts/io.py`：`GatewayJsonReadReport` 新增 `lock_busy` 字段；`read_json_file_report` 在 catch-all 前单独识别 `BlockingIOError`/`InterruptedError`（锁忙保留可重试语义，load_error 仍带诊断）。
 - `agent/gateway_parts/input_delivery_service.py`：新增 `_raise_for_input_read_report`（锁忙→BlockingIOError；其余 load_error→DataCorruptionError），receipt 读取/已有请求/turn 索引四处共用。
 
+## IM 插件命令 scope 投影（opp-final-fix2，2026-10-05，3a）
+
+- `gateway_parts/plugin_command_service.execute_plugin_control`：只对 dataclass 形态的 scope 用 `replace` 补 `event_hub`；其它形态原样交给 `_scope_management`。此前 `replace(None)` 抛 TypeError，被兜底吞成 `OUTCOME_UNKNOWN`，管理员看到“未能确认插件请求结果”而不是真实回执。
+
 ## Adapter dispatch 状态（slp5，2026-10-05；已实现，待初审）
 
 ## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，worker/obsfix34；待非作者初审）

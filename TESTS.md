@@ -11,6 +11,8 @@
 
 ## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`）
 
+- **3a 接手修复验证（opp-final-fix2，沙箱外）**：插件相关 146 个测试文件（`test_plugin*`、host_command_stream、workspace_peek、capability_*、background_extension_tools、plugins_chat_control 等 + guards9）：修复前 29+2 条失败（全部为老用例一条命令启用、IM 投影 scope、沙箱拒绝顺序），修复后上述文件全过；对照基线（不含 opp 的 17m）这两个额外文件 18 passed。
+
 - **修复补记（opp-final-fix）**：v1 解码回归已修——`_legacy_fields_match` 允许旧协议迁移忽略 v4 顶层 `legacy_permission_grant`（产物强制 None）；`test_plugin_configuration.py` 的 schema 断言随 v4 升级更新一行（`plugin_installations.v4`）。新增 `test_plugin_installation_migration_paths.py` 4 条（v1/v2/v3 只读解码不写盘+提交后 v4 迁移来源正确；坏表不覆盖原字节）。全批重跑与基线对照：**新增 0 / 修复 0**（75 vs 75）。该文件 26+4 passed。
 
 - **命令**：72 个引用文件（`git grep -l "plugin_permissions|plugin_runtime|plugin_management|plugin_enable_tool|plugin_installation|PluginActivation"` + `test_plugin_m1_joint_*`）分 4 批，每批 `subprocess.run(timeout=900)`：

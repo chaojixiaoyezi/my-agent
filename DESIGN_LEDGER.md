@@ -12,7 +12,12 @@
 - **验证**：见 TESTS.md 同名节（9 条新用例 + 3 变异全杀 + 38 文件连带 + 配置类 3 文件 + guards9）。
 - **已知边界**：argv（list）形态不受闸（不经过 shlex）；上限按字符数（非字节）。
 
-## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`，基于 17l 头 `e665afdb6`；WIP：1 条回归待修）
+## opp 集成到 17l（opp-final，2026-10-05，`worker/opp-final`，基于 17l 头 `e665afdb6`；已实现，3a 接手修复后集成到 17m）
+
+- **3a 接手修复（opp-final-fix2，2026-10-05）**：沙箱外跑插件相关 146 个测试文件（基线对照见 TESTS 同名节）定位并修复：
+  - 老用例 28 条：`/plugins enable` 改为两步确认（`PLUGIN_CONFIRMATION_REQUIRED` 是安全边界，保留），用例统一改走 `plugin_enable_fixtures.enable_with_confirmation`（同次预览的确认命令、目录版本与授权编号）；只测调用/注册/卸载语义、不测沙箱的老链路显式用 `unrestricted_service`（与 opp 之前的运行条件一致），原有断言不放宽；两步确认后 attempt 计数 2→3、按授权编号查状态，随协议更新。
+  - **产品缺陷**：`gateway_parts/plugin_command_service.execute_plugin_control` 先 `replace(scope, event_hub=hub)`，scope 不是 dataclass 时抛 TypeError，被兜底吞成 `OUTCOME_UNKNOWN`（“未能确认插件请求结果”），违背函数自身合同；改为仅 dataclass 实例才 replace（来源 M1 B6 `24c3aec0f`，生产 IM scope 恒为 dataclass，属潜伏缺陷）。
+  - opp 自带用例 `test_unavailable_sandbox_refuses_enable_and_explicit_calls` 假设“先确认后拒绝”，与产品合同（`_preflight_failure`：安全拒绝都在确认与副作用之前）相反，按合同改正用例顺序。
 
 - **修复补记（opp-final-fix，2026-10-05）**：v1 解码回归根因——旧协议迁移（v1/v2/v3）的字段集检查不认 v4 新增的顶层 `legacy_permission_grant`，而"由新格式删字段模拟的旧表"会带上它。修法：`_legacy_fields_match` 在三个旧协议入口允许并忽略该字段（迁移产物强制 None，不给新权限任何 grandfather 入口）；schema 断言一行随 v4 升级更新。全批对照新增 0。
 

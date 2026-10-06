@@ -14,6 +14,10 @@ from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.tooling.process_session_store import ProcessSessionStore
 from agent_py_agent.tests.plugin_deactivation_fixtures import activation_component
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 from agent_py_agent.tests.test_plugin_deactivation import installed_manager
 
 
@@ -217,14 +221,13 @@ def test_actual_environment_uninstall_revokes_old_snapshot_and_preserves_core_to
         plugin_registry,
     )
 
-    service = installed_runtime_plugin(tmp_path)
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
     registry = plugin_registry(service)
     source = tmp_path / "input.txt"
     source.write_text("卸载前后保留的用户文件")
     name = plugin_tool_name("sample-peek", "read")
     try:
-        enabled = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-        assert enabled["state"] == "succeeded", enabled
+        enable_with_confirmation(service, "sample-peek")
         entry = service.installations.snapshot()[0]
         registry.prepare_for_run()
         before = invoke_registered_tool(service, registry, name, {"path": str(source)})

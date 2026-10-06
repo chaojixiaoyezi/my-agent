@@ -15,6 +15,10 @@ from agent_py_agent.tests.plugin_activation_fixtures import (
     installed_runtime_plugin,
     plugin_registry,
 )
+from agent_py_agent.tests.plugin_enable_fixtures import (
+    enable_with_confirmation,
+    unrestricted_service,
+)
 
 PLUGIN_TOOL = "plugin__genui_lite_a39ac1a1__export_d46aee08"
 
@@ -105,14 +109,13 @@ def test_registry_failure_or_tools_disabled_falls_back_to_core_catalog(caplog):
 
 
 def test_registry_extension_tool_names_follow_plugin_activation(tmp_path):
-    service = installed_runtime_plugin(tmp_path)
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
     registry = plugin_registry(service)
     name = plugin_tool_name("sample-peek", "read")
     try:
         assert registry.extension_tool_names() == [], "已安装未启用：没有扩展目录"
         assert "read_file" in registry.tools
-        enabled = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-        assert enabled["state"] == "succeeded", enabled
+        enable_with_confirmation(service, "sample-peek")
         names = registry.extension_tool_names()
         assert name in names and "read_file" not in names, "按代理类型判定，核心工具永远不算扩展目录"
         disabled = service.command("/plugins disable sample-peek", revision=service.catalog().revision, request_id="disable")

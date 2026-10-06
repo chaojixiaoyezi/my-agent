@@ -144,9 +144,11 @@ def test_unavailable_sandbox_refuses_enable_and_explicit_calls(tmp_path, monkeyp
     source = _package(tmp_path, _declaration(tools=[_TOOL, _WRITE_TOOL]), {"bin/server.py": _WRITER})
     assert service.command(f'/plugins install "{source}"', revision=service.catalog().revision,
                            request_id="install")["state"] == "succeeded"
-    first = preview_legacy_enable(service, PLUGIN_ID)
-    refused = confirm_legacy_enable(service, first)
+    # 产品合同（plugin_enable_tool._preflight_failure）：安全拒绝都发生在确认与副作用之前，
+    #   沙箱不可用时第一次启用就直接拒绝，不先要管理员确认一份无法执行的授权（3a 10-05 改正用例顺序）。
+    refused = service.command(f"/plugins enable {PLUGIN_ID}", revision=service.catalog().revision, request_id="enable")
     assert refused["state"] == "failed" and refused["details"]["reason"] == "sandbox_unavailable", refused
+    assert refused["error_code"] != "PLUGIN_CONFIRMATION_REQUIRED", refused
     assert "沙箱不可用" in refused["message"]
     assert service.installations.snapshot()[0].activation is None
     environments = service.context.owner.plugins_dir / "environments"
