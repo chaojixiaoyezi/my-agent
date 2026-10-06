@@ -123,6 +123,12 @@ def test_lock_identity_retry_limit_is_bounded(tmp_path: Path, monkeypatch: pytes
     assert calls["count"] == _LOCK_IDENTITY_RETRY_COUNT
 
 
+# 函数用途: 在跨进程锁日志里追加一行 enter/exit 与进程号（模块级，spawn 子进程可导入）。
+def _append_lock_log(log_path_str: str, event: str, pid: int) -> None:
+    with open(log_path_str, "a", encoding="utf-8") as fh:
+        fh.write(f"{event} {pid}\n")
+
+
 # 函数用途: 多进程加锁循环体（spawn 子进程入口）：反复取锁，在临界区写 enter/exit 日志。
 def _locker_process(data_path_str: str, log_path_str: str, rounds: int) -> None:
     import os as _os
@@ -133,11 +139,9 @@ def _locker_process(data_path_str: str, log_path_str: str, rounds: int) -> None:
     data_path = Path(data_path_str)
     for _ in range(rounds):
         with _lock_path(data_path):
-            with open(log_path_str, "a", encoding="utf-8") as fh:
-                fh.write(f"enter {_os.getpid()}\n")
+            _append_lock_log(log_path_str, "enter", _os.getpid())
             _time.sleep(0.02)
-            with open(log_path_str, "a", encoding="utf-8") as fh:
-                fh.write(f"exit {_os.getpid()}\n")
+            _append_lock_log(log_path_str, "exit", _os.getpid())
 
 
 # 函数用途: 常驻跨进程互斥证明：3 个独立进程真实竞争同一把锁，任何时刻最多一方在临界区。
