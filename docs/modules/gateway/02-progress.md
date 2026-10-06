@@ -46,6 +46,10 @@
 - 详见 DESIGN_LEDGER / TESTS 同名节与 `docs/design/PLUGIN_EVENT_HOOKS.md` 第 6 节（事件目录 v2）。
 - tref3：`gateway_event_context` 在开关开启后统一拒绝未解析会话线程并记固定原因 `PLUGIN_EVENT_THREAD_UNRESOLVED`；`restart_resume` 与 `provider_transient_resume` 的回合结束事件都标记为 `interrupted`。
 
+## 启动指纹三态比较（starttime3 3a 终审修复，2026-10-05）
+
+- `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - **背景**：g2bfix3r 初审给 g2bfix3 判"小问题，可以交终审"：① 解码层 `auth_denied` 置位无直接断言；② 投递线程兜底会每秒一条 warning 刷屏，且 `except Exception` 会吞 `InterruptedError`/`BlockingIOError`；③ `/progress` 对不存在记录回无码 403，与 `/result`、`/input-status` 的"不存在回 404"不一致。3a 采纳服务端做法 A，本批由初审者直接修。

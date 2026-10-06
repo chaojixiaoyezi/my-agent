@@ -154,6 +154,11 @@
   - 门禁（guards9 12 文件、ruff、check_import_boundaries、doc_sync --base f7849d7ff、strict code-size、size_diff、git diff --check、check_clean_package）见交接报告最终复跑。
 - 未验证：真实请求上四类错误码的落账（需要真实 provider 故障或运行库冲突；由 3a 真机或后续故障样本观察）。
 
+## 启动指纹三态比较收口（starttime3 3a 终审修复，2026-10-05）
+
+- `test_start_time_unification.py`：新增三态比较矩阵 16 组（数字/数字串/lstart/空串/None/NaN/inf/布尔）与 scheduler 判活 5 组；整文件 54 passed。
+- 变异：格式不可比当 different → 5 failed；scheduler 退回字符串相等判死 → 3 failed；均已原样还原。
+
 ## starttime2 启动指纹读取统一 + schedstart 初审修正（2026-10-05，待初审）
 
 - **改动**：见 DESIGN_LEDGER 同名小节。产品文件 5 个（`common/heartbeat.py`、`local_storage/tool_operations.py`、`runtime_db/repository.py`、`runtime_db/executor_liveness.py`、`runtime_db/operations.py`），测试 2 个（新 `test_start_time_unification.py`、改写 `test_runtime_db_recover_stale.py` 参数表并新增双口径矩阵用例）。

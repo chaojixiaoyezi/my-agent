@@ -39,6 +39,10 @@
 - `agent/gateway_parts/control_operation_service.py`：回执新增 `conversation_thread_id`，新执行路径写盘前解析一次（`_with_control_conversation_thread` / `_control_operation_thread_id` / `_control_operation_agent`）。
 - tref3：`gateway_event_context` 在开关开启后统一拒绝未解析会话线程并记固定原因 `PLUGIN_EVENT_THREAD_UNRESOLVED`；`restart_resume` 与 `provider_transient_resume` 的回合结束事件都标记为 `interrupted`。
 
+## 启动指纹三态比较（starttime3 3a 终审修复，2026-10-05）
+
+- `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
+
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 
 - `agent/gateway_parts/http_handlers.py`：`_can_read_finished_request` 由 bool 改三态枚举 `_FinishedRequestAccess`（ALLOWED / NOT_FOUND / DENIED）；`handle_progress` 未找到回 404、无权限保持 403，两者都经 `_denial_body` 补缺凭据码；`_all_user_access` 分支不变。与 `/result`、`/input-status` 的"记录不存在 404 / 别人 403"口径统一。

@@ -297,3 +297,46 @@ def test_reconciliation_marker_conservatively_live_for_legacy_numeric_token(monk
         },
     }
     assert _reconciliation_marker_is_live(marker, time.time()) is True
+
+
+# 3a 10-05 收口（ds6 初审发现）：三态比较只在“同格式且确证不同”时判 different；格式不可比、空串、坏值都是 unverifiable。
+LSTART = "Mon Oct  5 10:00:00 2026"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "current", "expected"),
+    [
+        ("12345", "12345", "same"),
+        ("12345.0", "12345", "same"),
+        (12345, "12345", "same"),
+        ("12345", "12346", "different"),
+        (LSTART, LSTART, "same"),
+        (LSTART, "Mon Oct  5 10:00:01 2026", "different"),
+        ("12345", LSTART, "unverifiable"),
+        (LSTART, "12345", "unverifiable"),
+        (12345, LSTART, "unverifiable"),
+        ("", "12345", "unverifiable"),
+        ("   ", LSTART, "unverifiable"),
+        (None, "12345", "unverifiable"),
+        ("12345", None, "unverifiable"),
+        ("nan", "12345", "unverifiable"),
+        (float("inf"), "12345", "unverifiable"),
+        (True, "1", "unverifiable"),
+    ],
+)
+def test_start_time_relation_matrix(recorded, current, expected):
+    assert hb.start_time_relation(recorded, current) == expected
+    assert start_time_matches(recorded, current) is (expected != "different")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "current", "expected"),
+    [("12345", LSTART, "unverifiable"), ("", LSTART, "unverifiable"), ("12345.0", "12345", "alive"),
+     (LSTART, LSTART, "alive"), (LSTART, "Mon Oct  5 10:00:01 2026", "dead")],
+)
+def test_scheduler_runner_liveness_uses_shared_relation(monkeypatch, recorded, current, expected):
+    from agent_py_agent.agent.scheduler import repository as sched_repo
+
+    monkeypatch.setattr(sched_repo, "_process_state", lambda pid: "alive")
+    monkeypatch.setattr(sched_repo, "process_start_time", lambda pid: current)
+    assert sched_repo._runner_liveness({"runner_pid": 4242, "runner_start_time": recorded}) == expected

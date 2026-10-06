@@ -57,29 +57,40 @@ def process_start_time(pid: int) -> str | None:
         return None
 
 
-# LLM: 启动指纹比较是"是否同一进程"的共用口径；旧落盘记录可能是 /proc ticks 数字，
-#   新记录是 process_start_time 的字符串。只在"两侧都可读且确证不同"时返回 False；
-#   任一侧缺失、格式不可比（数字 vs macOS lstart）、非有限值一律返回 True（不可核验），
-#   调用方不得据此判死（宁可多等 lease，不误杀活进程）。
-# 函数用途: 判断记录中的启动指纹与当前读取是否视为同一进程（含旧数字记录兼容）。
-def start_time_matches(recorded: object, current: str | None) -> bool:
-    if current is None or recorded is None:
-        return True
-    if isinstance(recorded, str):
-        if current == recorded:
-            return True
-        try:
-            return float(recorded) == float(current)
-        except (TypeError, ValueError):
-            return False
+# LLM: 启动指纹三态比较的唯一实现（3a 10-05 收口，ds6 初审发现旧实现在“数字 vs macOS lstart”时判死）：
+#   旧落盘记录可能是 /proc ticks 数字或数字字符串，新记录是 process_start_time 的字符串。
+#   same：两侧同格式且相等（数字按数值比，“12345.0”与“12345”相同）；different：两侧同格式、都可读且确证不同；
+#   unverifiable：任一侧缺失/空串/非有限数字，或格式不可比（数字 vs 字符串指纹）。调用方只能凭 different 判死。
+# 函数用途: 比较记录的启动指纹与当前读取，返回 "same" / "different" / "unverifiable"。
+def start_time_relation(recorded: object, current: object) -> str:
+    left, right = _start_fingerprint(recorded), _start_fingerprint(current)
+    if left is None or right is None or left[0] != right[0]:
+        return "unverifiable"
+    return "same" if left[1] == right[1] else "different"
+
+
+# LLM: 只做格式归一，不读进程；布尔、空串、NaN/inf、未知类型一律 None（不可核验），不能当成可比较的指纹。
+# 函数用途: 把启动指纹归一成（种类, 值）：数字统一为 float，其余字符串去首尾空白。
+def _start_fingerprint(value: object) -> tuple[str, object] | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return ("number", number) if math.isfinite(number) else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
     try:
-        expected = float(recorded)  # type: ignore[arg-type]
-        actual = float(current)
-    except (TypeError, ValueError):
-        return True
-    if not math.isfinite(expected) or not math.isfinite(actual):
-        return True
-    return actual == expected
+        number = float(text)
+    except ValueError:
+        return ("text", text)
+    return ("number", number) if math.isfinite(number) else None
+
+
+# LLM: 布尔口径的兼容入口：只有确证不同才返回 False，其余（相同或不可核验）返回 True，调用方不得据此误杀活进程。
+# 函数用途: 判断记录中的启动指纹与当前读取是否视为同一进程（不可核验按同一进程处理）。
+def start_time_matches(recorded: object, current: str | None) -> bool:
+    return start_time_relation(recorded, current) != "different"
 
 
 def process_alive(pid: int, *, start_time: str | None = None) -> bool:

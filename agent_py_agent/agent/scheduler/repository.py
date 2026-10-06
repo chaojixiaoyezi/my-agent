@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.heartbeat import process_start_time
+from ..common.heartbeat import process_start_time, start_time_relation
 from ..common.json_io import (
     append_private_jsonl_records,
     locked_json_path,
@@ -1318,8 +1318,8 @@ def _process_state(pid: int) -> str:
 
 
 # LLM: Lease expiry is not proof of death; only a missing PID or a verified PID/starttime mismatch is reclaimable.
-#   启动指纹统一用 common.heartbeat.process_start_time 的跨平台字符串；旧数字记录只在 Linux（/proc ticks）可比，
-#   比较不了（例如 macOS 的 ps lstart 无法转数字）一律 unverifiable，绝不据此判死。
+#   启动指纹统一用 common.heartbeat.process_start_time 的跨平台字符串；比较走 heartbeat.start_time_relation
+#   （唯一三态实现）：只有 different 判死，格式不可比（数字 vs macOS lstart）、空串、坏值一律 unverifiable。
 # 函数用途: 普通 claim 和恢复器共用 runner 三态判断，身份读不出时返回 unverifiable 并阻止接管。
 def _runner_liveness(run: dict[str, object]) -> str:
     raw_pid = run.get("runner_pid")
@@ -1340,22 +1340,8 @@ def _runner_liveness(run: dict[str, object]) -> str:
     current_start = process_start_time(pid)
     if current_start is None:
         return "unverifiable"
-    if isinstance(recorded_start, str):
-        return "alive" if current_start == recorded_start else "dead"
-    return _legacy_numeric_liveness(recorded_start, current_start)
-
-
-# LLM: 旧落盘记录是 /proc ticks 数字；Linux 上新指纹是同值字符串，可转数字比较；其它平台转不了就不可核验。
-# 函数用途: 兼容旧数字 runner_start_time 的指纹比对，不把"格式对不上"当死亡证据。
-def _legacy_numeric_liveness(recorded_start: object, current_start: str) -> str:
-    try:
-        expected = float(recorded_start)  # type: ignore[arg-type]
-        actual = float(current_start)
-    except (TypeError, ValueError):
-        return "unverifiable"
-    if not math.isfinite(expected) or not math.isfinite(actual):
-        return "unverifiable"
-    return "alive" if actual == expected else "dead"
+    relation = start_time_relation(recorded_start, current_start)
+    return {"same": "alive", "different": "dead"}.get(relation, "unverifiable")
 
 
 # LLM: Build recovery updates from one owner-store snapshot; callers apply the returned patch under the existing store lock.

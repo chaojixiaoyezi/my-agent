@@ -83,6 +83,12 @@
 - **验证**：新用例 7 条 + 3 变异全 KILLED；58 个相关测试文件全跑（2 个沙箱基线失败；1 个既有断言按新字段更新后全绿）；guards9 全绿。见 `TESTS.md` 同名节。
 - **未验证**：真实 Gateway 上的供应商故障端到端（需要真实故障注入）；Linux 车道由 3a 跑。
 
+## 启动指纹三态比较收口（starttime3 3a 终审修复，2026-10-05）
+
+- **来源**：ds6 初审发现 `start_time_matches` 的字符串分支在“一侧数字、一侧 macOS lstart”时返回 False（判死），`scheduler._runner_liveness` 的字符串分支不等即判死，与“不可核验绝不判死”的口径相反；空串记录同样会判死。
+- **改法**：`common/heartbeat.start_time_relation` 作为唯一三态实现（same / different / unverifiable）：同格式数字按数值比，同格式字符串按去空白后相等比；格式不可比、空串、NaN/inf、布尔、缺失一律 unverifiable。`start_time_matches` 改为它的布尔投影（只有 different 为 False）；scheduler 判活改用它（same→alive、different→dead、其余 unverifiable），删除旧的 `_legacy_numeric_liveness`。
+- **状态**：已实现，随 starttime 线并入 17m。
+
 ## 启动指纹读取统一与 schedstart 初审修正（starttime2，2026-10-05，基于 17l `33a569b3e`；待初审）
 
 - **来源**：schedstart（`41991b6b0`）初审"必须改"两条——① runtime_db 的 runner 指纹比较仍是 `float()` 比较，与 heartbeat 字符串指纹不等，Linux 活进程会被误标 unknown；② heartbeat 的 ps 读取不看返回码，非零返回码带输出被当有效指纹。本分支 cherry-pick 后一并修复，并继续 starttime2 原计划（统一其余读取点）。
