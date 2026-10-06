@@ -641,3 +641,15 @@ def test_sandbox_tmp_root_uses_write_roots(tmp_path):
     assert "/tmp" in joined
     # 项目目录不应被当作 tmp 根
     assert str(workspace / ".sandbox-tmp") not in joined
+
+
+def test_allowlisted_directory_skips_missing_roots_without_raising(tmp_path) -> None:
+    """3a 终审补：某个根在启动前被删掉时只当它不覆盖 cwd，结构化判定照常进行，不抛未处理异常。"""
+    from agent_py_agent.agent.tooling.sandbox import allowlisted_directory
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    missing = tmp_path / "gone"
+    assert allowlisted_directory(cwd, (missing, tmp_path)) is True
+    assert allowlisted_directory(cwd, (missing,)) is False
+    assert allowlisted_directory(tmp_path / "nope", (tmp_path,)) is False

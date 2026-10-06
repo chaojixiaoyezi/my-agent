@@ -1207,6 +1207,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 ## rdfloor2-fix：stdin 替身补齐（2026-10-05；待 3a 外部复跑和非作者初审）
 
+- **3a 终审补（2026-10-05）**：`tooling/sandbox.allowlisted_directory` 改为逐根 strict 解析、跳过解析失败的根（启动前根被删时只当不覆盖 cwd，由调用方给 `RESTRICTED_CWD_NOT_ALLOWLISTED` 结构化拒绝，不再抛未处理异常）；新用例 `test_sandbox.py::test_allowlisted_directory_skips_missing_roots_without_raising`；`test_sandbox.py` 31 passed；变异（恢复成逐根直接 resolve）该用例变红（1 failed），已还原。
 - 来源：`1005-sol2-rdfloor2-fix.prompt.md`。3a 沙箱外用同一 31 文件清单对比基线 `4a935d200` 与 `af59b5c62`：基线原 allowlist/uv 启动用例一败；分支该用例已修好，作者此前的 attempt/v8/超时也通过，但新增两条 stdin attempt 的 AttributeError。此为 3a 报告，不是作者本地 31 文件实测；没有完整清单/日志，不补造通过或跳过总数。
 - 做法：仅给 `test_shell_stdin.py` 中绕过初始化的对象补完整 `AttemptSandboxSpec`（工作目录为隔离 tmp_path）和当前 `_platform`。保留真实子进程、模拟宿主管道、DEVNULL、显式管道输出和宿主输入未消费的全部原断言，不改产品 `run()`。指定 `git grep -n -E 'object\.__new__\((AttemptExecutionSandbox|.*Sandbox)'` 全仓仅该一处。
 - 当前红绿：修前 stdin 全文件 **4 failed、2 passed**（两 attempt 缺 spec，两 foreground 原入口 5 秒超时）；修后全文件 **4 passed、2 failed，10.42s**（两 foreground 同样超时，无 AttributeError）。再聚焦原两 attempt 用例 **2 passed、4 deselected，0.26s**，两条实际完成 stdin 断言；与全文件重叠，不累加。
