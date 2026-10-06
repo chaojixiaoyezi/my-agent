@@ -1494,3 +1494,4 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **边界**：403/请求拒绝类不续跑；零产出流中断照旧响应级重试；用户已停止不续跑；重排失败退回失败归档；不改发给供应商的请求内容（与手动“继续”同一组装路径）。
 - **验证**：见 `TESTS.md` 同名节（7 新用例、3 变异全杀、58 相关文件、guards9）。
 - **初审修正（tresume2，10-05，`worker/ds10-tresume-fix`）**：用满（`count >= max_count`）时失败答复附 `PROVIDER_RESUME_LIMIT_NOTICE`（“这一轮被模型接口故障反复打断，已停止自动续跑；发‘继续’可以接着做。”，TUI/IM 同源 user_error/error）；重排写盘失败退回正常归档前清掉 `provider_transient_resume` 标记；删 `recovery.py` 一段重复注释。验证见 TESTS.md 同名节（12 passed、m6/m7 变异全杀）。
+- **重排失败退回的插话收口（tresume3，10-05，`worker/ds10-tresume3`）**：重排失败退回正常归档前显式收口本回合插话（`_settle_fallback_turn_guidance`，`reject_pending(request_id, reject_reserved=True)`），覆盖归档失败（读不到请求文件）时 terminalize 收口不跑的形态；重排成功路径不变。验证见 TESTS.md 同名节。

@@ -298,3 +298,91 @@ def test_not_exhausted_has_no_limit_notice(tmp_path, monkeypatch):
 
     assert response["provider_transient_resume"]["resume_count"] == 2
     assert response.get("user_error") != PROVIDER_RESUME_LIMIT_NOTICE
+
+
+# ds10 tresume3 补钉：重排失败退回路径的插话收口（读失败/写失败/重排成功三种形态）。
+# 函数用途: 造一条绑定到指定回合的插话（TUI 形状的 guidance 条目）。
+def _steer_entry(agent, request_id: str, key: str):
+    store = agent.conversation_store
+    owner = agent.home_paths.owner_id
+    thread_id = store.threads.get_or_create({"canonical_user_id": owner}).thread_id
+    return store.guidance.append_once({
+        "message": "另外把 todo.txt 的行数也告诉我。", "sender": owner, "target_type": "request",
+        "target_id": request_id, "priority": "high", "delivery": "current_request",
+        "metadata": {"kind": "active_turn_user_input", "record_in_transcript": True,
+                     "expected_turn_id": request_id, "channel_message_id": key, "thread_id": thread_id},
+    }, dedupe_key=key)
+
+
+# 函数用途: 生产形态地跑一个回合（收尾传 conversation_store，退回路径的收口才会生效）。
+def _run_turn_with_store(agent, paths, request_id: str):
+    path = paths.processing / f"{request_id}.json"
+    response = request_execution._handle_gateway_request(agent, path)
+    _finish_claimed_gateway_request(paths, path, request_id, response,
+                                    conversation_store=agent.conversation_store)
+    return response
+
+
+# 函数用途: 造一条被本回合认领（reserved）的插话，返回请求的执行编号。
+def _reserved_steer(agent, paths, request_id: str, key: str) -> str:
+    payload = json.loads((paths.processing / f"{request_id}.json").read_text(encoding="utf-8"))
+    attempt_id = payload["execution_attempt_id"]
+    entry = _steer_entry(agent, request_id, key)
+    assert agent.conversation_store.guidance.claim_for_turn(
+        entry, expected_turn_id=request_id, attempt_id=attempt_id)
+    return attempt_id
+
+
+# 函数用途: 钉住读请求失败退回（文件消失、归档也失败）时插话仍被收口——显式收口覆盖归档失败形态。
+def test_requeue_read_failure_settles_guidance(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-readfail")
+    _reserved_steer(agent, paths, "gwreq-readfail", "readfail-steer")
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=3))
+
+    def _fail_and_remove(*_args, **_kwargs):
+        (paths.processing / "gwreq-readfail.json").unlink()
+        return False
+
+    monkeypatch.setattr(recovery, "requeue_provider_transient_processing", _fail_and_remove)
+
+    _run_turn_with_store(agent, paths, "gwreq-readfail")
+
+    assert agent.conversation_store.guidance.receipt("readfail-steer").status == "rejected"
+    assert not (paths.processing / "gwreq-readfail.json").exists()
+
+
+# 函数用途: 钉住写盘失败退回（插话已被释放成待处理）时插话仍被收口、请求按失败归档。
+def test_requeue_write_failure_settles_released_guidance(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-writefail")
+    attempt_id = _reserved_steer(agent, paths, "gwreq-writefail", "writefail-steer")
+    recovery._release_dead_attempt_guidance(agent.conversation_store, "gwreq-writefail",
+                                            dead_attempt_id=attempt_id)
+    assert agent.conversation_store.guidance.receipt("writefail-steer").status == "pending"
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=3))
+    monkeypatch.setattr(recovery, "requeue_provider_transient_processing", lambda *_a, **_k: False)
+
+    _run_turn_with_store(agent, paths, "gwreq-writefail")
+
+    assert agent.conversation_store.guidance.receipt("writefail-steer").status == "rejected"
+    assert (paths.failed / "gwreq-writefail.json").exists()
+
+
+# 函数用途: 钉住重排成功时插话不被收口——留给续跑回合认领。
+def test_requeue_success_keeps_guidance_for_resume(tmp_path, monkeypatch):
+    agent = _echo_agent(tmp_path, provider_transient_turn_resume_max_count=2)
+    paths = _gateway(agent)
+    _processing(paths, "gwreq-keep")
+    _reserved_steer(agent, paths, "gwreq-keep", "keep-steer")
+    monkeypatch.setattr(request_execution, "_run_gateway_ask",
+                        lambda _context: _failed_result("MODEL_STREAM_INCOMPLETE", tool_rounds=3))
+
+    _run_turn_with_store(agent, paths, "gwreq-keep")
+
+    assert agent.conversation_store.guidance.receipt("keep-steer").status == "pending"
+    assert (paths.inbox / "gwreq-keep.json").exists()

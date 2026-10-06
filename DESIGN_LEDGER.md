@@ -26,6 +26,13 @@
 - **验证**：见 TESTS.md 同名节（用例 12 passed；m6/m7 变异全杀；12 文件必跑 173 passed；guards9 全绿；门禁全过）。
 - **未验证**：真实 Gateway 上用满场景的 TUI/IM 端到端（3a 真机复核）。
 
+## tresume 重排失败退回的插话收口（tresume3，2026-10-05，分支 `worker/ds10-tresume3`，基于 17l 头 `886965f3a`；已实现，待初审）
+
+- **来源**：3a 终审发现：`_handle_gateway_request` 拿到续跑标记时跳过 `_settle_pending_gateway_guidance`（留给续跑回合认领），但供应商标记到 worker 收尾才真正重排；重排失败退回正常归档时本回合插话没人收口（探针实测：读失败/文件消失形态插话停在 reserved、归档也失败）。
+- **改法（做法 A，改动小、身份来源清楚）**：`request_worker._finish_claimed_gateway_request` 重排失败退回分支先清标记、再显式 `_settle_fallback_turn_guidance(conversation_store, request_id)`（防御式取 `guidance.recovery.reject_pending(request_id, reject_reserved=True)`，失败静默留给 recovery 兜底）；身份只有 request_id（与本回合同源）。正常归档时 terminalize 也会收口（写失败形态本来就被它覆盖），显式收口覆盖归档失败（读不到请求文件等）的形态且幂等。重排成功路径不变（插话留给续跑回合）。
+- **对照做法 B（把重排提前到 `_handle_gateway_request`）**：能拿到 failure，但要重构 finally 时序、给 worker 加“已重排”信号（否则二次重排）、在 request_execution 里复现失败收口流程——改动大、新状态多；provider 场景的 failure 属瞬时类（释放不计次），传 None 与传异常等价，A 的信息劣势不存在。
+- **验证**：见 TESTS.md 同名节。
+
 ## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，分支 `worker/tresume`，基于 17l 头 `630be9dcc`；待非作者初审）
 
 - **来源**：transient-investigate 只读调查 + 3a 裁定：允许回合级供应商故障自动续跑（与进程崩溃重排同族，不违背“普通任务不自动续跑”的 wake 口径）；每个请求最多 2 次、跨 Gateway 重启累计；加配置开关；白名单只认结构化错误码；续跑从已落盘历史继续、不重放工具；提示走 turn_resume_notice；不改发给供应商的请求内容。

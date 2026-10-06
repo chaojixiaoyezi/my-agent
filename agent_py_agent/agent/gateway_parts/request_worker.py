@@ -1029,6 +1029,22 @@ def _requeue_provider_transient_resume(paths, processing_path, response, convers
     )
 
 
+# LLM: 重排失败退回正常归档前收口本回合仍未消费的插话：request_execution 拿到续跑标记时跳过了收口
+#   （留给续跑回合认领），但重排没成功、没有续跑回合。正常归档时 terminalize 也会收口，这里显式先收，
+#   覆盖归档失败（读不到请求文件、改名失败等）的形态；收口幂等（归档侧第二次为空转）。
+#   身份只有 request_id（与本回合同源）；收口失败留给 recovery 兜底，不反噬终态归档。
+# 函数用途: 在供应商故障重排失败退回时，按正常回合语义拒绝本回合仍挂起的补充消息。
+def _settle_fallback_turn_guidance(conversation_store: object | None, request_id: str) -> None:
+    recovery_api = getattr(getattr(conversation_store, "guidance", None), "recovery", None)
+    reject = getattr(recovery_api, "reject_pending", None)
+    if not callable(reject) or not str(request_id or "").strip():
+        return
+    try:
+        reject(request_id, reject_reserved=True)
+    except Exception:  # noqa: BLE001 收口失败不阻断终态归档，recovery 会再次处理
+        pass
+
+
 def _finish_claimed_gateway_request(
     paths: GatewayPaths,
     processing_path: Path,
@@ -1050,6 +1066,9 @@ def _finish_claimed_gateway_request(
             return
         # 重排失败退回正常归档：标记只服务重排判定，先清掉，不让它落进终态响应与 responses 投影。
         response.pop("provider_transient_resume", None)
+        # 退回路径按正常结束的回合收口插话（#7：回合结束、插话还挂着会占住会话通道）；terminalize
+        # 正常归档时也会收口，这里先收覆盖归档失败（读不到请求文件等）的形态。
+        _settle_fallback_turn_guidance(conversation_store, request_id)
     if isinstance(response.get("restart_resume"), dict):
         # I4：宿主停机准入拒绝的回合不写终态，请求留在 processing，重启后由 recovery 按死进程重排续跑（见
         # request_execution._host_shutdown_resume_marker）。

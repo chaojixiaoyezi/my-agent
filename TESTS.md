@@ -64,6 +64,12 @@
 - 变异（`tasks/2026-10-05/tresume-review/mutations.py`，每次只改一处、按字节还原）：m6 去提示、m7 不清标记 → **2/2 KILLED**。
 - 复跑：12 文件（11 必跑 + test_tui_runtime）→ **173 passed / 1 skip**；guards9（12 文件）→ 全绿；ruff / boundaries=0 / doc_sync / strict code-size / size_diff / diff --check / clean_package → 全过（见交接报告）。
 
+## tresume 重排失败退回的插话收口（tresume3，2026-10-05，分支 `worker/ds10-tresume3`）
+
+- 用例：`test_provider_transient_turn_resume.py` → **15 passed**（新增 3 条：读失败退回插话收口、写失败退回插话收口、重排成功插话保留给续跑回合）。
+- 变异（`tasks/2026-10-05/tresume3-review/mutations.py`）：去掉退回路径的显式收口 → **KILLED**（读失败用例红：`reserved != rejected`；按字节还原）。
+- 连带：gateway 相关 31 文件 → 仅 1 条既有失败（`test_gateway_chat_conversation_context.py::test_first_gateway_shell_keeps_explicit_working_dir`，基线 `886965f3a` 临时树复现同名同因，沙箱限制）；guards9 → 全绿。
+
 ## 供应商临时故障的回合级自动续跑（tresume，2026-10-05，分支 `worker/tresume`，待非作者初审）
 
 - 背景与设计见 `DESIGN_LEDGER.md` 同名小节。

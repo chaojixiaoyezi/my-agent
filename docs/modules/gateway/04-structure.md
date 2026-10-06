@@ -2734,3 +2734,4 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - `gateway_parts/recovery.py`：`requeue_provider_transient_processing`（写回 inbox、固定退避 30/120 秒、写 cause=provider_transient_resume 与累计次数）、`provider_resume_count`（唯一读法）；`_active_turn_recovery_marker` 重启重排保留该计数。
 - `conversation/turn_resume_notice.py`：新增 cause `provider_transient_resume` 文案；`PROVIDER_RESUME_LIMIT_NOTICE`（供应商续跑用满时的失败答复提示，TUI/IM 同源 user_error/error）。
 - 配置：`provider_transient_turn_resume_max_count`（agent_config.yaml / AgentConfig，0=关闭）。
+- `request_worker._finish_claimed_gateway_request` 重排失败退回分支：清标记后显式 `_settle_fallback_turn_guidance`（按 request_id 收口本回合插话，覆盖归档失败形态；收口失败静默，留给 recovery 兜底）；重排成功路径不变。
