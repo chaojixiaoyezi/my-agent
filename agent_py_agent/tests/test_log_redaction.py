@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 
 import pytest
@@ -211,3 +212,73 @@ def test_authorization_key_shapes_masked_without_false_positives() -> None:
     assert "authorization_mode=verbose" in kept
     assert "unauthorized=true" in kept
     assert "my_authorized=yes" in kept
+
+
+# LLM: rejectdiag4 必须改 1：授权头任意方案（Basic/Token/Digest/Bearer）及 Proxy-Authorization 的整个凭据都要遮；
+#   方案名保留，值里可能有空格、逗号和（转义）引号。普通模式与诊断摘要的 labels 模式都要遮住，且 JSON 仍可解析。
+# 函数用途: 钉住授权头各方案、各引号形状的凭据清洗。
+@pytest.mark.parametrize("labels", [False, True])
+@pytest.mark.parametrize("text,secret", [
+    ("Authorization: Basic dXNlcjpQQVNTV09SRDEyMzQ=", "dXNlcjpQQVNTV09SRDEyMzQ"),
+    ("Authorization: Token TOKENSECRETVALUE77", "TOKENSECRETVALUE77"),
+    ('Authorization: Digest username="alice", realm="api", response="DIGESTRESPONSE9f8e7d"', "DIGESTRESPONSE9f8e7d"),
+    ("proxy-authorization: Basic PROXYSECRET0123456789", "PROXYSECRET0123456789"),
+    ("{'Proxy-Authorization': 'Basic PYREPRSECRET77'}", "PYREPRSECRET77"),
+    (json.dumps({"authorization": 'Digest username="alice", response="DIGESTJSONSECRET42"'}), "DIGESTJSONSECRET42"),
+    ('curl -H "Authorization: Basic CURLBASICSECRET99" https://example.test/v1', "CURLBASICSECRET99"),
+    # base64 填充 `=` 紧挨字符串闭引号、后面还有授权键：不能把它当 Digest 参数越界，漏掉后一个键的凭据
+    (json.dumps({"echo": "Authorization: Basic QkFTRTY0UEFE=", "authorization": "Token AFTERPADDINGSECRET"}),
+     "AFTERPADDINGSECRET"),
+])
+def test_authorization_any_scheme_masks_whole_credential(text, secret, labels) -> None:
+    safe = redact_sensitive_text(text, redact_assignment_labels=labels)
+    assert secret not in safe
+    if not labels and text.lower().startswith(("authorization:", "proxy-authorization:")):
+        assert safe.split(":", 1)[1].split()[0] in {"Basic", "Token", "Digest"}, "方案名应保留，便于排查"
+    if text.startswith("{\"") and not labels:
+        json.loads(safe)  # labels 模式按 rejectdiag3 口径连键名整段替换，只承诺不泄漏，不承诺 JSON 可解析
+    if text.startswith("curl"):
+        assert safe.endswith("https://example.test/v1"), "嵌在字符串里的授权头不能吞掉后面的 URL"
+
+
+# LLM: rejectdiag4 小问题 2：值以 `{`/`[` 开头是结构（如 JSON schema 片段）不是凭据，原样保留；结构里嵌套的真凭据照样遮。
+# 函数用途: 钉住 schema 片段不被误遮、不被破坏结构。
+def test_authorization_schema_fragment_kept_and_nested_secret_masked() -> None:
+    schema = '"authorization": {"type": "string"}'
+    assert redact_sensitive_text(schema) == schema
+    document = json.dumps({
+        "properties": {"authorization": {"type": "string", "description": "请求头"}},
+        "authorization": "Bearer NESTEDSECRET123456",
+    })
+    safe = redact_sensitive_text(document)
+    assert "NESTEDSECRET123456" not in safe
+    parsed = json.loads(safe)
+    assert parsed["properties"]["authorization"] == {"type": "string", "description": "请求头"}
+
+
+# LLM: rejectdiag4 ReDoS 守卫：授权头规则只有单层量词、值边界线性扫描。这里只用宽松的绝对上限挡住灾难性回溯
+#   （回溯会是分钟级），精确计时与线性比例记在 TESTS.md，不在测试里卡紧时限（CI 机器快慢不一）。
+# 函数用途: 钉住病态输入下授权头清洗不出现超线性耗时。
+@pytest.mark.parametrize("shape", [
+    lambda n: "a" * n + "!",
+    lambda n: " " * n,
+    lambda n: "Authorization: " + "x " * n,
+    lambda n: "authorization" + " " * n + "!",
+    lambda n: "Authorization:" * (n // 14),
+    lambda n: 'Authorization: Digest a="' + "x" * n,
+    lambda n: '{"authorization": "' + "\\" * n,
+])
+def test_authorization_redaction_stays_linear_on_pathological_input(shape) -> None:
+    import time
+
+    started = time.perf_counter()
+    redact_sensitive_text(shape(100_000))
+    assert time.perf_counter() - started < 5.0
+
+
+# LLM: 同一行两个授权头：前一个值截在下一个授权键之前，后一个键名与方案名照常保留、凭据照常遮。
+# 函数用途: 钉住授权值不跨过下一个授权键。
+def test_authorization_value_stops_before_next_authorization_key() -> None:
+    safe = redact_sensitive_text("Authorization: Basic FIRSTSECRET01 Proxy-Authorization: Token SECONDSECRET02")
+    assert "FIRSTSECRET01" not in safe and "SECONDSECRET02" not in safe
+    assert "Proxy-Authorization: Token" in safe

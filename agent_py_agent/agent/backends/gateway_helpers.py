@@ -117,6 +117,8 @@ _QUOTA_WINDOW_TOKEN = re.compile(
 )
 _QUOTA_WINDOW_UNIT_SECONDS = {"m": 60.0, "h": 3600.0, "d": 86400.0, "w": 604800.0}
 _HTTP_ERROR_DETAIL_ATTR = "_my_agent_provider_error_detail"
+# 调试转储清洗正文的扫描窗口（字符）：先在这一段里清洗再截到 4000 字，避免无界正文让清洗变慢。
+_DUMP_SCAN_CHARS = 16_000
 # 本次物理尝试的分段计时器挂在该尝试自己的 urllib Request 上，_gateway_urlopen 的调用形状不变。
 _ATTEMPT_TIMING_ATTR = "_my_agent_attempt_timing"
 _PROVIDER_ATTEMPT_OBSERVER = threading.local()
@@ -1166,27 +1168,43 @@ def _require_api_key(api_key: str) -> None:
 
 # LLM: Typed provider facts own recovery; unknown 4xx stays rejected with diagnostic details,
 # LLM: 供应商 400 的 body 可能只是空洞对象(真机 2026-09-11: {"object":"error","model":...})，
-# 结构化错误里拿不到原因；把完整响应头与 body 落到诊断文件，才能定位真实拒绝理由。
-# 只在显式设置 MY_AGENT_PROVIDER_DUMP 时写，且不含密钥；写失败绝不反噬主链路。
-# 函数用途: 按需记录一次被拒请求的完整供应商响应，供后续定位。
+# 结构化错误里拿不到原因；把响应头与 body 落到诊断文件，才能定位真实拒绝理由。
+# 只在显式设置 MY_AGENT_PROVIDER_DUMP 时写；落盘前头值和正文都过统一凭据清洗（rejectdiag4：此前原样写盘，
+#   服务端回显的 Authorization/Cookie 会进文件）。正文先取前 _DUMP_SCAN_CHARS 字清洗再截到 4000 字，
+#   先清洗后截断，避免把密钥切成半截逃过匹配。写失败绝不反噬主链路。
+# 函数用途: 按需记录一次被拒请求的供应商响应（已清洗），供后续定位。
 def _dump_provider_rejection(exc: urllib.error.HTTPError) -> None:
     import os
+
+    from ..common.log_redaction import redact_sensitive_text
 
     target = str(os.environ.get("MY_AGENT_PROVIDER_DUMP") or "").strip()
     if not target:
         return
     try:
-        headers = {str(key): str(value) for key, value in (getattr(exc, "headers", None) or {}).items()}
+        headers = {str(key): _dump_header_value(str(key), str(value))
+                   for key, value in (getattr(exc, "headers", None) or {}).items()}
         record = {
             "kind": "provider_rejection",
             "status": int(getattr(exc, "code", 0) or 0),
             "response_headers": headers,
-            "response_body": _http_error_detail(exc)[:4000],
+            "response_body": redact_sensitive_text(_http_error_detail(exc)[:_DUMP_SCAN_CHARS])[:4000],
         }
         with open(target, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         return
+
+
+# LLM: 头名作为上下文一起清洗（“authorization: …”“set-cookie: …”这类按键名认的规则才能命中），清洗后去掉头名前缀；
+#   前缀被清洗改动时退回只清洗值，宁可多遮。只服务调试转储，不改诊断/回执的清洗口径。
+# 函数用途: 返回一个响应头值的落盘安全形式。
+def _dump_header_value(name: str, value: str) -> str:
+    from ..common.log_redaction import redact_sensitive_text
+
+    prefix = f"{name}: "
+    line = redact_sensitive_text(prefix + value)
+    return line[len(prefix):] if line.startswith(prefix) else redact_sensitive_text(value)
 
 
 # never transient merely because the provider omitted its explanation.

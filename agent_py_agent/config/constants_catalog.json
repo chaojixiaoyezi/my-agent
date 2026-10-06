@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 927,
+  "count": 928,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -866,6 +866,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "决策响应上限 1 MiB：防超大响应撑爆解析。"
+    },
+    {
+      "name": "_DUMP_SCAN_CHARS",
+      "file": "agent_py_agent/agent/backends/gateway_helpers.py",
+      "value": 16000,
+      "unit": "字符",
+      "category": "其它",
+      "description": "调试转储清洗正文的扫描窗口（字符）：先在这一段里清洗再截到 4000 字，避免无界正文让清洗变慢。"
     },
     {
       "name": "_LONG_QUOTA_WINDOW_SECONDS",

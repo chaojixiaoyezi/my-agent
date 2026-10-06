@@ -297,6 +297,15 @@
 - **实测收益（合成历史、假后端、3 次模型调用，数字只作交接参考）**：35 万 token 回合估算 583.1→131.8ms（-77.4%）、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms（-72.0%）、整轮 1722.4→1060.9ms。
 - **状态/边界**：不加配置开关（内部性能优化、结果不变）；真实 Gateway/TUI/IM 与生产负载未验证；`estimate_tokens_from_json_parts` 未改。
 
+## 授权头凭据清洗泛化与转储清洗（rejectdiag4，3a，2026-10-05；状态：已实现，随 17o 集成）
+
+- **来源**：rejectdiag3 初审（ds7）+ 3a 安全终审三条：① `_AUTHORIZATION_RE` 只认 Bearer 且值到空白就停，`Authorization: Basic …`、`Token …`、`Proxy-Authorization: …` 的凭据残留，并经拒绝诊断摘要进 user_error、落盘与审计；② `"authorization": {"type": "string"}` 的 `{` 被当值吃掉、破坏结构；③ `_dump_provider_rejection`（需显式 `MY_AGENT_PROVIDER_DUMP`）原样写响应头与正文，注释却写“不含密钥”。
+- **做法**：
+  - `common/log_redaction`：正则 `_AUTHORIZATION_KEY_RE` 只定位“键前引号 + 键名（含 proxy-）+ 键后引号 + 分隔符 + 值开引号”，值边界交 `_authorization_value_end` 线性扫描（值有开引号→同种未转义引号；键带引号值裸露→JSON 标量到 `,}]` 或空白；等号赋值→空白或 `&;,`/引号；其余请求头形状→换行或未转义引号；裸露请求头行里 `name="..."` 的 Digest 参数整段跳过；扫描上限是下一个授权键）。整个值都当凭据：保留方案名（RFC 7235 的 auth-scheme，便于排查），其后整段过 `_mask_secret_value`（`Bearer $TOKEN` 纯变量引用照旧保留）；选“保留方案名”而非整段替换，是因为方案名不是秘密、对排查“认证方式不对”有用。labels 模式（拒绝诊断摘要）沿 rejectdiag3 口径把键名到值结束整段换标记。值以 `{`/`[` 开头视为结构原样保留，并从键后继续找（嵌套里的真凭据照样遮）。
+  - `backends/gateway_helpers._dump_provider_rejection`：响应头按“头名: 值”一起清洗后去前缀（`_dump_header_value`），正文先取前 `_DUMP_SCAN_CHARS`（16000）字清洗再截 4000 字；注释改成与实现一致。
+- **调试中发现并修掉的两处**：Basic 值末尾 base64 填充 `=` 紧挨字符串闭引号时被当成 Digest 参数、越界吞掉后一个键（只在裸露请求头行启用参数跳引号）；为“值不跨下一个授权键”先扫到行尾再截回会退化成平方（7000 个键 10.7 秒，ReDoS 用例抓到），改成扫描上限直接定在下一个键前。
+- **验证**：见 TESTS.md rejectdiag4 节（四方案端到端全字节扫描、转储用例、ReDoS 计时、7 个变异）。
+
 ## 拒绝诊断凭据清洗补全（rejectdiag3，2026-10-05，分支 `worker/rejectdiag3`，基于 9ffe07fc1）
 
 - **来源（rejectdiag2 初审实测）**：两个清洗缺口——① JSON/键值形状的 `authorization` 键不被文本清洗覆盖（`{"authorization": "Bearer …"}`、`authorization=…` 原样泄漏；`_AUTHORIZATION_RE` 只认无引号 `Authorization: Bearer 值` 一种形态）；② `_safe_header_value`（白名单头值与 content_type 共用）只折叠+截断、不过凭据清洗，服务端在 x-request-id 等头值里回显密钥时明文进诊断、落盘与展示。

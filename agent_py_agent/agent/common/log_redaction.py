@@ -59,13 +59,14 @@ _SENSITIVE_QUERY_PREFIX = (
 _SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}({_URL_VALUE})")
 # 日志不按源码标点分段：逗号、引号或括号可能就是真凭证的一部分，宁可隐藏尾部标点也不能泄漏尾段。
 _LOG_SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}([^&#\s]+)")
-# LLM: 授权头三种键值形状（无引号头、JSON 双/单引号键、等号赋值）共用这一条规则：键名后可带
-#   一层引号与冒号/等号；值前的方案名（Bearer）留在结构里，值部分过 _mask_secret_value（纯变量
-#   引用保留语义不变）；组 3 吃掉值后的闭引号。authorization 不进 _CREDENTIAL_KEY_NAMES——词表
-#   路径会让无引号头被 _SECRET_ASSIGNMENT_RE 二次处理、把方案名当值打码（rejectdiag3 实测回归）。
-_AUTHORIZATION_RE = re.compile(
-    r"(?i)(\bauthorization\b[\"']?\s*[:=]\s*[\"']?(?:Bearer\s+)?)([^\"'\s,;&]{1,})([\"']?)"
-)
+# LLM: 授权头（Authorization / Proxy-Authorization）只用正则定位“键名 + 引号 + 分隔符 + 值开引号”，值的边界交给
+#   _authorization_value_end 线性扫描（rejectdiag4）：旧规则只认 Bearer 且值到空白就停，Basic/Token/Digest 的凭据会残留，
+#   `"authorization": {...}` 的 `{` 还会被当值吃掉。分组：1=键前引号、2=键名、3=键后引号、4=分隔符、5=值开引号。
+#   authorization 不进 _CREDENTIAL_KEY_NAMES——词表路径会让无引号头被 _SECRET_ASSIGNMENT_RE 二次处理（rejectdiag3 回归）。
+#   正则只有单层量词，扫描逐字符前进，整体线性（ReDoS 计时见 TESTS.md rejectdiag4 节）。
+_AUTHORIZATION_KEY_RE = re.compile(r"(?i)([\"']?)\b((?:proxy-)?authorization)\b([\"']?)(\s*[:=]\s*)([\"']?)")
+# 授权值开头的方案名（RFC 7235：credentials = auth-scheme [ 1*SP ( token68 / #auth-param ) ]）；只保留它，其后整段当凭据。
+_AUTH_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9._~+/-]*)(\s+)(\S.*)", re.S)
 # 键名按"完整末尾片段"认，与 settings/user_config_capability.is_credential_key 同口径：键名等于凭据词，
 # 或以 `_凭据词`/`-凭据词` 结尾才算，不按子串匹配。原来键名前是 \b，而 `_` 是单词字符，\b 断不开，
 # 于是 DB_PASSWORD=hunter22、api_token=abcd1234、MY_SECRET: xyz12345 这些带前缀的键名基线里就不打码。
@@ -76,7 +77,7 @@ _AUTHORIZATION_RE = re.compile(
 # `set-cookie` 以 `-cookie` 结尾，自动命中。
 # rejectdiag3：authorization **不进词表**——实测词表路径会让无引号授权头被 `_SECRET_ASSIGNMENT_RE`
 # 二次处理，把方案名当值打码，破坏 rdv2 的“纯变量引用保留”合同；三种键值形状（JSON 双/单引号键、
-# 等号赋值）改由 `_AUTHORIZATION_RE` 扩形状覆盖（见该常量注释）。
+# 等号赋值）改由授权头专用规则覆盖（rejectdiag4 起是 `_AUTHORIZATION_KEY_RE` + `_redact_authorization_values`，见其注释）。
 _CREDENTIAL_KEY_NAMES = (
     r"access_key|access-token|access_token|api-key|api_key|apikey|app_secret|client_secret|cookie|credential|"
     r"encrypt_key|id_token|master_key|password|passwd|private_key|pwd|refresh_token|secret|signature|"
@@ -198,6 +199,94 @@ def _redact_json_field(match: re.Match[str], marker: str, labels_only: bool) -> 
             + _mask_secret_value(match.group(5), marker) + match.group(6))
 
 
+# LLM: 逐个定位授权键并从值的结束位置继续找下一个，整体线性。值以 `{`/`[` 开头是结构（如 JSON schema 片段）不是凭据，
+#   原样保留并从键后继续找（嵌套里的真凭据照样遮）。labels 模式（拒绝诊断摘要）把“键名到值结束（含闭引号）”整段换成标记；
+#   普通模式保留方案名，其后整段过 _mask_secret_value（纯变量引用如 `Bearer $TOKEN` 原样保留）。
+# 函数用途: 遮住文本里所有 Authorization / Proxy-Authorization 的凭据值，保留键名、方案名和外层结构。
+def _redact_authorization_values(text: str, marker: str, labels_only: bool) -> str:
+    parts, position = [], 0
+    while (match := _AUTHORIZATION_KEY_RE.search(text, position)) is not None:
+        # 值不能跨过下一个授权键：扫描上限定在它前面（下一个键另行处理），每段只扫一次，整体线性。
+        following = _AUTHORIZATION_KEY_RE.search(text, match.end())
+        start = match.end()
+        end = _authorization_value_end(text, match, following.start() if following is not None else len(text))
+        value = text[start:end]
+        if not value.strip() or value.lstrip()[:1] in "{[":
+            parts.append(text[position:match.end()])
+            position = match.end()
+            continue
+        closing = 1 if match.group(5) and text[end:end + 1] == match.group(5) else 0
+        if labels_only:
+            parts.append(text[position:match.start(2)] + marker)
+        else:
+            parts.append(text[position:start] + _mask_authorization_value(value, marker) + text[end:end + closing])
+        position = end + closing
+    parts.append(text[position:])
+    return "".join(parts)
+
+
+# LLM: 值边界只看结构字符，不读语义：值有开引号扫到同种未转义引号；键带引号而值裸露是 JSON 标量，到 `,}]` 或空白；
+#   等号赋值到空白或 `&;,` 与引号；其余是请求头形状，到换行或未转义引号为止（嵌在字符串里的 curl -H "...: Bearer $T"
+#   在闭引号前停，不吞后面的 URL）；裸露请求头行里 `name="..."` 形式的 Digest 参数值整段跳过。反斜杠转义一律跳过下一个字符。
+# 函数用途: 返回授权值在文本里的结束下标（不含闭引号），不超过 limit（下一个授权键的起点）。
+def _authorization_value_end(text: str, match: re.Match[str], limit: int) -> int:
+    index = match.end()
+    stops, param_quotes = _authorization_value_stops(match)
+    while index < limit:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if param_quotes and char == '"' and text[index - 1] == "=":
+            closing = _unescaped_quote(text, index + 1, '"', limit)
+            index = limit if closing < 0 else closing + 1
+            continue
+        if char in stops:
+            return index
+        index += 1
+    return limit
+
+
+# LLM: 按键值形状选值的结束字符与是否跳 Digest 参数引号（见 _authorization_value_end 注释）；只读分组，不扫正文。
+# 函数用途: 返回（结束字符集合, 是否按 name="..." 跳引号）。
+def _authorization_value_stops(match: re.Match[str]) -> tuple[str, bool]:
+    if match.group(5):
+        return match.group(5) + "\r\n", False
+    if match.group(3):
+        return ",}] \t\r\n", False
+    if "=" in match.group(4):
+        return " \t\r\n&;,\"'", False
+    # 只有裸露的请求头行才按 Digest `name="..."` 跳引号；嵌在引号字符串里时参数引号必然已转义，外层闭引号就是边界
+    #   （否则 Basic 值末尾的 base64 填充 `=` 紧挨闭引号会被误当参数，越界吞掉后面的键）。
+    return "\r\n\"'", not match.group(1)
+
+
+# LLM: 只服务 _authorization_value_end 的 Digest 参数跳过；遇换行或到 limit 视为未闭合，返回 -1 由调用方按到 limit 处理。
+# 函数用途: 从 start 起、limit 之前找下一个未被反斜杠转义的指定引号的位置。
+def _unescaped_quote(text: str, start: int, quote: str, limit: int) -> int:
+    index = start
+    while index < limit:
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index
+        if char in "\r\n":
+            return -1
+        index += 1
+    return -1
+
+
+# LLM: 方案名之后（Basic/Token/Digest/Bearer… 都一样）整段当凭据；没有“方案名 + 空白 + 内容”形状时整段遮。
+# 函数用途: 生成授权值的打码形式：保留方案名，凭据部分交 _mask_secret_value。
+def _mask_authorization_value(value: str, marker: str) -> str:
+    scheme = _AUTH_SCHEME_RE.fullmatch(value)
+    if scheme is None:
+        return _mask_secret_value(value, marker)
+    return scheme.group(1) + scheme.group(2) + _mask_secret_value(scheme.group(3), marker)
+
+
 # LLM: 调用方决定是否为源码；插值内字面量和实际 URL 凭证仍须遮蔽，已知密钥扫描始终执行。
 # 函数用途: 返回脱敏副本，不写文件；保持源码结构和日志安全边界各自生效。
 def redact_sensitive_text(
@@ -228,14 +317,7 @@ def redact_sensitive_text(
         ),
         text,
     )
-    text = _AUTHORIZATION_RE.sub(
-        lambda match: (
-            redacted_marker
-            if redact_assignment_labels
-            else match.group(1) + _mask_secret_value(match.group(2), redacted_marker) + match.group(3)
-        ),
-        text,
-    )
+    text = _redact_authorization_values(text, redacted_marker, redact_assignment_labels)
     if not code_file:
         text = _SECRET_JSON_FIELD_RE.sub(
             lambda match: _redact_json_field(match, redacted_marker, redact_assignment_labels), text)

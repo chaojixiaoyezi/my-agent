@@ -43,6 +43,11 @@
 
 - `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
 
+## 授权头凭据清洗（rejectdiag4，2026-10-05）
+
+- `common/log_redaction._redact_authorization_values` 是授权头清洗的唯一入口（`redact_sensitive_text` 调用）：`_AUTHORIZATION_KEY_RE` 定位键，`_authorization_value_end` 按结构字符定值边界（上限为下一个授权键），`_mask_authorization_value` 保留方案名、其后过 `_mask_secret_value`。
+- `backends/gateway_helpers._dump_provider_rejection` 落盘前用 `_dump_header_value` 与 `redact_sensitive_text` 清洗头和正文（正文扫描窗口 `_DUMP_SCAN_CHARS`）。
+
 ## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，基于 `54b48b625`；待非作者初审）
 
 - `agent/backends/rejection_diagnostics.py`：`body_excerpt` 先过统一凭据清洗（`sanitize_credentials`）再折叠截断；`rejection_headers` 加条数/总量双上限并返回截断标记，诊断带 `headers_truncated`；固定名单优先于 `x-ratelimit-*`。

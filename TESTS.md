@@ -352,6 +352,29 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **收益实测（合成历史、假后端、3 次模型调用；脚本 `/private/tmp/claude-501/m-estcache/probe2.py`，数字只作交接参考、不进仓库）**：35 万 token 回合 estimate 55 次合计 583.1→131.8ms、整轮 1067.6→697.9ms；85 万 token 回合 1243.8→348.1ms、整轮 1722.4→1060.9ms。
 - **未验证**：真实 Gateway/TUI/IM 与生产负载；`estimate_tokens_from_json_parts` 路径未改；沙箱外复跑由 3a 安排。
 
+## 授权头凭据清洗泛化与转储清洗（rejectdiag4，3a，2026-10-05）
+
+- 新用例：
+  - `test_log_redaction.py`：Basic/Token/Digest（含 JSON 转义引号）/Proxy-Authorization/Python repr/curl 嵌入/base64 填充紧挨闭引号 7 种形状 × 普通与 labels 两种模式，凭据都不出现，普通模式保留方案名、JSON 仍可解析、curl 不吞 URL；`"authorization": {"type": "string"}` 原样保留且嵌套真凭据照遮；同行两个授权头各自遮、后一个键名与方案名保留；7 种病态输入 n=1e5 各 < 5 秒（宽松守卫）。
+  - `test_gateway_request_runtime_errors.py::test_rejection_any_authorization_scheme_never_persisted`：服务端回显四种方案时，回执、user_error、落盘 response、终态信封、审计索引全字节扫描都查不到凭据。
+  - `test_provider_rejection_diagnostics.py::test_provider_dump_never_writes_credentials`：开启 `MY_AGENT_PROVIDER_DUMP` 时文件里查不到 set-cookie 与正文凭据，记录可解析、非敏感头保留。
+- ReDoS 计时（`redact_sensitive_text`，三次取最好，ms）：
+
+  | 形状 | n=1e4 | n=1e5 | 比例 |
+  |---|---|---|---|
+  | `"a"*n+"!"` | 0.53 | 5.45 | 10.2 |
+  | `" "*n` | 0.61 | 6.14 | 10.0 |
+  | `"Authorization: "+"x "*n` | 1.10 | 11.18 | 10.2 |
+  | `"authorization"+" "*n+"!"` | 0.74 | 6.94 | 9.4 |
+  | `"Authorization:"*(n/14)` | 0.64 | 6.24 | 9.8 |
+  | `Authorization: Digest a="`+`"x"*n`（未闭合） | 0.40 | 4.08 | 10.1 |
+  | `{"authorization": "`+反斜杠×n | 0.22 | 2.07 | 9.4 |
+  | `Authorization: Digest `+`a="x", `×n/7 | 0.58 | 5.76 | 9.9 |
+
+  全部线性。中途版本“先扫到行尾再截回下一个键”在第 5 行形状 n=1e5 用了 10.7 秒（平方），被守卫用例抓到后改为扫描上限定在下一个键前。
+- 结果：`test_log_redaction.py`、`test_log_redaction_variable_refs.py`、`test_provider_rejection_diagnostics.py`、`test_gateway_request_runtime_errors.py` **240 passed**。
+- 变异（`scratchpad/mutate_rd.py`，原文自动恢复）：值到空白就停（旧行为）、去掉 `{`/`[` 排除、转储正文不清洗、转储头不清洗、引号字符串里也按 Digest 参数跳引号、去掉下一个键上限、不保留方案名 → **7/7 KILLED**。
+
 ## 拒绝诊断凭据清洗补全（rejectdiag3，2026-10-05，分支 `worker/rejectdiag3`）
 
 - 背景与两条改法见 `DESIGN_LEDGER.md` 同名小节。

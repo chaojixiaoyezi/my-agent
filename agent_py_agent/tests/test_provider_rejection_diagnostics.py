@@ -209,7 +209,7 @@ def test_user_notice_without_diagnostic_is_unchanged():
 
 
 # LLM: rejectdiag3 缺口 A：JSON/键值形状的 authorization 键也要打码（此前只有无引号 Bearer 形态被
-#   _AUTHORIZATION_RE 覆盖，rejectdiag2 初审实测 JSON 形状泄漏）；三种形状都过文本清洗词表。
+#   旧授权头正则覆盖，rejectdiag2 初审实测 JSON 形状泄漏）；三种形状都过文本清洗（rejectdiag4 起是授权头专用规则）。
 # 函数用途: 钉住正文摘要里 authorization 键值形状的凭据清洗。
 def test_body_excerpt_redacts_authorization_key_shapes():
     cases = (
@@ -257,3 +257,30 @@ def test_redaction_before_truncation_leaves_no_secret_prefix():
     assert "sk-" not in header_error.details["rejection_diagnostic"]["headers"]["x-request-id"]
     body_error = _runtime_http_error(_http_error(403, b"a" * 196 + b" sk-ABCDEFGHIJ"))
     assert "sk-" not in body_error.details["rejection_diagnostic"]["body_excerpt"]
+
+
+# LLM: rejectdiag4 小问题 3：显式开启 MY_AGENT_PROVIDER_DUMP 时，转储文件里的响应头与正文都已过统一清洗，
+#   查不到凭据原文；记录仍是一行可解析 JSON，状态码与非敏感头保留，便于定位。
+# 函数用途: 钉住调试转储落盘前清洗。
+def test_provider_dump_never_writes_credentials(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+    from email.message import Message
+
+    from agent_py_agent.agent.backends.gateway_helpers import _dump_provider_rejection
+
+    target = tmp_path / "provider-dump.jsonl"
+    monkeypatch.setenv("MY_AGENT_PROVIDER_DUMP", str(target))
+    headers = Message()
+    headers["set-cookie"] = "session=COOKIESECRET0001; Path=/"
+    headers["www-authenticate"] = 'Bearer realm="api"'
+    headers["x-request-id"] = "req-dump-1"
+    body = json.dumps({"echo": "Authorization: Basic dXNlcjpQQVNTV09SRDEyMzQ=",
+                       "authorization": "Token TOKENSECRETVALUE77"}).encode()
+    _dump_provider_rejection(urllib.error.HTTPError("https://provider.example.test/v1", 400, "bad", headers, io.BytesIO(body)))
+
+    raw = target.read_text(encoding="utf-8")
+    for secret in ("COOKIESECRET0001", "dXNlcjpQQVNTV09SRDEyMzQ", "TOKENSECRETVALUE77"):
+        assert secret not in raw, secret
+    record = json.loads(raw.splitlines()[0])
+    assert record["status"] == 400 and record["response_headers"]["x-request-id"] == "req-dump-1"

@@ -1232,3 +1232,45 @@ def test_rejection_credentials_never_reach_response_files_or_audit(tmp_path, mon
         paths, request_path, request_id, response, conversation_store=agent.conversation_store,
     )
     _assert_secrets_never_persisted(tmp_path, secrets)
+
+
+# LLM: rejectdiag4：服务端回显 Basic/Token/Digest/Proxy-Authorization 四种授权形状时，凭据不能进回执、user_error、
+#   落盘 response、终态信封和审计索引任何一处；沿用 rejectdiag3 的临时目录全字节扫描。
+# 函数用途: 端到端钉住各授权方案的凭据都不落盘、不回显。
+def test_rejection_any_authorization_scheme_never_persisted(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends.gateway_helpers import _runtime_http_error
+
+    agent, paths = _make_agent(tmp_path)
+    request_id = "gw-rejectdiag4-schemes"
+    request_path = paths.processing / f"{request_id}.json"
+    request_path.write_text(json.dumps({
+        "id": request_id, "kind": "ask", "status": "processing", "turn_phase": "open", "prompt": "继续",
+        "execution_attempt_id": "claimed-rejectdiag4-attempt",
+        "conversation": {"channel": "chat", "channel_conversation_id": "rejectdiag4-session",
+                         "channel_user_id": "local-agent", "canonical_user_id": "local-agent"},
+    }), encoding="utf-8")
+    body = json.dumps({
+        "error": "Authorization: Basic dXNlcjpQQVNTV09SRDEyMzQ= rejected",
+        "authorization": "Token TOKENSECRETVALUE77",
+        "echo": 'Authorization: Digest username="alice", response="DIGESTRESPONSE9f8e7d"',
+        "proxy-authorization": "Basic PROXYSECRET0123456789",
+    }).encode()
+    message = Message()
+    message["x-request-id"] = "req-rejectdiag4"
+    provider_error = urllib.error.HTTPError(
+        "https://provider.example.test/v1/messages", 401, "rejected", message, io.BytesIO(body))
+
+    def run(*_args, **_kwargs):
+        raise _runtime_http_error(provider_error)
+
+    monkeypatch.setattr(agent, "run", run)
+    response = _handle_gateway_request(agent, request_path)
+
+    secrets = ("dXNlcjpQQVNTV09SRDEyMzQ", "TOKENSECRETVALUE77", "DIGESTRESPONSE9f8e7d", "PROXYSECRET0123456789")
+    rendered = json.dumps(response, ensure_ascii=False)
+    for secret in secrets:
+        assert secret not in rendered, secret
+    _finish_claimed_gateway_request(
+        paths, request_path, request_id, response, conversation_store=agent.conversation_store,
+    )
+    _assert_secrets_never_persisted(tmp_path, secrets)

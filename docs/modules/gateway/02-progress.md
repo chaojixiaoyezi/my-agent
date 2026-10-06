@@ -50,6 +50,10 @@
 
 - `common/heartbeat.start_time_relation` 是启动指纹比较的唯一三态实现；`start_time_matches` 是它的布尔投影，`scheduler/repository._runner_liveness` 只在 different 时判死，格式不可比（数字 vs macOS lstart）、空串、坏值都按不可核验处理。
 
+## 授权头凭据清洗泛化与转储清洗（rejectdiag4，3a，2026-10-05；随 17o 集成）
+
+- 授权头（含 Proxy-Authorization）任意方案的整个凭据都遮，保留方案名；值边界线性扫描；`{`/`[` 开头的结构原样保留；调试转储落盘前清洗头与正文。rejectdiag/2/3 三个提交随本节一起进 17o（原线基于 17l，挑入时 `request_execution.py` 合并保留 HEAD 的 `fallback_error_code`）。详见 DESIGN_LEDGER 与 TESTS 同名节。
+
 ## 供应商拒绝诊断收尾（rejectdiag2，2026-10-05，基于 `54b48b625`；待非作者初审）
 
 - **来源**：rejectdiag 初审必须改项（正文摘要未清洗，服务端回显密钥会原样进回执/落盘/审计）+ 两条小问题（头个数无上限、展示出口没有原因码）。
