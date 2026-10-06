@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## learnpack 第 2 步：打包（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
+
+- **用例**：
+  - `agent_py_agent/tests/test_package_build.py`（15 条）——仓库样例能力包 drama-text-a、drama-workflow-b 与样例插件 event-watch、hello-node、rm-guard 经产品函数打出的包 sha256 与搬家前旧脚本产物一致（固定摘要），两个脚本薄壳产物与产品函数逐字节相同；同一输入两次同字节；声明外形、链接、缺文件、重复、越界路径、清单与文件不一致都给登记过的错误码。
+  - `agent_py_agent/tests/test_learnpack_store.py`（5 条）——存储位于 owner 根 `data/`（H3）；产物内容寻址、0600、读回重算摘要（被改过当不存在、再次保存原子修复）；安装单号格式、只执行一次、换存储对象（相当于重启）仍只执行一次、结果可读回；安装记录追加读回。
+  - `agent_py_agent/tests/test_package_build_tool.py`（16 条，真实 SimpleAgent 注册链）——只注册给本机管理员且默认收起；自动收录跳过隐藏文件与 declaration.json；回执带开关现读值与命令原文、下一步含 sha256；同输入同 sha 只存一份；相对路径、owner 目录外、密钥、链接、v8 插件键、缺来源或许可证都拒绝且什么都不写；仓库样例能力包与样例插件经工具打出旧脚本同一摘要；经正规工具执行器调用成功。
+- **逐字节对照**：用基线 `e5d7f3c90` 源码里的旧脚本与新薄壳分别打 2 个样例能力包、5 个样例插件，7 个 sha256 全部一致（hello-go 需先编译，旧脚本同样打不了，未计入）。
+- **连带**：用到两个打包脚本、错误码表、工具目录/默认收起/工具清单的 132 个测试文件 + 14 个守卫全过（去掉基线已知失败 1 条）；`test_tool_default_deferral` 的钉住集合加入 `package_build` 并补一条自然语言检索用例；常数目录重新生成（931 项）。
+- **变异**（11/11 KILLED）：能力包成员顺序改成 plugin.json 先写；插件可执行位丢失；去掉成员路径合规校验；工具不查读权限；工具不拦密钥；自动收录不跳过隐藏文件；工具不查管理员；工具不收起；普通用户也注册；存储读回不验摘要；安装单可执行多次。首轮可执行位与路径校验两个变异存活，已补用例。
+- **未验证**：真实模型调用打包工具（第 8 步）。
+
 ## learnpack 第 1 步：两个自动装开关（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
 
 - **用例**：`agent_py_agent/tests/test_self_install_switches.py`（12 条）——两个开关在 dataclass 与随包 YAML 都默认关；参数中心登记为管理员专用边界项、生效时机 `immediate`；模型 `set` 返回 `PARAMETER_BOUNDARY` 且不建文件，`/settings` 写入（接受“开”）后文件权限 600、马上读到新值；即使 agent 上缓存了旧快照也按文件现读；用户文件缺失读随包默认、路径不可读按关；回执里的四条开关命令能被 `/settings` 解析器与 TUI 文本回放原样接受；Gateway `/settings set` 对本机管理员和 IM 绑定管理员都能开关、回执写“马上生效”不提 `/restart`，飞书普通用户被拒；模型用 `user_config view` 能只读看到当前值。

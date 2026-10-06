@@ -3537,3 +3537,45 @@ ERROR_CONTRACTS.update({
         ),
     ),
 })
+
+
+# ---- learnpack 打包（2026-10-06 3a）：独立块，合并冲突时整块保留，不与上方表格交错 ----
+# LLM: 这些码只由 capability/package_build 与 tooling/package_build_tool 产生，失败时都没有写任何东西（not_started）。
+#   改文案须同步 test_package_build 与 test_package_build_tool。
+ERROR_CONTRACTS.update({
+    "PACKAGE_BUILD_DECLARATION_INVALID": ErrorContract(
+        code="PACKAGE_BUILD_DECLARATION_INVALID", category="tool", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="包声明字段不对（缺字段、带了生成字段、files 写法不对或 origin/license 没写）；按回执说明改声明后重新打包，什么都没写。",
+    ),
+    "PACKAGE_BUILD_FILE_INVALID": ErrorContract(
+        code="PACKAGE_BUILD_FILE_INVALID", category="tool", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="要打包的文件不存在、是链接、路径不合规或超出大小预算；换成目录里的普通文件后重新打包，什么都没写。",
+    ),
+    "PACKAGE_BUILD_SOURCE_DENIED": ErrorContract(
+        code="PACKAGE_BUILD_SOURCE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
+        recovery_hint="source_dir 要写绝对路径，且只能打包你自己读得到的文件（第一期是你的 owner 目录，任务工作区就在里面）；把内容写到任务工作区后用那个绝对路径重新打包。",
+    ),
+    "PACKAGE_BUILD_KIND_UNSUPPORTED": ErrorContract(
+        code="PACKAGE_BUILD_KIND_UNSUPPORTED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="第一期自己做的插件只支持文件型 v6 包；去掉 events、tool_gates、permissions，或改做能力包。",
+    ),
+    "PACKAGE_BUILD_SECRET_FOUND": ErrorContract(
+        code="PACKAGE_BUILD_SECRET_FOUND", category="tool", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="回执列出的文件里像是有密钥或口令，整包没打；把真实值换成占位符（如 <YOUR_KEY>）后重新打包，不要把密钥写进包。",
+    ),
+    "PACKAGE_BUILD_OUTPUT_INVALID": ErrorContract(
+        code="PACKAGE_BUILD_OUTPUT_INVALID", category="tool", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="打出的包没通过宿主读包校验（如入口文档不在 files 里、能力说明或关键词不合规、插件缺入口）；按回执原因改后重新打包。",
+    ),
+    "PACKAGE_BUILD_STORE_FAILED": ErrorContract(
+        code="PACKAGE_BUILD_STORE_FAILED", category="state", retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="包打好了但没能存进宿主 learnpack 存储（磁盘或权限问题）；稍后用同样参数重新打包，同一内容只会存一份。",
+    ),
+})

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 928,
+  "count": 931,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1178,6 +1178,14 @@
       "unit": "字符",
       "category": "其它",
       "description": "经验条目在提案摘录里的最大字符数。"
+    },
+    {
+      "name": "_MAX_INSTALL_RECORD_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_store.py",
+      "value": 2000,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "安装记录最多保留 2000 条：超限只丢最旧的，找\"上一版\"只看最近记录。"
     },
     {
       "name": "MEMORY_SEARCH_DEFAULT_COUNT",
@@ -5770,6 +5778,22 @@
       "unit": "个",
       "category": "比例阈值",
       "description": "验证回执最多显示 12 个分组：控制回执体积。"
+    },
+    {
+      "name": "_MAX_LISTED_FILE_COUNT",
+      "file": "agent_py_agent/agent/tooling/package_build_tool.py",
+      "value": 4095,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "能力包省略 files 时自动收录目录里的普通文件，最多这么多个（与能力包协议上限一致）。"
+    },
+    {
+      "name": "_RECEIPT_FILE_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/tooling/package_build_tool.py",
+      "value": 40,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "回执里最多列出的包内文件名个数，超出只给总数。"
     },
     {
       "name": "_FIREWALL_NOT_RUNNING",
