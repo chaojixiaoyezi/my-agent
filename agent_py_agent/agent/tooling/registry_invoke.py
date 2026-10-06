@@ -45,9 +45,11 @@ from .write_boundary import (
 
 # 异常信息最多回 500 字符：超长截断，防堆栈撑爆反馈。
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
+# package_build（learnpack）按目录读文件打包，相对 source_dir 必须和读写文件工具落在同一个本轮执行目录。
 _BOUNDARY_FILESYSTEM_TOOL_NAMES = WRITE_TOOL_NAMES | {
     "find_files",
     "list_files",
+    "package_build",
     "read_file",
     "search_text",
 }

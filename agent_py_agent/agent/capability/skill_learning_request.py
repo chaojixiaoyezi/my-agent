@@ -2,6 +2,7 @@
 #   “任务已完成”由调用方（FinalizationService）按 conversation_task_completed 判定后才调用本模块。
 #   材料有界且脱敏：用户输入与最终回复各截 3000 字，工具轨迹最多 80 条、参数取模型可见参数并截 300 字，
 #   本轮用过的 Skill 只认成功的 skill_search action=get 调用里的 skill_id。不读回复正文做任何机器判断。
+#   recalled_memories 只给"让她总结一下"用（自动总结的请求不带）：本轮实际注入的正式记忆，最多 8 条、正文各截 600 字。
 #   同步检查 agent_core/_finalization_service.py 与 test_skill_learning*.py。
 # 模块用途: 在主代理任务完成收口时，把本轮经历压成一份有界、脱敏的自动总结请求。
 from __future__ import annotations
@@ -19,6 +20,10 @@ TRACE_COUNT = 80
 TRACE_ARGS_CHARS = 300
 # 本轮实际用到的技能 id 最多记录条数。
 USED_SKILLS_COUNT = 10
+# 用户要求总结时，随材料带上的本轮召回记忆最多条数。
+RECALLED_MEMORY_COUNT = 8
+# 每条召回记忆正文的截断字符数。
+RECALLED_MEMORY_CHARS = 600
 _SKILL_TOOL = "skill_search"
 _EXCLUDED_SOURCES = frozenset({"background_main_agent"})
 
@@ -62,6 +67,16 @@ def build_learning_request(ctx: object, min_tool_rounds: int) -> dict[str, objec
         "tool_trace": [_trace_entry(item) for item in records[:TRACE_COUNT]],
         "used_skill_ids": used_skill_ids(records),
     }
+
+
+# LLM: 只投影收尾上下文的 memories（本轮实际注入模型的正式记忆）的编号、种类和先脱敏再截断的正文，有条数与字数上限；
+#   只进"让她总结一下"的材料（skill_learning 里用户要求的请求），自动总结的请求与提示词不带。纯函数。
+# 函数用途: 取本轮召回的相关记忆，作为用户要求总结时的材料。
+def recalled_memories(ctx: object) -> list[dict[str, str]]:
+    rows = getattr(ctx, "memories", None)
+    return [{"entry_id": str(getattr(row, "entry_id", "") or "")[:120], "kind": str(getattr(row, "kind", "") or "")[:40],
+             "content": bounded_text(getattr(row, "content", ""), RECALLED_MEMORY_CHARS)}
+            for row in (rows if isinstance(rows, list) else [])[:RECALLED_MEMORY_COUNT]]
 
 
 # LLM: 先脱敏再截断，保证截断点不会把半个密钥留下；超长时保留开头并加省略标记。
@@ -113,5 +128,6 @@ __all__ = [
     "bounded_text",
     "build_learning_request",
     "learning_request_eligible",
+    "recalled_memories",
     "used_skill_ids",
 ]

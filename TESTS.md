@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## learnpack 第 5 步：学习技能 learn-external-agent 与"让她总结一下"（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
+
+- **用例**：
+  - `agent_py_agent/tests/test_learnpack_flow.py`（3 条）——假模型 + 真实 SimpleAgent 回合：用相对路径写包 → tool_search 加载默认收起的打包、安装工具 → package_build → 自动装开关关着 package_install 只开单 → 把回执里的确认行原样交给用户；宿主这边包没装、单子在、确认行是 `/plugins#` 写法。内置技能能被 skill_search 搜到并读到正文。真实回合：先做一轮带工具的活（这一轮召回了一条她自己的正式记忆），下一轮先读一眼文件（这一轮也升成了任务）再按 `target=previous` 要总结，入队一次、材料仍是上一轮的活，并带着那一轮召回的那条记忆；边做边要总结的（`target=current`）在这次活收尾时入队。
+  - `agent_py_agent/tests/test_skill_summarize_tool.py`（10 条）——只给本机管理员、默认收起；自学习关着如实返回 SKILL_SUMMARIZE_DISABLED；不在对话回合里返回 SKILL_SUMMARIZE_NO_RUN；`target` 不对返回 TOOL_INVALID_ARGUMENTS；`current` 在这一轮没做活（任务还挂着但没升格、或已完成）时返回 SKILL_SUMMARIZE_NO_CURRENT_TASK，正在做的活按会话任务打标记、回执写出这一轮的提问，任务在后面的运行里收尾也认、不受最少工具轮数限制、只用一次；`previous` 当场入队这个会话最近完成的那次活，找不到返回 SKILL_SUMMARIZE_NOTHING_RECENT，别的会话拿不到，不被自动总结的同一请求去重；同一次活两条路只入队一次（再要回 already_requested），收尾时队列满的事后还能再要；previous 碰上队列满返回 SKILL_SUMMARIZE_QUEUE_FULL 并撤回认领；入队写入抛错时也撤回认领、异常照常往外抛，收尾时入队抛错这次活照样记成最近一份、事后还能再要；用户要求的请求带本轮召回的相关记忆（最多 8 条、各 ≤600 字），自动总结的请求不带；提示词里用户要求的说明放在“待总结材料”之前（自动总结的提示词逐字节不变），写明召回记忆只用来理解背景、个人信息与一次性事实不写进技能；标记取走后收尾运行不合格，账上有 SKILL_LEARNING_USER_REQUEST_INELIGIBLE 丢弃事件；请求带 requested_by=user 与重点；普通自动总结的提示词不变；过闸门发布后能回退。
+  - `agent_py_agent/tests/test_learn_external_agent_skill.py`（3 条）——名片短、正文要点齐（学习笔记、许可证、默认能力包、照回执原文、不替用户确认）、参考链接都在、要的工具本机管理员都有。
+  - `test_package_build_tool` 补 2 条：写文件回执里的相对路径原样能当 source_dir 用，越界的相对路径照样被读权限拒绝；相对路径按本次调用的执行目录解析，不按注册时的基准目录。
+  - `test_write_my_agent_plugin_skill`、`test_tool_default_deferral` 跟着改（技能可用 package_build/package_install；钉住集合加 skill_summarize 并补一条自然语言能搜到它）。
+- **连带**：240 个文件（第 5 步改动模块的直接用例、引用它们的用例、注册表与工具清单用例）+ 14 个守卫：6278 passed / 15 skipped / 0 failed（去掉 1 条在基线 e5d7f3c90 上同样失败的已知用例 test_pack_verification_service::test_location_host_paths_are_redacted_before_reaching_the_model）；收尾改了提示词说明后，引用自学习、总结工具与错误码表的 37 个文件 + 守卫在最终代码上重跑：1062 passed / 6 skipped / 0 failed。
+- **非作者复审**（同一只读子代理）：一轮 1 条必须改（做完以后下一句才说的“总结一下”落不到上一次的活上、回执却说已记下）已按两种落点重做并补真实回合用例；建议改 3 条（相对路径按本次调用的执行目录、写插件技能收尾两种情况分开写、提示词里的重点标明是她转述仅供参考）已做。二轮无必须改；建议改 3 条都做了：落点改由结构化参数 `target` 决定（做完后先读一眼文件再要总结也不会落错）、两条路同一次活只入队一次、标记取走后收尾运行不合格在账上留事件。自查补了：收尾时队列满不算入队过、`current` 改用会话模块的字段常量与“已完成”判断，以及漏掉的“连同本轮召回的相关记忆一起交”（目标文件第 5 步原文）。三轮：逻辑可合入；必须改 3 处文字（占位符、对不上的注释、指南“同一次活只总结一次”说错）已改；建议改 1（这一轮还没动手时的提示别把她往 previous 引）、2（入队抛错撤回认领）已做；建议改 3–5（调过 previous 的运行别覆盖最近一份、已入队时新重点没用上、自动与用户各总结一次的后果、没产出技能的结果在产品里看不到）记进 DESIGN_LEDGER 待办。四轮：入队出错撤回可合入；必须改 1 处（记忆说明和“不要保存个人信息”冲突，删掉或到期的记忆会借技能复活）已改并加断言；建议改说明挪到材料之外、补 `__all__` 已做；“收尾入队抛错尽力记一条丢弃事件”没做（复审标“可以不改”，主链路优先不加兜底）。
+- **变异**（38/38 KILLED，在导出副本上跑）：总结标记不放宽门槛、总结标记可反复用、入队不带用户要求、用户要求的提示词不加说明、普通提示词也加说明、自学习关着不报、不在回合里也往下走、标记按运行编号取、找不到也说已记下、相对路径不按工作目录、相对路径按注册时基准目录、没在做活也能 current、current 不看任务是否已完成、current 不看这一轮是否在做活、previous 当成 current、坏 target 当成 previous、坏 target 当成 current、回执不写这一轮提问、不记最近完成的活、收尾时队列满也记已入队、边做边要的不记已入队、用户请求被自动总结去重、最近完成的活不分会话、同一次活重复入队、队列满不撤回认领、入队成功也撤回认领、previous 写入出错不撤回认领、收尾时入队出错不记最近、撤回不生效、有标记不合格不记账、用户请求不带召回记忆、自动总结也带召回记忆、提示词不放召回记忆、召回记忆不限条数、召回记忆不截断、回执不报记忆条数、说明放回材料里、记忆说明不挡个人信息。
+
 ## learnpack 第 4 步：能力包命令 `/plugins#`（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
 
 - **用例**：`agent_py_agent/tests/test_pack_commands.py`（13 条）。

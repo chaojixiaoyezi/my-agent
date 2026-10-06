@@ -59,7 +59,8 @@ _VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
 _UNSAFE_TEXT_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
 
-# LLM: 一次打包请求的结构化输入；declaration 是模型给的声明（能力包可省 files/settings_schema），source_dir 是绝对路径。
+# LLM: 一次打包请求的结构化输入；declaration 是模型给的声明（能力包可省 files/settings_schema）；source_dir 是她写的路径，
+#   相对路径到读文件时才按 read_file 的当前工作目录解析（_source_root）。
 # 类用途: 解析后的打包请求。
 @dataclass(frozen=True)
 class _BuildRequest:
@@ -77,8 +78,8 @@ class PackageBuildTool(BaseTool):
         description=(
             "把整理好的目录打成能力包（kind=capability_pack，方法、模板、检查清单、离线小工具）或文件型插件包"
             "（kind=plugin，要运行的程序/工具）。只打包、不安装：成功后回执给出 sha256、两个自动装开关的当前状态、"
-            "开关命令原文和下一步（用 package_install 传这个 sha256 安装）。source_dir 用绝对路径，目录要在你读得到的"
-            "地方（任务工作区即可）；"
+            "开关命令原文和下一步（用 package_install 传这个 sha256 安装）。source_dir 写目录路径：写文件回执里的相对路径"
+            "按当前工作目录算，也可以写绝对路径；目录要在你读得到的地方（任务工作区即可）；"
             "能力包 declaration 至少写 plugin_id、version、summary、capability（description、keywords、entry_document），"
             "files 可省（自动收录目录里的普通文件，隐藏文件与根目录 declaration.json 除外）；插件 declaration 必须列 files"
             "（每项 path 与 executable）。origin 写学自哪里（仓库地址@提交，或“自己写的”），license 写来源的许可证。"
@@ -88,7 +89,7 @@ class PackageBuildTool(BaseTool):
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "enum": [KIND_CAPABILITY_PACK, KIND_PLUGIN]},
-                "source_dir": {"type": "string", "description": "要打包的目录绝对路径"},
+                "source_dir": {"type": "string", "description": "要打包的目录：写文件回执里的相对路径，或绝对路径"},
                 "declaration": {"type": "object", "description": "包声明（不含摘要和协议版本）"},
                 "origin": {"type": "string", "description": "学自哪里：仓库地址@提交，或“自己写的”"},
                 "license": {"type": "string", "description": "来源的许可证，如 MIT、Apache-2.0；自己写的填“自有”"},
@@ -108,6 +109,9 @@ class PackageBuildTool(BaseTool):
     # 打包只写宿主 learnpack 存储（内容寻址，重放无害）；按原操作账去重。
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating"),
                                        idempotency_policy=IdempotencyPolicy("operation"))
+    # 本轮执行目录：注册表每次调用按当前写边界给工具副本设置（与读写文件工具同一来源，见 registry_invoke 的边界工具名单）；
+    # 直接调用（没经注册表）时为空，退回 read_file 的基准目录。
+    workspace_root: Path | None = None
 
     # LLM: 构造不读写；身份、读权限与开关都在执行时现取。
     # 函数用途: 绑定当前 owner 的 agent（取身份、owner 目录、注册表与开关）。
@@ -122,7 +126,7 @@ class PackageBuildTool(BaseTool):
             return _error("TOOL_PERMISSION_DENIED", "打包与自己装包第一期只对本机管理员开放。")
         try:
             request = _parse(params, _run_id(self._agent))
-            contents = _read_files(self._agent, request)
+            contents = _read_files(self._agent, request, self.workspace_root)
             built = _build(request, contents)
         except PackageBuildError as exc:
             return _error(exc.code, str(exc))
@@ -135,7 +139,7 @@ class PackageBuildTool(BaseTool):
         return _receipt(record, built, switch_facts(read_self_install_switches(self._agent)))
 
 
-# LLM: 只做结构检查与默认值填充，不读文件；source_dir 必须是绝对路径；插件不收 v8 键。纯函数。
+# LLM: 只做结构检查与默认值填充，不读文件；source_dir 不能为空（相对路径留到读文件时解析）；插件不收 v8 键。纯函数。
 # 函数用途: 把工具参数整理成 _BuildRequest。
 def _parse(params: dict, run_id: str) -> _BuildRequest:
     kind = str(params.get("kind") or "")
@@ -143,8 +147,8 @@ def _parse(params: dict, run_id: str) -> _BuildRequest:
     raw_dir = str(params.get("source_dir") or "")
     if kind not in {KIND_CAPABILITY_PACK, KIND_PLUGIN} or not isinstance(declaration, dict):
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "kind 只能是 capability_pack 或 plugin，declaration 必须是对象。")
-    if not raw_dir or not Path(raw_dir).expanduser().is_absolute():
-        raise PackageBuildError("PACKAGE_BUILD_SOURCE_DENIED", "source_dir 要写绝对路径（用写文件回执里的路径）。")
+    if not raw_dir.strip():
+        raise PackageBuildError("PACKAGE_BUILD_SOURCE_DENIED", "source_dir 要写要打包的目录（用写文件回执里的路径）。")
     if kind == KIND_PLUGIN and any(key in declaration for key in _V8_KEYS):
         raise PackageBuildError("PACKAGE_BUILD_KIND_UNSUPPORTED",
                                 "第一期她自己做的插件只支持文件型 v6 包，声明里不能有 events、tool_gates、permissions。")
@@ -196,9 +200,9 @@ def _declared_texts_ok(declaration: dict) -> bool:
 # LLM: 能力包没列 files 时自动收录，收录到的文件名也按声明文字同一条展示规则检查（复审 7 轮）；每个路径先过 read_file 的路径
 #   裁决再按无链接读取；读完做密钥检查。只读文件。
 # 函数用途: 读出要打进包的文件字节。
-def _read_files(agent: object, request: _BuildRequest) -> dict[str, bytes]:
+def _read_files(agent: object, request: _BuildRequest, base: Path | None) -> dict[str, bytes]:
     check = _path_check(agent)
-    root = request.source_dir.resolve(strict=False)
+    root = _source_root(agent, request.source_dir, base).resolve(strict=False)
     _require_allowed(check, root, str(request.source_dir))
     if request.kind == KIND_CAPABILITY_PACK and "files" not in request.declaration:
         listed = _list_files(root)
@@ -221,6 +225,21 @@ def _build(request: _BuildRequest, contents: dict[str, bytes]) -> BuiltPackage:
     if request.kind == KIND_CAPABILITY_PACK:
         return build_capability_pack(request.declaration, contents)
     return build_files_plugin(request.declaration, contents)
+
+
+# LLM: 相对路径和读文件、写文件工具同一口径：base 是注册表给本次调用的执行目录（复审：不能用注册表构造时的基准目录，
+#   会话带自己的执行目录时两者不同）；直接调用没有 base 时才退回 read_file 的基准目录。拿不到就拒绝（fail closed）。
+#   只拼路径，权限仍由 _require_allowed 裁决。
+# 函数用途: 把她写的 source_dir 落成绝对路径。
+def _source_root(agent: object, source_dir: Path, base: Path | None) -> Path:
+    if source_dir.is_absolute():
+        return source_dir
+    if base is None:
+        tools = getattr(getattr(agent, "tools", None), "tools", None)
+        base = getattr(tools.get("read_file") if isinstance(tools, dict) else None, "workspace_root", None)
+    if base is None:
+        raise PackageBuildError("PACKAGE_BUILD_SOURCE_DENIED", "当前拿不到工作目录，source_dir 请写绝对路径。")
+    return Path(base) / source_dir
 
 
 # LLM: 读权限的唯一来源是同一注册表里 read_file 的 check_path_access；拿不到就拒绝（fail closed）。只读。

@@ -4,7 +4,7 @@
 
 ```text
 |-- agent_py_agent/skills/builtin/plugins/write-my-agent-plugin/
-|   |-- SKILL.md                          # 工具/面板、v8 观察/收紧指引，安装启用仍由用户确认
+|   |-- SKILL.md                          # 工具/面板、v8 观察/收紧指引；她自己做的 v6 文件插件可经 package_build/package_install 按开关装，其余仍由用户确认
 |   |-- references/
 |   |   |-- author-contract.md            # v8 订阅、握手、审批及 B7 前关闭/安全前置合同
 |   |   `-- pack-and-verify.md             # 文件构建器、真实 v8 读回和包内 stdio 验证
@@ -15,7 +15,17 @@
 |       `-- node/
 |           |-- declaration.json           # 与 Python 相同的 v8 订阅及网络权限合同
 |           `-- src/server.js              # 无 npm 依赖，同样的三个方法及双能力握手
+|-- agent_py_agent/skills/builtin/plugins/learn-external-agent/
+|   |-- SKILL.md                          # learnpack 学外部 agent：学习笔记、核许可证、读原版、查同领域、默认做能力包、打包、按开关装或给确认行
+|   |-- references/
+|   |   |-- tell-the-user.md              # 照 package_install 回执原文提醒用户（确认行、管理命令、开关命令、退回两段式）
+|   |   |-- pack-layout.md                # 能力包目录与声明怎么写（版本、文字、来源许可证的规则）
+|   |   `-- merge.md                      # 同领域合并成新版本、并错了怎么退回
+|   `-- templates/
+|       |-- CAPABILITY.md                 # 能力包入口文档模板（适合、不适合、怎么用、方法目录）
+|       `-- PROVENANCE.md                 # 来源、提交号、许可证、改动记录模板
 |-- agent_py_agent/tests/test_write_my_agent_plugin_skill.py # 真包/stdio、纯订阅、模型边界及旧新字节回归
+|-- agent_py_agent/tests/test_learn_external_agent_skill.py # learnpack 学习技能：名片短、要点齐、参考链接在、要的工具管理员都有
 |-- scripts/build_plugin_files_package.py  # B1 同源 v8 文件包构建，不执行入口
 `-- scripts/build_plugin_package.py        # 原受信 wheel 构建路径，保持 v1–v5 回归
 ```
@@ -874,6 +884,7 @@ agent_py_agent/
 |   |   |-- audit_requests_topic.py    # audit_records 的 requests 主题：请求成败、错误码与处理建议、归属 owner，管理员附带身份事实
 |   |   |-- admin_controls_tool.py     # 管理员专用：list/set 各用户 Jev/审计开关与跨用户审计许可，每次都要本人确认
 |   |   |-- package_build_tool.py      # learnpack package_build：本机管理员把整理好的目录打成能力包/插件包（只打包不安装，默认收起）
+|   |   |-- skill_summarize_tool.py    # learnpack "让她总结一下"：按 target 参数选落点，current 按会话任务打标记、收尾时总结，previous 当场总结这个会话刚做完的那次活（默认收起）
 |   |   |-- package_install_tool.py    # learnpack package_install：按自动装开关装她打的包，关着只开待确认安装单并给用户一行确认（默认收起）
 |   |   |-- shell.py                  # 非交互 run_command、独立 stdin、超时/中断与有界 pipe drain
 |   |   |-- shell_syntax.py           # 外层及字面 Shell -c 的后台语法检查，不解释普通字符串或 heredoc 正文
@@ -1301,6 +1312,8 @@ agent_py_agent/
 |   |-- test_learnpack_store.py         # learnpack 宿主存储：内容寻址验摘要、安装单只执行一次、安装记录
 |   |-- test_package_build_tool.py      # package_build 工具：管理员专用且收起、读权限与密钥拦截、回执开关事实
 |   |-- test_pack_commands.py           # learnpack /plugins#：命名空间互不串、帮助与补全、每个动作 TUI 与 IM 真实链路、重发回放、非管理员只读
+|   |-- test_learnpack_flow.py          # learnpack 整条链路：假模型 + 真实回合，学 → 打包 → 开关关给确认行；技能能被 skill_search 找到读到
+|   |-- test_skill_summarize_tool.py    # learnpack 让她总结一下：管理员专用、自学习关着如实说、target 两种落点、同一次活只入队一次、过闸门发布、能回退
 |   |-- test_learnpack_install.py       # learnpack 安装：命令顺序与代确认边界（假管理服务）、开关开/关真实链路、确认单只执行一次、检查程序跟插件开关
 |   |-- test_audit_requests_topic.py    # 审计 requests 主题：owner_id/会话归属、去重、时间窗、不含正文、跨用户两道门、管理员身份事实
 |   |-- test_model_text_control.py      # 聊天 /model：解析、无模型引导、选择共享模型不泄密钥、按 owner 隔离、TUI 菜单保留
@@ -1650,6 +1663,7 @@ docs/
 - `agent_py_agent/agent/tooling/package_build_tool.py`：模型工具 package_build（本机管理员、默认收起），读文件过 read_file 同一裁决、拦密钥，产物进 learnpack 存储，回执带开关事实与下一步。
 - `agent_py_agent/agent/capability/learnpack_installer.py`、`learnpack_service.py`：learnpack 安装只经 `PluginManagement.command` 执行管理员同一串 /plugins 命令；代确认只覆盖运行她自己做的程序。
 - `agent_py_agent/agent/capability/pack_commands.py`：`/plugins#` 唯一处理处；启用/停用/删除转成管理员同一条 `/plugins` 命令并沿用用户的请求编号与目录版本，退回与安装复用 learnpack_service。
+- `agent_py_agent/agent/tooling/skill_summarize_tool.py`："让她总结一下"按结构化参数 `target` 选落点（`current` → `SkillLearningService.request_learning` 按会话任务打标记，`previous` → `summarize_recent` 当场入队这个会话最近完成的那次活；同一次活对用户只入队一次），入队、闸门、版本、回退全走现有自学习流水线。
 - `agent_py_agent/agent/tooling/package_install_tool.py`：模型工具 package_install（本机管理员、默认收起），包身份只认 learnpack 存储，能不能直接装只看对应开关现读值。
 - `scripts/build_capability_package.py`：开发者命令行薄壳，读文件后调 `capability/package_build` 构建 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。

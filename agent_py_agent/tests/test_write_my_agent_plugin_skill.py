@@ -191,7 +191,9 @@ def test_skill_only_requires_authoring_tools():
     card = parse_skill_file(SKILL / "SKILL.md", source="builtin", require_frontmatter=True)
     assert card.tools_required
     assert set(card.tools_required) <= {"skill_search", "list_files", "read_file", "write_file",
-                                        "edit_file", "apply_patch", "run_command"}
+                                        "edit_file", "apply_patch", "run_command",
+                                        # learnpack：自己做的 v6 文件插件可打包、按开关安装（宿主处理确认）。
+                                        "package_build", "package_install"}
     body = card.path.read_text(encoding="utf-8")
     assert "请用 /plugins install <路径> 安装，启用时按界面提示输确认码" in body
     assert "不能替用户输确认码" in body

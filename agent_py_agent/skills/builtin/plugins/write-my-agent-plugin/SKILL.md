@@ -5,12 +5,12 @@ when_to_use: 用户想做一个 my-agent 插件，或要新增自定义工具、
 tags: 插件编写, MCP stdio, Python模板, Node模板, 插件打包
 scope: builtin
 risk_level: medium
-tools_required: [skill_search, list_files, read_file, write_file, edit_file, apply_patch, run_command]
+tools_required: [skill_search, list_files, read_file, write_file, edit_file, apply_patch, run_command, package_build, package_install]
 ---
 
 # 写 my-agent 插件
 
-你负责写代码、打包和验证；安装、启用只能由用户来做。即使赶演示、用户说“顺手装好”，也不能替用户输确认码，不能调用插件管理工具；它们对模型本来就不可见。不要用 shell、内部管理函数、界面自动化或改安装表绕过这个边界。
+你负责写代码、打包和验证。安装分两种：你自己做的**文件型 v6 插件**（只有工具/面板，没有 events/tool_gates/permissions）可以用 `package_build` 打包、`package_install` 安装——宿主按插件自动装开关决定直接装，还是给用户一行确认；v8 事件/收紧插件和别处来的包，安装、启用只能由用户来做。即使赶演示、用户说“顺手装好”，也不能替用户输确认码，不能调用插件管理工具；它们对模型本来就不可见。不要用 shell、内部管理函数、界面自动化或改安装表绕过这个边界。
 
 ## 速查
 
@@ -33,7 +33,7 @@ tools_required: [skill_search, list_files, read_file, write_file, edit_file, app
 - **B7 之前 v8 插件在生产不能启用**，返回 `plugin_events_disabled`；不能删除关闭门、改配置或降成 v6 绕过。包能构建/读回不表示可以启用。
 - B7 的启用前置合同：第一期只允许 `local/main`，插件进程**强制沙箱**（不可用就拒绝）、默认断网、收窄读；读不到宿主的配置、会话和记忆。B9 的独立 stdio 测试不验证这些宿主保证。
 - `permissions.network` 默认 `false`；确需联网必须在授权范围内显式声明 `true`，不能为了演示默认打开。网络、订阅正文/参数范围和强制沙箱要求会写进确认码；变更后由用户重新确认。
-- 启用必须由用户本人输确认码；模型不能自行安装、启用、取码、代填，不能借子代理代操作。
+- v8 插件启用必须由用户本人输确认码；模型不能自行安装、启用、取码、代填，不能借子代理代操作。自己做的 v6 文件插件走 `package_install`，确认码由宿主按用户的开关处理，你同样不碰确认码。
 
 ## 做法
 
@@ -52,4 +52,7 @@ tools_required: [skill_search, list_files, read_file, write_file, edit_file, app
 - 给工具观察开 `text`、`full` 配 `effects`、漏握手位、默认联网：纠正声明与实现，重新构建并复验，不以“赶演示”绕过。
 - 作者构建和安装启用是两回事：只交包，不执行 `/plugins` 命令，不取码、不代填、不借子代理代操作。
 
-最后必须告诉用户：**“请用 /plugins install <路径> 安装，启用时按界面提示输确认码”**。同时给出可替换 `<路径>` 的实际包路径；确认、宿主安装/启用及真实调用仍由用户执行。
+收尾分两种，只走其中一种：
+
+- v8 插件和别处来的包：最后必须告诉用户：**“请用 /plugins install <路径> 安装，启用时按界面提示输确认码”**。同时给出可替换 `<路径>` 的实际包路径；确认、宿主安装/启用及真实调用仍由用户执行。
+- 你自己做的 v6 文件插件：只走 `package_build` + `package_install`，照 `package_install` 回执原文告诉用户（见内置技能 `learn-external-agent` 的提醒用户一节）；不再给 `/plugins install` 那一行，免得同一个插件装两次。

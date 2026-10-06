@@ -28,7 +28,7 @@ from agent_py_agent.agent.tooling.registry import _declared_deferred_names
 DECLARED = {
     "admin_controls", "cancel_session_task", "gateway_status",
     "manage_models", "memory_search", "package_build", "package_install", "publish_audit_update", "restart_gateway", "schedule",
-    "send_message", "send_session_message", "stop_named_work", "update_persona",
+    "send_message", "send_session_message", "skill_summarize", "stop_named_work", "update_persona",
     "user_config", "watch_stream",
 }
 
@@ -110,6 +110,7 @@ def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
     ("关闭某个用户的决策模型", "admin_controls"),
     ("把学来的方法打成能力包", "package_build"),
     ("把打好的能力包装上", "package_install"),
+    ("把这次的做法总结成内部技能", "skill_summarize"),
 ])
 def test_natural_requests_find_each_declared_tool(tmp_path, query, tool):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)

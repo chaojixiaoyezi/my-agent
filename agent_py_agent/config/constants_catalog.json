@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 934,
+  "count": 939,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1596,12 +1596,28 @@
       "description": "浏览当前会话历史时默认取多少条。"
     },
     {
+      "name": "FOCUS_LIMIT_CHARS",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 500,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "用户给的总结重点最多保留的字符数。"
+    },
+    {
       "name": "UPDATABLE_COUNT",
       "file": "agent_py_agent/agent/capability/skill_learning.py",
       "value": 3,
       "unit": "个",
       "category": "其它",
       "description": "单轮最多更新几条已登记的自主学习 Skill。"
+    },
+    {
+      "name": "_USER_REQUESTED_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同时记着的“用户要求总结”标记、以及按会话记着的“最近完成的那次活”各自的上限：超出丢最早的。"
     },
     {
       "name": "BODY_MAX_CHARS",
@@ -1666,6 +1682,22 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "适用时机字段的最大字符数。"
+    },
+    {
+      "name": "RECALLED_MEMORY_CHARS",
+      "file": "agent_py_agent/agent/capability/skill_learning_request.py",
+      "value": 600,
+      "unit": "字符",
+      "category": "其它",
+      "description": "每条召回记忆正文的截断字符数。"
+    },
+    {
+      "name": "RECALLED_MEMORY_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_request.py",
+      "value": 8,
+      "unit": "个",
+      "category": "其它",
+      "description": "用户要求总结时，随材料带上的本轮召回记忆最多条数。"
     },
     {
       "name": "TEXT_LIMIT_CHARS",
@@ -6194,6 +6226,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "进程管道排空超时 2 秒：收尾时防止子进程输出把管道堵死。"
+    },
+    {
+      "name": "_SUMMARIZED_PROMPT_PREVIEW_CHARS",
+      "file": "agent_py_agent/agent/tooling/skill_summarize_tool.py",
+      "value": 80,
+      "unit": "字符",
+      "category": "其它",
+      "description": "回执里展示\"总结的是哪一次的活\"时，那次提问最多显示的字符数。"
     },
     {
       "name": "_BUSY_RETRY_ATTEMPT_COUNT",

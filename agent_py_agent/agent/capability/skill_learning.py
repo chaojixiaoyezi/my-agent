@@ -6,6 +6,7 @@
 # 模块用途: 把主代理完成的复杂任务在后台总结成 owner 的自学 Skill，全程不需要用户确认、全程留账。
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -23,10 +24,11 @@ from .skill_learning_prompt import (
     skill_learning_response_schema,
 )
 from .skill_learning_publish import PublishRequest, SkillLearningGateError, publish_learned_skill
-from .skill_learning_request import build_learning_request
+from .skill_learning_request import bounded_text, build_learning_request, recalled_memories
 from .skill_learning_store import (
     CODE_QUEUE_FULL,
     CODE_REQUEST_CORRUPT,
+    CODE_USER_REQUEST_INELIGIBLE,
     EVENT_DROPPED,
     EVENT_FAILED,
     EVENT_REJECTED,
@@ -36,6 +38,8 @@ from .skill_learning_store import (
     SkillLearningRegistry,
     SkillLearningStore,
     SkillLearningStoreError,
+    request_key,
+    utc_now,
 )
 from .skill_snapshot import skill_content_sha256
 from .skills import parse_skill_file
@@ -95,6 +99,83 @@ class SkillLearningRunResult:
     request_key: str = ""
 
 
+# 同时记着的“用户要求总结”标记、以及按会话记着的“最近完成的那次活”各自的上限：超出丢最早的。
+_USER_REQUESTED_LIMIT_COUNT = 64
+# 用户给的总结重点最多保留的字符数。
+FOCUS_LIMIT_CHARS = 500
+# 入队结果里算"已经排上"的两种（新排上，或同一请求键早已在队里）。
+_QUEUED = frozenset({"queued", "duplicate"})
+
+# LLM: "用户要求总结"的两种落点，只在本进程内（Gateway 重启后找不到就照实说找不到）：
+#   - marks：会话任务 id → 重点。这一轮正在做活时打标记，这个任务收尾（可能在后面的运行里，会话任务 id 不变）时取走；
+#   - recent：会话线程 id → {request: 这个线程最近一次完成的会话任务的学习材料（按自动总结同一规则备好、再带上那次召回的
+#     相关记忆，已截断脱敏），
+#     user_requested: 这次活是否已按用户要求入队过}。用户在做完之后的下一句说"总结一下"时当场入队这一份；已按用户要求入队过的
+#     不再重复（复审：同一次活不入队两次）。
+#   两张表都有上限，超出丢最早的。不写文件、不调模型。
+# 类用途: 记住用户要求总结的标记和每个会话最近完成的那次活。
+class _UserRequests:
+    # LLM: 构造只建两张空表和一把锁。
+    # 函数用途: 初始化标记表与最近完成表。
+    def __init__(self) -> None:
+        self.marks: dict[str, str] = {}
+        self.recent: dict[str, dict[str, object]] = {}
+        self.lock = threading.Lock()
+
+    # LLM: 见类注释；只改内存。
+    # 函数用途: 给一个会话任务记下"收尾时按用户要求总结"。
+    def mark(self, task_id: str, focus: str) -> None:
+        with self.lock:
+            _bounded_put(self.marks, task_id, focus)
+
+    # LLM: 见类注释；取走即删，同一标记只用一次。
+    # 函数用途: 取走某个会话任务的标记（没有返回 None）。
+    def take_mark(self, task_id: str) -> str | None:
+        with self.lock:
+            return self.marks.pop(task_id, None) if task_id else None
+
+    # LLM: 见类注释；同一会话后完成的覆盖先完成的。只改内存。
+    # 函数用途: 记下某个会话最近完成的那次活的学习请求，以及它是否已按用户要求入队。
+    def remember(self, thread_id: str, request: dict[str, object], user_requested: bool) -> None:
+        with self.lock:
+            _bounded_put(self.recent, thread_id, {"request": request, "user_requested": user_requested})
+
+    # LLM: 取到就把它标成"已按用户要求入队"（调用方随后入队）；已标过的返回 (请求, True)，没有返回 (None, False)。只改内存。
+    # 函数用途: 认领某个会话最近完成的那次活，用来按用户要求入队。
+    def claim_latest(self, thread_id: str) -> tuple[dict[str, object] | None, bool]:
+        with self.lock:
+            entry = self.recent.get(thread_id) if thread_id else None
+            if entry is None:
+                return None, False
+            already, entry["user_requested"] = entry["user_requested"], True
+            return entry["request"], already
+
+    # LLM: 认领后没能入队（队列满）时调用，让用户过一会儿还能再要一次。只改内存。
+    # 函数用途: 撤回对某个会话最近完成那次活的认领。
+    def release(self, thread_id: str) -> None:
+        with self.lock:
+            entry = self.recent.get(thread_id) if thread_id else None
+            if entry is not None:
+                entry["user_requested"] = False
+
+
+# LLM: 两种落点共用：同一次运行的用户请求键固定为 "user:" + 原请求键（与自动总结的请求分开，两条路对同一次活键相同）；
+#   重置时间与尝试次数，带上 requested_by 与截断脱敏后的重点。纯组装。
+# 函数用途: 把一份备好的学习请求改成用户要求的版本。
+def _user_request(request: dict[str, object], focus: str) -> dict[str, object]:
+    return {**request, "request_key": request_key(f"user:{request['request_key']}"), "created_at": utc_now(), "attempts": 0,
+            "requested_by": "user", "user_focus": bounded_text(focus, FOCUS_LIMIT_CHARS)}
+
+
+# LLM: 有界表：放进去后超过上限就丢最早放进去的。只改内存。
+# 函数用途: 往有界表里放一项。
+def _bounded_put(table: dict, key: str, value: object) -> None:
+    table.pop(key, None)
+    table[key] = value
+    while len(table) > _USER_REQUESTED_LIMIT_COUNT:
+        table.pop(next(iter(table)))
+
+
 # LLM: 服务不持有线程或定时器；并发与顺延全靠 store 的运行锁和调用方车道。
 # 类用途: 一个 owner 的自动总结 Skill 服务。
 class SkillLearningService:
@@ -105,13 +186,68 @@ class SkillLearningService:
         self.store = store
         self.settings = settings
         self.runtime = runtime
+        self._user = _UserRequests()
 
-    # LLM: 只写一条请求；不合格返回 ineligible；队列满时丢弃并记 dropped/QUEUE_FULL。副作用：写 requests/ 与账本。
+    # LLM: 这一轮正在做活（已升格的会话任务）时由 skill_summarize 调用：按会话任务 id 记标记，这个任务收尾时取走。不写文件。
+    # 函数用途: 记下"这个会话任务收尾时要按用户要求总结"。
+    def request_learning(self, task_id: str, focus: str) -> None:
+        self._user.mark(str(task_id), str(focus or ""))
+
+    # LLM: 只在会话任务完成时被收口调用。先按会话任务 id 取走用户标记；按自动总结同一规则（门槛 1 轮）备好这次的请求，再带上
+    #   本轮召回的相关记忆，作为用户要求总结时的材料。有标记就按用户要求入队这份材料（不看最少工具轮数，其余结构化条件照旧）；
+    #   没有标记就照常按门槛入队自动总结的请求（不带记忆，和原来逐字节一样）。最后（入队抛错也照做）把材料记成这个会话最近完成
+    #   的那次活：按用户要求入队成功才记"已入队过"，队列满或入队出错都不记，用户还能再要（复审 3 轮）。不合格返回 ineligible；
+    #   队列满时丢弃并记 dropped/QUEUE_FULL。副作用：写 requests/ 与账本、改内存里的两张表。
     # 函数用途: 收口时按结构化条件登记一次学习请求，返回 queued/duplicate/queue_full/ineligible。
     def enqueue_from_finalize(self, ctx: object) -> str:
-        request = build_learning_request(ctx, self.settings.min_tool_rounds)
-        if request is None:
+        attrs = getattr(ctx, "task_attributes", None)
+        focus = self._user.take_mark(str((attrs if isinstance(attrs, dict) else {}).get("conversation_task_id") or ""))
+        prepared = build_learning_request(ctx, 1)
+        material = None if prepared is None else {**prepared, "recalled_memories": recalled_memories(ctx)}
+        outcome = "failed"
+        try:
+            if focus is not None:
+                outcome = self._enqueue_requested(ctx, material, focus)
+            else:
+                request = build_learning_request(ctx, self.settings.min_tool_rounds)
+                outcome = "ineligible" if request is None else self._enqueue(request)
+        finally:
+            if material is not None and material.get("thread_id"):
+                self._user.remember(str(material["thread_id"]), material, focus is not None and outcome in _QUEUED)
+        return outcome
+
+    # LLM: 有用户标记的收尾：材料不合格（比如后台运行）时在自学习账本 events 里留一条丢弃事件（带 run_id，可追溯；复审小问题），
+    #   合格就按用户要求入队。有写文件副作用。
+    # 函数用途: 按用户要求把收尾的这次活入队。
+    def _enqueue_requested(self, ctx: object, material: dict[str, object] | None, focus: str) -> str:
+        if material is None:
+            self.store.append_event(SkillLearningEvent(event=EVENT_DROPPED, code=CODE_USER_REQUEST_INELIGIBLE,
+                                                       run_id=str(getattr(ctx, "run_id", "") or "")))
             return "ineligible"
+        return self._enqueue(_user_request(material, focus))
+
+    # LLM: 用户在做完之后的下一句说"总结一下"时由 skill_summarize 调用：认领这个会话最近完成的那次活备好的请求，按用户要求入队
+    #   （和"正在做的活"那条路同一个用户请求键，不被自动总结的同一请求去重）。找不到返回 ("nothing_recent", None)；这次活已按
+    #   用户要求入队过返回 ("already_requested", 请求)，不再重复。没入队成功（队列满或写入抛错）就撤回认领，抛错照常往外抛
+    #   （复审 3 轮）。副作用：写 requests/ 与账本、改内存表。
+    # 函数用途: 把这个会话刚做完的那次活交给自学习流水线，返回 (入队结果, 请求)。
+    def summarize_recent(self, thread_id: str, focus: str) -> tuple[str, dict[str, object] | None]:
+        prepared, already = self._user.claim_latest(str(thread_id or ""))
+        if prepared is None:
+            return "nothing_recent", None
+        if already:
+            return "already_requested", prepared
+        request, outcome = _user_request(prepared, focus), "failed"
+        try:
+            outcome = self._enqueue(request)
+        finally:
+            if outcome not in _QUEUED:
+                self._user.release(str(thread_id or ""))
+        return outcome, request
+
+    # LLM: 写一条请求；队列满时记 dropped/QUEUE_FULL。有写文件副作用。
+    # 函数用途: 入队并在队列满时记账。
+    def _enqueue(self, request: dict[str, object]) -> str:
         outcome = self.store.enqueue(request)
         if outcome == "queue_full":
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
@@ -293,6 +429,7 @@ def _config_int(config: object, key: str, default: int) -> int:
 __all__ = [
     "CODE_MODEL_FAILED",
     "CODE_MODEL_TIMEOUT",
+    "FOCUS_LIMIT_CHARS",
     "STATUS_BUSY",
     "STATUS_DAILY_LIMIT",
     "STATUS_IDLE",

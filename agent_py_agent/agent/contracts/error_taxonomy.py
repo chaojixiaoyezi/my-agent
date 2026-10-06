@@ -3630,3 +3630,34 @@ ERROR_CONTRACTS.update({
         recovery_hint="这张安装单已经执行过，同一张单只执行一次；回执里有当时的结果，要重装请让 my-agent 重新出单。",
     ),
 })
+
+
+# ---- learnpack "总结一下"（2026-10-06 3a）：独立块 ----
+# LLM: 只由 tooling/skill_summarize_tool 产生；改文案须同步 test_skill_summarize_tool。
+ERROR_CONTRACTS.update({
+    "SKILL_SUMMARIZE_DISABLED": ErrorContract(
+        code="SKILL_SUMMARIZE_DISABLED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="自学习开关 enable_self_learning 关着，没法总结成内部技能；如实告诉用户，管理员可发 /settings set enable_self_learning true 打开。",
+    ),
+    "SKILL_SUMMARIZE_NOTHING_RECENT": ErrorContract(
+        code="SKILL_SUMMARIZE_NOTHING_RECENT", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="这个会话里找不到刚做完、能总结的活（中间重启过也会找不到）；如实告诉用户，等要总结的活做完再调用。",
+    ),
+    "SKILL_SUMMARIZE_NO_CURRENT_TASK": ErrorContract(
+        code="SKILL_SUMMARIZE_NO_CURRENT_TASK", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="这一轮还没有正在做的活：用户要边做边总结，就先动手做活，做了之后再用 target=current 调；只有用户要的确实是刚才已经做完的那次活，才改成 previous。",
+    ),
+    "SKILL_SUMMARIZE_QUEUE_FULL": ErrorContract(
+        code="SKILL_SUMMARIZE_QUEUE_FULL", category="state", retryable=True,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="排着等总结的活已经满了，这次没有入队；如实告诉用户过一会儿再说一次，不要自己反复重试。",
+    ),
+    "SKILL_SUMMARIZE_NO_RUN": ErrorContract(
+        code="SKILL_SUMMARIZE_NO_RUN", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="当前不在一次对话回合里，没法确定要总结哪一次的活；在用户的对话里再调用。",
+    ),
+})
