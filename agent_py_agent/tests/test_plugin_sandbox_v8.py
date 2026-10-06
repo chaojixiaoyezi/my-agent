@@ -639,7 +639,13 @@ def test_restricted_policy_allowlist_limits_reads_and_preserves_ancestor_metadat
     assert report["system_read"] == "OK"
     assert report["ancestor_stat"] is True
     assert report["denied_stat"] is False
-    assert report["ancestor_names"] is None
+    names = report["ancestor_names"]
+    if sys.platform == "darwin":
+        # Seatbelt：上级目录只给 file-read-metadata，列目录被拒。
+        assert names is None
+    else:
+        # bwrap allowlist：空 tmpfs 根只挂授权根，上级目录里只剩通往授权根的路径分量；被拒目录必须不可见（3a 10-05，Linux 车道发现）。
+        assert names is not None and unreadable.parent.name not in names, names
 
 
 @needs_linux

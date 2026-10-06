@@ -224,10 +224,14 @@ def test_real_plugin_projection_keeps_fixed_proxy_and_rejects_revoked_activation
         invoke_registered_tool,
         plugin_registry,
     )
+    from agent_py_agent.tests.plugin_enable_fixtures import (
+        enable_with_confirmation,
+        unrestricted_service,
+    )
 
-    service = installed_runtime_plugin(tmp_path)
-    enabled = service.command("/plugins enable sample-peek", revision=service.catalog().revision, request_id="enable")
-    assert enabled["state"] == "succeeded", enabled
+    # 本例测工具展示投影，不测沙箱：按 opp 夹具显式选不受限模式，并走两步确认启用（3a 10-05）。
+    service = unrestricted_service(installed_runtime_plugin(tmp_path))
+    enable_with_confirmation(service, "sample-peek")
     registry = plugin_registry(service, catalog_deferred_categories=[])
     try:
         registry.prepare_for_run()

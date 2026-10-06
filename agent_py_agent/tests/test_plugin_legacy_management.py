@@ -162,7 +162,11 @@ def test_changed_permission_or_path_identity_invalidates_confirmation(tmp_path, 
     root.mkdir()
     first = preview(service, f"--read-root {shlex.quote(str(root))}")
     facts = first["details"]["confirmation"]
-    command = facts["confirm_command"] + " --network"
+    # 权限集合变化用“再加一个读目录”触发：Linux 上沙箱插件请求网络会先被端口隔离预检拒绝（plugin_sandbox_problem），
+    #   到不了确认门；加读目录在两个平台都会真正改变授权事实（3a 10-05，Linux 车道发现）。
+    other = (tmp_path / "other").resolve()
+    other.mkdir()
+    command = facts["confirm_command"] + f" --read-root {shlex.quote(str(other))}"
     changed = service.command(command, revision=service.catalog().revision, request_id="changed")
     assert changed["error_code"] == "PLUGIN_CONFIRMATION_REQUIRED", changed
     assert changed["details"]["confirmation"]["confirm_code"] != facts["confirm_code"]
