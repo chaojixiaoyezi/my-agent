@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## learnpack 第 7 步：整体验证（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
+
+- **整条链路**：`agent_py_agent/tests/test_learnpack_e2e.py`（3 条）——假模型驱动真实 SimpleAgent 对话回合，工具、`/plugins#` 与 `/plugins` 命令都是真的；用户命令走 TUI（PluginManagement）和飞书私聊（网关会话控制）两个入口。
+  - 能力包、开关关：学 → 打包 → 只给 `/plugins#drama-scenes 安装 <单号>` → TUI 确认装上 → 同一行再发（TUI 同一请求编号、飞书新消息）都回 `PACKAGE_INSTALL_ORDER_USED` 并回放当时的结果，安装记录不增加 → 新建 agent（相当于重启）后 `/plugins#` 查看照常 → 飞书停用、TUI 启用 → 再学出 0.2.0、飞书确认 → 飞书退回（先预览、再发那一行）回到 0.1.0 → TUI 停用、删除，`/plugins#` 列表为空，她做的两版字节仍在 learnpack 存储。
+  - 能力包、开关开：直接装上并启用、不开单，安装回执由宿主写明版本与 `/plugins#` 管理命令，飞书 `/plugins#` 列表标"她做的"。
+  - 插件（hello-node 的 5 个文件由她逐个写进工作区；没有 node 时跳过）：插件开关关只给 `/plugins confirm <单号>`，确认后装上，`/plugins list` 标她做的、不进能力包列表，停用、删除；插件开关开时直接装上、不开单。
+  - 合并链路见第 6 步 `test_learnpack_merge.py`。"回放"按产品已有语义验：确认单只执行一次，重发回放当时结果；仓库里现成的 replay 设施（tests/replay、fake_llm_runner）是交付合同的假工具回放，不覆盖这条安装链路，所以没套用。
+- **连带**：learnpack 整组 15 个测试文件（开关、打包、安装、存储、`/plugins#`、学习技能、总结、门槛、合并、整条链路，以及跟着改的 TUI 输入、默认收起、写插件技能）+ 14 个守卫：584 passed / 0 skipped / 0 failed（本机有 node 与平台沙箱，插件用例都真跑了）。
+- **本地严格门禁**（第四节，逐条存 rc、不经管道）：`ruff check agent_py_agent scripts` rc=0；`check_doc_sync.py --base e5d7f3c90` rc=0；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` rc=0（报告写到 scratchpad，不动仓库里的 CODE_SIZE_REPORT.md）；`git diff --check e5d7f3c90` rc=0；`check_clean_package.py .` rc=0；`check_import_boundaries.py` rc=0。
+- **Linux 通道**：在本提交上用 linux-test-main 检出跑全量 12 片，结果写在下一个提交。
+
 ## learnpack 第 6 步：能力包推荐门槛与同领域合并（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
 
 - **用例**：
