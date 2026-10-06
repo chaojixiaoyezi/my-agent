@@ -230,6 +230,7 @@
     |-- PLUGIN_HOST_API.md               # 界面型插件的宿主只读 API：v4 声明、按激活发令牌、主题白名单
     |-- PLUGIN_OBSERVATION_CANDIDATES.md # 插件观察候选结构设计稿：manifest 声明、宿主铸 ID、两层执行前复核与动作候选决策点
     |-- CAPABILITY_PACKS_V2.md           # 能力包 v2：宿主跑钉住的原版检查程序、输入原件保护、交付存在（已确认、实施中）
+    |-- LEARN_TO_PACK.md                 # 学外部 agent 做成内部技能或能力包：自装开关与提醒、/plugins# 命令（已评估、待做）
     |-- J16_SCREEN_OBSERVATION.md        # J16 屏幕识别设计（已确认、未实施）：自家适配器结构化窗口观察、两层复核、自动执行默认关
     |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例
     |-- PLUGIN_PROCESS_SANDBOX.md        # 插件进程 OS 沙箱试点：开关语义、失败拒绝、已知限制与验证
