@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## learnpack 第 1 步：两个自动装开关（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
+
+- **用例**：`agent_py_agent/tests/test_self_install_switches.py`（12 条）——两个开关在 dataclass 与随包 YAML 都默认关；参数中心登记为管理员专用边界项、生效时机 `immediate`；模型 `set` 返回 `PARAMETER_BOUNDARY` 且不建文件，`/settings` 写入（接受“开”）后文件权限 600、马上读到新值；即使 agent 上缓存了旧快照也按文件现读；用户文件缺失读随包默认、路径不可读按关；回执里的四条开关命令能被 `/settings` 解析器与 TUI 文本回放原样接受；Gateway `/settings set` 对本机管理员和 IM 绑定管理员都能开关、回执写“马上生效”不提 `/restart`，飞书普通用户被拒；模型用 `user_config view` 能只读看到当前值。
+- **命令**：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_self_install_switches.py -q` → 12 passed。
+- **连带**：引用 parameter_changes / parameter_registry / user_config_capability / capability 配置 / settings_control_service / user_config_tool / 前端参数目录的 102 个测试文件 + 14 个守卫文件全过；唯一失败 `test_pack_verification_service.py::test_location_host_paths_are_redacted_before_reaching_the_model` 在基线 `e5d7f3c90` 源码上同样失败（本机沙箱 + 路径脱敏，与本改动无关）。
+- **变异**（7/7 KILLED，按备份还原、sha256 一致）：开关恒为开；读不到按开；改读缓存快照；不登记管理员可改；生效时机报重启；回执说明不分生效时机；开关命令拼错。
+- **配置与前端**：`node frontend/scripts/sync-backend-config.mjs` 重新生成（265 字段）且 `--check` in sync。
+
 ## 命令源长度上限 cmdcap + cmdcap-fix（2026-10-05，worker/cmdcap，基于 17l 头 886965f3a；待非作者初审）
 
 - **用例**：`agent_py_agent/tests/test_command_policy_source_limit.py`（9 条）——恰好等于上限放行到解析、上限+1 拒绝；1MB 超限在解析前拒绝且 <50ms；analyze_command 同样报 COMMAND_SOURCE_TOO_LARGE；**evaluate / analyze / controlled_exec 三个入口超限时绝不调用 shlex（monkeypatch 一调即报错）**；argv 形态不受闸；子代理文本助手（identity/scope/patch）超限不解析、按保守结果返回；错误码登记且恢复提示含 write_file。

@@ -104,6 +104,23 @@ subagent_input_media_enabled: false
 # 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后重启 Gateway 生效。
 capability_pack_host_verification_enabled: false
 
+# 能力包自动装（learnpack 第一期）：她自己学外部 agent、自己打好的能力包，要不要不经你确认直接装上。
+# - true: 她做好就自己装上（只装她自己打包、指纹对得上的包），装完告诉你装了什么、怎么删、怎么关掉自动装。
+# - false: 推荐默认值；她做好先问你，并给你一行确认命令，你发回来才装（隔多久都有效，只执行一次）。
+# 包里要宿主运行的检查程序不归这个开关管，跟着 plugin_self_install_enabled 走。
+# 只能由你经 /settings（管理员）或配置文件修改，模型不能改；改完马上生效，不用重启。
+# 撤回：发 /settings set capability_pack_self_install_enabled false。
+capability_pack_self_install_enabled: false
+
+# 插件自动装（learnpack 第一期）：她自己造的插件，要不要不经你确认直接装上并启用。
+# - true: 她做好就自己装上并启用（只装她自己打包、指纹对得上的插件），装完告诉你装了什么、怎么删、怎么关掉自动装；
+#   插件装上以后能做什么仍按现有插件权限规则，这个开关只管"谁来按安装"。
+# - false: 推荐默认值；她做好先问你，并给你一行确认命令，你发回来才装。
+# 能力包里要宿主运行的检查程序也跟这个开关走（会运行程序的都算装备）。
+# 只能由你经 /settings（管理员）或配置文件修改，模型不能改；改完马上生效，不用重启。
+# 撤回：发 /settings set plugin_self_install_enabled false。
+plugin_self_install_enabled: false
+
 # 屏幕/页面观察的自动执行（J16 第 7 节）：action_candidate 决策点（决策设置里模式为 apply）采用 Jev 的选择后，宿主要不要替主模型
 # 自动执行一次动作。
 # - true: 所选候选恰有一个只凭候选编号就能调用的动作工具（如 click_candidate）时，宿主以 actor=decision 调用它，走和模型调用

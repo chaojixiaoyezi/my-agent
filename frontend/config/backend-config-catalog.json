@@ -9,7 +9,7 @@
     {
       "id": "capability_config",
       "path": "agent_py_agent/config/capability_config.yaml",
-      "fieldCount": 35
+      "fieldCount": 37
     }
   ],
   "schema": {
@@ -4623,6 +4623,40 @@
             "order": 22
           },
           {
+            "key": "capability_pack_self_install_enabled",
+            "label": "capability_pack_self_install_enabled（capability pack self install enabled）",
+            "description": "能力包自动装（learnpack 第一期）：她自己学外部 agent、自己打好的能力包，要不要不经你确认直接装上。 - true: 她做好就自己装上（只装她自己打包、指纹对得上的包），装完告诉你装了什么、怎么删、怎么关掉自动装。 - false: 推荐默认值；她做好先问你，并给你一行确认命令，你发回来才装（隔多久都有效，只执行一次）。 包里要宿主运行的检查程序不归这个开关管，跟着 plugin_self_install_enabled 走。 只能由你经 /settings（管理员）或配置文件修改，模型不能改；改完马上生效，不用重启。 撤回：发 /settings set capability_pack_self_install_enabled false。",
+            "type": "boolean",
+            "defaultValue": false,
+            "currentValue": false,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 23
+          },
+          {
+            "key": "plugin_self_install_enabled",
+            "label": "plugin_self_install_enabled（plugin self install enabled）",
+            "description": "插件自动装（learnpack 第一期）：她自己造的插件，要不要不经你确认直接装上并启用。 - true: 她做好就自己装上并启用（只装她自己打包、指纹对得上的插件），装完告诉你装了什么、怎么删、怎么关掉自动装； 插件装上以后能做什么仍按现有插件权限规则，这个开关只管\"谁来按安装\"。 - false: 推荐默认值；她做好先问你，并给你一行确认命令，你发回来才装。 能力包里要宿主运行的检查程序也跟这个开关走（会运行程序的都算装备）。 只能由你经 /settings（管理员）或配置文件修改，模型不能改；改完马上生效，不用重启。 撤回：发 /settings set plugin_self_install_enabled false。",
+            "type": "boolean",
+            "defaultValue": false,
+            "currentValue": false,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 24
+          },
+          {
             "key": "action_candidate_auto_execute_enabled",
             "label": "action_candidate_auto_execute_enabled（action candidate auto execute enabled）",
             "description": "屏幕/页面观察的自动执行（J16 第 7 节）：action_candidate 决策点（决策设置里模式为 apply）采用 Jev 的选择后，宿主要不要替主模型 自动执行一次动作。 - true: 所选候选恰有一个只凭候选编号就能调用的动作工具（如 click_candidate）时，宿主以 actor=decision 调用它，走和模型调用 完全一样的审批、复核、归档；需要文字的动作（输入）永远不自动执行；两个及以上可选动作不执行；同一观察只执行一次，模型已经 动作过的观察不执行；复核拒绝、失败、用户拒绝都不重试、不改选候选。只对本机管理员主代理生效。 - false: 推荐默认值；只给提示，不替用户点任何东西。 只能由你经 /settings（管理员）或配置文件修改，模型不能自己打开；改后下一次读取生效。",
@@ -4637,7 +4671,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 23
+            "order": 25
           },
           {
             "key": "decision_subagent_model_mode",
@@ -4654,7 +4688,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 24
+            "order": 26
           },
           {
             "key": "decision_subagent_model_candidate_profile_ids",
@@ -4671,7 +4705,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 25
+            "order": 27
           },
           {
             "key": "decision_skill_tool_context_policy",
@@ -4688,7 +4722,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 26
+            "order": 28
           },
           {
             "key": "decision_skill_tool_optional_categories",
@@ -4709,7 +4743,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 27
+            "order": 29
           },
           {
             "key": "decision_skill_tool_mode",
@@ -4726,7 +4760,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 28
+            "order": 30
           },
           {
             "key": "decision_agent_timeout_min_seconds",
@@ -4743,7 +4777,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 29,
+            "order": 31,
             "min": 0,
             "max": 3600
           },
@@ -4762,7 +4796,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 30,
+            "order": 32,
             "min": 0,
             "max": 3600
           },
@@ -4781,7 +4815,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 31
+            "order": 33
           },
           {
             "key": "session_messaging_user_enabled",
@@ -4798,7 +4832,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 32
+            "order": 34
           },
           {
             "key": "session_task_admin_enabled",
@@ -4815,7 +4849,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 33
+            "order": 35
           },
           {
             "key": "session_task_max_chain_depth",
@@ -4832,7 +4866,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 34,
+            "order": 36,
             "min": 0,
             "max": 1000000
           },
@@ -4851,7 +4885,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 35,
+            "order": 37,
             "min": 0,
             "max": 1000000
           }

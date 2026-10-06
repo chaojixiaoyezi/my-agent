@@ -19,9 +19,12 @@ from .config_io import load_simple_yaml
 # 生效时机（如实报告，不夸大）
 EFFECT_NEXT_SESSION = "next_session"
 EFFECT_GATEWAY_RESTART = "restart_gateway"
+# 用到时按文件现读的项（如 learnpack 两个自动装开关）：保存即生效。
+EFFECT_IMMEDIATE = "immediate"
 
 _EFFECT_TEXT = {
     EFFECT_NEXT_SESSION: "保存后对**下一次新建会话**生效；当前正在跑的会话仍用已加载的值。",
+    EFFECT_IMMEDIATE: "保存后马上生效：用到这个开关时会按文件重新读取，不用重启 Gateway。",
     EFFECT_GATEWAY_RESTART: ("保存后需要重启 Gateway 才生效（命令行会话下次启动时读取）；当前进程不会热加载。"
                              "管理员可以发 /restart 或让 my-agent 安全重启 Gateway。"),
 }
@@ -171,6 +174,8 @@ BOUNDARY_KEYS: dict[str, str] = {
     "enable_capability_package_selection": "决定模型能否在新任务里一次选择能力包（C16：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
     "enable_memory_search_tool": "决定主模型是否多一个读取本人长期记忆的工具（J9：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
     "capability_pack_host_verification_enabled": "决定宿主是否自动运行能力包里的检查程序（执行包内代码，属于安全边界）；仅用户经 /settings 修改，模型不能改",
+    "capability_pack_self_install_enabled": "决定她能否不经确认自己装上她做的能力包（learnpack，装不装由用户决定）；仅用户经 /settings 修改，模型不能改",
+    "plugin_self_install_enabled": "决定她能否不经确认自己装上并启用她造的插件（插件会运行程序，装不装由用户决定）；仅用户经 /settings 修改，模型不能改",
     "my_agent_home": "宿主数据根，属于宿主控制面",
     "my_agent_owner_provider": "owner 身份解析，属于宿主控制面",
     "my_agent_owner_kind": "owner 身份解析，属于宿主控制面",
@@ -189,6 +194,8 @@ USER_SETTINGS_BOUNDARY_KEYS = frozenset(
      "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled",
      "capability_pack_host_verification_enabled", "action_candidate_auto_execute_enabled",
      "computer_use_observation_enabled", "plugin_events_enabled",
+     # learnpack：能力包、插件两个"自动装"开关；打开等于让她不经确认安装，开关只给管理员。
+     "capability_pack_self_install_enabled", "plugin_self_install_enabled",
      # B5：收紧征询的等待预算。它登记成边界是为了防模型放大预算（模型 set/reset/revert 一律拒），
      # 但管理员本就该能调：调大只会多等，超时仍收紧成 ask，不会变松。
      # 老插件权限：老格式新授权默认收紧是安全边界，模型不能改或降级已收紧的固定激活。
@@ -558,6 +565,7 @@ def capability_summary() -> dict[str, Any]:
 __all__ = [
     "BOUNDARY_KEYS",
     "EFFECT_GATEWAY_RESTART",
+    "EFFECT_IMMEDIATE",
     "EFFECT_NEXT_SESSION",
     "TUNABLE_KEYS",
     "TunableSpec",

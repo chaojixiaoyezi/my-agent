@@ -67,6 +67,10 @@ class CapabilityConfig:
     subagent_input_media_enabled: bool = False
     # 能力包宿主核验：宿主自动运行钉住包里声明的原版检查程序；执行包内代码属于安全边界，默认关闭。
     capability_pack_host_verification_enabled: bool = False
+    # 能力包自动装（learnpack）：她自己打好的能力包不经确认直接装；关着时给用户一行确认。默认关，仅管理员 /settings 可改。
+    capability_pack_self_install_enabled: bool = False
+    # 插件自动装（learnpack）：她自己造的插件不经确认直接装并启用；包里的宿主检查程序也跟它走。默认关，仅管理员可改。
+    plugin_self_install_enabled: bool = False
     # action_candidate 决策点采用建议后，宿主自动执行一次只凭候选编号的动作（如 click_candidate）；会替用户点击，默认关闭。
     action_candidate_auto_execute_enabled: bool = False
     # 失败自省自动拆分：should_split + 拆分建议存在时自动 split_task 重新派工。

@@ -34,6 +34,7 @@ from .parameter_registry import (
 )
 from .user_config_capability import (
     BOUNDARY_KEYS,
+    EFFECT_IMMEDIATE,
     TUNABLE_KEYS,
     USER_SETTINGS_BOUNDARY_KEYS,
     effect_text,
@@ -46,6 +47,8 @@ LEDGER_NAME = "settings-changes.jsonl"
 _MAX_LEDGER_RECORD_COUNT = 500
 # 设置修改台账单条文本最多 500 字符：防超长记录撑爆台账。
 _MAX_TEXT_CHARS = 500
+# 现读生效项的写入回执说明：这类键用到时按文件重新读取，写盘即生效。
+_IMMEDIATE_NOTE = "这个参数用到时会按文件重新读取，已经生效，不用重启。"
 _TRUE_WORDS = frozenset({"true", "1", "yes", "on", "开", "开启", "是"})
 _FALSE_WORDS = frozenset({"false", "0", "no", "off", "关", "关闭", "否"})
 _BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外部地址、会运行代码的服务或插件等），不能由模型或聊天命令修改"
@@ -269,13 +272,17 @@ def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dic
     return entry
 
 
+# LLM: note 按登记的生效时机如实说：现读的键（EFFECT_IMMEDIATE）已经生效，其余仍是启动时加载的值。纯函数。
+# 函数用途: 把一次成功写入排成给调用方（模型工具、聊天 /settings）的结构化回执。
 def _receipt(path: Path, spec: ParameterSpec, entry: dict[str, object], actual: object) -> dict[str, object]:
     saved = entry.get("value")
+    note = (_IMMEDIATE_NOTE if spec.effect == EFFECT_IMMEDIATE
+            else "当前进程仍在使用启动时加载的值，请按 effect_text 的时机生效。")
     return {
         "ok": True, "key": spec.key, "action": entry["action"], "change_id": entry["id"], "saved_to": str(path),
         "previous": entry.get("previous"), "saved": saved if saved is None else str(saved).strip('"'),
         "written_value_matches": True, "effective": mask_value(spec.key, actual), "effect_when": spec.effect,
-        "effect_text": effect_text(spec.effect), "note": "当前进程仍在使用启动时加载的值，请按 effect_text 的时机生效。",
+        "effect_text": effect_text(spec.effect), "note": note,
     }
 
 

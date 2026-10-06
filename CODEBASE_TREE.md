@@ -62,6 +62,7 @@
 |-- agent_py_agent/agent/capability/pack_verification_service.py # 宿主核验主流程：记基线、写完就查、收尾再查、输入解析、返工 1 次
 |-- agent_py_agent/agent/capability/pack_verification_hooks.py # 宿主核验接进工具执行缝隙和收尾通道的钩子（不新增模型工具）
 |-- agent_py_agent/agent/capability/pack_verification_scope.py # 宿主核验生效范围：开关、owner、钉住的带检查程序的包、基线模式
+|-- agent_py_agent/agent/capability/self_install_switches.py # learnpack 两个“自动装”开关（能力包、插件）的唯一读取入口：按文件现读、读不到按关，给回执用的开关事实与命令原文
 |-- agent_py_agent/agent/capability/pack_verification_matching.py # 按“路径模式 + 字段匹配”认文件，及有界工作区快照
 |-- agent_py_agent/agent/capability/pack_verification_ledger.py # 每 run 一本的宿主核验账本（基线、结果、收尾、返工，权限 600）
 |-- agent_py_agent/agent/capability/pack_verification_report.py # 从核验账本生成最终交付事实和宿主提示文字
@@ -1630,6 +1631,7 @@ docs/
 - `agent_py_agent/agent/tooling/file_syntax_diagnostics.py`：文件修改的有界纯语法观察；写入成功、当前语法与任务质量分开，禁止重新读取目标猜测已提交内容。
 - `agent_py_agent/agent/conversation/capability_selection_state.py`：原TaskLink的可选值类型和结果摘要，CAS与持久化仍归store.tasks。
 - `agent_py_agent/agent/capability/package_provider.py`：只从当前 owner 的原安装表取得已启用包，每次读取复查代次与摘要。
+- `agent_py_agent/agent/capability/self_install_switches.py`：learnpack 自动装开关的唯一读取口，每次按文件现读（不吃 agent 缓存快照），参数中心据它把两个开关的生效时机报成“马上生效”。
 - `scripts/build_capability_package.py`：把声明和私有资源构建为 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。
 - `examples/capability-packages/drama-text-a/methods/review-source.md`、`review-continuity.md`、`review-delivery.md`：A0.2.1 的来源、接续、交付三份私有审阅分表；沿入口按需读取，不进入全局 Skill。

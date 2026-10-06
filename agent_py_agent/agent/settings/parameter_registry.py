@@ -24,6 +24,7 @@ from .parameter_metadata import field_readers, ranges, unit_for_key
 from .user_config_capability import (
     BOUNDARY_KEYS,
     EFFECT_GATEWAY_RESTART,
+    EFFECT_IMMEDIATE,
     TUNABLE_KEYS,
     is_credential_key,
     packaged_config_path,
@@ -236,9 +237,11 @@ def _yaml_source_specs(source: str) -> dict[str, ParameterSpec]:
 
 # LLM: capability 配置有 CapabilityConfig dataclass：类型与默认值以 dataclass 为准（加载器会 coerce），
 #   说明仍从随包 capability_config.yaml 注释取；config_warnings 是加载器元数据，不登记（主配置的同名键已登记）。
+#   生效时机默认报"重启 Gateway"；用到时按文件现读的键（SELF_INSTALL_SWITCH_KEYS）如实报"马上生效"。
 # 函数用途: 从 CapabilityConfig 与随包 YAML 生成 capability 来源的参数登记。
 def _capability_specs() -> dict[str, ParameterSpec]:
     from ..capability.config import CapabilityConfig
+    from ..capability.self_install_switches import SELF_INSTALL_SWITCH_KEYS
 
     path = _packaged_extra_config_path(SOURCE_CAPABILITY)
     descriptions = _descriptions_from_lines(path.read_text(encoding="utf-8").splitlines())
@@ -253,7 +256,8 @@ def _capability_specs() -> dict[str, ParameterSpec]:
             key=item.name, default=default, value_type=value_type,
             description=descriptions.get(item.name, ""), category=category_for(item.name),
             safety=_safety_for(SOURCE_CAPABILITY, item.name, value_type),
-            masked=is_masked(item.name), effect=EFFECT_GATEWAY_RESTART,
+            masked=is_masked(item.name),
+            effect=EFFECT_IMMEDIATE if item.name in SELF_INSTALL_SWITCH_KEYS else EFFECT_GATEWAY_RESTART,
             common=False, unit=unit_for_key(item.name), source=SOURCE_CAPABILITY,
         )
     return specs
