@@ -171,6 +171,13 @@
   - 门禁：ruff All checks passed；import boundaries=0；DOC_SYNC_PASS；strict code-size `hard=0 blocked=False`；size_diff **新增 0 / 消失 57**；`git diff --check` 干净；clean-package OK。
 - **未验证**：真实 macOS ps 输出链路（沙箱内 ps 被禁，用打桩覆盖）；真实 claim 恢复场景；非作者初审。
 
+## macOS 启动指纹改用 sysctl（3a，2026-10-05，17n 候选）
+
+- 背景：17n 候选（17m + starttime 线）在 macOS 沙箱外跑 161 个连带测试文件，`test_plugin_configure_management.py::test_configure_original_operation_and_result_never_expose_values` 失败——heartbeat 在 macOS 起 `ps` 子进程，撞上“配置不得启动进程”；另实测 `ps -o lstart` 随 LANG/LC_ALL/TZ 变化。
+- 新用例（`test_start_time_unification.py`，前 4 条仅 macOS 跑）：读本进程不起子进程且两次相同；换 TZ/LC_ALL 后不变；秒数与固定 C/UTC 环境下 `ps -o lstart` 的内核时刻一致（钉偏移）；能读其它活进程、退出后与超范围 pid 为 None；非 Linux 非 macOS 返回 None、不调 sysctl、不起进程。比较矩阵补“sysctl 相同/不同”和“旧 lstart 记录 vs 新 sysctl → 不判死”三行；两条 lstart 判死用例改成 sysctl 格式。
+- 结果：`test_start_time_unification.py` + `test_heartbeat.py` + `test_plugin_configure_management.py` **81 passed**。
+- 变异（`scratchpad/mutate_st.py`，原文自动恢复）：退回 ps、偏移改 8、改成本地时间文本、去掉长度检查、去掉平台判断 → **5/5 KILLED**（去掉多余的“秒数>0”兜底后长度检查才有用例守住）。
+
 ## starttime3 锁写端统一与比较双口径（2026-10-05，待初审）
 
 - **改动**：见 DESIGN_LEDGER 同名小节。`runtime_db/repository._start_token` 改走 heartbeat；`local_storage/tool_operations` 两处比较改 `start_time_matches`；`test_start_time_unification.py` +7 例。

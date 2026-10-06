@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 922,
+  "count": 923,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1794,6 +1794,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "可能发生原子替换（inode 复用、时间戳同片）。窗口内读到的结果只返回、不放进缓存。"
+    },
+    {
+      "name": "_DARWIN_KINFO_BUFFER_BYTES",
+      "file": "agent_py_agent/agent/common/heartbeat.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "其它",
+      "description": "接收 struct kinfo_proc 的缓冲区大小（字节）：64 位 macOS 上该结构 648 字节，这里留足余量，实际长度以内核返回为准。"
     },
     {
       "name": "_JSON_LOCK_IDENTITY_RETRY_COUNT",

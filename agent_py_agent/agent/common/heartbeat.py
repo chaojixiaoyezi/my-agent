@@ -10,10 +10,21 @@ from __future__ import annotations
 # LLM: 进程身份必须联合 PID 与启动时间判断；调用方不能把普通心跳年龄当成进程退出证据。
 # 模块用途: 为后台服务保存心跳与精确进程身份，避免 PID 复用导致错误判活。
 
+import ctypes
+import ctypes.util
+import functools
 import math
 import os
-import subprocess
+import struct
+import sys
 import time
+
+# macOS 读单个进程信息的 sysctl 名字：CTL_KERN、KERN_PROC、KERN_PROC_PID（<sys/sysctl.h> 固定协议值），末位补 pid。
+_DARWIN_PROC_PID_MIB_PROTOCOL = (1, 14, 1)
+# 接收 struct kinfo_proc 的缓冲区大小（字节）：64 位 macOS 上该结构 648 字节，这里留足余量，实际长度以内核返回为准。
+_DARWIN_KINFO_BUFFER_BYTES = 4096
+# kinfo_proc 开头就是 kp_proc.p_un.__p_starttime（struct timeval）：8 字节秒 + 4 字节微秒，按本机字节序紧凑读取。
+_DARWIN_TIMEVAL_LAYOUT_PROTOCOL = "=qi"
 
 
 def _read_proc_starttime(proc_stat: str) -> str | None:
@@ -22,27 +33,46 @@ def _read_proc_starttime(proc_stat: str) -> str | None:
     return after[19] if len(after) > 19 else None  # ) 之后第 20 个 = stat 第 22 域 starttime
 
 
-# LLM: ps 的返回码是"能否核验"的一部分：非零返回码、超时、空输出一律返回 None（不可核验），
-#   不得把带错误输出的调用当成有效指纹。
-# 函数用途: 用 ps 读进程启动时刻（macOS 等无 /proc 平台）；读不到返回 None。
-def _read_ps_starttime(pid: int) -> str | None:
+# LLM: 只在 macOS 用；libc 句柄进程内复用一次。加载失败返回 None（读不到 = 不可核验），不退回 ps 子进程。
+# 函数用途: 取 libc 的 sysctl 入口并声明参数类型，供 _read_darwin_starttime 调用。
+@functools.lru_cache(maxsize=1)
+def _darwin_sysctl():
     try:
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    except OSError:
         return None
-    if out.returncode != 0:
-        return None
-    return out.stdout.strip() or None
+    sysctl = libc.sysctl
+    sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                       ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+    sysctl.restype = ctypes.c_int
+    return sysctl
 
 
+# LLM: 直接读内核记录的启动时刻（sysctl kern.proc.pid），不起子进程、不受 LANG/LC_*/TZ 影响。
+#   旧实现用 ps -o lstart：输出随调用方语言和时区变化（同一进程在 zh_CN 与 C 下、不同 TZ 下字符串都不同），
+#   录入方与核对方环境不同时会把活进程判成“不同”（唯一死亡证据）；每次还要起一个 ps 子进程。
+#   返回 "秒.微秒" 数字串；进程不存在时内核返回 0 字节，记 None（不可核验）。pid 超出 C int 范围同样 None。
+# 函数用途: macOS 上读一个进程的启动时刻指纹；读不到返回 None。
+def _read_darwin_starttime(pid: int) -> str | None:
+    sysctl = _darwin_sysctl()
+    if sysctl is None or ctypes.c_int(pid).value != pid:
+        return None
+    mib = (ctypes.c_int * 4)(*_DARWIN_PROC_PID_MIB_PROTOCOL, pid)
+    buffer = ctypes.create_string_buffer(_DARWIN_KINFO_BUFFER_BYTES)
+    size = ctypes.c_size_t(_DARWIN_KINFO_BUFFER_BYTES)
+    if sysctl(mib, len(mib), buffer, ctypes.byref(size), None, 0) != 0:
+        return None
+    if size.value < struct.calcsize(_DARWIN_TIMEVAL_LAYOUT_PROTOCOL):
+        return None
+    seconds, micros = struct.unpack_from(_DARWIN_TIMEVAL_LAYOUT_PROTOCOL, buffer.raw, 0)
+    return f"{seconds}.{micros:06d}"
+
+
+# LLM: 启动指纹只要求“同一台机器上同一进程前后稳定可比”，不要求跨平台统一格式；读不到一律 None（不可核验），
+#   调用方不能凭 None 判死。不起子进程（插件配置等路径禁止启动进程，且主机热路径每次 attempt 都会读）。
+# 函数用途: 读进程启动时刻指纹：Linux 取 /proc/<pid>/stat 的 starttime（时钟 tick），macOS 用 sysctl 读内核启动时刻，
+#   其它平台返回 None。
 def process_start_time(pid: int) -> str | None:
-    """读进程启动时刻指纹(字符串,只要同进程稳定可比即可,不要求跨平台统一格式)。
-    Linux 读 /proc/<pid>/stat 的 starttime 域;其它(macOS 等)退回 ps -o lstart。取不到返回 None。"""
     if pid <= 0:
         return None
     proc_stat = f"/proc/{pid}/stat"
@@ -51,10 +81,9 @@ def process_start_time(pid: int) -> str | None:
             return _read_proc_starttime(proc_stat)
         except OSError:
             return None
-    try:
-        return _read_ps_starttime(pid)
-    except (OSError, subprocess.SubprocessError):
-        return None
+    if sys.platform == "darwin":
+        return _read_darwin_starttime(pid)
+    return None
 
 
 # LLM: 启动指纹三态比较的唯一实现（3a 10-05 收口，ds6 初审发现旧实现在“数字 vs macOS lstart”时判死）：

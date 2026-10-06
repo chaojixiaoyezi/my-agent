@@ -1,13 +1,18 @@
 # LLM: starttime2 的回归锚点——启动指纹"读取统一 + 双口径比较"（schedstart 修正 + starttime2 统一）。
-#   读取统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS ps lstart）；比较走
+#   读取统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS sysctl 秒.微秒）；比较走
 #   heartbeat.start_time_matches：旧数字记录与新字符串指纹都可核验，核验不了不判死（宁多等 lease）。
-#   本文件覆盖：ps 返回码/超时/空输出口径、/proc 解析（含 comm 空格）、比较矩阵、tool_operations 判活三态。
+#   本文件覆盖：macOS sysctl 读取（不起子进程、不随语言时区变、与 ps 的内核时刻一致）、/proc 解析（含 comm 空格）、
+#   比较矩阵、tool_operations 判活三态。
 # 模块用途: 钉住跨平台启动指纹读取与判活语义，防止 PID 复用误判与"格式差异当死亡证据"误杀活进程。
 from __future__ import annotations
 
+import calendar
 import os
+import re
 import subprocess
+import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,50 +26,67 @@ from agent_py_agent.agent.local_storage.tool_operations import (
 )
 from agent_py_agent.agent.runtime_db.operations import holder_is_alive
 
-_FAKE_PID = 4_000_000_000  # 不存在的 pid：/proc 与真实 ps 都读不到，保证走打桩路径
+_FAKE_PID = 4_000_000_000  # 不存在的 pid：超出 C int，/proc 与 sysctl 都读不到
+_DARWIN_ONLY = pytest.mark.skipif(sys.platform != "darwin", reason="macOS sysctl 读取路径")
 
 
-class _CompletedPs:
-    """subprocess.run 的替身：只需要 returncode 与 stdout 两个字段。"""
-
-    def __init__(self, returncode: int, stdout: str) -> None:
-        self.returncode = returncode
-        self.stdout = stdout
+# ---------------------------------------------------------------- heartbeat：macOS sysctl 读取
 
 
-# ---------------------------------------------------------------- heartbeat：ps 读取（macOS 等无 /proc 平台）
+@_DARWIN_ONLY
+def test_darwin_start_time_reads_kernel_without_subprocess(monkeypatch):
+    """macOS：读启动指纹不起任何子进程（插件配置等路径禁止启动进程），返回“秒.微秒”，连读两次相同。"""
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: pytest.fail("读启动指纹不得启动进程"))
+    first = process_start_time(os.getpid())
+    assert first is not None and re.fullmatch(r"\d+\.\d{6}", first)
+    assert process_start_time(os.getpid()) == first
 
 
-def test_ps_success_returns_fingerprint(monkeypatch):
-    """fake ps 返回码 0 且有输出：指纹可用。"""
-    monkeypatch.setattr(
-        hb.subprocess, "run", lambda *_a, **_k: _CompletedPs(0, "Fri Oct  3 09:00:00 2026\n")
-    )
-    assert process_start_time(_FAKE_PID) == "Fri Oct  3 09:00:00 2026"
+@_DARWIN_ONLY
+def test_darwin_start_time_ignores_locale_and_timezone(monkeypatch):
+    """macOS：换语言和时区后同一进程的指纹不变（ps lstart 会随 LANG/TZ 变，活进程会被判成“不同”）。"""
+    before = process_start_time(os.getpid())
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    monkeypatch.setenv("LC_ALL", "zh_CN.UTF-8")
+    time.tzset()
+    try:
+        assert process_start_time(os.getpid()) == before
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
-def test_ps_nonzero_returncode_is_unverifiable(monkeypatch):
-    """fake ps 返回码非 0：即使 stdout 有内容也不可核验（返回 None）——初审阻塞 2 的钉点。"""
-    monkeypatch.setattr(
-        hb.subprocess, "run", lambda *_a, **_k: _CompletedPs(1, "ps: No such process\n")
-    )
+@_DARWIN_ONLY
+def test_darwin_start_time_matches_kernel_clock_reported_by_ps():
+    """macOS：秒数与系统 ps 在固定 C/UTC 环境下报告的启动时刻一致（钉住 kinfo_proc 里的偏移和布局）。"""
+    value = process_start_time(os.getpid())
+    shown = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(os.getpid())], capture_output=True, text=True,
+        env={"LC_ALL": "C", "TZ": "UTC"}, timeout=10, check=True,
+    ).stdout.strip()
+    assert int(value.split(".")[0]) == calendar.timegm(time.strptime(shown, "%a %b %d %H:%M:%S %Y"))
+
+
+@_DARWIN_ONLY
+def test_darwin_start_time_tracks_other_and_exited_processes():
+    """macOS：能读别的活进程（晚于本进程启动）；进程退出后读不到（None），超范围 pid 也是 None。"""
+    child = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        assert float(process_start_time(child.pid)) >= float(process_start_time(os.getpid()))
+    finally:
+        child.kill()
+        child.wait()
+    assert process_start_time(child.pid) is None
     assert process_start_time(_FAKE_PID) is None
 
 
-def test_ps_timeout_is_unverifiable(monkeypatch):
-    """fake ps 超时：不可核验（返回 None）。"""
-
-    def _timeout(*_a, **_k):
-        raise subprocess.TimeoutExpired(cmd="ps", timeout=5)
-
-    monkeypatch.setattr(hb.subprocess, "run", _timeout)
-    assert process_start_time(_FAKE_PID) is None
-
-
-def test_ps_empty_output_is_unverifiable(monkeypatch):
-    """fake ps 返回码 0 但输出为空：不可核验（返回 None）。"""
-    monkeypatch.setattr(hb.subprocess, "run", lambda *_a, **_k: _CompletedPs(0, ""))
-    assert process_start_time(_FAKE_PID) is None
+def test_start_time_without_proc_or_sysctl_is_unverifiable(monkeypatch):
+    """既没有 /proc 也不是 macOS：返回 None（不可核验），也不退回起子进程。"""
+    monkeypatch.setattr(hb, "os", SimpleNamespace(path=SimpleNamespace(exists=lambda _path: False)))
+    monkeypatch.setattr(hb, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(hb, "_read_darwin_starttime", lambda _pid: pytest.fail("非 macOS 不得调用 sysctl"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: pytest.fail("读启动指纹不得启动进程"))
+    assert process_start_time(12345) is None
 
 
 # ---------------------------------------------------------------- heartbeat：/proc 解析（Linux 读取）
@@ -108,8 +130,11 @@ def test_proc_starttime_missing_fields_returns_none(tmp_path):
         (123.0, "123", True),  # 旧数字记录 vs 新字符串指纹：数值匹配 → 活
         (123, "123", True),
         (123.0, "124", False),  # 旧数字记录 vs 不同字符串 → 判死
-        ("Fri Oct  3 09:00:00 2026", "Fri Oct  3 09:00:00 2026", True),  # macOS lstart 相同
-        ("Fri Oct  3 09:00:00 2026", "Sat Oct  4 10:00:00 2026", False),  # macOS lstart 不同 → 判死
+        ("1791257357.612853", "1791257357.612853", True),  # macOS sysctl 秒.微秒：相同
+        ("1791257357.612853", "1791257400.000001", False),  # macOS sysctl 秒.微秒：不同 → 判死
+        ("Fri Oct  3 09:00:00 2026", "Fri Oct  3 09:00:00 2026", True),  # 文本指纹（旧 macOS lstart 记录）相同
+        ("Fri Oct  3 09:00:00 2026", "Sat Oct  4 10:00:00 2026", False),  # 文本指纹不同 → 判死
+        ("Fri Oct  3 09:00:00 2026", "1791257357.612853", True),  # 旧 lstart 记录 vs 新 sysctl 读取：不可核验 → 不判死
         (123.0, "Fri Oct  3 09:00:00 2026", True),  # 跨表示不可核验 → 不判死
         (123.0, None, True),  # 当前读不到 → 不判死
         (None, "123", True),  # 记录缺失 → 不判死
@@ -162,7 +187,7 @@ def test_holder_dead_when_fingerprint_mismatches(monkeypatch, _local_holder):
 
 
 def test_holder_conservatively_live_when_fingerprint_unreadable(monkeypatch, _local_holder):
-    """读不到启动指纹（如沙箱禁 ps）→ 保持原语义：保守判活，不接管。"""
+    """读不到启动指纹（如进程已退出、平台不支持）→ 保持原语义：保守判活，不接管。"""
     monkeypatch.setattr(tool_operations, "process_start_time", lambda _pid: None)
     assert _operation_holder_is_live(_record_with_token(os.getpid(), "999"), time.time()) is True
 
@@ -186,7 +211,7 @@ def test_holder_is_alive_reads_fingerprint_consistently(monkeypatch):
 
 
 def test_holder_is_alive_conservative_when_unreadable(monkeypatch):
-    """读不到指纹（如沙箱禁 ps / 无 /proc）→ 保守判活，不接管。"""
+    """读不到指纹（如平台不支持 / 无 /proc）→ 保守判活，不接管。"""
     monkeypatch.setattr(
         "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: None
     )
@@ -201,14 +226,14 @@ def test_holder_is_alive_conservative_for_legacy_empty_token(monkeypatch):
     assert holder_is_alive(os.getpid(), "") is True
 
 
-def test_holder_is_alive_detects_pid_reuse_on_macos_lstart(monkeypatch):
-    """macOS：lstart 指纹不同 → 判死（此前读不到 /proc 恒判活，本次起可核对）。"""
+def test_holder_is_alive_detects_pid_reuse_on_macos_sysctl(monkeypatch):
+    """macOS：sysctl 指纹不同 → 判死（此前读不到 /proc 恒判活，本次起可核对）。"""
     monkeypatch.setattr(
         "agent_py_agent.agent.runtime_db.operations.process_start_time",
-        lambda _pid: "Sat Oct  4 10:00:00 2026",
+        lambda _pid: "1791257400.000001",
     )
-    assert holder_is_alive(os.getpid(), "Fri Oct  3 09:00:00 2026") is False
-    assert holder_is_alive(os.getpid(), "Sat Oct  4 10:00:00 2026") is True
+    assert holder_is_alive(os.getpid(), "1791257357.612853") is False
+    assert holder_is_alive(os.getpid(), "1791257400.000001") is True
 
 
 # ---------------------------------------------------------------- 锁写读同源（starttime3）
@@ -239,21 +264,21 @@ def test_lock_write_and_read_share_fingerprint(monkeypatch):
     assert holder_is_alive(os.getpid(), token) is False
 
 
-def test_lock_macos_lstart_write_then_pid_reuse_detected(monkeypatch):
-    """macOS：写端写入 lstart 指纹后读端能识别 pid 复用（此前写端恒空、读端恒判活）。"""
+def test_lock_macos_sysctl_write_then_pid_reuse_detected(monkeypatch):
+    """macOS：写端写入 sysctl 指纹后读端能识别 pid 复用（此前写端恒空、读端恒判活）。"""
     from agent_py_agent.agent.runtime_db import repository as rt_repo
 
-    lstart = "Fri Oct  3 09:00:00 2026"
-    monkeypatch.setattr(rt_repo, "_proc_start_time", lambda _pid: lstart)
+    started = "1791257357.612853"
+    monkeypatch.setattr(rt_repo, "_proc_start_time", lambda _pid: started)
     token = rt_repo.RuntimeRepository._start_token(None)
-    assert token == lstart
+    assert token == started
     monkeypatch.setattr(
         "agent_py_agent.agent.runtime_db.operations.process_start_time",
-        lambda _pid: "Sat Oct  4 10:00:00 2026",
+        lambda _pid: "1791257400.000001",
     )
     assert holder_is_alive(os.getpid(), token) is False
     monkeypatch.setattr(
-        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: lstart
+        "agent_py_agent.agent.runtime_db.operations.process_start_time", lambda _pid: started
     )
     assert holder_is_alive(os.getpid(), token) is True
 

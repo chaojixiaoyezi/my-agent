@@ -173,7 +173,7 @@ def _json_object(value: object) -> dict[str, Any]:
 
 
 # LLM: 崩溃调和（RUN-01）依赖 attempt 记录的 runner 身份；start_time 统一取 common.heartbeat
-#   （Linux /proc ticks、其它平台 ps lstart，字符串指纹），判死比较走 start_time_matches。
+#   （Linux /proc ticks、macOS sysctl 秒.微秒，字符串指纹），判死比较走 start_time_matches。
 # 函数用途: 构造当前进程身份元数据（pid + 启动时刻），随 attempt 落账供崩溃恢复使用。
 def _runner_identity_metadata() -> dict[str, object]:
     return {
@@ -1818,7 +1818,7 @@ class RuntimeRepository(
 
     # ------------------------------------------------------ R1-03 辅助
     # LLM: 锁记录的启动指纹必须与读端 holder_is_alive 同源（common.heartbeat 的跨平台字符串：
-    #   Linux /proc ticks、macOS ps lstart）；旧实现只读 /proc 且用全文 split，comm 含空格时取错
+    #   Linux /proc ticks、macOS sysctl 秒.微秒）；旧实现只读 /proc 且用全文 split，comm 含空格时取错
     #   字段，与读端（rsplit）比较不等而误判死。读不到返回空串（空=不可核验，保守判活）。
     # 函数用途: 返回本进程的启动指纹，供执行权锁写入与 PID 复用核验。
     def _start_token(self) -> str:

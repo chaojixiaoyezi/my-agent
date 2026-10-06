@@ -423,7 +423,7 @@ Gateway 维护摘要 `[gateway-owner-maintenance]` 只打印、不落盘。其�
 
 `SchedulerRepository.claim_run` 与 `recover_interrupted_executions` 共用 runner PID/starttime tri-state proof；只有 expired runner 被证明死亡后才先 CAS 为 `queued`，再由 claim 路径递增 `claim_epoch` 并生成嵌入 epoch 的 `claim_id`。旧 claim 的 heartbeat、release、running transition 与 finish 统一按 identity+epoch 拒绝。历史 run 缺 epoch 按 0 读取；SLP-2A 已实现，待 3a 复审。最终 19 文件 sweep 的 9 个 fixture failures 在基线 `812828b98` 复现，其余相关测试通过；guards9 前 11 项通过，静态与尺寸门禁通过，详情见 `TESTS.md`。operation_id 接线归 SLP-2B。
 
-`scheduler/repository` 的 runner 判活启动指纹唯一取自 `common/heartbeat.process_start_time`（跨平台字符串；Linux /proc、其它平台 ps lstart），记录与比较同一种表示；旧数字记录只在当前指纹可转数字时核验，取不到或不可比一律 unverifiable、不判死。`runtime_db/repository` 与 `runtime_db/executor_liveness` 的复用方同源取指纹；executor_liveness 的 replaced 判定字符串直接比、数字仅在可转时比，不可比不报替换（schedstart，2026-10-05，待初审）。
+`scheduler/repository` 的 runner 判活启动指纹唯一取自 `common/heartbeat.process_start_time`（字符串；Linux /proc ticks、macOS sysctl“秒.微秒”，不起子进程、不随语言时区变化，其它平台 None），记录与比较同一种表示；旧数字记录只在当前指纹可转数字时核验，取不到或不可比一律 unverifiable、不判死。`runtime_db/repository` 与 `runtime_db/executor_liveness` 的复用方同源取指纹；executor_liveness 的 replaced 判定字符串直接比、数字仅在可转时比，不可比不报替换（schedstart，2026-10-05，待初审）。
 
 `goal_control_service._create_goal`复用`capability.package_selection_scope.new_task_capability_selection`为真正新建任务提供可选typed pending；原Goal存储、任务bind和wake顺序保持，入口选择在后续真实主业务请求前发生。
 

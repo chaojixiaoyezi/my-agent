@@ -98,9 +98,9 @@ def attempt_status_is_terminal(status: object) -> bool:
 def holder_is_alive(pid: int, start_token: str = "") -> bool:
     """R1-03 持主判死：pid 不存在 → 死；start_token 失配（PID 复用）→ 死。
 
-    读不到指纹（含非 Linux 无 ps 权限）或记录为空 → 保守视为存活（fail-closed：
-    无法证明死亡就不接管）。指纹统一取 common.heartbeat 的跨平台字符串
-    （Linux /proc ticks、macOS ps lstart）。
+    读不到指纹或记录为空 → 保守视为存活（fail-closed：
+    无法证明死亡就不接管）。指纹统一取 common.heartbeat 的字符串
+    （Linux /proc ticks、macOS sysctl 秒.微秒；旧 macOS lstart 记录与之不可比，按不可核验处理）。
     """
     if int(pid or 0) <= 0:
         return True

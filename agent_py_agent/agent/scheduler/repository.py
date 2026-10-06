@@ -1319,7 +1319,7 @@ def _process_state(pid: int) -> str:
 
 # LLM: Lease expiry is not proof of death; only a missing PID or a verified PID/starttime mismatch is reclaimable.
 #   启动指纹统一用 common.heartbeat.process_start_time 的跨平台字符串；比较走 heartbeat.start_time_relation
-#   （唯一三态实现）：只有 different 判死，格式不可比（数字 vs macOS lstart）、空串、坏值一律 unverifiable。
+#   （唯一三态实现）：只有 different 判死，格式不可比（数字 vs 旧 macOS lstart 文本）、空串、坏值一律 unverifiable。
 # 函数用途: 普通 claim 和恢复器共用 runner 三态判断，身份读不出时返回 unverifiable 并阻止接管。
 def _runner_liveness(run: dict[str, object]) -> str:
     raw_pid = run.get("runner_pid")

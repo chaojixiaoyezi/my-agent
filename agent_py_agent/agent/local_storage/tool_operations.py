@@ -829,8 +829,8 @@ def _pid_exists(pid: int) -> bool:
         return False
 
 
-# LLM: 进程启动标记统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS ps lstart，
-#   与 scheduler/runtime_db 同一读取权威）；进程内缓存一次，避免每个工具轮都调 ps。
+# LLM: 进程启动标记统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS sysctl“秒.微秒”，
+#   与 scheduler/runtime_db 同一读取权威）；本进程启动时刻不变，进程内缓存一次。
 # 函数用途: 返回本进程的启动标记；读不到时为空串（空值=不可核验，判活保守）。
 def _process_start_token() -> str:
     global _PROCESS_START_TOKEN
