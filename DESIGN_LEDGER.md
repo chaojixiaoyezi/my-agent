@@ -124,6 +124,13 @@
 - **边界**：实现限于 scheduler repository 与聚焦测试；未改 `scheduler/service.py`，未碰 conversation/tooling；SLP-2B operation_id/操作账本接线仍未做。misfire grace 政策未改。因 `check_doc_sync` 要求同步模块文档，另更新 Gateway 进度与结构文档。
 - **验证结论**：最终 19 文件 scheduler sweep 仅有 `test_scheduler_waiting_deadlock.py` 9 项失败，均在任务基线 `812828b98` 复现；其余相关测试通过。guards9 前 11 项通过，第 12 项因基线缺该测试文件而未运行；import boundaries 0 findings、Ruff、doc-sync、strict code-size、size_diff（新增告警 0）通过。具体命令及结果见 [TESTS.md](TESTS.md) SLP-2A 节；设计合同见 [SLEEP_RESUME.md](docs/design/SLEEP_RESUME.md)。
 
+## Gateway 插件事件线程解析缺失统一短路与瞬时续跑状态（tref3，2026-10-05，worker/tref3；已实现，待初审）
+
+- **问题与合同**：`gateway_event_context` 曾允许空线程进入 Gateway 发布上下文，导致 `turn_started`、`command_executed` 可产生空 `thread_ref`；原 `prompt_queued` 会自行早退，但没有统一诊断。m1_joint 要求每个回合事件具有非空会话引用。
+- **实现**：统一在 `gateway_event_context` 先确认开关，再验证线程 id 为非空文本；缺失/无效时不构造上下文，调用 `warn_event_assembly_failure(PLUGIN_EVENT_THREAD_UNRESOLVED)`，只写固定 `event`/`reason_code`，不带渠道、会话号或错误正文。prompt 线程解析失败交由该权威入口处理；开关关闭仍零路由读取、零线程解析。`turn_ended` 依据结构化 `restart_resume` 或 `provider_transient_resume` 标记发布 `interrupted`，供应商瞬时故障重排不是失败。
+- **调用方盘点**：`event_points.prompt_queued`、`turn_started`、`command_completed` 与 `agent_core/tool_call_runtime._tool_event_context` 都仅为插件事件装配上下文；线程分别来自 Gateway preflight、控制回执 `conversation_thread_id` 或 RunScope 中的同一会话线程属性，均适用缺线程不发布规则，没有例外。
+- **边界**：只短路可选观察，不改变队列、命令回执、工具执行或续跑业务状态；真实 Gateway/外部沙箱验收由 3a 后续复核。
+
 ## 插件事件 thread_ref 统一为会话线程 + channel_conversation_ref（tref2/tref2b，2026-10-05，worker/tref2b；**撤回原因已修复，待非作者初审**）
 
 - **撤回原因（3a，10-05 10:5x，Linux 车道发现、macOS 复现）**：`test_plugin_m1_joint_tool_gate.py` 7 条失败——同一回合 3 个事件的 thread_ref 出现两种值（prompt_submitted 为空、其余为线程哈希），违反“每个事件的会话引用不许为空、同一回合只有一个引用”；`test_plugin_m1_joint_e2e.py::test_event_watch_real_gateway_six_counts_and_readonly` 也失败。挑入时只跑了插件事件三个测试文件，漏了这两组联动测试。撤回提交 9e3073882、c7851feef，代码回到挑入前。

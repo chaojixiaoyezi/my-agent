@@ -25,6 +25,7 @@
 - `gateway_parts/request_execution.py`：新增 `_gateway_turn_thread_id`（回合开始前只读 preflight 解析会话线程，与执行路径同一入口；取消/跳过路径不经过；失败留空），`turn_started` 用解析出的线程。
 - `gateway_parts/control_operation_service.py`：`GatewayControlOperationReceipt` 新增 `conversation_thread_id`（执行时按冻结渠道身份只读解析一次，多 owner 先物化 owner agent，失败留空；重放/对账不回填旧行）。
 - 详见 DESIGN_LEDGER / TESTS 同名节与 `docs/design/PLUGIN_EVENT_HOOKS.md` 第 6 节（事件目录 v2）。
+- tref3：`gateway_event_context` 在开关开启后统一拒绝未解析会话线程并记固定原因 `PLUGIN_EVENT_THREAD_UNRESOLVED`；`restart_resume` 与 `provider_transient_resume` 的回合结束事件都标记为 `interrupted`。
 
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 

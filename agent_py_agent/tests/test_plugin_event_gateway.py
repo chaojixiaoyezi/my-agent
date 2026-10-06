@@ -106,14 +106,75 @@ def test_prompt_queued_disabled_never_resolves_thread(gateway, monkeypatch):
 
 # LLM: 解析不出线程时不发残缺事件（合同"每个事件都有非空会话引用"）：不发比发空引用好，入队结果不受影响。
 # 函数用途: 断言线程解析为空时 prompt_submitted 不发出。
-def test_prompt_queued_without_resolvable_thread_emits_nothing(gateway, monkeypatch):
+def test_prompt_queued_without_resolvable_thread_emits_nothing(gateway, monkeypatch, event_warning_log):
     from agent_py_agent.agent.gateway_parts import event_points
 
     _agent, _paths, server, events = gateway
     monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
-    monkeypatch.setattr(event_points, '_prompt_thread_id', lambda *_: '')
+    calls = []
+    monkeypatch.setattr(event_points, '_prompt_thread_id', lambda *_: calls.append(True) or '')
     assert event_points.prompt_queued(server, {'id': 'x', 'prompt': 'p'}) is None
+    assert calls == [True] and events == []
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert len(records) == 1
+    assert records[0].event == 'plugin_events.assembly_failed'
+    assert records[0].reason_code == 'PLUGIN_EVENT_THREAD_UNRESOLVED'
+
+
+@pytest.mark.parametrize('entry', ['turn', 'command'])
+def test_gateway_event_entry_without_resolved_thread_emits_nothing_and_warns_once(
+        gateway, event_warning_log, entry):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, _server, events = gateway
+    if entry == 'turn':
+        calls = []
+        result = event_points.turn_started(
+            agent,
+            {'id': 'turn-unresolved', 'conversation': {'channel': 'chat'}},
+            thread_id_of=lambda: calls.append(True) or '',
+        )
+        assert result is None and calls == [True]
+    else:
+        receipt = SimpleNamespace(
+            channel='chat', conversation_thread_id='', conversation_id='private-channel-session',
+            command_kind='verbose', operation_id='operation-unresolved', result={'ok': True},
+        )
+        assert event_points.command_completed(agent, receipt) is None
+
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert events == [] and len(records) == 1
+    assert records[0].event == 'plugin_events.assembly_failed'
+    assert records[0].reason_code == 'PLUGIN_EVENT_THREAD_UNRESOLVED'
+    assert records[0].exc_info is None and records[0].stack_info is None
+    assert 'private-channel-session' not in str(records[0].__dict__)
+
+
+def test_turn_started_unresolved_thread_keeps_turn_ended_silent(gateway, event_warning_log):
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    agent, _paths, _server, events = gateway
+    context = event_points.turn_started(agent, {'id': 'turn-unresolved'}, thread_id_of=lambda: '')
+    assert context is None
+    event_points.turn_ended(context, {'id': 'turn-unresolved', 'status': 'done'}, 1)
     assert events == []
+    records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
+    assert len(records) == 1 and records[0].reason_code == 'PLUGIN_EVENT_THREAD_UNRESOLVED'
+
+
+def test_turn_ended_provider_transient_resume_is_interrupted(gateway):
+    from agent_py_agent.agent.gateway_parts import event_points
+    from agent_py_agent.agent.plugin_events.points import EventPointContext
+
+    agent, _paths, _server, events = gateway
+    context = EventPointContext(agent.config, lambda event: events.append(event), 'chat', 'thread-resume')
+    event_points.turn_ended(context, {
+        'id': 'turn-resume', 'status': 'failed',
+        'provider_transient_resume': {'retry_count': 1},
+    }, 12)
+    assert len(events) == 1 and events[0].type == 'turn_ended'
+    assert events[0].thread_ref
+    assert events[0].facts['status'] == 'interrupted'
 
 
 def test_turn_real_gateway_path_has_exact_fields(gateway, monkeypatch):
@@ -131,6 +192,7 @@ def test_turn_real_gateway_path_has_exact_fields(gateway, monkeypatch):
     response = _handle_gateway_request(agent, path)
     assert response['ok'], json.dumps(response, ensure_ascii=False)
     assert [event.type for _, event in events] == ['turn_started', 'turn_ended']
+    assert all(event.thread_ref for _, event in events)
     assert set(events[0][1].facts) == {'request_id', 'model_name'}
     ended = events[-1][1]
     assert ended.facts['status'] == 'done'
@@ -141,6 +203,10 @@ def test_turn_real_gateway_path_has_exact_fields(gateway, monkeypatch):
 
 def test_control_real_receipt_emits_only_first_completion(gateway):
     agent, paths, _server, events = gateway
+    agent.conversation_store.threads.get_or_create({
+        'canonical_user_id': 'admin', 'channel': 'chat', 'channel_conversation_id': 'c-1',
+        'channel_user_id': 'admin',
+    })
     command = parse_conversation_control('/verbose on', reject_unknown_slash=True)
     scope = GatewayControlScope(user_id='admin', channel='chat', conversation_id='c-1',
                                 metadata={'message_id': 'control-1'})
@@ -149,6 +215,7 @@ def test_control_real_receipt_emits_only_first_completion(gateway):
     assert len(events) == 1
     event = events[0][1]
     assert event.type == 'command_executed'
+    assert event.thread_ref
     assert event.facts == {'command': '/verbose', 'operation_id': receipt.operation_id, 'state': 'ok'}
     execute_gateway_control_operation(agent, paths, command, scope, command_text='/verbose on')
     assert len(events) == 1
@@ -192,7 +259,9 @@ def test_turn_exception_and_publish_exception_keep_business_result(gateway, monk
             raise ValueError('private error marker')
         context['response'].update(ok=True, status='done')
     monkeypatch.setattr(request_execution, '_execute_gateway_request_body', body)
-    request = {'id': 'outcome-1', 'kind': 'ask', 'prompt': 'normal'}
+    request = {'id': 'outcome-1', 'kind': 'ask', 'prompt': 'normal',
+               'conversation': {'channel': 'chat', 'channel_conversation_id': 'outcome-conversation',
+                                'channel_user_id': 'local-agent', 'canonical_user_id': 'local-agent'}}
     path = paths.processing / 'outcome-1.json'
     path.write_text(json.dumps(request))
     result = _handle_gateway_request(agent, path)
@@ -216,7 +285,7 @@ def test_disabled_gateway_context_does_not_assemble(gateway, monkeypatch):
         assembled.append((args, kwargs))
         return original(*args, **kwargs)
     monkeypatch.setattr(event_points, 'EventPointContext', context_probe)
-    assert event_points.gateway_event_context(agent, {}, server=server) is None
+    assert event_points.gateway_event_context(agent, {'thread_id': 'thread-context'}, server=server) is None
     assert assembled == []
 
 
@@ -363,7 +432,7 @@ def test_gateway_event_entries_bad_routing_never_escapes(gateway, monkeypatch, e
     agent, _paths, server, events = gateway
     broken = _BrokenEventFields()
     monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
-    context = event_points.gateway_event_context(agent, {}, server=server)
+    context = event_points.gateway_event_context(agent, {'thread_id': 'thread-context'}, server=server)
     calls = {'prompt': partial(event_points.prompt_queued, server, broken),
              'turn': partial(event_points.turn_started, agent, broken),
              'command': partial(event_points.command_completed, agent, broken),
@@ -394,7 +463,7 @@ def test_gateway_context_assembly_failure_is_isolated_without_callers(gateway, m
 
     agent, _paths, server, events = gateway
     monkeypatch.setattr(event_points, 'EventPointContext', _fail_event_context)
-    assert event_points.gateway_event_context(agent, {}, server=server) is None
+    assert event_points.gateway_event_context(agent, {'thread_id': 'thread-context'}, server=server) is None
     assert events == []
 
 
@@ -411,7 +480,7 @@ def test_gateway_context_failure_warns_once_only_when_enabled(gateway, monkeypat
         return _fail_event_context(*args)
     monkeypatch.setattr(event_points, 'EventPointContext', fail)
     for _ in range(2):
-        assert event_points.gateway_event_context(agent, {}, server=server) is None
+        assert event_points.gateway_event_context(agent, {'thread_id': 'thread-context'}, server=server) is None
     records = [r for r in event_warning_log.records if r.name.endswith('plugin_events.points')]
     assert calls == ([True, True] if enabled else [])
     assert events == [] and len(records) == int(enabled)
@@ -431,7 +500,7 @@ def test_gateway_entry_field_failure_warns_once(gateway, monkeypatch, event_warn
 
     agent, _paths, server, events = gateway
     monkeypatch.setattr(event_points, '_prompt_has_base_owner', lambda *_: True)
-    context = event_points.gateway_event_context(agent, {}, server=server)
+    context = event_points.gateway_event_context(agent, {'thread_id': 'thread-context'}, server=server)
     broken = _BrokenEventFields()
     calls = {'prompt': partial(event_points.prompt_queued, server, broken),
              'turn': partial(event_points.turn_started, agent, broken),
@@ -469,7 +538,7 @@ def test_gateway_context_warning_is_thread_safe(gateway, monkeypatch, event_warn
 
     agent, _paths, server, events = gateway
     monkeypatch.setattr(event_points, 'EventPointContext', _fail_event_context)
-    call = partial(event_points.gateway_event_context, agent, {}, server=server)
+    call = partial(event_points.gateway_event_context, agent, {'thread_id': 'thread-context'}, server=server)
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: call(), range(32)))
     assert results == [None] * 32 and events == []
@@ -489,5 +558,5 @@ def test_gateway_warning_sink_failure_cannot_escape(gateway, monkeypatch, event_
         raise RuntimeError('logging sink unavailable')
     monkeypatch.setattr(logging.getLogger(points.__name__), 'warning', unavailable)
     for _ in range(2):
-        assert event_points.gateway_event_context(agent, {}, server=server) is None
+        assert event_points.gateway_event_context(agent, {'thread_id': 'thread-context'}, server=server) is None
     assert attempts == [True] and events == [] and event_warning_log.records == []

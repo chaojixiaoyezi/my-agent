@@ -23,6 +23,7 @@
 - `agent/gateway_parts/event_points.py`：Gateway 侧四事件的 `thread_ref` 来源统一——`turn_started` 接收调用方解析的会话线程，`prompt_submitted` 在提交时点解析线程（与执行路径同一预检入口；非空）+ `channel_conversation_ref` 有值，`command_executed` 用回执 `conversation_thread_id`；`gateway_event_context` 透传渠道会话号。
 - `agent/gateway_parts/request_execution.py`：`_gateway_turn_thread_id` 在 `_handle_gateway_request` 里做一次只读 preflight（与执行路径同一解析入口）供 `turn_started`/`turn_ended` 使用。
 - `agent/gateway_parts/control_operation_service.py`：回执新增 `conversation_thread_id`，新执行路径写盘前解析一次（`_with_control_conversation_thread` / `_control_operation_thread_id` / `_control_operation_agent`）。
+- tref3：`gateway_event_context` 在开关开启后统一拒绝未解析会话线程并记固定原因 `PLUGIN_EVENT_THREAD_UNRESOLVED`；`restart_resume` 与 `provider_transient_resume` 的回合结束事件都标记为 `interrupted`。
 
 ## G2b 客户端收尾小修（g2bfix4，2026-10-05，基于 g2bfix3 头 `51b3efb20`；待终审）
 

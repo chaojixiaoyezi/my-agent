@@ -140,6 +140,27 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 宽 sweep 使用 `agent_py_agent/tests/test_scheduler*.py`，并附加 `test_adapter_manager.py`、`test_private_dirs_policy.py`、`test_adapter_ingress.py`、`test_operation_store_robustness.py`、`test_r103_closeout_gate.py`、`test_end_task_control.py`；实际执行的 19 个文件与 summary 留在任务运行记录中。
 
+## Gateway 插件事件线程解析缺失统一短路与瞬时续跑状态（tref3，2026-10-05，worker/tref3；已实现，待初审）
+
+- **覆盖**：三事件点（`prompt_queued`、`turn_started`、`command_completed`）各验证未解析线程时无事件、只记一次 `PLUGIN_EVENT_THREAD_UNRESOLVED`；成功时照常发布且 `thread_ref` 非空。另覆盖关闭时零解析/零路由读取、`turn_started(None)` 后 `turn_ended` 静默，以及 `provider_transient_resume` 结构化标记归为 `interrupted`。新断言先红，显示旧实现漏诊断、发布空引用及把 provider resume 报成 failed。
+- **焦点命令**（当前版本）：`PY=$HOME/.my-agent/releases/claude-tools/ci-venv-312/bin/python; PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest -v --tb=short -p no:cacheprovider --basetemp=/private/tmp/tref3-focused agent_py_agent/tests/test_plugin_event_gateway.py` → **50 passed in 4.19s**。
+- **关联命令**（在工作树根；先核对三组清单均非空，合并去重后运行 37 个文件）：
+
+  ```bash
+  PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+  EVENT_RAW=$(git grep -l -E 'event_points|gateway_event_context|plugin_event|thread_ref' -- 'agent_py_agent/tests/')
+  EVENT_TESTS=$(printf '%s\n' "$EVENT_RAW" | awk '/^agent_py_agent\/tests\/(.*\/)?test_.*\.py$/')
+  JOINT_TESTS=$(git ls-files 'agent_py_agent/tests/test_plugin_m1_joint_*')
+  GUARD_TESTS=$(cat "$HOME/.my-agent/releases/claude-tools/3a-scripts/guards9.txt")
+  if [ -z "$EVENT_TESTS" ] || [ -z "$JOINT_TESTS" ] || [ -z "$GUARD_TESTS" ]; then exit 1; fi
+  TESTS=$(printf '%s\n%s\n%s\n' "$EVENT_TESTS" "$JOINT_TESTS" "$GUARD_TESTS" | awk 'NF && !seen[$0]++' | sort)
+  PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest -v --tb=short -p no:cacheprovider --basetemp=/private/tmp/tref3-related $TESTS
+  ```
+
+- **结果**：37 个唯一文件、863 项收集；**848 passed、12 skipped、3 failed**。两份 `test_plugin_m1_joint_*` 与 guards9 12 文件均在该批次中，未出现失败。3 个失败均为 `agent_py_agent/tests/test_plugin_sandbox_v8.py` 的嵌套 sandbox 用例（`test_macos_v8_narrows_read_and_enforces_network[True]`、`test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home`）；子进程明确返回 71，stderr=`sandbox-exec: sandbox_apply: Operation not permitted`。依 tref3 要求交 3a 沙箱外复跑，不把该结果归因于产品代码。
+- **静态门禁**：`python -m ruff check agent_py_agent scripts` → `All checks passed!`；`python scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`python scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2186, hard=0, high-risk=1492, soft=694, test_advisory=1234, blocked=False`。运行后已将生成的 `CODE_SIZE_REPORT.md` 恢复为 HEAD 版本；`git diff --check 886965f3a` exit 0。
+- **未验证**：真实 Gateway/外部沙箱运行及上述三个用例的沙箱外复跑；未部署、未推送。
+
 ## 插件事件 thread_ref 统一与 channel_conversation_ref（tref2，2026-10-05，worker/tref2）
 
 - **用例**：`test_plugin_event_points.py` 新增双通道（tui / feishu）投影用例——同一会话里 turn 类与 tool 类事件 `thread_ref` 相同、渠道哈希只在 Gateway 侧事件上有值且与线程哈希不同、payload 不含原文；空线程上下文投影用例（空入空出；tref2b 后产品层不再发出这种事件）与 `command_executed` 双引用用例。`test_plugin_event_e2e.py`：六事件真回合加断言（turn/tool/command 的 `thread_ref` 同源非空、`channel_conversation_ref` 存在且一致、`prompt_submitted` 的 `thread_ref` 与回合事件同一非空引用（tref2b 修订）、工具事件无渠道 ref），HTTP worker 用例加 feishu 身份变体并更新 v2 断言。

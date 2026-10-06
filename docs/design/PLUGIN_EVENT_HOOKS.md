@@ -162,6 +162,8 @@ v8 在 v6（任意语言：`entry` + `files` + `platforms`）基础上加三个�
 - 被拒绝、要求确认后被用户拒绝的工具调用，不发 `tool_call_started` / `finished`（它们没执行）；收紧征询本身记在账本里（第 9 节）。
 - 本地直连 TUI（不经 Gateway）第一期只有工具两类事件，没有提示、回合、命令三类（已知边界）。
 
+- **tref3（2026-10-05）**：所有经 `gateway_event_context` 装配的 Gateway/工具事件都必须有非空 ConversationStore `thread_id`；线程未解析时返回 `None`，只记固定 `PLUGIN_EVENT_THREAD_UNRESOLVED` 结构化诊断（不含渠道、会话号或错误正文）。事件开关关闭时先短路，不读路由、不解析线程。`turn_started` 无上下文时，`turn_ended` 自然不发布；结构化 `restart_resume` 与 `provider_transient_resume` 均令回合状态为 `interrupted`。
+
 ## 7. 观察的投递语义（M2）
 
 照面板服务的做法，并把它的连接管理抽成两边共用的通道（块 B2），不再写第二套：

@@ -9,6 +9,9 @@ from pathlib import Path
 
 from ..plugin_events.points import EventPointContext, emit_event, warn_event_assembly_failure
 
+# 固定结构化原因码；不携带线程或渠道身份。
+PLUGIN_EVENT_THREAD_UNRESOLVED = 'PLUGIN_EVENT_THREAD_UNRESOLVED'
+
 
 # LLM: 复用宿主已冻结的路径，提供 B3 安装读取与连接需要的两个字段；这里不解析或检查文件系统。
 # 类用途: 给后台事件中心传当前用户的既有插件地址，不创建目录或读取安装表。
@@ -28,8 +31,8 @@ def _enabled_event_config(agent):
         return None
 
 
-# LLM: server 是唯一 HTTP 宿主；开关在路由/路径装配前检查，启用后的异常仅一次固定原因诊断并返回 None，不改 owner/权限链。
-# 函数用途: 从内存宿主事实构造发布上下文，关闭、缺失或装配失败时零发布、零磁盘读取。
+# LLM: server 是唯一 HTTP 宿主；开关在读取路由和装配前检查，启用后先要求真实会话线程，缺失只记固定原因诊断并返回 None。
+# 函数用途: 从内存宿主事实构造发布上下文；关闭或线程未解析时不构造上下文、不发布事件。
 def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointContext | None:
     enabled = False
     try:
@@ -37,6 +40,11 @@ def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointCon
         if config is None:
             return None
         enabled = True
+        thread_id = routing.get('thread_id')
+        if not isinstance(thread_id, str) or not thread_id.strip():
+            warn_event_assembly_failure(PLUGIN_EVENT_THREAD_UNRESOLVED)
+            return None
+        thread_id = thread_id.strip()
         from . import http_service, plugin_panels_http
 
         server = server if server is not None else http_service._server_instance
@@ -44,7 +52,7 @@ def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointCon
             return None
         owner = _EventOwner(agent.home_paths.owner_home_dir, agent.home_paths.owner_plugins_dir)
         return EventPointContext(config, partial(plugin_panels_http.publish_plugin_event, server, owner),
-                                 str(routing.get('channel') or ''), str(routing.get('thread_id') or ''),
+                                 str(routing.get('channel') or ''), thread_id,
                                  str(routing.get('actor') or 'main'),
                                  str(routing.get('channel_conversation_id') or ''))
     except Exception:  # noqa: BLE001 观察装配故障不能中止入队或模型执行
@@ -84,11 +92,9 @@ def _prompt_thread_id(agent, request: dict) -> str:
         return ''
 
 
-# LLM: 开关先于 owner/路由读取；观察装配异常隔离，确认启用后只记一次固定原因，不影响已成功入队事实。
-#   v2（tref2b）：合同要求每个回合事件的会话引用非空，所以提交时点也解析会话线程——与执行路径共用同一
-#   预检入口（get_or_create 幂等，同一渠道键解析出同一线程）；解析不出线程时不发事件（不发残缺引用）。
-#   渠道会话号进 channel_conversation_ref 供插件在提交时点归组。两者都不从正文推断。
-# 函数用途: 首次排队后仅向基础 owner 发提示观察；缺配置、字段、线程或装配故障不发，关闭不读取请求。
+# LLM: 开关先于请求字段读取；线程解析失败交由 gateway_event_context 统一短路并记录固定原因，关闭时不读取请求。
+#   v2（tref2b）：提交时点在确认开启后解析会话线程；渠道会话号只进 channel_conversation_ref，两者都不从正文推断。
+# 函数用途: 首次排队后仅向基础 owner 发提示观察；线程缺失或装配失败不发布，关闭时零解析。
 def prompt_queued(server, request: dict) -> None:
     enabled = False
     try:
@@ -102,8 +108,6 @@ def prompt_queued(server, request: dict) -> None:
         channel = str(metadata.get('channel') or '')
         conversation = request.get('conversation') or {}
         thread_id = _prompt_thread_id(agent, request)
-        if not thread_id:
-            return
         context = gateway_event_context(agent, {'channel': channel,
             'thread_id': thread_id,
             'channel_conversation_id': conversation.get('channel_conversation_id') or ''}, server=server)
@@ -141,9 +145,9 @@ def command_completed(agent, receipt) -> None:
         return
 
 
-# LLM: 开关先于请求字段读取；装配异常返回 None，启用后的固定原因诊断不包含通道/会话/模型或错误正文。
-#   v2（tref2）：会话线程由调用方给的 thread_id_of 在确认开启后才解析（与工具事件同源；关闭时一次都不调，
-#   不为事件多查会话库）；渠道会话号从请求里读，进 channel_conversation_ref。两者都不从正文推断。
+# LLM: 开关先于请求字段读取；thread_id_of 仅在启用后调用，解析失败由统一 context 闸门记固定原因并返回 None。
+#   v2（tref2）：会话线程由调用方给的 thread_id_of 在确认开启后解析（与工具事件同源；关闭时一次都不调），
+#   不为事件多查会话库；渠道会话号从请求里读，进 channel_conversation_ref。两者都不从正文推断。
 # 函数用途: 请求真正开始前发最小回合观察；缺失或关闭时不读路由、不解析线程，不带服务商或密钥。
 def turn_started(agent, request: dict, *, thread_id_of: Callable[[], str] | None = None) -> EventPointContext | None:
     enabled = False
@@ -169,15 +173,19 @@ def turn_started(agent, request: dict, *, thread_id_of: Callable[[], str] | None
         return None
 
 
-# LLM: 缺上下文/关闭先返回，零响应读取；启用后的字段故障仅一次固定原因诊断，不能翻转真实回合终态。
-# 函数用途: 回合收口时发布最小终态，保留失败和中断事实；观察不可用则不发。
+# LLM: 缺上下文/关闭先返回，零响应读取；依据结构化 restart_resume 或 provider_transient_resume 标记中断，不能翻转回合续跑事实。
+# 函数用途: 回合收口时发布最小终态；重启续跑和供应商瞬时故障重排都标 interrupted，观察不可用则不发。
 def turn_ended(context, response: dict, duration_ms: float) -> None:
     enabled = False
     try:
         if _enabled_event_config(context) is None:
             return
         enabled = True
-        status = 'interrupted' if response.get('restart_resume') else str(response.get('status') or 'failed')
+        has_resume_marker = (
+            response.get('restart_resume') is not None
+            or response.get('provider_transient_resume') is not None
+        )
+        status = 'interrupted' if has_resume_marker else str(response.get('status') or 'failed')
         emit_event(context, 'turn_ended', {'request_id': response.get('id') or '',
             'status': status if status in {'done', 'failed', 'stopped', 'interrupted'} else 'failed',
             'duration_ms': duration_ms, 'tool_calls': response.get('tool_calls', 0),
