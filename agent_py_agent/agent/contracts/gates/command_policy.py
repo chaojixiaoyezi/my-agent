@@ -39,8 +39,9 @@ _SHELL_EXECUTABLES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _NESTED_SHELL_DEPTH_LIMIT_COUNT = 4
 # 单条嵌套程序的字符上限：解析是线性的，超长输入不再递归（fail-closed 给 finding）。32k 足够容纳真实包装文本。
 _NESTED_SHELL_SOURCE_MAX_CHARS = 32_768
-# 顶层命令源长度上限：64K 足够容纳真实命令行（实测 shlex 解析 1KB≈0.02ms、64KB≈0.9ms、
-# 256KB≈3.8ms、1MB≈18.4s——1MB 会卡住策略线程，必须在解析前拦截）。
+# 顶层命令源长度上限：64K 足够容纳真实命令行。shlex 逐字符拼 token，对单个超长参数是平方级
+#   （3a 实测单个带引号长参数：64K≈35ms、128K≈0.2s、256K≈0.6s；ds5 实测 1MB≈18.4s），
+#   短词很多时接近线性（64KB≈0.9ms）——按最坏形状定上限，1MB 会卡住策略线程，必须在解析前拦截。
 # 3a 2026-10-05 裁定：这是解析成本的资源上界，与嵌套 Shell 源的 32K 上限同类，固定为模块常量、不做配置项。
 _COMMAND_SOURCE_MAX_CHARS = 65_536
 
