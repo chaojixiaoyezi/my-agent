@@ -1,5 +1,7 @@
-"""Responses 请求体的会话级缓存键：绑定宿主会话时带 prompt_cache_key，未绑定时不带；同线程稳定、跨线程不同、不含凭据。"""
+"""Responses 请求体的会话级缓存键：绑定宿主会话时带 prompt_cache_key，未绑定时不带；同线程稳定、跨线程不同、不含凭据。
+订阅登录另带与缓存键同值的 session-id 头（服务端缓存亲和）。"""
 import json
+from uuid import UUID
 
 from agent_py_agent.agent.backends import BackendOptions
 from agent_py_agent.agent.backends.base import ProviderRequestOptions
@@ -18,7 +20,7 @@ def _non_stream_payload(monkeypatch, backend):
     return sent[0]
 
 
-def _stream_payload(monkeypatch, backend):
+def _stream_request(monkeypatch, backend):
     sent = []
 
     class _Lines:
@@ -39,7 +41,7 @@ def _stream_payload(monkeypatch, backend):
         def close(self):
             pass
 
-    monkeypatch.setattr(backend, "request_stream_iter", lambda path, payload, headers, first_event_timeout_seconds=None: sent.append(payload) or _Lines())
+    monkeypatch.setattr(backend, "request_stream_iter", lambda path, payload, headers, first_event_timeout_seconds=None: sent.append((payload, headers)) or _Lines())
     backend.generate("你好", request_options=ProviderRequestOptions())
     return sent[0]
 
@@ -85,11 +87,23 @@ def test_cache_key_contains_no_credentials(monkeypatch):
 
 
 def test_subscription_mode_payload_carries_the_cache_key(monkeypatch):
-    # 订阅登录走同一 Responses 组包：auth mode=chatgpt 时改 instructions/去 max_output_tokens，缓存键照常写入。
+    # 订阅登录走同一 Responses 组包：auth mode=chatgpt 时改 instructions/去 max_output_tokens；缓存键改用与 session-id
+    # 头相同的 UUID 形态（宿主会话摘要前 128 位），官方 Codex 根代理两者同值。
     backend = OpenAIResponsesBackend(BackendOptions("https://chatgpt.example.test/backend-api/codex", "", "m", stream_enabled=True))
     backend.auth_ref = {"mode": "chatgpt"}
     with provider_session_scope(("local", "main"), "thread-1"):
-        expected = current_provider_session()
-        payload = _stream_payload(monkeypatch, backend)
-    assert payload["prompt_cache_key"] == expected
+        session = current_provider_session()
+        payload, headers = _stream_request(monkeypatch, backend)
+    assert payload["prompt_cache_key"] == str(UUID(hex=session[:32]))
+    assert headers["session-id"] == payload["prompt_cache_key"]
     assert "max_output_tokens" not in payload
+
+
+def test_non_subscription_requests_carry_no_session_affinity_header(monkeypatch):
+    # 普通 API Key 的 Responses 服务商不加 session-id 头，缓存键保持原摘要，请求逐字节不变。
+    backend = OpenAIResponsesBackend(BackendOptions("https://example.test/v1", "key", "model", stream_enabled=True))
+    with provider_session_scope(("local", "main"), "thread-1"):
+        session = current_provider_session()
+        payload, headers = _stream_request(monkeypatch, backend)
+    assert payload["prompt_cache_key"] == session
+    assert "session-id" not in headers

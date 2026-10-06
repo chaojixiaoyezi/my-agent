@@ -211,6 +211,48 @@ def test_only_the_subscription_login_uses_websocket(tmp_path, monkeypatch):
 
 
 
+# LLM: 订阅接口按 session-id 头决定提示缓存亲和（官方 Codex 每个请求都带）；10-05 生产统计订阅模型命中只有 10%–71%，
+#   DeepSeek 98%，缺的就是这个头。这里走真实登录配置 → get_backend → 真实握手函数（只替换 websockets 的 connect），
+#   核对握手头里的 session-id 与首包 prompt_cache_key 相同、同线程稳定、跨线程不同、未绑定会话不带；非订阅登录不加头。
+# 函数用途: 钉住订阅登录每个请求都带会话亲和头，且与缓存键同值。
+def test_subscription_handshake_carries_session_affinity_matching_cache_key(tmp_path, monkeypatch):
+    from uuid import UUID
+
+    from agent_py_agent.agent.backends.provider_headers import provider_session_scope
+
+    alice = host(tmp_path / "affinity")
+    key = setup(alice, "chatgpt")
+    login(alice, monkeypatch)
+    execute_model_profile_operation(alice, "set_default", {"profile_id": key})
+    config = selected_model_config(alice)
+    config.stream_enabled = True
+    backend = get_backend(config.model_backend, config)
+    handshakes = []
+
+    def fake_connect(url, **kwargs):
+        connection = FakeConnection(completed_events())
+        handshakes.append((kwargs["additional_headers"], connection))
+        return connection
+
+    monkeypatch.setattr("websockets.sync.client.connect", fake_connect)
+
+    def send_once(thread_id):
+        if thread_id is None:
+            backend.generate("你好")
+        else:
+            with provider_session_scope(("local", "main"), thread_id):
+                backend.generate("你好")
+        headers, connection = handshakes[-1]
+        return headers.get("session-id"), connection.sent[0].get("prompt_cache_key")
+
+    first, first_key = send_once("thread-a")
+    again, again_key = send_once("thread-a")
+    other, _ = send_once("thread-b")
+    assert first == first_key == again == again_key and str(UUID(first)) == first
+    assert other != first
+    assert send_once(None) == (None, None)
+
+
 # LLM: 17k Linux 车道实测：cabfix 把 HttpBackend 的 _gateway_request/request_stream_iter 改成 (StreamCall, options) 后，
 #   OAuth 的两个覆盖仍是旧签名，账号登录的非流式请求和非订阅流式请求一调就 TypeError。这里经基类公开入口
 #   （request_json、request_stream_iter）走到 OAuth 覆盖，核对账号头、禁重定向、首包预算和绝对期限都进了信封。

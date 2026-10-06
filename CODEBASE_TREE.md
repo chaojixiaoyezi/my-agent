@@ -101,7 +101,7 @@
 |-- agent_py_agent/tests/test_wire_contract.py # 出站协议合同：逐形状修整与校验、三个出口集成、修整被改坏时本地拦截、随机历史性质测试
 |-- agent_py_agent/tests/test_backends_provider_history_reload_identical.py # 磁盘重载 vs 同进程的 provider payload 逐字一致：工具参数稳定键序、reasoning_content 保留、Responses 路径同口径（DeepSeek 前缀缓存底座）
 |-- agent_py_agent/tests/test_backend_signature_guardrails.py # 后端传输签名守卫：类关系发现四个传输方法的覆盖签名一致性 + ast 调用点关键字扫描，含比较器自检
-|-- agent_py_agent/tests/test_responses_cache_key.py # Responses 请求体会话级缓存键：绑定会话带 prompt_cache_key、未绑定不带、同线程稳定、跨线程不同、不含凭据
+|-- agent_py_agent/tests/test_responses_cache_key.py # Responses 请求体会话级缓存键：绑定会话带 prompt_cache_key、未绑定不带、同线程稳定、跨线程不同、不含凭据；订阅登录另带同值 session-id 头
 |-- agent_py_agent/tests/test_provider_retry_final_sink.py # 修法 B 收口提示走结构化通道：typed final 事件、异常/旧签名回退、TUI 与 IM 同一句已登记文案
 |-- agent_py_agent/agent/retrieval/embedding_usage.py # 嵌入用量与召回方式的进程内计数（按用途：请求、条数、失败、供应商回报的 token；semantic/keyword/none），只给 /model vector 展示
 |-- agent_py_agent/tests/test_embedding_usage.py # S7：各用途计数、未回报 token、失败、真实记忆接线、召回方式、/model vector 的 TUI/IM 同一份且不含正文

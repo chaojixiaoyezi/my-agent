@@ -8,9 +8,12 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 _SESSION: ContextVar[str] = ContextVar("provider_session", default="")
+# ChatGPT 订阅接口按这个请求头决定提示缓存亲和（官方 Codex codex-rs/core/src/client.rs 的 responses_session_id；
+#   codex-api build_session_headers 的头名）。不带它时同一会话的请求会落到不同缓存分片，命中率低。
+CHATGPT_SESSION_HEADER_PROTOCOL = "session-id"
 # LLM: 探测记账只在该 scope 内生效：宿主在探测前绑定账本与请求身份，http 探测每次真实请求按它记账；
 #   没有 scope 的调用（测试直调 backend、旧路径）保持不记账，不改变探测行为与缓存。
 _PROBE_ACCOUNTING: ContextVar[object | None] = ContextVar("probe_accounting", default=None)
@@ -75,6 +78,16 @@ def validate_headers(value: object) -> dict[str, str]:
 # 函数用途: 返回当前 provider 会话编号（owner+thread 的 sha256），未绑定会话时返回空串；Responses 请求体用它做提示缓存键。
 def current_provider_session() -> str:
     return _SESSION.get()
+
+
+# LLM: 订阅登录（auth mode=chatgpt）专用的会话编号形态：官方 Codex 根代理的 session-id 头与 prompt_cache_key 是同一个 UUID，
+#   服务端按 session-id 把同一会话路由到同一份提示缓存。这里把宿主会话编号（owner+thread 的 sha256）前 128 位排成 UUID：
+#   同线程稳定、跨线程不同、不含凭据；未绑定会话返回空串（缓存亲和是优化，不是协议必需），绝不生成随机值。
+#   改动同步 test_responses_cache_key 与 test_model_oauth 的订阅用例。
+# 函数用途: 返回订阅接口用的会话 UUID；没有绑定宿主会话时返回空串。
+def chatgpt_session_uuid() -> str:
+    session = _SESSION.get()
+    return str(UUID(hex=session[:32])) if session else ""
 
 
 # LLM: 动态会话头名称是配置，值永远来自宿主身份，不能接受静态 UUID 冒充会话。

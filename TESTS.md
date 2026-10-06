@@ -8311,6 +8311,15 @@ $PY scripts/check_clean_package.py .
   `test_native_tool_ir*`、`test_reasoning*`、`test_message_adapter*`、`test_*context_pressure*`、`test_tool_ir*`、`test_wire_contract*` 共 1274 passed。
 - 变异 6/6 被杀：不认 responses_reasoning、跨模型也放行、不校验 item、不校验 model、分类器沿用旧规则、文字判定沿用旧规则。
 
+## 订阅登录 session-id 缓存亲和头（gptcache，3a，2026-10-05）
+
+- 新用例：
+  - `test_responses_websocket.py::test_subscription_handshake_carries_session_affinity_matching_cache_key`：真实登录配置 → `get_backend` → 真实握手函数（只替换 websockets 的 connect），握手头 `session-id` 与首包 `prompt_cache_key` 相同且是 UUID；同线程两次相同、跨线程不同、未绑定会话两者都不带。
+  - `test_responses_cache_key.py`：订阅模式缓存键是会话编号前 128 位的 UUID 且等于 `session-id` 头；非订阅服务商不带该头、缓存键仍是原摘要。
+- 结果：`test_responses_cache_key.py`、`test_responses_websocket.py`、`test_model_oauth.py`、`test_responses_backend.py` **56 passed**。
+- 变异（`scratchpad/mutate_gptcache.py`，原文自动恢复）：去掉头、头值用 64 位摘要、所有服务商都加、缓存键保持摘要、随机 UUID → **5/5 KILLED**。
+- 未验证：真实 ChatGPT 订阅接口（按用户规定不拿订阅额度做测试调用）；上线后用 model_usage 账本对比 luna/sol 命中率。
+
 ## Responses 请求体带会话级提示缓存键 prompt_cache_key（2026-09-30，分支 `worker/ds1-responses-cache-key`）
 
 - **新增** `test_responses_cache_key.py`：

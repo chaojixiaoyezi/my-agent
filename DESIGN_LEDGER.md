@@ -1,5 +1,14 @@
 # 设计台账
 
+## 订阅登录请求带 session-id 缓存亲和头（gptcache，3a，2026-10-05；状态：已实现，待部署后用生产账本核对命中率）
+
+- **来源（结构化事实）**：10-05 按 model_usage 账本统计近 24 小时主调用：DeepSeek（官方，Chat 接口）6152 次、缓存命中 98%；`gpt-6-luna` 4387 次、命中 71%、未命中输入约 3.5 亿 token；`gpt-6.1-sol` 810 次、命中 10%、未命中约 1.15 亿。两个 GPT 配置都走同一个 ChatGPT 订阅登录服务商（WebSocket）。线程最后一次调用的缓存诊断显示请求前缀（system/tools/历史）没变，服务端仍未命中——问题在路由，不在前缀。
+- **根因**：官方 Codex（`codex-rs/core/src/client.rs` 的 `responses_session_id`，注释“ChatGPT derives cache affinity from the Responses session-id header”；头名见 `codex-api/src/requests/headers.rs` 的 `build_session_headers`）每个请求都带 `session-id` 头，根代理的值与请求体 `prompt_cache_key` 相同。我们只在请求体带了 `prompt_cache_key`，订阅服务商配置的 `session_header` 为空，所以没有这个头。
+- **做法**：`provider_headers.chatgpt_session_uuid()` 把宿主会话编号（owner+thread 的 sha256）前 128 位排成 UUID；`responses._generate` 在 `auth mode=chatgpt` 时请求头加 `session-id`、请求体 `prompt_cache_key` 改用同一个 UUID（官方根代理两者同值）；WebSocket 握手沿用同一份请求头。未绑定会话不加（缓存亲和是优化），绝不生成随机值；非订阅服务商请求逐字节不变。
+- **代价**：订阅线程的缓存键形态变了，上线后每个活跃线程第一次调用冷启动一次。
+- **没做（下一步候选）**：① 官方在一个回合内复用同一条 WebSocket，并回放服务端给的 `x-codex-turn-state` 粘性路由令牌；我们每个请求新开连接、不回放令牌。是否还需要，等 session-id 上线后看命中率再定。② Compact 等辅助调用的命中率是 0%（DeepSeek 一天约 2800 万未命中输入）：摘要请求的前缀和主线程不同，下一刀可以让摘要请求复用主线程的前缀（系统提示 + 工具 + 历史，最后追加摘要指令）。
+- **验证**：见 TESTS.md 同名节。
+
 ## 命令源长度上限：解析前的结构化拒绝（cmdcap + cmdcap-fix，2026-10-05，worker/cmdcap，基于 17l 头 886965f3a；本地验收完成，待 3a 终审）
 
 - **来源（结构化事实）**：ds5 初审 shellwrap5 时实测，顶层命令没有长度上限：1MB 的单个参数在命令策略检查里光 stdlib shlex.split 就要 18.4 秒（纯 Python 逐字符），会卡住对应线程；嵌套源已有 32K 上限（COMMAND_NESTED_SOURCE_TOO_LARGE）。

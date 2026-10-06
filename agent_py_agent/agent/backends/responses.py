@@ -56,13 +56,15 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["text"] = {"format": {"type": "json_schema", "name": "my_agent_output", "strict": True, "schema": request.response_schema}}
         elif request.json_object:
             payload["text"] = {"format": {"type": "json_object"}}
-        if getattr(self, "auth_ref", {}).get("mode") == "chatgpt":
+        subscription = getattr(self, "auth_ref", {}).get("mode") == "chatgpt"
+        if subscription:
             payload.pop("max_output_tokens", None)
             payload["instructions"] = "\n\n".join(item["content"] for item in payload["input"] if item.get("role") == "system")
             payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
         validate_responses_input(payload["input"])
-        payload.update(_session_cache_key())
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        payload.update(_session_cache_key(subscription))
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
+                   **_subscription_affinity_headers(subscription)}
         obj = self._send_responses_request(payload, headers, request)
         return ModelResponse(backend=self.name, **response_fields(obj, self.model_name))
 
@@ -86,10 +88,21 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
 
 # LLM: 参考官方 Codex：同一会话的请求带稳定缓存键（宿主绑定的 owner+thread 摘要，不含凭据），让服务商把同一会话
-#   路由到同一份提示缓存；只在绑定宿主会话时写入，绝不生成随机键。改动须同步 test_responses_cache_key。
+#   路由到同一份提示缓存；只在绑定宿主会话时写入，绝不生成随机键。订阅登录用与 session-id 头相同的 UUID 形态
+#   （官方根代理两者相同），其它服务商保持原摘要。改动须同步 test_responses_cache_key。
 # 函数用途: 返回要并进 Responses 请求体的缓存键字段；没有绑定会话时返回空字典。
-def _session_cache_key() -> dict:
-    from .provider_headers import current_provider_session
+def _session_cache_key(subscription: bool = False) -> dict:
+    from .provider_headers import chatgpt_session_uuid, current_provider_session
 
-    session = current_provider_session()
+    session = chatgpt_session_uuid() if subscription else current_provider_session()
     return {"prompt_cache_key": session} if session else {}
+
+
+# LLM: 只给订阅登录加：ChatGPT 后端按 session-id 头决定缓存亲和（官方 Codex 每个请求都带），值与 prompt_cache_key 相同；
+#   未绑定会话或非订阅登录返回空字典，不改其它服务商的请求头。WebSocket 握手沿用同一份请求头。
+# 函数用途: 返回订阅接口的缓存亲和请求头。
+def _subscription_affinity_headers(subscription: bool) -> dict:
+    from .provider_headers import CHATGPT_SESSION_HEADER_PROTOCOL, chatgpt_session_uuid
+
+    session = chatgpt_session_uuid() if subscription else ""
+    return {CHATGPT_SESSION_HEADER_PROTOCOL: session} if session else {}

@@ -62,7 +62,8 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
 订阅模式固定使用专用 Responses 端点、账号头、流式请求及 `store=false`；system 指令转到 `instructions`，
 不发送该接口不接受的 `max_output_tokens`。请求体在绑定宿主会话时带 `prompt_cache_key`（会话级提示缓存键，值与
 `provider_session_scope` 的会话编号一致，参考官方 Codex 的做法，让服务商把同一会话路由到同一份提示缓存）；
-未绑定会话时不带，且绝不生成随机键。通用服务商可按原显式目录发现操作读取 `/v1/models`。
+未绑定会话时不带，且绝不生成随机键。订阅模式另带 `session-id` 请求头（ChatGPT 后端按它决定缓存亲和），值与
+`prompt_cache_key` 相同，都是会话编号前 128 位排成的 UUID（官方 Codex 根代理两者同值）；WebSocket 握手沿用同一份请求头。通用服务商可按原显式目录发现操作读取 `/v1/models`。
 
 ### 订阅接口改走 WebSocket（2026-09-30）
 
