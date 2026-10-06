@@ -9,6 +9,13 @@
 
 - `gateway_parts/plugin_command_service.execute_plugin_control`：只对 dataclass 形态的 scope 用 `replace` 补 `event_hub`；其它形态原样交给 `_scope_management`。此前 `replace(None)` 抛 TypeError，被兜底吞成 `OUTCOME_UNKNOWN`，管理员看到“未能确认插件请求结果”而不是真实回执。
 
+## 管理员完整结果附续跑关联投影（contref，2026-10-05，ds9 实现、3a 审查收尾；随 17p 集成）
+
+- `agent/gateway_parts/http_handlers.py`：`_send_archived_terminal_result(handler, paths, access, *, repair_response_projection=False, agent=None)`——管理员分支在 `terminal_response` 上追加 `continuation` 键（`_continuation_result_projection` → `conversation/continuation_refs.read_continuation_projection`）；公开分支保持 `_public_result` 白名单过滤，`handle_result` 两处调用点传 `agent=server.agent`。
+- 投影只读任务档案的 `continuation_refs`（结构化指向：turn/message id、字符数、时间、交付原因），不复制正文；无关联或读取失败时无该键。
+
+- 返回体拼装在 `http_handlers._archived_result_body(server, access, terminal_response)`：管理员分支附 `continuation`，公开分支走 `_public_result`；`_send_archived_terminal_result` 收 `server`（取 paths 与 agent）。
+
 ## Adapter dispatch 状态（slp5，2026-10-05；已实现，待初审）
 
 ## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，worker/obsfix34；待非作者初审）

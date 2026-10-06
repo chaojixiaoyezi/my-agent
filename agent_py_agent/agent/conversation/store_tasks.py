@@ -886,3 +886,67 @@ class TaskStore:
 
         payload = update_json_file_atomic(path, updater, require_existing=True)
         return ThreadTaskLink.from_dict(payload) if updated else None
+
+    # LLM: 续跑关联的唯一写入口：在文件锁内按稳定键幂等追加，重复 wake/冻结重投不会重复记账；
+    #   档案不存在或参数不合法返回 None（调用方据此转诊断），坏档案沿原错误合同抛出，不静默重建。
+    # 函数用途: 把一条续跑回合关联追加到原请求档案（按 message_id 去重）。
+    def append_continuation_ref(self, request: dict) -> ThreadTaskLink | None:
+        return _append_task_link_row(self.storage, "continuation_refs", request)
+
+    # LLM: 诊断与 refs 互斥：解析不到原请求时留固定原因码，不猜测归属；写入口径与 refs 相同。
+    # 函数用途: 把一条续跑关联诊断追加到任务档案（按 turn_id+reason 去重）。
+    def append_continuation_diagnostic(self, request: dict) -> ThreadTaskLink | None:
+        return _append_task_link_row(self.storage, "continuation_diagnostics", request)
+
+
+
+
+# LLM: 续跑追加逻辑放模块级以控制 TaskStore 类体量；row 必须是结构化 dict（不存正文），判重键按字段选：
+#   refs=message_id，diagnostics=turn_id+reason。只追加不改写已有行，顺序即写入顺序。
+# 函数用途: 在文件锁内把一条续跑行幂等追加到指定字段；档案不存在返回 None。
+def _append_task_link_row(
+    storage: ConversationStorage, field: str, request: dict
+) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "")
+    row = request.get("row")
+    if not task_id or not isinstance(row, dict):
+        return None
+    path = storage.task_path(task_id)
+    if not path.exists():
+        return None
+    appended = False
+
+    # LLM: store_tasks 的持久化合同：校验任务身份后按字段判重追加，重复行保持原记录；修改须同步本领域调用方与存储回归。
+    # 函数用途: 校验任务身份后按稳定键判重，把一条续跑行追加到档案。
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal appended
+        if not data:
+            raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+        link = ThreadTaskLink.from_dict(data)
+        if not link.thread_id or link.task_id != task_id:
+            raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
+        rows = list(getattr(link, field) or ())
+        if any(_continuation_row_matches(field, item, row) for item in rows if isinstance(item, dict)):
+            return data
+        rows.append(dict(row))
+        appended = True
+        return replace(link, **{field: tuple(rows)}).to_dict()
+
+    payload = update_json_file_atomic(path, updater, require_existing=True)
+    return ThreadTaskLink.from_dict(payload)
+
+
+# LLM: 续跑行判重只认稳定结构化键：refs 按 message_id、diagnostics 按 turn_id+reason；空键不算命中。
+# 函数用途: 判断一条续跑行是否已经在档案里（幂等判据）。
+def _continuation_row_matches(
+    field: str, existing: dict[str, Any], new: dict[str, Any]
+) -> bool:
+    if field == "continuation_refs":
+        message_id = str(new.get("message_id") or "")
+        return bool(message_id) and str(existing.get("message_id") or "") == message_id
+    turn_id = str(new.get("turn_id") or "")
+    return (
+        bool(turn_id)
+        and str(existing.get("turn_id") or "") == turn_id
+        and str(existing.get("reason") or "") == str(new.get("reason") or "")
+    )

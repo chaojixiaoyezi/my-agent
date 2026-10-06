@@ -248,20 +248,32 @@ class ThreadTaskLink:
     run_prompt: str = ""
     # 能力包首次读取时固定的版本；只保存在当前任务链接，不能从会话摘要或名称推断。
     skill_snapshot_refs: tuple[dict[str, str], ...] = ()
+    # 子代理完成触发的续跑回合把「最终回复在哪个消息」的结构化指向追加在这里（唯一权威位置）。
+    # 只存 turn/message id、字符数、交付时间与交付原因，不存正文；管理员视图与取数侧只做投影。
+    continuation_refs: tuple[dict[str, Any], ...] = ()
+    # 解析续跑关联失败/冲突时的固定原因诊断；与 continuation_refs 互斥出现，供管理员排查。
+    continuation_diagnostics: tuple[dict[str, Any], ...] = ()
     capability_selection: TaskCapabilitySelection | None = None
     # 仅用于无损回写坏 marker；诊断只暴露固定代码，不能记录、展示或执行 raw 内容。
     capability_selection_corruption: InvalidTaskCapabilitySelection | None = field(default=None, repr=False)
 
     # LLM: None 完全省略选择键，保持旧序列化字节；损坏 marker 原值保留，不能因更新状态/pins 丢弃证据或重建 pending。
+    #   续跑字段同理：空集合完全省略键，旧档案经普通状态更新重写后字节不变。
     # 函数用途: 生成原任务 JSON，仅合法非空选择或已存在坏值使用 host_capability_selection.v1 键。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         selection = payload.pop("capability_selection")
         corruption = payload.pop("capability_selection_corruption")
+        refs = payload.pop("continuation_refs")
+        diagnostics = payload.pop("continuation_diagnostics")
         if corruption is not None:
             payload[CAPABILITY_SELECTION_KEY] = corruption["raw"]
         elif selection is not None:
             payload[CAPABILITY_SELECTION_KEY] = self.capability_selection.to_dict()
+        if refs:
+            payload["continuation_refs"] = [dict(item) for item in refs]
+        if diagnostics:
+            payload["continuation_diagnostics"] = [dict(item) for item in diagnostics]
         return payload
 
     # LLM: 只提供 bounded 代码，原坏值不进入日志/模型；缺键与坏键必须区分且两者都不能作为待领取资格。
@@ -322,6 +334,16 @@ class ThreadTaskLink:
             run_epoch=max(0, int(data.get("run_epoch") or 0)),
             run_prompt=str(data.get("run_prompt") or ""),
             skill_snapshot_refs=tuple(_task_skill_refs(data.get("skill_snapshot_refs", []))),
+            continuation_refs=tuple(
+                dict(item)
+                for item in (data.get("continuation_refs") or [])
+                if isinstance(item, dict)
+            ),
+            continuation_diagnostics=tuple(
+                dict(item)
+                for item in (data.get("continuation_diagnostics") or [])
+                if isinstance(item, dict)
+            ),
             capability_selection=selection,
             capability_selection_corruption=corruption,
         )

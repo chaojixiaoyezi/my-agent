@@ -275,7 +275,7 @@ def handle_result(handler, server) -> None:
     access = _ResultAccessContext(request_id, user_id, permission)
     if _send_archived_terminal_result(
         handler,
-        server.paths,
+        server,
         access,
         repair_response_projection=True,
     ):
@@ -288,7 +288,7 @@ def handle_result(handler, server) -> None:
     # 或 done/failed 投影永远不能把请求提升为完成。
     if _send_archived_terminal_result(
         handler,
-        server.paths,
+        server,
         access,
         repair_response_projection=True,
     ):
@@ -330,11 +330,12 @@ def handle_input_status(handler, server) -> None:
 # 函数用途: 从完成或失败归档恢复最终答复，并补写缺失的 response 文件。
 def _send_archived_terminal_result(
     handler,
-    paths,
+    server,
     access: _ResultAccessContext,
     *,
     repair_response_projection: bool = False,
 ) -> bool:
+    paths = server.paths
     archive_path = paths.terminal / f"{access.request_id}.json"
     if not archive_path.exists():
         return False
@@ -372,9 +373,36 @@ def _send_archived_terminal_result(
         # The canonical archive is already durable; serving it remains safe
         # even if this best-effort projection cannot be repaired now.
         pass
-    result = terminal_response if _all_user_access(access) else _public_result(terminal_response)
-    handler._send_json(200, result)
+    handler._send_json(200, _archived_result_body(server, access, terminal_response))
     return True
+
+
+# LLM: 读权限决定完整结果还是公开投影；管理员完整结果附续跑指向（结构化投影，不复制正文），公开投影不带这个键，
+#   IM/TUI 展示不变。agent 取自 Gateway server（本机主账号的会话档案）：管理员看其他 owner 的请求时读不到对方档案，
+#   按无续跑处理（已知局限，见 DESIGN_LEDGER contref 节）。
+# 函数用途: 生成归档终态结果的返回体。
+def _archived_result_body(server, access: _ResultAccessContext, terminal_response: dict) -> dict:
+    if not _all_user_access(access):
+        return _public_result(terminal_response)
+    result = dict(terminal_response)
+    projection = _continuation_result_projection(getattr(server, "agent", None), access.request_id)
+    if projection:
+        result["continuation"] = projection
+    return result
+
+
+# LLM: 管理员完整结果附「有续跑，最终回复见 …」的结构化指向；读取失败按无续跑处理，不影响原结果。
+#   公开投影（IM/TUI 公开面）不带这个键，展示行为不变。
+# 函数用途: 给管理员分支读一次续跑关联投影；无关联或读不到返回 None。
+def _continuation_result_projection(agent: object | None, request_id: str) -> dict | None:
+    if agent is None:
+        return None
+    from ..conversation.continuation_refs import read_continuation_projection
+
+    try:
+        return read_continuation_projection(agent, request_id)
+    except Exception:
+        return None
 
 
 # LLM: progress 读取沿用 result 的请求 owner 鉴权；chunk 正文和 response 都不能自证身份。

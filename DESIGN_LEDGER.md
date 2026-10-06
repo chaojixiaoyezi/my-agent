@@ -57,6 +57,19 @@
 - **收益口径（2026-10-05 精算）**：新装用户（默认配置、全工具注册）相比本次改动前再省 **~1.46K token/次**（memory_search 312 + publish_audit_update 961 + stop_named_work 184；cancel_session_task/send_message/send_session_message 因进入后台续跑目录被豁免）。**生产（现状基线）实际再省 ~184 token/次**（stop_named_work；其余 5 个：3 豁免 + memory_search 未注册 + publish_audit_update 普通会话不可用）。生产实测 tool_schema 约 1.7 万，改动后约 16.8K。
 - **已知边界**：`memory_search` 默认不注册（`enable_memory_search_tool` 默认关），其标记只在开启时生效；`publish_audit_update` 只在 Audit 准备回合可用，测试按快照可用性跳过。
 
+## 续跑产出回写原请求的结构化关联（contref，2026-10-05，ds9 实现、3a 非作者审查并收尾；随 17p 集成）
+
+- **来源（问题清单 #21「续跑产出未回写请求」+ subwait/subwait2 只读调查 + 3a 裁定 b2）**：子代理完成触发的续跑回合，产出会经 canonical 消息送达 TUI/飞书（用户无需操作即可看到），但请求级记录（`terminal_response`）停在第一段回合的回复；评测/程序化取数从请求记录取数时拿不到最终回复。3a 裁定采纳 b2：请求照旧收口，续跑回合交付 final 时把结构化关联记到原请求名下。
+- **权威位置与字段**：`conversations/tasks/<原请求 id>.json`（ThreadTaskLink）新增 `continuation_refs`（每条含 `turn_id`、`message_id`、`content_chars`、`delivered_at`、`background_delivery_reason`、`source_run_id`，不存正文）与 `continuation_diagnostics`（解析失败/冲突时的固定原因诊断，与 refs 互斥）。空集合完全省略键，旧档案重写后字节不变（与 capability_selection 同一序列化口径）。
+- **身份链路（不猜）**：只用结构化来源——wake 信封的 `source_agent_id`（来源 run）+ `parent_agent_id`（父 run），并用来源 run 的持久父级（`agent.subagents.load(...).parent_id`）交叉验证；不一致按冲突处理（不静默选一侧，两侧事实进诊断），取不到写固定原因诊断（`continuation_source_missing` / `_source_load_failed` / `_parent_missing`）。禁止按时间或线程推断。
+- **写入点**：`conversation/runtime._complete_background_slice` 交付收口后调 `continuation_refs.record_continuation_ref`——只处理 `subagent_runner_finished` 且 `persisted=True`（canonical final 落盘）的交付；中间回合（partial/mailbox 抑制、message-tool 直投）不写。幂等按 `message_id` 判重（重复 wake/冻结重投不重复记账）；写入失败不影响交付主链路。诊断写到 wake 自带的 `root_task_id` 档案（目标档案缺失时同处落 `continuation_target_missing`）。
+- **管理员完整结果**：`gateway_parts/http_handlers._send_archived_terminal_result` 管理员分支附 `continuation` 投影（`ref_count` + `latest` 结构化指向，不复制正文）；公开投影（IM/TUI 公开面）不带该键，展示行为不变。
+- **不加开关（理由）**：只新增结构化事实（任务档案字段 + 管理员投影键），用户可见行为不变、无额外 token/网络/后台任务；按项目「配置开关」口径属「内部结构整理，外部行为不变」。
+- **工具说明（候选 c）**：`create_subagents` 说明补一句——回合结束后子代理完成会自动触发续跑回合、结果写入会话（TUI/飞书可见）但不更新已返回的本次响应；需要子代理结果作为本次交付时应在结束回合前等它们完成或先交付阶段结果。**缓存影响**：工具定义变化一次 → 所有会话的 prompt 前缀首次 miss 一次，之后恢复；无其它运行时影响。
+- **3a 审查与收尾（2026-10-05 晚）**：身份链路用生产结构化事实核对——主工作区子代理记录的 parent_id（gwreq 930、srun 32、goal-task 26、subagent 6）全部有同名会话任务档案，且子代理完成事件契约要求 `parent_agent_id == root_task_id`，所以“父 run id 即原请求档案 id”成立。size_diff 的 4 条近上限告警已拆平：交付三件套收成 `ContinuationDelivery`（`record_continuation_ref(runtime, delivery)`、`_build_ref_row(delivery, resolution)`）；`_send_archived_terminal_result` 改收 `server`（取 paths 与 agent），返回体拼装抽到 `_archived_result_body`。补 HTTP 返回体用例（管理员有 continuation、公开视图没有）。
+- **已知局限**：`_archived_result_body` 用 Gateway server 的 agent（本机主账号的会话档案）读投影；管理员查看其他 owner（如飞书用户）的请求时读不到对方档案，按“无续跑”处理、不报错。要支持需按请求 owner 解析会话存储，留作后续。
+- **验证**：见 TESTS.md 同名小节（新用例 10 条 + 变异 6/6 + 连带测试 + 门禁 + Linux 车道）。
+
 ## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）
 
 - **撤回原因（Linux 车道发现，macOS 复现）**：`test_compact_text_source.py::test_many_message_summary_avoids_whole_json_copy` 断言压缩取材峰值低于整段 JSON 的一半，estcache 后峰值 2,385,150 > 1,239,645。3a 实测：对 1200 条（每条约 2KB）消息估算一次，估算缓存留住约 1.6MB 的指纹结构（嵌套元组，平均每条约 1.3KB，`tokens.py:229/252/253/264`），被算进压缩峰值——不是整段拷贝，但指纹留存过重。二分：630be9dcc 通过、2b059ec2d 失败。

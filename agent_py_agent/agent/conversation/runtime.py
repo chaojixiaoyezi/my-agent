@@ -754,6 +754,10 @@ def _complete_background_slice(
         commit=commit,
     )
     tool_call_count, tool_success_count, material_progress_count = plan.counters
+    # 续跑回合交付 final 后，把「最终回复在哪个消息」的结构化指向写回原请求；写失败不影响交付主链路。
+    from .continuation_refs import ContinuationDelivery, record_continuation_ref
+
+    record_continuation_ref(runtime, ContinuationDelivery.from_turn(request, plan, commit))
     return BackgroundMainAgentReport(
         thread_id=request.thread_id,
         task_id=request.task_id,

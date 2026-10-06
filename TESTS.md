@@ -39,6 +39,16 @@
 - **门禁**：相关 118 passed、guards9 12 文件 192 passed、变异 5/5 KILLED、ruff、import boundaries=0、DOC_SYNC_PASS、strict code-size hard=0、size_diff 新增 0/消失 57、clean-package OK、git diff --check 通过。
 - **生产收益**：见 DESIGN_LEDGER（生产再省 ~184 token/次；新装用户再省 ~1.46K token/次）。
 
+## 续跑产出回写原请求的结构化关联（contref，2026-10-05，ds9 实现、3a 审查收尾）
+
+- **新用例**：`agent_py_agent/tests/test_continuation_refs.py`（9 条）——final 交付写关联且字段齐全、多级追加顺序、同 message_id 幂等、非续跑 reason 不写、缺父 run 写诊断、父冲突写诊断（含两侧事实）、partial 抑制不写、管理员投影取最新、旧档案重写不加空键。
+- **命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
+  - `pytest agent_py_agent/tests/test_continuation_refs.py` → 9 passed。
+  - 相关 12 文件（continuation_refs / conversation_store / background_main_agent_runtime / background_owner_delivery_commit / background_notice_display / conversation_message_stream / create_subagents_contract_edges / gateway_http / conversation_wake_events / capability_selection_scope / capability_selection_state / background_main_wake_recall）→ 全绿（含兼容修正：`test_absent_marker_preserves_original_task_json_bytes` 的基准同步新可选键）。
+  - 变异 4/4 KILLED（去掉交付门 / 去掉冲突检查 / 去掉幂等判重 / 去掉 wake reason 门）。
+  - guards9 12 文件全绿；ruff 全过；import boundaries=0；DOC_SYNC_PASS（gateway 02/04 已同步）；strict code-size `hard=0 blocked=False`；`git diff --check 886965f3a` 干净。
+- **3a 收尾**：4 条 near-soft 告警拆平后 size_diff 新增 0；新增 `test_result_body_adds_continuation_only_for_admin_view`（管理员返回体有 continuation、公开视图没有），`test_continuation_refs.py` **10 passed**。变异（`scratchpad/mutate_cr.py`，原文自动恢复）：任意 wake 都写、父冲突照收、去掉判重、公开视图也带投影、管理员不带投影、关联行丢 message_id → **6/6 KILLED**。连带测试与车道结果见 17p 记录。
+
 ## 输出上限截断的轮内续跑对真实供应商响应可达（truncfix，2026-10-05，分支 `worker/truncfix`，待非作者初审）
 
 ## 逻辑引用编号误当写路径守卫（artrefguard，2026-10-05，基于 17l `1fc40dd1d`；待初审）

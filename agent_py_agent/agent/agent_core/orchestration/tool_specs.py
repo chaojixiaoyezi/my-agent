@@ -115,6 +115,9 @@ def build_create_subagents_model_spec(*, input_media: bool = False) -> ToolModel
         description=(
             "把独立工作交给下级代理；主、子、孙代理共用此工具。创建后立即运行，进展、阻塞和完成事件"
             "自动通知直接父级，不需要轮询或额外推进；查看或引导已有下级使用当前工具列表中的对应能力。"
+            "回合结束后子代理完成会自动触发一个新的续跑回合：结果写入本会话（TUI/飞书用户无需操作即可看到），"
+            "但不会更新已经返回的本次响应；需要子代理结果作为本次交付时，应在结束回合前等它们完成，"
+            "或先交付阶段结果并说明后续补齐。"
             "单派传 goal；批量传 items，每项 goal 必填，顶层 goal 只是可选批次说明。"
             + _CREATE_DEPENDENCY_ORDER_RULE
             + _CREATE_DISJOINT_WRITE_SCOPE_RULE

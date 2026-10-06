@@ -6,6 +6,12 @@
 - **必须改 2（luna4）**：`test_lock_sidecar_cleanup_protocol.py` 新增 spawn 3 进程 × 20 轮的常驻跨进程互斥用例（enter/exit 日志断言 max_active==1）；补 `try_locked_file_transition` 身份不匹配 fail-closed 用例。
 - 详见 DESIGN_LEDGER / TESTS 同名节。
 
+## 管理员完整结果附续跑关联投影（contref，2026-10-05，ds9 实现、3a 审查收尾；随 17p 集成）
+
+- `agent/gateway_parts/http_handlers.py`：`_send_archived_terminal_result` 新增 `agent` 参数；管理员分支（`_all_user_access`）在完整终态响应上附 `continuation` 投影（`read_continuation_projection`：`ref_count` + `latest` 结构化指向），读取失败按无续跑处理；公开投影 `_public_result` 与 TUI/IM 展示不变。
+- 投影数据源在会话任务档案（`conversations/tasks/<请求>.json` 的 `continuation_refs`），本文件只做投影；写入与身份解析见 DESIGN_LEDGER「续跑产出回写原请求的结构化关联（contref）」。
+- 用例与门禁见 TESTS.md 同名节。
+
 ## Adapter 外发恢复（slp5，2026-10-05；已实现，待初审）
 
 ## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，worker/obsfix34；待非作者初审）
