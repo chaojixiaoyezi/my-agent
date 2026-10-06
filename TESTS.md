@@ -8312,6 +8312,16 @@ $PY scripts/check_clean_package.py .
   `test_native_tool_ir*`、`test_reasoning*`、`test_message_adapter*`、`test_*context_pressure*`、`test_tool_ir*`、`test_wire_contract*` 共 1274 passed。
 - 变异 6/6 被杀：不认 responses_reasoning、跨模型也放行、不校验 item、不校验 model、分类器沿用旧规则、文字判定沿用旧规则。
 
+## 回合中归档摘要复用主请求前缀（compactcache，3a，2026-10-05）
+
+- 复现用例（先红后绿）：`test_cache_prefix_regression.py::test_active_turn_compaction_reuses_the_running_request_prefix`——缓存模拟器 + 真实 Gateway ask，新会话两次工具往返后注入 typed overflow；同一次恢复的两个 `compact_live_tool_summary` 请求都要与上一次主请求同分区、命中其前缀 ≥90%。改前：PTL 摘要 61,201 命中、归档摘要 4/61,234（红）；改后归档摘要 61,980/66,568。场景脚本的工具调用编号改为逐次不同（真实供应商如此；同编号会触发分叉的“编号重复回退”）。
+- 单元用例（`test_active_turn_compact_projection.py`）：有分叉且来源全在 IR → 带主请求工具/system/之前历史/提示、IR 截到最后一个被替代调用（保留调用不进前缀）、tool_choice 交 auto；来源只在归档 → 回退 none；调用编号重复 → 回退；恢复入口冻结的分叉材料与冻结输入同源、投影未知不分叉。
+- 兜底来源：`test_compact_semantic_summary.py::test_live_tool_history_fallback_projects_only_the_replaced_source`（给了 fallback_history 时普通与完整兜底都只写来源）；分叉用例另断言兜底来源只含被替代调用、不含任务原文与保留调用。起因：`test_subagent_runtime_compact.py::...before_retry[9]` 在第一版分叉下失败——假模型摘要不合格走机械兜底，兜底把整段前缀抄进摘要，主请求每代多涨约 7K，第 6 代超出摘要预算改走分段、脚本节奏错位。
+- 单次摘要上限：`test_compact_request_budget.py::test_cache_surface_summary_gets_main_request_capacity`——输入落在（80% 分段预算, 窗口减输出]区间时，带主请求工具的摘要一次发完，同尺寸无工具请求照旧分段。
+- 结果：上述 5 个文件（cache_prefix_regression、active_turn_compact_projection、compact_semantic_summary、compact_request_budget、subagent_runtime_compact）全过；压缩相关全量见下一行。
+- 压缩相关全量（文件名含 compact/cache，或导入 active_turn_compact、compact_request_recovery、compact_semantic_summary、compact_request_budget、_tool_loop_service 的测试，加 guards9，共 144 个文件，沙箱外）：**2700 passed、24 xfailed、1 xpassed、0 failed**。
+- 变异（`scratchpad/mutate_cc.py`，原文自动恢复）：恢复入口不取分叉、不截断、去掉覆盖保护、分叉不带工具、分叉丢之前历史、分叉强制 none、分叉兜底用整段前缀、兜底忽略 fallback_history、缓存安全请求仍用 80% 预算、无工具请求也用大预算 → **10/10 KILLED**（“丢之前历史”起初存活——离线场景是新会话没有之前历史，补恢复入口单元用例后被杀）。
+
 ## 订阅登录 session-id 缓存亲和头（gptcache，3a，2026-10-05）
 
 - 新用例：

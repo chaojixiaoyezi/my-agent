@@ -142,6 +142,19 @@ def partition_carried_tool_records(
     )
 
 
+# LLM: 回合中归档摘要的缓存分叉材料：恢复宿主在卸掉主请求历史之前，从同一份冻结输入取出主请求的提示、之前的原生历史、
+#   当前回合原生 IR、工具 schema 与 system 指令，只在本次摘要发送时用一次。这些字段与主请求同源，不得重建或改写；
+#   它不授予覆盖权，被替代范围仍只由 plan 的 source 决定。10-05 生产：缺它时这条摘要与主请求从工具段分叉，命中 0%。
+# 类用途: 携带主请求的缓存前缀，让回合中归档摘要按“主请求前缀 + 末尾摘要要求”发送。
+@dataclass(frozen=True)
+class ActiveTurnCacheFork:
+    provider_prompt: str
+    provider_history_messages: tuple[dict[str, object], ...]
+    tool_ir_history: tuple[object, ...]
+    tools: tuple[dict[str, object], ...]
+    system_instruction: str
+
+
 # LLM: projector 只按摘要、保留记录、预计提交代次替换原材料；provider_surface 沿原准备复用，
 # 不授予重新准备、状态变更或扩范围权限。未接 projector 的宿主保留原局部计量行为。
 # 类用途: 冻结本次身份、摘要视图和完整请求投影入口，供跨片压缩在同次准备内计量与提交。
@@ -166,6 +179,8 @@ class ActiveTurnArchiveCompactRequest:
     #   上（与预检同一观测）；None 即原始口径。trigger_source 是结构化触发来源，只进进度事件。
     calibration: CompactRequestCalibration | None = None
     trigger_source: str = ""
+    # 主请求缓存前缀（见 ActiveTurnCacheFork）；None 时摘要退回只带上一代摘要与来源 IR 的独立请求。
+    cache_fork: ActiveTurnCacheFork | None = None
 
 
 # LLM: This candidate freezes one exact checkpoint boundary before the summary model call. The
@@ -507,9 +522,10 @@ def _active_turn_fixed_tokens(
     return calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
 
 
-# LLM: Active-turn 只把上一代摘要与选中的当前工具 IR 合成替换摘要，不重放完整线程历史；它不承诺缓存前缀复用。
-#   因此摘要请求必须不带业务工具且显式 tool_choice=none，避免工具执行权与无意义的额外工具调用重试。
-# 函数用途: 按当前回合的工具往返生成独立交接摘要，保留冻结的 system 面与停止信号。
+# LLM: 有缓存分叉且来源全在主请求 IR 里时，摘要请求 = 主请求前缀（同 system/工具/之前历史/当前回合 IR 截到最后一个
+#   被替代调用的结果）+ 末尾摘要要求，tool_choice 交有界发送按主请求的 auto 走（模型若真返回工具调用，沿原机制无工具重试一次，
+#   调用永不执行）。否则退回独立摘要：只带上一代摘要与来源 IR、空工具目录、tool_choice=none。被替代范围两种方式相同。
+# 函数用途: 生成回合中归档的替换摘要，优先复用主请求缓存前缀，保留冻结的 system 面与停止信号。
 def _active_turn_replacement_summary(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
@@ -521,28 +537,15 @@ def _active_turn_replacement_summary(
         summarize_live_tool_history,
     )
     from ..settings.reasoning_effort import run_thread_id
-    from ..tooling.runtime_contracts import ToolChoice
-    from .compact_provider_surface import (
-        conversation_compact_provider_messages,
-        conversation_compact_provider_prompt,
-    )
-    from .compact_tool_summary import compact_tool_summary_history
 
     config = semantic_summary_config(agent)
     if not config.enabled:
         raise ValueError("active-turn carried compact semantic summary is disabled")
     scope_id = str(getattr(plan.thread, "workspace_task_id", "") or "")
-    source_history = compact_tool_summary_history(plan.source_records, plan.source_ir_history)
     context = request.compact_context
     previous_summary = str(context.view.summary if context is not None else plan.thread.summary or "")
-    surface = request.provider_surface
-    provider_history = tuple(conversation_compact_provider_messages(
-        previous_summary, context.view.generation if context is not None else plan.thread.compact_generation,
-        (), volatile_sections=surface.volatile_sections,
-    )) if surface is not None else ()
     replacement = summarize_live_tool_history(
         LiveToolHistorySummaryRequest(
-            history=source_history,
             preserve_complete_fallback=request.request_projector is not None,
             backend=getattr(agent, "backend", None),
             agent=agent,
@@ -553,17 +556,68 @@ def _active_turn_replacement_summary(
             task_prompt=str(request.task_prompt or "继续当前任务。"),
             previous_summary=previous_summary,
             max_output_chars=config.max_input_chars,
-            provider_prompt=conversation_compact_provider_prompt(surface, "") if surface is not None else "",
-            provider_history_messages=provider_history,
-            tools=(),
-            tool_choice=ToolChoice.none("active_turn_summary_no_prefix"),
-            system_instruction=surface.system_instruction if surface is not None else "",
             interrupt_check=request.interrupt_check,
+            **_summary_source_material(plan, request, previous_summary),
         )
     )
     if not replacement:
         raise ValueError("active-turn carried compact summary is empty")
     return replacement
+
+
+# LLM: 返回 LiveToolHistorySummaryRequest 的来源字段（history/fallback_history/provider_prompt/provider_history_messages/
+#   tools/tool_choice/system_instruction）；分叉路径的 provider_history_messages 带着上一代摘要，摘要要求不再重复内联它；
+#   分叉路径的 history 是主请求前缀（只为命中缓存），机械兜底只写 fallback_history 里的被替代来源。
+# 函数用途: 按是否能复用主请求前缀，给回合中归档摘要挑选请求材料。
+def _summary_source_material(
+    plan: _ActiveTurnArchiveCompactPlan,
+    request: ActiveTurnArchiveCompactRequest,
+    previous_summary: str,
+) -> dict[str, object]:
+    from .compact_tool_summary import compact_tool_summary_history
+
+    source_history = compact_tool_summary_history(plan.source_records, plan.source_ir_history)
+    fork = request.cache_fork
+    history = _cache_fork_history(fork, plan) if fork is not None else None
+    if history is not None:
+        return {"history": history, "fallback_history": source_history, "provider_prompt": fork.provider_prompt,
+                "provider_history_messages": fork.provider_history_messages, "tools": fork.tools,
+                "tool_choice": None, "system_instruction": fork.system_instruction}
+    from ..tooling.runtime_contracts import ToolChoice
+    from .compact_provider_surface import (
+        conversation_compact_provider_messages,
+        conversation_compact_provider_prompt,
+    )
+
+    context, surface = request.compact_context, request.provider_surface
+    provider_history = tuple(conversation_compact_provider_messages(
+        previous_summary, context.view.generation if context is not None else plan.thread.compact_generation,
+        (), volatile_sections=surface.volatile_sections,
+    )) if surface is not None else ()
+    return {"history": source_history,
+            "provider_prompt": conversation_compact_provider_prompt(surface, "") if surface is not None else "",
+            "provider_history_messages": provider_history, "tools": (),
+            "tool_choice": ToolChoice.none("active_turn_summary_no_prefix"),
+            "system_instruction": surface.system_instruction if surface is not None else ""}
+
+
+# LLM: 只在“每个被替代调用的结果都恰好出现一次在主请求原生 IR 里”时分叉：前缀截到最后一个被替代调用的结果为止，
+#   中间夹着的保留区或文字原样留在前缀里（摘要多看几条无害，覆盖范围不变）。跨片只在归档里的来源不在 IR 中，
+#   此时返回 None，调用方退回独立摘要，绝不丢来源。只读结构化 call_id，不看正文。
+# 函数用途: 计算缓存分叉要带的主请求 IR 前缀；不满足结构化条件时返回 None。
+def _cache_fork_history(fork: ActiveTurnCacheFork, plan: _ActiveTurnArchiveCompactPlan) -> tuple[object, ...] | None:
+    from ..tooling.runtime_contracts import ToolResult
+
+    wanted = {str(ref.get("call_id") or "") for ref in plan.source_tool_refs} - {""}
+    found: list[str] = []
+    end = 0
+    for index, item in enumerate(fork.tool_ir_history):
+        if isinstance(item, ToolResult) and item.call_id in wanted:
+            found.append(item.call_id)
+            end = index + 1
+    if not wanted or len(found) != len(wanted) or set(found) != wanted:
+        return None
+    return tuple(fork.tool_ir_history[:end])
 
 
 # LLM: This helper forwards the frozen scope and summary base alongside the same interrupt check;

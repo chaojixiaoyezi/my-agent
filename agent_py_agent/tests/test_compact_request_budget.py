@@ -93,6 +93,45 @@ def test_fitting_request_preserves_cache_surface_with_auto_choice(monkeypatch, v
     assert request.tool_choice is None
 
 
+# LLM: 按计量把请求撑到 80% 分段预算与缓存安全上限之间；只调 _request_tokens 计量，不发请求。
+# 函数用途: 造一个输入大小落在 (分段预算, 缓存安全上限] 区间里的摘要请求。
+def _request_between_budgets(request: AuxiliaryModelCallRequest, low: int, high: int) -> AuxiliaryModelCallRequest:
+    def sized(length: int) -> AuxiliaryModelCallRequest:
+        return replace(request, messages=[{"role": "user", "content": [{"type": "text", "text": "记" * length}]}])
+
+    lower, upper = 1, 50_000
+    while lower < upper:
+        middle = (lower + upper) // 2
+        if budget_module._request_tokens(sized(middle)) <= low:
+            lower = middle + 1
+        else:
+            upper = middle
+    candidate = sized(lower)
+    assert low < budget_module._request_tokens(candidate) <= high
+    return candidate
+
+
+# LLM: 缓存安全单次摘要与主请求同一容量上限（窗口减输出预留），80% 分段预算只管不共享前缀的无工具请求。
+#   生产压缩触发点在窗口 90%（用户决定），旧口径让每次缓存安全摘要都超 80% 改走分段，压缩类辅助调用命中 0%（compactcache）。
+# 函数用途: 钉住两个预算之间：带主请求工具的摘要一次发完，同尺寸无工具请求照旧走分段。
+def test_cache_surface_summary_gets_main_request_capacity(monkeypatch):
+    base = _request("")
+    low = budget_module.compact_summary_budget(base.agent)
+    high = budget_module.compact_cache_surface_budget(base.agent)
+    assert low < high
+    request = _request_between_budgets(base, low, high)
+    calls = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response", lambda r: calls.append(r) or "result")
+
+    assert budget_module.generate_bounded_compact_response(request) == "result"
+    assert len(calls) == 1 and calls[0].messages == request.messages and calls[0].tools == request.tools
+
+    calls.clear()
+    plain = _request_between_budgets(replace(base, tools=None), low, high)
+    budget_module.generate_bounded_compact_response(plain)
+    assert calls and calls[0].messages != plain.messages, "无工具请求超出分段预算时必须走分段，不能一次发完"
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_fitting_compact_keeps_schema_and_auto_in_actual_provider_payload(monkeypatch, stream):
     from agent_py_agent.agent.backends import AnthropicCompatibleBackend, BackendOptions

@@ -19,6 +19,13 @@
 - 九文件 273 passed、原十一守卫 187 passed、三变异 KILLED、新增尺寸告警 0；外部清单第十二项不在本树，完整清单未通过，不能写全门禁完成。
 - 详细合同见本模块 `04-structure.md` 与 `docs/design/LONG_RUNNING_EXECUTION.md`；实际验证记录见 `TESTS.md` 的 cachediag3 节。
 
+## 回合中归档摘要复用主请求前缀（compactcache，3a，2026-10-05）
+
+- 起因：生产 48 小时压缩类辅助调用命中 0%（DeepSeek 4290 万输入、GPT 约 3300 万，cache_read 已上报且为 0）。离线复现：工具循环 PTL 摘要命中 92%，恢复链的回合中归档摘要命中 4/61234——cachecompact2 让它发空工具 + `none`、只带上一代摘要，恢复宿主还在摘要前卸掉了主请求历史。
+- 改法：恢复宿主卸历史前冻结 `ActiveTurnCacheFork`（主请求提示、之前历史、当前回合 IR、同一投影的工具与 system 指令），只给本次摘要用一次；摘要在“来源全在主请求 IR、调用编号不重复”时按主请求前缀发送（截到最后一个被替代调用的结果），否则退回原独立摘要。被替代范围、候选计量与提交都不变。
+- 第二个根因：缓存安全单次摘要原受窗口 80% 预算限制，触发点 90% 时永远超限改分段；新增 `compact_cache_surface_budget`（窗口减输出预留）只给带主请求工具的单次请求。机械兜底改读 `fallback_history`（被替代来源），避免前缀被抄进兜底摘要。
+- 下面 cachecompact2 节里“active-turn 不承诺前缀命中”的口径由本节取代（结构化条件不满足时仍走那条回退）。验证见 `TESTS.md` 同名节。
+
 ## cachecompact/cachecompact2 压缩缓存前缀（2026-10-05，worker/cache-compact；本地实现，待终审）
 
 - 可容纳的单次压缩请求携带与主请求相同的 system/tools/native messages，并将 `tool_choice` 设为 `auto`；压缩目的按 thread 读取相同 thinking/reasoning_effort。结构化工具调用不会执行，只触发一次无工具/`none` 重试。

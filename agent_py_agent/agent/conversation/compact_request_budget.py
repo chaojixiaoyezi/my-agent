@@ -80,6 +80,14 @@ def compact_summary_budget(agent: object) -> int:
     return max(1, int(window * 0.8) - max_output_tokens(agent))
 
 
+# LLM: 带主请求工具的缓存安全单次摘要，前缀就是主请求本身，容量上限与主请求同一口径（窗口减输出预留）；80% 的
+#   compact_summary_budget 只管不再共享前缀的分段/无工具请求。10-05 生产：压缩触发点在窗口 90%（用户决定），旧口径让
+#   每次缓存安全摘要都超 80% 预算、改走分段，压缩类辅助调用命中 0%。供应商仍判窗口超限时沿原逻辑减半预算改分段。
+# 函数用途: 算出缓存安全单次摘要允许的输入 token 上限。
+def compact_cache_surface_budget(agent: object) -> int:
+    return max(1, resolve_model_context_window_tokens(agent) - max_output_tokens(agent))
+
+
 # LLM: 与内部 _request_tokens 同一口径（prompt、messages/来源、tools、system）；供媒体准入在构造来源后估算文字部分。
 # 函数用途: 估算一次摘要请求的完整输入大小，不含图块视觉 token。
 def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMessageSource | None = None) -> int:
@@ -114,7 +122,9 @@ def generate_bounded_compact_response(
     if vision_summary:
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
     attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
-    result = _try_cached_compact_requests(request, attempt) if _request_tokens(request, message_source) <= budget else None
+    single_budget = compact_cache_surface_budget(request.agent) if request.tools else budget
+    result = (_try_cached_compact_requests(request, attempt)
+              if _request_tokens(request, message_source) <= single_budget else None)
     if result is not None:
         if result.response is not None:
             return result.response

@@ -4,6 +4,8 @@
 
 - `LiveToolHistorySummaryRequest.tool_choice` 是可选显式选择字段，位于 dataclass 末尾以保持已有位置参数顺序。
 - `_resolve_generate_with_messages` 在显式选择存在时保留空 `tools=[]`；bounded helper 只在 tools 非空时切换为 `auto`。active-turn 调用固定为无工具/`none`，完整缓存面摘要仍保留真实工具目录。
+- 回合中归档摘要的缓存分叉（compactcache，2026-10-05）：`ActiveTurnArchiveCompactRequest.cache_fork`（`ActiveTurnCacheFork`）由恢复宿主在卸掉主请求历史前冻结；`_cache_fork_history` 只在每个被替代调用的结果都恰好出现一次在主请求 IR 里时，把前缀截到最后一个被替代调用的结果；`_summary_source_material` 据此选“主请求前缀 + 工具 + tool_choice 交有界发送走 auto”，否则退回无工具/`none` 的独立摘要。
+- `LiveToolHistorySummaryRequest.fallback_history`（末尾新字段）：机械兜底与完整回退只投影它（None 时用 history）；`compact_request_budget.compact_cache_surface_budget` 是带工具缓存安全单次摘要的上限，`compact_summary_budget` 仍管分段与无工具请求。
 
 ## 私有写整包 9b 终审修复（pbfix，2026-10-04）
 

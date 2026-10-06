@@ -127,7 +127,7 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 
 摘要只归纳已有材料，没有业务工具执行权。具有完整主请求缓存面的单次 transcript/tool-loop 摘要保留原 system/tools/history 并使用 `auto`，让工具 schema 继续位于缓存前缀；结构化工具调用只作为违规响应、绝不执行，沿原有界链最多再尝试一次无工具/`none` 摘要。
 
-active-turn carried replacement 是有意例外：它只组合上一代 thread summary 与本轮选中的工具 IR，不携带完整主线程 provider history，因此不承诺主请求前缀命中。该路径不发送工具定义，并显式使用 `ToolChoice.none("active_turn_summary_no_prefix")`；不能把主请求工具 schema 加回这份窄输入。分段摘要同样换成 summary-only system、无工具/`none`，只覆盖局部文本片段，不保证完整主前缀。辅助摘要入口没有工具执行循环，不新增账本。
+active-turn carried replacement（回合中归档摘要）优先复用主请求前缀（compactcache，2026-10-05，取代 cachecompact2 的“有意例外”）：恢复宿主在卸掉主请求历史前冻结 `ActiveTurnCacheFork`；只要每个被替代调用的结果都恰好出现一次在主请求原生 IR 里，摘要请求就用主请求的 system、工具、之前历史与当前回合 IR（截到最后一个被替代调用的结果），末尾追加摘要要求，`tool_choice` 交有界发送按 `auto` 走，违规工具调用沿下面的兜底处理。结构化条件不满足（跨片只在归档里的来源、调用编号重复、投影未知）时退回原窄输入：上一代摘要 + 来源 IR、不发工具定义、`ToolChoice.none("active_turn_summary_no_prefix")`，此时不承诺前缀命中。分段摘要同样换成 summary-only system、无工具/`none`，只覆盖局部文本片段，不保证完整主前缀。带主请求工具的缓存安全单次摘要与主请求同一容量上限（`compact_cache_surface_budget`，窗口减输出预留）；窗口 80% 减输出的 `compact_summary_budget` 只管分段与无工具请求（触发点 90% 时，旧口径让每次缓存安全摘要都被迫分段）。缓存分叉的机械兜底只投影被替代来源（`fallback_history`）。辅助摘要入口没有工具执行循环，不新增账本。
 
 违规兜底（2026-09-26 集成方补）：真机样本里 MiniMax-M2.7 经 Anthropic 兼容协议，带工具加 `none` 仍返回 tool_use。
 - **做法**：单次摘要一旦返回工具调用，就改走原有分段链。分段链把来源文本化、工具为空、选择为 `none`，沿用原纠正提示与确定性摘录，让模型重写，不直接退成机械摘要。

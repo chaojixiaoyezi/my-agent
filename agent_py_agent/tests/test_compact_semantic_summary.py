@@ -544,6 +544,27 @@ def test_live_tool_history_empty_response_uses_bounded_typed_fallback() -> None:
     assert len(summary) <= 1_400
 
 
+# LLM: 缓存分叉把主请求整段前缀放进 history 只为命中缓存；机械兜底（含完整回退）只能投影 fallback_history 里的被替代来源，
+#   否则任务原文、运行时事实会被抄进摘要，主请求逐代膨胀（compactcache 在子代理 9 轮超窗用例里实测）。
+# 函数用途: 钉住给了 fallback_history 时兜底只写它。
+def test_live_tool_history_fallback_projects_only_the_replaced_source() -> None:
+    backend = _LiveSummaryBackend(text="")
+    call = canonical_history_call("read_file", {"path": "/srv/project/a.txt"}, call_id="toolu_fallback_source")
+    source = [AssistantTurn(tool_calls=[call]), canonical_history_result(call, "SOURCE-RESULT")]
+    prefix = [UserTurn("PARENT-PREFIX-ONLY 主请求前缀里的任务原文"), *source]
+
+    for complete in (False, True):
+        summary = summarize_live_tool_history(
+            LiveToolHistorySummaryRequest(
+                history=prefix, fallback_history=source, backend=backend,
+                task_prompt="继续核对", max_output_chars=4_000, preserve_complete_fallback=complete,
+            )
+        )
+        assert summary.startswith("[compact-mechanical-fallback]")
+        assert "toolu_fallback_source" in summary and "SOURCE-RESULT" in summary
+        assert "PARENT-PREFIX-ONLY" not in summary
+
+
 def test_compact_tool_summary_history_prefers_exact_ir_and_keeps_complete_result() -> None:
     call = canonical_history_call(
         "read_file", {"path": "/srv/project/state.json"}, call_id="shared-call",

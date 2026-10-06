@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from dataclasses import replace
@@ -76,6 +77,11 @@ class CacheScenarioWire:
         if marker != self._last_marker:
             self._last_marker = marker
             self._tool_calls_in_turn[marker] = 0
+        if (marker.startswith("SIM-ACTIVE") and self._tool_calls_in_turn.get(marker, 0) == 2
+                and marker not in self._overflowed_markers):
+            # 回合进行中（已做两次工具往返、还没有已结束历史）注入 typed overflow，逼原恢复链压当前回合的工具往返。
+            self._overflowed_markers.add(marker)
+            raise ProviderContextWindowError("测试触发的回合进行中 overflow")
         scripted = self._script_for(marker, self._tool_calls_in_turn.get(marker, 0))
         self.payloads.append(payload)
         response, _ = self.simulator.serve(payload)
@@ -94,6 +100,10 @@ class CacheScenarioWire:
     def _script_for(self, marker: str, tool_calls_done: int) -> dict:
         if marker.startswith("SIM-COMPACT-SEED"):
             return {"text": "SIM-COMPACT-SEED-DONE", "reasoning": "种子回合的思考。"}
+        if marker.startswith("SIM-ACTIVE"):
+            if tool_calls_done < 2:
+                return {"tool": "list_files", "arguments": {"path": "."}}
+            return {"text": "SIM-ACTIVE-DONE 活动回合完成。", "reasoning": "活动回合的思考。"}
         if marker.startswith("SIM-TURN1"):
             if tool_calls_done == 0:
                 return {"tool": "list_files", "arguments": {"path": "."}}
@@ -123,13 +133,17 @@ def _last_marker(payload: dict) -> str:
     return ""
 
 
-# 函数用途: 造一个带工具调用的响应。
+# 每次工具调用的序号：真实供应商每次调用给的编号都不同，脚本也要不同，否则同名调用会撞成同一个编号。
+_TOOL_CALL_SEQUENCE = itertools.count(1)
+
+
+# 函数用途: 造一个带工具调用的响应（调用编号逐次不同，与真实供应商一致）。
 def _tool_call(payload: dict, name: str, arguments: dict) -> dict:
     return {"id": "chatcmpl-sim-tool", "object": "chat.completion", "created": 1,
             "model": str(payload.get("model") or ""),
             "choices": [{"index": 0, "finish_reason": "tool_calls",
                          "message": {"role": "assistant", "content": None, "tool_calls": [{
-                             "id": f"call_sim_{name}", "type": "function",
+                             "id": f"call_sim_{name}_{next(_TOOL_CALL_SEQUENCE)}", "type": "function",
                              "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}]}}],
             "usage": {"prompt_tokens": 1000, "completion_tokens": 10, "total_tokens": 1010}}
 
@@ -233,13 +247,13 @@ def test_three_real_turns_keep_the_cache_prefix_hot(tmp_path, monkeypatch):
 
 # LLM: 只观察 conversation_compact_summary 这一种摘要请求：记录请求对象和它在模拟器里的调用区间，原样转发不改行为。
 # 函数用途: 给 Gateway 前台 Compact 的摘要入口挂观察点，返回（摘要请求列表，[(请求, 起始调用号, 结束调用号)]）。
-def _observe_compact_requests(monkeypatch, simulator) -> tuple[list, list]:
+def _observe_compact_requests(monkeypatch, simulator, purpose: str = "conversation_compact_summary") -> tuple[list, list]:
     compact_requests = []
     compact_request_call_ranges = []
     original_send = compact_request_budget._generate_auxiliary_with_retry
 
     def observe_compact_request(request):
-        if request.purpose != "conversation_compact_summary":
+        if request.purpose != purpose:
             return original_send(request)
         compact_requests.append(request)
         call_start = len(simulator.calls)
@@ -295,3 +309,33 @@ def test_compaction_call_reuses_the_conversation_history_prefix(tmp_path, monkey
     assert not compact_calls[-1].rejected, "Compact 后重新发送的业务请求被模拟服务端拒绝"
     assert scenario.turns[-1]["marker"] == "SIM-COMPACT-NEXT"
     assert scenario.turns[-1]["kind"] == "final"
+
+
+# LLM: 生产 10-05 统计：压缩类辅助调用 48 小时 DeepSeek 88 次、4290 万输入，命中 0%（GPT 同样 0%）。长任务回合里
+#   多数压缩发生在回合进行中（没有已结束历史，压当前回合的工具往返），这条路此前发空工具目录 + none、历史只带上一代
+#   摘要，与主请求从工具段就分叉。这里走真实 Gateway ask：两次工具往返后注入 typed overflow，由原恢复链做回合中压缩，
+#   断言摘要请求与上一次主请求同分区、命中其前缀的 90% 以上，且恢复后的业务请求正常完成。
+# 函数用途: 钉住回合中压缩的摘要请求复用正在运行的主请求前缀。
+def test_active_turn_compaction_reuses_the_running_request_prefix(tmp_path, monkeypatch):
+    chain, simulator, scenario = _environment(tmp_path, monkeypatch)
+    live_requests, live_ranges = _observe_compact_requests(monkeypatch, simulator, purpose="compact_live_tool_summary")
+
+    chain.ask("SIM", "SIM-ACTIVE\n看两次目录再收尾。")
+
+    assert live_requests, (
+        "回合中 overflow 没有进入活动回合压缩摘要入口；"
+        f"calls={[(call.partition, call.rejected, call.hit_tokens, call.prompt_tokens) for call in simulator.calls]}；"
+        f"turns={scenario.turns}")
+    # 恢复链先发工具循环的缓存安全摘要，再发跨片归档摘要；两次都必须复用溢出前最后一次成功主请求的前缀。
+    parent = simulator.calls[live_ranges[0][1] - 1]
+    for observed, call_start, call_end in live_ranges:
+        assert call_end > call_start, "活动回合摘要请求没有进入模拟器传输"
+        summary_call = simulator.calls[call_start]
+        assert not summary_call.rejected, "活动回合摘要请求被模拟服务端拒绝"
+        assert summary_call.partition == parent.partition, (
+            f"活动回合摘要落在不同分区：{summary_call.partition} vs 主请求 {parent.partition}")
+        assert summary_call.hit_tokens >= CROSS_TURN_HIT_FLOOR * parent.prompt_tokens, (
+            f"活动回合摘要（tool_choice={observed.tool_choice}）未复用主请求前缀："
+            f"命中 {summary_call.hit_tokens}，主请求前缀 {parent.prompt_tokens}")
+    assert scenario.turns[-1]["marker"].startswith("SIM-ACTIVE") and scenario.turns[-1]["kind"] == "final"
+    assert not simulator.report()["rejected"]

@@ -14,10 +14,12 @@ from agent_py_agent.agent.backends import http
 from agent_py_agent.agent.backends.base import BackendOptions
 from agent_py_agent.agent.backends.http import HttpBackend
 from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.conversation import compact as compact_module
 from agent_py_agent.agent.conversation.active_turn_compact import (
     ActiveTurnArchiveCompactRequest,
+    ActiveTurnCacheFork,
     compact_carried_active_turn_archive,
     model_visible_active_turn_tool_calls,
 )
@@ -40,6 +42,7 @@ from agent_py_agent.agent.conversation.compact_summary_view import (
     AppliedCompactContext,
     resolve_compact_summary_view,
 )
+from agent_py_agent.agent.conversation.compact_tool_summary import compact_tool_summary_text
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_archive import compact_semantic_summary, estimate_tokens
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
@@ -47,7 +50,10 @@ from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
 )
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.tests._tool_runtime_harness import canonical_history_call
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    canonical_history_result,
+)
 
 _SUMMARY = (
     "[compact-live-handoff.v1]\ncurrent_progress: 已核对来源\nuser_constraints: 保留原要求\n"
@@ -509,3 +515,87 @@ def test_active_turn_summary_without_prefix_contract_sends_none_without_retry(ca
     )
     assert mode == "none", f"active-turn 摘要必须明确禁止工具选择：{choice!r}"
     assert not payload.get("tools"), "active-turn 摘要不承诺主请求前缀，不应发送工具定义"
+
+
+# LLM: 缓存分叉用例共用的主请求材料：原生 IR 按真实顺序排（任务 → 每个调用 → 结果 → 收尾文字），调用身份与 _record 一致。
+# 函数用途: 造一份与 carried_case 归档同身份的主请求缓存前缀；ir_call_ids 控制哪些调用出现在主请求 IR 里。
+def _fork(case, ir_call_ids=("call-0", "call-1", "call-2"), *, tail=("call-tail",)):
+    ir = [UserTurn("# User Task\n继续核对原始材料")]
+    for call_id in (*ir_call_ids, *tail):
+        index = call_id.rsplit("-", 1)[-1]
+        call = canonical_history_call(
+            "read_file", {"path": f"evidence-{index}.txt"}, call_id=call_id,
+            run_id="origin-run", attempt_id="origin-attempt", turn_id=f"origin-turn-{index}",
+        )
+        ir += [AssistantTurn(tool_calls=[call]), canonical_history_result(call, f"ORIGINAL_EVIDENCE_{index}")]
+    tool = {"name": "read_file", "description": "读取文件", "input_schema": {"type": "object", "properties": {}}}
+    return ActiveTurnCacheFork(
+        provider_prompt="主请求提示", provider_history_messages=({"role": "user", "content": "之前的历史"},),
+        tool_ir_history=tuple(ir), tools=(tool,), system_instruction="主请求 system 指令",
+    )
+
+
+# LLM: 10-05 生产：回合中归档摘要 48 小时命中 0%。有分叉且来源全在主请求 IR 时，摘要必须带主请求的工具、system、之前历史
+#   与提示，IR 截到最后一个被替代调用的结果（之后的保留调用不进前缀），tool_choice 交有界发送按 auto 走。
+# 函数用途: 钉住回合中归档摘要优先复用主请求缓存前缀。
+def test_active_turn_summary_reuses_parent_prefix_when_fork_covers_sources(carried_case):
+    case = carried_case
+    fork = _fork(case)
+    result = _compact(case, cache_fork=fork, request_projector=lambda *_: ConversationCompactProjection(100, object()))
+
+    assert result.compacted
+    request = case.summaries[-1]
+    assert request.tools == fork.tools and request.tool_choice is None
+    assert request.system_instruction == fork.system_instruction and request.provider_prompt == fork.provider_prompt
+    assert request.provider_history_messages == fork.provider_history_messages
+    sent_call_ids = [item.call_id for item in request.history if hasattr(item, "call_id")]
+    assert sent_call_ids == ["call-0", "call-1", "call-2"], "前缀必须截到最后一个被替代调用的结果，保留调用不进前缀"
+    assert request.history == fork.tool_ir_history[:len(request.history)], "前缀必须是主请求 IR 的原样开头"
+    fallback_text = compact_tool_summary_text(request.fallback_history)
+    assert all(f"call-{index}" in fallback_text for index in range(3)), "机械兜底必须覆盖全部被替代来源"
+    assert "call-tail" not in fallback_text and "继续核对原始材料" not in fallback_text, (
+        "保留调用、任务原文等非来源内容不能进兜底摘要，否则主请求逐代膨胀")
+
+
+# LLM: 跨片只在归档里的来源不在主请求 IR 中：分叉会漏摘它，必须退回独立摘要（空工具 + none + 来源 IR），不丢来源。
+# 函数用途: 钉住来源不全在主请求 IR 时的回退。
+def test_active_turn_summary_falls_back_when_a_source_is_archive_only(carried_case):
+    case = carried_case
+    result = _compact(case, cache_fork=_fork(case, ("call-0", "call-1")),
+                      request_projector=lambda *_: ConversationCompactProjection(100, object()))
+
+    assert result.compacted
+    request = case.summaries[-1]
+    assert request.tools == () and request.tool_choice.reason == "active_turn_summary_no_prefix"
+    assert "call-2" in json.dumps([getattr(item, "call_id", "") for item in request.history]) or any(
+        "call-2" in json.dumps(item, default=str) for item in request.history), "回退摘要必须带上全部来源"
+
+
+# LLM: 同一调用编号在主请求 IR 里出现两次时无法证明截断点，按结构化事实回退，不猜哪个才是来源。
+# 函数用途: 钉住调用编号重复时的回退。
+def test_active_turn_summary_falls_back_when_call_ids_repeat(carried_case):
+    case = carried_case
+    result = _compact(case, cache_fork=_fork(case, ("call-0", "call-1", "call-2", "call-1")),
+                      request_projector=lambda *_: ConversationCompactProjection(100, object()))
+
+    assert result.compacted
+    assert case.summaries[-1].tool_choice.reason == "active_turn_summary_no_prefix"
+
+
+# LLM: 恢复入口在卸掉主请求历史前冻结分叉材料：之前的历史、当前回合 IR、提示原样取自冻结输入，工具与 system 取自
+#   同一份完整投影（与真实发送一致）；投影不完整时不给分叉（摘要退回独立请求）。只替身投影函数，不发请求。
+# 函数用途: 钉住分叉材料与主请求同源、投影未知时不分叉。
+def test_recovery_freezes_parent_prefix_for_active_turn_fork(monkeypatch):
+    from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
+
+    projection = SimpleNamespace(status="ready", tools=[{"name": "read_file"}], system_instruction="主请求 system 指令")
+    monkeypatch.setattr(recovery, "project_tool_loop_request", lambda _frozen: projection)
+    frozen = SimpleNamespace(provider_history_messages=({"role": "user", "content": "之前的历史"},),
+                             tool_ir_history=("当前回合 IR",))
+    fork = recovery._active_turn_cache_fork("主请求提示", frozen)
+    assert fork == ActiveTurnCacheFork(
+        provider_prompt="主请求提示", provider_history_messages=frozen.provider_history_messages,
+        tool_ir_history=("当前回合 IR",), tools=({"name": "read_file"},), system_instruction="主请求 system 指令",
+    )
+    projection.status = "unknown"
+    assert recovery._active_turn_cache_fork("主请求提示", frozen) is None

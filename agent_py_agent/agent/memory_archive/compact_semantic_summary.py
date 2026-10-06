@@ -185,6 +185,9 @@ class LiveToolHistorySummaryRequest:
     preserve_complete_fallback: bool = False
     # LLM: active-turn 窄摘要要显式保留 none；将字段放末尾避免改变已有位置参数的含义。
     tool_choice: ToolChoice | None = None
+    # LLM: 机械兜底与完整回退只投影被替代的来源 IR；None 时用 history。缓存分叉把主请求整段前缀放进 history 让请求
+    #   命中缓存，兜底却只能写来源本身——否则任务原文、运行时事实等非来源内容会被抄进摘要，主请求逐代膨胀（compactcache 实测）。
+    fallback_history: list[Any] | None = None
 
 
 # LLM: 只从 agent.config 读 enabled；首尾保护、中段阈值和输入预算已是本模块常量（2026-09-28 参数减量），
@@ -320,7 +323,7 @@ def _mechanical_live_tool_history_summary(
     if previous:
         rows.append(f"- previous_summary: {_bounded_inline(previous, 2_400)}")
     rows.append("- chronological_projection:")
-    for index, item in enumerate(request.history, start=1):
+    for index, item in enumerate(_fallback_history(request), start=1):
         if isinstance(item, UserTurn):
             rows.append(
                 f"  - {index}: user_steer={_bounded_inline(item.text, 900)}"
@@ -386,7 +389,13 @@ def _mechanical_live_tool_history_summary(
 
     complete_previous = str(request.previous_summary or "")
     inherited = f"\n- complete_previous_summary:\n{complete_previous}" if complete_previous else ""
-    return f"{bounded}{inherited}\n- complete_model_visible_history:\n{compact_tool_summary_text(request.history)}"
+    return f"{bounded}{inherited}\n- complete_model_visible_history:\n{compact_tool_summary_text(_fallback_history(request))}"
+
+
+# LLM: 兜底来源的唯一取值点；缓存分叉显式给出被替代来源，其余调用方沿用 history（行为不变）。
+# 函数用途: 返回机械兜底与完整回退要投影的 IR 序列。
+def _fallback_history(request: LiveToolHistorySummaryRequest) -> list[Any]:
+    return list(request.history if request.fallback_history is None else request.fallback_history)
 
 
 # LLM: Live Compact accepts one plain-text handoff schema only. Rejecting provider tool syntax and

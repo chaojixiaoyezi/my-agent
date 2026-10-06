@@ -83,6 +83,8 @@ class PreparedCompactRecovery:
     # LLM: 已提交候选的（参数, prompt）；只供仍拿着渲染时原参数对象的后续尝试（瞬断重试）复用，换参数对象或回合结束即失效。
     # 字段用途: 让重试发送与首次尝试相同的已提交恢复请求，而不是压缩前的旧请求。
     committed_request: tuple[object, str] | None = field(default=None, repr=False)
+    # LLM: select 卸掉主请求历史前为回合中归档摘要取出的缓存前缀（ActiveTurnCacheFork）；只给本次摘要用，用完即清。
+    active_cache_fork: object | None = field(default=None, repr=False)
 
     # LLM: 恢复宿主在原生成安全点独占本次Compact；普通工具轮和其它请求仍走原自动压缩。
     # 函数用途: 防止完整输入捕获前的自动压缩先推进同一来源代次。
@@ -123,7 +125,8 @@ class PreparedCompactRecovery:
     # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
     # 强制恢复遇 unknown 非文本内容（或媒体策略 off 且含媒体）报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
     # 已知媒体在策略不为 off 时进入压缩链，由 compact 按策略投影为归档引用或随图摘要。
-    # 自动 noop 先原样返回原请求；决定摘要后先量一次完整旧请求（“压缩前”大小），再解绑原参数与冻结输入的完整原生历史，
+    # 自动 noop 先原样返回原请求；决定摘要后先量一次完整旧请求（“压缩前”大小）；没有已结束历史时再为回合中归档摘要冻结一份
+# 主请求缓存前缀（_active_turn_cache_fork，摘要发送即清）；然后解绑原参数与冻结输入的完整原生历史，
     # 失败/取消/超限收尾都不得再读它。冻结完整请求后先按其表面指纹冻结一次校准观测（同 fingerprint、同代次），自动判定、
     # 压缩前与候选都按它折算；提交后用已接受候选改写本轮观测基线，让同轮下一次真实预检与接受基准一致。
     # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
@@ -164,6 +167,7 @@ class PreparedCompactRecovery:
         # 解绑前先按自动判定同一口径量一次完整旧请求，作为 checkpoint 与进度里的“压缩前”大小：解绑后的冻结输入
         # 已不含历史，再量只剩系统提示和工具（2026-09-26 真机记成 35,915，实际约 31.3 万）。
         before_tokens = _full_request_tokens(agent, frozen)
+        self.active_cache_fork = None if source.messages else _active_turn_cache_fork(prompt, frozen)
         frozen = replace(frozen, provider_history_messages=())
         object.__setattr__(params, "provider_history_messages", [])
         backend = agent.backend
@@ -281,6 +285,7 @@ class PreparedCompactRecovery:
                 raise ConversationCompactError("活动恢复候选未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
             return _candidate_projection(material)
 
+        cache_fork, self.active_cache_fork = self.active_cache_fork, None
         return compact_carried_active_turn_archive(
             self.agent, self.agent.conversation_store, self.source.thread, list(params.archive_tool_calls),
             ActiveTurnArchiveCompactRequest(
@@ -289,7 +294,7 @@ class PreparedCompactRecovery:
                 compact_context=self.source.compact_context, request_projector=project,
                 projected_tokens_before=before_tokens, provider_surface=_summary_surface(frozen), tool_source=tool_source,
                 fixed_request_projector=_active_fixed_projector(self, params, frozen),
-                calibration=self.calibration, trigger_source=self.trigger_source,
+                calibration=self.calibration, trigger_source=self.trigger_source, cache_fork=cache_fork,
             ),
         )
 
@@ -401,6 +406,22 @@ def _full_request_tokens(agent: object, frozen: ToolLoopRequestInput) -> int:
         raise ConversationCompactError("完整请求投影未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
     return tokens
+
+
+# LLM: 只在卸掉历史前调用一次：材料全部取自同一冻结输入及其完整投影（system/工具与真实发送一致），不重跑准备；
+#   投影不完整时返回 None，回合中归档摘要退回独立请求。返回对象只交给本次摘要，不进候选、不持久化。
+# 函数用途: 为回合中归档摘要冻结主请求的缓存前缀材料（提示、之前历史、当前回合 IR、工具、system 指令）。
+def _active_turn_cache_fork(prompt: str, frozen: ToolLoopRequestInput):
+    from ..conversation.active_turn_compact import ActiveTurnCacheFork
+
+    projection = project_tool_loop_request(frozen)
+    if projection.status != "ready" or projection.tools is None or projection.system_instruction is None:
+        return None
+    return ActiveTurnCacheFork(
+        provider_prompt=prompt, provider_history_messages=tuple(frozen.provider_history_messages or ()),
+        tool_ir_history=tuple(frozen.tool_ir_history or ()), tools=tuple(projection.tools),
+        system_instruction=projection.system_instruction,
+    )
 
 
 # LLM: 摘要继续沿原 provider surface，但只消费此次已准备的 system/schema/展示；不得重跑 Registry、推荐或 PromptBuilder。

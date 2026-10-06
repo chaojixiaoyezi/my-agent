@@ -1,5 +1,16 @@
 # 设计台账
 
+## 回合中归档摘要复用主请求前缀（compactcache，3a，2026-10-05；状态：已实现，待部署后用账本核对辅助调用命中率）
+
+- **来源（结构化事实）**：生产 model_usage 账本 48 小时压缩类辅助调用（purpose=auxiliary）命中 0%：DeepSeek 88 次、4290 万输入，GPT 两个订阅模型约 3300 万；cache_read 每次都上报了，值就是 0。17k 起前台 transcript 压缩已复用前缀（模拟器 ≥90%），但长任务回合里多数压缩走恢复链的回合中归档（`compact_carried_active_turn_archive`）。
+- **离线复现**：缓存模拟器 + 真实 Gateway ask，新会话里两次工具往返后注入 typed overflow。同一次恢复里先后两个 `compact_live_tool_summary` 请求：工具循环 PTL 回收摘要命中 92%；回合中归档摘要命中 4/61234。原因有二：cachecompact2 让它发空工具 + `none`、历史只带上一代摘要；`CompactRequestRecovery.select` 在摘要前就卸掉了主请求历史（为了摘要期间不驻留旧请求），这条路拿不到原样前缀。
+- **做法**：`select` 在卸历史前（只在没有已结束历史、要走回合中归档时）冻结 `ActiveTurnCacheFork`：主请求提示、之前的原生历史、当前回合原生 IR，以及同一份完整投影给出的工具与 system 指令；交给 `ActiveTurnArchiveCompactRequest.cache_fork`，发送摘要即清。`active_turn_compact._summary_source_material` 在 `_cache_fork_history` 成立时（每个被替代调用的结果都恰好在主请求 IR 里出现一次）用“主请求前缀截到最后一个被替代调用的结果 + 末尾摘要要求”，tool_choice 交有界发送按 auto 走（模型若真返回工具调用，沿原兜底改走无工具分段链，调用永不执行）；否则退回 cachecompact2 的窄输入。被替代范围、候选计量、checkpoint/CAS 都不变。
+- **代价与边界**：摘要请求的总输入变大（带着主请求前缀），但这部分在服务端缓存里；离线场景总计量 15,067 → 66,568、其中 61,980 命中。截断点之前夹着的保留调用会被摘要多看到（无害，覆盖范围不变）。卸历史后的内存释放推迟到这次摘要发送之后。
+- **取代**：cachecompact2 节的“active-turn 边界”（明确不承诺前缀）只在结构化条件不满足时继续成立。
+- **单次摘要上限（同一轮发现的第二个根因）**：缓存安全单次摘要原先也受 `compact_summary_budget`（窗口 80% 减输出预留，09-10 定的）限制；压缩触发点改成窗口 90%（用户决定）后，要压缩时主请求已经 ≥90%，任何带主请求前缀的摘要都超这个预算、改走分段（summary-only system、无工具，永不命中）。生产窗口/触发点：DeepSeek 100 万/90 万、luna 50 万/45 万、sol 27.2 万/24.48 万——这就是辅助调用一直 0% 的主因。新增 `compact_cache_surface_budget`（窗口减输出预留，与主请求同一口径）：只给带主请求工具的缓存安全单次请求用；分段、无工具请求仍用 80%。供应商仍判超窗时沿原逻辑减半预算改分段。
+- **兜底来源分离**：分叉把主请求整段前缀放进 history 只为命中缓存；机械兜底与完整回退改读新字段 `LiveToolHistorySummaryRequest.fallback_history`（分叉路径给被替代来源，其余调用方为 None、沿用 history）。不分开时，子代理 9 轮超窗用例里兜底摘要把任务原文、运行时事实也抄进去，主请求每代多涨约 7K（实测之前历史 8.9K→52K，修后与原代码一致 1.5K→11K）。
+- **验证**：见 TESTS.md 同名节。未验证：真实 DeepSeek/GPT 的命中与计费（上线后用 `3a-scripts/usage_by_model.py` 看 auxiliary 行）。
+
 ## 订阅登录请求带 session-id 缓存亲和头（gptcache，3a，2026-10-05；状态：已实现，待部署后用生产账本核对命中率）
 
 - **来源（结构化事实）**：10-05 按 model_usage 账本统计近 24 小时主调用：DeepSeek（官方，Chat 接口）6152 次、缓存命中 98%；`gpt-6-luna` 4387 次、命中 71%、未命中输入约 3.5 亿 token；`gpt-6.1-sol` 810 次、命中 10%、未命中约 1.15 亿。两个 GPT 配置都走同一个 ChatGPT 订阅登录服务商（WebSocket）。线程最后一次调用的缓存诊断显示请求前缀（system/tools/历史）没变，服务端仍未命中——问题在路由，不在前缀。
@@ -329,7 +340,7 @@
 ## cachecompact2：Gateway压缩分区与active-turn前缀边界（2026-10-05，worker/cache-compact；本地实现与回归/静态门禁通过，真实服务指标未验证）
 
 - **Gateway遗漏复核**：旧 strict xfail 测试使用非生产 purpose=`compact`，且构造的辅助请求没有线程历史、tools；它不能证明 Gateway 前台压缩真的落在 default 分区。测试现改走真实 Gateway ask，首次成功请求建立历史，typed overflow 后由原恢复链执行 Compact，再重发业务请求。真实摘要入口传 `conversation_compact_summary` 与精确 thread_id，主/摘要请求同为 `(deepseek-v4-flash, enabled, max)`，模拟前缀命中达到 90% 门槛；生产线程档位转接无缺陷，已去掉 xfail。单次变异移除该 purpose 识别后，分区断言按 default/max 不一致变红。
-- **active-turn边界**：该摘要只合并上一代 thread summary 与当前选中的工具 IR，不携带完整主线程 provider history；因此明确不承诺主请求缓存前缀。为此请求显式发送空工具目录与 `ToolChoice.none("active_turn_summary_no_prefix")`；bounded 路径只对非空工具目录强制 `auto`，空目录的 none 保持至出站，避免无谓工具选择与额外重试。真实 HTTP 假传输测试检查出站字段、一次请求完成；将 active-turn 改回带 surface.tools 的单次变异被 none 断言抓红。
+- **active-turn边界**（2026-10-05 起由 compactcache 取代：有缓存分叉时复用主请求前缀，下述只在结构化条件不满足时成立）：该摘要只合并上一代 thread summary 与当前选中的工具 IR，不携带完整主线程 provider history；因此明确不承诺主请求缓存前缀。为此请求显式发送空工具目录与 `ToolChoice.none("active_turn_summary_no_prefix")`；bounded 路径只对非空工具目录强制 `auto`，空目录的 none 保持至出站，避免无谓工具选择与额外重试。真实 HTTP 假传输测试检查出站字段、一次请求完成；将 active-turn 改回带 surface.tools 的单次变异被 none 断言抓红。
 - **区分其他路径**：完整缓存面可复用的单次 transcript/tool-loop 摘要仍保留 system/tools/history 与 `auto`；结构化工具调用不执行，走已有的一次无工具/`none`重试。超窗分段、active-turn 窄视图和 `compact_carried_summary` 均不宣称与主请求共享完整前缀。
 - **证据边界**：当前只有本地 Gateway/假传输及缓存模拟器证据；真实 DeepSeek 缓存命中率、服务端计费和实际节省未验证，不以旧估算冒充实测。完整测试与门禁结果见 `TESTS.md` 本节后续记录。
 ## B7 第四段：老格式插件启动复核与 restricted 经统一底座施加（opp6，2026-10-05，WIP，待沙箱外复跑与终审）
