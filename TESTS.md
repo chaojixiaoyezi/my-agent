@@ -156,6 +156,7 @@
 
 ## 启动指纹三态比较收口（starttime3 3a 终审修复，2026-10-05）
 
+- 插件释放启动指纹：`test_plugin_release.py` 新增合法形态 4 组（lstart 文本、数字串、旧数字、None 必须进入退出判定）、坏形态加空串；停用竞态/释放/停用/统一四文件 83 passed；变异（恢复按数字校验）7 failed，已还原。
 - `test_start_time_unification.py`：新增三态比较矩阵 16 组（数字/数字串/lstart/空串/None/NaN/inf/布尔）与 scheduler 判活 5 组；整文件 54 passed。
 - 变异：格式不可比当 different → 5 failed；scheduler 退回字符串相等判死 → 3 failed；均已原样还原。
 

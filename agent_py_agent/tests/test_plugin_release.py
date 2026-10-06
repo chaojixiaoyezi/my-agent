@@ -167,7 +167,7 @@ def test_release_cas_and_receipt_roundtrip_cannot_clear_a_newer_installation(tmp
         prepare_release("different", stopped, (result.installation,))
 
 
-@pytest.mark.parametrize("field,value", [("start_time", "NaN"), ("start_time", True),
+@pytest.mark.parametrize("field,value", [("start_time", "NaN"), ("start_time", True), ("start_time", ""),
                                          ("ended_at", True), ("ended_at", "123"), ("started_at", -1)])
 def test_invalid_executor_birth_or_exit_time_never_authorizes_deletion(tmp_path, monkeypatch, field, value):
     from agent_py_agent.agent import plugin_release
@@ -183,3 +183,24 @@ def test_invalid_executor_birth_or_exit_time_never_authorizes_deletion(tmp_path,
         monkeypatch.setattr(plugin_release, "executor_exit_reason", lambda *_: pytest.fail("坏身份不能用于 OS 退出判断"))
         with pytest.raises(PluginInstallationError):
             preparation_exit(repo, binding)
+
+
+# 3a 10-05：执行器 start_time 已统一为 heartbeat 启动指纹（字符串；旧记录可能是数字）。合法形态必须进入退出判定，
+#   不能再被当成坏记录（此前按数字校验，字符串指纹让停用/释放卡成 outcome_unknown）。
+@pytest.mark.parametrize("value", ["Mon Oct  5 10:00:00 2026", "12345", 12345, None])
+def test_valid_start_fingerprint_forms_reach_exit_check(tmp_path, monkeypatch, value):
+    from agent_py_agent.agent import plugin_release
+
+    service = installed_manager(tmp_path)
+    with activation_component(service, tmp_path, preparation=False) as state:
+        binding, repo = state["binding"], state["repo"]
+        metadata = json.loads(repo.get_attempt(binding.attempt_id)["metadata_json"])
+        metadata["executor"]["start_time"] = value
+        with repo.transaction() as conn:
+            conn.execute("UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?",
+                         (json.dumps(metadata), binding.attempt_id))
+        seen = []
+        monkeypatch.setattr(plugin_release, "executor_exit_reason",
+                            lambda meta: seen.append(meta["executor"]["start_time"]) or "executor_returned_without_result")
+        result = preparation_exit(repo, binding)
+        assert seen == [value] and result["reason"] == "executor_returned_without_result"

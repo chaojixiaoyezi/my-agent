@@ -87,6 +87,13 @@ def _start_fingerprint(value: object) -> tuple[str, object] | None:
     return ("number", number) if math.isfinite(number) else None
 
 
+# LLM: 启动指纹的形态校验，与 start_time_relation 共用 _start_fingerprint 的归一规则：有限数字、数字串或非空文本为合法；
+#   None、布尔、空串、NaN/inf（含字符串 "NaN"）、其它类型都不合法。只看形态，不读进程；是否允许“读不到”（None）由调用方决定。
+# 函数用途: 判断一个值能否当作启动指纹参与比较（供执行器记录在破坏性操作前校验）。
+def start_fingerprint_is_valid(value: object) -> bool:
+    return _start_fingerprint(value) is not None
+
+
 # LLM: 布尔口径的兼容入口：只有确证不同才返回 False，其余（相同或不可核验）返回 True，调用方不得据此误杀活进程。
 # 函数用途: 判断记录中的启动指纹与当前读取是否视为同一进程（不可核验按同一进程处理）。
 def start_time_matches(recorded: object, current: str | None) -> bool:

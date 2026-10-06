@@ -85,6 +85,7 @@
 
 ## 启动指纹三态比较收口（starttime3 3a 终审修复，2026-10-05）
 
+- **插件释放的执行器校验（3a 根因定位，2026-10-05）**：17m 收口时 Linux 车道和 macOS 都发现 starttime 线让插件停用返回 outcome_unknown。根因：`plugin_release.preparation_exit` 在删除插件环境前按数字（`_valid_time`）校验执行器 `start_time`，而 starttime 线把它统一成 heartbeat 字符串指纹，校验抛 `preparation_executor_missing`，释放失败 → 停用的工具操作停在 UNKNOWN → 收尾判 unknown。旧代码在 macOS 读不到启动时间（None）恰好跳过校验。修法：heartbeat 新增 `start_fingerprint_is_valid`（与 `start_time_relation` 同一归一规则），plugin_release 改用它（None 允许，布尔/空串/NaN 含字符串 "NaN" 拒绝）。教训：改记录格式要盘点所有读者（ds5 沙箱里的批量失败曾被归为环境问题，掩盖了这一处）。
 - **来源**：ds6 初审发现 `start_time_matches` 的字符串分支在“一侧数字、一侧 macOS lstart”时返回 False（判死），`scheduler._runner_liveness` 的字符串分支不等即判死，与“不可核验绝不判死”的口径相反；空串记录同样会判死。
 - **改法**：`common/heartbeat.start_time_relation` 作为唯一三态实现（same / different / unverifiable）：同格式数字按数值比，同格式字符串按去空白后相等比；格式不可比、空串、NaN/inf、布尔、缺失一律 unverifiable。`start_time_matches` 改为它的布尔投影（只有 different 为 False）；scheduler 判活改用它（same→alive、different→dead、其余 unverifiable），删除旧的 `_legacy_numeric_liveness`。
 - **状态**：已实现，随 starttime 线并入 17m。

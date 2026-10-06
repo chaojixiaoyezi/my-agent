@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict
 
+from .common.heartbeat import start_fingerprint_is_valid
 from .common.strict_json import load_strict_json
 from .plugin_activation import PLUGIN_ENABLE_TOOL
 from .plugin_installation import PluginInstallationError
@@ -34,7 +35,7 @@ def preparation_binding(repository, owner_id: str, plan):
     return binding
 
 
-# LLM: find_host_command 已校验首次运行链；出生/退出时间严格拒绝 bool/NaN/文本，原 attempt 缺失身份不可走 runner 回退。
+# LLM: find_host_command 已校验首次运行链；出生/退出时间戳严格拒绝 bool/NaN/文本，启动指纹接受 heartbeat 字符串或旧数字；原 attempt 缺失身份不可走 runner 回退。
 # 函数用途: 核验原准备函数已经返回或原宿主确实死亡，保留可引用的原执行器证据。
 def preparation_exit(repository, binding) -> dict:
     attempt = repository.get_attempt(binding.attempt_id)
@@ -50,7 +51,7 @@ def preparation_exit(repository, binding) -> dict:
             or type(executor.get("pid")) is not int or executor["pid"] <= 0
             or executor.get("status") not in {"running", "exited"}
             or not _valid_time(executor.get("started_at"))
-            or (executor.get("start_time") is not None and not _valid_time(executor["start_time"]))
+            or not _valid_start_fingerprint(executor.get("start_time"))
             or (executor.get("status") == "exited" and not _valid_time(executor.get("ended_at")))):
         raise PluginInstallationError("preparation_executor_missing", "插件准备执行器缺少可信退出身份。")
     reason = executor_exit_reason(metadata)
@@ -63,6 +64,15 @@ def preparation_exit(repository, binding) -> dict:
 # 函数用途: 在破坏性环境删除前严格验证原执行器时间。
 def _valid_time(value) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+# LLM: 执行器 start_time 是 common.heartbeat.process_start_time 的启动指纹（跨平台字符串，starttime 线统一）；旧记录可能是
+#   /proc ticks 数字；None 表示读不到（由 executor_exit_reason 按不可核验保守处理）。形态规则唯一来源是
+#   heartbeat.start_fingerprint_is_valid（布尔、空串、NaN/inf 含字符串 "NaN" 都是坏记录）。
+#   只校验字段形态，不比较值；started_at/ended_at 仍是时间戳，继续走 _valid_time（3a 10-05：此前按数字校验，字符串指纹被误判坏记录）。
+# 函数用途: 校验执行器记录里的启动指纹字段形态，坏形态在破坏性删除前拒绝。
+def _valid_start_fingerprint(value) -> bool:
+    return value is None or start_fingerprint_is_valid(value)
 
 
 # LLM: revocation 已关闭新准入；先证明原 handler 退出，再在资源锁下复读两类完整记录，任一未知或坏记录阻止环境删除。
