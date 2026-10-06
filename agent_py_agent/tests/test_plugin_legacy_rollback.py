@@ -16,15 +16,24 @@ from agent_py_agent.tests.test_plugin_legacy_records import granted
 from agent_py_agent.tests.test_plugin_legacy_state import upgrade_source
 
 REVISION = "22e02c668"
+# 17i（22e02c668）原文件逐字节存为测试夹具：Linux 车道和浅克隆没有 Git 历史，不能在用例里 git show（3a 10-05）。
+#   哈希钉住夹具与 22e02c668 原文一致；更新夹具必须同步这里，不能拿当前解码器冒充旧代码。
+_LEGACY_17I = Path(__file__).resolve().parent / "fixtures" / "legacy_17i"
+_LEGACY_17I_SHA256 = {
+    "plugin_activation_record": "67949fd238bb2cbe18f01423dada4d8d1391ebaee78c631fde33e6dd51730518",
+    "plugin_installation": "3aae2373898af0271439da3a566b32086b9971291d31899a5ddd009aaf22e582",
+    "plugin_installation_state": "c1f024c59e6cfc5d32476a95cd6a6013c228fab0745eb48664a9b4f5841129a0",
+    "plugin_install_store": "ee92b4595443589b578de826f9ccd1ff57e95099efc4f1578a93529912d949c2",
+}
 
 
 def old_readers(monkeypatch):
-    """固定 Git 引用读原函数及三个真实依赖，不用当前宽化后的解码器冒充旧代码。"""
-    root = Path(__file__).resolve().parents[2]
+    """固定 17i 原文件（夹具，哈希核对）读原函数及三个真实依赖，不用当前宽化后的解码器冒充旧代码。"""
     modules = []
     with monkeypatch.context() as patch:
         for name in ("plugin_activation_record", "plugin_installation", "plugin_installation_state", "plugin_install_store"):
-            source = subprocess.check_output(["git", "show", f"{REVISION}:agent_py_agent/agent/{name}.py"], cwd=root)
+            source = (_LEGACY_17I / f"{name}.py.txt").read_bytes()
+            assert hashlib.sha256(source).hexdigest() == _LEGACY_17I_SHA256[name], name
             alias = f"agent_py_agent.agent.{name}"
             module = types.ModuleType(alias)
             module.__package__ = "agent_py_agent.agent"
