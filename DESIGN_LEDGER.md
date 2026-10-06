@@ -577,7 +577,9 @@
 - **实测边界与估算**：非作者只读初审未发现阻断问题；尚未实测修后DeepSeek缓存命中率或费用。若同模型/同thread分区且完整历史前缀仍驻留、逐字节命中，基于旧2.2% system-only命中线索估算理想输入token命中可接近98%，尾部指令/动态字段会降低比例。
 - **协作注意**：本次改 `compact_request_budget.py` 的单次/分段分流；CAB ds5 合入时对照该文件，避免覆盖超时修复。
 
-## B7 最低启动读取、链接链与同步 cwd（rdfloor2，2026-10-05，`worker/rdfloor2`，基线 `4a935d200`；已实现，待 3a 沙箱外复验）
+## B7 最低启动读取、链接链与同步 cwd（rdfloor2，2026-10-05，`worker/rdfloor2`，基线 `4a935d200`；已实现，stdin 补修待外部复跑与初审）
+
+- 新反馈与补修：3a 沙箱外同 31 文件清单已确认 `af59b5c62` 修好原 allowlist/uv 启动及此前进程卡点，但分支新增两条绕过初始化的 stdin 替身 AttributeError。仅补测试所需完整 spec/平台，产品 run 不改；全仓指定构造检索仅一处。当前两条 attempt stdin 真进程/原断言通过，完整 stdin 仍两 foreground 5 秒超时，原六文件仍有本地进程失败；十一守卫 187 passed。详见 TESTS 顶部，新版本同 31 文件沙箱外复跑、非作者初审和生产链尚未验收。以下保留此前阶段记录，不把旧局部绿或失败覆盖为新版本完整结果。
 
 - 按 3a 在 macOS 26.4 / Darwin 25.4 沙箱外的实测修规则：allowlist 仅补 literal `/` read-data；逐分量 lstat/readlink，最多 40 次解引用，所有系统/R/E/W 放行根的链接节点仅获 metadata literal，hide_home 共用。不写 uv 专用分支、不加配置/依赖/状态源。
 - Linux 显式终端 symlink 原本会直接恢复到获准 realpath；但终端为普通文件、只有中间目录为链接时，旧 is_symlink 筛选漏入口。本片按原路径与 realpath 差异恢复授权根的精确入口，不挂未授权父目录/兄弟数据。argv 单测从真实基线转红再转绿，真实 bwrap 启动未验证。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox
+from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
 from agent_py_agent.agent.subagents.shell_gateway_execution import _run_subprocess_with_budget
 from agent_py_agent.agent.tooling import shell
 
@@ -51,6 +52,9 @@ def test_batch_shell_never_consumes_host_stdin(tmp_path, monkeypatch, entry, exp
             output = result.stdout.decode()
         else:
             sandbox = object.__new__(AttemptExecutionSandbox)
+            # 绕过初始化只为隔开平台包装；同步 run 的真实 cwd 参数仍来自完整规格与当前平台。
+            sandbox.spec = AttemptSandboxSpec(tmp_path, tmp_path, tmp_path, tmp_path)
+            sandbox._platform = platform.system()
             monkeypatch.setattr(sandbox, "require_ready", lambda: None)
             monkeypatch.setattr(sandbox, "build_argv", lambda args: args)
             result = sandbox.run(argv, timeout=5)

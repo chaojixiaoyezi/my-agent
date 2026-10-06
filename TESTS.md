@@ -1205,6 +1205,26 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **缓存命中估算（非实测）**：只在同模型/同 thread 分区、服务端未逐出缓存且完整历史前缀逐字节命中时，按约 2.2% system-only 旧命中线索估计输入 token 命中可接近 98%；尾部指令/动态字段略降。修后真实 DeepSeek 命中率、费用未测。
 - **初审与协作注意**：非作者只读初审未发现阻断性逻辑缺陷；该审查未复跑测试，也未连 DeepSeek 实测。`compact_request_budget.py` 涉及单次/分段分流，CAB ds5 合入时需留意，避免覆盖超时修复。
 
+## rdfloor2-fix：stdin 替身补齐（2026-10-05；待 3a 外部复跑和非作者初审）
+
+- 来源：`1005-sol2-rdfloor2-fix.prompt.md`。3a 沙箱外用同一 31 文件清单对比基线 `4a935d200` 与 `af59b5c62`：基线原 allowlist/uv 启动用例一败；分支该用例已修好，作者此前的 attempt/v8/超时也通过，但新增两条 stdin attempt 的 AttributeError。此为 3a 报告，不是作者本地 31 文件实测；没有完整清单/日志，不补造通过或跳过总数。
+- 做法：仅给 `test_shell_stdin.py` 中绕过初始化的对象补完整 `AttemptSandboxSpec`（工作目录为隔离 tmp_path）和当前 `_platform`。保留真实子进程、模拟宿主管道、DEVNULL、显式管道输出和宿主输入未消费的全部原断言，不改产品 `run()`。指定 `git grep -n -E 'object\.__new__\((AttemptExecutionSandbox|.*Sandbox)'` 全仓仅该一处。
+- 当前红绿：修前 stdin 全文件 **4 failed、2 passed**（两 attempt 缺 spec，两 foreground 原入口 5 秒超时）；修后全文件 **4 passed、2 failed，10.42s**（两 foreground 同样超时，无 AttributeError）。再聚焦原两 attempt 用例 **2 passed、4 deselected，0.26s**，两条实际完成 stdin 断言；与全文件重叠，不累加。
+- 复现：沿下节指定 Python 和隔离 env，`$PY -u -m pytest agent_py_agent/tests/test_shell_stdin.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-sol2-fix-stdin-green --junitxml=tmp/rdfloor2-fix/stdin-green.xml`；聚焦加 `-k attempt` 并使用独立 `m-sol2-fix-stdin-target`。原六文件串行逐套跑同样参数，加 `--timeout=25 -o faulthandler_timeout=15`，basetemp 为 `m-sol2-fix-0` 至 `5`，每套都有完整 log/XML；25 秒上限用于让卡点以失败返回，不改源码/断言、不得当成通过。驱动为本树临时 `tmp/rdfloor2-fix/run_regression.py`。
+
+| 本次完整文件 | passed | skipped | failed |
+| --- | --- | --- | --- |
+| test_attempt_sandbox.py | 46 | 10 | 3 |
+| test_sandbox.py | 30 | 0 | 0 |
+| test_plugin_sandbox.py | 9 | 4 | 0 |
+| test_plugin_sandbox_v8.py | 16 | 10 | 2 |
+| test_shell_sandbox_boundary_facts.py | 9 | 0 | 2 |
+| test_pack_verification_cancellation.py | 23 | 0 | 1 |
+
+- 六套 errors 均 0，四套 exit=1，不称完整回归通过。attempt 两项、v8 两项和 cancellation 的 `[platform]` 观察到 71/`sandbox_apply: Operation not permitted`；registry 与两个 facts 用例在 `_communicate_process` 等待，被 25 秒测试期限截断；stdin foreground 是原 5 秒超时。这些失败观察与原因假设分开，不把所有等待失败都归因沙箱。前轮基线同五项和 facts 卡点证据保留；本轮未新做 cancellation/foreground 基线，不声称两者已证实为既有失败。
+- 本轮十一适用守卫含 packaging **187 passed，41.53s，exit=0**；第十二文件仍沿 17k 基线缺失例外，不跨版补入。完整日志/XML在本树 `tmp/rdfloor2-fix/`，新版本外部同 31 清单及非作者初审尚未执行，不据本地两条绿外推全套或生产链。
+- 终轮门禁：全 Ruff 通过；imports findings=0；doc-sync `--base 4a935d200` 为 DOC_SYNC_PASS；strict-size strict_scope_total=2199、hard=0、high-risk=1503、soft=696、test_advisory=1234、blocked=False；线上逐身份差集 **新增0、消失44**；clean-package 与普通 diff 均通过。CODE_SIZE_REPORT.md 还原至 HEAD，并核无差异，不提交；仍有存量债务。门禁回执 2026-10-05 17:40:48 PDT 已超过本次预计 30 分钟，超窗如实记录，未声称按时。
+
 ## rdfloor2-continue：共用 cwd 裁决与逐文件诊断（2026-10-05；实现待 3a 外部复验）
 
 - 来源：`1005-sol2-rdfloor2-continue.prompt.md` 八行。原 WIP `dbaf575ed` 的外部六文件 129 passed、16 skipped、1 failed 是 3a 提供的旧版本记录；剩余 Python 3.12 import/getcwd PermissionError。续修前 `run_sandbox_process` 未传 cwd，Linux 有 `--chdir` 而 Darwin 继承了工作树目录。
