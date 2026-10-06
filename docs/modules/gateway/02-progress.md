@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+## 锁失败语义与跨进程证明补钉（obsfix34c，2026-10-05，worker/obsfix34c；待初审）
+
+- **必须改 1（luna4）**：`gateway_parts/io.read_json_file_report` 在 catch-all 前单独识别 `BlockingIOError`/`InterruptedError`，报告新增 `lock_busy` 标记；`input_delivery_service._raise_for_input_read_report` 把“锁忙→BlockingIOError（可重试）/其余 load_error→数据损坏”分流（receipt 读取/已有请求/turn 索引四处），锁忙不再被拒成损坏。
+- **必须改 2（luna4）**：`test_lock_sidecar_cleanup_protocol.py` 新增 spawn 3 进程 × 20 轮的常驻跨进程互斥用例（enter/exit 日志断言 max_active==1）；补 `try_locked_file_transition` 身份不匹配 fail-closed 用例。
+- 详见 DESIGN_LEDGER / TESTS 同名节。
+
 ## Adapter 外发恢复（slp5，2026-10-05；已实现，待初审）
 
 ## 请求锁 sidecar 周期安全清理（obsfix34 问题3，2026-10-05，worker/obsfix34；待非作者初审）

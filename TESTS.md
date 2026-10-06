@@ -90,6 +90,11 @@
   - guards9（12 文件）→ 全绿；`scripts/check_import_boundaries.py` → findings=0（白名单常量放 gateway 层，守住 gateway_parts 不能导入 agent_core 的层边界）；`ruff check agent_py_agent scripts` → All checks passed。
 - 新增用例：`test_incomplete_with_tool_rounds_requeues_for_resume`、`test_retry_budget_exceeded_requeues_for_resume`、`test_request_rejected_does_not_requeue`、`test_zero_output_stream_incomplete_does_not_requeue`、`test_resume_limit_exhausted_fails_normally`、`test_switch_off_does_not_requeue`、`test_resume_count_accumulates_and_survives_restart_marker`。
 
+## 锁失败语义与跨进程证明补钉（obsfix34c，2026-10-05，分支 `worker/obsfix34c`）
+
+- 用例：`test_lock_sidecar_cleanup_protocol.py` → **8 passed**（新增 3 条：跨进程互斥、端到端锁忙、try 身份不匹配；端到端用例断言 BlockingIOError——修复前该链路为 DataCorruptionError，用例会红）。
+- 门禁：见交接报告。
+
 ## 请求锁 sidecar 清理协议加固 obsfix34b（2026-10-05，worker/obsfix34b，基于 2a3a7f21c）
 
 - **用例**：新增 `agent_py_agent/tests/test_lock_sidecar_cleanup_protocol.py`（5 条）——真实持有者持锁时绝不删除（回归双重后缀 bug）；持锁 unlink 失败（Windows 语义）放弃删除；清理者+阻塞迟到者+新来者交错时任何时刻最多一方在临界区（unlink 钩子确定性时序）；身份核对重试有上限（`BlockingIOError`）；json_io 加锁路径重置换锁后正常进入。更新 `test_gateway_io.py` 活锁构造（锁文件本体持锁）、`test_error_code_fallback.py` 加 quota 自带码用例。

@@ -573,6 +573,9 @@ def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True) -> i
 
 
 # 函数用途: 核对锁文件描述符与锁路径当前指向同一个 inode。
+# LLM: 加锁方身份核对（json_io 侧）：比较描述符与锁路径的 (st_dev, st_ino)，只看 inode 身份，
+#   不看 mtime/权限；路径缺失或不可 stat 一律视为不匹配（fail-closed），由调用方重开重试。
+# 函数用途: 核对锁描述符与锁路径当前指向同一个 inode。
 def _descriptor_matches_lock_path(descriptor: int, lock_path: Path) -> bool:
     try:
         fd_stat = os.fstat(descriptor)

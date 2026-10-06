@@ -159,6 +159,16 @@ def gateway_input_transition(paths: GatewayPaths, request_id: str):
     return gateway_turn_transition(paths, request_id)
 
 
+# LLM: 入口读失败分流：锁忙（含取锁身份核对重试耗尽）是暂时竞争，按可重试的锁失败抛出；只有
+#   其余 load_error 才是数据损坏。调用方绝不把锁忙拒成“损坏”。
+# 函数用途: 按报告里的锁忙/读取错误分流抛出，锁忙保持可重试语义。
+def _raise_for_input_read_report(report, corruption_message: str) -> None:
+    if report.lock_busy:
+        raise BlockingIOError("gateway input lock is busy")
+    if report.load_error is not None:
+        raise DataCorruptionError(corruption_message)
+
+
 # LLM: A prepared receipt is committed before active routing or queue writes. Reusing the stable
 # id with another digest always conflicts before any downstream side effect.
 # 函数用途: 在已持有入口锁时读取或首次保存普通消息回执和完整排队请求。
@@ -173,8 +183,7 @@ def load_or_prepare_gateway_input_locked(
 ) -> tuple[GatewayInputReceipt, bool]:
     path = gateway_input_receipt_path(paths, request_id)
     report = read_json_file_report(path, context="gateway.input_receipt.read")
-    if report.load_error is not None:
-        raise DataCorruptionError("gateway input receipt is unreadable")
+    _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
             raise DataCorruptionError("gateway input receipt is empty or invalid")
@@ -221,8 +230,7 @@ def read_gateway_input_receipt(
 ) -> GatewayInputReceipt | None:
     path = gateway_input_receipt_path(paths, request_id)
     report = read_json_file_report(path, context="gateway.input_receipt.read")
-    if report.load_error is not None:
-        raise DataCorruptionError("gateway input receipt is unreadable")
+    _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
             raise DataCorruptionError("gateway input receipt is empty or invalid")
@@ -674,8 +682,7 @@ def _write_active_turn_ref(paths: GatewayPaths, receipt: GatewayInputReceipt) ->
         "client_message_id": receipt.client_message_id,
     }
     report = read_json_file_report(path, context="gateway.input_turn_ref.read")
-    if report.load_error is not None:
-        raise DataCorruptionError("gateway input turn index is unreadable")
+    _raise_for_input_read_report(report, "gateway input turn index is unreadable")
     if report.payload and report.payload != expected:
         raise DataCorruptionError("gateway input turn index conflicts")
     if not report.payload:
@@ -714,8 +721,7 @@ def _materialize_prepared_request_locked(
         if not candidate.is_file():
             continue
         report = read_json_file_report(candidate, context="gateway.input_request.read")
-        if report.load_error is not None:
-            raise DataCorruptionError("existing gateway input request is unreadable")
+        _raise_for_input_read_report(report, "existing gateway input request is unreadable")
         if (
             _prepared_request_digest(report.payload) != receipt.client_input_digest
             or _prepared_payload_digest(report.payload) != receipt.prepared_payload_digest

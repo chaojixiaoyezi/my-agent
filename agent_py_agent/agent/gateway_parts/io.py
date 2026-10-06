@@ -89,6 +89,9 @@ class _GatewayHistoryIndexEntry:
 class GatewayJsonReadReport:
     payload: dict
     load_error: dict | None = None
+    # LLM: 取锁失败（身份核对重试耗尽、取锁被打断）是暂时竞争，不是数据损坏：单独置位，供调用方
+    #   按“可重试的锁失败”处理；不读它、只看 load_error 的调用方行为保持原样。
+    lock_busy: bool = False
 
 
 # LLM: The request fingerprint covers authenticated owner, conversation, prompt, task, and all
@@ -188,6 +191,11 @@ def read_json_file_report(path: Path, *, context: str = "gateway.json.read") -> 
     try:
         with _locked_json_path(path):
             payload = json.loads(path.read_text(encoding="utf-8"))
+    except (BlockingIOError, InterruptedError) as exc:
+        # LLM: BlockingIOError/InterruptedError 都是 OSError 子类，必须在下面的 catch-all 之前单独
+        #   识别：锁忙（含身份核对重试耗尽）要保持“可重试的锁失败”语义，调用方按锁失败处理，
+        #   不能当成数据损坏；load_error 仍带上诊断，其余只认 load_error 的调用方行为不变。
+        return GatewayJsonReadReport({}, _gateway_json_load_error(path, exc, context), lock_busy=True)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         return GatewayJsonReadReport({}, _gateway_json_load_error(path, exc, context))
     if isinstance(payload, dict):

@@ -123,6 +123,106 @@ def test_lock_identity_retry_limit_is_bounded(tmp_path: Path, monkeypatch: pytes
     assert calls["count"] == _LOCK_IDENTITY_RETRY_COUNT
 
 
+# 函数用途: 多进程加锁循环体（spawn 子进程入口）：反复取锁，在临界区写 enter/exit 日志。
+def _locker_process(data_path_str: str, log_path_str: str, rounds: int) -> None:
+    import os as _os
+    import time as _time
+
+    from agent_py_agent.agent.gateway_parts.io import _locked_file_path as _lock_path
+
+    data_path = Path(data_path_str)
+    for _ in range(rounds):
+        with _lock_path(data_path):
+            with open(log_path_str, "a", encoding="utf-8") as fh:
+                fh.write(f"enter {_os.getpid()}\n")
+            _time.sleep(0.02)
+            with open(log_path_str, "a", encoding="utf-8") as fh:
+                fh.write(f"exit {_os.getpid()}\n")
+
+
+# 函数用途: 常驻跨进程互斥证明：3 个独立进程真实竞争同一把锁，任何时刻最多一方在临界区。
+def test_cross_process_lockers_never_overlap(tmp_path: Path) -> None:
+    import multiprocessing
+
+    data_path = tmp_path / "x.json"
+    log_path = tmp_path / "lock.log"
+    ctx = multiprocessing.get_context("spawn")
+    procs = [
+        ctx.Process(target=_locker_process, args=(str(data_path), str(log_path), 20))
+        for _ in range(3)
+    ]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(timeout=90)
+    assert [proc.exitcode for proc in procs] == [0, 0, 0]
+    active = 0
+    max_active = 0
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("enter"):
+            active += 1
+            max_active = max(max_active, active)
+        else:
+            active -= 1
+    assert active == 0
+    assert max_active == 1, "跨进程 flock 必须保证任何时刻最多一方在临界区"
+
+
+# 函数用途: 非阻塞探测遇到锁文件身份不匹配时按“没拿到”返回（fail-closed），不给出任何授权。
+def test_try_lock_identity_mismatch_returns_not_acquired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agent_py_agent.agent.gateway_parts.io as gateway_io
+    from agent_py_agent.agent.gateway_parts.io import try_locked_file_transition
+
+    monkeypatch.setattr(gateway_io, "_lock_handle_matches_path", lambda _handle, _path: False)
+    with try_locked_file_transition(tmp_path / "x.json") as acquired:
+        assert acquired is False
+
+
+# 函数用途: 锁身份核对重试耗尽一路到 input_delivery：按可重试的锁失败（BlockingIOError）处理，不是数据损坏。
+def test_lock_exhaustion_reaches_input_delivery_as_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json as _json
+
+    import agent_py_agent.agent.gateway_parts.io as gateway_io
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as ids
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    request_id = "gwreq-lockbusy"
+    (paths.inbox / f"{request_id}.json").write_text(_json.dumps({"id": request_id}), encoding="utf-8")
+    prepared = {"id": request_id, "request_id": request_id, "kind": "ask", "goal": "hi",
+                "user_id": "local", "metadata": {"client_input_digest": "d"}}
+
+    with ids.gateway_input_transition(paths, request_id):
+        ids.load_or_prepare_gateway_input_locked(
+            paths, request_id=request_id, client_input_digest="d", client_message_id="m",
+            guidance_dedupe_key="k", prepared_request=prepared)
+
+    real_matches = gateway_io._lock_handle_matches_path
+
+    def flaky_matches(handle, lock_path):
+        if str(lock_path).endswith(f"{request_id}.json.lock"):
+            return False
+        return real_matches(handle, lock_path)
+
+    monkeypatch.setattr(gateway_io, "_lock_handle_matches_path", flaky_matches)
+    with pytest.raises(BlockingIOError):
+        with ids.gateway_input_transition(paths, request_id):
+            ids.load_or_prepare_gateway_input_locked(
+                paths, request_id=request_id, client_input_digest="d", client_message_id="m",
+                guidance_dedupe_key="k", prepared_request=prepared)
+
+    monkeypatch.undo()
+    with ids.gateway_input_transition(paths, request_id):
+        ids.load_or_prepare_gateway_input_locked(
+            paths, request_id=request_id, client_input_digest="d", client_message_id="m",
+            guidance_dedupe_key="k", prepared_request=prepared)
+
+
 # 函数用途: common/json_io 的加锁路径同样核对身份：锁文件被替换一次后重试并正常进入临界区。
 def test_json_io_lock_retries_when_lock_file_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import agent_py_agent.agent.common.json_io as json_io

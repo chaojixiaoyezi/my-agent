@@ -95,6 +95,15 @@
 - **未验证 / 已知边界**：macOS 上 `holder_is_alive` 没有 /proc 时一律判活——本次只在交接记录，不改（另有 scheduler 判活补丁在审）。
 - **验证**：见 `TESTS.md` obsfix12 节。
 
+## 锁失败语义与跨进程证明补钉（obsfix34c，2026-10-05，分支 `worker/obsfix34c`，基于 17m 头 `886965f3a`；待初审）
+
+- **来源**：luna4 初审两条必须改 + 小问题。变基到 886965f3a：文档冲突两边保留并删掉 tref2 旧标题，常量目录重新生成（921 项）。
+- **必须改 1（锁失败不再当数据损坏）**：`gateway_parts/io.read_json_file_report` 在 catch-all 前单独识别 `BlockingIOError`/`InterruptedError`，报告新增 `lock_busy` 标记；`input_delivery_service` 新增 `_raise_for_input_read_report`，receipt 读取/已有请求/turn 索引四处“load_error→DataCorruptionError”按“锁忙→BlockingIOError（可重试）/其余→数据损坏”分流；端到端用例从锁身份核对重试耗尽一路到 input_delivery 断言 BlockingIOError。
+- **必须改 2（跨进程互斥常驻证明）**：新增 `test_cross_process_lockers_never_overlap`（spawn 3 进程 × 20 轮，enter/exit 日志断言任何时刻 max_active==1）；补 `try_locked_file_transition` 身份不匹配 fail-closed 用例。
+- **小问题**：`common/json_io._descriptor_matches_lock_path` 补 `# LLM:` 注释。
+- **未做（超时）**：顺带项（TRANSIENT_ERROR/PROVIDER_TIMEOUT 进续跑白名单）未做，见交接报告。
+- **验证**：见 TESTS.md 同名节。
+
 ## 请求锁 sidecar 清理协议加固（obsfix34b，2026-10-05，worker/obsfix34b，基于 2a3a7f21c；本地验收完成，待 3a 终审）
 
 - **背景**：obsfix34 初审用探针实证"先 close 再 unlink"竞态窗口；3a 补充判断"阻塞等待的迟到者"在持锁 unlink 下仍可拿到旧 inode 锁。本件按"两边一起改"的标准协议修复，并实证了初审未发现的两个问题。
