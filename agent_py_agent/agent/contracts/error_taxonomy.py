@@ -3619,6 +3619,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.NONE.value,
         recovery_hint="没有可退回的版本：只有她做的、在这个包名下装上过、还留在 learnpack 存储里的版本才能退回；现在装的可能已是第一版或不是她做的，带版本时请照预览那一行原样发。",
     ),
+    "PACK_NOT_FOUND": ErrorContract(
+        code="PACK_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="没有装这个能力包；不带包名发 /plugins# 看全部已装能力包，再照列表里的名字操作。",
+    ),
     "PACKAGE_INSTALL_ORDER_USED": ErrorContract(
         code="PACKAGE_INSTALL_ORDER_USED", category="state", retryable=False,
         recommended_action=RecoveryAction.NONE.value,

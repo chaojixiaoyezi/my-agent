@@ -26,7 +26,7 @@ class CommandSpec:
     submit_on_enter: bool = False
     conversation_suffix: str | None = None
     multiline: bool = False
-    namespace_separator: str = ""
+    namespace_separators: tuple[str, ...] = ()
     actions: tuple[CommandActionSpec, ...] = ()
     sensitive_input: bool = False
 
@@ -270,8 +270,10 @@ COMMAND_CATALOG = (
         "/plugins [管理动作]",
         "查看插件与查询请求（TUI、IM 可用；安装、配置、启停、更新和卸载仅管理员）",
         help_variants=(("/plugins@<插件ID> [动作] [参数]", "使用已启用插件的动作（TUI、IM 共用权限和纯文本回执）"),
-                       ("/plugins enable <插件ID> --confirm <确认码>", "含可执行文件或外部解释器的包先预览，再按回执确认")),
-        namespace_separator="@",
+                       ("/plugins enable <插件ID> --confirm <确认码>", "含可执行文件或外部解释器的包先预览，再按回执确认"),
+                       ("/plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>]",
+                        "管理能力包（TUI、IM 共用）：不带包名列出全部并标出 my-agent 自己做的")),
+        namespace_separators=("@", "#"),
         actions=(
             CommandActionSpec("help", "查看管理动作的参数说明", (ArgumentSpec("action", "管理动作名称"),)),
             CommandActionSpec("list", "列出已安装插件", (
@@ -350,7 +352,7 @@ _CONVERSATION_MATCHERS = tuple(
     for spec in COMMAND_CATALOG
     if spec.conversation_suffix is not None
 )
-_NAMESPACE_COMMANDS = tuple(spec for spec in COMMAND_CATALOG if spec.namespace_separator)
+_NAMESPACE_COMMANDS = tuple(spec for spec in COMMAND_CATALOG if spec.namespace_separators)
 _SYSTEM_SLASH = re.compile(r"^/([a-z][a-z0-9_-]*)(?:\s|$)", re.IGNORECASE)
 
 
@@ -369,8 +371,7 @@ def match_conversation_command(raw: str) -> tuple[str, str | None] | None:
 def system_slash_command_name(text: object) -> str:
     raw = str(text or "").strip()
     for spec in _NAMESPACE_COMMANDS:
-        prefix = "/" + spec.name + spec.namespace_separator
-        if raw.lower().startswith(prefix):
+        if any(raw.lower().startswith("/" + spec.name + separator) for separator in spec.namespace_separators):
             head = raw.split(maxsplit=1)[0]
             return spec.name + head[len(spec.name) + 1 :]
     match = _SYSTEM_SLASH.match(raw)

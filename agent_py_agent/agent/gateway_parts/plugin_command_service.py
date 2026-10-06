@@ -70,13 +70,15 @@ def _log_rejection(result: dict, text: str, request_id: str) -> dict:
     return result
 
 
-# LLM: 子命令名只取解析器给出的结构化动作名，业务调用统一记 plugin_call；解析失败记 "-"，不回显原文。
+# LLM: 子命令名只取解析器给出的结构化动作名，业务调用统一记 plugin_call，能力包命令记 pack；解析失败记 "-"，不回显原文。
 # 函数用途: 为拒绝日志给出不含参数的子命令名。
 def _action_name(text: str) -> str:
     from ..command_arguments import CommandArgumentError
     from ..plugin_commands import parse_plugin_command, plugin_namespace
 
     namespace = plugin_namespace(text)
+    if namespace is not None and namespace.kind == "pack":
+        return "pack"
     if namespace is not None and namespace.plugin_id:
         return "plugin_call"
     try:

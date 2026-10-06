@@ -1,6 +1,6 @@
 # LLM: learnpack 的三条安装入口共用这里：开关开着时模型工具 package_install 走 install_now（宿主用专用 learnpack 线程身份执行）；
-#   用户发回确认行 /plugins confirm <单号> 时走 confirm_order，发 /plugins revert <包名> 时走 revert_install（都用用户当前会话身份
-#   执行）。三条都调 learnpack_installer.run_install，都只装 learnpack 存储里她自己打的、摘要和清单都对得上的包，都先查插件功能与
+#   用户发回确认行 /plugins confirm <单号>（能力包也可以 /plugins#<包名> 安装 <单号>）时走 confirm_order，发 /plugins revert <包名>
+#   （能力包也可以 /plugins#<包名> 退回）时走 revert_install（都用用户当前会话身份执行）；/plugins# 整段由 pack_commands 处理。三条都调 learnpack_installer.run_install，都只装 learnpack 存储里她自己打的、摘要和清单都对得上的包，都先查插件功能与
 #   管理动作（_management_problem），都在 installs.jsonl 记账（含许可来源）。包名归属由 ownership_problem 裁决，并经
 #   _InstallHooks.guard 在安装驱动读安装表的同一次快照上再判一次：同名（含只差大小写）但不是她打的已装包不替换（复审 M2）；
 #   没装着、却留着别处同名插件的私有数据目录（她从没装过这个包名）也不装（卸载不删数据目录）。"她装过的包名"只在她的包进了
@@ -271,8 +271,9 @@ def previous_build(store: LearnpackStore, current: object) -> BuildRecord | None
 #   现在装着的就是目标且已启用时什么都不做，同一行可以放心重发；装着目标但没启用（比如上次中途退出）就只补启用。用户发带版本的那一行就是同意运行该版本自带的程序，联网与读写目录授权仍不代给
 #   （run_install 白名单）。管理员与插件功能在这里再查，什么都没做时不写记录。有副作用（执行时）：经宿主命令停用、更新、
 #   启用，写包名归属与 via=revert 安装记录。
+#   command_prefix 是预览末行命令去掉版本摘要的前半段（能力包用 "/plugins#<包名> 退回"），缺省为 "/plugins revert <包名>"。
 # 函数用途: 预览或执行把她做的包退回到她做的某个旧版本。
-def revert_install(manager: object, package_id: str, target: str = "") -> dict[str, object]:
+def revert_install(manager: object, package_id: str, target: str = "", command_prefix: str = "") -> dict[str, object]:
     if not manager.context.is_admin:
         return _rejected("PLUGIN_PERMISSION_DENIED", "只有管理员能退回。")
     blocked = _management_problem(manager)
@@ -287,7 +288,7 @@ def revert_install(manager: object, package_id: str, target: str = "") -> dict[s
         return _rejected("PACKAGE_REVERT_UNAVAILABLE", f"{package_id} 没有可退回的版本（只有她做的、在这个包名下装上过、"
                          "还留着的版本才能退回；带版本时请照预览那一行原样发）。")
     if not target:
-        return _revert_preview(store, current, record)
+        return _revert_preview(store, current, record, f"{command_prefix or f'/plugins revert {package_id}'} {record.sha256[:12]}")
     if current.package_sha256 == record.sha256 and current.enabled:
         return {"ok": True, "state": STATE_ENABLED, "message": f"已经是 {version_label(record)}，而且已启用；什么都没做。"}
     hooks = _InstallHooks(store, manager.context.owner, record)
@@ -301,13 +302,12 @@ def revert_install(manager: object, package_id: str, target: str = "") -> dict[s
 #   宿主未核实（打包时已挡住换行、控制与格式字符，所以它出不了自己那一行，复审 6 轮：引号挡不住她自己写的收尾引号）；
 #   回执最后一行是带版本摘要的执行命令（IM 回执末行就是要发的那一行）。只读。
 # 函数用途: 生成退回预览回执。
-def _revert_preview(store: LearnpackStore, current: object, record: BuildRecord) -> dict[str, object]:
+def _revert_preview(store: LearnpackStore, current: object, record: BuildRecord, line: str) -> dict[str, object]:
     note = ("装上后会运行它自带的程序（宿主代你确认运行她自己做的程序；联网和读写别的目录仍要你另外确认）"
             if package_runs_programs(store, record) else "它不运行程序")
     message = (f"现在装着 {current.manifest.plugin_id} {current.manifest.version}（{current.package_sha256[:12]}）。"
                f"退回会换成她做的 {version_label(record)}；{note}。\n"
-               f"她声明的来源（原文，宿主未核实）：{record.origin}\n确认退回请发：\n"
-               f"/plugins revert {record.package_id} {record.sha256[:12]}")
+               f"她声明的来源（原文，宿主未核实）：{record.origin}\n确认退回请发：\n{line}")
     return {"ok": True, "state": "revert_preview", "message": message}
 
 
@@ -318,6 +318,15 @@ def _revert_target(store: LearnpackStore, package_id: str, target: str) -> Build
         return None
     matches = [record for record in _installed_versions(store, package_id) if record.sha256.startswith(target)]
     return matches[0] if len(matches) == 1 else None
+
+
+# LLM: "她做的"只按结构化事实：装着的字节摘要在 learnpack 存储里有打包记录。只列包名（受包名规则约束），不放她写的来源文字，
+#   也不给插件指 /plugins#（那只管能力包，复审建议）。只读。
+# 函数用途: 给 /plugins list 末尾补一行"my-agent 自己做的"。
+def self_made_note(owner_home: object, entries: list) -> str:
+    store = LearnpackStore(owner_home)
+    names = [row.manifest.plugin_id for row in entries if store.build(row.package_sha256) is not None]
+    return f"\nmy-agent 自己做的：{'、'.join(names)}" if names else ""
 
 
 # LLM: 读包清单判断，与启用工具同一口径：插件有入口就会运行程序；能力包只有声明的检查程序要运行包内代码时才算。只读。
@@ -376,14 +385,20 @@ def _install_entry(record: BuildRecord, outcome: InstallOutcome, consent_source:
             "request_ids": list(outcome.request_ids)}
 
 
-# LLM: 只认结构化解析结果：管理命名空间里的 confirm（带单号）与 revert（带包名）动作。解析失败或不是这两个动作返回 None，
-#   交回插件管理原流程（原流程会给出参数错误的标准回执）。有副作用的执行在 confirm_order / revert_install。
-# 函数用途: 识别并执行 learnpack 的插件命令（/plugins confirm <单号>、/plugins revert <包名>），返回原始回执。
-def learnpack_command(manager: object, text: str) -> dict[str, object] | None:
+# LLM: 能力包入口（/plugins#，kind=pack）整段交给 pack_commands（request_id、revision 是用户这次命令的请求编号与目录版本，
+#   转发宿主命令时原样沿用）；
+#   其余只认结构化解析结果：管理命名空间里的 confirm（带单号）与 revert（带包名）动作。解析失败或不是这两个动作返回 None，
+#   交回插件管理原流程（原流程会给出参数错误的标准回执）。有副作用的执行在 confirm_order / revert_install / pack_commands。
+# 函数用途: 识别并执行 learnpack 的插件命令（/plugins confirm、/plugins revert、/plugins#），返回原始回执。
+def learnpack_command(manager: object, text: str, request_id: str = "", revision: str = "") -> dict[str, object] | None:
     from ..command_arguments import CommandArgumentError
     from ..plugin_commands import parse_plugin_command, plugin_namespace
 
     namespace = plugin_namespace(text)
+    if namespace is not None and namespace.kind == "pack":
+        from .pack_commands import run_pack_command
+
+        return run_pack_command(manager, namespace, request_id, revision)
     if namespace is None or namespace.plugin_id:
         return None
     try:
@@ -417,4 +432,5 @@ __all__ = [
     "package_runs_programs",
     "previous_build",
     "revert_install",
+    "self_made_note",
 ]

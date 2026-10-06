@@ -60,13 +60,16 @@ class PluginCommandSpec:
 
 
 # LLM: body_start 属于原文字符坐标，仅用于补全；插件 ID 保留大小写，不带 owner 或执行身份。
-# 类用途: 表示已识别的管理入口或插件入口。
+#   kind 区分插件入口（/plugins、/plugins@<插件ID>，值 "plugin"）与能力包入口（/plugins#[包名]，值 "pack"）；
+#   能力包入口只交给 capability/pack_commands，不进插件业务调用。
+# 类用途: 表示已识别的管理入口、插件入口或能力包入口。
 @dataclass(frozen=True)
 class PluginNamespace:
     prefix: str
     plugin_id: str
     body: str
     body_start: int
+    kind: str = "plugin"
 
 
 # LLM: 解析请求只含声明及绑定值，不能直接作为已授权工具调用；无动作输入总是静态帮助。
@@ -84,7 +87,7 @@ class ParsedPluginCommand:
 # 函数用途: 拆开命令头与原参数正文，并保留准确的替换位置。
 def plugin_namespace(text: str) -> PluginNamespace | None:
     name = system_slash_command_name(text)
-    if name != "plugins" and not name.startswith("plugins@"):
+    if name != "plugins" and not name.startswith(("plugins@", "plugins#")):
         return None
     start = len(text) - len(text.lstrip())
     head_end = start
@@ -93,9 +96,10 @@ def plugin_namespace(text: str) -> PluginNamespace | None:
     body_start = head_end
     while body_start < len(text) and text[body_start].isspace():
         body_start += 1
-    plugin_id = name[len("plugins@"):] if name != "plugins" else ""
-    prefix = "/plugins" + ("@" + plugin_id if name != "plugins" else "")
-    return PluginNamespace(prefix, plugin_id, text[body_start:], body_start)
+    separator = name[len("plugins"):len("plugins") + 1]
+    plugin_id = name[len("plugins") + 1:] if separator else ""
+    kind = "pack" if separator == "#" else "plugin"
+    return PluginNamespace("/plugins" + separator + plugin_id, plugin_id, text[body_start:], body_start, kind)
 
 
 # LLM: 目录必须由调用宿主按 owner 过滤；拒绝重复 ID，不能静默挑选其中一个或扫描磁盘补齐。
@@ -106,6 +110,8 @@ def namespace_actions(
 ) -> tuple[tuple[CommandActionSpec, ...], PluginCommandSpec | None]:
     if namespace.prefix == "/plugins":
         return management_actions, None
+    if namespace.kind == "pack":
+        raise CommandArgumentError("pack_namespace", "能力包命令用 /plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>]。")
     if not _PLUGIN_ID.fullmatch(namespace.plugin_id):
         raise CommandArgumentError("invalid_plugin_id", "插件 ID 应为 1—64 位英文字母开头的字母、数字、点、下划线或横线。")
     if len({plugin.plugin_id for plugin in plugins}) != len(plugins):
@@ -160,6 +166,7 @@ def render_plugin_help(namespace: PluginNamespace, actions: tuple[CommandActionS
     lines.append(f"输入 {namespace.prefix} <动作> --help 查看参数。")
     if not namespace.plugin_id:
         lines.append("插件业务入口：/plugins@<插件ID> [动作] [参数]；可用动作以当前目录为准。")
+        lines.append("能力包入口：/plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>]；不带包名列出全部能力包。")
     return "\n".join(lines)
 
 

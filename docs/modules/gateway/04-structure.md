@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## 能力包命令 /plugins#（learnpack 第 4 步，2026-10-06，3a）
+
+- `gateway_parts/plugin_command_service._action_name`：拒绝日志的子命令名，能力包入口（`plugin_namespace(...).kind == "pack"`）记 `pack`，插件业务调用仍记 `plugin_call`；只看结构化命名空间，不回显原文。
+- IM 侧没有新增分支：`/plugins#` 文本经 `parse_conversation_control` 认作 `plugins` 命令，与 `/plugins` 同一 `_scope_management` 管理服务执行。
+
 ## 锁失败语义补钉（obsfix34c，2026-10-05，worker/obsfix34c；待初审）
 
 - `agent/gateway_parts/io.py`：`GatewayJsonReadReport` 新增 `lock_busy` 字段；`read_json_file_report` 在 catch-all 前单独识别 `BlockingIOError`/`InterruptedError`（锁忙保留可重试语义，load_error 仍带诊断）。

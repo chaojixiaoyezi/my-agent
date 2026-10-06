@@ -255,7 +255,7 @@ def test_switch_off_only_opens_an_order_then_user_confirm_installs_once(tmp_path
     build = _build(agent)
     outcome, body = _install(agent, build["sha256"])
     assert outcome.ok and body["state"] == "awaiting_user_confirmation"
-    assert body["user_confirm_command"] == f"/plugins confirm {body['order_id']}"
+    assert body["user_confirm_command"] == f"/plugins#drama-scenes 安装 {body['order_id']}", "能力包的确认行用 /plugins# 写法"
     assert body["enable_auto_install_command"] == "/settings set capability_pack_self_install_enabled true"
     assert body["switches"]["capability_pack_self_install_enabled"] is False and body["package"]["runs_programs"] is False
     assert _installed_entry(agent, "drama-scenes") is None
@@ -294,7 +294,7 @@ def test_switch_on_installs_directly_in_the_learnpack_thread(tmp_path, monkeypat
     build = _build(agent)
     outcome, body = _install(agent, build["sha256"])
     assert outcome.ok and body["state"] == STATE_ENABLED, body
-    assert body["manage_commands"]["remove"] == "/plugins remove drama-scenes"
+    assert body["manage_commands"]["remove"] == "/plugins#drama-scenes 删除"
     assert _installed_entry(agent, "drama-scenes").enabled
     thread = agent.conversation_store.threads.resolve(channel=LEARNPACK_CHANNEL,
                                                      channel_conversation_id=LEARNPACK_CONVERSATION,
@@ -627,7 +627,7 @@ def test_revert_previews_then_walks_back_through_her_versions(tmp_path, monkeypa
     builds = [_build(agent, version) for version in ("0.1.0", "0.2.0", "0.3.0")]
     bodies = [_install(agent, build["sha256"])[1] for build in builds]
     assert all(body["state"] == STATE_ENABLED for body in bodies) and "drama-scenes 0.3.0" in bodies[-1]["message"]
-    assert bodies[-1]["manage_commands"]["revert"] == "/plugins revert drama-scenes"
+    assert bodies[-1]["manage_commands"]["revert"] == "/plugins#drama-scenes 退回"
     for expected, build in (("0.2.0", builds[1]), ("0.1.0", builds[0])):
         preview = _admin(agent, "/plugins revert drama-scenes", f"pv-{expected}")
         line = preview["message"].splitlines()[-1]

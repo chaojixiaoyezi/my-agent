@@ -137,6 +137,21 @@ def _initial_candidates(
     return tuple({item.text: item for item in candidates}.values())
 
 
+# LLM: 只在 /plugins#<包名> 后补第一个动作词（与 capability/pack_commands 同一组中文动作词）；不读安装表、不扫文件系统，
+#   中文动作词原样写回、不加引号。延迟导入，补全模块不常驻能力包实现。纯函数。
+# 函数用途: 给能力包命令补动作词。
+def _pack_candidates(namespace, text: str, requested: bool) -> tuple[PluginCompletion, ...]:
+    from .capability.pack_commands import PACK_ACTION_WORDS
+
+    body = namespace.body
+    if not namespace.plugin_id or any(char.isspace() for char in body.strip()):
+        return ()
+    if not body and not text[-1:].isspace() and not requested:
+        return ()
+    start = namespace.body_start if body else len(text)
+    return tuple(PluginCompletion(word, start, word, summary) for word, summary in PACK_ACTION_WORDS if word.startswith(body))
+
+
 # LLM: 插件与管理动作消费同一宿主目录；requested 只表示显式请求候选，完整输入不能被自动菜单改写后吞掉 Enter。
 # 函数用途: 补全插件 ID、动作和参数；未开放的管理动作仅能通过 help 发现，不暗示可执行。
 def complete_plugin_command(
@@ -146,6 +161,8 @@ def complete_plugin_command(
     namespace = plugin_namespace(text)
     if namespace is None:
         return ()
+    if namespace.kind == "pack":
+        return _pack_candidates(namespace, text, requested)
     if "@" in namespace.prefix and not any(char.isspace() for char in text.lstrip()):
         if not requested and any(plugin.plugin_id == namespace.plugin_id for plugin in plugins):
             return ()

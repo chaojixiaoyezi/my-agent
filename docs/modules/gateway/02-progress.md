@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+## 能力包命令 /plugins#（learnpack 第 4 步，2026-10-06，3a，分支 claude/3a-learnpack-p1；非作者复审无必须改）
+
+- IM 的 `/plugins#[包名] …` 与 `/plugins`、`/plugins@` 走同一条 `execute_plugin_control → PluginManagement.command`，由 learnpack 分流到 `capability/pack_commands`；网关不新增入口，只在拒绝日志里把能力包命令的动作名记成 `pack`（`plugin_command_service._action_name`）。
+- 详见 docs/design/LEARN_TO_PACK.md 11.1 与 TESTS.md 同名节。
+
 ## 锁失败语义与跨进程证明补钉（obsfix34c，2026-10-05，worker/obsfix34c；待初审）
 
 - **必须改 1（luna4）**：`gateway_parts/io.read_json_file_report` 在 catch-all 前单独识别 `BlockingIOError`/`InterruptedError`，报告新增 `lock_busy` 标记；`input_delivery_service._raise_for_input_read_report` 把“锁忙→BlockingIOError（可重试）/其余 load_error→数据损坏”分流（receipt 读取/已有请求/turn 索引四处），锁忙不再被拒成损坏。

@@ -214,10 +214,11 @@ class PluginManagement:
         namespace = plugin_namespace(text)
         if namespace is None:
             raise ValueError("不是插件命令")
-        # learnpack（确认安装单 /plugins confirm、退回 /plugins revert）在类外分流，最终仍经本服务的同一串管理命令执行。
-        routed = learnpack_command_payload(self, text)
+        # learnpack（/plugins confirm、/plugins revert、能力包 /plugins#）在类外分流，最终仍经本服务的同一串管理命令执行；
+        # 能力包的启用/停用/删除转成宿主命令后回执已经排好，装在 forwarded_reply 里原样取出，不再包一层。
+        routed = learnpack_command_payload(self, text, request_id, revision)
         if routed is not None:
-            return self._reply(routed)
+            return routed["forwarded_reply"] if "forwarded_reply" in routed else self._reply(routed)
         if namespace.plugin_id:
             return self._reply(self._business(text, revision, request_id, request_permission, cancellation_token), request_id)
         static = plugin_command_response(text)
@@ -242,7 +243,7 @@ class PluginManagement:
             return execute_plugin_command(catalog, text, revision=revision)
         if parsed.action.name == "list":
             listed = [item for item in entries if not values.get("enabled") or item.enabled]
-            plugins_text = permission_listing(listed, self.context.is_admin, self.context.legacy_sandbox_default) or "当前没有符合条件的已安装插件。"
+            plugins_text = (permission_listing(listed, self.context.is_admin, self.context.legacy_sandbox_default) or "当前没有符合条件的已安装插件。") + learnpack_list_note(self, listed)
             # MCP 服务段（J16 片 F）：TUI 直连与 Gateway/IM 都经这里，事实只来自已加载实例的注册表
             return self._reply({"ok": True, "message": plugins_text + "\n\n" + render_mcp_server_section(self.context.live_registry)})
         if parsed.action.name == "info":
@@ -615,11 +616,23 @@ def management_ready(manager: PluginManagement) -> bool:
 
 
 # LLM: learnpack 分流放在类外以免 PluginManagement 超长；延迟导入避免与 capability 模块循环引用。返回 None 表示不是 learnpack 命令。
-# 函数用途: 把 /plugins confirm <单号> 与 /plugins revert <包名> 交给 learnpack 处理，得到原始回执。
-def learnpack_command_payload(manager: PluginManagement, text: str) -> dict | None:
+#   request_id、revision 是用户这次命令的请求编号与目录版本（能力包命令转成宿主命令时原样沿用，重发才能回放原结果）。
+# 函数用途: 把 /plugins confirm、/plugins revert 与 /plugins# 交给 learnpack 处理，得到回执。
+def learnpack_command_payload(manager: PluginManagement, text: str, request_id: str = "", revision: str = "") -> dict | None:
     from .capability.learnpack_service import learnpack_command
 
-    return learnpack_command(manager, text)
+    return learnpack_command(manager, text, request_id, revision)
+
+
+# LLM: 只读 learnpack 存储；延迟导入同上。读不出存储时不标（列表照常给出）。
+# 函数用途: 给 /plugins list 补一行"my-agent 自己做的"。
+def learnpack_list_note(manager: PluginManagement, entries: list) -> str:
+    from .capability.learnpack_service import self_made_note
+
+    try:
+        return self_made_note(manager.context.owner.home_dir, entries)
+    except OSError:
+        return ""
 
 
 # LLM: 原结构化 kind 决定确认投影；完整 R/W/N/E 同源运输，中文文案不参与授权判断。

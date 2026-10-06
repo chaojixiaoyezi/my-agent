@@ -132,6 +132,15 @@ def test_bad_requests_are_coded_and_write_nothing(tmp_path, monkeypatch, overrid
     assert not Path(agent.home_paths.owner_home_dir).joinpath(*STORE_PARTS).exists()
 
 
+def test_auto_listed_file_names_follow_the_same_text_rule(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    root = _pack_dir(_owner(agent))
+    (root / "methods" / "review\u202egnp.md").write_text("看起来像别的扩展名\n", encoding="utf-8")
+    ok, _body, error_code = _run(agent, _params(root))
+    assert not ok and error_code == "PACKAGE_BUILD_DECLARATION_INVALID"
+    assert not Path(agent.home_paths.owner_home_dir).joinpath(*STORE_PARTS).exists()
+
+
 def test_unreadable_source_is_denied_by_the_read_file_policy(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
     outside = _pack_dir(tmp_path / "elsewhere")  # owner 目录外：read_file 也读不到

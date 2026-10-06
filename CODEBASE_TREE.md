@@ -66,6 +66,7 @@
 |-- agent_py_agent/agent/capability/package_build.py # 能力包（v7）与文件型插件包（v6/v8）唯一的打包实现：清单、摘要、成员顺序与权限位、复验；两个打包脚本只是薄壳
 |-- agent_py_agent/agent/capability/learnpack_store.py # learnpack 宿主存储 <owner home>/data/learnpack/：她打的包（内容寻址、读回验摘要）、待确认安装单（只执行一次）、安装记录、她装过的包名
 |-- agent_py_agent/agent/capability/learnpack_installer.py # learnpack 安装驱动：把“装她打的包”变成管理员同一串 /plugins 命令（安装/停用+更新→启用→必要时代确认运行她自己的程序），联网与读写目录授权永不代给
+|-- agent_py_agent/agent/capability/pack_commands.py # 能力包命令 /plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>] 的唯一处理处（TUI、IM 同一入口），列表标出她做的
 |-- agent_py_agent/agent/capability/learnpack_service.py # learnpack 三条安装入口：开关开着自动装（专用 learnpack 线程）、用户发 /plugins confirm 执行待确认安装单（只执行一次）、/plugins revert 退回她做的上一版；包名归属检查
 |-- agent_py_agent/agent/capability/pack_verification_matching.py # 按“路径模式 + 字段匹配”认文件，及有界工作区快照
 |-- agent_py_agent/agent/capability/pack_verification_ledger.py # 每 run 一本的宿主核验账本（基线、结果、收尾、返工，权限 600）
@@ -1299,6 +1300,7 @@ agent_py_agent/
 |   |-- test_package_build.py           # learnpack 唯一打包实现：样例包固定摘要与旧脚本逐字节一致、坏输入错误码
 |   |-- test_learnpack_store.py         # learnpack 宿主存储：内容寻址验摘要、安装单只执行一次、安装记录
 |   |-- test_package_build_tool.py      # package_build 工具：管理员专用且收起、读权限与密钥拦截、回执开关事实
+|   |-- test_pack_commands.py           # learnpack /plugins#：命名空间互不串、帮助与补全、每个动作 TUI 与 IM 真实链路、重发回放、非管理员只读
 |   |-- test_learnpack_install.py       # learnpack 安装：命令顺序与代确认边界（假管理服务）、开关开/关真实链路、确认单只执行一次、检查程序跟插件开关
 |   |-- test_audit_requests_topic.py    # 审计 requests 主题：owner_id/会话归属、去重、时间窗、不含正文、跨用户两道门、管理员身份事实
 |   |-- test_model_text_control.py      # 聊天 /model：解析、无模型引导、选择共享模型不泄密钥、按 owner 隔离、TUI 菜单保留
@@ -1647,6 +1649,7 @@ docs/
 - `agent_py_agent/agent/capability/learnpack_store.py`：learnpack 的宿主存储；“是不是她做的”只认这里且读回重算 sha256，安装单靠独占创建只执行一次。
 - `agent_py_agent/agent/tooling/package_build_tool.py`：模型工具 package_build（本机管理员、默认收起），读文件过 read_file 同一裁决、拦密钥，产物进 learnpack 存储，回执带开关事实与下一步。
 - `agent_py_agent/agent/capability/learnpack_installer.py`、`learnpack_service.py`：learnpack 安装只经 `PluginManagement.command` 执行管理员同一串 /plugins 命令；代确认只覆盖运行她自己做的程序。
+- `agent_py_agent/agent/capability/pack_commands.py`：`/plugins#` 唯一处理处；启用/停用/删除转成管理员同一条 `/plugins` 命令并沿用用户的请求编号与目录版本，退回与安装复用 learnpack_service。
 - `agent_py_agent/agent/tooling/package_install_tool.py`：模型工具 package_install（本机管理员、默认收起），包身份只认 learnpack 存储，能不能直接装只看对应开关现读值。
 - `scripts/build_capability_package.py`：开发者命令行薄壳，读文件后调 `capability/package_build` 构建 v7 内容包，不导入或执行包内脚本。
 - `examples/capability-packages/`：三个独立迁移切片与来源许可，组件测试不代表真实 TUI 通过。

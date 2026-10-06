@@ -248,8 +248,8 @@ class TuiInputCompleter(Completer):
             directory = {}
             for spec in COMMAND_CATALOG:
                 directory[spec.name] = spec
-                if spec.namespace_separator:
-                    directory[spec.name + spec.namespace_separator] = spec
+                for separator in spec.namespace_separators:
+                    directory[spec.name + separator] = spec
             for name in sorted(directory):
                 spec = directory[name]
                 if not name.startswith(slash_prefix):

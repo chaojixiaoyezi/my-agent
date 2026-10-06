@@ -48,16 +48,18 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
     monkeypatch.setattr(tui_input, "_path_candidates", scan)
     completer = TuiInputCompleter(tmp_path)
     candidates = list(completer.get_completions(Document("/plug"), CompleteEvent()))
-    assert {item.text for item in candidates} == {"/plugins ", "/plugins@"}
+    assert {item.text for item in candidates} == {"/plugins ", "/plugins@", "/plugins#"}, "能力包入口 /plugins# 也在斜杠菜单里"
     assert all(item.enter_action == "apply" for item in candidates)
     namespace = next(item for item in candidates if item.text == "/plugins@")
     assert namespace.append_space is False
+    assert next(item for item in candidates if item.text == "/plugins#").append_space is False
     buffer = Buffer()
     buffer.set_document(Document("/plug"), bypass_readonly=True)
     buffer.complete_state = CompletionState(buffer.document, [namespace], complete_index=0)
     assert apply_selected_completion(buffer) is namespace
     assert buffer.text == "/plugins@"
     assert list(completer.get_completions(Document("/plugins@Demo"), CompleteEvent())) == []
+    assert list(completer.get_completions(Document("/plugins#drama-scenes"), CompleteEvent())) == []
     scan.assert_not_called()
 
 

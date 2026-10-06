@@ -132,6 +132,7 @@ Gateway 管理员的 `my-agent gateway stop` / HTTP `POST /stop` 是服务生命
 `/plugins update <插件ID> <新包路径>` 用同一插件 ID 的新版本本地包替换已停用插件：配置结构不变时保留私有配置（结果 `settings_restored=true`），变化则清空并提示先 configure 再 enable；已启用插件要先 disable，新包 ID 不一致或同包分别报错或不变。不做双版本切换与 rollback。
 管理动作（install、configure、enable、disable、remove、update，以及查询管理请求的 status）只对管理员开放；普通用户执行时在任何写入之前被拒，回执写“当前身份没有插件管理权限。”并另起一行“错误码：PLUGIN_PERMISSION_DENIED”。所有执行前被拒（rejected）的插件命令都会附这行错误码，执行后的失败与成功文案不变；经 Gateway 时日志另记一行 `PLUGIN_COMMAND_REJECTED error_code=… action=… request_id=…`（只含码、子命令名和请求编号，不含命令原文或路径）。
 my-agent 自己做的包（learnpack）：`/plugins confirm <单号>` 执行她给的待确认安装单（只执行一次、只认最新一行，回执写明装的是哪一版）；`/plugins revert <包名>` 先预览会退到她做的哪一版，再照回执发 `/plugins revert <包名> <版本摘要>` 才执行。两者都只对管理员开放，TUI 与 IM 同一入口。
+能力包专用入口 `/plugins#[包名] [查看|启用|停用|删除|退回 [版本摘要]|安装 <单号>]`：不带包名列出全部能力包并标出 my-agent 自己做的；启用/停用/删除等同对应的 `/plugins` 管理动作（沿用本次请求编号与目录版本），退回与安装分别复用 `/plugins revert`、`/plugins confirm`；与 `/plugins@` 互不串，TUI 补全在包名后补中文动作词。
 `/help` 与补全读取同一声明；补全只填入，`/plugins@` 后直接填写 ID，不插入空格。新目录 v3 要求客户端与 Gateway 同版，过期输入须重新查看再确认。
 未知或异常后缀不会转为普通聊天、运行中插话、Shell 或停止操作。完整实际 TUI 装卸验收仍待完成，见 [插件设计](docs/design/PLUGIN_LIFECYCLE.md)。
 

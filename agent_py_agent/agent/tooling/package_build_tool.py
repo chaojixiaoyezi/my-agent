@@ -193,7 +193,8 @@ def _declared_texts_ok(declaration: dict) -> bool:
     return all(_safe_text(text, _DECLARED_TEXT_MAX_CHARS) for text in texts)
 
 
-# LLM: 能力包没列 files 时自动收录；每个路径先过 read_file 的路径裁决再按无链接读取；读完做密钥检查。只读文件。
+# LLM: 能力包没列 files 时自动收录，收录到的文件名也按声明文字同一条展示规则检查（复审 7 轮）；每个路径先过 read_file 的路径
+#   裁决再按无链接读取；读完做密钥检查。只读文件。
 # 函数用途: 读出要打进包的文件字节。
 def _read_files(agent: object, request: _BuildRequest) -> dict[str, bytes]:
     check = _path_check(agent)
@@ -201,6 +202,9 @@ def _read_files(agent: object, request: _BuildRequest) -> dict[str, bytes]:
     _require_allowed(check, root, str(request.source_dir))
     if request.kind == KIND_CAPABILITY_PACK and "files" not in request.declaration:
         listed = _list_files(root)
+        if not all(_safe_text(path, _DECLARED_TEXT_MAX_CHARS) for path in listed):
+            raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID",
+                                    "目录里有文件名带换行、控制字符或改变显示方向的字符，改名后再打包。")
         request.declaration["files"] = [{"path": path} for path in listed]
     paths = (capability_pack_paths(request.declaration) if request.kind == KIND_CAPABILITY_PACK
              else files_plugin_paths(request.declaration))

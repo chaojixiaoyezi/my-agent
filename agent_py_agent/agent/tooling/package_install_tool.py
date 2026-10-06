@@ -141,17 +141,24 @@ def _order_receipt(store: LearnpackStore, record: BuildRecord, facts: dict) -> T
     return _ok(payload)
 
 
-# LLM: 用户确认行的唯一拼法；单号由宿主生成。纯函数。
+# LLM: 用户确认行的唯一拼法；单号由宿主生成。能力包用 /plugins#<包名> 安装 <单号>，插件用 /plugins confirm <单号>（两种写法宿主
+#   都认，按用户"能力包用 #、插件用 @"的分法给）。纯函数。
 # 函数用途: 给出用户确认某张安装单要发的那一行。
 def confirm_line(record: BuildRecord, order_id: str) -> str:
+    if record.kind == KIND_CAPABILITY_PACK:
+        return f"/plugins#{record.package_id} 安装 {order_id}"
     return f"/plugins confirm {order_id}"
 
 
-# LLM: 命令原文给用户照抄；只拼文字。纯函数。
-# 函数用途: 装好以后管理这个包的命令原文（停用、删除、退回上一版）。
+# LLM: 命令原文给用户照抄：能力包用 /plugins# 写法（查看、停用、删除、退回），插件用 /plugins 管理动作（停用、删除、退回）。
+#   只拼文字。纯函数。
+# 函数用途: 装好以后管理这个包的命令原文。
 def _manage_commands(record: BuildRecord) -> dict[str, str]:
-    return {"disable": f"/plugins disable {record.package_id}", "remove": f"/plugins remove {record.package_id}",
-            "revert": f"/plugins revert {record.package_id}"}
+    name = record.package_id
+    if record.kind == KIND_CAPABILITY_PACK:
+        return {"view": f"/plugins#{name} 查看", "disable": f"/plugins#{name} 停用",
+                "remove": f"/plugins#{name} 删除", "revert": f"/plugins#{name} 退回"}
+    return {"disable": f"/plugins disable {name}", "remove": f"/plugins remove {name}", "revert": f"/plugins revert {name}"}
 
 
 # LLM: existing 来自同一次读到的安装表；没装返回 None。纯组装。
