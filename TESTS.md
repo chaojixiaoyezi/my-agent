@@ -9,7 +9,7 @@
   - 合并链路见第 6 步 `test_learnpack_merge.py`。"回放"按产品已有语义验：确认单只执行一次，重发回放当时结果；仓库里现成的 replay 设施（tests/replay、fake_llm_runner）是交付合同的假工具回放，不覆盖这条安装链路，所以没套用。
 - **连带**：learnpack 整组 15 个测试文件（开关、打包、安装、存储、`/plugins#`、学习技能、总结、门槛、合并、整条链路，以及跟着改的 TUI 输入、默认收起、写插件技能）+ 14 个守卫：584 passed / 0 skipped / 0 failed（本机有 node 与平台沙箱，插件用例都真跑了）。
 - **本地严格门禁**（第四节，逐条存 rc、不经管道）：`ruff check agent_py_agent scripts` rc=0；`check_doc_sync.py --base e5d7f3c90` rc=0；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` rc=0（报告写到 scratchpad，不动仓库里的 CODE_SIZE_REPORT.md）；`git diff --check e5d7f3c90` rc=0；`check_clean_package.py .` rc=0；`check_import_boundaries.py` rc=0。
-- **Linux 通道**：在本提交上用 linux-test-main 检出跑全量 12 片，结果写在下一个提交。
+- **Linux 通道**：在提交 ce4f769a2 上用 linux-test-main 检出跑全量 12 片（Docker，py3.12，bwrap 自检 SANDBOX_READY）：12/12 rc=0，29427 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，pytest 481 秒。learnpack 的能力包用例全部真跑通过；镜像里没有 node，hello-node 插件相关的 3 条按设计跳过（test_learnpack_install 712/725 两条、test_learnpack_e2e 插件链路一条），另有 1 条（test_learnpack_install 838）因容器里以 root 运行不受目录权限限制而跳过；平台沙箱不可用时的跳过分支在这里没被触发（是没 node 先跳过的）。在本机 Mac 上插件用例都真跑了（见上面连带）。证据：claude-tools/linux-lane-ce4f769a2/（totals.json、out-0..11.txt、rc.txt、timing.txt）。宿主 docker run 客户端在容器退出后卡住（已知现象），只 kill -9 了自己那一个客户端进程。
 
 ## learnpack 第 6 步：能力包推荐门槛与同领域合并（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
 
