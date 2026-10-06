@@ -75,6 +75,7 @@
 |-- agent_py_agent/agent/capability/self_install_switches.py # learnpack 两个“自动装”开关（能力包、插件）的唯一读取入口：按文件现读、读不到按关，给回执用的开关事实与命令原文
 |-- agent_py_agent/agent/capability/package_build.py # 能力包（v7）与文件型插件包（v6/v8）唯一的打包实现：清单、摘要、成员顺序与权限位、复验；两个打包脚本只是薄壳
 |-- agent_py_agent/agent/capability/learnpack_store.py # learnpack 宿主存储 <owner home>/data/learnpack/：她打的包（内容寻址、读回验摘要）、待确认安装单（只执行一次）、安装记录、她装过的包名
+|-- agent_py_agent/agent/capability/learnpack_build_notes.py # learnpack 打包回执的版本事实与软提醒：现在装着哪一版、她做过哪些版本，同号重用、版本倒退、比上一版少了文件（不挡打包）
 |-- agent_py_agent/agent/capability/learnpack_installer.py # learnpack 安装驱动：把“装她打的包”变成管理员同一串 /plugins 命令（安装/停用+更新→启用→必要时代确认运行她自己的程序），联网与读写目录授权永不代给
 |-- agent_py_agent/agent/capability/pack_commands.py # 能力包命令 /plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>] 的唯一处理处（TUI、IM 同一入口），列表标出她做的
 |-- agent_py_agent/agent/capability/learnpack_service.py # learnpack 三条安装入口：开关开着自动装（专用 learnpack 线程）、用户发 /plugins confirm 执行待确认安装单（只执行一次）、/plugins revert 退回她做的上一版；包名归属检查
@@ -1313,6 +1314,8 @@ agent_py_agent/
 |   |-- test_package_build_tool.py      # package_build 工具：管理员专用且收起、读权限与密钥拦截、回执开关事实
 |   |-- test_pack_commands.py           # learnpack /plugins#：命名空间互不串、帮助与补全、每个动作 TUI 与 IM 真实链路、重发回放、非管理员只读
 |   |-- test_learnpack_flow.py          # learnpack 整条链路：假模型 + 真实回合，学 → 打包 → 开关关给确认行；技能能被 skill_search 找到读到
+|   |-- test_pack_recommendation_threshold.py    # learnpack 能力包推荐门槛：评测 4 个包离线打分，领域请求照样命中、只撞描述常用词或关键词片段的不推荐
+|   |-- test_learnpack_merge.py    # learnpack 同领域合并：查到已装同领域包先问、并进去出新版本、两个方向都在、退回合并前；版本号重用提醒
 |   |-- test_skill_summarize_tool.py    # learnpack 让她总结一下：管理员专用、自学习关着如实说、target 两种落点、同一次活只入队一次、过闸门发布、能回退
 |   |-- test_learnpack_install.py       # learnpack 安装：命令顺序与代确认边界（假管理服务）、开关开/关真实链路、确认单只执行一次、检查程序跟插件开关
 |   |-- test_audit_requests_topic.py    # 审计 requests 主题：owner_id/会话归属、去重、时间窗、不含正文、跨用户两道门、管理员身份事实

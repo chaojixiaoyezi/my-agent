@@ -14,6 +14,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..capability.learnpack_build_notes import build_notes
 from ..capability.learnpack_store import BuildProvenance, BuildRecord, LearnpackStore
 from ..capability.package_build import (
     KIND_CAPABILITY_PACK,
@@ -132,11 +133,13 @@ class PackageBuildTool(BaseTool):
             return _error(exc.code, str(exc))
         except PluginPackageError as exc:
             return _error("PACKAGE_BUILD_OUTPUT_INVALID", f"打出的包没通过宿主校验：{exc}")
+        store = LearnpackStore(home.owner_home_dir)
         try:
-            record = LearnpackStore(home.owner_home_dir).save_build(built, request.provenance)
+            record = store.save_build(built, request.provenance)
         except OSError:
             return _error("PACKAGE_BUILD_STORE_FAILED", "包已打好但没能存进宿主存储，请稍后重试。")
-        return _receipt(record, built, switch_facts(read_self_install_switches(self._agent)))
+        return _receipt(record, built, switch_facts(read_self_install_switches(self._agent)),
+                        build_notes(self._agent, store, record))
 
 
 # LLM: 只做结构检查与默认值填充，不读文件；source_dir 不能为空（相对路径留到读文件时解析）；插件不收 v8 键。纯函数。
@@ -292,9 +295,12 @@ def _reject_secrets(contents: dict[str, bytes]) -> None:
                                 f"这些文件里像是有密钥或口令，已整包拒绝：{'、'.join(flagged[:10])}；换成占位符后再打包。")
 
 
-# LLM: 回执字段是给模型照抄的结构化事实；next_step 写清用 package_install 装、开关关着时会给用户确认行。纯函数。
+# LLM: 回执字段是给模型照抄的结构化事实；next_step 写清用 package_install 装、开关关着时会给用户确认行；notes 来自
+#   capability/learnpack_build_notes：现在装着的版本、她做过的版本，以及软提醒 warnings（code + 一句话，没有就是空列表，
+#   不挡打包）。纯函数。
 # 函数用途: 生成成功回执。
-def _receipt(record: BuildRecord, built: BuiltPackage, switches: dict[str, object]) -> ToolHandlerOutcome:
+def _receipt(record: BuildRecord, built: BuiltPackage, switches: dict[str, object],
+             notes: dict[str, object]) -> ToolHandlerOutcome:
     shown = list(built.files[:_RECEIPT_FILE_LIMIT_COUNT])
     payload = {
         "ok": True,
@@ -302,6 +308,10 @@ def _receipt(record: BuildRecord, built: BuiltPackage, switches: dict[str, objec
                   "sha256": record.sha256, "file_count": record.file_count, "files": shown,
                   "files_truncated": len(built.files) > len(shown), "origin": record.origin, "license": record.license},
         "switches": switches,
+        "installed_version": notes["installed_version"],
+        "installed_by_me": notes["installed_by_me"],
+        "previous_versions": notes["previous_versions"],
+        "warnings": notes["warnings"],
         "next_step": (f"调用 package_install，参数 sha256={record.sha256} 安装。对应开关开着就直接装上；"
                       "关着会生成待确认安装单，回执里有要用户原样发的那一行确认。照回执原文提醒用户。"),
     }

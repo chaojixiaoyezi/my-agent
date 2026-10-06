@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import zipfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,8 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ORDER_ID_ATTEMPT_COUNT = 8
 # 安装记录最多保留 2000 条：超限只丢最旧的，找"上一版"只看最近记录。
 _MAX_INSTALL_RECORD_COUNT = 2000
+# 找同名旧包时最多看的打包记录文件个数（超出的不看，只影响打包回执里的提醒）。
+_MAX_BUILD_SCAN_COUNT = 2000
 
 
 # LLM: 打包记录只来自宿主打包工具；origin/license 是她声明的来源与许可证（展示与追溯用，不做权限判断）。
@@ -113,6 +116,32 @@ class LearnpackStore:
         if (manifest.plugin_id, manifest.version) != (record.package_id, record.version):
             return None
         return record if manifest.is_content_only == (record.kind == KIND_CAPABILITY_PACK) else None
+
+    # LLM: 列出同一个包名做过的打包记录：按修改时间取最近的 _MAX_BUILD_SCAN_COUNT 个记录文件（复审：超出上限时要的是最近的，
+    #   不是按文件名随便取一批），先读记录筛包名，再逐个用 build() 核对字节与清单，坏的跳过；结果按打包时间从早到晚。
+    #   只读，只用于打包回执里的事实与提醒，不做权限判断。
+    # 函数用途: 找她以前做过的同名包。
+    def builds_for(self, package_id: str) -> list[BuildRecord]:
+        found: list[BuildRecord] = []
+        newest = sorted((self.root / "builds").glob("*.json"), key=_modified_time, reverse=True)
+        for path in newest[:_MAX_BUILD_SCAN_COUNT]:
+            try:
+                same_package = read_json_object(path).get("package_id") == package_id
+            except (OSError, ValueError):
+                continue
+            record = self.build(path.stem) if same_package else None
+            if record is not None:
+                found.append(record)
+        return sorted(found, key=lambda item: item.built_at)
+
+    # LLM: 打包产物 zip 里的文件名（不含目录项）；读不了返回空元组。调用前应先用 build() 确认字节可信。只读。
+    # 函数用途: 列出她打的某个包里有哪些文件（比较上一版少了哪些文件用）。
+    def build_files(self, sha256: str) -> tuple[str, ...]:
+        try:
+            with zipfile.ZipFile(self._build_zip(sha256)) as archive:
+                return tuple(name for name in archive.namelist() if not name.endswith("/"))
+        except (OSError, zipfile.BadZipFile):
+            return ()
 
     # LLM: 只拼路径；调用前应先用 build() 确认字节与记录可信。
     # 函数用途: 返回某个打包产物在宿主存储里的路径（安装命令从这里读包）。
@@ -242,6 +271,15 @@ class LearnpackStore:
     # 函数用途: 打包记录 json 的位置。
     def _build_json(self, sha256: str) -> Path:
         return self.root / "builds" / f"{sha256}.json"
+
+
+# LLM: 取不到修改时间（文件刚被删）就当最旧，排序不出错。只读。
+# 函数用途: 取文件修改时间，供"最近的记录"排序。
+def _modified_time(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 # LLM: 内容寻址文件：已有且字节摘要相同就不再写；没有或不同（如上次写到一半）就写临时文件再原子替换，出生即 0600。

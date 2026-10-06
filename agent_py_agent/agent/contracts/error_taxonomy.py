@@ -3632,6 +3632,32 @@ ERROR_CONTRACTS.update({
 })
 
 
+# ---- learnpack 打包提醒（2026-10-06 3a，第 6 步）：只出现在 package_build 成功回执的 warnings 里，不是失败码 ----
+# LLM: 只由 capability/learnpack_build_notes 产生，经 tooling/package_build_tool 放进回执 warnings；改文案须同步 test_learnpack_merge。
+ERROR_CONTRACTS.update({
+    "PACKAGE_BUILD_VERSION_REUSED": ErrorContract(
+        code="PACKAGE_BUILD_VERSION_REUSED", category="tool", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="包已打好，但同名同版本号以前装上过内容不同的一版；改版或合并就把 declaration.version 升一级重新打包，再用新回执安装。",
+    ),
+    "PACKAGE_BUILD_VERSION_OLDER": ErrorContract(
+        code="PACKAGE_BUILD_VERSION_OLDER", category="tool", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="包已打好，但版本号比现在装着的旧，装上去会倒退；改版或合并就用比现在装着的大的版本号重新打包。",
+    ),
+    "PACKAGE_BUILD_ID_TAKEN": ErrorContract(
+        code="PACKAGE_BUILD_ID_TAKEN", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="包已打好，但这个包名被别处的包占着，装不上；同领域的内容只能换个包名单独成包，不要去并进别处的包。",
+    ),
+    "PACKAGE_BUILD_FILES_DROPPED": ErrorContract(
+        code="PACKAGE_BUILD_FILES_DROPPED", category="tool", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="包已打好，但比上一版少了文件；合并或改版要把旧方向的文件原样带上再打包，确实要删的不用管，带不过来的如实告诉用户。",
+    ),
+})
+
+
 # ---- learnpack "总结一下"（2026-10-06 3a）：独立块 ----
 # LLM: 只由 tooling/skill_summarize_tool 产生；改文案须同步 test_skill_summarize_tool。
 ERROR_CONTRACTS.update({

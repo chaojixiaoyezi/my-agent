@@ -344,6 +344,8 @@ class CapabilityRouter:
         return "# Candidate Capabilities\n" + "\n\n".join(blocks)
 
     # LLM: 仅复用 scoped search 的元数据评分；先按宿主选中集合过滤再限数，完整读取参数随卡保留，不预读、不 pin、不授予权限。
+    #   推荐门槛（learnpack 第 6 步）：没有宿主一次选择时只推荐 has_strong_match 的包（声明的名称、能力或关键词整个出现在提问里），
+    #   只撞上描述常用词的不推荐；宿主选中的包照旧（选择本身已判断过相关）。改门槛要同步 test_pack_recommendation_threshold。
     # 函数用途: 在现有元数据预算内展示本轮相关包摘要；宿主负责开关与工具权限，空结果保持原提示字节。
     def render_package_recommendations(
         self, query: str, *, limit: int | None = None,
@@ -351,7 +353,10 @@ class CapabilityRouter:
         selected_skill_ids: tuple[str, ...] | None = None,
     ) -> str:
         hits = self.search(query, limit=0, kinds={"capability_package"})
-        cards = [hit.card for hit in hits if selected_skill_ids is None or hit.card.id in selected_skill_ids]
+        if selected_skill_ids is not None:
+            cards = [hit.card for hit in hits if hit.card.id in selected_skill_ids]
+        else:
+            cards = [hit.card for hit in hits if has_strong_match(query, hit.card)]
         # 注意：路由器构造时 self.config 是 AgentConfig，上面没有 capability_candidate_limit；watch_service 之后才换成
         # CapabilityConfig 快照。生产调用都显式传 limit，新调用方也必须显式传，不能依赖 limit=None。
         effective_limit = self.config.capability_candidate_limit if limit is None else limit
@@ -477,6 +482,26 @@ def classify_tool_model_risk(spec: ToolModelSpec) -> tuple[list[str], str]:
     if spec.category == "filesystem":
         return ["filesystem_read"], "low"
     return [], "low"
+
+
+# LLM: 本轮能力包候选的推荐门槛（learnpack 第 6 步）：卡片声明的名称、能力或关键词要整个出现在提问里才算强命中（忽略大小写；
+#   纯 ASCII 的词两头不能紧挨英文字母，免得 "r" 撞上 "report"）。只撞上描述、适用场景里的词，或提问切出来的片段撞上关键词的
+#   一部分（如"工作目录"里的"工作"撞上"相关工作"）都不算。只给 render_package_recommendations 用；score_card 的分数和 search
+#   排序不变，skill_search 主动搜照旧能按描述搜到。纯函数。
+# 函数用途: 判断提问里有没有出现能力卡声明的名称、能力或关键词。
+def has_strong_match(query: str, card: CapabilityCard) -> bool:
+    lowered = query.lower()
+    return any(_declared_term_in(term.strip().lower(), lowered) for term in (card.name, *card.capabilities, *card.keywords))
+
+
+# LLM: 空词不算；纯 ASCII 的词要求两头不紧挨英文字母，其余（含中文）按子串。纯函数。
+# 函数用途: 判断一个声明的词是否整个出现在（已转小写的）提问里。
+def _declared_term_in(term: str, lowered_query: str) -> bool:
+    if not term:
+        return False
+    if term.isascii():
+        return re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", lowered_query) is not None
+    return term in lowered_query
 
 
 def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:

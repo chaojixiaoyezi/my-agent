@@ -242,9 +242,9 @@ def _superseded_by(store: LearnpackStore, order: InstallOrder) -> str:
 
 # LLM: 她在这个包名下装上过（结果进过安装表：已启用或停在启用确认）的各个版本，按每个版本第一次装上的序号排先后；只认
 #   learnpack 存储里摘要与清单对得上、包名相同的。"上一版"按这个顺序取、不按最后一条记录，重新装回旧版后也不会来回跳（复审）。
-#   只读。
+#   只读。打包回执的"同号提醒"也只看这些版本（capability/learnpack_build_notes）。
 # 函数用途: 列出她在这个包名下装上过的版本，从早到晚。
-def _installed_versions(store: LearnpackStore, package_id: str) -> list[BuildRecord]:
+def installed_versions(store: LearnpackStore, package_id: str) -> list[BuildRecord]:
     first: dict[str, int] = {}
     for row in store.installs():
         seq, sha256 = row.get("seq"), str(row.get("sha256") or "")
@@ -254,13 +254,13 @@ def _installed_versions(store: LearnpackStore, package_id: str) -> list[BuildRec
     return [record for record in records if record is not None and record.package_id == package_id]
 
 
-# LLM: 现在装着的版本在 _installed_versions 里的前一个；现在装着的不是她装上过的版本就没有上一版。连续退回一路往前，退到
+# LLM: 现在装着的版本在 installed_versions 里的前一个；现在装着的不是她装上过的版本就没有上一版。连续退回一路往前，退到
 #   第一版为止。只读。
 # 函数用途: 找到现在装着的版本的上一版（她做的），找不到返回 None。
 def previous_build(store: LearnpackStore, current: object) -> BuildRecord | None:
     if current is None:
         return None
-    versions = _installed_versions(store, current.manifest.plugin_id)
+    versions = installed_versions(store, current.manifest.plugin_id)
     shas = [record.sha256 for record in versions]
     index = shas.index(current.package_sha256) if current.package_sha256 in shas else 0
     return versions[index - 1] if index > 0 else None
@@ -316,7 +316,7 @@ def _revert_preview(store: LearnpackStore, current: object, record: BuildRecord,
 def _revert_target(store: LearnpackStore, package_id: str, target: str) -> BuildRecord | None:
     if _SHA_PREFIX.fullmatch(target) is None:
         return None
-    matches = [record for record in _installed_versions(store, package_id) if record.sha256.startswith(target)]
+    matches = [record for record in installed_versions(store, package_id) if record.sha256.startswith(target)]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -424,6 +424,7 @@ __all__ = [
     "confirm_order",
     "install_now",
     "installed_entry",
+    "installed_versions",
     "learnpack_command",
     "learnpack_manager",
     "learnpack_owner",

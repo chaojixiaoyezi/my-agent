@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 939,
+  "count": 941,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1178,6 +1178,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "经验条目在提案摘录里的最大字符数。"
+    },
+    {
+      "name": "_DROPPED_LIST_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_build_notes.py",
+      "value": 10,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "文件少了时回执里最多列出的路径个数。"
+    },
+    {
+      "name": "_MAX_BUILD_SCAN_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_store.py",
+      "value": 2000,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "找同名旧包时最多看的打包记录文件个数（超出的不看，只影响打包回执里的提醒）。"
     },
     {
       "name": "_MAX_INSTALL_RECORD_COUNT",
