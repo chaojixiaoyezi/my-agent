@@ -74,6 +74,8 @@ from .user_space.owner_resolver import OwnerHomeResult
 _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGURE_TOOL,
                      "enable": PLUGIN_ENABLE_TOOL, "disable": PLUGIN_DISABLE_TOOL, "remove": PLUGIN_REMOVE_TOOL,
                      "update": PLUGIN_UPDATE_TOOL}
+# learnpack 安装单要用到的管理工具：缺任何一个被策略禁用，确认就不执行、不占单。
+_LEARNPACK_TOOLS = (PLUGIN_INSTALL_TOOL, PLUGIN_UPDATE_TOOL, PLUGIN_ENABLE_TOOL, PLUGIN_DISABLE_TOOL)
 
 
 # LLM: 身份与新默认只来自宿主；展示不改变既有权限代次，原线程是权威，不信正文自称管理员。
@@ -193,9 +195,7 @@ class PluginManagement:
         context = self.context
         actions = []
         for action in COMMAND_INDEX["plugins"].actions:
-            available = (action.name in {"help", "list", "info", "status"}
-                         or action.name in _MANAGEMENT_TOOLS and context.enabled and context.is_admin
-                         and self._allowed(_MANAGEMENT_TOOLS[action.name]))
+            available = _action_available(context, action.name, self._allowed)
             reason = "" if available else ("admin_only" if not context.is_admin else "not_implemented")
             actions.append(replace(action, available=available, unavailable_reason=reason))
         return replace(read_plugin_catalog(context.owner.identity, channel=context.channel,
@@ -214,6 +214,10 @@ class PluginManagement:
         namespace = plugin_namespace(text)
         if namespace is None:
             raise ValueError("不是插件命令")
+        # learnpack（确认安装单 /plugins confirm、退回 /plugins revert）在类外分流，最终仍经本服务的同一串管理命令执行。
+        routed = learnpack_command_payload(self, text)
+        if routed is not None:
+            return self._reply(routed)
         if namespace.plugin_id:
             return self._reply(self._business(text, revision, request_id, request_permission, cancellation_token), request_id)
         static = plugin_command_response(text)
@@ -589,6 +593,33 @@ _PLUGIN_BUSINESS_REPLY_MESSAGES = {
     "succeeded": "插件调用已完成。", "failed": "插件调用失败，请核对原结果。",
     "approval_required": "插件调用需要审批，尚未执行。", "outcome_unknown": "插件调用结果尚未确认，请查询原请求。",
 }
+
+
+# LLM: 只读与查询动作人人可见；管理动作要插件功能开着、管理员身份、且该工具没被 owner 策略禁用；learnpack 的 confirm/revert 要求
+#   install/update/enable/disable 四个管理工具都可用（与 management_ready 同一口径）。纯函数。
+# 函数用途: 判断一个 /plugins 管理动作在当前身份下是否可用。
+def _action_available(context, name: str, allowed: Callable) -> bool:
+    if name in {"help", "list", "info", "status"}:
+        return True
+    if not (context.enabled and context.is_admin):
+        return False
+    if name in {"confirm", "revert"}:
+        return all(allowed(tool) for tool in _LEARNPACK_TOOLS)
+    return name in _MANAGEMENT_TOOLS and allowed(_MANAGEMENT_TOOLS[name])
+
+
+# LLM: learnpack 执行安装单前的前置检查（复审 S1），与目录里 confirm 是否可用同一口径；不满足时调用方不占单。只读。
+# 函数用途: 判断这个管理服务现在能不能完整执行一串安装/更新/启用/停用命令。
+def management_ready(manager: PluginManagement) -> bool:
+    return _action_available(manager.context, "confirm", manager._allowed)
+
+
+# LLM: learnpack 分流放在类外以免 PluginManagement 超长；延迟导入避免与 capability 模块循环引用。返回 None 表示不是 learnpack 命令。
+# 函数用途: 把 /plugins confirm <单号> 与 /plugins revert <包名> 交给 learnpack 处理，得到原始回执。
+def learnpack_command_payload(manager: PluginManagement, text: str) -> dict | None:
+    from .capability.learnpack_service import learnpack_command
+
+    return learnpack_command(manager, text)
 
 
 # LLM: 原结构化 kind 决定确认投影；完整 R/W/N/E 同源运输，中文文案不参与授权判断。

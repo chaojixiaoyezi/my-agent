@@ -290,6 +290,13 @@ COMMAND_CATALOG = (
             CommandActionSpec("status", "查询当前会话的管理请求", (
                 ArgumentSpec("request", "原请求编号", required=True),
             ), available=False),
+            CommandActionSpec("confirm", "确认 my-agent 准备好的安装单：装上她打的包并启用（同一张单只执行一次）", (
+                ArgumentSpec("order", "安装单号（lp- 开头，照她给的原样填）", required=True),
+            ), available=False),
+            CommandActionSpec("revert", "把 my-agent 做的包退回到她做的旧版本：先只发包名看会退到哪一版，再照回执发带版本的那一行", (
+                ArgumentSpec("plugin", "插件或能力包 ID", required=True),
+                ArgumentSpec("target", "版本摘要（照预览回执里那一行原样填）"),
+            ), available=False),
             CommandActionSpec("enable", "管理员确认授权后启用；重新启用先撤销并清理旧代", (
                 ArgumentSpec("plugin", "插件 ID", required=True),
                 ArgumentSpec("read_roots", "授权读取的规范绝对目录，可重复", options=("--read-root",), multiple=True, path=True),

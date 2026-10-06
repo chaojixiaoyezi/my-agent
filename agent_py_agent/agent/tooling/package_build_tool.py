@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +49,14 @@ _RECEIPT_FILE_LIMIT_COUNT = 40
 _EMPTY_SETTINGS = {"type": "object", "properties": {}, "additionalProperties": False}
 # 文件型插件第一期不收的 v8 声明键（事件订阅、收紧钩子、权限需求）。
 _V8_KEYS = ("events", "tool_gates", "permissions")
+# 她声明的来源与许可证会进宿主回执和 /plugins# 列表：单行、最多 200 个字符。
+_PROVENANCE_MAX_CHARS = 200
+# 声明里其它字符串（说明、关键词、动作说明等）每段最多 1000 个字符。
+_DECLARED_TEXT_MAX_CHARS = 1000
+# 版本号只用字母、数字和 . + - _，最多 64 个字符（它会进宿主回执的"包名 版本（摘要）"）。
+_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
+# 展示文字里不收的 Unicode 类别：控制字符（含换行、ESC、C1）、格式字符（含改显示方向的）、行与段落分隔符、单独的代理字符。
+_UNSAFE_TEXT_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
 
 # LLM: 一次打包请求的结构化输入；declaration 是模型给的声明（能力包可省 files/settings_schema），source_dir 是绝对路径。
@@ -99,6 +109,7 @@ class PackageBuildTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating"),
                                        idempotency_policy=IdempotencyPolicy("operation"))
 
+    # LLM: 构造不读写；身份、读权限与开关都在执行时现取。
     # 函数用途: 绑定当前 owner 的 agent（取身份、owner 目录、注册表与开关）。
     def __init__(self, agent: object) -> None:
         self._agent = agent
@@ -137,12 +148,49 @@ def _parse(params: dict, run_id: str) -> _BuildRequest:
     if kind == KIND_PLUGIN and any(key in declaration for key in _V8_KEYS):
         raise PackageBuildError("PACKAGE_BUILD_KIND_UNSUPPORTED",
                                 "第一期她自己做的插件只支持文件型 v6 包，声明里不能有 events、tool_gates、permissions。")
+    if not isinstance(declaration.get("version"), str) or _VERSION.fullmatch(declaration["version"]) is None:
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "version 只能用字母、数字和 . + - _，最多 64 个字符。")
+    if not _declared_texts_ok(declaration):
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID",
+                                f"声明里的文字每段最多 {_DECLARED_TEXT_MAX_CHARS} 个字符，不能有换行、控制字符或改变显示方向的格式字符。")
     origin, license_name = str(params.get("origin") or "").strip(), str(params.get("license") or "").strip()
-    if not origin or not license_name:
-        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "origin（学自哪里）和 license（许可证）都要写。")
+    if not (_display_text_ok(origin) and _display_text_ok(license_name)):
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID",
+                                f"origin（学自哪里）和 license（许可证）都要写，各自一行、不超过 {_PROVENANCE_MAX_CHARS} "
+                                "个字符，不能有换行、控制字符或改变显示方向的格式字符。")
     if kind == KIND_CAPABILITY_PACK:
         declaration = {"settings_schema": _EMPTY_SETTINGS, **declaration}
     return _BuildRequest(kind, Path(raw_dir).expanduser(), declaration, BuildProvenance(origin, license_name, run_id))
+
+
+# LLM: 比包清单展示文字（plugin_manifest._text：非空、无控制字符）更严：再挡 C1 控制、格式字符（如改显示方向）、行/段落分隔符和
+#   单独的代理字符，并限长。她声明的来源与许可证会被宿主原样放进回执和列表，这样造不出"像宿主写的"额外几行，也不会把控制字符
+#   送到终端（复审 5、6 轮）。纯函数。
+# 函数用途: 判断来源或许可证文字能不能安全展示（必须非空）。
+def _display_text_ok(value: str) -> bool:
+    return bool(value) and _safe_text(value, _PROVENANCE_MAX_CHARS)
+
+
+# LLM: 同 _display_text_ok 的字符规则，允许空串（声明里有可留空的字段）；只看长度与 Unicode 类别。纯函数。
+# 函数用途: 判断一段文字能不能安全展示。
+def _safe_text(value: str, limit: int) -> bool:
+    return len(value) <= limit and not any(unicodedata.category(char) in _UNSAFE_TEXT_CATEGORIES for char in value)
+
+
+# LLM: 声明里所有字符串（键和值，含版本、说明、关键词、动作与参数说明）都是她写的，宿主会拿去展示（回执、/plugins info、
+#   列表），所以逐个按展示规则检查，而不是挑字段补（复审 6 轮）。迭代展开，不递归。纯函数。
+# 函数用途: 检查声明里的每一段文字都能安全展示。
+def _declared_texts_ok(declaration: dict) -> bool:
+    pending, texts = [declaration], []
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend([*value.keys(), *value.values()])
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str):
+            texts.append(value)
+    return all(_safe_text(text, _DECLARED_TEXT_MAX_CHARS) for text in texts)
 
 
 # LLM: 能力包没列 files 时自动收录；每个路径先过 read_file 的路径裁决再按无链接读取；读完做密钥检查。只读文件。
@@ -163,6 +211,7 @@ def _read_files(agent: object, request: _BuildRequest) -> dict[str, bytes]:
     return contents
 
 
+# LLM: 打包规则只在 capability/package_build；这里只按类型分派。纯函数。
 # 函数用途: 按类型调用唯一的打包实现。
 def _build(request: _BuildRequest, contents: dict[str, bytes]) -> BuiltPackage:
     if request.kind == KIND_CAPABILITY_PACK:
@@ -181,6 +230,7 @@ def _path_check(agent: object):
     return check
 
 
+# LLM: 裁决结果只看结构化 allowed 字段，拒绝时只报路径不报内容。只读。
 # 函数用途: 某个路径读权限不允许时，抛 PACKAGE_BUILD_SOURCE_DENIED。
 def _require_allowed(check, path: Path, shown: str) -> None:
     if not check(path.resolve(strict=False)).allowed:
@@ -236,11 +286,13 @@ def _receipt(record: BuildRecord, built: BuiltPackage, switches: dict[str, objec
                               result_envelope={PACKAGE_BUILD_TOOL: payload})
 
 
+# LLM: 失败时一律没写任何东西（not_started）。纯组装。
 # 函数用途: 生成失败回执（没有写任何东西）。
 def _error(code: str, message: str) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(PACKAGE_BUILD_TOOL, False, message, error_code=code, effect_outcome="not_started")
 
 
+# LLM: 只读线程本地的当前运行参数，用于打包记录追溯，不参与权限判断。
 # 函数用途: 取当前运行编号（取不到为空串）。
 def _run_id(agent: object) -> str:
     return str(getattr(getattr(agent, "_current_run_params", None), "run_id", "") or "")

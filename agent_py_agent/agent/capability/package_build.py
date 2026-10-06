@@ -36,6 +36,7 @@ _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 #   以保持两个脚本原有的异常类型。
 # 类用途: 打包失败时携带结构化错误码。
 class PackageBuildError(ValueError):
+    # LLM: code 必须是 error_taxonomy 登记过的 PACKAGE_BUILD_* 码。
     # 函数用途: 记下错误码与中文原因。
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)

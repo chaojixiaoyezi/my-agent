@@ -3579,3 +3579,49 @@ ERROR_CONTRACTS.update({
         recovery_hint="包打好了但没能存进宿主 learnpack 存储（磁盘或权限问题）；稍后用同样参数重新打包，同一内容只会存一份。",
     ),
 })
+
+
+# ---- learnpack 安装（2026-10-06 3a）：独立块，合并冲突时整块保留 ----
+# LLM: 只由 tooling/package_install_tool 与 capability/learnpack_service 产生；改文案须同步 test_learnpack_install。
+ERROR_CONTRACTS.update({
+    "PACKAGE_INSTALL_NOT_SELF_BUILT": ErrorContract(
+        code="PACKAGE_INSTALL_NOT_SELF_BUILT", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="只能装你自己用 package_build 打的包；先用 package_build 打包，再用回执里的 sha256 安装。别处来的包要管理员用 /plugins install。",
+    ),
+    "PACKAGE_INSTALL_FAILED": ErrorContract(
+        code="PACKAGE_INSTALL_FAILED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="宿主的插件管理命令有一步没成功，之后的步骤都没执行；把回执里的 message 和 request_ids 如实告诉用户，不要自己重复安装。",
+    ),
+    "PACKAGE_INSTALL_ORDER_NOT_FOUND": ErrorContract(
+        code="PACKAGE_INSTALL_ORDER_NOT_FOUND", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="没有这张安装单，或它指向的包已被改动；请核对单号，必要时让 my-agent 重新打包并出单。",
+    ),
+    "PACKAGE_INSTALL_ID_TAKEN": ErrorContract(
+        code="PACKAGE_INSTALL_ID_TAKEN", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="这个包名被别处来的同名包或插件占着（装着的不是你做的，或它卸载后还留着数据），宿主不会让你的包替换或接着用它；换一个包名重新打包。",
+    ),
+    "PACKAGE_INSTALL_ORDER_STALE": ErrorContract(
+        code="PACKAGE_INSTALL_ORDER_STALE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="这张单开出之后，同一个包又出过新单或装过别的版本，旧单不再执行；请用最新的那一行，或者让 my-agent 重新出一张单。",
+    ),
+    "PACKAGE_INSTALL_UNCONFIRMED": ErrorContract(
+        code="PACKAGE_INSTALL_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="宿主的插件管理命令结果没法确认（可能已部分执行）；把回执里的请求编号告诉用户核对，不要自己重复安装。",
+    ),
+    "PACKAGE_REVERT_UNAVAILABLE": ErrorContract(
+        code="PACKAGE_REVERT_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="没有可退回的版本：只有她做的、在这个包名下装上过、还留在 learnpack 存储里的版本才能退回；现在装的可能已是第一版或不是她做的，带版本时请照预览那一行原样发。",
+    ),
+    "PACKAGE_INSTALL_ORDER_USED": ErrorContract(
+        code="PACKAGE_INSTALL_ORDER_USED", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="这张安装单已经执行过，同一张单只执行一次；回执里有当时的结果，要重装请让 my-agent 重新出单。",
+    ),
+})

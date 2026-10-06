@@ -143,6 +143,7 @@ from .tooling.computer_use_profile import (
 from .tooling.gateway_restart_tool import RestartGatewayTool
 from .tooling.gateway_status import GatewayStatusTool
 from .tooling.package_build_tool import PackageBuildTool
+from .tooling.package_install_tool import PackageInstallTool
 from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .tooling.user_config_tool import UserConfigTool
 from .user_space.approval_mode import is_permission_admin
@@ -1231,6 +1232,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
             agent.tools.register(RestartGatewayTool(agent))
         # learnpack：把整理好的目录打成能力包/插件包（只打包不安装，默认收起），第一期只给本机管理员。
         agent.tools.register(PackageBuildTool(agent))
+        # learnpack：按"自动装"开关安装她打的包，开关关着只开待确认安装单（默认收起），同样只给本机管理员。
+        agent.tools.register(PackageInstallTool(agent))
     # 普通 user 也能经原 owner/thread 设置服务操作自己的决策覆盖；group/未知 owner 不扩权。
     # 统一审计工具同一范围注册：只读本人结构化记录，跨用户审计另需管理员明确许可（工具内复核）。
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
