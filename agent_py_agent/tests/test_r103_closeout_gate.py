@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import time
 from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.common.heartbeat import process_start_time
 from agent_py_agent.agent.owner_wake_discovery import unfinished_task_ids
 from agent_py_agent.agent.runtime_db.repository import (
     RuntimeConflictError,
@@ -498,13 +498,17 @@ def test_g_expired_live_lock_not_orphan(repo):
 
 
 def test_g_holder_liveness_start_token(repo):  # RED
-    """持主判死：pid 不存在 → 死；pid 存活但 start_token 失配（PID 复用）→ 死。"""
+    """持主判死：pid 不存在 → 死；pid 存活且启动指纹同格式但不同（PID 复用）→ 死；格式不可比或为空 → 不可核验，保守判活。"""
     assert holder_is_alive(pid=999999, start_token="whatever") is False
-    if platform.system() == "Linux":
-        # PID 复用防护：start_token 对不上 → 视为不可信（fail-closed 判死）
-        assert holder_is_alive(pid=os.getpid(), start_token="wrong-token") is False
-        # 空 token 且进程在 → 存活
-        assert holder_is_alive(pid=os.getpid(), start_token="") is True
+    current = process_start_time(os.getpid())
+    if current is None:
+        pytest.skip("本平台读不到进程启动指纹")
+    # PID 复用防护：Linux /proc ticks 与 macOS sysctl 秒.微秒都是数字，同格式且不同才是死亡证据。
+    assert holder_is_alive(pid=os.getpid(), start_token=str(float(current) + 1)) is False
+    assert holder_is_alive(pid=os.getpid(), start_token=current) is True
+    # 非数字的旧记录与当前数字指纹不可比（starttime 三态收口）：不可核验不能当死亡证据；空 token 同样保守判活。
+    assert holder_is_alive(pid=os.getpid(), start_token="wrong-token") is True
+    assert holder_is_alive(pid=os.getpid(), start_token="") is True
 
 
 def test_g_reclaim_side_effect_gate(repo):  # RED

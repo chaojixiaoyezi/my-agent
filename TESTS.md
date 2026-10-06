@@ -177,6 +177,7 @@
 - 新用例（`test_start_time_unification.py`，前 4 条仅 macOS 跑）：读本进程不起子进程且两次相同；换 TZ/LC_ALL 后不变；秒数与固定 C/UTC 环境下 `ps -o lstart` 的内核时刻一致（钉偏移）；能读其它活进程、退出后与超范围 pid 为 None；非 Linux 非 macOS 返回 None、不调 sysctl、不起进程。比较矩阵补“sysctl 相同/不同”和“旧 lstart 记录 vs 新 sysctl → 不判死”三行；两条 lstart 判死用例改成 sysctl 格式。
 - 结果：`test_start_time_unification.py` + `test_heartbeat.py` + `test_plugin_configure_management.py` **81 passed**。
 - 变异（`scratchpad/mutate_st.py`，原文自动恢复）：退回 ps、偏移改 8、改成本地时间文本、去掉长度检查、去掉平台判断 → **5/5 KILLED**（去掉多余的“秒数>0”兜底后长度检查才有用例守住）。
+- 17n 候选 Linux 车道（a169ad2c6）12 片：29,181 passed、1 failed——`test_r103_closeout_gate.py::test_g_holder_liveness_start_token` 仍按旧口径用非数字 `"wrong-token"` 当失配指纹、期望判死；按 starttime 三态收口，非数字记录与 /proc 数字不可比，只能算不可核验。用例改为：同格式数字且不同 → 判死、相同 → 活、非数字或空 → 保守判活；读不到指纹的平台跳过（macOS 现在也能读，原先只在 Linux 跑）。
 
 ## starttime3 锁写端统一与比较双口径（2026-10-05，待初审）
 
