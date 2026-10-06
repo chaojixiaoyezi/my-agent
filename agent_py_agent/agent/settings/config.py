@@ -222,9 +222,6 @@ class _ToolConfigFields:
     access_mode: str = DEFAULT_COMMAND_ACCESS_MODE
     tool_shell_timeout: int = 240
     tool_shell_output_max_chars: int = 12_000
-    # 顶层命令源（整条命令文本）在解析前的长度上限；超限直接拒绝，避免 shlex 逐字符解析卡住策略线程。
-    # 0 = 不限制。默认 64K：真实命令远小于它，而 1MB 解析要十几秒（见 agent_config.yaml 注释的实测耗时）。
-    command_policy_max_source_chars: int = 65_536
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）：分页器等按键会让命令永不退出，超过阈值由宿主自动收回。
     pty_session_idle_timeout_minutes: int = 30
     # 后台服务默认只允许监听本机回环；声明 loopback 却绑到局域网地址时由 host 回收（False 只记 listener_warning）。

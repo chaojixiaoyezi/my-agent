@@ -1430,7 +1430,9 @@ Gateway 解析并校验会话 cwd，但不再把 `workspace_task.task_path` 覆�
 ## Owner WorkspaceOnly 与管理员 Full Access
 
 - owner-scoped Shell 的结构化 cwd 先由 path policy 校验，命令正文仍交给 OS 沙箱，不解析重定向、管道或
-  任意字符串中的路径。Linux bwrap 下另一 owner/未授权宿主路径不会被挂载，进程内 `ENOENT`/`EACCES` 只证明当前
+  任意字符串中的路径。命令正文进入策略前先过顶层命令源长度闸门（`contracts/gates/command_policy` 的模块常量
+  `_COMMAND_SOURCE_MAX_CHARS`=64K；超长直接结构化报 `COMMAND_SOURCE_TOO_LARGE`、不做 shlex 解析——1MB 纯 Python
+  解析要 18 秒，会卡住策略线程；子代理受控执行网关与子代理文本解析点共用同一判定，阈值是常量不是配置项）。Linux bwrap 下另一 owner/未授权宿主路径不会被挂载，进程内 `ENOENT`/`EACCES` 只证明当前
   scope 不可访问；macOS Seatbelt 是 allow default 加写拒绝，宿主上的一般路径读得到，但 owner 隔离时先拒绝读取 my-agent
   家目录、再放行本 owner 家目录与授权读写根（`attempt/sandbox._private_read_rules`，拒读根来自 `ToolRegistryParams.host_private_roots`），
   其它 owner、配置与密钥读不到；根与放行目录之间的各级目录只放行元数据（git 等规范化路径要逐级 lstat），仍列不出内容。

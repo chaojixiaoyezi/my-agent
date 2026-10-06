@@ -5,6 +5,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..contracts.gates.command_policy import command_source_too_large
 from .models import CapabilityGrant
 from .shell_gateway import ShellGatewayDecision, ShellGatewayRequest, plan_shell_command
 
@@ -47,7 +48,12 @@ def shell_request_from_controlled_exec(request: ControlledExecRequest) -> ShellG
     return _shell_request_from_grant(request)
 
 
+# LLM: 受控执行计划的唯一入口：先按共享长度闸门拒绝超长命令源（超长文本交给下游 shlex 会卡住线程，
+#   与命令策略两条入口共用同一判定），再解析、走删除策略与 shell 网关；长度闸门失败时不进入任何解析。
+# 函数用途: 为一次受控执行请求生成放行/拒绝计划（只判定，不执行命令）。
 def plan_controlled_exec(request: ControlledExecRequest) -> ControlledExecPlan:
+    if command_source_too_large(request.command):
+        return _blocked("COMMAND_SOURCE_TOO_LARGE")
     argv, parse_error = _parse_command(request.command)
     if parse_error:
         return _blocked(parse_error)

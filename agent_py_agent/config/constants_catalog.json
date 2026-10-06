@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 917,
+  "count": 918,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1858,6 +1858,14 @@
       "unit": "",
       "category": "上限预算",
       "description": "合同追踪最多展开的层数；防环状引用导致递归无限加深（无物理单位）。"
+    },
+    {
+      "name": "_COMMAND_SOURCE_MAX_CHARS",
+      "file": "agent_py_agent/agent/contracts/gates/command_policy.py",
+      "value": 65536,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "3a 2026-10-05 裁定：这是解析成本的资源上界，与嵌套 Shell 源的 32K 上限同类，固定为模块常量、不做配置项。"
     },
     {
       "name": "_NESTED_SHELL_DEPTH_LIMIT_COUNT",

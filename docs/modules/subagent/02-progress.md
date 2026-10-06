@@ -1,5 +1,11 @@
 # 子代理维护状态
 
+## 命令源长度闸门接入子代理文本解析点（cmdcap-fix，2026-10-05，分支 `worker/cmdcap`，基于 17l 头 `886965f3a`）
+
+- `subagents/controlled_exec_gateway.plan_controlled_exec` 在 `_parse_command`（shlex.split）之前先过共享判定 `command_source_too_large`（contracts/gates/command_policy 的模块常量 64K），超长按 `COMMAND_SOURCE_TOO_LARGE` 拒绝，不再先慢解析一遍。
+- 能力申请命令名提取（`capability_request_identity._command_name`、`capability_scope._requested_command_name`）与 patch 测试命令校验（`patch_apply_helpers.validate_patch_test_command`、`_patch_test_argv`）超长时不做 shlex：按"无命令名"或"阻止"fail-closed 返回。
+- 用例、变异与门禁见 TESTS.md 的 cmdcap + cmdcap-fix 节；设计见 DESIGN_LEDGER 同名节。
+
 ## runner 收口 unknown 空转与终态 attempt 孤儿操作修复（obsfix12，2026-10-05，分支 `worker/obsfix12`，基于 17l 头 `f7849d7ff`）
 
 - 两条底座修复，各一个提交：

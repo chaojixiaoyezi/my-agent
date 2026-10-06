@@ -1057,7 +1057,6 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
-            command_policy_max_source_chars=config.command_policy_max_source_chars,
             pty_session_idle_timeout_minutes=config.pty_session_idle_timeout_minutes,
             background_process_listen_scope_enforce=config.background_process_listen_scope_enforce,
             shell_sandbox_boundary_facts=config.shell_sandbox_boundary_facts,

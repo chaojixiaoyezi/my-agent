@@ -1,11 +1,15 @@
 # 设计台账
 
-## 命令源长度上限：解析前的结构化拒绝（cmdcap，2026-10-05，worker/cmdcap，基于 17l 头 81254d4a5；本地验收完成，待 3a 终审）
+## 命令源长度上限：解析前的结构化拒绝（cmdcap + cmdcap-fix，2026-10-05，worker/cmdcap，基于 17l 头 886965f3a；本地验收完成，待 3a 终审）
 
 - **来源（结构化事实）**：ds5 初审 shellwrap5 时实测，顶层命令没有长度上限：1MB 的单个参数在命令策略检查里光 stdlib shlex.split 就要 18.4 秒（纯 Python 逐字符），会卡住对应线程；嵌套源已有 32K 上限（COMMAND_NESTED_SOURCE_TOO_LARGE）。
-- **做法**：`contracts/gates/command_policy.py` 的 `evaluate_command_policy` 与 `analyze_command`（两条 shlex 入口）在解析前加长度闸门：str 形态超限直接返回 `COMMAND_SOURCE_TOO_LARGE`（新登记码：与嵌套码并列、恢复提示面向"整条命令太长"场景，写"大段内容请改用 write_file 写文件"；argv 形态不经过 shlex 不做闸）。实测 1MB 拒绝耗时 0.01ms（原 18.4s）。
-- **可配置**：`agent_config.yaml` 加 `command_policy_max_source_chars`（默认 65536、0=不限制、注释含 1KB/64KB/256KB/1MB 实测耗时）；`AgentConfig`/`RegistryParams` 同步；`registry_bootstrap.register_base_tools` 注册时 `configure_command_source_max_chars(params...)` 注入进程级策略——所有经两条入口的调用点（run_command、PTY、后台、子代理 shell 网关、插件钩子路径）共用同一上限，未注入时默认 64K，不存在无闸入口。
-- **验证**：新测试 `test_command_policy_source_limit.py` 8 条；3 变异全杀；连带 8 个测试文件跑过（pty 5 条为基线 `81254d4a5` 复核同样失败的沙箱进程限制）；前端配置目录已同步（262 字段，--check in sync）；常数目录重生成 914 项；门禁全过（见 TESTS）。
+- **做法**：`contracts/gates/command_policy.py` 的 `evaluate_command_policy` 与 `analyze_command`（两条 shlex 入口）在解析前加长度闸门：str 形态超限直接返回 `COMMAND_SOURCE_TOO_LARGE`（新登记码：与嵌套码并列、恢复提示面向"整条命令太长"场景，写"大段内容请改用 write_file 写文件"；argv 形态不经过 shlex 不做闸）。实测 1MB 拒绝耗时 0.01ms（原 18.4s）。**判定收敛到唯一共享函数 `command_source_too_large(text)`**，阈值是模块常量 `_COMMAND_SOURCE_MAX_CHARS = 65_536`（注释含 1KB≈0.02ms / 64KB≈0.9ms / 256KB≈3.8ms / 1MB≈18.4s 实测耗时）。
+- **cmdcap-fix（luna6 初审三条必须改 + 3a 改判）**：
+  - **①owner 串扰（初版缺陷）**：初版把上限放在模块级可变变量、由注册入口注入——网关一个进程服务多个 owner，A 配 0、B 配 65536 时"最后注册的说了算"，会串到别的 owner。**3a 裁定改成模块常量、去掉配置项**：`command_policy_max_source_chars` 从 yaml / AgentConfig / RegistryParams / 注册入口全部删除，前端配置目录重新生成。**3a 理由（对原任务第 2 条"可配置"的改判）**：这是解析成本的资源上界，与嵌套 Shell 源的 32K 上限同类（后者本来就没有开关）；按 owner 传值要穿过 10 个调用点（8 个文件），其中几处拿不到 owner 配置，容易漏，也容易再出现"配置改了不生效"；大段内容本来就该用 write_file，没有调大上限的需求。
+  - **②controlled_exec 慢解析（初版缺陷）**：`subagents/controlled_exec_gateway.plan_controlled_exec` 先调 `_parse_command`（直接 shlex.split）之后才进 plan_shell_command——长输入在被拦之前已慢解析一遍。现在入口最前先过 `command_source_too_large`，超限按同一码拒绝。
+  - **③负数配置（初版缺陷）**：初版 `max(0, ...)` 把负数变 0（=不限制）——配置项删除后此路径消失。
+  - **④其它 shlex 盘点**：子代理文本解析点接入共享判定——`capability_request_identity._command_name`、`capability_scope._requested_command_name`（超长按"无命令名"fail-closed）、`patch_apply_helpers.validate_patch_test_command` + `_patch_test_argv`（超长按"阻止"返回、空 argv 跳过）；其余逐个确认不接：`shell_source`（嵌套源解析，位于命令策略闸门之后）、`verification/project_facts`（事后核验已执行命令，位于闸门之后）、`command_arguments`（插件命令参数域，非模型命令文本）、`shell_syntax`（无 shlex，纯字符串扫描）、`sandbox`/`plugin_completion`（shlex.quote，非解析）。
+- **验证**：见 TESTS.md 同名节（9 条新用例 + 3 变异全杀 + 38 文件连带 + 配置类 3 文件 + guards9）。
 - **已知边界**：argv（list）形态不受闸（不经过 shlex）；上限按字符数（非字节）。
 
 ## estcache 挑入 17l 后撤回（estcache，2026-10-05，3a）

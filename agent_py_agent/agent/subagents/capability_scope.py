@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..contracts.gates.command_policy import command_source_too_large
 from .model_capabilities import CapabilityRequest
 from .model_task import SubAgentTask
 from .utils import _merge_list
@@ -510,9 +511,12 @@ def _set_csv_constraint(target: dict[str, str], key: str, values: list[str]) -> 
         target.setdefault(key, ",".join(cleaned))
 
 
+# LLM: 申请里的 requested_commands 是模型文本、可能超长；超长时不做 shlex（慢解析会卡线程），
+#   按"无命令名"处理——fail-closed：不会判成删除类申请，授权判定保持保守。
+# 函数用途: 从一条命令文本里提取可比较的命令名；解析失败或超长时返回空串。
 def _requested_command_name(value: object) -> str:
     text = str(value or "").strip()
-    if not text:
+    if not text or command_source_too_large(text):
         return ""
     try:
         parts = shlex.split(text)

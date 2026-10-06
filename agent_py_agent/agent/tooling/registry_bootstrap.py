@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..contracts.gates.command_policy import configure_command_source_max_chars
 from ..contracts.gates.network_safety import GatewayEndpointConfig
 from ._filesystem_edit import EditFileTool
 from ._filesystem_find import FindFilesTool
@@ -48,10 +47,6 @@ def build_tool_retriever(params: Any) -> HybridToolRetriever:
 # LLM: 基础工具只在这里成批装配。
 # 函数用途: 注册所有基础工具。
 def register_base_tools(registry: Any, params: Any) -> None:
-    # LLM: 命令源长度上限是进程级安全闸门：注册入口把配置注入命令策略，所有经
-    #   evaluate_command_policy/analyze_command 的调用点（run_command、PTY、后台与插件钩子路径）
-    #   共用同一值；未注入时用默认 64K，不会出现无闸门的入口。
-    configure_command_source_max_chars(getattr(params, "command_policy_max_source_chars", None))
     _register_filesystem_tools(registry, params)
     _register_network_tools(registry, params)
 

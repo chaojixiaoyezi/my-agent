@@ -528,6 +528,9 @@ sink 只发布独立 system_message 技术提示，不修改生命周期；历�
 controlled_exec 和 `attempt/sandbox.py::run` 都是非交互批处理，spawn 显式使用 DEVNULL；不能继承
 Gateway/TUI 的 fd 0。显式命令管道/重定向仍由子 shell 建立；PTY 继续绑定独立 slave fd，MCP 使用协议管道。
 此修复不改变命令授权、输出预算、取消和进程终止证明，也不解析确认文案或自动输入 yes。
+命令正文进入策略前先过顶层命令源长度闸门（`contracts/gates/command_policy.command_source_too_large`，模块常量 64K）：
+`controlled_exec` 网关、能力申请命令名提取（identity/scope）与 patch 测试命令校验超长时不做 shlex、fail-closed 拒绝，
+避免 1MB 文本逐字符解析卡住线程（cmdcap-fix）。
 
 ## 正常接续与失败恢复
 

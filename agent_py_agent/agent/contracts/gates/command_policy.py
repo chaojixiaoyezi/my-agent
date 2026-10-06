@@ -39,46 +39,26 @@ _SHELL_EXECUTABLES = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _NESTED_SHELL_DEPTH_LIMIT_COUNT = 4
 # 单条嵌套程序的字符上限：解析是线性的，超长输入不再递归（fail-closed 给 finding）。32k 足够容纳真实包装文本。
 _NESTED_SHELL_SOURCE_MAX_CHARS = 32_768
-# 顶层命令源长度上限默认值：64K 足够容纳真实命令行（实测 shlex 解析 1KB≈0.02ms、64KB≈0.9ms、
+# 顶层命令源长度上限：64K 足够容纳真实命令行（实测 shlex 解析 1KB≈0.02ms、64KB≈0.9ms、
 # 256KB≈3.8ms、1MB≈18.4s——1MB 会卡住策略线程，必须在解析前拦截）。
-_DEFAULT_COMMAND_SOURCE_MAX_CHARS = 65_536
-# 进程级生效上限；None = 尚未由 AgentConfig 注入（用默认），0 = 不限制。
-_command_source_max_chars_override: int | None = None
-
-
-# LLM: 改变工具执行范围的开关必须可配置：工具注册入口把 AgentConfig 的值注入这里，所有经
-#   evaluate_command_policy/analyze_command 的调用点共用同一进程级上限；None 恢复默认。
-# 函数用途: 覆盖进程级顶层命令源长度上限（0 表示不限制；坏值恢复默认）。
-def configure_command_source_max_chars(value: int | None) -> None:
-    global _command_source_max_chars_override
-    if value is None:
-        _command_source_max_chars_override = None
-        return
-    try:
-        _command_source_max_chars_override = max(0, int(value))
-    except (TypeError, ValueError):
-        _command_source_max_chars_override = None
-
-
-# 函数用途: 返回当前生效的顶层命令源长度上限（0 表示不限制）。
-def command_source_max_chars() -> int:
-    if _command_source_max_chars_override is not None:
-        return _command_source_max_chars_override
-    return _DEFAULT_COMMAND_SOURCE_MAX_CHARS
+# 3a 2026-10-05 裁定：这是解析成本的资源上界，与嵌套 Shell 源的 32K 上限同类，固定为模块常量、不做配置项。
+_COMMAND_SOURCE_MAX_CHARS = 65_536
 
 
 # LLM: shlex 是逐字符纯 Python 解析（1MB≈18.4s），会卡住策略线程；str 形态的顶层命令源在解析前
 #   先按长度闸门拒绝，结构化报 COMMAND_SOURCE_TOO_LARGE；argv 形态不经过 shlex，不做此闸。
-# 函数用途: 检查顶层命令源长度，超限返回一个 COMMAND_SOURCE_TOO_LARGE finding。
-def _source_size_findings(command: object) -> tuple[CommandPolicyFinding, ...]:
-    if not isinstance(command, str):
-        return ()
-    limit = command_source_max_chars()
-    if limit <= 0 or len(command) <= limit:
-        return ()
-    return (
-        CommandPolicyFinding("COMMAND_SOURCE_TOO_LARGE", {"limit": limit, "length": len(command)}),
+#   本函数是唯一长度判定入口：命令策略两条 shlex 入口与子代理受控执行网关共用它，阈值只在这里改。
+# 函数用途: 检查命令源文本是否超过长度上限，超限返回一个 COMMAND_SOURCE_TOO_LARGE finding，否则返回 None。
+def command_source_too_large(text: object) -> CommandPolicyFinding | None:
+    if not isinstance(text, str):
+        return None
+    if len(text) <= _COMMAND_SOURCE_MAX_CHARS:
+        return None
+    return CommandPolicyFinding(
+        "COMMAND_SOURCE_TOO_LARGE",
+        {"limit": _COMMAND_SOURCE_MAX_CHARS, "length": len(text)},
     )
+
 # xargs 选项表（来源：GNU findutils xargs 手册 + macOS/BSD xargs 手册，2026-10-05 shellwrap3 逐项核对）。
 #   拆包的关键是"这个选项到底吃不吃下一个词"：吃错了就会把后面的命令当成选项值而跳过，真删就会放行。
 #   所以只认表内完整选项名；不在表里的（含 GNU 长选项缩写）一律从严给 finding——宁可多拦，不猜缩写，
@@ -253,9 +233,8 @@ def evaluate_command_policy(
     allow_shell_operators: bool = False,
     allowed_commands: Iterable[str] = (),
 ) -> CommandPolicyDecision:
-    size_findings = _source_size_findings(command)
-    if size_findings:
-        return CommandPolicyDecision(findings=size_findings)
+    if size_finding := command_source_too_large(command):
+        return CommandPolicyDecision(findings=(size_finding,))
     parsed = _parse_command_value(command)
     if parsed.findings:
         return parsed
@@ -269,12 +248,14 @@ def evaluate_command_policy(
     return CommandPolicyDecision(parsed.argv, _unique_findings(findings))
 
 
+# LLM: 只读分析入口（不执行命令）：先过长度闸门，再依次做解析、策略判定与段结构分类；解析或策略
+#   有 finding 时归为 unknown/dangerous，调用方不得把 unknown 当只读放行。
+# 函数用途: 解析命令的记号、操作符与重定向，返回命令分类与理由码。
 def analyze_command(command: object) -> CommandAnalysis:
     """Parse commands, operators and redirections; unknowns never become read-only."""
 
-    size_findings = _source_size_findings(command)
-    if size_findings:
-        return CommandAnalysis("unknown", reason_codes=tuple(item.code for item in size_findings))
+    if size_finding := command_source_too_large(command):
+        return CommandAnalysis("unknown", reason_codes=(size_finding.code,))
     parsed = _parse_command_value(command)
     if parsed.findings:
         return CommandAnalysis(
