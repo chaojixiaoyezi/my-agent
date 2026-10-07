@@ -242,13 +242,14 @@ def _superseded_by(store: LearnpackStore, order: InstallOrder) -> str:
     return f"{version}（{sha256[:12]}）"
 
 
-# LLM: 还在等用户确认的安装单：没执行过（没有 done 文件）、也没被同一个包后来的单或安装取代（_superseded_by 同一判断）。
-#   按开单序号从新到旧。只读。安装回执的 open_orders 与宿主提示都用它，让给用户的确认行对得上存储里的事实（2026-10-07 生产复测：
-#   她把早已执行过的单又交给用户）。
+# LLM: 还在等用户确认的安装单：没执行过（没有 done 文件）、没被同一个包后来的单或安装取代（_superseded_by 同一判断），而且这份
+#   字节现在没装着（entries 是调用方刚读的安装表快照；开关打开后她直接装了同一份，这张单就不用再确认）。按开单序号从新到旧。
+#   只读。安装回执的 open_orders 与宿主提示都用它，让给用户的确认行对得上事实（2026-10-07 生产复测：她把早已执行过的单又交给用户）。
 # 函数用途: 列出现在还有效、等用户确认的安装单。
-def open_orders(store: LearnpackStore) -> list[InstallOrder]:
+def open_orders(store: LearnpackStore, entries: tuple = ()) -> list[InstallOrder]:
     rows = [order for order in store.all_orders()
-            if store.order_outcome(order.order_id) is None and not _superseded_by(store, order)]
+            if store.order_outcome(order.order_id) is None and not _superseded_by(store, order)
+            and getattr(installed_entry(entries, order.package_id), "package_sha256", None) != order.sha256]
     return sorted(rows, key=lambda order: order.seq, reverse=True)
 
 

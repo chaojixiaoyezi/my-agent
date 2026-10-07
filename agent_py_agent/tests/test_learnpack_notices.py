@@ -7,7 +7,7 @@
 /plugins 写法；装失败不排。真实回合（假模型 + 真实工具循环）里装包后，提示进入同一会话。
 开关关着她开安装单时（第 2 项），宿主把现在还有效的确认行排成一条提示（来源 learnpack:orders、码 orders_open），以这条为准：执行过的单、
 被同一个包后来的单取代的单都不列；最新的在前、最多列 3 张，多的只报张数；新单和她做的已装包同领域时说怎么合并；回执 open_orders
-列同一批单，message 要她不要再给以前对话里的旧行。
+列同一批单，message 要她不要再给以前对话里的旧行；同一份字节已经装着的单（开关打开后她直接装了）也不再列。
 """
 from __future__ import annotations
 
@@ -88,6 +88,16 @@ def test_an_order_notice_lists_only_lines_that_still_work_newest_first(tmp_path,
         f"poem-notes 0.2.0：/plugins#poem-notes 安装 {ids[2]}（还有 1 张更早的单没列出）。"
         "新做的 drama-pipeline 和她做的 drama-scenes 0.1.0 同领域，想合并就别发它那行，跟她说“把 drama-pipeline 并进 drama-scenes”。")
     assert dict(notice.details)["order_ids"] == ",".join(ids) and dict(notice.details)["open_count"] == "4"
+
+
+def test_an_order_whose_bytes_are_already_installed_no_longer_waits(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    sha = _make(agent, "drama-scenes", "0.1.0", ["短剧"])
+    ordered = _install(agent, sha)[1]
+    assert [row["order_id"] for row in ordered["open_orders"]] == [ordered["order_id"]]
+    _switches(agent, pack=True)
+    body = _install(agent, sha)[1]
+    assert body["state"] == STATE_ENABLED and body["open_orders"] == [], "开关打开后她直接装了同一份，这张单不用再确认"
 
 
 def test_wording_for_plugins_waiting_for_the_user_and_failures(tmp_path, monkeypatch):
