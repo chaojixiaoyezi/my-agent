@@ -6,6 +6,7 @@
 # typed overflow携带原生IR与精确插话ID，下一轮重建权限/前缀，不能用归档preview替代原完整工具回执。
 # 决策实验对照记录由能力观察出口拆出写入请求记录；回合正常收尾后才补写实际工具用量并在 apply 授权内检查晋升。
 # 新晋升提示并入当轮原 host_notice 流和 final；开轮旧提示不重发，联测 test_decision_experiment_notice 与 test_host_notices。
+# 本轮工具排的提示（details.turn_request_id 是本请求）同批发布；别的来源中途到的仍留下一轮，联测 test_host_notices。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -47,6 +48,7 @@ from ..conversation.host_notices import (
     host_notice,
     host_notices_from,
     pending_host_notices,
+    turn_host_notices,
 )
 from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
@@ -450,8 +452,23 @@ def _execute_gateway_conversation_turn(
     promoted = request_experiment_records.finish_decision_experiment_turn(context, result)
     # 能力包宿主核验结论（核验账本的结构化事实）和实验晋升提示同一批发布、同一批随最终回复提交。
     promoted += queue_pack_verification_notice(context, conversation, result)
+    promoted += _turn_tool_notices(context, conversation, notices + promoted)
     notices += _publish_gateway_host_notices(context, conversation, notices=promoted)
     return request_history.persist_gateway_assistant_result(context, conversation, result, host_notices=notices)
+
+
+# LLM: 只读；本轮工具经 queue_turn_host_notice 排的提示（details.turn_request_id 等于本请求编号），去掉本轮已发布的。
+#   别的来源在回合中途排的提示不带本请求编号，照旧留给下一轮（HOST_NOTICES.md 第 3 节）。
+# 函数用途: 挑出要并进收尾批次、随当轮回复一起显示的工具提示。
+def _turn_tool_notices(
+    context: request_context.GatewayAskRunContext,
+    conversation: request_context.GatewayConversationContext,
+    published: tuple[HostNotice, ...],
+) -> tuple[HostNotice, ...]:
+    store = getattr(context.agent, "conversation_store", None)
+    seen = {notice.notice_id for notice in published}
+    rows = turn_host_notices(store, conversation.thread_id, context.request_id) if store is not None else ()
+    return tuple(notice for notice in rows if notice.notice_id not in seen)
 
 
 # LLM: 开轮读取原队列，收尾只发布传入的新提示；不取走，最终回复提交才按编号消费，失败留下一轮。没有流也返回同批提示。

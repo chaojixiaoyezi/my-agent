@@ -41,7 +41,7 @@
 - **模型看不到**：`models.MODEL_HIDDEN_THREAD_FIELDS` 统一列出不进模型上下文的线程字段（原有的两个显示遥测字段加上这个），`store.context_bundle_report` 和 `background_context._minimal_context_bundle` 都按它剔除。提示也不拼进最终消息正文。
 - **发布**：Gateway 前台回合在用户消息落账后、模型执行前（`request_execution._publish_gateway_host_notices`），把此刻待送达的提示用 `stream_writer.write_host_notice_events` 发成 `host_notice` 流事件。这一步只读，不取走。
 - **提交即已读**（集成者定的 B 口径）：
-  - `request_history.persist_gateway_assistant_result` 在正常回复提交时，按本轮发布过的编号取走（`take_host_notices`）；本轮期间新到的提示留给下一轮。
+  - `request_history.persist_gateway_assistant_result` 在正常回复提交时，按本轮发布过的编号取走（`take_host_notices`）；本轮期间新到的提示留给下一轮（例外：本轮工具排的提示，见下一条）。
   - 取走的提示同时写进最终消息元数据 `host_notices` 和 `channel_delivery.host_notices`。写入失败走补交时，元数据也一起带上。
   - 停止或失败的回合不取走，下一次回复还会附上。
   - 理由：最终回复本身会重试到送达；如果连回复都永久失败了，用户缺的是整条回复，结论仍可以从源头（如 `/effort`）查到。以后真有“必须确认送达”的提示，再在同一个字段上加确认。
@@ -52,6 +52,12 @@
   - TUI 发起窗口：`tui_runtime._publish_host_notice` 把 `host_notice` 事件画成 `system_message` 块（灰色 `◇` 行）。块号带请求号和提示编号，重放不重复。
   - 同会话其他窗口：`foreground_transcript.write_host_notice` 同步成 system_message 显示事件，并进入最终快照。
   - 历史回放：`history_display._host_notice_events` 从最终消息元数据重建，挂在同片用户消息那一行，排在用户消息之后、回复之前。带快照的最终消息里已经有同一事件，不重复生成。
+- **本轮工具提示**（2026-10-07，learnpack 第五轮）：工具用 `queue_turn_host_notice(agent, source, code, text, details=)` 排提示。
+  - 会话编号只读本轮 task_attributes 的 conversation_thread_id，请求编号只读本轮运行参数 request_id，记进 `details.turn_request_id`；
+    没有会话时不排（返回 None）。运行参数按线程挂在 agent 上，所以只能在工具执行时调用，不能在模型生成回调里调。
+  - `request_execution._turn_tool_notices` 在收尾批次里并入 `turn_request_id` 等于本请求编号的提示：和实验晋升、能力包核验同一批发布（在工具之后）、同一 final 提交。
+  - 别的来源在回合中途排的提示不带本请求编号，照旧留给下一轮；后台续跑回合里工具排的提示也留给下一条前台回复。
+  - 第一个使用方：learnpack 她自己装包（来源 `learnpack:<包名>`，同一个包只留最新一条）和开安装单（来源 `learnpack:orders`，列出当时全部还有效的确认行）。
 - **来源清理**：使用方可以用 `clear_host_notices(store, thread, source)` 清掉某个来源的待送达提示。智能程度检测在两种情况下清：`/effort` 查看结论时，以及开始新一轮检测时。
 - **定时任务受阻**（2026-09-29）：一轮定时执行没做完、又没有任何后续工作时，`scheduler/active_run_closeout._block_task` 以来源
   `scheduler:<job_id>`、码为结算码（如 `SCHEDULED_TASK_TOOL_OUTCOME_UNKNOWN`、`SCHEDULED_TASK_FOLLOW_UP_UNREADABLE`）排一条提示，说明这一轮已停下、需要人工确认，

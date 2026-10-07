@@ -197,11 +197,11 @@ class LearnpackStore:
     # LLM: 只读；读不出的单子跳过。用于判断一张单是不是已被同一个包后来的单取代。
     # 函数用途: 列出某个包的全部待确认安装单。
     def orders_for(self, package_id: str) -> list[InstallOrder]:
-        return [order for order in self._all_orders() if order.package_id == package_id]
+        return [order for order in self.all_orders() if order.package_id == package_id]
 
-    # LLM: 只读；读不出的单子跳过。
+    # LLM: 只读；读不出的单子跳过。learnpack_service.open_orders 据此列出还有效的单。
     # 函数用途: 列出全部待确认安装单。
-    def _all_orders(self) -> list[InstallOrder]:
+    def all_orders(self) -> list[InstallOrder]:
         paths = sorted((self.root / "orders").glob("lp-*.json"))
         orders = [self.order(path.name[:-len(".json")]) for path in paths if not path.name.endswith(".done.json")]
         return [order for order in orders if order is not None]
@@ -253,7 +253,7 @@ class LearnpackStore:
     # LLM: 只在 seq.json 不存在或读坏时用；只读。
     # 函数用途: 找出已有单子与安装记录里最大的序号。
     def _max_recorded_seq(self) -> int:
-        seqs = [order.seq for order in self._all_orders()]
+        seqs = [order.seq for order in self.all_orders()]
         seqs += [row["seq"] for row in self.installs() if isinstance(row.get("seq"), int)]
         return max(seqs, default=0)
 

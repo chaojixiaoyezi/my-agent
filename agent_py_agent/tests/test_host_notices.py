@@ -8,6 +8,8 @@
 - 显示：飞书在同一条回复正文前加“【提示】”；TUI 发起窗口与同会话窗口画成灰色系统行；历史回放排在用户消息之后、
   回复之前，有快照的回合不重复。
 - 智能程度检测：结论排进发起检测的会话，/effort 看过、或重新开始检测时清掉。
+- 本轮工具排的提示（queue_turn_host_notice，带本轮请求编号）在本轮回复之后发布、随本轮回复提交；别的来源回合中途到的
+  提示仍留给下一轮；没有会话时不排。
 全部用 echo 后端或假传输，零网络，不读真实配置。
 """
 from __future__ import annotations
@@ -21,7 +23,8 @@ from agent_py_agent.agent.adapter.manager import (
     _GatewayReplyPollClient,
     _reply_text_with_host_notices,
 )
-from agent_py_agent.agent.backends.base import EchoBackend
+from agent_py_agent.agent.agent_core import _tool_loop_service
+from agent_py_agent.agent.backends.base import EchoBackend, ModelResponse
 from agent_py_agent.agent.conversation.background_context import _minimal_context_bundle
 from agent_py_agent.agent.conversation.background_transcript import (
     read_background_transcript_events,
@@ -35,6 +38,7 @@ from agent_py_agent.agent.conversation.host_notices import (
     host_notices_from,
     pending_host_notices,
     queue_host_notice,
+    queue_turn_host_notice,
     take_host_notices,
     with_host_notice_lines,
 )
@@ -167,6 +171,44 @@ def test_gateway_turn_shows_notice_first_commits_it_once_and_keeps_it_from_the_m
     _third_id, third, third_chunks = _ask(tmp_path, agent, paths, "第三句")
     assert "host_notices" not in third["channel_delivery"] and all(row.get("kind") != "host_notice" for row in third_chunks)
     assert all(_TEXT not in item for item in seen)  # 下一轮模型同样看不到
+
+
+def test_a_notice_queued_by_this_turn_shows_after_the_reply_and_other_sources_wait(tmp_path, monkeypatch):
+    agent, paths = _gateway_agent(tmp_path)
+    _ask(tmp_path, agent, paths, "第一句")
+    store, thread_id = agent.conversation_store, _thread_id(agent)
+    tool, queued, calls = agent.tools.tools["list_files"], {}, []
+    original_execute = tool.execute
+
+    # 本轮一个真实工具调用里排提示（工具执行时才有本轮运行参数），同时有别的来源（后台任务）在回合中途排了一条。
+    def execute(params):
+        queued["turn"] = queue_turn_host_notice(agent, "learnpack:drama-pipeline", "self_installed", "她自己装上了能力包")
+        queued["other"] = host_notice("scheduler:job-1", "finished", "后台任务结束了")
+        assert queue_host_notice(store, thread_id, queued["other"])
+        return original_execute(params)
+
+    # 首次生成发起一次真实原生工具调用（经原工具循环执行），第二次给出最终答复。
+    def generate(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return ModelResponse(text="", backend="fixture",
+                                 tool_use_blocks=[{"id": "call-1", "name": "list_files", "input": {"path": "."}}])
+        return ModelResponse(text="看完了", backend="fixture")
+
+    monkeypatch.setattr(tool, "execute", execute)
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
+    request_id, response, chunks = _ask(tmp_path, agent, paths, "第二句")
+    turn = queued["turn"]
+    assert turn is not None and dict(turn.details)["turn_request_id"] == request_id
+    kinds = [row.get("kind") for row in chunks]
+    assert [row["notice"] for row in chunks if row.get("kind") == "host_notice"] == [turn.to_dict()]
+    assert kinds.index("host_notice") > max(at for at, kind in enumerate(kinds) if kind == "tool_progress"), "收尾才发布，排在工具之后"
+    assert response["ok"] and response["channel_delivery"]["host_notices"] == [turn.to_dict()]
+    assert pending_host_notices(store, thread_id) == (queued["other"],), "别的来源中途到的留给下一轮"
+    monkeypatch.undo()
+    _third_id, third, _third_chunks = _ask(tmp_path, agent, paths, "第三句")
+    assert third["channel_delivery"]["host_notices"] == [queued["other"].to_dict()]
+    assert queue_turn_host_notice(SimpleNamespace(), "x", "y", "没有会话") is None
 
 
 def test_failed_turn_keeps_the_notice_for_the_next_reply(tmp_path, monkeypatch):

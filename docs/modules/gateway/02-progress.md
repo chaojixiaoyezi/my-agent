@@ -1580,3 +1580,10 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **验证**：见 `TESTS.md` 同名节（7 新用例、3 变异全杀、58 相关文件、guards9）。
 - **初审修正（tresume2，10-05，`worker/ds10-tresume-fix`）**：用满（`count >= max_count`）时失败答复附 `PROVIDER_RESUME_LIMIT_NOTICE`（“这一轮被模型接口故障反复打断，已停止自动续跑；发‘继续’可以接着做。”，TUI/IM 同源 user_error/error）；重排写盘失败退回正常归档前清掉 `provider_transient_resume` 标记；删 `recovery.py` 一段重复注释。验证见 TESTS.md 同名节（12 passed、m6/m7 变异全杀）。
 - **重排失败退回的插话收口（tresume3，10-05，`worker/ds10-tresume3`）**：重排失败退回正常归档前显式收口本回合插话（`_settle_fallback_turn_guidance`，`reject_pending(request_id, reject_reserved=True)`），覆盖归档失败（读不到请求文件）时 terminalize 收口不跑的形态；重排成功路径不变。验证见 TESTS.md 同名节。
+
+## 本轮工具提示随当轮回复发布（learnpack 第五轮，3a，2026-10-07，分支 `claude/3a-learnpack-prodfix`）
+
+- **背景**：learnpack 生产复测里她不转告安装回执里的提醒；自动装开关开着时，用户可能不知道她陆续装了哪些包。宿主提示原来只在开轮发布待送达队列、收尾发布本轮结构化事实（实验晋升、能力包核验），工具在回合中排的提示要等到下一轮才显示。
+- **改动**：`conversation/host_notices.queue_turn_host_notice(agent, source, code, text, details=)` 给工具用：会话编号只读本轮 task_attributes，请求编号只读本轮运行参数 request_id，记进 details.turn_request_id；`request_execution._turn_tool_notices` 把这些提示并进收尾批次（同一 host_notice 流事件、同一 final 提交，提交即已读）。别的来源（定时任务、后台检测）回合中途到的提示不带本请求编号，仍按原规则留给下一轮；后台续跑里工具排的提示也留给下一条前台回复。
+- **使用方**：learnpack 她自己装包、开安装单时的宿主提示（`capability/learnpack_notices`）。
+- **验证**：`test_host_notices.py` 新用例（真实工具调用里排提示：当轮在工具之后发布、进 channel_delivery、提交后不再待送达；同轮别的来源的提示留到下一轮）；变异见 TESTS.md learnpack 第五轮。

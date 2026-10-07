@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 945,
+  "count": 947,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1202,6 +1202,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "同领域提醒里每个包最多列出的共同关键词个数。"
+    },
+    {
+      "name": "ORDER_LIST_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_notices.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "安装单提示里最多列出的确认行条数。"
     },
     {
       "name": "_MAX_BUILD_SCAN_COUNT",
@@ -5898,6 +5906,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "密钥检查命中时每个文件最多列出的行号个数。"
+    },
+    {
+      "name": "_OPEN_ORDER_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/tooling/package_install_tool.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "回执 open_orders 里最多列出的还有效的安装单张数（最新的在前）。"
     },
     {
       "name": "_FIREWALL_NOT_RUNNING",

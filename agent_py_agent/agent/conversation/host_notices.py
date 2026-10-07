@@ -2,6 +2,8 @@
 #   不为某个来源专设），由同一会话下一次前台回复提交规范最终消息时按编号取走，放进最终消息元数据 host_notices 与
 #   Gateway 结果 channel_delivery.host_notices；提交即算已读（集成者 2026-09-27 定的 B 口径）。模型上下文不含它
 #   （models.MODEL_HIDDEN_THREAD_FIELDS）。正文由宿主生成，source / code 是结构化事实，同一来源的新提示替换旧的。
+#   本轮工具用 queue_turn_host_notice 排的提示在 details 里带本轮 Gateway 请求编号（turn_request_id），由 request_execution
+#   收尾时随当轮回复一起发布（turn_host_notices）；别的来源在回合中途到的提示仍留给下一轮。
 #   改动须同步 test_host_notices.py、gateway_parts/request_history、stream_writer、adapter/manager 与各显示出口。
 # 模块用途: 保存、读取、取走与清除会话的宿主提示，并把提示渲染成 IM 正文前的提示行。
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from uuid import uuid4
+
+from .authority import current_conversation_task_attributes
 
 # 每个会话最多暂存的提示条数（同一来源只留最新一条，超出时丢最旧的）；正文与名字的长度上限。
 HOST_NOTICE_LIMIT_COUNT = 5
@@ -19,6 +23,8 @@ _NAME_LIMIT_CHARS = 64
 # 宿主提示详情最多 200 字符：超长截断，保持提示紧凑。
 _DETAIL_LIMIT_CHARS = 200
 _LINE_PREFIX = "【提示】"
+# 本轮工具排的提示在 details 里记本轮 Gateway 请求编号的键名；收尾按它挑出要随当轮回复发布的提示。
+TURN_REQUEST_DETAIL = "turn_request_id"
 
 
 # LLM: 四个字段都是宿主写入的纯文本；notice_id 是取走与去重的唯一依据，source / code 供测试和同来源替换，不参与模型输入。
@@ -97,6 +103,29 @@ def queue_host_notice(store: object, thread_id: str, notice: HostNotice, *, repl
     return _update(store, thread_id, update)
 
 
+# LLM: 给工具用：会话编号只读本轮 task_attributes 的结构化 conversation_thread_id，请求编号只读本轮运行参数 request_id（Gateway
+#   前台回合就是 Gateway 请求编号），不从参数或正文接收。有请求编号时记进 details.turn_request_id，收尾随当轮回复发布；
+#   没有（比如后台续跑）就和普通提示一样留到下一条前台回复。没有会话或写不进去时返回 None，不抛异常。副作用：改写会话线程记录。
+# 函数用途: 让工具把"用户必须知道的事"排成本轮的宿主提示，随这一轮回复直接显示给用户，不经模型转告。
+def queue_turn_host_notice(agent: object, source: str, code: str, text: str, *,
+                           details: Mapping[str, object] | None = None) -> HostNotice | None:
+    thread_id = str(current_conversation_task_attributes(agent).get("conversation_thread_id") or "").strip()
+    request_id = str(getattr(getattr(agent, "_current_run_params", None), "request_id", "") or "").strip()
+    if not thread_id:
+        return None
+    facts = {**(details or {}), **({TURN_REQUEST_DETAIL: request_id} if request_id else {})}
+    notice = host_notice(source, code, text, details=facts)
+    return notice if queue_host_notice(getattr(agent, "conversation_store", None), thread_id, notice) else None
+
+
+# LLM: 只读；挑出 details.turn_request_id 等于给定请求编号的待送达提示（本轮工具排的），请求编号为空时返回空。
+# 函数用途: 读出本轮工具排的、要随当轮回复一起发布的提示。
+def turn_host_notices(store: object, thread_id: str, request_id: str) -> tuple[HostNotice, ...]:
+    if not request_id:
+        return ()
+    return tuple(row for row in pending_host_notices(store, thread_id) if dict(row.details).get(TURN_REQUEST_DETAIL) == request_id)
+
+
 # 函数用途: 读取一个会话的待送达提示；读不到时返回空。只读。
 def pending_host_notices(store: object, thread_id: str) -> tuple[HostNotice, ...]:
     try:
@@ -155,12 +184,15 @@ def with_host_notice_lines(content: str, notices: object) -> str:
 
 __all__ = [
     "HOST_NOTICE_LIMIT_COUNT",
+    "TURN_REQUEST_DETAIL",
     "HostNotice",
     "clear_host_notices",
     "host_notice",
     "host_notices_from",
     "pending_host_notices",
     "queue_host_notice",
+    "queue_turn_host_notice",
     "take_host_notices",
+    "turn_host_notices",
     "with_host_notice_lines",
 ]

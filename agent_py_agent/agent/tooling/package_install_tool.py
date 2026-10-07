@@ -3,7 +3,9 @@
 #   开关开：宿主走管理员同一串 /plugins 命令装上并启用，代确认范围只取插件开关（运行她自己做的程序）；
 #   开关关：只开一张待确认安装单，回执给出用户要原样发的那一行确认，什么都不装。
 #   回执里的开关事实、命令原文都是给模型照抄提醒用户的；已经装着她做的同领域能力包时（learnpack_domain 同一判断）回执带
-#   same_domain_installed 与 user_notice，开单时提醒她先问用户（生产复测：她看到打包提醒也照装不误）。
+#   same_domain_installed 与 user_notice，开单时提醒她先问用户（生产复测：她看到打包提醒也照装不误）。开关开着她自己装上时，
+#   宿主还直接给用户排一条本轮提示（learnpack_notices，不经她转告），回执 host_notice_queued 写明排上没有。开单时宿主同样把现在
+#   全部还有效的确认行排成提示（以这条为准），回执 open_orders 列出这些单，免得她把执行过或作废的旧行再交给用户。
 #   改字段要同步 learn-external-agent 技能、test_learnpack_install 与 test_learnpack_same_domain。
 # 模块用途: 让 my-agent 按你的开关把她打的包装上，或者准备好一行确认交给你。
 from __future__ import annotations
@@ -21,15 +23,17 @@ from ..capability.learnpack_installer import (
     STATE_UNKNOWN,
     InstallConsent,
 )
+from ..capability.learnpack_notices import queue_orders_notice, queue_self_install_notice
 from ..capability.learnpack_service import (
     REFUSED_STATES,
     install_now,
     installed_entry,
     learnpack_owner,
+    open_orders,
     ownership_problem,
     package_runs_programs,
 )
-from ..capability.learnpack_store import BuildRecord, LearnpackStore
+from ..capability.learnpack_store import BuildRecord, InstallOrder, LearnpackStore
 from ..capability.package_build import KIND_CAPABILITY_PACK
 from ..capability.self_install_switches import (
     PACK_SELF_INSTALL_KEY,
@@ -52,6 +56,8 @@ from .models import (
 )
 
 PACKAGE_INSTALL_TOOL = "package_install"
+# 回执 open_orders 里最多列出的还有效的安装单张数（最新的在前）。
+_OPEN_ORDER_LIMIT_COUNT = 5
 
 
 # LLM: 只认本机管理员；包身份只认 learnpack 存储；开关现读。有副作用（开关开着时经宿主命令安装、启用，或写安装单）。
@@ -111,12 +117,16 @@ class PackageInstallTool(BaseTool):
         facts = {"package": _package_facts(store, record), "installed_now": _installed_facts(existing),
                  "switches": switch_facts(switches), "same_domain_installed": [pack.to_payload() for pack in domain]}
         if not _can_install_now(record, switches, facts["package"]["runs_programs"]):
-            return _order_receipt(store, record, facts, domain)
+            payload = _order_payload(store, record, facts, domain)
+            payload["host_notice_queued"] = queue_orders_notice(self._agent, record, payload["open_orders"], domain)
+            return _ok(payload)
         source = {"switch_capability_pack": switches.capability_pack, "switch_plugin": switches.plugin,
                   "config_version": switches.config_version}
         outcome = install_now(self._agent, record, InstallConsent(run_programs=switches.plugin, user_session=False), source)
         payload = {**facts, "state": outcome.state, "message": outcome.message, "next_command": outcome.next_command,
                    "request_ids": list(outcome.request_ids), "manage_commands": _manage_commands(record),
+                   "host_notice_queued": queue_self_install_notice(self._agent, record, outcome, domain),
+                   "open_orders": _open_order_rows(store),
                    **_notice(domain, record, installed=True)}
         if outcome.state not in {STATE_ENABLED, STATE_NEEDS_USER}:
             return _failure(outcome, payload)
@@ -148,9 +158,10 @@ def _notice(domain: list, record: BuildRecord, *, installed: bool) -> dict[str, 
 
 
 # LLM: 开关关着：开单，回执给确认行与"以后都让她装"的开关命令；什么都不装。已经装着她做的同领域能力包时，message 先要求她问用户
-#   并进去还是单独成包、用户说单独成包再给确认行，并带 user_notice 原样转告。有写文件副作用（安装单）。
-# 函数用途: 生成待确认安装单回执。
-def _order_receipt(store: LearnpackStore, record: BuildRecord, facts: dict, domain: list) -> ToolHandlerOutcome:
+#   并进去还是单独成包、用户说单独成包再给确认行，并带 user_notice 原样转告。open_orders 是开单后全部还有效的单（刚开的在前），
+#   message 要求确认行只用这次回执给的。有写文件副作用（安装单）。
+# 函数用途: 开单并组装待确认安装单回执的内容。
+def _order_payload(store: LearnpackStore, record: BuildRecord, facts: dict, domain: list) -> dict:
     order = store.create_order(record)
     key = PACK_SELF_INSTALL_KEY if record.kind == KIND_CAPABILITY_PACK else PLUGIN_SELF_INSTALL_KEY
     switch_on = facts["switches"][key]
@@ -164,16 +175,18 @@ def _order_receipt(store: LearnpackStore, record: BuildRecord, facts: dict, doma
     payload = {**facts, "state": "awaiting_user_confirmation", "order_id": order.order_id,
                "user_confirm_command": confirm_line(record, order.order_id),
                "enable_auto_install_command": switch_command(key if not switch_on else PLUGIN_SELF_INSTALL_KEY, True),
+               "open_orders": _open_order_rows(store),
                "message": f"{reason}。{current}{ask}把 user_confirm_command 原样给用户：他发回来才装，这张单隔多久都有效、只执行一次；"
-                          "想以后都让你自己装，给他 enable_auto_install_command。",
+                          "想以后都让你自己装，给他 enable_auto_install_command。确认行只用这次回执给的（user_confirm_command 和 "
+                          "open_orders 里的），以前对话里给过的旧行可能已经执行过或作废了，不要再给。",
                **_notice(domain, record, installed=False)}
-    return _ok(payload)
+    return payload
 
 
 # LLM: 用户确认行的唯一拼法；单号由宿主生成。能力包用 /plugins#<包名> 安装 <单号>，插件用 /plugins confirm <单号>（两种写法宿主
 #   都认，按用户"能力包用 #、插件用 @"的分法给）。纯函数。
 # 函数用途: 给出用户确认某张安装单要发的那一行。
-def confirm_line(record: BuildRecord, order_id: str) -> str:
+def confirm_line(record: BuildRecord | InstallOrder, order_id: str) -> str:
     if record.kind == KIND_CAPABILITY_PACK:
         return f"/plugins#{record.package_id} 安装 {order_id}"
     return f"/plugins confirm {order_id}"
@@ -196,6 +209,15 @@ def _installed_facts(existing: object) -> dict[str, object] | None:
     if existing is None:
         return None
     return {"version": existing.manifest.version, "sha256": existing.package_sha256, "enabled": bool(existing.enabled)}
+
+
+# LLM: 只读；learnpack_service.open_orders 同一判断（没执行、没被取代），最新的在前，最多列 _OPEN_ORDER_LIMIT_COUNT 张；每行带
+#   用户要发的确认行原文。
+# 函数用途: 回执里"现在还有效、等用户确认的单"。
+def _open_order_rows(store: LearnpackStore) -> list[dict[str, object]]:
+    return [{"order_id": order.order_id, "package_id": order.package_id, "version": order.version, "kind": order.kind,
+             "created_at": order.created_at, "confirm_line": confirm_line(order, order.order_id)}
+            for order in open_orders(store)[:_OPEN_ORDER_LIMIT_COUNT]]
 
 
 # LLM: 只读打包记录与包清单。

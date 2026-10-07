@@ -242,6 +242,16 @@ def _superseded_by(store: LearnpackStore, order: InstallOrder) -> str:
     return f"{version}（{sha256[:12]}）"
 
 
+# LLM: 还在等用户确认的安装单：没执行过（没有 done 文件）、也没被同一个包后来的单或安装取代（_superseded_by 同一判断）。
+#   按开单序号从新到旧。只读。安装回执的 open_orders 与宿主提示都用它，让给用户的确认行对得上存储里的事实（2026-10-07 生产复测：
+#   她把早已执行过的单又交给用户）。
+# 函数用途: 列出现在还有效、等用户确认的安装单。
+def open_orders(store: LearnpackStore) -> list[InstallOrder]:
+    rows = [order for order in store.all_orders()
+            if store.order_outcome(order.order_id) is None and not _superseded_by(store, order)]
+    return sorted(rows, key=lambda order: order.seq, reverse=True)
+
+
 # LLM: 她在这个包名下装上过（结果进过安装表：已启用或停在启用确认）的各个版本，按每个版本第一次装上的序号排先后；只认
 #   learnpack 存储里摘要与清单对得上、包名相同的。"上一版"按这个顺序取、不按最后一条记录，重新装回旧版后也不会来回跳（复审）。
 #   只读。打包回执的"同号提醒"也只看这些版本（capability/learnpack_build_notes）。
@@ -432,6 +442,7 @@ __all__ = [
     "learnpack_command",
     "learnpack_manager",
     "learnpack_owner",
+    "open_orders",
     "outcome_reply",
     "ownership_problem",
     "package_runs_programs",
