@@ -10,6 +10,7 @@
   - `test_pack_commands.py`：`/plugins#` 停用、删除的回执以"能力包已停用 / 能力包已卸载"开头；直接敲 `/plugins disable` 照旧是"插件已停用"。
   - `test_learnpack_merge.py::test_latin_only_keywords_for_a_chinese_pack_are_flagged`——说明是中文、关键词全是英文时给 `PACKAGE_BUILD_KEYWORDS_SCRIPT`（不挡打包）；有一个中文关键词、或说明本身是拉丁字母都不提醒。造包辅助函数加 `description` 参数。
 - **定向结果**：打包、打包工具、learnpack 整组、`/plugins#`、学习与写插件技能、插件管理/卸载/停用/启用/配置/老格式管理、`/plugins` 聊天控制、清单 v8、默认收起、工具预检、控制台打包、飞书适配器、常量目录共 24 个文件 + 14 个守卫：743 passed / 0 skipped / 0 failed。常量目录重新生成（941 → 944 项）。
+- **Linux 通道**：全量 12 片（Docker，py3.12）在 d6134d17b 上 29433 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，在最终提交 40960b8fa 上 29434 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，两次都 12/12 rc=0。证据：claude-tools/linux-lane-d6134d17b/、linux-lane-40960b8fa/（totals.json、out-0..11.txt、rc.txt）。
 - **变异**：19 个变异（关掉字段核对、去掉 capability 提示、平台/补空字段/v8 订阅键不再可省、缺字段不报、不带校验原因、同领域提醒不出、不按 casefold 比、别处的包或同名包也算同领域、卸载与停用称呼写死"插件"、能力包命令不传称呼、管理命令不把称呼传给排版、关键词文字提醒不出、有中文关键词或说明是拉丁字母也提醒、非拉丁判断失效）19/19 被杀（只认 pytest rc=1）。
 
 ## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–23:24 PDT，3a，被测提交 `fd45290e0`，补跑 `c42700a3e`）
