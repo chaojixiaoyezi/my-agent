@@ -1,5 +1,20 @@
 # 测试与发布验收
 
+## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–22:56 PDT，3a，被测提交 `fd45290e0`）
+
+- **跑法**：用户点头后跑完整 4 次。两个隔离根（各自 home、私有端口 8441/8442、`env -i`），模型目录只放 MiniMax-M2.7；样本是本机评测原版短剧
+  `short-drama-skills`、长篇小说 `chinese-longnovel-skill`（都是 MIT，工作区只读）。TUI 一路用 tmux 驱动；IM 一路用飞书适配器同一套载荷与身份头
+  提交到隔离 Gateway 的 `/ask`（本机飞书应用绑在生产 8420，隔离不了飞书服务器），先 `/admin <密码>` 绑定管理员。每遍只发一句学习提问。
+- **结果**：3 遍通过、1 遍没通过。
+  - TUI 开关关（短剧）：只开单、回复里原样给出 `/plugins#… 安装 <单号>` → 照抄发回 → 装上 → 列表、查看、停用、删除都对。
+  - TUI 开关开（小说）：**没通过**。她派了 5 个子代理写包文件；子代理写完后的后台续跑用的是 `SUBAGENT_INTEGRATION_ALLOWED_TOOLS`（18 个工具，
+    没有 `package_build`、`package_install`、`tool_search`），连续 3 次 `TOOL_UNAVAILABLE` 后回合被停，没打包、没安装。
+  - IM 开关关（短剧）：只开单 → IM 发回确认行 → 装上 → 列表、查看、停用、删除都对；重发旧确认行回 `PACKAGE_INSTALL_ORDER_USED` 并回放当时结果。
+  - IM 开关开（小说）：直接装上并启用（不开单）→ 列表、查看、停用、删除都对。
+- **用量**：输入合计 7,192,789 token（缓存命中约 81%），输出 122,677 token；没碰到额度错误。密钥与管理员密码在证据和网关日志里出现 0 次。
+- **待定**：第 2 遍的修法（A 放进后台续跑目录 / B 只改技能让她在自己这一轮打包），用户定了再修，修好后补跑这一遍。另有三处小问题记在设计台账。
+- **证据**：`~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`（README、每遍结构化步骤、屏幕记录、IM 回执、用量汇总、协议违规事件、脚本）。
+
 ## learnpack 第 7 步：整体验证（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
 
 - **整条链路**：`agent_py_agent/tests/test_learnpack_e2e.py`（3 条）——假模型驱动真实 SimpleAgent 对话回合，工具、`/plugins#` 与 `/plugins` 命令都是真的；用户命令走 TUI（PluginManagement）和飞书私聊（网关会话控制）两个入口。
