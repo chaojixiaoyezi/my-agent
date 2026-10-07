@@ -11,6 +11,7 @@
   - `test_plugin_m1_joint_tool_gate::test_recent_decisions_are_rendered_newest_first`：直接调请求处理函数不经 worker 的终态迁移，会话执行车道没结束，第二轮要等租约约 90 秒过期（本机 90.25 秒才过，GitHub 按 60 秒超时判失败）；每轮后用产品同一个收尾函数 `recovery._finish_gateway_conversation_claim` 结束车道，现在 0.42 秒。
   - `test_compact_text_source::test_many_message_summary_avoids_whole_json_copy`：tracemalloc 也算同进程其它线程的分配，GitHub 上峰值约整份 JSON 的 0.51（本机 0.38），上限 1/2 偶发越线；改为 3/4，整份复制（≥1.0）照样抓得住。
   - `test_slow_model_liveness::test_heartbeat_only_activity_keeps_client_waiting`：心跳 0.06 秒、判死窗口 0.12 秒，慢机器偶发被判死；改为心跳 0.05 秒共约 1 秒、窗口 0.4 秒（窗口仍远短于总时长，心跳不算活动就会判死）。
+- **Test 工作流时间上限 60 → 90 分钟**：用例增多后单个 job 实测 53–60 分钟，10-07 两次推送的三个版本都在 60 分钟整被平台按超时取消（结论是"cancelled"，不是用例失败），用例全过也绿不了。
 - **复现与验证**：测试机（openEuler x86_64，非 root 用户、Python 装在家目录，与 GitHub runner 同类）复现了沙箱用例、两轮车道卡住与读取方打平；本机 Python 3.10 虚拟环境复现了 3.10 失败；本机用插件模拟 Windows（不支持 dir_fd、打开目录即 PermissionError）复现了 Windows 的 11 条，修复后 Cross-platform guard 的 7 个测试文件全过。变异：读取方打平看遍历顺序、范围表不排除、私有目录不走可移植退路 3/3 被杀；3.10 上撤掉摘要修复则漂移用例失败。
 
 ## learnpack 生产测试发现的问题与修复（2026-10-07，3a，分支 `claude/3a-learnpack-prodfix`）
