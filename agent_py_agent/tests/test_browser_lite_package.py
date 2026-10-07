@@ -272,7 +272,9 @@ def _observation_meta(key: str, generation: str) -> dict:
 @needs_browser
 def test_candidates_resolve_by_key_and_generation_and_go_stale_after_navigation(browser, dirs):
     workspace, _ = dirs
-    assert not invoke(browser, workspace, "open", url="form.html")[0]
+    # 失败时带上插件回的内容（错误码与说明）：2026-10-07 GitHub 上偶发一次打开失败，没有内容无从判断是启动超时还是别的。
+    opened_error, opened = invoke(browser, workspace, "open", url="form.html")
+    assert not opened_error, opened
     listed = invoke_full(browser, workspace, "read")
     assert not listed["isError"] and "my_agent_observation" not in listed["content"], "观察只进 structuredContent，正文不重复"
     observation = listed["structuredContent"]["my_agent_observation"]
