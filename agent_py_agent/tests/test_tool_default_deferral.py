@@ -108,8 +108,7 @@ def test_tool_search_loads_a_declared_tool_for_the_next_call(tmp_path):
     ("重启网关", "restart_gateway"),
     ("gateway 状态", "gateway_status"),
     ("关闭某个用户的决策模型", "admin_controls"),
-    ("把学来的方法打成能力包", "package_build"),
-    ("把打好的能力包装上", "package_install"),
+    # package_build / package_install 进了后台续跑必需集合（learnpack 第 8 步，用户定方案 A），始终直出，不在收起索引里搜。
     ("把这次的做法总结成内部技能", "skill_summarize"),
 ])
 def test_natural_requests_find_each_declared_tool(tmp_path, query, tool):

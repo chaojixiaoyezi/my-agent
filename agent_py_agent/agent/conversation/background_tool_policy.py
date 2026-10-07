@@ -27,6 +27,11 @@ _BACKGROUND_WORK_TOOLS = (
     "task_progress",
     "resolve_capability_requests",
     "cancel_subagents",
+    # learnpack（用户 2026-10-06 定方案 A）：学外部 agent 时她常把写包文件派给子代理，子代理写完后的续跑要能打包、按开关安装或
+    #   开待确认安装单（第 8 步真模型验收：续跑里没有这两个工具，连续 TOOL_UNAVAILABLE 后回合被停）。两个工具只注册给本机管理员，
+    #   装不装仍只看自动装开关和用户确认，这里只给候选目录。进了续跑必需集合就始终直出（不再默认收起），这是已知代价。
+    "package_build",
+    "package_install",
 )
 
 DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
@@ -110,6 +115,8 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "cancel_subagents": "打断并结束一个不应继续运行的直属子代理；它不负责轮询、推动或验收。",
+    "package_build": "把（子代理）写好的能力包或插件目录打成包，不安装；回执写现在装着的版本和提醒。",
+    "package_install": "按自动装开关安装她打的包；开关关着只开待确认安装单，把回执里的确认行原样交给用户。",
     "list_agents": "只读查看直属子代理的当前状态和结果引用；不等待、不推进，子代理的变化仍由宿主唤醒送达。",
     "send_message": "向当前 owner 的已绑定通道发送一条模型撰写的消息；证据型后台事件必须原样携带其 evidence_refs。",
     "get_goal": "读取当前 /goal 持续目标及其权威状态。",

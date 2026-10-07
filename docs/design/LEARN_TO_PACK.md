@@ -102,7 +102,8 @@
 - TUI 和飞书各验一遍。
 
 **第 8 步（MiniMax-M2.7 真模型，4 遍）**：TUI 开关关、IM 开关关、IM 开关开通过；TUI 开关开那遍她派子代理写文件，子代理写完后的后台续跑工具目录里
-没有打包、安装工具，没通过。修法待用户定（见 DESIGN_LEDGER），证据在 `~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`。
+没有打包、安装工具，没通过。用户定方案 A：两个工具放进后台工作目录（`background_tool_policy._BACKGROUND_WORK_TOOLS`），代价是它们始终直出、
+不再默认收起；修好后补跑那一遍（结果见 TESTS.md 第 8 步）。证据在 `~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`。
 
 **第 7 步（假模型）已跑通**：用假模型驱动真实对话回合、真实工具和真实 `/plugins#`、`/plugins` 命令，把能力包开关关/开、插件两种开关位置、TUI 与飞书两个入口、确认行重发回放和重启后照常都跑了一遍（`test_learnpack_e2e.py`，见 TESTS.md 第 7 步）。真模型（MiniMax）在两个入口各跑一遍是第 8 步，先给用户 token 估算、用户点头才跑。
 
@@ -200,7 +201,7 @@
    - 生产上两个开关保持关，由用户自己开。第一期只对管理员 owner（local/main）开放。
 5. **命令**：能力包 `/plugins#`、`/plugins#<包名> 查看|启用|停用|删除|退回`；插件仍 `/plugins@`，插件列表也标"她做的"。TUI 和飞书同一套。
 
-**新工具**：打包、安装、"总结一下"共 3 个，都声明默认收起（`default_deferred` + 一句 `deferred_summary`；生产已开 `tool_default_deferral_enabled`），每个在工具目录里只占一行。
+**新工具**：打包、安装、"总结一下"共 3 个，都声明默认收起（第 8 步后打包、安装进了后台续跑必需集合，实际始终直出；只有"总结一下"仍收起）（`default_deferred` + 一句 `deferred_summary`；生产已开 `tool_default_deferral_enabled`），每个在工具目录里只占一行。
 
 **估算（更正第 4、5 节）**：第 5 节"约 15–35 元"是拿几件小修复的花费乘件数算的，漏了整天运行时每次调用重发上下文、复审、返工、测试和验收，严重偏低。改按"会话·天 × 账本里每会话每天的实际花费"估。第一期改由 3a 单人开发，约 24–28 小时，不花 DeepSeek；真模型验收只用 MiniMax-M2.7，跑前给 token 估算。
 

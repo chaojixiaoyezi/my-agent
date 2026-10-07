@@ -12,7 +12,11 @@
   - IM 开关关（短剧）：只开单 → IM 发回确认行 → 装上 → 列表、查看、停用、删除都对；重发旧确认行回 `PACKAGE_INSTALL_ORDER_USED` 并回放当时结果。
   - IM 开关开（小说）：直接装上并启用（不开单）→ 列表、查看、停用、删除都对。
 - **用量**：输入合计 7,192,789 token（缓存命中约 81%），输出 122,677 token；没碰到额度错误。密钥与管理员密码在证据和网关日志里出现 0 次。
-- **待定**：第 2 遍的修法（A 放进后台续跑目录 / B 只改技能让她在自己这一轮打包），用户定了再修，修好后补跑这一遍。另有三处小问题记在设计台账。
+- **修正（用户定方案 A）**：`package_build`、`package_install` 放进后台工作目录 `background_tool_policy._BACKGROUND_WORK_TOOLS`（所有后台 profile
+  都有，带中文动作说明；代价：始终直出、不再默认收起）。新用例 `test_learnpack_background.py`（3 条）：子代理整合续跑的目录和按它生成的工具快照里
+  两个工具都在、续跑照旧没有 tool_search、各后台 profile 都有、非管理员 owner 快照里没有、始终直出而 skill_summarize 仍收起；
+  `test_tool_default_deferral` 去掉两组已不收起的搜索参数。连带：引用后台续跑目录的测试与 learnpack 整组共 59 个文件 + 14 个守卫，
+  1744 passed / 1 xfailed / 0 failed；变异 3/3（后台目录不含打包、不含安装、安装没有动作说明）。补跑结果写在下一个提交。另有三处小问题记在设计台账。
 - **证据**：`~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`（README、每遍结构化步骤、屏幕记录、IM 回执、用量汇总、协议违规事件、脚本）。
 
 ## learnpack 第 7 步：整体验证（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
