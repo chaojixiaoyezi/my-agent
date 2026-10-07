@@ -54,6 +54,8 @@ _V8_KEYS = ("events", "tool_gates", "permissions")
 _PROVENANCE_MAX_CHARS = 200
 # 宿主校验失败时带给她的具体原因最多这么多个字符（单行）。
 _CAUSE_MAX_CHARS = 200
+# 密钥检查命中时每个文件最多列出的行号个数。
+_SECRET_LINE_LIMIT_COUNT = 5
 # 声明里其它字符串（说明、关键词、动作说明等）每段最多 1000 个字符。
 _DECLARED_TEXT_MAX_CHARS = 1000
 # 版本号只用字母、数字和 . + - _，最多 64 个字符（它会进宿主回执的"包名 版本（摘要）"）。
@@ -283,7 +285,9 @@ def _list_files(root: Path) -> list[str]:
     return listed
 
 
-# LLM: 只对能按 UTF-8 解码的文件做检查，复用日志脱敏的同一套密钥识别；命中就整包拒绝并只报文件名（不回显内容）。只读。
+# LLM: 只对能按 UTF-8 解码的文件做检查，复用日志脱敏的同一套密钥识别；命中就整包拒绝，只报文件名和行号（不回显内容）。
+#   报行号是因为她读文件时这些地方已被宿主打码，看不到是哪一行（learnpack 生产复测：她以为原文里就是占位符）；跨行的写法
+#   逐行认不出时只报文件名。只读。
 # 函数用途: 拒绝带密钥的文件进包。
 def _reject_secrets(contents: dict[str, bytes]) -> None:
     flagged = []
@@ -292,11 +296,16 @@ def _reject_secrets(contents: dict[str, bytes]) -> None:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        if redact_sensitive_text(text, code_file=True) != text:
-            flagged.append(path)
+        if redact_sensitive_text(text, code_file=True) == text:
+            continue
+        lines = [number for number, line in enumerate(text.splitlines(), 1)
+                 if redact_sensitive_text(line, code_file=True) != line]
+        shown = "、".join(str(number) for number in lines[:_SECRET_LINE_LIMIT_COUNT])
+        flagged.append(f"{path}（第 {shown}{'…' if len(lines) > _SECRET_LINE_LIMIT_COUNT else ''} 行）" if lines else path)
     if flagged:
         raise PackageBuildError("PACKAGE_BUILD_SECRET_FOUND",
-                                f"这些文件里像是有密钥或口令，已整包拒绝：{'、'.join(flagged[:10])}；换成占位符后再打包。")
+                                f"这些文件里像是有密钥或口令，已整包拒绝：{'；'.join(flagged[:10])}。你读文件时这些地方可能被打了码，"
+                                "按行号找；要联网、要密钥的脚本按设计不放进能力包（做成插件或不收），只是写法像密钥的示例就换成不像的再打包。")
 
 
 # LLM: 包是用她自己的声明打出来的，校验器的内部原因（如"包描述字段不完整或存在未知字段"、KeyError 的字段名）直接给她改声明用；
@@ -327,8 +336,9 @@ def _receipt(record: BuildRecord, built: BuiltPackage, switches: dict[str, objec
         "installed_by_me": notes["installed_by_me"],
         "previous_versions": notes["previous_versions"],
         "warnings": notes["warnings"],
-        "next_step": (f"调用 package_install，参数 sha256={record.sha256} 安装。对应开关开着就直接装上；"
-                      "关着会生成待确认安装单，回执里有要用户原样发的那一行确认。照回执原文提醒用户。"),
+        "next_step": (f"先处理 warnings（要改就改了重新打包），然后由你自己调用 package_install，参数 sha256={record.sha256}"
+                      "（这是你的工具，不要让用户去敲）。对应开关开着就直接装上；关着会生成待确认安装单，回执里有要用户原样发的"
+                      "那一行确认。照回执原文提醒用户。"),
     }
     return ToolHandlerOutcome(PACKAGE_BUILD_TOOL, True, json.dumps(payload, ensure_ascii=False),
                               result_envelope={PACKAGE_BUILD_TOOL: payload})

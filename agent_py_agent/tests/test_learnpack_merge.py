@@ -251,7 +251,7 @@ def test_latin_only_keywords_for_a_chinese_pack_are_flagged(tmp_path, monkeypatc
     make = _maker(agent)
     english = make("0.1.0", {"CAPABILITY.md": _SCENES}, package_id="novel-craft", keywords=["long novel", "web novel"])
     assert _codes(english) == ["PACKAGE_BUILD_KEYWORDS_SCRIPT"] and english["build"]["sha256"], "提醒不挡打包"
-    assert "推荐不到" in english["warnings"][0]["message"]
+    assert "推荐不到" in english["warnings"][0]["message"] and "不是可以忽略的建议" in english["warnings"][0]["message"]
     mixed = make("0.1.1", {"CAPABILITY.md": _SCENES}, package_id="novel-craft", keywords=["long novel", "长篇"])
     assert mixed["warnings"] == [], "有一个中文关键词就够"
     latin = make("0.1.2", {"CAPABILITY.md": _SCENES}, package_id="novel-craft", keywords=["long novel"],

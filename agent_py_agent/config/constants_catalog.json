@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 944,
+  "count": 945,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5890,6 +5890,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "回执里最多列出的包内文件名个数，超出只给总数。"
+    },
+    {
+      "name": "_SECRET_LINE_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/tooling/package_build_tool.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "密钥检查命中时每个文件最多列出的行号个数。"
     },
     {
       "name": "_FIREWALL_NOT_RUNNING",

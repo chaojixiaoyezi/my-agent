@@ -3,7 +3,8 @@
 锁定：仓库样例能力包/样例插件经产品函数打出的包，sha256 与搬家前的旧脚本产物逐字节一致（固定摘要）；两个脚本只是薄壳；
 同一输入两次打包字节相同；声明外形、链接、预算、文件清单不一致、产物复验失败都给登记过的错误码。
 插件声明的顶层字段按清单字段表核对：缺了、多了都点名（多了 capability 时说明那是能力包的字段），构建补空的字段与参数给的平台可省
-（learnpack 生产测试：她照能力包的样子写插件声明，宿主只回"描述无效"）。
+（learnpack 生产测试：她照能力包的样子写插件声明，宿主只回"描述无效"）。能力包声明的顶层字段和 capability 的字段也点名缺/多
+（生产复测：只看到"能力声明字段无效"时她误以为中文关键词不行）；verification 是可选字段。
 """
 from __future__ import annotations
 
@@ -99,6 +100,23 @@ def test_pack_declaration_shape_errors_are_coded(tmp_path, change, code):
     with pytest.raises(PackageBuildError) as error:
         capability_pack_paths(declaration)
     assert error.value.code == code and code in ERROR_CONTRACTS
+
+
+def test_pack_and_capability_field_errors_name_the_fields(tmp_path):
+    _root, declaration = _pack_source(tmp_path)
+    no_files = {key: value for key, value in declaration.items() if key != "files"}
+    with pytest.raises(PackageBuildError, match="缺 files"):
+        capability_pack_paths(no_files)
+    shaped = {**declaration, "capability": {"description": "x", "keywords": ["短剧"], "tags": ["y"]}}
+    with pytest.raises(PackageBuildError, match="缺 entry_document；多了 tags") as error:
+        capability_pack_paths(shaped)
+    assert error.value.code == "PACKAGE_BUILD_DECLARATION_INVALID" and "中文、英文都行" in str(error.value)
+    with pytest.raises(PackageBuildError, match="keywords 是字符串列表"):
+        capability_pack_paths({**declaration, "capability": {**declaration["capability"], "keywords": "短剧"}})
+    with pytest.raises(PackageBuildError, match="缺 description、entry_document、keywords"):
+        capability_pack_paths({**declaration, "capability": "短剧方法"})
+    verified = {**declaration["capability"], "verification": {}}
+    assert capability_pack_paths({**declaration, "capability": verified}), "verification 是可选字段，形状由清单校验器管"
 
 
 def test_reader_rejects_links_missing_files_duplicates_and_bad_paths(tmp_path):

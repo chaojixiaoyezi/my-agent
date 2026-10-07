@@ -13,6 +13,9 @@ CAPABILITY_PACKAGE_SCHEMA = "plugin_package.v7"
 # 能力包清单最多收录的文件数；超出即判定清单过大（接近常见文件描述符上限 4096）。
 MAX_CAPABILITY_FILES = 4095
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+# 能力声明（清单里的 capability）必须有的字段与可选字段：from_payload 和打包层的缺/多字段提示共用这一处。
+CAPABILITY_REQUIRED_FIELDS = ("description", "keywords", "entry_document")
+CAPABILITY_OPTIONAL_FIELDS = ("verification",)
 
 
 # LLM: 路径只定位归档成员，不是宿主地址；保持原名字，碰撞比较另做规范化，不能清洗后改指另一文件。
@@ -80,8 +83,8 @@ class CapabilityDeclaration:
     # 函数用途: 从静态描述恢复能力声明。
     @classmethod
     def from_payload(cls, value: object) -> CapabilityDeclaration:
-        base = {"description", "keywords", "entry_document"}
-        if (not isinstance(value, dict) or not base <= set(value) or not set(value) <= base | {"verification"}
+        base = set(CAPABILITY_REQUIRED_FIELDS)
+        if (not isinstance(value, dict) or not base <= set(value) or not set(value) <= base | set(CAPABILITY_OPTIONAL_FIELDS)
                 or not isinstance(value["keywords"], list)):
             raise ValueError("能力声明字段无效")
         verification = (VerificationDeclaration.from_payload(value["verification"])

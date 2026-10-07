@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ..capability_package_manifest import (
+    CAPABILITY_OPTIONAL_FIELDS,
     CAPABILITY_PACKAGE_SCHEMA,
+    CAPABILITY_REQUIRED_FIELDS,
     MAX_CAPABILITY_FILES,
     validate_capability_path,
 )
@@ -85,11 +87,22 @@ def read_declared_files(root: Path, paths: list[str], limits: PackageReadLimits 
     return contents
 
 
-# LLM: 声明字段必须恰好是 _PACK_FIELDS，files 每项只写 path，数量 1..MAX_CAPABILITY_FILES；只看结构，不读文件。纯函数。
+# LLM: 声明字段必须恰好是 _PACK_FIELDS，capability 的字段按能力声明的字段表（capability_package_manifest，唯一出处）核对，
+#   缺了、多了都点名（learnpack 生产复测：她只看到"能力声明字段无效"，误以为是中文关键词不行，把关键词全改成了英文）；
+#   files 每项只写 path，数量 1..MAX_CAPABILITY_FILES；只看结构，不读文件。纯函数。
 # 函数用途: 校验能力包声明的外形并返回要读的文件路径（按声明顺序）。
 def capability_pack_paths(declaration: object) -> list[str]:
     if not isinstance(declaration, dict) or set(declaration) != _PACK_FIELDS:
-        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "能力包声明字段不完整或含生成字段")
+        shown = _diff_text(_PACK_FIELDS, set(declaration) if isinstance(declaration, dict) else set())
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", f"能力包声明字段不完整或含生成字段：{shown}")
+    capability = declaration["capability"]
+    allowed = set(CAPABILITY_REQUIRED_FIELDS) | set(CAPABILITY_OPTIONAL_FIELDS)
+    if (not isinstance(capability, dict) or not set(CAPABILITY_REQUIRED_FIELDS) <= set(capability) <= allowed
+            or not isinstance(capability["keywords"], list)):
+        shown = _diff_text(set(CAPABILITY_REQUIRED_FIELDS), set(capability) if isinstance(capability, dict) else set(),
+                           optional=set(CAPABILITY_OPTIONAL_FIELDS))
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID",
+                                f"capability 要写成对象，keywords 是字符串列表（中文、英文都行）：{shown}")
     items = declaration["files"]
     if (not isinstance(items, list) or not 1 <= len(items) <= MAX_CAPABILITY_FILES
             or any(not isinstance(item, dict) or set(item) != {"path"} for item in items)):
@@ -128,6 +141,14 @@ def files_plugin_paths(declaration: object, platforms: tuple[str, ...] = ()) -> 
     if not isinstance(items, list) or any(not isinstance(item, dict) or set(item) != {"path", "executable"} for item in items):
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "files 每项只能写 path 与 executable，摘要由脚本生成")
     return [item["path"] for item in items]
+
+
+# LLM: 只拼说明：缺哪些（required 里没写的）、多了哪些（required 与 optional 之外的），都没有就说"字段齐全"。纯函数。
+# 函数用途: 把一组字段的缺/多写成一句中文。
+def _diff_text(required: set[str], given: set[str], optional: set[str] = frozenset()) -> str:
+    missing, extra = sorted(required - given), sorted(given - required - set(optional))
+    parts = ([f"缺 {'、'.join(missing)}"] if missing else []) + ([f"多了 {'、'.join(extra)}"] if extra else [])
+    return "；".join(parts) or "字段齐全，检查 keywords 是不是列表"
 
 
 # LLM: 字段表只取 plugin_manifest.files_plugin_manifest_fields（唯一出处）。声明要写的 = 清单字段 - 构建生成的 schema_version

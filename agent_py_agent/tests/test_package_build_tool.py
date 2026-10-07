@@ -87,6 +87,7 @@ def test_pack_build_auto_lists_files_stores_privately_and_reports_switches(tmp_p
     assert switches["capability_pack_self_install_enabled"] is False and switches["plugin_self_install_enabled"] is False
     assert switches["switch_commands"]["capability_pack_on"] == "/settings set capability_pack_self_install_enabled true"
     assert "package_install" in body["next_step"] and build["sha256"] in body["next_step"]
+    assert "不要让用户去敲" in body["next_step"] and "先处理 warnings" in body["next_step"], "生产复测：她把 package_install 写给了用户"
     store = LearnpackStore(agent.home_paths.owner_home_dir)
     assert store.build(build["sha256"]).package_id == "drama-scenes"
     assert Path(agent.home_paths.owner_home_dir).joinpath(*STORE_PARTS) == store.root
@@ -166,10 +167,11 @@ def test_unreadable_source_is_denied_by_the_read_file_policy(tmp_path, monkeypat
 def test_secret_in_any_file_rejects_the_whole_pack(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
     root = _pack_dir(_owner(agent))
-    (root / "methods" / "api.md").write_text("调用时带上 api_key = \"sk-live-1234567890abcdefghijklmnop\"\n", encoding="utf-8")
+    (root / "methods" / "api.md").write_text("# 接口\n先说明用法。\n调用时带上 api_key = \"sk-live-1234567890abcdefghijklmnop\"\n",
+                                          encoding="utf-8")
     ok, body, code = _run(agent, _params(root))
-    assert not ok and code == "PACKAGE_BUILD_SECRET_FOUND" and "methods/api.md" in body
-    assert "sk-live" not in body
+    assert not ok and code == "PACKAGE_BUILD_SECRET_FOUND" and "methods/api.md（第 3 行）" in body, body
+    assert "sk-live" not in body and "不放进能力包" in body
     assert not Path(agent.home_paths.owner_home_dir).joinpath(*STORE_PARTS).exists()
 
 
