@@ -279,3 +279,16 @@
   - 打包回执的版本事实与软提醒（`capability/learnpack_build_notes`，复审建议）：回执多 `installed_version`（现在装着的同名包版本）、`installed_by_me`（装着的那个是不是她做的，和 `/plugins#` 列表"她做的"同一判断）、`previous_versions`（她做过的这个包名的各版本）和 `warnings`。包名被别处的包占着时（和安装时同一个裁决 `ownership_problem`）只给 `PACKAGE_BUILD_ID_TAKEN`：装不上，只能换包名单独成包，不再给版本提醒免得绕一圈。其余三种提醒都不挡打包（版本号和文件清单是质量问题，按铁律不做硬门）：`PACKAGE_BUILD_VERSION_REUSED`——和她装上过的某一版同号、字节不同（没装过的同号重打是正常迭代，不提醒）；`PACKAGE_BUILD_VERSION_OLDER`——比现在装着的旧（只比纯数字点分的版本号，末尾的 0 不算）；`PACKAGE_BUILD_FILES_DROPPED`——比上一版（现在装着的、她做的那一版；没有就取她上一次打的）少了文件，合并时靠 `skill_search` 读出再写回，非文本文件和长文件容易漏。找旧包用 `LearnpackStore.builds_for`：按修改时间取最近的 2000 个记录，再逐个按 `build()` 核对字节与清单。
   - 门槛的代价（复审，记下来）：关键词写成长短语的包（包括仓库里的示例包），用户只说了其中一部分时不进当轮候选——名片照样列着，`skill_search` 主动搜照样搜得到，只是少一次提醒（回归里锁了一个翻译包的例子）；"报告""摘要""一致性""写作"这类各领域都会说的词写进关键词照样会误推，门槛管不了，学习技能里要求别写这类词。
   - 合并只能并进她自己做的包：别处装的同名包宿主不让替换（`PACKAGE_INSTALL_ID_TAKEN`），技能里写明，她看打包回执的 `installed_by_me` 与 `PACKAGE_BUILD_ID_TAKEN` 判断，免得白问一轮；问用户之前就能知道（在 `skill_search` 的包结果里标出是不是她做的）留待以后。以后要彻底解决"旧文件带不过来"，可以给 `package_build` 加"以上一版为底"的参数，由宿主按字节把旧文件带过来（待办）。
+
+## 12. 生产测试与修复（2026-10-07）
+
+- **怎么测的**：第一期合 main（c775bd4b4）、部署生产 step17q 后，3a 在生产上开自己的 TUI（同一运行时、连生产 Gateway 8420，`--workspace` 指到生产 owner 家里的测试目录），模型用生产默认的 MiniMax-M2.7（官网），像用户一样每步只发一句；用户自己开着的 TUI 不碰。证据 `~/.my-agent/decision-evidence/learnpack-prod-c775bd4b4/`。
+- **能力包这条线全通**：开关关着学短剧原版（short-drama-skills，MIT）→ 打成 `short-drama-production` 1.0.0、只给确认行 → 照发装上 → `/plugins#` 列表与查看写"她做的"、来源与许可证；开关开着学长篇小说原版（chinese-longnovel-skill，MIT）→ 直接装上并启用 `chinese-longnovel-capability` 1.0.0，回执给全查看、停用、删除、退回命令。
+- **同领域合并**：学第二个短剧原版（short-drama-production，Apache-2.0）时她**没先问**就另起了一个包（问题 2）；用户回"并成一个"后出 `short-drama-production` 2.0.0（两个方向，来源与许可证分开写），打包回执认出装着 1.0.0、没有少文件；确认装上，查看写出两个来源，`退回` 先预览、发带版本的一行回到 1.0.0、重发什么都不做，`删除` 可用但回执写成"插件已卸载"（问题 3）。她还给包写了 MiniMax、H3、CompShare 这类厂商名和产品名当关键词（问题 4），并把联网调视频服务的脚本也搬进能力包（密钥检查拦了 4 个，她排除后打包成功）。
+- **她自己给自己写插件没走通**（问题 1）：80 轮里 7 次按插件打包，声明都只有能力包那 5 个字段（plugin_id、version、summary、capability、files），宿主每次只回"插件包描述无效"；她以为工具会读目录里的 declaration.json，又在 shell 里用了指向六月旧版 my-agent 的 python3 自测，结论是错的；shell 打的包装不上（`PACKAGE_INSTALL_NOT_SELF_BUILT`，这道闸是对的）。按上限中断。之后"把这次的做法总结一下记下来"：`skill_summarize` 给了正确的指引（上一轮被中断、她没选 previous），她改用记忆工具，记忆因缺证据没生效（回执 `ok: true` 但正式记忆没变），她却说"已记下来了"。
+- **修复（分支 claude/3a-learnpack-prodfix）**：
+  1. 插件声明顶层字段按清单字段表核对（`plugin_manifest.files_plugin_manifest_fields` 是唯一出处）：缺了、多了都点名，多了 `capability` 时说明那是能力包的字段，并写全插件要写的字段；内层清单校验失败时，打包回执带上校验器的具体原因（一行、限 200 字）；`package_build` 说明写全插件字段和"不读目录里的 declaration.json"；写插件技能加"你自己做的 v6 文件插件"一节：模板删掉三个 v8 键就是 v6、声明整份传给工具、失败按回执改、别改用 shell 构建脚本。
+  2. 打包回执新软提醒 `PACKAGE_BUILD_SAME_DOMAIN`：新能力包和她自己做的、装着的另一个能力包声明的关键词（casefold 整词）重合，就提醒先问用户并进去还是单独成包；同名包走版本提醒、别处装的包不能并入，都不算；不挡打包（铁律：质量问题不做硬门）。
+  3. `/plugins#` 停用、删除的回执称呼改成"能力包"：`PluginManagement.command` 多一个 `subject`，只换卸载/停用说明里的称呼，由 `/plugins#` 这条结构化路由传入，不参与任何判断；直接敲 `/plugins` 照旧叫插件。
+  4. 学习技能要求关键词不写厂商名、模型名、产品名和脚本名（用户聊模型时会误推荐）。
+- **待办（未修）**：记忆工具"没记上"的回执要一眼可见（不是 `ok: true`）；她不知道用户在 `/plugins#` 里做过什么（会把执行过的单当成还要确认、建议删没装过的包），宿主命令结果要成为她可查的结构化事实；联网、账号类工具只靠技能提醒做成插件；本机 Homebrew python3 的旧 editable 安装由用户决定卸不卸。

@@ -52,6 +52,8 @@ _EMPTY_SETTINGS = {"type": "object", "properties": {}, "additionalProperties": F
 _V8_KEYS = ("events", "tool_gates", "permissions")
 # 她声明的来源与许可证会进宿主回执和 /plugins# 列表：单行、最多 200 个字符。
 _PROVENANCE_MAX_CHARS = 200
+# 宿主校验失败时带给她的具体原因最多这么多个字符（单行）。
+_CAUSE_MAX_CHARS = 200
 # 声明里其它字符串（说明、关键词、动作说明等）每段最多 1000 个字符。
 _DECLARED_TEXT_MAX_CHARS = 1000
 # 版本号只用字母、数字和 . + - _，最多 64 个字符（它会进宿主回执的"包名 版本（摘要）"）。
@@ -82,8 +84,10 @@ class PackageBuildTool(BaseTool):
             "开关命令原文和下一步（用 package_install 传这个 sha256 安装）。source_dir 写目录路径：写文件回执里的相对路径"
             "按当前工作目录算，也可以写绝对路径；目录要在你读得到的地方（任务工作区即可）；"
             "能力包 declaration 至少写 plugin_id、version、summary、capability（description、keywords、entry_document），"
-            "files 可省（自动收录目录里的普通文件，隐藏文件与根目录 declaration.json 除外）；插件 declaration 必须列 files"
-            "（每项 path 与 executable）。origin 写学自哪里（仓库地址@提交，或“自己写的”），license 写来源的许可证。"
+            "files 可省（自动收录目录里的普通文件，隐藏文件与根目录 declaration.json 除外）；插件 declaration 要写全（不读目录里的"
+            " declaration.json）：plugin_id、version、summary、entry、files（每项 path 与 executable）、platforms、actions、"
+            "default_action、tools、settings_schema，照内置技能 write-my-agent-plugin 的模板写，不带 events/tool_gates/permissions。"
+            "origin 写学自哪里（仓库地址@提交，或“自己写的”），license 写来源的许可证。"
             "文件里有密钥或模型读不到的文件会整包拒绝。"
         ),
         input_schema={
@@ -132,7 +136,7 @@ class PackageBuildTool(BaseTool):
         except PackageBuildError as exc:
             return _error(exc.code, str(exc))
         except PluginPackageError as exc:
-            return _error("PACKAGE_BUILD_OUTPUT_INVALID", f"打出的包没通过宿主校验：{exc}")
+            return _error("PACKAGE_BUILD_OUTPUT_INVALID", f"打出的包没通过宿主校验：{exc}{_cause_text(exc)}")
         store = LearnpackStore(home.owner_home_dir)
         try:
             record = store.save_build(built, request.provenance)
@@ -293,6 +297,17 @@ def _reject_secrets(contents: dict[str, bytes]) -> None:
     if flagged:
         raise PackageBuildError("PACKAGE_BUILD_SECRET_FOUND",
                                 f"这些文件里像是有密钥或口令，已整包拒绝：{'、'.join(flagged[:10])}；换成占位符后再打包。")
+
+
+# LLM: 包是用她自己的声明打出来的，校验器的内部原因（如"包描述字段不完整或存在未知字段"、KeyError 的字段名）直接给她改声明用；
+#   只取异常链上一层的类型名和文字，压成一行、限长，按展示规则过滤（不合规就不带）。纯函数。
+# 函数用途: 把宿主校验失败的具体原因接在错误回执后面。
+def _cause_text(exc: BaseException) -> str:
+    cause = exc.__cause__
+    if cause is None:
+        return ""
+    text = " ".join(f"{type(cause).__name__}: {cause}".split())[:_CAUSE_MAX_CHARS]
+    return f"（具体原因：{text}）" if _safe_text(text, _CAUSE_MAX_CHARS) else ""
 
 
 # LLM: 回执字段是给模型照抄的结构化事实；next_step 写清用 package_install 装、开关关着时会给用户确认行；notes 来自

@@ -1,6 +1,7 @@
 # LLM: 能力包命令 /plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>] 的唯一处理处（TUI、IM 同一入口：PluginManagement.command
 #   → learnpack_command 按 plugin_namespace 的 kind=pack 分流到这里）。列表与查看只读安装表与 learnpack 存储；启用/停用/删除转成
-#   管理员同一条 /plugins enable|disable|remove 命令（沿用用户这次的请求编号，回执由宿主原样给出）；"退回 [版本摘要]" 走
+#   管理员同一条 /plugins enable|disable|remove 命令（沿用用户这次的请求编号，回执由宿主同一套排版给出，只把说明里的称呼换成
+#   "能力包"）；"退回 [版本摘要]" 走
 #   learnpack_service.revert_install（与 /plugins revert 同一实现，先预览、带版本才执行）；"安装 <单号>" 核对单子上的包名后走
 #   confirm_order（与 /plugins confirm 同一实现）。她声明的来源与许可证只在单独一行里展示，并标明是她的原文、宿主未核实。动作词是结构化枚举（中文为主、英文同义），不做自然语言理解。改动作要同步 command_catalog 帮助、
 #   plugin_completion 补全与 test_pack_commands。
@@ -57,7 +58,7 @@ def run_pack_command(manager: object, namespace: object, request_id: str = "", r
         return revert_install(manager, name, argument, f"/plugins#{name} 退回")
     text = f"/plugins {action} {entry.manifest.plugin_id}"
     return {"forwarded_reply": manager.command(text, revision=revision or manager.catalog().revision,
-                                               request_id=request_id or f"lp-{uuid.uuid4().hex}")}
+                                               request_id=request_id or f"lp-{uuid.uuid4().hex}", subject="能力包")}
 
 
 # LLM: 第一个词是动作（缺省为查看）；"安装"必须带一个单号，"退回"可带一个版本摘要，其余动作不带参数，多余参数一律拒绝。纯函数。

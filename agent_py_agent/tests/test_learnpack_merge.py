@@ -7,6 +7,8 @@
 和装上过的某一版同号、字节不同（PACKAGE_BUILD_VERSION_REUSED；没装过的同号重打不提醒）；比现在装着的旧（PACKAGE_BUILD_VERSION_OLDER，
 只比纯数字点分的版本号）；比上一版少了文件（PACKAGE_BUILD_FILES_DROPPED）；包名被别处的同名包占着时只报 PACKAGE_BUILD_ID_TAKEN
 （不报版本提醒），回执写明装着的是不是她做的。找旧包超过上限时看最近的记录。
+新能力包和她自己做的、装着的另一个能力包声明的关键词重合（casefold 整词）时提醒 PACKAGE_BUILD_SAME_DOMAIN（先问用户并进去还是
+单独成包；生产测试里她没问就另起了一个包），同名包和别处装的包不算。
 """
 from __future__ import annotations
 
@@ -163,13 +165,15 @@ def _maker(agent):
     root = Path(agent.home_paths.owner_home_dir) / "runs" / "2026-10-06" / "learn" / "pack"
     build = agent.tools.tools["package_build"]
 
-    def make(version, files, package_id="drama-scenes"):
+    def make(version, files, package_id="drama-scenes", keywords=None):
         shutil.rmtree(root, ignore_errors=True)
         for name, body in files.items():
             (root / name).parent.mkdir(parents=True, exist_ok=True)
             (root / name).write_text(body, encoding="utf-8")
         _name, payload = _build(str(root), version, "github.com/example/drama-agent@abc", "MIT")
         payload["declaration"]["plugin_id"] = package_id
+        if keywords is not None:
+            payload["declaration"]["capability"]["keywords"] = keywords
         outcome = build.execute(payload)
         assert outcome.ok, outcome.output
         return json.loads(outcome.output)
@@ -219,7 +223,24 @@ def test_dropping_files_of_the_previous_version_warns_but_still_builds(tmp_path,
     assert _codes(again) == ["PACKAGE_BUILD_FILES_DROPPED"], "和现在装着的那版比，不和上一次的草稿比"
     kept = make("0.2.0", {**scenes, "CAPABILITY.md": _SCENES + _DIALOGUE, "provenance/dialogue.md": "原项目：dialogue\n"})
     assert kept["warnings"] == [], "旧方向的文件都带上了"
-    assert make("0.1.0", {"CAPABILITY.md": "# 别的包\n"}, package_id="novel-notes")["warnings"] == [], "第一次打的包没有上一版"
+    other = make("0.1.0", {"CAPABILITY.md": "# 别的包\n"}, package_id="novel-notes", keywords=["长篇", "伏笔"])
+    assert other["warnings"] == [], "第一次打的包没有上一版，关键词也不重合"
+
+
+def test_a_new_pack_sharing_keywords_with_her_installed_pack_warns_to_ask_first(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    make = _maker(agent)
+    _install_now(agent, make("0.1.0", {"CAPABILITY.md": _SCENES}, keywords=["短剧", "Storyboard"]))
+    body = make("1.0.0", {"CAPABILITY.md": "# 短剧管线\n"}, package_id="drama-pipeline", keywords=["短剧", "管线"])
+    assert _codes(body) == ["PACKAGE_BUILD_SAME_DOMAIN"] and body["build"]["sha256"], "提醒不挡打包"
+    message = body["warnings"][0]["message"]
+    assert "drama-scenes 0.1.0（共同关键词：短剧）" in message and "先问用户" in message
+    folded = make("1.0.0", {"CAPABILITY.md": "# 管线\n"}, package_id="drama-pipeline", keywords=["STORYBOARD", "管线"])
+    assert "共同关键词：storyboard" in folded["warnings"][0]["message"], "关键词按 casefold 整词比"
+    assert make("1.0.0", {"CAPABILITY.md": "# 管\n"}, package_id="drama-pipeline", keywords=["短剧分场"])["warnings"] == [], "只比整词"
+    assert make("0.1.0", {"CAPABILITY.md": "# 别的\n"}, package_id="novel-notes", keywords=["长篇", "伏笔"])["warnings"] == []
+    assert _codes(make("0.2.0", {"CAPABILITY.md": _SCENES + _DIALOGUE})) == [], "同名包走版本提醒，不算同领域"
+    assert "PACKAGE_BUILD_SAME_DOMAIN" in ERROR_CONTRACTS
 
 
 def test_the_newest_builds_are_scanned_first(tmp_path, monkeypatch):

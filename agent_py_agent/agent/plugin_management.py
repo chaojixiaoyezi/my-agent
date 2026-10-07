@@ -206,11 +206,12 @@ class PluginManagement:
                                              enabled=row.enabled, activation_id=row.activation_id)
                                      for row in entries))
 
-    # LLM: 原请求先查原账，权限文字取同次安装快照；TUI/飞书同源，普通身份不显示管理员授根。
+    # LLM: 原请求先查原账，权限文字取同次安装快照；TUI/飞书同源，普通身份不显示管理员授根。subject 只是卸载/停用说明里的
+    #   称呼（能力包命令 /plugins# 转发时传"能力包"），由调用方的结构化路由决定，不参与任何判断。
     # 函数用途: 分派明确的管理或业务命令，不进入聊天；详情说明不启动插件，业务批准只恢复同一原调用。
     def command(self, text: str, *, revision: str, request_id: str,
                 request_permission: Callable | None = None,
-                cancellation_token: CancellationToken | None = None) -> dict:
+                cancellation_token: CancellationToken | None = None, subject: str = "插件") -> dict:
         namespace = plugin_namespace(text)
         if namespace is None:
             raise ValueError("不是插件命令")
@@ -236,7 +237,7 @@ class PluginManagement:
                 # 下一确认请求已在完整预览冻结，运输重送不改变已确认的激活代。
                 request_id = values["authorization"]
             return self._reply(self._submit(tool_name, dict(values), revision, request_id,
-                                           request_permission, cancellation_token), request_id)
+                                           request_permission, cancellation_token), request_id, subject)
         entries = self.installations.snapshot()
         catalog = self._catalog(entries)
         if not revision or revision != catalog.revision:
@@ -536,7 +537,7 @@ class PluginManagement:
 
     # LLM: 原 UNKNOWN 不暴露未经确认工具结果；重新启用仅附同表原撤权的有限观察，仍 UNKNOWN；成功卡需原结果确认。
     # 函数用途: 分开原结果、已观察撤权和未验证清理，保留原查询编号与授权身份。
-    def _reply(self, payload: dict, request_id: str = "") -> dict:
+    def _reply(self, payload: dict, request_id: str = "", subject: str = "插件") -> dict:
         payload = unconfirmed_reenable_observation(self.installations, dict(payload))
         envelope = payload.pop("result", {})
         if envelope:
@@ -549,7 +550,7 @@ class PluginManagement:
         special = _reason_message(payload.get("details", {}))
         if special:
             result["message"] = special
-        result.setdefault("message", _outcome_message(payload, state, _reply_message(payload, state, business)))
+        result.setdefault("message", _outcome_message(payload, state, _reply_message(payload, state, business, subject)))
         self._attach_catalog(result, payload)
         if request_id:
             result["message"] += f"\n查询：/plugins status {request_id}"
@@ -654,13 +655,14 @@ def _reason_message(details: dict) -> str:
     return permission_problem_message(reason) or runtime_reason_message(reason) or ""
 
 
-# LLM: 只读回执里的结构化状态与收尾字段选说明，不解析正文；业务调用的输出只经可读化投影后附在说明后面。
+# LLM: 只读回执里的结构化状态与收尾字段选说明，不解析正文；业务调用的输出只经可读化投影后附在说明后面。subject 只换卸载/停用
+#   说明里的称呼。
 # 函数用途: 按状态、卸载/停用释放、资源回收、业务调用与运行收尾事实拼出插件命令的默认说明。
-def _reply_message(payload: dict, state: str, business: bool) -> str:
+def _reply_message(payload: dict, state: str, business: bool, subject: str = "插件") -> str:
     details = payload.get("details", {})
     message = _PLUGIN_REPLY_STATE_MESSAGES.get(state, "插件命令已处理。")
     if state == "succeeded":
-        message = _release_message(details) or message
+        message = _release_message(details, subject) or message
     if payload.get("cleanup_consumption", {}).get("state") == "pending":
         message += "资源或包回收尚未确认；重送原请求可继续收尾。"
     if business:
@@ -704,15 +706,16 @@ def _observed_counts(hub, owner, plugin_id: str) -> dict | None:
     return cleaned or None
 
 
-# LLM: 只按成功回执里的卸载/停用释放结构化字段选择说明，先命中者优先；都不满足时返回空串交调用方沿用默认说明。
+# LLM: 只按成功回执里的卸载/停用释放结构化字段选择说明，先命中者优先；都不满足时返回空串交调用方沿用默认说明。subject 是
+#   称呼（默认"插件"，能力包命令传"能力包"；生产测试里删能力包回执写成"插件已卸载"）。
 # 函数用途: 给成功的卸载、停用待释放和停用已释放三种结果选对应说明。
-def _release_message(details: dict) -> str:
+def _release_message(details: dict, subject: str = "插件") -> str:
     if details.get("removed") is True:
-        return "插件已卸载，用户产物与操作历史保留。"
+        return f"{subject}已卸载，用户产物与操作历史保留。"
     if details.get("release_pending"):
-        return "插件已停用，原准备执行器尚未确认退出；请稍后再次停用以完成环境释放。"
+        return f"{subject}已停用，原准备执行器尚未确认退出；请稍后再次停用以完成环境释放。"
     if details.get("released") is True:
-        return "插件已停用并释放，可以再次启用。"
+        return f"{subject}已停用并释放，可以再次启用。"
     return ""
 
 

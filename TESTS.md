@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## learnpack 生产测试发现的问题与修复（2026-10-07，3a，分支 `claude/3a-learnpack-prodfix`）
+
+- **来由**：部署 step17q 后在生产上用真 MiniMax-M2.7 测（3a 开自己的 TUI 连生产 Gateway），发现四个问题，见设计台账与 `docs/design/LEARN_TO_PACK.md` 第 12 节。
+- **新用例**：
+  - `test_package_build.py::test_plugin_field_check_names_fields_and_respects_defaults`——插件声明顶层字段按清单字段表核对：缺 platforms、多了 capability（并说明那是能力包的字段）都点名；panels/skills/host_api 可省；平台由参数给时声明里不用写；v8 写了一个订阅键其余可省。
+  - `test_package_build_tool.py` 三条：写插件技能的模板删掉三个 v8 键能经工具打成 v6 插件；照能力包样子写的插件声明（生产里她 7 次都是这样）回 `PACKAGE_BUILD_DECLARATION_INVALID`，点名缺 entry、platforms、actions、default_action、tools、settings_schema 和多了 capability，什么都不写；内层清单校验失败（工具缺 input_schema）时回执带"具体原因"。
+  - `test_learnpack_merge.py::test_a_new_pack_sharing_keywords_with_her_installed_pack_warns_to_ask_first`——新能力包和她装着的另一个能力包关键词重合时给 `PACKAGE_BUILD_SAME_DOMAIN`（列出包名、版本、共同关键词，按 casefold 整词比，不挡打包）；关键词不重合、同名包、别处装的包都不提醒（别处装的包由 `test_a_foreign_same_name_pack_is_reported_instead_of_version_hints` 锁住）。造包辅助函数加 `keywords` 参数，"别的包"改用不重合的关键词。
+  - `test_pack_commands.py`：`/plugins#` 停用、删除的回执以"能力包已停用 / 能力包已卸载"开头；直接敲 `/plugins disable` 照旧是"插件已停用"。
+- **定向结果**：打包、打包工具、learnpack 整组、`/plugins#`、学习与写插件技能、插件管理/卸载/停用/启用/配置/老格式管理、`/plugins` 聊天控制、清单 v8、默认收起、工具预检、控制台打包、飞书适配器、常量目录共 24 个文件 + 14 个守卫：742 passed / 0 skipped / 0 failed。常量目录重新生成（941 → 944 项）。
+- **变异**：15 个变异（关掉字段核对、去掉 capability 提示、平台/补空字段/v8 订阅键不再可省、缺字段不报、不带校验原因、同领域提醒不出、不按 casefold 比、别处的包或同名包也算同领域、卸载与停用称呼写死"插件"、能力包命令不传称呼、管理命令不把称呼传给排版）15/15 被杀（只认 pytest rc=1）。
+
 ## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–23:24 PDT，3a，被测提交 `fd45290e0`，补跑 `c42700a3e`）
 
 - **跑法**：用户点头后跑完整 4 次。两个隔离根（各自 home、私有端口 8441/8442、`env -i`），模型目录只放 MiniMax-M2.7；样本是本机评测原版短剧

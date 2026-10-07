@@ -5,6 +5,7 @@
 /plugins# 写法的管理命令；启用/停用/删除转成同一条管理员 /plugins 命令；退回只退到她做过的上一版；"安装 <单号>"执行同名包的
 确认单、包名对不上被拒；每个动作 TUI、IM 各走一遍真实链路；普通用户能看列表与详情但不能改；未知包、未知动作、多余参数给登记过的
 错误码；安装回执里能力包的确认行与管理命令都是 /plugins# 写法，插件仍是 /plugins 写法；/plugins list 也标出她做的插件。
+/plugins# 停用、删除的回执称呼是"能力包"（生产测试里写成"插件已卸载"），直接敲 /plugins 照旧叫插件。
 """
 from __future__ import annotations
 
@@ -133,7 +134,9 @@ def test_every_pack_action_works_in_tui_and_im(tmp_path, monkeypatch, entry):
     view = entry(agent, "/plugins#drama-scenes 查看")
     assert view["ok"] and "她做的（打包于" in view["message"] and "/plugins#drama-scenes 退回" in view["message"]
     assert "带检查程序：否" in view["message"]
-    assert entry(agent, "/plugins#drama-scenes 停用")["ok"] and not _entry(agent, "drama-scenes").enabled
+    stopped = entry(agent, "/plugins#drama-scenes 停用")
+    assert stopped["ok"] and not _entry(agent, "drama-scenes").enabled
+    assert stopped["message"].startswith("能力包已停用"), "能力包命令的回执称呼是能力包（生产测试：原来写成插件）"
     assert entry(agent, "/plugins#drama-scenes 启用")["ok"] and _entry(agent, "drama-scenes").enabled
     second = _order(agent, "0.2.0")
     assert entry(agent, second["user_confirm_command"])["ok"] and _entry(agent, "drama-scenes").manifest.version == "0.2.0"
@@ -144,7 +147,8 @@ def test_every_pack_action_works_in_tui_and_im(tmp_path, monkeypatch, entry):
     reverted = entry(agent, line)
     assert reverted["ok"] and _entry(agent, "drama-scenes").manifest.version == "0.1.0", reverted
     assert entry(agent, "/plugins#drama-scenes 停用")["ok"]
-    assert entry(agent, "/plugins#drama-scenes 删除")["ok"] and _entry(agent, "drama-scenes") is None
+    removed = entry(agent, "/plugins#drama-scenes 删除")
+    assert removed["ok"] and _entry(agent, "drama-scenes") is None and removed["message"].startswith("能力包已卸载")
 
 
 def test_pack_install_rejects_an_order_for_another_package(tmp_path, monkeypatch):
@@ -216,7 +220,8 @@ def test_pack_actions_reply_exactly_like_the_plugin_command(tmp_path, monkeypatc
     _tui(agent, _order(agent)["user_confirm_command"])
     assert _tui(agent, "/plugins#drama-scenes 停用")["ok"]
     via_pack = _tui(agent, "/plugins#drama-scenes 启用")
-    assert _tui(agent, "/plugins disable drama-scenes")["ok"]
+    plain = _tui(agent, "/plugins disable drama-scenes")
+    assert plain["ok"] and plain["message"].startswith("插件已停用"), "直接敲 /plugins 照旧叫插件"
     direct = _tui(agent, "/plugins enable drama-scenes")
     strip = lambda reply: reply["message"].replace(reply["request_id"], "<编号>")  # noqa: E731
     assert via_pack["ok"] and strip(via_pack) == strip(direct), "转发的回执由宿主原样给出，不再包一层"

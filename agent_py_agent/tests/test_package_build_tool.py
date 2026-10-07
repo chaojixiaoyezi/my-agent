@@ -5,6 +5,8 @@
 相对路径、读权限不允许的目录、带密钥的文件、目录里的链接、v8 插件键、缺来源/许可证、来源/许可证/版本/声明文字里有换行、
 控制或改变显示方向的字符或超长，都给登记过的错误码且什么都不写；
 仓库样例能力包与样例插件经工具能打出与旧脚本一致的包；经正规工具执行器调用同样成功。
+learnpack 生产测试（2026-10-07）补：写插件技能的模板删掉三个 v8 键就能经工具打成 v6 插件；照能力包样子写的插件声明点名缺哪些、
+多哪些字段且什么都不写；内层清单校验失败时回执带上校验器的具体原因。
 """
 from __future__ import annotations
 
@@ -219,3 +221,46 @@ def test_runs_through_the_canonical_tool_executor(tmp_path, monkeypatch):
     execution = execute_canonical_test_call(tmp_path, tools={"package_build": agent.tools.tools["package_build"]},
                                             tool_name="package_build", arguments=_params(_pack_dir(_owner(agent))))
     assert execution.result.ok, execution.result
+
+
+_TEMPLATE = ROOT / "agent_py_agent" / "skills" / "builtin" / "plugins" / "write-my-agent-plugin" / "templates" / "python"
+
+
+# 照写插件技能的模板做 v6：删掉三个 v8 键，整份声明原样传给工具（生产测试里她就卡在这一步）。
+def _template_plugin(agent) -> tuple[Path, dict]:
+    root = _owner(agent) / "runs" / "2026-10-07" / "learn" / "dialogue-check"
+    shutil.copytree(_TEMPLATE, root)
+    declaration = json.loads((root / "declaration.json").read_text(encoding="utf-8"))
+    for key in ("events", "tool_gates", "permissions"):
+        declaration.pop(key)
+    (root / "declaration.json").write_text(json.dumps(declaration, ensure_ascii=False), encoding="utf-8")
+    return root, declaration
+
+
+def test_the_skill_template_minus_v8_keys_builds_as_a_v6_plugin(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    root, declaration = _template_plugin(agent)
+    ok, body, _ = _run(agent, _params(root, kind="plugin", declaration=declaration, origin="自己写的", license="自有"))
+    assert ok, body
+    assert body["build"]["kind"] == "plugin" and body["build"]["files"] == ["declaration.json", "src/server.py"]
+
+
+def test_pack_shaped_plugin_declaration_names_missing_and_extra_fields(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    root, declaration = _template_plugin(agent)
+    shaped = {key: declaration[key] for key in ("plugin_id", "version", "summary", "files")}
+    shaped["capability"] = _DECLARATION["capability"]
+    ok, message, code = _run(agent, _params(root, kind="plugin", declaration=shaped, license="自有"))
+    assert not ok and code == "PACKAGE_BUILD_DECLARATION_INVALID"
+    assert "缺 entry、platforms、actions、default_action、tools、settings_schema" in message, message
+    assert "多了 capability" in message and "不会从别处补" in message
+    assert not Path(agent.home_paths.owner_home_dir).joinpath(*STORE_PARTS).exists()
+
+
+def test_nested_manifest_errors_carry_the_validator_reason(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    root, declaration = _template_plugin(agent)
+    declaration["tools"][0].pop("input_schema")
+    ok, message, code = _run(agent, _params(root, kind="plugin", declaration=declaration, license="自有"))
+    assert not ok and code == "PACKAGE_BUILD_OUTPUT_INVALID"
+    assert "（具体原因：" in message, message

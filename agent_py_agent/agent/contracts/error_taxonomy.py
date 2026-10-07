@@ -3655,6 +3655,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="包已打好，但比上一版少了文件；合并或改版要把旧方向的文件原样带上再打包，确实要删的不用管，带不过来的如实告诉用户。",
     ),
+    "PACKAGE_BUILD_SAME_DOMAIN": ErrorContract(
+        code="PACKAGE_BUILD_SAME_DOMAIN", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="包已打好，但她已经装着自己做的同领域能力包（关键词重合）；先问用户并进已有的包还是单独成包，用户说单独成包再装。",
+    ),
 })
 
 

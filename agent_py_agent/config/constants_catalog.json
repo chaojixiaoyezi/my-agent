@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 941,
+  "count": 944,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1186,6 +1186,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "文件少了时回执里最多列出的路径个数。"
+    },
+    {
+      "name": "_SAME_DOMAIN_LIST_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_build_notes.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同领域提醒里最多列出的已装包个数。"
+    },
+    {
+      "name": "_SHARED_KEYWORD_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_build_notes.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "同领域提醒里每个包最多列出的共同关键词个数。"
     },
     {
       "name": "_MAX_BUILD_SCAN_COUNT",
@@ -5834,6 +5850,14 @@
       "unit": "个",
       "category": "比例阈值",
       "description": "验证回执最多显示 12 个分组：控制回执体积。"
+    },
+    {
+      "name": "_CAUSE_MAX_CHARS",
+      "file": "agent_py_agent/agent/tooling/package_build_tool.py",
+      "value": 200,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "宿主校验失败时带给她的具体原因最多这么多个字符（单行）。"
     },
     {
       "name": "_DECLARED_TEXT_MAX_CHARS",

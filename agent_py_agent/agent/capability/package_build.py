@@ -19,7 +19,11 @@ from ..capability_package_manifest import (
     validate_capability_path,
 )
 from ..common.nofollow_fs import read_bytes_beneath
-from ..plugin_manifest import PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8
+from ..plugin_manifest import (
+    PLUGIN_PACKAGE_SCHEMA_V6,
+    PLUGIN_PACKAGE_SCHEMA_V8,
+    files_plugin_manifest_fields,
+)
 from ..plugin_package import PackageReadLimits, inspect_plugin_package
 
 KIND_CAPABILITY_PACK = "capability_pack"
@@ -28,6 +32,8 @@ KIND_PLUGIN = "plugin"
 _PACK_FIELDS = frozenset({"plugin_id", "version", "summary", "capability", "files", "settings_schema"})
 # 声明里出现这些键就打成 v8（事件订阅、收紧钩子、权限需求），否则 v6。
 _V8_KEYS = frozenset({"events", "tool_gates", "permissions"})
+# 插件声明可以省的字段：面板、技能、宿主 API 由构建补空（v8 的三个订阅键写了一个，其余也由构建补空）。
+_PLUGIN_DEFAULTED_FIELDS = frozenset({"panels", "skills", "host_api"})
 # ZIP 成员固定时间戳：同一输入得到同一包字节。
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
@@ -106,18 +112,42 @@ def build_capability_pack(declaration: dict, contents: dict[str, bytes]) -> Buil
     return _finish(KIND_CAPABILITY_PACK, _zip(sorted(members), members), require_entry=False)
 
 
-# LLM: 声明不能自带 schema_version；platforms 在声明与参数二选一；files 每项只写 path 与 executable（摘要由构建生成）。
-#   只看结构，不读文件。纯函数。
+# LLM: 声明不能自带 schema_version；platforms 在声明与参数二选一；顶层字段先按清单字段表核对，缺了或多了直接说出是哪几个
+#   （learnpack 生产测试：她照能力包的样子写插件声明，宿主只回"描述无效"，她猜了 80 轮）；files 每项只写 path 与 executable
+#   （摘要由构建生成）。只看结构，不读文件。纯函数。
 # 函数用途: 校验文件型插件声明的外形并返回要读的文件路径（按声明顺序）。
 def files_plugin_paths(declaration: object, platforms: tuple[str, ...] = ()) -> list[str]:
     if not isinstance(declaration, dict) or "schema_version" in declaration:
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "声明必须是对象，且不能自带协议版本")
     if platforms and "platforms" in declaration:
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "平台只能在声明或 --platform 中二选一")
+    problem = _plugin_field_problem(declaration, platforms)
+    if problem:
+        raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", problem)
     items = declaration.get("files")
     if not isinstance(items, list) or any(not isinstance(item, dict) or set(item) != {"path", "executable"} for item in items):
         raise PackageBuildError("PACKAGE_BUILD_DECLARATION_INVALID", "files 每项只能写 path 与 executable，摘要由脚本生成")
     return [item["path"] for item in items]
+
+
+# LLM: 字段表只取 plugin_manifest.files_plugin_manifest_fields（唯一出处）。声明要写的 = 清单字段 - 构建生成的 schema_version
+#   - 构建补空的字段（platforms 由参数给时也不用写）。返回空串表示顶层字段齐全且没有多余的；否则返回一句中文，说清缺哪些、
+#   多了哪些、完整要写哪些。只看键名，纯函数。
+# 函数用途: 核对插件声明的顶层字段，给出缺字段、多字段的具体说明。
+def _plugin_field_problem(declaration: dict, platforms: tuple[str, ...]) -> str:
+    v8 = bool(_V8_KEYS & declaration.keys())
+    fields = [name for name in files_plugin_manifest_fields(v8=v8) if name != "schema_version"]
+    optional = _PLUGIN_DEFAULTED_FIELDS | (_V8_KEYS if v8 else frozenset()) | ({"platforms"} if platforms else frozenset())
+    missing = [name for name in fields if name not in optional and name not in declaration]
+    unknown = sorted(set(declaration) - set(fields))
+    if not missing and not unknown:
+        return ""
+    parts = ([f"缺 {'、'.join(missing)}"] if missing else []) + ([f"多了 {'、'.join(unknown)}"] if unknown else [])
+    hint = "（capability 是能力包的字段，插件不写）" if "capability" in unknown else ""
+    required = "、".join(name for name in fields if name not in optional)
+    skippable = "、".join(name for name in fields if name in optional)
+    return (f"插件声明字段不对：{'；'.join(parts)}{hint}。这份声明要写全，构建不会从别处补字段：{required}"
+            f"（{skippable} 可省）；格式照内置技能 write-my-agent-plugin 的模板。")
 
 
 # LLM: contents 的键必须与声明的 files 一致；带 events/tool_gates/permissions 任一键时打成 v8（空订阅也照 v8 校验），

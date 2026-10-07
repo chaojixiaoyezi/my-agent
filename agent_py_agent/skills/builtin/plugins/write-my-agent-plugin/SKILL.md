@@ -44,6 +44,13 @@ tools_required: [skill_search, list_files, read_file, write_file, edit_file, app
 5. 默认标准库；新增文件功能先核工作区/SDK 合同，权限只能来自本次可信 `_meta`，不能用 cwd、插件目录、参数或历史上下文冒充授权。v8 两语言都用 `scripts/build_plugin_files_package.py`；旧 v1–v5 wheel 才用 `build_plugin_package.py`，不另开 wheel 订阅路径。命令见[打包与验证](references/pack-and-verify.md)。构建器仅在产品源码内，不随普通 wheel 提供；缺获授权入口如实报告，不手拼 ZIP、不联网补依赖。只构建本次受信授权源码。
 6. `TMPDIR`、副本和最终 `output/*.zip` 全在工作区。用真实 `inspect_plugin_package` 读回最终 v8 ZIP；从该包解出的入口跑握手、目录、业务、观察空回执和收紧请求，覆盖 Unicode、空输入、坏参数/错误后继续调用、危险模式 `ask` 与普通命令 `allow_as_is`。缺解释器或失败就修复或如实报告；不能把清单校验等同于安装启用或宿主收紧生效。
 
+## 你自己做的 v6 文件插件：用 package_build 打包
+
+1. 声明从模板 `declaration.json` 改：删掉 `events`、`tool_gates`、`permissions` 三个键就是 v6；`server.py` 里观察与收紧那两个方法和 `initialize` 的对应能力位可以一起删掉。插件声明不写能力包的 `capability` 字段。
+2. 改 `plugin_id`、`version`、`summary`、`actions`、`default_action`、`tools` 和真实实现；`files` 列出包里每个文件（`path` 与 `executable`），`settings_schema` 没设置就写空对象结构。
+3. 调 `package_build`：`kind=plugin`，`source_dir` 写插件项目目录，`declaration` 把整份声明对象原样传进去——它**不会读**目录里的 `declaration.json`，参数里少一个字段就打不出来；`origin` 写“自己写的”，`license` 写“自有”。
+4. 失败按回执改：回执会写缺了哪些字段、多了哪些字段和宿主校验的具体原因。不要改用 shell 跑构建脚本——那样打的包不在宿主记录里，`package_install` 会回 `PACKAGE_INSTALL_NOT_SELF_BUILT`。本机 `python3` 导入的 my-agent 不一定是正在运行的版本，宿主校验以 `package_build` 回执为准。
+
 ## 交付与常见错误
 
 - 给出源码、包的实际路径、真实测试结果及未验证范围；工作区不得留下密钥、会话正文或宿主内部状态。模板的 stdio 测试不等于安装/启用或真实 TUI/模型调用。

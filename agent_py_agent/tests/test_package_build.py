@@ -2,6 +2,8 @@
 
 锁定：仓库样例能力包/样例插件经产品函数打出的包，sha256 与搬家前的旧脚本产物逐字节一致（固定摘要）；两个脚本只是薄壳；
 同一输入两次打包字节相同；声明外形、链接、预算、文件清单不一致、产物复验失败都给登记过的错误码。
+插件声明的顶层字段按清单字段表核对：缺了、多了都点名（多了 capability 时说明那是能力包的字段），构建补空的字段与参数给的平台可省
+（learnpack 生产测试：她照能力包的样子写插件声明，宿主只回"描述无效"）。
 """
 from __future__ import annotations
 
@@ -127,6 +129,20 @@ def test_plugin_declaration_shape_errors_are_coded():
         assert error.value.code == "PACKAGE_BUILD_DECLARATION_INVALID"
     with pytest.raises(PackageBuildError):
         files_plugin_paths({"platforms": ["x"], "files": []}, ("darwin-arm64",))
+
+
+def test_plugin_field_check_names_fields_and_respects_defaults():
+    base = json.loads((ROOT / "plugins" / "hello-node" / "declaration.json").read_text(encoding="utf-8"))
+    assert files_plugin_paths(base) == [item["path"] for item in base["files"]], "构建补空的 panels/skills/host_api 可省"
+    without_platforms = {key: value for key, value in base.items() if key != "platforms"}
+    assert files_plugin_paths(without_platforms, ("darwin-arm64",)), "平台由参数给时声明里不用写"
+    with pytest.raises(PackageBuildError, match="缺 platforms"):
+        files_plugin_paths(without_platforms)
+    with pytest.raises(PackageBuildError, match="多了 capability（capability 是能力包的字段，插件不写）"):
+        files_plugin_paths({**base, "capability": {}})
+    assert files_plugin_paths({**base, "events": []}), "v8：写了一个订阅键，另外两个由构建补空"
+    with pytest.raises(PackageBuildError, match="不会从别处补字段：plugin_id、version、summary、entry、files、platforms"):
+        files_plugin_paths({"files": []})
 
 
 def test_plugin_executable_flag_sets_the_zip_member_mode(tmp_path):

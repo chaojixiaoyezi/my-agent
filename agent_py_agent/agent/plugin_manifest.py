@@ -411,6 +411,13 @@ class PluginManifest:
 _V6_FIELDS = ("schema_version plugin_id version summary entry files platforms actions default_action tools "
               "settings_schema panels skills host_api")
 _V8_FIELDS = _V6_FIELDS + " events tool_gates permissions"
+
+
+# LLM: 文件型插件（v6/v8）清单字段的唯一出处是上面两行；打包层（capability/package_build）用它告诉作者声明缺了哪些、多了
+#   哪些字段，不另抄一份字段表。改字段集合时打包层的提示自动跟着变。纯函数。
+# 函数用途: 按清单里的顺序返回文件型插件清单必须恰好包含的字段（v8 多三个订阅键）。
+def files_plugin_manifest_fields(*, v8: bool) -> tuple[str, ...]:
+    return tuple((_V8_FIELDS if v8 else _V6_FIELDS).split())
 _BASE_FIELDS = "schema_version plugin_id version summary entry_module entry_wheel wheels actions default_action tools settings_schema"
 # 各协议版本在基础字段之外必须出现的字段；每个新版本声明的新能力不能为空（否则应使用更低版本）
 _SCHEMA_FIELDS = {
