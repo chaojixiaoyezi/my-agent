@@ -103,7 +103,7 @@
 
 **第 8 步（MiniMax-M2.7 真模型，4 遍）**：TUI 开关关、IM 开关关、IM 开关开通过；TUI 开关开那遍她派子代理写文件，子代理写完后的后台续跑工具目录里
 没有打包、安装工具，没通过。用户定方案 A：两个工具放进后台工作目录（`background_tool_policy._BACKGROUND_WORK_TOOLS`），代价是它们始终直出、
-不再默认收起；修好后补跑那一遍（结果见 TESTS.md 第 8 步）。证据在 `~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`。
+不再默认收起；修好后用 `c42700a3e` 补跑那一遍通过（她这次没派子代理，派子代理那条路由 `test_learnpack_background` 证明，见 TESTS.md 第 8 步）。证据在 `~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`。
 
 **第 7 步（假模型）已跑通**：用假模型驱动真实对话回合、真实工具和真实 `/plugins#`、`/plugins` 命令，把能力包开关关/开、插件两种开关位置、TUI 与飞书两个入口、确认行重发回放和重启后照常都跑了一遍（`test_learnpack_e2e.py`，见 TESTS.md 第 7 步）。真模型（MiniMax）在两个入口各跑一遍是第 8 步，先给用户 token 估算、用户点头才跑。
 

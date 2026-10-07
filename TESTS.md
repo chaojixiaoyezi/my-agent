@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–22:56 PDT，3a，被测提交 `fd45290e0`）
+## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–23:24 PDT，3a，被测提交 `fd45290e0`，补跑 `c42700a3e`）
 
 - **跑法**：用户点头后跑完整 4 次。两个隔离根（各自 home、私有端口 8441/8442、`env -i`），模型目录只放 MiniMax-M2.7；样本是本机评测原版短剧
   `short-drama-skills`、长篇小说 `chinese-longnovel-skill`（都是 MIT，工作区只读）。TUI 一路用 tmux 驱动；IM 一路用飞书适配器同一套载荷与身份头
@@ -16,7 +16,10 @@
   都有，带中文动作说明；代价：始终直出、不再默认收起）。新用例 `test_learnpack_background.py`（3 条）：子代理整合续跑的目录和按它生成的工具快照里
   两个工具都在、续跑照旧没有 tool_search、各后台 profile 都有、非管理员 owner 快照里没有、始终直出而 skill_summarize 仍收起；
   `test_tool_default_deferral` 去掉两组已不收起的搜索参数。连带：引用后台续跑目录的测试与 learnpack 整组共 59 个文件 + 14 个守卫，
-  1744 passed / 1 xfailed / 0 failed；变异 3/3（后台目录不含打包、不含安装、安装没有动作说明）。补跑结果写在下一个提交。另有三处小问题记在设计台账。
+  1744 passed / 1 xfailed / 0 failed；变异 3/3（后台目录不含打包、不含安装、安装没有动作说明）。另有三处小问题记在设计台账。
+- **补跑（`c42700a3e`，干净隔离根，同一句提问）**：TUI 开关开学小说通过——直接装上并启用 `my-novel` 2.2.0（不开单），列表、查看、停用、删除都对；
+  这次她没派子代理（主回合 15 轮工具），所以"派子代理后在续跑里打包"那条路由 `test_learnpack_background` 证明。输入 1,433,397 token（缓存约 91%），
+  输出 6,881。第 8 步合计输入 8,626,186、输出 129,558 token；没碰到额度错误；密钥与密码 0 次出现。
 - **证据**：`~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`（README、每遍结构化步骤、屏幕记录、IM 回执、用量汇总、协议违规事件、脚本）。
 
 ## learnpack 第 7 步：整体验证（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
