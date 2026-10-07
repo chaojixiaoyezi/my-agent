@@ -20,6 +20,7 @@ from agent_py_agent.agent.agent_core.tool_loop import round_execution
 from agent_py_agent.agent.contracts.gates.command_policy import evaluate_command_policy
 from agent_py_agent.agent.contracts.tool_approval import ToolApprovalDecision
 from agent_py_agent.agent.gateway_parts import http_handlers, plugin_panels_http
+from agent_py_agent.agent.gateway_parts.recovery import _finish_gateway_conversation_claim
 from agent_py_agent.agent.gateway_parts.request_execution import _handle_gateway_request
 from agent_py_agent.agent.tooling.executor import ToolExecutorRequest
 from agent_py_agent.agent.tooling.models import (
@@ -168,6 +169,9 @@ def _run_case(bundle, monkeypatch, spec):
     processing = paths.processing / f'{request_id}.json'
     processing.write_text(json.dumps(queued))
     response = _handle_gateway_request(agent, processing)
+    # 直接调请求处理函数不经 worker 的终态迁移：按产品同一个收尾函数结束原请求的会话执行车道，否则同会话下一轮要等租约约
+    # 90 秒过期才领得到（GitHub 上按 60 秒超时判失败；CI 修复，2026-10-07）。
+    _finish_gateway_conversation_claim(json.loads(processing.read_text()), request_id, agent.conversation_store)
     assert response['ok'], response
     ran = spec.decision == 'approved' and spec.interactive
     assert tool.executions == int(ran) and agent.backend.calls == 2

@@ -186,3 +186,24 @@ def test_portable_directory_creation_race_rechecks_existing_identity(
         os.close(descriptor)
         assert (parent / ".lock").is_file()
     assert not list(outside.iterdir())
+
+
+def test_private_dir_without_dirfd_uses_the_portable_path(tmp_path, monkeypatch):
+    # Windows 上 os.open 打不开目录：不支持 dir_fd 时 ensure_private_dir 不得打开目录描述符，逐级新建、已存在的不动；
+    # 与 dir_fd 那条路同一规则：最近已存在祖先是指向目录的链接时跟随一次，是普通文件就拒绝（CI 修复，2026-10-07）。
+    monkeypatch.setattr(fs, "_supports_dir_fd", lambda: False)
+
+    def no_directory_descriptor(*_args, **_kwargs):
+        raise AssertionError("不支持 dir_fd 的平台不能打开目录描述符")
+
+    monkeypatch.setattr(fs, "open_directory_beneath", no_directory_descriptor)
+    fs.ensure_private_dir(tmp_path / "a" / "b" / "c")
+    assert (tmp_path / "a" / "b" / "c").is_dir()
+    fs.ensure_private_dir(tmp_path / "a" / "b" / "c")  # 已存在：什么都不做
+    (tmp_path / "real").mkdir()
+    (tmp_path / "a" / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+    fs.ensure_private_dir(tmp_path / "a" / "link" / "new" / "deeper")
+    assert (tmp_path / "real" / "new" / "deeper").is_dir()
+    (tmp_path / "a" / "plain").write_text("x", encoding="utf-8")
+    with pytest.raises(fs.NoFollowPathError):
+        fs.ensure_private_dir(tmp_path / "a" / "plain" / "new")

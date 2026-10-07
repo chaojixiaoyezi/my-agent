@@ -198,7 +198,7 @@ def example(...):
 
 ### 远端提交前强制本地严格验收
 
-当前仓库可能因为 GitHub Actions 额度、账单或临时策略暂停线上 CI。只要准备把代码推到远端、更新远端分支、开/更新 PR、或合并到 `main`，就必须先在本地跑最严格验收；不能把“线上 CI 暂停/没跑”当成跳过测试的理由。
+线上 GitHub Actions 在跑（Lint、Test 的 Python 3.10/3.11/3.12、Cross-platform guard 的 macOS/Windows、每晚 Full Tests）。每次推送 `main` 后必须确认这些工作流全绿（用户 2026-10-07 要求：别让推送一直报错）；本地严格验收是推送前的最低要求，不能代替线上 CI。只要准备把代码推到远端、更新远端分支、开/更新 PR、或合并到 `main`，就必须先在本地跑最严格验收。
 
 远端提交前最小严格 gate：
 
@@ -218,6 +218,8 @@ python3 scripts/check_clean_package.py .
 - Ruff、doc sync、strict code-size、diff 和 clean-package 仍属于远端提交前严格 gate，不受上述 pytest
   频率限制。
 - 任一命令失败时，默认不得推送远端、不得合并到 `main`；除非用户明确要求绕过，并且最终汇报写清失败命令、风险和原因。
+- 推送 `main` 前先看上一轮线上 CI 是否全绿；推送后跟到全部工作流全绿为止，红了先修，不在红的 `main` 上接着推新功能。
+- 只在线上才暴露的问题，推送前要在接近 GitHub runner 的环境复现：Linux 用非 root 用户、Python 解释器不在系统目录、3.10/3.11/3.12 三个版本、单用例 60 秒超时；改到文件系统、进程、路径这类平台相关代码时，先在分支上手动触发 Cross-platform guard（Windows 只能在线上跑）。
 - 如果线上 CI 被禁用或被 billing 阻塞，最终汇报必须明确说明“本地严格 gate 已通过/未通过”，以及线上 CI 没有作为验收来源。
 - 如果本轮不提交远端，只是本地探索、草稿或小切片开发，继续按改动风险运行 focused tests、语法检查、doc sync 或必要 guard；不强制每次都跑全量严格 gate。
 

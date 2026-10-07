@@ -27,10 +27,12 @@ _REFERENCE = re.compile(r"\.([A-Za-z_]\w*)|[\"']([A-Za-z_]\w*)[\"']")
 # 定义/规范化/登记类文件（P8 验收后修订，2026-10-02）：这些文件只是声明、校验或登记字段，
 #   不是真正消费方——P18 验收发现约 50 个键的“读取方”落在 _memory_coercion、_normalize、
 #   user_config_capability、model_provider_schema 上（如 memory_compact_auto_trigger_percent 显示
-#   user_config_capability，实际是 context_compactor）。排除后读取方才是实际消费方。
+#   user_config_capability，实际是 context_compactor）。排除后读取方才是实际消费方。runtime_tool_field_specs 是工具与会话类
+#   整数配置的范围表（供规范化校验），同属登记类（CI 修复，2026-10-07：它和真实消费方各引用 1 次时打平，取哪个看遍历顺序）。
 _DEFINITION_EXCLUDED = frozenset({
     _PACKAGE / "agent" / "settings" / "_memory_coercion.py",
     _PACKAGE / "agent" / "settings" / "services" / "_normalize.py",
+    _PACKAGE / "agent" / "settings" / "services" / "runtime_tool_field_specs.py",
     _PACKAGE / "agent" / "settings" / "user_config_capability.py",
     _PACKAGE / "agent" / "settings" / "model_provider_schema.py",
 })
@@ -199,12 +201,14 @@ def _count_references(path: Path, counts: dict[str, dict[str, int]]) -> None:
         per_module[relative] = per_module.get(relative, 0) + 1
 
 
-# LLM: 引用最多的文件为读取方；没有直接引用的决策字段用 decision_config_fields 映射补；都没有返回 None。只读。
+# LLM: 引用最多的文件为读取方；次数打平时取相对路径排在最后的那个（只看次数和路径，与文件系统遍历顺序无关——
+#   GitHub 的 Linux 与 macOS 遍历顺序不同，api_base 有 6 个文件各引用 5 次，曾让 CI 和本机取到不同文件）。没有直接引用的决策
+#   字段用 decision_config_fields 映射补；都没有返回 None。只读。
 # 函数用途: 为一个配置字段选出主要读取方与归属模块。
 def _reader_for(name: str, counts: dict[str, dict[str, int]], mapped: dict[str, tuple[str, str]]) -> tuple[str, str] | None:
     per_module = counts.get(name)
     if per_module:
-        reader = max(per_module, key=per_module.get)
+        reader = max(per_module, key=lambda module: (per_module[module], module))
         return _owner_module(reader), reader
     return mapped.get(name)
 

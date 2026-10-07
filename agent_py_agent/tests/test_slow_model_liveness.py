@@ -204,9 +204,11 @@ def test_heartbeat_only_activity_keeps_client_waiting(tmp_path) -> None:
     terminal_path = tmp_path / "req.json"
     processing_path.write_text("{}", encoding="utf-8")
 
+    # 心跳每 0.05 秒一次、共约 1 秒，静默判死窗口 0.4 秒：窗口远短于总时长（心跳若不算活动，0.4 秒就会判死），又给慢机器的
+    # 线程调度留出余量（原来 0.06/0.12，GitHub 上偶发被判死；CI 修复，2026-10-07）。
     def silent_work() -> None:
-        for index in range(6):
-            time.sleep(0.06)
+        for index in range(20):
+            time.sleep(0.05)
             processing_path.write_text(
                 json.dumps({"lease_heartbeat_at": time.time(), "tick": index}),
                 encoding="utf-8",
@@ -223,7 +225,7 @@ def test_heartbeat_only_activity_keeps_client_waiting(tmp_path) -> None:
             lambda _chunk: False,
             [0],
             activity_paths=(chunk_path, processing_path),
-            inactivity_timeout_seconds=0.12,
+            inactivity_timeout_seconds=0.4,
         )
     )
     worker.join(timeout=5)

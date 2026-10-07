@@ -225,7 +225,9 @@ def _cancel_on_ready(token, ready):
 
 @pytest.mark.parametrize("mode", ["plain", "platform"])
 def test_running_cancellation_reclaims_entire_process_group(tmp_path, monkeypatch, mode):
-    sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(tmp_path, tmp_path, tmp_path, tmp_path))
+    # 与产品里跑检查程序的规格一致（pack_verifier_runner._sandbox_spec：整根只读、只写临时目录）：用宿主自己的解释器跑命令，
+    # 解释器不在系统目录（GitHub 的 /opt/hostedtoolcache、家目录里的虚拟环境）时只放行系统目录的规格会 execvp 失败（CI 修复，2026-10-07）。
+    sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(tmp_path, tmp_path, tmp_path, tmp_path, read_only_root=True))
     if mode == "plain":
         sandbox = _plain_sandbox(tmp_path, monkeypatch)
     else:

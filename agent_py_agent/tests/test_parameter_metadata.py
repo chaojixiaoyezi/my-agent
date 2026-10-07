@@ -96,6 +96,23 @@ def test_readers_exclude_definition_normalization_registration_files():
     assert registry["api_base"].reader == "agent/settings/model_profiles"
 
 
+def test_readers_do_not_depend_on_file_walk_order(monkeypatch):
+    """CI 修复（2026-10-07）：GitHub 的 Linux 与 macOS 遍历文件顺序不同，引用次数打平时曾取到不同读取方（api_base 6 个文件各 5 次）。
+    打平按相对路径定，倒着遍历结果也一样。"""
+    from agent_py_agent.agent.settings import parameter_metadata as metadata
+
+    metadata.field_readers.cache_clear()
+    forward = metadata.field_readers()
+    walk = type(metadata._PACKAGE).rglob
+    monkeypatch.setattr(type(metadata._PACKAGE), "rglob", lambda self, pattern: sorted(walk(self, pattern), reverse=True))
+    metadata.field_readers.cache_clear()
+    try:
+        assert metadata.field_readers() == forward
+        assert forward["api_base"] == ("settings", "agent/settings/model_profiles")
+    finally:
+        metadata.field_readers.cache_clear()
+
+
 def test_owner_module_is_top_level_without_slash():
     """归属模块是顶层模块名（不含路径分隔符），读取方是相对文件路径。"""
     for key, spec in parameter_registry().items():

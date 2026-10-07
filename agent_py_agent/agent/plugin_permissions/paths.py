@@ -17,6 +17,10 @@ def validate_permission_root(path: Path, forbidden_roots) -> None:
         raise ValueError("不能授权宿主控制目录或其祖先")
 
 
+# 程序文件摘要每次读入的块大小（字节）。
+_DIGEST_CHUNK_BYTES = 1024 * 1024
+
+
 # LLM: 不展开相对路径、~ 或 ..；解析到别名或链接时拒绝，程序文件摘要以流式读取固定。
 # 函数用途: 读取路径身份，不运行程序或读取目录内的业务正文。
 def permission_path(value: str, forbidden_roots, *, program: bool = False):
@@ -33,8 +37,13 @@ def permission_path(value: str, forbidden_roots, *, program: bool = False):
         raise ValueError("读写根必须为目录，额外依赖可为普通文件或目录前缀")
     digest = ""
     if program and path.is_file():
+        # 项目支持 Python 3.10，hashlib.file_digest 是 3.11 才有的（3.10 上整条插件启用会以 AttributeError 失败，CI 修复
+        # 2026-10-07），这里按块流式读，结果相同。
+        hasher = hashlib.sha256()
         with path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            for chunk in iter(lambda: stream.read(_DIGEST_CHUNK_BYTES), b""):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
     return PermissionPath(str(path), stat.st_dev, stat.st_ino, digest)
 
 

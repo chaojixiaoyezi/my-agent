@@ -120,7 +120,9 @@ def test_many_message_summary_avoids_whole_json_copy(monkeypatch):
         tracemalloc.stop()
     assert chars == len(expected) and calls > 2
     assert digest.digest() == hashlib.sha256(expected.encode("utf-8")).digest()
-    assert peak < len(expected) // 2, (peak, len(expected))
+    # 复制整份 JSON 本身就至少有 len(expected) 字节；tracemalloc 也会算进同进程其它线程的分配，GitHub 的慢机器上峰值约是整份的
+    # 0.51（本机约 0.38），所以上限放在 3/4：抓得住整份复制，又不被别的线程的分配误伤（CI 修复，2026-10-07）。
+    assert peak < len(expected) * 3 // 4, (peak, len(expected))
 
 
 def test_source_mutation_during_summary_never_returns_covered_result(monkeypatch):

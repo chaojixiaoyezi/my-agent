@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 947,
+  "count": 948,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4770,6 +4770,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "观察标签的最大字符数；超长截断，防止标签撑爆载荷。"
+    },
+    {
+      "name": "_DIGEST_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/plugin_permissions/paths.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": "程序文件摘要每次读入的块大小（字节）。"
     },
     {
       "name": "DEFAULT_EMBED_DIM",

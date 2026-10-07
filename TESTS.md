@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
+
+- **来由**：main 的 GitHub Actions 红了一周——Test（ubuntu，3.10/3.11/3.12 快速套件，单用例 60 秒）从 10-01 起、Cross-platform guard（macOS/Windows）从 10-05 起、每晚 Full Tests 都失败；本地 Mac、Docker（root、Python 在 /usr）都没暴露。
+- **逐条修复**（产品 3 处、测试 4 处）：
+  - `settings/parameter_metadata`：参数"读取方"按引用次数取最多的文件，打平时原来看文件遍历顺序（GitHub 的 Linux 与 macOS 不同，`api_base` 6 个文件各 5 次）；改为打平取相对路径最后的；字段范围表 `runtime_tool_field_specs` 属登记类、加进排除名单（`plugin_tool_gate_timeout_ms` 才能稳定指向 `tool_gate_review`）。新用例：倒序遍历结果不变。
+  - `plugin_permissions/paths`：项目支持 Python 3.10，`hashlib.file_digest` 是 3.11 才有的，3.10 上整条老格式插件启用以 AttributeError 失败（`test_plugin_legacy_drift` 8 条）；改为按块流式读，结果相同。
+  - `common/nofollow_fs.ensure_private_dir`：Windows 上 `os.open` 打不开目录，Python 不支持 dir_fd 时改走模块里现成的 `_portable_directory`（逐级 lstat，拒绝链接与非目录），与其它原语一致（Windows 上子代理建任务目录 11 条全部 PermissionError）。新用例：模拟不支持 dir_fd、禁止打开目录描述符。
+  - `test_pack_verification_cancellation[platform]`：用例的沙箱规格只放行系统目录，GitHub 的解释器在 /opt/hostedtoolcache、测试机虚拟环境在家目录，沙箱里 execvp 失败；改用产品跑检查程序的同一规格（整根只读，`pack_verifier_runner._sandbox_spec`）。
+  - `test_plugin_m1_joint_tool_gate::test_recent_decisions_are_rendered_newest_first`：直接调请求处理函数不经 worker 的终态迁移，会话执行车道没结束，第二轮要等租约约 90 秒过期（本机 90.25 秒才过，GitHub 按 60 秒超时判失败）；每轮后用产品同一个收尾函数 `recovery._finish_gateway_conversation_claim` 结束车道，现在 0.42 秒。
+  - `test_compact_text_source::test_many_message_summary_avoids_whole_json_copy`：tracemalloc 也算同进程其它线程的分配，GitHub 上峰值约整份 JSON 的 0.51（本机 0.38），上限 1/2 偶发越线；改为 3/4，整份复制（≥1.0）照样抓得住。
+  - `test_slow_model_liveness::test_heartbeat_only_activity_keeps_client_waiting`：心跳 0.06 秒、判死窗口 0.12 秒，慢机器偶发被判死；改为心跳 0.05 秒共约 1 秒、窗口 0.4 秒（窗口仍远短于总时长，心跳不算活动就会判死）。
+- **复现与验证**：测试机（openEuler x86_64，非 root 用户、Python 装在家目录，与 GitHub runner 同类）复现了沙箱用例、两轮车道卡住与读取方打平；本机 Python 3.10 虚拟环境复现了 3.10 失败；本机用插件模拟 Windows（不支持 dir_fd、打开目录即 PermissionError）复现了 Windows 的 11 条，修复后 Cross-platform guard 的 7 个测试文件全过。变异：读取方打平看遍历顺序、范围表不排除、私有目录不走可移植退路 3/3 被杀；3.10 上撤掉摘要修复则漂移用例失败。
+
 ## learnpack 生产测试发现的问题与修复（2026-10-07，3a，分支 `claude/3a-learnpack-prodfix`）
 
 - **来由**：部署 step17q 后在生产上用真 MiniMax-M2.7 测（3a 开自己的 TUI 连生产 Gateway），发现四个问题，见设计台账与 `docs/design/LEARN_TO_PACK.md` 第 12 节。

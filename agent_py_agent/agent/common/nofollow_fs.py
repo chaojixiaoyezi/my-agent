@@ -246,13 +246,19 @@ def split_existing_anchor(path: str | Path) -> tuple[Path, tuple[str, ...]]:
 
 # LLM: 私有写与私有锁统一的“确保目录存在”（原 json_io._ensure_private_dir 公开版，pbfix）：缺失段经
 #   no-follow 原语逐段按 0700 新建——中间各级同样是 0700（mkdir(parents=True, mode=0o700) 只保证最后一级）；
-#   已存在的目录一律不动；最近已存在祖先是有效符号链接时跟随一次，断链/指向文件保持拒绝。
+#   已存在的目录一律不动；最近已存在祖先是有效符号链接时跟随一次，断链/指向文件保持拒绝。Python 不支持 dir_fd 的平台
+#   （Windows：os.open 打不开目录）与本模块其它原语一样走 _portable_directory（逐级 lstat，拒绝链接与非目录），不再
+#   打开目录描述符（CI 修复，2026-10-07：Windows 上子代理建任务目录全部 PermissionError）。
 # 函数用途: 确保一个宿主私有目录存在；缺失则逐级按 0700 新建，已存在（含符号链接）则完全不动。
 def ensure_private_dir(directory: str | Path) -> None:
     anchor, parts = split_existing_anchor(Path(os.path.abspath(directory)))
     if not parts:
         return
-    os.close(open_directory_beneath(resolve_existing_symlink_anchor(anchor), parts, create=True))
+    root = resolve_existing_symlink_anchor(anchor)
+    if not _supports_dir_fd():
+        _portable_directory(root, parts, create=True)
+        return
+    os.close(open_directory_beneath(root, parts, create=True))
 
 
 # LLM: 永久锁仅允许单链接普通文件；先排他创建，已存在再打开，避免并发非排他创建的歧义；调用方关闭 fd。
