@@ -20,6 +20,7 @@
 - **补跑（`c42700a3e`，干净隔离根，同一句提问）**：TUI 开关开学小说通过——直接装上并启用 `my-novel` 2.2.0（不开单），列表、查看、停用、删除都对；
   这次她没派子代理（主回合 15 轮工具），所以"派子代理后在续跑里打包"那条路由 `test_learnpack_background` 证明。输入 1,433,397 token（缓存约 91%），
   输出 6,881。第 8 步合计输入 8,626,186、输出 129,558 token；没碰到额度错误；密钥与密码 0 次出现。
+- **修正后的 Linux 通道复跑**（修正改的是后台续跑目录这个共享默认值）：在 `2dc89cc17` 上用 linux-test-main 检出跑全量 12 片，12/12 rc=0，29428 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，pytest 465 秒；证据 claude-tools/linux-lane-2dc89cc17/。
 - **证据**：`~/.my-agent/decision-evidence/learnpack-p1-fd45290e0/`（README、每遍结构化步骤、屏幕记录、IM 回执、用量汇总、协议违规事件、脚本）。
 
 ## learnpack 第 7 步：整体验证（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
