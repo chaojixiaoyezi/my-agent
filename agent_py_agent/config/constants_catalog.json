@@ -1188,16 +1188,16 @@
       "description": "文件少了时回执里最多列出的路径个数。"
     },
     {
-      "name": "_SAME_DOMAIN_LIST_LIMIT_COUNT",
-      "file": "agent_py_agent/agent/capability/learnpack_build_notes.py",
+      "name": "SAME_DOMAIN_LIST_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_domain.py",
       "value": 3,
       "unit": "个",
       "category": "上限预算",
       "description": "同领域提醒里最多列出的已装包个数。"
     },
     {
-      "name": "_SHARED_KEYWORD_LIMIT_COUNT",
-      "file": "agent_py_agent/agent/capability/learnpack_build_notes.py",
+      "name": "SHARED_KEYWORD_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/learnpack_domain.py",
       "value": 5,
       "unit": "个",
       "category": "上限预算",

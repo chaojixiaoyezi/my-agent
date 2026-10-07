@@ -481,3 +481,8 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
   `retention_apply._apply_candidate_phase(candidates, plan)`，返回结果与错误两个新列表，后续逐条动作继续追加。
 
 2026-09-29 唤醒毒丸第 4 步（分支 `claude/be-wake-ops`）：`retention_scan._thread_wake_files` 把 `wake_queue/quarantine/archive/` 顶层（满 14 天归档的结案记录，带 thread_id）加进会话删除清单；`archive/ledger`、`archive/unreadable` 与原来的留档目录一样无法归属会话，不随会话删除。
+
+2026-10-07 `remember` 回执让"没记上"一眼可见（3a，分支 `claude/3a-learnpack-prodfix`，learnpack 生产测试发现：候选因缺证据没生效、回执是 `ok: true`，她对用户说"已记下来了"）：
+- 回执加 `saved`：每条 promotion 结果的 `reason_code` 都是 PROMOTED 或 ALREADY_PROMOTED 才为 true；`ok` 含义不变（调用跑完了，候选也算副作用）。
+- `hint` 按结构化结果改写：没记上的分支一律以"没记上（正式记忆没变）"开头并写"不要对用户说已记下"（缺证据的仍带"不能把缺证据说成等待用户确认"）；一批里有记上有没记上写"部分记上了：有 N 条没记上"；全是 ALREADY_PROMOTED 写"早就在正式记忆里了"；正式记忆更新的三种说法不变。
+- 测试：`test_memory_tool.py` 断言缺证据、要人审（REVIEW_REQUIRED）、部分记上、早就记着四种回执的 `saved` 与 `hint`；6 个变异全杀（只认 pytest rc=1）。

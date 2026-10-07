@@ -76,6 +76,7 @@
 |-- agent_py_agent/agent/capability/package_build.py # 能力包（v7）与文件型插件包（v6/v8）唯一的打包实现：清单、摘要、成员顺序与权限位、复验；两个打包脚本只是薄壳
 |-- agent_py_agent/agent/capability/learnpack_store.py # learnpack 宿主存储 <owner home>/data/learnpack/：她打的包（内容寻址、读回验摘要）、待确认安装单（只执行一次）、安装记录、她装过的包名
 |-- agent_py_agent/agent/capability/learnpack_build_notes.py # learnpack 打包回执的版本事实与软提醒：现在装着哪一版、她做过哪些版本，同号重用、版本倒退、比上一版少了文件（不挡打包）
+|-- agent_py_agent/agent/capability/learnpack_domain.py # learnpack“同领域”与“她做的”的唯一判断：打包提醒、安装与确认回执里给用户的提醒、/plugins# 列表的同领域行、skill_search 的 made_by_me 都调它
 |-- agent_py_agent/agent/capability/learnpack_installer.py # learnpack 安装驱动：把“装她打的包”变成管理员同一串 /plugins 命令（安装/停用+更新→启用→必要时代确认运行她自己的程序），联网与读写目录授权永不代给
 |-- agent_py_agent/agent/capability/pack_commands.py # 能力包命令 /plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>] 的唯一处理处（TUI、IM 同一入口），列表标出她做的
 |-- agent_py_agent/agent/capability/learnpack_service.py # learnpack 三条安装入口：开关开着自动装（专用 learnpack 线程）、用户发 /plugins confirm 执行待确认安装单（只执行一次）、/plugins revert 退回她做的上一版；包名归属检查
@@ -1318,6 +1319,7 @@ agent_py_agent/
 |   |-- test_learnpack_background.py    # learnpack 后台续跑：子代理写完后的续跑目录里有打包、安装（第 8 步修正），非管理员不授予，始终直出
 |   |-- test_learnpack_e2e.py    # learnpack 整条链路：能力包开关关/开、插件两种开关位置、TUI 与飞书、确认重发回放、重启后照常
 |   |-- test_learnpack_merge.py    # learnpack 同领域合并：查到已装同领域包先问、并进去出新版本、两个方向都在、退回合并前；版本号重用提醒
+|   |-- test_learnpack_same_domain.py    # learnpack 同领域早提醒：安装回执的 same_domain_installed 与 user_notice、确认后宿主回执带提醒（TUI/IM）、/plugins# 同领域行、skill_search made_by_me
 |   |-- test_skill_summarize_tool.py    # learnpack 让她总结一下：管理员专用、自学习关着如实说、target 两种落点、同一次活只入队一次、过闸门发布、能回退
 |   |-- test_learnpack_install.py       # learnpack 安装：命令顺序与代确认边界（假管理服务）、开关开/关真实链路、确认单只执行一次、检查程序跟插件开关
 |   |-- test_audit_requests_topic.py    # 审计 requests 主题：owner_id/会话归属、去重、时间窗、不含正文、跨用户两道门、管理员身份事实
@@ -1665,6 +1667,7 @@ docs/
 - `agent_py_agent/agent/capability/self_install_switches.py`：learnpack 自动装开关的唯一读取口，每次按文件现读（不吃 agent 缓存快照），参数中心据它把两个开关的生效时机报成“马上生效”。
 - `agent_py_agent/agent/capability/package_build.py`：打包规则的唯一位置；不执行、不导入随包文件，同一输入同一字节（固定摘要测试守着）。
 - `agent_py_agent/agent/capability/learnpack_store.py`：learnpack 的宿主存储；“是不是她做的”只认这里且读回重算 sha256，安装单靠独占创建只执行一次。
+- `agent_py_agent/agent/capability/learnpack_domain.py`：“同领域”（她做的、装着的、包名不同的能力包，声明关键词 casefold 整词重合）和“她做的”（装着的字节在 learnpack 存储里有打包记录）只在这里判断；只读结构化字段，给用户的同领域提醒也在这里拼。
 - `agent_py_agent/agent/tooling/package_build_tool.py`：模型工具 package_build（本机管理员、默认收起），读文件过 read_file 同一裁决、拦密钥，产物进 learnpack 存储，回执带开关事实与下一步。
 - `agent_py_agent/agent/capability/learnpack_installer.py`、`learnpack_service.py`：learnpack 安装只经 `PluginManagement.command` 执行管理员同一串 /plugins 命令；代确认只覆盖运行她自己做的程序。
 - `agent_py_agent/agent/capability/pack_commands.py`：`/plugins#` 唯一处理处；启用/停用/删除转成管理员同一条 `/plugins` 命令并沿用用户的请求编号与目录版本，退回与安装复用 learnpack_service。

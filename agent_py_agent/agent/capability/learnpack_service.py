@@ -16,6 +16,7 @@ import re
 from dataclasses import asdict, dataclass, replace
 
 from ..plugin_package import inspect_plugin_package
+from .learnpack_domain import installed_notice
 from .learnpack_installer import (
     STATE_ENABLED,
     STATE_FAILED,
@@ -190,7 +191,8 @@ def confirm_order(manager: object, order_id: str) -> dict[str, object]:
                                   "error_code": outcome.error_code})
     if outcome.state not in REFUSED_STATES:
         store.record_install(_install_entry(record, outcome, {"via": "order", "order_id": order_id}))
-    return outcome_reply(outcome)
+    notice = installed_notice(store, manager.context.owner, record) if outcome.state == STATE_ENABLED else ""
+    return outcome_reply(outcome, notice)
 
 
 # LLM: 不占单的前置检查（复审 S1 与过期单）：插件功能与管理动作同 _management_problem；包名归属同 ownership_problem；
@@ -339,11 +341,13 @@ def package_runs_programs(store: LearnpackStore, record: BuildRecord) -> bool:
     return manifest.entry is not None
 
 
-# LLM: 宿主回执用的字典：成功与否只看结构化 state；停在确认不是失败，不带错误码（IM 回执末行才能保持是那行命令）。纯函数。
+# LLM: 宿主回执用的字典：成功与否只看结构化 state；停在确认不是失败，不带错误码（IM 回执末行才能保持是那行命令）。
+#   notice 是装上以后的用户提醒（同领域，learnpack_domain.installed_notice），只在装上时由调用方给，接在说明后面。纯函数。
 # 函数用途: 把一次安装结果排成插件命令回执。
-def outcome_reply(outcome: InstallOutcome) -> dict[str, object]:
+def outcome_reply(outcome: InstallOutcome, notice: str = "") -> dict[str, object]:
     reply: dict[str, object] = {"ok": outcome.state == STATE_ENABLED, "state": outcome.state,
-                                "message": outcome.message, "learnpack_install": asdict(outcome)}
+                                "message": outcome.message + (f"\n{notice}" if notice else ""),
+                                "learnpack_install": asdict(outcome)}
     if outcome.next_command:
         reply["message"] = f"{outcome.message}\n{outcome.next_command}"
     if outcome.error_code and outcome.state != STATE_NEEDS_USER:

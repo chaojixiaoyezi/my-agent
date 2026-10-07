@@ -329,6 +329,7 @@ class RememberTool(BaseTool):
             json.dumps(
                 {
                     "ok": True,
+                    "saved": _remember_saved(promotion_results),
                     "action": action,
                     "active_memory_changed": active_changed,
                     "results": promotion_results,
@@ -966,15 +967,39 @@ def _promotion_result_with_scope(
     return result
 
 
+# 这两种结果码表示这条已经在正式记忆里（这次写进去的，或早就写过、这次幂等命中）。
+_SAVED_REASON_CODES = frozenset({"PROMOTED", "ALREADY_PROMOTED"})
+
+
+# LLM: saved 只看每条 promotion 结果的结构化 reason_code：每一条都在正式记忆里（PROMOTED 或 ALREADY_PROMOTED）才算 true。
+#   "ok" 只表示这次调用跑完了（候选也算副作用），不表示记住了；learnpack 生产复测里她看到 ok 就对用户说"已记下来了"，
+#   其实记忆因缺证据没生效，所以单独给一个一眼可见的字段。纯函数。
+# 函数用途: 判断这次要记的内容是不是全都在正式记忆里了。
+def _remember_saved(promotion_results: list[dict[str, object]]) -> bool:
+    return bool(promotion_results) and all(
+        str(item.get("reason_code") or "") in _SAVED_REASON_CODES for item in promotion_results
+    )
+
+
 # LLM: Result hints summarize typed repairs and recall scopes already projected beside each
-# promotion result. They are explanation only and never widen machine authority.
-# 函数用途: 说明正式记忆是否变化及其召回边界；失败时要求模型按结构化修复项重试。
+# promotion result. They are explanation only and never widen machine authority. Every branch
+# where something is not in formal memory starts with "没记上" and tells the model not to claim
+# it was saved (learnpack production retest: "ok": true was read as "saved").
+# 函数用途: 说明正式记忆是否变化及其召回边界；没记上时直说没记上、别对用户说已记下，并要求按结构化修复项重试。
 def _remember_result_hint(
     action: str,
     active_changed: bool,
     required_repairs: list[dict[str, object]],
     promotion_results: list[dict[str, object]],
 ) -> str:
+    unsaved = sum(str(item.get("reason_code") or "") not in _SAVED_REASON_CODES for item in promotion_results)
+    if active_changed and unsaved:
+        return (
+            f"部分记上了：有 {unsaved} 条没记上（看 results 的 reason_code），不要对用户说全部记下了；"
+            "没记上的按 required_repairs 或 reason_code 处理，处理不了就如实告诉用户。"
+        )
+    if promotion_results and not unsaved and not active_changed:
+        return "这些内容早就在正式记忆里了（这次没有重复写入），可以如实告诉用户已经记着。"
     if active_changed:
         scope_types = {
             str((item.get("memory_scope") or {}).get("scope_type") or "")
@@ -995,12 +1020,12 @@ def _remember_result_hint(
         )
     if required_repairs:
         return (
-            f"{action} 候选已记录，但对应 memory_scope 的正式记忆未改变；"
-            "按 required_repairs 补齐真实来源后重试，不能把缺证据说成等待用户确认。"
+            f"没记上（正式记忆没变）：{action} 只记成了候选，不要对用户说“已记下”或“记住了”。"
+            "按 required_repairs 补齐真实来源后重试，不能把缺证据说成等待用户确认；补不了就如实告诉用户没记上。"
         )
     return (
-        f"{action} 候选已记录，但对应 memory_scope 的正式记忆未改变；"
-        "请依据 reason_code 补证据、修正精确目标或解决冲突。"
+        f"没记上（正式记忆没变）：{action} 只记成了候选，不要对用户说“已记下”或“记住了”。"
+        "请依据 reason_code 补证据、修正精确目标或解决冲突；处理不了就如实告诉用户没记上。"
     )
 
 

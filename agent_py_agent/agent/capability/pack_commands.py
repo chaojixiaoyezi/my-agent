@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 
 from ..command_arguments import CommandArgumentError, lex_command_arguments
+from .learnpack_domain import same_domain_packs, same_domain_text
 from .learnpack_service import confirm_order, revert_install
 from .learnpack_store import ORDER_ID_PATTERN, LearnpackStore
 from .package_build import KIND_CAPABILITY_PACK
@@ -97,11 +98,13 @@ def _install_order(manager: object, package_id: str, order_id: str) -> dict[str,
     return confirm_order(manager, order_id)
 
 
-# LLM: "她做的"只按结构化事实判断：当前装的字节摘要在 learnpack 存储里有打包记录。只读。
-# 函数用途: 列出全部已装能力包（版本、启用状态、是否她做的、来源与许可证）。
+# LLM: "她做的"只按结构化事实判断：当前装的字节摘要在 learnpack 存储里有打包记录。她做的包和她做的另一个已装能力包声明的关键词
+#   重合时（learnpack_domain 同一判断）多一行"同领域"，方便用户看出重复、决定要不要让她合并。只读。
+# 函数用途: 列出全部已装能力包（版本、启用状态、是否她做的、来源与许可证、同领域）。
 def render_pack_list(manager: object) -> str:
     store = LearnpackStore(manager.context.owner.home_dir)
-    rows = [row for row in manager.installations.snapshot() if row.manifest.is_content_only]
+    entries = tuple(manager.installations.snapshot())
+    rows = [row for row in entries if row.manifest.is_content_only]
     if not rows:
         return "当前没有装能力包。她学完外部 agent 做好能力包后，会给你装包的那一行命令。"
     lines = ["已装能力包（/plugins#<包名> 查看详情）："]
@@ -111,6 +114,9 @@ def render_pack_list(manager: object) -> str:
         lines.append(f"- {row.manifest.plugin_id} {row.manifest.version}（{state}）")
         if record is not None:
             lines.append(f"  {_declared_line(record)}")
+            same = same_domain_packs(store, entries, row.manifest.plugin_id, row.manifest.capability.keywords)
+            if same:
+                lines.append(f"  同领域：{same_domain_text(same)}")
     return "\n".join(lines)
 
 

@@ -12,6 +12,8 @@
 #   主任务旧 pin 已停用/换代时按快照里的结构化 pin 诊断回 CAPABILITY_PACKAGE_TASK_PIN_UNAVAILABLE（告诉用户），
 #   不再套用子代理口径的“由父代理重新授权”；没有 pin 诊断的缺包仍走原快照错误。
 #   正文读取及 pin 共用 package_read；本工具仍沿原 ToolExecutor 准入，宿主加载不伪造工具回执。
+#   能力包结果带 made_by_me（她自己学来做的包，learnpack_domain 同一判断；同领域只能并进这种包），只对本机管理员算，读不到安装表
+#   就都当 false，不影响检索。
 #   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
@@ -33,6 +35,7 @@ from ..tooling.models import (
     ToolParameterCondition,
     ToolRuntimePolicy,
 )
+from .learnpack_domain import self_made_package_ids
 from .package_read import (
     continuation_mismatches,
     package_continuation,
@@ -160,10 +163,12 @@ class SkillSearchTool(BaseTool):
                 "categories": router.render_category_index(),
             }
             return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        mine = _self_made_ids(self.agent) if any(hit.card.kind == "capability_package" for hit in hits) else set()
         matches = [
             ({"kind": "capability_package", "package_id": hit.card.metadata["package_id"],
               "name": hit.card.name, "description": hit.card.description,
               "stable_id": hit.card.metadata["stable_id"], "score": round(hit.score, 1),
+              "made_by_me": hit.card.metadata["package_id"] in mine,
               "next_read": package_read_parameters(hit.card.metadata)}
              if hit.card.kind == "capability_package" else {
                 "kind": "skill",
@@ -269,6 +274,24 @@ class SkillSearchTool(BaseTool):
             "body": body,
         }
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+# LLM: learnpack 只对本机管理员开放，别的 owner 一律空集；读不到安装表或存储也是空集（made_by_me 都为 false），不让检索失败。只读。
+# 函数用途: 取当前 owner 装着的包里哪些是她自己做的。
+def _self_made_ids(agent) -> set[str]:
+    from ..plugin_install_store import PluginInstallStore
+    from ..user_space.owner_access import is_complete_local_admin_owner
+    from .learnpack_service import learnpack_owner
+    from .learnpack_store import LearnpackStore
+
+    home = getattr(agent, "home_paths", None)
+    if not is_complete_local_admin_owner(home):
+        return set()
+    try:
+        entries = tuple(PluginInstallStore(learnpack_owner(agent)).snapshot())
+        return self_made_package_ids(LearnpackStore(home.owner_home_dir), entries)
+    except (OSError, ValueError):
+        return set()
 
 
 # 函数用途: 只取 composition root 装配的唯一路由器；缺失时 fail closed。

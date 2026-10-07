@@ -2,12 +2,19 @@
 #   读回重算摘要）；能不能直接装只看对应开关的现读值（能力包看能力包开关，插件看插件开关），自然语言不参与。
 #   开关开：宿主走管理员同一串 /plugins 命令装上并启用，代确认范围只取插件开关（运行她自己做的程序）；
 #   开关关：只开一张待确认安装单，回执给出用户要原样发的那一行确认，什么都不装。
-#   回执里的开关事实、命令原文都是给模型照抄提醒用户的；改字段要同步 learn-external-agent 技能与 test_learnpack_install。
+#   回执里的开关事实、命令原文都是给模型照抄提醒用户的；已经装着她做的同领域能力包时（learnpack_domain 同一判断）回执带
+#   same_domain_installed 与 user_notice，开单时提醒她先问用户（生产复测：她看到打包提醒也照装不误）。
+#   改字段要同步 learn-external-agent 技能、test_learnpack_install 与 test_learnpack_same_domain。
 # 模块用途: 让 my-agent 按你的开关把她打的包装上，或者准备好一行确认交给你。
 from __future__ import annotations
 
 import json
 
+from ..capability.learnpack_domain import (
+    build_capability,
+    same_domain_packs,
+    same_domain_user_notice,
+)
 from ..capability.learnpack_installer import (
     STATE_ENABLED,
     STATE_NEEDS_USER,
@@ -100,15 +107,17 @@ class PackageInstallTool(BaseTool):
         if taken is not None:
             return _error(taken.error_code, taken.message)
         switches = read_self_install_switches(self._agent)
+        domain = _same_domain(store, entries, record)
         facts = {"package": _package_facts(store, record), "installed_now": _installed_facts(existing),
-                 "switches": switch_facts(switches)}
+                 "switches": switch_facts(switches), "same_domain_installed": [pack.to_payload() for pack in domain]}
         if not _can_install_now(record, switches, facts["package"]["runs_programs"]):
-            return _order_receipt(store, record, facts)
+            return _order_receipt(store, record, facts, domain)
         source = {"switch_capability_pack": switches.capability_pack, "switch_plugin": switches.plugin,
                   "config_version": switches.config_version}
         outcome = install_now(self._agent, record, InstallConsent(run_programs=switches.plugin, user_session=False), source)
         payload = {**facts, "state": outcome.state, "message": outcome.message, "next_command": outcome.next_command,
-                   "request_ids": list(outcome.request_ids), "manage_commands": _manage_commands(record)}
+                   "request_ids": list(outcome.request_ids), "manage_commands": _manage_commands(record),
+                   **_notice(domain, record, installed=True)}
         if outcome.state not in {STATE_ENABLED, STATE_NEEDS_USER}:
             return _failure(outcome, payload)
         return _ok(payload)
@@ -122,9 +131,26 @@ def _can_install_now(record: BuildRecord, switches: SelfInstallSwitches, runs_pr
     return switch_on and (not runs_programs or switches.plugin)
 
 
-# LLM: 开关关着：开单，回执给确认行与"以后都让她装"的开关命令；什么都不装。有写文件副作用（安装单）。
+# LLM: 只给能力包算（插件没有能力关键词）；关键词取她打的这个包的声明，判断在 learnpack_domain。只读。
+# 函数用途: 找出和这个包同领域的、她做的已装能力包。
+def _same_domain(store: LearnpackStore, entries: tuple, record: BuildRecord) -> list:
+    if record.kind != KIND_CAPABILITY_PACK:
+        return []
+    capability = build_capability(store, record.sha256)
+    return same_domain_packs(store, entries, record.package_id, capability.keywords if capability is not None else ())
+
+
+# LLM: 有同领域包时给回执加 user_notice（给用户看的一句，她原样转告）；没有就不加字段。纯函数。
+# 函数用途: 生成回执里的同领域用户提醒。
+def _notice(domain: list, record: BuildRecord, *, installed: bool) -> dict[str, str]:
+    text = same_domain_user_notice(domain, record.package_id, installed=installed)
+    return {"user_notice": text} if text else {}
+
+
+# LLM: 开关关着：开单，回执给确认行与"以后都让她装"的开关命令；什么都不装。已经装着她做的同领域能力包时，message 先要求她问用户
+#   并进去还是单独成包、用户说单独成包再给确认行，并带 user_notice 原样转告。有写文件副作用（安装单）。
 # 函数用途: 生成待确认安装单回执。
-def _order_receipt(store: LearnpackStore, record: BuildRecord, facts: dict) -> ToolHandlerOutcome:
+def _order_receipt(store: LearnpackStore, record: BuildRecord, facts: dict, domain: list) -> ToolHandlerOutcome:
     order = store.create_order(record)
     key = PACK_SELF_INSTALL_KEY if record.kind == KIND_CAPABILITY_PACK else PLUGIN_SELF_INSTALL_KEY
     switch_on = facts["switches"][key]
@@ -133,11 +159,14 @@ def _order_receipt(store: LearnpackStore, record: BuildRecord, facts: dict) -> T
     installed = facts["installed_now"]
     current = (f"现在装着的同名包是 {installed['version']}（{'启用' if installed['enabled'] else '停用'}中），确认后换成这一版。"
                if installed else "")
+    ask = ("已经装着你做的同领域能力包（见 same_domain_installed）：先问用户并进已有的包还是单独成包，把 user_notice 原样转告；"
+           "用户说单独成包再给他确认行。" if domain else "")
     payload = {**facts, "state": "awaiting_user_confirmation", "order_id": order.order_id,
                "user_confirm_command": confirm_line(record, order.order_id),
                "enable_auto_install_command": switch_command(key if not switch_on else PLUGIN_SELF_INSTALL_KEY, True),
-               "message": f"{reason}。{current}把 user_confirm_command 原样给用户：他发回来才装，这张单隔多久都有效、只执行一次；"
-                          "想以后都让你自己装，给他 enable_auto_install_command。"}
+               "message": f"{reason}。{current}{ask}把 user_confirm_command 原样给用户：他发回来才装，这张单隔多久都有效、只执行一次；"
+                          "想以后都让你自己装，给他 enable_auto_install_command。",
+               **_notice(domain, record, installed=False)}
     return _ok(payload)
 
 

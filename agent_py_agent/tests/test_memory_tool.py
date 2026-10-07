@@ -61,7 +61,7 @@ def test_remember_user_explicit_goes_through_candidate_and_promotes(tmp_path):
 
     payload = json.loads(result.output)
     assert result.ok
-    assert payload["active_memory_changed"] is True
+    assert payload["active_memory_changed"] is True and payload["saved"] is True
     assert payload["results"][0]["status"] == "promoted"
     assert len(agent.memory.all()) == 1
     candidate = agent.memory_candidates.list()[0]
@@ -89,6 +89,8 @@ def test_remember_single_add_tool_verified_authorized_auto_but_evidence_gate_blo
     assert result.ok
     payload = json.loads(result.output)
     assert payload["active_memory_changed"] is False
+    # learnpack 生产复测：她看到 ok 就对用户说"已记下来了"；没记上必须一眼可见。
+    assert payload["saved"] is False and payload["hint"].startswith("没记上") and "不要对用户说" in payload["hint"]
     candidate = agent.memory_candidates.list()[0]
     assert candidate.promotion_mode == "auto_eligible"
     assert candidate.status == "blocked_missing_evidence"
@@ -206,6 +208,7 @@ def test_remember_batch_then_single_replay_stays_idempotently_promoted(tmp_path)
 
     assert payload["active_memory_changed"] is False
     assert payload["results"][0]["reason_code"] == "ALREADY_PROMOTED"
+    assert payload["saved"] is True and "早就在正式记忆里" in payload["hint"]
     candidate = agent.memory_candidates.list()[0]
     assert candidate.promotion_mode == "auto_eligible"
     assert candidate.occurrence_count == 1
@@ -460,3 +463,29 @@ def test_remember_registered_in_agent_toolset(tmp_path):
     )
     names = [getattr(spec, "name", "") for spec in agent.tools.specs()]
     assert "remember" in names
+
+
+def test_remember_batch_with_one_unsaved_item_says_partial(tmp_path):
+    # 一批里有记上的也有没记上的：saved 为 false，提示写"部分记上了"和没记上的条数，不能说全部记下了。
+    agent = _agent_with_current_user(tmp_path)
+    saved = {"action": "add", "content": "moneywise 项目使用 UTC 保存时间", "kind": "project", "origin": "user_explicit",
+             "subject_key": "project.moneywise.timezone", "scope": {"scope_type": "project", "scope_key": "project:moneywise"}}
+    blocked = {"action": "add", "content": "moneywise 构建产物已生成", "kind": "project", "origin": "tool_verified",
+               "evidence_refs": ["call-build-1"], "subject_key": "project.moneywise.build",
+               "scope": {"scope_type": "project", "scope_key": "project:moneywise"}}
+    result = RememberTool(agent).execute({"action": "batch", "operations": [saved, blocked]})
+    payload = json.loads(result.output)
+    assert payload["active_memory_changed"] is True and payload["saved"] is False
+    assert payload["hint"].startswith("部分记上了：有 1 条没记上") and "不要对用户说全部记下了" in payload["hint"]
+
+
+def test_remember_needing_review_says_not_saved(tmp_path):
+    # 推断来的长期事实只记成候选、要人审：不是缺证据，也要直说没记上，不能对用户说已记下。
+    agent = _agent_with_current_user(tmp_path)
+    result = RememberTool(agent).execute({"content": "moneywise 项目大概会改用 UTC", "kind": "project",
+                                          "origin": "model_inferred", "subject_key": "project.moneywise.timezone",
+                                          "scope": {"scope_type": "project", "scope_key": "project:moneywise"}})
+    payload = json.loads(result.output)
+    assert result.ok and payload["active_memory_changed"] is False and payload["saved"] is False
+    assert payload["results"][0]["reason_code"] == "REVIEW_REQUIRED" and payload["required_repairs"] == []
+    assert payload["hint"].startswith("没记上") and "不要对用户说" in payload["hint"]
