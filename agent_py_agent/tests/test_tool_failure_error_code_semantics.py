@@ -14,7 +14,10 @@ from __future__ import annotations
 须对应真实失败阶段，不能用同一个参数错误覆盖文件和状态问题。
 """
 
+import os
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.tooling._filesystem_edit import EditFileTool
 from agent_py_agent.agent.tooling._filesystem_find import FindFilesTool
@@ -142,6 +145,39 @@ def test_apply_patch_delete_missing_target_is_path_not_found(tmp_path: Path):
     r = tool.execute({"patch": patch})
     assert r.ok is False
     assert r.error_code == "PATH_NOT_FOUND", r.error_code
+
+
+def test_apply_patch_delete_refused_by_the_filesystem_is_not_started(tmp_path: Path):
+    # learnpack 生产复测：只读目录里的文件删不掉时被记成"副作用未知"，宿主停掉了整轮；删除只有一次 unlink，失败后文件还在就是没动过。
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root 不受目录写权限限制，删得掉")
+    ws = _workspace(tmp_path)
+    locked = ws / "locked"
+    locked.mkdir()
+    (locked / "a.txt").write_text("x", encoding="utf-8")
+    locked.chmod(0o555)
+    try:
+        r = ApplyPatchTool(ws).execute({"patch": "*** Begin Patch\n*** Delete File: locked/a.txt\n*** End Patch\n"})
+    finally:
+        locked.chmod(0o755)
+    assert r.ok is False and r.error_code == "TOOL_EXECUTION_FAILED" and r.effect_outcome == "not_started", r
+    assert (locked / "a.txt").exists() and "什么都没改" in r.output
+    assert r.result_envelope["failed_path_effect"] == "none" and r.result_envelope["partial_commit"] is False
+
+
+def test_apply_patch_delete_that_failed_after_removing_stays_unknown(tmp_path: Path, monkeypatch):
+    # 只有"失败后文件还在"才算没动过；删掉了却报错的（这里用替身模拟），照旧按副作用未知处理，不能说成什么都没改。
+    ws = _workspace(tmp_path)
+    (ws / "b.txt").write_text("x", encoding="utf-8")
+
+    def unlink_then_fail(self, missing_ok=False):
+        os.unlink(self)
+        raise OSError("删完之后出错")
+
+    monkeypatch.setattr(Path, "unlink", unlink_then_fail)
+    r = ApplyPatchTool(ws).execute({"patch": "*** Begin Patch\n*** Delete File: b.txt\n*** End Patch\n"})
+    assert r.ok is False and r.effect_outcome == "unknown" and not (ws / "b.txt").exists(), r
+    assert r.result_envelope["failed_path_effect"] == "unknown"
 
 
 def test_apply_patch_malformed_is_invalid_arguments(tmp_path: Path):

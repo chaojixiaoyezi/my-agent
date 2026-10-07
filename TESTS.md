@@ -10,9 +10,10 @@
   - `test_pack_commands.py`：`/plugins#` 停用、删除的回执以"能力包已停用 / 能力包已卸载"开头；直接敲 `/plugins disable` 照旧是"插件已停用"。
   - `test_learnpack_merge.py::test_latin_only_keywords_for_a_chinese_pack_are_flagged`——说明是中文、关键词全是英文时给 `PACKAGE_BUILD_KEYWORDS_SCRIPT`（不挡打包）；有一个中文关键词、或说明本身是拉丁字母都不提醒。造包辅助函数加 `description` 参数。
   - 复测后第二轮：`test_package_build.py::test_pack_and_capability_field_errors_name_the_fields`（能力包顶层缺 files、capability 缺 entry_document 多 tags、keywords 不是列表、capability 不是对象都点名，verification 可选）；`test_package_build_tool.py` 的密钥用例改成第 3 行命中、回执写"（第 3 行）"且不回显内容；打包回执下一步写"先处理 warnings""不要让用户去敲"；关键词文字提醒写"不是可以忽略的建议"。
-- **定向结果**：打包、打包工具、learnpack 整组、`/plugins#`、学习与写插件技能、插件管理/卸载/停用/启用/配置/老格式管理、`/plugins` 聊天控制、清单 v8、默认收起、工具预检、控制台打包、飞书适配器、常量目录共 24 个文件 + 14 个守卫：744 passed / 0 skipped / 0 failed（含复测后第二轮）。常量目录重新生成（941 → 945 项）。
+  - 第三轮（通用补丁工具）：`test_tool_failure_error_code_semantics.py` 两条——只读目录里删不掉的文件回 `effect_outcome=not_started`、`failed_path_effect=none`、说明写"什么都没改"、文件还在（root 跑时跳过）；删掉了却报错的（替身模拟）照旧 `unknown`。
+- **定向结果**：打包、打包工具、learnpack 整组、`/plugins#`、学习与写插件技能、插件管理/卸载/停用/启用/配置/老格式管理、`/plugins` 聊天控制、清单 v8、默认收起、工具预检、控制台打包、飞书适配器、常量目录共 24 个文件 + 14 个守卫：744 passed / 0 skipped / 0 failed（含复测后第二轮）。常量目录重新生成（941 → 945 项）。第三轮（补丁工具）把引用 `apply_patch`/`_filesystem_patch` 的 45 个测试文件也并进来（共 69 个文件 + 14 个守卫）：2025 passed / 0 failed。
 - **Linux 通道**：全量 12 片（Docker，py3.12）在 d6134d17b 上 29433 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，在最终提交 40960b8fa 上 29434 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，两次都 12/12 rc=0。证据：claude-tools/linux-lane-d6134d17b/、linux-lane-40960b8fa/（totals.json、out-0..11.txt、rc.txt）。
-- **变异**：19 个变异（关掉字段核对、去掉 capability 提示、平台/补空字段/v8 订阅键不再可省、缺字段不报、不带校验原因、同领域提醒不出、不按 casefold 比、别处的包或同名包也算同领域、卸载与停用称呼写死"插件"、能力包命令不传称呼、管理命令不把称呼传给排版、关键词文字提醒不出、有中文关键词或说明是拉丁字母也提醒、非拉丁判断失效；第二轮：capability 字段核对关掉、verification 不再可选、缺/多字段说明不点名、密钥检查不报行号、行号从 0 数、下一步不写由她自己调）25/25 被杀（只认 pytest rc=1）。
+- **变异**：19 个变异（关掉字段核对、去掉 capability 提示、平台/补空字段/v8 订阅键不再可省、缺字段不报、不带校验原因、同领域提醒不出、不按 casefold 比、别处的包或同名包也算同领域、卸载与停用称呼写死"插件"、能力包命令不传称呼、管理命令不把称呼传给排版、关键词文字提醒不出、有中文关键词或说明是拉丁字母也提醒、非拉丁判断失效；第二轮：capability 字段核对关掉、verification 不再可选、缺/多字段说明不点名、密钥检查不报行号、行号从 0 数、下一步不写由她自己调；第三轮：删除失败一律按未知、不看文件还在不在、回执里失败项副作用写死未知、没动过也不说什么都没改）29/29 被杀（只认 pytest rc=1）。
 
 ## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–23:24 PDT，3a，被测提交 `fd45290e0`，补跑 `c42700a3e`）
 
