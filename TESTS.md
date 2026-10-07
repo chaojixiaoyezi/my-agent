@@ -8,8 +8,9 @@
   - `test_package_build_tool.py` 三条：写插件技能的模板删掉三个 v8 键能经工具打成 v6 插件；照能力包样子写的插件声明（生产里她 7 次都是这样）回 `PACKAGE_BUILD_DECLARATION_INVALID`，点名缺 entry、platforms、actions、default_action、tools、settings_schema 和多了 capability，什么都不写；内层清单校验失败（工具缺 input_schema）时回执带"具体原因"。
   - `test_learnpack_merge.py::test_a_new_pack_sharing_keywords_with_her_installed_pack_warns_to_ask_first`——新能力包和她装着的另一个能力包关键词重合时给 `PACKAGE_BUILD_SAME_DOMAIN`（列出包名、版本、共同关键词，按 casefold 整词比，不挡打包）；关键词不重合、同名包、别处装的包都不提醒（别处装的包由 `test_a_foreign_same_name_pack_is_reported_instead_of_version_hints` 锁住）。造包辅助函数加 `keywords` 参数，"别的包"改用不重合的关键词。
   - `test_pack_commands.py`：`/plugins#` 停用、删除的回执以"能力包已停用 / 能力包已卸载"开头；直接敲 `/plugins disable` 照旧是"插件已停用"。
-- **定向结果**：打包、打包工具、learnpack 整组、`/plugins#`、学习与写插件技能、插件管理/卸载/停用/启用/配置/老格式管理、`/plugins` 聊天控制、清单 v8、默认收起、工具预检、控制台打包、飞书适配器、常量目录共 24 个文件 + 14 个守卫：742 passed / 0 skipped / 0 failed。常量目录重新生成（941 → 944 项）。
-- **变异**：15 个变异（关掉字段核对、去掉 capability 提示、平台/补空字段/v8 订阅键不再可省、缺字段不报、不带校验原因、同领域提醒不出、不按 casefold 比、别处的包或同名包也算同领域、卸载与停用称呼写死"插件"、能力包命令不传称呼、管理命令不把称呼传给排版）15/15 被杀（只认 pytest rc=1）。
+  - `test_learnpack_merge.py::test_latin_only_keywords_for_a_chinese_pack_are_flagged`——说明是中文、关键词全是英文时给 `PACKAGE_BUILD_KEYWORDS_SCRIPT`（不挡打包）；有一个中文关键词、或说明本身是拉丁字母都不提醒。造包辅助函数加 `description` 参数。
+- **定向结果**：打包、打包工具、learnpack 整组、`/plugins#`、学习与写插件技能、插件管理/卸载/停用/启用/配置/老格式管理、`/plugins` 聊天控制、清单 v8、默认收起、工具预检、控制台打包、飞书适配器、常量目录共 24 个文件 + 14 个守卫：743 passed / 0 skipped / 0 failed。常量目录重新生成（941 → 944 项）。
+- **变异**：19 个变异（关掉字段核对、去掉 capability 提示、平台/补空字段/v8 订阅键不再可省、缺字段不报、不带校验原因、同领域提醒不出、不按 casefold 比、别处的包或同名包也算同领域、卸载与停用称呼写死"插件"、能力包命令不传称呼、管理命令不把称呼传给排版、关键词文字提醒不出、有中文关键词或说明是拉丁字母也提醒、非拉丁判断失效）19/19 被杀（只认 pytest rc=1）。
 
 ## learnpack 第 8 步：真模型验收（MiniMax-M2.7，2026-10-06 22:26–23:24 PDT，3a，被测提交 `fd45290e0`，补跑 `c42700a3e`）
 

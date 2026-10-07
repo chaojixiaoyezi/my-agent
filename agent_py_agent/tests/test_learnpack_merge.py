@@ -8,7 +8,8 @@
 只比纯数字点分的版本号）；比上一版少了文件（PACKAGE_BUILD_FILES_DROPPED）；包名被别处的同名包占着时只报 PACKAGE_BUILD_ID_TAKEN
 （不报版本提醒），回执写明装着的是不是她做的。找旧包超过上限时看最近的记录。
 新能力包和她自己做的、装着的另一个能力包声明的关键词重合（casefold 整词）时提醒 PACKAGE_BUILD_SAME_DOMAIN（先问用户并进去还是
-单独成包；生产测试里她没问就另起了一个包），同名包和别处装的包不算。
+单独成包；生产测试里她没问就另起了一个包），同名包和别处装的包不算。说明是中文这类非拉丁文字、关键词却全是拉丁字母时提醒
+PACKAGE_BUILD_KEYWORDS_SCRIPT（生产测试里小说包关键词全是英文，中文提问推荐不到）。
 """
 from __future__ import annotations
 
@@ -165,7 +166,7 @@ def _maker(agent):
     root = Path(agent.home_paths.owner_home_dir) / "runs" / "2026-10-06" / "learn" / "pack"
     build = agent.tools.tools["package_build"]
 
-    def make(version, files, package_id="drama-scenes", keywords=None):
+    def make(version, files, package_id="drama-scenes", keywords=None, description=None):
         shutil.rmtree(root, ignore_errors=True)
         for name, body in files.items():
             (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -174,6 +175,8 @@ def _maker(agent):
         payload["declaration"]["plugin_id"] = package_id
         if keywords is not None:
             payload["declaration"]["capability"]["keywords"] = keywords
+        if description is not None:
+            payload["declaration"]["capability"]["description"] = description
         outcome = build.execute(payload)
         assert outcome.ok, outcome.output
         return json.loads(outcome.output)
@@ -241,6 +244,20 @@ def test_a_new_pack_sharing_keywords_with_her_installed_pack_warns_to_ask_first(
     assert make("0.1.0", {"CAPABILITY.md": "# 别的\n"}, package_id="novel-notes", keywords=["长篇", "伏笔"])["warnings"] == []
     assert _codes(make("0.2.0", {"CAPABILITY.md": _SCENES + _DIALOGUE})) == [], "同名包走版本提醒，不算同领域"
     assert "PACKAGE_BUILD_SAME_DOMAIN" in ERROR_CONTRACTS
+
+
+def test_latin_only_keywords_for_a_chinese_pack_are_flagged(tmp_path, monkeypatch):
+    agent = _agent(tmp_path, monkeypatch)
+    make = _maker(agent)
+    english = make("0.1.0", {"CAPABILITY.md": _SCENES}, package_id="novel-craft", keywords=["long novel", "web novel"])
+    assert _codes(english) == ["PACKAGE_BUILD_KEYWORDS_SCRIPT"] and english["build"]["sha256"], "提醒不挡打包"
+    assert "推荐不到" in english["warnings"][0]["message"]
+    mixed = make("0.1.1", {"CAPABILITY.md": _SCENES}, package_id="novel-craft", keywords=["long novel", "长篇"])
+    assert mixed["warnings"] == [], "有一个中文关键词就够"
+    latin = make("0.1.2", {"CAPABILITY.md": _SCENES}, package_id="novel-craft", keywords=["long novel"],
+                 description="Plans and drafts long novels, 2nd ed.")
+    assert latin["warnings"] == [], "说明本身是拉丁字母就不提醒"
+    assert "PACKAGE_BUILD_KEYWORDS_SCRIPT" in ERROR_CONTRACTS
 
 
 def test_the_newest_builds_are_scanned_first(tmp_path, monkeypatch):

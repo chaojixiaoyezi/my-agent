@@ -8,12 +8,16 @@
 #   - PACKAGE_BUILD_FILES_DROPPED：比上一版少了文件（上一版取现在装着的、她做的那一版；没有就取她上一次打的），合并时旧方向的
 #     文件没带过来就会这样；
 #   - PACKAGE_BUILD_SAME_DOMAIN：新能力包和她自己做的、装着的另一个能力包声明的关键词有重合（learnpack 生产测试：学第二个短剧
-#     原版时她没问就另起了一个包），提醒她按学习流程先问用户并进去还是单独成包。
+#     原版时她没问就另起了一个包），提醒她按学习流程先问用户并进去还是单独成包；
+#   - PACKAGE_BUILD_KEYWORDS_SCRIPT：能力包说明里有非拉丁文字（如中文），关键词却全是拉丁字母（learnpack 生产测试：小说包关键词
+#     全是英文，中文提问一次都推荐不到，两遍小说题都没用上包）。
 #   改规则要同步 tooling/package_build_tool 的回执与 test_learnpack_merge。
-# 模块用途: 打包后告诉她现在装着哪一版、她做过哪些版本，以及版本号重用、倒退、比上一版少了文件或已经装着同领域能力包的提醒。
+# 模块用途: 打包后告诉她现在装着哪一版、她做过哪些版本，以及版本号重用、倒退、比上一版少了文件、已经装着同领域能力包或关键词
+#   和说明不是同一种文字的提醒。
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from ..plugin_install_store import PluginInstallStore
 from ..plugin_manifest import PluginPackageError
@@ -53,8 +57,9 @@ def build_notes(agent: object, store: LearnpackStore, record: BuildRecord) -> di
             "PACKAGE_BUILD_ID_TAKEN", f"包名 {record.package_id} 被别处的包占着（同名或只差大小写的包，或别处插件卸载后留下的数据），"
             "这个包装不上；同领域的内容只能换个包名单独成包。")]}
     base = mine or (earlier[-1] if earlier else None)
+    capability = _capability(store, record.sha256) if record.kind == KIND_CAPABILITY_PACK else None
     return {**facts, "warnings": [*_version_warnings(store, record, installed), *_dropped_files(store, record, base),
-                                  *_same_domain(store, record, entries)]}
+                                  *_same_domain(store, capability, record, entries), *_keyword_script(capability)]}
 
 
 # LLM: 安装表读不了（损坏、权限）就当一个都没装；owner 照常解析。只读。
@@ -99,11 +104,12 @@ def _dropped_files(store: LearnpackStore, record: BuildRecord, base: BuildRecord
                   "文件原样带上；非文本文件带不过来就如实告诉用户，确实要删的不用管。")]
 
 
-# LLM: 只看能力包：她自己做的（字节在 learnpack 存储里有记录）、装着的、包名不同的能力包，声明的关键词和新包有重合（不分大小写的
-#   整词相同）就提醒。关键词是声明里的结构化字段，不解析正文；别处装的包不能并入，不提醒；任何一边读不了就不提醒。只读。
+# LLM: 只看能力包（capability 为 None 就不提醒）：她自己做的（字节在 learnpack 存储里有记录）、装着的、包名不同的能力包，声明的
+#   关键词和新包有重合（不分大小写的整词相同）就提醒。关键词是声明里的结构化字段，不解析正文；别处装的包不能并入，不提醒。只读。
 # 函数用途: 生成"已经装着同领域能力包，先问用户并进去还是单独成包"的提醒。
-def _same_domain(store: LearnpackStore, record: BuildRecord, entries: tuple) -> list[dict[str, str]]:
-    words = _keywords(store, record.sha256) if record.kind == KIND_CAPABILITY_PACK else set()
+def _same_domain(store: LearnpackStore, capability: object | None, record: BuildRecord,
+                 entries: tuple) -> list[dict[str, str]]:
+    words = {word.casefold() for word in capability.keywords} if capability is not None else set()
     hits = []
     for row in entries:
         capability = getattr(row.manifest, "capability", None)
@@ -120,14 +126,33 @@ def _same_domain(store: LearnpackStore, record: BuildRecord, entries: tuple) -> 
                   "并进已有的包（加一个方向、升版本），还是单独成包；用户说单独成包再装。")]
 
 
-# LLM: 从她打的包里读声明的关键词（同一个读包校验器），统一 casefold；读不了返回空集合。只读。
-# 函数用途: 取某个打包产物声明的能力关键词。
-def _keywords(store: LearnpackStore, sha256: str) -> set[str]:
+# LLM: 宿主按"用户的话里整词出现关键词"推荐能力包（router.has_strong_match），所以说明里有非拉丁文字（按字符的 Unicode 名称判断，
+#   如中文、西里尔文）、关键词里却一个这样的字都没有时，用户用说明那种文字提问就推荐不到这个包。只看字符属性，不理解语义；没有
+#   关键词或读不了包就不提醒。纯函数。
+# 函数用途: 生成"关键词和说明不是同一种文字"的提醒。
+def _keyword_script(capability: object | None) -> list[dict[str, str]]:
+    if capability is None or not capability.keywords or not _non_latin(capability.description):
+        return []
+    if any(_non_latin(word) for word in capability.keywords):
+        return []
+    return [_note("PACKAGE_BUILD_KEYWORDS_SCRIPT",
+                  "包的说明用的不是拉丁字母（比如中文），关键词却全是拉丁字母（比如英文）。宿主只在用户的话里整词出现关键词时才推荐"
+                  "这个包，用户用说明那种语言提问时会一直推荐不到；加几个用户真会用那种语言说的领域短词。")]
+
+
+# LLM: 字母（str.isalpha）的 Unicode 名称不以 LATIN 开头就算非拉丁文字；数字、标点、空格不算。纯函数。
+# 函数用途: 判断一段文字里有没有非拉丁字母的文字。
+def _non_latin(text: str) -> bool:
+    return any(char.isalpha() and not unicodedata.name(char, "LATIN").startswith("LATIN") for char in text)
+
+
+# LLM: 从她打的包里读能力声明（同一个读包校验器）；读不了或不是能力包返回 None。只读。
+# 函数用途: 取某个打包产物的能力声明（说明、关键词）。
+def _capability(store: LearnpackStore, sha256: str) -> object | None:
     try:
-        capability = inspect_plugin_package(store.build_path(sha256).read_bytes()).manifest.capability
+        return inspect_plugin_package(store.build_path(sha256).read_bytes()).manifest.capability
     except (OSError, ValueError, PluginPackageError):
-        return set()
-    return {word.casefold() for word in capability.keywords} if capability is not None else set()
+        return None
 
 
 # LLM: 纯数字点分才比较，末尾的 0 不算（1.0 与 1.0.0 相同）；其它写法一律按"比不出"处理。纯函数。

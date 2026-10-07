@@ -3660,6 +3660,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="包已打好，但她已经装着自己做的同领域能力包（关键词重合）；先问用户并进已有的包还是单独成包，用户说单独成包再装。",
     ),
+    "PACKAGE_BUILD_KEYWORDS_SCRIPT": ErrorContract(
+        code="PACKAGE_BUILD_KEYWORDS_SCRIPT", category="tool", retryable=True,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="包已打好，但说明是中文这类非拉丁文字、关键词全是英文这类拉丁字母，用户用说明那种语言提问时推荐不到；加几个那种语言的领域短词再打包。",
+    ),
 })
 
 
