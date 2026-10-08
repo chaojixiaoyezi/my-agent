@@ -170,21 +170,26 @@ def contender(path):
     sys.stdin.readline()
 
 
+def release_contenders(store, children):
+    """在 state 锁内等竞争子进程就绪后放行，保证两个子进程同时抢同一租约。"""
+    with locked_json_path(store.path):
+        assert [read_line(p) for p in children] == ["ready", "ready"]
+        for child in children:
+            child.stdin.write("go\n")
+            child.stdin.flush()
+
+
 def test_two_real_processes_reclaim_exactly_once(tmp_path):
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     assert dead.wait(timeout=10) == 0
     store = write_lease(tmp_path, lease(dead.pid))
     children = []
     try:
-        with locked_json_path(store.path):
-            for _ in range(2):
-                children.append(subprocess.Popen([
-                    sys.executable, str(Path(__file__).resolve()), "contend", str(store.path),
-                ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
-            assert [read_line(p) for p in children] == ["ready", "ready"]
-            for child in children:
-                child.stdin.write("go\n")
-                child.stdin.flush()
+        for _ in range(2):
+            children.append(subprocess.Popen([
+                sys.executable, str(Path(__file__).resolve()), "contend", str(store.path),
+            ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        release_contenders(store, children)
         results = [json.loads(read_line(p)) for p in children]
         assert sum(result["acquired"] for result in results) == 1, results
         active = store.load().active_lease
@@ -236,7 +241,10 @@ def test_old_state_and_lease_digest_stable(tmp_path):
     snapshot = store.load()
     assert store.path.read_bytes() == before
     assert json.dumps(snapshot.to_dict(), sort_keys=True, indent=2).encode() + b"\n" == before
-    digest = lambda obj: hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+
+    def digest(obj):
+        return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+
     store.request("turn_threshold")
     after = store.load()
     assert digest(after.active_lease) == digest(record)
