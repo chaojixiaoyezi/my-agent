@@ -854,7 +854,9 @@ def test_reconstructed_runtime_state_keeps_tool_search_loaded_names() -> None:
     assert loop_params.loaded_tool_names == {"create_subagents", "inspect_agent_tree"}
 
 
-def test_reconstructed_runtime_state_does_not_resurrect_consumed_tool_search() -> None:
+# LLM: 10-08 前缀纪律：线程内加载过的工具只增不减（tool_search_state），用过之后下一回合也不撤回，工具表不抖动、缓存前缀不失效。
+# 函数用途: 旧轮的 tool_search 加载在后续回合仍然可见。
+def test_reconstructed_runtime_state_keeps_loaded_tool_search_for_the_thread() -> None:
     records = [
         {
             "tool": "tool_search",
@@ -876,7 +878,7 @@ def test_reconstructed_runtime_state_does_not_resurrect_consumed_tool_search() -
 
     loop_params = _tool_loop_execute_params(agent, _seed(records))
 
-    assert loop_params.loaded_tool_names == set()
+    assert loop_params.loaded_tool_names == {"create_subagents"}
 
 
 def test_reconstructed_runtime_state_wraps_external_preview_without_summary() -> None:

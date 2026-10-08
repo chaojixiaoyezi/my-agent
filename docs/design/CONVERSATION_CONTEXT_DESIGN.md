@@ -155,6 +155,8 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
   （只含原长度），最近两条不动，带图或非文字块不动；省够就仍走 `_try_cached_compact_requests`（同 system、同工具、auto、指令在末尾），
   省不够返回 None 走原分段链。分段仍拿 `attempt.message_source` 的完整来源。实现是两遍读同一冻结来源：第一遍只记槽位与可省 token，
   不留正文；第二遍按槽位替换。整份物化会让 `test_compact_source_lifetime` 的峰值内存翻倍，所以省不够时也不能留下任何正文。
+- 工具表只增不减（10-08 前缀纪律）：`tooling/tool_search_state.pending_carried_loaded_tool_names` 按线程累计 tool_search 加载的名字，
+  下一回合不撤回；工具表一变整段缓存前缀失效（.16 真机实测撤回那次 0% 命中），主请求与压缩面同一条规则。
 - 预算计量按校准口径：`_single_request_source` 与 `compact_remote._messages_within_budget` 都用
   `compact_calibration.calibrated_compact_request_tokens(原始估算, calibration)` 和预算比，calibration 是恢复宿主冻结的主请求校准事实
   （`_CompactSummaryCall.calibration` / `LiveToolHistorySummaryRequest.calibration` / `RemoteCompactionRequest.calibration`）。
