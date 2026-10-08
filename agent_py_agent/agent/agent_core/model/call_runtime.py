@@ -507,13 +507,27 @@ def max_output_tokens(agent: object) -> int:
 #   32000 算，27.2 万窗口的 sol/astra 和 26.2 万窗口的 MiniMax 按 90% 触发时单次缓存面请求永远装不下，每次压缩都退到
 #   不复用缓存、不带工具的分段路径（10～33 分钟）。改默认值须同步 AgentConfig、MemorySettings、随包 YAML 与
 #   test_compact_request_budget。
-# 函数用途: 返回压缩摘要调用的输出 token 上限；配置为 0 或主请求上限更小时沿用主请求的上限。
+#   2026-10-08 生产事故（step17x，mc3 DeepSeek v4-flash max 档）：16384 只对"压缩调用真的降到了低档"成立；DeepSeek/MiniMax
+#   的压缩调用仍按线程档位推理，推理 token 算进输出上限，摘要正好在 16384 被截断（COMPACT_SUMMARY_TRUNCATED，回合失败）。
+#   所以配置的预留只在后端能用 configuration_update 降档且配置了压缩档位时生效，其它后端沿用主请求上限（部署前口径）。
+# 函数用途: 返回压缩摘要调用的输出 token 上限；配置为 0、主请求上限更小、或压缩调用降不了档时沿用主请求的上限。
 def compact_summary_output_reserve_tokens(agent: object) -> int:
     normal = max_output_tokens(agent)
     configured = _nonnegative_int(getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 0))
     if configured <= 0:
         return normal
-    return min(configured, normal) if normal > 0 else configured
+    if normal <= 0:
+        return configured
+    return min(configured, normal) if _compact_reasoning_downshift_available(agent) else normal
+
+
+# LLM: 只读两个结构化事实：后端的 supports_reasoning_update_items()（GPT-6 Responses 的 configuration_update 项）和配置的
+#   memory_compact_reasoning_level（空/auto/off 表示不降档）。两者都成立，压缩调用才会在低档下写摘要，输出预留才能收紧。
+# 函数用途: 判断这个 agent 的压缩调用能不能被安全地降档（决定能不能用小的输出预留）。
+def _compact_reasoning_downshift_available(agent: object) -> bool:
+    supports = getattr(getattr(agent, "backend", None), "supports_reasoning_update_items", None)
+    level = str(getattr(getattr(agent, "config", None), "memory_compact_reasoning_level", "") or "").strip().lower()
+    return callable(supports) and bool(supports()) and level not in {"", "auto", "off"}
 
 
 # LLM: Non-stream total budgeting may estimate full output time; stream liveness must not use this as a hidden wall clock.

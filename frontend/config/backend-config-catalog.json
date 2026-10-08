@@ -3090,7 +3090,7 @@
           {
             "key": "memory_compact_summary_max_output_tokens",
             "label": "memory_compact_summary_max_output_tokens（memory compact summary max output tokens）",
-            "description": "压缩摘要请求的输出上限（单位 tokens，含思考）；0 表示沿用主请求的输出上限（max_tokens 按窗口夹取后的值）。 默认 16384：压缩请求要先在本地判断\"整段历史 + 本值 ≤ 模型窗口\"，装得下才发一次复用主请求前缀（缓存几乎全命中）的请求； 装不下就退到分段路径（换系统提示、去掉工具、逐段总结，缓存命中 0%，sol/astra 实测 10～33 分钟）。 之前按主请求的 32000 预留，27.2 万窗口的模型按 90% 触发时永远装不下。摘要本身一般几千 token，16384 足够； 思考很长的模型若摘要被截断可以调大，但越大越容易退回分段。改完需要重启 Gateway 才生效。",
+            "description": "压缩摘要请求的输出上限（单位 tokens，含思考）；0 表示沿用主请求的输出上限（max_tokens 按窗口夹取后的值）。 默认 16384：压缩请求要先在本地判断\"整段历史 + 本值 ≤ 模型窗口\"，装得下才发一次复用主请求前缀（缓存几乎全命中）的请求； 装不下就退到分段路径（换系统提示、去掉工具、逐段总结，缓存命中 0%，sol/astra 实测 10～33 分钟）。 之前按主请求的 32000 预留，27.2 万窗口的模型按 90% 触发时永远装不下。摘要本身一般几千 token，16384 足够； 思考很长的模型若摘要被截断可以调大，但越大越容易退回分段。改完需要重启 Gateway 才生效。 注意：这个值只对\"压缩调用能降档\"的模型生效（GPT-6 系列的 Responses 接口，见 memory_compact_reasoning_level）；DeepSeek、MiniMax 等模型的压缩调用仍按会话档位思考，思考 token 算进输出上限，用 16384 会把摘要截断（2026-10-08 生产实测），它们自动沿用主请求上限。",
             "type": "number",
             "defaultValue": 16384,
             "currentValue": 16384,

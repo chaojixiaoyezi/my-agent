@@ -42,11 +42,29 @@ MINIMAX_WINDOW = 262_144
 
 
 # 函数用途: 造一个只带窗口、输出上限和压缩配置的最小 agent 替身。
-def _agent(window: int, *, backend_max_tokens: int = 32_000, reserve: int = 16_384) -> SimpleNamespace:
+def _agent(window: int, *, backend_max_tokens: int = 32_000, reserve: int = 16_384,
+           downshift_level: str | None = "low") -> SimpleNamespace:
+    # 默认模拟 GPT-6 Responses：能用 configuration_update 降档且配置了压缩档位，小预留才生效；
+    # downshift_level=None 表示后端没有降档能力（DeepSeek/MiniMax），"" / "auto" 表示没配压缩档位。
+    backend = SimpleNamespace(max_tokens=backend_max_tokens)
+    if downshift_level is not None:
+        backend.supports_reasoning_update_items = lambda: True
     return SimpleNamespace(
-        backend=SimpleNamespace(max_tokens=backend_max_tokens),
-        config=SimpleNamespace(model_context_window_tokens=window, memory_compact_summary_max_output_tokens=reserve),
+        backend=backend,
+        config=SimpleNamespace(model_context_window_tokens=window, memory_compact_summary_max_output_tokens=reserve,
+                               memory_compact_reasoning_level=downshift_level or ""),
     )
+
+
+def test_compact_output_reserve_only_shrinks_when_the_compact_call_can_downshift():
+    # 2026-10-08 生产事故：DeepSeek max 档的压缩调用推理 token 算进输出上限，16384 把摘要截断（回合失败）。
+    # 后端不能降档（DeepSeek / MiniMax）或没配压缩档位时，预留沿用主请求上限（部署前口径），不发小上限。
+    assert compact_summary_output_reserve_tokens(_agent(272_000, downshift_level=None)) == 32_000
+    assert compact_summary_output_reserve_tokens(_agent(272_000, downshift_level="")) == 32_000
+    assert compact_summary_output_reserve_tokens(_agent(272_000, downshift_level="auto")) == 32_000
+    assert compact_summary_output_reserve_tokens(_agent(272_000)) == 16_384
+    assert compact_summary_output_reserve_tokens(SimpleNamespace(backend=SimpleNamespace(max_tokens=32_000),
+                                                                 config=SimpleNamespace())) == 32_000
 
 
 def test_compact_output_reserve_follows_config_but_never_exceeds_the_main_cap():
@@ -173,14 +191,26 @@ def _compact_request(agent, purpose: str = "conversation_compact_summary"):
     )
 
 
-def test_compact_call_sends_the_compact_output_cap_on_chat_payload():
+def test_compact_call_keeps_the_main_cap_on_backends_that_cannot_downshift():
+    # DeepSeek（Chat 接口）压缩调用按线程档位推理，不能收紧上限：和部署前一样发主请求上限
     backend, agent, payloads = _capturing_backend("openai_compatible", model_name="deepseek-v4-flash",
                                                   api_base="https://api.deepseek.com", model_context_window_tokens=SOL_WINDOW)
     assert backend.max_tokens == 65_536  # 显式窗口 27.2 万：主请求上限按 min(65536, 窗口/4)
     generate_auxiliary_model_response(_compact_request(agent))
-    assert payloads[-1]["max_tokens"] == 16_384
+    assert payloads[-1]["max_tokens"] == 65_536
     generate_auxiliary_model_response(_compact_request(agent, purpose="auxiliary"))
     assert payloads[-1]["max_tokens"] == 65_536, "非压缩目的不改输出上限"
+
+
+def test_compact_call_sends_the_small_cap_only_with_a_downshift_capable_responses_backend():
+    backend, agent, payloads = _capturing_backend("openai_responses", model_name="gpt-6.1-sol",
+                                                  api_base="https://api.openai.com/v1", model_context_window_tokens=SOL_WINDOW)
+    assert backend.supports_reasoning_update_items()
+    generate_auxiliary_model_response(_compact_request(agent))
+    assert payloads[-1]["max_output_tokens"] == 16_384
+    agent.config.memory_compact_reasoning_level = ""
+    generate_auxiliary_model_response(_compact_request(agent))
+    assert payloads[-1]["max_output_tokens"] == backend.max_tokens, "没配压缩档位就不能收紧上限"
 
 
 @pytest.mark.parametrize(("model", "declared", "expect_item"), [
