@@ -98,6 +98,8 @@ class ProviderRequestOptions:
     #   空串不插入。请求级 reasoning.effort 保持原值，所以前缀缓存不失配（OpenAI 缓存文档的推荐做法）。
     # 字段用途: 携带压缩辅助调用的降档申请；普通请求留空。
     reasoning_update_effort: str = ""
+    # 服务端压缩：True 时 Responses 后端在 input 末尾放 {"type":"compaction_trigger"}，不带压缩指令；只有压缩链的远端路径设置。
+    compaction_trigger: bool = False
     # LLM: cabfix：一次调用的绝对墙钟上界（秒），None=不设总期限（主模型与旧调用方保持原语义）。
     #   与 first_event_timeout_seconds 的区别：后者是"等首个事件"的窗口，收到事件后可续期；
     #   本字段是整次调用的硬上限，无论有没有事件到达都不延长。辅助调用用它堵住

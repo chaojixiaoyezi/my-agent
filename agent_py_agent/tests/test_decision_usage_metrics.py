@@ -79,11 +79,11 @@ def test_purpose_snapshot_delta_counts_input_once_and_keeps_real_output(tmp_path
 
 
 @pytest.mark.parametrize("usage,expected,reported,label", [
-    ({"input_tokens": 0}, 0, 1, "决策 0 token · 成功 1 · 失败 0"),
-    ({"input_tokens": 12, "output_tokens": 3}, 12, 1, "决策 12 token · 成功 1 · 失败 0"),
+    ({"input_tokens": 0}, 0, 1, "决策 成功 1 · 失败 0"),
+    ({"input_tokens": 12, "output_tokens": 3}, 12, 1, "决策 成功 1 · 失败 0"),
     # 成功却一次都没报输入、也没有可外推的已报调用：真的没有数据，挂在成功次数上说明（不能显示成 0，也不另起重复计数）
-    ({"output_tokens": 3}, None, 0, "决策 成功 1（其中 1 次未回报用量） · 失败 0"),
-    ({}, None, 0, "决策 成功 1（其中 1 次未回报用量） · 失败 0"),
+    ({"output_tokens": 3}, None, 0, "决策 成功 1 · 失败 0"),
+    ({}, None, 0, "决策 成功 1 · 失败 0"),
 ])
 def test_decision_metrics_preserve_main_rounds_cache_tools_and_unknown(tmp_path, usage, expected, reported, label):
     agent, params, clock, _, _ = fixture(tmp_path)
@@ -112,10 +112,11 @@ def test_partial_decision_usage_is_not_hidden_by_complete_other_call(tmp_path):
     decision(agent, params, call_id="decision-2", usage={"output_tokens": 5})
     metrics = publish_model_metrics(agent, params, pending=False)
     assert metrics["model_rounds"] == 0
-    assert metrics["input_tokens"] == 12 and metrics["estimated_tokens"] == 42
+    # 决策用量不计入状态行累计（用户 10-08 定）：只有决策调用时累计输入为 0
+    assert metrics["input_tokens"] == 0 and metrics["estimated_tokens"] == 42
     assert metrics["decision_input_tokens"] == 12 and metrics["decision_input_reported_calls"] == 1
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-    assert "决策 ≈24 token · 成功 2 · 失败 0" in text
+    assert "决策 成功 2 · 失败 0" in text and "token" not in text.split("决策")[1].split("·")[0]
 
 
 def test_sent_failures_show_an_estimate_and_unsent_failures_are_listed_apart(tmp_path):
@@ -131,7 +132,7 @@ def test_sent_failures_show_an_estimate_and_unsent_failures_are_listed_apart(tmp
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
     # 发出去后超时的那次显示估算并算失败；一次 HTTP 尝试都没有的那次单列“未发出”、不算失败；进行中的两边都不计。
     # 已报只外推到成功调用（未完成的调用另有估算，不再重复外推）。
-    assert "决策 5.0k token · 估算 42 token（未完成） · 成功 1 · 失败 1 · 未发出 1" in text
+    assert "决策 成功 1 · 失败 1 · 未发出 1" in text
     # 这里只有决策调用没有供应商回报，决策段已讲清，总行不再出现“缺报”
     assert "缺报" not in text
 
@@ -154,8 +155,8 @@ def test_original_baseline_refreshes_when_background_usage_appends(tmp_path):
     decision(agent, background, usage={"input_tokens": 12})
     persist(agent, background, thread)
     refreshed = publish_model_metrics(agent, params, pending=False)
-    assert refreshed["input_tokens"] == 1012 and refreshed["decision_input_tokens"] == 12
-    assert publish_model_metrics(agent, params, pending=False)["input_tokens"] == 1012
+    assert refreshed["input_tokens"] == 1000 and refreshed["decision_input_tokens"] == 12
+    assert publish_model_metrics(agent, params, pending=False)["input_tokens"] == 1000
 
 
 def test_legacy_history_retains_unknown_partition(tmp_path):
@@ -168,7 +169,8 @@ def test_legacy_history_retains_unknown_partition(tmp_path):
     persist(agent, params, thread)
     assert not agent.conversation_store.model_usage.summary(thread.thread_id)["purpose_totals_known"]
     metrics = publish_model_metrics(agent, params, pending=False)
-    assert metrics["input_tokens"] == 24 and metrics["decision_input_tokens"] == 12
+    # 旧账没有用途分区的 12 留在累计里，当前这次决策调用的 12 被扣除
+    assert metrics["input_tokens"] == 12 and metrics["decision_input_tokens"] == 12
     # 没有用途分区的旧账不计入决策约数与成败次数，也不当作零决策补进来
     assert (metrics["decision_call_count"], metrics["decision_success_count"]) == (1, 1)
 

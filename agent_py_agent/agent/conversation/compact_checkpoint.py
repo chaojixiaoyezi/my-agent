@@ -51,6 +51,8 @@ class CompactCheckpointRequest:
     media_blocks_summarized: int = 0
     media_policy_reason: str = ""
     media_refs: tuple[str, ...] = ()
+    # 服务端压缩记录（conversation/compact_remote.provider_compaction_record）；None 表示普通文字摘要。
+    provider_compaction: dict[str, object] | None = None
 
 
 # LLM: 工具来源/保留区均以原四元refs为权威，call_id仅作展示；与scope/base共同写入原owner账本。
@@ -71,6 +73,7 @@ class LiveToolCompactCheckpointRequest:
     forced: bool = False
     scope: CompactScope = THREAD_COMPACT_SCOPE
     summary_base_checkpoint_id: str | None = None
+    provider_compaction: dict[str, object] | None = None
 
 
 # LLM: v3身份绑定提交前驱、摘要基础、scope、精确覆盖及创建时间；时间影响任务继承，必须封印。
@@ -125,6 +128,9 @@ def _checkpoint_payload(agent, request) -> dict[str, object]:
         "summary": summary, "summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest(),
         "backend": str(getattr(backend, "name", "") or ""),
         "model": str(getattr(backend, "model_name", "") or ""), "created_at": time.time(),
+        # 服务端压缩检查点：summary 是占位文本，真正的内容在这条记录的压缩项里（协议 + 端点决定谁能读）。
+        **({"provider_compaction": dict(request.provider_compaction)}
+           if isinstance(getattr(request, "provider_compaction", None), dict) else {}),
     }
 
 

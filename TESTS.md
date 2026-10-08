@@ -20,6 +20,12 @@
   两遍重放一致、原消息不改；超预算先瘦身仍单次（带工具、auto）、省不够才分段；Chat 载荷的压缩调用 `max_tokens` 为 16384 而普通
   辅助调用不变；Responses gpt-6 系列压缩请求请求级 `reasoning.effort` 不变且在压缩指令前插 `configuration_update`（gpt-5.5 auto 不插、
   档案 on 插、off 不插、未配置或同档不插）；两个 memory 键的解析与回退；会话累计命中率的累计与显示、没回报缓存字段时不显示。
+- **新用例** `agent_py_agent/tests/test_compact_remote_provider.py`（9 条，compactremote）：Responses 线层解析/回放压缩项；订阅后端
+  把触发项放 input 最末、带工具与 instructions、声明能力（API Key 端点不声明）；远端助手返回记录、没返回项/后端抛错/开关关都回退 None、
+  超预算先瘦身旧工具输出且不改原消息、瘦不够放弃；兼容性只比协议与端点；来源前缀发压缩项而不是占位文本；真实消息文件 + 假后端走完
+  transcript 压缩：检查点存 `provider_compaction`、thread.summary 是占位、视图带密文、换成读不了的后端后视图透明且来源重新含全部行；
+  live 摘要执行器走远端并把记录放进 provider_outcome、开关关走原路；memory 设置解析新开关。决策段改成只显示个数、用量不计入累计后，
+  `test_decision_usage_metrics` / `test_decision_stats_display` / `test_tui_status_line_display` 的期望同步改。
 - **新用例** `agent_py_agent/tests/test_tui_status_line_display.py`（10 条）：状态行固定顺序与整行文案；总缓存两位小数、累计会话只算输入
   （估算补位带 ~、未知）；决策（关闭/观察/实际）括号、旧快照/未知值不带括号；重试显示、待结算与 LLM 段不显示；窄屏有界；
   `decision_summary_mode_from_read` 折叠线程点位（apply > observe > off、线程覆盖、总开关）；`publish_model_metrics` 只在捕获作用域内带

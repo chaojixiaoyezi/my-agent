@@ -220,7 +220,8 @@ def conversation_compact_provider_messages(
 # LLM: 各遍重放同一rows，原生最后信封与orphan规则共用原实现；不缓存完整provider数组，不授予历史覆盖。
 # project_message 是每遍重放都重新应用的纯投影（如把媒体块换成归档引用），只改交给摘要的临时消息，不改 rows。
 # 函数用途: 为摘要计量与分段提供同一可重放缓存面，完整旧摘要和展示段仍原样保留。
-def conversation_compact_provider_source(previous_summary, compact_generation, rows, *, volatile_sections=(), project_message=None):
+def conversation_compact_provider_source(previous_summary, compact_generation, rows, *, volatile_sections=(), project_message=None,
+                                         previous_provider_compaction=""):
     rows = rows if isinstance(rows, Sequence) else tuple(rows)
     prefix: list[dict[str, Any]] = []
     summary = str(previous_summary or "").strip()
@@ -229,7 +230,9 @@ def conversation_compact_provider_source(previous_summary, compact_generation, r
             [
                 CompactionSummary(
                     "# Earlier Conversation Summary "
-                    f"(generation {max(0, int(compact_generation or 0))})\n{summary}"
+                    f"(generation {max(0, int(compact_generation or 0))})\n{summary}",
+                    # 上一代是服务端压缩项时前缀发压缩项（与主请求逐字一致），不发占位文本。
+                    provider_compaction=str(previous_provider_compaction or ""),
                 )
             ]
         )

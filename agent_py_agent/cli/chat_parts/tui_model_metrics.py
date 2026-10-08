@@ -1,5 +1,5 @@
 # LLM: 只渲染 model_runtime_metrics.v1，不读取日志、成本文件或模型正文；每帧工作量与固定字段数相关。
-# 模块用途: 在 Context 下沿显示一行模型统计：本轮模型轮、当轮工具、总缓存（两位小数）、累计会话、决策（开关）及成败、输出、速度；按宽度裁剪，不显示价格。
+# 模块用途: 在 Context 下沿显示一行模型统计：本轮模型轮、当轮工具、总缓存（两位小数）、累计会话、决策（开关）及成败个数、输出、速度；决策调用不计入累计，按宽度裁剪，不显示价格。
 from __future__ import annotations
 
 from ...agent.conversation.model_metrics import public_model_metrics, split_unsent_failures
@@ -19,32 +19,19 @@ def _tokens(value: int) -> str:
 
 
 # LLM: 仅供显示，不写回账本、不参与预算或调度。括号里的开关值来自快照的 decision_mode（settings.decision_settings_projection
-#   的总标签），没有该字段（旧快照、本地模式）就不带括号。token 两种来源分开标注：
-#   供应商回报的输入按已报调用的平均值外推到全部成功调用（有没报的成功调用时带 ≈）；
-#   估算 = 已发出后超时/失败的调用的发送前本地估算，标"未完成"。
-#   次数互不重叠、可直接看：成功 / 失败（只算发出去之后失败或超时的）/ 未发出（一次 HTTP 尝试都没有，不计入失败，
-#   口径见 split_unsent_failures）。真的一点数据都没有的只作为括号说明挂在所属次数上，不另起一个会重复计数的"缺报"数。
-# 函数用途: 生成统计行里的"决策（观察）≈N token · 估算 M token（未完成） · 成功 X（其中 a 次未回报用量） · 失败 Y（其中 b 次分不清是否发出） · 未发出 Z"片段；
-#   没有决策调用时只给"决策（关闭）"这样的开关状态。
+#   的总标签），没有该字段（旧快照、本地模式）就不带括号。用户 2026-10-08 定：决策只看个数、不看 token 和缓存——
+#   成功 / 失败（只算发出去之后失败或超时的）/ 未发出（一次 HTTP 尝试都没有，不计入失败，口径见 split_unsent_failures）；
+#   决策调用的用量也不进总缓存/累计会话/输出（model_metrics._add_usage 已扣除）。
+# 函数用途: 生成统计行里的"决策（观察） 成功 X · 失败 Y · 未发出 Z"片段；没有决策调用时只给"决策（关闭）"这样的开关状态。
 def _decision_part(metrics: dict[str, object]) -> str:
     mode = metrics.get("decision_mode")
     head = "决策" + (f"（{_DECISION_MODE_LABELS[mode]}）" if mode in _DECISION_MODE_LABELS else "")
     if not metrics.get("decision_call_count"):
         return head
-    success, reported = int(metrics["decision_success_count"]), int(metrics["decision_input_reported_calls"])
     failures, not_sent = split_unsent_failures(metrics["decision_failure_count"], metrics["decision_unfinished_calls"],
                                                metrics["decision_unknown_failures"])
-    value, estimate = metrics["decision_input_tokens"], int(metrics["decision_estimated_tokens"])
-    parts = []
-    if value is not None and reported:
-        approx = "≈" if success > reported else ""
-        parts.append(f"{approx}{_tokens(round(int(value) * max(success, reported) / reported))} token")
-    if estimate:
-        parts.append(f"估算 {_tokens(estimate)} token（未完成）")
-    unreported, unknown = (0 if reported else success), int(metrics["decision_unknown_failures"])
-    parts.append(f"成功 {success}" + (f"（其中 {unreported} 次未回报用量）" if unreported else ""))
-    parts.append(f"失败 {failures}" + (f"（其中 {unknown} 次分不清是否发出）" if unknown else ""))
-    return head + " " + " · ".join(parts + ([f"未发出 {not_sent}"] if not_sent else []))
+    parts = [f"成功 {int(metrics['decision_success_count'])}", f"失败 {failures}"] + ([f"未发出 {not_sent}"] if not_sent else [])
+    return head + " " + " · ".join(parts)
 
 
 # LLM: 只显示会话累计命中率（账本累计 cache_read ÷ 累计输入，DeepSeek Harness 页脚同一口径），保留两位小数：用户拿

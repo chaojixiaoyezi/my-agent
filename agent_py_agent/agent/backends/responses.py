@@ -68,6 +68,9 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["instructions"] = "\n\n".join(item["content"] for item in payload["input"] if item.get("role") == "system")
             payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
         validate_responses_input(payload["input"])
+        # 服务端压缩：触发项放在 input 最末（压缩链保证此时没有压缩指令这条动态 user 消息），前缀逐字不变。
+        if getattr(request, "compaction_trigger", False):
+            payload["input"] = [*payload["input"], {"type": "compaction_trigger"}]
         payload.update(_session_cache_key(subscription))
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
                    **_subscription_affinity_headers(subscription)}
@@ -82,6 +85,18 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         if declared in {"on", "off"}:
             return declared == "on"
         return str(self.model_name or "").lower().startswith("gpt-6")
+
+    # LLM: 服务端压缩能力只按结构化事实判断：订阅登录（auth_ref.mode == chatgpt，即官方 Codex 同一后端）已真机核实接受
+    #   compaction_trigger 项并返回 compaction 项；API Key 的 Responses 端点未核实，先不声明。改动同步 conversation/compact_remote。
+    # 函数用途: 这个后端能不能让服务端替我们压缩历史。
+    def supports_remote_compaction(self) -> bool:
+        return str((getattr(self, "auth_ref", None) or {}).get("mode") or "") == "chatgpt"
+
+    # LLM: 压缩项只有同一协议、同一端点的后端能读（真机核实 sol/astra 可互读）；检查点里存这份范围，
+    #   compact_summary_view 按它判断兼容，不兼容的后端把该检查点当透明、从归档原文重新压缩。
+    # 函数用途: 返回服务端压缩项的适用范围（协议 + 端点），不含凭据。
+    def provider_compaction_scope(self) -> dict[str, str]:
+        return {"protocol": "openai_responses", "endpoint": str(self.api_base or "")}
 
     # LLM: 流式与 Chat 后端同一个分派入口 request_stream_lines，按被调方签名传首包预算与绝对期限（cabfix 起
     #   HttpBackend 收 options）；直接写旧关键字会让所有 Responses 流式请求 TypeError（17k Linux 车道实测）。

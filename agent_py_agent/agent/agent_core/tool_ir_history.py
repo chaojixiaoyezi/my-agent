@@ -174,12 +174,12 @@ def provider_messages_fingerprint(params: object) -> str:
 # LLM: compact 摘要与真实 UserTurn 类型分开；每次安装只替换 thread/live summary，
 # writer-owned摘要标记applied_compact；carried handoff原位保留，重跑不得重复恢复摘要前缀。
 # 函数用途: 在最近工具尾部之前安装唯一一条当前 turn 压缩摘要，并保留运行交接摘要。
-def replace_compaction_summary_ir(params: object, text: str) -> bool:
+def replace_compaction_summary_ir(params: object, text: str, *, provider_compaction: str = "") -> bool:
     content = str(text or "").strip()
     if not content:
         return False
     history = native_tool_ir_history(params)
-    replacement = CompactionSummary(content, source="applied_compact")
+    replacement = CompactionSummary(content, source="applied_compact", provider_compaction=provider_compaction)
     rebuilt: list[Any] = []
     installed = False
     for item in history:

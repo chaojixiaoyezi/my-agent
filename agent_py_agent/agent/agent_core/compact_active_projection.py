@@ -114,9 +114,12 @@ def replace_recovery_active_tools(
 def _replace_compact_history(history, params, compact_context, handoff):
     needs_ir_summary = getattr(params, "conversation_history_seed", None) is None
     summary_text = str(compact_context.view.summary or "").strip()
+    from ..conversation.compact_remote import provider_compaction_content
+
     applied = CompactionSummary(
         f"# Earlier Conversation Summary (generation {compact_context.view.generation})\n{summary_text}",
         source="applied_compact",
+        provider_compaction=provider_compaction_content(getattr(compact_context.view, "provider_compaction", None)),
     ) if needs_ir_summary and summary_text else None
 
     projected_ir: list[object] = []

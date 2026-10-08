@@ -288,6 +288,11 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     decision = purposes.get("decision", {})
     usage = decision.get("usage_breakdown", {}).get("provider", {})
     reported = int(usage.get("input_tokens_reported_call_count") or 0)
+    # 决策调用不计入状态行的总缓存/累计会话/输出（用户 2026-10-08 定）：从累计里扣掉决策分区的供应商用量，决策段单独报。
+    for key in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
+        totals[key] = max(0, int(totals[key]) - int(usage.get(key) or 0))
+    totals["cache_read_reported_calls"] = max(0, int(totals["cache_read_reported_calls"])
+                                             - int(usage.get("cache_read_input_tokens_reported_call_count") or 0))
     outcomes, facts = decision.get("status_counts") or {}, unfinished_usage_facts(decision)
     totals["decision_call_count"] += int(decision.get("physical_model_attempt_count") or 0)
     totals["decision_input_reported_calls"] += reported

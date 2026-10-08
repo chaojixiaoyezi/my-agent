@@ -70,6 +70,7 @@ _FIELDS = (
     _FieldSpec("memory_compact_recovery_target_percent", "compact_recovery_percent"),
     # 0 表示沿用主请求输出上限；负数、非整数回到默认 16384（与 call_runtime.compact_summary_output_reserve_tokens 同一口径）。
     _FieldSpec("memory_compact_summary_max_output_tokens", "int", 0, None),
+    _FieldSpec("memory_compact_remote_enabled", "bool"),
     # 档位字符串在使用处按 normalize_reasoning_level 规范化；非法值等于留空（沿用会话档位）。
     _FieldSpec("memory_compact_reasoning_level", "string", max_chars=16),
     _FieldSpec("memory_curator_enabled", "bool"),

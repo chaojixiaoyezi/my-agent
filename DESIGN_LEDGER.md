@@ -1,5 +1,29 @@
 # 设计台账
 
+## GPT 订阅模型走服务端压缩（compactremote，07，2026-10-08；状态：实现与假后端测试完成，待 192.168.1.16 真机验证、合 main、部署）
+
+- **来由**：用户 10-08 拍板"我们 codex 也走服务端压缩，看是否可行"。在 192.168.1.16 上用订阅后端真机探过（探针脚本在 07 的 scratchpad，
+  只读结构化事实）：同一请求末尾加 `{"type":"compaction_trigger"}`，服务端 11–14 秒返回一个 `compaction` 项（密文 1720 字符、
+  输出 152 token、前缀 100% 命中）；之后请求只带该项（算 154 token）+ 提问仍答出 4.5 万历史里的细节；链式压缩（项 + 新回合 + 再触发）
+  可行；astra 能读 sol 产出的项。对比客户端压缩（sol 64–109 秒、输出 2–4 千 token、生产 3.5–5 分钟）。
+- **合同**：
+  1. 后端能力：`OpenAIResponsesBackend.supports_remote_compaction()` 只按结构化事实（订阅登录 `auth_ref.mode == chatgpt`）；
+     `provider_compaction_scope()` = {protocol, endpoint}。请求选项 `ProviderRequestOptions.compaction_trigger` 为真时 input 最末放触发项，
+     没有压缩指令；响应里 `compaction` 项清洗成 `responses_compaction` 块（`responses_wire.compaction_item`），回放时再变回顶层项。
+  2. 共享助手 `conversation/compact_remote.py`：预算与单次缓存面同源、超预算同一瘦身规则；失败/没返回项返回 None，调用方走原客户端
+     压缩，不进熔断器；记录 `provider_compaction`（schema/protocol/endpoint/model/sha256/item）；三条压缩链（transcript `_summarize`、
+     活动回合 `summarize_live_tool_history`、工具循环同一入口）都先试远端。
+  3. 检查点：`summary` 存占位文本（含密文 sha 前 16 位，id 仍内容寻址），`provider_compaction` 存记录；`CompactionSummary.provider_compaction`
+     带密文，适配器发 `responses_compaction` 块而不是文字；主请求前缀、压缩来源前缀、IR 替换、视图刷新都走同一字段。
+  4. 不兼容后端透明回退（`compact_summary_view._readable_checkpoint`）：当前后端读不了（协议或端点不同、没有能力方法）就沿 summary_base
+     链退到最近能读的检查点，退到头 = 没有摘要；被跳过的检查点覆盖的行重新算未覆盖，下一次压缩从归档原文重新做一份该后端能读的摘要。
+     换模型不丢上下文，代价是换模型后的一次客户端压缩（Codex 同样重压）。
+  5. 开关 `memory_compact_remote_enabled`（默认 true）；关掉或后端不支持都走原路。
+  6. 压缩项不进对话行：回合结束归档 canonical_native_messages 时把带压缩项的摘要项换成占位文本（loop_support）；回放时剔除残留的
+     `responses_compaction` 块（native_history）。.16 真机发现：归档了压缩项的行在换到 MiniMax 后被原样重放，MiniMax 400（2013）。
+- **没做 / 风险**：API Key 的 OpenAI Responses 端点是否接受触发项未核实，暂不声明能力；服务端压缩项的过期时间未知——失效时请求会失败，
+  回退路径是下一次压缩从原文重做（待真机观察）；MiniMax/DeepSeek 没有此接口，继续走 compactfit 的单次缓存面路线。
+
 ## 压缩请求装进窗口、复用主请求前缀、降档不破坏缓存（compactfit，07，2026-10-08；状态：隔离真机已验证（sol 压缩调用命中 83–89%、astra 91%、MiniMax 12 秒），3a/6d 同意尽快部署，待合 main、CI 全绿后 MAC_ONLY 部署）
 
 - **来由**：sol/astra 一次自动压缩 10～33 分钟（mc1/mc2/mc4、luna4 任务 2 实测），期间工人一半时间在压缩；MiniMax 同样中招。根因是算术：
@@ -19,7 +43,8 @@
      DeepSeek/MiniMax 等暂不降档（DeepSeek 压缩本来十几秒；MiniMax 改请求级参数会不会破坏缓存未实测）。
   4. 工具输出外置阈值默认 200000 → 32000 字符（约 8k 英文 token；Codex 每条 1 万 token、dsh 8192 字符）：每轮 20 万上下文的根子。
   5. TUI 统计行改成用户 10-08 定的布局：本轮模型轮 · 当轮工具 · 总缓存（会话累计命中率 = 账本累计 cache_read ÷ 输入，两位小数，
-     不再显示最近一次） · 累计会话（只算累计输入，和总缓存相乘就是命中量） · 决策（关闭/观察/实际）及成败（去掉"已报"两字，括号里是
+     不再显示最近一次） · 累计会话（只算累计输入，和总缓存相乘就是命中量） · 决策（关闭/观察/实际）只显示成功/失败/未发出个数
+     （用户 10-08 再定：决策不看 token 和缓存，决策调用的用量也从总缓存/累计会话/输出里扣除，`model_metrics._add_usage`）（括号里是
      `decision_summary_mode_from_read` 的总开关投影，只在 Gateway 捕获过 owner 设置时显示） · [重试] · 输出 · [速度]；去掉"LLM 估算…
      （未完成）/未发出/缺报"段、"本轮待结算"和"入/出"。速度口径改为输出 token ÷ 整次调用时长（原来按首字到收完算，隐藏思考 token
      不逐字流出，sol 常显示上千 tok/s）。Context 行压缩点后面接模型名和思考档位（`思考 关` / 档位 / `auto`），来自

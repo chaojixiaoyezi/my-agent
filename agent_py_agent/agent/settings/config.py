@@ -378,6 +378,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 压缩摘要调用的思考档位，空 = 沿用会话档位。只在后端能用 configuration_update 项降档时生效（GPT-6 系列 Responses 接口），
     # 请求级 reasoning.effort 不变、前缀缓存不失配；其它后端仍沿用会话档位。
     memory_compact_reasoning_level: str = "low"
+    # 服务端压缩开关：后端声明支持时（目前是 ChatGPT 订阅登录的 Responses 接口）压缩改为让服务端返回压缩项，不再发摘要请求；
+    # 关掉或后端不支持都走客户端摘要。换到读不了压缩项的后端时程序自动从归档原文重新压缩（conversation/compact_remote）。
+    memory_compact_remote_enabled: bool = True
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
     # 留空时按消息来源会话的主代理模型整理（2026-10-02 用户拍板），会话没选或不可用时用 owner 默认；填编号则固定用它，

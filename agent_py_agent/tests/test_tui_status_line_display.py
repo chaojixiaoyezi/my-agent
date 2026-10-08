@@ -55,9 +55,9 @@ def test_session_total_counts_input_only_and_marks_local_estimates():
 def test_decision_mode_label_in_brackets():
     assert "决策（关闭） · 输出 0" in _line(decision_mode="off")
     assert "决策（实际） · 输出 0" in _line(decision_mode="apply")
-    assert "决策（观察） 120 token · 成功 1 · 失败 0" in _line(
-        decision_mode="observe", decision_call_count=1, decision_success_count=1, decision_input_reported_calls=1,
-        decision_input_tokens=120, decision_unfinished_calls=0, decision_unknown_failures=0)
+    text = _line(decision_mode="observe", decision_call_count=1, decision_success_count=1, decision_input_reported_calls=1,
+                 decision_input_tokens=120, decision_unfinished_calls=0, decision_unknown_failures=0)
+    assert "决策（观察） 成功 1 · 失败 0" in text and "token" not in text.split("决策")[1], "决策只看个数，不看 token"
     # 旧快照 / 未知值：不带括号，也不猜
     assert "决策 · 输出 0" in _line() and "决策 · 输出 0" in _line(decision_mode="maybe")
     assert "decision_mode" not in public_model_metrics({"schema": "model_runtime_metrics.v1", "decision_mode": "maybe"})

@@ -108,7 +108,8 @@ def test_configured_http_decision_reaches_original_usage_and_display(tmp_path, s
     metrics = params.tui_runtime.store.snapshot().status.model_metrics
     assert metrics["decision_input_tokens"] == 120 and metrics["decision_input_reported_calls"] == 1
     assert metrics["decision_success_count"] == 1 and metrics["decision_failure_count"] == 0
-    assert metrics["input_tokens"] == 120 and metrics["output_tokens"] == 30
+    # 决策调用的用量不计入状态行累计（用户 2026-10-08 定），只在决策分区里报
+    assert metrics["input_tokens"] == 0 and metrics["output_tokens"] == 0
     assert metrics["model_rounds"] == 0
 
 

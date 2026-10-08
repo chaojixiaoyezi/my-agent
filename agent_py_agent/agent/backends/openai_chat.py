@@ -66,6 +66,7 @@ class _OpenAIGenerateRequest:
     max_output_tokens: int | None = None
     # 压缩降档申请（configuration_update 项的档位），只有 Responses 适配器消费；默认空串不插项。
     reasoning_update_effort: str = ""
+    compaction_trigger: bool = False
     first_event_timeout_seconds: float | None = None
     # cabfix：调用方给的本次请求绝对墙钟上界（秒）；None=不设总期限，主模型路径保持原语义。
     total_deadline_seconds: float | None = None
@@ -144,6 +145,7 @@ class OpenAICompatibleBackend(HttpBackend):
                 thinking_disabled=provider_options.thinking_disabled,
                 max_output_tokens=provider_options.max_output_tokens,
                 reasoning_update_effort=provider_options.reasoning_update_effort,
+                compaction_trigger=provider_options.compaction_trigger,
                 first_event_timeout_seconds=provider_options.first_event_timeout_seconds,
                 total_deadline_seconds=provider_options.total_deadline_seconds,
                 reasoning_effort=provider_options.reasoning_effort,

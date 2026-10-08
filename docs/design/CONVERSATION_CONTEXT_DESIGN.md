@@ -123,6 +123,24 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 `agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
 另一份主 thread。孙代理递归遵守同一规则。
 
+## 服务端压缩（2026-10-08，07，compactremote）
+
+- 能力与请求：`OpenAIResponsesBackend.supports_remote_compaction()`（订阅登录）/ `provider_compaction_scope()`；
+  `ProviderRequestOptions.compaction_trigger` → input 最末 `{"type":"compaction_trigger"}`；`responses_wire.compaction_item` 清洗响应里的
+  `compaction` 项为 `responses_compaction` 块，`message_items` 回放成顶层项。
+- 助手 `conversation/compact_remote.py`：`request_remote_compaction` 用主请求同一份 system/工具/历史（无压缩指令）发一次辅助调用
+  （用途 `conversation_compact_remote`，预算与瘦身同单次缓存面），返回 `provider_compaction` 记录或 None；`provider_compaction_marker`
+  是检查点 summary 的占位；`provider_compaction_compatible` 只比协议与端点。
+- 接入点：transcript 链 `compact._summarize` → `_remote_transcript_compaction`；活动回合与工具循环共用
+  `compact_semantic_summary.summarize_live_tool_history` → `_remote_live_compaction`（只在缓存安全路径）；三条链的检查点请求、
+  `_NativeCompactPlan`、`LiveToolCompactCommitRequest`、`_CompactCandidate` 都带 `provider_compaction`。
+- 历史表达：`CompactionSummary.provider_compaction`（密文）→ `message_adapter` 发 `responses_compaction` 块；主请求前缀
+  （loop_support 两处、compact_active_projection）、压缩来源前缀（`conversation_compact_provider_source(previous_provider_compaction=)`）、
+  IR 替换（`replace_compaction_summary_ir(provider_compaction=)`）、视图刷新同一字段。
+- 视图与回退：`CompactSummaryView.provider_compaction`；`_readable_checkpoint` 把当前后端读不了的检查点当透明（沿 base 链回退），
+  覆盖的行重新算未覆盖，由下一次客户端压缩从原文重做。
+- 开关：`memory_compact_remote_enabled`（默认 true）。
+
 ## 压缩请求装进窗口与降档（2026-10-08，07，分支 `claude/07-compact-cache`）
 
 - 事故形状：sol/astra 的 90% 触发线 244,800 高于单次缓存面预算 240,000（窗口 − 构造期按 128k 默认算出的主请求输出上限 32000），

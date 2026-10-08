@@ -52,6 +52,8 @@ class CompactionSummary:
 
     text: str
     source: str = ""
+    # 服务端压缩项的密文（conversation/compact_remote）：非空时适配器发压缩项而不是 text；只有兼容后端的视图会带它。
+    provider_compaction: str = ""
 
 
 # LLM: RuntimeFactsTurn is a chronological provider-visible input item. Unlike UserTurn it is

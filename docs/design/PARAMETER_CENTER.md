@@ -252,6 +252,12 @@
 - `goal_continuation_idle_limit`：连续多少个持续目标自动续跑片没有工具调用或 Goal/任务结构化状态变化时自动暂停；默认 3，设为 0 表示不限。
   定义在 `AgentConfig`，随包 `agent_config.yaml` 的中文说明由参数登记表自动读取；按普通非安全整数参数登记，可从参数中心查看/修改，沿配置默认的 Gateway 重启生效语义。
 
+## 2026-10-08 新增参数（compactremote，07）
+
+| 参数 | 位置 | 默认 | 说明 |
+|---|---|---|---|
+| `memory_compact_remote_enabled` | `agent_config.yaml` / `AgentConfig` / `MemorySettings`（bool） | true | 后端声明支持时（ChatGPT 订阅 Responses）压缩改为服务端返回压缩项；关掉或不支持走客户端摘要 |
+
 ## 2026-10-08 新增参数（compactfit，07）
 
 - `memory_compact_summary_max_output_tokens`：压缩摘要请求的输出上限（含思考），默认 16384，0 = 沿用主请求输出上限；预算与实际发送

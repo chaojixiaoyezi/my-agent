@@ -736,6 +736,7 @@ agent_py_agent/
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
 |   |   |-- compact_message_source.py   # 可重放原生摘要消息与完整JSON数组编码，复用唯一token估算
 |   |   |-- compact_request_budget.py   # 按当前模型窗口顺序分段摘要，完整覆盖历史且失败不推进游标
+|   |   |-- compact_remote.py            # 服务端压缩（Codex 路线）共享助手：触发请求、预算与瘦身、provider_compaction 记录与兼容性判断
 |   |   |-- compact_landmarks.py        # 压缩摘要末尾原话备份：按 token 随窗口放大、带消息编号、放不下保留头尾、省略列编号与回查说明
 |   |   |-- compact_tool_refs.py        # 从匹配原生工具往返保留原样路径线索，不靠模型摘要记忆目录
 |   |   |-- compact_guard.py            # 结构化完整回合选择、连续失败冷却与 typed compact 错误
@@ -1042,6 +1043,7 @@ agent_py_agent/
 |   |-- test_decision_transport_timing.py # 假代理/假 TLS/假服务端逐段注入延迟：分段计时与超时阶段落结果日志、估算输入入 model_usage、零重试不补发
 |   |-- test_keepalive_transport.py     # 决策长连接复用：一条隧道/一次握手、复用记 0 毫秒建连、错误与中止不归还、过期与对端关闭丢弃、开关
 |   |-- test_decision_stats_display.py  # 决策统计口径：TUI 已报/估算（未完成）/缺报分开、未发出单列，结果日志与审计把没发出去的失败单列
+|   |-- test_compact_remote_provider.py  # 服务端压缩：触发项/压缩项线层、远端助手回退、检查点与视图兼容性、live 摘要走远端
 |   |-- test_tui_status_line_display.py  # 状态行布局（2026-10-08）：总缓存两位小数、累计会话只算输入、决策（关闭/观察/实际）、速度按整次调用时长、Context 行模型名与思考档位
 |   |-- test_compact_cache_surface_fit.py  # 压缩请求装进窗口：输出预留同源、超预算先瘦身再单次、Responses configuration_update 降档、会话累计命中率
 |   |-- test_decision_reach_counts.py   # 到达计数：进程内累加、节流合并不覆盖、7 天修剪、开关与写失败、阶段原因与大白话；导出各点位测试共用的 reach_counter

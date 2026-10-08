@@ -245,6 +245,8 @@ class _CompactCandidate:
     projected_tokens_after: int
     request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
     tool_source: CarriedToolCompactSource | None = field(default=None, repr=False)
+    # 服务端压缩记录（compact_remote）；None = 普通文字摘要。
+    provider_compaction: dict[str, object] | None = field(default=None, repr=False)
     # LLM: 本候选对媒体块采取的策略与将被归档的媒体事实；None/空表示本次范围内没有媒体或策略为 off，提交时据此决定是否写 checkpoint 字段。
     media_decision: CompactMediaDecision | None = field(default=None, repr=False)
     media_facts: MediaArchiveFacts = field(default_factory=MediaArchiveFacts, repr=False)
@@ -275,6 +277,10 @@ class _CompactSummaryCall:
     media_outcome: list[CompactMediaDecision] | None = None
     # LLM: 调用方提供的列表；_summarize 追加一个可按更小原话备份预算重建同一摘要文本的对象，只供本候选超出恢复目标时收缩备份。
     landmark_outcome: list[_LandmarkRebuild] | None = None
+    # 服务端压缩：provider_outcome 是调用方提供的列表，走了远端路径时追加记录；previous_provider_compaction 是上一代压缩项密文，
+    #   来源前缀据此发压缩项而不是占位文本（链式压缩、与主请求逐字一致）。
+    provider_outcome: list[dict[str, object]] | None = None
+    previous_provider_compaction: str = ""
 
 
 # LLM: 只重算原话备份段，语义摘要、机械回退正文与尾随来源原样保留；不发模型请求、不写任何状态。
@@ -1005,6 +1011,11 @@ def _build_compact_candidate(
     evidence = _merge_compact_operation_evidence(base_evidence, compact_rows)
     media_outcome: list[CompactMediaDecision] = []
     landmark_outcome: list[_LandmarkRebuild] = []
+    provider_outcome: list[dict[str, object]] = []
+    from .compact_remote import provider_compaction_content
+
+    previous_provider_compaction = (provider_compaction_content(request.compact_context.view.provider_compaction)
+                                    if request.compact_context is not None else "")
     summary = _summarize(
         request.agent,
         base_summary,
@@ -1028,6 +1039,8 @@ def _build_compact_candidate(
             media_facts=media_facts,
             media_outcome=media_outcome,
             landmark_outcome=landmark_outcome,
+            provider_outcome=provider_outcome,
+            previous_provider_compaction=previous_provider_compaction,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -1052,6 +1065,7 @@ def _build_compact_candidate(
         # 摘要阶段的准入或看图小请求结果可能改写 B 候选；checkpoint 记的是实际采用的决定（含 summarized_blocks）。
         media_decision=final_media,
         media_facts=media_facts,
+        provider_compaction=provider_outcome[-1] if provider_outcome else None,
     )
 
 
@@ -1173,6 +1187,7 @@ def _commit_compact_candidate(
             media_blocks_archived=_media_blocks_archived(candidate),
             media_blocks_summarized=_media_blocks_summarized(candidate),
             media_refs=candidate.media_facts.refs,
+            provider_compaction=candidate.provider_compaction,
             **({
                 "scope": request.compact_context.scope,
                 "summary_base_checkpoint_id": request.compact_context.view.checkpoint_id,
@@ -1426,6 +1441,7 @@ def _summarize(
             # 图块永远不进这次大范围文字摘要请求：策略不为 off 时统一投影为归档引用，图中要点已由看图小请求写进指令。
             project_message=(project_archived_media_message
                              if selected_call.media_policy != MEDIA_POLICY_OFF else None),
+            previous_provider_compaction=selected_call.previous_provider_compaction,
         )
         provider_tools = (
             list(provider_surface.tools)
@@ -1438,6 +1454,9 @@ def _summarize(
             prompt = f"{prompt}\n\n{tool_source_text}"
         else:
             message_source = message_source.with_tail(AnthropicMessageAdapter().to_provider_messages(tool_history))
+    marker = _remote_transcript_summary(agent, selected_call, message_source) if message_source is not None else ""
+    if marker:
+        return marker
     from .auxiliary_model_call import AuxiliaryModelCallRequest
     from .compact_request_budget import (
         compact_summary_response_outcome,
@@ -1467,6 +1486,33 @@ def _summarize(
     return _finish_summary(_SummaryFinish(
         agent, previous_summary, operation_evidence, rows, foreground_rows, tool_source_text, media_digest, selected_call,
     ), summary)
+
+
+# LLM: 服务端压缩（compact_remote）：材料与客户端单次缓存面请求同源（同 system、同工具、同一份可重放来源，只是没有压缩指令），
+#   工具与 system 直接取 provider_surface；不可用/失败返回空串走原文字摘要；中断照常传播。来源在这里物化一次交给远端请求。
+# 函数用途: 对一段 transcript 来源尝试一次服务端压缩：成功登记记录并返回占位摘要文本，否则返回空串。
+def _remote_transcript_summary(agent, selected_call, message_source) -> str:
+    from .compact_remote import (
+        RemoteCompactionRequest,
+        provider_compaction_marker,
+        remote_compaction_enabled,
+        request_remote_compaction,
+    )
+
+    surface = selected_call.provider_surface
+    if surface is None or not remote_compaction_enabled(agent):
+        return ""
+    record = request_remote_compaction(RemoteCompactionRequest(
+        agent=agent, prompt=conversation_compact_provider_prompt(surface, ""), messages=list(message_source),
+        tools=list(surface.tools) if surface.tools is not None else None, system_instruction=surface.system_instruction,
+        request_id=selected_call.request_id, run_id=selected_call.run_id, task_id=selected_call.task_id,
+        thread_id=selected_call.thread_id,
+    ))
+    if record is None:
+        return ""
+    if selected_call.provider_outcome is not None:
+        selected_call.provider_outcome.append(record)
+    return provider_compaction_marker(record)
 
 
 # LLM: 模型没给正文时生成机械续接包（保留媒体要点）；再追加原话备份段，并把可按更小预算重建的对象交给调用方。
