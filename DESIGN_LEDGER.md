@@ -139,6 +139,18 @@
     引用方与完整 guards9 合跑 618 passed / 9 skipped / 3 failed（sandbox-exec 明确权限拒绝，基线同失败）；
     import boundaries、ruff、doc-sync、strict code-size、diff、clean-package 已执行通过，线上告警差集新增 0、消失 0。
     命令、两处变异和基线复核见 TESTS；真实 TUI/飞书、模型、Linux 与部署未验证，非生产完成。
+    **第 2 步已实现（w1，代码提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`，2026-10-08），待 3a 复核**：
+    `capability/method_carry.py` 唯一负责主会话成功 get 的隐藏线程账本、名单冻结、目录标注和 Compact 后参考带回。
+    包保留版本与最近八份非入口资料路径，最多五个方法；旧线程缺栏/空值省略、原摘要/指纹与权限/pins 保持。
+    显示按首次使用且无时间戳，淘汰按最近使用；每 run 开始冻结一次，中途 get 不改本 run 的目录。
+    空线程的通用 scope 不写新字段，保持嵌套和并发清理；预算只用缓存，完整头/资料参数/JSON 都计入。
+    带回在选包准备后、首业务 build/capture 前，包入口复用原 reader/ActionPolicy/pins，清单只带完整重读参数；成功 RuntimeFacts 投递才推进代次。
+    `/skills using` / `remove` 共用 TUI/IM 控制入口；默认 true 的现读开关仅管理员可改，不额外调模型或执行包脚本。
+    三轮假模型真实工具/Store CAS 联验与最终 242 项通过，十处变异均 pytest rc=1；本次两条 scope 回归与自引报告准备错误已修并复验。
+    广回归原 JUnit 6263 tests/20 failures/1 error/20 skipped，rc=1；指定真基线 6e8f61564 逐项复核余下 18 个同失败，不宣称联合全绿。
+    import boundaries/ruff/doc-sync/strict-size/diff/clean-package 与前端目录均通过，size_diff 新增0/消失0，报告不提交。
+    命令、原始失败和基线/变异证据见 TESTS 首节及设计第4节；临时基线树已清理，真实 TUI/飞书、MiniMax、Linux/CI 和生产未验证。
+    第 1 步沙箱外复核通过取自 3a 第 2 步任务书，本线不把外部证据冒充自己实测；w2 可并行做第 3 步测量，生产验收归 3a。
   - **待办（"总结一下"，第 5 步复审 3 轮建议，第一期之后单独做）**：
     - 调过 `previous` 的那次运行，收尾时别覆盖"最近完成的那次活"（现在事后那一轮若先读了文件、升成任务，收尾后它自己会变成最近一份，用户接着说"再总结一下，重点换成 X"会拿到"总结一下"这一轮）；按运行编号记一下即可，是结构化做法。
     - 回 `already_requested` 时，这次新给的重点没有用上：回执要写明；更好是用户请求还在排队时就地改重点。

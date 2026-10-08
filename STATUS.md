@@ -5,7 +5,8 @@ w1 第 2 步（2026-10-08，`worker/w1-method-carry`，本地已实现，待 3a 
 十处变异各 pytest rc=1；变异后新增五文件、原 scope 文件、完整 12 文件 guards9 及原 teardown node 合跑 242 passed，rc=0。
 广回归原 JUnit 6263 tests/20 failures/1 error/20 skipped，rc=1；两个本次 scope 回归和自引报告准备错误已修复复验。
 剩余 18 个在指定基线 6e8f61564 同节点失败：9 个进程夹具、6 个 shell、3 个 sandbox-exec；超时未定位，不统称沙箱问题。
-完整命令、基线栈对照和变异见 TESTS 首节；静态门禁、提交号在冻结后补齐。第 3 步测量工具归 w2，真实入口与生产验收归 3a。
+代码提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`；import0/ruff/doc-sync/strict-size/diff/clean-package 和前端目录均通过，新增尺寸告警0。
+完整命令、基线栈对照和变异见 TESTS 首节。第 3 步测量工具归 w2，真实入口与生产验收归 3a。
 本线未验证真实 TUI/飞书、MiniMax、Linux 和生产；下段仅保留第 1 步交付时点，不覆盖本段。
 
 w1 第 1 步（2026-10-07，`worker/w1-method-carry`，本地实现，待 3a 非作者复核，未集成/部署）：

@@ -138,6 +138,7 @@
 
 ### 第 2 步实际落点（w1，2026-10-08，本地实现，待 3a 复核）
 
+- 功能/测试提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`；242 项无变异最终复验、十处有效变异和基线失败边界见 TESTS 首节。
 - 唯一负责模块 `capability/method_carry.py`：`record_method_read` 在主会话成功 get 后经原 `threads.update_atomic` 合并隐藏账本；
   包记录当前版本、读代次和最近 8 份非入口资料路径，Skill 仅保存身份/时间/代次；最多 5 个方法，按最近使用淘汰。
   `conversation/models.ConversationThread.conversation_methods` 空时不输出 JSON 键，加入 `MODEL_HIDDEN_THREAD_FIELDS`；原摘要和 fingerprint 不参与更新。
@@ -145,6 +146,7 @@
 - 缓存两条分别保证：`first_used_at` 重读不刷新，`prompt_method_ids` 只按首次使用排序且不展示时间；
   `runtime_mixin.current_prompt_scope` 调 `freeze_conversation_methods`，名单落本 run 参数，不挂线程全局缓存；
   `_runtime_params` / `loop_support` / `loop_models` 透传冻结值，builder 及纯请求投影只读此值，中途 get 只改下一个 run 的账本。
+  无合格线程的通用 prompt scope 不写新增字段，保留原嵌套/并发失败恢复；原用例已参与最终复验。
 - `router.render_skill_metadata_index` / `_render_package_metadata` 统一调用 `using_method_cards` 标注并复用 required 必显；
   在用包规则只在当前授权目录确实含在用包时追加。无在用项或关闭路径锁定旧目录字节；停用/删除/旧 pin 失效不补造卡片。
 - `_tool_loop_service.next_tool_loop_model_response` 在选包准备后、首业务 build/capture 前调用 `prepare_conversation_method_carry`。
