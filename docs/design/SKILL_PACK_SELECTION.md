@@ -160,6 +160,10 @@
 - 三轮假模型 Gateway 联验使用真实 get、原 `write_compact_checkpoint` 和同 Store 的 Compact/CAS 提交；第 2 轮有入口、资料重读参数和目录标注，第 3 轮同代不重复。
   只替换模型传输，不代表真实客户端、MiniMax 采用或生产验收。测试、变异、门禁及失败基线对照详见 TESTS.md 第 2 步节。
 
+- **集成复核（3a，2026-10-08）**：在用 skill 时 Skill 段保持普通目录格式（`# Available Skills` 与 How to use Skills 规则不变），
+  不切到 `# Selected Skills` 选择模式；`router._render_public_skill_lines` 先按"至少放得下名字和编号"渲染在用卡，再用剩余预算渲染其余卡，
+  无在用项时字节不变。用例 `test_in_use_skill_keeps_public_directory_format_and_usage_rules`、`test_in_use_skill_survives_tiny_budget_in_public_directory`。
+
 ## 5. 第 3 步：第一次挑中（三组对比，按数据定）
 
 - **现在**：第一次能不能挑中，看她自己有没有注意到目录那一行。关键词提醒只认同语言的整词；开工前选包关着。

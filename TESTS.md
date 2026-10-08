@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## skill／能力包挑选集成（3a，2026-10-08，分支 `claude/3a-pick-int`）
+
+- **范围**：main e957e0815 + 3a 文档 + w1（开关现读、会话方法沿用）+ w2（首次选包测量工具、选包候选修复，WIP 收尾项另补）+ 3a 修复 c71e44529。
+- **沙箱外复跑 w1 第 2 步头 b0cdcdebf**：按导入关系找出引用改动模块的 531 个测试文件，加 guards9，分 4 片：
+  2779 + 2577 + 2684 + 2703 = 10,743 passed、23 skipped、25 xfailed、5 xpassed，0 失败（w1 在沙箱里的 18 项失败都是沙箱环境所致）。
+- **集成分支大回归**：引用集成改动模块的测试、全部压缩测试与 guards9，共 580 个文件，分 5 片：
+  2292 + 2372 + 2297 + 2244 + 2104 = 11,309 passed，0 失败。命令前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <分片文件> -q --tb=line -p no:cacheprovider -o addopts='' --timeout=120`。
+- **3a 修复验证**：`test_conversation_method_directory.py` 8 passed；变异（改回"有 skill 在用就切选择模式"）新加 2 个用例都失败，rc=1。
+- **门禁**（BASE=origin/main）：ruff、doc-sync、strict code-size、diff-check、clean-package、import boundaries 全过；
+  常量目录 951 项、前端参数目录 269 字段重新生成且一致。
+- **未验证**：testbox Linux 3.10／3.11／3.12、PR 线上 CI、生产部署与第 4 步验收（进行中）。
+
 ## 压缩请求装进窗口与降档（compactfit，2026-10-08，07，分支 `claude/07-compact-cache`）
 
 - **新用例** `agent_py_agent/tests/test_compact_cache_surface_fit.py`（16 条）：压缩输出预留按配置且不超主请求上限；sol（272000）与

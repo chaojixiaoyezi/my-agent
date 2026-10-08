@@ -194,6 +194,11 @@
     `/skills using` / `remove` 共用 TUI/IM 控制入口；默认 true 的现读开关仅管理员可改，不额外调模型或执行包脚本。
     三轮假模型真实工具/Store CAS 联验与最终 242 项通过，十处变异均 pytest rc=1；本次两条 scope 回归与自引报告准备错误已修并复验。
     广回归原 JUnit 6263 tests/20 failures/1 error/20 skipped，rc=1；指定真基线 6e8f61564 逐项复核余下 18 个同失败，不宣称联合全绿。
+    **集成复核（3a，2026-10-08）**：集成分支 `claude/3a-pick-int`（从 main e957e0815 开，合 3a 文档、w1、w2，加 3a 修复 c71e44529）。
+    沙箱外复跑：w1 头 b0cdcdebf 引用改动模块的 531 个测试文件 10,743 项通过、0 失败（w1 沙箱里的 18 项都是沙箱环境所致）；
+    集成分支 580 个文件 11,309 项通过、0 失败；门禁全过。3a 修复：有 skill 在用、没有 Jev 选择时，Skill 段原先会整段切成
+    "Selected Skills"选择模式（标题误导、丢掉 How to use Skills 使用规则），改回普通目录格式，在用 skill 仍排最前、保证显示；
+    补 2 用例，变异抓到。状态：已集成，待 testbox 三个 Python 版本、PR 线上 CI、部署 step17y 和第 4 步验收。
     import boundaries/ruff/doc-sync/strict-size/diff/clean-package 与前端目录均通过，size_diff 新增0/消失0，报告不提交。
     命令、原始失败和基线/变异证据见 TESTS 首节及设计第4节；临时基线树已清理，真实 TUI/飞书、MiniMax、Linux/CI 和生产未验证。
     第 1 步沙箱外复核通过取自 3a 第 2 步任务书，本线不把外部证据冒充自己实测；w2 可并行做第 3 步测量，生产验收归 3a。
