@@ -21,6 +21,22 @@
 - 原有测试断言不改、不删失败；临时 owner 与假线程只证明提示合同和纯投影，真实主/子/后台完整 Gateway、TUI/飞书、
   Linux/Windows、真实供应商出站及 usage/cache 收益均未验证；组合后由 07 沙箱外复核，不据此上线。
 
+## Curator 工具输出引用批量读取（mc3-e11a，2026-10-08，分支 `worker/mc3-e11a`，含 e11a-perf 预筛正则与 e11a-fix 修订，待复核）
+
+- **来源**：生产网关内存 4.1–8.6GB、每分钟跳涨 2.5–4GB；curator 批内每个 run_id 各做一次全量控制面查询（每批重复 glob 3993 根、整读解析 836MB 级索引）。
+- **新用例** `agent_py_agent/tests/test_curator_tool_output_refs.py`（38 条）：多根合成树（顶层 + runs + tasks）上批量读取器逐条等价旧逐 run 查询（limit 0/1/2/10，含坏行、空行、越界路径、缺 index 文件）；CRLF 与 CRLF/LF 混合行尾索引两路径逐条等价（含匹配字节的坏行两边同样过滤、limit 截断一致）；read 层对照测试内旧逻辑参照（limit 0/2/2500/"abc"）refs 与 errors 逐条相同、重复 call 后行覆盖前行；非 UTF-8 索引两路径同抛 `UnicodeDecodeError`、read 层每 run 一条同型错误；单遍扫描计数（5 run 批量 = 每 index 文件 open 1 次、lookup 1 次；3 次逐 run 查询 = 每文件 3 次）；预筛条件（安全 ASCII 且非布尔/数字样式才编译字面量正则；转义兜底只认 `\u00XX` 与 `\/`，非 ASCII `\u` 不触发）；mc4-1301 转义写法照常找到（`\/`、`\u002f`、单个 `\u`、混合、全 `\u`，5 个参数）与 JSON 布尔/数字值（`true`→"True"、`1e2`→"100.0"，2 个参数）；无关账本（daily/compact）含非法 UTF-8 时引用照常返回、errors 为空（mc4-1302 新合同，2 个参数）；含正则元字符的 run_id（`. + ( [ * ? |`）精确匹配、与相似 run_id 互不误收（7 个参数）；scope 嵌套 run_id 照常匹配；预筛字节命中但结构不匹配不收集；内存上界（合成 40 根 × 500 行 ≈ 198MB 索引 + 2MB 超长行，tracemalloc 新路径峰值 5.8MB < 32MB 常量，旧路径 217.9MB）。
+- **替身更新**：`test_memory_curator_v2.py` 的 `_tool_reference_query` 改批量签名（直接转调 `query_tool_output_refs_for_runs`）。
+- **性能（e11a-perf）**：预筛从"每行对全部 needle 的 Python 生成器"改为**每批只编译一次的字节正则**（`re.compile(b"|".join(re.escape(n) ...))`，每行一次 C 层 `search`，字面量交替无回溯风险）；3a bench（1000 根、386MB、40 万行、10 run_id）同一数据两遍取小值：CPU **3.31s → 0.68s**、wall **3.47s → 0.73s**（目标 ≤1.0s 达标），matched=572 不变；旧路径同场 ≈10.3–11.6s。
+- **修订（mc3-e11a-fix，mc4 review13 结论"修改后部署"）**：
+  - **MC4-1301（阻断）修复**：JSON 允许把任何字符写成 `\uXXXX`、把 `/` 写成 `\/`；安全 run_id 的原始字节只有三种可能——原样（字面量正则命中）、含 `\u` 转义（安全字符都是 0x21–0x7E，写法必然是 `\u00XX`，含字节 `\u00`）、含 `\/`。预筛改为**字面量正则 + `\u00`/`\/` 转义兜底**（`_PRESCREEN_ESCAPE_PATTERN`，先按反斜杠闸门，避免拖慢无转义行）；另排除布尔/数字样式 run_id（`str()` 投影：`true`→"True"、`1e2`→"100.0"）。
+  - **性能（与 50b87f934 同场、同一数据两遍取小）**：任务书建议的"字面量|\u|\/"单正则先按原样实现并实测：home **2.75s**、home_ascii **2.89s**（混前缀打掉 sre 前缀优化，单次搜索慢约 13 倍），不满足 ≤1.0s，故改两段式；改后 home **0.51 → 0.52s**（达标）、最坏情况 home_ascii（ensure_ascii=True、674MB）**0.55 → 1.41s**（如实报告）；matched=572 不变。
+  - **MC4-1302（3a 接受）**：错误合同**有意变化**——工具引用读取只依赖工具输出索引，daily/compact 账本损坏不再连带失败；原文案"纯性能、errors 全部不变"作废。`query_tool_output_refs_for_runs` 与 `CuratorToolReferenceSource.read` 注释写明；测试锁新合同。
+  - **变异 3/3 被抓**（逐个还原、零残留）：去 `\u00` 兜底 → 6 红；去 `\/` 兜底 → 3 红；去布尔/数字排除 → 3 红。
+  - **mc4 契约补测复跑**：`test_review13_contracts.py` 20 过 2 红——两条"错误传播差异"红测对应旧合同，按 3a 决定不改绿。
+  - **复跑**：新文件 38 条 + `test_memory_curator_v2.py` 56 条全过；29 个相关测试文件 **639 条全过**（327+312，含新增 10 条）。
+- **回归（e11a-perf 时点）**：29 个相关测试文件 629 条全过（分两批 311+318）；**变异 6/6 被抓**：每 run 重扫 → 单遍测试红（`assert 5 == 1`）；去截断 → 4 条等价红；预筛无条件 → 4 条红（含 3 个转义/非 ASCII 参数）；只认顶层 run_id → scope 测试红；行切分失效（整文件当一行）→ CRLF 测试红；去掉 `re.escape` → 正则元字符用例 5/7 参数红（`(`/`[` 编译失败、`+`/`*`/`?` 漏收）。
+- **复现**：`PYTHONPATH=$PWD $PY -m pytest agent_py_agent/tests/test_curator_tool_output_refs.py agent_py_agent/tests/test_memory_curator_v2.py -q`。
+
 ## browser-lite 慢启动期限
 - 根因：CI Chrome 冷启动偶尔超过插件 `command_timeout_seconds` 默认 15 秒；产品默认值保持不变，避免延长页面/CDP 命令等待。
 - 夹具规则：真实浏览器组件统一 45 秒（含 EOF/SIGTERM 入口）、MCP 等待 90 秒，显式短值优先，不重试、不跳过失败。

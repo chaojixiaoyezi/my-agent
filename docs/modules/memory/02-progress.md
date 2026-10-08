@@ -493,3 +493,20 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
 - 回执加 `saved`：每条 promotion 结果的 `reason_code` 都是 PROMOTED 或 ALREADY_PROMOTED 才为 true；`ok` 含义不变（调用跑完了，候选也算副作用）。
 - `hint` 按结构化结果改写：没记上的分支一律以"没记上（正式记忆没变）"开头并写"不要对用户说已记下"（缺证据的仍带"不能把缺证据说成等待用户确认"）；一批里有记上有没记上写"部分记上了：有 N 条没记上"；全是 ALREADY_PROMOTED 写"早就在正式记忆里了"；正式记忆更新的三种说法不变。
 - 测试：`test_memory_tool.py` 断言缺证据、要人审（REVIEW_REQUIRED）、部分记上、早就记着四种回执的 `saved` 与 `hint`；6 个变异全杀（只认 pytest rc=1）。
+
+2026-10-08 Curator 工具输出引用改批量读取（mc3-e11a，分支 `worker/mc3-e11a`，生产网关内存热修，待复核）：生产观察 curator 批内每个 run_id 各做一次全量控制面查询——每批重复 glob 3993 个索引根（1.66 秒）、整读整解析 836MB 级索引，网关内存 4.1–8.6GB、每分钟跳涨 2.5–4GB。改法：
+- `memory_archive/control_plane` 新增 `query_tool_output_refs_for_runs`：一批 run 一次 glob、一次顺序扫描，逐行二进制流式读（物理 LF 切、行尾去 `\r`、严格 UTF-8，与 `jsonl_lines` 同一边界），每 run 只留前 `limit_per_run` 条匹配行；匹配复用 `_record_value`/`_matches_scope`，不复制新规则。
+- 可选字节预筛只在全部 run_id 为 JSON 不转义的可见 ASCII 时启用，命中或无法预筛时整行解析；跳过行仍严格解码（非 UTF-8 行为与旧路径一致）。
+- `memory_store/curator_inputs.CuratorToolReferenceSource.read` 改批量契约，整批失败时每个 run 复制同类型错误；`core._query_curator_tool_references` 批量转调。通用控制面 `query_memory_control_plane` 本次不改（对超大 owner 同样问题留待后续）。
+- 合成约 200MB 索引实测：新路径 tracemalloc 峰值 5.8MB，旧路径 217.9MB；29 个相关测试文件 621 条全过；变异 4/4 被抓。根列表收窄不可由结构化事实证明，本批未收窄，方案写入交接。
+
+2026-10-08 Curator 预筛改正则 + 收尾补测（mc3-e11a-perf，同一分支 `worker/mc3-e11a`，待复核）：
+- 预筛从"每行对全部 needle 的 Python 生成器步进"改为每批只编译一次的字节正则（`re.compile(b"|".join(re.escape(n) ...))`，每行一次 C 层 `search`）；字面量交替无回溯风险；空 run_id 不预筛、跳过语义（预筛不中或纯空白）不变。（注：安全条件与预筛机制在 mc3-e11a-fix 里修订——mc4-1301 兜底 + 布尔/数字排除，见下条。）
+- 3a bench（1000 根、386MB、40 万行、10 run_id）同一数据两遍取小值：一批 CPU 3.31s → 0.68s、wall 3.47s → 0.73s（目标 ≤1.0s 达标），matched=572 不变。
+- 补 CRLF/混合行尾等价用例与正则元字符用例（`.` `+` `(` `[` `*` `?` `|` 精确匹配、与相似 run_id 互不误收）；29 个相关测试文件 629 条全过；变异 6/6 被抓（新增：去掉 `re.escape` → 正则元字符用例 5/7 参数红）。
+
+2026-10-08 Curator 预筛修订（mc3-e11a-fix，mc4 review13 结论"修改后部署"，同一分支 `worker/mc3-e11a`，待复核）：
+- MC4-1301（阻断）修复：预筛可证明不漏——安全 run_id 的合法 JSON 写法只有原样/含 `\u00XX`/含 `\/` 三种；预筛 = 字面量正则 + `\u00`/`\/` 转义兜底（独立编译、先按反斜杠闸门）；布尔/数字样式 run_id 排除（`str()` 投影）。
+- 性能（与 50b87f934 同场两遍取小）：任务书建议的单正则（字面量|\u|\/）实测 home 2.75s / home_ascii 2.89s，不达标；两段式后 home 0.51 → 0.52s、home_ascii 0.55 → 1.41s；matched=572 不变。
+- MC4-1302（3a 接受）：错误合同有意变化——工具引用读取只依赖工具输出索引，无关账本损坏不再连带失败；注释与测试已写明；mc4 两条旧合同红测保持红。
+- 测试：新文件 38 条 + v2 56 条全过；29 文件 639 条全过；变异 3/3（去 `\u00`、去 `\/`、去布尔/数字排除，均 rc=1）。
