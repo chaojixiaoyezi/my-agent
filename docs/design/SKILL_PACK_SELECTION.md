@@ -231,6 +231,26 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BEN
 两次均保留真实选择与主首请求，脚本化正例只证明候选/诊断链路，不证明自然召回。测试、变异与门禁见 [TESTS](../../TESTS.md#开工前选包候选修复2026-10-07w2selfix)。
 修复后正式评测仍由 3a 用上面的真实档案命令复跑，不需将推荐上限改为 0，不据 C0 数据擅自打开默认开关。
 
+### 3a 修复后复跑、点名补测与产品决定（2026-10-07；整合铺路 2026-10-08）
+
+来源：`~/.my-agent/decision-evidence/skill-pack-selection-1007/bench-results/README.md`（只读）与 `w2-integ-prep.md`。
+以下是 **3a 在 selfix `8fc141941` 上的真实 MiniMax-M2.7 观察**，不是 w2 自行真跑，也不是本次合并后的生产验收：
+
+| 场景 | 首步对口 | 无关题误选 | 观察边界 |
+| --- | --- | --- | --- |
+| 修复后 C，默认输入/入口预算 | 程序选中 75/75（100%，中/英/法各 100%） | 0/42 | 未出现 CANDIDATES_OMITTED；选择调用中位 6.8 秒、p90 12.4 秒 |
+| 选包关着，点名领域包（“用短剧能力包……”） | 主 get 意图 74/75（98.7%） | 未提供该项 | 用户点名观察，不与程序选中混算 |
+| 选包关着，点名确切包名（“用 short-drama-production 这个能力包……”） | 主 get 意图 75/75（100%） | 未提供该项 | 每次正好打开点名包 |
+
+**用户 10-07 决定：开工前选包开关不开，靠目录加用户点名；候选修复仍合入备用。**
+“选包与会话沿用配合（不重复塞入口）”推迟到准备开启开关之前；不是本轮新增第 2 步配置或默认开启的授权。
+
+整合落点：w2 只合指定 w1 第 1 步头 `cdfe9b4d1`；合并提交 `9866479ff` 保留双方所有文档条目，YAML 合并两方注释、键值不变，前端目录由原生成器读取后端 effect 重生。
+`pack_pick_runtime.arm_context` 改为沿 `capability_config_path_for` 的原显式优先级，在隔离 owner 用户文件临时写 `enable_capability_package_selection`：C 为 true，A/B 为 false。
+写入复用原 `config_io.set_simple_yaml_raw`，其它行/键保留；退出按原字节恢复，原文件不存在则删除。先沿原 home 保护校验规范路径，拒绝真实 home、外部路径和链接越界。
+预算类键仍保留原缓存/内存处理，不热刷新；B 仅替换采用行，模型请求与原用量账不改。不再宣称实验臂全程不写配置文件，零模型工具执行合同保持。
+本轮假模型只校准原 A/B/C 首请求、真实现读与配置恢复；w1 合并后的真实 MiniMax、TUI/飞书、Linux 全量和业务质量**未验证**，交 3a 复核。命令与结果见 TESTS 的 integprep 节。
+
 ## 6. 第 4 步：部署和生产验收
 
 - **部署**：本地严格 gate → testbox 三个 Python 版本 → 开 PR 看线上 CI 全绿 → 合 main 推送，main 线上 CI 全绿 →

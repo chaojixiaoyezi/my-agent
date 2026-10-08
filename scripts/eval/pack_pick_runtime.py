@@ -1,4 +1,4 @@
-# LLM: 本模块只包装产品原生成层；原模型用量与首轮选包保留，回答在工具循环消费前替换，零模型工具执行。
+# LLM: 包装产品原生成层，并临时改隔离用户能力配置开关后还原；原用量与选包保留，回答在工具循环消费前替换，零模型工具执行。
 # 模块用途: 在单进程中测量 A/B/C 的真实 Gateway 首请求，可使用离线脚本化后端校准工具。
 from __future__ import annotations
 
@@ -18,7 +18,10 @@ from agent_py_agent.agent.backends.base import (
 )
 from agent_py_agent.agent.backends.gateway_helpers import _emit_provider_attempt
 from agent_py_agent.agent.capability import package_selection, router
-from agent_py_agent.agent.capability.runtime_config_reload import capability_config_for_agent
+from agent_py_agent.agent.capability.runtime_config_reload import (
+    capability_config_for_agent,
+    capability_config_path_for,
+)
 from agent_py_agent.agent.contracts.model_call_ledger import model_call_purpose
 from agent_py_agent.agent.gateway_parts import (
     GatewayAskParams,
@@ -26,6 +29,7 @@ from agent_py_agent.agent.gateway_parts import (
     gateway_paths,
     submit_gateway_ask,
 )
+from agent_py_agent.agent.settings.config_io import set_simple_yaml_raw
 from agent_py_agent.agent.settings.thread_model_selection import thread_model_profile_id
 from scripts.eval.pack_pick_results import judge, judge_packages, usage_fields
 
@@ -41,21 +45,56 @@ class BenchCase:
     fake: bool = False
 
 
-# LLM: 只覆盖进程内状态并在异常时还原；A/B 关闭选包，C 开启，所有其它能力配置保持原值。
-# 函数用途: 给一例切换实验臂，B 仅替换采用那一行，绝不写产品源码或配置文件。
+# LLM: 开关按原用户路径临时写文件，使原现读入口生效；预算仍沿原缓存覆盖，不热刷新，正常/异常都恢复文件和内存。
+# 函数用途: A/B 关闭、C 开启隔离选包，B 仅换采用行；不写产品源码、随包默认或真实 owner home。
 @contextmanager
 def arm_context(agent: object, arm: str):
     if arm not in {"A", "B", "C"}:
         raise ValueError("未知实验组")
+    path = _selection_config_path(agent)
     config = capability_config_for_agent(agent)
     if config is None:
         raise ValueError("隔离能力配置不可读")
     with ExitStack() as stack:
+        stack.enter_context(_selection_switch_file(path, arm == "C"))
         stack.enter_context(patch.object(agent, "_capability_config_runtime_snapshot",
-                                        SimpleNamespace(config=replace(config, enable_capability_package_selection=arm == "C"))))
+                                        SimpleNamespace(config=replace(config, enable_capability_package_selection=arm == "C")), create=True))
         if arm == "B":
             stack.enter_context(patch.object(router, "_CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS", _stronger_rule()))
         yield
+
+
+# LLM: 复用测量器的真实 home/别名/祖先保护；用户路径沿原显式优先级，解析后必须仍在隔离 owner 根内，先查边界再读配置。
+# 函数用途: 给实验臂确定唯一可写的用户能力配置，不猜 agent_config 所在目录，也不写随包模板。
+def _selection_config_path(agent: object):
+    from scripts.eval.pack_pick_bench import safe_home
+
+    root = getattr(agent, "root", None)
+    if root is None:
+        raise ValueError("实验臂必须绑定隔离 owner 根目录")
+    root = safe_home(root)
+    path = capability_config_path_for(agent).expanduser().resolve()
+    if root not in path.parents:
+        raise ValueError("用户能力配置不能越出隔离 owner 根目录")
+    return path
+
+
+# LLM: 只经原参数中心标量写入器改一个布尔键，其余行保留；原字节在 finally 恢复，新建文件退出删除，不刷新预算缓存。
+# 函数用途: 在隔离用户文件中临时设置选择开关；有写盘副作用，但不触发安装、授权或模型工具。
+@contextmanager
+def _selection_switch_file(path, enabled: bool):
+    original = path.read_bytes() if path.exists() else None
+    try:
+        if original is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(mode=0o600)
+        set_simple_yaml_raw(path, "enable_capability_package_selection", "true" if enabled else "false")
+        yield
+    finally:
+        if original is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(original)
 
 
 # LLM: 只替换明确的采用行，产品规则形状变了则拒绝，不悄悄把其它规则改成新版。

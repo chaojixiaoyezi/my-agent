@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -80,27 +81,84 @@ def test_home_guard_refuses_real_descendant_alias_missing_and_ancestor(tmp_path,
     assert module.safe_home(isolated) == isolated.resolve()
 
 
-def test_arm_patch_changes_only_adoption_restores_on_failure_and_does_not_write(tmp_path):
+@pytest.mark.parametrize("arm", ["A", "B", "C"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_arm_writes_fresh_switch_restores_bytes_and_keeps_budget_cache(tmp_path, arm, failure):
+    module = bench()
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    from agent_py_agent.agent.capability.self_install_switches import read_fresh_capability_switch
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+
+    config = CapabilityConfig(capability_bundle_max_tokens=987)
+    snapshot = SimpleNamespace(config=config)
+    path = tmp_path / "config/capability_config.yaml"
+    path.parent.mkdir()
+    saved = (f"# 原注释\r\nenable_capability_package_selection: {str(arm != 'C').lower()}\r\n"
+             "capability_bundle_max_tokens: 3211\r\ncapability_candidate_limit: 9\r\n"
+             "fixture_extra: ['keep', 'unknown']\r\n").encode()
+    path.write_bytes(saved)
+    agent = SimpleNamespace(root=tmp_path, _capability_config_runtime_snapshot=snapshot)
+    original = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
+    with pytest.raises(RuntimeError, match="fixture") if failure else nullcontext():
+        with module.arm_context(agent, arm):
+            changed = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
+            assert ("用户的需求和某个能力包沾边" in changed) == (arm == "B")
+            assert changed.splitlines()[2:] == original.splitlines()[2:]
+            assert read_fresh_capability_switch(agent, "enable_capability_package_selection") == (arm == "C")
+            raw = load_simple_yaml(path)
+            assert raw["enable_capability_package_selection"] == (arm == "C")
+            assert raw["capability_bundle_max_tokens"] == 3211 and raw["capability_candidate_limit"] == 9
+            assert raw["fixture_extra"] == ["keep", "unknown"]
+            assert agent._capability_config_runtime_snapshot.config.capability_bundle_max_tokens == 987
+            if failure:
+                raise RuntimeError("fixture")
+    assert original == router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
+    assert agent._capability_config_runtime_snapshot is snapshot
+    assert path.read_bytes() == saved and not config.enable_capability_package_selection
+
+
+@pytest.mark.parametrize("arm", ["A", "B", "C"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_arm_removes_new_file_and_uses_explicit_user_path(tmp_path, arm, failure):
+    module = bench()
+    from agent_py_agent.agent.capability.self_install_switches import read_fresh_capability_switch
+
+    path = tmp_path / "explicit/capability_config.yaml"
+    agent = SimpleNamespace(root=tmp_path, capability_config_path=path)
+    assert not hasattr(agent, "_capability_config_runtime_snapshot")
+    with pytest.raises(RuntimeError, match="fixture") if failure else nullcontext():
+        with module.arm_context(agent, arm):
+            assert path.is_file()
+            assert not (tmp_path / "config/capability_config.yaml").exists()
+            assert read_fresh_capability_switch(agent, "enable_capability_package_selection") == (arm == "C")
+            if failure:
+                raise RuntimeError("fixture")
+    assert not path.exists()
+    assert not hasattr(agent, "_capability_config_runtime_snapshot")
+
+
+@pytest.mark.parametrize("kind", ["real", "outside", "symlink"])
+def test_arm_refuses_real_owner_and_escaped_configuration(tmp_path, monkeypatch, kind):
     module = bench()
     from agent_py_agent.agent.capability.config import CapabilityConfig
 
-    config = CapabilityConfig()
-    snapshot = SimpleNamespace(config=config)
-    agent = SimpleNamespace(_capability_config_runtime_snapshot=snapshot)
-    original = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
-    with pytest.raises(RuntimeError):
-        with module.arm_context(agent, "B"):
-            changed = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
-            assert "用户的需求和某个能力包沾边" in changed
-            assert changed.splitlines()[2:] == original.splitlines()[2:]
-            assert not agent._capability_config_runtime_snapshot.config.enable_capability_package_selection
-            raise RuntimeError("fixture")
-    assert original == router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
-    assert agent._capability_config_runtime_snapshot is snapshot
-    with module.arm_context(agent, "C"):
-        assert agent._capability_config_runtime_snapshot.config.enable_capability_package_selection
-        assert original == router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
-    assert list(tmp_path.iterdir()) == [] and not config.enable_capability_package_selection
+    personal = tmp_path / "personal"
+    root = personal / ".my-agent/owners/local/main" if kind == "real" else tmp_path / "isolated"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: personal))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = root / "config/capability_config.yaml"
+    if kind == "outside":
+        path = outside / "capability_config.yaml"
+    if kind == "symlink":
+        (root / "config").symlink_to(outside, target_is_directory=True)
+    agent = SimpleNamespace(root=root, capability_config_path=path,
+                            _capability_config_runtime_snapshot=SimpleNamespace(config=CapabilityConfig()))
+    with pytest.raises(ValueError):
+        with module.arm_context(agent, "C"):
+            pytest.fail("不安全路径进入实验臂")
+    assert not path.exists()
 
 
 def _packages(root):
@@ -148,6 +206,10 @@ def test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_hand
     home.mkdir()
     packages = _packages(tmp_path)
     assert module.main(["setup", "--home", str(home), "--packages", str(packages)]) == 0
+    config_path = home / "owners/local/main/config/capability_config.yaml"
+    config_path.parent.mkdir(exist_ok=True)
+    saved_config = b"# restored exactly\nenable_capability_package_selection: true\ncapability_bundle_max_tokens: 3000\n"
+    config_path.write_bytes(saved_config)
     queries = Path(__file__).parent / "fixtures" / "pack_pick_queries.json"
     out = tmp_path / "out"
     original = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
@@ -168,6 +230,8 @@ def test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_hand
     assert all(row["cache_read_input_tokens"] == 13 for row in primary)
     selected = [row for row in rows if row["phase"] == "selection"]
     assert len(selected) == 8 and all(row["input_tokens"] == 17 for row in selected)
+    assert all(row["arm"] == "C" and row["record_kind"] == "model_call" for row in selected)
+    assert config_path.read_bytes() == saved_config
     assert all(row["matched"] == bool(row["positive_packs"]) for row in rows)
     assert all(row["status"] == "finished" and not row["misopened"] for row in rows)
     assert "PRIVATE-ENTRY" not in (out / "calls.jsonl").read_text()

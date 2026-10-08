@@ -1,5 +1,36 @@
 # 测试与发布验收
 
+## w2 integprep 部署窗口 WIP（2026-10-08；未完成验收）
+
+- 来源：`w2-integ-prep.md`；3a 随后通过 `deploy-window-steer.md` 要求 20 分钟内保存全部改动为本分支 WIP，停止本轮，不再启动长命令。未 push、未部署。
+- 指定 w1 头 `cdfe9b4d1` 已合入：合并提交 `9866479ff4c23cb750b5d65e6a1f782265c1f24f`，父提交为 selfix `8fc141941` 与指定 w1 头。
+  实际冲突仅 DESIGN_LEDGER、LLM_GUIDE、TESTS、COMPLETED、ROADMAP 五份文档；保留双方全部条目，提交前以 stage 2/3 非空行 Counter 核对无缺失。
+  YAML 自动合并保留双方注释，键/默认值不改；前端先接受 HEAD，再以指定 PYTHON 运行原生成器，265 fields，rc=0。最终 `--check` 尚未跑。
+- 实现阶段：实验臂沿原能力用户路径，先校验隔离 owner 与链接边界，复用 `config_io.set_simple_yaml_raw` 临时写 C=true、A/B=false；预算仍按原缓存处理。
+  基本正常/异常退出恢复原字节或删除新文件，B 采用行和缓存恢复；无原缓存属性时退出仍不留下属性。
+  **下面的独立审查问题尚未解决，此版本不能作为完整交付。**
+- 红测：合并后旧缓存式实验臂被 fresh 开关真假值、文件存在、安全边界与原假 ABC 调用断言抓到，pytest rc=1，非导入或收集失败。
+  实现过程中六项缺缓存属性错误后补 `patch.object(..., create=True)`；不是把缺属性异常当业务变异通过。
+- 最新局部复测的真实命令：
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_pack_pick_bench.py \
+  agent_py_agent/tests/test_package_selection_candidates.py \
+  -q -o addopts= --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2
+$PY -m ruff check scripts/eval/pack_pick_runtime.py agent_py_agent/tests/test_pack_pick_bench.py
+```
+
+- 结果：**28 passed in 6.16s；局部 Ruff All checks passed；联合命令 rc=0**。这只是两个 pytest 文件和两个 Ruff 文件，不能沿用 selfix 的 28 文件/529 项冒充本轮完整门禁。
+- 非作者仅审内嵌需求、实现和测试设计，未读实际工作树、未执行测试；指出两项重要问题，尚未实测/修复：
+  1. 原文件可读不可写（如 0400）、目录可写时，原标量写入器原子替换并保留只读权限，但 finally 的 `path.write_bytes(original)` 直接写回可能失败，留下实验开关。续作先复现，再改为保留权限的原子字节恢复，补正常/异常测试。
+  2. 原假 ABC 测试的初始文件开关 true；仅略过 C 的文件写入仍会按 true 选择，不能用该场景证明 C 写入开启选择。续作应保留 true 场景验证 A/B 关闭，并增加原始 false 的真实选择链路，再跑“C 不写文件、仅改缓存”变异，要求目标业务断言导致 pytest rc=1。
+- **未完成/未验证**：上述审查问题；本轮五类模块所有导入方的完整定向回归、完整 guards9、独立 CLI 假 ABC 校准、必做变异、最终前端 `--check`、全范围 Ruff、import boundaries、doc-sync、strict code-size、基线区间 diff-check、clean-package、size_diff。
+  不删测试、不加 skip/xfail、不放宽断言；未跑全仓 pytest、未真跑模型、未触碰真实凭据或 Gateway。3a 的 selfix 真跑成绩仅作正式来源记录，不是本整合版本验收。
+- 下次第一步：在本 WIP 上复现并修复只读配置原子恢复，再补 false 初值真实 C 场景与变异；两项通过后继续剩余回归和门禁。按部署插话，本轮 WIP 后暂停，等 3a 派“继续”。
+
 ## 开工前选包候选修复（2026-10-07，w2/selfix）
 
 - 来源：3a `w2-selection-fix.md`；接 `e863c1e2c`，共同规则失败归因基线仍为 `6e8f61564`。
