@@ -264,7 +264,7 @@ def test_active_turn_summary_uses_applied_view_base(monkeypatch) -> None:
             compact_context=_context(),
         ),
     )
-    assert result == "下一轮摘要"
+    assert result == ("下一轮摘要", None)
     assert requests[0].thread_id == "thread-active-compact"
     assert requests[0].previous_summary == "本轮局部摘要"
     assert "本次完整工具材料" in requests[0].history[0].text
@@ -350,7 +350,7 @@ def test_native_commit_forwards_base_and_returns_commit_facts(monkeypatch) -> No
     ref = {"run_id": "run-1", "attempt_id": "attempt-2", "turn_id": "model-turn-2", "call_id": "call-2"}
     plan = SimpleNamespace(
         binding=object(), before_tool_refs=(ref,), semantic_summary="下一轮摘要",
-        before_tokens=100, policy=SimpleNamespace(), forced=False,
+        before_tokens=100, policy=SimpleNamespace(), forced=False, provider_compaction=None,
     )
     monkeypatch.setattr(_tool_loop_service, "_native_tool_refs", lambda _params: ())
     monkeypatch.setattr(_tool_loop_service, "_native_compact_interrupted", lambda _params: False)
