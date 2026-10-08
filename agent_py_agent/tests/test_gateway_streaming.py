@@ -239,6 +239,11 @@ def test_turn_resumed_boundary_is_typed_content_free_and_after_buffered_output(t
     assert set(rows[1]) == {"t", "kind", "cause"}
 
 
+# Gateway 放行的 context_usage 数字字段（与 gateway_parts.stream_events 的白名单同一份）。
+_CONTEXT_USAGE_PUBLIC_KEYS = ("schema", "estimated", "context_window_tokens", "compact_trigger_tokens", "current_tokens",
+                             "prompt_tokens", "messages_tokens", "runtime_guidance_tokens", "tool_schema_tokens", "protocol")
+
+
 def test_context_usage_is_rich_only_and_whitelists_numeric_projection(tmp_path):
     paths = _make_paths(tmp_path)
     disabled_path = gateway_chunk_path(paths, "context-disabled")
@@ -267,21 +272,9 @@ def test_context_usage_is_rich_only_and_whitelists_numeric_projection(tmp_path):
     row = json.loads(enabled_path.read_text(encoding="utf-8").strip())
 
     assert row["kind"] == "context_usage_updated"
-    assert row["context_usage"] == {
-        key: usage[key]
-        for key in (
-            "schema",
-            "estimated",
-            "context_window_tokens",
-            "compact_trigger_tokens",
-            "current_tokens",
-            "prompt_tokens",
-            "messages_tokens",
-            "runtime_guidance_tokens",
-            "tool_schema_tokens",
-            "protocol",
-        )
-    }
+    # 2026-10-08 状态行用的两个短标签：快照没给时为空串，仍然只放行字符串、不放行正文
+    assert row["context_usage"] == {**{key: usage[key] for key in _CONTEXT_USAGE_PUBLIC_KEYS},
+                                    "model_name": "", "reasoning_level": ""}
     assert "prompt" not in row["context_usage"]
     assert "tools" not in row["context_usage"]
 
