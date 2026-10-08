@@ -190,6 +190,9 @@ class LiveToolHistorySummaryRequest:
     fallback_history: list[Any] | None = None
     # 服务端压缩结果出口：调用方传一个列表，走了远端路径时追加 provider_compaction 记录，返回值是占位摘要文本。
     provider_outcome: list[dict[str, Any]] | None = None
+    # 主请求的校准事实（conversation.compact_calibration.CompactRequestCalibration）：单次缓存面与服务端压缩的预算
+    #   检查按它换算；None 按原始上界。
+    calibration: Any = None
 
 
 # LLM: 只从 agent.config 读 enabled；首尾保护、中段阈值和输入预算已是本模块常量（2026-09-28 参数减量），
@@ -325,6 +328,7 @@ def _remote_live_compaction(request: LiveToolHistorySummaryRequest, messages: li
         agent=request.agent, prompt=_compact_cache_safe_prompt(request.provider_prompt, ""), messages=messages,
         tools=list(request.tools) or None, system_instruction=request.system_instruction,
         request_id=request.request_id, run_id=request.run_id, task_id=request.task_id, thread_id=request.thread_id,
+        calibration=request.calibration,
     ))
 
 
@@ -865,6 +869,7 @@ def _resolve_generate_with_messages(
                 ),
                 interrupt_check=request.interrupt_check,
                 preserve_complete_fallback=request.preserve_complete_fallback,
+                calibration=request.calibration,
             )
         else:
             kwargs: dict[str, object] = {"messages": compact_messages}

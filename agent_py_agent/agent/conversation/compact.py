@@ -281,6 +281,8 @@ class _CompactSummaryCall:
     #   来源前缀据此发压缩项而不是占位文本（链式压缩、与主请求逐字一致）。
     provider_outcome: list[dict[str, object]] | None = None
     previous_provider_compaction: str = ""
+    # 主请求的校准事实：单次缓存面与服务端压缩的预算检查按它换算，不再用原始上界误判超预算（10-08 mc4 复盘）。
+    calibration: CompactRequestCalibration | None = None
 
 
 # LLM: 只重算原话备份段，语义摘要、机械回退正文与尾随来源原样保留；不发模型请求、不写任何状态。
@@ -1041,6 +1043,7 @@ def _build_compact_candidate(
             landmark_outcome=landmark_outcome,
             provider_outcome=provider_outcome,
             previous_provider_compaction=previous_provider_compaction,
+            calibration=request.calibration,
             source_progress=lambda covered, total: _emit_compact_progress(
                 request, phase="progress", stage="summarizing",
                 percent=progress_range[0] + int((progress_range[1] - progress_range[0]) * covered / max(1, total)),
@@ -1481,6 +1484,7 @@ def _summarize(
         source_progress=selected_call.source_progress,
         preserve_complete_fallback=selected_call.preserve_complete_fallback or bool(tool_history),
         message_source=message_source,
+        calibration=selected_call.calibration,
     )
     summary, _reason = compact_summary_response_outcome(response, reject_truncated=False, request=summary_request)
     return _finish_summary(_SummaryFinish(
@@ -1506,7 +1510,7 @@ def _remote_transcript_summary(agent, selected_call, message_source) -> str:
         agent=agent, prompt=conversation_compact_provider_prompt(surface, ""), messages=list(message_source),
         tools=list(surface.tools) if surface.tools is not None else None, system_instruction=surface.system_instruction,
         request_id=selected_call.request_id, run_id=selected_call.run_id, task_id=selected_call.task_id,
-        thread_id=selected_call.thread_id,
+        thread_id=selected_call.thread_id, calibration=selected_call.calibration,
     ))
     if record is None:
         return ""

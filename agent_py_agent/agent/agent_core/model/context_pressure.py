@@ -425,6 +425,17 @@ def frozen_compact_request_calibration(
     )
 
 
+# LLM: 回合中原生 IR 压缩（_tool_loop_service._native_tool_history_summary）没有恢复宿主冻结的校准事实，这里按同一规则
+#   现算：同一份请求投影的表面指纹 + frozen_compact_request_calibration 的观测水合。投影会再算一遍，只在压缩那一刻调用；
+#   没有可用观测返回 None，调用方的预算检查按原始上界。
+# 函数用途: 给回合中压缩的预算检查取主请求的校准事实。
+def compact_request_calibration_for_request(
+    agent: object, params: object, prompt: object,
+) -> CompactRequestCalibration | None:
+    _protocol, _raw, _components, fingerprint = _model_visible_context_components(agent, params, prompt)
+    return frozen_compact_request_calibration(agent, params, context_surface_fingerprint=fingerprint)
+
+
 # LLM: 压缩提交后由恢复宿主调用：已接受候选的原始计量与校准值成为下一次真实预检的本轮基线（同 fingerprint，仍是
 #   provider + 追加增量口径），让“候选通过 → 提交 → 下一次预检”说同一种数，而不是清掉观测后按原始值立刻再压一次。
 #   写入的是派生观测（basis/derived_from_generation 结构化标记），只存本轮内存状态、不持久化到线程；下一次真实

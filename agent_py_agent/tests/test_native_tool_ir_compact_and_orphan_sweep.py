@@ -2406,3 +2406,40 @@ def test_post_commit_context_refresh_failure_keeps_committed_history(tmp_path, m
     assert stored.compact_consecutive_failures == 0
     assert not [row for row in sink.progress_rows if row["phase"] in {"failed", "superseded"}]
     _assert_no_orphans(_native_provider_messages(agent, params))
+
+
+# LLM: 回合中压缩的预算检查按预检同一校准口径（10-08 生产复盘：原始上界把装得下的压缩请求瘦身，前缀只命中 20%）。
+#   校准事实按主请求同一投影指纹现算（context_pressure.compact_request_calibration_for_request）；没有观测或没有
+#   provider_prompt 时为 None，摘要请求按原始上界，不编造系数。
+# 函数用途: 回合中压缩把主请求的校准事实交给摘要请求；没有观测时不编造。
+def test_midturn_summary_request_carries_the_preflight_calibration(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core._tool_loop_service import (
+        _native_compact_calibration,
+        _native_tool_history_summary,
+    )
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        model_visible_context_snapshot,
+        record_provider_context_observation,
+    )
+    from agent_py_agent.agent.memory_archive import compact_semantic_summary
+
+    agent = _native_agent(tmp_path)
+    params = _params()
+    for index in range(1, 4):
+        _rec(agent, params, rnd=index, idx=1, cid=f"toolu_{index}", body="X" * 3_000)
+    assert _native_compact_calibration(agent, params, "prompt") is None, "没有观测就没有校准"
+    assert _native_compact_calibration(agent, params, "") is None, "旧调用方不带 prompt 时不算"
+    fingerprint = model_visible_context_snapshot(agent, params, "prompt").context_surface_fingerprint
+    assert record_provider_context_observation(
+        agent, params, raw_estimated_tokens=100_000, context_surface_fingerprint=fingerprint,
+        response=SimpleNamespace(usage={"input_tokens": 50_000}),
+    )
+    calibration = _native_compact_calibration(agent, params, "prompt")
+    assert (calibration.raw_estimated_tokens, calibration.provider_input_tokens) == (100_000, 50_000)
+    captured = []
+    monkeypatch.setattr(compact_semantic_summary, "semantic_summary_config",
+                        lambda _agent: SimpleNamespace(enabled=True, max_input_chars=1_000))
+    monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history",
+                        lambda request: captured.append(request) or "摘要")
+    assert _native_tool_history_summary(agent, params, provider_prompt="prompt") == "摘要"
+    assert captured[0].calibration == calibration

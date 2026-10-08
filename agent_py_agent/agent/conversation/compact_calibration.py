@@ -49,10 +49,22 @@ def calibrated_compact_request_tokens(raw_tokens: int, calibration: CompactReque
     return grown
 
 
+# LLM: 瘦身（compact_message_source.shrink_tool_outputs）按原始估算累计“可省 token”，而预算比较按校准口径；超出量必须换回
+#   原始口径再交给瘦身，否则校准比例越小瘦得越少、再量一次又超预算。校准值不大于 0 或不超预算时返回 0。
+# 函数用途: 把“校准口径超出预算多少”换算成“原始估算口径要省多少”，向上取整。
+def raw_token_excess(raw_tokens: int, calibrated_tokens: int, budget_tokens: int) -> int:
+    raw, calibrated = max(0, int(raw_tokens or 0)), max(0, int(calibrated_tokens or 0))
+    excess = calibrated - max(0, int(budget_tokens or 0))
+    if excess <= 0 or calibrated <= 0:
+        return 0
+    return -(-excess * max(raw, calibrated) // calibrated)
+
+
 __all__ = [
     "CALIBRATION_SCOPE_CURRENT_RUN",
     "CALIBRATION_SCOPE_DURABLE_THREAD",
     "CALIBRATION_SCOPE_OWNER_RATIO",
     "CompactRequestCalibration",
     "calibrated_compact_request_tokens",
+    "raw_token_excess",
 ]

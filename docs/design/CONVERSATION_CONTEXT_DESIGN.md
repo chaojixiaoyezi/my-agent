@@ -151,6 +151,11 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
   （只含原长度），最近两条不动，带图或非文字块不动；省够就仍走 `_try_cached_compact_requests`（同 system、同工具、auto、指令在末尾），
   省不够返回 None 走原分段链。分段仍拿 `attempt.message_source` 的完整来源。实现是两遍读同一冻结来源：第一遍只记槽位与可省 token，
   不留正文；第二遍按槽位替换。整份物化会让 `test_compact_source_lifetime` 的峰值内存翻倍，所以省不够时也不能留下任何正文。
+- 预算计量按校准口径：`_single_request_source` 与 `compact_remote._messages_within_budget` 都用
+  `compact_calibration.calibrated_compact_request_tokens(原始估算, calibration)` 和预算比，calibration 是恢复宿主冻结的主请求校准事实
+  （`_CompactSummaryCall.calibration` / `LiveToolHistorySummaryRequest.calibration` / `RemoteCompactionRequest.calibration`）。
+  原始上界（字符÷3）在长工具历史上高出供应商实际三成以上：10-08 生产 mc4（astra，gen10）真实约 20 万的压缩请求被算成超预算而瘦身，
+  最早的工具输出换了占位，前缀只命中 35,968（20%），压缩用时 2 分 13 秒。没有校准事实时仍按原始上界。
 - 降档不破坏缓存：`ProviderRequestOptions.reasoning_update_effort` 只由压缩类目的设置，`OpenAIResponsesBackend` 在
   `supports_reasoning_update_items()` 为真时把 `{"type": "configuration_update", "reasoning": {"effort": ...}}` 插在末尾动态 user
   消息（压缩指令）之前；请求级 `reasoning.effort` 不变。能力判断：`model_reasoning_update_items` 档案 on/off 优先，auto 按模型名前缀 gpt-6。

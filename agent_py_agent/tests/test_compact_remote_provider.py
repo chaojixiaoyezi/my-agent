@@ -24,6 +24,7 @@ from agent_py_agent.agent.conversation.compact import (
     load_conversation_compact_source,
     prepare_conversation_context,
 )
+from agent_py_agent.agent.conversation.compact_calibration import CompactRequestCalibration
 from agent_py_agent.agent.conversation.compact_provider_surface import (
     ConversationCompactProviderSurface,
     conversation_compact_provider_messages,
@@ -145,6 +146,19 @@ def test_remote_request_shrinks_old_tool_outputs_or_gives_up(monkeypatch):
     assert results[0]["content"][0]["content"].startswith("x"), "只改交给远端请求的副本"
     agent, calls = _remote_agent(monkeypatch, good, window=1_200)
     assert request_remote_compaction(RemoteCompactionRequest(agent=agent, prompt="p", messages=results)) is None and not calls
+
+
+# 函数用途: 远端压缩的预算检查和单次缓存面同一校准口径：主请求观测到估算是实际的两倍，装得下就逐字发、不瘦身。
+def test_remote_budget_uses_the_main_request_calibration(monkeypatch):
+    good = ModelResponse(text="", backend="fake", assistant_content_blocks=[BLOCK])
+    agent, calls = _remote_agent(monkeypatch, good, window=6_000)
+    results = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"c{i}", "content": "x" * 4_000}]} for i in range(6)]
+    assert request_remote_compaction(RemoteCompactionRequest(agent=agent, prompt="p", messages=results)) is not None
+    assert calls[-1].messages[0]["content"][0]["content"].startswith("[compact-omitted-tool-output"), "前提：原始上界下会瘦身"
+    calibration = CompactRequestCalibration(raw_estimated_tokens=100_000, provider_input_tokens=50_000)
+    request = RemoteCompactionRequest(agent=agent, prompt="p", messages=results, calibration=calibration)
+    assert request_remote_compaction(request) is not None
+    assert all(row["content"][0]["content"].startswith("x") for row in calls[-1].messages), "按校准口径装得下，不换占位"
 
 
 def test_compatibility_only_matches_protocol_and_endpoint():

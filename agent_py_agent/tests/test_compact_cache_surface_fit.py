@@ -21,6 +21,11 @@ from agent_py_agent.agent.conversation.auxiliary_model_call import (
     AuxiliaryModelCallRequest,
     generate_auxiliary_model_response,
 )
+from agent_py_agent.agent.conversation.compact_calibration import (
+    CompactRequestCalibration,
+    calibrated_compact_request_tokens,
+    raw_token_excess,
+)
 from agent_py_agent.agent.conversation.compact_message_source import (
     TOOL_OUTPUT_PLACEHOLDER,
     CompactMessageSource,
@@ -146,6 +151,41 @@ def test_over_budget_request_shrinks_old_tool_outputs_before_segmenting(monkeypa
     assert sent[2]["content"][0]["content"].startswith("[compact-omitted-tool-output chars=")
     assert budget_module._request_tokens(calls[0]) <= budget_module.compact_cache_surface_budget(agent)
     assert list(source) == messages, "原始来源不能被瘦身改掉（分段路径还要用它）"
+
+
+# LLM: 10-08 生产复盘（mc4 astra gen10）：原始上界把真实约 20 万的压缩请求算成超预算，瘦掉最早的工具输出后前缀只命中 20%。
+#   单次缓存面的预算检查必须按主请求的校准口径（calibrated_compact_request_tokens）计量；没有校准才按原始上界。
+# 函数用途: 主请求观测到“本地估算是供应商实际的两倍”时，同一份请求按校准口径装得下，就逐字发、不换占位。
+def test_calibrated_measure_keeps_a_request_that_really_fits_unshrunk(monkeypatch):
+    agent = _agent(5_000, backend_max_tokens=256, reserve=0)
+    messages = _tool_history(6, chars=4_000)
+    request = AuxiliaryModelCallRequest(
+        agent=agent, prompt="请总结历史", system_instruction="稳定系统前缀", tools=[{"name": "run_command"}],
+        messages=None, purpose="conversation_compact_summary",
+    )
+    source = CompactMessageSource(lambda: iter(deepcopy(messages)))
+    calibration = CompactRequestCalibration(raw_estimated_tokens=100_000, provider_input_tokens=50_000)
+    raw, budget = budget_module._request_tokens(request, source), budget_module.compact_cache_surface_budget(agent)
+    assert raw > budget >= calibrated_compact_request_tokens(raw, calibration), "前提：原始上界超预算、校准后装得下"
+    calls = []
+    monkeypatch.setattr(budget_module, "generate_auxiliary_model_response",
+                        lambda r: calls.append(r) or ModelResponse(text="摘要", backend="fake"))
+    response = budget_module.generate_bounded_compact_response(request, message_source=source, calibration=calibration)
+    assert response.text == "摘要" and len(calls) == 1 and calls[0].tool_choice.mode == "auto"
+    assert all(row["content"][0]["content"].startswith("output-") for row in calls[0].messages[2::2]), "逐字发，不换占位"
+    # 没有校准事实仍按原始上界：同一请求会先瘦身（最早一条换占位）。
+    plain = budget_module.generate_bounded_compact_response(request, message_source=source)
+    assert plain.text == "摘要" and calls[1].messages[2]["content"][0]["content"].startswith("[compact-omitted-tool-output")
+
+
+# 函数用途: 校准口径超出的量换回原始口径交给瘦身（瘦身按原始估算累计可省量），比例越小换算越大；不超预算为 0。
+def test_raw_token_excess_scales_the_calibrated_overflow_back_to_raw_units():
+    assert raw_token_excess(raw_tokens=200, calibrated_tokens=100, budget_tokens=90) == 20
+    assert raw_token_excess(raw_tokens=150, calibrated_tokens=100, budget_tokens=97) == 5, "向上取整"
+    assert raw_token_excess(raw_tokens=100, calibrated_tokens=100, budget_tokens=90) == 10, "没有校准就是原值"
+    assert raw_token_excess(raw_tokens=80, calibrated_tokens=100, budget_tokens=90) == 10, "校准反而更大时不缩小超出量"
+    assert raw_token_excess(raw_tokens=200, calibrated_tokens=100, budget_tokens=100) == 0
+    assert raw_token_excess(raw_tokens=0, calibrated_tokens=0, budget_tokens=0) == 0
 
 
 def test_shrink_that_cannot_fit_falls_back_to_segments(monkeypatch):
