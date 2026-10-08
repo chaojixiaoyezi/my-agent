@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## Curator 工具输出引用批量读取（mc3-e11a，2026-10-08，分支 `worker/mc3-e11a`，待复核）
+
+- **来源**：生产网关内存 4.1–8.6GB、每分钟跳涨 2.5–4GB；curator 批内每个 run_id 各做一次全量控制面查询（每批重复 glob 3993 根、整读解析 836MB 级索引）。
+- **新用例** `agent_py_agent/tests/test_curator_tool_output_refs.py`（20 条）：多根合成树（顶层 + runs + tasks）上批量读取器逐条等价旧逐 run 查询（limit 0/1/2/10，含坏行、空行、越界路径、缺 index 文件）；read 层对照测试内旧逻辑参照（limit 0/2/2500/"abc"）refs 与 errors 逐条相同、重复 call 后行覆盖前行；非 UTF-8 索引两路径同抛 `UnicodeDecodeError`、read 层每 run 一条同型错误；单遍扫描计数（5 run 批量 = 每 index 文件 open 1 次、lookup 1 次；3 次逐 run 查询 = 每文件 3 次）；预筛条件（安全 ASCII 才生成字节串）与转义/空格/非 ASCII run_id 两种 ensure_ascii 写法都能找到；scope 嵌套 run_id 照常匹配；预筛字节命中但结构不匹配不收集；内存上界（合成 40 根 × 500 行 ≈ 198MB 索引 + 2MB 超长行，tracemalloc 新路径峰值 5.8MB < 32MB 常量，旧路径 217.9MB）。
+- **替身更新**：`test_memory_curator_v2.py` 的 `_tool_reference_query` 改批量签名（直接转调 `query_tool_output_refs_for_runs`）。
+- **回归**：29 个相关测试文件 621 条全过（无失败）；**变异 4/4 被抓**：每 run 重扫 → 单遍测试红（`assert 5 == 1`）；去截断 → 4 条等价红；预筛无条件 → 4 条红（含 3 个转义/非 ASCII 参数）；只认顶层 run_id → scope 测试红。
+- **复现**：`PYTHONPATH=$PWD $PY -m pytest agent_py_agent/tests/test_curator_tool_output_refs.py agent_py_agent/tests/test_memory_curator_v2.py -q`。
+
 ## browser-lite 慢启动期限
 - 根因：CI Chrome 冷启动偶尔超过插件 `command_timeout_seconds` 默认 15 秒；产品默认值保持不变，避免延长页面/CDP 命令等待。
 - 夹具规则：真实浏览器组件统一 45 秒（含 EOF/SIGTERM 入口）、MCP 等待 90 秒，显式短值优先，不重试、不跳过失败。

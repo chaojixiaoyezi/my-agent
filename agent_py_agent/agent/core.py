@@ -98,10 +98,7 @@ from .gateway_parts.channel_health import adapter_runtime_health
 from .ingestion.watch_tool import WatchStreamTool
 from .local_storage import LocalStore
 from .memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
-from .memory_archive.control_plane import (
-    MemoryControlPlaneQueryOptions,
-    query_memory_control_plane,
-)
+from .memory_archive.control_plane import query_tool_output_refs_for_runs
 from .memory_store import JsonlMemory
 from .memory_store.candidates import CandidateService
 from .memory_store.curator import (
@@ -300,16 +297,14 @@ def _curator_profile_route(profile_id: str, profile_config: object):
 
 # LLM: The composition root is the only adapter allowed to join Memory Store with the existing
 # archive control plane; Curator receives bounded metadata and never imports the archive layer.
-# 函数用途: 按精确 run_id 查询当前 owner 的工具产物索引，并保持内部层依赖单向。
+#   批量契约：一次调用带全部 run_id，读取器每批只 glob、只顺序扫描一遍索引，不再每 run 全量重扫。
+# 函数用途: 按 run_id 集合查询当前 owner 的工具产物索引，并保持内部层依赖单向。
 def _query_curator_tool_references(
     owner_root: Path,
-    run_id: str,
+    run_ids: tuple[str, ...],
     limit: int,
 ) -> dict[str, object]:
-    return query_memory_control_plane(
-        owner_root,
-        MemoryControlPlaneQueryOptions(run_id=run_id, limit=limit),
-    )
+    return query_tool_output_refs_for_runs(owner_root, run_ids=run_ids, limit_per_run=limit)
 
 
 # LLM: Formal Memory, Candidate and Persona authorities are constructed once from canonical owner paths before prompts/tools.

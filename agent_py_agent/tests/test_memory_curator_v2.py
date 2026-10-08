@@ -20,10 +20,7 @@ from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.provider_headers import provider_session_scope, request_headers
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.gateway_parts.http_handlers import handle_ask
-from agent_py_agent.agent.memory_archive.control_plane import (
-    MemoryControlPlaneQueryOptions,
-    query_memory_control_plane,
-)
+from agent_py_agent.agent.memory_archive.control_plane import query_tool_output_refs_for_runs
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.memory_store.curator import (
     MemoryCuratorDependencies,
@@ -47,11 +44,12 @@ from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateSt
 from agent_py_agent.agent.memory_store.daily import DailyMemoryStore
 
 
-def _tool_reference_query(owner_root: Path, run_id: str, limit: int) -> dict[str, object]:
-    return query_memory_control_plane(
-        owner_root,
-        MemoryControlPlaneQueryOptions(run_id=run_id, limit=limit),
-    )
+def _tool_reference_query(
+    owner_root: Path,
+    run_ids: tuple[str, ...],
+    limit: int,
+) -> dict[str, object]:
+    return query_tool_output_refs_for_runs(owner_root, run_ids=run_ids, limit_per_run=limit)
 
 
 class _StaticStructuredBackend:
