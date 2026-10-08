@@ -259,6 +259,9 @@ class CuratorToolReferenceSource:
     #   批量契约：一次调用对全部 run 只查一遍（读取器每批只 glob、只顺序扫描一次索引）；
     #   整批失败时给每个 run 复制同类型错误——旧路径里每个 run 的独立查询都会在同一个
     #   确定性原因上失败，逐条等价。
+    #   错误合同（mc4-1302，3a 已接受的有意变化）：本读取只依赖工具输出索引；daily/*/events.jsonl
+    #   与 memory_archive/compact_applies/ledger.jsonl 损坏（非法 UTF-8）不再连带失败（旧路径会因
+    #   整读它们而给每个 run 报 UnicodeDecodeError）。这是行为改进，不是等价修改。
     # 函数用途: 为一批 audit 工具事件读取有界、owner 隔离的大输出引用元数据。
     def read(
         self,

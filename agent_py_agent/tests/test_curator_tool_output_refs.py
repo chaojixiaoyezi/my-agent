@@ -4,7 +4,9 @@
 glob 全部索引根、整读整解析），批内 run 越多重复扫描越多。新读取器一次调用只 glob、只顺序
 扫描一遍索引，逐行流式读取，按 run 集合收有界匹配行。
 本文件验证：①与旧逐 run 路径输出逐条等价（含 CRLF/混合行尾索引）；②每 index 文件每批只打开
-一次；③内存峰值有界；④字节预筛不改变结果（含转义、空格、非 ASCII run_id 与 ensure_ascii 两种写法）。
+一次；③内存峰值有界（驻留 = 索引路径列表 + run 集合 + 预筛正则 + 单行缓冲 + 有界匹配行，不随
+索引总量增长）；④字节预筛不改变结果（含 \\u/\\/ 转义写法、JSON 布尔/数字值、空格、非 ASCII
+run_id 与 ensure_ascii 两种写法）。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent import core
 from agent_py_agent.agent.memory_archive import control_plane
 from agent_py_agent.agent.memory_archive.control_plane import (
     MemoryControlPlaneQueryOptions,
@@ -34,7 +37,7 @@ _MEMORY_LIMIT_BYTES = 32 * 1024 * 1024
 _BULK_ROOT_COUNT = 40
 _BULK_ROWS_PER_ROOT = 500
 _BULK_PADDING_CHARS = 10_000
-# 超长非匹配行（约 2MB）：验证峰值只跟最长单行加匹配行有关，不跟索引总量有关。
+# 超长非匹配行（约 2MB）：验证峰值与索引总量无关——由索引路径列表、run 集合、预筛正则、最长单行缓冲与有界匹配行构成。
 _OVERSIZE_PADDING_CHARS = 2_000_000
 
 
@@ -340,19 +343,46 @@ def test_batch_reader_scans_each_index_once(
     assert all(count == 3 for count in legacy_counts.values())
 
 
-# 函数用途: 验证预筛条件：只有全为 JSON 不转义的可见 ASCII 才编译字节正则，否则整行解析。
+# 函数用途: 验证预筛条件：安全可见 ASCII 且非布尔/数字样式才编译字面量正则；转义写法由 \u00/\/ 兜底放行。
 def test_prescreen_pattern_skips_unsafe_run_ids() -> None:
     pattern = control_plane._tool_ref_prescreen_pattern(("run-safe",))
     assert pattern is not None
     assert pattern.search(b'"run_id": "run-safe"') is not None
+    # 字面量正则不认转义写法：转义行靠 _skip_record_bytes 的兜底放行（不跳过 = 会解析）
+    assert control_plane._skip_record_bytes(rb'"\u0072un-safe"', '"\\u0072un-safe"', pattern) is False
+    assert control_plane._skip_record_bytes(rb'"run\/a"', '"run\\/a"', pattern) is False
+    assert (
+        control_plane._skip_record_bytes(b'"run_id": "run-other"', '"run_id": "run-other"', pattern)
+        is True
+    )
     multi = control_plane._tool_ref_prescreen_pattern(("run-a", "run-b"))
     assert multi is not None
     assert multi.search(b"run-b") is not None
+    slash = control_plane._tool_ref_prescreen_pattern(("run/a",))
+    assert slash is not None
+    assert slash.search(b"run/a") is not None
+    assert control_plane._skip_record_bytes(rb'"run\/a"', '"run\\/a"', slash) is False
     assert control_plane._tool_ref_prescreen_pattern(("run safe",)) is None
     assert control_plane._tool_ref_prescreen_pattern(('run"quote',)) is None
     assert control_plane._tool_ref_prescreen_pattern(("run\\backslash",)) is None
     assert control_plane._tool_ref_prescreen_pattern(("运行-任务-1",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(("True",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(("100.0",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(("1e2",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(("0",)) is None
     assert control_plane._tool_ref_prescreen_pattern(()) is None
+
+
+# LLM: 转义兜底只放行能编码 ASCII 的 \u00XX 与 \/；非 ASCII 的 \uXXXX（如中文）不触发兜底——
+#   这是 ensure_ascii=True 数据里预筛仍然有效的关键（否则每行都要整行解析）。\u00 的完备性：
+#   安全字符都是 0x21–0x7E，\u 写法必然以 \u00 开头（mc3-e11a-fix 的论证）。
+# 函数用途: 验证转义兜底正则的精确范围（ASCII \u 转义与 \/ 命中，非 ASCII \u 转义不命中）。
+def test_escape_backstop_matches_only_ascii_escapes() -> None:
+    escape = control_plane._PRESCREEN_ESCAPE_PATTERN
+    assert escape.search(rb'"\u0072un-safe"') is not None
+    assert escape.search(rb'"run\u002fa"') is not None
+    assert escape.search(rb'"run\/a"') is not None
+    assert escape.search(rb'"\u5de5\u5177"') is None
 
 
 # LLM: 预筛正则必须把 run_id 当字面量（re.escape）：含 . + ( [ * ? | 等元字符的 run_id 要精确命中，
@@ -399,6 +429,92 @@ def test_escaped_or_non_ascii_run_ids_still_match(tmp_path: Path, run_id: str) -
         assert rows == legacy["tool_outputs"]
         assert len(rows) == 1
         assert rows[0]["run_id"] == run_id
+
+
+# LLM: JSON 允许把任何字符写成 \uXXXX、把 / 写成 \/——只含可见 ASCII 的 run_id 也可能以"原样、
+#   \u、\/"三种合法写法出现（其余转义只产出安全集外的字符）。预筛（字面量正则 + \u00/\/ 转义
+#   兜底）必须放行含 \u 或 \/ 的行，交给结构化 run_id 判断；否则会静默漏引用（mc4-1301）。
+#   混合写法（部分字面 + 部分转义）与 / 的 \u002f 写法同样覆盖。测试走真实组合根适配器。
+# 函数用途: 验证 run_id 以 \/ 或 \u 转义写法出现时引用照常找到、errors 为空。
+@pytest.mark.parametrize(
+    "run_id,encoded",
+    [
+        ("run/a", r'"run\/a"'),
+        ("run/a", r'"run\u002fa"'),
+        ("run-safe", r'"\u0072un-safe"'),
+        ("run-safe", r'"run-\u0073afe"'),
+        ("run-safe", r'"\u0072\u0075\u006e\u002d\u0073\u0061\u0066\u0065"'),
+    ],
+)
+def test_escaped_json_run_ids_still_match(tmp_path: Path, run_id: str, encoded: str) -> None:
+    artifact = tmp_path / "blobs" / "tool_outputs" / "artifact.txt"
+    raw = (
+        _tool_output_line(run_id, "call-escaped", artifact)
+        .replace(json.dumps(run_id), encoded)
+        .encode("utf-8")
+    )
+    assert run_id.encode("utf-8") not in raw  # run_id 不以原样字节出现，确保测试真的压到预筛
+    path = tmp_path / "blobs/tool_outputs/index.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    batch = query_tool_output_refs_for_runs(tmp_path, run_ids=(run_id,), limit_per_run=5)
+    assert [row["call_id"] for row in batch["tool_outputs_by_run"][run_id]] == ["call-escaped"]
+    source = CuratorToolReferenceSource(tmp_path, query=core._query_curator_tool_references)
+    refs, errors = source.read((_audit_event(run_id, "call-escaped"),), limit_per_run=5)
+    assert errors == []
+    assert (run_id, "call-escaped") in refs
+
+
+# LLM: _record_value 用 str() 投影非字符串 JSON 值：JSON true 变 "True"、数字 1e2 变 "100.0"，
+#   与 JSON 原样字节不同；这两类查询值不预筛、整行解析，保证任何 JSON 值都不会漏（mc4-1301）。
+# 函数用途: 验证 JSON 布尔/数字形式的 run_id 值也被精确匹配、与旧路径一致。
+@pytest.mark.parametrize("json_value,query_run_id", [("true", "True"), ("1e2", "100.0")])
+def test_non_string_json_run_values_still_match(
+    tmp_path: Path, json_value: str, query_run_id: str
+) -> None:
+    artifact = tmp_path / "blobs" / "tool_outputs" / "artifact.txt"
+    raw = (
+        '{"kind": "tool_output", "run_id": '
+        + json_value
+        + ', "call_id": "call-nonstring", "path": "'
+        + str(artifact)
+        + '", "sha256": "'
+        + "a" * 64
+        + '", "size_bytes": 5}\n'
+    ).encode("utf-8")
+    path = tmp_path / "blobs/tool_outputs/index.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    batch = query_tool_output_refs_for_runs(tmp_path, run_ids=(query_run_id,), limit_per_run=5)
+    rows = batch["tool_outputs_by_run"][query_run_id]
+    assert [row["call_id"] for row in rows] == ["call-nonstring"]
+    legacy = query_memory_control_plane(
+        tmp_path,
+        MemoryControlPlaneQueryOptions(run_id=query_run_id, limit=5),
+    )
+    assert rows == legacy["tool_outputs"]
+
+
+# LLM: mc4-1302 合同变化（3a 已接受）：工具引用读取只依赖工具输出索引，不再整读
+#   daily/*/events.jsonl 与 memory_archive/compact_applies/ledger.jsonl；这些账本损坏
+#   （非法 UTF-8）不再连带失败。旧路径会整读它们并给每个 run 报 UnicodeDecodeError。
+# 函数用途: 验证无关账本含非法 UTF-8 时工具引用照常返回、errors 为空。
+@pytest.mark.parametrize(
+    "relative",
+    ["daily/2026-10-08/events.jsonl", "memory_archive/compact_applies/ledger.jsonl"],
+)
+def test_corrupt_unrelated_ledgers_do_not_break_tool_refs(
+    tmp_path: Path, relative: str
+) -> None:
+    artifact = tmp_path / "blobs" / "tool_outputs" / "artifact.txt"
+    _write_index(tmp_path, "blobs/tool_outputs", _tool_output_line("run-a", "call-a1", artifact))
+    bad = tmp_path / relative
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(b"\xff bad utf8\n")
+    source = CuratorToolReferenceSource(tmp_path, query=core._query_curator_tool_references)
+    refs, errors = source.read((_audit_event("run-a", "call-a1"),), limit_per_run=5)
+    assert errors == []
+    assert ("run-a", "call-a1") in refs
 
 
 # 函数用途: 验证 run_id 出现在 scope 嵌套位置时照常匹配（复用 _record_value 的 scope 分支）。
@@ -504,7 +620,8 @@ def _oversize_line(tmp_path: Path) -> str:
 
 
 # LLM: 规模按任务书"约 200MB"设计：40 根 × 500 行 × 约 10KB，另加一条 2MB 超长非匹配行。
-#   tracemalloc 分别测两条路径峰值：新路径只保留匹配行加单行缓冲；旧路径整读整解析全部行。
+#   tracemalloc 分别测两条路径峰值：新路径驻留索引路径列表、run 集合、预筛正则、单行缓冲与有界
+#   匹配行（不随索引总量增长）；旧路径整读整解析全部行。
 # 函数用途: 验证批量读取器峰值低于 32MB 常量上限，且远低于旧整读路径的实测峰值。
 def test_batch_reader_memory_stays_bounded(tmp_path: Path) -> None:
     padding = "x" * _BULK_PADDING_CHARS

@@ -222,6 +222,12 @@ def _limited(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
 
 # 预筛排除字符：JSON 字符串里必须转义的两个可见 ASCII（" 与 \）；其余可见 ASCII 在任何写法下逐字节出现。
 _PRESCREEN_EXCLUDED_CHARS = frozenset('"\\')
+# 布尔字面量经 str() 投影后大小写不同（JSON true → "True"），这类查询值不预筛（整行解析，保证不漏）。
+_PRESCREEN_BOOL_LIKE_RUN_IDS = frozenset({"True"})
+# LLM: 转义兜底扫描：安全 run_id 在 JSON 里还可能被写成 \u00XX（0x21–0x7E 的 \u 写法都以 \u00 开头）
+#   或 \/（只能编码 /）；两个分支共享前缀 \，sre 前缀扫描足够快。与字面量正则分开编译，避免混前缀
+#   打掉主正则的前缀优化（实测每次搜索慢约一个数量级，见 TESTS.md 的 mc3-e11a-fix 记录）。
+_PRESCREEN_ESCAPE_PATTERN = re.compile(rb"\\u00|\\/")
 
 
 # LLM: curator 批次级读取——一次 glob、一次顺序扫描全部工具输出索引，为每个 run 收集有界匹配行；
@@ -229,6 +235,10 @@ _PRESCREEN_EXCLUDED_CHARS = frozenset('"\\')
 #   _record_value/_matches_scope 匹配、同一"前 N 条"截断。区别只在"每个 run 各扫一遍"变成"全批扫一遍"。
 #   读取失败（OSError/UnicodeDecodeError）与旧路径一样向上抛出：旧路径每个 run 的独立查询都会在同一个
 #   坏文件处失败，所以这里抛出即代表"每个 run 各得一条同类型读取错误"。
+#   错误合同（mc4-1302，3a 已接受的有意变化）：本读取器只依赖工具输出索引，不再整读
+#   daily/*/events.jsonl 与 memory_archive/compact_applies/ledger.jsonl；这两个无关账本损坏（非法
+#   UTF-8）时旧路径会给每个 run 报 UnicodeDecodeError、curator 可能因 load_errors 拒绝整批输入，
+#   新路径照常返回工具引用。这是行为改进，不是等价修改。
 # 函数用途: 按 run_id 集合批量读取工具输出索引里的匹配行（只读元数据，不读 artifact 正文）。
 def query_tool_output_refs_for_runs(
     root: str | Path,
@@ -276,12 +286,14 @@ def _iter_index_lines(path: Path) -> Iterator[tuple[int, bytes]]:
         yield from enumerate(handle, start=1)
 
 
-# LLM: 预筛与空行检查合成一个"跳过"判断：预筛正则不命中、或（已严格解码的）纯空白行都跳过；
-#   解码本身不在这里做——非 UTF-8 行必须在任何跳过判断前失败，才能与旧整文件解码等价。
+# LLM: 预筛与空行检查合成一个"跳过"判断：字面量正则不中、且转义兜底也不中（无 \ 直接排除，否则查
+#   \u00/\/）的行才跳过；解码本身不在这里做——非 UTF-8 行必须在任何跳过判断前失败，才能与旧整文件
+#   解码等价。
 # 函数用途: 判断一行原始字节是否不参与归属判断（预筛未命中或空白行）。
 def _skip_record_bytes(raw: bytes, text: str, prescreen: re.Pattern[bytes] | None) -> bool:
     if prescreen is not None and prescreen.search(raw) is None:
-        return True
+        if b"\\" not in raw or _PRESCREEN_ESCAPE_PATTERN.search(raw) is None:
+            return True
     return not text.strip()
 
 
@@ -317,11 +329,15 @@ def _collect_matching_record(
     bucket.append(record)
 
 
-# LLM: 预筛条件=run_id 全部是"JSON 不会转义的可见 ASCII"（! 到 ~ 去掉 " 和 \）：这类字符在
-#   ensure_ascii 开/关两种写法里都逐字节出现，字节命中只是性能提示、不是归属判断；含空格/转义字符/
-#   非 ASCII 的 run_id 一律不预筛——写索引的一方可能用 \uXXXX 或 \" 转义，字节串会漏匹配。
-#   每批只编译一次字节正则（字面量交替 + re.escape，无回溯风险）：每行一次 C 层 search，
-#   替代每行对全部 needle 的 Python 级生成器步进（40 万行实测里预筛约占七成 CPU）。
+# LLM: 预筛条件=run_id 全部是"JSON 不会转义的可见 ASCII"（! 到 ~ 去掉 " 和 \）且非布尔/数字样式。
+#   对这类 run_id，JSON 字符串解码后要等于它，原始字节只有三种可能：①原样包含 run_id——字面量正则
+#   命中；②含 \u 转义——安全字符都是 0x21–0x7E，\u 写法必然是 \u00XX，含字节 \u00；③含 \/ 转义
+#   （只能编码 /）。其余转义（\" \\ \b \f \n \r \t）只产出安全集外的字符，不可能构成匹配。
+#   所以预筛 = 字面量正则 + \u00/\/ 转义兜底（_PRESCREEN_ESCAPE_PATTERN）：命中任一项就照常解析、
+#   再按结构化 run_id 判断，误命中只多解析几行。两项分开写而不是并进同一个正则——混前缀会打掉
+#   sre 的前缀优化，实测每次搜索慢约一个数量级（mc3-e11a-fix）。
+#   每批只编译一次字面量正则（re.escape，无回溯风险）：每行一次 C 层 search，替代每行对全部 needle
+#   的 Python 级生成器步进（40 万行实测里预筛约占七成 CPU）。
 # 函数用途: 为全部安全的 run_id 编译"任一出现即命中"的字节正则；任一不安全就返回 None（整行解析，不漏匹配）。
 def _tool_ref_prescreen_pattern(run_ids: tuple[str, ...]) -> re.Pattern[bytes] | None:
     if not run_ids or not all(_is_prescreen_safe_run_id(run_id) for run_id in run_ids):
@@ -329,15 +345,28 @@ def _tool_ref_prescreen_pattern(run_ids: tuple[str, ...]) -> re.Pattern[bytes] |
     return re.compile(b"|".join(re.escape(run_id.encode("utf-8")) for run_id in run_ids))
 
 
-# LLM: 单个 run_id 的预筛安全判定；空串不预筛（all() 对空串恒真，必须显式排除）。
-# 函数用途: 判断 run_id 是否全由 JSON 不会转义的可见 ASCII 组成。
+# LLM: 单个 run_id 的预筛安全判定；空串不预筛（all() 对空串恒真，必须显式排除）；布尔/数字样式
+#   不预筛——_record_value 用 str() 投影非字符串 JSON 值（true → "True"、1e2 → "100.0"），
+#   与 JSON 原样字节不同，预筛找不到会漏。
+# 函数用途: 判断 run_id 是否全由 JSON 不会转义的可见 ASCII 组成且不可能是 str() 改写的值。
 def _is_prescreen_safe_run_id(run_id: str) -> bool:
-    if not run_id:
+    if not run_id or run_id in _PRESCREEN_BOOL_LIKE_RUN_IDS:
+        return False
+    if _is_numeric_like_run_id(run_id):
         return False
     return all(
         "!" <= char <= "~" and char not in _PRESCREEN_EXCLUDED_CHARS
         for char in run_id
     )
+
+
+# 函数用途: 判断 run_id 是否是 float() 可解析的数字样式（含 1e2/1_0/带空格等 Python 接受的写法）。
+def _is_numeric_like_run_id(run_id: str) -> bool:
+    try:
+        float(run_id)
+    except ValueError:
+        return False
+    return True
 
 
 __all__ = [
