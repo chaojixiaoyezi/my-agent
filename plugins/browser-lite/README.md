@@ -74,6 +74,7 @@ python scripts/build_plugin_package.py \
   这是插件层的第二道门；宿主出站门默认仍拦私网地址，两道门都放行才能打开。
 - `idle_close_seconds`：空闲多少秒后自动关闭浏览器，默认 120。
 - `command_timeout_seconds`：每个 CDP 命令（含启动、页面加载）的超时，默认 15。
+  真实浏览器组件测试统一用 45 秒、MCP 等待 90 秒，避开 CI 冷启动。
 
 取值范围见唯一声明 `src/browser_lite/declaration.json`。
 

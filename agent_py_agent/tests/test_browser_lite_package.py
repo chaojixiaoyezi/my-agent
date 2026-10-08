@@ -1,3 +1,5 @@
+# LLM: 标准包、独立进程与真实浏览器组件验收；测试期限留出冷启动余量，显式短期限不覆盖，不代替线上 CI 或宿主验收。
+# 模块用途: 验证 browser-lite 的包、协议、候选动作和真实浏览器生命周期。
 """browser-lite 真实标准包、独立 Python、原 MCP 客户端与真实浏览器的组件验收；不代替 TUI、审批或模型验收。"""
 
 from __future__ import annotations
@@ -197,15 +199,19 @@ def dirs(tmp_path):
     return workspace, data
 
 
-# LLM: 按宿主相同方式传入数据目录和设置环境变量；进程由原 MCP 客户端启动与回收。
-# 函数用途: 启动一个安装后的 browser-lite MCP 进程。
+# LLM: 测试默认期限比产品的 15 秒宽，CI 冷启动不挤占全部预算；显式设置（包括短期限）始终优先。
+# 函数用途: 为真实浏览器组件测试生成独立设置，不修改插件产品默认值。
+def _browser_settings(settings=None):
+    return {"command_timeout_seconds": 45, **(settings or {})}
+
+
+# LLM: 按宿主相同方式传数据目录和设置；原 MCP 客户端启动与回收，90 秒传输预算留出浏览器启动及后续命令余量。
+# 函数用途: 用较宽的测试期限启动安装后的 browser-lite，显式设置不被覆盖。
 def start(installed, data, settings=None):
     python, _ = installed
-    env = {"MY_AGENT_PLUGIN_DATA_DIR": str(data)}
-    if settings is not None:
-        env["MY_AGENT_PLUGIN_SETTINGS"] = json.dumps(settings)
+    env = {"MY_AGENT_PLUGIN_DATA_DIR": str(data), "MY_AGENT_PLUGIN_SETTINGS": json.dumps(_browser_settings(settings))}
     client = MCPStdioClient(_config("", name="browser-lite", command=str(python),
-                                   args=["-I", "-m", "browser_lite"], env=env, timeout=60.0))
+                                   args=["-I", "-m", "browser_lite"], env=env, timeout=90.0))
     client.start()
     return client
 
@@ -253,6 +259,12 @@ def test_tools_match_manifest(browser, installed_browser):
     for name in ("click", "fill"):
         assert (declared[name].observation_ref.target_kind, declared[name].observation_ref.param) == ("page", "candidate_id")
         assert "selector" not in declared[name].input_schema["required"], "填候选 ID 时可以不给 selector"
+
+
+def test_browser_test_settings_widen_defaults_but_preserve_explicit_short_timeout():
+    assert _browser_settings() == {"command_timeout_seconds": 45}
+    assert _browser_settings({"command_timeout_seconds": 1, "chrome_path": "fake"}) == {
+        "command_timeout_seconds": 1, "chrome_path": "fake"}
 
 
 # LLM: 与 invoke 同源，但返回完整 MCP 结果（含 structuredContent）并可附宿主观察 _meta；只拼装真实协议值。
@@ -464,13 +476,14 @@ def test_host_stop_reaps_browser(installed_browser, dirs):
     assert gone(opened["browser_pid"])
 
 
-# LLM: 不经 MCP 客户端直接起插件进程，才能分别验证 stdin EOF 与仅对插件 pid 发 SIGTERM 的退出路径。
-# 函数用途: 启动插件、打开测试页并返回进程和浏览器 pid。
+# LLM: 直接起插件进程以分别验证 EOF 与 SIGTERM；冷启动期限与 MCP 测试同源，退出断言与信号范围不变。
+# 函数用途: 用组件测试设置启动插件、打开测试页，返回进程和浏览器 pid。
 def raw_open(installed, workspace, data):
     python, _ = installed
     process = subprocess.Popen([str(python), "-I", "-m", "browser_lite"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, env={"MY_AGENT_PLUGIN_DATA_DIR": str(data), "HOME": os.environ["HOME"],
-                                                              "PATH": os.environ.get("PATH", "")},
+                                                              "PATH": os.environ.get("PATH", ""),
+                                                              "MY_AGENT_PLUGIN_SETTINGS": json.dumps(_browser_settings())},
                                start_new_session=True)
     meta = {WORKSPACE_READ_EXTENSION: read_context(workspace).to_payload()}
     for request in ({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},

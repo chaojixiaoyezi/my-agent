@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## browser-lite 慢启动期限
+- 根因：CI Chrome 冷启动偶尔超过插件 `command_timeout_seconds` 默认 15 秒；产品默认值保持不变，避免延长页面/CDP 命令等待。
+- 夹具规则：真实浏览器组件统一 45 秒（含 EOF/SIGTERM 入口）、MCP 等待 90 秒，显式短值优先，不重试、不跳过失败。
+- 复现方法：将先 `sleep 17` 再 `exec` 真 Chrome 的包装脚本设为 `chrome_path`，15 秒复现 `BROWSER_START_FAILED`，45 秒通过 open → read 候选。
+- 沙箱外验证：07 已复核两个 browser-lite 文件 31 个用例全部通过，以及同慢启动包装的 15 秒失败／45 秒完整链路通过。
+
 ## skill／能力包挑选集成（3a，2026-10-08，分支 `claude/3a-pick-int`）
 
 - **范围**：main e957e0815 + 3a 文档 + w1（开关现读、会话方法沿用）+ w2（首次选包测量工具、选包候选修复，WIP 收尾项另补）+ 3a 修复 c71e44529。
