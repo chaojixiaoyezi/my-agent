@@ -270,7 +270,7 @@ def test_active_entry_with_carried_handoff_counts_only_ir_the_candidate_sends(tm
     monkeypatch.setattr(recovery, "_recovery_tool_source",
                         lambda *args: sources.append(original_source(*args)) or sources[-1])
     monkeypatch.setattr(active_turn_compact, "_active_turn_replacement_summary",
-                        lambda *args, **kwargs: "携带归档已核对，继续后续步骤。")
+                        lambda *args, **kwargs: ("携带归档已核对，继续后续步骤。", None))
     original_ceiling = compact._compact_request_input_ceiling
     monkeypatch.setattr(compact, "_compact_request_input_ceiling",
                         lambda *args: 1 if business else original_ceiling(*args))
