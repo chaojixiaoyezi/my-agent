@@ -1,4 +1,4 @@
-# LLM: 开关、主执行身份、原工具权限和包快照共同决定可选准备资格；只读元数据，不调用模型、正文或安装器。
+# LLM: 现读开关、主执行身份、原工具权限和包快照共同决定可选准备资格；预算仍取 agent 缓存，只读不执行。
 # 模块用途: 普通任务晋升与 Goal 新建共用一次选包的初始化条件，缺少资格时不增加持久字段。
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from ..conversation.capability_selection_state import TaskCapabilitySelection
 from ..runtime_context import current_subagent_run_id
 from .config import CapabilityConfig
 from .runtime_config_reload import capability_config_for_agent
+from .self_install_switches import read_fresh_capability_switch
 from .skill_snapshot import SkillSnapshot
 
 
@@ -24,11 +25,12 @@ class PackageSelectionScope:
 
 
 # LLM: 已有 run 使用原冻结工具/Skill 快照；Goal 控制入口传可信 cwd，只生成元数据快照，不准备连接或执行资源。
+#   只有开关按文件现读，config 仍为原缓存实例，不能顺手热刷新预算；坏文件按开关默认值关闭。
 # 函数用途: 判断当前主执行是否允许准备包选择；关闭、孩子、无原读权限或无包时直接跳过。
 def package_selection_scope(agent: object, params: object = None, *, workspace_root: object = None) -> PackageSelectionScope | None:
     # 缺文件由统一入口给默认实例，坏文件（None）也落到 dataclass 默认值；这里不另写兜底。
     config = capability_config_for_agent(agent) or CapabilityConfig()
-    if not config.enable_capability_package_selection or current_subagent_run_id(agent):
+    if not read_fresh_capability_switch(agent, "enable_capability_package_selection") or current_subagent_run_id(agent):
         return None
     agent_config = getattr(agent, "config", None)
     if not (getattr(agent_config, "enable_tools", False) and getattr(agent_config, "enable_plugins", False)):

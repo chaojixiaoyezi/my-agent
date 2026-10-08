@@ -10,7 +10,9 @@ import pytest
 
 from agent_py_agent.agent.capability import package_selection_scope as selection_scope
 from agent_py_agent.agent.capability.config import CapabilityConfig, load_capability_config
+from agent_py_agent.agent.capability.runtime_config_reload import capability_config_for_agent
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshot
+from agent_py_agent.agent.capability.subagent_package_entries import subagent_entries_enabled
 from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.conversation.capability_selection_state import (
     CAPABILITY_SELECTION_KEY,
@@ -22,6 +24,11 @@ from agent_py_agent.agent.runtime_context import (
     set_current_subagent_context,
 )
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.settings.parameter_registry import parameter_registry
+from agent_py_agent.agent.settings.user_config_capability import (
+    EFFECT_GATEWAY_RESTART,
+    EFFECT_IMMEDIATE,
+)
 from agent_py_agent.tests.test_capability_package_discovery import package_fixture
 
 
@@ -248,3 +255,71 @@ def test_real_installation_and_tool_registry_initialize_without_member_read(tmp_
     assert scope is not None and len(scope.skills.packages) == len(entries) == 2
     assert scope.tools is params.tool_runtime_snapshot
     assert selection_scope.new_task_capability_selection(agent, params) == TaskCapabilitySelection.pending()
+
+
+@pytest.mark.parametrize("key", [
+    "capability_pack_self_install_enabled", "plugin_self_install_enabled", "enable_capability_package_selection",
+])
+def test_fresh_switch_registry_reports_immediate_but_budgets_still_require_restart(key):
+    registry = parameter_registry()
+    assert registry[key].effect == EFFECT_IMMEDIATE
+    assert registry["capability_bundle_max_tokens"].effect == EFFECT_GATEWAY_RESTART
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_selection_scope_reads_switch_fresh_without_refreshing_cached_budgets(tmp_path, enabled):
+    fixture = _fixture(tmp_path, enabled=enabled, extra_config="capability_bundle_max_tokens: 731\n")
+    assert (selection_scope.package_selection_scope(fixture.agent, fixture.params) is not None) is enabled
+    cached = capability_config_for_agent(fixture.agent)
+    fixture.path.write_text(
+        f"enable_capability_package_selection: {str(not enabled).lower()}\ncapability_bundle_max_tokens: 509\n",
+        encoding="utf-8",
+    )
+    scope = selection_scope.package_selection_scope(fixture.agent, fixture.params)
+    assert (scope is not None) is (not enabled)
+    assert capability_config_for_agent(fixture.agent) is cached
+    assert cached.enable_capability_package_selection is enabled
+    assert cached.capability_bundle_max_tokens == 731
+    if scope is not None:
+        assert scope.config is cached and scope.config.capability_bundle_max_tokens == 731
+
+
+@pytest.mark.parametrize("damage", ["invalid_config", "invalid_bool", "unreadable"])
+def test_damaged_selection_switch_uses_default_instead_of_cached_true(tmp_path, damage):
+    fixture = _fixture(tmp_path)
+    cached = capability_config_for_agent(fixture.agent)
+    assert cached.enable_capability_package_selection is True
+    if damage == "unreadable":
+        fixture.path.unlink()
+        fixture.path.mkdir()
+    else:
+        text = ("decision_subagent_model_mode: invalid\n" if damage == "invalid_config"
+                else "enable_capability_package_selection: not-a-bool\n")
+        fixture.path.write_text(text, encoding="utf-8")
+    assert selection_scope.package_selection_scope(fixture.agent, fixture.params) is None
+    assert subagent_entries_enabled(fixture.agent) is False
+    assert capability_config_for_agent(fixture.agent) is cached
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_subagent_entry_switch_reads_next_file_value_with_same_agent(tmp_path, enabled):
+    fixture = _fixture(tmp_path, enabled=enabled)
+    cached = capability_config_for_agent(fixture.agent)
+    assert subagent_entries_enabled(fixture.agent) is enabled
+    fixture.path.write_text(f"enable_capability_package_selection: {str(not enabled).lower()}\n", encoding="utf-8")
+    assert subagent_entries_enabled(fixture.agent) is (not enabled)
+    assert capability_config_for_agent(fixture.agent) is cached
+
+
+def test_admin_settings_selection_switch_receipt_and_next_scope_match_without_restart(tmp_path, monkeypatch):
+    from agent_py_agent.tests.test_self_install_switches import _ADMIN, _settings_run
+
+    fixture = _fixture(tmp_path, enabled=False)
+    fixture.agent.config.config_path = str(tmp_path / "desktop.yaml")
+    cached = capability_config_for_agent(fixture.agent)
+    for enabled in (True, False):
+        report = _settings_run(monkeypatch, fixture.agent,
+                               f"/settings set enable_capability_package_selection {str(enabled).lower()}", home=_ADMIN)
+        assert report.ok and "马上生效" in report.message and "/restart" not in report.message
+        assert (selection_scope.package_selection_scope(fixture.agent, fixture.params) is not None) is enabled
+        assert capability_config_for_agent(fixture.agent) is cached

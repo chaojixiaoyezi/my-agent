@@ -10,7 +10,9 @@
 # - 本文件（随包默认）只读、永不被写：用户位置不存在时按本文件的值运行；参数中心 /settings 写入
 #   永远落在用户位置（不存在时新建，权限 0600/目录 0700），不会写进随包默认。
 # - Gateway 读到的这一份被它服务的所有 owner 共用；找不到文件时按 CapabilityConfig 默认值运行，也就是本模板的值。
-# - 要改能力配置：把本文件复制到上述位置再改。进程内会缓存已加载的配置，改完重启 Gateway 最稳妥。
+# - 要改能力配置：把本文件复制到上述位置再改。以下三个开关每次按文件现读，改完下一次判断马上生效：
+#   capability_pack_self_install_enabled、plugin_self_install_enabled、enable_capability_package_selection。
+#   读不到或文件坏按各键的 CapabilityConfig 默认值处理（这三个默认都关）；其余项仍缓存，修改后要重启 Gateway。
 # - 旧位置 <agent 根目录>/agent_py_agent/config/capability_config.yaml 不再当用户配置读取；
 #   那里存在非随包默认文件时会在配置告警里提示，不会静默合并。
 # - daemon、gateway scenario 和 subagents 系列 CLI 子命令默认直接读本随包文件，可用 --capability-config 指定别的文件。
@@ -27,6 +29,7 @@ enable_capability_package_recommendations: true
 # - 新子线程仅在原首请求资格内读取显式授权且同代 pin 的入口，不运行选择模型、不改 pin；旧线程不补资格。
 # - 子入口复用下方总预算及原权限；Jev 关闭仍可准备入口，关闭本开关则保持原子代理路径。
 # - 只选择原有权限内的包，不执行包内脚本，不扩大工具权限；后续正常自动选模仍可能改变业务模型。
+# - 管理员 /settings 或配置文件改完，下一次主任务/子入口判断马上生效，不用重启；其它预算项仍要重启。
 enable_capability_package_selection: false
 # 选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。
 # 候选只受输入预算限制，不受推荐候选数上限限制；预算不足按现有推荐打分稳定排序，同分保留原序，不过滤零分包。
