@@ -21,7 +21,7 @@ from .capability_selection_state import (
 
 SCHEMA_VERSION = "conversation_thread.v10"
 # 线程记录里只给界面和宿主用、不进模型上下文的字段：状态条遥测与待送达的宿主提示。拼上下文包的地方都按它剔除。
-MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices")
+MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods")
 _MODEL_SELECTION_FIELDS = (
     "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision",
 )
@@ -432,7 +432,7 @@ class ConversationCompactCommit:
 
 
 # LLM: ConversationThread 是历史、压缩点、模型引用与选择版本、决策覆盖及上下文投影的唯一持久权威；
-# 选择版本不能代替连接版本或授权，任务生命周期仍由 ThreadTaskLink 拥有，改动须核对线程存储与选择测试。
+# 选择版本不能代替连接版本或授权；方法账本只经 capability.method_carry 使用，不进入摘要与模型线程投影。
 # 类用途: 保存会话模型引用与选择版本、临时决策覆盖和压缩点；选择来源不替代任务状态或自动采用权限。
 @dataclass(frozen=True)
 class ConversationThread:
@@ -493,6 +493,9 @@ class ConversationThread:
     #   不进入模型上下文（MODEL_HIDDEN_THREAD_FIELDS），同一来源只留最新一条，最多 HOST_NOTICE_LIMIT_COUNT 条。
     # 字段用途: 暂存要在下一条回复顶部告诉用户的宿主提示（如智能程度检测结论）。
     pending_host_notices: tuple[dict[str, object], ...] = ()
+    # LLM: 唯一会话方法账本，读写和校验归 capability.method_carry；隐藏且空时不写，保留旧线程序列化字节。
+    # 字段用途: 暂存主会话成功读过的包和 skill 身份、资料路径与压缩代次，不存正文或权限。
+    conversation_methods: tuple[dict[str, object], ...] = field(default=(), metadata={"omit_empty": True})
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
@@ -515,19 +518,22 @@ class ConversationThread:
             raise ValueError("已知模型选择缺少模型引用，原记录未修改。")
 
     # LLM: 原 v10 同次序列化选择事实、设置和历史/Compact/校准投影；不另写事件账或模型秘密，须同步旧记录迁移测试。
-    # 函数用途: 将会话模型引用、选择版本和上下文状态一并写成 JSON，不保存模型密钥或第二份选择索引。
+    # 函数用途: 将线程写成 JSON；方法账本为空时省略新增键，不改旧摘要或指纹字段。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
         payload["channel_bindings"] = [item.to_dict() for item in self.channel_bindings]
         payload["task_ids"] = list(self.task_ids)
         payload["active_task_ids"] = list(self.active_task_ids)
+        if not self.conversation_methods:
+            payload.pop("conversation_methods", None)
         return payload
 
     # LLM: 原 v10 及更早记录三选择字段全缺才归一为未知；坏/部分字段和未知 thread 版本拒绝，不补造手动事件。
-    # 函数用途: 读取旧会话的设置与选择事实，保留原上下文；归一只在内存，后续真实写入才保存新字段。
+    # 函数用途: 读取旧会话；方法账本缺栏正常，校验仍经唯一负责模块，不反推摘要。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
+        from ..capability.method_carry import methods_from
         from ..settings.decision_settings_schema import thread_decision_settings
 
         decision_settings = thread_decision_settings(data)
@@ -592,6 +598,7 @@ class ConversationThread:
             verbose_level=_verbose_level(data.get("verbose_level")),
             reasoning_effort=normalize_reasoning_level(data.get("reasoning_effort")),
             pending_host_notices=_pending_host_notices(data.get("pending_host_notices")),
+            conversation_methods=methods_from(data.get("conversation_methods")),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
             channel_bindings=tuple(

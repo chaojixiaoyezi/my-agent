@@ -18,6 +18,135 @@
 - **真机验证**（隔离 smoke，scratchpad/smk-c07，触发线封顶 6 万，只读用量快照差分与请求事件流）：sol 6 次压缩命中 83.5%–89.3%、
   64–109 秒；astra 2 次 91.3%、92/106 秒；MiniMax 12 秒。改前三者压缩调用走分段、0% 命中、10～33 分钟。数据见设计台账 compactfit 条目。
 
+## w1 第 2 步：会话方法沿用（2026-10-08，本地已实现，待 3a 非作者复核）
+
+- **来源与范围**：w1-step2 / common-v3，在第 1 步 `073e64237`、`cdfe9b4d1` 上续做；失败对照仍用任务指定的真正基线
+  `6e8f61564dd5cc32a3f97d26fdb3a9035ce51bc1`，不拿本分支的早先提交冒充基线。
+  本步功能/测试提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`；随后仅补交付 SHA 与文档，不改已验证产品/测试字节。
+  `method_carry.py` 是唯一负责模块；隐藏线程账本、成功 get 登记、逐 run 冻结、目录必显、Compact 后带回与 using/remove 已接真实业务入口。
+  新开关默认 true，管理员边界、现读名单、YAML/dataclass 与前端目录同源；预算仍缓存。不额外调模型、不执行包脚本、不改原权限与任务 pins。
+- **缓存两条**：首次成功使用时间重读不刷新，目录按首次使用排序且不显示时间；淘汰与带回优先级才按最近使用。
+  `current_prompt_scope` 在 run 参数中冻结一次；同 run get 只改线程账本，builder/纯请求投影只消费冻结值。
+  没有合格主会话的通用 scope 不写新增参数字段，嵌套和并发退出仍恢复原快照。
+- **新增测试**：`agent_py_agent/tests/test_conversation_method_{carry,commands,directory,gateway,restore}.py`。
+  覆盖主会话/失败读取准入、并发锁内合并、5 个方法与最近 8 份非入口资料、旧记录缺栏与空值不序列化、摘要/指纹及隐藏投影保持、
+  在用必显/停用删除/无在用与关闭的旧目录字节、稳定排序/逐 run 冻结、完整载荷预算/当前版本过滤/原 policy 和 pin/取消与失权、
+  成功投递才推进代次/同代新 run 零重读/失败不热重试/并发 remove 不复活，以及公共命令解析、认证线程范围与模型不可改开关。
+- **三轮假模型端到端**：`test_conversation_method_gateway.py` 使用真实 Gateway 队列处理、工具循环、临时安装表和成功 get；
+  第 1 轮读入口及资料，原 `write_compact_checkpoint` 加同 Store 的 Compact/CAS 提交后，第 2 轮实际请求含入口、完整资料重读参数与目录标注；
+  第 3 轮同代无再次带回。只替换模型传输，不把这项写成真模型、实际 TUI/飞书或生产验收。
+- **固定跑法**：先在本工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，pytest 前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest`，后缀
+  `-q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w1 -o addopts='' --timeout=60`。
+  不跑全仓，不同时跑两个 pytest，不在 pytest 运行时跑 code-size 或改生成报告。
+- **引用方广回归**：用 AST 查直接引用本次改动模块的测试，275 个引用方文件，合入完整 guards9 和新增文件后为 285 个明确文件，
+  顺序 15 批执行（每批最多 20 文件）。原始 JUnit 合计 **6263 tests / 20 failures / 1 error / 20 skipped，整体 rc=1**；
+  不把 JUnit tests 数误写成 pytest passed，也不写联合全绿。文件与批次列表在临时检查目录的 `files.json`、`results.json`。
+- **本次回归与自引准备错误**：广回归的两个 `test_prompt_scope_failure.py` 节点在真正基线均 PASS，确认是本次沿用字段写入
+  object/字符串占位参数造成；修复 `freeze_conversation_methods` 空线程早返回后，原四个 scope 测试通过。
+  一个 `test_background_main_agent_runtime.py` teardown error 来自我并行改写 CODE_SIZE_REPORT.md；还原报告并重跑该原 node 后通过，
+  不能称它是基线既有失败。原始失败和错误保留，不删测试、不放宽断言。
+- **最终无变异复验**：上述五个新增文件、整个 `test_prompt_scope_failure.py`、任务 `guards9.txt` 的全部 **12 个文件**，再加原 teardown node：
+  **242 passed in 50.37s，rc=0**。含常量目录、参数登记与打包守卫；覆盖变异后增强的“同代新 run 连准备读取也不重复”断言。
+  此结果与广回归有重叠，不相加冒充另一轮全量。
+- **真正基线逐项复核**：用 `git worktree add --detach /private/tmp/claude-501/w1-step2-baseline-6e8f61564 6e8f61564`，
+  在该树根用同一 Python、PYTHONPATH 与单例 60 秒上限重跑原 20 个 failure node：**20 tests / 18 failures / 0 errors / 0 skipped，rc=1**。
+  两个 scope 节点 PASS；余下 18 个逐节点对照如下。仅比较忽略临时目录、内存地址与临时端口后的栈，不忽略异常类型或业务断言。
+
+  | 类别 | 原失败节点 | 基线复核和原因边界 |
+  | --- | --- | --- |
+  | 线程/进程夹具 9 项 | `test_scheduler_waiting_deadlock.py::TestPendingProcessCompletion`：`test_corrupt_records_count_only_when_they_may_belong_to_the_task` 的 unparseable/this-task/another-task/another-store/missing-target/empty-target 六项；`test_a_confirmed_pending_record_wins_over_a_corrupt_one` 的 unparseable/this-task/empty 三项 | 当前与基线完整栈一致：夹具写记录时 `ValueError: managed process instance is partially bound`；本轮不改无关夹具或进程合同 |
+  | shell 6 项 | `test_chat_control_runtime::test_local_interrupt_stops_foreground_shell_without_resource_reclaim`；`test_gateway_chat_conversation_context::test_first_gateway_shell_keeps_explicit_working_dir`；`test_shell_hide_user_home::test_registry_built_shell_hides_the_home_but_git_still_works`；`test_shell_sandbox_boundary_facts::test_real_seatbelt_denial_comes_back_as_boundary_facts` 和 `test_model_sees_the_boundary_facts_on_its_next_request`；`test_tool_call_guardrail_runtime::test_real_shell_executor_stops_repeats_and_accepts_progress` | 前者 started 文件未出现，其余 60 秒超时，基线同节点/同栈；未取得根因证据，不把超时归因为沙箱 |
+  | sandbox-exec 3 项 | `test_plugin_sandbox_v8`：`test_macos_v8_narrows_read_and_enforces_network[True]`、`test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home` | 两树均退出 71，明确 `sandbox_apply: Operation not permitted`；差别仅内存地址/临时端口，沙箱外交 3a 复核 |
+
+- **十处变异**：每处单独的新 Python 进程执行一次源码单点内存替换，再进入同一 pytest；结束即丢弃该进程，未写产品文件。
+  每项均 **1 test / 1 failure / 0 errors，pytest rc=1**；外层检查程序确认 10/10 killed、两个产品文件 SHA256 前后相同，rc=0。
+  变异后上述 242 项普通运行恢复绿；具体替换及原始日志在 `mutations.json`、`mutation-01..10.log/xml`。
+
+  | 变异点 | 测试文件与 -k | pytest rc | 抓到 |
+  | --- | --- | --- | --- |
+  | 主会话判断去掉子代理排除 | carry：child_never_records | 1 | 是 |
+  | 包 get 失败前也记账 | carry：read_failure_never_creates_a_record | 1 | 是 |
+  | 资料上限 8 改 9 | carry：package_paths_are_unique_recent_eight | 1 | 是 |
+  | 按首次使用淘汰 | carry：repeated_reads_keep_first_order | 1 | 是 |
+  | 重读刷新首次时间，改变显示排序 | directory：display_order_does_not_follow_recent_usage | 1 | 是 |
+  | 代次 > 改为 >= | restore：compact_restores_entry | 1 | 是 |
+  | 无视缓存带回预算，直接用模型窗口 | restore：tiny_budget_does_not_consume_generation | 1 | 是 |
+  | 资料清单不按当前版本过滤 | restore：current_version_filters_missing_paths | 1 | 是 |
+  | 绕过现读关闭判断 | carry：off_switch_is_fresh | 1 | 是 |
+  | remove 回成功却不删除账本 | commands：using_lists_package_resource_count | 1 | 是 |
+
+  表中的 carry/commands/directory/restore 均指 `agent_py_agent/tests/test_conversation_method_<名称>.py`。
+- **静态门禁（当前实现与目录实际执行，均 rc=0）**：`$PY scripts/check_import_boundaries.py` 为 findings=0；
+  `$PY -m ruff check agent_py_agent scripts` 全过；`$PY scripts/check_doc_sync.py --base 6e8f61564` 为 DOC_SYNC_PASS；
+  `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` 为 266 fields 同步。
+  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
+  strict_scope_total=2190/hard=0/high-risk=1494/soft=696/test_advisory=1239/blocked=False；这是接受既有基线告警，不是全仓零告警。
+  `git diff --check 6e8f61564` 无输出；`$PY scripts/check_clean_package.py .` 无发布阻塞项。
+  新实现/测试六文件先纳入 Git 后 clean-package 才通过；之前未跟踪导致的失败不冒充通过。
+  code-size 与 size_diff 后均从 HEAD 还原 CODE_SIZE_REPORT.md，不提交生成报告。
+- **size_diff 全部输出**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`，对线上 step17w 的告警身份比对，rc=0：
+
+  ```text
+  新增告警: 0
+  消失告警: 0
+  ```
+
+- **基线清理**：复核前临时基线树是 detached HEAD 6e8f61564；复核完成后 status 干净，已用 `git worktree remove` 删除该临时树，原始检查日志/XML 保留。
+- **检查证据**：`/private/tmp/claude-501/w1-step2-checks/` 中的 `final-focused.xml`、15 批 `related-*.log/xml`、`baseline.log/xml`、
+  `baseline-comparison.json` 与变异表均为本次实际执行产物；临时夹具不是生产数据，原始失败不改写成通过。
+- **未做/未验证**：真实模型采用与缓存/业务质量、实际 TUI/飞书、生产 Gateway、Linux 三版本/全量、远端 PR/main CI 与部署。
+  本线不 push、不安装依赖、不运行 my-agent、不启停 Gateway，不改她已做好的包；第 3/4 步不在本次 w1 开发范围。
+
+## w1 第 1 步：能力开关改完立即生效（2026-10-07，本地已实现、待 3a 复核）
+
+- **来源与做法**：3a 的 w1-step1 任务，基线 `6e8f61564`，代码提交 `073e64237`。选包开关原先吃 agent 缓存，管理员 `/settings` 保存后仍提示重启。
+  `self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS` 统一两个自动装和选包三个键；主/子判断现读，读不到按 dataclass 默认，
+  其它预算仍是原缓存实例。两个自动装的回执、命令和 unreadable 版本标记不变。参数中心、前端目录都消费后端事实。
+- **新增合同**：放在现有 `test_capability_selection_scope.py`，覆盖三键立即生效/名单外预算重启、同 agent 关→开与开→关、
+  坏文件/非法布尔/不可读时不吃缓存 true、子入口双方向现读，以及真实管理员设置服务的回执→原 agent 下一次 scope。
+  `test_backend_config_catalog.py` 改成逐字段比后端 effect，不另抄名单。修复前 10 个断言失败（pytest rc=1，无收集错误）。
+- **固定跑法**：所有命令先在本工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，pytest 统一前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest`，后缀
+  `-q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w1 -o addopts=''`。
+  `-o addopts=''` 只保留清楚的实跑统计，不改变断言或选择范围。
+- **直接回归**：`test_capability_selection_scope.py test_self_install_switches.py test_backend_config_catalog.py
+  test_frontend_settings_labels.py test_subagent_package_entries.py`（均在 `agent_py_agent/tests/`）：94 passed，rc=0。
+  `node frontend/scripts/sync-backend-config.mjs` 已生成目录（265 个字段）。
+- **引用方 + guards9 联合**：文件列表用 `rg -l '(from|import).*?(package_selection_scope|subagent_package_entries|parameter_registry)'
+  agent_py_agent/tests`，再加任务指定 guards9 清单全部文件。实跑 **618 passed / 9 skipped / 3 failed，rc=1**。
+  失败全部在 `test_plugin_sandbox_v8.py`：`test_macos_v8_narrows_read_and_enforces_network[True]`、
+  `test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home`。
+  三项均实际调用 sandbox-exec，退出 71，明确回 `sandbox_apply: Operation not permitted`；没有把无响应猜成隔离。
+- **真正基线复核**：按共同规则用 `git worktree add --detach <临时工作树> 6e8f61564`，仅在临时工作树根、同一 Python/
+  PYTHONPATH 口径重跑上述三个完整 node id（临时目录 `--basetemp` 独立）。结果 **3 failed，rc=1**，三处均同样的退出 71/权限拒绝。
+  临时工作树已用 `git worktree remove` 删除。因此三项是同环境基线也失败；不修改、删除或 skip 原测试，沙箱外真机复核仍未验证。
+- **变异（一次一处，每次跑完立即原样还原，只认 pytest rc=1）**：
+
+  | 变异点 | 文件与用例选择 | 结果 | 是否抓到 |
+  | --- | --- | --- | --- |
+  | `package_selection_scope` 开关改回 `config.enable_capability_package_selection` 缓存读 | `test_capability_selection_scope.py -k selection_scope_reads_switch_fresh_without_refreshing_cached_budgets` | 2 failed / 35 deselected；rc=1 | 是，双方向断言失败 |
+  | `CAPABILITY_FRESH_SWITCH_KEYS` 去掉选包键，只剩两个自动装键 | `test_capability_selection_scope.py -k fresh_switch_registry_reports_immediate_but_budgets_still_require_restart` | 1 failed / 2 passed / 34 deselected；rc=1 | 是，选包时机变成 restart_gateway |
+
+- **收尾门禁（实际执行）**：恢复后五个直接文件再跑仍 **94 passed，rc=0**；引用方 + 全部 guards9 再跑仍
+  **618 passed / 9 skipped / 3 failed，rc=1**，三个失败与上文相同，不登记联合全绿。测试只把两处长 import 拆成多行以修 I001，
+  没有改断言、选择范围或产品行为；修复后的 `$PY -m ruff check agent_py_agent scripts` 为 `All checks passed!`，rc=0。
+  `$PY scripts/check_import_boundaries.py` 为 `IMPORT_BOUNDARIES findings=0`，rc=0；`$PY scripts/check_doc_sync.py` 为 `DOC_SYNC_PASS`，rc=0。
+  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
+  `strict_scope_total=2190 hard=0 high-risk=1494 soft=696 test_advisory=1239 blocked=False`，rc=0；这是接受基线告警，不是全仓零告警。
+  `git diff --check 6e8f61564` 无输出、rc=0；`$PY scripts/check_clean_package.py .` 为 `OK: . 未发现发布阻塞项`，rc=0。
+  code-size 与 size_diff 后均已还原生成的 `CODE_SIZE_REPORT.md`，不提交报告。
+  `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` 已执行，`Config catalog is in sync (265 fields).`，rc=0；
+  最后仍用该命令、`$PY scripts/check_doc_sync.py --base 6e8f61564` 与区间 `git diff --check` 复核冻结交付，最终结果见交接报告。
+- **size_diff 全部输出**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`，rc=0，对线上 step17w 告警身份比对：
+
+  ```text
+  新增告警: 0
+  消失告警: 0
+  ```
+- **未做/未验证**：第 2 步的配置和会话沿用没有实现；真实 Gateway/TUI/飞书、真模型、生产热切换、Linux 多版本/全量与线上 CI 未验证。
+  不启停 Gateway、不运行 my-agent、不推远端，不安装依赖。
+
 ## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
 
 - **来由**：main 的 GitHub Actions 红了一周——Test（ubuntu，3.10/3.11/3.12 快速套件，单用例 60 秒）从 10-01 起、Cross-platform guard（macOS/Windows）从 10-05 起、每晚 Full Tests 都失败；本地 Mac、Docker（root、Python 在 /usr）都没暴露。

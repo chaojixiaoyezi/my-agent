@@ -73,6 +73,12 @@
 |-- agent_py_agent/agent/capability/pack_verification_hooks.py # 宿主核验接进工具执行缝隙和收尾通道的钩子（不新增模型工具）
 |-- agent_py_agent/agent/capability/pack_verification_scope.py # 宿主核验生效范围：开关、owner、钉住的带检查程序的包、基线模式
 |-- agent_py_agent/agent/capability/self_install_switches.py # learnpack 两个“自动装”开关（能力包、插件）的唯一读取入口：按文件现读、读不到按关，给回执用的开关事实与命令原文
+|-- agent_py_agent/agent/capability/method_carry.py # 主会话成功 get 的隐藏登记、逐 run 冻结目录和压缩后入口/资料清单带回；不存第二份正文、不扩权
+|-- agent_py_agent/tests/test_conversation_method_carry.py # 原线程锁内成功读取登记、主会话边界、容量、隐藏字段和立即生效开关
+|-- agent_py_agent/tests/test_conversation_method_directory.py # 首次使用显示顺序、required 必显、逐 run 冻结及关闭/失效的旧提示字节
+|-- agent_py_agent/tests/test_conversation_method_restore.py # 压缩代次、完整投递预算、当前版本资料参数、取消/失败不消费资格
+|-- agent_py_agent/tests/test_conversation_method_commands.py # using/remove 的认证线程范围、TUI 文本往返和 Gateway 共用入口
+|-- agent_py_agent/tests/test_conversation_method_gateway.py # 三轮真实 get 与原 Compact 检查点提交、第二轮带回及同代不重复（仅模型传输替身）
 |-- agent_py_agent/agent/capability/package_build.py # 能力包（v7）与文件型插件包（v6/v8）唯一的打包实现：清单、摘要、成员顺序与权限位、复验；两个打包脚本只是薄壳
 |-- agent_py_agent/agent/capability/learnpack_store.py # learnpack 宿主存储 <owner home>/data/learnpack/：她打的包（内容寻址、读回验摘要）、待确认安装单（只执行一次）、安装记录、她装过的包名
 |-- agent_py_agent/agent/capability/learnpack_build_notes.py # learnpack 打包回执的版本事实与软提醒：现在装着哪一版、她做过哪些版本，同号重用、版本倒退、比上一版少了文件（不挡打包）

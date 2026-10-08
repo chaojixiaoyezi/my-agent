@@ -21,9 +21,9 @@
 - 关键词提醒：用户原话里整词出现包名或关键词时，多一段"本轮能力包候选"（`render_package_recommendations`）。
 - 开工前选包（`enable_capability_package_selection`，默认关，生产也关）：新任务第一次业务请求前，用主模型单独问一次
   （输入不超过 3000 token，只看用户这一句，不看历史），选中后宿主读入口（不超过 3000 token）放进本轮。
-  同一件活不重复，但普通聊天基本每条新消息都算一件新活；纯问答也会留一条任务记录。改这个开关要重启 Gateway：
-  能力配置读一次就缓存在 agent 上，只有两个"自动装"开关是每次现读的（`capability/self_install_switches.py`）。
-  它有管理员 `/settings` 入口，参数中心如实提示"重启后生效"。
+  同一件活不重复，但普通聊天基本每条新消息都算一件新活；纯问答也会留一条任务记录。第 1 步落地前改这个开关要重启 Gateway：
+  能力配置读一次就缓存在 agent 上，当时只有两个"自动装"开关每次现读。w1 本地实现已把选包开关接到同一现读入口，
+  管理员 `/settings` 如实提示"马上生效"，预算仍保持缓存；待 3a 复核和部署，不代表生产已切换（落点见第 3 节）。
 - 压缩：会话压缩不保留读过的 skill／包正文，压缩后只剩摘要里提一句。
 - 实测：
   - 原版两遍都没调用自己的短剧技能。
@@ -51,12 +51,12 @@
 
 ## 3. 第 1 步：开关改完立刻生效
 
-- **现在**：管理员发 `/settings set enable_capability_package_selection true`，参数中心提示"重启 Gateway 才生效"，
+- **原问题**：管理员发 `/settings set enable_capability_package_selection true`，参数中心提示"重启 Gateway 才生效"，
   当前进程照旧按关跑。
 - **改后**：改完下一条消息就按新值跑，参数中心如实报"马上生效"。
 - **怎么改**：
-  - 把两个"自动装"开关用的"每次按文件现读"做法，扩到一份名单：两个自动装开关、选包开关、第 2 步新开关
-    `conversation_method_carry_enabled`。读不到或文件坏按默认值，不报错。
+  - 把两个"自动装"开关用的"每次按文件现读"做法，扩到一份名单：两个自动装开关、选包开关。读不到或文件坏按默认值，不报错。
+    第 2 步才新增 `conversation_method_carry_enabled` 并把它加到名单，本步不提前加配置或名单成员。
   - 读选包开关的两处改走现读：`capability/package_selection_scope.py` 和 `capability/subagent_package_entries.py`。
   - 参数中心按这份名单报生效时机（`settings/parameter_registry.py`）。
   - `capability_config.yaml` 头部"改完重启 Gateway 最稳妥"那句改成写明哪几个键马上生效。
@@ -64,6 +64,21 @@
   - 5 个合同用例：参数中心报"马上生效"；不重建 agent 改文件，关→开、开→关都在下一次请求生效；坏文件按关；
     子代理入口同样现读。
   - 2 个变异（改回缓存读）必须被抓到。
+
+- **实际落点（w1，2026-10-07，本地已实现、待 3a 复核）**：
+  - `agent_py_agent/agent/capability/self_install_switches.py` 的 `CAPABILITY_FRESH_SWITCH_KEYS` 是马上生效开关的唯一名单，
+    保留 `SELF_INSTALL_SWITCH_KEYS` 的两键回执合同。`_read_fresh_capability_snapshot` 共用原文件优先级和正式加载器，
+    `read_fresh_capability_switch` 在读不到时按 `CapabilityConfig` 对应键默认值处理，不读写 agent 缓存。
+  - `package_selection_scope.package_selection_scope` 只把是否开关改为现读；`PackageSelectionScope.config` 及预算仍取
+    `runtime_config_reload.capability_config_for_agent` 的原缓存实例，没有改它的缓存语义。
+    `subagent_package_entries.subagent_entries_enabled` 共用现读入口；已有线程、授权、pin 和首请求资格保持原样。
+  - `settings/parameter_registry._capability_specs` 按唯一名单给出 `EFFECT_IMMEDIATE`；其它能力参数仍为 `EFFECT_GATEWAY_RESTART`。
+    YAML 头部列出三个立即生效键；`frontend/scripts/sync-backend-config.mjs::backendRestartRequirements` 通过 Python
+    直接读后端 `parameter_registry()` 的 effect 生成 `restartRequired`，没有在 JS 或目录守卫里重抄名单。
+    生成器默认 python3（Windows 为 python），项目解释器可经 `PYTHON` 指定，失败即中止，不猜时机。
+  - 五类合同及管理员 `/settings` 保存→原 agent 下一次主/子开关判断，记录在 `test_capability_selection_scope.py`；
+    `test_backend_config_catalog.py` 逐字段对后端 effect。测试、基线失败复核和两处有效变异见 `TESTS.md` 的 w1 第 1 步节。
+  - 会话沿用、真模型、实际 TUI/飞书、Linux 通道与生产部署不在本步本地验收内，均未验证。
 
 ## 4. 第 2 步：会话沿用
 
@@ -120,6 +135,30 @@
     - 开关关掉时提示字节不变 1 个；旧线程记录没有这一栏也能正常读 1 个。
   - 1 个假模型端到端：Gateway 第 1 轮读包，`/compact` 后第 2 轮上下文里有带回的入口，目录里有"在用"标注。
   - 约 10 个变异，只有 pytest 退出码为 1 才算抓到。
+
+### 第 2 步实际落点（w1，2026-10-08，本地实现，待 3a 复核）
+
+- 功能/测试提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`；242 项无变异最终复验、十处有效变异和基线失败边界见 TESTS 首节。
+- 唯一负责模块 `capability/method_carry.py`：`record_method_read` 在主会话成功 get 后经原 `threads.update_atomic` 合并隐藏账本；
+  包记录当前版本、读代次和最近 8 份非入口资料路径，Skill 仅保存身份/时间/代次；最多 5 个方法，按最近使用淘汰。
+  `conversation/models.ConversationThread.conversation_methods` 空时不输出 JSON 键，加入 `MODEL_HIDDEN_THREAD_FIELDS`；原摘要和 fingerprint 不参与更新。
+  `store_threads` 锁内扩展字段合并以 dataclass 显式字段为权威，避免移除最后一项后旧 extra_fields 复活登记，锁/CAS 不变。
+- 缓存两条分别保证：`first_used_at` 重读不刷新，`prompt_method_ids` 只按首次使用排序且不展示时间；
+  `runtime_mixin.current_prompt_scope` 调 `freeze_conversation_methods`，名单落本 run 参数，不挂线程全局缓存；
+  `_runtime_params` / `loop_support` / `loop_models` 透传冻结值，builder 及纯请求投影只读此值，中途 get 只改下一个 run 的账本。
+  无合格线程的通用 prompt scope 不写新增字段，保留原嵌套/并发失败恢复；原用例已参与最终复验。
+- `router.render_skill_metadata_index` / `_render_package_metadata` 统一调用 `using_method_cards` 标注并复用 required 必显；
+  在用包规则只在当前授权目录确实含在用包时追加。无在用项或关闭路径锁定旧目录字节；停用/删除/旧 pin 失效不补造卡片。
+- `_tool_loop_service.next_tool_loop_model_response` 在选包准备后、首业务 build/capture 前调用 `prepare_conversation_method_carry`。
+  `package_selection_scope.package_read_scope` 抽出原“工具与快照可用”检查，带回不依赖选包开关；`MethodCarryAuthority` 核取消、原 run/attempt 执行权。
+  包入口沿 `prepare_package_entry_context` / 原 ActionPolicy / reader / task pins，资料只列当前清单存在的路径与完整 `next_read`；Skill 按完整文本预算截正文开头。
+- 预算取原缓存 `capability_bundle_max_tokens`，公共头、JSON 转义、资料参数和分隔符全部计入；包先 Skill 后、同类最近使用优先。
+  `_commit_method_carry` 在原线程锁内复核同代和登记实例，实际 `record_runtime_facts_turn_ir(source="conversation_method_carry")` 成功才推进代次。
+  同代成功只投递一次；同 run 失败不热重试，失败不消费持久代次，下一合法 run 可再试；取消沿原异常传播。
+- `/skills using` / `remove` 的解析、命令目录与 `skill_control_service._execute_using_control` 共用 TUI/IM 控制入口，按认证 scope 的通道绑定找线程；
+  不采用 metadata 自称线程、不构造 Agent、不改安装/授权/pins。开关为唯一现读名单第四项，管理员边界、YAML/dataclass、前端目录同源。
+- 三轮假模型 Gateway 联验使用真实 get、原 `write_compact_checkpoint` 和同 Store 的 Compact/CAS 提交；第 2 轮有入口、资料重读参数和目录标注，第 3 轮同代不重复。
+  只替换模型传输，不代表真实客户端、MiniMax 采用或生产验收。测试、变异、门禁及失败基线对照详见 TESTS.md 第 2 步节。
 
 ## 5. 第 3 步：第一次挑中（三组对比，按数据定）
 

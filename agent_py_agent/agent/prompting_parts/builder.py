@@ -57,6 +57,7 @@ class ToolSections:
     native_tool_use: bool = False
     selected_skill_ids: tuple[str, ...] | None = None
     required_skill_ids: tuple[str, ...] = ()
+    in_use_method_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -531,7 +532,7 @@ def _self_development_guide(builder: PromptBuilder) -> str:
 
 
 # LLM: Skill 展示选择通过当前 request 传递；不影响 prompt 文件、owner 上下文和隔离范围。
-# 函数用途: 组织原稳定内容，选择模式下只在这里留下固定发现说明。
+# 函数用途: 组织原稳定内容，结构化在用名单随名卡传递，选择模式保留固定发现说明。
 def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
     selected = request.tools.selected_skill_ids if request.tools else None
     if str(request.context_scope or "").strip().lower() == "isolated":
@@ -539,18 +540,20 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, is
     chunks = [
         *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
         *([] if isolated else builder.read_home_context(request.user_prompt)),
-        *([] if isolated else _skill_context_chunks(builder, request.user_prompt, selected_skill_ids=selected)),
+        *([] if isolated else _skill_context_chunks(builder, request.user_prompt, selected_skill_ids=selected,
+                                                   in_use_method_ids=request.tools.in_use_method_ids if request.tools else ())),
     ]
     return "\n".join(chunks)
 
 
 # LLM: 对齐 会话运行时 core-skills：主 run 在 2% context 预算内暴露当前逐轮
 #   Skill snapshot 的 name+description+stable id，正文仍须模型显式 skill_search
-#   get 后才进入上下文。这里不按用户自然语言自动选择/执行 Skill，也不赋权。
+#   get 后才进入上下文。在用名单已逐 run 冻结，不在这里读取线程或按自然语言推断。
 # 函数用途: 让模型看见每本可用 Skill 的短卡，匹配后再按 stable id 读取正文；
 #   选择模式只输出固定发现说明，选中名卡另进动态推荐段；没有合适技能时继续走普通任务。
 def _skill_context_chunks(
     builder: PromptBuilder, user_prompt: str, *, selected_skill_ids: tuple[str, ...] | None = None,
+    in_use_method_ids: tuple[str, ...] = (),
 ) -> list[str]:
     del user_prompt
     router = getattr(builder, "capability_router", None)
@@ -562,6 +565,7 @@ def _skill_context_chunks(
         config = getattr(builder, "config", None)
         index = router.render_skill_metadata_index(
             context_window_tokens=_skill_index_window(config),
+            in_use_method_ids=in_use_method_ids,
         )
         return [index] if index else []
     except Exception:
@@ -575,7 +579,7 @@ def _skill_index_window(config: object) -> int:
 
 
 # LLM: 名卡与原 scoped Router 相交；task_local 仅接受显式投影，isolated/control_plane 不新增，None 保持旧行为。
-# 函数用途: 为当前 build 生成动态 Skill 名卡，复用原预算，并保留宿主明确的必要引用。
+# 函数用途: 为当前 build 生成动态 Skill 名卡，复用必要引用与冻结在用名单，不扩权或重读线程。
 def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
     tools = request.tools
     router = getattr(builder, "capability_router", None)
@@ -589,6 +593,7 @@ def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest,
             context_window_tokens=_skill_index_window(builder.config),
             selected_skill_ids=tools.selected_skill_ids,
             required_skill_ids=tools.required_skill_ids,
+            in_use_method_ids=tools.in_use_method_ids,
         )
     except Exception:
         return ""

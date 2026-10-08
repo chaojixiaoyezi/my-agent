@@ -3,7 +3,8 @@
 #   skill_learning_report（与 CLI 同一事实推导与闸门）；列提案时调用自学习审核顺序点 skill_proposal_review_order（与 CLI
 #   同一入口）。不构造 Agent、不暴露给模型；回执不含本机绝对路径。改动须同步 control_commands._skills_command、
 #   command_catalog 的 skills 条目、TUI control_runtime 的文本还原与本地拒绝，以及 test_skill_chat_control.py。
-# 模块用途: 让用户在 TUI 和 IM 里查看、确认、拒绝技能提案，查看、回滚、删除自动总结的 Skill。
+#   using 仅通过 owner_conversation_store 和 method_carry 操作当前线程隐藏登记，不加载正文或冷 Agent。
+# 模块用途: 在 TUI 和 IM 管理技能提案、自动总结 Skill 和本会话方法沿用。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -51,7 +52,7 @@ _FAILURE_HINTS = {
     CODE_TARGET_EXISTS: "同名 Skill 已经存在，这条提案不能安装；可以用 /skills reject 拒绝它。",
 }
 # 会改提案或 Skill 的子命令：改动可能在异常前已经生效（例如删除后追加账本失败），回执不能承诺“没有改动”。
-_WRITE_OPERATIONS = frozenset({"confirm", "reject", "learned_revert", "learned_remove"})
+_WRITE_OPERATIONS = frozenset({"confirm", "reject", "learned_revert", "learned_remove", "using_remove"})
 _READ_FAILURE = "技能提案或自动 Skill 暂时读不到，请稍后重试。"
 _WRITE_UNCONFIRMED = "这次操作的结果没能完整确认，可能已经生效；请先发 /skills 或 /skills learned 查看当前状态，再决定是否重试。"
 
@@ -62,6 +63,7 @@ _WRITE_UNCONFIRMED = "这次操作的结果没能完整确认，可能已经生�
 class SkillControlHost:
     home_paths: object
     config: object
+    capability_config_path: str = ""
 
 
 # LLM: 只表示可预期的用户输入问题（编号找不到或不唯一），消息直接给用户看，不含路径。
@@ -72,12 +74,14 @@ class SkillControlError(Exception):
 
 # LLM: Gateway 控制分派入口；可预期失败保留原结构化失败回执。其它异常不泄露路径或堆栈，按子命令是否写入
 #   选回执：只读子命令回“暂时读不到”；写子命令可能在改动生效后才失败（如 append_event 抛 OSError），只说结果没能完整确认、
-#   请先查当前状态，不承诺“没有改动”或直接重试。改动须同步 test_skill_chat_control.py 的提交后失败测试。
+#   请先查当前状态，不承诺“没有改动”或直接重试。using 按当前认证范围裁决原线程，联测 conversation_method_commands。
 # 函数用途: 执行一条已解析的 /skills 控制并返回给用户的中文回执（确认、拒绝、回滚、删除会写文件）。
 def execute_skill_control(base_agent: object, command: ConversationControlCommand, scope: object) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(_KIND, False, command.usage)
     try:
+        if command.operation in {"using", "using_remove"}:
+            return _execute_using_control(base_agent, command, scope)
         text = run_skill_control(_scoped_host(base_agent, scope), command)
     except SkillControlError as exc:
         return ConversationControlResult(_KIND, False, str(exc))
@@ -91,12 +95,42 @@ def execute_skill_control(base_agent: object, command: ConversationControlComman
     return ConversationControlResult(_KIND, True, text)
 
 
+# LLM: owner 裁决与 learned 同源，线程只取认证 scope 的通道绑定，忽略 metadata 里自称的线程；关掉开关不写账。
+# 函数用途: 查看或移除当前 TUI/IM 会话的在用方法，不构造 Agent 或创建新线程。
+def _execute_using_control(base_agent, command, scope) -> ConversationControlResult:
+    from ..capability.method_carry import remove_conversation_method, render_conversation_methods
+    from ..capability.self_install_switches import read_fresh_capability_switch
+    from .owner_conversation_store import owner_conversation_store
+
+    host = _scoped_host(base_agent, scope)
+    if not read_fresh_capability_switch(host, "conversation_method_carry_enabled"):
+        return ConversationControlResult(_KIND, True, "会话沿用已关闭")
+    store = owner_conversation_store(base_agent, host.home_paths, initialize=False)
+    thread = store.threads.resolve(channel=scope.channel, channel_conversation_id=scope.conversation_id,
+                                   channel_user_id=scope.user_id)
+    thread_id = thread.thread_id if thread else ""
+    if command.operation == "using":
+        return ConversationControlResult(_KIND, True, render_conversation_methods(store, thread_id))
+    removed = remove_conversation_method(store, thread_id, command.value.split(" ", 2)[2])
+    return ConversationControlResult(_KIND, removed, "已从本会话移除该方法。" if removed else
+                                     "本会话没有唯一匹配的方法；请用 /skills using 列出的完整编号移除。")
+
+
 # LLM: 与 /model 文字控制同一 owner 解析（resolve_gateway_scope_owner → owner 路径投影）；只读，不创建目录。
+#   现读开关沿当前 owner 的原配置位置；不能以服务 cwd 或基础 owner 的路径替代其它用户配置。
 # 函数用途: 按控制范围找到当前用户的 owner 路径与配置。
 def _scoped_host(base_agent: object, scope: object) -> SkillControlHost:
+    from ..capability.runtime_config_reload import (
+        capability_config_path_for,
+        default_capability_config_path,
+    )
+
     owner = resolve_gateway_scope_owner(base_agent, scope)
     base_home = base_agent.home_paths
-    return SkillControlHost(home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner)), base_agent.config)
+    home = home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner))
+    same_owner = all(getattr(base_home, key) == getattr(home, key) for key in ("owner_provider", "owner_kind", "owner_id"))
+    path = capability_config_path_for(base_agent) if same_owner else default_capability_config_path(home.owner_home_dir)
+    return SkillControlHost(home, base_agent.config, str(path))
 
 
 # LLM: 按解析器给出的 operation 分派；tokens 是解析器规范化后的参数（含子命令本身）；help 与未知子命令回用法。

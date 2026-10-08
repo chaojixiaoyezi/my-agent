@@ -15,7 +15,7 @@ from ..settings.config import load_simple_yaml
 # LLM: 子代理权限、运行投影、包候选展示和阶段提醒的唯一默认配置；新增字段同步随包 YAML 与配置一致性测试。
 # 模块用途: 集中读取协作能力设置；包候选只影响上下文，阶段提醒不作为执行超时或权限授予。
 
-# LLM: 包准备默认关闭；主任务一次选择，合格新 child 仅加载已授权同代入口，不再选择；原首请求状态和预算不授予权限。
+# LLM: 包准备默认关闭；主会话方法沿用默认开，但不授予权限或增加模型调用；预算和 YAML 须保持同源。
 # 类用途: 定义子代理能力和包上下文设置；推荐只展示摘要，选包会消耗模型用量并记录原任务，数值配额为零仍受模型窗口限制。
 @dataclass
 class CapabilityConfig:
@@ -45,6 +45,8 @@ class CapabilityConfig:
     session_pair_hourly_limit: int = 60
     enable_capability_package_recommendations: bool = True
     enable_capability_package_selection: bool = False
+    # 会话方法沿用只记主会话成功读取，压缩后按原授权带回入口及资料清单；用户开关现读。
+    conversation_method_carry_enabled: bool = True
     capability_package_selection_max_input_tokens: int = 3000
     capability_candidate_limit: int = 5
     capability_bundle_max_tokens: int = 3000

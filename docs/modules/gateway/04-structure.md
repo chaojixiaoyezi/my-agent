@@ -1,5 +1,12 @@
 # Gateway Structure
 
+## 会话方法沿用命令（w1 第 2 步，2026-10-08）
+
+- `conversation/control_commands._skills_using_command` 与 `command_catalog` 共同声明 `/skills using` / `remove`，保留名字大小写；TUI 沿原 `_command_text` 往返，IM 同一控制入口。
+- `gateway_parts/skill_control_service._execute_using_control`：同 learned 的 owner 裁决和配置位置，通过 `owner_conversation_store` 查 scope 的原线程绑定；不从文本或 metadata 猜线程，不读取方法正文。
+- `capability/method_carry.render_conversation_methods` / `remove_conversation_method` 是唯一账本读写处，删除在原 `threads.update_atomic` 锁内精确匹配名字或 stable_id；重名拒绝，授权/安装/pins 不变。
+- 开关 `conversation_method_carry_enabled` 由管理员设置、现读；关闭时两条命令只回关闭提示。联测 `test_conversation_method_commands.py`，真实渠道待部署复核。
+
 ## 能力包命令 /plugins#（learnpack 第 4 步，2026-10-06，3a）
 
 - `gateway_parts/plugin_command_service._action_name`：拒绝日志的子命令名，能力包入口（`plugin_namespace(...).kind == "pack"`）记 `pack`，插件业务调用仍记 `plugin_call`；只看结构化命名空间，不回显原文。

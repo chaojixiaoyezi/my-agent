@@ -147,6 +147,10 @@ auto_promote_to_parent_memory。旧记录里残留的三个键没有任何读取
 
 能力包子入口（2026-09-27，本地已实现，组合验收中）：新建child可复用原首请求marker准备已显式授权且同代pin的包入口，
 入口沿原RuntimeFacts进入业务请求，不新增辅助选包模型。旧无marker线程不回填，关闭配置不加载，方法仍按需读取。
+2026-10-07 w1 第 1 步（本地实现，待 3a 复核）：`subagent_entries_enabled` 改走
+`self_install_switches.read_fresh_capability_switch`，与主选包共用现读名单；坏文件按默认关，预算仍取原缓存。
+原显式授权、同代 pin、线程和首请求 marker 不变，不增加辅助模型调用。直接 94 项回归含子入口测试通过；
+引用方与 guards9 的三项 sandbox-exec 权限失败及真正基线复核见 TESTS 首节，真实子线程/模型/TUI/飞书未验证。
 2026-10-05 selfix3（本地实现，待3a终审）：共享入口扣公共头后均分，逐包紧凑编码完整页及一个逗号并独立计费，最终可见页按 package_id 排列；
 余数、未投递包份额不转借，零份额仍沿原 reader 验证读取。准入/有效页/固定三分法和 child 原 canonical 授权/pins 保持，
 entry_status 仅诊断，不能代替权限、固定或采用事实；主/子目前只消费 text/warnings。精确两/三包回归和变异见 TESTS 顶部 selfix3，
