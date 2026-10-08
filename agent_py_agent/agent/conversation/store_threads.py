@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +107,25 @@ def _get_or_create_bound_thread(store, request: dict) -> ConversationThread:
     return store._create(request)
 
 
-# LLM: 原线程元数据与通道绑定唯一存储；同一文件锁内守住身份、Compact CAS 和模型选择单调版本，不建立第二选择账。
+# LLM: 原文件事务内校验身份与选择版本；omit_empty 的已知字段清空时移除旧键，未知扩展仍保持原样。
+#   由 ThreadStore.update_atomic 在原锁内调用；不读写独立状态，不让扩展合并复活已移除的会话方法。联测 store/commands。
+# 函数用途: 校验并合并一份线程更新，保留模型选择的单调性，尊重可选字段的清空。
+def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> dict:
+    thread = ConversationThread.from_dict(payload)
+    if not thread.thread_id:
+        raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
+    if thread.thread_id != thread_id:
+        raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
+    updated = updater(thread)
+    if updated.thread_id != thread_id:
+        raise DataCorruptionError(f"conversation thread updater changed identity: {thread_id}")
+    _validate_model_selection_update(thread, updated)
+    serialized = updated.to_dict()
+    omitted = {item.name for item in fields(updated) if item.metadata.get("omit_empty") and item.name not in serialized}
+    return {**{key: value for key, value in payload.items() if key not in omitted}, **serialized}
+
+
+# LLM: 原线程元数据与通道绑定唯一存储；身份校验与扩展合并在类外小函数，仍在同一文件锁内守住 CAS，不建立第二状态源。
 # 类用途: 保存线程和通道绑定，防止迟到更新回退模型选择；默认模型只初始化新线程。
 class ThreadStore:
     # LLM: 同一 ConversationStorage 与默认解析器由组装入口注入；构造不读写线程或通道索引。
@@ -409,7 +427,7 @@ class ThreadStore:
     def write(self, thread: ConversationThread) -> None:
         write_json_file_atomic(self.storage.thread_path(thread.thread_id), thread.to_dict())
 
-    # LLM: Compact/设置/模型选择写回共用原文件锁；拒绝选择回退、跳号或漏记，保留未知扩展，不能在 updater 中联网。
+    # LLM: Compact/设置/模型选择写回共用原文件锁；_apply_thread_update 校验身份与扩展字段，不在 updater 中联网。
     # 函数用途: 在原锁内保存线程和单调选择事实，避免覆盖并发状态；不因此授予模型自动采用能力。
     def update_atomic(
         self,
@@ -418,23 +436,7 @@ class ThreadStore:
     ) -> ConversationThread:
         path = self.storage.thread_path(thread_id)
 
-        # LLM: 原文件事务内校验身份与选择版本；更新失败不序列化，不让旧 updater 抹掉新显式选择或 pending 终态。
-        # 函数用途: 合并同一线程的合法更新，保留旧扩展字段与模型选择的单调性。
-        def apply(payload: dict) -> dict:
-            thread = ConversationThread.from_dict(payload)
-            if not thread.thread_id:
-                raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
-            if thread.thread_id != thread_id:
-                raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
-            updated = updater(thread)
-            if updated.thread_id != thread_id:
-                raise DataCorruptionError(
-                    f"conversation thread updater changed identity: {thread_id}"
-                )
-            _validate_model_selection_update(thread, updated)
-            return {**payload, **updated.to_dict()}
-
-        payload = update_json_file_atomic(path, apply, require_existing=True)
+        payload = update_json_file_atomic(path, lambda value: _apply_thread_update(value, thread_id, updater), require_existing=True)
         return ConversationThread.from_dict(payload)
 
     # LLM: store_threads 的持久化合同：读回通道到线程索引，损坏时返回错误，禁止静默创建替代绑定；修改须同步本领域调用方与存储回归。

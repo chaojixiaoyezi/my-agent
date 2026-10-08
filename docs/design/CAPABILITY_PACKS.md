@@ -210,10 +210,32 @@ outcome=failed 且是辅助调用抛异常时，标记另带 `failure`：只含�
 `package_selection_runtime`只在真实主业务首轮、完整build/capture前协调一次；`package_selection_authority`复用原准入与执行权；
 `package_selection_context`控制入口总预算，正文读取和原`skill_search get`共用`package_read`。
 新开关`enable_capability_package_selection=false`；输入预算`capability_package_selection_max_input_tokens=3000`，
-候选数复用`capability_candidate_limit=5`；入口总预算首次真正消费`capability_bundle_max_tokens=3000`，不把此前未消费的字段描述成已生效。
+候选只受选择输入预算与预留输出后的模型窗口限制，不再复用推荐上限`capability_candidate_limit=5`；该项只控制“本轮能力包候选”推荐段。
+入口总预算仍为`capability_bundle_max_tokens=3000`，不改选中后的读取、pin、权限或子代理首入口合同。
 数字配额0只移除独立限制，仍预留原模型输出并受上下文窗口限制。输入不截掉用户需求，候选只整条省略；入口分页不改原资源摘要。
 实际配置文件、缓存生效及新任务验证步骤见[迁移手册6.1](CAPABILITY_MIGRATION.md#61-可选的一次选包与入口准备)；安装启用包不会自动开启此开关，新开TUI也不保证重载宿主配置。
 配置缓存只接受原`CapabilityConfig`实例；无效占位对象继续原文件读取路径，文件不可读仍返回既有空结果，不凭对象真值开启包准备。没有新增配置源或热加载协议。
+
+### 首次选包测量与候选修复（2026-10-07，w2；本地修复，待集成/真模型复跑）
+
+下表来源为 **3a 提供的 `w2-selection-fix.md` 任务书**（MiniMax、10 包、39 句×3 遍）；
+w2 未读取正式原始 JSONL，也未自行调用真实模型。这是修复前对照，不是修复后召回验收。
+
+| 组 | 首步对口 | 无关题乱开包 |
+| --- | --- | --- |
+| A，自己看目录挑 | 44/75（58.7%） | 0/42 |
+| B，采用文案加硬 | 43/75（57.3%） | 0/42 |
+| C，默认候选上限 5 | 程序选中 45/75（60%） | 0/42 |
+| C0，原版候选上限设为 0 | 程序选中 74/75（98.7%，唯一漏项为调用失败） | 0/42 |
+
+A/B 的主模型 get 意图与 C/C0 的程序选择是不同观察点，不把程序选中当作方法采用或业务质量。
+根因是原 `build_package_selection_material` 按快照顺序放满 5 个即停，后半目录无法进入模型候选。
+现在 `package_selection_runtime._prepare_pending_selection` 不传推荐上限；`package_selection.build_package_selection_material`
+先校验全部引用，预算足够保留全部包与原顺序；不够才复用 `router.from_capability_package` / `score_card` 稳定降序装完整名卡。
+同分保持快照原序，零分不筛掉，超大单卡仍可略过并继续试后面的完整卡；只由原输入预算决定省略，数量和 OMITTED 告警照旧。
+`candidate_digest` 的定义没改：仍绑定实际 prompt、schema 与冻结引用及其顺序；预算紧时排序或候选集合变了，摘要随实际输入改变。
+不更改已有 claimed/finished 标记或重新选择旧任务。默认开关仍关闭，入口和子代理路径未改。
+合同与假模型 C 校准见 [TESTS](../../TESTS.md#开工前选包候选修复2026-10-07w2selfix)；修复后正式 39 句与生产 TUI/飞书、质量验收**未验证**，交 3a 复跑。
 
 宿主读取用原`ActionPolicy`做只读准入：原接口要求的`ToolCall`只作为栈内评估值，
 不dispatch、不进入业务history或工具操作账，也不声称模型调用过工具。ask/deny只给warning，不自动代批。

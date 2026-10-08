@@ -1,13 +1,15 @@
-# LLM: learnpack 两个"自动装"开关的唯一读取入口（能力包、插件各一个），打包/安装回执里的开关事实也只从这里出。
-#   开关只从能力配置文件读，且每次按文件现读（不走 agent 上缓存的快照），所以管理员 /settings 改完马上生效；
-#   读不到或格式坏一律按"关"处理（关着只会多问用户一次，不会多装）。改键名或命令文字要同步
+# LLM: 能力配置现读开关的唯一名单与读取入口；两个自动装回执仍保持原字段、版本标记和命令文字。
+#   名单内开关每次按文件现读，不读写 agent 上缓存的预算快照，所以管理员 /settings 改完马上生效；
+#   读不到或格式坏按 CapabilityConfig 对应键的默认值处理（两个自动装默认关，不会多装）。改键名或命令文字要同步
 #   capability_config.yaml、CapabilityConfig、user_config_capability 的边界登记、parameter_registry 的生效时机和
-#   test_self_install_switches。
-# 模块用途: 回答"她现在能不能自己装能力包/插件"，并给出用户要发的开关命令原文，供回执照抄给用户。
+#   test_self_install_switches、test_capability_selection_scope 与前端参数目录。
+# 模块用途: 统一回答四个马上生效的能力开关当前值，并保持自动装回执原样。
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .config import CapabilityConfig
+from .runtime_config_models import CapabilityConfigSnapshot
 from .runtime_config_reload import (
     capability_config_path_for,
     load_capability_config_snapshot,
@@ -16,8 +18,12 @@ from .runtime_config_reload import (
 
 PACK_SELF_INSTALL_KEY = "capability_pack_self_install_enabled"
 PLUGIN_SELF_INSTALL_KEY = "plugin_self_install_enabled"
-# 用到时现读文件的能力配置键：参数中心按这份名单把生效时机报成"马上生效"，不能报成"重启后生效"。
+# 自动装回执的两键集合；保留原合同，不包含其它现读开关。
 SELF_INSTALL_SWITCH_KEYS = frozenset({PACK_SELF_INSTALL_KEY, PLUGIN_SELF_INSTALL_KEY})
+# 用到时现读文件的能力配置键唯一名单；参数中心和前端目录按这份事实报"马上生效"。
+CAPABILITY_FRESH_SWITCH_KEYS = SELF_INSTALL_SWITCH_KEYS | frozenset({
+    "enable_capability_package_selection", "conversation_method_carry_enabled",
+})
 # 配置文件读不到或解析失败时的版本标记：开关按关处理，回执如实带上这个标记。
 UNREADABLE_CONFIG_VERSION = "unreadable"
 
@@ -32,20 +38,35 @@ class SelfInstallSwitches:
     config_version: str
 
 
-# LLM: 路径解析与 capability_config_for_agent 同一规则（用户位置存在用用户位置，否则随包默认），但不读也不写
-#   agent 上的缓存快照；文件读不到、格式错一律当两个开关都关。只读。
-# 函数用途: 安装、打包回执前调用，现读两个"自动装"开关。
-def read_self_install_switches(agent: object) -> SelfInstallSwitches:
-    path = resolve_capability_config_path(capability_config_path_for(agent))
+# LLM: 现读入口共用原路径优先级和正式加载器；不碰 agent 缓存，读取失败只交回缺失事实，由调用方按默认值处理。
+# 函数用途: 为现读开关和自动装版本回执读取同一份文件快照，不写文件。
+def _read_fresh_capability_snapshot(agent: object) -> CapabilityConfigSnapshot | None:
     try:
-        snapshot = load_capability_config_snapshot(path)
+        path = resolve_capability_config_path(capability_config_path_for(agent))
+        return load_capability_config_snapshot(path)
     except (OSError, TypeError, ValueError):
-        return SelfInstallSwitches(False, False, UNREADABLE_CONFIG_VERSION)
-    config = snapshot.config
+        return None
+
+
+# LLM: 仅允许唯一名单内的布尔开关走现读，不能把预算项伪装成马上生效；坏文件用 dataclass 默认值，不读写缓存。
+# 函数用途: 主选包和子入口共用此入口，下一次判断读取管理员刚保存的开关值。
+def read_fresh_capability_switch(agent: object, key: str) -> bool:
+    if key not in CAPABILITY_FRESH_SWITCH_KEYS:
+        raise ValueError(f"能力配置键不在现读开关名单内: {key}")
+    snapshot = _read_fresh_capability_snapshot(agent)
+    config = snapshot.config if snapshot is not None else CapabilityConfig()
+    return getattr(config, key) is True
+
+
+# LLM: 与通用开关共用同一现读入口；两个自动装默认关，坏文件保留 unreadable 标记，原字段和四条命令不变。
+# 函数用途: 安装、打包回执前调用，现读两个"自动装"开关并保留真实文件版本。
+def read_self_install_switches(agent: object) -> SelfInstallSwitches:
+    snapshot = _read_fresh_capability_snapshot(agent)
+    config = snapshot.config if snapshot is not None else CapabilityConfig()
     return SelfInstallSwitches(
-        capability_pack=getattr(config, PACK_SELF_INSTALL_KEY, False) is True,
-        plugin=getattr(config, PLUGIN_SELF_INSTALL_KEY, False) is True,
-        config_version=snapshot.version,
+        capability_pack=getattr(config, PACK_SELF_INSTALL_KEY) is True,
+        plugin=getattr(config, PLUGIN_SELF_INSTALL_KEY) is True,
+        config_version=snapshot.version if snapshot is not None else UNREADABLE_CONFIG_VERSION,
     )
 
 
@@ -75,11 +96,13 @@ def switch_facts(switches: SelfInstallSwitches) -> dict[str, object]:
 
 
 __all__ = [
+    "CAPABILITY_FRESH_SWITCH_KEYS",
     "PACK_SELF_INSTALL_KEY",
     "PLUGIN_SELF_INSTALL_KEY",
     "SELF_INSTALL_SWITCH_KEYS",
     "SelfInstallSwitches",
     "UNREADABLE_CONFIG_VERSION",
+    "read_fresh_capability_switch",
     "read_self_install_switches",
     "switch_command",
     "switch_facts",

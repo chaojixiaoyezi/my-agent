@@ -1,3 +1,6 @@
+// LLM: YAML 是键和值、说明的来源，生效时机直接读取后端登记表；生成只读投影，不碰用户配置或启动服务。
+// 模块用途: 重生前端参数目录，避免前后端各维护一份马上生效的开关名单。
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +9,24 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = resolve(scriptDir, "..");
 const repoRoot = resolve(frontendRoot, "..");
 const outputPath = resolve(frontendRoot, "config/backend-config-catalog.json");
+
+// LLM: 使用仓库根下的后端 parameter_registry 读 effect；仅随包默认与元数据，不读取 owner 或凭据。
+//   PYTHON 可指定项目解释器，默认 python3（Windows 为 python）；失败即终止生成，不回退写死时机。
+// 函数用途: 给生成器提供后端的重启事实，名单只留在后端现读入口。
+function backendRestartRequirements() {
+  const script = [
+    "import json",
+    "from agent_py_agent.agent.settings.parameter_registry import parameter_registry",
+    "from agent_py_agent.agent.settings.user_config_capability import EFFECT_GATEWAY_RESTART",
+    "print(json.dumps({key: spec.effect == EFFECT_GATEWAY_RESTART for key, spec in parameter_registry().items()}))",
+  ].join("\n");
+  const python = process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+  return JSON.parse(execFileSync(python, ["-c", script], {
+    cwd: repoRoot, encoding: "utf8", env: { ...process.env, PYTHONPATH: repoRoot, PYTHONDONTWRITEBYTECODE: "1" },
+  }));
+}
+
+const restartRequirements = backendRestartRequirements();
 
 const sources = [
   ["agent_config", "agent_config.yaml", "agent_py_agent/config/agent_config.yaml"],
@@ -269,12 +290,11 @@ function isAdvanced(key, category) {
   );
 }
 
-// LLM: 后端 parameter_registry 对每个参数统一声明 effect=EFFECT_GATEWAY_RESTART（TUNABLE_KEYS 里的可调参数同样如此，
-//   user_config_capability.py 里没有 next_session 的键），配置修改一律要重启 Gateway 才生效，不存在“按名字免重启”的键；
-//   因此这里不再按键名猜，所有项都标记需要重启。若后端未来引入 next_session 的键，再按后端 effect 事实补充。
-// 函数用途: 返回该配置项修改后是否需要重启 Gateway 才生效（当前后端语义：全部需要）。
+// LLM: 只消费后端登记的结构化 effect，不按键名或中文说明猜；未登记的 YAML 键视为合同错误，不能静默生目录。
+// 函数用途: 返回某项是否需要重启，现读开关显示马上生效，其余项保持重启。
 function restartRequired(key) {
-  return true;
+  if (!Object.hasOwn(restartRequirements, key)) throw new Error(`Backend parameter is not registered: ${key}`);
+  return restartRequirements[key];
 }
 
 function requiresUnlock(key, category) {

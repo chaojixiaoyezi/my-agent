@@ -1309,6 +1309,9 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         if str(getattr(action, "status", "") or "") == "open"
         for name in tuple(getattr(action, "allowed_tools", ()) or ())
     }
+    from ...capability.method_carry import prompt_method_ids
+
+    # 构造值对象时复制逐 run 冻结名单，实际渲染和 Compact 纯投影使用同一身份与顺序。
     return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
         root_user_prompt=params.root_user_prompt or params.user_prompt,
@@ -1339,6 +1342,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         effective_contract_snapshot=seed.effective_contract_snapshot,
         selected_skill_ids=seed.selected_skill_ids,
         required_skill_ids=seed.required_skill_ids,
+        in_use_method_ids=prompt_method_ids(agent),
         tool_rounds=tool_rounds,
         save=params.save,
         live_archive_state=live_archive_state,

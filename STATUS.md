@@ -1,5 +1,24 @@
 # 当前状态
 
+w1 第 2 步（2026-10-08，`worker/w1-method-carry`，本地已实现，待 3a 非作者复核，未集成/部署）：
+隐藏方法账本、成功 get、逐 run 冻结/稳定目录、Compact 入口和资料清单及 using/remove 已接通；开关现读，预算缓存，原授权和 pins 保持。
+十处变异各 pytest rc=1；变异后新增五文件、原 scope 文件、完整 12 文件 guards9 及原 teardown node 合跑 242 passed，rc=0。
+广回归原 JUnit 6263 tests/20 failures/1 error/20 skipped，rc=1；两个本次 scope 回归和自引报告准备错误已修复复验。
+剩余 18 个在指定基线 6e8f61564 同节点失败：9 个进程夹具、6 个 shell、3 个 sandbox-exec；超时未定位，不统称沙箱问题。
+代码提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`；import0/ruff/doc-sync/strict-size/diff/clean-package 和前端目录均通过，新增尺寸告警0。
+完整命令、基线栈对照和变异见 TESTS 首节。第 3 步测量工具归 w2，真实入口与生产验收归 3a。
+本线未验证真实 TUI/飞书、MiniMax、Linux 和生产；下段仅保留第 1 步交付时点，不覆盖本段。
+
+w2 integprep（2026-10-08）：指定 w1 第 1 步已并入本线，测量器隔离文件开关及只读原子恢复已修，原 false/true 假 ABC 和两项业务变异完成；44 文件回归 845 passed / 3 failed / 9 skipped，三个失败在真正基线同样权限拒绝。待 3a 沙箱外、集成及真实入口复核，不宣称完整验收。
+用户 10-07 决定不开选包、靠目录和点名；入口与会话沿用去重延期，本整合版本未部署、真实模型/生产/业务质量未验证，详见 TESTS 和设计第 5 节。
+
+w1 第 1 步（2026-10-07，`worker/w1-method-carry`，本地实现，待 3a 非作者复核，未集成/部署）：
+三个能力现读开关、主/子入口、参数中心和前端目录已同源，两个自动装回执与预算缓存保持。
+恢复后直接回归 94 passed；引用方加完整 guards9 为 618 passed / 9 skipped / 3 failed，失败三项均 sandbox-exec 退出 71、明确权限拒绝。
+基线 `6e8f61564` 的独立临时工作树同样三项失败；不删/跳过失败，不宣称联合全绿，命令及两处有效变异见 TESTS 首节。
+代码提交 `073e64237`；import boundaries、ruff、doc-sync、strict code-size、diff、clean-package 已执行通过，新增尺寸告警 0。
+真实 TUI/飞书、模型、Linux 与部署未验证，第 2 步未做。3a 复核并沙箱外复跑后另派下一步。
+
 M5（2026-10-03，sol2，`worker/sol2-m5`，WIP：本地实现与定向守卫已验，扩展回归失败待复核、待 be 复审/3a 集成）：
 内置 `write-my-agent-plugin` 及 Python v1/Node v6 单只读工具模板已实施，Python 构建器可接显式受信本地作者工程。
 续作补齐生产 wheel 新技能全部资源的原字节核对，并证明九个既有工程用原/新构建器的最终包字节一致；当前定向加 guards9 为 196 项通过。

@@ -109,7 +109,7 @@ class InputModalityFilter:
 
 # LLM: 参数来自原 ToolLoopExecuteParams；额外三项必须由宿主准备，不能在这里读取 Goal、运行账或执行事实。
 #   回合触发类型原样交给 PromptBuilder，只决定当前回合以用户任务还是宿主事件开头。
-# 函数用途: 统一真实轮次和准备前投影使用的 PromptBuilder 输入，保留原系统、动态段、名卡及上下文作用域。
+# 函数用途: 统一真实轮次与纯投影输入，透传已冻结在用名单，原系统与作用域不变。
 def tool_loop_prompt_request(
     params: ToolLoopExecuteParams,
     *,
@@ -129,6 +129,7 @@ def tool_loop_prompt_request(
         tools=ToolSections(
             selected_skill_ids=params.selected_skill_ids,
             required_skill_ids=params.required_skill_ids,
+            in_use_method_ids=params.in_use_method_ids,
             tool_catalog_section=params.tool_catalog_section,
             tool_recommendations_section=params.tool_recommendations_section,
             tool_context=params.tool_context,

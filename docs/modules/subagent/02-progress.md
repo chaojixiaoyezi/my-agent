@@ -1,5 +1,12 @@
 # 子代理维护状态
 
+## 选包整合铺路（2026-10-08，w2 integprep；待 3a 集成复核）
+
+部署后续作只在测量器补只读原子恢复与原 false/true 的假 ABC，不改子权限、pin 或入口语义。C 仅缓存变异有效抓到；44 文件回归保留真正基线复现的三个 Seatbelt 权限拒绝，详见 TESTS，真实子入口与生产观察点未验证。
+
+只合 w1 第 1 步指定头 `cdfe9b4d1`，子授权入口沿其原现读开关，权限/pin/首请求资格与预算缓存不改；本次修复仅测量器隔离用户文件的实验臂切换。
+用户决定不开选包，入口与会话沿用去重延期到准备开启之前。组件证据、变异和生产未验边界见 TESTS，不能将 selfix 真跑数据外推为此整合版本已验收。
+
 ## 命令源长度闸门接入子代理文本解析点（cmdcap-fix，2026-10-05，分支 `worker/cmdcap`，基于 17l 头 `886965f3a`）
 
 - `subagents/controlled_exec_gateway.plan_controlled_exec` 在 `_parse_command`（shlex.split）之前先过共享判定 `command_source_too_large`（contracts/gates/command_policy 的模块常量 64K），超长按 `COMMAND_SOURCE_TOO_LARGE` 拒绝，不再先慢解析一遍。
@@ -147,6 +154,10 @@ auto_promote_to_parent_memory。旧记录里残留的三个键没有任何读取
 
 能力包子入口（2026-09-27，本地已实现，组合验收中）：新建child可复用原首请求marker准备已显式授权且同代pin的包入口，
 入口沿原RuntimeFacts进入业务请求，不新增辅助选包模型。旧无marker线程不回填，关闭配置不加载，方法仍按需读取。
+2026-10-07 w1 第 1 步（本地实现，待 3a 复核）：`subagent_entries_enabled` 改走
+`self_install_switches.read_fresh_capability_switch`，与主选包共用现读名单；坏文件按默认关，预算仍取原缓存。
+原显式授权、同代 pin、线程和首请求 marker 不变，不增加辅助模型调用。直接 94 项回归含子入口测试通过；
+引用方与 guards9 的三项 sandbox-exec 权限失败及真正基线复核见 TESTS 首节，真实子线程/模型/TUI/飞书未验证。
 2026-10-05 selfix3（本地实现，待3a终审）：共享入口扣公共头后均分，逐包紧凑编码完整页及一个逗号并独立计费，最终可见页按 package_id 排列；
 余数、未投递包份额不转借，零份额仍沿原 reader 验证读取。准入/有效页/固定三分法和 child 原 canonical 授权/pins 保持，
 entry_status 仅诊断，不能代替权限、固定或采用事实；主/子目前只消费 text/warnings。精确两/三包回归和变异见 TESTS 顶部 selfix3，

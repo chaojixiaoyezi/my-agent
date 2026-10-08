@@ -86,9 +86,11 @@ def release_active_turn_inputs_for_compact(
 
 
 # LLM: 先固定旧临时状态，再在同一 try/finally 中安装参数与快照；包括 yield 前的过期引用错误也必须恢复。
-# 函数用途: 进入一轮线程隔离的 prompt/任务/能力快照范围，正常、失败和嵌套退出均恢复原状态。
+# 函数用途: 进入逐 run prompt/能力快照范围，并冻结会话方法名单；退出恢复原线程状态。
 @contextmanager
 def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
+    from ..capability.method_carry import freeze_conversation_methods
+
     """Expose one thread-local run/tool scope without requiring a model turn."""
     had_current_prompt = hasattr(agent, "_current_user_prompt")
     previous_current_prompt = getattr(agent, "_current_user_prompt", "")
@@ -109,6 +111,7 @@ def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = Non
         if params is not None:
             agent._current_run_params = params
         agent._current_skill_snapshot = _turn_skill_snapshot(agent)
+        freeze_conversation_methods(agent)
         yield
     finally:
         _restore_current_prompt(agent, snapshot)

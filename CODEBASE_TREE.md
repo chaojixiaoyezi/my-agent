@@ -1,5 +1,19 @@
 # Codebase Tree
 
+## 首次选包测量（w2，2026-10-07；开发工具，不进入 wheel）
+
+```text
+|-- scripts/eval/pack_pick_bench.py          # setup/run、安全隔离 home、原安装启用、题目与输入指纹
+|-- scripts/eval/pack_pick_runtime.py        # 原 Gateway 首请求、隔离文件开关与原子字节/权限恢复、预算缓存覆盖、模型层捕获与零工具执行
+|-- scripts/eval/pack_pick_results.py        # 最小工具身份、原账本已报 token、分组分语言汇总
+|-- agent_py_agent/tests/test_pack_pick_bench.py # 六个自测；假传输校准，不代表自然召回
+|-- agent_py_agent/tests/test_package_selection_candidates.py # 选包预算与推荐限数解耦、稳定排序、原测量器 C 组校准
+`-- agent_py_agent/tests/fixtures/pack_pick_queries.json # 四句中/英/法小样本（不是正式 39 句）
+```
+
+实际用法、接缝与验证边界见 [SKILL_PACK_SELECTION.md 第 5 节](docs/design/SKILL_PACK_SELECTION.md#5-第-3-步第一次挑中三组对比按数据定)。
+`test_package_selection_candidates.py` 是 selfix 候选合同和原 C 测量入口的长期回归；它不评自然召回，也不进入 wheel。
+
 ## M1 B9（原 M5）插件作者入口
 
 ```text
@@ -73,6 +87,12 @@
 |-- agent_py_agent/agent/capability/pack_verification_hooks.py # 宿主核验接进工具执行缝隙和收尾通道的钩子（不新增模型工具）
 |-- agent_py_agent/agent/capability/pack_verification_scope.py # 宿主核验生效范围：开关、owner、钉住的带检查程序的包、基线模式
 |-- agent_py_agent/agent/capability/self_install_switches.py # learnpack 两个“自动装”开关（能力包、插件）的唯一读取入口：按文件现读、读不到按关，给回执用的开关事实与命令原文
+|-- agent_py_agent/agent/capability/method_carry.py # 主会话成功 get 的隐藏登记、逐 run 冻结目录和压缩后入口/资料清单带回；不存第二份正文、不扩权
+|-- agent_py_agent/tests/test_conversation_method_carry.py # 原线程锁内成功读取登记、主会话边界、容量、隐藏字段和立即生效开关
+|-- agent_py_agent/tests/test_conversation_method_directory.py # 首次使用显示顺序、required 必显、逐 run 冻结及关闭/失效的旧提示字节
+|-- agent_py_agent/tests/test_conversation_method_restore.py # 压缩代次、完整投递预算、当前版本资料参数、取消/失败不消费资格
+|-- agent_py_agent/tests/test_conversation_method_commands.py # using/remove 的认证线程范围、TUI 文本往返和 Gateway 共用入口
+|-- agent_py_agent/tests/test_conversation_method_gateway.py # 三轮真实 get 与原 Compact 检查点提交、第二轮带回及同代不重复（仅模型传输替身）
 |-- agent_py_agent/agent/capability/package_build.py # 能力包（v7）与文件型插件包（v6/v8）唯一的打包实现：清单、摘要、成员顺序与权限位、复验；两个打包脚本只是薄壳
 |-- agent_py_agent/agent/capability/learnpack_store.py # learnpack 宿主存储 <owner home>/data/learnpack/：她打的包（内容寻址、读回验摘要）、待确认安装单（只执行一次）、安装记录、她装过的包名
 |-- agent_py_agent/agent/capability/learnpack_build_notes.py # learnpack 打包回执的版本事实与软提醒：现在装着哪一版、她做过哪些版本，同号重用、版本倒退、比上一版少了文件（不挡打包）
@@ -250,6 +270,7 @@
     |-- PLUGIN_OBSERVATION_CANDIDATES.md # 插件观察候选结构设计稿：manifest 声明、宿主铸 ID、两层执行前复核与动作候选决策点
     |-- CAPABILITY_PACKS_V2.md           # 能力包 v2：宿主跑钉住的原版检查程序、输入原件保护、交付存在（已确认、实施中）
     |-- LEARN_TO_PACK.md                 # 学外部 agent 做成能力包或插件：两个自动装开关、一行确认、/plugins# 命令（第一期开发中）
+    |-- SKILL_PACK_SELECTION.md          # skill 与能力包的挑选：开关现读、会话沿用（压缩后带回）、首次挑中三组对比、"不比原版差"验收（提议中）
     |-- J16_SCREEN_OBSERVATION.md        # J16 屏幕识别设计（已确认、未实施）：自家适配器结构化窗口观察、两层复核、自动执行默认关
     |-- PLUGIN_ANY_LANGUAGE.md           # 任意语言插件（v6）：随包可执行文件/系统解释器、启用前用户确认、解释器固定与跨语言读取检查用例
     |-- PLUGIN_PROCESS_SANDBOX.md        # 插件进程 OS 沙箱试点：开关语义、失败拒绝、已知限制与验证

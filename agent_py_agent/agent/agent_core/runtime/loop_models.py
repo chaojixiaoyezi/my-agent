@@ -39,6 +39,8 @@ class RunParams:
     compact_auto_continue_depth: int = 0
     compact_auto_no_tool_continue_depth: int = 0
     context_scope: str = "default"
+    # 方法目录逐 run 冻结：None 尚未读取，空元组表示无在用项；不进入持久任务 attrs。
+    conversation_methods: tuple[dict, ...] | None = None
     root_user_prompt: str = ""
     carried_archive_tool_calls: list[dict[str, object]] | None = None
     carried_active_turn_user_inputs: list[dict[str, object]] | None = None

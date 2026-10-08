@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## skill／能力包挑选集成（3a，2026-10-08，分支 `claude/3a-pick-int`）
+
+- **范围**：main e957e0815 + 3a 文档 + w1（开关现读、会话方法沿用）+ w2（首次选包测量工具、选包候选修复，WIP 收尾项另补）+ 3a 修复 c71e44529。
+- **沙箱外复跑 w1 第 2 步头 b0cdcdebf**：按导入关系找出引用改动模块的 531 个测试文件，加 guards9，分 4 片：
+  2779 + 2577 + 2684 + 2703 = 10,743 passed、23 skipped、25 xfailed、5 xpassed，0 失败（w1 在沙箱里的 18 项失败都是沙箱环境所致）。
+- **集成分支大回归**：引用集成改动模块的测试、全部压缩测试与 guards9，共 580 个文件，分 5 片：
+  2292 + 2372 + 2297 + 2244 + 2104 = 11,309 passed，0 失败。命令前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <分片文件> -q --tb=line -p no:cacheprovider -o addopts='' --timeout=120`。
+- **3a 修复验证**：`test_conversation_method_directory.py` 8 passed；变异（改回"有 skill 在用就切选择模式"）新加 2 个用例都失败，rc=1。
+- **门禁**（BASE=origin/main）：ruff、doc-sync、strict code-size、diff-check、clean-package、import boundaries 全过；
+  常量目录 951 项、前端参数目录 269 字段重新生成且一致。
+- **未验证**：testbox Linux 3.10／3.11／3.12、PR 线上 CI、生产部署与第 4 步验收（进行中）。
+
 ## 压缩请求装进窗口与降档（compactfit，2026-10-08，07，分支 `claude/07-compact-cache`）
 
 - **新用例** `agent_py_agent/tests/test_compact_cache_surface_fit.py`（16 条）：压缩输出预留按配置且不超主请求上限；sol（272000）与
@@ -23,6 +36,346 @@
   改成两遍惰性读后通过；状态行相关 158 条通过。
 - **真机验证**（隔离 smoke，scratchpad/smk-c07，触发线封顶 6 万，只读用量快照差分与请求事件流）：sol 6 次压缩命中 83.5%–89.3%、
   64–109 秒；astra 2 次 91.3%、92/106 秒；MiniMax 12 秒。改前三者压缩调用走分段、0% 命中、10～33 分钟。数据见设计台账 compactfit 条目。
+
+## w1 第 2 步：会话方法沿用（2026-10-08，本地已实现，待 3a 非作者复核）
+
+- **来源与范围**：w1-step2 / common-v3，在第 1 步 `073e64237`、`cdfe9b4d1` 上续做；失败对照仍用任务指定的真正基线
+  `6e8f61564dd5cc32a3f97d26fdb3a9035ce51bc1`，不拿本分支的早先提交冒充基线。
+  本步功能/测试提交 `673c0914d1f78b993edfa1c1d546bc39d3646c52`；随后仅补交付 SHA 与文档，不改已验证产品/测试字节。
+  `method_carry.py` 是唯一负责模块；隐藏线程账本、成功 get 登记、逐 run 冻结、目录必显、Compact 后带回与 using/remove 已接真实业务入口。
+  新开关默认 true，管理员边界、现读名单、YAML/dataclass 与前端目录同源；预算仍缓存。不额外调模型、不执行包脚本、不改原权限与任务 pins。
+- **缓存两条**：首次成功使用时间重读不刷新，目录按首次使用排序且不显示时间；淘汰与带回优先级才按最近使用。
+  `current_prompt_scope` 在 run 参数中冻结一次；同 run get 只改线程账本，builder/纯请求投影只消费冻结值。
+  没有合格主会话的通用 scope 不写新增参数字段，嵌套和并发退出仍恢复原快照。
+- **新增测试**：`agent_py_agent/tests/test_conversation_method_{carry,commands,directory,gateway,restore}.py`。
+  覆盖主会话/失败读取准入、并发锁内合并、5 个方法与最近 8 份非入口资料、旧记录缺栏与空值不序列化、摘要/指纹及隐藏投影保持、
+  在用必显/停用删除/无在用与关闭的旧目录字节、稳定排序/逐 run 冻结、完整载荷预算/当前版本过滤/原 policy 和 pin/取消与失权、
+  成功投递才推进代次/同代新 run 零重读/失败不热重试/并发 remove 不复活，以及公共命令解析、认证线程范围与模型不可改开关。
+- **三轮假模型端到端**：`test_conversation_method_gateway.py` 使用真实 Gateway 队列处理、工具循环、临时安装表和成功 get；
+  第 1 轮读入口及资料，原 `write_compact_checkpoint` 加同 Store 的 Compact/CAS 提交后，第 2 轮实际请求含入口、完整资料重读参数与目录标注；
+  第 3 轮同代无再次带回。只替换模型传输，不把这项写成真模型、实际 TUI/飞书或生产验收。
+- **固定跑法**：先在本工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，pytest 前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest`，后缀
+  `-q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w1 -o addopts='' --timeout=60`。
+  不跑全仓，不同时跑两个 pytest，不在 pytest 运行时跑 code-size 或改生成报告。
+- **引用方广回归**：用 AST 查直接引用本次改动模块的测试，275 个引用方文件，合入完整 guards9 和新增文件后为 285 个明确文件，
+  顺序 15 批执行（每批最多 20 文件）。原始 JUnit 合计 **6263 tests / 20 failures / 1 error / 20 skipped，整体 rc=1**；
+  不把 JUnit tests 数误写成 pytest passed，也不写联合全绿。文件与批次列表在临时检查目录的 `files.json`、`results.json`。
+- **本次回归与自引准备错误**：广回归的两个 `test_prompt_scope_failure.py` 节点在真正基线均 PASS，确认是本次沿用字段写入
+  object/字符串占位参数造成；修复 `freeze_conversation_methods` 空线程早返回后，原四个 scope 测试通过。
+  一个 `test_background_main_agent_runtime.py` teardown error 来自我并行改写 CODE_SIZE_REPORT.md；还原报告并重跑该原 node 后通过，
+  不能称它是基线既有失败。原始失败和错误保留，不删测试、不放宽断言。
+- **最终无变异复验**：上述五个新增文件、整个 `test_prompt_scope_failure.py`、任务 `guards9.txt` 的全部 **12 个文件**，再加原 teardown node：
+  **242 passed in 50.37s，rc=0**。含常量目录、参数登记与打包守卫；覆盖变异后增强的“同代新 run 连准备读取也不重复”断言。
+  此结果与广回归有重叠，不相加冒充另一轮全量。
+- **真正基线逐项复核**：用 `git worktree add --detach /private/tmp/claude-501/w1-step2-baseline-6e8f61564 6e8f61564`，
+  在该树根用同一 Python、PYTHONPATH 与单例 60 秒上限重跑原 20 个 failure node：**20 tests / 18 failures / 0 errors / 0 skipped，rc=1**。
+  两个 scope 节点 PASS；余下 18 个逐节点对照如下。仅比较忽略临时目录、内存地址与临时端口后的栈，不忽略异常类型或业务断言。
+
+  | 类别 | 原失败节点 | 基线复核和原因边界 |
+  | --- | --- | --- |
+  | 线程/进程夹具 9 项 | `test_scheduler_waiting_deadlock.py::TestPendingProcessCompletion`：`test_corrupt_records_count_only_when_they_may_belong_to_the_task` 的 unparseable/this-task/another-task/another-store/missing-target/empty-target 六项；`test_a_confirmed_pending_record_wins_over_a_corrupt_one` 的 unparseable/this-task/empty 三项 | 当前与基线完整栈一致：夹具写记录时 `ValueError: managed process instance is partially bound`；本轮不改无关夹具或进程合同 |
+  | shell 6 项 | `test_chat_control_runtime::test_local_interrupt_stops_foreground_shell_without_resource_reclaim`；`test_gateway_chat_conversation_context::test_first_gateway_shell_keeps_explicit_working_dir`；`test_shell_hide_user_home::test_registry_built_shell_hides_the_home_but_git_still_works`；`test_shell_sandbox_boundary_facts::test_real_seatbelt_denial_comes_back_as_boundary_facts` 和 `test_model_sees_the_boundary_facts_on_its_next_request`；`test_tool_call_guardrail_runtime::test_real_shell_executor_stops_repeats_and_accepts_progress` | 前者 started 文件未出现，其余 60 秒超时，基线同节点/同栈；未取得根因证据，不把超时归因为沙箱 |
+  | sandbox-exec 3 项 | `test_plugin_sandbox_v8`：`test_macos_v8_narrows_read_and_enforces_network[True]`、`test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home` | 两树均退出 71，明确 `sandbox_apply: Operation not permitted`；差别仅内存地址/临时端口，沙箱外交 3a 复核 |
+
+- **十处变异**：每处单独的新 Python 进程执行一次源码单点内存替换，再进入同一 pytest；结束即丢弃该进程，未写产品文件。
+  每项均 **1 test / 1 failure / 0 errors，pytest rc=1**；外层检查程序确认 10/10 killed、两个产品文件 SHA256 前后相同，rc=0。
+  变异后上述 242 项普通运行恢复绿；具体替换及原始日志在 `mutations.json`、`mutation-01..10.log/xml`。
+
+  | 变异点 | 测试文件与 -k | pytest rc | 抓到 |
+  | --- | --- | --- | --- |
+  | 主会话判断去掉子代理排除 | carry：child_never_records | 1 | 是 |
+  | 包 get 失败前也记账 | carry：read_failure_never_creates_a_record | 1 | 是 |
+  | 资料上限 8 改 9 | carry：package_paths_are_unique_recent_eight | 1 | 是 |
+  | 按首次使用淘汰 | carry：repeated_reads_keep_first_order | 1 | 是 |
+  | 重读刷新首次时间，改变显示排序 | directory：display_order_does_not_follow_recent_usage | 1 | 是 |
+  | 代次 > 改为 >= | restore：compact_restores_entry | 1 | 是 |
+  | 无视缓存带回预算，直接用模型窗口 | restore：tiny_budget_does_not_consume_generation | 1 | 是 |
+  | 资料清单不按当前版本过滤 | restore：current_version_filters_missing_paths | 1 | 是 |
+  | 绕过现读关闭判断 | carry：off_switch_is_fresh | 1 | 是 |
+  | remove 回成功却不删除账本 | commands：using_lists_package_resource_count | 1 | 是 |
+
+  表中的 carry/commands/directory/restore 均指 `agent_py_agent/tests/test_conversation_method_<名称>.py`。
+- **静态门禁（当前实现与目录实际执行，均 rc=0）**：`$PY scripts/check_import_boundaries.py` 为 findings=0；
+  `$PY -m ruff check agent_py_agent scripts` 全过；`$PY scripts/check_doc_sync.py --base 6e8f61564` 为 DOC_SYNC_PASS；
+  `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` 为 266 fields 同步。
+  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
+  strict_scope_total=2190/hard=0/high-risk=1494/soft=696/test_advisory=1239/blocked=False；这是接受既有基线告警，不是全仓零告警。
+  `git diff --check 6e8f61564` 无输出；`$PY scripts/check_clean_package.py .` 无发布阻塞项。
+  新实现/测试六文件先纳入 Git 后 clean-package 才通过；之前未跟踪导致的失败不冒充通过。
+  code-size 与 size_diff 后均从 HEAD 还原 CODE_SIZE_REPORT.md，不提交生成报告。
+- **size_diff 全部输出**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`，对线上 step17w 的告警身份比对，rc=0：
+
+  ```text
+  新增告警: 0
+  消失告警: 0
+  ```
+
+- **基线清理**：复核前临时基线树是 detached HEAD 6e8f61564；复核完成后 status 干净，已用 `git worktree remove` 删除该临时树，原始检查日志/XML 保留。
+- **检查证据**：`/private/tmp/claude-501/w1-step2-checks/` 中的 `final-focused.xml`、15 批 `related-*.log/xml`、`baseline.log/xml`、
+  `baseline-comparison.json` 与变异表均为本次实际执行产物；临时夹具不是生产数据，原始失败不改写成通过。
+- **未做/未验证**：真实模型采用与缓存/业务质量、实际 TUI/飞书、生产 Gateway、Linux 三版本/全量、远端 PR/main CI 与部署。
+  本线不 push、不安装依赖、不运行 my-agent、不启停 Gateway，不改她已做好的包；第 3/4 步不在本次 w1 开发范围。
+
+## w2 integprep 部署后续作（2026-10-08；本地实现，整合回归有既有沙箱失败）
+
+- 来源：3a `continue-after-deploy.md`，接 WIP `e82911f65`；重新核对原任务、共同规则、HEAD 和干净状态，不重复 merge。指定 w1 合并仍为 `9866479ff`，没有 push、部署、改写历史或开启生产选包。
+- 修复：`pack_pick_runtime._selection_switch_file` 恢复阶段复用原 `common.nofollow_fs.write_bytes_atomic_beneath`，同目录原子恢复原字节，再恢复精确权限（创建受 umask 约束）。目录可写、叶子 0400 也可恢复；保留 BOM/CRLF，原无文件退出删除，预算仍缓存。
+- 有效红绿：新增正常/异常两条 readonly 合同，旧直接写回被业务断言 `配置未能恢复：['PermissionError']` 抓到，**2 failed，rc=1**；修复后 bench 与候选两文件 **31 passed，rc=0**，局部 Ruff rc=0。
+- 原假 ABC 场景保留原 true，并新增原 false；每场景四句×ABC×repeat2，原主会话/模型账、完整工具目录、零模型工具 handler、恢复原配置等断言不删。false 场景辨识 C 确实是本轮写文件开启，不把选择观察占位行当作物理调用。
+- 独立 CLI（不是上述 pytest 的返回值）：CI Python 子进程实际运行 `scripts/eval/pack_pick_bench.py setup --home <临时home> --packages <两包目录>` 和 `run --home <同home> --queries agent_py_agent/tests/fixtures/pack_pick_queries.json --arms A,B,C --repeat 1 --fake --out <全新目录>`，各 rc=0。原 false 配置：12 个独立主会话、16 个物理调用，A/main=4、B/main=4、C/main=4、C/selection=4；所有请求完成，配置原字节 SHA-256 前后一致，临时 home 已清除。只有假传输校准，不是自然召回率。
+- 变异仅在独立 Python 进程内 patch，单项退出即恢复；产品/测试源码 SHA-256 前后一致，无持久变异。
+
+| 变异位置与行为 | 目标用例（test_pack_pick_bench.py） | pytest rc | 抓到 |
+| --- | --- | --- | --- |
+| `_selection_switch_file` 的 C 分支不写文件，保留原预算/开关缓存 patch | `test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers[false]` | 1 | 是，C 的选择行为 observation、输入用量为 null，物理选择调用断言失败 |
+| 原子字节恢复调用退回直接 `Path.write_bytes` | `test_arm_restores_readonly_bytes_and_mode_even_on_failure` 两参数 | 1 | 是，两条恢复业务断言都显示 PermissionError |
+
+- 整合回归：按 AST 收集五模块直接 import、from import 及动态字符串导入，补选择 runtime/配置/推荐/bench/前端，并合并完整 guards9（含 packaging），共 **44 文件**。第一次运行 rc=1；旧外置结果未注册、无法补读尾部，因此第二次加 JUnit 原样复核并取得完整计数，不将无法读取的结果补造为通过。
+  第二次 **845 passed / 3 failed / 9 skipped / 0 errors，rc=1**，146.38 秒。未跑全仓、不删失败用例、不加 skip/xfail、不放宽断言；以下显式文件集合可复现：
+
+```bash
+# 在本工作树根；使用共同规则的 CI Python。
+PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+TEST_FILES=(
+  test_architecture_guardrails.py test_backend_config_catalog.py test_backend_signature_guardrails.py
+  test_capability_config.py test_capability_config_class.py test_capability_config_missing_defaults.py
+  test_capability_config_single_default_source.py test_capability_package_entry_context.py
+  test_capability_package_prompt_guidance.py test_capability_package_selection.py
+  test_capability_package_selection_runtime.py test_capability_runtime_config.py
+  test_capability_selection_authority.py test_capability_selection_scope.py test_computer_use_observe_only.py
+  test_config_field_readers.py test_constant_names_unique.py test_constants_catalog.py test_curator_model_profile.py
+  test_decision_action_execute.py test_embedding_model_profile.py test_embedding_service.py
+  test_frontend_settings_labels.py test_main_agent_has_no_case_runtime.py test_memory_search_tool.py
+  test_pack_pick_bench.py test_package_selection_candidates.py test_package_selection_failure.py test_packaging.py
+  test_parameter_metadata.py test_parameter_registry.py test_parameter_sources.py test_plugin_legacy_config.py
+  test_plugin_sandbox_v8.py test_plugin_tool_gate_execution.py test_recovery_actions.py test_recovery_code_policy.py
+  test_self_install_switches.py test_settings_chat_control.py test_skill_snapshot_error_codes.py
+  test_subagent_config_inheritance.py test_subagent_input_media.py test_subagent_package_entries.py test_subagent_takeover_hint.py
+)
+for i in "${!TEST_FILES[@]}"; do TEST_FILES[$i]="agent_py_agent/tests/${TEST_FILES[$i]}"; done
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest "${TEST_FILES[@]}" \
+  -q -o addopts= --tb=short -rs -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2
+```
+
+- 三个失败均在 `test_plugin_sandbox_v8.py`：`test_macos_v8_narrows_read_and_enforces_network[True]`、`test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home`。真实子进程 rc=71、stdout 空、stderr 为 `sandbox-exec: sandbox_apply: Operation not permitted`，有明确权限拒绝证据，不是根据超时猜沙箱。
+- 真正基线复核：`git worktree add --detach <临时树> 6e8f61564dd5cc32a3f97d26fdb3a9035ce51bc1`，在临时树根用相同 CI Python、`PYTHONPATH=$PWD`、无字节码与 cacheprovider、独立 basetemp，只跑上述三个精确 node；确认 import 来源为该临时树。**3 failed / 0 skipped / 0 errors，rc=1**，同样 rc71 和相同权限拒绝；临时树已正常 `git worktree remove`。这三项在真正基线即失败，但本版本整合回归仍然不是全绿。
+- 九项 skip 为原测试按 Linux bwrap 平台及受限沙箱就绪自检自行跳过；没有改跳过逻辑。这些真实沙箱观察点未验证，交 3a 沙箱外复核。
+- 独立非作者复审只看内嵌需求与代码材料，未读实际树/未执行，未发现有依据的阻断问题；不能代替上述运行证据。
+- 尺寸首查确有四条新增测试告警（长 ABC 用例及三个恢复矩阵的嵌套），rc=1。合并 context 为同层，复用异常注入 helper、提取 ABC 行断言；没有删除/放宽任何业务断言，以 AST Counter 确认 WIP 的全部断言均保留。重构后在当前版本完整重跑上述 **44 文件：845 passed / 3 failed / 9 skipped / 0 errors，rc=1，228.42 秒**；失败仍是上述三个真正基线复现的权限拒绝。两项变异在当前测试版本再次实际运行，分别 1 failed 与 2 failed，pytest 都为 rc=1；源码 SHA-256 前后一致。
+- 收尾命令与结果（CI Python、工作树根；静态结果不掩盖 pytest rc=1）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `$PY scripts/check_import_boundaries.py` | findings=0，rc=0 |
+| `$PY -m ruff check agent_py_agent scripts` | All checks passed，rc=0 |
+| `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` | 265 fields 同步，rc=0 |
+| `$PY scripts/check_doc_sync.py` | DOC_SYNC_PASS，rc=0 |
+| `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` | hard=0、blocked=False，rc=0；生成报告已还原 HEAD、不提交 |
+| `git diff --check 6e8f61564` | rc=0 |
+| `$PY scripts/check_clean_package.py .` | 未发现发布阻塞项，rc=0 |
+| `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` | rc=0，输出如下 |
+
+```text
+新增告警: 0
+消失告警: 1
+```
+- **未验证**：本整合版本真实 MiniMax、TUI/飞书、Linux 全量、Windows、真实模型工具读取/方法采用/业务质量；默认选包仍关，第 2 步与入口去重仍延期。保留以下 WIP 为当时历史记录，里面“尚未”只指该 WIP，不代表续作后的状态。
+
+## w2 integprep 部署窗口 WIP（2026-10-08；未完成验收）
+
+- 来源：`w2-integ-prep.md`；3a 随后通过 `deploy-window-steer.md` 要求 20 分钟内保存全部改动为本分支 WIP，停止本轮，不再启动长命令。未 push、未部署。
+- 指定 w1 头 `cdfe9b4d1` 已合入：合并提交 `9866479ff4c23cb750b5d65e6a1f782265c1f24f`，父提交为 selfix `8fc141941` 与指定 w1 头。
+  实际冲突仅 DESIGN_LEDGER、LLM_GUIDE、TESTS、COMPLETED、ROADMAP 五份文档；保留双方全部条目，提交前以 stage 2/3 非空行 Counter 核对无缺失。
+  YAML 自动合并保留双方注释，键/默认值不改；前端先接受 HEAD，再以指定 PYTHON 运行原生成器，265 fields，rc=0。最终 `--check` 尚未跑。
+- 实现阶段：实验臂沿原能力用户路径，先校验隔离 owner 与链接边界，复用 `config_io.set_simple_yaml_raw` 临时写 C=true、A/B=false；预算仍按原缓存处理。
+  基本正常/异常退出恢复原字节或删除新文件，B 采用行和缓存恢复；无原缓存属性时退出仍不留下属性。
+  **下面的独立审查问题尚未解决，此版本不能作为完整交付。**
+- 红测：合并后旧缓存式实验臂被 fresh 开关真假值、文件存在、安全边界与原假 ABC 调用断言抓到，pytest rc=1，非导入或收集失败。
+  实现过程中六项缺缓存属性错误后补 `patch.object(..., create=True)`；不是把缺属性异常当业务变异通过。
+- 最新局部复测的真实命令：
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
+  agent_py_agent/tests/test_pack_pick_bench.py \
+  agent_py_agent/tests/test_package_selection_candidates.py \
+  -q -o addopts= --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2
+$PY -m ruff check scripts/eval/pack_pick_runtime.py agent_py_agent/tests/test_pack_pick_bench.py
+```
+
+- 结果：**28 passed in 6.16s；局部 Ruff All checks passed；联合命令 rc=0**。这只是两个 pytest 文件和两个 Ruff 文件，不能沿用 selfix 的 28 文件/529 项冒充本轮完整门禁。
+- 非作者仅审内嵌需求、实现和测试设计，未读实际工作树、未执行测试；指出两项重要问题，尚未实测/修复：
+  1. 原文件可读不可写（如 0400）、目录可写时，原标量写入器原子替换并保留只读权限，但 finally 的 `path.write_bytes(original)` 直接写回可能失败，留下实验开关。续作先复现，再改为保留权限的原子字节恢复，补正常/异常测试。
+  2. 原假 ABC 测试的初始文件开关 true；仅略过 C 的文件写入仍会按 true 选择，不能用该场景证明 C 写入开启选择。续作应保留 true 场景验证 A/B 关闭，并增加原始 false 的真实选择链路，再跑“C 不写文件、仅改缓存”变异，要求目标业务断言导致 pytest rc=1。
+- **未完成/未验证**：上述审查问题；本轮五类模块所有导入方的完整定向回归、完整 guards9、独立 CLI 假 ABC 校准、必做变异、最终前端 `--check`、全范围 Ruff、import boundaries、doc-sync、strict code-size、基线区间 diff-check、clean-package、size_diff。
+  不删测试、不加 skip/xfail、不放宽断言；未跑全仓 pytest、未真跑模型、未触碰真实凭据或 Gateway。3a 的 selfix 真跑成绩仅作正式来源记录，不是本整合版本验收。
+- 下次第一步：在本 WIP 上复现并修复只读配置原子恢复，再补 false 初值真实 C 场景与变异；两项通过后继续剩余回归和门禁。按部署插话，本轮 WIP 后暂停，等 3a 派“继续”。
+
+## 开工前选包候选修复（2026-10-07，w2/selfix）
+
+- 来源：3a `w2-selection-fix.md`；接 `e863c1e2c`，共同规则失败归因基线仍为 `6e8f61564`。
+- 做法：选择材料/API/runtime 删除推荐候选上限；先验证全部原引用，预算够全目录原序，预算不够复用原 `score_card` 稳定排序，不过滤零分。
+  输入/模型窗口预算、完整卡省略、实际输入摘要、一轮 claim/入口与子代理合同保持；默认开关仍关闭。
+- 新文件 `test_package_selection_candidates.py`：10 包全收、无关键词的尾包保留、三卡预算相关度与零分稳定同序、推荐 5/1/0 限数、runtime 不转发推荐上限、假模型 C 原路径。
+  前 7 项先跑：4 failed / 3 passed，rc=1；都是目标断言红测，不是导入或收集失败。修复后四文件含参数/前端目录合同：145 passed，rc=0。
+- 原测试断言改动（未删或放宽）：`test_input_budget_never_silently_truncates_user_facts_or_partial_candidate` 去掉已删除的 `candidate_limit=0` 入参，全部预算/完整卡断言不变；
+  原 `test_candidate_limit_zero_retains_budget_and_missing_candidates_never_call_model` 改为只按输入预算限制，一卡预算仍断言 1 个/省略 5 个，宽预算仍断言 6 个、空候选仍不调用模型；
+  非法预算参数中的 `candidate_limit=True` 换为 `max_input_tokens=True`，仍严格拒绝 bool、不解除预算。旧限数语义按任务书替换为独立预算合同。
+- C 原测量入口（不是旁路生成）：setup 安装/启用 10 个临时纯内容包，run 四句 `--arms C --fake`，独立会话，辅助 schema 实测各 10 个候选，无 OMITTED；
+  再按三卡实际估算写隔离配置，单句 `novel`，候选 3 个且首位对口，回执保留 OMITTED；两次分别 8/2 条原模型调用，全行请求成功。
+  观察器保留原 `generate_structured` 签名，早先宽 `**kwargs` 观察器使传输收到多余参数而 TypeError，已修观察器并重跑；未弱化失败/告警断言。
+  输出位于 pytest basetemp 的 `c-all` / `c-tight`（可被下一次测试清理）；脚本化正例只验证材料与诊断，不证明真实召回。
+- 前端目录：`node frontend/scripts/sync-backend-config.mjs` 及 `--check`，均 rc=0，265 fields；默认数值/dataclass 不变。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_package_selection_candidates.py agent_py_agent/tests/test_capability_package_selection.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_backend_config_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2 -v -rs
+```
+
+- 最终版本回归：grep 到直接 import `package_selection` 的全部 9 个测试文件，加完整 guards9 的 12 文件及 7 个推荐/配置/前端/测量相关文件，去重后明确 **28 文件 / 529 项全部通过，0 skipped / 0 failed，rc=0**。
+  最终命令如下；默认 quiet 输出只显示通过点，因此另对完全相同文件集合执行 `--collect-only`，实报 `files=28 items=529 exitstatus=0`；收集数字不是执行通过的替代证据。
+  本节只使用下面最终集合的计数，不混用开发中其它集合的结果；不跑全仓 pytest。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 /Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python - <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+imports = subprocess.run(['rg', '-l', '(from|import).*package_selection', 'agent_py_agent/tests', '-g', '*.py'], capture_output=True, text=True, check=True).stdout.splitlines()
+guards = Path('/Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/guards9.txt').read_text().splitlines()
+extra = ['test_pack_pick_bench.py', 'test_backend_config_catalog.py', 'test_capability_config.py', 'test_capability_config_class.py', 'test_capability_config_missing_defaults.py', 'test_capability_runtime_config.py', 'test_capability_package_prompt_guidance.py']
+files = sorted(set(imports + [line for line in guards if line.strip() and not line.startswith('#')] + ['agent_py_agent/tests/' + name for name in extra]))
+assert all(Path(name).is_file() for name in files)
+print(f'CURRENT_VERSION_REGRESSION: {len(files)} explicit test files', flush=True)
+print('\n'.join(files), flush=True)
+result = subprocess.run([sys.executable, '-m', 'pytest', *files, '-q', '--tb=short', '-p', 'no:cacheprovider', '--basetemp=/private/tmp/claude-501/m-w2', '-rs'])
+raise SystemExit(result.returncode)
+PY
+```
+
+- 两处必做变异：独立 Python 子进程内只替换 `build_package_selection_material` 的一处实现；分别执行 `pytest.main([测试文件::函数, '-q', '--tb=short', '-p', 'no:cacheprovider', '--basetemp=/private/tmp/claude-501/m-w2'])`。
+  每次仅一个变异，进程结束即消失；产品两文件和新增测试文件的 SHA-256 前后一致，原文件未写入坏代码。外层检查器 rc=0 只表示两次预期 rc=1 都被检测到，**不把外层成功当变异测试通过**。
+
+  | 变异位置与做法 | 测试文件与函数 | pytest rc | 是否抓到 |
+  | --- | --- | --- | --- |
+  | `package_selection.build_package_selection_material`：构造材料前恢复最多 5 个候选 | `test_package_selection_candidates.py::test_selection_includes_ten_packages_with_recommendation_limit_five` | 1 | 是；完整 refs 断言，10 个变 5 个 |
+  | 同函数：`ranked = sorted(...score_card...)` 改为 `ranked = candidates` | `test_package_selection_candidates.py::test_tight_budget_ranks_keyword_match_then_stable_zero_score_ties` | 1 | 是；原序首个 c-pack 不等于应优先的 z-pack |
+
+- 门禁（均在本树根用指定解释器；下列每项均 rc=0）：
+  - `scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`。
+  - `-m ruff check agent_py_agent scripts`：`All checks passed!`。
+  - `scripts/check_doc_sync.py --base 6e8f61564`：`DOC_SYNC_PASS`；`git diff --check 6e8f61564` 无输出。
+  - `scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：hard=0、blocked=False；生成 `CODE_SIZE_REPORT.md` 已还原，不提交。
+  - `scripts/check_clean_package.py .`：未发现发布阻塞项；新测试先暂存，使原守卫可正确检查，不改守卫或豁免。
+  - `bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：原输出“新增告警: 0”“消失告警: 1”。
+  - 参数/常量目录、打包和后端签名守卫包含在上述完整 guards9 中；`test_backend_config_catalog.py` 包含在最终集合中。
+- 独立补丁审查：非作者子代理只读原任务要求与内嵌改动材料，静态检查未发现阻断问题；没有读外部工作树、执行程序或测试，不把该结论当端到端验证。
+  实际文件和回归由本作者核对；原默认关闭、原 reader/pin/CAS/取消/子代理入口未被本次 diff 修改。审查建议确认大卡略过、零预算/窗口与摘要变化边界，未报必须修复的问题。
+- 真实对照来源是任务书：A 44/75、B 43/75、C 45/75、原 C0 74/75，误开均 0/42。w2 未读原始正式 JSONL、未使用真实凭据或网络。
+  修复后 MiniMax/39 句、生产 TUI/飞书、方法采用与业务质量、w1 集成均未验证，交 3a；不把 C0 原对照当本修复已达标。
+
+## 首次选包测量工具（2026-10-07，w2；任务基线 `6e8f61564`）
+
+- 来源：3a 的 `w2-step3-bench.md`，只开发测量器，真 MiniMax 和 39 句由 3a 沙箱外跑。
+- 做法：开发脚本复用原安装/启用、Gateway 主请求、提示/工具目录、一次选包及用量账；只在原模型生成返回后捕获首步意图，
+  用固定无工具终答结束，不改产品源码。失败后保存观察，未知 token 不补零，C 选择/主 get 和其它用途分开。
+- 新测试 `agent_py_agent/tests/test_pack_pick_bench.py` 六条，覆盖结构化判定/脱敏、汇总分母和探针/未知字段、
+  home 链接/祖先拒绝、B 只改采用行且异常恢复、原安装→A/B/C→原账本、坏输入及供应商失败保留。
+  先有可导入空壳和有效断言红测，再实现；红测退出 1（五个断言失败），不是导入/收集失败。
+- 定向实跑退出 0：两个临时包、四句 × 三臂 × 两遍，24 个独立主会话、32 条原调用（C 辅助选择 8 条）。
+  handler 被接管为一旦进入即失败；没有进入任何模型工具 handler；主生成 24 次，C 对口入口入模 6 次。
+  注入写文件意图未生成 sentinel；模型工具参数秘密样本在隔离 home 文件中未出现；JSONL 不含入口或工具正文。
+  框架自己的线程、请求、任务和用量确实写盘，**不是全路径零写入**。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_pack_pick_bench.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2
+```
+
+- 当前版本收尾（全部命令在工作树根，均用上面同一解释器；全仓 pytest **未跑**）：
+  - 定向五个文件加 `guards9.txt` 的全部十二个文件，合并跑：**317 passed / 1 skipped / 0 failed，rc=0**。
+    跳过由既有平台能力检测明确报告：后台启动器进程身份不可用；不是把失败用例删除或改成跳过。
+    定向文件为 `test_pack_pick_bench.py`、`test_host_notices.py`、`test_learnpack_install.py`、
+    `test_capability_package_prompt_guidance.py`、`test_capability_package_selection.py`；grep 直接 import 新模块的测试只有新增文件。
+  - 独立 CLI 子进程实跑 `python scripts/eval/pack_pick_bench.py setup ...` 与 `run ... --fake --repeat 1`：两条 rc=0，
+    12 个独立主会话、16 条调用（main 12 / selection 4），三份输出均生成；临时目录结束清理，不是正式评测文件。
+  - `scripts/check_import_boundaries.py`：rc=0，`findings=0`；`-m ruff check agent_py_agent scripts`：rc=0。
+  - `scripts/check_doc_sync.py --base 6e8f61564`：rc=0，`DOC_SYNC_PASS`；`git diff --check 6e8f61564`：rc=0。
+  - `scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：rc=0，hard=0；生成报告还原，不提交。
+  - `scripts/check_clean_package.py .`：rc=0，未发现发布阻塞项；新增文件须先 git add，未登记的源码会按原守卫被拒绝。
+  - `bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：rc=0，原输出为“新增告警: 0”“消失告警: 0”。
+  - 开发中曾被架构守卫抓出两个 `**kwargs` 服务接口、被 size_diff 抓出三项新增告警；已改为原解析接缝、标准库假传输和单层 helper，
+    不加豁免或 baseline，不放宽断言。最终结果只对应修改后的版本。
+- 变异：独立子进程中一次替换一个函数，退出即恢复；源码前后 SHA-256 一致，不改产品源码或守卫。以下均运行
+  `agent_py_agent/tests/test_pack_pick_bench.py` 内对应测试（只认 pytest rc=1，不把外层检测器的 rc=0 当测试成功）。
+
+  | 变异位置与做法 | 测试函数（省略 `test_` 前缀） | pytest rc | 抓到 |
+  | --- | --- | --- | --- |
+  | results.judge_packages：对口恒假 | judgement_reads_structured_get_and_keeps_only_tool_identity | 1 | 是 |
+  | results._summary_row：无关分母混入对口题 | summary_separates_selection_main_languages_denominators_and_unknown_tokens | 1 | 是 |
+  | bench.safe_output：不拒绝真实 home | home_guard_refuses_real_descendant_alias_missing_and_ancestor | 1 | 是 |
+  | runtime._stronger_rule：B 保持原采用行 | arm_patch_changes_only_adoption_restores_on_failure_and_does_not_write | 1 | 是 |
+  | runtime.arm_context：C 强制关闭 | arm_patch_changes_only_adoption_restores_on_failure_and_does_not_write | 1 | 是 |
+  | runtime.FirstCallTap.primary：原工具响应直接交给循环 | setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers | 1 | 是，进入 handler 即失败 |
+  | runtime._record_row：selection 归 main | setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers | 1 | 是 |
+  | results.usage_fields：拿本地估算补缺报 | summary_separates_selection_main_languages_denominators_and_unknown_tokens | 1 | 是，900 不是 None |
+
+  总计 8/8 抓到。缺报变异第一次因不完整替身属性失败，补齐替身后重跑，确认是业务断言失败而非缺字段假阳性。
+- 未验证：真模型/真实凭据、39 句自然召回、生产 TUI/飞书、工具实际读取/方法采用/业务质量、w1 集成后的行为。
+
+## w1 第 1 步：能力开关改完立即生效（2026-10-07，本地已实现、待 3a 复核）
+
+- **来源与做法**：3a 的 w1-step1 任务，基线 `6e8f61564`，代码提交 `073e64237`。选包开关原先吃 agent 缓存，管理员 `/settings` 保存后仍提示重启。
+  `self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS` 统一两个自动装和选包三个键；主/子判断现读，读不到按 dataclass 默认，
+  其它预算仍是原缓存实例。两个自动装的回执、命令和 unreadable 版本标记不变。参数中心、前端目录都消费后端事实。
+- **新增合同**：放在现有 `test_capability_selection_scope.py`，覆盖三键立即生效/名单外预算重启、同 agent 关→开与开→关、
+  坏文件/非法布尔/不可读时不吃缓存 true、子入口双方向现读，以及真实管理员设置服务的回执→原 agent 下一次 scope。
+  `test_backend_config_catalog.py` 改成逐字段比后端 effect，不另抄名单。修复前 10 个断言失败（pytest rc=1，无收集错误）。
+- **固定跑法**：所有命令先在本工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，pytest 统一前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest`，后缀
+  `-q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w1 -o addopts=''`。
+  `-o addopts=''` 只保留清楚的实跑统计，不改变断言或选择范围。
+- **直接回归**：`test_capability_selection_scope.py test_self_install_switches.py test_backend_config_catalog.py
+  test_frontend_settings_labels.py test_subagent_package_entries.py`（均在 `agent_py_agent/tests/`）：94 passed，rc=0。
+  `node frontend/scripts/sync-backend-config.mjs` 已生成目录（265 个字段）。
+- **引用方 + guards9 联合**：文件列表用 `rg -l '(from|import).*?(package_selection_scope|subagent_package_entries|parameter_registry)'
+  agent_py_agent/tests`，再加任务指定 guards9 清单全部文件。实跑 **618 passed / 9 skipped / 3 failed，rc=1**。
+  失败全部在 `test_plugin_sandbox_v8.py`：`test_macos_v8_narrows_read_and_enforces_network[True]`、
+  `test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home`。
+  三项均实际调用 sandbox-exec，退出 71，明确回 `sandbox_apply: Operation not permitted`；没有把无响应猜成隔离。
+- **真正基线复核**：按共同规则用 `git worktree add --detach <临时工作树> 6e8f61564`，仅在临时工作树根、同一 Python/
+  PYTHONPATH 口径重跑上述三个完整 node id（临时目录 `--basetemp` 独立）。结果 **3 failed，rc=1**，三处均同样的退出 71/权限拒绝。
+  临时工作树已用 `git worktree remove` 删除。因此三项是同环境基线也失败；不修改、删除或 skip 原测试，沙箱外真机复核仍未验证。
+- **变异（一次一处，每次跑完立即原样还原，只认 pytest rc=1）**：
+
+  | 变异点 | 文件与用例选择 | 结果 | 是否抓到 |
+  | --- | --- | --- | --- |
+  | `package_selection_scope` 开关改回 `config.enable_capability_package_selection` 缓存读 | `test_capability_selection_scope.py -k selection_scope_reads_switch_fresh_without_refreshing_cached_budgets` | 2 failed / 35 deselected；rc=1 | 是，双方向断言失败 |
+  | `CAPABILITY_FRESH_SWITCH_KEYS` 去掉选包键，只剩两个自动装键 | `test_capability_selection_scope.py -k fresh_switch_registry_reports_immediate_but_budgets_still_require_restart` | 1 failed / 2 passed / 34 deselected；rc=1 | 是，选包时机变成 restart_gateway |
+
+- **收尾门禁（实际执行）**：恢复后五个直接文件再跑仍 **94 passed，rc=0**；引用方 + 全部 guards9 再跑仍
+  **618 passed / 9 skipped / 3 failed，rc=1**，三个失败与上文相同，不登记联合全绿。测试只把两处长 import 拆成多行以修 I001，
+  没有改断言、选择范围或产品行为；修复后的 `$PY -m ruff check agent_py_agent scripts` 为 `All checks passed!`，rc=0。
+  `$PY scripts/check_import_boundaries.py` 为 `IMPORT_BOUNDARIES findings=0`，rc=0；`$PY scripts/check_doc_sync.py` 为 `DOC_SYNC_PASS`，rc=0。
+  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
+  `strict_scope_total=2190 hard=0 high-risk=1494 soft=696 test_advisory=1239 blocked=False`，rc=0；这是接受基线告警，不是全仓零告警。
+  `git diff --check 6e8f61564` 无输出、rc=0；`$PY scripts/check_clean_package.py .` 为 `OK: . 未发现发布阻塞项`，rc=0。
+  code-size 与 size_diff 后均已还原生成的 `CODE_SIZE_REPORT.md`，不提交报告。
+  `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` 已执行，`Config catalog is in sync (265 fields).`，rc=0；
+  最后仍用该命令、`$PY scripts/check_doc_sync.py --base 6e8f61564` 与区间 `git diff --check` 复核冻结交付，最终结果见交接报告。
+- **size_diff 全部输出**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`，rc=0，对线上 step17w 告警身份比对：
+
+  ```text
+  新增告警: 0
+  消失告警: 0
+  ```
+- **未做/未验证**：第 2 步的配置和会话沿用没有实现；真实 Gateway/TUI/飞书、真模型、生产热切换、Linux 多版本/全量与线上 CI 未验证。
+  不启停 Gateway、不运行 my-agent、不推远端，不安装依赖。
 
 ## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
 

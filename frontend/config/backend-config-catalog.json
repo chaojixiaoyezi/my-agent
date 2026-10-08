@@ -9,7 +9,7 @@
     {
       "id": "capability_config",
       "path": "agent_py_agent/config/capability_config.yaml",
-      "fieldCount": 37
+      "fieldCount": 38
     }
   ],
   "schema": {
@@ -4310,14 +4310,14 @@
           {
             "key": "enable_capability_package_selection",
             "label": "enable_capability_package_selection（enable capability package selection）",
-            "description": "是否在新主任务首次业务请求前，用准备时绑定的主模型选择已授权能力包。 - 默认关闭；开启会增加辅助模型用量、等待时间和原任务记录，并有界读取选中包的入口。 - 有授权候选时，纯问答或空选也会留下普通任务记录，可在任务列表看到；不创建 Goal，不改变 Goal 的运行状态。 - 每任务只准备一次，明确空选、失败、停止及续跑均不自动重试；旧任务不补选。 - 新子线程仅在原首请求资格内读取显式授权且同代 pin 的入口，不运行选择模型、不改 pin；旧线程不补资格。 - 子入口复用下方总预算及原权限；Jev 关闭仍可准备入口，关闭本开关则保持原子代理路径。 - 只选择原有权限内的包，不执行包内脚本，不扩大工具权限；后续正常自动选模仍可能改变业务模型。",
+            "description": "是否在新主任务首次业务请求前，用准备时绑定的主模型选择已授权能力包。 - 默认关闭；开启会增加辅助模型用量、等待时间和原任务记录，并有界读取选中包的入口。 - 有授权候选时，纯问答或空选也会留下普通任务记录，可在任务列表看到；不创建 Goal，不改变 Goal 的运行状态。 - 每任务只准备一次，明确空选、失败、停止及续跑均不自动重试；旧任务不补选。 - 新子线程仅在原首请求资格内读取显式授权且同代 pin 的入口，不运行选择模型、不改 pin；旧线程不补资格。 - 子入口复用下方总预算及原权限；Jev 关闭仍可准备入口，关闭本开关则保持原子代理路径。 - 只选择原有权限内的包，不执行包内脚本，不扩大工具权限；后续正常自动选模仍可能改变业务模型。 - 管理员 /settings 或配置文件改完，下一次主任务/子入口判断马上生效，不用重启；其它预算项仍要重启。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
             "category": "capability",
             "categoryLabel": "能力路由",
             "advanced": true,
-            "restartRequired": true,
+            "restartRequired": false,
             "riskLevel": "medium",
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
@@ -4325,9 +4325,26 @@
             "order": 2
           },
           {
+            "key": "conversation_method_carry_enabled",
+            "label": "conversation_method_carry_enabled（conversation method carry enabled）",
+            "description": "是否沿用本会话成功读过的方法（能力包为主，skill 简单版）。默认开，只有管理员 /settings 能改，模型不能改。 - 主会话最多记 5 个方法；包保留最近 8 份已读资料路径，目录标注在用；压缩后按原授权带回入口和重读参数。 - 不增加模型调用，不执行资源或扩大权限；关闭时不记账、不带回，目录保持原字节。改完马上生效，预算仍缓存。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 3
+          },
+          {
             "key": "capability_package_selection_max_input_tokens",
             "label": "capability_package_selection_max_input_tokens（capability package selection max input tokens）",
-            "description": "选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。 后端原有结构化重试可能带来多次 HTTP；输出沿原模型配置，不保证固定一次 HTTP 或固定总 token。",
+            "description": "选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。 候选只受输入预算限制，不受推荐候选数上限限制；预算不足按现有推荐打分稳定排序，同分保留原序，不过滤零分包。 后端原有结构化重试可能带来多次 HTTP；输出沿原模型配置，不保证固定一次 HTTP 或固定总 token。",
             "type": "number",
             "defaultValue": 3000,
             "currentValue": 3000,
@@ -4339,14 +4356,14 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 3,
+            "order": 4,
             "min": 0,
             "max": 200000
           },
           {
             "key": "capability_candidate_limit",
             "label": "capability_candidate_limit（capability candidate limit）",
-            "description": "推荐与选包共用的候选数上限；0 不限制数量，仍按输入预算省略放不下的完整候选。",
+            "description": "只控制推荐提示中“本轮能力包候选”段的条数；0 不限制推荐条数，仍受元数据预算限制，不控制开工前选包。",
             "type": "number",
             "defaultValue": 5,
             "currentValue": 5,
@@ -4358,7 +4375,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 4,
+            "order": 5,
             "min": 0,
             "max": 1000000
           },
@@ -4377,7 +4394,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 5,
+            "order": 6,
             "min": 0,
             "max": 200000
           },
@@ -4396,7 +4413,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 6
+            "order": 7
           },
           {
             "key": "capability_grant_max_skills",
@@ -4413,7 +4430,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 7,
+            "order": 8,
             "min": 0,
             "max": 1000000
           },
@@ -4432,7 +4449,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 8,
+            "order": 9,
             "min": 0,
             "max": 1000000
           },
@@ -4451,7 +4468,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 9,
+            "order": 10,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4471,7 +4488,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 10,
+            "order": 11,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4491,7 +4508,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 11,
+            "order": 12,
             "min": 0,
             "max": 1000000
           },
@@ -4510,7 +4527,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 12
+            "order": 13
           },
           {
             "key": "subagent_failure_split_max_depth",
@@ -4527,7 +4544,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 13,
+            "order": 14,
             "min": 0,
             "max": 1000000
           },
@@ -4546,7 +4563,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 14
+            "order": 15
           },
           {
             "key": "subagent_stream_activity_interval_seconds",
@@ -4563,7 +4580,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 15,
+            "order": 16,
             "min": 0,
             "max": 3600
           },
@@ -4582,7 +4599,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 16
+            "order": 17
           },
           {
             "key": "subagent_first_token_notice_seconds",
@@ -4599,7 +4616,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 17,
+            "order": 18,
             "min": 0,
             "max": 3600
           },
@@ -4618,7 +4635,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 18,
+            "order": 19,
             "min": 0,
             "max": 3600
           },
@@ -4637,7 +4654,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 19,
+            "order": 20,
             "min": 0,
             "max": 3600
           },
@@ -4656,7 +4673,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 20
+            "order": 21
           },
           {
             "key": "subagent_input_media_enabled",
@@ -4673,7 +4690,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 21
+            "order": 22
           },
           {
             "key": "capability_pack_host_verification_enabled",
@@ -4690,7 +4707,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 22
+            "order": 23
           },
           {
             "key": "capability_pack_self_install_enabled",
@@ -4702,12 +4719,12 @@
             "category": "capability",
             "categoryLabel": "能力路由",
             "advanced": true,
-            "restartRequired": true,
+            "restartRequired": false,
             "riskLevel": "medium",
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 23
+            "order": 24
           },
           {
             "key": "plugin_self_install_enabled",
@@ -4719,12 +4736,12 @@
             "category": "capability",
             "categoryLabel": "能力路由",
             "advanced": true,
-            "restartRequired": true,
+            "restartRequired": false,
             "riskLevel": "medium",
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 24
+            "order": 25
           },
           {
             "key": "action_candidate_auto_execute_enabled",
@@ -4741,7 +4758,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 25
+            "order": 26
           },
           {
             "key": "decision_subagent_model_mode",
@@ -4758,7 +4775,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 26
+            "order": 27
           },
           {
             "key": "decision_subagent_model_candidate_profile_ids",
@@ -4775,7 +4792,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 27
+            "order": 28
           },
           {
             "key": "decision_skill_tool_context_policy",
@@ -4792,7 +4809,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 28
+            "order": 29
           },
           {
             "key": "decision_skill_tool_optional_categories",
@@ -4813,7 +4830,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 29
+            "order": 30
           },
           {
             "key": "decision_skill_tool_mode",
@@ -4830,7 +4847,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 30
+            "order": 31
           },
           {
             "key": "decision_agent_timeout_min_seconds",
@@ -4847,7 +4864,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 31,
+            "order": 32,
             "min": 0,
             "max": 3600
           },
@@ -4866,7 +4883,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 32,
+            "order": 33,
             "min": 0,
             "max": 3600
           },
@@ -4885,7 +4902,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 33
+            "order": 34
           },
           {
             "key": "session_messaging_user_enabled",
@@ -4902,7 +4919,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 34
+            "order": 35
           },
           {
             "key": "session_task_admin_enabled",
@@ -4919,7 +4936,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 35
+            "order": 36
           },
           {
             "key": "session_task_max_chain_depth",
@@ -4936,7 +4953,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 36,
+            "order": 37,
             "min": 0,
             "max": 1000000
           },
@@ -4955,7 +4972,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 37,
+            "order": 38,
             "min": 0,
             "max": 1000000
           }

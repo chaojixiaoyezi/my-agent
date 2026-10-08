@@ -320,8 +320,9 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return prompt
 
 
-# LLM: 保持 Goal/workspace/execution facts 原准备顺序；宿主与 child 只冻结同一次 gather，纯预览不得调用这里改变 Goal 修订号。
-# 函数用途: 读取本轮真实宿主事实并交给原 PromptBuilder，保留选中名卡、执行事实和缓存分段。
+# LLM: 保持 Goal/workspace/execution facts 原准备顺序；在用身份已随 ToolLoopExecuteParams 冻结，不能在渲染时替换执行参数，
+#   否则 Compact 的原参数身份核对会失败。宿主与 child 只冻结同一次 gather，纯预览不改变 Goal 修订号；联测 method_gateway。
+# 函数用途: 读取宿主事实并透传逐 run 冻结的方法名单，原名卡与纯请求投影共用布局。
 def _render_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     request = tool_loop_prompt_request(
         params,
@@ -1468,10 +1469,12 @@ def next_tool_loop_model_response(
             )
             return ModelTurnRequest(prompt, response, params)
         if tool_rounds == 0:
+            from ..capability.method_carry import prepare_conversation_method_carry
             from ..capability.package_selection_runtime import prepare_capability_package_selection
             from ..capability.subagent_package_entries import prepare_subagent_package_entries
 
             prepare_capability_package_selection(agent, params)
+            prepare_conversation_method_carry(agent, params)
             prepare_subagent_package_entries(agent, params)
         prompt = build_tool_loop_prompt(agent, params)
         prepared, prompt = prepare_request_context(agent, params, prompt)

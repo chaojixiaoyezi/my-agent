@@ -14,7 +14,8 @@
 #   正文读取及 pin 共用 package_read；本工具仍沿原 ToolExecutor 准入，宿主加载不伪造工具回执。
 #   能力包结果带 made_by_me（她自己学来做的包，learnpack_domain 同一判断；同领域只能并进这种包），只对本机管理员算，读不到安装表
 #   就都当 false，不影响检索。
-#   修改时同步检查 skill_tree、包发现、选择器恢复和原生归档后精确复制测试。
+#   主会话成功 get 在返回前经 method_carry 原子记账，附带故障不能改变回执；失败/search 不记。
+#   修改时同步检查 skill_tree、包发现、会话沿用和原生归档后精确复制测试。
 # 模块用途: 模型的"技能书架检索台":说一句需求,给出最相关的几个技能和它们的
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
 from __future__ import annotations
@@ -36,6 +37,7 @@ from ..tooling.models import (
     ToolRuntimePolicy,
 )
 from .learnpack_domain import self_made_package_ids
+from .method_carry import record_method_read
 from .package_read import (
     continuation_mismatches,
     package_continuation,
@@ -191,7 +193,7 @@ class SkillSearchTool(BaseTool):
 
     # LLM: 解析不到包时先看主任务 pin 诊断（停用/换代则回执让模型告诉用户）；解析到后先比对显式代次，不符只回参数纠错；
     #   再用同一 resolve 判未声明成员并仅给参数纠错；取消/中断传播，真实读取仍共用 reader 和原 pin。
-    # 函数用途: 检索或读取包资源；路径或版本字段填错时引导重新显式调用，不自动换路径、读正文或改任务引用。
+    # 函数用途: 检索或读取包资源，成功 get 才记沿用；路径或版本字段填错不自动换路径、读正文或改任务引用。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
             return _invalid("包范围只接受 search/get，不能同时传 skill_id")
@@ -224,6 +226,8 @@ class SkillSearchTool(BaseTool):
                     offset=offset, max_chars=_nonnegative_int(params, "max_chars", max(1, int(config.tool_read_max_chars))),
                 )
             payload = {**_package_navigation(package), **payload}
+            if action == "get":
+                record_method_read(self.agent, package, resource_path)
             return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
@@ -234,7 +238,7 @@ class SkillSearchTool(BaseTool):
 
     # LLM: 保持普通 Skill resolve 的既有优先级；失败后仅精确匹配当前受限包身份来给建议，不读成员、不 pin、不转换执行。
     #   读正文失败时回执在 details.error_code 带出快照异常的结构化码，调用方不解析 error 文案。
-    # 函数用途: 读取普通 Skill，或为错填包身份的请求返回仍为失败的结构化纠错信息。
+    # 函数用途: 读取普通 Skill，成功后记主会话沿用；错填包身份仍失败，不记账或自动读取。
     def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
         if not skill_id:
@@ -273,6 +277,7 @@ class SkillSearchTool(BaseTool):
             "content_sha256": entry.content_sha256,
             "body": body,
         }
+        record_method_read(self.agent, entry)
         return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 

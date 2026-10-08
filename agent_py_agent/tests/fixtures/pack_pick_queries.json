@@ -1,0 +1,6 @@
+[
+  {"id":"zh-novel","query":"写一章小说，先规划人物和伏笔。","lang":"zh","query_domain":"novel","positive_packs":["novel"]},
+  {"id":"en-drama","query":"Plan the scenes for a short drama.","lang":"en","query_domain":"drama","positive_packs":["drama"]},
+  {"id":"fr-novel","query":"Prépare les personnages du premier chapitre du roman.","lang":"fr","query_domain":"novel","positive_packs":["novel"]},
+  {"id":"zh-unrelated","query":"二加二等于几？","lang":"zh","query_domain":"general","positive_packs":[]}
+]
