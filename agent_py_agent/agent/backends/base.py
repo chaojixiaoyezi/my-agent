@@ -75,6 +75,8 @@ class BackendOptions:
     reasoning_control: str = "none"
     # 模型档案声明的服务商思考档位（所有 effort 协议按声明过滤）；空表示未声明，沿各协议原通用范围。
     reasoning_levels: tuple[str, ...] = ()
+    # 模型能不能用 configuration_update 项改思考档位：auto 按已核对的模型名前缀判断，on/off 由档案显式声明（见 responses.py）。
+    reasoning_update_items: str = "auto"
     # 已解析的结构化输出方式（native/json_object，见 structured_output_mode.py）；随 profile 冻结。
     structured_output: str = "native"
 
@@ -92,6 +94,10 @@ class ProviderRequestOptions:
     #   bounded_output_tokens 与后端配置取小，绝不放大既有上限。
     # 字段用途: 携带调用方显式给出的本次请求输出 token 上限，供适配器构造请求体。
     max_output_tokens: int | None = None
+    # LLM: 压缩降档专用（10-08）：要通过 input 末尾的 configuration_update 项申请的档位，只有 Responses 后端消费，
+    #   空串不插入。请求级 reasoning.effort 保持原值，所以前缀缓存不失配（OpenAI 缓存文档的推荐做法）。
+    # 字段用途: 携带压缩辅助调用的降档申请；普通请求留空。
+    reasoning_update_effort: str = ""
     # LLM: cabfix：一次调用的绝对墙钟上界（秒），None=不设总期限（主模型与旧调用方保持原语义）。
     #   与 first_event_timeout_seconds 的区别：后者是"等首个事件"的窗口，收到事件后可续期；
     #   本字段是整次调用的硬上限，无论有没有事件到达都不延长。辅助调用用它堵住

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from ..agent_core.model.call_runtime import (
+    compact_summary_output_reserve_tokens,
     max_output_tokens,
     model_call_ledger,
     model_name,
@@ -309,7 +310,11 @@ def _invoke_auxiliary_generate(
     def _observe_provider_attempt(event: dict[str, object]) -> None:
         record_model_provider_attempt(ledger, call_id, event)
 
-    with provider_runtime_scope(request.agent, request), provider_attempt_observer(_observe_provider_attempt):
+    # 压缩类调用也算请求前缀诊断（backends/cache_diagnostics）：和上一次主请求比 system/工具/历史链，账本里留变化码，
+    # 用来回答"压缩请求有没有复用主请求前缀"；不记正文，不改请求。
+    with provider_runtime_scope(request.agent, request), provider_attempt_observer(
+        _observe_provider_attempt, cache_diagnostics=_is_compact_purpose(request.purpose),
+    ):
         with global_llm_admission_slot():
             llm_inflight(1)
             try:
@@ -382,9 +387,11 @@ def _auxiliary_provider_options(
     system_instruction = str(request.system_instruction or "")
     timeouts = timeouts or AuxiliaryTimeoutPlan()
     thinking_disabled, reasoning_effort = _compact_reasoning_options(request, backend)
-    declared = bool(system_instruction or thinking_disabled or reasoning_effort)
+    reasoning_update_effort = _compact_reasoning_update_effort(request, backend)
+    output_cap = _compact_output_cap(request)
+    declared = bool(system_instruction or thinking_disabled or reasoning_effort or reasoning_update_effort)
     has_timeouts = timeouts.first_event_budget_seconds is not None or timeouts.total_deadline_seconds is not None
-    if not (declared or has_timeouts):
+    if not (declared or has_timeouts or output_cap is not None):
         return None
     if not _accepts_keyword(generate, "request_options"):
         if declared:
@@ -394,9 +401,41 @@ def _auxiliary_provider_options(
         system_instruction=system_instruction,
         thinking_disabled=thinking_disabled,
         reasoning_effort=reasoning_effort,
+        reasoning_update_effort=reasoning_update_effort,
+        max_output_tokens=output_cap,
         first_event_timeout_seconds=timeouts.first_event_budget_seconds,
         total_deadline_seconds=timeouts.total_deadline_seconds,
     )
+
+
+# LLM: 只给压缩类目的加本次输出封顶：读 call_runtime.compact_summary_output_reserve_tokens（与 compact 预算同源），
+#   只在它小于主请求上限时才带（否则 None 沿后端配置）；后端不收 request_options 时静默不带（与期限同一口径），
+#   供应商若因此判超窗仍走原分段链。
+# 函数用途: 返回压缩辅助调用要发的 max_output_tokens；不适用时返回 None。
+def _compact_output_cap(request: AuxiliaryModelCallRequest) -> int | None:
+    if not _is_compact_purpose(request.purpose):
+        return None
+    reserve = compact_summary_output_reserve_tokens(request.agent)
+    normal = max_output_tokens(request.agent)
+    return reserve if reserve > 0 and (normal <= 0 or reserve < normal) else None
+
+
+# LLM: 压缩降档只走"追加 configuration_update 项"这一条缓存安全的路（OpenAI 缓存文档：改请求级 reasoning.effort 会让
+#   前缀失配，GPT-6 系列应改用 configuration_update 项）：请求级档位仍沿线程（见 _compact_reasoning_options），由后端
+#   在 input 末尾插入档位更新项。条件：压缩目的、配置了 memory_compact_reasoning_level、后端声明
+#   supports_reasoning_update_items()；其它后端一律返回空串，继续沿线程档位，不冒险改请求级参数。
+# 函数用途: 返回压缩请求要通过 configuration_update 项申请的档位；不适用时返回空串。
+def _compact_reasoning_update_effort(request: AuxiliaryModelCallRequest, backend: object) -> str:
+    if not _is_compact_purpose(request.purpose):
+        return ""
+    supports = getattr(backend, "supports_reasoning_update_items", None)
+    if not callable(supports) or not supports():
+        return ""
+    from ..backends.reasoning_control import normalize_reasoning_level
+
+    configured = getattr(getattr(request.agent, "config", None), "memory_compact_reasoning_level", "") or ""
+    level = normalize_reasoning_level(configured)
+    return "" if level in {"", "auto", "off"} else level
 
 
 # LLM: 只有后端声明支持 provider 请求选项、且是明确标记的压缩目的、带线程身份时，才按线程读取思考档位。

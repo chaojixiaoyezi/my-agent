@@ -1,5 +1,31 @@
 # 设计台账
 
+## 压缩请求装进窗口、复用主请求前缀、降档不破坏缓存（compactfit，07，2026-10-08；状态：本地实现与定向测试完成，待隔离真机验证、待合 main 并部署）
+
+- **来由**：sol/astra 一次自动压缩 10～33 分钟（mc1/mc2/mc4、luna4 任务 2 实测），期间工人一半时间在压缩；MiniMax 同样中招。根因是算术：
+  单次缓存面请求的预算 = 窗口 − 输出预留，预留按主请求在构造期用 128k 默认窗口算出的 32000；27.2 万窗口按用户定的 90% 触发
+  （244,800）大于预算（240,000），26.2 万窗口的 MiniMax 同理（235,929 > 230,144），于是每次压缩都退到分段路径：换系统提示、
+  去掉工具、逐段总结，缓存命中 0%，再乘以线程的 max/xhigh 思考。luna（50 万窗口）和 DeepSeek（100 万）走单次路径只要
+  1～2 分钟 / 15～28 秒。对照 OpenAI Codex 与 DeepSeek Harness 的做法见
+  `~/.my-agent/releases/claude-tools/multicore-evidence/compaction-cache-reference-comparison.md`（证据目录，不进仓库）。
+- **改法**（都不动用户定的触发线）：
+  1. 压缩专用输出预留 `memory_compact_summary_max_output_tokens`（默认 16384，0 = 沿用主请求上限）：预算和辅助调用实际发的
+     `max_output_tokens` 都读 `call_runtime.compact_summary_output_reserve_tokens`，同源；sol/astra/MiniMax 的 90% 触发线从此低于单次预算。
+  2. 单次请求超预算时先瘦身再发（`compact_message_source.shrink_tool_outputs`）：按时间把最早的 tool_result 正文换成只含长度的
+     占位，最近两条不动，省够就仍发一次带工具、auto、同前缀的请求；省不够才走原分段链（分段仍拿完整来源，覆盖承诺不变）。
+  3. 压缩降档只走缓存安全的路：`memory_compact_reasoning_level`（默认 low，空 = 沿用会话档位）只对能用 `configuration_update` 项的
+     模型生效（`model_reasoning_update_items`：auto 按模型名前缀 gpt-6 判断，on/off 档案显式声明）；请求级 `reasoning.effort`
+     仍是线程档位，降档项插在压缩指令之前、已缓存历史之后（OpenAI 缓存文档"Change reasoning effort without rewriting the prefix"）。
+     DeepSeek/MiniMax 等暂不降档（DeepSeek 压缩本来十几秒；MiniMax 改请求级参数会不会破坏缓存未实测）。
+  4. 工具输出外置阈值默认 200000 → 32000 字符（约 8k 英文 token；Codex 每条 1 万 token、dsh 8192 字符）：每轮 20 万上下文的根子。
+  5. TUI 统计行加会话累计命中率（账本累计 cache_read ÷ 输入，只在供应商回报过缓存字段时显示）："缓存 会话 97% · 最近 85%"。
+  6. 压缩类辅助调用也算请求前缀诊断（`cache_diagnostics`），账本里留和上一次主请求比的变化码，用来回答"压缩请求有没有复用前缀"。
+- **没做、为什么**：健康线语义不改——分区只有"保留 ≤4 轮尾巴"和"全压"两种，第一候选已经是一次压到底，luna 第一次只压到 19.6 万
+  是当时活动回合的原生 IR 不归对话压缩管，不是健康线挡的。回合结束预压（Codex post-turn compaction）另排。
+- **待验证**：隔离 smoke 里用 sol/astra/MiniMax 各触发一次压缩，看压缩调用的耗时、缓存命中和变化码；luna 单次路径命中只有 2% 的
+  疑点（历史由 transcript 行加归档工具记录重建，可能与主请求的原生 IR 不逐字一致）按变化码定位后再决定是否让单次请求复用
+  `ActiveTurnCacheFork.provider_history_messages`。
+
 ## 学外部 agent 做成能力包或插件、自己装（learnpack，3a，2026-10-06；状态：第一期已合 main（c775bd4b4）并部署生产 step17q；2026-10-07 生产真模型测试发现的问题在分支 claude/3a-learnpack-prodfix 修，各轮修复都已合 main 并部署，最新是 step17w（11bc85ce8））
 
 - **第一期定稿（用户 10-06 后三轮，以此为准）**：学外部 agent 默认做成能力包，要联网/账号/常驻服务的做成插件；内部技能只从她自己的总结来（"让她总结一下"走现有自学习流水线），不再问"内部技能还是能力包"。名片照旧：学来的技能和能力包都和内置技能一样每次带名片、正文用到才读（靠字面打分判断相关不可靠）；下面"本体干净"条里的"常驻只放一句"和第 10 节第 1 级作废。两个开关「能力包自动装」「插件自动装」默认关、只有管理员能改：开着她自己装（只装她自己做的），关着她给一行确认、用户发回来由宿主只执行一次；能力包里要宿主运行的检查程序跟插件开关走。新工具 3 个（打包、安装、总结一下），都默认收起。估算改按会话·天算，原"15–35 元"作废；第一期 3a 单人约 24–28 小时，不花 DeepSeek，真实验收只用 MiniMax-M2.7 且要用户点头。详见设计文档第 11 节。

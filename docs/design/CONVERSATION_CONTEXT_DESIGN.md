@@ -123,6 +123,24 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 `agent_thread_id` 和相同的 summary/generation/checkpoint 状态机；它不生成根任务级 compact 包，也不注入
 另一份主 thread。孙代理递归遵守同一规则。
 
+## 压缩请求装进窗口与降档（2026-10-08，07，分支 `claude/07-compact-cache`）
+
+- 事故形状：sol/astra 的 90% 触发线 244,800 高于单次缓存面预算 240,000（窗口 − 构造期按 128k 默认算出的主请求输出上限 32000），
+  MiniMax 同理，所以每次压缩都走分段（换系统提示、去工具、0% 缓存、线程 max/xhigh 档位），10～33 分钟。
+- 预算与发送同源：`call_runtime.compact_summary_output_reserve_tokens` = min(`memory_compact_summary_max_output_tokens`, 主请求上限)，
+  `compact_request_budget` 的两个预算和 `auxiliary_model_call` 给压缩类目的发的 `request_options.max_output_tokens` 都只读它。
+- 超预算先瘦身：`compact_message_source.shrink_tool_outputs` 把最早的 tool_result 文字正文换成 `TOOL_OUTPUT_PLACEHOLDER`
+  （只含原长度），最近两条不动，带图或非文字块不动；省够就仍走 `_try_cached_compact_requests`（同 system、同工具、auto、指令在末尾），
+  省不够返回 None 走原分段链。分段仍拿 `attempt.message_source` 的完整来源。
+- 降档不破坏缓存：`ProviderRequestOptions.reasoning_update_effort` 只由压缩类目的设置，`OpenAIResponsesBackend` 在
+  `supports_reasoning_update_items()` 为真时把 `{"type": "configuration_update", "reasoning": {"effort": ...}}` 插在末尾动态 user
+  消息（压缩指令）之前；请求级 `reasoning.effort` 不变。能力判断：`model_reasoning_update_items` 档案 on/off 优先，auto 按模型名前缀 gpt-6。
+- 诊断：压缩类辅助调用开 `provider_attempt_observer(cache_diagnostics=True)`，账本记录带 `cache_diagnostic`（和上一次主请求比的
+  system/tools/历史链变化码）。
+- 显示：`model_metrics` 累计 `cache_read_input_tokens` 与 `cache_read_reported_calls`，`public_model_metrics` 多出
+  `cache_percent_session`；TUI 统计行"缓存 会话 N% · 最近 M%"，供应商没回报过缓存字段时沿旧文案只显示最近值。
+- 回归：`agent_py_agent/tests/test_compact_cache_surface_fit.py`。
+
 ## 摘要请求的工具控制与诊断（2026-09-26，集成方已吸收 Codex `d4dd6c094` 并补违规兜底，分支 `claude/curator-budget`）
 
 摘要只归纳已有材料，没有业务工具执行权。具有完整主请求缓存面的单次 transcript/tool-loop 摘要保留原 system/tools/history 并使用 `auto`，让工具 schema 继续位于缓存前缀；结构化工具调用只作为违规响应、绝不执行，沿原有界链最多再尝试一次无工具/`none` 摘要。

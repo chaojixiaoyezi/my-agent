@@ -252,6 +252,16 @@
 - `goal_continuation_idle_limit`：连续多少个持续目标自动续跑片没有工具调用或 Goal/任务结构化状态变化时自动暂停；默认 3，设为 0 表示不限。
   定义在 `AgentConfig`，随包 `agent_config.yaml` 的中文说明由参数登记表自动读取；按普通非安全整数参数登记，可从参数中心查看/修改，沿配置默认的 Gateway 重启生效语义。
 
+## 2026-10-08 新增参数（compactfit，07）
+
+- `memory_compact_summary_max_output_tokens`：压缩摘要请求的输出上限（含思考），默认 16384，0 = 沿用主请求输出上限；预算与实际发送
+  同源（`call_runtime.compact_summary_output_reserve_tokens`）。归 MemorySettings（`_memory_types`/`_memory_coercion` 同步），Gateway 重启生效。
+- `memory_compact_reasoning_level`：压缩摘要调用的思考档位，默认 low，空 = 沿用会话档位；只对能用 `configuration_update` 项的模型生效。
+- `model_reasoning_update_items`：模型能否用 `configuration_update` 项改档位，auto / on / off，默认 auto（按模型名前缀 gpt-6 判断）；
+  属模型档案字段（`model_scope` 后端缓存键已加），枚举在 `reasoning_control.REASONING_UPDATE_ITEM_MODES`。
+- `tool_output_externalize_min_chars` 默认 200000 → 32000（约 8k 英文 token）：全文仍存归档，模型看预览加引用。
+- 前端目录 `frontend/config/backend-config-catalog.json` 已重新生成（231 项 agent_config），`--check` 通过。
+
 ## 2026-10-01 前端参数目录重新生成与守卫
 
 - `frontend/config/backend-config-catalog.json` 按当前随包 YAML 重新生成为 **270 项**（agent_config 219、capability_config 31、

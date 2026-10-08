@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 压缩请求装进窗口与降档（compactfit，2026-10-08，07，分支 `claude/07-compact-cache`）
+
+- **新用例** `agent_py_agent/tests/test_compact_cache_surface_fit.py`（16 条）：压缩输出预留按配置且不超主请求上限；sol（272000）与
+  MiniMax（262144）的 90% 触发线 ≤ 单次缓存面预算、旧口径（预留 32000）装不下；瘦身只换最早的 tool_result、最近两条不动、带图不动、
+  两遍重放一致、原消息不改；超预算先瘦身仍单次（带工具、auto）、省不够才分段；Chat 载荷的压缩调用 `max_tokens` 为 16384 而普通
+  辅助调用不变；Responses gpt-6 系列压缩请求请求级 `reasoning.effort` 不变且在压缩指令前插 `configuration_update`（gpt-5.5 auto 不插、
+  档案 on 插、off 不插、未配置或同档不插）；两个 memory 键的解析与回退；会话累计命中率的累计与显示、没回报缓存字段时不显示。
+- **跑过的旧用例**（3a 的 `run_files312.sh`，ci-venv-312）：压缩预算/档位/来源 59 条、后端与配置守卫 261 条、输出预留/触发封顶/外置/
+  目录 94 条，全部通过。
+- **真机验证**：待隔离 smoke（sol、astra、MiniMax 各触发一次压缩，看耗时、命中率、变化码），见设计台账 compactfit 条目。
+
 ## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
 
 - **来由**：main 的 GitHub Actions 红了一周——Test（ubuntu，3.10/3.11/3.12 快速套件，单用例 60 秒）从 10-01 起、Cross-platform guard（macOS/Windows）从 10-05 起、每晚 Full Tests 都失败；本地 Mac、Docker（root、Python 在 /usr）都没暴露。

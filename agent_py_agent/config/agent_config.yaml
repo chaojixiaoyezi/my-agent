@@ -220,6 +220,17 @@ memory_context_calibration_carry_enabled: true
 # 自动压缩后的历史收缩目标百分比。
 # 只有当你的模型窗口特别大、或压缩后仍频繁再次触发压缩时，才需要调低它压得更狠；调高会更保守、保留更多历史，但可能很快又触发下一次压缩。
 memory_compact_recovery_target_percent: 60
+# 压缩摘要请求的输出上限（单位 tokens，含思考）；0 表示沿用主请求的输出上限（max_tokens 按窗口夹取后的值）。
+# 默认 16384：压缩请求要先在本地判断"整段历史 + 本值 ≤ 模型窗口"，装得下才发一次复用主请求前缀（缓存几乎全命中）的请求；
+# 装不下就退到分段路径（换系统提示、去掉工具、逐段总结，缓存命中 0%，sol/astra 实测 10～33 分钟）。
+# 之前按主请求的 32000 预留，27.2 万窗口的模型按 90% 触发时永远装不下。摘要本身一般几千 token，16384 足够；
+# 思考很长的模型若摘要被截断可以调大，但越大越容易退回分段。改完需要重启 Gateway 才生效。
+memory_compact_summary_max_output_tokens: 16384
+# 压缩摘要调用用什么思考档位：low / medium / high / xhigh / max，留空表示沿用会话当前档位。
+# 只对能用 configuration_update 项改档位的模型生效（OpenAI GPT-6 系列的 Responses 接口，见 model_reasoning_update_items）：
+# 请求级 reasoning.effort 保持会话档位不变，只在请求末尾追加一个降档项，这样前缀缓存不失配。写摘要不需要深思考，
+# 默认 low；其它模型（DeepSeek、MiniMax 等）暂不降档，仍沿用会话档位。改完需要重启 Gateway 才生效。
+memory_compact_reasoning_level: "low"
 # compact 自动续跑深度硬顶已降为代码常量（finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
 # compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
 # - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要
@@ -796,6 +807,9 @@ model_reasoning_control: auto
 # - Responses 的 xhigh 按 xhigh → high，ultra 按 ultra → max → xhigh → high；max 仍按 max → xhigh → high。
 # - Chat/Messages 的 xhigh 按 high、ultra 按 max → high；Responses 关闭思考只在声明了 none 或 minimal 时发送。
 model_reasoning_levels: []
+# 当前模型能不能在请求里追加 configuration_update 项改思考档位（OpenAI GPT-6 系列的 Responses 接口有这个能力，
+# 改档位不会让前缀缓存失配）：auto 按已核对的模型名前缀 gpt-6 判断，on / off 由档案显式声明。目前只有压缩降档用它。
+model_reasoning_update_items: auto
 # 智能程度自动检测：用户把 /effort 设成 auto 以外的档位，而当前模型没有声明思考控制方式、又不在上面已核对的名单里时，
 # 宿主用已保存的凭据在后台检测一次：同一道短题按“低”“最高”和不带参数各发 3 次，比较用量里的推理 token
 # （接口不单独报告推理 token 时比较输出 token）。确认支持就把这个模型档案的思考控制改为 effort（可用 /effort revert 撤销），
@@ -901,12 +915,15 @@ tool_artifact_read_budget_max_chars: 240000
 # 工具输出归档和工具调用解析预算：
 # - tool_output_externalize_min_chars: 工具输出达到多少字符或 UTF-8 bytes 后外置为 artifact；0 表示所有工具输出都外置。
 #   几 KB 的定位/抽取结果会直接进入下一轮上下文，避免模型只看到“命令完成”却看不到证据。
+#   2026-10-08 默认从 200000 降到 32000（约 8k 英文 token）：之前每轮上下文被整段测试日志、整份文件撑到约 20 万 token，
+#   每轮都按整段付费；参考 Codex 每条工具输出 1 万 token、DeepSeek Harness 8192 字符的上限。全文仍存归档，
+#   模型看预览（tool_output_preview_chars）加引用，需要时用 read_artifact 分页读回。
 # - tool_output_preview_chars: archive 记录里保留多少字符预览；完整内容走 artifact 引用读取。
 # - tool_output_externalize_on_low_headroom: 一条工具输出的估算 token 已不小于距自动压缩点的剩余余量时，即使没到
 #   上面的字符阈值也立刻外置（模型只看预览和恢复锚点），并让下一次模型请求前先走统一压缩；用来避免同一轮多条大结果
 #   把上下文冲过窗口后压缩再也放不下（COMPACT_CANDIDATE_TOO_LARGE）。关掉则只按字符阈值外置。
 # - tool_payload_*: 只限制模型发来的单次工具调用 JSON 形状，防止坏 payload 撑爆上下文；不是业务字段枚举。
-tool_output_externalize_min_chars: 200000
+tool_output_externalize_min_chars: 32000
 # 工具输出太长时会存成文件，对话里只留一段预览，需要时再按引用读全文。
 # 这个数就是预览保留的字符数，`0` 表示不留预览；一般不用改。
 tool_output_preview_chars: 4000

@@ -36,6 +36,8 @@ _REASONING_LEVEL_RULES = {
 }
 REASONING_LEVELS = tuple(_REASONING_LEVEL_RULES)
 REASONING_CONTROLS = ("auto", "effort", "budget", "none")
+# 模型能否用 configuration_update 项改档位的三种声明：auto 按已核对的模型名前缀判断，on/off 由档案显式声明。
+REASONING_UPDATE_ITEM_MODES = ("auto", "on", "off")
 LEVEL_LABELS = {level: rule.label for level, rule in _REASONING_LEVEL_RULES.items()}
 CONTROL_LABELS = {"effort": "按推理强度档位发送", "budget": "按思考预算发送（部分服务商只按开/关生效）", "none": "不支持调节"}
 # 思考预算按档位取值，最终夹到 [1024, max_tokens-1024]；空区间不发送，不能以抬高下界伪装成合法夹紧。
@@ -165,6 +167,19 @@ def responses_reasoning_field(control: str, level: str, levels: tuple[str, ...] 
     wanted = "off" if disabled else normalize_reasoning_level(level)
     choice = _provider_effort(wanted, "responses", levels)
     return {"reasoning": {"effort": choice}} if choice else {}
+
+
+# LLM: 压缩降档的 configuration_update 项（OpenAI GPT-6 系列的 Responses 接口）：档位按同一张表换算成服务商值，
+#   和请求级已发的档位相同就不插（白费一项）；control 不是 effort 或换算不出也不插。只读、不发网络。
+# 函数用途: 生成要追加到 input 末尾的档位更新项；不需要时返回 None。
+def responses_reasoning_update_item(control: str, level: str, current: object, levels: tuple[str, ...] | list[str]) -> dict | None:
+    if control != "effort" or not level:
+        return None
+    choice = _provider_effort(normalize_reasoning_level(level), "responses", levels)
+    current_effort = current.get("effort") if isinstance(current, dict) else None
+    if not choice or choice == current_effort:
+        return None
+    return {"type": "configuration_update", "reasoning": {"effort": choice}}
 
 
 # LLM: 给 /effort 回执与状态展示用的人读说明；只由结构化的档位、控制方式、协议与模型声明的服务商档位生成。

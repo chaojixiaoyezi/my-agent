@@ -13,6 +13,10 @@ from ..memory_archive.tokens import estimate_tokens_from_json_parts
 # 摘要来源里 Responses 加密思考密文的固定占位：密文只有原模型在原协议里能解开，摘要模型读到的只是一段 base64，
 # 每个助手轮约 3.6K 字符（09-30 生产实测 17 块、60712 字符，约 2 万估算 token）。固定字符串保证两遍来源逐字一致。
 REASONING_CIPHERTEXT_PLACEHOLDER = "[encrypted reasoning omitted from summary source]"
+# 单次压缩请求瘦身时替换较早工具结果正文的固定占位：只写原长度，不含正文；固定字符串保证两遍来源逐字一致。
+TOOL_OUTPUT_PLACEHOLDER = "[compact-omitted-tool-output chars={chars}] 这条较早的工具输出已为压缩请求省略，完整内容仍在会话归档中。"
+# 瘦身时永远原样保留的最近工具结果条数：摘要至少要看到最新的工具结果原文。
+SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT = 2
 
 
 # LLM: factory是同一冻结来源的准备层投影，可读盘且须关闭上游；容器不缓存正文，不能进入纯请求投影合同。
@@ -93,6 +97,66 @@ def summary_source_message(message: dict[str, Any]) -> dict[str, Any]:
 def _has_reasoning_ciphertext(block: object) -> bool:
     item = block.get("item") if isinstance(block, dict) and block.get("type") == "responses_reasoning" else None
     return isinstance(item, dict) and isinstance(item.get("encrypted_content"), str)
+
+
+# LLM: 单次缓存面压缩请求超预算时的瘦身投影（不是分段）：按时间顺序把最早的 tool_result 文字正文换成固定占位
+#   （保留块位置、tool_use_id 与其它字段，最近 SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT 条不动），直到省出的估算 token
+#   不少于 excess_tokens。只改交给摘要的临时副本，不改 rows、不改分段来源；省不够返回 None。带图或非文字的
+#   tool_result 不动。结果来源重放同一冻结元组，两遍逐字一致。
+# 类用途: 瘦身结果：新的可重放来源和被替换的条数。
+@dataclass(frozen=True)
+class ShrunkMessageSource:
+    source: CompactMessageSource
+    replaced: int
+
+
+# 函数用途: 把最早的工具结果正文换成占位，让单次压缩请求装进窗口而不放弃主请求前缀；省不够返回 None。
+def shrink_tool_outputs(source, excess_tokens: int, *, keep_recent: int = SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT):
+    messages = list(source)
+    slots = [
+        (index, position)
+        for index, message in enumerate(messages)
+        for position, block in enumerate(_content_blocks(message))
+        if _tool_result_text(block) is not None
+    ]
+    saved = replaced = 0
+    for index, position in slots[:max(0, len(slots) - max(0, int(keep_recent)))]:
+        if saved >= excess_tokens:
+            break
+        block = messages[index]["content"][position]
+        text = _tool_result_text(block)
+        placeholder = TOOL_OUTPUT_PLACEHOLDER.format(chars=len(text))
+        if len(text) <= len(placeholder):
+            continue
+        saved += max(0, estimate_tokens(text) - estimate_tokens(placeholder))
+        content = list(messages[index]["content"])
+        content[position] = {**block, "content": placeholder}
+        messages[index] = {**messages[index], "content": content}
+        replaced += 1
+    if not replaced or saved < excess_tokens:
+        return None
+    frozen = tuple(messages)
+    return ShrunkMessageSource(CompactMessageSource(lambda: iter(frozen)), replaced)
+
+
+# 函数用途: 返回一条消息的内容块列表；content 不是列表时返回空元组。
+def _content_blocks(message: object) -> tuple:
+    content = message.get("content") if isinstance(message, dict) else None
+    return tuple(content) if isinstance(content, list) else ()
+
+
+# 函数用途: 取出 tool_result 块里可替换的纯文字正文；带图或非文字块返回 None（不动）。
+def _tool_result_text(block: object) -> str | None:
+    if not isinstance(block, dict) or block.get("type") != "tool_result":
+        return None
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content and all(
+        isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str) for item in content
+    ):
+        return "\n".join(item["text"] for item in content)
+    return None
 
 
 # LLM: 只有显式CompactMessageSource替换数组编码；其余值仍使用原估算器，顶层字段数和原JSON参数保持。

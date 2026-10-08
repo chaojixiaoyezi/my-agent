@@ -231,6 +231,8 @@ class HttpBackend(BaseBackend):
         # 思考控制方式随 profile 冻结；档位由每次请求的 ProviderRequestOptions.reasoning_effort 传入。
         self.reasoning_control = str(options.reasoning_control or "none")
         self.reasoning_levels = tuple(options.reasoning_levels or ())
+        # 是否能用 configuration_update 项改档位随 profile 冻结；只有 Responses 后端按它判断，其它协议不读。
+        self.reasoning_update_items = str(options.reasoning_update_items or "auto")
         # 结构化输出方式随 profile 冻结；只有 OpenAI Chat 兼容接口会用到 json_object。
         self.structured_output = str(options.structured_output or "native")
         self.stream_enabled = bool(options.stream_enabled)

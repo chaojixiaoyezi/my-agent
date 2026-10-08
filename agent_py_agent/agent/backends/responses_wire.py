@@ -82,6 +82,16 @@ def input_items(prompt: str, messages: list | None, system: str, model: str) -> 
     return result
 
 
+# LLM: configuration_update 项只能放在已缓存前缀之后：历史和稳定前缀不动，插在末尾那条动态 user 消息（压缩指令）
+#   之前；末尾不是 user 消息时直接追加。不改其它项的顺序，validate_responses_input 不检查未知类型。
+# 函数用途: 把档位更新项插进 Responses input 末尾，保持前缀逐字不变。
+def insert_reasoning_update(items: list[dict], update: dict) -> list[dict]:
+    position = len(items)
+    if items and items[-1].get("role") == "user" and items[-1].get("type") in (None, "message"):
+        position -= 1
+    return [*items[:position], update, *items[position:]]
+
+
 # LLM: 展示回调失败不能改变模型完成状态；此函数不生成或执行工具。
 # 函数用途: 安全通知 TUI 一个流式增量或思考完成事件。
 def _notify(callback, value: str) -> None:

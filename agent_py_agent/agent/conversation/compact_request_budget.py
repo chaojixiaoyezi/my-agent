@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
 
-from ..agent_core.model.call_runtime import max_output_tokens
+from ..agent_core.model.call_runtime import compact_summary_output_reserve_tokens
 from ..agent_core.model.context_window import resolve_model_context_window_tokens
 from ..backends.base import ModelResponse
 from ..backends.errors import ProviderContextWindowError
@@ -34,6 +34,7 @@ from .compact_media_policy import COMPACT_VISION_SUMMARY_FAILED
 from .compact_message_source import (
     CompactMessageSource,
     estimate_compact_payload,
+    shrink_tool_outputs,
     summary_source_message,
 )
 from .compact_text_source import CompactTextSource
@@ -77,15 +78,17 @@ _SEGMENT_MERGE_INSTRUCTION = (
 # 函数用途: 算出当前模型一次摘要请求允许的输入 token 上限。
 def compact_summary_budget(agent: object) -> int:
     window = resolve_model_context_window_tokens(agent)
-    return max(1, int(window * 0.8) - max_output_tokens(agent))
+    return max(1, int(window * 0.8) - compact_summary_output_reserve_tokens(agent))
 
 
 # LLM: 带主请求工具的缓存安全单次摘要，前缀就是主请求本身，容量上限与主请求同一口径（窗口减输出预留）；80% 的
 #   compact_summary_budget 只管不再共享前缀的分段/无工具请求。10-05 生产：压缩触发点在窗口 90%（用户决定），旧口径让
 #   每次缓存安全摘要都超 80% 预算、改走分段，压缩类辅助调用命中 0%。供应商仍判窗口超限时沿原逻辑减半预算改分段。
+#   10-08：输出预留改读压缩专用的 compact_summary_output_reserve_tokens（默认 16384，与辅助调用实际发的
+#   max_output_tokens 同源）；之前按主请求的 32000 预留，27.2 万窗口按 90% 触发时单次请求永远装不下。
 # 函数用途: 算出缓存安全单次摘要允许的输入 token 上限。
 def compact_cache_surface_budget(agent: object) -> int:
-    return max(1, resolve_model_context_window_tokens(agent) - max_output_tokens(agent))
+    return max(1, resolve_model_context_window_tokens(agent) - compact_summary_output_reserve_tokens(agent))
 
 
 # LLM: 与内部 _request_tokens 同一口径（prompt、messages/来源、tools、system）；供媒体准入在构造来源后估算文字部分。
@@ -123,8 +126,9 @@ def generate_bounded_compact_response(
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
     attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
     single_budget = compact_cache_surface_budget(request.agent) if request.tools else budget
-    result = (_try_cached_compact_requests(request, attempt)
-              if _request_tokens(request, message_source) <= single_budget else None)
+    cached_source = _single_request_source(request, message_source, single_budget)
+    result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source))
+              if cached_source is not None else None)
     if result is not None:
         if result.response is not None:
             return result.response
@@ -134,6 +138,37 @@ def generate_bounded_compact_response(
             tool_call_reply=result.tool_call_reply,
         )
     return _summarize_or_return_tool_call(request, attempt, source_progress)
+
+
+# LLM: 单次缓存面请求的来源裁决（10-08）：装得下就原样发；装不下且来源是可重放消息数组时，先把最早的工具结果正文
+#   换成占位（compact_message_source.shrink_tool_outputs，最近两条不动）再量一次，装得下才发单次请求。瘦身只改交给
+#   摘要的临时副本；分段路径仍拿原始完整来源（attempt.message_source 不变），覆盖承诺不变。装不下返回 None，
+#   调用方按原分段链处理。参考 OpenAI Codex 远端压缩前把旧工具输出换占位、DeepSeek Harness 压缩前先剪工具输出。
+# 类用途: 携带单次请求实际使用的消息来源（None 表示沿用 request.messages）。
+@dataclass(frozen=True)
+class _SingleRequestSource:
+    source: CompactMessageSource | None
+
+
+# 函数用途: 决定单次缓存面请求用哪份来源：原样、瘦身后的副本，或放弃单次请求（None）。
+def _single_request_source(
+    request: AuxiliaryModelCallRequest,
+    message_source: CompactMessageSource | None,
+    single_budget: int,
+) -> _SingleRequestSource | None:
+    tokens = _request_tokens(request, message_source)
+    if tokens <= single_budget:
+        return _SingleRequestSource(message_source)
+    if message_source is None:
+        return None
+    shrunk = shrink_tool_outputs(message_source, tokens - single_budget)
+    if shrunk is None or _request_tokens(request, shrunk.source) > single_budget:
+        return None
+    logging.getLogger(__name__).info(
+        "compact single request shrank old tool outputs to fit the cache surface budget",
+        extra={"compact_shrunk_tool_outputs": shrunk.replaced, "compact_single_budget": single_budget},
+    )
+    return _SingleRequestSource(shrunk.source)
 
 
 # LLM: Context holds only per-generation controls so the cache request and its one none retry share exact policy.

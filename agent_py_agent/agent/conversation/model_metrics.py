@@ -15,6 +15,9 @@ _SCHEMA = "model_runtime_metrics.v1"
 _COUNTS = (
     "model_rounds", "retry_count", "input_tokens", "output_tokens", "estimated_tokens", "sampled_at_ns",
     "failure_count", "unfinished_calls", "unfinished_tokens", "unknown_failures",
+    # 10-08：会话累计的缓存命中输入（供应商回报的 cache_read）和回报过缓存字段的调用次数，一起算会话累计命中率；
+    # 旧快照没有这两个键按 0 读，没回报过缓存字段的供应商不显示累计值（不能把"没报"显示成 0%）。
+    "cache_read_input_tokens", "cache_read_reported_calls",
 )
 # 决策分区的显示计数（都是跨事件累加的原始次数，展示时再推导）：已报输入的调用次数（供约数外推）、成功（finished）、
 # 失败（failed + timed_out 原始次数）、其中已发出后未完成的次数与本地估算输入、分不清是否发出的旧账失败次数
@@ -125,6 +128,8 @@ def public_model_metrics(value: object) -> dict[str, object]:
         **{key: int(_number(value.get(key)) or 0) for key in _COUNTS},
         "tool_count": int(_number(value.get("tool_count"))) if _number(value.get("tool_count")) is not None else None,
         "cache_percent": min(100.0, _number(value.get("cache_percent"))) if _number(value.get("cache_percent")) is not None else None,
+        # 会话累计命中率 = 累计缓存命中输入 ÷ 累计供应商输入（DeepSeek Harness 页脚同一口径）；没有输入时为 None。
+        "cache_percent_session": _session_cache_percent(value),
         "output_tps": _number(value.get("output_tps")),
         "pending": value.get("pending") is True,
         "totals_known": value.get("totals_known") is True,
@@ -136,6 +141,18 @@ def public_model_metrics(value: object) -> dict[str, object]:
             **decision}
            if decision_calls else {}),
     }
+
+
+# LLM: 最近一次调用的命中率会被压缩前后的两次调用拉得很低（压缩请求、压缩后第一次都是新前缀），TUI 只看它会误判；
+#   累计值按账本的供应商回报数算，缓存读入超过输入时夹到 100。
+# 函数用途: 从统计快照算会话累计缓存命中百分比；没有供应商输入时返回 None。
+def _session_cache_percent(value: Mapping[str, object]) -> float | None:
+    total_input = _number(value.get("input_tokens"))
+    cached = _number(value.get("cache_read_input_tokens"))
+    reported = _number(value.get("cache_read_reported_calls"))
+    if not total_input or total_input <= 0 or cached is None or not reported:
+        return None
+    return min(100.0, 100.0 * cached / total_input)
 
 
 # LLM: 迟到的后台轮询和流重放只能保留较新的采样；时间戳只用于显示，不拥有调度或计费权限。
@@ -173,7 +190,8 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
     cached = state.get("_model_metrics_baseline") if isinstance(state, dict) else None
     if isinstance(cached, tuple) and cached[0] == (key, revision):
         return dict(cached[1])
-    totals = {"input_tokens": 0, "output_tokens": 0, "estimated_tokens": 0, "totals_known": True,
+    totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_read_reported_calls": 0,
+              "estimated_tokens": 0, "totals_known": True,
               "failure_count": 0, "unfinished_calls": 0, "unfinished_tokens": 0, "unknown_failures": 0,
               "decision_call_count": 0, "decision_input_tokens": None, **dict.fromkeys(_DECISION_COUNTS, 0)}
     reader = getattr(usage_store, "events_report", None)
@@ -222,8 +240,9 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
     breakdown = summary.get("usage_breakdown")
     breakdown = breakdown if isinstance(breakdown, Mapping) else {}
     provider, estimated = breakdown.get("provider", {}), breakdown.get("estimated", {})
-    for key in ("input_tokens", "output_tokens"):
+    for key in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
         totals[key] += int(provider.get(key) or 0)
+    totals["cache_read_reported_calls"] += int(provider.get("cache_read_input_tokens_reported_call_count") or 0)
     totals["estimated_tokens"] += sum(int(estimated.get(key) or 0) for key in ("input_tokens", "output_tokens"))
     overall = unfinished_usage_facts(summary)
     totals["failure_count"] += overall["failures"]

@@ -207,7 +207,9 @@ class _ToolConfigFields:
     tool_agent_budget_max_calls: int | None = None
     # 单个 run 最近 10 分钟最多读取多少字符的归档正文（窗口固定 600 秒）；0 = 不限制。
     tool_artifact_read_budget_max_chars: int = 240_000
-    tool_output_externalize_min_chars: int = 200_000
+    # 10-08 从 200000 降到 32000（约 8k 英文 token）：参考 Codex 每条工具输出 1 万 token、DeepSeek Harness 8192 字符的上限；
+    # 之前每轮上下文被工具结果撑到约 20 万 token。全文仍存归档，模型看预览加引用。
+    tool_output_externalize_min_chars: int = 32_000
     tool_output_preview_chars: int = 4_000
     # 上下文余量不足时立刻外置本条工具输出并要求下一次请求前压缩；关掉则只按 tool_output_externalize_min_chars 外置。
     tool_output_externalize_on_low_headroom: bool = True
@@ -368,6 +370,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     compact_recall_hint_enabled: bool = True
     # 到达触发线后优先把完整输入收敛到该占比；低于真实触发线的有效候选不会因未达目标而被丢弃。
     memory_compact_recovery_target_percent: int = 60
+    # 压缩摘要请求的输出上限（含思考），0 = 沿用主请求的输出上限。预算与实际发送同源（call_runtime.compact_summary_output_reserve_tokens）：
+    # 27.2 万窗口按 90% 触发时，单次缓存面请求（窗口 − 本值）要装得下才不会退到不复用缓存的分段路径。
+    memory_compact_summary_max_output_tokens: int = 16_384
+    # 压缩摘要调用的思考档位，空 = 沿用会话档位。只在后端能用 configuration_update 项降档时生效（GPT-6 系列 Responses 接口），
+    # 请求级 reasoning.effort 不变、前缀缓存不失配；其它后端仍沿用会话档位。
+    memory_compact_reasoning_level: str = "low"
     # 后台 Memory Curator 只读有界经历并输出严格 daily/candidate JSON；它没有工具循环和写人格权限。
     memory_curator_enabled: bool = True
     # 留空时按消息来源会话的主代理模型整理（2026-10-02 用户拍板），会话没选或不可用时用 owner 默认；填编号则固定用它，
@@ -558,6 +566,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 当前模型声明的服务商思考档位（如 low/medium/high/xhigh/max/ultra），通常由 /model 档案带入；
     # effort 协议只发声明内的值，留空表示未声明（Responses 沿通用 low/medium/high，Chat/Messages 沿原四档）。
     model_reasoning_levels: list[str] = field(default_factory=list)
+    # 当前模型能不能在 input 里追加 configuration_update 项改思考档位（OpenAI GPT-6 系列的 Responses 接口）：
+    # auto = 按已核对的模型名前缀 gpt-6 判断，on/off = 档案显式声明。压缩降档只在支持时才用这个项。
+    model_reasoning_update_items: str = "auto"
     # /effort 设成 auto 以外的档位、而当前模型未声明思考控制方式且解析为不支持时，宿主是否在后台自动检测一次（9 次短请求）。
     reasoning_control_auto_probe: bool = True
     # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。

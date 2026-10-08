@@ -501,6 +501,21 @@ def max_output_tokens(agent: object) -> int:
     return output_cap_for_window(configured, window) if configured else 0
 
 
+# LLM: 压缩摘要请求专用的输出预留：读 memory_compact_summary_max_output_tokens（0 = 沿用主请求输出上限），与
+#   max_output_tokens 取小、绝不放大主请求上限。compact 预算（conversation/compact_request_budget）和辅助调用发出的
+#   request_options.max_output_tokens 都只读这里，保证"预算按它算、请求也按它发"。2026-10-08 之前预算按主请求的
+#   32000 算，27.2 万窗口的 sol/astra 和 26.2 万窗口的 MiniMax 按 90% 触发时单次缓存面请求永远装不下，每次压缩都退到
+#   不复用缓存、不带工具的分段路径（10～33 分钟）。改默认值须同步 AgentConfig、MemorySettings、随包 YAML 与
+#   test_compact_request_budget。
+# 函数用途: 返回压缩摘要调用的输出 token 上限；配置为 0 或主请求上限更小时沿用主请求的上限。
+def compact_summary_output_reserve_tokens(agent: object) -> int:
+    normal = max_output_tokens(agent)
+    configured = _nonnegative_int(getattr(getattr(agent, "config", None), "memory_compact_summary_max_output_tokens", 0))
+    if configured <= 0:
+        return normal
+    return min(configured, normal) if normal > 0 else configured
+
+
 # LLM: Non-stream total budgeting may estimate full output time; stream liveness must not use this as a hidden wall clock.
 # 函数用途: 按最大输出 token 与保守速度估算非流式生成时间。
 def _output_generation_timeout_seconds(agent: object) -> float:

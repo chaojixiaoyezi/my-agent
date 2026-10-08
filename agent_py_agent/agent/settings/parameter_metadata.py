@@ -11,7 +11,11 @@ from dataclasses import fields
 from functools import lru_cache
 from pathlib import Path
 
-from ..backends.reasoning_control import REASONING_CONTROLS, REASONING_LEVELS
+from ..backends.reasoning_control import (
+    REASONING_CONTROLS,
+    REASONING_LEVELS,
+    REASONING_UPDATE_ITEM_MODES,
+)
 from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ._memory_coercion import _FIELDS as MEMORY_FIELDS
 from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
@@ -93,6 +97,7 @@ _CHOICES = {
     "model_backend": ("", "echo", "anthropic_compatible", "openai_compatible", "openai_responses"),
     "model_reasoning_effort": REASONING_LEVELS,
     "model_reasoning_control": REASONING_CONTROLS,
+    "model_reasoning_update_items": REASONING_UPDATE_ITEM_MODES,
     "model_structured_output": STRUCTURED_OUTPUT_MODES,
     "log_level": ("debug", "info", "warning", "error", "critical"),
     "access_mode": ("restricted", "workspace-write", "full-access"),

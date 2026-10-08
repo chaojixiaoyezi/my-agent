@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 948,
+  "count": 949,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2394,6 +2394,14 @@
       "unit": "tokens",
       "category": "上限预算",
       "description": "这里是唯一定义；预检、自动压缩判定、恢复候选计量与看图小请求打包都经下面两个访问函数读取，测试 patch 这两个常量即可。"
+    },
+    {
+      "name": "SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT",
+      "file": "agent_py_agent/agent/conversation/compact_message_source.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "瘦身时永远原样保留的最近工具结果条数：摘要至少要看到最新的工具结果原文。"
     },
     {
       "name": "_SEGMENT_DIGEST_CHARS",

@@ -6,7 +6,7 @@ from ..conversation.input_media import project_input_media
 from .base import ModelResponse
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
-from .responses_wire import collect_response, input_items, response_fields
+from .responses_wire import collect_response, input_items, insert_reasoning_update, response_fields
 from .tool_protocol_adapter import tools_for_choice
 from .wire_contract import repair_native_messages, validate_responses_input
 
@@ -48,10 +48,16 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
             value = openai_tool_choice(choice or ToolChoice.auto())
             payload["tool_choice"] = {"type": "function", "name": value["function"]["name"]} if isinstance(value, dict) else value
-        from .reasoning_control import responses_reasoning_field
+        from .reasoning_control import responses_reasoning_field, responses_reasoning_update_item
 
         payload.update(responses_reasoning_field(self.reasoning_control, request.reasoning_effort, self.reasoning_levels,
                                                  disabled=request.thinking_disabled))
+        # 压缩降档：请求级 reasoning.effort 不动（前缀不失配），只在 input 末尾追加 configuration_update 项。
+        update = (responses_reasoning_update_item(self.reasoning_control, request.reasoning_update_effort,
+                                                  payload.get("reasoning"), self.reasoning_levels)
+                  if request.reasoning_update_effort and self.supports_reasoning_update_items() else None)
+        if update is not None:
+            payload["input"] = insert_reasoning_update(payload["input"], update)
         if request.response_schema is not None:
             payload["text"] = {"format": {"type": "json_schema", "name": "my_agent_output", "strict": True, "schema": request.response_schema}}
         elif request.json_object:
@@ -67,6 +73,15 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
                    **_subscription_affinity_headers(subscription)}
         obj = self._send_responses_request(payload, headers, request)
         return ModelResponse(backend=self.name, **response_fields(obj, self.model_name))
+
+    # LLM: 只按结构化事实判断：档案显式 on/off 优先；auto 按已核对的模型名前缀 gpt-6（OpenAI 文档：GPT-6 及以后
+    #   支持用 configuration_update 项改档位且前缀不变）。不是封闭枚举：新模型可在档案里显式声明 on。
+    # 函数用途: 这个模型能不能用 configuration_update 项改思考档位。
+    def supports_reasoning_update_items(self) -> bool:
+        declared = str(getattr(self, "reasoning_update_items", "auto") or "auto").strip().lower()
+        if declared in {"on", "off"}:
+            return declared == "on"
+        return str(self.model_name or "").lower().startswith("gpt-6")
 
     # LLM: 流式与 Chat 后端同一个分派入口 request_stream_lines，按被调方签名传首包预算与绝对期限（cabfix 起
     #   HttpBackend 收 options）；直接写旧关键字会让所有 Responses 流式请求 TypeError（17k Linux 车道实测）。
