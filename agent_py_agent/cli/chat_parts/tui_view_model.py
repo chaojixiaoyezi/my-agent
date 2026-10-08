@@ -88,6 +88,9 @@ class TuiContextUsage:
     tool_schema_tokens: int = 0
     estimated: bool = True
     protocol: str = "unknown"
+    # 状态行显示用：这次调用的模型名与思考档位（"off" 关、"auto" 模型默认），旧 Gateway 事件没有时为空串。
+    model_name: str = ""
+    reasoning_level: str = ""
 
 
 # LLM: TuiStatus 是 footer/spinner/context strip 的结构化快照；elapsed 等展示值由 renderer 的 clock 计算，不写回状态机。
@@ -1407,7 +1410,14 @@ def _context_usage_from_mapping(
         tool_schema_tokens=_nonnegative_int(value.get("tool_schema_tokens"), 0),
         estimated=value.get("estimated") is True,
         protocol=protocol if protocol in {"native", "text"} else "unknown",
+        model_name=_short_label(value.get("model_name")),
+        reasoning_level=_short_label(value.get("reasoning_level")),
     )
+
+
+# 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让事件把长正文带进状态行。
+def _short_label(value: object) -> str:
+    return value.strip()[:80] if isinstance(value, str) else ""
 
 
 # LLM: 白名单保留显示字段及host历史缺口标记；标题由公开detail投影，标记不影响运行或控制权限。

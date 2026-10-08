@@ -2810,6 +2810,7 @@ def _render_context_usage(
         text = (
             f"Context {estimate}{_format_compact_number(current)}/{_format_compact_number(window)}"
             f" · {percent}% · compact {compact} · 压缩点 {trigger_percent}%"
+            f"{_context_model_suffix(usage.model_name, usage.reasoning_level)}"
         )
     elif available >= 40:
         text = (
@@ -2824,6 +2825,16 @@ def _render_context_usage(
         first_prefix=(("class:tui-context-label", "  ◉ "),),
         continuation_prefix=(("class:tui-context-label", "    "),),
     )
+
+
+# LLM: 只拼快照自带的短标签（model_visible_context_usage.v1 的 model_name / reasoning_level），没有就不拼，旧 Gateway
+#   的事件保持原行不变；"off" 显示"关"，其它档位照原值显示（auto 表示交给模型默认）。
+# 函数用途: 在压缩点后面接上"· 模型名 · 思考 档位"。
+def _context_model_suffix(model_name: str, reasoning_level: str) -> str:
+    text = f" · {model_name}" if model_name else ""
+    if reasoning_level:
+        text += f" · 思考 {'关' if reasoning_level == 'off' else reasoning_level}"
+    return text
 
 
 # LLM: `/context` in rich TUI must render the exact same TuiContextUsage object as the fixed

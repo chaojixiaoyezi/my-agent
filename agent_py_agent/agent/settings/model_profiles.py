@@ -80,6 +80,14 @@ def capture_selected_model_read():
         _SELECTED_MODEL_READ.reset(token)
 
 
+# LLM: 零 I/O 读当前作用域里原模型冻结时捕获的选择与决策设置（selected_model_config 首次读取填充）；作用域外、
+#   本地模式或测试没有捕获时返回 None，调用方只能按"未知"展示，不能据此再读目录或改变任何判定。
+# 函数用途: 给状态行这类纯展示的消费者复用已读的决策开关，不再读模型目录。
+def captured_selected_model_read() -> SelectedModelRead | None:
+    captured = _SELECTED_MODEL_READ.get()
+    return captured[-1] if captured else None
+
+
 # LLM: 路径只由可信 home/owner 身份决定，不接受客户端指定路径或从模型名拼文件名。
 # 函数用途: 返回当前用户配置文件的位置，不创建目录。
 def model_profiles_path(home_paths: object) -> Path:

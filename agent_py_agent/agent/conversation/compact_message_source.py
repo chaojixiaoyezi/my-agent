@@ -101,8 +101,9 @@ def _has_reasoning_ciphertext(block: object) -> bool:
 
 # LLM: 单次缓存面压缩请求超预算时的瘦身投影（不是分段）：按时间顺序把最早的 tool_result 文字正文换成固定占位
 #   （保留块位置、tool_use_id 与其它字段，最近 SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT 条不动），直到省出的估算 token
-#   不少于 excess_tokens。只改交给摘要的临时副本，不改 rows、不改分段来源；省不够返回 None。带图或非文字的
-#   tool_result 不动。结果来源重放同一冻结元组，两遍逐字一致。
+#   不少于 excess_tokens。两遍读同一冻结来源：第一遍只记槽位和可省 token 数，不留任何正文（省不够直接返回 None，
+#   不能让整份历史驻留，test_compact_source_lifetime 守这条）；第二遍按槽位逐条替换，结果来源可重放、两遍逐字一致。
+#   只改交给摘要的临时投影，不改 rows、不改分段来源；带图或非文字的 tool_result 不动。
 # 类用途: 瘦身结果：新的可重放来源和被替换的条数。
 @dataclass(frozen=True)
 class ShrunkMessageSource:
@@ -112,31 +113,63 @@ class ShrunkMessageSource:
 
 # 函数用途: 把最早的工具结果正文换成占位，让单次压缩请求装进窗口而不放弃主请求前缀；省不够返回 None。
 def shrink_tool_outputs(source, excess_tokens: int, *, keep_recent: int = SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT):
-    messages = list(source)
-    slots = [
-        (index, position)
-        for index, message in enumerate(messages)
-        for position, block in enumerate(_content_blocks(message))
-        if _tool_result_text(block) is not None
-    ]
-    saved = replaced = 0
-    for index, position in slots[:max(0, len(slots) - max(0, int(keep_recent)))]:
+    slots = _tool_result_slots(source)
+    chosen: dict[tuple[int, int], int] = {}
+    saved = 0
+    for index, position, chars, saving in slots[:max(0, len(slots) - max(0, int(keep_recent)))]:
         if saved >= excess_tokens:
             break
-        block = messages[index]["content"][position]
-        text = _tool_result_text(block)
-        placeholder = TOOL_OUTPUT_PLACEHOLDER.format(chars=len(text))
-        if len(text) <= len(placeholder):
-            continue
-        saved += max(0, estimate_tokens(text) - estimate_tokens(placeholder))
-        content = list(messages[index]["content"])
-        content[position] = {**block, "content": placeholder}
-        messages[index] = {**messages[index], "content": content}
-        replaced += 1
-    if not replaced or saved < excess_tokens:
+        if saving > 0:
+            saved += saving
+            chosen[(index, position)] = chars
+    if not chosen or saved < excess_tokens:
         return None
-    frozen = tuple(messages)
-    return ShrunkMessageSource(CompactMessageSource(lambda: iter(frozen)), replaced)
+
+    # LLM: 逐条重放原来源并按槽位替换，早退/失败显式关闭上游（与 projected 同一关闭合同）。
+    # 函数用途: 第二遍读取：只有被选中的工具结果块换成占位，其它消息原样。
+    def replaced():
+        iterator = iter(source)
+        try:
+            for index, message in enumerate(iterator):
+                yield _with_tool_output_placeholders(message, index, chosen)
+        finally:
+            iterator.close()
+
+    return ShrunkMessageSource(CompactMessageSource(replaced), len(chosen))
+
+
+# 函数用途: 第一遍读取：按顺序列出每个可替换的工具结果块的（消息序号、块位置、原字符数、替换可省 token），不留正文。
+def _tool_result_slots(source) -> list[tuple[int, int, int, int]]:
+    slots = []
+    for index, message in enumerate(source):
+        slots.extend(_message_tool_result_slots(index, message))
+    return slots
+
+
+# 函数用途: 列出一条消息里每个可替换工具结果块的槽位与可省 token；只算长度和估算值，不保留正文。
+def _message_tool_result_slots(index: int, message: object) -> list[tuple[int, int, int, int]]:
+    slots = []
+    for position, block in enumerate(_content_blocks(message)):
+        text = _tool_result_text(block)
+        if text is None:
+            continue
+        placeholder = TOOL_OUTPUT_PLACEHOLDER.format(chars=len(text))
+        saving = estimate_tokens(text) - estimate_tokens(placeholder) if len(text) > len(placeholder) else 0
+        slots.append((index, position, len(text), max(0, saving)))
+    return slots
+
+
+# 函数用途: 把一条消息里被选中的工具结果块换成占位；该消息没有选中块时原样返回（不复制）。
+def _with_tool_output_placeholders(message, index: int, chosen: dict[tuple[int, int], int]):
+    blocks = _content_blocks(message)
+    if not any((index, position) in chosen for position in range(len(blocks))):
+        return message
+    content = [
+        {**block, "content": TOOL_OUTPUT_PLACEHOLDER.format(chars=chosen[(index, position)])}
+        if (index, position) in chosen else block
+        for position, block in enumerate(blocks)
+    ]
+    return {**message, "content": content}
 
 
 # 函数用途: 返回一条消息的内容块列表；content 不是列表时返回空元组。

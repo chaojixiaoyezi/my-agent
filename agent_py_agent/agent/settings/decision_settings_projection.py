@@ -44,6 +44,22 @@ def decision_point_mode_from_read(config: object, owner_settings: dict, thread: 
     return _effective_point_mode(values, point)
 
 
+# LLM: TUI 状态行"决策（关闭/观察/实际）"的总标签：线程范围各点位按 decision_point_mode_from_read 逐点算有效模式
+#   （总开关关则全部 off），有 apply 记 apply，否则有 observe 记 observe，否则 off。不属于 AgentConfig 的点位跳过。
+#   只做展示投影，零 I/O；各点位的实际判定仍各自调用逐点函数，不以此标签代替。
+# 函数用途: 把十来个决策点位折成一个给人看的开关状态。
+def decision_summary_mode_from_read(config: object, owner_settings: dict, thread: object) -> str:
+    modes = set()
+    for point, runtime_scope in POINT_RUNTIME_SCOPES.items():
+        if runtime_scope != "thread":
+            continue
+        try:
+            modes.add(decision_point_mode_from_read(config, owner_settings, thread, point=point))
+        except ModelProfileError:
+            continue
+    return "apply" if "apply" in modes else "observe" if "observe" in modes else "off"
+
+
 # LLM: 显式保存引用只检查原目录的合法 Decision 用途；可用性另查，失效服务不得阻止用户关闭。
 # 函数用途: 复用私有/共享原引用解析，供保存或只读状态检查，不创建后端。
 def decision_profile(context: object, data: dict, profile_id: str, *, require_enabled: bool = True) -> dict:

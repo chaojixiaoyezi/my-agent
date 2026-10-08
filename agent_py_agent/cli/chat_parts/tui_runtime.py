@@ -521,6 +521,8 @@ _MAIN_ACTIVITY_FIELDS = frozenset(
     {"task_id", "phase", "activity", "started_at", "updated_at", "ended_at"}
 )
 _CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
+# 状态行显示用的两个短标签（模型名、思考档位），和 Gateway 清洗、reducer 同一份字段名。
+_CONTEXT_USAGE_LABEL_FIELDS = ("model_name", "reasoning_level")
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
     "compact_trigger_tokens",
@@ -731,8 +733,9 @@ def _normalize_main_activity(value: object) -> dict[str, object]:
 
 
 # LLM: Background context uses the same frozen schema as foreground status.
-# Unknown or content-bearing fields are removed before the event reaches the reducer.
-# 函数用途: 清洗后台 main 的上下文用量，只保留状态条需要的数字。
+# Unknown or content-bearing fields are removed before the event reaches the reducer; the two short display labels
+# (model_name / reasoning_level) pass through _context_usage_label like every other copy of this schema.
+# 函数用途: 清洗后台 main 的上下文用量，只保留状态条需要的数字和模型名/思考档位两个短标签。
 def _normalize_context_usage(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping) or value.get("schema") != _CONTEXT_USAGE_SCHEMA:
         return {}
@@ -745,7 +748,13 @@ def _normalize_context_usage(value: object) -> dict[str, object]:
             for key in _CONTEXT_USAGE_TOKEN_FIELDS
         },
         "protocol": protocol if protocol in {"native", "text"} else "unknown",
+        **{key: _context_usage_label(value.get(key)) for key in _CONTEXT_USAGE_LABEL_FIELDS},
     }
+
+
+# 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让长正文借状态行标签进 TUI 事件。
+def _context_usage_label(value: object) -> str:
+    return value.strip()[:80] if isinstance(value, str) else ""
 
 
 # LLM: Todo snapshots are canonical display rows, never free-form tool output.
@@ -2881,6 +2890,7 @@ def _tui_context_usage_payload(value: object) -> dict[str, object]:
         "estimated": value.get("estimated") is True,
         **{field: _nonnegative_int(value.get(field)) for field in token_fields},
         "protocol": protocol if protocol in {"native", "text"} else "unknown",
+        **{field: _context_usage_label(value.get(field)) for field in _CONTEXT_USAGE_LABEL_FIELDS},
     }
 
 

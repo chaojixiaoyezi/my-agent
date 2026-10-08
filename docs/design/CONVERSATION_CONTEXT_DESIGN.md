@@ -131,7 +131,8 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
   `compact_request_budget` 的两个预算和 `auxiliary_model_call` 给压缩类目的发的 `request_options.max_output_tokens` 都只读它。
 - 超预算先瘦身：`compact_message_source.shrink_tool_outputs` 把最早的 tool_result 文字正文换成 `TOOL_OUTPUT_PLACEHOLDER`
   （只含原长度），最近两条不动，带图或非文字块不动；省够就仍走 `_try_cached_compact_requests`（同 system、同工具、auto、指令在末尾），
-  省不够返回 None 走原分段链。分段仍拿 `attempt.message_source` 的完整来源。
+  省不够返回 None 走原分段链。分段仍拿 `attempt.message_source` 的完整来源。实现是两遍读同一冻结来源：第一遍只记槽位与可省 token，
+  不留正文；第二遍按槽位替换。整份物化会让 `test_compact_source_lifetime` 的峰值内存翻倍，所以省不够时也不能留下任何正文。
 - 降档不破坏缓存：`ProviderRequestOptions.reasoning_update_effort` 只由压缩类目的设置，`OpenAIResponsesBackend` 在
   `supports_reasoning_update_items()` 为真时把 `{"type": "configuration_update", "reasoning": {"effort": ...}}` 插在末尾动态 user
   消息（压缩指令）之前；请求级 `reasoning.effort` 不变。能力判断：`model_reasoning_update_items` 档案 on/off 优先，auto 按模型名前缀 gpt-6。

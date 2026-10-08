@@ -7,9 +7,16 @@
   两遍重放一致、原消息不改；超预算先瘦身仍单次（带工具、auto）、省不够才分段；Chat 载荷的压缩调用 `max_tokens` 为 16384 而普通
   辅助调用不变；Responses gpt-6 系列压缩请求请求级 `reasoning.effort` 不变且在压缩指令前插 `configuration_update`（gpt-5.5 auto 不插、
   档案 on 插、off 不插、未配置或同档不插）；两个 memory 键的解析与回退；会话累计命中率的累计与显示、没回报缓存字段时不显示。
+- **新用例** `agent_py_agent/tests/test_tui_status_line_display.py`（10 条）：状态行固定顺序与整行文案；总缓存两位小数、累计会话只算输入
+  （估算补位带 ~、未知）；决策（关闭/观察/实际）括号、旧快照/未知值不带括号；重试显示、待结算与 LLM 段不显示；窄屏有界；
+  `decision_summary_mode_from_read` 折叠线程点位（apply > observe > off、线程覆盖、总开关）；`publish_model_metrics` 只在捕获作用域内带
+  `decision_mode`、作用域外删旧值；Context 行模型名/思考档位（off 显示"关"、没有标签原行不变）；标签清洗与 reducer；
+  `_display_reasoning_level` 与实际发送一致。既有用例同步改口径：`output_tps` 按整次调用时长（100 ÷ 7）、"已报"去掉、"会话累计"改"累计会话"。
 - **跑过的旧用例**（3a 的 `run_files312.sh`，ci-venv-312）：压缩预算/档位/来源 59 条、后端与配置守卫 261 条、输出预留/触发封顶/外置/
-  目录 94 条，全部通过。
-- **真机验证**：待隔离 smoke（sol、astra、MiniMax 各触发一次压缩，看耗时、命中率、变化码），见设计台账 compactfit 条目。
+  目录 94 条；239 个相关测试文件 5,935 通过、2 失败——`test_compact_source_lifetime` 两条（瘦身把整份历史物化，峰值内存翻倍），
+  改成两遍惰性读后通过；状态行相关 158 条通过。
+- **真机验证**（隔离 smoke，scratchpad/smk-c07，触发线封顶 6 万，只读用量快照差分与请求事件流）：sol 6 次压缩命中 83.5%–89.3%、
+  64–109 秒；astra 2 次 91.3%、92/106 秒；MiniMax 12 秒。改前三者压缩调用走分段、0% 命中、10～33 分钟。数据见设计台账 compactfit 条目。
 
 ## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
 

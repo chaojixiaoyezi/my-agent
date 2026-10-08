@@ -24,8 +24,15 @@ def _count(value: object) -> int:
         return 0
 
 
-# LLM: 该白名单供持久化和主/子公开投影共用；原始 prompt、工具参数和未知字段不保留。
-# 函数用途: 复制已有 preflight 快照中的合法数字，不重新估算模型上下文。
+# LLM: 短标签只接受字符串、去首尾空白、截到 80 字符；非字符串按空串，不把任何正文带进快照。
+# 函数用途: 清洗模型名、思考档位这类只给状态行看的短字段。
+def _label(value: object) -> str:
+    return value.strip()[:80] if isinstance(value, str) else ""
+
+
+# LLM: 该白名单供持久化和主/子公开投影共用；原始 prompt、工具参数和未知字段不保留。model_name / reasoning_level 是状态行
+#   显示用的短标签（来自 agent_core.model.context_pressure 的快照），旧快照没有时为空串。
+# 函数用途: 复制已有 preflight 快照中的合法数字与两个短标签，不重新估算模型上下文。
 def public_context_usage(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping) or value.get("schema") != _SCHEMA:
         return {}
@@ -35,6 +42,8 @@ def public_context_usage(value: object) -> dict[str, object]:
         "estimated": value.get("estimated") is True,
         **{key: _count(value.get(key)) for key in _TOKEN_FIELDS},
         "protocol": protocol if protocol in ("native", "text") else "unknown",
+        "model_name": _label(value.get("model_name")),
+        "reasoning_level": _label(value.get("reasoning_level")),
     }
 
 

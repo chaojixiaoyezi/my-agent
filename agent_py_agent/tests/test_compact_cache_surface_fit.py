@@ -244,7 +244,7 @@ def test_session_cache_percent_is_cumulative_and_only_shown_when_reported(tmp_pa
     assert metrics["cache_percent"] == 75 and metrics["cache_percent_session"] == 75
     assert metrics["cache_read_input_tokens"] == 750 and metrics["cache_read_reported_calls"] == 1
     text = "".join(piece for _, piece in render_model_metrics(metrics, 200)[0])
-    assert "缓存 会话 75% · 最近 75%" in text
+    assert "总缓存 75.00%" in text and "最近" not in text
     cold = metrics_settled(agent, params, clock, call_id="call-2", usage={"prompt_tokens": 1000, "completion_tokens": 50,
                                                                       "prompt_tokens_details": {"cached_tokens": 0}})
     later = publish_model_metrics(agent, params, pending=False, tool_count=1, response=cold, call_id="call-2")

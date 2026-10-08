@@ -10,6 +10,8 @@ from collections.abc import Mapping
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA = "model_runtime_metrics.v1"
+# 状态行"决策（关闭/观察/实际）"的结构化值，来自 settings.decision_settings_projection.decision_summary_mode_from_read。
+DECISION_DISPLAY_MODES = ("off", "observe", "apply")
 # 全部用途的计数；failure_count/unfinished_calls/unfinished_tokens/unknown_failures 是跨事件累加的原始次数
 # （口径见 unfinished_usage_facts），展示时减去决策分区得到非决策调用，再按 split_unsent_failures 推导
 _COUNTS = (
@@ -131,6 +133,7 @@ def public_model_metrics(value: object) -> dict[str, object]:
         # 会话累计命中率 = 累计缓存命中输入 ÷ 累计供应商输入（DeepSeek Harness 页脚同一口径）；没有输入时为 None。
         "cache_percent_session": _session_cache_percent(value),
         "output_tps": _number(value.get("output_tps")),
+        **({"decision_mode": value.get("decision_mode")} if value.get("decision_mode") in DECISION_DISPLAY_MODES else {}),
         "pending": value.get("pending") is True,
         "totals_known": value.get("totals_known") is True,
         **({"cache_diagnostic": diagnostic} if diagnostic else {}),
@@ -175,6 +178,36 @@ def model_metrics_from_thread(store: object, thread_id: str) -> dict[str, object
         return public_model_metrics(getattr(thread, "model_metrics", None)) if not error else {}
     except (OSError, RuntimeError, TypeError, ValueError):
         return {}
+
+
+# LLM: 只读 exact thread 对象供同一次发布复用（持久统计副本 + 决策开关覆盖），读不到按 None；不改线程、不读历史。
+# 函数用途: 一次发布只加载一次线程文件。
+def _display_thread(store: object, thread_id: str) -> object | None:
+    loader = getattr(getattr(store, "threads", None), "load_report", None)
+    if not thread_id or not callable(loader):
+        return None
+    try:
+        thread, error = loader(thread_id)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return None if error else thread
+
+
+# LLM: 决策开关只取当前作用域已捕获的 owner 设置（settings.model_profiles.captured_selected_model_read，零 I/O）叠加线程覆盖；
+#   没有捕获（本地模式、测试）返回空串，发布时删掉旧值而不是沿用，免得用户关了决策状态行还显示"观察"。展示用，不参与判定。
+# 函数用途: 给状态行算"决策（关闭/观察/实际）"里括号中的那个值。
+def _decision_display_mode(agent: object, thread: object) -> str:
+    from ..settings.decision_settings_projection import decision_summary_mode_from_read
+    from ..settings.model_profiles import captured_selected_model_read
+
+    captured = captured_selected_model_read()
+    if captured is None or thread is None:
+        return ""
+    try:
+        return decision_summary_mode_from_read(getattr(agent, "config", None), captured.decision_settings, thread)
+    except Exception:
+        _LOGGER.warning("决策开关展示值不可用；不影响模型与工具执行", exc_info=False)
+        return ""
 
 
 # LLM: 原用量文件变更才重读事件，仅排除相同统计代次 request/run；重启旧账仍加入基数。
@@ -295,7 +328,8 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     state = getattr(params, "live_archive_state", None)
     store = getattr(agent, "conversation_store", None)
     # 整份选较新快照，基数与身份同源；持久较新时不能取旧内存身份再对新基数重复加一。
-    persisted = model_metrics_from_thread(store, thread_id)
+    thread = _display_thread(store, thread_id)
+    persisted = public_model_metrics(getattr(thread, "model_metrics", None)) if thread is not None else {}
     state_previous = state.get("_model_metrics_current", {}) if isinstance(state, dict) else {}
     previous = newer_model_metrics(state_previous, persisted)
     totals = _previous_totals(agent, params, thread_id, str(summary.get("usage_scope_id") or ""))
@@ -306,6 +340,10 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
         payload.update(model_rounds=int(summary.get("logical_model_turn_count") or 0) - int(decision.get("logical_model_turn_count") or 0),
             retry_count=sum(int(summary.get(key) or 0) - int(decision.get(key) or 0) for key in ("model_retry_count", "provider_http_retry_count")),
             tool_count=tool_count, pending=pending)
+    payload.pop("decision_mode", None)
+    mode = _decision_display_mode(agent, thread)
+    if mode:
+        payload["decision_mode"] = mode
     fresh = response is not None and not usage_only
     fresh_diagnostic = _merge_response_metrics(payload, response, ledger, call_id) if fresh else None
     # 同一快照里的累计基数和身份一起更新，随后一起清洗并通过原线程保存入口持久化。
@@ -347,7 +385,9 @@ def _last_response_metrics(response: object, ledger: object, call_id: str) -> di
             known = known or any(_number(detail.get(key)) is not None for key in ("cached_tokens", "cache_read_tokens"))
     denominator = input_token_usage(response)
     cache = 100.0 * reported_cache_read_token_usage(response) / denominator if known and denominator else None
-    elapsed = (record.finished_at - record.first_token_at) if record and record.finished_at is not None and record.first_token_at is not None else 0
+    # 速度 = 输出 token ÷ 整次调用时长（发出请求到收完）。隐藏思考的 token 算在输出里却不逐字流出，按首字到收完算会
+    # 虚高到上千 tok/s；整段时长含首字等待，只会偏低不会虚高。
+    elapsed = (record.finished_at - record.started_at) if record and record.finished_at is not None and record.started_at else 0
     output = output_token_usage(response)
     return {"cache_percent": cache, "output_tps": output / elapsed if output is not None and elapsed >= 0.1 else None,
             "cache_diagnostic": record.metadata.get("cache_diagnostic") if record else None}

@@ -347,7 +347,7 @@ agent_py_agent/
 |   |   |-- tui_model_auth.py           # 新增登录账号、已有账号的登录/添加模型/退出/删除，设备码与通用参数
 |   |   |-- tui_browser_login.py        # ChatGPT 订阅浏览器登录：本机临时回调、自动打开浏览器、登录完自动回到 TUI
 |   |   |-- tui_subscription_models.py  # 模型勾选框（可多选）：订阅账号与新连接共用，经 add_models 一次保存
-|   |   |-- tui_model_metrics.py        # Context 下方模型轮、工具数、最近缓存、会话累计与输出速度的一行统计
+|   |   |-- tui_model_metrics.py        # Context 下方本轮模型轮、当轮工具、总缓存（两位小数）、累计会话、决策开关与成败、输出、速度的一行统计
 |   |   |-- tui_shared_model_menu.py    # 管理员逐模型显式共享/撤销、指定其他用户的初始模型
 |   |   |-- tui_permissions_menu.py     # /permissions 与 F4 三档权限菜单、保存/取消及管理员确认
 |   |   |-- tui_provider_menu.py        # 「管理已有模型」（改连接、编辑/删除模型、从连接再勾选添加）与连接测试
@@ -1021,6 +1021,8 @@ agent_py_agent/
 |   |-- test_decision_transport_timing.py # 假代理/假 TLS/假服务端逐段注入延迟：分段计时与超时阶段落结果日志、估算输入入 model_usage、零重试不补发
 |   |-- test_keepalive_transport.py     # 决策长连接复用：一条隧道/一次握手、复用记 0 毫秒建连、错误与中止不归还、过期与对端关闭丢弃、开关
 |   |-- test_decision_stats_display.py  # 决策统计口径：TUI 已报/估算（未完成）/缺报分开、未发出单列，结果日志与审计把没发出去的失败单列
+|   |-- test_tui_status_line_display.py  # 状态行布局（2026-10-08）：总缓存两位小数、累计会话只算输入、决策（关闭/观察/实际）、速度按整次调用时长、Context 行模型名与思考档位
+|   |-- test_compact_cache_surface_fit.py  # 压缩请求装进窗口：输出预留同源、超预算先瘦身再单次、Responses configuration_update 降档、会话累计命中率
 |   |-- test_decision_reach_counts.py   # 到达计数：进程内累加、节流合并不覆盖、7 天修剪、开关与写失败、阶段原因与大白话；导出各点位测试共用的 reach_counter
 |   |-- test_capability_presentation_observation.py # 能力推荐观测进 Gateway 请求记录：一回合一条、采用/保留原因、失败码、写入上限与失败语义
 |   |-- test_decision_cooldown_backoff.py # 决策连接连续失败的冷却翻倍、并发同次故障不加级、成功/显式重试复位

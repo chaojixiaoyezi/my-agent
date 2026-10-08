@@ -75,14 +75,19 @@ class ModelVisibleContextSnapshot:
     raw_estimated_tokens: int
     # 稳定 system/prompt/tool surface 只保存摘要指纹，不进入公开 TUI 事件。
     context_surface_fingerprint: str
+    # 这次调用实际用的模型名与思考档位（"off" 表示关、"auto" 表示交给模型默认），只给状态行显示；空串表示未知。
+    model_name: str = ""
+    reasoning_level: str = ""
 
-    # LLM: Public serialization exposes only bounded numeric facts and the frozen schema id;
-    # prompts, messages, tool definitions, and guidance content must never enter the UI event.
+    # LLM: Public serialization exposes only bounded numeric facts, two short display labels (model name, reasoning
+    # level) and the frozen schema id; prompts, messages, tool definitions, and guidance content must never enter the UI event.
     # 函数用途: 把上下文快照转换成可安全发送给 TUI 的结构化字典，不包含任何正文。
     def to_public_dict(self) -> dict[str, object]:
         return {
             "schema": "model_visible_context_usage.v1",
             "estimated": True,
+            "model_name": self.model_name,
+            "reasoning_level": self.reasoning_level,
             "context_window_tokens": self.context_window_tokens,
             "compact_trigger_tokens": self.compact_trigger_tokens,
             "current_tokens": self.current_tokens,
@@ -137,7 +142,25 @@ def model_visible_context_snapshot(
         protocol=protocol,
         raw_estimated_tokens=raw_current,
         context_surface_fingerprint=surface_fingerprint,
+        model_name=str(getattr(getattr(agent, "backend", None), "model_name", "") or "")[:80],
+        reasoning_level=_display_reasoning_level(agent, params),
     )
+
+
+# LLM: 与真实请求同一解析（settings.reasoning_effort.run_reasoning_level + backends.reasoning_control.reasoning_request_values，
+#   线程档位优先、其次全局默认、再按后端控制方式降成实际发送值）：关思考记 "off"，发了档位记档位，交给模型默认记 "auto"。
+#   只给状态行显示，读不到按空串，绝不因此影响请求。
+# 函数用途: 算出这次调用"思考开的是啥"，和实际发给模型的一致。
+def _display_reasoning_level(agent: object, params: object | None) -> str:
+    from ...backends.reasoning_control import reasoning_request_values
+    from ...settings.reasoning_effort import run_reasoning_level
+
+    try:
+        control = str(getattr(getattr(agent, "backend", None), "reasoning_control", "none") or "none")
+        disabled, effort = reasoning_request_values(run_reasoning_level(agent, params), control, forced=False)
+    except Exception:
+        return ""
+    return "off" if disabled else (effort or "auto")
 
 
 def model_visible_context_budget(

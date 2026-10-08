@@ -25,6 +25,7 @@ from agent_py_agent.agent.conversation.model_metrics import (
     newer_model_metrics,
     public_model_metrics,
     publish_model_metrics,
+    split_unsent_failures,
 )
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext, _render_input_status
@@ -67,7 +68,8 @@ def test_round_tools_cache_speed_and_no_double_count(tmp_path):
     metrics = publish_model_metrics(agent, params, pending=False, tool_count=3, response=response, call_id="call-1")
     assert metrics["model_rounds"] == 1 and metrics["tool_count"] == 3
     assert metrics["input_tokens"] == 1000 and metrics["output_tokens"] == 100
-    assert metrics["cache_percent"] == 75 and metrics["output_tps"] == 20
+    # 速度 = 输出 ÷ 整次调用时长（started 10 → finished 17），不是首字到收完的 5 秒
+    assert metrics["cache_percent"] == 75 and metrics["output_tps"] == pytest.approx(100 / 7)
     replay = publish_model_metrics(agent, params, pending=False, tool_count=3)
     assert replay["input_tokens"] == 1000 and replay["cache_percent"] == 75
     assert runtime.store.snapshot().status.model_metrics == replay
@@ -246,7 +248,7 @@ def test_cache_unknown_is_not_zero_and_protocols_share_denominator(tmp_path, usa
     if not usage:
         # 供应商没回报用量：按本地估算计入会话累计（带 ~），不是 0；有估算就不算“缺报”（缺报只留给真的没有数据的调用）
         text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-        assert metrics["estimated_tokens"] > 0 and "会话累计 ~" in text and "缺报" not in text
+        assert metrics["estimated_tokens"] > 0 and "累计会话 ~" in text and "缺报" not in text
 
 
 def test_previous_requests_accumulate_but_current_persisted_snapshot_not_added_twice(tmp_path):
@@ -442,8 +444,10 @@ def test_standalone_compact_failure_keeps_explicit_unknown_usage(tmp_path):
     metrics = model_metrics_from_thread(agent.conversation_store, thread.thread_id)
     # 一次 HTTP 尝试都没有就失败：请求没发出去，明确显示“未发出”，不当成 0 用量藏起来
     assert metrics["failure_count"] >= 1 and metrics["unfinished_calls"] == 0 and metrics["unknown_failures"] == 0
+    assert split_unsent_failures(metrics["failure_count"], metrics["unfinished_calls"], metrics["unknown_failures"])[1] >= 1
+    # 2026-10-08 起状态行不再显示非决策调用的未发出/缺报段，事实只在快照与审计用量行里
     text = "".join(part[1] for line in render_model_metrics(metrics, 250) for part in line)
-    assert "LLM 未发出" in text
+    assert "LLM" not in text and "决策" in text
 
 
 @pytest.mark.parametrize("standalone,failed", [(True, False), (True, True), (False, False), (False, True)])
@@ -483,7 +487,7 @@ def test_renderer_bounded_and_separate_from_context(width):
     text = "".join(fragment[1] for fragment in lines[0])
     assert display_width_text(text) <= width
     if width >= 90:
-        assert "当轮工具 2" in text and "最近缓存 —" in text and "会话累计 1.3m" in text
+        assert "当轮工具 2" in text and "总缓存 —" in text and "累计会话 1.3m" in text and "输出 1.0k" in text
     runtime = TuiRuntime("render")
     rendered = _render_input_status(runtime.store.snapshot(), TuiRenderContext(width=width, model_metrics=tuple(metrics.items())))
     assert rendered == lines

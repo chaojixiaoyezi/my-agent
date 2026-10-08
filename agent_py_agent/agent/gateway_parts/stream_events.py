@@ -32,9 +32,10 @@ _CONTEXT_COMPACTION_FIELDS = (
 )
 
 
-# LLM: Gateway stream sanitization accepts only the frozen schema and known numeric fields;
-# unknown keys and all content-bearing values are dropped before the public event is written.
-# 函数用途: 清洗上下文用量快照，防止模型正文或工具定义意外进入 Gateway chunk。
+# LLM: Gateway stream sanitization accepts only the frozen schema, known numeric fields and two short display labels
+# (model_name / reasoning_level, strings only, trimmed to 80 chars, see conversation.context_usage); unknown keys and all
+# content-bearing values are dropped before the public event is written.
+# 函数用途: 清洗上下文用量快照，防止模型正文或工具定义意外进入 Gateway chunk；只放行给状态行看的模型名与思考档位短标签。
 def public_context_usage_payload(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or value.get("schema") != CONTEXT_USAGE_SCHEMA:
         return {}
@@ -44,7 +45,13 @@ def public_context_usage_payload(value: object) -> dict[str, object]:
         "estimated": value.get("estimated") is True,
         **{key: non_negative_int(value.get(key) or 0) for key in _CONTEXT_USAGE_TOKEN_FIELDS},
         "protocol": protocol if protocol in {"native", "text"} else "unknown",
+        **{key: _short_label(value.get(key)) for key in ("model_name", "reasoning_level")},
     }
+
+
+# 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让长正文借这两个字段进事件流。
+def _short_label(value: object) -> str:
+    return value.strip()[:80] if isinstance(value, str) else ""
 
 
 # LLM: Gateway projection validates the frozen compaction schema and copies only nonnegative
