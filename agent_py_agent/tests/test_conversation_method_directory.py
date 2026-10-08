@@ -86,3 +86,28 @@ def test_off_switch_blocks_run_metadata_without_deleting_records(tmp_path):
         assert prompt_method_ids(fixture.agent) == ()
         assert render(fixture, in_use_method_ids=prompt_method_ids(fixture.agent)) == render(fixture)
     assert len(records(fixture)) == 1
+
+
+# 3a 集成复核（10-08）：平常没有 Jev 选择时，有 skill 在用也必须保持普通目录格式（标题与使用规则不丢），在用的排最前并标注。
+def test_in_use_skill_keeps_public_directory_format_and_usage_rules(tmp_path):
+    from agent_py_agent.agent.capability.router import _SKILL_USAGE_INSTRUCTIONS
+
+    fixture = method_fixture(tmp_path)
+    skills = fixture.scope.skills.enabled_entries()
+    used = skills[-1]
+    text = render(fixture, in_use_method_ids=(used.stable_id,))
+    assert "# Available Skills" in text and "# Selected Skills" not in text
+    assert _SKILL_USAGE_INSTRUCTIONS in text
+    assert f"- {used.name}（本会话在用）" in text
+    section = text[text.index("# Available Skills"):]
+    first_skill_line = next(line for line in section.splitlines() if line.startswith("- "))
+    assert first_skill_line.startswith(f"- {used.name}（本会话在用）")
+
+
+# 3a 集成复核（10-08）：普通目录在极小预算下，在用 skill 仍显示，其余照原规则省略并报告。
+def test_in_use_skill_survives_tiny_budget_in_public_directory(tmp_path):
+    fixture = method_fixture(tmp_path)
+    used = fixture.scope.skills.enabled_entries()[-1]
+    text = render(fixture, in_use_method_ids=(used.stable_id,), context_window_tokens=1)
+    assert f"{used.name}（本会话在用）" in text and used.stable_id in text
+    assert "# Selected Skills" not in text

@@ -282,9 +282,8 @@ class CapabilityRouter:
         if not skills:
             return package_text
         budget = _SkillMetadataBudget(max(0, budget.limit - package_cost), budget.token_based)
-        if selected_skill_ids is not None or any(card.metadata.get("conversation_in_use") for card in skills):
-            selected = selected_skill_ids if selected_skill_ids is not None else tuple(card.metadata["stable_id"] for card in skills)
-            skill_text = _render_selected_skill_metadata(skills, budget, selected, required_skill_ids)
+        if selected_skill_ids is not None:
+            skill_text = _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids)
             return "\n\n".join(text for text in (package_text, skill_text) if text)
         return "\n\n".join(text for text in (package_text, _render_public_skill_metadata(skills, budget)) if text)
 
@@ -543,10 +542,11 @@ class _SkillMetadataBudget:
         return len(text)
 
 
-# LLM: 保持未选择、无在用项时的原提示字节；预算与省略说明只从原渲染结果取得，不读取线程或新增身份。
+# LLM: 保持未选择、无在用项时的原提示字节；有在用 skill 时仍用普通目录格式（标题和使用规则不变，3a 集成复核 10-08 改回），
+#   不切到 Selected Skills 选择模式；预算与省略说明只从原渲染结果取得，不读取线程或新增身份。联测 conversation_method_directory。
 # 函数用途: 装配普通 Skill 目录、预算说明与使用规则，供公开能力索引复用。
 def _render_public_skill_metadata(skills: list, budget: _SkillMetadataBudget) -> str:
-    rendered, omitted, descriptions_shortened = _render_skill_metadata_lines(skills, budget)
+    rendered, omitted, descriptions_shortened = _render_public_skill_lines(skills, budget)
     lines = ["# Available Skills", "下列是本轮可用 Skill 的 name + description + stable skill_id。普通问答没有匹配项时无需调用。", *rendered]
     if omitted:
         lines.append(f"- 2% Skill metadata 预算不足，另有 {omitted} 个 Skill 未显示；仍可用 skill_search(action=search) 按需求检索。")
@@ -554,6 +554,21 @@ def _render_public_skill_metadata(skills: list, budget: _SkillMetadataBudget) ->
         lines.append("- 部分 description 已为适配 2% Skill metadata 预算而缩短；stable id 与 Skill 正文未改变。")
     lines.append(_SKILL_USAGE_INSTRUCTIONS)
     return "\n".join(lines)
+
+
+# LLM: 在用卡已由 using_method_cards 排在最前；先按"至少放得下名字和编号"的下限渲染在用卡，再用剩余预算渲染其余卡，
+#   没有在用卡时等同原来一次渲染全部（字节不变）。省略数只计其余卡，在用卡不会被省略。
+# 函数用途: 普通目录下保证本会话在用的 skill 一定显示，其余照原裁剪规则。
+def _render_public_skill_lines(skills: list, budget: _SkillMetadataBudget) -> tuple[list[str], int, bool]:
+    in_use = [card for card in skills if card.metadata.get("conversation_in_use")]
+    if not in_use:
+        return _render_skill_metadata_lines(skills, budget)
+    others = [card for card in skills if not card.metadata.get("conversation_in_use")]
+    minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in in_use)
+    first, _, first_short = _render_skill_metadata_lines(in_use, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based))
+    used = sum(_line_cost(budget, line) for line in first)
+    rest, omitted, rest_short = _render_skill_metadata_lines(others, _SkillMetadataBudget(max(0, budget.limit - used), budget.token_based))
+    return [*first, *rest], omitted, first_short or rest_short
 
 
 # LLM: ID 仅匹配原 stable_id，不接受名称别名；required 也必须处于授权卡内，预算不足只省略可选项。
