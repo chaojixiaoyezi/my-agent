@@ -190,8 +190,31 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BEN
 
 **已知限制**：这一版基于任务基线 `6e8f61564`，没有合入 w1 的开关现读/会话沿用；集成后应复跑。
 主首步 get 意图、宿主入口入模、实际成功读取、方法采用、业务质量是五个观察点，这里不验后面三项。
-默认 C 候选上限 5、输入/入口各 3000 token；10 个包可能被省略或入口预算不足，诊断保留在 JSONL，工具不偷偷提预算。
-真 MiniMax 网络/凭据/工具探针及 39 句准确率**未验证**；第 4 步生产质量与 TUI/飞书验收也不在本次自测里。
+选择输入/入口预算仍默认各 3000 token；推荐上限默认 5 已与选择解耦，只有预算不足才省略完整候选，诊断保留在 JSONL。
+修复后真 MiniMax 网络/凭据/工具探针及 39 句准确率**未验证**；第 4 步生产质量与 TUI/飞书验收也不在本次自测里。
+
+### 3a 真跑对照与 selfix（2026-10-07；本地修复，待集成/真模型复跑）
+
+来源：3a 的 `w2-selection-fix.md`，MiniMax、10 个包、39 句×3 遍。
+以下是任务书提供的修复前结果，w2 没读正式原始 JSONL、没自行真跑；不能当本次修复后的召回率。
+
+| 组 | 第一次对口 | 无关题乱开包 |
+| --- | --- | --- |
+| A，她自己看目录挑 | 44/75（58.7%） | 0/42 |
+| B，目录说法加硬 | 43/75（57.3%） | 0/42 |
+| C，原默认候选上限 5 | 程序选中 45/75（60%） | 0/42 |
+| C0，原版 `capability_candidate_limit: 0` | 程序选中 74/75（98.7%，唯一漏项是调用失败） | 0/42 |
+
+修复落点：`package_selection.build_package_selection_material` 删除 `candidate_limit` 入参，
+`package_selection_runtime._prepare_pending_selection` 不再传推荐上限。候选只受选择输入预算及模型窗口限制；
+预算够保留全目录原序，预算不够时复用 `router.score_card`（卡片由原 `from_capability_package` 生成）稳定降序，同分原序、零分不筛。
+不替模型决定选哪个包，装不下的完整卡继续计入 `omitted_candidates` 与 `CAPABILITY_SELECTION_CANDIDATES_OMITTED`。
+`candidate_digest` 仍 hash 实际 prompt/schema/refs；紧预算导致实际排列或集合改变时摘要也改变，定义没变，不重放旧标记。
+推荐段仍按 `capability_candidate_limit` 限数，默认开关仍关闭，入口读取和子代理入口不改。
+随包 YAML 注释已分开，前端 `sync-backend-config.mjs` 重生目录并以 `--check` 核对。
+本地假模型 C 校准使用原测量入口：10 个临时包、四句、候选全 10 且无 OMITTED；单句紧预算只装 3 个并保留 OMITTED，
+两次均保留真实选择与主首请求，脚本化正例只证明候选/诊断链路，不证明自然召回。测试、变异与门禁见 [TESTS](../../TESTS.md#开工前选包候选修复2026-10-07w2selfix)。
+修复后正式评测仍由 3a 用上面的真实档案命令复跑，不需将推荐上限改为 0，不据 C0 数据擅自打开默认开关。
 
 ## 6. 第 4 步：部署和生产验收
 

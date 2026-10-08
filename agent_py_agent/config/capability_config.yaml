@@ -29,9 +29,10 @@ enable_capability_package_recommendations: true
 # - 只选择原有权限内的包，不执行包内脚本，不扩大工具权限；后续正常自动选模仍可能改变业务模型。
 enable_capability_package_selection: false
 # 选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。
+# 候选只受输入预算限制，不受推荐候选数上限限制；预算不足按现有推荐打分稳定排序，同分保留原序，不过滤零分包。
 # 后端原有结构化重试可能带来多次 HTTP；输出沿原模型配置，不保证固定一次 HTTP 或固定总 token。
 capability_package_selection_max_input_tokens: 3000
-# 推荐与选包共用的候选数上限；0 不限制数量，仍按输入预算省略放不下的完整候选。
+# 只控制推荐提示中“本轮能力包候选”段的条数；0 不限制推荐条数，仍受元数据预算限制，不控制开工前选包。
 capability_candidate_limit: 5
 # 主选包与子授权入口装配共用的总 token 预算，包含读取回执；读不完保留准确分页信息，0 仍受模型窗口限制。
 capability_bundle_max_tokens: 3000

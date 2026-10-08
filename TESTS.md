@@ -1,5 +1,70 @@
 # 测试与发布验收
 
+## 开工前选包候选修复（2026-10-07，w2/selfix）
+
+- 来源：3a `w2-selection-fix.md`；接 `e863c1e2c`，共同规则失败归因基线仍为 `6e8f61564`。
+- 做法：选择材料/API/runtime 删除推荐候选上限；先验证全部原引用，预算够全目录原序，预算不够复用原 `score_card` 稳定排序，不过滤零分。
+  输入/模型窗口预算、完整卡省略、实际输入摘要、一轮 claim/入口与子代理合同保持；默认开关仍关闭。
+- 新文件 `test_package_selection_candidates.py`：10 包全收、无关键词的尾包保留、三卡预算相关度与零分稳定同序、推荐 5/1/0 限数、runtime 不转发推荐上限、假模型 C 原路径。
+  前 7 项先跑：4 failed / 3 passed，rc=1；都是目标断言红测，不是导入或收集失败。修复后四文件含参数/前端目录合同：145 passed，rc=0。
+- 原测试断言改动（未删或放宽）：`test_input_budget_never_silently_truncates_user_facts_or_partial_candidate` 去掉已删除的 `candidate_limit=0` 入参，全部预算/完整卡断言不变；
+  原 `test_candidate_limit_zero_retains_budget_and_missing_candidates_never_call_model` 改为只按输入预算限制，一卡预算仍断言 1 个/省略 5 个，宽预算仍断言 6 个、空候选仍不调用模型；
+  非法预算参数中的 `candidate_limit=True` 换为 `max_input_tokens=True`，仍严格拒绝 bool、不解除预算。旧限数语义按任务书替换为独立预算合同。
+- C 原测量入口（不是旁路生成）：setup 安装/启用 10 个临时纯内容包，run 四句 `--arms C --fake`，独立会话，辅助 schema 实测各 10 个候选，无 OMITTED；
+  再按三卡实际估算写隔离配置，单句 `novel`，候选 3 个且首位对口，回执保留 OMITTED；两次分别 8/2 条原模型调用，全行请求成功。
+  观察器保留原 `generate_structured` 签名，早先宽 `**kwargs` 观察器使传输收到多余参数而 TypeError，已修观察器并重跑；未弱化失败/告警断言。
+  输出位于 pytest basetemp 的 `c-all` / `c-tight`（可被下一次测试清理）；脚本化正例只验证材料与诊断，不证明真实召回。
+- 前端目录：`node frontend/scripts/sync-backend-config.mjs` 及 `--check`，均 rc=0，265 fields；默认数值/dataclass 不变。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_package_selection_candidates.py agent_py_agent/tests/test_capability_package_selection.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_backend_config_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2 -v -rs
+```
+
+- 最终版本回归：grep 到直接 import `package_selection` 的全部 9 个测试文件，加完整 guards9 的 12 文件及 7 个推荐/配置/前端/测量相关文件，去重后明确 **28 文件 / 529 项全部通过，0 skipped / 0 failed，rc=0**。
+  最终命令如下；默认 quiet 输出只显示通过点，因此另对完全相同文件集合执行 `--collect-only`，实报 `files=28 items=529 exitstatus=0`；收集数字不是执行通过的替代证据。
+  本节只使用下面最终集合的计数，不混用开发中其它集合的结果；不跑全仓 pytest。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 /Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python - <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+imports = subprocess.run(['rg', '-l', '(from|import).*package_selection', 'agent_py_agent/tests', '-g', '*.py'], capture_output=True, text=True, check=True).stdout.splitlines()
+guards = Path('/Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/guards9.txt').read_text().splitlines()
+extra = ['test_pack_pick_bench.py', 'test_backend_config_catalog.py', 'test_capability_config.py', 'test_capability_config_class.py', 'test_capability_config_missing_defaults.py', 'test_capability_runtime_config.py', 'test_capability_package_prompt_guidance.py']
+files = sorted(set(imports + [line for line in guards if line.strip() and not line.startswith('#')] + ['agent_py_agent/tests/' + name for name in extra]))
+assert all(Path(name).is_file() for name in files)
+print(f'CURRENT_VERSION_REGRESSION: {len(files)} explicit test files', flush=True)
+print('\n'.join(files), flush=True)
+result = subprocess.run([sys.executable, '-m', 'pytest', *files, '-q', '--tb=short', '-p', 'no:cacheprovider', '--basetemp=/private/tmp/claude-501/m-w2', '-rs'])
+raise SystemExit(result.returncode)
+PY
+```
+
+- 两处必做变异：独立 Python 子进程内只替换 `build_package_selection_material` 的一处实现；分别执行 `pytest.main([测试文件::函数, '-q', '--tb=short', '-p', 'no:cacheprovider', '--basetemp=/private/tmp/claude-501/m-w2'])`。
+  每次仅一个变异，进程结束即消失；产品两文件和新增测试文件的 SHA-256 前后一致，原文件未写入坏代码。外层检查器 rc=0 只表示两次预期 rc=1 都被检测到，**不把外层成功当变异测试通过**。
+
+  | 变异位置与做法 | 测试文件与函数 | pytest rc | 是否抓到 |
+  | --- | --- | --- | --- |
+  | `package_selection.build_package_selection_material`：构造材料前恢复最多 5 个候选 | `test_package_selection_candidates.py::test_selection_includes_ten_packages_with_recommendation_limit_five` | 1 | 是；完整 refs 断言，10 个变 5 个 |
+  | 同函数：`ranked = sorted(...score_card...)` 改为 `ranked = candidates` | `test_package_selection_candidates.py::test_tight_budget_ranks_keyword_match_then_stable_zero_score_ties` | 1 | 是；原序首个 c-pack 不等于应优先的 z-pack |
+
+- 门禁（均在本树根用指定解释器；下列每项均 rc=0）：
+  - `scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`。
+  - `-m ruff check agent_py_agent scripts`：`All checks passed!`。
+  - `scripts/check_doc_sync.py --base 6e8f61564`：`DOC_SYNC_PASS`；`git diff --check 6e8f61564` 无输出。
+  - `scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：hard=0、blocked=False；生成 `CODE_SIZE_REPORT.md` 已还原，不提交。
+  - `scripts/check_clean_package.py .`：未发现发布阻塞项；新测试先暂存，使原守卫可正确检查，不改守卫或豁免。
+  - `bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：原输出“新增告警: 0”“消失告警: 1”。
+  - 参数/常量目录、打包和后端签名守卫包含在上述完整 guards9 中；`test_backend_config_catalog.py` 包含在最终集合中。
+- 独立补丁审查：非作者子代理只读原任务要求与内嵌改动材料，静态检查未发现阻断问题；没有读外部工作树、执行程序或测试，不把该结论当端到端验证。
+  实际文件和回归由本作者核对；原默认关闭、原 reader/pin/CAS/取消/子代理入口未被本次 diff 修改。审查建议确认大卡略过、零预算/窗口与摘要变化边界，未报必须修复的问题。
+- 真实对照来源是任务书：A 44/75、B 43/75、C 45/75、原 C0 74/75，误开均 0/42。w2 未读原始正式 JSONL、未使用真实凭据或网络。
+  修复后 MiniMax/39 句、生产 TUI/飞书、方法采用与业务质量、w1 集成均未验证，交 3a；不把 C0 原对照当本修复已达标。
+
 ## 首次选包测量工具（2026-10-07，w2；任务基线 `6e8f61564`）
 
 - 来源：3a 的 `w2-step3-bench.md`，只开发测量器，真 MiniMax 和 39 句由 3a 沙箱外跑。

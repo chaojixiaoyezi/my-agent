@@ -1,4 +1,4 @@
-# LLM: 输入只接受宿主已授权的冻结包元数据；本模块不晋升、不 claim、不读正文、不 pin、不写主历史或任务状态。
+# LLM: 输入只接受宿主已授权的冻结包元数据；候选仅受输入预算约束，预算不足复用 router 打分排序但不筛零分。本模块无授权/读取/状态副作用。
 # 模块用途: 有界准备能力包名卡，用当前后端做一次逻辑结构化选择，返回严格校验的引用与无正文诊断。
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from ..conversation.auxiliary_model_call import (
 from ..memory_archive import estimate_tokens
 from .package_selection_failure import log_selection_failure, selection_failure_facts
 from .package_snapshot import CapabilityPackageSnapshot
+from .router import from_capability_package, score_card
 from .task_references import normalize_skill_reference
 
 _FrozenReferences = tuple[tuple[tuple[str, str], ...], ...]
@@ -83,14 +84,14 @@ class PackageSelectionResult:
         return tuple(dict(row) for row in self._references)
 
 
-# LLM: packages 必须先经调用方权限裁剪；只读公开字段，完整卡片预算不足则明确省略，不裁掉任务事实或半条引用。
-# 函数用途: 按总输入预算构建不可变选择材料；0 不限制该配置项，但必须有模型窗口或另一项有效预算。
+# LLM: packages 已经权限裁剪；先验证全部引用，预算够保持原序，预算不足按原 score_card 稳定降序装完整卡，不筛零分或代模型选择。
+# 函数用途: 只按选择输入预算准备名卡，推荐上限不参与；0 仍受模型窗口限制，不读正文或改状态。
 def build_package_selection_material(
     query: str, packages: Sequence[CapabilityPackageSnapshot], *, max_input_tokens: int = 3000,
-    candidate_limit: int = 5, context_window_tokens: int = 0,
+    context_window_tokens: int = 0,
 ) -> PackageSelectionMaterial:
     total = len(packages)
-    if any(type(value) is not int or value < 0 for value in (max_input_tokens, candidate_limit, context_window_tokens)):
+    if any(type(value) is not int or value < 0 for value in (max_input_tokens, context_window_tokens)):
         return _failed_material("CAPABILITY_SELECTION_BUDGET_INVALID", total)
     limits = [value for value in (max_input_tokens, context_window_tokens) if value]
     if not limits:
@@ -100,22 +101,20 @@ def build_package_selection_material(
     budget = min(limits)
     if _material(query, (), (), total).estimated_input_tokens > budget:
         return _failed_material("CAPABILITY_SELECTION_INPUT_TOO_LARGE", total)
+    candidates, error = _validated_candidates(packages)
+    if error:
+        return _failed_material(error, total)
+    complete = _material(query, tuple(_candidate_card(package) for package, _ in candidates),
+                         tuple(tuple(sorted(reference.items())) for _, reference in candidates), total)
+    if not candidates:
+        return _failed_material("CAPABILITY_SELECTION_NO_CANDIDATES", total)
+    if complete.estimated_input_tokens <= budget:
+        return complete
     cards: tuple[dict, ...] = ()
     references: _FrozenReferences = ()
-    seen: set[str] = set()
-    for package in packages:
-        try:
-            reference = normalize_skill_reference(package.to_ref())
-        except (ValueError, TypeError):
-            return _failed_material("CAPABILITY_SELECTION_CANDIDATE_INVALID", total)
-        stable_id = reference["stable_id"]
-        if stable_id in seen:
-            return _failed_material("CAPABILITY_SELECTION_CANDIDATE_CONFLICT", total)
-        seen.add(stable_id)
-        if candidate_limit and len(cards) >= candidate_limit:
-            continue
-        card = {"stable_id": stable_id, "name": package.name, "version": package.version,
-                "summary": package.summary, "description": package.description, "keywords": list(package.keywords)}
+    ranked = sorted(candidates, key=lambda item: -score_card(query, from_capability_package(item[0]))[0])
+    for package, reference in ranked:
+        card = _candidate_card(package)
         trial_refs = (*references, tuple(sorted(reference.items())))
         trial = _material(query, (*cards, card), trial_refs, total)
         if trial.estimated_input_tokens <= budget:
@@ -123,6 +122,31 @@ def build_package_selection_material(
     if not cards:
         return _failed_material("CAPABILITY_SELECTION_NO_CANDIDATES", total)
     return _material(query, cards, references, total)
+
+
+# LLM: 校验在排序/预算省略之前，尾部坏引用或重复身份也必须失败；不预读私有资源、不改快照。
+# 函数用途: 冻结合法候选引用，给预算装配提供与原快照一致的身份。
+def _validated_candidates(packages: Sequence[CapabilityPackageSnapshot]) -> tuple[list[tuple], str]:
+    candidates = []
+    seen: set[str] = set()
+    for package in packages:
+        try:
+            reference = normalize_skill_reference(package.to_ref())
+        except (ValueError, TypeError):
+            return [], "CAPABILITY_SELECTION_CANDIDATE_INVALID"
+        stable_id = reference["stable_id"]
+        if stable_id in seen:
+            return [], "CAPABILITY_SELECTION_CANDIDATE_CONFLICT"
+        seen.add(stable_id)
+        candidates.append((package, reference))
+    return candidates, ""
+
+
+# LLM: 只投影包声明的公开字段，与推荐打分输入同源；不加入路径、正文或成员清单。
+# 函数用途: 为选择模型生成一张完整名卡，不执行读取或授权。
+def _candidate_card(package: CapabilityPackageSnapshot) -> dict:
+    return {"stable_id": package.stable_id, "name": package.name, "version": package.version,
+            "summary": package.summary, "description": package.description, "keywords": list(package.keywords)}
 
 
 # LLM: 只编码完整名卡和严格输出 schema，估算沿原辅助调用口径；摘要绑定实际任务/元数据/refs，不保存另一本账。

@@ -7,10 +7,12 @@
 |-- scripts/eval/pack_pick_runtime.py        # 原 Gateway 首请求、A/B/C 内存覆盖、模型层捕获与零工具执行
 |-- scripts/eval/pack_pick_results.py        # 最小工具身份、原账本已报 token、分组分语言汇总
 |-- agent_py_agent/tests/test_pack_pick_bench.py # 六个自测；假传输校准，不代表自然召回
+|-- agent_py_agent/tests/test_package_selection_candidates.py # 选包预算与推荐限数解耦、稳定排序、原测量器 C 组校准
 `-- agent_py_agent/tests/fixtures/pack_pick_queries.json # 四句中/英/法小样本（不是正式 39 句）
 ```
 
 实际用法、接缝与验证边界见 [SKILL_PACK_SELECTION.md 第 5 节](docs/design/SKILL_PACK_SELECTION.md#5-第-3-步第一次挑中三组对比按数据定)。
+`test_package_selection_candidates.py` 是 selfix 候选合同和原 C 测量入口的长期回归；它不评自然召回，也不进入 wheel。
 
 ## M1 B9（原 M5）插件作者入口
 
