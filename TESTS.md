@@ -1,5 +1,33 @@
 # 测试与发布验收
 
+## E11d 返工：mc4 review18 两个阻断（mc3-e11d-fix，2026-10-08，分支 `worker/mc3-e11d`，待复核）
+
+- **来源**：mc4 review18 判"修改后部署"，两个部署阻断——MC4-1801 新接管事实 `stale_lease_reclaimed` 没接入运行审计：
+  `curator_run_log._normalized_recovery` 的严格校验不认该 kind，带接管事实的整轮被改写成 `CURATOR_RUN_AUDIT_FAILED`、运行账为空、失败收尾还清掉租约；
+  MC4-1802 提前接管绕过未完成事务恢复：`curator_commit` 恢复只看 `expires_at`（旧租约未过期就跳过），`acquire` 又按 pid 已死换租约，
+  带着旧事务清单开始新执行，之后等到过期恢复也一直 `CURATOR_COMMIT_RECOVERY_FAILED`。
+- **第 0 步**：`git merge 9e843077d`（生产源码 = main 25d4538db + E11a + E11c）→ 合并提交 `e789bc56c`；
+  三个文档冲突（TESTS.md、memory 02-progress、04-structure）双方保留，常数目录重生成一致（957 项）。
+- **修法**（范围放开到 curator_state/commit/run_log）：
+  1. `curator_run_log._normalized_recovery` 新增 `stale_lease_reclaimed` 严格分支（字段全集 = kind/previous_run_id/previous_lease_id/previous_pid/previous_expires_at/reclaimed_at，
+     与 `expired_lease` 同格式），成功与失败两条运行记录都经同一序列化/读回；不丢 recovery 绕过校验；
+  2. `curator_state._stale_lease_reclaimable` 改名公开 `stale_lease_reclaimable`，`curator_commit._same_live_lease` 未过期时改判"持有者是否确定死亡"——
+     与 `acquire` 提前接管共用同一判据；`_run_once` 保持先 `recover_incomplete`（原锁内核对身份、恢复旧事务）再 `acquire`，判据分叉的绕过通道关闭。
+- **mc4 补测**：`agent_py_agent/tests/test_review18_contracts.py`（9 def 参数化 22 项）修复前 11 failed / 11 passed 原样复现；修复后 **22 passed**。
+  原 `test_curator_stale_lease_reclaim.py` 10 条保留；3 处死 PID 接管断言按平台写清期望（Windows 不提前判死：不接管且租约原样、`_pid_definitely_dead` 不调 `os.kill`）。
+- **变异 3/3 被抓**（一次一处、逐个还原、SHA 与备份一致）：
+
+  | 变异 | 改动 | 红测 | rc |
+  |---|---|---|---|
+  | M1 审计不认接管事实 | 删 `stale_lease_reclaimed` allowed 分支 | restart_never_executes[1/2/3] + dead_lease_full_service[False/True]（`CURATOR_RUN_AUDIT_FAILED`） | 1 |
+  | M2 恢复端判据退回只看过期 | `_same_live_lease` 恒返回 True | restart 两测试各 3 切点 + recovery_barrier[1/2/3] | 1 |
+  | M3 接管前不恢复旧事务 | 可提前接管的租约跳过恢复 | 同上 9 项（旧 manifest 残留 / 恢复计数 0） | 1 |
+
+- **回归**：curator/memory 相关 108 文件 + guards9 12 文件共 **120 文件全绿**（103.5s，0 失败 0 跳过）。
+- **门禁**：strict_gates（diff-check 基线 9e843077d）与 size_diff 明细见任务交接；生成报告已还原不提交。
+- **复现**：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_review18_contracts.py agent_py_agent/tests/test_curator_stale_lease_reclaim.py -q --tb=short -p no:cacheprovider`（$PY 用 ci-venv-312）。
+- **未验证**：真实网关重启、真实多进程接管竞争、Windows 实机（只有平台分支断言与替身，未跑 Windows CI）；生产环境接管收益。
+
 ## 网关重启后 Curator 租约接管（mc3-e11d，2026-10-08，分支 `worker/mc3-e11d`，待复核）
 
 - **来源**：生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，而 `acquire` 只认 `expires_at`；

@@ -125,7 +125,7 @@ class MemoryCuratorStateStore:
             if _lease_live(previous, now=current_time):
                 # LLM: 租约未过期但持有者进程已确定死亡（同主机、非本进程、pid 不存在）时提前接管；
                 #   其余一切不确定情况继续按 expires_at 等，宁可多等不能误抢。
-                if not _stale_lease_reclaimable(previous):
+                if not stale_lease_reclaimable(previous):
                     return None
                 reclaimed_stale = True
             pending, generations = _bump_pending_reason(state, normalized_reason)
@@ -586,8 +586,10 @@ def _pid_definitely_dead(pid: int) -> bool:
 
 # LLM: 三条同时成立才提前接管：同主机（同一 host 函数）、不是本进程、pid 确定不存在；
 #   信息不全（缺 host/pid 或类型不对）不接管，损坏租约在 _lease_live 已按原 corrupt 路径拒绝。
-# 函数用途: 判断未过期租约的持有者是否已确定死亡、可以立即接管。
-def _stale_lease_reclaimable(lease: dict[str, object]) -> bool:
+#   本函数是"持有者已确定死亡"的唯一判据：acquire 的提前接管与 curator_commit 的事务恢复
+#   都调用它，两侧判据不允许分叉（mc4-1802）。
+# 函数用途: 判断未过期租约的持有者是否已确定死亡、可以提前接管或安全恢复其遗留事务。
+def stale_lease_reclaimable(lease: dict[str, object]) -> bool:
     if not lease:
         return False
     if str(lease.get("host") or "") != _local_hostname():
@@ -651,4 +653,5 @@ __all__ = [
     "CuratorStateCorruptError",
     "MemoryCuratorStateStore",
     "build_success_state",
+    "stale_lease_reclaimable",
 ]

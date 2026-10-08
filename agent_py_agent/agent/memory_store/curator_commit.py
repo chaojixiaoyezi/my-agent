@@ -37,6 +37,7 @@ from .curator_state import (
     CuratorSuccessCommit,
     MemoryCuratorStateStore,
     build_success_state,
+    stale_lease_reclaimable,
 )
 from .daily import (
     DailyMemoryEvent,
@@ -554,9 +555,11 @@ def _assert_target(path: Path, memory_root: Path) -> None:
         raise CuratorCommitRecoveryError("curator transaction target is not a regular file")
 
 
-# LLM: A lease blocks recovery only when it belongs to the same run and has a valid future UTC
-# expiry; malformed expiry fails closed.
-# 函数用途: 判断事务对应的原运行是否仍合法持有 lease。
+# LLM: A lease blocks recovery only when it belongs to the same run, has a valid future UTC
+# expiry, and its holder is not provably dead; the death check is the same function acquire
+# uses, so recovery and early lease handover can never disagree (mc4-1802). Malformed expiry
+# fails closed.
+# 函数用途: 判断事务对应的原运行是否仍合法持有 lease（未过期且持有者未确定死亡）。
 def _same_live_lease(
     lease: dict[str, object],
     *,
@@ -571,7 +574,11 @@ def _same_live_lease(
         raise CuratorCommitRecoveryError("curator transaction lease expiry is invalid") from exc
     if expires.tzinfo is None:
         raise CuratorCommitRecoveryError("curator transaction lease expiry lacks timezone")
-    return expires.astimezone(timezone.utc) > now
+    if expires.astimezone(timezone.utc) <= now:
+        return False
+    # 未过期：持有者已确定死亡时不再算 live，旧事务先在本锁内恢复、之后 acquire 才能换租约；
+    # 不确定（权限/异主机/信息不全/Windows）继续保守等待，与 acquire 判据完全一致。
+    return not stale_lease_reclaimable(lease)
 
 
 # LLM: Recovery audit contains only old run/lease metadata and a stable code; restored content

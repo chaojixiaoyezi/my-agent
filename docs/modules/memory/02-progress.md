@@ -1,14 +1,15 @@
 # 记忆与上下文维护状态
 
-## 网关重启后 Curator 租约接管（mc3-e11d，2026-10-08，分支 `worker/mc3-e11d`，本地实现，待复核）
+## 网关重启后 Curator 租约接管（mc3-e11d + e11d-fix 返工，2026-10-08，分支 `worker/mc3-e11d`，本地实现，待复核）
 
 - 生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，`acquire` 只认 `expires_at`，
   新网关要等约 28 分钟才能接手。修复：租约未过期但持有者进程已确定死亡（同主机、非本进程、`os.kill(pid, 0)` 抛 ProcessLookupError）时可提前接管；
   PermissionError/主机不同/信息不全一律等 `expires_at`，宁可多等不误抢。
 - 接管写结构化事实 `stale_lease_reclaimed`（原 lease_id/run_id/pid/expires_at + 接管时间），不悄悄覆盖；
   新租约带持有者出生身份 `process_identity`（`daemon_metadata.build_process_identity`），旧租约无该字段按未知、旧状态文件照读且摘要稳定。
-  `run_once` 顺序不变（先 `recover_incomplete` 再 `acquire`）。
-- 纯修复不加开关。测试 10 条、变异 3/3 被抓、30 文件回归 534 passed；未验证真实网关重启与真实多进程接管（模拟 pid）。详见根 `TESTS.md` 同名节。
+- e11d-fix 返工（mc4 review18 两阻断）：运行审计补 `stale_lease_reclaimed` 严格合同（成功/失败记录同一序列化与读回，不再把整轮改写成 `CURATOR_RUN_AUDIT_FAILED`）；
+  事务恢复与领取共用 `stale_lease_reclaimable` 死亡判据——持有者已死的旧事务先恢复（`recover_incomplete` 在原锁内核对身份）再换租约（`_run_once` 顺序不变），三个崩溃切点用例转绿。
+- 纯修复不加开关。mc4 补测 22 项全绿（返工前 11 红）、原测试 10 条保留、变异 3/3 被抓、120 文件回归全绿；未验证真实网关重启与真实多进程接管（模拟 pid）。详见根 `TESTS.md` 同名节。
 
 ## Curator消息/审计只读游标缓存（mc2-e11c，2026-10-08，worker/mc2-e11c，本地实现、待3a复核）
 

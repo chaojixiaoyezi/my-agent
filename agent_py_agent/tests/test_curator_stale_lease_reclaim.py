@@ -98,6 +98,12 @@ def test_dead_pid_is_reclaimed_with_fact_and_commit(tmp_path: Path) -> None:
     store = MemoryCuratorStateStore(_state_path(tmp_path))
     _write_state(store.path, _lease(pid=dead_pid))
     acquired = _acquire(store)
+    if os.name == "nt":
+        # Windows 合同：os.kill(pid, 0) 会误杀目标进程，一律不提前判死；
+        # 死 pid 也不接管，租约原样保留等 expires_at。
+        assert acquired is None
+        assert store.load().active_lease["lease_id"] == _LEASE_ID
+        return
     assert acquired is not None
     _, lease = acquired
     recovery = lease["recovery"]
@@ -132,6 +138,11 @@ def test_foreign_host_lease_waits_for_expiry(tmp_path: Path) -> None:
 
 
 def test_pid_definitely_dead_classifies_os_errors(monkeypatch) -> None:
+    if os.name == "nt":
+        # Windows 合同：直接返回不确定，且不得调用 os.kill；替身只在被误用时让测试失败。
+        monkeypatch.setattr(cs.os, "kill", lambda *args: pytest.fail("Windows must not probe"))
+        assert cs._pid_definitely_dead(4321) is False
+        return
     def _permission(pid, sig):
         raise PermissionError("exists but not ours")
 
@@ -176,6 +187,11 @@ def test_legacy_lease_without_identity_reads_and_reclaims(tmp_path: Path) -> Non
     assert "process_identity" not in lease
     _write_state(store.path, lease)
     acquired = _acquire(store)
+    if os.name == "nt":
+        # Windows 合同：一律不提前判死；旧租约照常读回、不接管。
+        assert acquired is None
+        assert store.load().active_lease["lease_id"] == _LEASE_ID
+        return
     assert acquired is not None
     _, new_lease = acquired
     assert new_lease["recovery"]["kind"] == "stale_lease_reclaimed"

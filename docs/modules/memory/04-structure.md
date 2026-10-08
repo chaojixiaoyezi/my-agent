@@ -1,12 +1,16 @@
 # Memory Structure
 
-## 网关重启后 Curator 租约接管（mc3-e11d，2026-10-08，分支 `worker/mc3-e11d`，待复核）
+## 网关重启后 Curator 租约接管（mc3-e11d + e11d-fix 返工，2026-10-08，分支 `worker/mc3-e11d`，待复核）
 
-- `memory_store/curator_state.MemoryCuratorStateStore.acquire`：租约未过期但持有者已确定死亡时提前接管；
-  判定三条件同真——`host == socket.gethostname()`（与写入租约共用 `_local_hostname`）、`pid != os.getpid()`、
+- `memory_store/curator_state.stale_lease_reclaimable`（公开判据；mc4-1802 起 acquire 与事务恢复共用，不允许分叉）三条件同真——
+  `host == socket.gethostname()`（与写入租约共用 `_local_hostname`）、`pid != os.getpid()`、
   `_pid_definitely_dead`（只认 `ProcessLookupError`；PermissionError 与其它 OSError 按不确定；`os.name == "nt"` 不探测）。其余情况继续等 `expires_at`。
+- `acquire`：租约未过期但持有者已确定死亡时提前接管；`curator_commit._same_live_lease`（崩溃事务恢复的 live 判定）复用同一判据——
+  持有者已死不再算 live，`_run_once` 先 `recover_incomplete` 在原锁内核对身份并恢复旧事务，再换租约开始新执行。
 - 接管时 `lease.recovery` 写 `stale_lease_reclaimed`（含 `previous_lease_id`/`previous_run_id`/`previous_pid`/`previous_expires_at`/`reclaimed_at`）；
   正常过期仍写 `expired_lease`（`_lease_handover_recovery` 分流）。
+- `curator_run_log._normalized_recovery` 的严格合同认 `stale_lease_reclaimed`（字段全集固定，与 `expired_lease` 同格式）；
+  接管事实随成功/失败运行记录序列化并读回，不会把整轮改写成 `CURATOR_RUN_AUDIT_FAILED`（mc4-1801）。
 - 新 lease 增加 `process_identity`（`build_process_identity()`：host_id/pid/start_time），供 B5 多进程核验；
   旧租约无该字段按未知处理，`MemoryCuratorState.from_dict` 过滤未知顶层字段的行为不变。
 - `_bump_pending_reason` 从 acquire 拆出 pending 队列/代次更新，使 acquire 尺寸守在 near-soft 阈值下（span 56 → 46，基线 47）。

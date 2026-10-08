@@ -276,6 +276,9 @@ def _normalized_recovery(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("memory curator run recovery must be an object")
     kind = str(value.get("kind") or "")
+    # LLM: stale_lease_reclaimed 是 E11d 提前接管事实（mc4-1801）：与 expired_lease 同格式对齐，
+    #   只含结构化标识与时间；字段全集严格匹配，不认的 kind 或多余字段一律拒绝，
+    #   不能把接管事实丢成空 recovery 绕过校验。
     allowed = {
         "expired_lease": {
             "kind",
@@ -283,6 +286,14 @@ def _normalized_recovery(value: object) -> dict[str, object]:
             "previous_lease_id",
             "previous_expires_at",
             "recovered_at",
+        },
+        "stale_lease_reclaimed": {
+            "kind",
+            "previous_run_id",
+            "previous_lease_id",
+            "previous_pid",
+            "previous_expires_at",
+            "reclaimed_at",
         },
         "transaction_rollback": {"kind", "prepared_at"},
         "manual_from_quarantine": {
