@@ -1,5 +1,50 @@
 # 测试与发布验收
 
+## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08，07-c1，本地实现待复核）
+
+- 来源：07 toolrefs、两次插话及toolrefs-2审核意见；只用合成索引，不读真实owner/正文/凭据，不连接Gateway。Compact、artifact、晋升证据回退、通用控制面共用 `common/tool_index_stream.py`；E11a保留原物理LF，旧整读入口保留CR/LF/CRLF。
+- `test_tool_ref_scope_stream.py` 冻结真基线 `9e843077d` 的整读与scope规则，62种scope对照单类及合并入口；顶层/runs/tasks、坏行/空行/非对象、Unicode分隔符、转义、非ASCII、布尔/数字/数组/字典、集合/AND/空条件、旧请求回退、重复/未知身份/双参数/ledger排除均覆盖。
+- 原范围先红7条；两次独立静态评审后父级复现裸CR/晚期解码与投影错误顺序，10项回归转绿。扩展三入口非匹配零loads先红3条；第二审查实际复现深层坏JSON、超长整数及不相关路径错误4条红，再修复并加晚UTF-8优先等回归。审查称字典字符串可预筛的意见被反证：空格已使该值不安全，保留对照测试而非盲改。
+- toolrefs-2删除纯Python词法校验器：需要旧合法性语义的行用C `json.loads` 后立即丢弃，不进入历史列表；晋升坏行仍使整文件无证据。预筛文本接口候选仍按原调用方解析，对象接口每行只解析一次。E11a原合同不检查无关行，仍零解析。极端资源异常延迟到文件扫描完，保持IO/UTF-8优先。
+- `test_tool_ref_hot_paths.py` 对artifact各查找键、路径/链接/scope/最后匹配，晋升run/call/tool/operation及整文件失效，通用控制面逐条对照。新增规范POSIX路径避免Path分配与原解析器的NUL/loop/缺失/非规范路径对照；其它平台及路径保留原Path实现，最终正文/权限/哈希不变。无效ref先验证索引异常但不收集历史全集。
+- `test_tool_index_validation.py` 保留1250种生成语法对照，新增跨64KiB块UTF-8/CRLF、裸CR尾部、残缺UTF-8及普通坏行/资源错误/晚IO的优先级。深Python调用栈的CPython3.12复跑未重现审查假设中的RecursionError，按原C解析实际结果对照；仍去掉递归预算猜测，校验直调C解析器。按07新方案更新loads与长行分配断言，不删除业务等价断言。
+- E11a原内存对照曾调用本次也被优化的控制面，失去旧基准；改用 `helper_tool_index_baseline.py` 冻结真基线整读，原条数、大小、峰值断言全部保留，没有跳过或放宽。
+- 最新toolrefs-2计量用真基线 `9e843077d054e34fddff896102f4da7c29977c40` 的git归档及当前源码，两个独立子进程共享同一套1000根/16006行/6匹配语料；压缩/收尾39339552字节，其它6模式39339571字节。较首版路径前缀缩短，故字节数不同；不混用旧数据。峰值/计数单独一次；计时移除meter及tracemalloc，每轮旧→新交错3次取中位数，GC、bundle复位及结果断言在计时外。原始样本见 `tmp/toolrefs/tr2-paired.json`，脚本为该目录的 `paired_measure.py`；下面全部是当前方案结果，不再用旧版带探针计时判断回退。
+
+| 合成入口 | 索引字节：旧→新 | json.loads：旧→新 | tracemalloc峰值字节：旧→新 | 无tracemalloc计时秒 median3：旧→新 | 耗时变化 |
+|---|---:|---:|---:|---:|---:|
+| compact来源 | 78679104→39339552 | 32012→16012 | 67946535→2225142 | 0.328817→0.154859 | -52.90% |
+| finalization产物更新 | 39339552→39339552 | 16007→16013 | 67944457→2218957 | 0.164541→0.164374 | -0.10% |
+| ReadArtifactTool.execute | 39339571→39339571 | 16007→16007 | 67957154→2233966 | 0.461854→0.416544 | -9.81% |
+| display_archive._original_output | 39339571→39339571 | 16007→16007 | 69868749→2223145 | 0.577051→0.488295 | -15.38% |
+| estimate_tool_output_artifact_size | 39339571→39339571 | 16006→16006 | 67943494→2216692 | 0.430281→0.357298 | -16.96% |
+| LocalStoreToolEvidenceVerifier.verify | 39339571→39339571 | 16006→16006 | 2216590→2217262 | 0.163485→0.172536 | +5.54% |
+| query_memory_control_plane | 39339571→39339571 | 16006→16012 | 67932048→2219154 | 0.178382→0.180703 | +1.30% |
+| carried_tool_call_records | 39339571→39339571 | 16006→16012 | 67941108→2216048 | 0.186651→0.178173 | -4.54% |
+
+- compact索引枚举/打开2/2000→1/1000，其余均1/1000；artifact正文读取还会另枚举许可目录，不把该路径检查伪装成零扫描。晋升语料无typed成功事实，实跑结果为None，未声称证据晋升成功。完整Finalization、TUI/Gateway、生产RSS不是这些计量的观察点。
+- toolrefs-2聚焦四文件257 passed、扩展25文件685 passed、完整12文件guards9的194 passed、计量三文件及C解析回归59 passed（含8入口分开计时）。配对8入口耗时/峰值断言通过；import边界0、Ruff、doc-sync、strict尺寸、diff与clean-package均rc0，新增尺寸告警0。首次Ruff两处import顺序失败已修，clean-package首轮因新增测试未入索引失败、正常git add后复验通过；不把原失败隐藏为成功。命令及红绿输出在本工作树 `tmp/toolrefs/`；未修改常数生成器或目录基线。
+- 复跑：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_tool_index_validation.py agent_py_agent/tests/test_curator_tool_output_refs.py agent_py_agent/tests/test_tool_ref_scope_measurement.py agent_py_agent/tests/test_tool_ref_hot_measurement.py -o addopts='' -q -s -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-toolrefs-all-measure`；PY为指定ci-venv-312。
+- 单入口复跑新增 `test_tool_ref_timing_measurement.py`，使用相同8模式分开计量峰值和无探针median3；旧版复跑需把这些测试helper复制到真基线归档，不复制产品源码。配对脚本使用 `/private/tmp/claude-501/m-toolrefs-timing` 下该测试的固定语料，再调用指定CI Python运行 `tmp/toolrefs/paired_measure.py`，输出两个版本三次原始样本并断言8入口耗时≤旧+10%、峰值<300万。
+- 风险/取舍：全部根/字节仍读，只消除历史全集常驻，单行仍会瞬时构造；晋升旧峰值本来低，不宣称所有入口变快。空/不安全scope及路径alias保守解析，无缓存、新截断、schema、配置、写入或权限改变。路径等价测试基于稳定文件系统；扫描中外部修改symlink不提供事务快照保证，完整并发等价、Windows运行、生产836MB/4000根、Gateway及RSS收益未验证，不能用收尾5–11/h解释约50/h跳涨。
+
+### 全量工具索引调用方盘点（源码相对agent_py_agent；频率由07提供，未自行访问生产）
+
+| 文件:行与调用链 | 触发/频率 | 处理 |
+|---|---|---|
+| agent/user_space/context_bundle_artifacts.py:32→tool_output_source_refs；agent/memory_archive/compact_apply/__init__.py:467→tool_source_refs | 收尾有scope，07计5–11/h；压缩apply按需 | 单类及合并共用流式；旧_read_tool_output_index已无调用并删除，tool_call_source_refs保留兼容导出 |
+| agent/tooling/artifact.py:211→artifact/reader.py:53→_index_records_for_root:403→路径枚举:405 | 每模型read_artifact，07计6–31/h | 共用C逐行解析与原path匹配；max_chars=0时:339先estimate，再读可另扫一次 |
+| agent/agent_core/tool_loop/round_execution.py:1481→display_archive.py:59→同artifact reader | 每完成外置工具且无patch/diff/write/command富展示；频率未计 | 一并改后端；这不是模型read_artifact计数，不能漏计为仅收尾 |
+| cli/memory_artifact_commands.py:18、agent/conversation/audit_tools.py:896→同artifact reader | 显式CLI/审计读取；未计 | 后端一并改，无新增权限或正文读取 |
+| agent/memory_store/promotion.py→每文件流式校验 | 晋升缺运行时gate证据才回退；07称晋升400+/日，非每次都读索引 | 共用C解析后丢弃+整文件合法性；不导入archive层 |
+| agent/memory_archive/control_plane.py:115→_tool_outputs | 通用API；全仓未找到生产直接调用方，频率未计 | 可控范围一起改；无安全run/task值时保守解析 |
+| agent/gateway_parts/request_execution.py:735、agent/conversation/runtime.py:2054→carried_tool_call_records | 活跃回合恢复/旧后台唤醒；未计 | 共用scope流式，原身份去重/投影不变 |
+| agent/conversation/runtime.py:2071→carried_tool_call_records_for_requests | 请求级后台唤醒；未计 | 原本只扫已知owner/task两源、物理LF及替换解码/不完整源合同不同，保留既有流式而不越界统一 |
+| agent/core.py:307→query_tool_output_refs_for_runs；agent/memory_store/curator_inputs.py:285批量适配器 | Curator定时/手动批次一次；未计 | E11a共用新权威读取器，原坏行/分组/上限不变 |
+| agent/common/tool_output_paths.py:19/31→根枚举/index路径；artifact/reader.py:410另作许可根检查 | 上述入口按需，无独立定时器 | 唯一工具索引根glob；全仓检索无其它索引整读，retention扫描不是索引读取 |
+
+- tool_output_externalizer.py:310/353及shared_workspace.py:126只写不读，不改；未找到独立决策工具索引扫描，决策涉及晋升时仍走上述验证器。包导出及测试引用不是额外生产触发点。
+
 ## 压缩重复读取及 SQLite 批次（compactmem，2026-10-08，07-c1）
 
 - 来源：07 compactmem/steer1；只测合成 20,000 行、50,535,560 字节 canonical/tool 历史，含既有派生索引；真实正文/凭据/Gateway 未读取或连接。

@@ -34,7 +34,7 @@ from ..compact_state import (
     build_compaction_state,
     render_compaction_handoff_summary,
 )
-from ..compact_tool_output_refs import tool_call_source_refs, tool_output_source_refs
+from ..compact_tool_output_refs import tool_source_refs
 from ..schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
@@ -457,13 +457,14 @@ def build_self_check_failure_payload(
     }
 
 
+# LLM: 原文件来源不变，两类工具引用交给同一 scope 单扫描读取器；只读元数据、不改变恢复 schema 或归属。
+# 函数用途: 生成压缩恢复来源，一遍读取同时保留小调用和大输出，避免每次压缩重复扫描全部索引。
 def _source_refs(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return {
         "archive_files": _file_refs(plan["archive"].get("files", [])),
         "snapshot_files": _file_refs(plan["snapshots"].get("latest", [])),
         "token_ledgers": _file_refs(plan["tokens"].get("latest", [])),
-        "tool_calls": tool_call_source_refs(plan["workspace_root"], plan["scope"]),
-        "tool_outputs": tool_output_source_refs(plan["workspace_root"], plan["scope"]),
+        **tool_source_refs(plan["workspace_root"], plan["scope"]),
     }
 
 
