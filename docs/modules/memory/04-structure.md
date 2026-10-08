@@ -1,9 +1,9 @@
 # Memory Structure
 
-## Curator 工具输出引用的批量读取器（mc3-e11a，2026-10-08，分支 `worker/mc3-e11a`，待复核）
+## Curator 工具输出引用的批量读取器（mc3-e11a，2026-10-08，分支 `worker/mc3-e11a`，含 e11a-perf 预筛正则跟进，待复核）
 
 - `memory_archive/control_plane.query_tool_output_refs_for_runs`：一批 run_id 一次 glob、一次顺序扫描全部工具输出索引，逐行二进制流式读取（物理 LF 切、行尾去一个 `\r`、严格 UTF-8 解码，与 `jsonl_lines` 同一记录边界），只为请求的 run 收集有界匹配行（每 run 最多 `limit_per_run` 条，`<=0` 不截断）。返回 `{"ok": True, "tool_outputs_by_run": {run_id: [行]}}`，行内容与旧 `query_memory_control_plane` 的 `tool_outputs` 逐条等价（同一文件顺序、同一行序、同一 `_record_value`/`_matches_scope` 匹配、同一"前 N 条"截断）。
-- 可选字节预筛：仅当全部 run_id 由 JSON 不会转义的可见 ASCII（`!`–`~` 去掉 `"` 和 `\`）组成时，才先在原始行字节里查 run_id 字节串；命中或无法预筛时整行解析。预筛只是性能提示：跳过行仍严格解码（非 UTF-8 等价性不破坏），归属判断只走结构化匹配。
+- 可选字节预筛（e11a-perf：每批只编译一次的字节正则 `re.compile(b"|".join(re.escape(n) ...))`，每行一次 C 层 `search`，字面量交替无回溯风险）：仅当全部 run_id 由 JSON 不会转义的可见 ASCII（`!`–`~` 去掉 `"` 和 `\`）组成时才启用；命中或无法预筛时整行解析。预筛只是性能提示：跳过行仍严格解码（非 UTF-8 等价性不破坏），归属判断只走结构化匹配。bench（1000 根/386MB/40 万行/10 run）CPU 3.31s → 0.68s。
 - `memory_store/curator_inputs.CuratorToolReferenceSource.read` 改批量契约（`query(owner_root, run_ids, limit)`）：一次调用覆盖整批 audit 事件的 run 集合；整批失败（读文件错、`ok` 非真、结构不对、`int()` 失败）时给每个 run 复制同类型错误，与旧路径"每个 run 的独立查询都在同一确定性原因上失败"逐条等价。逐行转换（`_run_refs_and_errors`）是旧循环体的原样提取。
 - 组合根 `core._query_curator_tool_references` 改为批量转调；通用控制面查询 `query_memory_control_plane` 不变（对超大 owner 仍有同样的全量读取开销，本次未动）。
 - 收窄（只扫"某 run 可能出现的根"）经核查不可由结构化事实证明（runs 目录名是 `sha256(identity)[:24]`、date 层不可推、顶层根可含任意 run 行），本批保持全量根列表、每批只 glob 一次；收窄方案留作后续项。

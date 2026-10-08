@@ -492,3 +492,8 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
 - 可选字节预筛只在全部 run_id 为 JSON 不转义的可见 ASCII 时启用，命中或无法预筛时整行解析；跳过行仍严格解码（非 UTF-8 行为与旧路径一致）。
 - `memory_store/curator_inputs.CuratorToolReferenceSource.read` 改批量契约，整批失败时每个 run 复制同类型错误；`core._query_curator_tool_references` 批量转调。通用控制面 `query_memory_control_plane` 本次不改（对超大 owner 同样问题留待后续）。
 - 合成约 200MB 索引实测：新路径 tracemalloc 峰值 5.8MB，旧路径 217.9MB；29 个相关测试文件 621 条全过；变异 4/4 被抓。根列表收窄不可由结构化事实证明，本批未收窄，方案写入交接。
+
+2026-10-08 Curator 预筛改正则 + 收尾补测（mc3-e11a-perf，同一分支 `worker/mc3-e11a`，待复核）：
+- 预筛从"每行对全部 needle 的 Python 生成器步进"改为每批只编译一次的字节正则（`re.compile(b"|".join(re.escape(n) ...))`，每行一次 C 层 `search`）；安全条件、空 run_id 不预筛、跳过语义（预筛不中或纯空白）完全不变；字面量交替无回溯风险。
+- 3a bench（1000 根、386MB、40 万行、10 run_id）同一数据两遍取小值：一批 CPU 3.31s → 0.68s、wall 3.47s → 0.73s（目标 ≤1.0s 达标），matched=572 不变。
+- 补 CRLF/混合行尾等价用例与正则元字符用例（`.` `+` `(` `[` `*` `?` `|` 精确匹配、与相似 run_id 互不误收）；29 个相关测试文件 629 条全过；变异 6/6 被抓（新增：去掉 `re.escape` → 正则元字符用例 5/7 参数红）。

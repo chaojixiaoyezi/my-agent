@@ -340,14 +340,43 @@ def test_batch_reader_scans_each_index_once(
     assert all(count == 3 for count in legacy_counts.values())
 
 
-# 函数用途: 验证预筛条件：只有全为 JSON 不转义的可见 ASCII 才生成字节串，否则整行解析。
-def test_prescreen_needles_skip_unsafe_run_ids() -> None:
-    assert control_plane._tool_ref_prescreen_needles(("run-safe",)) == (b"run-safe",)
-    assert control_plane._tool_ref_prescreen_needles(("run safe",)) == ()
-    assert control_plane._tool_ref_prescreen_needles(('run"quote',)) == ()
-    assert control_plane._tool_ref_prescreen_needles(("run\\backslash",)) == ()
-    assert control_plane._tool_ref_prescreen_needles(("运行-任务-1",)) == ()
-    assert control_plane._tool_ref_prescreen_needles(()) == ()
+# 函数用途: 验证预筛条件：只有全为 JSON 不转义的可见 ASCII 才编译字节正则，否则整行解析。
+def test_prescreen_pattern_skips_unsafe_run_ids() -> None:
+    pattern = control_plane._tool_ref_prescreen_pattern(("run-safe",))
+    assert pattern is not None
+    assert pattern.search(b'"run_id": "run-safe"') is not None
+    multi = control_plane._tool_ref_prescreen_pattern(("run-a", "run-b"))
+    assert multi is not None
+    assert multi.search(b"run-b") is not None
+    assert control_plane._tool_ref_prescreen_pattern(("run safe",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(('run"quote',)) is None
+    assert control_plane._tool_ref_prescreen_pattern(("run\\backslash",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(("运行-任务-1",)) is None
+    assert control_plane._tool_ref_prescreen_pattern(()) is None
+
+
+# LLM: 预筛正则必须把 run_id 当字面量（re.escape）：含 . + ( [ * ? | 等元字符的 run_id 要精确命中，
+#   相似但不同的 run_id 不能互相污染（正向查不到相似行、反向查不到精确行）；去掉 re.escape 的
+#   变异会让本用例红（( [ 编译失败，* ? + 假阴性漏收）。
+# 函数用途: 验证含正则元字符的 run_id 在预筛正则下精确匹配、与相似 run_id 互不误收。
+@pytest.mark.parametrize(
+    "run_id",
+    ["run.dot", "run+plus", "run(paren", "run[bracket", "run*star", "run?question", "run|pipe"],
+)
+def test_regex_metachar_run_ids_match_exactly(tmp_path: Path, run_id: str) -> None:
+    artifact = tmp_path / "blobs" / "tool_outputs" / "artifact.txt"
+    similar = "".join("x" if char in ".+([*?|" else char for char in run_id)
+    _write_index(
+        tmp_path,
+        "blobs/tool_outputs",
+        _tool_output_line(run_id, "call-exact", artifact)
+        + _tool_output_line(similar, "call-similar", artifact),
+    )
+    batch = query_tool_output_refs_for_runs(tmp_path, run_ids=(run_id,), limit_per_run=5)
+    rows = batch["tool_outputs_by_run"][run_id]
+    assert [row["call_id"] for row in rows] == ["call-exact"]
+    reverse = query_tool_output_refs_for_runs(tmp_path, run_ids=(similar,), limit_per_run=5)
+    assert [row["call_id"] for row in reverse["tool_outputs_by_run"][similar]] == ["call-similar"]
 
 
 # LLM: ensure_ascii 两种写法各测一遍：安全 ASCII 逐字节出现；引号/反斜杠会被转义成 \" 与 \\，

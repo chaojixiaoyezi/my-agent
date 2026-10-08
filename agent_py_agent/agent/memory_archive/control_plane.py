@@ -12,6 +12,7 @@ returns scoped references that compact/resume/debug flows can follow.
 """
 
 import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,9 +242,9 @@ def query_tool_output_refs_for_runs(
         run_id: MemoryControlPlaneQueryOptions(run_id=run_id, limit=limit_per_run)
         for run_id in run_ids
     }
-    prescreen_bytes = _tool_ref_prescreen_needles(run_ids)
+    prescreen = _tool_ref_prescreen_pattern(run_ids)
     for path in tool_output_index_paths_for_lookup(workspace):
-        _collect_tool_output_rows(path, collected, options_by_run, prescreen_bytes)
+        _collect_tool_output_rows(path, collected, options_by_run, prescreen)
     return {"ok": True, "tool_outputs_by_run": collected}
 
 
@@ -255,13 +256,13 @@ def _collect_tool_output_rows(
     path: Path,
     collected: dict[str, list[dict[str, Any]]],
     options_by_run: dict[str, MemoryControlPlaneQueryOptions],
-    prescreen_bytes: tuple[bytes, ...],
+    prescreen: re.Pattern[bytes] | None,
 ) -> None:
     if not path.exists():
         return
     for line_number, raw in _iter_index_lines(path):
         text = _decode_record_bytes(raw)
-        if _skip_record_bytes(raw, text, prescreen_bytes):
+        if _skip_record_bytes(raw, text, prescreen):
             continue
         record = _decode_line(path, line_number, text)
         _collect_matching_record(record, collected, options_by_run)
@@ -275,11 +276,11 @@ def _iter_index_lines(path: Path) -> Iterator[tuple[int, bytes]]:
         yield from enumerate(handle, start=1)
 
 
-# LLM: 预筛与空行检查合成一个"跳过"判断：预筛字节不命中、或（已严格解码的）纯空白行都跳过；
+# LLM: 预筛与空行检查合成一个"跳过"判断：预筛正则不命中、或（已严格解码的）纯空白行都跳过；
 #   解码本身不在这里做——非 UTF-8 行必须在任何跳过判断前失败，才能与旧整文件解码等价。
 # 函数用途: 判断一行原始字节是否不参与归属判断（预筛未命中或空白行）。
-def _skip_record_bytes(raw: bytes, text: str, prescreen_bytes: tuple[bytes, ...]) -> bool:
-    if prescreen_bytes and not any(needle in raw for needle in prescreen_bytes):
+def _skip_record_bytes(raw: bytes, text: str, prescreen: re.Pattern[bytes] | None) -> bool:
+    if prescreen is not None and prescreen.search(raw) is None:
         return True
     return not text.strip()
 
@@ -319,11 +320,13 @@ def _collect_matching_record(
 # LLM: 预筛条件=run_id 全部是"JSON 不会转义的可见 ASCII"（! 到 ~ 去掉 " 和 \）：这类字符在
 #   ensure_ascii 开/关两种写法里都逐字节出现，字节命中只是性能提示、不是归属判断；含空格/转义字符/
 #   非 ASCII 的 run_id 一律不预筛——写索引的一方可能用 \uXXXX 或 \" 转义，字节串会漏匹配。
-# 函数用途: 为全部安全的 run_id 生成字节串候选；任一不安全就返回空（整行解析，不漏匹配）。
-def _tool_ref_prescreen_needles(run_ids: tuple[str, ...]) -> tuple[bytes, ...]:
+#   每批只编译一次字节正则（字面量交替 + re.escape，无回溯风险）：每行一次 C 层 search，
+#   替代每行对全部 needle 的 Python 级生成器步进（40 万行实测里预筛约占七成 CPU）。
+# 函数用途: 为全部安全的 run_id 编译"任一出现即命中"的字节正则；任一不安全就返回 None（整行解析，不漏匹配）。
+def _tool_ref_prescreen_pattern(run_ids: tuple[str, ...]) -> re.Pattern[bytes] | None:
     if not run_ids or not all(_is_prescreen_safe_run_id(run_id) for run_id in run_ids):
-        return ()
-    return tuple(run_id.encode("utf-8") for run_id in run_ids)
+        return None
+    return re.compile(b"|".join(re.escape(run_id.encode("utf-8")) for run_id in run_ids))
 
 
 # LLM: 单个 run_id 的预筛安全判定；空串不预筛（all() 对空串恒真，必须显式排除）。
