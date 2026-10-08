@@ -26,7 +26,7 @@ _SUCCESS_TOOL_STATUSES = frozenset(
 )
 _INCOMPLETE_TOOL_EFFECTS = frozenset({"unknown", "not_started", "failed"})
 
-ToolReferenceQuery = Callable[[Path, str, int], dict[str, object]]
+ToolReferenceQuery = Callable[[Path, tuple[str, ...], int], dict[str, object]]
 
 
 # LLM: full_content 只在宿主内用于 quote/hash 核验，to_model 永远只发有界预览。
@@ -256,6 +256,12 @@ class CuratorToolReferenceSource:
 
     # LLM: Exact structured run/call identity is required and every returned path must remain
     # inside this owner root, preventing one owner's index from introducing another owner's ref.
+    #   批量契约：一次调用对全部 run 只查一遍（读取器每批只 glob、只顺序扫描一次索引）；
+    #   整批失败时给每个 run 复制同类型错误——旧路径里每个 run 的独立查询都会在同一个
+    #   确定性原因上失败，逐条等价。
+    #   错误合同（mc4-1302，3a 已接受的有意变化）：本读取只依赖工具输出索引；daily/*/events.jsonl
+    #   与 memory_archive/compact_applies/ledger.jsonl 损坏（非法 UTF-8）不再连带失败（旧路径会因
+    #   整读它们而给每个 run 报 UnicodeDecodeError）。这是行为改进，不是等价修改。
     # 函数用途: 为一批 audit 工具事件读取有界、owner 隔离的大输出引用元数据。
     def read(
         self,
@@ -272,45 +278,26 @@ class CuratorToolReferenceSource:
                 if event.run_id and event.tool_call_id
             }
         )
+        if not run_ids:
+            return refs, errors
+        try:
+            limit = max(1, min(2_048, int(limit_per_run)))
+            result = self.query(self.owner_root, tuple(run_ids), limit)
+        except (OSError, UnicodeError, ValueError) as exc:
+            return refs, _all_run_errors(run_ids, exc)
+        if result.get("ok") is not True:
+            return refs, _all_run_errors(run_ids, ValueError("control plane failed"))
+        rows_by_run = result.get("tool_outputs_by_run")
+        if not isinstance(rows_by_run, dict):
+            return refs, _all_run_errors(run_ids, ValueError("invalid tool_outputs"))
         for run_id in run_ids:
-            try:
-                result = self.query(
-                    self.owner_root,
-                    run_id,
-                    max(1, min(2_048, int(limit_per_run))),
-                )
-            except (OSError, UnicodeError, ValueError) as exc:
-                errors.append(_tool_reference_error(exc, run_id=run_id))
-                continue
-            if result.get("ok") is not True:
-                errors.append(_tool_reference_error(ValueError("control plane failed"), run_id=run_id))
-                continue
-            rows = result.get("tool_outputs")
+            rows = rows_by_run.get(run_id)
             if not isinstance(rows, list):
                 errors.append(_tool_reference_error(ValueError("invalid tool_outputs"), run_id=run_id))
                 continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    errors.append(_tool_reference_error(ValueError("invalid tool output row"), run_id=run_id))
-                    continue
-                if str(row.get("kind") or "") == "control_plane_decode_error":
-                    errors.append(
-                        {
-                            "context": "memory_curator.tool_reference_read",
-                            "error_code": "TOOL_REFERENCE_READ_FAILED",
-                            "error_type": "InvalidJsonlRow",
-                            "run_id": run_id,
-                            "line": int(row.get("line_number") or 0),
-                        }
-                    )
-                    continue
-                try:
-                    ref = _bounded_tool_output_ref(row, owner_root=self.owner_root, run_id=run_id)
-                except (OSError, ValueError) as exc:
-                    errors.append(_tool_reference_error(exc, run_id=run_id))
-                    continue
-                if ref:
-                    refs[(run_id, str(ref["tool_call_id"]))] = ref
+            run_refs, run_errors = _run_refs_and_errors(run_id, rows, self.owner_root)
+            refs.update(run_refs)
+            errors.extend(run_errors)
         return refs, errors
 
 
@@ -631,6 +618,48 @@ def _tool_reference_error(exc: BaseException, *, run_id: str) -> dict[str, objec
         "error_type": type(exc).__name__,
         "run_id": run_id,
     }
+
+
+# LLM: 批量读取器整批失败时（读文件出错、查询失败、返回结构不对），旧路径里每个 run 的独立查询都会
+#   在同一个确定性原因上失败；这里给每个请求的 run 复制同一条错误，保持错误集合逐条等价。
+# 函数用途: 为一次批量查询里的每个 run 生成同类型的读取错误。
+def _all_run_errors(run_ids: list[str], exc: BaseException) -> list[dict[str, object]]:
+    return [_tool_reference_error(exc, run_id=run_id) for run_id in run_ids]
+
+
+# LLM: 单个 run 的行处理与旧路径逐条相同（非 dict 行、decode_error 行、越界/坏 size、合法行覆盖写入）；
+#   行序由读取器保证与旧全量查询一致，因此同一 (run_id, call_id) 的覆盖结果也一致。
+# 函数用途: 把一个 run 的索引行转成有界引用，并收集逐行错误。
+def _run_refs_and_errors(
+    run_id: str,
+    rows: list[object],
+    owner_root: Path,
+) -> tuple[dict[tuple[str, str], dict[str, object]], list[dict[str, object]]]:
+    refs: dict[tuple[str, str], dict[str, object]] = {}
+    errors: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            errors.append(_tool_reference_error(ValueError("invalid tool output row"), run_id=run_id))
+            continue
+        if str(row.get("kind") or "") == "control_plane_decode_error":
+            errors.append(
+                {
+                    "context": "memory_curator.tool_reference_read",
+                    "error_code": "TOOL_REFERENCE_READ_FAILED",
+                    "error_type": "InvalidJsonlRow",
+                    "run_id": run_id,
+                    "line": int(row.get("line_number") or 0),
+                }
+            )
+            continue
+        try:
+            ref = _bounded_tool_output_ref(row, owner_root=owner_root, run_id=run_id)
+        except (OSError, ValueError) as exc:
+            errors.append(_tool_reference_error(exc, run_id=run_id))
+            continue
+        if ref:
+            refs[(run_id, str(ref["tool_call_id"]))] = ref
+    return refs, errors
 
 
 # LLM: metadata 仅白名单短标量，避免把隐藏工具结果或 provider payload 带进后台模型。
