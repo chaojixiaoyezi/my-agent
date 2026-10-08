@@ -19,6 +19,7 @@ from .compact_calibration import (
     calibrated_compact_request_tokens,
     raw_token_excess,
 )
+from .compact_message_source import CompactMessageSource
 
 PROVIDER_COMPACTION_SCHEMA = "provider_compaction.v1"
 REMOTE_COMPACTION_PURPOSE = "conversation_compact_remote"
@@ -27,12 +28,13 @@ _LOGGER = logging.getLogger(__name__)
 
 # LLM: prompt 必须是没有动态尾巴的稳定前缀（CacheStructuredPrompt 的 volatile_suffix 为空或纯字符串），否则触发项
 #   前面会多出一条 user 消息、前缀失配；messages 是主请求同一份 provider 消息数组（含上一代摘要/压缩项）。
-# 类用途: 一次服务端压缩请求的全部材料与运行身份。
+# messages可携带同次冻结来源：预算通过前不物化正文，最终Auxiliary运输仍只接完整列表。
+# 类用途: 一次服务端压缩请求的材料与身份，允许流式检查大历史预算。
 @dataclass(frozen=True)
 class RemoteCompactionRequest:
     agent: object
     prompt: object
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any]] | CompactMessageSource
     tools: list[dict[str, Any]] | None = None
     system_instruction: str = ""
     request_id: str = ""

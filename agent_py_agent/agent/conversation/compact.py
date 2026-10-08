@@ -1500,8 +1500,9 @@ def _summarize(
 
 
 # LLM: 服务端压缩（compact_remote）：材料与客户端单次缓存面请求同源（同 system、同工具、同一份可重放来源，只是没有压缩指令），
-#   工具与 system 直接取 provider_surface；不可用/失败返回空串走原文字摘要；中断照常传播。来源在这里物化一次交给远端请求。
-# 函数用途: 对一段 transcript 来源尝试一次服务端压缩：成功登记记录并返回占位摘要文本，否则返回空串。
+#   工具与 system 直接取 provider_surface；不可用/失败返回空串走原文字摘要，中断照常传播。服务端预算先流式计量同次冻结来源；
+#   仅装得下的最终请求才物化，拒绝/回退不可持有整份正文，校准与瘦身不变。
+# 函数用途: 先尝试远端摘要，不在预算拒绝前把完整历史放进内存。
 def _remote_transcript_summary(agent, selected_call, message_source) -> str:
     from .compact_remote import (
         RemoteCompactionRequest,
@@ -1514,7 +1515,7 @@ def _remote_transcript_summary(agent, selected_call, message_source) -> str:
     if surface is None or not remote_compaction_enabled(agent):
         return ""
     record = request_remote_compaction(RemoteCompactionRequest(
-        agent=agent, prompt=conversation_compact_provider_prompt(surface, ""), messages=list(message_source),
+        agent=agent, prompt=conversation_compact_provider_prompt(surface, ""), messages=message_source,
         tools=list(surface.tools) if surface.tools is not None else None, system_instruction=surface.system_instruction,
         request_id=selected_call.request_id, run_id=selected_call.run_id, task_id=selected_call.task_id,
         thread_id=selected_call.thread_id, calibration=selected_call.calibration,

@@ -1,4 +1,6 @@
 
+# LLM: 派生记录共用原写入/审计权威，索引比较只取必要列及流式正文，不另建记录或持久状态。
+# 模块用途: 管理本地记录的写入、精确比较与完整读取。
 from __future__ import annotations
 
 """owns LocalStore record upsert, lookup, content-file paths, and row hydration.
@@ -58,7 +60,44 @@ class _PreparedRecord:
     now: float
 
 
+# LLM: 文件流只读一块字符并精确比实际内容；保留errors=replace及尾部长度判断，不靠数据库hash替代内容验证。
+# 函数用途: 不水合整份正文地检查索引文件内容是否一致。
+def _content_stream_matches(handle, content):
+    position = 0
+    while chunk := handle.read(65536):
+        if chunk != content[position:position + len(chunk)]:
+            return False
+        position += len(chunk)
+    return position == len(content)
+
+
+# LLM: 比较与水合共用原路径及UTF8/preview语义，读取模式不同不能让坏正文被误认一致。
+# 类用途: 提供记录的路径解析、精确比较及完整读取辅助。
 class _LocalStoreRecordHelpers:
+    # LLM: 只取比较需要的列；hash仅作快速否定，正文仍按原UTF8替换解码逐块精确比较，缺文件仍用原preview。
+    # 函数用途: 判断派生索引的正文和元数据是否已一致，不水合整条记录或保留第二份正文。
+    def record_matches(self, record: LocalRecordInput) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                'SELECT content_hash, metadata_json, content_path, content_preview FROM records WHERE id = ?',
+                (record.record_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        if row['content_hash'] != hashlib.sha256(record.content.encode('utf-8')).hexdigest():
+            return False
+        return (json.loads(row['metadata_json'] or '{}') == (record.metadata or {})
+                and self._content_matches(row, record.content))
+
+    # LLM: 原_read_content的文件存在/preview及errors=replace语义不变；逐块比实际字符，不能仅相信hash而漏掉坏正文文件。
+    # 函数用途: 验证派生正文与canonical投影完全一致，内存只多一块，不生成完整返回正文。
+    def _content_matches(self, row, content: str) -> bool:
+        path = self._resolve_content_path(row['content_path'])
+        if not path.exists():
+            return row['content_preview'] == content
+        with path.open('r', encoding='utf-8', errors='replace') as handle:
+            return _content_stream_matches(handle, content)
+
     def _row_to_result(self, row: sqlite3.Row, *, score: float = 0.0) -> LocalSearchResult:
         metadata = json.loads(row["metadata_json"] or "{}")
         return LocalSearchResult(

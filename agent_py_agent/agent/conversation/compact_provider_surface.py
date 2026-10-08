@@ -20,7 +20,7 @@ from ..prompting_parts.builder import PromptBuilder, PromptBuildRequest, ToolSec
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..prompting_parts.thread_persona import thread_persona_scope
 from .compact_message_source import CompactMessageSource
-from .native_history import iter_provider_history_messages_from_rows
+from .native_history_replay import prepare_native_history_replay
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.loop_models import RuntimeContextRequest
@@ -242,7 +242,7 @@ def conversation_compact_provider_messages(
                                                      volatile_sections=volatile_sections))
 
 
-# LLM: 各遍重放同一rows，原生最后信封与orphan规则共用原实现；不缓存完整provider数组，不授予历史覆盖。
+# LLM: 各遍重放同一rows，最后信封位置在本次来源内只准备一次；原orphan规则不变，不缓存provider正文或授予覆盖。
 # project_message 是每遍重放都重新应用的纯投影（如把媒体块换成归档引用），只改交给摘要的临时消息，不改 rows。
 # 函数用途: 为摘要计量与分段提供同一可重放缓存面，完整旧摘要和展示段仍原样保留。
 def conversation_compact_provider_source(previous_summary, compact_generation, rows, *, volatile_sections=(), project_message=None,
@@ -264,11 +264,12 @@ def conversation_compact_provider_source(previous_summary, compact_generation, r
     current_display = AnthropicMessageAdapter().to_provider_messages(
         [RuntimeFactsTurn(text=text, source=source) for source, text in volatile_sections]
     )
+    native_replay = prepare_native_history_replay(rows)
     # LLM: 每次重放都沿同一冻结rows，yield from向native迭代器传播提前关闭，不能留下文件句柄。
     # 函数用途: 在原生历史前后加原摘要和展示消息，保持原数组顺序。
     def replay():
         yield from prefix
-        history = iter_provider_history_messages_from_rows(rows)
+        history = iter(native_replay)
         yield from (map(project_message, history) if project_message is not None else history)
         yield from current_display
 

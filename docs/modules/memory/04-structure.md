@@ -11,6 +11,15 @@
   旧租约无该字段按未知处理，`MemoryCuratorState.from_dict` 过滤未知顶层字段的行为不变。
 - `_bump_pending_reason` 从 acquire 拆出 pending 队列/代次更新，使 acquire 尺寸守在 near-soft 阈值下（span 56 → 46，基线 47）。
 
+## Curator读取定位的进程缓存（mc2-e11c，2026-10-08）
+
+- `io/cursor_cache.py` 只提供短锁LRU、文件指纹和保守已见ID过滤器；键是绝对规范路径+精确ID，不按同ID/inode合并owner。值无正文/权限/持久消费状态，锁不包IO，不替代原写锁。
+- `conversation/message_cursor.py` 是 `MessageStore.after_report/byte_offset_after` 的唯一精确定位算法：缓存命中先查dev/ino、size不缩；同尺寸mtime/ctime变化失效；增长时读回同message_id和同结束偏移。失效沿完整扫描，保留原首匹配/空白前缀损坏和DataCorruptionError。完整指纹未变且游标在EOF或已确认空尾时零打开；display/limit/坏行/typed解析仍由原规则负责。
+- 消息LRU4096项，每份首ID过滤器8KiB，极端过滤器32MiB；同批位置共享不可变过滤器。读尾只缓存可证明首次出现的ID，重复/Bloom误报只不提升；过长ID不缓存，淘汰只变慢。
+- `memory_store/curator_audit_cursor.py` 由 `_collect_audit` 接原投影和预算；LRU128项，每项最多512个旧分片指纹、128KiB首ID过滤器，极端过滤器16MiB，目录过大或历史有错误不缓存。跳过旧片前必须匹配完整文件名序列及指纹，锚文件身份/大小/时间戳/ID/边界也须校验；缺cursor仍AUDIT_CURSOR_MISSING，不能从头重放。
+- 审计读取遵守原 `read_text` 通用CR/CRLF/LF换行口径，不切Unicode NEL/U+2028/U+2029；物理行号和错误顺序（JSON/非对象在前、缺ID在后）不变。当前分片全部错误先收齐再按预算选取；UTF-8/IO整读失败丢该文件有效行，缓存锚不可见时完整重定位，避免吞缺cursor错误。
+- 缓存只针对原append-only账本读增量；同inode改写早期前缀且同时增长、锚行仍原样的外部篡改，单靠身份/大小/锚行无法完备检测。不是内容完整性或授权事实。重启/并发淘汰只增加一次冷扫；合成等价/性能结果不代表真实Gateway或跨平台验收。
+
 ## 线程人格快照与Compact准备（personafreeze，2026-10-08）
 
 - 快照内容不合法等价于缺失，由原锁内唯一writer重建，日志不含正文；安全链接/非普通文件不放行。
