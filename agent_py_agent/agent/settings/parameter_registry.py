@@ -9,6 +9,7 @@
 #   实际使用值，如 max_tokens 按窗口夹取、推理强度在不支持的模型上不发送）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置；
 #   修改回执经 applied_value_with 按新值给出同一派生结果。常用层级（COMMON_KEYS，/settings 默认只列这些）是封闭的产品决策名单，
 #   登记为 ParameterSpec.common；只影响展示与推荐顺序，不参与任何放行判断。
+#   capability 现读开关的时机只从 self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS 取，不复制名单。
 # 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效、实际用的是多少”，是参数中心的唯一登记来源。
 from __future__ import annotations
 
@@ -237,11 +238,11 @@ def _yaml_source_specs(source: str) -> dict[str, ParameterSpec]:
 
 # LLM: capability 配置有 CapabilityConfig dataclass：类型与默认值以 dataclass 为准（加载器会 coerce），
 #   说明仍从随包 capability_config.yaml 注释取；config_warnings 是加载器元数据，不登记（主配置的同名键已登记）。
-#   生效时机默认报"重启 Gateway"；用到时按文件现读的键（SELF_INSTALL_SWITCH_KEYS）如实报"马上生效"。
+#   生效时机默认报"重启 Gateway"；唯一现读名单 CAPABILITY_FRESH_SWITCH_KEYS 内的键如实报"马上生效"。
 # 函数用途: 从 CapabilityConfig 与随包 YAML 生成 capability 来源的参数登记。
 def _capability_specs() -> dict[str, ParameterSpec]:
     from ..capability.config import CapabilityConfig
-    from ..capability.self_install_switches import SELF_INSTALL_SWITCH_KEYS
+    from ..capability.self_install_switches import CAPABILITY_FRESH_SWITCH_KEYS
 
     path = _packaged_extra_config_path(SOURCE_CAPABILITY)
     descriptions = _descriptions_from_lines(path.read_text(encoding="utf-8").splitlines())
@@ -257,7 +258,7 @@ def _capability_specs() -> dict[str, ParameterSpec]:
             description=descriptions.get(item.name, ""), category=category_for(item.name),
             safety=_safety_for(SOURCE_CAPABILITY, item.name, value_type),
             masked=is_masked(item.name),
-            effect=EFFECT_IMMEDIATE if item.name in SELF_INSTALL_SWITCH_KEYS else EFFECT_GATEWAY_RESTART,
+            effect=EFFECT_IMMEDIATE if item.name in CAPABILITY_FRESH_SWITCH_KEYS else EFFECT_GATEWAY_RESTART,
             common=False, unit=unit_for_key(item.name), source=SOURCE_CAPABILITY,
         )
     return specs

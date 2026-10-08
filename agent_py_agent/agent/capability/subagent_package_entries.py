@@ -1,4 +1,4 @@
-# LLM: 子入口只消费显式授权与同代 pin，沿原首请求资格和 RuntimeFacts；不选包、不调用模型、不创建任务或改包引用。
+# LLM: 子入口现读选包开关，只消费显式授权与同代 pin，沿原首请求资格和 RuntimeFacts；不选包、不扩大权限。
 # 模块用途: 在原创建时准备宿主资格，真实子请求 build/capture 前一次读取有界入口，具体方法仍按需读取。
 from __future__ import annotations
 
@@ -6,18 +6,19 @@ from concurrent.futures import CancelledError
 from dataclasses import replace
 
 from ..common.cancellation import ToolCancelled
-from .config import CapabilityConfig
 from .package_selection_context import prepare_package_entry_context
 from .package_selection_scope import PackageSelectionScope
 from .runtime_config_reload import capability_config_for_agent
+from .self_install_switches import read_fresh_capability_switch
 from .subagent_entry_authority import SubagentEntryAuthority, SubagentEntryInitialization
 from .task_references import normalize_skill_reference, task_skill_references
 
 
-# LLM: 只读配置；关闭不读取 Skill 快照/包正文，也不初始化原首请求标记。开关值只来自 CapabilityConfig（坏文件也用默认值）。
+# LLM: 每次按统一名单现读开关，不采用 agent 缓存；坏文件按 CapabilityConfig 默认值关，预算仍走原缓存入口。
+#   关闭不读取 Skill 快照/包正文，也不初始化原首请求标记；只读，不写状态。
 # 函数用途: 根和递归创建共用同一个包入口开关，默认路径保持原样。
 def subagent_entries_enabled(agent: object) -> bool:
-    return bool((capability_config_for_agent(agent) or CapabilityConfig()).enable_capability_package_selection)
+    return read_fresh_capability_switch(agent, "enable_capability_package_selection")
 
 
 # LLM: 当前 scoped 快照只作为权限上界；引用来自孩子 canonical 规格，不从描述、父正文或当前安装猜版本。

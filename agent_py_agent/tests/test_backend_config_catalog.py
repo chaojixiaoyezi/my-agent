@@ -3,8 +3,8 @@
 后端事实源（以后端为准）：
 - 键集合与注释归属：agent_py_agent/agent/settings/parameter_registry.py 的 _descriptions_from_lines
   （空行或任何非注释行中断注释块，无上方注释时取行尾注释，同名键只取第一次）。
-- 生效语义：parameter_registry.parameter_registry() 对每个参数声明 effect=EFFECT_GATEWAY_RESTART，
-  user_config_capability.py 的 TUNABLE_KEYS 也没有 next_session 的键，因此目录里每项都要标记需要重启。
+- 生效语义：parameter_registry.parameter_registry() 的 effect；现读开关不需要重启，其余项仍要重启。
+  守卫不另抄一份现读名单。
 
 生成器：frontend/scripts/sync-backend-config.mjs（node 重新生成后运行本文件即可验证一致；
 本守卫不依赖 node，直接对比 YAML 与目录 JSON）。
@@ -15,7 +15,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_py_agent.agent.settings.parameter_registry import _descriptions_from_lines
+from agent_py_agent.agent.settings.parameter_registry import (
+    _descriptions_from_lines,
+    parameter_registry,
+)
+from agent_py_agent.agent.settings.user_config_capability import EFFECT_GATEWAY_RESTART
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_PATH = REPO_ROOT / "frontend" / "config" / "backend-config-catalog.json"
@@ -79,10 +83,10 @@ def test_catalog_descriptions_match_backend_comment_rule():
 def test_catalog_restart_required_matches_backend_effect():
     fields = _catalog_fields()
     assert fields, "目录不应为空"
-    assert all(field["restartRequired"] for field in fields), (
-        "后端所有参数 effect=EFFECT_GATEWAY_RESTART（配置修改都要重启 Gateway 才生效），"
-        "目录里每一项都应标记 restartRequired=true"
-    )
+    registry = parameter_registry()
+    for field in fields:
+        expected = registry[field["key"]].effect == EFFECT_GATEWAY_RESTART
+        assert field["restartRequired"] is expected, f"{field['key']} 的生效时机与后端 effect 不一致"
 
 
 def test_curator_profile_is_a_high_risk_reference_without_legacy_keys():
