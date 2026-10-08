@@ -10,6 +10,8 @@ import tracemalloc
 from collections import Counter
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation import ConversationStore, compact_request_budget
 from agent_py_agent.agent.conversation.compact import (
@@ -111,10 +113,10 @@ def install_counters(monkeypatch, local, counts):
         monkeypatch.setattr(local, '_content_matches', measured_compare)
 
 
-def measure_compaction(agent, thread, monkeypatch):
+def measure_compaction(agent, thread, monkeypatch, rows: int = 20_000):
     counts = Counter(connect_sites=Counter(), get_record_calls=0, retrieved_body_bytes=0, comparison_body_bytes=0)
     install_counters(monkeypatch, agent.local_store, counts)
-    install_scan_counters(monkeypatch, counts, 20_000)
+    install_scan_counters(monkeypatch, counts, rows)
     monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response',
                         lambda _r: ModelResponse(text='保留合成测试工作及其原始来源。', backend='fake'))
     gc.collect()
@@ -173,23 +175,37 @@ def install_scan_counters(monkeypatch, counts, count):
     monkeypatch.setattr(MessageSnapshotRows, '__iter__', measured_replay)
 
 
-def test_large_synthetic_transcript_work_is_bounded(tmp_path, monkeypatch):
-    count = 20_000
+# LLM: 两个规模共用同一组上限（遍数、每行解析次数、连接数、整行读取、峰值相对来源大小）；2 万行版本在 CI 慢机上会超过
+#   单测 60 秒上限（10-08 25d4538db 的 3.11 job 超时），所以标 slow 只在本机/压测跑，CI 跑 2,000 行版本守同一合同。
+# 函数用途: 在给定行数的合成线程上测一次完整压缩的工作量，并断言各项上限。
+def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_source_bytes: int) -> None:
     agent, thread, path = synthetic_case(tmp_path, count)
-    counts = measure_compaction(agent, thread, monkeypatch)
+    counts = measure_compaction(agent, thread, monkeypatch, rows=count)
     counts['rows'] = count
     counts['source_bytes'] = path.stat().st_size
     counts['full_parse_equivalents'] = counts['canonical_json_calls'] / count
     print('COMPACTMEM_MEASUREMENT ' + json.dumps(counts, sort_keys=True))
-    assert counts['source_bytes'] > 40_000_000
+    assert counts['source_bytes'] > min_source_bytes
     violations = {
         'full_parse_passes': counts['full_parse_passes'] > 44,
         'canonical_json_calls': counts['canonical_json_calls'] > count * 50,
         'sqlite_connects': counts['sqlite_connects'] > 1,
         'get_record_calls': counts['get_record_calls'] > 0,
-        'tracemalloc_peak': counts['tracemalloc_peak'] >= counts['source_bytes'] // 2,
+        # 峰值不随来源线性增长：来源的一半再加 4 MB 固定开销余量（小规模时解释器/索引的固定开销占大头）。
+        'tracemalloc_peak': counts['tracemalloc_peak'] >= counts['source_bytes'] // 2 + 4_000_000,
     }
     assert not any(violations.values()), violations
+
+
+# 函数用途: 2 万行、约 50 MB 的完整规模测量（slow：本机复核和压测用）。
+@pytest.mark.slow
+def test_large_synthetic_transcript_work_is_bounded(tmp_path, monkeypatch):
+    _assert_compaction_work_bounded(tmp_path, monkeypatch, 20_000, 40_000_000)
+
+
+# 函数用途: 2,000 行、约 5 MB 的同一合同，CI 每次都跑。
+def test_synthetic_transcript_work_is_bounded(tmp_path, monkeypatch):
+    _assert_compaction_work_bounded(tmp_path, monkeypatch, 2_000, 4_000_000)
 
 
 def test_remote_rejection_does_not_materialize_unbudgeted_history(tmp_path):

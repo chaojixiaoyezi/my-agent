@@ -3,6 +3,7 @@
 ## 压缩重复读取及 SQLite 批次（compactmem，2026-10-08，07-c1）
 
 - 来源：07 compactmem/steer1；只测合成 20,000 行、50,535,560 字节 canonical/tool 历史，含既有派生索引；真实正文/凭据/Gateway 未读取或连接。
+- CI 规模（10-08 07 跟进）：2 万行/约 50 MB 的完整规模测量标 `slow`（本机约 59 秒，CI 3.11 上超过单测 60 秒上限，25d4538db 因此变红），CI 跑同一合同的 2,000 行/约 5 MB 版本；峰值上限为来源一半加 4 MB 固定余量。完整规模复跑：`-m slow`。
 - `test_compact_work_measurement.py` 覆盖首次历史索引、正式 `load_conversation_compact_source` → `prepare_conversation_context` 本地预检/摘要/归档/CAS；无真实恢复宿主完整预检，不外推生产。
 - 真正基线 `973cdb3c6` 归档到工作树 tmp 后复跑同探针：两个性能测试均红；旧全解析 52 遍，canonical loads 1,380,057（69.00285 文件当量）、总 loads 1,400,059、SQLite/get 各 20,000。
 - 改后同探针：38 遍，canonical loads 800,057（40.00285 当量）、总 loads 820,059、SQLite/get 1/0；连接调用点由 get_record 改为一次 connection_batch。
