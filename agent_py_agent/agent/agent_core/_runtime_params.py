@@ -85,6 +85,9 @@ class ToolLoopExecuteParams:
     effective_contract_snapshot: Any = None
     selected_skill_ids: tuple[str, ...] | None = None
     required_skill_ids: tuple[str, ...] = ()
+    in_use_method_ids: tuple[str, ...] = ()
+    # 压缩带回的本轮尝试集合：frozen 参数内仅改此容器，replace 续轮共用；新 run 从空集合起步。
+    conversation_method_carry_attempts: set[tuple[str, int]] = field(default_factory=set)
     # One host-owned token follows this run through shell/MCP/HTTP/long-poll boundaries.
     cancellation_token: CancellationToken = field(
         default_factory=lambda: CancellationToken(_external_check=is_interrupted)

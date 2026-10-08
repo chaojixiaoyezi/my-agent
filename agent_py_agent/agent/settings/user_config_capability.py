@@ -172,6 +172,7 @@ BOUNDARY_KEYS: dict[str, str] = {
                                 "代为设置（用户 10-02 拍板；比对的是启动时的默认对话模型）；主机不同要用户自己在 /model 里选。"
                                 "设好后模型也不能经 manage_models 改地址、挪服务商或删除把它换到别的主机，其余情况模型不能改"),
     "enable_capability_package_selection": "决定模型能否在新任务里一次选择能力包（C16：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
+    "conversation_method_carry_enabled": "决定是否往模型提示里带本会话在用的方法（用户决定）",
     "enable_memory_search_tool": "决定主模型是否多一个读取本人长期记忆的工具（J9：开不开由用户决定）；仅用户经 /settings 修改，模型不能改",
     "capability_pack_host_verification_enabled": "决定宿主是否自动运行能力包里的检查程序（执行包内代码，属于安全边界）；仅用户经 /settings 修改，模型不能改",
     "capability_pack_self_install_enabled": "决定她能否不经确认自己装上她做的能力包（learnpack，装不装由用户决定）；仅用户经 /settings 修改，模型不能改",
@@ -190,7 +191,7 @@ BOUNDARY_KEYS: dict[str, str] = {
 #   不改上游执行权威；正式档 computer_use_enabled（能点击、能输入，交出上游鼠标键盘）**刻意不收**，继续只能手改配置文件。
 # 常量用途: 列出用户设置命令可以修改、模型工具始终不能修改的边界参数。
 USER_SETTINGS_BOUNDARY_KEYS = frozenset(
-    {"memory_curator_model_profile", "embedding_model_profile", "enable_capability_package_selection",
+    {"memory_curator_model_profile", "embedding_model_profile", "enable_capability_package_selection", "conversation_method_carry_enabled",
      "enable_memory_search_tool", "subagent_takeover_hint_enabled", "subagent_input_media_enabled",
      "capability_pack_host_verification_enabled", "action_candidate_auto_execute_enabled",
      "computer_use_observation_enabled", "plugin_events_enabled",

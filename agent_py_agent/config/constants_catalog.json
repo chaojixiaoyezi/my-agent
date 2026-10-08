@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 948,
+  "count": 950,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1258,6 +1258,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "一次最多返回几条（schema 上限与执行时截断共用）。"
+    },
+    {
+      "name": "CONVERSATION_METHOD_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/method_carry.py",
+      "value": 5,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个主会话允许沿用的方法数（包与 skill 共用）。"
+    },
+    {
+      "name": "PACKAGE_METHOD_RESOURCE_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/capability/method_carry.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每个包保留的最近成功读取资料路径数，入口不占名额。"
     },
     {
       "name": "MAX_DELIVERABLE_REWORK_COUNT",

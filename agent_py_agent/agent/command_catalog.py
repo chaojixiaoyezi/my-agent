@@ -239,6 +239,8 @@ COMMAND_CATALOG = (
             ("/skills reject <提案编号> <版本>", "拒绝一条提案（IM 可用）"),
             ("/skills proposals [all]", "列出待确认的提案，加 all 列出全部状态（IM 可用）"),
             ("/skills learned [show|revert|remove <名称>]", "查看、回滚或删除自动总结的 Skill（IM 可用）"),
+            ("/skills using", "列出本会话在用的包和 Skill，包附已读资料数（IM 可用）"),
+            ("/skills using remove <名字>", "只移除本会话的沿用登记，不停用包或 Skill（IM 可用）"),
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",

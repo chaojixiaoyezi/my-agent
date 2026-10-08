@@ -3,7 +3,7 @@
 #   读不到或格式坏按 CapabilityConfig 对应键的默认值处理（两个自动装默认关，不会多装）。改键名或命令文字要同步
 #   capability_config.yaml、CapabilityConfig、user_config_capability 的边界登记、parameter_registry 的生效时机和
 #   test_self_install_switches、test_capability_selection_scope 与前端参数目录。
-# 模块用途: 统一回答三个马上生效的能力开关当前值，并保持自动装回执原样。
+# 模块用途: 统一回答四个马上生效的能力开关当前值，并保持自动装回执原样。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,8 +20,10 @@ PACK_SELF_INSTALL_KEY = "capability_pack_self_install_enabled"
 PLUGIN_SELF_INSTALL_KEY = "plugin_self_install_enabled"
 # 自动装回执的两键集合；保留原合同，不包含其它现读开关。
 SELF_INSTALL_SWITCH_KEYS = frozenset({PACK_SELF_INSTALL_KEY, PLUGIN_SELF_INSTALL_KEY})
-# 用到时现读文件的能力配置键唯一名单：参数中心和前端目录按这份事实报"马上生效"；第2步新开关尚未加入。
-CAPABILITY_FRESH_SWITCH_KEYS = SELF_INSTALL_SWITCH_KEYS | frozenset({"enable_capability_package_selection"})
+# 用到时现读文件的能力配置键唯一名单；参数中心和前端目录按这份事实报"马上生效"。
+CAPABILITY_FRESH_SWITCH_KEYS = SELF_INSTALL_SWITCH_KEYS | frozenset({
+    "enable_capability_package_selection", "conversation_method_carry_enabled",
+})
 # 配置文件读不到或解析失败时的版本标记：开关按关处理，回执如实带上这个标记。
 UNREADABLE_CONFIG_VERSION = "unreadable"
 

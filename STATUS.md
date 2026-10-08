@@ -1,5 +1,13 @@
 # 当前状态
 
+w1 第 2 步（2026-10-08，`worker/w1-method-carry`，本地已实现，待 3a 非作者复核，未集成/部署）：
+隐藏方法账本、成功 get、逐 run 冻结/稳定目录、Compact 入口和资料清单及 using/remove 已接通；开关现读，预算缓存，原授权和 pins 保持。
+十处变异各 pytest rc=1；变异后新增五文件、原 scope 文件、完整 12 文件 guards9 及原 teardown node 合跑 242 passed，rc=0。
+广回归原 JUnit 6263 tests/20 failures/1 error/20 skipped，rc=1；两个本次 scope 回归和自引报告准备错误已修复复验。
+剩余 18 个在指定基线 6e8f61564 同节点失败：9 个进程夹具、6 个 shell、3 个 sandbox-exec；超时未定位，不统称沙箱问题。
+完整命令、基线栈对照和变异见 TESTS 首节；静态门禁、提交号在冻结后补齐。第 3 步测量工具归 w2，真实入口与生产验收归 3a。
+本线未验证真实 TUI/飞书、MiniMax、Linux 和生产；下段仅保留第 1 步交付时点，不覆盖本段。
+
 w1 第 1 步（2026-10-07，`worker/w1-method-carry`，本地实现，待 3a 非作者复核，未集成/部署）：
 三个能力现读开关、主/子入口、参数中心和前端目录已同源，两个自动装回执与预算缓存保持。
 恢复后直接回归 94 passed；引用方加完整 guards9 为 618 passed / 9 skipped / 3 failed，失败三项均 sandbox-exec 退出 71、明确权限拒绝。

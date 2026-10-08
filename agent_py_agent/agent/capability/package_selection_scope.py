@@ -26,14 +26,24 @@ class PackageSelectionScope:
 
 # LLM: 已有 run 使用原冻结工具/Skill 快照；Goal 控制入口传可信 cwd，只生成元数据快照，不准备连接或执行资源。
 #   只有开关按文件现读，config 仍为原缓存实例，不能顺手热刷新预算；坏文件按开关默认值关闭。
-# 函数用途: 判断当前主执行是否允许准备包选择；关闭、孩子、无原读权限或无包时直接跳过。
+# 函数用途: 判断当前主执行可否选包；工具与快照准入同方法带回复用，但沿用不受选包开关控制。
 def package_selection_scope(agent: object, params: object = None, *, workspace_root: object = None) -> PackageSelectionScope | None:
     # 缺文件由统一入口给默认实例，坏文件（None）也落到 dataclass 默认值；这里不另写兜底。
     config = capability_config_for_agent(agent) or CapabilityConfig()
     if not read_fresh_capability_switch(agent, "enable_capability_package_selection") or current_subagent_run_id(agent):
         return None
     agent_config = getattr(agent, "config", None)
-    if not (getattr(agent_config, "enable_tools", False) and getattr(agent_config, "enable_plugins", False)):
+    if not getattr(agent_config, "enable_plugins", False):
+        return None
+    scope = package_read_scope(agent, params, workspace_root=workspace_root)
+    return PackageSelectionScope(config, scope.skills, scope.tools) if scope and scope.skills.packages else None
+
+
+# LLM: 仅复用原工具快照与 Skill 快照的准入，不看选包开关，不选择、不扩权；预算仍取缓存。
+# 函数用途: 给主选包和主会话压缩带回提供同一只读工具范围，普通 skill 可不启用插件。
+def package_read_scope(agent: object, params: object = None, *, workspace_root: object = None) -> PackageSelectionScope | None:
+    config = capability_config_for_agent(agent) or CapabilityConfig()
+    if not getattr(getattr(agent, "config", None), "enable_tools", False):
         return None
     allowed = getattr(params, "allowed_tools", None)
     if allowed is not None and "skill_search" not in allowed:
@@ -49,7 +59,7 @@ def package_selection_scope(agent: object, params: object = None, *, workspace_r
         return None
     skills = (agent.skills_service.snapshot_for(workspace_root)
               if workspace_root is not None else agent.current_skill_snapshot())
-    return PackageSelectionScope(config, skills, tools) if skills.packages else None
+    return PackageSelectionScope(config, skills, tools)
 
 
 # LLM: 仅原 TaskStore 真正新建链接时接受此 typed 值，已有任务/回滚缺键不可补写；异常只关闭增强，不使 Goal 创建失败。

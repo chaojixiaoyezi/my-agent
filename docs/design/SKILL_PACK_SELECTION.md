@@ -136,6 +136,28 @@
   - 1 个假模型端到端：Gateway 第 1 轮读包，`/compact` 后第 2 轮上下文里有带回的入口，目录里有"在用"标注。
   - 约 10 个变异，只有 pytest 退出码为 1 才算抓到。
 
+### 第 2 步实际落点（w1，2026-10-08，本地实现，待 3a 复核）
+
+- 唯一负责模块 `capability/method_carry.py`：`record_method_read` 在主会话成功 get 后经原 `threads.update_atomic` 合并隐藏账本；
+  包记录当前版本、读代次和最近 8 份非入口资料路径，Skill 仅保存身份/时间/代次；最多 5 个方法，按最近使用淘汰。
+  `conversation/models.ConversationThread.conversation_methods` 空时不输出 JSON 键，加入 `MODEL_HIDDEN_THREAD_FIELDS`；原摘要和 fingerprint 不参与更新。
+  `store_threads` 锁内扩展字段合并以 dataclass 显式字段为权威，避免移除最后一项后旧 extra_fields 复活登记，锁/CAS 不变。
+- 缓存两条分别保证：`first_used_at` 重读不刷新，`prompt_method_ids` 只按首次使用排序且不展示时间；
+  `runtime_mixin.current_prompt_scope` 调 `freeze_conversation_methods`，名单落本 run 参数，不挂线程全局缓存；
+  `_runtime_params` / `loop_support` / `loop_models` 透传冻结值，builder 及纯请求投影只读此值，中途 get 只改下一个 run 的账本。
+- `router.render_skill_metadata_index` / `_render_package_metadata` 统一调用 `using_method_cards` 标注并复用 required 必显；
+  在用包规则只在当前授权目录确实含在用包时追加。无在用项或关闭路径锁定旧目录字节；停用/删除/旧 pin 失效不补造卡片。
+- `_tool_loop_service.next_tool_loop_model_response` 在选包准备后、首业务 build/capture 前调用 `prepare_conversation_method_carry`。
+  `package_selection_scope.package_read_scope` 抽出原“工具与快照可用”检查，带回不依赖选包开关；`MethodCarryAuthority` 核取消、原 run/attempt 执行权。
+  包入口沿 `prepare_package_entry_context` / 原 ActionPolicy / reader / task pins，资料只列当前清单存在的路径与完整 `next_read`；Skill 按完整文本预算截正文开头。
+- 预算取原缓存 `capability_bundle_max_tokens`，公共头、JSON 转义、资料参数和分隔符全部计入；包先 Skill 后、同类最近使用优先。
+  `_commit_method_carry` 在原线程锁内复核同代和登记实例，实际 `record_runtime_facts_turn_ir(source="conversation_method_carry")` 成功才推进代次。
+  同代成功只投递一次；同 run 失败不热重试，失败不消费持久代次，下一合法 run 可再试；取消沿原异常传播。
+- `/skills using` / `remove` 的解析、命令目录与 `skill_control_service._execute_using_control` 共用 TUI/IM 控制入口，按认证 scope 的通道绑定找线程；
+  不采用 metadata 自称线程、不构造 Agent、不改安装/授权/pins。开关为唯一现读名单第四项，管理员边界、YAML/dataclass、前端目录同源。
+- 三轮假模型 Gateway 联验使用真实 get、原 `write_compact_checkpoint` 和同 Store 的 Compact/CAS 提交；第 2 轮有入口、资料重读参数和目录标注，第 3 轮同代不重复。
+  只替换模型传输，不代表真实客户端、MiniMax 采用或生产验收。测试、变异、门禁及失败基线对照详见 TESTS.md 第 2 步节。
+
 ## 5. 第 3 步：第一次挑中（三组对比，按数据定）
 
 - **现在**：第一次能不能挑中，看她自己有没有注意到目录那一行。关键词提醒只认同语言的整词；开工前选包关着。

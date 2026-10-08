@@ -1,5 +1,12 @@
 # Gateway 维护状态
 
+## 会话方法沿用命令（w1 第 2 步，2026-10-08，本地实现，待 3a 复核）
+
+- `/skills using` 列当前会话登记的能力包与 Skill，包附已读资料数；`/skills using remove <名字>` 只移除会话登记，不停用包、不改授权或任务 pins。
+- TUI 与 IM 共用 `skill_control_service.execute_skill_control → _execute_using_control`；owner 同 `/skills learned` 裁决，线程只取认证 scope 的 channel/conversation/user 绑定，忽略 metadata 自称的线程。
+- `owner_conversation_store(initialize=False)` 不构造冷 Agent、不新建线程；隐藏字段统一经 `capability/method_carry` 的原线程锁内更新。新开关现读，关闭时命令回“会话沿用已关闭”且不改账本。
+- 命令解析、TUI 文本往返与原 Gateway 控制服务的合成夹具已验；真实 TUI/飞书客户端、模型和生产部署未验证。测试细节见 TESTS.md 第 2 步节。
+
 ## 能力包命令 /plugins#（learnpack 第 4 步，2026-10-06，3a，分支 claude/3a-learnpack-p1；非作者复审无必须改）
 
 - IM 的 `/plugins#[包名] …` 与 `/plugins`、`/plugins@` 走同一条 `execute_plugin_control → PluginManagement.command`，由 learnpack 分流到 `capability/pack_commands`；网关不新增入口，只在拒绝日志里把能力包命令的动作名记成 `pack`（`plugin_command_service._action_name`）。

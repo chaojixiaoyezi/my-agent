@@ -450,7 +450,8 @@ def _model_command(trailing: object) -> ConversationControlCommand:
 _SKILLS_USAGE = (
     "用法：/skills 查看待确认的技能提案与自动总结的 Skill；/skills proposals [all] 列出提案；"
     "/skills show <提案编号>；/skills confirm <提案编号> <版本>；/skills reject <提案编号> <版本>；"
-    "/skills learned 列出自动总结的 Skill；/skills learned show|revert|remove <名称>。"
+    "/skills learned 列出自动总结的 Skill；/skills learned show|revert|remove <名称>；"
+    "/skills using 列出本会话在用的方法；/skills using remove <名字> 移除沿用。"
 )
 # 提案编号是 24 位十六进制，聊天里允许用至少 6 位的前缀；自动总结 Skill 的名字沿用生成合同的安全名字规则。
 _SKILL_PROPOSAL_REF = re.compile(r"[0-9a-f]{6,24}")
@@ -459,9 +460,13 @@ _SKILLS_SIMPLE = {"": "overview", "help": "help", "proposals": "proposals", "lea
 
 
 # LLM: 只做词法解析：子命令、提案编号前缀（十六进制）、版本号（正整数）与 Skill 名（安全名字）都在这里拒绝式校验，
-#   不合规时 valid=False 并给出用法，绝不把任意文字当成编号或路径交给服务。value 保存规范化后的参数，TUI 据此还原命令文本。
+#   不合规时 valid=False 并给出用法，绝不把任意文字当成编号或路径交给服务。using 名称保持大小写，只在账本精确匹配。
+#   value 保存规范化后的参数，TUI 据此还原命令文本；联测 conversation_method_commands。
 # 函数用途: 把 `/skills …` 解析成结构化的技能提案/自动 Skill 控制。
 def _skills_command(trailing: object) -> ConversationControlCommand:
+    raw = str(trailing or "").split()
+    if raw and raw[0].casefold() == "using":
+        return _skills_using_command(raw[1:])
     # 参数统一小写：提案编号是十六进制、Skill 名按合同只含小写，子命令大小写不敏感。
     tokens = str(trailing or "").casefold().split()
     head, rest = (tokens[0] if tokens else ""), tokens[1:]
@@ -479,6 +484,17 @@ def _skills_command(trailing: object) -> ConversationControlCommand:
     valid = known and len(rest) == 2 and bool(_LEARNED_SKILL_NAME.fullmatch(rest[1]))
     return ConversationControlCommand("skills", value=" ".join(tokens), operation=f"learned_{action}" if known else "unknown",
                                       valid=valid, usage=_SKILLS_USAGE)
+
+
+# LLM: using 是用户显式控制语法，名字仅用于账本匹配、不用于路径；大小写保持，支持结构化稳定编号解除重名。
+# 函数用途: 解析查看或移除本会话在用方法，并保留 TUI 原样往返所需参数。
+def _skills_using_command(tokens: list[str]) -> ConversationControlCommand:
+    if not tokens:
+        return ConversationControlCommand("skills", value="using", operation="using", usage=_SKILLS_USAGE)
+    action = tokens[0].casefold()
+    value = "using " + " ".join([action, *tokens[1:]])
+    return ConversationControlCommand("skills", value=value, operation="using_remove" if action == "remove" else "unknown",
+                                      valid=action == "remove" and len(tokens) > 1, usage=_SKILLS_USAGE)
 
 
 _SETTINGS_USAGE = (
