@@ -4,7 +4,7 @@
 
 ```text
 |-- scripts/eval/pack_pick_bench.py          # setup/run、安全隔离 home、原安装启用、题目与输入指纹
-|-- scripts/eval/pack_pick_runtime.py        # 原 Gateway 首请求、隔离文件开关与预算缓存覆盖、模型层捕获与零工具执行
+|-- scripts/eval/pack_pick_runtime.py        # 原 Gateway 首请求、隔离文件开关与原子字节/权限恢复、预算缓存覆盖、模型层捕获与零工具执行
 |-- scripts/eval/pack_pick_results.py        # 最小工具身份、原账本已报 token、分组分语言汇总
 |-- agent_py_agent/tests/test_pack_pick_bench.py # 六个自测；假传输校准，不代表自然召回
 |-- agent_py_agent/tests/test_package_selection_candidates.py # 选包预算与推荐限数解耦、稳定排序、原测量器 C 组校准

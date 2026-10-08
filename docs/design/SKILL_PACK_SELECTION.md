@@ -275,9 +275,10 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BEN
 
 整合落点：w2 只合指定 w1 第 1 步头 `cdfe9b4d1`；合并提交 `9866479ff` 保留双方所有文档条目，YAML 合并两方注释、键值不变，前端目录由原生成器读取后端 effect 重生。
 `pack_pick_runtime.arm_context` 改为沿 `capability_config_path_for` 的原显式优先级，在隔离 owner 用户文件临时写 `enable_capability_package_selection`：C 为 true，A/B 为 false。
-写入复用原 `config_io.set_simple_yaml_raw`，其它行/键保留；退出按原字节恢复，原文件不存在则删除。先沿原 home 保护校验规范路径，拒绝真实 home、外部路径和链接越界。
+写入复用原 `config_io.set_simple_yaml_raw`，其它行/键保留；退出复用原 `write_bytes_atomic_beneath` 原子恢复字节及原权限（含 0400、BOM/CRLF），原文件不存在则删除。先沿原 home 保护校验规范路径，拒绝真实 home、外部路径和链接越界。
 预算类键仍保留原缓存/内存处理，不热刷新；B 仅替换采用行，模型请求与原用量账不改。不再宣称实验臂全程不写配置文件，零模型工具执行合同保持。
 本轮假模型只校准原 A/B/C 首请求、真实现读与配置恢复；w1 合并后的真实 MiniMax、TUI/飞书、Linux 全量和业务质量**未验证**，交 3a 复核。命令与结果见 TESTS 的 integprep 节。
+部署后续作保留原 true 并新增原 false 的真实假 ABC 入口；C 仅改缓存不写文件的变异被业务断言抓到。44 文件回归为 845 passed / 3 failed / 9 skipped（rc=1）；三个 Seatbelt 权限拒绝在真正基线 `6e8f61564` 复现，保留失败，真实沙箱仍须 3a 在沙箱外复核，不宣称完整门禁通过。
 
 ## 6. 第 4 步：部署和生产验收
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import stat
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,6 +82,13 @@ def test_home_guard_refuses_real_descendant_alias_missing_and_ancestor(tmp_path,
     assert module.safe_home(isolated) == isolated.resolve()
 
 
+# LLM: 统一用结构化布尔值注入退出错误；不吞恢复错误，保持正常/异常矩阵的同一业务断言。
+# 函数用途: 让实验臂退出测试在需要时抛出明确的 fixture 异常。
+def _raise_fixture(failure):
+    if failure:
+        raise RuntimeError("fixture")
+
+
 @pytest.mark.parametrize("arm", ["A", "B", "C"])
 @pytest.mark.parametrize("failure", [False, True])
 def test_arm_writes_fresh_switch_restores_bytes_and_keeps_budget_cache(tmp_path, arm, failure):
@@ -99,19 +107,18 @@ def test_arm_writes_fresh_switch_restores_bytes_and_keeps_budget_cache(tmp_path,
     path.write_bytes(saved)
     agent = SimpleNamespace(root=tmp_path, _capability_config_runtime_snapshot=snapshot)
     original = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
-    with pytest.raises(RuntimeError, match="fixture") if failure else nullcontext():
-        with module.arm_context(agent, arm):
-            changed = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
-            assert ("用户的需求和某个能力包沾边" in changed) == (arm == "B")
-            assert changed.splitlines()[2:] == original.splitlines()[2:]
-            assert read_fresh_capability_switch(agent, "enable_capability_package_selection") == (arm == "C")
-            raw = load_simple_yaml(path)
-            assert raw["enable_capability_package_selection"] == (arm == "C")
-            assert raw["capability_bundle_max_tokens"] == 3211 and raw["capability_candidate_limit"] == 9
-            assert raw["fixture_extra"] == ["keep", "unknown"]
-            assert agent._capability_config_runtime_snapshot.config.capability_bundle_max_tokens == 987
-            if failure:
-                raise RuntimeError("fixture")
+    expected = pytest.raises(RuntimeError, match="fixture") if failure else nullcontext()
+    with expected, module.arm_context(agent, arm):
+        changed = router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
+        assert ("用户的需求和某个能力包沾边" in changed) == (arm == "B")
+        assert changed.splitlines()[2:] == original.splitlines()[2:]
+        assert read_fresh_capability_switch(agent, "enable_capability_package_selection") == (arm == "C")
+        raw = load_simple_yaml(path)
+        assert raw["enable_capability_package_selection"] == (arm == "C")
+        assert raw["capability_bundle_max_tokens"] == 3211 and raw["capability_candidate_limit"] == 9
+        assert raw["fixture_extra"] == ["keep", "unknown"]
+        assert agent._capability_config_runtime_snapshot.config.capability_bundle_max_tokens == 987
+        _raise_fixture(failure)
     assert original == router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
     assert agent._capability_config_runtime_snapshot is snapshot
     assert path.read_bytes() == saved and not config.enable_capability_package_selection
@@ -126,15 +133,43 @@ def test_arm_removes_new_file_and_uses_explicit_user_path(tmp_path, arm, failure
     path = tmp_path / "explicit/capability_config.yaml"
     agent = SimpleNamespace(root=tmp_path, capability_config_path=path)
     assert not hasattr(agent, "_capability_config_runtime_snapshot")
-    with pytest.raises(RuntimeError, match="fixture") if failure else nullcontext():
-        with module.arm_context(agent, arm):
-            assert path.is_file()
-            assert not (tmp_path / "config/capability_config.yaml").exists()
-            assert read_fresh_capability_switch(agent, "enable_capability_package_selection") == (arm == "C")
-            if failure:
-                raise RuntimeError("fixture")
+    expected = pytest.raises(RuntimeError, match="fixture") if failure else nullcontext()
+    with expected, module.arm_context(agent, arm):
+        assert path.is_file()
+        assert not (tmp_path / "config/capability_config.yaml").exists()
+        assert read_fresh_capability_switch(agent, "enable_capability_package_selection") == (arm == "C")
+        _raise_fixture(failure)
     assert not path.exists()
     assert not hasattr(agent, "_capability_config_runtime_snapshot")
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_arm_restores_readonly_bytes_and_mode_even_on_failure(tmp_path, failure):
+    module = bench()
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    from agent_py_agent.agent.capability.self_install_switches import read_fresh_capability_switch
+
+    path = tmp_path / "config/capability_config.yaml"
+    path.parent.mkdir()
+    original = b"\xef\xbb\xbf# readonly\r\nenable_capability_package_selection: false\r\ncapability_bundle_max_tokens: 3211\r\n"
+    path.write_bytes(original)
+    path.chmod(0o400)
+    snapshot = SimpleNamespace(config=CapabilityConfig(capability_bundle_max_tokens=987))
+    agent = SimpleNamespace(root=tmp_path, _capability_config_runtime_snapshot=snapshot)
+    errors = []
+    expected = pytest.raises(RuntimeError, match="fixture") if failure else nullcontext()
+    try:
+        with expected, module.arm_context(agent, "C"):
+            assert read_fresh_capability_switch(agent, "enable_capability_package_selection")
+            assert stat.S_IMODE(path.stat().st_mode) == 0o400
+            _raise_fixture(failure)
+    except OSError as exc:
+        errors.append(type(exc).__name__)
+    assert not errors, f"配置未能恢复：{errors}"
+    assert path.read_bytes() == original
+    assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    assert agent._capability_config_runtime_snapshot is snapshot
+    assert sorted(item.name for item in path.parent.iterdir()) == [path.name]
 
 
 @pytest.mark.parametrize("kind", ["real", "outside", "symlink"])
@@ -200,7 +235,25 @@ def _observe_backend(monkeypatch):
     return observed
 
 
-def test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers(tmp_path, monkeypatch):
+# LLM: 同一份假 ABC 行合同由两种原文件初值共用；保留独立首会话、真实物理调用及供应商 token 口径断言。
+# 函数用途: 核对实验行并返回主请求，供后续逐线程原账本断言使用。
+def _assert_abc_call_rows(rows):
+    assert len(rows) == 32
+    primary = [row for row in rows if row["phase"] == "main"]
+    assert len(primary) == len({row["thread_id"] for row in primary}) == 24
+    # 产品 Anthropic 口径总输入 = 未缓存 41 + 缓存读 13。
+    assert all(row["input_tokens"] == 54 and row["output_tokens"] == 7 for row in primary)
+    assert all(row["cache_read_input_tokens"] == 13 for row in primary)
+    selected = [row for row in rows if row["phase"] == "selection"]
+    assert len(selected) == 8 and all(row["input_tokens"] == 17 for row in selected)
+    assert all(row["arm"] == "C" and row["record_kind"] == "model_call" for row in selected)
+    assert all(row["matched"] == bool(row["positive_packs"]) for row in rows)
+    assert all(row["status"] == "finished" and not row["misopened"] for row in rows)
+    return primary
+
+
+@pytest.mark.parametrize("initial", ["false", "true"])
+def test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers(tmp_path, monkeypatch, initial):
     module = bench()
     home = tmp_path / "home"
     home.mkdir()
@@ -208,7 +261,7 @@ def test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_hand
     assert module.main(["setup", "--home", str(home), "--packages", str(packages)]) == 0
     config_path = home / "owners/local/main/config/capability_config.yaml"
     config_path.parent.mkdir(exist_ok=True)
-    saved_config = b"# restored exactly\nenable_capability_package_selection: true\ncapability_bundle_max_tokens: 3000\n"
+    saved_config = f"# restored exactly\nenable_capability_package_selection: {initial}\ncapability_bundle_max_tokens: 3000\n".encode()
     config_path.write_bytes(saved_config)
     queries = Path(__file__).parent / "fixtures" / "pack_pick_queries.json"
     out = tmp_path / "out"
@@ -222,18 +275,8 @@ def test_setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_hand
     assert module.main(["run", "--home", str(home), "--queries", str(queries), "--arms", "A,B,C",
                         "--out", str(out), "--repeat", "2", "--fake"]) == 0
     rows = [json.loads(line) for line in (out / "calls.jsonl").read_text().splitlines()]
-    assert len(rows) == 32
-    primary = [row for row in rows if row["phase"] == "main"]
-    assert len(primary) == len({row["thread_id"] for row in primary}) == 24
-    # 产品 Anthropic 口径总输入 = 未缓存 41 + 缓存读 13，不能把未缓存数冒充总输入。
-    assert all(row["input_tokens"] == 54 and row["output_tokens"] == 7 for row in primary)
-    assert all(row["cache_read_input_tokens"] == 13 for row in primary)
-    selected = [row for row in rows if row["phase"] == "selection"]
-    assert len(selected) == 8 and all(row["input_tokens"] == 17 for row in selected)
-    assert all(row["arm"] == "C" and row["record_kind"] == "model_call" for row in selected)
+    primary = _assert_abc_call_rows(rows)
     assert config_path.read_bytes() == saved_config
-    assert all(row["matched"] == bool(row["positive_packs"]) for row in rows)
-    assert all(row["status"] == "finished" and not row["misopened"] for row in rows)
     assert "PRIVATE-ENTRY" not in (out / "calls.jsonl").read_text()
     assert original == router._CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS
     assert (out / "summary.md").is_file()
