@@ -1,5 +1,18 @@
 # Codebase Tree
 
+## Curator消息/审计增量定位（mc2-e11c，2026-10-08）
+
+```text
+|-- agent_py_agent/agent/io/cursor_cache.py # 有界短锁LRU、dev/ino指纹、保守首ID过滤器；仅元数据
+|-- agent_py_agent/agent/conversation/message_cursor.py # after_report/byte_offset_after唯一定位与原尾读合同
+|-- agent_py_agent/agent/memory_store/curator_audit_cursor.py # 已校验旧分片/锚行跳过，错误/预算/缺cursor保持
+|-- agent_py_agent/tests/support/curator_scan_cases.py # 合成owner与实际文件读取计数
+|-- agent_py_agent/tests/support/curator_scan_legacy.py # 725d读取器独立对照，仅测试，不进产品
+|-- agent_py_agent/tests/test_curator_cursor_scans.py # 132格等价矩阵与扫描量/推进/重复ID
+|-- agent_py_agent/tests/test_curator_cursor_cache.py # 身份失效、隔离/LRU、多线程预算及变异靶点
+`-- agent_py_agent/tests/bench_curator_cursor_scans.py # 800线程/100分片CPU与分配计量，自动清理自有合成数据
+```
+
 ## 线程人格前缀冻结（personafreeze，2026-10-08）
 
 ```text

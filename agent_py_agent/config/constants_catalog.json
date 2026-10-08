@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 952,
+  "count": 957,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2812,6 +2812,22 @@
       "description": "唤醒事实单条文本最多 600 字符。"
     },
     {
+      "name": "_MESSAGE_CURSOR_CACHE_MAX_COUNT",
+      "file": "agent_py_agent/agent/conversation/message_cursor.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "4096条覆盖800线程及近期推进位置；LRU淘汰只让定位重扫，不会从头重放消息。"
+    },
+    {
+      "name": "_MESSAGE_CURSOR_FILTER_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_cursor.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "其它",
+      "description": "每份首ID过滤器8KiB，4096份极端上界32MiB；实际同一次读取的多个位置共享不可变过滤器。"
+    },
+    {
       "name": "THREAD_GOAL_OBJECTIVE_MAX_CHARS",
       "file": "agent_py_agent/agent/conversation/models.py",
       "value": 4000,
@@ -4242,6 +4258,30 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "候选证据引用最多 4096 字节：ref 过长视为异常，防止坏快照入库。"
+    },
+    {
+      "name": "_AUDIT_CURSOR_CACHE_MAX_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_audit_cursor.py",
+      "value": 128,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "128个近期审计游标兼顾多owner和80条批次，淘汰仅重扫；不缓存事件正文或历史异常。"
+    },
+    {
+      "name": "_AUDIT_CURSOR_FILTER_BYTES",
+      "file": "agent_py_agent/agent/memory_store/curator_audit_cursor.py",
+      "value": 131072,
+      "unit": "字节",
+      "category": "其它",
+      "description": "128KiB有界首ID过滤器使约十万事件仍能保守提升新游标；误报仅变慢，极端128份为16MiB。"
+    },
+    {
+      "name": "_AUDIT_CURSOR_PREFIX_MAX_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_audit_cursor.py",
+      "value": 512,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每条最多记录512个旧分片指纹，覆盖约100个生产分片且把多年目录的缓存内存封顶。"
     },
     {
       "name": "_TIMEOUT_SHRINK_FLOOR_COUNT",
