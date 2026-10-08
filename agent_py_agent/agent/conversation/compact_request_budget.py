@@ -132,7 +132,7 @@ def generate_bounded_compact_response(
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
     attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
     single_budget = compact_cache_surface_budget(request.agent) if request.tools else budget
-    cached_source = _single_request_source(request, message_source, single_budget, calibration)
+    cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
     result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source))
               if cached_source is not None else None)
     if result is not None:
@@ -159,27 +159,36 @@ class _SingleRequestSource:
     source: CompactMessageSource | None
 
 
+# LLM: 预算和计量口径成对出现：原样与瘦身后两次计量都走同一 measure，不能一次按原始、一次按校准。
+# 类用途: 单次缓存面的预算（token）及其计量口径（主请求的校准事实，None 按原始上界）。
+@dataclass(frozen=True)
+class _SurfaceBudget:
+    tokens: int
+    calibration: CompactRequestCalibration | None = None
+
+    # 函数用途: 把原始估算换成和预算同一口径的数。
+    def measure(self, raw_tokens: int) -> int:
+        return calibrated_compact_request_tokens(raw_tokens, self.calibration)
+
+
 # 函数用途: 决定单次缓存面请求用哪份来源：原样、瘦身后的副本，或放弃单次请求（None）。
 def _single_request_source(
     request: AuxiliaryModelCallRequest,
     message_source: CompactMessageSource | None,
-    single_budget: int,
-    calibration: CompactRequestCalibration | None = None,
+    budget: _SurfaceBudget,
 ) -> _SingleRequestSource | None:
     raw = _request_tokens(request, message_source)
-    tokens = calibrated_compact_request_tokens(raw, calibration)
-    if tokens <= single_budget:
+    tokens = budget.measure(raw)
+    if tokens <= budget.tokens:
         return _SingleRequestSource(message_source)
     if message_source is None:
         return None
-    shrunk = shrink_tool_outputs(message_source, raw_token_excess(raw, tokens, single_budget))
-    if shrunk is None:
-        return None
-    if calibrated_compact_request_tokens(_request_tokens(request, shrunk.source), calibration) > single_budget:
+    shrunk = shrink_tool_outputs(message_source, raw_token_excess(raw, tokens, budget.tokens))
+    if shrunk is None or budget.measure(_request_tokens(request, shrunk.source)) > budget.tokens:
         return None
     logging.getLogger(__name__).info(
         "compact single request shrank old tool outputs to fit the cache surface budget",
-        extra={"compact_shrunk_tool_outputs": shrunk.replaced, "compact_single_budget": single_budget},
+        extra={"compact_shrunk_tool_outputs": shrunk.replaced, "compact_single_budget": budget.tokens},
     )
     return _SingleRequestSource(shrunk.source)
 

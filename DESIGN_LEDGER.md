@@ -21,6 +21,10 @@
   5. 开关 `memory_compact_remote_enabled`（默认 true）；关掉或后端不支持都走原路。
   6. 压缩项不进对话行：回合结束归档 canonical_native_messages 时把带压缩项的摘要项换成占位文本（loop_support）；回放时剔除残留的
      `responses_compaction` 块（native_history）。.16 真机发现：归档了压缩项的行在换到 MiniMax 后被原样重放，MiniMax 400（2013）。
+  7. 压缩项是同一后端的供应商信封（10-08 生产 step17xb 事故）：第一次服务端压缩之后，主请求历史最前面是 responses_compaction 块，
+     下一次压缩前的非文本分类（backends/request_content）把它当 unknown 块：自动压缩按 noop 跳过、涨到窗口上限被迫压缩时报
+     COMPACT_REQUEST_NON_TEXT，线程卡在触发线上（mc4 astra，06:12）。改法：分类器把它和加密思考同一许可（同一后端可计量、可进压缩链，
+     跨模型 allow_reasoning=False 不可移植；视图前缀发出的块没有 model 字段，只认 item 白名单），分段摘要投影把它的密文换占位。
 - **没做 / 风险**：API Key 的 OpenAI Responses 端点是否接受触发项未核实，暂不声明能力；服务端压缩项的过期时间未知——失效时请求会失败，
   回退路径是下一次压缩从原文重做（待真机观察）；MiniMax/DeepSeek 没有此接口，继续走 compactfit 的单次缓存面路线。
 

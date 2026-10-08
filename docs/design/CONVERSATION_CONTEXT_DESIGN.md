@@ -140,6 +140,10 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 - 视图与回退：`CompactSummaryView.provider_compaction`；`_readable_checkpoint` 把当前后端读不了的检查点当透明（沿 base 链回退），
   覆盖的行重新算未覆盖，由下一次客户端压缩从原文重做。
 - 开关：`memory_compact_remote_enabled`（默认 true）。
+- 压缩项的内容分类（10-08 生产事故）：`backends/request_content` 把 `responses_compaction` 块和加密思考同一许可——同一后端
+  （allow_reasoning=True）算已知容量、能进压缩链，跨模型不可移植；只认 `responses_wire.compaction_item` 白名单，视图前缀发出的块
+  没有 model 字段。否则第一次服务端压缩之后自动压缩按 noop 跳过、到窗口上限报 COMPACT_REQUEST_NON_TEXT，线程卡死。
+  分段摘要投影 `summary_source_message` 同样把它的密文换成占位。
 
 ## 压缩请求装进窗口与降档（2026-10-08，07，分支 `claude/07-compact-cache`）
 

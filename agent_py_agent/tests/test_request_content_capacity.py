@@ -68,6 +68,26 @@ def test_malformed_responses_reasoning_stays_unknown(broken):
     assert classify_nontext_content(history).unknown == 1
 
 
+# LLM: 10-08 生产（step17xb）：服务端压缩后主请求历史最前面是 responses_compaction 块，下一次压缩被当成 unknown 块拒绝
+#   （COMPACT_REQUEST_NON_TEXT），线程卡在触发线上。它和加密思考同一许可：同一后端可计量可压缩，跨模型不可移植。
+# 函数用途: 服务端压缩项在同一后端算已知容量、能进压缩链；跨模型或坏信封仍是 unknown。
+def test_provider_compaction_item_is_same_backend_text_capacity_and_compactable():
+    from agent_py_agent.agent.agent_core.tool_request_projection import text_request_capacity_known
+
+    # 视图前缀发出的块没有 model；响应归档块带 model，两种都要认。
+    block = {"type": "responses_compaction", "item": {"type": "compaction", "encrypted_content": "gAAAAABq..."}}
+    messages = [{"role": "user", "content": [block]}, {"role": "user", "content": "继续"}]
+    assert text_messages_supported(messages) and classify_nontext_content(messages).unknown == 0
+    assert text_messages_supported([{"role": "user", "content": [{**block, "model": "gpt-6-astra"}]}])
+    assert compact_source_supported(messages, media_policy="off")
+    assert text_request_capacity_known(SimpleNamespace(provider_history_messages=messages, tool_ir_history=()))
+    assert not text_messages_supported(messages, allow_reasoning=False), "跨模型不可移植"
+    assert classify_nontext_content(messages, allow_reasoning=False).unknown == 1
+    for broken in ({**block, "item": {"type": "compaction"}}, {**block, "item": "x"}, {**block, "item": {"type": "x"}}):
+        assert not text_messages_supported([{"role": "user", "content": [broken]}])
+        assert classify_nontext_content([{"role": "user", "content": [broken]}]).unknown == 1
+
+
 @pytest.mark.parametrize("location", ["current", "prior", "assistant", "unknown"])
 def test_media_or_unknown_content_is_not_text_capacity_proof(location):
     media = {"type": "image", "source": {"type": "local_file", "path": "not-read"}}

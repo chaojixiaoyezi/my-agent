@@ -225,6 +225,38 @@ def test_transcript_compaction_stores_the_item_and_incompatible_backends_see_thr
     assert len(again.messages) >= len(view.source_message_ids)
 
 
+# LLM: 10-08 生产：服务端压缩后的第二次压缩曾被当成非文本内容拒绝（COMPACT_REQUEST_NON_TEXT，request_content 分类）。
+#   这里守 transcript 路径的链式压缩：前缀逐字发上一代压缩项、再次触发、存下新一代的项。
+# 函数用途: 服务端压缩之后再压一次，前缀带压缩项照样能压并链式存项。
+def test_second_transcript_compaction_chains_on_the_stored_item(tmp_path, monkeypatch):
+    backend = SimpleNamespace(name="openai_responses", model_name="gpt-6.1-sol", max_tokens=2_000, api_base="https://chatgpt.com/backend-api/codex",
+                              supports_remote_compaction=lambda: True,
+                              provider_compaction_scope=lambda: {"protocol": "openai_responses", "endpoint": "https://chatgpt.com/backend-api/codex"})
+    agent, thread = _thread(tmp_path, backend)
+    calls = []
+    monkeypatch.setattr(auxiliary_model_call, "generate_auxiliary_model_response",
+                        lambda request: calls.append(request) or ModelResponse(text="", backend="fake", assistant_content_blocks=[BLOCK]))
+    surface = ConversationCompactProviderSurface("稳定前缀", None, "摘要系统")
+    source = load_conversation_compact_source(agent, agent.conversation_store, thread, scope=THREAD_COMPACT_SCOPE)
+    first = prepare_conversation_context(agent, agent.conversation_store, thread, options=ConversationCompactOptions(
+        source=source, force=True, exclude_request_id="request-1", provider_surface=surface))
+    assert first.compacted
+    path = agent.conversation_store.storage.message_path(first.thread.thread_id)
+    with path.open("ab") as handle:
+        for index in range(8, 16):
+            row = {"message_id": f"m-{index}", "thread_id": first.thread.thread_id, "role": "user" if index % 2 == 0 else "assistant",
+                   "content": f"续文{index}:" + "y" * 400, "metadata": {}}
+            handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
+    source = load_conversation_compact_source(agent, agent.conversation_store, first.thread, scope=THREAD_COMPACT_SCOPE)
+    second = prepare_conversation_context(agent, agent.conversation_store, first.thread, options=ConversationCompactOptions(
+        source=source, force=True, exclude_request_id="request-2", provider_surface=surface))
+    assert second.compacted and second.thread.compact_generation == first.thread.compact_generation + 1
+    assert calls[-1].compaction_trigger is True
+    assert calls[-1].messages[0]["content"] == [{"type": "responses_compaction", "item": ITEM}], "前缀逐字发上一代压缩项"
+    view = resolve_compact_summary_view(agent, second.thread, THREAD_COMPACT_SCOPE)
+    assert provider_compaction_content(view.provider_compaction) == CIPHER and view.generation == second.thread.compact_generation
+
+
 def test_live_tool_summary_takes_the_remote_path_when_available(monkeypatch):
     agent, calls = _remote_agent(monkeypatch, ModelResponse(text="", backend="fake", assistant_content_blocks=[BLOCK]))
     outcome = []

@@ -78,7 +78,7 @@ class CompactMessageSource:
         return CompactMessageSource(combined)
 
 
-# LLM: 分段摘要来源的唯一消息投影：只把 responses_reasoning 块里 item.encrypted_content 换成固定占位，保留块位置、
+# LLM: 分段摘要来源的唯一消息投影：只把 responses_reasoning / responses_compaction 块里 item.encrypted_content 换成固定占位，保留块位置、
 #   model、id 与可读的 summary_text；其它块（含 thinking 正文、工具参数与结果）原样。不改原消息，不含它的消息原对象返回。
 #   只用于把历史编码成摘要文字的分段路径；整请求原协议发送的路径照旧带密文（同后端能用它续推理）。
 # 函数用途: 去掉摘要模型读不懂的加密思考密文，减少分段摘要的来源量而不丢可读内容。
@@ -93,9 +93,10 @@ def summary_source_message(message: dict[str, Any]) -> dict[str, Any]:
     ]}
 
 
-# 函数用途: 判断一个内容块是不是带加密密文的 Responses 思考块。
+# 函数用途: 判断一个内容块是不是带加密密文的 Responses 信封（思考块或服务端压缩项）。
 def _has_reasoning_ciphertext(block: object) -> bool:
-    item = block.get("item") if isinstance(block, dict) and block.get("type") == "responses_reasoning" else None
+    kinds = {"responses_reasoning", "responses_compaction"}
+    item = block.get("item") if isinstance(block, dict) and block.get("type") in kinds else None
     return isinstance(item, dict) and isinstance(item.get("encrypted_content"), str)
 
 
