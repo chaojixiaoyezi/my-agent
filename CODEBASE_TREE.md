@@ -756,6 +756,7 @@ agent_py_agent/
 |   |   |-- active_turn_compact.py      # 跨工作片工具 archive 到同一 checkpoint/CAS 的恢复压缩与模型投影
 |   |   |-- live_tool_compact.py        # 运行中原生工具历史到同一 thread checkpoint/CAS 的适配层
 |   |   |-- native_history.py           # 完成回合的 provider 原生消息信封、校验与按请求替换式恢复
+|   |   |-- native_history_replay.py    # 同次冻结来源的轻量native位置计划，不缓存正文，回放仍校验原行
 |   |   |-- history_projection.py       # 前后台共用完整历史行选择、范围过滤和原生 metadata 保留
 |   |   |-- history_seed.py             # 会话种子只读来源：冻结行加原单行投影，只在 native/text 准备边界解析
 |   |   |-- history_display.py          # 从 canonical 消息投影只读恢复事件，不把问答预览代替正文
@@ -1128,6 +1129,8 @@ agent_py_agent/
 |   |-- test_compact_message_source.py # 可重放摘要消息的编码/估算等价及迭代关闭验证
 |   |-- test_message_tail_streaming.py # 消息尾部流式读取与原整块读取逐项等价（跨块、CRLF、NEL/U+2028、坏行、停止边界）
 |   |-- test_compact_source_lifetime.py # 全选真实JSONL到摘要提交的正文驻留、完整覆盖及峰值验证
+|   |-- test_compact_work_measurement.py # 合成大线程索引/压缩的解析、连接、正文水合及峰值有界测量
+|   |-- test_compact_work_contracts.py # 线程批次连接及异常、精确索引比较、原生位置计划等值回归
 |   |-- test_model_selection_isolation.py # 双会话选模故障隔离、近窗口完整材料和连接校准失效组合
 |   |-- test_compact_output_reserve.py # 三宿主完整输入和原输出cap、容量拒绝无提交及Responses字段对照
 |   |-- test_compact_capacity_facts.py # 候选过大失败带出最小候选/上限/摘要占比/保留条数/候选数，白名单与TUI失败行
@@ -2005,6 +2008,8 @@ docs/
 - `agent_py_agent/agent/conversation/store_threads.py`：`store.threads` 保存唯一线程元数据和通道索引，提供同一线程锁内的 CAS；新会话模型解析器由本领域持有。
 - `agent_py_agent/agent/conversation/message_selection.py`：先冻结身份/锚点再筛正文，复用原文件，两遍原字节一致后才返回选中来源。
 - `agent_py_agent/agent/conversation/message_replay.py`：保存临时行地址而非完整正文，每次重放核对原文件身份及行hash，不新增持久索引。
+- `agent_py_agent/agent/conversation/native_history_replay.py`：同次摘要多次计量只准备一次最后信封位置；保持原转换与匿名语义，原地址校验不变。
+- `agent_py_agent/tests/test_compact_work_measurement.py` / `test_compact_work_contracts.py`：合成大线程及精确批次边界验证，不代替生产大库/真实 Gateway RSS 验收。
 - `agent_py_agent/agent/conversation/compact_message_source.py`：原摘要链的可重放原生消息视图，完整数组编码和估算共用原规则，普通可发送请求仍物化原消息。
 - `agent_py_agent/tests/test_compact_source_lifetime.py`：从真实canonical加载前开始测量摘要链内存，并核对完整字符、精确ID及原CAS结果，不代替三宿主峰值验收。
 - `agent_py_agent/tests/test_compact_message_source.py`：完整JSON标点和结构开销等价、不同Unicode与native消息及取消关闭的窄回归。

@@ -1,5 +1,21 @@
 # 测试与发布验收
 
+## 压缩重复读取及 SQLite 批次（compactmem，2026-10-08，07-c1）
+
+- 来源：07 compactmem/steer1；只测合成 20,000 行、50,535,560 字节 canonical/tool 历史，含既有派生索引；真实正文/凭据/Gateway 未读取或连接。
+- `test_compact_work_measurement.py` 覆盖首次历史索引、正式 `load_conversation_compact_source` → `prepare_conversation_context` 本地预检/摘要/归档/CAS；无真实恢复宿主完整预检，不外推生产。
+- 真正基线 `973cdb3c6` 归档到工作树 tmp 后复跑同探针：两个性能测试均红；旧全解析 52 遍，canonical loads 1,380,057（69.00285 文件当量）、总 loads 1,400,059、SQLite/get 各 20,000。
+- 改后同探针：38 遍，canonical loads 800,057（40.00285 当量）、总 loads 820,059、SQLite/get 1/0；连接调用点由 get_record 改为一次 connection_batch。
+  全水合返回正文 20,980,000→0 字节；逐块精确比较仍读取 20,980,000 字节，不宣称正文 I/O 消失。tracemalloc 峰值 19,835,434→16,163,035 字节。
+- 远端预算拒绝的合成 64×512KiB 来源先红后绿：峰值 34,770,858→2,103,662 字节，运输仍仅在预算接受后物化列表，单次缓存面/校准/分段不变。
+- 测量断言：全解析不超过 44 遍（真正基线 52），canonical loads 不超过 50 文件当量、SQLite 不超过 1 次、get_record 为 0，峰值小于来源一半。
+- `test_compact_work_contracts.py` 守同线程嵌套/跨线程隔离/异常关闭、坏正文文件/缺文件/Unicode、changed row 验证事实及坏 transcript 零索引、磁盘及内存匿名/identified 最后信封与独占复制。
+- 独立静态审查的两条反例实测 3 failed：正常/异常退出遗留未提交 SQL 被下次误提交、普通内存行移除信封后 legacy 丢失；补逐操作 rollback、普通行沿原动态迭代器，反例均转绿。
+- 定向 12 文件 154 passed，含原 source_lifetime/cache_surface_fit/remote_provider/request_budget 与恢复、LocalStore、native、session_search；不删改原断言。
+- guards9 当前完整 12 文件加 4 个 Gateway/私有写入/消息扫描选择文件 335 passed；ruff、导入边界（0条）、doc-sync、strict尺寸、diff、clean-package均返回0。尺寸身份差集新增0/消失2，baseline不改，生成报告不提交。
+- 复跑：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_compact_work_measurement.py agent_py_agent/tests/test_compact_work_contracts.py -q -s -o addopts='' -p no:cacheprovider --basetemp=tmp/compactmem/reproduce`（PY 为 ci-venv-312）。
+- 生产 schema/FTS、大库 SQLite 原生分配、完整 Gateway/TUI/供应商与生产 RSS 未验证；由 07 沙箱外复核，不推送或部署。
+
 ## 线程人格前缀冻结（personafreeze，2026-10-08，07-c3）
 
 - 07跟进personafreeze-2：坏JSON/错schema/缺段落/超1MB/坏UTF-8/非字符串段，六种先断言失败后同锁重建；

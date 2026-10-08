@@ -1,4 +1,6 @@
 
+# LLM: schema仍是唯一建表权威；显式同线程批次复用短连接，每个操作独立提交或丢弃未提交事务。
+# 模块用途: 统一管理本地SQLite表结构与连接生命周期。
 from __future__ import annotations
 
 """owns SQLite connection setup, schema creation, and transactional context helpers.
@@ -198,6 +200,8 @@ _TOOL_OPERATIONS_SQL = (
 )
 
 
+# LLM: 长寿命store不拥有常驻连接，批次只优化生命周期，不合并操作事务或更改FTS建表策略。
+# 类用途: 为LocalStore提供schema初始化和有界连接范围。
 class LocalStoreSchemaMixin:
 
     def _init_schema(self) -> None:
@@ -306,8 +310,33 @@ class LocalStoreSchemaMixin:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    # LLM: 显式批次只复用同store、同线程连接；嵌套不关闭外层，各写API原有commit/rollback边界不变，异常也释放。
+    # 函数用途: 在一次流式索引中避免逐消息打开SQLite；批次结束不保留连接。
+    @contextmanager
+    def connection_batch(self):
+        state = self._connection_local
+        if getattr(state, 'connection', None) is not None:
+            yield
+            return
+        with self._connection() as conn:
+            state.connection = conn
+            try:
+                yield
+            finally:
+                del state.connection
+
+    # LLM: 默认短连接合同不变；批次借用连接也丢弃本操作未提交事务，避免后续API误提交失败写入，关闭权归批次。
+    # 函数用途: 给一次存储操作取得连接，批次内省去重复Pragma和schema读取。
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        state = getattr(self, '_connection_local', None)
+        existing = getattr(state, 'connection', None)
+        if existing is not None:
+            try:
+                yield existing
+            finally:
+                existing.rollback()
+            return
         conn = self._connect()
         try:
             yield conn
