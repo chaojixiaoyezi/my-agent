@@ -136,7 +136,7 @@
     - C：打开开工前选包。
   - 每句每组各跑 1 次，都是新会话的第一句话。
     - A、B 只发第一次请求，看她第一步有没有调 `skill_search(action=get)` 打开对口的包，看工具账本，不执行后续工具。
-    - C 看选包结果。
+    - C 看程序选包结果，也保留同样的第一次主请求，看她自己的 get 意图，两者分表。
   - 记两个数，分语言列：
     - 对口率：25 句对口的里，打开了对口包的比例。
     - 误开率：14 句无关的里，打开了任何包的比例。
@@ -146,6 +146,52 @@
     任务列表里每条消息多一条记录。
   - 都不够：用 A、B 里好的那个，C 不开，把数据给用户看再定。
 - **用量**：A、B 每次约 4 万输入，39 句两组约 310 万；C 每次约 3000，约 12 万。合计约 320 万输入 token，大部分命中缓存。
+  这是原粗估，C 只算了选包辅助调用；测量工具还保留 C 主首请求，真跑总量以实际账本为准，不能用这个旧估算作总账。
+
+### 测量工具（w2，2026-10-07；状态：已实现，假模型自测完成，真模型待 3a）
+
+- 入口 `scripts/eval/pack_pick_bench.py`：`setup` 调产品 `PluginManagement.command` 安装、启用全部内容包；
+  `run` 为每句、每组、每次重复新建会话，通过 `submit_gateway_ask` / `_process_gateway_requests` 处理第一句话。
+  不启动 Gateway 服务、不手拼提示、不裁剪工具表。默认原能力目录和关键词提醒保留。
+- 接缝 `scripts/eval/pack_pick_runtime.py`：`arm_context` 只在内存替换选包开关，B 只替换采用那一行；异常也恢复。
+  `FirstCallTap.primary` 委托原 `_tool_loop_service.generate_model_response`，保留原输入、preflight、后端调用与用量账，
+  捕获首步 native 工具意图后返回固定无工具终答，禁止第二次主生成。`FirstCallTap.selection` 委托原 `_selected_references` 解析，
+  C 保留真实的选择、宿主读入口、任务状态与 pin；不把宿主读取冒充她调 `skill_search get`。
+- 和真实请求的差别：主输出流的 `effective_on_chunk` 设为 `None`，避免模型回答和工具参数正文经流回执落盘；
+  用户最终收到固定测量终答，没有模型工具执行和后续业务链路。框架自身会在**隔离 home** 写请求、线程、任务与用量，
+  所以不是“全路径不写盘”。JSONL 只记工具名、动作、必要包号，不记其余参数、模型正文或包正文。
+- `_case_rows` 对齐该隔离线程的原持久用量账与同请求 `ModelCallLedger`；`pack_pick_results.usage_fields` 只取供应商已报字段，
+  缺报是 `null`，不拿本地估算冒充。Anthropic 总输入含缓存读/写，不可把未缓存数当总输入。每个原调用单列，
+  HTTP 内部重试次数另记，供应商可能只回报最后一次的 token，不能声称覆盖每个 HTTP 尝试的全部计费。
+- 输出 `calls.jsonl`、`summary.md`、`metadata.json`（题目、源码、包指纹与原候选/输入/入口预算）。
+  C 的 `selection`、`main` 分表；探针、决策及其它辅助调用另列，不算主 get。率按独立样本去重，
+  对口题开错包保留在行内，误开率分母仍只算无关题。未触发的观察行标 `record_kind=observation`，不是物理调用，
+  不进 token 均值；请求失败写入已有结果后非零退出，不静默继续。输出目录必须全新，不覆盖旧结果。
+
+**真跑命令（3a 沙箱外）**：先准备已有隔离 home，里面只配置正规模型档案入口生成的官方 MiniMax-M2.7 档案，
+不用生产 owner 的会话/记忆。将 10 个 `.zip` 内容包和真实 39 句放到自己的评测输入目录。
+以下三个路径和档案 ID 是待填的输入，并不是已经存在或已验证的文件；不要加 `--fake`。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+BENCH_HOME=/private/tmp/claude-501/w2-real/home
+PACKAGES=/private/tmp/claude-501/w2-real/inputs/packages
+QUERIES=/private/tmp/claude-501/w2-real/inputs/queries-39.json
+PROFILE_ID='<该隔离 home 中 MiniMax-M2.7 的精确档案 ID>'
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py setup --home "$BENCH_HOME" --packages "$PACKAGES"
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BENCH_HOME" --queries "$QUERIES" --arms A,B,C --repeat 1 --profile "$PROFILE_ID" --out /private/tmp/claude-501/w2-real/results-abc-1
+```
+
+自测可将第二条命令的 `--profile ...` 换成 `--fake`，题目用 `agent_py_agent/tests/fixtures/pack_pick_queries.json`，
+包要自行造 `novel`、`drama` 两个纯内容包；假后端按题目的结构化正例给答案，只校准测量器，不能评自然召回。
+安全 home 检查解析符号链接，拒绝真实 `~/.my-agent`、其内部和祖先；正例必须属于实际已启用目录。
+不要并发运行、不要连接运行中的 Gateway、不要复用有待处理请求的队列。
+
+**已知限制**：这一版基于任务基线 `6e8f61564`，没有合入 w1 的开关现读/会话沿用；集成后应复跑。
+主首步 get 意图、宿主入口入模、实际成功读取、方法采用、业务质量是五个观察点，这里不验后面三项。
+默认 C 候选上限 5、输入/入口各 3000 token；10 个包可能被省略或入口预算不足，诊断保留在 JSONL，工具不偷偷提预算。
+真 MiniMax 网络/凭据/工具探针及 39 句准确率**未验证**；第 4 步生产质量与 TUI/飞书验收也不在本次自测里。
 
 ## 6. 第 4 步：部署和生产验收
 

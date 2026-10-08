@@ -1,5 +1,55 @@
 # 测试与发布验收
 
+## 首次选包测量工具（2026-10-07，w2；任务基线 `6e8f61564`）
+
+- 来源：3a 的 `w2-step3-bench.md`，只开发测量器，真 MiniMax 和 39 句由 3a 沙箱外跑。
+- 做法：开发脚本复用原安装/启用、Gateway 主请求、提示/工具目录、一次选包及用量账；只在原模型生成返回后捕获首步意图，
+  用固定无工具终答结束，不改产品源码。失败后保存观察，未知 token 不补零，C 选择/主 get 和其它用途分开。
+- 新测试 `agent_py_agent/tests/test_pack_pick_bench.py` 六条，覆盖结构化判定/脱敏、汇总分母和探针/未知字段、
+  home 链接/祖先拒绝、B 只改采用行且异常恢复、原安装→A/B/C→原账本、坏输入及供应商失败保留。
+  先有可导入空壳和有效断言红测，再实现；红测退出 1（五个断言失败），不是导入/收集失败。
+- 定向实跑退出 0：两个临时包、四句 × 三臂 × 两遍，24 个独立主会话、32 条原调用（C 辅助选择 8 条）。
+  handler 被接管为一旦进入即失败；没有进入任何模型工具 handler；主生成 24 次，C 对口入口入模 6 次。
+  注入写文件意图未生成 sentinel；模型工具参数秘密样本在隔离 home 文件中未出现；JSONL 不含入口或工具正文。
+  框架自己的线程、请求、任务和用量确实写盘，**不是全路径零写入**。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_pack_pick_bench.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w2
+```
+
+- 当前版本收尾（全部命令在工作树根，均用上面同一解释器；全仓 pytest **未跑**）：
+  - 定向五个文件加 `guards9.txt` 的全部十二个文件，合并跑：**317 passed / 1 skipped / 0 failed，rc=0**。
+    跳过由既有平台能力检测明确报告：后台启动器进程身份不可用；不是把失败用例删除或改成跳过。
+    定向文件为 `test_pack_pick_bench.py`、`test_host_notices.py`、`test_learnpack_install.py`、
+    `test_capability_package_prompt_guidance.py`、`test_capability_package_selection.py`；grep 直接 import 新模块的测试只有新增文件。
+  - 独立 CLI 子进程实跑 `python scripts/eval/pack_pick_bench.py setup ...` 与 `run ... --fake --repeat 1`：两条 rc=0，
+    12 个独立主会话、16 条调用（main 12 / selection 4），三份输出均生成；临时目录结束清理，不是正式评测文件。
+  - `scripts/check_import_boundaries.py`：rc=0，`findings=0`；`-m ruff check agent_py_agent scripts`：rc=0。
+  - `scripts/check_doc_sync.py --base 6e8f61564`：rc=0，`DOC_SYNC_PASS`；`git diff --check 6e8f61564`：rc=0。
+  - `scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：rc=0，hard=0；生成报告还原，不提交。
+  - `scripts/check_clean_package.py .`：rc=0，未发现发布阻塞项；新增文件须先 git add，未登记的源码会按原守卫被拒绝。
+  - `bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：rc=0，原输出为“新增告警: 0”“消失告警: 0”。
+  - 开发中曾被架构守卫抓出两个 `**kwargs` 服务接口、被 size_diff 抓出三项新增告警；已改为原解析接缝、标准库假传输和单层 helper，
+    不加豁免或 baseline，不放宽断言。最终结果只对应修改后的版本。
+- 变异：独立子进程中一次替换一个函数，退出即恢复；源码前后 SHA-256 一致，不改产品源码或守卫。以下均运行
+  `agent_py_agent/tests/test_pack_pick_bench.py` 内对应测试（只认 pytest rc=1，不把外层检测器的 rc=0 当测试成功）。
+
+  | 变异位置与做法 | 测试函数（省略 `test_` 前缀） | pytest rc | 抓到 |
+  | --- | --- | --- | --- |
+  | results.judge_packages：对口恒假 | judgement_reads_structured_get_and_keeps_only_tool_identity | 1 | 是 |
+  | results._summary_row：无关分母混入对口题 | summary_separates_selection_main_languages_denominators_and_unknown_tokens | 1 | 是 |
+  | bench.safe_output：不拒绝真实 home | home_guard_refuses_real_descendant_alias_missing_and_ancestor | 1 | 是 |
+  | runtime._stronger_rule：B 保持原采用行 | arm_patch_changes_only_adoption_restores_on_failure_and_does_not_write | 1 | 是 |
+  | runtime.arm_context：C 强制关闭 | arm_patch_changes_only_adoption_restores_on_failure_and_does_not_write | 1 | 是 |
+  | runtime.FirstCallTap.primary：原工具响应直接交给循环 | setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers | 1 | 是，进入 handler 即失败 |
+  | runtime._record_row：selection 归 main | setup_and_fake_abc_use_real_gateway_ledger_fresh_sessions_and_zero_handlers | 1 | 是 |
+  | results.usage_fields：拿本地估算补缺报 | summary_separates_selection_main_languages_denominators_and_unknown_tokens | 1 | 是，900 不是 None |
+
+  总计 8/8 抓到。缺报变异第一次因不完整替身属性失败，补齐替身后重跑，确认是业务断言失败而非缺字段假阳性。
+- 未验证：真模型/真实凭据、39 句自然召回、生产 TUI/飞书、工具实际读取/方法采用/业务质量、w1 集成后的行为。
+
 ## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
 
 - **来由**：main 的 GitHub Actions 红了一周——Test（ubuntu，3.10/3.11/3.12 快速套件，单用例 60 秒）从 10-01 起、Cross-platform guard（macOS/Windows）从 10-05 起、每晚 Full Tests 都失败；本地 Mac、Docker（root、Python 在 /usr）都没暴露。
