@@ -1,5 +1,54 @@
 # 测试与发布验收
 
+## w1 第 1 步：能力开关改完立即生效（2026-10-07，本地已实现、待 3a 复核）
+
+- **来源与做法**：3a 的 w1-step1 任务，基线 `6e8f61564`，代码提交 `073e64237`。选包开关原先吃 agent 缓存，管理员 `/settings` 保存后仍提示重启。
+  `self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS` 统一两个自动装和选包三个键；主/子判断现读，读不到按 dataclass 默认，
+  其它预算仍是原缓存实例。两个自动装的回执、命令和 unreadable 版本标记不变。参数中心、前端目录都消费后端事实。
+- **新增合同**：放在现有 `test_capability_selection_scope.py`，覆盖三键立即生效/名单外预算重启、同 agent 关→开与开→关、
+  坏文件/非法布尔/不可读时不吃缓存 true、子入口双方向现读，以及真实管理员设置服务的回执→原 agent 下一次 scope。
+  `test_backend_config_catalog.py` 改成逐字段比后端 effect，不另抄名单。修复前 10 个断言失败（pytest rc=1，无收集错误）。
+- **固定跑法**：所有命令先在本工作树根执行；`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，pytest 统一前缀
+  `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest`，后缀
+  `-q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w1 -o addopts=''`。
+  `-o addopts=''` 只保留清楚的实跑统计，不改变断言或选择范围。
+- **直接回归**：`test_capability_selection_scope.py test_self_install_switches.py test_backend_config_catalog.py
+  test_frontend_settings_labels.py test_subagent_package_entries.py`（均在 `agent_py_agent/tests/`）：94 passed，rc=0。
+  `node frontend/scripts/sync-backend-config.mjs` 已生成目录（265 个字段）。
+- **引用方 + guards9 联合**：文件列表用 `rg -l '(from|import).*?(package_selection_scope|subagent_package_entries|parameter_registry)'
+  agent_py_agent/tests`，再加任务指定 guards9 清单全部文件。实跑 **618 passed / 9 skipped / 3 failed，rc=1**。
+  失败全部在 `test_plugin_sandbox_v8.py`：`test_macos_v8_narrows_read_and_enforces_network[True]`、
+  `test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home`。
+  三项均实际调用 sandbox-exec，退出 71，明确回 `sandbox_apply: Operation not permitted`；没有把无响应猜成隔离。
+- **真正基线复核**：按共同规则用 `git worktree add --detach <临时工作树> 6e8f61564`，仅在临时工作树根、同一 Python/
+  PYTHONPATH 口径重跑上述三个完整 node id（临时目录 `--basetemp` 独立）。结果 **3 failed，rc=1**，三处均同样的退出 71/权限拒绝。
+  临时工作树已用 `git worktree remove` 删除。因此三项是同环境基线也失败；不修改、删除或 skip 原测试，沙箱外真机复核仍未验证。
+- **变异（一次一处，每次跑完立即原样还原，只认 pytest rc=1）**：
+
+  | 变异点 | 文件与用例选择 | 结果 | 是否抓到 |
+  | --- | --- | --- | --- |
+  | `package_selection_scope` 开关改回 `config.enable_capability_package_selection` 缓存读 | `test_capability_selection_scope.py -k selection_scope_reads_switch_fresh_without_refreshing_cached_budgets` | 2 failed / 35 deselected；rc=1 | 是，双方向断言失败 |
+  | `CAPABILITY_FRESH_SWITCH_KEYS` 去掉选包键，只剩两个自动装键 | `test_capability_selection_scope.py -k fresh_switch_registry_reports_immediate_but_budgets_still_require_restart` | 1 failed / 2 passed / 34 deselected；rc=1 | 是，选包时机变成 restart_gateway |
+
+- **收尾门禁（实际执行）**：恢复后五个直接文件再跑仍 **94 passed，rc=0**；引用方 + 全部 guards9 再跑仍
+  **618 passed / 9 skipped / 3 failed，rc=1**，三个失败与上文相同，不登记联合全绿。测试只把两处长 import 拆成多行以修 I001，
+  没有改断言、选择范围或产品行为；修复后的 `$PY -m ruff check agent_py_agent scripts` 为 `All checks passed!`，rc=0。
+  `$PY scripts/check_import_boundaries.py` 为 `IMPORT_BOUNDARIES findings=0`，rc=0；`$PY scripts/check_doc_sync.py` 为 `DOC_SYNC_PASS`，rc=0。
+  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
+  `strict_scope_total=2190 hard=0 high-risk=1494 soft=696 test_advisory=1239 blocked=False`，rc=0；这是接受基线告警，不是全仓零告警。
+  `git diff --check 6e8f61564` 无输出、rc=0；`$PY scripts/check_clean_package.py .` 为 `OK: . 未发现发布阻塞项`，rc=0。
+  code-size 与 size_diff 后均已还原生成的 `CODE_SIZE_REPORT.md`，不提交报告。
+  `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` 已执行，`Config catalog is in sync (265 fields).`，rc=0；
+  最后仍用该命令、`$PY scripts/check_doc_sync.py --base 6e8f61564` 与区间 `git diff --check` 复核冻结交付，最终结果见交接报告。
+- **size_diff 全部输出**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`，rc=0，对线上 step17w 告警身份比对：
+
+  ```text
+  新增告警: 0
+  消失告警: 0
+  ```
+- **未做/未验证**：第 2 步的配置和会话沿用没有实现；真实 Gateway/TUI/飞书、真模型、生产热切换、Linux 多版本/全量与线上 CI 未验证。
+  不启停 Gateway、不运行 my-agent、不推远端，不安装依赖。
+
 ## 线上 CI 修复（2026-10-07，3a，用户："每次推送要保证远端都 ci 都过"）
 
 - **来由**：main 的 GitHub Actions 红了一周——Test（ubuntu，3.10/3.11/3.12 快速套件，单用例 60 秒）从 10-01 起、Cross-platform guard（macOS/Windows）从 10-05 起、每晚 Full Tests 都失败；本地 Mac、Docker（root、Python 在 /usr）都没暴露。

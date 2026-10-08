@@ -132,6 +132,13 @@
     是两码事、包复杂得多：会话沿用以包为主，包还记她读过的包内资料（每包最近 8 份），压缩后带回入口加资料清单（带重读参数），
     skill 只做简单版。分工：my-agent 会话 w1（gpt-6.1-sol，max）做第 1–2 步，w2（gpt-6.1-sol，xhigh）做第 3 步测量工具；
     3a 统筹、处理疑难、真机测试（用原来测试用的 TUI，MiniMax），并记录这期间 my-agent 的用量、缓存、资源占用等数据。
+    **第 1 步已实现（w1，代码提交 `073e64237`，2026-10-07），待 3a 复核**：现读名单唯一放在
+    `capability/self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS`，本步仅两个自动装与选包三个键；主/子选包入口共用
+    `read_fresh_capability_switch`，坏文件按 dataclass 默认，不采用缓存 true。预算缓存、两自动装回执、原授权/pin/首请求不变。
+    参数中心按名单报马上生效，前端生成器直接读后端 effect；没有提前新增第 2 步配置。恢复后直接回归 94 passed；
+    引用方与完整 guards9 合跑 618 passed / 9 skipped / 3 failed（sandbox-exec 明确权限拒绝，基线同失败）；
+    import boundaries、ruff、doc-sync、strict code-size、diff、clean-package 已执行通过，线上告警差集新增 0、消失 0。
+    命令、两处变异和基线复核见 TESTS；真实 TUI/飞书、模型、Linux 与部署未验证，非生产完成。
   - **待办（"总结一下"，第 5 步复审 3 轮建议，第一期之后单独做）**：
     - 调过 `previous` 的那次运行，收尾时别覆盖"最近完成的那次活"（现在事后那一轮若先读了文件、升成任务，收尾后它自己会变成最近一份，用户接着说"再总结一下，重点换成 X"会拿到"总结一下"这一轮）；按运行编号记一下即可，是结构化做法。
     - 回 `already_requested` 时，这次新给的重点没有用上：回执要写明；更好是用户请求还在排队时就地改重点。

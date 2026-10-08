@@ -21,9 +21,9 @@
 - 关键词提醒：用户原话里整词出现包名或关键词时，多一段"本轮能力包候选"（`render_package_recommendations`）。
 - 开工前选包（`enable_capability_package_selection`，默认关，生产也关）：新任务第一次业务请求前，用主模型单独问一次
   （输入不超过 3000 token，只看用户这一句，不看历史），选中后宿主读入口（不超过 3000 token）放进本轮。
-  同一件活不重复，但普通聊天基本每条新消息都算一件新活；纯问答也会留一条任务记录。改这个开关要重启 Gateway：
-  能力配置读一次就缓存在 agent 上，只有两个"自动装"开关是每次现读的（`capability/self_install_switches.py`）。
-  它有管理员 `/settings` 入口，参数中心如实提示"重启后生效"。
+  同一件活不重复，但普通聊天基本每条新消息都算一件新活；纯问答也会留一条任务记录。第 1 步落地前改这个开关要重启 Gateway：
+  能力配置读一次就缓存在 agent 上，当时只有两个"自动装"开关每次现读。w1 本地实现已把选包开关接到同一现读入口，
+  管理员 `/settings` 如实提示"马上生效"，预算仍保持缓存；待 3a 复核和部署，不代表生产已切换（落点见第 3 节）。
 - 压缩：会话压缩不保留读过的 skill／包正文，压缩后只剩摘要里提一句。
 - 实测：
   - 原版两遍都没调用自己的短剧技能。
@@ -51,12 +51,12 @@
 
 ## 3. 第 1 步：开关改完立刻生效
 
-- **现在**：管理员发 `/settings set enable_capability_package_selection true`，参数中心提示"重启 Gateway 才生效"，
+- **原问题**：管理员发 `/settings set enable_capability_package_selection true`，参数中心提示"重启 Gateway 才生效"，
   当前进程照旧按关跑。
 - **改后**：改完下一条消息就按新值跑，参数中心如实报"马上生效"。
 - **怎么改**：
-  - 把两个"自动装"开关用的"每次按文件现读"做法，扩到一份名单：两个自动装开关、选包开关、第 2 步新开关
-    `conversation_method_carry_enabled`。读不到或文件坏按默认值，不报错。
+  - 把两个"自动装"开关用的"每次按文件现读"做法，扩到一份名单：两个自动装开关、选包开关。读不到或文件坏按默认值，不报错。
+    第 2 步才新增 `conversation_method_carry_enabled` 并把它加到名单，本步不提前加配置或名单成员。
   - 读选包开关的两处改走现读：`capability/package_selection_scope.py` 和 `capability/subagent_package_entries.py`。
   - 参数中心按这份名单报生效时机（`settings/parameter_registry.py`）。
   - `capability_config.yaml` 头部"改完重启 Gateway 最稳妥"那句改成写明哪几个键马上生效。
@@ -64,6 +64,21 @@
   - 5 个合同用例：参数中心报"马上生效"；不重建 agent 改文件，关→开、开→关都在下一次请求生效；坏文件按关；
     子代理入口同样现读。
   - 2 个变异（改回缓存读）必须被抓到。
+
+- **实际落点（w1，2026-10-07，本地已实现、待 3a 复核）**：
+  - `agent_py_agent/agent/capability/self_install_switches.py` 的 `CAPABILITY_FRESH_SWITCH_KEYS` 是马上生效开关的唯一名单，
+    保留 `SELF_INSTALL_SWITCH_KEYS` 的两键回执合同。`_read_fresh_capability_snapshot` 共用原文件优先级和正式加载器，
+    `read_fresh_capability_switch` 在读不到时按 `CapabilityConfig` 对应键默认值处理，不读写 agent 缓存。
+  - `package_selection_scope.package_selection_scope` 只把是否开关改为现读；`PackageSelectionScope.config` 及预算仍取
+    `runtime_config_reload.capability_config_for_agent` 的原缓存实例，没有改它的缓存语义。
+    `subagent_package_entries.subagent_entries_enabled` 共用现读入口；已有线程、授权、pin 和首请求资格保持原样。
+  - `settings/parameter_registry._capability_specs` 按唯一名单给出 `EFFECT_IMMEDIATE`；其它能力参数仍为 `EFFECT_GATEWAY_RESTART`。
+    YAML 头部列出三个立即生效键；`frontend/scripts/sync-backend-config.mjs::backendRestartRequirements` 通过 Python
+    直接读后端 `parameter_registry()` 的 effect 生成 `restartRequired`，没有在 JS 或目录守卫里重抄名单。
+    生成器默认 python3（Windows 为 python），项目解释器可经 `PYTHON` 指定，失败即中止，不猜时机。
+  - 五类合同及管理员 `/settings` 保存→原 agent 下一次主/子开关判断，记录在 `test_capability_selection_scope.py`；
+    `test_backend_config_catalog.py` 逐字段对后端 effect。测试、基线失败复核和两处有效变异见 `TESTS.md` 的 w1 第 1 步节。
+  - 会话沿用、真模型、实际 TUI/飞书、Linux 通道与生产部署不在本步本地验收内，均未验证。
 
 ## 4. 第 2 步：会话沿用
 
