@@ -1055,7 +1055,9 @@ def _build_compact_candidate(
             and final_media.reason == COMPACT_VISION_SUMMARY_FAILED):
         # 看图小请求一次都没成功：写同代次标记；若本次提交失败，同代次重试直接选归档引用，不再发看图请求。
         record_compact_vision_failure(request.store, request.thread, now=request.attempted_at)
-    remeasure = partial(_measure_candidate, request, _CandidateTail(retained_tail, evidence))
+    remeasure = partial(_measure_candidate, request, _CandidateTail(
+        retained_tail, evidence, dict(provider_outcome[-1]) if provider_outcome else {},
+    ))
     measured = _fit_landmarks_to_target(_candidate_limits(request), remeasure(summary), landmark_outcome, remeasure)
     return _CompactCandidate(
         summary=measured.summary,
@@ -1087,6 +1089,8 @@ class _MeasuredSummary:
 class _CandidateTail:
     retained_tail: Sequence[MessageLogEntry]
     evidence: dict[str, object]
+    # 本候选的服务端压缩记录；候选视图按它投影请求（compact_projection.ConversationCompactView.provider_compaction）。
+    provider_compaction: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: target 是压缩后的健康目标，ceiling 是会被拒的输入上限（与候选循环同一 _compact_request_input_ceiling）。
@@ -1114,6 +1118,7 @@ def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summar
         evidence, dict(_recent_operation_evidence(retained_tail) or {}), request.policy.trigger_tokens, True,
         retained_tool_records=request.tool_source.retained_records if request.tool_source is not None else None,
         retained_ir_history=request.tool_source.retained_ir_history if request.tool_source is not None else None,
+        provider_compaction=dict(tail.provider_compaction),
     ))
     tokens = (
         calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)

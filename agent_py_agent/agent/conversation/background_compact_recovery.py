@@ -73,9 +73,13 @@ def _project_background_candidate(agent, current, params, frozen, view):
 
 # LLM: 本回调只替换历史与注入；公共层负责精确IR分区，窄事件仍无seed，媒体与插话保留。
 # 函数用途: 将本次活动摘要投影到后台完整请求，不重跑宿主或工具循环准备。
-def _project_background_active_candidate(agent, current, params, frozen, summary, retained, generation):
-    application = replace(current.compact_context, view=replace(current.compact_context.view,
-                                                               summary=summary, generation=generation))
+def _project_background_active_candidate(agent, current, params, frozen, summary, retained, generation, *,
+                                         provider_compaction=None):
+    from ..agent_core.compact_request_recovery import active_candidate_compact_context
+
+    application = active_candidate_compact_context(
+        current.compact_context, summary=summary, generation=generation, provider_compaction=provider_compaction,
+    )
     seed = current.history.seed
     if seed is not None:
         seed = replace(seed, compact_summary=summary, compact_generation=generation)

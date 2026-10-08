@@ -378,7 +378,7 @@ def _execute_active_turn_compact(
     try:
         replacement, provider_compaction = _active_turn_replacement_summary(agent, plan, request)
         raise_if_compact_interrupted(request.interrupt_check)
-        projection = _project_active_turn_request(agent, plan, request, replacement)
+        projection = _project_active_turn_request(agent, plan, request, replacement, provider_compaction)
         # 接受门与提交记的是折算后的值；projection 本身保留原始纯投影，供宿主提交后改写本轮观测基线。
         after_tokens = (
             calibrated_compact_request_tokens(projection.projected_tokens, request.calibration)
@@ -470,13 +470,16 @@ def _project_active_turn_request(
     plan: _ActiveTurnArchiveCompactPlan,
     request: ActiveTurnArchiveCompactRequest,
     replacement: str,
+    provider_compaction: dict[str, object] | None = None,
 ) -> ConversationCompactProjection | None:
     if request.request_projector is None:
         return None
     from .compact import _compact_request_input_ceiling
 
+    # 服务端压缩记录随候选一起交给宿主投影器（只在有记录时传关键字，旧投影器/替身签名不变）。
+    extra = {"provider_compaction": provider_compaction} if provider_compaction else {}
     projection = request.request_projector(
-        replacement, plan.retained_records, max(0, int(plan.thread.compact_generation or 0)) + 1,
+        replacement, plan.retained_records, max(0, int(plan.thread.compact_generation or 0)) + 1, **extra,
     )
     raise_if_compact_interrupted(request.interrupt_check)
     if (not isinstance(projection, ConversationCompactProjection)

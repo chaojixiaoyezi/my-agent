@@ -42,6 +42,9 @@ class ConversationCompactView:
     retained_tool_records: tuple[dict[str, object], ...] | None = field(default=None, repr=False)
     retained_ir_history: tuple[object, ...] | None = field(default=None, repr=False)
     measure_only: bool = field(default=False, kw_only=True)
+    # 服务端压缩记录（compact_remote.provider_compaction_record）：候选自己的新记录，文字摘要候选为空字典。候选上下文和
+    #   它投影出的请求都按它发压缩项，不能沿用上一代视图的记录（10-08 .16 真机：主请求带着上一代的项、第一代带占位文本）。
+    provider_compaction: dict[str, object] = field(default_factory=dict, kw_only=True, repr=False)
 
 
 # LLM: 计量必须来自完整请求，unknown 应抛结构化错误而非填零；material 属宿主，Compact 不解释也不持久化。

@@ -25,6 +25,10 @@ from agent_py_agent.agent.conversation.compact import (
     prepare_conversation_context,
 )
 from agent_py_agent.agent.conversation.compact_calibration import CompactRequestCalibration
+from agent_py_agent.agent.conversation.compact_projection import (
+    ConversationCompactProjection,
+    ConversationCompactView,
+)
 from agent_py_agent.agent.conversation.compact_provider_surface import (
     ConversationCompactProviderSurface,
     conversation_compact_provider_messages,
@@ -36,11 +40,16 @@ from agent_py_agent.agent.conversation.compact_remote import (
     provider_compaction_compatible,
     provider_compaction_content,
     provider_compaction_marker,
+    provider_compaction_record,
     remote_compaction_enabled,
     request_remote_compaction,
 )
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
-from agent_py_agent.agent.conversation.compact_summary_view import resolve_compact_summary_view
+from agent_py_agent.agent.conversation.compact_summary_view import (
+    AppliedCompactContext,
+    CompactSummaryView,
+    resolve_compact_summary_view,
+)
 from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
     LiveToolHistorySummaryRequest,
     summarize_live_tool_history,
@@ -51,6 +60,9 @@ from agent_py_agent.agent.settings.config import AgentConfig
 CIPHER = "ZW5jcnlwdGVkLWNvbXBhY3Rpb24="
 ITEM = {"type": "compaction", "encrypted_content": CIPHER}
 BLOCK = {"type": "responses_compaction", "model": "fake", "item": ITEM}
+CIPHER2 = "c2VydmVyLWNvbXBhY3Rpb24tZ2VuLTI="
+ITEM2 = {"type": "compaction", "encrypted_content": CIPHER2}
+BLOCK2 = {"type": "responses_compaction", "model": "fake", "item": ITEM2}
 
 
 def test_wire_layer_parses_and_replays_compaction_items():
@@ -233,14 +245,22 @@ def test_second_transcript_compaction_chains_on_the_stored_item(tmp_path, monkey
                               supports_remote_compaction=lambda: True,
                               provider_compaction_scope=lambda: {"protocol": "openai_responses", "endpoint": "https://chatgpt.com/backend-api/codex"})
     agent, thread = _thread(tmp_path, backend)
-    calls = []
+    calls, views = [], []
+    # 第一次返回第一代的项，之后返回第二代的项；投影器记录每个候选视图带的服务端压缩记录（宿主就按它物化前缀）。
     monkeypatch.setattr(auxiliary_model_call, "generate_auxiliary_model_response",
-                        lambda request: calls.append(request) or ModelResponse(text="", backend="fake", assistant_content_blocks=[BLOCK]))
+                        lambda request: calls.append(request) or ModelResponse(
+                            text="", backend="fake", assistant_content_blocks=[BLOCK if len(calls) == 1 else BLOCK2]))
+
+    def projector(view):
+        if view.is_candidate:
+            views.append(provider_compaction_content(view.provider_compaction))
+        return ConversationCompactProjection(projected_tokens=1_000, material=object())
+
     surface = ConversationCompactProviderSurface("稳定前缀", None, "摘要系统")
     source = load_conversation_compact_source(agent, agent.conversation_store, thread, scope=THREAD_COMPACT_SCOPE)
     first = prepare_conversation_context(agent, agent.conversation_store, thread, options=ConversationCompactOptions(
-        source=source, force=True, exclude_request_id="request-1", provider_surface=surface))
-    assert first.compacted
+        source=source, force=True, exclude_request_id="request-1", provider_surface=surface, request_projector=projector))
+    assert first.compacted and views == [CIPHER], "第一代候选视图带第一代的项"
     path = agent.conversation_store.storage.message_path(first.thread.thread_id)
     with path.open("ab") as handle:
         for index in range(8, 16):
@@ -249,12 +269,48 @@ def test_second_transcript_compaction_chains_on_the_stored_item(tmp_path, monkey
             handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
     source = load_conversation_compact_source(agent, agent.conversation_store, first.thread, scope=THREAD_COMPACT_SCOPE)
     second = prepare_conversation_context(agent, agent.conversation_store, first.thread, options=ConversationCompactOptions(
-        source=source, force=True, exclude_request_id="request-2", provider_surface=surface))
+        source=source, force=True, exclude_request_id="request-2", provider_surface=surface, request_projector=projector))
     assert second.compacted and second.thread.compact_generation == first.thread.compact_generation + 1
     assert calls[-1].compaction_trigger is True
     assert calls[-1].messages[0]["content"] == [{"type": "responses_compaction", "item": ITEM}], "前缀逐字发上一代压缩项"
+    # 10-08 .16 真机：候选视图曾沿用上一代的项，压缩后同一回合的主请求就带着旧项发出去；现在必须是本代的项。
+    assert views[-1] == CIPHER2 and CIPHER not in views[1:], "第二代候选视图带第二代自己的项"
     view = resolve_compact_summary_view(agent, second.thread, THREAD_COMPACT_SCOPE)
-    assert provider_compaction_content(view.provider_compaction) == CIPHER and view.generation == second.thread.compact_generation
+    assert provider_compaction_content(view.provider_compaction) == CIPHER2 and view.generation == second.thread.compact_generation
+
+
+# LLM: 10-08 .16 真机：候选上下文只换摘要文本不换 provider_compaction，物化的前缀按上一代的项发（第一代发占位文本）。
+#   候选上下文的唯一出处（project_recovery_compact_context / active_candidate_compact_context）必须带候选自己的记录，
+#   文字摘要候选是空字典，不沿用基视图的记录。
+# 函数用途: 候选上下文带本代的服务端压缩记录，文字候选清空记录；物化的历史前缀按它发压缩项。
+def test_candidate_context_carries_its_own_record_and_materializes_it():
+    from agent_py_agent.agent.agent_core.compact_request_recovery import (
+        active_candidate_compact_context,
+        project_recovery_compact_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_support import (
+        _native_provider_history_messages,
+    )
+
+    backend = _subscription_backend()
+    old, new = provider_compaction_record(backend, ITEM), provider_compaction_record(backend, ITEM2)
+    base = AppliedCompactContext("thread-1", THREAD_COMPACT_SCOPE, CompactSummaryView(
+        checkpoint_id="c1", summary="[provider-compaction 1]", generation=1, provider_compaction=old))
+    candidate = ConversationCompactView("thread-1", 2, "[provider-compaction 2]", (), {}, {}, 10_000, True,
+                                        provider_compaction=new)
+    applied = project_recovery_compact_context(base, candidate)
+    assert provider_compaction_content(applied.view.provider_compaction) == CIPHER2 and applied.view.generation == 2
+    text_candidate = ConversationCompactView("thread-1", 2, "文字摘要", (), {}, {}, 10_000, True)
+    assert project_recovery_compact_context(base, text_candidate).view.provider_compaction == {}
+    active = active_candidate_compact_context(base, summary="[provider-compaction 2]", generation=2, provider_compaction=new)
+    assert provider_compaction_content(active.view.provider_compaction) == CIPHER2
+    assert active_candidate_compact_context(base, summary="文字", generation=2).view.provider_compaction == {}
+    # 物化：历史前缀按候选上下文的记录发压缩项（Responses 后端再把它转成 compaction 项）。
+    seed = SimpleNamespace(compact_summary="旧占位", compact_generation=1,
+                           canonical_messages=({"role": "user", "content": "保留的尾巴"},))
+    messages = _native_provider_history_messages(SimpleNamespace(conversation_history_seed=seed, compact_context=applied))
+    assert messages[0]["content"] == [{"type": "responses_compaction", "item": ITEM2}]
+    assert messages[1]["content"] == "保留的尾巴"
 
 
 def test_live_tool_summary_takes_the_remote_path_when_available(monkeypatch):

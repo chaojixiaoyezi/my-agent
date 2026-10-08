@@ -76,12 +76,16 @@ def _project_recovery_candidate(context, conversation, params, frozen, view):
 
 # LLM: 绑定原host和scope/view；只替换摘要与会话注入，公共层随后按同一来源替换工具IR。
 # 函数用途: 空历史但已有活动工具时，以同一候选材料计量并准备提交后的业务请求。
-def _project_gateway_active_candidate(binding, params, frozen, summary, retained, generation):
+def _project_gateway_active_candidate(binding, params, frozen, summary, retained, generation, *, provider_compaction=None):
+    from .agent_core.compact_request_recovery import active_candidate_compact_context
+
     context, conversation = binding
     application = conversation.compact_context
     if application is None:
         raise ConversationCompactError("缺少原 Compact 应用范围", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-    candidate_context = replace(application, view=replace(application.view, summary=summary, generation=generation))
+    candidate_context = active_candidate_compact_context(
+        application, summary=summary, generation=generation, provider_compaction=provider_compaction,
+    )
     candidate = replace(
         conversation, compact_summary=summary, compact_generation=generation,
         compact_context=candidate_context, compact_source=None,

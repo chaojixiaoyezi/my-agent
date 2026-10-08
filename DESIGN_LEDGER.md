@@ -25,6 +25,13 @@
      下一次压缩前的非文本分类（backends/request_content）把它当 unknown 块：自动压缩按 noop 跳过、涨到窗口上限被迫压缩时报
      COMPACT_REQUEST_NON_TEXT，线程卡在触发线上（mc4 astra，06:12）。改法：分类器把它和加密思考同一许可（同一后端可计量、可进压缩链，
      跨模型 allow_reasoning=False 不可移植；视图前缀发出的块没有 model 字段，只认 item 白名单），分段摘要投影把它的密文换占位。
+  8. 候选上下文带本代压缩项（10-08 .16 真机逐请求比对，sol 7 代连续压缩）：此前恢复宿主的候选上下文只换摘要文本和代次，
+     `provider_compaction` 沿用上一代视图，已物化的 provider_history_messages 就按上一代的项（第一代是占位文本）发出去——
+     压缩后同一回合的主请求少了刚压缩掉的记忆，而压缩请求带的是最新的项，两边前缀从第 0 项起失配（生产 mc4 gen11 压缩调用 0%
+     命中、.16 上每次压缩调用只命中 system+工具）。改法：`ConversationCompactView.provider_compaction` 带候选自己的记录
+     （文字摘要候选为空），`project_recovery_compact_context` / `active_candidate_compact_context`（唯一出处，三个宿主投影器共用）
+     把它写进候选上下文，活动回合投影器多收一个 `provider_compaction` 关键字（只在有记录时传），提交后的一致性校验把记录
+     内容也比进去。
 - **没做 / 风险**：API Key 的 OpenAI Responses 端点是否接受触发项未核实，暂不声明能力；服务端压缩项的过期时间未知——失效时请求会失败，
   回退路径是下一次压缩从原文重做（待真机观察）；MiniMax/DeepSeek 没有此接口，继续走 compactfit 的单次缓存面路线。
 

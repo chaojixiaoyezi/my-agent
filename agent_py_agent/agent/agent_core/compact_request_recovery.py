@@ -270,17 +270,20 @@ class PreparedCompactRecovery:
 
         # LLM: 本回调只在原摘要后、写checkpoint前执行；预计代次来自真实binding，不使用原旧thread猜新代次。
         # 函数用途: 把活动摘要和保留区交给宿主纯投影，交回真实完整计量及同次材料。
-        def project(summary, retained, generation):
-            material = self.project_active_candidate(params, frozen, summary, retained, generation)
+        def project(summary, retained, generation, *, provider_compaction=None):
+            extra = {"provider_compaction": provider_compaction} if provider_compaction else {}
+            material = self.project_active_candidate(params, frozen, summary, retained, generation, **extra)
             view = ConversationCompactView(
                 self.source.thread.thread_id, generation, summary, (), {}, {},
                 self.source.policy.trigger_tokens, True, retained_tool_records=retained,
                 retained_ir_history=tool_source.retained_ir_history if tool_source is not None else None,
+                provider_compaction=dict(provider_compaction or {}),
             )
             material = _project_mixed_recovery_material(material, view, handoff_max_chars)
-            expected = replace(self.source.compact_context, view=replace(
-                self.source.compact_context.view, summary=summary, generation=generation,
-            ))
+            expected = active_candidate_compact_context(
+                self.source.compact_context, summary=summary, generation=generation,
+                provider_compaction=provider_compaction,
+            )
             if material.projection.status != "ready" or material.params.compact_context != expected:
                 raise ConversationCompactError("活动恢复候选未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
             return _candidate_projection(material)
@@ -468,12 +471,23 @@ def project_recovery_compact_context(context, view):
     if not view.is_candidate:
         return context
     return replace(context, view=replace(context.view, summary=view.summary,
-        operation_evidence=deepcopy(view.operation_evidence), generation=view.compact_generation))
+        operation_evidence=deepcopy(view.operation_evidence), generation=view.compact_generation,
+        provider_compaction=dict(view.provider_compaction)))
+
+
+# LLM: 活动回合候选的上下文唯一出处：三个宿主投影器与恢复宿主的 expected 校验都从这里取，摘要、代次和本候选的服务端压缩记录
+#   一起换；记录为空就是文字摘要候选（空字典），不能沿用 application.view 里上一代的记录。
+# 函数用途: 把本次活动候选（摘要文本、预计代次、服务端压缩记录）套到已应用的压缩上下文上。
+def active_candidate_compact_context(application, *, summary, generation, provider_compaction=None):
+    return replace(application, view=replace(
+        application.view, summary=summary, generation=generation, provider_compaction=dict(provider_compaction or {}),
+    ))
 
 
 # LLM: 只读取获胜CAS返回的head，不load更新后的别人的thread；补齐真实checkpoint与coverage，不改变已验payload。
 # 函数用途: 提交成功后把候选参数和宿主状态中的临时base换成实际生效视图。
 def _committed_recovery_material(agent, source, result, material):
+    from ..conversation.compact_remote import provider_compaction_content
     from ..conversation.compact_summary_view import resolve_compact_summary_view
 
     context = source.compact_context
@@ -481,9 +495,12 @@ def _committed_recovery_material(agent, source, result, material):
         return material
     view = resolve_compact_summary_view(agent, result.thread, context.scope)
     candidate = getattr(material.params, "compact_context", None)
+    # 候选上下文必须已经带着本代的服务端压缩记录：已物化的 provider_history_messages 按它发压缩项，提交后不再重算。
     if (candidate is None or candidate.scope != context.scope or candidate.thread_id != context.thread_id
             or candidate.view.summary != view.summary or candidate.view.operation_evidence != view.operation_evidence
-            or view.checkpoint_id != result.thread.compact_checkpoint_id):
+            or view.checkpoint_id != result.thread.compact_checkpoint_id
+            or provider_compaction_content(candidate.view.provider_compaction)
+            != provider_compaction_content(view.provider_compaction)):
         raise ConversationCompactError("提交后摘要与恢复请求不一致", code="COMPACT_REQUEST_PROJECTION_CHANGED")
     applied = replace(context, view=view)
     params = replace(material.params, compact_context=applied)
