@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## 网关重启后 Curator 租约接管（mc3-e11d，2026-10-08，分支 `worker/mc3-e11d`，待复核）
+
+- **来源**：生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，而 `acquire` 只认 `expires_at`；
+  新网关要等旧租约过期（实测约 28 分钟）才能接手，每次部署 curator 都停摆。
+- **新用例** `agent_py_agent/tests/test_curator_stale_lease_reclaim.py`（10 条）：本进程持有/活着的子进程持有 → busy 不接管；
+  持有者 pid 已死（子进程 wait 回收）→ 立即接管，`lease.recovery` 写 `stale_lease_reclaimed`（含原 lease_id/run_id/pid/expires_at/reclaimed_at），
+  接管后 `commit_success` 正常释放；主机不同 → 等 `expires_at`；`os.kill` 抛 PermissionError（进程存在但不归我们）→ 等 `expires_at`；
+  `_pid_definitely_dead` 对 ProcessLookupError=True、PermissionError=False、正常返回 False 的异常分类单测；
+  损坏租约（缺 `expires_at`）仍走原 `lease_invalid_expires_at` corrupt 路径；旧状态文件（无 `process_identity` 字段）能读且接管规则照常生效；
+  新 lease 带持有者出生身份（`build_process_identity` 的 host_id/pid/start_time）；旧租约在无关更新（request）后不被添加新字段。
+- **变异 3/3 被抓**（一次一处、逐个还原，还原 SHA 与基线一致 `ffe0f920…`）：去掉主机条件 → 1 红（异主机被误接管）；
+  PermissionError 当死 → 2 红；接管不写事实 → 2 红。
+- **回归**：curator/memory 相关 18 文件 + guards9 全 12 文件共 30 文件 **534 passed（121.64s）**。
+- **尺寸**：`acquire` 初版 +9 行触发 near-soft high-risk 新增告警，拆出 `_bump_pending_reason` / `_lease_handover_recovery` 后
+  span 56 → 46（基线 47），size_diff 新增告警 0；其余门禁项与提交后复跑见任务交接。
+- **复现**：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_curator_stale_lease_reclaim.py -q -o addopts= -p no:cacheprovider`（PY 用 ci-venv-312）。
+- **未验证**：真实网关重启场景（本测试用假 pid/子进程模拟）、真实多进程同时接管竞争、Windows（`os.kill(pid, 0)` 在 nt 上不做探测，直接按不确定处理）。
+
 ## 线程人格前缀冻结（personafreeze，2026-10-08，07-c3）
 
 - 07跟进personafreeze-2：坏JSON/错schema/缺段落/超1MB/坏UTF-8/非字符串段，六种先断言失败后同锁重建；

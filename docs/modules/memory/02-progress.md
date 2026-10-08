@@ -1,5 +1,15 @@
 # 记忆与上下文维护状态
 
+## 网关重启后 Curator 租约接管（mc3-e11d，2026-10-08，分支 `worker/mc3-e11d`，本地实现，待复核）
+
+- 生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，`acquire` 只认 `expires_at`，
+  新网关要等约 28 分钟才能接手。修复：租约未过期但持有者进程已确定死亡（同主机、非本进程、`os.kill(pid, 0)` 抛 ProcessLookupError）时可提前接管；
+  PermissionError/主机不同/信息不全一律等 `expires_at`，宁可多等不误抢。
+- 接管写结构化事实 `stale_lease_reclaimed`（原 lease_id/run_id/pid/expires_at + 接管时间），不悄悄覆盖；
+  新租约带持有者出生身份 `process_identity`（`daemon_metadata.build_process_identity`），旧租约无该字段按未知、旧状态文件照读且摘要稳定。
+  `run_once` 顺序不变（先 `recover_incomplete` 再 `acquire`）。
+- 纯修复不加开关。测试 10 条、变异 3/3 被抓、30 文件回归 534 passed；未验证真实网关重启与真实多进程接管（模拟 pid）。详见根 `TESTS.md` 同名节。
+
 ## 线程人格冻结（personafreeze，2026-10-08，本地实现、待07复核）
 
 - 07跟进：缓存内容损坏按缺失在原锁内重建，只warn线程/原因；截断target凭结构诊断只报新增，完整target删除照旧。两文件101 passed。

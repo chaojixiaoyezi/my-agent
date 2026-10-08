@@ -3,6 +3,7 @@ from __future__ import annotations
 """Memory Curator 每 owner 的 durable request、cursor 和 lease 仓库。"""
 
 # LLM: Gateway 内存 tick 不是运行权威；所有触发、租约和成功游标必须先后写同一个 state.json。
+#   租约未过期但持有者进程已确定死亡（同主机、非本进程、pid 不存在）时可提前接管，其余不确定情况等 expires_at。
 # 模块用途: 在多线程/多进程下保证同一 owner 同时最多一个 Curator 提交。
 
 import hashlib
@@ -20,6 +21,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_json_file_atomic_unlocked,
 )
+from ..gateway_parts.daemon_metadata import build_process_identity
 from .candidate_models import normalize_iso_time, utc_now_iso
 from .curator_models import (
     CURATOR_TRIGGER_REASONS,
@@ -118,19 +120,18 @@ class MemoryCuratorStateStore:
         now_iso = current_time.isoformat()
         with locked_json_path(self.path):
             state = self._load_unlocked()
-            if _lease_live(state.active_lease, now=current_time):
-                return None
-            pending = list(state.pending_reasons)
-            generations = dict(state.pending_reason_generations)
-            if normalized_reason not in pending:
-                pending.append(normalized_reason)
-                generations[normalized_reason] = generations.get(normalized_reason, 0) + 1
-            elif generations.get(normalized_reason, 0) <= 0:
-                # Existing v1 state may contain a pending reason without a generation.
-                generations[normalized_reason] = 1
+            previous = state.active_lease
+            reclaimed_stale = False
+            if _lease_live(previous, now=current_time):
+                # LLM: 租约未过期但持有者进程已确定死亡（同主机、非本进程、pid 不存在）时提前接管；
+                #   其余一切不确定情况继续按 expires_at 等，宁可多等不能误抢。
+                if not _stale_lease_reclaimable(previous):
+                    return None
+                reclaimed_stale = True
+            pending, generations = _bump_pending_reason(state, normalized_reason)
             reason_generation = generations[normalized_reason]
             run_id = "memory-curator-run-" + uuid.uuid4().hex
-            recovery = _expired_lease_recovery(state.active_lease, now=current_time)
+            recovery = _lease_handover_recovery(previous, reclaimed_stale=reclaimed_stale, now=current_time)
             lease = {
                 "lease_id": "memory-curator-lease-" + uuid.uuid4().hex,
                 "run_id": run_id,
@@ -139,7 +140,9 @@ class MemoryCuratorStateStore:
                 "acquired_at": now_iso,
                 "expires_at": (current_time + timedelta(seconds=max(30, lease_seconds))).isoformat(),
                 "pid": os.getpid(),
-                "host": socket.gethostname(),
+                "host": _local_hostname(),
+                # LLM: 出生身份供 B5 多进程核验用；旧租约没有该字段按未知处理，接管判断不依赖它。
+                "process_identity": build_process_identity(),
                 "recovery": recovery,
             }
             updated = replace(
@@ -558,6 +561,88 @@ def _expired_lease_recovery(
         "previous_expires_at": str(lease.get("expires_at") or ""),
         "recovered_at": now.astimezone(timezone.utc).isoformat(),
     }
+
+
+# LLM: 租约写入与接管判断共用同一个主机名函数；换实现要两侧同步改，否则接管条件会静默失效。
+# 函数用途: 返回本机主机名，供租约 host 字段和陈旧租约判断使用。
+def _local_hostname() -> str:
+    return socket.gethostname()
+
+
+# LLM: 只把 ProcessLookupError 当"确定死亡"；PermissionError 说明进程存在（只是不归我们），
+#   其它 OSError 一律按"无法证明死亡"处理；Windows 的 os.kill(pid, 0) 会终止目标进程，直接放弃探测。
+# 函数用途: 返回目标 pid 是否已被内核确认为不存在。
+def _pid_definitely_dead(pid: int) -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+# LLM: 三条同时成立才提前接管：同主机（同一 host 函数）、不是本进程、pid 确定不存在；
+#   信息不全（缺 host/pid 或类型不对）不接管，损坏租约在 _lease_live 已按原 corrupt 路径拒绝。
+# 函数用途: 判断未过期租约的持有者是否已确定死亡、可以立即接管。
+def _stale_lease_reclaimable(lease: dict[str, object]) -> bool:
+    if not lease:
+        return False
+    if str(lease.get("host") or "") != _local_hostname():
+        return False
+    pid = lease.get("pid")
+    if type(pid) is not int or pid <= 0 or pid == os.getpid():
+        return False
+    return _pid_definitely_dead(pid)
+
+
+# LLM: 接管事实只存结构化标识和时间，与 expired_lease 恢复同格式对齐；不能悄悄覆盖原租约，
+#   原 lease_id/pid/expires_at 与接管时间都留档供日后核查。
+# 函数用途: 为提前接管生成 stale_lease_reclaimed 结构化事实。
+def _stale_lease_recovery(lease: dict[str, object], *, now: datetime) -> dict[str, object]:
+    pid = lease.get("pid")
+    return {
+        "kind": "stale_lease_reclaimed",
+        "previous_run_id": str(lease.get("run_id") or ""),
+        "previous_lease_id": str(lease.get("lease_id") or ""),
+        "previous_pid": pid if type(pid) is int else None,
+        "previous_expires_at": str(lease.get("expires_at") or ""),
+        "reclaimed_at": now.astimezone(timezone.utc).isoformat(),
+    }
+
+
+# LLM: acquire 的 pending 队列更新单独成函数，是为了让 acquire 长度守在 near-soft 阈值下；
+#   首次出现的 reason 生成新代次，v1 旧状态里缺代次的 reason 补 1。
+# 函数用途: 把待处理原因加入队列并返回更新后的队列与代次表。
+def _bump_pending_reason(
+    state: MemoryCuratorState,
+    normalized_reason: str,
+) -> tuple[list[str], dict[str, int]]:
+    pending = list(state.pending_reasons)
+    generations = dict(state.pending_reason_generations)
+    if normalized_reason not in pending:
+        pending.append(normalized_reason)
+        generations[normalized_reason] = generations.get(normalized_reason, 0) + 1
+    elif generations.get(normalized_reason, 0) <= 0:
+        # Existing v1 state may contain a pending reason without a generation.
+        generations[normalized_reason] = 1
+    return pending, generations
+
+
+# LLM: 接管事实按“这次是否提前接管”分流：提前接管写 stale 事实，其余沿用过期恢复事实；
+#   两种事实格式对齐，都不覆盖原租约信息。
+# 函数用途: 按接管类型为本次 lease 生成对应的 recovery 事实。
+def _lease_handover_recovery(
+    lease: dict[str, object],
+    *,
+    reclaimed_stale: bool,
+    now: datetime,
+) -> dict[str, object]:
+    if reclaimed_stale:
+        return _stale_lease_recovery(lease, now=now)
+    return _expired_lease_recovery(lease, now=now)
 
 
 __all__ = [
