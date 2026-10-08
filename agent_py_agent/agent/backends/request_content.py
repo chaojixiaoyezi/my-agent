@@ -6,6 +6,11 @@ from dataclasses import dataclass
 
 # 思考信封的三种 canonical 块：Anthropic 的 thinking / redacted_thinking，以及 Responses 的加密思考 responses_reasoning。
 _REASONING_KINDS = frozenset({"thinking", "redacted_thinking", "responses_reasoning"})
+# 服务端压缩项（conversation/compact_remote）：和加密思考一样是只有同一后端能读的供应商信封，canonical 形态
+#   {"type": "responses_compaction", "item"}（响应归档块另带 model；视图前缀发出的块没有），item 经
+#   responses_wire.compaction_item 白名单清洗后非空。
+#   10-08 生产：step17xb 第一次服务端压缩后，下一次压缩把它当 unknown 块拒绝（COMPACT_REQUEST_NON_TEXT），线程卡在触发线上。
+_PROVIDER_COMPACTION_KIND = "responses_compaction"
 
 
 # LLM: 思考信封只在同一后端（allow_reasoning）可保留，跨模型一律不可移植（不能转移供应商签名或密文）。
@@ -24,7 +29,20 @@ def _reasoning_block_supported(block: dict, allow_reasoning: bool) -> bool:
     return all(isinstance(value, str) for value in block.values())
 
 
-# LLM: 文字/工具可沿原计量；同后端可保留文字推理，跨模型须关闭allow_reasoning；未知模态返回False，不猜MIME能力。
+# LLM: 服务端压缩项与思考信封同一许可（allow_reasoning = 同一后端）：跨模型不可移植，读不了它的后端由
+#   compact_summary_view 把对应检查点当透明，历史里根本不会出现它。计量按块本身（密文字符）走原估算，偏大但可知。
+# 函数用途: 判断一个供应商信封块（思考或服务端压缩项）在当前用途下能否按原协议完整表示并计量。
+def _provider_envelope_supported(block: dict, allow_reasoning: bool) -> bool:
+    if block.get("type") != _PROVIDER_COMPACTION_KIND:
+        return _reasoning_block_supported(block, allow_reasoning)
+    if not allow_reasoning:
+        return False
+    from .responses_wire import compaction_item
+
+    return bool(compaction_item(block.get("item")))
+
+
+# LLM: 文字/工具可沿原计量；同后端可保留文字推理与服务端压缩项，跨模型须关闭allow_reasoning；未知模态返回False，不猜MIME能力。
 # 函数用途: 在适配器可能过滤内容之前判断原块能否由现有文字协议完整表示。
 def text_content_supported(content: object, *, allow_reasoning: bool = True) -> bool:
     if isinstance(content, str):
@@ -38,9 +56,9 @@ def text_content_supported(content: object, *, allow_reasoning: bool = True) -> 
         if kind == "tool_result":
             if not text_content_supported(block.get("content", ""), allow_reasoning=allow_reasoning):
                 return False
-        elif kind in _REASONING_KINDS:
-            # 同一后端保留原推理信封；跨模型调用方必须关闭此许可，不能转移供应商签名。
-            if not _reasoning_block_supported(block, allow_reasoning):
+        elif kind in _REASONING_KINDS or kind == _PROVIDER_COMPACTION_KIND:
+            # 同一后端保留原推理信封/服务端压缩项；跨模型调用方必须关闭此许可，不能转移供应商签名。
+            if not _provider_envelope_supported(block, allow_reasoning):
                 return False
         elif kind not in {"text", "tool_use"}:
             return False
@@ -104,7 +122,7 @@ def _classify_blocks(content: object, allow_reasoning: bool, *, media_allowed: b
     return media, unknown
 
 
-# 函数用途: 单个内容块的分类：text/tool_use 与合法思考信封不计，tool_result 递归，已知媒体按位置放行，其余 unknown。
+# 函数用途: 单个内容块的分类：text/tool_use、合法思考信封与服务端压缩项不计，tool_result 递归，已知媒体按位置放行，其余 unknown。
 def _classify_block(block: object, allow_reasoning: bool, *, media_allowed: bool) -> tuple[int, int]:
     if not isinstance(block, dict):
         return 0, 1
@@ -113,8 +131,8 @@ def _classify_block(block: object, allow_reasoning: bool, *, media_allowed: bool
         return 0, 0
     if kind == "tool_result":
         return _classify_blocks(block.get("content", ""), allow_reasoning, media_allowed=False)
-    if kind in _REASONING_KINDS:
-        return (0, 0) if _reasoning_block_supported(block, allow_reasoning) else (0, 1)
+    if kind in _REASONING_KINDS or kind == _PROVIDER_COMPACTION_KIND:
+        return (0, 0) if _provider_envelope_supported(block, allow_reasoning) else (0, 1)
     if media_allowed and is_local_media_block(block):
         return 1, 0
     return 0, 1

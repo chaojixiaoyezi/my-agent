@@ -1,6 +1,6 @@
 # 设计台账
 
-## GPT 订阅模型走服务端压缩（compactremote，07，2026-10-08；状态：实现与假后端测试完成，待 192.168.1.16 真机验证、合 main、部署）
+## GPT 订阅模型走服务端压缩（compactremote，07，2026-10-08；状态：已部署生产 step17xb（10-08 05:35，3dbb0e5e8）；生产第一例 mc4 astra gen10 用时 2 分 13 秒、压缩调用只命中 20%，根因是预算检查按原始上界误瘦身，见 compactfit 节第 8 条）
 
 - **来由**：用户 10-08 拍板"我们 codex 也走服务端压缩，看是否可行"。在 192.168.1.16 上用订阅后端真机探过（探针脚本在 07 的 scratchpad，
   只读结构化事实）：同一请求末尾加 `{"type":"compaction_trigger"}`，服务端 11–14 秒返回一个 `compaction` 项（密文 1720 字符、
@@ -21,10 +21,36 @@
   5. 开关 `memory_compact_remote_enabled`（默认 true）；关掉或后端不支持都走原路。
   6. 压缩项不进对话行：回合结束归档 canonical_native_messages 时把带压缩项的摘要项换成占位文本（loop_support）；回放时剔除残留的
      `responses_compaction` 块（native_history）。.16 真机发现：归档了压缩项的行在换到 MiniMax 后被原样重放，MiniMax 400（2013）。
+  7. 压缩项是同一后端的供应商信封（10-08 生产 step17xb 事故）：第一次服务端压缩之后，主请求历史最前面是 responses_compaction 块，
+     下一次压缩前的非文本分类（backends/request_content）把它当 unknown 块：自动压缩按 noop 跳过、涨到窗口上限被迫压缩时报
+     COMPACT_REQUEST_NON_TEXT，线程卡在触发线上（mc4 astra，06:12）。改法：分类器把它和加密思考同一许可（同一后端可计量、可进压缩链，
+     跨模型 allow_reasoning=False 不可移植；视图前缀发出的块没有 model 字段，只认 item 白名单），分段摘要投影把它的密文换占位。
 - **没做 / 风险**：API Key 的 OpenAI Responses 端点是否接受触发项未核实，暂不声明能力；服务端压缩项的过期时间未知——失效时请求会失败，
   回退路径是下一次压缩从原文重做（待真机观察）；MiniMax/DeepSeek 没有此接口，继续走 compactfit 的单次缓存面路线。
 
-## 压缩请求装进窗口、复用主请求前缀、降档不破坏缓存（compactfit，07，2026-10-08；状态：隔离真机已验证（sol 压缩调用命中 83–89%、astra 91%、MiniMax 12 秒），3a/6d 同意尽快部署，待合 main、CI 全绿后 MAC_ONLY 部署）
+## 前缀纪律：主请求/压缩请求逐字同前缀、工具表只增不减（prefixdisc，07，2026-10-08；状态：第一刀（压缩请求误瘦身）与第二刀（工具表只增不减）已实现，待合 main、部署后用 .16 采集和生产账本复核）
+
+- **来由**：用户 10-08 定的第 2 项——向 DeepSeek-Harness 99% 命中靠拢，同时提高其它模型命中。先量再改：线上没有逐次调用的结构化数据
+  （请求表面摘要与 cache_diagnostic 只在网关内存账本里；threads/*.json 只留最后一次，而且旧线程是升级前的版本），所以在 192.168.1.16
+  用 `.pth` 钩住 `cache_diagnostics.request_surface`，记每次出站请求的逐条消息摘要（角色、块类型、sha、字符数，不记正文），
+  用 `surface_diff.py` 比相邻两次请求（工具在 07 的 scratchpad/smk16hook，不进仓库）。
+- **真机结论（MiniMax，6 回合带工具）**：主请求结构是 system 稳定前缀 → 上一代摘要 → 历史回放 → 当前回合 → 运行时事实尾巴；
+  相邻两次请求只有末尾那条运行时事实消息被改写（设计如此，损失几百 token），其余逐字追加——回合内命中 92–98%，
+  新回合第一次调用 94%。主请求本身没有多余的动态头（builder 从不设置 stable_user_prefix）。
+  真正打断前缀的两处：① 压缩请求按原始上界误瘦身（compactfit 第 8 条，已修）；② 按需加载的工具：tool_search 加载后工具表 +2，
+  下一回合又 −2，工具表一变整段前缀失效（实测撤回那次 0% 命中，33k 全量重算；生产 25 万上下文就是 25 万）。
+- **改法 ②**：`tooling/tool_search_state.pending_carried_loaded_tool_names` 从"只保留最新一轮加载"改成"线程内按轮累计、只增不减"；
+  旧无轮号记录仍只认精确尾项。主请求与压缩面（gateway_compact_context）同一条规则，工具表只会追加（每次真正新加载仍不可避免地
+  失效一次，但不再撤回、不再反复加载）。压缩后携带记录被替换时工具表会收回，和压缩本身重建缓存同一时刻，不另算一次。
+- **真机结论（sol，同样 6 回合）**：用量口径与 MiniMax 一致——回合内逐次调用命中 92–99.5%，新回合第一次调用 94.2%（3.9 万上下文时
+  未命中约 2.3k token = 新用户消息 + 运行时事实尾巴 + 取整），换算到 20 万上下文即 98.5%+，剩下的差距只来自压缩（一次性重建）、
+  工具表变化和缓存过期。工具表变化在两家供应商上的表现相反：sol 加载 +2 那次 0% 命中、撤回那次仍命中旧前缀；MiniMax 加载那次
+  93.6%、撤回那次 0%——所以“只增不减”对两家都是净减少失效次数。sol 走 WebSocket 传输，不经 gateway_helpers 的 request_surface，
+  逐条消息摘要钩子只抓到 MiniMax 的请求，sol 用网关用量快照差分核对。
+- **没做、为什么**：服务端压缩项的过期处理（第 3 项）用户暂不做；把运行时事实尾巴从"改写"改成"只追加"收益只有几百 token，不值得
+  改历史合同。
+
+## 压缩请求装进窗口、复用主请求前缀、降档不破坏缓存（compactfit，07，2026-10-08；状态：已部署生产 step17x/17xa（10-08）；隔离真机 sol 压缩调用命中 83–89%、astra 91%、MiniMax 12 秒；生产复盘发现第 8 条（预算按校准口径计量），待合 main 后随下次部署）
 
 - **来由**：sol/astra 一次自动压缩 10～33 分钟（mc1/mc2/mc4、luna4 任务 2 实测），期间工人一半时间在压缩；MiniMax 同样中招。根因是算术：
   单次缓存面请求的预算 = 窗口 − 输出预留，预留按主请求在构造期用 128k 默认窗口算出的 32000；27.2 万窗口按用户定的 90% 触发
@@ -53,6 +79,13 @@
      但 Gateway 进程只有 WARNING 及以上进 gateway.log，INFO 落不了盘，已删；要看变化码读账本/用量快照。
   7. 瘦身投影两遍读同一冻结来源：第一遍只记槽位和可省 token 数不留正文（否则 `test_compact_source_lifetime` 的峰值内存翻倍），
      第二遍逐条替换；省不够直接 None，不让整份历史驻留。
+  8. 预算检查按校准口径计量（10-08 生产复盘，step17xb 下 mc4 astra gen10）：压缩调用用时 2 分 13 秒，输入 177,937 只命中 35,968
+     （20%，约等于 system + 工具目录），输出 3,801。原因是单次缓存面/服务端压缩的预算检查用原始上界（字符÷3）量请求，长工具历史
+     上高出供应商实际三成以上，真实约 20 万、预算 255,616 的请求被算成超预算，瘦掉最早的工具输出，前缀从第一条工具结果起失配。
+     改法：`compact_request_budget._single_request_source` 与 `compact_remote._messages_within_budget` 都按
+     `compact_calibration.calibrated_compact_request_tokens(原始, calibration)` 计量，calibration 是恢复宿主冻结的同一份校准事实
+     （transcript 走 `_CompactSummaryCall.calibration`，活动回合走 `LiveToolHistorySummaryRequest.calibration`），没有校准才按原始上界；
+     瘦身顺序不变。回合中原生 IR 压缩（`_tool_loop_service._native_tool_history_summary`）暂未传校准，仍按原始上界。
 - **没做、为什么**：健康线语义不改——分区只有"保留 ≤4 轮尾巴"和"全压"两种，第一候选已经是一次压到底，luna 第一次只压到 19.6 万
   是当时活动回合的原生 IR 不归对话压缩管，不是健康线挡的。回合结束预压（Codex post-turn compaction）另排。
 - **隔离真机结果（2026-10-08 02:2x–02:5x，scratchpad/smk-c07，触发线封顶 6 万，只读用量快照差分）**：

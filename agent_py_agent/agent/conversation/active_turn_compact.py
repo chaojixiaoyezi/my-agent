@@ -560,6 +560,7 @@ def _active_turn_replacement_summary(
             max_output_chars=config.max_input_chars,
             interrupt_check=request.interrupt_check,
             provider_outcome=provider_outcome,
+            calibration=request.calibration,
             **_summary_source_material(plan, request, previous_summary),
         )
     )

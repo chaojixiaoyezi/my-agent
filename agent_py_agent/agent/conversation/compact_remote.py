@@ -14,6 +14,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from .compact_calibration import (
+    CompactRequestCalibration,
+    calibrated_compact_request_tokens,
+    raw_token_excess,
+)
+
 PROVIDER_COMPACTION_SCHEMA = "provider_compaction.v1"
 REMOTE_COMPACTION_PURPOSE = "conversation_compact_remote"
 _LOGGER = logging.getLogger(__name__)
@@ -33,6 +39,9 @@ class RemoteCompactionRequest:
     run_id: str = ""
     task_id: str = ""
     thread_id: str = ""
+    # 主请求的校准事实（本地估算 ÷ 供应商实际）：预算检查按它换算，None 按原始上界。10-08 生产复盘：原始上界把装得下的
+    #   请求瘦身，最早的工具输出换了占位，前缀只命中 system + 工具目录。
+    calibration: CompactRequestCalibration | None = None
 
 
 # LLM: 只读结构化事实：配置开关 + 后端能力方法；没有 backend 或方法不存在都算不可用。
@@ -44,7 +53,8 @@ def remote_compaction_enabled(agent: object) -> bool:
     return callable(supports) and bool(supports())
 
 
-# LLM: 预算与单次缓存面同源（compact_request_budget.compact_cache_surface_budget）；瘦身后仍超预算返回 None。
+# LLM: 预算与单次缓存面同源（compact_request_budget.compact_cache_surface_budget）；计量按 request.calibration 换算（与
+#   compact_request_budget._single_request_source 同一口径）；瘦身后仍超预算返回 None。
 #   辅助调用走 generate_auxiliary_model_response（账本、准入、期限、缓存诊断都沿用），用途 conversation_compact_remote。
 #   除中断外的任何异常都记一行 warning（只记异常类名）并返回 None，让调用方回退客户端压缩。
 # 函数用途: 发一次带压缩触发项的请求，返回检查点要存的 provider_compaction 记录；不可行返回 None。
@@ -87,15 +97,16 @@ def _messages_within_budget(request: RemoteCompactionRequest) -> list[dict[str, 
     budget = compact_cache_surface_budget(request.agent)
     source = CompactMessageSource(lambda: iter(request.messages))
 
-    def tokens(value: CompactMessageSource) -> int:
+    def raw_tokens(value: CompactMessageSource) -> int:
         return estimate_compact_payload({"prompt": request.prompt, "messages": value, "tools": request.tools or [],
-                                         "system_instruction": request.system_instruction})
+                                        "system_instruction": request.system_instruction})
 
-    total = tokens(source)
+    raw = raw_tokens(source)
+    total = calibrated_compact_request_tokens(raw, request.calibration)
     if total <= budget:
         return list(request.messages)
-    shrunk = shrink_tool_outputs(source, total - budget)
-    if shrunk is None or tokens(shrunk.source) > budget:
+    shrunk = shrink_tool_outputs(source, raw_token_excess(raw, total, budget))
+    if shrunk is None or calibrated_compact_request_tokens(raw_tokens(shrunk.source), request.calibration) > budget:
         return None
     return list(shrunk.source)
 

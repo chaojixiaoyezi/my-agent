@@ -25,6 +25,11 @@ from .auxiliary_model_call import (
     auxiliary_response_shape,
     generate_auxiliary_model_response,
 )
+from .compact_calibration import (
+    CompactRequestCalibration,
+    calibrated_compact_request_tokens,
+    raw_token_excess,
+)
 from .compact_guard import (
     CompactInterruptCheck,
     ConversationCompactError,
@@ -115,6 +120,7 @@ def generate_bounded_compact_response(
     message_source: CompactMessageSource | None = None,
     vision_summary: bool = False,
     media_reserve_tokens: int = 0,
+    calibration: CompactRequestCalibration | None = None,
 ) -> object:
     if message_source is not None and request.messages is not None:
         raise ValueError('compact summary requires one message source')
@@ -126,7 +132,7 @@ def generate_bounded_compact_response(
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
     attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
     single_budget = compact_cache_surface_budget(request.agent) if request.tools else budget
-    cached_source = _single_request_source(request, message_source, single_budget)
+    cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
     result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source))
               if cached_source is not None else None)
     if result is not None:
@@ -144,29 +150,45 @@ def generate_bounded_compact_response(
 #   换成占位（compact_message_source.shrink_tool_outputs，最近两条不动）再量一次，装得下才发单次请求。瘦身只改交给
 #   摘要的临时副本；分段路径仍拿原始完整来源（attempt.message_source 不变），覆盖承诺不变。装不下返回 None，
 #   调用方按原分段链处理。参考 OpenAI Codex 远端压缩前把旧工具输出换占位、DeepSeek Harness 压缩前先剪工具输出。
+#   计量按主请求同一校准口径（compact_calibration.calibrated_compact_request_tokens，调用方传入冻结的 calibration）：
+#   原始上界（字符÷3）在长工具历史上高出真实三成以上，10-08 生产 mc4（astra，gen10）把真实约 20 万的请求算成超预算，
+#   瘦掉最早的工具输出，压缩调用只命中 20%（3.6 万）。没有校准事实才按原始上界。
 # 类用途: 携带单次请求实际使用的消息来源（None 表示沿用 request.messages）。
 @dataclass(frozen=True)
 class _SingleRequestSource:
     source: CompactMessageSource | None
 
 
+# LLM: 预算和计量口径成对出现：原样与瘦身后两次计量都走同一 measure，不能一次按原始、一次按校准。
+# 类用途: 单次缓存面的预算（token）及其计量口径（主请求的校准事实，None 按原始上界）。
+@dataclass(frozen=True)
+class _SurfaceBudget:
+    tokens: int
+    calibration: CompactRequestCalibration | None = None
+
+    # 函数用途: 把原始估算换成和预算同一口径的数。
+    def measure(self, raw_tokens: int) -> int:
+        return calibrated_compact_request_tokens(raw_tokens, self.calibration)
+
+
 # 函数用途: 决定单次缓存面请求用哪份来源：原样、瘦身后的副本，或放弃单次请求（None）。
 def _single_request_source(
     request: AuxiliaryModelCallRequest,
     message_source: CompactMessageSource | None,
-    single_budget: int,
+    budget: _SurfaceBudget,
 ) -> _SingleRequestSource | None:
-    tokens = _request_tokens(request, message_source)
-    if tokens <= single_budget:
+    raw = _request_tokens(request, message_source)
+    tokens = budget.measure(raw)
+    if tokens <= budget.tokens:
         return _SingleRequestSource(message_source)
     if message_source is None:
         return None
-    shrunk = shrink_tool_outputs(message_source, tokens - single_budget)
-    if shrunk is None or _request_tokens(request, shrunk.source) > single_budget:
+    shrunk = shrink_tool_outputs(message_source, raw_token_excess(raw, tokens, budget.tokens))
+    if shrunk is None or budget.measure(_request_tokens(request, shrunk.source)) > budget.tokens:
         return None
     logging.getLogger(__name__).info(
         "compact single request shrank old tool outputs to fit the cache surface budget",
-        extra={"compact_shrunk_tool_outputs": shrunk.replaced, "compact_single_budget": single_budget},
+        extra={"compact_shrunk_tool_outputs": shrunk.replaced, "compact_single_budget": budget.tokens},
     )
     return _SingleRequestSource(shrunk.source)
 

@@ -1268,6 +1268,18 @@ def _native_tool_refs(params: ToolLoopExecuteParams) -> tuple[dict[str, str], ..
     return compact_tool_refs(completed)
 
 
+# LLM: 回合中压缩的单次缓存面/服务端压缩预算检查要和预检同一校准口径（10-08 生产复盘：原始上界把装得下的压缩请求瘦身，
+#   前缀只命中 20%）。校准事实按主请求同一投影指纹现算（context_pressure.compact_request_calibration_for_request）；
+#   没有 provider_prompt（旧调用方/测试替身）就不算，预算检查按原始上界。不改 IR、不写状态。
+# 函数用途: 给回合中压缩的摘要请求取主请求的校准事实；拿不到返回 None。
+def _native_compact_calibration(agent: object, params: ToolLoopExecuteParams, provider_prompt: object):
+    if not provider_prompt:
+        return None
+    from .model.context_pressure import compact_request_calibration_for_request
+
+    return compact_request_calibration_for_request(agent, params, provider_prompt)
+
+
 # LLM: native compact passes the full typed IR to the memory-archive summarizer; that boundary
 # removes only duplicate task/thread projections and must retain an independent carried handoff.
 # 函数用途: 在旧工具对尚未回收时生成可持续回放的当前 turn 续接摘要，并保留真实交接上下文。
@@ -1310,6 +1322,7 @@ def _native_tool_history_summary(
             system_instruction=surface.system_instruction,
             interrupt_check=partial(_native_compact_interrupted, params),
             provider_outcome=provider_outcome,
+            calibration=_native_compact_calibration(agent, params, provider_prompt),
         )
     )
 
