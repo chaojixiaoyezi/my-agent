@@ -20,6 +20,7 @@ from .display_checkpoint import (
     display_checkpoint_event,
     is_display_checkpoint,
 )
+from .message_cursor import locate_message_cursor, read_after_rows
 from .message_scan import complete_message_offset, find_message_dedupe, read_message_page
 from .models import (
     ConversationThread,
@@ -413,7 +414,7 @@ class MessageStore:
         except Exception as exc:
             return [], max(0, int(after)), [jsonl_error(exc, "conversation.messages.page", path=path)]
 
-    # LLM: Memory Curator从精确message_id后读取对话；display行既不进模型也不占批量条数，物理读取仍顺序推进。
+    # LLM: Memory Curator经同源有界只读缓存定位；指纹/锚行失效重扫，display/坏行/limit与原合同相同，不推进持久游标。
     # 函数用途: 跳过展示记录后收集有界真实消息；不改变调用方已消费的消息编号或正式记忆。
     def after_report(
         self,
@@ -427,34 +428,7 @@ class MessageStore:
         if not path.exists():
             return [], []
         try:
-            offset = (
-                self.byte_offset_after(thread_id, after_message_id)
-                if str(after_message_id or "").strip()
-                else 0
-            )
-            rows: list[dict[str, Any]] = []
-            errors: list[dict[str, Any]] = []
-            with path.open("rb") as handle:
-                handle.seek(offset)
-                while len(rows) < bounded_limit and (line := handle.readline()):
-                    if not line.strip():
-                        continue
-                    try:
-                        text = line.decode("utf-8")
-                    except UnicodeDecodeError as exc:
-                        errors.append(jsonl_error(exc, "conversation.messages.after", path=path))
-                        break
-                    row, error = json_row(
-                        text,
-                        context="conversation.messages.after",
-                        path=path,
-                        line_number=0,
-                    )
-                    if error is not None:
-                        errors.append(error)
-                        break
-                    if row is not None and not is_display_checkpoint(row):
-                        rows.append(row)
+            rows, errors = read_after_rows(path, after_message_id, bounded_limit)
             entries, parse_errors = _message_entries(rows)
             return entries, [*errors, *parse_errors]
         except Exception as exc:
@@ -519,24 +493,9 @@ class MessageStore:
             *parse_errors,
         ]
 
-    # LLM: store_messages 的持久化合同：扫描精确消息之后的字节位置，供 Compact 和增量读取沿原文件续读；修改须同步本领域调用方与存储回归。
+    # LLM: Compact与增量读取共用message_cursor定位首条精确ID；缓存是可丢弃提示，替换/截断/改写退回原完整扫描错误合同。
     # 函数用途: 扫描精确消息之后的字节位置，供 Compact 和增量读取沿原文件续读。
     def byte_offset_after(self, thread_id: str, message_id: str) -> int:
         """Return the byte position immediately after a message in the raw ledger."""
         path = self.storage.message_path(thread_id)
-        try:
-            with path.open("rb") as handle:
-                while line := handle.readline():
-                    try:
-                        row = json.loads(line.decode("utf-8"))
-                    except (json.JSONDecodeError, UnicodeError) as exc:
-                        raise DataCorruptionError(
-                            f"conversation transcript contains an unreadable row: {path}"
-                        ) from exc
-                    if isinstance(row, dict) and str(row.get("message_id") or "") == message_id:
-                        return handle.tell()
-        except OSError as exc:
-            raise DataCorruptionError(f"cannot read conversation transcript: {path}") from exc
-        raise DataCorruptionError(
-            f"conversation compact message cursor is missing from transcript: {message_id}"
-        )
+        return locate_message_cursor(path, message_id).end

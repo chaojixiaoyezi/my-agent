@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import read_jsonl_objects_report
+from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
 
@@ -403,7 +403,7 @@ def _collect_messages(
     return selected, errors
 
 
-# LLM: audit cursor 按 daily 文件和行的追加顺序扫描；找不到旧 cursor 必须报告损坏而非从头重放。
+# LLM: audit经有界只读定位缓存按原日分片/行顺序扫描；失效同算法重定位，保留全部原错误，不推进持久cursor。
 # 函数用途: 收集 last_processed_audit_event_id 后的有界 audit 预览。
 def _collect_audit(
     audit_dir: Path,
@@ -412,64 +412,7 @@ def _collect_audit(
     limit: int,
     max_chars: int,
 ) -> tuple[list[CuratorAuditInput], list[dict[str, object]]]:
-    if not audit_dir.exists():
-        return [], []
-    target = str(after_event_id or "").strip()
-    cursor_found = not target
-    selected: list[CuratorAuditInput] = []
-    errors: list[dict[str, object]] = []
-    used_chars = 0
-    for path in sorted(audit_dir.glob("*.jsonl")):
-        rows, path_errors = _read_audit_rows(path)
-        errors.extend(path_errors)
-        for payload in rows:
-            event_id = str(payload.get("event_id") or "").strip()
-            if not cursor_found:
-                cursor_found = event_id == target
-                continue
-            item = _audit_input(payload)
-            item_chars = len(json.dumps(item.to_model(), ensure_ascii=False))
-            if selected and (len(selected) >= limit or used_chars + item_chars > max_chars):
-                return selected, errors
-            selected.append(item)
-            used_chars += item_chars
-            if len(selected) >= limit:
-                return selected, errors
-    if target and not cursor_found:
-        errors.append(
-            {
-                "context": "memory_curator.audit_cursor",
-                "error_code": "AUDIT_CURSOR_MISSING",
-                "event_id": target,
-            }
-        )
-    return selected, errors
-
-
-# LLM: Any malformed row marks the whole input batch unsafe; valid rows are returned only so
-# diagnostics preserve cursor discovery without nested file parsing logic.
-# 函数用途: 严格读取一个 audit 日分片并转换通用错误为 Curator 稳定错误。
-def _read_audit_rows(path: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    if not path.is_file():
-        return [], []
-    report = read_jsonl_objects_report(path, context="memory_curator.audit_read")
-    errors = [
-        {
-            "context": "memory_curator.audit_read",
-            "error_code": "AUDIT_READ_FAILED",
-            "error_type": str(item.get("error_type") or item.get("error_code") or "InvalidRow"),
-            "path": str(path),
-            "line": int(item.get("line") or 0),
-        }
-        for item in report.load_errors
-    ]
-    rows: list[dict[str, object]] = []
-    for payload in report.records:
-        if not str(payload.get("event_id") or "").strip():
-            errors.append(_load_error(path, ValueError("audit row lacks event_id"), line=0))
-            continue
-        rows.append(dict(payload))
-    return rows, errors
+    return collect_audit_window(AuditRead(audit_dir, after_event_id, limit, max_chars), _audit_input)
 
 
 # LLM: 字段选择只认 audit 结构键，preview 也有固定上限且不读取 content_path 指向的大正文。
@@ -696,18 +639,6 @@ def _audit_time(payload: dict[str, object]) -> str:
 # 函数用途: 格式化消息时间。
 def _iso_from_epoch(value: float) -> str:
     return datetime.fromtimestamp(max(0.0, value), tz=timezone.utc).isoformat()
-
-
-# LLM: 输入损坏只暴露类型、路径和行号，不把坏行正文复制进 state/run audit。
-# 函数用途: 构造稳定读错误。
-def _load_error(path: Path, exc: BaseException, *, line: int) -> dict[str, object]:
-    return {
-        "context": "memory_curator.audit_read",
-        "error_code": "AUDIT_READ_FAILED",
-        "error_type": type(exc).__name__,
-        "path": str(path),
-        "line": line,
-    }
 
 
 __all__ = [

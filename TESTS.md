@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## Curator 消息与审计游标缓存（mc2-e11c，2026-10-08，基线725d6eb7b，本地实现、待3a复核）
+
+- 来源：生产每批对未变线程仍从头定位message_id，审计从最早分片整读；本次只替换读取定位，不改写入、持久schema、权限、预算或游标提交，不加配置。
+- TDD：原实现扫描量3条有效红（未变线程4次打开、追加读446690字节、旧审计片仍打开）；推进后零打开另1条红。审计CR换行对照暴露差异，修复原通用换行口径后转绿。
+- 新测试 `test_curator_cursor_scans.py` 与 `test_curator_cursor_cache.py` 最终155项通过：消息/审计各11场景×中部/末尾×3预算=66格，外加扫描量、首重复ID、空白前缀、owner路径隔离、LRU淘汰、饱和过滤器、多线程混合预算、display空尾、预算后的坏行、CR/CRLF/LF、空白after cursor；与725d冻结旧读取器逐条比较类型化输入和errors，合成文件字节及消费cursor不变。空白cursor补测有效红后修复；未经抽平的原读取器再次对照154项也通过（空白补测前）。
+- 性能（最终版本）：`bench_curator_cursor_scans.py` 经原collector读取800线程（实际1207337748字节，最大79349998）及100审计片（119400000字节）；追加一个消息/一个审计事件后，旧/新输出逐对象相同。旧混合批CPU3.437646s、墙钟3.443112s、新分配峰值8398135B；新热混合批CPU0.186814s、墙钟0.186914s、峰值3412477B，CPU下降94.57%。实际读取1326738050→6669B、消息/审计打开1700→4（只计这两类账本，不包含线程元数据）；未变及推进后读取/打开均为0。
+- 冷启动仍完整扫描：CPU7.357203s、新分配峰值11695876B（包括首次缓存驻留）；热批峰值是本批新分配，不含既有缓存，不冒称全进程RSS。试验只有合成数据，退出确认本次corpus已删除；不外推生产65秒批次的降幅。
+- 指定四变异：去锚行ID、去inode、跳过只看大小、缺审计cursor不报损坏；均单独pytest rc=1、各1条真实断言失败，备份逐次拷回且SHA/字节一致。没有跳过、删除、xfail或放宽断言。
+- 回归清单：grep `curator_inputs|store_messages|after_report|byte_offset_after|_collect_audit` 全命中，另加全部curator命名测试及完整12文件guards9，合计41文件1090项通过，0失败/错误/跳过；其中guards9为194项。首轮仅新增3个常量单位后缀不合规，改_COUNT并重新生成目录后同清单全绿，不改守卫/白名单。
+- 严格门禁十项全部rc0：import boundaries（0条）、ruff、doc-sync、常量目录/命名测试、前端目录、strict code-size、size-diff（新增0、消失7）、725d基线diff-check及clean-package；生成尺寸报告已还原，不提交。只把日志输出/独占basetemp改到本树tmp的脚本副本，无门禁逻辑改变。初次clean-package拦住8个未跟踪新文件，正常暂存后通过；额外暂存区diff-check又找到测试对照EOF空行，已去掉。
+- 复现：工作树根用ci-venv-312的 `$PY`，`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_curator_cursor_scans.py agent_py_agent/tests/test_curator_cursor_cache.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc2-e11c`；性能用相同前缀 `$PY -m agent_py_agent.tests.bench_curator_cursor_scans`，元数据输出到任务tmp且自动删除合成正文。
+- 未验证：真实owner/Gateway/模型链路、生产CPU/RSS、Linux/Windows、多进程共享及外部恶意历史篡改；cache仅为append-only账本的读取提示，不是授权或防篡改来源。审计为保留原晚坏行诊断仍收齐当前分片尾部，不按limit提前停止读取。
+
 ## 线程人格前缀冻结（personafreeze，2026-10-08，07-c3）
 
 - 07跟进personafreeze-2：坏JSON/错schema/缺段落/超1MB/坏UTF-8/非字符串段，六种先断言失败后同锁重建；
