@@ -372,6 +372,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_compact_recovery_target_percent: int = 60
     # 压缩摘要请求的输出上限（含思考），0 = 沿用主请求的输出上限。预算与实际发送同源（call_runtime.compact_summary_output_reserve_tokens）：
     # 27.2 万窗口按 90% 触发时，单次缓存面请求（窗口 − 本值）要装得下才不会退到不复用缓存的分段路径。
+    # 只对压缩调用能降档的后端生效（GPT-6 Responses 走 configuration_update）；DeepSeek/MiniMax 的压缩调用仍按线程档位推理，
+    # 推理 token 算进上限，16384 会截断摘要（2026-10-08 生产事故），它们沿用主请求上限。
     memory_compact_summary_max_output_tokens: int = 16_384
     # 压缩摘要调用的思考档位，空 = 沿用会话档位。只在后端能用 configuration_update 项降档时生效（GPT-6 系列 Responses 接口），
     # 请求级 reasoning.effort 不变、前缀缓存不失配；其它后端仍沿用会话档位。
