@@ -3,8 +3,8 @@
 来源：mc3-e11a 生产热修——旧 curator 路径对每个 run_id 各做一次全量控制面查询（每批重复
 glob 全部索引根、整读整解析），批内 run 越多重复扫描越多。新读取器一次调用只 glob、只顺序
 扫描一遍索引，逐行流式读取，按 run 集合收有界匹配行。
-本文件验证：①与旧逐 run 路径输出逐条等价；②每 index 文件每批只打开一次；③内存峰值有界；
-④字节预筛不改变结果（含转义、空格、非 ASCII run_id 与 ensure_ascii 两种写法）。
+本文件验证：①与旧逐 run 路径输出逐条等价（含 CRLF/混合行尾索引）；②每 index 文件每批只打开
+一次；③内存峰值有界；④字节预筛不改变结果（含转义、空格、非 ASCII run_id 与 ensure_ascii 两种写法）。
 """
 
 from __future__ import annotations
@@ -504,3 +504,31 @@ def test_batch_reader_memory_stays_bounded(tmp_path: Path) -> None:
     assert peak_old > _MEMORY_LIMIT_BYTES, f"旧路径峰值 {peak_old} 字节低于预期（数据未生效？）"
     assert peak_old > peak_new
     print(f"\n[memory] batch_peak={peak_new} legacy_peak={peak_old} index_bytes={total_bytes}")
+
+
+# LLM: 真实写入器在 Windows 上以文本模式追加 \n，落盘是 CRLF（跨平台同步后还会出现 CRLF/LF 混合
+#   行尾）；旧 read_text 的 universal newlines 与新路径"行尾去一个 \r"必须在这两种格式上逐条等价。
+#   第 3 行是含 run-a 字节的坏 JSON：两路径都应把它过滤掉，而第 4 行照常找到（行边界处理正确）。
+# 函数用途: 验证 CRLF 与混合行尾索引文件在两路径下结果逐条等价、截断语义一致。
+def test_crlf_written_index_matches_legacy(tmp_path: Path) -> None:
+    artifact = tmp_path / "blobs" / "tool_outputs" / "artifact.txt"
+    path = tmp_path / "blobs/tool_outputs/index.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        _tool_output_line("run-a", "call-a1", artifact).replace("\n", "\r\n").encode("utf-8")
+        + _tool_output_line("run-other", "call-x1", artifact).encode("utf-8")
+        + b'{"run_id": "run-a", broken\r\n'
+        + _tool_output_line("run-a", "call-a2", artifact).replace("\n", "\r\n").encode("utf-8")
+    )
+
+    batch = query_tool_output_refs_for_runs(tmp_path, run_ids=("run-a",), limit_per_run=5)
+    legacy = query_memory_control_plane(
+        tmp_path,
+        MemoryControlPlaneQueryOptions(run_id="run-a", limit=5),
+    )
+    rows = batch["tool_outputs_by_run"]["run-a"]
+    assert rows == legacy["tool_outputs"]
+    assert [row["call_id"] for row in rows] == ["call-a1", "call-a2"]
+
+    truncated = query_tool_output_refs_for_runs(tmp_path, run_ids=("run-a",), limit_per_run=1)
+    assert [row["call_id"] for row in truncated["tool_outputs_by_run"]["run-a"]] == ["call-a1"]
