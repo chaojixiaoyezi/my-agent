@@ -36,9 +36,10 @@ enable_capability_package_selection: false
 # - 不增加模型调用，不执行资源或扩大权限；关闭时不记账、不带回，目录保持原字节。改完马上生效，预算仍缓存。
 conversation_method_carry_enabled: true
 # 选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。
+# 候选只受输入预算限制，不受推荐候选数上限限制；预算不足按现有推荐打分稳定排序，同分保留原序，不过滤零分包。
 # 后端原有结构化重试可能带来多次 HTTP；输出沿原模型配置，不保证固定一次 HTTP 或固定总 token。
 capability_package_selection_max_input_tokens: 3000
-# 推荐与选包共用的候选数上限；0 不限制数量，仍按输入预算省略放不下的完整候选。
+# 只控制推荐提示中“本轮能力包候选”段的条数；0 不限制推荐条数，仍受元数据预算限制，不控制开工前选包。
 capability_candidate_limit: 5
 # 主选包与子授权入口装配共用的总 token 预算，包含读取回执；读不完保留准确分页信息，0 仍受模型窗口限制。
 capability_bundle_max_tokens: 3000

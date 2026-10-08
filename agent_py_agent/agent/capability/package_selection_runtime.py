@@ -63,14 +63,14 @@ def _selection_task(agent: object, params: object):
     return promote_conversation_task_for_run(agent, params)
 
 
-# LLM: claim 写入必须先于辅助 I/O，全部结果仅绑定同一 claim；崩溃留下 claimed 不重试，模型输出不能直接决定持久状态。
+# LLM: 选择只传独立输入预算与实际窗口，不传推荐上限；claim 先于辅助 I/O，同一 claim 收口，崩溃不重试，入口与子代理合同不变。
 # 函数用途: 准备有界候选、领取一次选择，调用当前主后端后在原事务内提交入口和回执。
 def _prepare_pending_selection(agent, params, scope, link) -> None:
     window = max(1, resolve_model_context_window_tokens(agent) - max_output_tokens(agent))
     material = build_package_selection_material(
         params.root_user_prompt or params.user_prompt, scope.skills.packages,
         max_input_tokens=scope.config.capability_package_selection_max_input_tokens,
-        candidate_limit=scope.config.capability_candidate_limit, context_window_tokens=window,
+        context_window_tokens=window,
     )
     authority = PackageSelectionAuthority(agent, params, link.task_id, link.thread_id,
                                           params.request_id, params.run_id, params.attempt_id)

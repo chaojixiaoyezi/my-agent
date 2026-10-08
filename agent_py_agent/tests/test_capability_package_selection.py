@@ -165,7 +165,7 @@ def test_input_budget_never_silently_truncates_user_facts_or_partial_candidate()
     build = _selection().build_package_selection_material
     assert build("资料" * 1000, [_package()], max_input_tokens=100).error_code == "CAPABILITY_SELECTION_INPUT_TOO_LARGE"
     packages = [_package("oversized", "说明" * 6000), _package("small")]
-    material = build("核对", packages, max_input_tokens=800, candidate_limit=0)
+    material = build("核对", packages, max_input_tokens=800)
     assert material.candidate_refs == (packages[1].to_ref(),)
     assert material.omitted_candidates == 1
     assert material.estimated_input_tokens <= 800
@@ -175,12 +175,13 @@ def test_input_budget_never_silently_truncates_user_facts_or_partial_candidate()
     assert build("核对", [_package()], max_input_tokens=0).error_code == "CAPABILITY_SELECTION_BUDGET_UNAVAILABLE"
 
 
-def test_candidate_limit_zero_retains_budget_and_missing_candidates_never_call_model():
+def test_input_budget_alone_bounds_candidates_and_missing_candidates_never_call_model():
     build = _selection().build_package_selection_material
     packages = [_package(str(index)) for index in range(6)]
-    limited = build("核对", packages, candidate_limit=1)
+    one = build("核对", packages[:1])
+    limited = build("核对", packages, max_input_tokens=one.estimated_input_tokens)
     assert len(limited.candidate_refs) == 1 and limited.omitted_candidates == 5
-    unlimited = build("核对", packages, candidate_limit=0, max_input_tokens=4000)
+    unlimited = build("核对", packages, max_input_tokens=4000)
     assert len(unlimited.candidate_refs) == 6
     agent = _agent(SimpleNamespace(generate_structured=lambda *_a, **_k: pytest.fail("不能发送空候选")))
     result = _selection().select_capability_packages(agent, build("核对", []))
@@ -358,7 +359,7 @@ def test_deepseek_selection_keeps_following_business_history_and_effort_high(mon
     assert agent.history == [{"role": "user", "content": "原业务"}]
 
 
-@pytest.mark.parametrize("limits", [{"max_input_tokens": -1}, {"candidate_limit": True}, {"context_window_tokens": -2}])
+@pytest.mark.parametrize("limits", [{"max_input_tokens": -1}, {"max_input_tokens": True}, {"context_window_tokens": -2}])
 def test_bad_budget_cannot_silently_disable_limits(limits):
     material = _selection().build_package_selection_material("核对", [_package()], **limits)
     assert material.error_code == "CAPABILITY_SELECTION_BUDGET_INVALID"

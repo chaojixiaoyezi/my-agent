@@ -175,7 +175,7 @@
     - C：打开开工前选包。
   - 每句每组各跑 1 次，都是新会话的第一句话。
     - A、B 只发第一次请求，看她第一步有没有调 `skill_search(action=get)` 打开对口的包，看工具账本，不执行后续工具。
-    - C 看选包结果。
+    - C 看程序选包结果，也保留同样的第一次主请求，看她自己的 get 意图，两者分表。
   - 记两个数，分语言列：
     - 对口率：25 句对口的里，打开了对口包的比例。
     - 误开率：14 句无关的里，打开了任何包的比例。
@@ -185,6 +185,95 @@
     任务列表里每条消息多一条记录。
   - 都不够：用 A、B 里好的那个，C 不开，把数据给用户看再定。
 - **用量**：A、B 每次约 4 万输入，39 句两组约 310 万；C 每次约 3000，约 12 万。合计约 320 万输入 token，大部分命中缓存。
+  这是原粗估，C 只算了选包辅助调用；测量工具还保留 C 主首请求，真跑总量以实际账本为准，不能用这个旧估算作总账。
+
+### 测量工具（w2，2026-10-07；状态：已实现，假模型自测完成，真模型待 3a）
+
+- 入口 `scripts/eval/pack_pick_bench.py`：`setup` 调产品 `PluginManagement.command` 安装、启用全部内容包；
+  `run` 为每句、每组、每次重复新建会话，通过 `submit_gateway_ask` / `_process_gateway_requests` 处理第一句话。
+  不启动 Gateway 服务、不手拼提示、不裁剪工具表。默认原能力目录和关键词提醒保留。
+- 接缝 `scripts/eval/pack_pick_runtime.py`：`arm_context` 只在内存替换选包开关，B 只替换采用那一行；异常也恢复。
+  `FirstCallTap.primary` 委托原 `_tool_loop_service.generate_model_response`，保留原输入、preflight、后端调用与用量账，
+  捕获首步 native 工具意图后返回固定无工具终答，禁止第二次主生成。`FirstCallTap.selection` 委托原 `_selected_references` 解析，
+  C 保留真实的选择、宿主读入口、任务状态与 pin；不把宿主读取冒充她调 `skill_search get`。
+- 和真实请求的差别：主输出流的 `effective_on_chunk` 设为 `None`，避免模型回答和工具参数正文经流回执落盘；
+  用户最终收到固定测量终答，没有模型工具执行和后续业务链路。框架自身会在**隔离 home** 写请求、线程、任务与用量，
+  所以不是“全路径不写盘”。JSONL 只记工具名、动作、必要包号，不记其余参数、模型正文或包正文。
+- `_case_rows` 对齐该隔离线程的原持久用量账与同请求 `ModelCallLedger`；`pack_pick_results.usage_fields` 只取供应商已报字段，
+  缺报是 `null`，不拿本地估算冒充。Anthropic 总输入含缓存读/写，不可把未缓存数当总输入。每个原调用单列，
+  HTTP 内部重试次数另记，供应商可能只回报最后一次的 token，不能声称覆盖每个 HTTP 尝试的全部计费。
+- 输出 `calls.jsonl`、`summary.md`、`metadata.json`（题目、源码、包指纹与原候选/输入/入口预算）。
+  C 的 `selection`、`main` 分表；探针、决策及其它辅助调用另列，不算主 get。率按独立样本去重，
+  对口题开错包保留在行内，误开率分母仍只算无关题。未触发的观察行标 `record_kind=observation`，不是物理调用，
+  不进 token 均值；请求失败写入已有结果后非零退出，不静默继续。输出目录必须全新，不覆盖旧结果。
+
+**真跑命令（3a 沙箱外）**：先准备已有隔离 home，里面只配置正规模型档案入口生成的官方 MiniMax-M2.7 档案，
+不用生产 owner 的会话/记忆。将 10 个 `.zip` 内容包和真实 39 句放到自己的评测输入目录。
+以下三个路径和档案 ID 是待填的输入，并不是已经存在或已验证的文件；不要加 `--fake`。
+
+```bash
+cd /Users/xiaoyezi/my-agent-worktrees/worker-w2-pick-bench
+PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python
+BENCH_HOME=/private/tmp/claude-501/w2-real/home
+PACKAGES=/private/tmp/claude-501/w2-real/inputs/packages
+QUERIES=/private/tmp/claude-501/w2-real/inputs/queries-39.json
+PROFILE_ID='<该隔离 home 中 MiniMax-M2.7 的精确档案 ID>'
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py setup --home "$BENCH_HOME" --packages "$PACKAGES"
+PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BENCH_HOME" --queries "$QUERIES" --arms A,B,C --repeat 1 --profile "$PROFILE_ID" --out /private/tmp/claude-501/w2-real/results-abc-1
+```
+
+自测可将第二条命令的 `--profile ...` 换成 `--fake`，题目用 `agent_py_agent/tests/fixtures/pack_pick_queries.json`，
+包要自行造 `novel`、`drama` 两个纯内容包；假后端按题目的结构化正例给答案，只校准测量器，不能评自然召回。
+安全 home 检查解析符号链接，拒绝真实 `~/.my-agent`、其内部和祖先；正例必须属于实际已启用目录。
+不要并发运行、不要连接运行中的 Gateway、不要复用有待处理请求的队列。
+
+**已知限制**：这一版基于任务基线 `6e8f61564`，没有合入 w1 的开关现读/会话沿用；集成后应复跑。
+主首步 get 意图、宿主入口入模、实际成功读取、方法采用、业务质量是五个观察点，这里不验后面三项。
+选择输入/入口预算仍默认各 3000 token；推荐上限默认 5 已与选择解耦，只有预算不足才省略完整候选，诊断保留在 JSONL。
+修复后真 MiniMax 网络/凭据/工具探针及 39 句准确率**未验证**；第 4 步生产质量与 TUI/飞书验收也不在本次自测里。
+
+### 3a 真跑对照与 selfix（2026-10-07；本地修复，待集成/真模型复跑）
+
+来源：3a 的 `w2-selection-fix.md`，MiniMax、10 个包、39 句×3 遍。
+以下是任务书提供的修复前结果，w2 没读正式原始 JSONL、没自行真跑；不能当本次修复后的召回率。
+
+| 组 | 第一次对口 | 无关题乱开包 |
+| --- | --- | --- |
+| A，她自己看目录挑 | 44/75（58.7%） | 0/42 |
+| B，目录说法加硬 | 43/75（57.3%） | 0/42 |
+| C，原默认候选上限 5 | 程序选中 45/75（60%） | 0/42 |
+| C0，原版 `capability_candidate_limit: 0` | 程序选中 74/75（98.7%，唯一漏项是调用失败） | 0/42 |
+
+修复落点：`package_selection.build_package_selection_material` 删除 `candidate_limit` 入参，
+`package_selection_runtime._prepare_pending_selection` 不再传推荐上限。候选只受选择输入预算及模型窗口限制；
+预算够保留全目录原序，预算不够时复用 `router.score_card`（卡片由原 `from_capability_package` 生成）稳定降序，同分原序、零分不筛。
+不替模型决定选哪个包，装不下的完整卡继续计入 `omitted_candidates` 与 `CAPABILITY_SELECTION_CANDIDATES_OMITTED`。
+`candidate_digest` 仍 hash 实际 prompt/schema/refs；紧预算导致实际排列或集合改变时摘要也改变，定义没变，不重放旧标记。
+推荐段仍按 `capability_candidate_limit` 限数，默认开关仍关闭，入口读取和子代理入口不改。
+随包 YAML 注释已分开，前端 `sync-backend-config.mjs` 重生目录并以 `--check` 核对。
+本地假模型 C 校准使用原测量入口：10 个临时包、四句、候选全 10 且无 OMITTED；单句紧预算只装 3 个并保留 OMITTED，
+两次均保留真实选择与主首请求，脚本化正例只证明候选/诊断链路，不证明自然召回。测试、变异与门禁见 [TESTS](../../TESTS.md#开工前选包候选修复2026-10-07w2selfix)。
+修复后正式评测仍由 3a 用上面的真实档案命令复跑，不需将推荐上限改为 0，不据 C0 数据擅自打开默认开关。
+
+### 3a 修复后复跑、点名补测与产品决定（2026-10-07；整合铺路 2026-10-08）
+
+来源：`~/.my-agent/decision-evidence/skill-pack-selection-1007/bench-results/README.md`（只读）与 `w2-integ-prep.md`。
+以下是 **3a 在 selfix `8fc141941` 上的真实 MiniMax-M2.7 观察**，不是 w2 自行真跑，也不是本次合并后的生产验收：
+
+| 场景 | 首步对口 | 无关题误选 | 观察边界 |
+| --- | --- | --- | --- |
+| 修复后 C，默认输入/入口预算 | 程序选中 75/75（100%，中/英/法各 100%） | 0/42 | 未出现 CANDIDATES_OMITTED；选择调用中位 6.8 秒、p90 12.4 秒 |
+| 选包关着，点名领域包（“用短剧能力包……”） | 主 get 意图 74/75（98.7%） | 未提供该项 | 用户点名观察，不与程序选中混算 |
+| 选包关着，点名确切包名（“用 short-drama-production 这个能力包……”） | 主 get 意图 75/75（100%） | 未提供该项 | 每次正好打开点名包 |
+
+**用户 10-07 决定：开工前选包开关不开，靠目录加用户点名；候选修复仍合入备用。**
+“选包与会话沿用配合（不重复塞入口）”推迟到准备开启开关之前；不是本轮新增第 2 步配置或默认开启的授权。
+
+整合落点：w2 只合指定 w1 第 1 步头 `cdfe9b4d1`；合并提交 `9866479ff` 保留双方所有文档条目，YAML 合并两方注释、键值不变，前端目录由原生成器读取后端 effect 重生。
+`pack_pick_runtime.arm_context` 改为沿 `capability_config_path_for` 的原显式优先级，在隔离 owner 用户文件临时写 `enable_capability_package_selection`：C 为 true，A/B 为 false。
+写入复用原 `config_io.set_simple_yaml_raw`，其它行/键保留；退出按原字节恢复，原文件不存在则删除。先沿原 home 保护校验规范路径，拒绝真实 home、外部路径和链接越界。
+预算类键仍保留原缓存/内存处理，不热刷新；B 仅替换采用行，模型请求与原用量账不改。不再宣称实验臂全程不写配置文件，零模型工具执行合同保持。
+本轮假模型只校准原 A/B/C 首请求、真实现读与配置恢复；w1 合并后的真实 MiniMax、TUI/飞书、Linux 全量和业务质量**未验证**，交 3a 复核。命令与结果见 TESTS 的 integprep 节。
 
 ## 6. 第 4 步：部署和生产验收
 

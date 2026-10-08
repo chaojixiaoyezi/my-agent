@@ -1,5 +1,10 @@
 # 子代理维护状态
 
+## 选包整合铺路（2026-10-08，w2 integprep；待 3a 集成复核）
+
+只合 w1 第 1 步指定头 `cdfe9b4d1`，子授权入口沿其原现读开关，权限/pin/首请求资格与预算缓存不改；本次修复仅测量器隔离用户文件的实验臂切换。
+用户决定不开选包，入口与会话沿用去重延期到准备开启之前。组件证据、变异和生产未验边界见 TESTS，不能将 selfix 真跑数据外推为此整合版本已验收。
+
 ## 命令源长度闸门接入子代理文本解析点（cmdcap-fix，2026-10-05，分支 `worker/cmdcap`，基于 17l 头 `886965f3a`）
 
 - `subagents/controlled_exec_gateway.plan_controlled_exec` 在 `_parse_command`（shlex.split）之前先过共享判定 `command_source_too_large`（contracts/gates/command_policy 的模块常量 64K），超长按 `COMMAND_SOURCE_TOO_LARGE` 拒绝，不再先慢解析一遍。

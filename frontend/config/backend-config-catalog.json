@@ -4327,7 +4327,7 @@
           {
             "key": "capability_package_selection_max_input_tokens",
             "label": "capability_package_selection_max_input_tokens（capability package selection max input tokens）",
-            "description": "选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。 后端原有结构化重试可能带来多次 HTTP；输出沿原模型配置，不保证固定一次 HTTP 或固定总 token。",
+            "description": "选择请求的输入预算，包含用户需求、完整候选摘要和响应 schema；0 不设独立配额，仍受模型窗口限制。 候选只受输入预算限制，不受推荐候选数上限限制；预算不足按现有推荐打分稳定排序，同分保留原序，不过滤零分包。 后端原有结构化重试可能带来多次 HTTP；输出沿原模型配置，不保证固定一次 HTTP 或固定总 token。",
             "type": "number",
             "defaultValue": 3000,
             "currentValue": 3000,
@@ -4346,7 +4346,7 @@
           {
             "key": "capability_candidate_limit",
             "label": "capability_candidate_limit（capability candidate limit）",
-            "description": "推荐与选包共用的候选数上限；0 不限制数量，仍按输入预算省略放不下的完整候选。",
+            "description": "只控制推荐提示中“本轮能力包候选”段的条数；0 不限制推荐条数，仍受元数据预算限制，不控制开工前选包。",
             "type": "number",
             "defaultValue": 5,
             "currentValue": 5,
