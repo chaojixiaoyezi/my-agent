@@ -2,7 +2,7 @@
 # same tool snapshot and PromptBuilder contracts as an ordinary model turn. It must never execute
 # tools, infer cache boundaries from prose, or mutate ConversationThread state. Same-turn display
 # is revalidated from host inputs; failure clears the host carrier without another decision call.
-# 模块用途: 为会话压缩复用普通请求的system、工具和动态展示；推荐继承宿主范围和重验选择，历史沿原读取边界隔离，不执行工具。
+# 模块用途: 为会话压缩复用普通请求的system、线程冻结人格、工具和动态展示；历史沿原读取边界，不执行工具。
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from ..agent_core.native_tool_protocol import resolve_native_tools
 from ..backends.message_adapter import AnthropicMessageAdapter, iter_strip_orphaned_tool_blocks
 from ..backends.tool_ir import CompactionSummary, RuntimeFactsTurn
 from ..model_guidance import provider_system_instruction
-from ..prompting_parts.builder import ToolSections
+from ..prompting_parts.builder import PromptBuilder, PromptBuildRequest, ToolSections
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
+from ..prompting_parts.thread_persona import thread_persona_scope
 from .compact_message_source import CompactMessageSource
 from .native_history import iter_provider_history_messages_from_rows
 
@@ -26,8 +27,8 @@ if TYPE_CHECKING:
     from ..capability.decision_recommendation import CapabilityPresentationSelection
 
 
-# LLM: 当前身份只取宿主RuntimeContextRequest，不从carrier借身份；callback仅在内存清旧值，不进结果或持久化。
-# 类用途: 描述压缩与随后模型轮的同一输入面，保留None/空授权和同片展示，手动或新轮默认不继承。
+# LLM: 身份取宿主RuntimeContextRequest，手动Compact由原请求绑定thread_id；候选不得改代次，callback只清内存旧展示。
+# 类用途: 描述压缩与随后模型轮的同一输入面，含明确线程人格归属；授权和展示不从正文补造。
 @dataclass(frozen=True)
 class ConversationCompactModelSurface:
     allowed_tools: tuple[str, ...] | None = None
@@ -41,6 +42,7 @@ class ConversationCompactModelSurface:
     capability_presentation_callback: Callable[[CapabilityPresentationSelection | None], object] | None = field(
         default=None, repr=False, compare=False,
     )
+    thread_id: str = ""
 
 
 # LLM: 这里只保存请求展示，不含callback/handler/权限；动态段沿原typed source转原生历史，不能混进稳定前缀。
@@ -57,7 +59,7 @@ class ConversationCompactProviderSurface:
 # reuse ordinary helpers; original preparation may synchronize tools/probe capability. Carried
 # display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
 # 包候选沿 model_surface 原范围和重验后的 selected 集合投影，不用默认范围或载体旧选择重新补回未选包。
-# 函数用途: 按原准备链冻结压缩缓存面，复核并传递同片展示与范围；准备失败仍在摘要发送前抛出。
+# 函数用途: 按原准备链冻结压缩缓存面，复用已提交线程人格并传递其动态变化；失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
     model_surface: ConversationCompactModelSurface,
@@ -115,9 +117,9 @@ def prepare_conversation_compact_provider_surface(
             selected_skill_ids=presentation.selected_skill_ids,
         )
     )
-    parent_prompt = agent.prompts.build(
-        user_prompt,
-        [],
+    prompt_request = PromptBuildRequest(
+        user_prompt=user_prompt,
+        memories=[],
         inject=[],
         prompt_files=list(model_surface.prompt_files),
         system_prompt_override=model_surface.system_prompt_override,
@@ -131,6 +133,7 @@ def prepare_conversation_compact_provider_surface(
             required_skill_ids=presentation.required_skill_ids,
         ),
     )
+    parent_prompt = _compact_parent_prompt(agent, prompt_request, _compact_persona_params(model_surface, protocol_snapshot))
     layout = prompt_cache_layout(parent_prompt)
     if layout is None or not layout.stable_prefix:
         raise RuntimeError("conversation Compact requires a structured native prompt layout")
@@ -153,9 +156,31 @@ def prepare_conversation_compact_provider_surface(
         system_instruction=provider_system_instruction(getattr(agent, "backend", None)),
         volatile_sections=tuple(
             section for section in layout.volatile_sections
-            if presentation.selection is not None and section[0] == "prompt.tool_recommendations"
+            if section[0] == "prompt.persona_updates"
+            or (presentation.selection is not None and section[0] == "prompt.tool_recommendations")
         ),
     )
+
+
+# LLM: 仅原PromptBuilder支持线程冻结；结构化thread来自Compact请求，预检只读当前已提交代次，不借候选刷新。
+# 函数用途: 让手动与自动摘要准备复用同线程稳定人格，自定义renderer仍沿旧参数调用。
+def _compact_parent_prompt(agent, request, params):
+    if isinstance(agent.prompts, PromptBuilder):
+        request.thread_persona = thread_persona_scope(agent, params)
+        return agent.prompts.build(request=request)
+    return agent.prompts.build(request.user_prompt, request.memories, inject=request.inject,
+                              prompt_files=request.prompt_files, system_prompt_override=request.system_prompt_override,
+                              context_scope=request.context_scope, workspace_context_override=request.workspace_context_override,
+                              tools=request.tools)
+
+
+# LLM: 仅组装原宿主身份/协议，不加载线程、不从carrier恢复权限；规范线程ID优先于展示上下文。
+# 函数用途: 将Compact缓存面转成共用人格准备层接受的结构化参数。
+def _compact_persona_params(surface, protocol):
+    attrs = dict(getattr(surface.presentation_context, "task_attributes", None) or {})
+    if surface.thread_id:
+        attrs["conversation_thread_id"] = surface.thread_id
+    return SimpleNamespace(task_attributes=attrs, tool_protocol_snapshot=protocol)
 
 
 # LLM: 原推荐入口只在非None载体下调用；当前快照/身份/配置失效即基础面并清宿主值，绝不重决策或恢复执行权。

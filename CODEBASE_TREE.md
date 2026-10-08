@@ -1,5 +1,12 @@
 # Codebase Tree
 
+## 线程人格前缀冻结（personafreeze，2026-10-08）
+
+```text
+|-- agent_py_agent/agent/prompting_parts/thread_persona.py # 唯一渲染快照、已提交epoch、按行有界增量
+`-- agent_py_agent/tests/test_thread_persona_freeze.py # 临时owner、实际builder/纯投影/Compact同源合同；不代替真实渠道验收
+```
+
 ## 首次选包测量（w2，2026-10-07；开发工具，不进入 wheel）
 
 ```text
@@ -947,6 +954,7 @@ agent_py_agent/
 |   |-- prompting_parts/               # prompt 构造
 |   |   |-- builder.py                 # 完整 prompt 与 native 三段追加式缓存布局构造
 |   |   |-- cache_layout.py            # typed 稳定 system/user、动态尾部与完整字符串投影
+|   |   |-- thread_persona.py          # 线程唯一安全渲染快照、结构化断点与人格变化动态尾巴
 |   |   `-- memory_context.py          # 非权威、可转义且可统一剥离的召回记忆信封
 |   |-- scale_downstream.py            # scale worker 复用普通 gateway 会话执行主链
 |   `-- backends/                      # 模型后端适配、run 固定协议/tool_choice、原生工具历史与结构化生成

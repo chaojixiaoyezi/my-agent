@@ -25,11 +25,13 @@ def model_request_selection_scope(host: object):
         _HOST.reset(token)
 
 
-# LLM: 宿主返回 None 表示沿原 renderer；不额外 gather，子代理仍使用自己的首次请求资格。
-# 函数用途: 在原准备时点允许宿主保留实际冻结提示材料。
+# LLM: 共用真实渲染安全点绑定已提交线程人格事实；候选投影复制request，不从候选状态刷新快照。
+# 函数用途: 主/子/后台同源冻结人格，再允许宿主保留实际材料，无线程保持旧行为。
 def render_selected_request(agent: object, params: object, request: object) -> str:
     from .agent_core.subagent.model_selection import render_first_request_prompt
+    from .prompting_parts.thread_persona import thread_persona_scope
 
+    request.thread_persona = thread_persona_scope(agent, params)
     host = _HOST.get()
     rendered = host.render(agent, params, request) if host is not None else None
     return rendered if rendered is not None else render_first_request_prompt(agent, params, request)

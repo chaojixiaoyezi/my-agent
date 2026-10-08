@@ -1,6 +1,7 @@
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算模型用量，失败形状不含正文且不改变收口。
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
 # 联合候选绑定消息及工具分区，须同时满足输入触发线和已知输出预留；取消不提交、不计熔断。
+# 人格缓存面只绑定本次已提交线程，不使用候选代次；与普通提示冻结共享唯一快照。
 # 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
 
 from __future__ import annotations
@@ -935,14 +936,15 @@ class _RejectedCandidates:
         return replace(self.smallest, candidates_tried=self.count, fixed_tokens=_fixed_request_tokens(self.request))
 
 
-# LLM: 宿主已备好的 provider_surface 原样沿用；只有给了 model_surface 才在此准备，准备失败先记原失败码再上抛，不进入候选循环。
-# 函数用途: 为本次 Compact 取得摘要请求的缓存面，准备失败与候选失败共用同一记账。
+# LLM: 宿主已备provider_surface原样沿用；model_surface绑定已提交线程人格身份，不用候选代次；失败走原记账。
+# 函数用途: 为本次Compact取得同线程缓存面，准备失败与候选失败共用原记账。
 def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompactProviderSurface | None:
     provider_surface = request.provider_surface
     if provider_surface is not None or request.model_surface is None:
         return provider_surface
     try:
-        return prepare_conversation_compact_provider_surface(request.agent, request.model_surface, run_id=request.run_id)
+        surface = replace(request.model_surface, thread_id=request.thread.thread_id)
+        return prepare_conversation_compact_provider_surface(request.agent, surface, run_id=request.run_id)
     except Exception as exc:
         record_compact_failure(request.store, request.thread, code=compact_exception_code(exc), now=request.attempted_at)
         raise

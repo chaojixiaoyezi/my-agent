@@ -1,5 +1,9 @@
 # LLM_GUIDE
 
+personafreeze（2026-10-08，本地实现、待 07 复核）：默认只冻结线程人格三份文件，安全行差异走动态尾巴；
+快照在首次/内容失效或已提交压缩/所选档案协议变化后的准备刷新；坏内容同锁重建只warn原因，截断target仅报新增。唯一路径与边界见 CONVERSATION_CONTEXT_DESIGN，
+测试见 TESTS 首节；真实 Gateway/渠道/供应商缓存收益未验证，不推送、不部署。
+
 w1 第 2 步（2026-10-08，`worker/w1-method-carry`，本地已实现、待 3a 非作者复核）：
 主会话方法沿用统一经 `capability/method_carry.py`，隐藏线程账本只记成功 get；逐 run 名单冻结、首次使用稳定显示、
 Compact 后入口与资料重读清单、Skill 简单带回及 using/remove 已接真实控制/业务入口。现读开关默认 true，预算仍缓存，原权限/pins 不变。

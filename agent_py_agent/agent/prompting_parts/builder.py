@@ -31,6 +31,7 @@ from ..task_progress_guidance import (
 from ..user_space.approval_mode import is_permission_admin
 from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
+from .thread_persona import RenderedPersonaSections, ThreadPersonaScope, freeze_thread_persona
 
 if TYPE_CHECKING:
     # 循环导入根修: builder 被 prompting_parts/__init__ 顶层加载,而 memory_store/__init__
@@ -60,6 +61,8 @@ class ToolSections:
     in_use_method_ids: tuple[str, ...] = ()
 
 
+# LLM: 请求携带宿主已提交的线程人格断点；候选容量检查复制此值，不把候选状态写回持久快照。
+# 类用途: 汇总本次提示输入与可选线程冻结事实，无线程时仍每次现读人格。
 @dataclass
 class PromptBuildRequest:
     """bundle for PromptBuilder.build inputs."""
@@ -74,6 +77,7 @@ class PromptBuildRequest:
     workspace_context_override: str | None = None
     # 回合触发类型（agent_core/runtime/turn_trigger.TurnTrigger）；生命周期唤醒时当前回合以“# Host Event”开头。
     turn_trigger: object | None = None
+    thread_persona: ThreadPersonaScope | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,7 @@ class PromptRenderInput:
     native_tool_use: bool
     # 只决定当前回合开头用“# User Task”还是“# Host Event”；None 保持原格式与字节。
     turn_trigger: object | None = None
+    persona_updates: str = ""
 
     # LLM: 冻结调用方容器，片段包括空串和内嵌换行；不得按正文去重或猜测历史来源。
     # 函数用途: 避免准备完成后修改原注入列表影响当前请求，只有新候选可以显式替换片段。
@@ -201,7 +206,7 @@ class PromptBuilder:
 
     # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序（管理员自身开发约定会检查开发工作树是否存在），
     #   注入列表复制为元组，纯投影只消费返回值；回合触发类型原样冻结，只影响当前回合开头的渲染。
-    # 函数用途: 把原 build 材料和注入边界冻结成值对象，不发请求、不写状态，也不为缺失输入猜造子代理事实。
+    # 函数用途: 把材料冻结成值对象；有线程时在已提交断点原子保存人格快照，不发请求、不猜子代理事实。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
@@ -212,7 +217,8 @@ class PromptBuilder:
             owner_scope += "\n\n" + home_guide
         if self_development := _self_development_guide(self):
             owner_scope += "\n\n" + self_development
-        dynamic = _dynamic_prompt_text(self, request, task_local)
+        persona, updates = _thread_persona_context(self, request, task_local)
+        dynamic = _dynamic_prompt_text(self, request, persona)
         injection_fragments = tuple(request.inject or ())
         workspace_context = (
             _workspace_context_text(self)
@@ -238,6 +244,7 @@ class PromptBuilder:
                 )
             ),
             turn_trigger=request.turn_trigger,
+            persona_updates=updates,
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
@@ -268,7 +275,7 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
                 memory_text=prepared.memory_text, tool_recommendations=prepared.recommendations,
                 workspace_context=prepared.workspace_context, injected=prepared.injected,
                 execution_facts=prepared.execution_facts,
-            ),
+            ) + ((("prompt.persona_updates", prepared.persona_updates),) if prepared.persona_updates else ()),
             canonical_user_turn=current_turn_text(prepared.user_prompt, prepared.turn_trigger),
         )
     return (
@@ -281,6 +288,7 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
         f"{prepared.tool_catalog}\n\n"
         f"{prepared.recommendations}\n\n"
         f"{prepared.task_and_transcript}\n\n"
+        f"{prepared.persona_updates + chr(10) if prepared.persona_updates else ''}"
         f"{prepared.execution_facts}\n"
     )
 
@@ -532,14 +540,15 @@ def _self_development_guide(builder: PromptBuilder) -> str:
 
 
 # LLM: Skill 展示选择通过当前 request 传递；不影响 prompt 文件、owner 上下文和隔离范围。
-# 函数用途: 组织原稳定内容，结构化在用名单随名卡传递，选择模式保留固定发现说明。
-def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
+# 函数用途: 组织稳定内容，只使用准备层给出的固定人格；其它文件与名卡仍按原规则读取。
+def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, persona: list[str]) -> str:
+    isolated = _is_task_local_context(request.context_scope)
     selected = request.tools.selected_skill_ids if request.tools else None
     if str(request.context_scope or "").strip().lower() == "isolated":
         selected = None
     chunks = [
         *builder.read_prompt_files(request.prompt_files, include_config=not isolated),
-        *([] if isolated else builder.read_home_context(request.user_prompt)),
+        *persona,
         *([] if isolated else _skill_context_chunks(builder, request.user_prompt, selected_skill_ids=selected,
                                                    in_use_method_ids=request.tools.in_use_method_ids if request.tools else ())),
     ]
@@ -728,9 +737,29 @@ def _persona_home_context_chunks(
     return _persona_context_chunks(repository)
 
 
+# LLM: 无线程现读与冻结调用同一renderer；这里只消费展示段，结构截断集合不进入系统文本。
+# 函数用途: 将安全人格渲染为旧Home段落，保留关闭时字节口径。
 def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
     if repository is None:
         return []
+    return [value for value in _render_persona_sections(repository.snapshot()).sections.values() if value]
+
+
+# LLM: 有线程/开关/home启用时走唯一快照，无资格保持旧read_home_context；仅存安全渲染值，不存被拦原文。
+# 函数用途: 取得稳定人格与本轮行变化，task_local/control_plane 保持原隔离，不读 owner 人格。
+def _thread_persona_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> tuple[list[str], str]:
+    if isolated or not builder.home_paths or not builder.config.home_context_enabled:
+        return [], ""
+    scope = request.thread_persona
+    repository = builder.persona_repository
+    if not builder.config.thread_prompt_prefix_freeze_enabled or scope is None or not scope.thread_id or repository is None:
+        return builder.read_home_context(request.user_prompt), ""
+    return freeze_thread_persona(repository.owner_home, scope, _render_persona_sections(repository.snapshot()))
+
+
+# LLM: 展示顺序/清洗/截断与旧提示逐字一致；同次diagnostic.truncated给出不完整target，不解析诊断文案。
+# 函数用途: 同源渲染人格及诊断，并携带结构截断集合，让变化层不把移出窗口误报删除。
+def _render_persona_sections(snapshots: dict) -> RenderedPersonaSections:
     # 长期助手 keeps agent identity and the user profile in explicitly different
     # system-prompt tiers.  Preserve our single Persona repository while making
     # the same semantic boundary unambiguous to the model: SOUL describes the
@@ -741,19 +770,19 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
         "soul": "ASSISTANT PERSONA (who the assistant is and how it speaks)",
         "user": "CURRENT USER OR GROUP PROFILE (stable facts and preferences)",
     }
-    chunks: list[str] = []
+    chunks = dict.fromkeys((*labels, "diagnostics"), "")
     diagnostics: list[dict[str, object]] = []
-    for target, snapshot in repository.snapshot().items():
+    for target, snapshot in snapshots.items():
         content = _strip_injection_comments(snapshot.content)
         if target == "user":
             content = _strip_empty_markdown_sections(content)
         if content.strip():
-            chunks.append(f"# Home Entry: {labels[target]}\n{content}")
+            chunks[target] = f"# Home Entry: {labels[target]}\n{content}"
         diagnostic = snapshot.diagnostic
         if diagnostic.state not in {"ok", "missing"}:
             diagnostics.append(diagnostic.to_dict())
     if diagnostics:
-        chunks.append(
+        chunks["diagnostics"] = (
             "# Persona Load Diagnostics\n"
             + "\n".join(
                 f"- {row['target']}: state={row['state']}, truncated={row['truncated']}, "
@@ -761,7 +790,8 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
                 for row in diagnostics
             )
         )
-    return chunks
+    return RenderedPersonaSections(chunks, frozenset(target for target, snapshot in snapshots.items()
+                                                    if snapshot.diagnostic.truncated))
 
 
 def _strip_injection_comments(text: str) -> str:

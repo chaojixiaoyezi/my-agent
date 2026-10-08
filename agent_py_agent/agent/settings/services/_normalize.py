@@ -1,4 +1,4 @@
-# LLM: 各配置域共用默认和校验；文件语法反馈、Compact原文回查与决策跳过记录开关独立归一为布尔值，须同步各自配置加载测试；规范化不发请求或写日志。
+# LLM: 各配置域共用默认和校验；人格线程冻结同其它home开关归一为布尔，字符串false不能误开；须同步加载测试。
 # 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 意外启用工具反馈、回查提示或决策记录。
 """Domain-specific normalize services for config fields.
 
@@ -288,7 +288,7 @@ _HOME_STRING_FIELDS = (
     "my_agent_owner_id", "workspace_task_path_template",
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
-    "home_context_enabled", "run_task_workspace_enabled",
+    "home_context_enabled", "run_task_workspace_enabled", "thread_prompt_prefix_freeze_enabled",
 )
 def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []

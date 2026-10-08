@@ -66,6 +66,9 @@ my_agent_owner_id: "main"
 # - home_context_enabled: 每轮 prompt 允许读取轻量 home 上下文，例如 memory.md 和匹配 lesson。
 # - run_task_workspace_enabled: 保存宿主运行记录到用户 runs/日期/不透明ID；普通聊天不建运行，记录不改变工具 cwd。
 home_context_enabled: true
+# 在线程内冻结系统提示里的 AGENTS/SOUL/USER 三份人格文件（目前不冻结其它提示来源）。
+# 期间的安全行变化放动态尾巴；已提交压缩或换模型后下一次准备刷新。关闭后恢复每次现读。
+thread_prompt_prefix_freeze_enabled: true
 # 召回的 lesson 超过多少天未更新就附加"记忆可能过期"提示；0 表示不加提示。
 # 防止把陈旧记忆当现状：记忆反映写入时的事实，与当前代码/状态冲突时以现状为准。
 home_lesson_stale_caveat_days: 7

@@ -151,12 +151,12 @@ def refresh_first_request_prompt(agent: object, params: object, prepared_input: 
     preparation.request_input = None
 
 
-# LLM: 只有原 PromptBuilder 可分离一次宿主读取与纯渲染；自定义 renderer 继续原 build 并保持输入未知，不重复采集 Goal/文件/Skill。
-# 函数用途: 保存实际首请求使用的提示输入，调用原纯渲染器，默认关闭时完全沿用原 build。
+# LLM: 原 PromptBuilder 接完整request（含线程人格事实）；首请求记录仍只对原资格生效，自定义renderer保持旧调用。
+# 函数用途: 用真实准备层冻结主/子/后台人格，首请求可选留档，不重复采集 Goal/文件/Skill。
 def render_first_request_prompt(agent: object, params: object, request: object) -> str:
     preparation = first_request_preparation(agent, params)
     builder = agent.prompts
-    if preparation is None or not isinstance(builder, PromptBuilder) or type(builder).build is not PromptBuilder.build:
+    if not isinstance(builder, PromptBuilder) or type(builder).build is not PromptBuilder.build:
         return builder.build(request.user_prompt, request.memories, inject=request.inject,
                              prompt_files=request.prompt_files, tools=request.tools,
                              system_prompt_override=request.system_prompt_override, context_scope=request.context_scope,

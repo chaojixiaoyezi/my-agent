@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 线程人格前缀冻结（personafreeze，2026-10-08，07-c3）
+
+- 07跟进personafreeze-2：坏JSON/错schema/缺段落/超1MB/坏UTF-8/非字符串段，六种先断言失败后同锁重建；
+  每次只warn线程及原因，确认无内容/路径/堆栈，重读不再warn，符号链接仍拒绝；旧“坏缓存卡回合”断言按新合同替换。
+- 截断AGENTS追加两行的伪删除和溢出删除计数均先红后绿；结构diagnostic.truncated集合传递，只报新增，完整删除仍保留。
+- 跟进验证：上述复现同test_thread_persona_freeze.py；指定两文件101 passed，含投影/前缀/主子Compact的六文件160 passed；
+  guards9完整12文件194 passed，ruff/doc-sync/strict尺寸（新增告警0）/常量目录/导入边界/diff/clean-package通过；真实渠道仍未验证。
+- 来源：07/personafreeze 任务；修复 owner 人格变更使同线程跨回合固定前缀失配，晋升行为不改。
+- 新测试 `test_thread_persona_freeze.py`：跨回合追加、长 AGENTS 截断、重建 builder、代次/档案/协议刷新、关闭/无线程、
+  删除替换/4000字符预算、线程隔离、字符串 false 解析、共用实际渲染入口与完整请求投影、私有文件/符号链接/坏快照、
+  Compact准备复用冻结前缀/尾巴及规范线程绑定，不覆盖原surface。
+- 红测：未实现时 7 条固定前缀/尾巴断言失败，1 条旧行为通过；解析新增红测实测字符串 false 未归一，已修 HomeFieldsService。
+- 补充红测：Compact准备重新现读人格，前缀逐字比较失败；绑定原线程并沿共用builder后新旧压缩展示测试通过。
+- 最终本地回归：相关17文件445 passed，guards9完整12文件194 passed；ruff/doc-sync/常量目录/导入边界通过。
+- strict尺寸守卫通过且新增告警0；初次差集暴露Compact helper四参数告警，拆出结构化参数准备后复核归零；未改baseline。
+- 复现：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_thread_persona_freeze.py
+  agent_py_agent/tests/test_prompting_builder.py agent_py_agent/tests/test_tool_request_projection.py -q --tb=short -p no:cacheprovider
+  -o addopts='' --basetemp=/private/tmp/claude-501/m-personafreeze`（PY 用 ci-venv-312）。最终命令/结果见任务 RESULT。
+- 原有测试断言不改、不删失败；临时 owner 与假线程只证明提示合同和纯投影，真实主/子/后台完整 Gateway、TUI/飞书、
+  Linux/Windows、真实供应商出站及 usage/cache 收益均未验证；组合后由 07 沙箱外复核，不据此上线。
+
 ## browser-lite 慢启动期限
 - 根因：CI Chrome 冷启动偶尔超过插件 `command_timeout_seconds` 默认 15 秒；产品默认值保持不变，避免延长页面/CDP 命令等待。
 - 夹具规则：真实浏览器组件统一 45 秒（含 EOF/SIGTERM 入口）、MCP 等待 90 秒，显式短值优先，不重试、不跳过失败。

@@ -1,5 +1,14 @@
 # Memory Structure
 
+## 线程人格快照与Compact准备（personafreeze，2026-10-08）
+
+- 快照内容不合法等价于缺失，由原锁内唯一writer重建，日志不含正文；安全链接/非普通文件不放行。
+- `RenderedPersonaSections`携同次diagnostic.truncated集合，截断target的尾窗移出不报删除，溢出只数新增；不解析诊断文本。
+- `prompting_parts/thread_persona.py` 只拥有 `<owner_home>/persona/thread_prefix/<thread_id>.json`；线程JSON和人格版本账不存副本。
+- `compact._resolved_provider_surface` 将已提交线程ID绑定到 `ConversationCompactModelSurface.thread_id`；原builder和普通请求
+  使用同一安全renderer/断点，`prompt.persona_updates` 随原RuntimeFactsTurn传递。不从候选或正文推断刷新。
+- 失败不推进人格epoch；获选恢复材料保持已计量字节，提交后下一次实际准备刷新。详情见CONVERSATION_CONTEXT_DESIGN。
+
 ## Compact 语义摘要的工具选择边界（cachecompact2，2026-10-05）
 
 - `LiveToolHistorySummaryRequest.tool_choice` 是可选显式选择字段，位于 dataclass 末尾以保持已有位置参数顺序。

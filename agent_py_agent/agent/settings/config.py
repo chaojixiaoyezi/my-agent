@@ -152,6 +152,8 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+# LLM: owner/home开关是提示准备的唯一默认源；新增人格线程冻结只控制系统字节，不改变owner授权或晋升。
+# 类用途: 保存家目录与人格上下文开关，须与YAML及HomeFieldsService布尔解析同步。
 @dataclass
 class _HomeProviderConfigFields:
     my_agent_home: str = ""
@@ -166,6 +168,7 @@ class _HomeProviderConfigFields:
     # 仅向模型说明推荐的业务文件整理格式，不决定运行归档或文件权限。
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
     home_context_enabled: bool = True
+    thread_prompt_prefix_freeze_enabled: bool = True
     home_lesson_stale_caveat_days: int = 7
     run_task_workspace_enabled: bool = True
     timezone: str = ""  # IANA 时区名(如 Asia/Shanghai、America/New_York);空=服务器本地(审计 #21)

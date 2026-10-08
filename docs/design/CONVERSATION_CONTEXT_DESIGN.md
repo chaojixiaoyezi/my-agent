@@ -24,6 +24,31 @@ task 或 turn 语义；它们进入同一个 Gateway/runtime。
 
 ## Transcript and compact
 
+### 线程人格前缀冻结（personafreeze）
+
+- 解决问题：同 owner 的人格自动晋升或人工修改，过去会改变其它线程下一回合系统前缀。现在默认开启
+  `thread_prompt_prefix_freeze_enabled`，只冻结 AGENTS→SOUL→USER 三份安全渲染段和加载诊断；其它系统材料不冻结。
+- 唯一权威文件是 `<owner_home>/persona/thread_prefix/<thread_id>.json`（schema_version=1），包含已提交断点和按 target
+  分组的已渲染字符串。线程 JSON 不存正文/副本；每线程最多一个现行快照，原子替换、跨进程共享文件锁、私有 0600，
+  拒绝符号链接；坏JSON、schema/段落不合法、超1MB内容按缺失处理，在原锁内用当前安全渲染原子重建，
+  warning只记线程ID和原因码，无内容/路径/异常堆栈；非普通文件与IO安全失败仍抛出。PersonaRepository的版本备份可恢复已登记原文，但人工外改、缺失及加载诊断没有
+  可恢复的完整渲染版本，因此选择独立渲染快照，而不是不完整的版本引用。
+- 主/子/后台统一在 `model_request_selection.render_selected_request` 绑定实际线程元数据与协议；首建、已提交
+  compact_generation 或所选 model_profile_id/model_backend/source_protocol 不同才在下次准备刷新；内容失效按缺失重建。无线程/开关关闭
+  完全沿旧现读路径。task_local/control_plane 保留原不读 persona 的隔离规则，不借父线程人格。
+- 手动/自动Compact原请求在 `_resolved_provider_surface` 绑定规范线程ID，准备沿同一PromptBuilder读取已提交epoch；
+  `prompt.persona_updates` 也进入摘要的动态事实，不丢弃当轮变更，不从候选借代次或刷新快照。
+- `PromptRenderInput.persona_updates` 是动态来源 `prompt.persona_updates`，由现有原生 IR 变成 RuntimeFactsTurn；不进
+  instructions/稳定前缀。按 target 比较已安全渲染字符串的新增/删除行（不解析自然语言），总量超过 4000 字符仅列条数并
+  说明“下次压缩后整体生效”。原清洗、空节剥离、每份截断仍同源；截断隐藏中段不进入增量，下一断点按当前安全渲染刷新。
+- 同次`PersonaDocumentSnapshot.diagnostic.truncated`沿`RenderedPersonaSections`传给冻结和增量计算，不解析诊断文字。
+  截断target只列当前安全渲染中有、冻结快照中没有的行，预算溢出也只报新增数；完整target仍按原增删，
+  避免尾部窗口后移被误认为文件中约定撤销。隐藏行和真实删除无法由截断视图证明，不推测补齐。
+- 候选容量投影和真实发送只消费同一次 PromptRenderInput，不因候选配置/候选 compact 重新冻结；压缩获选请求保持已经
+  计量的冻结材料，提交后下次实际准备看到新代次才更新，不在 CAS 后偷换未计量系统内容。失败不改变 persona epoch。
+- 开关按普通主配置重启生效，YAML/dataclass/布尔解析/后端参数目录/前端生成目录同步；人格晋升频率和权限不变。
+  本地临时 owner 合同测试不等于真实 Gateway、TUI、飞书或供应商缓存验收；由 07 在组合版本复核这些观察点。
+
 摘要分段现以临时顺序字符视图消费JSON编码流，首遍长度/hash、次遍当前窗口和完整结束核对；只有原writer/CAS拥有覆盖。估算共享tokens流式计数，数值规则不变。片段选择预留纠正提示并在发送前再次检查预算和取消；不落第二存储，也不以字符位置替代消息字节游标。原messages及最大单值仍需内存，完整有界化继续开放。
 
 显式scope的Compact只读来源现按完整LF尾界扫描两次：第一遍验证身份及创建锚点，第二遍按原范围与原检查点精确覆盖筛正文，原字节hash必须一致。后台有任务先读同次结构事实，再按范围加载正文，0展示限制仍不截断。该实现不改变摘要writer/CAS；ID位置、选中正文及覆盖链仍需内存，完整有界化尚未完成。

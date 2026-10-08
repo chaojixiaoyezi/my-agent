@@ -37,6 +37,14 @@
 
 ## 前缀纪律：主请求/压缩请求逐字同前缀、工具表只增不减（prefixdisc，07，2026-10-08；状态：第一刀（压缩请求误瘦身）与第二刀（工具表只增不减）已实现，待合 main、部署后用 .16 采集和生产账本复核）
 
+- **personafreeze（2026-10-08，状态：本地实现、待 07 复核）**：默认开启 `thread_prompt_prefix_freeze_enabled`，目前只冻结
+  AGENTS/SOUL/USER 的安全渲染段及诊断。唯一快照为 `<owner_home>/persona/thread_prefix/<thread_id>.json`，不进线程 JSON；
+  版本账无法覆盖人工外改、缺失和渲染诊断，故不以版本引用作权威。首次/快照内容失效、已提交 compact_generation 或所选档案/协议变化后
+  下一次准备才刷新；候选预检与失败不刷新。差异走 `prompt.persona_updates` 的 RuntimeFactsTurn，超 4000 字符只给条数。
+  同次发送与容量投影复用 PromptRenderInput；不冻结其它文件/目录/工具，不声称供应商缓存收益已验证。
+  07跟进：坏缓存在原锁内按缺失重建，只warn线程/原因码，安全链接仍拒绝；诊断结构标记的截断target仅报新增及新增数，不把尾窗移出当撤销。
+  详细边界见 [线程人格冻结](docs/design/CONVERSATION_CONTEXT_DESIGN.md#线程人格前缀冻结personafreeze)。
+
 - **来由**：用户 10-08 定的第 2 项——向 DeepSeek-Harness 99% 命中靠拢，同时提高其它模型命中。先量再改：线上没有逐次调用的结构化数据
   （请求表面摘要与 cache_diagnostic 只在网关内存账本里；threads/*.json 只留最后一次，而且旧线程是升级前的版本），所以在 192.168.1.16
   用 `.pth` 钩住 `cache_diagnostics.request_surface`，记每次出站请求的逐条消息摘要（角色、块类型、sha、字符数，不记正文），

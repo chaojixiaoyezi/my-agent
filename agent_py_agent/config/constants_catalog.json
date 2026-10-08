@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 951,
+  "count": 952,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4802,6 +4802,14 @@
       "unit": "字节",
       "category": "其它",
       "description": "程序文件摘要每次读入的块大小（字节）。"
+    },
+    {
+      "name": "PERSONA_UPDATES_MAX_CHARS",
+      "file": "agent_py_agent/agent/prompting_parts/thread_persona.py",
+      "value": 4000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "动态人格行变化总字符预算；超出仅给数量，避免尾巴吞掉窗口。"
     },
     {
       "name": "DEFAULT_EMBED_DIM",
