@@ -73,25 +73,36 @@ class NativeCompactCandidate:
     after_tokens: int
 
 
+# LLM: 摘要文本可带服务端压缩项密文（compact_remote）：IR 里装的摘要项据此发压缩项而不是文字。
+# 类用途: 压缩候选要装进 IR 的摘要：文本 + 可选的压缩项密文。
+@dataclass(frozen=True)
+class NativeCompactSummary:
+    text: str
+    provider_compaction: str = ""
+
+
 # LLM: 修改原列表而不持久化；先回收、安装摘要，再把窗口提示计入同一估算器。异常由调用方恢复快照。
+#   summary 既接受纯文本（旧调用方/测试），也接受 NativeCompactSummary（带压缩项密文）。
 # 函数用途: 形成配对完整的压缩候选；有完整摘要时允许继续回收最后一对，始终保留用户原话与当前事实。
 def reduce_native_compact_candidate(
     window: NativeCompactWindow,
     *,
-    summary: str,
+    summary: str | NativeCompactSummary,
     target_tokens: int,
     estimate_tokens: Callable[[], int],
 ) -> NativeCompactCandidate:
+    text = summary.text if isinstance(summary, NativeCompactSummary) else str(summary or "")
+    provider_compaction = summary.provider_compaction if isinstance(summary, NativeCompactSummary) else ""
     dropped = compact_native_ir_to_token_budget(
         window,
         max_tokens=max(1, target_tokens),
         token_estimator=estimate_tokens,
-        drop_completed_tool_turns=bool(summary),
+        drop_completed_tool_turns=bool(text),
     )
     if not dropped:
         return NativeCompactCandidate(dropped_pairs=0, after_tokens=0)
-    if summary:
-        replace_compaction_summary_ir(window, summary)
+    if text:
+        replace_compaction_summary_ir(window, text, provider_compaction=provider_compaction)
     while True:
         record_native_ir_window(
             window,
@@ -104,8 +115,8 @@ def reduce_native_compact_candidate(
             window,
             max_tokens=max(1, target_tokens),
             token_estimator=estimate_tokens,
-            preserve_newest_pair=not bool(summary),
-            drop_completed_tool_turns=bool(summary),
+            preserve_newest_pair=not bool(text),
+            drop_completed_tool_turns=bool(text),
         )
         if additional <= 0:
             break

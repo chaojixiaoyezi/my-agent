@@ -228,6 +228,11 @@ memory_compact_recovery_target_percent: 60
 # 注意：这个值只对"压缩调用能降档"的模型生效（GPT-6 系列的 Responses 接口，见 memory_compact_reasoning_level）；DeepSeek、MiniMax
 # 等模型的压缩调用仍按会话档位思考，思考 token 算进输出上限，用 16384 会把摘要截断（2026-10-08 生产实测），它们自动沿用主请求上限。
 memory_compact_summary_max_output_tokens: 16384
+# 服务端压缩：true 时，后端声明支持的模型（目前是 ChatGPT 订阅登录的 gpt-6 系列 Responses 接口，和官方 Codex 同一路线）
+# 压缩不再自己发摘要请求，而是在主请求末尾放一个压缩触发项，由服务端返回一个不透明的压缩项（2026-10-08 真机：4.5 万历史
+# 11～14 秒、输出 152 token、前缀全命中；之后每轮只带压缩项约 154 token）。换到读不了压缩项的模型（MiniMax、DeepSeek 等）
+# 时程序自动从归档原文重新做一份文字摘要，不丢上下文。false 或后端不支持时走原客户端摘要。改完需要重启 Gateway 才生效。
+memory_compact_remote_enabled: true
 # 压缩摘要调用用什么思考档位：low / medium / high / xhigh / max，留空表示沿用会话当前档位。
 # 只对能用 configuration_update 项改档位的模型生效（OpenAI GPT-6 系列的 Responses 接口，见 model_reasoning_update_items）：
 # 请求级 reasoning.effort 保持会话档位不变，只在请求末尾追加一个降档项，这样前缀缓存不失配。写摘要不需要深思考，

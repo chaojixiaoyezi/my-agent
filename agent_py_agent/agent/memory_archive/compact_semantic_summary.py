@@ -188,6 +188,8 @@ class LiveToolHistorySummaryRequest:
     # LLM: 机械兜底与完整回退只投影被替代的来源 IR；None 时用 history。缓存分叉把主请求整段前缀放进 history 让请求
     #   命中缓存，兜底却只能写来源本身——否则任务原文、运行时事实等非来源内容会被抄进摘要，主请求逐代膨胀（compactcache 实测）。
     fallback_history: list[Any] | None = None
+    # 服务端压缩结果出口：调用方传一个列表，走了远端路径时追加 provider_compaction 记录，返回值是占位摘要文本。
+    provider_outcome: list[dict[str, Any]] | None = None
 
 
 # LLM: 只从 agent.config 读 enabled；首尾保护、中段阈值和输入预算已是本模块常量（2026-09-28 参数减量），
@@ -257,6 +259,10 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
             *AnthropicMessageAdapter().to_provider_messages(request.history),
         ]
     messages = strip_orphaned_tool_blocks(messages)
+    # 服务端压缩（compact_remote）：只在缓存安全路径（主请求同一份前缀 + 当前 IR）上做；成功就不再发摘要请求。
+    marker = _remote_live_summary(request, messages) if cache_safe is not None else ""
+    if marker:
+        return marker
     generate = _resolve_generate_with_messages(
         request,
         messages,
@@ -270,30 +276,56 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     # leave an orphan summary call consuming quota beside the resumed turn.
     summary = generate(summary_instruction).strip()
     raise_if_compact_interrupted(request.interrupt_check)
+    return _accept_live_summary(request, summary)
+
+
+# LLM: 空正文或形状无效（模型无视"不要调用工具"、返回供应商私有工具协议、只说"现在写报告"）都退回 typed IR 机械摘要，
+#   不再烧一次相同请求、也不打断主代理轮；真正异常仍由调用方抛给 Compact 熔断器，checkpoint/CAS 失败语义不变。
+# 函数用途: 把模型给的 live 摘要收尾：合格就加固定前缀并裁到上限，不合格就机械兜底。
+def _accept_live_summary(request: LiveToolHistorySummaryRequest, summary: str) -> str:
     limit = max(1_000, int(request.max_output_chars or _DEFAULT_MAX_INPUT_CHARS))
     fallback_limit = min(limit, _LIVE_FALLBACK_MAX_OUTPUT_CHARS)
     if not summary:
-        # HTTP/模型调用已经正常结束但正文为空，不值得再烧一次相同请求，也不能把主代理轮
-        # 粗暴打断。这里仅用 typed IR 生成有界投影；真正异常仍由上面的直接调用抛给 Compact
-        # 熔断器，checkpoint/CAS 也仍保持原来的失败语义。
-        return _mechanical_live_tool_history_summary(
-            request,
-            limit=fallback_limit,
-            reason="provider_empty_summary",
-        )
+        return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_empty_summary")
     if not _valid_live_summary(summary):
-        # 模型有时会无视“不要调用工具”，返回供应商私有工具协议，或只说“现在写报告”。
-        # 这类正文不是可续接交接；沿用 typed IR 机械摘要，不能让伪动作污染下一轮。
-        return _mechanical_live_tool_history_summary(
-            request,
-            limit=fallback_limit,
-            reason="provider_invalid_summary_shape",
-        )
+        return _mechanical_live_tool_history_summary(request, limit=fallback_limit, reason="provider_invalid_summary_shape")
     return (
         f"{_SUMMARY_PREFIX} 当前运行 turn 的旧工具往返已被这份摘要替换。"
         "摘要不是执行事实源；精确结果以 archive、operation ledger、artifact 和真实文件为准。\n"
         f"{_clip(summary, limit)}"
     )
+
+
+# LLM: 远端成功时把记录放进调用方的 provider_outcome 并返回占位摘要文本；不可用/失败返回空串，调用方走原文字摘要路径。
+# 函数用途: 把"试服务端压缩 + 登记记录 + 给占位文本"收成一步。
+def _remote_live_summary(request: LiveToolHistorySummaryRequest, messages: list[dict[str, Any]]) -> str:
+    record = _remote_live_compaction(request, messages)
+    if record is None:
+        return ""
+    if request.provider_outcome is not None:
+        request.provider_outcome.append(record)
+    from ..conversation.compact_remote import provider_compaction_marker
+
+    return provider_compaction_marker(record)
+
+
+# LLM: 请求材料与主请求同源：稳定前缀 + 主请求自己的动态尾巴（不加压缩指令）、同一份 provider 历史 + 当前 IR、同一份工具，
+#   触发项由后端放在最末；不可用/失败返回 None 交给原文字摘要路径。agent 缺失（旧调用方只给 backend）不走远端。
+# 函数用途: 对 live 工具历史尝试一次服务端压缩，返回检查点要存的记录或 None。
+def _remote_live_compaction(request: LiveToolHistorySummaryRequest, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    from ..conversation.compact_remote import (
+        RemoteCompactionRequest,
+        remote_compaction_enabled,
+        request_remote_compaction,
+    )
+
+    if request.agent is None or not remote_compaction_enabled(request.agent):
+        return None
+    return request_remote_compaction(RemoteCompactionRequest(
+        agent=request.agent, prompt=_compact_cache_safe_prompt(request.provider_prompt, ""), messages=messages,
+        tools=list(request.tools) or None, system_instruction=request.system_instruction,
+        request_id=request.request_id, run_id=request.run_id, task_id=request.task_id, thread_id=request.thread_id,
+    ))
 
 
 # LLM: 默认机械投影保持原有界语义；显式完整回退另附旧摘要全文及原adapter序列，不截断继承覆盖或选中IR正文。

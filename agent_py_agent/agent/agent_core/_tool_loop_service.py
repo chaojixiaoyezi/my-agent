@@ -98,6 +98,7 @@ from .tool_guard.loop_hints import (
     append_tool_guardrail_action_block_hint,
 )
 from .tool_ir_compact import (
+    NativeCompactSummary,
     NativeCompactWindow,
     compact_native_ir_to_token_budget,
     reduce_native_compact_candidate,
@@ -220,6 +221,8 @@ class _NativeCompactPlan:
     progress_source_kind: str
     progress_commit_authority: str
     forced: bool
+    # 服务端压缩记录（conversation/compact_remote）；None = 普通文字摘要。提交和 IR 替换都从这里取。
+    provider_compaction: dict[str, object] | None = None
 
 
 # LLM: 仅承载一次已赢得原线程 CAS 的提交事实；调用方在提交后阶段用它刷新同范围视图与投影，
@@ -528,6 +531,7 @@ def _prepare_native_compact_plan(
         return None
     before_tool_refs = _native_tool_refs(params)
     target = min(recovery_target, base_tokens + recent_tail_tokens)
+    provider_outcome: list[dict[str, object]] = []
     (
         binding,
         summary,
@@ -543,6 +547,7 @@ def _prepare_native_compact_plan(
         before_tokens=before_tokens,
         trigger_tokens=limit,
         source_messages=len(before_call_ids) * 2,
+        provider_outcome=provider_outcome,
     )
     return _NativeCompactPlan(
         policy=policy,
@@ -558,6 +563,7 @@ def _prepare_native_compact_plan(
         progress_operation_id=progress_operation_id,
         progress_source_kind=progress_source_kind,
         progress_commit_authority=progress_commit_authority,
+        provider_compaction=provider_outcome[-1] if provider_outcome else None,
         forced=force,
     )
 
@@ -607,6 +613,7 @@ def _live_compact_binding_and_summary(
     before_tokens: int,
     trigger_tokens: int,
     source_messages: int,
+    provider_outcome: list[dict[str, object]] | None = None,
 ) -> tuple[object | None, str, int, str, str, str]:
     from ..conversation.live_tool_compact import (
         record_live_tool_compact_failure,
@@ -656,6 +663,7 @@ def _live_compact_binding_and_summary(
         binding,
         progress,
         provider_prompt=provider_prompt,
+        provider_outcome=provider_outcome,
     )
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     if binding is None or summary:
@@ -685,6 +693,14 @@ def _live_compact_binding_and_summary(
     raise error
 
 
+# LLM: 上一代摘要优先取本次适用视图（和来源隐藏、检查点基础同一个视图），没有视图时取绑定线程的摘要，都没有为空串。
+# 函数用途: 取 live 压缩要续接的上一代摘要文本。
+def _live_compact_previous_summary(params: ToolLoopExecuteParams, binding: object | None) -> str:
+    if params.compact_context is not None:
+        return params.compact_context.view.summary
+    return binding.thread.summary if binding is not None else ""
+
+
 # LLM: The slow summary call checks both cancellation sources before and after provider I/O and
 # uses the applied view as its semantic base when present, matching source hiding and checkpoint
 # base. Interruption closes the block neutrally; only real failure enters the live Compact circuit.
@@ -696,6 +712,7 @@ def _summarize_live_compact(
     progress: dict[str, object],
     *,
     provider_prompt: str,
+    provider_outcome: list[dict[str, object]] | None = None,
 ) -> str:
     from ..conversation.compact_guard import compact_exception_code
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
@@ -709,12 +726,9 @@ def _summarize_live_compact(
         summary = _native_tool_history_summary(
             agent,
             params,
-            previous_summary=(
-                params.compact_context.view.summary
-                if params.compact_context is not None
-                else binding.thread.summary if binding is not None else ""
-            ),
+            previous_summary=_live_compact_previous_summary(params, binding),
             provider_prompt=provider_prompt,
+            provider_outcome=provider_outcome,
         )
         raise_if_compact_interrupted(interrupt_check)
         return summary
@@ -751,6 +765,13 @@ def _summarize_live_compact(
         raise
 
 
+# 函数用途: 取计划里服务端压缩项的密文（没有返回空串），交给 IR 替换与视图刷新。
+def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
+    from ..conversation.compact_remote import provider_compaction_content
+
+    return provider_compaction_content(plan.provider_compaction)
+
+
 # LLM: 候选与 checkpoint/CAS 失败才恢复原列表；提交成功后的投影异常必须保留已提交历史。同步检查中断与故障回归。
 # 函数用途: 沿原会话事务提交压缩候选，明确分开可回滚阶段和已提交后的展示阶段。
 def _apply_native_compact_plan(
@@ -770,7 +791,7 @@ def _apply_native_compact_plan(
             NativeCompactWindow(
                 params.tool_ir_history, params.tool_context, params.archive_tool_calls,
             ),
-            summary=plan.semantic_summary,
+            summary=NativeCompactSummary(plan.semantic_summary, _plan_provider_compaction(plan)),
             target_tokens=plan.target_tokens,
             estimate_tokens=estimator,
         )
@@ -836,6 +857,7 @@ def _apply_native_compact_plan(
     if params.compact_context is not None:
         _refresh_native_compact_context(
             params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
+            provider_compaction=plan.provider_compaction,
         )
     return _publish_native_compact_result(
         agent, params, plan, dropped=dropped, after_tokens=after_tokens,
@@ -951,6 +973,7 @@ def _commit_native_ir_generation(
         plan.binding,
         LiveToolCompactCommitRequest(
             summary=plan.semantic_summary,
+            provider_compaction=plan.provider_compaction,
             source_tool_call_ids=tuple(ref["call_id"] for ref in source_refs),
             retained_tool_call_ids=tuple(ref["call_id"] for ref in retained_refs),
             source_tool_refs=source_refs,
@@ -991,6 +1014,7 @@ def _refresh_native_compact_context(
     *,
     summary: str,
     source_refs: tuple[dict[str, str], ...],
+    provider_compaction: dict[str, object] | None = None,
 ) -> None:
     from ..conversation.compact_summary_view import AppliedCompactContext, CompactSummaryView
 
@@ -1006,6 +1030,7 @@ def _refresh_native_compact_context(
         source_tool_refs=(*view.source_tool_refs, *(dict(ref) for ref in source_refs)),
         legacy_message_end_ids=view.legacy_message_end_ids,
         generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
+        provider_compaction=dict(provider_compaction or {}),
     )
     object.__setattr__(params, "compact_context", AppliedCompactContext(
         thread_id=previous.thread_id,
@@ -1251,6 +1276,7 @@ def _native_tool_history_summary(
     *,
     previous_summary: str = "",
     provider_prompt: str = "",
+    provider_outcome: list[dict[str, object]] | None = None,
 ) -> str:
     from ..memory_archive.compact_semantic_summary import (
         LiveToolHistorySummaryRequest,
@@ -1282,6 +1308,7 @@ def _native_tool_history_summary(
             tools=surface.tools,
             system_instruction=surface.system_instruction,
             interrupt_check=partial(_native_compact_interrupted, params),
+            provider_outcome=provider_outcome,
         )
     )
 

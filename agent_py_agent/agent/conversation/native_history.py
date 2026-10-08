@@ -138,7 +138,25 @@ def _legacy_row_message(row: object) -> dict[str, Any] | None:
 # LLM: 顶层校验共用唯一迭代器，输出嵌套值在此隔离，不字符串化或缩短未来content类型。
 # 函数用途: 将有效原生消息复制为调用者独占的列表。
 def _normalized_native_messages(value: object) -> list[dict[str, Any]]:
-    return [{'role': role, 'content': deepcopy(content)} for role, content in _native_message_values(value)]
+    result = []
+    for role, content in _native_message_values(value):
+        content = _without_provider_compaction_blocks(content)
+        if content is None:
+            continue
+        result.append({'role': role, 'content': deepcopy(content)})
+    return result
+
+
+# LLM: 服务端压缩项（responses_compaction 块）只能由检查点视图在前缀里发；落盘行里残留的块（旧版本归档）回放时去掉，
+#   去掉后空消息整条丢弃。别家后端读不懂这种块（MiniMax 400 2013），兼容后端也不该收到第二份。
+# 函数用途: 从一条回放消息的内容里剔除服务端压缩项块；整条只剩该块时返回 None。
+def _without_provider_compaction_blocks(content: object):
+    if not isinstance(content, list):
+        return content
+    kept = [block for block in content if not (isinstance(block, dict) and block.get("type") == "responses_compaction")]
+    if not kept and content:
+        return None
+    return kept
 
 
 # LLM: 本入口只借用值作形状验证，调用方不得保存或修改借用content；最终公开投影由normalizer隔离。

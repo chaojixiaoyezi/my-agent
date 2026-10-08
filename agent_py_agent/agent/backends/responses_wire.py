@@ -24,6 +24,14 @@ def reasoning_item(value: object) -> dict:
     return result
 
 
+# LLM: 服务端压缩项只认 type=compaction 且 encrypted_content 为字符串；不保存 id、不解读密文、不让它携带工具字段。
+# 函数用途: 清洗供应商返回或回放用的压缩项。
+def compaction_item(value: object) -> dict:
+    if not isinstance(value, dict) or value.get("type") != "compaction" or not isinstance(value.get("encrypted_content"), str):
+        return {}
+    return {"type": "compaction", "encrypted_content": value["encrypted_content"]}
+
+
 # LLM: 工具结果依据 tool_use_id 匹配，助手工具依据 canonical IR；任何自然语言都不能生成 function_call。
 #   reasoning 项必须紧跟它产出的消息或函数调用，所以助手轮末尾没有后继的 reasoning 项不发送（只影响本次请求）。
 # 函数用途: 转换 Responses items，图片在发送边界编码，未支持的视频显式拒绝而不静默丢失。
@@ -46,6 +54,10 @@ def message_items(message: dict, model: str) -> list[dict]:
             continue
         if kind == "text":
             result.append({"role": role, "content": str(block.get("text") or "")})
+            continue
+        # 服务端压缩项是顶层 input 项（不在消息里），由 CompactionSummary 的适配消息带进来，任何角色都按项回放。
+        if kind == "responses_compaction" and (compaction := compaction_item(block.get("item"))):
+            result.append(compaction)
             continue
         if role == "assistant" and kind == "responses_reasoning" and block.get("model") == model and (item := reasoning_item(block.get("item"))):
             result.append(item)
@@ -167,6 +179,9 @@ def response_fields(obj: dict, model: str) -> dict:
             continue
         if kind == "reasoning" and (raw := reasoning_item(item)):
             blocks.append({"type": "responses_reasoning", "model": model, "item": raw})
+            continue
+        if kind == "compaction" and (raw := compaction_item(item)):
+            blocks.append({"type": "responses_compaction", "model": model, "item": raw})
             continue
         if kind == "function_call":
             call = _function_block(item)

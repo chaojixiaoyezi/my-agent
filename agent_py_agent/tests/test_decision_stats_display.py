@@ -15,8 +15,9 @@ pre_recall 与 recall 共用阶段预算，排在后面的 pre_recall 常常一�
 - 失败构成出现前写下的旧快照（没有 decision_unknown_failures 键）按旧账规则把失败记为分不清是否发出，
   不能被补成 0 后说成“未发出”（9b 复审）。下面手写的新格式快照都显式带上失败构成两键。
 
-2026-10-08（07，用户定的状态行布局）：决策段去掉“已报”两字、开关值放括号（见 test_tui_status_line_display.py）；
-非决策调用的 LLM 段（估算/未发出/缺报）不再显示在状态行，口径函数仍供审计用量行使用；“会话累计”改名“累计会话”且只算输入。
+2026-10-08（07，用户定的状态行布局）：决策段只显示个数（成功/失败/未发出），不再显示已报/估算 token 和括号说明，开关值放括号
+（见 test_tui_status_line_display.py）；决策调用的用量不计入总缓存/累计会话/输出；非决策调用的 LLM 段（估算/未发出/缺报）
+不再显示在状态行，口径函数仍供审计用量行使用；“会话累计”改名“累计会话”且只算输入。
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ def _line(**fields) -> str:
 def test_provider_reported_calls_show_only_the_reported_figure():
     text = _line(decision_call_count=1, decision_success_count=1, decision_input_reported_calls=1,
                  decision_input_tokens=120, decision_unfinished_calls=0, decision_unknown_failures=0)
-    assert "决策 120 token · 成功 1 · 失败 0" in text
+    assert "决策 成功 1 · 失败 0" in text and "token" not in text
     assert "估算" not in text and "缺报" not in text and "未发出" not in text
 
 
@@ -67,14 +68,14 @@ def test_partially_reported_success_is_extrapolated_without_a_missing_note():
     # 有一部分成功调用回报了输入：按已报平均值外推并带 ≈，不挂“未回报用量”说明（那只留给一次都没回报的情况）
     text = _line(decision_call_count=3, decision_success_count=3, decision_input_reported_calls=1, decision_input_tokens=50,
                  decision_unfinished_calls=0, decision_unknown_failures=0)
-    assert "决策 ≈150 token · 成功 3 · 失败 0" in text and "未回报" not in text
+    assert "决策 成功 3 · 失败 0" in text and "未回报" not in text and "≈" not in text
 
 
 def test_estimate_only_is_labelled_unfinished_and_is_not_reported_as_missing():
     text = _line(failure_count=1, unfinished_calls=1, unfinished_tokens=321, decision_call_count=1,
                  decision_failure_count=1, decision_unfinished_calls=1, decision_unknown_failures=0,
                  decision_estimated_tokens=321)
-    assert "决策 估算 321 token（未完成） · 成功 0 · 失败 1" in text
+    assert "决策 成功 0 · 失败 1" in text and "估算" not in text
     assert "缺报" not in text and "LLM" not in text, "有估算的超时调用不算缺报，决策调用也不在 LLM 段重复出现"
 
 
@@ -83,18 +84,18 @@ def test_calls_without_any_data_are_explained_inside_their_own_count():
     legacy = _line(failure_count=3, unknown_failures=3, decision_call_count=4, decision_success_count=1,
                    decision_input_reported_calls=1, decision_input_tokens=80, decision_failure_count=3,
                    decision_unfinished_calls=0, decision_unknown_failures=3)
-    assert "决策 80 token · 成功 1 · 失败 3（其中 3 次分不清是否发出）" in legacy
+    assert "决策 成功 1 · 失败 3" in legacy and "分不清" not in legacy
     assert "缺报" not in legacy and "LLM" not in legacy, "同一次决策调用只在决策段讲一次"
     unreported = _line(decision_call_count=2, decision_success_count=2, decision_unfinished_calls=0,
                        decision_unknown_failures=0)
-    assert "决策 成功 2（其中 2 次未回报用量） · 失败 0" in unreported and "缺报" not in unreported
+    assert "决策 成功 2 · 失败 0" in unreported and "缺报" not in unreported and "未回报" not in unreported
 
 
 def test_unsent_failures_are_listed_apart_and_not_counted_as_failures():
     text = _line(failure_count=2, decision_call_count=3, decision_success_count=1, decision_input_reported_calls=1,
                  decision_input_tokens=50, decision_failure_count=2, decision_unfinished_calls=0,
                  decision_unknown_failures=0)
-    assert "决策 50 token · 成功 1 · 失败 0 · 未发出 2" in text and "LLM" not in text
+    assert "决策 成功 1 · 失败 0 · 未发出 2" in text and "LLM" not in text
 
 
 def test_llm_segment_is_not_rendered_but_estimates_still_mark_the_session_total():
@@ -110,7 +111,7 @@ def test_decision_share_keeps_its_own_breakdown_without_an_llm_segment():
     text = _line(failure_count=6, unfinished_calls=2, unfinished_tokens=542, unknown_failures=2, decision_call_count=3,
                  decision_failure_count=3, decision_unfinished_calls=1, decision_estimated_tokens=42,
                  decision_unknown_failures=1)
-    assert "决策 估算 42 token（未完成） · 成功 0 · 失败 2（其中 1 次分不清是否发出） · 未发出 1" in text
+    assert "决策 成功 0 · 失败 2 · 未发出 1" in text
     assert "LLM" not in text
 
 
@@ -228,7 +229,7 @@ def test_production_shape_snapshot_keeps_old_failures_as_failures(tmp_path):
     public = public_model_metrics(dict(_PRODUCTION_SNAPSHOT))
     assert (public["decision_unfinished_calls"], public["decision_unknown_failures"]) == (0, 2), "与旧用量行同一规则"
     text = _line(**_PRODUCTION_SNAPSHOT)
-    assert "决策 300 token · 成功 3 · 失败 2（其中 2 次分不清是否发出）" in text
+    assert "决策 成功 3 · 失败 2" in text
     assert "未发出" not in text and "LLM" not in text, "旧快照没有全部用途的失败构成，LLM 段留空而不是乱报"
 
     # 重连、切入子代理页面读回的是落盘的原始旧快照，同样按旧账口径显示
@@ -238,7 +239,7 @@ def test_production_shape_snapshot_keeps_old_failures_as_failures(tmp_path):
                                             lambda item: replace(item, model_metrics=dict(_PRODUCTION_SNAPSHOT)))
     persisted = "".join(part[1] for line in render_model_metrics(
         model_metrics_from_thread(store, thread.thread_id), 400) for part in line)
-    assert "失败 2（其中 2 次分不清是否发出）" in persisted and "未发出" not in persisted
+    assert "失败 2" in persisted and "未发出" not in persisted
 
 
 def test_llm_segment_flows_from_ledger_events_through_the_publisher(tmp_path):
@@ -258,7 +259,7 @@ def test_llm_segment_flows_from_ledger_events_through_the_publisher(tmp_path):
     metrics = publish_model_metrics(agent, params, pending=False)
     text = "".join(part[1] for line in render_model_metrics(metrics, 400) for part in line)
 
-    assert "决策 估算 42 token（未完成） · 成功 0 · 失败 1" in text
+    assert "决策 成功 0 · 失败 1" in text
     assert "LLM" not in text, "非决策调用的估算段不再显示在状态行"
     # MU1（9b 复审）：未完成调用的发送前估算只在估算段显示，不能算进累计会话
     assert metrics["unfinished_tokens"] == 84 and "累计会话 0 · " in text

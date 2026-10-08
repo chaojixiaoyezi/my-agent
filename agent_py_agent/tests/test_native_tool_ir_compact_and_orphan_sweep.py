@@ -2381,7 +2381,8 @@ def test_post_commit_context_refresh_failure_keeps_committed_history(tmp_path, m
     committed, published = {}, []
     failure = failure_type("post-commit context refresh failed")
 
-    def fail_refresh(refresh_params, refreshed_thread, *, summary, source_refs):
+    def fail_refresh(refresh_params, refreshed_thread, **kwargs):
+        summary, source_refs = kwargs["summary"], kwargs["source_refs"]
         assert refresh_params is params and source_refs
         assert refreshed_thread.compact_generation == 1
         assert store.threads.load(thread.thread_id).compact_generation == 1

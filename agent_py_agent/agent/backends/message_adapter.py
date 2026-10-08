@@ -116,6 +116,11 @@ def _flush_results(messages: list[dict[str, Any]], pending_results: list[dict[st
 # 函数用途: 将非工具结果的 IR 项追加为有序原生消息。
 def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem) -> None:
     if isinstance(item, CompactionSummary):
+        if item.provider_compaction:
+            # 服务端压缩项：Responses 适配器（responses_wire.message_items）把这个块发成顶层 compaction 项，不发文字。
+            messages.append({"role": "user", "content": [{"type": "responses_compaction", "item": {
+                "type": "compaction", "encrypted_content": item.provider_compaction}}]})
+            return
         text = str(item.text or "")
         if text.strip():
             messages.append(

@@ -29,6 +29,8 @@ class CompactSummaryView:
     source_tool_refs: tuple[dict[str, object], ...] = ()
     legacy_message_end_ids: tuple[str, ...] = ()
     generation: int = 0
+    # 选中检查点的服务端压缩记录（空字典 = 普通文字摘要）；只有当前后端能读时才会选中带它的检查点。
+    provider_compaction: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: Applied context is a per-run immutable snapshot of the chosen scope and its summary view;
@@ -166,9 +168,10 @@ def _row_sources(row: dict[str, object]) -> tuple[tuple[str, ...], tuple[dict[st
 def _indexed_rows(chain, scope: CompactScope):
     by_id: dict[str, dict[str, object]] = {}
     selected = None
+    # provider_compaction（服务端压缩记录，约 2KB）留在索引里：兼容性回退要沿 base 链逐个检查，不能只看选中行。
     keys = ("checkpoint_id", "schema", "generation", "created_at", "scope", "previous_checkpoint_id",
             "summary_base_checkpoint_id", "source_kind", "source_message_ids", "source_tool_refs",
-            "source_end_message_id", "source_tool_call_ids", "request_id", "attempt_id")
+            "source_end_message_id", "source_tool_call_ids", "request_id", "attempt_id", "provider_compaction")
     for row in chain:
         row_scope = _checkpoint_scope(row)
         _validate_summary(row)
@@ -205,6 +208,7 @@ def resolve_compact_summary_view(
         raise TypeError("Compact 作用域类型无效")
     with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
         by_id, selected = _indexed_rows(chain, scope)
+    selected = _readable_checkpoint(agent, by_id, selected)
     if selected is None:
         return CompactSummaryView()
     messages: set[str] = set()
@@ -238,7 +242,39 @@ def resolve_compact_summary_view(
         source_tool_refs=tuple(tools),
         legacy_message_end_ids=tuple(ends),
         generation=int(selected["generation"]),
+        provider_compaction=_validated_provider_compaction(selected),
     )
+
+
+# LLM: 服务端压缩检查点只有同协议同端点的后端能读（compact_remote.provider_compaction_compatible）；当前后端读不了就沿
+#   summary_base 链退到最近一个能读的检查点（通常是文字摘要），退到头返回 None = 没有可用摘要。被跳过的检查点仍在账本里，
+#   它覆盖的行因此重新算作未覆盖，下一次压缩会从归档原文重新做一份该后端能读的摘要（换模型后的自愈，不丢上下文）。
+# 函数用途: 从选中检查点起找当前后端读得了的那一个。
+def _readable_checkpoint(agent, by_id, selected):
+    from .compact_remote import provider_compaction_compatible
+
+    backend = getattr(agent, "backend", None)
+    row = selected
+    while row is not None:
+        record = row.get("provider_compaction")
+        if record is None or provider_compaction_compatible(backend, record):
+            return row
+        base_id = _summary_base_id(row)
+        row = by_id.get(base_id) if base_id else None
+    return None
+
+
+# LLM: 只接受带 item.encrypted_content 字符串的字典；缺失返回空字典，坏形状视为账本损坏（与 summary 校验同一严格度）。
+# 函数用途: 校验并复制检查点里的服务端压缩记录。
+def _validated_provider_compaction(row: dict[str, object]) -> dict[str, object]:
+    record = row.get("provider_compaction")
+    if record is None:
+        return {}
+    from .compact_remote import provider_compaction_content
+
+    if type(record) is not dict or not provider_compaction_content(record):
+        raise OSError("conversation compact provider compaction record is invalid")
+    return dict(record)
 
 
 __all__ = ["AppliedCompactContext", "CompactSummaryView", "resolve_compact_summary_view"]

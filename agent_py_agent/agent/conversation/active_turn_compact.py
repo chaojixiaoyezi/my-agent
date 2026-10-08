@@ -376,7 +376,7 @@ def _execute_active_turn_compact(
     _emit_progress(callback, progress, phase="started", stage="preparing", percent=5)
     _emit_progress(callback, progress, phase="progress", stage="summarizing", percent=20)
     try:
-        replacement = _active_turn_replacement_summary(agent, plan, request)
+        replacement, provider_compaction = _active_turn_replacement_summary(agent, plan, request)
         raise_if_compact_interrupted(request.interrupt_check)
         projection = _project_active_turn_request(agent, plan, request, replacement)
         # 接受门与提交记的是折算后的值；projection 本身保留原始纯投影，供宿主提交后改写本轮观测基线。
@@ -404,7 +404,8 @@ def _execute_active_turn_compact(
             percent=82,
             after_tokens=after_tokens,
         )
-        updated = _commit_active_turn_compact(agent, plan, request, replacement, after_tokens)
+        updated = _commit_active_turn_compact(agent, plan, request, replacement, after_tokens,
+                                              provider_compaction=provider_compaction)
     except (InterruptedError, ToolCancelled):
         _emit_progress(
             callback,
@@ -530,7 +531,7 @@ def _active_turn_replacement_summary(
     agent: object,
     plan: _ActiveTurnArchiveCompactPlan,
     request: ActiveTurnArchiveCompactRequest,
-) -> str:
+) -> tuple[str, dict[str, object] | None]:
     from ..memory_archive.compact_semantic_summary import (
         LiveToolHistorySummaryRequest,
         semantic_summary_config,
@@ -541,6 +542,7 @@ def _active_turn_replacement_summary(
     config = semantic_summary_config(agent)
     if not config.enabled:
         raise ValueError("active-turn carried compact semantic summary is disabled")
+    provider_outcome: list[dict[str, object]] = []
     scope_id = str(getattr(plan.thread, "workspace_task_id", "") or "")
     context = request.compact_context
     previous_summary = str(context.view.summary if context is not None else plan.thread.summary or "")
@@ -557,12 +559,13 @@ def _active_turn_replacement_summary(
             previous_summary=previous_summary,
             max_output_chars=config.max_input_chars,
             interrupt_check=request.interrupt_check,
+            provider_outcome=provider_outcome,
             **_summary_source_material(plan, request, previous_summary),
         )
     )
     if not replacement:
         raise ValueError("active-turn carried compact summary is empty")
-    return replacement
+    return replacement, (provider_outcome[-1] if provider_outcome else None)
 
 
 # LLM: 返回 LiveToolHistorySummaryRequest 的来源字段（history/fallback_history/provider_prompt/provider_history_messages/
@@ -585,14 +588,16 @@ def _summary_source_material(
                 "tool_choice": None, "system_instruction": fork.system_instruction}
     from ..tooling.runtime_contracts import ToolChoice
     from .compact_provider_surface import (
-        conversation_compact_provider_messages,
         conversation_compact_provider_prompt,
+        conversation_compact_provider_source,
     )
+    from .compact_remote import provider_compaction_content
 
     context, surface = request.compact_context, request.provider_surface
-    provider_history = tuple(conversation_compact_provider_messages(
+    provider_history = tuple(conversation_compact_provider_source(
         previous_summary, context.view.generation if context is not None else plan.thread.compact_generation,
         (), volatile_sections=surface.volatile_sections,
+        previous_provider_compaction=provider_compaction_content(getattr(context.view, "provider_compaction", None)) if context is not None else "",
     )) if surface is not None else ()
     return {"history": source_history,
             "provider_prompt": conversation_compact_provider_prompt(surface, "") if surface is not None else "",
@@ -629,12 +634,15 @@ def _commit_active_turn_compact(
     request: ActiveTurnArchiveCompactRequest,
     replacement: str,
     after_tokens: int,
+    *,
+    provider_compaction: dict[str, object] | None = None,
 ) -> ConversationThread:
     return commit_live_tool_compact(
         agent,
         plan.binding,
         LiveToolCompactCommitRequest(
             summary=replacement,
+            provider_compaction=provider_compaction,
             source_tool_call_ids=plan.source_call_ids,
             source_tool_refs=plan.source_tool_refs,
             retained_tool_refs=plan.retained_tool_refs,

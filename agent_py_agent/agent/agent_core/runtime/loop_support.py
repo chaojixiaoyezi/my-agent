@@ -1042,6 +1042,14 @@ def _applied_compact_context(value: object):
     return value
 
 
+# LLM: 视图带服务端压缩记录时取它的密文（compact_remote.provider_compaction_content），摘要项据此发压缩项而不是占位文本。
+# 函数用途: 从本次适用视图取服务端压缩项密文，没有返回空串。
+def _view_provider_compaction(view: object) -> str:
+    from ...conversation.compact_remote import provider_compaction_content
+
+    return provider_compaction_content(getattr(view, "provider_compaction", None))
+
+
 # LLM: A narrow history seed may be None even when an applied scoped summary exists. Add that
 # summary to current-turn IR after the media-owning initializer, leaving its carried handoff intact.
 # The initializer is the user turn or the lifecycle host event (_current_turn_opener_count).
@@ -1060,6 +1068,7 @@ def _native_ir_with_applied_summary(
     summary = CompactionSummary(
         f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}",
         source="applied_compact",
+        provider_compaction=_view_provider_compaction(context.view),
     )
     history.insert(_current_turn_opener_count(history), summary)
     return history
@@ -1090,7 +1099,8 @@ def _native_provider_history_messages(
     if summary and include_compact_summary:
         prefix_items.append(
             CompactionSummary(
-                f"# Earlier Conversation Summary (generation {generation})\n{summary}"
+                f"# Earlier Conversation Summary (generation {generation})\n{summary}",
+                provider_compaction=_view_provider_compaction(context.view) if context is not None else "",
             )
         )
     adapter = AnthropicMessageAdapter()
@@ -1180,21 +1190,28 @@ def _with_input_media_manifest(agent: object, history: list[object]) -> list[obj
 
 # LLM: Persist only this run's provider-neutral IR plus the terminal assistant response. The
 # prior-thread prefix is excluded; ConversationStore and Compact own its lifetime. A lifecycle-wake
-# slice also leaves out its slice-only host snapshots (_replayable_turn_history).
+# slice also leaves out its slice-only host snapshots (_replayable_turn_history). 服务端压缩项不进对话行：
+# 它只属于检查点（provider_compaction），下一轮由视图前缀按后端兼容性再发；归档时只留占位文本，换模型重放才不会把
+# 别家读不懂的项发出去（2026-10-08 在 .16 上 MiniMax 收到 responses_compaction 块直接 400）。
 # 函数用途: 整理一轮结束后可供下一轮精确回放的原生消息，包括工具调用、结果和最终回复。
 def _completed_turn_native_messages(
     params: ToolLoopExecuteParams,
     final_response: object,
 ) -> list[dict[str, object]]:
+    from dataclasses import replace as dc_replace
+
     from ...backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
-    from ...backends.tool_ir import AssistantTurn
+    from ...backends.tool_ir import AssistantTurn, CompactionSummary
     from ..native_tool_protocol import native_tool_use_active
 
     if not native_tool_use_active(params):
         return []
-    history = _replayable_turn_history(
-        list(getattr(params, "tool_ir_history", None) or []), getattr(params, "turn_trigger", None),
-    )
+    history = [
+        dc_replace(item, provider_compaction="") if isinstance(item, CompactionSummary) and item.provider_compaction else item
+        for item in _replayable_turn_history(
+            list(getattr(params, "tool_ir_history", None) or []), getattr(params, "turn_trigger", None),
+        )
+    ]
     blocks = [
         deepcopy(item)
         for item in list(getattr(final_response, "assistant_content_blocks", None) or [])

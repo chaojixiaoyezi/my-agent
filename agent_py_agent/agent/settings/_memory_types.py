@@ -29,6 +29,7 @@ class MemorySettings:
     memory_compact_auto_trigger_max_tokens: int = 300_000
     memory_compact_recovery_target_percent: int = 60
     memory_compact_summary_max_output_tokens: int = 16_384
+    memory_compact_remote_enabled: bool = True
     memory_compact_reasoning_level: str = "low"
     memory_curator_enabled: bool = True
     memory_curator_model_profile: str = ""

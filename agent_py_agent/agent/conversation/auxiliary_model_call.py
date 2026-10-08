@@ -91,6 +91,8 @@ class AuxiliaryModelCallRequest:
     thread_id: str = ""
     purpose: str = "auxiliary"
     response_schema: dict[str, Any] | None = None
+    # 服务端压缩：True 时后端在历史末尾放压缩触发项而不是压缩指令（prompt 必须没有动态尾巴）；见 compact_remote。
+    compaction_trigger: bool = False
     on_observation: Callable[[AuxiliaryModelCallObservation], None] | None = field(default=None, repr=False, compare=False)
 
 
@@ -389,7 +391,8 @@ def _auxiliary_provider_options(
     thinking_disabled, reasoning_effort = _compact_reasoning_options(request, backend)
     reasoning_update_effort = _compact_reasoning_update_effort(request, backend)
     output_cap = _compact_output_cap(request)
-    declared = bool(system_instruction or thinking_disabled or reasoning_effort or reasoning_update_effort)
+    declared = bool(system_instruction or thinking_disabled or reasoning_effort or reasoning_update_effort
+                    or request.compaction_trigger)
     has_timeouts = timeouts.first_event_budget_seconds is not None or timeouts.total_deadline_seconds is not None
     if not (declared or has_timeouts or output_cap is not None):
         return None
@@ -402,6 +405,7 @@ def _auxiliary_provider_options(
         thinking_disabled=thinking_disabled,
         reasoning_effort=reasoning_effort,
         reasoning_update_effort=reasoning_update_effort,
+        compaction_trigger=bool(request.compaction_trigger),
         max_output_tokens=output_cap,
         first_event_timeout_seconds=timeouts.first_event_budget_seconds,
         total_deadline_seconds=timeouts.total_deadline_seconds,
@@ -456,6 +460,7 @@ def _compact_reasoning_options(request: AuxiliaryModelCallRequest, backend: obje
 def _is_compact_purpose(purpose: str) -> bool:
     return str(purpose or "") in {
         "conversation_compact_summary",
+        "conversation_compact_remote",
         "conversation_compact_media_digest",
         "compact_live_tool_summary",
         "compact_carried_summary",

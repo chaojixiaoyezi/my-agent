@@ -66,6 +66,8 @@ class LiveToolCompactCommitRequest:
     forced: bool = False
     after_checkpoint: Callable[[], None] | None = None
     interrupt_check: CompactInterruptCheck | None = None
+    # 服务端压缩记录（compact_remote.provider_compaction_record），写进检查点；None = 普通文字摘要。
+    provider_compaction: dict[str, object] | None = None
 
 
 # LLM: Only a policy-approved transcript-authoritative turn may persist a live-tool Compact.
@@ -152,6 +154,7 @@ def commit_live_tool_compact(
             forced=bool(request.forced),
             scope=binding.scope,
             summary_base_checkpoint_id=request.summary_base_checkpoint_id,
+            provider_compaction=request.provider_compaction,
         ),
     )
     if request.after_checkpoint is not None:
