@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from agent_py_agent.agent.capability.runtime_config_reload import (
     capability_config_for_agent,
     capability_config_path_for,
 )
+from agent_py_agent.agent.common.nofollow_fs import write_bytes_atomic_beneath
 from agent_py_agent.agent.contracts.model_call_ledger import model_call_purpose
 from agent_py_agent.agent.gateway_parts import (
     GatewayAskParams,
@@ -79,11 +81,12 @@ def _selection_config_path(agent: object):
     return path
 
 
-# LLM: 只经原参数中心标量写入器改一个布尔键，其余行保留；原字节在 finally 恢复，新建文件退出删除，不刷新预算缓存。
-# 函数用途: 在隔离用户文件中临时设置选择开关；有写盘副作用，但不触发安装、授权或模型工具。
+# LLM: 原标量写入器只改一个布尔键；finally 复用 no-follow 原子字节写回，保留原权限（包括只读）及 BOM/CRLF，不热刷新预算。
+# 函数用途: 临时设置隔离用户开关后原子恢复原字节/权限，或删除新文件；有写盘副作用，不触发安装、授权或模型工具。
 @contextmanager
 def _selection_switch_file(path, enabled: bool):
     original = path.read_bytes() if path.exists() else None
+    original_mode = stat.S_IMODE(path.stat().st_mode) if original is not None else 0o600
     try:
         if original is None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +97,9 @@ def _selection_switch_file(path, enabled: bool):
         if original is None:
             path.unlink(missing_ok=True)
         else:
-            path.write_bytes(original)
+            write_bytes_atomic_beneath(path.parent, (path.name,), original, file_mode=original_mode)
+            # 原子写的创建权限仍受 umask 约束，替换后恢复精确的存量权限位。
+            path.chmod(original_mode)
 
 
 # LLM: 只替换明确的采用行，产品规则形状变了则拒绝，不悄悄把其它规则改成新版。
