@@ -8,6 +8,7 @@
 - 新 `test_midturn_compact_prefix.py` 四项：两条双回合路径保持全部13项前缀，首个新增 input[13] 为 assistant；两条辅助压缩路径保持推理/工具对并不改输入。
 - 旧期望变化：`test_applied_compact_context` 改为 seeded IR 含一份应用摘要、prior无摘要、出站前置且媒体仍在；内部 carried handoff位置不变。
 - `test_compact_remote_provider` 不再归档应用摘要占位以免下回合双份；`test_native_tool_ir_compact_and_orphan_sweep` 机械摘要加统一代次标题，最新工具对保留断言不放宽。
+- 07 沙箱外全量复核补改：`test_background_scoped_compact` 的任务范围分支改为 IR 含一份应用摘要、prior 历史不含摘要；请求里摘要只出现一次的断言不变。
 - 聚焦八文件：midturn_compact_prefix、applied_compact_context、compact_remote_provider、native_tool_ir_compact_and_orphan_sweep、native_tool_use_ir_messages_flow、active_turn_compact_projection、subagent_runtime_compact、background_compact_recovery，193 passed。
 - guards9完整12文件194 passed；ruff、导入边界（0条）、doc-sync --base origin/main、strict尺寸、常数目录 --check（952项）、diff、clean-package均返回0；尺寸身份差集新增0/消失2，生成报告不提交。
 - 复跑：根目录 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_midturn_compact_prefix.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-midturn`；PY用ci-venv-312。
