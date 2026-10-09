@@ -109,7 +109,7 @@ def test_current_version_filters_missing_paths_not_authorization_or_old_pins(tmp
     assert '"resource_path":"methods/0.md"' in turns[0].text
 
 
-def test_failed_entry_logs_code_without_leaking_text_or_consuming_generation(tmp_path, monkeypatch, caplog):
+def test_failed_entry_logs_code_without_leaking_text_and_delivers_only_reference(tmp_path, monkeypatch, caplog):
     fixture = method_fixture(tmp_path)
     assert read_package(fixture).ok
     compact(fixture)
@@ -117,8 +117,11 @@ def test_failed_entry_logs_code_without_leaking_text_or_consuming_generation(tmp
         raise OSError("PRIVATE_ERROR_SENTINEL")
     package, = fixture.scope.skills.packages
     fixture.agent._current_skill_snapshot = replace(fixture.scope.skills, packages=(replace(package, reader=broken),))
-    assert carry(fixture) == []
-    assert records(fixture)[0]["carried_generation"] == 0
+    turns = carry(fixture)
+    assert len(turns) == 1 and "正文这次没带回" in turns[0].text
+    assert '"package_id":"entry-0"' in turns[0].text and "METHOD_ENTRY_0" not in turns[0].text
+    assert "PRIVATE_ERROR_SENTINEL" not in turns[0].text
+    assert records(fixture)[0]["carried_generation"] == 1
     assert "CONVERSATION_METHOD_ENTRY_UNAVAILABLE" in caplog.text and "PRIVATE_ERROR_SENTINEL" not in caplog.text
 
 
@@ -138,6 +141,11 @@ def test_failed_runtime_facts_delivery_does_not_consume_generation(tmp_path, mon
     compact(fixture)
     monkeypatch.setattr("agent_py_agent.agent.agent_core.tool_ir_history.record_runtime_facts_turn_ir", lambda *a, **kw: False)
     assert carry(fixture) == []
+    assert records(fixture)[0]["carried_generation"] == 0
+    # 投递失败也不能在同一 run 热重试；独立观察读取次数，避免提交门掩盖 attempts 失效。
+    before_reads = list(fixture.reads)
+    assert carry(fixture) == []
+    assert fixture.reads == before_reads
     assert records(fixture)[0]["carried_generation"] == 0
 
 
