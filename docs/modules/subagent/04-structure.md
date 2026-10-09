@@ -1,5 +1,13 @@
 # Subagent Structure
 
+## 自身运行工作目录写权限（2026-10-09，w3）
+
+- 权威路径：`subagents/context_bundle_refs.py::runtime_task_attributes` 的 `agent_run_workspace_dir` 与 `services/runner_context_service.py::_build_write_boundary` 的 `task_dir`；授权仍来自同一次 `allowed_write_roots`。
+- 合并落点：`agent_core/tool_runtime_ledger.py::_attach_owner_task_write_scope` 调用 `_retained_child_work_roots`，仅在普通 `task_local`、非 exact 范围中保留一个 owner 内已授权的自身窄根；缺字段、路径不一致或缺原窄授权不补。
+- 执行落点：同一根进入 `allowed_write_roots` 与 `execution_workspace_roots`。文件工具经 `tooling/write_boundary.py::_forbidden_root_blocks_target` 的原最具体路径裁决，再经 `_filesystem_read.py::resolve_write_path` 的 owner 与宿主写门；不修改这些门或审批链。
+- 边界：保留 runs/tasks 的祖先禁止，不保留共享任务根或兄弟根；同层禁止、locked_files、运行安装保护与 PathAccessPolicy 的 A 类宿主状态仍拒绝。原 owner 普通文件可写语义不变，不能把这一修复解释为收窄或放宽整个家目录。
+- 守卫：`tests/test_child_own_workspace_write.py` 使用真实上下文构造、runtime 合并、ToolExecutor 和 WriteFileTool，并核对 handler 标志及文件字节；这不是实际 OS 命令沙箱或生产子代理验收。
+
 ## 会话方法沿用的主/子边界（2026-10-08，w1）
 
 - `capability/method_carry.py::method_thread_id` 保留主会话资格判断；引用预算预留、完整重读参数和代次投递均不另建子授权入口。

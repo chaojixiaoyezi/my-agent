@@ -1,5 +1,13 @@
 # 子代理维护状态
 
+## 自身运行工作目录的窄授权保留（2026-10-09，w3；本地实现、待 3a 复核）
+
+- 解决问题：researcher 的执行上下文明确允许自身 `runs/<日期>/<任务>/work/agents/<子代理>`，但运行时合并只剩 owner 根，随后祖先 `runs/` 禁写规则使 `write_file` 在 handler 前返回 `WRITE_FORBIDDEN`。
+- 修复落点：`agent_core/tool_runtime_ledger.py::_retained_child_work_roots`，仅保留宿主绑定、与 `task_dir` 相等且原列表明确允许的自身根；不是恢复所有内部允许根，更不是授权整棵 runs/。
+- 真实文件工具的隔离合同测试覆盖写入/读回、自身缺授权或身份不匹配、其它 tasks/runs、兄弟与同名前缀目录、祖先任务账、符号链接、同层禁止、锁定、安装与任务核验状态保护。已有 owner 普通文件权限不变，原禁止位置继续拒绝。
+- 两处逐项变异已捕获：取消自身窄根保留使复现断言红；删除 runs/ 保护开放全树使四个边界断言红，均退出码 1，之后原样还原。
+- 聚焦、引用消费者与 guards9 等完整结果见 TESTS 首节；本轮不启动 Gateway，真实 TUI/研究子代理执行片、Linux/Windows 与生产环境未验证。
+
 ## 会话引用与中途补带边界（2026-10-08，w1；已实现，待 6d 复核）
 
 本次 `method_carry` 引用预留和 `_apply_native_compact_plan` CAS 后补带仍仅限 `method_thread_id` 非空的主会话；

@@ -30,6 +30,15 @@
 |-- agent_py_agent/tests/test_agents_cleanup_critical_section.py # 一次删除/全程持锁/续作/晋升租约合同
 ```
 
+## 子代理自身工作目录写边界（w3，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/agent_core/tool_runtime_ledger.py # 合并 owner 范围时保留宿主绑定且已授权的自身窄根
+`-- agent_py_agent/tests/test_child_own_workspace_write.py # 真实文件写链的自身目录放行、其它受保护位置拒绝及两处变异靶点
+```
+
+关键文件说明：`test_child_own_workspace_write.py` 通过真实 runner 上下文构造、runtime 边界合并和 ToolExecutor→WriteFileTool 写入/读回核对自身草稿授权；不替代真实生产子代理或 OS 沙箱验收。详细边界见子代理模块 04-structure。
+
 ## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08）
 
 ```text
