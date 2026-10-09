@@ -5,6 +5,29 @@
 - `common.tool_index_stream` 是E11a、Compact、artifact、晋升回退、通用控制面的唯一严格UTF-8读取器；control_plane保留兼容导出。预筛文本迭代器在需要旧合法性语义时先C解析并丢弃对象，E11a保留非候选零解析；对象迭代器C解析一次、只保留候选。Compact从四键AND选安全必要条件，最终仍原scope/旧请求回退；apply单扫描投影两类引用，scope carried也共用。artifact仅存ref/path候选，规范POSIX路径沿realpath/stat快路、其它平台及非规范路径仍原Path求值；无效ref仍扫描异常但不收集历史全集。晋升校验所有行，坏行整文件无证据，不留历史对象；资源错误/IO顺序保持原合同。已删除纯Python词法校验器，schema/权限/正文/归档写入不变，无缓存，实测及调用链见TESTS。
 - Compact 显式使用原 `read_text` 的 CR/LF/CRLF 通用换行；64KiB增量UTF-8及标准库换行解码不整读CR文件，E11a默认物理LF分行不变。只存匹配投影和每类首错，读取失败不返回半份引用；扫描完成后按原小调用→大输出次序报投影错，晚IO/UTF-8错误仍优先于前部坏字段。稳定索引/文件系统下已做路径、换行与异常对照；扫描途中外部改symlink不提供事务快照或完整等价保证，Windows运行及生产未验证。
 
+## Curator 恢复与领取的原子临界区（mc2-e11d-race，2026-10-08）
+
+- `curator._run_once` 唯一启动路径改为 `curator_commit.recover_and_acquire(CuratorLeaseRequest)`；领取失败/竞争为 busy，恢复故障为 `CURATOR_COMMIT_RECOVERY_FAILED`，随后模型执行在锁外。原 public state.acquire 仍取自己的 state 锁；复合入口调用已持锁的 `_acquire_unlocked`，两者均重读最新 state，不保存等待前快照。
+- 锁顺序仍是 quota admission → 规范绝对路径排序的全部文件锁。发现阶段只确定候选锁集合：旧事务目标、candidate、state、当前真实日期审计分片；获取后重新枚举目录、严格重读 manifest。新增目录、目标或跨日审计片不在持锁集合时返回 busy，不恢复一半才扩大锁集合。
+- 锁内同一 lease 身份/提交状态复核 → restore → 严格事务目录清理 → `_append_unlocked` 恢复审计 → `_acquire_unlocked` 写新 lease，形成一个边界。等待者看到前者已清理的 manifest 不会重复 restore；仍在锁内删除时的真实 FileNotFoundError 不被吞掉。
+- 独立 `recover_incomplete` 复用相同恢复边界并阻塞等待；服务启动复合入口非阻塞取锁，部分取锁失败由 ExitStack 释放已取资源。成功 commit 的 best-effort 清理仍在原锁内，与严格恢复清理共用目录范围检查/删除原语，失败策略不混用。
+- manifest/state/run audit 严格校验、私有写入格式、死亡/过期判据不改；不新增配置或持久 schema。`process_identity` 不成为 B5 放行或 D2 stop 证明。回归/三项变异与真实环境未验范围见 TESTS 的 mc2-e11d-race 节。
+
+## 网关重启后 Curator 租约接管（mc3-e11d + e11d-fix 返工，2026-10-08，分支 `worker/mc3-e11d`，待复核）
+
+- `memory_store/curator_state.stale_lease_reclaimable`（公开判据；mc4-1802 起 acquire 与事务恢复共用，不允许分叉）三条件同真——
+  `host == socket.gethostname()`（与写入租约共用 `_local_hostname`）、`pid != os.getpid()`、
+  `_pid_definitely_dead`（只认 `ProcessLookupError`；PermissionError 与其它 OSError 按不确定；`os.name == "nt"` 不探测）。其余情况继续等 `expires_at`。
+- `acquire`：租约未过期但持有者已确定死亡时提前接管；`curator_commit._same_live_lease`（崩溃事务恢复的 live 判定）复用同一判据——
+  持有者已死不再算 live；mc2-e11d-race 起 `_run_once` 使用上述 `recover_and_acquire`，在同一临界区先恢复旧事务再换租约，不再分两次获取锁。
+- 接管时 `lease.recovery` 写 `stale_lease_reclaimed`（含 `previous_lease_id`/`previous_run_id`/`previous_pid`/`previous_expires_at`/`reclaimed_at`）；
+  正常过期仍写 `expired_lease`（`_lease_handover_recovery` 分流）。
+- `curator_run_log._normalized_recovery` 的严格合同认 `stale_lease_reclaimed`（字段全集固定，与 `expired_lease` 同格式）；
+  接管事实随成功/失败运行记录序列化并读回，不会把整轮改写成 `CURATOR_RUN_AUDIT_FAILED`（mc4-1801）。
+- 新 lease 增加 `process_identity`（`build_process_identity()`：host_id/pid/start_time），供 B5 多进程核验；
+  旧租约无该字段按未知处理，`MemoryCuratorState.from_dict` 过滤未知顶层字段的行为不变。
+- `_bump_pending_reason` 从 acquire 拆出 pending 队列/代次更新，使 acquire 尺寸守在 near-soft 阈值下（span 56 → 46，基线 47）。
+
 ## Curator读取定位的进程缓存（mc2-e11c，2026-10-08）
 
 - `io/cursor_cache.py` 只提供短锁LRU、文件指纹和保守已见ID过滤器；键是绝对规范路径+精确ID，不按同ID/inode合并owner。值无正文/权限/持久消费状态，锁不包IO，不替代原写锁。

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """Gateway 正式后台主链使用的唯一 Memory Curator 服务。"""
 
-# LLM: Every trigger becomes a durable reason in one state store and every run uses one
-# no-tools backend, one evidence validator, and one recoverable batch committer.
+# LLM: 所有触发、模型提取和事务提交沿同一 state/后端/校验器；恢复与领取不可拆开，避免竞争扩大。
 # 模块用途: 调度增量策展、严格模型提取、整批提交、失败审计与保守自动晋升。
+# 恢复和领取使用 committer 的同一规范临界区，模型只在解锁且获得租约后执行。
 
 import json
 import logging
@@ -77,6 +77,7 @@ from .curator_run_log import (
 )
 from .curator_state import (
     CuratorLeaseLostError,
+    CuratorLeaseRequest,
     CuratorStateCorruptError,
     CuratorSuccessCommit,
     MemoryCuratorStateStore,
@@ -675,10 +676,9 @@ class _CuratorRunMixin:
                 break
         return combined_run_result(results)
 
-    # LLM: Recovery runs before lease acquisition; an unexpired prior lease remains busy, while
-    # an expired partial transaction is rolled back before any new input is processed.
-    #   返回（结果, 本批还剩几组没处理）；剩余组数只在成功时有意义，由 _execute 写在 context.route。
-    # 函数用途: 显式或自动执行一次 Curator 运行并返回无正文运行摘要。
+    # LLM: 恢复、清理、审计和领取不能拆开；共享锁竞争即 busy，尚未调用模型的启动失败不能报模型失败。
+    # 返回（结果, 剩余组数）；模型执行在完整接管解锁后开始，不持文件锁进行网络调用。
+    # 函数用途: 同锁接管旧事务后执行一次 Curator 批次，返回无正文摘要。
     def _run_once(
         self,
         *,
@@ -689,22 +689,14 @@ class _CuratorRunMixin:
         if not self.config.enabled and not force:
             return self._result(status="disabled", reason=reason), 0
         try:
-            self.committer.recover_incomplete(now=now)
+            acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
+                reason, self.config.revision(), _lease_seconds(self.config), now,
+            ))
         except CuratorStateCorruptError as exc:
             # 崩溃恢复阶段也读 state: 损坏同样隔离留证, 不进无落账的 unleased 路径。
             return self._corrupt_failure(reason, exc), 0
-        except Exception as exc:
-            return self._unleased_failure(reason, _failure_code(exc)), 0
-        try:
-            acquired = self.state_store.acquire(
-                reason=reason,
-                config_revision=self.config.revision(),
-                lease_seconds=_lease_seconds(self.config),
-                now=now,
-            )
-        except CuratorStateCorruptError as exc:
-            # 损坏 state 拒绝接管: 不 acquire、不消费、不自动重跑, 隔离留证转人工。
-            return self._corrupt_failure(reason, exc), 0
+        except Exception:
+            return self._unleased_failure(reason, "CURATOR_COMMIT_RECOVERY_FAILED"), 0
         if acquired is None:
             return self._result(status="busy", reason=reason), 0
         context = _run_context(reason, *acquired)

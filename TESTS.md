@@ -70,6 +70,82 @@
 
 - tool_output_externalizer.py:310/353及shared_workspace.py:126只写不读，不改；未找到独立决策工具索引扫描，决策涉及晋升时仍走上述验证器。包导出及测试引用不是额外生产触发点。
 
+## 配额锁竞争被误报为恢复失败（mc3-e11d-quota，2026-10-08，基线 b766de177，本地实现、待3a复核）
+
+- **来源**：MC4-2501（review25）。配额非零时另一个真实子进程暂时持有 owner 配额锁，候选版立刻 `failed / CURATOR_COMMIT_RECOVERY_FAILED`、模型调用为 0；基线 efc2f3336 会等锁后完成。
+- **根因**：`owner_quota._locked_owner_quota` 把底层 `BlockingIOError`（锁竞争）与其它故障统一包成 `OwnerQuotaUnavailable`；`curator_commit._enter_recovery_locks` 只捕 `BlockingIOError`，竞争落进恢复失败分支。
+- **改法**：`owner_quota` 新增 `OwnerQuotaLockContention(OwnerQuotaUnavailable)` 子类（由 `BlockingIOError` 产生），锁竞争与策略/存储故障分开转领域错误；`_enter_recovery_locks` 捕获 `(BlockingIOError, OwnerQuotaLockContention)` → busy。已有 `except OwnerQuotaUnavailable` 调用方行为不变；不靠异常消息文本判断。
+- **其它非阻塞配额调用点**（只查不改）：`plugin_environment.py:103`、`plugin_files_environment.py:108` 同样 `admission(blocking=False)`，竞争异常直接传播给插件安装上层，无"恢复失败"误分类；其余 `except OwnerQuotaUnavailable` 调用点均为默认阻塞路径（竞争时等锁），无同类误判。
+- **新测试**：`test_curator_quota_contention.py` 3 项（竞争→busy 或等锁成功；策略不可用→失败；扫描存储错误→失败且非模型失败）。
+- **mc4 补测**：`test_review25_extra.py` 原样 11 passed / 1 failed——2501 转绿；唯一红 `test_pre_model_collection_io_error_is_not_model_failure`（MC4-2502，基线同红，本轮不改）。
+- **既有补测**：review18 22 项 + review22 20 项 = 42 passed；mc2 新增 17 项 passed。
+- **变异**（一次一处，rc=1，SHA 还原一致）：M1 去掉竞争识别 → 竞争测试红（failed/CURATOR_COMMIT_RECOVERY_FAILED）；M2 把 `OwnerQuotaUnavailable` 全当 busy → 策略测试红（busy）。
+- **回归**：curator/memory/quota 相关 + guards9 = 774 passed。
+
+## Curator 恢复与接管竞态（mc2-e11d-race，2026-10-08，基线 efc2f3336，本地实现、待3a复核）
+
+- 来源：MC4-2201；原路径 review22 补测先复现 **12 failed / 8 passed**。锁前发现 manifest 不能成为恢复权威，恢复清理与新租约领取之间不能留下第二个执行者的接管窗口。
+- 修法：`curator_commit.recover_and_acquire` 先取 quota admission，再按规范绝对路径排序取事务全部目标、候选、state 与当日恢复审计分片锁；锁内重读严格 manifest 和最新 state，完成 restore → 严格 cleanup → 恢复审计 → 新租约领取，模型执行在锁外。新目录/目标/跨日分片不在已持锁集合时返回 busy，让下次重新发现；真实恢复 I/O 错误保留 `CURATOR_COMMIT_RECOVERY_FAILED`，不冒充模型失败。
+- 成功提交也在原目标锁内清理；成功后的 best-effort 清理与恢复时严格清理共用删除原语，但保留不同错误策略。`CuratorLeaseRequest` 只封装已有领取参数，不加配置、schema 或新的进程内权威；旧 public acquire 入口仍自行取 state 锁并读最新 state。
+- 新用例：`test_curator_recovery_race.py` 的 12 个双子进程交错（3 崩溃切点 × 2 暂停 seam × 死亡/过期）；`test_curator_recovery_critical_section.py` 覆盖清理持锁、发现后 manifest 变坏、真实目录消失异常、审计/领取持锁与取锁中途失败释放。子进程用临时真实存储与假模型，获胜者保持存活到结果观察完成，不是生产 Gateway 验收。
+- 原路径补测均未改写：review22 20 项与 review18 22 项，连同最终新增 17 项在三项变异还原后联合复跑 **59 passed**（0 失败/错误/跳过）；memory/curator 与完整 guards9 明确并集 **122 文件、1892 passed**（0 失败/错误/跳过）。两组含重叠测试，不合计为独立覆盖数；严格门禁逐项返回码见本次交接。
+- 三项变异逐次实际 pytest **rc=1**，各 1 failure、0 errors；测试后从独立备份拷回，不用 git checkout 覆盖产品改动，字节与 SHA 均相同：
+
+  | 变异 | 红测 | 实际 rc |
+  |---|---|---|
+  | M1 去掉锁内 manifest 复核，复用发现结果 | `test_manifest_changed_after_discovery_is_not_used` | 1 |
+  | M2 恢复 cleanup 移到释放临界区之后 | `test_cleanup_keeps_state_and_targets_locked` | 1 |
+  | M3 领取复用等待前 state，不读最新 state | 原 review22 `test_two_services_never_fail_or_restore_twice[False-loaded_manifest-1]`，两次模型执行且一方提交失败 | 1 |
+
+- 复现：工作树根用 ci-venv-312 的 `$PY`：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_curator_recovery_race.py agent_py_agent/tests/test_curator_recovery_critical_section.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc2-e11dr-reproduce`。原补测直接使用 review22-e11dfix 与 review18-e11d 的原文件路径。
+- 未验证：真实 Gateway 重启、真实供应商链路、线上收益、Linux/Windows 实机与全仓车道；B5 的 process_identity 仍只是记录字段，不作为授权或 D2 stop 证明。无推送、部署或真实 owner 数据访问。
+
+## E11d 返工：mc4 review18 两个阻断（mc3-e11d-fix，2026-10-08，分支 `worker/mc3-e11d`，待复核）
+
+- **来源**：mc4 review18 判"修改后部署"，两个部署阻断——MC4-1801 新接管事实 `stale_lease_reclaimed` 没接入运行审计：
+  `curator_run_log._normalized_recovery` 的严格校验不认该 kind，带接管事实的整轮被改写成 `CURATOR_RUN_AUDIT_FAILED`、运行账为空、失败收尾还清掉租约；
+  MC4-1802 提前接管绕过未完成事务恢复：`curator_commit` 恢复只看 `expires_at`（旧租约未过期就跳过），`acquire` 又按 pid 已死换租约，
+  带着旧事务清单开始新执行，之后等到过期恢复也一直 `CURATOR_COMMIT_RECOVERY_FAILED`。
+- **第 0 步**：`git merge 9e843077d`（生产源码 = main 25d4538db + E11a + E11c）→ 合并提交 `e789bc56c`；
+  三个文档冲突（TESTS.md、memory 02-progress、04-structure）双方保留，常数目录重生成一致（957 项）。
+- **修法**（范围放开到 curator_state/commit/run_log）：
+  1. `curator_run_log._normalized_recovery` 新增 `stale_lease_reclaimed` 严格分支（字段全集 = kind/previous_run_id/previous_lease_id/previous_pid/previous_expires_at/reclaimed_at，
+     与 `expired_lease` 同格式），成功与失败两条运行记录都经同一序列化/读回；不丢 recovery 绕过校验；
+  2. `curator_state._stale_lease_reclaimable` 改名公开 `stale_lease_reclaimable`，`curator_commit._same_live_lease` 未过期时改判"持有者是否确定死亡"——
+     与 `acquire` 提前接管共用同一判据；`_run_once` 保持先 `recover_incomplete`（原锁内核对身份、恢复旧事务）再 `acquire`，判据分叉的绕过通道关闭。
+- **mc4 补测**：`agent_py_agent/tests/test_review18_contracts.py`（9 def 参数化 22 项）修复前 11 failed / 11 passed 原样复现；修复后 **22 passed**。
+  原 `test_curator_stale_lease_reclaim.py` 10 条保留；3 处死 PID 接管断言按平台写清期望（Windows 不提前判死：不接管且租约原样、`_pid_definitely_dead` 不调 `os.kill`）。
+- **变异 3/3 被抓**（一次一处、逐个还原、SHA 与备份一致）：
+
+  | 变异 | 改动 | 红测 | rc |
+  |---|---|---|---|
+  | M1 审计不认接管事实 | 删 `stale_lease_reclaimed` allowed 分支 | restart_never_executes[1/2/3] + dead_lease_full_service[False/True]（`CURATOR_RUN_AUDIT_FAILED`） | 1 |
+  | M2 恢复端判据退回只看过期 | `_same_live_lease` 恒返回 True | restart 两测试各 3 切点 + recovery_barrier[1/2/3] | 1 |
+  | M3 接管前不恢复旧事务 | 可提前接管的租约跳过恢复 | 同上 9 项（旧 manifest 残留 / 恢复计数 0） | 1 |
+
+- **回归**：curator/memory 相关 108 文件 + guards9 12 文件共 **120 文件全绿**（103.5s，0 失败 0 跳过）。
+- **门禁**：strict_gates（diff-check 基线 9e843077d）与 size_diff 明细见任务交接；生成报告已还原不提交。
+- **复现**：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_review18_contracts.py agent_py_agent/tests/test_curator_stale_lease_reclaim.py -q --tb=short -p no:cacheprovider`（$PY 用 ci-venv-312）。
+- **未验证**：真实网关重启、真实多进程接管竞争、Windows 实机（只有平台分支断言与替身，未跑 Windows CI）；生产环境接管收益。
+
+## 网关重启后 Curator 租约接管（mc3-e11d，2026-10-08，分支 `worker/mc3-e11d`，待复核）
+
+- **来源**：生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，而 `acquire` 只认 `expires_at`；
+  新网关要等旧租约过期（实测约 28 分钟）才能接手，每次部署 curator 都停摆。
+- **新用例** `agent_py_agent/tests/test_curator_stale_lease_reclaim.py`（10 条）：本进程持有/活着的子进程持有 → busy 不接管；
+  持有者 pid 已死（子进程 wait 回收）→ 立即接管，`lease.recovery` 写 `stale_lease_reclaimed`（含原 lease_id/run_id/pid/expires_at/reclaimed_at），
+  接管后 `commit_success` 正常释放；主机不同 → 等 `expires_at`；`os.kill` 抛 PermissionError（进程存在但不归我们）→ 等 `expires_at`；
+  `_pid_definitely_dead` 对 ProcessLookupError=True、PermissionError=False、正常返回 False 的异常分类单测；
+  损坏租约（缺 `expires_at`）仍走原 `lease_invalid_expires_at` corrupt 路径；旧状态文件（无 `process_identity` 字段）能读且接管规则照常生效；
+  新 lease 带持有者出生身份（`build_process_identity` 的 host_id/pid/start_time）；旧租约在无关更新（request）后不被添加新字段。
+- **变异 3/3 被抓**（一次一处、逐个还原，还原 SHA 与基线一致 `ffe0f920…`）：去掉主机条件 → 1 红（异主机被误接管）；
+  PermissionError 当死 → 2 红；接管不写事实 → 2 红。
+- **回归**：curator/memory 相关 18 文件 + guards9 全 12 文件共 30 文件 **534 passed（121.64s）**。
+- **尺寸**：`acquire` 初版 +9 行触发 near-soft high-risk 新增告警，拆出 `_bump_pending_reason` / `_lease_handover_recovery` 后
+  span 56 → 46（基线 47），size_diff 新增告警 0；其余门禁项与提交后复跑见任务交接。
+- **复现**：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_curator_stale_lease_reclaim.py -q -o addopts= -p no:cacheprovider`（PY 用 ci-venv-312）。
+- **未验证**：真实网关重启场景（本测试用假 pid/子进程模拟）、真实多进程同时接管竞争、Windows（`os.kill(pid, 0)` 在 nt 上不做探测，直接按不确定处理）。
+
 ## 部署路径退出固定前缀（deployprefix，2026-10-08，07-c3）
 
 - 来源：07 deployprefix + steer1；只用两份合成运行包/提示、临时工作树和注册器，不读真实会话、人格或凭据，不连真实 Gateway。
