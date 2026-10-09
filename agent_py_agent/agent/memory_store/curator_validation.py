@@ -516,6 +516,10 @@ def next_cursors(
         batch.audit_events,
         processed_audit_ids,
     )
+    # 窗口整段被排除时 batch 给出可跳过的游标（否则同一窗口每轮重扫、游标永不动）；
+    # 有事件可处理时仍按 processed 前缀推进，跳过值只在没有输入时兜底。
+    if batch.skipped_audit_cursor and not batch.audit_events:
+        audit_cursor = batch.skipped_audit_cursor
     return CuratorCursorAdvance(cursors, audit_cursor, advanced_messages, advanced_audit)
 
 

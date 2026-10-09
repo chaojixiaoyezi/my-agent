@@ -313,6 +313,27 @@ def read_learning_exclusions(
     return tuple(entries), None
 
 
+# LLM: 名单修订号与名单同文件持久化：每次追加有新增就 +1，供晋升提交前记录「判定基于哪一版
+#   名单」；缺失或非法按 0 处理（旧文件没有该字段）。
+# 函数用途: 读取学习排除名单的修订号。
+def read_learning_exclusions_revision(home: MyAgentHomePaths) -> int:
+    report = read_json_object_report(
+        home.owner_memory_policy_json,
+        context="owner_policy.memory_policy",
+    )
+    if report.load_error is not None:
+        return 0
+    return _normalized_revision(report.payload)
+
+
+# 函数用途: 解析 memory_policy 里的名单修订号，缺失/非法按 0。
+def _normalized_revision(payload: dict[str, object]) -> int:
+    try:
+        return max(0, int(payload.get("learning_exclusions_revision") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 # LLM: 追加在同一把 memory_policy 文件锁内读改写；已存在的 channel_conversation_id 不重复写，
 #   名单原样保留未知键，不静默丢已有条目；读不动时拒绝写入而不是覆盖。
 # 函数用途: 幂等追加学习排除会话，返回新增条数。
@@ -338,6 +359,7 @@ def append_learning_exclusions(
         added = _extend_learning_exclusions(existing, incoming, seen)
         if added:
             payload["learning_exclusions"] = existing
+            payload["learning_exclusions_revision"] = _normalized_revision(payload) + 1
             write_private_json_file_atomic_unlocked(path, payload)
         return added
 

@@ -3,9 +3,10 @@
 ## AGENTS.md 硬拦与清理迁移（mc3-agents0，2026-10-08，本地实现待复核）
 
 - `promotion`：`promote()` 在证据/状态变更前按 `promotion_target=agents` 整体拒绝（自动 `AUTO_AGENTS_WRITE_FORBIDDEN`、人工 `AGENTS_WRITE_USER_ONLY`）；`_automatic_policy_block` 同步拦自动路径；`_commit_persona` 是最终提交入口兜底（`_PromotionBlocked`）。用户当轮 `update_persona` 不经本服务、行为不变。
-- `curator`：`_CuratorPromotionMixin._pending_promotable_candidate_ids` 过滤 `promotion_target=agents` 与名单排除（fail-closed）；`_CuratorExclusionMixin` 负责名单读取/标记同步/候选过滤；`_recovered_state` 是 recover 的 state 重建（权威链覆盖游标/审计、lease 不接管、副本不可解析时计数从审计链累计）。
-- `agents_migration`：plan 用版本账本「最后有效写入」归类 removable/ambiguous/protected；apply=快照（AGENTS.md、versions.jsonl、candidates.jsonl、memory_policy.json、archive/record、persona/backups 全树 + snapshot.json 逐文件 sha256）→ 归档 archive.jsonl → 分批 `mutate_batch`（≤32、CAS、`source=migration:<id>`）→ 名单追加 → record.json；`_require_matching_digest` 绑定 dry-run 摘要（缺失 `AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED`、过期 `AGENTS_CLEANUP_PLAN_STALE`）。
-- `thread_persona.expire_thread_personas_containing`：清理后按内容失效线程冻结快照（目录链 symlink 拒绝、单文件 symlink 跳过、锁外预筛+锁内复核）。
+- `curator`：`_CuratorPromotionMixin._pending_promotable_candidate_ids` 过滤 `promotion_target=agents` 与名单排除（fail-closed）；`_CuratorExclusionMixin` 负责名单读取/标记同步/候选过滤；`_promote_eligible` 每条候选提交前 `_recheck_exclusion_before_promotion` 重读名单（读不出跳过、命中标记并告警，核对 `learning_exclusions_revision` 修订号）；`_recovered_state` 是 recover 的 state 重建（权威链覆盖游标/审计、lease 不接管、副本不可解析时计数从审计链累计）。
+- `agents_migration`：plan 用版本账本「最后有效写入」归类 removable/ambiguous/protected（文件正文与版本历史最后记录 SHA 不一致的条目判歧义保留）；apply=快照（AGENTS.md、versions.jsonl、candidates.jsonl、memory_policy.json、archive/record、persona/backups 全树 + snapshot.json 逐文件 sha256；任何读取/复制失败在删除前中止、写完按清单读回校验）→ 归档 archive.jsonl → 分批 `mutate_batch`（≤32、CAS、`source=migration:<id>`，`expected_versions_tail` 在人格锁内核对，计划后任何写入都拒绝）→ 名单追加（续作以事务记录的原请求 conversations 为准，冲突拒绝）→ record.json；`_require_matching_digest` 绑定 dry-run 摘要（缺失 `AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED`、过期 `AGENTS_CLEANUP_PLAN_STALE`）。
+- `thread_persona`：`expire_thread_personas_containing` 清理后先在锁内推进持久失效代次（`persona/thread_prefix_epoch.json`）再按内容失效线程冻结快照（目录链 symlink 拒绝、单文件 symlink 跳过、锁外预筛+锁内复核）；`freeze_thread_persona` 在锁内核对渲染时读到的 `persona_epoch`，旧代次返回空、不写回。
+- `curator_inputs`：消息与 audit 两路都按名单跳过（名单读不出 fail-closed，本轮不收集任何会话消息）；audit 全被过滤时不推进游标（`skipped_audit_cursor` 交给验证层推进）。
 - CLI：`memory agents cleanup [--apply] [--conversation ...] [--migration-id ...] [--json]`；dry-run 输出 plan（含 plan_digest/ambiguous_entry_ids），不打印正文。
 
 ## 工具引用 scope 流式读取（toolrefs / E11e，2026-10-08，本地实现待复核）

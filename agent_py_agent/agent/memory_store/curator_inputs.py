@@ -16,7 +16,7 @@ from typing import Any
 from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
-from .learning_exclusions import thread_is_excluded
+from .learning_exclusions import excluded_thread_ids, thread_is_excluded
 
 # 消息预览最多 6000 字符：多轮消息给足上下文又不过载。
 _MESSAGE_PREVIEW_CHARS = 6_000
@@ -217,6 +217,8 @@ class CuratorInputBatch:
     formal_memory_errors: tuple[dict[str, object], ...] = ()
     decision_annotations: tuple[CuratorDecisionAnnotation, ...] = ()
     relation_annotations: tuple[CuratorRelationAnnotation, ...] = ()
+    # 排除名单过滤后整个 audit 窗口被跳过的游标（原始窗口最后一条 event_id）；空串表示无跳过。
+    skipped_audit_cursor: str = ""
 
     # LLM: 保持原材料顺序；标签校验来源 hash，关系同时校验正式 ref/hash/版本；缩批不能遗留尾部建议。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
@@ -335,12 +337,18 @@ def collect_curator_inputs(
         config.max_input_chars
         - len(json.dumps([item.to_model() for item in messages], ensure_ascii=False)),
     )
-    audit_events, audit_errors = _collect_audit(
-        Path(audit_dir),
-        after_event_id=state.last_processed_audit_event_id,
-        limit=config.batch_message_limit,
-        max_chars=remaining_chars,
-    )
+    audit_thread_ids = _excluded_audit_thread_ids(message_source)
+    if audit_thread_ids is None:
+        # fail-closed：名单不可读时本轮不消费任何 audit，也不推进游标，修复后整段重放。
+        audit_events, audit_errors, skipped_audit_cursor = [], [], ""
+    else:
+        audit_events, audit_errors = _collect_audit(
+            Path(audit_dir),
+            after_event_id=state.last_processed_audit_event_id,
+            limit=config.batch_message_limit,
+            max_chars=remaining_chars,
+        )
+        audit_events, skipped_audit_cursor = _filter_excluded_audit(audit_events, audit_thread_ids)
     tool_reference_errors: list[dict[str, object]] = []
     if tool_reference_source is not None and audit_events:
         refs, tool_reference_errors = tool_reference_source.read(
@@ -354,6 +362,7 @@ def collect_curator_inputs(
         audit_events=tuple(audit_events),
         formal_memories=tuple(formal_memories),
         load_errors=(*message_errors, *audit_errors, *tool_reference_errors),
+        skipped_audit_cursor=skipped_audit_cursor,
     )
 
 
@@ -420,6 +429,32 @@ def _collect_messages(
             if len(selected) >= limit:
                 break
     return selected, errors
+
+
+# LLM: audit 行按 thread_id 归属；名单是 channel_conversation_id，先经线程元数据翻译成 thread_id 集合。
+#   名单不可读返回 None（fail-closed：audit 与消息一起跳过，游标不动）。
+# 函数用途: 计算本次 audit 收集要排除的 thread_id 集合。
+def _excluded_audit_thread_ids(source: CuratorMessageSource) -> frozenset[str] | None:
+    if source.excluded_conversation_ids is None:
+        return None
+    if not source.excluded_conversation_ids:
+        return frozenset()
+    return frozenset(excluded_thread_ids(source.conversation_store, source.excluded_conversation_ids))
+
+
+# LLM: 排除会话的 audit 事件不进入模型输入；窗口整段被排除时给出可安全跳过的游标，
+#   否则同一窗口每轮都被重新扫描（游标不推进就永远停在原地）。
+# 函数用途: 按排除 thread 集合过滤 audit 事件并返回可跳过的游标。
+def _filter_excluded_audit(
+    events: list[CuratorAuditInput],
+    excluded_thread_ids: frozenset[str],
+) -> tuple[list[CuratorAuditInput], str]:
+    if not excluded_thread_ids or not events:
+        return events, ""
+    kept = [event for event in events if event.thread_id not in excluded_thread_ids]
+    if kept:
+        return kept, ""
+    return kept, str(events[-1].event_id or "")
 
 
 # LLM: audit经有界只读定位缓存按原日分片/行顺序扫描；失效同算法重定位，保留全部原错误，不推进持久cursor。

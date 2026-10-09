@@ -112,7 +112,10 @@ from .memory_store.curator_models import MemoryCuratorConfig
 from .memory_store.curator_run_log import CuratorRunLog
 from .memory_store.curator_state import MemoryCuratorStateStore
 from .memory_store.daily import DailyMemoryStore
-from .memory_store.learning_exclusions import curator_learning_exclusions
+from .memory_store.learning_exclusions import (
+    curator_learning_exclusions,
+    curator_learning_exclusions_revision,
+)
 from .memory_store.lessons import HotRuleRepository, LessonRepository
 from .memory_store.migration import MemoryMigrationService
 from .memory_store.promotion import (
@@ -424,6 +427,8 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
             # 学习排除名单：名单会话的消息不进入提炼、既有候选不自动晋升；名单不可读时
             # curator 侧 fail-closed（本轮不收集消息、不补晋升），修复后从原游标重放。
             learning_exclusions=lambda: curator_learning_exclusions(agent.home_paths),
+            # 名单修订号：提交前记录「判定基于哪一版名单」，随运行警告进审计。
+            learning_exclusions_revision=lambda: curator_learning_exclusions_revision(agent.home_paths),
             # 升级自愈:curator 每次持 lease 执行前自动应用 v2 迁移(幂等),旧数据不再能瘫痪提炼。
             migration_service=MemoryMigrationService(
                 home_paths=agent.home_paths,

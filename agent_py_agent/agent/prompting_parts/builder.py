@@ -31,7 +31,12 @@ from ..task_progress_guidance import (
 from ..user_space.approval_mode import is_permission_admin
 from .cache_layout import CacheStructuredPrompt
 from .memory_context import memory_context_text
-from .thread_persona import RenderedPersonaSections, ThreadPersonaScope, freeze_thread_persona
+from .thread_persona import (
+    RenderedPersonaSections,
+    ThreadPersonaScope,
+    _read_persona_epoch,
+    freeze_thread_persona,
+)
 
 if TYPE_CHECKING:
     # 循环导入根修: builder 被 prompting_parts/__init__ 顶层加载,而 memory_store/__init__
@@ -771,12 +776,16 @@ def _thread_persona_context(builder: PromptBuilder, request: PromptBuildRequest,
     repository = builder.persona_repository
     if not builder.config.thread_prompt_prefix_freeze_enabled or scope is None or not scope.thread_id or repository is None:
         return builder.read_home_context(request.user_prompt), ""
-    return freeze_thread_persona(repository.owner_home, scope, _render_persona_sections(repository.snapshot()))
+    # LLM: 先读失效代次再渲染（2905）：清理迁移在两步之间推进代次时，冻结写入会在锁内核对里
+    #   被拒，旧渲染不会写回快照；代次读取必须发生在渲染之前，不能事后补读。
+    epoch = _read_persona_epoch(repository.owner_home)
+    rendered = _render_persona_sections(repository.snapshot(), epoch)
+    return freeze_thread_persona(repository.owner_home, scope, rendered)
 
 
 # LLM: 展示顺序/清洗/截断与旧提示逐字一致；同次diagnostic.truncated给出不完整target，不解析诊断文案。
-# 函数用途: 同源渲染人格及诊断，并携带结构截断集合，让变化层不把移出窗口误报删除。
-def _render_persona_sections(snapshots: dict) -> RenderedPersonaSections:
+# 函数用途: 同源渲染人格及诊断，并携带结构截断集合与渲染时代次，让变化层不把移出窗口误报删除。
+def _render_persona_sections(snapshots: dict, persona_epoch: int | None = None) -> RenderedPersonaSections:
     # 长期助手 keeps agent identity and the user profile in explicitly different
     # system-prompt tiers.  Preserve our single Persona repository while making
     # the same semantic boundary unambiguous to the model: SOUL describes the
@@ -808,7 +817,8 @@ def _render_persona_sections(snapshots: dict) -> RenderedPersonaSections:
             )
         )
     return RenderedPersonaSections(chunks, frozenset(target for target, snapshot in snapshots.items()
-                                                    if snapshot.diagnostic.truncated))
+                                                    if snapshot.diagnostic.truncated),
+                                   persona_epoch=persona_epoch)
 
 
 def _strip_injection_comments(text: str) -> str:

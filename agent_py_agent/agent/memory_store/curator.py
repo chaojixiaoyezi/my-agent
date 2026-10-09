@@ -146,6 +146,8 @@ class MemoryCuratorDependencies:
     # 学习排除名单读取：返回 (被排除的 channel_conversation_id 集合, 是否不可读)；不可读时
     # fail-closed——本轮不收集会话消息、不做补晋升，修复后从原游标重放。None 表示不启用排除。
     learning_exclusions: Callable[[], tuple[frozenset[str], bool]] | None = None
+    # 名单修订号读取：提交前记录「判定基于哪一版名单」并进入运行警告；None 或读取失败按 0。
+    learning_exclusions_revision: Callable[[], int] | None = None
 
 
 # LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
@@ -732,7 +734,8 @@ class _CuratorPromotionMixin:
         except Exception:
             return []
 
-    # LLM: 失败与已成功事务隔离且保持可重试；manual_only 或无回调时不动。
+    # LLM: 失败与已成功事务隔离且保持可重试；manual_only 或无回调时不动；每条候选提交前重读名单
+    #   （选中到晋升之间可能有新排除，如清理迁移），命中即跳过并补同步标记（2907）。
     # 函数用途: 逐条执行保守自动晋升并返回成功数与稳定警告码。
     def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...]]:
         if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
@@ -740,6 +743,10 @@ class _CuratorPromotionMixin:
         promoted = 0
         warnings: list[str] = []
         for candidate_id in candidate_ids:
+            skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
+            warnings.extend(skip_warnings)
+            if skipped:
+                continue
             try:
                 result = self.promotion_callback(candidate_id)
             except Exception:
@@ -748,6 +755,44 @@ class _CuratorPromotionMixin:
             if bool(getattr(result, "promoted", False)):
                 promoted += 1
         return promoted, tuple(dict.fromkeys(warnings))
+
+    # LLM: 名单不可读时不晋升（fail-closed）；命中候选补一次标记同步，让后续人工路径也看到排除；
+    #   判定只看结构化 refs 与通道绑定，不解析正文（2907）。
+    # 函数用途: 晋升前用最新名单复核一条候选，返回 (是否跳过, 警告)。
+    def _recheck_exclusion_before_promotion(self, candidate_id: str) -> tuple[bool, list[str]]:
+        excluded_ids, unreadable = self._learning_exclusions_for_run()
+        if unreadable:
+            return True, ["learning_exclusions_unreadable"]
+        if not excluded_ids:
+            return False, []
+        try:
+            row = self.candidate_service.get(candidate_id)
+        except Exception:
+            return True, ["CURATOR_AUTO_PROMOTION_FAILED"]
+        hits = excluded_candidate_ids(
+            conversation_store=self.conversation_store,
+            rows=[row],
+            excluded_conversation_ids=excluded_ids,
+        )
+        if not hits:
+            return False, []
+        warnings = list(self._sync_learning_exclusions(excluded_ids))
+        revision = self._read_exclusions_revision()
+        if revision:
+            warnings.append(f"learning_exclusions_revision:{revision}")
+        return True, warnings
+
+    # LLM: 名单修订号随名单文件持久化（append 有新增时 +1）；提交前记录本次判定基于哪一版名单，
+    #   供运行审计回溯。依赖未注入或读取失败按 0（不阻断，判定本身始终用最新名单重读）。
+    # 函数用途: 读取名单修订号。
+    def _read_exclusions_revision(self) -> int:
+        reader = self.learning_exclusions_revision
+        if reader is None:
+            return 0
+        try:
+            return int(reader() or 0)
+        except Exception:
+            return 0
 
 
 # LLM: 一次触发的运行编排与按组取模型：run 按会话主代理模型分组依次跑完整运行（_run_once 负责恢复、租约和失败记账），
@@ -906,6 +951,7 @@ class MemoryCuratorService(
         self.promotion_callback = dependencies.promotion_callback
         self.migration_service = dependencies.migration_service
         self.learning_exclusions = dependencies.learning_exclusions
+        self.learning_exclusions_revision = dependencies.learning_exclusions_revision
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,
@@ -1152,9 +1198,10 @@ def _prepare_outputs(
     extraction: CuratorExtraction | None,
 ) -> _PreparedOutputs:
     if extraction is None:
+        # 空批次也要消费「整段被排除」的 audit 游标，否则同一排除窗口会被反复扫描。
         cursor = CuratorCursorAdvance(
             dict(context.state_before.per_thread_cursors),
-            context.state_before.last_processed_audit_event_id,
+            batch.skipped_audit_cursor or context.state_before.last_processed_audit_event_id,
             0,
             0,
         )

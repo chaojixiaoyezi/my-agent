@@ -109,6 +109,9 @@ class PersonaBatchMutationRequest:
     operations: tuple[PersonaMutationRequest, ...]
     expected_sha256: str = ""
     source: str = "agent_tool"
+    # LLM: 迁移工具在删除前核对「版本账本尾」（文件长度+最后一条记录摘要）——计划之后任何写入，
+    #   即使正文 sha 恰好恢复原值（删除后重添同文），也会让前提失效；空串表示普通调用方不核对。
+    expected_versions_tail: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "target", str(self.target or "").strip().lower())
@@ -469,6 +472,14 @@ def _prepare_persona_batch_mutation(
         raise PersonaConflictError(
             f"persona changed: expected {request.expected_sha256}, current {previous_sha}"
         )
+    # LLM: 迁移的版本账本前提核对在人格锁内：计划之后任何一次写入（含「删除后重添同文」这种
+    #   正文 sha 恢复原值的情况）都会改变账本尾，这里直接拒绝，要求重新空跑。
+    if request.expected_versions_tail:
+        current_tail = versions_ledger_tail(repository.versions_path)
+        if current_tail != request.expected_versions_tail:
+            raise PersonaConflictError(
+                "persona version ledger changed since the plan was taken"
+            )
     working = previous
     operation_results: list[dict[str, object]] = []
     for operation in request.operations:
@@ -796,6 +807,19 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+# LLM: 「版本账本尾」= 文件字节长度 + 最后一条非空记录的 sha256；任何一次追加（哪怕正文 sha
+#   恢复原值）都会改变它，用于迁移删除前的锁内前提核对。文件缺失返回空串（无账本可核对）。
+# 函数用途: 计算版本账本文件的尾部指纹，供迁移前提核对使用。
+def versions_ledger_tail(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    lines = [line for line in data.splitlines() if line.strip()]
+    last = lines[-1] if lines else b""
+    return f"{len(data)}:{hashlib.sha256(last).hexdigest()}"
+
+
 def persona_entry_id(target: str, content: str) -> str:
     digest = hashlib.sha256(f"{target}\0{content}".encode()).hexdigest()[:16]
     return f"persona-{digest}"
@@ -971,4 +995,5 @@ __all__ = [
     "PersonaRepositoryError",
     "PersonaSecurityError",
     "persona_entry_id",
+    "versions_ledger_tail",
 ]

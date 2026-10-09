@@ -27,11 +27,14 @@ class ThreadPersonaScope:
 
 
 # LLM: 安全渲染段与截断集合来自同一次Repository snapshot；只有结构字段决定删除资格，不解析正文。
-# 类用途: 携带当前人格展示与不完整target，供线程冻结和变化计算同源消费。
+#   persona_epoch 记录渲染时读到的人格失效代次（清理迁移会推进它），冻结写入在锁内核对。
+# 类用途: 携带当前人格展示、不完整target与渲染时的失效代次，供线程冻结和变化计算同源消费。
 @dataclass(frozen=True)
 class RenderedPersonaSections:
     sections: dict[str, str]
     truncated_targets: frozenset[str]
+    # None 表示调用方未提供代次（旧路径/测试构造），冻结时不核对；提供时与持久代次不一致即拒绝写。
+    persona_epoch: int | None = None
 
 
 # LLM: 主/子/后台渲染安全点共用，只加载线程元数据，不读消息；缺线程保持一次性准备语义。
@@ -68,12 +71,16 @@ def _snapshot_path(home: Path, thread_id: str) -> Path:
 
 
 # LLM: 原锁内首建/内容修复/换代只存安全渲染段；截断集合仅控制当轮删除资格，不借此刷新快照。
+#   渲染之后发生过受控失效（清理迁移推进了持久代次）时，禁止把旧渲染写回快照：返回空固定段，
+#   让调用方下一轮按当前人格重新渲染，旧约定不再从固定前缀注入（2905）。
 # 函数用途: 原子维护唯一固定人格，按同次截断事实计算增量；安全路径/写入错误仍暴露。
 def freeze_thread_persona(home: Path, scope: ThreadPersonaScope, current: RenderedPersonaSections) -> tuple[list[str], str]:
     path = _snapshot_path(home, scope.thread_id)
     epoch = {"compact_generation": scope.compact_generation, "model_profile_id": scope.model_profile_id,
              "protocol": list(scope.protocol)}
     with locked_json_path(path):
+        if current.persona_epoch is not None and current.persona_epoch != _read_persona_epoch(home):
+            return [], ""
         saved = _read_snapshot(path)
         if saved is None or saved["epoch"] != epoch:
             saved = {"schema_version": 1, "epoch": epoch, "sections": current.sections}
@@ -158,8 +165,9 @@ def _change_counts(target: str, rows: list[str], additions_only: bool) -> str:
     return f"- {target}: 新增 {added} 行，删除 {removed} 行"
 
 
-# LLM: 清理迁移后的受控失效：锁外预筛减少锁竞争，锁内复核保证与冻结写入不竞态；失效=删除
-#   快照文件，下轮重建时用当前人格，旧约定不再从固定前缀注入。
+# LLM: 清理迁移后的受控失效：先推进持久失效代次（锁内递增），再删除命中快照；在途渲染的
+#   旧代次冻结会被 freeze_thread_persona 拒绝，不会把已清理的旧约定写回固定前缀（2905）。
+#   锁外预筛减少锁竞争，锁内复核保证与冻结写入不竞态；失效=删除快照文件，下轮重建时用当前人格。
 # 函数用途: 让包含被清理条目的线程快照受控失效，返回实际删除的快照数。
 def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
     needles = _content_needles(contents)
@@ -168,6 +176,7 @@ def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
     directory = home / "persona" / "thread_prefix"
     if any(part.is_symlink() for part in (home, home / "persona", directory)):
         raise ValueError("PERSONA_PREFIX_SYMLINK")
+    _bump_persona_epoch(home)
     if not directory.is_dir():
         return 0
     expired = 0
@@ -177,6 +186,43 @@ def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
         if _expire_snapshot_locked(path, needles):
             expired += 1
     return expired
+
+
+# LLM: 失效代次放 persona/ 下的持久小文件；只在锁内递增，读取是单次原子读，不携带正文。
+# 函数用途: 返回人格失效代次文件的路径。
+def _persona_epoch_path(home: Path) -> Path:
+    return home / "persona" / "thread_prefix_epoch.json"
+
+
+# 函数用途: 读取当前人格失效代次；缺失、链接或坏内容按 0 处理（首次渲染不核对）。
+def _read_persona_epoch(home: Path) -> int:
+    path = _persona_epoch_path(home)
+    if path.is_symlink():
+        return 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return max(0, int(payload.get("epoch") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# 函数用途: 在文件锁内把人格失效代次 +1，返回新代次。
+def _bump_persona_epoch(home: Path) -> int:
+    if any(part.is_symlink() for part in (home, home / "persona")):
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    ensure_private_dir(home / "persona")
+    path = _persona_epoch_path(home)
+    if path.is_symlink():
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    with locked_json_path(path):
+        next_value = _read_persona_epoch(home) + 1
+        write_private_text_file_atomic_unlocked(path, json.dumps({"epoch": next_value}))
+    return next_value
 
 
 # LLM: 复核与删除在同一把快照锁内完成，避免预筛后快照被冻结刷新导致误删新快照。

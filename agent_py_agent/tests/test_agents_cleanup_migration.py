@@ -33,10 +33,18 @@ from agent_py_agent.agent.memory_store.candidate_models import (
     MemoryScope,
 )
 from agent_py_agent.agent.memory_store.candidates import CandidateService
+from agent_py_agent.agent.memory_store.learning_exclusions import (
+    curator_learning_exclusions_revision,
+)
 from agent_py_agent.agent.prompting_parts.thread_persona import (
     RenderedPersonaSections,
     ThreadPersonaScope,
     freeze_thread_persona,
+)
+from agent_py_agent.agent.user_space.owner_policy import (
+    LearningExclusionEntry,
+    append_learning_exclusions,
+    read_learning_exclusions_revision,
 )
 
 _ENTRY_ONE = "自动条目一。"
@@ -491,3 +499,35 @@ def test_same_scale_cleanup_duration(tmp_path: Path):
     remaining = repo.list_entries("agents")["entries"]
     assert len(remaining) == 14
     assert all("自动条目" not in item["content"] for item in remaining)
+
+
+def test_learning_exclusions_revision_tracks_appends(tmp_path: Path):
+    home, _repo, _candidates = _env(tmp_path)
+    assert read_learning_exclusions_revision(home) == 0
+    assert curator_learning_exclusions_revision(home) == 0
+
+    assert (
+        append_learning_exclusions(
+            home, (LearningExclusionEntry(channel_conversation_id="chat-rev-1"),)
+        )
+        == 1
+    )
+    assert read_learning_exclusions_revision(home) == 1
+    assert curator_learning_exclusions_revision(home) == 1
+
+    # 重复追加同一条不新增，修订号不动（幂等追加不产生假代次）。
+    assert (
+        append_learning_exclusions(
+            home, (LearningExclusionEntry(channel_conversation_id="chat-rev-1"),)
+        )
+        == 0
+    )
+    assert read_learning_exclusions_revision(home) == 1
+
+    assert (
+        append_learning_exclusions(
+            home, (LearningExclusionEntry(channel_conversation_id="chat-rev-2"),)
+        )
+        == 1
+    )
+    assert curator_learning_exclusions_revision(home) == 2

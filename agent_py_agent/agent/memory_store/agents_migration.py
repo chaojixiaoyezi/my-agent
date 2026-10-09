@@ -23,6 +23,7 @@ from ..capability.persona_repository import (
     PersonaMutationRequest,
     PersonaRepository,
     persona_entry_id,
+    versions_ledger_tail,
 )
 from ..common.json_io import (
     append_private_jsonl_records,
@@ -64,8 +65,9 @@ class AgentsCleanupRequest:
 
 
 # LLM: 计划含条目定位与正文快照（供归档）；to_dict 剔除正文，dry-run 不打印内容；
-#   歧义条目一律保留，只在报告里列 entry_id。
-# 类用途: 描述一次 dry-run 的可清理集合、歧义集合与计划摘要。
+#   歧义条目一律保留，只在报告里列 entry_id；versions_tail 是计划时点的版本账本尾指纹，
+#   apply 的删除阶段在人格锁内核对它，任何并发写入都会让计划失效（即使正文 sha 恢复原值）。
+# 类用途: 描述一次 dry-run 的可清理集合、歧义集合、计划摘要与版本账本前提。
 @dataclass(frozen=True)
 class AgentsCleanupPlan:
     entries_total: int
@@ -74,6 +76,7 @@ class AgentsCleanupPlan:
     ambiguous_entry_ids: tuple[str, ...]
     sha256: str
     plan_digest: str
+    versions_tail: str = ""
 
     # 函数用途: 把计划转成不含条目正文的结构化报告。
     def to_dict(self) -> dict[str, object]:
@@ -110,12 +113,13 @@ class _HistoryIndex:
 
 
 # LLM: 删除进度收成一个对象后，事务记录写回与批次回调不再各传三个散参数。
-# 类用途: 一批删除完成后的进度（sha、已删数、剩余数）。
+# 类用途: 一批删除完成后的进度（sha、已删数、剩余数、该批完成后的版本账本尾指纹）。
 @dataclass(frozen=True)
 class _BatchProgress:
     sha: str
     removed: int
     remaining: int
+    versions_tail: str = ""
 
 
 # LLM: 删除循环只消费通道对象：迁移编号、批间 CAS 的 sha 与进度回调集中在一处，避免参数继续膨胀。
@@ -142,13 +146,16 @@ class _ApplySummary:
 # LLM: 归属判定用版本历史的事件流：add/replace 记 write、remove 记 remove（batch 展开其
 #   operations，只算 changed 的操作）；rollback 记录单独收集行序。判定规则（设计 v2 §3.6）：
 #   无事件、最后事件是 remove、或最后写入之后发生 rollback → 歧义保留；最后写入来源是
-#   memory-promotion 前缀 → 可清理；其它来源 → 保护。
+#   memory-promotion 前缀 → 可清理；其它来源 → 保护。仓库外直接编辑（当前 sha 与版本历史
+#   最后记录不一致）时，无法用历史证明未被触碰的条目一律降级为歧义（2902）。
 # 函数用途: 计算当前可清理的自动晋升条目（只读，不修改任何文件）。
 def plan_agents_cleanup(*, persona: PersonaRepository) -> AgentsCleanupPlan:
     report = persona.list_entries("agents")
     entries = report.get("entries")
     entry_rows = entries if isinstance(entries, list) else []
-    index = _history_index(persona.history("agents"))
+    rows = persona.history("agents")
+    index = _history_index(rows)
+    edited_ids = _hand_edited_entry_ids(persona, rows, entry_rows, report.get("sha256"))
     removable: list[dict[str, object]] = []
     ambiguous: list[str] = []
     protected = 0
@@ -157,6 +164,8 @@ def plan_agents_cleanup(*, persona: PersonaRepository) -> AgentsCleanupPlan:
         if not entry_id:
             continue
         verdict = _classify_entry(entry_id, index)
+        if verdict == "removable" and entry_id in edited_ids:
+            verdict = "ambiguous"
         if verdict == "ambiguous":
             ambiguous.append(entry_id)
             continue
@@ -165,7 +174,10 @@ def plan_agents_cleanup(*, persona: PersonaRepository) -> AgentsCleanupPlan:
             continue
         protected += 1
     sha256 = str(report.get("sha256") or "")
-    digest = _plan_digest(sha256, [str(item["entry_id"]) for item in removable], ambiguous)
+    versions_tail = versions_ledger_tail(persona.versions_path)
+    digest = _plan_digest(
+        sha256, [str(item["entry_id"]) for item in removable], ambiguous, versions_tail
+    )
     return AgentsCleanupPlan(
         entries_total=len(entry_rows),
         protected_entries=protected,
@@ -173,7 +185,63 @@ def plan_agents_cleanup(*, persona: PersonaRepository) -> AgentsCleanupPlan:
         ambiguous_entry_ids=tuple(ambiguous),
         sha256=sha256,
         plan_digest=digest,
+        versions_tail=versions_tail,
     )
+
+
+# LLM: 仓库外直接编辑（当前文件 sha 与版本历史最后一条记录不一致）后，历史无法解释当前
+#   文件里哪些行是用户手工写回的；与「最后记录内容」逐行对比，凡当前条目行不在最后记录里
+#   的一律判为受影响（保留）。备份读不到时无法证明任何条目未被触碰，全部保守。
+# 函数用途: 返回直接编辑后不能用历史证明未被触碰的条目 ID 集合。
+def _hand_edited_entry_ids(
+    persona: PersonaRepository,
+    rows: list[dict[str, object]],
+    entry_rows: list,
+    current_sha: object,
+) -> set[str]:
+    if not rows:
+        return set()
+    last = rows[-1]
+    if str(last.get("sha256") or "") == str(current_sha or ""):
+        return set()
+    history_text = _read_version_snapshot(persona, last)
+    all_ids = {
+        str(entry.get("entry_id") or "").strip()
+        for entry in entry_rows
+        if isinstance(entry, dict) and str(entry.get("entry_id") or "").strip()
+    }
+    if history_text is None:
+        return all_ids
+    history_lines = {line.strip() for line in history_text.splitlines()}
+    edited: set[str] = set()
+    for entry in entry_rows:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("entry_id") or "").strip()
+        content = str(entry.get("content") or "").strip()
+        if not entry_id or not content:
+            continue
+        if f"- {content}" not in history_lines:
+            edited.add(entry_id)
+    return edited
+
+
+# 函数用途: 读取版本记录 backup_ref 指向的快照内容；缺失、越界或读不动返回 None。
+def _read_version_snapshot(persona: PersonaRepository, row: dict[str, object]) -> str | None:
+    ref = str(row.get("backup_ref") or "")
+    if not ref:
+        return None
+    path = (persona.owner_home / ref).resolve(strict=False)
+    try:
+        path.relative_to(persona.owner_home)
+    except ValueError:
+        return None
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 # 函数用途: 把版本账本折叠成每条目的最后事件与 rollback 行序。
@@ -263,12 +331,18 @@ def _removable_item(entry: dict[str, object], event: _WriteEvent) -> dict[str, o
     }
 
 
-# 函数用途: 生成计划摘要，绑定当前文档 sha 与可清理/歧义条目集合。
-def _plan_digest(sha256: str, removable_ids: list[str], ambiguous_ids: list[str]) -> str:
+# 函数用途: 生成计划摘要，绑定当前文档 sha、可清理/歧义条目集合与版本账本尾指纹。
+def _plan_digest(
+    sha256: str,
+    removable_ids: list[str],
+    ambiguous_ids: list[str],
+    versions_tail: str = "",
+) -> str:
     payload = {
         "sha256": sha256,
         "removable": sorted(removable_ids),
         "ambiguous": sorted(ambiguous_ids),
+        "versions_tail": versions_tail,
     }
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -295,6 +369,13 @@ def apply_agents_cleanup(
         _require_matching_digest(request, plan)
         record = _new_record(migration_id, plan, request)
         _write_record(directory, record)
+    else:
+        # LLM: 续作以「原计划 ∩ 当前重判定」为准，重判定已接受迁移期间的用户修改；删除阶段的
+        #   版本账本前提以当前 tail 为新基准（首启时基准来自计划），避免把恢复前的合法写入
+        #   误判成并发冲突。
+        record = _rebased_record(record, persona)
+        _write_record(directory, record)
+    conversations = _effective_conversations(record, request)
     snapshot = _ensure_snapshot(home_paths, directory, migration_id)
     targets = _resume_targets(record, plan)
     snapshot_map = _snapshot_entry_contents(directory)
@@ -309,7 +390,7 @@ def apply_agents_cleanup(
         on_batch=on_batch,
     )
     removed_count = _remove_planned(persona, targets, channel)
-    conversations_added = _append_conversations(home_paths, request)
+    conversations_added = _append_conversations(home_paths, conversations, request)
     expired = _expire_thread_snapshots(persona, _planned_contents(record, snapshot_map))
     summary = _ApplySummary(
         migration_id=migration_id,
@@ -347,8 +428,9 @@ def _resume_targets(record: dict, plan: AgentsCleanupPlan) -> list[dict[str, obj
     return [item for item in plan.removable if str(item.get("entry_id") or "") in planned]
 
 
-# LLM: 删除分批沿 PersonaRepository 的 batch 通道（每批 ≤32），批间用上一批返回的 sha 做 CAS；
-#   每批把进度写回事务记录，崩溃续作时不需要重放已删除的部分。
+# LLM: 删除分批沿 PersonaRepository 的 batch 通道（每批 ≤32），批间用上一批返回的 sha 做 CAS，
+#   并在人格锁内核对版本账本尾（计划之后任何写入都拒绝）；每批把进度与新的账本尾写回事务
+#   记录，崩溃续作时不需要重放已删除的部分。
 # 函数用途: 分批删除目标条目，返回实际删除条数。
 def _remove_planned(
     persona: PersonaRepository,
@@ -362,10 +444,19 @@ def _remove_planned(
         result = _remove_batch(persona, chunk, sha, channel.migration_id)
         sha = str(result.get("sha256") or sha)
         removed += _changed_count(result)
-        channel.on_batch(_BatchProgress(sha, removed, len(targets) - removed))
+        channel.on_batch(
+            _BatchProgress(
+                sha,
+                removed,
+                len(targets) - removed,
+                versions_ledger_tail(persona.versions_path),
+            )
+        )
     return removed
 
 
+# LLM: 删除一批前从事务记录读「版本账本尾」前提并传入 PersonaRepository，核对在人格锁内
+#   完成——计划之后任何写入（含正文 sha 恢复原值的删除重添）都会在这里被拒绝。
 # 函数用途: 通过 PersonaRepository 的批量通道删除一批条目。
 def _remove_batch(
     persona: PersonaRepository,
@@ -373,6 +464,8 @@ def _remove_batch(
     sha: str,
     migration_id: str,
 ) -> dict[str, object]:
+    record = _read_record(_migration_dir_for(persona.owner_home, migration_id))
+    expected_tail = str(record.get("versions_tail") or "") if record else ""
     operations = tuple(
         PersonaMutationRequest(
             target="agents",
@@ -387,6 +480,7 @@ def _remove_batch(
             operations=operations,
             expected_sha256=sha,
             source=f"migration:{migration_id}",
+            expected_versions_tail=expected_tail,
         )
     )
 
@@ -423,6 +517,7 @@ def _new_record(
         ],
         "expected_agents_sha256": plan.sha256,
         "current_sha256": plan.sha256,
+        "versions_tail": plan.versions_tail,
         "removed_count": 0,
         "remaining_count": len(plan.removable),
         "conversations": [str(item) for item in request.conversations if str(item).strip()],
@@ -466,7 +561,7 @@ def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[
     }
 
 
-# 函数用途: 每批删除后把进度写回事务记录。
+# 函数用途: 每批删除后把进度与新的版本账本尾写回事务记录。
 def _update_record(
     directory: Path,
     record: dict,
@@ -480,9 +575,25 @@ def _update_record(
             "current_sha256": progress.sha,
             "removed_count": progress.removed,
             "remaining_count": progress.remaining,
+            "versions_tail": progress.versions_tail
+            or str(record.get("versions_tail") or ""),
         }
     )
     _write_record(directory, payload)
+
+
+# LLM: 续作开始时把删除阶段的账本尾基准重置为当前值：重判定已经接受迁移期间的用户修改，
+#   之后的并发写入仍会被逐批核对拦住。
+# 函数用途: 以当前版本账本尾重建续作事务记录。
+def _rebased_record(record: dict, persona: PersonaRepository) -> dict:
+    payload = dict(record)
+    payload.update(
+        {
+            "updated_at": _now_iso(),
+            "versions_tail": versions_ledger_tail(persona.versions_path),
+        }
+    )
+    return payload
 
 
 # 函数用途: 构造 completed 事务记录。
@@ -537,7 +648,7 @@ def _apply_report(
 
 # LLM: 快照在首次 apply 时一次性写全：AGENTS.md、版本账本、候选账本、排除名单、已有归档与
 #   事务记录、persona/backups 全树；snapshot.json 记录每个文件的 sha256+bytes，存在即复用，
-#   绝不覆盖已有快照（它是恢复与归档内容的权威）。
+#   绝不覆盖已有快照（它是恢复与归档内容的权威）。任何一步失败都在删除前中止（2903）。
 # 函数用途: 确保迁移快照存在，返回快照元数据。
 def _ensure_snapshot(home_paths: object, directory: Path, migration_id: str) -> dict[str, object]:
     meta_path = directory / _SNAPSHOT_META
@@ -572,19 +683,24 @@ def _snapshot_sources(home_paths: object, directory: Path) -> dict[str, Path]:
     }
 
 
-# 函数用途: 复制一个快照文件并记录 sha256/bytes；缺失、链接、非常规或不可读文件跳过。
+# LLM: 快照是删除的安全前提（2903）：任何一步读取/复制失败都在删除前中止；写完后按清单读回
+#   校验 sha256，全部通过才继续。缺失、链接、非常规文件按「源不存在」跳过（合法缺失），
+#   但存在却读不动一律抛出，绝不留半个坏快照继续删。
+# 函数用途: 复制一个快照文件并记录 sha256/bytes；读取失败或读回校验失败时抛出。
 def _copy_snapshot_file(source: Path, target: Path, files: dict[str, object], key: str) -> None:
     if not source.name or source.is_symlink() or not source.is_file():
         return
-    try:
-        content = source.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return
+    content = source.read_text(encoding="utf-8")
     write_private_text_file_atomic(target, content)
     encoded = content.encode("utf-8")
-    files[key] = {"sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded)}
+    digest = hashlib.sha256(encoded).hexdigest()
+    readback = target.read_text(encoding="utf-8")
+    if hashlib.sha256(readback.encode("utf-8")).hexdigest() != digest:
+        raise OSError(f"snapshot readback mismatch: {key}")
+    files[key] = {"sha256": digest, "bytes": len(encoded)}
 
 
+# LLM: 全树复制沿用同一套「失败即中止」语义：任一条目读不动就抛出，由调用方在删除前停住。
 # 函数用途: 递归复制 persona/backups 全树到快照，跳过链接与非常规文件。
 def _copy_snapshot_tree(
     source_root: Path,
@@ -683,16 +799,40 @@ def _read_archive_entry_ids(path: Path) -> set[str]:
     return {str(row.get("entry_id") or "") for row in report.records}
 
 
-# LLM: 名单只追加、幂等；会话列表来自请求参数（数据，不写死在代码里）。
-# 函数用途: 把请求里的会话追加到学习排除名单，返回新增条数。
-def _append_conversations(home_paths: object, request: AgentsCleanupRequest) -> int:
-    if not request.conversations:
+# LLM: 名单只追加、幂等；续作一律以事务记录里的原请求会话为准（2904），新请求带了与记录
+#   冲突的会话时在删除前就拒绝（结构化原因码），不能用新请求的空列表覆盖原请求。
+# 函数用途: 把生效的会话列表追加到学习排除名单，返回新增条数。
+def _append_conversations(
+    home_paths: object,
+    conversations: tuple[str, ...],
+    request: AgentsCleanupRequest,
+) -> int:
+    if not conversations:
         return 0
-    return append_learning_exclusions(home_paths, _conversation_entries(request))
+    return append_learning_exclusions(home_paths, _conversation_entries(conversations, request))
 
 
-# 函数用途: 把请求里的会话列表转成学习排除条目。
-def _conversation_entries(request: AgentsCleanupRequest) -> tuple[LearningExclusionEntry, ...]:
+# 函数用途: 计算本次删除阶段生效的排除会话（记录优先；新请求与记录冲突时拒绝）。
+def _effective_conversations(
+    record: dict,
+    request: AgentsCleanupRequest,
+) -> tuple[str, ...]:
+    recorded = tuple(
+        str(item) for item in record.get("conversations") or () if str(item).strip()
+    )
+    requested = tuple(
+        str(item).strip() for item in request.conversations if str(item).strip()
+    )
+    if requested and requested != recorded:
+        raise AgentsCleanupError("AGENTS_CLEANUP_CONVERSATIONS_CONFLICT")
+    return recorded or requested
+
+
+# 函数用途: 把会话列表转成学习排除条目。
+def _conversation_entries(
+    conversations: tuple[str, ...],
+    request: AgentsCleanupRequest,
+) -> tuple[LearningExclusionEntry, ...]:
     return tuple(
         LearningExclusionEntry(
             channel_conversation_id=str(conversation).strip(),
@@ -700,7 +840,7 @@ def _conversation_entries(request: AgentsCleanupRequest) -> tuple[LearningExclus
             added_at=_now_iso(),
             added_by=request.actor,
         )
-        for conversation in request.conversations
+        for conversation in conversations
         if str(conversation).strip()
     )
 
@@ -740,7 +880,13 @@ def _validated_migration_id(value: str) -> str:
 # LLM: 迁移目录固定在 owner persona/migrations 下，按 migration_id 寻址。
 # 函数用途: 返回一次迁移的目录路径。
 def _migration_dir(home_paths: object, migration_id: str) -> Path:
-    owner_home = Path(str(getattr(home_paths, "owner_home_dir", "") or ""))
+    return _migration_dir_for(
+        Path(str(getattr(home_paths, "owner_home_dir", "") or "")), migration_id
+    )
+
+
+# 函数用途: 由 owner home 与迁移编号定位迁移目录（删除批次的账本前提读取复用）。
+def _migration_dir_for(owner_home: Path, migration_id: str) -> Path:
     return owner_home / "persona" / "migrations" / f"agents-migration-{migration_id}"
 
 

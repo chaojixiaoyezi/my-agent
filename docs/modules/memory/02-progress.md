@@ -5,6 +5,7 @@
 - 生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条（派活会话任务书被当用户长期约定）。三件事：promotion 最终提交入口硬拦 agents（自动/积压重试/人工/审核后一律拒绝，候选保持原状态带原因码）、owner 策略学习排除名单（按会话跳过收集 + 既有待定候选持久标记）、CLI 清理迁移（默认 dry-run、`--apply` 才执行；快照+归档+分批 CAS 删除、幂等续作）。
 - v2 四个阻断：①硬拦覆盖 `promote()` 主拦、`_automatic_policy_block` 与 `_commit_persona` 最终入口，curator 补晋升与可晋升判定同步排除 agents；②归属判定按「当前条目最后一次有效写入的来源」——用户删除后重加同文字、rollback、手工编辑均歧义保留并列出；③apply 绑定 dry-run 计划摘要，快照含 `persona/backups`、排除名单、归档与事务状态，崩溃幂等续作且不覆盖用户迁移期间的修改；④清理后按内容失效受影响线程的冻结人格快照。
 - 测试 21 项（guard 7 + migration 14）；6 项变异全部 rc=1 且备份字节还原；489 条同规模 plan+apply 0.656s。未验证真实 home 迁移（由 3a 部署后空跑→执行）、真实 Gateway 链路。
+- 0r 返工（mc4 review29 七阻断 2901–2907）：执行前在人格锁内核对版本账本尾（计划后任何写入都让计划失效）；文件正文与版本历史 SHA 不一致的条目判歧义保留；快照读取/复制失败在删除前中止并按清单读回校验；续作以事务记录的原请求 conversations 为准（冲突拒绝）；清理推进持久失效代次、冻结写入锁内核对；audit 预览按名单跳过且名单不可读 fail-closed；晋升提交前重读名单并核对修订号（`memory_policy.json` 的 `learning_exclusions_revision`）。mc4 18 条探针全绿、回归 634 项、变异 6/6、门禁全过。
 
 ## Compact工具引用按scope流式读取（toolrefs/E11e，2026-10-08，claude/07-c1-toolrefs，本地实现、待07复核）
 

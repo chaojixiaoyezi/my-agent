@@ -7,7 +7,7 @@ from __future__ import annotations
 #   channel_conversation_id，绝不解析消息正文。
 # 模块用途: 把 owner 学习排除名单同步成候选账本上的持久标记，并提供共享的会话排除判定。
 
-from ..user_space.owner_policy import read_learning_exclusions
+from ..user_space.owner_policy import read_learning_exclusions, read_learning_exclusions_revision
 
 # 候选被学习来源排除时写入的结构化原因码；promote(automatic=True) 会原样返回它并保持候选状态。
 LEARNING_SOURCE_EXCLUDED = "LEARNING_SOURCE_EXCLUDED"
@@ -19,6 +19,12 @@ LEARNING_SOURCE_EXCLUDED = "LEARNING_SOURCE_EXCLUDED"
 def curator_learning_exclusions(home: object) -> tuple[frozenset[str], bool]:
     entries, error = read_learning_exclusions(home)
     return frozenset(item.channel_conversation_id for item in entries), error is not None
+
+
+# LLM: 名单修订号只用于提交前记录与审计回溯（判定本身始终按最新名单重读）；读取失败按 0。
+# 函数用途: 读取 owner 学习排除名单的修订号。
+def curator_learning_exclusions_revision(home: object) -> int:
+    return read_learning_exclusions_revision(home)
 
 
 # LLM: thread 的任一通道绑定命中排除会话即视为被排除；没有绑定的老 thread 无法判定，按不排除处理。
@@ -43,11 +49,11 @@ def sync_learning_exclusion_marks(
 ) -> dict[str, object]:
     if not excluded_conversation_ids:
         return {"marked": 0, "checked": 0}
-    excluded_thread_ids = _excluded_thread_ids(conversation_store, excluded_conversation_ids)
-    if not excluded_thread_ids:
+    thread_ids = excluded_thread_ids(conversation_store, excluded_conversation_ids)
+    if not thread_ids:
         return {"marked": 0, "checked": 0}
     rows = candidate_service.list(statuses={"pending_review", "approved"}, limit=0)
-    targets = [row.candidate_id for row in rows if _row_excluded(row, excluded_thread_ids)]
+    targets = [row.candidate_id for row in rows if _row_excluded(row, thread_ids)]
     marked = (
         candidate_service.mark_promotion_excluded(
             targets, reason=LEARNING_SOURCE_EXCLUDED
@@ -55,13 +61,13 @@ def sync_learning_exclusion_marks(
         if targets
         else 0
     )
-    return {"marked": marked, "checked": len(rows), "excluded_threads": len(excluded_thread_ids)}
+    return {"marked": marked, "checked": len(rows), "excluded_threads": len(thread_ids)}
 
 
-# LLM: 映射方向只有 thread→channel 一种：排除名单按 channel_conversation_id，候选引用按 thread_id，
-#   所以先把名单翻译成被排除的 thread_id 集合，后续判定全部走同一集合。
+# LLM: 映射方向只有 thread→channel 一种：排除名单按 channel_conversation_id，候选与 audit 引用按
+#   thread_id，所以先把名单翻译成被排除的 thread_id 集合，消息/audit/候选判定全部走同一集合。
 # 函数用途: 把排除会话 ID 集合翻译成对应的 thread_id 集合。
-def _excluded_thread_ids(
+def excluded_thread_ids(
     conversation_store: object,
     excluded_conversation_ids: frozenset[str],
 ) -> set[str]:
@@ -99,20 +105,22 @@ def excluded_candidate_ids(
 ) -> set[str]:
     if not excluded_conversation_ids:
         return set()
-    excluded_thread_ids = _excluded_thread_ids(conversation_store, excluded_conversation_ids)
-    if not excluded_thread_ids:
+    thread_ids = excluded_thread_ids(conversation_store, excluded_conversation_ids)
+    if not thread_ids:
         return set()
     return {
         str(getattr(row, "candidate_id", "") or "")
         for row in rows
-        if _row_excluded(row, excluded_thread_ids)
+        if _row_excluded(row, thread_ids)
     }
 
 
 __all__ = [
     "LEARNING_SOURCE_EXCLUDED",
     "curator_learning_exclusions",
+    "curator_learning_exclusions_revision",
     "excluded_candidate_ids",
+    "excluded_thread_ids",
     "sync_learning_exclusion_marks",
     "thread_is_excluded",
 ]

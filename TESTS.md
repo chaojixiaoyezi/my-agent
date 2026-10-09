@@ -14,6 +14,15 @@
 - 复现：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_agents_phase0_guard.py agent_py_agent/tests/test_agents_cleanup_migration.py -q -s -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc3-agents`；PY 用 ci-venv-312。同规模耗时看 `SAME_SCALE_CLEANUP_ELAPSED` 行。
 - 未验证：真实 home 迁移演练（由 3a 部署后空跑→执行）、Gateway 端到端、生产 437 条实际清理、名单生效后的真实 curator 运行；curator 集成（_execute/run_if_due）只经单元测试，未连真实 Gateway。
 
+## AGENTS.md 第 0 期返工：mc4 review29 七阻断（mc3-agents0r，2026-10-08，接着 62e99ac1b）
+
+- 来源：mc4 review29（`/private/tmp/claude-501/m-mc4/review29-agents/`，18 条探针 11 红）；任务 mc3-agents-phase0-rework.md。修复：①2901 执行前在人格锁内核对版本账本尾（`expected_versions_tail`），计划后任何写入（哪怕正文 SHA 恢复原值）都拒绝；②2902 文件正文与版本历史最后记录 SHA 不一致的条目判歧义保留；③2903 快照任何读取/复制失败在删除前中止、写完按清单读回校验 sha256；④2904 续作以事务记录的原请求 conversations 为准、冲突拒绝；⑤2905 清理推进持久失效代次、冻结写入锁内核对；⑥2906 audit 预览按名单跳过且名单不可读 fail-closed；⑦2907 晋升提交前重读名单（含修订号）核对。
+- 数据位置：人格失效代次 `<owner_home>/persona/thread_prefix_epoch.json`（锁内递增）；排除名单修订号 `memory_policy.json` 的 `learning_exclusions_revision` 字段（每次新增 +1，重复追加不动）。
+- 补测：mc4 18 条探针 11 红转 0 红（断言未改）；新增 `test_learning_exclusions_revision_tracks_appends`（0→1→重复不变→2）；40 项（18+7+15）全绿；回归 29 文件 634 项全绿。
+- 变异 6/6 全部 rc=1 抓到并原样还原（sha256 一致）：①去掉版本账本尾核对 → cli_boundary 1 项失败；②快照读失败继续 → contracts 2 项失败；③续作用新请求 conversations → additional 1 项失败；④冻结不核对代次 → contracts 1 项失败；⑤audit 不过滤 → contracts 1 项失败；⑥晋升不重读名单 → 2 项失败（contracts + additional）。
+- 门禁（strict_gates.sh f11b8f495）：GATES_PASS——import 边界 0、ruff、doc-sync、常数目录 958 项、frontend catalog 271、尺寸 strict hard=0、size_diff 新增 0（消失 13）、diff --check、clean-package 全过。
+- 未验证：同上一节（真实 home 迁移、Gateway 端到端、生产清理、真实 curator 运行）。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。
