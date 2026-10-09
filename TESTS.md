@@ -1,5 +1,31 @@
 # 测试与发布验收
 
+## 空正文预算只认真实执行的新进展（mc3-emptybudgetfix1，2026-10-09，分支 `worker/mc3-thinktrunc`，接 175d85315）
+
+来源：mc4 review36（`reply_of.py mc4-mc4-b1bp4r3` 与 `/private/tmp/claude-501/m-mc4/review36-emptybudget/HANDOFF.md`）：
+两处消费点接得对、截断预算独立、正常进展修复有效，只有一项必修——旧成功回执被重放时不能算新进展。
+
+- **R36-1 修复**：`_tool_loop_service.py` 新增 `_fresh_execution_success`（ok + handler_executed + 操作非 replayed）
+  与 `_record_successful_tool`（`executed_tools` 保持全局原义，另记 `fresh_successful_tools`）；
+  `_runtime_params.py` 加 `fresh_successful_tools` 字段；`response_decision.py` 的
+  `_empty_text_budget_after_progress` 改读它。不改 `executed_tools` 的全局统计口径。
+- **重放语义**：成功操作被重放时 ok=True、handler_executed=False、operation.replayed=True，不算新进展；
+  探针复现（修复前 decision=continue，修复后 break）。
+- **T5 口径纠正**：`test_completed_failed_tool_call_is_not_progress`——测的是"工具调用完成但失败"，
+  失败结果不刷新预算（保守策略保留）。
+- **正文路径表述收窄**：本轮不增加正文重置。"空 → 空 → 可见正文但被截断 → 空"会继续 3 次，
+  基线与候选一致，不是新退步；不能表述为该路径不存在。
+- **刷预算风险（如实记录）**：不同参数的廉价成功读取可以持续刷新预算，由工具轮上限（默认 5000）兜底；
+  本轮不改护栏。
+- **测试**：`test_empty_text_budget_progress.py` 8 条（新成功能恢复 / 旧重放不能恢复 / 两处消费点一致 /
+  截断预算独立 + T5 口径纠正）；半修复态 3 红（T6 continue!=break、T7×2 break!=continue）→ 修复后全绿。
+- **变异 4 处**（一次一处，全部 rc=1）：不重置 / 没有进展也重置 / 发起了就算进展（archive 计数）/
+  重放也算作进展。
+- **回归**：37 文件 1133 条，1 failed（`test_real_shell_executor_stops_repeats_and_accepts_progress`，
+  环境性：基线 175d85315 单跑 600s 超时 + 基线探针 180s 超时 + 当前树单跑 300s 超时；不走本次改动链路）。
+- **门禁**：`strict_gates.sh` GATES_PASS（10 项检查全 rc=0、0 dirty files；size_diff 新增告警 0）。
+- 提交：50ff92cff（测试）、816f0492f（实现）、aff7fc46e（门禁告警修复）。
+
 ## 空正文续跑预算按工具进展重置（mc3-emptybudget，2026-10-09，分支 `worker/mc3-thinktrunc`，接 a8c8b6e77）
 
 来源：`tasks/multicore/mc3-empty-body-budget.md`；mc1/mc2 两个长回合（159/192 轮工具）最后一步回复为空，
