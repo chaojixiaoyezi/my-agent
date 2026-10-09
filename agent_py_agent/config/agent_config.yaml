@@ -827,6 +827,12 @@ model_reasoning_update_items: auto
 # - true：开启（默认）。
 # - false：不自动检测；仍可用 /effort probe 手动检测。
 reasoning_control_auto_probe: true
+# 「只思考被输出上限截断」的续跑给紧邻那一次调用降一档思考强度（最高→高→中，超高/极限先落到相邻的更低档），
+# 打破"继续展开推理直到上限"的循环：
+# - true：开启（默认）。降档只影响紧邻那一次续跑调用，下一次调用恢复本会话配置的档位，不改会话或用户设置；
+#   供应商不支持调节智能程度、或已是最低档时只如实记录、照常续跑。
+# - false：关闭。续跑完全按原来的提示和档位进行（与改动前行为一致）。
+model_truncation_thinking_downgrade: true
 # 当前模型的结构化输出方式（记忆整理、自动总结 Skill 等后台结构化调用使用），通常由 /model 档案的"结构化输出"字段带入：
 # - auto：只对实测确认过的服务商改用 json_object（DeepSeek 官方 OpenAI 兼容接口不接受 json_schema），其余用原生方式。
 # - native：用接口自带的严格方式（OpenAI 兼容接口发 json_schema，Anthropic 兼容接口用强制工具信封）。

@@ -36,6 +36,14 @@ _REASONING_LEVEL_RULES = {
 }
 REASONING_LEVELS = tuple(_REASONING_LEVEL_RULES)
 REASONING_CONTROLS = ("auto", "effort", "budget", "none")
+# LLM: 「只思考截断续跑」的相邻降档表：max → high → medium 为主链（任务给定），超高/极限档先落到
+#   相邻的更低档；不在表里的档位（medium/low/off/auto）已是最低档。只按此表降档，不按模型名或正文猜。
+_REASONING_DOWNGRADE_NEXT = {
+    "ultra": "max",
+    "max": "high",
+    "xhigh": "high",
+    "high": "medium",
+}
 # 模型能否用 configuration_update 项改档位的三种声明：auto 按已核对的模型名前缀判断，on/off 由档案显式声明。
 REASONING_UPDATE_ITEM_MODES = ("auto", "on", "off")
 LEVEL_LABELS = {level: rule.label for level, rule in _REASONING_LEVEL_RULES.items()}
@@ -96,6 +104,15 @@ def normalize_reasoning_level(value: object) -> str:
 def normalize_reasoning_control(value: object) -> str:
     control = str(value or "auto").strip().lower()
     return control if control in REASONING_CONTROLS else ""
+
+
+# LLM: 「只思考被输出上限截断」的续跑要把紧邻那一次调用的思考强度降一档（max → high → medium 为主链，
+#   超高/极限档先落到相邻的更低档）。降档只按这一张表，不按模型名或回复正文判断；表里没有的档位
+#   （medium/low/off/auto）表示已是最低档，调用方记 already_lowest 后照常续跑。
+# 函数用途: 返回某档位降一档后的档位；已是最低档或不可降时返回空串。
+def downgraded_reasoning_level(level: str) -> str:
+    normalized = normalize_reasoning_level(level)
+    return _REASONING_DOWNGRADE_NEXT.get(normalized, "")
 
 
 # LLM: 显式声明优先；auto 按 (接口域名, 协议) 查已知表，查不到一律 none。model_backend 只映射到协议族
@@ -280,6 +297,7 @@ __all__ = [
     "describe_config_reasoning_effect",
     "describe_level_choices",
     "describe_reasoning_effect",
+    "downgraded_reasoning_level",
     "normalize_reasoning_control",
     "normalize_reasoning_level",
     "reasoning_payload_fields",

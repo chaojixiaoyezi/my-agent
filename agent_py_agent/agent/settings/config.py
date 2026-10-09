@@ -579,6 +579,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_reasoning_update_items: str = "auto"
     # /effort 设成 auto 以外的档位、而当前模型未声明思考控制方式且解析为不支持时，宿主是否在后台自动检测一次（9 次短请求）。
     reasoning_control_auto_probe: bool = True
+    # 「只思考被输出上限截断」的续跑给紧邻那一次调用降一档思考强度（max→high→medium），打破"继续展开推理"
+    # 的循环；只影响那一次调用，不改会话或用户设置。关 = 完全按原提示与原档位续跑。
+    model_truncation_thinking_downgrade: bool = True
     # 当前模型的结构化输出方式 auto/native/json_object，通常由 /model 档案带入；auto 只对已核对供应商改用 json_object。
     model_structured_output: str = "auto"
     # Anthropic-compatible 原生多轮工具请求是否写 cache_control 断点。仅影响 native

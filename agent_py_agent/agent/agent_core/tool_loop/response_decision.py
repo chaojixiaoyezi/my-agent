@@ -74,6 +74,8 @@ class ToolLoopRepairCounters:
     truncated_write_repairs: int = 0
     # R248: 最终答复被输出上限截断后的轮内续跑次数（不重启整轮，见 _truncated_final_resume）。
     truncated_output_repairs: int = 0
+    # 「只思考截断」续跑实际降一档思考强度的次数（至多 1 次；与截断续跑预算分开，任何一方不吃另一方额度）。
+    truncation_thinking_downgrades: int = 0
     # 门槛5 续跑探针: 本轮模型调用被供应商超时打断且重试救回、**且本轮确实执行过工具**，模型
     # 零工具调用只回一句承诺时放行的轮内探针次数（至多 1 次，与截断续跑分开计数、互不吃预算）。
     # 探针那一枪零工具调用 → 在「探针之前那一枪」与该枪之间原样交付更长的一条（无损 tie-break），
@@ -108,6 +110,18 @@ _TRUNCATED_OUTPUT_RESUME = (
     "把剩余工作拆成更小的块，每块做完立刻落盘或执行，再继续下一块；"
     "需要调用工具就直接调用。本条指令不指定任何具体工具，也不假定上一轮调用了哪个工具。"
     "如果上一轮还没有产出正文或工具调用（只有推理先顶到了上限），不要再展开长推理，直接产出第一块。"
+)
+
+# LLM: 「只思考被输出上限截断」（零可见正文、零工具调用，推理先顶到上限）的续跑指令：原来的"接着写"
+#   会把模型引回继续展开推理；这里明确要求先用一个工具动作或简短答复把断点推过去，再继续剩余工作。
+#   与正文截断共用同一个 [output-limit-resume] 续跑族与同一份有界预算；判断只看结构化事实。
+# 常量用途: 只思考截断的续跑回灌给模型的宿主指令。
+_THINKING_ONLY_TRUNCATION_RESUME = (
+    "[output-limit-resume]\n"
+    "上一条回复被供应商输出上限截断了，不能当作完成。上一轮没有产出可见正文或工具调用，是推理先顶到了上限。"
+    "不要再展开长推理：先用一个工具动作或简短答复推进，再继续。"
+    "不要道歉、不要复述已经写过的内容、不要总结；需要调用工具就直接调用。"
+    "本条指令不指定任何具体工具，也不假定上一轮调用了哪个工具。"
 )
 
 # LLM: 供应商超时续跑与输出截断续跑是两件事：前者针对「本轮模型调用被供应商超时打断、
@@ -847,17 +861,79 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
     return {"tool": call.tool_name, "call_id": call.call_id, **call.arguments}
 
 
+# LLM: 「只思考截断」的结构化判据：provider 长度三件套由调用方先验，这里只看零可见正文；
+#   零工具调用由本裁决路径保证。不解析思考内容、不看模型自述，判据全部来自响应对象的结构字段。
+# 函数用途: 判断一次长度截断响应是不是"只有思考、没有可见正文"。
+def _is_thinking_only_truncation(response: object) -> bool:
+    return not str(getattr(response, "text", "") or "").strip()
+
+
+# LLM: 开关是用户可见配置（默认开）；读不到配置时按开（与 AgentConfig 默认值一致），
+#   关 = 完全按原提示与原档位续跑（连提示都不变），保证"行为和现在完全一样"。
+# 函数用途: 读取「只思考截断续跑降档」开关。
+def _thinking_downgrade_enabled(agent: object) -> bool:
+    return bool(
+        getattr(getattr(agent, "config", None), "model_truncation_thinking_downgrade", True)
+    )
+
+
+# LLM: trace 只写结构化字段（原档位/新档位/结果），不读正文、不写模型可见上下文；容器不可用时静默跳过。
+# 函数用途: 往运行诊断 trace 追加一条降档决策记录。
+def _record_thinking_downgrade(params: object, from_level: str, to_level: str, outcome: str) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return
+    trace = state.setdefault("truncation_thinking_downgrade_trace", [])
+    if isinstance(trace, list):
+        trace.append({"from_level": from_level, "to_level": to_level, "outcome": outcome})
+
+
+# LLM: 降档决策只写结构化事实：counters 记实际降档次数（至多 1 次），live_archive_state 记每次决策的
+#   trace（原档位/新档位/结果），供运行诊断读取；供应商不支持强度参数记 unsupported、没有更低档位
+#   记 already_lowest、本轮已降过记 already_downgraded，三种情况都照常续跑。永不抛异常、永不阻断续跑：
+#   读不到档位或写不进覆盖时按未降档处理。
+# 函数用途: 为「只思考截断续跑」的紧邻下一次调用尝试降一档，返回更新后的修复计数。
+def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepairCounters:
+    from ...backends.reasoning_control import downgraded_reasoning_level
+    from ...settings.reasoning_effort import run_reasoning_level, set_next_call_reasoning_level
+
+    current = run_reasoning_level(request.agent, request.params)
+    control = str(getattr(getattr(request.agent, "backend", None), "reasoning_control", "none") or "none")
+    if control not in {"effort", "budget"}:
+        _record_thinking_downgrade(request.params, current, "", "unsupported")
+        return request.counters
+    if request.counters.truncation_thinking_downgrades >= 1:
+        _record_thinking_downgrade(request.params, current, "", "already_downgraded")
+        return request.counters
+    target = downgraded_reasoning_level(current)
+    if not target:
+        _record_thinking_downgrade(request.params, current, "", "already_lowest")
+        return request.counters
+    if not set_next_call_reasoning_level(request.params, target):
+        return request.counters
+    _record_thinking_downgrade(request.params, current, target, "downgraded")
+    return replace(
+        request.counters,
+        truncation_thinking_downgrades=request.counters.truncation_thinking_downgrades + 1,
+    )
+
+
 # LLM: 供应商长度截断的真实响应一定带 runtime 字段（unfinished/MODEL_RESPONSE_TRUNCATED/model_provider），
 #   会在下面的通用 runtime-status break 之前被拦下；R248 的轮内续跑若只挂在"无 runtime 字段"分支上，
 #   对真实截断永远不可达（真机 NOV02-ds-t2 2026-10-05：16 次调用、末次纯思考顶满 65536 后整轮失败，
 #   续跑 0 次、约 400 秒白花）。这里按既有结构化三件套识别长度截断，先消费同一条有界续跑预算；
 #   其它 runtime 状态（断流、过滤、坏参数等）原样直接 break，不给续跑。
+#   只思考截断（零可见正文）走专门提示并给紧邻下一次调用降一档（开关开时）；正文截断保持原提示。
 # 函数用途: 给"最终答复或仅思考被输出上限截断"的零工具响应补一次轮内续跑；超限或非长度截断返回 None。
 def _truncated_output_resume_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision | None:
     if not _is_provider_length_truncated(request.response):
         return None
     if request.counters.truncated_output_repairs >= _TRUNCATED_OUTPUT_RESUME_COUNT:
         return None
+    if _thinking_downgrade_enabled(request.agent) and _is_thinking_only_truncation(request.response):
+        request.params.tool_context.append(_THINKING_ONLY_TRUNCATION_RESUME)
+        counters = _downgrade_next_call_reasoning(request)
+        return ToolLoopResponseDecision("continue", None, [], _inc_truncated_output(counters))
     request.params.tool_context.append(_TRUNCATED_OUTPUT_RESUME)
     return ToolLoopResponseDecision("continue", None, [], _inc_truncated_output(request.counters))
 

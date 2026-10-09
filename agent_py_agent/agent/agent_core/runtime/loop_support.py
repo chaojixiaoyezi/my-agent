@@ -853,6 +853,11 @@ def _tool_runtime_evidence(
             for item in list(live_state.get("protocol_violation_trace") or [])
             if isinstance(item, dict)
         ],
+        "truncation_thinking_downgrades": [
+            dict(item)
+            for item in list(live_state.get("truncation_thinking_downgrade_trace") or [])
+            if isinstance(item, dict)
+        ],
         "completion_gate": {
             "status": final_status,
             "reason": str(getattr(final_response, "runtime_reason", "") or ""),

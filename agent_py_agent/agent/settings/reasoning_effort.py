@@ -48,12 +48,52 @@ def run_reasoning_level(agent: object, params: object) -> str:
     return level or configured_reasoning_level(getattr(agent, "config", None))
 
 
+# LLM: 「只思考被输出上限截断」的续跑要在紧邻那一次模型调用上降一档思考强度：覆盖值挂在
+#   params.live_archive_state（工具循环整轮复用同一 params 实例），读取无副作用、供真实请求与各载荷
+#   投影共用同一口径；清除在真实调用完成后统一做（见 tool_model_generation._do_backend_generate），
+#   因此它只影响一次调用，不改会话、线程或用户设置。伪 params（无 dict 状态）时全部退化为无覆盖。
+NEXT_CALL_LEVEL_KEY = "_next_call_reasoning_level"
+
+
+# 函数用途: 读取「紧邻下一次调用」的档位覆盖；没有或不可用时返回空串。
+def next_call_reasoning_level(params: object) -> str:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return ""
+    return normalize_reasoning_level(state.get(NEXT_CALL_LEVEL_KEY))
+
+
+# 函数用途: 写入「紧邻下一次调用」的档位覆盖；非法档位或伪 params 时返回 False。
+def set_next_call_reasoning_level(params: object, level: str) -> bool:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return False
+    normalized = normalize_reasoning_level(level)
+    if not normalized:
+        return False
+    state[NEXT_CALL_LEVEL_KEY] = normalized
+    return True
+
+
+# 函数用途: 清除「紧邻下一次调用」的档位覆盖（真实模型调用完成后调用）。
+def clear_next_call_reasoning_level(params: object) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        state.pop(NEXT_CALL_LEVEL_KEY, None)
+
+
 # LLM: 真实请求与两处载荷投影都必须调用本函数；backend.reasoning_control 缺失（假后端、旧后端）按 none 处理。
 #   返回 (thinking_disabled, reasoning_effort)，forced 表示原强制工具选择要求关闭思考。
+#   「只思考截断续跑」的一次性降档覆盖优先于线程/全局档位：只作用于紧邻这一次调用，由真实调用
+#   完成后清除；投影与真实请求共用本函数，所以口径一致。
 # 函数用途: 计算一次模型请求的思考开关与档位。
 def request_reasoning_options(agent: object, params: object, backend: object, *, forced: bool) -> tuple[bool, str]:
     control = str(getattr(backend, "reasoning_control", "none") or "none")
-    return reasoning_request_values(run_reasoning_level(agent, params), control, forced=forced)
+    level = run_reasoning_level(agent, params)
+    override = next_call_reasoning_level(params)
+    if override:
+        level = override
+    return reasoning_request_values(level, control, forced=forced)
 
 
 # LLM: 只改线程自己的档位字段（原子更新）；空串表示清除会话设置、回落全局默认。八档取唯一表，非法档位抛 ValueError。
@@ -92,10 +132,13 @@ __all__ = [
     "CHILD_ATTR",
     "THREAD_FIELD",
     "child_reasoning_level",
+    "clear_next_call_reasoning_level",
     "configured_reasoning_level",
     "inherit_reasoning_effort",
+    "next_call_reasoning_level",
     "request_reasoning_options",
     "run_reasoning_level",
     "run_thread_id",
+    "set_next_call_reasoning_level",
     "set_thread_reasoning_level",
 ]
