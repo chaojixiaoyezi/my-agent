@@ -126,7 +126,8 @@ curator 要覆盖三处：
   2. 先取得 quota admission，再按 policy → 人格顺序拿锁（PersonaRepository 的同一目标锁），quota 禁用也不省掉人格锁。
   3. 锁内一次做完：重判定计划（核对 plan_digest 与版本账本尾）→ 校验快照（首次写入并逐个读回；续作也按清单逐文件校验 SHA，不一致拒绝）→ 写归档 → 一次性删除全部目标 → 追加排除名单 → 推进失效代次 → 写事务记录（completed）。
   4. 按相反顺序释放（迁移释放走 `commit_success`，清空 active_lease 并记录成功时间）。
-- 锁序固定为 **curator 租约 → policy 锁 → 人格锁 → 线程前缀锁**；quota admission 先于目标文件锁，所有路径同序，不能反过来。
+- 完整锁序为 **curator 租约（仅 curator/迁移）→ quota admission → policy 锁 → 正式记忆/人格目标锁 → 线程前缀锁**。人工晋升和 remember 没有 curator 租约，也必须在 policy 外先领 quota；quota 禁用仍取得 policy/目标锁，不能依赖配额互斥。
+- 晋升通过显式不可变提交上下文传递已领取 admission：长期事实 add/replace/remove 与删除后的候选脱敏复用准入，人格提交复用唯一仓库内部写入口，不能再次获取不可重入 quota。冲突候选状态写入在退出 policy/quota 后执行；lesson/HOT 仍沿原仓库，所有最终提交都先经过同一 quota→policy 闸门。
 - 第 4 轮落实：迁移用锁内批处理入口一次传全部目标，普通 `mutate_batch` 的 32 条公开上限不变；同锁读计划和账本尾，续作不在锁外重采样。名单用锁内追加入口，不能重入普通锁。
 - curator 的成功批次提交保留同一租约到自动晋升尾段结束（含无新消息的积压补晋升），再单独释放，不重复累计游标或计数；心跳核对精确 lease_id 延长期限，原 E11d 明确死亡判据不变。
 - `executing/promotion` 只在同机正整数 PID 未被明确判死时获得超期保护，领取和事务恢复共用同一判据。心跳不缩短已存在的未来期限；退出先 stop/join 再检查在途续租错误。真实死亡仍可回收；未知生死保守等待，若执行线程永久卡死而进程仍活着，会持续 busy，不自动强抢。
@@ -144,7 +145,7 @@ curator 要覆盖三处：
 
 - 所有写 `memory_policy.json` 的入口（`append_learning_exclusions`、home_layout 与 owner_resolver 的种子初始化）都走 policy 锁。
 - 初始化改成"不存在才原子创建"（O_EXCL），不能覆盖已经存在的文件。
-- 晋升提交：在提交的临界区内拿 policy 锁（锁序 policy → 记忆写入），读名单和修订号，候选来源命中就拒绝；不在提交之前单独做检查。
+- 晋升提交：按 quota → policy → 记忆/人格目标拿锁，名单核对与正式写入在同一 policy 临界区内，候选来源命中就拒绝；不在提交之前单独做检查，不在 policy 内重新领取 quota。
 
 #### 3.6.4 排除窗口的到期与诊断（0r3）
 

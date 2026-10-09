@@ -19,6 +19,7 @@ from typing import Protocol
 from ..capability.persona_repository import (
     PersonaMutationRequest,
     PersonaRepository,
+    _mutate_persona_document,
     persona_entry_id,
 )
 from ..common.json_io import locked_json_path
@@ -29,6 +30,7 @@ from ..common.tool_index_stream import (
 )
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from ..user_space.owner_policy import read_learning_exclusions
+from ..user_space.owner_quota import OwnerQuotaAdmission
 from .candidate_models import (
     MemoryCandidate,
     MemoryScope,
@@ -368,15 +370,24 @@ class MemoryPromotionResult:
 
 # LLM: 正式目标提交与 MemoryPromotionService 主流程分离，保持主流程只做裁决编排。
 # 类用途: 提供 long_term/Persona/lesson/HOT 四种正式落点的唯一提交实现。
+# LLM: 提交上下文显式携带外层 quota；不把准入藏在 service 的可变属性中，线程间不会串用。
+# 类用途: 保存一次提交的审阅者、确认事实和已领取的配额准入。
+@dataclass(frozen=True)
+class _PromotionWriteContext:
+    reviewer: str
+    confirmed: bool
+    admission: OwnerQuotaAdmission
+
+
+# LLM: 四种目标共用唯一仓库，接收已经取得的外层配额准入。
+# 类用途: 执行正式目标写入，不重复获取 owner quota 锁。
 class _PromotionCommitMixin:
     # LLM: 每个正式目标只有一个 repository；禁止在这里另写 Markdown/JSONL 旁路。
     # 函数用途: 提交目标并返回正式引用。
     def _commit_target(
         self,
         candidate: MemoryCandidate,
-        *,
-        reviewer: str,
-        confirmed: bool,
+        context: _PromotionWriteContext,
     ) -> str:
         # 宿主确定性补全(与 _automatic_policy_block 同源):user_explicit 漏写 target 时按 long_term 落库。
         target = str(candidate.promotion_target or "").strip().lower()
@@ -384,13 +395,12 @@ class _PromotionCommitMixin:
             if candidate.origin == "user_explicit" and candidate.candidate_type in _LONG_TERM_TARGET_TYPES:
                 target = "long_term"
         if target == "long_term":
-            return self._commit_long_term(candidate)
+            return self._commit_long_term(candidate, context.admission)
         if target in {"user", "soul", "agents"}:
             return self._commit_persona(
                 candidate,
-                target=target,
-                reviewer=reviewer,
-                confirmed=confirmed,
+                target,
+                context,
             )
         if target == "lesson":
             lesson = self.lessons.promote(
@@ -410,7 +420,7 @@ class _PromotionCommitMixin:
 
     # LLM: subject 冲突只在同 scope 内；新时间不能覆盖，replace/remove 必须精确 target_entry_id。
     # 函数用途: 按 proposed_action 分发长期记忆提交。
-    def _commit_long_term(self, candidate: MemoryCandidate) -> str:
+    def _commit_long_term(self, candidate: MemoryCandidate, admission: OwnerQuotaAdmission) -> str:
         if candidate.candidate_type not in _LONG_TERM_TARGET_TYPES:
             raise ValueError("candidate type cannot be stored in long_term memory")
         if candidate.origin == "model_inferred":
@@ -421,8 +431,8 @@ class _PromotionCommitMixin:
         if same_content is not None and candidate.proposed_action == "add":
             return "memory/long_term/memory.jsonl#" + same_content.entry_id
         if candidate.proposed_action == "add":
-            return self._commit_long_term_add(candidate, existing)
-        return self._commit_long_term_existing(candidate, existing)
+            return self._commit_long_term_add(candidate, existing, admission)
+        return self._commit_long_term_existing(candidate, existing, admission)
 
     # LLM: add 不得隐式转换为 replace；同 subject/scope 的冲突要求显式目标，不同主体分别保存。
     # 函数用途: 提交新增长期事实(add 分支)。
@@ -430,6 +440,7 @@ class _PromotionCommitMixin:
         self,
         candidate: MemoryCandidate,
         existing: list[MemoryRecord],
+        admission: OwnerQuotaAdmission,
     ) -> str:
         if existing:
             raise _PromotionConflict(
@@ -452,7 +463,7 @@ class _PromotionCommitMixin:
                     "source": f"candidate:{candidate.candidate_id}",
                     "expires_at": _expiry_epoch(candidate.valid_until),
                 }
-            ]
+            ], _admission=admission,
         )
         if not record:
             raise _PromotionConflict(
@@ -468,6 +479,7 @@ class _PromotionCommitMixin:
         self,
         candidate: MemoryCandidate,
         existing: list[MemoryRecord],
+        admission: OwnerQuotaAdmission,
     ) -> str:
         target = candidate.target_entry_id
         if not target or target not in {item.entry_id for item in existing}:
@@ -491,15 +503,13 @@ class _PromotionCommitMixin:
                         "expires_at": _expiry_epoch(candidate.valid_until),
                         "expected_version": prior.version,
                     }
-                ]
+                ], _admission=admission,
             )[0]
             return "memory/long_term/memory.jsonl#" + record.entry_id
         if action == "remove":
-            self.long_term.remove(
-                target,
-                source=f"candidate:{candidate.candidate_id}",
-                expected_version=prior.version,
-            )
+            self.long_term.apply_batch([{"action": "remove", "entry_id": target,
+                "source": f"candidate:{candidate.candidate_id}", "expected_version": prior.version}],
+                _admission=admission)
             return "memory/long_term/memory.jsonl#" + target + ":removed"
         raise ValueError("long_term promotion proposed_action must be add/replace/remove/merge")
 
@@ -511,11 +521,10 @@ class _PromotionCommitMixin:
     def _commit_persona(
         self,
         candidate: MemoryCandidate,
-        *,
         target: str,
-        reviewer: str,
-        confirmed: bool,
+        context: _PromotionWriteContext,
     ) -> str:
+        reviewer, confirmed = context.reviewer, context.confirmed
         if target == "agents":
             raise _PromotionBlocked(candidate.status, "AGENTS_WRITE_USER_ONLY")
         if target in {"user", "soul"} and candidate.origin != "user_explicit":
@@ -544,7 +553,7 @@ class _PromotionCommitMixin:
             (str(ref.get("quote") or "") for ref in candidate.source_message_refs if str(ref.get("quote") or "")),
             "",
         )
-        result = self.persona.mutate(
+        result = _mutate_persona_document(self.persona, context.admission,
             PersonaMutationRequest(
                 target=target,
                 action=action,
@@ -591,8 +600,7 @@ class _PromotionCommitMixin:
         return ""
 
 
-# LLM: 提交期复核与写入必须共享同一把 policy 锁（锁序 policy → 记忆写入，mc4-3103）；
-#   未接线 exclusion_store 时为空上下文，保持既有调用方行为（0r3 拆平：从类内搬出）。
+# LLM: 完整顺序为 quota→policy→正式目标；冲突候选提交在退出外锁后执行，不能 policy→quota。
 # 函数用途: 在 policy 锁内复核名单后提交目标，失败按稳定码返回。
 def _commit_with_exclusion_guard(
     service: MemoryPromotionService,
@@ -601,11 +609,24 @@ def _commit_with_exclusion_guard(
     reviewer: str,
     confirmed: bool,
 ) -> str:
-    with _learning_exclusion_scope(service):
-        _ensure_not_excluded(service, candidate)
-        return _commit_target_blocked(
-            service, candidate, reviewer=reviewer, confirmed=confirmed
-        )
+    try:
+        return _commit_admitted(service, candidate, (reviewer, confirmed))
+    except _PromotionConflict as exc:
+        blocked = service.candidates.transition(candidate.candidate_id, "blocked_conflict",
+            reviewer=reviewer, review_note=exc.reason_code, conflicts_with=list(exc.conflicts_with))
+        raise _PromotionBlocked(blocked.status, exc.reason_code) from None
+
+
+# LLM: 人工/remember 没有 curator 租约，必须直接在 policy 之外领 quota 并贯穿正式写入。
+# 函数用途: 依目标的原配额策略领取准入，在名单锁内核对并写入正式目标。
+def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool]) -> str:
+    enforcer = service.persona.quota_enforcer
+    if candidate.promotion_target == "long_term" and service.long_term.quota_enforcer is not None:
+        enforcer = service.long_term.quota_enforcer
+    with enforcer.admission() as admission:
+        with _learning_exclusion_scope(service):
+            _ensure_not_excluded(service, candidate)
+            return _commit_target_blocked(service, candidate, _PromotionWriteContext(*review, admission))
 
 
 # 函数用途: 返回提交期 policy 锁上下文（未接线时为空）。
@@ -655,21 +676,10 @@ def _learning_exclusion_block(
 def _commit_target_blocked(
     service: MemoryPromotionService,
     candidate: MemoryCandidate,
-    *,
-    reviewer: str,
-    confirmed: bool,
+    context: _PromotionWriteContext,
 ) -> str:
     try:
-        return service._commit_target(candidate, reviewer=reviewer, confirmed=confirmed)
-    except _PromotionConflict as exc:
-        blocked = service.candidates.transition(
-            candidate.candidate_id,
-            "blocked_conflict",
-            reviewer=reviewer,
-            review_note=exc.reason_code,
-            conflicts_with=list(exc.conflicts_with),
-        )
-        raise _PromotionBlocked(blocked.status, exc.reason_code) from None
+        return service._commit_target(candidate, context)
     except ValueError as exc:
         # lesson/HOT 重复证据门槛不满足(lessons.py:_validate_lesson_candidate):
         # 自动路径保持原状态干净失败,不崩溃——候选留在 approved,证据凑齐后下次再晋升;

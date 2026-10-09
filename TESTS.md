@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## AGENTS 第 0 期第 5 轮：配额完整锁序与释放诊断（mc2-agentsr5，2026-10-09）
+
+- 来源：review33 在 `ec9263f2b` 的原样探针实际 3 失败、2 通过：长期事实/USER 的 quota-policy 锁环，以及释放写盘失败后的 executing 租约无限保护。
+- 第一段：统一 quota→policy→正式目标，显式传递 admission，长期事实 add/replace/remove 和候选脱敏不重入；冲突候选落状态在释放外锁后完成。正式锁序见设计 §3.6。
+- `test_agents_cleanup_review33.py` 保留真实 flock、两个线程都结束、无锁错误、迁移 completed 与晋升 promoted 的原断言；正确顺序下改等 cleaner 的 quota 请求而不是取得。USER/SOUL 真实写版本尾后按原 CAS 重新 dry-run，不能取消计划校验。
+- 第一段六个配额合同加原晋升文件共 55 项通过；空提交故障注入仅适配 admission 关键字，原冲突断言不变。释放故障合同仍红，第二段待修；最终回归、变异、门禁在收尾更新。
+- 本轮只在隔离 HOME 验证；未启动真实 Gateway、未改真实 owner，不推送或部署。
+
 ## AGENTS 第 0 期第 4 轮：真实外层锁与晋升尾段租约（mc2-agents0r4，2026-10-09）
 
 - 来源：mc4 review32 两项 P1（3201、3202）及锁序统一任务；基线 `6eedee007` 原 26 探针为 23 过、3 业务红。

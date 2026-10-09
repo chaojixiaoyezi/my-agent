@@ -371,7 +371,7 @@ def test_empty_long_term_add_commit_becomes_conflict_not_stop_iteration(
         scope_key="project:alpha",
         subject_key="environment.timezone",
     )
-    monkeypatch.setattr(service.long_term, "apply_batch", lambda _operations: [])
+    monkeypatch.setattr(service.long_term, "apply_batch", lambda _operations, **_kwargs: [])
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
