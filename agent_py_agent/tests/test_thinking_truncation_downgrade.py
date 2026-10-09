@@ -19,12 +19,12 @@ import types
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    ToolLoopRepairCounters,
-    _no_tool_calls_decision,
-    _NoToolCallsRequest,
     _THINKING_ONLY_TRUNCATION_RESUME,
     _TRUNCATED_OUTPUT_RESUME,
     _TRUNCATED_OUTPUT_RESUME_COUNT,
+    ToolLoopRepairCounters,
+    _no_tool_calls_decision,
+    _NoToolCallsRequest,
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.settings.reasoning_effort import (
@@ -38,7 +38,6 @@ from agent_py_agent.tests._tool_runtime_harness import (
     make_test_protocol_snapshot,
     runtime_snapshot_for_model_specs,
 )
-
 
 # ---------------------------------------------------------------- helpers
 
@@ -60,7 +59,7 @@ def _agent(*, effort: str = "max", downgrade: bool = True, control: str = "effor
 # LLM: 供应商归一后的真实截断响应（带 runtime 三件套，与 response_completion 同形）；text 空
 #   代表"只思考截断"。裁决层只读结构化字段，不解析正文。
 # 函数用途: 构造一次「零工具调用」截断裁决请求与它的 params。
-def _request(*, text: str = "", counters=None, effort: str = "max", downgrade: bool = True, control: str = "effort"):
+def _request(*, text: str = "", counters=None, agent=None):
     params = types.SimpleNamespace(
         context_scope="task_local",
         task_attributes={},
@@ -77,7 +76,7 @@ def _request(*, text: str = "", counters=None, effort: str = "max", downgrade: b
         runtime_source="model_provider",
     )
     return _NoToolCallsRequest(
-        agent=_agent(effort=effort, downgrade=downgrade, control=control),
+        agent=agent if agent is not None else _agent(),
         params=params,
         response=response,
         counters=counters or ToolLoopRepairCounters(),
@@ -139,7 +138,7 @@ def test_visible_text_truncation_keeps_original_resume_without_downgrade() -> No
 # LLM: 开关关闭时行为和改动前完全一样：原提示、不降档、不写 trace。
 # 函数用途: 验证开关关的只思考截断保持原行为。
 def test_downgrade_disabled_keeps_original_behaviour() -> None:
-    request, params = _request(text="", downgrade=False)
+    request, params = _request(text="", agent=_agent(downgrade=False))
     decision = _no_tool_calls_decision(request)
 
     assert decision.action == "continue"
@@ -152,7 +151,7 @@ def test_downgrade_disabled_keeps_original_behaviour() -> None:
 # LLM: 供应商不支持强度参数时只如实记 unsupported、照常续跑，不挂覆盖。
 # 函数用途: 验证 control=none 的只思考截断：专门提示 + unsupported + 零降档。
 def test_unsupported_control_records_unsupported_and_resumes() -> None:
-    request, params = _request(text="", control="none")
+    request, params = _request(text="", agent=_agent(control="none"))
     decision = _no_tool_calls_decision(request)
 
     assert decision.action == "continue"
@@ -166,7 +165,7 @@ def test_unsupported_control_records_unsupported_and_resumes() -> None:
 # LLM: 已是最低档（medium 及以下）时只如实记 already_lowest、照常续跑，不挂覆盖。
 # 函数用途: 验证 medium 档的只思考截断：专门提示 + already_lowest + 零降档。
 def test_already_lowest_records_already_lowest_and_resumes() -> None:
-    request, params = _request(text="", effort="medium")
+    request, params = _request(text="", agent=_agent(effort="medium"))
     decision = _no_tool_calls_decision(request)
 
     assert decision.action == "continue"
@@ -261,7 +260,7 @@ class _RecordingPrompts:
     def __init__(self) -> None:
         self.built: list[str] = []
 
-    def build(self, user_prompt, memories, *, inject=None, prompt_files=None, **kwargs):
+    def build(self, user_prompt, memories, *, inject=None, **kwargs):
         text = "\n".join(
             [str(user_prompt)]
             + [str(item) for item in (inject or [])]

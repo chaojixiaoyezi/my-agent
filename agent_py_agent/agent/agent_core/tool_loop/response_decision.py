@@ -879,7 +879,7 @@ def _thinking_downgrade_enabled(agent: object) -> bool:
 
 # LLM: trace 只写结构化字段（原档位/新档位/结果），不读正文、不写模型可见上下文；容器不可用时静默跳过。
 # 函数用途: 往运行诊断 trace 追加一条降档决策记录。
-def _record_thinking_downgrade(params: object, from_level: str, to_level: str, outcome: str) -> None:
+def _record_thinking_downgrade(params: object, *, from_level: str, to_level: str, outcome: str) -> None:
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         return
@@ -900,18 +900,18 @@ def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepa
     current = run_reasoning_level(request.agent, request.params)
     control = str(getattr(getattr(request.agent, "backend", None), "reasoning_control", "none") or "none")
     if control not in {"effort", "budget"}:
-        _record_thinking_downgrade(request.params, current, "", "unsupported")
+        _record_thinking_downgrade(request.params, from_level=current, to_level="", outcome="unsupported")
         return request.counters
     if request.counters.truncation_thinking_downgrades >= 1:
-        _record_thinking_downgrade(request.params, current, "", "already_downgraded")
+        _record_thinking_downgrade(request.params, from_level=current, to_level="", outcome="already_downgraded")
         return request.counters
     target = downgraded_reasoning_level(current)
     if not target:
-        _record_thinking_downgrade(request.params, current, "", "already_lowest")
+        _record_thinking_downgrade(request.params, from_level=current, to_level="", outcome="already_lowest")
         return request.counters
     if not set_next_call_reasoning_level(request.params, target):
         return request.counters
-    _record_thinking_downgrade(request.params, current, target, "downgraded")
+    _record_thinking_downgrade(request.params, from_level=current, to_level=target, outcome="downgraded")
     return replace(
         request.counters,
         truncation_thinking_downgrades=request.counters.truncation_thinking_downgrades + 1,
