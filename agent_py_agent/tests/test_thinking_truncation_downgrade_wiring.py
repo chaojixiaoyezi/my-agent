@@ -72,17 +72,13 @@ def _provider_reply(protocol: str, *, truncated: bool = False, text: str = "") -
 # LLM: 真实后端 + 替身传输的完整工具循环：组包/解析/裁决都走产品代码，只有网络被替换；
 #   rows 记录每次真实出站的 payload，供断言"有效参数"而不是配置值。
 # 函数用途: 起一次真实后端的工具循环，返回 agent、params、出站载荷与 prompt 记录。
-def _real_loop(
-    monkeypatch,
-    protocol: str = "openai_compatible",
-    *,
-    script: list | None = None,
-    level: str = "max",
-    control: str = "effort",
-    levels=(),
-    downgrade: bool = True,
-    max_tokens: int = 65536,
-):
+def _real_loop(monkeypatch, protocol: str = "openai_compatible", *, options: dict | None = None):
+    options = options or {}
+    script = options.get("script")
+    level = str(options.get("level", "max"))
+    control = str(options.get("control", "effort"))
+    downgrade = bool(options.get("downgrade", True))
+    max_tokens = int(options.get("max_tokens", 65536))
     config = AgentConfig(
         model_backend=protocol,
         model_name="wiring-model",
@@ -90,7 +86,7 @@ def _real_loop(
         api_key="synthetic-fixture",
         stream_enabled=False,
         model_reasoning_control=control,
-        model_reasoning_levels=list(levels),
+        model_reasoning_levels=[],
         model_reasoning_effort=level,
         model_truncation_thinking_downgrade=downgrade,
         max_tokens=max_tokens,
@@ -123,16 +119,17 @@ def _real_loop(
 #   断言的是真实出站字段（Chat 的 reasoning_effort / Responses 的 reasoning.effort /
 #   Anthropic 的 budget_tokens 或 output_config.effort）。这组用例也是生产接线变异的抓取者。
 # 函数用途: 验证真实后端组包下续跑降档、下一次恢复用户档位。
-@pytest.mark.parametrize("protocol,control,level,expected", [
-    ("openai_compatible", "effort", "max", ["max", "high", "max"]),
-    ("openai_responses", "effort", "high", ["high", "medium", "high"]),
-    ("anthropic_compatible", "effort", "max", ["max", "high", "max"]),
-    ("anthropic_compatible", "budget", "high", [12288, 6144, 12288]),
+@pytest.mark.parametrize("protocol,case", [
+    ("openai_compatible", ("effort", "max", ["max", "high", "max"])),
+    ("openai_responses", ("effort", "high", ["high", "medium", "high"])),
+    ("anthropic_compatible", ("effort", "max", ["max", "high", "max"])),
+    ("anthropic_compatible", ("budget", "high", [12288, 6144, 12288])),
 ])
-def test_real_backend_loop_payload_downgrade_restore(
-    monkeypatch, protocol, control, level, expected,
-) -> None:
-    agent, params, rows, _ = _real_loop(monkeypatch, protocol, control=control, level=level)
+def test_real_backend_loop_payload_downgrade_restore(monkeypatch, protocol, case) -> None:
+    control, level, expected = case
+    agent, params, rows, _ = _real_loop(
+        monkeypatch, protocol, options={"control": control, "level": level},
+    )
     result = loop.execute_tool_loop(agent, params)
 
     if protocol == "openai_responses":
@@ -163,7 +160,7 @@ def test_resume_retry_keeps_lower_effort(monkeypatch, stage) -> None:
         ProviderTimeoutError("synthetic timeout", stage=stage),
         _provider_reply("openai_compatible", text="done"),
     ]
-    agent, params, rows, _ = _real_loop(monkeypatch, script=script)
+    agent, params, rows, _ = _real_loop(monkeypatch, options={"script": script})
     result = loop.execute_tool_loop(agent, params)
 
     assert result.final_response.text == "done"
@@ -180,9 +177,9 @@ def test_interposed_natural_reply_does_not_consume_override(monkeypatch) -> None
         queue_natural_user_reply,
     )
 
-    agent, params, rows, _ = _real_loop(monkeypatch, script=[
+    agent, params, rows, _ = _real_loop(monkeypatch, options={"script": [
         _provider_reply("openai_compatible", text="background status"),
-    ])
+    ]})
     response = ModelResponse(
         text="", backend="openai_compatible", truncated=True,
         runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
@@ -215,11 +212,11 @@ def test_compact_auxiliary_and_child_do_not_consume_override(monkeypatch) -> Non
         inherit_reasoning_effort,
     )
 
-    agent, params, rows, _ = _real_loop(monkeypatch, script=[
+    agent, params, rows, _ = _real_loop(monkeypatch, options={"script": [
         _provider_reply("openai_compatible", text="summary"),
         _provider_reply("openai_compatible", text="auxiliary"),
         _provider_reply("openai_compatible", text="resume done"),
-    ])
+    ]})
     response = ModelResponse(
         text="", backend="openai_compatible", truncated=True,
         runtime_status="unfinished", runtime_reason="MODEL_RESPONSE_TRUNCATED",
@@ -260,7 +257,7 @@ def test_compact_auxiliary_and_child_do_not_consume_override(monkeypatch) -> Non
 ])
 def test_recorded_downgrade_requires_effective_wire_change(monkeypatch, protocol, control, cap) -> None:
     agent, params, rows, _ = _real_loop(
-        monkeypatch, protocol, control=control, max_tokens=cap,
+        monkeypatch, protocol, options={"control": control, "max_tokens": cap},
     )
     loop.execute_tool_loop(agent, params)
 
@@ -294,10 +291,10 @@ def test_partial_tool_output_is_not_thinking_only(monkeypatch) -> None:
             },
         }],
     }
-    agent, params, rows, _ = _real_loop(monkeypatch, script=[
+    agent, params, rows, _ = _real_loop(monkeypatch, options={"script": [
         first,
         _provider_reply("openai_compatible", text="done"),
-    ])
+    ]})
     loop.execute_tool_loop(agent, params)
 
     assert [p["reasoning_effort"] for p in rows] == ["max", "max"]
