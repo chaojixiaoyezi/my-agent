@@ -154,6 +154,30 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 - 独立静态审查只读需求和三处 diff，未执行测试、未独立核对全文件；提出工具入口也应给实际中英词的低项。对照原任务第 17 行只要求工具示意“中文说明、中英文关键词”，第 20–21 行才要求 skill 举通用词例子，现稿已满足；不为此扩大工具说明或锁死示例词。该审查不替代 6d 或父级已执行的字节/AST/回归验证。
 - 真实 MiniMax/Gateway/TUI 学习与打包、目录/关键词推荐命中率、缓存收益和生产业务质量**未验证**；未部署、未改已装包或运行配置。下一步由 6d 在固定候选上复核生产入口，不能拿模拟或文字测试替代。
 
+## 订阅WS压缩字段与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
+
+- 来源：compactcall-2跟进；真实OAuthResponsesBackend、WS统一编码器与主模型guard线程，凭据入口/socket/动态事实全为合成替身，固定262144窗口与65536输出上限，不读真实正文或密钥。
+- 红测/定位：旧model_turn成功后clear会将真实工具表31→30，线程归档并集恢复已实现但当前轮仍撤回Schema；移除clear及两个死参数，旧消费测试改成连续成功仍保留集合，超限、恢复和异常断言保留。
+- `test_compactcall_websocket.py`保存完整connect参数、response.create原字节及JSON至pytest临时`wire-pair.json`。remote/text×live/preflight四臂：live走公开agent.run、真实tool_search和文件handler替身；preflight由Gateway构造加载面→公开prepare_conversation_context自动阈值→候选/CAS，强制压缩关闭。
+- preflight在线程池中不复制ContextVar，辅助入口用明确thread重绑；主guard沿原copy_context。完整应用层握手、model/type/stream/instructions/tools顺序及全部非input字段相同：cache_key=session-id、auto、reasoning.high、include encrypted、store=false；parallel/text/truncation/max_output_tokens均缺席，不补不受支持字段。
+- 窗口内live保留整个主input；preflight对全数组定位首差异input[32]，与检查点实际覆盖32/34条历史相同，后面是保留尾部/本轮要求/人格部署及新摘要指令的范围差异，不宣称整个input相等。
+- 第五例核对旧加载名不扩展收紧后的工具授权、空线程归档不继承名字。未完成真实Gateway消息队列、生产人格生成和跨线程持久工具生命周期E2E；局部身份/权限测试不能外推完整端到端。
+- 初审两项P1已补真实自动preflight入口及全数组首差异定位；P2补真实tool_search和授权边界。仅证明客户端合成条件；生产16%本地复现不出，仍需真机核对供应商缓存单独路由、失效/TTL及部署组合。
+- 复现：根目录`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_compactcall_websocket.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-compactcall2-auto`，PY取指定ci-venv-312；五例通过。相关18文件402通过，guards9完整12文件194通过；仅导入排版后五例复跑通过。进程内恢复旧clear的remote/text两例均因tools 31→30失败（pytest rc1，变异检查rc0），恢复后五例rc0。
+- 门禁：ruff、导入边界0条、doc-sync基线2f7589721、常数目录957项、diff、clean-package、strict尺寸均rc0；size_diff新增0/消失10、rc0，CODE_SIZE_REPORT已还原。初次ruff导入排版失败已修；误写常数脚本名rc2已改真实build_constants_catalog.py，clean-package未跟踪新测试失败在git add后通过，不把未执行的后续链当成成功。
+
+## 压缩调用出站前缀（compactcall，2026-10-08，07-c3，本地修复待复核）
+
+- 来源：compactcall派活；合成Store、原生历史及假运输，不读真实正文/凭据、不连Gateway。窗口内复用前缀，不把生产16%归因坐实。
+- 红测：新增8例有3失败/5通过：远端preflight末尾user在input[2]先分叉为configuration_update；live两例原动态尾项在input[1]被移动/strip拼接。instructions与工具表未分叉。
+- 改法：typed volatile而非最后user角色定位新指令；旧动态项完整放入共享messages；remote空新尾项+最终trigger，text独立最终指令。预算/运输同材料，无新配置，不动提交/CAS/回滚。
+- midturn文件新增8个参数例比较真实JSON的instructions/tools/tool_choice/reasoning字节及input历史；active_turn新增2例走真实归档/CAS、两工具排序、完整input前缀及预算材料经真实serializer同源验证。
+- 旧期望改为历史→降档→trigger，旧动态事实从prompt移入messages；Anthropic守全体正文块前缀，缓存元数据/连续user分组允许投影推进，原动态文本不并进新摘要块。
+- 复跑：根目录`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_midturn_compact_prefix.py agent_py_agent/tests/test_active_turn_compact_projection.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-compactcall`；PY用指定ci-venv-312。
+- 相关13文件301通过（含主/子/后台和容量投影），guards9完整12文件194通过；ruff、doc-sync基线2f7589721、导入边界0、clean-package、常数目录957项、diff均rc0。strict尺寸通过；size_diff初报测试函数过长，拆出完整前缀与预算重放断言助手后最终新增0/消失9（rc0）；拆分后active_turn全文件35通过，其他未变测试复用301通过结果。
+- 独立审查提出main和compact同时带降档更新的条件性顺序缺口；全产品读取点只有auxiliary的compact目的设置update，主请求不设置；新运输断言明确main无update/compact确有update且整个main input逐字保留。任意后端直接调用的非产品控制组合未验证。媒体repair先于input_items，typed volatile由input_items最后追加，不靠末尾user猜。
+- 上游契约及风险见DESIGN_LEDGER的compactcall；窗口内合成前缀不外推真实命中，超窗瘦身/分段及来源不全时不承诺历史前缀。完整旧分段source期望补入原dynamic user，仍逐字比较连续源、不放宽窗口或覆盖断言；全仓及真机由07复核。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。

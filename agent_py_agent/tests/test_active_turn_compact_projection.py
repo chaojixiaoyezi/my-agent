@@ -599,3 +599,79 @@ def test_recovery_freezes_parent_prefix_for_active_turn_fork(monkeypatch):
     )
     projection.status = "unknown"
     assert recovery._active_turn_cache_fork("主请求提示", frozen) is None
+
+
+# LLM: 实际归档选择、摘要执行、预算与运输都运行，仅模型响应替身；完整来源可复用时不许悄悄换工具或旧尾项。
+# 函数用途: 抓跨片归档压缩的完整Responses负载及预算来源，守住同源前缀和最后指令。
+@pytest.mark.parametrize("remote", [True, False])
+def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case, monkeypatch, remote):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+    from agent_py_agent.agent.backends.message_adapter import project_native_history_messages
+    from agent_py_agent.agent.conversation import compact_message_source, compact_request_budget
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+    from agent_py_agent.tests.test_compact_remote_provider import BLOCK, _subscription_backend
+
+    case = carried_case
+    backend, _, _ = _subscription_backend()
+    case.agent.backend = backend
+    case.agent.config.model_context_window_tokens = 128_000
+    case.agent.config.memory_compact_remote_enabled = remote
+    fork = replace(_fork(case, tail=()), provider_prompt=CacheStructuredPrompt("稳定规则", " \n旧动态事实\n "))
+    second_tool = {"name": "list_files", "description": "列目录", "input_schema": {"type": "object"}}
+    fork = replace(fork, tools=(*fork.tools, second_tool))
+    payloads, measured = [], []
+
+    def send(_path, payload, _headers, **_options):
+        payloads.append(deepcopy(payload))
+        output = [BLOCK["item"]] if payload["input"][-1].get("type") == "compaction_trigger" else [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": _SUMMARY}]}]
+        return {"status": "completed", "output": output}
+
+    estimate = compact_message_source.estimate_compact_payload
+
+    def measure(payload):
+        measured.append({**payload, "messages": list(deepcopy(list(payload["messages"])))})
+        return estimate(payload)
+
+    monkeypatch.setattr(compact_message_source, "estimate_compact_payload", measure)
+    monkeypatch.setattr(compact_request_budget, "estimate_compact_payload", measure)
+    monkeypatch.setattr(compact_semantic_summary, "summarize_live_tool_history", _real_summarize_live_tool_history)
+    backend.request_json = send
+    backend.generate(fork.provider_prompt, tools=list(fork.tools),
+                     messages=project_native_history_messages(fork.tool_ir_history, fork.provider_history_messages),
+                     request_options=ProviderRequestOptions(system_instruction=fork.system_instruction))
+    result = _compact(case, cache_fork=fork, request_projector=lambda *_, **_kw: ConversationCompactProjection(100, object()))
+    assert result.compacted and len(payloads) == 2 and measured
+    main, compact = payloads
+    _assert_compactcall_archive_prefix(main, compact, remote)
+    # 把预算读取过的同一材料交真实serializer，不能仅比较估算数字或对象身份。
+    material = measured[-1]
+    assert material["tools"] == list(fork.tools) and material["system_instruction"] == fork.system_instruction
+    _assert_compactcall_budget_wire(backend, payloads, material, compact)
+
+
+# LLM: 工具排序及旧历史逐字相同才算共享前缀；新控制或摘要要求不能插在任何旧项之前。
+# 函数用途: 比较归档压缩与主请求的完整固定负载及尾部要求。
+def _assert_compactcall_archive_prefix(main, compact, remote):
+    for field in ("instructions", "tools", "tool_choice", "reasoning"):
+        assert json.dumps(compact.get(field), ensure_ascii=False) == json.dumps(main.get(field), ensure_ascii=False)
+    assert [tool["name"] for tool in compact["tools"]] == ["read_file", "list_files"]
+    assert compact["input"][:len(main["input"])] == main["input"]
+    tail = compact["input"][-1]
+    assert tail == {"type": "compaction_trigger"} if remote else "完整替代摘要" in str(tail)
+
+
+# LLM: 去掉本次追加的控制项后，真实serializer输入必须与预算所见材料完全相同，不能只用估算值证明同源。
+# 函数用途: 重放预算材料并与实际摘要请求比较完整历史。
+def _assert_compactcall_budget_wire(backend, payloads, material, compact):
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+
+    before = len(payloads)
+    backend.generate(material["prompt"], messages=material["messages"], tools=material["tools"],
+                     request_options=ProviderRequestOptions(system_instruction=material["system_instruction"]))
+    assert len(payloads) == before + 1
+    projected = payloads[-1]["input"]
+    expected = [item for item in compact["input"] if item.get("type") not in {"configuration_update", "compaction_trigger"}]
+    assert projected == expected

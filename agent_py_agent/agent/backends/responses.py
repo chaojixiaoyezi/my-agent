@@ -1,8 +1,9 @@
-# LLM: Responses 适配复用 HTTP 主链、原生工具和工作片采样配置；不启用远端存储，不自动换协议。
+# LLM: Responses适配复用HTTP主链；压缩降档只追加在已有input之后，文本新尾项由typed布局定位；不启用远端存储。
 # 模块用途: 支持 /responses 的显式采样、文本、工具调用、流式摘要、JSON 输出及用量统计。
 from __future__ import annotations
 
 from ..conversation.input_media import project_input_media
+from ..prompting_parts.cache_layout import prompt_cache_layout
 from .base import ModelResponse
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
@@ -11,7 +12,7 @@ from .tool_protocol_adapter import tools_for_choice
 from .wire_contract import repair_native_messages, validate_responses_input
 
 
-# LLM: 继承公开生成签名以保持 Compact/原生调用方一致，仅覆盖协议组装和解析。
+# LLM: 继承公开生成签名；普通和压缩同源组包，trigger必须最后且降档不得抢到历史user之前。
 # 类用途: 适配支持 OpenAI Responses 的供应商。
 class OpenAIResponsesBackend(OpenAICompatibleBackend):
     name = "openai_responses"
@@ -28,6 +29,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     # LLM: Responses 只发送显式采样；订阅登录固定使用流式、不发 max_output_tokens，system 移到 instructions。
     #   智能程度按 reasoning_control=effort 写 reasoning.effort（档位按模型声明的 reasoning_levels 对应，见 reasoning_control）。
     #   历史先经 wire_contract.repair_native_messages 修整副本，最终 input 由 validate_responses_input 复核，不合规在本地抛错不发送。
+    #   降档位置只读typed布局及compaction_trigger：远端压缩追加于完整历史之后，文字摘要才可放在新volatile指令前。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         messages = project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes)
@@ -57,7 +59,9 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
                                                   payload.get("reasoning"), self.reasoning_levels)
                   if request.reasoning_update_effort and self.supports_reasoning_update_items() else None)
         if update is not None:
-            payload["input"] = insert_reasoning_update(payload["input"], update)
+            layout = prompt_cache_layout(request.prompt)
+            before_suffix = not request.compaction_trigger and bool(layout and layout.volatile_suffix)
+            payload["input"] = insert_reasoning_update(payload["input"], update, before_volatile_suffix=before_suffix)
         if request.response_schema is not None:
             payload["text"] = {"format": {"type": "json_schema", "name": "my_agent_output", "strict": True, "schema": request.response_schema}}
         elif request.json_object:

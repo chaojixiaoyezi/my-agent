@@ -1,4 +1,4 @@
-# LLM: 本模块只生成原 Compact 候选；live 调用复用主请求布局及有界发送，完整覆盖/取消检查完成前不得回收 IR 或提交会话。
+# LLM: 本模块只生成原Compact候选；live原动态尾项逐字转入消息，摘要指令独立追加；完整覆盖/取消检查前不得回收IR或提交会话。
 # 模块用途: 为历史续跑和运行中压缩生成摘要，保留原取消、缓存和失败合同，不创建另一份历史或清理线程。
 from __future__ import annotations
 
@@ -228,7 +228,7 @@ def summarize_carried_tool_context(
         return None
 
 
-# LLM: live 摘要与主请求共用前置布局（message_adapter），跨代仍保持原 model/system/tools/message 前缀；失败不改 IR。
+# LLM: live摘要共用主请求前置布局及原动态尾项的完整字节，摘要规则只能独立追加；原IR不变，预算与运输使用同一数组。
 # 函数用途: 对完整原生历史生成可续接摘要；原请求正常结束并复核停止后才返回候选，由外层容量门裁决大小。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     from ..conversation.compact_guard import raise_if_compact_interrupted
@@ -259,6 +259,7 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
         messages = AnthropicMessageAdapter().to_provider_messages(compact_history)
     else:
         messages = project_native_history_messages(request.history, request.provider_history_messages)
+        messages = _compact_cache_safe_messages(request.provider_prompt, messages)
     messages = strip_orphaned_tool_blocks(messages)
     # 服务端压缩（compact_remote）：只在缓存安全路径（主请求同一份前缀 + 当前 IR）上做；成功就不再发摘要请求。
     marker = _remote_live_summary(request, messages) if cache_safe is not None else ""
@@ -533,11 +534,9 @@ def _is_previous_thread_summary(
     )
 
 
-# LLM: A typed parent prompt is copied without flattening its metadata; only its volatile suffix is
-# extended. That keeps provider cache keys for system/tools/message history identical to the main
-# request while guaranteeing that the Compact instruction is chronologically last. Plain strings
-# return None and retain the compatibility path instead of inferring cache boundaries from prose.
-# 函数用途: 基于主请求的结构化缓存布局构造 Compact 请求，只在末尾追加摘要要求。
+# LLM: 原volatile已由_compact_cache_safe_messages逐字追加到原消息末尾；这里只放独立摘要指令，不合并或strip已有字节。
+# 普通字符串仍无typed布局，不猜边界；远端传空指令，最终trigger由后端追加，预算与发送同源。
+# 函数用途: 保留原稳定布局，把摘要要求作为一条新的末尾消息，而不改写主请求尾项。
 def _compact_cache_safe_prompt(
     provider_prompt: object,
     compact_instruction: str,
@@ -547,20 +546,24 @@ def _compact_cache_safe_prompt(
     layout = prompt_cache_layout(provider_prompt)
     if layout is None:
         return None
-    volatile_suffix = "\n\n".join(
-        text
-        for text in (
-            str(layout.volatile_suffix or "").strip(),
-            str(compact_instruction or "").strip(),
-        )
-        if text
-    )
     return CacheStructuredPrompt(
         layout.stable_prefix,
-        volatile_suffix,
+        str(compact_instruction or "").strip(),
         stable_user_prefix=layout.stable_user_prefix,
         canonical_user_turn=layout.canonical_user_turn,
     )
+
+
+# LLM: 主请求input_items把原volatile作为独立user尾项；只读typed布局，保留空白和顺序，不改原列表或来源IR。
+# 该唯一数组同时供远端、文字摘要预算和运输使用；无动态尾项时原对象直传。
+# 函数用途: 把主请求原动态尾项无损放在旧历史之后，让新的压缩指令或trigger继续纯追加。
+def _compact_cache_safe_messages(provider_prompt: object, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from ..prompting_parts.cache_layout import prompt_cache_layout
+
+    layout = prompt_cache_layout(provider_prompt)
+    if layout is None or not layout.volatile_suffix:
+        return messages
+    return [*messages, {"role": "user", "content": layout.volatile_suffix}]
 
 
 # LLM: 摘要可折叠普通过程，但中段非成功副作用必须另以精确事实块保留，失败时仍回退机械列表。
