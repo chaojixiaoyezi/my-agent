@@ -99,7 +99,9 @@ def test_responses_backend_sends_the_trigger_last_and_declares_the_capability():
         tools=[{"name": "read_file", "description": "read", "input_schema": {"type": "object"}}], purpose="conversation_compact_remote",
         compaction_trigger=True))
     payload = payloads[-1]
-    assert payload["input"][-1] == {"type": "compaction_trigger"} and payload["input"][-2]["role"] == "user"
+    assert payload["input"][-1] == {"type": "compaction_trigger"}
+    assert payload["input"][-2]["type"] == "configuration_update"
+    assert payload["input"][-3] == {"role": "user", "content": "历史"}
     assert payload["tools"][0]["name"] == "read_file" and "instructions" in payload
     assert response.assistant_content_blocks == [{"type": "responses_compaction", "model": "gpt-6.1-sol", "item": ITEM}]
     plain = get_backend("openai_responses", AgentConfig(model_backend="openai_responses", api_key="k", stream_enabled=False,
@@ -323,7 +325,8 @@ def test_live_tool_summary_takes_the_remote_path_when_available(monkeypatch):
     assert text.startswith("[provider-compaction") and outcome and outcome[-1]["item"] == ITEM
     sent = calls[-1]
     assert sent.compaction_trigger is True and sent.system_instruction == "系统" and sent.messages[0]["content"][0]["text"] == "历史"
-    assert str(sent.prompt) == "稳定前缀\n\n动态尾巴" or "动态尾巴" in str(sent.prompt)
+    assert str(sent.prompt) == "稳定前缀"
+    assert sent.messages[-1] == {"role": "user", "content": "动态尾巴"}
     # 开关关：回到原文字摘要路径（这里假 generate 返回空正文 → 机械兜底），不出现占位文本
     agent, _ = _remote_agent(monkeypatch, ModelResponse(text="", backend="fake"), enabled=False)
     text = summarize_live_tool_history(LiveToolHistorySummaryRequest(

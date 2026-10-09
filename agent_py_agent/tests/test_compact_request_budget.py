@@ -256,7 +256,10 @@ def test_live_summary_bounds_complete_tool_arguments_results_and_reasoning(monke
         tools=({"name": "write_file", "input_schema": {"type": "object"}},),
         system_instruction="原执行系统指令", request_id="request-live", run_id="run-live", task_id="task-live",
     )
-    expected = json.dumps([*prior, *AnthropicMessageAdapter().to_provider_messages(history)], ensure_ascii=False)
+    expected = json.dumps([
+        *prior, *AnthropicMessageAdapter().to_provider_messages(history),
+        {"role": "user", "content": "当前动态事实"},
+    ], ensure_ascii=False)
     segments = []
 
     def generate(candidate):

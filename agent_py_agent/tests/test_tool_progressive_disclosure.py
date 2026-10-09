@@ -92,23 +92,25 @@ def test_tool_search_schema_has_only_query_and_limit(tmp_path) -> None:
     assert schema["additionalProperties"] is False
 
 
-# LLM: 跑实际请求周期而非旧私有清理helper；所有后端响应为本地固定值，不请求模型。
-# 函数用途: 用最小绑定能力检查临时工具集合在响应边的消费规则。
+# LLM: 跑实际请求周期，工具表由同一加载集合投影；仅后端响应是替身，不清空粘性集合。
+# 函数用途: 确认连续发送与超限/回执不会撤回已有工具Schema。
 def _request_with_loaded_tools(loaded, *, status="completed", visible=True):
     return request_model_response(
         build_prompt=lambda: "原请求",
-        generate_response=lambda _prompt: ModelResponse("", "fake", runtime_status=status),
+        generate_response=lambda _prompt: ModelResponse(
+            ",".join(sorted(loaded)) if visible else "回执", "fake", runtime_status=status),
         restore_rejected_input=lambda: None,
         recover_context=lambda _prompt: False,
         read_overflow_retry_limit=lambda: 0,
-        visible_loaded_tools=loaded if visible else None,
     )
 
 
-def test_loaded_tool_schema_is_consumed_after_one_successful_model_call() -> None:
+def test_loaded_tool_schema_stays_sticky_after_successful_model_calls() -> None:
     loaded = {"get_goal"}
-    _request_with_loaded_tools(loaded)
-    assert loaded == set()
+    for _ in range(2):
+        _, response = _request_with_loaded_tools(loaded)
+        assert loaded == {"get_goal"}
+        assert response.text == "get_goal"
 
 
 def test_loaded_tool_schema_survives_overflow_or_auxiliary_reply() -> None:
