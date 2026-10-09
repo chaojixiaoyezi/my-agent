@@ -21,7 +21,7 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
-from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
+from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import CandidateService, merge_candidate_observations
 from .curator_run_log import (
@@ -433,13 +433,14 @@ def _recovery_plan(committer: CuratorBatchCommitter, now: datetime | None):
     return _RecoveryPlan(manifests, tuple(path.resolve(strict=False) for path in paths), current)
 
 
-# LLM: 只有取锁阶段的 BlockingIOError 是 busy；进入临界区后的清理/审计/领取异常必须报恢复失败。
+# LLM: 只有取锁阶段的锁竞争是 busy（文件锁的 BlockingIOError 或配额锁包装出的
+#   OwnerQuotaLockContention）；进入临界区后的清理/审计/领取异常必须报恢复失败（MC4-2501）。
 # 函数用途: 依既有 quota→有序规范文件锁进入接管临界区，并保证失败释放完整锁集合。
 def _enter_recovery_locks(stack: ExitStack, committer: CuratorBatchCommitter, plan: _RecoveryPlan):
     try:
         stack.enter_context(committer._admissions(blocking=plan.blocking))
         stack.enter_context(_locked_paths(list(plan.paths), blocking=plan.blocking))
-    except BlockingIOError as exc:
+    except (BlockingIOError, OwnerQuotaLockContention) as exc:
         raise _CuratorRecoveryBusy("curator recovery locks are busy") from exc
 
 

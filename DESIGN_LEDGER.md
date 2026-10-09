@@ -1,5 +1,7 @@
 # 设计台账
 
+- **E11d 第四轮：配额锁竞争误报恢复失败（mc3-e11d-quota，2026-10-08；MC4-2501，本地实施，待 mc4 复审/3a 集成）**：`owner_quota` 新增 `OwnerQuotaLockContention` 子类，把锁竞争（`BlockingIOError`）与策略/存储故障分开；`curator_commit._enter_recovery_locks` 捕获子类转 busy，不再落进 `CURATOR_COMMIT_RECOVERY_FAILED`。mc4 review25 补测原样 11/12（2501 转绿；2502 基线问题不改）；review18+22 42 项、mc2 17 项、回归 774 项全绿；变异 2/2 rc=1；其它非阻塞配额调用点（插件环境准备 2 处）无同类误判。证据见 TESTS 顶部。
+
 ## Curator 未完成事务恢复与新租约领取的边界（mc2-e11d-race，2026-10-08；本地实现、待3a复核）
 
 - 来由：MC4-2201；两个服务锁前都发现旧 manifest，恢复后的清理/审计/再次 acquire 不在同一锁内，后者可重复回滚或覆盖新租约；原 review22 12 个双子进程交错先红。

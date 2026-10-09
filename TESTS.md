@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 配额锁竞争被误报为恢复失败（mc3-e11d-quota，2026-10-08，基线 b766de177，本地实现、待3a复核）
+
+- **来源**：MC4-2501（review25）。配额非零时另一个真实子进程暂时持有 owner 配额锁，候选版立刻 `failed / CURATOR_COMMIT_RECOVERY_FAILED`、模型调用为 0；基线 efc2f3336 会等锁后完成。
+- **根因**：`owner_quota._locked_owner_quota` 把底层 `BlockingIOError`（锁竞争）与其它故障统一包成 `OwnerQuotaUnavailable`；`curator_commit._enter_recovery_locks` 只捕 `BlockingIOError`，竞争落进恢复失败分支。
+- **改法**：`owner_quota` 新增 `OwnerQuotaLockContention(OwnerQuotaUnavailable)` 子类（由 `BlockingIOError` 产生），锁竞争与策略/存储故障分开转领域错误；`_enter_recovery_locks` 捕获 `(BlockingIOError, OwnerQuotaLockContention)` → busy。已有 `except OwnerQuotaUnavailable` 调用方行为不变；不靠异常消息文本判断。
+- **其它非阻塞配额调用点**（只查不改）：`plugin_environment.py:103`、`plugin_files_environment.py:108` 同样 `admission(blocking=False)`，竞争异常直接传播给插件安装上层，无"恢复失败"误分类；其余 `except OwnerQuotaUnavailable` 调用点均为默认阻塞路径（竞争时等锁），无同类误判。
+- **新测试**：`test_curator_quota_contention.py` 3 项（竞争→busy 或等锁成功；策略不可用→失败；扫描存储错误→失败且非模型失败）。
+- **mc4 补测**：`test_review25_extra.py` 原样 11 passed / 1 failed——2501 转绿；唯一红 `test_pre_model_collection_io_error_is_not_model_failure`（MC4-2502，基线同红，本轮不改）。
+- **既有补测**：review18 22 项 + review22 20 项 = 42 passed；mc2 新增 17 项 passed。
+- **变异**（一次一处，rc=1，SHA 还原一致）：M1 去掉竞争识别 → 竞争测试红（failed/CURATOR_COMMIT_RECOVERY_FAILED）；M2 把 `OwnerQuotaUnavailable` 全当 busy → 策略测试红（busy）。
+- **回归**：curator/memory/quota 相关 + guards9 = 774 passed。
+
 ## Curator 恢复与接管竞态（mc2-e11d-race，2026-10-08，基线 efc2f3336，本地实现、待3a复核）
 
 - 来源：MC4-2201；原路径 review22 补测先复现 **12 failed / 8 passed**。锁前发现 manifest 不能成为恢复权威，恢复清理与新租约领取之间不能留下第二个执行者的接管窗口。
