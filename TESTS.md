@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## 只思考截断降档 3502 输出上限收口（mc3-thinktruncfix2，2026-10-09，分支 `worker/mc3-thinktrunc`）
+
+来源：mc4 review35b 复核（`915f14d29` 不放行，只剩 3502）：比较前后出站参数用的输出上限与真实出站不同源。
+
+- **做法**：`response_decision.py` 新增 `_effective_output_cap`（优先后端冻结值 `backend.max_tokens`——
+  工厂 `effective_max_output_tokens` 按窗口裁剪、0 取默认值后冻结；伪后端缺该字段时回落同一工厂函数）；
+  `_effective_wire_change` 的 `ReasoningPayloadLimits.max_tokens` 改用它，不在决策层重算配置值。
+- **收编 mc4 两条边界用例**（`test_thinking_truncation_downgrade_wiring.py::test_effective_budget_uses_actual_factory_output_cap`）：
+  窗口裁剪（配置 65536 / 窗口 32768 → 上限 8192，max 与 high 预算都夹成 7168 → 记 no_effective_change）
+  与 0 默认值（配置 0 / 窗口 128000 → 上限 32000 → max→high 真降档）；修复前 2 红、修复后绿。
+- **测试**：两文件 34 条全绿；改动相关 + guards9 共 38 文件 866 条，0 failed / 0 skipped（连跑两轮）。
+- **变异 9 处**（一次一处，全部 rc=1）：原 8 处 + 比较改回 config.max_tokens。
+- **未知协议结论**：fail-open（协议未知直接认可变化）未发现可从生产入口触发（工厂拒绝未登记协议、
+  真实协议都映射到已知协议、echo/unconfigured 控制方式 none、决策后端不实现 generate），保持原行为。
+- **门禁**：strict_gates.sh GATES_PASS（10 项检查全 rc=0、0 dirty files；size_diff 新增告警 0）。
+- 提交：60d6db71a（测试收编）、74fdc52ea（3502 修复）。
+
 ## 只思考截断降档的四项 review35 修复（mc3-thinktruncfix1，2026-10-09，分支 `worker/mc3-thinktrunc`）
 
 来源：mc4 review35 报告；在上一小节基础上修复四项，同一分支、同一工作树。
