@@ -1,5 +1,16 @@
 # 测试与发布验收
 
+## 工具索引测量长进程隔离（toolrefs3，2026-10-08，本地测试修复，待07复核）
+
+- 来源：07 `toolrefs-3.md`及部署暂停/续做；只改测试，以已引用的 `eadabf649` 为父提交。`toolrefs-3-resume2.md`仅允许把未被引用的WIP `2de9af337`改写为正式提交；不改写 `eadabf649`，不改产品读取器。
+- 原序hot分片未重现峰值超限；scope原序复现compact峰值6,104,189字节。`tracemalloc.start(25)`再次复现6,088,189；快照最大单trace **3,844,800字节**，最内层为CPython3.12 `pathlib.py:404` 的 `sys.intern`，调用链由 `common/tool_output_paths.py:42` 的rglob进入。证据 `tmp/toolrefs/tr3-trace-compact.json`；不把未重现的hot超额来源说成已证实。
+- `helper_tool_ref_isolation.py`让hot/scope/timing三个文件的每个参数用例在同解释器、同工作树的全新pytest子进程执行完整原体，明确nodeid与独立临时目录，内部标记防递归。子进程断言/启动/超时失败原样使父用例失败；原3MiB、业务结果、loads/字节/枚举断言不变，无trace过滤或阈值调整。计时仍分开tracemalloc、meter与三次median；父进程启动成本不计入被测入口耗时。
+- 最终参数反证只通过临时测试插件将子进程scope/control读取器换为全部16,006行对象进列表再过滤；两个用例的loads/bytes/结果先通过，分别 **68,879,685 / 68,884,679字节**在原3MiB断言失败，父用例也失败（rc1），见 `tmp/toolrefs/tr3-resume2-old.txt`。不加载插件后两例恢复通过，峰值2,624,031/2,628,868，见 `tr3-resume2-restored.txt`；无产品源码变异。此前父测量窗口保持16MiB无关分配时两例仍通过，父峰值16,880,694/16,880,393、子峰值2,632,031/2,636,868，见 `tr3-parent-noise-final.txt`。
+- 独立审查指出退出0可能只是collect-only/skip/xfail；新增 `test_tool_ref_isolation.py` 先跑6红/1绿锁住缺口，再要求当前nodeid的setup/call/teardown全通过且无xfail的JSON回执。只清理影响pytest启动及tracemalloc的继承控制（包括 `PYTEST_ADDOPTS`、`PYTEST_PLUGINS`、`PYTHONTRACEMALLOC`、`PYTHONOPTIMIZE`），禁用自动插件，显式加载本测试插件/仓库conftest，固定当前树PYTHONPATH；不声称隔离全部OS环境。回执初始化为空防止旧报告复用；合成替身不作为真实业务入口证据，真实三文件与反证仍另行执行。
+- 复核又指出父解释器-O可删除helper普通assert；实跑守卫5红/2绿确认，再改为显式if/raise，补子退出1/2传播两例。最终9个守卫在正常与-O模式均9通过（优化运行仍有pytest固有警告）；对应 `tr3-isolation-final.txt` / `tr3-optimize-green.txt`。三个测量文件分别6/2/8通过，未变的测量源码结果复用；resume2按最终版本重跑原序分片hot901通过/1失败、scope575通过/4失败（见 `tr3-resume2-hot.txt` / `tr3-resume2-scope.txt`，失败均为下列非测量项），不得称全绿。最终源码快照独立静态审查无确定阻塞；主代理另用AST与eadabf649核对三处原测试体完全保留。未跑全仓；沙箱外6路长进程复核仍由07补跑。
+- scope清单第19项 `test_midturn_compact_prefix.py` 不在本工作树；只临时取 `95d5bc2e8` 该测试文件来保留42文件原次序，不复制其产品修复。该文件4项失败另列，不删除/放宽或修本任务范围外产品；验证后还原原先不存在状态。hot还存在Gateway shell显式cwd断言失败，不未经证据归因于沙箱。两个分片整体状态及最终命令返回码见任务RESULT，不能将测量通过说成分片全绿。
+- 复跑三个测量文件仍用指定CI Python及工作树根，`-o addopts='' -q -s --tb=short -p no:cacheprovider --basetemp=<独立临时目录>`；父进程自动为当前参数nodeid启动子pytest。原序分片清单、trace探针和可控注入日志保留在 `tmp/toolrefs/`；本机隔离结果不外推生产RSS或沙箱外6路整仓验证。
+
 ## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08，07-c1，本地实现待复核）
 
 - 来源：07 toolrefs、两次插话及toolrefs-2审核意见；只用合成索引，不读真实owner/正文/凭据，不连接Gateway。Compact、artifact、晋升证据回退、通用控制面共用 `common/tool_index_stream.py`；E11a保留原物理LF，旧整读入口保留CR/LF/CRLF。

@@ -14,6 +14,7 @@ import pytest
 from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
 from agent_py_agent.agent.common import tool_output_paths
 from agent_py_agent.agent.memory_archive import compact_apply
+from agent_py_agent.tests.helper_tool_ref_isolation import run_measurement_isolated
 from agent_py_agent.tests.test_tool_ref_scope_stream import compact_plan, index_row, write_index
 
 
@@ -89,7 +90,10 @@ def _install_meter(monkeypatch, stats: dict) -> None:
 
 
 @pytest.mark.parametrize("mode", ["compact", "finalization"])
-def test_large_scope_read_work(tmp_path: Path, monkeypatch, mode: str) -> None:
+def test_large_scope_read_work(monkeypatch, mode: str, request) -> None:
+    if run_measurement_isolated(request):
+        return
+    tmp_path: Path = request.getfixturevalue("tmp_path")
     index_bytes, corpus_sha256 = _corpus(tmp_path)
     bundle_path = tmp_path / "bundle.json"
     bundle_path.write_text('{"artifact_refs":{"items":[]}}', encoding="utf-8")
