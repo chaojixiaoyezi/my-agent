@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core import _tool_loop_service as loop
@@ -106,12 +106,12 @@ class _RecordingPrompts:
     def __init__(self) -> None:
         self.built: list[str] = []
 
-    def build(self, user_prompt, memories, *, inject=None, prompt_files=None, **kwargs):
+    def build(self, user_prompt, memories, **kwargs):
         tools = kwargs.get("tools")
         tool_context = list(getattr(tools, "tool_context", ()) or ()) if tools else []
         text = "\n".join(
             [str(user_prompt)]
-            + [str(item) for item in (inject or [])]
+            + [str(item) for item in (kwargs.get("inject") or [])]
             + [str(item) for item in tool_context]
         )
         self.built.append(text)
@@ -173,13 +173,26 @@ def _params(run_id: str, *, context_scope: str = "default") -> ToolLoopExecutePa
     )
 
 
+# LLM: 一次驱动所需的全部场景参数收成一个对象（size 门禁：模块级函数参数 ≤4）。
+# 类用途: 承载剧本、工具、run 身份与 scope/档位选项。
+@dataclass
+class _Scenario:
+    __test__ = False
+
+    script: list
+    tool: object
+    run_id: str
+    context_scope: str = "default"
+    effort: str = "max"
+
+
 # LLM: 真 execute_tool_loop 保留；只把工具 handler 换成隔离执行器里的测试工具、把 prompt 装配
 #   换成产品渲染函数——工具账（executed/archive）走真实 _record_tool_call 记账，不是桩件自证。
 # 函数用途: 在脚本化假后端上跑一次真实工具循环，返回结果、参数、后端与工具。
-def _drive(monkeypatch, tmp_path, script, tool, *, run_id: str, context_scope: str = "default", effort: str = "max"):
-    params = _params(run_id, context_scope=context_scope)
-    backend = _ScriptedBackend(script)
-    agent = _LoopAgent(backend, _RecordingPrompts(), root=tmp_path, effort=effort)
+def _drive(monkeypatch, tmp_path, scenario: _Scenario):
+    params = _params(scenario.run_id, context_scope=scenario.context_scope)
+    backend = _ScriptedBackend(scenario.script)
+    agent = _LoopAgent(backend, _RecordingPrompts(), root=tmp_path, effort=scenario.effort)
 
     # LLM: 只替换具体工具 handler，canonical ToolExecutor 仍实际执行；显式核对宿主防止串用。
     # 函数用途: 核对当前宿主后交给隔离测试执行器运行只读测试工具。
@@ -187,11 +200,11 @@ def _drive(monkeypatch, tmp_path, script, tool, *, run_id: str, context_scope: s
         assert loop_agent is agent
         return execute_canonical_test_call(
             tmp_path,
-            tools={tool.model_spec.name: tool},
+            tools={scenario.tool.model_spec.name: scenario.tool},
             tool_name=request.call.tool_name,
             arguments=dict(request.call.arguments),
             call_id=request.call.call_id,
-            run_id=run_id,
+            run_id=scenario.run_id,
         )
 
     monkeypatch.setattr(loop, "execute_one_tool_call", exec_one)
@@ -254,16 +267,18 @@ def test_tool_progress_resets_empty_text_budget(monkeypatch, tmp_path) -> None:
     result, params, backend = _drive(
         monkeypatch,
         tmp_path,
-        [
-            _empty_thinking(),  # 1 空 → nudge（空 1）
-            _tool_call(),  # 2 工具成功 → 真实进展
-            _empty_thinking(),  # 3 空 → 预算恢复 + nudge
-            _tool_call(call_id="call-2"),  # 4 工具成功 → 真实进展
-            _empty_thinking(),  # 5 空 → 预算恢复 + nudge（旧语义在这里结束）
-            _final("完成"),  # 6 终答
-        ],
-        tool,
-        run_id="empty-budget-progress",
+        _Scenario(
+            [
+                _empty_thinking(),  # 1 空 → nudge（空 1）
+                _tool_call(),  # 2 工具成功 → 真实进展
+                _empty_thinking(),  # 3 空 → 预算恢复 + nudge
+                _tool_call(call_id="call-2"),  # 4 工具成功 → 真实进展
+                _empty_thinking(),  # 5 空 → 预算恢复 + nudge（旧语义在这里结束）
+                _final("完成"),  # 6 终答
+            ],
+            tool,
+            "empty-budget-progress",
+        ),
     )
 
     assert backend.calls == 6, "有工具进展时空正文预算恢复，不提前结束"
@@ -281,14 +296,16 @@ def test_three_consecutive_empty_without_progress_still_ends(monkeypatch, tmp_pa
     result, params, backend = _drive(
         monkeypatch,
         tmp_path,
-        [
-            _empty_thinking(),  # 1 空 → nudge（空 1）
-            _empty_thinking(),  # 2 空 → nudge（空 2）
-            _empty_thinking(),  # 3 空 → 按原方式结束
-            _final("不该被调用"),  # 4 若被调用说明没结束
-        ],
-        tool,
-        run_id="empty-budget-no-progress",
+        _Scenario(
+            [
+                _empty_thinking(),  # 1 空 → nudge（空 1）
+                _empty_thinking(),  # 2 空 → nudge（空 2）
+                _empty_thinking(),  # 3 空 → 按原方式结束
+                _final("不该被调用"),  # 4 若被调用说明没结束
+            ],
+            tool,
+            "empty-budget-no-progress",
+        ),
     )
 
     assert backend.calls == 3, "连续空正文无进展仍守 2 次硬上限"
@@ -306,17 +323,19 @@ def test_truncation_budget_and_empty_text_budget_stay_independent(monkeypatch, t
     result, params, backend = _drive(
         monkeypatch,
         tmp_path,
-        [
-            _empty_thinking(),  # 1 空 → nudge（空 1）
-            _thinking_truncated(),  # 2 只思考截断 → 截断续跑 + 降档（不碰空预算）
-            _empty_thinking(),  # 3 空 → nudge（空 2；截断轮没偷吃空预算）
-            _tool_call(),  # 4 工具成功 → 真实进展
-            _empty_thinking(),  # 5 空 → 预算恢复 + nudge（旧语义在这里结束）
-            _thinking_truncated(),  # 6 第二次截断 → 仍按截断预算续跑（already_downgraded）
-            _final("完成"),  # 7 终答
-        ],
-        tool,
-        run_id="empty-budget-independent",
+        _Scenario(
+            [
+                _empty_thinking(),  # 1 空 → nudge（空 1）
+                _thinking_truncated(),  # 2 只思考截断 → 截断续跑 + 降档（不碰空预算）
+                _empty_thinking(),  # 3 空 → nudge（空 2；截断轮没偷吃空预算）
+                _tool_call(),  # 4 工具成功 → 真实进展
+                _empty_thinking(),  # 5 空 → 预算恢复 + nudge（旧语义在这里结束）
+                _thinking_truncated(),  # 6 第二次截断 → 仍按截断预算续跑（already_downgraded）
+                _final("完成"),  # 7 终答
+            ],
+            tool,
+            "empty-budget-independent",
+        ),
     )
 
     assert backend.calls == 7, "空正文预算与截断预算各自独立、互不吞掉"
@@ -338,17 +357,19 @@ def test_subagent_scope_gets_same_progress_reset(monkeypatch, tmp_path) -> None:
     result, params, backend = _drive(
         monkeypatch,
         tmp_path,
-        [
-            _empty_thinking(),
-            _tool_call(),
-            _empty_thinking(),
-            _tool_call(call_id="call-2"),
-            _empty_thinking(),
-            _final("完成"),
-        ],
-        tool,
-        run_id="empty-budget-subagent",
-        context_scope="task_local",
+        _Scenario(
+            [
+                _empty_thinking(),
+                _tool_call(),
+                _empty_thinking(),
+                _tool_call(call_id="call-2"),
+                _empty_thinking(),
+                _final("完成"),
+            ],
+            tool,
+            "empty-budget-subagent",
+            context_scope="task_local",
+        ),
     )
 
     assert backend.calls == 6, "子代理回合同样按工具进展恢复空正文预算"
@@ -366,15 +387,17 @@ def test_started_but_unfinished_tool_call_is_not_progress(monkeypatch, tmp_path)
     result, params, backend = _drive(
         monkeypatch,
         tmp_path,
-        [
-            _empty_thinking(),  # 1 空 → nudge（空 1）
-            _tool_call(),  # 2 工具调用发起但执行失败 → 只有 archive 增长
-            _empty_thinking(),  # 3 空 → 不恢复，nudge（空 2）
-            _empty_thinking(),  # 4 空 → 按原方式结束
-            _final("不该被调用"),  # 5 若被调用说明预算被错误恢复
-        ],
-        tool,
-        run_id="empty-budget-unfinished",
+        _Scenario(
+            [
+                _empty_thinking(),  # 1 空 → nudge（空 1）
+                _tool_call(),  # 2 工具调用发起但执行失败 → 只有 archive 增长
+                _empty_thinking(),  # 3 空 → 不恢复，nudge（空 2）
+                _empty_thinking(),  # 4 空 → 按原方式结束
+                _final("不该被调用"),  # 5 若被调用说明预算被错误恢复
+            ],
+            tool,
+            "empty-budget-unfinished",
+        ),
     )
 
     assert backend.calls == 4, "发起了但没有结果的调用不算进展，硬上限照旧"
