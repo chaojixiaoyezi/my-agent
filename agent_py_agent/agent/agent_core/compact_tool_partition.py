@@ -2,7 +2,7 @@
 #   回执带引用时，只有每个引用都等于同一四元身份原归档记录自己写下的输出位置（外置全文路径、分页读取的来源引用），
 #   整组才可移入摘要来源。摘要材料始终是模型当时看到的原回执（预览/正文+指针），不按引用去取全文；
 #   指针指向的内容由归档按四元身份保存，压缩后仍可读回。工具自报的其它引用、媒体引用、json/数据块仍保留原位。
-# 模块用途: 纯计算Compact可替代的完整工具往返，交回原CarriedToolCompactSource，不读取存储或调用摘要器。
+# 模块用途: 纯计算完整工具往返和已覆盖旧快照的退休分区，交回原CarriedToolCompactSource，不读存储或调用摘要器。
 from __future__ import annotations
 
 from collections import Counter
@@ -19,6 +19,7 @@ from ..conversation.compact_tool_identity import (
     compact_tool_refs,
 )
 from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
+from .tool_ir_history import summarized_runtime_fact_indexes
 
 # 与 tool_call_archive_record._projection_refs 里“完整原始输出”那条引用同源：归档自己写下的输出位置字段。
 # 两边必须一起改，test_compact_tool_partition 有同步测试。
@@ -76,7 +77,8 @@ def recovery_complete_ir_tool_refs(history: Sequence[object]) -> tuple[dict[str,
     ])
 
 
-# LLM: 归档优先并入精确refs，IR仅整组可替代；任何重复、已覆盖或未证明组都不进入source，也不按裸call_id删记录。
+# LLM: 归档优先并入精确refs，IR仅整组可替代；旧快照复用连续覆盖退休规则，保最新事实与未覆盖屏障。
+#   任何重复、已覆盖或未证明组都不进入source，也不按裸call_id删记录。
 # 函数用途: 从原归档和原生历史划出可摘要工具区及保持原时间位置的保留区，结果与入参深度隔离。
 def partition_recovery_tool_source(
     records: Sequence[dict[str, object]],
@@ -110,7 +112,8 @@ def partition_recovery_tool_source(
     source_ir = tuple(item for index, item in enumerate(history) if index in source_positions)
     if not source_records and not source_ir:
         return None
-    retained_ir = tuple(item for index, item in enumerate(history) if index not in source_positions)
+    retired_facts = summarized_runtime_fact_indexes(list(history), source_positions)
+    retained_ir = tuple(item for index, item in enumerate(history) if index not in source_positions | retired_facts)
     source_refs = compact_tool_refs([
         *source_records, *recovery_ir_tool_refs(source_ir, require_complete=True, archive_refs=archive_refs),
     ])

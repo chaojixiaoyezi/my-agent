@@ -1,7 +1,7 @@
 
 
 # LLM: execute_tool_loop 是主子共用的唯一入口；交付复核只消费原验证/写入信封并改共享展示，native IR、Compact 与收口权威不变。
-# 模块用途: 装配采样、工具和窄收口；可选建议不参与控制，保持输入账、取消和持久提交边界，核对共享展示测试。
+# 模块用途: 装配采样、工具和窄收口及最终校准计量；保持输入账、取消和持久提交边界，核对共享展示测试。
 from __future__ import annotations
 
 import json
@@ -204,6 +204,7 @@ class ToolLoopRunResult:
 # LLM: This is one immutable candidate for reducing native history; binding and generation are
 # point-in-time facts and four-part run/attempt/turn/call refs are frozen from actual IR calls before
 # mutation. Discard the plan after commit or rollback; current request identity never replaces them.
+# 计量校准及 prompt 同样只冻结一次，提交后不可重新取供应商观测改口径。
 # 类用途: 固定运行中 Compact 的阈值、摘要、线程绑定和原始四元调用来源，供提交与回滚共用。
 @dataclass(frozen=True)
 class _NativeCompactPlan:
@@ -223,6 +224,8 @@ class _NativeCompactPlan:
     forced: bool
     # 服务端压缩记录（conversation/compact_remote）；None = 普通文字摘要。提交和 IR 替换都从这里取。
     provider_compaction: dict[str, object] | None = None
+    calibration: object | None = None
+    prompt: object = ""
 
 
 # LLM: 仅承载一次已赢得原线程 CAS 的提交事实；调用方在提交后阶段用它刷新同范围视图与投影，
@@ -440,7 +443,7 @@ def _string_sequence(value: object) -> list[str]:
 
 # LLM: Native history is reduced only as complete ToolCall/ToolResult pairs. A save-enabled
 # authoritative turn must checkpoint and CAS the same ConversationThread before the mutation lives.
-# 函数用途: 原生工具历史达到统一阈值时，压缩最旧完整往返并将真实回合提交到唯一 Compact 账本。
+# 函数用途: 原生工具历史达到统一阈值时，按冻结校准口径压缩并提交到唯一 Compact 账本。
 def _fit_native_ir_to_shared_budget(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -458,10 +461,17 @@ def _fit_native_ir_to_shared_budget(
     """
     if not native_tool_use_active(params):
         return 0
-    from .model.context_pressure import model_visible_context_tokens
+    from ..conversation.compact_calibration import calibrated_compact_request_tokens
+    from .model.context_pressure import (
+        compact_request_calibration_for_request,
+        model_visible_context_snapshot,
+    )
+
+    calibration = compact_request_calibration_for_request(agent, params, prompt)
 
     def estimator() -> int:
-        return model_visible_context_tokens(agent, params, prompt)
+        raw = model_visible_context_snapshot(agent, params, prompt).raw_estimated_tokens
+        return calibrated_compact_request_tokens(raw, calibration)
 
     plan = _prepare_native_compact_plan(
         agent,
@@ -472,6 +482,7 @@ def _fit_native_ir_to_shared_budget(
     )
     if plan is None:
         return 0
+    plan = replace(plan, calibration=calibration, prompt=prompt)
     return _apply_native_compact_plan(agent, params, estimator, plan)
 
 
@@ -775,7 +786,7 @@ def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
 
 # LLM: 候选与发送同源，CAS 失败恢复原列表；赢得 CAS 并刷新视图后才向 IR 补带方法，提交后异常不回滚。联测中断/前缀。
 #   补带预算按距再次触发压缩的余量（trigger_tokens - after_tokens）封顶，不能把刚压缩完的上下文又填满。
-# 函数用途: 提交压缩候选后按原缓存预算追加一次方法参考，明确区分提交前回滚与提交后投递。
+# 函数用途: 提交后补带再计量最终请求，明确区分提交前回滚与提交后投递，健康目标仍为优选。
 def _apply_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -835,6 +846,7 @@ def _apply_native_compact_plan(
         )
         if plan.binding is None:
             # 临时回合没有 canonical 提交；继续保持原内存事务及投影失败回滚。
+            after_tokens = _settled_native_compact_tokens(params, estimator, 0)
             return _publish_native_compact_result(
                 agent, params, plan, dropped=dropped, after_tokens=after_tokens,
                 preserved_pairs=preserved_pairs, canonical_generation=0,
@@ -868,6 +880,8 @@ def _apply_native_compact_plan(
             provider_compaction=plan.provider_compaction,
         )
         prepare_conversation_method_carry(agent, params, budget_cap=plan.trigger_tokens - after_tokens)
+    # 提交视图刷新和方法补带都改变发送材料，完成事件不能沿用候选的旧数字。
+    after_tokens = _settled_native_compact_tokens(params, estimator, commit.generation)
     return _publish_native_compact_result(
         agent, params, plan, dropped=dropped, after_tokens=after_tokens,
         preserved_pairs=preserved_pairs, canonical_generation=commit.generation,
@@ -886,7 +900,16 @@ def _restore_native_compact_candidate(
     params.tool_context[:] = original_tool_context
 
 
-# LLM: 只处理用量失效与投影；异常原样上抛，持久提交或临时回合的回滚边界由调用方掌管。
+# LLM: 代次运行事实也会进入下一请求，必须先记录再调用同一冻结计量器；此处不推进线程或发事件。
+# 函数用途: 计量补带及最新代次事实全部就位后的最终发送大小。
+def _settled_native_compact_tokens(params, estimator, canonical_generation):
+    state = params.live_archive_state if isinstance(params.live_archive_state, dict) else {}
+    generation = canonical_generation or max(0, int(state.get("_native_ir_compact_generation") or 0)) + 1
+    record_conversation_compact_generation(params, generation, canonical=canonical_generation > 0)
+    return estimator()
+
+
+# LLM: 只处理用量失效与投影；数字由提交视图刷新和补带后计量，异常原样上抛，回滚边界由调用方掌管。
 # 函数用途: 将已应用的压缩结果投给运行态和 TUI，本函数不做历史回滚或失败记账。
 def _publish_native_compact_result(
     agent: object,
@@ -898,10 +921,18 @@ def _publish_native_compact_result(
     preserved_pairs: int,
     canonical_generation: int,
 ) -> int:
-    # 历史已按完整工具对改写，上一次 provider 实际用量不再能作为追加基线。
-    from .model.context_pressure import invalidate_provider_context_observation
+    # 历史已改写，冻结口径按最终发送材料重建本轮追加基线，不把旧供应商量继续套在缩小请求上。
+    from .model.context_pressure import (
+        invalidate_provider_context_observation,
+        model_visible_context_snapshot,
+        rebase_provider_context_observation,
+    )
 
-    invalidate_provider_context_observation(params)
+    raw = model_visible_context_snapshot(agent, params, plan.prompt).raw_estimated_tokens
+    if not rebase_provider_context_observation(
+        params, calibration=plan.calibration, raw_estimated_tokens=raw, calibrated_tokens=after_tokens,
+    ):
+        invalidate_provider_context_observation(params)
     completed_generation = canonical_generation or plan.progress_generation
     _emit_native_compact_progress(
         params,

@@ -99,6 +99,55 @@ def _strings(value):
             yield from _strings(item)
 
 
+def test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_facts(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, RuntimeFactsTurn
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
+    from agent_py_agent.tests.test_compact_tool_partition import _call
+
+    agent, store, thread, request, execution, sink, _ = _mixed_background(
+        tmp_path, backend="anthropic_compatible", detached=False,
+    )
+    from agent_py_agent.agent.agent_core.runtime import loop_support
+    agent.config.enable_tools = True
+    agent.backend.max_tokens = 1024
+    original_prepare = loop_support._tool_loop_execute_params
+    call = _call("fixture-big", turn="fixture-turn")
+
+    def prepare(*args, **options):
+        params = original_prepare(*args, **options)
+        params.tool_ir_history.extend([
+            RuntimeFactsTurn(text="a" * 415000, source="fixture_state"),
+            AssistantTurn(tool_calls=[call]), ToolResult.succeeded(call, "b" * 300000),
+            RuntimeFactsTurn(text="最新状态", source="fixture_state"),
+        ])
+        return params
+
+    monkeypatch.setattr(loop_support, "_tool_loop_execute_params", prepare)
+    seen = []
+    original_projection = recovery_core._candidate_projection
+
+    def observe(material, override=None):
+        value = original_projection(material, override)
+        seen.append(value)
+        return value
+
+    monkeypatch.setattr(recovery_core, "_candidate_projection", observe)
+    monkeypatch.setattr(compact, "_summarize", lambda *args, **kwargs: "旧资料和已完成工具结果已归纳。")
+    business = []
+    _http(monkeypatch, backend="anthropic_compatible", on_business=lambda wire, _n: business.append(wire))
+    background_execution.run_background_turn_with_compact(
+        execution, thread, request, user_prompt="继续核对", continuation_injection=[],
+        proactive_delivery_available=False, activity_sink=sink,
+    )
+    assert len(business) == 1
+    policy = runtime_compact_policy(agent, save=True)
+    assert seen and seen[-1].projected_tokens <= policy.recovery_target_tokens
+    assert store.threads.require(thread.thread_id).compact_generation == 1
+    assert not any("a" * 100 in text for text in _strings(business[0]))
+    print("preflight_healthy_candidate", seen[-1].projected_tokens, policy.recovery_target_tokens)
+
+
 @pytest.mark.parametrize("backend", ["anthropic_compatible", "openai_compatible"])
 @pytest.mark.parametrize("detached", [False, True])
 def test_mixed_recovery_commits_both_sources_and_sends_selected_wire(tmp_path, monkeypatch, backend, detached):
