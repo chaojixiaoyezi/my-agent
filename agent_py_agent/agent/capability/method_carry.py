@@ -1,5 +1,5 @@
 # LLM: 主会话方法沿用的唯一负责模块；账本仅在线程隐藏字段中，原子更新不改摘要、pins 或权限。
-#   只记成功 get，主会话资格来自运行结构字段；关掉现读开关时不写账、不改提示。联测 conversation_method_carry。
+#   只记成功 get，正文或完整重读引用均沿原 IR 投递；关闭时不写账、不改提示。联测 conversation_method_carry。
 # 模块用途: 记下本会话读过的方法，供逐 run 目录和压缩后的参考资料恢复使用，不存第二份正文。
 from __future__ import annotations
 
@@ -312,8 +312,8 @@ def _carry_budget(agent, config) -> int:
     return max(0, int(config.capability_bundle_max_tokens)) or resolve_model_context_window_tokens(agent)
 
 
-# LLM: 包先 skill 后，同类最近使用优先；计费覆盖头、分隔符和完整资料参数，不截断 JSON 或 next_read。
-# 函数用途: 在总预算内依次准备可投递的方法片段，失败条目不阻挡其它条目。
+# LLM: 次序不变，完整片段不能投递时只降为当前授权快照的引用；头、分隔符、引用及资料均计费，不截 JSON。
+# 函数用途: 在缓存总预算内准备正文或重读提示，连提示都放不下的条目保留下一 run 资格。
 def _prepare_method_pieces(request: _MethodCarryRequest, rows: list) -> list:
     ordered = sorted(rows, key=lambda row: (row["kind"] != "capability_package", -row["last_used_at"]))
     pieces = []
@@ -322,9 +322,41 @@ def _prepare_method_pieces(request: _MethodCarryRequest, rows: list) -> list:
         remaining = max(0, request.max_tokens - estimate_tokens(used + "\n\n"))
         loader = _prepare_package_method if row["kind"] == "capability_package" else _prepare_skill_method
         text = loader(request, row, remaining)
+        if not text or estimate_tokens(used + "\n\n" + text) > request.max_tokens:
+            text = _prepare_method_reference(request, row, remaining)
         if text and estimate_tokens(used + "\n\n" + text) <= request.max_tokens:
             pieces.append((row, text))
     return pieces
+
+
+# LLM: 引用只能来自当前受限快照；不读正文、不改 pin、不恢复已停用身份，完整参数复用原包协议。
+# 函数用途: 为已登记方法取得可直接交给 skill_search 的重读参数，当前不可见时为空。
+def _method_read_parameters(request: _MethodCarryRequest, row: dict) -> dict:
+    from .package_snapshot import package_read_parameters
+
+    if row["kind"] == "capability_package":
+        package = request.scope.skills.resolve_package(row["package_id"])
+        return package_read_parameters(package.to_ref()) if package is not None else {}
+    entry = request.scope.skills.resolve(row["stable_id"])
+    return {"action": "get", "skill_id": entry.stable_id} if entry is not None else {}
+
+
+# LLM: 引用沿同一总预算和 RuntimeFacts 提交门，不代表读成功或授权；包资料仅在整份完整清单放得下时追加。
+# 函数用途: 正文这次没带回时留一行中文和完整重读参数，预算更宽时保留当前版本的资料清单。
+def _prepare_method_reference(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
+    arguments = _method_read_parameters(request, row)
+    if not arguments:
+        return ""
+    text = "本会话用过的方法，正文这次没带回；需要时用 skill_search 重读：" + json.dumps(
+        arguments, ensure_ascii=False, separators=(",", ":"))
+    if estimate_tokens(text) > remaining:
+        return ""
+    if row["kind"] == "capability_package":
+        package = request.scope.skills.resolve_package(row["package_id"])
+        resources = _package_method_resources(package, row)
+        if estimate_tokens(text + "\n\n" + resources) <= remaining:
+            text += "\n\n" + resources
+    return text
 
 
 # LLM: 包按当前授权快照 ref 读；原 reader/policy/pins 保持，停用/删除不退回全局安装，升级不绕旧 task pin。

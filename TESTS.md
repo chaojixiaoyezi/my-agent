@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 会话方法引用与中途补带（2026-10-08，w1，部署窗口 WIP）
+
+- 来源：`1008/w1-carry-ref.md`；基线 `7dd3f9ba0`，工作分支 `worker/w1-carry-ref`。按 `deploy-window-steer.md` 先保存 WIP，未作为完整验收交付。
+- 已实现：`method_carry._prepare_method_pieces` 在正文为空/超预算时降为完整 get 参数引用，头/分隔/资料清单计预算；引用经原 IR 提交门推进代次。`_apply_native_compact_plan` 在 CAS 成功且刷新视图后补带，不改 prior。
+- 聚焦红绿：新增引用用例及中途开启带回的文字/密文两回合用例先变红；实现后 reference、restore、midturn 三文件联合 `27 passed`，返回码 0。命令：根目录 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_conversation_method_reference.py agent_py_agent/tests/test_conversation_method_restore.py agent_py_agent/tests/test_midturn_compact_prefix.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-w1-ref-focus`，PY 为指定 ci-venv-312。
+- 启动带回：`test_conversation_method_prefix.py` 单独运行 `2 passed`，返回码 0；真实 Chat 序列化、真实 read_file、真实临时 Store/checkpoint/CAS，仅 HTTP 运输替换。正文/引用两种路径的后续工具轮及下一 run 均逐字节延伸，同代只一块；模拟绝对命中不低于关闭对照。正文估算 534/3000、引用 167/171；模拟计量不代表供应商 usage 或生产缓存收益。
+- 旧入口读取失败用例按新“loader 空也带引用”合同调整，仍检查固定错误码、私密异常不泄漏、无正文、投递后才消费代次；`test_tiny_budget_does_not_consume_generation` 的预算 1 及断言未动。
+- 后续测试增强：投递失败时同 run 不重复读取的 attempts 断言、等价 UTF-8 断言改写及去掉冗余的列表比较，尚未完成独立重跑；不能用上述较早聚焦结果宣称当前 WIP 全通过。
+- 引用方清单由测试 AST import 与 grep 核对生成，含全部 method、缓存、中途用例，共 70 文件，保存在未提交的 `tmp/w1-carry/related-tests.txt`。执行同上 pytest 参数并加 `--junitxml=tmp/w1-carry/related.xml`，在 600 秒工具时限终止，返回码 -15，无最终结果，不能计通过。工具确认进程清理；不把超时归因于权限或沙箱。
+- 独立静态审阅提出候选：`_prepare_skill_method` 的 `except Exception` 可能吞 `InterruptedError`，新增降级随后投递引用并消费代次。已核对捕获代码，但尚未注入异常复现，未判定为已验证缺陷。
+- 未完成：四处变异、guards9、import/ruff/doc-sync/code-size/clean-package、尺寸身份差集、完整设计/台账/目录/YAML 注释同步。WIP 前 `git diff --check 7dd3f9ba0` 返回 0；真实供应商、Gateway/TUI/IM、Linux 全量及生产未验证，未部署、未 push。
+- 续作第一步：从本 WIP 复现审阅提出的中断传播候选，必要时按红绿修复；再把 70 文件回归拆小定位超时，继续四变异、门禁及文档同步。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。
