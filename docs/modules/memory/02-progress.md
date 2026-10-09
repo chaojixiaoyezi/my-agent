@@ -6,6 +6,25 @@
 - toolrefs-2按07审核意见删除Python词法校验器，逐行C解析后立即丢弃非候选，保留晋升整文件失效、路径异常与晚UTF-8优先；规范POSIX路径避免无关Path对象，无效ref异常支路不保留历史全集。最新回归与门禁见TESTS及任务RESULT。
 - 8个同语料入口峰值约222万字节；独立不开tracemalloc的交错三次中位耗时均不超过真基线+10%，详见TESTS。仍全量枚举/读字节，晋升旧峰值本来低；生产RSS/Gateway、Windows及扫描期间symlink并发变更未验证，未推送、合main或部署。
 
+## Curator 恢复/清理/接管同临界区（mc2-e11d-race，2026-10-08，本地实现、待3a复核）
+
+- MC4-2201：原 review22 的 12 个双进程交错先红；修复不改变 mc3 的死亡/过期判据，只把 manifest 锁内重验、restore、严格 cleanup、恢复审计和 acquire 合并到 `recover_and_acquire` 同一 quota/规范文件锁边界。
+- 等待者不能复用锁前 state 或 manifest；发现集合变动/取锁竞争返回 busy，下一次重新发现。真实 cleanup/恢复 I/O 异常按恢复失败分类，尚未调用模型就不记模型失败；正常模型调用仍在临界区外。
+- 成功提交的清理也留在原锁内；public acquire 和独立恢复入口保留原职责，无新 schema、开关或单进程缓存权威。旧租约死亡/未知判据与 process_identity 的记录边界不扩张。
+- 原 review22 20 项 + review18 22 项 + 最终新增 17 项在变异还原后联合复跑 59 passed；memory/curator 与完整 guards9 并集 122 文件、1892 passed，两组均零失败/错误/跳过。三项指定变异各真实 rc1 且备份字节/SHA 还原。门禁与未验证范围见根 TESTS 同名节及交接。
+- 未验证真实 Gateway/供应商链路、线上收益、Linux/Windows 实机及全仓车道；下面 mc3 节记录前一轮返工，当前锁边界以本节和 04-structure 为准。
+
+## 网关重启后 Curator 租约接管（mc3-e11d + e11d-fix 返工，2026-10-08，分支 `worker/mc3-e11d`，本地实现，待复核）
+
+- 生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，`acquire` 只认 `expires_at`，
+  新网关要等约 28 分钟才能接手。修复：租约未过期但持有者进程已确定死亡（同主机、非本进程、`os.kill(pid, 0)` 抛 ProcessLookupError）时可提前接管；
+  PermissionError/主机不同/信息不全一律等 `expires_at`，宁可多等不误抢。
+- 接管写结构化事实 `stale_lease_reclaimed`（原 lease_id/run_id/pid/expires_at + 接管时间），不悄悄覆盖；
+  新租约带持有者出生身份 `process_identity`（`daemon_metadata.build_process_identity`），旧租约无该字段按未知、旧状态文件照读且摘要稳定。
+- e11d-fix 返工（mc4 review18 两阻断）：运行审计补 `stale_lease_reclaimed` 严格合同（成功/失败记录同一序列化与读回，不再把整轮改写成 `CURATOR_RUN_AUDIT_FAILED`）；
+  事务恢复与领取共用 `stale_lease_reclaimable` 死亡判据——持有者已死的旧事务先恢复（`recover_incomplete` 在原锁内核对身份）再换租约（`_run_once` 顺序不变），三个崩溃切点用例转绿。
+- 纯修复不加开关。mc4 补测 22 项全绿（返工前 11 红）、原测试 10 条保留、变异 3/3 被抓、120 文件回归全绿；未验证真实网关重启与真实多进程接管（模拟 pid）。详见根 `TESTS.md` 同名节。
+
 ## Curator消息/审计只读游标缓存（mc2-e11c，2026-10-08，worker/mc2-e11c，本地实现、待3a复核）
 
 - `MessageStore.after_report/byte_offset_after` 共用有界进程缓存，稳态已追平线程零打开，增长线程校验锚行再读尾；审计跳过指纹未变的旧日分片和游标前缀。

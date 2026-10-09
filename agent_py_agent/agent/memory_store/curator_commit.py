@@ -2,15 +2,15 @@ from __future__ import annotations
 
 """Memory Curator 的可恢复多文件整批提交。"""
 
-# LLM: Daily, candidates, run audit, and state are committed under their canonical file locks;
-# state is always written last as the durable commit marker and a journal enables crash rollback.
+# LLM: 成功提交仍以 state 最后落盘为标记；恢复、清理、审计和新租约在同一规范文件锁集合内完成。
+# 锁前清单只发现锁集合；quota 先于有序目标锁，锁内必须重读清单和 state，竞争不能变成模型错误。
 # 模块用途: 为 Curator 提供整批校验、配额检查、备份、提交、异常回滚和进程重启恢复。
 
 import hashlib
 import json
 import shutil
-from contextlib import ExitStack
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +21,7 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
-from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange
+from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import CandidateService, merge_candidate_observations
 from .curator_run_log import (
@@ -33,10 +33,12 @@ from .curator_run_log import (
     run_records_text,
 )
 from .curator_state import (
+    CuratorLeaseRequest,
     CuratorStateCorruptError,
     CuratorSuccessCommit,
     MemoryCuratorStateStore,
     build_success_state,
+    stale_lease_reclaimable,
 )
 from .daily import (
     DailyMemoryEvent,
@@ -83,6 +85,22 @@ class CuratorBatchCommitError(RuntimeError):
     pass
 
 
+# LLM: 只用于取锁阶段竞争，不吞清理/读写中的 BlockingIOError；服务可退回 busy 后再调度。
+# 类用途: 标记完整接管锁集合繁忙或发现集合已换代，尚未执行恢复和领取。
+class _CuratorRecoveryBusy(CuratorCommitRecoveryError):
+    pass
+
+
+# LLM: 清单快照只用于发现全部目标锁，不能授权恢复；最终以锁内复核为准。
+# 类用途: 保存一次接管准备阶段发现的事务、规范锁集合与时间口径。
+@dataclass(frozen=True)
+class _RecoveryPlan:
+    manifests: dict[Path, dict[str, object] | None]
+    paths: tuple[Path, ...]
+    current: datetime
+    blocking: bool = True
+
+
 # LLM: The committer owns no model or promotion capability; it only materializes a validated
 # batch into the four canonical ledgers.
 # 类用途: 协调 Daily、Candidate、run audit 与 state 的可恢复多文件事务。
@@ -106,9 +124,8 @@ class CuratorBatchCommitter:
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
         ensure_private_dir(self.transactions_dir)
 
-    # LLM: All target content is computed and quota-checked before the first canonical replace;
-    # an exception restores every preimage while locks are still held.
-    # 函数用途: 提交一个成功 Curator 批次并返回实际幂等落点。
+    # LLM: 先整批校验配额再写入；异常在原锁内回滚。成功清理也留在同锁内，不能与恢复者竞争删备份。
+    # 函数用途: 原子提交 Curator 批次并清理事务，返回实际幂等落点。
     def commit(self, request: CuratorBatchCommit) -> CuratorBatchCommitResult:
         _validate_batch_identity(request)
         paths = self._target_paths(request)
@@ -132,51 +149,26 @@ class CuratorBatchCommitter:
                         ) from rollback_exc
                     _cleanup_transaction(_transaction_directory(transaction))
                     raise CuratorBatchCommitError("curator batch commit failed") from exc
-        _cleanup_committed_best_effort(_transaction_directory(transaction))
+                _cleanup_committed_best_effort(_transaction_directory(transaction))
         return CuratorBatchCommitResult(tuple(daily_events), tuple(candidates))
 
-    # LLM: A live lease is never rolled back by another instance; committed state only cleans
-    # stale backups, while expired/unowned prepared transactions restore every preimage.
-    # 函数用途: 在新一轮运行前恢复进程崩溃遗留的事务并返回恢复审计数量。
+    # LLM: 独立恢复也必须同锁复核、恢复、清理和审计；不领取租约，默认等待规范锁。
+    # 函数用途: 保留独立恢复接口，返回本次真正恢复的事务数。
     def recover_incomplete(self, *, now: datetime | None = None) -> int:
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        recovered = 0
-        for directory in sorted(self.transactions_dir.iterdir()):
-            if directory.is_symlink() or not directory.is_dir():
-                raise CuratorCommitRecoveryError("curator transaction root contains non-directory")
-            manifest_path = directory / "manifest.json"
-            if not manifest_path.exists():
-                _cleanup_transaction(directory)
-                continue
-            manifest = _load_manifest(manifest_path, self.memory_root)
-            state = self.state.load()
-            run_id = str(manifest["run_id"])
-            if state.last_committed_run_id == run_id:
-                _cleanup_transaction(directory)
-                continue
-            if _same_live_lease(state.active_lease, run_id=run_id, now=current):
-                continue
-            paths = [Path(item["path"]) for item in manifest["targets"]]
-            with _locked_paths(paths):
-                state = self.state._load_unlocked()
-                if state.last_committed_run_id == run_id:
-                    _cleanup_transaction(directory)
-                    continue
-                if _same_live_lease(state.active_lease, run_id=run_id, now=current):
-                    continue
-                self._restore_transaction(manifest, paths_locked=True)
-            _cleanup_transaction(directory)
-            # 审计记录记恢复实际发生的时刻（真实时钟），不用调用方注入的 now：
-            # now 只用于 lease 过期判定（测试/回放可模拟未来），若审计也用它，
-            # 跨日分片时 rollback 记录会被写进未来分片，run_log 排序失真
-            # （recovered_rollback 与 succeeded 相对顺序错位）。
-            self.run_log.append(
-                _recovery_record(
-                    manifest, finished_at=datetime.now(timezone.utc).isoformat()
-                )
-            )
-            recovered += 1
-        return recovered
+        plan = _recovery_plan(self, now)
+        with _recovery_section(self, plan):
+            return _recover_locked(self, plan)
+
+    # LLM: 前台服务使用这个完整接管入口；任一目标锁竞争立即 busy，不等待持锁清理的对端。
+    # 函数用途: 在同一临界区恢复旧事务并领取新租约，模型执行在解锁之后。
+    def recover_and_acquire(self, request: CuratorLeaseRequest):
+        plan = replace(_recovery_plan(self, request.now), blocking=False)
+        try:
+            with _recovery_section(self, plan):
+                _recover_locked(self, plan)
+                return self.state._acquire_unlocked(request)
+        except _CuratorRecoveryBusy:
+            return None
 
     # LLM: Target locks cover every daily shard plus the three owner ledgers, with state sorted
     # among them but still written last by _apply_changes.
@@ -339,12 +331,11 @@ class CuratorBatchCommitter:
             else:
                 path.unlink(missing_ok=True)
 
-    # LLM: Quota admissions are deduplicated by owner root and acquired before file locks,
-    # preserving the repository-wide lock order.
-    # 函数用途: 获取本批次涉及的 owner quota 临界区。
-    def _admissions(self):
+    # LLM: 所有恢复写入也先取 owner quota admission，再按规范路径取目标锁，不能倒置。
+    # 函数用途: 获取去重后的 owner quota 临界区，接管入口可在竞争时立即退出。
+    def _admissions(self, *, blocking: bool = True):
         return _AdmissionContext(
-            [self.candidates.quota_enforcer, self.daily.quota_enforcer]
+            [self.candidates.quota_enforcer, self.daily.quota_enforcer], blocking=blocking
         )
 
 
@@ -352,16 +343,26 @@ class CuratorBatchCommitter:
 # enforcer objects for one owner cannot self-deadlock.
 # 类用途: 按 owner root 去重并持有多文件提交所需的 quota admission。
 class _AdmissionContext:
-    # LLM: 输入 enforcer 只按 owner root 去重；不得绕过其 admission 或改变全仓锁序。
-    # 函数用途: 初始化多 owner quota 临界区管理器。
-    def __init__(self, enforcers: list[object | None]) -> None:
+    # LLM: 去重和阻塞方式只控制同一 admission，不另建 quota 锁或权威。
+    # 函数用途: 初始化多 owner quota 临界区管理器及竞争策略。
+    def __init__(self, enforcers: list[object | None], *, blocking: bool = True) -> None:
         self.enforcers = enforcers
+        self.blocking = blocking
         self.stack = ExitStack()
         self.admissions: list[_QuotaAdmission] = []
 
-    # LLM: 进入顺序决定 quota->file lock 约束；同 owner 的重复实例只能获取一次。
-    # 函数用途: 进入所有去重后的 owner quota admission。
+    # LLM: 取锁中途失败必须释放已取得的 admission，非阻塞竞争尤其不能留下半个锁集合。
+    # 函数用途: 安全进入所有 quota admission，失败时归还已取得的锁。
     def __enter__(self) -> list[_QuotaAdmission]:
+        try:
+            return self._enter_all()
+        except BaseException:
+            self.stack.close()
+            raise
+
+    # LLM: quota 必须早于目标文件；同 owner 重复对象仍只取一次，阻塞与非阻塞同源。
+    # 函数用途: 按 owner 根去重后取得每个 admission。
+    def _enter_all(self) -> list[_QuotaAdmission]:
         seen: set[str] = set()
         for enforcer in self.enforcers:
             if enforcer is None:
@@ -370,7 +371,7 @@ class _AdmissionContext:
             if root in seen:
                 continue
             seen.add(root)
-            admission = self.stack.enter_context(enforcer.admission())
+            admission = self.stack.enter_context(enforcer.admission(blocking=self.blocking))
             self.admissions.append(_QuotaAdmission(Path(enforcer.owner_root), admission))
         return self.admissions
 
@@ -394,14 +395,122 @@ class _QuotaAdmission:
     admission: OwnerQuotaAdmission
 
 
-# LLM: Every file lock is acquired in resolved-path order, matching ordinary single-file
-# repository locks without introducing a second daemon or in-memory authority.
-# 函数用途: 为一组规范目标建立确定性多文件临界区。
-def _locked_paths(paths: list[Path]):
-    stack = ExitStack()
-    for path in sorted(set(paths), key=lambda item: str(item.resolve(strict=False))):
-        stack.enter_context(locked_json_path(path))
-    return stack
+# LLM: 规范路径有序取同一双层锁；中途取锁失败时也释放已取得的锁，禁止非阻塞锁泄漏。
+# 函数用途: 建立完整目标文件临界区，支持接管时的即忙即退。
+@contextmanager
+def _locked_paths(paths: list[Path], *, blocking: bool = True):
+    with ExitStack() as stack:
+        for path in sorted(set(paths), key=lambda item: str(item.resolve(strict=False))):
+            stack.enter_context(locked_json_path(path, blocking=blocking))
+        yield
+
+
+# LLM: 发现阶段可能与对端清理交错，失败先留为未知；持完整规范锁后必须重读，不能把快照用于回滚。
+# 函数用途: 尝试发现一个事务的锁集合，不在此阶段恢复、清理或领取。
+def _discover_manifest(directory: Path, memory_root: Path):
+    if directory.is_symlink() or not directory.is_dir():
+        return None
+    path = directory / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        return _load_manifest(path, memory_root)
+    except CuratorCommitRecoveryError:
+        return None
+
+
+# LLM: candidates 是每个成功提交都会持有的规范锁；与 state、实际日期审计及全部旧目标一起排序取锁。
+# 函数用途: 在锁前仅发现完整目标集合；恢复审计绝不采用回放的未来时间。
+def _recovery_plan(committer: CuratorBatchCommitter, now: datetime | None):
+    manifests = {directory: _discover_manifest(directory, committer.memory_root)
+                 for directory in sorted(committer.transactions_dir.iterdir())}
+    audit = run_log_path(committer.run_log.runs_dir, datetime.now(timezone.utc).isoformat())
+    paths = {committer.candidates.path, committer.state.path, audit}
+    for manifest in manifests.values():
+        if manifest is not None:
+            paths.update(Path(item["path"]) for item in manifest["targets"])
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return _RecoveryPlan(manifests, tuple(path.resolve(strict=False) for path in paths), current)
+
+
+# LLM: 只有取锁阶段的锁竞争是 busy（文件锁的 BlockingIOError 或配额锁包装出的
+#   OwnerQuotaLockContention）；进入临界区后的清理/审计/领取异常必须报恢复失败（MC4-2501）。
+# 函数用途: 依既有 quota→有序规范文件锁进入接管临界区，并保证失败释放完整锁集合。
+def _enter_recovery_locks(stack: ExitStack, committer: CuratorBatchCommitter, plan: _RecoveryPlan):
+    try:
+        stack.enter_context(committer._admissions(blocking=plan.blocking))
+        stack.enter_context(_locked_paths(list(plan.paths), blocking=plan.blocking))
+    except (BlockingIOError, OwnerQuotaLockContention) as exc:
+        raise _CuratorRecoveryBusy("curator recovery locks are busy") from exc
+
+
+# LLM: 模型尚未执行；I/O/清理/审计等失败不能被上层归成 CURATOR_MODEL_FAILED，state 损坏仍单列。
+# 函数用途: 管理完整恢复和领取临界区的生命周期、锁释放及准确的失败分类。
+@contextmanager
+def _recovery_section(committer: CuratorBatchCommitter, plan: _RecoveryPlan):
+    with ExitStack() as stack:
+        try:
+            _enter_recovery_locks(stack, committer, plan)
+            yield
+        except (CuratorStateCorruptError, CuratorCommitRecoveryError):
+            raise
+        except Exception as exc:
+            raise CuratorCommitRecoveryError("curator recovery or lease acquisition failed") from exc
+
+
+# LLM: 发现后若又出现未锁住的事务则退出重试；等待者只处理锁内仍存在且已严格复核的清单。
+# 函数用途: 持完整锁集合后重新枚举权威事务目录并恢复尚未处理的事务。
+def _recover_locked(committer: CuratorBatchCommitter, plan: _RecoveryPlan) -> int:
+    directories = sorted(committer.transactions_dir.iterdir())
+    if set(directories) - plan.manifests.keys():
+        raise _CuratorRecoveryBusy("curator recovery discovery changed")
+    return sum(_recover_directory(committer, directory, plan) for directory in directories)
+
+
+# LLM: 缺失仅在规范锁内复核后跳过；真实清理失败不吞。换代目标不得绕过发现阶段的锁集合。
+# 函数用途: 严格重读当前清单；已处理事务不再恢复，坏清单原样报错。
+def _read_recovery_manifest(committer: CuratorBatchCommitter, directory: Path, plan: _RecoveryPlan):
+    if directory.is_symlink() or not directory.is_dir():
+        raise CuratorCommitRecoveryError("curator transaction root contains non-directory")
+    path = directory / "manifest.json"
+    if not path.exists():
+        _cleanup_transaction(directory)
+        return None
+    manifest = _read_manifest(path, committer.memory_root)
+    targets = {Path(item["path"]).resolve(strict=False) for item in manifest["targets"]}
+    if not targets.issubset(plan.paths):
+        raise _CuratorRecoveryBusy("curator recovery targets changed")
+    return manifest
+
+
+# LLM: 真实时钟决定恢复审计分片；发现等待跨日时必须先重新发现锁集合，不能锁错分片仍写入。
+# 函数用途: 在真正开始恢复时确定审计时间并检查其分片锁已持有。
+def _recovery_time(committer: CuratorBatchCommitter, plan: _RecoveryPlan) -> str:
+    finished_at = datetime.now(timezone.utc).isoformat()
+    path = run_log_path(committer.run_log.runs_dir, finished_at).resolve(strict=False)
+    if path not in plan.paths:
+        raise _CuratorRecoveryBusy("curator recovery audit day changed")
+    return finished_at
+
+
+# LLM: 复核、恢复、清理及审计都必须留在完整临界区；随后锁内领取会再次重读恢复后的 state。
+# 函数用途: 根据当前提交标记和共享死亡判据恢复一个事务，不触碰仍活跃的运行。
+def _recover_directory(committer: CuratorBatchCommitter, directory: Path, plan: _RecoveryPlan) -> int:
+    manifest = _read_recovery_manifest(committer, directory, plan)
+    if manifest is None:
+        return 0
+    state = committer.state._load_unlocked()
+    run_id = str(manifest["run_id"])
+    if state.last_committed_run_id == run_id:
+        _cleanup_transaction(directory)
+        return 0
+    if _same_live_lease(state.active_lease, run_id=run_id, now=plan.current):
+        return 0
+    finished_at = _recovery_time(committer, plan)
+    committer._restore_transaction(manifest, paths_locked=True)
+    _cleanup_transaction(directory)
+    committer.run_log._append_unlocked(_recovery_record(manifest, finished_at=finished_at))
+    return 1
 
 
 # LLM: Identity validation rejects a state/run mismatch before creating backups or touching a
@@ -486,10 +595,15 @@ def _memory_root(
     return roots.pop()
 
 
-# LLM: Manifest parsing is exact and fail-closed; a malformed recovery file never causes broad
-# deletion or an inferred target path.
-# 函数用途: 严格读取并验证一个崩溃恢复事务清单。
+# LLM: 锁前只发现目标；与锁内复核共用严格读取器，但发现结果不能授权修改任何规范文件。
+# 函数用途: 读取事务清单以确定要取得的规范锁集合。
 def _load_manifest(path: Path, memory_root: Path) -> dict[str, object]:
+    return _read_manifest(path, memory_root)
+
+
+# LLM: 同一严格解析器供发现与锁内重读，保持路径、备份和 Schema 的精确 fail-closed 合同。
+# 函数用途: 从磁盘重新读取并验证当前事务清单，绝不复用发现时的内容。
+def _read_manifest(path: Path, memory_root: Path) -> dict[str, object]:
     report = read_json_object_report(path, context="memory_curator.transaction")
     if report.load_error:
         raise CuratorCommitRecoveryError("curator transaction manifest is unreadable")
@@ -554,9 +668,11 @@ def _assert_target(path: Path, memory_root: Path) -> None:
         raise CuratorCommitRecoveryError("curator transaction target is not a regular file")
 
 
-# LLM: A lease blocks recovery only when it belongs to the same run and has a valid future UTC
-# expiry; malformed expiry fails closed.
-# 函数用途: 判断事务对应的原运行是否仍合法持有 lease。
+# LLM: A lease blocks recovery only when it belongs to the same run, has a valid future UTC
+# expiry, and its holder is not provably dead; the death check is the same function acquire
+# uses, so recovery and early lease handover can never disagree (mc4-1802). Malformed expiry
+# fails closed.
+# 函数用途: 判断事务对应的原运行是否仍合法持有 lease（未过期且持有者未确定死亡）。
 def _same_live_lease(
     lease: dict[str, object],
     *,
@@ -571,7 +687,11 @@ def _same_live_lease(
         raise CuratorCommitRecoveryError("curator transaction lease expiry is invalid") from exc
     if expires.tzinfo is None:
         raise CuratorCommitRecoveryError("curator transaction lease expiry lacks timezone")
-    return expires.astimezone(timezone.utc) > now
+    if expires.astimezone(timezone.utc) <= now:
+        return False
+    # 未过期：持有者已确定死亡时不再算 live，旧事务先在本锁内恢复、之后 acquire 才能换租约；
+    # 不确定（权限/异主机/信息不全/Windows）继续保守等待，与 acquire 判据完全一致。
+    return not stale_lease_reclaimable(lease)
 
 
 # LLM: Recovery audit contains only old run/lease metadata and a stable code; restored content
@@ -593,21 +713,25 @@ def _recovery_record(manifest: dict[str, object], *, finished_at: str) -> Curato
     )
 
 
-# LLM: Cleanup accepts only the exact transaction run directory selected by the caller and
-# refuses the transactions root itself.
-# 函数用途: 删除已提交、已回滚或未形成 manifest 的临时事务目录。
+# LLM: 未提交恢复的清理失败必须阻断接管；与成功提交后的尽力清理分开，但共用相同边界和删除原语。
+# 函数用途: 严格删除已回滚或未形成 manifest 的事务材料，失败原样交给恢复错误分类。
 def _cleanup_transaction(directory: Path) -> None:
+    _remove_transaction_directory(directory)
+
+
+# LLM: 两种清理策略共用唯一删除原语，只接受精确事务目录，禁止删除整个 transactions 根。
+# 函数用途: 验证清理范围后删除事务目录，不忽略任何文件系统错误。
+def _remove_transaction_directory(directory: Path) -> None:
     if directory.name in {"", ".", "..", "transactions"}:
         raise CuratorCommitRecoveryError("refusing broad curator transaction cleanup")
     shutil.rmtree(directory, ignore_errors=False)
 
 
-# LLM: Once state has been atomically committed, cleanup failure must not turn a successful
-# batch into a false failure; restart recovery recognizes last_committed_run_id and retries it.
+# LLM: state 已提交是成功权威，后续删除失败不改变成功；仍在目标锁内清理，不能与恢复者争删。
 # 函数用途: 尽力删除已提交事务恢复材料，失败时保留给下一次安全清理。
 def _cleanup_committed_best_effort(directory: Path) -> None:
     try:
-        _cleanup_transaction(directory)
+        _remove_transaction_directory(directory)
     except OSError:
         return
 

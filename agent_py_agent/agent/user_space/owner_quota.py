@@ -43,6 +43,13 @@ class OwnerQuotaUnavailable(RuntimeError):
     """The authoritative owner quota or current usage could not be read safely."""
 
 
+# LLM: 锁竞争是暂态事实，与策略/存储不可用分开表达；调用方可安全地按 busy/重试处理，
+#   而不能把策略或存储故障也吞成 busy（MC4-2501）。
+# 类用途: 表示 owner 配额锁被其它进程/线程暂时持有（由底层 BlockingIOError 产生）。
+class OwnerQuotaLockContention(OwnerQuotaUnavailable):
+    """The owner quota lock is temporarily held elsewhere; a retry may succeed."""
+
+
 class OwnerQuotaExceeded(RuntimeError):
     def __init__(self, projection: OwnerQuotaProjection):
         self.projection = projection
@@ -345,13 +352,16 @@ def _logical_file_size(path: Path) -> int:
     return max(0, int(info.st_size))
 
 
-# LLM: 沿用原 JSON 双层锁；竞争/存储故障仍转配额不可用，不能因为立即准入失败而无锁继续。
+# LLM: 沿用原 JSON 双层锁；锁竞争（BlockingIOError）与策略/存储故障分开转领域错误，
+#   不能因为立即准入失败而无锁继续（MC4-2501）。
 # 函数用途: 将配额锁的底层错误转成领域错误，退出归还同一锁。
 @contextmanager
 def _locked_owner_quota(path: Path, *, blocking: bool = True) -> Iterator[None]:
     manager = locked_json_path(path, blocking=blocking)
     try:
         manager.__enter__()
+    except BlockingIOError as exc:
+        raise OwnerQuotaLockContention("owner quota lock is busy") from exc
     except (OSError, RuntimeError, ValueError) as exc:
         raise OwnerQuotaUnavailable("owner quota lock is unavailable") from exc
     try:
@@ -365,6 +375,7 @@ __all__ = [
     "OwnerQuotaChange",
     "OwnerQuotaEnforcer",
     "OwnerQuotaExceeded",
+    "OwnerQuotaLockContention",
     "OwnerQuotaProjection",
     "OwnerQuotaUnavailable",
     "owner_quota_enforcer_from_policy",
