@@ -78,15 +78,27 @@ def freeze_thread_persona(home: Path, scope: ThreadPersonaScope, current: Render
     path = _snapshot_path(home, scope.thread_id)
     epoch = {"compact_generation": scope.compact_generation, "model_profile_id": scope.model_profile_id,
              "protocol": list(scope.protocol)}
-    with locked_json_path(path):
+    # LLM: 外层线程前缀锁把「核对代次→写快照」整体圈进临界区：expire 的「推进代次→失效」
+    #   也在同一把锁内，任何交错都被互斥挡住（mc4-3102）。
+    with locked_json_path(_thread_prefix_lock_path(home)):
         if current.persona_epoch is not None and current.persona_epoch != _read_persona_epoch(home):
             return [], ""
+        sections = _read_or_freeze_snapshot(path, epoch, current)
+    return [value for value in sections.values() if value], persona_updates(sections, current)
+
+
+# LLM: 快照「读或首次写」收成单层小函数（mc4-3102 拆平）：调用方已持线程前缀锁，
+#   这里再拿快照文件锁并用原子替换写入；返回本次生效的 sections。
+# 函数用途: 读快照；缺失或代次不一致时按当前渲染写一份并返回 sections。
+def _read_or_freeze_snapshot(
+    path: Path, epoch: dict[str, object], current: RenderedPersonaSections
+) -> dict:
+    with locked_json_path(path):
         saved = _read_snapshot(path)
         if saved is None or saved["epoch"] != epoch:
             saved = {"schema_version": 1, "epoch": epoch, "sections": current.sections}
             write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
-        sections = saved["sections"]
-    return [value for value in sections.values() if value], persona_updates(sections, current)
+        return saved["sections"]
 
 
 # LLM: 内容损坏等价于缺失，调用方须在原锁内重建；链接/非普通文件和IO安全错误仍抛出，不含正文日志。
@@ -176,7 +188,17 @@ def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
     directory = home / "persona" / "thread_prefix"
     if any(part.is_symlink() for part in (home, home / "persona", directory)):
         raise ValueError("PERSONA_PREFIX_SYMLINK")
-    _bump_persona_epoch(home)
+    # LLM: 「推进代次→失效快照」与 freeze 的「核对代次→写快照」共用同一把线程前缀锁：
+    #   在途渲染的旧代次冻结要么发生在失效前（会被失效清掉）、要么发生在推进后（核对拒绝）。
+    with locked_json_path(_thread_prefix_lock_path(home)):
+        _bump_persona_epoch(home)
+        return _expire_snapshots_locked(directory, needles)
+
+
+# LLM: 目录遍历与失效收成单层小函数（mc4-3102 拆平）：调用方已持线程前缀锁，遍历中跳过
+#   链接与非普通文件（IO 安全错误仍由底层抛出）；返回失效个数。
+# 函数用途: 让目录里命中内容的快照失效，返回失效个数。
+def _expire_snapshots_locked(directory: Path, needles: list[str]) -> int:
     if not directory.is_dir():
         return 0
     expired = 0
@@ -186,6 +208,14 @@ def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
         if _expire_snapshot_locked(path, needles):
             expired += 1
     return expired
+
+
+# LLM: 线程前缀锁是 freeze 写入与 expire 失效的唯一互斥点（mc4-3102）：「核对代次→写快照」
+#   与「推进代次→失效快照」在同一把锁内完成，两者之间不再有交错窗口；锁文件只作 flock
+#   锚点、不写内容，放 persona 目录下与其它人格状态同域。
+# 函数用途: 返回线程前缀锁文件路径。
+def _thread_prefix_lock_path(home: Path) -> Path:
+    return home / "persona" / "thread_prefix.lock"
 
 
 # LLM: 失效代次放 persona/ 下的持久小文件；只在锁内递增，读取是单次原子读，不携带正文。

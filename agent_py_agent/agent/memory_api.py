@@ -18,6 +18,7 @@ from .memory_store.candidate_models import (
     PROMOTION_TARGETS,
     PROPOSED_ACTIONS,
 )
+from .memory_store.curator_state import MemoryCuratorStateStore
 from .memory_store.daily import DAILY_ACTORS, DAILY_EVENT_TYPES, DailyMemoryStore
 from .memory_store.lessons import LessonRepository
 from .memory_store.lifecycle import request_memory_curator_for_session_best_effort
@@ -35,6 +36,7 @@ __all__ = [
     "PROPOSED_ACTIONS",
     "DailyMemoryStore",
     "LessonRepository",
+    "MemoryCuratorStateStore",
     "MemoryMigrationService",
     "MemoryRetentionService",
     "apply_agents_cleanup",

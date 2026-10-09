@@ -32,11 +32,14 @@ from ..common.json_io import (
     write_private_text_file_atomic,
 )
 from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions
+from .curator_state import CuratorStateCorruptError, CuratorSuccessCommit
 
 # 自动晋升写入 Persona 时使用的来源前缀（见 promotion._commit_persona）。
 _PROMOTION_SOURCE_PREFIX = "memory-promotion:"
 # PersonaRepository 的 batch 硬上限是 32 条操作。
 _PERSONA_BATCH_OPERATIONS_COUNT = 32
+# 迁移租约时长：迁移本身是本地秒级操作，给足提交/恢复余量即可；异常崩溃后 curator 最多等到过期。
+_MIGRATION_LEASE_SECONDS = 300
 _MIGRATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SNAPSHOT_META = "snapshot.json"
 _ARCHIVE_NAME = "archive.jsonl"
@@ -112,7 +115,8 @@ class _HistoryIndex:
     rollback_positions: tuple[int, ...]
 
 
-# LLM: 删除进度收成一个对象后，事务记录写回与批次回调不再各传三个散参数。
+# LLM: 删除进度收成一个对象后，事务记录写回与批次回调不再各传三个散参数；versions_tail 必须
+#   是上一批在人格锁内采样（mutate_batch 返回）的值，不能锁外重采样（mc4-3101）。
 # 类用途: 一批删除完成后的进度（sha、已删数、剩余数、该批完成后的版本账本尾指纹）。
 @dataclass(frozen=True)
 class _BatchProgress:
@@ -348,9 +352,11 @@ def _plan_digest(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-# LLM: 执行顺序固定为 计划校验→快照→归档→删除→名单→线程快照失效→完成记录；apply 首次必须
-#   携带与当前计划一致的 plan_digest（防漂移），续作跳过 digest 但只处理「当前重判定 ∩ 原计划」；
-#   删除分批 CAS，批间更新事务记录；完成后重跑幂等返回。
+# LLM: 迁移执行在 curator 租约内进行（拿不到结构化拒绝，迁移期间不会有新的 curator 运行）；
+#   单一临界区一次做完：计划校验→快照（续作逐文件校验）→归档→删除→名单→线程快照失效→完成
+#   记录；删除按 32 条一批连续执行，批间前提用上一批锁内采样的账本尾串联（批间并发写入必然
+#   让下一批拒绝，不再被锁外重采样洗白）；apply 首次必须携带与当前计划一致的 plan_digest（防
+#   漂移），续作跳过 digest 但只处理「当前重判定 ∩ 原计划」；完成后重跑幂等返回。
 # 函数用途: 执行一次 AGENTS 清理迁移并返回结构化报告。
 def apply_agents_cleanup(
     *,
@@ -358,12 +364,41 @@ def apply_agents_cleanup(
     persona: PersonaRepository,
     candidate_service: object,
     request: AgentsCleanupRequest,
+    curator_state_store: object | None = None,
 ) -> dict[str, object]:
     migration_id = _validated_migration_id(request.migration_id)
     directory = _migration_dir(home_paths, migration_id)
     record = _read_record(directory)
     if _is_completed(record):
         return _completed_report(migration_id, directory, record)
+    lease = _acquire_migration_lease(curator_state_store)
+    try:
+        return _run_cleanup(
+            home_paths=home_paths,
+            persona=persona,
+            candidate_service=candidate_service,
+            request=request,
+            migration_id=migration_id,
+            directory=directory,
+            record=record,
+        )
+    finally:
+        _release_migration_lease(curator_state_store, lease)
+
+
+# LLM: 临界区主体与租约生命周期分离：本函数只在租约已领取时被调用，任何异常都交给调用方
+#   释放租约后原样冒泡。
+# 函数用途: 执行迁移的计划校验、快照、归档、删除、名单与收尾记录。
+def _run_cleanup(
+    *,
+    home_paths: object,
+    persona: PersonaRepository,
+    candidate_service: object,
+    request: AgentsCleanupRequest,
+    migration_id: str,
+    directory: Path,
+    record: dict | None,
+) -> dict[str, object]:
     plan = plan_agents_cleanup(persona=persona)
     if record is None:
         _require_matching_digest(request, plan)
@@ -404,6 +439,54 @@ def apply_agents_cleanup(
     return _apply_report(directory, plan, record, summary)
 
 
+# LLM: 迁移与 curator 的互斥用 curator 自己的租约（同一 state 文件上的 CAS）：迁移先领租约、
+#   结束后释放；拿不到就结构化拒绝，不让两条写入链并行（mc4-3102 的设计）。store 为空时不做
+#   互斥，dry-run 与未接线的调用方保持原行为。
+# 函数用途: 为迁移领取 curator 租约，返回租约 dict；拿不到时抛出结构化错误。
+def _acquire_migration_lease(store: object | None) -> dict[str, object] | None:
+    if store is None:
+        return None
+    try:
+        acquired = store.acquire(
+            reason="migration",
+            config_revision="agents-cleanup",
+            lease_seconds=_MIGRATION_LEASE_SECONDS,
+        )
+    except CuratorStateCorruptError as exc:
+        raise AgentsCleanupError("AGENTS_CLEANUP_CURATOR_STATE_UNAVAILABLE") from exc
+    if acquired is None:
+        raise AgentsCleanupError("AGENTS_CLEANUP_CURATOR_BUSY")
+    _, lease = acquired
+    return dict(lease)
+
+
+# LLM: 释放走 commit_success 同一 CAS：只提交「0 处理」并清空租约；per_thread_cursors 必须原样
+#   回传——build_success_state 用传入值整体替换，传空会误清 curator 游标。释放是 best-effort：
+#   迁移结果已落盘，释放失败不回滚迁移，留给租约过期兜底。
+# 函数用途: 提交并释放迁移租约。
+def _release_migration_lease(store: object | None, lease: dict[str, object] | None) -> None:
+    if store is None or not lease:
+        return
+    try:
+        state = store.load()
+        store.commit_success(
+            CuratorSuccessCommit(
+                lease_id=str(lease.get("lease_id") or ""),
+                run_id=str(lease.get("run_id") or ""),
+                reason="migration",
+                per_thread_cursors=dict(state.per_thread_cursors),
+                last_processed_audit_event_id="",
+                processed_messages=0,
+                processed_audit_events=0,
+                candidate_count=0,
+                daily_event_count=0,
+                committed_at=_now_iso(),
+            )
+        )
+    except Exception:
+        return
+
+
 # LLM: apply 绑定 dry-run 计划摘要：缺失拒绝（必须先预览），与当前计划不一致说明文档或计划
 #   已变化，拒绝并要求重新预览。
 # 函数用途: 校验 apply 携带的计划摘要与当前计划一致。
@@ -428,10 +511,10 @@ def _resume_targets(record: dict, plan: AgentsCleanupPlan) -> list[dict[str, obj
     return [item for item in plan.removable if str(item.get("entry_id") or "") in planned]
 
 
-# LLM: 删除分批沿 PersonaRepository 的 batch 通道（每批 ≤32），批间用上一批返回的 sha 做 CAS，
-#   并在人格锁内核对版本账本尾（计划之后任何写入都拒绝）；每批把进度与新的账本尾写回事务
-#   记录，崩溃续作时不需要重放已删除的部分。
-# 函数用途: 分批删除目标条目，返回实际删除条数。
+# LLM: 删除沿 PersonaRepository 的 batch 通道连续执行（每批 ≤32），批间用上一批返回的 sha 做
+#   CAS，并在人格锁内核对版本账本尾；批间前提链只认上一批锁内采样的账本尾——锁外重采样会把
+#   批间并发写入洗白成新基准（mc4-3101），所以这里不再调用 versions_ledger_tail。
+# 函数用途: 连续删除目标条目，返回实际删除条数。
 def _remove_planned(
     persona: PersonaRepository,
     targets: list[dict[str, object]],
@@ -449,7 +532,7 @@ def _remove_planned(
                 sha,
                 removed,
                 len(targets) - removed,
-                versions_ledger_tail(persona.versions_path),
+                str(result.get("versions_tail") or ""),
             )
         )
     return removed
@@ -653,6 +736,9 @@ def _apply_report(
 def _ensure_snapshot(home_paths: object, directory: Path, migration_id: str) -> dict[str, object]:
     meta_path = directory / _SNAPSHOT_META
     if meta_path.exists():
+        # LLM: 续作复用前逐文件重校验（mc4-3104）：快照是删除的安全前提，两次 apply 之间副本
+        #   可能被改动或损坏；校验不过就拒绝，绝不带着坏快照继续删除。
+        _verify_snapshot_manifest(directory, meta_path)
         return {"reused": True, "snapshot_dir": str(directory)}
     snapshot_dir = directory / "snapshot"
     _ensure_dir(snapshot_dir)
@@ -668,6 +754,47 @@ def _ensure_snapshot(home_paths: object, directory: Path, migration_id: str) -> 
     meta = {"migration_id": migration_id, "created_at": _now_iso(), "files": files}
     write_private_json_file_atomic(meta_path, meta)
     return {"reused": False, "snapshot_dir": str(directory), "files": files}
+
+
+# LLM: 续作复用快照前按清单逐文件核对 sha256+bytes：快照副本可能被改动、删除或替换成链接；
+#   清单本身缺失/坏内容/结构不对同样视为不可信——拒绝而不是重建（重建会覆盖恢复依据，也会
+#   掩盖磁盘问题）。任何一项不一致都在删除前中止（mc4-3104）。
+# 函数用途: 校验已存在快照的清单与每个文件内容，不一致时抛出快照不可信错误。
+def _verify_snapshot_manifest(directory: Path, meta_path: Path) -> None:
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED") from exc
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, dict):
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED")
+    snapshot_dir = directory / "snapshot"
+    for key, entry in files.items():
+        _verify_snapshot_file(snapshot_dir, str(key), entry)
+
+
+# 函数用途: 核对快照里单个文件与清单一致；链接、越界路径、读不动或内容不符都按篡改拒绝。
+def _verify_snapshot_file(snapshot_dir: Path, key: str, entry: object) -> None:
+    if not isinstance(entry, dict) or not _safe_snapshot_key(key):
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED")
+    target = snapshot_dir / key
+    if target.is_symlink() or not target.is_file():
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED")
+    try:
+        content = target.read_bytes()
+    except OSError as exc:
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED") from exc
+    if hashlib.sha256(content).hexdigest() != str(entry.get("sha256") or ""):
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED")
+    if entry.get("bytes") != len(content):
+        raise AgentsCleanupError("AGENTS_CLEANUP_SNAPSHOT_TAMPERED")
+
+
+# 函数用途: 判断快照清单里的相对路径安全（拒绝空值、绝对路径与上级跳转）。
+def _safe_snapshot_key(key: str) -> bool:
+    if not key or key.startswith("/"):
+        return False
+    return ".." not in Path(key).parts
 
 
 # 函数用途: 列出快照要保存的权威文件（含迁移自身的归档与事务记录）。

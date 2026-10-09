@@ -429,8 +429,9 @@ def _mutate_persona_document(
     return _persona_mutation_result(request, prepared)
 
 
-# LLM: Batch Persona changes validate against an in-memory working copy and commit once.
-# 函数用途: 一条用户消息含多个长期事实时，保证整批全成功或全不写。
+# LLM: Batch Persona changes validate against an in-memory working copy and commit once；结果里的
+#   versions_tail 是锁内提交后采样（迁移的批间前提链不允许锁外重采样洗白，mc4-3101）。
+# 函数用途: 一条用户消息含多个长期事实时，保证整批全成功或全不写；结果携带锁内账本尾。
 def _mutate_persona_batch_document(
     repository: PersonaRepository,
     admission: OwnerQuotaAdmission,
@@ -454,10 +455,15 @@ def _mutate_persona_batch_document(
         previous = path.read_text(encoding="utf-8") if path.exists() else ""
         prepared = _prepare_persona_batch_mutation(repository, request, previous)
         if isinstance(prepared, dict):
-            return prepared
+            return {**prepared, "versions_tail": versions_ledger_tail(repository.versions_path)}
         _admit_persona_mutation(repository, admission, path, prepared)
         _commit_persona_mutation(repository, path, prepared)
-    return _persona_batch_mutation_result(request, prepared)
+        # LLM: 提交后立刻在锁内采样账本尾：迁移的批间前提链必须用这个值，锁外重采样会把
+        #   批间并发写入洗白成新基准（mc4-3101）。
+        committed_tail = versions_ledger_tail(repository.versions_path)
+    result = _persona_batch_mutation_result(request, prepared)
+    result["versions_tail"] = committed_tail
+    return result
 
 
 # LLM: First batch writes keep version one for the changed document while attaching version zero.

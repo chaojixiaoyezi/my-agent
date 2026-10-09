@@ -17,6 +17,7 @@ from ..agent.memory_api import (
     AgentsCleanupRequest,
     DailyMemoryStore,
     LessonRepository,
+    MemoryCuratorStateStore,
     MemoryMigrationService,
     MemoryRetentionService,
     apply_agents_cleanup,
@@ -353,6 +354,8 @@ def _agents_cleanup_payload(agent: Any, args: Any) -> dict[str, object]:
             "plan": plan.to_dict(),
         }
     migration_id = str(getattr(args, "migration_id", None) or "") or _default_migration_id()
+    # LLM: 执行路径携带 curator state store 领取迁移租约（curator 在跑时结构化拒绝，mc4-3102）；
+    #   dry-run 保持纯读不领租约。
     try:
         report = apply_agents_cleanup(
             home_paths=home,
@@ -363,6 +366,9 @@ def _agents_cleanup_payload(agent: Any, args: Any) -> dict[str, object]:
                 conversations=conversations,
                 actor="memory-admin-cli",
                 plan_digest=str(getattr(args, "plan_digest", None) or ""),
+            ),
+            curator_state_store=MemoryCuratorStateStore(
+                home.owner_memory_curator_state_json
             ),
         )
     except AgentsCleanupError as exc:

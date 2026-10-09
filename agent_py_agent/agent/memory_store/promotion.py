@@ -8,9 +8,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol
 
 from ..capability.persona_repository import (
@@ -18,12 +21,14 @@ from ..capability.persona_repository import (
     PersonaRepository,
     persona_entry_id,
 )
+from ..common.json_io import locked_json_path
 from ..common.tool_index_stream import (
     InvalidToolIndexObject,
     iter_decoded_tool_index_objects,
     tool_index_prescreen_pattern,
 )
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from ..user_space.owner_policy import read_learning_exclusions
 from .candidate_models import (
     MemoryCandidate,
     MemoryScope,
@@ -32,6 +37,7 @@ from .candidate_models import (
 )
 from .candidates import CandidateService
 from .jsonl import JsonlMemory, MemoryRecord
+from .learning_exclusions import excluded_candidate_ids
 from .lessons import HotRuleRepository, LessonRepository
 from .operations import normalized_memory_content
 
@@ -112,6 +118,9 @@ class MemoryPromotionDependencies:
     hot: HotRuleRepository
     message_verifier: MessageEvidenceVerifier | None = None
     tool_verifier: ToolEvidenceVerifier | None = None
+    # LLM: 学习排除复核的会话绑定来源（conversation_store）；None 时提交路径不做名单复核，
+    #   保持既有调用方行为，接线后提交在 policy 锁内复核（mc4-3103）。
+    exclusion_store: object | None = None
 
 
 # LLM: Threshold policy is immutable and separate from repositories so tests/config cannot mix
@@ -582,6 +591,94 @@ class _PromotionCommitMixin:
         return ""
 
 
+# LLM: 提交期复核与写入必须共享同一把 policy 锁（锁序 policy → 记忆写入，mc4-3103）；
+#   未接线 exclusion_store 时为空上下文，保持既有调用方行为（0r3 拆平：从类内搬出）。
+# 函数用途: 在 policy 锁内复核名单后提交目标，失败按稳定码返回。
+def _commit_with_exclusion_guard(
+    service: MemoryPromotionService,
+    candidate: MemoryCandidate,
+    *,
+    reviewer: str,
+    confirmed: bool,
+) -> str:
+    with _learning_exclusion_scope(service):
+        _ensure_not_excluded(service, candidate)
+        return _commit_target_blocked(
+            service, candidate, reviewer=reviewer, confirmed=confirmed
+        )
+
+
+# 函数用途: 返回提交期 policy 锁上下文（未接线时为空）。
+@contextmanager
+def _learning_exclusion_scope(service: MemoryPromotionService) -> Iterator[None]:
+    if service.exclusion_store is None:
+        yield
+        return
+    with locked_json_path(service.persona.owner_home / "memory_policy.json"):
+        yield
+
+
+# LLM: 名单不可读或来源命中都拒绝提交（fail-closed）；只读结构化 refs 与通道绑定。
+# 函数用途: 在 policy 锁内复核候选来源是否命中学习排除名单。
+def _ensure_not_excluded(service: MemoryPromotionService, candidate: MemoryCandidate) -> None:
+    code = _learning_exclusion_block(service, candidate)
+    if code:
+        raise _PromotionBlocked(candidate.status, code)
+
+
+# 函数用途: 读最新名单并判定一条候选是否命中；返回稳定原因码或空串。
+def _learning_exclusion_block(
+    service: MemoryPromotionService, candidate: MemoryCandidate
+) -> str:
+    if service.exclusion_store is None:
+        return ""
+    entries, error = read_learning_exclusions(
+        SimpleNamespace(
+            owner_memory_policy_json=service.persona.owner_home / "memory_policy.json"
+        )
+    )
+    if error is not None:
+        return "LEARNING_SOURCE_UNREADABLE"
+    excluded = frozenset(entry.channel_conversation_id for entry in entries)
+    if not excluded:
+        return ""
+    hits = excluded_candidate_ids(
+        conversation_store=service.exclusion_store,
+        rows=[candidate],
+        excluded_conversation_ids=excluded,
+    )
+    return "LEARNING_SOURCE_EXCLUDED" if hits else ""
+
+
+# LLM: 提交失败已落状态迁移的载体；只把冲突/门槛失败转稳定码，其他异常照常外抛。
+# 函数用途: 提交目标并把失败转 _PromotionBlocked 供主流程返回。
+def _commit_target_blocked(
+    service: MemoryPromotionService,
+    candidate: MemoryCandidate,
+    *,
+    reviewer: str,
+    confirmed: bool,
+) -> str:
+    try:
+        return service._commit_target(candidate, reviewer=reviewer, confirmed=confirmed)
+    except _PromotionConflict as exc:
+        blocked = service.candidates.transition(
+            candidate.candidate_id,
+            "blocked_conflict",
+            reviewer=reviewer,
+            review_note=exc.reason_code,
+            conflicts_with=list(exc.conflicts_with),
+        )
+        raise _PromotionBlocked(blocked.status, exc.reason_code) from None
+    except ValueError as exc:
+        # lesson/HOT 重复证据门槛不满足(lessons.py:_validate_lesson_candidate):
+        # 自动路径保持原状态干净失败,不崩溃——候选留在 approved,证据凑齐后下次再晋升;
+        # 稳定原因码供 curator 兜底与 CLI 显示。其他 target 的 ValueError 照常外抛。
+        if str(candidate.promotion_target or "").strip().lower() in {"lesson", "hot"}:
+            raise _PromotionBlocked(candidate.status, "PROMOTION_THRESHOLD_NOT_MET") from None
+        raise
+
+
 # LLM: Persona adoption trusts only canonical verifier output and exact structured parameters;
 # candidate prose, model status words, and semantic similarity never authorize reuse.
 # 函数用途: 判断核验后的工具证据是否为目标人格文件的成功 add。
@@ -625,6 +722,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
             dependencies.message_verifier or RejectingMessageEvidenceVerifier()
         )
         self.tool_verifier = dependencies.tool_verifier or RejectingToolEvidenceVerifier()
+        self.exclusion_store = dependencies.exclusion_store
         self.lesson_min_occurrences = max(2, int(thresholds.lesson_min_occurrences))
         self.hot_min_occurrences = max(3, int(thresholds.hot_min_occurrences))
 
@@ -780,32 +878,18 @@ class MemoryPromotionService(_PromotionCommitMixin):
             )
         return candidate
 
-    # LLM: 冲突/门槛失败转稳定码,候选留在可复升状态,不崩溃。
-    # 函数用途: 提交目标并把失败转 _PromotionBlocked 供主流程返回。
+    # LLM: 提交在 policy 锁内先复核名单（mc4-3103）：cleanup 的名单追加与晋升提交不能交错，
+    #   复核与写入必须在同一临界区；未接线 exclusion_store 时退化为无复核提交。
+    # 函数用途: 在 policy 锁内复核名单后提交目标。
     def _commit_with_conflict_handling(
         self,
         candidate: MemoryCandidate,
         reviewer: str,
         confirmed: bool,
     ) -> str:
-        try:
-            return self._commit_target(candidate, reviewer=reviewer, confirmed=confirmed)
-        except _PromotionConflict as exc:
-            blocked = self.candidates.transition(
-                candidate.candidate_id,
-                "blocked_conflict",
-                reviewer=reviewer,
-                review_note=exc.reason_code,
-                conflicts_with=list(exc.conflicts_with),
-            )
-            raise _PromotionBlocked(blocked.status, exc.reason_code) from None
-        except ValueError as exc:
-            # lesson/HOT 重复证据门槛不满足(lessons.py:_validate_lesson_candidate):
-            # 自动路径保持原状态干净失败,不崩溃——候选留在 approved,证据凑齐后下次再晋升;
-            # 稳定原因码供 curator 兜底与 CLI 显示。其他 target 的 ValueError 照常外抛。
-            if str(candidate.promotion_target or "").strip().lower() in {"lesson", "hot"}:
-                raise _PromotionBlocked(candidate.status, "PROMOTION_THRESHOLD_NOT_MET") from None
-            raise
+        return _commit_with_exclusion_guard(
+            self, candidate, reviewer=reviewer, confirmed=confirmed
+        )
 
     # LLM: 总量闸:long_term 写成功后顺带治理(超上限按访问信号浓缩,user_explicit 不淘汰)。
     # 放在 promote 成功路径,任何写入口(remember/curator)都自动触发,无需单独 cron。

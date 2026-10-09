@@ -111,6 +111,7 @@ def _runtime(tmp_path: Path):
             hot=HotRuleRepository(owner / "memory-hot.md"),
             message_verifier=ConversationMessageEvidenceVerifier(conversations),
             tool_verifier=LocalStoreToolEvidenceVerifier(owner, owner_id="user-1"),
+            exclusion_store=conversations,
         ),
     )
     return service, conversations, threads

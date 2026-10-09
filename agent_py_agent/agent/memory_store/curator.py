@@ -201,8 +201,13 @@ class _CuratorLifecycleMixin:
         if pending:
             return self._run_pending_when_due(state, pending, current)
         # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
-        # 会话的旧消息误触发一次运行）；真正的收集在 _execute 里再做一次。
-        excluded_ids, _ = self._learning_exclusions_for_run()
+        # 会话的旧消息误触发一次运行）；真正的收集在 _execute 里再做一次。不可读的诊断要随
+        # not_due 一起返回，不能显示成没有原因的普通 not_due（mc4-3106）。
+        excluded_ids, exclusion_warnings = self._learning_exclusions_for_run()
+        if excluded_ids is None:
+            return self._result(
+                status="not_due", reason="interval", warnings=exclusion_warnings
+            )
         batch = self._collect(
             state, include_formal=False, excluded_conversation_ids=excluded_ids
         )
@@ -424,8 +429,15 @@ class _CuratorLifecycleMixin:
         )
 
     # LLM: Simple non-running results share one enum validation and never synthesize a run ID.
+    #   诊断 warning（如名单不可读）要能随非运行结果返回，调用方不必从日志猜原因（mc4-3106）。
     # 函数用途: 构造 disabled、busy 或 not_due 结果。
-    def _result(self, *, status: str, reason: str) -> CuratorRunResult:
+    def _result(
+        self,
+        *,
+        status: str,
+        reason: str,
+        warnings: tuple[str, ...] = (),
+    ) -> CuratorRunResult:
         if status not in _RUN_STATUSES:
             raise ValueError("unsupported memory curator result status")
         return CuratorRunResult(
@@ -434,6 +446,7 @@ class _CuratorLifecycleMixin:
             reason=reason,
             provider=self.provider_name,
             model=self.model_name,
+            warnings=warnings,
         )
 
 
@@ -562,6 +575,7 @@ class _CuratorExecutionMixin:
             provider=str(context.route.get("provider", self.provider_name)),
             model=str(context.route.get("model", self.model_name)),
             finished_at=finished_at,
+            extra_warnings=extra_warnings,
         )
         state_commit = _success_commit(
             context,
@@ -1264,7 +1278,8 @@ def _run_context(
 
 
 # LLM: Successful audit includes counts/cursors and recovery IDs only; extracted content remains
-# solely in Daily/Candidate authorities.
+# solely in Daily/Candidate authorities. 诊断类 warning（名单不可读等）必须写进持久 run audit，
+# 不能只出现在内存结果里，否则事后审计看不到原因（mc4-3106）。
 # 函数用途: 构造整批事务内的最终成功 run audit。
 def _successful_run_record(
     context: _RunContext,
@@ -1273,6 +1288,7 @@ def _successful_run_record(
     provider: str,
     model: str,
     finished_at: str,
+    extra_warnings: tuple[str, ...] = (),
 ) -> CuratorRunRecord:
     return CuratorRunRecord(
         run_id=context.run_id,
@@ -1287,7 +1303,7 @@ def _successful_run_record(
         processed_audit_events=prepared.cursor.processed_audit_events,
         daily_events=len(prepared.daily_events),
         candidates=len(prepared.candidates),
-        warnings=prepared.warnings,
+        warnings=(*prepared.warnings, *extra_warnings)[:RUN_WARNINGS_MAX_COUNT],
         cursor_before=_cursor_payload(
             context.state_before.per_thread_cursors,
             context.state_before.last_processed_audit_event_id,
@@ -1618,7 +1634,8 @@ def _pending_reason(reasons: list[str]) -> str:
 
 
 # LLM: Interval due requires actual unprocessed message/audit input and uses a timezone-aware
-# durable success timestamp.
+# durable success timestamp. 被整窗排除的 audit 窗口只剩 skipped_audit_cursor 作输入证据，也
+# 必须算「有输入」：否则游标停摆，只能等每日收尾才越过（mc4-3105）。
 # 函数用途: 判断增量输入是否达到时间触发条件。
 def _interval_due(
     batch: CuratorInputBatch,
@@ -1626,7 +1643,7 @@ def _interval_due(
     now: datetime,
     interval_seconds: int,
 ) -> bool:
-    if not batch.messages and not batch.audit_events:
+    if not batch.messages and not batch.audit_events and not batch.skipped_audit_cursor:
         return False
     last_success = _parse_time(state.last_success_at)
     return last_success is None or (now - last_success).total_seconds() >= interval_seconds

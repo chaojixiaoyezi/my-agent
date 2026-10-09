@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 958,
+  "count": 959,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4234,6 +4234,14 @@
       "unit": "",
       "category": "上限预算",
       "description": "目标匹配用的最大 ngram 阶数；阶数越高匹配越精确但索引越大（无物理单位）。"
+    },
+    {
+      "name": "_MIGRATION_LEASE_SECONDS",
+      "file": "agent_py_agent/agent/memory_store/agents_migration.py",
+      "value": 300,
+      "unit": "秒",
+      "category": "比例阈值",
+      "description": "迁移租约时长：迁移本身是本地秒级操作，给足提交/恢复余量即可；异常崩溃后 curator 最多等到过期。"
     },
     {
       "name": "_PERSONA_BATCH_OPERATIONS_COUNT",

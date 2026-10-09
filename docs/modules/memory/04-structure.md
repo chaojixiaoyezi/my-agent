@@ -9,6 +9,16 @@
 - `curator_inputs`：消息与 audit 两路都按名单跳过（名单读不出 fail-closed，本轮不收集任何会话消息）；audit 全被过滤时不推进游标（`skipped_audit_cursor` 交给验证层推进）。
 - CLI：`memory agents cleanup [--apply] [--conversation ...] [--migration-id ...] [--json]`；dry-run 输出 plan（含 plan_digest/ambiguous_entry_ids），不打印正文。
 
+## AGENTS.md 第 0 期第 3 轮：单一临界区与固定锁序（mc3-agents0r3，2026-10-09，接着 b731b9b54）
+
+- 固定锁序：**curator 租约 → 人格锁 → policy 锁 → 线程前缀锁**（所有路径同序拿锁，不反向）。
+- `agents_migration`：apply 改为一个临界区一次做完——先取 curator 租约（`MemoryCuratorStateStore.acquire(reason="migration")`，在途 curator 结束才拿得到，拿不到结构化拒绝 `AGENTS_CLEANUP_CURATOR_BUSY`）→ 人格锁内重判定计划/核对摘要与版本账本尾 → 快照校验（首次写入并读回；续作按 `snapshot.json` 清单逐文件核对 sha256+bytes，不一致 `AGENTS_CLEANUP_SNAPSHOT_TAMPERED`）→ 归档 → 一次性删除全部目标（取消分批；批间 tail 只认上一批锁内采样，不再锁外重采样）→ 名单追加 → 推进失效代次 → 事务记录 completed；释放走 `commit_success`（active_lease 清空、last_success_at 落盘）。
+- `thread_persona`：新增线程前缀锁 `persona/thread_prefix.lock`（flock 锚点，不写内容）；`freeze_thread_persona` 的「核对代次→写快照」与 `expire_thread_personas_containing` 的「推进代次→失效」在同一把锁内互斥（读/写快照与目录遍历各收成单层小函数）。
+- `promotion`：提交期复核与写入共享 policy 锁——`_commit_with_exclusion_guard`（模块函数）在 `locked_json_path(memory_policy.json)` 内先 `_ensure_not_excluded`（名单不可读 `LEARNING_SOURCE_UNREADABLE`、命中 `LEARNING_SOURCE_EXCLUDED`）再提交。
+- `home_layout`/`owner_resolver` 的种子初始化：`path.exists()` 快速路径 + `os.open(O_WRONLY|O_CREAT|O_EXCL, 0o600)`，只创建不覆盖（并发追加的名单不会被初始化覆盖）。
+- `curator`：`_interval_due` 到期判定计入 `skipped_audit_cursor`（整段 audit 窗口被排除也按周期排空）；名单不可读的警告码 `learning_exclusions_unreadable` 随运行记录序列化，`run_if_due` 的 not_due 返回带 warnings。
+- 8 条 mc4 review31 红测原样转绿、新增 4 测试、6 项变异全部 rc=1；回归与门禁见根 `TESTS.md` 同名节。
+
 ## 工具引用 scope 流式读取（toolrefs / E11e，2026-10-08，本地实现待复核）
 
 - `common.tool_index_stream` 是E11a、Compact、artifact、晋升回退、通用控制面的唯一严格UTF-8读取器；control_plane保留兼容导出。预筛文本迭代器在需要旧合法性语义时先C解析并丢弃对象，E11a保留非候选零解析；对象迭代器C解析一次、只保留候选。Compact从四键AND选安全必要条件，最终仍原scope/旧请求回退；apply单扫描投影两类引用，scope carried也共用。artifact仅存ref/path候选，规范POSIX路径沿realpath/stat快路、其它平台及非规范路径仍原Path求值；无效ref仍扫描异常但不收集历史全集。晋升校验所有行，坏行整文件无证据，不留历史对象；资源错误/IO顺序保持原合同。已删除纯Python词法校验器，schema/权限/正文/归档写入不变，无缓存，实测及调用链见TESTS。

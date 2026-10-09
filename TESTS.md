@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## AGENTS.md 第 0 期第 3 轮：单一临界区（mc3-agents0r3，2026-10-09，接着 b731b9b54）
+
+- 来源：mc4 review31（`/private/tmp/claude-501/m-mc4/review31-agents/`，13 条补测，8 条红）；任务 mc3-agents-phase0-round3.md；设计调整写进 `docs/design/PERSONA_AGENTS_OWNERSHIP.md` §3.6.1–3.6.4。演练全部在 pytest 隔离 HOME，未触碰真实 home。
+- 结构（锁序固定 curator 租约 → 人格锁 → policy 锁 → 线程前缀锁）：①迁移执行=一个临界区一次做完——curator 租约（拿不到 `AGENTS_CLEANUP_CURATOR_BUSY`）→人格锁内重判定/核对摘要与账本尾→快照校验（首次写入读回；续作逐文件 sha256+bytes，不一致 `AGENTS_CLEANUP_SNAPSHOT_TAMPERED`）→归档→一次性删除（取消分批，批间 tail 只认上一批锁内采样）→名单→失效代次→事务记录；②线程前缀锁（`persona/thread_prefix.lock`）统一 freeze「核对代次→写快照」与 expire「推进代次→失效」；③seed 初始化 O_EXCL 不覆盖 + 晋升提交在 policy 锁内复核名单；④`run_if_due` 计入 `skipped_audit_cursor`，名单不可读原因码 `learning_exclusions_unreadable` 进运行审计与返回。
+- 8 条红测原样转绿（断言未改）：3101 批间 ABA 不得成新 tail、3102 首个 freeze 不得写旧代次、3103 cleanup 后提交不得漏名单、3104 续作必须逐文件重校验快照、3105 整段被排除的 audit 窗口按周期排空、3106 名单不可读诊断持久化、3107 两条 seed 不得覆盖并发追加。review29 18 条保持全绿。
+- 新增 4 测试（`test_agents_cleanup_migration.py`）：并发 `update_persona` 真实子进程在迁移锁外等待且条目清理后保留；curator 持租约时迁移结构化拒绝、释放后重跑成功（active_lease 清空、last_success_at 落盘）；freeze/expire 都引用线程前缀锁（inspect 静态断言）；2×freeze + 2×expire 各 20 轮并发交错无死锁（join(30)）。
+- 变异 6/6 全部 rc=1 抓到并原样还原（sha256 一致）：①恢复分批（批间 tail 锁外重采样）→3101 失败；②冻结不拿前缀锁→3102 失败；③提交不复核名单（等价于复核不在提交临界区）→3103 失败；④seed 无条件覆盖→3107 失败（owner_resolver 参数仍绿）；⑤`run_if_due` 忽略跳过游标→3105 失败；⑥续作不校验快照→3104 失败。另记一项探测变体（复核保留但移出锁）3103 仍绿——该测试锁的是「提交内复核存在」，顺序场景下不区分锁内/锁外，如实记录。
+- 回归：review31 13 条 + 迁移 19 条 = 32 passed；persona/promotion/home/owner 组 197 passed；curator 组 210 passed；guards9 12 文件 194 passed。`size_diff` 新增告警 0（消失 13）；4 处尺寸拆平（类 297→≤250、freeze/expire 嵌套 3→2、测试函数 52→≤47 行，各收成单层小函数）。
+- 门禁（strict_gates.sh f11b8f495）：GATES_PASS——import 边界 0、ruff、doc-sync、常数目录 959 项、frontend catalog 271、尺寸 strict hard=0、size_diff 新增 0（消失 13）、diff --check、clean-package 全过。
+- 复现：工作树根 `PYTHONPATH=$PWD:/private/tmp/claude-501/m-mc4/review31-agents:/private/tmp/claude-501/m-mc4/review29-agents PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc3-agents/<tag>`；PY 用 ci-venv-312。
+- 未验证：真实 home 迁移演练（由 3a 部署后空跑→执行）、Gateway 端到端、全仓 pytest（留给 3a 12 片车道）。
+
 ## AGENTS.md 第 0 期：自动写入硬拦、学习排除名单与清理迁移（mc3-agents0，2026-10-08，基线 f11b8f495，按设计 v2 补齐 4 阻断；本地实现待复核）
 
 - 来源：生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条（开发派活会话的任务书被当成用户长期约定）。用户拍板第 0 期三件事，设计见 docs/design/PERSONA_AGENTS_OWNERSHIP.md（0a441da06 第 1 版 → c8800d348 第 2 版）。演练全部在 pytest 隔离 HOME，未触碰真实 home。

@@ -8,14 +8,20 @@ apply 绑定 dry-run 计划摘要，中途变化拒绝；崩溃可幂等续作�
 删除；收尾让受影响线程的冻结人格快照受控失效。空跑只给计数和 entry_id，不打印正文。
 """
 
+import functools
+import inspect
 import json
 import shutil
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.capability import persona_repository as persona_repository_module
 from agent_py_agent.agent.capability.persona_repository import (
     PersonaBatchMutationRequest,
     PersonaMutationRequest,
@@ -33,12 +39,15 @@ from agent_py_agent.agent.memory_store.candidate_models import (
     MemoryScope,
 )
 from agent_py_agent.agent.memory_store.candidates import CandidateService
+from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.memory_store.learning_exclusions import (
     curator_learning_exclusions_revision,
 )
+from agent_py_agent.agent.prompting_parts import builder as prompt_builder
 from agent_py_agent.agent.prompting_parts.thread_persona import (
     RenderedPersonaSections,
     ThreadPersonaScope,
+    expire_thread_personas_containing,
     freeze_thread_persona,
 )
 from agent_py_agent.agent.user_space.owner_policy import (
@@ -531,3 +540,194 @@ def test_learning_exclusions_revision_tracks_appends(tmp_path: Path):
         == 1
     )
     assert curator_learning_exclusions_revision(home) == 2
+
+
+_USER_WRITER_CODE = """
+import json, sys
+from pathlib import Path
+from agent_py_agent.agent.capability.persona_repository import (
+    PersonaMutationRequest,
+    PersonaRepository,
+)
+owner = Path(sys.argv[1])
+repo = PersonaRepository(
+    owner_home=owner,
+    soul_path=owner / "SOUL.md",
+    user_path=owner / "USER.md",
+    agents_path=owner / "AGENTS.md",
+)
+result = repo.mutate(
+    PersonaMutationRequest(
+        target="agents", action="add", content=sys.argv[2], source="user_manual"
+    )
+)
+print(json.dumps({"entry_id": result.get("entry_id"), "sha256": result.get("sha256")}))
+"""
+
+# 迁移线程要替换的原函数引用；monkeypatch 只改模块属性，不影响这里的原始引用。
+_ORIGINAL_ADMIT = persona_repository_module._admit_persona_mutation
+
+
+# LLM: 迁移线程第一次进入 _admit_persona_mutation 时暂停（用真实事件），让子进程有机会去抢锁；
+#   state=(paused, release) 经 partial 传入；用 *args 透传产品调用签名（保持参数预算）。
+# 函数用途: 返回给 monkeypatch 用的替换函数（在迁移线程内暂停一次）。
+def _pause_admit_impl(*args, state):
+    paused, release = state
+    if threading.current_thread().name == "r3-migration" and not paused.is_set():
+        paused.set()
+        assert release.wait(10)
+    return _ORIGINAL_ADMIT(*args)
+
+
+# 函数用途: 在线程里执行一次 apply；context=(migration_id, sink)，结果写进 sink。
+def _apply_migration_sink(home, repo, candidates, context):
+    migration_id, sink = context
+    try:
+        sink["report"] = _apply(home, repo, candidates, migration_id=migration_id)
+    except BaseException as exc:
+        sink["error"] = repr(exc)
+
+
+# LLM: 迁移持人格锁（flock）期间用户写入必须等待；真实子进程验证跨进程互斥，释放后写入生效，
+#   且清理只删计划内的自动条目、不碰用户新条目（0r3 新增并发用例）。
+# 函数用途: 验证迁移执行期间并发 update_persona 等待锁、写入条目在清理后保留。
+def test_concurrent_user_write_waits_and_survives_cleanup(tmp_path: Path, monkeypatch):
+    home, repo, candidates = _env(tmp_path)
+    for index in range(5):
+        content = f"并发清理自动条目{index}。"
+        candidate = _candidate(candidates, content, 20 + index)
+        _promotion_add(repo, content, candidate.candidate_id)
+    paused, release = threading.Event(), threading.Event()
+    result: dict[str, object] = {}
+    monkeypatch.setattr(
+        persona_repository_module,
+        "_admit_persona_mutation",
+        functools.partial(_pause_admit_impl, state=(paused, release)),
+    )
+    thread = threading.Thread(
+        target=_apply_migration_sink,
+        args=(home, repo, candidates, ("user-wait", result)),
+        name="r3-migration",
+    )
+    thread.start()
+    assert paused.wait(5)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _USER_WRITER_CODE, str(home.owner_home_dir), "用户并发写入条目。"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    time.sleep(1.0)
+    waited = child.poll() is None
+    release.set()
+    child.communicate(timeout=15)
+    thread.join(15)
+    text = _agents_text(repo)
+    result["user_entry_present"] = "用户并发写入条目。" in text
+    result["automatic_entries_removed"] = "并发清理自动条目" not in text
+    result["waited"] = waited
+    result["child_returncode"] = child.returncode
+    result["migration_alive"] = thread.is_alive()
+    assert waited and child.returncode == 0 and not thread.is_alive(), result
+    assert result["user_entry_present"] and result["automatic_entries_removed"], result
+
+
+# LLM: curator 租约是迁移的互斥闸：在途 curator 持租约时迁移结构化拒绝且不写任何东西；
+#   释放后可重跑，迁移释放走 commit_success 清空 active_lease 并记录成功时间（0r3 新增）。
+# 函数用途: 验证 curator 运行中迁移被拒、释放后成功且租约状态正确收尾。
+def test_migration_refuses_while_curator_lease_is_held(tmp_path: Path):
+    home, repo, candidates = _env(tmp_path)
+    candidate = _candidate(candidates, _ENTRY_ONE, 31)
+    _promotion_add(repo, _ENTRY_ONE, candidate.candidate_id)
+    store = MemoryCuratorStateStore(home.owner_home_dir / "memory" / "curator" / "state.json")
+    acquired = store.acquire(reason="interval", config_revision="test", lease_seconds=300)
+    assert acquired is not None
+    lease = dict(acquired[1])
+    result: dict[str, object] = {}
+    try:
+        apply_agents_cleanup(
+            home_paths=home,
+            persona=repo,
+            candidate_service=candidates,
+            request=AgentsCleanupRequest(migration_id="busy-curator", plan_digest=_digest(repo)),
+            curator_state_store=store,
+        )
+        result["unexpected_success"] = True
+    except AgentsCleanupError as exc:
+        result["refusal"] = exc.reason_code
+    result["entry_kept_while_busy"] = _ENTRY_ONE in _agents_text(repo)
+    store.commit_failure(
+        lease_id=str(lease.get("lease_id") or ""), failure_code="TEST_RELEASE"
+    )
+    report = apply_agents_cleanup(
+        home_paths=home,
+        persona=repo,
+        candidate_service=candidates,
+        request=AgentsCleanupRequest(migration_id="busy-curator", plan_digest=_digest(repo)),
+        curator_state_store=store,
+    )
+    state = store.load()
+    result["removed_count"] = report.get("removed_count")
+    result["active_lease_cleared"] = dict(state.active_lease) == {}
+    result["last_success_at_set"] = bool(state.last_success_at)
+    assert result.get("refusal") == "AGENTS_CLEANUP_CURATOR_BUSY", result
+    assert result["entry_kept_while_busy"], result
+    assert result["removed_count"] == 1, result
+    assert result["active_lease_cleared"], result
+    assert result["last_success_at_set"], result
+    assert _ENTRY_ONE not in _agents_text(repo), result
+
+
+# LLM: 冻结与失效必须走同一把线程前缀锁（B 设计）；静态断言两处都引用锁函数，再用并发
+#   交错测试证明不会死锁（0r3 新增锁序用例）。
+# 函数用途: 静态验证 freeze/expire 都引用线程前缀锁。
+def test_thread_prefix_lock_covers_freeze_and_expire():
+    freeze_source = inspect.getsource(freeze_thread_persona)
+    expire_source = inspect.getsource(expire_thread_personas_containing)
+    assert "_thread_prefix_lock_path" in freeze_source
+    assert "_thread_prefix_lock_path" in expire_source
+
+
+# 函数用途: 并发交错 freeze 与 expire 限时完成，验证线程前缀锁不会死锁。
+def test_freeze_and_expire_interleave_without_deadlock(tmp_path: Path):
+    home, repo, candidates = _env(tmp_path)
+    candidate = _candidate(candidates, _ENTRY_ONE, 41)
+    _promotion_add(repo, _ENTRY_ONE, candidate.candidate_id)
+    builder = SimpleNamespace(
+        home_paths=home,
+        persona_repository=repo,
+        config=SimpleNamespace(
+            home_context_enabled=True, thread_prompt_prefix_freeze_enabled=True
+        ),
+    )
+    request = SimpleNamespace(
+        thread_persona=ThreadPersonaScope("r3-thread", 1, "test", ("fake", "native"))
+    )
+    errors: list[str] = []
+
+    def freezer():
+        try:
+            for _ in range(20):
+                prompt_builder._thread_persona_context(builder, request, False)
+        except BaseException as exc:
+            errors.append(repr(exc))
+
+    def expirer():
+        try:
+            for _ in range(20):
+                expire_thread_personas_containing(home.owner_home_dir, (_ENTRY_ONE,))
+        except BaseException as exc:
+            errors.append(repr(exc))
+
+    threads = [
+        threading.Thread(target=freezer, name="r3-freezer-1"),
+        threading.Thread(target=freezer, name="r3-freezer-2"),
+        threading.Thread(target=expirer, name="r3-expirer-1"),
+        threading.Thread(target=expirer, name="r3-expirer-2"),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert not any(thread.is_alive() for thread in threads), errors
+    assert not errors, errors

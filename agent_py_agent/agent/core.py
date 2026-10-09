@@ -375,6 +375,7 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
                 owner_id=str(agent.home_paths.owner_id or "local/main"),
                 owner_root=agent.home_paths.owner_home_dir,
             ),
+            exclusion_store=agent.conversation_store,
         ),
         policy=MemoryPromotionPolicy(
             lesson_min_occurrences=config.memory_lesson_min_occurrences,
