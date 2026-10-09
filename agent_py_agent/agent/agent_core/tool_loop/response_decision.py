@@ -891,9 +891,25 @@ def _record_thinking_downgrade(params: object, *, from_level: str, to_level: str
         trace.append({"from_level": from_level, "to_level": to_level, "outcome": outcome})
 
 
-# LLM: 降档必须以有效出站参数变化为准：按协议、模型档位声明与预算裁剪算出前后字段，相同就
-#   不算成功降档（调用方记 no_effective_change 并照常续跑，不消耗唯一一次机会）。协议未知
-#   （伪 agent/旧后端）时按旧行为处理；判定只读结构化配置，不发网络。
+# LLM: 降档比较的输出上限必须与真实出站载荷同源：真实后端把工厂算好的上限（按窗口裁剪、
+#   0 取默认值，见 backends/factory.py 的 effective_max_output_tokens）冻结在实例上，
+#   Anthropic 组包读的就是 backend.max_tokens；决策层不能再用配置原始 max_tokens 重算，
+#   否则窗口小于 4×上限时会高估、配置为 0 时会把上限当成 0 而误判"无变化"。伪后端缺该
+#   字段时回落同一个工厂函数，不另写换算；只读、不发网络。
+# 函数用途: 返回降档比较用的有效输出上限（优先真实后端冻结值，缺失时按工厂同款规则）。
+def _effective_output_cap(agent: object) -> int:
+    cap = getattr(getattr(agent, "backend", None), "max_tokens", None)
+    if type(cap) is int and cap > 0:
+        return cap
+    from ...settings.defaults import effective_max_output_tokens
+
+    return int(effective_max_output_tokens(getattr(agent, "config", None)))
+
+
+# LLM: 降档必须以有效出站参数变化为准：按协议、模型档位声明与真实出站输出上限算出前后字段，
+#   相同就不算成功降档（调用方记 no_effective_change 并照常续跑，不消耗唯一一次机会）。上限取
+#   后端冻结值（见 _effective_output_cap），不在决策层重算配置值。协议未知（伪 agent/旧后端）
+#   时按旧行为处理；判定只读结构化配置，不发网络。
 # 函数用途: 判断从当前档位降到目标档位是否会改变真实出站思考控制字段。
 def _effective_wire_change(agent: object, control: str, current: str, target: str) -> bool:
     from ...backends.reasoning_control import (
@@ -908,7 +924,7 @@ def _effective_wire_change(agent: object, control: str, current: str, target: st
     if not protocol:
         return True
     limits = ReasoningPayloadLimits(
-        max_tokens=max(0, int(getattr(config, "max_tokens", 0) or 0)),
+        max_tokens=_effective_output_cap(agent),
         levels=tuple(getattr(backend, "reasoning_levels", ()) or ()),
     )
     before = effective_reasoning_wire_fields(control, current, protocol, limits)
