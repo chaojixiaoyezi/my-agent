@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## Responses 完整空输出（wsempty，2026-10-09，本地实现，待复核）
+
+- 来源：sol 长工具回合空答复。只核对复制后的请求元数据、事件、runtime.db 与用量账本；没有读取会话/人格/凭据正文。
+- 缺口：Responses 完整空工具响应漏报 Chat 已有的 MODEL_EMPTY_RESPONSE；不是已证实的两轮线上根因。修复只分类完整纯空工具响应，保留原生思考/压缩、坏参数/断流、无工具辅助请求及既有重试预算。
+- 红绿：修前 5 failed / 7 passed，初版修后 12 passed；独立评审补测后 14 passed。真实 SimpleAgent.run + 读取工具 + 假 WS 覆盖读取→断开→空→终答，末次真实出站载荷保留唯一工具结果和恢复提示。
+- 非空 commentary 的终局测试证实当前合同按普通正文交付，不会成为空答复。相邻六文件初版回归 104 passed / 20 xfailed，未改 XFAIL 标记；线上末次条目类型及真实 sol 修复效果未验证。
+- 最终相关六文件加完整 guards9：300 passed / 20 xfailed（rc=0）；标准 `ruff check agent_py_agent scripts`、import（0条）、doc-sync、strict size、diff 均 rc=0，size_diff 新增告警 0。
+- 扩大范围 `ruff check .` 未通过：plugins/event-watch/src/server.py 两处 C420；已在真正基线 8ade40d6f 的临时 detached worktree 原样复核（rc=1），未改无关插件，证据存于本轮临时诊断目录。
+- 复现：工作树根固定 ci-venv Python，`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_responses_empty_recovery.py -q -o addopts= --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-wsempty`。
+
 ## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
 
 - **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、

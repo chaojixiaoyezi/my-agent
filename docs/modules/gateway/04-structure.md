@@ -1,5 +1,11 @@
 # Gateway Structure
 
+## Responses 空输出边界（wsempty，2026-10-09）
+
+- `backends.responses._checked_response_fields`：完整纯空工具响应转 MODEL_EMPTY_RESPONSE；原生 reasoning/compaction 与原失败原因不改。
+- `_tool_loop_service._model_turn_or_retry`：沿原一次空响应恢复保留真实历史，持续空上抛；WS 瞬断仍沿原 TransientError 路由。
+- channel 不区分 final/commentary，非空 commentary 仍交付正文；聚合用量不是末次条目证据，线上效果未验证。
+
 ## 会话方法沿用命令（w1 第 2 步，2026-10-08）
 
 - `conversation/control_commands._skills_using_command` 与 `command_catalog` 共同声明 `/skills using` / `remove`，保留名字大小写；TUI 沿原 `_command_text` 往返，IM 同一控制入口。
