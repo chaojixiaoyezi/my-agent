@@ -1,5 +1,10 @@
 # Memory Structure
 
+## WS缓存路由与工具粘性（compactcall2，2026-10-08）
+
+- `tool_loop.model_turn`不再消费已加载Schema；主循环参数与typed线程归档保留同一并集，Gateway开头压缩及live冻结面复用当前工具快照，授权收紧仍由registry裁决。
+- `provider_runtime_scope`不改：主guard复制ContextVar，辅助明确thread时在执行器内重绑。合成WS捕获全部应用层头与体，preflight只覆盖checkpoint选定的canonical前缀；本轮/部署动态尾项不属于其来源，不将尾项不同解释为系统前缀分叉。
+
 ## 压缩尾项独立追加（compactcall，2026-10-08）
 
 - `compact_semantic_summary._compact_cache_safe_messages`按typed布局把原volatile完整附到原历史，`_compact_cache_safe_prompt`只持新指令且保留原稳定布局。remote与bounded文字路径复用messages供预算/发送，不新增事实源或布局开关。

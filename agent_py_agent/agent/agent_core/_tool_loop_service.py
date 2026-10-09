@@ -1444,7 +1444,7 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # LLM: 每次外层采样尝试都在瞬断包装器内重新选择业务或回执参数：真实业务请求先按原顺序构建完整 prompt，
 # 再由请求宿主准备同次上下文并核对子代理首请求与主会话候选；内部超限重试绑定该次采用的参数。只有宿主
 # 在首次 HTTP 前抛出的 typed 拒绝可退回同一次尝试的原参数与原 prompt，之后错误原样上抛。返回具名结果，
-# params 是实际产出 response 的循环参数；不要把辅助回执当作业务工具声明已展示。
+# params 是实际产出 response 的循环参数；回执不扩展执行权，也不撤回已有粘性工具Schema。
 # 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
 # 选模仍在每次尝试内重新进行。主选包与 child 已授权入口只在真实业务首轮 build/capture 前准备，不进入回执/预览或已提交恢复候选。
 # 函数用途: 选择本轮真正要发给模型的上下文与模型依赖，并把原请求、Compact和输入恢复能力交给模型请求周期。
@@ -1469,7 +1469,7 @@ def next_tool_loop_model_response(
         model_params = natural_user_reply_model_params(params)
         if model_params is not params:
             prompt, response = _request_tool_loop_model_response(
-                agent, model_params, tool_rounds, consumes_task_tool_surface=False,
+                agent, model_params, tool_rounds,
             )
             return ModelTurnRequest(prompt, response, params)
         if tool_rounds == 0:
@@ -1499,7 +1499,7 @@ def next_tool_loop_model_response(
 
 
 # LLM: 固定同一份参数完成原请求周期；首发可复用已准备的 prompt，超限重试照原方式重建，prompt/response 成对。
-# 只有真实业务请求消费本轮临时工具声明；回执轮不消费。
+# 主请求与回执均不撤回线程已加载Schema，当前授权仍由原工具快照约束。
 # 函数用途: 把请求组装、实际生成、输入恢复与原 Compact 回收绑定到同一份参数后交给模型请求周期。
 def _request_tool_loop_model_response(
     agent,
@@ -1507,7 +1507,6 @@ def _request_tool_loop_model_response(
     tool_rounds: int,
     *,
     first_prompt: str | None = None,
-    consumes_task_tool_surface: bool = True,
 ) -> tuple[str, ModelResponse]:
     from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX_COUNT
 
@@ -1525,7 +1524,6 @@ def _request_tool_loop_model_response(
         recover_context=lambda prompt: _ptl_reclaim_oldest(agent, model_params, prompt=prompt),
         # 单轮 PTL 自救重试次数是内部容错参数，用具名常量（2026-09-28 参数减量）。
         read_overflow_retry_limit=lambda: DEFAULT_PTL_RETRY_MAX_COUNT,
-        visible_loaded_tools=model_params.loaded_tool_names if consumes_task_tool_surface else None,
     )
 
 

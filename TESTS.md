@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 订阅WS压缩字段与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
+
+- 来源：compactcall-2跟进；真实OAuthResponsesBackend、WS统一编码器与主模型guard线程，凭据入口/socket/动态事实全为合成替身，固定262144窗口与65536输出上限，不读真实正文或密钥。
+- 红测/定位：旧model_turn成功后clear会将真实工具表31→30，线程归档并集恢复已实现但当前轮仍撤回Schema；移除clear及两个死参数，旧消费测试改成连续成功仍保留集合，超限、恢复和异常断言保留。
+- `test_compactcall_websocket.py`保存完整connect参数、response.create原字节及JSON至pytest临时`wire-pair.json`。remote/text×live/preflight四臂：live走公开agent.run、真实tool_search和文件handler替身；preflight由Gateway构造加载面→公开prepare_conversation_context自动阈值→候选/CAS，强制压缩关闭。
+- preflight在线程池中不复制ContextVar，辅助入口用明确thread重绑；主guard沿原copy_context。完整应用层握手、model/type/stream/instructions/tools顺序及全部非input字段相同：cache_key=session-id、auto、reasoning.high、include encrypted、store=false；parallel/text/truncation/max_output_tokens均缺席，不补不受支持字段。
+- 窗口内live保留整个主input；preflight对全数组定位首差异input[32]，与检查点实际覆盖32/34条历史相同，后面是保留尾部/本轮要求/人格部署及新摘要指令的范围差异，不宣称整个input相等。
+- 第五例核对旧加载名不扩展收紧后的工具授权、空线程归档不继承名字。未完成真实Gateway消息队列、生产人格生成和跨线程持久工具生命周期E2E；局部身份/权限测试不能外推完整端到端。
+- 初审两项P1已补真实自动preflight入口及全数组首差异定位；P2补真实tool_search和授权边界。仅证明客户端合成条件；生产16%本地复现不出，仍需真机核对供应商缓存单独路由、失效/TTL及部署组合。
+- 复现：根目录`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_compactcall_websocket.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-compactcall2-auto`，PY取指定ci-venv-312；五例通过。相关18文件402通过，guards9完整12文件194通过；仅导入排版后五例复跑通过。进程内恢复旧clear的remote/text两例均因tools 31→30失败（pytest rc1，变异检查rc0），恢复后五例rc0。
+- 门禁：ruff、导入边界0条、doc-sync基线2f7589721、常数目录957项、diff、clean-package、strict尺寸均rc0；size_diff新增0/消失10、rc0，CODE_SIZE_REPORT已还原。初次ruff导入排版失败已修；误写常数脚本名rc2已改真实build_constants_catalog.py，clean-package未跟踪新测试失败在git add后通过，不把未执行的后续链当成成功。
+
 ## 压缩调用出站前缀（compactcall，2026-10-08，07-c3，本地修复待复核）
 
 - 来源：compactcall派活；合成Store、原生历史及假运输，不读真实正文/凭据、不连Gateway。窗口内复用前缀，不把生产16%归因坐实。
