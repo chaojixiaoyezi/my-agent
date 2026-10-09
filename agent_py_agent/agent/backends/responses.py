@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..conversation.input_media import project_input_media
 from ..prompting_parts.cache_layout import prompt_cache_layout
 from .base import ModelResponse
+from .errors import ProviderResponseError
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
 from .responses_wire import collect_response, input_items, insert_reasoning_update, response_fields
@@ -30,6 +31,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     #   智能程度按 reasoning_control=effort 写 reasoning.effort（档位按模型声明的 reasoning_levels 对应，见 reasoning_control）。
     #   历史先经 wire_contract.repair_native_messages 修整副本，最终 input 由 validate_responses_input 复核，不合规在本地抛错不发送。
     #   降档位置只读typed布局及compaction_trigger：远端压缩追加于完整历史之后，文字摘要才可放在新volatile指令前。
+    #   工具请求的完整空输出沿 Chat 同一 MODEL_EMPTY_RESPONSE 合同交回有界修复，原生思考/压缩及失败响应不改判。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         messages = project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes)
@@ -79,7 +81,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
                    **_subscription_affinity_headers(subscription)}
         obj = self._send_responses_request(payload, headers, request)
-        return ModelResponse(backend=self.name, **response_fields(obj, self.model_name))
+        return ModelResponse(backend=self.name, **_checked_response_fields(obj, self.model_name, tools))
 
     # LLM: 只按结构化事实判断：档案显式 on/off 优先；auto 按已核对的模型名前缀 gpt-6（OpenAI 文档：GPT-6 及以后
     #   支持用 configuration_update 项改档位且前缀不变）。不是封闭枚举：新模型可在档案里显式声明 on。
@@ -119,6 +121,18 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         if request.total_deadline_seconds is None:
             return self.request_json("/responses", payload, headers)
         return self.request_json("/responses", payload, headers, total_deadline_seconds=request.total_deadline_seconds)
+
+
+# LLM: 只检查完整工具请求；原生加密思考和压缩项是合法续跑事实，不能因为无正文而抹掉。
+# 函数用途: 将真正没有可用输出的工具响应标为空响应错误，复用既有一次修复及耗尽失败路径。
+def _checked_response_fields(obj: dict, model: str, tools: list) -> dict:
+    fields = response_fields(obj, model)
+    if not tools or fields.get("runtime_reason") or fields["text"].strip() or fields["tool_use_blocks"]:
+        return fields
+    if any(block.get("type") in {"responses_reasoning", "responses_compaction"}
+           for block in fields["assistant_content_blocks"]):
+        return fields
+    raise ProviderResponseError("Responses 完整响应没有文本或工具调用", error_code="MODEL_EMPTY_RESPONSE")
 
 
 # LLM: 参考官方 Codex：同一会话的请求带稳定缓存键（宿主绑定的 owner+thread 摘要，不含凭据），让服务商把同一会话

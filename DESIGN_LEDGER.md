@@ -8,6 +8,12 @@
 - 边界：中途原生的健康目标仍为优选，不为达标删除最新事实/工具对；补带仍沿已定 trigger 余量合同。不能保证不可压缩底座超大时回到健康线，更不能将此合成根因认作原 mc4 已证事实。
 - 复现与红绿证据见 TESTS 首节，模块规则见 CONVERSATION_CONTEXT_DESIGN。无配置项/依赖/权限变更。
 
+## Responses 空工具输出（wsempty，2026-10-09，本地实现，待复核）
+
+- `backends.responses._checked_response_fields` 在原解析后对齐 Chat 的 MODEL_EMPTY_RESPONSE，不加配置/旁路/预算；原失败原因优先，原生 reasoning/compaction 保留。
+- 沿原工具循环保留真实历史修复一次，持续空则显式供应商错误；未改全回合 empty-text nudge 预算。message channel 不区分 final/commentary，非空 commentary 仍交付正文。
+- 两轮现场仅有聚合用量，缺末次 output 类型/状态/长度及 empty-text 计数，不能判定上游诱因。真实 sol/生产效果未验证，不部署。
+
 - **E11d 第四轮：配额锁竞争误报恢复失败（mc3-e11d-quota，2026-10-08；MC4-2501，本地实施，待 mc4 复审/3a 集成）**：`owner_quota` 新增 `OwnerQuotaLockContention` 子类，把锁竞争（`BlockingIOError`）与策略/存储故障分开；`curator_commit._enter_recovery_locks` 捕获子类转 busy，不再落进 `CURATOR_COMMIT_RECOVERY_FAILED`。mc4 review25 补测原样 11/12（2501 转绿；2502 基线问题不改）；review18+22 42 项、mc2 17 项、回归 774 项全绿；变异 2/2 rc=1；其它非阻塞配额调用点（插件环境准备 2 处）无同类误判。证据见 TESTS 顶部。
 
 ## Curator 未完成事务恢复与新租约领取的边界（mc2-e11d-race，2026-10-08；本地实现、待3a复核）
