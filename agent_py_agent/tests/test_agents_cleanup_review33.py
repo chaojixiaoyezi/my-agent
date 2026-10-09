@@ -192,3 +192,45 @@ def test_migration_release_write_failure_cannot_report_success_and_wedge_forever
     assert result["status"] == "completed" and result["ok"] is False
     assert result["lease_cleanup"]["release_error_class"] == "OSError"
     assert result["lease_cleanup"]["retired"] is True
+
+
+@pytest.mark.parametrize("primary_kind", ["completed", "ordinary", "interrupt"])
+@pytest.mark.parametrize("retire_fails", [False, True])
+def test_migration_release_and_retirement_failure_combination(tmp_path, monkeypatch, primary_kind, retire_fails):
+    env = _setup(tmp_path)
+    primary = KeyboardInterrupt("primary interruption") if primary_kind == "interrupt" else RuntimeError("primary execution")
+    write = env.store._write_unlocked
+    def refuse_release(_commit):
+        raise OSError("release failure")
+    def refuse_retire(state):
+        if retire_fails and state.active_lease.get("phase") == "interrupted":
+            raise OSError("retirement failure")
+        return write(state)
+    def refuse_execution(_context):
+        raise primary
+    monkeypatch.setattr(env.store, "commit_success", refuse_release)
+    monkeypatch.setattr(env.store, "_write_unlocked", refuse_retire)
+    if primary_kind != "completed":
+        monkeypatch.setattr(migration, "_run_cleanup", refuse_execution)
+        with pytest.raises(type(primary)) as caught:
+            _apply(env)
+        assert caught.value is primary
+        detail = caught.value.lease_cleanup
+        assert caught.value.__notes__
+    else:
+        result = _apply(env)
+        assert result["status"] == "completed" and result["ok"] is False
+        detail = result["lease_cleanup"]
+        repeated = _apply(env)
+        assert repeated["already_completed"] and repeated["ok"] is False
+        assert repeated["lease_cleanup"] == detail
+    lease = env.store.load().active_lease
+    assert detail["lease_id"] == lease["lease_id"]
+    assert detail["release_error_class"] == "OSError"
+    assert detail["retired"] is not retire_fails
+    future = datetime.fromisoformat(lease["expires_at"]) + timedelta(hours=1)
+    acquired = env.store.acquire(reason="migration", config_revision="test", lease_seconds=300, now=future)
+    assert (acquired is None) is retire_fails
+    if retire_fails:
+        assert detail["retire_error_class"] == "OSError"
+        assert detail["recovery"] == "manual_recovery_required"

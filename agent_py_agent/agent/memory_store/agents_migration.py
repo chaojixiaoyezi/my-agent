@@ -35,7 +35,7 @@ from ..common.json_io import (
 )
 from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions_locked
 from ..user_space.owner_quota import OwnerQuotaAdmission
-from .curator_lease import curator_lease_heartbeat
+from .curator_lease import curator_lease_heartbeat, retire_curator_lease
 from .curator_state import CuratorStateCorruptError, CuratorSuccessCommit, MemoryCuratorStateStore
 
 # 自动晋升写入 Persona 时使用的来源前缀（见 promotion._commit_persona）。
@@ -385,11 +385,39 @@ def apply_agents_cleanup(
         return _completed_report(migration_id, directory, record)
     curator_state_store = curator_state_store or MemoryCuratorStateStore(persona.owner_home / "memory/curator/state.json")
     lease = _acquire_migration_lease(curator_state_store)
+    return _execute_migration(_CleanupContext(home_paths, persona, candidate_service, request), curator_state_store, lease)
+
+
+# LLM: 心跳必须先退出再释放精确租约；收尾失败不撤销已提交迁移，也不能覆盖主体异常或报告静默成功。
+# 函数用途: 执行迁移主体并携带租约收尾诊断，异常仍抛原对象。
+def _execute_migration(context: _CleanupContext, store: object, lease: dict[str, object]) -> dict[str, object]:
     try:
-        with curator_lease_heartbeat(curator_state_store, str(lease["lease_id"]), _MIGRATION_LEASE_SECONDS):
-            return _run_cleanup(_CleanupContext(home_paths, persona, candidate_service, request))
-    finally:
-        _release_migration_lease(curator_state_store, lease)
+        with curator_lease_heartbeat(store, str(lease["lease_id"]), _MIGRATION_LEASE_SECONDS):
+            report = _run_cleanup(context)
+    except BaseException as exc:
+        detail = _release_migration_lease(store, lease)
+        if detail:
+            exc.lease_cleanup = detail
+            exc.add_note("agents migration lease cleanup: " + json.dumps(detail, sort_keys=True))
+        raise
+    detail = _release_migration_lease(store, lease)
+    if detail:
+        _persist_cleanup_diagnostic(context, detail)
+        return {**report, "ok": False, "lease_cleanup": detail, "notes": ["AGENTS_CLEANUP_LEASE_RELEASE_FAILED"]}
+    return report
+
+
+# LLM: 完成事实不回滚；同编号重放必须保留未成功释放的诊断，诊断自身落盘失败仍在本次回执明确给出。
+# 函数用途: 将租约收尾故障写入原迁移记录，不创建另一份执行权或恢复账。
+def _persist_cleanup_diagnostic(context: _CleanupContext, detail: dict[str, object]) -> None:
+    directory = _migration_dir(context.home_paths, context.request.migration_id)
+    try:
+        with locked_json_path(directory / _RECORD_NAME):
+            record = _read_record(directory)
+            if record is not None:
+                _write_record(directory, {**record, "lease_cleanup": detail})
+    except Exception as exc:
+        detail["diagnostic_write_error_class"] = type(exc).__name__
 
 
 # LLM: 租约已领取；quota admission 先于目标锁，固定 policy→人格锁覆盖重判定到 completed。
@@ -474,13 +502,11 @@ def _acquire_migration_lease(store: object | None) -> dict[str, object] | None:
     return dict(lease)
 
 
-# LLM: 释放走 commit_success 同一 CAS：只提交「0 处理」并清空租约；per_thread_cursors 必须原样
-#   回传——build_success_state 用传入值整体替换，传空会误清 curator 游标。释放是 best-effort：
-#   迁移结果已落盘，释放失败不回滚迁移，留给租约过期兜底。
+# LLM: 释放沿精确 lease_id CAS，保留游标；失败尝试同 ID 退役，失败分类必须交回，不能承诺活 holder 自动过期。
 # 函数用途: 提交并释放迁移租约。
-def _release_migration_lease(store: object | None, lease: dict[str, object] | None) -> None:
+def _release_migration_lease(store: object | None, lease: dict[str, object] | None) -> dict[str, object]:
     if store is None or not lease:
-        return
+        return {}
     try:
         state = store.load()
         store.commit_success(
@@ -497,8 +523,26 @@ def _release_migration_lease(store: object | None, lease: dict[str, object] | No
                 committed_at=_now_iso(),
             )
         )
-    except Exception:
-        return
+    except Exception as exc:
+        return _retire_failed_release(store, lease, exc)
+    return {}
+
+
+# LLM: 退役只有同一租约能改 phase；退役也失败时保留 fail-closed 的 executing，不抢新执行权。
+# 函数用途: 返回释放/退役的稳定错误分类与恢复要求，不输出错误正文或假装已释放。
+def _retire_failed_release(store: object, lease: dict[str, object], error: Exception) -> dict[str, object]:
+    lease_id = str(lease["lease_id"])
+    detail: dict[str, object] = {"lease_id": lease_id, "released": False, "retired": False,
+        "release_error_class": type(error).__name__, "retire_error_class": "", "recovery": "manual_recovery_required"}
+    try:
+        retire_curator_lease(store, lease_id)
+        current = store.load().active_lease
+        detail["retired"] = current.get("lease_id") == lease_id and current.get("phase") == "interrupted"
+        detail["lease_changed"] = current.get("lease_id") != lease_id
+        detail["recovery"] = "expired_lease" if detail["retired"] else "lease_changed"
+    except Exception as exc:
+        detail["retire_error_class"] = type(exc).__name__
+    return detail
 
 
 # LLM: apply 绑定 dry-run 计划摘要：缺失拒绝（必须先预览），与当前计划不一致说明文档或计划
@@ -634,7 +678,7 @@ def _is_completed(record: dict | None) -> bool:
 # 函数用途: 为已完成迁移生成幂等返回报告。
 def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[str, object]:
     return {
-        "ok": True,
+        "ok": not bool(record.get("lease_cleanup")),
         "already_completed": True,
         "migration_id": migration_id,
         "status": "completed",
@@ -644,6 +688,7 @@ def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[
         "conversations_added": 0,
         "expired_thread_snapshots": 0,
         "notes": ["already_completed"],
+        **({"lease_cleanup": record["lease_cleanup"]} if record.get("lease_cleanup") else {}),
     }
 
 

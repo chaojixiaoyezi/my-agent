@@ -5,7 +5,9 @@
 - 来源：review33 在 `ec9263f2b` 的原样探针实际 3 失败、2 通过：长期事实/USER 的 quota-policy 锁环，以及释放写盘失败后的 executing 租约无限保护。
 - 第一段：统一 quota→policy→正式目标，显式传递 admission，长期事实 add/replace/remove 和候选脱敏不重入；冲突候选落状态在释放外锁后完成。正式锁序见设计 §3.6。
 - `test_agents_cleanup_review33.py` 保留真实 flock、两个线程都结束、无锁错误、迁移 completed 与晋升 promoted 的原断言；正确顺序下改等 cleaner 的 quota 请求而不是取得。USER/SOUL 真实写版本尾后按原 CAS 重新 dry-run，不能取消计划校验。
-- 第一段六个配额合同加原晋升文件共 55 项通过；空提交故障注入仅适配 admission 关键字，原冲突断言不变。释放故障合同仍红，第二段待修；最终回归、变异、门禁在收尾更新。
+- 第一段六个配额合同加原晋升文件共 55 项通过（`tmp/mc2-agentsr5/lock-v3.xml`）；提交 `d6682c1a0`。空提交故障注入仅适配 admission 关键字，原冲突断言不变。
+- 第二段新增七个释放/退役组合合同，修前实际七红（`tmp/mc2-agentsr5/release-red.xml`）。WIP 已加入精确租约退役、结构化诊断、保留主体异常和完成记录诊断重放；**尚未验证通过**。三文件联合验证在输出六个通过点后超时，退出 -15，没有完整绿测结果；宿主回执确认该次命令进程已终止。
+- 3a 的 pause12 要求先提交并停回合：不再开测试。恢复后先定位收尾入口超时，优先核对 `_persist_cleanup_diagnostic` 持 record 锁后 `_write_record` 的原子写入是否再次领同锁（目前只是原因假设，未完成复现）；然后重跑七个合同、已有 54 条与相关回归、两处独立变异及原严格门禁。第二段恢复承诺文档尚未更新，不可部署本 WIP。
 - 本轮只在隔离 HOME 验证；未启动真实 Gateway、未改真实 owner，不推送或部署。
 
 ## AGENTS 第 0 期第 4 轮：真实外层锁与晋升尾段租约（mc2-agents0r4，2026-10-09）
