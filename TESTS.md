@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 只思考截断的续跑降档（mc3-thinktrunc，2026-10-09，分支 `worker/mc3-thinktrunc`，基于 main 8ade40d6f）
+
+来源：`tasks/multicore/mc3-thinking-truncation.md`；真机 gwreq-1791538381（45 分钟、末两次调用各约 160 秒
+顶满 65536、`turn_end_reason=max-tokens` 整轮失败）暴露的通用问题：只思考截断时续跑不降档、提示又是"接着写"。
+
+- **识别**：只按结构化事实——长度截断三件套（`truncated` + `unfinished` + `MODEL_RESPONSE_TRUNCATED`/`model_provider`）
+  加零工具调用、零可见正文；不解析思考内容。正文截断保持原提示、不降档。
+- **降档**：`response_decision.py` 给紧邻下一次调用挂一次性覆盖（max→high→medium，至多一次）；
+  `reasoning_effort.py` 提供覆盖读/写/清且 `request_reasoning_options` 读取优先；`reasoning_control.py`
+  提供相邻降档表；`tool_model_generation.py` 每次物理调用用 finally 清覆盖（成功/失败/异常都清），
+  保证只影响一次、下一次恢复用户配置强度。供应商不支持记 `unsupported`、已最低档记 `already_lowest`，都照常续跑。
+- **提示**：只思考截断换成"先用一个工具动作或简短答复推进"（`_THINKING_ONLY_TRUNCATION_RESUME`）；正文截断沿用原提示。
+- **开关**：`model_truncation_thinking_downgrade`（默认开，`AgentConfig` + `agent_config.yaml` 中文注释 + 前端目录同步）。
+- **记录**：counters 新增 `truncation_thinking_downgrades`；运行诊断（`loop_support.py`）投影同名键；
+  `live_archive_state["truncation_thinking_downgrade_trace"]` 记原档位/新档位/结果。
+- **测试**：新增 `test_thinking_truncation_downgrade.py` 12 条（裁决层 7、覆盖 helper 2、fake LLM 端到端 3）；
+  相关 9 文件 350 条全绿。变异 4 项（不降档 / 降档后不恢复 / 正文截断也降档 / 开关不生效）一次一处全部 rc=1。
+- **门禁**：`strict_gates.sh` GATES_PASS（10 项检查全 rc=0、0 dirty files）。
+- **真实验证**：官方 DeepSeek 3 次成功调用（probe 当前 max 档 + 子代理 high / medium 档各一次），降档目标档位被供应商接受。
+- 提交：136f80a06（实现）、7a1aa8532（测试）、8b7fa9dad（门禁修复）。
+
 ## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
 
 - **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、
