@@ -1,8 +1,9 @@
 """LLM: 「只思考截断降档」的接线与边界补测（mc4 review35 收编）。
 
-覆盖四个必须成立的行为边界：
+覆盖以下必须成立的行为边界：
 - 覆盖值绑定逻辑调用：同一次续跑的超时重试保持降档；自然回执/压缩/辅助等其它用途不消费它；
-- 记录降档必须以有效出站参数变化为准（Responses 无更高档声明 / Chat budget / Anthropic 预算裁剪）；
+- 记录降档必须以有效出站参数变化为准（Responses 无更高档声明 / Chat budget / Anthropic 预算裁剪），
+  且比较用的输出上限与真实出站同源（窗口裁剪、0 表示默认值两种边界）；
 - 半截工具输出不算"只思考"（truncated_tool_names 是供应商给出的结构化事实）；
 - 开关关闭时对外诊断保持旧结构，旧字段行为与基线一致。
 
@@ -79,6 +80,8 @@ def _real_loop(monkeypatch, protocol: str = "openai_compatible", *, options: dic
     control = str(options.get("control", "effort"))
     downgrade = bool(options.get("downgrade", True))
     max_tokens = int(options.get("max_tokens", 65536))
+    # 窗口参与工厂的输出上限换算（effective_max_output_tokens）；不传时保持 AgentConfig 默认。
+    window = options.get("window")
     config = AgentConfig(
         model_backend=protocol,
         model_name="wiring-model",
@@ -90,6 +93,7 @@ def _real_loop(monkeypatch, protocol: str = "openai_compatible", *, options: dic
         model_reasoning_effort=level,
         model_truncation_thinking_downgrade=downgrade,
         max_tokens=max_tokens,
+        model_context_window_tokens=window,
     )
     backend = get_backend(protocol, config)
     rows: list[dict] = []
@@ -108,6 +112,7 @@ def _real_loop(monkeypatch, protocol: str = "openai_compatible", *, options: dic
     agent.config.model_reasoning_effort = level
     agent.config.max_tokens = max_tokens
     agent.config.model_backend = protocol
+    agent.config.model_context_window_tokens = window
     params = _loop_params(run_id="wiring-real")
     _patch_loop(monkeypatch, agent)
     return agent, params, rows, prompts
@@ -271,6 +276,32 @@ def test_recorded_downgrade_requires_effective_wire_change(monkeypatch, protocol
     after = {k: rows[1][k] for k in control_keys if k in rows[1]}
     assert before == after, {"before": before, "after": after, "trace": trace}
     assert next_call_reasoning_level(params) == ""
+
+
+# LLM: 3502 收口（mc4 review35b）：比较用的上限必须与真实出站同源——工厂按窗口裁剪、0 取默认值，
+#   把结果冻结在 backend.max_tokens 上，Anthropic 组包读的就是它；决策层若用配置原始 max_tokens，
+#   窗口小于 4×上限时会把不该降的降档当真（白耗唯一机会），配置为 0 时又会把上限当成 0、
+#   误判"无变化"挡住本该发生的降档。本用例用真实工厂配置与真实组包复现这两种边界。
+# 函数用途: 验证降档比较使用后端实际输出上限（窗口裁剪 / 0 默认值两种边界）。
+@pytest.mark.parametrize("configured,window", [(65536, 32768), (0, 128000)])
+def test_effective_budget_uses_actual_factory_output_cap(monkeypatch, configured, window) -> None:
+    agent, params, rows, _ = _real_loop(
+        monkeypatch, "anthropic_compatible",
+        options={"control": "budget", "max_tokens": configured, "window": window},
+    )
+    loop.execute_tool_loop(agent, params)
+
+    budgets = [p.get("thinking", {}).get("budget_tokens") for p in rows]
+    trace = params.live_archive_state["truncation_thinking_downgrade_trace"]
+    if configured:
+        # 窗口裁剪后实际上限 8192：max 与 high 的预算都被夹成 7168，出站参数没有变化，
+        # 必须如实记 no_effective_change（不消耗唯一机会，下一次截断还能再试）。
+        assert len(set(budgets)) == 1, budgets
+        assert trace[0]["outcome"] == "no_effective_change", trace
+    else:
+        # 配置 0 = 用默认上限：实际出站上限是工厂按窗口算出的 32000，max→high 必须真的降预算。
+        assert trace[0]["outcome"] == "downgraded", trace
+        assert budgets[1] < budgets[0], budgets
 
 
 # ---------------------------------------------------------------- 5. 识别边界：半截工具与长度三件套
