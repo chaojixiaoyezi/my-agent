@@ -1,4 +1,4 @@
-# LLM: 本模块把已验证运行账本、scope、rate/guardrail 与临时审批 binding 合并进每次 ToolExecutor 请求；不得从模型正文恢复控制字段。
+# LLM: 本模块把已验证运行账本、scope、rate/guardrail 与临时审批 binding 合并进每次 ToolExecutor 请求；不得从模型正文恢复控制字段；保留已授权自身工作根，不扩大任务树权限。
 # 模块用途: 维护工具运行门的持久证据，并生成当前调用使用的权威 write boundary。
 
 from __future__ import annotations
@@ -469,7 +469,7 @@ def _granted_external_roots(
     return [root for root in granted if not _is_relative_to(Path(root), owner_home)]
 
 
-# LLM: 普通 main/child 的文件墙是同一 owner home；Audit 精确授权和 control_plane 不扩大。
+# LLM: 普通 main/child 的文件墙是同一 owner home；普通 child 仅保留宿主绑定且已授权的自身窄写根，避免祖先 runs 保护吞掉它；Audit 精确授权和 control_plane 不扩大。
 # 函数用途: 放开自己家里的普通文件操作，继续保护其他用户与宿主权威文件；不看 tasks 命名或模型文字。
 def _attach_owner_task_write_scope(
     boundary: dict[str, object],
@@ -499,8 +499,9 @@ def _attach_owner_task_write_scope(
         # 但宿主创建时下发的"墙外显式工作目录"是结构化授权，不能被 owner home 覆盖：
         # 覆盖会让子代理在用户声明的项目目录里拿 WRITE_FORBIDDEN（2026-09-11 真机复测：
         # 创建时 allowed_write_roots 含目标目录，运行时只剩 owner home，写门直接拒绝）。
+        own_work_roots = _retained_child_work_roots(boundary, params, owner_root)
         boundary["allowed_write_roots"] = list(
-            dict.fromkeys([str(owner_root), *_granted_external_roots(boundary, owner_root)])
+            dict.fromkeys([str(owner_root), *own_work_roots, *_granted_external_roots(boundary, owner_root)])
         )
         boundary["execution_workspace_roots"] = list(boundary["allowed_write_roots"])
         return
@@ -554,6 +555,24 @@ def _attach_owner_task_write_scope(
             if text not in scoped:
                 scoped.append(text)
     boundary["allowed_write_roots"] = scoped
+
+
+# LLM: 仅恢复宿主 runtime_task_attributes 绑定的子代理自身工作目录，而且它必须与 boundary.task_dir 一致并已在 allowed_write_roots 中。
+#   不恢复整棵任务树、产品根或兄弟工作根；缺身份、缺授权、路径不一致/墙外一律不补。无文件或审批副作用；联测 test_child_own_workspace_write。
+# 函数用途: 避免 owner 写范围合并丢失子代理已有的自身窄授权，让原最具体路径规则正常生效。
+def _retained_child_work_roots(
+    boundary: dict[str, object], params: object, owner_root: Path,
+) -> list[str]:
+    if _text(getattr(params, "context_scope", "")).lower() != "task_local":
+        return []
+    attrs = getattr(params, "task_attributes", None)
+    own = _resolved_path(attrs.get("agent_run_workspace_dir") if isinstance(attrs, dict) else None)
+    if own is None or own == owner_root or not _is_relative_to(own, owner_root):
+        return []
+    if own != _resolved_path(boundary.get("task_dir")):
+        return []
+    granted = [_resolved_path(raw) for raw in _string_list(boundary.get("allowed_write_roots"))]
+    return [str(own)] if own in granted else []
 
 
 # LLM: B 类（H3 后的口径，3a 2026-10-02 定）：这里只放 owner 隔离时默认禁写、但可被更具体的本任务工作目录穿透的任务树根

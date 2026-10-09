@@ -1,5 +1,7 @@
 # 设计台账
 
+- **w3 子代理自身运行工作目录写边界（2026-10-09，本地实现、待 3a 复核）**：`tool_runtime_ledger._attach_owner_task_write_scope` 合并 owner 范围时，仅保留 `task_local` 中宿主 `agent_run_workspace_dir` 与 `boundary.task_dir` 一致、位于 owner 内且已在 `allowed_write_roots` 中的自身窄根；沿原“最具体路径优先、同层 deny 胜出”放行自己的草稿。其它 tasks/runs、兄弟目录、已有显式禁止/锁、宿主状态和安装保护不放宽，不改审批、不加开关；实现与边界见子代理模块文档，验证及未验范围见 TESTS 首节。
+
 - **E11d 第四轮：配额锁竞争误报恢复失败（mc3-e11d-quota，2026-10-08；MC4-2501，本地实施，待 mc4 复审/3a 集成）**：`owner_quota` 新增 `OwnerQuotaLockContention` 子类，把锁竞争（`BlockingIOError`）与策略/存储故障分开；`curator_commit._enter_recovery_locks` 捕获子类转 busy，不再落进 `CURATOR_COMMIT_RECOVERY_FAILED`。mc4 review25 补测原样 11/12（2501 转绿；2502 基线问题不改）；review18+22 42 项、mc2 17 项、回归 774 项全绿；变异 2/2 rc=1；其它非阻塞配额调用点（插件环境准备 2 处）无同类误判。证据见 TESTS 顶部。
 
 ## Curator 未完成事务恢复与新租约领取的边界（mc2-e11d-race，2026-10-08；本地实现、待3a复核）

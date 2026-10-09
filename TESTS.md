@@ -1,5 +1,62 @@
 # 测试与发布验收
 
+## w3 自身运行工作目录写边界（2026-10-09，基线 d7e68e492；本地实现、待 3a 复核）
+
+- 来源：10-09 w3 任务书。根因不是 PathAccessPolicy 把 runs/ 当绝对宿主状态，而是 owner scope 合并删除原自身窄 allowed 根，随后 B 类祖先禁止胜出。
+- 实现：只保留 `task_local` 中两处宿主自身路径一致、位于 owner 内、已明确授予的目录；不保留整个任务根，不改 forbidden、审批或配置。
+- 新用例：`agent_py_agent/tests/test_child_own_workspace_write.py`；真实上下文构造→runtime 合并→ToolExecutor→WriteFileTool→文件读回；边界断言包括未执行标志、拒绝码、原字节未变。
+- 先红：原实现复现用例断言失败，退出码 1；其它原边界用例通过。首次诊断使用了不存在的结果字段，改正后重跑取得有效断言红，不把准备错误算复现证据。
+- 后绿：18 项聚焦用例通过，退出码 0。安装保护测试最初错误使用旧 boundary 投影，改为宿主 `running_install_roots` 事实注入后通过；未放宽任何业务断言或产品保护。
+- pytest 共用命令：工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <下表范围> -o addopts='' -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-w3`。
+
+| 变异（一次一处，运行后立即还原） | pytest 范围（上述新文件内） | 结果 | 是否抓到 |
+| --- | --- | --- | --- |
+| `own_work_roots` 改为空，取消窄根保留 | `::test_child_own_workspace_write_reaches_real_handler` | 1 failed，退出码 1 | 是 |
+| 删除 owner_runs_dir 祖先禁止，开放整个 runs/ | `::test_child_own_workspace_does_not_open_other_guarded_locations` | 4 failed、2 passed，退出码 1 | 是 |
+
+### 回归、失败复核与门禁
+
+- 引用回归选取：扫描测试的 AST import/import-from，模块后缀为 `tool_runtime_ledger`、`path_access_policy`、`write_boundary`、`runner_context_service`、`hierarchy.write_policy`，并补上全文引用 `tool_runtime_ledger` 的测试。打印并显式传入 47 个文件，未跑全仓；按上方 pytest 共用命令运行。
+- 首轮完整结果：`17 failed, 1271 passed, 6 skipped, 1 error`，退出码 1，耗时 9107.58s。没有把失败删掉或改断言，也不把命令超时推断为权限拒绝。
+- 失败分布：`test_host_files_access.py` 7 项、`test_host_managed_store_access.py` 2 项、`test_pack_verification_protection.py` 7 项、`test_tool_call_guardrail_runtime.py` 1 项。输出主要是 `TOOL_TIMEOUT (30s)`；另外有 CLI PermissionError 被改为 SystemExit，以及重复执行标志不符合预期。失败根因不能仅凭这些输出定成沙箱限制。
+- 首轮另有 `test_host_files_access.py::test_every_host_state_item_is_read_only_for_commands[tool_policy.json]` 的 teardown error：被跟踪 `CODE_SIZE_REPORT.md` 在回归执行期间变化。已还原生成物，不再交叉执行尺寸门禁；原 node 与新文件、guards9 联跑复核通过，未修改该断言。
+- 最终联跑命令：上述 pytest 共用命令的范围替换为 `agent_py_agent/tests/test_child_own_workspace_write.py 'agent_py_agent/tests/test_host_files_access.py::test_every_host_state_item_is_read_only_for_commands[tool_policy.json]' $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)`；结果 `213 passed in 180.83s`，退出码 0（包含 18 项新用例、错误 node 复核及 guards9 全清单）。
+- 真实基线复核：使用 `git worktree add --detach /private/tmp/claude-501/w3-baseline-d7e68e492 d7e68e492`；已核对完整 SHA 为 `d7e68e49206ac522ecb0466552586d5c88a406dc`。在该根目录、`PYTHONPATH` 指向该目录，用上方同一 pytest 命令和独立 `--basetemp=/private/tmp/claude-501/m-w3-baseline` 显式运行首轮 17 个失败 node；结果 `17 failed in 3153.22s`，退出码 1。失败节点和断言与本分支一致，说明这些是该基线在当前环境也存在的失败，并非此次窄根保留新增；具体超时原因仍未确定，不以此替代沙箱外复核。临时基线工作树按规则用 `git worktree remove` 清理。
+- 基线重跑时，上方 pytest 共用命令的 `<范围>` 显式替换为以下 17 个 node（独立 basetemp 如上），没有重跑无变化的整个引用集合：
+
+```text
+agent_py_agent/tests/test_host_files_access.py::test_real_full_access_shell_cannot_write_host_files
+agent_py_agent/tests/test_host_files_access.py::test_real_isolated_shell_with_home_root_write_cannot_write_own_host_files
+agent_py_agent/tests/test_host_files_access.py::test_any_new_subdir_under_owner_data_is_read_only_but_host_writes_go_on[full-access]
+agent_py_agent/tests/test_host_files_access.py::test_any_new_subdir_under_owner_data_is_read_only_but_host_writes_go_on[isolated]
+agent_py_agent/tests/test_host_files_access.py::test_real_full_access_shell_outside_the_task_tree_cannot_forge_the_records
+agent_py_agent/tests/test_host_files_access.py::test_real_seatbelt_protects_every_task_record_without_task_params
+agent_py_agent/tests/test_host_files_access.py::test_cli_guard_only_rewrites_permission_failures_inside_the_sandbox
+agent_py_agent/tests/test_host_managed_store_access.py::test_real_shell_cannot_read_the_store[True]
+agent_py_agent/tests/test_host_managed_store_access.py::test_real_shell_cannot_read_the_store[False]
+agent_py_agent/tests/test_pack_verification_protection.py::test_real_shell_cannot_forge_the_ledger[False-main-in-task-work]
+agent_py_agent/tests/test_pack_verification_protection.py::test_real_shell_cannot_forge_the_ledger[False-main-with-task-write-roots]
+agent_py_agent/tests/test_pack_verification_protection.py::test_real_shell_cannot_forge_the_ledger[False-subagent]
+agent_py_agent/tests/test_pack_verification_protection.py::test_real_shell_cannot_forge_the_ledger[True-main-in-task-work]
+agent_py_agent/tests/test_pack_verification_protection.py::test_real_shell_cannot_forge_the_ledger[True-main-with-task-write-roots]
+agent_py_agent/tests/test_pack_verification_protection.py::test_real_shell_cannot_forge_the_ledger[True-subagent]
+agent_py_agent/tests/test_pack_verification_protection.py::test_full_access_shell_outside_the_task_tree_cannot_forge_the_ledger
+agent_py_agent/tests/test_tool_call_guardrail_runtime.py::test_real_shell_executor_stops_repeats_and_accepts_progress
+```
+
+| 检查（工作树根、上述 PY） | 结果 / 退出码 |
+| --- | --- |
+| `$PY scripts/check_import_boundaries.py` | `findings=0` / 0 |
+| `$PY -m ruff check agent_py_agent scripts` | `All checks passed!` / 0 |
+| `$PY scripts/check_doc_sync.py` | `DOC_SYNC_PASS` / 0 |
+| `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` | `blocked=False` / 0 |
+| `git diff --no-ext-diff --check d7e68e492` | 无空白错误 / 0 |
+| `$PY scripts/check_clean_package.py .` | 未发现发布阻塞项 / 0 |
+| `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh $PWD ~/.my-agent/releases/claude-tools/3a-scripts/size-baseline-d7e68e492.json` | 新增告警 0、消失告警 0 / 0 |
+
+- code-size 两次生成的 `CODE_SIZE_REPORT.md` 均还原到 HEAD，不纳入功能提交。clean-package 首次因新测试尚未跟踪失败；将新测试纳入 git 后重跑为 0。未增加参数或常量。
+- 未验证：真实 Gateway/TUI/研究子代理执行片、生产部署、Linux/Windows OS 沙箱及全仓回归；按任务书本轮不启动 Gateway、不 push、不部署、不跑全仓 pytest。
+
 ## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
 
 - **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、
