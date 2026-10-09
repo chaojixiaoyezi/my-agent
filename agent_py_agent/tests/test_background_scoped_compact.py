@@ -306,7 +306,9 @@ def test_scoped_active_compact_hides_only_with_its_applied_summary(background_ca
         ) == records
     else:
         assert after.seed is not None and after.seed.compact_summary == _live_summary()
-        assert applied_summaries == []
+        # 布局 B：有历史种子时应用摘要也只由当前 IR 承载、出站前置；prior 历史不再重复带摘要。
+        assert len(applied_summaries) == 1
+        assert not any("TASK_A_TOOL_EVIDENCE" in str(message) for message in loop.provider_history_messages)
 
 
 def test_background_overflow_refresh_retains_original_scope_bundle(background_case, monkeypatch):
