@@ -313,6 +313,19 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 - **门禁**（BASE=origin/main）：ruff、doc-sync、strict code-size、diff-check、clean-package、import boundaries 全过；
   常量目录 951 项、前端参数目录 269 字段重新生成且一致。
 - **未验证**：testbox Linux 3.10／3.11／3.12、PR 线上 CI、生产部署与第 4 步验收（进行中）。
+- **第 4 步生产验收（6d，2026-10-08，step17y／step17ya，真 MiniMax-M2.7）**：
+  - 方法：测试者用私有 tmux 开生产 TUI，每句只发一次，结果只读结构化事实。工具在
+    `~/.my-agent/decision-evidence/skill-pack-selection-1007/harness/`：
+    - `run_pool.py`：最多 8 个会话并发跑；
+    - `collect_case.py`：收交付，附件被原地改过也收；
+    - `carry_facts.py`：读线程 `conversation_methods`、`compact_generation`，以及 `skill_search` 的结构化参数；
+    - `mkreview.py` 加 Claude 子代理：做盲评；
+    - `verdict.py`：判达标。
+  - 结果：分数口径达标，短剧 41:31，小说 18:18。评审交齐标记她 9/12、原版 10/12；按严格交齐，短剧 1、小说 1 没过。
+  - 机制：压缩后带回在 CD、CNN 生效，已带回代次 0→1。不点名时 1/12 遍用包。
+  - 不乱用：包在用时问 3 个不相关问题，无工具调用。
+  - 测试工具的坑：tmux 目标必须精确匹配（`=名字`），否则会话已关时会按前缀关掉别的会话。
+  - 详见设计第 6 节和证据目录 README.md。
 
 ## 压缩请求装进窗口与降档（compactfit，2026-10-08，07，分支 `claude/07-compact-cache`）
 
