@@ -83,9 +83,10 @@ class ToolLoopRepairCounters:
     provider_timeout_resume_repairs: int = 0
     # 09-30：连续收到“工具参数不是合法 JSON 对象”的响应次数；成功执行一轮工具后清零（与累计型的协议修复分开）。
     invalid_arguments_repairs: int = 0
-    # 空正文预算的进展水位：上次空正文 nudge 时已成功执行的工具数（executed_tools 长度）。
-    # 空正文裁决前对照它判断“自上次空正文以来是否有真实进展”，有进展就把 empty_text_repairs
-    # 归 0；只记录成功执行（result.ok）的调用，发起了但没有结果的不算进展。
+    # 空正文预算的进展水位：上次空正文 nudge 时「本次实际执行成功、非重放」的工具数
+    # （fresh_successful_tools 长度）。空正文裁决前对照它判断“自上次空正文以来是否有真实进展”，
+    # 有进展就把 empty_text_repairs 归 0；旧成功回执重放（ok=True 但 handler_executed=False、
+    # operation.replayed=True）不算新进展（review36 R36-1）。
     empty_text_progress_marker: int = 0
 
 
@@ -192,17 +193,18 @@ def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
 
 
 # LLM: 空正文预算按真实进展恢复（长回合不再"前期偶发空几次、后期一空就死"）：
-#   判据只用结构化事实——上次空正文 nudge 之后至少一次工具调用真正执行完
-#   （executed_tools 只在 result.ok 时追加；发起了但没有结果的调用不在其中）。
-#   连续无进展的空正文仍守原硬上限，不会变成死循环；不读正文或思考内容。
+#   判据只用结构化事实——上次空正文 nudge 之后至少一次工具调用「本次实际执行成功、且不是重放」
+#   （fresh_successful_tools 只在 result.ok 且 handler_executed 且 operation 非 replayed 时追加；
+#   旧成功回执重放不算新完成的工作，review36 R36-1）。连续无进展的空正文仍守原硬上限，
+#   不会变成死循环；不读正文或思考内容。
 # 函数用途: 空正文裁决前，若有新进展则把空正文预算计 0 并前移进展标记。
 def _empty_text_budget_after_progress(
     params: object, counters: ToolLoopRepairCounters
 ) -> ToolLoopRepairCounters:
-    executed = len(list(getattr(params, "executed_tools", None) or []))
-    if executed <= counters.empty_text_progress_marker:
+    progressed = len(list(getattr(params, "fresh_successful_tools", None) or []))
+    if progressed <= counters.empty_text_progress_marker:
         return counters
-    return replace(counters, empty_text_repairs=0, empty_text_progress_marker=executed)
+    return replace(counters, empty_text_repairs=0, empty_text_progress_marker=progressed)
 
 
 @dataclass(frozen=True)
