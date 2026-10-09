@@ -1,5 +1,17 @@
 # Codebase Tree
 
+## AGENTS 第 6 轮（mc2-agentsr6，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/memory_store/agents_migration_reconcile.py # completed 旧精确租约收尾；state→record、原记录历史
+|-- agent_py_agent/agent/memory_store/curator_lease.py # stop/join 保护原异常与停止未确认
+|-- agent_py_agent/agent/memory_store/curator.py # 所有失败收尾拒绝清未确认停止的租约
+|-- agent_py_agent/tests/test_agents_cleanup_review33b.py # mc4 原九项公开入口/崩溃/收尾
+|-- agent_py_agent/tests/test_agents_cleanup_review33b_locks.py # 两个独立校准的完整 quota 锁探针
+|-- agent_py_agent/tests/test_agents_cleanup_reconcile.py # 精确身份、历史、I/O恢复、真实死进程与业务不重做
+|-- agent_py_agent/tests/test_curator_heartbeat_stop.py # 真实存活心跳线程的 stop/join 中断
+```
+
 - AGENTS 快照字节合同：`agent/memory_store/agents_migration.py` 的复制入口复用 `agent/common/nofollow_fs.py` 私有原子字节写；`tests/test_agents_snapshot_bytes.py` 验证公开迁移、续作、清单兼容和篡改拒绝。路径均相对 `agent_py_agent/`，不新增恢复执行权。
 
 ## AGENTS 第 5 轮（mc2-agentsr5，2026-10-09）

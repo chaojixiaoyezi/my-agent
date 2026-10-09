@@ -1,11 +1,27 @@
 # 测试与发布验收
 
+## R33b-02 completed 精确收尾对账（mc2-agentsr6，2026-10-09；本地实现待复审/集成）
+
+- 来源：mc4 原九例＋独立校准锁两例先按原测试 AST 跑出 4 个合同失败（正常 join 中断及三个 completed 收尾），无 error/skip；证据位置改 pytest tmp_path。校准锁两例已经绿，不把旧无效夹具计为通过。
+- 做法：原 apply 的 completed 分支只调用 `agents_migration_reconcile`；规范 state→原 record 锁内重读。旧精确 ID 消失或已换新 ID 只结清旧 record；同 ID 仅沿原明确死亡判据清空旧 active_lease，状态其它字段不动。活/未知 holder、停止未确认、身份缺失均拒绝，不把到期或 interrupted 当死亡证明。
+- 旧诊断与 pending 进入 `lease_cleanup_history`。死 holder 确认意图先耐久，再清旧 state；意图写失败不清租约。后续失败在可写的原 record 锁内重读补审计，不倒序取 state，不覆盖晚到诊断；存储全不可写时只报告，不保证无法写入的错误能被下一次读出。
+- 新 `test_agents_cleanup_reconcile.py` 验证精确活/未知/停止未确认/缺 ID 的拒绝、规范读取失败审计、对账幂等、旧释放错误留存和新 state 字节不变；真实子进程 completed 后 `os._exit(73)`，逐项核对 counters/cursors 等全部非 lease 字段、业务文件和失效代次字节不变。分别注入所有 record 写失败及只有最终结清写失败，恢复后沿同 ID 完成。
+- 独立审查所指 stop.set 范围、失败审计、坏诊断类型，新增反例实际 6 红；死 holder 确认意图两例再红。修后聚焦联合入口绿，未删除/跳过/放宽 mc4 的原业务断言。诊断类型错误结构化拒绝，不抛新 TypeError。
+- 复审的锁内记录身份漂移、晚到失败审计写错迁移、falsey 非 dict 假成功及异常子类伪装字典，另加反例实际 15 红；按目录迁移编号＋初读编号＋旧 lease ID 验证，类型先检查不 `or {}`，停止事实和诊断读写同一 BaseException 原生字典，保留原对象。目录规则为原 `agents-migration-<id>`，首次误按裸 ID 导致回归，按实际格式修正，保留原断言。
+- 复审建议“停止未确认但旧 ID 消失/换新即可结清”未采用：任务原文要求停止未确认仍保守拒绝；原拒绝探针覆盖已无旧 lease 的情况，不因只更新 record 放宽此合同。
+- 原 strict 首跑 9 项 rc0、size_diff 因收进的原测试函数/嵌套/参数共 6 新告警 rc1。只抽测试监控器、锁重试与 stale replan helper，没有改核验器或业务断言；30 个原探针 assert 和 7 个校准锁 assert，在 self 属性接收者归一化后 AST 集合及重复数逐一相同（`assertion-preservation.json`），真实线程/锁/子进程入口 11 例仍绿，size_diff 预检新增为 0。锁超时保留同一 BlockingIOError 原因，原隐式链改显式 from，类型、文字、2 秒获取限时及各等待点不变。
+- 当前产品聚焦 76 项通过；相关检索及 curator/quota 文件加完整 guards9 共 75 文件 1487 过/2 失败/0 error/skip，整条回归 rc1。仍是 r223 的 MCP 背压子进程未终止与双大流捕获超时，不删、不跳、不放宽；同名两项在此前真正基线 `84ff2c884c1e99100d3bb3a4e041dbaa5c0499e1` 已实测复现，本轮复用 `tmp/mc2-agentsr5/baseline-failures.xml`，不声称广回归全绿。运行清单/日志/XML 见 `tmp/agentsr6/regression-final*`。
+- 最终结构版本同一 75 文件再跑，仍 1487 过/2 失败，无 error/skip；其中全部 12 个 guards9 文件的 194 项通过、聚焦 76 项通过。原 `strict_gates.sh <tree> f11b8f495` 十项均 rc0，import 0 findings、size_diff 新增 0，生成 CODE_SIZE_REPORT 已按原脚本还原，不随提交。日志为 `tmp/agentsr6/strict-gates-final.log`。
+- 最终四单点变异分别由 1/3/1/5 个业务失败杀死，pytest 均 rc1，无 error/skip；依次对应正常 join 清 lease、completed 跳过对账、误清新 lease、改回文本复制。每次原字节备份立即还原，SHA 与当前源码及暂存区相同；命令/JUnit/日志在 `tmp/agentsr6/mutations/`，最终核对在 `final-verification.json`。
+- **已知计数限制（本轮仅记录，未修）**：after_delete 与 progress 耐久之间崩溃，重放 `removed_count` 可为 0；真实退出 73 的探针中版本账仍有一次删除、归档字节不变。不得据回执 0 宣称未删除；用 `source=migration:<id>` 版本账、归档和实际条目共同核对。不要在 cleanup-only 重放补做删除/归档/名单/代次。
+- 复现：指定 ci-venv、工作树根 PYTHONPATH、隔离 HOME、无字节码/cache，执行 `test_agents_cleanup_review33b.py`、`test_agents_cleanup_review33b_locks.py`、`test_agents_cleanup_reconcile.py`、`test_curator_heartbeat_stop.py` 和字节快照测试；原始红/绿 XML 与单点变异在 `tmp/agentsr6/`。真实 owner/Gateway、生产副本、Linux 全仓、Windows、断电未验证；phase1 接口保持暂停。
+
 ## R33b-01 心跳停止未确认（mc2-agentsr6，2026-10-09）
 
 - 正常主体 join 抛错也把停止未确认附到原 join 异常；异常主体保留原对象。迁移沿该事实不释放/退役；其它消费者 Curator 的普通失败落账和外层中断守卫同样拒绝清租约。
 - 独立审查后补停止信号自身中断：`stop.set` 与 `join` 放在同一异常保护范围；两条真实存活线程反例先红（标记缺失/主体被替换），补丁后绿。业务异常与停止/等待异常均保留原对象，不把未设置成功的 stop 当已停止。
-- 原 mc4 九项与两条独立校准锁探针收进 `test_agents_cleanup_review33b*.py`，断言与测试 AST 不改，仅将证据文件移入 pytest tmp_path。首次 11 例为 7 过/4 个合同失败；锁两项已绿，不冒称旧夹具原样通过。补 `test_curator_heartbeat_stop.py` 的公开 run 四例（正常/异常主体×KeyboardInterrupt/普通 join 错误），活线程与原异常身份断言；修正自身 bound-method 注入夹具后四例实际红，未把首次夹具失败计作产品证据。
-- completed 重放的三个红例仍待下一项修复；接口冻结仍暂停，生产/Gateway 未验证。
+- 原 mc4 九项与两条独立校准锁探针收进 `test_agents_cleanup_review33b*.py`，首次红测保持原测试 AST，仅将证据文件移入 pytest tmp_path。首次 11 例为 7 过/4 个合同失败；锁两项已绿，不冒称旧夹具原样通过。之后为零新增告警抽辅助结构，原断言核对见顶部。补 `test_curator_heartbeat_stop.py` 的公开 run 四例（正常/异常主体×KeyboardInterrupt/普通 join 错误），活线程与原异常身份断言；修正自身 bound-method 注入夹具后四例实际红，未把首次夹具失败计作产品证据。
+- 本节记录第一项提交时的范围；completed 重放三个红例的后续修复见顶部 R33b-02。接口冻结仍暂停，生产/Gateway 未验证。
 
 ## AGENTS 字节快照修复（mc2-snapbytes，2026-10-09；本地实现，待复审/集成）
 

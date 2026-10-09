@@ -135,40 +135,60 @@ def test_real_process_crash_same_id_recovery_no_duplicate_business(tmp_path, sta
     assert current_lease == {}, 'same migration-id must finish cleanup of its dead exact holder'
 
 
+class _JoinProbe:
+    def __init__(self, env, primary_kind):
+        self.entered, self.unblock = threading.Event(), threading.Event()
+        self.threads, self.releases = [], []
+        self.original_renew, self.original_join = curator_lease.renew_curator_lease, threading.Thread.join
+        self.original_run, self.original_commit = migration._run_cleanup, env.store.commit_success
+        self.primary_kind = primary_kind
+        self.primary = RuntimeError('body finished with isolated error')
+        self.interrupted = KeyboardInterrupt('isolated join interruption')
+
+    def gated_renew(self, store, lease_id, seconds):
+        if threading.current_thread().name == 'curator-lease-heartbeat':
+            self.threads.append(threading.current_thread())
+            self.entered.set()
+            assert self.unblock.wait(10), 'probe must unblock its real heartbeat thread'
+        return self.original_renew(store, lease_id, seconds)
+
+    def run(self, context):
+        report = self.original_run(context)
+        assert self.entered.wait(5)
+        if self.primary_kind == 'body_error':
+            raise self.primary
+        return report
+
+    def interrupted_join(self, thread, *args, **kwargs):
+        if thread.name == 'curator-lease-heartbeat':
+            assert thread.is_alive()
+            raise self.interrupted
+        return self.original_join(thread, *args, **kwargs)
+
+    def trace_release(self, request):
+        self.releases.append(request.lease_id)
+        return self.original_commit(request)
+
+    def install(self, monkeypatch, env):
+        monkeypatch.setattr(migration, '_MIGRATION_LEASE_SECONDS', 0)
+        monkeypatch.setattr(curator_lease, 'renew_curator_lease', self.gated_renew)
+        monkeypatch.setattr(threading.Thread, 'join', lambda thread, *args, **kwargs: self.interrupted_join(thread, *args, **kwargs))
+        monkeypatch.setattr(migration, '_run_cleanup', self.run)
+        monkeypatch.setattr(env.store, 'commit_success', self.trace_release)
+
+    def finish(self):
+        self.unblock.set()
+        for thread in self.threads:
+            self.original_join(thread, 5)
+            assert not thread.is_alive()
+
+
 @pytest.mark.parametrize('primary_kind', ['completed', 'body_error'])
 def test_unconfirmed_heartbeat_join_never_releases_while_real_thread_alive(tmp_path, monkeypatch, primary_kind):
     env = _setup(tmp_path)
-    entered, unblock = threading.Event(), threading.Event()
-    threads, releases = [], []
-    original_renew, original_join = curator_lease.renew_curator_lease, threading.Thread.join
-    original_run, original_commit = migration._run_cleanup, env.store.commit_success
-    primary = RuntimeError('body finished with isolated error')
-    interrupted = KeyboardInterrupt('isolated join interruption')
-    def gated_renew(store, lease_id, seconds):
-        if threading.current_thread().name == 'curator-lease-heartbeat':
-            threads.append(threading.current_thread())
-            entered.set()
-            assert unblock.wait(10), 'probe must unblock its real heartbeat thread'
-        return original_renew(store, lease_id, seconds)
-    def run(context):
-        report = original_run(context)
-        assert entered.wait(5)
-        if primary_kind == 'body_error':
-            raise primary
-        return report
-    def interrupted_join(thread, *args, **kwargs):
-        if thread.name == 'curator-lease-heartbeat':
-            assert thread.is_alive()
-            raise interrupted
-        return original_join(thread, *args, **kwargs)
-    def trace_release(request):
-        releases.append(request.lease_id)
-        return original_commit(request)
-    monkeypatch.setattr(migration, '_MIGRATION_LEASE_SECONDS', 0)
-    monkeypatch.setattr(curator_lease, 'renew_curator_lease', gated_renew)
-    monkeypatch.setattr(threading.Thread, 'join', interrupted_join)
-    monkeypatch.setattr(migration, '_run_cleanup', run)
-    monkeypatch.setattr(env.store, 'commit_success', trace_release)
+    probe = _JoinProbe(env, primary_kind)
+    threads, releases, primary, interrupted = probe.threads, probe.releases, probe.primary, probe.interrupted
+    probe.install(monkeypatch, env)
     try:
         with pytest.raises(BaseException) as caught:
             _apply(env)
@@ -184,10 +204,7 @@ def test_unconfirmed_heartbeat_join_never_releases_while_real_thread_alive(tmp_p
         assert not releases, 'unconfirmed join cannot authorize a lease release'
         assert lease.get('phase') == 'executing'
     finally:
-        unblock.set()
-        for thread in threads:
-            original_join(thread, 5)
-            assert not thread.is_alive()
+        probe.finish()
 
 
 @pytest.mark.parametrize('target', ['long_term', 'user'])

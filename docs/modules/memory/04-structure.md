@@ -1,5 +1,7 @@
 # Memory Structure
 
+> mc2-agentsr6（2026-10-09）当前结构：`agents_migration` 的 completed 分支只进 `agents_migration_reconcile`，规范 state→原 record 锁内重读并追加历史；旧 ID 消失/替换不写 state，同 ID 只用原明确死亡判据清旧 lease，确认意图先耐久。失败审计仅 record 锁重读，无 record→state 逆边。停止未确认沿 `curator_lease` 原异常标记，迁移与 Curator 都不清 lease。其它业务锁序为租约→quota→policy→人格→前缀；下述第 4 轮结构是历史阶段，以本节与设计 §3.6 为准。
+
 > mc2-snapbytes（2026-10-09）：`agents_migration._copy_snapshot_file` 用 `read_bytes` → 原目标锁 → `nofollow_fs.write_bytes_atomic_beneath` → 字节 SHA/读回；清单 `sha256`/`bytes` 不变。`_verify_snapshot_file` 原本已按 bytes 校验，保持不变。仅清单 JSON 和语义 AGENTS 解析用 UTF-8；无二进制自动恢复入口新增。
 
 ## AGENTS.md 硬拦与清理迁移（mc3-agents0，2026-10-08，本地实现待复核）

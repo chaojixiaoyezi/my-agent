@@ -66,8 +66,9 @@ def test_curator_public_run_preserves_primary_and_executing_when_join_unconfirme
 
 
 @pytest.mark.parametrize("body_fails", [False, True])
-def test_stop_signal_interruption_keeps_original_and_never_releases(tmp_path, monkeypatch, body_fails):
-    from types import SimpleNamespace
+@pytest.mark.parametrize("shadow_dict", ["none", "readonly", "ephemeral"])
+def test_stop_signal_interruption_keeps_original_and_never_releases(tmp_path, monkeypatch, body_fails, shadow_dict):
+    from types import MappingProxyType, SimpleNamespace
 
     from agent_py_agent.agent.memory_store import agents_migration as migration
     from agent_py_agent.tests.test_agents_cleanup_review33 import _apply
@@ -75,7 +76,12 @@ def test_stop_signal_interruption_keeps_original_and_never_releases(tmp_path, mo
     env = _setup(tmp_path)
     original = curator_lease._LeaseHeartbeat
     workers = []
-    body_error, stop_error = RuntimeError("body error"), KeyboardInterrupt("stop request interruption")
+    body_type, stop_type = RuntimeError, KeyboardInterrupt
+    if shadow_dict != "none":
+        shadow = property(lambda _self: MappingProxyType({}) if shadow_dict == "readonly" else {})
+        body_type = type("ShadowBody", (RuntimeError,), {"__dict__": shadow})
+        stop_type = type("ShadowStop", (KeyboardInterrupt,), {"__dict__": shadow})
+    body_error, stop_error = body_type("body error"), stop_type("stop request interruption")
     run = migration._run_cleanup
 
     def raise_stop():
@@ -100,7 +106,7 @@ def test_stop_signal_interruption_keeps_original_and_never_releases(tmp_path, mo
         with pytest.raises(BaseException) as caught:
             _apply(env)
         assert caught.value is (body_error if body_fails else stop_error)
-        assert caught.value.lease_heartbeat_stop_error_class == "KeyboardInterrupt"
+        assert caught.value.lease_heartbeat_stop_error_class == type(stop_error).__name__
         assert workers and all(w.thread.is_alive() and not s.is_set() for w, s in workers)
         assert env.store.load().active_lease.get("phase") == "executing"
     finally:

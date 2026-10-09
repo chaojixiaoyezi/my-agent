@@ -1,9 +1,15 @@
 # 记忆与上下文维护状态
 
+## AGENTS 第 6 轮（mc2-agentsr6，2026-10-09；本地实现待复审/集成）
+
+- 字节快照、正常/异常主体的 stop/join 中断原对象保护、completed 旧精确租约收尾对账已实现；只改旧 record 或明确死亡的旧 active_lease，不重做业务，历史留在原记录。
+- 真实线程/子进程及 I/O 故障恢复用隔离 HOME 验证；详情与限制见根 TESTS。after_delete 崩溃回执计数可能为 0 已明确记录，未修计数。真实 owner、副本生产清理、Gateway 和全仓未验证，phase1 接口保持暂停。
+- 下列第 4/5 轮为历史；当前锁序为 curator 租约→quota admission→policy→人格→线程前缀。未结清 completed 的对账另用规范 state→原 record，不把记录 pending 当执行授权。
+
 ## AGENTS 字节快照（mc2-snapbytes，2026-10-09；待复审/集成）
 
 - 复制载荷不再 UTF-8 解码或换行规范化；原锁内私有原子字节写，字节读回、SHA 与长度，清单兼容。
-- 隔离公开 apply/续作等 7 项通过；单点文本读取变异 rc=1 且源码字节恢复，详见 TESTS 顶部。真实 owner 副本与 Gateway 未验证；第 6 轮收尾缺口未完成，不放行生产清理。
+- 隔离公开 apply/续作等 7 项通过；单点文本读取变异 rc=1 且源码字节恢复，详见 TESTS 顶部。真实 owner 副本与 Gateway 未验证；第 6 轮后续见上节，不放行生产清理。
 
 ## AGENTS 第 0 期第 4 轮（mc2-agents0r4，2026-10-09，待独立复核）
 

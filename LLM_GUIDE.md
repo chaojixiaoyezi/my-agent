@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+> mc2-agentsr6（2026-10-09）：当前清理合同以设计 §3.6 与 TESTS 顶部第 6 轮为准，下述第 4 轮是历史记录。stop/join 中断在原对象标记停止未确认，迁移及 Curator 不清 lease。completed 同编号仅经 `agents_migration_reconcile` 按 state→record 重读精确 ID 对账；替换的新 lease 不写，同 ID 活/未知/停止未确认拒绝，明确死亡确认意图先耐久后清空。原 record 保存历史，失败审计锁内重读，不逆取 state。不得重做业务或把 after_delete 崩溃后的回执 removed_count=0 当作没有删除；核对迁移来源版本账与归档。生产/Gateway 未验证，phase1 接口保持暂停。
+
 > AGENTS 迁移快照载荷是原始字节，不是统一 UTF-8 文本；复制、摘要、读回及续作校验按 bytes，清单 JSON 仍用 UTF-8。复用 `nofollow_fs.write_bytes_atomic_beneath` 与原写锁；禁止按扩展名或 `.DS_Store` 特判。合同见 TESTS 顶部与 `test_agents_snapshot_bytes.py`。
 
 mc2-agents0r4（2026-10-09）：AGENTS 清理锁序为 curator 租约→policy→人格→线程前缀，quota 先于目标锁。

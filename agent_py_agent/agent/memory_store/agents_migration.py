@@ -36,7 +36,7 @@ from ..common.json_io import (
 from ..common.nofollow_fs import write_bytes_atomic_beneath
 from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions_locked
 from ..user_space.owner_quota import OwnerQuotaAdmission
-from .curator_lease import curator_lease_heartbeat, retire_curator_lease
+from .curator_lease import curator_lease_heartbeat, lease_exception_metadata, retire_curator_lease
 from .curator_state import CuratorStateCorruptError, CuratorSuccessCommit, MemoryCuratorStateStore
 
 # 自动晋升写入 Persona 时使用的来源前缀（见 promotion._commit_persona）。
@@ -370,7 +370,7 @@ def _plan_digest(
 # LLM: 迁移执行在 curator 租约内进行（拿不到结构化拒绝，迁移期间不会有新的 curator 运行）；
 #   单一临界区一次做完：计划校验→快照（续作逐文件校验）→归档→删除→名单→线程快照失效→完成
 #   记录；删除通过人格批次的锁内入口一次完成，首次必须携带与当前计划一致的 plan_digest（防
-#   漂移），续作跳过 digest 但只处理「当前重判定 ∩ 原计划」；完成后重跑幂等返回。
+#   漂移），续作跳过 digest 但只处理「当前重判定 ∩ 原计划」；completed 重跑仅对账旧精确租约，不重做业务。
 # 函数用途: 执行一次 AGENTS 清理迁移并返回结构化报告。
 def apply_agents_cleanup(
     *,
@@ -383,9 +383,12 @@ def apply_agents_cleanup(
     migration_id = _validated_migration_id(request.migration_id)
     directory = _migration_dir(home_paths, migration_id)
     record = _read_record(directory)
-    if _is_completed(record):
-        return _completed_report(migration_id, directory, record)
     curator_state_store = curator_state_store or MemoryCuratorStateStore(persona.owner_home / "memory/curator/state.json")
+    if _is_completed(record):
+        from .agents_migration_reconcile import reconcile_completed_cleanup
+
+        record = reconcile_completed_cleanup(curator_state_store, directory, record)
+        return _completed_report(migration_id, directory, record)
     lease = _acquire_migration_lease(curator_state_store)
     return _execute_migration(_CleanupContext(home_paths, persona, candidate_service, request), curator_state_store, lease)
 
@@ -407,7 +410,7 @@ def _execute_migration(context: _CleanupContext, store: object, lease: dict[str,
     return report
 
 
-# LLM: 有主体异常时二次中断也不能换掉原对象；诊断尽力落到原记录，失败仍保留 pending，不强抢租约。
+# LLM: 二次中断不换主体；诊断尽力落原记录和原生异常字典，绕过子类伪字典/add_note，坏 notes 不遮蔽主体，失败仍保留 pending。
 # 函数用途: 为失败主体安全收尾并附结构化诊断，绕过异常类自定义 add_note。
 def _cleanup_failed_migration(context: _CleanupContext, store: object, lease: dict, primary: BaseException) -> None:
     try:
@@ -420,14 +423,17 @@ def _cleanup_failed_migration(context: _CleanupContext, store: object, lease: di
     except BaseException as secondary:
         detail["diagnostic_write_error_class"] = type(secondary).__name__
     if detail:
-        primary.__dict__["lease_cleanup"] = detail
-        primary.__dict__.setdefault("__notes__", []).append("agents migration lease cleanup: " + json.dumps(detail, sort_keys=True))
+        metadata = lease_exception_metadata(primary)
+        metadata["lease_cleanup"] = detail
+        notes = metadata.setdefault("__notes__", [])
+        if isinstance(notes, list):
+            notes.append("agents migration lease cleanup: " + json.dumps(detail, sort_keys=True))
 
 
-# LLM: 心跳停止未确认时仍可能在途写 state，禁止释放/退役；保留 executing 的 fail-closed 保护与原异常。
+# LLM: 原生异常字典持停止事实，子类属性不作权威；未确认仍可能在途写 state，禁止释放/退役，保留 executing 与原异常。
 # 函数用途: 仅在心跳停止已确认后为失败主体释放原租约。
 def _release_after_primary(store: object, lease: dict, primary: BaseException) -> dict[str, object]:
-    stop_error = primary.__dict__.get("lease_heartbeat_stop_error_class")
+    stop_error = lease_exception_metadata(primary).get("lease_heartbeat_stop_error_class")
     if stop_error:
         return {"lease_id": lease["lease_id"], "released": False, "retired": False,
             "heartbeat_stop_error_class": stop_error, "recovery": "manual_recovery_required"}
@@ -721,13 +727,15 @@ def _is_completed(record: dict | None) -> bool:
     return isinstance(record, dict) and str(record.get("status") or "") == "completed"
 
 
-# LLM: completed 只代表迁移数据耐久完成，收尾 pending 期间和诊断写失败后都不能据缺诊断推定成功。
-# 函数用途: 为已完成迁移生成幂等报告，保留收尾 pending 或失败事实。
+# LLM: completed 只代表业务耐久完成；pending 阻止成功但不能盖掉对账读/写故障的真实分类。
+# 函数用途: 为已完成迁移生成幂等报告，保留 pending 与已有结构化诊断。
 def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[str, object]:
-    detail = record.get("lease_cleanup") or {}
+    detail = record.get("lease_cleanup", {})
+    if not isinstance(detail, dict):
+        detail = {"record_error_class": "invalid_cleanup_diagnostic", "recovery": "manual_recovery_required"}
     if record.get("lease_cleanup_pending"):
-        detail = {"lease_id": record.get("cleanup_lease_id", ""), "released": False,
-            "retired": False, "recovery": "cleanup_pending"}
+        detail = {**detail, "lease_id": record.get("cleanup_lease_id", ""), "released": False,
+            "retired": False, "recovery": detail.get("recovery") or "cleanup_pending"}
     return {
         "ok": not bool(detail),
         "already_completed": True,
