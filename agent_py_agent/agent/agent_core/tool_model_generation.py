@@ -208,12 +208,19 @@ def generate_model_response(request: ModelGenerateParams):
     if preflight := preflight_context_pressure_response(request):
         return preflight
     _trace_model_start(request)
-    state = _start_model_generation(request)
-    # 门槛5补证(维护记录): 返回与响应配对的 final_state——重试成功后
-    # 用 attempt-2 的 state 收口(其 call_id 落 finished), 不落在 attempt-1。
-    response, final_state = _generate_or_recover_context_pressure(request, state)
-    _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
-    return _finish_model_generation(request, final_state, response)
+    # LLM: 覆盖的清除归「消费它的这次逻辑调用」：入口判定归属，结束时统一清（含异常路径），
+    #   重试与自然回执轮都不再各自碰它。判定只读结构化字段，不读正文。
+    owns_override = _owns_next_call_override(request.params)
+    try:
+        state = _start_model_generation(request)
+        # 门槛5补证(维护记录): 返回与响应配对的 final_state——重试成功后
+        # 用 attempt-2 的 state 收口(其 call_id 落 finished), 不落在 attempt-1。
+        response, final_state = _generate_or_recover_context_pressure(request, state)
+        _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
+        return _finish_model_generation(request, final_state, response)
+    finally:
+        if owns_override:
+            _clear_next_call_reasoning_override(request.params)
 
 
 # LLM: Native dynamic sections enter IR by host source before submission; compare only each
@@ -1416,38 +1423,64 @@ def _provider_request_options(backend, state: _ModelGenerationState, *, forced: 
     )
 
 
+# LLM: 「只思考截断续跑」的一次性降档覆盖只允许活到紧邻这一次物理模型调用：请求参数在 generate
+#   之前读取（_provider_request_options），无论成功、失败还是异常都在 generate 之后清除，
+#   下一次调用恢复用户配置的强度。惰性导入避免模块级循环依赖；伪 params / 缺失 params 时为无操作。
+# 函数用途: 清除挂在 params 上的「紧邻下一次调用」档位覆盖。
+def _clear_next_call_reasoning_override(params: object) -> None:
+    from ..settings.reasoning_effort import clear_next_call_reasoning_level
+
+    clear_next_call_reasoning_level(params)
+
+
+# LLM: 「只思考截断续跑」的降档覆盖由消费它的那次逻辑调用负责清除（见 generate_model_response）：
+#   入口判定本次调用是否拥有覆盖——非 isolated 参数视图（自然回执轮是另一用途）且序号已到武装点；
+#   是则在调用结束时清。这样同一次续跑的超时重试保持降档、下一次逻辑调用自然恢复。
+# 函数用途: 判断本次逻辑调用是否负责清除「紧邻下一次调用」的档位覆盖。
+def _owns_next_call_override(params: object) -> bool:
+    from ..settings.reasoning_effort import next_call_override_owned
+
+    return next_call_override_owned(params)
+
+
 # LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink
 # 的宿主；fake/旧后端保持原关键字形态，流内思考终态不能在 response 收尾处重放。
 # 函数用途: 按当前原生工具、思考、智能程度和展示能力组装参数并调用一次模型后端。
-def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+def _generate_with_request_options(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
     thinking_observer = _thinking_stream_observer(backend, state)
     tool_input_progress = _tool_input_progress_callback(backend, state)
-    _generate_started = time.monotonic()
     if state.tools is None and state.messages is None:
         kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
         if (options := _provider_request_options(backend, state, forced=False)) is not None:
             kwargs["request_options"] = options
         if thinking_observer is not None:
             kwargs["on_thinking_delta"] = thinking_observer
-        result = backend.generate(prompt, **kwargs)
-    else:
-        kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
-        forced = False
-        if thinking_observer is not None:
-            kwargs["on_thinking_delta"] = thinking_observer
-        if tool_input_progress is not None:
-            kwargs["on_tool_input_progress"] = tool_input_progress
-        if state.tools is not None:
-            kwargs["tools"] = state.tools
-            tool_choice = state.tool_choice or ToolChoice.auto()
-            kwargs["tool_choice"] = tool_choice
-            forced = tool_choice.mode != "auto"
-        if (options := _provider_request_options(backend, state, forced=forced)) is not None:
-            kwargs["request_options"] = options
-        if state.messages is not None:
-            kwargs["messages"] = state.messages
-        result = backend.generate(prompt, **kwargs)
+        return backend.generate(prompt, **kwargs)
+    kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
+    forced = False
+    if thinking_observer is not None:
+        kwargs["on_thinking_delta"] = thinking_observer
+    if tool_input_progress is not None:
+        kwargs["on_tool_input_progress"] = tool_input_progress
+    if state.tools is not None:
+        kwargs["tools"] = state.tools
+        tool_choice = state.tool_choice or ToolChoice.auto()
+        kwargs["tool_choice"] = tool_choice
+        forced = tool_choice.mode != "auto"
+    if (options := _provider_request_options(backend, state, forced=forced)) is not None:
+        kwargs["request_options"] = options
+    if state.messages is not None:
+        kwargs["messages"] = state.messages
+    return backend.generate(prompt, **kwargs)
+
+
+# LLM: 覆盖的清除不在物理调用层：每次物理尝试都清会让超时重试丢档、并误伤共享参数的其它用途
+#   （见 generate_model_response 的逻辑调用级归属判定）。本函数只负责组装并发出一次请求。
+# 函数用途: 组装一次模型请求参数并调用模型后端。
+def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+    _generate_started = time.monotonic()
+    result = _generate_with_request_options(backend, prompt, state)
     if os.environ.get("MY_AGENT_STAGE_DEBUG") == "1":
         # 诊断行走 stderr（gateway 的 nohup 2>&1 已并入日志文件）。
         import sys

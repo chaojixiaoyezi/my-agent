@@ -807,6 +807,15 @@ def _persist_partial_native_turn(callback: object, params: ToolLoopExecuteParams
         logging.getLogger(__name__).error("异常回合的原生历史保存失败；请核对会话账本", exc_info=True)
 
 
+# LLM: 降档 trace 是本次运行新增的可选事实：只有真的产生过决策才投影，否则整个键不出现
+#   （开关关闭/从未触发时对外诊断保持旧结构，旧字段行为与基线一致）。
+# 函数用途: 把降档决策 trace 按需转成诊断字段，没有决策时返回空 dict。
+def _thinking_downgrade_diagnostics(live_state: dict[str, object]) -> dict[str, object]:
+    trace = live_state.get("truncation_thinking_downgrade_trace")
+    rows = [dict(item) for item in list(trace or []) if isinstance(item, dict)]
+    return {"truncation_thinking_downgrades": rows} if rows else {}
+
+
 def _tool_runtime_evidence(
     runtime_snapshot: object,
     protocol_snapshot: object,
@@ -854,6 +863,8 @@ def _tool_runtime_evidence(
             for item in list(live_state.get("protocol_violation_trace") or [])
             if isinstance(item, dict)
         ],
+        # LLM: 对外诊断只在本次运行真的产生过降档决策时出现新字段；开关关闭或从未触发时保持旧结构。
+        **_thinking_downgrade_diagnostics(live_state),
         "completion_gate": {
             "status": final_status,
             "reason": str(getattr(final_response, "runtime_reason", "") or ""),

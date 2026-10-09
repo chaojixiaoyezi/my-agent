@@ -90,6 +90,111 @@ agent_py_agent/tests/test_tool_call_guardrail_runtime.py::test_real_shell_execut
 - code-size 两次生成的 `CODE_SIZE_REPORT.md` 均还原到 HEAD，不纳入功能提交。clean-package 首次因新测试尚未跟踪失败；将新测试纳入 git 后重跑为 0。未增加参数或常量。
 - 未验证：真实 Gateway/TUI/研究子代理执行片、生产部署、Linux/Windows OS 沙箱及全仓回归；按任务书本轮不启动 Gateway、不 push、不部署、不跑全仓 pytest。
 
+## 空正文预算只认真实执行的新进展（mc3-emptybudgetfix1，2026-10-09，分支 `worker/mc3-thinktrunc`，接 175d85315）
+
+来源：mc4 review36（`reply_of.py mc4-mc4-b1bp4r3` 与 `/private/tmp/claude-501/m-mc4/review36-emptybudget/HANDOFF.md`）：
+两处消费点接得对、截断预算独立、正常进展修复有效，只有一项必修——旧成功回执被重放时不能算新进展。
+
+- **R36-1 修复**：`_tool_loop_service.py` 新增 `_fresh_execution_success`（ok + handler_executed + 操作非 replayed）
+  与 `_record_successful_tool`（`executed_tools` 保持全局原义，另记 `fresh_successful_tools`）；
+  `_runtime_params.py` 加 `fresh_successful_tools` 字段；`response_decision.py` 的
+  `_empty_text_budget_after_progress` 改读它。不改 `executed_tools` 的全局统计口径。
+- **重放语义**：成功操作被重放时 ok=True、handler_executed=False、operation.replayed=True，不算新进展；
+  探针复现（修复前 decision=continue，修复后 break）。
+- **T5 口径纠正**：`test_completed_failed_tool_call_is_not_progress`——测的是"工具调用完成但失败"，
+  失败结果不刷新预算（保守策略保留）。
+- **正文路径表述收窄**：本轮不增加正文重置。"空 → 空 → 可见正文但被截断 → 空"会继续 3 次，
+  基线与候选一致，不是新退步；不能表述为该路径不存在。
+- **刷预算风险（如实记录）**：不同参数的廉价成功读取可以持续刷新预算，由工具轮上限（默认 5000）兜底；
+  本轮不改护栏。
+- **测试**：`test_empty_text_budget_progress.py` 8 条（新成功能恢复 / 旧重放不能恢复 / 两处消费点一致 /
+  截断预算独立 + T5 口径纠正）；半修复态 3 红（T6 continue!=break、T7×2 break!=continue）→ 修复后全绿。
+- **变异 4 处**（一次一处，全部 rc=1）：不重置 / 没有进展也重置 / 发起了就算进展（archive 计数）/
+  重放也算作进展。
+- **回归**：37 文件 1133 条，1 failed（`test_real_shell_executor_stops_repeats_and_accepts_progress`，
+  环境性：基线 175d85315 单跑 600s 超时 + 基线探针 180s 超时 + 当前树单跑 300s 超时；不走本次改动链路）。
+- **门禁**：`strict_gates.sh` GATES_PASS（10 项检查全 rc=0、0 dirty files；size_diff 新增告警 0）。
+- 提交：50ff92cff（测试）、816f0492f（实现）、aff7fc46e（门禁告警修复）。
+
+## 空正文续跑预算按工具进展重置（mc3-emptybudget，2026-10-09，分支 `worker/mc3-thinktrunc`，接 a8c8b6e77）
+
+来源：`tasks/multicore/mc3-empty-body-budget.md`；mc1/mc2 两个长回合（159/192 轮工具）最后一步回复为空，
+整轮判 `USER_REPLY_UNAVAILABLE`，交接丢失。旧语义：空正文 nudge 预算是整轮累计 2 次、不随工具进展重置。
+
+- **旧语义**：`empty_text_repairs` 整轮累计、上限 `_MAX_EMPTY_TEXT_REPAIR_COUNT = 2`；两处消费点都在
+  `_no_tool_calls_decision`（活跃用户轮空回复 / 通用空正文 nudge），超限即按原方式收口。
+- **新语义**：空正文裁决前对照结构化进展水位（counters 新字段 `empty_text_progress_marker` = 上次空正文时
+  已成功执行的工具数）；只要自上次空正文以来至少有一次工具调用真正执行完（`executed_tools` 只在
+  `result.ok` 时追加），预算恢复为 0。连续无进展的空正文仍守 2 次硬上限；判据不读正文或思考内容，
+  也不把"发起了但没有结果"的调用算作进展（`archive_tool_calls` 增长不算）。
+- **实现**：`response_decision.py` 新增 `_empty_text_budget_after_progress`；`_no_tool_calls_decision`
+  两处 nudge 消费点改用恢复后的计数。不加开关（恢复路径 bug 修复，判据只读结构化事实，无进展路径行为不变）。
+- **测试**：新增 `test_empty_text_budget_progress.py` 5 条（进展重置 / 无进展硬上限 / 与截断预算独立 /
+  子代理 / 发起无结果不算进展），全部走真实 `execute_tool_loop` + 真实工具执行与产品记账；修复前 3 红、修复后全绿。
+- **变异 3 处**（一次一处，全部 rc=1）：不重置 / 没有进展也重置 / 把"发起了但没有结果"也算进展。
+- **回归**：33 文件 567 条，1 failed（`test_pack_verification_cancellation[platform]`，基线 a8c8b6e77 同样失败，
+  平台沙箱不可用）、2 skipped（同为平台沙箱不可用）、其余全绿。
+- **门禁**：`strict_gates.sh` GATES_PASS（10 项检查全 rc=0、0 dirty files；size_diff 新增告警 0）。
+- 提交：58bbc1c7e（测试）、e73e20e1a（实现）、afeadc1b6（门禁告警修复）。
+
+## 只思考截断降档 3502 输出上限收口（mc3-thinktruncfix2，2026-10-09，分支 `worker/mc3-thinktrunc`）
+
+来源：mc4 review35b 复核（`915f14d29` 不放行，只剩 3502）：比较前后出站参数用的输出上限与真实出站不同源。
+
+- **做法**：`response_decision.py` 新增 `_effective_output_cap`（优先后端冻结值 `backend.max_tokens`——
+  工厂 `effective_max_output_tokens` 按窗口裁剪、0 取默认值后冻结；伪后端缺该字段时回落同一工厂函数）；
+  `_effective_wire_change` 的 `ReasoningPayloadLimits.max_tokens` 改用它，不在决策层重算配置值。
+- **收编 mc4 两条边界用例**（`test_thinking_truncation_downgrade_wiring.py::test_effective_budget_uses_actual_factory_output_cap`）：
+  窗口裁剪（配置 65536 / 窗口 32768 → 上限 8192，max 与 high 预算都夹成 7168 → 记 no_effective_change）
+  与 0 默认值（配置 0 / 窗口 128000 → 上限 32000 → max→high 真降档）；修复前 2 红、修复后绿。
+- **测试**：两文件 34 条全绿；改动相关 + guards9 共 38 文件 866 条，0 failed / 0 skipped（连跑两轮）。
+- **变异 9 处**（一次一处，全部 rc=1）：原 8 处 + 比较改回 config.max_tokens。
+- **未知协议结论**：fail-open（协议未知直接认可变化）未发现可从生产入口触发（工厂拒绝未登记协议、
+  真实协议都映射到已知协议、echo/unconfigured 控制方式 none、决策后端不实现 generate），保持原行为。
+- **门禁**：strict_gates.sh GATES_PASS（10 项检查全 rc=0、0 dirty files；size_diff 新增告警 0）。
+- 提交：60d6db71a（测试收编）、74fdc52ea（3502 修复）。
+
+## 只思考截断降档的四项 review35 修复（mc3-thinktruncfix1，2026-10-09，分支 `worker/mc3-thinktrunc`）
+
+来源：mc4 review35 报告；在上一小节基础上修复四项，同一分支、同一工作树。
+
+- **3501 覆盖绑定逻辑调用身份**：覆盖结构升级为 {"level", "armed_sequence"}，宿主开始下一次逻辑调用
+  （_model_turn_sequence 越过武装点）才生效；tool_model_generation 入口按"序号 >= 武装点"认领，
+  认领者 finally 清除，物理调用结束不再清除——同一次逻辑续跑的重试保持降档、只有下一次逻辑调用恢复，
+  自然回执/压缩/辅助入口不消费覆盖。
+- **3502 有效出站参数**：新增 effective_reasoning_wire_fields / protocol_for_backend；
+  _effective_wire_change 按协议+模型档位声明+预算裁剪比较前后字段；没有变化记 no_effective_change，
+  不算成功降档、不消耗唯一机会。
+- **3503 半截工具**：_is_thinking_only_truncation 排除 truncated_tool_names 非空的响应。
+- **3504 OFF 对外诊断**：降档 trace 抽成 _thinking_downgrade_diagnostics 按需投影（开关关闭或从未触发
+  时保持旧结构）；内部 counters/trace 字段保留（兼容口径见交接报告）。
+- **测试**：收编 mc4 补测 20 条（wiring 文件），修复前 8 红；两文件 32 条全绿；回归 34 文件 895 条全绿。
+- **变异 8 处**（一次一处，全部 rc=1）：不降档 / 不清除覆盖 / 正文也算只思考 / 忽略开关 /
+  物理调用后就清除 / 没变化也算成功降档 / 不看半截工具 / HttpBackend 接线改 false。
+- **门禁**：strict_gates.sh GATES_PASS（10 项检查全 rc=0、0 dirty files）。
+- 提交：3aed34d76（四项修复）、74ec92e6b（门禁告警修复）。
+
+## 只思考截断的续跑降档（mc3-thinktrunc，2026-10-09，分支 `worker/mc3-thinktrunc`，基于 main 8ade40d6f）
+
+来源：`tasks/multicore/mc3-thinking-truncation.md`；真机 gwreq-1791538381（45 分钟、末两次调用各约 160 秒
+顶满 65536、`turn_end_reason=max-tokens` 整轮失败）暴露的通用问题：只思考截断时续跑不降档、提示又是"接着写"。
+
+- **识别**：只按结构化事实——长度截断三件套（`truncated` + `unfinished` + `MODEL_RESPONSE_TRUNCATED`/`model_provider`）
+  加零工具调用、零可见正文；不解析思考内容。正文截断保持原提示、不降档。
+- **降档**：`response_decision.py` 给紧邻下一次调用挂一次性覆盖（max→high→medium，至多一次）；
+  `reasoning_effort.py` 提供覆盖读/写/清且 `request_reasoning_options` 读取优先；`reasoning_control.py`
+  提供相邻降档表；`tool_model_generation.py` 每次物理调用用 finally 清覆盖（成功/失败/异常都清），
+  保证只影响一次、下一次恢复用户配置强度。供应商不支持记 `unsupported`、已最低档记 `already_lowest`，都照常续跑。
+- **提示**：只思考截断换成"先用一个工具动作或简短答复推进"（`_THINKING_ONLY_TRUNCATION_RESUME`）；正文截断沿用原提示。
+- **开关**：`model_truncation_thinking_downgrade`（默认开，`AgentConfig` + `agent_config.yaml` 中文注释 + 前端目录同步）。
+- **记录**：counters 新增 `truncation_thinking_downgrades`；运行诊断（`loop_support.py`）投影同名键；
+  `live_archive_state["truncation_thinking_downgrade_trace"]` 记原档位/新档位/结果。
+- **测试**：新增 `test_thinking_truncation_downgrade.py` 12 条（裁决层 7、覆盖 helper 2、fake LLM 端到端 3）；
+  相关 9 文件 350 条全绿。变异 4 项（不降档 / 降档后不恢复 / 正文截断也降档 / 开关不生效）一次一处全部 rc=1。
+- **门禁**：`strict_gates.sh` GATES_PASS（10 项检查全 rc=0、0 dirty files）。
+- **真实验证**：官方 DeepSeek 3 次成功调用（probe 当前 max 档 + 子代理 high / medium 档各一次），降档目标档位被供应商接受。
+- 提交：136f80a06（实现）、7a1aa8532（测试）、8b7fa9dad（门禁修复）。
+
 ## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
 
 - **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、

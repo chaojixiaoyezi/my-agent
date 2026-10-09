@@ -97,6 +97,11 @@ class ToolLoopExecuteParams:
     live_archive_state: dict[str, object] = field(default_factory=dict)
     # 本轮写入与 run_command 共用的决策请求去重；不持久化、不写归档、不挪用工具执行幂等集合。
     delivery_review_requested_records: set[str] = field(default_factory=set)
+    # LLM: 空正文预算的进展事实：本轮「本次实际执行成功、非重放」的工具名（executed_tools 的
+    #   新鲜执行子集）。旧成功回执重放时 ok=True 但 handler_executed=False、operation.replayed=True，
+    #   不能算新完成的工作（review36 R36-1）；只供空正文预算恢复判据，不改 executed_tools 口径。
+    # 字段用途: 记录本轮真正新执行成功的工具调用，供空正文续跑预算按进展恢复。
+    fresh_successful_tools: list[str] = field(default_factory=list)
     # 原生 tool_use（native）下与 tool_context 文本链路并存的结构化 IR 历史
     # （AssistantTurn / ToolResult / UserTurn / CompactionSummary）；text 协议下恒为空，
     # 由 message_adapter 翻成厂商原生 messages。详见 agent_core/tool_ir_history.py。

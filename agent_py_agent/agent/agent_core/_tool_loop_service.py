@@ -2464,6 +2464,32 @@ def _mark_tool_call_halts(agent, record: ToolCallRecordParams) -> None:
     _mark_unknown_outcome_halt(agent, record)
 
 
+# LLM: 空正文预算只认「本次实际执行成功、非重放」的进展事实：旧成功回执重放时 ok=True、
+#   handler_executed=False、operation.replayed=True，不能算新完成的工作（review36 R36-1）。
+#   只读结构化字段，不改 executed_tools 的全局统计口径。
+# 函数用途: 判断一条工具结果是否为本次真实执行成功（非重放）。
+def _fresh_execution_success(result: object) -> bool:
+    if not result.ok or not result.handler_executed:
+        return False
+    operation = getattr(result, "operation", None)
+    if operation is None:
+        return True
+    return (
+        getattr(operation, "status", "") == "succeeded"
+        and bool(getattr(operation, "handler_executed", False))
+        and not bool(getattr(operation, "replayed", False))
+    )
+
+
+# LLM: 成功工具账分两口径：executed_tools 保持全局原义（含重放成功），fresh_successful_tools
+#   只记本次真实执行成功（空正文预算判据，review36 R36-1）。
+# 函数用途: 记录一条成功结果的工具账（全局成功列表 + 新鲜成功事实）。
+def _record_successful_tool(loop_params, result) -> None:
+    loop_params.executed_tools.append(result.tool_name)
+    if _fresh_execution_success(result):
+        loop_params.fresh_successful_tools.append(result.tool_name)
+
+
 # LLM: Archive once, then feed the same bounded projection to text and native histories before any
 # later compact/window logic; do not let raw result refs bypass this choke point. Optional decision
 # hints only append to that shared display and never change results, ledgers or refs.
@@ -2486,7 +2512,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     )
     _mark_tool_call_halts(agent, record)
     if record.result.ok:
-        record.params.executed_tools.append(record.result.tool_name)
+        _record_successful_tool(record.params, record.result)
     archive_record = archive_tool_call_record(agent, record)
     _load_discovered_tools(record.params, archive_record)
     schema_hint = reload_schema_after_blind_call(agent, record.params, archive_record)
