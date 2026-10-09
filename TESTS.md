@@ -1,5 +1,25 @@
 # 测试与发布验收
 
+## 只思考截断降档的四项 review35 修复（mc3-thinktruncfix1，2026-10-09，分支 `worker/mc3-thinktrunc`）
+
+来源：mc4 review35 报告；在上一小节基础上修复四项，同一分支、同一工作树。
+
+- **3501 覆盖绑定逻辑调用身份**：覆盖结构升级为 {"level", "armed_sequence"}，宿主开始下一次逻辑调用
+  （_model_turn_sequence 越过武装点）才生效；tool_model_generation 入口按"序号 >= 武装点"认领，
+  认领者 finally 清除，物理调用结束不再清除——同一次逻辑续跑的重试保持降档、只有下一次逻辑调用恢复，
+  自然回执/压缩/辅助入口不消费覆盖。
+- **3502 有效出站参数**：新增 effective_reasoning_wire_fields / protocol_for_backend；
+  _effective_wire_change 按协议+模型档位声明+预算裁剪比较前后字段；没有变化记 no_effective_change，
+  不算成功降档、不消耗唯一机会。
+- **3503 半截工具**：_is_thinking_only_truncation 排除 truncated_tool_names 非空的响应。
+- **3504 OFF 对外诊断**：降档 trace 抽成 _thinking_downgrade_diagnostics 按需投影（开关关闭或从未触发
+  时保持旧结构）；内部 counters/trace 字段保留（兼容口径见交接报告）。
+- **测试**：收编 mc4 补测 20 条（wiring 文件），修复前 8 红；两文件 32 条全绿；回归 34 文件 895 条全绿。
+- **变异 8 处**（一次一处，全部 rc=1）：不降档 / 不清除覆盖 / 正文也算只思考 / 忽略开关 /
+  物理调用后就清除 / 没变化也算成功降档 / 不看半截工具 / HttpBackend 接线改 false。
+- **门禁**：strict_gates.sh GATES_PASS（10 项检查全 rc=0、0 dirty files）。
+- 提交：3aed34d76（四项修复）、74ec92e6b（门禁告警修复）。
+
 ## 只思考截断的续跑降档（mc3-thinktrunc，2026-10-09，分支 `worker/mc3-thinktrunc`，基于 main 8ade40d6f）
 
 来源：`tasks/multicore/mc3-thinking-truncation.md`；真机 gwreq-1791538381（45 分钟、末两次调用各约 160 秒
