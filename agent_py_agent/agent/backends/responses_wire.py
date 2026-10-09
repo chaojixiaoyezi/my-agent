@@ -1,4 +1,4 @@
-# LLM: Responses items/SSE 只按结构化 type/status 解释；未完成参数不得成为工具调用，原始密文仅供同模型回放。
+# LLM: Responses items/SSE只按结构化type/status解释；降档位置由真实prompt布局声明，不能把历史user误当新指令；未完成参数不得成为工具调用。
 # 模块用途: 将 Responses API 转成已有模型响应和工具历史合同，保留流式正文、思考摘要和用量。
 from __future__ import annotations
 
@@ -94,13 +94,11 @@ def input_items(prompt: str, messages: list | None, system: str, model: str) -> 
     return result
 
 
-# LLM: configuration_update 项只能放在已缓存前缀之后：历史和稳定前缀不动，插在末尾那条动态 user 消息（压缩指令）
-#   之前；末尾不是 user 消息时直接追加。不改其它项的顺序，validate_responses_input 不检查未知类型。
-# 函数用途: 把档位更新项插进 Responses input 末尾，保持前缀逐字不变。
-def insert_reasoning_update(items: list[dict], update: dict) -> list[dict]:
-    position = len(items)
-    if items and items[-1].get("role") == "user" and items[-1].get("type") in (None, "message"):
-        position -= 1
+# LLM: 调用方按真实prompt布局显式标出新volatile尾项；远端trigger请求没有摘要指令，必须在全部历史之后降档。
+# 不根据user角色猜缓存边界；只操作副本，Responses发送与压缩前缀测试须同步。
+# 函数用途: 在新摘要指令之前或完整历史之后追加降档更新，绝不插入既有历史中间。
+def insert_reasoning_update(items: list[dict], update: dict, *, before_volatile_suffix: bool) -> list[dict]:
+    position = len(items) - int(bool(items) and before_volatile_suffix)
     return [*items[:position], update, *items[position:]]
 
 

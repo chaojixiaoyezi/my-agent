@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## 压缩调用出站前缀（compactcall，2026-10-08，07-c3，本地修复待复核）
+
+- 来源：compactcall派活；合成Store、原生历史及假运输，不读真实正文/凭据、不连Gateway。窗口内复用前缀，不把生产16%归因坐实。
+- 红测：新增8例有3失败/5通过：远端preflight末尾user在input[2]先分叉为configuration_update；live两例原动态尾项在input[1]被移动/strip拼接。instructions与工具表未分叉。
+- 改法：typed volatile而非最后user角色定位新指令；旧动态项完整放入共享messages；remote空新尾项+最终trigger，text独立最终指令。预算/运输同材料，无新配置，不动提交/CAS/回滚。
+- midturn文件新增8个参数例比较真实JSON的instructions/tools/tool_choice/reasoning字节及input历史；active_turn新增2例走真实归档/CAS、两工具排序、完整input前缀及预算材料经真实serializer同源验证。
+- 旧期望改为历史→降档→trigger，旧动态事实从prompt移入messages；Anthropic守全体正文块前缀，缓存元数据/连续user分组允许投影推进，原动态文本不并进新摘要块。
+- 复跑：根目录`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_midturn_compact_prefix.py agent_py_agent/tests/test_active_turn_compact_projection.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-compactcall`；PY用指定ci-venv-312。
+- 相关13文件301通过（含主/子/后台和容量投影），guards9完整12文件194通过；ruff、doc-sync基线2f7589721、导入边界0、clean-package、常数目录957项、diff均rc0。strict尺寸通过；size_diff初报测试函数过长，拆出完整前缀与预算重放断言助手后最终新增0/消失9（rc0）；拆分后active_turn全文件35通过，其他未变测试复用301通过结果。
+- 独立审查提出main和compact同时带降档更新的条件性顺序缺口；全产品读取点只有auxiliary的compact目的设置update，主请求不设置；新运输断言明确main无update/compact确有update且整个main input逐字保留。任意后端直接调用的非产品控制组合未验证。媒体repair先于input_items，typed volatile由input_items最后追加，不靠末尾user猜。
+- 上游契约及风险见DESIGN_LEDGER的compactcall；窗口内合成前缀不外推真实命中，超窗瘦身/分段及来源不全时不承诺历史前缀。完整旧分段source期望补入原dynamic user，仍逐字比较连续源、不放宽窗口或覆盖断言；全仓及真机由07复核。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。

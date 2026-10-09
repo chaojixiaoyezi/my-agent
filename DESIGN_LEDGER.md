@@ -46,6 +46,10 @@
 
 ## 前缀纪律：主请求/压缩请求逐字同前缀、工具表只增不减（prefixdisc，07，2026-10-08；状态：第一刀（压缩请求误瘦身）与第二刀（工具表只增不减）已实现，待合 main、部署后用 .16 采集和生产账本复核）
 
+- **compactcall（2026-10-08，状态：本地修复、待07复核；生产收益未验证）**：假运输定位远端历史末尾user之前误插`configuration_update`，live文字请求strip/拼接旧动态尾项。按typed布局定位新指令，旧动态项逐字转入共享messages；降档与trigger/摘要要求纯追加。preflight共享选中历史，live/归档窗口内共享选中主请求前缀，预算/运输同材料；无新开关，不动CAS/回滚。
+  两工具顺序、首尾空白及完整历史由真实serializer假运输比较；Anthropic允许缓存标记/连续user分组推进，仅承诺正文块前缀。超窗瘦身/分段及archive-only独立摘要仍可分叉，不保证全命中。
+  当前[Codex](https://raw.githubusercontent.com/openai/codex/03b761dca9b04f47e166494232d70b3fe7c6738a/codex-rs/core/src/compact_remote_v2_attempt.rs)普通Responses追加末尾trigger，工具在历史时复用历史目录，否则用模型工具表。官方[compact请求类型](https://raw.githubusercontent.com/openai/openai-python/8e1fd2587deae364367e791385997ab45aa2a520/src/openai/types/responses/response_compact_params.py)未声明顶层tools/tool_choice/parallel_tool_calls/stream，不硬塞；仍只在现有已声明的订阅Responses能力上用tools+trigger。未知字段接受性、生产16%根因与收益未验证。
+
 - **midturn（2026-10-08，状态：07 已复核，已随 step17ye 于 2026-10-08 17:58 上线，生产命中待统计）**：两回合原生工具重放证实压缩项从用户轮后迁到历史前端，两个路径均在 provider input[0] 分叉。
   选择 B：`backends.message_adapter.project_native_history_messages` 统一按 applied summary → canonical history → 当前 IR 投影；内部 IR 仍保留用户 opener 和紧随其后的 handoff。
   应用摘要只由 checkpoint/view 拥有，不存第二份 canonical 占位；文字摘要的代次标题与密文项在回合内外一致，容量、主请求及后续压缩同源。

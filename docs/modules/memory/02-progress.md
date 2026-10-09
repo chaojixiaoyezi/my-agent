@@ -1,5 +1,10 @@
 # 记忆与上下文维护状态
 
+## 压缩请求出站前缀（compactcall，2026-10-08，本地修复待07复核）
+
+- live与归档摘要保留原动态尾项完整字节，新摘要规则独立最后追加；Responses远端降档不再抢到历史user之前。preflight/native共享选中历史及工具/system，窗口内预算与运输同材料；CAS/回滚不变。
+- 完整JSON假运输覆盖远端/文字、preflight/live/active_turn、两工具顺序和首尾空白；Anthropic正文块保留而缓存标记/分组允许推进。上游契约及未验证生产收益见DESIGN_LEDGER的compactcall。
+
 ## Compact工具引用按scope流式读取（toolrefs/E11e，2026-10-08，claude/07-c1-toolrefs，本地实现、待07复核）
 
 - Compact、artifact、晋升证据回退、通用控制面及scope carried共用common权威流式读取器；apply两类引用单扫描，E11a原分行/错误口径不变。
