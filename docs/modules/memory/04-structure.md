@@ -1,12 +1,20 @@
 # Memory Structure
 
+## Curator 恢复与领取的原子临界区（mc2-e11d-race，2026-10-08）
+
+- `curator._run_once` 唯一启动路径改为 `curator_commit.recover_and_acquire(CuratorLeaseRequest)`；领取失败/竞争为 busy，恢复故障为 `CURATOR_COMMIT_RECOVERY_FAILED`，随后模型执行在锁外。原 public state.acquire 仍取自己的 state 锁；复合入口调用已持锁的 `_acquire_unlocked`，两者均重读最新 state，不保存等待前快照。
+- 锁顺序仍是 quota admission → 规范绝对路径排序的全部文件锁。发现阶段只确定候选锁集合：旧事务目标、candidate、state、当前真实日期审计分片；获取后重新枚举目录、严格重读 manifest。新增目录、目标或跨日审计片不在持锁集合时返回 busy，不恢复一半才扩大锁集合。
+- 锁内同一 lease 身份/提交状态复核 → restore → 严格事务目录清理 → `_append_unlocked` 恢复审计 → `_acquire_unlocked` 写新 lease，形成一个边界。等待者看到前者已清理的 manifest 不会重复 restore；仍在锁内删除时的真实 FileNotFoundError 不被吞掉。
+- 独立 `recover_incomplete` 复用相同恢复边界并阻塞等待；服务启动复合入口非阻塞取锁，部分取锁失败由 ExitStack 释放已取资源。成功 commit 的 best-effort 清理仍在原锁内，与严格恢复清理共用目录范围检查/删除原语，失败策略不混用。
+- manifest/state/run audit 严格校验、私有写入格式、死亡/过期判据不改；不新增配置或持久 schema。`process_identity` 不成为 B5 放行或 D2 stop 证明。回归/三项变异与真实环境未验范围见 TESTS 的 mc2-e11d-race 节。
+
 ## 网关重启后 Curator 租约接管（mc3-e11d + e11d-fix 返工，2026-10-08，分支 `worker/mc3-e11d`，待复核）
 
 - `memory_store/curator_state.stale_lease_reclaimable`（公开判据；mc4-1802 起 acquire 与事务恢复共用，不允许分叉）三条件同真——
   `host == socket.gethostname()`（与写入租约共用 `_local_hostname`）、`pid != os.getpid()`、
   `_pid_definitely_dead`（只认 `ProcessLookupError`；PermissionError 与其它 OSError 按不确定；`os.name == "nt"` 不探测）。其余情况继续等 `expires_at`。
 - `acquire`：租约未过期但持有者已确定死亡时提前接管；`curator_commit._same_live_lease`（崩溃事务恢复的 live 判定）复用同一判据——
-  持有者已死不再算 live，`_run_once` 先 `recover_incomplete` 在原锁内核对身份并恢复旧事务，再换租约开始新执行。
+  持有者已死不再算 live；mc2-e11d-race 起 `_run_once` 使用上述 `recover_and_acquire`，在同一临界区先恢复旧事务再换租约，不再分两次获取锁。
 - 接管时 `lease.recovery` 写 `stale_lease_reclaimed`（含 `previous_lease_id`/`previous_run_id`/`previous_pid`/`previous_expires_at`/`reclaimed_at`）；
   正常过期仍写 `expired_lease`（`_lease_handover_recovery` 分流）。
 - `curator_run_log._normalized_recovery` 的严格合同认 `stale_lease_reclaimed`（字段全集固定，与 `expired_lease` 同格式）；

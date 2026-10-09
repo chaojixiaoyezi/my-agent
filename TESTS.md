@@ -1,5 +1,23 @@
 # 测试与发布验收
 
+## Curator 恢复与接管竞态（mc2-e11d-race，2026-10-08，基线 efc2f3336，本地实现、待3a复核）
+
+- 来源：MC4-2201；原路径 review22 补测先复现 **12 failed / 8 passed**。锁前发现 manifest 不能成为恢复权威，恢复清理与新租约领取之间不能留下第二个执行者的接管窗口。
+- 修法：`curator_commit.recover_and_acquire` 先取 quota admission，再按规范绝对路径排序取事务全部目标、候选、state 与当日恢复审计分片锁；锁内重读严格 manifest 和最新 state，完成 restore → 严格 cleanup → 恢复审计 → 新租约领取，模型执行在锁外。新目录/目标/跨日分片不在已持锁集合时返回 busy，让下次重新发现；真实恢复 I/O 错误保留 `CURATOR_COMMIT_RECOVERY_FAILED`，不冒充模型失败。
+- 成功提交也在原目标锁内清理；成功后的 best-effort 清理与恢复时严格清理共用删除原语，但保留不同错误策略。`CuratorLeaseRequest` 只封装已有领取参数，不加配置、schema 或新的进程内权威；旧 public acquire 入口仍自行取 state 锁并读最新 state。
+- 新用例：`test_curator_recovery_race.py` 的 12 个双子进程交错（3 崩溃切点 × 2 暂停 seam × 死亡/过期）；`test_curator_recovery_critical_section.py` 覆盖清理持锁、发现后 manifest 变坏、真实目录消失异常、审计/领取持锁与取锁中途失败释放。子进程用临时真实存储与假模型，获胜者保持存活到结果观察完成，不是生产 Gateway 验收。
+- 原路径补测均未改写：review22 20 项与 review18 22 项，连同最终新增 17 项在三项变异还原后联合复跑 **59 passed**（0 失败/错误/跳过）；memory/curator 与完整 guards9 明确并集 **122 文件、1892 passed**（0 失败/错误/跳过）。两组含重叠测试，不合计为独立覆盖数；严格门禁逐项返回码见本次交接。
+- 三项变异逐次实际 pytest **rc=1**，各 1 failure、0 errors；测试后从独立备份拷回，不用 git checkout 覆盖产品改动，字节与 SHA 均相同：
+
+  | 变异 | 红测 | 实际 rc |
+  |---|---|---|
+  | M1 去掉锁内 manifest 复核，复用发现结果 | `test_manifest_changed_after_discovery_is_not_used` | 1 |
+  | M2 恢复 cleanup 移到释放临界区之后 | `test_cleanup_keeps_state_and_targets_locked` | 1 |
+  | M3 领取复用等待前 state，不读最新 state | 原 review22 `test_two_services_never_fail_or_restore_twice[False-loaded_manifest-1]`，两次模型执行且一方提交失败 | 1 |
+
+- 复现：工作树根用 ci-venv-312 的 `$PY`：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_curator_recovery_race.py agent_py_agent/tests/test_curator_recovery_critical_section.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc2-e11dr-reproduce`。原补测直接使用 review22-e11dfix 与 review18-e11d 的原文件路径。
+- 未验证：真实 Gateway 重启、真实供应商链路、线上收益、Linux/Windows 实机与全仓车道；B5 的 process_identity 仍只是记录字段，不作为授权或 D2 stop 证明。无推送、部署或真实 owner 数据访问。
+
 ## E11d 返工：mc4 review18 两个阻断（mc3-e11d-fix，2026-10-08，分支 `worker/mc3-e11d`，待复核）
 
 - **来源**：mc4 review18 判"修改后部署"，两个部署阻断——MC4-1801 新接管事实 `stale_lease_reclaimed` 没接入运行审计：

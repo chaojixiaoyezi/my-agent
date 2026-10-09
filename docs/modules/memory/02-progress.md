@@ -1,5 +1,13 @@
 # 记忆与上下文维护状态
 
+## Curator 恢复/清理/接管同临界区（mc2-e11d-race，2026-10-08，本地实现、待3a复核）
+
+- MC4-2201：原 review22 的 12 个双进程交错先红；修复不改变 mc3 的死亡/过期判据，只把 manifest 锁内重验、restore、严格 cleanup、恢复审计和 acquire 合并到 `recover_and_acquire` 同一 quota/规范文件锁边界。
+- 等待者不能复用锁前 state 或 manifest；发现集合变动/取锁竞争返回 busy，下一次重新发现。真实 cleanup/恢复 I/O 异常按恢复失败分类，尚未调用模型就不记模型失败；正常模型调用仍在临界区外。
+- 成功提交的清理也留在原锁内；public acquire 和独立恢复入口保留原职责，无新 schema、开关或单进程缓存权威。旧租约死亡/未知判据与 process_identity 的记录边界不扩张。
+- 原 review22 20 项 + review18 22 项 + 最终新增 17 项在变异还原后联合复跑 59 passed；memory/curator 与完整 guards9 并集 122 文件、1892 passed，两组均零失败/错误/跳过。三项指定变异各真实 rc1 且备份字节/SHA 还原。门禁与未验证范围见根 TESTS 同名节及交接。
+- 未验证真实 Gateway/供应商链路、线上收益、Linux/Windows 实机及全仓车道；下面 mc3 节记录前一轮返工，当前锁边界以本节和 04-structure 为准。
+
 ## 网关重启后 Curator 租约接管（mc3-e11d + e11d-fix 返工，2026-10-08，分支 `worker/mc3-e11d`，本地实现，待复核）
 
 - 生产网关 SIGTERM 关闭时 curator 线程池 `shutdown(wait=False, cancel_futures=True)` 不释放租约，`acquire` 只认 `expires_at`，

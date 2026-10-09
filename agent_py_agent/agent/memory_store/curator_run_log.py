@@ -86,16 +86,22 @@ class CuratorRunLog:
         self.runs_dir = Path(runs_dir)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
-    # LLM: Same record replay is a no-op; same record_id with different bytes is a hard
-    # collision rather than an overwrite.
+    # LLM: 普通追加自行取锁；恢复方持同一审计分片锁时共用锁内追加，不在 state 锁内另取文件锁。
     # 函数用途: 原子追加一次 Curator 运行审计。
     def append(self, record: CuratorRunRecord) -> CuratorRunRecord:
         normalized = normalize_run_record(record)
         path = run_log_path(self.runs_dir, normalized.finished_at)
         with locked_json_path(path):
-            existing = load_run_records_unlocked(path)
-            rows = merge_run_record(existing, normalized)
-            write_text_file_atomic_unlocked(path, run_records_text(rows))
+            return self._append_unlocked(normalized)
+
+    # LLM: 只能在 finished_at 对应分片锁已持有时调用；同 ID 碰撞与严格历史读取规则不变。
+    # 函数用途: 在多文件恢复临界区内落恢复审计，避免再次取 flock 及锁序倒置。
+    def _append_unlocked(self, record: CuratorRunRecord) -> CuratorRunRecord:
+        normalized = normalize_run_record(record)
+        path = run_log_path(self.runs_dir, normalized.finished_at)
+        existing = load_run_records_unlocked(path)
+        rows = merge_run_record(existing, normalized)
+        write_text_file_atomic_unlocked(path, run_records_text(rows))
         return normalized
 
     # LLM: 只读；从最新的日分片往前读，只收已结束（succeeded/failed）的记录，按完成时间新到旧，凑够 count 条即停。
