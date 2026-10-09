@@ -5,10 +5,12 @@
 预算用完，后期再空一次就直接结束回合。
 
 规则（通用，不针对模型写分支）：
-- 空正文裁决前，若自上次空正文以来至少有一次工具调用**真正执行完**（executed_tools 增长，
-  它只在 result.ok 时追加），预算恢复为 0（连续无进展仍守原硬上限 2 次）；
+- 空正文裁决前，若自上次空正文以来至少有一次工具调用**本次实际执行成功、且不是重放**
+  （fresh_successful_tools 只在 result.ok 且 handler_executed 且 operation 非 replayed 时追加），
+  预算恢复为 0（连续无进展仍守原硬上限 2 次）；
 - 判据只用结构化事实（计数、工具执行记录），不读正文或思考内容；
-- "工具调用发起了但没有结果"（archive_tool_calls 增长、executed_tools 不增长）不算进展；
+- 旧成功回执重放（ok=True 但 handler_executed=False、operation.replayed=True）不算新进展；
+- "工具调用已完成但失败"（ok=False）与"发起了但没有结果"都不算进展；
 - 与截断降档预算各自独立、互不吞掉；子代理回合走同一条裁决路径。
 
 全部用例走真实 execute_tool_loop + 真实工具执行与产品记账，只把工具 handler 换成
@@ -20,18 +22,32 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core import _tool_loop_service as loop
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
-from agent_py_agent.agent.agent_core.tool_loop.response_decision import _EMPTY_TEXT_NUDGE
+from agent_py_agent.agent.agent_core.runtime.guidance import _require_active_turn_user_reply
+from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
+    _ACTIVE_TURN_EMPTY_REPLY_NUDGE,
+    _EMPTY_TEXT_NUDGE,
+    ToolLoopRepairCounters,
+    ToolLoopResponseDecisionRequest,
+    tool_loop_response_decision,
+)
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
 from agent_py_agent.agent.backends import ModelResponse
+from agent_py_agent.agent.contracts.idempotency import operation_idempotency_key
 from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
 from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_test_call,
     execute_canonical_test_call,
     make_test_model_spec,
     make_test_protocol_snapshot,
     make_test_runtime_policy,
     runtime_snapshot_for_model_specs,
+    runtime_snapshot_for_tools,
 )
+from agent_py_agent.tests.test_tool_operation_managed_gate import _PathWriteTool, _store
 
 _READ_SPEC = make_test_model_spec(
     "read_file",
@@ -47,7 +63,8 @@ _READ_SPEC = make_test_model_spec(
 # ---------------------------------------------------------------- helpers
 
 
-# LLM: 成功工具：handler 真返回 ok=True，走产品记账后 executed_tools 增长——"真实进展"的唯一事实源。
+# LLM: 成功工具：handler 真返回 ok=True，走产品记账后 executed_tools 与 fresh_successful_tools
+#   同步增长——"真实进展"的事实源（非重放）。
 # 类用途: 注册进隔离执行器的只读计数工具（成功路径）。
 class _OkTool(BaseTool):
     __test__ = False
@@ -62,8 +79,8 @@ class _OkTool(BaseTool):
         return ToolHandlerOutcome(self.model_spec.name, True, f"read:{params['path']}")
 
 
-# LLM: 失败工具：handler 真返回 ok=False——"发起了但没有成功结果"；executed_tools 不增长，
-#   archive_tool_calls 照常增长（产品记账对每个调用都归档）。
+# LLM: 失败工具：handler 真返回 ok=False——"已完成但失败"（不是在途无结果）；executed_tools 与
+#   fresh_successful_tools 都不增长，archive_tool_calls 照常增长（产品记账对每个调用都归档）。
 # 类用途: 注册进隔离执行器的只读计数工具（失败路径）。
 class _FailTool(BaseTool):
     __test__ = False
@@ -257,6 +274,19 @@ def _nudge_count(params: ToolLoopExecuteParams) -> int:
     return sum(1 for item in params.tool_context if item == _EMPTY_TEXT_NUDGE)
 
 
+# LLM: 决策层直接驱动的辅助（T6/T7 用）：构造预算计数与裁决请求，走真实 tool_loop_response_decision。
+# 函数用途: 构造一份空正文预算计数（可选进展水位）。
+def _counters(used: int, marker: int = 0) -> ToolLoopRepairCounters:
+    return ToolLoopRepairCounters(empty_text_repairs=used, empty_text_progress_marker=marker)
+
+
+# 函数用途: 直接调用真实响应裁决，返回决策对象。
+def _decide(agent, params, response, counters):
+    return tool_loop_response_decision(
+        ToolLoopResponseDecisionRequest(agent, params, response, counters)
+    )
+
+
 # ---------------------------------------------------------------- 1. 有进展 → 预算恢复
 
 # LLM: 旧语义下第 3 次空正文就结束（预算整轮累计 2 次）；新语义下每次空正文之前只要有一次
@@ -377,12 +407,14 @@ def test_subagent_scope_gets_same_progress_reset(monkeypatch, tmp_path) -> None:
     assert _nudge_count(params) == 3
 
 
-# ---------------------------------------------------------------- 5. 发起但无结果 ≠ 进展
+# ---------------------------------------------------------------- 5. 已完成但失败 ≠ 进展
 
-# LLM: "工具调用发起了但没有成功结果"（executed_tools 不增长、archive_tool_calls 增长）不算
-#   真实进展：空正文预算不被恢复，连续空仍守硬上限。变异"把发起了但没有结果也算进展"由本用例抓取。
-# 函数用途: 验证失败/无结果的工具调用不重置空正文预算。
-def test_started_but_unfinished_tool_call_is_not_progress(monkeypatch, tmp_path) -> None:
+# LLM: "工具调用已完成但失败"（ok=False：executed_tools 与 fresh_successful_tools 都不增长、
+#   archive_tool_calls 增长）不算真实进展：空正文预算不被恢复，连续空仍守硬上限。
+#   变异"把已完成失败也算进展"由本用例抓取。（review36 纠正：本用例测的是已完成失败结果，
+#   不是"发起了但没有结果"的在途路径。）
+# 函数用途: 验证已完成失败的工具调用不重置空正文预算。
+def test_completed_failed_tool_call_is_not_progress(monkeypatch, tmp_path) -> None:
     tool = _FailTool()
     result, params, backend = _drive(
         monkeypatch,
@@ -390,18 +422,97 @@ def test_started_but_unfinished_tool_call_is_not_progress(monkeypatch, tmp_path)
         _Scenario(
             [
                 _empty_thinking(),  # 1 空 → nudge（空 1）
-                _tool_call(),  # 2 工具调用发起但执行失败 → 只有 archive 增长
+                _tool_call(),  # 2 工具调用完成但失败 → 只有 archive 增长
                 _empty_thinking(),  # 3 空 → 不恢复，nudge（空 2）
                 _empty_thinking(),  # 4 空 → 按原方式结束
                 _final("不该被调用"),  # 5 若被调用说明预算被错误恢复
             ],
             tool,
-            "empty-budget-unfinished",
+            "empty-budget-failed",
         ),
     )
 
-    assert backend.calls == 4, "发起了但没有结果的调用不算进展，硬上限照旧"
+    assert backend.calls == 4, "已完成失败的调用不算进展，硬上限照旧"
     assert result.final_response.text == ""
     assert params.executed_tools == [], "没有成功执行过的工具"
+    assert params.fresh_successful_tools == [], "失败不进入新鲜成功事实"
     assert len(params.archive_tool_calls) == 1, "调用本身有归档记录"
     assert _nudge_count(params) == 2
+
+
+# ---------------------------------------------------------------- 6. 旧成功回执重放 ≠ 新进展
+
+# LLM: review36 R36-1：同一操作第二次调用只读回放旧成功结果（ok=True 但 handler_executed=False、
+#   operation.replayed=True），不能算新完成的工作；空正文预算不被恢复。收编 mc4 重放探针，
+#   修复前本用例必红（错误 continue）。真实执行器 + LocalStore 操作账 + 产品记账。
+# 函数用途: 验证旧成功回执重放不恢复空正文预算（handler 不重跑）。
+def test_replayed_success_does_not_restore_empty_text_budget(tmp_path) -> None:
+    store = _store(tmp_path)
+    tool = _PathWriteTool("review_write")
+    params = _params("empty-budget-replay")
+    snapshot = runtime_snapshot_for_tools({"review_write": tool}, run_id=params.run_id)
+    params = replace(params, tool_runtime_snapshot=snapshot)
+    agent = _LoopAgent(_ScriptedBackend([]), _RecordingPrompts(), root=tmp_path)
+    operation_id = "tool_call:attempt-review:call-review"
+    key = operation_idempotency_key("attempt-review", operation_id)
+    results = []
+    for index in range(2):
+        execution = execute_canonical_test_call(
+            tmp_path,
+            tools={"review_write": tool},
+            tool_name="review_write",
+            arguments={"path": "output/review", "value": 1},
+            run_id=params.run_id,
+            call_id="call-review",
+            attempt_id="attempt-review",
+            operation_id=operation_id,
+            idempotency_key=key,
+            operation_store=store,
+            operation_store_required=True,
+            write_boundary={},
+        )
+        call = canonical_test_call(
+            snapshot,
+            "review_write",
+            {"path": "output/review", "value": 1},
+            call_id="call-review",
+            attempt_id="attempt-review",
+            operation_id=operation_id,
+            idempotency_key=key,
+        )
+        loop._record_tool_call(agent, ToolCallRecordParams(params, index + 1, 1, call, execution.result))
+        results.append(execution.result)
+
+    assert tool.calls == 1, "handler 实际只执行一次"
+    assert results[1].ok and results[1].operation.replayed, "第二次是旧成功回执重放"
+    assert results[1].handler_executed is False
+    assert params.executed_tools == ["review_write", "review_write"], "全局口径不受影响"
+    decision = _decide(agent, params, _empty_thinking(), _counters(2, marker=1))
+    assert decision.action == "break", "旧成功回执不是新完成的工作，不恢复空正文预算"
+    assert params.fresh_successful_tools == ["review_write"], "重放不进入新鲜成功事实"
+
+
+# ---------------------------------------------------------------- 7. 两处消费点一致
+
+# LLM: 两处空正文消费点（活跃用户轮回复义务 / 通用空正文）共用同一恢复后计数：
+#   新鲜成功进展恢复预算、同一成功不反复重置、无进展照旧守上限。review36 要求两处都验证。
+# 函数用途: 参数化验证两处消费点在恢复与上限上行为一致。
+@pytest.mark.parametrize("active_turn", [False, True])
+def test_both_empty_text_consumers_share_recovered_budget(tmp_path, active_turn) -> None:
+    params = _params(f"empty-budget-consumer-{int(active_turn)}")
+    if active_turn:
+        _require_active_turn_user_reply(params.live_archive_state, ["review-guidance"])
+    agent = _LoopAgent(_ScriptedBackend([]), _RecordingPrompts(), root=tmp_path)
+    used = _counters(2)
+    exhausted = _decide(agent, params, _empty_thinking(), used)
+    assert exhausted.action == "break", "预算耗尽且无新进展：收口"
+    params.fresh_successful_tools.append("read_file")  # 模拟一次新鲜成功记账
+    resumed = _decide(agent, params, _empty_thinking(), used)
+    assert resumed.action == "continue", "有新进展：恢复预算"
+    assert resumed.counters.empty_text_repairs == 1
+    expected_nudge = _ACTIVE_TURN_EMPTY_REPLY_NUDGE if active_turn else _EMPTY_TEXT_NUDGE
+    assert params.tool_context[-1] == expected_nudge, "走对应消费点的 nudge"
+    second = _decide(agent, params, _empty_thinking(), resumed.counters)
+    assert second.counters.empty_text_repairs == 2
+    third = _decide(agent, params, _empty_thinking(), second.counters)
+    assert third.action == "break", "同一成功不反复重置：再空两次仍守上限"
