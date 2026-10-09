@@ -1,4 +1,4 @@
-# LLM: 宿主材料采集与纯渲染分开；注入按原片段冻结，真实请求和容量投影共用唯一布局，渲染不得读文件、刷新状态或裁决权限。
+# LLM: 宿主材料采集与纯渲染分开；部署路径只在动态尾巴，准备时冻结；请求/容量同源，渲染不得读文件、刷新状态或裁决权限。
 # 模块用途: 先冻结主/子代理的完整提示材料，再按原文本或原生缓存布局生成模型输入。
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ class _PromptBuildFields:
 
 # LLM: 所有字段均为已采集的值；注入片段按原位置冻结，不解析正文识别来源，不另存合并副本。
 # 空字符串是显式空材料；纯渲染不得再读取配置、文件、时钟或 Router，修改布局须同步请求投影测试。
-# 类用途: 冻结完整提示并保留注入边界，让宿主只替换自己拥有的片段，真实发送与容量检查共用格式化器。
+# 类用途: 冻结完整提示及易变部署事实，让宿主只替换自己拥有的片段，真实发送与容量检查共用格式化器。
 @dataclass(frozen=True)
 class PromptRenderInput:
     system_prompt: str
@@ -112,6 +112,7 @@ class PromptRenderInput:
     # 只决定当前回合开头用“# User Task”还是“# Host Event”；None 保持原格式与字节。
     turn_trigger: object | None = None
     persona_updates: str = ""
+    deployment_context: str = ""
 
     # LLM: 冻结调用方容器，片段包括空串和内嵌换行；不得按正文去重或猜测历史来源。
     # 函数用途: 避免准备完成后修改原注入列表影响当前请求，只有新候选可以显式替换片段。
@@ -205,8 +206,8 @@ class PromptBuilder:
         return render_prepared_prompt(self.prepare_render_input(request))
 
     # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序（管理员自身开发约定会检查开发工作树是否存在），
-    #   注入列表复制为元组，纯投影只消费返回值；回合触发类型原样冻结，只影响当前回合开头的渲染。
-    # 函数用途: 把材料冻结成值对象；有线程时在已提交断点原子保存人格快照，不发请求、不猜子代理事实。
+    #   注入列表复制为元组，部署路径只采集到动态事实；纯投影只消费返回值，回合触发类型原样冻结。
+    # 函数用途: 冻结材料与当前部署位置；线程人格按已提交断点保存，部署路径不进入固定前缀。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         system_prompt = request.system_prompt_override or self.config.system_prompt
@@ -217,6 +218,7 @@ class PromptBuilder:
             owner_scope += "\n\n" + home_guide
         if self_development := _self_development_guide(self):
             owner_scope += "\n\n" + self_development
+        deployment_context = _deployment_context() if self_development else ""
         persona, updates = _thread_persona_context(self, request, task_local)
         dynamic = _dynamic_prompt_text(self, request, persona)
         injection_fragments = tuple(request.inject or ())
@@ -245,6 +247,7 @@ class PromptBuilder:
             ),
             turn_trigger=request.turn_trigger,
             persona_updates=updates,
+            deployment_context=deployment_context,
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
@@ -260,8 +263,8 @@ class PromptBuilder:
 
 
 # LLM: 真实 build 和创建前投影必须共用此纯入口；仅格式化已冻结字符串，不能补读宿主、文件或模型状态。
-#   当前回合开头由 turn_trigger 的类型决定（生命周期唤醒是“# Host Event”），普通回合字节不变。
-# 函数用途: 复现原提示字节和原生缓存来源布局，允许同一输入重复投影而不产生副作用。
+#   回合开头由 turn_trigger 决定；人格变化与部署事实只在原生动态尾巴，文本协议保留完整可读信息。
+# 函数用途: 同源渲染固定前缀及易变尾巴，同一冻结输入重复投影不补读宿主。
 def render_prepared_prompt(prepared: PromptRenderInput) -> str:
     from ..agent_core.runtime.turn_trigger import current_turn_text
 
@@ -275,7 +278,7 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
                 memory_text=prepared.memory_text, tool_recommendations=prepared.recommendations,
                 workspace_context=prepared.workspace_context, injected=prepared.injected,
                 execution_facts=prepared.execution_facts,
-            ) + ((("prompt.persona_updates", prepared.persona_updates),) if prepared.persona_updates else ()),
+            ) + _volatile_prompt_updates(prepared),
             canonical_user_turn=current_turn_text(prepared.user_prompt, prepared.turn_trigger),
         )
     return (
@@ -288,13 +291,13 @@ def render_prepared_prompt(prepared: PromptRenderInput) -> str:
         f"{prepared.tool_catalog}\n\n"
         f"{prepared.recommendations}\n\n"
         f"{prepared.task_and_transcript}\n\n"
+        f"{prepared.deployment_context + chr(10) if prepared.deployment_context else ''}"
         f"{prepared.persona_updates + chr(10) if prepared.persona_updates else ''}"
         f"{prepared.execution_facts}\n"
     )
 
 
-# LLM: Stable native content is restricted to run-invariant instructions, owner scope, prompt files,
-# persona/skill metadata, and the textual tool catalog. Request memory, clocks and history stay out.
+# LLM: 原生固定内容只含稳定指令、owner规则、内置提示/人格/Skill与工具目录；部署路径、时钟和历史都留在尾巴。
 # 函数用途: 组装原生模型请求可跨轮复用的固定前缀，供供应商缓存断点使用。
 def _native_cache_stable_prefix(
     *,
@@ -516,9 +519,9 @@ def _home_directory_guide(builder: PromptBuilder) -> str:
 # LLM: 自身开发约定只给结构化本机管理员（local/main），且本片 access_mode 已由 permission_config 映射为 full-access；
 #   self_dev_worktree 必须是已存在的 git 工作树绝对路径（有 .git），任一不满足返回空串、提示词不变。这里只写工作约定，
 #   写权限仍由 Full Access 的结构化边界裁决，文字不放宽也不收紧；子代理继承时 access_mode 降为 workspace-write，看不到这段。
-#   属于准备层（会 stat 工作树）；改动须同步 agent_config.yaml 的 self_dev_worktree 注释与 test_prompting_builder.py。
+#   属于准备层（会 stat 工作树）；具体运行包位置另冻结为部署动态段，资格和开发工作树说明仍留在稳定前缀。
 #   “不改其他检出目录”是默认约定，集成者分派并行任务时会明确指定各自的工作树（10-05 sol3 因这句拒绝分派而停工）。
-# 函数用途: 告诉管理员主代理正在运行的代码在哪（只读参考）、改自己代码去哪个开发工作树、改完怎么交接，避免读错源码目录。
+# 函数用途: 稳定说明运行代码只读、位置从动态段取；开发工作树与交接约定不随部署路径变化。
 def _self_development_guide(builder: PromptBuilder) -> str:
     config = getattr(builder, "config", None)
     raw = str(getattr(config, "self_dev_worktree", "") or "").strip()
@@ -530,13 +533,27 @@ def _self_development_guide(builder: PromptBuilder) -> str:
         return ""
     return (
         "# my-agent 自身代码\n"
-        f"- 正在运行的代码: {_builtin_prompt_root()}。部署会整体替换它，只用来核对当前行为，不在这里改。\n"
+        "- 正在运行的代码位置见动态“当前部署”段。部署会整体替换运行包，只用来核对当前行为，不在这里改。\n"
         f"- 开发工作树: {worktree}（独立分支的 git 工作树）。用户要你改 my-agent 自己的功能或修 bug 时在这里改："
         "先读相关模块、合同和测试，改完跑相关测试（不接管道），提交到当前分支，把分支名和提交号告诉用户，"
         "由集成者审核、合并和部署。不推送远端，不切换分支，不改其他检出目录；"
         "集成者在任务里明确指定了别的工作树时，就在那个工作树里做。\n"
         "- 只调参数时用 user_config 工具，不手改配置文件。"
     )
+
+
+# LLM: 只由通过原管理员/Full Access/工作树资格的准备层调用；实际位置冻结为值，不赋予文件权限。
+# 函数用途: 把随部署变化的运行包位置放进动态上下文，保留模型核对当前代码的能力。
+def _deployment_context() -> str:
+    return f"# 当前部署\n- 正在运行的代码: {_builtin_prompt_root()}。仅作只读参考，不在运行包里改。"
+
+
+# LLM: 分段来源由宿主字段明确给出，不解析正文；复用RuntimeFacts尾巴机制，准备和预算不另采集部署位置。
+# 函数用途: 生成非空的人格差异与部署事实动态段，固定系统前缀不携带这些值。
+def _volatile_prompt_updates(prepared: PromptRenderInput) -> tuple[tuple[str, str], ...]:
+    return tuple((source, text) for source, text in (
+        ("prompt.persona_updates", prepared.persona_updates), ("prompt.deployment", prepared.deployment_context),
+    ) if text)
 
 
 # LLM: Skill 展示选择通过当前 request 传递；不影响 prompt 文件、owner 上下文和隔离范围。

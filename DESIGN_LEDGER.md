@@ -55,11 +55,17 @@
 
 ## 前缀纪律：主请求/压缩请求逐字同前缀、工具表只增不减（prefixdisc，07，2026-10-08；状态：第一刀（压缩请求误瘦身）与第二刀（工具表只增不减）已实现，待合 main、部署后用 .16 采集和生产账本复核）
 
-- **midturn（2026-10-08，状态：本地实现、待 07 复核）**：两回合原生工具重放证实压缩项从用户轮后迁到历史前端，两个路径均在 provider input[0] 分叉。
+- **midturn（2026-10-08，状态：07 已复核，已随 step17ye 于 2026-10-08 17:58 上线，生产命中待统计）**：两回合原生工具重放证实压缩项从用户轮后迁到历史前端，两个路径均在 provider input[0] 分叉。
   选择 B：`backends.message_adapter.project_native_history_messages` 统一按 applied summary → canonical history → 当前 IR 投影；内部 IR 仍保留用户 opener 和紧随其后的 handoff。
   应用摘要只由 checkpoint/view 拥有，不存第二份 canonical 占位；文字摘要的代次标题与密文项在回合内外一致，容量、主请求及后续压缩同源。
   假 Responses 两回合已验证第一回合末次请求全部 13 项作为下一次请求前缀，推理与工具对不拆；无新开关。真实供应商顺序接受与生产缓存收益未验证。
   详见 [回合中途压缩的跨回合布局](docs/design/CONVERSATION_CONTEXT_DESIGN.md#回合中途压缩的跨回合布局midturn)。
+- **deployprefix（2026-10-08，状态：本地实现、待 07 复核）**：运行包实际路径从固定 owner_scope 移至 `prompt.deployment` 动态事实；
+  开发工作树及“运行包只读”约定保持稳定。准备层冻结实际位置，真实发送/容量共用纯 renderer，不靠模型自行猜解释器或源码目录。
+  资格仍是 local/main + Full Access + 有效开发工作树；不加开关、不读取生产正文。两份同内容运行包红测转绿，固定前缀逐字相同、尾巴含各自实际路径。
+  盘点覆盖 system/owner/prompt来源/Skill名卡/工具说明，时间和cwd原已在动态层，未发现其它自身部署/重启元数据进入固定前缀，细项见 TESTS。
+  **验收预期（steer1）**：修复首次上线仍会断一次缓存（固定前缀的路径从有变无）；再下一次部署起，在提示正文/工具表等不变时不再因部署路径断前缀。
+  这不是保证永不失效；实际供应商缓存收益、真实重启/Gateway/TUI仍未验证，需 07 沙箱外复核。
 
 - **personafreeze（2026-10-08，状态：本地实现、待 07 复核）**：默认开启 `thread_prompt_prefix_freeze_enabled`，目前只冻结
   AGENTS/SOUL/USER 的安全渲染段及诊断。唯一快照为 `<owner_home>/persona/thread_prefix/<thread_id>.json`，不进线程 JSON；
@@ -103,7 +109,7 @@
 
 ## 压缩请求装进窗口、复用主请求前缀、降档不破坏缓存（compactfit，07，2026-10-08；状态：已部署生产 step17x/17xa（10-08）；隔离真机 sol 压缩调用命中 83–89%、astra 91%、MiniMax 12 秒；生产复盘发现第 8 条（预算按校准口径计量），待合 main 后随下次部署）
 
-- **索引读取跟进 E11e（toolrefs，2026-10-08，本地实现、待07复核）**：收尾/压缩、artifact、晋升证据回退、通用控制面及scope carried共用common权威逐行读取/安全预筛，E11a原合同保留；apply两类引用两扫→单扫。原scope/重复/投影/schema/权限/写入不变；toolrefs-2依07审核删除Python词法校验器，合法性沿C解析后立即丢弃，规范POSIX路径快路避免Path对象分配，无效ref异常扫描不收集历史全集。错误顺序、路径与换行反例已实测修复；最新相关回归/门禁见任务RESULT。8入口独立无tracemalloc交错median3均不超过真基线9e843077d+10%，峰值约222万字节，完整数值见TESTS；晋升旧峰值本来低，不宣称所有入口变快。路径对照只证明稳定文件系统，扫描中外部symlink变更不提供事务快照保证，Windows运行未验证。另发现每个外置工具无富展示时的display归档也读索引，07的模型read_artifact6–31/h未覆盖它；收尾5–11/h不能解释约50/h RSS跳涨。全部调用链/频率表在TESTS，生产836MB/4000根与完整Gateway/RSS未验证，无缓存或新增截断，不据合成结果宣称已部署。
+- **索引读取跟进 E11e（toolrefs，2026-10-08，07 已复核，已随 step17ye 于 2026-10-08 17:58 上线，生产内存待 3a 采样）**：收尾/压缩、artifact、晋升证据回退、通用控制面及scope carried共用common权威逐行读取/安全预筛，E11a原合同保留；apply两类引用两扫→单扫。原scope/重复/投影/schema/权限/写入不变；toolrefs-2依07审核删除Python词法校验器，合法性沿C解析后立即丢弃，规范POSIX路径快路避免Path对象分配，无效ref异常扫描不收集历史全集。错误顺序、路径与换行反例已实测修复；最新相关回归/门禁见任务RESULT。8入口独立无tracemalloc交错median3均不超过真基线9e843077d+10%，峰值约222万字节，完整数值见TESTS；晋升旧峰值本来低，不宣称所有入口变快。路径对照只证明稳定文件系统，扫描中外部symlink变更不提供事务快照保证，Windows运行未验证。另发现每个外置工具无富展示时的display归档也读索引，07的模型read_artifact6–31/h未覆盖它；收尾5–11/h不能解释约50/h RSS跳涨。全部调用链/频率表在TESTS，生产836MB/4000根与完整Gateway/RSS未验证，无缓存或新增截断，不据合成结果宣称已部署。
 
 - **来由**：sol/astra 一次自动压缩 10～33 分钟（mc1/mc2/mc4、luna4 任务 2 实测），期间工人一半时间在压缩；MiniMax 同样中招。根因是算术：
   单次缓存面请求的预算 = 窗口 − 输出预留，预留按主请求在构造期用 128k 默认窗口算出的 32000；27.2 万窗口按用户定的 90% 触发
@@ -730,6 +736,7 @@
 - **active-turn边界**（2026-10-05 起由 compactcache 取代：有缓存分叉时复用主请求前缀，下述只在结构化条件不满足时成立）：该摘要只合并上一代 thread summary 与当前选中的工具 IR，不携带完整主线程 provider history；因此明确不承诺主请求缓存前缀。为此请求显式发送空工具目录与 `ToolChoice.none("active_turn_summary_no_prefix")`；bounded 路径只对非空工具目录强制 `auto`，空目录的 none 保持至出站，避免无谓工具选择与额外重试。真实 HTTP 假传输测试检查出站字段、一次请求完成；将 active-turn 改回带 surface.tools 的单次变异被 none 断言抓红。
 - **区分其他路径**：完整缓存面可复用的单次 transcript/tool-loop 摘要仍保留 system/tools/history 与 `auto`；结构化工具调用不执行，走已有的一次无工具/`none`重试。超窗分段、active-turn 窄视图和 `compact_carried_summary` 均不宣称与主请求共享完整前缀。
 - **证据边界**：当前只有本地 Gateway/假传输及缓存模拟器证据；真实 DeepSeek 缓存命中率、服务端计费和实际节省未验证，不以旧估算冒充实测。完整测试与门禁结果见 `TESTS.md` 本节后续记录。
+
 ## B7 第四段：老格式插件启动复核与 restricted 经统一底座施加（opp6，2026-10-05，WIP，待沙箱外复跑与终审）
 
 - **实现**：`plugin_permissions/sandbox.py` 重写为 `legacy_launch_policy(owner, installation)`：每次启动读固定 `permission_json`，重算插件/包/激活身份、激活计划（canonical JSON 全等）、受限根 inode 与程序内容（`permission_paths` 重读）、解释器事实（`verified_runtime_command`，stat 优先）、模式与网络；变化抛结构化 `LegacyLaunchDenied`（`legacy_permission_changed`/`legacy_permission_missing`/`legacy_permission_invalid`）。`installation_ref` 随提交漂移，只用于确认码绑定，不作复核判据（实测坑：准备/发布后 ref 变化，最初把它当判据导致全部复核误拒）。
@@ -1235,6 +1242,7 @@
 - **不改拒绝语义**：允许/拒绝结果、状态码、既有 error/message 全部不变，只多一个可选字段。回环带错或过期凭据同样带码（9b 终审更正：代码与用例本来如此，处置同为重启客户端）；远程不可信来源、来源未知、开关关着（迁移档）不带这个码。
 - **判定只读结构化事实**：开关档位、对端 IP、凭据常量时间比对结果；不解析路径、正文或 message（g2bad 里强调的纪律）。
 - **验证与变异**：见 [TESTS](TESTS.md) 顶部「G2b 本机凭据缺失码（g2bfix1）」小节。覆盖挂闸三个入口（`/ask`、`/control`、`/client/notices`）+ 三个自判读端点 + 开关关着不变 + 远程不带码。3 个变异全被抓：① 去掉中间件的 error_code；② 去掉回环判断让远程也带码；③ 开关关着也返回码。
+
 ## B5 审批阶段的门决定承接与 interactive 取证（b5fix9b，2026-10-04，worker/b5fix9b，基于 17j 头 `4081a0df3`；ds5 复核无功能缺陷，已并入 step17k；出口用例由 luna1 b5fix9bt 补齐）
 
 - **来源**：9b 对 B5 的终审结论——拦截这一层成立，但有两条"记下的结构化事实不对"：
@@ -1568,6 +1576,7 @@
 - **验证**：见 TESTS.md 同名节（pw3 轮 3 个变异——流事件追加、Todo 落盘、迟到登记各退回普通写——全部被用例杀死；pw3r 在 17j 头 `35b1647e8` 复跑：新增 14 条用例 + 相关回归 459 passed / 1 skipped + guards9 与静态门禁全过）。
 - **pw3r 搬运说明（相对原 `cab1f7702`）**：① `scoped_locks.py` 未搬——17j 的 sclk2/sclk3 已用 `open_private_lock_beneath(exclusive=True)` 覆盖本批要做的锁记录 0600/锁目录 0700；② `constants_catalog.json` 未搬目录变更——17j 已由 3a 重新生成，本批在 17j 上重新生成核对（897 项一致）；③ `optimistic_lock.py` 恢复原样（裁定见上）；④ 显式 mkdir 点（chunk、adapter 五目录、session 根、通道目录）改用 pbfix 的 `nofollow_fs.ensure_private_dir`；⑤ 其余 17 个产品文件、测试与文档段按原样搬入。
 - **未验证**：Windows/无 dir_fd 平台未实测（与整包同一残余风险）；存量旧文件只在下次写入收紧；`http_handlers.py` 旧 /ask 与 `request_history.py` message_repairs 两点由同原语+静态核对覆盖，没有各自独立的端到端用例（入口深、依赖 handler/agent 装配）。
+
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，ds7 初审可以交终审（变异 5/5），9b 看脱敏与清洗两处，已并入 step17j）
 
 - **背景**：能力包重跑里 B 包两例不合格，都是交接文件的一个字段填错；检查程序报了错、宿主核验判失败、返工了好几次，模型还是改不对——返工提示里每条错误只有 code 和 location，看不出“应该填什么”。ds7 在做 B 包 0.3.2：检查程序的报错会带上期望值（hint），宿主不转模型就看不到。
@@ -1815,6 +1824,7 @@
 - **本就不该动的 3 条**：`claude/be-gateway-local-trust`（标题写「实施中，并入 step17i」，已注明并入）、`claude/be-m1-design`（设计稿，剩余 6 个文档提交未挑入，标题「待拆块派活」属实）、`worker/luna5-pack-guide`（标题「已完成，ae 已复审，并入 step17h」，状态本就准确）。
 - **判断口径的坑（留给后来人）**：`git cherry` 单独看会误判——挑入后若又经过返工修订，补丁就不再等价、会显示 `+`（`worker/sol56-c8c9-recover`、`worker/sol2-anthropic-budget` 都是这样），但提交信息里的 `cherry picked from commit` 映射是权威的。本轮的并入判断以映射为准，`git cherry` 只作辅助。
 - **验证**：`scripts/check_doc_sync.py` 通过（`DOC_SYNC_PASS`）、`git diff --check` 干净。纯文档改动，未跑代码测试；未改任何代码。
+
 ## 屏幕观察的 macOS 后端依赖显式钉进新 extra（2026-10-03，cux，worker/computer-use-extra `10094bb11`，3a 复审并入 step17i）
 
 - **起因（3a 定）**：J16 设计稿第 34–37 行本来要求“实施时把用到的这几个写进 computer-use extra，显式钉版本”，但一直没做——`pyproject.toml` 的 `computer-use` extra 只有上游 `computer-control-mcp==0.3.13`，装它会带进 222 个包，生产没法照仓库声明只装观察用到的那几个。
@@ -1823,6 +1833,7 @@
 - **文档**：`docs/design/computer-use.md` 顶部加“怎么装（管理员）”：两个 extra 各装什么、何时用哪个，以及**屏幕录制**与**辅助功能**两个系统权限要给“启动 Gateway 的那个终端程序”（权限认进程，换终端要重授权）。
 - **验证**：新增 `test_packaging.py::test_computer_use_observe_extra_pins_platform_dependencies`（解析 TOML，逐条核对名称/版本/平台标记，并要求无 pyautogui）；命令与结果见 TESTS。
 - **未验证**：没有真的在 macOS 上按这个 extra 装一遍并跑通截图/AX；Linux 侧也没有按新 extra（而非上游整包）重建过车道镜像。
+
 ## M 线第一期真实验收手册（m1ar，2026-10-03；手册已写，真实验收待执行）
 
 - 状态：**3a 终审通过，已并入 step17j；等 B5、B7（以及第 6.6 节要的老插件权限）合入后在沙箱外执行**。rb5：§6.5 改结果通道、加宿主侧对照、收窄异常（rb5 收口）；rb4 补全探针声明 + §6.8；rb3 落实 ds1 复审 3 条必须改**。rb3 做的是手册第三版：tmux 从 `-L` 全改 `-S`（`-L` 收名字不收路径，会把路径拼到 `/tmp/tmux-<uid>/` 下直接报错，已实地验证 `-S` 的套接字落在隔离目录且 `srw-------`）；§2 脚本加 `umask 077` 并补 macOS/Linux 两套 `stat` 权限核对（配置/三哨兵/三 zip 须 `-rw-------`、目录 `drwx------`）；版本前置统一为 B3–B9（补 B9 行）；把 `plugin_events_enabled`（B7 提供）与 `plugin_tool_gate_timeout_ms`（B5 提供）挪进 §1.1 前提清单——这两个键在 17j 里**根本不存在**，`/settings` 也管不了，只有对应分支合入后本节才成立；§6.5 附可直接复制的探针插件骨架（以 B9 Python 模板为底）。之前 rb2 段落的"待 17j 合入 B3–B8"写法随之作废。
@@ -2199,6 +2210,7 @@
 - **验证**：临时目录的 0600/0700、旧 latest 收紧、重写与字节稳定性、三项变异及所有门禁见 TESTS.md 同名节；未读取真实 owner home。
 - **9b 复审补正**：memory_archive 根或其下任一级遇到符号链接时，跳过链接所在级及下级目录 chmod，以结构化 warning 记录 `reason_code=private_directory_symlink_skipped`；四个快照/latest 文件仍用私有原子写为 0600，回合不因链接抛错。
 - **目录锚点**：build_main_context_bundle 的保存入口只准备一次目录链；显式携带 archive root、目标目录与是否跳过权限收紧的结果供首次写入、latest 刷新及合同字段重写复用，不再按 `parents[]` 反推。复审后的红绿、C1–C6 与门禁回执见 TESTS.md 同名节。
+
 ## M1 B5 第4段精确批准重跑（2026-10-04，m1b5，接 `471b7b4fc`，整体 WIP）
 
 - 第3段主/子与隔离I4已提交 `471b7b4fc4ef47a284925ad43da89edccefd1b2f`，父 `57f465dca`。本段只读原宿主write_boundary.approved_actions，外层APPROVED/approval_id/tool/run身份与内层六身份逐字段核对；auto/宿主不要求确认时也能精确跳门，不另建批准源。
@@ -2291,6 +2303,7 @@
 - **两配置项**：`plugin_events_enabled`（默认 false）、`plugin_tool_gate_timeout_ms`（默认 2000，范围 200–10000，range 在 B5 消费处收口）；都进 `USER_SETTINGS_BOUNDARY_KEYS`，模型经 `user_config` 改被拒（PARAMETER_BOUNDARY），只有用户 /settings 能改。
 - **已知边界**：Linux `--unshare-net` 在 Docker LinuxKit 车道建回环会失败（内核限制，真实主机不受影响），所以车道上断网只在 argv 上断言、不真连；收窄读在车道用 `network:true` 真进程验。证据 `~/.my-agent/decision-evidence/b7-prep-20261003/`（挂法实测）与 B7 真进程用例。
 - **验收**：真进程两平台（macOS 真 Seatbelt、Linux 车道真 bwrap），布局为“放行目录嵌在拒读根里”，真实 Python 启动 + realpath + 读自己的包/数据、读不到会话/记忆/secrets。详见 TESTS 同名节。
+
 ## 老格式插件权限（opp，2026-10-03，分支 `worker/plugin-legacy-permissions`，基于 step17i `c47d023b6`；状态：方案待 3a 定）
 
 - **本轮仅方案**：逐项盘点 `plugins/` 的 17 个样例、SDK 构建/入口模板及 v1–v7 能力，给出读/写/网络/host_api 的源码或清单依据、逐样例最小授权和兼容破坏点。没有改产品代码、配置或真实安装表，没有运行插件、连接 Gateway、做真实 TUI/飞书验收。
@@ -6246,6 +6259,7 @@
   - 用户配置里残留这些键只告警、照常加载。
   - 测试进一步锁定：dataclass 的每个字段都必须写进模板。不用的字段直接删，不在模板外保留。
 - **不变**：读取逻辑和路径解析都不变；Gateway 找不到文件时的行为也不变。
+
 ## 前端 import 链恢复（2026-09-28，分支 `claude/9a-frontend-runtimeconfig`，基于 `3e23d2da8`，已上线 step17a（main de222698b，2026-10-02））
 
 `frontend/src/data/runtimeConfig.ts`、`mockConfig.ts` 在 2026-08-15 建独立仓库（`0b6252590`）时被误删、引用方仍在用，按原结构补回最小版本：runtimeConfig 的类型改由 `frontend-runtime-config.json` 推导、不再手写字段清单，mockConfig 只从生成的配置目录派生；设置页表单项清理已在 main（`3af7c94df`），JSON 与 store 里对应已删后端键的旧字段等能跑 tsc 类型检查时再清（见 ROADMAP）。验证方式见 TESTS。
