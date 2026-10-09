@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.tests.helper_tool_ref_isolation import run_measurement_isolated
 from agent_py_agent.tests.test_tool_ref_hot_measurement import (
     assert_hot_result,
     hot_corpus,
@@ -19,7 +20,10 @@ from agent_py_agent.tests.test_tool_ref_scope_measurement import _corpus, _insta
 
 
 @pytest.mark.parametrize("mode", ["compact", "finalization", "artifact", "display", "estimate", "promotion", "control", "carry"])
-def test_same_entry_separate_peak_and_median3(tmp_path: Path, monkeypatch, mode: str) -> None:
+def test_same_entry_separate_peak_and_median3(monkeypatch, mode: str, request) -> None:
+    if run_measurement_isolated(request):
+        return
+    tmp_path: Path = request.getfixturevalue("tmp_path")
     scope_mode = mode in {"compact", "finalization"}
     index_bytes, corpus_sha256 = (_corpus if scope_mode else hot_corpus)(tmp_path)
     (tmp_path / "blobs/tool_outputs/hit-0-tool_output.txt").write_text(

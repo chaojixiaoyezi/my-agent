@@ -200,3 +200,141 @@ def test_next_compact_uses_same_layout_without_moving_handoff_or_pairs(remote):
     assert expected[3]["content"][0]["text"] == "handoff"
     assert expected[4]["content"][0] == reasoning
     assert expected[4]["content"][-1]["id"] == expected[5]["content"][0]["tool_use_id"] == "retained"
+
+
+@pytest.mark.parametrize("remote", [True, False], ids=["remote", "text"])
+def test_compactcall_captures_full_live_wire_prefix(tmp_path, monkeypatch, remote):
+    import json
+
+    agent, thread, prior = _prepare_run(tmp_path, remote)
+    business, summaries, _ = _install_fake_io(agent, thread, monkeypatch, remote)
+    # 提前触发是为了验证窗口内可共享前缀；90%+大块结果会真实超窗，另测其瘦身/分段边界。
+    agent.config.memory_compact_auto_trigger_percent = 50
+    pairs = []
+    send = agent.backend.request_json
+
+    def capture(path, payload, headers, **options):
+        previous = deepcopy(business[-1]) if business else None
+        count = len(summaries)
+        response = send(path, payload, headers, **options)
+        if len(summaries) > count:
+            pairs.append((previous, deepcopy(payload)))
+        return response
+
+    monkeypatch.setattr(agent.backend, "request_json", capture)
+    agent.run("本轮要求", params=RunParams(
+        save=False, allowed_tools=["read_file"], context_scope="conversation",
+        request_id="compactcall", run_id="compactcall",
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True, "conversation_thread_id": thread.thread_id},
+        conversation_history_seed=ConversationHistorySeed(canonical_messages=prior),
+        compact_context=AppliedCompactContext(thread.thread_id, THREAD_COMPACT_SCOPE,
+            resolve_compact_summary_view(agent, thread, THREAD_COMPACT_SCOPE)),
+    ))
+    assert pairs
+    main, compact = pairs[0]
+    def encode(value):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    a, b = main["input"], compact["input"]
+    first = next((i for i, (x, y) in enumerate(zip(a, b)) if encode(x) != encode(y)), min(len(a), len(b)))
+    print("compactcall_fork", remote, first, str(a[first])[:180] if first < len(a) else "end",
+          str(b[first])[:180] if first < len(b) else "end")
+    for field in ("instructions", "tools", "tool_choice", "reasoning"):
+        a, b = encode(main.get(field)), encode(compact.get(field))
+        mismatch = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        print("compactcall_live", remote, field, "sizes", len(a), len(b), "first_byte", mismatch,
+              "tool_count", len(main.get("tools", [])), len(compact.get("tools", [])))
+        assert a == b, field
+    a, b = main["input"], compact["input"]
+    mismatch = next((i for i, (x, y) in enumerate(zip(a, b)) if encode(x) != encode(y)), min(len(a), len(b)))
+    print("compactcall_live", remote, "input", "counts", len(a), len(b), "first_item", mismatch)
+    assert encode(b[:len(a)]) == encode(a)
+
+
+@pytest.mark.parametrize("remote", [True, False], ids=["remote", "text"])
+@pytest.mark.parametrize("last_role", ["user", "assistant"])
+def test_compactcall_captures_full_preflight_wire_prefix(tmp_path, remote, last_role):
+    import json
+
+    from agent_py_agent.agent.conversation.compact import _CompactSummaryCall, _summarize
+    from agent_py_agent.agent.conversation.compact_provider_surface import (
+        ConversationCompactModelSurface,
+        prepare_conversation_compact_provider_surface,
+    )
+
+    agent, thread, prior = _prepare_run(tmp_path, remote)
+    if last_role == "user":
+        agent.conversation_store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "历史末尾用户补充", "metadata": {}})
+        prior = provider_history_messages_from_rows(agent.conversation_store.messages.recent(thread.thread_id, limit=0))
+    payloads = []
+
+    def send(_path, payload, _headers, **_options):
+        payloads.append(deepcopy(payload))
+        output = [BLOCK["item"]] if payload["input"][-1].get("type") == "compaction_trigger" else [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "摘要"}]}]
+        return {"status": "completed", "output": output}
+
+    agent.backend.request_json = send
+    agent.run("当前用户要求", params=RunParams(
+        save=False, allowed_tools=["read_file"], context_scope="conversation", run_id="compactcall",
+        task_attributes={"conversation_thread_id": thread.thread_id},
+        conversation_history_seed=ConversationHistorySeed(canonical_messages=prior),
+    ))
+    surface = prepare_conversation_compact_provider_surface(agent, ConversationCompactModelSurface(
+        allowed_tools=("read_file",), context_scope="conversation", thread_id=thread.thread_id), run_id="compactcall")
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
+    _summarize(agent, "", {}, rows, call=_CompactSummaryCall(provider_surface=surface, thread_id=thread.thread_id))
+    main, compact = payloads[0], payloads[-1]
+    def encode(value):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    for field in ("instructions", "tools", "tool_choice", "reasoning"):
+        a, b = encode(main.get(field)), encode(compact.get(field))
+        mismatch = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        print("compactcall_preflight", remote, field, "sizes", len(a), len(b), "first_byte", mismatch,
+              "tool_count", len(main.get("tools", [])), len(compact.get("tools", [])))
+        assert a == b, field
+    count = next((i for i, item in enumerate(compact["input"]) if item.get("type") in {"configuration_update", "compaction_trigger"}), len(compact["input"]) - 1)
+    a, b = main["input"], compact["input"][:count]
+    print("compactcall_preflight", remote, last_role, "input", len(a), len(compact["input"]), "shared", len(b))
+    assert encode(a[:len(b)]) == encode(b)
+    assert len(b) == len(rows)
+
+
+@pytest.mark.parametrize("remote", [True, False])
+def test_compactcall_live_preserves_parent_volatile_item_bytes(remote):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+    from agent_py_agent.agent.backends.tool_ir import UserTurn
+    from agent_py_agent.agent.memory_archive.compact_semantic_summary import (
+        LiveToolHistorySummaryRequest,
+        summarize_live_tool_history,
+    )
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+    from agent_py_agent.tests.test_compact_remote_provider import _subscription_backend
+    from agent_py_agent.tests.test_native_tool_ir_compact_and_orphan_sweep import (
+        _valid_live_handoff,
+    )
+
+    backend, config, _ = _subscription_backend()
+    config.memory_compact_remote_enabled = remote
+    config.model_context_window_tokens = 128_000
+    payloads = []
+
+    def send(_path, payload, _headers, **_options):
+        payloads.append(deepcopy(payload))
+        output = [BLOCK["item"]] if payload["input"][-1].get("type") == "compaction_trigger" else [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": _valid_live_handoff()}]}]
+        return {"status": "completed", "output": output}
+
+    backend.request_json = send
+    prompt = CacheStructuredPrompt("稳定", " \n原动态尾巴\n ")
+    history = [{"role": "user", "content": [{"type": "text", "text": "历史"}]}]
+    backend.generate(prompt, messages=history, request_options=ProviderRequestOptions(system_instruction="系统"))
+    agent = SimpleNamespace(backend=backend, config=config)
+    summarize_live_tool_history(LiveToolHistorySummaryRequest(
+        history=[UserTurn("历史")], backend=backend, agent=agent, provider_prompt=prompt, system_instruction="系统"))
+    main, compact = payloads[0], payloads[-1]
+    assert compact["instructions"] == main["instructions"]
+    assert not any(item.get("type") == "configuration_update" for item in main["input"])
+    assert compact["input"][-2]["type"] == "configuration_update", "压缩运输确实执行降档，不只测无更新分支"
+    assert compact["input"][:len(main["input"])] == main["input"]

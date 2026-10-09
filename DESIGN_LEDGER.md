@@ -9,6 +9,12 @@
 - 失败策略：恢复时缺目录等真实 I/O 异常保留恢复失败；未调模型不记录模型失败。正常提交后的清理仍 best-effort，但留在原锁内，与严格清理共享范围检查及删除原语，不混用两种失败合同。
 - 不新增 schema/配置/全局互斥锁，不扩大 mc3 死亡/未知接管或 B5/D2 权限。原 review22/review18 未改，新增真实临时存储+假模型的双进程和持锁断言；三项变异各 rc1 且备份字节/SHA 还原。详细回归/门禁与真实环境未验证项见 TESTS。
 
+## 订阅压缩缓存路由与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
+
+- 线程typed工具搜索归档已按并集恢复，但成功模型响应仍clear加载集合，合成WS请求31→30提前改变工具前缀；删除清空与消费参数，不增加Schema权限或供应商字段，重试/取消/提交逻辑不变。
+- 真实客户端序列化的四臂捕获证明cache_key、session-id、工具/指令及全部非input字段相同；guard传播与无ContextVar预检线程重绑均已验。live完整input延伸；自动preflight首差异是已覆盖历史之后的范围尾项，详见TESTS。
+- 不将此工具缺口等同生产16%根因：客户端路由差异本地复现不出，缓存命中/供应商单独路由、TTL与部署组合仍未验证；不推送、不部署。建议07先审阅再在隔离真机捕获脱敏路由/前缀摘要。
+
 ## Curator消息/审计定位缓存（mc2-e11c，2026-10-08；本地实现、待3a复核）
 
 - 来由：E11a之后每批仍从头解析未变线程与旧审计日分片，生产任务书记录一批65秒。纯读取热修，基线725d6eb7b，走main线。
@@ -54,6 +60,10 @@
   回退路径是下一次压缩从原文重做（待真机观察）；MiniMax/DeepSeek 没有此接口，继续走 compactfit 的单次缓存面路线。
 
 ## 前缀纪律：主请求/压缩请求逐字同前缀、工具表只增不减（prefixdisc，07，2026-10-08；状态：第一刀（压缩请求误瘦身）与第二刀（工具表只增不减）已实现，待合 main、部署后用 .16 采集和生产账本复核）
+
+- **compactcall（2026-10-08，状态：本地修复、待07复核；生产收益未验证）**：假运输定位远端历史末尾user之前误插`configuration_update`，live文字请求strip/拼接旧动态尾项。按typed布局定位新指令，旧动态项逐字转入共享messages；降档与trigger/摘要要求纯追加。preflight共享选中历史，live/归档窗口内共享选中主请求前缀，预算/运输同材料；无新开关，不动CAS/回滚。
+  两工具顺序、首尾空白及完整历史由真实serializer假运输比较；Anthropic允许缓存标记/连续user分组推进，仅承诺正文块前缀。超窗瘦身/分段及archive-only独立摘要仍可分叉，不保证全命中。
+  当前[Codex](https://raw.githubusercontent.com/openai/codex/03b761dca9b04f47e166494232d70b3fe7c6738a/codex-rs/core/src/compact_remote_v2_attempt.rs)普通Responses追加末尾trigger，工具在历史时复用历史目录，否则用模型工具表。官方[compact请求类型](https://raw.githubusercontent.com/openai/openai-python/8e1fd2587deae364367e791385997ab45aa2a520/src/openai/types/responses/response_compact_params.py)未声明顶层tools/tool_choice/parallel_tool_calls/stream，不硬塞；仍只在现有已声明的订阅Responses能力上用tools+trigger。未知字段接受性、生产16%根因与收益未验证。
 
 - **midturn（2026-10-08，状态：07 已复核，已随 step17ye 于 2026-10-08 17:58 上线，生产命中待统计）**：两回合原生工具重放证实压缩项从用户轮后迁到历史前端，两个路径均在 provider input[0] 分叉。
   选择 B：`backends.message_adapter.project_native_history_messages` 统一按 applied summary → canonical history → 当前 IR 投影；内部 IR 仍保留用户 opener 和紧随其后的 handoff。

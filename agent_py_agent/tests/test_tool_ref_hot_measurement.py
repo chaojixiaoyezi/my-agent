@@ -18,11 +18,15 @@ from agent_py_agent.agent.memory_archive import control_plane
 from agent_py_agent.agent.memory_archive.artifact import reader
 from agent_py_agent.agent.memory_store.promotion import LocalStoreToolEvidenceVerifier
 from agent_py_agent.agent.tooling.artifact import ReadArtifactTool
+from agent_py_agent.tests.helper_tool_ref_isolation import run_measurement_isolated
 from agent_py_agent.tests.test_tool_ref_scope_measurement import _corpus, _install_meter
 
 
 @pytest.mark.parametrize("mode", ["artifact", "display", "estimate", "promotion", "control", "carry"])
-def test_large_hot_entry_read_work(tmp_path: Path, monkeypatch, mode: str) -> None:
+def test_large_hot_entry_read_work(monkeypatch, mode: str, request) -> None:
+    if run_measurement_isolated(request):
+        return
+    tmp_path: Path = request.getfixturevalue("tmp_path")
     index_bytes, corpus_sha256 = hot_corpus(tmp_path)
     (tmp_path / "blobs/tool_outputs/hit-0-tool_output.txt").write_text(json.dumps({"kind": "tool_output", "content": "synthetic display"}))
     stats = {"json_loads": 0, "lookups": 0, "index_opens": 0, "read_bytes": 0}

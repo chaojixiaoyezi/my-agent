@@ -504,12 +504,16 @@ def test_live_compact_cache_safe_fork_reuses_parent_request_prefix() -> None:
     assert parent_payload["tool_choice"] == {"type": "auto"}
     assert compact_payload["tool_choice"] == {"type": "auto"}
     assert "thinking" not in compact_payload
-    parent_tail = parent_payload["messages"][-1]["content"]
-    compact_tail = compact_payload["messages"][-1]["content"]
-    assert parent_tail[:-1] == compact_tail[:-1]
-    assert parent_tail[-1]["text"] == "DYNAMIC-RUNTIME-FACTS"
-    assert compact_tail[-1]["text"].startswith("DYNAMIC-RUNTIME-FACTS")
-    assert "完整替代摘要" in compact_tail[-1]["text"]
+    # Anthropic 会合并同角色尾项、推进缓存断点；正文块仍逐字延伸，不能再把旧动态事实拼进摘要指令。
+    def blocks(payload):
+        return [
+            {key: value for key, value in block.items() if key != "cache_control"}
+            for message in payload["messages"] for block in message["content"]
+        ]
+    parent_blocks, compact_blocks = blocks(parent_payload), blocks(compact_payload)
+    assert compact_blocks[:len(parent_blocks)] == parent_blocks
+    assert parent_blocks[-1] == {"type": "text", "text": "DYNAMIC-RUNTIME-FACTS"}
+    assert "完整替代摘要" in compact_blocks[-1]["text"]
     assert str(compact_payload["messages"]).count("CACHE-TASK") == 1
     assert str(compact_payload["messages"]).count(previous_summary) == 1
 

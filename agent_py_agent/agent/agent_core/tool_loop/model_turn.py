@@ -77,8 +77,8 @@ def sample_and_accept_model_response(
     return turn
 
 
-# LLM: 固定同一组请求能力完成本次采样；重试上限在首次返回后读，先恢复原输入再回收，最终prompt/response必须配对。
-# 函数用途: 组装并请求模型，遇供应商明确超限时按原策略压缩重试；仅有效业务响应消费本轮临时工具声明。
+# LLM: 固定同一组能力完成采样；工具加载集合由线程typed归档及循环持有，只增不减，不在响应边清空。
+# 函数用途: 请求模型并按原超限策略压缩重试；保持后续主请求与Compact的工具前缀，最终prompt/response成对。
 def request_model_response(
     *,
     build_prompt: Callable[[], str],
@@ -86,7 +86,6 @@ def request_model_response(
     restore_rejected_input: Callable[[], object],
     recover_context: Callable[[str], bool],
     read_overflow_retry_limit: Callable[[], int],
-    visible_loaded_tools: set[str] | None,
 ) -> tuple[str, ModelResponse]:
     prompt = build_prompt()
     response = generate_response(prompt)
@@ -103,9 +102,4 @@ def request_model_response(
         retries += 1
         prompt = build_prompt()
         response = generate_response(prompt)
-    if (
-        visible_loaded_tools is not None
-        and str(getattr(response, "runtime_status", "") or "") != "context_overflow"
-    ):
-        visible_loaded_tools.clear()
     return prompt, response

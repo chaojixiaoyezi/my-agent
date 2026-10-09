@@ -173,14 +173,13 @@ def test_request_recovery_order_and_final_prompt_pair(
         restore_rejected_input=lambda: events.append("restore"),
         recover_context=recover,
         read_overflow_retry_limit=limit,
-        visible_loaded_tools=loaded,
     )
     assert len(responses) == expected_calls
     assert prompt is prompts[-1] and response is responses[-1]
     assert events[:3] == [("build", "请求1"), ("generate", "请求1"), "limit"]
     assert events.count("limit") == 1
     assert events.count("restore") == expected_restores
-    assert loaded == (set() if expected_calls == 3 else {"read_file"})
+    assert loaded == {"read_file"}
 
 
 def test_request_failure_does_not_consume_visible_tools():
@@ -199,7 +198,6 @@ def test_request_failure_does_not_consume_visible_tools():
             restore_rejected_input=lambda: pytest.fail("不能恢复未知请求"),
             recover_context=lambda _prompt: pytest.fail("不能压缩未知请求"),
             read_overflow_retry_limit=lambda: pytest.fail("响应返回前不能读取上限"),
-            visible_loaded_tools=loaded,
         )
     assert caught.value is failure
     assert loaded == {"read_file"}

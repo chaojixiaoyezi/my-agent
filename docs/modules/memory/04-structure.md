@@ -1,5 +1,15 @@
 # Memory Structure
 
+## WS缓存路由与工具粘性（compactcall2，2026-10-08）
+
+- `tool_loop.model_turn`不再消费已加载Schema；主循环参数与typed线程归档保留同一并集，Gateway开头压缩及live冻结面复用当前工具快照，授权收紧仍由registry裁决。
+- `provider_runtime_scope`不改：主guard复制ContextVar，辅助明确thread时在执行器内重绑。合成WS捕获全部应用层头与体，preflight只覆盖checkpoint选定的canonical前缀；本轮/部署动态尾项不属于其来源，不将尾项不同解释为系统前缀分叉。
+
+## 压缩尾项独立追加（compactcall，2026-10-08）
+
+- `compact_semantic_summary._compact_cache_safe_messages`按typed布局把原volatile完整附到原历史，`_compact_cache_safe_prompt`只持新指令且保留原稳定布局。remote与bounded文字路径复用messages供预算/发送，不新增事实源或布局开关。
+- `backends.responses`按typed尾项与trigger定位降档，不能以历史最后role=user猜摘要规则；trigger最后。容量不足的旧瘦身/分段、来源不全的独立归档摘要不承诺前缀；不改checkpoint/CAS/取消/回滚。
+
 ## 工具引用 scope 流式读取（toolrefs / E11e，2026-10-08，本地实现待复核）
 
 - `common.tool_index_stream` 是E11a、Compact、artifact、晋升回退、通用控制面的唯一严格UTF-8读取器；control_plane保留兼容导出。预筛文本迭代器在需要旧合法性语义时先C解析并丢弃对象，E11a保留非候选零解析；对象迭代器C解析一次、只保留候选。Compact从四键AND选安全必要条件，最终仍原scope/旧请求回退；apply单扫描投影两类引用，scope carried也共用。artifact仅存ref/path候选，规范POSIX路径沿realpath/stat快路、其它平台及非规范路径仍原Path求值；无效ref仍扫描异常但不收集历史全集。晋升校验所有行，坏行整文件无证据，不留历史对象；资源错误/IO顺序保持原合同。已删除纯Python词法校验器，schema/权限/正文/归档写入不变，无缓存，实测及调用链见TESTS。
