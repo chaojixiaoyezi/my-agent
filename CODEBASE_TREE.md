@@ -619,7 +619,7 @@ agent_py_agent/
 |   |   |-- decision_recall.py        # 原预算后重排长期事实或追加同范围补充查询，复核来源并复用本轮上下文
 |   |   |-- decision_curator.py       # 可选用户后台分类/优先级标注，失败保留原批次且不拥有记忆写权限
 |   |   |-- decision_curator_relation.py # 同阶段的完整来源—正式条目关系建议，精确版本复查且不直接合并或晋升
-|   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 整批提交与崩溃恢复
+|   |   |-- curator_commit.py         # Daily/Candidate/state/run audit 提交与同临界区恢复接管
 |   |   |-- curator_routing.py        # 按会话主代理模型分组：挑本次处理的那组、审计事件只跟默认组、按组投影熔断游标、汇总多组结果
 |   |   |-- curator_*.py              # Curator 输入、Schema、正式记忆快照、状态与运行审计辅助模块
 |   |   |-- daily.py                  # v2 DailyMemoryEvent 稳定序列、幂等合并与按天账本
@@ -1417,6 +1417,8 @@ agent_py_agent/
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_curator_recovery_race.py  # Curator 双进程发现/清理交错与唯一恢复执行
+|   |-- test_curator_recovery_critical_section.py # Curator manifest重验、清理审计领取持锁与异常释放
 |   |-- test_curator_thread_model_routing.py # 记忆整理按会话主代理模型分组：各调各的、失败不重复落账、坏 JSON 用默认补跑、按组熔断、路由只读
 |   |-- test_curator_input_budget.py   # Curator 输入预算缩批：按最终提示实测长度截尾、尾部重放不丢、标注前缩批、预算失败不复用旧尝试形状
 |   |-- test_curator_model_not_configured.py # 没配模型的 owner：永久配置错误不原地重试、独立失败码、发现层与 Curator 同源一小时退避
