@@ -1,11 +1,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import read_json_object_report
+from ..common.json_io import (
+    locked_json_path,
+    read_json_object_report,
+    write_private_json_file_atomic_unlocked,
+)
 from ..common.value_parsing import non_negative_int, positive_int
 from .home_layout import MyAgentHomePaths
 from .owner_quota import owner_logical_usage_bytes
@@ -258,6 +262,108 @@ def owner_disk_usage(home: MyAgentHomePaths) -> OwnerDiskUsage:
     return OwnerDiskUsage(total_bytes=sum(by_root.values()), by_root=by_root)
 
 
+# LLM: 学习排除名单是 owner 级结构化数据，唯一权威位置是 memory_policy.json 的
+#   learning_exclusions 列表（一个概念一个权威位置）：curator 读消息前按 channel_conversation_id
+#   跳过名单会话；迁移工具只追加、不覆盖。文件缺失=没有排除；文件存在但读不动时返回读取错误，
+#   由调用方决定 fail 行为（curator 侧 fail-closed：本轮不学任何会话）。
+# 类用途: 保存一条学习排除会话的 channel_conversation_id 与出处。
+@dataclass(frozen=True)
+class LearningExclusionEntry:
+    channel_conversation_id: str
+    reason: str = ""
+    added_at: str = ""
+    added_by: str = ""
+
+    # 函数用途: 把一条排除条目转成 JSON 可序列化对象。
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+# LLM: 解析只认结构化字段；任何一条非法都整体作废（宁可 fail-closed 也不静默漏掉一条排除）。
+# 函数用途: 读取 owner 的学习排除会话名单，返回 (条目, 读取错误)。
+def read_learning_exclusions(
+    home: MyAgentHomePaths,
+) -> tuple[tuple[LearningExclusionEntry, ...], dict[str, object] | None]:
+    report = read_json_object_report(
+        home.owner_memory_policy_json,
+        context="owner_policy.memory_policy",
+    )
+    if report.load_error is not None:
+        return (), report.load_error
+    raw = report.payload.get("learning_exclusions")
+    if raw is None:
+        return (), None
+    if not isinstance(raw, list):
+        return (), _learning_exclusions_invalid("learning_exclusions must be a list")
+    entries: list[LearningExclusionEntry] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return (), _learning_exclusions_invalid("entry must be an object")
+        conversation_id = str(item.get("channel_conversation_id") or "").strip()
+        if not conversation_id:
+            return (), _learning_exclusions_invalid("channel_conversation_id is required")
+        entries.append(
+            LearningExclusionEntry(
+                channel_conversation_id=conversation_id,
+                reason=str(item.get("reason") or "").strip(),
+                added_at=str(item.get("added_at") or "").strip(),
+                added_by=str(item.get("added_by") or "").strip(),
+            )
+        )
+    return tuple(entries), None
+
+
+# LLM: 追加在同一把 memory_policy 文件锁内读改写；已存在的 channel_conversation_id 不重复写，
+#   名单原样保留未知键，不静默丢已有条目；读不动时拒绝写入而不是覆盖。
+# 函数用途: 幂等追加学习排除会话，返回新增条数。
+def append_learning_exclusions(
+    home: MyAgentHomePaths,
+    entries: tuple[LearningExclusionEntry, ...],
+) -> int:
+    incoming = [item for item in entries if item.channel_conversation_id]
+    if not incoming:
+        return 0
+    path = home.owner_memory_policy_json
+    with locked_json_path(path):
+        report = read_json_object_report(path, context="owner_policy.memory_policy")
+        if report.load_error is not None:
+            raise ValueError("memory policy is unreadable; refusing to append learning exclusions")
+        payload = report.payload
+        raw = payload.get("learning_exclusions")
+        if raw is None:
+            existing: list[object] = []
+        elif isinstance(raw, list):
+            existing = list(raw)
+        else:
+            raise ValueError("learning_exclusions must be a list")
+        seen = {
+            str(item.get("channel_conversation_id") or "").strip()
+            for item in existing
+            if isinstance(item, dict)
+        }
+        added = 0
+        for item in incoming:
+            if item.channel_conversation_id in seen:
+                continue
+            seen.add(item.channel_conversation_id)
+            existing.append(item.to_dict())
+            added += 1
+        if added:
+            payload["learning_exclusions"] = existing
+            write_private_json_file_atomic_unlocked(path, payload)
+        return added
+
+
+# LLM: 结构化错误只给稳定错误码和短说明，不夹带文件正文。
+# 函数用途: 生成学习排除名单的解析错误。
+def _learning_exclusions_invalid(detail: str) -> dict[str, object]:
+    return {
+        "context": "owner_policy.memory_policy.learning_exclusions",
+        "error_code": "LEARNING_EXCLUSIONS_INVALID",
+        "detail": detail,
+    }
+
+
 def _dict_value(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -327,10 +433,13 @@ def _grant_payload(grant) -> dict[str, str]:
 
 __all__ = [
     "EffectiveOwnerPolicy",
+    "LearningExclusionEntry",
     "OwnerDiskUsage",
     "OwnerPolicyBundle",
     "OwnerPolicyBundleReport",
+    "append_learning_exclusions",
     "owner_disk_usage",
+    "read_learning_exclusions",
     "read_owner_policy_bundle",
     "read_owner_policy_bundle_report",
     "resolve_effective_owner_policy",

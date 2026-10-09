@@ -270,6 +270,39 @@ class CandidateService:
                     _write_candidates_unlocked(self.path, candidates, admission=admission)
                 return changed
 
+    # LLM: 排除标记只按精确 candidate_id 写结构化原因码，不改状态、不写状态历史、不看正文；
+    #   幂等：同值重复标记不产生写入，状态机与人工审核路径都不受影响。
+    # 函数用途: 给一批候选写排除自动晋升的持久原因码，返回实际变化条数。
+    def mark_promotion_excluded(
+        self,
+        candidate_ids: list[str] | tuple[str, ...],
+        *,
+        reason: str,
+    ) -> int:
+        ids = set(normalize_string_list(candidate_ids))
+        code = str(reason or "").strip()
+        if not ids or not code:
+            return 0
+        with _quota_admission(self.quota_enforcer) as admission:
+            with locked_json_path(self.path):
+                candidates = self._load_unlocked()
+                changed = 0
+                now = utc_now_iso()
+                for index, item in enumerate(candidates):
+                    if item.candidate_id not in ids:
+                        continue
+                    if str(item.promotion_exclusion or "").strip() == code:
+                        continue
+                    candidates[index] = replace(
+                        item,
+                        promotion_exclusion=code,
+                        updated_at=now,
+                    )
+                    changed += 1
+                if changed:
+                    _write_candidates_unlocked(self.path, candidates, admission=admission)
+                return changed
+
     # LLM: retention 只按结构化 rejected/expired/superseded 状态和 updated_at 删除。
     # 函数用途: 规划超过截止时间的非活跃候选 ID，不执行删除。
     def retention_candidates(self, *, before: datetime) -> list[str]:

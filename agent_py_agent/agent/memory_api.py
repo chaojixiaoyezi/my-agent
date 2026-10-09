@@ -11,6 +11,12 @@ from .memory_store.candidate_models import (
     PROMOTION_TARGETS,
     PROPOSED_ACTIONS,
 )
+from .memory_store.agents_migration import (
+    AgentsCleanupPlan,
+    AgentsCleanupRequest,
+    apply_agents_cleanup,
+    plan_agents_cleanup,
+)
 from .memory_store.daily import DAILY_ACTORS, DAILY_EVENT_TYPES, DailyMemoryStore
 from .memory_store.lessons import LessonRepository
 from .memory_store.lifecycle import request_memory_curator_for_session_best_effort
@@ -18,6 +24,8 @@ from .memory_store.migration import MemoryMigrationService
 from .memory_store.retention import MemoryRetentionService
 
 __all__ = [
+    "AgentsCleanupPlan",
+    "AgentsCleanupRequest",
     "CANDIDATE_STATUSES",
     "DAILY_ACTORS",
     "DAILY_EVENT_TYPES",
@@ -27,5 +35,7 @@ __all__ = [
     "LessonRepository",
     "MemoryMigrationService",
     "MemoryRetentionService",
+    "apply_agents_cleanup",
+    "plan_agents_cleanup",
     "request_memory_curator_for_session_best_effort",
 ]

@@ -16,6 +16,7 @@ from typing import Any
 from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
+from .learning_exclusions import thread_is_excluded
 
 # 消息预览最多 6000 字符：多轮消息给足上下文又不过载。
 _MESSAGE_PREVIEW_CHARS = 6_000
@@ -301,11 +302,22 @@ class CuratorToolReferenceSource:
         return refs, errors
 
 
+# LLM: 消息来源包把 ConversationStore 与 owner 学习排除名单绑成一个只读输入；排除判定只影响
+#   消息收集，审计与正式记忆投影不受影响。
+# 类用途: 绑定一次消息收集的会话存储与 owner 学习排除名单。
+@dataclass(frozen=True)
+class CuratorMessageSource:
+    conversation_store: object
+    # 学习排除名单（channel_conversation_id 集合）：命中的会话在读取消息前跳过、游标不动；
+    # None 表示名单不可读的 fail-closed——本轮不收集任何会话消息，修复后从原游标重放。
+    excluded_conversation_ids: frozenset[str] | None = frozenset()
+
+
 # LLM: collection 必须用 ConversationStore 的 typed cursor read，不直接解析其文件布局。
 # 函数用途: 收集所有线程游标后的有界消息和 audit 事件。
 def collect_curator_inputs(
     *,
-    conversation_store: object,
+    message_source: CuratorMessageSource,
     audit_dir: str | Path,
     state: MemoryCuratorState,
     config: MemoryCuratorConfig,
@@ -313,7 +325,7 @@ def collect_curator_inputs(
     tool_reference_source: CuratorToolReferenceSource | None = None,
 ) -> CuratorInputBatch:
     messages, message_errors = _collect_messages(
-        conversation_store=conversation_store,
+        source=message_source,
         cursors=state.per_thread_cursors,
         limit=config.batch_message_limit,
         max_chars=config.max_input_chars,
@@ -347,25 +359,32 @@ def collect_curator_inputs(
 
 # LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
 # 两个读取能力来自同一 ConversationStore 的显式领域，不探测旧方法或建立第二份消息来源。
-# 函数用途: 收集最早仍未处理的消息直至批量/字符上限。
+# 学习排除名单在读取任何消息前生效：命中的会话整段跳过（cursor 不动），名单不可读时本轮全跳。
+# 函数用途: 收集最早仍未处理的消息直至批量/字符上限，跳过学习排除名单内的会话。
 def _collect_messages(
     *,
-    conversation_store: object,
+    source: CuratorMessageSource,
     cursors: dict[str, str],
     limit: int,
     max_chars: int,
 ) -> tuple[list[CuratorMessageInput], list[dict[str, object]]]:
+    conversation_store = source.conversation_store
     list_report = getattr(getattr(conversation_store, 'threads', None), 'list_report', None)
     after_report = getattr(getattr(conversation_store, 'messages', None), 'after_report', None)
     if not callable(list_report) or not callable(after_report):
         raise TypeError("ConversationStore lacks incremental Memory Curator read contract")
     threads, thread_errors = list_report(limit=0)
     errors: list[dict[str, object]] = [dict(item) for item in thread_errors]
+    if source.excluded_conversation_ids is None:
+        # fail-closed：名单不可读时本轮不学任何会话；消息留在原游标后，名单修复后重放。
+        return [], errors
     selected: list[CuratorMessageInput] = []
     used_chars = 0
     for thread in sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id))):
         if len(selected) >= limit or used_chars >= max_chars:
             break
+        if thread_is_excluded(thread, source.excluded_conversation_ids):
+            continue
         entries, load_errors = after_report(
             str(thread.thread_id),
             after_message_id=str(cursors.get(str(thread.thread_id)) or ""),
@@ -646,6 +665,7 @@ __all__ = [
     "CuratorFormalMemoryInput",
     "CuratorInputBatch",
     "CuratorMessageInput",
+    "CuratorMessageSource",
     "CuratorToolReferenceSource",
     "collect_curator_inputs",
 ]

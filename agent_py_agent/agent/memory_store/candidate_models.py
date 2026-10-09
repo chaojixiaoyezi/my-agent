@@ -55,6 +55,9 @@ PROMOTION_TARGETS = frozenset(
 )
 # 晋升权限由宿主按结构化 target/type/origin/action 确定性计算，模型文本/Schema 不能声明。
 # auto_eligible=可由当前 owner 的 Agent 自主尝试（仍受证据、CAS、冲突、门槛和注入扫描）；
+# AGENTS 目标例外：资格记录仍是 auto_eligible，但自动晋升在 Promotion 边界被硬拦
+# （AUTO_AGENTS_WRITE_FORBIDDEN，见 promotion._automatic_policy_block），只能由用户当前回合
+# 直接 update_persona 或 owner 本人人工复核写入。
 # manual_required 只保留给 SOUL 或根本不具备正式落点权威的候选。
 PROMOTION_MODES = frozenset({"auto_eligible", "manual_required"})
 CANDIDATE_STATUSES = frozenset(
@@ -244,6 +247,10 @@ class MemoryCandidate:
     observation_keys: list[str] = field(default_factory=list)
     status_history: list[dict[str, str]] = field(default_factory=list)
     promotion_mode: str = ""
+    # LLM: 学习来源排除的持久标记（如 LEARNING_SOURCE_EXCLUDED）：非空表示该候选不得再走任何
+    #   自动晋升路径，由排除名单同步写回；人工路径不读取它，状态机也不因此改变。
+    # 字段用途: 记录候选被排除自动晋升的结构化原因码。
+    promotion_exclusion: str = ""
 
     # LLM: 持久化前完整验证，坏行不能被部分加载后继续覆盖。
     # 函数用途: 将候选转换为 JSONL 记录。
@@ -415,8 +422,10 @@ def utc_now_iso() -> str:
 
 
 # LLM: Promotion authority is derived only from typed candidate fields. SOUL always remains
-# manual; formal user facts still require user_explicit authority, while lessons/HOT and AGENTS
-# may be maintained autonomously and remain protected by their target repositories.
+# manual; formal user facts still require user_explicit authority; lessons/HOT remain protected
+# by their target repositories. AGENTS keeps its auto_eligible eligibility record, but every
+# automatic promotion path is blocked at the promotion boundary (AUTO_AGENTS_WRITE_FORBIDDEN):
+# only the user's own update_persona turn or an owner-run manual review may write AGENTS.
 # 函数用途: 统一判断一个候选能否进入模型自主晋升链，避免 remember、curator 和子代理各写一套规则。
 def host_promotion_mode(candidate: object) -> str:
     values = candidate if isinstance(candidate, dict) else None
@@ -574,6 +583,8 @@ def validate_candidate(candidate: MemoryCandidate) -> None:
         raise ValueError("candidate status_history is required")
     if str(candidate.status_history[-1].get("status") or "") != candidate.status:
         raise ValueError("candidate status_history tail must match current status")
+    if len(str(candidate.promotion_exclusion or "")) > 120:
+        raise ValueError("candidate promotion_exclusion is too long")
 
 
 __all__ = [

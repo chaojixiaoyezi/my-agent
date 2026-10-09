@@ -13,6 +13,7 @@ from ..agent.memory_api import (
     PROPOSED_ACTIONS,
 )
 from .memory_admin_commands import (
+    cmd_memory_agents_cleanup,
     cmd_memory_candidates_list,
     cmd_memory_candidates_promote,
     cmd_memory_candidates_review,
@@ -52,6 +53,7 @@ def add_memory_admin_subcommands(sub: argparse._SubParsersAction) -> None:
     )
     areas = parser.add_subparsers(dest="memory_area", required=True)
     _add_candidate_commands(areas)
+    _add_agents_commands(areas)
     _add_curator_commands(areas)
     _add_retention_commands(areas)
     _add_doctor_command(areas)
@@ -114,6 +116,31 @@ def _add_candidate_commands(areas: argparse._SubParsersAction) -> None:
     )
     promote.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     promote.set_defaults(func=cmd_memory_candidates_promote)
+
+
+# LLM: agents 清理是一次性迁移入口：默认 dry-run，--apply 才动文件；会话名单只追加不覆盖。
+# 函数用途: 注册 AGENTS 自动晋升条目清理迁移命令。
+def _add_agents_commands(areas: argparse._SubParsersAction) -> None:
+    parser = areas.add_parser(
+        "agents",
+        help="清理由自动晋升写入 AGENTS.md 的条目（默认只读预览）",
+        description=(
+            "把由 memory-promotion 自动写入 AGENTS.md 的条目移除，并把指定会话加入学习排除名单。"
+            "任何存在非自动晋升来源记录的条目一律保护；默认 dry-run，--apply 才执行。"
+        ),
+    )
+    actions = parser.add_subparsers(dest="memory_agents_action", required=True)
+    cleanup = actions.add_parser("cleanup", help="预览或执行 AGENTS 自动晋升条目清理")
+    cleanup.add_argument("--apply", action="store_true", help="显式执行迁移；不传时只输出计划")
+    cleanup.add_argument(
+        "--conversation",
+        action="append",
+        default=[],
+        help="要加入学习排除名单的会话编号（channel_conversation_id），可重复传入",
+    )
+    cleanup.add_argument("--migration-id", help="迁移编号（默认按时间生成）；用于快照目录命名")
+    cleanup.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    cleanup.set_defaults(func=cmd_memory_agents_cleanup)
 
 
 # LLM: 审核元数据只补充 typed action/target，不允许用自由文本覆盖状态机。

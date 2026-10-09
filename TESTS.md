@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## AGENTS.md 第 0 期：自动写入硬拦、学习排除名单与清理迁移（mc3-agents0，2026-10-08，基线 f11b8f495，本地实现待复核）
+
+- 来源：生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条（开发派活会话的任务书被当成用户长期约定）。用户拍板第 0 期三件事，设计见 docs/design/PERSONA_AGENTS_OWNERSHIP.md（0a441da06）。演练全部在 pytest 隔离 HOME，未触碰真实 home。
+- 硬拦：`promotion._automatic_policy_block` 对 `promotion_target=agents` 的自动路径返回 `AUTO_AGENTS_WRITE_FORBIDDEN`，候选保持 pending_review、不丢不标失败；manual 复核路径（automatic=False）与 long_term 自动晋升不变；判定只看结构化字段。
+- 名单：owner 策略 `memory_policy.json.learning_exclusions`（只追加不覆盖，不在代码写死会话号）；`curator_inputs._collect_messages` 在读取消息前跳过名单会话（游标不动），名单不可读时 fail-closed 本轮不收集任何会话消息；`sync_learning_exclusion_marks` 给既有 pending/approved 候选写 `promotion_exclusion=LEARNING_SOURCE_EXCLUDED`；promote 自动路径拦截带标记候选；`_pending_promotable_candidate_ids` 补晋升路径同样过滤（名单不可读时不补晋升）。依赖经 `MemoryCuratorDependencies.learning_exclusions` 注入（core.py 组合根接 `curator_learning_exclusions`）。
+- 迁移：`memory agents cleanup`（默认 dry-run，`--apply` 才执行；`--conversation` 可重复、`--migration-id`、`--json`）。plan 只移出「当前文件里、来源记录全部为 memory-promotion」的条目；任何存在非 promotion 来源记录（agent_tool、system_baseline、迁移自身 batch）的 entry_id 一律保护。apply 顺序=快照（AGENTS.md/versions.jsonl/candidates.jsonl → persona/migrations/agents-migration-<id>/snapshot/ + snapshot.json）→ 归档 archive.jsonl（entry_id、candidate_id、version、内容、来源引用）→ PersonaRepository.mutate_batch 分批删除（每批 ≤32、CAS、source=migration:<id>）→ 名单追加 → record.json。幂等：重跑无可删条目即空操作、快照不覆盖、归档按 entry_id 去重、名单幂等；dry-run 输出不含条目正文。
+- 新测试：`test_agents_phase0_guard.py` 7 项（自动拦/人工过/long_term 不受影响/消息跳过+名单不可读 fail-closed/候选标记不晋升/补晋升过滤/名单不可读不补晋升）；`test_agents_cleanup_migration.py` 8 项（混合文件计数、dry-run 无正文、执行后只剩非自动+归档出处、双来源保护、幂等、快照逐字节、注入失败后重跑收敛、489/475 同规模耗时）。既有 `test_memory_promotion_v2.py` 的 agents 自动用例按新口径更新（原来断言自动成功），其余 48 项不变。
+- 同规模耗时：489 条（475 自动 + 13 agent_tool + 1 基线）合成数据，plan+apply 0.445s（含快照、归档、15 批删除）。
+- 变异 4/4 全部 rc=1 抓到并原样还原（sha256 一致）：去掉 agents 硬拦（promotion）、保护集合失效（agents_migration）、名单跳过失效（curator_inputs）、快照不写（agents_migration）。
+- 回归：本批相关 30 文件 694 项通过（curator 系列、persona/promotion/admin CLI/review18、memory 系列）；guards9 12 文件 194 项通过。`strict_gates.sh` 全过（import 边界 0、ruff、doc-sync、常数目录 --check 958 项、尺寸 strict、size_diff 新增 0、diff、clean-package）。
+- 复现：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_agents_phase0_guard.py agent_py_agent/tests/test_agents_cleanup_migration.py -q -s -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc3-agents`；PY 用 ci-venv-312。同规模耗时看 `SAME_SCALE_CLEANUP_ELAPSED` 行。
+- 未验证：真实 home 迁移演练（由 3a 部署后空跑→执行）、Gateway 端到端、生产 437 条实际清理、名单生效后的真实 curator 运行；curator 集成（_execute/run_if_due）只经单元测试，未连真实 Gateway。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。

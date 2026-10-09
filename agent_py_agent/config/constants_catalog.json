@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 957,
+  "count": 958,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4234,6 +4234,14 @@
       "unit": "",
       "category": "上限预算",
       "description": "目标匹配用的最大 ngram 阶数；阶数越高匹配越精确但索引越大（无物理单位）。"
+    },
+    {
+      "name": "_PERSONA_BATCH_OPERATIONS_COUNT",
+      "file": "agent_py_agent/agent/memory_store/agents_migration.py",
+      "value": 32,
+      "unit": "个",
+      "category": "比例阈值",
+      "description": "PersonaRepository 的 batch 硬上限是 32 条操作。"
     },
     {
       "name": "_MAX_CONDITION_CHARS",

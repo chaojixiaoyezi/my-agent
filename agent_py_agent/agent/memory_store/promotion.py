@@ -495,8 +495,9 @@ class _PromotionCommitMixin:
         raise ValueError("long_term promotion proposed_action must be add/replace/remove/merge")
 
     # LLM: USER facts require user_explicit evidence and SOUL alone requires current-turn
-    # confirmation. AGENTS may be maintained autonomously but still uses the same owner path,
-    # exact-entry CAS, quota, version history, and injection scanner.
+    # confirmation. AGENTS is written only by the user's own update_persona turn or an owner-run
+    # manual review (automatic paths are blocked with AUTO_AGENTS_WRITE_FORBIDDEN) and still uses
+    # the same owner path, exact-entry CAS, quota, version history, and injection scanner.
     # 函数用途: 通过唯一 PersonaRepository 提交人格目标。
     def _commit_persona(
         self,
@@ -651,8 +652,9 @@ class MemoryPromotionService(_PromotionCommitMixin):
             promotion_target=promotion_target,
         )
 
-    # LLM: Automatic promotion covers every host-authorized non-SOUL target. Evidence, exact
-    # mutation ids, conflicts, thresholds, temporary expiry and target repositories still fail closed.
+    # LLM: Automatic promotion covers every host-authorized non-SOUL target except AGENTS (hard
+    # blocked for automatic paths). Evidence, exact mutation ids, conflicts, thresholds, temporary
+    # expiry and target repositories still fail closed.
     # 函数用途: 核验证据并提交一个候选的正式落点。
     def promote(
         self,
@@ -679,6 +681,16 @@ class MemoryPromotionService(_PromotionCommitMixin):
                 False,
                 candidate.status,
                 "PROMOTION_MANUAL_REQUIRED",
+            )
+        # 学习来源排除标记（如 LEARNING_SOURCE_EXCLUDED）只拦自动路径：候选保持原状态、不丢；
+        # 用户显式人工复核（automatic=False）不受影响。判定只看结构化字段，不看正文。
+        exclusion_code = str(candidate.promotion_exclusion or "").strip()
+        if automatic and exclusion_code:
+            return MemoryPromotionResult(
+                candidate_id,
+                False,
+                candidate.status,
+                exclusion_code,
             )
         evidence_code = self._verify_evidence(candidate)
         if evidence_code:
@@ -870,8 +882,13 @@ class MemoryPromotionService(_PromotionCommitMixin):
 
 # LLM: Automatic policy consumes the shared host authority result plus exact mutation/conflict/scope
 # facts. It never uses confidence, prose, elapsed time, or a model-authored approval claim.
+# AGENTS is hard-blocked for every automatic path (the user writes it via update_persona or an
+# owner-run manual review only); the candidate stays pending, keeps its state, and reports a
+# stable reason code so the phase-1 migration can route it into long-term memory.
 # 函数用途: 返回空表示非 SOUL 候选可自主尝试正式写入，否则返回稳定阻塞码。
 def _automatic_policy_block(candidate: MemoryCandidate) -> str:
+    if str(candidate.promotion_target or "").strip().lower() == "agents":
+        return "AUTO_AGENTS_WRITE_FORBIDDEN"
     if host_promotion_mode(candidate) != "auto_eligible":
         return "AUTO_POLICY_AUTHORITY_REQUIRES_REVIEW"
     if candidate.proposed_action in {"replace", "remove", "merge"} and not candidate.target_entry_id:
@@ -885,8 +902,9 @@ def _automatic_policy_block(candidate: MemoryCandidate) -> str:
 
 
 # LLM: No review or autonomous path can manufacture formal user facts or SOUL authority.
-# AGENTS is intentionally model-maintainable, while temporary/session instructions still cannot
-# become a durable USER profile.
+# AGENTS is user-write-only: every automatic promotion path is blocked earlier in
+# _automatic_policy_block (AUTO_AGENTS_WRITE_FORBIDDEN), while temporary/session instructions
+# still cannot become a durable USER profile.
 # 函数用途: 返回模型自主或人工路径都不能绕过的正式事实与 SOUL/USER 权威阻塞码。
 def _absolute_authority_block(candidate: MemoryCandidate) -> str:
     if candidate.origin == "model_inferred" and candidate.promotion_target in {

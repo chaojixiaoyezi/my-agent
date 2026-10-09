@@ -41,6 +41,7 @@ from .curator_commit import (
 from .curator_formal import FormalMemorySource
 from .curator_inputs import (
     CuratorInputBatch,
+    CuratorMessageSource,
     CuratorToolReferenceSource,
     collect_curator_inputs,
 )
@@ -85,6 +86,7 @@ from .curator_state import (
 )
 from .curator_validation import CuratorCursorAdvance, next_cursors, validate_extraction
 from .daily import DailyMemoryEvent, DailyMemoryStore
+from .learning_exclusions import excluded_candidate_ids, sync_learning_exclusion_marks
 
 _LOGGER = logging.getLogger(__name__)
 _RUN_STATUSES = frozenset({"succeeded", "failed", "busy", "disabled", "not_due"})
@@ -141,6 +143,9 @@ class MemoryCuratorDependencies:
     # 记忆整理按会话的主代理模型走：组合根在“没指定整理档案”时注入，传入本批会话编号，返回各会话该用哪组模型；
     # 为 None（指定了档案、旧调用方、测试替身）时全批用 backend，与改动前一致。
     model_router: Callable[[tuple[str, ...]], CuratorModelRouting] | None = None
+    # 学习排除名单读取：返回 (被排除的 channel_conversation_id 集合, 是否不可读)；不可读时
+    # fail-closed——本轮不收集会话消息、不做补晋升，修复后从原游标重放。None 表示不启用排除。
+    learning_exclusions: Callable[[], tuple[frozenset[str], bool]] | None = None
 
 
 # LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
@@ -193,7 +198,12 @@ class _CuratorLifecycleMixin:
             return self._result(status="busy", reason=pending or "interval")
         if pending:
             return self._run_pending_when_due(state, pending, current)
-        batch = self._collect(state, include_formal=False)
+        # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
+        # 会话的旧消息误触发一次运行）；真正的收集在 _execute 里再做一次。
+        excluded_ids, _ = self._learning_exclusions_for_run()
+        batch = self._collect(
+            state, include_formal=False, excluded_conversation_ids=excluded_ids
+        )
         if batch.load_errors:
             return self.run(reason="interval", now=current)
         if batch.user_turns() >= self.config.turn_threshold:
@@ -434,31 +444,44 @@ class _CuratorExecutionMixin:
     # 同一 run 的同输入重试/缩批共享同一会话值,退出即复位。改动时同步 test_memory_curator_v2 的会话头用例。
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
-        migration_warnings = self._preflight_migration()
-        batch = self._collect(context.state_before, include_formal=True)
+        preflight_warnings = self._preflight_migration()
+        # 学习排除名单先于任何收集与晋升生效：不可读时 fail-closed（excluded_ids=None 会让消息
+        # 收集整批跳过）；非空时先把历史待定候选标记为排除，再收集本批消息。
+        excluded_ids, exclusion_warnings = self._learning_exclusions_for_run()
+        preflight_warnings = (*preflight_warnings, *exclusion_warnings)
+        if excluded_ids:
+            preflight_warnings = (
+                *preflight_warnings,
+                *self._sync_learning_exclusions(excluded_ids),
+            )
+        batch = self._collect(
+            context.state_before,
+            include_formal=True,
+            excluded_conversation_ids=excluded_ids,
+        )
         if batch.load_errors:
             raise CuratorInputError(_load_error_code(batch.load_errors))
         if not batch.messages and not batch.audit_events:
             return self._commit_batch(
-                context, batch, None, extra_warnings=migration_warnings
+                context, batch, None, extra_warnings=preflight_warnings
             )
         # 按会话的主代理模型挑出这一次处理的那组会话；没有路由时全批照旧。
         batch = _apply_route(context, batch, self.dependencies.model_router)
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
-        migration_warnings = (*migration_warnings, *fit_warnings)
+        preflight_warnings = (*preflight_warnings, *fit_warnings)
         annotate = self.dependencies.annotate_batch
         if annotate is not None:
             batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, self.config))
-            migration_warnings = (*migration_warnings, *decision_warnings)
+            preflight_warnings = (*preflight_warnings, *decision_warnings)
         attempt, validated = self._extract_for_route(context, batch)
         if attempt.shrink_attempts:
-            migration_warnings = (
-                *migration_warnings,
+            preflight_warnings = (
+                *preflight_warnings,
                 f"memory_curator_input_shrunk:{attempt.shrink_attempts}",
             )
         return self._commit_batch(
-            context, attempt.batch, validated, extra_warnings=migration_warnings
+            context, attempt.batch, validated, extra_warnings=preflight_warnings
         )
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
@@ -478,12 +501,15 @@ class _CuratorExecutionMixin:
         return ()
 
     # LLM: Formal memory 走固定子预算;due 检查省略它,实际 run 包含它而不动游标契约。
+    #   学习排除名单随消息来源包传入：名单会话在读取消息前跳过（游标不动），None 表示名单
+    #   不可读的 fail-closed（本轮不收集任何会话消息）。
     # 函数用途: 收集一次有界增量输入快照。
     def _collect(
         self,
         state: MemoryCuratorState,
         *,
         include_formal: bool,
+        excluded_conversation_ids: frozenset[str] | None = frozenset(),
     ) -> CuratorInputBatch:
         formal = ()
         formal_memory_errors: list[dict[str, object]] = []
@@ -509,7 +535,10 @@ class _CuratorExecutionMixin:
             ),
         )
         batch = collect_curator_inputs(
-            conversation_store=self.conversation_store,
+            message_source=CuratorMessageSource(
+                conversation_store=self.conversation_store,
+                excluded_conversation_ids=excluded_conversation_ids,
+            ),
             audit_dir=self.audit_dir,
             state=state,
             config=input_config,
@@ -611,7 +640,9 @@ class _CuratorExecutionMixin:
             warnings=warnings,
         )
 
-    # LLM: 晋升只消费已提交候选 ID;失败与已成功事务隔离且保持可重试。
+    # LLM: 晋升只消费已提交候选 ID;失败与已成功事务隔离且保持可重试。名单判定用结构化字段：
+    #   名单不可读时不补晋升（fail-closed），来源命中名单的候选跳过；持久标记由 _execute 的
+    #   全量同步负责，这里只做只读剔除。
     # 函数用途: 执行保守自动晋升并返回数量和稳定警告码。
     def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
         """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
@@ -624,15 +655,69 @@ class _CuratorExecutionMixin:
                 statuses={"pending_review", "approved"},
                 limit=limit,
             )
-            ids: list[str] = []
-            for row in rows:
-                mode = str(getattr(row, "promotion_mode", "") or "").strip().lower()
-                if mode != "auto_eligible":
-                    continue
-                ids.append(str(getattr(row, "candidate_id", "") or ""))
-            return ids
+            eligible = [
+                row
+                for row in rows
+                if str(getattr(row, "promotion_mode", "") or "").strip().lower()
+                == "auto_eligible"
+            ]
+            if not eligible:
+                return []
+            eligible = self._drop_excluded_promotable(eligible)
+            return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
         except Exception:
             return []
+
+    # LLM: 名单不可读时返回空（宁可不晋升也不误晋升）；判定只读结构化 refs 与通道绑定，不写标记。
+    # 函数用途: 从待晋升候选里剔除来源命中学习排除名单的条目。
+    def _drop_excluded_promotable(self, rows: list) -> list:
+        excluded_ids, unreadable = self._learning_exclusions_for_run()
+        if unreadable:
+            return []
+        if not excluded_ids:
+            return rows
+        hit_ids = excluded_candidate_ids(
+            conversation_store=self.conversation_store,
+            rows=rows,
+            excluded_conversation_ids=excluded_ids,
+        )
+        if not hit_ids:
+            return rows
+        return [
+            row
+            for row in rows
+            if str(getattr(row, "candidate_id", "") or "") not in hit_ids
+        ]
+
+    # LLM: 名单不可读（文件损坏/结构非法）时 fail-closed：返回 None 让消息收集与补晋升都跳过；
+    #   warning 码稳定，便于 run 审计回溯。依赖未注入时不排除任何会话。
+    # 函数用途: 读取本次运行的学习排除名单，返回 (排除集合或 None, 警告)。
+    def _learning_exclusions_for_run(
+        self,
+    ) -> tuple[frozenset[str] | None, tuple[str, ...]]:
+        if self.learning_exclusions is None:
+            return frozenset(), ()
+        try:
+            ids, unreadable = self.learning_exclusions()
+        except Exception:
+            return None, ("learning_exclusions_unreadable",)
+        if unreadable:
+            return None, ("learning_exclusions_unreadable",)
+        return frozenset(str(item) for item in ids if str(item).strip()), ()
+
+    # LLM: 标记同步只做结构化映射（名单会话→thread→候选 refs），失败只记 warning 不阻断策展主链。
+    # 函数用途: 把名单会话的既有待定候选标记为排除，返回可展示警告。
+    def _sync_learning_exclusions(self, excluded_ids: frozenset[str]) -> tuple[str, ...]:
+        try:
+            report = sync_learning_exclusion_marks(
+                conversation_store=self.conversation_store,
+                candidate_service=self.candidate_service,
+                excluded_conversation_ids=excluded_ids,
+            )
+        except Exception:
+            return ("learning_exclusion_sync_failed",)
+        marked = int(report.get("marked") or 0)
+        return (f"learning_exclusion_marked:{marked}",) if marked else ()
 
     def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...]]:
         if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
@@ -799,6 +884,7 @@ class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLif
         self.tool_reference_source = dependencies.tool_reference_source
         self.promotion_callback = dependencies.promotion_callback
         self.migration_service = dependencies.migration_service
+        self.learning_exclusions = dependencies.learning_exclusions
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,
