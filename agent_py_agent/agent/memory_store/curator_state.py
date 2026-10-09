@@ -50,9 +50,8 @@ class CuratorLeaseLostError(RuntimeError):
     pass
 
 
-# LLM: A single immutable object replaces a wide commit signature and prevents callers from
-# accidentally mixing cursor/count fields from different runs.
-# 类用途: 表示 Daily、Candidate 和 run audit 已准备完成后要提交的成功状态变化。
+# LLM: 同一提交绑定游标/计数与租约；retain_lease 只由仍要晋升的 Curator 设置，普通提交仍释放。
+# 类用途: 表示批次成功事实；可保留原租约供晋升尾段使用，避免迁移在尾段插入。
 @dataclass(frozen=True)
 class CuratorSuccessCommit:
     lease_id: str
@@ -66,6 +65,7 @@ class CuratorSuccessCommit:
     daily_event_count: int
     last_daily_finalize_date: str = ""
     committed_at: str = ""
+    retain_lease: bool = False
 
 
 # LLM: 只携带领取参数，不携带旧 state；整批恢复方必须持规范 state 锁再调用锁内领取。
@@ -468,8 +468,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-# LLM: lease 过期只按结构化 expires_at 判断；解析失败视为损坏而非永远占用。
-# 函数用途: 判断当前 lease 是否仍有效。
+# LLM: 旧租约按 expires_at；带执行阶段且同机持有者未确定死亡的租约不能因心跳故障被抢。
+# 函数用途: 校验期限并判断租约仍有效，保护整轮执行和晋升尾段。
 def _lease_live(lease: dict[str, object], *, now: datetime) -> bool:
     if not lease:
         return False
@@ -485,7 +485,18 @@ def _lease_live(lease: dict[str, object], *, now: datetime) -> bool:
             "memory curator lease expires_at lacks timezone",
             error_class="lease_naive_expires_at",
         )
-    return expires.astimezone(timezone.utc) > now.astimezone(timezone.utc)
+    return expires.astimezone(timezone.utc) > now.astimezone(timezone.utc) or execution_lease_protected(lease)
+
+
+# LLM: 只保护主动续租标记的执行，不改变旧租约合同；同机不确定生死保守等待，确定死亡仍走 E11d。
+# 函数用途: 为领取与事务恢复提供同一整轮执行保护判据。
+def execution_lease_protected(lease: dict[str, object]) -> bool:
+    if lease.get("phase") not in {"executing", "promotion"}:
+        return False
+    if str(lease.get("host") or "") != _local_hostname():
+        return False
+    pid = lease.get("pid")
+    return type(pid) is int and pid > 0 and not stale_lease_reclaimable(lease)
 
 
 # LLM: commit 只认精确 lease_id，run_id/reason 相似不能授权旧运行推进游标。
@@ -496,9 +507,8 @@ def _require_lease(state: MemoryCuratorState, lease_id: str) -> None:
         raise CuratorLeaseLostError("memory curator commit does not own the active lease")
 
 
-# LLM: The success projection consumes only the leased reason generation; both distinct reasons
-# and a newer request for the same reason remain durable for the next maintenance tick.
-# 函数用途: 校验租约身份、推进成功游标，并只移除本次确实处理过的触发代次。
+# LLM: 成功投影只消费本租约的原因代次；retain_lease 保留原身份到晋升结束，不重复累计提交。
+# 函数用途: 校验租约、提交游标与计数；Curator 后续晋升尚未完成时保留执行权。
 def build_success_state(
     current: MemoryCuratorState,
     commit: CuratorSuccessCommit,
@@ -547,7 +557,7 @@ def build_success_state(
         per_thread_cursors=cursors,
         last_success_at=committed_at,
         last_failure_code="",
-        active_lease={},
+        active_lease=({**current.active_lease, "phase": "promotion"} if commit.retain_lease else {}),
         processed_count=current.processed_count
         + max(0, int(commit.processed_messages))
         + max(0, int(commit.processed_audit_events)),

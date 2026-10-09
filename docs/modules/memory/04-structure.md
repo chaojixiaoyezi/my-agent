@@ -2,6 +2,8 @@
 
 ## AGENTS.md 硬拦与清理迁移（mc3-agents0，2026-10-08，本地实现待复核）
 
+> 第 4 轮（mc2-agents0r4，2026-10-09）当前结构：`agents_migration._run_cleanup` 在 quota 后取得 policy→AGENTS 外锁，`_run_cleanup_locked` 全程覆盖首次/续作重判定、摘要/尾、快照、归档、一次删除、名单、线程失效和 completed。删除复用 `persona_repository._mutate_persona_batch_locked`，公开 32 条上限不变；名单复用 `owner_policy.append_learning_exclusions_locked`。新增 `curator_lease` 用精确 ID 心跳及独立释放，成功提交保留租约至晋升尾段结束，积压补晋升经同一执行入口。下文第 3 轮锁序与一次删除已完成的说法被 review32 否定，当前统一 curator 租约→policy→人格→线程前缀，quota 先于目标锁。
+
 - `promotion`：`promote()` 在证据/状态变更前按 `promotion_target=agents` 整体拒绝（自动 `AUTO_AGENTS_WRITE_FORBIDDEN`、人工 `AGENTS_WRITE_USER_ONLY`）；`_automatic_policy_block` 同步拦自动路径；`_commit_persona` 是最终提交入口兜底（`_PromotionBlocked`）。用户当轮 `update_persona` 不经本服务、行为不变。
 - `curator`：`_CuratorPromotionMixin._pending_promotable_candidate_ids` 过滤 `promotion_target=agents` 与名单排除（fail-closed）；`_CuratorExclusionMixin` 负责名单读取/标记同步/候选过滤；`_promote_eligible` 每条候选提交前 `_recheck_exclusion_before_promotion` 重读名单（读不出跳过、命中标记并告警，核对 `learning_exclusions_revision` 修订号）；`_recovered_state` 是 recover 的 state 重建（权威链覆盖游标/审计、lease 不接管、副本不可解析时计数从审计链累计）。
 - `agents_migration`：plan 用版本账本「最后有效写入」归类 removable/ambiguous/protected（文件正文与版本历史最后记录 SHA 不一致的条目判歧义保留）；apply=快照（AGENTS.md、versions.jsonl、candidates.jsonl、memory_policy.json、archive/record、persona/backups 全树 + snapshot.json 逐文件 sha256；任何读取/复制失败在删除前中止、写完按清单读回校验）→ 归档 archive.jsonl → 分批 `mutate_batch`（≤32、CAS、`source=migration:<id>`，`expected_versions_tail` 在人格锁内核对，计划后任何写入都拒绝）→ 名单追加（续作以事务记录的原请求 conversations 为准，冲突拒绝）→ record.json；`_require_matching_digest` 绑定 dry-run 摘要（缺失 `AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED`、过期 `AGENTS_CLEANUP_PLAN_STALE`）。

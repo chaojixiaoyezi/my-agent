@@ -38,6 +38,7 @@ from .curator_state import (
     CuratorSuccessCommit,
     MemoryCuratorStateStore,
     build_success_state,
+    execution_lease_protected,
     stale_lease_reclaimable,
 )
 from .daily import (
@@ -319,6 +320,8 @@ class CuratorBatchCommitter:
             before_matches = current_exists == bool(item["existed"]) and _sha256(
                 current
             ) == str(item["before_sha256"])
+            before_matches = before_matches or (current_exists and _lease_metadata_only_change(
+                path, self.state.path, before, current))
             if before_matches:
                 continue
             after_matches = current_exists and _sha256(current) == str(item["after_sha256"])
@@ -337,6 +340,44 @@ class CuratorBatchCommitter:
         return _AdmissionContext(
             [self.candidates.quota_enforcer, self.daily.quota_enforcer], blocking=blocking
         )
+
+
+# LLM: 心跳和已退出标记不属于事务事实；只允许规范 state 中同一租约的单调续租/退出，计数和游标仍逐字段相等。
+# 函数用途: 识别事务前 state 的合法租约元数据变化，不容忍其他文件、换主或业务事实变化。
+def _lease_metadata_only_change(path: Path, state_path: Path, before: str, current: str) -> bool:
+    if path.resolve(strict=False) != state_path.resolve(strict=False):
+        return False
+    try:
+        expected, actual = json.loads(before), json.loads(current)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return False
+    old, new = expected.get("active_lease"), actual.get("active_lease")
+    if not isinstance(old, dict) or not isinstance(new, dict) or not old.get("lease_id"):
+        return False
+    if new.get("phase") not in {old.get("phase"), "interrupted"}:
+        return False
+    if not _renewal_times_advance(old, new):
+        return False
+    metadata = {"phase", "heartbeat_at", "expires_at"}
+    expected["active_lease"] = {key: value for key, value in old.items() if key not in metadata}
+    actual["active_lease"] = {key: value for key, value in new.items() if key not in metadata}
+    return actual == expected
+
+
+# LLM: 续租只延长已存在的有时区期限；畸形或倒退值不能绕开恢复冲突检查。
+# 函数用途: 校验租约心跳与期限两个字段的单调性。
+def _renewal_times_advance(before: dict, current: dict) -> bool:
+    for key in ("heartbeat_at", "expires_at"):
+        try:
+            old = datetime.fromisoformat(str(before[key]))
+            new = datetime.fromisoformat(str(current[key]))
+        except (ValueError, KeyError):
+            return False
+        if old.tzinfo is None or new.tzinfo is None or new < old:
+            return False
+    return datetime.fromisoformat(str(current["expires_at"])) >= datetime.fromisoformat(str(current["heartbeat_at"]))
 
 
 # LLM: Context ownership is isolated so the committer class stays focused and duplicate
@@ -668,11 +709,8 @@ def _assert_target(path: Path, memory_root: Path) -> None:
         raise CuratorCommitRecoveryError("curator transaction target is not a regular file")
 
 
-# LLM: A lease blocks recovery only when it belongs to the same run, has a valid future UTC
-# expiry, and its holder is not provably dead; the death check is the same function acquire
-# uses, so recovery and early lease handover can never disagree (mc4-1802). Malformed expiry
-# fails closed.
-# 函数用途: 判断事务对应的原运行是否仍合法持有 lease（未过期且持有者未确定死亡）。
+# LLM: 同一运行按期限或共享执行阶段保护阻止恢复；明确死亡仍用 E11d 原判据，坏期限拒绝。
+# 函数用途: 判断原运行仍持有租约，续租故障不得导致活跃晋升被恢复覆盖。
 def _same_live_lease(
     lease: dict[str, object],
     *,
@@ -687,7 +725,7 @@ def _same_live_lease(
         raise CuratorCommitRecoveryError("curator transaction lease expiry is invalid") from exc
     if expires.tzinfo is None:
         raise CuratorCommitRecoveryError("curator transaction lease expiry lacks timezone")
-    if expires.astimezone(timezone.utc) <= now:
+    if expires.astimezone(timezone.utc) <= now and not execution_lease_protected(lease):
         return False
     # 未过期：持有者已确定死亡时不再算 live，旧事务先在本锁内恢复、之后 acquire 才能换租约；
     # 不确定（权限/异主机/信息不全/Windows）继续保守等待，与 acquire 判据完全一致。

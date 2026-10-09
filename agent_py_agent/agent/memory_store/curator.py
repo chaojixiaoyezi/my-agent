@@ -225,9 +225,8 @@ class _CuratorLifecycleMixin:
         # 纯结构化判据:只读候选账本里 pending_review 的候选数,不解析正文。
         pending_promotable = self._pending_promotable_candidate_ids(limit=32)
         if pending_promotable:
-            promoted, _warnings = self._promote_eligible(pending_promotable)
-            if promoted:
-                return self._result(status="succeeded", reason="promote_backlog")
+            # 积压补晋升也经同一恢复/租约/提交链，不能绕过迁移互斥闸。
+            return self.run(reason="interval", now=current)
         return self._result(status="not_due", reason="interval")
 
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
@@ -557,8 +556,8 @@ class _CuratorExecutionMixin:
             batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
         return batch
 
-    # LLM: committer 最后写 state;自动晋升只在事务成功后开始,不能回溯失效其游标。
-    # 函数用途: 构造 Daily/Candidate、游标、run audit 并整批提交。
+    # LLM: committer 最后写 state 并保留租约；晋升完成才释放，不重放已提交计数或游标。
+    # 函数用途: 提交规范批次并完成晋升尾段，租约由整轮生命周期在心跳停止后释放。
     def _commit_batch(
         self,
         context: _RunContext,
@@ -600,12 +599,10 @@ class _CuratorExecutionMixin:
             raise
         except Exception as exc:
             raise CuratorBatchCommitError("curator batch commit failed") from exc
-        return self._post_commit_report(
-            context, batch, prepared, committed, extra_warnings
-        )
+        return self._post_commit_report(context, batch, prepared, committed, extra_warnings)
 
-    # LLM: 自动晋升在事务成功后执行,失败与已成功事务隔离且保持可重试。
-    # 函数用途: 提交成功后执行自动晋升并构造成功结果。
+    # LLM: 提交成功后仍持有同一租约；新候选和积压候选去重后晋升，失败不回滚已成功事务。
+    # 函数用途: 在租约尾段执行自动晋升并构造成功结果。
     def _post_commit_report(
         self,
         context: _RunContext,
@@ -626,6 +623,7 @@ class _CuratorExecutionMixin:
             and str(getattr(item, "promotion_target", "") or "").strip().lower()
             != "agents"
         ]
+        promotable = list(dict.fromkeys((*promotable, *self._pending_promotable_candidate_ids(limit=32))))
         promoted, promotion_warnings = self._promote_eligible(promotable)
         warnings = (
             *prepared.warnings,
@@ -835,9 +833,8 @@ class _CuratorRunMixin:
                 break
         return combined_run_result(results)
 
-    # LLM: 恢复、清理、审计和领取不能拆开；共享锁竞争即 busy，尚未调用模型的启动失败不能报模型失败。
-    # 返回（结果, 剩余组数）；模型执行在完整接管解锁后开始，不持文件锁进行网络调用。
-    # 函数用途: 同锁接管旧事务后执行一次 Curator 批次，返回无正文摘要。
+    # LLM: 恢复/领取同锁；执行后持续心跳到晋升尾段结束，未配置模型和共享锁竞争口径保持不变。
+    # 函数用途: 领取租约后执行整轮 Curator，在提取、提交和晋升期间维持同一租约。
     def _run_once(
         self,
         *,
@@ -859,8 +856,21 @@ class _CuratorRunMixin:
         if acquired is None:
             return self._result(status="busy", reason=reason), 0
         context = _run_context(reason, *acquired)
+        from .curator_lease import curator_lease_interruption_guard
+
+        with curator_lease_interruption_guard(self.state_store, context.lease_id):
+            return self._run_leased(context)
+
+    # LLM: 外层中断守卫覆盖主体和失败审计；普通失败沿原落账路径，晋升仍处在同一心跳范围。
+    # 函数用途: 执行已领取的一轮，提交后晋升结束才释放，普通异常记录失败。
+    def _run_leased(self, context: _RunContext) -> tuple[CuratorRunResult, int]:
+        from .curator_lease import curator_lease_heartbeat, release_curator_lease
+
         try:
-            return self._execute(context), int(context.route.get("remaining", 0) or 0)
+            with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(self.config)):
+                result = self._execute(context)
+            release_curator_lease(self.state_store, context.lease_id)
+            return result, int(context.route.get("remaining", 0) or 0)
         except Exception as exc:
             return self._commit_failure(context, exc), 0
 
@@ -1551,9 +1561,8 @@ def _failed_run_record(
     )
 
 
-# LLM: State commit count/cursor values come from the same prepared object used to build the run
-# audit, eliminating split-brain bookkeeping.
-# 函数用途: 构造事务最后写入的成功 state 变化。
+# LLM: 游标和审计同源；只在 Curator 的整轮提交设置 retain_lease，晋升后的释放不再次累计。
+# 函数用途: 构造批次成功 state，同时保留租约给后续自动晋升。
 def _success_commit(
     context: _RunContext,
     prepared: _PreparedOutputs,
@@ -1573,6 +1582,7 @@ def _success_commit(
         daily_event_count=len(prepared.daily_events),
         last_daily_finalize_date=finalize_date,
         committed_at=finished_at,
+        retain_lease=True,
     )
 
 

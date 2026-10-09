@@ -28,6 +28,7 @@ from agent_py_agent.agent.capability.persona_repository import (
     PersonaRepository,
     persona_entry_id,
 )
+from agent_py_agent.agent.memory_store import agents_migration as migration_module
 from agent_py_agent.agent.memory_store.agents_migration import (
     AgentsCleanupError,
     AgentsCleanupRequest,
@@ -392,25 +393,23 @@ def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
     home, repo, candidates = _env(tmp_path)
     for index in range(1, 41):
         _promotion_add(repo, f"自动条目 {index}。", f"scale-candidate-{index}")
-    original = PersonaRepository.mutate_batch
-    calls = {"count": 0}
+    original = migration_module._remove_batch
 
-    def flaky(self, request):
-        if calls["count"] >= 1:
-            raise RuntimeError("injected batch failure")
-        calls["count"] += 1
-        return original(self, request)
+    def flaky(*args):
+        # 一次性删除已提交、进度记录尚未写入的崩溃窗口；不依赖已取消的第二批。
+        original(*args)
+        raise RuntimeError("injected batch failure")
 
-    monkeypatch.setattr(PersonaRepository, "mutate_batch", flaky)
+    monkeypatch.setattr(migration_module, "_remove_batch", flaky)
     with pytest.raises(RuntimeError, match="injected batch failure"):
         _apply(home, repo, candidates, migration_id="m1")
 
     directory = home.owner_home_dir / "persona" / "migrations" / "agents-migration-m1"
     record = json.loads((directory / "record.json").read_text(encoding="utf-8"))
     assert record["status"] == "in_progress"
-    # 40 条自动条目按每批 32 条删除：第一批已删，剩 8 条自动 + 1 条基线。
-    assert len(repo.list_entries("agents")["entries"]) == 9
-    monkeypatch.setattr(PersonaRepository, "mutate_batch", original)
+    # 全部自动条目已删，续作不能重删、重复归档或误碰基线。
+    assert len(repo.list_entries("agents")["entries"]) == 1
+    monkeypatch.setattr(migration_module, "_remove_batch", original)
 
     report = apply_agents_cleanup(
         home_paths=home,
@@ -419,7 +418,7 @@ def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
         request=AgentsCleanupRequest(migration_id="m1"),
     )
 
-    assert report["removed_count"] == 8
+    assert report["removed_count"] == 0
     assert report["status"] == "completed"
     remaining = repo.list_entries("agents")["entries"]
     assert {item["content"] for item in remaining} == {_BASELINE_ENTRY}

@@ -1,6 +1,20 @@
 # 测试与发布验收
 
+## AGENTS 第 0 期第 4 轮：真实外层锁与晋升尾段租约（mc2-agents0r4，2026-10-09）
+
+- 来源：mc4 review32 两项 P1（3201、3202）及锁序统一任务；基线 `6eedee007` 原 26 探针为 23 过、3 业务红。
+- 做法：quota 先于文件锁，policy → AGENTS 外层锁覆盖重判定、摘要/尾、快照校验、归档、一次删除、名单、线程失效及完成记录；使用锁内批处理和名单入口，公开批次 32 条上限不变。续作只用同锁计划版本尾。
+- curator 批次提交保留租约至晋升结束，积压补晋升也走持租约执行链；心跳及精确 ID 释放不重复累计计数。
+- 活跃同机 `executing/promotion` 即使心跳失败且期限过去也不会被误收；仍用 E11d 明确死亡判据。续租不缩短未来期限，停止并 join 后复核在途错误。捕获 `KeyboardInterrupt/SystemExit` 后取消执行保护但保留原短期恢复期限；事务恢复仅容忍同一租约单调时间/退出标记变化，身份、游标、计数和其他文件仍严格检查。
+- 正式合同：`test_agents_cleanup_critical_section.py` 覆盖 500 条一次删除与全程持锁、忙 curator、续作 ABA、晋升尾段/过期/回调异常、积压晋升、周期心跳、用户并发重添。旧部分失败测试将故障点移到唯一删除提交后、进度落盘前，仍验证续作不重删、不重复归档、不碰基线。
+- 独立审查的中断活性问题先以四个主体中断和一个失败审计中断红测复现；外层守卫覆盖整个失败收尾。恢复投影另加十三个正反例（合法续租/退出、换主、换 run/PID、计数/游标改动、错误文件、坏期限、时间倒退、心跳越过期限），保留两条原仓库崩溃恢复测试的 busy→过期恢复和私有权限断言。
+- 复现：根目录、指定 ci-venv Python、隔离 HOME、`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`；pytest 两个 cleanup 文件及相关 curator/memory 文件，加 `-q --tb=short -p no:cacheprovider --basetemp=<隔离目录>`。
+- 原三项探针在持锁回调中同步等待写进程，实际外层锁会使父等子、子等锁而超时；保留原件和原始 rc=1，不声称原 26 全绿。正式合同用异步子进程及就绪屏障，退出外锁后等待，保留用户重添必须存活的业务断言。
+- 验证结果、逐条结果、变异还原 SHA 和原始门禁输出见交接。真实 home、Gateway、全仓车道及跨平台未验证；本轮不推送、不部署。
+
 ## AGENTS.md 第 0 期第 3 轮：单一临界区（mc3-agents0r3，2026-10-09，接着 b731b9b54）
+
+> 历史交接更正：该轮声称一次删除和完整外锁，但 review32 发现仍分批且外层人格锁缺失；当前锁序与实现以第 4 轮和设计 §3.6 为准。
 
 - 来源：mc4 review31（`/private/tmp/claude-501/m-mc4/review31-agents/`，13 条补测，8 条红）；任务 mc3-agents-phase0-round3.md；设计调整写进 `docs/design/PERSONA_AGENTS_OWNERSHIP.md` §3.6.1–3.6.4。演练全部在 pytest 隔离 HOME，未触碰真实 home。
 - 结构（锁序固定 curator 租约 → 人格锁 → policy 锁 → 线程前缀锁）：①迁移执行=一个临界区一次做完——curator 租约（拿不到 `AGENTS_CLEANUP_CURATOR_BUSY`）→人格锁内重判定/核对摘要与账本尾→快照校验（首次写入读回；续作逐文件 sha256+bytes，不一致 `AGENTS_CLEANUP_SNAPSHOT_TAMPERED`）→归档→一次性删除（取消分批，批间 tail 只认上一批锁内采样）→名单→失效代次→事务记录；②线程前缀锁（`persona/thread_prefix.lock`）统一 freeze「核对代次→写快照」与 expire「推进代次→失效」；③seed 初始化 O_EXCL 不覆盖 + 晋升提交在 policy 锁内复核名单；④`run_if_due` 计入 `skipped_audit_cursor`，名单不可读原因码 `learning_exclusions_unreadable` 进运行审计与返回。

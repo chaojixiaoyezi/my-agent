@@ -334,10 +334,19 @@ def _normalized_revision(payload: dict[str, object]) -> int:
         return 0
 
 
-# LLM: 追加在同一把 memory_policy 文件锁内读改写；已存在的 channel_conversation_id 不重复写，
-#   名单原样保留未知键，不静默丢已有条目；读不动时拒绝写入而不是覆盖。
-# 函数用途: 幂等追加学习排除会话，返回新增条数。
+# LLM: 普通入口获取唯一 policy 锁；迁移已持该锁时走锁内版本，避免不可重入 flock 自死锁。
+# 函数用途: 持 policy 锁幂等追加学习排除会话，返回新增条数。
 def append_learning_exclusions(
+    home: MyAgentHomePaths,
+    entries: tuple[LearningExclusionEntry, ...],
+) -> int:
+    with locked_json_path(home.owner_memory_policy_json):
+        return append_learning_exclusions_locked(home, entries)
+
+
+# LLM: 调用方必须持 home 的 policy 锁；保留未知键与原名单，坏内容拒绝写入，新增才推进修订号。
+# 函数用途: 在迁移外层 policy 临界区中原子追加排除名单，不重复取锁。
+def append_learning_exclusions_locked(
     home: MyAgentHomePaths,
     entries: tuple[LearningExclusionEntry, ...],
 ) -> int:
@@ -345,23 +354,19 @@ def append_learning_exclusions(
     if not incoming:
         return 0
     path = home.owner_memory_policy_json
-    with locked_json_path(path):
-        report = read_json_object_report(path, context="owner_policy.memory_policy")
-        if report.load_error is not None:
-            raise ValueError("memory policy is unreadable; refusing to append learning exclusions")
-        payload = report.payload
-        existing = _normalized_exclusions(payload)
-        seen = {
-            str(item.get("channel_conversation_id") or "").strip()
-            for item in existing
-            if isinstance(item, dict)
-        }
-        added = _extend_learning_exclusions(existing, incoming, seen)
-        if added:
-            payload["learning_exclusions"] = existing
-            payload["learning_exclusions_revision"] = _normalized_revision(payload) + 1
-            write_private_json_file_atomic_unlocked(path, payload)
-        return added
+    report = read_json_object_report(path, context="owner_policy.memory_policy")
+    if report.load_error is not None:
+        raise ValueError("memory policy is unreadable; refusing to append learning exclusions")
+    payload = report.payload
+    existing = _normalized_exclusions(payload)
+    seen = {str(item.get("channel_conversation_id") or "").strip()
+            for item in existing if isinstance(item, dict)}
+    added = _extend_learning_exclusions(existing, incoming, seen)
+    if added:
+        payload["learning_exclusions"] = existing
+        payload["learning_exclusions_revision"] = _normalized_revision(payload) + 1
+        write_private_json_file_atomic_unlocked(path, payload)
+    return added
 
 
 # LLM: 名单字段只接受缺失（空表）或列表；其它类型直接拒绝，不静默覆盖已有条目。

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 959,
+  "count": 958,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4241,15 +4241,7 @@
       "value": 300,
       "unit": "秒",
       "category": "比例阈值",
-      "description": "迁移租约时长：迁移本身是本地秒级操作，给足提交/恢复余量即可；异常崩溃后 curator 最多等到过期。"
-    },
-    {
-      "name": "_PERSONA_BATCH_OPERATIONS_COUNT",
-      "file": "agent_py_agent/agent/memory_store/agents_migration.py",
-      "value": 32,
-      "unit": "个",
-      "category": "比例阈值",
-      "description": "PersonaRepository 的 batch 硬上限是 32 条操作。"
+      "description": "迁移租约时长：等待目标锁和迁移全过程续租；死亡回收仍走 Curator 的共享判据。"
     },
     {
       "name": "_MAX_CONDITION_CHARS",

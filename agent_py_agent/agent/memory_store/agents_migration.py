@@ -22,23 +22,25 @@ from ..capability.persona_repository import (
     PersonaBatchMutationRequest,
     PersonaMutationRequest,
     PersonaRepository,
+    _mutate_persona_batch_locked,
     persona_entry_id,
     versions_ledger_tail,
 )
 from ..common.json_io import (
     append_private_jsonl_records,
+    locked_json_path,
     read_jsonl_objects_report,
     write_private_json_file_atomic,
     write_private_text_file_atomic,
 )
-from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions
-from .curator_state import CuratorStateCorruptError, CuratorSuccessCommit
+from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions_locked
+from ..user_space.owner_quota import OwnerQuotaAdmission
+from .curator_lease import curator_lease_heartbeat
+from .curator_state import CuratorStateCorruptError, CuratorSuccessCommit, MemoryCuratorStateStore
 
 # 自动晋升写入 Persona 时使用的来源前缀（见 promotion._commit_persona）。
 _PROMOTION_SOURCE_PREFIX = "memory-promotion:"
-# PersonaRepository 的 batch 硬上限是 32 条操作。
-_PERSONA_BATCH_OPERATIONS_COUNT = 32
-# 迁移租约时长：迁移本身是本地秒级操作，给足提交/恢复余量即可；异常崩溃后 curator 最多等到过期。
+# 迁移租约时长：等待目标锁和迁移全过程续租；死亡回收仍走 Curator 的共享判据。
 _MIGRATION_LEASE_SECONDS = 300
 _MIGRATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SNAPSHOT_META = "snapshot.json"
@@ -133,6 +135,17 @@ class _RemovalChannel:
     migration_id: str
     initial_sha: str
     on_batch: Callable[[_BatchProgress], None]
+    admission: OwnerQuotaAdmission
+
+
+# LLM: 把迁移依赖收成不可变对象，临界区内重新读事务记录，不携带锁外旧状态。
+# 类用途: 绑定迁移当前请求、规范 owner 仓库和候选来源。
+@dataclass(frozen=True)
+class _CleanupContext:
+    home_paths: object
+    persona: PersonaRepository
+    candidate_service: object
+    request: AgentsCleanupRequest
 
 
 # LLM: 完成记录与报告共用同一份计数快照，同一组数字只组装一次。
@@ -354,8 +367,7 @@ def _plan_digest(
 
 # LLM: 迁移执行在 curator 租约内进行（拿不到结构化拒绝，迁移期间不会有新的 curator 运行）；
 #   单一临界区一次做完：计划校验→快照（续作逐文件校验）→归档→删除→名单→线程快照失效→完成
-#   记录；删除按 32 条一批连续执行，批间前提用上一批锁内采样的账本尾串联（批间并发写入必然
-#   让下一批拒绝，不再被锁外重采样洗白）；apply 首次必须携带与当前计划一致的 plan_digest（防
+#   记录；删除通过人格批次的锁内入口一次完成，首次必须携带与当前计划一致的 plan_digest（防
 #   漂移），续作跳过 digest 但只处理「当前重判定 ∩ 原计划」；完成后重跑幂等返回。
 # 函数用途: 执行一次 AGENTS 清理迁移并返回结构化报告。
 def apply_agents_cleanup(
@@ -371,44 +383,43 @@ def apply_agents_cleanup(
     record = _read_record(directory)
     if _is_completed(record):
         return _completed_report(migration_id, directory, record)
+    curator_state_store = curator_state_store or MemoryCuratorStateStore(persona.owner_home / "memory/curator/state.json")
     lease = _acquire_migration_lease(curator_state_store)
     try:
-        return _run_cleanup(
-            home_paths=home_paths,
-            persona=persona,
-            candidate_service=candidate_service,
-            request=request,
-            migration_id=migration_id,
-            directory=directory,
-            record=record,
-        )
+        with curator_lease_heartbeat(curator_state_store, str(lease["lease_id"]), _MIGRATION_LEASE_SECONDS):
+            return _run_cleanup(_CleanupContext(home_paths, persona, candidate_service, request))
     finally:
         _release_migration_lease(curator_state_store, lease)
 
 
-# LLM: 临界区主体与租约生命周期分离：本函数只在租约已领取时被调用，任何异常都交给调用方
-#   释放租约后原样冒泡。
-# 函数用途: 执行迁移的计划校验、快照、归档、删除、名单与收尾记录。
-def _run_cleanup(
-    *,
-    home_paths: object,
-    persona: PersonaRepository,
-    candidate_service: object,
-    request: AgentsCleanupRequest,
-    migration_id: str,
-    directory: Path,
-    record: dict | None,
-) -> dict[str, object]:
+# LLM: 租约已领取；quota admission 先于目标锁，固定 policy→人格锁覆盖重判定到 completed。
+# 同锁入口只调用锁内写入版本；quota 关闭不能缩短人格锁，异常按相反顺序释放。
+# 函数用途: 建立迁移唯一外层临界区，首次和续作使用相同锁集合与顺序。
+def _run_cleanup(context: _CleanupContext) -> dict[str, object]:
+    persona = context.persona
+    with persona.quota_enforcer.admission() as admission:
+        with locked_json_path(context.home_paths.owner_memory_policy_json), locked_json_path(persona.path_for("agents")):
+            return _run_cleanup_locked(context, admission)
+
+
+# LLM: 调用方持 policy/quota/persona；事务记录、计划和账本尾全部来自本次锁内状态。
+# 函数用途: 同一持锁期间完成快照、归档、一次删除、名单、线程失效和耐久完成记录。
+def _run_cleanup_locked(context: _CleanupContext, admission: OwnerQuotaAdmission) -> dict[str, object]:
+    home_paths, persona = context.home_paths, context.persona
+    candidate_service, request = context.candidate_service, context.request
+    migration_id = _validated_migration_id(request.migration_id)
+    directory = _migration_dir(home_paths, migration_id)
+    record = _read_record(directory)
+    if _is_completed(record):
+        return _completed_report(migration_id, directory, record)
     plan = plan_agents_cleanup(persona=persona)
     if record is None:
         _require_matching_digest(request, plan)
         record = _new_record(migration_id, plan, request)
         _write_record(directory, record)
     else:
-        # LLM: 续作以「原计划 ∩ 当前重判定」为准，重判定已接受迁移期间的用户修改；删除阶段的
-        #   版本账本前提以当前 tail 为新基准（首启时基准来自计划），避免把恢复前的合法写入
-        #   误判成并发冲突。
-        record = _rebased_record(record, persona)
+        # 接受恢复前的合法用户修改，但只用同锁重判定已采样的尾，不另行重采样。
+        record = {**record, "updated_at": _now_iso(), "versions_tail": plan.versions_tail}
         _write_record(directory, record)
     conversations = _effective_conversations(record, request)
     snapshot = _ensure_snapshot(home_paths, directory, migration_id)
@@ -416,6 +427,8 @@ def _run_cleanup(
     snapshot_map = _snapshot_entry_contents(directory)
     archived_count = _archive_planned(directory, targets, candidate_service, snapshot_map)
 
+    # LLM: 进度写回仍在迁移外锁内；崩溃后只认耐久记录和再次重判定，不反读外部 tail。
+    # 函数用途: 将一次原子删除后的版本尾与计数保存到恢复记录。
     def on_batch(progress: _BatchProgress) -> None:
         _update_record(directory, record, progress)
 
@@ -423,6 +436,7 @@ def _run_cleanup(
         migration_id=migration_id,
         initial_sha=plan.sha256,
         on_batch=on_batch,
+        admission=admission,
     )
     removed_count = _remove_planned(persona, targets, channel)
     conversations_added = _append_conversations(home_paths, conversations, request)
@@ -440,8 +454,8 @@ def _run_cleanup(
 
 
 # LLM: 迁移与 curator 的互斥用 curator 自己的租约（同一 state 文件上的 CAS）：迁移先领租约、
-#   结束后释放；拿不到就结构化拒绝，不让两条写入链并行（mc4-3102 的设计）。store 为空时不做
-#   互斥，dry-run 与未接线的调用方保持原行为。
+#   结束后释放；拿不到就结构化拒绝，不让两条写入链并行（mc4-3102 的设计）。apply 未注入
+#   store 时使用该 owner 的规范 state；dry-run 不领取租约。
 # 函数用途: 为迁移领取 curator 租约，返回租约 dict；拿不到时抛出结构化错误。
 def _acquire_migration_lease(store: object | None) -> dict[str, object] | None:
     if store is None:
@@ -511,42 +525,31 @@ def _resume_targets(record: dict, plan: AgentsCleanupPlan) -> list[dict[str, obj
     return [item for item in plan.removable if str(item.get("entry_id") or "") in planned]
 
 
-# LLM: 删除沿 PersonaRepository 的 batch 通道连续执行（每批 ≤32），批间用上一批返回的 sha 做
-#   CAS，并在人格锁内核对版本账本尾；批间前提链只认上一批锁内采样的账本尾——锁外重采样会把
-#   批间并发写入洗白成新基准（mc4-3101），所以这里不再调用 versions_ledger_tail。
-# 函数用途: 连续删除目标条目，返回实际删除条数。
+# LLM: 外层人格锁内一次送入全部目标；不用普通入口的 32 操作限制，不存在批间窗口。
+# 函数用途: 一次删除已重判定目标，写回唯一删除进度并返回实际数量。
 def _remove_planned(
     persona: PersonaRepository,
     targets: list[dict[str, object]],
     channel: _RemovalChannel,
 ) -> int:
-    sha = channel.initial_sha
-    removed = 0
-    for start in range(0, len(targets), _PERSONA_BATCH_OPERATIONS_COUNT):
-        chunk = targets[start : start + _PERSONA_BATCH_OPERATIONS_COUNT]
-        result = _remove_batch(persona, chunk, sha, channel.migration_id)
-        sha = str(result.get("sha256") or sha)
-        removed += _changed_count(result)
-        channel.on_batch(
-            _BatchProgress(
-                sha,
-                removed,
-                len(targets) - removed,
-                str(result.get("versions_tail") or ""),
-            )
-        )
+    if not targets:
+        return 0
+    result = _remove_batch(persona, targets, channel.initial_sha, channel)
+    removed = _changed_count(result)
+    channel.on_batch(_BatchProgress(str(result.get("sha256") or channel.initial_sha),
+        removed, len(targets) - removed, str(result.get("versions_tail") or "")))
     return removed
 
 
-# LLM: 删除一批前从事务记录读「版本账本尾」前提并传入 PersonaRepository，核对在人格锁内
-#   完成——计划之后任何写入（含正文 sha 恢复原值的删除重添）都会在这里被拒绝。
-# 函数用途: 通过 PersonaRepository 的批量通道删除一批条目。
+# LLM: 调用方持 policy/quota/persona；同一人格 CAS/配额/备份/账本提交实现，但不重复取锁。
+# 函数用途: 将全部移除操作一次交给人格仓库的锁内批次提交。
 def _remove_batch(
     persona: PersonaRepository,
     chunk: list[dict[str, object]],
     sha: str,
-    migration_id: str,
+    channel: _RemovalChannel,
 ) -> dict[str, object]:
+    migration_id = channel.migration_id
     record = _read_record(_migration_dir_for(persona.owner_home, migration_id))
     expected_tail = str(record.get("versions_tail") or "") if record else ""
     operations = tuple(
@@ -557,7 +560,7 @@ def _remove_batch(
         )
         for item in chunk
     )
-    return persona.mutate_batch(
+    return _mutate_persona_batch_locked(persona, channel.admission,
         PersonaBatchMutationRequest(
             target="agents",
             operations=operations,
@@ -663,20 +666,6 @@ def _update_record(
         }
     )
     _write_record(directory, payload)
-
-
-# LLM: 续作开始时把删除阶段的账本尾基准重置为当前值：重判定已经接受迁移期间的用户修改，
-#   之后的并发写入仍会被逐批核对拦住。
-# 函数用途: 以当前版本账本尾重建续作事务记录。
-def _rebased_record(record: dict, persona: PersonaRepository) -> dict:
-    payload = dict(record)
-    payload.update(
-        {
-            "updated_at": _now_iso(),
-            "versions_tail": versions_ledger_tail(persona.versions_path),
-        }
-    )
-    return payload
 
 
 # 函数用途: 构造 completed 事务记录。
@@ -926,7 +915,7 @@ def _read_archive_entry_ids(path: Path) -> set[str]:
     return {str(row.get("entry_id") or "") for row in report.records}
 
 
-# LLM: 名单只追加、幂等；续作一律以事务记录里的原请求会话为准（2904），新请求带了与记录
+# LLM: 调用方已持 policy 锁，使用锁内入口不重复 flock；名单只追加、幂等；续作以原请求会话为准，新请求带了与记录
 #   冲突的会话时在删除前就拒绝（结构化原因码），不能用新请求的空列表覆盖原请求。
 # 函数用途: 把生效的会话列表追加到学习排除名单，返回新增条数。
 def _append_conversations(
@@ -936,7 +925,7 @@ def _append_conversations(
 ) -> int:
     if not conversations:
         return 0
-    return append_learning_exclusions(home_paths, _conversation_entries(conversations, request))
+    return append_learning_exclusions_locked(home_paths, _conversation_entries(conversations, request))
 
 
 # 函数用途: 计算本次删除阶段生效的排除会话（记录优先；新请求与记录冲突时拒绝）。

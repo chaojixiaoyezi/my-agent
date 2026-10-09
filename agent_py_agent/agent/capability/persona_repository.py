@@ -429,10 +429,23 @@ def _mutate_persona_document(
     return _persona_mutation_result(request, prepared)
 
 
-# LLM: Batch Persona changes validate against an in-memory working copy and commit once；结果里的
-#   versions_tail 是锁内提交后采样（迁移的批间前提链不允许锁外重采样洗白，mc4-3101）。
-# 函数用途: 一条用户消息含多个长期事实时，保证整批全成功或全不写；结果携带锁内账本尾。
+# LLM: 普通入口保留 32 操作上限及 quota→目标锁；迁移已持相同锁时调用锁内版本，不重入 flock。
+# 函数用途: 获取人格目标锁后按同一套校验、配额与提交协议执行普通批次。
 def _mutate_persona_batch_document(
+    repository: PersonaRepository,
+    admission: OwnerQuotaAdmission,
+    request: PersonaBatchMutationRequest,
+) -> dict[str, object]:
+    if len(request.operations) > 32:
+        raise ValueError("persona batch exceeds 32 operations")
+    with locked_json_path(repository.path_for(request.target)):
+        return _mutate_persona_batch_locked(repository, admission, request)
+
+
+# LLM: 调用方必须已持 quota admission 和本目标的人格锁；仍执行完整 CAS、版本尾、内容与配额校验。
+# 普通入口的 32 操作限制留在锁外入口；可信迁移可在同一持锁区内一次提交全部已重判定删除。
+# 函数用途: 不重复取锁地准备并提交一个原子批次，返回锁内采样的账本尾。
+def _mutate_persona_batch_locked(
     repository: PersonaRepository,
     admission: OwnerQuotaAdmission,
     request: PersonaBatchMutationRequest,
@@ -441,26 +454,21 @@ def _mutate_persona_batch_document(
         raise ValueError(f"unknown persona target: {request.target}")
     if not request.operations:
         raise ValueError("persona batch operations are required")
-    if len(request.operations) > 32:
-        raise ValueError("persona batch exceeds 32 operations")
     for operation in request.operations:
         if operation.target != request.target:
             raise ValueError("all persona batch operations must use the batch target")
         if operation.action not in {"add", "replace", "remove"}:
             raise ValueError("persona batch supports add/replace/remove only")
     path = repository.path_for(request.target)
-    with locked_json_path(path):
-        if path.exists() and (path.is_symlink() or not path.is_file()):
-            raise PersonaSecurityError("persona target must be a regular file")
-        previous = path.read_text(encoding="utf-8") if path.exists() else ""
-        prepared = _prepare_persona_batch_mutation(repository, request, previous)
-        if isinstance(prepared, dict):
-            return {**prepared, "versions_tail": versions_ledger_tail(repository.versions_path)}
-        _admit_persona_mutation(repository, admission, path, prepared)
-        _commit_persona_mutation(repository, path, prepared)
-        # LLM: 提交后立刻在锁内采样账本尾：迁移的批间前提链必须用这个值，锁外重采样会把
-        #   批间并发写入洗白成新基准（mc4-3101）。
-        committed_tail = versions_ledger_tail(repository.versions_path)
+    if path.exists() and (path.is_symlink() or not path.is_file()):
+        raise PersonaSecurityError("persona target must be a regular file")
+    previous = path.read_text(encoding="utf-8") if path.exists() else ""
+    prepared = _prepare_persona_batch_mutation(repository, request, previous)
+    if isinstance(prepared, dict):
+        return {**prepared, "versions_tail": versions_ledger_tail(repository.versions_path)}
+    _admit_persona_mutation(repository, admission, path, prepared)
+    _commit_persona_mutation(repository, path, prepared)
+    committed_tail = versions_ledger_tail(repository.versions_path)
     result = _persona_batch_mutation_result(request, prepared)
     result["versions_tail"] = committed_tail
     return result

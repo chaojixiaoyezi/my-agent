@@ -1,5 +1,13 @@
 # Codebase Tree
 
+## AGENTS 第 4 轮（mc2-agents0r4，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/memory_store/agents_migration.py # quota 前置；policy→AGENTS 全程外锁
+|-- agent_py_agent/agent/memory_store/curator_lease.py # 精确 ID 心跳与晋升后独立释放
+|-- agent_py_agent/tests/test_agents_cleanup_critical_section.py # 一次删除/全程持锁/续作/晋升租约合同
+```
+
 ## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08）
 
 ```text
