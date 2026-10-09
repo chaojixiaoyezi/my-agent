@@ -1,5 +1,13 @@
 # Ordinary Conversation Context Design
 
+## Compact 最终数字与联合恢复旧快照（compactview，2026-10-09）
+
+原生压缩复用 `compact_calibration` 的冻结请求校准器，不另做显示比例；完成数字在 CAS 同范围视图刷新、方法补带、代次运行事实就位后重算。最终 raw/校准值重建 provider observation 的 compact_candidate 基线，后续 Context 沿同一追加量规则增长。无校准时失效旧 provider 观测并保持 raw 口径。
+
+联合恢复以原四元身份完整组计算位置集合，再调用 `tool_ir_history.summarized_runtime_fact_indexes`；只退休连续已覆盖工具前缀里的旧 RuntimeFacts，每个 source 的最新事实始终保留，遇到未覆盖工具立即止步。位置来自完整组，不解析正文或裸 call_id 判断身份。原生既有规则也调用此函数，不维护第二套规则。
+
+仅在既有联合候选与 CAS 内完成：不追加另一轮摘要/压缩代次，旧前缀改写与原 Compact 同时重建缓存；不重排未退休工具对、稳定提示或工具表。实际供应商缓存未验证。中途原生恢复目标仍是优选，最新工具对/不可压缩底座可能使其高于目标但低于 trigger；方法补带沿原 trigger 余量合同，不承诺所有场景健康线硬达标。详见 TESTS 首节。
+
 Status: implemented in the current worktree. Release and 1.10 evidence remain governed by
 `docs/PRODUCT_FACTS.md`.
 

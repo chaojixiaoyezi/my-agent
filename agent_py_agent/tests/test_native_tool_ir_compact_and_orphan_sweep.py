@@ -1127,14 +1127,18 @@ def test_native_window_commits_below_trigger_when_recovery_target_is_unreachable
 
     monkeypatch.setattr(service, "reduce_native_compact_candidate", settle_below_trigger)
 
-    build_tool_loop_prompt(agent, params)
+    prompt = build_tool_loop_prompt(agent, params)
 
     updated = store.threads.load(thread.thread_id)
     assert updated is not None and updated.compact_generation == 1
     assert sink.progress_rows[-1]["phase"] == "completed"
-    assert sink.progress_rows[-1]["after_tokens"] == 8_500
+    # 候选仍在健康目标上方，不能因此拒绝有效提交；完成显示则重新量最终发送材料。
+    assert any(row["stage"] == "measuring" and row["after_tokens"] == 8_500 for row in sink.progress_rows)
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        model_visible_context_snapshot,
+    )
+    assert sink.progress_rows[-1]["after_tokens"] == model_visible_context_snapshot(agent, params, prompt).current_tokens
     assert sink.progress_rows[-1]["trigger_tokens"] == 9_000
-    assert sink.progress_rows[-1]["after_tokens"] > 8_100
     _assert_no_orphans(_native_provider_messages(agent, params))
 
 

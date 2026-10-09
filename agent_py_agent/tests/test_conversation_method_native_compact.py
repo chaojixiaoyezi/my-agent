@@ -112,3 +112,37 @@ def test_native_cas_passes_remaining_headroom_as_carry_cap(tmp_path, monkeypatch
     monkeypatch.setattr(method_carry, "prepare_conversation_method_carry", spy)
     service.build_tool_loop_prompt(fixture.agent, fixture.params)
     assert any(cap is not None and 0 < cap < 40_000 for cap in caps), caps
+
+
+@pytest.mark.parametrize("calibrated", [False, True])
+def test_native_completed_numbers_include_carry_and_match_context_snapshot(tmp_path, monkeypatch, calibrated):
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        model_visible_context_snapshot,
+    )
+
+    fixture, _thread = _native_carry_fixture(tmp_path, monkeypatch, True)
+    if calibrated:
+        prompt = service._render_tool_loop_prompt(fixture.agent, fixture.params)
+        before = model_visible_context_snapshot(fixture.agent, fixture.params, prompt)
+        fixture.params.live_archive_state["_provider_context_observation"] = {
+            "schema": "provider_context_observation.v3",
+            "raw_estimated_tokens": before.raw_estimated_tokens,
+            "provider_input_tokens": before.raw_estimated_tokens * 3 // 4,
+            "context_surface_fingerprint": before.context_surface_fingerprint,
+            "_calibration_scope": "current_run",
+        }
+    published = []
+    original = service._publish_native_ir_compaction
+
+    def observe(agent, params, **values):
+        published.append(values)
+        return original(agent, params, **values)
+
+    monkeypatch.setattr(service, "_publish_native_ir_compaction", observe)
+    prompt = service.build_tool_loop_prompt(fixture.agent, fixture.params)
+    snapshot = model_visible_context_snapshot(fixture.agent, fixture.params, prompt)
+    assert published[-1]["after_tokens"] == snapshot.current_tokens
+    if calibrated:
+        assert published[-1]["before_tokens"] == before.raw_estimated_tokens * 3 // 4
+        assert snapshot.current_tokens < snapshot.raw_estimated_tokens
+        assert fixture.params.live_archive_state["_provider_context_observation"]["basis"] == "compact_candidate"

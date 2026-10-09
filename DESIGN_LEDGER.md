@@ -1,5 +1,13 @@
 # 设计台账
 
+## compactview：最终计量与已覆盖快照退休（07/c1，2026-10-09；本地实现、待集成复核）
+
+- 唯一数字口径复用 `conversation/compact_calibration.py`：原生 Compact 冻结请求校准，before/候选/最终 after 同源；CAS 刷新、方法补带和代次事实全部就位后计量，再 rebase Context 追加基线，失败仍失效旧观测。
+- 联合恢复原先只替换完整工具组，旧 RuntimeFacts 随当前 IR 留在候选中，可使只压 transcript 后仍约 88%；现在复用原生退休规则，以已证完整身份组的位置集合授权删除连续退休前缀的旧事实，每 source 最新事实及未覆盖工具屏障不可越过。
+- 缓存：只在原联合候选/CAS 内退休旧快照，不新增第二次工具摘要或第二代提交。摘要/已退休前缀改写与原 Compact 同次发生，产生同次必要缓存重建；剩余未退休工具对和稳定 system/工具表不重排。供应商实际命中未验证。
+- 边界：中途原生的健康目标仍为优选，不为达标删除最新事实/工具对；补带仍沿已定 trigger 余量合同。不能保证不可压缩底座超大时回到健康线，更不能将此合成根因认作原 mc4 已证事实。
+- 复现与红绿证据见 TESTS 首节，模块规则见 CONVERSATION_CONTEXT_DESIGN。无配置项/依赖/权限变更。
+
 - **E11d 第四轮：配额锁竞争误报恢复失败（mc3-e11d-quota，2026-10-08；MC4-2501，本地实施，待 mc4 复审/3a 集成）**：`owner_quota` 新增 `OwnerQuotaLockContention` 子类，把锁竞争（`BlockingIOError`）与策略/存储故障分开；`curator_commit._enter_recovery_locks` 捕获子类转 busy，不再落进 `CURATOR_COMMIT_RECOVERY_FAILED`。mc4 review25 补测原样 11/12（2501 转绿；2502 基线问题不改）；review18+22 42 项、mc2 17 项、回归 774 项全绿；变异 2/2 rc=1；其它非阻塞配额调用点（插件环境准备 2 处）无同类误判。证据见 TESTS 顶部。
 
 ## Curator 未完成事务恢复与新租约领取的边界（mc2-e11d-race，2026-10-08；本地实现、待3a复核）

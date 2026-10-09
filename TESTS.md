@@ -1,5 +1,17 @@
 # 测试与发布验收
 
+## compactview：提示口径与回合开头高水位（07/c1，2026-10-09，本地实现、待集成复核）
+
+- 来源：07 compactview 任务中的 w2 提示/Context 校准差异、mc4 preflight 后仍约 88% 的结构化观察；未读取真实会话正文，未证明 mc4 原线程与合成样例根因完全相同。
+- 红测：方法补带后完成事件仍用候选数；修正测试为真实发送 prompt 后为 7536 对 8184。补带后重算还遗漏代次事实，8093 对 8185；现在代次事实先入 IR 再用同一冻结校准器计量、重建 Context 基线。
+- 高水位复现：后台真实 preflight 入口，合成旧 RuntimeFacts + 完整工具组 + 最新同源事实，仅摘要与末端 HTTP 用替身。禁用旧事实退休时候选 175750/200000（87.875%）超过健康目标 120000；恢复修复后当前候选 37401 <= 120000，下一业务请求无旧事实正文。
+- 覆盖：四元身份完整组、未覆盖工具屏障、每 source 最新事实与原列表不变；raw/校准两臂的完成 after 等最终发送快照；TUI、Gateway、原生/联合恢复、CAS/取消原测试不删不跳过。
+- 当前八文件 200 passed，完整 guards9 十二文件 194 passed（均 rc=0）；命令：指定 ci-venv Python 在根运行 `-m pytest <相关文件> -q -o addopts= --tb=short -p no:cacheprovider --basetemp=<隔离目录>`。
+- 门禁：`python -m ruff check agent_py_agent scripts`、`scripts/check_doc_sync.py`、`scripts/check_import_boundaries.py`（0 条）、`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`、`git diff --check`、`scripts/check_clean_package.py .` 均 rc=0；`size_diff.sh $PWD` rc=0，输出为“新增告警: 0；消失告警: 13”。初次共用 helper 移名暴露一条嵌套身份告警，已拆平控制流并重跑八文件及完整 guards9；生成 CODE_SIZE_REPORT 未提交。
+- 单点数字复核：`test_mixed_compact_recovery.py::test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_facts -s`；完成计量见 `test_conversation_method_native_compact.py` 新增参数化用例。
+- 独立静态评审指出中途原生补带预算使用 trigger 而非健康线；核实原合同明确健康目标是优选、保留最新工具对的有效候选低于 trigger 即提交。本轮不改该合同或再压一代；回合开头健康样例走联合 recovery 而非该中途路径。
+- 未验证：真实飞书/TUI 接收、真实模型/测试机、原 mc4 复发、供应商缓存收益、Linux/全仓测试。IM 活动消费者仅显示阶段，不另算数字；共用完成事件数字已改，真实渠道仍需集成者验收。
+
 ## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
 
 - **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、

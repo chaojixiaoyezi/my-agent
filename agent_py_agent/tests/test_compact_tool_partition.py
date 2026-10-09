@@ -43,6 +43,30 @@ def _ref(call: ToolCall) -> dict[str, str]:
     return {key: getattr(call, key) for key in ("run_id", "attempt_id", "turn_id", "call_id")}
 
 
+def test_recovery_retires_superseded_facts_only_in_complete_prefix():
+    first, second = _call("first", turn="old"), _call("second", turn="new")
+    old = RuntimeFactsTurn(text="旧状态" * 20000, source="old_snapshot")
+    latest = RuntimeFactsTurn(text="最新状态", source="old_snapshot")
+    user = UserTurn("不能删的用户要求")
+    history = [user, old, AssistantTurn(tool_calls=[first]), ToolResult.succeeded(first, "结果"),
+               latest, AssistantTurn(tool_calls=[second]), ToolResult.succeeded(second, "结果")]
+    frozen = deepcopy(history)
+    source = partition_recovery_tool_source([_record(first), _record(second)], history)
+    assert source.retained_ir_history == (user, latest)
+    assert history == frozen
+
+
+def test_recovery_fact_retirement_cannot_cross_uncovered_tool_group():
+    first, second = _call("first", turn="old"), _call("second", turn="new")
+    before = RuntimeFactsTurn(text="旧状态", source="state")
+    after = RuntimeFactsTurn(text="新状态", source="state")
+    history = [before, AssistantTurn(tool_calls=[first]), ToolResult.succeeded(first, "结果"),
+               after, AssistantTurn(tool_calls=[second]), ToolResult.succeeded(second, "结果")]
+    source = partition_recovery_tool_source([_record(first), _record(second)], history,
+                                          covered_tool_refs=[_ref(first)])
+    assert before in source.retained_ir_history and after in source.retained_ir_history
+
+
 def test_reused_call_id_in_different_turns_stays_exact_and_ir_full_text_wins():
     first = _call("same-id", turn="turn-1", attempt="attempt-1")
     second = _call("same-id", turn="turn-2", attempt="attempt-2")

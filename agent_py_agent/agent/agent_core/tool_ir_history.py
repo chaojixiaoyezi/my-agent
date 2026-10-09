@@ -1,6 +1,6 @@
 
 # LLM: typed IR 是唯一历史；请求投影/发送同源；applied Compact 固定前置，普通历史只追加，工具与推理不拆对。
-# 模块用途: 保存工具与模型历史，提供不修改原 IR 的出站投影；须核对配对、缓存前缀和取消回滚。
+# 模块用途: 保存工具与模型历史，提供出站投影及共用旧快照退休规则；须核对配对、缓存前缀和取消回滚。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -332,17 +332,26 @@ def drop_tool_call_pairs(
 
 
 # LLM: 仅从 typed 调用/结果的顺序计算连续退休前缀；跳过较新的任意调用不授权删除其之前仍在用的状态。
-# 函数用途: 找出摘要可替代的旧状态；不越过尚有保留调用的并行轮，每个来源的最新状态始终保留。
+# 函数用途: 将已摘要调用转换为覆盖位置，复用联合恢复的旧状态退休规则，保留每个来源的最新状态。
 def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> set[int]:
+    positions = {
+        index for index, item in enumerate(history)
+        if (isinstance(item, ToolResult) and item.call_id in call_ids)
+        or (isinstance(item, AssistantTurn) and item.tool_calls
+            and all(call.call_id in call_ids for call in item.tool_calls))
+    }
+    return summarized_runtime_fact_indexes(history, positions)
+
+
+# LLM: 位置集合必须来自调用方已证明覆盖的完整工具组；这里只看 typed 顺序，不按正文或裸调用名猜覆盖。
+# 函数用途: 为运行中及联合恢复共用连续退休前缀规则，始终保留每个来源的最新状态。
+def summarized_runtime_fact_indexes(history: list[Any], retired_positions: set[int]) -> set[int]:
     retired_through = -1
     for index, item in enumerate(history):
-        if isinstance(item, AssistantTurn) and any(
-            call.call_id not in call_ids for call in item.tool_calls
-        ):
+        is_tool_item = isinstance(item, ToolResult) or (isinstance(item, AssistantTurn) and item.tool_calls)
+        if is_tool_item and index not in retired_positions:
             break
         if isinstance(item, ToolResult):
-            if item.call_id not in call_ids:
-                break
             retired_through = index
     latest_by_source = {
         item.source: index for index, item in enumerate(history) if isinstance(item, RuntimeFactsTurn)
