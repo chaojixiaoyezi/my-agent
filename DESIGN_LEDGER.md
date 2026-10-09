@@ -1,5 +1,11 @@
 # 设计台账
 
+## Responses 探测用途边界（wsempty2，2026-10-09，本地实现，待复核）
+
+- 空输出守卫只负责业务工具回合；原生工具/视觉能力探测允许空结果作未证明/不确定，阳性仍需结构化 nonce/颜色证据。
+- 宿主 `ProviderRequestOptions.is_probe` 默认 false，末尾新增保持原位置参数；OpenAI 请求对象仅转交响应分类，不进供应商 payload，不按文本/工具名/ToolChoice.reason 判用途。工具和视觉探测入口显式置 true，不热改 backend。
+- 不改供应商失败、不完整响应、原重试/缓存/记账和无工具连通/档位探测；旧视觉 backend 的能力位未声明时保持关键字形态。真实供应商及 sol 原事故关联未验证，验证见 TESTS。
+
 ## Responses 空工具输出（wsempty，2026-10-09，本地实现，待复核）
 
 - `backends.responses._checked_response_fields` 在原解析后对齐 Chat 的 MODEL_EMPTY_RESPONSE，不加配置/旁路/预算；原失败原因优先，原生 reasoning/compaction 保留。

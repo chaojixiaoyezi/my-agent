@@ -83,6 +83,7 @@ class BackendOptions:
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。
 #   reasoning_effort 只会是 low/medium/high/xhigh/max/ultra 或空串（off 已折成 thinking_disabled），由后端按控制方式及声明换算字段。
+#   is_probe 只由宿主探测入口设置，不从 prompt/工具选择理由推断，不进入供应商 payload 或污染后续业务请求。
 # 类用途: 携带一次模型请求的宿主 system 指令、思考开关、智能程度档位和首个流式事件等待预算，不混入用户正文或工具历史。
 @dataclass(frozen=True)
 class ProviderRequestOptions:
@@ -106,6 +107,9 @@ class ProviderRequestOptions:
     #   "慢滴流可以无限拖住一次压缩"和"有效事件流无限续期"两条路径。
     # 字段用途: 携带调用方给出的本次请求总期限，供传输层在发送前算进绝对 deadline。
     total_deadline_seconds: float | None = None
+    # LLM: 探测只提供能力证据，完整空输出由探测自身判未证明/不确定；业务请求默认仍严格判空。
+    # 字段用途: 标记本次非业务探测用途，不表示探测成功，也不豁免供应商失败或不完整响应。
+    is_probe: bool = False
 
 
 # LLM: 后端 capability flag 决定上层能否传真实 system instruction；未声明支持的旧实现保持原关键字形态。
