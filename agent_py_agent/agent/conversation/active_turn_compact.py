@@ -587,6 +587,7 @@ def _summary_source_material(
     fork = request.cache_fork
     history = _cache_fork_history(fork, plan) if fork is not None else None
     if history is not None:
+        history = _with_previous_applied_summary(history, plan, request)
         return {"history": history, "fallback_history": source_history, "provider_prompt": fork.provider_prompt,
                 "provider_history_messages": fork.provider_history_messages, "tools": fork.tools,
                 "tool_choice": None, "system_instruction": fork.system_instruction}
@@ -612,9 +613,10 @@ def _summary_source_material(
 
 # LLM: 只在“每个被替代调用的结果都恰好出现一次在主请求原生 IR 里”时分叉：前缀截到最后一个被替代调用的结果为止，
 #   中间夹着的保留区或文字原样留在前缀里（摘要多看几条无害，覆盖范围不变）。跨片只在归档里的来源不在 IR 中，
-#   此时返回 None，调用方退回独立摘要，绝不丢来源。只读结构化 call_id，不看正文。
+#   此时返回 None，调用方退回独立摘要，绝不丢来源。applied摘要在出站时前置，须从全IR保留，不能按原索引截掉。
 # 函数用途: 计算缓存分叉要带的主请求 IR 前缀；不满足结构化条件时返回 None。
 def _cache_fork_history(fork: ActiveTurnCacheFork, plan: _ActiveTurnArchiveCompactPlan) -> tuple[object, ...] | None:
+    from ..backends.message_adapter import is_applied_compact_summary
     from ..tooling.runtime_contracts import ToolResult
 
     wanted = {str(ref.get("call_id") or "") for ref in plan.source_tool_refs} - {""}
@@ -626,7 +628,26 @@ def _cache_fork_history(fork: ActiveTurnCacheFork, plan: _ActiveTurnArchiveCompa
             end = index + 1
     if not wanted or len(found) != len(wanted) or set(found) != wanted:
         return None
-    return tuple(fork.tool_ir_history[:end])
+    return tuple(item for index, item in enumerate(fork.tool_ir_history)
+                 if index < end or is_applied_compact_summary(item))
+
+
+# LLM: 恢复宿主可能把上一代摘要交给历史种子而不留在当前IR；空provider历史的缓存分叉必须继承同一适用视图。
+# 已有applied项或provider历史时不重复合成；新增项只供摘要阅读，来源refs与机械兜底仍由原plan决定。
+# 函数用途: 补齐没有IR载体的上一代正式摘要，使用与主请求相同的generation标题和密文。
+def _with_previous_applied_summary(history, plan, request):
+    from ..agent_core.tool_ir_history import applied_compact_summary_item
+    from ..backends.message_adapter import is_applied_compact_summary
+    from .compact_remote import provider_compaction_content
+
+    fork, context = request.cache_fork, request.compact_context
+    view = context.view if context is not None else plan.thread
+    summary = str(view.summary or "")
+    if not summary or fork.provider_history_messages or any(is_applied_compact_summary(item) for item in history):
+        return history
+    generation = view.generation if context is not None else plan.thread.compact_generation
+    item = applied_compact_summary_item(summary, generation, provider_compaction_content(getattr(view, "provider_compaction", None)))
+    return (item, *history)
 
 
 # LLM: This helper forwards the frozen scope and summary base alongside the same interrupt check;

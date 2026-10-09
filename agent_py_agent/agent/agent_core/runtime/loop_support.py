@@ -19,6 +19,7 @@ from ...conversation.active_turn_input import (
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
 )
+from ...conversation.tool_discovery import thread_loaded_tools
 from ...memory_archive import build_auto_resume_context
 from ...memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
 from ...memory_archive.tool_output_externalizer import model_visible_tool_parameters
@@ -1357,7 +1358,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         conversation_history_seed=params.conversation_history_seed,
         compact_context=params.compact_context,
         context_scope=params.context_scope,
-        loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names},
+        loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names, *thread_loaded_tools(agent, params)},
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
         max_protocol_repairs=MAX_PROTOCOL_REPAIRS,
     )

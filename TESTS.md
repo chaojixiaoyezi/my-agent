@@ -154,6 +154,17 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 - 独立静态审查只读需求和三处 diff，未执行测试、未独立核对全文件；提出工具入口也应给实际中英词的低项。对照原任务第 17 行只要求工具示意“中文说明、中英文关键词”，第 20–21 行才要求 skill 举通用词例子，现稿已满足；不为此扩大工具说明或锁死示例词。该审查不替代 6d 或父级已执行的字节/AST/回归验证。
 - 真实 MiniMax/Gateway/TUI 学习与打包、目录/关键词推荐命中率、缓存收益和生产业务质量**未验证**；未部署、未改已装包或运行配置。下一步由 6d 在固定候选上复核生产入口，不能拿模拟或文字测试替代。
 
+## 上一代摘要与跨回合工具（compactcall3，2026-10-09，待测试机复核）
+
+- 来源：compactcall-3及模型插话；主代理保持sol，测试机服务端压缩用sol、文字摘要与工具粘性用MiniMax-M2.7。只抓隔离测试请求指纹与用量，不输出凭据。
+- active-turn归档红测扩成无旧摘要/文字/加密三臂，旧缓存fork按最后替换结果截IR丢掉尾置applied摘要；主原生投影会前置该摘要，因此首叉input[0]。保留全部applied项，仍按原截止点选工具源，预算和运输同源。
+- live→下一轮新参数、无携带归档红测确认工具回撤；新增隐藏可选线程loaded_tool_names，真实搜索typed信封原子并集，主启动和transcript预检读取；不反推正文，不扩大注册表授权，旧空记录不写新字段。
+- thread_tool_discovery核对序列化兼容、子线程身份优先、原子更新不覆盖Compact代次、损坏/正文不加载、缺线程不新建及收紧权限过滤。公开agent.run配真实WS序列化和假运输锁住压缩后下一回合工具表。
+- 复现命令：根目录指定ci-venv-312，PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1；pytest test_active_turn_compact_projection.py、test_compactcall_websocket.py、test_thread_tool_discovery.py，-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-cc3-*。
+- 补齐无IR载体的正式view摘要两臂（文字/密文），现局部三文件53例通过；包含真实预检快照→搜索写入→CAS提交与归档后持久化IO故障。缺线程仅捕获FileNotFoundError，其它错误传播，不把成功记录丢在归档之前。前阶段357相关/194 guards9通过；新增行为收尾重跑，不以局部结果外推命中率。
+- MiniMax隔离run21两代已抓到第二代input[0]正文首块sha不相等，cache_fork有上一代734字符但IR/provider都无载体；这是实际语义早叉，不只是Anthropic cache_control。补齐只改变阅读材料，原refs/fallback/预算/CAS不改。非空冻结provider前缀/既有applied不覆盖，纯密文记录由非空marker伴随；独立静态审查的条件风险见DESIGN_LEDGER。
+- 收尾相关13文件379 passed、guards9完整12文件194 passed；尺寸差集报新增四参数helper后把fork改由request同源取得，三文件53例重跑rc0，ruff/导入边界0/doc-sync/strict size/diff/clean-package最终rc0，size_diff新增0/消失10，报告已还原。常数目录957项一致；误写不存在测试名导致rc4且无测试执行，已纠正后得到379结果，不计作测试失败或通过。
+
 ## 订阅WS压缩字段与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
 
 - 来源：compactcall-2跟进；真实OAuthResponsesBackend、WS统一编码器与主模型guard线程，凭据入口/socket/动态事实全为合成替身，固定262144窗口与65536输出上限，不读真实正文或密钥。

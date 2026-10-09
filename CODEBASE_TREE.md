@@ -775,6 +775,7 @@ agent_py_agent/
 |   |   |-- compact.py                  # 唯一 thread compact：候选验证、一次 CAS 提交与近期 raw tail
 |   |   |-- compact_projection.py       # 原 Compact 的只读来源、完整请求投影和提交后临时材料合同
 |   |   |-- compact_provider_surface.py # transcript Compact 复用普通轮 stable prompt/system/tools/messages 的缓存面
+|   |   |-- tool_discovery.py          # typed搜索名称的线程原子并集及新回合恢复，不授予权限
 |   |   |-- compact_media_digest.py     # 随图摘要的发送实现：含图回合分组、按预算打包看图小请求、要点标签与部分成功/失败合成
 |   |   |-- compact_media_policy.py     # 媒体压缩策略：归档引用/随图摘要决策、视觉能力事实、字节与预算准入、checkpoint 媒体事实
 |   |   |-- compact_text_source.py      # 只读两遍编码校验与当前字符窗口，消费后释放，不拥有覆盖
@@ -1092,6 +1093,7 @@ agent_py_agent/
 |   |-- test_compact_remote_provider.py  # 服务端压缩：触发项/压缩项线层、远端助手回退、检查点与视图兼容性、live 摘要走远端
 |   |-- test_midturn_compact_prefix.py  # 回合中途密文/文本摘要两回合前缀延伸与辅助压缩同源投影
 |   |-- test_compactcall_websocket.py  # 订阅WS完整头体、自动preflight/live缓存路由和粘性工具边界
+|   |-- test_thread_tool_discovery.py  # 线程累计加载的兼容序列化、身份隔离和原子恢复
 |   |-- test_tui_status_line_display.py  # 状态行布局（2026-10-08）：总缓存两位小数、累计会话只算输入、决策（关闭/观察/实际）、速度按整次调用时长、Context 行模型名与思考档位
 |   |-- test_compact_cache_surface_fit.py  # 压缩请求装进窗口：输出预留同源、超预算先瘦身再单次、Responses configuration_update 降档、会话累计命中率
 |   |-- test_decision_reach_counts.py   # 到达计数：进程内累加、节流合并不覆盖、7 天修剪、开关与写失败、阶段原因与大白话；导出各点位测试共用的 reach_counter

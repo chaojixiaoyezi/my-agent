@@ -27,7 +27,7 @@ def _carried_tool_round(record: dict[str, object]) -> int | None:
 
 
 # LLM: 只消费tool_result_envelope.tool_search.loaded_tool_names，不解析用户或模型文本，也不授予工具执行权限。
-# 函数用途: 从工具搜索的正式结果信封取出名称集合；损坏/缺失信封返回空集合。
+# 函数用途: 从工具搜索正式信封取字符串名称集合；损坏/缺失字段不转造名称。
 def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
     envelope = record.get("tool_result_envelope")
     if not isinstance(envelope, dict):
@@ -38,4 +38,4 @@ def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
     names = search.get("loaded_tool_names")
     if not isinstance(names, list):
         return set()
-    return {str(item).strip() for item in names if str(item).strip()}
+    return {item.strip() for item in names if isinstance(item, str) and item.strip()}

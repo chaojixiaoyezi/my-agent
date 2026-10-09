@@ -2482,13 +2482,22 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     )
     # 灰度双轨：native 下同时把这次「调用+结果」记进结构化 IR 历史（与上面的文本
     # tool_context 共存），供出站翻成原生 messages；text 协议下完全不走这里。
-    _record_tool_call_ir_if_native(record, result_rendered)
+    _record_tool_post_archive(agent, record, archive_record, result_rendered)
     if guardrail_hint:
         record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
     append_long_content_recovery_context(record)
     progress = record_runtime_subagent_tool_progress(agent, record)
     if progress:
         record.params.tool_context.append(_task_local_progress_context(progress))
+
+
+# LLM: 搜索展示事实后写，存储失败显式上抛；调用点必须在原工具归档及IR追加之后。
+# 函数用途: 保存线程加载名而不让持久化失败丢掉已完成工具的证据。
+def _record_tool_post_archive(agent, record, archive_record, result_rendered):
+    from ..conversation.tool_discovery import persist_discovered_tools
+
+    _record_tool_call_ir_if_native(record, result_rendered)
+    persist_discovered_tools(agent, record.params, archive_record)
 
 
 # LLM: 三点沿原归档信封消费结构化事实（web_fetch / run_command 验证或成功写入 stale / 插件观察）；
@@ -2507,8 +2516,9 @@ def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: 
     return "".join("\n" + hint for hint in hints if hint)
 
 
+# LLM: 正式搜索信封更新当前循环展示集合；持久化在原归档/IR之后，权限不由加载名授予。
+# 函数用途: 让工具加载跨当前Compact和下一回合保留。
 def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object]) -> None:
-    """Apply only the typed tool_search result envelope to the next model turn."""
 
     envelope = archive_record.get("tool_result_envelope")
     if not isinstance(envelope, dict):
@@ -2519,7 +2529,7 @@ def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[s
     names = search.get("loaded_tool_names")
     if not isinstance(names, list):
         return
-    params.loaded_tool_names.update(str(item).strip() for item in names if str(item).strip())
+    params.loaded_tool_names.update(item.strip() for item in names if isinstance(item, str) and item.strip())
 
 
 # LLM: Native history must carry the reducer output, never the raw executor projection; otherwise
