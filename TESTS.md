@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 学包声明语言软提醒（w2-1008-lang，2026-10-08；已实现，待 6d 复核）
+
+- 来源：`1008/w2-pack-lang.md`，真基线 `7dd3f9ba050ba026ce2a52535825f32869a799f4`（step17ye）；只改 `PackageBuildTool.model_spec.description` 和 `learn-external-agent` 第 7 步正文。不加语言判断，不改请求结构、字段、开关、已装包或原 `PACKAGE_BUILD_KEYWORDS_SCRIPT` 逻辑。
+- 新用例 `test_declaration_language_reminder_reaches_both_model_entries` 参数化读取真实工具 model_spec 与剥离 frontmatter 的 skill 正文：同一语句包含三字段及对话语言关键短语，另查外语来源、双语、目录展示/关键词推荐的短语；不锁整段文案。
+- 先红：未改两处说明时 `-k declaration_language`，2 failed / 3 deselected，pytest rc=1；补文案后同入口 2 passed / 3 deselected，rc=0。
+- 离线生成校准：两名独立子代理在同一中文票据归档/费用分类场景，只拟声明、不执行工具。未加载 skill 的摸底已主动写中文，但未保留英文关键词；读取修订写声明片段后生成中文为主的中英说明和中英领域关键词。只证明该片段在这一模拟场景被采用，不宣称复现全英文缺陷、真实学包链或生产效果。
+- 字节/结构复核：与真基线用 `git show` 比较，全 frontmatter 与 `learnpack_build_notes.py` 字节相同；AST 除 `ToolModelSpec.description` 的文字值外完全相同（包括 schema、hints/default_deferred、handler 和 runtime policy），rc=0。
+- 按 `rg -l 'package_build_tool|learn-external-agent|learnpack_build_notes' agent_py_agent/tests -g 'test_*.py'` 找直接引用，再加内置索引/名卡摘要/指纹/清单和相邻 learnpack 测试；实际以下 12 文件 **142 passed，rc=0**（包含新增两项）：
+  `test_package_build_tool.py test_learn_external_agent_skill.py test_learnpack_flow.py test_learnpack_merge.py test_learnpack_same_domain.py test_builtin_seed.py test_skill_tree_and_recall.py test_skills_service.py test_declarative_index.py test_plugin_skills.py test_conversation_method_directory.py test_write_my_agent_plugin_skill.py`。
+- guards9 原清单全部 12 文件（含 packaging、常数目录、参数登记）**194 passed，rc=0**；均为定向验证，不表示全仓通过。未跑全仓 pytest。
+- 复跑命令：在本工作树根 `PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；统一 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <上述文件加 agent_py_agent/tests/ 前缀，或 guards9.txt 原文件清单> -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-w2-lang-related`；guards 单独用 `m-w2-lang-guards`。聚焦用例保留同一文件并加 `-k declaration_language`。
+
+| 变异 | 运行入口 | pytest 结果/退出码 | 结论与恢复 |
+| --- | --- | --- | --- |
+| 只删工具模型说明新增语言提醒；skill 正文不动 | `test_learn_external_agent_skill.py -k declaration_language`，basetemp `m-w2-lang-mutation` | 工具项 1 failed，skill 项 1 passed，3 deselected；rc=1 | 有效业务断言捕获，非收集失败；`finally` 按变异前字节原样恢复，之后 142 项回归通过 |
+
+- 静态门禁均 rc=0：`$PY scripts/check_import_boundaries.py`（findings=0）；`$PY -m ruff check agent_py_agent scripts`；`$PY scripts/check_doc_sync.py`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`（blocked=False）；`git diff --check 7dd3f9ba0`；`$PY scripts/check_clean_package.py .`。生成的 `CODE_SIZE_REPORT.md` 已按规则还原 HEAD，不提交。
+- 尺寸差集：`bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh $PWD /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size-baseline-7dd3f9ba0.json`，rc=0，原输出“新增告警: 0 / 消失告警: 0”。
+- 独立静态审查只读需求和三处 diff，未执行测试、未独立核对全文件；提出工具入口也应给实际中英词的低项。对照原任务第 17 行只要求工具示意“中文说明、中英文关键词”，第 20–21 行才要求 skill 举通用词例子，现稿已满足；不为此扩大工具说明或锁死示例词。该审查不替代 6d 或父级已执行的字节/AST/回归验证。
+- 真实 MiniMax/Gateway/TUI 学习与打包、目录/关键词推荐命中率、缓存收益和生产业务质量**未验证**；未部署、未改已装包或运行配置。下一步由 6d 在固定候选上复核生产入口，不能拿模拟或文字测试替代。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。

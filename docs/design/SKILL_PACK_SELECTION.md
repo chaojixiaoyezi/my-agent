@@ -318,6 +318,15 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BEN
 
   合计约 800 万，九成左右命中缓存。评审用 Claude 子代理，不占 MiniMax。
 
+### 10-08 跟进（w2）
+
+**状态：已实现，待 6d 复核。** 生产验收发现英文来源容易被照抄为全英文声明，中文用户看目录或说领域词时对不上；本次只补模型读到的软提醒：
+
+- `agent_py_agent/agent/tooling/package_build_tool.py` 的 `PackageBuildTool.model_spec.description`：在能力包最小声明说明后，明确 `summary`、`capability.description`、`capability.keywords` 都用和用户对话时的语言；来源是另一种语言时补双语（如中文说明、中英文关键词），方便目录展示和关键词推荐匹配用户说法。
+- `agent_py_agent/skills/builtin/plugins/learn-external-agent/SKILL.md` 第 7 步写声明：同样要求，配领域通用的“文档翻译 / document translation”关键词例子；只改正文，全部 frontmatter 保持原字节。
+- 不加语言检测/机器判断，不改 schema、字段、开关、`default_deferred`、已安装包或 `learnpack_build_notes.py` 的 `PACKAGE_BUILD_KEYWORDS_SCRIPT` 原判断。
+- 两处入口的轻量关键短语红转绿、删除工具提醒的变异和定向/内置 skill/guards9/静态门禁证据见 `TESTS.md`；模型实际经工具学习、目录推荐命中率及生产业务质量仍待 6d 复核，不能由文字断言外推。
+
 ## 7. 总用量与不做的事
 
 - MiniMax 合计约 1100–1200 万输入 token，九成左右命中缓存，约是 10-07 学做包生产测试（2150 万）的一半。
