@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,6 +218,145 @@ class TestPromptBuilderInit:
 
         assert "# my-agent 自身代码" not in rendered
         assert "开发工作树" not in rendered
+
+
+# LLM: 两个合成运行包只改变部署目录，保留同一内置提示及原生工具表，以隔离固定前缀换位。
+# 函数用途: 重现部署路径改变系统前缀，要求新路径仅在动态尾巴且纯渲染不重读宿主。
+def test_deployment_path_only_changes_volatile_context(tmp_path, monkeypatch):
+    from agent_py_agent.agent.prompting_parts import builder as builder_module
+
+    worktree = tmp_path / "dev"
+    worktree.mkdir()
+    (worktree / ".git").mkdir()
+    builder = PromptBuilder(
+        AgentConfig(access_mode="full-access", self_dev_worktree=str(worktree)), tmp_path,
+        home_paths=SimpleNamespace(owner_provider="local", owner_kind="main", owner_id="main"),
+    )
+    request = PromptBuildRequest("继续", [], tools=ToolSections(native_tool_use=True, tool_catalog_section="# Tools\n固定工具说明"),
+                                 workspace_context_override="固定测试工作区")
+    prepared, layouts = [], []
+    roots = [tmp_path / "runtime-step-a-111" / "agent_py_agent", tmp_path / "runtime-step-b-222" / "agent_py_agent"]
+    for root in roots:
+        (root / "prompts").mkdir(parents=True)
+        (root / "prompts" / "default.md").write_text("相同的内置提示", encoding="utf-8")
+        monkeypatch.setattr(builder_module, "_builtin_prompt_root", lambda: root)
+        prepared.append(builder.prepare_render_input(request))
+        layouts.append(prompt_cache_layout(builder_module.render_prepared_prompt(prepared[-1])))
+    assert layouts[0].stable_prefix == layouts[1].stable_prefix
+    for root, layout in zip(roots, layouts):
+        assert str(root) not in layout.stable_prefix
+        assert str(root) in "\n".join(text for _, text in layout.volatile_sections)
+        assert str(worktree) in layout.stable_prefix
+    monkeypatch.setattr(builder_module, "_builtin_prompt_root", lambda: pytest.fail("纯渲染不得重读部署路径"))
+    assert prompt_cache_layout(builder_module.render_prepared_prompt(prepared[0])) == layouts[0]
+
+
+# LLM: 注册器只构造工具，不执行命令；模拟两次进程事实，排除PID/可执行文件/临时目录进入固定工具说明。
+# 函数用途: 核对重启不改变基础工具目录、说明及Schema。
+def test_restart_facts_do_not_change_tool_catalog_or_schemas(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    surfaces = []
+    for marker in ("restart-a", "restart-b"):
+        monkeypatch.setattr("os.getpid", lambda: 111 if marker == "restart-a" else 222)
+        monkeypatch.setattr("sys.executable", str(tmp_path / marker / "python"))
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / marker))
+        registry = ToolRegistry(ToolRegistryParams(
+            workspace_root=tmp_path, max_chars=16000, max_entries=50, max_matches=50,
+            web_max_chars=16000, http_timeout=30, catalog_limit=50, retrieval_limit=5,
+            vector_search_enabled=False,
+        ))
+        surfaces.append(deepcopy((
+            registry.render_catalog_section(tool_protocol="native"),
+            [(spec.name, spec.render_detail_entry(max_chars=16000)) for spec in registry.specs()],
+            [(spec.name, spec.description, spec.input_schema) for spec in registry.specs()],
+        )))
+    assert surfaces[0] == surfaces[1]
+    assert surfaces[0][2]
+
+
+# LLM: 移动路径不能越过原资格门；非管理员和子代理的workspace-write不应获得新部署信息。
+# 函数用途: 核对运行包位置与自身开发约定在无资格时都不注入。
+@pytest.mark.parametrize("access,provider", [("workspace-write", "local"), ("full-access", "feishu")])
+def test_deployment_context_keeps_existing_qualification(tmp_path, access, provider):
+    worktree = tmp_path / "dev"
+    worktree.mkdir()
+    (worktree / ".git").mkdir()
+    builder = PromptBuilder(
+        AgentConfig(prompt_files=[], access_mode=access, self_dev_worktree=str(worktree)), tmp_path,
+        home_paths=SimpleNamespace(owner_provider=provider, owner_kind="main", owner_id="main"),
+    )
+    prepared = builder.prepare_render_input(PromptBuildRequest("继续", []))
+    assert prepared.deployment_context == ""
+    assert "# my-agent 自身代码" not in prepared.owner_scope
+    assert "# 当前部署" not in builder.build(request=PromptBuildRequest("继续", []))
+
+
+# LLM: 新解释器从各自真实包副本导入，捕获模块导入时取值；仅构造注册器/提示，不执行工具或接触生产资源。
+# 常量用途: 为两次隔离导入导出同源前缀和工具声明，并校验文本分支只消费冻结路径。
+_DEPLOYMENT_PROCESS_PROBE = """
+import json, os, sys
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.executable = str(Path.cwd() / 'python')
+from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, PromptBuildRequest, ToolSections, render_prepared_prompt, _builtin_prompt_root
+from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+workspace = Path(sys.argv[1])
+registry = ToolRegistry(ToolRegistryParams(workspace_root=workspace, max_chars=16000, max_entries=50, max_matches=50,
+    web_max_chars=16000, http_timeout=30, catalog_limit=50, retrieval_limit=5, vector_search_enabled=False))
+builder = PromptBuilder(AgentConfig(access_mode='full-access', self_dev_worktree=str(workspace)), workspace,
+    home_paths=SimpleNamespace(owner_provider='local', owner_kind='main', owner_id='main'))
+request = PromptBuildRequest('继续', [], tools=ToolSections(native_tool_use=True, tool_catalog_section=registry.render_catalog_section()),
+    workspace_context_override='固定工作区')
+prepared = builder.prepare_render_input(request)
+layout = prompt_cache_layout(render_prepared_prompt(prepared))
+package_root = str(_builtin_prompt_root())
+with patch('agent_py_agent.agent.prompting_parts.builder._builtin_prompt_root', side_effect=AssertionError('纯渲染重新取路径')):
+    text = render_prepared_prompt(replace(prepared, native_tool_use=False, task_and_transcript='固定任务记录'))
+assert text.index('固定任务记录') < text.index('# 当前部署')
+assert text.count(package_root) == 1
+print(json.dumps({'pid': os.getpid(), 'root': package_root, 'prefix': layout.stable_prefix,
+    'deployment': dict(layout.volatile_sections)['prompt.deployment'],
+    'tools': [(spec.name, spec.description, spec.input_schema) for spec in registry.specs()],
+    'details': [spec.render_detail_entry(max_chars=16000) for spec in registry.specs()]}, ensure_ascii=False))
+"""
+
+
+# LLM: 不仅替换一个函数；相同源码放在不同物理部署目录，用独立进程/TMPDIR排除导入缓存掩盖路径或PID泄漏。
+# 函数用途: 在合成部署中核对真实基础工具目录、Schema、固定系统前缀相同，尾巴含各自路径。
+def test_fresh_deployments_preserve_prefix_and_tool_schemas(tmp_path):
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    snapshots = []
+    for name in ("deployment-a", "deployment-b"):
+        root = tmp_path / name
+        shutil.copytree(Path(__file__).resolve().parents[1], root / "agent_py_agent",
+                        ignore=shutil.ignore_patterns("tests", "__pycache__", ".pytest_cache"))
+        temporary = root / "temp"
+        temporary.mkdir()
+        completed = subprocess.run(
+            [sys.executable, "-c", _DEPLOYMENT_PROCESS_PROBE, str(workspace)], cwd=root,
+            env={"PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(temporary)},
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        snapshots.append(json.loads(completed.stdout))
+    assert snapshots[0]["root"] != snapshots[1]["root"]
+    assert snapshots[0]["pid"] != snapshots[1]["pid"]
+    for key in ("prefix", "tools", "details"):
+        assert snapshots[0][key] == snapshots[1][key]
+    for snapshot in snapshots:
+        assert snapshot["root"] not in snapshot["prefix"]
+        assert snapshot["root"] in snapshot["deployment"]
 
 
 def test_strip_empty_markdown_sections_keeps_real_persona_entries() -> None:
