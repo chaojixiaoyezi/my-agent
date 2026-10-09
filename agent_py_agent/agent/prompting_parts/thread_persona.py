@@ -156,3 +156,56 @@ def _change_counts(target: str, rows: list[str], additions_only: bool) -> str:
         return f"- {target}: 新增 {added} 行"
     removed = sum(row.startswith("- ") for row in rows)
     return f"- {target}: 新增 {added} 行，删除 {removed} 行"
+
+
+# LLM: 清理迁移后的受控失效：锁外预筛减少锁竞争，锁内复核保证与冻结写入不竞态；失效=删除
+#   快照文件，下轮重建时用当前人格，旧约定不再从固定前缀注入。
+# 函数用途: 让包含被清理条目的线程快照受控失效，返回实际删除的快照数。
+def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
+    needles = _content_needles(contents)
+    if not needles:
+        return 0
+    directory = home / "persona" / "thread_prefix"
+    if any(part.is_symlink() for part in (home, home / "persona", directory)):
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    if not directory.is_dir():
+        return 0
+    expired = 0
+    for path in sorted(directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if _expire_snapshot_locked(path, needles):
+            expired += 1
+    return expired
+
+
+# LLM: 复核与删除在同一把快照锁内完成，避免预筛后快照被冻结刷新导致误删新快照。
+# 函数用途: 在锁内复核命中后删除一个快照文件，返回是否删除。
+def _expire_snapshot_locked(path: Path, needles: list[str]) -> bool:
+    with locked_json_path(path):
+        if not _snapshot_contains(path, needles):
+            return False
+        path.unlink()
+        return True
+
+
+# LLM: 只做行级子串判断（被清理行是快照行的子串），不解析正文语义；缺失/损坏/超限视为不含，
+#   坏缓存不阻断迁移，也不把链接目标读进来。
+# 函数用途: 判断快照的 agents 段是否仍包含任一被清理条目。
+def _snapshot_contains(path: Path, needles: list[str]) -> bool:
+    try:
+        saved = _read_snapshot(path)
+    except ValueError:
+        return False
+    if saved is None:
+        return False
+    lines = str(saved["sections"].get("agents", "")).splitlines()
+    return any(needle in line for line in lines for needle in needles)
+
+
+# 函数用途: 把被清理条目正文拆成非空行，作为快照命中的最小比较单位。
+def _content_needles(contents: list[str]) -> list[str]:
+    needles: list[str] = []
+    for text in contents:
+        needles.extend(part.strip() for part in str(text or "").splitlines() if part.strip())
+    return needles

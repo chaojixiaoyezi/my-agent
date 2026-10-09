@@ -283,25 +283,12 @@ class CandidateService:
         code = str(reason or "").strip()
         if not ids or not code:
             return 0
-        with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
-                candidates = self._load_unlocked()
-                changed = 0
-                now = utc_now_iso()
-                for index, item in enumerate(candidates):
-                    if item.candidate_id not in ids:
-                        continue
-                    if str(item.promotion_exclusion or "").strip() == code:
-                        continue
-                    candidates[index] = replace(
-                        item,
-                        promotion_exclusion=code,
-                        updated_at=now,
-                    )
-                    changed += 1
-                if changed:
-                    _write_candidates_unlocked(self.path, candidates, admission=admission)
-                return changed
+        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+            candidates = self._load_unlocked()
+            changed = _mark_excluded_candidates(candidates, ids, code, utc_now_iso())
+            if changed:
+                _write_candidates_unlocked(self.path, candidates, admission=admission)
+            return changed
 
     # LLM: retention 只按结构化 rejected/expired/superseded 状态和 updated_at 删除。
     # 函数用途: 规划超过截止时间的非活跃候选 ID，不执行删除。
@@ -584,6 +571,25 @@ def _write_candidates_unlocked(
     )
     admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
     write_private_text_file_atomic_unlocked(path, text)
+
+
+# LLM: 排除标记只按结构化 candidate_id 命中；已带同原因码的条目跳过，写回由调用方在锁内一次性完成。
+# 函数用途: 给命中的候选写排除原因码，返回实际改动条数。
+def _mark_excluded_candidates(
+    candidates: list[MemoryCandidate],
+    ids: set[str],
+    code: str,
+    now: str,
+) -> int:
+    changed = 0
+    for index, item in enumerate(candidates):
+        if item.candidate_id not in ids:
+            continue
+        if str(item.promotion_exclusion or "").strip() == code:
+            continue
+        candidates[index] = replace(item, promotion_exclusion=code, updated_at=now)
+        changed += 1
+    return changed
 
 
 # LLM: 候选初次观察先记录 observed，再以同一状态图进入 pending/blocked，不允许直接 approved。

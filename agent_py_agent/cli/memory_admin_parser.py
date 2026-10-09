@@ -139,6 +139,10 @@ def _add_agents_commands(areas: argparse._SubParsersAction) -> None:
         help="要加入学习排除名单的会话编号（channel_conversation_id），可重复传入",
     )
     cleanup.add_argument("--migration-id", help="迁移编号（默认按时间生成）；用于快照目录命名")
+    cleanup.add_argument(
+        "--plan-digest",
+        help="dry-run 输出的计划摘要；apply 必须携带且与当前计划一致，否则拒绝执行",
+    )
     cleanup.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     cleanup.set_defaults(func=cmd_memory_agents_cleanup)
 

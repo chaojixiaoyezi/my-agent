@@ -1,5 +1,13 @@
 # Memory Structure
 
+## AGENTS.md 硬拦与清理迁移（mc3-agents0，2026-10-08，本地实现待复核）
+
+- `promotion`：`promote()` 在证据/状态变更前按 `promotion_target=agents` 整体拒绝（自动 `AUTO_AGENTS_WRITE_FORBIDDEN`、人工 `AGENTS_WRITE_USER_ONLY`）；`_automatic_policy_block` 同步拦自动路径；`_commit_persona` 是最终提交入口兜底（`_PromotionBlocked`）。用户当轮 `update_persona` 不经本服务、行为不变。
+- `curator`：`_CuratorPromotionMixin._pending_promotable_candidate_ids` 过滤 `promotion_target=agents` 与名单排除（fail-closed）；`_CuratorExclusionMixin` 负责名单读取/标记同步/候选过滤；`_recovered_state` 是 recover 的 state 重建（权威链覆盖游标/审计、lease 不接管、副本不可解析时计数从审计链累计）。
+- `agents_migration`：plan 用版本账本「最后有效写入」归类 removable/ambiguous/protected；apply=快照（AGENTS.md、versions.jsonl、candidates.jsonl、memory_policy.json、archive/record、persona/backups 全树 + snapshot.json 逐文件 sha256）→ 归档 archive.jsonl → 分批 `mutate_batch`（≤32、CAS、`source=migration:<id>`）→ 名单追加 → record.json；`_require_matching_digest` 绑定 dry-run 摘要（缺失 `AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED`、过期 `AGENTS_CLEANUP_PLAN_STALE`）。
+- `thread_persona.expire_thread_personas_containing`：清理后按内容失效线程冻结快照（目录链 symlink 拒绝、单文件 symlink 跳过、锁外预筛+锁内复核）。
+- CLI：`memory agents cleanup [--apply] [--conversation ...] [--migration-id ...] [--json]`；dry-run 输出 plan（含 plan_digest/ambiguous_entry_ids），不打印正文。
+
 ## 工具引用 scope 流式读取（toolrefs / E11e，2026-10-08，本地实现待复核）
 
 - `common.tool_index_stream` 是E11a、Compact、artifact、晋升回退、通用控制面的唯一严格UTF-8读取器；control_plane保留兼容导出。预筛文本迭代器在需要旧合法性语义时先C解析并丢弃对象，E11a保留非候选零解析；对象迭代器C解析一次、只保留候选。Compact从四键AND选安全必要条件，最终仍原scope/旧请求回退；apply单扫描投影两类引用，scope carried也共用。artifact仅存ref/path候选，规范POSIX路径沿realpath/stat快路、其它平台及非规范路径仍原Path求值；无效ref仍扫描异常但不收集历史全集。晋升校验所有行，坏行整文件无证据，不留历史对象；资源错误/IO顺序保持原合同。已删除纯Python词法校验器，schema/权限/正文/归档写入不变，无缓存，实测及调用链见TESTS。

@@ -445,15 +445,9 @@ class _CuratorExecutionMixin:
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
         preflight_warnings = self._preflight_migration()
-        # 学习排除名单先于任何收集与晋升生效：不可读时 fail-closed（excluded_ids=None 会让消息
-        # 收集整批跳过）；非空时先把历史待定候选标记为排除，再收集本批消息。
-        excluded_ids, exclusion_warnings = self._learning_exclusions_for_run()
+        # 学习排除名单先于收集与晋升生效：不可读时 fail-closed，非空先标记历史待定候选再收集。
+        excluded_ids, exclusion_warnings = self._prepare_exclusion_context()
         preflight_warnings = (*preflight_warnings, *exclusion_warnings)
-        if excluded_ids:
-            preflight_warnings = (
-                *preflight_warnings,
-                *self._sync_learning_exclusions(excluded_ids),
-            )
         batch = self._collect(
             context.state_before,
             include_formal=True,
@@ -501,8 +495,7 @@ class _CuratorExecutionMixin:
         return ()
 
     # LLM: Formal memory 走固定子预算;due 检查省略它,实际 run 包含它而不动游标契约。
-    #   学习排除名单随消息来源包传入：名单会话在读取消息前跳过（游标不动），None 表示名单
-    #   不可读的 fail-closed（本轮不收集任何会话消息）。
+    #   名单随消息来源包传入：名单会话读取前跳过（游标不动），None 表示不可读的 fail-closed。
     # 函数用途: 收集一次有界增量输入快照。
     def _collect(
         self,
@@ -605,8 +598,8 @@ class _CuratorExecutionMixin:
         committed: CuratorBatchCommit,
         extra_warnings: tuple[str, ...],
     ) -> CuratorRunResult:
-        # 提交后的自动晋升只消费宿主按结构化字段标出的 auto_eligible 候选；
-        # SOUL 和无正式权威的候选仍不会进入回调。
+        # 提交后的自动晋升只消费宿主按结构化字段标出的 auto_eligible 候选；SOUL、agents 目标
+        # 和无正式权威的候选不会进入回调（v2：可晋升判定与最终提交入口的硬拦同步）。
         promotable = [
             item.candidate_id
             for item in committed.candidates
@@ -614,6 +607,8 @@ class _CuratorExecutionMixin:
             == "auto_eligible"
             and str(getattr(item, "status", "") or "").strip().lower()
             in {"pending_review", "approved"}
+            and str(getattr(item, "promotion_target", "") or "").strip().lower()
+            != "agents"
         ]
         promoted, promotion_warnings = self._promote_eligible(promotable)
         warnings = (
@@ -640,33 +635,17 @@ class _CuratorExecutionMixin:
             warnings=warnings,
         )
 
-    # LLM: 晋升只消费已提交候选 ID;失败与已成功事务隔离且保持可重试。名单判定用结构化字段：
-    #   名单不可读时不补晋升（fail-closed），来源命中名单的候选跳过；持久标记由 _execute 的
-    #   全量同步负责，这里只做只读剔除。
-    # 函数用途: 执行保守自动晋升并返回数量和稳定警告码。
-    def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
-        """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
 
-        LLM: Selection trusts only persisted host promotion_mode and typed status. Target-specific
-        evidence, threshold, CAS and SOUL confirmation remain PromotionService responsibilities.
-        """
-        try:
-            rows = self.candidate_service.list(
-                statuses={"pending_review", "approved"},
-                limit=limit,
-            )
-            eligible = [
-                row
-                for row in rows
-                if str(getattr(row, "promotion_mode", "") or "").strip().lower()
-                == "auto_eligible"
-            ]
-            if not eligible:
-                return []
-            eligible = self._drop_excluded_promotable(eligible)
-            return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
-        except Exception:
-            return []
+# LLM: 学习排除名单的读取、同步与过滤集中在这里：名单不可读时 fail-closed（消息收集与补晋升都跳过），
+#   命中名单只做结构化判定，不阻断策展主链；Execution 只调用本类方法拿结果。
+# 类用途: 提供 Curator 的学习排除名单读取、标记同步与候选过滤。
+class _CuratorExclusionMixin:
+    # 函数用途: 读取名单并同步历史待定候选的排除标记，返回 (排除集合或 None, 警告)。
+    def _prepare_exclusion_context(self) -> tuple[frozenset[str] | None, tuple[str, ...]]:
+        excluded_ids, warnings = self._learning_exclusions_for_run()
+        if not excluded_ids:
+            return excluded_ids, warnings
+        return excluded_ids, (*warnings, *self._sync_learning_exclusions(excluded_ids))
 
     # LLM: 名单不可读时返回空（宁可不晋升也不误晋升）；判定只读结构化 refs 与通道绑定，不写标记。
     # 函数用途: 从待晋升候选里剔除来源命中学习排除名单的条目。
@@ -719,6 +698,42 @@ class _CuratorExecutionMixin:
         marked = int(report.get("marked") or 0)
         return (f"learning_exclusion_marked:{marked}",) if marked else ()
 
+
+# LLM: 自动晋升的候选选取与执行集中在这里：只消费持久账本与提交结果里的结构化字段，
+#   名单不可读时不补晋升（fail-closed），agents 目标跳过（v2 硬拦）；失败与已成功事务隔离。
+# 类用途: 提供 Curator 保守自动晋升的候选选取与执行。
+class _CuratorPromotionMixin:
+    # LLM: 只消费已提交候选的持久结构化字段（promotion_mode/status/target）；这里只做只读剔除，
+    #   不写标记（持久标记由 _execute 的全量同步负责）。
+    # 函数用途: 列出已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
+    def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
+        """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
+
+        LLM: Selection trusts only persisted host promotion_mode and typed status. Target-specific
+        evidence, threshold, CAS and SOUL confirmation remain PromotionService responsibilities.
+        """
+        try:
+            rows = self.candidate_service.list(
+                statuses={"pending_review", "approved"},
+                limit=limit,
+            )
+            eligible = [
+                row
+                for row in rows
+                if str(getattr(row, "promotion_mode", "") or "").strip().lower()
+                == "auto_eligible"
+                and str(getattr(row, "promotion_target", "") or "").strip().lower()
+                != "agents"
+            ]
+            if not eligible:
+                return []
+            eligible = self._drop_excluded_promotable(eligible)
+            return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
+        except Exception:
+            return []
+
+    # LLM: 失败与已成功事务隔离且保持可重试；manual_only 或无回调时不动。
+    # 函数用途: 逐条执行保守自动晋升并返回成功数与稳定警告码。
     def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...]]:
         if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
             return 0, ()
@@ -853,7 +868,13 @@ class _CuratorRunMixin:
 # LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
 # compact, task completion, and lifecycle signals.
 # 类用途: 执行一个 owner 的增量 Daily/Candidate 策展闭环。
-class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLifecycleMixin):
+class MemoryCuratorService(
+    _CuratorRunMixin,
+    _CuratorExecutionMixin,
+    _CuratorExclusionMixin,
+    _CuratorPromotionMixin,
+    _CuratorLifecycleMixin,
+):
     # LLM: Construction wires existing canonical services and creates only a transaction
     # coordinator; it starts no thread, daemon, or second scheduler.
     # 函数用途: 初始化唯一 Curator 服务及其可恢复提交器。
@@ -975,38 +996,8 @@ class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLif
                     "evidence": _recover_evidence_summary(evidence),
                 }
         # 4. 重建 state: 游标/审计 = 权威链; 副本可解析时保留 pending/last_* 字段
-        try:
-            if isinstance(copy_payload, dict):
-                restored = MemoryCuratorState.from_dict(copy_payload)
-            else:
-                restored = MemoryCuratorState()
-            restored = replace(
-                restored,
-                last_processed_message_id=str(
-                    authoritative.get("last_processed_message_id") or ""
-                ),
-                last_processed_audit_event_id=str(
-                    authoritative.get("last_audit_event_id") or ""
-                ),
-                per_thread_cursors=dict(authoritative.get("per_thread_cursors") or {}),
-                active_lease={},  # 损坏前 lease 不可信, 绝不接管
-                last_failure_at="",
-                last_failure_code="",
-                last_committed_run_id=last_success.run_id,
-            )
-            if not isinstance(copy_payload, dict):
-                # 副本不可解析(unreadable): 计数从权威审计链累计(恢复点不丢账)。
-                restored = replace(
-                    restored,
-                    processed_count=sum(
-                        int(r.processed_messages or 0) + int(r.processed_audit_events or 0)
-                        for r in succeeded
-                    ),
-                    candidate_count=sum(int(r.candidates or 0) for r in succeeded),
-                    daily_event_count=sum(int(r.daily_events or 0) for r in succeeded),
-                )
-            validate_curator_state(restored)
-        except (TypeError, ValueError):
+        restored = _recovered_state(copy_payload, authoritative, last_success, succeeded)
+        if restored is None:
             return {
                 "status": "refused",
                 "reason": "restored_state_invalid",
@@ -1265,6 +1256,51 @@ def _successful_run_record(
 # LLM: 损坏 run_id 由原文件 sha256 派生, 首次(算文件)与重复(读哨兵)取值一致,
 # 保证同一损坏的重复维护 tick 落幂等审计, 不伪造自愈成功。
 # 函数用途: 从隔离元数据派生稳定损坏 run_id。
+# LLM: 恢复时的 state 重建语义复杂(权威链覆盖游标/审计、lease 绝不接管、副本不可解析时计数从
+#   审计链累计), 抽成模块级函数让 recover 保持可读; 失败返回 None 由调用方拒绝恢复。
+# 函数用途: 由副本与权威链重建恢复后的 MemoryCuratorState; 非法时返回 None。
+def _recovered_state(
+    copy_payload: dict[str, object] | None,
+    authoritative: dict[str, object],
+    last_success: CuratorRunRecord,
+    succeeded: list[CuratorRunRecord],
+) -> MemoryCuratorState | None:
+    try:
+        if isinstance(copy_payload, dict):
+            restored = MemoryCuratorState.from_dict(copy_payload)
+        else:
+            restored = MemoryCuratorState()
+        restored = replace(
+            restored,
+            last_processed_message_id=str(
+                authoritative.get("last_processed_message_id") or ""
+            ),
+            last_processed_audit_event_id=str(
+                authoritative.get("last_audit_event_id") or ""
+            ),
+            per_thread_cursors=dict(authoritative.get("per_thread_cursors") or {}),
+            active_lease={},  # 损坏前 lease 不可信, 绝不接管
+            last_failure_at="",
+            last_failure_code="",
+            last_committed_run_id=last_success.run_id,
+        )
+        if not isinstance(copy_payload, dict):
+            # 副本不可解析(unreadable): 计数从权威审计链累计(恢复点不丢账)。
+            restored = replace(
+                restored,
+                processed_count=sum(
+                    int(r.processed_messages or 0) + int(r.processed_audit_events or 0)
+                    for r in succeeded
+                ),
+                candidate_count=sum(int(r.candidates or 0) for r in succeeded),
+                daily_event_count=sum(int(r.daily_events or 0) for r in succeeded),
+            )
+        validate_curator_state(restored)
+    except (TypeError, ValueError):
+        return None
+    return restored
+
+
 # LLM: 恢复拒绝原因只带结构化证据标识(路径/hash 前缀/分类), 不复制损坏正文。
 # 函数用途: 生成恢复校验失败时返回的哨兵证据摘要。
 def _recover_evidence_summary(evidence: dict[str, object]) -> dict[str, object]:

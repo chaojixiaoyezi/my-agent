@@ -11,7 +11,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..agent.capability.persona_repository import PersonaRepository
 from ..agent.memory_api import (
+    AgentsCleanupError,
     AgentsCleanupRequest,
     DailyMemoryStore,
     LessonRepository,
@@ -20,7 +22,6 @@ from ..agent.memory_api import (
     apply_agents_cleanup,
     plan_agents_cleanup,
 )
-from ..agent.capability.persona_repository import PersonaRepository
 from ..agent.user_space.owner_access import is_complete_local_admin_owner
 from .common import make_agent
 from .memory_commands.memory_doctor_cmd import (
@@ -336,7 +337,8 @@ def _migration_payload(agent: Any, args: Any) -> dict[str, object]:
     }
 
 
-# LLM: dry-run 只输出计划（不含条目正文）；apply 走同一服务并返回结构化迁移报告。
+# LLM: dry-run 只输出计划（不含条目正文）并给出 plan_digest；apply 必须携带同一摘要，
+#   计划漂移以稳定错误码拒绝；apply 走同一服务并返回结构化迁移报告。
 # 函数用途: 构造 AGENTS 清理迁移的预览或执行报告。
 def _agents_cleanup_payload(agent: Any, args: Any) -> dict[str, object]:
     home = agent.home_paths
@@ -351,16 +353,25 @@ def _agents_cleanup_payload(agent: Any, args: Any) -> dict[str, object]:
             "plan": plan.to_dict(),
         }
     migration_id = str(getattr(args, "migration_id", None) or "") or _default_migration_id()
-    report = apply_agents_cleanup(
-        home_paths=home,
-        persona=persona,
-        candidate_service=agent.memory_candidates,
-        request=AgentsCleanupRequest(
-            migration_id=migration_id,
-            conversations=conversations,
-            actor="memory-admin-cli",
-        ),
-    )
+    try:
+        report = apply_agents_cleanup(
+            home_paths=home,
+            persona=persona,
+            candidate_service=agent.memory_candidates,
+            request=AgentsCleanupRequest(
+                migration_id=migration_id,
+                conversations=conversations,
+                actor="memory-admin-cli",
+                plan_digest=str(getattr(args, "plan_digest", None) or ""),
+            ),
+        )
+    except AgentsCleanupError as exc:
+        return {
+            "ok": False,
+            "command": "memory agents cleanup",
+            "mode": "apply",
+            "error_code": exc.reason_code,
+        }
     return {
         "ok": bool(report.get("ok")),
         "command": "memory agents cleanup",

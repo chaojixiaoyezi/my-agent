@@ -495,9 +495,9 @@ class _PromotionCommitMixin:
         raise ValueError("long_term promotion proposed_action must be add/replace/remove/merge")
 
     # LLM: USER facts require user_explicit evidence and SOUL alone requires current-turn
-    # confirmation. AGENTS is written only by the user's own update_persona turn or an owner-run
-    # manual review (automatic paths are blocked with AUTO_AGENTS_WRITE_FORBIDDEN) and still uses
-    # the same owner path, exact-entry CAS, quota, version history, and injection scanner.
+    # confirmation. 第 0 期（v2）：promotion 的最终提交入口一律拒绝 agents——本方法对 agents
+    # 直接抛出稳定的 _PromotionBlocked，任何到达提交层的路径都无法再写 AGENTS；用户直接要求
+    # 写 AGENTS 走 update_persona，不经本服务。
     # 函数用途: 通过唯一 PersonaRepository 提交人格目标。
     def _commit_persona(
         self,
@@ -507,6 +507,8 @@ class _PromotionCommitMixin:
         reviewer: str,
         confirmed: bool,
     ) -> str:
+        if target == "agents":
+            raise _PromotionBlocked(candidate.status, "AGENTS_WRITE_USER_ONLY")
         if target in {"user", "soul"} and candidate.origin != "user_explicit":
             raise ValueError(f"{target.upper()} promotion requires user_explicit evidence")
         if target == "soul" and not confirmed:
@@ -518,8 +520,6 @@ class _PromotionCommitMixin:
             raise ValueError("USER promotion requires profile/preference candidate")
         if target == "soul" and candidate.candidate_type != "soul_change":
             raise ValueError("SOUL promotion requires soul_change candidate")
-        if target == "agents" and candidate.candidate_type != "working_agreement":
-            raise ValueError("AGENTS promotion requires working_agreement candidate")
         action = candidate.proposed_action
         if action == "merge":
             action = "replace"
@@ -652,9 +652,10 @@ class MemoryPromotionService(_PromotionCommitMixin):
             promotion_target=promotion_target,
         )
 
-    # LLM: Automatic promotion covers every host-authorized non-SOUL target except AGENTS (hard
-    # blocked for automatic paths). Evidence, exact mutation ids, conflicts, thresholds, temporary
-    # expiry and target repositories still fail closed.
+    # LLM: 第 0 期（设计 v2 §3.1）：memory promotion 的最终提交入口一律拒绝 agents 目标——
+    # 自动、积压重试、人工晋升与审核后提交都算；候选保持原状态并带结构化原因码，不丢弃、
+    # 不标失败。用户直接要求写 AGENTS 走 update_persona，不经本服务。证据、精确 mutation id、
+    # 冲突、门槛、临时过期与目标仓库仍照常 fail-closed。
     # 函数用途: 核验证据并提交一个候选的正式落点。
     def promote(
         self,
@@ -681,6 +682,14 @@ class MemoryPromotionService(_PromotionCommitMixin):
                 False,
                 candidate.status,
                 "PROMOTION_MANUAL_REQUIRED",
+            )
+        # AGENTS 硬拦（v2）：不分自动/人工，在证据与状态变更之前整体拒绝。
+        if str(candidate.promotion_target or "").strip().lower() == "agents":
+            return MemoryPromotionResult(
+                candidate_id,
+                False,
+                candidate.status,
+                "AUTO_AGENTS_WRITE_FORBIDDEN" if automatic else "AGENTS_WRITE_USER_ONLY",
             )
         # 学习来源排除标记（如 LEARNING_SOURCE_EXCLUDED）只拦自动路径：候选保持原状态、不丢；
         # 用户显式人工复核（automatic=False）不受影响。判定只看结构化字段，不看正文。

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-"""AGENTS.md 清理迁移：混合文件计划、执行、幂等、快照恢复与故障收敛（2026-10-08 第 0 期）。
+"""AGENTS.md 清理迁移（设计 v2 §3.6）：归属判定、计划摘要、事务恢复与快照失效。
 
-口径：只移出「仍在本文件里且来源为 memory-promotion」的条目；agent_tool、system_baseline
-（基线快照）与任何其它来源记录一律保护；执行先快照后删除，删除走 PersonaRepository 的
-CAS 批量通道；空跑只给计数和 entry_id，不打印正文。
+口径：归属按「当前条目最后一次有效写入的来源」判定——「自动添加→用户删除→用户重新添加
+相同文字」判为用户条目；无事件、最后是 remove 或最后写入之后有 rollback 一律歧义保留。
+apply 绑定 dry-run 计划摘要，中途变化拒绝；崩溃可幂等续作；先快照（含 backups）后归档再
+删除；收尾让受影响线程的冻结人格快照受控失效。空跑只给计数和 entry_id，不打印正文。
 """
 
 import json
@@ -22,6 +23,7 @@ from agent_py_agent.agent.capability.persona_repository import (
     persona_entry_id,
 )
 from agent_py_agent.agent.memory_store.agents_migration import (
+    AgentsCleanupError,
     AgentsCleanupRequest,
     apply_agents_cleanup,
     plan_agents_cleanup,
@@ -31,6 +33,11 @@ from agent_py_agent.agent.memory_store.candidate_models import (
     MemoryScope,
 )
 from agent_py_agent.agent.memory_store.candidates import CandidateService
+from agent_py_agent.agent.prompting_parts.thread_persona import (
+    RenderedPersonaSections,
+    ThreadPersonaScope,
+    freeze_thread_persona,
+)
 
 _ENTRY_ONE = "自动条目一。"
 _ENTRY_TWO_OLD = "自动条目二（旧）。"
@@ -124,6 +131,26 @@ def _agents_text(repo) -> str:
     return repo.path_for("agents").read_text(encoding="utf-8")
 
 
+# 函数用途: 计算当前 dry-run 计划摘要，供 apply 携带。
+def _digest(repo) -> str:
+    return plan_agents_cleanup(persona=repo).plan_digest
+
+
+# 函数用途: 用当前计划摘要执行一次迁移（测试默认路径）。
+def _apply(home, repo, candidates, **kwargs):
+    migration_id = str(kwargs.pop("migration_id"))
+    return apply_agents_cleanup(
+        home_paths=home,
+        persona=repo,
+        candidate_service=candidates,
+        request=AgentsCleanupRequest(
+            migration_id=migration_id,
+            plan_digest=_digest(repo),
+            **kwargs,
+        ),
+    )
+
+
 def test_plan_counts_mixed_entries(tmp_path: Path):
     home, repo, candidates, first, second = _mixed(tmp_path)
 
@@ -131,7 +158,6 @@ def test_plan_counts_mixed_entries(tmp_path: Path):
     payload = plan.to_dict()
 
     assert payload["entries_total"] == 4
-    assert payload["promotion_entries"] == 2
     assert payload["protected_entries"] == 1
     assert payload["removable_count"] == 2
     assert set(payload["removable_entry_ids"]) == {
@@ -146,6 +172,7 @@ def test_plan_counts_mixed_entries(tmp_path: Path):
         first.candidate_id,
         second.candidate_id,
     }
+    assert payload["plan_digest"]
 
 
 def test_dry_run_payload_has_no_entry_content(tmp_path: Path):
@@ -177,28 +204,85 @@ def test_entry_with_non_promotion_record_is_protected(tmp_path: Path):
 
     plan = plan_agents_cleanup(persona=repo)
     assert plan.removable == ()
-    report = apply_agents_cleanup(
-        home_paths=home,
-        persona=repo,
-        candidate_service=candidates,
-        request=AgentsCleanupRequest(migration_id="m2"),
-    )
+    report = _apply(home, repo, candidates, migration_id="m2")
 
     assert report["removed_count"] == 0
-    assert "双记录条目。" in repo.path_for("agents").read_text(encoding="utf-8")
+    assert "双记录条目。" in _agents_text(repo)
+
+
+def test_user_readded_same_text_is_kept(tmp_path: Path):
+    # mc4 红测场景：自动添加 → 用户删除 → 用户重新添加相同文字，entry_id 相同但归属是用户。
+    home, repo, candidates = _env(tmp_path)
+    candidate = _candidate(candidates, "被用户接管的约定。", 1)
+    entry_id = persona_entry_id("agents", "被用户接管的约定。")
+    _promotion_add(repo, "被用户接管的约定。", candidate.candidate_id)
+    repo.mutate(
+        PersonaMutationRequest(
+            target="agents", action="remove", entry_id=entry_id, source="agent_tool"
+        )
+    )
+    repo.mutate(
+        PersonaMutationRequest(
+            target="agents",
+            action="add",
+            content="被用户接管的约定。",
+            source="agent_tool",
+        )
+    )
+
+    plan = plan_agents_cleanup(persona=repo)
+
+    assert plan.removable == ()
+    assert entry_id not in plan.ambiguous_entry_ids
+    report = _apply(home, repo, candidates, migration_id="m-readd")
+    assert report["removed_count"] == 0
+    assert "被用户接管的约定。" in _agents_text(repo)
+
+
+def test_hand_edited_entry_is_ambiguous_and_kept(tmp_path: Path):
+    # 用户直接编辑文件加的行没有任何版本事件，归属不明 → 歧义保留并列出。
+    home, repo, candidates = _env(tmp_path)
+    _promotion_add(repo, "自动条目。", "hand-candidate-1")
+    path = repo.path_for("agents")
+    path.write_text(path.read_text(encoding="utf-8") + "- 手工加的条目。\n", encoding="utf-8")
+
+    plan = plan_agents_cleanup(persona=repo)
+
+    manual_id = persona_entry_id("agents", "手工加的条目。")
+    assert manual_id in plan.ambiguous_entry_ids
+    assert all(item["entry_id"] != manual_id for item in plan.removable)
+    assert {item["entry_id"] for item in plan.removable} == {
+        persona_entry_id("agents", "自动条目。")
+    }
+
+
+def test_entry_touched_by_rollback_is_ambiguous(tmp_path: Path):
+    # rollback 晚于最后写入时，当前内容可能来自被恢复的旧版本 → 歧义保留。
+    home, repo, candidates = _env(tmp_path)
+    _promotion_add(repo, "自动条目 A。", "rollback-candidate-a")
+    _promotion_add(repo, "自动条目 B。", "rollback-candidate-b")
+    repo.mutate(
+        PersonaMutationRequest(
+            target="agents", action="rollback", rollback_version=1, source="agent_tool"
+        )
+    )
+
+    plan = plan_agents_cleanup(persona=repo)
+
+    entry_a = persona_entry_id("agents", "自动条目 A。")
+    assert entry_a in plan.ambiguous_entry_ids
+    assert plan.removable == ()
+    report = _apply(home, repo, candidates, migration_id="m-rollback")
+    assert report["removed_count"] == 0
+    assert "自动条目 A。" in _agents_text(repo)
 
 
 def test_apply_removes_only_promotion_entries(tmp_path: Path):
     home, repo, candidates, first, second = _mixed(tmp_path)
 
-    report = apply_agents_cleanup(
-        home_paths=home,
-        persona=repo,
-        candidate_service=candidates,
-        request=AgentsCleanupRequest(migration_id="m1", conversations=("chat-excluded",)),
-    )
+    report = _apply(home, repo, candidates, migration_id="m1", conversations=("chat-excluded",))
 
-    assert report["removable_count"] == 2
+    assert report["planned_count"] == 2
     assert report["removed_count"] == 2
     remaining = repo.list_entries("agents")["entries"]
     assert {item["content"] for item in remaining} == {_BASELINE_ENTRY, _TOOL_ENTRY}
@@ -217,6 +301,7 @@ def test_apply_removes_only_promotion_entries(tmp_path: Path):
     assert by_id[persona_entry_id("agents", _ENTRY_TWO_NEW)]["candidate_id"] == second.candidate_id
     record = json.loads((Path(str(report["snapshot_dir"])) / "record.json").read_text(encoding="utf-8"))
     assert record["migration_id"] == "m1"
+    assert record["status"] == "completed"
     assert record["removed_count"] == 2
     assert record["conversations"] == ["chat-excluded"]
     versions = repo.history("agents")
@@ -227,48 +312,62 @@ def test_apply_removes_only_promotion_entries(tmp_path: Path):
     assert policy["learning_exclusions"][0]["channel_conversation_id"] == "chat-excluded"
 
 
+def test_apply_requires_digest_and_rejects_stale_plan(tmp_path: Path):
+    home, repo, candidates, first, second = _mixed(tmp_path)
+
+    with pytest.raises(AgentsCleanupError) as missing:
+        apply_agents_cleanup(
+            home_paths=home,
+            persona=repo,
+            candidate_service=candidates,
+            request=AgentsCleanupRequest(migration_id="m1"),
+        )
+    assert missing.value.reason_code == "AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED"
+
+    digest = _digest(repo)
+    repo.mutate(
+        PersonaMutationRequest(
+            target="agents", action="add", content="用户新加的条目。", source="agent_tool"
+        )
+    )
+    with pytest.raises(AgentsCleanupError) as stale:
+        apply_agents_cleanup(
+            home_paths=home,
+            persona=repo,
+            candidate_service=candidates,
+            request=AgentsCleanupRequest(migration_id="m1", plan_digest=digest),
+        )
+    assert stale.value.reason_code == "AGENTS_CLEANUP_PLAN_STALE"
+    assert _ENTRY_ONE in _agents_text(repo)
+
+
 def test_apply_is_idempotent_on_rerun(tmp_path: Path):
     home, repo, candidates, first, second = _mixed(tmp_path)
-    apply_agents_cleanup(
-        home_paths=home,
-        persona=repo,
-        candidate_service=candidates,
-        request=AgentsCleanupRequest(migration_id="m1"),
-    )
+    _apply(home, repo, candidates, migration_id="m1")
     before = _agents_text(repo)
 
-    plan = plan_agents_cleanup(persona=repo)
-    report = apply_agents_cleanup(
-        home_paths=home,
-        persona=repo,
-        candidate_service=candidates,
-        request=AgentsCleanupRequest(migration_id="m1"),
-    )
+    report = _apply(home, repo, candidates, migration_id="m1")
 
-    assert plan.removable == ()
-    assert report["removed_count"] == 0
-    assert "nothing_to_remove" in report["notes"]
+    assert report["already_completed"] is True
+    assert report["removed_count"] == 2
     assert _agents_text(repo) == before
     snapshot_meta = json.loads(
         (Path(str(report["snapshot_dir"])) / "snapshot.json").read_text(encoding="utf-8")
     )
-    assert snapshot_meta["files"]["agents"]["sha256"]
+    assert snapshot_meta["files"]["agents.md"]["sha256"]
 
 
 def test_snapshot_restores_original_bytes(tmp_path: Path):
     home, repo, candidates, first, second = _mixed(tmp_path)
     before = repo.path_for("agents").read_bytes()
 
-    report = apply_agents_cleanup(
-        home_paths=home,
-        persona=repo,
-        candidate_service=candidates,
-        request=AgentsCleanupRequest(migration_id="m1"),
-    )
+    report = _apply(home, repo, candidates, migration_id="m1")
 
-    snapshot_agents = Path(str(report["snapshot_dir"])) / "snapshot" / "agents"
-    assert snapshot_agents.read_bytes() == before
-    shutil.copyfile(snapshot_agents, repo.path_for("agents"))
+    snapshot_dir = Path(str(report["snapshot_dir"])) / "snapshot"
+    assert (snapshot_dir / "agents.md").read_bytes() == before
+    assert (snapshot_dir / "versions.jsonl").exists()
+    assert list((snapshot_dir / "backups").rglob("*.md"))
+    shutil.copyfile(snapshot_dir / "agents.md", repo.path_for("agents"))
     assert repo.path_for("agents").read_bytes() == before
 
 
@@ -287,15 +386,11 @@ def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(PersonaRepository, "mutate_batch", flaky)
     with pytest.raises(RuntimeError, match="injected batch failure"):
-        apply_agents_cleanup(
-            home_paths=home,
-            persona=repo,
-            candidate_service=candidates,
-            request=AgentsCleanupRequest(migration_id="m1"),
-        )
+        _apply(home, repo, candidates, migration_id="m1")
 
     directory = home.owner_home_dir / "persona" / "migrations" / "agents-migration-m1"
-    assert (directory / "snapshot.json").exists()
+    record = json.loads((directory / "record.json").read_text(encoding="utf-8"))
+    assert record["status"] == "in_progress"
     # 40 条自动条目按每批 32 条删除：第一批已删，剩 8 条自动 + 1 条基线。
     assert len(repo.list_entries("agents")["entries"]) == 9
     monkeypatch.setattr(PersonaRepository, "mutate_batch", original)
@@ -308,8 +403,69 @@ def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
     )
 
     assert report["removed_count"] == 8
+    assert report["status"] == "completed"
     remaining = repo.list_entries("agents")["entries"]
     assert {item["content"] for item in remaining} == {_BASELINE_ENTRY}
+    archive_rows = [
+        json.loads(line)
+        for line in (directory / "archive.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(archive_rows) == 40
+    final = json.loads((directory / "record.json").read_text(encoding="utf-8"))
+    assert final["status"] == "completed"
+    assert final["remaining_count"] == 0
+
+
+def test_expire_thread_snapshots_after_cleanup(tmp_path: Path):
+    home, repo, candidates = _env(tmp_path)
+    _promotion_add(repo, "会被清掉的约定。", "expire-candidate-1")
+    scope = ThreadPersonaScope(
+        thread_id="thread-1",
+        compact_generation=1,
+        model_profile_id="model-a",
+        protocol=("backend", "protocol"),
+    )
+    frozen = RenderedPersonaSections(
+        sections={
+            "agents": _agents_text(repo),
+            "soul": "# SOUL.md\n",
+            "user": "# USER.md\n",
+            "diagnostics": "",
+        },
+        truncated_targets=frozenset(),
+    )
+    freeze_thread_persona(home.owner_home_dir, scope, frozen)
+    snapshot_path = home.owner_home_dir / "persona" / "thread_prefix" / "thread-1.json"
+    assert snapshot_path.exists()
+
+    report = _apply(home, repo, candidates, migration_id="m1")
+
+    assert report["expired_thread_snapshots"] == 1
+    assert not snapshot_path.exists()
+    # 下一回合重新冻结后，固定前缀不再出现旧条目（失效后按当前内容重建）。
+    after = RenderedPersonaSections(
+        sections={**frozen.sections, "agents": _agents_text(repo)},
+        truncated_targets=frozenset(),
+    )
+    freeze_thread_persona(home.owner_home_dir, scope, after)
+    saved = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert "会被清掉的约定。" not in saved["sections"]["agents"]
+
+
+def test_archived_entries_leave_no_live_surfaces(tmp_path: Path):
+    home, repo, candidates, first, second = _mixed(tmp_path)
+
+    report = _apply(home, repo, candidates, migration_id="m1", conversations=("chat-1",))
+
+    archive_path = Path(str(report["archive_ref"]))
+    assert archive_path.exists()
+    agents_text = _agents_text(repo)
+    for entry in (_ENTRY_ONE, _ENTRY_TWO_NEW):
+        assert entry not in agents_text
+    stored = candidates.get(first.candidate_id)
+    assert stored.status == "pending_review"
+    policy = json.loads((home.owner_memory_policy_json).read_text(encoding="utf-8"))
+    assert policy["learning_exclusions"][0]["channel_conversation_id"] == "chat-1"
 
 
 def test_same_scale_cleanup_duration(tmp_path: Path):
@@ -326,16 +482,11 @@ def test_same_scale_cleanup_duration(tmp_path: Path):
     assert len(repo.list_entries("agents")["entries"]) == 489
 
     start = time.perf_counter()
-    report = apply_agents_cleanup(
-        home_paths=home,
-        persona=repo,
-        candidate_service=candidates,
-        request=AgentsCleanupRequest(migration_id="scale"),
-    )
+    report = _apply(home, repo, candidates, migration_id="scale")
     elapsed = time.perf_counter() - start
     print(f"\nSAME_SCALE_CLEANUP_ELAPSED={elapsed:.3f}s", flush=True)
 
-    assert report["removable_count"] == 475
+    assert report["planned_count"] == 475
     assert report["removed_count"] == 475
     remaining = repo.list_entries("agents")["entries"]
     assert len(remaining) == 14

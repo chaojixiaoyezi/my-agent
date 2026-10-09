@@ -1,5 +1,11 @@
 # 记忆与上下文维护状态
 
+## AGENTS.md 第 0 期：硬拦与清理迁移（mc3-agents0，2026-10-08，分支 worker/mc3-agents，本地实现待复核）
+
+- 生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条（派活会话任务书被当用户长期约定）。三件事：promotion 最终提交入口硬拦 agents（自动/积压重试/人工/审核后一律拒绝，候选保持原状态带原因码）、owner 策略学习排除名单（按会话跳过收集 + 既有待定候选持久标记）、CLI 清理迁移（默认 dry-run、`--apply` 才执行；快照+归档+分批 CAS 删除、幂等续作）。
+- v2 四个阻断：①硬拦覆盖 `promote()` 主拦、`_automatic_policy_block` 与 `_commit_persona` 最终入口，curator 补晋升与可晋升判定同步排除 agents；②归属判定按「当前条目最后一次有效写入的来源」——用户删除后重加同文字、rollback、手工编辑均歧义保留并列出；③apply 绑定 dry-run 计划摘要，快照含 `persona/backups`、排除名单、归档与事务状态，崩溃幂等续作且不覆盖用户迁移期间的修改；④清理后按内容失效受影响线程的冻结人格快照。
+- 测试 21 项（guard 7 + migration 14）；6 项变异全部 rc=1 且备份字节还原；489 条同规模 plan+apply 0.656s。未验证真实 home 迁移（由 3a 部署后空跑→执行）、真实 Gateway 链路。
+
 ## Compact工具引用按scope流式读取（toolrefs/E11e，2026-10-08，claude/07-c1-toolrefs，本地实现、待07复核）
 
 - Compact、artifact、晋升证据回退、通用控制面及scope carried共用common权威流式读取器；apply两类引用单扫描，E11a原分行/错误口径不变。

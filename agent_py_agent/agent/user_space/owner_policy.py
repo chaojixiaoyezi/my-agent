@@ -329,29 +329,45 @@ def append_learning_exclusions(
         if report.load_error is not None:
             raise ValueError("memory policy is unreadable; refusing to append learning exclusions")
         payload = report.payload
-        raw = payload.get("learning_exclusions")
-        if raw is None:
-            existing: list[object] = []
-        elif isinstance(raw, list):
-            existing = list(raw)
-        else:
-            raise ValueError("learning_exclusions must be a list")
+        existing = _normalized_exclusions(payload)
         seen = {
             str(item.get("channel_conversation_id") or "").strip()
             for item in existing
             if isinstance(item, dict)
         }
-        added = 0
-        for item in incoming:
-            if item.channel_conversation_id in seen:
-                continue
-            seen.add(item.channel_conversation_id)
-            existing.append(item.to_dict())
-            added += 1
+        added = _extend_learning_exclusions(existing, incoming, seen)
         if added:
             payload["learning_exclusions"] = existing
             write_private_json_file_atomic_unlocked(path, payload)
         return added
+
+
+# LLM: 名单字段只接受缺失（空表）或列表；其它类型直接拒绝，不静默覆盖已有条目。
+# 函数用途: 读取并校验 memory_policy 里的 learning_exclusions 列表。
+def _normalized_exclusions(payload: dict[str, object]) -> list[object]:
+    raw = payload.get("learning_exclusions")
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return list(raw)
+    raise ValueError("learning_exclusions must be a list")
+
+
+# LLM: 名单只追加不覆盖：按 channel_conversation_id 去重，重复条目跳过，写回由调用方在锁内完成。
+# 函数用途: 把新名单条目追加到现有列表，返回实际新增条数。
+def _extend_learning_exclusions(
+    existing: list[object],
+    incoming: list[LearningExclusionEntry],
+    seen: set[str],
+) -> int:
+    added = 0
+    for item in incoming:
+        if item.channel_conversation_id in seen:
+            continue
+        seen.add(item.channel_conversation_id)
+        existing.append(item.to_dict())
+        added += 1
+    return added
 
 
 # LLM: 结构化错误只给稳定错误码和短说明，不夹带文件正文。
