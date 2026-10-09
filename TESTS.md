@@ -1,6 +1,6 @@
 # 测试与发布验收
 
-## 上一代摘要与跨回合工具（compactcall3，2026-10-09，待测试机复核）
+## 上一代摘要与跨回合工具（compactcall3，2026-10-09，隔离真机局部验证，生产症状未全解）
 
 - 来源：compactcall-3及模型插话；主代理保持sol，测试机服务端压缩用sol、文字摘要与工具粘性用MiniMax-M2.7。只抓隔离测试请求指纹与用量，不输出凭据。
 - active-turn归档红测扩成无旧摘要/文字/加密三臂，旧缓存fork按最后替换结果截IR丢掉尾置applied摘要；主原生投影会前置该摘要，因此首叉input[0]。保留全部applied项，仍按原截止点选工具源，预算和运输同源。
@@ -10,6 +10,10 @@
 - 补齐无IR载体的正式view摘要两臂（文字/密文），现局部三文件53例通过；包含真实预检快照→搜索写入→CAS提交与归档后持久化IO故障。缺线程仅捕获FileNotFoundError，其它错误传播，不把成功记录丢在归档之前。前阶段357相关/194 guards9通过；新增行为收尾重跑，不以局部结果外推命中率。
 - MiniMax隔离run21两代已抓到第二代input[0]正文首块sha不相等，cache_fork有上一代734字符但IR/provider都无载体；这是实际语义早叉，不只是Anthropic cache_control。补齐只改变阅读材料，原refs/fallback/预算/CAS不改。非空冻结provider前缀/既有applied不覆盖，纯密文记录由非空marker伴随；独立静态审查的条件风险见DESIGN_LEDGER。
 - 收尾相关13文件379 passed、guards9完整12文件194 passed；尺寸差集报新增四参数helper后把fork改由request同源取得，三文件53例重跑rc0，ruff/导入边界0/doc-sync/strict size/diff/clean-package最终rc0，size_diff新增0/消失10，报告已还原。常数目录957项一致；误写不存在测试名导致rc4且无测试执行，已纠正后得到379结果，不计作测试失败或通过。
+- 当前产品815a79dc3，必须down→等旧PID消失→up（单up不重启）：run24/25/26/27/28实际新PID42389/42605/43365/43598/44368；active源码sha256为9e1512d747fdc3510bb68a850e63b71f593f2e9b0f6b238d9aa3b37be308b29d。run22/23仍用旧进程，不能算815验证。
+- MiniMax-M2.7 run28阈值80K、两长读源码回合加无工具下一轮：active gen1 114825→39271、transcript gen2 131108→29791、active gen3 83751→43513，三对首条语义sha及首块相同；正常模型请求加载后36，下一回合首次36，摘要失败重试tools=0是明确降档辅助请求，不计入主工具表。run24阈值50K active候选过大失败，随后transcript成功，不删失败。
+- sol run27阈值80K、六回合×四500行读取，transcript gen1/2/3 Compact为55936/75833=73.76%、56704/76112=74.50%、71296/76562=93.12%，紧邻main为96.60/95.73/96.62%；首叉input[41/53/60]均user→user，固定指令/工具/缓存键/header相同。只有第3代达到90%，不得把它扩成所有代次或生产已修复。run25阈值50K四代为87.45/42.88/76.12/68.66%，均未达到90%；真实生产235K/6–16%未完整复现。
+- 指纹与数值原件留/root/smk/captures/surface-minimax-after28.jsonl、surface-sol-after27.jsonl、usage-clean19.jsonl；usage按出站起始/下次出站时间窗、模型、Compact标志唯一配对，压缩事件按各run时间窗读取全部chunks。最后数值脚本首次误把block哈希字符串当dict而rc1，改成真实形状后rc0，不把前次未跑到的断言算成功。
 
 ## 订阅WS压缩字段与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
 
