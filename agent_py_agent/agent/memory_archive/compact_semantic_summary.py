@@ -1,4 +1,4 @@
-# LLM: 本模块只生成原 Compact 的候选摘要；live 调用复用有界发送和原账本，完整覆盖/取消检查完成前不得回收 IR 或提交会话。
+# LLM: 本模块只生成原 Compact 候选；live 调用复用主请求布局及有界发送，完整覆盖/取消检查完成前不得回收 IR 或提交会话。
 # 模块用途: 为历史续跑和运行中压缩生成摘要，保留原取消、缓存和失败合同，不创建另一份历史或清理线程。
 from __future__ import annotations
 
@@ -228,7 +228,7 @@ def summarize_carried_tool_context(
         return None
 
 
-# LLM: live 摘要够用时保持原 model/system/tools/message 前缀；空白或无效回复按请求开关保留完整来源，异常或停止不授权改写 IR。
+# LLM: live 摘要与主请求共用前置布局（message_adapter），跨代仍保持原 model/system/tools/message 前缀；失败不改 IR。
 # 函数用途: 对完整原生历史生成可续接摘要；原请求正常结束并复核停止后才返回候选，由外层容量门裁决大小。
 def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
     from ..conversation.compact_guard import raise_if_compact_interrupted
@@ -238,6 +238,7 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
         return ""
     from ..backends.message_adapter import (
         AnthropicMessageAdapter,
+        project_native_history_messages,
         strip_orphaned_tool_blocks,
     )
 
@@ -257,10 +258,7 @@ def summarize_live_tool_history(request: LiveToolHistorySummaryRequest) -> str:
         )
         messages = AnthropicMessageAdapter().to_provider_messages(compact_history)
     else:
-        messages = [
-            *[dict(item) for item in request.provider_history_messages],
-            *AnthropicMessageAdapter().to_provider_messages(request.history),
-        ]
+        messages = project_native_history_messages(request.history, request.provider_history_messages)
     messages = strip_orphaned_tool_blocks(messages)
     # 服务端压缩（compact_remote）：只在缓存安全路径（主请求同一份前缀 + 当前 IR）上做；成功就不再发摘要请求。
     marker = _remote_live_summary(request, messages) if cache_safe is not None else ""

@@ -173,6 +173,20 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
   没有 model 字段。否则第一次服务端压缩之后自动压缩按 noop 跳过、到窗口上限报 COMPACT_REQUEST_NON_TEXT，线程卡死。
   分段摘要投影 `summary_source_message` 同样把它的密文换成占位。
 
+## 回合中途压缩的跨回合布局（midturn）
+
+- 2026-10-08，07-c3：选择 B，不记录第二套锚点、不加开关。唯一出站布局为 applied summary → canonical 历史 → 当前回合 IR；
+  权威投影在 `backends/message_adapter.project_native_history_messages`，`tool_ir_history`、容量估算、主发送与缓存安全压缩辅助请求共用它。
+- 只以前台结构字段 `CompactionSummary.source == applied_compact` 识别应用摘要，不按正文判断；内部 IR 的 opener 与 carried handoff 顺序不变。
+  应用摘要文字统一为代次标题加 summary；Responses 密文保持完整顶层 compaction 项，不作为普通 user 文本改写，工具调用/结果及 reasoning 仍顺序回放。
+- canonical 归档不再留下 applied summary 或它的密文占位。下回合仅从已提交 checkpoint/view 恢复一份摘要，并在投影前端放置；
+  普通 carried handoff 仍属于历史，不移动。未提交候选和失败不改变活状态；没有语义摘要的预算窗口回收仍保持空摘要语义。
+- 上游核对：openai/codex `780d7ab09741241380586b07882c635037a6ba21` 的 `codex-rs/core/src/compact_remote_v2.rs`，
+  315–351 行构造 replacement history 后整体安装；443–447 行保留 Compaction 项。它证实整体替换再续接，不能替代真实供应商对本布局的接受验证。
+- 假工具与假 Responses 两次 `agent.run`，真实临时 Store/checkpoint/CAS：密文和文本两条路径修前均在 input[0] 分叉；
+  修后前次末请求全部 13 个 input 项逐项一致，首个新增项在 input[13]，为前次请求后生成的 assistant 完成消息。
+  辅助第二次压缩另测与主布局一致、原始输入无改写及推理/工具对保留；193 项相关主/子/后台回归通过。真实 Gateway/TUI、缓存收益未验证。
+
 ## 压缩请求装进窗口与降档（2026-10-08，07，分支 `claude/07-compact-cache`）
 
 - 事故形状：sol/astra 的 90% 触发线 244,800 高于单次缓存面预算 240,000（窗口 − 构造期按 128k 默认算出的主请求输出上限 32000），

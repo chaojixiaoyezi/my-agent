@@ -37,6 +37,12 @@
 
 ## 前缀纪律：主请求/压缩请求逐字同前缀、工具表只增不减（prefixdisc，07，2026-10-08；状态：第一刀（压缩请求误瘦身）与第二刀（工具表只增不减）已实现，待合 main、部署后用 .16 采集和生产账本复核）
 
+- **midturn（2026-10-08，状态：本地实现、待 07 复核）**：两回合原生工具重放证实压缩项从用户轮后迁到历史前端，两个路径均在 provider input[0] 分叉。
+  选择 B：`backends.message_adapter.project_native_history_messages` 统一按 applied summary → canonical history → 当前 IR 投影；内部 IR 仍保留用户 opener 和紧随其后的 handoff。
+  应用摘要只由 checkpoint/view 拥有，不存第二份 canonical 占位；文字摘要的代次标题与密文项在回合内外一致，容量、主请求及后续压缩同源。
+  假 Responses 两回合已验证第一回合末次请求全部 13 项作为下一次请求前缀，推理与工具对不拆；无新开关。真实供应商顺序接受与生产缓存收益未验证。
+  详见 [回合中途压缩的跨回合布局](docs/design/CONVERSATION_CONTEXT_DESIGN.md#回合中途压缩的跨回合布局midturn)。
+
 - **personafreeze（2026-10-08，状态：本地实现、待 07 复核）**：默认开启 `thread_prompt_prefix_freeze_enabled`，目前只冻结
   AGENTS/SOUL/USER 的安全渲染段及诊断。唯一快照为 `<owner_home>/persona/thread_prefix/<thread_id>.json`，不进线程 JSON；
   版本账无法覆盖人工外改、缺失和渲染诊断，故不以版本引用作权威。首次/快照内容失效、已提交 compact_generation 或所选档案/协议变化后

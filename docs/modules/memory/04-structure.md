@@ -1,5 +1,11 @@
 # Memory Structure
 
+## 应用摘要出站投影（midturn，2026-10-08）
+
+- `backends/message_adapter.project_native_history_messages` 唯一决定 applied summary、canonical history、当前IR顺序；仅识别结构source。
+- `memory_archive/compact_semantic_summary` 的缓存安全辅助请求共用该投影，避免再次压缩时退回旧布局；工具对与推理按原序转换。
+- `agent_core/tool_ir_history.applied_compact_summary_item` 统一代次标题与密文；`runtime/loop_support` 只从已提交view恢复一份，不重复归档。
+
 ## 线程人格快照与Compact准备（personafreeze，2026-10-08）
 
 - 快照内容不合法等价于缺失，由原锁内唯一writer重建，日志不含正文；安全链接/非普通文件不放行。

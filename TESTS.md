@@ -1,5 +1,18 @@
 # 测试与发布验收
 
+## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
+
+- 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。
+- 红测：密文旧 history user → compaction，文字旧 history user → summary user，首个分叉均 input[0]，与缓存 TTL 无关。
+- B布局：唯一 backend 投影前置 applied summary，canonical 不重复归档；文字统一代次标题，辅助压缩与主请求/容量同源，不加配置。
+- 新 `test_midturn_compact_prefix.py` 四项：两条双回合路径保持全部13项前缀，首个新增 input[13] 为 assistant；两条辅助压缩路径保持推理/工具对并不改输入。
+- 旧期望变化：`test_applied_compact_context` 改为 seeded IR 含一份应用摘要、prior无摘要、出站前置且媒体仍在；内部 carried handoff位置不变。
+- `test_compact_remote_provider` 不再归档应用摘要占位以免下回合双份；`test_native_tool_ir_compact_and_orphan_sweep` 机械摘要加统一代次标题，最新工具对保留断言不放宽。
+- 聚焦八文件：midturn_compact_prefix、applied_compact_context、compact_remote_provider、native_tool_ir_compact_and_orphan_sweep、native_tool_use_ir_messages_flow、active_turn_compact_projection、subagent_runtime_compact、background_compact_recovery，193 passed。
+- guards9完整12文件194 passed；ruff、导入边界（0条）、doc-sync --base origin/main、strict尺寸、常数目录 --check（952项）、diff、clean-package均返回0；尺寸身份差集新增0/消失2，生成报告不提交。
+- 复跑：根目录 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_midturn_compact_prefix.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-midturn`；PY用ci-venv-312。
+- 上游现 main `780d7ab09741241380586b07882c635037a6ba21` compact_remote_v2整体替换历史；真实供应商顺序接受、Gateway/TUI、生产缓存命中收益未验证。
+
 ## 压缩重复读取及 SQLite 批次（compactmem，2026-10-08，07-c1）
 
 - 来源：07 compactmem/steer1；只测合成 20,000 行、50,535,560 字节 canonical/tool 历史，含既有派生索引；真实正文/凭据/Gateway 未读取或连接。

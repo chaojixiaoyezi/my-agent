@@ -773,7 +773,7 @@ def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
     return provider_compaction_content(plan.provider_compaction)
 
 
-# LLM: 候选与 checkpoint/CAS 失败才恢复原列表；提交成功后的投影异常必须保留已提交历史。同步检查中断与故障回归。
+# LLM: 候选与发送同源，先安装本代标准摘要再估算；checkpoint/CAS 失败恢复原列表，提交后不能倒退。同步检查中断回归。
 # 函数用途: 沿原会话事务提交压缩候选，明确分开可回滚阶段和已提交后的展示阶段。
 def _apply_native_compact_plan(
     agent: object,
@@ -783,16 +783,20 @@ def _apply_native_compact_plan(
 ) -> int:
     from ..conversation.compact_guard import compact_exception_code
     from ..conversation.live_tool_compact import record_live_tool_compact_failure
+    from .tool_ir_history import applied_compact_summary_item
 
     original_ir = list(params.tool_ir_history)
     original_tool_context = list(params.tool_context)
+    summary = applied_compact_summary_item(
+        plan.semantic_summary, plan.progress_generation, _plan_provider_compaction(plan),
+    ) if plan.semantic_summary else None
     try:
         raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
         candidate = reduce_native_compact_candidate(
             NativeCompactWindow(
                 params.tool_ir_history, params.tool_context, params.archive_tool_calls,
             ),
-            summary=NativeCompactSummary(plan.semantic_summary, _plan_provider_compaction(plan)),
+            summary=NativeCompactSummary(summary.text, summary.provider_compaction) if summary is not None else "",
             target_tokens=plan.target_tokens,
             estimate_tokens=estimator,
         )
