@@ -12,7 +12,8 @@ import pytest
 
 from agent_py_agent.agent.capability.persona_repository import PersonaMutationRequest
 from agent_py_agent.agent.common import json_io
-from agent_py_agent.agent.memory_store import agents_migration as migration, promotion
+from agent_py_agent.agent.memory_store import agents_migration as migration
+from agent_py_agent.agent.memory_store import promotion
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
@@ -80,14 +81,20 @@ class _LockProbe:
     def _acquire(self, path, blocking):
         end = time.monotonic() + 2
         while True:
-            manager = self.real_lock(path, blocking=False)
-            try:
-                manager.__enter__()
+            manager = self._try_acquire(path)
+            if manager is not None:
                 return manager
-            except BlockingIOError:
-                if not blocking or time.monotonic() >= end:
-                    raise TimeoutError(f"{path.name} blocked while holding {getattr(self.local, 'held', [])}") from None
-                time.sleep(0.005)
+            if not blocking or time.monotonic() >= end:
+                raise TimeoutError(f"{path.name} blocked while holding {getattr(self.local, 'held', [])}") from None
+            time.sleep(0.005)
+
+    def _try_acquire(self, path):
+        manager = self.real_lock(path, blocking=False)
+        try:
+            manager.__enter__()
+        except BlockingIOError:
+            return None
+        return manager
 
     def checked(self, service, candidate):
         promotion._ensure_not_excluded_original(service, candidate)

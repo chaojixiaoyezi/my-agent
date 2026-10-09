@@ -572,16 +572,23 @@ def _retire_failed_release(store: object, lease: dict[str, object], error: Excep
         "release_error_class": type(error).__name__, "retire_error_class": "", "recovery": "manual_recovery_required"}
     try:
         retire_curator_lease(store, lease_id)
-        current = store.load().active_lease
-        detail["retired"] = current.get("lease_id") == lease_id and current.get("phase") == "interrupted"
-        detail["lease_changed"] = current.get("lease_id") != lease_id
-        if detail["retired"]:
-            detail["recovery"] = "expired_lease"
-        elif detail["lease_changed"]:
-            detail["recovery"] = "lease_changed"
+        _record_retirement_state(detail, store.load().active_lease)
     except Exception as exc:
         detail["retire_error_class"] = type(exc).__name__
     return detail
+
+
+# LLM: I/O 错误保护与 phase 分类分开，只有读回同 ID interrupted 才承诺原期限后的领取。
+# 函数用途: 将租约读回事实转换成释放失败的恢复分类，未改变时保留人工恢复要求。
+def _record_retirement_state(detail: dict[str, object], current: dict[str, object]) -> None:
+    lease_id = detail["lease_id"]
+    detail["retired"] = current.get("lease_id") == lease_id and current.get("phase") == "interrupted"
+    detail["lease_changed"] = current.get("lease_id") != lease_id
+    if detail["retired"]:
+        detail["recovery"] = "expired_lease"
+        return
+    if detail["lease_changed"]:
+        detail["recovery"] = "lease_changed"
 
 
 # LLM: apply 绑定 dry-run 计划摘要：缺失拒绝（必须先预览），与当前计划不一致说明文档或计划

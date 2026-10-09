@@ -368,8 +368,6 @@ class MemoryPromotionResult:
         return asdict(self)
 
 
-# LLM: 正式目标提交与 MemoryPromotionService 主流程分离，保持主流程只做裁决编排。
-# 类用途: 提供 long_term/Persona/lesson/HOT 四种正式落点的唯一提交实现。
 # LLM: 提交上下文显式携带外层 quota；不把准入藏在 service 的可变属性中，线程间不会串用。
 # 类用途: 保存一次提交的审阅者、确认事实和已领取的配额准入。
 @dataclass(frozen=True)
@@ -563,37 +561,46 @@ class _PromotionCommitMixin:
         entry_id = str(result.get("entry_id") or candidate.target_entry_id)
         return f"{target.upper()}.md#{entry_id or result.get('sha256', '')}"
 
-    # LLM: When update_persona already committed the same deterministic entry in this turn, the
-    # curator must adopt that exact entry instead of writing its paraphrase. Every check is typed:
-    # verified tool, exact parameters, deterministic id, and current repository entry.
-    # 函数用途: 识别已由 update_persona 正式写入的同一条人格事实并复用其引用。
+    # LLM: 保留原提交接缝，结构化事实验证独立于写入编排，避免四目标 mixin 继续膨胀。
+    # 函数用途: 委托只读验证器复用本回合已正式提交的人格事实引用。
     def _adopt_existing_persona_tool_write(
         self,
         candidate: MemoryCandidate,
         *,
         target: str,
     ) -> str:
-        target_entry_id = str(candidate.target_entry_id or "").strip()
-        if not target_entry_id or not candidate.source_tool_refs:
-            return ""
-        report = self.persona.list_entries(target)
-        entries = report.get("entries")
-        current_entries = entries if isinstance(entries, list) else []
-        for ref in candidate.source_tool_refs:
-            verified = self.tool_verifier.verify(ref)
-            if verified is None or not _is_successful_persona_add(verified, target=target):
-                continue
-            direct_content = str(verified.parameters.get("content") or "").strip()
-            if not direct_content or persona_entry_id(target, direct_content) != target_entry_id:
-                continue
-            if any(
-                isinstance(entry, dict)
-                and str(entry.get("entry_id") or "").strip() == target_entry_id
-                and str(entry.get("content") or "").strip() == direct_content
-                for entry in current_entries
-            ):
-                return f"{target.upper()}.md#{target_entry_id}"
+        return _adopt_existing_persona_tool_write(self, candidate, target=target)
+
+
+# LLM: 已被 update_persona 提交的同一事实只认成功工具、精确参数、确定性 ID 与当前仓库，不写改述。
+# 函数用途: 只读核对既有工具写入的人格条目，返回精确引用或空串。
+def _adopt_existing_persona_tool_write(
+    service: MemoryPromotionService,
+    candidate: MemoryCandidate,
+    *,
+    target: str,
+) -> str:
+    target_entry_id = str(candidate.target_entry_id or "").strip()
+    if not target_entry_id or not candidate.source_tool_refs:
         return ""
+    report = service.persona.list_entries(target)
+    entries = report.get("entries")
+    current_entries = entries if isinstance(entries, list) else []
+    for ref in candidate.source_tool_refs:
+        verified = service.tool_verifier.verify(ref)
+        if verified is None or not _is_successful_persona_add(verified, target=target):
+            continue
+        direct_content = str(verified.parameters.get("content") or "").strip()
+        if not direct_content or persona_entry_id(target, direct_content) != target_entry_id:
+            continue
+        if any(
+            isinstance(entry, dict)
+            and str(entry.get("entry_id") or "").strip() == target_entry_id
+            and str(entry.get("content") or "").strip() == direct_content
+            for entry in current_entries
+        ):
+            return f"{target.upper()}.md#{target_entry_id}"
+    return ""
 
 
 # LLM: 完整顺序为 quota→policy→正式目标；冲突候选提交在退出外锁后执行，不能 policy→quota。
