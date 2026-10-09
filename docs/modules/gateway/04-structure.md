@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## 探测用途传递（wsempty2，2026-10-09）
+
+- `ProviderRequestOptions.is_probe` → `_OpenAIGenerateRequest.is_probe` → Responses 空输出分类；默认业务 false，探测入口 true，请求局部且不进入供应商 payload。
+- `http._probe_tool_capability_uncached`/`vision_capability.probe_vision_capability` 仍独占阴性/不确定、nonce/颜色阳性、重试缓存和失败传播；旧视觉后端按既有 typed-options 能力位保留调用形态。
+
 ## Responses 空输出边界（wsempty，2026-10-09）
 
 - `backends.responses._checked_response_fields`：完整纯空工具响应转 MODEL_EMPTY_RESPONSE；原生 reasoning/compaction 与原失败原因不改。

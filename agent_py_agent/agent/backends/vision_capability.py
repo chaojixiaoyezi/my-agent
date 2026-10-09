@@ -15,6 +15,7 @@ import zlib
 from dataclasses import dataclass
 
 from ..tooling.runtime_contracts import ToolChoice
+from .base import ProviderRequestOptions
 from .errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
@@ -123,6 +124,7 @@ def reset_vision_capability_cache() -> None:
 
 # LLM: 探针依赖原生工具调用，先要求 probe_tool_capability().native_supported；发一次请求（图 + 固定说明 + 单工具），
 #   只认与真实颜色一致的 tool_use 为 supported。异常分类见模块头；本函数不缓存，缓存由 resolve_vision_capability 负责。
+#   支持 typed options 的后端显式收到 is_probe；旧后端不传新关键字，空输出仍由本探针判不确定，不执行工具。
 # 函数用途: 对一个后端实例执行一次真实的视觉能力探针。
 def probe_vision_capability(backend: object) -> VisionCapability:
     tool_probe = getattr(backend, "probe_tool_capability", None)
@@ -140,6 +142,8 @@ def probe_vision_capability(backend: object) -> VisionCapability:
             response = backend.generate(
                 _PROBE_PROMPT, tools=[dict(_PROBE_TOOL)], tool_choice=ToolChoice.auto("vision_capability_probe"),
                 messages=[message],
+                **({"request_options": ProviderRequestOptions(is_probe=True)}
+                   if getattr(backend, "supports_provider_request_options", False) else {}),
             )
         except ProviderRequestShapeInvalidError as exc:
             return VisionCapability(VISION_UNAVAILABLE, "probe_unavailable", f"request_shape_invalid:{exc.details.get('rule', '')}")

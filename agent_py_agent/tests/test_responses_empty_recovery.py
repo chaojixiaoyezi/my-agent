@@ -16,7 +16,7 @@ from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
 from agent_py_agent.agent.backends.responses_wire import collect_response
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from agent_py_agent.tests.test_responses_backend import completed
 from agent_py_agent.tests.test_responses_websocket import (
     FakeConnection,
@@ -178,3 +178,124 @@ def test_real_loop_commentary_only_keeps_existing_plain_text_final_projection(mo
     result, used = run_real_loop(monkeypatch, tmp_path, [FakeConnection(events)])
     assert result.response == "过程说明" and result.executed_tools == ["read_file"]
     assert len(used) == 2, "当前合同未区分channel，不将非空commentary误报为空"
+
+
+def probe_backend(monkeypatch, stream, output):
+    from agent_py_agent.agent.backends import http
+
+    backend = OpenAIResponsesBackend(BackendOptions("https://example.test/v1", "test-key", "m", stream_enabled=stream))
+    obj = completed(output)
+
+    def provider(request):
+        assert "is_probe" not in request.payload, "宿主用途不改变供应商payload"
+        return obj
+
+    monkeypatch.setattr(http, "post_json", provider)
+    monkeypatch.setattr(http, "post_stream_iter", lambda request: iter([
+        json.dumps({"type": "response.completed", "response": provider(request)})]))
+    requests = []
+    generate = backend._generate
+    monkeypatch.setattr(backend, "_generate", lambda request: requests.append(request) or generate(request))
+    return backend, requests
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("output", [[], [{"type": "message", "content": [{"type": "output_text", "text": " \n"}]}]])
+def test_tool_probe_empty_is_unproven_bounded_and_not_cached(monkeypatch, stream, output):
+    backend, requests = probe_backend(monkeypatch, stream, output)
+    for count in (3, 6):
+        capability = backend.probe_tool_capability()
+        assert not capability.native_supported
+        assert capability.evidence == "live_probe_returned_no_valid_structured_tool_call"
+        assert len(requests) == count
+        assert all(request.is_probe for request in requests)
+    previous = requests[-1]
+    with pytest.raises(ProviderResponseError) as caught:
+        backend.generate(previous.prompt, tools=previous.tools, tool_choice=previous.tool_choice)
+    assert caught.value.error_code == "MODEL_EMPTY_RESPONSE"
+    assert not requests[-1].is_probe, "相同提示与工具选择不能冒充探测用途；标记不污染后续请求"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("output", [[], [{"type": "message", "content": [{"type": "output_text", "text": " \n"}]}]])
+def test_vision_probe_empty_is_inconclusive_bounded_and_not_cached(monkeypatch, stream, output):
+    from agent_py_agent.agent.backends import vision_capability as vision
+
+    backend, requests = probe_backend(monkeypatch, stream, output)
+    monkeypatch.setattr(backend, "probe_tool_capability", lambda: SimpleNamespace(native_supported=True))
+    vision.reset_vision_capability_cache()
+    try:
+        for count in (2, 4):
+            result = vision.resolve_vision_capability(backend)
+            assert result.status == vision.VISION_INCONCLUSIVE and result.evidence == "probe_no_tool_call"
+            assert len(requests) == count
+            assert all(request.is_probe for request in requests)
+    finally:
+        vision.reset_vision_capability_cache()
+
+
+def test_probe_purpose_does_not_suppress_provider_errors(monkeypatch):
+    from agent_py_agent.agent.backends.errors import ProviderQuotaExhaustedError
+    from agent_py_agent.agent.backends.vision_capability import probe_vision_capability
+
+    backend, requests = probe_backend(monkeypatch, False, [])
+    failure = ProviderQuotaExhaustedError("synthetic quota")
+    monkeypatch.setattr(backend, "_send_responses_request", lambda *_args: (_ for _ in ()).throw(failure))
+    with pytest.raises(ProviderQuotaExhaustedError) as caught:
+        backend.probe_tool_capability()
+    assert caught.value is failure and len(requests) == 1
+    monkeypatch.setattr(backend, "probe_tool_capability", lambda: SimpleNamespace(native_supported=True))
+    with pytest.raises(ProviderQuotaExhaustedError) as caught:
+        probe_vision_capability(backend)
+    assert caught.value is failure and len(requests) == 2
+    assert requests[-1].is_probe
+    assert requests[-1].messages[0]["content"][1]["type"] == "image", "失败来自视觉请求，不是前置工具探针"
+
+
+def test_tool_choice_reason_alone_does_not_exempt_business_empty(monkeypatch):
+    backend = backend_with_output(monkeypatch, [])
+    with pytest.raises(ProviderResponseError) as caught:
+        backend.generate("Internal vision capability probe", tools=TOOLS,
+                         tool_choice=ToolChoice.auto("vision_capability_probe"))
+    assert caught.value.error_code == "MODEL_EMPTY_RESPONSE"
+
+
+def test_legacy_vision_backend_does_not_receive_new_keyword():
+    from agent_py_agent.agent.backends.vision_capability import (
+        VISION_INCONCLUSIVE,
+        probe_vision_capability,
+    )
+
+    class LegacyBackend:
+        calls = 0
+
+        def probe_tool_capability(self):
+            return SimpleNamespace(native_supported=True)
+
+        def generate(self, prompt, *, tools, tool_choice, messages):
+            self.calls += 1
+            return SimpleNamespace(tool_use_blocks=[])
+
+    backend = LegacyBackend()
+    assert probe_vision_capability(backend).status == VISION_INCONCLUSIVE
+    assert backend.calls == 2, "旧后端无typed-options能力位，不把新关键字当解析失败"
+
+
+def test_probe_purpose_is_local_to_request_and_absent_from_fake_ws_wire(monkeypatch):
+    backend, requests = probe_backend(monkeypatch, True, [])
+    connections = [FakeConnection(completed_events("")) for _ in range(3)]
+    used = []
+    monkeypatch.setattr(ws, "_connect", lambda _request: used.append(connections[len(used)]) or used[-1])
+
+    def send(payload, _headers, info):
+        lines = ws.iter_responses_websocket(replace(request(), payload=payload))
+        try:
+            return collect_response(lines, info.on_chunk, info.on_thinking_delta)
+        finally:
+            lines.close()
+
+    monkeypatch.setattr(backend, "_send_responses_request", send)
+    assert not backend.probe_tool_capability().native_supported
+    assert len(requests) == len(used) == 3 and all(info.is_probe for info in requests)
+    assert all("is_probe" not in connection.sent[0] for connection in used)
+    assert all(connection.closed for connection in used)

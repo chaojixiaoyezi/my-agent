@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
-from .base import BackendOptions, BaseBackend, _utc_now_iso
+from .base import BackendOptions, BaseBackend, ProviderRequestOptions, _utc_now_iso
 from .errors import (
     ProviderConfigurationError,
     ProviderRecoverableError,
@@ -260,6 +260,7 @@ class HttpBackend(BaseBackend):
 
     # LLM: Caller holds `_provider_tool_capability_lock`; probe the ordinary auto tool-choice
     # surface, not forced-call or reasoning-disable support. Only a matching nonce proves support.
+    # 宿主显式标记本次为探测；空输出仍属未证明能力，保持三次有界重试、不缓存阴性及供应商错误原样上抛。
     # 函数用途: 用普通工具选择发起有界探测并缓存阳性结果，不执行工具；避免思考模型被强制参数挡住。
     def _probe_tool_capability_uncached(self) -> ProviderToolCapability:
         # 缺凭据属于配置错误，须在协议能力判定之前暴露给调用方。
@@ -300,6 +301,7 @@ class HttpBackend(BaseBackend):
                     prompt,
                     tools=[probe_tool],
                     tool_choice=ToolChoice.auto("native_capability_probe"),
+                    request_options=ProviderRequestOptions(is_probe=True),
                 )
             except (ProviderRecoverableError, ProviderConfigurationError) as exc:
                 _fail_probe_call(scope, call_id, exc)

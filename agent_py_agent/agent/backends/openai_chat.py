@@ -49,6 +49,7 @@ class _StreamObservers:
 
 
 # LLM: OpenAI 请求对象按 typed 字段保留 system 和请求级思考控制；子适配器只发送其协议支持的字段。
+#   宿主 is_probe 仅供响应分类，不发到服务商；每次新建请求避免探测用途泄漏到业务轮。
 # 类用途: 汇总一次 OpenAI-compatible 调用的规则、用户输入、工具、思考开关和输出格式选项。
 @dataclass(frozen=True)
 class _OpenAIGenerateRequest:
@@ -72,6 +73,7 @@ class _OpenAIGenerateRequest:
     total_deadline_seconds: float | None = None
     # 智能程度用户档位或空串；off 已折为开关，两个新档按协议与声明换算，不能直接透传。
     reasoning_effort: str = ""
+    is_probe: bool = False
 
 
 # LLM: Chat 出站诊断只在显式环境开关下写入；payload 含任务正文，调用方必须使用仓库外私有路径。
@@ -118,6 +120,7 @@ class OpenAICompatibleBackend(HttpBackend):
 
     # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；
     # reasoning 和工具参数计数是展示边界；请求开关与观察器必须转交组包器，不能丢失或影响执行。
+    # is_probe 原样传给请求对象，不能按正文或 ToolChoice.reason 猜测，也不修改共享后端。
     # 函数用途: 调用 chat/completions，传递宿主规则、本次思考开关和流式展示，不改变后续请求。
     def generate(
         self,
@@ -136,6 +139,7 @@ class OpenAICompatibleBackend(HttpBackend):
             _OpenAIGenerateRequest(
                 prompt=prompt,
                 system_instruction=provider_options.system_instruction,
+                is_probe=provider_options.is_probe,
                 on_chunk=on_chunk,
                 on_thinking_delta=on_thinking_delta,
                 on_tool_input_progress=on_tool_input_progress,

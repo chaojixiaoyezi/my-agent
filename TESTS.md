@@ -12,6 +12,17 @@
 - 独立静态评审指出中途原生补带预算使用 trigger 而非健康线；核实原合同明确健康目标是优选、保留最新工具对的有效候选低于 trigger 即提交。本轮不改该合同或再压一代；回合开头健康样例走联合 recovery 而非该中途路径。
 - 未验证：真实飞书/TUI 接收、真实模型/测试机、原 mc4 复发、供应商缓存收益、Linux/全仓测试。IM 活动消费者仅显示阶段，不另算数字；共用完成事件数字已改，真实渠道仍需集成者验收。
 
+## Responses 探测空输出（wsempty2，2026-10-09，本地实现，待复核）
+
+- 来源：07 全量发现 94245c703 引入端点探测六失败；本地原文件复现 6 failed / 103 passed（rc=1），未改失败替身或断言。
+- 判断：原生工具/视觉探测使用 auto，空输出属于未证明/不确定的可能结果，不能先按业务空回复报错；连通和思考档位探测不带工具，原规则就不作用。
+- 改法：宿主 `ProviderRequestOptions.is_probe` 请求局部标记，经 OpenAI 请求对象进入 Responses 分类；只豁免完整空输出，阳性仍需 nonce/颜色，供应商错误原样抛出；不按 prompt/工具名/选择理由判断，不发用途到 HTTP/WS，不污染下一轮，旧视觉后端不加关键字。
+- 红绿：新增工具/视觉阴性矩阵修前 8 failed / 2 passed；初步 base+核心 133 passed。新增 HTTP/SSE/假WS、请求污染、旧后端兼容、真实视觉错误观察点测试；最终组合结果见本轮交接及临时日志。
+- 最终组合：base、原六文件、空 output 分类清单及全部 guards9，共30个去重测试文件，777 passed / 20 xfailed，rc=0（`tmp/wsempty2/tests-final.txt`），既有替身、断言和 XFAIL 未改。
+- 全仓 grep+AST 核对空 output：base 阴性保留，empty_recovery 业务恢复保留，backend/websocket/compactcall/cache_key 流中已完成项回填保留，provider_completion_boundary 不完整状态保留；不以终态空数组一概推断实际没有输出。
+- 复现命令：在工作树根用 ci-venv Python、`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1` 跑 `test_backends_base.py`；扩展范围和原六文件、guards9 完整清单存于 `tmp/wsempty2/test-files.txt`，pytest 加 `-q -o addopts= --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-wsempty2-final`。
+- 真实供应商是否返回过完整空探测、sol 线上事故关联及部署效果未验证；本轮不联网、不启停 Gateway、不改运行包，不跑全仓 pytest。
+
 ## Responses 完整空输出（wsempty，2026-10-09，本地实现，待复核）
 
 - 来源：sol 长工具回合空答复。只核对复制后的请求元数据、事件、runtime.db 与用量账本；没有读取会话/人格/凭据正文。
