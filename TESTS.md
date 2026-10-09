@@ -59,6 +59,27 @@
 
 - tool_output_externalizer.py:310/353及shared_workspace.py:126只写不读，不改；未找到独立决策工具索引扫描，决策涉及晋升时仍走上述验证器。包导出及测试引用不是额外生产触发点。
 
+## 部署路径退出固定前缀（deployprefix，2026-10-08，07-c3）
+
+- 来源：07 deployprefix + steer1；只用两份合成运行包/提示、临时工作树和注册器，不读真实会话、人格或凭据，不连真实 Gateway。
+- `test_deployment_path_only_changes_volatile_context`：两份内置提示字节相同，仅 monkeypatch 运行包位置；修前固定前缀断言红，差异 runtime-step-a-111→runtime-step-b-222。
+- 修后稳定前缀逐字相同，分别只在动态尾巴包含真实路径；开发工作树仍在稳定段。准备后再换路径并让读取报错，同一冻结输入纯渲染仍一致。
+- 实现：PromptRenderInput.deployment_context 在准备时冻结，`prompt.deployment` 沿原 RuntimeFactsTurn 易变段机制入尾巴；文本请求仍含完整实际位置，不新增配置或持久快照。
+- `test_restart_facts_do_not_change_tool_catalog_or_schemas`：模拟不同PID、解释器、临时目录，真实基础注册器的native目录、文本详情和Schema完全一致；注册不执行工具。
+- 独立静态评审提出两个中级证据缺口（真实工具目录部署路径、导入时冻结）及一个文本尾部断言缺口；`test_fresh_deployments_preserve_prefix_and_tool_schemas`已补齐并实跑通过。
+- 新回归将同内容真实运行包复制到两个临时部署目录，用两个新解释器进程/不同TMPDIR及导入前解释器路径构造真实基础工具目录；前缀/Schema/详情逐字一致，PID/物理包根确实不同，动态含各自位置；文本段在任务记录后且纯渲染不重读路径。不是生产Gateway部署验收。
+- `test_deployment_context_keeps_existing_qualification`：workspace-write与远程owner均不注入部署段；原full-access管理员文本路径说明测试不放宽。
+- 盘点：`prompting_parts/builder.py:302` 的固定段仅system/owner/dynamic/tool_catalog；`:548`运行包位置已移动态，`:648`时钟及`:644`cwd原已动态。
+- `builder.py:412`内置提示标题用builtin相对引用，不输出资源物理路径；`:489`owner home、`:537`显式self_dev_worktree是稳定业务配置，不是进程/部署路径，保留。
+- `config/agent_config.yaml:18`系统指令是静态配置；`capability/router.py:612`Skill名卡只发稳定ID/名称/摘要；`tooling/registry.py:989`及`models.py:169`只格式化声明和配置。
+- 工具声明AST与读取点核对：tooling中34处description参数无格式插值；agent/cli另两处为record_lesson的固定条数常量与非模型工具表的审批展示，不是版本/SHA/PID/启动时间/端口/临时目录。
+- 最终八文件回归153 passed：prompting_builder、thread_persona_freeze、cache_prefix_regression、cache_prefix_simulator、offline_prompt_context_contract、native_prompt_no_text_protocol_leak、subagent_prompt_contract、compact_cache_surface_fit；包含新进程回归，后者另有独立实跑证据。
+- 复跑：根目录 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_prompting_builder.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-deployprefix`，PY用ci-venv-312。
+- YAML self_dev_worktree注释已说明动态位置；`node frontend/scripts/sync-backend-config.mjs`及`--check`均0，271字段同步。ruff、strict尺寸0；size_diff新增0/消失2。
+- guards9完整12文件194 passed；doc-sync --base origin/main、常数目录 --check（952项）、导入边界（0条）、diff --check origin/main、clean-package均0；CODE_SIZE_REPORT已还原，不跑全仓。
+- **上线验收（steer1）**：修复首次部署仍会断一次缓存（固定前缀中路径从有变无），再下一次部署才不再因路径变化断前缀；前提是其它正文/工具表不变。
+- 生产缓存收益、真实进程重启/Gateway/TUI及用户自定义prompt/第三方MCP内容未验证；正文、权限、工具声明实质变更仍可合法导致前缀变化，不宣称整个请求永不失效。
+
 ## 压缩重复读取及 SQLite 批次（compactmem，2026-10-08，07-c1）
 
 - 来源：07 compactmem/steer1；只测合成 20,000 行、50,535,560 字节 canonical/tool 历史，含既有派生索引；真实正文/凭据/Gateway 未读取或连接。
