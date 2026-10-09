@@ -3,6 +3,8 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.conversation.models import MODEL_HIDDEN_THREAD_FIELDS, ConversationThread
 from agent_py_agent.agent.conversation.tool_discovery import (
     normalized_loaded_tools,
@@ -63,3 +65,50 @@ def test_compact_surface_does_not_import_other_thread_names():
     stale = ConversationCompactModelSurface(thread_id="parent", loaded_tool_names=("manage_models",))
     assert _bound_loaded_tools(stale, thread) == ("read_file",)
     assert _bound_loaded_tools(replace(stale, thread_id="child"), thread) == ("manage_models", "read_file")
+
+
+def test_discovery_failure_happens_after_native_ir(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+
+    agent, thread, _, records = _setup(tmp_path, monkeypatch, False)
+    params = SimpleNamespace(task_attributes={"conversation_thread_id": thread.thread_id})
+    events = []
+    failure = OSError("synthetic thread write failure")
+
+    def fail_update(*_args):
+        events.append("discovery")
+        raise failure
+
+    monkeypatch.setattr(agent.conversation_store.threads, "update_atomic", fail_update)
+    monkeypatch.setattr(service, "_record_tool_call_ir_if_native", lambda *_args: events.append("ir"))
+    with pytest.raises(OSError) as caught:
+        service._record_tool_post_archive(agent, SimpleNamespace(params=params), records[0], "safe-render")
+    assert caught.value is failure
+    assert events == ["ir", "discovery"]
+
+
+def test_compact_cas_preserves_discovery_written_during_summary(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import compact_request_budget
+    from agent_py_agent.agent.conversation.compact import (
+        ConversationCompactOptions,
+        prepare_conversation_context,
+    )
+    from agent_py_agent.tests.test_compactcall_websocket import _Probe
+
+    agent, thread, _, records = _setup(tmp_path, monkeypatch, True)
+    _Probe(monkeypatch, True, live=False)
+    params = SimpleNamespace(task_attributes={"conversation_thread_id": thread.thread_id})
+    generate = compact_request_budget.generate_auxiliary_model_response
+
+    def interleave(request):
+        assert thread.loaded_tool_names == ()
+        persist_discovered_tools(agent, params, records[0])
+        return generate(request)
+
+    monkeypatch.setattr(compact_request_budget, "generate_auxiliary_model_response", interleave)
+    result = prepare_conversation_context(agent, agent.conversation_store, thread,
+        options=ConversationCompactOptions(force=True))
+    current = agent.conversation_store.threads.load(thread.thread_id)
+    assert result.compacted and current.compact_generation == 1
+    assert current.loaded_tool_names == ("read_file",)
+    assert current.compact_checkpoint_id == result.thread.compact_checkpoint_id

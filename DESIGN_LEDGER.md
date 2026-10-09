@@ -4,6 +4,8 @@
 
 - active-turn缓存fork原来只留最后被替换工具结果之前的IR；applied Compact摘要可在IR末尾，主原生投影却把它前置。截断必须保留每个正式applied摘要，不能让新摘要请求从普通user开头而主请求从上一代compaction开头。
 - 工具来源身份与截止点不变，source-only兼容回退不伪造缓存面；旧摘要不是新的替换工具源，实际覆盖、原文归档、CAS与失败回滚仍由原链负责。
+- 同轮恢复可令seed接管摘要、IR不再携带applied；空provider历史时按同一compact_context.view补标准generation标题/密文，不能读过期thread。已有applied或冻结provider前缀不另造新项：目标是保留实际主请求，不声称非空provider历史必含摘要。纯密文检查点仍有非空marker；当前替换器拒绝多条applied并按同view更换，任意外部错代IR不由此修正。
+- 新工具持久化在原typed原生归档后执行；缺线程略过，其它IO错误传播且已成功工具记录不丢。真实预检快照→搜索原子写→候选CAS交错测试确认代次与工具集合共存；显式冻结provider surface仍原样复用，不重算或扩大授权。
 - 累计加载工具名不再依赖会被Compact移走的搜索记录：正式typed信封原子更新线程可选隐藏字段；新回合与新建transcript面恢复并集，当前注册表快照仍是权限权威。空字段省略，旧线程保持兼容，不从模型/用户正文提取。
 - 多代、长上下文和服务端命中只在隔离测试机sol上核验；MiniMax负责文字路径和跨轮工具。假运输逐字前缀不等于供应商命中，生产transcript早叉若未复现保持未验证。
 

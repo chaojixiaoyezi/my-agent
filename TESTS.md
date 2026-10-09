@@ -7,7 +7,9 @@
 - live→下一轮新参数、无携带归档红测确认工具回撤；新增隐藏可选线程loaded_tool_names，真实搜索typed信封原子并集，主启动和transcript预检读取；不反推正文，不扩大注册表授权，旧空记录不写新字段。
 - thread_tool_discovery核对序列化兼容、子线程身份优先、原子更新不覆盖Compact代次、损坏/正文不加载、缺线程不新建及收紧权限过滤。公开agent.run配真实WS序列化和假运输锁住压缩后下一回合工具表。
 - 复现命令：根目录指定ci-venv-312，PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1；pytest test_active_turn_compact_projection.py、test_compactcall_websocket.py、test_thread_tool_discovery.py，-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-cc3-*。
-- 当前局部45例及线程3例通过；缺线程原子写失败仅捕获FileNotFoundError，其它存储错误传播。完整相关回归、门禁和测试机前后数字在交接里另记，不以局部结果外推命中率。
+- 补齐无IR载体的正式view摘要两臂（文字/密文），现局部三文件53例通过；包含真实预检快照→搜索写入→CAS提交与归档后持久化IO故障。缺线程仅捕获FileNotFoundError，其它错误传播，不把成功记录丢在归档之前。前阶段357相关/194 guards9通过；新增行为收尾重跑，不以局部结果外推命中率。
+- MiniMax隔离run21两代已抓到第二代input[0]正文首块sha不相等，cache_fork有上一代734字符但IR/provider都无载体；这是实际语义早叉，不只是Anthropic cache_control。补齐只改变阅读材料，原refs/fallback/预算/CAS不改。非空冻结provider前缀/既有applied不覆盖，纯密文记录由非空marker伴随；独立静态审查的条件风险见DESIGN_LEDGER。
+- 收尾相关13文件379 passed、guards9完整12文件194 passed；尺寸差集报新增四参数helper后把fork改由request同源取得，三文件53例重跑rc0，ruff/导入边界0/doc-sync/strict size/diff/clean-package最终rc0，size_diff新增0/消失10，报告已还原。常数目录957项一致；误写不存在测试名导致rc4且无测试执行，已纠正后得到379结果，不计作测试失败或通过。
 
 ## 订阅WS压缩字段与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
 

@@ -690,3 +690,24 @@ def _assert_compactcall_budget_wire(backend, payloads, material, compact):
     projected = payloads[-1]["input"]
     expected = [item for item in compact["input"] if item.get("type") not in {"configuration_update", "compaction_trigger"}]
     assert projected == expected
+
+
+# LLM: 测试机连续文字压缩的恢复输入可能有view却无摘要IR/provider行；只检查同一适用视图，不伪造来源refs。
+# 函数用途: 验证补齐首条摘要的标题/密文与主投影同源，已有载体时不重复。
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_active_prefix_inherits_view_without_ir_carrier(encrypted):
+    from agent_py_agent.agent.agent_core.tool_ir_history import applied_compact_summary_item
+    from agent_py_agent.agent.conversation.active_turn_compact import _with_previous_applied_summary
+    from agent_py_agent.tests.test_compact_remote_provider import BLOCK, CIPHER
+
+    view = SimpleNamespace(summary="上一代完整文字", generation=2, provider_compaction=BLOCK if encrypted else None)
+    request = SimpleNamespace(compact_context=SimpleNamespace(view=view))
+    plan = SimpleNamespace(thread=SimpleNamespace(summary="过期文字", compact_generation=1))
+    history = (UserTurn("本轮任务"),)
+    fork = SimpleNamespace(provider_history_messages=())
+    request.cache_fork = fork
+    expected = applied_compact_summary_item(view.summary, 2, CIPHER if encrypted else "")
+    assert _with_previous_applied_summary(history, plan, request) == (expected, *history)
+    assert _with_previous_applied_summary((expected, *history), plan, request) == (expected, *history)
+    fork.provider_history_messages = ({"role": "user", "content": "既有历史载体"},)
+    assert _with_previous_applied_summary(history, plan, request) == history
