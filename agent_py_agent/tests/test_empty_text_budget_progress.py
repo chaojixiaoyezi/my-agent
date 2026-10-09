@@ -281,9 +281,9 @@ def _counters(used: int, marker: int = 0) -> ToolLoopRepairCounters:
 
 
 # 函数用途: 直接调用真实响应裁决，返回决策对象。
-def _decide(agent, params, response, counters):
+def _decide(agent, loop_params, response, counters):
     return tool_loop_response_decision(
-        ToolLoopResponseDecisionRequest(agent, params, response, counters)
+        ToolLoopResponseDecisionRequest(agent, loop_params, response, counters)
     )
 
 
