@@ -32,8 +32,8 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_json_file_atomic,
     write_private_json_file_atomic_unlocked,
-    write_private_text_file_atomic,
 )
+from ..common.nofollow_fs import write_bytes_atomic_beneath
 from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions_locked
 from ..user_space.owner_quota import OwnerQuotaAdmission
 from .curator_lease import curator_lease_heartbeat, retire_curator_lease
@@ -895,21 +895,21 @@ def _snapshot_sources(home_paths: object, directory: Path) -> dict[str, Path]:
     }
 
 
-# LLM: 快照是删除的安全前提（2903）：任何一步读取/复制失败都在删除前中止；写完后按清单读回
-#   校验 sha256，全部通过才继续。缺失、链接、非常规文件按「源不存在」跳过（合法缺失），
-#   但存在却读不动一律抛出，绝不留半个坏快照继续删。
-# 函数用途: 复制一个快照文件并记录 sha256/bytes；读取失败或读回校验失败时抛出。
+# LLM: 快照是删除的安全前提；所有普通文件按原始字节复制，不推断扩展名或编码，不转换换行。
+#   复用原目标路径锁与私有 nofollow 原子字节写；清单字段仍为 sha256/bytes，续作沿原字节核验。
+#   缺失、链接、非常规文件仍按合法缺失跳过；读取、落盘、读回任一步失败都在删除前抛出。
+# 函数用途: 私有原子复制快照的原始字节并读回核对，保留二进制、空文件和文本原貌。
 def _copy_snapshot_file(source: Path, target: Path, files: dict[str, object], key: str) -> None:
     if not source.name or source.is_symlink() or not source.is_file():
         return
-    content = source.read_text(encoding="utf-8")
-    write_private_text_file_atomic(target, content)
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    readback = target.read_text(encoding="utf-8")
-    if hashlib.sha256(readback.encode("utf-8")).hexdigest() != digest:
+    content = source.read_bytes()
+    with locked_json_path(target):
+        write_bytes_atomic_beneath(target.parent, (target.name,), content)
+    digest = hashlib.sha256(content).hexdigest()
+    readback = target.read_bytes()
+    if hashlib.sha256(readback).hexdigest() != digest:
         raise OSError(f"snapshot readback mismatch: {key}")
-    files[key] = {"sha256": digest, "bytes": len(encoded)}
+    files[key] = {"sha256": digest, "bytes": len(content)}
 
 
 # LLM: 全树复制沿用同一套「失败即中止」语义：任一条目读不动就抛出，由调用方在删除前停住。

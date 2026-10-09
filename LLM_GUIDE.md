@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+> AGENTS 迁移快照载荷是原始字节，不是统一 UTF-8 文本；复制、摘要、读回及续作校验按 bytes，清单 JSON 仍用 UTF-8。复用 `nofollow_fs.write_bytes_atomic_beneath` 与原写锁；禁止按扩展名或 `.DS_Store` 特判。合同见 TESTS 顶部与 `test_agents_snapshot_bytes.py`。
+
 mc2-agents0r4（2026-10-09）：AGENTS 清理锁序为 curator 租约→policy→人格→线程前缀，quota 先于目标锁。
 首次和续作共用真实外锁、锁内删除及名单入口；curator 租约覆盖提交后晋升。设计 §3.6 和 TESTS 第4轮为当前合同。
 同机执行阶段超期保护与 E11d 明确死亡判据共用；捕获进程级异常后退回固定期限恢复，不留下无限 busy。

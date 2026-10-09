@@ -1,5 +1,7 @@
 # Memory Structure
 
+> mc2-snapbytes（2026-10-09）：`agents_migration._copy_snapshot_file` 用 `read_bytes` → 原目标锁 → `nofollow_fs.write_bytes_atomic_beneath` → 字节 SHA/读回；清单 `sha256`/`bytes` 不变。`_verify_snapshot_file` 原本已按 bytes 校验，保持不变。仅清单 JSON 和语义 AGENTS 解析用 UTF-8；无二进制自动恢复入口新增。
+
 ## AGENTS.md 硬拦与清理迁移（mc3-agents0，2026-10-08，本地实现待复核）
 
 > 第 4 轮（mc2-agents0r4，2026-10-09）当前结构：`agents_migration._run_cleanup` 在 quota 后取得 policy→AGENTS 外锁，`_run_cleanup_locked` 全程覆盖首次/续作重判定、摘要/尾、快照、归档、一次删除、名单、线程失效和 completed。删除复用 `persona_repository._mutate_persona_batch_locked`，公开 32 条上限不变；名单复用 `owner_policy.append_learning_exclusions_locked`。新增 `curator_lease` 用精确 ID 心跳及独立释放，成功提交保留租约至晋升尾段结束，积压补晋升经同一执行入口。下文第 3 轮锁序与一次删除已完成的说法被 review32 否定，当前统一 curator 租约→policy→人格→线程前缀，quota 先于目标锁。

@@ -1,5 +1,7 @@
 # Codebase Tree
 
+- AGENTS 快照字节合同：`agent/memory_store/agents_migration.py` 的复制入口复用 `agent/common/nofollow_fs.py` 私有原子字节写；`tests/test_agents_snapshot_bytes.py` 验证公开迁移、续作、清单兼容和篡改拒绝。路径均相对 `agent_py_agent/`，不新增恢复执行权。
+
 ## AGENTS 第 5 轮（mc2-agentsr5，2026-10-09）
 
 ```text

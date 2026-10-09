@@ -1,5 +1,12 @@
 # 测试与发布验收
 
+## AGENTS 字节快照修复（mc2-snapbytes，2026-10-09；本地实现，待复审/集成）
+
+- 来源：生产副本的 backups 可含非 UTF-8 二进制；迁移不能把普通文件统一当文本，也不能规范化 CRLF/单 CR。
+- 做法：`_copy_snapshot_file` 读原始字节，在原锁内复用 nofollow 私有原子字节写，按字节 SHA 读回复核。清单仍为 `sha256`/`bytes`，续作既有字节复核不改；无文件名专用分支。
+- 新测试：`test_agents_snapshot_bytes.py` 覆盖公开 apply 的二进制、空 lock、0600、清单 SHA/长度；删除前中断后同编号续作；文本换行不规范化、旧清单兼容、同长度篡改拒绝。修复前 5 失败/2 通过，修复后 7 通过；单点改回 `read_text().encode()`，实际 pytest rc=1、5 业务失败、无 error/skip，备份字节与 SHA 完全恢复。
+- 复现：工作树根，用指定 ci-venv Python 和隔离 HOME，执行 `-m pytest agent_py_agent/tests/test_agents_snapshot_bytes.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-snapbytes`。证据在 `tmp/snapbytes/`；真实生产副本迁移/Gateway、Linux/Windows、断电未验证。第 6 轮租约收尾修复在本项提交后继续，不能据本项绿测部署。
+
 ## AGENTS 第 0 期第 5 轮：配额完整锁序与释放诊断（mc2-agentsr5，2026-10-09）
 
 - 来源：review33 在 `ec9263f2b` 的原样探针实际 3 失败、2 通过：长期事实/USER 的 quota-policy 锁环，以及释放写盘失败后的 executing 租约无限保护。
