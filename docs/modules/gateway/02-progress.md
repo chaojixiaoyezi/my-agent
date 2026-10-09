@@ -1,5 +1,10 @@
 # Gateway 维护状态
 
+## 不可交付回复诊断（wsempty4，2026-10-09，本地实现、待集成）
+
+- 原USER_REPLY_UNAVAILABLE路径附白名单user_reply_diagnostic，最后调用形状/输出类型长度、原预算和canonical成功压缩间隔进入原结构化response/terminal记录。
+- 不存正文、人格、密钥或密文；不改交付/重试，也未修改response_decision。真实循环配假供应商及原Gateway落账回归见TESTS；生产事故未验证。
+
 ## 探测与业务空输出分离（wsempty2，2026-10-09，本地实现，待复核）
 
 - 工具/视觉探测显式携带请求局部 is_probe；完整空输出仍原有界阴性/不确定，不冒充能力成功，供应商失败不吞。

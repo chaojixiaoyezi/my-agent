@@ -280,6 +280,8 @@ class FinalizationService:
             "active": _active_context_tokens(input_tokens, output_tokens, prompt_tokens),
         }
 
+    # LLM: 最终结果只透传循环已形成的无正文诊断；不重新读取模型、不修改回复或结束事实。
+    # 函数用途: 将最终模型回复与运行账组装成结果，让Gateway失败路径仍能取得真实循环计数。
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
         ctx = params.ctx
         routed_context = ctx.routed_context
@@ -310,6 +312,7 @@ class FinalizationService:
             backend=ctx.final_response.backend,
             used_memories=len(ctx.memories),
             model_response=honest_text,
+            user_reply_diagnostic=getattr(ctx.final_response, "user_reply_diagnostic", None),
             assistant_commentary_messages=_assistant_commentary_messages(ctx.on_chunk),
             tool_rounds=ctx.tool_rounds,
             executed_tools=ctx.executed_tools,

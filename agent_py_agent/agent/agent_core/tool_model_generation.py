@@ -1418,7 +1418,8 @@ def _provider_request_options(backend, state: _ModelGenerationState, *, forced: 
 
 # LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink
 # 的宿主；fake/旧后端保持原关键字形态，流内思考终态不能在 response 收尾处重放。
-# 函数用途: 按当前原生工具、思考、智能程度和展示能力组装参数并调用一次模型后端。
+#   最后业务逻辑调用的无正文诊断随本轮params留存，不能写共享backend或污染压缩辅助调用。
+# 函数用途: 组装本次调用并保存只读形状证据，不改变供应商载荷或生成行为。
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
     thinking_observer = _thinking_stream_observer(backend, state)
@@ -1463,4 +1464,7 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             file=sys.stderr,
             flush=True,
         )
+    from ..backends.reply_diagnostics import remember_model_call
+
+    remember_model_call(state.params, result, kwargs)
     return result

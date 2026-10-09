@@ -1,5 +1,13 @@
 # 测试与发布验收
 
+## 空回复结构化诊断（wsempty4，2026-10-09，本地实现、待集成）
+
+- 来源：wsempty3事故记录缺少最终出站形状、原始输出类型和空正文预算，无法定性；此片只补观察字段，不修改回复/重试合同，也未触碰 `response_decision.py`。
+- 新增 `test_user_reply_unavailable_diagnostic.py`：真实工具循环配假WS，read_file后3次reasoning-only，仍4次调用/1工具轮/原预算2；原Gateway失败处理和worker落账保存同一诊断。
+- 六项最初红测均因字段缺失失败；HTTP/SSE类型长度、WS循环、stream_eof、压缩时钟、response/terminal无正文白名单红转绿。none保留已授权schema，实际tools数不是零。
+- 当前直接组合三文件106 passed；独立审查补非有限压缩时钟红测1 failed/12 passed，finite校验后转绿。覆盖无压缩None、探测请求局部、不透传prompt/persona/key/密文、旧后端output/status未知不推测。复现：CI Python在仓库根执行 `-m pytest agent_py_agent/tests/test_user_reply_unavailable_diagnostic.py -q`。
+- 全仓按原testpaths全部文件分12批，与指定3626274be独立基线使用同文件顺序、独立basetemp/JUnit逐项对比；部署暂停时两版各完成4批，尚未结算。已验Ruff、doc-sync、strict-size、import、clean-package、diff返回0，size_diff新增0。真实供应商、TUI/飞书生产事故复现未验证。
+
 ## compactview：提示口径与回合开头高水位（07/c1，2026-10-09，本地实现、待集成复核）
 
 - 来源：07 compactview 任务中的 w2 提示/Context 校准差异、mc4 preflight 后仍约 88% 的结构化观察；未读取真实会话正文，未证明 mc4 原线程与合成样例根因完全相同。

@@ -14,6 +14,7 @@ from ..backends.errors import (
     provider_error_http_status,
 )
 from ..backends.rejection_diagnostics import public_rejection_diagnostic
+from ..backends.reply_diagnostics import public_user_reply_diagnostic
 from ..runtime_errors import runtime_error_report
 from ..turn_end import result_turn_end_reason
 
@@ -36,10 +37,18 @@ class ActiveTurnOutcomeUncertainError(ConversationPersistenceError):
     error_code = "ACTIVE_TURN_OUTCOME_UNCERTAIN"
 
 
+# LLM: 错误码和交付语义不变；仅附白名单诊断，Gateway失败投影必须同步保留且不能重试。
+# 类用途: 表示没有可安全交付的回复，同时携带无正文的最后调用与循环事实。
 class UserReplyUnavailableError(RuntimeError):
     """The model reply phase ended without any text safe for user delivery."""
 
     error_code = "USER_REPLY_UNAVAILABLE"
+
+    # LLM: 不透明透传调用方字典；新字段只参与结构化请求失败记录，不写客户端提示正文。
+    # 函数用途: 创建原空回复错误并复制清洗后的诊断，不改变异常信息。
+    def __init__(self, message: str, *, diagnostic: object = None) -> None:
+        super().__init__(message)
+        self.user_reply_diagnostic = public_user_reply_diagnostic(diagnostic)
 
 
 class SystemCommandRoutingError(RuntimeError):
@@ -183,7 +192,10 @@ def gateway_model_response_error_projection(result: object) -> dict:
 #   rejectdiag：只从 typed details 的 rejection_diagnostic 键读已白名单化的拒绝诊断（状态码/白名单头/体量/
 #   摘要/原因码），不透明透传 details；cause_code 是给用户看的可行动方向，判定不读语言。
 # 函数用途: 给当前请求失败补上可见状态码与可能原因，让用户定位这一轮，未知原因仍保持未知。
+#   空回复错误额外携带已白名单化的诊断，不更改状态/文案，不把其他异常归成空回复。
 def gateway_provider_error_projection(exc: BaseException) -> dict:
+    if isinstance(exc, UserReplyUnavailableError):
+        return {"user_reply_diagnostic": public_user_reply_diagnostic(exc.user_reply_diagnostic)}
     details = getattr(exc, "details", None)
     diagnostic = public_rejection_diagnostic(
         details.get("rejection_diagnostic") if isinstance(details, dict) else None)

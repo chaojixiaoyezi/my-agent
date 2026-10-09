@@ -1,5 +1,10 @@
 # Gateway Structure
 
+## 空回复只读诊断（wsempty4，2026-10-09）
+
+- Responses最终payload/原始output→request-local模型诊断→原工具循环计数→AgentRunResult；原request_history抛错点读取canonical compact_updated_at，缺证据None。
+- UserReplyUnavailableError只携带白名单诊断；gateway_provider_error_projection→原request_execution失败response→worker既有response/terminal_response落账。无额外模型调用，不进入模型输入或用户正文。
+
 ## 探测用途传递（wsempty2，2026-10-09）
 
 - `ProviderRequestOptions.is_probe` → `_OpenAIGenerateRequest.is_probe` → Responses 空输出分类；默认业务 false，探测入口 true，请求局部且不进入供应商 payload。

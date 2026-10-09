@@ -5,10 +5,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..backends.reply_diagnostics import public_user_reply_diagnostic
 from ..conversation.channels import (
     LOCAL_CHAT_CHANNEL,
     LOCAL_CHAT_SOURCE,
@@ -81,6 +84,7 @@ class GatewayAssistantTurn:
 #   host_notices 是本轮开始时发布过的宿主提示：只在正常回复提交时按编号取走（提交即已读），放进最终元数据与
 #   channel_delivery.host_notices；停止与失败不取走，留给下一轮。
 # 函数用途: 保存回复或中断前的执行历史；空正文不伪装成模型答复，写失败沿原 repair 补交。
+#   空回复仍抛同一错误；只附无正文诊断，压缩间隔只从当前canonical线程的成功提交时间读取。
 def persist_gateway_assistant_result(
     context: request_context.GatewayAskRunContext,
     conversation: request_context.GatewayConversationContext,
@@ -93,9 +97,9 @@ def persist_gateway_assistant_result(
         return result
     delivery_projection = project_user_reply(str(getattr(result, "response", "") or ""))
     if delivery_projection.internal_signal:
-        raise UserReplyUnavailableError("任务只返回了运行时内部信号，没有生成可交付给用户的回复")
+        raise _unavailable_reply_error(context, conversation, result, "任务只返回了运行时内部信号，没有生成可交付给用户的回复")
     if not delivery_projection.content and not gateway_model_response_error_projection(result):
-        raise UserReplyUnavailableError("模型没有生成可安全交付的自然回复")
+        raise _unavailable_reply_error(context, conversation, result, "模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
     # 整条最终回复走整条消息出口：对外通道脱敏过宿主绝对路径时末尾附一次说明（之后投递服务不会再附）。
     public_content = redact_structured_identifiers(
@@ -168,6 +172,29 @@ def persist_gateway_assistant_result(
         result.conversation_persist_degraded = True
         result.conversation_persist_error = "assistant transcript append deferred for repair"
     return result
+
+
+# LLM: 诊断失败不能覆盖原USER_REPLY_UNAVAILABLE；线程缺失、未压缩或读取失败均记录None，不改成功/失败投递。
+# 函数用途: 在原抛错点绑定循环事实和压缩间隔，不保存正文或触发额外模型调用。
+def _unavailable_reply_error(context, conversation, result, message: str) -> UserReplyUnavailableError:
+    diagnostic = public_user_reply_diagnostic(getattr(result, "user_reply_diagnostic", None))
+    diagnostic["seconds_since_last_compaction"] = _last_compaction_elapsed(context, conversation)
+    return UserReplyUnavailableError(message, diagnostic=diagnostic)
+
+
+# LLM: compact_updated_at是成功压缩的权威时钟；拒绝非有限值，不把异常时间误报为零间隔。
+# 函数用途: 计算最后成功压缩到当前失败的间隔，证据缺失时明确保持未知。
+def _last_compaction_elapsed(context, conversation) -> float | None:
+    try:
+        store = getattr(getattr(context, "agent", None), "conversation_store", None)
+        thread_id = getattr(conversation, "thread_id", "")
+        thread = store.threads.load(thread_id) if store is not None and thread_id else None
+        updated = getattr(thread, "compact_updated_at", None)
+        if type(updated) in (int, float) and math.isfinite(updated) and updated > 0:
+            return max(0.0, time.time() - updated)
+    except Exception:
+        pass
+    return None
 
 
 # LLM: 按本轮发布过的编号从线程里取走（本轮期间新到的留给下一轮）；没有线程或存储时不取。副作用：改写会话线程记录。

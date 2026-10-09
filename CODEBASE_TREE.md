@@ -1,5 +1,13 @@
 # Codebase Tree
 
+## 空回复诊断（wsempty4，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/backends/reply_diagnostics.py # 原始Responses无正文形状与诊断白名单，不参与决策
+|-- agent_py_agent/agent/agent_core/tool_loop/reply_diagnostic.py # 仅读取循环计数及权威上限，随最终结果带出
+|-- agent_py_agent/tests/test_user_reply_unavailable_diagnostic.py # 工具循环、传输投影与Gateway失败落账回归
+```
+
 ## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08）
 
 ```text

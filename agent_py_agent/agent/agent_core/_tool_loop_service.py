@@ -1717,7 +1717,8 @@ def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) ->
 
 # LLM: 本入口直接调用既有采样、工具和记账函数；每次调用独占计数与 params，只从模型轮具名结果显式换用采用后的参数。
 # 裁决顺序须同步核对中断、续跑和工具循环测试；返回具名结果，调用方从 result.params 取最终参数。
-# 函数用途: 执行主子共用的模型工具循环，会请求模型、运行工具及更新原账；只按结构化响应、中断和预算推进。
+#   收口时只读取当前空正文预算形成诊断；不改response_decision策略或向模型历史注入遥测。
+# 函数用途: 执行主子共用工具循环并带出只读诊断，仍按原响应、中断和预算推进。
 def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult:
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
@@ -1812,6 +1813,9 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
         if final_response:
             break
 
+    from .tool_loop.reply_diagnostic import ReplyLoopFacts, attach_user_reply_diagnostic
+
+    attach_user_reply_diagnostic(params, final_response, ReplyLoopFacts(repair_counters, tool_rounds))
     return ToolLoopRunResult(final_prompt, final_response, tool_rounds, params)
 
 

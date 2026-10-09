@@ -1,5 +1,13 @@
 # 设计台账
 
+## 不可交付回复诊断（wsempty4，2026-10-09；本地WIP、部署窗口暂停，未集成部署）
+
+- 解决问题：空回复失败缺乏结构化证据，无法区分真实无工具收口、原生思考/压缩项和预算耗尽；只补诊断，不尝试修复或重新分类原事故。
+- 原始Responses返回点只保留最终payload工具数、宿主is_probe、真实compaction触发、输出项类型/嵌套内容类型/可交付字符数及status/incomplete原因，不保留任何正文/思考/密文/参数/凭据。
+- 主子共用generate接缝把最后业务逻辑调用保存在本轮volatile状态；循环收口读取现有empty_text_repairs和response_decision权威上限，不改其代码、预算、重试或交付决策。
+- request_history原USER_REPLY_UNAVAILABLE抛错点绑定canonical线程成功压缩时钟，异常携带白名单user_reply_diagnostic，经原Gateway失败投影进入response及terminal_response；无压缩或缺证据None，不补零。
+- 旧/自定义后端未捕获原始output/status时保持未知；字段不进入模型输入、原生历史、用户正文或公开工具载荷。生产事故和实际客户端端到端待集成者复核。
+
 ## compactview：最终计量与已覆盖快照退休（07/c1，2026-10-09；本地实现、待集成复核）
 
 - 唯一数字口径复用 `conversation/compact_calibration.py`：原生 Compact 冻结请求校准，before/候选/最终 after 同源；CAS 刷新、方法补带和代次事实全部就位后计量，再 rebase Context 追加基线，失败仍失效旧观测。
