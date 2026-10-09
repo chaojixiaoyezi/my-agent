@@ -861,8 +861,8 @@ class _CuratorRunMixin:
         with curator_lease_interruption_guard(self.state_store, context.lease_id):
             return self._run_leased(context)
 
-    # LLM: 外层中断守卫覆盖主体和失败审计；普通失败沿原落账路径，晋升仍处在同一心跳范围。
-    # 函数用途: 执行已领取的一轮，提交后晋升结束才释放，普通异常记录失败。
+    # LLM: 外层中断守卫覆盖主体和失败审计；join 未确认时普通异常也不能经 commit_failure 清租约，原样交给外层保守守卫。
+    # 函数用途: 执行已领取的一轮，心跳确认结束才释放；停止未确认时保留原异常与执行权。
     def _run_leased(self, context: _RunContext) -> tuple[CuratorRunResult, int]:
         from .curator_lease import curator_lease_heartbeat, release_curator_lease
 
@@ -872,6 +872,8 @@ class _CuratorRunMixin:
             release_curator_lease(self.state_store, context.lease_id)
             return result, int(context.route.get("remaining", 0) or 0)
         except Exception as exc:
+            if exc.__dict__.get("lease_heartbeat_stop_error_class"):
+                raise
             return self._commit_failure(context, exc), 0
 
     # LLM: 用本组模型提取并校验；会话自己的模型在提取/校验阶段确定性失败（CURATOR_DEFAULT_FALLBACK_CODES）且不是默认组时，

@@ -1,5 +1,11 @@
 # 测试与发布验收
 
+## R33b-01 心跳停止未确认（mc2-agentsr6，2026-10-09）
+
+- 正常主体 join 抛错也把停止未确认附到原 join 异常；异常主体保留原对象。迁移沿该事实不释放/退役；其它消费者 Curator 的普通失败落账和外层中断守卫同样拒绝清租约。
+- 原 mc4 九项与两条独立校准锁探针收进 `test_agents_cleanup_review33b*.py`，断言与测试 AST 不改，仅将证据文件移入 pytest tmp_path。首次 11 例为 7 过/4 个合同失败；锁两项已绿，不冒称旧夹具原样通过。补 `test_curator_heartbeat_stop.py` 的公开 run 四例（正常/异常主体×KeyboardInterrupt/普通 join 错误），活线程与原异常身份断言；修正自身 bound-method 注入夹具后四例实际红，未把首次夹具失败计作产品证据。
+- completed 重放的三个红例仍待下一项修复；接口冻结仍暂停，生产/Gateway 未验证。
+
 ## AGENTS 字节快照修复（mc2-snapbytes，2026-10-09；本地实现，待复审/集成）
 
 - 来源：生产副本的 backups 可含非 UTF-8 二进制；迁移不能把普通文件统一当文本，也不能规范化 CRLF/单 CR。

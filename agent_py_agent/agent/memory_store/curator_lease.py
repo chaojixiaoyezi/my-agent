@@ -35,13 +35,15 @@ def retire_curator_lease(store, lease_id: str) -> None:
         store._write_unlocked(replace(state, active_lease={**state.active_lease, "phase": "interrupted"}))
 
 
-# LLM: 守卫包住主体与失败收尾；同级 except 捕不到失败审计内部中断，必须有独立外层。
-# 函数用途: 任意异常逃出整轮后取消执行保护，清理失败只补诊断而不盖掉原异常。
+# LLM: 守卫包住主体与失败收尾；心跳停止未确认仍可能写 state，必须保留 executing 和原异常，不能退役。
+# 函数用途: 确认心跳已结束后才取消执行保护，清理失败只补诊断而不盖掉原异常。
 @contextmanager
 def curator_lease_interruption_guard(store, lease_id: str):
     try:
         yield
     except BaseException as exc:
+        if exc.__dict__.get("lease_heartbeat_stop_error_class"):
+            raise
         try:
             retire_curator_lease(store, lease_id)
         except Exception as cleanup_error:
@@ -101,13 +103,14 @@ def curator_lease_heartbeat(store, lease_id: str, seconds: int):
         raise heartbeat.error
 
 
-# LLM: 已有主体异常时 join 二次中断不能替换它；停止未确认必须显式留给调用方，不能据此退役执行权。
-# 函数用途: 请求停止并等待心跳，收尾中断保留原主体并标记未确认的停止事实。
+# LLM: join 中断不等于线程已停；正常和异常主体都在最终传播的原对象上标记未确认，供所有收尾调用方拒绝释放/退役。
+# 函数用途: 请求停止并等待心跳，join 失败标记原主体或原 join 异常，保留对象身份。
 def _stop_heartbeat(heartbeat: _LeaseHeartbeat, primary: BaseException | None) -> None:
     heartbeat.stop.set()
     try:
         heartbeat.thread.join()
     except BaseException as exc:
+        target = exc if primary is None else primary
+        target.__dict__["lease_heartbeat_stop_error_class"] = type(exc).__name__
         if primary is None:
             raise
-        primary.__dict__["lease_heartbeat_stop_error_class"] = type(exc).__name__
