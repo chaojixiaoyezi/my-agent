@@ -428,44 +428,10 @@ class _PromotionCommitMixin:
             return self._commit_long_term_add(candidate, existing, admission)
         return self._commit_long_term_existing(candidate, existing, admission)
 
-    # LLM: add 不得隐式转换为 replace；同 subject/scope 的冲突要求显式目标，不同主体分别保存。
-    # 函数用途: 提交新增长期事实(add 分支)。
-    def _commit_long_term_add(
-        self,
-        candidate: MemoryCandidate,
-        existing: list[MemoryRecord],
-        admission: OwnerQuotaAdmission,
-    ) -> str:
-        if existing:
-            raise _PromotionConflict(
-                "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE",
-                tuple(item.entry_id for item in existing),
-            )
-        entry_id = "memory-" + hashlib.sha256(
-            candidate.candidate_id.encode("utf-8")
-        ).hexdigest()[:24]
-        record = self.long_term.apply_batch(
-            [
-                {
-                    "action": "add",
-                    "entry_id": entry_id,
-                    "role": "user" if candidate.origin == "user_explicit" else "system",
-                    "content": candidate.content,
-                    "kind": _long_term_kind(candidate.candidate_type),
-                    "tags": [candidate.candidate_type, candidate.origin],
-                    "attributes": _long_term_attributes(candidate),
-                    "source": f"candidate:{candidate.candidate_id}",
-                    "expires_at": _expiry_epoch(candidate.valid_until),
-                }
-            ], _admission=admission,
-        )
-        if not record:
-            raise _PromotionConflict(
-                "LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH",
-                _exact_content_entry_ids(self.long_term.all(), candidate),
-            )
-        committed = record[0]
-        return "memory/long_term/memory.jsonl#" + committed.entry_id
+    # LLM: 保留原 add 调用接缝；独立提交原语仍共用已有准入、冲突判据和确定性 ID。
+    # 函数用途: 委托正式仓库提交新增长期事实，不隐式改为替换。
+    def _commit_long_term_add(self, candidate: MemoryCandidate, existing: list[MemoryRecord], admission: OwnerQuotaAdmission) -> str:
+        return _commit_long_term_add(self, candidate, existing, admission)
 
     # LLM: replace/merge 必须精确 target_entry_id 且 target 在 same subject scope 内。
     # 函数用途: 提交对既有长期条目的 replace/merge/remove。
@@ -570,6 +536,46 @@ class _PromotionCommitMixin:
         target: str,
     ) -> str:
         return _adopt_existing_persona_tool_write(self, candidate, target=target)
+
+
+# LLM: add 与写入编排分开，不隐式转 replace；同 subject/scope 冲突与空提交仍按原身份判据拒绝。
+# 函数用途: 用已领取的准入向唯一长期仓库提交 add，返回确定性正式引用。
+def _commit_long_term_add(
+    service: MemoryPromotionService,
+    candidate: MemoryCandidate,
+    existing: list[MemoryRecord],
+    admission: OwnerQuotaAdmission,
+) -> str:
+    if existing:
+        raise _PromotionConflict(
+            "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE",
+            tuple(item.entry_id for item in existing),
+        )
+    entry_id = "memory-" + hashlib.sha256(
+        candidate.candidate_id.encode("utf-8")
+    ).hexdigest()[:24]
+    record = service.long_term.apply_batch(
+        [
+            {
+                "action": "add",
+                "entry_id": entry_id,
+                "role": "user" if candidate.origin == "user_explicit" else "system",
+                "content": candidate.content,
+                "kind": _long_term_kind(candidate.candidate_type),
+                "tags": [candidate.candidate_type, candidate.origin],
+                "attributes": _long_term_attributes(candidate),
+                "source": f"candidate:{candidate.candidate_id}",
+                "expires_at": _expiry_epoch(candidate.valid_until),
+            }
+        ], _admission=admission,
+    )
+    if not record:
+        raise _PromotionConflict(
+            "LONG_TERM_ADD_IDEMPOTENCY_IDENTITY_MISMATCH",
+            _exact_content_entry_ids(service.long_term.all(), candidate),
+        )
+    committed = record[0]
+    return "memory/long_term/memory.jsonl#" + committed.entry_id
 
 
 # LLM: 已被 update_persona 提交的同一事实只认成功工具、精确参数、确定性 ID 与当前仓库，不写改述。

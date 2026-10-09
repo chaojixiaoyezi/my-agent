@@ -15,6 +15,7 @@
 - import 检索与 curator/quota 直接相关 58 文件加 guards9 全部 12 文件：70 文件共 1435 通过、2 失败、0 skip/error，整条命令 rc1（`regression.xml` / `regression-manifest.json`）；其中 guards9 的 194 项均通过。两失败是 `test_r223_audit_regressions.py` 的 MCP 背压终止及双大流捕获超时，真正基线 `84ff2c884c1e99100d3bb3a4e041dbaa5c0499e1` 独立临时 worktree 同入口也两失败（`baseline-failures.xml`），临时树干净并已移除；不改、不删、不跳过这两项，不把总回归写成全绿。真实模型文件未执行，原因与辅助 harness 清单明确登记。
 - 本轮只在隔离 HOME 验证；未启动真实 Gateway、未改真实 owner，不推送或部署。
 - 原 strict 首跑实际 ruff 导入排序失败、size_diff 三个新增告警；拆开只读 Persona 采用核验、租约 phase 分类和测试单次非阻塞领锁，保留原业务断言与私有调用接缝。结构拆平后 146 聚焦仍全部通过（`size-final-green.xml`），两变异仍各 rc1/三和七业务失败且 SHA 还原（`mutations-final/results.json`）；相同 70 文件回归仍 1435 过/2 失败、无 skip/error（`regression-final.xml`），原失败不隐藏。
+- 第二次 strict 剩一条 mixin near-soft：191 行仍进入 200 行软阈值的 80% 预警区。继续独立出长期 add 原语，保留原方法接缝/唯一仓库/准入/冲突与幂等身份；原 size_diff 预检新增为 0。最后结构版本 146 聚焦再次全绿（`add-final-green.xml`），最新两变异各 rc1 且 SHA 还原，同 70 文件回归仍 1435 过/2 失败（`regression-final.xml`）；这两项真实失败仍须集成者复核。
 
 ## AGENTS 第 0 期第 4 轮：真实外层锁与晋升尾段租约（mc2-agents0r4，2026-10-09）
 
