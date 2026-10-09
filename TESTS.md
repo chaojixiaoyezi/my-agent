@@ -1,5 +1,26 @@
 # 测试与发布验收
 
+## 空正文续跑预算按工具进展重置（mc3-emptybudget，2026-10-09，分支 `worker/mc3-thinktrunc`，接 a8c8b6e77）
+
+来源：`tasks/multicore/mc3-empty-body-budget.md`；mc1/mc2 两个长回合（159/192 轮工具）最后一步回复为空，
+整轮判 `USER_REPLY_UNAVAILABLE`，交接丢失。旧语义：空正文 nudge 预算是整轮累计 2 次、不随工具进展重置。
+
+- **旧语义**：`empty_text_repairs` 整轮累计、上限 `_MAX_EMPTY_TEXT_REPAIR_COUNT = 2`；两处消费点都在
+  `_no_tool_calls_decision`（活跃用户轮空回复 / 通用空正文 nudge），超限即按原方式收口。
+- **新语义**：空正文裁决前对照结构化进展水位（counters 新字段 `empty_text_progress_marker` = 上次空正文时
+  已成功执行的工具数）；只要自上次空正文以来至少有一次工具调用真正执行完（`executed_tools` 只在
+  `result.ok` 时追加），预算恢复为 0。连续无进展的空正文仍守 2 次硬上限；判据不读正文或思考内容，
+  也不把"发起了但没有结果"的调用算作进展（`archive_tool_calls` 增长不算）。
+- **实现**：`response_decision.py` 新增 `_empty_text_budget_after_progress`；`_no_tool_calls_decision`
+  两处 nudge 消费点改用恢复后的计数。不加开关（恢复路径 bug 修复，判据只读结构化事实，无进展路径行为不变）。
+- **测试**：新增 `test_empty_text_budget_progress.py` 5 条（进展重置 / 无进展硬上限 / 与截断预算独立 /
+  子代理 / 发起无结果不算进展），全部走真实 `execute_tool_loop` + 真实工具执行与产品记账；修复前 3 红、修复后全绿。
+- **变异 3 处**（一次一处，全部 rc=1）：不重置 / 没有进展也重置 / 把"发起了但没有结果"也算进展。
+- **回归**：33 文件 567 条，1 failed（`test_pack_verification_cancellation[platform]`，基线 a8c8b6e77 同样失败，
+  平台沙箱不可用）、2 skipped（同为平台沙箱不可用）、其余全绿。
+- **门禁**：`strict_gates.sh` GATES_PASS（10 项检查全 rc=0、0 dirty files；size_diff 新增告警 0）。
+- 提交：58bbc1c7e（测试）、e73e20e1a（实现）、afeadc1b6（门禁告警修复）。
+
 ## 只思考截断降档 3502 输出上限收口（mc3-thinktruncfix2，2026-10-09，分支 `worker/mc3-thinktrunc`）
 
 来源：mc4 review35b 复核（`915f14d29` 不放行，只剩 3502）：比较前后出站参数用的输出上限与真实出站不同源。
