@@ -18,7 +18,7 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.text_norm import fold_key
-from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaEnforcer
+from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_models import (
     CANDIDATE_ORIGINS,
     CANDIDATE_SCHEMA_VERSION,
@@ -241,34 +241,55 @@ class CandidateService:
         exclude_candidate_ids: set[str] | frozenset[str] | None = None,
         reviewer: str = "memory-hard-delete",
     ) -> int:
-        hashes = {str(item).strip() for item in content_hashes if str(item).strip()}
-        excluded = {
-            str(item).strip()
-            for item in (exclude_candidate_ids or set())
-            if str(item).strip()
-        }
+        return self.redact_content_admitted(None, {
+            "content_hashes": content_hashes,
+            "exclude_candidate_ids": exclude_candidate_ids,
+            "reviewer": reviewer,
+        })
+
+    # LLM: 晋升硬删除传入外层准入，普通入口自行准入；同一候选写入协议不再 policy→quota 重入。
+    # 函数用途: 按已有准入或普通配额通道清除候选正文，保留身份与审计。
+    def redact_content_admitted(self, admission: OwnerQuotaAdmission | None, options: dict) -> int:
+        if admission is None:
+            with _quota_admission(self.quota_enforcer) as acquired:
+                return self.redact_content_admitted(acquired, options)
+        hashes = {str(item).strip() for item in options["content_hashes"] if str(item).strip()}
+        excluded = {str(item).strip() for item in (options.get("exclude_candidate_ids") or ()) if str(item).strip()}
         if not hashes:
             return 0
-        with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
-                candidates = self._load_unlocked()
-                changed = 0
-                now = utc_now_iso()
-                for index, item in enumerate(candidates):
-                    updated = _redacted_candidate(
-                        item,
-                        hashes=hashes,
-                        excluded=excluded,
-                        reviewer=reviewer,
-                        now=now,
-                    )
-                    if updated is None:
-                        continue
-                    candidates[index] = updated
-                    changed += 1
-                if changed:
-                    _write_candidates_unlocked(self.path, candidates, admission=admission)
-                return changed
+        now = utc_now_iso()
+        with locked_json_path(self.path):
+            candidates = self._load_unlocked()
+            replacements = [
+                _redacted_candidate(item, hashes=hashes, excluded=excluded,
+                    reviewer=str(options.get("reviewer") or "memory-hard-delete"), now=now)
+                for item in candidates
+            ]
+            changed = sum(item is not None for item in replacements)
+            if changed:
+                rows = [new if new is not None else old for old, new in zip(candidates, replacements, strict=True)]
+                _write_candidates_unlocked(self.path, rows, admission=admission)
+            return changed
+
+    # LLM: 排除标记只按精确 candidate_id 写结构化原因码，不改状态、不写状态历史、不看正文；
+    #   幂等：同值重复标记不产生写入，状态机与人工审核路径都不受影响。
+    # 函数用途: 给一批候选写排除自动晋升的持久原因码，返回实际变化条数。
+    def mark_promotion_excluded(
+        self,
+        candidate_ids: list[str] | tuple[str, ...],
+        *,
+        reason: str,
+    ) -> int:
+        ids = set(normalize_string_list(candidate_ids))
+        code = str(reason or "").strip()
+        if not ids or not code:
+            return 0
+        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+            candidates = self._load_unlocked()
+            changed = _mark_excluded_candidates(candidates, ids, code, utc_now_iso())
+            if changed:
+                _write_candidates_unlocked(self.path, candidates, admission=admission)
+            return changed
 
     # LLM: retention 只按结构化 rejected/expired/superseded 状态和 updated_at 删除。
     # 函数用途: 规划超过截止时间的非活跃候选 ID，不执行删除。
@@ -551,6 +572,25 @@ def _write_candidates_unlocked(
     )
     admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
     write_private_text_file_atomic_unlocked(path, text)
+
+
+# LLM: 排除标记只按结构化 candidate_id 命中；已带同原因码的条目跳过，写回由调用方在锁内一次性完成。
+# 函数用途: 给命中的候选写排除原因码，返回实际改动条数。
+def _mark_excluded_candidates(
+    candidates: list[MemoryCandidate],
+    ids: set[str],
+    code: str,
+    now: str,
+) -> int:
+    changed = 0
+    for index, item in enumerate(candidates):
+        if item.candidate_id not in ids:
+            continue
+        if str(item.promotion_exclusion or "").strip() == code:
+            continue
+        candidates[index] = replace(item, promotion_exclusion=code, updated_at=now)
+        changed += 1
+    return changed
 
 
 # LLM: 候选初次观察先记录 observed，再以同一状态图进入 pending/blocked，不允许直接 approved。

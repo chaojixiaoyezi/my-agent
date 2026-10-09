@@ -37,6 +37,7 @@ from agent_py_agent.agent.memory_store.curator_inputs import (
     CuratorAuditInput,
     CuratorInputBatch,
     CuratorMessageInput,
+    CuratorMessageSource,
     collect_curator_inputs,
 )
 from agent_py_agent.agent.memory_store.curator_models import (
@@ -131,7 +132,8 @@ def _conversation(tmp_path: Path, count: int):
 def _backlog_filling_config(store: ConversationStore, tmp_path: Path) -> MemoryCuratorConfig:
     base = MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, timeout_seconds=1, max_retries=0,
                                batch_message_limit=80, max_input_chars=500_000)
-    everything = collect_curator_inputs(conversation_store=store, audit_dir=tmp_path / "no-audit",
+    everything = collect_curator_inputs(message_source=CuratorMessageSource(conversation_store=store),
+                                        audit_dir=tmp_path / "no-audit",
                                         state=MemoryCuratorState(), config=base)
     message_chars = len(json.dumps([item.to_model() for item in everything.messages], ensure_ascii=False))
     return replace(base, max_input_chars=message_chars + 7_000 + len(json.dumps([])))
@@ -190,7 +192,8 @@ def test_full_backlog_is_fitted_committed_as_prefix_and_replayed_without_loss(tm
     event_ids = _write_audit(tmp_path, thread.thread_id, 3)
     # 前置条件即真机形态：消息收满收集预算，审计仍按保底至少进一条，身份清单也不在预算内，最终提示超预算。
     collected = collect_curator_inputs(
-        conversation_store=store, audit_dir=tmp_path / "audit", state=MemoryCuratorState(),
+        message_source=CuratorMessageSource(conversation_store=store),
+        audit_dir=tmp_path / "audit", state=MemoryCuratorState(),
         config=replace(config, max_input_chars=config.max_input_chars - 7_000 - len(json.dumps([]))),
     )
     assert len(collected.messages) == 80

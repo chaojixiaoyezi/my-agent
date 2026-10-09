@@ -27,11 +27,14 @@ class ThreadPersonaScope:
 
 
 # LLM: 安全渲染段与截断集合来自同一次Repository snapshot；只有结构字段决定删除资格，不解析正文。
-# 类用途: 携带当前人格展示与不完整target，供线程冻结和变化计算同源消费。
+#   persona_epoch 记录渲染时读到的人格失效代次（清理迁移会推进它），冻结写入在锁内核对。
+# 类用途: 携带当前人格展示、不完整target与渲染时的失效代次，供线程冻结和变化计算同源消费。
 @dataclass(frozen=True)
 class RenderedPersonaSections:
     sections: dict[str, str]
     truncated_targets: frozenset[str]
+    # None 表示调用方未提供代次（旧路径/测试构造），冻结时不核对；提供时与持久代次不一致即拒绝写。
+    persona_epoch: int | None = None
 
 
 # LLM: 主/子/后台渲染安全点共用，只加载线程元数据，不读消息；缺线程保持一次性准备语义。
@@ -68,18 +71,34 @@ def _snapshot_path(home: Path, thread_id: str) -> Path:
 
 
 # LLM: 原锁内首建/内容修复/换代只存安全渲染段；截断集合仅控制当轮删除资格，不借此刷新快照。
+#   渲染之后发生过受控失效（清理迁移推进了持久代次）时，禁止把旧渲染写回快照：返回空固定段，
+#   让调用方下一轮按当前人格重新渲染，旧约定不再从固定前缀注入（2905）。
 # 函数用途: 原子维护唯一固定人格，按同次截断事实计算增量；安全路径/写入错误仍暴露。
 def freeze_thread_persona(home: Path, scope: ThreadPersonaScope, current: RenderedPersonaSections) -> tuple[list[str], str]:
     path = _snapshot_path(home, scope.thread_id)
     epoch = {"compact_generation": scope.compact_generation, "model_profile_id": scope.model_profile_id,
              "protocol": list(scope.protocol)}
+    # LLM: 外层线程前缀锁把「核对代次→写快照」整体圈进临界区：expire 的「推进代次→失效」
+    #   也在同一把锁内，任何交错都被互斥挡住（mc4-3102）。
+    with locked_json_path(_thread_prefix_lock_path(home)):
+        if current.persona_epoch is not None and current.persona_epoch != _read_persona_epoch(home):
+            return [], ""
+        sections = _read_or_freeze_snapshot(path, epoch, current)
+    return [value for value in sections.values() if value], persona_updates(sections, current)
+
+
+# LLM: 快照「读或首次写」收成单层小函数（mc4-3102 拆平）：调用方已持线程前缀锁，
+#   这里再拿快照文件锁并用原子替换写入；返回本次生效的 sections。
+# 函数用途: 读快照；缺失或代次不一致时按当前渲染写一份并返回 sections。
+def _read_or_freeze_snapshot(
+    path: Path, epoch: dict[str, object], current: RenderedPersonaSections
+) -> dict:
     with locked_json_path(path):
         saved = _read_snapshot(path)
         if saved is None or saved["epoch"] != epoch:
             saved = {"schema_version": 1, "epoch": epoch, "sections": current.sections}
             write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
-        sections = saved["sections"]
-    return [value for value in sections.values() if value], persona_updates(sections, current)
+        return saved["sections"]
 
 
 # LLM: 内容损坏等价于缺失，调用方须在原锁内重建；链接/非普通文件和IO安全错误仍抛出，不含正文日志。
@@ -156,3 +175,113 @@ def _change_counts(target: str, rows: list[str], additions_only: bool) -> str:
         return f"- {target}: 新增 {added} 行"
     removed = sum(row.startswith("- ") for row in rows)
     return f"- {target}: 新增 {added} 行，删除 {removed} 行"
+
+
+# LLM: 清理迁移后的受控失效：先推进持久失效代次（锁内递增），再删除命中快照；在途渲染的
+#   旧代次冻结会被 freeze_thread_persona 拒绝，不会把已清理的旧约定写回固定前缀（2905）。
+#   锁外预筛减少锁竞争，锁内复核保证与冻结写入不竞态；失效=删除快照文件，下轮重建时用当前人格。
+# 函数用途: 让包含被清理条目的线程快照受控失效，返回实际删除的快照数。
+def expire_thread_personas_containing(home: Path, contents: list[str]) -> int:
+    needles = _content_needles(contents)
+    if not needles:
+        return 0
+    directory = home / "persona" / "thread_prefix"
+    if any(part.is_symlink() for part in (home, home / "persona", directory)):
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    # LLM: 「推进代次→失效快照」与 freeze 的「核对代次→写快照」共用同一把线程前缀锁：
+    #   在途渲染的旧代次冻结要么发生在失效前（会被失效清掉）、要么发生在推进后（核对拒绝）。
+    with locked_json_path(_thread_prefix_lock_path(home)):
+        _bump_persona_epoch(home)
+        return _expire_snapshots_locked(directory, needles)
+
+
+# LLM: 目录遍历与失效收成单层小函数（mc4-3102 拆平）：调用方已持线程前缀锁，遍历中跳过
+#   链接与非普通文件（IO 安全错误仍由底层抛出）；返回失效个数。
+# 函数用途: 让目录里命中内容的快照失效，返回失效个数。
+def _expire_snapshots_locked(directory: Path, needles: list[str]) -> int:
+    if not directory.is_dir():
+        return 0
+    expired = 0
+    for path in sorted(directory.glob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if _expire_snapshot_locked(path, needles):
+            expired += 1
+    return expired
+
+
+# LLM: 线程前缀锁是 freeze 写入与 expire 失效的唯一互斥点（mc4-3102）：「核对代次→写快照」
+#   与「推进代次→失效快照」在同一把锁内完成，两者之间不再有交错窗口；锁文件只作 flock
+#   锚点、不写内容，放 persona 目录下与其它人格状态同域。
+# 函数用途: 返回线程前缀锁文件路径。
+def _thread_prefix_lock_path(home: Path) -> Path:
+    return home / "persona" / "thread_prefix.lock"
+
+
+# LLM: 失效代次放 persona/ 下的持久小文件；只在锁内递增，读取是单次原子读，不携带正文。
+# 函数用途: 返回人格失效代次文件的路径。
+def _persona_epoch_path(home: Path) -> Path:
+    return home / "persona" / "thread_prefix_epoch.json"
+
+
+# 函数用途: 读取当前人格失效代次；缺失、链接或坏内容按 0 处理（首次渲染不核对）。
+def _read_persona_epoch(home: Path) -> int:
+    path = _persona_epoch_path(home)
+    if path.is_symlink():
+        return 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return max(0, int(payload.get("epoch") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# 函数用途: 在文件锁内把人格失效代次 +1，返回新代次。
+def _bump_persona_epoch(home: Path) -> int:
+    if any(part.is_symlink() for part in (home, home / "persona")):
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    ensure_private_dir(home / "persona")
+    path = _persona_epoch_path(home)
+    if path.is_symlink():
+        raise ValueError("PERSONA_PREFIX_SYMLINK")
+    with locked_json_path(path):
+        next_value = _read_persona_epoch(home) + 1
+        write_private_text_file_atomic_unlocked(path, json.dumps({"epoch": next_value}))
+    return next_value
+
+
+# LLM: 复核与删除在同一把快照锁内完成，避免预筛后快照被冻结刷新导致误删新快照。
+# 函数用途: 在锁内复核命中后删除一个快照文件，返回是否删除。
+def _expire_snapshot_locked(path: Path, needles: list[str]) -> bool:
+    with locked_json_path(path):
+        if not _snapshot_contains(path, needles):
+            return False
+        path.unlink()
+        return True
+
+
+# LLM: 只做行级子串判断（被清理行是快照行的子串），不解析正文语义；缺失/损坏/超限视为不含，
+#   坏缓存不阻断迁移，也不把链接目标读进来。
+# 函数用途: 判断快照的 agents 段是否仍包含任一被清理条目。
+def _snapshot_contains(path: Path, needles: list[str]) -> bool:
+    try:
+        saved = _read_snapshot(path)
+    except ValueError:
+        return False
+    if saved is None:
+        return False
+    lines = str(saved["sections"].get("agents", "")).splitlines()
+    return any(needle in line for line in lines for needle in needles)
+
+
+# 函数用途: 把被清理条目正文拆成非空行，作为快照命中的最小比较单位。
+def _content_needles(contents: list[str]) -> list[str]:
+    needles: list[str] = []
+    for text in contents:
+        needles.extend(part.strip() for part in str(text or "").splitlines() if part.strip())
+    return needles

@@ -91,7 +91,10 @@ def _collect(world: BenchWorld, old: bool):
     store = SimpleNamespace(threads=world.store.threads, messages=LegacyMessageReader(world.store)) if old else world.store
     reader = legacy_collect_audit if old else curator_inputs._collect_audit
     with patch.object(curator_inputs, "_collect_audit", reader):
-        return curator_inputs.collect_curator_inputs(conversation_store=store, audit_dir=world.audit, state=world.state, config=config)
+        return curator_inputs.collect_curator_inputs(
+            message_source=curator_inputs.CuratorMessageSource(conversation_store=store),
+            audit_dir=world.audit, state=world.state, config=config,
+        )
 
 
 # LLM: 计时采用本进程CPU，峰值为本批新分配；读取字节/打开次数来自真实IO包装，不是估计或mock返回值。

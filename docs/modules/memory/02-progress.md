@@ -5,6 +5,38 @@
 - live与归档摘要保留原动态尾项完整字节，新摘要规则独立最后追加；Responses远端降档不再抢到历史user之前。preflight/native共享选中历史及工具/system，窗口内预算与运输同材料；CAS/回滚不变。
 - 完整JSON假运输覆盖远端/文字、preflight/live/active_turn、两工具顺序和首尾空白；Anthropic正文块保留而缓存标记/分组允许推进。上游契约及未验证生产收益见DESIGN_LEDGER的compactcall。
 
+## AGENTS 第 6 轮（mc2-agentsr6，2026-10-09；本地实现待复审/集成）
+
+- 字节快照、正常/异常主体的 stop/join 中断原对象保护、completed 旧精确租约收尾对账已实现；只改旧 record 或明确死亡的旧 active_lease，不重做业务，历史留在原记录。
+- 真实线程/子进程及 I/O 故障恢复用隔离 HOME 验证；详情与限制见根 TESTS。after_delete 崩溃回执计数可能为 0 已明确记录，未修计数。真实 owner、副本生产清理、Gateway 和全仓未验证，phase1 接口保持暂停。
+- 下列第 4/5 轮为历史；当前锁序为 curator 租约→quota admission→policy→人格→线程前缀。未结清 completed 的对账另用规范 state→原 record，不把记录 pending 当执行授权。
+
+## AGENTS 字节快照（mc2-snapbytes，2026-10-09；待复审/集成）
+
+- 复制载荷不再 UTF-8 解码或换行规范化；原锁内私有原子字节写，字节读回、SHA 与长度，清单兼容。
+- 隔离公开 apply/续作等 7 项通过；单点文本读取变异 rc=1 且源码字节恢复，详见 TESTS 顶部。真实 owner 副本与 Gateway 未验证；第 6 轮后续见上节，不放行生产清理。
+
+## AGENTS 第 0 期第 4 轮（mc2-agents0r4，2026-10-09，待独立复核）
+
+- 实际建立 policy → AGENTS 外层临界区，quota 先于目标锁；全部目标一次锁内批处理，重判定到完成记录不放锁，续作尾与计划同锁采样。
+- curator 提交后保留租约至晋升结束，积压补晋升不绕过租约；心跳及精确 ID 释放不重复累计游标和计数。
+- 第 3 轮关于已经一次删除/完整外锁的交接不准确，本轮修正；下面旧节仅保留历史，当前锁序为 curator 租约 → policy → 人格 → 线程前缀。
+- 合成数据合同、变异及门禁结果见根 TESTS 和交接；真实 owner、Gateway 与全仓车道未验证。
+
+## AGENTS.md 第 0 期：硬拦与清理迁移（mc3-agents0，2026-10-08，分支 worker/mc3-agents，本地实现待复核）
+
+- 生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条（派活会话任务书被当用户长期约定）。三件事：promotion 最终提交入口硬拦 agents（自动/积压重试/人工/审核后一律拒绝，候选保持原状态带原因码）、owner 策略学习排除名单（按会话跳过收集 + 既有待定候选持久标记）、CLI 清理迁移（默认 dry-run、`--apply` 才执行；快照+归档+分批 CAS 删除、幂等续作）。
+- v2 四个阻断：①硬拦覆盖 `promote()` 主拦、`_automatic_policy_block` 与 `_commit_persona` 最终入口，curator 补晋升与可晋升判定同步排除 agents；②归属判定按「当前条目最后一次有效写入的来源」——用户删除后重加同文字、rollback、手工编辑均歧义保留并列出；③apply 绑定 dry-run 计划摘要，快照含 `persona/backups`、排除名单、归档与事务状态，崩溃幂等续作且不覆盖用户迁移期间的修改；④清理后按内容失效受影响线程的冻结人格快照。
+- 测试 21 项（guard 7 + migration 14）；6 项变异全部 rc=1 且备份字节还原；489 条同规模 plan+apply 0.656s。未验证真实 home 迁移（由 3a 部署后空跑→执行）、真实 Gateway 链路。
+- 0r 返工（mc4 review29 七阻断 2901–2907）：执行前在人格锁内核对版本账本尾（计划后任何写入都让计划失效）；文件正文与版本历史 SHA 不一致的条目判歧义保留；快照读取/复制失败在删除前中止并按清单读回校验；续作以事务记录的原请求 conversations 为准（冲突拒绝）；清理推进持久失效代次、冻结写入锁内核对；audit 预览按名单跳过且名单不可读 fail-closed；晋升提交前重读名单并核对修订号（`memory_policy.json` 的 `learning_exclusions_revision`）。mc4 18 条探针全绿、回归 634 项、变异 6/6、门禁全过。
+
+## AGENTS.md 第 0 期第 3 轮：单一临界区（mc3-agents0r3，2026-10-09，接着 b731b9b54）
+
+- mc4 review31 判「5 原阻断缺口 + 1 新增回归」；本轮按任务把校验/提交收进单一临界区，不再逐个补并发窗口：迁移执行=curator 租约+人格锁内一次做完（重判定/快照续作逐文件校验/归档/一次性删除/名单/失效代次/事务记录），取消分批；线程前缀锁统一 freeze/expire；policy 锁覆盖 seed 初始化（O_EXCL 不覆盖）与晋升提交复核；`run_if_due` 计入 `skipped_audit_cursor`、名单不可读诊断（`learning_exclusions_unreadable`）进运行审计。
+- 固定锁序：curator 租约 → 人格锁 → policy 锁 → 线程前缀锁。
+- 8 条红测原样转绿（3101–3107）、review29 18 条保持绿；新增 4 测试（并发 update_persona 真实子进程等待、curator 运行中迁移被拒/释放后成功、freeze/expire 锁一致性静态+并发交错无死锁）；变异 6/6 rc=1 抓到（另记一项探测变体未被测试区分：3103 锁的是「提交内复核存在」而非锁内/锁外）；guards9 12 文件 194 项、persona/curator/promotion/memory 相关回归全绿；size_diff 新增 0；strict_gates 见根 TESTS。
+- 未验证：真实 home 迁移演练、Gateway 端到端、全仓 pytest（留给 3a 12 片车道）。
+
 ## Compact工具引用按scope流式读取（toolrefs/E11e，2026-10-08，claude/07-c1-toolrefs，本地实现、待07复核）
 
 - Compact、artifact、晋升证据回退、通用控制面及scope carried共用common权威流式读取器；apply两类引用单扫描，E11a原分行/错误口径不变。

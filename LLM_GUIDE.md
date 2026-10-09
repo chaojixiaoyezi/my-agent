@@ -8,6 +8,13 @@ wsempty2（2026-10-09，本地实现，待复核）：完整空业务工具响�
 wsempty（2026-10-09，本地实现，待复核）：Responses 完整空工具响应沿 MODEL_EMPTY_RESPONSE 原一次修复；
 不改变 WS/压缩/原生思考/失败预算，非空 commentary 保持正文投影。14 项覆盖真实工具结果和修复提示出站；
 线上末次条目类型、事故根因关联及真实 sol 修复效果未验证，详见 TESTS。
+> mc2-agentsr6（2026-10-09）：当前清理合同以设计 §3.6 与 TESTS 顶部第 6 轮为准，下述第 4 轮是历史记录。stop/join 中断在原对象标记停止未确认，迁移及 Curator 不清 lease。completed 同编号仅经 `agents_migration_reconcile` 按 state→record 重读精确 ID 对账；替换的新 lease 不写，同 ID 活/未知/停止未确认拒绝，明确死亡确认意图先耐久后清空。原 record 保存历史，失败审计锁内重读，不逆取 state。不得重做业务或把 after_delete 崩溃后的回执 removed_count=0 当作没有删除；核对迁移来源版本账与归档。生产/Gateway 未验证，phase1 接口保持暂停。
+
+> AGENTS 迁移快照载荷是原始字节，不是统一 UTF-8 文本；复制、摘要、读回及续作校验按 bytes，清单 JSON 仍用 UTF-8。复用 `nofollow_fs.write_bytes_atomic_beneath` 与原写锁；禁止按扩展名或 `.DS_Store` 特判。合同见 TESTS 顶部与 `test_agents_snapshot_bytes.py`。
+
+mc2-agents0r4（2026-10-09）：AGENTS 清理锁序为 curator 租约→policy→人格→线程前缀，quota 先于目标锁。
+首次和续作共用真实外锁、锁内删除及名单入口；curator 租约覆盖提交后晋升。设计 §3.6 和 TESTS 第4轮为当前合同。
+同机执行阶段超期保护与 E11d 明确死亡判据共用；捕获进程级异常后退回固定期限恢复，不留下无限 busy。
 
 mc2-e11c（2026-10-08，本地实现、待3a复核）：Curator消息与审计只读定位沿有界进程缓存，失效同源完整扫描，
 无schema/配置/权限/追加或游标推进变化。键为绝对路径+ID，文件指纹与锚行复核；缓存不是授权或历史防篡改事实。

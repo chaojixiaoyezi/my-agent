@@ -12,7 +12,11 @@ from agent_py_agent.agent.conversation import message_cursor
 from agent_py_agent.agent.conversation.display_checkpoint import DISPLAY_CHECKPOINT_ROLE
 from agent_py_agent.agent.io.cursor_cache import CursorCache, cursor_key
 from agent_py_agent.agent.memory_store import curator_audit_cursor
-from agent_py_agent.agent.memory_store.curator_inputs import _collect_audit, _collect_messages
+from agent_py_agent.agent.memory_store.curator_inputs import (
+    CuratorMessageSource,
+    _collect_audit,
+    _collect_messages,
+)
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.tests.support.curator_scan_cases import (
     encode_row,
@@ -162,9 +166,19 @@ def test_multi_thread_mixed_new_and_old_messages_equal_without_writes(tmp_path, 
     legacy = SimpleNamespace(threads=store.threads, messages=LegacyMessageReader(store))
     limit, max_chars = budget
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    expected = _collect_messages(conversation_store=legacy, cursors=cursors, limit=limit, max_chars=max_chars)
-    assert _collect_messages(conversation_store=store, cursors=cursors, limit=limit, max_chars=max_chars) == expected
-    assert _collect_messages(conversation_store=store, cursors=cursors, limit=limit, max_chars=max_chars) == expected
+    expected = _collect_messages(
+        source=CuratorMessageSource(conversation_store=legacy),
+        cursors=cursors, limit=limit, max_chars=max_chars,
+    )
+    current = _collect_messages(
+        source=CuratorMessageSource(conversation_store=store),
+        cursors=cursors, limit=limit, max_chars=max_chars,
+    )
+    assert current == expected
+    assert _collect_messages(
+        source=CuratorMessageSource(conversation_store=store),
+        cursors=cursors, limit=limit, max_chars=max_chars,
+    ) == expected
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
     assert cursors == {tid: rows[-1].message_id, other.thread_id: first.message_id}
 

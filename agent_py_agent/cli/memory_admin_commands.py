@@ -6,15 +6,22 @@ from __future__ import annotations
 # 模块用途: 把 argparse 参数变成 typed Service 调用，并输出不含秘密的结构化报告。
 
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..agent.capability.persona_repository import PersonaRepository
 from ..agent.memory_api import (
+    AgentsCleanupError,
+    AgentsCleanupRequest,
     DailyMemoryStore,
     LessonRepository,
+    MemoryCuratorStateStore,
     MemoryMigrationService,
     MemoryRetentionService,
+    apply_agents_cleanup,
+    plan_agents_cleanup,
 )
 from ..agent.user_space.owner_access import is_complete_local_admin_owner
 from .common import make_agent
@@ -87,6 +94,12 @@ def cmd_memory_v2_doctor(args: Any) -> int:
 # 函数用途: 检测或应用一次性 Memory v2 安全迁移。
 def cmd_memory_migrate(args: Any) -> int:
     return _run_admin_command(args, _migration_payload)
+
+
+# LLM: agents 清理走同一迁移服务：dry-run 只读计划，apply 才快照、归档、删除并写名单。
+# 函数用途: 预览或执行 AGENTS 自动晋升条目的清理迁移。
+def cmd_memory_agents_cleanup(args: Any) -> int:
+    return _run_admin_command(args, _agents_cleanup_payload)
 
 
 # LLM: 统一包装只处理 CLI 错误边界，不吞掉 Service 的结构化失败报告。
@@ -325,6 +338,59 @@ def _migration_payload(agent: Any, args: Any) -> dict[str, object]:
     }
 
 
+# LLM: dry-run 只输出计划（不含条目正文）并给出 plan_digest；apply 必须携带同一摘要，
+#   计划漂移以稳定错误码拒绝；apply 走同一服务并返回结构化迁移报告。
+# 函数用途: 构造 AGENTS 清理迁移的预览或执行报告。
+def _agents_cleanup_payload(agent: Any, args: Any) -> dict[str, object]:
+    home = agent.home_paths
+    persona = PersonaRepository.from_home_paths(home)
+    conversations = tuple(str(item) for item in (getattr(args, "conversation", None) or ()))
+    if not bool(getattr(args, "apply", False)):
+        plan = plan_agents_cleanup(persona=persona)
+        return {
+            "ok": True,
+            "command": "memory agents cleanup",
+            "mode": "dry-run",
+            "plan": plan.to_dict(),
+        }
+    migration_id = str(getattr(args, "migration_id", None) or "") or _default_migration_id()
+    # LLM: 执行路径携带 curator state store 领取迁移租约（curator 在跑时结构化拒绝，mc4-3102）；
+    #   dry-run 保持纯读不领租约。
+    try:
+        report = apply_agents_cleanup(
+            home_paths=home,
+            persona=persona,
+            candidate_service=agent.memory_candidates,
+            request=AgentsCleanupRequest(
+                migration_id=migration_id,
+                conversations=conversations,
+                actor="memory-admin-cli",
+                plan_digest=str(getattr(args, "plan_digest", None) or ""),
+            ),
+            curator_state_store=MemoryCuratorStateStore(
+                home.owner_memory_curator_state_json
+            ),
+        )
+    except AgentsCleanupError as exc:
+        return {
+            "ok": False,
+            "command": "memory agents cleanup",
+            "mode": "apply",
+            "error_code": exc.reason_code,
+        }
+    return {
+        "ok": bool(report.get("ok")),
+        "command": "memory agents cleanup",
+        "mode": "apply",
+        "migration": report,
+    }
+
+
+# 函数用途: 生成默认迁移编号（UTC 时间戳）。
+def _default_migration_id() -> str:
+    return time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+
+
 # LLM: doctor 只组合无正文健康摘要；候选正文、对话正文和工具大输出都不能出现在报告中。
 # 函数用途: 汇总 Memory v2 正式组件的只读诊断。
 def _doctor_payload(agent: Any, args: Any) -> dict[str, object]:
@@ -434,6 +500,7 @@ def _print_admin_payload(payload: dict[str, object], *, json_output: bool) -> No
 
 
 __all__ = [
+    "cmd_memory_agents_cleanup",
     "cmd_memory_candidates_list",
     "cmd_memory_candidates_promote",
     "cmd_memory_candidates_review",

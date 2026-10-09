@@ -311,10 +311,19 @@ def _upgrade_one_stub(path: Path, stub: str, template: str) -> None:
         pass
 
 
+# LLM: 种子文件只在「不存在」时创建；存在性检查与写入之间的竞态窗口用 O_EXCL 兜底，
+#   并发 append（如学习排除名单）先创建文件时放弃写入，绝不覆盖（mc4-3107）。
+# 函数用途: 不存在时写入种子 JSON（O_EXCL 防并发覆盖）。
 def _write_seed_json(path: Path, payload: Mapping[str, object]) -> None:
     if path.exists():
         return
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
 
 
 # LLM: Only the byte-for-byte semantic legacy seed may migrate automatically. Any custom quota

@@ -1,5 +1,35 @@
 # Codebase Tree
 
+## AGENTS 第 6 轮（mc2-agentsr6，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/memory_store/agents_migration_reconcile.py # completed 旧精确租约收尾；state→record、原记录历史
+|-- agent_py_agent/agent/memory_store/curator_lease.py # stop/join 保护原异常与停止未确认
+|-- agent_py_agent/agent/memory_store/curator.py # 所有失败收尾拒绝清未确认停止的租约
+|-- agent_py_agent/tests/test_agents_cleanup_review33b.py # mc4 原九项公开入口/崩溃/收尾
+|-- agent_py_agent/tests/test_agents_cleanup_review33b_locks.py # 两个独立校准的完整 quota 锁探针
+|-- agent_py_agent/tests/test_agents_cleanup_reconcile.py # 精确身份、历史、I/O恢复、真实死进程与业务不重做
+|-- agent_py_agent/tests/test_curator_heartbeat_stop.py # 真实存活心跳线程的 stop/join 中断
+```
+
+- AGENTS 快照字节合同：`agent/memory_store/agents_migration.py` 的复制入口复用 `agent/common/nofollow_fs.py` 私有原子字节写；`tests/test_agents_snapshot_bytes.py` 验证公开迁移、续作、清单兼容和篡改拒绝。路径均相对 `agent_py_agent/`，不新增恢复执行权。
+
+## AGENTS 第 5 轮（mc2-agentsr5，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/memory_store/promotion.py # quota→policy→目标；最终目标同源解析
+|-- agent_py_agent/agent/memory_store/agents_migration.py # 原 record 收尾 pending、精确退役与结构化诊断
+|-- agent_py_agent/tests/test_agents_cleanup_review33.py # 真 flock、收尾组合、重放/二次中断合同
+```
+
+## AGENTS 第 4 轮（mc2-agents0r4，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/memory_store/agents_migration.py # quota 前置；policy→AGENTS 全程外锁
+|-- agent_py_agent/agent/memory_store/curator_lease.py # 精确 ID 心跳与晋升后独立释放
+|-- agent_py_agent/tests/test_agents_cleanup_critical_section.py # 一次删除/全程持锁/续作/晋升租约合同
+```
+
 ## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08）
 
 ```text
@@ -245,6 +275,7 @@
 |-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
 |-- docs/design/CAPABILITY_UPSTREAM_MIGRATION.md # 上游未迁内容的许可核对、迁移清单与不迁原因（C14）
 |-- docs/design/FILE_SYNTAX_DIAGNOSTICS.md # 文件原子发布的有界语法观察及工具反馈边界
+|-- docs/design/PERSONA_AGENTS_OWNERSHIP.md # AGENTS.md 只由用户写、指向配置、自动学习另存、来源标记与清理迁移
 |-- docs/design/SLEEP_RESUME.md # 睡眠/长暂停后的 claim、副作用不确定态与恢复故障注入设计（待 3a 定）
 |-- docs/guides/MODEL_GUIDE.md        # 给用户的模型管理使用说明：新增/切换/默认/effort/删除/共享/派子代理选模
 |-- docs/guides/CAPABILITY_PACK_GUIDE.md # 给用户的能力包使用说明：装/启用/停用/更新/回退/卸载/发现使用/派子代理授权/自制包/安全边界
@@ -1780,6 +1811,7 @@ docs/
 - `docs/design/CAPABILITY_SOURCE_COVERAGE.md`：两个固定短剧来源的全部入口、阅读深度、样包映射及未迁移项；索引覆盖不等于能力全部迁移。
 - `docs/design/CAPABILITY_UPSTREAM_MIGRATION.md`：上游未迁内容按许可证分成可迁（B 的 `.mjs` 门做 Node 插件、A 的图像/视频工具只做外壳）与不迁（Toonflow、Remotion、限用途样例），给出分批、验收与审查要点。
 - `docs/design/FILE_SYNTAX_DIAGNOSTICS.md`：原生文件修改的语法反馈设计，区分写入成功、观察结果与任务质量。
+- `docs/design/PERSONA_AGENTS_OWNERSHIP.md`：AGENTS.md 归属与多 owner 隔离、指向本地或网络文件的权限边界、自动学习另存与合并、学习来源标记、写入上限、误加条目的清理迁移。
 - `docs/design/SLEEP_RESUME.md`：睡眠/长暂停后的 lease、执行者接管、外部副作用不确定状态、前五风险和可派工测试切片。
 - `agent_py_agent/tests/test_capability_package_resource_scope.py`：验证包成员和业务路径的区分、同代搜索导航、受限隔离，以及归档后原生消息保留完整资源引用。
 - `agent_py_agent/tests/test_capability_resource_input_schema.py`：验证模型完整来源schema、原执行器在handler前拒绝缺字段/类型错误，以及原身份/代次/摘要边界不变。

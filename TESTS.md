@@ -228,6 +228,102 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 - 独立审查提出main和compact同时带降档更新的条件性顺序缺口；全产品读取点只有auxiliary的compact目的设置update，主请求不设置；新运输断言明确main无update/compact确有update且整个main input逐字保留。任意后端直接调用的非产品控制组合未验证。媒体repair先于input_items，typed volatile由input_items最后追加，不靠末尾user猜。
 - 上游契约及风险见DESIGN_LEDGER的compactcall；窗口内合成前缀不外推真实命中，超窗瘦身/分段及来源不全时不承诺历史前缀。完整旧分段source期望补入原dynamic user，仍逐字比较连续源、不放宽窗口或覆盖断言；全仓及真机由07复核。
 
+## R33b-02 completed 精确收尾对账（mc2-agentsr6，2026-10-09；本地实现待复审/集成）
+
+- 来源：mc4 原九例＋独立校准锁两例先按原测试 AST 跑出 4 个合同失败（正常 join 中断及三个 completed 收尾），无 error/skip；证据位置改 pytest tmp_path。校准锁两例已经绿，不把旧无效夹具计为通过。
+- 做法：原 apply 的 completed 分支只调用 `agents_migration_reconcile`；规范 state→原 record 锁内重读。旧精确 ID 消失或已换新 ID 只结清旧 record；同 ID 仅沿原明确死亡判据清空旧 active_lease，状态其它字段不动。活/未知 holder、停止未确认、身份缺失均拒绝，不把到期或 interrupted 当死亡证明。
+- 旧诊断与 pending 进入 `lease_cleanup_history`。死 holder 确认意图先耐久，再清旧 state；意图写失败不清租约。后续失败在可写的原 record 锁内重读补审计，不倒序取 state，不覆盖晚到诊断；存储全不可写时只报告，不保证无法写入的错误能被下一次读出。
+- 新 `test_agents_cleanup_reconcile.py` 验证精确活/未知/停止未确认/缺 ID 的拒绝、规范读取失败审计、对账幂等、旧释放错误留存和新 state 字节不变；真实子进程 completed 后 `os._exit(73)`，逐项核对 counters/cursors 等全部非 lease 字段、业务文件和失效代次字节不变。分别注入所有 record 写失败及只有最终结清写失败，恢复后沿同 ID 完成。
+- 独立审查所指 stop.set 范围、失败审计、坏诊断类型，新增反例实际 6 红；死 holder 确认意图两例再红。修后聚焦联合入口绿，未删除/跳过/放宽 mc4 的原业务断言。诊断类型错误结构化拒绝，不抛新 TypeError。
+- 复审的锁内记录身份漂移、晚到失败审计写错迁移、falsey 非 dict 假成功及异常子类伪装字典，另加反例实际 15 红；按目录迁移编号＋初读编号＋旧 lease ID 验证，类型先检查不 `or {}`，停止事实和诊断读写同一 BaseException 原生字典，保留原对象。目录规则为原 `agents-migration-<id>`，首次误按裸 ID 导致回归，按实际格式修正，保留原断言。
+- 复审建议“停止未确认但旧 ID 消失/换新即可结清”未采用：任务原文要求停止未确认仍保守拒绝；原拒绝探针覆盖已无旧 lease 的情况，不因只更新 record 放宽此合同。
+- 原 strict 首跑 9 项 rc0、size_diff 因收进的原测试函数/嵌套/参数共 6 新告警 rc1。只抽测试监控器、锁重试与 stale replan helper，没有改核验器或业务断言；30 个原探针 assert 和 7 个校准锁 assert，在 self 属性接收者归一化后 AST 集合及重复数逐一相同（`assertion-preservation.json`），真实线程/锁/子进程入口 11 例仍绿，size_diff 预检新增为 0。锁超时保留同一 BlockingIOError 原因，原隐式链改显式 from，类型、文字、2 秒获取限时及各等待点不变。
+- 当前产品聚焦 76 项通过；相关检索及 curator/quota 文件加完整 guards9 共 75 文件 1487 过/2 失败/0 error/skip，整条回归 rc1。仍是 r223 的 MCP 背压子进程未终止与双大流捕获超时，不删、不跳、不放宽；同名两项在此前真正基线 `84ff2c884c1e99100d3bb3a4e041dbaa5c0499e1` 已实测复现，本轮复用 `tmp/mc2-agentsr5/baseline-failures.xml`，不声称广回归全绿。运行清单/日志/XML 见 `tmp/agentsr6/regression-final*`。
+- 最终结构版本同一 75 文件再跑，仍 1487 过/2 失败，无 error/skip；其中全部 12 个 guards9 文件的 194 项通过、聚焦 76 项通过。原 `strict_gates.sh <tree> f11b8f495` 十项均 rc0，import 0 findings、size_diff 新增 0，生成 CODE_SIZE_REPORT 已按原脚本还原，不随提交。日志为 `tmp/agentsr6/strict-gates-final.log`。
+- 最终四单点变异分别由 1/3/1/5 个业务失败杀死，pytest 均 rc1，无 error/skip；依次对应正常 join 清 lease、completed 跳过对账、误清新 lease、改回文本复制。每次原字节备份立即还原，SHA 与当前源码及暂存区相同；命令/JUnit/日志在 `tmp/agentsr6/mutations/`，最终核对在 `final-verification.json`。
+- **已知计数限制（本轮仅记录，未修）**：after_delete 与 progress 耐久之间崩溃，重放 `removed_count` 可为 0；真实退出 73 的探针中版本账仍有一次删除、归档字节不变。不得据回执 0 宣称未删除；用 `source=migration:<id>` 版本账、归档和实际条目共同核对。不要在 cleanup-only 重放补做删除/归档/名单/代次。
+- 复现：指定 ci-venv、工作树根 PYTHONPATH、隔离 HOME、无字节码/cache，执行 `test_agents_cleanup_review33b.py`、`test_agents_cleanup_review33b_locks.py`、`test_agents_cleanup_reconcile.py`、`test_curator_heartbeat_stop.py` 和字节快照测试；原始红/绿 XML 与单点变异在 `tmp/agentsr6/`。真实 owner/Gateway、生产副本、Linux 全仓、Windows、断电未验证；phase1 接口保持暂停。
+
+## R33b-01 心跳停止未确认（mc2-agentsr6，2026-10-09）
+
+- 正常主体 join 抛错也把停止未确认附到原 join 异常；异常主体保留原对象。迁移沿该事实不释放/退役；其它消费者 Curator 的普通失败落账和外层中断守卫同样拒绝清租约。
+- 独立审查后补停止信号自身中断：`stop.set` 与 `join` 放在同一异常保护范围；两条真实存活线程反例先红（标记缺失/主体被替换），补丁后绿。业务异常与停止/等待异常均保留原对象，不把未设置成功的 stop 当已停止。
+- 原 mc4 九项与两条独立校准锁探针收进 `test_agents_cleanup_review33b*.py`，首次红测保持原测试 AST，仅将证据文件移入 pytest tmp_path。首次 11 例为 7 过/4 个合同失败；锁两项已绿，不冒称旧夹具原样通过。之后为零新增告警抽辅助结构，原断言核对见顶部。补 `test_curator_heartbeat_stop.py` 的公开 run 四例（正常/异常主体×KeyboardInterrupt/普通 join 错误），活线程与原异常身份断言；修正自身 bound-method 注入夹具后四例实际红，未把首次夹具失败计作产品证据。
+- 本节记录第一项提交时的范围；completed 重放三个红例的后续修复见顶部 R33b-02。接口冻结仍暂停，生产/Gateway 未验证。
+
+## AGENTS 字节快照修复（mc2-snapbytes，2026-10-09；本地实现，待复审/集成）
+
+- 来源：生产副本的 backups 可含非 UTF-8 二进制；迁移不能把普通文件统一当文本，也不能规范化 CRLF/单 CR。
+- 做法：`_copy_snapshot_file` 读原始字节，在原锁内复用 nofollow 私有原子字节写，按字节 SHA 读回复核。清单仍为 `sha256`/`bytes`，续作既有字节复核不改；无文件名专用分支。
+- 新测试：`test_agents_snapshot_bytes.py` 覆盖公开 apply 的二进制、空 lock、0600、清单 SHA/长度；删除前中断后同编号续作；文本换行不规范化、旧清单兼容、同长度篡改拒绝。修复前 5 失败/2 通过，修复后 7 通过；单点改回 `read_text().encode()`，实际 pytest rc=1、5 业务失败、无 error/skip，备份字节与 SHA 完全恢复。
+- 复现：工作树根，用指定 ci-venv Python 和隔离 HOME，执行 `-m pytest agent_py_agent/tests/test_agents_snapshot_bytes.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-snapbytes`。证据在 `tmp/snapbytes/`；真实生产副本迁移/Gateway、Linux/Windows、断电未验证。第 6 轮租约收尾修复在本项提交后继续，不能据本项绿测部署。
+
+## AGENTS 第 0 期第 5 轮：配额完整锁序与释放诊断（mc2-agentsr5，2026-10-09）
+
+- 来源：review33 在 `ec9263f2b` 的原样探针实际 3 失败、2 通过：长期事实/USER 的 quota-policy 锁环，以及释放写盘失败后的 executing 租约无限保护。
+- 第一段：统一 quota→policy→正式目标，显式传递 admission，长期事实 add/replace/remove 和候选脱敏不重入；冲突候选落状态在释放外锁后完成。正式锁序见设计 §3.6。
+- `test_agents_cleanup_review33.py` 保留真实 flock、两个线程都结束、无锁错误、迁移 completed 与晋升 promoted 的原断言；正确顺序下改等 cleaner 的 quota 请求而不是取得。USER/SOUL 真实写版本尾后按原 CAS 重新 dry-run，不能取消计划校验。
+- 第一段六个配额合同加原晋升文件共 55 项通过（`tmp/mc2-agentsr5/lock-v3.xml`）；提交 `d6682c1a0`。空提交故障注入仅适配 admission 关键字，原冲突断言不变。
+- 第二段七个释放/退役组合合同修前实际七红（`tmp/mc2-agentsr5/release-red.xml`）。pause12 保存 WIP `cc18269b6`，当时联合入口退出 -15，不是绿测。resume7 后有界复现：`--timeout=12 -o faulthandler_timeout=5` 的真实栈确认诊断持 record 锁后私有原子写再次领同锁，退出 1（`timeout-root-red.xml`）；改成锁内私有原子写 unlocked 入口，仍共用原 record 和私有权限。
+- 增补精确身份/phase 与诊断落盘失败合同：未改变 executing 不得报告 lease_changed，先失败再修正（`diagnostic-red.xml`）。释放失败不回滚 completed，但 `ok=false`；退役成功按原期限恢复，退役失败要求人工恢复。普通异常与 KeyboardInterrupt 保留原对象，完成记录诊断可重放；诊断自身写盘失败另报告类别，不承诺持久化。
+- 同一当前实现的三正式文件 63 项通过（`release-final.xml`）；mc4 已接受的适配 26 + 正式合同 28 + 新合同共 70 项通过（`contracts-final.xml`）。复制的旧探针只改内部 `_commit_persona` 的新 context 参数调用，原 AGENTS 拒绝及状态断言不变；最初证据目录未准备与旧签名失败已保留，不计为业务通过。复现仍使用指定 ci-venv、隔离 HOME、仓库根 PYTHONPATH、无字节码/cache、独立 basetemp。
+- 两个独立只读审查补出的真实问题另先红测复现（`review-red.xml` 八失败）：默认/规范化目标错领 disabled persona quota；completed 后主体异常、释放窗口重放、诊断写失败可能假成功；收尾二次中断覆盖 primary。准入与提交复用唯一目标解析；原 record 在数据提交前耐久写入精确租约与 pending，收尾结果耐久写入之前重放保持 `ok=false`，不另建执行权。异常附注绕过自定义方法，保留原异常对象。
+- 心跳 join 二次中断单项先业务红（`join-red.xml`，rc1；最初直接让 KeyboardInterrupt 逃逸的 rc2 不是变异证据），修复保留 primary 并记录停止未确认；这种情况下迁移不释放/退役，仍保守 busy。修后四正式文件＋适配探针共 146 项通过（`review-green.xml`），其中新正式合同 24 项。
+- 两处独立单点变异实际各 rc1：policy→quota 反向边被三条持锁断言抓到；吞释放失败被七条业务断言抓到。每次备份原始字节并立即还原，SHA 一致，命令/JUnit/日志见 `tmp/mc2-agentsr5/mutations/`。
+- import 检索与 curator/quota 直接相关 58 文件加 guards9 全部 12 文件：70 文件共 1435 通过、2 失败、0 skip/error，整条命令 rc1（`regression.xml` / `regression-manifest.json`）；其中 guards9 的 194 项均通过。两失败是 `test_r223_audit_regressions.py` 的 MCP 背压终止及双大流捕获超时，真正基线 `84ff2c884c1e99100d3bb3a4e041dbaa5c0499e1` 独立临时 worktree 同入口也两失败（`baseline-failures.xml`），临时树干净并已移除；不改、不删、不跳过这两项，不把总回归写成全绿。真实模型文件未执行，原因与辅助 harness 清单明确登记。
+- 本轮只在隔离 HOME 验证；未启动真实 Gateway、未改真实 owner，不推送或部署。
+- 原 strict 首跑实际 ruff 导入排序失败、size_diff 三个新增告警；拆开只读 Persona 采用核验、租约 phase 分类和测试单次非阻塞领锁，保留原业务断言与私有调用接缝。结构拆平后 146 聚焦仍全部通过（`size-final-green.xml`），两变异仍各 rc1/三和七业务失败且 SHA 还原（`mutations-final/results.json`）；相同 70 文件回归仍 1435 过/2 失败、无 skip/error（`regression-final.xml`），原失败不隐藏。
+- 第二次 strict 剩一条 mixin near-soft：191 行仍进入 200 行软阈值的 80% 预警区。继续独立出长期 add 原语，保留原方法接缝/唯一仓库/准入/冲突与幂等身份；原 size_diff 预检新增为 0。最后结构版本 146 聚焦再次全绿（`add-final-green.xml`），最新两变异各 rc1 且 SHA 还原，同 70 文件回归仍 1435 过/2 失败（`regression-final.xml`）；这两项真实失败仍须集成者复核。
+
+## AGENTS 第 0 期第 4 轮：真实外层锁与晋升尾段租约（mc2-agents0r4，2026-10-09）
+
+- 来源：mc4 review32 两项 P1（3201、3202）及锁序统一任务；基线 `6eedee007` 原 26 探针为 23 过、3 业务红。
+- 做法：quota 先于文件锁，policy → AGENTS 外层锁覆盖重判定、摘要/尾、快照校验、归档、一次删除、名单、线程失效及完成记录；使用锁内批处理和名单入口，公开批次 32 条上限不变。续作只用同锁计划版本尾。
+- curator 批次提交保留租约至晋升结束，积压补晋升也走持租约执行链；心跳及精确 ID 释放不重复累计计数。
+- 活跃同机 `executing/promotion` 即使心跳失败且期限过去也不会被误收；仍用 E11d 明确死亡判据。续租不缩短未来期限，停止并 join 后复核在途错误。捕获 `KeyboardInterrupt/SystemExit` 后取消执行保护但保留原短期恢复期限；事务恢复仅容忍同一租约单调时间/退出标记变化，身份、游标、计数和其他文件仍严格检查。
+- 正式合同：`test_agents_cleanup_critical_section.py` 覆盖 500 条一次删除与全程持锁、忙 curator、续作 ABA、晋升尾段/过期/回调异常、积压晋升、周期心跳、用户并发重添。旧部分失败测试将故障点移到唯一删除提交后、进度落盘前，仍验证续作不重删、不重复归档、不碰基线。
+- 独立审查的中断活性问题先以四个主体中断和一个失败审计中断红测复现；外层守卫覆盖整个失败收尾。恢复投影另加十三个正反例（合法续租/退出、换主、换 run/PID、计数/游标改动、错误文件、坏期限、时间倒退、心跳越过期限），保留两条原仓库崩溃恢复测试的 busy→过期恢复和私有权限断言。
+- 复现：根目录、指定 ci-venv Python、隔离 HOME、`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1`；pytest 两个 cleanup 文件及相关 curator/memory 文件，加 `-q --tb=short -p no:cacheprovider --basetemp=<隔离目录>`。
+- 原三项探针在持锁回调中同步等待写进程，实际外层锁会使父等子、子等锁而超时；保留原件和原始 rc=1，不声称原 26 全绿。正式合同用异步子进程及就绪屏障，退出外锁后等待，保留用户重添必须存活的业务断言。
+- 验证结果、逐条结果、变异还原 SHA 和原始门禁输出见交接。真实 home、Gateway、全仓车道及跨平台未验证；本轮不推送、不部署。
+
+## AGENTS.md 第 0 期第 3 轮：单一临界区（mc3-agents0r3，2026-10-09，接着 b731b9b54）
+
+> 历史交接更正：该轮声称一次删除和完整外锁，但 review32 发现仍分批且外层人格锁缺失；当前锁序与实现以第 4 轮和设计 §3.6 为准。
+
+- 来源：mc4 review31（`/private/tmp/claude-501/m-mc4/review31-agents/`，13 条补测，8 条红）；任务 mc3-agents-phase0-round3.md；设计调整写进 `docs/design/PERSONA_AGENTS_OWNERSHIP.md` §3.6.1–3.6.4。演练全部在 pytest 隔离 HOME，未触碰真实 home。
+- 结构（锁序固定 curator 租约 → 人格锁 → policy 锁 → 线程前缀锁）：①迁移执行=一个临界区一次做完——curator 租约（拿不到 `AGENTS_CLEANUP_CURATOR_BUSY`）→人格锁内重判定/核对摘要与账本尾→快照校验（首次写入读回；续作逐文件 sha256+bytes，不一致 `AGENTS_CLEANUP_SNAPSHOT_TAMPERED`）→归档→一次性删除（取消分批，批间 tail 只认上一批锁内采样）→名单→失效代次→事务记录；②线程前缀锁（`persona/thread_prefix.lock`）统一 freeze「核对代次→写快照」与 expire「推进代次→失效」；③seed 初始化 O_EXCL 不覆盖 + 晋升提交在 policy 锁内复核名单；④`run_if_due` 计入 `skipped_audit_cursor`，名单不可读原因码 `learning_exclusions_unreadable` 进运行审计与返回。
+- 8 条红测原样转绿（断言未改）：3101 批间 ABA 不得成新 tail、3102 首个 freeze 不得写旧代次、3103 cleanup 后提交不得漏名单、3104 续作必须逐文件重校验快照、3105 整段被排除的 audit 窗口按周期排空、3106 名单不可读诊断持久化、3107 两条 seed 不得覆盖并发追加。review29 18 条保持全绿。
+- 新增 4 测试（`test_agents_cleanup_migration.py`）：并发 `update_persona` 真实子进程在迁移锁外等待且条目清理后保留；curator 持租约时迁移结构化拒绝、释放后重跑成功（active_lease 清空、last_success_at 落盘）；freeze/expire 都引用线程前缀锁（inspect 静态断言）；2×freeze + 2×expire 各 20 轮并发交错无死锁（join(30)）。
+- 变异 6/6 全部 rc=1 抓到并原样还原（sha256 一致）：①恢复分批（批间 tail 锁外重采样）→3101 失败；②冻结不拿前缀锁→3102 失败；③提交不复核名单（等价于复核不在提交临界区）→3103 失败；④seed 无条件覆盖→3107 失败（owner_resolver 参数仍绿）；⑤`run_if_due` 忽略跳过游标→3105 失败；⑥续作不校验快照→3104 失败。另记一项探测变体（复核保留但移出锁）3103 仍绿——该测试锁的是「提交内复核存在」，顺序场景下不区分锁内/锁外，如实记录。
+- 回归：review31 13 条 + 迁移 19 条 = 32 passed；persona/promotion/home/owner 组 197 passed；curator 组 210 passed；guards9 12 文件 194 passed。`size_diff` 新增告警 0（消失 13）；4 处尺寸拆平（类 297→≤250、freeze/expire 嵌套 3→2、测试函数 52→≤47 行，各收成单层小函数）。
+- 门禁（strict_gates.sh f11b8f495）：GATES_PASS——import 边界 0、ruff、doc-sync、常数目录 959 项、frontend catalog 271、尺寸 strict hard=0、size_diff 新增 0（消失 13）、diff --check、clean-package 全过。
+- 复现：工作树根 `PYTHONPATH=$PWD:/private/tmp/claude-501/m-mc4/review31-agents:/private/tmp/claude-501/m-mc4/review29-agents PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc3-agents/<tag>`；PY 用 ci-venv-312。
+- 未验证：真实 home 迁移演练（由 3a 部署后空跑→执行）、Gateway 端到端、全仓 pytest（留给 3a 12 片车道）。
+
+## AGENTS.md 第 0 期：自动写入硬拦、学习排除名单与清理迁移（mc3-agents0，2026-10-08，基线 f11b8f495，按设计 v2 补齐 4 阻断；本地实现待复核）
+
+- 来源：生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条（开发派活会话的任务书被当成用户长期约定）。用户拍板第 0 期三件事，设计见 docs/design/PERSONA_AGENTS_OWNERSHIP.md（0a441da06 第 1 版 → c8800d348 第 2 版）。演练全部在 pytest 隔离 HOME，未触碰真实 home。
+- 硬拦（v2：最终提交入口一律拒绝 agents）：`promote()` 在证据/状态变更前整体拒绝 `promotion_target=agents`（自动 `AUTO_AGENTS_WRITE_FORBIDDEN`、人工/审核后 `AGENTS_WRITE_USER_ONLY`）；`_automatic_policy_block` 同步拦自动路径；`_commit_persona` 最终提交入口兜底。候选保持原状态、不丢不标失败；`_pending_promotable_candidate_ids` 补晋升判定同步剔除 agents 目标；用户当轮 `update_persona` 与 long_term 自动晋升不变；判定只看结构化字段。
+- 名单：owner 策略 `memory_policy.json.learning_exclusions`（只追加不覆盖，不在代码写死会话号）；`curator_inputs._collect_messages` 在读取消息前跳过名单会话（游标不动），名单不可读时 fail-closed 本轮不收集任何会话消息；`sync_learning_exclusion_marks` 给既有 pending/approved 候选写 `promotion_exclusion=LEARNING_SOURCE_EXCLUDED`；promote 自动路径拦截带标记候选；`_pending_promotable_candidate_ids` 补晋升路径同样过滤（名单不可读时不补晋升）。依赖经 `MemoryCuratorDependencies.learning_exclusions` 注入（core.py 组合根接 `curator_learning_exclusions`）。
+- 迁移（v2 事务与恢复合同）：`memory agents cleanup`（默认 dry-run，`--apply` 才执行；`--conversation` 可重复、`--migration-id`、`--json`）。plan 按「当前条目最后一次有效写入的来源」归类：最后写入是 `memory-promotion:` 前缀 → 可清理；无事件/最后是 remove/rollback 晚于最后写入 → 歧义保留并列出（用户删除后重加同文字、手工编辑均保留）；其它来源 → 保护。apply 绑定 dry-run 的 `plan_digest`（缺失 `AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED`、文档已变 `AGENTS_CLEANUP_PLAN_STALE`）；顺序=快照（AGENTS.md/versions.jsonl/candidates.jsonl/memory_policy.json/archive/record/persona-backups 全树 + snapshot.json 逐文件 sha256）→ 归档 archive.jsonl（entry_id、candidate_id、version、内容、来源引用）→ `mutate_batch` 分批删除（每批 ≤32、CAS、source=migration:<id>、批间进度写事务记录）→ 名单追加 → record.json。崩溃后重跑按「原计划 ∩ 当前重判定」幂等续作、不覆盖用户新修改；dry-run 输出不含条目正文。清理收尾按内容失效受影响线程的冻结人格快照（`thread_persona.expire_thread_personas_containing`）。
+- 新测试：`test_agents_phase0_guard.py` 7 项（自动拦/人工拒/long_term 不受影响/消息跳过+名单不可读 fail-closed/候选标记不晋升/补晋升过滤/名单不可读不补晋升）；`test_agents_cleanup_migration.py` 14 项（混合计数、dry-run 无正文、执行后只剩非自动+归档出处、双来源保护、重加同文字保留、手工编辑歧义、rollback 歧义、digest 缺失/过期、幂等、快照逐字节、注入失败重跑收敛、489/475 同规模、清理后快照失效、归档不回流）。既有 `test_memory_promotion_v2.py` 的 agents 自动用例按新口径更新（原来断言自动成功），其余 48 项不变。
+- 同规模耗时：489 条（475 自动 + 13 agent_tool + 1 基线）合成数据，plan+apply 0.656s（含快照、归档、分批删除）。
+- 变异 6/6 全部 rc=1 抓到并原样还原（备份字节/sha256 一致）：①去掉 agents 硬拦（promotion 主拦+自动策略两层）→ guard 2 项失败；②迁移误删 agent_tool（`_classify_entry` 来源判据）→ migration 6 项失败；③排除名单不生效（`curator_inputs` 跳过失效）→ guard 1 项失败；④迁移不写快照（`_ensure_snapshot` 直接返回）→ migration 3 项失败；⑤归属判定只看历史来源（`_collect_single_event` 保留 promotion 事件不覆盖）→ migration 2 项失败；⑥apply 不比对计划摘要（`_require_matching_digest` 放行）→ migration 1 项失败。
+- 回归：提交前 19 文件 289 项（guards9 12 + persona 三件套 + admin CLI + owner_policy + guard/migration）与 curator 相关 13 文件 372 项全通过。
+- 门禁（strict_gates.sh f11b8f495）：GATES_PASS——import 边界 0、ruff、doc-sync、常数目录 --check 958 项、frontend catalog 271、尺寸 strict hard=0、size_diff 新增 0、diff --check、clean-package 全过。
+- 复现：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_agents_phase0_guard.py agent_py_agent/tests/test_agents_cleanup_migration.py -q -s -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-mc3-agents`；PY 用 ci-venv-312。同规模耗时看 `SAME_SCALE_CLEANUP_ELAPSED` 行。
+- 未验证：真实 home 迁移演练（由 3a 部署后空跑→执行）、Gateway 端到端、生产 437 条实际清理、名单生效后的真实 curator 运行；curator 集成（_execute/run_if_due）只经单元测试，未连真实 Gateway。
+
+## AGENTS.md 第 0 期返工：mc4 review29 七阻断（mc3-agents0r，2026-10-08，接着 62e99ac1b）
+
+- 来源：mc4 review29（`/private/tmp/claude-501/m-mc4/review29-agents/`，18 条探针 11 红）；任务 mc3-agents-phase0-rework.md。修复：①2901 执行前在人格锁内核对版本账本尾（`expected_versions_tail`），计划后任何写入（哪怕正文 SHA 恢复原值）都拒绝；②2902 文件正文与版本历史最后记录 SHA 不一致的条目判歧义保留；③2903 快照任何读取/复制失败在删除前中止、写完按清单读回校验 sha256；④2904 续作以事务记录的原请求 conversations 为准、冲突拒绝；⑤2905 清理推进持久失效代次、冻结写入锁内核对；⑥2906 audit 预览按名单跳过且名单不可读 fail-closed；⑦2907 晋升提交前重读名单（含修订号）核对。
+- 数据位置：人格失效代次 `<owner_home>/persona/thread_prefix_epoch.json`（锁内递增）；排除名单修订号 `memory_policy.json` 的 `learning_exclusions_revision` 字段（每次新增 +1，重复追加不动）。
+- 补测：mc4 18 条探针 11 红转 0 红（断言未改）；新增 `test_learning_exclusions_revision_tracks_appends`（0→1→重复不变→2）；40 项（18+7+15）全绿；回归 29 文件 634 项全绿。
+- 变异 6/6 全部 rc=1 抓到并原样还原（sha256 一致）：①去掉版本账本尾核对 → cli_boundary 1 项失败；②快照读失败继续 → contracts 2 项失败；③续作用新请求 conversations → additional 1 项失败；④冻结不核对代次 → contracts 1 项失败；⑤audit 不过滤 → contracts 1 项失败；⑥晋升不重读名单 → 2 项失败（contracts + additional）。
+- 门禁（strict_gates.sh f11b8f495）：GATES_PASS——import 边界 0、ruff、doc-sync、常数目录 958 项、frontend catalog 271、尺寸 strict hard=0、size_diff 新增 0（消失 13）、diff --check、clean-package 全过。
+- 未验证：同上一节（真实 home 迁移、Gateway 端到端、生产清理、真实 curator 运行）。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。

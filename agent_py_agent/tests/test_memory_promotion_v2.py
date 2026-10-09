@@ -371,7 +371,7 @@ def test_empty_long_term_add_commit_becomes_conflict_not_stop_iteration(
         scope_key="project:alpha",
         subject_key="environment.timezone",
     )
-    monkeypatch.setattr(service.long_term, "apply_batch", lambda _operations: [])
+    monkeypatch.setattr(service.long_term, "apply_batch", lambda _operations, **_kwargs: [])
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
@@ -959,7 +959,9 @@ def test_soul_requires_explicit_confirmation(tmp_path: Path) -> None:
     assert content in target_path.read_text(encoding="utf-8")
 
 
-def test_agents_working_agreement_is_autonomous(tmp_path: Path) -> None:
+def test_agents_working_agreement_automatic_write_is_forbidden(tmp_path: Path) -> None:
+    # 第 0 期口径（2026-10-08）：AGENTS.md 只能由用户写，自动路径一律被结构化拦截，
+    # 候选保持待定并带原因码；人工复核路径由 test_manual 用例覆盖。
     service, conversations, thread = _runtime(tmp_path)
     content = "长期合作时先核对真实代码。"
     candidate = _explicit(
@@ -974,8 +976,10 @@ def test_agents_working_agreement_is_autonomous(tmp_path: Path) -> None:
 
     result = service.promote(candidate.candidate_id, automatic=True)
 
-    assert result.promoted is True
-    assert content in service.persona.path_for("agents").read_text(encoding="utf-8")
+    assert result.promoted is False
+    assert result.reason_code == "AUTO_AGENTS_WRITE_FORBIDDEN"
+    assert service.candidates.get(candidate.candidate_id).status == "pending_review"
+    assert content not in service.persona.path_for("agents").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("origin", ["subagent_finding", "subagent_lesson"])

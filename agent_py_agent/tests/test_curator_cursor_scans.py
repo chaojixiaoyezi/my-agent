@@ -8,7 +8,11 @@ from dataclasses import replace
 import pytest
 
 from agent_py_agent.agent.conversation.display_checkpoint import DISPLAY_CHECKPOINT_ROLE
-from agent_py_agent.agent.memory_store.curator_inputs import _collect_audit, _collect_messages
+from agent_py_agent.agent.memory_store.curator_inputs import (
+    CuratorMessageSource,
+    _collect_audit,
+    _collect_messages,
+)
 from agent_py_agent.tests.support.curator_scan_cases import (
     encode_row,
     make_audit,
@@ -27,7 +31,10 @@ def test_unchanged_thread_at_cursor_end_has_zero_opens(tmp_path, monkeypatch):
     assert store.messages.after_report(tid, after_message_id=cursor) == ([], [])
     counts = observe_reads(monkeypatch, [store.storage.message_path(tid)])
     for _ in range(2):
-        assert _collect_messages(conversation_store=store, cursors={tid: cursor}, limit=20, max_chars=10_000) == ([], [])
+        assert _collect_messages(
+            source=CuratorMessageSource(conversation_store=store),
+            cursors={tid: cursor}, limit=20, max_chars=10_000,
+        ) == ([], [])
     assert counts.opens == []
     assert counts.bytes == 0
 

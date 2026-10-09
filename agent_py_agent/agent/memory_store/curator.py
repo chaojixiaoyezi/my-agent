@@ -41,6 +41,7 @@ from .curator_commit import (
 from .curator_formal import FormalMemorySource
 from .curator_inputs import (
     CuratorInputBatch,
+    CuratorMessageSource,
     CuratorToolReferenceSource,
     collect_curator_inputs,
 )
@@ -85,6 +86,7 @@ from .curator_state import (
 )
 from .curator_validation import CuratorCursorAdvance, next_cursors, validate_extraction
 from .daily import DailyMemoryEvent, DailyMemoryStore
+from .learning_exclusions import excluded_candidate_ids, sync_learning_exclusion_marks
 
 _LOGGER = logging.getLogger(__name__)
 _RUN_STATUSES = frozenset({"succeeded", "failed", "busy", "disabled", "not_due"})
@@ -141,6 +143,11 @@ class MemoryCuratorDependencies:
     # 记忆整理按会话的主代理模型走：组合根在“没指定整理档案”时注入，传入本批会话编号，返回各会话该用哪组模型；
     # 为 None（指定了档案、旧调用方、测试替身）时全批用 backend，与改动前一致。
     model_router: Callable[[tuple[str, ...]], CuratorModelRouting] | None = None
+    # 学习排除名单读取：返回 (被排除的 channel_conversation_id 集合, 是否不可读)；不可读时
+    # fail-closed——本轮不收集会话消息、不做补晋升，修复后从原游标重放。None 表示不启用排除。
+    learning_exclusions: Callable[[], tuple[frozenset[str], bool]] | None = None
+    # 名单修订号读取：提交前记录「判定基于哪一版名单」并进入运行警告；None 或读取失败按 0。
+    learning_exclusions_revision: Callable[[], int] | None = None
 
 
 # LLM: Run context binds one acquired lease to its pre-run cursor snapshot; helpers cannot use a
@@ -193,7 +200,17 @@ class _CuratorLifecycleMixin:
             return self._result(status="busy", reason=pending or "interval")
         if pending:
             return self._run_pending_when_due(state, pending, current)
-        batch = self._collect(state, include_formal=False)
+        # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
+        # 会话的旧消息误触发一次运行）；真正的收集在 _execute 里再做一次。不可读的诊断要随
+        # not_due 一起返回，不能显示成没有原因的普通 not_due（mc4-3106）。
+        excluded_ids, exclusion_warnings = self._learning_exclusions_for_run()
+        if excluded_ids is None:
+            return self._result(
+                status="not_due", reason="interval", warnings=exclusion_warnings
+            )
+        batch = self._collect(
+            state, include_formal=False, excluded_conversation_ids=excluded_ids
+        )
         if batch.load_errors:
             return self.run(reason="interval", now=current)
         if batch.user_turns() >= self.config.turn_threshold:
@@ -208,9 +225,8 @@ class _CuratorLifecycleMixin:
         # 纯结构化判据:只读候选账本里 pending_review 的候选数,不解析正文。
         pending_promotable = self._pending_promotable_candidate_ids(limit=32)
         if pending_promotable:
-            promoted, _warnings = self._promote_eligible(pending_promotable)
-            if promoted:
-                return self._result(status="succeeded", reason="promote_backlog")
+            # 积压补晋升也经同一恢复/租约/提交链，不能绕过迁移互斥闸。
+            return self.run(reason="interval", now=current)
         return self._result(status="not_due", reason="interval")
 
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
@@ -412,8 +428,15 @@ class _CuratorLifecycleMixin:
         )
 
     # LLM: Simple non-running results share one enum validation and never synthesize a run ID.
+    #   诊断 warning（如名单不可读）要能随非运行结果返回，调用方不必从日志猜原因（mc4-3106）。
     # 函数用途: 构造 disabled、busy 或 not_due 结果。
-    def _result(self, *, status: str, reason: str) -> CuratorRunResult:
+    def _result(
+        self,
+        *,
+        status: str,
+        reason: str,
+        warnings: tuple[str, ...] = (),
+    ) -> CuratorRunResult:
         if status not in _RUN_STATUSES:
             raise ValueError("unsupported memory curator result status")
         return CuratorRunResult(
@@ -422,6 +445,7 @@ class _CuratorLifecycleMixin:
             reason=reason,
             provider=self.provider_name,
             model=self.model_name,
+            warnings=warnings,
         )
 
 
@@ -434,31 +458,38 @@ class _CuratorExecutionMixin:
     # 同一 run 的同输入重试/缩批共享同一会话值,退出即复位。改动时同步 test_memory_curator_v2 的会话头用例。
     # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
     def _execute(self, context: _RunContext) -> CuratorRunResult:
-        migration_warnings = self._preflight_migration()
-        batch = self._collect(context.state_before, include_formal=True)
+        preflight_warnings = self._preflight_migration()
+        # 学习排除名单先于收集与晋升生效：不可读时 fail-closed，非空先标记历史待定候选再收集。
+        excluded_ids, exclusion_warnings = self._prepare_exclusion_context()
+        preflight_warnings = (*preflight_warnings, *exclusion_warnings)
+        batch = self._collect(
+            context.state_before,
+            include_formal=True,
+            excluded_conversation_ids=excluded_ids,
+        )
         if batch.load_errors:
             raise CuratorInputError(_load_error_code(batch.load_errors))
         if not batch.messages and not batch.audit_events:
             return self._commit_batch(
-                context, batch, None, extra_warnings=migration_warnings
+                context, batch, None, extra_warnings=preflight_warnings
             )
         # 按会话的主代理模型挑出这一次处理的那组会话；没有路由时全批照旧。
         batch = _apply_route(context, batch, self.dependencies.model_router)
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
-        migration_warnings = (*migration_warnings, *fit_warnings)
+        preflight_warnings = (*preflight_warnings, *fit_warnings)
         annotate = self.dependencies.annotate_batch
         if annotate is not None:
             batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, self.config))
-            migration_warnings = (*migration_warnings, *decision_warnings)
+            preflight_warnings = (*preflight_warnings, *decision_warnings)
         attempt, validated = self._extract_for_route(context, batch)
         if attempt.shrink_attempts:
-            migration_warnings = (
-                *migration_warnings,
+            preflight_warnings = (
+                *preflight_warnings,
                 f"memory_curator_input_shrunk:{attempt.shrink_attempts}",
             )
         return self._commit_batch(
-            context, attempt.batch, validated, extra_warnings=migration_warnings
+            context, attempt.batch, validated, extra_warnings=preflight_warnings
         )
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
@@ -478,12 +509,14 @@ class _CuratorExecutionMixin:
         return ()
 
     # LLM: Formal memory 走固定子预算;due 检查省略它,实际 run 包含它而不动游标契约。
+    #   名单随消息来源包传入：名单会话读取前跳过（游标不动），None 表示不可读的 fail-closed。
     # 函数用途: 收集一次有界增量输入快照。
     def _collect(
         self,
         state: MemoryCuratorState,
         *,
         include_formal: bool,
+        excluded_conversation_ids: frozenset[str] | None = frozenset(),
     ) -> CuratorInputBatch:
         formal = ()
         formal_memory_errors: list[dict[str, object]] = []
@@ -509,7 +542,10 @@ class _CuratorExecutionMixin:
             ),
         )
         batch = collect_curator_inputs(
-            conversation_store=self.conversation_store,
+            message_source=CuratorMessageSource(
+                conversation_store=self.conversation_store,
+                excluded_conversation_ids=excluded_conversation_ids,
+            ),
             audit_dir=self.audit_dir,
             state=state,
             config=input_config,
@@ -520,8 +556,8 @@ class _CuratorExecutionMixin:
             batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
         return batch
 
-    # LLM: committer 最后写 state;自动晋升只在事务成功后开始,不能回溯失效其游标。
-    # 函数用途: 构造 Daily/Candidate、游标、run audit 并整批提交。
+    # LLM: committer 最后写 state 并保留租约；晋升完成才释放，不重放已提交计数或游标。
+    # 函数用途: 提交规范批次并完成晋升尾段，租约由整轮生命周期在心跳停止后释放。
     def _commit_batch(
         self,
         context: _RunContext,
@@ -538,6 +574,7 @@ class _CuratorExecutionMixin:
             provider=str(context.route.get("provider", self.provider_name)),
             model=str(context.route.get("model", self.model_name)),
             finished_at=finished_at,
+            extra_warnings=extra_warnings,
         )
         state_commit = _success_commit(
             context,
@@ -562,12 +599,10 @@ class _CuratorExecutionMixin:
             raise
         except Exception as exc:
             raise CuratorBatchCommitError("curator batch commit failed") from exc
-        return self._post_commit_report(
-            context, batch, prepared, committed, extra_warnings
-        )
+        return self._post_commit_report(context, batch, prepared, committed, extra_warnings)
 
-    # LLM: 自动晋升在事务成功后执行,失败与已成功事务隔离且保持可重试。
-    # 函数用途: 提交成功后执行自动晋升并构造成功结果。
+    # LLM: 提交成功后仍持有同一租约；新候选和积压候选去重后晋升，失败不回滚已成功事务。
+    # 函数用途: 在租约尾段执行自动晋升并构造成功结果。
     def _post_commit_report(
         self,
         context: _RunContext,
@@ -576,8 +611,8 @@ class _CuratorExecutionMixin:
         committed: CuratorBatchCommit,
         extra_warnings: tuple[str, ...],
     ) -> CuratorRunResult:
-        # 提交后的自动晋升只消费宿主按结构化字段标出的 auto_eligible 候选；
-        # SOUL 和无正式权威的候选仍不会进入回调。
+        # 提交后的自动晋升只消费宿主按结构化字段标出的 auto_eligible 候选；SOUL、agents 目标
+        # 和无正式权威的候选不会进入回调（v2：可晋升判定与最终提交入口的硬拦同步）。
         promotable = [
             item.candidate_id
             for item in committed.candidates
@@ -585,7 +620,10 @@ class _CuratorExecutionMixin:
             == "auto_eligible"
             and str(getattr(item, "status", "") or "").strip().lower()
             in {"pending_review", "approved"}
+            and str(getattr(item, "promotion_target", "") or "").strip().lower()
+            != "agents"
         ]
+        promotable = list(dict.fromkeys((*promotable, *self._pending_promotable_candidate_ids(limit=32))))
         promoted, promotion_warnings = self._promote_eligible(promotable)
         warnings = (
             *prepared.warnings,
@@ -611,8 +649,77 @@ class _CuratorExecutionMixin:
             warnings=warnings,
         )
 
-    # LLM: 晋升只消费已提交候选 ID;失败与已成功事务隔离且保持可重试。
-    # 函数用途: 执行保守自动晋升并返回数量和稳定警告码。
+
+# LLM: 学习排除名单的读取、同步与过滤集中在这里：名单不可读时 fail-closed（消息收集与补晋升都跳过），
+#   命中名单只做结构化判定，不阻断策展主链；Execution 只调用本类方法拿结果。
+# 类用途: 提供 Curator 的学习排除名单读取、标记同步与候选过滤。
+class _CuratorExclusionMixin:
+    # 函数用途: 读取名单并同步历史待定候选的排除标记，返回 (排除集合或 None, 警告)。
+    def _prepare_exclusion_context(self) -> tuple[frozenset[str] | None, tuple[str, ...]]:
+        excluded_ids, warnings = self._learning_exclusions_for_run()
+        if not excluded_ids:
+            return excluded_ids, warnings
+        return excluded_ids, (*warnings, *self._sync_learning_exclusions(excluded_ids))
+
+    # LLM: 名单不可读时返回空（宁可不晋升也不误晋升）；判定只读结构化 refs 与通道绑定，不写标记。
+    # 函数用途: 从待晋升候选里剔除来源命中学习排除名单的条目。
+    def _drop_excluded_promotable(self, rows: list) -> list:
+        excluded_ids, unreadable = self._learning_exclusions_for_run()
+        if unreadable:
+            return []
+        if not excluded_ids:
+            return rows
+        hit_ids = excluded_candidate_ids(
+            conversation_store=self.conversation_store,
+            rows=rows,
+            excluded_conversation_ids=excluded_ids,
+        )
+        if not hit_ids:
+            return rows
+        return [
+            row
+            for row in rows
+            if str(getattr(row, "candidate_id", "") or "") not in hit_ids
+        ]
+
+    # LLM: 名单不可读（文件损坏/结构非法）时 fail-closed：返回 None 让消息收集与补晋升都跳过；
+    #   warning 码稳定，便于 run 审计回溯。依赖未注入时不排除任何会话。
+    # 函数用途: 读取本次运行的学习排除名单，返回 (排除集合或 None, 警告)。
+    def _learning_exclusions_for_run(
+        self,
+    ) -> tuple[frozenset[str] | None, tuple[str, ...]]:
+        if self.learning_exclusions is None:
+            return frozenset(), ()
+        try:
+            ids, unreadable = self.learning_exclusions()
+        except Exception:
+            return None, ("learning_exclusions_unreadable",)
+        if unreadable:
+            return None, ("learning_exclusions_unreadable",)
+        return frozenset(str(item) for item in ids if str(item).strip()), ()
+
+    # LLM: 标记同步只做结构化映射（名单会话→thread→候选 refs），失败只记 warning 不阻断策展主链。
+    # 函数用途: 把名单会话的既有待定候选标记为排除，返回可展示警告。
+    def _sync_learning_exclusions(self, excluded_ids: frozenset[str]) -> tuple[str, ...]:
+        try:
+            report = sync_learning_exclusion_marks(
+                conversation_store=self.conversation_store,
+                candidate_service=self.candidate_service,
+                excluded_conversation_ids=excluded_ids,
+            )
+        except Exception:
+            return ("learning_exclusion_sync_failed",)
+        marked = int(report.get("marked") or 0)
+        return (f"learning_exclusion_marked:{marked}",) if marked else ()
+
+
+# LLM: 自动晋升的候选选取与执行集中在这里：只消费持久账本与提交结果里的结构化字段，
+#   名单不可读时不补晋升（fail-closed），agents 目标跳过（v2 硬拦）；失败与已成功事务隔离。
+# 类用途: 提供 Curator 保守自动晋升的候选选取与执行。
+class _CuratorPromotionMixin:
+    # LLM: 只消费已提交候选的持久结构化字段（promotion_mode/status/target）；这里只做只读剔除，
+    #   不写标记（持久标记由 _execute 的全量同步负责）。
+    # 函数用途: 列出已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
     def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
         """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
 
@@ -624,22 +731,34 @@ class _CuratorExecutionMixin:
                 statuses={"pending_review", "approved"},
                 limit=limit,
             )
-            ids: list[str] = []
-            for row in rows:
-                mode = str(getattr(row, "promotion_mode", "") or "").strip().lower()
-                if mode != "auto_eligible":
-                    continue
-                ids.append(str(getattr(row, "candidate_id", "") or ""))
-            return ids
+            eligible = [
+                row
+                for row in rows
+                if str(getattr(row, "promotion_mode", "") or "").strip().lower()
+                == "auto_eligible"
+                and str(getattr(row, "promotion_target", "") or "").strip().lower()
+                != "agents"
+            ]
+            if not eligible:
+                return []
+            eligible = self._drop_excluded_promotable(eligible)
+            return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
         except Exception:
             return []
 
+    # LLM: 失败与已成功事务隔离且保持可重试；manual_only 或无回调时不动；每条候选提交前重读名单
+    #   （选中到晋升之间可能有新排除，如清理迁移），命中即跳过并补同步标记（2907）。
+    # 函数用途: 逐条执行保守自动晋升并返回成功数与稳定警告码。
     def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...]]:
         if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
             return 0, ()
         promoted = 0
         warnings: list[str] = []
         for candidate_id in candidate_ids:
+            skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
+            warnings.extend(skip_warnings)
+            if skipped:
+                continue
             try:
                 result = self.promotion_callback(candidate_id)
             except Exception:
@@ -648,6 +767,44 @@ class _CuratorExecutionMixin:
             if bool(getattr(result, "promoted", False)):
                 promoted += 1
         return promoted, tuple(dict.fromkeys(warnings))
+
+    # LLM: 名单不可读时不晋升（fail-closed）；命中候选补一次标记同步，让后续人工路径也看到排除；
+    #   判定只看结构化 refs 与通道绑定，不解析正文（2907）。
+    # 函数用途: 晋升前用最新名单复核一条候选，返回 (是否跳过, 警告)。
+    def _recheck_exclusion_before_promotion(self, candidate_id: str) -> tuple[bool, list[str]]:
+        excluded_ids, unreadable = self._learning_exclusions_for_run()
+        if unreadable:
+            return True, ["learning_exclusions_unreadable"]
+        if not excluded_ids:
+            return False, []
+        try:
+            row = self.candidate_service.get(candidate_id)
+        except Exception:
+            return True, ["CURATOR_AUTO_PROMOTION_FAILED"]
+        hits = excluded_candidate_ids(
+            conversation_store=self.conversation_store,
+            rows=[row],
+            excluded_conversation_ids=excluded_ids,
+        )
+        if not hits:
+            return False, []
+        warnings = list(self._sync_learning_exclusions(excluded_ids))
+        revision = self._read_exclusions_revision()
+        if revision:
+            warnings.append(f"learning_exclusions_revision:{revision}")
+        return True, warnings
+
+    # LLM: 名单修订号随名单文件持久化（append 有新增时 +1）；提交前记录本次判定基于哪一版名单，
+    #   供运行审计回溯。依赖未注入或读取失败按 0（不阻断，判定本身始终用最新名单重读）。
+    # 函数用途: 读取名单修订号。
+    def _read_exclusions_revision(self) -> int:
+        reader = self.learning_exclusions_revision
+        if reader is None:
+            return 0
+        try:
+            return int(reader() or 0)
+        except Exception:
+            return 0
 
 
 # LLM: 一次触发的运行编排与按组取模型：run 按会话主代理模型分组依次跑完整运行（_run_once 负责恢复、租约和失败记账），
@@ -676,9 +833,8 @@ class _CuratorRunMixin:
                 break
         return combined_run_result(results)
 
-    # LLM: 恢复、清理、审计和领取不能拆开；共享锁竞争即 busy，尚未调用模型的启动失败不能报模型失败。
-    # 返回（结果, 剩余组数）；模型执行在完整接管解锁后开始，不持文件锁进行网络调用。
-    # 函数用途: 同锁接管旧事务后执行一次 Curator 批次，返回无正文摘要。
+    # LLM: 恢复/领取同锁；执行后持续心跳到晋升尾段结束，未配置模型和共享锁竞争口径保持不变。
+    # 函数用途: 领取租约后执行整轮 Curator，在提取、提交和晋升期间维持同一租约。
     def _run_once(
         self,
         *,
@@ -700,9 +856,28 @@ class _CuratorRunMixin:
         if acquired is None:
             return self._result(status="busy", reason=reason), 0
         context = _run_context(reason, *acquired)
+        from .curator_lease import curator_lease_interruption_guard
+
+        with curator_lease_interruption_guard(self.state_store, context.lease_id):
+            return self._run_leased(context)
+
+    # LLM: 外层守卫覆盖主体和失败审计；原生异常字典的停止未确认标记不能被子类属性屏蔽，也不能经 commit_failure 清租约。
+    # 函数用途: 执行已领取的一轮，心跳确认结束才释放；停止未确认时保留原异常与执行权。
+    def _run_leased(self, context: _RunContext) -> tuple[CuratorRunResult, int]:
+        from .curator_lease import (
+            curator_lease_heartbeat,
+            lease_exception_metadata,
+            release_curator_lease,
+        )
+
         try:
-            return self._execute(context), int(context.route.get("remaining", 0) or 0)
+            with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(self.config)):
+                result = self._execute(context)
+            release_curator_lease(self.state_store, context.lease_id)
+            return result, int(context.route.get("remaining", 0) or 0)
         except Exception as exc:
+            if lease_exception_metadata(exc).get("lease_heartbeat_stop_error_class"):
+                raise
             return self._commit_failure(context, exc), 0
 
     # LLM: 用本组模型提取并校验；会话自己的模型在提取/校验阶段确定性失败（CURATOR_DEFAULT_FALLBACK_CODES）且不是默认组时，
@@ -768,7 +943,13 @@ class _CuratorRunMixin:
 # LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
 # compact, task completion, and lifecycle signals.
 # 类用途: 执行一个 owner 的增量 Daily/Candidate 策展闭环。
-class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLifecycleMixin):
+class MemoryCuratorService(
+    _CuratorRunMixin,
+    _CuratorExecutionMixin,
+    _CuratorExclusionMixin,
+    _CuratorPromotionMixin,
+    _CuratorLifecycleMixin,
+):
     # LLM: Construction wires existing canonical services and creates only a transaction
     # coordinator; it starts no thread, daemon, or second scheduler.
     # 函数用途: 初始化唯一 Curator 服务及其可恢复提交器。
@@ -799,6 +980,8 @@ class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLif
         self.tool_reference_source = dependencies.tool_reference_source
         self.promotion_callback = dependencies.promotion_callback
         self.migration_service = dependencies.migration_service
+        self.learning_exclusions = dependencies.learning_exclusions
+        self.learning_exclusions_revision = dependencies.learning_exclusions_revision
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,
@@ -889,38 +1072,8 @@ class MemoryCuratorService(_CuratorRunMixin, _CuratorExecutionMixin, _CuratorLif
                     "evidence": _recover_evidence_summary(evidence),
                 }
         # 4. 重建 state: 游标/审计 = 权威链; 副本可解析时保留 pending/last_* 字段
-        try:
-            if isinstance(copy_payload, dict):
-                restored = MemoryCuratorState.from_dict(copy_payload)
-            else:
-                restored = MemoryCuratorState()
-            restored = replace(
-                restored,
-                last_processed_message_id=str(
-                    authoritative.get("last_processed_message_id") or ""
-                ),
-                last_processed_audit_event_id=str(
-                    authoritative.get("last_audit_event_id") or ""
-                ),
-                per_thread_cursors=dict(authoritative.get("per_thread_cursors") or {}),
-                active_lease={},  # 损坏前 lease 不可信, 绝不接管
-                last_failure_at="",
-                last_failure_code="",
-                last_committed_run_id=last_success.run_id,
-            )
-            if not isinstance(copy_payload, dict):
-                # 副本不可解析(unreadable): 计数从权威审计链累计(恢复点不丢账)。
-                restored = replace(
-                    restored,
-                    processed_count=sum(
-                        int(r.processed_messages or 0) + int(r.processed_audit_events or 0)
-                        for r in succeeded
-                    ),
-                    candidate_count=sum(int(r.candidates or 0) for r in succeeded),
-                    daily_event_count=sum(int(r.daily_events or 0) for r in succeeded),
-                )
-            validate_curator_state(restored)
-        except (TypeError, ValueError):
+        restored = _recovered_state(copy_payload, authoritative, last_success, succeeded)
+        if restored is None:
             return {
                 "status": "refused",
                 "reason": "restored_state_invalid",
@@ -1075,9 +1228,10 @@ def _prepare_outputs(
     extraction: CuratorExtraction | None,
 ) -> _PreparedOutputs:
     if extraction is None:
+        # 空批次也要消费「整段被排除」的 audit 游标，否则同一排除窗口会被反复扫描。
         cursor = CuratorCursorAdvance(
             dict(context.state_before.per_thread_cursors),
-            context.state_before.last_processed_audit_event_id,
+            batch.skipped_audit_cursor or context.state_before.last_processed_audit_event_id,
             0,
             0,
         )
@@ -1140,7 +1294,8 @@ def _run_context(
 
 
 # LLM: Successful audit includes counts/cursors and recovery IDs only; extracted content remains
-# solely in Daily/Candidate authorities.
+# solely in Daily/Candidate authorities. 诊断类 warning（名单不可读等）必须写进持久 run audit，
+# 不能只出现在内存结果里，否则事后审计看不到原因（mc4-3106）。
 # 函数用途: 构造整批事务内的最终成功 run audit。
 def _successful_run_record(
     context: _RunContext,
@@ -1149,6 +1304,7 @@ def _successful_run_record(
     provider: str,
     model: str,
     finished_at: str,
+    extra_warnings: tuple[str, ...] = (),
 ) -> CuratorRunRecord:
     return CuratorRunRecord(
         run_id=context.run_id,
@@ -1163,7 +1319,7 @@ def _successful_run_record(
         processed_audit_events=prepared.cursor.processed_audit_events,
         daily_events=len(prepared.daily_events),
         candidates=len(prepared.candidates),
-        warnings=prepared.warnings,
+        warnings=(*prepared.warnings, *extra_warnings)[:RUN_WARNINGS_MAX_COUNT],
         cursor_before=_cursor_payload(
             context.state_before.per_thread_cursors,
             context.state_before.last_processed_audit_event_id,
@@ -1179,6 +1335,51 @@ def _successful_run_record(
 # LLM: 损坏 run_id 由原文件 sha256 派生, 首次(算文件)与重复(读哨兵)取值一致,
 # 保证同一损坏的重复维护 tick 落幂等审计, 不伪造自愈成功。
 # 函数用途: 从隔离元数据派生稳定损坏 run_id。
+# LLM: 恢复时的 state 重建语义复杂(权威链覆盖游标/审计、lease 绝不接管、副本不可解析时计数从
+#   审计链累计), 抽成模块级函数让 recover 保持可读; 失败返回 None 由调用方拒绝恢复。
+# 函数用途: 由副本与权威链重建恢复后的 MemoryCuratorState; 非法时返回 None。
+def _recovered_state(
+    copy_payload: dict[str, object] | None,
+    authoritative: dict[str, object],
+    last_success: CuratorRunRecord,
+    succeeded: list[CuratorRunRecord],
+) -> MemoryCuratorState | None:
+    try:
+        if isinstance(copy_payload, dict):
+            restored = MemoryCuratorState.from_dict(copy_payload)
+        else:
+            restored = MemoryCuratorState()
+        restored = replace(
+            restored,
+            last_processed_message_id=str(
+                authoritative.get("last_processed_message_id") or ""
+            ),
+            last_processed_audit_event_id=str(
+                authoritative.get("last_audit_event_id") or ""
+            ),
+            per_thread_cursors=dict(authoritative.get("per_thread_cursors") or {}),
+            active_lease={},  # 损坏前 lease 不可信, 绝不接管
+            last_failure_at="",
+            last_failure_code="",
+            last_committed_run_id=last_success.run_id,
+        )
+        if not isinstance(copy_payload, dict):
+            # 副本不可解析(unreadable): 计数从权威审计链累计(恢复点不丢账)。
+            restored = replace(
+                restored,
+                processed_count=sum(
+                    int(r.processed_messages or 0) + int(r.processed_audit_events or 0)
+                    for r in succeeded
+                ),
+                candidate_count=sum(int(r.candidates or 0) for r in succeeded),
+                daily_event_count=sum(int(r.daily_events or 0) for r in succeeded),
+            )
+        validate_curator_state(restored)
+    except (TypeError, ValueError):
+        return None
+    return restored
+
+
 # LLM: 恢复拒绝原因只带结构化证据标识(路径/hash 前缀/分类), 不复制损坏正文。
 # 函数用途: 生成恢复校验失败时返回的哨兵证据摘要。
 def _recover_evidence_summary(evidence: dict[str, object]) -> dict[str, object]:
@@ -1366,9 +1567,8 @@ def _failed_run_record(
     )
 
 
-# LLM: State commit count/cursor values come from the same prepared object used to build the run
-# audit, eliminating split-brain bookkeeping.
-# 函数用途: 构造事务最后写入的成功 state 变化。
+# LLM: 游标和审计同源；只在 Curator 的整轮提交设置 retain_lease，晋升后的释放不再次累计。
+# 函数用途: 构造批次成功 state，同时保留租约给后续自动晋升。
 def _success_commit(
     context: _RunContext,
     prepared: _PreparedOutputs,
@@ -1388,6 +1588,7 @@ def _success_commit(
         daily_event_count=len(prepared.daily_events),
         last_daily_finalize_date=finalize_date,
         committed_at=finished_at,
+        retain_lease=True,
     )
 
 
@@ -1449,7 +1650,8 @@ def _pending_reason(reasons: list[str]) -> str:
 
 
 # LLM: Interval due requires actual unprocessed message/audit input and uses a timezone-aware
-# durable success timestamp.
+# durable success timestamp. 被整窗排除的 audit 窗口只剩 skipped_audit_cursor 作输入证据，也
+# 必须算「有输入」：否则游标停摆，只能等每日收尾才越过（mc4-3105）。
 # 函数用途: 判断增量输入是否达到时间触发条件。
 def _interval_due(
     batch: CuratorInputBatch,
@@ -1457,7 +1659,7 @@ def _interval_due(
     now: datetime,
     interval_seconds: int,
 ) -> bool:
-    if not batch.messages and not batch.audit_events:
+    if not batch.messages and not batch.audit_events and not batch.skipped_audit_cursor:
         return False
     last_success = _parse_time(state.last_success_at)
     return last_success is None or (now - last_success).total_seconds() >= interval_seconds

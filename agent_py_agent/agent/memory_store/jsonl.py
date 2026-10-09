@@ -51,12 +51,16 @@ if TYPE_CHECKING:
     from .candidates import CandidateService
 
 
-# LLM: quota admission 必须先于正式记忆文件锁获取，未配置时只提供透明空上下文。
+# LLM: quota 必须先于 policy/正式记忆锁；晋升显式传已持准入，不能重复获取不可重入 flock。
 # 函数用途: 进入当前 owner 的长期记忆容量临界区。
 @contextmanager
 def _quota_admission(
     enforcer: OwnerQuotaEnforcer | None,
+    admitted: OwnerQuotaAdmission | None = None,
 ) -> Iterator[OwnerQuotaAdmission | None]:
+    if admitted is not None:
+        yield admitted
+        return
     if enforcer is None:
         yield None
         return
@@ -338,9 +342,9 @@ class _JsonlMemoryIdentityMixin:
 # LLM: This mixin performs locked, quota-admitted mutations after public inputs are normalized by the identity mixin.
 # 类用途: 原子提交长期记忆批次，并为迁移精确清除已有 legacy 记录。
 class _JsonlMemoryMutationMixin:
-    # LLM: batch 锁内全量验证并原子替换权威 JSONL；remove 还要清派生层明文且可精确重放。
+    # LLM: batch 锁内全量验证并原子替换；晋升传入外层 admission，删除脱敏复用同一准入不重入。
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
-    def apply_batch(self, operations: list[dict[str, object]]) -> list[MemoryRecord]:
+    def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
 
         The JSONL file remains the sole authority.  All operations are applied
@@ -351,7 +355,7 @@ class _JsonlMemoryMutationMixin:
         if not operations:
             raise ValueError("memory operations list is empty")
         committed: list[MemoryRecord]
-        with _quota_admission(self.quota_enforcer) as admission:
+        with _quota_admission(self.quota_enforcer, _admission) as admission:
             with locked_json_path(self.path):
                 current_events = self._read_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)
@@ -406,15 +410,15 @@ class _JsonlMemoryMutationMixin:
                 self._redact_local_tool_ledgers(removed_contents)
                 write_private_text_file_atomic_unlocked(self.path, next_text)
         if removed_content_hashes and self.candidate_service is not None:
-            self.candidate_service.redact_content(
-                content_hashes=removed_content_hashes,
-                exclude_candidate_ids={
+            self.candidate_service.redact_content_admitted(_admission, {
+                "content_hashes": removed_content_hashes,
+                "exclude_candidate_ids": {
                     source.removeprefix("candidate:")
                     for record in persisted
                     if record.action == "remove"
                     and (source := str(record.source or "")).startswith("candidate:")
                 },
-            )
+            })
         if final_removed_ids:
             append_memory_purge_event(
                 self.ops_path,

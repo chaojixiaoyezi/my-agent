@@ -9,6 +9,30 @@
 
 - `compact_semantic_summary._compact_cache_safe_messages`按typed布局把原volatile完整附到原历史，`_compact_cache_safe_prompt`只持新指令且保留原稳定布局。remote与bounded文字路径复用messages供预算/发送，不新增事实源或布局开关。
 - `backends.responses`按typed尾项与trigger定位降档，不能以历史最后role=user猜摘要规则；trigger最后。容量不足的旧瘦身/分段、来源不全的独立归档摘要不承诺前缀；不改checkpoint/CAS/取消/回滚。
+> mc2-agentsr6（2026-10-09）当前结构：`agents_migration` 的 completed 分支只进 `agents_migration_reconcile`，规范 state→原 record 锁内重读并追加历史；旧 ID 消失/替换不写 state，同 ID 只用原明确死亡判据清旧 lease，确认意图先耐久。失败审计仅 record 锁重读，无 record→state 逆边。停止未确认沿 `curator_lease` 原异常标记，迁移与 Curator 都不清 lease。其它业务锁序为租约→quota→policy→人格→前缀；下述第 4 轮结构是历史阶段，以本节与设计 §3.6 为准。
+
+> mc2-snapbytes（2026-10-09）：`agents_migration._copy_snapshot_file` 用 `read_bytes` → 原目标锁 → `nofollow_fs.write_bytes_atomic_beneath` → 字节 SHA/读回；清单 `sha256`/`bytes` 不变。`_verify_snapshot_file` 原本已按 bytes 校验，保持不变。仅清单 JSON 和语义 AGENTS 解析用 UTF-8；无二进制自动恢复入口新增。
+
+## AGENTS.md 硬拦与清理迁移（mc3-agents0，2026-10-08，本地实现待复核）
+
+> 第 4 轮（mc2-agents0r4，2026-10-09）当前结构：`agents_migration._run_cleanup` 在 quota 后取得 policy→AGENTS 外锁，`_run_cleanup_locked` 全程覆盖首次/续作重判定、摘要/尾、快照、归档、一次删除、名单、线程失效和 completed。删除复用 `persona_repository._mutate_persona_batch_locked`，公开 32 条上限不变；名单复用 `owner_policy.append_learning_exclusions_locked`。新增 `curator_lease` 用精确 ID 心跳及独立释放，成功提交保留租约至晋升尾段结束，积压补晋升经同一执行入口。下文第 3 轮锁序与一次删除已完成的说法被 review32 否定，当前统一 curator 租约→policy→人格→线程前缀，quota 先于目标锁。
+
+- `promotion`：`promote()` 在证据/状态变更前按 `promotion_target=agents` 整体拒绝（自动 `AUTO_AGENTS_WRITE_FORBIDDEN`、人工 `AGENTS_WRITE_USER_ONLY`）；`_automatic_policy_block` 同步拦自动路径；`_commit_persona` 是最终提交入口兜底（`_PromotionBlocked`）。用户当轮 `update_persona` 不经本服务、行为不变。
+- `curator`：`_CuratorPromotionMixin._pending_promotable_candidate_ids` 过滤 `promotion_target=agents` 与名单排除（fail-closed）；`_CuratorExclusionMixin` 负责名单读取/标记同步/候选过滤；`_promote_eligible` 每条候选提交前 `_recheck_exclusion_before_promotion` 重读名单（读不出跳过、命中标记并告警，核对 `learning_exclusions_revision` 修订号）；`_recovered_state` 是 recover 的 state 重建（权威链覆盖游标/审计、lease 不接管、副本不可解析时计数从审计链累计）。
+- `agents_migration`：plan 用版本账本「最后有效写入」归类 removable/ambiguous/protected（文件正文与版本历史最后记录 SHA 不一致的条目判歧义保留）；apply=快照（AGENTS.md、versions.jsonl、candidates.jsonl、memory_policy.json、archive/record、persona/backups 全树 + snapshot.json 逐文件 sha256；任何读取/复制失败在删除前中止、写完按清单读回校验）→ 归档 archive.jsonl → 分批 `mutate_batch`（≤32、CAS、`source=migration:<id>`，`expected_versions_tail` 在人格锁内核对，计划后任何写入都拒绝）→ 名单追加（续作以事务记录的原请求 conversations 为准，冲突拒绝）→ record.json；`_require_matching_digest` 绑定 dry-run 摘要（缺失 `AGENTS_CLEANUP_PLAN_DIGEST_REQUIRED`、过期 `AGENTS_CLEANUP_PLAN_STALE`）。
+- `thread_persona`：`expire_thread_personas_containing` 清理后先在锁内推进持久失效代次（`persona/thread_prefix_epoch.json`）再按内容失效线程冻结快照（目录链 symlink 拒绝、单文件 symlink 跳过、锁外预筛+锁内复核）；`freeze_thread_persona` 在锁内核对渲染时读到的 `persona_epoch`，旧代次返回空、不写回。
+- `curator_inputs`：消息与 audit 两路都按名单跳过（名单读不出 fail-closed，本轮不收集任何会话消息）；audit 全被过滤时不推进游标（`skipped_audit_cursor` 交给验证层推进）。
+- CLI：`memory agents cleanup [--apply] [--conversation ...] [--migration-id ...] [--json]`；dry-run 输出 plan（含 plan_digest/ambiguous_entry_ids），不打印正文。
+
+## AGENTS.md 第 0 期第 3 轮：单一临界区与固定锁序（mc3-agents0r3，2026-10-09，接着 b731b9b54）
+
+- 固定锁序：**curator 租约 → 人格锁 → policy 锁 → 线程前缀锁**（所有路径同序拿锁，不反向）。
+- `agents_migration`：apply 改为一个临界区一次做完——先取 curator 租约（`MemoryCuratorStateStore.acquire(reason="migration")`，在途 curator 结束才拿得到，拿不到结构化拒绝 `AGENTS_CLEANUP_CURATOR_BUSY`）→ 人格锁内重判定计划/核对摘要与版本账本尾 → 快照校验（首次写入并读回；续作按 `snapshot.json` 清单逐文件核对 sha256+bytes，不一致 `AGENTS_CLEANUP_SNAPSHOT_TAMPERED`）→ 归档 → 一次性删除全部目标（取消分批；批间 tail 只认上一批锁内采样，不再锁外重采样）→ 名单追加 → 推进失效代次 → 事务记录 completed；释放走 `commit_success`（active_lease 清空、last_success_at 落盘）。
+- `thread_persona`：新增线程前缀锁 `persona/thread_prefix.lock`（flock 锚点，不写内容）；`freeze_thread_persona` 的「核对代次→写快照」与 `expire_thread_personas_containing` 的「推进代次→失效」在同一把锁内互斥（读/写快照与目录遍历各收成单层小函数）。
+- `promotion`：提交期复核与写入共享 policy 锁——`_commit_with_exclusion_guard`（模块函数）在 `locked_json_path(memory_policy.json)` 内先 `_ensure_not_excluded`（名单不可读 `LEARNING_SOURCE_UNREADABLE`、命中 `LEARNING_SOURCE_EXCLUDED`）再提交。
+- `home_layout`/`owner_resolver` 的种子初始化：`path.exists()` 快速路径 + `os.open(O_WRONLY|O_CREAT|O_EXCL, 0o600)`，只创建不覆盖（并发追加的名单不会被初始化覆盖）。
+- `curator`：`_interval_due` 到期判定计入 `skipped_audit_cursor`（整段 audit 窗口被排除也按周期排空）；名单不可读的警告码 `learning_exclusions_unreadable` 随运行记录序列化，`run_if_due` 的 not_due 返回带 warnings。
+- 8 条 mc4 review31 红测原样转绿、新增 4 测试、6 项变异全部 rc=1；回归与门禁见根 `TESTS.md` 同名节。
 
 ## 工具引用 scope 流式读取（toolrefs / E11e，2026-10-08，本地实现待复核）
 
