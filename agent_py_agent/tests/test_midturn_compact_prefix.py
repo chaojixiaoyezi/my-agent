@@ -1,12 +1,14 @@
 # LLM: 仅传输和文件工具用合成替身，真实回合/检查点/存储必须执行，以捕获跨回合而非单次投影失配。
 # 模块用途: 验证密文与文字中途压缩的两回合前缀延伸、后续压缩同源及工具配对。
 """两次真实工具循环、临时 Store/checkpoint；仅替换模型传输和文件工具 handler。"""
+import json
 from copy import deepcopy
 
 import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.backends.base import ProviderToolCapability
+from agent_py_agent.agent.capability.runtime_config_reload import capability_config_path_for
 from agent_py_agent.agent.conversation.authority import CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR
 from agent_py_agent.agent.conversation.compact_scope import THREAD_COMPACT_SCOPE
 from agent_py_agent.agent.conversation.compact_summary_view import (
@@ -57,6 +59,49 @@ def _prepare_run(tmp_path, remote):
     return agent, thread, prior
 
 
+# LLM: 仅 fake Responses 运输；真实 skill_search、安装、主运行身份和 canonical 行都执行，不手插方法账本。
+# 函数用途: 在长运行之前成功读过一个包，冻结在用目录，避免把首次目录变化混作带回失配。
+def _seed_method(agent, thread, prior, monkeypatch):
+    from agent_py_agent.agent.plugin_activation import PluginActivationRequest
+    from agent_py_agent.agent.plugin_content_activation import PluginContentActivation
+    from agent_py_agent.agent.plugin_install_store import PluginInstallStore
+    from agent_py_agent.agent.plugin_installation import PluginInstallRequest
+    from agent_py_agent.agent.plugin_package import inspect_plugin_package
+    from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+    from agent_py_agent.tests.test_capability_package import content_bundle
+
+    package = inspect_plugin_package(content_bundle(files={"CAPABILITY.md": b"MIDTURN_METHOD_ENTRY"},
+        change=lambda row: row.update(plugin_id="midturn-method")))
+    install = PluginInstallStore(resolve_owner_home(agent.home_paths.root))
+    row = install.install(PluginInstallRequest(package, "install-method", 0)).installation
+    activation = PluginContentActivation("enable-method", "midturn-method", row.package_sha256, row.revision, row.settings_revision)
+    install.change_activation(PluginActivationRequest("enable-method", row.revision, activation))
+    sent = []
+
+    def seed_io(_path, payload, _headers, **_options):
+        sent.append(deepcopy(payload))
+        if len(sent) == 1:
+            return {"status": "completed", "output": [{"type": "function_call", "call_id": "seed-method",
+                "name": "skill_search", "arguments": '{"action":"get","package_id":"midturn-method"}'}]}
+        return {"status": "completed", "output": [{"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "已读方法"}]}]}
+
+    monkeypatch.setattr(agent.backend, "request_json", seed_io)
+    store = agent.conversation_store
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "先读方法",
+                           "metadata": {"conversation_request_id": "seed-method"}})
+    result = agent.run("先读方法", params=RunParams(save=False, allowed_tools=["read_file", "skill_search"],
+        context_scope="conversation", request_id="seed-method", run_id="seed-method",
+        task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True, "conversation_thread_id": thread.thread_id},
+        conversation_history_seed=ConversationHistorySeed(canonical_messages=prior)))
+    assert result.response == "已读方法" and len(sent) == 2
+    assert len(store.threads.require(thread.thread_id).conversation_methods) == 1
+    store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": result.response,
+        "metadata": {"conversation_request_id": "seed-method",
+                     "canonical_native_messages": canonical_native_messages_envelope(result.canonical_native_messages)}})
+    return provider_history_messages_from_rows(store.messages.recent(thread.thread_id, limit=0))
+
+
 # LLM: 辅助调用用结构化调用边界区分；业务模型持续产出大工具结果，直到真实CAS推进generation。
 # 函数用途: 替换模型传输和工具handler，记录所有业务与压缩请求。
 def _install_fake_io(agent, thread, monkeypatch, remote):
@@ -105,13 +150,23 @@ def _install_fake_io(agent, thread, monkeypatch, remote):
     return business, summaries, executed
 
 
-# LLM: 两轮都走公开agent.run，宿主存储动作只在本例临时Store模拟，不能短路恢复与提交。
-# 函数用途: 比较本轮中途压缩的末请求与下一轮首请求的完整前缀。
-@pytest.mark.parametrize("remote", [True, False], ids=["responses_compaction", "text_summary"])
-def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatch, remote):
-    agent, thread, prior = _prepare_run(tmp_path, remote)
+# LLM: 沿真实方法读取准备主会话目录，开关只改合成工作区，保持原生产权限边界。
+# 函数用途: 给文字/密文用例设置未读、开启、关闭三种对照。
+def _prepare_midturn_method(run, monkeypatch, method_mode):
+    agent, thread, prior = run
+    if method_mode != "none":
+        prior = _seed_method(agent, thread, prior, monkeypatch)
+        if method_mode == "off":
+            path = capability_config_path_for(agent)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("conversation_method_carry_enabled: false\n", encoding="utf-8")
+    return prior
+
+
+# LLM: 存储宿主需把 canonical 结果写入真实行，下一轮由公开重放函数读取，不能手造出站前缀。
+# 函数用途: 为两次真实运行提供合成输入与结果的持久化函数。
+def _midturn_runner(agent, thread):
     store = agent.conversation_store
-    business, summaries, executed = _install_fake_io(agent, thread, monkeypatch, remote)
     # LLM: 存储宿主需把canonical结果写入真实行，下一轮由公开重放函数读取。
     # 函数用途: 执行一轮并持久合成输入与结果。
     def run_turn(number, seed, context):
@@ -119,13 +174,26 @@ def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatc
         text = f"本轮要求-{number}"
         store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": text,
                                "metadata": {"conversation_request_id": request}})
-        result = agent.run(text, params=RunParams(save=False, allowed_tools=["read_file"], context_scope="conversation",
+        result = agent.run(text, params=RunParams(save=False, allowed_tools=["read_file", "skill_search"], context_scope="conversation",
             request_id=request, run_id=request, task_attributes={CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR: True,
                 "conversation_thread_id": thread.thread_id}, conversation_history_seed=seed, compact_context=context))
         store.messages.append({"thread_id": thread.thread_id, "role": "assistant", "content": result.response,
             "metadata": {"conversation_request_id": request,
                          "canonical_native_messages": canonical_native_messages_envelope(result.canonical_native_messages)}})
         return result
+    return run_turn
+
+
+# LLM: 两轮都走公开agent.run，不能短路恢复与提交；保留原生工具对的容量用例独立测试。
+# 函数用途: 比较本轮中途压缩的末请求与下一轮首请求的完整前缀。
+@pytest.mark.parametrize("remote", [True, False], ids=["responses_compaction", "text_summary"])
+@pytest.mark.parametrize("method_mode", ["none", "on", "off"])
+def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatch, remote, method_mode):
+    agent, thread, prior = _prepare_run(tmp_path, remote)
+    prior = _prepare_midturn_method((agent, thread, prior), monkeypatch, method_mode)
+    store = agent.conversation_store
+    business, summaries, executed = _install_fake_io(agent, thread, monkeypatch, remote)
+    run_turn = _midturn_runner(agent, thread)
 
     first = run_turn(1, ConversationHistorySeed(canonical_messages=prior),
                      AppliedCompactContext(thread.thread_id, THREAD_COMPACT_SCOPE, resolve_compact_summary_view(agent, thread, THREAD_COMPACT_SCOPE)))
@@ -135,6 +203,10 @@ def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatc
         [len(str(row["input"])) for row in business],
         [str(item.get("output", ""))[:300] for item in business[-1]["input"] if item.get("type") == "function_call_output"])
     last = business[-1]
+    carry_count = json.dumps(last["input"], ensure_ascii=False).count("[会话方法参考]")
+    assert carry_count == (1 if method_mode == "on" else 0)
+    if method_mode != "none":
+        assert current.conversation_methods[0]["carried_generation"] == (1 if method_mode == "on" else 0)
     view = resolve_compact_summary_view(agent, current, THREAD_COMPACT_SCOPE)
     rows = store.messages.recent(thread.thread_id, limit=0)
     seed = ConversationHistorySeed(compact_summary=view.summary, compact_generation=view.generation,
@@ -148,6 +220,10 @@ def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatc
           _kind(after[mismatch]) if mismatch < len(after) else "end")
     # 本例不合法丢弃任何已发送条目，连同状态/保留工具尾部全部保持到第一轮请求末尾。
     assert after[:len(before)] == before
+    original_bytes = json.dumps(before, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    extended_bytes = json.dumps(after[:len(before)], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert extended_bytes == original_bytes
+    assert json.dumps(after, ensure_ascii=False).count("[会话方法参考]") == carry_count, "同代下一 run 不得再追加带回块"
 
 
 # LLM: 第二次压缩也必须复用主请求的顺序；同代applied摘要不应挪动独立handoff、推理或工具对。

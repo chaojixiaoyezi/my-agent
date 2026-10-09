@@ -773,8 +773,9 @@ def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
     return provider_compaction_content(plan.provider_compaction)
 
 
-# LLM: 候选与发送同源，先安装本代标准摘要再估算；checkpoint/CAS 失败恢复原列表，提交后不能倒退。同步检查中断回归。
-# 函数用途: 沿原会话事务提交压缩候选，明确分开可回滚阶段和已提交后的展示阶段。
+# LLM: 候选与发送同源，CAS 失败恢复原列表；赢得 CAS 并刷新视图后才向 IR 补带方法，提交后异常不回滚。联测中断/前缀。
+#   补带预算按距再次触发压缩的余量（trigger_tokens - after_tokens）封顶，不能把刚压缩完的上下文又填满。
+# 函数用途: 提交压缩候选后按原缓存预算追加一次方法参考，明确区分提交前回滚与提交后投递。
 def _apply_native_compact_plan(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -860,10 +861,13 @@ def _apply_native_compact_plan(
 
     # 已赢得 CAS：同范围视图刷新与投影异常原样上抛，不回滚已提交历史，也不记作压缩失败。
     if params.compact_context is not None:
+        from ..capability.method_carry import prepare_conversation_method_carry
+
         _refresh_native_compact_context(
             params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
             provider_compaction=plan.provider_compaction,
         )
+        prepare_conversation_method_carry(agent, params, budget_cap=plan.trigger_tokens - after_tokens)
     return _publish_native_compact_result(
         agent, params, plan, dropped=dropped, after_tokens=after_tokens,
         preserved_pairs=preserved_pairs, canonical_generation=commit.generation,

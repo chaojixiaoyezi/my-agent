@@ -8,11 +8,28 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.capability.skills import parse_skill_file
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.tooling.package_build_tool import PackageBuildTool
 
 SKILL = Path(__file__).resolve().parents[1] / "skills" / "builtin" / "plugins" / "learn-external-agent"
+
+
+@pytest.mark.parametrize("entry", ("tool", "skill"))
+def test_declaration_language_reminder_reaches_both_model_entries(entry):
+    texts = {
+        "tool": PackageBuildTool.model_spec.description,
+        "skill": (SKILL / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[2],
+    }
+    text = texts[entry]
+    reminders = [sentence for sentence in text.split("。") if "和用户对话时用的语言" in sentence]
+    assert any(all(field in sentence for field in ("summary", "capability.description", "capability.keywords"))
+               for sentence in reminders), entry
+    for token in ("另一种语言", "中英文", "目录展示", "关键词推荐"):
+        assert token in text, (entry, token)
 
 
 def test_card_is_short_and_body_has_the_key_rules():

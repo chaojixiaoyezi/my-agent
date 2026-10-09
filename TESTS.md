@@ -1,5 +1,159 @@
 # 测试与发布验收
 
+## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
+
+- **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、
+  6d 验收文档 a9e7b5eb5，再加 6d 三处集成修正（资料清单预留规则、中途补带封顶、前端参数目录重新生成）。
+- **复核 w1/w2**（沙箱外）：
+  - w1 核心 11 个文件 83 passed；
+  - w1 在沙箱里超时的 `test_tool_call_guardrail_runtime.py::test_real_shell_executor_stops_repeats_and_accepts_progress`，
+    在基线和 w1 上各跑一次，都在 1 秒内通过，所以是沙箱环境的问题；
+  - w2 相关 9 个文件 130 passed，两处变异 rc=1。
+- **集成修正**：4 个带回测试文件 54 passed。变异 5 处（不预留清单、总是先留清单、忽略上限、去掉"为 0 时直接返回"、挂点不传上限）全部 rc=1，
+  已用备份还原、字节核对。
+- **相关测试**：引用了 `_tool_loop_service`、`method_carry`、`package_build_tool`、`learn-external-agent`、
+  `capability_config`、前端目录、常量目录、参数登记的测试文件，加 guards9，共 152 个。沙箱外分 4 片跑：
+  753 + 978 + 944 + 680 = 3,355 passed、7 skipped、24 xfailed、1 xpassed，0 失败。
+- **前端目录**：`node frontend/scripts/sync-backend-config.mjs --check` 在基线上显示 in sync，w1 改了注释后显示 stale，
+  重新生成后恢复 in sync（271 个字段）。
+
+## 会话方法引用与中途补带续作（2026-10-08，w1；已实现，待 6d 复核）
+
+来源：`1008/w1-carry-ref.md` 和 `1008/w1-continue-review.md`；从 WIP `fd10324ab` 续作，真正基线为
+`7dd3f9ba050ba026ce2a52535825f32869a799f4`，分支 `worker/w1-carry-ref`。下面 WIP 小节保留暂停时点，不再代表最新状态。
+
+### 实现和红绿证据
+
+- `method_carry.py` 先给有资格、当前可见方法留完整最小引用预算，再按原次序把额外容量给正文；标题/分隔也计费。
+  引用经原 RuntimeFacts 提交门消费代次，放不下的不消费；包重读参数来自当前受限快照，资源清单完整放得下才加，不新增持久字段。
+- 6d 的三长 Skill/3000 和三种中断注入先得到 `5 failed / 11 passed`，rc=1；其中 Skill 三个中断被吞、后续引用缺席。
+  预留底线与显式重抛实现后变绿；包原 `prepare_package_entry_context` 重抛链保持，六个 skill/package 异常用例断言同一异常对象、无参考投递、无代次消费。
+- B 挂点保持 CAS 成功后同一个 `compact_context` 块内 refresh→prepare→publish，只向当前 IR 追加、不改 prior。
+  选择不改原压缩目标：补带守现有缓存预算；新增 native_compact 用例实走 checkpoint/CAS 和两次真实 build，15 对→3 对，
+  开/关下一 build 都保留 3 对且回收 0、代次仍 1；工具结果之后才补带，清掉 attempts 再 prepare 也不重复。
+  这是合成 40000 窗口场景，不保证所有窗口都有余量，不当作生产容量验收。
+- 临时把预算观察挂在 07 公共运行入口时，那里走 active-turn 恢复后工具对为空，断言失败；不能用空数组证明原生回收。
+  已移除该不适用观察，换成上述真实 native CAS 入口且明确要求至少保留两对；原 07 文字/密文的双运行前缀和去重断言保留。
+- 引用不足用例曾多给 4 token，确实可合法容纳很短正文；改为独立估算的精确引用底线，仍严格断言只有首条完整引用和首条消费。
+  `test_tiny_budget_does_not_consume_generation` 的预算 1 与断言未改，没有为过测试删除/跳过失败。
+- 独立静态复审指出包清单预扣预算会挤掉短入口；空清单与八份资料的真实读取红测均停在缺入口断言（`resources-red.xml`，2 failed，rc=1）。
+  `_prepare_package_method` 改为优先给入口预算，剩余足够才带完整资料清单；没有有效路径不输出空清单。
+  reference/restore 联跑（`resources-green.xml`）29 passed，rc=0；另补宽预算八条路径及全部当前 SHA/激活代次 next_read 参数回归，核心最终结果含此用例。
+
+统一执行：工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，
+`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <明确文件列表> -q --tb=short -p no:cacheprovider -o addopts='' --timeout=120 --basetemp=/private/tmp/claude-501/m-w1-<批名>`。
+
+- 核心：全部 `test_conversation_method_*.py`，加 `test_midturn_compact_prefix.py`、`test_cache_prefix_regression.py`、
+  `test_cache_prefix_simulator.py`，另加 `-s --junitxml=tmp/w1-carry/core-final.xml`、独立 `m-w1-core-final`；`83 passed`，rc=0。
+- 早先核心 80 项、导入格式修正后的三文件 20 项均为阶段结果；尺寸助手重构及包入口修复后已重跑上述核心，并重新串行跑全体引用方，
+  不把旧版本、超时被杀的大批或无效入口观察当作最终通过。
+- startup 正文/引用均使用真实 Chat 序列化、真实读文件和 canonical 重放，只替换 HTTP 运输。
+  最终 `core-final.xml` 正文 521/3000，模拟命中 off `[0,24606,27718]`、on `[0,25979,29091]`；
+  引用 167/171，off `[0,24606,27718]`、on `[0,25034,28146]`。
+  逐字节前缀延伸、稳定 model/tools/thinking 等字段、每代只一块，以及 on 后两次绝对命中不低于 off 都由业务断言检查。
+  绝对数字含临时测试路径等输入，较早 core 的数字不同，不混为一组；模拟 token 不是供应商 usage。
+
+### 70 个引用方文件分批回归
+
+在 `agent_py_agent/tests/test*.py` 中按 `_tool_loop_service` 或 `method_carry` 原文匹配并排序，70 文件切为 15/15/15/15/10，
+最终版本串行执行上述命令，每批加 `--junitxml=tmp/w1-carry/final-batches/batchN.xml`、独立 `m-w1-final-batchN`。
+文件名单、实际 argv、退出码和完整日志保留于本地 `tmp/w1-carry/final-batches/` 下的 `related-tests.txt`、`batches.json`、`batchN.log`；
+根目录下的同名记录为较早阶段，不混用；不把包装脚本退出码代替 pytest。
+可重建名单的 Bash 命令：`FILES=( $(grep -lE '_tool_loop_service|method_carry' agent_py_agent/tests/test*.py | LC_ALL=C sort) )`，
+每批 pytest 文件参数为 `${FILES[@]:0:15}`、`${FILES[@]:15:15}`、`${FILES[@]:30:15}`、`${FILES[@]:45:15}`、`${FILES[@]:60:15}`。
+
+| 批次 | 文件数 | 实际结果 | pytest rc |
+| --- | ---: | --- | ---: |
+| 1 | 15 | 282 passed | 0 |
+| 2 | 15 | 564 passed | 0 |
+| 3 | 15 | 331 passed | 0 |
+| 4 | 15 | 294 passed / 4 xfailed / 1 xpassed（非严格；JUnit skipped=4） | 0 |
+| 5 | 10 | 221 passed / 1 failed（120 秒 timeout） | 1 |
+
+JUnit 程序聚合为 1698 tests，1693 passed（含 1 个非严格 XPASS）/ 1 failed / 4 skipped；不与核心/守卫重复累计。
+四个 xfail 是原 native steer/audit 断言待适配；额外一个 XPASS 按实际日志单列，未把它算成普通绿测，未新增或修改 skip/xfail。
+唯一失败：`test_tool_call_guardrail_runtime.py::test_real_shell_executor_stops_repeats_and_accepts_progress`，
+停在真实 shell `_communicate_process` 等待，pytest-timeout 报 120 秒；没有权限拒绝证据，原因未定位，不能统称沙箱问题。
+在 `/private/tmp/claude-501/m-w1-carryref-base-DHi40S` 用 `git worktree add --detach ... 7dd3f9ba0`、
+同 Python/根目录 PYTHONPATH/同节点/同 timeout120 复核也 `1 failed`，rc=1，栈同点；基线完整 SHA 已核对，临时工作树用完已 remove。
+因此该失败在真正基线复现，不宣称分批回归全绿，留 3a 沙箱外定位。
+原 600 秒 rc=-15 的无结果大批没有计入通过。
+
+### 六项单变异（每次只改一处，pytest rc=1 才算抓到）
+
+全部沿统一 pytest 参数、各自 `m-w1-mutN`；初轮 `mutationN.xml` 与收尾 `mutationN-final.xml` 均有实际 rc=1，
+每次从备份拷回并 cmp/SHA256 核对，不 checkout 未提交源码。前两项的收尾验证在包可选清单修复前：
+第 1 项的 Skill loader 被测试替换、提交函数未变；第 2 项的原生挂点及 Skill 入口未变，复用该观察点有效结果。后四项在包入口修复后执行。
+
+| N | 变异 | 实际测试文件/筛选 | 业务失败 | rc | 抓到 |
+| --- | --- | --- | --- | ---: | --- |
+| 1 | 引用不推进已带回代次 | reference.py `-k skill_empty_or_oversized` | 2 failed，代次仍 0 | 1 | 是 |
+| 2 | 删除原生 CAS 后 prepare 挂点 | native_compact.py | 1 failed / 1 passed，开启路径没有参考 | 1 | 是 |
+| 3 | 删除准备前 carried_generation 筛选 | restore.py `-k compact_restores_entry` | 1 failed，同代下一运行多读入口 | 1 | 是 |
+| 4 | 最小引用 cost 改为 0 | reference.py `-k reference_line_and_separators` | 1 failed，不可容纳的引用被投递 | 1 | 是 |
+| 5 | 只预留首条引用，不预留后续 | reference.py `-k three_long_skills` | 1 failed，3095 > 3000 | 1 | 是 |
+| 6 | 删除 Skill 三种中断显式 re-raise | reference.py `-k 'body_read_interruptions and skill'` | 3 failed，异常未传播 | 1 | 是 |
+
+文件简称分别为 `agent_py_agent/tests/test_conversation_method_reference.py`、`test_conversation_method_native_compact.py`、
+`test_conversation_method_restore.py`。第 3 项抓的是多余读取，提交门仍能挡重复 IR，不夸成已观察到重复投递。
+最终恢复产品 SHA256：method_carry `cd1cd58722881bb31b3fccdbd966e3082e1df9e97eedde18c619956302fd6aff`；
+_tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2dd60`。
+恢复后的核心 83 项与重新分批回归为最终版本证据，不留变异。
+
+### 守卫与静态门禁
+
+- 完整 guards9 当前 12 文件（含 packaging、参数目录、常量目录）：最终版本同 pytest 参数，`m-w1-guards9-final` / `tmp/w1-carry/guards9-final.xml`，194 passed，rc=0。
+- `$PY scripts/check_import_boundaries.py`：findings=0，rc=0。
+- `$PY -m ruff check agent_py_agent scripts`：初轮 4 个 I001，新增入口助手另有 1 个 I001；均只修导入格式，最终全仓通过，rc=0。
+- `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：rc=0；hard=0、high-risk=1487、soft=694，blocked=False，不等于全仓零告警；生成的 CODE_SIZE_REPORT.md 还原到 HEAD，不纳入功能提交。
+- `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh "$PWD" ~/.my-agent/releases/claude-tools/3a-scripts/size-baseline-7dd3f9ba0.json`：rc=0，新增告警 0 / 消失告警 0，按身份对比真正基线；初轮新增的助手尺寸告警已拆平，未更改阈值或白名单。
+- `$PY scripts/check_doc_sync.py`：DOC_SYNC_PASS，rc=0；`git diff --check 7dd3f9ba0`：rc=0。
+- `$PY scripts/check_clean_package.py .`：首次报新增 native_compact 测试未跟踪，rc=1；把真实已验证的新文件纳入本分支索引后 rc=0，未删文件或跳过检查。
+- 独立复审：首试输入引用不可读，未形成结论；改为直接提供代码正文和原始需求的静态审查后，按红绿修复可选清单挤入口。
+  修复后的独立复审未发现所给代码新增超预算/权限绕过，指出宽预算清单覆盖不足，已补八条完整 next_read 的真实回归。
+  审查没有执行命令，动态结论来自本人的实际测试，不称“独立动态验收通过”。
+- 条件性意见核对：`methods_from` 按 stable_id 去重，故同 stable_id 不同 record_id 被一并消费的前提不成立；
+  `update_json_file_atomic`→`_updated_json_dict`→`_apply_thread_update` 在原锁内各调用一次 updater，无回调重放循环。
+  分项 ceil 的保守余量是有意安全上界，不保证贴边预算装下最长正文，未为利用舍入差放宽上限。
+  IR 追加后线程落盘故障与 refresh 后被其它有效执行推进代次的极端窗口未注入复现，保持原提交/运行权威合同，作为未验证风险交 6d 决定是否另立事务/并发专题。
+
+未运行真实模型/Gateway/TUI/飞书，不联网装依赖，不读真实会话正文，不推送、不部署；Linux 全量及供应商缓存收益、业务质量未验证。
+建议 6d 收固定提交后交 07 复核前缀和容量边界，3a 在沙箱外复跑超时节点并补生产观察点证据。
+
+## 会话方法引用与中途补带（2026-10-08，w1，部署窗口 WIP）
+
+- 来源：`1008/w1-carry-ref.md`；基线 `7dd3f9ba0`，工作分支 `worker/w1-carry-ref`。按 `deploy-window-steer.md` 先保存 WIP，未作为完整验收交付。
+- 已实现：`method_carry._prepare_method_pieces` 在正文为空/超预算时降为完整 get 参数引用，头/分隔/资料清单计预算；引用经原 IR 提交门推进代次。`_apply_native_compact_plan` 在 CAS 成功且刷新视图后补带，不改 prior。
+- 聚焦红绿：新增引用用例及中途开启带回的文字/密文两回合用例先变红；实现后 reference、restore、midturn 三文件联合 `27 passed`，返回码 0。命令：根目录 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_conversation_method_reference.py agent_py_agent/tests/test_conversation_method_restore.py agent_py_agent/tests/test_midturn_compact_prefix.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-w1-ref-focus`，PY 为指定 ci-venv-312。
+- 启动带回：`test_conversation_method_prefix.py` 单独运行 `2 passed`，返回码 0；真实 Chat 序列化、真实 read_file、真实临时 Store/checkpoint/CAS，仅 HTTP 运输替换。正文/引用两种路径的后续工具轮及下一 run 均逐字节延伸，同代只一块；模拟绝对命中不低于关闭对照。正文估算 534/3000、引用 167/171；模拟计量不代表供应商 usage 或生产缓存收益。
+- 旧入口读取失败用例按新“loader 空也带引用”合同调整，仍检查固定错误码、私密异常不泄漏、无正文、投递后才消费代次；`test_tiny_budget_does_not_consume_generation` 的预算 1 及断言未动。
+- 后续测试增强：投递失败时同 run 不重复读取的 attempts 断言、等价 UTF-8 断言改写及去掉冗余的列表比较，尚未完成独立重跑；不能用上述较早聚焦结果宣称当前 WIP 全通过。
+- 引用方清单由测试 AST import 与 grep 核对生成，含全部 method、缓存、中途用例，共 70 文件，保存在未提交的 `tmp/w1-carry/related-tests.txt`。执行同上 pytest 参数并加 `--junitxml=tmp/w1-carry/related.xml`，在 600 秒工具时限终止，返回码 -15，无最终结果，不能计通过。工具确认进程清理；不把超时归因于权限或沙箱。
+- 独立静态审阅提出候选：`_prepare_skill_method` 的 `except Exception` 可能吞 `InterruptedError`，新增降级随后投递引用并消费代次。已核对捕获代码，但尚未注入异常复现，未判定为已验证缺陷。
+- 未完成：四处变异、guards9、import/ruff/doc-sync/code-size/clean-package、尺寸身份差集、完整设计/台账/目录/YAML 注释同步。WIP 前 `git diff --check 7dd3f9ba0` 返回 0；真实供应商、Gateway/TUI/IM、Linux 全量及生产未验证，未部署、未 push。
+- 续作第一步：从本 WIP 复现审阅提出的中断传播候选，必要时按红绿修复；再把 70 文件回归拆小定位超时，继续四变异、门禁及文档同步。
+
+## 学包声明语言软提醒（w2-1008-lang，2026-10-08；已实现，待 6d 复核）
+
+- 来源：`1008/w2-pack-lang.md`，真基线 `7dd3f9ba050ba026ce2a52535825f32869a799f4`（step17ye）；只改 `PackageBuildTool.model_spec.description` 和 `learn-external-agent` 第 7 步正文。不加语言判断，不改请求结构、字段、开关、已装包或原 `PACKAGE_BUILD_KEYWORDS_SCRIPT` 逻辑。
+- 新用例 `test_declaration_language_reminder_reaches_both_model_entries` 参数化读取真实工具 model_spec 与剥离 frontmatter 的 skill 正文：同一语句包含三字段及对话语言关键短语，另查外语来源、双语、目录展示/关键词推荐的短语；不锁整段文案。
+- 先红：未改两处说明时 `-k declaration_language`，2 failed / 3 deselected，pytest rc=1；补文案后同入口 2 passed / 3 deselected，rc=0。
+- 离线生成校准：两名独立子代理在同一中文票据归档/费用分类场景，只拟声明、不执行工具。未加载 skill 的摸底已主动写中文，但未保留英文关键词；读取修订写声明片段后生成中文为主的中英说明和中英领域关键词。只证明该片段在这一模拟场景被采用，不宣称复现全英文缺陷、真实学包链或生产效果。
+- 字节/结构复核：与真基线用 `git show` 比较，全 frontmatter 与 `learnpack_build_notes.py` 字节相同；AST 除 `ToolModelSpec.description` 的文字值外完全相同（包括 schema、hints/default_deferred、handler 和 runtime policy），rc=0。
+- 按 `rg -l 'package_build_tool|learn-external-agent|learnpack_build_notes' agent_py_agent/tests -g 'test_*.py'` 找直接引用，再加内置索引/名卡摘要/指纹/清单和相邻 learnpack 测试；实际以下 12 文件 **142 passed，rc=0**（包含新增两项）：
+  `test_package_build_tool.py test_learn_external_agent_skill.py test_learnpack_flow.py test_learnpack_merge.py test_learnpack_same_domain.py test_builtin_seed.py test_skill_tree_and_recall.py test_skills_service.py test_declarative_index.py test_plugin_skills.py test_conversation_method_directory.py test_write_my_agent_plugin_skill.py`。
+- guards9 原清单全部 12 文件（含 packaging、常数目录、参数登记）**194 passed，rc=0**；均为定向验证，不表示全仓通过。未跑全仓 pytest。
+- 复跑命令：在本工作树根 `PY=/Users/xiaoyezi/.my-agent/releases/claude-tools/ci-venv-312/bin/python`；统一 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <上述文件加 agent_py_agent/tests/ 前缀，或 guards9.txt 原文件清单> -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-w2-lang-related`；guards 单独用 `m-w2-lang-guards`。聚焦用例保留同一文件并加 `-k declaration_language`。
+
+| 变异 | 运行入口 | pytest 结果/退出码 | 结论与恢复 |
+| --- | --- | --- | --- |
+| 只删工具模型说明新增语言提醒；skill 正文不动 | `test_learn_external_agent_skill.py -k declaration_language`，basetemp `m-w2-lang-mutation` | 工具项 1 failed，skill 项 1 passed，3 deselected；rc=1 | 有效业务断言捕获，非收集失败；`finally` 按变异前字节原样恢复，之后 142 项回归通过 |
+
+- 静态门禁均 rc=0：`$PY scripts/check_import_boundaries.py`（findings=0）；`$PY -m ruff check agent_py_agent scripts`；`$PY scripts/check_doc_sync.py`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`（blocked=False）；`git diff --check 7dd3f9ba0`；`$PY scripts/check_clean_package.py .`。生成的 `CODE_SIZE_REPORT.md` 已按规则还原 HEAD，不提交。
+- 尺寸差集：`bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh $PWD /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size-baseline-7dd3f9ba0.json`，rc=0，原输出“新增告警: 0 / 消失告警: 0”。
+- 独立静态审查只读需求和三处 diff，未执行测试、未独立核对全文件；提出工具入口也应给实际中英词的低项。对照原任务第 17 行只要求工具示意“中文说明、中英文关键词”，第 20–21 行才要求 skill 举通用词例子，现稿已满足；不为此扩大工具说明或锁死示例词。该审查不替代 6d 或父级已执行的字节/AST/回归验证。
+- 真实 MiniMax/Gateway/TUI 学习与打包、目录/关键词推荐命中率、缓存收益和生产业务质量**未验证**；未部署、未改已装包或运行配置。下一步由 6d 在固定候选上复核生产入口，不能拿模拟或文字测试替代。
+
 ## 回合中途压缩的跨回合前缀（midturn，2026-10-08，07-c3）
 
 - 来源：07 midturn-prefix，假工具/假 Responses 两次真实 `agent.run`，临时 Store/checkpoint/CAS；不读取生产正文，不连真实 Gateway。
@@ -252,6 +406,19 @@
 - **门禁**（BASE=origin/main）：ruff、doc-sync、strict code-size、diff-check、clean-package、import boundaries 全过；
   常量目录 951 项、前端参数目录 269 字段重新生成且一致。
 - **未验证**：testbox Linux 3.10／3.11／3.12、PR 线上 CI、生产部署与第 4 步验收（进行中）。
+- **第 4 步生产验收（6d，2026-10-08，step17y／step17ya，真 MiniMax-M2.7）**：
+  - 方法：测试者用私有 tmux 开生产 TUI，每句只发一次，结果只读结构化事实。工具在
+    `~/.my-agent/decision-evidence/skill-pack-selection-1007/harness/`：
+    - `run_pool.py`：最多 8 个会话并发跑；
+    - `collect_case.py`：收交付，附件被原地改过也收；
+    - `carry_facts.py`：读线程 `conversation_methods`、`compact_generation`，以及 `skill_search` 的结构化参数；
+    - `mkreview.py` 加 Claude 子代理：做盲评；
+    - `verdict.py`：判达标。
+  - 结果：分数口径达标，短剧 41:31，小说 18:18。评审交齐标记她 9/12、原版 10/12；按严格交齐，短剧 1、小说 1 没过。
+  - 机制：压缩后带回在 CD、CNN 生效，已带回代次 0→1。不点名时 1/12 遍用包。
+  - 不乱用：包在用时问 3 个不相关问题，无工具调用。
+  - 测试工具的坑：tmux 目标必须精确匹配（`=名字`），否则会话已关时会按前缀关掉别的会话。
+  - 详见设计第 6 节和证据目录 README.md。
 
 ## 压缩请求装进窗口与降档（compactfit，2026-10-08，07，分支 `claude/07-compact-cache`）
 
