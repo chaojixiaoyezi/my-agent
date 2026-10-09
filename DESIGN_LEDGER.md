@@ -1,5 +1,6 @@
 # 设计台账
 
+- **AGENTS.md 归属、指向与自动学习分离（3a，2026-10-08；状态：设计已定，用户拍板；第 0 期实施中，第 1 期待实施）**：生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条，来源全是开发派活会话（任务书被当成用户本人说的约定）。用户决定：AGENTS.md 只能由用户写，各 owner 只改自己的，admin 有权限但不动别人的；用户可以配置指向（默认自己的，本地或网络文件，必须有权限、不能越权）；自动学到的另存进长期记忆，重复或相似的合并更新；子代理可以学但要打标签，其它自动化来源不学；写入时有硬上限；误加条目先留快照再移入归档。第 0 期：自动晋升硬拦 agents 目标，加清理迁移工具和学习排除名单。详见 [docs/design/PERSONA_AGENTS_OWNERSHIP.md](docs/design/PERSONA_AGENTS_OWNERSHIP.md)。
 - **E11d 第四轮：配额锁竞争误报恢复失败（mc3-e11d-quota，2026-10-08；MC4-2501，本地实施，待 mc4 复审/3a 集成）**：`owner_quota` 新增 `OwnerQuotaLockContention` 子类，把锁竞争（`BlockingIOError`）与策略/存储故障分开；`curator_commit._enter_recovery_locks` 捕获子类转 busy，不再落进 `CURATOR_COMMIT_RECOVERY_FAILED`。mc4 review25 补测原样 11/12（2501 转绿；2502 基线问题不改）；review18+22 42 项、mc2 17 项、回归 774 项全绿；变异 2/2 rc=1；其它非阻塞配额调用点（插件环境准备 2 处）无同类误判。证据见 TESTS 顶部。
 
 ## Curator 未完成事务恢复与新租约领取的边界（mc2-e11d-race，2026-10-08；本地实现、待3a复核）
