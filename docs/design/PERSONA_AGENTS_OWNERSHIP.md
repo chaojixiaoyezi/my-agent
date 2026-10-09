@@ -125,13 +125,16 @@ curator 要覆盖三处：
   1. 先拿 curator 租约（用 curator 现有租约接口）：在途 curator 运行结束后才拿得到，迁移期间不会有新的 curator 运行；拿不到就结构化拒绝（`AGENTS_CLEANUP_CURATOR_BUSY`，"稍后重试"）。
   2. 先取得 quota admission，再按 policy → 人格顺序拿锁（PersonaRepository 的同一目标锁），quota 禁用也不省掉人格锁。
   3. 锁内一次做完：重判定计划（核对 plan_digest 与版本账本尾）→ 校验快照（首次写入并逐个读回；续作也按清单逐文件校验 SHA，不一致拒绝）→ 写归档 → 一次性删除全部目标 → 追加排除名单 → 推进失效代次 → 写事务记录（completed）。
-  4. 按相反顺序释放（迁移释放走 `commit_success`，清空 active_lease 并记录成功时间）。
+  4. 按相反顺序释放；先停止并 join 心跳，再以精确 lease_id 走 `commit_success` 清空 active_lease，游标原样保留。失败按下述收尾合同报告。
 - 完整锁序为 **curator 租约（仅 curator/迁移）→ quota admission → policy 锁 → 正式记忆/人格目标锁 → 线程前缀锁**。人工晋升和 remember 没有 curator 租约，也必须在 policy 外先领 quota；quota 禁用仍取得 policy/目标锁，不能依赖配额互斥。
 - 晋升通过显式不可变提交上下文传递已领取 admission：长期事实 add/replace/remove 与删除后的候选脱敏复用准入，人格提交复用唯一仓库内部写入口，不能再次获取不可重入 quota。冲突候选状态写入在退出 policy/quota 后执行；lesson/HOT 仍沿原仓库，所有最终提交都先经过同一 quota→policy 闸门。
 - 第 4 轮落实：迁移用锁内批处理入口一次传全部目标，普通 `mutate_batch` 的 32 条公开上限不变；同锁读计划和账本尾，续作不在锁外重采样。名单用锁内追加入口，不能重入普通锁。
 - curator 的成功批次提交保留同一租约到自动晋升尾段结束（含无新消息的积压补晋升），再单独释放，不重复累计游标或计数；心跳核对精确 lease_id 延长期限，原 E11d 明确死亡判据不变。
 - `executing/promotion` 只在同机正整数 PID 未被明确判死时获得超期保护，领取和事务恢复共用同一判据。心跳不缩短已存在的未来期限；退出先 stop/join 再检查在途续租错误。真实死亡仍可回收；未知生死保守等待，若执行线程永久卡死而进程仍活着，会持续 busy，不自动强抢。
 - 主体已经以进程级异常退出、但异常被同进程捕获时，精确 ID 标为 `interrupted`，保留旧固定期限的 busy→过期恢复合同，不再无限保护。恢复只为规范 state 容忍同一租约的单调心跳/期限及退出标记，其他身份、计数、游标和所有其他目标文件仍拒绝漂移；租约清理写失败会给主体异常附诊断，不伪造释放成功。
+- 第 5 轮迁移收尾合同：释放失败后只尝试退役同一个 lease_id，并读回确认 phase。完成事实不回滚，但回执 `ok=false` 与 `lease_cleanup` 给出释放/退役错误类别、精确身份和恢复分类；诊断耐久合并进原 record，已完成重放也不能消掉故障。普通异常和进程级中断保留原异常对象，附同一结构化诊断。旧租约不能修改后来取得的新租约。
+- 原 record 在迁移数据提交之前写入精确租约和收尾 pending；completed 不代表租约收尾完成。释放窗口内或收尾结果尚未耐久保存时，重放返回 `ok=false` / `cleanup_pending`，不得因缺少错误诊断推定成功。释放成功和失败都要在原 record 耐久完成收尾记录；pending 本身不授予恢复执行权。
+- 仅确认同 ID 已为 `interrupted` 时，才承诺原期限后可重新领取。释放和退役都失败、或退役未改变 executing 时，仍 fail-closed：活进程即使超期也 busy，报告 `manual_recovery_required`，不强抢执行权。诊断写盘也失败时，本次回执另含 `diagnostic_write_error_class`，已耐久 pending 继续阻止重放假成功，但不能承诺下一次重放仍有详细错误类别。若心跳 join 二次中断，停止未确认时不释放/退役，同样要求人工复核，不承诺自动过期恢复。
 - 续作只是"上一次没走完"：仍在同一临界区里从事务记录重判定，没有批间窗口；批间不再锁外重采样版本账本尾（`versions_tail` 只认上一批锁内采样的值）。
 
 #### 3.6.2 失效代次与冻结写入共用线程前缀锁（0r3）

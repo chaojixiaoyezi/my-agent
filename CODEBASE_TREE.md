@@ -1,5 +1,13 @@
 # Codebase Tree
 
+## AGENTS 第 5 轮（mc2-agentsr5，2026-10-09）
+
+```text
+|-- agent_py_agent/agent/memory_store/promotion.py # quota→policy→目标；最终目标同源解析
+|-- agent_py_agent/agent/memory_store/agents_migration.py # 原 record 收尾 pending、精确退役与结构化诊断
+|-- agent_py_agent/tests/test_agents_cleanup_review33.py # 真 flock、收尾组合、重放/二次中断合同
+```
+
 ## AGENTS 第 4 轮（mc2-agents0r4，2026-10-09）
 
 ```text

@@ -389,11 +389,7 @@ class _PromotionCommitMixin:
         candidate: MemoryCandidate,
         context: _PromotionWriteContext,
     ) -> str:
-        # 宿主确定性补全(与 _automatic_policy_block 同源):user_explicit 漏写 target 时按 long_term 落库。
-        target = str(candidate.promotion_target or "").strip().lower()
-        if target in {"", "none"}:
-            if candidate.origin == "user_explicit" and candidate.candidate_type in _LONG_TERM_TARGET_TYPES:
-                target = "long_term"
+        target = _promotion_target(candidate)
         if target == "long_term":
             return self._commit_long_term(candidate, context.admission)
         if target in {"user", "soul", "agents"}:
@@ -621,12 +617,21 @@ def _commit_with_exclusion_guard(
 # 函数用途: 依目标的原配额策略领取准入，在名单锁内核对并写入正式目标。
 def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool]) -> str:
     enforcer = service.persona.quota_enforcer
-    if candidate.promotion_target == "long_term" and service.long_term.quota_enforcer is not None:
+    if _promotion_target(candidate) == "long_term" and service.long_term.quota_enforcer is not None:
         enforcer = service.long_term.quota_enforcer
     with enforcer.admission() as admission:
         with _learning_exclusion_scope(service):
             _ensure_not_excluded(service, candidate)
             return _commit_target_blocked(service, candidate, _PromotionWriteContext(*review, admission))
+
+
+# LLM: 准入与写入共用同一目标解析，空/none 的用户事实仍落 long_term，不能错领 disabled persona 配额。
+# 函数用途: 统一规范化最终晋升目标，保持原用户事实默认落点。
+def _promotion_target(candidate: MemoryCandidate) -> str:
+    target = str(candidate.promotion_target or "").strip().lower()
+    if target in {"", "none"} and candidate.origin == "user_explicit" and candidate.candidate_type in _LONG_TERM_TARGET_TYPES:
+        return "long_term"
+    return target
 
 
 # 函数用途: 返回提交期 policy 锁上下文（未接线时为空）。

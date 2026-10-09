@@ -234,3 +234,134 @@ def test_migration_release_and_retirement_failure_combination(tmp_path, monkeypa
     if retire_fails:
         assert detail["retire_error_class"] == "OSError"
         assert detail["recovery"] == "manual_recovery_required"
+
+
+@pytest.mark.parametrize("retirement", ["no_change", "changed_lease"])
+def test_release_retirement_reports_verified_identity_and_phase(tmp_path, monkeypatch, retirement):
+    env = _setup(tmp_path)
+    lease = migration._acquire_migration_lease(env.store)
+    if retirement == "changed_lease":
+        from agent_py_agent.agent.memory_store.curator_lease import release_curator_lease
+        release_curator_lease(env.store, lease["lease_id"])
+        replacement = migration._acquire_migration_lease(env.store)
+    else:
+        replacement = lease
+    monkeypatch.setattr(migration, "retire_curator_lease", lambda _store, _lease_id: None)
+    before = env.store.path.read_bytes()
+    detail = migration._retire_failed_release(env.store, lease, OSError("synthetic release"))
+    assert env.store.path.read_bytes() == before
+    assert env.store.load().active_lease["lease_id"] == replacement["lease_id"]
+    assert detail["retired"] is False
+    assert detail["lease_changed"] is (retirement == "changed_lease")
+    assert detail["recovery"] == ("lease_changed" if retirement == "changed_lease" else "manual_recovery_required")
+
+
+def test_release_diagnostic_write_failure_is_returned_not_silent(tmp_path, monkeypatch):
+    env = _setup(tmp_path)
+    def refuse(_arg, *_args):
+        raise PermissionError("synthetic private write")
+    monkeypatch.setattr(env.store, "commit_success", refuse)
+    monkeypatch.setattr(migration, "write_private_json_file_atomic_unlocked", refuse)
+    report = _apply(env)
+    assert report["status"] == "completed" and report["ok"] is False
+    assert report["lease_cleanup"]["diagnostic_write_error_class"] == "PermissionError"
+    assert report["lease_cleanup"]["retired"] is True
+    assert _apply(env)["ok"] is False
+
+
+@pytest.mark.parametrize("target", ["", " long_term ", "LONG_TERM"])
+def test_default_and_normalized_long_term_use_target_quota(tmp_path, target):
+    from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaExceeded
+    env = _setup(tmp_path)
+    candidate = replace(_candidate(env, "long_term"), promotion_target=target, origin="user_explicit")
+    env.service.long_term.quota_enforcer = OwnerQuotaEnforcer(env.service.persona.owner_home, max_bytes=1)
+    with pytest.raises(OwnerQuotaExceeded):
+        promotion._commit_admitted(env.service, candidate, ("test", True))
+    assert not env.service.long_term.all()
+
+
+def test_completed_before_primary_error_keeps_cleanup_failure_on_replay(tmp_path, monkeypatch):
+    env = _setup(tmp_path)
+    run = migration._run_cleanup
+    primary = RuntimeError("after completed")
+    def run_then_fail(context):
+        run(context)
+        raise primary
+    def refuse(_commit):
+        raise OSError("synthetic release")
+    monkeypatch.setattr(migration, "_run_cleanup", run_then_fail)
+    monkeypatch.setattr(env.store, "commit_success", refuse)
+    with pytest.raises(RuntimeError) as caught:
+        _apply(env)
+    assert caught.value is primary
+    assert _apply(env)["ok"] is False
+
+
+def test_completed_replay_during_release_is_not_success(tmp_path, monkeypatch):
+    env = _setup(tmp_path)
+    commit = env.store.commit_success
+    observed = []
+    def commit_after_replay(request):
+        observed.append(_apply(env))
+        return commit(request)
+    monkeypatch.setattr(env.store, "commit_success", commit_after_replay)
+    assert _apply(env)["ok"] is True
+    assert observed[0]["already_completed"] and observed[0]["ok"] is False
+    assert _apply(env)["ok"] is True
+
+
+def test_successful_release_with_record_write_failure_stays_pending(tmp_path, monkeypatch):
+    env = _setup(tmp_path)
+    def refuse(_path, _payload):
+        raise PermissionError("synthetic record update")
+    monkeypatch.setattr(migration, "write_private_json_file_atomic_unlocked", refuse)
+    result = _apply(env)
+    assert result["ok"] is False
+    assert not env.store.load().active_lease
+    assert result["lease_cleanup"]["diagnostic_write_error_class"] == "PermissionError"
+    assert _apply(env)["ok"] is False
+
+
+def test_cleanup_secondary_interrupt_and_custom_note_preserve_primary(tmp_path, monkeypatch):
+    env = _setup(tmp_path)
+    class PrimaryError(RuntimeError):
+        def add_note(self, _note):
+            raise ValueError("custom note refuses")
+    primary = PrimaryError("primary body")
+    def fail_body(_context):
+        raise primary
+    def fail_cleanup(_commit):
+        raise SystemExit("secondary cleanup interruption")
+    monkeypatch.setattr(migration, "_run_cleanup", fail_body)
+    monkeypatch.setattr(env.store, "commit_success", fail_cleanup)
+    with pytest.raises(PrimaryError) as caught:
+        _apply(env)
+    assert caught.value is primary
+    assert primary.lease_cleanup["release_error_class"] == "SystemExit"
+    assert primary.lease_cleanup["recovery"] == "manual_recovery_required"
+
+
+def test_heartbeat_join_interrupt_keeps_primary_and_does_not_retire(tmp_path, monkeypatch):
+    env = _setup(tmp_path)
+    primary = RuntimeError("primary before join")
+    threads = []
+    join = threading.Thread.join
+    def fail_body(_context):
+        raise primary
+    def fail_join(thread, *args, **kwargs):
+        if thread.name == "curator-lease-heartbeat":
+            threads.append(thread)
+            raise KeyboardInterrupt("secondary join interruption")
+        return join(thread, *args, **kwargs)
+    monkeypatch.setattr(migration, "_run_cleanup", fail_body)
+    monkeypatch.setattr(threading.Thread, "join", fail_join)
+    try:
+        with pytest.raises(BaseException) as caught:
+            _apply(env)
+        assert caught.value is primary
+        assert primary.lease_cleanup["recovery"] == "manual_recovery_required"
+        assert env.store.load().active_lease["phase"] == "executing"
+    finally:
+        for thread in threads:
+            join(thread, 5)
+            assert not thread.is_alive()

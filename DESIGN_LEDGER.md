@@ -1,5 +1,7 @@
 # 设计台账
 
+- **AGENTS 第 0 期第 5 轮（mc2-agentsr5，2026-10-09；本地实现待 mc4 复审/3a 集成）**：review33 完整锁序统一为 quota→policy→正式目标；长期事实、人格与候选硬删除复用显式 admission，默认目标与准入同源解析。释放失败精确退役、读回 phase 并结构化报告；原迁移 record 耐久标记收尾 pending，正常/异常及写盘失败重放不再假成功，二次中断保留 primary，心跳停止未确认不退役。146 聚焦合同及两变异通过；相关 70 文件回归 1435 过/2 失败，两失败在真正基线 84ff2c884 同入口复现；真实 HOME/Gateway 与 Linux 全量未验证。恢复承诺与边界见 PERSONA_AGENTS_OWNERSHIP §3.6、TESTS 顶部。本工作树没有 GATEWAY_MULTICORE.md，未重建或借别的工作树改 §11。
+
 - **AGENTS.md 归属、指向与自动学习分离（3a，2026-10-08；状态：设计第 2 版已定（按 mc4 设计审查修正）；第 0 期按 v2 实施中（worker/mc3-agents）；第 1 期待实施）**：生产 owner 的 AGENTS.md 两天被 curator 自动追加 437 条，来源全是开发派活会话（任务书被当成用户本人说的约定）。用户决定：AGENTS.md 只能由用户写，各 owner 只改自己的，admin 有权限但不动别人的；用户可以配置指向（默认自己的，本地或网络文件，必须有权限、不能越权）；自动学到的另存进长期记忆，重复或相似的合并更新；子代理可以学但要打标签，其它自动化来源不学；写入时有硬上限；误加条目先留快照再移入归档。第 0 期（v2）：promotion 最终提交入口拒绝 agents（含人工与积压重试）；学习排除名单和 curator 三处检查；清理迁移按当前条目最后一次有效写入来源判定、事务与恢复合同、apply 绑定空跑计划摘要、清理后冻结快照受控失效。证据见 TESTS 顶部；真实 home 演练与 Gateway 端到端未验证，由 3a 部署后执行。详见 [docs/design/PERSONA_AGENTS_OWNERSHIP.md](docs/design/PERSONA_AGENTS_OWNERSHIP.md)。
 - **E11d 第四轮：配额锁竞争误报恢复失败（mc3-e11d-quota，2026-10-08；MC4-2501，本地实施，待 mc4 复审/3a 集成）**：`owner_quota` 新增 `OwnerQuotaLockContention` 子类，把锁竞争（`BlockingIOError`）与策略/存储故障分开；`curator_commit._enter_recovery_locks` 捕获子类转 busy，不再落进 `CURATOR_COMMIT_RECOVERY_FAILED`。mc4 review25 补测原样 11/12（2501 转绿；2502 基线问题不改）；review18+22 42 项、mc2 17 项、回归 774 项全绿；变异 2/2 rc=1；其它非阻塞配额调用点（插件环境准备 2 处）无同类误判。证据见 TESTS 顶部。
 

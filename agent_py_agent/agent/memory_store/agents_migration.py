@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +31,7 @@ from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
     write_private_json_file_atomic,
+    write_private_json_file_atomic_unlocked,
     write_private_text_file_atomic,
 )
 from ..user_space.owner_policy import LearningExclusionEntry, append_learning_exclusions_locked
@@ -146,6 +147,7 @@ class _CleanupContext:
     persona: PersonaRepository
     candidate_service: object
     request: AgentsCleanupRequest
+    lease_id: str = ""
 
 
 # LLM: 完成记录与报告共用同一份计数快照，同一组数字只组装一次。
@@ -391,33 +393,65 @@ def apply_agents_cleanup(
 # LLM: 心跳必须先退出再释放精确租约；收尾失败不撤销已提交迁移，也不能覆盖主体异常或报告静默成功。
 # 函数用途: 执行迁移主体并携带租约收尾诊断，异常仍抛原对象。
 def _execute_migration(context: _CleanupContext, store: object, lease: dict[str, object]) -> dict[str, object]:
+    context = replace(context, lease_id=str(lease["lease_id"]))
     try:
         with curator_lease_heartbeat(store, str(lease["lease_id"]), _MIGRATION_LEASE_SECONDS):
             report = _run_cleanup(context)
     except BaseException as exc:
-        detail = _release_migration_lease(store, lease)
-        if detail:
-            exc.lease_cleanup = detail
-            exc.add_note("agents migration lease cleanup: " + json.dumps(detail, sort_keys=True))
+        _cleanup_failed_migration(context, store, lease, exc)
         raise
     detail = _release_migration_lease(store, lease)
+    _persist_cleanup_diagnostic(context, detail)
     if detail:
-        _persist_cleanup_diagnostic(context, detail)
         return {**report, "ok": False, "lease_cleanup": detail, "notes": ["AGENTS_CLEANUP_LEASE_RELEASE_FAILED"]}
     return report
 
 
-# LLM: 完成事实不回滚；同编号重放必须保留未成功释放的诊断，诊断自身落盘失败仍在本次回执明确给出。
+# LLM: 有主体异常时二次中断也不能换掉原对象；诊断尽力落到原记录，失败仍保留 pending，不强抢租约。
+# 函数用途: 为失败主体安全收尾并附结构化诊断，绕过异常类自定义 add_note。
+def _cleanup_failed_migration(context: _CleanupContext, store: object, lease: dict, primary: BaseException) -> None:
+    try:
+        detail = _release_after_primary(store, lease, primary)
+    except BaseException as secondary:
+        detail = {"lease_id": context.lease_id, "released": False, "retired": False,
+            "release_error_class": type(secondary).__name__, "recovery": "manual_recovery_required"}
+    try:
+        _persist_cleanup_diagnostic(context, detail)
+    except BaseException as secondary:
+        detail["diagnostic_write_error_class"] = type(secondary).__name__
+    if detail:
+        primary.__dict__["lease_cleanup"] = detail
+        primary.__dict__.setdefault("__notes__", []).append("agents migration lease cleanup: " + json.dumps(detail, sort_keys=True))
+
+
+# LLM: 心跳停止未确认时仍可能在途写 state，禁止释放/退役；保留 executing 的 fail-closed 保护与原异常。
+# 函数用途: 仅在心跳停止已确认后为失败主体释放原租约。
+def _release_after_primary(store: object, lease: dict, primary: BaseException) -> dict[str, object]:
+    stop_error = primary.__dict__.get("lease_heartbeat_stop_error_class")
+    if stop_error:
+        return {"lease_id": lease["lease_id"], "released": False, "retired": False,
+            "heartbeat_stop_error_class": stop_error, "recovery": "manual_recovery_required"}
+    return _release_migration_lease(store, lease)
+
+
+# LLM: 完成事实不回滚；同编号重放保留收尾诊断。读改写共用 record 锁，锁内只用私有原子写 unlocked 入口，避免自死锁。
 # 函数用途: 将租约收尾故障写入原迁移记录，不创建另一份执行权或恢复账。
 def _persist_cleanup_diagnostic(context: _CleanupContext, detail: dict[str, object]) -> None:
     directory = _migration_dir(context.home_paths, context.request.migration_id)
     try:
-        with locked_json_path(directory / _RECORD_NAME):
-            record = _read_record(directory)
-            if record is not None:
-                _write_record(directory, {**record, "lease_cleanup": detail})
+        _persist_cleanup_diagnostic_locked(directory, detail)
     except Exception as exc:
         detail["diagnostic_write_error_class"] = type(exc).__name__
+
+
+# LLM: 诊断只追加到已存在记录；读改写共用 record 锁，私有原子写不重复准入，避免并发覆盖和自死锁。
+# 函数用途: 持锁合并并耐久保存迁移的收尾诊断。
+def _persist_cleanup_diagnostic_locked(directory: Path, detail: dict[str, object]) -> None:
+    with locked_json_path(directory / _RECORD_NAME):
+        record = _read_record(directory)
+        if record is not None:
+            write_private_json_file_atomic_unlocked(directory / _RECORD_NAME,
+                {**record, "lease_cleanup": detail, "lease_cleanup_pending": False})
 
 
 # LLM: 租约已领取；quota admission 先于目标锁，固定 policy→人格锁覆盖重判定到 completed。
@@ -443,11 +477,13 @@ def _run_cleanup_locked(context: _CleanupContext, admission: OwnerQuotaAdmission
     plan = plan_agents_cleanup(persona=persona)
     if record is None:
         _require_matching_digest(request, plan)
-        record = _new_record(migration_id, plan, request)
+        record = {**_new_record(migration_id, plan, request), "cleanup_lease_id": context.lease_id,
+            "lease_cleanup_pending": True}
         _write_record(directory, record)
     else:
         # 接受恢复前的合法用户修改，但只用同锁重判定已采样的尾，不另行重采样。
-        record = {**record, "updated_at": _now_iso(), "versions_tail": plan.versions_tail}
+        record = {**record, "updated_at": _now_iso(), "versions_tail": plan.versions_tail,
+            "cleanup_lease_id": context.lease_id, "lease_cleanup_pending": True}
         _write_record(directory, record)
     conversations = _effective_conversations(record, request)
     snapshot = _ensure_snapshot(home_paths, directory, migration_id)
@@ -539,7 +575,10 @@ def _retire_failed_release(store: object, lease: dict[str, object], error: Excep
         current = store.load().active_lease
         detail["retired"] = current.get("lease_id") == lease_id and current.get("phase") == "interrupted"
         detail["lease_changed"] = current.get("lease_id") != lease_id
-        detail["recovery"] = "expired_lease" if detail["retired"] else "lease_changed"
+        if detail["retired"]:
+            detail["recovery"] = "expired_lease"
+        elif detail["lease_changed"]:
+            detail["recovery"] = "lease_changed"
     except Exception as exc:
         detail["retire_error_class"] = type(exc).__name__
     return detail
@@ -675,10 +714,15 @@ def _is_completed(record: dict | None) -> bool:
     return isinstance(record, dict) and str(record.get("status") or "") == "completed"
 
 
-# 函数用途: 为已完成迁移生成幂等返回报告。
+# LLM: completed 只代表迁移数据耐久完成，收尾 pending 期间和诊断写失败后都不能据缺诊断推定成功。
+# 函数用途: 为已完成迁移生成幂等报告，保留收尾 pending 或失败事实。
 def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[str, object]:
+    detail = record.get("lease_cleanup") or {}
+    if record.get("lease_cleanup_pending"):
+        detail = {"lease_id": record.get("cleanup_lease_id", ""), "released": False,
+            "retired": False, "recovery": "cleanup_pending"}
     return {
-        "ok": not bool(record.get("lease_cleanup")),
+        "ok": not bool(detail),
         "already_completed": True,
         "migration_id": migration_id,
         "status": "completed",
@@ -688,7 +732,7 @@ def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[
         "conversations_added": 0,
         "expired_thread_snapshots": 0,
         "notes": ["already_completed"],
-        **({"lease_cleanup": record["lease_cleanup"]} if record.get("lease_cleanup") else {}),
+        **({"lease_cleanup": detail} if detail else {}),
     }
 
 

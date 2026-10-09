@@ -6,8 +6,13 @@
 - 第一段：统一 quota→policy→正式目标，显式传递 admission，长期事实 add/replace/remove 和候选脱敏不重入；冲突候选落状态在释放外锁后完成。正式锁序见设计 §3.6。
 - `test_agents_cleanup_review33.py` 保留真实 flock、两个线程都结束、无锁错误、迁移 completed 与晋升 promoted 的原断言；正确顺序下改等 cleaner 的 quota 请求而不是取得。USER/SOUL 真实写版本尾后按原 CAS 重新 dry-run，不能取消计划校验。
 - 第一段六个配额合同加原晋升文件共 55 项通过（`tmp/mc2-agentsr5/lock-v3.xml`）；提交 `d6682c1a0`。空提交故障注入仅适配 admission 关键字，原冲突断言不变。
-- 第二段新增七个释放/退役组合合同，修前实际七红（`tmp/mc2-agentsr5/release-red.xml`）。WIP 已加入精确租约退役、结构化诊断、保留主体异常和完成记录诊断重放；**尚未验证通过**。三文件联合验证在输出六个通过点后超时，退出 -15，没有完整绿测结果；宿主回执确认该次命令进程已终止。
-- 3a 的 pause12 要求先提交并停回合：不再开测试。恢复后先定位收尾入口超时，优先核对 `_persist_cleanup_diagnostic` 持 record 锁后 `_write_record` 的原子写入是否再次领同锁（目前只是原因假设，未完成复现）；然后重跑七个合同、已有 54 条与相关回归、两处独立变异及原严格门禁。第二段恢复承诺文档尚未更新，不可部署本 WIP。
+- 第二段七个释放/退役组合合同修前实际七红（`tmp/mc2-agentsr5/release-red.xml`）。pause12 保存 WIP `cc18269b6`，当时联合入口退出 -15，不是绿测。resume7 后有界复现：`--timeout=12 -o faulthandler_timeout=5` 的真实栈确认诊断持 record 锁后私有原子写再次领同锁，退出 1（`timeout-root-red.xml`）；改成锁内私有原子写 unlocked 入口，仍共用原 record 和私有权限。
+- 增补精确身份/phase 与诊断落盘失败合同：未改变 executing 不得报告 lease_changed，先失败再修正（`diagnostic-red.xml`）。释放失败不回滚 completed，但 `ok=false`；退役成功按原期限恢复，退役失败要求人工恢复。普通异常与 KeyboardInterrupt 保留原对象，完成记录诊断可重放；诊断自身写盘失败另报告类别，不承诺持久化。
+- 同一当前实现的三正式文件 63 项通过（`release-final.xml`）；mc4 已接受的适配 26 + 正式合同 28 + 新合同共 70 项通过（`contracts-final.xml`）。复制的旧探针只改内部 `_commit_persona` 的新 context 参数调用，原 AGENTS 拒绝及状态断言不变；最初证据目录未准备与旧签名失败已保留，不计为业务通过。复现仍使用指定 ci-venv、隔离 HOME、仓库根 PYTHONPATH、无字节码/cache、独立 basetemp。
+- 两个独立只读审查补出的真实问题另先红测复现（`review-red.xml` 八失败）：默认/规范化目标错领 disabled persona quota；completed 后主体异常、释放窗口重放、诊断写失败可能假成功；收尾二次中断覆盖 primary。准入与提交复用唯一目标解析；原 record 在数据提交前耐久写入精确租约与 pending，收尾结果耐久写入之前重放保持 `ok=false`，不另建执行权。异常附注绕过自定义方法，保留原异常对象。
+- 心跳 join 二次中断单项先业务红（`join-red.xml`，rc1；最初直接让 KeyboardInterrupt 逃逸的 rc2 不是变异证据），修复保留 primary 并记录停止未确认；这种情况下迁移不释放/退役，仍保守 busy。修后四正式文件＋适配探针共 146 项通过（`review-green.xml`），其中新正式合同 24 项。
+- 两处独立单点变异实际各 rc1：policy→quota 反向边被三条持锁断言抓到；吞释放失败被七条业务断言抓到。每次备份原始字节并立即还原，SHA 一致，命令/JUnit/日志见 `tmp/mc2-agentsr5/mutations/`。
+- import 检索与 curator/quota 直接相关 58 文件加 guards9 全部 12 文件：70 文件共 1435 通过、2 失败、0 skip/error，整条命令 rc1（`regression.xml` / `regression-manifest.json`）；其中 guards9 的 194 项均通过。两失败是 `test_r223_audit_regressions.py` 的 MCP 背压终止及双大流捕获超时，真正基线 `84ff2c884c1e99100d3bb3a4e041dbaa5c0499e1` 独立临时 worktree 同入口也两失败（`baseline-failures.xml`），临时树干净并已移除；不改、不删、不跳过这两项，不把总回归写成全绿。真实模型文件未执行，原因与辅助 harness 清单明确登记。
 - 本轮只在隔离 HOME 验证；未启动真实 Gateway、未改真实 owner，不推送或部署。
 
 ## AGENTS 第 0 期第 4 轮：真实外层锁与晋升尾段租约（mc2-agents0r4，2026-10-09）

@@ -88,11 +88,26 @@ def curator_lease_heartbeat(store, lease_id: str, seconds: int):
     renew_curator_lease(store, lease_id, seconds)
     heartbeat = _LeaseHeartbeat(store, lease_id, seconds)
     heartbeat.thread.start()
+    primary = None
     try:
         yield
+    except BaseException as exc:
+        primary = exc
+        raise
     finally:
-        heartbeat.stop.set()
-        heartbeat.thread.join()
+        _stop_heartbeat(heartbeat, primary)
     # 必须等在途续租真正结束才看错误；主体抛错时不会走到这里，保留主体原始异常。
     if heartbeat.error is not None:
         raise heartbeat.error
+
+
+# LLM: 已有主体异常时 join 二次中断不能替换它；停止未确认必须显式留给调用方，不能据此退役执行权。
+# 函数用途: 请求停止并等待心跳，收尾中断保留原主体并标记未确认的停止事实。
+def _stop_heartbeat(heartbeat: _LeaseHeartbeat, primary: BaseException | None) -> None:
+    heartbeat.stop.set()
+    try:
+        heartbeat.thread.join()
+    except BaseException as exc:
+        if primary is None:
+            raise
+        primary.__dict__["lease_heartbeat_stop_error_class"] = type(exc).__name__
