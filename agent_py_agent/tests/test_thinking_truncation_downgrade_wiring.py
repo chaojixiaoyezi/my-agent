@@ -20,18 +20,18 @@ from agent_py_agent.agent.agent_core import _tool_loop_service as loop
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_runtime_evidence
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
     ToolLoopRepairCounters,
-    _NoToolCallsRequest,
     _no_tool_calls_decision,
+    _NoToolCallsRequest,
 )
 from agent_py_agent.agent.backends import ModelResponse, get_backend
 from agent_py_agent.agent.backends.errors import ProviderTimeoutError
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.reasoning_effort import next_call_reasoning_level
 from agent_py_agent.tests.test_thinking_truncation_downgrade import (
-    _LoopAgent,
-    _RecordingPrompts,
     _loop_params,
+    _LoopAgent,
     _patch_loop,
+    _RecordingPrompts,
 )
 
 # ---------------------------------------------------------------- helpers
@@ -111,6 +111,7 @@ def _real_loop(
     agent = _LoopAgent(backend, prompts, downgrade=downgrade)
     agent.config.model_reasoning_effort = level
     agent.config.max_tokens = max_tokens
+    agent.config.model_backend = protocol
     params = _loop_params(run_id="wiring-real")
     _patch_loop(monkeypatch, agent)
     return agent, params, rows, prompts
@@ -175,7 +176,9 @@ def test_resume_retry_keeps_lower_effort(monkeypatch, stage) -> None:
 #   回执轮必须既不使用也不清除覆盖，随后的续跑仍拿到降档后的强度。
 # 函数用途: 验证自然回执轮不消费续跑覆盖。
 def test_interposed_natural_reply_does_not_consume_override(monkeypatch) -> None:
-    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import queue_natural_user_reply
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        queue_natural_user_reply,
+    )
 
     agent, params, rows, _ = _real_loop(monkeypatch, script=[
         _provider_reply("openai_compatible", text="background status"),
@@ -262,7 +265,10 @@ def test_recorded_downgrade_requires_effective_wire_change(monkeypatch, protocol
     loop.execute_tool_loop(agent, params)
 
     trace = params.live_archive_state["truncation_thinking_downgrade_trace"]
-    assert [row["outcome"] for row in trace] == ["no_effective_change"]
+    # LLM: 有效参数没变化时每次都如实记 no_effective_change（不消耗唯一机会，所以第二次截断还会再记一条），
+    #   但绝不允许出现 "downgraded"——那说明判据失效、又走了"算成功降档"的老路。
+    assert trace
+    assert all(row["outcome"] == "no_effective_change" for row in trace)
     control_keys = ("reasoning", "reasoning_effort", "thinking", "output_config")
     before = {k: rows[0][k] for k in control_keys if k in rows[0]}
     after = {k: rows[1][k] for k in control_keys if k in rows[1]}

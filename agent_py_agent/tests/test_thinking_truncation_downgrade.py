@@ -194,15 +194,22 @@ def test_resume_budget_exhausted_breaks_unchanged() -> None:
 # ---------------------------------------------------------------- 2. 一次性覆盖：读/写/清
 
 
-# LLM: 覆盖只作用于紧邻下一次请求：挂上后请求档位变为降档值，清除后恢复用户配置档位。
+# LLM: 覆盖只作用于紧邻下一次请求：挂上后（宿主开始下一次模型生成、序号越过武装点）请求档位
+#   变为降档值，清除后恢复用户配置档位。
 # 函数用途: 验证覆盖的读/写/清与 request_reasoning_options 的优先读取。
 def test_override_applies_to_next_request_then_recovers() -> None:
-    params = types.SimpleNamespace(live_archive_state={}, task_attributes={})
+    params = types.SimpleNamespace(
+        live_archive_state={"_model_turn_sequence": 1},
+        task_attributes={},
+        context_scope="task_local",
+    )
     agent = types.SimpleNamespace(config=types.SimpleNamespace(model_reasoning_effort="max"))
     backend = types.SimpleNamespace(reasoning_control="effort")
 
     assert request_reasoning_options(agent, params, backend, forced=False) == (False, "max")
     assert set_next_call_reasoning_level(params, "high") is True
+    # 覆盖绑定武装序号：宿主开始下一次模型生成后（序号 +1）它才生效。
+    params.live_archive_state["_model_turn_sequence"] = 2
     assert request_reasoning_options(agent, params, backend, forced=False) == (False, "high")
     clear_next_call_reasoning_level(params)
     assert request_reasoning_options(agent, params, backend, forced=False) == (False, "max")

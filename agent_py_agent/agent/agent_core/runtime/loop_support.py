@@ -853,11 +853,18 @@ def _tool_runtime_evidence(
             for item in list(live_state.get("protocol_violation_trace") or [])
             if isinstance(item, dict)
         ],
-        "truncation_thinking_downgrades": [
-            dict(item)
-            for item in list(live_state.get("truncation_thinking_downgrade_trace") or [])
-            if isinstance(item, dict)
-        ],
+        # LLM: 对外诊断只在本次运行真的产生过降档决策时出现新字段；开关关闭或从未触发时保持旧结构。
+        **(
+            {
+                "truncation_thinking_downgrades": [
+                    dict(item)
+                    for item in list(live_state.get("truncation_thinking_downgrade_trace") or [])
+                    if isinstance(item, dict)
+                ]
+            }
+            if live_state.get("truncation_thinking_downgrade_trace")
+            else {}
+        ),
         "completion_gate": {
             "status": final_status,
             "reason": str(getattr(final_response, "runtime_reason", "") or ""),

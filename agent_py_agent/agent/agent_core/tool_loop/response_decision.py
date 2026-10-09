@@ -861,10 +861,13 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
     return {"tool": call.tool_name, "call_id": call.call_id, **call.arguments}
 
 
-# LLM: 「只思考截断」的结构化判据：provider 长度三件套由调用方先验，这里只看零可见正文；
-#   零工具调用由本裁决路径保证。不解析思考内容、不看模型自述，判据全部来自响应对象的结构字段。
-# 函数用途: 判断一次长度截断响应是不是"只有思考、没有可见正文"。
+# LLM: 「只思考截断」的结构化判据：provider 长度三件套由调用方先验，这里看零可见正文；
+#   零工具调用由本裁决路径保证，但供应商已输出半截工具（后端保留 truncated_tool_names）时
+#   不算"只思考"——"未执行工具"不等于"模型没输出工具"。不解析思考内容、不看模型自述。
+# 函数用途: 判断一次长度截断响应是不是"只有思考、没有可见正文也没有已输出的工具"。
 def _is_thinking_only_truncation(response: object) -> bool:
+    if getattr(response, "truncated_tool_names", None):
+        return False
     return not str(getattr(response, "text", "") or "").strip()
 
 
@@ -888,10 +891,35 @@ def _record_thinking_downgrade(params: object, *, from_level: str, to_level: str
         trace.append({"from_level": from_level, "to_level": to_level, "outcome": outcome})
 
 
+# LLM: 降档必须以有效出站参数变化为准：按协议、模型档位声明与预算裁剪算出前后字段，相同就
+#   不算成功降档（调用方记 no_effective_change 并照常续跑，不消耗唯一一次机会）。协议未知
+#   （伪 agent/旧后端）时按旧行为处理；判定只读结构化配置，不发网络。
+# 函数用途: 判断从当前档位降到目标档位是否会改变真实出站思考控制字段。
+def _effective_wire_change(agent: object, control: str, current: str, target: str) -> bool:
+    from ...backends.reasoning_control import (
+        ReasoningPayloadLimits,
+        effective_reasoning_wire_fields,
+        protocol_for_backend,
+    )
+
+    config = getattr(agent, "config", None)
+    backend = getattr(agent, "backend", None)
+    protocol = protocol_for_backend(getattr(config, "model_backend", ""))
+    if not protocol:
+        return True
+    limits = ReasoningPayloadLimits(
+        max_tokens=max(0, int(getattr(config, "max_tokens", 0) or 0)),
+        levels=tuple(getattr(backend, "reasoning_levels", ()) or ()),
+    )
+    before = effective_reasoning_wire_fields(control, current, protocol, limits)
+    after = effective_reasoning_wire_fields(control, target, protocol, limits)
+    return before != after
+
+
 # LLM: 降档决策只写结构化事实：counters 记实际降档次数（至多 1 次），live_archive_state 记每次决策的
 #   trace（原档位/新档位/结果），供运行诊断读取；供应商不支持强度参数记 unsupported、没有更低档位
-#   记 already_lowest、本轮已降过记 already_downgraded，三种情况都照常续跑。永不抛异常、永不阻断续跑：
-#   读不到档位或写不进覆盖时按未降档处理。
+#   记 already_lowest、本轮已降过记 already_downgraded、降档不改变有效出站参数记
+#   no_effective_change，都照常续跑。永不抛异常、永不阻断续跑：读不到档位或写不进覆盖时按未降档处理。
 # 函数用途: 为「只思考截断续跑」的紧邻下一次调用尝试降一档，返回更新后的修复计数。
 def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepairCounters:
     from ...backends.reasoning_control import downgraded_reasoning_level
@@ -908,6 +936,11 @@ def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepa
     target = downgraded_reasoning_level(current)
     if not target:
         _record_thinking_downgrade(request.params, from_level=current, to_level="", outcome="already_lowest")
+        return request.counters
+    if not _effective_wire_change(request.agent, control, current, target):
+        _record_thinking_downgrade(
+            request.params, from_level=current, to_level=target, outcome="no_effective_change",
+        )
         return request.counters
     if not set_next_call_reasoning_level(request.params, target):
         return request.counters

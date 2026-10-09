@@ -186,6 +186,26 @@ def responses_reasoning_field(control: str, level: str, levels: tuple[str, ...] 
     return {"reasoning": {"effort": choice}} if choice else {}
 
 
+# LLM: 按协议、模型档位声明与预算裁剪算出这次请求实际会发送的思考控制字段；调用方用它比较
+#   降档前后的有效出站参数——实际没变化时不得记为成功降档。与协议组包共用同一换算函数，
+#   不重写第二套规则、不发网络、不改后端配置。
+# 函数用途: 返回某档位在给定控制方式/协议/上限下真正会发到线上的字段（空字典=不发字段）。
+def effective_reasoning_wire_fields(
+    control: str, level: str, protocol: str, limits: ReasoningPayloadLimits,
+) -> dict[str, object]:
+    normalized = normalize_reasoning_level(level)
+    if protocol == "responses":
+        return responses_reasoning_field(
+            control, normalized, limits.levels, disabled=normalized == "off",
+        )
+    return reasoning_payload_fields(control, normalized, protocol, limits)
+
+
+# 函数用途: 把 model_backend 名字映射到协议族（openai / responses / anthropic）；未知返回空串。
+def protocol_for_backend(model_backend: object) -> str:
+    return _PROTOCOLS.get(str(model_backend or "").strip().lower(), "")
+
+
 # LLM: 压缩降档的 configuration_update 项（OpenAI GPT-6 系列的 Responses 接口）：档位按同一张表换算成服务商值，
 #   和请求级已发的档位相同就不插（白费一项）；control 不是 effort 或换算不出也不插。只读、不发网络。
 # 函数用途: 生成要追加到 input 末尾的档位更新项；不需要时返回 None。
