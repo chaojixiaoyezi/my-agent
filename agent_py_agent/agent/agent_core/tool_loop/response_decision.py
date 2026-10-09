@@ -83,6 +83,10 @@ class ToolLoopRepairCounters:
     provider_timeout_resume_repairs: int = 0
     # 09-30：连续收到“工具参数不是合法 JSON 对象”的响应次数；成功执行一轮工具后清零（与累计型的协议修复分开）。
     invalid_arguments_repairs: int = 0
+    # 空正文预算的进展水位：上次空正文 nudge 时已成功执行的工具数（executed_tools 长度）。
+    # 空正文裁决前对照它判断“自上次空正文以来是否有真实进展”，有进展就把 empty_text_repairs
+    # 归 0；只记录成功执行（result.ok）的调用，发起了但没有结果的不算进展。
+    empty_text_progress_marker: int = 0
 
 
 # LLM: 截断续跑与"分块写纠偏"是两件事：前者针对最终答复被输出上限截断，后者针对工具参数被截断。
@@ -179,11 +183,26 @@ def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCoun
     return replace(counters, truncated_write_repairs=counters.truncated_write_repairs + 1)
 
 
-# LLM: 空正文 nudge 有界(默认 2 次):工具执行后模型必须产出终态正文或继续调工具,
-# 静默空收口只会让用户收不到回复。计数与协议修复相互独立。
+# LLM: 空正文 nudge 有界(默认 2 次连续无进展):工具执行后模型必须产出终态正文或继续调工具,
+# 静默空收口只会让用户收不到回复。计数与协议修复相互独立；有真实进展时由
+# _empty_text_budget_after_progress 恢复预算（连续无进展才守这个上限）。
 # 函数用途: 增加一次"执行过工具但空正文"的修复计数。
 def _inc_empty_text(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
     return replace(counters, empty_text_repairs=counters.empty_text_repairs + 1)
+
+
+# LLM: 空正文预算按真实进展恢复（长回合不再"前期偶发空几次、后期一空就死"）：
+#   判据只用结构化事实——上次空正文 nudge 之后至少一次工具调用真正执行完
+#   （executed_tools 只在 result.ok 时追加；发起了但没有结果的调用不在其中）。
+#   连续无进展的空正文仍守原硬上限，不会变成死循环；不读正文或思考内容。
+# 函数用途: 空正文裁决前，若有新进展则把空正文预算计 0 并前移进展标记。
+def _empty_text_budget_after_progress(
+    params: object, counters: ToolLoopRepairCounters
+) -> ToolLoopRepairCounters:
+    executed = len(list(getattr(params, "executed_tools", None) or []))
+    if executed <= counters.empty_text_progress_marker:
+        return counters
+    return replace(counters, empty_text_repairs=0, empty_text_progress_marker=executed)
 
 
 @dataclass(frozen=True)
@@ -1011,19 +1030,21 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         timeout_resume = _provider_timeout_resume_decision(request, response_text)
         if timeout_resume is not None:
             return timeout_resume
+        # 空正文预算先按"自上次空正文以来是否有真实进展"恢复；下面两处 nudge 消费同一份计数。
+        counters = _empty_text_budget_after_progress(request.params, request.counters)
         reply_required = active_turn_user_reply_required(request.params)
         if reply_required and response_text:
             satisfy_active_turn_user_reply(request.params)
         elif (
             reply_required
-            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
+            and counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
         ):
             # This branch is controlled by exact consumed guidance ids. Thinking
             # is intentionally insufficient: users need one ordinary assistant
             # segment before a waiting parent yields again.
             request.params.tool_context.append(_ACTIVE_TURN_EMPTY_REPLY_NUDGE)
             return ToolLoopResponseDecision(
-                "continue", None, [], _inc_empty_text(request.counters)
+                "continue", None, [], _inc_empty_text(counters)
             )
         # 长期助手 式空响应 nudge(参考 长期助手 conversation_loop 6511-6547:
         # "You just executed tool calls but returned an empty response... continue")。
@@ -1037,11 +1058,11 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             and request.probe_rollback is None
             and (list(getattr(request.params, "executed_tools", None) or [])
                  or has_reasoning_content(list(getattr(request.response, "assistant_content_blocks", None) or [])))
-            and request.counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
+            and counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
         ):
             request.params.tool_context.append(_EMPTY_TEXT_NUDGE)
             return ToolLoopResponseDecision(
-                "continue", None, [], _inc_empty_text(request.counters)
+                "continue", None, [], _inc_empty_text(counters)
             )
         final_response = request.response
         # EXEC-38(owner 拍板 2026-08-16): 程序验证收窄为只做"未知副作用"
