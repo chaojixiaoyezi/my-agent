@@ -1,5 +1,14 @@
 # 测试与发布验收
 
+## 上一代摘要与跨回合工具（compactcall3，2026-10-09，待测试机复核）
+
+- 来源：compactcall-3及模型插话；主代理保持sol，测试机服务端压缩用sol、文字摘要与工具粘性用MiniMax-M2.7。只抓隔离测试请求指纹与用量，不输出凭据。
+- active-turn归档红测扩成无旧摘要/文字/加密三臂，旧缓存fork按最后替换结果截IR丢掉尾置applied摘要；主原生投影会前置该摘要，因此首叉input[0]。保留全部applied项，仍按原截止点选工具源，预算和运输同源。
+- live→下一轮新参数、无携带归档红测确认工具回撤；新增隐藏可选线程loaded_tool_names，真实搜索typed信封原子并集，主启动和transcript预检读取；不反推正文，不扩大注册表授权，旧空记录不写新字段。
+- thread_tool_discovery核对序列化兼容、子线程身份优先、原子更新不覆盖Compact代次、损坏/正文不加载、缺线程不新建及收紧权限过滤。公开agent.run配真实WS序列化和假运输锁住压缩后下一回合工具表。
+- 复现命令：根目录指定ci-venv-312，PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1；pytest test_active_turn_compact_projection.py、test_compactcall_websocket.py、test_thread_tool_discovery.py，-q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-cc3-*。
+- 当前局部45例及线程3例通过；缺线程原子写失败仅捕获FileNotFoundError，其它存储错误传播。完整相关回归、门禁和测试机前后数字在交接里另记，不以局部结果外推命中率。
+
 ## 订阅WS压缩字段与粘性工具（compactcall2，2026-10-08，本地修复待07复核）
 
 - 来源：compactcall-2跟进；真实OAuthResponsesBackend、WS统一编码器与主模型guard线程，凭据入口/socket/动态事实全为合成替身，固定262144窗口与65536输出上限，不读真实正文或密钥。

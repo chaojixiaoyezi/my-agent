@@ -604,7 +604,8 @@ def test_recovery_freezes_parent_prefix_for_active_turn_fork(monkeypatch):
 # LLM: 实际归档选择、摘要执行、预算与运输都运行，仅模型响应替身；完整来源可复用时不许悄悄换工具或旧尾项。
 # 函数用途: 抓跨片归档压缩的完整Responses负载及预算来源，守住同源前缀和最后指令。
 @pytest.mark.parametrize("remote", [True, False])
-def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case, monkeypatch, remote):
+@pytest.mark.parametrize("previous", ["none", "text", "encrypted"])
+def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case, monkeypatch, remote, previous):
     from dataclasses import replace
 
     from agent_py_agent.agent.backends.base import ProviderRequestOptions
@@ -621,6 +622,7 @@ def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case
     fork = replace(_fork(case, tail=()), provider_prompt=CacheStructuredPrompt("稳定规则", " \n旧动态事实\n "))
     second_tool = {"name": "list_files", "description": "列目录", "input_schema": {"type": "object"}}
     fork = replace(fork, tools=(*fork.tools, second_tool))
+    fork = _fork_with_previous_summary(fork, previous)
     payloads, measured = [], []
 
     def send(_path, payload, _headers, **_options):
@@ -650,6 +652,19 @@ def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case
     material = measured[-1]
     assert material["tools"] == list(fork.tools) and material["system_instruction"] == fork.system_instruction
     _assert_compactcall_budget_wire(backend, payloads, material, compact)
+
+
+# LLM: 主投影会把后置正式摘要前置；构造该IR排序，不复用主请求provider数组。
+# 函数用途: 为三臂运输用例注入真实上一代摘要项。
+def _fork_with_previous_summary(fork, previous):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core.tool_ir_history import applied_compact_summary_item
+
+    if previous == "none":
+        return fork
+    item = applied_compact_summary_item("上一代摘要", 3, "synthetic-cipher" if previous == "encrypted" else "")
+    return replace(fork, tool_ir_history=(*fork.tool_ir_history, item))
 
 
 # LLM: 工具排序及旧历史逐字相同才算共享前缀；新控制或摘要要求不能插在任何旧项之前。

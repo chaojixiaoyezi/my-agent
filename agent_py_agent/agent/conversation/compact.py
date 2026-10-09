@@ -936,18 +936,27 @@ class _RejectedCandidates:
         return replace(self.smallest, candidates_tried=self.count, fixed_tokens=_fixed_request_tokens(self.request))
 
 
-# LLM: 宿主已备provider_surface原样沿用；model_surface绑定已提交线程人格身份，不用候选代次；失败走原记账。
+# LLM: 宿主已备provider_surface原样沿用；新建面绑定已提交线程人格及累计加载名，不用候选代次；失败走原记账。
 # 函数用途: 为本次Compact取得同线程缓存面，准备失败与候选失败共用原记账。
 def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompactProviderSurface | None:
     provider_surface = request.provider_surface
     if provider_surface is not None or request.model_surface is None:
         return provider_surface
     try:
-        surface = replace(request.model_surface, thread_id=request.thread.thread_id)
+        surface = replace(request.model_surface, thread_id=request.thread.thread_id,
+                          loaded_tool_names=_bound_loaded_tools(request.model_surface, request.thread))
         return prepare_conversation_compact_provider_surface(request.agent, surface, run_id=request.run_id)
     except Exception as exc:
         record_compact_failure(request.store, request.thread, code=compact_exception_code(exc), now=request.attempted_at)
         raise
+
+
+# LLM: 旧调用可不带字段；已经绑定其它线程的加载面不能把发现状态带到目标线程。
+# 函数用途: 把线程加载事实与同身份的本轮加载名合并，不扩大授权。
+def _bound_loaded_tools(surface, thread):
+    same_thread = not surface.thread_id or surface.thread_id == thread.thread_id
+    carried = surface.loaded_tool_names if same_thread else ()
+    return tuple(sorted(set(carried) | set(getattr(thread, "loaded_tool_names", ()))))
 
 
 # LLM: 只组合原 Compact 输入阈值与 core 唯一请求容量规则，不另配百分比、不把未来输出当已消耗 token。

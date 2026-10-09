@@ -21,7 +21,7 @@ from .capability_selection_state import (
 
 SCHEMA_VERSION = "conversation_thread.v10"
 # 线程记录里只给界面和宿主用、不进模型上下文的字段：状态条遥测与待送达的宿主提示。拼上下文包的地方都按它剔除。
-MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods")
+MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods", "loaded_tool_names")
 _MODEL_SELECTION_FIELDS = (
     "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision",
 )
@@ -496,6 +496,9 @@ class ConversationThread:
     # LLM: 唯一会话方法账本，读写和校验归 capability.method_carry；隐藏且空时不写，保留旧线程序列化字节。
     # 字段用途: 暂存主会话成功读过的包和 skill 身份、资料路径与压缩代次，不存正文或权限。
     conversation_methods: tuple[dict[str, object], ...] = field(default=(), metadata={"omit_empty": True})
+    # LLM: 名称仅用于Schema展示；工具授权仍取本次快照，空字段省略以兼容旧线程。
+    # 字段用途: 保存本线程累计发现的工具，压缩摘要不承载此状态。
+    loaded_tool_names: tuple[str, ...] = field(default=(), metadata={"omit_empty": True})
     created_at: float = 0.0
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
@@ -525,8 +528,9 @@ class ConversationThread:
         payload["channel_bindings"] = [item.to_dict() for item in self.channel_bindings]
         payload["task_ids"] = list(self.task_ids)
         payload["active_task_ids"] = list(self.active_task_ids)
-        if not self.conversation_methods:
-            payload.pop("conversation_methods", None)
+        for key in ("conversation_methods", "loaded_tool_names"):
+            if not getattr(self, key):
+                payload.pop(key, None)
         return payload
 
     # LLM: 原 v10 及更早记录三选择字段全缺才归一为未知；坏/部分字段和未知 thread 版本拒绝，不补造手动事件。
@@ -535,6 +539,7 @@ class ConversationThread:
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         from ..capability.method_carry import methods_from
         from ..settings.decision_settings_schema import thread_decision_settings
+        from .tool_discovery import normalized_loaded_tools
 
         decision_settings = thread_decision_settings(data)
         bindings = data.get("channel_bindings")
@@ -599,6 +604,7 @@ class ConversationThread:
             reasoning_effort=normalize_reasoning_level(data.get("reasoning_effort")),
             pending_host_notices=_pending_host_notices(data.get("pending_host_notices")),
             conversation_methods=methods_from(data.get("conversation_methods")),
+            loaded_tool_names=normalized_loaded_tools(data.get("loaded_tool_names")),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
             channel_bindings=tuple(

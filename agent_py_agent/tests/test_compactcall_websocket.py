@@ -224,3 +224,17 @@ def test_sticky_loading_does_not_grant_tools_or_cross_thread_records(tmp_path, m
     specs = agent.tools.model_visible_specs(allowed_tools=["list_files"], loaded_tool_names=loaded, runtime_snapshot=snapshot)
     assert {spec.name for spec in specs} == {"list_files"}
     assert pending_carried_loaded_tool_names([]) == set()
+
+
+# LLM: 首轮真实执行搜索和live压缩，下一轮不注入携带归档；恢复须来自原线程而不是同一参数对象。
+# 函数用途: 验证压缩后新回合仍展示已搜索工具，新线程和收紧授权不继承执行权。
+def test_sticky_schema_survives_new_turn_after_live_compact(tmp_path, monkeypatch):
+    agent, thread, prior, records = _setup(tmp_path, monkeypatch, False)
+    probe = _Probe(monkeypatch, False, live=True)
+    monkeypatch.setattr(agent.tools.tools["read_file"], "execute",
+                        lambda _params: ToolHandlerOutcome(tool="read_file", ok=True, output="x" * 280_000))
+    assert _run(agent, thread, prior, records).response == "完成"
+    assert any(call["compact"] for call in probe.calls)
+    count = len(probe.calls)
+    assert _run(agent, thread, prior, []).response == "完成"
+    assert probe.calls[count]["body"]["tools"] == probe.calls[count - 1]["body"]["tools"]
