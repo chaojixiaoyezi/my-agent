@@ -341,7 +341,7 @@ def test_memory_settings_parse_the_remote_switch():
     assert normalize_memory_settings({})[0].memory_compact_remote_enabled is True
 
 
-def test_archive_keeps_the_marker_but_never_the_item():
+def test_archive_excludes_applied_summary_and_its_item():
     from agent_py_agent.agent.agent_core.runtime.loop_support import _completed_turn_native_messages
     from agent_py_agent.agent.conversation.native_history import (
         canonical_native_messages_envelope,
@@ -360,7 +360,7 @@ def test_archive_keeps_the_marker_but_never_the_item():
         archived = original(params, ModelResponse(text="完成", backend="fake"))
     finally:
         native_tool_protocol.native_tool_use_active = saved
-    assert archived[0]["content"] == [{"type": "text", "text": "[provider-compaction …] 占位"}], "落盘只留占位文本"
+    assert archived == [{"role": "assistant", "content": [{"type": "text", "text": "完成"}]}], "摘要只由检查点视图重放，canonical 不重复占位文本"
     assert all(b.get("type") != "responses_compaction" for m in archived for b in (m["content"] if isinstance(m["content"], list) else []))
     # 旧版本已经落盘的块：回放时剔除，整条只剩该块时丢弃
     envelope = canonical_native_messages_envelope([

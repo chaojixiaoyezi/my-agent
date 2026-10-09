@@ -1,5 +1,5 @@
 # LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；包候选只消费 scoped 元数据与原能力配置，展示纯值经推荐接缝/回调传递，
-# 不能写入结果、Agent共享属性或扩大原快照权限；拒绝列表、异常原生历史与权限沿原权威，禁止反向依赖Gateway。
+# 不能写入结果、Agent共享属性或扩大原快照权限；applied摘要由唯一前置投影承载，归档不重复它；禁止反向依赖Gateway。
 # 模块用途: 为主链准备记忆、工具和续跑输入，恢复同源核验与清理事实，直接驱动唯一循环；回传本片展示与异常历史。
 
 from __future__ import annotations
@@ -1015,8 +1015,8 @@ def _host_event_source(trigger: object) -> str:
 
 
 # LLM: 当前回合的开头项是真实用户轮（UserTurn）或生命周期唤醒的宿主事件（source=HOST_EVENT_FACTS_SOURCE 的
-#   RuntimeFactsTurn）；只按类型与宿主来源判断，不看正文。交接摘要与适用摘要都插在开头项之后。纯计算。
-# 函数用途: 返回当前回合开头项占用的位置数（0 或 1），供摘要与交接的插入位置共用。
+#   RuntimeFactsTurn）；只按类型与宿主来源判断。独立交接跟开头，applied 摘要由出站投影前置。
+# 函数用途: 返回开头项占用的位置数（0 或 1），保持独立交接插入合同。
 def _current_turn_opener_count(history: list[object]) -> int:
     from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
     from .turn_trigger import HOST_EVENT_FACTS_SOURCE, SESSION_TASK_FACTS_SOURCE
@@ -1050,25 +1050,23 @@ def _view_provider_compaction(view: object) -> str:
     return provider_compaction_content(getattr(view, "provider_compaction", None))
 
 
-# LLM: A narrow history seed may be None even when an applied scoped summary exists. Add that
-# summary to current-turn IR after the media-owning initializer, leaving its carried handoff intact.
-# The initializer is the user turn or the lifecycle host event (_current_turn_opener_count).
-# 函数用途: 无历史种子时把本次适用摘要插入当前原生回合，保留原交接和媒体块。
+# LLM: 显式视图优先，缺视图才读种子摘要；typed applied 摘要是出站布局权威，不重复进入 provider 历史。
+# 函数用途: 开轮安装同代标准摘要，不移动 opener/媒体/独立交接；出站投影时摘要前置。
 def _native_ir_with_applied_summary(
     history: list[object],
     *,
     compact_context: object,
-    has_history_seed: bool,
+    history_seed: object,
 ) -> list[object]:
-    from ...backends.tool_ir import CompactionSummary
+    from ..tool_ir_history import applied_compact_summary_item
 
     context = _applied_compact_context(compact_context)
-    if context is None or has_history_seed or not context.view.summary.strip():
+    text = context.view.summary if context is not None else str(getattr(history_seed, "compact_summary", "") or "")
+    generation = context.view.generation if context is not None else int(getattr(history_seed, "compact_generation", 0) or 0)
+    if not text.strip():
         return history
-    summary = CompactionSummary(
-        f"# Earlier Conversation Summary (generation {context.view.generation})\n{context.view.summary}",
-        source="applied_compact",
-        provider_compaction=_view_provider_compaction(context.view),
+    summary = applied_compact_summary_item(
+        text, generation, _view_provider_compaction(context.view) if context is not None else "",
     )
     history.insert(_current_turn_opener_count(history), summary)
     return history
@@ -1166,7 +1164,7 @@ def _reconstructed_native_initial_ir(
     return _native_ir_with_applied_summary(
         _with_input_media_manifest(agent, history),
         compact_context=seed.params.compact_context,
-        has_history_seed=seed.params.conversation_history_seed is not None,
+        history_seed=seed.params.conversation_history_seed,
     )
 
 
@@ -1190,9 +1188,8 @@ def _with_input_media_manifest(agent: object, history: list[object]) -> list[obj
 
 # LLM: Persist only this run's provider-neutral IR plus the terminal assistant response. The
 # prior-thread prefix is excluded; ConversationStore and Compact own its lifetime. A lifecycle-wake
-# slice also leaves out its slice-only host snapshots (_replayable_turn_history). 服务端压缩项不进对话行：
-# 它只属于检查点（provider_compaction），下一轮由视图前缀按后端兼容性再发；归档时只留占位文本，换模型重放才不会把
-# 别家读不懂的项发出去（2026-10-08 在 .16 上 MiniMax 收到 responses_compaction 块直接 400）。
+# slice also leaves out its slice-only host snapshots (_replayable_turn_history). applied 摘要（文字/密文）只属于检查点视图，
+# 不能重复作为当前轮 canonical 落盘；其它旧压缩项仍清掉密文，换后端不发不兼容块。
 # 函数用途: 整理一轮结束后可供下一轮精确回放的原生消息，包括工具调用、结果和最终回复。
 def _completed_turn_native_messages(
     params: ToolLoopExecuteParams,
@@ -1200,7 +1197,11 @@ def _completed_turn_native_messages(
 ) -> list[dict[str, object]]:
     from dataclasses import replace as dc_replace
 
-    from ...backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
+    from ...backends.message_adapter import (
+        AnthropicMessageAdapter,
+        is_applied_compact_summary,
+        strip_orphaned_tool_blocks,
+    )
     from ...backends.tool_ir import AssistantTurn, CompactionSummary
     from ..native_tool_protocol import native_tool_use_active
 
@@ -1211,6 +1212,7 @@ def _completed_turn_native_messages(
         for item in _replayable_turn_history(
             list(getattr(params, "tool_ir_history", None) or []), getattr(params, "turn_trigger", None),
         )
+        if not is_applied_compact_summary(item)
     ]
     blocks = [
         deepcopy(item)
@@ -1252,10 +1254,9 @@ def _native_user_task_text(value: object) -> str:
 # remains the same host-owned list across automatic continuations, independent of model history.
 # Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
 #   带 CARRIED_RUNTIME_ONLY_FIELD 的携带记录（回合已写进会话历史）只进运行时状态重建，不进本片 archive_tool_calls。
-# 函数用途: 从新权限快照及完整归档恢复执行状态；同进程carry保留原IR，不重跑归档摘要或用户轮初始化。
+# 函数用途: 从新权限快照及完整归档恢复执行状态；应用摘要由typed IR唯一承载，prior不重复；同进程carry保留原IR。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
-    from ...backends.tool_ir import CompactionSummary
     from ...conversation.compact_carry import restore_native_compact_carry
 
     if (params.task_attributes or {}).get("input_media") and getattr(seed.tool_protocol_snapshot, "source_protocol", "") != "native":
@@ -1349,8 +1350,7 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         tool_ir_history=tool_ir_history,
         conversation_turn_id=params.conversation_turn_id,
         turn_trigger=params.turn_trigger,
-        provider_history_messages=_native_provider_history_messages(params, include_compact_summary=not any(
-            isinstance(item, CompactionSummary) and item.source == "applied_compact" for item in tool_ir_history)),
+        provider_history_messages=_native_provider_history_messages(params, include_compact_summary=False),
         active_turn_user_inputs=active_turn_user_inputs,
         active_turn_transition_callback=params.active_turn_transition_callback,
         runtime_rejected_actions=params.runtime_rejected_actions,

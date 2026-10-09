@@ -1,5 +1,5 @@
 
-# LLM: typed IR 是唯一历史；纯请求投影与真实发送共享原生转换和配对清扫，普通请求只追加，Compact 才回收。
+# LLM: typed IR 是唯一历史；请求投影/发送同源；applied Compact 固定前置，普通历史只追加，工具与推理不拆对。
 # 模块用途: 保存工具与模型历史，提供不修改原 IR 的出站投影；须核对配对、缓存前缀和取消回滚。
 from __future__ import annotations
 
@@ -126,22 +126,30 @@ def project_native_prompt_history(
     return provider_prompt, history
 
 
-# LLM: 实际出站和容量投影共用 IR→messages/孤儿清扫；可选未提交引导只追加到副本，不消费原 seen 或写 IR。
-# 函数用途: 按原时间顺序投影完整消息，保留图片、推理、工具往返及待发送引导，不改变运行状态。
+# LLM: 实际出站和容量投影共用唯一布局 B：applied 摘要→已结束历史→当前时间线；仅按 source 移动摘要。
+# carried handoff 仍跟当前 opener，工具与推理不重排；候选只改副本，失败由原事务恢复。
+# 函数用途: 将当前适用摘要放在历史前，防止下一回合头部换位；投影不消费 seen 或改原列表。
 def project_native_provider_messages(
     history: object, *, prior_messages: object = (),
     tool_context: object = (), forwarded_guidance: object = (),
 ) -> list[dict[str, Any]]:
-    from ..backends.message_adapter import AnthropicMessageAdapter, strip_orphaned_tool_blocks
+    from ..backends.message_adapter import project_native_history_messages
     from .tool_ir_guidance import unforwarded_runtime_guidance
 
     projected = SimpleNamespace(tool_ir_history=list(history or ()))
     guidance = unforwarded_runtime_guidance(list(tool_context or ()), set(forwarded_guidance or ()))
     if guidance:
         record_runtime_facts_turn_ir(projected, "\n\n".join(guidance), source="runtime.guidance")
-    prior = [deepcopy(item) for item in list(prior_messages or []) if isinstance(item, dict)]
-    current = AnthropicMessageAdapter().to_provider_messages(projected.tool_ir_history)
-    return strip_orphaned_tool_blocks([*prior, *current])
+    return project_native_history_messages(projected.tool_ir_history, prior_messages)
+
+
+# LLM: 开轮与 live 候选统一 generation 标题，检查点仍存原始 summary；不写状态或发请求。
+# 函数用途: 构造跨回合逐字一致的摘要项，兼容服务端密文及纯文本路径。
+def applied_compact_summary_item(text: str, generation: int, provider_compaction: str = "") -> CompactionSummary:
+    return CompactionSummary(
+        f"# Earlier Conversation Summary (generation {generation})\n{text}",
+        source="applied_compact", provider_compaction=provider_compaction,
+    )
 
 
 # LLM: 逻辑回合身份要覆盖"实际出站内容"：native 下 tool_context/IR 变化不反映在渲染 prompt 上，

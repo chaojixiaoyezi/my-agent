@@ -108,16 +108,17 @@ def test_narrow_seed_injects_summary_without_replacing_handoff() -> None:
     media = UserTurn("媒体输入")
     history = [current, handoff, media]
     updated = _native_ir_with_applied_summary(
-        history, compact_context=_context(), has_history_seed=False,
+        history, compact_context=_context(), history_seed=None,
     )
     assert updated[0] is current
     assert isinstance(updated[1], CompactionSummary)
     assert "本轮局部摘要" in updated[1].text
     assert updated[2] is handoff
     assert updated[3] is media
+    # 有种子时也由当前 typed 摘要承载，provider 历史只放保留 canonical；独立 handoff 保持。
     assert _native_ir_with_applied_summary(
-        [current, handoff, media], compact_context=_context(), has_history_seed=True,
-    ) == [current, handoff, media]
+        [current, handoff, media], compact_context=_context(), history_seed=SimpleNamespace(),
+    ) == updated
 
 
 def test_seed_summary_uses_explicit_view_and_preserves_media_message() -> None:
@@ -185,10 +186,15 @@ def test_native_loop_with_seed_uses_one_view_summary_and_keeps_media() -> None:
         tool_protocol_snapshot=make_test_protocol_snapshot(run_id="test-run", source_protocol="native"),
     )
     params = _tool_loop_execute_params(SimpleNamespace(), seed)
-    assert not any(isinstance(item, CompactionSummary) for item in params.tool_ir_history)
+    assert sum(isinstance(item, CompactionSummary) for item in params.tool_ir_history) == 1
+    assert "本轮局部摘要" in params.tool_ir_history[1].text
     assert params.provider_history_messages[-1] == media
     rendered = json.dumps(params.provider_history_messages, ensure_ascii=False)
-    assert rendered.count("本轮局部摘要") == 1
+    assert rendered.count("本轮局部摘要") == 0
+    from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
+    sent = _native_provider_messages(SimpleNamespace(), params)
+    assert sent[0]["content"][0]["text"].endswith("本轮局部摘要")
+    assert sent[1] == media
     assert "错误的全线程摘要" not in rendered
 
 

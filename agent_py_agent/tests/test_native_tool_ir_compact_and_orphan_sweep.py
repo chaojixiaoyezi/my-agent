@@ -1441,7 +1441,7 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
     # 空段沿原有界纠正后生成机械候选；调用数不再等于逻辑 Compact 代数。
     assert len(agent.backend.calls) >= 3 and len(agent.backend.calls) % 3 == 0
     assert len(summaries) == 1
-    assert summaries[0].text.startswith("[compact-mechanical-fallback]")
+    assert summaries[0].text.startswith("# Earlier Conversation Summary (generation 1)\n[compact-mechanical-fallback]")
     assert "checkpoint" in summaries[0].text
     assert sink.progress_rows[-1]["phase"] == "completed"
     assert not any(row["phase"] == "failed" for row in sink.progress_rows)

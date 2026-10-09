@@ -9,6 +9,12 @@
 - 审计读取遵守原 `read_text` 通用CR/CRLF/LF换行口径，不切Unicode NEL/U+2028/U+2029；物理行号和错误顺序（JSON/非对象在前、缺ID在后）不变。当前分片全部错误先收齐再按预算选取；UTF-8/IO整读失败丢该文件有效行，缓存锚不可见时完整重定位，避免吞缺cursor错误。
 - 缓存只针对原append-only账本读增量；同inode改写早期前缀且同时增长、锚行仍原样的外部篡改，单靠身份/大小/锚行无法完备检测。不是内容完整性或授权事实。重启/并发淘汰只增加一次冷扫；合成等价/性能结果不代表真实Gateway或跨平台验收。
 
+## 应用摘要出站投影（midturn，2026-10-08）
+
+- `backends/message_adapter.project_native_history_messages` 唯一决定 applied summary、canonical history、当前IR顺序；仅识别结构source。
+- `memory_archive/compact_semantic_summary` 的缓存安全辅助请求共用该投影，避免再次压缩时退回旧布局；工具对与推理按原序转换。
+- `agent_core/tool_ir_history.applied_compact_summary_item` 统一代次标题与密文；`runtime/loop_support` 只从已提交view恢复一份，不重复归档。
+
 ## 线程人格快照与Compact准备（personafreeze，2026-10-08）
 
 - 快照内容不合法等价于缺失，由原锁内唯一writer重建，日志不含正文；安全链接/非普通文件不放行。

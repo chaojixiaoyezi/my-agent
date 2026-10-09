@@ -1,5 +1,5 @@
 
-# LLM: 历史适配只转换原生 IR，不裁决工具副作用；缺失回执只能标记结果未知，不能宣称已经执行或已经压缩。
+# LLM: 历史适配只转换原生 IR，不裁决副作用；主请求/容量/摘要共用 applied 摘要前置布局，不改变工具与推理顺序。
 # 模块用途: 在原生对话与工具历史间做协议翻译，保留调用配对，未知结果由后续执行者核实。
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from typing import Any
 
 from .tool_ir import (
@@ -47,6 +48,23 @@ HistoryItem = (
     | ToolResult
     | Sequence[ToolResult]
 )
+
+
+# LLM: 只认宿主 source，不根据正文决定摘要位置或归档；所有消费者共享此判定。
+# 函数用途: 区分检查点适用摘要和当前轮独立交接摘要。
+def is_applied_compact_summary(item: object) -> bool:
+    return isinstance(item, CompactionSummary) and item.source == "applied_compact"
+
+
+# LLM: applied 摘要固定在已结束历史前；其余 IR 按时间原样转换，工具与推理整对保留；不改源或持久状态。
+# 函数用途: 为主请求、容量估算和再次压缩提供唯一布局，避免同代跨回合重排。
+def project_native_history_messages(history: object, prior_messages: object = ()) -> list[dict[str, Any]]:
+    items = list(history or ())
+    prefix = [item for item in items if is_applied_compact_summary(item)]
+    current = [item for item in items if not is_applied_compact_summary(item)]
+    prior = [deepcopy(item) for item in list(prior_messages or ()) if isinstance(item, dict)]
+    adapter = AnthropicMessageAdapter()
+    return strip_orphaned_tool_blocks([*adapter.to_provider_messages(prefix), *prior, *adapter.to_provider_messages(current)])
 
 
 class MessageAdapter(ABC):
