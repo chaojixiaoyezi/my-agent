@@ -1,5 +1,10 @@
 # Memory Structure
 
+## 工具引用 scope 流式读取（toolrefs / E11e，2026-10-08，本地实现待复核）
+
+- `common.tool_index_stream` 是E11a、Compact、artifact、晋升回退、通用控制面的唯一严格UTF-8读取器；control_plane保留兼容导出。预筛文本迭代器在需要旧合法性语义时先C解析并丢弃对象，E11a保留非候选零解析；对象迭代器C解析一次、只保留候选。Compact从四键AND选安全必要条件，最终仍原scope/旧请求回退；apply单扫描投影两类引用，scope carried也共用。artifact仅存ref/path候选，规范POSIX路径沿realpath/stat快路、其它平台及非规范路径仍原Path求值；无效ref仍扫描异常但不收集历史全集。晋升校验所有行，坏行整文件无证据，不留历史对象；资源错误/IO顺序保持原合同。已删除纯Python词法校验器，schema/权限/正文/归档写入不变，无缓存，实测及调用链见TESTS。
+- Compact 显式使用原 `read_text` 的 CR/LF/CRLF 通用换行；64KiB增量UTF-8及标准库换行解码不整读CR文件，E11a默认物理LF分行不变。只存匹配投影和每类首错，读取失败不返回半份引用；扫描完成后按原小调用→大输出次序报投影错，晚IO/UTF-8错误仍优先于前部坏字段。稳定索引/文件系统下已做路径、换行与异常对照；扫描途中外部改symlink不提供事务快照或完整等价保证，Windows运行及生产未验证。
+
 ## Curator读取定位的进程缓存（mc2-e11c，2026-10-08）
 
 - `io/cursor_cache.py` 只提供短锁LRU、文件指纹和保守已见ID过滤器；键是绝对规范路径+精确ID，不按同ID/inode合并owner。值无正文/权限/持久消费状态，锁不包IO，不替代原写锁。

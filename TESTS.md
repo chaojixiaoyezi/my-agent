@@ -13,6 +13,51 @@
 - 复跑：根目录 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_midturn_compact_prefix.py -q -s --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-midturn`；PY用ci-venv-312。
 - 上游现 main `780d7ab09741241380586b07882c635037a6ba21` compact_remote_v2整体替换历史；真实供应商顺序接受、Gateway/TUI、生产缓存命中收益未验证。
 
+## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08，07-c1，本地实现待复核）
+
+- 来源：07 toolrefs、两次插话及toolrefs-2审核意见；只用合成索引，不读真实owner/正文/凭据，不连接Gateway。Compact、artifact、晋升证据回退、通用控制面共用 `common/tool_index_stream.py`；E11a保留原物理LF，旧整读入口保留CR/LF/CRLF。
+- `test_tool_ref_scope_stream.py` 冻结真基线 `9e843077d` 的整读与scope规则，62种scope对照单类及合并入口；顶层/runs/tasks、坏行/空行/非对象、Unicode分隔符、转义、非ASCII、布尔/数字/数组/字典、集合/AND/空条件、旧请求回退、重复/未知身份/双参数/ledger排除均覆盖。
+- 原范围先红7条；两次独立静态评审后父级复现裸CR/晚期解码与投影错误顺序，10项回归转绿。扩展三入口非匹配零loads先红3条；第二审查实际复现深层坏JSON、超长整数及不相关路径错误4条红，再修复并加晚UTF-8优先等回归。审查称字典字符串可预筛的意见被反证：空格已使该值不安全，保留对照测试而非盲改。
+- toolrefs-2删除纯Python词法校验器：需要旧合法性语义的行用C `json.loads` 后立即丢弃，不进入历史列表；晋升坏行仍使整文件无证据。预筛文本接口候选仍按原调用方解析，对象接口每行只解析一次。E11a原合同不检查无关行，仍零解析。极端资源异常延迟到文件扫描完，保持IO/UTF-8优先。
+- `test_tool_ref_hot_paths.py` 对artifact各查找键、路径/链接/scope/最后匹配，晋升run/call/tool/operation及整文件失效，通用控制面逐条对照。新增规范POSIX路径避免Path分配与原解析器的NUL/loop/缺失/非规范路径对照；其它平台及路径保留原Path实现，最终正文/权限/哈希不变。无效ref先验证索引异常但不收集历史全集。
+- `test_tool_index_validation.py` 保留1250种生成语法对照，新增跨64KiB块UTF-8/CRLF、裸CR尾部、残缺UTF-8及普通坏行/资源错误/晚IO的优先级。深Python调用栈的CPython3.12复跑未重现审查假设中的RecursionError，按原C解析实际结果对照；仍去掉递归预算猜测，校验直调C解析器。按07新方案更新loads与长行分配断言，不删除业务等价断言。
+- E11a原内存对照曾调用本次也被优化的控制面，失去旧基准；改用 `helper_tool_index_baseline.py` 冻结真基线整读，原条数、大小、峰值断言全部保留，没有跳过或放宽。
+- 最新toolrefs-2计量用真基线 `9e843077d054e34fddff896102f4da7c29977c40` 的git归档及当前源码，两个独立子进程共享同一套1000根/16006行/6匹配语料；压缩/收尾39339552字节，其它6模式39339571字节。较首版路径前缀缩短，故字节数不同；不混用旧数据。峰值/计数单独一次；计时移除meter及tracemalloc，每轮旧→新交错3次取中位数，GC、bundle复位及结果断言在计时外。原始样本见 `tmp/toolrefs/tr2-paired.json`，脚本为该目录的 `paired_measure.py`；下面全部是当前方案结果，不再用旧版带探针计时判断回退。
+
+| 合成入口 | 索引字节：旧→新 | json.loads：旧→新 | tracemalloc峰值字节：旧→新 | 无tracemalloc计时秒 median3：旧→新 | 耗时变化 |
+|---|---:|---:|---:|---:|---:|
+| compact来源 | 78679104→39339552 | 32012→16012 | 67946535→2225142 | 0.328817→0.154859 | -52.90% |
+| finalization产物更新 | 39339552→39339552 | 16007→16013 | 67944457→2218957 | 0.164541→0.164374 | -0.10% |
+| ReadArtifactTool.execute | 39339571→39339571 | 16007→16007 | 67957154→2233966 | 0.461854→0.416544 | -9.81% |
+| display_archive._original_output | 39339571→39339571 | 16007→16007 | 69868749→2223145 | 0.577051→0.488295 | -15.38% |
+| estimate_tool_output_artifact_size | 39339571→39339571 | 16006→16006 | 67943494→2216692 | 0.430281→0.357298 | -16.96% |
+| LocalStoreToolEvidenceVerifier.verify | 39339571→39339571 | 16006→16006 | 2216590→2217262 | 0.163485→0.172536 | +5.54% |
+| query_memory_control_plane | 39339571→39339571 | 16006→16012 | 67932048→2219154 | 0.178382→0.180703 | +1.30% |
+| carried_tool_call_records | 39339571→39339571 | 16006→16012 | 67941108→2216048 | 0.186651→0.178173 | -4.54% |
+
+- compact索引枚举/打开2/2000→1/1000，其余均1/1000；artifact正文读取还会另枚举许可目录，不把该路径检查伪装成零扫描。晋升语料无typed成功事实，实跑结果为None，未声称证据晋升成功。完整Finalization、TUI/Gateway、生产RSS不是这些计量的观察点。
+- toolrefs-2聚焦四文件257 passed、扩展25文件685 passed、完整12文件guards9的194 passed、计量三文件及C解析回归59 passed（含8入口分开计时）。配对8入口耗时/峰值断言通过；import边界0、Ruff、doc-sync、strict尺寸、diff与clean-package均rc0，新增尺寸告警0。首次Ruff两处import顺序失败已修，clean-package首轮因新增测试未入索引失败、正常git add后复验通过；不把原失败隐藏为成功。命令及红绿输出在本工作树 `tmp/toolrefs/`；未修改常数生成器或目录基线。
+- 复跑：工作树根 `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_tool_index_validation.py agent_py_agent/tests/test_curator_tool_output_refs.py agent_py_agent/tests/test_tool_ref_scope_measurement.py agent_py_agent/tests/test_tool_ref_hot_measurement.py -o addopts='' -q -s -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-toolrefs-all-measure`；PY为指定ci-venv-312。
+- 单入口复跑新增 `test_tool_ref_timing_measurement.py`，使用相同8模式分开计量峰值和无探针median3；旧版复跑需把这些测试helper复制到真基线归档，不复制产品源码。配对脚本使用 `/private/tmp/claude-501/m-toolrefs-timing` 下该测试的固定语料，再调用指定CI Python运行 `tmp/toolrefs/paired_measure.py`，输出两个版本三次原始样本并断言8入口耗时≤旧+10%、峰值<300万。
+- 风险/取舍：全部根/字节仍读，只消除历史全集常驻，单行仍会瞬时构造；晋升旧峰值本来低，不宣称所有入口变快。空/不安全scope及路径alias保守解析，无缓存、新截断、schema、配置、写入或权限改变。路径等价测试基于稳定文件系统；扫描中外部修改symlink不提供事务快照保证，完整并发等价、Windows运行、生产836MB/4000根、Gateway及RSS收益未验证，不能用收尾5–11/h解释约50/h跳涨。
+
+### 全量工具索引调用方盘点（源码相对agent_py_agent；频率由07提供，未自行访问生产）
+
+| 文件:行与调用链 | 触发/频率 | 处理 |
+|---|---|---|
+| agent/user_space/context_bundle_artifacts.py:32→tool_output_source_refs；agent/memory_archive/compact_apply/__init__.py:467→tool_source_refs | 收尾有scope，07计5–11/h；压缩apply按需 | 单类及合并共用流式；旧_read_tool_output_index已无调用并删除，tool_call_source_refs保留兼容导出 |
+| agent/tooling/artifact.py:211→artifact/reader.py:53→_index_records_for_root:403→路径枚举:405 | 每模型read_artifact，07计6–31/h | 共用C逐行解析与原path匹配；max_chars=0时:339先estimate，再读可另扫一次 |
+| agent/agent_core/tool_loop/round_execution.py:1481→display_archive.py:59→同artifact reader | 每完成外置工具且无patch/diff/write/command富展示；频率未计 | 一并改后端；这不是模型read_artifact计数，不能漏计为仅收尾 |
+| cli/memory_artifact_commands.py:18、agent/conversation/audit_tools.py:896→同artifact reader | 显式CLI/审计读取；未计 | 后端一并改，无新增权限或正文读取 |
+| agent/memory_store/promotion.py→每文件流式校验 | 晋升缺运行时gate证据才回退；07称晋升400+/日，非每次都读索引 | 共用C解析后丢弃+整文件合法性；不导入archive层 |
+| agent/memory_archive/control_plane.py:115→_tool_outputs | 通用API；全仓未找到生产直接调用方，频率未计 | 可控范围一起改；无安全run/task值时保守解析 |
+| agent/gateway_parts/request_execution.py:735、agent/conversation/runtime.py:2054→carried_tool_call_records | 活跃回合恢复/旧后台唤醒；未计 | 共用scope流式，原身份去重/投影不变 |
+| agent/conversation/runtime.py:2071→carried_tool_call_records_for_requests | 请求级后台唤醒；未计 | 原本只扫已知owner/task两源、物理LF及替换解码/不完整源合同不同，保留既有流式而不越界统一 |
+| agent/core.py:307→query_tool_output_refs_for_runs；agent/memory_store/curator_inputs.py:285批量适配器 | Curator定时/手动批次一次；未计 | E11a共用新权威读取器，原坏行/分组/上限不变 |
+| agent/common/tool_output_paths.py:19/31→根枚举/index路径；artifact/reader.py:410另作许可根检查 | 上述入口按需，无独立定时器 | 唯一工具索引根glob；全仓检索无其它索引整读，retention扫描不是索引读取 |
+
+- tool_output_externalizer.py:310/353及shared_workspace.py:126只写不读，不改；未找到独立决策工具索引扫描，决策涉及晋升时仍走上述验证器。包导出及测试引用不是额外生产触发点。
+
 ## 压缩重复读取及 SQLite 批次（compactmem，2026-10-08，07-c1）
 
 - 来源：07 compactmem/steer1；只测合成 20,000 行、50,535,560 字节 canonical/tool 历史，含既有派生索引；真实正文/凭据/Gateway 未读取或连接。
@@ -1159,6 +1204,7 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 实测暴露并修掉的两个真缺陷：`change_codes()` 初版漏收三个 `history_*` 历史码；`_add_cache_change_counts(None, …)` 对 `None` 取 `items()` 抛异常（被外层兜底吞掉，表现为整条统计丢失）。
 
 未验证：真实 DeepSeek 请求上的端到端读数（要联网与密钥）；sol1 / luna3 的修复不在本分支。
+
 ## B7 第四段：四启动入口复核与 restricted 经统一底座施加（opp6，2026-10-05，WIP）
 
 - **范围**：`worker/opp5` 上实现（基线为 17k 头 `02acd6446` 变基后的 `65ebf6317` 之后）。产品改动：`plugin_permissions/sandbox.py`（重写为 `legacy_launch_policy`/`policy_from_grant`/`LegacyLaunchDenied`）、`plugin_runtime.py`（构造复核 + `start()` 覆盖）、`plugin_enable_tool.py`（移除 pending 拒绝、restricted 预检）、`confirmation.py`（文案）、`grants.py`/`records.py`（`sandbox_status=platform_sandbox`）。
@@ -2462,6 +2508,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   ② 去掉回环判断（远程也带码）→ 判定单元 + 远程参数化 + `test_remote_peer_denial_never_carries_code` 变红；
   ③ 开关关着也返回码 → 开关关两条用例变红。**三个全部被抓**。
 - 静态门禁：import boundaries=0、ruff 全过、DOC_SYNC_PASS、`git diff --check` 干净。
+
 ## B5 审批阶段门决定承接与 interactive 取证（b5fix9b，2026-10-04，worker/b5fix9b，基于 17j 头 `4081a0df3`；ds5 复核无功能缺陷，已并入 step17k；出口用例由 luna1 b5fix9bt 补齐）
 
 - 来源：9b 对 B5 的终审两条必须修（详见 DESIGN_LEDGER 同名节）。都是"记下的结构化事实不对"，不影响拦不拦。
@@ -3074,6 +3121,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
 → **23 passed**（新用例 2 条 + 既有 21 条）。
 
 guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部通过**；`ruff` All checks passed；`check_import_boundaries.py` findings=0；`check_doc_sync.py` DOC_SYNC_PASS；strict code-size `blocked=False`；`check_clean_package.py .` OK；`git diff --check` 干净；`size_diff.sh` **新增告警 0**（消失 39）。
+
 ## B9 的测试期望跟上新技能（b9fix，2026-10-04，worker/b9-seed-fix；ds4 初审可以挑入，已并入 step17j）
 
 - 来源：B9 新增内置技能 `plugins/write-my-agent-plugin`（带 `references/`、`templates/`）后，17j 上 7 条老断言过时。
@@ -3246,6 +3294,7 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
 - **基线复核**：`test_supervision_kills_fully_stalled_source_worker_host` 在基线 `39350230a`（临时 worktree 复核）同样失败——环境相关既有失败，非本修正引入。
 
 ## 返工提示转检查程序 hint（phh，2026-10-04，worker/pack-host-hints，基于 step17i 头 d05a0d075，已并入 step17j `1a21ae0d9`）
+
 ## 宿主私有写入第三批（pw3，2026-10-04；pw3r 已搬到 17j 头 `35b1647e8`，待非作者初审，之后交 9b）
 
 - **改了什么**：17 个产品文件里的宿主写入点改走私有写（0600/原子/0700），覆盖 Gateway（旧 /ask inbox、流事件、adapter outbox、迟到登记、message_repairs）、会话与存储（Todo 账本、任务摘要、session.json、channels.json）、子代理与运行数据（投影/locator/canonical、LocalStore blob、rotating_log、启动 spec、备份清单、配额迁移）。格式与读取路径不变；pw3r 在 17j 上核对：scoped_locks 由 sclk 覆盖、optimistic_lock 按 ds10/ds1 裁定恢复原样（均未搬）；保留原样的点与理由见 DESIGN_LEDGER 同名节。
@@ -3960,6 +4009,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - 结果：**16 passed**（含新增的 `test_computer_use_observe_extra_pins_platform_dependencies`）；guards9 清单 **172 passed**；`check_import_boundaries.py` findings=0；ruff `All checks passed`；`check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` 干净；`check_clean_package.py .` OK；strict code-size hard=0 blocked=False；`size_diff.sh` 新增告警 0 / 消失 23。
 - 变异（脚本 `/private/tmp/claude-501/cux_mutate.py`，不进仓库）：①删掉 Linux 的 python-xlib ②去掉 mss 的平台标记 ③把 pillow 钉放宽成 `>=` ④把 pyautogui 塞进观察 extra —— **四个全被杀**，还原后守卫复跑通过。
 - 没验证：没在真实 macOS 上按这个 extra 装一遍并跑截图/AX；没按新 extra 重建 Linux 车道镜像（镜像仍由上游整包带入这些库）；`pip install -e ".[computer-use-observe]"` 未实际执行过解析。
+
 ## M 线第一期真实验收手册（m1ar，2026-10-03，文档；真实验收待执行）
 
 - 新手册：`docs/design/PLUGIN_EVENT_HOOKS_ACCEPTANCE.md`，覆盖 17j 前置、隔离 home/私有端口、三样例联合冒烟、TUI/飞书场景、`runtime_events` 结构化字段、`/plugins info`、`/status` 与隔离收尾。
@@ -4530,6 +4580,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **未运行**：全仓 pytest 与 Linux 车道留给集成者。
 
 ## B3 事件中心：观察投递（m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`、返工 2 `d8970996c`、拆平 `815151369`，基于 step17i `b6ede99e0`，待 9b 复审）
+
 ## M1 B4 事件点（m1b4，2026-10-03，分支 `worker/m1-b4-event-points`，待复审）
 
 - **投影段**：`test_plugin_event_points.py` 先在空实现上运行，14 failed / 1 passed，均为预期断言失败；实现精确六类 facts、哈希引用、宿主 actor、提示统一脱敏和 4000 字上界后，与 B3 合跑 **47 passed in 0.56s**，无失败/跳过。
@@ -4658,6 +4709,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   消失告警: 9
   ```
   strict code-size 后执行了 `git checkout -- CODE_SIZE_REPORT.md`；生成报告不提交。完整代码-size 值、尺寸差分输出均为实际运行结果。
+
 ## M 线 B7 f841 阶段验证记录（b7f，2026-10-04；仅适用于 `f84182b5d`）
 
 - **继承的 3a 沙箱外结果**：`test_plugin_sandbox_v8.py`、`test_plugin_sandbox.py`、`test_attempt_sandbox.py` 报告 46 passed、12 skipped、1 failed。唯一失败 `test_python_installation_prefix_inside_hidden_home_runs` 是临时 venv 前缀缺少 `lib/libpython3.12.dylib` 及 `otool -L` 所列依赖，并非沙箱拒读；Node 真 Seatbelt 用例由 3a 报告通过。这是旧提交结果，不代表本轮修改已验证。
@@ -4813,6 +4865,7 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **本轮静态门禁**：导入边界 `IMPORT_BOUNDARIES findings=0`；Ruff `All checks passed!`；文档同步 `DOC_SYNC_PASS`；严格代码尺寸 `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`，随后已还原 `CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；clean-package `OK: . 未发现发布阻塞项`。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 输出 `新增告警: 0`、`消失告警: 9`。
 - 未跑全仓 pytest；测试使用假目录，不调用真实模型服务，也未启动 Gateway。
+
 ## Gateway 本机来源信任 G6 ae 复审修正（2026-10-03，worker/luna1-g6-fetch-port，ds4 初审通过，待 3a 挑入）
 
 - **聚焦回归（最终产品代码修正后）**：`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python; PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/test_network_safety_gate.py agent_py_agent/tests/test_web_fetch_ssrf.py agent_py_agent/tests/test_tooling_web_fetch.py agent_py_agent/tests/test_ingestion_watch_tool.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna1g6-size-fix`，退出码 0。
@@ -5970,6 +6023,7 @@ compact 媒体两件/user_config_capability/settings_chat_control）；guards9 1
   - runpy 以非 `__main__` 名字执行脚本 → RuntimeError，且临时目录里没有冒烟工作区；
   - 把脚本点名交给 pytest → 收集报错、rc 非 0。
   - 不做“去掉守卫”的变异：去掉守卫，用例就会真的执行冒烟脚本。
+
 ## 能力包 v2 块 5：必需交付物缺失或打不开时返工（2026-10-02，原分支 `claude/ae-capability-packs-v2-b5h3`；10-03 与块 4 一起变基到 `claude/ae-capability-packs-v2-b45-17h`，见块 4 节末“变基到 step17h”）
 
 - **新增** `agent_py_agent/tests/test_pack_verification_deliverables.py`（8 项）：
@@ -9870,6 +9924,7 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
   - 叠加 my-agent-3 的 `fd28c2a7a`（含空闲消息确认与已消费判据修复）：不注入仍是 XFAIL，注入后转正。可见只修第 16g 批转不了正，必须修去重。
   - 全文件 main 上 7 通过、7 xfail，连跑 3 次一致。
 - **未覆盖**：同一次工具调用的重试去重。修去重时要保留“同一次调用重试返回同一条”，这一窗管不到。
+
 ## global_index 只追加索引的内部压缩（2026-09-29，分支 `my-agent/self-dev-2-index`，基于 `9a71d8cd5`）
 
 ### 复审跟进（38）：锁内再核身份、键定义单一来源、失败原因单列（2026-09-29，基于 `bac2f176d`）
@@ -10045,6 +10100,7 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
 - **门禁**：新文件 + dispatcher/adapter 韧性 + loops_resilience + readiness + runtime_error_reports + model_unconfigured + message_scan +
   two_tier + http_runtime_errors + status_tool + background_main_agent_cli + lane_retry + 九个全仓守卫；ruff、doc sync、strict code-size
   （identity 对 64f7ee64e 无新增）、`git diff --check`、clean package；`CODE_SIZE_REPORT.md` 不入提交。真机未复验。
+
 ## 向量缓存第四轮：构造宽松、写入严格（2026-09-29，分支 `my-agent/self-dev-2-vcache`）
 
 第三轮把 `_load` 改成"只有 `FileNotFoundError` 才当空"之后，**读错误从构造函数抛了出去**。
@@ -10670,6 +10726,7 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **门禁**：ruff、doc sync、strict code-size、`git diff --check`、clean package；basetemp 全部放在本会话 scratchpad 并在跑完后删除。
 - 观察（未改产品）：`request_timeout` 极短时，被墙钟放弃的第一次调用的工作线程仍会在放弃之后提交插话，使重试提交撞上“未预留”；
   生产超时为秒级，线程启动延迟远小于超时，正常配置下达不到这个窗口，留给产品作者判断是否在提交前复核调用是否仍是当前调用。
+
 ## 检索侧正文哈希向量缓存（第三版，2026-09-28，分支 `my-agent/self-dev-2-vcache`，基于 `f7a4cc909`）
 
 第三版是二审后的返工：**分支重建**（先前把新提交叠在被退回的提交上，第二次犯）、**X1**（跨进程合并复活别人删掉的键）、
@@ -11068,6 +11125,7 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
   python3 <工作目录>/_mutate_relation_selection.py reverse      # 期望 1 条红
   ```
 - **未覆盖**：本批没做真实 Jev 样本对比（挑选规则只影响哪些对进入请求，语义质量仍由原 Curator 与原验证把关）；真机效果按 dev 安排等 Jev 复测。
+
 ## 读取不存在的文件时给出相近文件名建议（2026-09-28，分支 `my-agent/self-dev`，基于 `80b4afed8`）
 
 - **来源**：集成者派的任务——路径不存在时，如果用户只是把文件名写错（少字/多字/串位），
@@ -11145,6 +11203,7 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
 - **变异验证**：注入 5 个变异并确认**全部被抓住**，随后恢复原文件：
   - 距离上限 2 → 1；建议条数 2 → 0；改成大小写敏感；近名排到候选末尾；越权过滤失效。
   （上一轮同样这 4 个变异**全部存活**，说明当时的用例没有区分度；这次补的用例把它们都杀掉了。）
+
 ## 检索侧向量按正文哈希缓存（2026-09-28，任务 9）
 
 来源：dev 通过开发交流板派的任务，对应 DESIGN_LEDGER「召回前补充查询」缺口 3。
@@ -11769,6 +11828,7 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **环境说明**：本机沙箱拿不到本进程出生身份（`ps -p` 不可用），测试按"fake 进程"约定给 `capture_process_birth_token`
   打桩，其余字段仍走真实校验器与真实 Store。`test_background_handoff.py` / `test_background_stdio.py` 在**基线提交**
   上同样失败（需要在沙箱内真实 spawn 托管 host），与本改动无关，已用基线工作树对照确认。
+
 ## list_agents 显式 run_id 的范围裁决（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 2（Claude 会话 dsh-9b 的 R16 跨 owner 隔离验收随附发现）。隔离本身通过，
@@ -12289,6 +12349,7 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **变异验证**：把跨 owner 判定改成恒真 → 5 条跨 owner 测试全红；把自派任务判定改成恒假 → 自派测试变红；恢复后全绿。
 - **回归**：`test_runtime_guidance.py`、`test_wake_queue.py`、`test_orchestration_tool_constants.py` 通过。
 - 尚无真实 Gateway 双会话端到端验收（第 3 片用 fake LLM 做；真实环境由 dev 安排）。
+
 ## Jev curator invalid_input 快速失败修复（2026-09-28，分支 `my-agent/self-dev-4`）
 
 - **来源**：my-agent-4 开发交流板任务 1。owner 的 `data/decision/outcomes.jsonl` 里 point=curator 有 7 条
@@ -13232,6 +13293,7 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
   - 审计与菜单：model_selection 改为已统计并带适用范围说明，“未统计”的例子换成 skill_tool。
 - **变异验证（11 种全部被抓住，逐个字节级还原）**：关闭不计、关闭时落盘（被原零 I/O 测试拦下）、阶段原因不计、没有候选不计、
   材料不合格不计、轮次已关不计、`called` 提到提交之前、机制性退出误计、诊断丢 `note`、菜单不显示 `note`、忽略 `flush` 参数。
+
 ## 宿主提示 host notices（2026-09-27，分支 `claude/be-host-notices`，基于 `eb7c639a1`）
 
 - **来源**：集成者派活（方案一，已读时机 B）。智能程度检测在后台跑完后，没有地方告诉用户结论。设计见 `docs/design/HOST_NOTICES.md`。
@@ -13251,6 +13313,7 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
 - **变异验证**：37 个全部被抓出：存取与渲染 10 个；线程字段与模型隐藏 5 个；Gateway 发布、取走、元数据、交付字段与 `/result` 白名单 8 个；
   飞书渲染与流事件名 2 个；TUI 与同会话窗口 5 个；历史回放 3 个；智能程度检测排队、清除与会话目标 4 个。每个都在
   `PYTHONDONTWRITEBYTECODE=1` 子进程里跑，并逐字节恢复。
+
 ## 决策点位的期限与模型引用只留覆盖层（2026-09-27，分支 `claude/decision-point-fields`）
 
 - **来源**：参数减量分类里的“决策点位 20 项”：12 个点位在 agent/memory/capability 三份配置里各有 `timeout_seconds`/`profile_id`
@@ -13328,6 +13391,7 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
   状态码、进度展示、撤销路由、记录合并、重新计时与失败释放 24 个；档案字段白名单、校验、原值、脱敏、编号长度、按用户账本 7 个；
   解析、命令目录、TUI 转发 5 个；Gateway 先执行后渲染 2 个；开关规范化与默认值 3 个。每个都在 `PYTHONDONTWRITEBYTECODE=1`
   子进程里跑并逐字节恢复。
+
 ## owner 路径按用户作用域、停机补写到达计数、数量界限统一（2026-09-27，分支 `claude/9b-owner-path-scope`，基于 main `946a26783`）
 
 - **来源**：9b 审查结论。`home_paths_with_owner` 没有按用户重设 `owner_memory_policy_json`，Gateway 里其它用户读到的是本机主用户的
@@ -13345,6 +13409,7 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
 - **变异验证（14 种全部被抓住，逐个字节级还原）**：作用域不重设 memory_policy、收尾不落盘、落盘提到停 HTTP 之前、落盘异常外泄、
   去掉取消在途决策、标签写死上限、标签上下限写反、数量类标签放回静态表、六个点位各自写回本地数字。
 - **code-size**：`_cmd_gateway_run_cleanup` 抽出 `_cancel_active_decisions` 后从 54 行降到 50 行；和 main 比身份新增 0。
+
 ## TUI 权限/模型菜单测试改为按状态等待（2026-09-27，分支 `claude/9b-tui-permission-wait`，基于 main `946a26783`）
 
 - **来源**：线上 CI `723c424d6` 的 test(3.12) 里，`test_tui_permissions_menu.py::test_f4_menu_keeps_focus_while_tool_approval_is_pending`
@@ -13370,6 +13435,7 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
   888 项全过；3.10、3.11 跑改动的 4 个文件，各 46 项全过。
 - **同类检查**：相邻 TUI 测试里其余 `sleep`，要么在有截止时间的轮询循环里，要么只读按键同步更新的内存状态
   （输入框、光标、任务队列、主界面导航列表），不涉及线程读写或浮层对话框，未改。
+
 ## 摘要阶段内存测试排除解释器驻留表扩容（2026-09-27，集成分支 `claude/integrate-13s`）
 
 - **现象**：参数减量第 1、2 批集成后，全仓 12 分片里 `test_host_summary_phase_lifetime.py::...[background]` 稳定失败：摘要入口计到 4.19MB，
@@ -13417,6 +13483,7 @@ C `72f23d0d9` 首轮只作静态审阅；随后在固定该提交的独立 check
   `config-get` 先 `str()`、遮挡函数原样返回、元组变列表、`--header`/`--env` 的值不遮、文本请求头原样保留、纯变量名被遮、
   `名字=值` 不查名字形状、`--开关=网址` 不遮密码、下一项是开关也当值遮、去掉凭据开关角色），每个都在
   `PYTHONDONTWRITEBYTECODE=1` 子进程里跑并逐字节恢复。
+
 ## 决策审计说清“每个点位最近为什么没触发”（2026-09-27，分支 `claude/9b-decision-miss-reasons`，基于 main `f824b6c10`）
 
 - **来源**：审计里某个点位调用 0 次时，用户只看到“0 次”，分不清是没打开、没到触发点，还是每次都被条件挡下。
@@ -14508,6 +14575,7 @@ child不展示历史正文时的读取回归先复现1 failed/1 passed，修复�
   - `/model` 编辑表单预填并原样回存标签，编辑其它字段不会丢。
 - **变异验证**：7 种各自使测试失败——校验结果丢标签、快捷新增白名单漏标签、决策模型可带标签、允许大写、主会话候选不带、子代理候选不带、表单不发送。改回后全部通过（变异子进程带 `PYTHONDONTWRITEBYTECODE=1`）。
 - **相关回归**：模型目录、服务商与采样、共享目录、决策全部、Gateway 选模观察与采用、子代理首请求选模、TUI 模型与决策菜单共 63 个文件 1399 passed。
+
 ## 能力推荐观测写进 Gateway 请求记录（2026-09-24，本地分支 `claude/decision-capability-observation`）
 
 - **新测试** `test_capability_presentation_observation.py` 6 项，走真实 Gateway 回合（只替换模型生成与决策后端）：
@@ -15585,6 +15653,7 @@ pending／handled 两种重试均保留一条 wake 和完整原观察。新顺�
 具体命令、严格 gate 与未覆盖项见[配对发布交接](docs/tasks/HANDOFF_STEP7_WAKE_PUBLICATION.md)。
 本片不做宿主自动恢复扫描；prepared 成功后仍需调用方重试，runner 复用原 WAL；无 key 不承诺重试幂等。
 离线故障回归不等于真实 TUI、硬断电或所有通知入口自动恢复，线上 CI 未作为验收来源。
+
 ## 自然长任务结束与稳定历史缓存补充
 
 官网 M2.7 的 fd→Python 真实任务已自然结束：canonical TaskRun/主代理/三个子代理均 done，
@@ -17520,6 +17589,7 @@ python3 scripts/check_clean_package.py .
 注释与示例清理要比较生产 Python AST、默认配置值、协议与依赖标识。允许的人类展示字符串变化需单列；构建包检查 LICENSE/NOTICE、vendor 许可和不含秘密数据。历史重写须先备份、只改授权引用、带 lease 更新，验证发布树不变。
 
 <!-- 媒体来源片 3adb61904 的既有记录；不代表当前 Compact 集成已验。 -->
+
 ## 官网真模型与TUI媒体验收
 
 2026-09-23，独立候选线，专用测试机限制为 1 CPU / 2 GiB；官网直连，不通过中转，不使用假模型作为本轮验收。
@@ -17774,6 +17844,7 @@ CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`�
 - 启动器用 `python -I` 跑（隔离 PYTHONPATH/用户 site，不被遮 ctypes/os）：`test_wrap_with_landlock_wraps_when_ready` 断言 argv 含 `-I`。
 - 施加失败用专门退出码 `APPLY_FAILED_EXIT_CODE`(97) + stderr 首行结构化标记（含 `GATEWAY_ISOLATION_APPLY_FAILED`），参数不对用 `BAD_ARGV_EXIT_CODE`(96)；`is_apply_failed` 识别；shell 工具把它映射成宿主错误码 `GATEWAY_ISOLATION_APPLY_FAILED`（`test_shell_maps_launcher_apply_failure_to_host_error_code`，普通非零仍是 COMMAND_FAILED）。
 - `parse_launcher_argv` 从严：空 `--deny`、越界端口（不在 0–65535）、`--deny` 后多于一个参数都按参数不对，不 exec。
+
 ## M 线 B7 插件安全底座（be，2026-10-03，分支 `claude/be-m1-b7`，基于 B1 `add244a92`）
 
 - **策略门**（`test_plugin_manifest_v8.py`，改写 B1 两道过渡门的用例、新增 owner/开关用例）：

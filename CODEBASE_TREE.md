@@ -1,5 +1,24 @@
 # Codebase Tree
 
+## 工具索引统一流式预筛（toolrefs / E11e，2026-10-08）
+
+```text
+|-- agent_py_agent/agent/common/tool_index_stream.py # 唯一权威逐行严格UTF-8/换行与安全字节预筛
+|-- agent_py_agent/agent/memory_archive/control_plane.py # E11a与通用控制面调用共享流式读取器
+|-- agent_py_agent/agent/memory_archive/compact_tool_output_refs.py # 原scope同源匹配，两类引用单扫描，投影不变
+|-- agent_py_agent/agent/memory_archive/artifact/reader.py # C逐行解析后保留ref/path候选，规范POSIX路径快路，最终权限/正文验证不变
+|-- agent_py_agent/agent/memory_store/promotion.py # 原证据回退条件与整文件失效，不导入archive层
+|-- agent_py_agent/tests/helper_tool_index_baseline.py # 冻结9e843077d整读内存oracle，保留E11a原断言
+|-- agent_py_agent/tests/test_tool_index_validation.py # C解析语法对照、资源限制、分块UTF-8与换行/异常顺序
+|-- agent_py_agent/tests/test_tool_ref_hot_paths.py # artifact/晋升/控制面旧新等价与错误合同
+|-- agent_py_agent/tests/test_tool_ref_hot_measurement.py # 高频真实入口合成索引计量
+|-- agent_py_agent/tests/test_tool_ref_scope_stream.py # 冻结旧口径、多根多形状等价与解析/枚举/打开计数
+|-- agent_py_agent/tests/test_tool_ref_timing_measurement.py # 同8入口分开测峰值与无探针三次耗时，供真基线复跑
+`-- agent_py_agent/tests/test_tool_ref_scope_measurement.py # 1000根同字节合成数据，压缩来源及收尾产物更新真实入口计量
+```
+
+关键职责：预筛不是归属判断；只优化索引，不改变正文/权限/schema/归档写入。scope carried同步复用，已知两源的request carried保留原流式及替换解码合同；无持久缓存。
+
 ## Curator消息/审计增量定位（mc2-e11c，2026-10-08）
 
 ```text

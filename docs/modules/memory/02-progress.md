@@ -1,5 +1,11 @@
 # 记忆与上下文维护状态
 
+## Compact工具引用按scope流式读取（toolrefs/E11e，2026-10-08，claude/07-c1-toolrefs，本地实现、待07复核）
+
+- Compact、artifact、晋升证据回退、通用控制面及scope carried共用common权威流式读取器；apply两类引用单扫描，E11a原分行/错误口径不变。
+- toolrefs-2按07审核意见删除Python词法校验器，逐行C解析后立即丢弃非候选，保留晋升整文件失效、路径异常与晚UTF-8优先；规范POSIX路径避免无关Path对象，无效ref异常支路不保留历史全集。最新回归与门禁见TESTS及任务RESULT。
+- 8个同语料入口峰值约222万字节；独立不开tracemalloc的交错三次中位耗时均不超过真基线+10%，详见TESTS。仍全量枚举/读字节，晋升旧峰值本来低；生产RSS/Gateway、Windows及扫描期间symlink并发变更未验证，未推送、合main或部署。
+
 ## Curator消息/审计只读游标缓存（mc2-e11c，2026-10-08，worker/mc2-e11c，本地实现、待3a复核）
 
 - `MessageStore.after_report/byte_offset_after` 共用有界进程缓存，稳态已追平线程零打开，增长线程校验锚行再读尾；审计跳过指纹未变的旧日分片和游标前缀。

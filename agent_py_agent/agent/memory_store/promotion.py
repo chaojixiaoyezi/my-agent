@@ -6,6 +6,7 @@ from __future__ import annotations
 # 模块用途: 核验消息/工具证据，执行保守自动策略，并在正式落点成功后标 promoted。
 
 import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -17,7 +18,11 @@ from ..capability.persona_repository import (
     PersonaRepository,
     persona_entry_id,
 )
-from ..common.json_io import read_jsonl_objects_report
+from ..common.tool_index_stream import (
+    InvalidToolIndexObject,
+    iter_decoded_tool_index_objects,
+    tool_index_prescreen_pattern,
+)
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from .candidate_models import (
     MemoryCandidate,
@@ -178,10 +183,7 @@ class LocalStoreToolEvidenceVerifier:
             return None
         matches = _owner_tool_archive_matches(
             self.owner_root,
-            run_id=run_id,
-            call_id=call_id,
-            tool_name=tool_name,
-            operation_id=claimed_operation_id,
+            _ToolArchiveMatch(run_id, call_id, tool_name, claimed_operation_id),
         )
         by_identity: dict[str, dict[str, object]] = {}
         for item in matches:
@@ -255,40 +257,48 @@ def _verified_runtime_gate_record(
     )
 
 
-# LLM: Index lookup is owner-root bounded and returns metadata rows only; raw output bodies and
-# physical artifact contents never enter Memory promotion verification.
-# 函数用途: 读取 owner 内所有规范工具索引并筛选精确调用。
-def _owner_tool_archive_matches(
-    owner_root: Path,
-    *,
-    run_id: str,
-    call_id: str,
-    tool_name: str,
-    operation_id: str,
-) -> list[dict[str, object]]:
+# LLM: 原四元匹配条件打包传递，归属仍由owner根与结构化字段证明，不从正文或字节预筛推断成功。
+# 类用途: 保存记忆晋升要核对的run/call/tool/operation身份。
+@dataclass(frozen=True)
+class _ToolArchiveMatch:
+    run_id: str
+    call_id: str
+    tool_name: str
+    operation_id: str
+
+
+# LLM: 共用唯一索引读取器，任一坏JSON/非对象/IO/UTF-8仍拒绝该文件；语法校验不构造无关历史对象。
+# 函数用途: 按原owner边界和四元身份流式筛选工具证据，不保存整份索引。
+def _owner_tool_archive_matches(owner_root: Path, query: _ToolArchiveMatch) -> list[dict[str, object]]:
+    prescreen = next((pattern for value in (query.run_id, query.call_id, query.operation_id, query.tool_name)
+                      if (pattern := tool_index_prescreen_pattern((value,))) is not None), None)
     matches: list[dict[str, object]] = []
     for path in tool_output_index_paths_for_lookup(owner_root):
-        report = read_jsonl_objects_report(
-            path,
-            context="memory_promotion.tool_output_index",
-        )
-        if report.load_errors:
-            continue
-        for row in report.records:
-            operation = row.get("tool_operation")
-            row_operation_id = (
-                str(operation.get("operation_id") or "").strip()
-                if isinstance(operation, dict)
-                else ""
-            )
-            if (
-                str(row.get("run_id") or "").strip() == run_id
-                and str(row.get("call_id") or "").strip() == call_id
-                and str(row.get("tool") or "").strip() == tool_name
-                and (not operation_id or row_operation_id == operation_id)
-            ):
-                matches.append(dict(row))
+        matches.extend(_archive_file_matches(path, query, prescreen))
     return matches
+
+
+# LLM: 文件级拒绝必须在扫描结束后提交候选；异常只吞原read_jsonl_objects_report会报告的IO/UTF-8和对象坏行。
+# 函数用途: 验证一个索引文件并返回精确身份匹配的记录，坏文件没有部分证据。
+def _archive_file_matches(path: Path, query: _ToolArchiveMatch, prescreen: re.Pattern[bytes] | None) -> list[dict[str, object]]:
+    try:
+        lines = iter_decoded_tool_index_objects(path, prescreen, validate_objects=True)
+        return [row for _, row in lines if _archive_record_matches(row, query)]
+    except (OSError, UnicodeDecodeError, InvalidToolIndexObject):
+        return []
+
+
+# LLM: 对象合法性由全行校验保证；精确比较保持原str/or/strip及嵌套operation_id规则，重复项仍保留。
+# 函数用途: 判断一条工具索引记录是否对应需要核验的旧工具调用。
+def _archive_record_matches(row: dict[str, object], query: _ToolArchiveMatch) -> bool:
+    if not isinstance(row, dict):
+        return False
+    operation = row.get("tool_operation")
+    operation_id = str(operation.get("operation_id") or "").strip() if isinstance(operation, dict) else ""
+    return (str(row.get("run_id") or "").strip() == query.run_id
+            and str(row.get("call_id") or "").strip() == query.call_id
+            and str(row.get("tool") or "").strip() == query.tool_name
+            and (not query.operation_id or operation_id == query.operation_id))
 
 
 # LLM: verifier 流式查一条真实消息并核验 thread/role/hash/quote，不把整段原话返回调用方。

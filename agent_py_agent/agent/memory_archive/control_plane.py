@@ -13,11 +13,22 @@ returns scoped references that compact/resume/debug flows can follow.
 
 import json
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.tool_index_stream import (
+    _PRESCREEN_ESCAPE_PATTERN as _PRESCREEN_ESCAPE_PATTERN,
+)
+from ..common.tool_index_stream import (
+    _skip_record_bytes as _skip_record_bytes,
+)
+from ..common.tool_index_stream import (
+    iter_prescreened_tool_index_lines as iter_prescreened_tool_index_lines,
+)
+from ..common.tool_index_stream import (
+    tool_index_prescreen_pattern as _tool_ref_prescreen_pattern,
+)
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from .schema import (
     RuntimeMemorySchemaOptions,
@@ -55,7 +66,7 @@ def query_memory_control_plane(root: str | Path, options: MemoryControlPlaneQuer
     workspace = Path(root)
     daily_events = _limited(_matching_records(_daily_events(workspace, options), options), options.limit)
     compact_applies = _limited(_matching_records(_compact_applies(workspace), options), options.limit)
-    tool_outputs = _limited(_matching_records(_tool_outputs(workspace), options), options.limit)
+    tool_outputs = _limited(_tool_outputs(workspace, options), options.limit)
     task_run_refs = _limited(_task_run_refs(daily_events, options), options.limit)
     return _result_payload(
         _ControlPlaneResultParts(workspace, options, daily_events, task_run_refs, compact_applies, tool_outputs)
@@ -95,10 +106,15 @@ def _compact_applies(workspace: Path) -> list[dict[str, Any]]:
     return _read_jsonl(workspace / "memory_archive" / "compact_applies" / "ledger.jsonl")
 
 
-def _tool_outputs(workspace: Path) -> list[dict[str, Any]]:
+# LLM: 通用控制面的嵌套scope、坏行投影及顺序不变；无安全run/task条件时完整解析，不提前截断读取。
+# 函数用途: 共用唯一索引读取器返回已匹配的控制面工具记录，不累积不相关历史。
+def _tool_outputs(workspace: Path, options: MemoryControlPlaneQueryOptions | None = None) -> list[dict[str, Any]]:
+    options = options or MemoryControlPlaneQueryOptions(limit=0)
+    prescreen = _tool_ref_prescreen_pattern((options.run_id or options.task_id,))
     rows: list[dict[str, Any]] = []
     for path in tool_output_index_paths_for_lookup(workspace):
-        rows.extend(_read_jsonl(path))
+        rows.extend(record for number, text in iter_prescreened_tool_index_lines(path, prescreen, universal_newlines=True)
+                    if _matches_scope(record := _decode_line(path, number, text), options))
     return rows
 
 
@@ -220,16 +236,6 @@ def _limited(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     return records[:limit] if limit > 0 else records
 
 
-# 预筛排除字符：JSON 字符串里必须转义的两个可见 ASCII（" 与 \）；其余可见 ASCII 在任何写法下逐字节出现。
-_PRESCREEN_EXCLUDED_CHARS = frozenset('"\\')
-# 布尔字面量经 str() 投影后大小写不同（JSON true → "True"），这类查询值不预筛（整行解析，保证不漏）。
-_PRESCREEN_BOOL_LIKE_RUN_IDS = frozenset({"True"})
-# LLM: 转义兜底扫描：安全 run_id 在 JSON 里还可能被写成 \u00XX（0x21–0x7E 的 \u 写法都以 \u00 开头）
-#   或 \/（只能编码 /）；两个分支共享前缀 \，sre 前缀扫描足够快。与字面量正则分开编译，避免混前缀
-#   打掉主正则的前缀优化（实测每次搜索慢约一个数量级，见 TESTS.md 的 mc3-e11a-fix 记录）。
-_PRESCREEN_ESCAPE_PATTERN = re.compile(rb"\\u00|\\/")
-
-
 # LLM: curator 批次级读取——一次 glob、一次顺序扫描全部工具输出索引，为每个 run 收集有界匹配行；
 #   与 query_memory_control_plane 的 tool_outputs 语义逐条等价：同一文件顺序、同一行序、同一
 #   _record_value/_matches_scope 匹配、同一"前 N 条"截断。区别只在"每个 run 各扫一遍"变成"全批扫一遍"。
@@ -258,9 +264,7 @@ def query_tool_output_refs_for_runs(
     return {"ok": True, "tool_outputs_by_run": collected}
 
 
-# LLM: 流式读一个索引文件：二进制按物理 LF 切（与 jsonl_lines 同一记录边界），行尾去掉一个 \r；
-#   每行都做严格 UTF-8 解码——文件含非法字节与旧 read_text 整文件解码一样失败（这是等价性要求，
-#   预筛只省 json.loads，不能顺手跳过解码）。文件不存在时不产出任何行（与 _read_jsonl 的检查一致）。
+# LLM: Curator 的桶与截断规则不变，逐行读取、UTF-8 和保守预筛交给 Compact 也使用的唯一读取器。
 # 函数用途: 把一个工具输出索引文件的匹配行收进各 run 的桶里。
 def _collect_tool_output_rows(
     path: Path,
@@ -268,44 +272,9 @@ def _collect_tool_output_rows(
     options_by_run: dict[str, MemoryControlPlaneQueryOptions],
     prescreen: re.Pattern[bytes] | None,
 ) -> None:
-    if not path.exists():
-        return
-    for line_number, raw in _iter_index_lines(path):
-        text = _decode_record_bytes(raw)
-        if _skip_record_bytes(raw, text, prescreen):
-            continue
+    for line_number, text in iter_prescreened_tool_index_lines(path, prescreen):
         record = _decode_line(path, line_number, text)
         _collect_matching_record(record, collected, options_by_run)
-
-
-# LLM: 生成器把文件句柄生命周期收在一处：迭代结束或异常时 with 都正常关闭，调用方按行拿
-#   (行号, 原始字节)；行号从 1 开始，与旧 jsonl_lines 的 enumerate 语义一致。
-# 函数用途: 按物理行流式产出索引文件的 (行号, 原始字节)。
-def _iter_index_lines(path: Path) -> Iterator[tuple[int, bytes]]:
-    with path.open("rb") as handle:
-        yield from enumerate(handle, start=1)
-
-
-# LLM: 预筛与空行检查合成一个"跳过"判断：字面量正则不中、且转义兜底也不中（无 \ 直接排除，否则查
-#   \u00/\/）的行才跳过；解码本身不在这里做——非 UTF-8 行必须在任何跳过判断前失败，才能与旧整文件
-#   解码等价。
-# 函数用途: 判断一行原始字节是否不参与归属判断（预筛未命中或空白行）。
-def _skip_record_bytes(raw: bytes, text: str, prescreen: re.Pattern[bytes] | None) -> bool:
-    if prescreen is not None and prescreen.search(raw) is None:
-        if b"\\" not in raw or _PRESCREEN_ESCAPE_PATTERN.search(raw) is None:
-            return True
-    return not text.strip()
-
-
-# LLM: JSONL 记录边界只有物理 LF；行尾一个 \r 是 CRLF 写入方兼容（与 jsonl_lines 逐字一致），
-#   记录内部的字符绝不当边界。解码用严格 UTF-8：非法字节让整个读取失败。
-# 函数用途: 把一行原始字节转成记录文本（去尾部 \n/\r 后严格解码）。
-def _decode_record_bytes(raw: bytes) -> str:
-    if raw.endswith(b"\n"):
-        raw = raw[:-1]
-    if raw.endswith(b"\r"):
-        raw = raw[:-1]
-    return raw.decode("utf-8")
 
 
 # LLM: 归属判断复用控制面同一套语义：先按 _record_value 找候选 run（顶层或 scope），再走 _matches_scope
@@ -329,48 +298,9 @@ def _collect_matching_record(
     bucket.append(record)
 
 
-# LLM: 预筛条件=run_id 全部是"JSON 不会转义的可见 ASCII"（! 到 ~ 去掉 " 和 \）且非布尔/数字样式。
-#   对这类 run_id，JSON 字符串解码后要等于它，原始字节只有三种可能：①原样包含 run_id——字面量正则
-#   命中；②含 \u 转义——安全字符都是 0x21–0x7E，\u 写法必然是 \u00XX，含字节 \u00；③含 \/ 转义
-#   （只能编码 /）。其余转义（\" \\ \b \f \n \r \t）只产出安全集外的字符，不可能构成匹配。
-#   所以预筛 = 字面量正则 + \u00/\/ 转义兜底（_PRESCREEN_ESCAPE_PATTERN）：命中任一项就照常解析、
-#   再按结构化 run_id 判断，误命中只多解析几行。两项分开写而不是并进同一个正则——混前缀会打掉
-#   sre 的前缀优化，实测每次搜索慢约一个数量级（mc3-e11a-fix）。
-#   每批只编译一次字面量正则（re.escape，无回溯风险）：每行一次 C 层 search，替代每行对全部 needle
-#   的 Python 级生成器步进（40 万行实测里预筛约占七成 CPU）。
-# 函数用途: 为全部安全的 run_id 编译"任一出现即命中"的字节正则；任一不安全就返回 None（整行解析，不漏匹配）。
-def _tool_ref_prescreen_pattern(run_ids: tuple[str, ...]) -> re.Pattern[bytes] | None:
-    if not run_ids or not all(_is_prescreen_safe_run_id(run_id) for run_id in run_ids):
-        return None
-    return re.compile(b"|".join(re.escape(run_id.encode("utf-8")) for run_id in run_ids))
-
-
-# LLM: 单个 run_id 的预筛安全判定；空串不预筛（all() 对空串恒真，必须显式排除）；布尔/数字样式
-#   不预筛——_record_value 用 str() 投影非字符串 JSON 值（true → "True"、1e2 → "100.0"），
-#   与 JSON 原样字节不同，预筛找不到会漏。
-# 函数用途: 判断 run_id 是否全由 JSON 不会转义的可见 ASCII 组成且不可能是 str() 改写的值。
-def _is_prescreen_safe_run_id(run_id: str) -> bool:
-    if not run_id or run_id in _PRESCREEN_BOOL_LIKE_RUN_IDS:
-        return False
-    if _is_numeric_like_run_id(run_id):
-        return False
-    return all(
-        "!" <= char <= "~" and char not in _PRESCREEN_EXCLUDED_CHARS
-        for char in run_id
-    )
-
-
-# 函数用途: 判断 run_id 是否是 float() 可解析的数字样式（含 1e2/1_0/带空格等 Python 接受的写法）。
-def _is_numeric_like_run_id(run_id: str) -> bool:
-    try:
-        float(run_id)
-    except ValueError:
-        return False
-    return True
-
-
 __all__ = [
     "MemoryControlPlaneQueryOptions",
+    "iter_prescreened_tool_index_lines",
     "query_memory_control_plane",
     "query_tool_output_refs_for_runs",
 ]

@@ -1,15 +1,19 @@
-# LLM: 本模块读取 owner 私有的原工具输出索引，为 Compact 恢复提供真实 run/attempt/turn/call 身份；缺失身份保持未知，不从正文猜测。
+# LLM: 本模块读取 owner 私有的原工具输出索引，为 Compact 恢复提供真实 run/attempt/turn/call 身份；引用入口共用 E11a 流式预筛，缺失身份保持未知，不从正文猜测。
 # 模块用途: 从任务工作区的工具索引中恢复调用引用、输出引用和可续接的调用事实及来源身份。
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator, Sequence
+import re
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import jsonl_lines
+from ..common.tool_index_stream import (
+    iter_prescreened_tool_index_lines,
+    tool_index_prescreen_pattern,
+)
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup, tool_output_root
 from ..tooling.runtime_facts import project_process_runtime_facts
 from .tool_output_externalizer import model_visible_tool_parameters
@@ -22,15 +26,14 @@ _CALL_IDENTITY_FIELDS = ("run_id", "attempt_id", "turn_id", "call_id")
 CARRIED_RUNTIME_ONLY_FIELD = "carried_runtime_only"
 
 
-# LLM: Child lifecycle wakes share the originating conversation turn. Deduplicate only complete
-# run/attempt/turn/call identities whose fields are real strings; unknown legacy identities stay
-# visible and collapse only for byte-identical index rows. Scoped aliases never prove equality.
+# LLM: 旧生命周期续跑也共用scope流式预筛；读全匹配行后才投影，完整四元身份去重，未知身份只合并相同行。
+#   归属、重复保留、运行时标记及原读失败合同不变，不将所有历史索引载入列表。
 # 函数用途: 从任务原索引恢复调用历史；跨 attempt/turn 的同号调用都保留，旧身份未知时只合并完全相同的索引行。
 def carried_tool_call_records(
     workspace: str | Path,
     scope: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    rows = _read_tool_output_index(Path(workspace))
+    rows = list(_scoped_tool_index_rows(Path(workspace), scope))
     return _carried_records((row, False) for row in rows if _is_indexed_call_fact(row) and _matches_scope(row, scope))
 
 
@@ -125,16 +128,84 @@ def _index_line_row(raw: bytes, needles: tuple[bytes, ...]) -> dict[str, Any]:
     return _json_line(raw.decode("utf-8", errors="replace").removesuffix("\n").removesuffix("\r"))
 
 
+# LLM: 收尾只读索引元数据；复用 E11a 预筛后仍用原 scope、kind、ledger 排除及投影，错误优先级沿旧整读，不读 artifact。
+# 函数用途: 返回当前范围的大输出引用，只解析可能匹配的行，不把全部历史索引装进列表。
 def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
-    # 大输出恢复产物经 _write_output_artifact→_append_index 已写 kind=tool_output
-    # 行(带 path)进 index.jsonl, 直接读 index 即可, 无需另扫 artifact 文件。
-    rows = _read_tool_output_index(Path(workspace))
-    return [_source_ref(row) for row in rows if _is_tool_output_row(row) and _matches_scope(row, scope)]
+    return _read_scope_refs(Path(workspace), scope, {"tool_outputs": _source_ref})["tool_outputs"]
 
 
+# LLM: 单类入口不投影其它 kind，保持不相关类型的坏字段不会引发本类投影异常；顺序/重复项不变。
+# 函数用途: 返回当前范围的小调用引用，不整读其它回合的索引。
 def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
-    rows = _read_tool_output_index(Path(workspace))
-    return [_tool_call_ref(row) for row in rows if _is_tool_call_row(row) and _matches_scope(row, scope)]
+    return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref})["tool_calls"]
+
+
+# LLM: Compact 应用一次遍历同时收两类引用；沿原投影保留身份/双参数/缺失路径/重复项，各类保持原顺序，先调用后输出报投影错。
+# 函数用途: 一次枚举和读取索引生成压缩包的小调用与大输出引用，避免原先重复整读两遍。
+def tool_source_refs(workspace: str | Path, scope: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref, "tool_outputs": _source_ref})
+
+
+# LLM: 只保留匹配投影与每类首错，不保留原始索引全集；整次读取错误优先于投影错误，投影错按原调用类别顺序抛出。
+#   此处没有降级返回：任一错误都仍失败，不返回半份 refs；消费者只在完整扫描结束后拿结果。
+# 函数用途: 一次读完当前 scope 引用，延后投影报错以保持旧整读的 IO/UTF-8 优先级。
+def _read_scope_refs(
+    workspace: Path, scope: dict[str, Any], projectors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {key: [] for key in projectors}
+    errors: dict[str, Exception] = {}
+    for row in _scoped_tool_index_rows(Path(workspace), scope):
+        _collect_scope_projection(row, projectors, result, errors)
+    for key in projectors:
+        if key in errors:
+            raise errors[key]
+    return result
+
+
+# LLM: 单类只投影被请求的类型；投影异常原样保留、全量读取后再抛，不吞错误、不缓存正文；每类只保留首错。
+# 函数用途: 将匹配行加入相应的引用桶，或暂记首个字段/投影错误，继续验证后续索引可读性。
+def _collect_scope_projection(
+    row: dict[str, Any], projectors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]],
+    result: dict[str, list[dict[str, Any]]], errors: dict[str, Exception],
+) -> None:
+    kind = "tool_calls" if _is_tool_call_row(row) else "tool_outputs" if _is_tool_output_row(row) else ""
+    projector = projectors.get(kind)
+    if projector is None or kind in errors:
+        return
+    try:
+        result[kind].append(projector(row))
+    except Exception as exc:
+        errors[kind] = exc
+
+
+# LLM: 不根据目录名推断归属，沿原 owner/runs/tasks 路径一次枚举；预筛只选一个非空 AND 条件作为必要条件。
+#   最终匹配仍用本模块原顶层四键与旧 conversation_request_id 回退，不借用 Curator 的嵌套 scope 规则。
+# 函数用途: 流式产出当前范围的索引行；IO/UTF-8 错误向上抛出，坏 JSON/非对象仍忽略。
+def _scoped_tool_index_rows(workspace: Path, scope: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    prescreen = _scope_prescreen_pattern(scope)
+    for path in tool_output_index_paths_for_lookup(workspace):
+        yield from (
+            row for _, text in iter_prescreened_tool_index_lines(path, prescreen, universal_newlines=True)
+            if (row := _json_line(text)) and _matches_scope(row, scope)
+        )
+
+
+# LLM: scope 是各键 AND、每键允许值 OR；任意一个安全非空键足以构成必要条件。旧请求字段回退的同值也必在原字节中。
+#   任一不安全值则该键不能用于预筛；所有键都不可证明或没有约束时 None=逐行解析，不能静默漏引用。
+# 函数用途: 复用 E11a 的字面量/转义安全判定，为一个范围选取可证明不漏的预筛正则。
+def _scope_prescreen_pattern(scope: dict[str, Any]) -> re.Pattern[bytes] | None:
+    for key in ("conversation_request_id", "request_id", "run_id", "task_id"):
+        pattern = tool_index_prescreen_pattern(_scope_expected_values(scope.get(key)))
+        if pattern is not None:
+            return pattern
+    return None
+
+
+# LLM: 与原 _scope_value_matches 的 str(value or '')/strip 和四种集合类型完全同源，不改变空允许集=不筛选语义。
+# 函数用途: 将范围的一项或一组值投影成原匹配使用的非空字符串，供匹配和预筛共同使用。
+def _scope_expected_values(expected: object) -> tuple[str, ...]:
+    values = expected if isinstance(expected, (list, tuple, set, frozenset)) else (expected,)
+    return tuple(text for item in values if (text := str(item or "").strip()))
 
 
 # LLM: Restore refs retain the indexed call identity, execution parameters and model_parameters;
@@ -175,24 +246,6 @@ def tool_call_refs(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(item) for item in items if isinstance(item, dict)]
 
 
-def _read_tool_output_index(workspace: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for path in tool_output_index_paths_for_lookup(workspace):
-        if not path.exists():
-            continue
-        rows.extend(_read_tool_output_index_path(path))
-    return rows
-
-
-def _read_tool_output_index_path(path: Path) -> list[dict[str, Any]]:
-    return [
-        payload
-        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-        for line in jsonl_lines(path.read_text(encoding="utf-8"))
-        if (payload := _json_line(line))
-    ]
-
-
 def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
     return all(
         not expected or _scope_value_matches(row, key, expected)
@@ -204,14 +257,10 @@ def _matches_scope(row: dict[str, Any], scope: dict[str, Any]) -> bool:
 # LLM: Active-turn recovery may receive a bounded batch of child wakes. Match each row by
 # typed conversation request ids while accepting pre-field legacy rows only when request_id
 # already equals that exact id; never broaden to the durable task id implicitly.
+# 值规范化与预筛共用，空值仍不约束；归属依旧只由结构化字段决定。
 # 函数用途: 判断工具索引行是否属于一个或一组明确用户回合，并兼容字段落盘前的同值旧记录。
 def _scope_value_matches(row: dict[str, Any], key: str, expected: object) -> bool:
-    values = (
-        tuple(str(item or "").strip() for item in expected)
-        if isinstance(expected, (list, tuple, set, frozenset))
-        else (str(expected or "").strip(),)
-    )
-    allowed = {item for item in values if item}
+    allowed = set(_scope_expected_values(expected))
     if not allowed:
         return True
     actual = str(row.get(key) or "").strip()
@@ -416,4 +465,5 @@ __all__ = [
     "tool_call_source_refs",
     "tool_output_artifact_refs",
     "tool_output_source_refs",
+    "tool_source_refs",
 ]

@@ -1,15 +1,18 @@
+# LLM: 只优化注册索引查找，权限边界、最后匹配和正文哈希保持原契约。
+# 模块用途: 按显式注册引用读取工具输出正文。
 from __future__ import annotations
-
-from ...common.json_io import jsonl_lines
 
 """explicit refs-only-to-body reader for externalized tool output artifacts."""
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
+from errno import ELOOP
 from pathlib import Path
 from typing import Any
 
+from ...common.tool_index_stream import iter_decoded_tool_index_objects
 from ...common.tool_output_paths import (
     tool_output_index_paths_for_lookup,
     tool_output_roots_for_lookup,
@@ -180,14 +183,21 @@ def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str
             payload["next_offset"] = payload["window_end"]
     return payload
 
+# LLM: 字面逻辑ref才可按原字节预筛；路径解析/链接/同名回退不能证明字节必要性，回退完整解析但只存候选。
+# 函数用途: 沿原最后匹配、scope和basename回退规则查找已注册artifact，不保存历史全集。
 def _find_index_record(
     root: Path,
     artifact_ref: str,
     request: ReadToolOutputArtifactRequest,
 ) -> dict[str, Any] | None:
-    records = _index_records_for_root(root)
-    ref_path = Path(artifact_ref).expanduser()
-    resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
+    try:
+        ref_path = Path(artifact_ref).expanduser()
+        resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
+    except Exception:
+        # 原先先读取索引再求引用路径；极端引用路径错误不能遮蔽索引的读取/解码错误。
+        _index_records_for_root(root)
+        raise
+    records = _index_records_for_root(root, _ArtifactIndexQuery(artifact_ref, resolved_ref))
     matches = [
         record
         for record in records
@@ -207,19 +217,53 @@ def _find_index_record(
     return None
 
 
+# LLM: 原匹配仍先验证每行路径；普通POSIX规范绝对路径不构造大量interned Path，其他路径保持原生Path语义。
+# 函数用途: 沿原逻辑引用/路径匹配与错误合同核对一条注册记录。
 def _record_matches_ref(
     record: dict[str, Any],
     artifact_ref: str,
     resolved_ref: Path | None,
 ) -> bool:
-    record_path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
+    record_path = _resolve_index_record_path(str(record.get("path", "") or ""))
     literal_refs = {
         str(record.get("path", "") or ""),
         str(record.get("sha256", "") or ""),
         str(record.get("scoped_call_id", "") or ""),
         str(record.get("call_id", "") or ""),
     }
-    return artifact_ref in literal_refs or bool(resolved_ref is not None and record_path == resolved_ref)
+    comparable_ref = str(resolved_ref) if isinstance(record_path, str) else resolved_ref
+    return artifact_ref in literal_refs or bool(resolved_ref is not None and record_path == comparable_ref)
+
+
+# LLM: 仅规范POSIX绝对路径可省Path构造；相对、~、..、双根与Windows均走原实现，不能改解析和大小写规则。
+# 函数用途: 为索引匹配解析路径，避免不相关文件名使标准库intern池扩容。
+def _resolve_index_record_path(path: str) -> str | Path:
+    canonical_posix = os.name == "posix" and path.startswith("/") and not path.startswith("//") and os.path.normpath(path) == path
+    if not canonical_posix:
+        return Path(path).expanduser().resolve(strict=False)
+    return _resolved_posix_index_path(path)
+
+
+# LLM: 与Path.resolve(strict=False)相同：realpath后stat复核环链，普通缺失/权限错误不抛，ELOOP仍RuntimeError。
+# 函数用途: 复用标准库真实路径解析而不为每个历史文件名创建Path对象。
+def _resolved_posix_index_path(path: str) -> str:
+    try:
+        resolved = os.path.realpath(path, strict=False)
+    except OSError as exc:
+        _raise_index_path_loop(exc)
+        raise
+    try:
+        os.stat(resolved)
+    except OSError as exc:
+        _raise_index_path_loop(exc)
+    return resolved
+
+
+# LLM: POSIX环链的错误类别和文字沿原Path.resolve；不将其它OSError误报为环链。
+# 函数用途: 保留nonstrict解析遇到真实链接循环时的错误合同。
+def _raise_index_path_loop(exc: OSError) -> None:
+    if exc.errno == ELOOP:
+        raise RuntimeError("Symlink loop from %r" % exc.filename)
 
 
 def _scoped_matches(
@@ -287,23 +331,49 @@ def _unique_record_by_basename(records: list[dict[str, Any]], filename: str) -> 
     return matches[0] if len(matches) == 1 else None
 
 
-def _index_records(index_path: Path) -> list[dict[str, Any]]:
-    try:
-        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-        lines = jsonl_lines(index_path.read_text(encoding="utf-8"))
-    except OSError:
+# LLM: 描述查找的必要字节条件与最终原判定输入，不改变artifact读取权限或正文哈希验证。
+# 类用途: 将查找条件一起传给共用流式读取器，避免宽参数列表。
+@dataclass(frozen=True)
+class _ArtifactIndexQuery:
+    artifact_ref: str
+    resolved_ref: Path | None
+
+
+# LLM: IO失败整份丢弃；坏JSON/非对象忽略，严格UTF-8不吞。query=None只用于引用错误时验证优先级，不收集历史。
+# 函数用途: 流式读取一个工具索引的artifact查找候选，不整读文本或累积不相关记录。
+def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None) -> list[dict[str, Any]]:
+    if query is None:
+        _validate_artifact_index_file(index_path)
         return []
     records: list[dict[str, Any]] = []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
+    try:
+        lines = iter_decoded_tool_index_objects(index_path)
+        records.extend(record for _, record in lines if _artifact_index_candidate(record, query))
+    except OSError:
+        return []
     return records
+
+
+# LLM: 候选错误暂存到原最终查找；索引与文件系统在扫描过程中没有事务快照保证，不宣称并发链接变化等价。
+# 函数用途: 判断解析后的行是否可能用于精确ref或路径同名回退。
+def _artifact_index_candidate(record: dict[str, Any], query: _ArtifactIndexQuery) -> bool:
+    try:
+        return _record_matches_ref(record, query.artifact_ref, query.resolved_ref) or bool(
+            query.resolved_ref is not None
+            and Path(str(record.get("path", "") or "")).name == Path(query.artifact_ref).expanduser().name
+        )
+    except Exception:
+        return True
+
+
+# LLM: 错误引用仍先读完原索引以保持异常优先级，但无查询不能退回全集列表；IO沿原逐文件忽略。
+# 函数用途: 只验证索引读取和解码，不保留任何记录。
+def _validate_artifact_index_file(path: Path) -> None:
+    try:
+        for _ in iter_decoded_tool_index_objects(path):
+            pass
+    except OSError:
+        pass
 
 
 def _record_source_hint(record: dict[str, Any]) -> str:
@@ -328,10 +398,12 @@ def _error_payload(error_code: str, artifact_ref: str, message: str) -> dict[str
     }
 
 
-def _index_records_for_root(root: Path) -> list[dict[str, Any]]:
+# LLM: 所有根只枚举一次，按原目录/行顺序合并候选；最终选择仍由原_find_index_record负责。
+# 函数用途: 收集owner/runs/tasks中的artifact候选，避免extend整份历史索引。
+def _index_records_for_root(root: Path, query: _ArtifactIndexQuery | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for index_path in tool_output_index_paths_for_lookup(root):
-        records.extend(_index_records(index_path))
+        records.extend(_index_records(index_path, query))
     return records
 
 

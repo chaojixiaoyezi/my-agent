@@ -640,7 +640,10 @@ def test_batch_reader_memory_stays_bounded(tmp_path: Path) -> None:
 
     tracemalloc.start()
     tracemalloc.reset_peak()
-    legacy = query_memory_control_plane(
+    # 通用控制面也已流式化；旧路径必须冻在真正基线，原峰值/数量断言全部保留。
+    from agent_py_agent.tests.helper_tool_index_baseline import legacy_tool_output_query
+
+    legacy = legacy_tool_output_query(
         tmp_path,
         MemoryControlPlaneQueryOptions(run_id="run-hit", limit=10),
     )
