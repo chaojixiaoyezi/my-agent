@@ -150,20 +150,23 @@ def _install_fake_io(agent, thread, monkeypatch, remote):
     return business, summaries, executed
 
 
-# LLM: 两轮都走公开agent.run，宿主存储动作只在本例临时Store模拟，不能短路恢复与提交。
-# 函数用途: 比较本轮中途压缩的末请求与下一轮首请求的完整前缀。
-@pytest.mark.parametrize("remote", [True, False], ids=["responses_compaction", "text_summary"])
-@pytest.mark.parametrize("method_mode", ["none", "on", "off"])
-def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatch, remote, method_mode):
-    agent, thread, prior = _prepare_run(tmp_path, remote)
+# LLM: 沿真实方法读取准备主会话目录，开关只改合成工作区，保持原生产权限边界。
+# 函数用途: 给文字/密文用例设置未读、开启、关闭三种对照。
+def _prepare_midturn_method(run, monkeypatch, method_mode):
+    agent, thread, prior = run
     if method_mode != "none":
         prior = _seed_method(agent, thread, prior, monkeypatch)
         if method_mode == "off":
             path = capability_config_path_for(agent)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("conversation_method_carry_enabled: false\n", encoding="utf-8")
+    return prior
+
+
+# LLM: 存储宿主需把 canonical 结果写入真实行，下一轮由公开重放函数读取，不能手造出站前缀。
+# 函数用途: 为两次真实运行提供合成输入与结果的持久化函数。
+def _midturn_runner(agent, thread):
     store = agent.conversation_store
-    business, summaries, executed = _install_fake_io(agent, thread, monkeypatch, remote)
     # LLM: 存储宿主需把canonical结果写入真实行，下一轮由公开重放函数读取。
     # 函数用途: 执行一轮并持久合成输入与结果。
     def run_turn(number, seed, context):
@@ -178,6 +181,19 @@ def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatc
             "metadata": {"conversation_request_id": request,
                          "canonical_native_messages": canonical_native_messages_envelope(result.canonical_native_messages)}})
         return result
+    return run_turn
+
+
+# LLM: 两轮都走公开agent.run，不能短路恢复与提交；保留原生工具对的容量用例独立测试。
+# 函数用途: 比较本轮中途压缩的末请求与下一轮首请求的完整前缀。
+@pytest.mark.parametrize("remote", [True, False], ids=["responses_compaction", "text_summary"])
+@pytest.mark.parametrize("method_mode", ["none", "on", "off"])
+def test_two_real_turns_extend_post_compact_provider_prefix(tmp_path, monkeypatch, remote, method_mode):
+    agent, thread, prior = _prepare_run(tmp_path, remote)
+    prior = _prepare_midturn_method((agent, thread, prior), monkeypatch, method_mode)
+    store = agent.conversation_store
+    business, summaries, executed = _install_fake_io(agent, thread, monkeypatch, remote)
+    run_turn = _midturn_runner(agent, thread)
 
     first = run_turn(1, ConversationHistorySeed(canonical_messages=prior),
                      AppliedCompactContext(thread.thread_id, THREAD_COMPACT_SCOPE, resolve_compact_summary_view(agent, thread, THREAD_COMPACT_SCOPE)))

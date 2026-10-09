@@ -1,5 +1,11 @@
 # Subagent Structure
 
+## 会话方法沿用的主/子边界（2026-10-08，w1）
+
+- `capability/method_carry.py::method_thread_id` 保留主会话资格判断；引用预算预留、完整重读参数和代次投递均不另建子授权入口。
+- `agent_core/_tool_loop_service.py::_apply_native_compact_plan` 在 CAS 后同块刷新视图，再调用原 prepare；prepare 自行挡住子代理/隔离/控制面，只有当前 IR 可以承载参考资料，prior 不承载。
+- 取消和原 task pin/ActionPolicy 保留；只读静态/合成用例范围与真实生产未验项见 TESTS，不把带回参考当能力批准。
+
 ## rdfloor2 共用路径解析与 cwd（2026-10-05，已实现，待外部复验）
 
 - `attempt/sandbox.py` 的 `_symlink_path_nodes` 按 lstat/readlink 解析分量，`_readlink_node` 只读文件系统事实，`_symlink_metadata_rules` 给两读模式投影精确元数据。不新造执行链、不据规则形状称启动成功。

@@ -318,6 +318,31 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/eval/pack_pick_bench.py run --home "$BEN
 
   合计约 800 万，九成左右命中缓存。评审用 Claude 子代理，不占 MiniMax。
 
+### 10-08 跟进（w1）
+
+状态：**已实现，待 6d 复核**。本次基于 `7dd3f9ba0`，不改开关默认值、权限、pins 或持久化字段。
+
+- 引用降级落在 `capability/method_carry.py` 的 `_minimum_method_references`、`_prepare_method_pieces`、
+  `_prepare_method_piece` 和 `_prepare_method_reference`。先按包优先、同类最近使用优先，为有资格且可见的方法
+  留完整最小引用的位置；标题、每条分隔符和引用都按 `estimate_tokens` 保守分项计费，额外预算才交给正文。
+  三个长 Skill、总预算 3000 的用例保留首条截断正文及后两条引用，三条都推进代次；引用也放不下的保持未消费，下一运行可再试。
+- 引用包含完整 `skill_search` get 参数；能力包的 SHA 和激活代次取当前受限快照，资料清单过滤失效路径，整份清单放得下才带。
+  `_prepare_package_method` 优先给入口正文预算，不能让可选清单挤掉本可容纳的入口；空清单不占预算。入口缺席时才退完整引用。
+  空/八份资料的紧预算红测及宽预算完整清单回归覆盖此边界；正文为空、普通读取失败或超预算均可降级。`_prepare_skill_method` 显式重抛
+  `InterruptedError`、`ToolCancelled`、`CancelledError`，包加载原有重抛链不变。只有真实 RuntimeFacts 投递成功才提交已带回代次。
+- 中途挂点在 `agent_core/_tool_loop_service.py::_apply_native_compact_plan` 赢得 CAS 后：同一个
+  `compact_context is not None` 块中先 `_refresh_native_compact_context`，再 `prepare_conversation_method_carry`，最后 publish。
+  只追加当前 IR，不改 prior；运行内 attempts 和跨运行 `carried_generation` 保留每代一次，关闭及无主线程路径保持不带。
+- 预算回收选择：**不改变原压缩目标**，补带仍守现有缓存预算。新增 `test_conversation_method_native_compact.py` 实走
+  checkpoint/CAS 和两次 `build_tool_loop_prompt`：15 个完整工具对裁剪到 3 对，开/关补带后下一 build 均保留 3 对、回收 0，代次不再增加。
+  这验证合成 40000 窗口场景的实际余量，并非保证所有窗口都无需回收；不把空工具对或替代入口当作此链路证据。
+- 缓存证明：`test_conversation_method_prefix.py` 经真实 Chat 序列化、读文件和 canonical 重放，只有 HTTP 运输为模拟器。
+  最终 `core-final.xml` 正文带回 521/3000、引用带回 167/171；后两请求模拟命中分别为正文开 25979/29091、关 24606/27718，
+  引用开 25034/28146、关 24606/27718。两种模式均逐字节前缀延伸且每代一次；数字含临时路径等输入，不与早先计量混为一组。
+  `test_midturn_compact_prefix.py` 保留文字/密文双运行前缀延伸和同代去重；核心 83 项通过，六项单变异均 pytest rc=1，详见 TESTS。
+- 本地模拟命中量不是供应商 usage。真实模型、TUI/飞书、业务质量、Linux 全量和生产观察点**未验证**；
+  交 6d 审阅后由 07 复核前缀及容量边界，再按本节原生产验收步骤补真机证据。
+
 ## 7. 总用量与不做的事
 
 - MiniMax 合计约 1100–1200 万输入 token，九成左右命中缓存，约是 10-07 学做包生产测试（2150 万）的一半。

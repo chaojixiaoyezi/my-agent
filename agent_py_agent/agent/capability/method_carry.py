@@ -312,21 +312,47 @@ def _carry_budget(agent, config) -> int:
     return max(0, int(config.capability_bundle_max_tokens)) or resolve_model_context_window_tokens(agent)
 
 
-# LLM: 次序不变，完整片段不能投递时只降为当前授权快照的引用；头、分隔符、引用及资料均计费，不截 JSON。
-# 函数用途: 在缓存总预算内准备正文或重读提示，连提示都放不下的条目保留下一 run 资格。
+# LLM: 先按原次序给当前可见方法留完整引用底线，再把多余预算依次给正文；分项向上取整保守覆盖头和分隔。
+# 函数用途: 防止首个长正文挤掉后续方法；至少引用也放不下的条目不消费代次。
 def _prepare_method_pieces(request: _MethodCarryRequest, rows: list) -> list:
-    ordered = sorted(rows, key=lambda row: (row["kind"] != "capability_package", -row["last_used_at"]))
+    references = _minimum_method_references(request, rows)
+    spare = max(0, request.max_tokens - estimate_tokens(_CARRY_HEADER)
+                - sum(estimate_tokens("\n\n" + text) for _row, text in references))
     pieces = []
-    for row in ordered:
-        used = _carry_text(pieces)
-        remaining = max(0, request.max_tokens - estimate_tokens(used + "\n\n"))
-        loader = _prepare_package_method if row["kind"] == "capability_package" else _prepare_skill_method
-        text = loader(request, row, remaining)
-        if not text or estimate_tokens(used + "\n\n" + text) > request.max_tokens:
-            text = _prepare_method_reference(request, row, remaining)
-        if text and estimate_tokens(used + "\n\n" + text) <= request.max_tokens:
-            pieces.append((row, text))
+    for row, reference in references:
+        remaining = estimate_tokens("\n\n" + reference) + spare - estimate_tokens("\n\n")
+        text = _prepare_method_piece(request, (row, reference), remaining)
+        spare = max(0, spare + estimate_tokens("\n\n" + reference) - estimate_tokens("\n\n" + text))
+        pieces.append((row, text))
     return pieces
+
+
+# LLM: 不读取正文或消费代次；只保留当前授权快照可生成参数且预算够底线的方法，跳过项不挤掉后续较短引用。
+# 函数用途: 先包后 skill、同类最近优先，算出至少能带回的完整引用清单。
+def _minimum_method_references(request: _MethodCarryRequest, rows: list) -> list:
+    ordered = sorted(rows, key=lambda row: (row["kind"] != "capability_package", -row["last_used_at"]))
+    remaining = max(0, request.max_tokens - estimate_tokens(_CARRY_HEADER))
+    references = []
+    for row in ordered:
+        text = _method_reference_line(request, row)
+        cost = estimate_tokens("\n\n" + text)
+        if text and cost <= remaining:
+            references.append((row, text))
+            remaining -= cost
+    return references
+
+
+# LLM: method 为同一条目与其最小引用的只读输入对；remaining 不含分隔，后续引用已预留，读中断原样传播。
+# 函数用途: 将当前方法的余量交给正文，正文失败或超预算时保留完整引用及放得下的资料清单。
+def _prepare_method_piece(request: _MethodCarryRequest, method: tuple[dict, str], remaining: int) -> str:
+    row, reference = method
+    if remaining <= estimate_tokens(reference):
+        return reference
+    loader = _prepare_package_method if row["kind"] == "capability_package" else _prepare_skill_method
+    text = loader(request, row, remaining)
+    if text and estimate_tokens(text) <= remaining:
+        return text
+    return _prepare_method_reference(request, row, remaining) or reference
 
 
 # LLM: 引用只能来自当前受限快照；不读正文、不改 pin、不恢复已停用身份，完整参数复用原包协议。
@@ -341,57 +367,64 @@ def _method_read_parameters(request: _MethodCarryRequest, row: dict) -> dict:
     return {"action": "get", "skill_id": entry.stable_id} if entry is not None else {}
 
 
-# LLM: 引用沿同一总预算和 RuntimeFacts 提交门，不代表读成功或授权；包资料仅在整份完整清单放得下时追加。
-# 函数用途: 正文这次没带回时留一行中文和完整重读参数，预算更宽时保留当前版本的资料清单。
-def _prepare_method_reference(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
+# LLM: 仅当前授权快照生成完整 get 参数；本行无正文也无资料清单，作为所有方法共用的预算底线。
+# 函数用途: 正文缺席时说明本会话曾用过这个方法，以及如何重新读取。
+def _method_reference_line(request: _MethodCarryRequest, row: dict) -> str:
     arguments = _method_read_parameters(request, row)
     if not arguments:
         return ""
-    text = "本会话用过的方法，正文这次没带回；需要时用 skill_search 重读：" + json.dumps(
+    return "本会话用过的方法，正文这次没带回；需要时用 skill_search 重读：" + json.dumps(
         arguments, ensure_ascii=False, separators=(",", ":"))
+
+
+# LLM: 引用沿同一总预算和 RuntimeFacts 提交门，不代表读成功或授权；包资料仅在整份完整清单放得下时追加。
+# 函数用途: 正文这次没带回时留一行中文和完整重读参数，预算更宽时保留当前版本的资料清单。
+def _prepare_method_reference(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
+    text = _method_reference_line(request, row)
+    if not text:
+        return ""
     if estimate_tokens(text) > remaining:
         return ""
     if row["kind"] == "capability_package":
         package = request.scope.skills.resolve_package(row["package_id"])
         resources = _package_method_resources(package, row)
-        if estimate_tokens(text + "\n\n" + resources) <= remaining:
+        if resources and estimate_tokens(text + "\n\n" + resources) <= remaining:
             text += "\n\n" + resources
     return text
 
 
-# LLM: 包按当前授权快照 ref 读；原 reader/policy/pins 保持，停用/删除不退回全局安装，升级不绕旧 task pin。
-# 函数用途: 带回包入口和当前版本仍存在的已读资料清单，不加载资料正文或执行脚本。
+# LLM: 包按当前授权快照 ref 优先取得入口；资料清单是可选附带，不预扣正文预算，reader/policy/pins 保持。
+# 函数用途: 先带回包入口，完整资料清单仍能容纳时才追加，不加载资料正文或执行脚本。
 def _prepare_package_method(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
     from .package_selection_context import prepare_package_entry_context
 
     package = request.scope.skills.resolve_package(row["package_id"])
     if package is None:
         return ""
-    resource_text = _package_method_resources(package, row)
-    reserved = estimate_tokens(resource_text + "\n\n")
-    if remaining <= reserved:
-        return ""
     entry = prepare_package_entry_context(
         request.agent, request.params, request.scope, [package.to_ref()], authority=request.authority,
-        claim_id=f"carry:{request.thread_id}:{request.generation}", max_tokens=remaining - reserved)
+        claim_id=f"carry:{request.thread_id}:{request.generation}", max_tokens=remaining)
     if not entry.text:
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_ENTRY_UNAVAILABLE")
         return ""
-    return entry.text + "\n\n" + resource_text
+    resources = _package_method_resources(package, row)
+    if resources and estimate_tokens(entry.text + "\n\n" + resources) <= remaining:
+        return entry.text + "\n\n" + resources
+    return entry.text
 
 
-# LLM: 仅当前清单中存在的路径提供完整重读参数，入口不算资料；不替旧建议去掉 expected pin。
-# 函数用途: 把压缩前读过的包内资料投影成路径与 next_read 清单。
+# LLM: 仅当前清单中存在的路径提供完整重读参数，入口不算资料；空清单不占预算，不去掉 expected pin。
+# 函数用途: 把压缩前读过的包内资料投影成路径与 next_read 清单，没有有效路径时为空。
 def _package_method_resources(package, row: dict) -> str:
     from .package_snapshot import package_read_parameters
     paths = [path for path in row.get("resource_paths", ()) if path != package.entry_document and package.resolve(path) is not None]
     references = [{"resource_path": path, "next_read": {**package_read_parameters(package.to_ref()), "resource_path": path}}
                   for path in paths]
-    return "压缩前读过的包内资料：\n" + json.dumps(references, ensure_ascii=False, separators=(",", ":"))
+    return "压缩前读过的包内资料：\n" + json.dumps(references, ensure_ascii=False, separators=(",", ":")) if references else ""
 
 
-# LLM: 普通 skill 仍经原工具 ActionPolicy，只读当前快照正文并按完整投递 token 截开头；失败不泄漏异常正文。
-# 函数用途: 带回普通 skill 正文开头，保留完整稳定身份；预算放不下身份时跳过。
+# LLM: 普通 skill 仍经原工具 ActionPolicy，只读当前快照并截正文；取消原样传播，普通失败仅固定码，不泄漏异常正文。
+# 函数用途: 带回普通 skill 正文开头并保留完整身份，读中断不降为引用、不消费代次。
 def _prepare_skill_method(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
     from .package_selection_authority import package_entry_policy
 
@@ -406,7 +439,9 @@ def _prepare_skill_method(request: _MethodCarryRequest, row: dict, remaining: in
         return ""
     try:
         body = request.scope.skills.read_body(entry.stable_id)
-    except Exception:  # noqa: BLE001 - 恢复失败只留结构化提示码。
+    except (InterruptedError, ToolCancelled, CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - 普通读失败降为引用；中断不能被当成读取失败吞掉。
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_SKILL_UNAVAILABLE")
         return ""
     request.authority.check()

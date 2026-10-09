@@ -130,6 +130,9 @@
 |-- agent_py_agent/tests/test_conversation_method_carry.py # 原线程锁内成功读取登记、主会话边界、容量、隐藏字段和立即生效开关
 |-- agent_py_agent/tests/test_conversation_method_directory.py # 首次使用显示顺序、required 必显、逐 run 冻结及关闭/失效的旧提示字节
 |-- agent_py_agent/tests/test_conversation_method_restore.py # 压缩代次、完整投递预算、当前版本资料参数、取消/失败不消费资格
+|-- agent_py_agent/tests/test_conversation_method_reference.py # 引用底线预留、完整get参数与资料过滤、中断原样传播、成功消费代次
+|-- agent_py_agent/tests/test_conversation_method_native_compact.py # 真实checkpoint/CAS后补带和下一build预算回收，完整工具对与同代去重
+|-- agent_py_agent/tests/test_conversation_method_prefix.py # 真实Chat序列化正文/引用startup前缀延伸及模拟命中量开关对照
 |-- agent_py_agent/tests/test_conversation_method_commands.py # using/remove 的认证线程范围、TUI 文本往返和 Gateway 共用入口
 |-- agent_py_agent/tests/test_conversation_method_gateway.py # 三轮真实 get 与原 Compact 检查点提交、第二轮带回及同代不重复（仅模型传输替身）
 |-- agent_py_agent/agent/capability/package_build.py # 能力包（v7）与文件型插件包（v6/v8）唯一的打包实现：清单、摘要、成员顺序与权限位、复验；两个打包脚本只是薄壳
