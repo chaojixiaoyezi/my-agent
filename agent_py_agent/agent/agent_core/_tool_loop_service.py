@@ -774,6 +774,7 @@ def _plan_provider_compaction(plan: _NativeCompactPlan) -> str:
 
 
 # LLM: 候选与发送同源，CAS 失败恢复原列表；赢得 CAS 并刷新视图后才向 IR 补带方法，提交后异常不回滚。联测中断/前缀。
+#   补带预算按距再次触发压缩的余量（trigger_tokens - after_tokens）封顶，不能把刚压缩完的上下文又填满。
 # 函数用途: 提交压缩候选后按原缓存预算追加一次方法参考，明确区分提交前回滚与提交后投递。
 def _apply_native_compact_plan(
     agent: object,
@@ -866,7 +867,7 @@ def _apply_native_compact_plan(
             params, commit.thread, summary=plan.semantic_summary, source_refs=commit.source_refs,
             provider_compaction=plan.provider_compaction,
         )
-        prepare_conversation_method_carry(agent, params)
+        prepare_conversation_method_carry(agent, params, budget_cap=plan.trigger_tokens - after_tokens)
     return _publish_native_compact_result(
         agent, params, plan, dropped=dropped, after_tokens=after_tokens,
         preserved_pairs=preserved_pairs, canonical_generation=commit.generation,

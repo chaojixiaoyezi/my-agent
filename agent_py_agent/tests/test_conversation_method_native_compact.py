@@ -97,3 +97,18 @@ def test_native_cas_carry_preserves_nonempty_pairs_in_next_real_build(tmp_path, 
     assert sum(isinstance(turn, RuntimeFactsTurn) and turn.source == "conversation_method_carry"
                for turn in params.tool_ir_history) == int(enabled)
     print("native_post_carry_fit", enabled, len(before), len(retained), fits[-1][2])
+
+
+def test_native_cas_passes_remaining_headroom_as_carry_cap(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import method_carry
+
+    fixture, _thread = _native_carry_fixture(tmp_path, monkeypatch, True)
+    caps, original = [], method_carry.prepare_conversation_method_carry
+
+    def spy(agent_, params_, *, budget_cap=None):
+        caps.append(budget_cap)
+        return original(agent_, params_, budget_cap=budget_cap)
+
+    monkeypatch.setattr(method_carry, "prepare_conversation_method_carry", spy)
+    service.build_tool_loop_prompt(fixture.agent, fixture.params)
+    assert any(cap is not None and 0 < cap < 40_000 for cap in caps), caps

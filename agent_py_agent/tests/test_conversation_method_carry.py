@@ -24,9 +24,9 @@ from agent_py_agent.tests.test_capability_package import content_bundle
 from agent_py_agent.tests.test_capability_package_entry_context import _fixture
 
 
-def method_fixture(tmp_path, *, count=1, resources=12):
+def method_fixture(tmp_path, *, count=1, resources=12, entry=""):
     bundles = [content_bundle(
-        files={"CAPABILITY.md": f"METHOD_ENTRY_{index}".encode(),
+        files={"CAPABILITY.md": (entry or f"METHOD_ENTRY_{index}").encode(),
                **{f"methods/{n}.md": f"RESOURCE_BODY_{n}".encode() for n in range(resources)}},
         change=lambda row, index=index: row.update(plugin_id=f"entry-{index}"),
     ) for index in range(count)]

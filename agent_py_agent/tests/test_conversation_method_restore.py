@@ -27,7 +27,7 @@ def compact(fixture):
     return threads.update_compact_state(tid, commit=commit, expected_generation=previous.compact_generation)
 
 
-def carry(fixture, budget=3000):
+def carry(fixture, budget=3000, cap=None):
     path = capability_config_path_for(fixture.agent)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"conversation_method_carry_enabled: true\ncapability_bundle_max_tokens: {budget}\n", encoding="utf-8")
@@ -39,7 +39,7 @@ def carry(fixture, budget=3000):
                       tool_recommendations_section="", tool_context=[], effective_on_chunk=None,
                       one_shot_tool_calls=set(), executed_tools=[], archive_tool_calls=[]), **values})
         fixture.agent._current_run_params = fixture.params
-    module.prepare_conversation_method_carry(fixture.agent, fixture.params)
+    module.prepare_conversation_method_carry(fixture.agent, fixture.params, budget_cap=cap)
     return [turn for turn in fixture.params.tool_ir_history if isinstance(turn, RuntimeFactsTurn)
             and turn.source == "conversation_method_carry"]
 

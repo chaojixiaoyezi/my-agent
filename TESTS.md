@@ -1,5 +1,22 @@
 # 测试与发布验收
 
+## skill／能力包挑选跟进集成（6d，2026-10-08，分支 `claude/6d-pick-followup`）
+
+- **范围**：main 2f7589721，合入 w1 1bde4b60f（引用行、中途压缩补带、中断上抛）、w2 8182d9077（学包语言提示）、
+  6d 验收文档 a9e7b5eb5，再加 6d 三处集成修正（资料清单预留规则、中途补带封顶、前端参数目录重新生成）。
+- **复核 w1/w2**（沙箱外）：
+  - w1 核心 11 个文件 83 passed；
+  - w1 在沙箱里超时的 `test_tool_call_guardrail_runtime.py::test_real_shell_executor_stops_repeats_and_accepts_progress`，
+    在基线和 w1 上各跑一次，都在 1 秒内通过，所以是沙箱环境的问题；
+  - w2 相关 9 个文件 130 passed，两处变异 rc=1。
+- **集成修正**：4 个带回测试文件 54 passed。变异 5 处（不预留清单、总是先留清单、忽略上限、去掉"为 0 时直接返回"、挂点不传上限）全部 rc=1，
+  已用备份还原、字节核对。
+- **相关测试**：引用了 `_tool_loop_service`、`method_carry`、`package_build_tool`、`learn-external-agent`、
+  `capability_config`、前端目录、常量目录、参数登记的测试文件，加 guards9，共 152 个。沙箱外分 4 片跑：
+  753 + 978 + 944 + 680 = 3,355 passed、7 skipped、24 xfailed、1 xpassed，0 失败。
+- **前端目录**：`node frontend/scripts/sync-backend-config.mjs --check` 在基线上显示 in sync，w1 改了注释后显示 stale，
+  重新生成后恢复 in sync（271 个字段）。
+
 ## 会话方法引用与中途补带续作（2026-10-08，w1；已实现，待 6d 复核）
 
 来源：`1008/w1-carry-ref.md` 和 `1008/w1-continue-review.md`；从 WIP `fd10324ab` 续作，真正基线为

@@ -202,14 +202,12 @@ def remove_conversation_method(store: object, thread_id: str, name: str) -> bool
     return _update(store, thread_id, update) and bool(removed)
 
 
-# LLM: 业务首请求的压缩恢复接缝；正文仍是参考，不执行资源、不增加调用或扩权。
-# 函数用途: 压缩后按当前授权和缓存预算恢复主会话方法。
-def prepare_conversation_method_carry(agent: object, params: object) -> None:
-    thread_id = method_thread_id(agent, params)
-    if not thread_id:
-        return
+# LLM: 业务首请求与中途压缩提交后的恢复接缝；正文仍是参考，不执行资源、不增加调用或扩权。
+#   budget_cap 只由中途压缩挂点传入（距再次触发压缩的余量），只能收紧配置预算；为 0 时本次不带、不消费代次。
+# 函数用途: 压缩后按当前授权和缓存预算恢复主会话方法；中途压缩后另按剩余容量封顶。
+def prepare_conversation_method_carry(agent: object, params: object, *, budget_cap: int | None = None) -> None:
     try:
-        _prepare_method_carry(agent, params, thread_id)
+        _prepare_method_carry(agent, params, budget_cap)
     except (InterruptedError, ToolCancelled, CancelledError):
         raise
     except Exception:  # noqa: BLE001 - 增强失败只有固定码，不泄漏路径或异常正文。
@@ -278,10 +276,15 @@ _CARRY_HEADER = "[会话方法参考]\n以下是压缩前本会话读过的方�
 
 
 # LLM: 每代先选原账本合格条目；本 run 已尝试则不重试，失败不消费持久代次，后续合法 run 可再试。
+#   主会话资格（线程号）在这里取，非主会话直接返回；预算在登记尝试前算好：封顶后为 0 时直接返回，
+#   不占本 run 的尝试标记，下一次运行开头仍会带。
 # 函数用途: 组装当前授权的方法参考，并在真正进入本轮 RuntimeFacts 后推进账本。
-def _prepare_method_carry(agent, params, thread_id: str) -> None:
+def _prepare_method_carry(agent, params, budget_cap: int | None) -> None:
     from .package_selection_scope import package_read_scope
 
+    thread_id = method_thread_id(agent, params)
+    if not thread_id:
+        return
     store = getattr(agent, "conversation_store", None)
     thread = store.threads.load(thread_id) if store is not None else None
     if thread is None or thread.compact_generation <= 0:
@@ -296,20 +299,25 @@ def _prepare_method_carry(agent, params, thread_id: str) -> None:
     scope = package_read_scope(agent, params)
     if scope is None:
         return
+    budget = _carry_budget(agent, scope.config, budget_cap)
+    if budget <= 0:
+        return
     authority = MethodCarryAuthority(agent, params, thread_id)
     authority.check()
     params.conversation_method_carry_attempts.add(marker)
-    request = _MethodCarryRequest(agent, params, thread_id, generation, scope, authority, _carry_budget(agent, scope.config))
+    request = _MethodCarryRequest(agent, params, thread_id, generation, scope, authority, budget)
     pieces = _prepare_method_pieces(request, rows)
     if pieces:
         _commit_method_carry(request, pieces)
 
 
 # LLM: 数字零按能力路由约定不设独立配额，但仍受真实模型窗口限制；不刷新 agent 的预算缓存。
-# 函数用途: 取得同包入口预算的缓存上限，为零时复用原上下文窗口边界。
-def _carry_budget(agent, config) -> int:
+#   cap 来自中途压缩挂点，只能把结果变小（配置为 0 时尤其重要：不能拿整个窗口去填刚压缩完的上下文）。
+# 函数用途: 取得同包入口预算的缓存上限，为零时复用原上下文窗口边界，再按调用方给的余量封顶。
+def _carry_budget(agent, config, cap: int | None = None) -> int:
     from ..agent_core.model.context_window import resolve_model_context_window_tokens
-    return max(0, int(config.capability_bundle_max_tokens)) or resolve_model_context_window_tokens(agent)
+    budget = max(0, int(config.capability_bundle_max_tokens)) or resolve_model_context_window_tokens(agent)
+    return budget if cap is None else min(budget, max(0, cap))
 
 
 # LLM: 先按原次序给当前可见方法留完整引用底线，再把多余预算依次给正文；分项向上取整保守覆盖头和分隔。
@@ -393,21 +401,24 @@ def _prepare_method_reference(request: _MethodCarryRequest, row: dict, remaining
     return text
 
 
-# LLM: 包按当前授权快照 ref 优先取得入口；资料清单是可选附带，不预扣正文预算，reader/policy/pins 保持。
-# 函数用途: 先带回包入口，完整资料清单仍能容纳时才追加，不加载资料正文或执行脚本。
+# LLM: 资料清单（她读到哪里）只能靠这里带回，入口正文可分页重读；所以清单只占不超过一半余量时先预留，
+#   长入口截短后按分页续读；清单更大或预算很紧时入口优先，不让短入口被挤掉。reader/policy/pins 保持。
+# 函数用途: 带回包入口和压缩前读过的资料清单，不加载资料正文或执行脚本。
 def _prepare_package_method(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
     from .package_selection_context import prepare_package_entry_context
 
     package = request.scope.skills.resolve_package(row["package_id"])
     if package is None:
         return ""
+    resources = _package_method_resources(package, row)
+    reserve = estimate_tokens("\n\n" + resources) if resources else 0
     entry = prepare_package_entry_context(
         request.agent, request.params, request.scope, [package.to_ref()], authority=request.authority,
-        claim_id=f"carry:{request.thread_id}:{request.generation}", max_tokens=remaining)
+        claim_id=f"carry:{request.thread_id}:{request.generation}",
+        max_tokens=remaining - reserve if reserve <= remaining - reserve else remaining)
     if not entry.text:
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_ENTRY_UNAVAILABLE")
         return ""
-    resources = _package_method_resources(package, row)
     if resources and estimate_tokens(entry.text + "\n\n" + resources) <= remaining:
         return entry.text + "\n\n" + resources
     return entry.text

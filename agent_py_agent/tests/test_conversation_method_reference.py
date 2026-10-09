@@ -218,3 +218,33 @@ def test_affordable_full_resource_list_follows_entry_with_current_pins(tmp_path)
                           "next_read": {**arguments, "resource_path": f"methods/{index}.md"}} for index in range(8)]
     assert "RESOURCE_BODY_" not in text and estimate_tokens(text) <= 3000
     assert records(fixture)[0]["carried_generation"] == 1
+
+
+def _long_entry_fixture(tmp_path, resources):
+    fixture = method_fixture(tmp_path, resources=resources, entry="长入口方法说明。" * 3000)
+    assert read_package(fixture).ok
+    for index in range(resources):
+        assert read_package(fixture, path=f"methods/{index}.md").ok
+    compact(fixture)
+    return fixture
+
+
+def test_long_package_entry_keeps_resource_list_when_list_fits_half_budget(tmp_path):
+    fixture = _long_entry_fixture(tmp_path, 3)
+    turns = carry(fixture, 3000)
+    assert len(turns) == 1
+    text = turns[0].text
+    assert "长入口方法说明" in text and "压缩前读过的包内资料" in text
+    assert all(f'"resource_path":"methods/{index}.md"' in text for index in range(3))
+    assert "RESOURCE_BODY_" not in text and estimate_tokens(text) <= 3000
+    assert records(fixture)[0]["carried_generation"] == 1
+
+
+@pytest.mark.parametrize("budget", [3000, 0], ids=["configured", "window"])
+def test_budget_cap_only_tightens_and_zero_cap_keeps_generation(tmp_path, budget):
+    fixture = _long_entry_fixture(tmp_path, 3)
+    assert carry(fixture, budget, cap=0) == []
+    assert records(fixture)[0]["carried_generation"] == 0
+    turns = carry(fixture, budget, cap=400)
+    assert len(turns) == 1 and estimate_tokens(turns[0].text) <= 400
+    assert records(fixture)[0]["carried_generation"] == 1

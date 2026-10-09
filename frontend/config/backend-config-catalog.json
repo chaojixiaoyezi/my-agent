@@ -4344,7 +4344,7 @@
           {
             "key": "conversation_method_carry_enabled",
             "label": "conversation_method_carry_enabled（conversation method carry enabled）",
-            "description": "是否沿用本会话成功读过的方法（能力包为主，skill 简单版）。默认开，只有管理员 /settings 能改，模型不能改。 - 主会话最多记 5 个方法；包保留最近 8 份已读资料路径，目录标注在用；压缩后按原授权带回入口和重读参数。 - 不增加模型调用，不执行资源或扩大权限；关闭时不记账、不带回，目录保持原字节。改完马上生效，预算仍缓存。",
+            "description": "是否沿用本会话成功读过的方法（能力包为主，skill 简单版）。默认开，只有管理员 /settings 能改，模型不能改。 - 主会话最多记 5 个方法；包保留最近 8 份已读资料路径，目录标注在用；压缩后按原授权带回入口和重读参数，含引用行和中途压缩后的补带。 - 不增加模型调用，不执行资源或扩大权限；关闭时不记账、不带回，目录保持原字节。改完马上生效，预算仍缓存。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
