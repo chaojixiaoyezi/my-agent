@@ -63,3 +63,48 @@ def test_curator_public_run_preserves_primary_and_executing_when_join_unconfirme
         assert curator.state_store.load().active_lease.get("phase") == "executing"
     finally:
         probe.close()
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_stop_signal_interruption_keeps_original_and_never_releases(tmp_path, monkeypatch, body_fails):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import agents_migration as migration
+    from agent_py_agent.tests.test_agents_cleanup_review33 import _apply
+
+    env = _setup(tmp_path)
+    original = curator_lease._LeaseHeartbeat
+    workers = []
+    body_error, stop_error = RuntimeError("body error"), KeyboardInterrupt("stop request interruption")
+    run = migration._run_cleanup
+
+    def raise_stop():
+        raise stop_error
+
+    def heartbeat(store, lease_id, seconds):
+        worker = original(store, lease_id, seconds)
+        real_stop = worker.stop
+        workers.append((worker, real_stop))
+        worker.stop = SimpleNamespace(wait=real_stop.wait, set=raise_stop)
+        return worker
+
+    def body(context):
+        result = run(context)
+        if body_fails:
+            raise body_error
+        return result
+
+    monkeypatch.setattr(curator_lease, "_LeaseHeartbeat", heartbeat)
+    monkeypatch.setattr(migration, "_run_cleanup", body)
+    try:
+        with pytest.raises(BaseException) as caught:
+            _apply(env)
+        assert caught.value is (body_error if body_fails else stop_error)
+        assert caught.value.lease_heartbeat_stop_error_class == "KeyboardInterrupt"
+        assert workers and all(w.thread.is_alive() and not s.is_set() for w, s in workers)
+        assert env.store.load().active_lease.get("phase") == "executing"
+    finally:
+        for worker, real_stop in workers:
+            real_stop.set()
+            worker.thread.join(5)
+            assert not worker.thread.is_alive()

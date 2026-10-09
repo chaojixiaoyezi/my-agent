@@ -103,11 +103,11 @@ def curator_lease_heartbeat(store, lease_id: str, seconds: int):
         raise heartbeat.error
 
 
-# LLM: join 中断不等于线程已停；正常和异常主体都在最终传播的原对象上标记未确认，供所有收尾调用方拒绝释放/退役。
-# 函数用途: 请求停止并等待心跳，join 失败标记原主体或原 join 异常，保留对象身份。
+# LLM: 停止信号或 join 中断都不证明线程已停；两种主体都在原传播对象标记未确认，供所有调用方拒绝释放/退役。
+# 函数用途: 请求停止并等待心跳，两步均在同一保护范围内，失败保留原异常对象。
 def _stop_heartbeat(heartbeat: _LeaseHeartbeat, primary: BaseException | None) -> None:
-    heartbeat.stop.set()
     try:
+        heartbeat.stop.set()
         heartbeat.thread.join()
     except BaseException as exc:
         target = exc if primary is None else primary
