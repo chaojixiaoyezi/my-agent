@@ -801,7 +801,7 @@ class BackgroundMainAgentRuntime:
             agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
-    # LLM: 后台轮先冻结目标/子树阶段；完整展示快照随 canonical final 提交，不参与投递或生命周期裁决。
+    # LLM: 后台轮先冻结目标/子树阶段；独立调度按原 run 解析交付会话，执行/控制身份保持原线程，展示不参与裁决。
     # 函数用途: 准备一次后台唤醒，消费具名执行结果，并沿原事务记录或发送模型回复。
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
@@ -818,6 +818,9 @@ class BackgroundMainAgentRuntime:
             request,
             supports_proactive=getattr(self.channels, "supports_proactive", None),
         )
+        from ..scheduler.execution import resolve_delivery
+
+        owner_thread, channel, target = resolve_delivery(self.agent, thread, request, channel, target)
         route_supports_proactive = bool(target and self.channels.supports_proactive(channel))
         route_supports_transcript = channel_supports_transcript(self.channels, channel)
         # 归属只读声明级事实：外发能力此刻是否可用不改变这条路线欠不欠一次真实外送。
@@ -834,7 +837,7 @@ class BackgroundMainAgentRuntime:
             channel=channel,
             target=target,
             mode="proactive",
-            thread_id=request.thread_id,
+            thread_id=owner_thread.thread_id,
             task_id=request.task_id,
             idempotency_key=background_delivery_idempotency_key(request),
         )
@@ -879,7 +882,7 @@ class BackgroundMainAgentRuntime:
             ),
         )
 
-    # LLM: 只重投原冻结信封，不运行模型；任务状态由独立交付模块在原抑制位置回读，确认仍以实际提交事实为准。
+    # LLM: 只重投原冻结信封，不运行模型；独立调度复用原 run 交付绑定，确认仍以实际提交事实为准。
     # 函数用途: 为待发送唤醒补外发或本地落账，保持原回合身份、附件、过程回复与去重键。
     def redeliver_cached_wake(
         self,
@@ -901,11 +904,15 @@ class BackgroundMainAgentRuntime:
             now=now,
             wake_signal=signal.to_dict(),
         )
+        from ..scheduler.execution import resolve_delivery
+
+        thread = self.store.threads.require(signal.thread_id)
+        owner_thread, channel, target = resolve_delivery(self.agent, thread, request, channel, target)
         delivery_context = DeliveryContext(
             channel=channel,
             target=target,
             mode="proactive",
-            thread_id=signal.thread_id,
+            thread_id=owner_thread.thread_id,
             task_id=signal.root_task_id,
             idempotency_key=background_delivery_idempotency_key(request),
         )
@@ -1132,8 +1139,8 @@ def _close_out_session_task_turn(
         return
 
 
-# LLM: 后台按 canonical thread 的模型引用冻结一次配置，再交接 typed turn-end；不重读 owner 选择或改生命周期。
-# 函数用途: 用本会话模型运行后台工作片，保留真实结束原因；用户其他窗口选模型不会改变这个任务。
+# LLM: 后台从原 run 解析固定/继承来源，再用原模型依赖生命周期；不改输入、控制和 typed turn-end。
+# 函数用途: 为普通与定时后台工作绑定模型，继承模型在安全请求边界采用显式变更。
 def _invoke_background_main_agent(
     runtime: BackgroundMainAgentRuntime,
     thread: ConversationThread,
@@ -1141,9 +1148,9 @@ def _invoke_background_main_agent(
     goal_context: GoalRuntimeContext,
     delivery_availability: tuple[bool | None, bool | None],
 ) -> tuple[object, dict[str, object]]:
-    from ..settings.model_scope import selected_model_scope
+    from ..scheduler.execution import scheduled_model_scope
 
-    with selected_model_scope(runtime.agent, thread_id=thread.thread_id):
+    with scheduled_model_scope(runtime.agent, thread, request):
         return _invoke_background_main_agent_with_model(runtime, thread, request, goal_context, delivery_availability)
 
 
@@ -3969,8 +3976,8 @@ def _claim_scheduler_wake(
     return _WakeClaimState(claim=result.claim, heartbeat=heartbeat)
 
 
-# LLM: 首次准确回读后优先恢复合法冻结交付，再判断普通工作资格；预扫前后回读及领取后复核仍保持。
-# 函数用途: 为原pending信封重投回复或执行工作片；重投只走既有交付层，不调用模型或重新预扫孩子。
+# LLM: 优先恢复冻结交付；预检与模型共用后台领取及中断范围，预扫前后回读和领取后复核仍保持。
+# 函数用途: 为原 pending 信封重投或执行工作片；预检结束也沿原来源收口，重投不调用工具或模型。
 def _execute_wake_signal(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -4038,8 +4045,13 @@ def _execute_wake_signal(
         channel,
         target,
     )
+    dependencies = _background_claim_dependencies(scheduler, attempt=current_wake_attempt(scheduler, signal.thread_id))
+    if claim is not None:
+        from ..scheduler.execution import with_scheduled_work
+
+        dependencies = with_scheduled_work(dependencies, scheduler.runtime.agent, scheduler.scheduler_service, claim, signal, now=now)
     report = background_claim.run_claimed(
-        _background_claim_dependencies(scheduler, attempt=current_wake_attempt(scheduler, signal.thread_id)),
+        dependencies,
         {
             "thread_id": signal.thread_id,
             "task_id": signal.root_task_id,
@@ -4050,6 +4062,8 @@ def _execute_wake_signal(
             "wake_signal": signal,
         },
     )
+    if claim is not None and report is None and scheduler.store.wakes.pending_one(signal.wake_signal_id) is None:
+        return _WakeExecution(terminal=True)
     # LLM: 这一片被取消（用户停止打断了派活回合）时，它**不会**产生正常交付，但这条唤醒必须结案：
     #   否则信封一直留在 pending，调度器每轮重新认领、反复重跑这条已经取消的工作
     #   （dev 明确要求"跳过/取消时唤醒必须被结算，不能留 pending 被反复认领"）。

@@ -41,11 +41,16 @@ Gateway `/client/models` 沿用认证 owner/channel/conversation/user 解析，�
 
 前台先解析真实 thread，再进入 `selected_model_scope(thread_id=...)`。
 后台工作片、恢复继续、手动 Compact、`/context` 使用同一引用解析入口。
-正在执行的请求冻结完整模型配置（接口、密钥、容量、采样等），菜单选择只在下一个工作片生效。
+已经开始的请求冻结完整模型配置（接口、密钥、容量、采样等）。显式菜单选择在当前响应和已开始工具收尾后、下一次请求装配前采用；不再等待整个工作片结束。同一已提交逻辑请求的恢复重试继续原配置。
 即使选择部署默认，也要建立作用域绑定，防止嵌套 `.run()` 重新读取刚变化的 owner 默认。
 
 `/status` 运行中显示该工作片实际模型名，空闲显示 thread 当前选择；进程内名称表只是显示投影，
 不存秘密，不做模型路由，退出工作片即清除。
+
+`model_execution` 读取原 canonical 选择、活动依赖和模型调用账，区分 selected/bound/pending/last_request。
+采用时记录 profile/revision/selected_at/adopted_at；缺记录或 provider 缓存计数未报告时保持未知。
+显示阶段只读原 main 活动投影并按 task/绑定时刻过滤，不读取正文猜测。定时 inherit 的来源线程与执行线程分别记录，fixed 不消费会话选模。
+变更入口是 `agent_core/model/selection_refresh.py`；历史修复是 `selection_history.py`。已归档工具不重做，未知媒体保留；跨 provider 私有 Compact 必须从原 seed/checkpoint 恢复，来源缺失明确失败。
 
 换模型清除旧 `provider_context_observation/model_context_usage` 数值投影，保留 transcript、
 摘要、压缩 generation/checkpoint 与精确游标。小窗口能否完成分段压缩仍由原 Compact 流程负责；
@@ -71,7 +76,7 @@ task 创建引用只用于初始化尚未物化或旧记录的空字段，恢复
 ## 验证与集成边界
 
 定向测试覆盖同 owner 多会话并发、跨 owner 不可引用、同会话双窗口、默认仅影响新会话、
-重开、旧 schema 迁移、模型切换清投影不删历史、工作片冻结、默认嵌套作用域及子代理继承。
+重开、旧 schema 迁移、模型切换清投影不删历史、已提交请求冻结、请求边界采用、默认嵌套作用域及子代理继承。
 前后台和会话控制已有定向测试作为调用链回归。测试不发送真实模型请求。
 
 真实单 Gateway TUI 已验证同 owner A/B、不同 owner、修改默认不改变已有会话，详见

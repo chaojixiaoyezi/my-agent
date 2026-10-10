@@ -16,6 +16,7 @@ from ..tooling.models import (
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolInputPolicy,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -42,17 +43,17 @@ def _error(
     )
 
 
-# LLM: 输出真实目标及执行归属；提示供模型理解，不解析文案来激活或停止运行。
-# 函数用途: 生成当前代理目标及历史记录回执，不把展示名称解释成后台派工。
+# LLM: 输出真实目标及执行归属；metadata_only 沿 Goal 的白名单投影，不先生成正文再过滤。
+# 函数用途: 生成当前代理目标及历史回执，纯元数据查询不输出名字或目标正文。
 def _goal_response(
     goal: object | None, *, completion_report: bool = False, execution: dict | None = None,
-    goals: list[object] | None = None,
+    goals: list[object] | None = None, metadata_only: bool = False,
 ) -> str:
     remaining = None
     public = None
     report = None
     if goal is not None:
-        public = goal.public_dict()
+        public = goal.public_dict(metadata_only=metadata_only)
         budget = getattr(goal, "token_budget", None)
         if budget is not None:
             remaining = max(0, int(budget) - int(getattr(goal, "tokens_used", 0) or 0))
@@ -71,20 +72,24 @@ def _goal_response(
             "remainingTokens": remaining,
             "completionBudgetReport": report,
             **({"execution": execution} if execution is not None else {}),
-            **({"goals": [item.public_dict() for item in goals]} if goals is not None else {}),
+            **({"goals": [item.public_dict(metadata_only=metadata_only) for item in goals]} if goals is not None else {}),
+            **({"metadata_only": True} if metadata_only else {}),
         },
         ensure_ascii=False,
         indent=2,
     )
 
 
-# LLM: 只读当前会话的权威目标，冲突返回完整公开列表供精确控制，不猜测当前目标。
-# 类用途: 查询真实 Goal 和使用情况，避免把 Todo 或模型口头承诺当成目标。
+# LLM: 只读当前会话的权威目标；metadata_only 对当前、歧义和历史分支均使用白名单，不放宽 owner 授权。
+# 类用途: 查询真实 Goal 和用量，支持无需查看任务内容的诊断。
 class GetGoalTool(BaseTool):
     model_spec = ToolModelSpec(
         name="get_goal",
         description="Get this agent's current goal and retained history, including status, budgets, token and elapsed-time usage.",
-        input_schema={"type": "object", "properties": {"target_run_id": {"type": "string", "description": "Optional exact direct-child run ID; omit for your own Goal."}}, "additionalProperties": False},
+        input_schema={"type": "object", "properties": {
+            "target_run_id": {"type": "string", "description": "Optional exact direct-child run ID; omit for your own Goal."},
+            "metadata_only": {"type": "boolean", "description": "只返回编号、状态、版本、时间和用量；排除目标正文与名字。"},
+        }, "additionalProperties": False},
         hints=ToolModelHints(
             category="goal",
             use_cases=("Read the current persisted thread goal",),
@@ -100,38 +105,56 @@ class GetGoalTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
-    # LLM: 插话持久操作经 guidance 领域组件； get 不改变目标生命周期；旧共享任务歧义可读但必须暴露结构化冲突。
-    # 函数用途: 返回当前目标或候选列表，目标记录损坏仍交给存储层报错。
+    # LLM: get 不改变目标生命周期；元数据模式包括歧义和拒绝路径，异常只返回固定原因码，不带目标或路径。
+    # 函数用途: 返回当前目标或候选状态列表，仍通过原绑定检查当前代理的读取权限。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        metadata_only = params.get("metadata_only", False)
+        if not isinstance(metadata_only, bool):
+            return _error("get_goal", "metadata_only 必须是布尔值", "TOOL_INVALID_ARGUMENTS")
         try:
             thread_id, task_id, goal_id, _ = goal_tool_target(self.agent, str(params.get("target_run_id") or ""))
         except (PermissionError, FileNotFoundError) as exc:
-            return _error("get_goal", str(exc), "GOAL_STATE_CONFLICT", effect_outcome="not_started")
+            return _error("get_goal", "GOAL_STATE_CONFLICT" if metadata_only else str(exc), "GOAL_STATE_CONFLICT", effect_outcome="not_started")
+        except Exception:  # noqa: BLE001 - 绑定读取失败同样不能由通用异常出口回显内容
+            if not metadata_only:
+                raise
+            return _error("get_goal", "目标绑定读取失败", "TOOL_EXECUTION_FAILED", effect_outcome="not_started")
         if not thread_id:
             return _error("get_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED")
+        try:
+            return self._read(thread_id, task_id, goal_id, metadata_only=metadata_only)
+        except Exception:  # noqa: BLE001 - 元数据诊断不可经通用工具异常出口泄漏存储正文
+            if not metadata_only:
+                raise
+            return _error("get_goal", "目标状态读取失败", "TOOL_EXECUTION_FAILED", effect_outcome="not_started")
+
+    # LLM: 当前与候选列表都复用 GoalStore；不写回、不创建迁移，读取异常交由 execute 的诊断边界处理。
+    # 函数用途: 装配目标查询回执，元数据模式不读取公开投影中的正文和名称。
+    def _read(self, thread_id: str, task_id: str, goal_id: str, *, metadata_only: bool) -> ToolHandlerOutcome:
         store = self.agent.conversation_store
         try:
             goal = store.goals.load(thread_id, goal_id=goal_id, task_id=task_id)
         except ValueError:
             return ToolHandlerOutcome(
                 "get_goal", False,
-                json.dumps({"goal": None, "goals": [item.public_dict() for item in store.goals.list(thread_id)],
+                json.dumps({"goal": None, "goals": [item.public_dict(metadata_only=metadata_only) for item in store.goals.list(thread_id)],
+                            **({"metadata_only": True} if metadata_only else {}),
                             "error_code": "GOAL_STATE_CONFLICT",
                             "message": "目标绑定存在歧义，请使用 /goal 目标编号 resume 精确恢复。"}, ensure_ascii=False),
                 error_code="GOAL_STATE_CONFLICT", effect_outcome="not_started", failure_stage="validation",
             )
         if goal is None:
             goals = [
-                item.public_dict()
+                item.public_dict(metadata_only=metadata_only)
                 for item in store.goals.list(thread_id)
                 if str(getattr(item, "status", "") or "") != "complete"
             ]
             return ToolHandlerOutcome(
                 "get_goal",
                 True,
-                json.dumps({"goal": None, "goals": goals}, ensure_ascii=False, indent=2),
+                json.dumps({"goal": None, "goals": goals, **({"metadata_only": True} if metadata_only else {})}, ensure_ascii=False, indent=2),
             )
-        return ToolHandlerOutcome("get_goal", True, _goal_response(goal, goals=store.goals.list(thread_id)))
+        return ToolHandlerOutcome("get_goal", True, _goal_response(goal, goals=store.goals.list(thread_id), metadata_only=metadata_only))
 
 
 # LLM: 创建只绑定当前代理会话，名字不授权额外执行器；子代理身份来自 scoped runner。
@@ -286,6 +309,7 @@ class UpdateGoalTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating"),
         idempotency_policy=IdempotencyPolicy("operation"),
+        input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("current_thread_goal",)),
     )
 
@@ -350,6 +374,8 @@ class UpdateGoalTool(BaseTool):
                     "objective": objective,
                     "expected_status": goal.status,
                     "expected_revision": expected_revision,
+                    "transition_source": "model_tool",
+                    "transition_context": _goal_transition_context(self.agent, params, goal),
                 }
             )
             if updated is None:
@@ -386,3 +412,23 @@ class UpdateGoalTool(BaseTool):
 
 
 __all__ = ["CreateGoalTool", "GetGoalTool", "UpdateGoalTool"]
+
+
+# LLM: 身份取当前 runner，目标归属已由 goal_tool_target 授权；验证沿原 owner 账本只读投影，失败不修改目标语义。
+# 函数用途: 把一次模型目标变更关联到真实调用和已有验证编号，不采纳模型自述的成功证据。
+def _goal_transition_context(agent: object, params: dict, goal: object) -> dict:
+    from ..task_progress import goal_progress_metadata
+    from ..verification.runtime import verification_task_metadata
+
+    current = getattr(agent, "_current_run_params", None)
+    facts = {key: str(getattr(current, key, "") or "") for key in ("request_id", "run_id", "attempt_id")}
+    facts["tool_call_id"] = str(params.get("__tool_call_id") or "")
+    try:
+        facts["verification_refs"] = verification_task_metadata(agent, thread_id=goal.thread_id, task_id=goal.task_id)
+    except Exception:  # noqa: BLE001 - 验证为辅助证据，读失败不能冒充已验证或打断合法目标变更
+        facts["verification_refs"] = []
+    try:
+        facts["progress"] = goal_progress_metadata(agent, goal.task_id)
+    except Exception:  # noqa: BLE001 - 无法读进度只表示未知，不升级为验收成功
+        facts["progress"] = {"state": "unavailable"}
+    return facts

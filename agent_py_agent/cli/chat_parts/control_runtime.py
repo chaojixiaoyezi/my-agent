@@ -37,7 +37,7 @@ from ...agent.gateway_parts.local_client_token import LocalClientCredentialError
 GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS = 30.0
 
 
-# LLM: UI 状态只作展示；local_run 为原 worker 的临时控制句柄，资源归属必须经其发布绑定和 DB 校验。
+# LLM: UI 状态只作展示；expected_execution 携回原 Gateway claim 供复核；local_run 的资源归属必须经其绑定和 DB 校验。
 # 类用途: 把一刻的消息状态和精确本地控制目标交给命令执行端。
 @dataclass(frozen=True)
 class ChatControlState:
@@ -48,6 +48,7 @@ class ChatControlState:
     session_id: str
     request_id: str = ""
     local_run: object | None = None
+    expected_execution: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,8 @@ def _execute_gateway_control(
         },
     }
     selected_control_target = str(target_control_message_id or "").strip()
+    if execution.state.expected_execution is not None:
+        payload["metadata"]["expected_execution"] = execution.state.expected_execution
     from .gateway_client import _gateway_submit_workspace
 
     workspace = _gateway_submit_workspace(

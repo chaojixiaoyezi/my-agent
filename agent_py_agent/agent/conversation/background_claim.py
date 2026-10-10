@@ -16,13 +16,14 @@ from ..backends.errors import (
 from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..settings.thread_model_selection import is_model_configuration_unavailable
 from .background_execution import BackgroundCompactSliceYield
+from .claim_execution_binding import ClaimExecutionBinding, bind_claim_execution
 from .compact_guard import is_provider_quota_failure
 from .control_commands import (
     conversation_request_interrupt_name,
     session_task_interrupt_name,
 )
 from .models import BackgroundMainAgentReport
-from .run_claim import ConversationRunClaimHeartbeat
+from .run_claim import ConversationRunClaimHeartbeat, conversation_claim_interrupt_name
 from .store_io import now
 from .wake_poison import (
     WAKE_CLAIM_CANCELLED,
@@ -193,8 +194,8 @@ def run_claimed(
         )
 
 
-# LLM: 调用者持有本片中断登记；异常类别及 stop→facts→finish→普通失败账顺序保持，None/假值正常结算。
-# 函数用途: 运行已经领取的后台工作片，持续续租，退出后保存真实结果；不把取消或压缩让出写成失败。
+# LLM: 领取后登记唯一 claim 中断名，旧控制不能打到同任务的新片；保留外层旧任务名与 stop→facts→finish 顺序。
+# 函数用途: 运行后台工作片，按准确租约接受中断、续租和保存结果，不把取消或压缩让出写成失败。
 def run_with_heartbeat(
     dependencies: BackgroundClaimDependencies,
     claim_id: str,
@@ -212,9 +213,13 @@ def run_with_heartbeat(
     attempt_status = WAKE_CLAIM_FINISHED
     error: BaseException | None = None
     try:
-        if is_interrupted():
-            raise InterruptedError("后台工作片已被中断")
-        return _run_once_with_bound_turn_check(dependencies, kwargs)
+        with (
+            register_interruptible(conversation_claim_interrupt_name(claim_id)),
+            bind_claim_execution(ClaimExecutionBinding(dependencies.claims, kwargs["thread_id"], claim_id, claim_scope_id)),
+        ):
+            if is_interrupted():
+                raise InterruptedError("后台工作片已被中断")
+            return _run_once_with_bound_turn_check(dependencies, kwargs)
     except InterruptedError:
         # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。
         status, attempt_status = "cancelled", WAKE_CLAIM_CANCELLED

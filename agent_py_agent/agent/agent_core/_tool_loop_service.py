@@ -1493,6 +1493,7 @@ def next_tool_loop_model_response(
         reject_request_selection,
         select_request_model,
     )
+    from .model.selection_refresh import refresh_selected_model
     from .subagent.model_selection import select_first_request_model
 
     committed = committed_request_selection(agent, params)
@@ -1500,6 +1501,7 @@ def next_tool_loop_model_response(
         # 恢复候选已提交：重试原样复用，旧请求不再发送；新插话留到下一轮由新参数送出。
         prepared, prompt = committed
     else:
+        params = refresh_selected_model(agent, params)
         _discard_stale_natural_reply_for_pending_turn_input(agent, params)
         model_params = natural_user_reply_model_params(params)
         if model_params is not params:

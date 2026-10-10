@@ -354,6 +354,21 @@ def background_main_activity(
     return public
 
 
+# LLM: 仅复用现有 main 展示行，冷读取不初始化投影；精确 task 和当前绑定时间过滤旧阶段，不读 activity 正文。
+# 函数用途: 给模型采用状态提供无正文的当前阶段；缺失、旧任务或绑定前的阶段保持未知。
+def main_activity_metadata(agent: object, thread_id: str, *, task_id: str, bound_at: float) -> dict:
+    lock = getattr(agent, _MAIN_ACTIVITY_LOCK_ATTR, None)
+    rows = getattr(agent, _MAIN_ACTIVITY_STATE_ATTR, None)
+    if lock is None or not isinstance(rows, dict) or not task_id:
+        return {}
+    with lock:
+        row = rows.get(thread_id) or {}
+        if row.get("task_id") != task_id or float(row.get("updated_at") or 0) < bound_at:
+            return {}
+        phase = row.get("phase")
+        return {"phase": phase, "updated_at": row.get("updated_at")} if phase in _MAIN_ACTIVITY_LIVE_PHASES else {}
+
+
 # LLM: ConversationAgentActivity is an immutable, display-only projection. Lifecycle
 # decisions must continue to read ThreadTaskLink and SubAgentTask, never this snapshot.
 # 类用途: 汇总活跃主任务和子代理，另存不依赖任务是否活跃的最近上下文展示。

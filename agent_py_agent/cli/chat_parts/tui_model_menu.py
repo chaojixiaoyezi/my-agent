@@ -171,6 +171,7 @@ def default_label(row: dict) -> str:
 # LLM: 显式 ID 是唯一选项身份并向用户展示以便填写后台引用；成功仅发布显示事件，不能热改共享 Agent。
 # 函数用途: 分别选择当前会话模型或未来新会话默认值；修改默认值不会替换其他已打开会话。
 async def _select_model(app, agent, session_id: str, runtime, *, operation: str = "select") -> str:
+    from ...agent.settings.model_selection_status import render_model_execution_status
     result = await _request(app, agent, session_id, "list")
     if not result.get("ok"):
         return str(result.get("message") or "无法读取模型列表。")
@@ -184,7 +185,8 @@ async def _select_model(app, agent, session_id: str, runtime, *, operation: str 
                          f"{'（管理员共享）' if row.get('shared') else ''} · 档案编号：{row['id']}") for row in rows],
                         default=current, select_on_focus=True)
     title = "新会话默认模型 · 不修改已打开会话" if setting_default else "当前会话模型 · 不影响其他 TUI / IM 会话"
-    selected = await _dialog(app, title, choices,
+    body = HSplit([Label(render_model_execution_status(result.get("model_execution"))), choices])
+    selected = await _dialog(app, title, body,
                               (("选择并保存", lambda: choices.current_value), ("返回", None)), focus=choices)
     if selected is None:
         return ""
@@ -195,14 +197,14 @@ async def _select_model(app, agent, session_id: str, runtime, *, operation: str 
     _publish_selection(runtime, result)
     if setting_default:
         return f"新会话默认使用 {row['model_name']}；当前及其他已打开会话的模型保持不变。"
-    return f"本会话已选择 {row['model_name']}，上下文 {row['model_context_window_tokens']} tokens。下个工作片生效，当前执行不被中断。"
+    return f"本会话已选择 {row['model_name']}，上下文 {row['model_context_window_tokens']} tokens。当前响应和已开始的工具结束后，下一次模型请求采用新选择。"
 
 
 # LLM: 菜单始终在现有事件循环内；期间隔离聊天键盘处理，退出后恢复，异常不打印请求或密钥。
 # 函数用途: 打开 /model：新增模型、选择模型、管理已有模型、连接测试、默认模型与共享五项。
 async def run_model_menu(app, agent, session_id: str, runtime) -> None:
     app._my_agent_model_menu_active = True
-    message = "每个会话独立选模型；正在执行的工作片保持原模型。"
+    message = "每个会话独立选模型；运行中切换会在当前响应和已开始的工具结束后采用。"
     try:
         while True:
             choices = RadioList([

@@ -67,6 +67,154 @@ def test_goal_tools_require_exact_current_goal_context(tmp_path) -> None:
     assert rejected.error_code == "GOAL_STATE_CONFLICT"
 
 
+@pytest.mark.parametrize("binding", ["current", "missing", "ambiguous"])
+def test_goal_metadata_query_excludes_content_in_all_binding_states(tmp_path, monkeypatch, binding):
+    agent, thread, goal = _goal_agent(tmp_path)
+    store = agent.conversation_store.goals
+    if binding == "missing":
+        monkeypatch.setattr(store, "load", lambda *args, **kwargs: None)
+    elif binding == "ambiguous":
+        def ambiguous(*args, **kwargs):
+            raise ValueError("private goal content")
+        monkeypatch.setattr(store, "load", ambiguous)
+    result = agent.tools.tools["get_goal"].execute({"metadata_only": True})
+    payload = json.loads(result.output)
+    assert goal.objective not in result.output
+    assert "private goal content" not in result.output
+    assert payload["metadata_only"] is True
+    projected = payload["goals"][0]
+    assert projected["goalId"] == goal.goal_id
+    assert projected["threadId"] == thread.thread_id
+    assert projected["taskId"] == goal.task_id
+    assert projected["revision"] == goal.revision
+    assert projected["status"] == "active"
+    assert not {"name", "objective", "metadata"} & projected.keys()
+    assert result.ok is (binding != "ambiguous")
+
+
+def test_goal_metadata_projection_never_reads_private_fields():
+    from agent_py_agent.agent.conversation.models import ThreadGoal
+
+    class PrivateGoal(ThreadGoal):
+        def __getattribute__(self, key):
+            if key in {"objective", "name", "metadata"}:
+                raise AssertionError("private field read")
+            return super().__getattribute__(key)
+
+    goal = PrivateGoal("goal-1", "thread-1", "private", "task-1", token_budget=300, tokens_used=5)
+    assert goal.public_dict(metadata_only=True)["tokenBudget"] == 300
+
+
+def test_goal_metadata_query_redacts_authorization_error(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import goal_tools
+
+    agent, _, _ = _goal_agent(tmp_path)
+    def rejected(*args):
+        raise PermissionError("private path and objective")
+    monkeypatch.setattr(goal_tools, "goal_tool_target", rejected)
+    result = agent.tools.tools["get_goal"].execute({"metadata_only": True})
+    assert not result.ok
+    assert result.error_code == "GOAL_STATE_CONFLICT"
+    assert "private path" not in result.output
+
+
+def test_goal_metadata_query_redacts_storage_errors(tmp_path, monkeypatch):
+    agent, _, _ = _goal_agent(tmp_path)
+    def corrupted(*args, **kwargs):
+        raise OSError("private path and task content")
+    monkeypatch.setattr(agent.conversation_store.goals, "load", corrupted)
+    result = agent.tools.tools["get_goal"].execute({"metadata_only": True})
+    assert not result.ok
+    assert result.error_code == "TOOL_EXECUTION_FAILED"
+    assert "private path" not in result.output
+
+
+def test_goal_completion_records_exact_revision_attempt_and_unverified_evidence(tmp_path, monkeypatch):
+    from agent_py_agent.agent.verification import runtime
+
+    agent, _, goal = _goal_agent(tmp_path)
+    agent._current_run_params.request_id = "request-actual"
+    agent._current_run_params.run_id = "run-actual"
+    agent._current_run_params.attempt_id = "attempt-actual"
+    monkeypatch.setattr(runtime, "verification_task_metadata", lambda *args, **kwargs: [
+        {"event_id": 17, "scope": "full", "status": "stale", "command": "private-command"},
+    ])
+    result = agent.tools.tools["update_goal"].execute({"status": "complete", "__tool_call_id": "call-actual"})
+    assert result.ok
+    record = agent.conversation_store.goals.load(goal.thread_id, goal_id=goal.goal_id)
+    event = record.transition
+    assert event["source"] == "model_tool"
+    assert event["previous_revision"] == goal.revision
+    assert event["revision"] == goal.revision + 1
+    assert event["attempt_id"] == "attempt-actual"
+    assert event["tool_call_id"] == "call-actual"
+    assert event["verification"] == "not_evaluated"
+    assert event["verification_refs"] == [{"event_id": 17, "scope": "full", "status": "stale"}]
+    assert "private-command" not in result.output
+
+
+def test_stale_model_completion_cannot_close_expanded_goal(tmp_path):
+    from agent_py_agent.agent.conversation.goal_prompting import current_goal_scope_prompt
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    current_goal_scope_prompt(agent, agent._current_run_params)
+    expanded = agent.conversation_store.goals.update({
+        "thread_id": thread.thread_id, "goal_id": goal.goal_id, "expected_revision": goal.revision,
+        "objective": "处理合成清单中的全部 300 个条目", "transition_source": "user_control",
+    })
+    rejected = agent.tools.tools["update_goal"].execute({"status": "complete"})
+    assert rejected.error_code == "GOAL_STATE_CONFLICT"
+    retained = agent.conversation_store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    assert retained == expanded and retained.status == "active"
+    assert retained.transition["source"] == "user_control"
+    assert retained.transition["objective_changed"]
+
+
+def test_usage_limit_records_budget_source_without_fabricating_content_revision(tmp_path):
+    agent, thread, goal = _goal_agent(tmp_path)
+    budgeted = agent.conversation_store.goals.update({
+        "thread_id": thread.thread_id, "goal_id": goal.goal_id, "token_budget": 100,
+    })
+    exhausted = agent.conversation_store.goals.account_usage({
+        "thread_id": thread.thread_id, "goal_id": goal.goal_id, "token_delta": 100,
+    })
+    assert exhausted.status == "budget_limited"
+    assert exhausted.revision == budgeted.revision
+    assert exhausted.transition["source"] == "budget"
+
+
+def test_goal_completion_keeps_full_progress_counts_and_soft_unknown_verification(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
+    from agent_py_agent.agent.agent_core.runtime.task_identity import (
+        conversation_task_progress_ledger_id,
+    )
+    from agent_py_agent.agent.task_progress import goal_progress_metadata, write_task_progress
+
+    agent, thread, goal = _goal_agent(tmp_path)
+    ledger = conversation_task_progress_ledger_id(agent.conversation_store, goal.task_id)
+    write_task_progress(runtime_owner_root(agent), ledger, {"items": [
+        {"id": f"item-{i:03}", "title": "合成私有名称", "status": "done" if i < 100 else "pending"}
+        for i in range(300)
+    ]})
+    progress = goal_progress_metadata(agent, goal.task_id)
+    assert progress["counts"]["total"] == 300 and progress["open_count"] == 200
+    assert len(progress["open_ids"]) == 64 and progress["ids_truncated"]
+    result = agent.tools.tools["update_goal"].execute({"status": "complete"})
+    assert result.ok  # 内容质量不改成机械门；事件仍保留明确未完成数。
+    event = agent.conversation_store.goals.load(thread.thread_id, goal_id=goal.goal_id).transition
+    assert event["progress"] == progress and event["verification"] == "not_evaluated"
+    assert "合成私有名称" not in json.dumps(event, ensure_ascii=False)
+
+
+def test_late_goal_usage_does_not_replace_model_completion_source(tmp_path):
+    agent, thread, goal = _goal_agent(tmp_path)
+    agent.tools.tools["update_goal"].execute({"status": "complete"})
+    before = agent.conversation_store.goals.load(thread.thread_id, goal_id=goal.goal_id)
+    after = agent.conversation_store.goals.account_usage({"thread_id": thread.thread_id, "goal_id": goal.goal_id,
+                                                       "token_delta": 300, "mode": "active_or_complete"})
+    assert after.status == "complete" and after.transition == before.transition
+
+
 def test_goal_controls_are_visible_without_search_by_default(tmp_path) -> None:
     agent, _thread, _goal = _goal_agent(tmp_path)
     visible = {spec.name for spec in agent.tools.model_visible_specs()}

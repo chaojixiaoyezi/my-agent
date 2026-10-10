@@ -64,3 +64,6 @@
 - 新增模块设计文档后，同步更新本索引、`DESIGN_LEDGER.md` 和 `CODEBASE_TREE.md`。
 - 如果模块设计已经进入操作层面，同步检查对应 runbook、backlog 或 test checklist。
 - 主设计台账里不要复制模块文档全文，只放能帮后来者找到入口的摘要。
+
+- [长任务运行时审查与 L 线实施](LONG_TASK_RUNTIME_REVIEW.md)：Goal、模型采用、调度与元数据查询；实施中。
+- [定时执行策略合同](SCHEDULER_EXECUTION_POLICIES.md)：独立上下文、继承/固定模型、排队和失败策略、只读预检与原检查点。

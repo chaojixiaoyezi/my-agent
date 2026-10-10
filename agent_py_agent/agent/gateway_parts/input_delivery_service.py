@@ -3,12 +3,13 @@ from __future__ import annotations
 """LLM: Own the durable disposition of one authenticated Gateway input.
 
 模块用途: 把普通消息在“当前回合、下一轮队列、已消费、终态未知”之间的去向保存为
-唯一回执，并在进程重启、响应丢失或回合结束后继续对账，避免 TUI、飞书和 Web 各自补一套。
+唯一回执；按原 guidance 的请求/任务目标对账，不用同名运输请求代替持久任务状态。
 """
 
 import hashlib
 import json
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 from ..conversation.store_guidance_recovery import (
     CLOSEOUT_REPLAY_QUEUED,
     CLOSEOUT_REPLAY_UNAVAILABLE,
+    TurnEndSettlement,
 )
 from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError, runtime_error_report
@@ -294,16 +296,16 @@ def queue_gateway_input_locked(
     return updated, created
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Terminal settlement first lets ConversationStore reject only never-claimed guidance, then
-# releases that mailbox lock before taking any ingress lock. This fixed order avoids target/ingress inversion.
-# 函数用途: 回合结束后把未认领消息自动排到下一轮，把已消费或不确定消息收成对应状态。
+# LLM: 请求终态只结算原 request guidance；task guidance 按自己的生命周期对账。邮箱锁必须先于入口锁释放。
+#   联测前后台交接及 test_steer_closeout_replay，不能因同名运输结束拒绝活动后台任务的消息。
+# 函数用途: 请求结束后按原投递目标结算消息，保留仍属持久任务的插话。
 def settle_gateway_inputs_for_turn(
     paths: GatewayPaths,
     *,
     target_turn_id: str,
     conversation_store: object | None,
 ) -> dict[str, int]:
-    summary = {"consumed": 0, "queued": 0, "terminal_unknown": 0, "errors": 0}
+    summary = {"consumed": 0, "queued": 0, "active_pending": 0, "terminal_unknown": 0, "errors": 0}
     # 没有入口请求号的插话在收口时的两级结局计数：steer_replay_queued 已排成备用下一轮、steer_replay_unavailable 已提示重发。
     summary["steer_replay_queued"] = 0
     summary["steer_replay_unavailable"] = 0
@@ -313,17 +315,16 @@ def settle_gateway_inputs_for_turn(
         conversation_store.guidance.recovery.reject_pending(
             target_turn_id,
             reject_reserved=True,
+            target=("request", target_turn_id),
         )
     except Exception:
         summary["errors"] += 1
     for request_id in _turn_input_request_ids(paths, target_turn_id):
         try:
-            state = reconcile_gateway_input_request(
-                paths,
-                request_id=request_id,
-                conversation_store=conversation_store,
-                target_terminal=True,
-            )
+            receipt = read_gateway_input_receipt(paths, request_id)
+            if receipt is None:
+                continue
+            state = _reconcile_bound_input(paths, conversation_store, receipt)
             if state in summary:
                 summary[state] += 1
             elif state:
@@ -572,8 +573,8 @@ def reconcile_gateway_input_receipts(
     return summary
 
 
-# LLM: 对账一条尚未收口（pending/active_pending/terminal_unknown）的回执：先解析目标 owner 的 agent，目标已终态时
-#   拒绝未领取的 guidance 行，再走 reconcile_gateway_input_request 的结构化状态机并按返回状态计数；返回
+# LLM: 对账先解析原 owner 和已经校验绑定的 guidance；目标类型/编号只取原账，不能从同名请求文件猜测。
+#   目标已终态时拒绝未领取的 guidance 行，再走 reconcile_gateway_input_request 的结构化状态机并按返回状态计数；返回
 #   terminal_unknown 时把持久化的对账错误记进 summary。异常向上抛，由调用方计入 errors。改动时同步看
 #   test_steer_delivery_recovery 与 test_guidance_receipt_digest_compat。
 # 函数用途: reconcile_gateway_input_receipts 的单条回执处理，把"解析目标 -> 拒绝 -> 状态迁移 -> 计数"从循环里拆出来。
@@ -583,24 +584,44 @@ def _reconcile_unsettled_receipt(
     from .request_worker import _resolve_request_agent
 
     scoped = _resolve_request_agent(agent, receipt.prepared_request)
-    lifecycle = _input_target_lifecycle(paths, scoped, receipt.target_turn_id)
-    if lifecycle == "terminal" and receipt.target_turn_id:
-        # The owner store is now available, so a never-claimed row can
-        # be rejected safely and promoted. Claimed remains unknown.
-        scoped.conversation_store.guidance.recovery.reject_pending(
-            receipt.target_turn_id,
-            reject_reserved=True,
-        )
-    state = reconcile_gateway_input_request(
-        paths,
-        request_id=receipt.request_id,
-        conversation_store=scoped.conversation_store,
-        target_terminal=(lifecycle == "terminal"),
-    )
+    state = _reconcile_bound_input(paths, scoped.conversation_store, receipt)
     if state in summary:
         summary[state] += 1
     if state == "terminal_unknown":
         _note_terminal_unknown_error(paths, receipt.request_id, summary)
+
+
+# LLM: 目标来自已校验 guidance；按 Gateway T -> guidance M -> task 锁复查终态，再仅结算该目标。
+#   释放这些锁后才取入口锁，避免与模型提交及插话入口锁反转。读取损坏由原入口对账写出错误事实。
+# 函数用途: 周期对账和请求收尾共用同一条精确目标结算路径，写 guidance 和入口回执。
+def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayInputReceipt) -> str:
+    try:
+        binding = gateway_input_guidance_binding(receipt, store)
+    except Exception:
+        # 下方原对账入口会持入口锁记录读取错误；此处证据不足不得先拒绝消息。
+        binding = None
+    entry = getattr(binding[0], "entry", None) if binding is not None else None
+    target_type = str(getattr(entry, "target_type", "") or "")
+    target_id = str(getattr(entry, "target_id", "") or "")
+    turn_id = binding[1] if binding is not None else ""
+    lifecycle = "unknown"
+    if turn_id and target_type in {"request", "task"} and target_id:
+        with ExitStack() as locks:
+            locks.enter_context(gateway_turn_transition(paths, turn_id))
+            locks.enter_context(store.guidance.ledger.turn_guard(turn_id))
+            if target_type == "task":
+                locks.enter_context(store.tasks.transition_guard(target_id))
+            lifecycle = _input_target_lifecycle(paths, store, target_id, target_type=target_type)
+            if lifecycle == "terminal":
+                store.guidance.recovery.settle_turn_locked(
+                    turn_id, TurnEndSettlement(reject_reserved=True, target=(target_type, target_id)),
+                )
+    return reconcile_gateway_input_request(
+        paths,
+        request_id=receipt.request_id,
+        conversation_store=store,
+        target_terminal=(lifecycle == "terminal"),
+    )
 
 
 # LLM: 只看回执里持久化的结构化 reconcile_error（error_type/category/context），不解析文字；没有错误的终态未知
@@ -866,57 +887,58 @@ def _same_reconcile_error(previous: object, current: dict[str, Any]) -> bool:
     return all(str(before.get(key) or "") == str(current.get(key) or "") for key in keys)
 
 
-# LLM: Gateway 请求文件是前台回合的权威事实，有文件时照旧只看它。没有请求文件的目标（如定时任务 srun_*）只由
-#   同名会话任务的尝试读取插话：任务链接进入规范终态（task_state.conversation_task_link_is_terminal）后
-#   不会再有尝试认领，才算 terminal；读不到、没有记录或未终态（例如两次尝试之间）一律 unknown。只读。
-# 函数用途: 判定一条插话的目标回合是否已经结束，前台看请求文件，后台看会话任务状态。
-def _input_target_lifecycle(paths: GatewayPaths, agent: object, target_turn_id: str) -> str:
-    if not target_turn_id:
+# LLM: 生命周期只按已验证 guidance 的 target_type/target_id 查询；task 与 request 可同名且状态不同。
+#   task 非终态、缺失或不可读均不证明可结算，也不授予执行权；新输入准入仍由控制入口核对 claim。
+#   本函数只读；修改时联测 test_gateway_input_target_lifecycle 与 test_steer_delivery_recovery。
+# 函数用途: 分别读取原请求或持久任务的生命周期，避免前台结束误拒后台插话。
+def _input_target_lifecycle(
+    paths: GatewayPaths, store: object, target_id: str, *, target_type: str,
+) -> str:
+    if not target_id:
         return "unknown"
-    lifecycle = _gateway_turn_lifecycle(paths, target_turn_id)
-    if lifecycle != "unknown":
-        return lifecycle
+    if target_type == "request":
+        return _gateway_turn_lifecycle_locked(paths, target_id)
+    if target_type != "task":
+        return "unknown"
     try:
-        link = agent.conversation_store.tasks.load(target_turn_id)
+        link = store.tasks.load(target_id)
     except Exception:
         return "unknown"
     return "terminal" if link is not None and conversation_task_link_is_terminal(link.status) else "unknown"
 
 
-# LLM: Reconciliation distinguishes a live provider turn, a recoverable inbox claim, canonical
-# terminal evidence, and missing/corrupt evidence. done/failed/response projections never settle input.
-# 函数用途: 在精确回合锁内读取 Gateway 生命周期，避免把待恢复请求误当作已结束。
-def _gateway_turn_lifecycle(paths: GatewayPaths, target_turn_id: str) -> str:
+# LLM: 调用方已经持精确 Gateway 回合锁；本函数不重入文件锁，只读规范终态、处理中或待恢复的请求事实。
+# 函数用途: 在原请求锁内读取生命周期，避免把待恢复请求误当作已结束。
+def _gateway_turn_lifecycle_locked(paths: GatewayPaths, target_turn_id: str) -> str:
     turn_id = str(target_turn_id or "").strip()
     if not turn_id:
         return "unknown"
-    with gateway_turn_transition(paths, turn_id):
-        canonical = paths.terminal / f"{turn_id}.json"
-        if canonical.exists():
-            report = read_json_file_report(
-                canonical,
-                context="gateway.input_target.terminal",
-            )
-            return "terminal" if report.load_error is None and report.payload else "unknown"
-        processing = paths.processing / f"{turn_id}.json"
-        if processing.exists():
-            report = read_json_file_report(processing, context="gateway.input_target.processing")
-            if report.load_error is not None or not report.payload:
-                return "unknown"
-            phase = str(report.payload.get("turn_phase") or "open").strip().lower()
-            status = str(report.payload.get("status") or "processing").strip().lower()
-            if phase == "open" and status not in {
-                "done",
-                "failed",
-                "cancelled",
-                "stopped",
-            }:
-                return "live"
-            return "terminal"
-        inbox = paths.inbox / f"{turn_id}.json"
-        if inbox.exists():
-            report = read_json_file_report(inbox, context="gateway.input_target.inbox")
-            return "recoverable" if report.load_error is None and report.payload else "unknown"
+    canonical = paths.terminal / f"{turn_id}.json"
+    if canonical.exists():
+        report = read_json_file_report(
+            canonical,
+            context="gateway.input_target.terminal",
+        )
+        return "terminal" if report.load_error is None and report.payload else "unknown"
+    processing = paths.processing / f"{turn_id}.json"
+    if processing.exists():
+        report = read_json_file_report(processing, context="gateway.input_target.processing")
+        if report.load_error is not None or not report.payload:
+            return "unknown"
+        phase = str(report.payload.get("turn_phase") or "open").strip().lower()
+        status = str(report.payload.get("status") or "processing").strip().lower()
+        if phase == "open" and status not in {
+            "done",
+            "failed",
+            "cancelled",
+            "stopped",
+        }:
+            return "live"
+        return "terminal"
+    inbox = paths.inbox / f"{turn_id}.json"
+    if inbox.exists():
+        report = read_json_file_report(inbox, context="gateway.input_target.inbox")
+        return "recoverable" if report.load_error is None and report.payload else "unknown"
     return "unknown"
 
 

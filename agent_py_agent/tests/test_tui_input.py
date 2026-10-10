@@ -41,6 +41,14 @@ from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
 from agent_py_agent.tests._gateway_stub import plugin_command_responder
 
 
+# LLM: 测试显式提供服务端执行 DTO，不把本地 running/job 或 activity 当作执行证据。
+# 函数用途: 为纯 TUI 交互测试发布一个合成的实际执行快照，不启动线程或请求模型。
+def _publish_execution(runtime, turn_id, *, kind="request"):
+    from agent_py_agent.agent.gateway_parts.execution_target import GatewayExecutionTarget
+
+    runtime.publish_execution_target(GatewayExecutionTarget("thread-test", kind, turn_id, "claim-test").to_dict())
+
+
 def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monkeypatch) -> None:
     from agent_py_agent.cli.chat_parts import tui_input
 
@@ -447,6 +455,7 @@ def test_escape_targets_active_manual_compact_control_message() -> None:
 
 def test_escape_stops_canonical_background_task_while_local_worker_is_idle() -> None:
     runtime = TuiRuntime("background-escape")
+    _publish_execution(runtime, "task-background", kind="task")
     runtime.update_background_activity(1, {"main_activity": {"phase": "waiting"}})
     captured: list[object] = []
 
@@ -476,7 +485,7 @@ def test_escape_stops_canonical_background_task_while_local_worker_is_idle() -> 
     assert len(captured) == 1
     assert captured[0].command_kind == "stop"
     assert captured[0].command_text == "/interrupt"
-    assert captured[0].expected_turn_id == ""
+    assert captured[0].expected_turn_id == "task-background"
     assert app.invalidate_calls == 1
 
 
@@ -875,6 +884,7 @@ def test_successful_submit_repins_transcript_before_enqueue(monkeypatch) -> None
 
 def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     runtime = TuiRuntime("control-submit")
+    _publish_execution(runtime, "gwreq-exact")
     captured: list[object] = []
 
     class Reconciler:
@@ -1270,6 +1280,7 @@ def test_gateway_stop_completion_is_stable_transcript_feedback(tmp_path) -> None
 def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue(foreground) -> None:
     runtime = TuiRuntime("active-turn-submit")
     target = "gwreq-active-submit" if foreground else "goal-task-background"
+    _publish_execution(runtime, target, kind="request" if foreground else "task")
     if not foreground:
         runtime.update_background_activity(1, {"main_activity": {"task_id": target, "phase": "running"}})
     captured: dict[str, object] = {}
@@ -1319,12 +1330,15 @@ def test_running_gateway_submit_uses_active_turn_receipt_instead_of_job_queue(fo
     assert entry.execution_options.rich_transcript is True
 
 
-def test_background_input_target_disappears_when_activity_ends() -> None:
+def test_display_activity_cannot_replace_execution_binding() -> None:
     runtime = TuiRuntime("background-input-target")
+    _publish_execution(runtime, "real-task", kind="task")
     runtime.update_background_activity(1, {"main_activity": {"task_id": "goal-task", "phase": "running"}})
-    assert runtime.background_input_target() == "goal-task"
+    assert runtime.execution_target()["turn_id"] == "real-task"
     runtime.update_background_activity(0, {"main_activity": {"task_id": "goal-task", "phase": "done"}})
-    assert runtime.background_input_target() == ""
+    assert runtime.execution_target()["turn_id"] == "real-task"
+    runtime.publish_execution_target(None)
+    assert runtime.execution_target() is None
 
 
 def test_child_input_stays_queued_until_exact_provider_consumption(monkeypatch) -> None:
@@ -1461,6 +1475,7 @@ def test_active_input_outbox_v1_migration_records_tui_execution_defaults() -> No
 def test_unknown_active_turn_delivery_keeps_receipt_and_starts_same_id_reconciliation(
 ) -> None:
     runtime = TuiRuntime("active-turn-unknown")
+    _publish_execution(runtime, "gwreq-active-unknown")
     persisted: dict[str, object] = {}
 
     class Agent:
@@ -1504,6 +1519,7 @@ def test_reconciliation_queues_once_only_after_explicit_rejection(monkeypatch, t
     )
 
     runtime = TuiRuntime("active-turn-rejected")
+    _publish_execution(runtime, "gwreq-ended")
     jobs: Queue[ChatJob] = Queue()
 
     class Agent:
@@ -1563,6 +1579,7 @@ def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
     )
 
     runtime = TuiRuntime("active-turn-server-queued")
+    _publish_execution(runtime, "gwreq-ending")
     jobs: Queue[ChatJob] = Queue()
 
     class Agent:
@@ -1641,6 +1658,7 @@ class _UnconfirmedGatewayAgent:
 
 # 函数用途: 组一份主回合运行中的 TUI 按键参数，供活动回合插话对账测试使用。
 def _running_turn_params(agent, runtime: TuiRuntime, jobs: Queue, root) -> SimpleNamespace:
+    _publish_execution(runtime, "gwreq-active")
     return SimpleNamespace(media_importing=False, use_gateway=True, state_lock=threading.Lock(),
                            is_running_ref=[True], running_request_id_ref=["gwreq-active"],
                            pending_jobs_ref_for_enqueue=[0], runtime_inject=[], prompt_files=[],

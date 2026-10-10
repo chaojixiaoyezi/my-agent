@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -33,13 +34,14 @@ from .tool_loop.round_execution import ToolCallExecuteParams
 from .tool_runtime_ledger import write_boundary_with_runtime_ledger
 
 
-# LLM: 本请求冻结工具参数和宿主运行上下文；文件路径不选择任务身份，也不生成目录执行锁。
-# 类用途: 把一次工具调用的模型原参数、执行参数与审计请求放在一起，供共享工具入口读取。
+# LLM: 本请求冻结工具参数和宿主运行上下文；output_observer 仅接收已归档的原始正文，不改权限或模型投影，不持久化回调。
+# 类用途: 统一模型与宿主工具执行请求；只读宿主可在同一归档入口取得完整输出用于结构化比较。
 @dataclass(frozen=True)
 class ToolCallRuntimeRequest:
     agent: object
     request: ToolCallExecuteParams
     call: ToolCall
+    output_observer: Callable[[str], None] | None = None
 
     @property
     def trace_request(self) -> RunnerToolStageTraceRequest:
@@ -138,11 +140,10 @@ def _audit_source_worker_tool_scope_result(
 
 # LLM: 最终 Tool Gateway 携带同一 run 快照、宿主审批消费者存在事实和事件身份；interactive/actor 不从模型参数读，不能扩大工具宇宙。
 # 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
-# 函数用途: 执行并审计一个已追踪工具调用，同时维护任务晋升、幂等记录和被动验收事实。
+# 函数用途: 执行并审计一个已追踪工具调用，归档后把完整正文交给可选宿主观察者，再生成模型投影。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     from ..conversation.input_media import model_accepts_images
     from ..conversation.process_events import process_completion_target
-    from .tool_call_archive_record import archive_tool_output_projection
     from .tool_loop.recovery import runtime_run_scope
 
     runtime_request, prepared_promotion_outcome = _prepare_traced_tool_runtime_request(
@@ -192,13 +193,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         cancellation_token=getattr(runtime_request.request.params, "cancellation_token", None),
         required_action=_required_action_for_call(runtime_request),
         pre_handler_gate=pre_handler_gate,
-        output_archiver=lambda call, outcome: archive_tool_output_projection(
-            runtime_request.agent,
-            runtime_request.request.params,
-            call,
-            outcome,
-            model_call=runtime_request.model_call,
-        ),
+        output_archiver=lambda call, outcome: _archive_runtime_tool_output(runtime_request, call, outcome),
     )
     result = execution.result
     executable_payload = {
@@ -215,6 +210,18 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return execution
+
+
+# LLM: 所有输出先沿原归档入口保存；观察回调只读原始正文，不改变模型投影或持久账，失败仍归入原执行器归档错误。
+# 函数用途: 为宿主结构化检查提供完整输出，防止预览截断或展示脱敏掩盖数据变化。
+def _archive_runtime_tool_output(runtime_request, call, outcome):
+    from .tool_call_archive_record import archive_tool_output_projection
+
+    projection = archive_tool_output_projection(runtime_request.agent, runtime_request.request.params,
+        call, outcome, model_call=runtime_request.model_call)
+    if runtime_request.output_observer is not None:
+        runtime_request.output_observer(str(outcome.output or ""))
+    return projection
 
 
 # LLM: 9b 必须修 2：interactive 是"这次调用有没有人能当场审批"的宿主事实，不能拿"写入器碰巧有 request_permission 方法"

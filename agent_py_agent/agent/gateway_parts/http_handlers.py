@@ -78,6 +78,7 @@ from .control_service import (
 )
 from .daemon_control import get_running_pid, write_targeted_gateway_stop_request
 from .event_points import prompt_queued
+from .execution_target import execution_target_payload
 from .input_delivery_service import (
     bind_gateway_input_active_locked,
     gateway_input_guidance_binding,
@@ -90,7 +91,7 @@ from .input_delivery_service import (
 )
 from .io import gateway_request_counts, write_json_file_atomic
 from .loop_health import loop_health
-from .paths import gateway_chunk_path, gateway_chunk_path_candidates
+from .paths import GatewayPaths, gateway_chunk_path, gateway_chunk_path_candidates
 from .request_client import GatewayAskExecutionOptions
 from .response_renderer import read_gateway_terminal_envelope_report
 
@@ -1185,6 +1186,7 @@ def handle_client_notices(handler, server) -> None:
         return
     result = read_gateway_client_notices(
         server.agent,
+        paths=server.paths,
         scope=_gateway_control_scope(
             handler,
             body,
@@ -1393,12 +1395,13 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
 # projection from canonical runs; neither notices nor that projection can
 # create task state, authorize work, retry, or decide completion. Process-stream identity is
 # echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 按显式能力开放正文、前台流及完整检查点；旧页跳过新类型，轮询不初始化owner。
+# 函数用途: 按显式能力开放正文、前台流及完整检查点，并附实际执行绑定；轮询不初始化 owner。
 def read_gateway_client_notices(
     agent: object,
     *,
     scope: GatewayControlScope,
     after: int,
+    paths: GatewayPaths | None = None,
     event_after: int = 0,
     event_stream_id: str = "",
     interactive_approvals: bool = False,
@@ -1473,7 +1476,6 @@ def read_gateway_client_notices(
     )
     activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
-    active_task_count = activity.active_task_count
     notices, cursor, notices_ok = read_background_response_page(
         store, thread_id, after=after, include_foreground=display.foreground_messages,
         include_display_checkpoints=display.display_checkpoints,
@@ -1486,7 +1488,8 @@ def read_gateway_client_notices(
         "event_cursor": transcript["cursor"],
         "event_stream_id": transcript["stream_id"],
         "events_truncated": transcript["truncated"],
-        "active_task_count": active_task_count,
+        "active_task_count": activity.active_task_count,
+        "execution_target": execution_target_payload(paths, store, thread_id),
         "agent_activity": activity_payload,
         "agent_permission_requests": permission_requests,
     }
@@ -1594,6 +1597,7 @@ def _empty_gateway_notice_response(
         "event_stream_id": event_stream_id,
         "events_truncated": False,
         "active_task_count": 0,
+        "execution_target": None,
         "agent_permission_requests": [],
     }
     if error:

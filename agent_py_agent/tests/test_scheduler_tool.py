@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotEntry
 from agent_py_agent.agent.scheduler.repository import SchedulerRepository
@@ -52,6 +54,53 @@ def _agent(tmp_path, *, with_thread: bool = True):
 
 def _payload(result) -> dict[str, object]:
     return json.loads(result.output)
+
+
+@pytest.mark.parametrize("action", ["list", "get", "history", "status"])
+def test_schedule_metadata_query_excludes_nested_content(tmp_path, monkeypatch, action):
+    agent = _agent(tmp_path)
+    tool = ScheduleTool(agent)
+    job = _payload(tool.execute({
+        "action": "create", "name": "private-name", "prompt": "private-prompt",
+        "schedule_kind": "every", "every_seconds": 600,
+    }))["job"]
+    run = {
+        "run_id": "srun-1", "job_id": job["job_id"], "status": "failed",
+        "error_code": "SCHEDULER_TEST_FAILURE", "delivery_status": "failed",
+        "error_message": "private-error", "response": "private-response",
+        "delivery_reason": "private-delivery", "started_at": 100,
+    }
+    monkeypatch.setattr(agent.scheduler_repository, "active_runs_by_job", lambda: ({job["job_id"]: run}, []))
+    monkeypatch.setattr(agent.scheduler_repository, "history", lambda **kwargs: ([run], []))
+    before = agent.scheduler_repository.store_path.read_bytes()
+    result = tool.execute({"action": action, "job_id": job["job_id"], "metadata_only": True})
+    assert result.ok
+    assert "private-" not in result.output
+    assert agent.scheduler_repository.store_path.read_bytes() == before
+    data = _payload(result)
+    if action != "status":
+        projected = (data["runs"][0] if action == "history" else
+                     (data["job"] if action == "get" else data["jobs"][0])["current_run"])
+        assert projected["run_id"] == "srun-1"
+        assert projected["error_code"] == "SCHEDULER_TEST_FAILURE"
+        assert projected["delivery_status"] == "failed"
+        assert projected["started_at"]
+
+
+def test_schedule_metadata_query_sanitizes_failure_and_cannot_mutate(tmp_path, monkeypatch):
+    agent = _agent(tmp_path)
+    tool = ScheduleTool(agent)
+    def unavailable(*args):
+        raise OSError("private-path/private-prompt")
+    monkeypatch.setattr(agent.scheduler_repository, "list_jobs", unavailable)
+    failed = tool.execute({"action": "list", "metadata_only": True})
+    assert failed.error_code == "SCHEDULER_UNAVAILABLE"
+    assert "private-" not in failed.output
+    assert _payload(failed)["error_code"] == "SCHEDULER_UNAVAILABLE"
+    refused = tool.execute({"action": "create", "metadata_only": True})
+    assert not refused.ok
+    assert refused.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert not agent.scheduler_repository.store_path.exists()
 
 
 def test_schedule_tool_crud_uses_current_thread_and_hides_owner_paths(tmp_path) -> None:

@@ -1,5 +1,9 @@
 # Gateway 维护状态
 
+## L 线 O1 查询（2026-10-10，实施中）
+
+get_goal 与 schedule 的只读动作支持纯元数据模式，错误、候选列表及嵌套 run 同样排除正文。默认详细视图和授权不变；相关 55 项通过。模型采用和统一执行绑定投影继续实施。
+
 ## 不可交付回复诊断（wsempty4，2026-10-09，本地实现、待集成）
 
 - 原USER_REPLY_UNAVAILABLE路径附白名单user_reply_diagnostic，最后调用形状/输出类型长度、原预算和canonical成功压缩间隔进入原结构化response/terminal记录。

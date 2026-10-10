@@ -163,6 +163,41 @@ def test_caller_model_does_not_use_gateway_startup_default(tmp_path: Path) -> No
     }
 
 
+def test_metadata_status_never_reads_log_or_returns_nested_private_fields(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import gateway_status
+
+    agent, paths = _running_gateway(tmp_path)
+    sentinel = "PRIVATE_BODY_TOKEN_AND_ADDRESS"
+    paths.log.write_text(sentinel)
+    observed = []
+    def snapshot(*args, **kwargs):
+        observed.append(kwargs["include_log_diagnostics"])
+        return {"status": "running", "identity": {"pid": 27, "config_path": sentinel},
+                "queue": {"pending": 2, "reason": sentinel, "inflight": {"total": 1, "prompt": sentinel}},
+                "load_errors": [sentinel], "model_selection": {"pending": True, "secret": sentinel,
+                    "selected": {"profile_id": "b", "prompt": sentinel},
+                    "bound": {"model_name": "a", "api_key": sentinel}}}
+    monkeypatch.setattr(gateway_status, "gateway_runtime_snapshot", snapshot)
+    result = GatewayStatusTool(agent).execute({"metadata_only": True})
+    assert result.ok and sentinel not in result.output
+    row = json.loads(result.output)
+    assert observed == [False]
+    assert row["queue"]["inflight_total"] == 1 and row["model_selection"]["pending"]
+    assert row["model_selection"]["bound"]["model_name"] == "a"
+
+
+def test_metadata_status_redacts_exception(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import gateway_status
+
+    agent = _agent(tmp_path)
+    def fail(*args, **kwargs):
+        raise RuntimeError("PRIVATE_CONTENT")
+    monkeypatch.setattr(gateway_status, "gateway_runtime_snapshot", fail)
+    result = GatewayStatusTool(agent).execute({"metadata_only": True})
+    assert not result.ok and result.error_code == "TOOL_EXECUTION_FAILED"
+    assert "PRIVATE_CONTENT" not in result.output
+
+
 def test_gateway_run_state_persists_model_endpoint_and_log_boundary(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     context = GatewayRunContext(

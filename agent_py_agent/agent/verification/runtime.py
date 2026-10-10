@@ -208,6 +208,13 @@ def _verification_context(
     return VerificationContext(owner_ref=owner_ref, thread_id=thread_id or "local", task_id=task_id)
 
 
+# LLM: 调用方必须已经授权精确 Goal/thread/task；本入口只沿同一 owner 验证库投影，不验证目标质量或创造验证记录。
+# 函数用途: 为已授权目标读取现有验证编号、结果与过期状态，排除命令和输出正文。
+def verification_task_metadata(agent: object, *, thread_id: str, task_id: str) -> list[dict]:
+    context = replace(_verification_context(agent), thread_id=thread_id, task_id=task_id)
+    return VerificationEvidenceRepository(runtime_owner_root(agent)).task_metadata(context)
+
+
 def _command_cwd(agent: object, payload: dict[str, object]) -> Path:
     raw = str(payload.get("working_dir") or "").strip()
     if raw:

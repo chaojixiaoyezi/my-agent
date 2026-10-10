@@ -110,15 +110,17 @@ def record_background_response(
         route_supports_transcript=route_supports_transcript,
     )
     route = _local_only_route(route, local_transcript_only)
-    receipt, delivery_status = _background_external_delivery(
-        delivery,
-        delivery_context,
-        envelope,
-        _ExternalDeliveryOptions(
-            frozen_retry=frozen_retry,
-            local_transcript_only=local_transcript_only,
-        ),
-    )
+    from ..scheduler.execution import validate_delivery_origin
+
+    origin_valid = validate_delivery_origin(delivery.agent, request, delivery_context)
+    if origin_valid:
+        receipt, delivery_status = _background_external_delivery(
+            delivery, delivery_context, envelope,
+            _ExternalDeliveryOptions(frozen_retry=frozen_retry, local_transcript_only=local_transcript_only),
+        )
+    else:
+        receipt, delivery_status = SimpleNamespace(content=projection.content), "failed"
+        message_metadata["delivery_error_code"] = "SCHEDULER_ORIGIN_BINDING_CHANGED"
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
     committed_content = str(getattr(receipt, "content", projection.content) or "")
     commit = _commit_background_response(
@@ -128,7 +130,7 @@ def record_background_response(
         receipt=receipt,
         delivery_status=delivery_status,
         committed_content=committed_content,
-        canonical_record=route.canonical_record,
+        canonical_record=route.canonical_record and origin_valid,
         transcript_route=route.transcript_route,
         evidence_refs=evidence_refs,
         message_metadata=message_metadata,
@@ -443,7 +445,7 @@ def _commit_background_response(
         assistant_commentaries=assistant_commentaries,
     )
     message_request = {
-        "thread_id": request.thread_id,
+        "thread_id": delivery_context.thread_id,
         "role": "assistant",
         "content": committed_content,
         "channel": delivery_context.channel,
@@ -501,7 +503,7 @@ def _append_owner_commentaries(
         if not text:
             continue
         commentary_request = {
-            "thread_id": request.thread_id,
+            "thread_id": delivery_context.thread_id,
             "role": "assistant",
             "content": text,
             "channel": delivery_context.channel,

@@ -1,5 +1,9 @@
 # Gateway Structure
 
+## 长任务诊断元数据边界（2026-10-10）
+
+`conversation/models.ThreadGoal.public_dict(metadata_only=True)` 是 Goal 的白名单展示入口；`goal_tools.GetGoalTool` 在绑定、歧义列表和读取错误分支保留此边界。`scheduler/tool` 的 job/run 白名单先排除自由文本再输出，查询不会写入；元数据模式仅接受 list/get/history/status。名字、目标、提示词、回复预览、skill 名称及原始异常均不进入此模式，执行和交付状态分别保留。完整计划见 `docs/design/LONG_TASK_RUNTIME_REVIEW.md`。
+
 ## 空回复只读诊断（wsempty4，2026-10-09）
 
 - Responses最终payload/原始output→request-local模型诊断→原工具循环计数→AgentRunResult；原request_history抛错点读取canonical compact_updated_at，缺证据None。

@@ -71,6 +71,33 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def test_execution_binding_survives_control_receipt_replay_and_rejects_tampering(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.execution_target import GatewayExecutionTarget
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    paths = gateway_paths(agent)
+    target = GatewayExecutionTarget("thread-a", "task", "task-a", "claim-a").to_dict()
+    original = _scope(expected_turn_id="task-a")
+    scope = replace(original, metadata={**original.metadata, "expected_execution": target})
+    observed = []
+
+    def execute(_agent, _paths, _command, bound):
+        observed.append(bound.metadata["expected_execution"])
+        return ConversationControlResult("stop", True, "已受理")
+
+    monkeypatch.setattr("agent_py_agent.agent.gateway_parts.control_operation_service.execute_gateway_conversation_control", execute)
+    first = execute_gateway_control_operation(agent, paths, _command("/stop"), scope, command_text="/stop")
+    restored = GatewayControlOperationReceipt.from_dict(first.to_dict())
+    assert restored.expected_execution == target and restored.input_digest_version == 4
+    assert observed == [target]
+    replay = execute_gateway_control_operation(agent, paths, _command("/stop"), scope, command_text="/stop")
+    assert replay.operation_id == first.operation_id and observed == [target]
+    changed = first.to_dict()
+    changed["expected_execution"] = {**target, "claim_id": "new-claim"}
+    with pytest.raises(DataCorruptionError):
+        GatewayControlOperationReceipt.from_dict(changed)
+
+
 def test_control_operation_replays_completed_result_without_repeating_effect(
     tmp_path,
     monkeypatch,

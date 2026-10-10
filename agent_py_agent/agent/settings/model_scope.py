@@ -6,10 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from .model_profiles import selected_model_config
 
@@ -53,6 +54,14 @@ class ModelScopedAttribute:
         instance.__dict__[self.name] = value
 
 
+# LLM: 原部署配置是新档案未声明字段的唯一默认值；不能把当前作用域模型的覆盖当部署默认，读取不修改绑定。
+# 函数用途: 在模型切换或候选准备时读取 Agent 初始化的配置，防止旧模型参数串到新模型。
+def deployment_model_config(agent: object):
+    if isinstance(getattr(type(agent), "config", None), ModelScopedAttribute):
+        return agent.__dict__["config"]
+    return agent.config
+
+
 # LLM: 缓存键含 OAuth 引用代次而非 token 与思考控制方式；刷新不换模型，退出/重登录不能复用原身份。
 # 函数用途: 切换模型、采样或思考控制配置时创建对应后端，相同快照复用连接与探针缓存。
 def _profile_backend(agent: object, config: object):
@@ -83,12 +92,57 @@ def _profile_backend(agent: object, config: object):
 class ModelScopeDependencies:
     agent: object = field(repr=False)
     values: tuple[tuple[str, object], ...] = field(repr=False)
+    selection: ModelSelectionSnapshot | None = None
 
     # LLM: 配置来自原 permission_config，不重新解析 profile 或读取变化中的 owner 设置。
     # 函数用途: 读取这批依赖已冻结的配置对象。
     @property
     def config(self):
         return dict(self.values)["config"]
+
+
+# LLM: 这是请求依赖的只读来源快照，选择权威仍是 canonical thread；时间表示本地绑定，不证明 HTTP 送达。
+# 类用途: 关联实际依赖与当时采用的模型选择版本，不保存连接地址或凭据。
+@dataclass(frozen=True)
+class ModelSelectionSnapshot:
+    thread_id: str
+    profile_id: str
+    resolved_profile_id: str
+    revision: int
+    explicit_revision: int
+    selected_at: float | None
+    adopted_at: float
+    selection_thread_id: str = ""
+    selection_source: str = "thread"
+    scheduler_run_id: str = ""
+
+
+# LLM: 仅返回当前 ContextVar 的来源；无 descriptor/作用域时保持未知，不能读取 owner 默认冒充当前请求。
+# 函数用途: 为安全点和模型调用账提供同一次依赖的选择版本。
+def current_model_selection(agent: object) -> ModelSelectionSnapshot | None:
+    row = (_BINDINGS.get() or {}).get(id(agent))
+    return row[2] if row is not None and row[0] is agent else None
+
+
+# LLM: thread 必须已由原 owner 校验；不重新选模或写状态，时间只供观察。
+# 函数用途: 从已读取的会话选择建立请求采用快照。
+def model_selection_snapshot(thread: object, config: object) -> ModelSelectionSnapshot:
+    source = (getattr(config, "config_sources", None) or {}).get("model_name", {})
+    return ModelSelectionSnapshot(
+        thread.thread_id, thread.model_profile_id, str(source.get("profile_id") or "default"), thread.model_selection_revision,
+        thread.model_selection_last_explicit_revision, thread.model_selection_selected_at, time.time(),
+    )
+
+
+# LLM: 原模型调用账可保存这个白名单；自动候选未带快照时不把旧 profile 的版本归到新模型。
+# 函数用途: 给实际调用输出无正文、地址和密钥的模型选择来源。
+def model_selection_metadata(agent: object) -> dict:
+    selection = current_model_selection(agent)
+    config = getattr(agent, "config", None)
+    source = (getattr(config, "config_sources", None) or {}).get("model_name", {})
+    if selection is None or selection.resolved_profile_id != str(source.get("profile_id") or "default"):
+        return {}
+    return asdict(selection)
 
 
 # LLM: 使用原后端缓存和权限视图构造依赖；可以读宿主设置并创建连接对象，但不探针、不发网络、不准备工具或改变 Agent。
@@ -123,7 +177,8 @@ def prepare_model_dependencies(agent: object, model_config: object, *, inherited
 def model_dependencies_scope(agent: object, dependencies: ModelScopeDependencies, *, thread_id: str = "", active: bool = False):
     if not isinstance(dependencies, ModelScopeDependencies) or dependencies.agent is not agent:
         raise ValueError("模型依赖不能绑定其他 Agent。")
-    token = _BINDINGS.set({**(_BINDINGS.get() or {}), id(agent): (agent, dict(dependencies.values))})
+    selection = dependencies.selection or current_model_selection(agent)
+    token = _BINDINGS.set({**(_BINDINGS.get() or {}), id(agent): (agent, dict(dependencies.values), selection)})
     display_key = object()
     if thread_id and active:
         with _CACHE_LOCK:
@@ -131,6 +186,22 @@ def model_dependencies_scope(agent: object, dependencies: ModelScopeDependencies
             if names is None:
                 names = agent._model_profile_live_names = {}
             names.setdefault(thread_id, {})[display_key] = str(dependencies.config.model_name)
+            projections = getattr(agent, "_model_profile_live_selections", None)
+            if projections is None:
+                projections = agent._model_profile_live_selections = {}
+            facts = model_selection_metadata(agent)
+            source = (getattr(dependencies.config, "config_sources", None) or {}).get("model_name", {})
+            projections.setdefault(thread_id, {})[display_key] = {
+                "model_name": dependencies.config.model_name,
+                "backend": dependencies.config.model_backend,
+                "profile_id": facts.get("profile_id", str(source.get("profile_id") or "default")),
+                "selection_revision": facts.get("revision"),
+                "explicit_revision": selection.explicit_revision if selection else None,
+                "adopted_at": facts.get("adopted_at"),
+                "selection_source": facts.get("selection_source"),
+                "selection_thread_id": facts.get("selection_thread_id") or thread_id,
+                "scheduler_run_id": facts.get("scheduler_run_id"),
+            }
     try:
         yield
     finally:
@@ -140,6 +211,10 @@ def model_dependencies_scope(agent: object, dependencies: ModelScopeDependencies
                 names.get(thread_id, {}).pop(display_key, None)
                 if not names.get(thread_id):
                     names.pop(thread_id, None)
+                projections = agent._model_profile_live_selections
+                projections.get(thread_id, {}).pop(display_key, None)
+                if not projections.get(thread_id):
+                    projections.pop(thread_id, None)
         _BINDINGS.reset(token)
 
 
@@ -187,19 +262,73 @@ def activate_model_dependencies(agent: object, dependencies: ModelScopeDependenc
     lifetime.stack.enter_context(foreground_model_scope(agent.backend))
 
 
-# LLM: 普通调用仍只绑定最外层 descriptor Agent；显式候选另用 model_dependencies_scope，同源权限/缓存准备不会重选既有工作片。
-# 函数用途: 工作片按 canonical thread 选模型，子代理保持继承语义，退出恢复且不新建 MCP。
+# LLM: 最外层按 canonical thread 建立初始依赖；后续显式选择由原循环请求安全点采用，子代理继承仍独立冻结。
+# 函数用途: 为本次执行绑定初始模型及选择版本，退出恢复宿主依赖，不新建 MCP。
 @contextmanager
 def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True):
     if not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute) or id(agent) in (_BINDINGS.get() or {}):
         yield
         return
-    from .thread_model_selection import thread_model_config
+    from .thread_model_selection import _require_owner, thread_model_profile_id
 
-    model_config = agent.config if inherited else (
-        thread_model_config(agent, thread_id) if thread_id else selected_model_config(agent)
-    )
+    selection = None
+    if thread_id and not inherited:
+        thread_model_profile_id(agent, thread_id)
+        thread = agent.conversation_store.threads.load(thread_id)
+        if thread is None:
+            from .model_profiles import ModelProfileError
+
+            raise ModelProfileError("当前模型选择所属会话已不存在。")
+        _require_owner(agent, thread)
+        model_config = selected_model_config(agent, profile_id=thread.model_profile_id)
+        selection = model_selection_snapshot(thread, model_config)
+    else:
+        model_config = agent.config if inherited else selected_model_config(agent)
     dependencies = prepare_model_dependencies(agent, model_config, inherited=inherited)
     assert dependencies is not None
+    dependencies = replace(dependencies, selection=selection)
     with model_dependencies_scope(agent, dependencies, thread_id=thread_id, active=active):
         yield
+
+
+# LLM: 状态只投影 canonical 选择与活动依赖；定时继承读原会话，固定策略不等待会话选模，实际请求版本仍在调用账。
+# 函数用途: 展示执行来源、绑定模型与待采用版本；跨线程读取不改配置，bound 不声称供应商已收到。
+def thread_model_execution_status(agent: object, thread_id: str) -> dict:
+    from ..conversation.agent_activity import main_activity_metadata
+    from .model_selection_status import latest_thread_model_call
+    from .thread_model_selection import _require_owner
+
+    thread = agent.conversation_store.threads.load(thread_id)
+    if thread is None:
+        return {"state": "unavailable", "reason_code": "THREAD_NOT_FOUND"}
+    _require_owner(agent, thread)
+    with _CACHE_LOCK:
+        rows = getattr(agent, "_model_profile_live_selections", {}).get(thread_id, {})
+        bound = dict(next(reversed(rows.values()))) if rows else None
+    selected = {"profile_id": thread.model_profile_id, "revision": thread.model_selection_revision,
+                "source": thread.model_selection_source, "selected_at": thread.model_selection_selected_at}
+    pending = None
+    if bound is not None and bound.get("selection_source") == "scheduler_fixed":
+        selected = {"profile_id": bound["profile_id"], "revision": bound["selection_revision"],
+                    "source": "scheduler_fixed", "selected_at": None}
+        pending = False
+    elif bound is not None and bound["explicit_revision"] is not None:
+        source_id = bound.get("selection_thread_id") or thread_id
+        source = thread if source_id == thread_id else agent.conversation_store.threads.load(source_id)
+        if source is not None:
+            _require_owner(agent, source)
+            selected = {"profile_id": source.model_profile_id, "revision": source.model_selection_revision,
+                        "source": source.model_selection_source, "selected_at": source.model_selection_selected_at}
+            pending = source.model_selection_last_explicit_revision > bound["explicit_revision"]
+    last_request = latest_thread_model_call(agent, thread_id)
+    activity = main_activity_metadata(agent, thread_id, task_id=str((last_request or {}).get("task_id") or ""),
+                                     bound_at=float((bound or {}).get("adopted_at") or 0)) if bound else {}
+    return {
+        "thread_id": thread_id,
+        "selected": selected,
+        "bound": bound,
+        "pending": pending,
+        "pending_reason": "next_request_boundary" if pending else "",
+        "activity": activity,
+        "last_request": last_request,
+    }

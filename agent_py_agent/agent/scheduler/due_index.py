@@ -352,6 +352,8 @@ def _owner_key(owner: dict[str, object]) -> tuple[str, str, str]:
     return provider, owner_kind, owner_id
 
 
+# LLM: due index 只投影原 job/run，未来周期必须同时满足 next_run_at 与 backoff_until；索引不授予执行权。
+# 函数用途: 计算该 owner 下一次需要调度关注的时间，不发模型请求或写原账本。
 def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
     candidates: list[float] = []
     jobs = store.get("jobs")
@@ -361,7 +363,7 @@ def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
                 continue
             value = _positive_timestamp(raw.get("next_run_at"))
             if value > 0:
-                candidates.append(value)
+                candidates.append(max(value, _positive_timestamp(raw.get("backoff_until"))))
     runs = store.get("runs")
     if isinstance(runs, dict):
         for raw in runs.values():

@@ -166,6 +166,8 @@ def test_claim_preserves_existing_task_pins_and_selection_across_reclaim(tmp_pat
 
     first = service.claim_wake(signal, lease_seconds=60, now=1_001)
     assert first.status == "claimed" and first.claim is not None
+    assert repository.get_active_run(task_id)["started_at"] == 0
+    repository.mark_run_running(task_id, first.claim.claim_id, now=1_001)
     assert service.release(first.claim, now=1_002)
     second = service.claim_wake(signal, lease_seconds=60, now=1_003)
 
@@ -260,7 +262,7 @@ def test_claim_rejects_mismatched_wake_before_binding(tmp_path, field) -> None:
     assert repository.history()[0] == []
 
 
-@pytest.mark.parametrize("stage", ["bind", "mark_run_running"])
+@pytest.mark.parametrize("stage", ["bind", "check_run_claim"])
 def test_admission_exception_settles_the_acquired_claim(tmp_path, monkeypatch, stage) -> None:
     store, _thread, repository, service, signal = _queued_execution(tmp_path)
 
@@ -346,6 +348,7 @@ def _queued_frozen_delivery(tmp_path):
     store, thread, repository, service, signal = _queued_execution(tmp_path)
     first = service.claim_wake(signal, now=1_001)
     assert first.claim is not None
+    repository.mark_run_running(signal.root_task_id, first.claim.claim_id, now=1_001)
     service.release(first.claim, now=1_002)
     store.tasks.update_status({"task_id": signal.root_task_id, "status": "completed", "now": 1_002})
     store.wakes.cache_delivery(signal.wake_signal_id, {

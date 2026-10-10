@@ -461,6 +461,7 @@ class GatewayChatClientAgent:
         message_id: str,
         expected_turn_id: str,
         execution_options: GatewayAskExecutionOptions | None = None,
+        expected_execution: dict | None = None,
     ) -> ActiveTurnInputResult:
         content = str(message or "").strip()
         client_message_id = str(message_id or "").strip()
@@ -478,6 +479,8 @@ class GatewayChatClientAgent:
             },
         }
         workspace = self.gateway_request_workspace()
+        if expected_execution is not None:
+            payload["metadata"]["expected_execution"] = expected_execution
         if workspace:
             payload["workspace"] = workspace
         if execution_options is not None:

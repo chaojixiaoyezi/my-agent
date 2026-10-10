@@ -73,7 +73,7 @@ def _multimodal_actual_request(tmp_path, input_modalities):
 
 # LLM: 原 adapters/probe/post_json 调用形状保持；只替换网络端，业务 payload 必须在原投影与最终门之间完全相同。
 # 函数用途: 记录实际原生 schema、HTTP 次数与线程选择，并可模拟实际传输之后的错误。
-def fake_http(monkeypatch, fixture, *, before_probe=None, on_business=None, use_tool=False):
+def fake_http(monkeypatch, fixture, *, before_probe=None, on_business=None, use_tool=False, read_path=None):
     business, probes = [], []
 
     def send(request):
@@ -100,7 +100,7 @@ def fake_http(monkeypatch, fixture, *, before_probe=None, on_business=None, use_
             if on_business:
                 on_business(wire)
             if use_tool and len(business) == 1:
-                tool = {"type": "tool_use", "id": "read-material", "name": "read_file", "input": {"path": str(fixture.agent.root / "material.txt")}}
+                tool = {"type": "tool_use", "id": "read-material", "name": "read_file", "input": {"path": str(read_path or fixture.agent.root / "material.txt")}}
         if native:
             return {"content": [tool] if tool else [{"type": "text", "text": "资料整理完成。"}],
                     "stop_reason": "tool_use" if tool else "end_turn", "usage": {"input_tokens": 101, "output_tokens": 5}}

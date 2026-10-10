@@ -43,10 +43,11 @@ from .paths import GatewayPaths
 _CONTROL_OPERATION_SCHEMA = "gateway_control_operation.v2"
 _CONTROL_INPUT_DIGEST_LEGACY_VERSION = 1
 _CONTROL_INPUT_DIGEST_TARGET_VERSION = 2
-_CONTROL_INPUT_DIGEST_CURRENT_VERSION = 3
+_CONTROL_INPUT_DIGEST_CURRENT_VERSION = 4
 _CONTROL_INPUT_DIGEST_VERSIONS = {
     _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
     _CONTROL_INPUT_DIGEST_TARGET_VERSION,
+    3,
     _CONTROL_INPUT_DIGEST_CURRENT_VERSION,
 }
 _CONTROL_OPERATION_STATES = {
@@ -112,6 +113,7 @@ class GatewayControlOperationReceipt:
     # v2（tref2）：本回合的会话线程 id（执行时解析一次，与工具事件同源）；旧回执没有该字段时为空。
     conversation_thread_id: str = ""
     workspace: object = None
+    expected_execution: object = None
 
     # LLM: 保存固定身份、可选目录与摘要版本；准备后执行和对账只能读回执，不重读当前 HTTP 输入。
     # 函数用途: 把控制操作回执转换为可原子写入的 JSON 字典。
@@ -146,6 +148,8 @@ class GatewayControlOperationReceipt:
             payload["error"] = dict(self.error)
         if self.workspace is not None:
             payload["workspace"] = self.workspace
+        if self.expected_execution is not None:
+            payload["expected_execution"] = self.expected_execution
         return payload
 
     # LLM: 读取时重算身份与对应版本的摘要；目录篡改或旧版未签名目录都必须当作账本损坏拒绝。
@@ -201,6 +205,7 @@ class GatewayControlOperationReceipt:
             error=dict(data.get("error")) if isinstance(data.get("error"), dict) else {},
             updated_at=_control_operation_timestamp(data.get("updated_at")),
             workspace=data.get("workspace"),
+            expected_execution=data.get("expected_execution"),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -616,6 +621,7 @@ def _load_or_prepare_control_operation_locked(
         ).strip(),
         all_user_access=bool(scope.all_user_access),
         workspace=scope.workspace,
+        expected_execution=scope.metadata.get("expected_execution"),
         input_digest_version=_control_input_version(scope),
         state="prepared",
         updated_at=time.time(),
@@ -639,6 +645,7 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt, event_hub: object | 
             "target_control_message_id": receipt.target_control_message_id,
             "channel_chat_type": receipt.channel_chat_type,
             "channel_chat_id": receipt.channel_chat_id,
+            **({"expected_execution": receipt.expected_execution} if receipt.expected_execution is not None else {}),
         },
         all_user_access=receipt.all_user_access,
         resolved_owner=_receipt_owner_identity(receipt),
@@ -681,6 +688,8 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     )
     matched_digest_version = 0
     for version in candidate_versions:
+        if version < 4 and receipt.expected_execution is not None:
+            continue
         if version < 3 and receipt.workspace is not None:
             continue
         if (
@@ -756,7 +765,7 @@ def _control_operation_identity_payload(
     }
 
 
-# LLM: v1 不含 Compact 目标，v2 签入目标，v3 再签入 workspace；已发布版本的签名字段不可改变。
+# LLM: v1 不含 Compact 目标，v2 签入目标，v3 签入 workspace，v4 签入真实执行绑定；旧版本签名不可改变。
 # 函数用途: 按指定合同版本计算控制输入摘要，保证升级后仍能读旧账且新字段不能被篡改。
 def _control_operation_input_digest(
     scope: GatewayControlScope,
@@ -783,17 +792,17 @@ def _control_operation_input_digest(
         ).strip()
     if version >= 3:
         operation_input["workspace"] = scope.workspace
+    if version >= 4:
+        operation_input["expected_execution"] = scope.metadata.get("expected_execution")
     return hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
 
 
-# LLM: 没有目录声明的输入继续使用 v2，保证既有回执可重试；显式目录必须使用 v3 并冻结原值。
+# LLM: 原无目录/有目录输入分别保留 v2/v3 可重试；带执行绑定必须用 v4，重试不能切换目标。
 # 函数用途: 按结构化输入选择摘要合同版本，避免新字段绕过回执完整性检查。
 def _control_input_version(scope: GatewayControlScope) -> int:
-    return (
-        _CONTROL_INPUT_DIGEST_CURRENT_VERSION
-        if scope.workspace is not None
-        else _CONTROL_INPUT_DIGEST_TARGET_VERSION
-    )
+    if "expected_execution" in scope.metadata:
+        return _CONTROL_INPUT_DIGEST_CURRENT_VERSION
+    return 3 if scope.workspace is not None else _CONTROL_INPUT_DIGEST_TARGET_VERSION
 
 
 # LLM: Owner refs use a separate integrity digest so authenticated client input can be replayed

@@ -161,9 +161,8 @@ def _tui_enqueue_job(
     params.jobs.put(job)
 
 
-# LLM: Gateway has already created the canonical queued request. This job only attaches the
-# existing request id to the one worker queue; it must never POST the user text a second time.
-# 函数用途: 先按确切请求号接回显示、撤下同源副本，再加入本地队列；不二次提交用户文字。
+# LLM: Gateway 已创建原请求；本地只入观察队列，失败撤回去重预留与计数，让持久 outbox 重试同一 ID。
+# 函数用途: 同一请求只接回一次观察 job；不二次提交文字，显示或队列异常不能吞掉后续重试。
 def _tui_attach_gateway_job(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -176,6 +175,7 @@ def _tui_attach_gateway_job(
     request_id = str(gateway_request_id or "").strip()
     if not request_id:
         raise ValueError("queued active-turn input requires gateway_request_id")
+    runtime = _required_tui_runtime(params)
     options = execution_options or _tui_execution_options(params)
     job = ChatJob(
         user=text,
@@ -192,12 +192,19 @@ def _tui_attach_gateway_job(
         rich_transcript=options.rich_transcript,
         inject_complete=True,
     )
+    if not runtime.claim_gateway_job_attachment(request_id):
+        return
     with params.state_lock:
         params.pending_jobs_ref_for_enqueue[0] += 1
-    runtime = _required_tui_runtime(params)
-    runtime.register_gateway_request(request_id)
-    runtime.enqueue_prompt(request_id, display_text, queued=True)
-    params.jobs.put(job)
+    try:
+        runtime.register_gateway_request(request_id)
+        runtime.enqueue_prompt(request_id, display_text, queued=True)
+        params.jobs.put(job)
+    except Exception:
+        with params.state_lock:
+            params.pending_jobs_ref_for_enqueue[0] -= 1
+        runtime.release_gateway_job_attachment(request_id)
+        raise
 
 
 # LLM: Mutating Gateway slash controls enter a durable operation outbox before HTTP. `/btw` binds
@@ -246,18 +253,10 @@ def _tui_submit_control_operation(
     target_control_message_id = ""
     if command.kind == "stop":
         target_control_message_id = runtime.active_manual_compact_control_message_id()
-    expected_turn_id = ""
-    if command.kind in {"steer", "stop"}:
-        with params.state_lock:
-            running = bool(params.is_running_ref[0])
-            expected_turn_id = str(params.running_request_id_ref[0] or "").strip()
-        exact_turn_required = command.kind == "steer" or running
-        if exact_turn_required and (not running or not expected_turn_id):
-            _required_tui_runtime(params).set_notice(
-                "当前没有可精确绑定的运行回合，命令未发送",
-                duration_seconds=2.5,
-            )
-            return True
+    binding = _tui_control_target(params, command, target_control_message_id)
+    if binding is None:
+        return True
+    expected_turn_id, expected_execution = binding
     from ...agent.conversation.models import new_id
     from .tui_control_delivery import TuiControlOperationEntry
 
@@ -270,6 +269,7 @@ def _tui_submit_control_operation(
         command_kind=command.kind,
         expected_turn_id=expected_turn_id,
         target_control_message_id=target_control_message_id,
+        expected_execution=expected_execution,
     )
 
     # LLM: The control command becomes visible only after the exact outbox row
@@ -332,6 +332,25 @@ def _tui_control_or_im_only_refusal(params: TuiCreateKeybindingsParams, text: st
 # LLM: A single durable reconciler owns every TUI control retry. It reuses the saved message id,
 # freezes the exact turn snapshot, and switches permanently to GET after receiving operation_id.
 # 函数用途: 创建或取得本会话控制命令对账器，并连接 Gateway 提交、查询与界面回调。
+# LLM: 控制目标只取 Gateway 投影；本地观察 job 只决定是否需要等待绑定，不能给出目标身份。
+# 函数用途: 分离活动回合绑定、空闲整任务控制与手动 Compact 控制，缺失执行绑定时显示明确提示。
+def _tui_control_target(params, command, compact_id):
+    if command.kind not in {"steer", "stop"}:
+        return "", None
+    runtime = _required_tui_runtime(params)
+    expected = runtime.execution_target()
+    turn_id = str((expected or {}).get("turn_id") or "")
+    with params.state_lock:
+        observing_request = bool(params.is_running_ref[0])
+    requires_binding = command.kind == "steer" or command.operation == "interrupt" or observing_request
+    if requires_binding and not turn_id and not compact_id:
+        runtime.set_notice("当前没有可精确绑定的运行回合，命令未发送", duration_seconds=2.5)
+        return None
+    return turn_id, expected
+
+
+# LLM: 单一控制对账器冻结客户端消息 ID 与执行快照，有 operation_id 后只读查询。
+# 函数用途: 创建或取得本会话控制命令对账器，并连接 Gateway 提交、查询与界面回调。
 def _ensure_control_operation_reconciler(
     params: TuiCreateKeybindingsParams,
 ):
@@ -373,6 +392,7 @@ def _ensure_control_operation_reconciler(
                 started_at=0.0,
                 session_id=str(params.current_session_id or "default"),
                 request_id=entry.expected_turn_id,
+                expected_execution=entry.expected_execution,
             ),
         )
         return execute_chat_control(
@@ -524,7 +544,7 @@ def _ensure_control_operation_reconciler(
     return reconciler
 
 
-# LLM: 前后台输入共用稳定消息 ID 和持久回执；后台快照仅提供目标提示，服务端重查真实执行权。
+# LLM: 前后台输入共用稳定消息 ID 和持久回执；目标只来自 Gateway 的实际执行绑定，job 与 activity 均无选择权。
 # 函数用途: 普通 Enter 进入当前主代理的安全点；只在明确拒绝或已排队时回到原任务队列。
 def _tui_submit_active_turn_input(
     params: TuiCreateKeybindingsParams,
@@ -539,12 +559,9 @@ def _tui_submit_active_turn_input(
     show_prompt, _ordinary_text = is_show_prompt_command(text)
     if show_prompt or parse_conversation_task_command(text) is not None:
         return False
-    with params.state_lock:
-        running = bool(params.is_running_ref[0])
-        expected_turn_id = str(params.running_request_id_ref[0] or "").strip()
     runtime = _required_tui_runtime(params)
-    if not running:
-        expected_turn_id = runtime.background_input_target()
+    expected_execution = runtime.execution_target()
+    expected_turn_id = str((expected_execution or {}).get("turn_id") or "")
     if not expected_turn_id:
         return False
     if not callable(getattr(params.agent, "request_active_turn_input", None)):
@@ -565,6 +582,7 @@ def _tui_submit_active_turn_input(
                 text=text,
                 display_text=display_text,
                 execution_options=execution_options,
+                expected_execution=expected_execution,
             )
         )
     except Exception:
@@ -605,6 +623,7 @@ def _ensure_active_input_reconciler(
                 message_id=entry.message_id,
                 expected_turn_id=entry.expected_turn_id,
                 execution_options=entry.execution_options,
+                **({"expected_execution": entry.expected_execution} if entry.expected_execution is not None else {}),
             )
         except Exception:
             return ActiveTurnInputResult(ActiveTurnInputDelivery.UNKNOWN)
@@ -649,18 +668,18 @@ def _ensure_active_input_reconciler(
         )
         runtime.set_notice("Added to current turn", duration_seconds=1.2)
 
-    # LLM: Queued callback attaches the existing stable Gateway request and never POSTs text again.
-    # 函数用途: 撤下插入等待项并把服务器已排队请求接到本地 worker。
+    # LLM: 接回依据原 Gateway ID 幂等；显示等待行可能已被前一次失败撤下，不能拿它决定是否接回或完成 outbox。
+    # 函数用途: 撤下插入等待项并接回原排队请求，显示失败后的重试仍补齐同一个观察 job。
     def on_queued(entry, request_id: str) -> None:
-        if runtime.cancel_active_turn_input(entry.message_id):
-            _tui_attach_gateway_job(
-                params,
-                entry.text,
-                display_text=entry.display_text,
-                gateway_request_id=request_id,
-                client_message_id=entry.message_id,
-                execution_options=entry.execution_options,
-            )
+        runtime.cancel_active_turn_input(entry.message_id)
+        _tui_attach_gateway_job(
+            params,
+            entry.text,
+            display_text=entry.display_text,
+            gateway_request_id=request_id,
+            client_message_id=entry.message_id,
+            execution_options=entry.execution_options,
+        )
         runtime.set_notice("Current turn ended · queued next", duration_seconds=1.8)
 
     # LLM: Explicit rejection proves no Gateway side effect; only then may the ordinary queue create
@@ -942,7 +961,7 @@ def _safe_http_status(value: object) -> int:
         return 0
 
 
-# LLM: Esc 只中断本轮；网络不占 UI 线程，Goal 的续接交由服务端原执行权与去重 wake。
+# LLM: Esc 只中断服务器投影的当前执行；观察队列 request ID 不得用作控制目标，迟到快照由服务器拒绝。
 # 函数用途: 立即显示中断反馈并派发 /interrupt；显式 /stop 仍可暂停目标。
 def _dispatch_active_interrupt(event, params: TuiCreateKeybindingsParams) -> None:
     if not params.use_gateway:
@@ -950,8 +969,8 @@ def _dispatch_active_interrupt(event, params: TuiCreateKeybindingsParams) -> Non
         event.app.invalidate()
         _tui_handle_command(params=_handle_command_params(params, "/interrupt"))
         return
-    with params.state_lock:
-        exact_turn_id = str(params.running_request_id_ref[0] or "").strip()
+    target = _required_tui_runtime(params).execution_target()
+    exact_turn_id = str((target or {}).get("turn_id") or "")
     if not exact_turn_id:
         _required_tui_runtime(params).set_notice(
             "Turn is still binding · stop was not sent",

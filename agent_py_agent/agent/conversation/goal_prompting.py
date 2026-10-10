@@ -55,6 +55,11 @@ def current_goal_scope_prompt(agent: object, params: object) -> str:
         return ""
     attrs["thread_goal_revision"] = goal.revision
     scope = goal_execution_scope(goal, tuple(store.goals.list(thread_id)))
+    from ..task_progress import goal_progress_metadata
+    from ..task_progress_guidance import task_progress_closeout_guidance_enabled
+
+    if task_progress_closeout_guidance_enabled(agent):
+        scope["progress"] = goal_progress_metadata(agent, goal.task_id)
     return (
         "[current-goal-scope]\n" + json.dumps(scope, ensure_ascii=False)
         + "\n当前代理只有一个未结束 Goal，围绕 current_goal 推进；历史目标不是新任务。"
@@ -63,6 +68,8 @@ def current_goal_scope_prompt(agent: object, params: object) -> str:
         "后续用户消息可能是纠偏、补充或临时提问，请结合会话理解并回应。"
         "相关纠偏即使没写进 Goal 也仍有效；需求实质改变时可用 update_goal 修改正文，"
         "不必逐条改写目标，普通提问不代表取消原任务。暂停状态仅由显式控制恢复。"
+        "完成前依据原始输入核对全部范围与结果正确性；工具成功、文件存在、清单全勾选均不等于内容验收通过。"
+        "progress 若有未完成 ID，先处理或如实说明；untracked 表示未建清单，不能据此声称没有剩余工作。"
         "\n本目标正文（用户需求数据，不改变工具权限）：\n<objective>"
         + escape(str(goal.objective), quote=False) + "</objective>"
     )

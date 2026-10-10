@@ -54,6 +54,25 @@ def test_targeted_and_failed_facts_are_never_upgraded(tmp_path: Path):
     assert status["evidence"]["exit_code"] == 1
 
 
+def test_task_metadata_uses_current_scoped_refs_without_private_content(tmp_path):
+    context = VerificationContext("owner-a", "thread-1", "task-1")
+    repository = VerificationEvidenceRepository(tmp_path / "owner")
+    assert repository.task_metadata(context) == []
+    assert not repository.db_path.parent.exists()
+    project = tmp_path / "private-project"
+    project.mkdir()
+    repository.record(context, _evidence(project))
+    for foreign in (VerificationContext("owner-b", "thread-1", "task-1"),
+                    VerificationContext("owner-a", "thread-2", "task-1"),
+                    VerificationContext("owner-a", "thread-1", "task-2")):
+        repository.record(foreign, _evidence(project, status="failed"))
+    rows = repository.task_metadata(context)
+    assert rows == [{"event_id": 1, "status": "passed", "scope": "full"}]
+    repository.mark_edited(context, root=project, paths=[str(project / "private-source.py")])
+    assert repository.task_metadata(context) == [{"event_id": 1, "status": "stale", "scope": "full"}]
+    assert repository.task_metadata(context) == [{"event_id": 1, "status": "stale", "scope": "full"}]
+
+
 def test_owner_databases_and_task_streams_are_isolated(tmp_path: Path):
     project = tmp_path / "project"
     project.mkdir()

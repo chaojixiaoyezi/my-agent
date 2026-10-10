@@ -1,5 +1,7 @@
 # Verification：结构
 
+L 线的 `repository.task_metadata` 与 `runtime.verification_task_metadata` 为 Goal 收口提供原事件的无正文引用；不是新的核验器或验收门。入口读取原验证数据库，Goal 的 transition 只保存编号/状态/范围，命令、输出和路径留在原账本。
+
 ## jb6联合链（2026-10-04）
 
 两联合沿jb5原样Hub/共用池/展示、手工processing与离线模型；各插件不同activation，计数handler不运行删除。两直接deny按原archive/persist查唯一行及B6 info；两ask用户拒绝空账本仅由专用异常strict xfail标worker/b5fix9b，观察/协议/审批错误不吞。本线无产品/helper/writer修改，可见截断原strict XPASS后转普通裁定断言；非整期或产品启用/B7证据。

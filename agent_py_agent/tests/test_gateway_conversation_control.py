@@ -142,6 +142,19 @@ def _bind_live_main_request(agent, path):
     ))
 
 
+# LLM: 插话准入必须持真实会话 claim；仅 processing 与 write-ahead 绑定不能模拟执行。
+# 函数用途: 在临时原账里模拟前台已经取得车道，不调用模型、不伪造执行投影。
+def _hold_foreground_lane(agent, path):
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    owner = _resolve_request_agent(agent, payload)
+    thread = owner.conversation_store.threads.get_or_create(payload["conversation"])
+    GatewayTaskBindingWriter(path, payload["id"]).bind_conversation_claim(thread.thread_id)
+    assert owner.conversation_store.claims.acquire({
+        "thread_id": thread.thread_id, "task_id": f"gateway:{payload['id']}",
+        "reason": "gateway_foreground_turn",
+    })
+
+
 def _command(text: str):
     command = parse_conversation_control(text)
     assert command is not None
@@ -452,6 +465,7 @@ def test_ordinary_input_steers_only_the_matching_active_conversation(tmp_path) -
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
     write_json_file(paths.processing / "req-2.json", _request("req-2", user="u-2"))
+    _hold_foreground_lane(agent, paths.processing / "req-1.json")
 
     result = steer_active_conversation_if_running(
         agent,
@@ -563,6 +577,7 @@ def test_ordinary_input_follows_only_the_task_linked_to_the_live_turn(tmp_path) 
         "task_path": "",
     }
     write_json_file(paths.processing / "req-live.json", payload)
+    _hold_foreground_lane(agent, paths.processing / "req-live.json")
 
     linked = steer_active_conversation_if_running(
         agent,
@@ -590,6 +605,7 @@ def test_ordinary_input_follows_only_the_task_linked_to_the_live_turn(tmp_path) 
     other_paths.processing.mkdir(parents=True, exist_ok=True)
     _bind_durable_task(other_agent, "task-unrelated")
     write_json_file(other_paths.processing / "req-chat.json", _request("req-chat"))
+    _hold_foreground_lane(other_agent, other_paths.processing / "req-chat.json")
 
     unlinked = steer_active_conversation_if_running(
         other_agent,
@@ -622,6 +638,7 @@ def test_ordinary_input_guidance_stays_inside_the_authenticated_owner(tmp_path) 
     bob_request = _request("req-bob", user="bob", conversation_id="chat-bob")
     write_json_file(paths.processing / "req-alice.json", alice_request)
     write_json_file(paths.processing / "req-bob.json", bob_request)
+    _hold_foreground_lane(agent, paths.processing / "req-alice.json")
 
     result = steer_active_conversation_if_running(
         agent,
@@ -4188,6 +4205,7 @@ def test_http_ask_steers_active_turn_without_creating_a_second_request(tmp_path)
     paths = gateway_paths(agent)
     paths.processing.mkdir(parents=True, exist_ok=True)
     write_json_file(paths.processing / "req-1.json", _request("req-1"))
+    _hold_foreground_lane(agent, paths.processing / "req-1.json")
     auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
     port = _free_port()
     server = GatewayHTTPServer(
@@ -4469,7 +4487,7 @@ def test_http_ask_prepared_fallback_preserves_all_execution_options() -> None:
 
 def test_input_lifecycle_ignores_orphan_terminal_projections(tmp_path) -> None:
     from agent_py_agent.agent.gateway_parts.input_delivery_service import (
-        _gateway_turn_lifecycle,
+        _gateway_turn_lifecycle_locked,
     )
 
     agent = SimpleAgent(
@@ -4489,7 +4507,7 @@ def test_input_lifecycle_ignores_orphan_terminal_projections(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    assert _gateway_turn_lifecycle(paths, request_id) == "unknown"
+    assert _gateway_turn_lifecycle_locked(paths, request_id) == "unknown"
 
     paths.terminal.mkdir(parents=True, exist_ok=True)
     (paths.terminal / f"{request_id}.json").write_text(
@@ -4502,7 +4520,7 @@ def test_input_lifecycle_ignores_orphan_terminal_projections(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    assert _gateway_turn_lifecycle(paths, request_id) == "terminal"
+    assert _gateway_turn_lifecycle_locked(paths, request_id) == "terminal"
 
 
 def test_input_queue_refuses_orphan_projection_without_canonical(tmp_path) -> None:

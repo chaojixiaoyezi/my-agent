@@ -49,6 +49,8 @@ class VerificationEvidence:
     output_summary: str = ""
 
 
+# LLM: 验证事实只归一个 owner SQLite；元数据读回不建库、不新增事件，任何 passed/full 都不能提升为任务完成授权。
+# 类用途: 保存实际验证和文件修改事实，为上下文与 Goal 提供精确范围的证据引用。
 class VerificationEvidenceRepository:
     """Persist verification facts inside exactly one owner home."""
 
@@ -185,6 +187,27 @@ class VerificationEvidenceRepository:
             "root": root_text,
             "changed_paths": changed_paths,
         }
+
+    # LLM: 只投影原状态指向的同 owner/thread/task 验证；只读连接不创建库或迁移，不加载命令、输出和路径。
+    # 函数用途: 为 Goal 完成来源提供验证事件编号和结果；证据 scope 不等于整个目标已通过验收。
+    def task_metadata(self, context: VerificationContext) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        conn = sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True, timeout=5.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT e.id, e.status, e.scope, e.created_at, s.last_edit_at
+                   FROM verification_state s JOIN verification_events e ON e.id = s.last_event_id
+                   WHERE s.owner_ref = ? AND s.thread_id = ? AND s.task_id = ?
+                     AND e.owner_ref = s.owner_ref AND e.thread_id = s.thread_id AND e.task_id = s.task_id
+                   ORDER BY e.id""", (context.owner_ref, context.thread_id, context.task_id),
+            ).fetchall()
+            return [{"event_id": row["id"], "scope": row["scope"],
+                     "status": "stale" if row["last_edit_at"] and row["last_edit_at"] > row["created_at"] else row["status"]}
+                    for row in rows]
+        finally:
+            conn.close()
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

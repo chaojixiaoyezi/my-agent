@@ -1473,14 +1473,14 @@ def _limit_closeout(response: object) -> bool:
     return isinstance(response, dict) and response.get("error_code") == TURN_RESUME_LIMIT_ERROR_CODE
 
 
-# LLM: 插话收口唯一分流：续跑上限收口走 settle_dead_turn（连随进程死掉的已提交插话一起定终态），其余照旧
-#   reject_pending(reject_reserved=True)。terminalize 和已封存热记录的补交都经这里。
-# 函数用途: 按这次收口是不是续跑上限，选对插话的结算方式并返回计数。
+# LLM: 运输回合只能收口原 request 邮箱；task 邮箱由精确 task 生命周期对账，不能因同名请求结束而被拒。
+#   续跑上限只对原 request 的死亡提交收口，terminalize 和已封存热记录的补交都经这里。
+# 函数用途: 按运输回合结束原因结算原请求插话，保留尚在后台工作的持久任务邮箱。
 def _settle_turn_guidance(conversation_store: object, turn_id: str, response: object) -> dict:
     recovery = conversation_store.guidance.recovery
     if _limit_closeout(response):
-        return recovery.settle_dead_turn(turn_id)
-    return recovery.reject_pending(turn_id, reject_reserved=True)
+        return recovery.settle_dead_turn(turn_id, target=("request", turn_id))
+    return recovery.reject_pending(turn_id, reject_reserved=True, target=("request", turn_id))
 
 
 # LLM: 续跑上限收口时把插话结算的结构化计数写进答复（guidance_settlement），并按计数换提示句（turn_resume_limit_notice），

@@ -42,6 +42,9 @@ from ..user_space.owner_quota import (
     OwnerQuotaEnforcer,
 )
 from .due_index import SchedulerDueIndex
+from .execution_policy import normalize_execution, normalize_precheck
+from .policy import apply_run_policy, normalize_policy
+from .run_preparation import SchedulerRunPreparation
 from .schedule import (
     ScheduleValidationError,
     compute_next_run,
@@ -104,6 +107,8 @@ class SchedulerConflictError(SchedulerRepositoryError):
     """A version, claim, or lifecycle precondition changed concurrently."""
 
 
+# LLM: 创建值对象携带 job 级显式策略，不携带展开后的模型配置或凭据；规范化仍由原仓库执行。
+# 类用途: 将计划时间、来源会话、执行策略及预检作为一次创建事务的输入。
 @dataclass(frozen=True)
 class SchedulerJobCreateRequest:
     """Validated create inputs passed as one value through normalization."""
@@ -117,6 +122,9 @@ class SchedulerJobCreateRequest:
     skill_refs: object = ()
     source_request_id: str = ""
     now: float | None = None
+    policy: object = None
+    execution: object = None
+    precheck: object = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
@@ -273,6 +281,8 @@ class _SchedulerJobOperations:
         return deepcopy(deleted)
 
 
+# LLM: run 的预留、领取与终态只写原 owner 仓库；错过周期和退避不创建第二个执行者，恢复仍服从原 claim CAS。
+# 类用途: 管理定时运行的单次身份、实际开工和结果历史，修改时联测过期与交付重试。
 class _SchedulerRunOperations:
     """Public durable run reservation, claim, completion, and history operations."""
 
@@ -295,6 +305,8 @@ class _SchedulerRunOperations:
             self._write_store_unlocked(store, admission)
         return deepcopy(run)
 
+    # LLM: 到期检查沿原锁读取 job，按 skip/coalesce 预留最多一次；未来周期退避只延迟新 run，不重放旧执行。
+    # 函数用途: 为已到期且不重叠的计划预留原 run，记录错过周期并推进下次自然时间。
     def reserve_due_runs(
         self,
         *,
@@ -313,6 +325,7 @@ class _SchedulerRunOperations:
                     if job["status"] == "active"
                     and float(job.get("next_run_at") or 0.0) > 0
                     and float(job["next_run_at"]) <= current
+                    and float(job.get("backoff_until") or 0.0) <= current
                 ),
                 key=lambda job: (float(job["next_run_at"]), str(job["job_id"])),
             )
@@ -327,7 +340,7 @@ class _SchedulerRunOperations:
                 selected += 1
                 scheduled_for = float(job["next_run_at"])
                 lateness = max(0.0, current - scheduled_for)
-                if lateness > int(job["misfire_grace_seconds"]):
+                if lateness > int(job["misfire_grace_seconds"]) and normalize_policy(job.get("policy"))["misfire"] == "skip":
                     skipped_run = _terminal_misfire_run(
                         job, scheduled_for=scheduled_for, now=current
                     )
@@ -723,6 +736,8 @@ class _SchedulerWaitingRunOperations:
         return deepcopy(terminal)
 
 
+# LLM: 这里集中原存储解析、owner 校验和锁顺序；可选策略缺失沿默认语义，损坏字段不得参与领取。
+# 类用途: 为调度仓库提供校验与原子读写，不接触模型或工具执行。
 class _SchedulerStoreSupport:
     """Private owner-store parsing, locking, quota admission, and validation support."""
 
@@ -961,6 +976,8 @@ class _SchedulerStoreSupport:
                 errors.append(error)
         return jobs, sorted(set(errors))
 
+    # LLM: schema/owner/计划及可选执行策略共用这里校验；错误只返回结构化码，读路径不迁移或覆盖原文件。
+    # 函数用途: 识别可信的当前 owner 计划，将非法记录排除于实际调度之外。
     def _parse_job(self, raw: object) -> tuple[dict[str, object] | None, str]:
         if not isinstance(raw, dict):
             return None, "SCHEDULER_JOB_INVALID"
@@ -978,14 +995,17 @@ class _SchedulerStoreSupport:
             validate_schedule(raw.get("schedule"))
             _validate_name_prompt(str(raw.get("name") or ""), str(raw.get("prompt") or ""))
             _normalize_skill_refs(raw.get("skill_refs"))
+            normalize_policy(raw.get("policy"))
+            normalize_execution(raw.get("execution"))
+            normalize_precheck(raw.get("precheck"))
             if int(raw.get("version") or 0) < 1:
                 raise ValueError("job version")
             return dict(raw), ""
         except (TypeError, ValueError, ScheduleValidationError):
             return None, "SCHEDULER_JOB_INVALID"
 
-    # LLM: Legacy runs default to epoch 0; malformed, boolean, or negative epochs are rejected before any claim mutation.
-    # 函数用途: 解析新旧 scheduler run 并为旧记录补出 epoch 0，确保后续 CAS 有确定基线。
+    # LLM: 旧 run 默认 epoch 0；读取时校验冻结执行策略，损坏记录不能等到领取后才猜执行位置或预检动作。
+    # 函数用途: 解析新旧 scheduler run，拒绝非法 epoch 和配置，确保后续 CAS 有确定基线。
     def _parse_run(
         self,
         raw: object,
@@ -1009,6 +1029,8 @@ class _SchedulerStoreSupport:
             claim_epoch = raw.get("claim_epoch", 0)
             if isinstance(claim_epoch, bool) or not isinstance(claim_epoch, int) or claim_epoch < 0:
                 raise ValueError("claim epoch")
+            normalize_execution(raw.get("execution"))
+            normalize_precheck(raw.get("precheck"))
             parsed = dict(raw)
             parsed["claim_epoch"] = claim_epoch
             return parsed, ""
@@ -1104,7 +1126,10 @@ class _SchedulerStoreSupport:
         return [record for record in records if str(record.get("run_id") or "") not in existing]
 
 
+# LLM: 组合原 job/run/store 与执行准备操作；所有状态仍归同一 owner store 和 history，不能引入平行权威文件。
+# 类用途: 提供定时任务的持久化入口，供工具、调度服务和诊断查询共用。
 class SchedulerRepository(
+    SchedulerRunPreparation,
     _SchedulerJobOperations,
     _SchedulerRunOperations,
     _SchedulerWaitingRunOperations,
@@ -1433,6 +1458,8 @@ def _claim_matches(run: dict[str, object], claim_id: str) -> bool:
     return current_epoch == token_epoch
 
 
+# LLM: 纯规范化创建输入，幂等摘要包含 execution/precheck/policy；不同明确策略不能被判成同一登记。
+# 函数用途: 构造新的计划记录，落盘及配额由上层原事务负责。
 def _new_job_payload(
     *,
     owner: dict[str, str],
@@ -1442,6 +1469,9 @@ def _new_job_payload(
     normalized_name, normalized_prompt = _validate_name_prompt(request.name, request.prompt)
     normalized_schedule = validate_schedule(request.schedule)
     normalized_refs = _normalize_skill_refs(request.skill_refs)
+    policy = normalize_policy(request.policy)
+    execution = normalize_execution(request.execution)
+    precheck = normalize_precheck(request.precheck)
     thread = request.thread_id
     if not thread:
         raise ScheduleValidationError("thread_id is required")
@@ -1455,6 +1485,9 @@ def _new_job_payload(
                 "thread_id": thread,
                 "schedule": normalized_schedule,
                 "skill_refs": normalized_refs,
+                "policy": policy,
+                "execution": execution,
+                "precheck": precheck,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1475,6 +1508,11 @@ def _new_job_payload(
         "misfire_grace_seconds": grace,
         "delivery": {"mode": "origin"},
         "skill_refs": normalized_refs,
+        "policy": policy,
+        "execution": execution,
+        "precheck": precheck,
+        "consecutive_failures": 0,
+        "backoff_until": 0.0,
         "source_request_id": request.source_request_id,
         "create_fingerprint": fingerprint,
         "version": 1,
@@ -1489,6 +1527,8 @@ def _new_job_payload(
     }
 
 
+# LLM: 只改显式 patch，保留未给出的对象和已确认 checkpoint；已预留 run 的快照不在这里改写。
+# 函数用途: 校验计划更新并增加版本，让新周期读取新的完整策略。
 def _updated_job(
     job: dict[str, object], patch: dict[str, object], *, now: float
 ) -> dict[str, object]:
@@ -1516,6 +1556,9 @@ def _updated_job(
         "skill_refs": skill_refs,
         "misfire_grace_seconds": grace,
         "next_run_at": next_run,
+        "policy": normalize_policy(patch.get("policy") if "policy" in patch else job.get("policy")),
+        "execution": normalize_execution(patch.get("execution") if "execution" in patch else job.get("execution")),
+        "precheck": normalize_precheck(patch.get("precheck") if "precheck" in patch else job.get("precheck")),
         "updated_at": now,
         "version": int(job["version"]) + 1,
     }
@@ -1531,13 +1574,19 @@ def _reserved_run(
     dispatch_after: float,
     now: float,
 ) -> dict[str, object]:
+    run_id = f"srun_{uuid.uuid4().hex}"
+    execution = normalize_execution(job.get("execution"))
     return {
         "schema_version": _RUN_SCHEMA,
-        "run_id": f"srun_{uuid.uuid4().hex}",
+        "run_id": run_id,
         "job_id": str(job["job_id"]),
         "job_version": int(job["version"]),
         "owner": deepcopy(job["owner"]),
-        "thread_id": str(job["thread_id"]),
+        "thread_id": f"thread-{run_id}" if execution["mode"] == "isolated" else str(job["thread_id"]),
+        "origin_thread_id": str(job["thread_id"]),
+        "execution": execution,
+        "precheck": deepcopy(job.get("precheck")),
+        "precheck_checkpoint": deepcopy(job.get("precheck_checkpoint")),
         "source_task_id": str(job.get("source_task_id") or ""),
         "name": str(job["name"]),
         "prompt": str(job["prompt"]),
@@ -1545,6 +1594,10 @@ def _reserved_run(
         "trigger": trigger,
         "scheduled_for": float(scheduled_for),
         "dispatch_after": float(dispatch_after),
+        "queue_deadline_at": now + normalize_policy(job.get("policy"))["queue_timeout_seconds"]
+                             if normalize_policy(job.get("policy"))["queue_timeout_seconds"] else 0.0,
+        "misfire_policy": normalize_policy(job.get("policy"))["misfire"],
+        "lateness_seconds": max(0.0, now - scheduled_for),
         "status": "queued",
         "wake_signal_id": "",
         "claim_id": "",
@@ -1623,20 +1676,28 @@ def _advance_after_misfire(job: dict[str, object], now: float) -> dict[str, obje
     }
 
 
+# LLM: 原终态事务同时提交失败策略与 checkpoint；只有 done 且预检定义未变可确认摘要，不以模型正文判断成功。
+# 函数用途: 将一次运行的结果投回 job，保留暂停/删除及自然周期语义。
 def _job_after_run(
     job: dict[str, object],
     run: dict[str, object],
     *,
     now: float,
 ) -> dict[str, object]:
-    updated = {
+    updated = apply_run_policy({
         **job,
         "last_run_at": now,
         "last_run_status": str(run["status"]),
         "last_error_code": str(run.get("error_code") or ""),
         "updated_at": now,
         "version": int(job["version"]) + 1,
-    }
+    }, run, now=now)
+    observation = run.get("precheck_observation") or {}
+    if (run.get("status") == "done" and observation.get("status") == "changed"
+            and run.get("precheck") == job.get("precheck")):
+        updated["precheck_checkpoint"] = {
+            "fingerprint": observation["fingerprint"], "run_id": run["run_id"], "confirmed_at": now,
+        }
     if (
         job["status"] != "deleted"
         and run.get("trigger") == "due"
