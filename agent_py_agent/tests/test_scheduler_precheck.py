@@ -209,6 +209,31 @@ def test_precheck_archive_failure_is_failed_without_advancing_checkpoint(tmp_pat
     assert case.backend.prompts == []
 
 
+def test_real_read_file_precheck_uses_thread_directory_and_unchanged_cycle_has_no_model(tmp_path):
+    work = tmp_path / "home/owners/local/main/workspace/task-workspace"
+    work.mkdir(parents=True)
+    material = work / "revision.txt"
+    material.write_text("revision=1\n")
+    case = execution_case(tmp_path, cwd=work, precheck={"tool_name": "read_file", "arguments": {"path": "revision.txt"}})
+    case.channels.status = "sent"
+    repo = case.agent.scheduler_repository
+    case.scheduler.tick(now=1000)
+    assert repo.get_job(case.job["job_id"])["last_run_status"] == "done", json.dumps([r.get("precheck_observation") for r in repo.history()[0]])
+    assert len(case.backend.prompts) == 1
+    case.scheduler.tick(now=1600)
+    assert len(case.backend.prompts) == 1
+    material.write_text("revision=2\n")
+    case.scheduler.tick(now=2200)
+    assert len(case.backend.prompts) == 2
+    material.unlink()
+    case.scheduler.tick(now=2800)
+    assert len(case.backend.prompts) == 2
+    assert repo.get_job(case.job["job_id"])["last_run_status"] == "failed"
+    history, _ = repo.history()
+    failed = next(row for row in history if row["status"] == "failed")
+    assert failed["precheck_observation"]["tool_error_code"] == "PATH_NOT_FOUND"
+
+
 @pytest.mark.parametrize("pointer", ["/missing", "/rows/01", "/rows/-1", "/bad~9key"])
 def test_invalid_pointer_is_failure_not_unchanged(pointer):
     with pytest.raises((KeyError, ValueError, TypeError)):

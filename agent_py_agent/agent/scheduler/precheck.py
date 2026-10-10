@@ -1,5 +1,5 @@
-# LLM: 预检经唯一 ToolRegistry/Executor 执行，只接受当前声明为 read_only 的参数；不直接调用 handler、shell 或网络。
-# 模块用途: 在模型工作前比较结构化观察摘要；检查失败与无变化分开，动作完成前不推进检查点。
+# LLM: 预检经原后台参数、ToolRegistry/Executor 执行，只接受 read_only；cwd、Skill 和身份沿既有后台装配，不从 prompt 或工具参数推断。
+# 模块用途: 在模型工作前比较完整观察，保留工具原因码；失败与无变化分开，动作完成前不推进检查点。
 from __future__ import annotations
 
 import hashlib
@@ -9,15 +9,26 @@ import time
 from .execution_policy import normalize_precheck
 
 
+# LLM: 只携带原 ToolResult 的结构化错误码与调用编号，不保留输出正文或从异常文案解析原因。
+# 类用途: 将工具失败原因交给预检状态记录，便于纯元数据诊断。
+class PrecheckToolFailure(RuntimeError):
+    # LLM: 参数必须来自共享执行器的回执，不能传入用户提示词；异常仅作为宿主结构化失败载体。
+    # 函数用途: 保存原错误码和真实工具调用编号，不复制工具正文。
+    def __init__(self, error_code: str, call_id: str):
+        super().__init__("只读预检工具执行失败")
+        self.tool_error_code = error_code
+        self.call_id = call_id
+
+
 # LLM: 调用时已持 scheduler 与后台 claim，停止与心跳均已注册；同 run 已有观察原样复用，不重跑预检。
 # 函数用途: 返回是否需要继续模型工作，跳过或失败时沿原 TaskStore/run/wake 收口。
-def admit_prechecked_work(agent, service, claim, signal, *, now: float) -> bool:
+def admit_prechecked_work(agent, service, claim, signal, *, run_kwargs: dict, now: float) -> bool:
     spec = normalize_precheck(claim.run.get("precheck"))
     if spec is None:
         return True
     observation = claim.run.get("precheck_observation")
     if observation is None:
-        observation = observe(agent, claim, spec)
+        observation = observe(agent, claim, spec, run_kwargs=run_kwargs)
         observation = service.repository.record_precheck(claim.run_id, claim.claim_id, observation)
     if observation["status"] == "changed":
         return True
@@ -37,11 +48,11 @@ def admit_prechecked_work(agent, service, claim, signal, *, now: float) -> bool:
     return False
 
 
-# LLM: 只保存摘要、工具编号和结构化失败码；原参数与工具输出仍由既有工具操作账保存，不进入元数据视图。
-# 函数用途: 执行一次只读预检，比较原 job 的已确认 checkpoint，错误不伪装成无变化。
-def observe(agent, claim, spec: dict) -> dict:
+# LLM: 只保存摘要、工具编号及原工具错误码；原参数与输出仍归既有工具账，不进入元数据视图。
+# 函数用途: 沿同一后台请求执行预检并比较 checkpoint，错误不伪装成无变化。
+def observe(agent, claim, spec: dict, *, run_kwargs: dict) -> dict:
     try:
-        output, call_id = _execute_read_only(agent, claim, spec)
+        output, call_id = _execute_read_only(agent, claim, spec, run_kwargs=run_kwargs)
         value = _json_pointer(json.loads(output), spec["json_pointer"]) if "json_pointer" in spec else output
         raw = json.dumps({"precheck": spec, "value": value}, sort_keys=True, ensure_ascii=False, allow_nan=False)
         fingerprint = hashlib.sha256(raw.encode()).hexdigest()
@@ -51,27 +62,30 @@ def observe(agent, claim, spec: dict) -> dict:
     except InterruptedError:
         raise
     except Exception as exc:  # noqa: BLE001 - 预检失败沿原 run 留结构化原因，不等于无变化
-        return {"status": "failed", "error_code": "SCHEDULER_PRECHECK_FAILED", "call_id": f"host-tool-{claim.run_id}",
-                "error_type": type(exc).__name__, "observed_at": time.time()}
+        result = {"status": "failed", "error_code": "SCHEDULER_PRECHECK_FAILED", "call_id": f"host-tool-{claim.run_id}",
+                  "error_type": type(exc).__name__, "observed_at": time.time()}
+        if isinstance(exc, PrecheckToolFailure):
+            result.update(tool_error_code=exc.tool_error_code, call_id=exc.call_id)
+        return result
 
 
-# LLM: schema、effect 与执行共用同一快照；原后台身份回调把真实 attempt 发布到原 claim，未知或写工具在 handler 前拒绝。
-# 函数用途: 以原工具执行器运行显式读取，关联同一 run/claim 和可精确停止的 attempt，不创建输入消费轮。
-def _execute_read_only(agent, claim, spec: dict) -> tuple[str, str]:
+# LLM: 原后台请求唯一装配 cwd、授权根、Skill 和任务属性；schema/effect 与执行同快照，真实 attempt 发布到原 claim。
+# 函数用途: 沿后台实际工作目录执行只读工具并保留原因码，不创建输入消费轮或猜测相对路径。
+def _execute_read_only(agent, claim, spec: dict, *, run_kwargs: dict) -> tuple[str, str]:
     from ..agent_core.runtime.loop_models import RunParams
     from ..agent_core.tool_only_execution import execute_read_only_tool
     from ..conversation.background_execution import _BackgroundRunControl
+    from ..conversation.runtime import _background_task_attributes, _run_request
 
     thread = agent.conversation_store.threads.require(str(claim.run["thread_id"]))
+    attributes = _background_task_attributes(thread.thread_id, _run_request(run_kwargs), agent, thread=thread)
     params = RunParams(request_id=claim.run_id, run_id=claim.run_id, task_id=claim.run_id,
         source="scheduler_precheck", root_user_prompt=str(claim.run["prompt"]),
         conversation_task_binding_callback=_BackgroundRunControl(claim.run_id, None),
-        task_attributes={"conversation_thread_id": thread.thread_id, "conversation_task_id": claim.run_id},
-        write_boundary={"task_id": claim.run_id, "execution_cwd": thread.cwd,
-                        "execution_workspace_roots": list(thread.runtime_workspace_roots)})
+        task_attributes=attributes, write_boundary={"task_id": claim.run_id})
     execution, output = execute_read_only_tool(agent, params, tool_name=spec["tool_name"], arguments=spec["arguments"])
     if not execution.result.ok:
-        raise RuntimeError(execution.result.error_code or "PRECHECK_TOOL_FAILED")
+        raise PrecheckToolFailure(execution.result.error_code or "PRECHECK_TOOL_FAILED", execution.call.call_id)
     return output, execution.call.call_id
 
 

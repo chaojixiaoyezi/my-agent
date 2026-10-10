@@ -2826,3 +2826,5 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 # 长任务预检与采用字段
 
 `scheduler/execution_policy.py` 定义可直接用于 create/update 的预检对象，`scheduler/tool.py` 提供完整通用例子；prompt 不触发配置推断。`settings/model_scope.py::model_selection_snapshot` 为普通请求明确记录当前选择线程，定时执行在同一快照上替换来源。
+
+`scheduler/precheck.py` 的宿主 RunParams 使用原 `conversation.runtime._background_task_attributes` 装配 cwd/roots/Skill/任务身份，错误观察仅加原 tool_error_code 与 call_id；不建立另一套工作目录合同。

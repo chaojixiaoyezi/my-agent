@@ -20,8 +20,8 @@ def close_unstarted_task(service, run: dict, *, now: float) -> None:
                                                         "expected_status": "active", "now": now})
 
 
-# LLM: 只包装原后台 run_once；拿到后台车道后才写 running/started_at，排队领取不能伪装成已经执行。
-# 函数用途: 在同一后台领取、中断和心跳范围内开始定时工作，再执行可选预检和原模型工作片。
+# LLM: 只包装原后台 run_once；拿到车道后才写 started_at，预检接收同一原后台参数以保留 cwd、Skill 和任务身份。
+# 函数用途: 在同一领取、中断和心跳范围内执行预检及模型工作，不重建一份工作区合同。
 def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: float):
     # LLM: 原 claim 已经通过准入和恢复检查；开始、预检、模型仍用一个 run，异常交原后台领取器收尾。
     # 函数用途: 记录实际取得车道的时刻，然后按预检结果继续模型或静默收口。
@@ -29,7 +29,7 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         from .precheck import admit_prechecked_work
 
         service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
-        if admit_prechecked_work(agent, service, claim, signal, now=now):
+        if admit_prechecked_work(agent, service, claim, signal, run_kwargs=kwargs, now=now):
             return dependencies.run_once(kwargs)
         return None
 

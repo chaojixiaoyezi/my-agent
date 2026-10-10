@@ -538,8 +538,8 @@ def _job_projection(
     return payload
 
 
-# LLM: 白名单读取 run 的状态和时间；元数据模式不读取回复及错误正文，不能从执行成功推导交付成功。
-# 函数用途: 展示一次执行和交付状态；默认保留原详细摘要，纯元数据模式排除自由文本。
+# LLM: 白名单读取 run 状态、时间及预检原工具原因码；不读取回复/错误正文，执行成功不推导交付成功。
+# 函数用途: 展示执行、交付和预检错误来源；纯元数据模式排除自由文本。
 def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> dict[str, object]:
     payload = {
         "execution": normalize_execution(run.get("execution")),
@@ -547,7 +547,7 @@ def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> d
         "thread_id": run.get("thread_id"),
         "precheck_status": (run.get("precheck_observation") or {}).get("status", "pending" if run.get("precheck") else "disabled"),
         "precheck_observation": {key: value for key, value in (run.get("precheck_observation") or {}).items()
-                                 if key in {"status", "call_id", "observed_at", "error_code", "error_type"}},
+                                 if key in {"status", "call_id", "observed_at", "error_code", "error_type", "tool_error_code"}},
         "run_id": run["run_id"],
         "job_id": run["job_id"],
         "trigger": run.get("trigger") or "",

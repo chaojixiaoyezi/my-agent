@@ -15,15 +15,16 @@ from agent_py_agent.tests.test_model_profiles import add
 from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 
-# LLM: 只在隔离目录初始化真实调度链，替身仅负责模型文本与外发结果，不替换状态转换或重投。
-# 函数用途: 创建独立定时执行的生产入口夹具。
-def execution_case(tmp_path, *, precheck=None, policy=None):
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl", orphan_supervision_interval_seconds=0), tmp_path)
+# LLM: 显式隔离 home，不依赖 pytest 环境夹具；cwd 可与 Gateway 根不同，替身只负责模型文本与外发。
+# 函数用途: 创建独立定时执行夹具，覆盖真实会话目录、预检和冻结重投。
+def execution_case(tmp_path, *, precheck=None, policy=None, cwd=None):
+    agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False,
+        memory_path="memory.jsonl", orphan_supervision_interval_seconds=0), tmp_path)
     backend = _Backend()
     agent.backend = backend
     store = agent.conversation_store
     thread = store.threads.get_or_create({"canonical_user_id": "user-1", "channel": "feishu",
-        "channel_conversation_id": "chat-isolated", "channel_user_id": "open-1", "cwd": str(tmp_path), "now": 900})
+        "channel_conversation_id": "chat-isolated", "channel_user_id": "open-1", "cwd": str(cwd or tmp_path), "now": 900})
     store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "不应进入独立运行的原会话正文", "channel": "feishu"})
     job = agent.scheduler_repository.create_job(SchedulerJobCreateRequest(
         name="独立合成检查", prompt="核验合成资料", thread_id=thread.thread_id,

@@ -106,3 +106,7 @@ M2 中 `bound` 只证明宿主当前依赖，`last_request` 来自实际模型�
 真实验收从测试机原生 TUI 提交普通需求，由被测 agent 创建计划、修改文件并产生回复。测试者只准备合成输入、执行明确控制操作和观察证据，不能补任务产物。
 
 学习来源继续使用既有结构化合同；本基线的 Skill 自学习已经排除 `background_main_agent`，预检不进入 FinalizationService。报告所指新版 AGENTS 来源合同未在本基线集成；该组合单独列为依赖，不在 scheduler 添加第二张学习排除名单。
+
+## 预检工作目录与失败原因
+
+预检与后续模型工作共享原后台请求的 thread cwd、runtime workspace roots、Skill 与 task 属性装配。宿主工具入口不得自行拼接一套 cwd 合同；既有 owner 目录权限继续生效。原 ToolResult 失败码保存在观察的 `tool_error_code`，配合 call_id 可定位共享工具账，不在状态查询中复制参数或输出正文。
