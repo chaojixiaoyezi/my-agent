@@ -1,7 +1,7 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
 # 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
-# Goal、投递地址、执行 claim 和恢复守卫各有窄能力组件；来源消费和能力预扫保留原编排位置。
+# Goal、scheduler run、投递地址与执行 claim 各守原事实源；持久任务续接不虚构聊天请求，来源消费仍归原编排。
 # 能力事件开始的工作片也可能完成任务，公开交付须读当前任务状态，不能仅凭原唤醒原因永久静默。
 # 原 wake 队列在预扫及领取后重查；历史失败不能绕过已接续子代理的当前状态与未读完成信封。
 # 合法冻结交付须先于普通终态工作过滤恢复；任务结束不确认欠发回复，取消抑制和去重仍归原交付层。
@@ -462,7 +462,7 @@ class BackgroundRunRequest:
 
 
 # LLM: 一次采样冻结精确目标、兄弟目标状态与 child phase；兄弟目标不是本回合的执行范围。
-#   durable_goal_task_id/objective 是 _goal_runtime_context 已核实的 Goal 任务来源（属于本线程、任务编号与本次唤醒相同）：
+#   durable_task_id/objective 是 _goal_runtime_context 已核实的 Goal 或原 scheduler run 来源，线程和任务必须匹配：
 #   这个编号不是普通用户请求，没有对应的历史用户消息；目标是否 active 都保留，供宿主事件区分任务来源与历史请求。
 # 类用途: 固定一次后台模型调用所见的目标、任务目录和子代理阶段，避免采样中途漂移。
 @dataclass(frozen=True)
@@ -473,15 +473,15 @@ class GoalRuntimeContext:
     subagent_phase: str = ""
     state_error: str = ""
     other_goals: tuple[object, ...] = ()
-    durable_goal_task_id: str = ""
-    durable_goal_objective: str = ""
+    durable_task_id: str = ""
+    durable_task_objective: str = ""
 
 
 
 
-# LLM: 同一后台轮冻结 Goal/child phase；Goal 的持久任务编号不是普通用户请求编号，先按本线程事实解析归属。
+# LLM: 同一后台轮冻结 Goal/child phase；Goal 与 scheduler run 的持久编号都不是聊天请求，先按原存储核实线程归属。
 # 原始用户历史不裁剪；拆开的命名目标不得把整条多目标消息重新作为各自的任务。只读，不改历史或任务账。
-# 已核实的 Goal 任务来源记进 durable_goal_task_id/objective，宿主事件据此区分任务来源与历史请求。
+# 原 Goal 或 scheduler run 核实的来源记进 durable_task_id/objective；宿主事件与历史查找共用同一份身份。
 # 函数用途: 固定后台续接的正确用户要求与子树阶段，避免新任务完成后主代理回去回答旧任务。
 def _goal_runtime_context(
     agent: object,
@@ -514,9 +514,15 @@ def _goal_runtime_context(
             state_error=state_error or "goal_state_load_error",
         )
     origin_task_id, origin_objective = _durable_goal_origin(goal, request.thread_id, task_id)
+    if not origin_task_id:
+        from ..scheduler.execution import execution_run
+
+        scheduled = execution_run(agent, request)
+        if scheduled is not None:
+            origin_task_id, origin_objective = str(scheduled["run_id"]), str(scheduled["prompt"])
     if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
         task_objective = _background_request_objective(
-            store, request, durable_goal_task_id=origin_task_id,
+            store, request, durable_task_id=origin_task_id,
         ) or task_objective
     if (
         goal is None
@@ -528,7 +534,7 @@ def _goal_runtime_context(
             task_path=task_path,
             subagent_phase=phase,
             state_error=state_error,
-            durable_goal_task_id=origin_task_id, durable_goal_objective=origin_objective,
+            durable_task_id=origin_task_id, durable_task_objective=origin_objective,
         )
     if not phase and not state_error:
         phase, state_error = _goal_subagent_phase(agent, task_id)
@@ -540,7 +546,7 @@ def _goal_runtime_context(
         subagent_phase=phase,
         state_error=state_error or ("goal_state_load_error" if goals_error else ""),
         other_goals=tuple(item for item in goals if item.goal_id != goal.goal_id),
-        durable_goal_task_id=origin_task_id, durable_goal_objective=origin_objective,
+        durable_task_id=origin_task_id, durable_task_objective=origin_objective,
     )
 
 
@@ -584,19 +590,18 @@ def _background_task_continuation_fields(
     )
 
 
-# LLM: Resolve only host-owned wake request ids in this store/thread's canonical transcript.
-# Page cursors are ephemeral reads, not model state. The exact Goal task already validated by
-# the caller has no synthetic user message; all other explicit request ids still fail if missing.
-# 函数用途: 按普通派工请求找回用户原话；已核实的 Goal 任务沿目标账读取，不伪造消息或吞掉真实历史损坏。
+# LLM: 只从当前线程的 canonical 历史解析普通请求；调用方核实过的 Goal/调度任务没有聊天消息，按精确 ID 排除。
+# 分页游标仅用于读取；其他显式请求缺失仍须报损坏，不能因同轮存在持久任务就放过。
+# 函数用途: 按普通请求找回用户原话；核实过的持久任务沿原来源读取，不伪造聊天消息或吞掉历史损坏。
 def _background_request_objective(
     store: ConversationStore,
     request: BackgroundRunRequest,
     *,
-    durable_goal_task_id: str = "",
+    durable_task_id: str = "",
 ) -> str:
     pending = set(_background_active_turn_request_ids(request))
-    if durable_goal_task_id and durable_goal_task_id == request.task_id:
-        pending.discard(durable_goal_task_id)
+    if durable_task_id and durable_task_id == request.task_id:
+        pending.discard(durable_task_id)
     if not pending:
         return ""
     selected: list[str] = []
@@ -1154,7 +1159,7 @@ def _invoke_background_main_agent(
         return _invoke_background_main_agent_with_model(runtime, thread, request, goal_context, delivery_availability)
 
 
-# LLM: 后台一整片（包括 Compact）复用作用域模型快照；不因此新建线程、工作片或控制记录。
+# LLM: 后台整片复用模型快照；已核实的 Goal/调度任务来源透传宿主事件，不新建线程或伪造用户输入。
 #   _background_model_inputs 给出的回合触发类型原样交给执行层，每次模型尝试都写进本片 RunParams。
 # 函数用途: 用当前选定模型继续后台主代理，子代理仍从创建时的配置继承。
 def _invoke_background_main_agent_with_model(
@@ -1178,7 +1183,7 @@ def _invoke_background_main_agent_with_model(
         request,
         task_objective=goal_context.task_objective,
         wake_prompt=wake_prompt,
-        goal_origin=(goal_context.durable_goal_task_id, goal_context.durable_goal_objective),
+        task_origin=(goal_context.durable_task_id, goal_context.durable_task_objective),
     )
     execution = BackgroundExecutionDependencies(
         agent=runtime.agent,
@@ -1201,7 +1206,7 @@ def _invoke_background_main_agent_with_model(
 # synthetic wake instruction stays a soft runtime injection, and a typed lifecycle TurnTrigger makes the
 # slice open with a host event instead of a second "# User Task". Other background kinds keep their
 # one-shot prompt and no trigger. Host decisions read the trigger/wake_signal fields, never this prose.
-# The third item is an agent_core.runtime.turn_trigger.TurnTrigger or None. goal_origin is the Goal task
+# The third item is an agent_core.runtime.turn_trigger.TurnTrigger or None. task_origin is the Goal or scheduler run
 # source already validated by _goal_runtime_context: that id is task-origin, not a historical request, so it
 # never enters origin_request_ids and its objective travels as origin_task. With no request id at all the
 # resolved objective travels as origin_task as well.
@@ -1211,7 +1216,7 @@ def _background_model_inputs(
     *,
     task_objective: str,
     wake_prompt: str,
-    goal_origin: tuple[str, str] = ("", ""),
+    task_origin: tuple[str, str] = ("", ""),
 ) -> tuple[str, list[str], object | None]:
     from .lifecycle_wake_event import lifecycle_wake_turn_trigger
 
@@ -1224,10 +1229,10 @@ def _background_model_inputs(
     objective = str(task_objective or "").strip()
     if not _is_active_turn_lifecycle_continuation(request, objective):
         return str(wake_prompt or ""), [], None
-    goal_task_id, goal_objective = goal_origin
+    origin_task_id, origin_objective = task_origin
     wake_ids = _background_active_turn_request_ids(request)
-    history_ids = [item for item in wake_ids if item != goal_task_id]
-    origin_task = (goal_objective or objective) if goal_task_id and goal_task_id in wake_ids else ("" if history_ids else objective)
+    history_ids = [item for item in wake_ids if item != origin_task_id]
+    origin_task = (origin_objective or objective) if origin_task_id and origin_task_id in wake_ids else ("" if history_ids else objective)
     trigger = lifecycle_wake_turn_trigger(request.reason, request.wake_signal, history_ids, origin_task)
     return objective, ["[active-turn-continuation]\n" + str(wake_prompt or "").strip()], trigger
 

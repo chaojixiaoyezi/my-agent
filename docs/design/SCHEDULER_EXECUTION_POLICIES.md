@@ -110,3 +110,7 @@ M2 中 `bound` 只证明宿主当前依赖，`last_request` 来自实际模型�
 ## 预检工作目录与失败原因
 
 预检与后续模型工作共享原后台请求的 thread cwd、runtime workspace roots、Skill 与 task 属性装配。宿主工具入口不得自行拼接一套 cwd 合同；既有 owner 目录权限继续生效。原 ToolResult 失败码保存在观察的 `tool_error_code`，配合 call_id 可定位共享工具账，不在状态查询中复制参数或输出正文。
+
+## 子代理完成后的续接来源
+
+scheduler run 的 ID 是持久任务来源，不是聊天请求 ID。生命周期续接先核实原 repository 中同 run/thread 的记录，复用后台 durable_task 投影；目标仍来自原 run/TaskLink，普通额外用户请求仍需在 canonical 历史中存在。不会为续接补造聊天消息，也不重新预检或新建定时 run。

@@ -2078,6 +2078,7 @@ def test_stop_pauses_active_goal_without_deleting_it(tmp_path) -> None:
     goal = agent.conversation_store.goals.load(thread.thread_id)
     assert created.ok is True and stopped.ok is True
     assert goal is not None and goal.status == "paused"
+    assert goal.transition["source"] == "user_control"
     assert goal.task_id == created.request_id
 
 
@@ -2105,6 +2106,7 @@ def test_stop_also_pauses_goal_between_model_turns(tmp_path) -> None:
     links = {item.task_id: item for item in agent.conversation_store.tasks.list(thread.thread_id)}
     assert stopped.ok is True
     assert goal is not None and goal.status == "paused"
+    assert goal.transition["source"] == "user_control"
     assert links[created.request_id].status == "interrupted"
 
 

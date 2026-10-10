@@ -833,3 +833,19 @@ T 的核心控制候选已具备交接条件，但 HEAD 仍为共同基线。L �
 一次在 pytest 外直接调用执行夹具时未设置隔离 home，向默认 owner 目录误建了一项合成计划，后台领取了它。开发者随后仅按确切 job/run ID 暂停计划、通过原 TaskStore CAS 取消该运行；确认 claim finished、scheduler 终态 cancelled 后，将该合成计划标记 deleted，next_run_at 为 0。没有停止其他任务，也没有读取原业务内容。此记录意味着不能声称整个开发过程中默认目录从未被写入；不把误建运行计入测试成绩。
 
 夹具现显式传入临时 my_agent_home，不依赖 pytest 环境注入。独立证据保留创建 ID、取消 CAS、终态与删除版本。默认目录中的其他历史合成记录未处理，因为无法证明归属本轮。
+
+### 第四候选：原会话预检通过、定时子任务续接缺陷
+
+第四候选源码 `0a69dd41632b7a6d1f5cc56f4758ac933ec65965`，wheel SHA256 `521f0fef3c491bae475e490bc5023d74bdff0b53464bbb5281d950e3d5e2bfff`，测试机逐一核对 1610 个包文件。真实预检首次 changed 后调用模型，no_change 的同 run 实际模型请求数为 0，缺文件保留 PATH_NOT_FOUND 并按阈值暂停。来源会话切换到 C 后，继承运行实际请求记录采用 C/revision 3；固定计划继续使用 B（最终 wire 核对另记）。
+
+三计划请求仍有模型配置/执行失败：followup 被填成 isolated；写入的计划 prompt 误把执行 agent 当成另一个“调用模型”的控制器，实际未写出要求的回执。保留失败，不替模型补文件。新增独立单计划普通中文请求后，模型正确创建 followup/inherit；触发后自主写出 record.txt，版本文字与输入一致，后续无变化零模型请求。该成功不能覆盖三计划请求失败。
+
+第四候选固定计划在后续动作中派了子代理，真实完成唤醒暴露 `background request input is missing from its conversation`：scheduler run 编号被当作普通聊天请求编号。原 waiting run 保留、后台 claim 失败，不能视为正常排队。修复沿已有 Goal 的持久任务来源机制，先从原 scheduler repository 核实同 task/thread，再让历史查找与宿主事件使用同一 durable_task 来源；不创建假的 user 消息，不从 ID 前缀或正文推断身份。普通额外请求缺失仍报错。
+
+红绿回归覆盖 followup/isolated、额外用户请求存在/缺失、waiting → 子代理完成唤醒 → 原 run 收口与来源交付。修复前 6 failed/2 passed，修复后 8 passed；十个相关文件 436 passed。完整真机重验及最终状态待后续记录。
+
+### 原生停止控制的实际结果
+
+独立计数测试由被测模型自行创建主、子进程，期间自行修复脚本错误；测试者仅批准已授权的本地工具执行，没有补源码或计数文件。确认两个计数器持续增长后，通过原生 TUI `/stop` 发出停止：主、子进程及沙箱包装进程按 PID+出生时间核对均退出，两个文件均停在 42 条，后续观察仍不增长；Goal paused，Task interrupted。
+
+真实记录同时暴露停止来源仍为 unknown。已在原 `_pause_goal_for_stopped_task` Goal 事务补 `transition_source=user_control`，不另增停止状态。前台活动与两轮之间停止的两个回归均先红，修复后两文件 142 项通过；待下一候选在原长任务停止时核对真实来源。

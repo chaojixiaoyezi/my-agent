@@ -2575,8 +2575,8 @@ def _stop_linked_live_request(
     return linked_request_id, marked
 
 
-# LLM: 调用者已持 Goal 锁且释放任务锁；只暂停精确绑定的 active Goal，错误须交还控制回执。
-# 函数用途: `/stop` 完成资源冻结后暂停同一目标，保持与显式恢复的先后顺序。
+# LLM: 调用者已持 Goal 锁且释放任务锁；只暂停精确绑定的 active Goal，来源记为用户控制，错误交还回执。
+# 函数用途: `/stop` 冻结资源后沿原 Goal 事务记下暂停及操作者来源，保持与显式恢复的先后顺序。
 def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
     thread_id = str(getattr(task_link, "thread_id", "") or "")
     task_id = str(getattr(task_link, "task_id", "") or "")
@@ -2584,7 +2584,8 @@ def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
     if goal is None or goal.status != "active" or goal.task_id != task_id:
         return
     updated = store.goals.update(
-        {"thread_id": thread_id, "goal_id": goal.goal_id, "status": "paused", "expected_status": "active"}
+        {"thread_id": thread_id, "goal_id": goal.goal_id, "status": "paused", "expected_status": "active",
+         "transition_source": "user_control"}
     )
     if updated is None:
         raise ValueError("停止时目标状态发生冲突")

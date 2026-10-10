@@ -17,7 +17,7 @@ from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 # LLM: 显式隔离 home，不依赖 pytest 环境夹具；cwd 可与 Gateway 根不同，替身只负责模型文本与外发。
 # 函数用途: 创建独立定时执行夹具，覆盖真实会话目录、预检和冻结重投。
-def execution_case(tmp_path, *, precheck=None, policy=None, cwd=None):
+def execution_case(tmp_path, *, precheck=None, policy=None, cwd=None, execution=None):
     agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False,
         memory_path="memory.jsonl", orphan_supervision_interval_seconds=0), tmp_path)
     backend = _Backend()
@@ -29,7 +29,7 @@ def execution_case(tmp_path, *, precheck=None, policy=None, cwd=None):
     job = agent.scheduler_repository.create_job(SchedulerJobCreateRequest(
         name="独立合成检查", prompt="核验合成资料", thread_id=thread.thread_id,
         schedule={"kind": "every", "every_seconds": 600, "anchor_at": 1000, "timezone": "UTC"},
-        execution={"mode": "isolated"}, precheck=precheck, policy=policy, now=900,
+        execution=execution or {"mode": "isolated"}, precheck=precheck, policy=policy, now=900,
     ))[0]
     agent.scheduler_service.enqueue_ready_runs(now=1000)
     signal = store.wakes.pending()[0]
@@ -164,6 +164,65 @@ def test_failure_recording_execution_start_settles_original_run_without_model(tm
     rows, errors = case.agent.scheduler_repository.history()
     assert errors == [] and rows[0]["status"] == "failed"
     assert case.store.wakes.pending_one(case.signal.wake_signal_id) is None
+
+
+@pytest.mark.parametrize("mode", ["followup", "isolated"])
+@pytest.mark.parametrize("ordinary_input", ["none", "present", "missing"])
+def test_scheduled_child_wake_resolves_original_run_without_inventing_user_input(tmp_path, mode, ordinary_input):
+    import json
+
+    from agent_py_agent.agent.conversation.runtime import (
+        BackgroundRunRequest,
+        _background_model_inputs,
+        _goal_runtime_context,
+    )
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    case = execution_case(tmp_path, execution={"mode": mode})
+    claim = case.agent.scheduler_service.claim_wake(case.signal, now=1000).claim
+    assert claim is not None
+    metadata = {"conversation_request_id": claim.run_id}
+    if ordinary_input != "none":
+        metadata["events"] = [{"metadata": {"conversation_request_id": "ordinary-request"}}]
+    if ordinary_input == "present":
+        case.store.messages.append({"thread_id": claim.run["thread_id"], "role": "user", "content": "补充报告格式",
+                                    "metadata": {"conversation_request_id": "ordinary-request"}})
+    request = BackgroundRunRequest(thread_id=claim.run["thread_id"], task_id=claim.run_id,
+        reason="subagent_runner_finished", wake_signal={"metadata": metadata})
+    if ordinary_input == "missing":
+        with pytest.raises(DataCorruptionError, match="background request input is missing"):
+            _goal_runtime_context(case.agent, case.store, request)
+        return
+    context = _goal_runtime_context(case.agent, case.store, request)
+    assert context.task_objective == ("补充报告格式" if ordinary_input == "present" else case.job["prompt"])
+    _, _, trigger = _background_model_inputs(request, task_objective=context.task_objective,
+        wake_prompt="合成子代理完成", task_origin=(context.durable_task_id, context.durable_task_objective))
+    facts = json.loads(trigger.event_facts)
+    assert facts["origin_task"] == case.job["prompt"]
+    assert facts["origin_request_ids"] == (["ordinary-request"] if ordinary_input == "present" else [])
+    assert all(row.metadata.get("conversation_request_id") != claim.run_id
+               for row in case.store.messages.recent(claim.run["thread_id"], limit=0))
+
+
+@pytest.mark.parametrize("mode", ["followup", "isolated"])
+def test_waiting_schedule_replays_child_completion_into_same_run_and_delivery(tmp_path, mode):
+    case = execution_case(tmp_path, execution={"mode": mode})
+    service = case.agent.scheduler_service
+    claim = service.claim_wake(case.signal, now=1000).claim
+    service.repository.mark_run_running(claim.run_id, claim.claim_id, now=1000)
+    service.park_waiting(claim, now=1001)
+    case.store.wakes.mark_handled(case.signal.wake_signal_id, now=1001)
+    case.store.wakes.raise_signal({"thread_id": claim.run["thread_id"], "root_task_id": claim.run_id,
+        "reason": "subagent_runner_finished", "now": 1002,
+        "metadata": {"conversation_request_id": claim.run_id}})
+    case.channels.status = "sent"
+    case.scheduler.tick(now=1003)
+    case.scheduler.tick(now=1004)
+    assert len(case.backend.prompts) == 1
+    assert case.store.tasks.load(claim.run_id).status == "completed"
+    assert case.channels.attempts[0][0].thread_id == case.thread.thread_id
+    history, errors = service.repository.history()
+    assert errors == [] and history[0]["run_id"] == claim.run_id and history[0]["status"] == "done"
 
 
 @pytest.mark.parametrize("execution", [{"mode": []}, {"model_policy": {}},
