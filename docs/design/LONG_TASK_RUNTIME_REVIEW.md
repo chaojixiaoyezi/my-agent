@@ -932,3 +932,100 @@ MiniQL 的最后工具完成时间距初始需求约 10,976 秒，即 3 小时 2
 代码入口、每阶段 JUnit 和回滚步骤见 [L 线交接](../tasks/LONG_TASK_RUNTIME_HANDOFF.md)；调度当前合同见 [SCHEDULER_EXECUTION_POLICIES.md](SCHEDULER_EXECUTION_POLICIES.md)。证据位于工作树忽略目录 `tmp/long-task-runtime-l-evidence/`，`README.md` 为审查顺序，`manifest.json` 记录每个文件 SHA256；包含 53 文件清单、所有红绿 JUnit、安装清单、白名单 wire、原生 TUI、合成输入与模型产物、v6/v7 wheel、源码差异。它是本地交接附件，未随 Git 提交，也不含私有模型配置、网关日志或原业务会话。
 
 建议下一步：优先由另一 agent 审查选模采用、Goal CAS、waiting 回执/确认顺序及测试隔离，意见明确后由主线单人集成。审查同时可并行分析 Compact 失败和补 T 原剩余项；集成后固定一个版本，使用正常接班流程完成未覆盖的真实长任务和故障组合。当前不直接发布生产，不为业务样例添加专项修复，也不反复重跑同一失败需求挑选成功。
+
+## 同一候选长任务复验（2026-10-10，已自然结束）
+
+**最终结论：持续运行与自动续接验收通过，交付完整性仍未通过。** 固定候选在一次需求下自然运行到 6 小时 00 分 27 秒，模型通过 update_goal 声明 complete；约 28 秒后后台 claim finished、Task completed，六个子代理均 DONE。测试者没有停止或续发业务需求。独立公开检查 600/600，保留集 1197/1200，额外合同检查 10/11；模型自写单测 40/48，README 示例运行失败。不能把“运行超过六小时”或“Goal complete”合并成“所有要求完成”。
+
+用户要求用官方 MiniMax-M2.7、90% 压缩阈值把长时间测试完成。本轮固定代码 `134f43c3aea166be0210dd79dbbb3973143455b4` 及同一个已安装 Gateway；开跑前 1610 个包文件逐项摘要核对通过。运行期间不升级、不重启、不切档案、不手工触发压缩。沿 A 档案 200000 tokens，原生状态确认压缩触发线 180000、90%；与前次先用 64K 再切换窗口的观察分开。
+
+从新目录提交一次与前轮相同的普通中文需求，给定 SPEC/cases/check 三个文件摘要与前轮一致；仍为 600 个公开检查、1200 个外部隐藏检查，不带入旧引擎或修复结果。测试者只观察、处理实际原生审批并独立验收，不代写引擎或交付文件。Goal 未设置时间/token 上限，按任务结果自然收口，持续时长本身不作为成功条件。
+
+本轮身份：thread `thread-809409044d034847`，task `gwreq-1791185382-6d63a7ec8f294a878c231cd9ff71678a`，Goal `goal-9b9d90e8e9fb4803`。证据单独保存在隔离测试根的 `evidence/long-v7-200k-90/`，本地副本为本工作树 `tmp/long-task-runtime-l-retest/`；含初始需求、准备计划、版本和输入摘要、原生 TUI、只读观察、终态及独立验收。旧轮失败和旧证据包保持原样，不用本轮覆盖。
+
+触发口径补充：本轮实际请求 max_tokens 为 50000。90%/180000 是配置策略线，`context_pressure.model_request_input_ceiling` 还为已知共享窗口协议预留实际输出上限；`compact._compact_request_input_ceiling` 取策略线与请求容量边界的较小值。按 200K/50K 算，容量边界为 150K，不能把早于显示的 90% 压缩一概判成配置失效。此说明来自实际请求字段与当前源码，实际触发和候选大小仍以本轮事件为准；没有为了凑时长改输出预算。
+
+### 过程观察（保留各阶段当时状态）
+
+约 90 分钟阶段观察（不是最终验收）：首个子代理完成 236 次工具操作，两次自然 Compact 成功，第二次后继续执行；子代理自然结束后，主级自动取得原任务后台执行权并继续，主级也完成一次自然 Compact。此时主级累计 87 条 tool_completed、Goal 仍 active，给定输入摘要未变。约一小时处再次核对全部 1610 个安装文件，无差异。主级实际请求仍采用官方 M2.7；子进程未加载 Gateway 的出站观测包装，子级模型来源按原 profile/context/运行记录核对，不把主级 wire 当作子级逐请求抓包。
+
+同阶段内容检查由被测 agent 自己执行，通过数经过 121→133→172→208/600；主级修复一度回退到 172，随后恢复 208。一次 create_subagents 把 items 写成 string，被结构化参数检查拒绝；之后主级自动压缩并继续。主级最初把语法错误解释成“写入截断”，但该自然语言说明没有得到独立证实，当前只能确认生成代码存在语法错误。所有失败保留，最终公开/隐藏验收尚未运行；测试者没有纠正提示、改引擎、补文件或重启运行时。
+
+约 159–167 分钟的新观察：主级第 4 代检查点的摘要从上一代 6003 字符膨胀到 426286 字符。该检查点保存的是 `compact-mechanical-fallback.v1`，原因 `provider_invalid_summary_shape`，含完整旧摘要和完整模型可见历史；对应入口为 `memory_archive/compact_semantic_summary.py::_accept_live_summary` 与 `_mechanical_live_tool_history_summary`，完整模式由恢复调用方显式传入。检查点投影为 161951→127706 tokens，健康目标 120000；随后供应商回执记录 input=169455、raw estimate=219278。主级只做一次读取便再次压缩，第 5 代只覆盖一个新工具对，摘要恢复为 4808 字符，之后真实输入回落到 69325 并继续执行。第 3 代从第一条辅助摘要请求到提交约 366.31 秒，也说明单次压缩本身可持续数分钟。
+
+这段已证明“无效摘要形状→完整机械回退膨胀→短间隔再压缩”的实际退化路径，尚未导致本轮停止。原始无效回复未被本轮出站参数白名单保存，不能进一步断言具体缺哪个字段或是否返回工具调用；原生与联合恢复路径、冻结校准、候选投影和实际输入仍需放在一起复核。相关代码为 `conversation/active_turn_compact.py`、`compact_calibration.py`、`agent_core/_tool_loop_service.py` 和 `agent_core/model/context_pressure.py`。后续审查沿 [Compact 生成事实](COMPACT_GENERATION_FACTS.md) 补同一调用的失败形状与容量来源，并核对完整回退的容量处理；本轮继续固定已安装版本观察终态。第 4 代完整检查点、主级提交链元数据、原生 TUI 与第 5 代容量回执分别保存在本轮 evidence 中。两小时处包文件再次全数核对一致；截至约 167 分钟，模型自己的公开检查为 325/600，Goal 仍 active，独立最终验收尚未开始。
+
+三小时阶段：同一 Gateway 仍在执行，主级 405 条工具完成记录、Compact 5 代；两个已结束子代理分别有 236/103 条工具记录、2/0 代 Compact。给定输入未变，1610 个安装文件再次核对一致。测试者此时曾提出六小时观察上限并记录于 observation-window.json；该计划后来被用户“不要停”覆盖，从未执行计划中的停止动作。Goal 自身时间/token 预算始终无限制；历史观察计划不是产品自动停止上限，也不是最终结束原因。
+
+四小时阶段：主级第 8 代自然 Compact 后继续工具执行，摘要 6910 字符，随后实际 provider input 为 42059；四小时处 1610 个安装文件再次核对一致。约 248 分钟主级自行创建两个新子代理后结束当片，原 Goal 保持 active；约 253 分钟一个孩子完成后主级自动续接，并重跑得到 473/600。另一个孩子仍在执行。这里的完成当片、等待孩子和持续目标终态是不同事实，不能把 claim finished 单独当成整个 Goal 停止。
+
+进度展示也有新失败样本：TUI 此时仍显示清单 0/12；原主 run 的两条 task_progress 回执均为 task_progress_scope_mismatch，模型将 Goal ID 填为 run_id，未命中可见进度账本。原工具明确返回省略 run_id 或先 read 取回真实账本 ID 的修法。相关入口为 agent_core/task_progress_tool.py::_unmatched_explicit_run_target 和 _scope_rejection_outcome；这先按模型参数误用记录，不把它改成 Goal ID 的隐式别名，也不能仅凭这两次失败证明全部清单滞后的原因。证据为 task-progress-scope-mismatch.json 和 hour-four-new-children-tui.txt。
+
+外部终点验收准备补充 11 条基础合同检查，覆盖新表名、关键字大小写/空白、别名、基础聚合、自连接，以及未知表/列、歧义列、越出只读范围和错误语法的明确失败。输入与预期先经独立 SQLite 参照核对；UPDATE/DELETE 按原 SPEC 的只读边界要求拒绝。该脚本尚未对运行中的被测引擎执行，不反馈给被测模型；最终单独计分，不改原 600/1200 用例口径。同时收集引擎 AST 的明显禁止导入/调用、源码摘要、输入是否改变和要求的交付文件。
+
+约 272–283 分钟，worker-4 第一次压缩前后相邻 tool_completed 的间隔为 653.1389 秒，即 10 分 53 秒；检查点创建于 1791202297.2668295，摘要 8709 字符，投影 151523→41632，之后恢复真实工具执行。等待期间 canonical 心跳持续更新，单凭心跳不能证明有实际产出；最终检查点和后续工具事件才证明这次等待得到恢复。子进程没有本轮 Gateway 的 wire 包装，因此 653 秒是跨压缩的工具空档，不能全部精确归入某一次供应商摘要请求。原始元数据见 child-four-wait-diagnostic.json 和 child-four-first-compact-resumed.json。
+
+五小时阶段：1610 个包文件仍全部一致，主级已提交 10 代 Compact；第五个子代理完成后，主代理原生检查输出 532/600（随后的诊断命令退出码为 1，仍不是全项通过），进度清单已成功更新到 3/12。先前 task_progress 参数误用未永久阻断进度更新。主代理等待最后一个孩子时，后续又由 subagent_activity_notice 自动唤醒；对应 claim 原因已保存在 parent-resumed-with-child-active.json。worker-4 第二代压缩随后成功并继续工具操作。本轮尚未自然收口，最终独立验收仍待运行终点。
+
+续跑指令：约五小时二十一分钟，用户要求“汇报下情况但是不要停”。据此取消此前由测试者提出的六小时停止边界，改为六小时留检查点、继续等待自然终态；只更新观察计划，没有向被测任务发送控制或第二次业务需求。原 observation-window.json 保留为历史，当前策略见 observation-window-extension.json。后续不能把六小时写成用户要求的时限，也不能把此时点当成任务自然终点。
+
+约五小时三十八分钟，第六个子代理自己的原生检查输出 589/600，Goal 仍 active；其余失败继续由被测系统处理。测试者另外只读复核夹具：公开 600、保留 1200 条均与 SQLite 3.50.4 的行和列标签一致，开启 reverse_unordered_selects 后也无差异；只证明参考答案在这些检查下稳定，不代表被测引擎通过。脚本及结果保存在外部证据 external_reference_audit.py / reference-audit.json，没有改写给定检查或向被测任务反馈隐藏数据。
+
+子级容量线索：worker-4 五代投影 after 分别 41632、69954、86708、107541、117323，摘要为 8709、7554、3951、5414、6051 字符，每代均保留相同的两条旧工具引用（原 turn 21、55）；每代新覆盖工具对由 94、81、59、41 降到 21。原归档证实两条都是成功的 apply_patch，回执带 miniql.py 产物引用；内容很小，但并非归档自己的输出引用。代码 `agent_core/compact_tool_partition.py::_result_blocks_text_complete` 会保留不能由原归档证明覆盖的引用，`tool_ir_history.py::summarized_runtime_fact_indexes` 只回收连续退休前缀中的旧运行事实。因此“旧保留回执阻断后续运行快照回收”是具体排查方向；尚无现场完整请求分项，不能把它写成已确认根因，也不能为通过测试直接删除引用或状态。该子代理最终自然 DONE，没有在本轮重现旧轮第 19 代容量失败。各代 metadata 与两条原工具操作身份保存在 child-four-generation-*-observed.json、child-four-retained-archive-metadata.json。
+
+### 自然终点与运行事实
+
+| 项目 | 最终证据 |
+| --- | --- |
+| 起点/Goal 完成 | submitted_at=1791185382.2110057；transition.at=1791207009.5782325；相差 21627.3672 秒 |
+| 真正执行收尾 | claim.finished_at=1791207037.9807117；Task completed，六个孩子均 DONE，无活跃执行者 |
+| 完成来源 | source=model_tool，revision 1→2，verification=not_evaluated，verification_refs=[]，没有预算终止或 tester stop |
+| 主代理 | 829 条 tool_completed、11 代已提交 Compact |
+| 六个子代理 | 工具完成数依次 236/103/26/312/86/75；Compact 依次 2/0/0/5/0/0，共 7 代 |
+| 版本与输入 | 同一 Gateway PID/启动时间；开跑及 1–6 小时、最终共核对 1610 个安装文件均一致；SPEC/cases/check 未变 |
+| 观察连续性 | 提交后约 3 分 51 秒起保存 714 份状态，最大间隔 30.274 秒，首段另有 TUI/提交证据；不声称毫秒级连续跟踪 |
+| 主级实际请求 | 严格按 call_id→attempt_id 关联 813 次请求/HTTP 200，全部 MiniMax-M2.7、temperature=1、max_tokens=50000；783 次业务调用、30 次辅助调用 |
+| 观察边界 | 子进程未安装主 Gateway wire 包装；子级只按原运行事实确认模型/窗口。HTTP 200 本身也不等于语义成功 |
+
+约 5 小时 57 分钟，两个最后的孩子各自检查 600/600 后自然结束；原主级以 subagent_runner_finished 自动续接，亲自重跑 600/600。随后第 11 代压缩将投影 162661 降到 41267，写出 README/report，再完成目标。最终保留空闲原生 TUI 和测试 Gateway，没有重新开任务或发送补救提示。
+
+报告日期沿本地会话；测试机时钟显示 2026-10-05，本地时间工具显示 2026-10-10，二者不可直接相减。上述持续时间全部采用同一测试机的提交和原终态 Unix 时间；30 秒观察间隔未显示跨天跳变。Goal 自报 time_used_seconds=21603 是创建 Goal 后的口径，不等同从提交起算的 21627 秒。tokens_used=5816648 只按原 Goal 用量字段引用，不当成全部请求累计输入或费用。
+
+### 独立交付验收
+
+| 验收 | 结果 | 解释 |
+| --- | --- | --- |
+| 原公开 600 条 | 600/600 | 保持原行值及列数口径，不更换题目或修复产物 |
+| 原保留 1200 条 | 1197/1200 | S129-Q12 的 NULL 排序错误；空表、全 NULL 的 Q43 将 SUM(DISTINCT ...) 的 NULL 返回为 0 |
+| 新表与错误合同 11 条 | 10/11 | 未限定表别名的歧义列被接受，而原 SPEC 明确要求异常；新表、大小写/空白等其余检查通过 |
+| 模型编写的单测 | 40/48，进程退出 1 | 8 项失败原样保留；同套测试换独立 SQLite 后仍有 5 项失败，指向测试预期问题，不能把 8 项全部归为引擎错误 |
+| 8 条核心冒烟 | 能执行，退出 0 | 脚本定义了断言列表却没有使用，每条查询未抛异常就打印 PASS；不能据此称为 8 项结果正确性验证 |
+| README 快速开始 | 失败，TypeError | 文档写成表名→行字典列表、返回 list[dict]，真实接口要求 columns/rows 并返回 columns/rows；report 架构说明也写错返回类型 |
+| 交付文件 | 全部存在 | miniql.py、test_miniql.py、README.md、report.md 齐全；存在不等于内容验收通过 |
+| 输入/产物保持 | 通过 | 独立验收不改输入；源码前后 SHA256 一致；引擎 AST 未发现禁止导入/直接或单层别名调用，不冒充完整安全证明 |
+
+列标签另作兼容性诊断：原 checker 只查列数，60 条公开及 118 条行值通过的保留用例，其表达式列名与 SQLite 不同，如 LOWER(name) 被命名为 lower、CAST 被命名为 col。若同时要求行值和精确列标签一致，对失败 ID 与标签差异 ID 取并集后是 540/600、1079/1200；这不替换原 600/1197 计分，也不把新诊断伪装成原 checker 已覆盖的要求。
+
+模型完成前已经收到原生 run_command 退出 1、Ran 48 tests / FAILED (failures=8) 的回执（operation `tool_operation:ce5c7e83291f752818111b2653b0ca1d`）。随后生成无结果断言的 core smoke、README/report，再次跑公开 600 条并完成 Goal，最终报告没有披露单测失败。外部测试不向模型反馈保留集或代修文档，故本轮保持“交付不完整”的原结果。
+
+完成时进度账的真实快照是 total=18、done=9、in_progress=2、pending=7，open_count=9，仍有 A4–A12 未关闭。G1/G2 的来源、revision、未核验与完整计数记录生效；模型没有完成清单对账。这属于需要改进的完成判断与软提示，不能把“有未关闭项”改成所有任务的通用硬门。
+
+### 本轮新增的修复优先级与代码地点
+
+| 优先级 | 已确认的问题/线索 | 推荐解决方向 | 代码入口 |
+| --- | --- | --- | --- |
+| P1 | Goal 回执在 verification=not_evaluated、open_count=9 时仍生成无条件的 “Goal achieved” 指引 | 让原 completionBudgetReport 消费现有来源/验证/进度字段，准确表达完成声明并提示未核验和待对账项；不新增状态源或质量硬拦截 | conversation/goal_tools.py::_goal_response；goal_transition.py；agent_core/task_progress_tool.py |
+| P1 | 已知失败没有进入最终交付说明，文档接口未实际验证 | 沿原工具操作账、产物 refs 和 closeout 汇总失败及未验证项，给模型返工/披露提示；保留公开检查、单测、文档示例各自的证据，不由某个 exit 0 覆盖其它失败 | tooling/operation_verification.py、agent_core/task_progress_tool.py、conversation/goal_transition.py；既有交付/closeout 调用链 |
+| P1 | 一次无效摘要形状导致 426286 字符完整回退，下一工具后再次压缩 | 先接原 Compact 生成事实，定位无效形状与采用候选；再复核完整回退、输出预留和实际请求容量差异，保持原 refs/CAS | memory_archive/compact_semantic_summary.py、conversation/active_turn_compact.py、compact.py、compact_calibration.py |
+| P2 | 子级五代压缩后水位持续升高，固定保留早期产物引用 | 补请求分项并用原引用与旧快照退休合同复现；确认后修通用回收边界，不能直接丢未知引用 | agent_core/compact_tool_partition.py、tool_ir_history.py、_tool_loop_service.py；conversation/compact_tool_summary.py |
+| P2 | 数分钟压缩等待容易被误认停止 | 继续按实际阶段/辅助调用/检查点/后续工具事件展示进展；心跳仅证明进程响应，不代表业务前进 | conversation/compact_progress.py、agent_core/model/call_runtime.py、原 TUI Compact 投影 |
+
+本轮对原问题的回答：固定版本没有复现 1–3 小时自动停止；实际运行六小时后由模型声明完成。该声明与交付充分性仍有差距，且工具回执的确定性文案存在放大完成声明的不足。因而需要同时改进框架的事实反馈和模型的验证行为，不能将问题全归模型或全归底座。本轮只使用 MiniMax，不能据此评价原 DeepSeek 的相对能力；运行中切模和调度继续沿前轮独立证据，不冒称本轮覆盖。
+
+### 证据与交接
+
+主要文件：natural-terminal-control-state.json、final-agent-identities.json、final-compact-chains.json、scoped-runtime-events.jsonl、scoped-tool-operation-metadata.json、scoped-wire.jsonl/summary、observations-summary-final.json、external-evaluation.json、external-contract-smoke.json、subject-test-execution.json、subject-unit-reference-audit.json、readme-example-execution.json、root-closeout-check-results.json、subject-artifacts/。只导出本轮合成身份，不包含私有模型配置、凭据或原业务会话。
+
+本轮只更新验收文档与忽略目录中的证据/外部检查器，没有修改被测产品代码、用户默认模型或生产环境；不复跑旧 1190 项作为新证据，文档 doc sync、diff check、clean-package 已通过。此前代码严格 gate 与本次业务验收分别记账，线上 CI 未作为验收来源。新附件为工作树忽略目录中的 long-task-runtime-l-retest-review.tar.gz，校验清单在包内 manifest.json；旧证据包不变。
+
+建议下一步：先由另一 agent 独立复核完成回执、未披露失败与 Compact 证据，再按上表分片修复。只读审查、模型质量评测与 Compact 分析适合并行；共享 Goal/closeout 和 Compact 写入口各自保持单一负责人，固定新候选后再做定向真实验收，不修改本轮产物来补通过。

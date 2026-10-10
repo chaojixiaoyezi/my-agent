@@ -1,5 +1,15 @@
 # 测试与发布验收
 
+## 长任务同版本复验（2026-10-10，自然终态已验）
+
+用户指定官方 MiniMax-M2.7 与 90% 压缩阈值；固定已安装的 `134f43c3`、200K 档案及同一 Gateway，未在运行中升级、重启或切档案。新目录通过原生 TUI 提交一次原 MiniQL 需求，公开 600/隐藏 1200 检查不变。6 小时 00 分 27 秒后模型自然完成 Goal，来源 model_tool/revision 2/verification=not_evaluated；随后主任务与六个子代理全部终态。主级 829 次工具完成、11 代 Compact，子级合计 838 次工具完成、7 代 Compact；持续执行与自动续接通过，交付完整性未通过。身份和完整边界见 [报告](docs/design/LONG_TASK_RUNTIME_REVIEW.md#同一候选长任务复验2026-10-10已自然结束)。
+
+三小时处测试者曾设定六小时观察窗口；约五小时二十一分钟用户追加“汇报下情况但是不要停”后取消停止计划，最终没有发送 `/stop` 或第二次业务需求。Goal 时间/token 预算始终无限制。714 份状态观察只见同一 Gateway PID/启动时间，最大采样间隔 30.274 秒；开跑、各小时及最终 1610 个安装文件均一致，SPEC/cases/check 未变。主级按 call_id/attempt_id 精确关联 813 个实际 HTTP 200 请求，全部 M2.7、temperature 1、max_tokens 50000；子进程未装 wire 包装，不把主级记录当作子级逐请求抓包。
+
+自然终点后的独立只读验收：公开 600/600、保留 1197/1200、额外泛化/错误合同 10/11；保留集失败为 NULL 排序和空/全 NULL 的 DISTINCT SUM，额外失败为歧义列未拒绝。模型自写单测 40/48，SQLite 参考执行该套测试也有 5 项失败；README 示例 TypeError，8 条 core smoke 未使用结果断言。表达式列标签另有 60/118 处差异，不替换原计分。输入不变、源码前后 SHA256 一致，外部检查器和输出仅在证据目录，未向模型反馈或代修产物。
+
+本轮新增现场问题：已收到单测 8 项失败回执，最终报告仍未披露；完成时原进度账 open_count=9，Goal 回执虽保留 not_evaluated，却仍输出无条件 Goal achieved 指引。Compact 第 4 代一次完整机械回退膨胀到 426286 字符，随后恢复；worker-4 保留两条早期产物引用且五代压缩后水位从 41632 升到 117323，最终仍 DONE，因果分析待分项证据。代码地点和修复方向见报告末节。本轮产品代码未改，不重复旧代码回归；文档收口 doc sync、diff check、clean-package 已通过，线上 CI 未作为验收来源。
+
 ## 长任务 L 线（2026-10-10，候选待复审）
 
 候选代码 `134f43c3aea166be0210dd79dbbb3973143455b4`。L/T 组合 53 文件 1190 passed；各阶段增量 98、91、436、142、503、24、50 passed，存在重复用例，不能相加。清单、JUnit、命令及轮次边界见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；最后一轮 nullable schema 修复是 50 passed，代码候选严格 gate 为 `v7-strict-gates.json`，最终文档及完整基线检查为 `final-review-gates.json`。

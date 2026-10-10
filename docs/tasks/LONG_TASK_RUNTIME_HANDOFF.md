@@ -1,6 +1,6 @@
 # 长任务运行时 L 线交接
 
-状态：本轮实现、相关回归及最终定时子代理真实 TUI 复验已完成，候选待独立审查；长任务质量失败与尚未覆盖项目单列。仅本地提交及隔离测试部署，未推送远端、未发布生产。
+状态：实现、相关回归、最终定时子代理真实 TUI 及固定版本六小时长测已完成，候选待独立审查。长测持续执行通过，交付完整性仍失败，新增完成回执/验证披露/Compact 问题待修。仅本地提交及隔离测试部署，未推送远端、未发布生产。
 
 ## 接手先看
 
@@ -10,6 +10,7 @@
 - 第七候选 wheel SHA256：`f8d572da2343c2527b064eef4f1c8c345e5ab72e87e37095a42219faef5eb910`，安装前后核对 1610 个包文件，测试机 Python 3.11 语法检查通过。
 - T 来源为共同基线上已暂存的 29 个代码文件；固定补丁 SHA256 `54b42fb212ba0dd1a151c650ef3cb4ec59296aaa6cf68c7acda841c8f314631a`。不是一个新的 T 提交。保留 [T 交接](TUI_STEER_CONTROL_HANDOFF.md)，没有改写 T 工作树。
 - 证据在本工作树的忽略目录 `tmp/long-task-runtime-l-evidence/`；索引与 SHA256 见其 `manifest.json`，原始输入/ANSI/请求白名单/状态账与 JUnit 分开保存。不要把临时目录当作已入 Git 的报告附件。
+- 固定版本长测另存 `tmp/long-task-runtime-l-retest/`，不覆盖旧失败包；先读其 README、manifest 和独立验收结果。此次只新增验收文档/外部证据，产品包仍为 `134f43c3`。
 
 ## 已实现及代码入口
 
@@ -65,13 +66,21 @@
 | `/stop` | 合成主、子计数进程及包装进程按 PID+出生时间均退出，两个文件保持 42 条；原长任务停止复核 paused/source=user_control、Task interrupted |
 | 原会话单计划 | 模型正确配置 followup/inherit，自行写出记录；去掉换行后版本文字一致，不能说字节完全相同 |
 | 预检 | 22 个 no_change run 的实际模型调用数均为 0；缺文件保留 PATH_NOT_FOUND，并按阈值暂停 |
-| 长任务 | 一次需求，最后真实工具进展在 3 小时 2 分 56 秒，498 次工具完成、主 Compact 7 次；混合版本运行 |
-| 长任务交付 | 公开检查 228/600、隐藏 497/1200，通过口径为行值和列数；另有 48/108 处列标签差异，README/report 缺失，判未完成 |
+| 旧轮长任务 | 一次需求，最后真实工具进展在 3 小时 2 分 56 秒，498 次工具完成、主 Compact 7 次；混合版本运行 |
+| 旧轮交付 | 公开检查 228/600、隐藏 497/1200，通过口径为行值和列数；另有 48/108 处列标签差异，README/report 缺失，判未完成 |
+| 固定版本长测 | M2.7、200K/90%，一次需求自然到 6 小时 00 分 27 秒；主 829 工具/11 Compact，六个子级共 838 工具/7 Compact；同一 Gateway，1610 个安装文件始终一致 |
+| 新轮独立交付 | 公开 600/600、保留 1197/1200、额外合同 10/11；单测 40/48、README 示例失败；列标签另有 60/118 处差异，仍判交付不完整 |
 | 第七候选最终子代理用例 | 原 waiting run 等待孩子和最终执行结束，再 done；模型自主写入并读回 child-summary.json，12/686 正确，最终回复保存在原 run 且显示于 TUI；6 次主体实际请求均为固定 B/0.8/HTTP 200 |
 
 最终复验：job `job_904b6a73e17841dabd365e57e3286137`、run `srun_a6ffdb8d7ca444298544b075597f2c37`。观察到待处理 child wake 及活执行 claim 时仍 waiting/checkpoint=null；最后主级事件为 `1791181723.0111022`，run 的 ended_at 与 job checkpoint.confirmed_at 同为 `1791181723.1491773`。外部 14 项事实核验全部通过，文件见 `remote/scheduler-child-v7-final.json`，轮询不是连续无间隙的竞态证明，精确交错由离线四例补足。本地通道 delivery_status 为 not_applicable/root_subagents_terminal，证明 TUI 展示，不冒充真实 IM 外发确认。结束时测试 owner 无活动计划、run、请求或 claim，只有一个空闲 Gateway；观察脚本已停止。
 
-没有同版本不干预的三小时验收通过证据。第四次直接停启网关触发既有非计划续跑上限 3，原请求 TURN_RESUME_LIMIT_EXCEEDED；这次停止由测试升级方式触发，不是模型 complete 或固定三小时上限。停止前 Goal 仍 active 也不等于存在执行者。安全重启应走原接班流程，不删除保护或伪造恢复标记。
+旧轮没有同版本不干预的三小时通过证据；本次新固定版本已补齐六小时持续运行证据，两轮不能混算。旧轮第四次直接停启网关触发既有非计划续跑上限 3，原请求 TURN_RESUME_LIMIT_EXCEEDED；停止由测试升级方式触发，不是模型 complete 或固定三小时上限。安全重启仍应走原接班流程，不删除保护或伪造恢复标记。
+
+新轮 task `gwreq-1791185382-6d63a7ec8f294a878c231cd9ff71678a`、Goal `goal-9b9d90e8e9fb4803`。Goal transition 的 source=model_tool、revision 2、verification=not_evaluated；随后主 Task completed、claim finished，六个孩子 DONE。三小时处曾提出的六小时观察停止计划已被用户“不要停”覆盖，最终未发送停止控制或第二次业务需求。测试机时钟与本地日期不同，时长只取同机提交及终态差值。
+
+完成声明的真实缺口：完成前模型已收到单测 8 项失败，最终未披露；同套测试在 SQLite 上亦有 5 项失败，既有测试预期问题，也有引擎错误。README 使用错误接口，示例运行 TypeError；core smoke 未调用已定义的结果断言。Goal 完成时仍有 9 个未关闭进度项，结构化回执记录正确，但 `conversation/goal_tools.py::_goal_response` 仍给无条件 Goal achieved 指引，应优先改为消费现有验证/进度事实的准确软提示，不新增质量硬门。
+
+Compact 新样本：主第 4 代 provider_invalid_summary_shape 完整回退 426286 字符，下一工具后重压并恢复；worker-4 五代 after=41632/69954/86708/107541/117323，固定保留两条早期带产物引用的 apply_patch 回执，最终 DONE。后续沿 compact_tool_partition、tool_ir_history、compact_semantic_summary 和既有 COMPACT_GENERATION_FACTS 复核，未证明旧引用是现场增长的唯一根因。完整结果、证据命名和修复优先级见报告末节。
 
 保留的失败还包括：模型未配置预检却声称不支持、把 followup 配成 isolated、漏掉计划中的最终交付步骤、重复建计划、误填 JSON pointer；框架预检 cwd 和子代理来源错误已修复，等待最终投递的竞态已补红绿。MiniQL 一个长 child 在第 19 代 Compact 以 COMPACT_CANDIDATE_TOO_LARGE 失败，父级后来继续派工；该失败及主回复重复现象另交 Compact/模型质量线，不给业务样例添加特殊逻辑。
 
@@ -88,8 +97,8 @@
 1. 独立 agent 审查本候选和测试方法，再由主线单一负责人集成。当前未发布生产，不能说在线 agent 已获得修复。
 2. T 原交接的 T22/T23、全部真实 IM 组合、公共 drain 仍按原负责线完成；导入 T 代码不等于这些项通过。
 3. 新版 AGENTS 学习来源合同不在此基线，S11 组合未完成；沿原上游接口集成，不增加第二套来源名单。
-4. 同一最终版本的不干预多小时任务、复杂计划生成可靠性及 Compact 失败需后续独立验收。不要用更大的 Goal 或更长时长替代质量检查，也不要把一次 MiniMax 结果外推为 DeepSeek 对照结论。
+4. 固定版本多小时持续运行已关闭；交付完整性、复杂计划生成可靠性、Compact 退化及故障组合仍开放。优先修正完成回执与已知失败披露，再诊断回退/保留水位，不用更长时长替代质量检查，不把一次 MiniMax 结果外推为 DeepSeek 对照。
 
 ## 建议下一步
 
-先独立审查请求切模边界、Goal CAS、waiting 投递与 checkpoint 顺序，随后由主线集成并做同版本真实 TUI 验收。代码/证据审查和 Compact 失败分析适合并行；共享 runtime 修改、测试 Gateway 部署及生产集成保持单一负责人，避免改动正在工作的其他 agent。
+先独立审查请求切模、Goal CAS、waiting/checkpoint 与新长测证据，优先处理完成回执和已知失败披露；按固定新候选验证后再由主线集成。只读审查和 Compact 诊断可并行；Goal/closeout、Compact 写入口与 Gateway 部署各保持单一负责人，不改本轮产物、不影响在线其他 agent。
