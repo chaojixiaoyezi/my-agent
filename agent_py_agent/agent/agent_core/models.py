@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# LLM: response与channel_delivery保持独立；native_compact_carry只供同进程overflow，不从持久结果反序列化或恢复执行权。
+# LLM: response与channel_delivery独立；诊断无正文且不入模型历史；native_compact_carry不从持久结果恢复执行权。
 # 类用途: 描述一次主代理运行的完整内部结果及可选通道交付投影。
 @dataclass
 class AgentRunResult:
@@ -121,3 +121,5 @@ class AgentRunResult:
     canonical_native_messages: list[dict[str, object]] | None = None
     # 仅context_overflow提供的同进程typed IR，不用于对外回复或持久历史重建。
     native_compact_carry: object | None = None
+    # 最后逻辑调用及循环预算的只读投影；只有不可交付失败才进入Gateway请求记录。
+    user_reply_diagnostic: dict[str, object] | None = None

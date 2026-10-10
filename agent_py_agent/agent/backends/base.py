@@ -14,7 +14,7 @@ from .errors import (
 )
 
 
-# LLM: 这是所有模型后端返回给运行时的唯一响应合同；新增内部历史字段时必须保证不会进入用户可见正文，并同步原生工具循环测试。
+# LLM: 后端唯一响应合同；诊断仅承载类型/长度，不进入正文或原生历史，新增字段须联测工具循环与Gateway失败。
 # 类用途: 统一保存模型正文、用量、工具调用和厂商原生历史块，供后续工具轮继续使用。
 @dataclass
 class ModelResponse:
@@ -48,6 +48,9 @@ class ModelResponse:
     # 传输/流边界在形成完整响应前发现的结构化工具协议错误。这里只能由宿主适配层写入；
     # 模型正文不能设置该字段，也不能借此制造可执行 ToolCall。
     tool_protocol_violations: list[dict[str, str]] = field(default_factory=list)
+    # 仅本次适配器观察到的调用形状，未知时None；不持有任何原始响应或提示词。
+    model_call_diagnostic: dict[str, object] | None = None
+    user_reply_diagnostic: dict[str, object] | None = None
 
 
 # LLM: 后端连接与 top_p/温度是工作片冻结快照；请求头和模型名/密钥一起缓存，流式请求中不可热改。

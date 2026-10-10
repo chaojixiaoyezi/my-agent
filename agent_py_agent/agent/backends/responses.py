@@ -8,6 +8,7 @@ from .base import ModelResponse
 from .errors import ProviderResponseError
 from .http import bounded_output_tokens, request_stream_lines
 from .openai_chat import OpenAICompatibleBackend
+from .reply_diagnostics import responses_call_diagnostic
 from .responses_wire import collect_response, input_items, insert_reasoning_update, response_fields
 from .tool_protocol_adapter import tools_for_choice
 from .wire_contract import repair_native_messages, validate_responses_input
@@ -32,6 +33,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     #   历史先经 wire_contract.repair_native_messages 修整副本，最终 input 由 validate_responses_input 复核，不合规在本地抛错不发送。
     #   降档位置只读typed布局及compaction_trigger：远端压缩追加于完整历史之后，文字摘要才可放在新volatile指令前。
     #   业务工具请求的完整空输出沿 MODEL_EMPTY_RESPONSE 合同交回有界修复；宿主显式探测用途由探测判证据，不改原生块及失败。
+    #   诊断从最终payload和原始响应只取类型、状态、长度；不落正文、不改供应商错误或重试。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         messages = project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes)
@@ -81,7 +83,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
                    **_subscription_affinity_headers(subscription)}
         obj = self._send_responses_request(payload, headers, request)
-        return ModelResponse(backend=self.name, **_checked_response_fields(obj, self.model_name, tools, request.is_probe))
+        return ModelResponse(backend=self.name, model_call_diagnostic=responses_call_diagnostic(obj, payload, request), **_checked_response_fields(obj, self.model_name, tools, request.is_probe))
 
     # LLM: 只按结构化事实判断：档案显式 on/off 优先；auto 按已核对的模型名前缀 gpt-6（OpenAI 文档：GPT-6 及以后
     #   支持用 configuration_update 项改档位且前缀不变）。不是封闭枚举：新模型可在档案里显式声明 on。

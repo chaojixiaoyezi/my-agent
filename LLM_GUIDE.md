@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+wsempty4（2026-10-09，本地实现、待集成）：USER_REPLY_UNAVAILABLE在原失败路径保留最后逻辑调用形状/原始输出类型长度、现有空正文预算及canonical压缩间隔；仅无正文白名单，未知None，不改重试/交付或response_decision。验证边界见TESTS和DESIGN_LEDGER。
+
 compactview（07/c1，2026-10-09，本地实现、待复核）：原生压缩前后统一冻结校准，after 含补带/代次事实并 rebase 状态基线；联合恢复按完整组覆盖退休旧快照，保最新同源事实和未覆盖屏障。缓存同次压缩重建，不另压一代；中途健康线仍为优选。证据/未验边界见 TESTS 和 DESIGN_LEDGER。
 wsempty2（2026-10-09，本地实现，待复核）：完整空业务工具响应仍判 MODEL_EMPTY_RESPONSE；宿主显式 is_probe 的
 工具/视觉能力探测交原阴性/不确定合同，不改变阳性证据、重试/缓存/供应商错误。用途请求局部、不从正文推断、不发到供应商。
