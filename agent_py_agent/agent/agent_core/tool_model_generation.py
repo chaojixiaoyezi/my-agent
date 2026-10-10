@@ -1445,11 +1445,9 @@ def _owns_next_call_override(params: object) -> bool:
 
 # LLM: 仅把 backend 明确声明支持的 provider 增量/终态 callback 传给具备 typed sink
 # 的宿主；fake/旧后端保持原关键字形态，流内思考终态不能在 response 收尾处重放。
-# 函数用途: 按当前原生工具、思考、智能程度和展示能力组装参数并调用一次模型后端。
-def _generate_with_request_options(backend, prompt: str, state: _ModelGenerationState):
 #   最后业务逻辑调用的无正文诊断随本轮params留存，不能写共享backend或污染压缩辅助调用。
-# 函数用途: 组装本次调用并保存只读形状证据，不改变供应商载荷或生成行为。
-def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+# 函数用途: 按当前原生工具、思考、智能程度和展示能力组装参数，调用一次模型后端并保存只读形状证据。
+def _generate_with_request_options(backend, prompt: str, state: _ModelGenerationState):
     # text 协议(tools/messages 均为 None)保持原调用形态，不传新关键字，旁路/伪后端零改动。
     thinking_observer = _thinking_stream_observer(backend, state)
     tool_input_progress = _tool_input_progress_callback(backend, state)
@@ -1459,7 +1457,7 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             kwargs["request_options"] = options
         if thinking_observer is not None:
             kwargs["on_thinking_delta"] = thinking_observer
-        return backend.generate(prompt, **kwargs)
+        return _generate_and_remember(backend, prompt, state, kwargs)
     kwargs: dict[str, object] = {"on_chunk": state.on_chunk}
     forced = False
     if thinking_observer is not None:
@@ -1475,7 +1473,17 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
         kwargs["request_options"] = options
     if state.messages is not None:
         kwargs["messages"] = state.messages
-    return backend.generate(prompt, **kwargs)
+    return _generate_and_remember(backend, prompt, state, kwargs)
+
+
+# LLM: 两条组装路径共用的唯一发送点；诊断只读记录形状（tools 数、输出条目类型/长度），不改载荷、结果或重试。
+# 函数用途: 发出一次模型请求，把结构化形状证据留在本轮参数上，原样返回模型结果。
+def _generate_and_remember(backend, prompt: str, state: _ModelGenerationState, kwargs: dict[str, object]):
+    from ..backends.reply_diagnostics import remember_model_call
+
+    result = backend.generate(prompt, **kwargs)
+    remember_model_call(getattr(state, "params", None), result, kwargs)
+    return result
 
 
 # LLM: 覆盖的清除不在物理调用层：每次物理尝试都清会让超时重试丢档、并误伤共享参数的其它用途
@@ -1499,7 +1507,4 @@ def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
             file=sys.stderr,
             flush=True,
         )
-    from ..backends.reply_diagnostics import remember_model_call
-
-    remember_model_call(state.params, result, kwargs)
     return result
