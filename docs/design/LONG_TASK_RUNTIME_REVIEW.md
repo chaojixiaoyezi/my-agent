@@ -673,7 +673,7 @@ T 负责控制链及 `conversation/runtime.py` 的输入和前后台交接函数
 
 ### 现有测试入口
 
-以下是当前 checkout 已有文件，供找到可复用测试结构。安装版新增模块的对应测试应从同版源码找回；本报告没有修改或运行这些测试。
+以下是初审时 checkout 已有文件，供找到可复用测试结构。安装版新增模块的对应测试应从同版源码找回；实施后的改动、实际运行结果和版本分别列在文末及交接中。
 
 | 模块 | 当前已有测试 |
 | --- | --- |
@@ -790,7 +790,7 @@ Anthropic 的[长任务工程经验](https://www.anthropic.com/engineering/effec
 | 10 条记录核对 | 覆盖 10/10，错误 2 条 | 模型调用 complete，来源可追溯 | 内容验收失败；覆盖全不等于正确 |
 | 100 条相同规则记录 | 100/100 正确，无漏项/重复 | 正常完成 | 此样本通过 |
 | 300 条相同规则记录 | 300/300 正确，无漏项/重复 | 工作中切档案约 4.28 秒后采用，后续请求账为新 revision | 此样本与采用链通过 |
-| MiniQL 查询引擎，600 条公共检查 | 仍运行，最终正确率待外部核验 | 一次原生 TUI 初始需求；主代理自然 Compact 至少 5 次，两个 child 继续 | 不计为已完成或三小时通过 |
+| MiniQL 查询引擎，600 条公共检查 | 测试结束时公开 228/600、隐藏 497/1200 通过；README/report 缺失 | 混合候选版本，最后实际工具执行在初始需求后 3 小时 2 分 56 秒，主线程 Compact 7 次 | 未完成；不计为同版本三小时质量验收通过 |
 
 MiniQL 在实际 Compact 阶段切档案：选择与采用相差约 27.12 秒；主请求账采用新 revision，已有两个 child 保持原选择。64K/200K 是两个明确测试档案的有效窗口，自动 Compact 阈值未修改。没有向被测 agent 补源码、产物或修复提示。
 
@@ -849,3 +849,19 @@ T 的核心控制候选已具备交接条件，但 HEAD 仍为共同基线。L �
 独立计数测试由被测模型自行创建主、子进程，期间自行修复脚本错误；测试者仅批准已授权的本地工具执行，没有补源码或计数文件。确认两个计数器持续增长后，通过原生 TUI `/stop` 发出停止：主、子进程及沙箱包装进程按 PID+出生时间核对均退出，两个文件均停在 42 条，后续观察仍不增长；Goal paused，Task interrupted。
 
 真实记录同时暴露停止来源仍为 unknown。已在原 `_pause_goal_for_stopped_task` Goal 事务补 `transition_source=user_control`，不另增停止状态。前台活动与两轮之间停止的两个回归均先红，修复后两文件 142 项通过；待下一候选在原长任务停止时核对真实来源。
+
+### 第五候选实测与长任务终点
+
+第五候选源码 `1d5d648f90e6ac5c539d48235d1f12d62c799527`，wheel SHA256 `60adb5115d43c8547b1c48fda50d815a01f51a1449cecd8b4cffe358788dbc3e`。再次创建定时子代理测试时，模型第一次对纯文本 read_file 结果误加 JSON pointer，预检按原错误终止；第二个新会话虽然正确配置完整输出比较，却重复创建两个计划，且把要求的最终文件写入步骤漏出计划 prompt。两个原 waiting run 都收到子代理完成通知、沿同一 run 续接，实际请求为固定 B/temperature 0.8；统计答复为 12/686，但 child-summary.json 缺失。框架续接链已取得真机证据，模型建计划及完整交付仍判失败。
+
+MiniQL 的最后工具完成时间距初始需求约 10,976 秒，即 3 小时 2 分 56 秒，原主 run 累计 498 次 tool_completed、主线程 Compact 7 次。长期子代理之一在 Compact 第 19 代以 COMPACT_CANDIDATE_TOO_LARGE 失败；父级后来继续派工。这是被测框架/模型组合的失败样本，不能归因为 MiniMax 单一模型能力，也不能把重复回复时间当作有效工作。
+
+第四次直接停启测试 Gateway 后，原请求以 TURN_RESUME_LIMIT_EXCEEDED 结束：已有 unplanned_resume_count=3，上限=3。SIGTERM 后正常退出也不是结构化安全重启接班；本测试的连续升级消耗了该既有上限，不能将此停止说成模型提前 complete 或三小时固定上限。Goal 当时仍 active、TaskLink active，但原请求已 failed，三者代表不同事实；需要结合执行状态读取，不能拿 Goal active 证明正在运行。部署应使用现有安全重启流程。没有删除该保护或伪造恢复标记。
+
+随后从原生 TUI /stop 停止测试目标，Goal paused/revision 2，transition.source=user_control，Task interrupted。这验证了第五候选的停止来源修复。外部验收器只读最终引擎，600 个公开用例通过 228 个，1,200 个未提供给被测 agent 的随机/边界用例通过 497 个；README.md、report.md 均未生成。引擎只导入 re/typing，静态未见 eval/exec；给定 SPEC.md、cases.json、check.py 摘要均与初始相同，外部检查前后源码未变。结论是“测试终点未完成”，不声称模型本来会在这个时点自行完成，更不据混合版本时段宣称同版本三小时验收通过。
+
+### 第六候选：等待结束与投递确认的交错
+
+第五候选历史保留了第一片的 not_applicable/中间回复，且 ended_at 沿用了续接片开始时刻。仅凭该时间早于 HTTP 请求不能证明提前落盘；随后用真实后台执行、真实调度仓库和可控通道重现：TaskLink 已 completed、通道仍未确认时调用周期对账，原实现会结束 run 并推进预检 checkpoint。followup/isolated × sent/rejected 四例修前全失败。
+
+修复沿原 claim、pending wake 与原 run 字段：活执行者或未处理的生命周期通知阻止成功收口；最终交付回执先写回原 waiting run，再确认 wake；结束时间取实际收口时间。失败外发继续重投同一冻结结果，模型只执行一次。增加跨身份/未提交回执拒收、重启后读取已保存回执、completed 但仍有活执行者的测试。十二相关文件 503 passed，后补用例后的执行文件 24 passed。真机最终复验结果在交接补齐。参考模式为本地 OpenClaw 9cf12734e6 的 timer-job-runner.ts：工作结果与 delivered 回执分别持有，交付确认后才 settle；未复制其协议或另建状态机。

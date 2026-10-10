@@ -4271,7 +4271,8 @@ def _close_active_scheduler_run(
     return close_active_run(scheduler.scheduler_service, claim, outcome, now=time.time())
 
 
-# LLM: 先确认原 wake，再按精确 Goal 或孩子事实安排续跑，最后对账定时等待；不改变持久顺序。
+# LLM: 定时 waiting 的已提交交付回执先写原 run，再确认原 wake；按精确 Goal 或孩子事实安排续跑后才对账。
+#   pending wake 与 live claim 阻止提前完成；定时 ended_at 取实际收口时刻，不沿用工作片开始的 now。
 # 函数用途: 收口已提交的唤醒报告并连接后续工作，未完成交付保留来源和原重试时间。
 def _complete_wake_report(
     scheduler: BackgroundMainAgentScheduler,
@@ -4288,6 +4289,8 @@ def _complete_wake_report(
         return None
     scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
     scheduler._wake_retry_after.pop(signal.wake_signal_id, None)
+    if scheduler.scheduler_service is not None:
+        scheduler.scheduler_service.repository.record_waiting_delivery(report, now=time.time())
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
     if lifecycle_reason in {"audit_finding", "audit_capacity_alert"}:
         from .task_promotion import complete_named_audit_task_if_settled
@@ -4305,7 +4308,7 @@ def _complete_wake_report(
     if scheduler.scheduler_service is not None:
         scheduler.scheduler_service.reconcile_waiting_run(
             str(signal.root_task_id or ""),
-            now=now,
+            now=time.time(),
         )
     return report
 

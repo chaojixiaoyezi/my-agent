@@ -225,6 +225,97 @@ def test_waiting_schedule_replays_child_completion_into_same_run_and_delivery(tm
     assert errors == [] and history[0]["run_id"] == claim.run_id and history[0]["status"] == "done"
 
 
+@pytest.mark.parametrize("mode", ["followup", "isolated"])
+@pytest.mark.parametrize("delivery_status", ["sent", "rejected"])
+def test_waiting_schedule_does_not_commit_checkpoint_during_final_delivery(tmp_path, monkeypatch, mode, delivery_status):
+    case = execution_case(tmp_path, execution={"mode": mode},
+        precheck={"tool_name": "read_file", "arguments": {"path": "revision.txt"}})
+    service = case.agent.scheduler_service
+    claim = service.claim_wake(case.signal, now=1000).claim
+    service.repository.mark_run_running(claim.run_id, claim.claim_id, now=1000)
+    service.repository.record_precheck(claim.run_id, claim.claim_id,
+        {"status": "changed", "fingerprint": "synthetic-fingerprint", "observed_at": 1000})
+    service.park_waiting(claim, response="孩子正在处理", delivery_status="not_applicable", now=1001)
+    case.store.wakes.mark_handled(case.signal.wake_signal_id, now=1001)
+    signal = case.store.wakes.raise_signal({"thread_id": claim.run["thread_id"], "root_task_id": claim.run_id,
+        "reason": "subagent_runner_finished", "now": 1002,
+        "metadata": {"conversation_request_id": claim.run_id}})
+    case.channels.status = delivery_status
+    original_deliver = case.channels.deliver
+    observed = []
+
+    # LLM: 只在真实后台交付入口插入一次调度 tick 的对账交错，不改 TaskLink 或交付结果。
+    # 函数用途: 重现任务已 completed、通道尚未确认时被另一轮调度提前收口的窗口。
+    def deliver_with_reconcile(context, envelope):
+        assert case.store.tasks.load(claim.run_id).status == "completed"
+        settled = service.reconcile_waiting_run(claim.run_id, now=1003)
+        observed.append((settled, service.repository.get_job(case.job["job_id"]).get("precheck_checkpoint")))
+        return original_deliver(context, envelope)
+
+    monkeypatch.setattr(case.channels, "deliver", deliver_with_reconcile)
+    case.scheduler.tick(now=1003)
+    assert observed == [(None, None)]
+    if delivery_status == "rejected":
+        assert service.repository.get_active_run(claim.run_id)["status"] == "waiting"
+        assert case.store.wakes.pending_one(signal.wake_signal_id).metadata["owner_delivery"]
+        assert service.reconcile_waiting_run(claim.run_id, now=1010) is None
+        case.channels.status = "sent"
+        case.scheduler.tick(now=1034)
+    assert len(case.backend.prompts) == 1
+    history, errors = service.repository.history()
+    assert errors == [] and history[0]["status"] == "done"
+    assert history[0]["delivery_status"] == "sent"
+    assert history[0]["response"] == "已按计划完成。"
+    assert service.repository.get_job(case.job["job_id"])["precheck_checkpoint"]["run_id"] == claim.run_id
+
+
+def test_waiting_final_receipt_survives_restart_and_rejects_uncommitted_or_foreign_reports(tmp_path):
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+    from agent_py_agent.agent.scheduler.service import SchedulerService
+
+    case = execution_case(tmp_path)
+    service = case.agent.scheduler_service
+    claim = service.claim_wake(case.signal, now=1000).claim
+    service.park_waiting(claim, response="中间回复", now=1001)
+    case.store.wakes.mark_handled(case.signal.wake_signal_id, now=1001)
+    signal = case.store.wakes.raise_signal({"thread_id": claim.run["thread_id"], "root_task_id": claim.run_id,
+        "reason": "subagent_runner_finished", "now": 1002})
+    case.store.tasks.update_status({"task_id": claim.run_id, "status": "completed"})
+    report = BackgroundMainAgentReport(thread_id=claim.run["thread_id"], task_id=claim.run_id,
+        reason=signal.reason, response="最终回复", route_channel="feishu", route_target="chat-isolated",
+        created_at=1002, delivery_status="sent", delivery_reason="subagent_completion", wake_handled=True)
+    before = service.repository.get_active_run(claim.run_id)
+    for invalid in (replace(report, wake_handled=False), replace(report, thread_id="foreign"),
+                    replace(report, task_id="foreign")):
+        assert service.repository.record_waiting_delivery(invalid, now=1003) is False
+        assert service.repository.get_active_run(claim.run_id) == before
+    assert service.repository.record_waiting_delivery(report, now=1003)
+    restored = SchedulerService(service.repository, conversation_store=case.store, follow_up=service.follow_up)
+    assert restored.reconcile_waiting_run(claim.run_id, now=1004) is None
+    case.store.wakes.mark_handled(signal.wake_signal_id, now=1005)
+    result = restored.reconcile_waiting_run(claim.run_id, now=1006)
+    assert (result["status"], result["response"], result["delivery_status"], result["ended_at"]) == (
+        "done", "最终回复", "sent", 1006)
+    assert restored.reconcile_waiting_run(claim.run_id, now=1007) is None
+
+
+def test_completed_waiting_task_with_live_executor_does_not_close_without_a_pending_wake(tmp_path):
+    from agent_py_agent.agent.conversation.run_claim import detached_task_claim_scope_id
+
+    case = execution_case(tmp_path)
+    service = case.agent.scheduler_service
+    claim = service.claim_wake(case.signal, now=1000).claim
+    service.park_waiting(claim, now=1001)
+    case.store.wakes.mark_handled(case.signal.wake_signal_id, now=1001)
+    link = case.store.tasks.load(claim.run_id)
+    scope = detached_task_claim_scope_id(link.thread_id, link.task_id) if link.cancellation_scope == "detached" else ""
+    live = case.store.claims.acquire({"thread_id": link.thread_id, "task_id": link.task_id,
+        "claim_scope_id": scope, "reason": "subagent_runner_finished", "lease_seconds": 60, "now": 1002})
+    case.store.tasks.update_status({"task_id": claim.run_id, "status": "completed"})
+    assert live is not None and service.reconcile_waiting_run(claim.run_id, now=1003) is None
+    assert service.repository.get_active_run(claim.run_id)["status"] == "waiting"
+
+
 @pytest.mark.parametrize("execution", [{"mode": []}, {"model_policy": {}},
     {"model_policy": "fixed"}, {"model_policy": "inherit", "profile_id": "irrelevant"}])
 def test_invalid_execution_does_not_write_schedule(tmp_path, execution):

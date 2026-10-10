@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from .active_run_closeout import settle_stale_waiting
+from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
 from .repository import (
     SchedulerConflictError,
     SchedulerNotFoundError,
@@ -381,7 +381,8 @@ class SchedulerService:
         except (SchedulerConflictError, SchedulerNotFoundError):
             return None
 
-    # LLM: 等待对账只读精确TaskLink并复用领取/交付同一终态映射；缺失、损坏或未知状态不结算。
+    # LLM: 等待对账读取精确 TaskLink、执行 claim 和 pending wake；completed 的最终投递未确认时不得结束 run。
+    #   最终回执已在原 run 同事务保存，再确认 wake；重启对账沿同一字段收口，不用第一片的旧回复代替最终回执。
     #   任务仍是 active 时走 active_run_closeout.settle_stale_waiting 这个结构化出口：停满宽限期且没有任何后续工作才结算，否则继续等。
     # 函数用途: 在对应持久任务真正终结后结算原waiting运行，不负责冻结回复重投或另建执行状态。
     def reconcile_waiting_run(
@@ -404,6 +405,8 @@ class SchedulerService:
         terminal_status = scheduler_terminal_status_for_task(task_status)
         if terminal_status is None:
             return settle_stale_waiting(self, run, now=now) if task_status == "active" else None
+        if terminal_status == "done" and waiting_completion_pending(self, run, now=now):
+            return None
         error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"
         try:
             return self.repository.finish_waiting_run(

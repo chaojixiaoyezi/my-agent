@@ -49,6 +49,8 @@
 
 投递失败保留冻结内容、回执和原 run。重试只发送该内容，不再调用模型或预检工具，也不重做业务操作。业务终态与投递状态分别展示。
 
+子代理完成后的 waiting run 不能只凭 TaskLink completed 收口。仍有同任务存活或未知执行 claim、待处理生命周期 wake（含冻结投递）时保持 waiting。最终交付已确认后，先将该片的 response/delivery_status/delivery_reason 写回原 run，再确认原 wake，最后结束 run 并提交 checkpoint。重启对账读取同一组字段，不能把“孩子正在处理”的第一片回执当作最终结果；ended_at 使用实际收口时刻。
+
 ## 领取与开始时间
 
 领取 scheduler claim 表示持有调度运行资格，尚不代表取得后台会话执行权。

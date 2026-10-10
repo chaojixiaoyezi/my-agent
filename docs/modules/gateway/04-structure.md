@@ -1,5 +1,7 @@
 # Gateway Structure
 
+L 线等待收口修复（2026-10-10，真实复验中）：TaskLink completed 不再提前确认仍欠最终投递的定时 run；原 claim/pending wake 守住结束边界，最终回执先写原 run，再确认 wake，checkpoint 随完成事务提交。交错红测 4 failed，修复后十二文件 503 passed；补充重启回执/活执行者测试后该文件 24 passed。长任务已停止并外部核验，结果见长任务报告。
+
 ## 长任务诊断元数据边界（2026-10-10）
 
 `conversation/models.ThreadGoal.public_dict(metadata_only=True)` 是 Goal 的白名单展示入口；`goal_tools.GetGoalTool` 在绑定、歧义列表和读取错误分支保留此边界。`scheduler/tool` 的 job/run 白名单先排除自由文本再输出，查询不会写入；元数据模式仅接受 list/get/history/status。名字、目标、提示词、回复预览、skill 名称及原始异常均不进入此模式，执行和交付状态分别保留。完整计划见 `docs/design/LONG_TASK_RUNTIME_REVIEW.md`。

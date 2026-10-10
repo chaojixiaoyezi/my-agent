@@ -1,5 +1,5 @@
 # LLM: 执行准备与预检事实只写原 scheduler run；没有第二个检查点账本。动作 done 时原终态事务才推进 job checkpoint。
-# 模块用途: 原调度仓库的执行上下文冻结与预检结果 CAS。
+# 模块用途: 原调度仓库的执行上下文、预检观察及等待任务最终交付回执 CAS。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -43,3 +43,20 @@ class SchedulerRunPreparation:
             store["runs"][run_id] = {**run, "precheck_observation": deepcopy(observation)}
             self._write_store_unlocked(store, admission)
         return deepcopy(observation)
+
+    # LLM: 仅保存同 task/thread、仍 waiting 且 wake_handled 的后台交付结果；原 wake 尚未确认时先写现有结果字段，
+    #   再由调用方确认 wake，避免周期对账读到 completed 就用第一片回复结束任务。无 job/checkpoint 写入副作用。
+    # 函数用途: 把子任务续接后的最终投递回执写回原定时 run，供正常收口和进程重启读取。
+    def record_waiting_delivery(self, report, *, now: float) -> bool:
+        if not report.wake_handled:
+            return False
+        with self._mutation_scope() as (store, admission):
+            run, _error = self._parse_run(store["runs"].get(report.task_id))
+            if run is None or run["status"] != "waiting" or run["thread_id"] != report.thread_id:
+                return False
+            store["runs"][report.task_id] = {
+                **run, "response": report.response[:4000], "delivery_status": report.delivery_status[:80],
+                "delivery_reason": report.delivery_reason[:160], "updated_at": now,
+            }
+            self._write_store_unlocked(store, admission)
+        return True
