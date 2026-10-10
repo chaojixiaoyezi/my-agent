@@ -1,22 +1,16 @@
 # 测试与发布验收
 
-L 线预检 schema 尾补：json_pointer 现明确允许 null，与原 normalize_precheck 语义一致，完整输出比较无需伪造空字符串指针。真实第六候选误填空指针导致 JSONDecodeError，保留失败；新 schema 旧实现 1 failed/1 passed，修后相关测试见 TESTS。
+## 长任务 L 线（2026-10-10，候选待复审）
 
-L 线等待收口修复（2026-10-10，真实复验中）：TaskLink completed 不再提前确认仍欠最终投递的定时 run；原 claim/pending wake 守住结束边界，最终回执先写原 run，再确认 wake，checkpoint 随完成事务提交。交错红测 4 failed，修复后十二文件 503 passed；补充重启回执/活执行者测试后该文件 24 passed。长任务已停止并外部核验，结果见长任务报告。
+候选代码 `134f43c3aea166be0210dd79dbbb3973143455b4`。L/T 组合 53 文件 1190 passed；各阶段增量 98、91、436、142、503、24、50 passed，存在重复用例，不能相加。清单、JUnit、命令及轮次边界见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；最后一轮 nullable schema 修复是 50 passed，代码候选严格 gate 为 `v7-strict-gates.json`，最终文档及完整基线检查为 `final-review-gates.json`。
 
-L 线原生 `/stop` 已使计数测试主/子进程及包装进程全部退出，文件保持 42 条、Goal paused、Task interrupted；真实 unknown 来源记录已触发修复，两个旧实现回归红测留存；修复后 Gateway 控制和任务资源停止两文件 142 passed。
+关键有效红绿：合法 owner 内 read_file 的 cwd 错误；定时子代理来源误认（6 failed/2 passed→8 passed）；停止来源 unknown（2 failed→两文件 142 passed）；waiting 在投递确认前错误确认 checkpoint（四例全红→十二文件 503 passed）；nullable 指针 schema 与规范化不一致（1 failed/1 passed→三文件 50 passed）。等待回执重启恢复、活执行者及错身份/未提交回执拒收补测后执行文件 24 passed。未扩大到全仓 pytest，线上 CI 未作为验收来源。
 
-L 线第五候选：真实定时子代理完成后暴露来源误认；复用持久任务来源修复。8 项红绿回归（旧版 6 failed/2 passed），修复后十文件 436 passed，覆盖原会话/独立上下文及原 waiting run 续接交付。
+真实验收采用隔离测试机单 Gateway、原生 TUI、官方 MiniMax-M2.7；被测模型自己执行和产出。普通批量 10/100/300 条正确率为 8/10、100/100、300/300；活动目标 50→300 后 300/300 正确；切档案采用延迟约 4.28/27.12/37.57 秒，实际请求参数有白名单 wire 证据。同名 MiniMax 档案不是跨品牌模型对照。22 个 no_change 调度 run 零模型调用；父子停止后均不再写计数，长任务停止的 source=user_control 已真验。
 
-L 线第四候选增量：真实 read_file 合法会话 cwd 回归先在第三候选失败，再在修复实现通过；六个 scheduler/后台控制相关文件 91 passed。测试夹具显式指定临时 my_agent_home，禁止在默认目录运行。真实第三候选的 PATH_NOT_FOUND、模型误填执行模式和本地隔离失误均保留，见长任务报告。
+MiniQL 最后真实工具进展在初始需求后 3 小时 2 分 56 秒，主 Compact 7 次、工具完成 498 次。连续测试升级的第四次直接停启触发现有非计划续跑上限 3，不是三小时限制；测试终点公开 228/600、隐藏 497/1200 通过，README/report 缺失，判未完成。行值/列数之外的列标签差异单独记录。混合版本运行不能算最终版本多小时质量通过；一个 child 的 COMPACT_CANDIDATE_TOO_LARGE 及模型计划配置失败保留。第七候选真实子代理回收已通过：正确文件 12/686、最终回复入原 run 并显示 TUI；waiting/活 claim/pending wake 期间无 checkpoint，done 时确认；6 次主体请求固定 B/0.8/HTTP 200，外部 14 项事实核验全通过。详细身份、时间和边界见报告。
 
-## 长任务 L 线（2026-10-10，候选验收中）
-
-第二候选真实 TUI 暴露预检未配置却声称不支持的问题后，补清通用 schema 说明，并用原生 provider schema 到原创建/清除的合同测试验证可用性。普通请求选择来源字段同步修正。该增量六个相关文件 98 项通过；实际新会话复验另记，不覆盖首次失败记录。
-
-L/T 候选组合 53 个相关文件、1190 项通过（JUnit：`final-focused.xml`）。包括新增的模型安全点、历史转换、Goal 来源、调度执行/预检/策略、T 控制以及原工具归档/权限链。大输出预检验证末尾字段变化和原 `tool_completed` 事件；归档失败不推进 checkpoint。首次组合的代码尺寸报告并行写入触发仓库保护错误，改为串行和临时报告后同组 1190 项全部通过；不把首次错误隐藏为通过。最终命令、证据位置与版本见交接，不累计重复运行。
-
-真实验证使用测试机单 Gateway、多原生 TUI、独立 home 与合成 workspace；官方 MiniMax-M2.7 档案，测试者只给初始需求及已列出的控制操作，不补产物。10/100/300 条同规则任务由外部清单核对：分别 8/10、100/100、300/300 正确；第一组即使 complete 也按内容失败记录。300 条运行中切档案约 4.28 秒采用；独立 MiniQL 长任务已出现多次自然 Compact，Compact 中切档案约 27.12 秒采用，已有 child 保持选择。该长任务已停止：跨三小时有实际工具进展，但公开检查 228/600、隐藏检查 497/1200 通过且文档缺失，不算质量通过。早期测试包未含后续 S1–S3，调度真机须用新包另验。版本、证据和测试边界见 [报告](docs/design/LONG_TASK_RUNTIME_REVIEW.md#已取得的真实原生-tui-证据)。
+开发隔离注意：pytest 外构造 Agent 必须显式指定临时 my_agent_home。本轮误建默认 owner 合成计划已精确取消、删去未来调度并保存记录。code-size 使用临时 --report，避免和测试同时改 tracked 文件。实际准备错误、首次失败及复验分别保存，不修复被测任务产物。
 
 ## 空回复结构化诊断（wsempty4，2026-10-09，本地实现、待集成）
 

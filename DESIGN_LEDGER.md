@@ -1,16 +1,12 @@
 # 设计台账
 
-L 线预检 schema 尾补：json_pointer 现明确允许 null，与原 normalize_precheck 语义一致，完整输出比较无需伪造空字符串指针。真实第六候选误填空指针导致 JSONDecodeError，保留失败；新 schema 旧实现 1 failed/1 passed，修后相关测试见 TESTS。
+长任务 L 线（2026-10-10，候选待复审）：请求边界切模、Goal 来源/CAS/进度、纯元数据、S1–S3 与 T 固定快照已实现；真实目录、子代理来源及等待最终投递缺陷已修。组合 1190 项、增量回归及严格 gate 通过，最终子代理原生 TUI 正确交付 12/686。长任务内容失败、同版多小时和 T/S11 待验项见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；未推送或发布生产。
 
-L 线等待收口修复（2026-10-10，真实复验中）：TaskLink completed 不再提前确认仍欠最终投递的定时 run；原 claim/pending wake 守住结束边界，最终回执先写原 run，再确认 wake，checkpoint 随完成事务提交。交错红测 4 failed，修复后十二文件 503 passed；补充重启回执/活执行者测试后该文件 24 passed。长任务已停止并外部核验，结果见长任务报告。
-
-L 线续接修复（2026-10-10）：原 Goal/scheduler run 共享已核实的 durable_task 来源；定时子代理完成事件不再误查不存在的聊天输入。436 项相关回归通过，真机重验中；原普通请求损坏检查保留。详见长任务报告。
-
-## 长任务 L 线（2026-10-10，实施中）
+## 长任务 L 线（2026-10-10，本地候选已实现、待复审）
 
 唯一事实源仍为 thread、GoalStore、scheduler repository 与模型调用账。候选已实现请求边界显式选模、Goal 变更及完整进度计数、元数据投影和 S1–S3 策略；不增加质量硬门。定时开始在后台车道准入后记录，预检同范围可取消，经原工具归档与事件账保存证据，完整输出的宿主观察不使用模型预览；检查点随原 done 事务提交。字段、默认值、恢复与来源交付见 [调度合同](docs/design/SCHEDULER_EXECUTION_POLICIES.md)，真实失败样本及未完成矩阵见 [长任务报告](docs/design/LONG_TASK_RUNTIME_REVIEW.md)。T 控制绑定已按固定候选快照集成；新版 AGENTS 来源合同仍待上游，不复制第二套身份或学习排除名单。
 
-预检目录修复已落实：复用原后台请求属性装配，不维护宿主专用 cwd 旁路；状态投影保留原工具失败码。真实 read_file 红绿回归通过，真机重验中。
+预检目录复用原后台属性装配，保留原工具失败码，真机 changed/no_change/失败均已取证。定时持久来源沿原 repository 核实；waiting 结束还须核原 claim 与 pending wake，先保存最终回执、后确认 wake 和原 run；空指针与省略保持不同，公开 schema 对齐已有 null 语义。最终原生 TUI 回收和文件交付通过，长任务质量失败与 Compact 第 19 代错误另行分析。
 
 ## 不可交付回复诊断（wsempty4，2026-10-09；本地WIP、部署窗口暂停，未集成部署）
 
