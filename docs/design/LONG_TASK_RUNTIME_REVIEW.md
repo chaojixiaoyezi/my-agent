@@ -865,3 +865,7 @@ MiniQL 的最后工具完成时间距初始需求约 10,976 秒，即 3 小时 2
 第五候选历史保留了第一片的 not_applicable/中间回复，且 ended_at 沿用了续接片开始时刻。仅凭该时间早于 HTTP 请求不能证明提前落盘；随后用真实后台执行、真实调度仓库和可控通道重现：TaskLink 已 completed、通道仍未确认时调用周期对账，原实现会结束 run 并推进预检 checkpoint。followup/isolated × sent/rejected 四例修前全失败。
 
 修复沿原 claim、pending wake 与原 run 字段：活执行者或未处理的生命周期通知阻止成功收口；最终交付回执先写回原 waiting run，再确认 wake；结束时间取实际收口时间。失败外发继续重投同一冻结结果，模型只执行一次。增加跨身份/未提交回执拒收、重启后读取已保存回执、completed 但仍有活执行者的测试。十二相关文件 503 passed，后补用例后的执行文件 24 passed。真机最终复验结果在交接补齐。参考模式为本地 OpenClaw 9cf12734e6 的 timer-job-runner.ts：工作结果与 delivered 回执分别持有，交付确认后才 settle；未复制其协议或另建状态机。
+
+### 第六候选失败与指针 schema 对齐
+
+真实第六候选未进入模型工作：模型为完整文本比较填写 json_pointer 空字符串，预检返回 JSONDecodeError，没有模型调用，没有 checkpoint。RFC 6901 空指针仍要求原工具输出是 JSON，不能当成省略；未替模型修改计划。核对发现 normalize_precheck 已接受 null 表示不提取字段，而公开 schema 仅允许 string，两端不一致。候选补齐 nullable 并明确“指针针对工具原输出，不是所读文件内容”；原生 provider schema 到创建持久化的用例旧实现 1 failed/1 passed。此修复不改变空指针的既有语义。

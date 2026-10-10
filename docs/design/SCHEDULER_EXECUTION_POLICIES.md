@@ -116,3 +116,5 @@ M2 中 `bound` 只证明宿主当前依赖，`last_request` 来自实际模型�
 ## 子代理完成后的续接来源
 
 scheduler run 的 ID 是持久任务来源，不是聊天请求 ID。生命周期续接先核实原 repository 中同 run/thread 的记录，复用后台 durable_task 投影；目标仍来自原 run/TaskLink，普通额外用户请求仍需在 canonical 历史中存在。不会为续接补造聊天消息，也不重新预检或新建定时 run。
+
+预检字段说明：json_pointer 允许 null，与省略同义，比较完整工具输出；空字符串仍是 RFC 6901 的 JSON 根指针，要求工具输出本身是 JSON。schema 与原规范化函数保持一致，不把错误指针默默改为全量比较。

@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+L 线预检 schema 尾补：json_pointer 现明确允许 null，与原 normalize_precheck 语义一致，完整输出比较无需伪造空字符串指针。真实第六候选误填空指针导致 JSONDecodeError，保留失败；新 schema 旧实现 1 failed/1 passed，修后相关测试见 TESTS。
+
 L 线等待收口修复（2026-10-10，真实复验中）：TaskLink completed 不再提前确认仍欠最终投递的定时 run；原 claim/pending wake 守住结束边界，最终回执先写原 run，再确认 wake，checkpoint 随完成事务提交。交错红测 4 failed，修复后十二文件 503 passed；补充重启回执/活执行者测试后该文件 24 passed。长任务已停止并外部核验，结果见长任务报告。
 
 L 线长任务修复（2026-10-10，候选验收中）：请求边界显式选模、Goal 变更来源/进度、纯元数据查询和调度执行策略已进入原主链。定时开始时间只在取得后台车道后写入；预检复用原只读工具执行器与停止。真实 TUI 使用官方 MiniMax-M2.7，覆盖与正确率分别核验。合同、未完成集成及证据见 [报告](docs/design/LONG_TASK_RUNTIME_REVIEW.md#l-线实施记录2026-10-10) 和 [调度合同](docs/design/SCHEDULER_EXECUTION_POLICIES.md)。

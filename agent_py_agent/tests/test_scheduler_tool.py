@@ -56,7 +56,8 @@ def _payload(result) -> dict[str, object]:
     return json.loads(result.output)
 
 
-def test_provider_precheck_schema_accepts_native_arguments_and_create_persists_them(tmp_path):
+@pytest.mark.parametrize("null_pointer", [False, True])
+def test_provider_precheck_schema_accepts_native_arguments_and_create_persists_them(tmp_path, null_pointer):
     from agent_py_agent.agent.backends.tool_schema import tool_model_spec_to_anthropic_tool
     from agent_py_agent.agent.contracts.tool_input_schema import validate_tool_input
 
@@ -66,12 +67,15 @@ def test_provider_precheck_schema_accepts_native_arguments_and_create_persists_t
     params = {"action": "create", "name": "资料更新", "prompt": "汇总变更",
               "schedule_kind": "every", "every_seconds": 600,
               "precheck": {"tool_name": "read_file", "arguments": {"path": "source.txt"}}}
+    expected = dict(params["precheck"])
+    if null_pointer:
+        params["precheck"]["json_pointer"] = None
     assert validate_tool_input(params, surface).ok
     result = tool.execute(params)
     assert result.ok
     job = _payload(result)["job"]
-    assert job["precheck_enabled"] is True and job["precheck"] == params["precheck"]
-    assert agent.scheduler_repository.get_job(job["job_id"])["precheck"] == params["precheck"]
+    assert job["precheck_enabled"] is True and job["precheck"] == expected
+    assert agent.scheduler_repository.get_job(job["job_id"])["precheck"] == expected
     cleared = {"action": "update", "job_id": job["job_id"], "expected_version": job["version"], "precheck": None}
     assert validate_tool_input(cleared, surface).ok
     assert _payload(tool.execute(cleared))["job"]["precheck_enabled"] is False

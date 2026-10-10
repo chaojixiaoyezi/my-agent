@@ -1,4 +1,4 @@
-# LLM: 每项计划的显式执行配置保存在原 job，预留时复制到 run；预检由 schema 中的工具名和参数决定，prompt 不充当配置。
+# LLM: 每项计划的显式执行配置保存在原 job，预留时复制到 run；预检只认结构化配置。指针 null 与省略均比较原输出，schema 必须与规范化一致。
 # 模块用途: 统一会话隔离、固定模型和预检参数的校验及模型可读说明，不保存凭据或展开后的模型配置。
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ PRECHECK_SCHEMA = {
     "description": "create/update 可直接设置的调度器预检：填 tool_name 和 arguments，在模型调用前执行该只读工具，结果无变化则跳过模型，失败记错。省略或 null 关闭；prompt 仅描述检查有变化后的工作。",
     "properties": {"tool_name": {"type": "string", "description": "当前可用的只读工具名，如 read_file；按本次参数由原权限链校验。"},
                    "arguments": {"type": "object", "description": "该工具的完整调用参数；例如 read_file 使用 {\"path\":\"source.txt\"}。不是 shell 命令或判断条件正文。"},
-                   "json_pointer": {"type": "string", "description": "可选 RFC 6901 指针；省略比较完整工具输出，提供时输出必须是 JSON。"}},
+                   "json_pointer": {"type": ["string", "null"], "description": "比较完整工具输出时省略或填 null，不填空字符串。仅当工具输出本身是 JSON 时才使用 RFC 6901 指针；空字符串也要求 JSON。指针不针对工具读取的文件内容。"}},
     "required": ["tool_name", "arguments"],
 }
 
