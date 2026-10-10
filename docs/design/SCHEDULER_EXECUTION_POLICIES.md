@@ -75,6 +75,8 @@ M2 中 `bound` 只证明宿主当前依赖，`last_request` 来自实际模型�
 
 预检配置只包含 `tool_name`、`arguments`、可选 `json_pointer`。省略指针时比较完整工具输出；含时间、延迟等易变字段的结果应显式选择稳定字段。提供指针时输出必须可解析为 JSON。
 
+`create/update` 可直接填写这个对象，例如 `{"tool_name":"read_file","arguments":{"path":"source.txt"}}`。`prompt` 描述检查有变化后的工作。模型如果只在 prompt 中写“先检查”，而没有保存 precheck，运行时仍按关闭预检执行，不从自然语言补造配置。
+
 预检使用同一 ToolRegistry snapshot、ToolExecutor、原 task/run、workspace 和 authority。`agent_core/tool_only_execution.py` 装配原工具循环参数，经 `execute_traced_tool_call` 与 `_record_tool_call` 写入原归档和 `tool_completed` 事件，actor 为 `host`，不伪造模型 tool_use。原归档后的只读观察回调交付完整正文，比较不使用模型预览、脱敏展示或截断部分；归档失败按失败处理。该工作片不构造 fake LLM；中断令牌传入执行器，因此取消后不会继续只读重试。
 
 | 观察结果 | 后续行为 | 检查点 |

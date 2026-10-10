@@ -56,6 +56,27 @@ def _payload(result) -> dict[str, object]:
     return json.loads(result.output)
 
 
+def test_provider_precheck_schema_accepts_native_arguments_and_create_persists_them(tmp_path):
+    from agent_py_agent.agent.backends.tool_schema import tool_model_spec_to_anthropic_tool
+    from agent_py_agent.agent.contracts.tool_input_schema import validate_tool_input
+
+    agent = _agent(tmp_path)
+    tool = ScheduleTool(agent)
+    surface = tool_model_spec_to_anthropic_tool(tool.model_spec)["input_schema"]
+    params = {"action": "create", "name": "资料更新", "prompt": "汇总变更",
+              "schedule_kind": "every", "every_seconds": 600,
+              "precheck": {"tool_name": "read_file", "arguments": {"path": "source.txt"}}}
+    assert validate_tool_input(params, surface).ok
+    result = tool.execute(params)
+    assert result.ok
+    job = _payload(result)["job"]
+    assert job["precheck_enabled"] is True and job["precheck"] == params["precheck"]
+    assert agent.scheduler_repository.get_job(job["job_id"])["precheck"] == params["precheck"]
+    cleared = {"action": "update", "job_id": job["job_id"], "expected_version": job["version"], "precheck": None}
+    assert validate_tool_input(cleared, surface).ok
+    assert _payload(tool.execute(cleared))["job"]["precheck_enabled"] is False
+
+
 @pytest.mark.parametrize("action", ["list", "get", "history", "status"])
 def test_schedule_metadata_query_excludes_nested_content(tmp_path, monkeypatch, action):
     agent = _agent(tmp_path)

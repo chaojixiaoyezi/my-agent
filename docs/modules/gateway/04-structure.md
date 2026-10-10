@@ -2823,3 +2823,6 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - `conversation/turn_resume_notice.py`：新增 cause `provider_transient_resume` 文案；`PROVIDER_RESUME_LIMIT_NOTICE`（供应商续跑用满时的失败答复提示，TUI/IM 同源 user_error/error）。
 - 配置：`provider_transient_turn_resume_max_count`（agent_config.yaml / AgentConfig，0=关闭）。
 - `request_worker._finish_claimed_gateway_request` 重排失败退回分支：清标记后显式 `_settle_fallback_turn_guidance`（按 request_id 收口本回合插话，覆盖归档失败形态；收口失败静默，留给 recovery 兜底）；重排成功路径不变。
+# 长任务预检与采用字段
+
+`scheduler/execution_policy.py` 定义可直接用于 create/update 的预检对象，`scheduler/tool.py` 提供完整通用例子；prompt 不触发配置推断。`settings/model_scope.py::model_selection_snapshot` 为普通请求明确记录当前选择线程，定时执行在同一快照上替换来源。

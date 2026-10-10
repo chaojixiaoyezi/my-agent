@@ -124,13 +124,14 @@ def current_model_selection(agent: object) -> ModelSelectionSnapshot | None:
     return row[2] if row is not None and row[0] is agent else None
 
 
-# LLM: thread 必须已由原 owner 校验；不重新选模或写状态，时间只供观察。
-# 函数用途: 从已读取的会话选择建立请求采用快照。
+# LLM: thread 必须已由原 owner 校验；普通请求明确记同一选择来源线程，调度可替换来源，不重新选模或写状态。
+# 函数用途: 从已读取的会话选择建立请求采用快照，避免实际请求账留下可确定却空白的来源。
 def model_selection_snapshot(thread: object, config: object) -> ModelSelectionSnapshot:
     source = (getattr(config, "config_sources", None) or {}).get("model_name", {})
     return ModelSelectionSnapshot(
         thread.thread_id, thread.model_profile_id, str(source.get("profile_id") or "default"), thread.model_selection_revision,
         thread.model_selection_last_explicit_revision, thread.model_selection_selected_at, time.time(),
+        selection_thread_id=thread.thread_id,
     )
 
 

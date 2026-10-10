@@ -1613,3 +1613,6 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **改动**：`conversation/host_notices.queue_turn_host_notice(agent, source, code, text, details=)` 给工具用：会话编号只读本轮 task_attributes，请求编号只读本轮运行参数 request_id，记进 details.turn_request_id；`request_execution._turn_tool_notices` 把这些提示并进收尾批次（同一 host_notice 流事件、同一 final 提交，提交即已读）。别的来源（定时任务、后台检测）回合中途到的提示不带本请求编号，仍按原规则留给下一轮；后台续跑里工具排的提示也留给下一条前台回复。
 - **使用方**：learnpack 她自己装包、开安装单时的宿主提示（`capability/learnpack_notices`）。
 - **验证**：`test_host_notices.py` 新用例（真实工具调用里排提示：当轮在工具之后发布、进 channel_delivery、提交后不再待送达；同轮别的来源的提示留到下一轮）；变异见 TESTS.md learnpack 第五轮。
+# 长任务组合真机复验补充
+
+L/T 第二候选通过 1190 项组合回归和严格 gate，原测试 Goal 在更新 Gateway、原 session TUI 重连后继续执行。首次真实创建定时任务时模型未填 precheck，仍按失败保存；工具 schema 原生适配及创建/清除合同通过，现补清通用参数说明后另起新会话复验。详见长任务报告，不将模型声称成功当作结构化配置。

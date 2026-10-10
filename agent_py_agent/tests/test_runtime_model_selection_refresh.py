@@ -68,12 +68,14 @@ def test_next_real_request_adopts_selection_after_old_tool_result(tmp_path, monk
     assert len(records) == 1
     provenance = records[0].metadata["model_selection"]
     assert provenance["profile_id"] == selected
+    assert provenance["selection_thread_id"] == fixture.thread_id
     assert provenance["revision"] == business[1][1].model_selection_revision
     assert provenance["adopted_at"] >= provenance["selected_at"]
     assert fixture.agent.config.model_backend == "echo"
     status = thread_model_execution_status(fixture.agent, fixture.thread_id)
     assert status["last_request"]["model_name"] == "selected-latest"
     assert status["last_request"]["status"] == "finished"
+    assert status["last_request"]["selection_thread_id"] == fixture.thread_id
 
 
 def test_rapid_explicit_choices_adopt_latest_without_executing_intermediate(tmp_path, monkeypatch):

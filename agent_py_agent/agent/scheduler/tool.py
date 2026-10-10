@@ -40,14 +40,15 @@ if TYPE_CHECKING:
 _MUTATING_EXISTING_ACTIONS = frozenset({"update", "pause", "resume", "delete"})
 
 
-# LLM: schema 与 execute 的动作和参数校验保持一致；metadata_only 只支持原只读动作，不增加后台执行。
-# 函数用途: 声明定时工具可用参数和使用提示。
+# LLM: schema 与 execute 的动作和参数校验保持一致；显式 precheck 才启用预检，不能从 prompt 解释出运行策略。
+# 函数用途: 声明定时工具参数和完整配置示例，让模型区分调度配置与触发后的工作要求。
 def build_schedule_tool_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="schedule",
         description=(
             "管理当前用户自己的持久定时任务或提醒。默认在原会话执行，可显式选择独立上下文、固定模型和只读预检；"
             "结果回原会话交付，网关重启后恢复原身份。支持一次、固定间隔和五段 cron。"
+            "需要变化检查时，create/update 的 precheck 对象直接填写 tool_name 和 arguments；prompt 描述有变化后执行的工作。"
         ),
         input_schema={
             "type": "object",
@@ -126,6 +127,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
             examples=(
                 '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90}',
                 '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai"}',
+                '{"tool":"schedule","action":"create","name":"资料更新","prompt":"汇总资料变化","schedule_kind":"every","every_seconds":600,"precheck":{"tool_name":"read_file","arguments":{"path":"source.txt"}}}',
                 '{"tool":"schedule","action":"list"}',
                 '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
             ),
