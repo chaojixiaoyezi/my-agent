@@ -20,8 +20,8 @@ from ...agent.gateway_parts.io import (
 from ...agent.gateway_parts.request_client import GatewayAskExecutionOptions
 from ..chat_client_context import ActiveTurnInputDelivery, ActiveTurnInputResult
 
-_OUTBOX_SCHEMA = "tui_active_input_outbox.v2"
-_LEGACY_OUTBOX_SCHEMA = "tui_active_input_outbox.v1"
+_OUTBOX_SCHEMA = "tui_active_input_outbox.v3"
+_LEGACY_OUTBOX_SCHEMAS = {"tui_active_input_outbox.v1", "tui_active_input_outbox.v2"}
 _LEGACY_TUI_EXECUTION_OPTIONS = GatewayAskExecutionOptions(
     tool_approval=True,
     rich_transcript=True,
@@ -42,6 +42,9 @@ class TuiActiveInputOutboxEntry:
     attempts: int = 0
     next_attempt_at: float = 0.0
     options_migrated_from_v1: bool = False
+    expected_execution: dict | None = None
+    sequence: int = 0
+    sequence_migration: str = ""
 
     # LLM: Serialization is complete and versioned so restart never reconstructs identity from UI
     # prose or queue order.
@@ -50,6 +53,9 @@ class TuiActiveInputOutboxEntry:
         return {
             "message_id": self.message_id,
             "expected_turn_id": self.expected_turn_id,
+            "expected_execution": self.expected_execution,
+            "sequence": self.sequence,
+            "sequence_migration": self.sequence_migration,
             "text": self.text,
             "display_text": self.display_text,
             "execution_options": self.execution_options.to_payload(),
@@ -65,11 +71,16 @@ class TuiActiveInputOutboxEntry:
     # 函数用途: 从持久 JSON 校验并恢复一条待确认消息。
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> TuiActiveInputOutboxEntry:
+        from ...agent.gateway_parts.execution_target import GatewayExecutionTarget
+
         raw_options = payload.get("execution_options")
         migrated = not isinstance(raw_options, dict)
         entry = cls(
             message_id=str(payload.get("message_id") or "").strip(),
             expected_turn_id=str(payload.get("expected_turn_id") or "").strip(),
+            expected_execution=payload.get("expected_execution"),
+            sequence=int(payload.get("sequence") or 0),
+            sequence_migration=str(payload.get("sequence_migration") or ""),
             text=str(payload.get("text") or ""),
             display_text=str(payload.get("display_text") or ""),
             execution_options=(
@@ -87,6 +98,10 @@ class TuiActiveInputOutboxEntry:
         )
         if not entry.message_id or not entry.expected_turn_id or not entry.text:
             raise ValueError("TUI active input outbox entry is invalid")
+        if entry.expected_execution is not None:
+            target = GatewayExecutionTarget.from_dict(entry.expected_execution)
+            if target is None or target.turn_id != entry.expected_turn_id:
+                raise ValueError("TUI active input execution binding is invalid")
         return entry
 
 
@@ -143,7 +158,8 @@ class TuiActiveInputReconciler:
 
     # LLM: Persist-before-send covers an HTTP response-loss crash. Reusing a message id with another
     # payload fails before the worker invokes Gateway.
-    # 函数用途: 新增一条待确认消息并立刻唤醒统一对账线程。
+    #   sequence 在同一 outbox 锁内分配；不按随机 message ID 排序，跨重启和多 TUI 仍保持入账顺序。
+    # 函数用途: 保存目标和发送次序，再唤醒统一对账线程。
     def enqueue(self, entry: TuiActiveInputOutboxEntry) -> None:
         with self._lock, locked_file_transition(self._transition_path()):
             entries = self._read_entries_locked()
@@ -153,9 +169,12 @@ class TuiActiveInputReconciler:
                 or existing.text != entry.text
                 or existing.display_text != entry.display_text
                 or existing.execution_options != entry.execution_options
+                or existing.expected_execution != entry.expected_execution
             ):
                 raise ValueError("TUI active input id was reused with different content")
-            entries[entry.message_id] = existing or entry
+            entries[entry.message_id] = existing or replace(
+                entry, sequence=max((item.sequence for item in entries.values()), default=0) + 1,
+            )
             self._write_entries_locked(entries)
         self._ensure_worker_started()
         self._wake.set()
@@ -178,20 +197,21 @@ class TuiActiveInputReconciler:
 
     # LLM: The worker processes a bounded snapshot, persists backoff/request identity after every
     # unknown result, and removes a row only after its UI/job callback succeeds.
-    # 函数用途: 循环处理全部到期消息，空闲时等待唤醒或最短退避时间。
+    #   首条 POST 结果未知时不超车；已有 Gateway ID 的只读查询可继续，防止慢消费堵住已接纳输入。
+    # 函数用途: 按发送次序提交并独立查询已入账消息，空闲时等待唤醒或最短退避时间。
     def _run(self) -> None:
         while not self.stop_event.is_set():
             try:
                 entries = self._read_entries()
                 now = time.time()
-                due = [entry for entry in entries.values() if entry.next_attempt_at <= now]
+                due = [entry for entry in _dispatchable_entries(entries) if entry.next_attempt_at <= now]
                 for entry in due[:32]:
                     if self.stop_event.is_set():
                         return
                     self._reconcile_one(entry)
                 entries = self._read_entries()
                 next_due = min(
-                    (entry.next_attempt_at for entry in entries.values()),
+                    (entry.next_attempt_at for entry in _dispatchable_entries(entries)),
                     default=now + self.maximum_delay,
                 )
                 timeout = max(0.05, min(self.maximum_delay, next_due - time.time()))
@@ -291,20 +311,26 @@ class TuiActiveInputReconciler:
                 raise RuntimeError("TUI active input outbox is empty or invalid")
             return {}
         schema = report.payload.get("schema_version")
-        if schema not in {_OUTBOX_SCHEMA, _LEGACY_OUTBOX_SCHEMA}:
+        if schema not in {_OUTBOX_SCHEMA, *_LEGACY_OUTBOX_SCHEMAS}:
             raise RuntimeError("TUI active input outbox schema is invalid")
         rows = report.payload.get("entries")
         if not isinstance(rows, dict):
             raise RuntimeError("TUI active input outbox entries are invalid")
         entries: dict[str, TuiActiveInputOutboxEntry] = {}
-        for message_id, payload in rows.items():
+        for index, (message_id, payload) in enumerate(rows.items(), start=1):
             if not isinstance(payload, dict):
                 raise RuntimeError("TUI active input outbox row is invalid")
             entry = TuiActiveInputOutboxEntry.from_dict(payload)
             if entry.message_id != str(message_id):
                 raise RuntimeError("TUI active input outbox key conflicts")
+            if schema in _LEGACY_OUTBOX_SCHEMAS:
+                entry = replace(entry, sequence=index, sequence_migration=f"{schema}:persisted_file_order")
             entries[entry.message_id] = entry
-        if schema == _LEGACY_OUTBOX_SCHEMA:
+        sequences = [entry.sequence for entry in entries.values()]
+        if any(number <= 0 for number in sequences) or len(sequences) != len(set(sequences)):
+            raise RuntimeError("TUI active input outbox sequence is invalid")
+        entries = dict(sorted(entries.items(), key=lambda pair: pair[1].sequence))
+        if schema in _LEGACY_OUTBOX_SCHEMAS:
             self._write_entries_locked(entries)
         return entries
 
@@ -326,6 +352,20 @@ class TuiActiveInputReconciler:
     # 函数用途: 返回当前会话 outbox 的跨进程转换锁路径。
     def _transition_path(self) -> Path:
         return self.path.with_name(f".{self.path.name}.transition")
+
+
+# LLM: 调用者给出的 entries 已按持久 sequence 排序；只允许最早的未确认 POST，已有服务端编号可独立查询。
+# 函数用途: 防止第一条网络未知时后发消息先进入模型，保留已入账消息的状态查询。
+def _dispatchable_entries(entries: dict[str, TuiActiveInputOutboxEntry]) -> list[TuiActiveInputOutboxEntry]:
+    selected = []
+    post_selected = False
+    for entry in entries.values():
+        if not entry.request_id:
+            if post_selected:
+                continue
+            post_selected = True
+        selected.append(entry)
+    return selected
 
 
 # LLM: Session ids are hashed before becoming filenames so channel/user text never escapes into a

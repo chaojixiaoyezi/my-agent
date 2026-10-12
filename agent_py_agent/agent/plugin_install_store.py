@@ -41,7 +41,7 @@ from .user_space.owner_quota import (
     OwnerQuotaUnavailable,
     owner_quota_enforcer_from_policy,
 )
-from .user_space.owner_resolver import OwnerHomeResult
+from .user_space.owner_resolver import OwnerHomeResult, OwnerIdentity
 
 
 # LLM: 只保留必要 owner 身份与规范地址；缺失查询不创建目录，blob 目录不参与决定安装清单。
@@ -261,6 +261,8 @@ class PluginInstallStore:
     # LLM: 锁内复读最新记录；原请求命中后保留提交事实，新写入在原配额锁内计算完整包与安装表增长。
     # 函数用途: 在完整临界区内完成准入、保存包及提交安装表。
     def _install_locked(self, request: PluginInstallRequest, quota) -> PluginMutationResult:
+        if request.installation_scope == "public" and self._owner != OwnerIdentity.local_main():
+            raise PluginInstallationError("scope_denied", "只有管理员能安装公共能力包。")
         package = request.package
         state = self._read_state()
         entries = state.entries
@@ -282,7 +284,7 @@ class PluginInstallStore:
             request.expected_revision + 1,
         )
         installed = PluginInstallation(
-            package.manifest, package.sha256, receipt.after_revision, receipt
+            package.manifest, package.sha256, receipt.after_revision, receipt, installation_scope=request.installation_scope,
         )
         updated = (*entries, installed)
         text = encode_installation_state(updated, self._owner, state.migration_json)

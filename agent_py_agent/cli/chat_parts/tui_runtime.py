@@ -441,12 +441,6 @@ class _TuiBackgroundActivityController:
         with self._owner._lock:
             return self._state.count > 0
 
-    # LLM: 此 ID 是显示快照中的目标提示，不是后台执行权；服务端须重新核对 owner、任务与 claim。
-    # 函数用途: 原子读取当前后台主任务，活动归零时不再把新消息发给已结束任务。
-    def input_target(self) -> str:
-        with self._owner._lock:
-            return str(self._state.main_activity.get("task_id") or "") if self._state.count > 0 else ""
-
     # LLM: Count, one focused-agent row, and direct-child rows share one display
     # projection. A valid zero count retains terminal rows for read-only
     # navigation; only a zero count with no agent rows removes the block.
@@ -1047,9 +1041,43 @@ class _TuiConversationBoundaryRuntimeMixin:
         )
 
 
-# LLM: This narrow mixin keeps the public display adapter out of the central
-# runtime class size budget. It only delegates to the runtime-owned controller
-# and must not gain independent state or event sequencing.
+# LLM: 只存 Gateway 执行绑定投影和本地观察 job 去重；二者不授予运行权限、不从展示事件改写。
+# 类用途: 为 TuiRuntime 保存用户发出操作时的执行快照，并防止重复接回同一个观察任务。
+class _TuiExecutionBindingRuntimeMixin:
+    # LLM: 只缓存经 Gateway 原 claim 校验的 DTO，不从 activity/job 反推；发送操作时服务端仍须重查。
+    # 函数用途: 更新当前执行目标投影，空目标清除旧绑定；返回是否变化。
+    def publish_execution_target(self, payload: object) -> bool:
+        from ...agent.gateway_parts.execution_target import GatewayExecutionTarget
+
+        target = GatewayExecutionTarget.from_dict(payload)
+        with self._lock:
+            changed = target != self._execution_target
+            self._execution_target = target
+            return changed
+
+    # LLM: 读取投影不取得控制资格；请求回执、完成事件与显示焦点都不能修改它。
+    # 函数用途: 获取用户发出操作时看到的执行绑定副本。
+    def execution_target(self) -> dict | None:
+        with self._lock:
+            return self._execution_target.to_dict() if self._execution_target is not None else None
+
+    # LLM: 此窗口只防回执重复接回本地观察 job，无模型、控制或持久执行权限。
+    # 函数用途: 原子判断同一 Gateway 请求是否已进入本页观察队列。
+    def claim_gateway_job_attachment(self, request_id: str) -> bool:
+        with self._lock:
+            if request_id in self._attached_gateway_jobs:
+                return False
+            self._attached_gateway_jobs.add(request_id)
+            return True
+
+    # LLM: 仅在 job 尚未成功入队的异常路径调用；不撤销已入队 job，不改服务端输入回执。
+    # 函数用途: 回滚一次本地接回失败，让同一持久回执可以安全重试。
+    def release_gateway_job_attachment(self, request_id: str) -> None:
+        with self._lock:
+            self._attached_gateway_jobs.discard(request_id)
+
+
+# LLM: 后台活动只投影 canonical 状态供显示与轮询，不派生插话/停止目标。
 # 类用途: 为 TuiRuntime 提供后台主任务和直属子代理快照的唯一公开更新入口。
 class _TuiBackgroundActivityRuntimeMixin:
     # LLM: 仅登记宿主分配的 request ID；和背景事件消费持有同一显示锁，不改变执行权限或状态。
@@ -1343,6 +1371,7 @@ class _TuiBackgroundActivityRuntimeMixin:
 # LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；两个无状态 mixin 只能借用同一 publish/store。
 # 类用途: 建立 TUI 状态容器和回合 adapter；发起页登记真实请求编号，避免同会话消息再次显示。
 class TuiRuntime(
+    _TuiExecutionBindingRuntimeMixin,
     _TuiConversationBoundaryRuntimeMixin,
     _TuiBackgroundActivityRuntimeMixin,
     TuiPermissionRuntimeMixin,
@@ -1359,6 +1388,8 @@ class TuiRuntime(
         )
         self._turns: dict[str, TuiTurnEventAdapter] = {}
         self._owned_gateway_requests = TuiIdentityWindow()
+        self._attached_gateway_jobs = TuiIdentityWindow()
+        self._execution_target = None
         self._pending_steers: dict[str, str] = {}
         self._queued_prompts: dict[str, str] = {}
         self._published_control_commands = TuiIdentityWindow()
@@ -1458,11 +1489,6 @@ class TuiRuntime(
             {"text": str(text)},
             request_id=normalized,
         )
-
-    # LLM: 前后台共用输入回执；此读取只借用活动投影，不创建第二份执行状态或授予插话权限。
-    # 函数用途: 向消息投递入口提供后台任务提示，避免把正在执行时的补充排到整个目标之后。
-    def background_input_target(self) -> str:
-        return self._background_activity.input_target()
 
     # LLM: Active-turn input stays in a session-local receipt map until the runtime emits the
     # same opaque client id at the real model-injection boundary; acceptance alone is not proof.
@@ -2565,8 +2591,8 @@ def _publish_host_notice(adapter: TuiTurnEventAdapter, payload: Mapping[str, obj
 # LLM: turn_resumed 是 Gateway 在同一请求重新执行前写的结构化边界，只收口上一执行代次的显示：审批本地按 cancelled 关闭
 #   （不经 sink 写回，那一代已经结束；先于代次推进，permission 事件仍落在旧代块号上），思考与回复按 interrupted 冻结，
 #   仍登记为未终态的工具卡按中断收口、已终态的不再重发；随后代次加一，新代工具卡与审批用带代次的块号。
-#   cause 只用来选提示文案，未知或缺失时用通用提示，不读取任何正文。回合已结束时不再发布。
-# 函数用途: Gateway 重启或执行超时后同一回合自动续跑时，关掉旧确认框、旧动画和仍在“运行中”的旧工具卡，并提示已自动续跑。
+#   cause 只用来选提示文案，未知或缺失时用通用提示，不读取正文；进入恢复流程不代表 core 已准许续跑。回合已结束时不再发布。
+# 函数用途: 同一回合进入恢复流程时，关掉旧确认框、旧动画和仍在“运行中”的旧工具卡，后续是否执行由恢复结果决定。
 def _close_resumed_turn_generation(
     adapter: TuiTurnEventAdapter,
     payload: Mapping[str, object],

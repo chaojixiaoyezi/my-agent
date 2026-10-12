@@ -15,6 +15,7 @@ import json
 import threading
 import time
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
@@ -52,6 +53,7 @@ from ..conversation.models import (
 from ..conversation.run_claim import (
     ConversationRunLaneRequest,
     claim_heartbeat_interval_seconds,
+    conversation_claim_interrupt_name,
     conversation_run_lane,
 )
 from ..memory_store.lifecycle import (
@@ -61,6 +63,14 @@ from ..memory_store.lifecycle import (
 from ..user_space.owner_resolver import OwnerIdentity
 from .audit_control_service import AuditControlRequest, execute_audit_control_operation
 from .end_task_control import execute_end_task_control
+from .execution_control import (
+    background_stop_guard,
+    bind_execution_scope,
+    execute_running_stop,
+    execution_scope_guard,
+    resolve_execution_control,
+)
+from .execution_target import GatewayExecutionTarget
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
@@ -194,6 +204,8 @@ def _steer_channel_message_id(scope: GatewayControlScope) -> str:
 def _active_turn_request_id(active: _GatewayRequestRecord | None) -> str:
     if active is None:
         return ""
+    if active.payload.get("execution_turn_id"):
+        return str(active.payload["execution_turn_id"])
     linked = active.linked_request
     if linked is not None and linked.path is not None and linked.path.exists():
         return _record_id(linked)
@@ -363,6 +375,10 @@ def execute_gateway_conversation_control(
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
+    if command.kind == "delegate":
+        from .delegation_control import execute_delegation_control
+
+        return execute_delegation_control(agent, command, scope)
     if command.kind == "goal":
         return _execute_goal_control(agent, command, scope)
     if command.kind == "audit":
@@ -427,6 +443,9 @@ def execute_gateway_conversation_control(
         compact_stop = _stop_targeted_manual_compact(scope)
         if compact_stop is not None:
             return compact_stop
+        running_stop = execute_running_stop(agent, paths, scope, command)
+        if running_stop is not None:
+            return running_stop
         live_requests = _live_window_requests(paths, scope)
         expected_turn_id = _steer_expected_turn_id(scope)
         if expected_turn_id:
@@ -460,6 +479,15 @@ def execute_gateway_conversation_control(
         return _stop_session_leftovers(agent, scope, command)
     active = _active_control_target(agent, paths, scope)
     if command.kind == "steer":
+        target, executing = resolve_execution_control(agent, paths, scope)
+        if target is not None and executing is not None:
+            bound = bind_execution_scope(scope, target)
+            if bound is None and steer_receipt is None:
+                return _execution_changed_result("steer", _steer_expected_turn_id(scope))
+            active = executing
+            scope = bound or scope
+        elif "expected_execution" in scope.metadata and steer_receipt is None:
+            return _execution_changed_result("steer", _steer_expected_turn_id(scope))
         expected_turn_id = _steer_expected_turn_id(scope)
         receipt_turn_id = (
             str(steer_receipt.entry.metadata.get("expected_turn_id") or "").strip()
@@ -616,7 +644,7 @@ def _pending_exact_audit_requests(
     return selected
 
 
-# LLM: 普通输入复用精确回合投递；后台执行须有同任务的 running claim，单有活动链接不能冒充执行权。
+# LLM: 普通输入只用真实 claim 选择实际执行者；processing 等待者和活动链接不能冒充执行权，提交时再复核同一代次。
 # 函数用途:把前台或后台正在执行时的补充消息交给当前代理，不让后台 Goal 的插话排到整个任务之后。
 def steer_active_conversation_if_running(
     agent: object,
@@ -632,24 +660,20 @@ def steer_active_conversation_if_running(
     message remains opaque user input.  A caller can safely fall back to a normal
     queued request when this returns ``None`` or a non-success result.
     """
-    processing = _active_request(paths, scope)
-    if processing is None:
-        active = _running_background_input_target(agent, scope)
-        if active is None:
-            return None
-    else:
-        linked_task_id = _linked_conversation_task_id(processing)
-        active = (
-            _linked_active_task_record(agent, processing, scope, linked_task_id)
-            if linked_task_id else None
-        ) or processing
+    target, active = resolve_execution_control(agent, paths, scope)
+    if target is None or active is None:
+        return None
+    bound_scope = bind_execution_scope(scope, target)
+    if bound_scope is None:
+        return _execution_changed_result("steer", _steer_expected_turn_id(scope))
+    processing = active.linked_request if active.target_kind == "task" else active
     user_input = str(message or "").strip()
     result = _steer_active_request(
         agent,
         paths,
         active,
         ConversationControlCommand("steer", value=user_input, valid=bool(user_input)),
-        scope,
+        bound_scope,
     )
     if result.ok and processing is not None and active is not processing:
         # `/ask` callers keep polling the live Gateway request that already owns
@@ -742,8 +766,7 @@ def _session_protected_task_ids(store: object, thread_id: str) -> frozenset[str]
 #   （目标会话确认消费正文时把这一轮的 turn_id 写进 task.conversation_request_id），这一片自己就用
 #   同一个 bound turn 注册了专用可中断名。这里只沿绑定 + 后台认领记录确认"它确实在跑"，再打专用名；
 #   拿不到绑定或认领已不在跑就如实不确认（fail closed），不改回 done、不伪造成功。
-#   （`_running_background_input_target` 对派活片恒不成立：那一片没有 ConversationThread 线程任务关联，
-#   认领记录的 task_id 也是空的——已用真实链路实测确认。）
+#   普通持久任务已经由统一 execution_target 处理；此入口只保留会话派活的原显式绑定合同。
 # 函数用途: 停止一条已绑定但不在前台窗口里的后台会话任务回合。
 def _stop_bound_background_turn(
     agent: object,
@@ -768,12 +791,6 @@ def _stop_bound_background_turn(
             request_id=expected_turn_id,
             delivery_status="rejected",
         )
-    background = _running_background_input_target(agent, scope)
-    if background is not None and _record_id(background) == expected_turn_id:
-        return _stop_live_window_request(
-            agent, paths, background, scope,
-            interrupt_only=command.operation == "interrupt",
-        )
     return ConversationControlResult(
         "stop",
         False,
@@ -783,8 +800,7 @@ def _stop_bound_background_turn(
     )
 
 
-# LLM: 派活/消息片的定位不能靠前台窗口请求，也不能靠 `_running_background_input_target`
-#   （它要求 ConversationThread 线程任务关联 + claim.task_id，派活片两条都不满足，实测恒为 None）。
+# LLM: 派活/消息片不一定有 ConversationThread 任务链接或 claim.task_id；显式会话任务停止读取原派活绑定。
 #   这里只用真实存在的两件结构化事实：①目标会话里**任务记录**绑定了这个 turn
 #   （task.conversation_request_id == expected_turn_id，由 session_tasks.bind_turn 在认领时写入）；
 #   ②目标会话的后台认领记录**正在跑**（status=running，且没有别的来源占用它）。
@@ -830,23 +846,6 @@ def _bound_background_turn_is_running(
     if claim.get("load_error") or str(claim.get("status") or "") != "running":
         return False
     return True
-
-
-# LLM: 只读取本 owner/thread 的原后台执行权；模型文字、Goal active 和 TUI 快照均不能单独证明在运行。
-# 函数用途: 为后台执行的普通插话找到原任务邮箱；缺失、损坏、暂停和独立 Audit 均回到普通排队。
-def _running_background_input_target(
-    agent: object, scope: GatewayControlScope,
-) -> _GatewayRequestRecord | None:
-    active = _active_conversation_task(agent, scope, ordinary_only=True)
-    if active is None:
-        return None
-    store = _request_agent_for_scope(agent, scope).conversation_store
-    thread_id = str(active.payload.get("conversation_thread_id") or "")
-    claim = store.claims.load(thread_id)
-    if (claim.get("load_error") or claim.get("status") != "running"
-            or str(claim.get("task_id") or "") != _record_id(active)):
-        return None
-    return active
 
 
 # LLM: 先解析可信 owner；首次创建时共用请求目录校验，仅初始化空 cwd，不能重定向已绑定任务。
@@ -1669,7 +1668,7 @@ def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScop
     return bool(scope.conversation_id or (scope.all_user_access and scope.user_id))
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Steering targets exactly one active request or durable root task, never a later chat turn.
+# LLM: 插话持久操作经 guidance 领域组件；按 T→M→task→claim 锁序复核原执行绑定，等待者及过时代次无准入资格。
 # 函数用途:把用户补充写入当前 owner 的当前任务引导收件箱。
 def _steer_active_request(
     base_agent: object,
@@ -1728,7 +1727,9 @@ def _steer_active_request(
                 raise ValueError("conversation thread is unavailable")
             with store.guidance.ledger.turn_guard(turn_id):
                 if target_type == "task":
-                    with store.tasks.transition_guard(request_id):
+                    with store.tasks.transition_guard(request_id), execution_scope_guard(paths, store, scope) as matches:
+                        if not matches:
+                            return _execution_changed_result("steer", turn_id)
                         if not _durable_task_is_current(owner_agent, active):
                             return ConversationControlResult(
                                 "steer",
@@ -1750,15 +1751,12 @@ def _steer_active_request(
                             winner = _mark_control_guidance_result(store, entry, "rejected")
                             return _control_result_for_guidance_winner(winner, request_id)
                 else:
-                    entry = _append_control_guidance(
-                        store,
-                        target_type,
-                        request_id,
-                        command,
-                        scope,
-                        thread_id,
-                        turn_id,
-                    )
+                    with execution_scope_guard(paths, store, scope) as matches:
+                        if not matches:
+                            return _execution_changed_result("steer", turn_id)
+                        entry = _append_control_guidance(
+                            store, target_type, request_id, command, scope, thread_id, turn_id,
+                        )
     except Exception:
         return ConversationControlResult(
             "steer",
@@ -1779,6 +1777,15 @@ def _steer_active_request(
         request_id=turn_id,
         delivery_status="unknown",
         guidance_dedupe_key=str(entry.metadata.get("dedupe_key") or ""),
+    )
+
+
+# LLM: 过期控制只返回明确拒绝，不改写为当前目标、不猜下一轮。
+# 函数用途: 告知客户端原执行已经切换，保留用户发出操作时的目标编号。
+def _execution_changed_result(kind: str, turn_id: str) -> ConversationControlResult:
+    return ConversationControlResult(
+        kind, False, "目标执行已结束或切换，本次操作未应用到其他回合。",
+        request_id=turn_id, delivery_status="rejected", error_code="EXECUTION_TARGET_CHANGED",
     )
 
 
@@ -1896,10 +1903,8 @@ def _control_result_for_guidance_winner(winner: object, request_id: str) -> Conv
     )
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Existing guidance is bound to its receipt's exact turn, never the current active projection.
-# T and the store mailbox guard stay held through terminal rejection, matching provider admission's
-# T-to-M lock order; missing or corrupt lifecycle evidence remains UNKNOWN instead of losing input.
-# 函数用途: 按回执首次绑定的回合对账补充消息，只在锁内证明该回合终态时拒绝尚未认领的记录。
+# LLM: 按 T→M→task 核对回执原目标生命周期；task 不能借同名运输请求的终态收口，缺失或损坏保持 unknown。
+# 函数用途: 对账原 request/task 邮箱，只在精确目标已终态时拒绝尚未认领的记录。
 def _reconcile_existing_steer_receipt(
     paths: GatewayPaths,
     scope: GatewayControlScope,
@@ -1910,10 +1915,18 @@ def _reconcile_existing_steer_receipt(
     if not turn_id:
         return _unknown_existing_steer_result(receipt, "")
     with gateway_turn_transition(paths, turn_id):
-        lifecycle = _exact_gateway_turn_lifecycle_locked(paths, scope, turn_id)
-        if lifecycle != "terminal":
-            return _unknown_existing_steer_result(receipt, turn_id)
-        with receipt.store.guidance.ledger.turn_guard(turn_id):
+        with receipt.store.guidance.ledger.turn_guard(turn_id), ExitStack() as guards:
+            if receipt.entry.target_type == "task":
+                from .input_delivery_service import _input_target_lifecycle
+
+                guards.enter_context(receipt.store.tasks.transition_guard(receipt.entry.target_id))
+                lifecycle = _input_target_lifecycle(
+                    paths, receipt.store, receipt.entry.target_id, target_type="task",
+                )
+            else:
+                lifecycle = _exact_gateway_turn_lifecycle_locked(paths, scope, turn_id)
+            if lifecycle != "terminal":
+                return _unknown_existing_steer_result(receipt, turn_id)
             winner = receipt.store.guidance.mark_status(
                 receipt.dedupe_key,
                 "rejected",
@@ -2161,7 +2174,10 @@ def _stop_live_window_request(
         store = None
     binding, binding_error = {}, ""
     with gateway_turn_transition(paths, request_id):
-        marked, failure_message = _mark_request_stopping_locked(live_request, scope)
+        with execution_scope_guard(paths, store, scope) as matches:
+            if not matches:
+                return _execution_changed_result("stop", request_id)
+            marked, failure_message = _mark_request_stopping_locked(live_request, scope)
         if marked:
             try:
                 from .request_binding import gateway_runtime_authority
@@ -2172,7 +2188,7 @@ def _stop_live_window_request(
                 live_request = replace(live_request, payload=report.payload)
                 binding = gateway_runtime_authority(report.payload, request_id)
                 if store is not None:
-                    store.guidance.recovery.reject_pending(request_id)
+                    store.guidance.recovery.reject_pending(request_id, target=("request", request_id))
             except (OSError, RuntimeError, TypeError, ValueError):
                 binding_error = "request_binding_unconfirmed"
     if not marked:
@@ -2182,7 +2198,11 @@ def _stop_live_window_request(
             failure_message or "当前执行刚刚结束，无需停止。",
             request_id=request_id,
         )
-    interrupt_by_name(conversation_request_interrupt_name(request_id))
+    expected_execution = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+    interrupt_by_name(
+        conversation_claim_interrupt_name(expected_execution.claim_id)
+        if expected_execution else conversation_request_interrupt_name(request_id)
+    )
 
     linked_task_id = _linked_conversation_task_id(live_request)
     if _request_is_detached(live_request):
@@ -2352,8 +2372,16 @@ def _stop_active_task(
     else:
         linked_request_id, linked_marked = _stop_linked_live_request(active, scope)
     if interrupt_only:
-        task_interrupted = interrupt_by_name(conversation_request_interrupt_name(task_id))
-        if linked_request_id:
+        expected = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+        if expected is not None:
+            owner = _request_agent_for_scope(base_agent, scope)
+            with background_stop_guard(owner.conversation_store, scope) as matches:
+                if not matches:
+                    return _execution_changed_result("stop", expected.turn_id)
+                task_interrupted = interrupt_by_name(conversation_claim_interrupt_name(expected.claim_id))
+        else:
+            task_interrupted = interrupt_by_name(conversation_request_interrupt_name(task_id))
+        if linked_request_id and expected is None:
             interrupt_by_name(conversation_request_interrupt_name(linked_request_id))
         if not (task_interrupted or linked_marked):
             return ConversationControlResult("stop", False, "当前没有执行中的回合，无需中断。", request_id=task_id)
@@ -2445,7 +2473,7 @@ def _continue_goal_after_turn_interrupt(
         return True
 
 
-# LLM: 沿主 Goal→task 短读 Gateway T，释放 T 后进入 creation→子 Goal；精确关闭权限并固定树，不在锁内等进程退出。
+# LLM: 后台 Goal→task→claim 内使用 core 原绑定，不回读旧运输 T；前台沿原请求代次核对，进入 creation 后冻结树。
 # 函数用途: 关闭主任务准入、冻结资源并暂停续跑；清理在所有控制锁之外，部分错误不丢清单。
 def _prepare_main_task_stop(
     owner_agent: object,
@@ -2460,7 +2488,9 @@ def _prepare_main_task_stop(
     thread_id = str(active.payload.get("conversation_thread_id") or "")
     preparation_errors = []
     with store.goals.transition_guard(thread_id):
-        with store.tasks.transition_guard(task_id):
+        with store.tasks.transition_guard(task_id), background_stop_guard(store, scope) as matches:
+            if not matches:
+                return _MainTaskStop()
             current = store.tasks.load(task_id)
             if current is None or current.status != expected_status or current.thread_id != thread_id:
                 return _MainTaskStop()
@@ -2510,13 +2540,17 @@ def _request_unmanaged_pty_stop(owner_agent: object, thread_id: str, task_id: st
     return ()
 
 
-# LLM: 调用方已持任务锁；请求锁只短读本请求和原运输代次，不从过时 discovery payload 取得执行权。
-# 函数用途: 读取被停止热请求的正式运行绑定，无热请求时交由唯一持久主链定位。
+# LLM: 后台调用方已持 task→claim 并复核快照，只取原 core 绑定；不能在 C 内倒序读取无关运输 T。
+#   前台沿原请求锁短读运输代次。无热请求/尚未发布的后台由任务锁内唯一主链定位，实际关闭仍核对 RuntimeDB。
+# 函数用途: 取得被停止执行的准确运行绑定，避免后台借用旧运输身份或产生反向锁序。
 def _fresh_stop_runtime_binding(
     record: _GatewayRequestRecord | None, scope: GatewayControlScope,
 ) -> dict | None:
     from .request_binding import gateway_runtime_authority
 
+    expected = GatewayExecutionTarget.from_dict(scope.metadata.get("expected_execution"))
+    if expected is not None and expected.kind == "task":
+        return dict(expected.runtime_authority) if expected.runtime_authority else None
     if record is None:
         return None
     if record.path is None:
@@ -2609,6 +2643,9 @@ def _gateway_task_status(
     else:
         owner_agent = _request_agent_or_base(base_agent, payload)
     compact_generation, verbose_level = _conversation_profile(owner_agent, payload)
+    from .status_projection import status_display_facts
+
+    facts = status_display_facts(owner_agent, scope=scope)
     subagents = (
         _subagent_status(owner_agent, [_record_id(active), _record_id(live_request)])
         if active is not None
@@ -2640,6 +2677,10 @@ def _gateway_task_status(
         subagent_other_labels=subagents.other_labels,
         model_name=_status_model_name(owner_agent, idle=display_selected is None, scope=scope),
         compact_generation=compact_generation,
+        context_usage=facts["context_usage"],
+        user_role=facts["user_role"],
+        permission_mode=facts["permission_mode"],
+        im_task_status=facts["im_task_status"],
         verbose_level=verbose_level,
         durable_work=_named_durable_statuses(owner_agent, paths, scope),
         quarantined_wakes=_quarantined_wake_count(owner_agent),

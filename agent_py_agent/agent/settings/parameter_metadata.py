@@ -3,9 +3,11 @@
 #   属性访问/字符串键正则扫产品代码；推不出的一律留空，绝不手工抄一份或硬猜。改动须同步
 #   parameter_registry.py、tooling/user_config_tool.py、gateway_parts/settings_control_service.py
 #   与 test_parameter_metadata.py。
+#   无源码发行读取构建时由同一 field_readers 扫描生成的展示快照；快照不参与配置裁决。
 # 模块用途: 回答“这个参数以什么为单位、合法范围是多少、主要被哪个模块读取”，是登记表元数据的唯一推导来源。
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import fields
 from functools import lru_cache
@@ -178,6 +180,19 @@ def ranges() -> dict[str, str]:
 # 函数用途: 扫描产品代码，为每个配置字段找到主要读取方模块与归属顶层模块。
 @lru_cache(maxsize=1)
 def field_readers() -> dict[str, tuple[str, str]]:
+    snapshot = _PACKAGE / "config" / "parameter_readers.json"
+    if snapshot.is_file():
+        payload = json.loads(snapshot.read_text(encoding="utf-8"))
+        if payload.get("schema") != "my-agent.parameter-readers.v1":
+            raise ValueError("参数读取方快照版本不支持")
+        readers = payload["readers"]
+        if not isinstance(readers, dict) or any(
+            not isinstance(key, str) or not isinstance(value, list)
+            or len(value) != 2 or not all(isinstance(item, str) for item in value)
+            for key, value in readers.items()
+        ):
+            raise ValueError("参数读取方快照格式错误")
+        return {key: tuple(value) for key, value in readers.items()}
     counts: dict[str, dict[str, int]] = {}
     for path in _PACKAGE.rglob("*.py"):
         _count_references(path, counts)

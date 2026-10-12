@@ -117,11 +117,13 @@ class SchedulerJobCreateRequest:
     skill_refs: object = ()
     source_request_id: str = ""
     now: float | None = None
+    source_thread_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
         object.__setattr__(self, "source_task_id", str(self.source_task_id or "").strip())
         object.__setattr__(self, "source_request_id", str(self.source_request_id or "").strip())
+        object.__setattr__(self, "source_thread_id", str(self.source_thread_id or self.thread_id).strip())
 
 
 @dataclass(frozen=True)
@@ -1468,6 +1470,7 @@ def _new_job_payload(
         "name": normalized_name,
         "prompt": normalized_prompt,
         "thread_id": thread,
+        "source_thread_id": request.source_thread_id,
         "source_task_id": request.source_task_id,
         "schedule": normalized_schedule,
         "status": "active",
@@ -1538,6 +1541,7 @@ def _reserved_run(
         "job_version": int(job["version"]),
         "owner": deepcopy(job["owner"]),
         "thread_id": str(job["thread_id"]),
+        "source_thread_id": str(job.get("source_thread_id") or job["thread_id"]),
         "source_task_id": str(job.get("source_task_id") or ""),
         "name": str(job["name"]),
         "prompt": str(job["prompt"]),

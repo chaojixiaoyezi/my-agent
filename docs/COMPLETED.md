@@ -1,5 +1,17 @@
 # 已实现能力索引
 
+IM 多任务/公共包已完成本地实现、739 项联合回归与补充权限用例，以及 Linux 真模型/真子进程/SSH TUI/到期调度验证；出站为 fake，不能当成发布或真实飞书实发验收。完整功能和证据边界见 [交接](tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
+
+## 临时无业务源码离线包（2026-10-10，独立分支，未合并）
+
+- 解决内网 Ubuntu 无桌面安装、固定 `/app` 数据位置、登录 HOME 改变及同路径更新的问题。
+- 自带 CPython 3.11、生产依赖和 Ubuntu 20.04 重建的原 bubblewrap；1544 个业务模块只交付可逆向字节码。
+- 安装器校验 SHA256/逐文件清单及 owner，拒绝活动进程和同版本冲突，原子切换程序，保留配置/历史/工作文件。
+- 默认 workspace 沿原 owner resolver，参数展示快照、Landlock origin 与 `.pyc` 包入口适配保持原运行/权限合同。
+- 三版 Ubuntu 断网普通账户安装和更新通过；1.8 真 TUI + 官方 M2.7 + 工具、沙箱、225 文件原样更新及历史恢复通过。
+- 发布相关 81 passed/3 skipped，最终安装器 8 passed，控制组合 49 passed；不重复累计。严格静态门通过，线上 CI 未参与。
+- 版本 `0.3.0-tui-preview.20261010.2`，只是临时包；主线合并、推送和生产切换仍等用户指令。[指南](guides/PRIVATE_OFFLINE_RELEASE.md)。
+
 ## 空回复诊断（wsempty4，2026-10-09，本地实现、待集成）
 
 - 解决问题：不可交付回复失败没有足够无正文证据；Responses原始观察、工具循环预算、canonical压缩间隔现已贯通原Gateway失败记录。

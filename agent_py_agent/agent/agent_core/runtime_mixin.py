@@ -593,10 +593,15 @@ def _settle_terminal_conversation_task_run(agent: object, params: object) -> Non
 # LLM: 执行异常的运行账收口，只决定 cancelled/failed 与结构化原因；原因来源见 _exception_closeout_reason。
 #   调用方在 except 里随后重新抛出原异常，所以这里必须 fail-silent，不能盖住原异常。改动同步 test_run_audit_terminal.py。
 # 函数用途: 执行中途抛错或被中断时，把本轮写成 cancelled（中断）或 failed（其它异常），并顺带核对整棵任务能否关账。
+# LLM: 只按 typed 异常结算准确 attempt；后台容量等待保留耐久 run 和任务，不能记 failed/DONE 或扩容绕过配额。
+# 函数用途: 异常时释放本片执行权，区分取消、容量待准入与真正失败，副作用写原运行账。
 def _settle_main_agent_run_exception(agent, params: RunParams, exc: BaseException) -> None:
-    """异常路径收口：InterruptedError → 'cancelled'，其余 → 'failed'。"""
+    from ..conversation.background_execution import BackgroundCapacityDeferred
+
     status = "cancelled" if isinstance(exc, InterruptedError) else "failed"
     reason, source = _exception_closeout_reason(agent, params, exc)
+    if isinstance(exc, BackgroundCapacityDeferred):
+        status, reason, source = "unfinished", "CAPACITY_WAIT", "resource_capacity"
     _settle_main_agent_run_status(
         agent,
         run_id=str(params.run_id or "").strip(),
@@ -804,7 +809,10 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
         # 已绑定 attempt 后的所有入口，包括 skill/tool snapshot、provider
         # capability probe、上下文准备、模型循环和 finalization。任何一步抛错
         # 都不能让 TUI 已空闲而权威账本仍保留 running。
-        update_runtime_fact_terminal_if_enabled(agent, params, exc)
+        from ..conversation.background_execution import BackgroundCapacityDeferred
+
+        if not isinstance(exc, BackgroundCapacityDeferred):
+            update_runtime_fact_terminal_if_enabled(agent, params, exc)
         _settle_main_agent_run_exception(agent, params, exc)
         raise
 

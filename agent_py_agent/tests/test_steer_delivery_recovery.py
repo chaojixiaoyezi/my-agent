@@ -353,4 +353,5 @@ def test_background_target_steer_waits_while_running_and_queues_after_the_task_e
     assert (payload["disposition"], payload["delivery_status"]) == ("queued", "accepted")  # TUI 接成下一轮
     store.storage.task_path("srun_broken").write_text("{", encoding="utf-8")
     # 没有任务记录或记录读不出来时不能当终态收尾。
-    assert [_input_target_lifecycle(paths, agent, task) for task in ("srun_missing", "srun_broken")] == ["unknown"] * 2
+    assert [_input_target_lifecycle(paths, store, task, target_type="task")
+            for task in ("srun_missing", "srun_broken")] == ["unknown"] * 2

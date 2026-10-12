@@ -32,8 +32,9 @@ def package_selection_scope(agent: object, params: object = None, *, workspace_r
     config = capability_config_for_agent(agent) or CapabilityConfig()
     if not read_fresh_capability_switch(agent, "enable_capability_package_selection") or current_subagent_run_id(agent):
         return None
-    agent_config = getattr(agent, "config", None)
-    if not getattr(agent_config, "enable_plugins", False):
+    from .package_provider import package_usage_enabled
+
+    if not package_usage_enabled(agent):
         return None
     scope = package_read_scope(agent, params, workspace_root=workspace_root)
     return PackageSelectionScope(config, scope.skills, scope.tools) if scope and scope.skills.packages else None

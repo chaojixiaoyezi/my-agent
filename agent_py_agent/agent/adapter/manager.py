@@ -78,7 +78,7 @@ def _utc_now_iso() -> str:
 # 函数用途: 把一条过程事件渲染成 IM 可读文本；工具等待确认时告诉用户用 /approve 或 /deny。
 def _render_gateway_progress(event: dict[str, object]) -> str:
     kind = str(event.get("kind") or "")
-    if kind == "assistant_commentary":
+    if kind in {"assistant_commentary", "model_draft"}:
         return str(event.get("text") or "").strip()
     if kind == "permission_requested":
         summary = str(event.get("summary") or event.get("tool") or "一个工具操作").strip()
@@ -600,7 +600,7 @@ class _GatewayReplyPollClient:
         self.credentials = GatewayClientCredentials(home_paths().root)
 
     # LLM: 原游标/身份保持，凭据在运输 try 之前读取；开关开时凭据异常不混成远端瞬时错误，开关关时降级发送。
-    # 函数用途: 带宿主凭据拉取并渲染 Gateway 进度，不写秘密。
+    # 函数用途: 带宿主凭据拉取 Gateway 进度，保留明确模式和候选快照身份；不写秘密、不从正文猜档位。
     def poll_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
         import urllib.error
         import urllib.request
@@ -625,12 +625,18 @@ class _GatewayReplyPollClient:
                 _gateway_poll_quarantine_category(exc.code, denial_code),
             ) from exc
         events = body.get("events") if isinstance(body, dict) else []
+        source_events = events if isinstance(events, list) else []
+        snapshot_indices = [i for i, event in enumerate(source_events) if isinstance(event, dict) and event.get("kind") == "model_draft"]
+        rendered_events = source_events[snapshot_indices[-1]:] if snapshot_indices else source_events
         messages = [
             rendered
-            for event in (events if isinstance(events, list) else [])
+            for event in rendered_events
             if isinstance(event, dict) and (rendered := _render_gateway_progress(event))
         ]
-        return messages, max(pending.progress_cursor, int(body.get("next") or 0))
+        from .progress_draft import GatewayProgressBatch
+
+        mode = "stream" if any(isinstance(event, dict) and event.get("level") == "stream" for event in events or []) else "append"
+        return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode, bool(snapshot_indices))
 
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，
     #   开关关时降级为不带凭据；远端瞬时状态仍等待。
@@ -1142,18 +1148,12 @@ class ChannelManager:
             pending.progress_handle,
         )
 
-    def _deliver_gateway_progress(self, pending: PendingGatewayReply, response_text: str) -> bool:
-        return self._send_gateway_reply(
-            _pending_gateway_message(pending),
-            pending.request_id,
-            response_text,
-            idempotency_key=_gateway_delivery_key(
-                message_id=pending.message_id,
-                request_id=pending.request_id,
-                phase="progress",
-                progress_cursor=pending.progress_cursor,
-            ),
-        )
+    # LLM: 流式模式沿原 pending ID 编辑同一条，全部路由和净化仍经过 DeliveryService；普通 on/full 沿原逐条行为。
+    # 函数用途: 发送当前进度快照，并将真实消息 ID 返回原 worker 保存；编辑失败不会新发替代进度。
+    def _deliver_gateway_progress(self, pending: PendingGatewayReply, response_text: str):
+        from .progress_draft import send_gateway_progress
+
+        return send_gateway_progress(self, pending, response_text)
 
     # LLM: A consumed input belongs to the already-running turn's original reply delivery. This
     # callback removes only the transient placeholder and never emits another chat message.

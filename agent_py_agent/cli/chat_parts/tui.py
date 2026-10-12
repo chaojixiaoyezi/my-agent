@@ -176,8 +176,10 @@ def _run_tui_loop(ctx: TuiLoopContext) -> int:
         ctx.refresh_stop.set()
         set_tui_output_sink(None)
         # 原地切换来的进程要在这里把终端还原成第一代保存的设置（prompt_toolkit 只会还原成它启动时看到的 raw 模式）。
+        from .tui_terminal import release_tui_mouse_input
         from .tui_upgrade_follow import terminal_released
 
+        release_tui_mouse_input(ctx.app)
         terminal_released()
         title_controller = getattr(ctx.app, "_my_agent_title_controller", None)
         if title_controller is not None:

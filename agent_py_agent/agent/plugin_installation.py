@@ -25,6 +25,7 @@ class PluginInstallRequest:
     package: PluginPackageSnapshot
     operation_id: str
     expected_revision: int
+    installation_scope: str = "private"
 
     # LLM: JSON 或调用方不能把布尔值当版本；包描述与字节的匹配由 Store 在写入前复验。
     # 函数用途: 拒绝缺失包及无效操作身份。
@@ -32,14 +33,19 @@ class PluginInstallRequest:
         validate_install_identity(self.operation_id, self.expected_revision)
         if not isinstance(self.package, PluginPackageSnapshot):
             raise ValueError("安装请求缺少包快照")
+        if self.installation_scope not in {"private", "public"} or (
+                self.installation_scope == "public" and not self.package.manifest.is_content_only):
+            raise ValueError("公共范围只允许纯内容能力包")
 
     # LLM: 摘要包含动作、插件、包和期望版本；源路径变化不改变同一快照的语义，摘要不是授权。
     # 函数用途: 为原请求回执生成可重复比较的输入标识。
     @property
     def input_digest(self) -> str:
-        return plugin_input_digest(
+        digest = plugin_input_digest(
             "install", self.package.manifest.plugin_id, self.package.sha256, self.expected_revision
         )
+        # 私有旧操作回执保持原摘要；公共安装额外绑定显式范围，不能以私有回执重放公开操作。
+        return hashlib.sha256(f"public:{digest}".encode()).hexdigest() if self.installation_scope == "public" else digest
 
 
 # LLM: 更新回执与安装记录同次保存，删除回执只留原操作结果；它不是永久幂等历史，也不提供执行权限。
@@ -78,10 +84,14 @@ class PluginCommitReceipt:
                 or (lifecycle and not _DIGEST.fullmatch(self.activation_sha256))
                 or (not lifecycle and self.activation_sha256 != "")):
             raise ValueError("插件提交动作或内容摘要无效")
-        if self.input_digest != plugin_input_digest(
+        expected = plugin_input_digest(
             self.action, self.plugin_id, self.package_sha256, self.before_revision, self.settings_sha256,
             activation_sha256=self.activation_sha256,
-        ):
+        )
+        allowed = {expected}
+        if self.action == "install":
+            allowed.add(hashlib.sha256(f"public:{expected}".encode()).hexdigest())
+        if self.input_digest not in allowed:
             raise ValueError("安装回执输入摘要不匹配")
 
 
@@ -97,6 +107,7 @@ class PluginInstallation:
     settings_revision: int = 0
     activation: PluginActivation | PluginContentActivation | None = None
     legacy_permission_json: str | None = field(default=None, repr=False)
+    installation_scope: str = "private"
 
     # LLM: 最后回执与包/版本/激活匹配；兼容标记须绑定准确旧代，损坏不能补猜授权或配置。
     # 函数用途: 校验完整安装事实，不从包自述生成宿主激活状态。
@@ -105,6 +116,15 @@ class PluginInstallation:
             self.last_commit, PluginCommitReceipt
         ):
             raise ValueError("安装记录缺少已验证声明或回执")
+        if self.installation_scope not in {"private", "public"} or (
+                self.installation_scope == "public" and not self.manifest.is_content_only):
+            raise ValueError("安装发布范围无效")
+        if self.last_commit.action == "install":
+            expected = plugin_input_digest("install", self.manifest.plugin_id, self.package_sha256, self.last_commit.before_revision)
+            if self.installation_scope == "public":
+                expected = hashlib.sha256(f"public:{expected}".encode()).hexdigest()
+            if self.last_commit.input_digest != expected:
+                raise ValueError("安装范围与原提交回执不一致")
         if (
             type(self.revision) is not int
             or self.revision != self.last_commit.after_revision
@@ -199,6 +219,7 @@ class PluginInstallation:
             "settings_revision": self.settings_revision,
             "activation": self.activation.to_payload() if self.activation is not None else None,
             "legacy_permission_grant": load_strict_json(self.legacy_permission_json) if self.legacy_permission_json else None,
+            "installation_scope": self.installation_scope,
         }
 
     # LLM: v4 严格字段集合；v1–v3 只能经显式版本迁移补 None，不允许新记录凭缺字段取得兼容。
@@ -214,6 +235,7 @@ class PluginInstallation:
             "settings_revision",
             "activation",
             "legacy_permission_grant",
+            "installation_scope",
         }:
             raise ValueError("安装记录字段无效")
         if not isinstance(value["last_commit"], dict) or set(value["last_commit"]) != {
@@ -228,6 +250,7 @@ class PluginInstallation:
             last_commit=PluginCommitReceipt(**value["last_commit"]),
             settings_json=value["settings_json"],
             settings_revision=value["settings_revision"],
+            installation_scope=value["installation_scope"],
             activation=PluginActivation.from_payload(value["activation"]) if value["activation"] is not None else None,
             legacy_permission_json=(json.dumps(value["legacy_permission_grant"], ensure_ascii=False, sort_keys=True,
                                                separators=(",", ":"), allow_nan=False)
@@ -314,6 +337,8 @@ def admit_installation(
         raise PluginInstallationError("revision_conflict", "安装版本已变化，请先读取当前状态。")
     if existing is None:
         return None
+    if existing.installation_scope != request.installation_scope:
+        raise PluginInstallationError("scope_conflict", "已安装范围不同，请明确停用并移除旧安装后再按新范围安装。")
     if existing.package_sha256 != request.package.sha256:
         raise PluginInstallationError("package_conflict", "已安装的插件包不同，不能原地替换。")
     return PluginMutationResult(existing, "unchanged", "not_committed", None)

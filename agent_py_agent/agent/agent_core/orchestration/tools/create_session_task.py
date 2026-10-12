@@ -230,6 +230,28 @@ class _DispatchPlan:
     origin_task_id: str = ""
 
 
+# LLM: 宿主自动派工只允许准确来源下的同 owner 独立线程，不开放模型跨会话管理员权限；沿原记录/正文/唤醒及配额。
+# 函数用途: 把已冻结的 IM 工作项送入自己的后台线程，重放终态时只回读任务，不再唤醒或扣额。
+def dispatch_owned_background_task(agent, *, source_thread_id: str, target_thread, goal: str, config):
+    from ....conversation.execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
+    from ....conversation.session_tasks import SESSION_TASK_TERMINAL_STATUSES
+
+    source = execution_origin_thread(agent.conversation_store.threads.require, target_thread)
+    if (source.thread_id != source_thread_id or target_thread.owner_id != str(agent.home_paths.owner_id)
+            or target_thread.metadata[EXECUTION_ORIGIN_KEY]["kind"] != "delegated"):
+        return _error("后台派工身份不一致。", error_code=SESSION_IDENTITY_UNAVAILABLE)
+    plan = _DispatchPlan(source_thread_id, target_thread.thread_id, goal)
+    existing, errors = agent.conversation_store.session_tasks.list_report(limit=0)
+    if errors:
+        return _error("会话任务账本不可读。", error_code="TOOL_EXECUTION_FAILED")
+    previous = next((task for task in existing if task.dedupe_key == _task_dedupe_key(plan)), None)
+    if previous is not None and previous.status in SESSION_TASK_TERMINAL_STATUSES:
+        return ToolHandlerOutcome(_CREATE_NAME, True, json.dumps({"task_id": previous.task_id, "status": previous.status}))
+    if previous is None and (error := _pair_limit_error(agent, source_thread_id, target_thread.thread_id, config)):
+        return error
+    return _create_and_dispatch(agent, plan, target_thread, config, count_pair=previous is None)
+
+
 # LLM: 链来源只读宿主写入的结构化 task_attributes；本工具不接受模型传入的链深或父任务。
 #   属性由 conversation 运行时按派活唤醒信封写入（conversation_session_task_id），
 #   这样链深守卫在真实链路上才有输入——不能依赖任何手工赋值。
@@ -265,6 +287,7 @@ def _create_and_dispatch(
     plan: _DispatchPlan,
     target_thread: object,
     config: object,
+    *, count_pair: bool = True,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
     if limit_error := _chain_limit_error(store, plan.origin_task_id, config):
@@ -286,6 +309,9 @@ def _create_and_dispatch(
                 origin_task_id=plan.origin_task_id,
             )
         )
+        from ....conversation.execution_threads import bind_delegated_task
+
+        bind_delegated_task(store, plan.target_thread_id, task.task_id)
         body = _queue_body(store, plan, body_dedupe_key, task.task_id)
         bound = store.session_tasks.bind_body(task.task_id, body.guidance_id)
         if bound is not None:
@@ -299,7 +325,8 @@ def _create_and_dispatch(
             effect_outcome="unknown",
         )
     # 派发成功后计入每对会话配额（与消息、回报共用同一计数）。
-    _record_pair(store, plan.sender_thread_id, plan.target_thread_id)
+    if count_pair:
+        _record_pair(store, plan.sender_thread_id, plan.target_thread_id)
     payload = {
         "ok": True,
         "task_id": task.task_id,

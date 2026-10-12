@@ -35,6 +35,11 @@ class CapabilityConfig:
     # 会话间消息与派活（第一期只开给管理员）。判定只读结构化 owner_kind 与这些开关，不看文本。
     # 管理员（owner_kind=main，含 IM 绑定管理员私聊）之间的会话发消息开关；默认开。
     session_messaging_admin_enabled: bool = True
+    # 本机管理员可以主动发送到自己绑定身份的渠道；空列表关闭，不授权任意用户或群。
+    admin_message_channels: list[str] = field(default_factory=lambda: ["feishu"])
+    im_scheduled_tasks_background: bool = True
+    im_task_delegation_enabled: bool = True
+    public_capability_packages_enabled: bool = True
     # 普通用户（owner_kind=user）发消息开关；默认关，做用户隔离时再打开。
     session_messaging_user_enabled: bool = False
     # 管理员（owner_kind=main）之间的会话派任务开关；默认开。

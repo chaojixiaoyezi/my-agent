@@ -729,11 +729,12 @@ def _assemble_tui_application(
     normal_body: Any,
     transcript_body: Any,
 ) -> Any:
-    from prompt_toolkit.application import Application
     from prompt_toolkit.cursor_shapes import CursorShape
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.key_binding import ConditionalKeyBindings
     from prompt_toolkit.layout import DynamicContainer, FloatContainer, Layout
+
+    from .tui_application import TuiApplication
 
     body = DynamicContainer(
         lambda: (
@@ -748,7 +749,7 @@ def _assemble_tui_application(
     layout = Layout(model_host, focused_element=parts.input_area)
     key_bindings = ConditionalKeyBindings(_make_tui_keybindings(params, parts),
         Condition(lambda: not getattr(app, "_my_agent_model_menu_active", False)))
-    app = Application(
+    app = TuiApplication(
         layout=layout,
         key_bindings=key_bindings,
         style=_make_tui_style(),

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.backends import ModelResponse, ProviderRequestOptions
 from agent_py_agent.agent.backends.structured_output_mode import (
     STRUCTURED_OUTPUT_MODES,
     resolved_structured_output,
@@ -29,6 +30,33 @@ DEEPSEEK = "https://api.deepseek.com"
 OPENCODE = "https://opencode.ai/zen/go/v1"
 _SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"],
            "additionalProperties": False}
+
+
+@pytest.mark.parametrize("protocol", ["openai_compatible", "anthropic_compatible"])
+def test_structured_route_keeps_request_local_instruction_and_deadlines(monkeypatch, protocol):
+    from agent_py_agent.agent.backends import get_backend
+
+    backend = get_backend(protocol, AgentConfig(model_backend=protocol, model_name="test", api_key="fake", api_base="https://example.test"))
+    captured = []
+
+    def generate(request):
+        captured.append(request)
+        return ModelResponse(text='{"answer":"ok"}', backend=protocol,
+                             tool_use_blocks=[{"name": "my_agent_structured_output", "input": {"answer": "ok"}}])
+
+    monkeypatch.setattr(backend, "_generate_request" if protocol == "anthropic_compatible" else "_generate", generate)
+    options = ProviderRequestOptions(system_instruction="仅做结构化路由", first_event_timeout_seconds=61,
+                                     total_deadline_seconds=123, max_output_tokens=256, reasoning_effort="high")
+    backend.generate_structured("用户工作项", response_schema=_SCHEMA, request_options=options)
+    assert len(captured) == 1
+    sent = captured[0]
+    assert sent.system_instruction == options.system_instruction
+    assert sent.first_event_timeout_seconds == 61 and sent.total_deadline_seconds == 123
+    assert sent.max_output_tokens == 256
+    if protocol == "anthropic_compatible":
+        assert sent.thinking_disabled is True  # 强制 JSON 工具信封沿现有无推理约束。
+    else:
+        assert sent.reasoning_effort == "high"
 
 
 # 函数用途: 造一个 OpenAI 兼容接口的最小运行配置（假密钥、非流式）。

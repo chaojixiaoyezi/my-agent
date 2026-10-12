@@ -30,20 +30,25 @@ class PluginUpdateRequest:
     package: PluginPackageSnapshot
     operation_id: str
     expected_revision: int
+    installation_scope: str = "private"
 
-    # 函数用途: 拒绝无效操作身份、缺包或空插件 ID。
+    # LLM: 更新范围来自可信安装动作，后续 CAS 与原安装匹配；本校验不改安装表或赋予发布权限。
+    # 函数用途: 拒绝无效身份、包、范围或插件 ID，更新不得私转公。
     def __post_init__(self) -> None:
         validate_install_identity(self.operation_id, self.expected_revision)
         if not isinstance(self.package, PluginPackageSnapshot):
             raise ValueError("更新请求缺少包快照")
         if not isinstance(self.plugin_id, str) or not self.plugin_id:
             raise ValueError("更新请求缺少插件 ID")
+        if self.installation_scope not in {"private", "public"}:
+            raise ValueError("更新安装范围无效")
 
     # LLM: install 步的输入摘要沿 plugin_input_digest("install", …) 口径，重放判定与普通安装一致。
     # 函数用途: 给 install 回执生成可重复比较的输入标识。
     @property
     def input_digest(self) -> str:
-        return plugin_input_digest("install", self.plugin_id, self.package.sha256, self.expected_revision)
+        digest = plugin_input_digest("install", self.plugin_id, self.package.sha256, self.expected_revision)
+        return hashlib.sha256(f"public:{digest}".encode()).hexdigest() if self.installation_scope == "public" else digest
 
 
 # LLM: outcome ∈ updated / replayed / unchanged；settings_reason ∈ none（原本无配置）/ restored / incompatible。
@@ -74,12 +79,20 @@ class PluginUpdatePlan:
 def plan_package_update(request: PluginUpdateRequest, entries: tuple[PluginInstallation, ...]) -> PluginUpdatePlan:
     for entry in entries:
         if entry.last_commit.operation_id == request.operation_id:
+            receipt = entry.last_commit
+            original_before = receipt.before_revision - (1 if receipt.action == "configure" else 0)
+            if (entry.manifest.plugin_id != request.plugin_id or entry.package_sha256 != request.package.sha256
+                    or entry.installation_scope != request.installation_scope or original_before != request.expected_revision
+                    or (receipt.action == "install" and receipt.input_digest != request.input_digest)):
+                raise PluginInstallationError("operation_conflict", "更新重送与原包、范围或版本不一致。")
             return PluginUpdatePlan(entries, None, PluginUpdateResult(entry, "replayed", "committed", entry.last_commit,
                                                                       entry.settings_json is not None,
                                                                       "restored" if entry.settings_json is not None else "none"))
     existing = next((row for row in entries if row.manifest.plugin_id == request.plugin_id), None)
     if existing is None:
         raise PluginInstallationError("plugin_missing", "插件尚未安装，请改用 install。")
+    if request.installation_scope != existing.installation_scope:
+        raise PluginInstallationError("scope_conflict", "更新必须保持原安装范围；修改范围请卸载后重新安装。")
     if request.package.manifest.plugin_id != request.plugin_id:
         raise PluginInstallationError("plugin_conflict", "新包声明的插件 ID 与更新目标不一致。")
     if existing.revision != request.expected_revision:
@@ -94,7 +107,8 @@ def plan_package_update(request: PluginUpdateRequest, entries: tuple[PluginInsta
         request.operation_id, request.input_digest, request.plugin_id, request.package.sha256,
         existing.revision, existing.revision + 1,
     )
-    updated = PluginInstallation(request.package.manifest, request.package.sha256, install_receipt.after_revision, install_receipt)
+    updated = PluginInstallation(request.package.manifest, request.package.sha256, install_receipt.after_revision, install_receipt,
+                                 installation_scope=existing.installation_scope)
     restored, reason = False, "none"
     if existing.settings_json is not None:
         updated, restored, reason = _restore_settings(request, existing, updated)

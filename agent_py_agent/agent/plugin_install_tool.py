@@ -36,7 +36,7 @@ class PluginInstallTool(BaseTool):
         self.model_spec = ToolModelSpec(
             PLUGIN_INSTALL_TOOL, "保存经过授权的本地插件包，默认停用。",
             {"type": "object", "properties": {key: {"type": "string"} for key in (
-                "source", "catalog_revision", "workspace", "permission_digest",
+                "source", "catalog_revision", "workspace", "permission_digest", "scope",
             )}, "required": ["source", "catalog_revision", "workspace", "permission_digest"],
              "additionalProperties": False},
         )
@@ -65,11 +65,16 @@ class PluginInstallTool(BaseTool):
         except (OSError, ValueError, RuntimeError):
             return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "插件包来源不可读或格式无效。",
                                       error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
+        scope = str(params.get("scope") or "private")
+        if scope not in {"private", "public"} or scope == "public" and not package.manifest.is_content_only:
+            return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "公共范围只允许纯内容能力包，范围必须是 private 或 public。",
+                                      error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         try:
             previous = next((entry for entry in self.store.snapshot()
                              if entry.manifest.plugin_id == package.manifest.plugin_id), None)
             installed = self.store.install(PluginInstallRequest(
                 package, self.operation_id, previous.revision if previous is not None else 0,
+                installation_scope=scope,
             ))
         except PluginInstallationError as exc:
             return ToolHandlerOutcome(
@@ -85,6 +90,7 @@ class PluginInstallTool(BaseTool):
             PLUGIN_INSTALL_TOOL, True, "插件包已保存，当前停用。",
             result_envelope={"plugin_install": {
                 "plugin_id": installed.installation.manifest.plugin_id, "enabled": False,
+                "installation_scope": installed.installation.installation_scope,
                 "outcome": installed.outcome, "commit_state": installed.commit_state,
                 "receipt": asdict(installed.receipt) if installed.receipt else None,
             }},

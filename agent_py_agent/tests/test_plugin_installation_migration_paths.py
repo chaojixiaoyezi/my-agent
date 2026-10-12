@@ -54,6 +54,7 @@ def _downgrade_to(path, version):
     if version == "plugin_installations.v1":
         del payload["migration"]  # v1 表没有文件级迁移来源字段
     for row in payload["installations"]:
+        row.pop("installation_scope", None)  # v1-v3 的真实协议尚无发布范围。
         _DOWNGRADERS[version](row)
     path.write_text(json.dumps(payload))
     return payload
@@ -74,7 +75,7 @@ def test_legacy_table_reads_readonly_then_migrates_on_commit(tmp_path, version):
 
     store.configure(configure_request(entry))
     current = json.loads(path.read_text())
-    assert current["schema_version"] == "plugin_installations.v4"
+    assert current["schema_version"] == "plugin_installations.v5"
     assert current["migration"]["from_schema"] == version
     assert current["migration"]["source_sha256"] == hashlib.sha256(before[0]).hexdigest()
     assert store.snapshot()[0].settings_json == '{"limit":3}'

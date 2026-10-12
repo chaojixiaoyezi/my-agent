@@ -245,7 +245,7 @@ def _consume_background_notices(
 # process-event cursor paired with its stream identity. Only a new stream can reset the event
 # sequence; canonical message offsets never rewind. Typed activity controls poll cadence.
 # Invalid responses enter the existing exponential backoff without clearing display state.
-# 函数用途: 先按 canonical 顺序收用户/完整消息，再补未覆盖的易失过程；避免思考先于用户输入或 final 重复。
+# 函数用途: 同步实际执行绑定，再按 canonical 顺序收消息与易失过程；请求回执不改变控制目标。
 def _consume_gateway_background_snapshot(
     agent: object,
     session_id: str,
@@ -270,6 +270,9 @@ def _consume_gateway_background_snapshot(
         return False
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         return False
+    target_publisher = getattr(tui_runtime, "publish_execution_target", None)
+    if callable(target_publisher):
+        target_publisher(payload.get("execution_target"))
     permission_changed = _sync_gateway_agent_permissions(
         agent,
         session_id,

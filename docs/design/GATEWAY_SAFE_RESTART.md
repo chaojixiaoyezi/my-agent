@@ -206,11 +206,12 @@
     含上一版已排队的旧形式），`request_execution._handle_gateway_request` 在创建 chunk writer 之后、执行本代之前，经
     `BufferedChunkStreamWriter.write_turn_resumed` 写一次 `{"kind": "turn_resumed", "cause": <标记里的 cause>}`，只有结构化字段。
     cause 取 `gateway_safe_restart`、`gateway_restart` 或 `processing_lease_expired`，旧形式为空串；认领时已被停止的请求不执行也不写。
-    这条边界表示“同一回合重新开始执行”，不代表恢复核对已通过；核对不通过时 TUI 先看到边界，再看到原有的失败说明。
+    这条边界表示“同一回合进入恢复流程”，不代表恢复核对已通过；核对不通过时 TUI 先看到边界，再看到原有的失败说明。
   - TUI：`tui_runtime._close_resumed_turn_generation` 消费它时，上一代的审批面板按 cancelled 只在本地关闭，不写回 Gateway（那一代已结束，
     决定文件没有等待方）；活动思考与回复按 interrupted 冻结，参数生成临时行收起，进行中的 Compact 进度按中断收口；adapter 自己登记仍未终态的
-    工具卡，只把这些卡按中断收口，已终态的卡不重发终态；然后按 cause 显示一条系统提示，例如“Gateway 安全重启打断了这一轮，已自动续跑。”，
+    工具卡，只把这些卡按中断收口，已终态的卡不重发终态；然后按 cause 显示一条系统提示，例如“Gateway 安全重启打断了这一轮，已进入恢复流程。”，
     未知或缺失的原因用通用提示。之后新代次的确认框、工具卡、思考和回复都另起新块，续跑文本不再拼到旧块后面。
+    2026-10-09 的 T 线真实故障注入确认：工具结果 unknown 时会在此边界后暂停恢复；因此共用文案不再提前宣称“已自动续跑”。
   - 与第 5 节设想的差异：没有在排空收尾时给在途确认写“作废”，也不做“同请求新确认替换旧确认”。旧确认在进程退出后已无人等待；
     由接班进程写的一条续跑边界同时覆盖安全重启、普通重启和执行超时三种原因，不依赖即将退出或已经崩溃的进程多写东西。
   - 工具卡块号：续跑回合的工具轮号按已落账的调用数接着数（`loop_support._reconstructed_runtime_state`），被打断的那一轮若还没有调用落账，

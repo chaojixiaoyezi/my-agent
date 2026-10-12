@@ -1,4 +1,54 @@
+2026-10-12 临时更新收口：发行 20261012.5，输入计时、退出鼠标、状态/角色、群聊 mention、管理员绑定目标、单条流式恢复及长候选窗口已实现。定向回归与本地静态 gate 已通过；Ubuntu 24.04 真 TUI/官方 MiniMax 对照和真实 SSH 已验，真实模型原句发送由通道替身确认。现场校时关联与真实飞书客户端展示尚无证据，详见 docs/design/TUI_IM_PREVIEW.md。
+
+IM 多任务/公共包（2026-10-12，相关验收完成；739 项联合回归及新增权限/时区用例通过）：新五个合同/组合文件验证原 HTTP 入站快照、真实创建服务/G1、每日到期/DST/重启、调度独立线程、两用户公共读取/主子 grants/撤销/范围升级。配套回归包含 scheduler、Gateway 控制、SessionTask、运行收口、结构化后端。Linux 用单 Gateway 和官方 MiniMax-M2.7，在隔离 home 提交普通需求观察原账；出站 fake 适配器必须明确标记，不能称真实飞书实发。记录见 [交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
+
+2026-10-12 TUI/IM 临时更新：新增计时倒退对照、管理员绑定目标、群聊直接 mention、单条进度编辑/重启/失败不吞终态及退出真实 PTY 清理回归。当前开发验证见 `test_tui_im_preview.py`、`test_im_progress_draft.py`，验收结果待真实发行包复验后填写；合同见 docs/design/TUI_IM_PREVIEW.md。
+
 # 测试与发布验收
+
+## TUI 回合结束后冻结定位（2026-10-12，Ubuntu 24.04 真机；未复现现场冻结）
+
+- 用户指定 1.19：Ubuntu 24.04.4、x86_64、2 vCPU、约 4 GiB，原包 `20261011.1` 的 SHA256 与交付一致；固定 `/app/.my-agent`，单个独立 Gateway。
+- 官方 MiniMax-M2.7 的实际 model/backends/usage 与配置端点联合核对；7 个聊天请求均有同 ID canonical terminal，不用 `done/` 的最新文件猜结束。
+- 原生 PTY 4 轮（含长回复）：480/480 字符；处理延迟中位 1.11 ms、最大 8.04 ms。每轮在 terminal 后 0/15/30/45/60/90 秒混合打字和滚轮。
+- 真实 OpenSSH 恢复原测试会话 2 轮：240/240 字符。跨机器时钟中点估计有偏差，原负估计不作为物理延迟；用前后 RTT 区间保守分析上界约 33 ms。
+- 工具错误收尾 1 轮：120/120 字符、最大 3.23 ms。`run_command` 的真实操作账为 `TOOL_OPERATION_OUTCOME_UNKNOWN`，不算文件或 shell 任务通过，也没有替模型补产物。
+- 合计 1487 次半秒线程/异步 await 链采样：未见 `running_in_terminal`、输入 reader 脱离或事件循环异常；sudo py-spy 实际取得 9 个线程的函数栈，ptrace_scope 仍为 1，不采局部变量或正文。
+- 测试器只增加观测，不改产品、FPS、输入状态或输出流控；真实任务每例只给原测试需求，未补业务提示。SSH/PTY 输出消费和 CPR 应答属于测试终端模拟，不等同于原生 Windows 可见字形验收。
+- 边界：仅数万 token 测试会话，未覆盖现场 DeepSeek 接口、20 万以上上下文、大历史、飞书连接失败及 Curator 每轮失败。未定位具体卡住函数，未修复、未出新包、未合并；下一步按用户指定用 Ubuntu 22.04 对照。
+
+## TUI 连续滚动与输入复查（2026-10-12，真实发行；受控复现、现场未关闭）
+
+- 1.8 专属 Gateway/安装：正常 PTY、PuTTY 0.81 Linux GTK 与 OpenSSH+xterm 的连续滚轮/鼠标/打字均完整收到 80/80；不是原生 Windows 客户端验收。
+- 官方 MiniMax-M2.7 长回复后 GTK 再测 80/80。独立测试的配置、端点和界面模型相符，不修改日常模型或 8420 Gateway。
+- 同一长历史限制输出消费：16 KiB/s 最大输入积压 488 ms，5 KiB/s 约 3.80 s，重复约 3.55 s；5 KiB/s 只打字对照最大 34 ms。
+- 只增加计时的 flush 观察再次复现：flush 最大 3.731 s、render 3.743 s、输入 3.673 s，鼠标处理最大 0.49 ms；观察器错误类名导入的初次启动排除。
+- 重复组在进程内核实 2 核 quota / 4 GiB memory limit；只保存专属测试的输入长度、时间、渲染时长和鼠标计数。
+- Wine 5 的 Windows 0.81/0.85 崩溃和无效启动排除；未测客户网络吞吐、原生 Windows/输入法或现场 F6 效果。测量与后续修复边界见[交接](docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md)。
+
+## TUI 输入延迟（2026-10-11）
+
+`test_tui_input_responsiveness.py` 验证慢历史建议和候选枚举期间事件循环仍可处理输入；原版两项失败，修复后通过。
+初步与原输入/键盘联测 132 项通过，最终加入发行、顺序和插话恢复定向共 151 项通过。2 核/4 GiB 原生 PTY 的真实 MiniMax-M2.7 输入样本全部显示，
+Linux GTK PuTTY 0.83 已验证真实 SSH 与中文/英文输入；这些不替代 Windows 原客户端/输入法复核。
+400 ms 慢读取注入中，原版 26 键处理延迟最大 6.45 s，新版最大 22.3 ms；新版真模型输出的 30 个输入样本全部显示，中位 45 ms、最大 153 ms。
+Ubuntu 20/22/24 断网安装、原位置更新的 413 文件内容保留、发行完整性与本地严格 gate 已通过。
+详细证据见[交接](docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md)，不得将合成慢读取写成用户现场已复现。
+
+## 临时离线发行验收（2026-10-10，独立分支）
+
+- `test_private_release.py`、`test_parameter_metadata.py`、`test_landlock_launcher.py`、`test_packaging.py`、`test_chat_client_context.py`、`test_remote_owner_workspace_scope.py`：81 passed、3 个 Linux 专属 skipped；最终安装器提示调整后直接 8 passed。另一次 TUI 输入控制组合 49 passed，不与上述重复累计。
+- 最终 `.2` 自解压包在 Ubuntu 20.04 / 22.04 / 24.04 amd64 容器以 `--network none` 运行，不预装 Python；UID 600 普通账号、含空格路径、fixture→最终版更新、坏包拒绝、原数据保留均通过。
+- 容器内测试账号登录 HOME 改变后再次更新，仍使用固定 prefix/data。WorkspaceOnly 启动沿原 owner resolver；首装不得默认写 owner home 外的 workspace。
+- Mac 容器的 amd64 进程由 Rosetta 执行，不用它证明 `/proc/PID/exe` 的原生归属。该门在 1.8 原生 x86_64 以真实 Gateway/TUI PID 验过；产品不增加模拟器专项逻辑。
+- 1.8 原生包经官方 MiniMax-M2.7 完成中文 TUI 与一次真实 shell；随包 bwrap 全部隔离探测通过。完整 `.1→.2` 更新保留 225 个实际数据文件，恢复旧会话后两行原输出仍正确返回。
+- 业务 `.py` 为 0，1544 个编译模块，无 __pycache__，仅一个公开插件模板保留 `.py`；原 wheel 与源文件逐项一致。最终包逐文件校验通过。
+- 本地 Ruff、doc-sync、strict code-size、diff、clean-package 通过；线上 CI 未作为验收来源。三版 Ubuntu 是用户态容器覆盖，原生内核/TUI 为 openEuler 测试机；用户百炼 Key 未取用。
+- 证据与构建/更新复现入口见[指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md)和[交接追加](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md#临时离线发行追加记录2026-10-10)。
+
+## TUI 插话目标修复（2026-10-09，局部验证）
+
+实际执行统一从原 claim、请求绑定和 core run/attempt 投影；TUI 观察 job 不再决定插话/停止目标。输入结算按原 target 类型隔离，outbox 按发送顺序恢复，预留与未知提交分别处理。本地定向回归已过；1.8 的 MiniMax-M2.7 原生 TUI 已验证连续插话、多 TUI 与等待 B、Esc 后续跑、stop 以及长 shell 进程树清理。旧 rejected 批次和 UI 接回失败的恢复缺陷也已修正。后续真机补验了自动 Compact 前/中/后输入、等待子代理和跨线程停止隔离；在途工具崩溃保留 unknown，恢复提示不再提前宣称已续跑。完整矩阵和 P6 维护排空尚未收口。见 [实施记录](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md)。
 
 ## 空回复结构化诊断（wsempty4，2026-10-09，本地实现、待集成）
 

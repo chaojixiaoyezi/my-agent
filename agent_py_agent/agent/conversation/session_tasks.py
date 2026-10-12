@@ -1,7 +1,7 @@
 # LLM: 会话间派活的唯一权威存储。SessionTaskStore 只存派活记录（发送方、接收方、正文引用、dedupe_key、
 #   body_dedupe_key、origin_task_id）和指向目标执行的链接；任务正文只存一份（作为 guidance 条目），
 #   这里只存它的 id 与队列键。
-#   状态机只有一个写入方：accepted 由目标会话确认消费任务正文（guidance ack）时写入，同时把该回合的
+#   accepted 由目标会话确认消费正文，或宿主沿真实 G1 创建回执把正文交给准确孩子后写入，同时把该回合的
 #   request id 绑成 conversation_request_id；done/failed/cancelled 只由目标请求的终态事件写入。
 #   禁止出现"这里说 done、目标请求其实 failed"的双账。
 # 模块用途: 保存会话间派活的任务记录与状态，供派活工具、状态查询、取消和结果回报共用。

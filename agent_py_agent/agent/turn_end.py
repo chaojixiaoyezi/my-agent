@@ -118,6 +118,7 @@ def subagent_outcome_for_turn_end(reason: object) -> tuple[str, str, bool]:
 CONTINUABLE_REASONS = frozenset({
     "TASK_PROGRESS_OPEN", "TOOL_ROUND_LIMIT_REACHED", "REPEATED_TOOL_FAILURE",
     "TOOL_CALL_UNCLOSED", "MODEL_RESPONSE_TRUNCATED", "CONTEXT_OVERFLOW",
+    "CAPACITY_WAIT", "SUBAGENTS_ACTIVE",
 })
 
 
@@ -135,6 +136,9 @@ def should_continue_task(final_response: object) -> tuple[bool, str]:
     source = str(getattr(final_response, "runtime_source", "") or "").strip()
     status = str(getattr(final_response, "runtime_status", "") or "").strip().lower()
     if reason in CONTINUABLE_REASONS:
+        if reason in {"CAPACITY_WAIT", "SUBAGENTS_ACTIVE"}:
+            expected = "resource_capacity" if reason == "CAPACITY_WAIT" else "subagent_lifecycle"
+            return status == "unfinished" and source == expected, reason
         if reason == "TOOL_CALL_UNCLOSED" and not (
             source == "tool_protocol_adapter" and status == "unfinished"
         ):

@@ -90,6 +90,8 @@ def _suppress_lark_processor_not_found() -> None:
     _lark_noise_filtered = True
 
 
+# LLM: WS 必须保留 provider mention 的 key/open_id，与 webhook 走同一入站和群聊授权门；不按姓名识别机器人。
+# 函数用途: 把 SDK 事件转换成共享消息结构，保留话题、发送人和直接提及字段。
 def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
     """lark-oapi 的 ``im.message.receive_v1`` 事件对象 → 与 webhook 同构的 payload dict
     (复用 feishu_to_incoming,长连/webhook 同一条下游)。防御式 getattr(兼容真 lark 对象与测试假对象);
@@ -107,6 +109,10 @@ def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
             "event": {
                 "message": {
                     "message_id": message_id,
+                    "mentions": [
+                        {"key": row["key"], "id": {"open_id": row["open_id"]}}
+                        for row in _normalized_event_mentions(msg)
+                    ],
                     "msg_type": str(getattr(msg, "message_type", "") or ""),
                     "content": getattr(msg, "content", None) or "{}",
                     "chat_id": str(getattr(msg, "chat_id", "") or ""),
@@ -278,3 +284,11 @@ def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> Non
 
 
 __all__ = ["FeishuWsClient", "lark_event_to_webhook_payload", "run_ws_client_thread"]
+
+
+# LLM: SDK 的 mention 不得在 WS 归一过程中丢失，群聊门与 webhook 共用相同结构；只复制 ID 与 key。
+# 函数用途: 读取 SDK 事件的 mention 数组，不读或记录聊天正文。
+def _normalized_event_mentions(message: object) -> list[dict[str, str]]:
+    from .feishu_mentions import normalize_mentions
+
+    return normalize_mentions(getattr(message, "mentions", None))

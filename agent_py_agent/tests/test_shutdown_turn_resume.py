@@ -179,7 +179,7 @@ def test_fresh_turns_carry_no_resume_notice(tmp_path, monkeypatch):
 
 def test_tui_and_im_share_one_notice_table():
     assert tui_runtime.turn_resumed_notice_text is turn_resume_notice.turn_resumed_notice_text
-    assert turn_resumed_notice_text("gateway_restart") == "Gateway 重启打断了这一轮，已自动续跑。"
+    assert turn_resumed_notice_text("gateway_restart") == "Gateway 重启打断了这一轮，已进入恢复流程。"
     assert turn_resumed_notice_text("新原因") == turn_resume_notice.TURN_RESUMED_FALLBACK_NOTICE
 
 

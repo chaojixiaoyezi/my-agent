@@ -1778,6 +1778,8 @@ def _shell_failure_effect_outcome(
     _ = command, output
     if ok or not error_code:
         return ""
+    if isinstance(process_facts, dict) and process_facts.get("status") == "not_started":
+        return "not_started"
     if error_code == "TOOL_OPERATION_OUTCOME_UNKNOWN":
         return "unknown"
     if error_code == "TOOL_TIMEOUT":

@@ -53,12 +53,14 @@ def build_send_message_model_spec() -> ToolModelSpec:
         name="send_message",
         description=(
             "把文字或已经生成的文件原生发送到当前用户连接的聊天通道。"
+            "本机管理员可用 notify_channel 发送到自己已绑定的 IM 身份，不需通过另一个会话转述。"
             "用户说‘发我/传给我/作为附件发送’时，在文件生成后调用；不需要用户提供飞书 ID。"
             "attachments 每项使用 Recent Artifact Refs 里的完整 path 原值。"
         ),
         input_schema={
             "type": "object",
             "properties": {
+                "notify_channel": {"type": "string", "description": "可选目标渠道，如 feishu；只允许当前用户或管理员已绑定的身份。"},
                 "message": {"type": "string", "description": "随附件发送的简短说明；只发附件时可留空。"},
                 "attachments": {
                     "type": "array",
@@ -145,7 +147,7 @@ class SendMessageTool(BaseTool):
         request_scope = str(
             scope.get("request_id") or scope.get("run_id") or ""
         ).strip()
-        provider, target, _owner_root = _owner_delivery_identity(self.agent)
+        provider, target, _owner_root = _owner_delivery_identity(self.agent, str(params.get("notify_channel") or ""))
         if not request_scope or not provider or not target:
             return ""
         attachment_refs = params.get("attachments")
@@ -189,7 +191,7 @@ class SendMessageTool(BaseTool):
         params: dict[str, Any],
         context: ToolOperationReconciliationContext,
     ) -> ToolOperationReconciliation:
-        provider, target, _owner_root = _owner_delivery_identity(self.agent)
+        provider, target, _owner_root = _owner_delivery_identity(self.agent, str(params.get("notify_channel") or ""))
         capabilities = self._delivery.registry.capabilities_for(provider)
         if (
             not provider
@@ -226,7 +228,13 @@ class SendMessageTool(BaseTool):
             return scope_error
         if not message and not attachment_refs:
             return _error("message 和 attachments 不能同时为空", "TOOL_INVALID_ARGUMENTS")
-        provider, target, owner_root = _owner_delivery_identity(self.agent)
+        from .channel_message_target import resolve_message_target
+
+        provider, target, owner_root, target_error = resolve_message_target(
+            self.agent, str(params.get("notify_channel") or "")
+        )
+        if target_error:
+            return _error("没有唯一且已授权的消息接收身份；请检查管理员绑定和渠道配置", target_error)
         capabilities = self._delivery.registry.capabilities_for(provider)
         if not capabilities.proactive or not target or owner_root is None:
             return _error("当前 owner 没有可用的外部消息通道", "CHANNEL_ADAPTER_UNAVAILABLE")
@@ -396,18 +404,12 @@ def _evidence_refs(value: object) -> list[str] | ToolHandlerOutcome:
     return refs
 
 
-# LLM: owner 身份是唯一发送目标权威；收件 open_id 取 scoped config 原始值，不把内部 owner 路径当地址。
-# 函数用途: 从当前 agent 的可信 owner 配置取得 provider、目标 ID 和隔离根目录。
-def _owner_delivery_identity(agent: object) -> tuple[str, str, Path | None]:
-    home = getattr(agent, "home_paths", None)
-    provider = str(getattr(home, "owner_provider", "") or "").strip().lower()
-    config = getattr(agent, "config", None)
-    target = str(getattr(config, "my_agent_owner_id", "") or "").strip()
-    root = getattr(home, "owner_home_dir", None)
-    try:
-        owner_root = Path(root).expanduser().resolve(strict=True) if root else None
-    except OSError:
-        owner_root = None
+# LLM: 原 IM owner 仍取 scoped target，本机管理员取唯一已绑定身份；availability、幂等与发送前共用解析，不沿用撤销绑定缓存。
+# 函数用途: 取得当前 owner 的已授权渠道、实际接收 ID 和隔离根目录，不接收任意收件人。
+def _owner_delivery_identity(agent: object, channel: str = "") -> tuple[str, str, Path | None]:
+    from .channel_message_target import resolve_message_target
+
+    provider, target, owner_root, _error_code = resolve_message_target(agent, channel)
     return provider, target, owner_root
 
 

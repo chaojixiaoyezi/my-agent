@@ -56,9 +56,11 @@ class PluginActivationRef:
             raise ValueError("插件激活引用与规范用户地址不符")
         return owner
 
-    # LLM: preparing 只供启动、握手和发现；业务调用必须只接受 active，任一模式都不接受 revoked 或另一代。
+    # LLM: 插件运行只供管理员；每次调用鲜活核对身份与代次，防止旧连接绕过新注册限制。公共内容 reader 不走插件运行入口。
     # 函数用途: 鲜活读取唯一安装表，允许同一准备代发布后沿原连接继续使用。
     def require(self, *, allow_preparing: bool = False) -> PluginInstallation:
+        if self.identity != OwnerIdentity.local_main():
+            raise PermissionError("插件运行仅限管理员")
         phases = frozenset({"preparing", "active"}) if allow_preparing else frozenset({"active"})
         return PluginInstallStore(self.owner()).require_activation(
             self.scope.plugin_id, self.scope.activation_id, phases=phases,

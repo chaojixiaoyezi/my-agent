@@ -32,6 +32,8 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
+    CommandSpec("delegate", "/delegate enable|disable|status", "当天自动委派任务，部署时区零点自动关闭（IM）",
+                submit_on_enter=True, conversation_suffix=r"(?:\s+(\S+))?\s*$"),
     CommandSpec("help", "/help", "查看帮助和可用命令", submit_on_enter=True),
     CommandSpec(
         "sessions",
@@ -200,7 +202,7 @@ COMMAND_CATALOG = (
     ),
     CommandSpec(
         "verbose",
-        "/verbose [off|on|full]",
+        "/verbose [off|on|full|stream]",
         "查看或切换详细过程显示",
         aliases=("v",),
         submit_on_enter=True,
@@ -286,6 +288,7 @@ COMMAND_CATALOG = (
             ), available=False),
             CommandActionSpec("install", "安装本地包，默认停用", (
                 ArgumentSpec("source", "本地包路径", required=True, path=True),
+                ArgumentSpec("scope", "安装范围 private 或 public（公共仅内容能力包）", options=("--scope",)),
             ), available=False),
             CommandActionSpec("configure", "保存停用插件的完整配置", (
                 ArgumentSpec("plugin", "插件 ID", required=True),

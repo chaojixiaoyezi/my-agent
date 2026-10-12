@@ -2,6 +2,7 @@
 # 模块用途: 执行后台模型工作片并压缩重试；复用本轮展示，失效清除后不重发推荐，也不保存第二份状态。
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
@@ -18,6 +19,7 @@ from .background_context import (
     render_background_context,
 )
 from .background_history_seed import prepare_background_history_or_raise, refresh_background_history
+from .claim_execution_binding import publish_claim_runtime_authority
 from .compact_carry import compact_overflow_carry
 from .compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from .local_run_control import LocalRunControl
@@ -76,6 +78,12 @@ class BackgroundCompactSliceYield(RuntimeError):
     pass
 
 
+# LLM: 子代理容量在原创建事务复核后暂不可用；后台宿主保留原 wake/正文，沿原不执行退避，不能记失败或 DONE。
+# 类用途: 表示后台任务仍在等待容量，没有进入模型或工作执行。
+class BackgroundCapacityDeferred(RuntimeError):
+    pass
+
+
 # LLM: 复用本地调用的原身份发布句柄，先尊重已有宿主回调；不按 task 查询猜 run，不从展示载体恢复执行权。
 # 类用途: 接收后台实际执行身份，让 Compact 使用 core 已绑定的 run/attempt，同时保留原任务确认回调。
 class _BackgroundRunControl(LocalRunControl):
@@ -85,14 +93,16 @@ class _BackgroundRunControl(LocalRunControl):
         super().__init__(request_id)
         self._previous = previous
 
-    # LLM: 原回调拒绝或抛异常时不发布本地副本，由 core 沿原失败合同收口 attempt。
-    # 函数用途: 在模型启动前收取已经由 RuntimeDB 决定的执行身份。
+    # LLM: 原回调和本地身份均核对后投影到原 claim；CAS 失败由 core 收口 attempt，旧片不能更新新租约。
+    # 函数用途: 在模型前发布 RuntimeDB 已决定的身份，供后台控制准确定位 Compact 后的新尝试。
     def bind_runtime_authority(self, binding: dict[str, str]) -> bool:
         self.check_admission()
         publish = getattr(self._previous, "bind_runtime_authority", None)
         if callable(publish) and publish(binding) is not True:
             return False
-        return super().bind_runtime_authority(binding)
+        accepted = super().bind_runtime_authority(binding)
+        publish_claim_runtime_authority(binding)
+        return accepted
 
     # LLM: 任务晋升仍交原宿主确认；无原回调时只确认本调用尚未关闭，不新增持久任务或权限。
     # 函数用途: 保持后台已有任务链接回调的确认结果。
@@ -104,8 +114,8 @@ class _BackgroundRunControl(LocalRunControl):
         return callable(self._previous) and self._previous(link) is True
 
 
-# LLM: 原请求默认解析和身份发布共用生产入口；只回填 core 已发布的 run/attempt，展示回调仍更新原参数，异常不吞。
-# 函数用途: 执行后台模型尝试并将准确身份交给后续 Compact，解决恢复既有主 run 时 task_id 与 run_id 不同的问题。
+# LLM: 只回填 core 已发布的身份；异常退出沿原账释放该 attempt 的提交前预留，submitted 未知仍保留，正常 Compact 保持原恢复路径。
+# 函数用途: 执行后台模型尝试，将身份交给 Compact，并防止中断后未发送的插话永久卡在 reserved。
 def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
     from ..agent_core.runtime.run_params import run_params_with_request_id
 
@@ -113,12 +123,33 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     control = _BackgroundRunControl(resolved.request_id, params.conversation_task_binding_callback)
     try:
         result = agent.run(prompt, params=replace(resolved, conversation_task_binding_callback=control))
+    except Exception:
+        _release_failed_attempt_inputs(agent, resolved.request_id, control.runtime_authority())
+        raise
     finally:
         control.finish()
     binding = control.runtime_authority()
     return result, replace(params, request_id=resolved.request_id,
         run_id=binding.get("run_id", resolved.run_id), task_id=binding.get("task_id", resolved.task_id),
         attempt_id=binding.get("attempt_id", resolved.attempt_id))
+
+
+# LLM: agent.run 已退出，只有 core 正式发布的精确 attempt 能证明其预留可释放；原提交批次先修复，不释放 submitted。
+#   恢复失败记录结构化身份，不输出消息正文，也不能遮盖原异常；后续恢复器仍能读取原账。
+# 函数用途: 后台异常或 Esc 退出后恢复尚未提交的插话，允许同一任务的合法后继再次认领。
+def _release_failed_attempt_inputs(agent: object, turn_id: str, binding: dict[str, str]) -> None:
+    attempt_id = binding.get("attempt_id", "")
+    if not attempt_id:
+        return
+    try:
+        summary = agent.conversation_store.guidance.recovery.release_reserved(turn_id, dead_attempt_id=attempt_id)
+        if summary.get("errors"):
+            raise RuntimeError("guidance reservation recovery incomplete")
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "后台插话预留恢复未完成：turn_id=%s attempt_id=%s error_type=%s",
+            turn_id, attempt_id, type(exc).__name__,
+        )
 
 
 # LLM: 调用方已冻结模型作用域与提示；执行保持同一请求和活动 sink，异常/取消不提交伪造 final。
@@ -150,7 +181,7 @@ def invoke_background_turn(
             activity_sink=activity_sink,
             turn_trigger=turn_trigger,
         )
-    except BackgroundCompactSliceYield:
+    except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
         activity_sink.finish()
         raise
     except Exception:

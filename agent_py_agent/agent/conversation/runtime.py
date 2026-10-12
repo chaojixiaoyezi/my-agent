@@ -63,6 +63,7 @@ from .background_delivery import (
     record_background_response,
 )
 from .background_execution import (
+    BackgroundCapacityDeferred,
     BackgroundCompactSliceYield,
     BackgroundExecutionDependencies,
     BackgroundExecutionResult,
@@ -457,6 +458,7 @@ class BackgroundRunRequest:
     now: float = 0.0
     wake_signal: dict[str, Any] | None = None
     conversation_turn_id: str = field(default_factory=lambda: new_id("background-turn"))
+    host_session_task_id: str = ""
 
 
 
@@ -586,14 +588,20 @@ def _background_task_continuation_fields(
 
 # LLM: Resolve only host-owned wake request ids in this store/thread's canonical transcript.
 # Page cursors are ephemeral reads, not model state. The exact Goal task already validated by
-# the caller has no synthetic user message; all other explicit request ids still fail if missing.
-# 函数用途: 按普通派工请求找回用户原话；已核实的 Goal 任务沿目标账读取，不伪造消息或吞掉真实历史损坏。
+# the caller has no synthetic user message. Delegation reads its exact SessionTask ref;
+# all other explicit request ids still fail if missing.
+# 函数用途: 普通派工沿原消息取输入，委派沿原任务引用读 goal；不伪造消息或吞掉真实历史损坏。
 def _background_request_objective(
     store: ConversationStore,
     request: BackgroundRunRequest,
     *,
     durable_goal_task_id: str = "",
 ) -> str:
+    from .execution_threads import delegated_session_task
+
+    delegated = delegated_session_task(store, request.thread_id)
+    if delegated is not None:
+        return delegated.goal
     pending = set(_background_active_turn_request_ids(request))
     if durable_goal_task_id and durable_goal_task_id == request.task_id:
         pending.discard(durable_goal_task_id)
@@ -976,7 +984,7 @@ class BackgroundMainAgentRuntime:
                 resolved_goal_context,
                 (proactive_delivery_available, transcript_delivery_available),
             )
-        except BackgroundCompactSliceYield:
+        except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
             raise
         except Exception as exc:
             _settle_unconsumed_background_turn_input(self.agent, request, exc)
@@ -1104,7 +1112,7 @@ def _session_task_turn_was_cancelled(agent: object, request: BackgroundRunReques
 #   不在派活回合、任务已终态、或读账失败都安静返回（不改任何状态、不影响交付）。
 #   摘要取本回合的最终答复（结构化字段 response），让发送方的回报带上"目标到底说了什么"，
 #   不解析正文、不复制任务正文；答复为空时留空，回报照样发出。
-# 函数用途: 按本次后台请求收口它对应的会话任务。
+# 函数用途: 按本次后台请求收口真正完成的会话任务；等待孩子的 unfinished 片保留原任务。
 def _close_out_session_task_turn(
     agent: object,
     request: BackgroundRunRequest,
@@ -1113,6 +1121,9 @@ def _close_out_session_task_turn(
     turn_id: str = "",
 ) -> None:
     from .session_task_report import TaskTurnOutcome, close_out_turn
+
+    if execution.runtime_status == "unfinished":
+        return
 
     # 回合号必须与注入正文时用的同一个：定时/派活唤醒来自结构化唤醒信封，
     # 其余后台片回落到 request.task_id（原来唯一来源）。
@@ -1124,7 +1135,7 @@ def _close_out_session_task_turn(
             agent,
             resolved_turn_id,
             TaskTurnOutcome(
-                ok=not bool(getattr(execution, "error", None)),
+                ok=not bool(getattr(execution, "error", None)) and execution.runtime_status not in {"failed", "error"},
                 summary=str(getattr(execution, "response", "") or "").strip(),
             ),
         )
@@ -1916,6 +1927,8 @@ def _supports_builtin_proactive(channel: str) -> bool:
     return str(channel or "").strip().lower() in PROACTIVE_PUSH_CHANNELS
 
 
+# LLM: 只投影宿主领取参数，委派原 SessionTask ref 随生命周期片传递；不从文本推断或复制任务状态。
+# 函数用途: 构造本片后台请求，保持执行线程、来源与稳定会话任务身份。
 def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
     current = now(kwargs.get("now"))
     return BackgroundRunRequest(
@@ -1926,6 +1939,7 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
         route_target=str(kwargs.get("route_target") or ""),
         now=current,
         wake_signal=wake_signal_payload(kwargs.get("wake_signal")),
+        host_session_task_id=str(kwargs.get("host_session_task_id") or ""),
     )
 
 
@@ -2222,9 +2236,11 @@ def _scheduler_run_id(request: BackgroundRunRequest) -> str:
 # LLM: 派活唤醒必须像定时唤醒一样自带精确回合号，否则本片 request_id/run_id/task_id 全为空串：
 #   正文注入的 `if entries and turn_id` 会短路（正文永不认领、永不确认），收尾的
 #   `_close_out_session_task_turn` 也会因空 turn_id 直接返回——目标空闲时既不接单也不回报。
-#   回合号只取宿主唤醒信封里的结构化 session_task_id，不从正文或摘要推断。
-# 函数用途: 从派活唤醒信封读出这条会话任务的回合号。
+#   委派续片优先取 canonical 线程已校验的 host_session_task_id，其余仅取原唤醒信封，不从正文推断。
+# 函数用途: 让委派孩子生命周期片和原派活片持续引用同一接单回合。
 def _session_task_run_id(request: BackgroundRunRequest) -> str:
+    if request.host_session_task_id:
+        return request.host_session_task_id
     if str(request.reason or "").strip().lower() != "session_task":
         return ""
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
@@ -4576,6 +4592,8 @@ def _background_claim_dependencies(
     *,
     attempt: background_claim.BackgroundClaimAttempt | None = None,
 ) -> background_claim.BackgroundClaimDependencies:
+    from .execution_threads import delegated_turn_id
+
     return background_claim.BackgroundClaimDependencies(
         attempt=attempt,
         claims=scheduler.store.claims,
@@ -4600,6 +4618,7 @@ def _background_claim_dependencies(
         record_policy_failure=scheduler._record_policy_failure,
         lease_seconds=scheduler.claim_ttl_seconds,
         heartbeat_interval_seconds=scheduler.claim_heartbeat_interval_seconds,
+        bound_delivery_turn=partial(delegated_turn_id, scheduler.store),
     )
 
 

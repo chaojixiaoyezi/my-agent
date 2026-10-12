@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Literal
 
 from ..backends.reasoning_control import REASONING_LEVELS
@@ -31,6 +31,7 @@ from .authority import (
 from .channels import redact_host_absolute_paths
 
 ControlKind = Literal[
+    "delegate",
     "status",
     "context",
     "compact",
@@ -109,6 +110,8 @@ class ConversationTaskCommand:
 ConversationCommand = ConversationControlCommand | ConversationTaskCommand
 
 
+# LLM: /status 是显式控制面；上下文只携带 canonical 本代数值，角色来自 owner，子代理按结构化运行状态计数。
+# 类用途: 汇总当前任务、模型、上下文、压缩和权限，供 TUI 与 IM 共用展示，未知事实不能填成当前零值。
 @dataclass(frozen=True)
 class ConversationTaskStatus:
     state: Literal["idle", "queued", "running", "stopping"] = "idle"
@@ -123,6 +126,10 @@ class ConversationTaskStatus:
     # “异常”子代理按界面标签的细分（宿主停机中断、额度不足、失败等），标签来自 runner_display_projection。
     subagent_other_labels: tuple[tuple[str, int], ...] = ()
     model_name: str = ""
+    context_usage: dict[str, object] = field(default_factory=dict)
+    user_role: str = ""
+    permission_mode: str = ""
+    im_task_status: dict[str, object] = field(default_factory=dict)
     compact_generation: int | None = None
     verbose_level: str = ""
     durable_work: tuple[NamedConversationWorkStatus, ...] = ()
@@ -212,6 +219,10 @@ def parse_conversation_command(
     if plugin_namespace(raw) is not None:
         return ConversationControlCommand("plugins", value=raw)
     name, trailing = match_conversation_command(raw) or ("", None)
+    if name == "delegate":
+        value = str(trailing or "status").strip()
+        return ConversationControlCommand("delegate", value=value, valid=value in {"enable", "disable", "status"},
+                                          usage="用法：/delegate enable、disable 或 status（IM，当天有效）。")
     if name == "status":
         return _argumentless_command("status", trailing, "/status")
     if name == "context":
@@ -263,8 +274,8 @@ def parse_conversation_command(
             "verbose",
             value=value,
             operation="set" if value else "view",
-            valid=not value or value in {"off", "on", "full"},
-            usage="用法：/verbose off、/verbose on 或 /verbose full。",
+            valid=not value or value in {"off", "on", "full", "stream"},
+            usage="用法：/verbose off、on、full 或 stream（同一条进度持续更新，最终另发）。",
         )
     if raw.lower().startswith("/btw"):
         return ConversationControlCommand(
@@ -771,10 +782,12 @@ def render_verbose_control(current_level: str, command: ConversationControlComma
         return command.usage
     level = command.value or str(current_level or "off").strip().lower()
     if not command.value:
-        labels = {"off": "关闭", "on": "开启", "full": "完整"}
+        labels = {"off": "关闭", "on": "开启", "full": "完整", "stream": "流式更新"}
         return f"当前详细过程模式：{labels.get(level, '关闭')}。"
     if level == "off":
         return "详细过程已关闭。"
+    if level == "stream":
+        return "流式过程已开启：同一条进度消息持续更新，完成后另发最终结果。"
     if level == "on":
         return "详细过程已开启：执行任务时会发送工具步骤摘要。"
     return "完整过程已开启：除工具步骤摘要外，还会发送经过脱敏和长度限制的工具结果。"
@@ -828,35 +841,60 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
         "stopping": "正在停止",
     }
     lines = [f"状态：{labels.get(status.state, '空闲')}"]
+    if status.user_role:
+        lines.append(f"用户身份：{status.user_role}")
+    if status.permission_mode:
+        lines.append(f"执行权限：{status.permission_mode}")
     if status.task:
         lines.append(f"任务：{_short_text(redact_host_absolute_paths(status.task), 160)}")
     if status.elapsed_seconds > 0:
         lines.append(f"已运行：{_duration_text(status.elapsed_seconds)}")
     if status.recent_progress:
         lines.append(f"最近进展：{redact_host_absolute_paths(status.recent_progress)}")
-    if status.state != "idle" or status.subagent_total:
-        execution = "主代理 1"
-        if status.subagent_total:
-            execution += (
-                f"；子代理 {status.subagent_total}（运行 {status.subagent_running}，"
-                f"完成 {status.subagent_done}，异常 {status.subagent_failed}"
-                + _subagent_label_breakdown(status.subagent_other_labels)
-                + "）"
-            )
-        lines.append(f"执行情况：{execution}")
+    lines.append(
+        f"执行情况：主代理 {'1' if status.state in {'running', 'stopping'} else '0'}；"
+        f"子代理 {status.subagent_total}（运行 {status.subagent_running}，"
+        f"完成 {status.subagent_done}，异常 {status.subagent_failed}"
+        + _subagent_label_breakdown(status.subagent_other_labels) + "）"
+    )
     if status.queued_count:
         lines.append(f"等待中的消息：{status.queued_count}")
     if status.model_name:
         lines.append(f"模型：{status.model_name}")
+    from .context_usage import public_context_usage
+
+    usage = public_context_usage(status.context_usage)
+    if usage:
+        current, capacity = int(usage["current_tokens"]), int(usage["context_window_tokens"])
+        percent = f"（{current / capacity:.1%}）" if capacity else ""
+        estimate = "约 " if usage["estimated"] else ""
+        lines.append(f"上下文：{estimate}{current:,} / {capacity:,} tokens{percent}")
+        lines.append(f"压缩触发点：{int(usage['compact_trigger_tokens']):,} tokens")
+    else:
+        lines.append("上下文：当前占用未知（尚无本代调用快照）")
     if status.compact_generation is not None:
-        compact = (
-            f"已压缩 {status.compact_generation} 次"
-            if status.compact_generation > 0
-            else "尚未压缩"
-        )
-        lines.append(f"上下文：{compact}")
+        lines.append(f"压缩次数：{status.compact_generation}")
     if status.verbose_level:
         lines.append(f"过程显示：{status.verbose_level}")
+    if status.im_task_status:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        settings = status.im_task_status
+        if settings.get("available") is False:
+            lines.append("IM 后台任务：状态读取不可用")
+        else:
+            enabled = settings.get("delegation_enabled") is True
+            text = "开启" if enabled else "关闭"
+            if enabled:
+                expiry = datetime.fromtimestamp(float(settings["expires_at"]), ZoneInfo(str(settings["timezone"])))
+                text += f"（到 {expiry.isoformat()}）"
+            lines.append(f"当天自动委派：{text}")
+            if "queued" in settings:
+                lines.append(f"独立后台任务：排队 {settings['queued']}；运行/汇总 {settings['running']}")
+            if "subagent_running" in settings:
+                root_limit, owner_limit = settings["root_subagent_limit"], settings["owner_subagent_limit"]
+                lines.append(f"后台子代理：运行 {settings['subagent_running']}；每根上限 {root_limit or '不限'}；用户上限 {owner_limit or '不限'}")
     audits = [item for item in status.durable_work if item.kind == "audit"]
     goals = [item for item in status.durable_work if item.kind == "goal"]
     if audits:

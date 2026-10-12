@@ -71,6 +71,7 @@ class BufferedChunkStreamWriter:
     _model_segment: list[str] = field(default_factory=list)
     _model_delta_buffer: list[str] = field(default_factory=list)
     _model_delta_chars: int = 0
+    _last_im_draft_at: float = 0.0
     _last_model_delta_flush_at: float = field(default_factory=time.monotonic)
     _commentary_emitted: bool = False
     _committed_commentary: list[str] = field(default_factory=list)
@@ -117,6 +118,8 @@ class BufferedChunkStreamWriter:
 
     # LLM: rich transcript 逐模型轮暂存 commentary，普通客户端仍只保留首段；任何暂存段都只能在真实工具边界公开。
     # 函数用途: 接收供应商可见文本增量，等待工具边界确认它是过程说明。
+    # LLM: 普通 IM 候选仍在边界确认；显式 stream 只增加一秒一次的完整脱敏草稿，终态不从候选推断。
+    # 函数用途: 收集同一模型流，按客户端和明确档位发布展示增量，不另生成用户回复。
     def write_model(self, text: str) -> None:
         """Keep one tentative model segment and stream rich-client deltas live.
 
@@ -133,9 +136,9 @@ class BufferedChunkStreamWriter:
         """
         if not text:
             return
-        if self.rich_transcript or not self._commentary_emitted:
+        if self.rich_transcript or self._verbose_level == "stream" or not self._commentary_emitted:
             self._model_segment.append(text)
-        if self.rich_transcript:
+        if self.rich_transcript or self._verbose_level == "stream":
             self._model_delta_buffer.append(text)
             self._model_delta_chars += len(text)
             if _stream_flush_due(text, self._model_delta_chars, self._last_model_delta_flush_at, self.flush_chars, self.flush_interval_seconds):
@@ -145,7 +148,7 @@ class BufferedChunkStreamWriter:
     # 函数用途: 规范化本请求的过程显示级别。
     def set_verbose_level(self, level: str) -> None:
         normalized = str(level or "off").strip().lower()
-        self._verbose_level = normalized if normalized in {"off", "on", "full"} else "off"
+        self._verbose_level = normalized if normalized in {"off", "on", "full", "stream"} else "off"
 
     # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
     # can call tools. Request payload prose or tool arguments must never choose this scope.
@@ -480,7 +483,7 @@ class BufferedChunkStreamWriter:
     # 但已确认正文必须完整保留并进入 canonical history，末轮正文留给 final response。
     # 函数用途: 脱敏、记录并发布当前已经由工具边界确认的模型过程说明。
     def _write_model_commentary_at_boundary(self) -> None:
-        if (self._commentary_emitted and not self.rich_transcript) or not self._model_segment:
+        if (self._commentary_emitted and not self.rich_transcript and self._verbose_level != "stream") or not self._model_segment:
             return
         raw = "".join(self._model_segment)
         self._model_segment.clear()
@@ -492,6 +495,7 @@ class BufferedChunkStreamWriter:
         self._write_event(
             {
                 "kind": "assistant_commentary",
+                **({"verbose_level": "stream"} if self._verbose_level == "stream" else {}),
                 "text": content,
             },
         )
@@ -500,25 +504,7 @@ class BufferedChunkStreamWriter:
     # 那会把未完成文本当成终稿投影；canonical 终稿始终全量脱敏并覆盖流式正文。
     # 函数用途: 把当前候选消息增量批脱敏后写入 typed model_delta 事件。
     def _flush_model_deltas(self) -> None:
-        if not self._model_delta_buffer:
-            return
-        raw = "".join(self._model_delta_buffer)
-        self._model_delta_buffer.clear()
-        self._model_delta_chars = 0
-        self._last_model_delta_flush_at = time.monotonic()
-        content = redact_structured_identifiers(
-            project_host_paths_for_channel(raw, self.delivery_channel),
-            self._identifier_redactions,
-            channel=self.delivery_channel,
-        )
-        if not content:
-            return
-        self._write_event(
-            {
-                "kind": "model_delta",
-                "text": content,
-            },
-        )
+        _flush_model_delta_events(self)
 
 
 # LLM: 模型增量与运行进度使用同一刷新公式，各自传入独立计数/时钟；不读或改变任务状态。
@@ -538,3 +524,44 @@ def write_host_notice_events(writer: BufferedChunkStreamWriter, notices: Iterabl
     writer.flush()
     for notice in notices:
         writer._write_event({"kind": "host_notice", "notice": notice.to_dict()})
+
+
+# LLM: 流式 IM 快照至多一秒一次，仅消费模型候选并按原脱敏合同生成有界文本；不合成普通进度文案。
+# 函数用途: 发布同一条草稿的最新内容，防止逐 token 快照把事件文件和 IM 请求撑大。
+def _write_im_draft(writer: BufferedChunkStreamWriter) -> None:
+    now = time.monotonic()
+    if now - writer._last_im_draft_at < 1.0:
+        return
+    writer._last_im_draft_at = now
+    preview = public_model_text("".join(writer._model_segment), max_chars=0,
+        delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
+    if preview:
+        # 先完整脱敏再裁末尾，长输出仍能更新最新窗口，不会暴露被截开的路径前缀。
+        writer._write_event({"kind": "model_draft", "verbose_level": "stream", "text": preview[-8000:]})
+
+
+# LLM: 只处理 writer 已缓存的展示增量；普通 TUI 沿原逐批投影，stream IM 走完整候选快照，不写终态或另造回复。
+# 函数用途: 排空展示缓冲并发布相应事件，保持旧刷新公式、脱敏和同一事件出口。
+def _flush_model_delta_events(writer: BufferedChunkStreamWriter) -> None:
+    if not writer._model_delta_buffer:
+        return
+    raw = "".join(writer._model_delta_buffer)
+    writer._model_delta_buffer.clear()
+    writer._model_delta_chars = 0
+    writer._last_model_delta_flush_at = time.monotonic()
+    content = redact_structured_identifiers(
+        project_host_paths_for_channel(raw, writer.delivery_channel),
+        writer._identifier_redactions,
+        channel=writer.delivery_channel,
+    )
+    if not content:
+        return
+    if writer._verbose_level == "stream" and not writer.rich_transcript:
+        _write_im_draft(writer)
+        return
+    writer._write_event(
+        {
+            "kind": "model_delta",
+            "text": content,
+        },
+    )

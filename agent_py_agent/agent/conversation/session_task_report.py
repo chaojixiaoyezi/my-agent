@@ -89,7 +89,7 @@ def finish_task_for_turn(
 #   重复收口不会写第二条。投递失败不改变任务已到终态的事实（不回滚状态机）。metadata 带 SESSION_TASK_STATUS_FIELD：
 #   认领判定靠它把回报和派活正文区分开（正文只许它自己的派活回合认领，回报发送方哪一回合都能认领），不能去掉。任务带宿主判定的
 #   failure_code 时，metadata 记 session_task_failure_code（只在非空时出现，旧回报的 metadata 形状不变）。
-# 函数用途: 把任务终态作为一条来源明确的消息排队回发送方。
+# 函数用途: 把任务终态排队回发送方；独立 IM 委派已由原后台投递交付，避免再次唤醒聊天模型和重复回复。
 def report_task_result(agent: object, task: object) -> bool:
     task_id = str(getattr(task, "task_id", "") or "").strip()
     status = str(getattr(task, "status", "") or "").strip()
@@ -97,6 +97,19 @@ def report_task_result(agent: object, task: object) -> bool:
     if not task_id or not status or not sender:
         return False
     store = getattr(agent, "conversation_store", None)
+    from .execution_threads import IM_TASK_EXECUTION_KEY, execution_origin_thread
+
+    threads = getattr(store, "threads", None)
+    if threads is not None:
+        target, error = threads.load_report(str(getattr(task, "target_thread_id", "") or ""))
+        if error:
+            return False
+        if target is not None and IM_TASK_EXECUTION_KEY in target.metadata:
+            try:
+                source = execution_origin_thread(threads.require, target)
+            except (ValueError, OSError, RuntimeError):
+                return False
+            return source.thread_id == sender
     guidance = getattr(store, "guidance", None)
     if guidance is None:
         return False

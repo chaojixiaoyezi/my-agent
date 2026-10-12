@@ -1,5 +1,6 @@
-# LLM: 本模块实现 TUI 输入侧的纯补全、队列回取和占位投影；真实执行顺序仍由 canonical chat Queue 与 typed runtime 共同裁决。
-# 模块用途: 为 终端交互 风格输入框提供 slash/路径补全、排队提示，并把尚未执行的消息安全恢复到编辑器。
+# LLM: 本模块实现 TUI 输入侧的纯补全、队列回取和占位投影；历史搜索和候选枚举不得阻塞事件循环，
+# 真实执行顺序仍由 canonical chat Queue 与 typed runtime 共同裁决，修改时联测 input/responsiveness。
+# 模块用途: 为输入框提供后台历史建议和补全、排队提示，并把尚未执行的消息安全恢复到编辑器。
 
 from __future__ import annotations
 
@@ -61,8 +62,9 @@ class TuiCompletion(Completion):
         self.catalog_revision = catalog_revision
 
 
-# LLM: slash menu 可见时不能叠加历史 ghost text；普通输入仍完全复用 FileHistory 的既有建议算法。
-# 类用途: 为聊天输入提供历史灰字建议，并在斜杠命令补全期间隐藏它。
+# LLM: slash menu 可见时不能叠加历史 ghost text；普通输入复用原历史算法，异步入口在后台搜索，
+# 迟到结果仍由 prompt_toolkit 按原 Document 校验，不能改写输入或执行状态。
+# 类用途: 提供不阻塞键盘的历史灰字建议，并在斜杠命令补全期间隐藏它。
 class TuiHistoryAutoSuggest(AutoSuggestFromHistory):
     # LLM: 此判断只识别输入语法位置，不执行命令，也不根据历史内容改变系统状态。
     # 函数用途: 返回普通历史建议；斜杠命令名前缀下返回空建议。
@@ -70,6 +72,11 @@ class TuiHistoryAutoSuggest(AutoSuggestFromHistory):
         if _slash_command_prefix(document.text_before_cursor) is not None:
             return None
         return super().get_suggestion(buffer, document)
+
+    # LLM: 输入建议只读历史；计算交原执行器，Buffer 负责丢弃不再对应当前 Document 的结果。
+    # 函数用途: 在后台查找历史建议，避免历史较大或读取较慢时积压后续按键。
+    async def get_suggestion_async(self, buffer: Any, document: Document):
+        return await asyncio.to_thread(self.get_suggestion, buffer, document)
 
 
 # LLM: 菜单直接读取 Buffer.complete_state 这一份候选事实；禁止另建 selection store 或使用默认带背景/滚动条的 CompletionsMenu。
@@ -213,14 +220,16 @@ class TuiInputCompleter(Completer):
         self.plugin_client = plugin_client
         self.catalog_error = catalog_error
 
-    # LLM: prompt_toolkit 的异步补全在显式 Tab 才刷新目录，HTTP 离开事件线程；自动补全仅读缓存。
-    # 函数用途: 用户请求发现插件时更新声明，再沿同一个纯候选生成器补全。
+    # LLM: 显式 Tab 才刷新插件目录；HTTP、文件枚举和排序均离开事件线程。候选携带原目录版本，
+    # 过期 Document 的结果由原 Buffer 丢弃，不另建补全或提交状态源。
+    # 函数用途: 在后台生成同源候选，慢目录不阻塞键盘、光标或消息发送。
     async def get_completions_async(self, document: Document, complete_event: Any):
         if self.plugin_client is not None and complete_event.completion_requested and plugin_namespace(document.text_before_cursor) is not None:
             result = await asyncio.to_thread(self.plugin_client.refresh)
             if not result.get("ok") and self.catalog_error is not None:
                 self.catalog_error(str(result["message"]))
-        for item in self.get_completions(document, complete_event):
+        candidates = await asyncio.to_thread(lambda: list(self.get_completions(document, complete_event)))
+        for item in candidates:
             yield item
 
     # LLM: 插件参数先走公共词法，完整命令不自动追加可选旗标；显式 Tab 可继续发现候选，不执行或扩大授权。

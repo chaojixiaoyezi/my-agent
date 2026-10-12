@@ -203,7 +203,7 @@ class AnthropicCompatibleBackend(HttpBackend):
             )
         )
 
-    # LLM: Messages 的强制工具仅是不可执行的 schema 信封；保留既有两次请求预算，需同步结构化摘要测试。
+    # LLM: 强制工具仅是不可执行的 schema 信封；请求级 system/期限/输出预算须沿原传输，不改后端共享配置，同步辅助路由与摘要测试。
     # 函数用途: 请求一个符合 schema 的结构化结果，校验唯一信封并转为 JSON 正文。
     def generate_structured(
         self,
@@ -211,9 +211,11 @@ class AnthropicCompatibleBackend(HttpBackend):
         *,
         response_schema: dict[str, Any],
         messages: list[dict[str, Any]] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Force one non-executable tool block as the provider-native JSON envelope."""
 
+        options = request_options or ProviderRequestOptions()
         tool_name = "my_agent_structured_output"
         structured_prompt = (
             "MANDATORY OUTPUT CONTRACT: Call the provided my_agent_structured_output tool "
@@ -242,6 +244,10 @@ class AnthropicCompatibleBackend(HttpBackend):
                     messages=messages,
                     stream_response=False,
                     temperature=0.0,
+                    system_instruction=options.system_instruction,
+                    max_output_tokens=options.max_output_tokens,
+                    first_event_timeout_seconds=options.first_event_timeout_seconds,
+                    total_deadline_seconds=options.total_deadline_seconds,
                     # LLM: 强制工具信封不需要推理；部分兼容端点(如 工具运行时 zen)在思考模式下拒绝强制 tool_choice，
                     # 显式关闭 thinking 可同时满足该约束并节省结构化调用的延迟与 token。
                     thinking_disabled=True,

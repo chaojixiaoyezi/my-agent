@@ -1,6 +1,6 @@
+# LLM: 持久计划经当前 owner 的原 repository 与可信 thread 归属提交；新 IM 隔离线程，TUI 沿原线程，状态只读原回执。
+# 模块用途: 向模型提供统一的计划登记、管理和触发工具，不用草稿或回复文案充当计划事实。
 from __future__ import annotations
-
-"""Single action-oriented owner scheduler tool."""
 
 import json
 import time
@@ -32,12 +32,16 @@ if TYPE_CHECKING:
 _MUTATING_EXISTING_ACTIONS = frozenset({"update", "pause", "resume", "delete"})
 
 
+# LLM: 参数声明同时解释 create/立即运行的不同副作用及来源隔离；不根据模型文案认定计划已创建，必须读原 repository 回执。
+# 函数用途: 给模型完整的持久计划操作合同，避免只写计划草稿或把登记误认为马上执行。
 def build_schedule_tool_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="schedule",
         description=(
-            "管理当前用户自己的持久定时任务或提醒。任务到点后会回到创建它的同一会话继续执行，"
+            "管理当前用户自己的持久定时任务或提醒。IM 创建的任务在独立后台会话执行并通知原布置者，TUI 创建沿原会话执行，"
             "网关重启后仍会恢复；支持一次、固定间隔和五段 cron。"
+            "create 只登记未来计划，不会立即运行正文；run_now 才是立即触发。用户要求建好定时计划但不现在执行时，"
+            "应创建计划，不需要再索要一次确认，也不能只用 task_progress 保存计划草稿冒充定时计划。"
         ),
         input_schema={
             "type": "object",
@@ -61,7 +65,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "job_id": {"type": "string", "description": "除 create/list/status 外，使用 list/get 返回的精确 job_id。"},
                 "expected_version": {"type": "integer", "minimum": 1, "description": "更新现有任务时使用 get/list 返回的 version。"},
                 "name": {"type": "string", "description": "create 必填的简短名称；update 可选。"},
-                "prompt": {"type": "string", "description": "到点后在同一会话继续执行的完整用户要求。"},
+                "prompt": {"type": "string", "description": "到点后执行的完整用户要求，执行与通知身份由宿主固定。"},
                 "schedule_kind": {"type": "string", "enum": ["at", "every", "cron"], "description": "计划类型。"},
                 "at": {
                 "type": "string",
@@ -257,6 +261,8 @@ class ScheduleTool(BaseTool):
             )
         return _success(action, {"job": _job_projection(job, include_prompt=True)})
 
+    # LLM: 创建只从可信源 thread 的通道绑定决定隔离，宿主操作键固定身份；job 保存源/执行引用，不接受模型路由参数。
+    # 函数用途: 保存持久计划，IM 创建独立后台线程，TUI 和旧计划保持原行为。
     def _create(self, repository, params: dict[str, object]) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
@@ -273,6 +279,11 @@ class ScheduleTool(BaseTool):
             return skill_refs
         current = time.time()
         schedule = _schedule_from_params(self.agent, params, now=current)
+        source_thread_id = thread_id
+        source_request_id = _source_request_id(self.agent, params)
+        from .execution_policy import schedule_execution_thread
+
+        thread_id = schedule_execution_thread(self.agent, thread_id, source_request_id)
         job, deduped = repository.create_job(
             SchedulerJobCreateRequest(
                 name=name,
@@ -282,7 +293,8 @@ class ScheduleTool(BaseTool):
                 schedule=schedule,
                 misfire_grace_seconds=_optional_int(params.get("misfire_grace_seconds")),
                 skill_refs=skill_refs,
-                source_request_id=_source_request_id(self.agent, params),
+                source_request_id=source_request_id,
+                source_thread_id=source_thread_id,
                 now=current,
             )
         )
@@ -460,6 +472,7 @@ def _job_projection(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "job_id": job["job_id"],
+        "execution_mode": "background" if job.get("source_thread_id", job["thread_id"]) != job["thread_id"] else "current",
         "name": job["name"],
         "status": job["status"],
         "schedule": job["schedule"],

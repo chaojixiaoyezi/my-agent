@@ -41,8 +41,9 @@ def _authorized_references(task: object, snapshot: object) -> list[dict[str, str
 def prepare_subagent_entry_initialization(agent: object, prepared: object):
     initialization = None
     task = prepared.task
-    if (subagent_entries_enabled(agent) and getattr(agent.config, "enable_tools", False)
-            and getattr(agent.config, "enable_plugins", False) and "skill_search" in task.allowed_tools):
+    from .package_provider import package_usage_enabled
+
+    if subagent_entries_enabled(agent) and package_usage_enabled(agent) and "skill_search" in task.allowed_tools:
         try:
             if _authorized_references(task, agent.current_skill_snapshot()):
                 initialization = SubagentEntryInitialization(task.id, task.agent_thread_id)
@@ -94,8 +95,9 @@ def prepare_subagent_package_entries(agent: object, params: object) -> None:
 def _prepare_entries(agent: object, params: object, task: object, authority: SubagentEntryAuthority):
     from ..agent_core.model.call_runtime import max_output_tokens
     from ..agent_core.model.context_window import resolve_model_context_window_tokens
+    from .package_provider import package_usage_enabled
 
-    if not (getattr(agent.config, "enable_tools", False) and getattr(agent.config, "enable_plugins", False)):
+    if not package_usage_enabled(agent):
         return None
     tools = params.tool_runtime_snapshot
     runtime = tools.runtime("skill_search") if tools is not None else None

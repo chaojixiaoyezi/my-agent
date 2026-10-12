@@ -42,6 +42,20 @@ from agent_py_agent.agent.contracts.required_actions import (
 _UNKNOWN_CODE = "TOOL_OPERATION_OUTCOME_UNKNOWN"
 
 
+def test_unknown_effect_closes_as_blocked_instead_of_resumable_interruption():
+    from agent_py_agent.agent.agent_core.tool_loop.closeout import generate_tool_loop_closeout
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.turn_end import result_turn_end_reason, subagent_outcome_for_turn_end
+
+    _, result = generate_tool_loop_closeout(
+        build_prompt=lambda: "真实工具结果待核对", generate_response=lambda _: ModelResponse("请核对已有结果。", "fake"),
+        prepare_handoff_response=lambda response: response, read_runtime_reason=lambda: _UNKNOWN_CODE,
+    )
+    assert result.runtime_status == "blocked"
+    assert result_turn_end_reason(result) == "blocked"
+    assert subagent_outcome_for_turn_end(result_turn_end_reason(result))[0] == "BLOCKED"
+
+
 def _result(
     effect_outcome: str,
     reported_error_code: str = "",

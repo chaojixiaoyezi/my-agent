@@ -257,7 +257,7 @@ def _update_response_from_result(response: dict, result, request: dict) -> None:
 
 
 # LLM: 续跑回合（gateway_request_is_active_turn_recovery，只认 recovery 写下的结构化标记）在最终结果 channel_delivery.host_notices
-#   的最前面补一条提示，IM 把它渲染在回复正文前（I4：用户看得出来这一轮被打断过、已自动续跑）。TUI 已在续跑边界（turn_resumed 事件）
+#   的最前面补一条提示，IM 把它渲染在回复正文前（I4：用户看得出来这一轮被打断过、进入过恢复流程）。TUI 已在续跑边界（turn_resumed 事件）
 #   显示同一句话，且不读 channel_delivery，不会重复。文案按 cause 查 conversation.turn_resume_notice 的共用表。
 # 函数用途: 给重启后续跑完成的回合生成一条给 IM 看的宿主提示；不是续跑回合返回 None。
 def _turn_resumed_host_notice(request: dict, request_id: str) -> HostNotice | None:
@@ -442,6 +442,11 @@ def _execute_gateway_conversation_turn(
         raise ConversationPersistenceError("当前消息无法可靠写入会话记录，请稍后重试")
     reset_goal_progress_fuse(getattr(context.agent, "conversation_store", None), conversation.thread_id)
     notices = _publish_gateway_host_notices(context, conversation)
+    from .im_task_routing import prepare_im_task_dispatch
+
+    dispatched = prepare_im_task_dispatch(context, conversation, prompt)
+    if dispatched is not None:
+        context.request["host_im_task_ack"] = {"task_id": dispatched.task_id, "status": dispatched.status}
     result, conversation = _run_gateway_turn_with_conversation_compact(
         context,
         prompt,
@@ -857,6 +862,8 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     context = inputs.context
     conversation = inputs.conversation
     attrs = _gateway_run_task_attributes(conversation, request, context.request_id)
+    if isinstance(request.get("host_im_task_ack"), dict):
+        attrs = {**(attrs or {}), "host_im_task_ack": dict(request["host_im_task_ack"])}
     if request.get("input_media"):
         from ..conversation.input_media import input_media_root, validate_input_media
 
@@ -884,6 +891,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
             attrs = {**(attrs or {}), "conversation_task_id": task_id}
     return RunParams(
         inject=request_prompt.gateway_injections(request, conversation),
+        allowed_tools=[] if request.get("host_im_task_ack") else None,
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,

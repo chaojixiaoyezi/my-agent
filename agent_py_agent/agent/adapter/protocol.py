@@ -43,6 +43,8 @@ class OutgoingMessage:
 FEISHU_MESSAGE_TYPES = {"text", "post", "image", "audio", "video", "file", "sticker", "share_chat", "system"}
 
 
+# LLM: webhook 的 message_type 与既有 WS msg_type 归入同一内容解析；这里只转换事实，不授予角色或决定群聊触发。
+# 函数用途: 转换飞书文本和媒体消息，保留原 chat/topic 路由供下游核验。
 def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
     try:
         event = payload.get("event", {})
@@ -51,7 +53,8 @@ def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
         sender_id = sender.get("sender_id", {})
         open_id = sender_id.get("open_id", "")
 
-        msg_type = message.get("msg_type", "text")
+        # webhook 使用 message_type，既有 WS 归一使用 msg_type；两条入口共用同一内容解析。
+        msg_type = message.get("message_type") or message.get("msg_type") or "text"
         # 按类型抽文本+媒体引用(text/post/image/file/audio/...);未知给占位、绝不丢消息
         text, media = extract_feishu_content(msg_type, message.get("content"))
         if not text.strip():

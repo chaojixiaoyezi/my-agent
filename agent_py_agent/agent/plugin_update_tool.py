@@ -71,6 +71,7 @@ class PluginUpdateTool(BaseTool):
         try:
             result = self.store.update_package(PluginUpdateRequest(
                 plugin_id, package, self.operation_id, previous.revision if previous is not None else 0,
+                installation_scope=previous.installation_scope if previous is not None else "private",
             ))
         except PluginInstallationError as exc:
             report.update(reason=exc.reason, commit_state=exc.commit_state, receipt=asdict(exc.receipt) if exc.receipt else None)

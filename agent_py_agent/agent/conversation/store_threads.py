@@ -387,8 +387,8 @@ class ThreadStore:
         now: float | None = None,
     ) -> ConversationThread:
         normalized = str(level or "off").strip().lower()
-        if normalized not in {"off", "on", "full"}:
-            raise ValueError("verbose level must be one of: off, on, full")
+        if normalized not in {"off", "on", "full", "stream"}:
+            raise ValueError("verbose level must be one of: off, on, full, stream")
         current = now if now is not None else time.time()
         return self.update_atomic(
             thread_id,

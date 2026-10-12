@@ -498,6 +498,7 @@ def test_failure_effect_outcome_three_state_classification():
     from agent_py_agent.agent.tooling.shell import ShellTool
 
     classify = ShellTool._failure_effect_outcome
+    assert classify("任何命令", False, "SANDBOX_UNAVAILABLE", process_facts={"status": "not_started"}) == "not_started"
     # 没有退出事实时不从命令字符串猜测执行效果。
     assert classify("grep foo bar.txt", False, "COMMAND_FAILED") == ""
     # 写命令(重定向)失败但无退出码证据 → 不声明 → 保守 unknown

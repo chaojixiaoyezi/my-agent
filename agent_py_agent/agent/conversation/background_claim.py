@@ -15,14 +15,15 @@ from ..backends.errors import (
 )
 from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..settings.thread_model_selection import is_model_configuration_unavailable
-from .background_execution import BackgroundCompactSliceYield
+from .background_execution import BackgroundCapacityDeferred, BackgroundCompactSliceYield
+from .claim_execution_binding import ClaimExecutionBinding, bind_claim_execution
 from .compact_guard import is_provider_quota_failure
 from .control_commands import (
     conversation_request_interrupt_name,
     session_task_interrupt_name,
 )
 from .models import BackgroundMainAgentReport
-from .run_claim import ConversationRunClaimHeartbeat
+from .run_claim import ConversationRunClaimHeartbeat, conversation_claim_interrupt_name
 from .store_io import now
 from .wake_poison import (
     WAKE_CLAIM_CANCELLED,
@@ -63,6 +64,7 @@ class BackgroundClaimAttempt(Protocol):
 # LLM: 状态、任务归属和来源查询在原分支调用；来源只读查询不能消费信封，claims 为唯一持久域。
 #   attempt 是可选的尝试观察者（唤醒车道传入，观察、策略车道为 None，行为逐字不变）。
 #   close_out_source 是可选的领域收尾：来源已处理完/已放弃时在 retire_source 之前调用（收尾失败不能拦住结案，实现方不抛异常）。
+#   bound_delivery_turn 只读取 canonical 委派任务引用，供每片停止与接单身份共用，不新增状态账。
 # 类用途: 列明一片后台执行需要的能力，不缓存准入结论、不暴露模型权限或其它存储领域。
 @dataclass(frozen=True)
 class BackgroundClaimDependencies:
@@ -80,6 +82,7 @@ class BackgroundClaimDependencies:
     heartbeat_interval_seconds: float
     attempt: BackgroundClaimAttempt | None = None
     close_out_source: Callable[[dict, str], None] | None = None
+    bound_delivery_turn: Callable[[str], str] | None = None
 
 
 # LLM: 子代理归属必须来自调用方的 canonical 查询；此回执不调用主模型，也不替孩子续跑。
@@ -99,10 +102,12 @@ def _subagent_owned_report(kwargs: dict) -> BackgroundMainAgentReport:
     )
 
 
-# LLM: 绑定回合号只从唤醒信封 metadata 里的结构化字段读（派活工具写入的会话任务 id），
+# LLM: 绑定回合号先取本片已校验的 canonical 委派引用，其余从唤醒信封 metadata 里的结构化字段读，
 #   读不到就返回空串——此时**不注册专用名**（fail closed），不猜、不回退 task_id。
 # 函数用途: 给出这一片宿主投递唤醒已绑定的会话任务/回合号；没有绑定时返回空串。
 def _host_delivery_bound_turn(kwargs: dict) -> str:
+    if kwargs.get("host_session_task_id"):
+        return str(kwargs["host_session_task_id"])
     signal = kwargs.get("wake_signal")
     metadata = getattr(signal, "metadata", None)
     if not isinstance(metadata, dict):
@@ -119,6 +124,10 @@ def run_claimed(
     kwargs: dict,
 ) -> BackgroundMainAgentReport | None:
     task_id = str(kwargs.get("task_id") or "").strip()
+    if dependencies.bound_delivery_turn is not None:
+        bound = dependencies.bound_delivery_turn(str(kwargs.get("thread_id") or ""))
+        if bound:
+            kwargs = {**kwargs, "host_session_task_id": bound}
     # LLM: 宿主投递类唤醒（另一会话的派活/消息）的 task_id 为空，原逻辑会退化成 nullcontext()——
     #   这一轮**根本没注册可中断名**，取消永远停不下来（场景 5）。改成用**认领时已写下的会话任务绑定**
     #   （唤醒信封 metadata.session_task_id）作为专用可中断名 `session-task-turn:`，与前台
@@ -193,8 +202,8 @@ def run_claimed(
         )
 
 
-# LLM: 调用者持有本片中断登记；异常类别及 stop→facts→finish→普通失败账顺序保持，None/假值正常结算。
-# 函数用途: 运行已经领取的后台工作片，持续续租，退出后保存真实结果；不把取消或压缩让出写成失败。
+# LLM: 领取后登记唯一 claim 中断名，旧控制不能打到同任务的新片；保留外层旧任务名与 stop→facts→finish 顺序。
+# 函数用途: 运行后台工作片，按准确租约接受中断、续租和保存结果，不把取消或压缩让出写成失败。
 def run_with_heartbeat(
     dependencies: BackgroundClaimDependencies,
     claim_id: str,
@@ -211,10 +220,15 @@ def run_with_heartbeat(
     status = "finished"
     attempt_status = WAKE_CLAIM_FINISHED
     error: BaseException | None = None
+    admission = ""
     try:
-        if is_interrupted():
-            raise InterruptedError("后台工作片已被中断")
-        return _run_once_with_bound_turn_check(dependencies, kwargs)
+        with (
+            register_interruptible(conversation_claim_interrupt_name(claim_id)),
+            bind_claim_execution(ClaimExecutionBinding(dependencies.claims, kwargs["thread_id"], claim_id, claim_scope_id)),
+        ):
+            if is_interrupted():
+                raise InterruptedError("后台工作片已被中断")
+            return _run_once_with_bound_turn_check(dependencies, kwargs)
     except InterruptedError:
         # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。
         status, attempt_status = "cancelled", WAKE_CLAIM_CANCELLED
@@ -223,13 +237,16 @@ def run_with_heartbeat(
         # 本片让出不消费原 wake/observation/policy，下片沿 canonical checkpoint 继续。
         attempt_status = WAKE_CLAIM_YIELDED
         return None
+    except BackgroundCapacityDeferred:
+        attempt_status, admission = WAKE_CLAIM_NOT_EXECUTED, "im_subagent_capacity"
+        return None
     except BaseException as exc:
         status = "failed"
         error = exc
         raise
     finally:
         heartbeat.stop()
-        _finish_slice(dependencies, kwargs, (claim_id, claim_scope_id), _SliceEnd(status, attempt_status, error))
+        _finish_slice(dependencies, kwargs, (claim_id, claim_scope_id), _SliceEnd(status, attempt_status, error, admission))
 
 
 # LLM: 只在准入码属于 _SOURCE_FINISHED_ADMISSIONS 时调用 retire_source（与 terminal_task_link 同一条结案路径，不另起 mark_handled）；
@@ -334,13 +351,14 @@ def _notify_attempt(dependencies: BackgroundClaimDependencies, status: str, admi
         dependencies.attempt.settled(status, admission)
 
 
-# LLM: run_with_heartbeat 结束时的结算事实：claim 的持久状态（finished/cancelled/failed）、交给尝试观察者的结束方式、失败时的异常。
+# LLM: 只携带原 claim 结算及准入码；容量不执行单独让出退避，不计业务失败，异常保持原样。
 # 类用途: 一片后台工作结束时要结算的结构化结果。
 @dataclass(frozen=True)
 class _SliceEnd:
     status: str
     attempt_status: str
     error: BaseException | None = None
+    admission: str = ""
 
 
 # LLM: 结算顺序保持：先写 claim 结果（唯一持久结算），普通失败再计入策略失败账，非异常结束（完成/取消/让出）才回调尝试观察者；
@@ -365,7 +383,7 @@ def _finish_slice(
     if end.status == "failed" and end.error is not None and _counts_as_policy_failure(end.error):
         dependencies.record_policy_failure(kwargs)
     if end.status != "failed":
-        _notify_attempt(dependencies, end.attempt_status, "")
+        _notify_attempt(dependencies, end.attempt_status, end.admission)
 
 
 # LLM: 持久策略失败账只记这条工作本身的问题。不记：供应瞬时（供应退避接管）、模型配置暂缺（等配置）、环境级故障

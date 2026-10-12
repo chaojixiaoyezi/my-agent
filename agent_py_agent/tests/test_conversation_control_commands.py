@@ -215,7 +215,8 @@ def test_render_status_has_runtime_facts_without_guidance_history() -> None:
     assert "状态：运行中" in rendered
     assert "已运行：2分5秒" in rendered
     assert "子代理 2（运行 1，完成 1，异常 0）" in rendered
-    assert "上下文：已压缩 2 次" in rendered
+    assert "压缩次数：2" in rendered
+    assert "当前占用未知" in rendered
     assert "引导" not in rendered
 
 

@@ -319,7 +319,7 @@ class PluginManagement:
         if parsed.action.kind != "tool" or not parsed.action.available:
             return static
         name = plugin_tool_name(parsed.plugin.plugin_id, parsed.action.target)
-        if not self.context.business_allowed or name in self.context.disabled_tools:
+        if not self.context.is_admin or not self.context.business_allowed or name in self.context.disabled_tools:
             return {"ok": False, "state": "rejected", "error_code": "TOOL_DISABLED"}
         entry = next(row for row in entries if row.manifest.plugin_id == parsed.plugin.plugin_id)
         problem = self._business_sandbox_problem(entry)

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 
+from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import runtime_error_report
 
 _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
@@ -257,7 +258,7 @@ def _adjust_user_input_turns(key: str, delta: int) -> None:
             _USER_INPUT_TURNS.pop(key, None)
 
 
-# LLM: Ordinary lanes finish in finally. Gateway's write-ahead recovery binding makes terminal
+# LLM: 每次 claim 注册唯一中断名，只能打到这一片，不能沿稳定 task ID 误中下一片。Ordinary lanes finish in finally. Gateway's write-ahead recovery binding makes terminal
 # commit responsible for releasing pinned lanes, including the crash gap after returning a result.
 # 函数用途: 保持心跳直到本轮退出；恢复专属车道由请求终态释放，避免返回结果后被抢先续跑。
 @contextmanager
@@ -277,7 +278,8 @@ def _held_conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator
     status = "finished"
     error: BaseException | None = None
     try:
-        yield claim
+        with register_interruptible(conversation_claim_interrupt_name(claim_id)):
+            yield claim
     except BaseException as exc:
         status = "cancelled" if isinstance(exc, InterruptedError) else "failed"
         error = exc
@@ -297,11 +299,18 @@ def _held_conversation_run_lane(request: ConversationRunLaneRequest) -> Iterator
             )
 
 
+# LLM: claim_id 由原执行车道生成；名字仅用于进程内中断注册，不创造第二份执行状态。
+# 函数用途: 让控制命令精确中断一次车道占用，旧消息不能命中新取得的车道。
+def conversation_claim_interrupt_name(claim_id: str) -> str:
+    return f"conversation-claim:{claim_id}"
+
+
 __all__ = [
     "ConversationRunClaimHeartbeat",
     "ConversationRunLaneRequest",
     "claim_heartbeat_interval_seconds",
     "conversation_run_lane",
+    "conversation_claim_interrupt_name",
     "detached_task_claim_scope_id",
     "user_input_turn_gate",
     "user_input_turn_on_lane",

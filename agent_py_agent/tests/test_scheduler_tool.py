@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotEntry
+from agent_py_agent.agent.conversation.models import ConversationThread
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.scheduler.repository import SchedulerRepository
 from agent_py_agent.agent.scheduler.tool import (
     ScheduleTool,
@@ -25,6 +27,8 @@ class _Snapshot:
 
 
 def _agent(tmp_path, *, with_thread: bool = True):
+    store = ConversationStore(tmp_path / "conversation")
+    store.threads.write(ConversationThread(thread_id="thread-1", canonical_user_id="user-1"))
     repository = SchedulerRepository(
         tmp_path / "scheduler",
         owner_provider="feishu",
@@ -46,7 +50,7 @@ def _agent(tmp_path, *, with_thread: bool = True):
             task_attributes=attrs,
         ),
         current_skill_snapshot=lambda: _Snapshot(),
-        conversation_store=None,
+        conversation_store=store,
     )
 
 

@@ -2,7 +2,7 @@
 
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
-# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；owner 权限纯裁决与冷管理入口共用。
+# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；源码和无源码发行共用工作区裁决。
 
 from __future__ import annotations
 
@@ -613,6 +613,10 @@ class SimpleAgent(
     # LLM: 与插件工具注册同一 owner 解析与同一开关（enable_plugins 且 enable_tools）；只读安装表，不启动插件进程。
     # 函数用途: 给 Skill 目录提供本 owner 已启用插件自带的 Skill 目录，插件关闭时返回空。
     def _plugin_skill_roots(self):
+        from .user_space.owner_resolver import OwnerIdentity
+
+        if owner_identity_from_config(self.config) != OwnerIdentity.local_main():
+            return ()
         config = self.config
         if not (getattr(config, "enable_plugins", False) and getattr(config, "enable_tools", False)):
             return ()
@@ -620,15 +624,23 @@ class SimpleAgent(
 
         return enabled_plugin_skill_roots(resolve_owner_home(self.home_paths.root, owner_identity_from_config(config)))
 
-    # LLM: 与插件工具共用原 enable_plugins/enable_tools 边界及可信 owner；提供元数据不启动进程或注册内部 Skill。
-    # 函数用途: 为当前 owner 的逐轮快照装配已启用能力包，关闭任一总闸时返回空。
+    # LLM: 普通插件与私有包仍守管理员/插件边界；公共内容包按独立发布许可读取，消费用户的工具/权限/额度不改变。
+    # 函数用途: 合并管理员私有与已发布公共包的元数据，普通用户只得到公共内容，不启动插件进程。
     def _capability_packages(self):
-        if not (self.config.enable_plugins and self.config.enable_tools):
+        if not self.config.enable_tools:
             return ()
-        from .capability.package_provider import enabled_capability_packages
+        from .capability.config import CapabilityConfig
+        from .capability.package_provider import (
+            enabled_capability_packages,
+            enabled_public_capability_packages,
+        )
+        from .capability.runtime_config_reload import capability_config_for_agent
 
         owner = resolve_owner_home(self.home_paths.root, owner_identity_from_config(self.config))
-        return enabled_capability_packages(owner)
+        private = enabled_capability_packages(owner) if self.config.enable_plugins else ()
+        config = capability_config_for_agent(self) or CapabilityConfig()
+        public = enabled_public_capability_packages(owner) if config.public_capability_packages_enabled else ()
+        return (*private, *public)
 
     # LLM: 活动轮优先使用已冻结的权限视图；无活动轮时按当前可信运行范围构造，不把包私有资源放入公开 Skill。
     # 函数用途: 供检索、派工及授权读取当前轮的公开方法与能力包快照。
@@ -980,11 +992,13 @@ def _owner_scoped_workspace_override(
     return owner_home, [owner_home]
 
 
-# LLM: Prompt, filesystem tools and process tools must consume this one normalized workspace view.
+# LLM: Prompt, filesystem tools and process tools consume this normalized workspace view;
+# package entry recognition accepts source or intentional sourceless distribution bytecode.
 # 函数用途: 返回当前代理唯一有效的主工作区和根列表。
 def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple[Path, list[Path]]:
     """返回 prompt、文件工具和 shell 共用的唯一有效工作区。"""
-    workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
+    package_entry = any((agent.root / name).is_file() for name in ("__main__.py", "__main__.pyc"))
+    workspace_root = agent.root.parent if package_entry else agent.root
     workspace_roots = [
         workspace_root,
         *[root for root in agent.workspace_roots if root != agent.root],

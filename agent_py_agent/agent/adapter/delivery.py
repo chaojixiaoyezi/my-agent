@@ -19,7 +19,7 @@ from pathlib import Path
 from ..common.json_io import locked_json_path
 
 _LOGGER = logging.getLogger(__name__)
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 # 已外发回执正文保留 7 天：足够排查与重放，又不长期占用会话存储。
 _SENT_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 # 认领一次外部投递的默认租约 120 秒；已开始外发时还必须核验旧执行者，过期不等于死亡。
@@ -125,7 +125,7 @@ def _dispatch_marker(record: PendingGatewayReply, text: str, message: tuple[str,
         "message_sequence": sequence, "next_cursor": next_cursor,
         "message_key": _gateway_delivery_key(
             message_id=record.message_id, request_id=record.stable_id,
-            phase=phase, progress_cursor=record.progress_cursor,
+            phase=phase, progress_cursor=(0 if record.progress_draft.get("mode") == "stream" and not record.progress_draft.get("message_id") else record.progress_cursor),
         ),
         "payload_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "started_at": record.dispatch.get("started_at", time.time()),
@@ -242,6 +242,7 @@ class PendingGatewayReply:
     channel_chat_id: str = ""
     progress_handle: str = ""
     progress_cursor: int = 0
+    progress_draft: dict[str, object] = field(default_factory=dict)
     created_at: float = 0.0
     delivery_attempts: int = 0
     next_delivery_at: float = 0.0
@@ -290,7 +291,7 @@ class PendingGatewayReply:
         object.__setattr__(self, "claim_expires_at", claim_expires_at)
         object.__setattr__(self, "dispatch", _validated_dispatch(self.dispatch, claim_epoch))
 
-    # LLM: schema 7 仅在原记录增加 dispatch；不迁移路径，不保存正文或新的平行回执。
+    # LLM: schema 8 沿原记录保存单条流式进度 ID/有界草稿；旧 schema 7 无草稿时保持原逐条投递，不迁移路径或另建回执。
     # 函数用途: 把当前路由、租约和外发标记一起序列化。
     def to_dict(self) -> dict[str, object]:
         return {"schema_version": _SCHEMA_VERSION, **asdict(self)}
@@ -322,6 +323,7 @@ class PendingGatewayReply:
             receipt_id=str(data.get("receipt_id") or "").strip(),
             control_kind=str(data.get("control_kind") or "").strip().lower(),
             progress_cursor=max(0, int(data.get("progress_cursor") or 0)),
+            progress_draft=dict(data.get("progress_draft") or {}),
             created_at=float(data.get("created_at") or 0.0),
             delivery_attempts=max(0, int(data.get("delivery_attempts") or 0)),
             next_delivery_at=max(0.0, float(data.get("next_delivery_at") or 0.0)),
@@ -1140,6 +1142,11 @@ class _GatewayReplyDispatchWorkerMixin:
             return self.store.commit_claim(record, updated, owner=self._claim_owner, epoch=record.claim_epoch, release=False), 0
         if marker.get("retry_reason") == "not_started" or _provider_replay_allowed(adapter, marker):
             return record, 0
+        if marker["message_sequence"].startswith("progress:") and record.progress_draft.get("mode") == "stream":
+            return self.store.commit_claim(record, replace(record,
+                progress_cursor=int(marker["next_cursor"]), dispatch={},
+                progress_draft={**record.progress_draft, "disabled": True, "error_code": "CHANNEL_PROGRESS_UNKNOWN"}),
+                owner=self._claim_owner, epoch=record.claim_epoch, release=False), 0
         self._terminalize_without_reply(record, disposition="unknown", reason="channel_dispatch_unverifiable")
         return None, 0
 
@@ -1188,7 +1195,21 @@ class _GatewayReplyDispatchWorkerMixin:
         if started is None:
             return None, False
         try:
-            return started, bool(self._dispatch_callback(message[0])(started, text))
+            result = self._dispatch_callback(message[0])(started, text)
+            from ..delivery.progress import ProgressDeliveryReceipt
+
+            if isinstance(result, ProgressDeliveryReceipt):
+                updated = replace(started, progress_draft={**started.progress_draft,
+                    "message_id": result.message_id, "disabled": not result.ok,
+                    "error_code": result.error_code, "sent_at": time.time()})
+                try:
+                    committed = self.store.commit_claim(started, updated, owner=self._claim_owner, epoch=started.claim_epoch, release=False)
+                except OSError:
+                    committed = self.store.commit_claim(started, updated, owner=self._claim_owner, epoch=started.claim_epoch, release=False)
+                if committed is None:
+                    return None, bool(result)
+                started = committed
+            return started, bool(result)
         except Exception as exc:
             _LOGGER.warning("gateway reply dispatch failed request_id=%s error=%s", record.request_id, exc)
             return started, False
@@ -1391,7 +1412,14 @@ class GatewayReplyDeliveryWorker(
         if record.dispatch.get("message_sequence") == "final":
             return record
         try:
-            messages, next_cursor = self._poll_progress(record)
+            batch = self._poll_progress(record)
+            from .progress_draft import GatewayProgressBatch, deliver_stream_progress
+
+            if (isinstance(batch, GatewayProgressBatch) and batch.mode == "stream") or record.progress_draft.get("mode") == "stream":
+                if not isinstance(batch, GatewayProgressBatch):
+                    batch = GatewayProgressBatch(tuple(batch[0]), batch[1], "stream")
+                return deliver_stream_progress(self, record, batch)
+            messages, next_cursor = batch
         except GatewayReplyQuarantineError:
             raise
         except Exception as exc:

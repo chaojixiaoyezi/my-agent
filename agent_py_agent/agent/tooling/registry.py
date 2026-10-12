@@ -751,7 +751,7 @@ class ToolRegistry:
         )
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
-    # cwd/root set. 审批模式沿 owner 唯一策略，读失败不放行；事件身份与 B5 提供方只取宿主字段，来源保持默认 model。
+    # cwd/root set. 审批模式沿 owner 唯一策略，读失败不放行；调用来源只能由宿主参数指定，不能从模型参数提权。
     # 函数用途: 在本轮统一工作目录和授权根下执行工具，并返回可审计的标准执行结果。
     def execute_tool(
         self,
@@ -796,6 +796,7 @@ class ToolRegistry:
                 output_archiver=output_archiver,
                 event_context=_host_event_context(trusted_run_context),
                 plugin_gate_reviewer=self.plugin_gate_reviewer,
+                call_origin=(trusted_run_context or {}).get("call_origin", "model"),
             )
         )
 

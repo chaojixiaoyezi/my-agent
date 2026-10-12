@@ -191,12 +191,15 @@ class BaseBackend:
 
     # LLM: 基础后端不声明原生 schema 能力；保留 generate 的最小合同，具体协议负责覆盖与校验。
     # 函数用途: 为本地或自定义后端沿普通生成入口返回结果；实际调用可能由子类发起网络请求。
+    # LLM: 默认结构化能力沿本后端普通接口；有请求级选项必须真实支持并转交，不能静默丢 system/期限或授予工具执行权。
+    # 函数用途: 保留没有原生 schema 后端的既有生成入口，转交宿主请求控制；输出仍由调用者严格校验。
     def generate_structured(
         self,
         prompt: str,
         *,
         response_schema: dict[str, Any],
         messages: list[dict[str, Any]] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Generate a JSON-shaped response, with prompt-only fallback by default.
 
@@ -206,6 +209,10 @@ class BaseBackend:
         """
 
         del response_schema
+        if request_options is not None:
+            if not self.supports_provider_request_options:
+                raise TypeError("backend does not support provider request options")
+            return self.generate(prompt, messages=messages, request_options=request_options)
         return self.generate(prompt, messages=messages)
 
     # LLM: 基础合同不假装提供 JSON 输出保证；HTTP 子类负责请求级输出限制，需检查摘要调用方。

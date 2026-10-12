@@ -37,7 +37,7 @@ from ...agent.gateway_parts.local_client_token import LocalClientCredentialError
 GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS = 30.0
 
 
-# LLM: UI 状态只作展示；local_run 为原 worker 的临时控制句柄，资源归属必须经其发布绑定和 DB 校验。
+# LLM: UI 状态只作展示；expected_execution 携回原 Gateway claim 供复核；local_run 的资源归属必须经其绑定和 DB 校验。
 # 类用途: 把一刻的消息状态和精确本地控制目标交给命令执行端。
 @dataclass(frozen=True)
 class ChatControlState:
@@ -48,6 +48,7 @@ class ChatControlState:
     session_id: str
     request_id: str = ""
     local_run: object | None = None
+    expected_execution: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,8 @@ def _execute_gateway_control(
         },
     }
     selected_control_target = str(target_control_message_id or "").strip()
+    if execution.state.expected_execution is not None:
+        payload["metadata"]["expected_execution"] = execution.state.expected_execution
     from .gateway_client import _gateway_submit_workspace
 
     workspace = _gateway_submit_workspace(
@@ -336,6 +339,10 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
         subagent_other_labels=_label_counts(value.get("subagent_other_labels")),
         model_name=str(value.get("model_name") or ""),
         compact_generation=compact_generation,
+        context_usage=_status_context_usage(value.get("context_usage")),
+        im_task_status=dict(value.get("im_task_status") or {}),
+        user_role=str(value.get("user_role") or ""),
+        permission_mode=str(value.get("permission_mode") or ""),
         verbose_level=str(value.get("verbose_level") or ""),
         durable_work=tuple(durable_work),
         quarantined_wakes=_nonnegative_int(value.get("quarantined_wakes")),
@@ -642,10 +649,16 @@ def _execute_local_verbose(
         )
 
 
-# LLM: Local /status renders only facts already held by the chat worker and configured model.
+# LLM: 本地 /status 与 Gateway 共用角色、权限和 canonical 本代上下文快照；不创建线程、写快照或调用模型。
 # 函数用途:生成本地直跑任务的即时状态快照。
 def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
+    from types import SimpleNamespace
+
+    from ...agent.gateway_parts.status_projection import status_display_facts
+
     state = execution.state
+    facts = status_display_facts(execution.agent, scope=SimpleNamespace(
+        channel="chat", conversation_id=state.session_id or "default", user_id="local-agent"))
     status = "running" if state.running else "queued" if state.queued_count else "idle"
     return ConversationTaskStatus(
         state=status,
@@ -660,6 +673,10 @@ def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
         model_name=str(
             getattr(getattr(execution.agent, "config", None), "model_name", "") or ""
         ),
+        context_usage=facts["context_usage"],
+        user_role=facts["user_role"],
+        permission_mode=facts["permission_mode"],
+        im_task_status=facts["im_task_status"],
     )
 
 
@@ -788,3 +805,11 @@ __all__ = [
     "execute_chat_control",
     "im_only_control_result",
 ]
+
+
+# LLM: 客户端只验证 Gateway 的公开数值快照，不根据显示正文重新计算上下文或角色。
+# 函数用途: 跨进程保留 /status 的上下文数字，坏数据仍按未知显示。
+def _status_context_usage(value: object) -> dict[str, object]:
+    from ...agent.conversation.context_usage import public_context_usage
+
+    return public_context_usage(value)

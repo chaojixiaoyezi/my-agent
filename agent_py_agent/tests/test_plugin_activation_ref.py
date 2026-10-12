@@ -87,7 +87,7 @@ def test_reference_refuses_malformed_or_renormalized_identity(tmp_path, change):
 def test_reference_does_not_create_missing_owner_or_accept_other_owner_home(tmp_path):
     owner = resolve_owner_home(tmp_path / "missing", OwnerIdentity.provider_user("test", "one"))
     ref = PluginActivationRef.from_owner(owner, "plugin", "a" * 64)
-    with pytest.raises(PluginInstallationError):
+    with pytest.raises(PermissionError):
         ref.require()
     assert not owner.root.exists()
     with pytest.raises(ValueError):

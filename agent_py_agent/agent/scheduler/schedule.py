@@ -9,10 +9,12 @@ runtime authority never depends on words in the scheduled prompt.
 """
 
 import calendar
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _UTC = timezone.utc
@@ -351,14 +353,33 @@ def _candidate_timestamps(candidate_date: date, fields: CronFields, zone: ZoneIn
     return sorted(timestamps)
 
 
+# LLM: 显式 IANA 配置是唯一优先来源；为空时复用宿主本地时区解析，调度与每日偏好不能各造一个零点。
+# 函数用途: 返回部署的规范时区名称，不改进程时区或用户设置。
 def _canonical_zone_name(value: str) -> str:
     return str(value or "").strip() or _local_zone_name()
 
 
+# LLM: datetime 的固定偏移通常没有 key，Linux/macOS 读系统时区事实；仅接受 ZoneInfo 可打开的名称，无可读来源才 UTC。
+# 函数用途: 确定服务器本地 IANA 时区，避免把非 UTC 服务器的每日零点算错。
 def _local_zone_name() -> str:
     local = datetime.now().astimezone().tzinfo
     key = str(getattr(local, "key", "") or "").strip()
-    return key or "UTC"
+    candidates = [str(os.environ.get("TZ", "")).removeprefix(":"), key]
+    try:
+        path = str(Path("/etc/localtime").resolve())
+        if "/zoneinfo/" in path:
+            candidates.append(path.split("/zoneinfo/", 1)[1])
+        candidates.append(Path("/etc/timezone").read_text().strip())
+    except OSError:
+        pass
+    for name in candidates:
+        if name:
+            try:
+                ZoneInfo(name)
+                return name
+            except (ValueError, ZoneInfoNotFoundError):
+                continue
+    return "UTC"
 
 
 @lru_cache(maxsize=128)

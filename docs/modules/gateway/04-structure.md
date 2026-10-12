@@ -1,5 +1,15 @@
 # Gateway Structure
 
+新增 `im_dispatch_policy.py`（受理快照）、`im_task_routing.py`（结构化选择与原任务派发）、`delegation_control.py`（显式当天命令）；执行策略存在原 ThreadStore，偏好存在 owner config/im_preferences.json，均不复制任务状态。`status_projection.py` 补后台任务与当天偏好。
+
+## 插话生命周期与精确结算
+
+input_delivery_service._reconcile_bound_input 复用 guidance 回执的目标类型/编号，按 Gateway T、guidance M、task 锁顺序复核后结算，再释放目标锁进入入口对账。GuidanceRecovery.settle_turn_locked 接收原 TurnEndSettlement 的可选精确 target；调用方须已持 guidance 回合锁。请求终态和持久任务终态分开，不新增第二份绑定账本。
+
+## 实际执行与原回执
+
+execution_target 只投影原 claim、原 request write-ahead 绑定和 task link；后台 core 经 claim_execution_binding CAS 发布 run/attempt，控制服务在 T→M→task→claim 原锁边界复核。notices 只返回身份字段，TUI job/活动卡只负责观察与显示。普通输入 outbox v3 用显式 sequence，控制回执摘要 v4 覆盖 expected_execution；旧版本走明确读取/迁移。后台异常仅释放已退出精确 attempt 的 reserved，不重放 submitted 未知。
+
 ## 空回复只读诊断（wsempty4，2026-10-09）
 
 - Responses最终payload/原始output→request-local模型诊断→原工具循环计数→AgentRunResult；原request_history抛错点读取canonical compact_updated_at，缺证据None。

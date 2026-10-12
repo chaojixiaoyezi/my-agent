@@ -75,6 +75,13 @@ tar -tzf my-agent-clean.tar.gz | grep -E '(^|/)\._|\.DS_Store|__pycache__|\.pyc|
 
 ## 常见问题
 
+### 有意编译的私有离线发行
+
+`my-agent.private-release.v1` 是显式的无源码运行时格式，允许 `release.json` 逐文件登记的业务 `.pyc`；
+这些是构建产物，不是从工作区复制的缓存。它仍禁止 `__pycache__`、额外成员、外链、测试/运行数据和业务 `.py`。
+此格式由 `scripts/private_release/installer.py::verify` 和发行检查验收；原源码树、wheel 与源码 tar 的上述 pyc 禁令不变，
+原 `check_clean_package.py` 不改成宽泛忽略字节码。构建及范围见[临时发行指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md)。
+
 ### Q: macOS 上 .DS_Store 怎么删了又出现？
 
 A: macOS Finder 会自动在访问过的目录生成 `.DS_Store`。这些文件不会被 git 跟踪（已在 `.gitignore` 中排除），但打包时需要使用 `COPYFILE_DISABLE=1` 和 `--exclude` 来阻止它们进入交付包。

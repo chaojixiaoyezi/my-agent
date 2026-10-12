@@ -214,6 +214,8 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
             getattr(agent.config, "feishu_connection_mode", "long_connection") or "long_connection"
         ),
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
+        # WS/webhook 共用群聊触发配置，只认机器人直接 mention，@全员不派发。
+        "feishu_group_require_bot_mention": getattr(agent.config, "feishu_group_require_bot_mention", True),
         # 个人私聊会话锁默认开启；显式 false 才关闭，群聊不锁。
         "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", True),
         "feishu_personal_idle_lock_seconds": getattr(

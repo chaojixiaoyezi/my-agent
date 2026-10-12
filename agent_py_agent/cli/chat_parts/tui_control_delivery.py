@@ -37,6 +37,7 @@ class TuiControlOperationEntry:
     operation_id: str = ""
     attempts: int = 0
     next_attempt_at: float = 0.0
+    expected_execution: dict | None = None
 
     # LLM: Serialization is complete enough to replay the same POST or switch to read-only GET.
     # 函数用途: 把控制 outbox 行转换成持久 JSON 字典。
@@ -46,6 +47,7 @@ class TuiControlOperationEntry:
             "command_text": self.command_text,
             "command_kind": self.command_kind,
             "expected_turn_id": self.expected_turn_id,
+            "expected_execution": self.expected_execution,
             "target_control_message_id": self.target_control_message_id,
             "operation_id": self.operation_id,
             "attempts": self.attempts,
@@ -56,6 +58,8 @@ class TuiControlOperationEntry:
     # 函数用途: 从 JSON 校验并恢复一条 TUI 控制 outbox 行。
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> TuiControlOperationEntry:
+        from ...agent.gateway_parts.execution_target import GatewayExecutionTarget
+
         try:
             attempts = max(0, int(payload.get("attempts") or 0))
             next_attempt_at = max(0.0, float(payload.get("next_attempt_at") or 0.0))
@@ -66,6 +70,7 @@ class TuiControlOperationEntry:
             command_text=str(payload.get("command_text") or "").strip(),
             command_kind=str(payload.get("command_kind") or "").strip(),
             expected_turn_id=str(payload.get("expected_turn_id") or "").strip(),
+            expected_execution=payload.get("expected_execution"),
             target_control_message_id=str(
                 payload.get("target_control_message_id") or ""
             ).strip(),
@@ -75,6 +80,10 @@ class TuiControlOperationEntry:
         )
         if not entry.message_id or not entry.command_text or not entry.command_kind:
             raise ValueError("TUI control outbox entry is invalid")
+        if entry.expected_execution is not None:
+            target = GatewayExecutionTarget.from_dict(entry.expected_execution)
+            if target is None or target.turn_id != entry.expected_turn_id:
+                raise ValueError("TUI control execution binding is invalid")
         return entry
 
 
@@ -374,13 +383,14 @@ class TuiControlOperationReconciler:
 # 函数用途: 返回控制 outbox 行包含精确目标的不可变身份。
 def _control_entry_identity(
     entry: TuiControlOperationEntry,
-) -> tuple[str, str, str, str, str]:
+) -> tuple:
     return (
         entry.message_id,
         entry.command_text,
         entry.command_kind,
         entry.expected_turn_id,
         entry.target_control_message_id,
+        entry.expected_execution,
     )
 
 

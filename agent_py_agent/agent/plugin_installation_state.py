@@ -1,4 +1,4 @@
-# LLM: 唯一安装表严格解码 v4；仅显式旧 v3 的已启用激活迁移一次性兼容，查询不写盘，下一次事务保存来源。
+# LLM: 唯一安装表严格解码 v5 和安装范围；显式旧 v1-v4 迁移只授 private，查询不写盘，下一次事务保存来源。
 # 模块用途: 保留安装、配置和激活的同一权威及明确迁移来源，拒绝丢字段降级。
 
 from __future__ import annotations
@@ -11,12 +11,13 @@ from dataclasses import asdict, dataclass
 from .common.strict_json import load_strict_json
 from .plugin_installation import PluginInstallation, PluginInstallationError
 
-INSTALLATION_SCHEMA = "plugin_installations.v4"
+INSTALLATION_SCHEMA = "plugin_installations.v5"
 # 插件安装状态文件上限 16 MiB：防损坏/恶意状态文件撑爆内存。
 INSTALLATION_STATE_LIMIT_BYTES = 16 * 1024 * 1024
 _V1 = "plugin_installations.v1"
 _V2 = "plugin_installations.v2"
 _V3 = "plugin_installations.v3"
+_V4 = "plugin_installations.v4"
 
 
 # LLM: migration_json 是原文件来源事实，不是另一个状态表；记录内有配置，默认 repr 不可用于日志。
@@ -27,7 +28,7 @@ class PluginInstallationState:
     migration_json: str = "null"
 
 
-# LLM: 旧协议严格按版本迁移；v4 缺权限字段直接拒绝，不根据字段缺失补兼容；旧有效字节仅查询时不改盘。
+# LLM: 旧协议严格按版本迁移为 private；v5 缺范围和 v4 自报范围均拒绝；旧有效字节仅查询时不改盘。
 # 函数用途: 恢复 owner 的私有记录，损坏或跨用户状态不覆盖。
 def decode_installation_state(content: bytes | None, owner) -> PluginInstallationState:
     if content is None:
@@ -37,7 +38,7 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
         raise ValueError("安装表协议无效")
     version = payload.get("schema_version")
     fields = {"schema_version", "owner", "installations"}
-    if version in {INSTALLATION_SCHEMA, _V2, _V3}:
+    if version in {INSTALLATION_SCHEMA, _V2, _V3, _V4}:
         fields.add("migration")
     elif version != _V1:
         raise ValueError("安装表协议无效")
@@ -59,6 +60,12 @@ def decode_installation_state(content: bytes | None, owner) -> PluginInstallatio
         _validate_migration(payload["migration"])
         migration = {"from_schema": _V3, "source_sha256": hashlib.sha256(content).hexdigest(),
                      "previous": payload["migration"]}
+    elif version == _V4:
+        if any(not isinstance(row, dict) or "installation_scope" in row for row in payload["installations"]):
+            raise ValueError("旧安装不能声明公共范围")
+        rows = tuple(PluginInstallation.from_payload({**row, "installation_scope": "private"}) for row in payload["installations"])
+        _validate_migration(payload["migration"])
+        migration = {"from_schema": _V4, "source_sha256": hashlib.sha256(content).hexdigest(), "previous": payload["migration"]}
     else:
         rows = tuple(PluginInstallation.from_payload(row) for row in payload["installations"])
         migration = payload["migration"]
@@ -103,6 +110,7 @@ def _migrate_record(value: object, version: str) -> PluginInstallation:
         "settings_json": value["settings_json"] if version == _V2 else None,
         "settings_revision": value["settings_revision"] if version == _V2 else 0,
         "last_commit": receipt, "activation": None, "legacy_permission_grant": None,
+        "installation_scope": "private",
     })
 
 
@@ -127,6 +135,11 @@ def _validate_migration(value: object) -> None:
         if previous is None or isinstance(previous, dict) and previous.get("from_schema") in {_V1, _V2}:
             _validate_migration(previous)
             return
+    if value["from_schema"] == _V4 and set(value) == {"from_schema", "source_sha256", "previous"}:
+        previous = value["previous"]
+        if previous is None or isinstance(previous, dict) and previous.get("from_schema") in {_V1, _V2, _V3}:
+            _validate_migration(previous)
+            return
     raise ValueError("安装迁移记录无效")
 
 
@@ -141,7 +154,7 @@ def _migrate_v3_record(value: object) -> PluginInstallation:
     activation = value["activation"]
     if isinstance(activation, dict) and "permission_grant" in activation:
         raise ValueError("旧 v3 激活不能携带新授权")
-    entry = PluginInstallation.from_payload({**value, "legacy_permission_grant": None})
+    entry = PluginInstallation.from_payload({**value, "legacy_permission_grant": None, "installation_scope": "private"})
     return migrate_v3_entry(entry)
 
 

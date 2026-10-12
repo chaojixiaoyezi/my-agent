@@ -36,12 +36,16 @@ class CapabilityPackageSnapshot:
     activation_id: str
     members: tuple[CapabilityFile, ...]
     reader: Callable[[str], bytes] = field(repr=False, compare=False)
+    installation_scope: str = "private"
 
     # LLM: 安装声明的深层校验归 PluginManifest；这里只拒绝可变成员、重复键和缺入口，防止快照出现歧义。
     # 函数用途: 确认包快照能按唯一成员路径读取，且具有宿主固定的内容与激活身份。
     def __post_init__(self) -> None:
         if not self.package_id or not self.package_sha256 or not self.activation_id:
             raise ValueError("CAPABILITY_PACKAGE_IDENTITY_REQUIRED")
+        if self.installation_scope not in {"private", "public"} or (
+                self.installation_scope == "public" and not self.package_id.startswith("public/")):
+            raise ValueError("CAPABILITY_PACKAGE_SCOPE_INVALID")
         if not isinstance(self.members, tuple) or not all(isinstance(item, CapabilityFile) for item in self.members):
             raise ValueError("CAPABILITY_PACKAGE_MEMBERS_INVALID")
         paths = {item.path for item in self.members}

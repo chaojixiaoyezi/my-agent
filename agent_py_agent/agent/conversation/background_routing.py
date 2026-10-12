@@ -43,7 +43,7 @@ def owner_from_paths(paths: Iterable[str]) -> tuple[str, str]:
     return "", ""
 
 
-# LLM: 优先最新可外发 binding，其次原 owner 路径/属性，最后普通 binding；加载异常保持原 internal 回退。
+# LLM: 独立执行先鲜活核对原聊天引用再读 binding；其它线程保留原 owner 路由，引用失败不降级到别的地址。
 # 函数用途: 按当前线程事实选择后台回复地址；读操作可能失败，但不把地址选择当成发送成功。
 def resolve_background_route(
     dependencies: BackgroundRouteDependencies,
@@ -53,6 +53,14 @@ def resolve_background_route(
         thread = dependencies.load_thread(thread_id)
     except Exception:
         thread = None
+    if thread is not None:
+        from .execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
+
+        origin = thread.metadata.get(EXECUTION_ORIGIN_KEY)
+        thread = execution_origin_thread(dependencies.load_thread, thread)
+        if origin is not None:
+            binding = origin["binding"]
+            return binding["channel"], binding["actor_id"] or binding["conversation_id"]
     bindings = list(getattr(thread, "channel_bindings", ()) or ())
     for binding in reversed(bindings):
         channel = str(getattr(binding, "channel", "") or "")

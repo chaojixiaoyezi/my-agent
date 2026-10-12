@@ -100,6 +100,30 @@ class DeliveryService:
     def supports_transcript(self, channel: str) -> bool:
         return supports_transcript_delivery(channel)
 
+    # LLM: 进度和最终回复共用相同路由/净化/能力前置门；message_id 只可来自 pending 回执，编辑失败不新发替代消息。
+    # 函数用途: 首次创建一条进度消息，以后编辑同一条；返回 provider 消息 ID 供原投递账本耐久保存。
+    def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = ""):
+        from .progress import ProgressDeliveryReceipt
+
+        prepared = self._prepare(context, envelope)
+        if isinstance(prepared, DeliveryReceipt):
+            return ProgressDeliveryReceipt(False, message_id, prepared.error_code or "CHANNEL_PROGRESS_REJECTED")
+        attempt = self._resolve_attempt(context, envelope, prepared)
+        if isinstance(attempt, DeliveryReceipt):
+            return ProgressDeliveryReceipt(False, message_id, attempt.error_code)
+        if not attempt.capabilities.edit_progress:
+            return ProgressDeliveryReceipt(False, message_id, "CHANNEL_PROGRESS_UNSUPPORTED")
+        try:
+            text = attempt.content[-8000:]
+            if message_id:
+                ok = attempt.adapter.edit_progress_message(message_id, text)
+                return ProgressDeliveryReceipt(bool(ok), message_id, "" if ok else "CHANNEL_PROGRESS_EDIT_FAILED")
+            identity = attempt.adapter.start_progress_message(context.target, text,
+                reply_to=context.reply_to, idempotency_key=context.idempotency_key)
+            return ProgressDeliveryReceipt(bool(identity), str(identity or ""), "" if identity else "CHANNEL_PROGRESS_SEND_FAILED")
+        except Exception:
+            return ProgressDeliveryReceipt(False, message_id, "CHANNEL_PROGRESS_IO_FAILED")
+
     # LLM: context 是收件权威、envelope 是内容；任何发送前都校验模式、目标、内部协议和 adapter 能力。
     # 函数用途: 投递一份回复信封并返回不抛异常的结构化回执。
     def deliver(self, context: DeliveryContext, envelope: ReplyEnvelope) -> DeliveryReceipt:

@@ -1,5 +1,5 @@
-# LLM: 维护模型提交批次；保持回合锁先于回执锁、批次先提交后投影，修改须核对提交与重试测试。
-# 模块用途: 维护模型提交批次。
+# LLM: 维护原提交批次；回合锁先于回执锁，批次先提交后投影；已拒绝旧批次不能回写后来尝试，联测释放/续跑/未知提交。
+# 模块用途: 记录和恢复模型提交，防止旧失败批次阻塞或覆盖新一轮插话。
 from __future__ import annotations
 
 import hashlib
@@ -183,8 +183,8 @@ class GuidanceSubmissions:
                     restored.append(entry.guidance_id)
         return tuple(restored)
 
-    # LLM: GuidanceSubmissions：调用方持回合锁；先验证全部消息、幂等键与预留身份，再允许提交单个批次文件。
-    # 函数用途: 校验一次模型调用对应的补充消息整批身份和当前预留状态。
+    # LLM: 新提交严格校验原预留；恢复旧 rejected 批次时，已释放/换尝试的同一回执不再归它所有，不能据此回退状态。
+    # 函数用途: 校验模型提交整批身份，区分新提交与已被合法后继取代的旧拒绝投影。
     def _validate_locked(
         self,
         batch: dict[str, Any],
@@ -229,6 +229,9 @@ class GuidanceSubmissions:
                     if receipt is not None and isinstance(receipt.entry.metadata, dict)
                     else {}
                 )
+                if (allow_projected and batch["status"] == "rejected" and receipt is not None
+                        and receipt.entry.guidance_id == guidance_id and receipt.attempt_id != attempt_id):
+                    continue
                 if (
                     receipt is None
                     or receipt.entry.guidance_id != guidance_id
@@ -239,8 +242,8 @@ class GuidanceSubmissions:
                 if not allow_projected and receipt.status != "reserved":
                     raise DataCorruptionError("guidance submission was not reserved")
 
-    # LLM: GuidanceSubmissions：回执是已提交批次的可修复投影；旧批次不得覆盖更新的 submission_id，联测乱序重放。
-    # 函数用途: 根据一份已提交或已拒绝的批次幂等修复每条补充消息回执。
+    # LLM: 原提交批次可修复回执；已拒绝批次只拥有原 attempt，不能覆盖释放后的 pending 或后来 attempt/submission。
+    # 函数用途: 幂等修复仍属于该批次的回执，旧失败记录保留但不反复阻挡新一轮消费。
     def apply_locked(self, batch: dict[str, Any]) -> None:
         self._validate_locked(batch, allow_projected=True)
         call_id = str(batch.get("provider_call_id") or "").strip()
@@ -255,6 +258,8 @@ class GuidanceSubmissions:
             with locked_file_transition(transition):
                 receipt = self.ledger.read_receipt(receipt_path)
                 if receipt.status in {"consumed", "rejected"}:
+                    continue
+                if batch_status == "rejected" and receipt.attempt_id != batch["attempt_id"]:
                     continue
                 if batch_status == "submitted":
                     if receipt.status == "submitted" and receipt.submission_id != call_id:

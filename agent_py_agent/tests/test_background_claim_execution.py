@@ -109,6 +109,8 @@ def _claim_fixture(monkeypatch):
             event("stop")
 
     store = SimpleNamespace(
+        # 原线程在此明确是普通工作；委派身份读取不能由测试缺少权威接口迫使产品降级。
+        threads=SimpleNamespace(load_report=lambda _: (ConversationThread(thread_id="thread", canonical_user_id="user"), None)),
         claims=SimpleNamespace(acquire=acquire, finish=finish),
         tasks=SimpleNamespace(list_report=links),
         wakes=SimpleNamespace(mark_handled=retire, pending_one=lambda _wake_id: None),

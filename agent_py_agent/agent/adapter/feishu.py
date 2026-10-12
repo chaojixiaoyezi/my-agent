@@ -40,11 +40,13 @@ _FEISHU_IDEMPOTENT_SEND_ATTEMPT_COUNT = 3
 _FEISHU_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
+# LLM: 标准 API 出站共用此入口；GET 不携带请求体，POST/PUT 仍发送 JSON，凭据只进认证头，不作为正文或日志。
+# 函数用途: 调用机器人信息与消息接口，保持十秒运输超时及同一响应解析。
 def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
     """统一飞书消息 API 调用(urllib);method=POST/PUT,body→JSON。返回响应 dict。"""
     req = urllib.request.Request(
         f"{_FEIHSU_API_BASE}{path}",
-        data=json.dumps(body).encode("utf-8"),
+        data=None if method == "GET" else json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
         method=method,
     )
@@ -421,6 +423,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
     provider_idempotency_window_seconds = 3600.0
 
     adapter_name = "feishu"
+    supports_edit_progress = True
 
     def __init__(
         self,
@@ -443,6 +446,11 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
             config.get("feishu_connection_mode", "long_connection") or "long_connection"
         ).strip().lower()
         self.ws_proxy = config.get("feishu_ws_proxy", "")
+        self.group_require_bot_mention = str(config.get("feishu_group_require_bot_mention", True)).lower() not in {"false", "0", "off"}
+        self._bot_open_id = ""
+        self._bot_identity_app_id = ""
+        self._bot_identity_retry_at = 0.0
+        self._bot_identity_lock = threading.Lock()
 
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
@@ -575,13 +583,44 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
                 logger.warning(f"飞书 HTTP shutdown 异常: {exc}")
 
 
+    # LLM: 群聊触发门位于解锁和 Gateway 派发之前；只消费已验证入站 mention 和可信机器人身份，不按正文做路由。
+    # 函数用途: 私聊照常处理，群聊只允许直接 @机器人，@全员和未提及都不会启动回合。
     def _handle_feishu_event(self, payload: dict[str, Any]) -> None:
+        message = (payload.get("event") or {}).get("message") or {}
+        if message.get("chat_type") == "group" and self.group_require_bot_mention:
+            from .feishu_mentions import directly_mentions_bot
+
+            if not directly_mentions_bot(message, self._resolve_bot_open_id()):
+                return
         msg = feishu_to_incoming(payload)
         if msg is None:
             return
         if self._session_locked_gate(msg):  # 会话锁门:锁了就发密码卡、不处理正常消息
             return
         self._dispatch(msg)
+
+    # LLM: 身份绑定 app_id，API 失败按单调时间节流；只缓存 open_id，不记录 token、响应正文或用户内容。
+    # 函数用途: 向飞书机器人信息接口取得本应用的 open_id，群聊判断不从昵称猜机器人。
+    def _resolve_bot_open_id(self) -> str:
+        with self._bot_identity_lock:
+            if self._bot_identity_app_id != self.app_id:
+                self._bot_identity_app_id = self.app_id
+                self._bot_open_id = ""
+                self._bot_identity_retry_at = 0.0
+            if self._bot_open_id or time.monotonic() < self._bot_identity_retry_at:
+                return self._bot_open_id
+            self._bot_identity_retry_at = time.monotonic() + 30.0
+            try:
+                token = self._get_tenant_access_token()
+                if not token:
+                    return ""
+                result = _feishu_msg_api("GET", "/bot/v3/info", {}, token)
+                bot = result.get("bot") or (result.get("data") or {}).get("bot") or {}
+                if result.get("code") == 0 and isinstance(bot, dict):
+                    self._bot_open_id = str(bot.get("open_id") or "")
+            except (OSError, ValueError, TypeError):
+                logger.warning("飞书机器人身份暂不可用；群聊未派发，30 秒后可重试")
+            return self._bot_open_id
 
     def _session_locked_gate(self, msg: IncomingMessage) -> bool:
         """个人私聊会话锁门。
@@ -661,6 +700,21 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
                 else _reply_feishu_rendered(message_id, piece, token)
             )
         return all(results)
+
+    # LLM: 首次进度固定 text 类型并使用稳定 provider uuid，返回真实 message_id；不拆片、不唤醒会话、不伪造成功 ID。
+    # 函数用途: 创建可反复编辑的一条进度消息，后续统一投递服务用此 ID 更新同一条。
+    def start_progress_message(self, user_id: str, text: str, *, reply_to: str = "", idempotency_key: str = "") -> str:
+        return _start_feishu_progress(self, user_id, text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    # LLM: 进度始终使用首次创建的 text 类型，不能根据候选出现 Markdown/表格而改变消息类型；只编辑原 ID。
+    # 函数用途: 更新原文本进度窗口，普通富文本订正仍由 edit_message 保持已有语义。
+    def edit_progress_message(self, message_id: str, text: str) -> bool:
+        token = self._get_tenant_access_token()
+        if not token:
+            return False
+        result = _feishu_msg_api("PUT", f"/im/v1/messages/{message_id}",
+            {"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)}, token)
+        return result.get("code") == 0
 
     def edit_message(self, message_id: str, text: str) -> bool:
         """编辑已发消息(流式落版/订正;markdown 渲染 + post 回落)。"""
@@ -811,3 +865,28 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+
+# LLM: 首次进度固定 text 类型并沿真实 API/稳定 uuid 创建；响应 ID 是唯一后续编辑身份，无 fallback 或新会话唤醒。
+# 函数用途: 执行飞书首次草稿创建并返回真实 message_id；适配器类保留公共入口，发送实现在本模块集中维护。
+def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, reply_to: str, idempotency_key: str) -> str:
+    token = adapter._get_tenant_access_token()
+    if not token:
+        return ""
+    identities = []
+
+    # LLM: 渲染回落仍复用同一逻辑 uuid；只读取供应商成功响应的 message_id，不根据请求推导。
+    # 函数用途: 发送一种已渲染格式并记下真实消息身份。
+    def send(msg_type: str, content: str) -> dict[str, Any]:
+        uuid_value = _feishu_request_uuid(idempotency_key, component="progress", index=0)
+        body = {"msg_type": msg_type, "content": content, "uuid": uuid_value}
+        path = f"/im/v1/messages/{reply_to}/reply" if reply_to else "/im/v1/messages?receive_id_type=open_id"
+        if not reply_to:
+            body["receive_id"] = user_id
+        result = _feishu_msg_api_with_retry("POST", path, body, token)
+        if result.get("code") == 0:
+            identities.append(str((result.get("data") or {}).get("message_id") or ""))
+        return result
+
+    send("text", json.dumps({"text": text}, ensure_ascii=False))
+    return next((identity for identity in identities if identity), "")

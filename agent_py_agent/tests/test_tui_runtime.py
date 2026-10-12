@@ -1421,7 +1421,7 @@ def test_gateway_turn_resumed_cancels_stale_approval_and_reopens_new_generation(
     assert not [item for item in snapshot.diagnostics if item.code in {"TERMINAL_BLOCK_REPLAY", "TERMINAL_WITHOUT_BLOCK"}]
     notice = stable[f"turn-resumed:{request_id}:1"]
     assert notice.role == "system"
-    assert notice.text == "Gateway 安全重启打断了这一轮，已自动续跑。"
+    assert notice.text == "Gateway 安全重启打断了这一轮，已进入恢复流程。"
     assert snapshot.status.phase == "running"
 
     # 续跑代次的模型重新生成同一调用：轮号与序号不变，permission_id 必然不同。
@@ -1503,7 +1503,7 @@ def test_gateway_turn_resumed_freezes_live_blocks_and_keeps_new_reply_separate()
         "interrupted", "旧的思考",
     )
     assert stable[f"conversation-compact:{request_id}:transcript:compact-3"].phase == "interrupted"
-    assert stable[f"turn-resumed:{request_id}:1"].text == "Gateway 重启打断了这一轮，已自动续跑。"
+    assert stable[f"turn-resumed:{request_id}:1"].text == "Gateway 重启打断了这一轮，已进入恢复流程。"
 
     assert turn.on_gateway_event({"kind": "thinking_delta", "text": "新的思考"})
     assert turn.on_gateway_event({"kind": "model_delta", "text": "新的回复"})
@@ -1529,9 +1529,9 @@ def test_gateway_turn_resumed_freezes_live_blocks_and_keeps_new_reply_separate()
 @pytest.mark.parametrize(
     ("cause", "notice"),
     [
-        ("processing_lease_expired", "这一轮执行超时中断，Gateway 已自动续跑。"),
-        ("", "这一轮执行被打断，已自动续跑。"),
-        ("future_restart_cause", "这一轮执行被打断，已自动续跑。"),
+        ("processing_lease_expired", "这一轮执行超时中断，Gateway 已进入恢复流程。"),
+        ("", "这一轮执行被打断，已进入恢复流程。"),
+        ("future_restart_cause", "这一轮执行被打断，已进入恢复流程。"),
     ],
 )
 def test_gateway_turn_resumed_notice_reads_only_structured_cause(cause: str, notice: str) -> None:

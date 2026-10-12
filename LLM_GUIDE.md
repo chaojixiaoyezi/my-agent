@@ -1,5 +1,19 @@
 # LLM_GUIDE
 
+IM 多任务与公共能力包的新语义见 [执行策略](docs/design/IM_TASK_EXECUTION_POLICY.md) 和 [公共包](docs/design/PUBLIC_CAPABILITY_PACKS.md)。实现复用 Thread/SessionTask/Wake/子代理原账；受理模式被冻结，关闭或跨零点不改变旧任务；普通自然回复由模型生成。公共安装默认 private，管理员显式 `--scope public` 只共享内容，用户执行权限不继承。此次不打包、不合并。
+
+2026-10-12 TUI/IM 临时更新已完成临时分支实现与验收（20261012.5，未合并）：管理员外发复用 send_message 的已绑定身份路由；新增 /verbose stream、状态数字和群聊直接 @门。重绘改用单调时钟，退出清鼠标在途输入；现场根因与真实 Feishu 送达仍需独立证据。见 [合同](docs/design/TUI_IM_PREVIEW.md)。
+
+2026-10-12 回合结束冻结定位：1.19 Ubuntu 24.04 真机的原包、真实模型及 SSH 恢复会话共 7 个请求、840 个输入字符未复现几十秒冻结。工具案例出现 run_command UNKNOWN，不算业务通过；已具备无正文线程/异步栈采样和 sudo py-spy。现场根因仍未知，按用户要求只定位，下一步 Ubuntu 22.04 对照；见[交接](docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md)。
+
+2026-10-12 TUI 现场仍卡：问题重新打开。正常 Linux PuTTY 0.81/OpenSSH 未见多秒延迟；长历史在受控 5 KiB/s 输出下重复出现 3.5–3.8 秒输入积压，原渲染链同步 blocking flush 待修。Windows 原环境与 F6 对照尚未完成，无新包/合并/部署。详见[交接](docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md)。
+
+2026-10-11 TUI 输入延迟：历史建议和候选枚举的慢辅助读取移出事件循环，原算法、Document 迟到校验和消息队列不变。原两项阻塞用例先红后绿，真实 Linux/PuTTY 与发行包复验边界见[交接](docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md)。
+
+2026-10-10 临时离线包：当前独立 TUI 分支已产出并验证 Ubuntu x86_64 自带运行时的无业务源码临时包；固定 prefix 管理版本与持久数据，尚不合并主线。构建/更新及可见范围见[指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md)。
+
+实际执行统一从原 claim、请求绑定和 core run/attempt 投影；TUI 观察 job 不再决定插话/停止目标。输入结算按原 target 类型隔离，outbox 按发送顺序恢复，预留与未知提交分别处理。本地定向回归已过；1.8 的 MiniMax-M2.7 原生 TUI 已验证连续插话、多 TUI 与等待 B、Esc 后续跑、stop 以及长 shell 进程树清理。旧 rejected 批次和 UI 接回失败的恢复缺陷也已修正；完整矩阵和 P6 维护排空尚未收口。见 [实施记录](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md)。
+
 wsempty4（2026-10-09，本地实现、待集成）：USER_REPLY_UNAVAILABLE在原失败路径保留最后逻辑调用形状/原始输出类型长度、现有空正文预算及canonical压缩间隔；仅无正文白名单，未知None，不改重试/交付或response_decision。验证边界见TESTS和DESIGN_LEDGER。
 
 compactview（07/c1，2026-10-09，本地实现、待复核）：原生压缩前后统一冻结校准，after 含补带/代次事实并 rebase 状态基线；联合恢复按完整组覆盖退休旧快照，保最新同源事实和未覆盖屏障。缓存同次压缩重建，不另压一代；中途健康线仍为优选。证据/未验边界见 TESTS 和 DESIGN_LEDGER。

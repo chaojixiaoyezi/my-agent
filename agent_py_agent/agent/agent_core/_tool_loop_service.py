@@ -1482,7 +1482,8 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # params 是实际产出 response 的循环参数；回执不扩展执行权，也不撤回已有粘性工具Schema。
 # 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
 # 选模仍在每次尝试内重新进行。主选包与 child 已授权入口只在真实业务首轮 build/capture 前准备，不进入回执/预览或已提交恢复候选。
-# 函数用途: 选择本轮真正要发给模型的上下文与模型依赖，并把原请求、Compact和输入恢复能力交给模型请求周期。
+# LLM: 首片委派准备经原宿主创建服务；根表达零工具，只有 canonical OPEN 孩子申请可投影原父级裁决工具。
+# 函数用途: 选择真实出站上下文与模型依赖，保持委派协调、Compact、请求恢复和原输入确认合同。
 def next_tool_loop_model_response(
     agent, params: ToolLoopExecuteParams, tool_rounds: int,
 ) -> ModelTurnRequest:
@@ -1501,6 +1502,10 @@ def next_tool_loop_model_response(
         prepared, prompt = committed
     else:
         _discard_stale_natural_reply_for_pending_turn_input(agent, params)
+        from ..conversation.im_delegation import prepare_delegated_execution, prepare_dispatch_ack
+
+        if tool_rounds == 0:
+            prepare_dispatch_ack(params)
         model_params = natural_user_reply_model_params(params)
         if model_params is not params:
             prompt, response = _request_tool_loop_model_response(
@@ -1512,6 +1517,11 @@ def next_tool_loop_model_response(
             from ..capability.package_selection_runtime import prepare_capability_package_selection
             from ..capability.subagent_package_entries import prepare_subagent_package_entries
 
+            params = prepare_delegated_execution(agent, params) or params
+            model_params = natural_user_reply_model_params(params)
+            if model_params is not params:
+                prompt, response = _request_tool_loop_model_response(agent, model_params, tool_rounds)
+                return ModelTurnRequest(prompt, response, params)
             prepare_capability_package_selection(agent, params)
             prepare_conversation_method_carry(agent, params)
             prepare_subagent_package_entries(agent, params)

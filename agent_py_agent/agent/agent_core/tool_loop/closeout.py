@@ -1,5 +1,5 @@
 # LLM: 收口只消费绑定后的请求、收口响应处理与原因读取操作；不持有Agent、回合参数或执行器，保持原因在生成和响应处理之后读取。
-# 模块用途: 统一硬边界后的模型交接及未完成状态，避免重复生成逻辑混配原请求或过早读取副作用事实。
+# 模块用途: 统一工具硬边界后的交接；未知副作用标为阻塞，已知可续失败标为未完成，避免自动重复未知操作。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -9,7 +9,7 @@ from ...backends import ModelResponse
 
 
 # LLM: 原请求与响应成对返回；先调用原模型运输，再处理剩余工具请求，最后读取结构化原因。异常原样传播，不重试、不执行工具或记账。
-# 函数用途: 生成一次停止调用工具后的交接回复，保留原内容和用量，只将运行状态标为未完成。
+# 函数用途: 生成停止工具调用的模型回复；按真实副作用原因区分阻塞与可续未完成，不擅自重试。
 def generate_tool_loop_closeout(
     *,
     build_prompt: Callable[[], str],
@@ -23,7 +23,7 @@ def generate_tool_loop_closeout(
     reason = read_runtime_reason()
     return prompt, replace(
         response,
-        runtime_status="unfinished",
+        runtime_status="blocked" if reason == "TOOL_OPERATION_OUTCOME_UNKNOWN" else "unfinished",
         runtime_reason=reason,
         runtime_source="tool_loop",
     )

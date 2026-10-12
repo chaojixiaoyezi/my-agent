@@ -78,6 +78,7 @@ from .control_service import (
 )
 from .daemon_control import get_running_pid, write_targeted_gateway_stop_request
 from .event_points import prompt_queued
+from .execution_target import execution_target_payload
 from .input_delivery_service import (
     bind_gateway_input_active_locked,
     gateway_input_guidance_binding,
@@ -90,7 +91,7 @@ from .input_delivery_service import (
 )
 from .io import gateway_request_counts, write_json_file_atomic
 from .loop_health import loop_health
-from .paths import gateway_chunk_path, gateway_chunk_path_candidates
+from .paths import GatewayPaths, gateway_chunk_path, gateway_chunk_path_candidates
 from .request_client import GatewayAskExecutionOptions
 from .response_renderer import read_gateway_terminal_envelope_report
 
@@ -469,7 +470,7 @@ def _read_public_progress_events(
             continue
         if not isinstance(row, dict):
             continue
-        if row.get("kind") == "assistant_commentary":
+        if row.get("kind") in {"assistant_commentary", "model_draft"}:
             # Model commentary is safe at every verbose level only after the
             # same user-facing projection used by final channel delivery.
             # 本机私有通道保留宿主绝对路径（用户要能直接复制），外部通道仍收敛成 basename。
@@ -478,7 +479,8 @@ def _read_public_progress_events(
                 channel,
             ).strip()
             if text:
-                events.append({"kind": "assistant_commentary", "text": text})
+                events.append({"kind": str(row["kind"]), "text": text,
+                               **({"level": "stream"} if row.get("verbose_level") == "stream" else {})})
             continue
         if row.get("kind") == "permission_requested":
             permission_event = _public_permission_request_event(row, channel)
@@ -489,7 +491,7 @@ def _read_public_progress_events(
             continue
         level = str(row.get("verbose_level") or "off")
         progress = row.get("progress")
-        if level not in {"on", "full"} or not isinstance(progress, dict):
+        if level not in {"on", "full", "stream"} or not isinstance(progress, dict):
             continue
         events.append({"level": level, **progress})
     return events, min(len(lines), since + 200)
@@ -778,6 +780,11 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     request_id = request_id_factory()
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     try:
+        from .im_dispatch_policy import IM_DISPATCH_KEY, capture_im_dispatch
+
+        snapshot = capture_im_dispatch(server.agent, _gateway_control_scope(handler, body, user_id=user_id, channel=channel))
+        if snapshot is not None:
+            request_data[IM_DISPATCH_KEY] = snapshot
         pending_path = server.paths.inbox / f"{request_id}.json"
         # 旧 /ask 无幂等 ID 路径：提示词正文写进 inbox 队列，必须私有落盘——目录 0700、文件出生 0600、
         # 原子替换（半写不留残档）。输出格式与原来逐字节一致：indent=2、不排序、无尾换行。
@@ -785,7 +792,7 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         from ..observability.concurrency_metrics import gateway_request_enqueued
 
         gateway_request_enqueued()
-    except OSError as exc:
+    except (DataCorruptionError, ValueError, OSError) as exc:
         handler._send_json(500, {"error": f"failed to write request: {exc}"})
         return
     prompt_queued(server, request_data)
@@ -827,8 +834,13 @@ def _handle_idempotent_ordinary_ask(
         user_id=user_id,
         channel=channel,
     )
+    from .im_dispatch_policy import IM_DISPATCH_KEY, capture_im_dispatch
+
     guidance_key = active_turn_guidance_dedupe_key(scope)
     try:
+        snapshot = capture_im_dispatch(server.agent, scope)
+        if snapshot is not None:
+            prepared_request[IM_DISPATCH_KEY] = snapshot
         with gateway_input_transition(server.paths, request_id):
             receipt, created = load_or_prepare_gateway_input_locked(
                 server.paths,
@@ -838,7 +850,8 @@ def _handle_idempotent_ordinary_ask(
                 guidance_dedupe_key=guidance_key,
                 prepared_request=prepared_request,
             )
-            if created and receipt.state == "pending" and allow_active_turn:
+            delegated = (receipt.prepared_request.get(IM_DISPATCH_KEY) or {}).get("mode") == "delegated"
+            if created and receipt.state == "pending" and allow_active_turn and not delegated:
                 active_turn = _route_ask_to_active_turn(
                     server,
                     body=routed_body,
@@ -1185,6 +1198,7 @@ def handle_client_notices(handler, server) -> None:
         return
     result = read_gateway_client_notices(
         server.agent,
+        paths=server.paths,
         scope=_gateway_control_scope(
             handler,
             body,
@@ -1393,12 +1407,13 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
 # projection from canonical runs; neither notices nor that projection can
 # create task state, authorize work, retry, or decide completion. Process-stream identity is
 # echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 按显式能力开放正文、前台流及完整检查点；旧页跳过新类型，轮询不初始化owner。
+# 函数用途: 按显式能力开放正文、前台流及完整检查点，并附实际执行绑定；轮询不初始化 owner。
 def read_gateway_client_notices(
     agent: object,
     *,
     scope: GatewayControlScope,
     after: int,
+    paths: GatewayPaths | None = None,
     event_after: int = 0,
     event_stream_id: str = "",
     interactive_approvals: bool = False,
@@ -1473,7 +1488,6 @@ def read_gateway_client_notices(
     )
     activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
-    active_task_count = activity.active_task_count
     notices, cursor, notices_ok = read_background_response_page(
         store, thread_id, after=after, include_foreground=display.foreground_messages,
         include_display_checkpoints=display.display_checkpoints,
@@ -1486,7 +1500,8 @@ def read_gateway_client_notices(
         "event_cursor": transcript["cursor"],
         "event_stream_id": transcript["stream_id"],
         "events_truncated": transcript["truncated"],
-        "active_task_count": active_task_count,
+        "active_task_count": activity.active_task_count,
+        "execution_target": execution_target_payload(paths, store, thread_id),
         "agent_activity": activity_payload,
         "agent_permission_requests": permission_requests,
     }
@@ -1594,6 +1609,7 @@ def _empty_gateway_notice_response(
         "event_stream_id": event_stream_id,
         "events_truncated": False,
         "active_task_count": 0,
+        "execution_target": None,
         "agent_permission_requests": [],
     }
     if error:

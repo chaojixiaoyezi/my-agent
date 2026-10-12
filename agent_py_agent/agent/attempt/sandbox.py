@@ -1,5 +1,6 @@
 # LLM: attempt 沙箱负责平台执行边界；Seatbelt 读规则含根一级最低启动读取和链节点精确 metadata，不据规则形状宣称真进程成功。
 #   同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
+#   独立 Landlock 启动器按 Python 导入器的真实 origin 定位，支持源码及无源码发行包。
 # 模块用途: 为不同平台构造执行隔离，批处理等待可被本 run 取消，不消费 Gateway 输入、不绕过隔离。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
@@ -22,6 +23,7 @@ staging_root=同任务目录、shared_workspace=owner home）。
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import platform
@@ -712,8 +714,10 @@ def gateway_bound_ports() -> tuple[int, ...]:
         return tuple(sorted(_LOCAL_GATEWAY_PORTS))
 
 
-# G5：Landlock 端口拒绝启动器脚本路径（本包内自包含脚本，exec bwrap 前施加 Landlock）。
-_LANDLOCK_LAUNCHER = Path(__file__).with_name("landlock_launcher.py")
+# G5：使用真实模块路径；无源码发行包的独立启动器是可被 CPython 执行的 .pyc。
+_LANDLOCK_LAUNCHER = Path(
+    importlib.util.find_spec("agent_py_agent.agent.attempt.landlock_launcher").origin
+)
 
 
 # LLM: G5：判断本机 Linux 环境能不能用 Landlock 按端口拒绝（不施加、不限制本进程，只查询——在 Gateway 进程里调是安全的）。

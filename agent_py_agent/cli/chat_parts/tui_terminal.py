@@ -91,3 +91,43 @@ __all__ = [
     "TITLE_STATIC_PREFIX",
     "TuiTerminalTitleController",
 ]
+
+
+# LLM: 退出清理只对当前 TTY 生效，先关闭所有鼠标跟踪再丢弃退出前及在途输入；不消费管道、不读取/记录内容。
+# 函数用途: 防止残留鼠标转义序列进入 shell 被当作命令；POSIX 最多等待 250ms，非 POSIX 只恢复输出模式。
+def release_tui_mouse_input(app: object) -> None:
+    output = getattr(app, "output", None)
+    if output is None:
+        return
+    try:
+        output.write_raw("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l")
+        output.flush()
+    except (OSError, AttributeError):
+        return
+    try:
+        import os
+
+        input_stream = getattr(app, "input", None)
+        fd = input_stream.fileno()
+        if not os.isatty(fd):
+            return
+        _drain_exit_input(input_stream, fd)
+    except (ImportError, OSError, ValueError, AttributeError):
+        pass
+
+
+# LLM: 当前 POSIX TTY 已确认，清理只持续固定 250ms；异常由退出入口处理，原 raw_mode 上下文恢复设置。
+# 函数用途: 在终端鼠标关闭的网络往返期间丢弃在途输入，避免尾部残片落进 shell；不存储输入字节。
+def _drain_exit_input(input_stream: object, fd: int) -> None:
+    import os
+    import select
+    import termios
+
+    with input_stream.raw_mode():
+        termios.tcflush(fd, termios.TCIFLUSH)
+        deadline = time.monotonic() + 0.25
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], min(0.05, max(0.0, deadline - time.monotonic())))
+            if ready and not os.read(fd, 4096):
+                break
+        termios.tcflush(fd, termios.TCIFLUSH)

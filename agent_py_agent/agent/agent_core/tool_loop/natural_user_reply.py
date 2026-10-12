@@ -62,7 +62,8 @@ def pending_natural_user_reply(params: ToolLoopExecuteParams) -> dict[str, objec
 #   提示词最尾；否则 MiniMax 等模型会把“写一句回执”错当成“重新执行原任务”，
 #   并再次吐出工具协议。结构化回复事实必须作为唯一末尾 UserTurn 进入
 #   native wire；CacheStructuredPrompt.canonical_user_turn 只是诊断副本，不能代替真实 messages。
-# 函数用途: 构造低延迟、零工具、不重做原任务的临时模型参数视图。
+#   委派协调与 Audit 回执须保留原真实输入和执行证据，让 provider 正常确认投递；其它阶段保持薄视图。
+# 函数用途: 构造零工具的表达参数，保留需要确认的真实历史，不重新执行业务。
 def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopExecuteParams:
     """Return a deliberately thin no-tools view for one user-facing model reply."""
     phase = pending_natural_user_reply(params)
@@ -73,6 +74,7 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
     preserve_execution_evidence = kind in {
         "audit_prepare_pending",
         "audit_prepare_result",
+        "subagents_active", "delegated_result", "delegated_failure",
     }
     return replace(
         params,
@@ -83,13 +85,8 @@ def natural_user_reply_model_params(params: ToolLoopExecuteParams) -> ToolLoopEx
         runtime_injections=[],
         tool_catalog_section="",
         tool_recommendations_section="",
-        # A pending Audit prepare is the one reply phase where the exact
-        # current-turn execution history is part of the fact being presented:
-        # the model may have probed an interface and written candidate notes
-        # without publishing them.  Keep the already windowed transcript/IR
-        # visible while still exposing no callable schemas.  Other reply kinds
-        # remain deliberately thin so background progress cannot drag tool
-        # payloads into a second generation.
+        # Audit 与委派协调保留已裁剪的真实历史，原输入仍由 provider 实际接收确认；
+        # 所有表达阶段都不暴露 callable schemas，其他回执不重复携带业务载荷。
         tool_context=(params.tool_context if preserve_execution_evidence else []),
         allowed_tools=[],
         tool_ir_history=_natural_reply_tool_ir_history(
@@ -358,6 +355,8 @@ def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
         return "unfinished", "TOOL_ROUND_LIMIT_REACHED", "tool_loop"
     if kind == "subagents_active":
         return "unfinished", "SUBAGENTS_ACTIVE", "subagent_lifecycle"
+    if kind == "delegated_failure":
+        return "failed", "DELEGATED_WORK_FAILED", "im_delegation"
     if kind == "named_work_active":
         return "unfinished", "NAMED_WORK_ACTIVE", "conversation_task"
     if kind in {"named_work_incomplete", "named_work_activation_incomplete"}:

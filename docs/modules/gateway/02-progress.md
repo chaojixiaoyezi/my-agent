@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+2026-10-12 IM 多任务：原入口 receipt 冻结发送者 `/delegate` 模式；结构化辅助路由、短接单与独立 SessionTask/Wake 派工已接，后台原 ToolExecutor/G1 真建孩子，待终态后原模型汇总。联合验收见 [交接](../../tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
+
+## TUI 插话目标修复（2026-10-09，实施中）
+
+T 线主链已修复：真实 claim/core 代次统一控制，typed 生命周期对账、FIFO、重复/失败回执接回和精确预留释放已覆盖。356 项最新组合通过；1.8 原生 TUI + MiniMax-M2.7 已证明三条输入均 consumed、Esc 换执行继续、stop 后 Goal paused/claim cancelled，Compact 为 0。两个 TUI 与等待 B 组合、真实长 shell 进程树停止、自动 Compact 三阶段输入、子代理停止及跨线程隔离也已通过；在途崩溃未知结果沿原合同暂停，恢复提示已修正。完整矩阵和公共 P6 drain 接线仍在进行，见 docs/tasks/TUI_STEER_CONTROL_HANDOFF.md。
+
 ## 不可交付回复诊断（wsempty4，2026-10-09，本地实现、待集成）
 
 - 原USER_REPLY_UNAVAILABLE路径附白名单user_reply_diagnostic，最后调用形状/输出类型长度、原预算和canonical成功压缩间隔进入原结构化response/terminal记录。

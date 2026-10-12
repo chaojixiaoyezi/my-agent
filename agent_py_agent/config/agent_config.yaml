@@ -602,6 +602,8 @@ adapter_workspace: ""
 # - feishu_connection_mode: long_connection(默认,支持交互卡片且免公网) / webhook(需公网回调地址)
 # - feishu_ws_proxy: 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
 feishu_app_id: ""
+# 群聊只在单独 @机器人时回复，@全员或未 @不触发；私聊不受此设置影响。
+feishu_group_require_bot_mention: true
 # 飞书自建应用的 App Secret，用于以你的飞书应用身份收发消息。
 # 在飞书开放平台（开发者后台）的「凭证与基础信息」里获取。
 # 只有首次接入飞书或更换应用时才需要填；可以写明文，也可以写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文落到配置文件里。

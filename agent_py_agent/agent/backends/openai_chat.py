@@ -158,7 +158,7 @@ class OpenAICompatibleBackend(HttpBackend):
 
     # LLM: Chat 结构化输出仍经过同一请求组装与响应解析；schema 只约束输出，不授予工具权限。方式随 profile 冻结
     #   （self.structured_output，见 structured_output_mode.py）：native 发严格 json_schema；json_object 用供应商 JSON
-    #   对象模式，并把 schema 写进提示，是否合规由调用方的严格解析判断。同步 test_structured_output_mode.py。
+    #   对象模式；system/期限/思考/输出预算沿请求级 options，schema 合规由调用方复核。同步结构化模式与辅助模型测试。
     # 函数用途: 发起结构化输出的模型请求，按模型声明选择 JSON Schema 或 JSON 对象格式。
     def generate_structured(
         self,
@@ -166,9 +166,11 @@ class OpenAICompatibleBackend(HttpBackend):
         *,
         response_schema: dict[str, Any],
         messages: list[dict[str, Any]] | None = None,
+        request_options: ProviderRequestOptions | None = None,
     ) -> ModelResponse:
         """Use strict JSON schema, or JSON-object mode with the schema in the prompt when declared."""
 
+        options = request_options or ProviderRequestOptions()
         json_object = self.structured_output == "json_object"
         return self._generate(
             _OpenAIGenerateRequest(
@@ -176,6 +178,12 @@ class OpenAICompatibleBackend(HttpBackend):
                 messages=messages,
                 response_schema=None if json_object else response_schema,
                 json_object=json_object,
+                system_instruction=options.system_instruction,
+                thinking_disabled=options.thinking_disabled,
+                max_output_tokens=options.max_output_tokens,
+                first_event_timeout_seconds=options.first_event_timeout_seconds,
+                total_deadline_seconds=options.total_deadline_seconds,
+                reasoning_effort=options.reasoning_effort,
             )
         )
 

@@ -1,5 +1,9 @@
 # 当前状态
 
+IM 多任务和公共包（2026-10-12，本地实现与相关验收完成，未发布）：定时 IM 独立线程、当日 `/delegate`、真实孩子执行和父模型汇总、公共内容包 v5 已落地。739 项联合回归与新增权限用例通过；Linux 官方 MiniMax/真实孩子、SSH TUI 和到期调度通过。真实飞书出站未验；立即触发真实复测已进入计划管理，保留原 APPROVAL_REQUIRED 确认边界。未打包、未推送/合并、未切换线上。见 [交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
+
+临时离线包（2026-10-10，独立分支，未合并）：`0.3.0-tui-preview.20261010.2` 自带 CPython 3.11，业务模块仅字节码；固定 `/app/my-agent-preview/data`，沿原 owner 目录布局。三版 Ubuntu 断网容器安装/更新、普通账户与 HOME 改变、1.8 原生 MiniMax-M2.7 TUI/工具、随包沙箱及真实历史更新恢复通过。发布相关组合 81 passed/3 skipped，控制组合 49 passed，最终安装器 8 passed；各组合有重叠，不累加。严格静态门通过，线上 CI 未作为验收来源；主线/生产继续等待用户指令。见[发行指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md)与[交接追加](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md#临时离线发行追加记录2026-10-10)。
+
 compactview（07/c1，2026-10-09，本地实现、待集成）：最终校准计量与联合恢复旧快照退休已落地；相关 200、guards9 194 通过，详见 TESTS。未验证真实 TUI/飞书、mc4 原线程、真实模型缓存及 Linux 全量；不推送、不部署。
 wsempty2（2026-10-09，本地实现，待复核）：已复现原端点六失败；宿主 is_probe 请求局部豁免完整空工具/视觉探测，
 业务空输出恢复、阳性证据、失败传播与原预算不改；最终30个去重测试文件777通过、20 xfailed，完整范围见 TESTS 与本轮交接。

@@ -654,7 +654,7 @@ def _notice_details(row: dict) -> dict[str, object]:
 
 def _verbose_level(value: object) -> str:
     level = str(value or "off").strip().lower()
-    return level if level in {"off", "on", "full"} else "off"
+    return level if level in {"off", "on", "full", "stream"} else "off"
 
 
 # LLM: JSON reads produce lists while in-process atomic updates may return tuples before a reload;

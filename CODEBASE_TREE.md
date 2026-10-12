@@ -1,5 +1,25 @@
 # Codebase Tree
 
+IM 多任务和公共包的新长期入口及关键文件职责（均复用原 Store，不增加第二套任务账）：
+
+```text
+|-- agent_py_agent/agent/conversation/execution_threads.py  # 独立执行线程和准确来源引用
+|-- agent_py_agent/agent/conversation/im_delegation.py  # 宿主真实派工、等待和主模型汇总
+|-- agent_py_agent/agent/scheduler/execution_policy.py  # 新 IM 计划隔离线程策略
+|-- agent_py_agent/agent/settings/im_task_preferences.py  # 每发送者当日偏好及到期解析
+|-- agent_py_agent/agent/gateway_parts/im_dispatch_policy.py  # 入站回执冻结执行方式
+|-- agent_py_agent/agent/gateway_parts/im_task_routing.py  # 辅助模型结构路由和原任务派发
+|-- agent_py_agent/agent/gateway_parts/delegation_control.py  # 当日委派显式命令
+|-- agent_py_agent/tests/test_im_delegation_ingress.py  # 真实 HTTP 排队、重送和关闭快照
+|-- agent_py_agent/tests/test_im_delegation_runtime.py  # 原创建服务、G1、恢复及收口组合
+|-- agent_py_agent/tests/test_im_delegation_preferences.py  # 零点、DST、重启和发送者隔离
+|-- agent_py_agent/tests/test_im_execution_threads.py  # 调度、线程和投递来源隔离
+|-- agent_py_agent/tests/test_public_capability_packages.py  # 公共发现、授权、升级与撤销
+`-- docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md  # 本轮证据与交接
+```
+
+临时更新关键文件：`agent/gateway_parts/status_projection.py` 只读 TUI 同代上下文、角色与权限；`cli/chat_parts/tui_application.py` 接管单调重绘计时；`adapter/progress_draft.py` 沿原 pending 保存编辑消息身份。新回归 `tests/test_tui_im_preview.py` 与 `tests/test_im_progress_draft.py` 验证时间跳变、管理员绑定、群聊 mention、退出清理与进度恢复。方案见 [TUI/IM 临时更新](docs/design/TUI_IM_PREVIEW.md)。
+
 ## AGENTS 第 6 轮（mc2-agentsr6，2026-10-09）
 
 ```text
@@ -139,6 +159,14 @@
 ## 发布与开发入口
 
 ```text
+|-- scripts/private_release/             # 临时离线发行构建、校验、原子更新和本地模型配置辅助
+|   |-- build.py                         # 同源展示快照、业务字节码、逐文件清单和自解压载荷
+|   |-- installer.py                     # 显式安装路径、数据保留、活动进程检查和原子版本切换
+|   |-- configure.py                     # 不回显密钥的 OpenAI 兼容模型配置
+|   |-- prepare_runtime.sh               # 构建期从原 wheel 安装自包含 headless 依赖
+|   `-- prepare_bwrap.sh                 # Ubuntu 20.04 重建同源 bubblewrap 与离线运行库
+|-- agent_py_agent/tests/test_private_release.py # 离线安装/更新、坏包、数据保留、UTF-8 和展示快照回归
+|-- docs/guides/PRIVATE_OFFLINE_RELEASE.md # 无桌面 Ubuntu 内网安装、固定数据位置和后续更新说明
 |-- agent_py_agent/agent/gateway_parts/event_points.py # B4 Gateway 提示/回合/控制回执的最小事件投影装配；关闭零安装读取
 |-- agent_py_agent/tests/test_plugin_event_gateway.py # B4 真实队列/控制回执/Gateway 请求观察与发布故障隔离
 |-- agent_py_agent/tests/test_plugin_event_runtime.py # B4 生产 Registry/宿主自动执行与真实子代理父链的三身份观察
@@ -287,6 +315,8 @@
 |   |-- drama-text-a/methods/visible-characters.md # 从成稿回填可见与画外人物，解释字面诊断边界
 |   |-- drama-text-a/templates/review.md # 人与模型使用的审阅反馈形状，不生成机器状态
 |   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
+|-- docs/design/IM_TASK_EXECUTION_POLICY.md # IM 定时后台、当天委派开关与零点失效的待实施合同
+|-- docs/design/PUBLIC_CAPABILITY_PACKS.md # 管理员公共发布、普通用户只读消费与原执行权限隔离的评估
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口
@@ -340,6 +370,15 @@
 |-- docs/tasks/DECISION_MODEL_NATURAL_CONFIG_FIX_HANDOFF.md # 普通 owner 配置工具可信线程/CAS 预览修复及真实读写验收
 |-- docs/tasks/DECISION_MODEL_CATALOG_GENERATION_HANDOFF.md # 原私有/共享模型目录持久代次及原锁 guard 交接
 |-- docs/tasks/TUI_RESOURCE_HANDOFF.md  # 资源性能线的归属、验收、限制和主线整合交接
+|-- agent_py_agent/agent/gateway_parts/execution_target.py  # 从原 claim 与 core 身份读取实际执行目标
+|-- agent_py_agent/agent/gateway_parts/execution_control.py  # 控制入口共用精确绑定和原锁内复核
+|-- agent_py_agent/agent/conversation/claim_execution_binding.py  # 后台 core 身份投影到原 claim 的 CAS 发布
+|-- agent_py_agent/tests/test_gateway_execution_target.py  # 等待请求、后台执行与过期控制组合
+|-- agent_py_agent/tests/test_tui_input_ordering.py  # FIFO、重复回执及接回失败重试
+|-- agent_py_agent/tests/test_background_input_recovery.py  # 异常尝试的预留释放与未知提交隔离
+|-- agent_py_agent/tests/test_background_steer_gateway.py  # 真实后台 core 与隔离 HTTP 的连续插话
+|-- docs/tasks/TUI_STEER_CONTROL_HANDOFF.md  # 插话与停止修复的独立实施、依赖和验收记录
+|-- docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md # 输入延迟、终端对照和临时发行验证边界
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
     |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
@@ -476,6 +515,7 @@ agent_py_agent/
 |   |   |-- tui_upgrade_follow.py       # Gateway 换安装后空闲原地切换到同版客户端：runtime_prefix 比对、空闲判定、UI 线程 execv、会话与 termios 交接
 |   |   |-- tui_permission_queue.py     # 主代理与多个 child 的工具审批统一 FIFO、原 request 回写和展示去重
 |   |   |-- tui_runtime.py              # session/queue/turn/model/tool/Gateway typed rows 到稳定 TuiEvent 的唯一 adapter
+|   |   |-- tui_application.py          # 单调时间重绘合并，避免校时后输入可读但屏幕不刷
 |   |   |-- tui_terminal.py             # OSC 终端标题、活动帧与退出清理
 |   |   |-- tui_transcript.py           # 详细 transcript 冻结视图、全文搜索与命中导航状态
 |   |   |-- tui_view.py                 # prompt_toolkit typed transcript control、frame/block cache、scroll anchor 与 overlay/footer
@@ -890,8 +930,11 @@ agent_py_agent/
 |   |   `-- project_facts.py           # 从项目显式声明识别验证命令，不按报告文字猜测已验证
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
 |   |   |-- registry.py                # adapter/配置/健康/绑定/capabilities/target validator 唯一注册表
-|   |   `-- service.py                 # 普通回复、主动消息、原生附件的统一发送出口
+|   |   |-- progress.py                # 原生可编辑进度的真实消息 ID 与结构化结果
+|   |   `-- service.py                 # 普通回复、主动消息、可编辑进度及附件的统一发送出口
 |   |-- adapter/
+|   |   |-- feishu_mentions.py         # WS/webhook 共用直接 @机器人判据，不按名称或正文猜
+|   |   |-- progress_draft.py           # 单条草稿在原 pending 内合并、限频、恢复与独立最终回复
 |   |   |-- delivery.py                # 原 pending/sent 外发意图、死亡核验、消息身份与 epoch CAS 回送
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
 |   |-- settings/                      # AgentConfig、加载、来源账本、runtime scope config
@@ -1035,6 +1078,7 @@ agent_py_agent/
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
+|   |   |-- channel_message_target.py  # 当前 owner 与本机管理员绑定目标的唯一外发解析
 |   |   |-- channel_message_tool.py    # 当前 owner 的统一 send_message；登记产物经原生通道发送
 |   |   |-- memory_search_tool.py      # memory_search：主模型只读检索本人正式长期记忆（默认关），与自动召回同范围、不写访问信号
 |   |   |-- session_search_tool.py     # session_search：本地历史检索/翻看/浏览，外加按 message_id 读原文与当前会话检索
@@ -1357,6 +1401,8 @@ agent_py_agent/
 |   |-- test_tui_history_paging.py      # 更早页渲染顺序、锚点、冻结页、子页/过期响应和单在途读取
 |   |-- test_conversation_history_paging.py # 中文长行字节边界、完整工作片、坏游标与追加竞态
 |   |-- test_tui_input.py               # slash/path 补全、菜单选择、queue 回取与 bracketed paste 输入回归
+|   |-- test_tui_input_responsiveness.py # 慢历史建议与候选读取期间的事件循环响应回归
+|   |-- test_gateway_input_target_lifecycle.py  # 请求与持久任务同名时的插话生命周期、目标隔离回归
 |   |-- test_plugin_command_catalog.py # 声明跨进程往返、版本变化及损坏载荷拒绝
 |   |-- test_plugin_observation.py     # 插件观察候选宿主合同：形状码、ID 稳定、投影、事件序新鲜度、动作候选复核
 |   |-- test_plugin_package.py         # 静态包篡改、归档预算、危险成员及不执行代码的合同检查；v5 观察声明往返与非法声明
@@ -1773,6 +1819,16 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `docs/design/PUBLIC_CAPABILITY_PACKS.md`：公共能力包的待实施发布范围、管理/使用权限矩阵、主子版本与消费用户隔离，记录当前内容包与插件总闸的耦合；不表示当前包已开放公共发布。
+- `docs/design/IM_TASK_EXECUTION_POLICY.md`：普通 IM 多任务的待实施策略，区分定时后台与当天自动委派，记录执行归属、主代理后台汇总、容量与跨零点验收；不表示当前包已具备该能力。
+
+- `docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md`：输入辅助工作的线程边界、原生 TUI/PuTTY 证据及发行交接。
+
+- `scripts/private_release/`：临时离线发行唯一构建/安装入口，产物放工作树外；不代替原源码 wheel 发布，不进行 main 合并。
+- `docs/guides/PRIVATE_OFFLINE_RELEASE.md`：版本、程序目录、数据目录、源码可见范围与原目录更新约定。
+
+实际执行读取与复核入口为 `gateway_parts/execution_target.py`、`execution_control.py`；后台发布入口为 `conversation/claim_execution_binding.py`。TUI 和 IM 都使用原 claim/run/attempt，不把回执或展示状态变成运行权威。测试与实施记录见 `docs/tasks/TUI_STEER_CONTROL_HANDOFF.md`。
 
 - `agent_py_agent/tests/test_plugin_m1_joint_e2e.py`：迁入sol2联合观察点，真实样例进程、Hub合并计数和只读展示共用原单池，临时各插件激活独立；手工processing、合成安装与启动适配不代产品启用/B7；缺Node event-watch样例时单独skip。
 - `agent_py_agent/tests/test_plugin_m1_joint_tool_gate.py`：强断言17j必备B5字段，四联合严格核真实征询、用户拒绝、零handler及目标event-watch非空三事件；两直接deny唯一行/info通过；jb6b 起两条 ask 账本用例转正（删掉空账本豁免），另补批准出口、不可交互、消费者答 unavailable 与同 owner 多行排序 4 条。无真实删除，非整期验收。
@@ -2382,3 +2438,5 @@ docs/
 - `agent/conversation/input_media.py`：入站媒体唯一文件/ref 合同；`cli/chat_parts/tui_media.py`、`tui_media_clipboard.py` 只处理输入动作。
 - `docs/design/TUI_INPUT_MEDIA.md`：新媒体能力、迁移、平台和供应商边界。
 - `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。
+
+- `docs/tasks/TUI_STEER_CONTROL_HANDOFF.md`：TUI 插话与停止 T 线的持续实施记录、测试证据和集成边界。
