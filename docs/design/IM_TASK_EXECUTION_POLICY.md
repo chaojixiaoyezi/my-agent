@@ -2,7 +2,7 @@
 
 状态：2026-10-12，本地实现与相关验收完成，未发布；不打包、不推送 main、不切换线上实例。
 
-IM 新计划绑定原 ThreadStore 的独立线程；TUI/旧计划保留原执行线程。
+IM 新计划绑定原 ThreadStore 的独立执行线程；TUI/旧计划保留原执行线程。L 整合后可显式按次 isolated；inherit 从原布置聊天读取最新合法模型选择，fixed 保存明确档案引用，凭据不复制。见 [整合记录](../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 `/delegate enable|disable|status` 保存逐发送者偏好，到部署时区下一零点失效；原入站回执冻结模式与版本。
 开启后原辅助模型按结构化 chat/task 路由；工作项进入原 SessionTaskStore/WakeStore，聊天主模型只生成接单回应。
 后台主代理经真实 ToolExecutor/G1 启动子代理，复用根/owner 容量，等待孩子后由原自然回复模型汇总；孩子提出结构化能力申请时，根只获得原父级裁决工具，不代做业务。

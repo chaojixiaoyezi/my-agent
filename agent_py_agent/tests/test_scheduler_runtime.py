@@ -408,7 +408,7 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
     )
 
     # 进 waiting 必须有结构化的后续工作事实：这里是一条尚未处理、指向该任务的子代理生命周期唤醒。
-    store.wakes.raise_signal({
+    completion = store.wakes.raise_signal({
         "thread_id": thread.thread_id, "root_task_id": claim.run_id,
         "reason": "subagent_runner_finished", "urgency": "normal", "now": 1_002,
     })
@@ -452,8 +452,9 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
     store.tasks.update_status(
         {"task_id": claim.run_id, "status": "completed", "now": 1_005}
     )
-    # Gateway 启动/轮询时走批量对账；这条路径保证一次生命周期通知丢失后，
-    # 重启仍会从同一个 task link 收敛，而不是让 waiting 永久悬挂。
+    # completed 不能抹掉待处理的完成通知；Gateway 重启仍从原 wake 继续，交付确认后才收口。
+    assert agent.scheduler_service.reconcile_waiting_runs(now=1_006) == []
+    store.wakes.mark_handled(completion.wake_signal_id, now=1_006)
     settled = agent.scheduler_service.reconcile_waiting_runs(now=1_006)
 
     assert settled == [claim.run_id]

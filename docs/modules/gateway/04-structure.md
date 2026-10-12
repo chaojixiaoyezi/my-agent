@@ -1,5 +1,7 @@
 # Gateway Structure
 
+L/T/IM 整合：`scheduler/execution_policy.py` 共用 IM 放置和显式策略规范；`scheduler/execution.py::_origin_bindings` 只桥接 canonical 计划来源。无第二个 scheduler 队列/安装账，来源模型与执行线程分开。见 [整合记录](../../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
+
 新增 `im_dispatch_policy.py`（受理快照）、`im_task_routing.py`（结构化选择与原任务派发）、`delegation_control.py`（显式当天命令）；执行策略存在原 ThreadStore，偏好存在 owner config/im_preferences.json，均不复制任务状态。`status_projection.py` 补后台任务与当天偏好。
 
 ## 插话生命周期与精确结算
@@ -9,6 +11,11 @@ input_delivery_service._reconcile_bound_input 复用 guidance 回执的目标类
 ## 实际执行与原回执
 
 execution_target 只投影原 claim、原 request write-ahead 绑定和 task link；后台 core 经 claim_execution_binding CAS 发布 run/attempt，控制服务在 T→M→task→claim 原锁边界复核。notices 只返回身份字段，TUI job/活动卡只负责观察与显示。普通输入 outbox v3 用显式 sequence，控制回执摘要 v4 覆盖 expected_execution；旧版本走明确读取/迁移。后台异常仅释放已退出精确 attempt 的 reserved，不重放 submitted 未知。
+长任务 L 线（2026-10-10，候选待复审）：请求边界切模、Goal 来源/CAS/进度、纯元数据、S1–S3 与 T 固定快照已实现；真实目录、子代理来源及等待最终投递缺陷已修。组合 1190 项、增量回归及严格 gate 通过，最终子代理原生 TUI 正确交付 12/686。固定同版 M2.7/200K/90% 长测自然运行 6 小时 00 分 27 秒，续接通过；公开 600/600、保留 1197/1200，单测和 README 仍失败。完成回执、交付缺口及 T/S11 待办见 [交接](../../tasks/LONG_TASK_RUNTIME_HANDOFF.md)；未推送或发布生产。
+
+## 长任务诊断元数据边界（2026-10-10）
+
+`conversation/models.ThreadGoal.public_dict(metadata_only=True)` 是 Goal 的白名单展示入口；`goal_tools.GetGoalTool` 在绑定、歧义列表和读取错误分支保留此边界。`scheduler/tool` 的 job/run 白名单先排除自由文本再输出，查询不会写入；元数据模式仅接受 list/get/history/status。名字、目标、提示词、回复预览、skill 名称及原始异常均不进入此模式，执行和交付状态分别保留。完整计划见 `docs/design/LONG_TASK_RUNTIME_REVIEW.md`。
 
 ## 空回复只读诊断（wsempty4，2026-10-09）
 
@@ -2829,3 +2836,10 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 - `conversation/turn_resume_notice.py`：新增 cause `provider_transient_resume` 文案；`PROVIDER_RESUME_LIMIT_NOTICE`（供应商续跑用满时的失败答复提示，TUI/IM 同源 user_error/error）。
 - 配置：`provider_transient_turn_resume_max_count`（agent_config.yaml / AgentConfig，0=关闭）。
 - `request_worker._finish_claimed_gateway_request` 重排失败退回分支：清标记后显式 `_settle_fallback_turn_guidance`（按 request_id 收口本回合插话，覆盖归档失败形态；收口失败静默，留给 recovery 兜底）；重排成功路径不变。
+# 长任务预检与采用字段
+
+`scheduler/execution_policy.py` 定义可直接用于 create/update 的预检对象，`scheduler/tool.py` 提供完整通用例子；prompt 不触发配置推断。`settings/model_scope.py::model_selection_snapshot` 为普通请求明确记录当前选择线程，定时执行在同一快照上替换来源。
+
+`scheduler/precheck.py` 的宿主 RunParams 使用原 `conversation.runtime._background_task_attributes` 装配 cwd/roots/Skill/任务身份，错误观察仅加原 tool_error_code 与 call_id；不建立另一套工作目录合同。
+
+定时生命周期续接：`conversation/runtime.py` 复用原 scheduler repository 核实持久任务来源，与 Goal 共用 durable_task_id/objective；历史查找及宿主事件一致排除该持久编号，普通额外用户请求缺失仍报错。真实第四候选失败记录保留，新增八项红绿回归及十文件 436 项通过，真机重验中。

@@ -1,5 +1,5 @@
-# LLM: Goal 只控制目标驱动的后续调度；暂停、清除不取消当前执行，不关闭任务资源。
-# 模块用途: 维护 owner/thread 内的目标与自动续跑开关，和回合中断、资源停止分别处理。
+# LLM: Goal 只控制后续调度；显式控制沿原 revision CAS 标记 user_control，暂停、清除不取消当前执行或关闭资源。
+# 模块用途: 维护 owner/thread 内的目标、来源与自动续跑开关，和回合中断、资源停止分别处理。
 from __future__ import annotations
 
 """Persistent `/goal` lifecycle operations for one exact owner conversation.
@@ -141,14 +141,16 @@ def _create_goal(request: GoalControlRequest) -> ConversationControlResult:
     )
 
 
-# LLM: 插话持久操作经 guidance 领域组件； Edits objective text without changing goal/task identity or workspace lineage.
-# 函数用途: 修改当前持续目标的内容，并同步任务索引中的显示说明。
+# LLM: 沿原 Goal revision CAS 修改目标，标明 user_control；不改变 goal/task 或 workspace 身份，旧模型收口必须使用旧 revision。
+# 函数用途: 保存用户修改的目标及来源，再同步任务显示说明，避免旧执行完成新目标。
 def _edit_goal(request: GoalControlRequest, current: object) -> ConversationControlResult:
     updated = request.store.goals.update(
         {
             "thread_id": request.thread.thread_id,
             "goal_id": current.goal_id,
             "objective": request.command.value,
+            "expected_revision": current.revision,
+            "transition_source": "user_control",
             "status": current.status,
             "expected_status": current.status,
         }
@@ -261,8 +263,8 @@ def _clear_goal(request: GoalControlRequest, current: object) -> ConversationCon
     )
 
 
-# LLM: Goal status changes use goal-id plus expected-status CAS to reject stale controllers.
-# 函数用途: 用比较后更新方式安全切换当前目标状态。
+# LLM: Goal 状态同时核对 goal-id、status 和 revision；user_control 是结构化控制入口的事实，不能从目标正文推导。
+# 函数用途: 在原事务切换目标状态并记录用户控制来源，拒绝过期控制器。
 def _transition_goal(request: GoalControlRequest, current: object, status: str):
     return request.store.goals.update(
         {
@@ -270,6 +272,8 @@ def _transition_goal(request: GoalControlRequest, current: object, status: str):
             "goal_id": current.goal_id,
             "status": status,
             "expected_status": current.status,
+            "expected_revision": current.revision,
+            "transition_source": "user_control",
         }
     )
 

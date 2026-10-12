@@ -69,7 +69,8 @@ def test_im_user_selects_shared_model_for_this_conversation_without_secrets(tmp_
     chosen = _run(base, "/model 1")
     assert chosen.ok is True and "本会话已选择 Shared-M2.7" in chosen.message
     again = _run(base, "/model")
-    assert "当前会话模型：Shared-M2.7" in again.message and "1. ● Shared-M2.7" in again.message
+    assert "当前会话已选模型：Shared-M2.7" in again.message and "1. ● Shared-M2.7" in again.message
+    assert "本进程暂无记录" in again.message
     assert "新会话默认：未设置" in again.message
 
     defaulted = _run(base, "/model default 1")
@@ -87,7 +88,7 @@ def test_selection_is_per_owner_and_other_users_are_unaffected(tmp_path, monkeyp
     shared, _ = add(admin, model_name="Shared-M2.7")
     set_shared_profile(admin, shared, True)
     assert _run(base, "/model 1", user="ou_a").ok is True
-    assert "当前会话模型：未选择" in _run(base, "/model", user="ou_b").message
+    assert "当前会话已选模型：未选择" in _run(base, "/model", user="ou_b").message
 
 
 def test_tui_keeps_bare_model_for_its_menu_and_serializes_text_forms():

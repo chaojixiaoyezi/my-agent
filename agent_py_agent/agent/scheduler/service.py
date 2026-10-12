@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from .active_run_closeout import settle_stale_waiting
+from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
 from .repository import (
     SchedulerConflictError,
     SchedulerNotFoundError,
@@ -153,15 +153,23 @@ class SchedulerService:
     # run id in both typed wake identity and metadata so background lifecycle reads one authority.
     # 函数用途: 预留到期执行并投递同一任务身份的会话唤醒，供 Gateway 后台实际运行。
     def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32) -> list[str]:
+        from .policy import queue_expired
+
         current = float(time.time() if now is None else now)
         self.repository.reserve_due_runs(now=current, limit=limit)
         wake_ids: list[str] = []
         for run in self.repository.queued_runs(now=current, limit=max(1, limit * 2)):
+            if queue_expired(run, current):
+                self._fail_without_execution(run, "SCHEDULER_QUEUE_EXPIRED", now=current, status="skipped")
+                continue
             skill_error = self._skill_reference_error(run)
             if skill_error:
                 self._fail_without_execution(run, skill_error, now=current)
                 continue
             try:
+                from .execution import prepare_execution
+
+                run = prepare_execution(self, run, now=current)
                 signal = self.conversation_store.wakes.raise_signal(
                     {
                         "thread_id": str(run["thread_id"]),
@@ -188,8 +196,8 @@ class SchedulerService:
                 self._fail_without_execution(run, "SCHEDULER_THREAD_UNAVAILABLE", now=current)
         return wake_ids
 
-    # LLM: 领取后准确回读pending并验证TaskLink；合法冻结仅保留交付claim，绑定异常结算，来源不明或结算CAS未成功均不消费。
-    # 函数用途: 领取原定时工作或欠发回复；不会重建旧任务或将终态重开为running，联测完整tick及历史收口。
+    # LLM: 领取后回读 pending 并验证 TaskLink；此处仅 claimed，原后台车道准入后才由 execution 写 running。
+    # 函数用途: 领取定时工作或欠发回复；绑定异常结算，合法冻结只重投，不把等待执行的时间记成工作开始。
     def claim_wake(
         self,
         signal: Any,
@@ -233,13 +241,20 @@ class SchedulerService:
         if pending_delivery is None:
             self.release(claim, now=now)
             return SchedulerWakeClaimResult("busy")
+        from .policy import queue_expired
+
+        if not pending_delivery and queue_expired(claimed, float(time.time() if now is None else now)):
+            from .execution import close_unstarted_task
+
+            close_unstarted_task(self, claimed, now=float(time.time() if now is None else now))
+            terminal = self.finish(claim, status="skipped", error_code="SCHEDULER_QUEUE_EXPIRED", now=now)
+            return SchedulerWakeClaimResult("stale" if terminal is not None else "busy")
         try:
             task_status = self._prepare_task_link(claim, now=now)
             terminal_status = scheduler_terminal_status_for_task(task_status)
             if task_status != "active" and terminal_status is None:
                 raise ValueError("scheduled task link status is unknown")
-            if not terminal_status and not pending_delivery:
-                self.repository.mark_run_running(run_id, claim.claim_id, now=now)
+            self.repository.check_run_claim(run_id, claim.claim_id)
         except Exception as exc:
             terminal = self.finish(
                 claim, status="failed", error_code="SCHEDULER_TASK_BINDING_INVALID",
@@ -366,7 +381,8 @@ class SchedulerService:
         except (SchedulerConflictError, SchedulerNotFoundError):
             return None
 
-    # LLM: 等待对账只读精确TaskLink并复用领取/交付同一终态映射；缺失、损坏或未知状态不结算。
+    # LLM: 等待对账读取精确 TaskLink、执行 claim 和 pending wake；completed 的最终投递未确认时不得结束 run。
+    #   最终回执已在原 run 同事务保存，再确认 wake；重启对账沿同一字段收口，不用第一片的旧回复代替最终回执。
     #   任务仍是 active 时走 active_run_closeout.settle_stale_waiting 这个结构化出口：停满宽限期且没有任何后续工作才结算，否则继续等。
     # 函数用途: 在对应持久任务真正终结后结算原waiting运行，不负责冻结回复重投或另建执行状态。
     def reconcile_waiting_run(
@@ -389,6 +405,8 @@ class SchedulerService:
         terminal_status = scheduler_terminal_status_for_task(task_status)
         if terminal_status is None:
             return settle_stale_waiting(self, run, now=now) if task_status == "active" else None
+        if terminal_status == "done" and waiting_completion_pending(self, run, now=now):
+            return None
         error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"
         try:
             return self.repository.finish_waiting_run(
@@ -464,12 +482,15 @@ class SchedulerService:
                     return "SCHEDULER_SKILL_REFERENCE_INVALID"
         return ""
 
+    # LLM: 先取原 claim；从未开始的 TaskLink 只按精确归属关闭，不删除或重建记录，终态仍由原仓库 CAS。
+    # 函数用途: 结算开始前过期或不可执行的 run，避免排队阶段留下活动任务。
     def _fail_without_execution(
         self,
         run: dict[str, object],
         error_code: str,
         *,
         now: float,
+        status: str = "failed",
     ) -> None:
         claimed = self.repository.claim_run(
             str(run.get("run_id") or ""),
@@ -478,12 +499,15 @@ class SchedulerService:
         )
         if claimed is None:
             return
+        from .execution import close_unstarted_task
+
+        close_unstarted_task(self, claimed, now=now)
         claim_id = str(claimed.get("claim_id") or "")
         self.repository.finish_run(
             str(run["run_id"]),
             claim_id,
             SchedulerRunFinish(
-                status="failed",
+                status=status,
                 error_code=error_code,
                 error_message="scheduled run failed before model execution",
                 now=now,

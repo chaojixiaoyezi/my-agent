@@ -9,6 +9,7 @@
 原问题有三层原因：一是等待请求占住显示位置，使 UI 目标与后台实际执行者错位；二是输入对账把同名运输 request 的结束当成持久 task 的结束；三是旧提交批次或显示接回失败会阻碍后继消费/观察。修复分别落在原执行绑定、typed 生命周期结算、原提交账本与原 TUI outbox，没有靠提示词要求模型“记得看插话”。
 
 本轮没有切换正在工作的生产安装。严格 gate 的最终定向组合为 863 passed、4 个既有 xfail；1.8 另有 41 项核心回归及 63 项恢复提示/UI 回归通过。九组真机记录、实际失败分支和剩余边界见下文。
+状态：用户已授权开始；核心插话与控制修复已在独立分支实现，在 192.168.1.8 原生 TUI + MiniMax-M2.7 验证。完整 T01—T26 仍有下表列出的缺口；本记录不代表可以切换生产。
 
 ## 范围、基线与环境
 
@@ -79,6 +80,7 @@
 - Ruff 曾报新测试导入顺序，已修正。strict code-size 当前 hard=0；最终 gate 结果见下。
 - 未运行全仓 pytest：改动规模未达到项目约定门槛；按受影响模块定向验证。
 - 最终去重组合覆盖 30 个受影响测试文件：**863 passed、4 个既有 xfail、0 failed、0 error**，耗时约 112 秒；JUnit 共 867 项。前一版 29 文件为 854 passed。另在 1.8 的 Linux/Python 3.11 上运行四个新增回归入口 **41 passed**，恢复提示/UI 三文件 **63 passed**；不同组合不相加。
+- 最终去重组合覆盖 29 个受影响测试文件：**854 passed、4 个既有 xfail、0 failed、0 error**，耗时约 138 秒；JUnit 共 858 项。另在 1.8 的 Linux/Python 3.11 上运行四个新增回归入口，**41 passed**。
 - **本地严格 gate 全部通过**：focused pytest、Ruff、doc sync、strict code-size（hard=0）、diff、clean-package。clean-package 首次因九个新增文件尚未登记 Git 而拒绝，登记后复跑通过。线上 CI 未作为验收来源。
 
 最终定向测试的可复现命令：
@@ -140,6 +142,9 @@ python3 scripts/check_clean_package.py .
 - 独立证据归档 `evidence-review.tar.gz` 的 SHA256 为 `3f1a9b330a04a529de4fc9deb0792651ad46a5262a158501ab50c644912a6e86`，包含合成 TUI 录制、动作、manifest、67 条白名单原账投影、19 条模型使用记录、17 个 attempt 及 Linux JUnit；不含测试凭据或现有任务正文。
 - 后续 R6—R9 证据为 `evidence-extended.tar.gz`，SHA256 **`05819d592e08900ee94d1961d064e69c475011bf9054f85ad588c08e2ef6f893`**；包含四个原生 TUI 的动作/录制/manifest、阶段对齐、前后原账投影和 Linux 回归报告，同样只含本轮合成任务。
 - 收尾：所有测试 TUI 正常退出；候选 Gateway 在 pending=0、processing=0、running claim=0 后正常停止。测试目录、源码和证据保留，自动 Compact 临时阈值已恢复；既有 8420 的原 PID 165438 仍在。见 `extended-closeout.json`。
+- 第一版源码归档 SHA256：`c19b31ea0422c8b60ae79bea1e4a6138ca4fb0c66794efd7e24f4ceeec02a88e`；第二版为 `d99bfbf5d1c290ca0cf244a4b81930a214f3030754a28b908ac5a82e69d250d1`。最终本轮候选归档为 `da16e10c8599fc5f4e13841892eb242b4a115919c33924e2f199864884e586ee`。
+- 测试机系统时钟与开发机相差约五天。以下先后关系按测试机同一时钟和原账身份核对，不拿跨主机墙钟计算延迟。
+- 独立证据归档 `evidence-review.tar.gz` 的 SHA256 为 `3f1a9b330a04a529de4fc9deb0792651ad46a5262a158501ab50c644912a6e86`，包含合成 TUI 录制、动作、manifest、67 条白名单原账投影、19 条模型使用记录、17 个 attempt 及 Linux JUnit；不含测试凭据或现有任务正文。
 
 ### R1：后台连续插话、Esc、再插话、stop
 
@@ -239,6 +244,11 @@ python3 scripts/check_clean_package.py .
 | T18 长模型/长工具 | R2 长采样解释与 R4 长工具取消；未知结果保持 |
 | T19 多 TUI/多线程 | R3 同线程及 R6 跨线程同时运行、输入隔离和停止隔离真机通过；跨 owner/thread 回归 |
 | T20 重连/Gateway 恢复/半写 | R3 客户端重连、R5 空闲重启、R7 工具在途 unknown 分支、R9 模型在途原身份自动恢复；原半写与对账回归 |
+| T16 Compact 三阶段插话 | 原恢复/释放回归及 R5 手动 Compact 前/中/后真机通过；自动 Compact 期间真实连续输入未完成 |
+| T17 等子代理时插话/中断 | 原控制/等待回归；R6 等待时连续输入、原任务接续和 stop 子代理通过；等待态 Esc 尚未单独验 |
+| T18 长模型/长工具 | R2 长采样解释与 R4 长工具取消；未知结果保持 |
+| T19 多 TUI/多线程 | R3 同线程及 R6 跨线程同时运行、输入隔离和停止隔离真机通过；跨 owner/thread 回归 |
+| T20 重连/Gateway 恢复/半写 | R3 客户端重连、R5 空闲重启、R7 工具在途崩溃的 unknown 分支；原半写与对账回归；可自动恢复的在途正例待补 |
 | T21 完整组合 | R1 控制序列通过；样例文件交付不计通过 |
 | T22 Compact 交接与空回复 | 见下述源码结论；历史前后台并存尚未归因，不宣称已修复 |
 | T23 维护排空恢复 | 公共内核依赖未集成，尚未实现 |
@@ -255,6 +265,7 @@ python3 scripts/check_clean_package.py .
 ## 尚未完成及集成依赖
 
 1. 核心组合、自动 Compact 三阶段、子代理等待、多线程隔离及在途崩溃的成功/未知结果分支已有真机证据；真实 IM 等明确测试群/会话与身份。小项边界仍逐条保留在矩阵中。
+1. 核心组合、子代理等待、多线程隔离及在途崩溃的未知结果分支已有真机证据；继续补自动 Compact、可自动恢复的在途正例和真实 IM，矩阵仍有明确缺口。
 2. 输入绑定 turn 与持久 task 不同的合法后继路径仍需进一步验证；保留 pending 本身不能证明下片已消费，不放宽 expected turn 校验来掩盖恢复缺口。
 3. T22：既有 Compact 公平让出和真实空回复分别有回归，但原现场因果仍未证明；不把 task active 当作成功交接，不关闭 USER_REPLY_UNAVAILABLE 的真实错误。
 4. T23：原单进程 restart drain 只统计 foreground admission/tool gate，不能代表后台、压缩、控制、子代理、资源和恢复事实全已排空。本轮尚未修改或宣称完成维护排空。
@@ -334,3 +345,4 @@ Ubuntu 三版为容器用户态兼容验证，原生 TUI/隔离为 1.8 的 openE
 - 分发目录仅含最终 `.run`、SHA256SUMS 和中文安装说明，不含构建源码、测试凭据或原生录制。
 
 建议下一步：交用户在 Ubuntu 22.04 试用，合并与生产发布继续等待用户指令；其它 agent 可只读审阅，不接管此测试实例。
+建议下一步：保留本核心切片，继续补自动 Compact/在途恢复及 T22 合成长任务归因。P6 公共内核与其多进程 adapter 适合由原负责线并行推进；本线随后接单进程 adapter，不能复制第二份 drained 判定。真实 IM 验收使用明确的测试群和身份。所有步骤保持独立测试 home/端口，生产切换前重跑集成后的严格 gate。

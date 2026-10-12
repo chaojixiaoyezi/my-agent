@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+L/T/IM 当前整合边界见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)：新 IM 计划仍固定后台，inherit 读取原来源聊天，显式 isolated 的通知继续固定原布置者；原 SessionTask 与 scheduler run 各守准确身份。来源长测质量缺口不算已修。
+
 IM 多任务与公共能力包的新语义见 [执行策略](docs/design/IM_TASK_EXECUTION_POLICY.md) 和 [公共包](docs/design/PUBLIC_CAPABILITY_PACKS.md)。实现复用 Thread/SessionTask/Wake/子代理原账；受理模式被冻结，关闭或跨零点不改变旧任务；普通自然回复由模型生成。公共安装默认 private，管理员显式 `--scope public` 只共享内容，用户执行权限不继承。此次不打包、不合并。
 
 2026-10-12 TUI/IM 临时更新已完成临时分支实现与验收（20261012.5，未合并）：管理员外发复用 send_message 的已绑定身份路由；新增 /verbose stream、状态数字和群聊直接 @门。重绘改用单调时钟，退出清鼠标在途输入；现场根因与真实 Feishu 送达仍需独立证据。见 [合同](docs/design/TUI_IM_PREVIEW.md)。
@@ -13,6 +15,7 @@ IM 多任务与公共能力包的新语义见 [执行策略](docs/design/IM_TASK
 2026-10-10 临时离线包：当前独立 TUI 分支已产出并验证 Ubuntu x86_64 自带运行时的无业务源码临时包；固定 prefix 管理版本与持久数据，尚不合并主线。构建/更新及可见范围见[指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md)。
 
 实际执行统一从原 claim、请求绑定和 core run/attempt 投影；TUI 观察 job 不再决定插话/停止目标。输入结算按原 target 类型隔离，outbox 按发送顺序恢复，预留与未知提交分别处理。本地定向回归已过；1.8 的 MiniMax-M2.7 原生 TUI 已验证连续插话、多 TUI 与等待 B、Esc 后续跑、stop 以及长 shell 进程树清理。旧 rejected 批次和 UI 接回失败的恢复缺陷也已修正；完整矩阵和 P6 维护排空尚未收口。见 [实施记录](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md)。
+长任务 L 线（2026-10-10，候选待复审）：请求边界切模、Goal 来源/CAS/进度、纯元数据、S1–S3 与 T 固定快照已实现；真实目录、子代理来源及等待最终投递缺陷已修。组合 1190 项、增量回归及严格 gate 通过，最终子代理原生 TUI 正确交付 12/686。固定同版 M2.7/200K/90% 长测自然运行 6 小时 00 分 27 秒，续接通过；公开 600/600、保留 1197/1200，单测和 README 仍失败。完成回执、交付缺口及 T/S11 待办见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；未推送或发布生产。
 
 wsempty4（2026-10-09，本地实现、待集成）：USER_REPLY_UNAVAILABLE在原失败路径保留最后逻辑调用形状/原始输出类型长度、现有空正文预算及canonical压缩间隔；仅无正文白名单，未知None，不改重试/交付或response_decision。验证边界见TESTS和DESIGN_LEDGER。
 

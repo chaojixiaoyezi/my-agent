@@ -112,6 +112,8 @@ def _goal_with_fuse(
 ) -> ThreadGoal:
     from dataclasses import replace
 
+    from .goal_transition import goal_transition_event
+
     metadata = {**current.metadata, FUSE_METADATA_KEY: next_state}
     if next_state.get("reason_code") != NO_PROGRESS_REASON_CODE:
         return replace(current, metadata=metadata)
@@ -121,6 +123,8 @@ def _goal_with_fuse(
         time_used_seconds=current.time_used_seconds + store.clock.take_elapsed_seconds(current),
         updated_at=current_time,
         revision=current.revision + 1,
+        transition=goal_transition_event(current, status="paused", revision=current.revision + 1,
+                                         now=current_time, source="no_progress_fuse"),
         metadata=metadata,
     )
 

@@ -1,10 +1,17 @@
 # Gateway 维护状态
 
+2026-10-12 L/T/IM 本地整合完成：原 IM 后台线程与 L 每次隔离策略组合，inherit 读取原聊天，冻结通知沿原计划引用与索引复核。工作树已整合，79 文件 1801 项及真机 smoke 通过，未发布；见 [整合记录](../../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
+
 2026-10-12 IM 多任务：原入口 receipt 冻结发送者 `/delegate` 模式；结构化辅助路由、短接单与独立 SessionTask/Wake 派工已接，后台原 ToolExecutor/G1 真建孩子，待终态后原模型汇总。联合验收见 [交接](../../tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
 
 ## TUI 插话目标修复（2026-10-09，实施中）
 
 T 线主链已修复：真实 claim/core 代次统一控制，typed 生命周期对账、FIFO、重复/失败回执接回和精确预留释放已覆盖。356 项最新组合通过；1.8 原生 TUI + MiniMax-M2.7 已证明三条输入均 consumed、Esc 换执行继续、stop 后 Goal paused/claim cancelled，Compact 为 0。两个 TUI 与等待 B 组合、真实长 shell 进程树停止、自动 Compact 三阶段输入、子代理停止及跨线程隔离也已通过；在途崩溃未知结果沿原合同暂停，恢复提示已修正。完整矩阵和公共 P6 drain 接线仍在进行，见 docs/tasks/TUI_STEER_CONTROL_HANDOFF.md。
+长任务 L 线（2026-10-10，候选待复审）：请求边界切模、Goal 来源/CAS/进度、纯元数据、S1–S3 与 T 固定快照已实现；真实目录、子代理来源及等待最终投递缺陷已修。组合 1190 项、增量回归及严格 gate 通过，最终子代理原生 TUI 正确交付 12/686。固定同版 M2.7/200K/90% 长测自然运行 6 小时 00 分 27 秒，续接通过；公开 600/600、保留 1197/1200，单测和 README 仍失败。完成回执、交付缺口及 T/S11 待办见 [交接](../../tasks/LONG_TASK_RUNTIME_HANDOFF.md)；未推送或发布生产。
+
+## L 线 O1 与控制绑定（2026-10-10，本地候选已实现）
+
+get_goal、schedule 只读动作与 gateway_status 支持纯元数据模式，错误、候选列表及嵌套 run 同样排除正文。模型视图区分保存、绑定、待采用和实际请求；控制绑定导入 T 固定快照，原生停止的 Goal 事务补 user_control。双插话与停止已有原生 TUI 分项证据，T 完整矩阵仍按原交接继续。
 
 ## 不可交付回复诊断（wsempty4，2026-10-09，本地实现、待集成）
 
@@ -1615,3 +1622,12 @@ ae 的 C3 真实补测里，模型用 `run_command` 的 `unzip -p` 从 owner 插
 - **改动**：`conversation/host_notices.queue_turn_host_notice(agent, source, code, text, details=)` 给工具用：会话编号只读本轮 task_attributes，请求编号只读本轮运行参数 request_id，记进 details.turn_request_id；`request_execution._turn_tool_notices` 把这些提示并进收尾批次（同一 host_notice 流事件、同一 final 提交，提交即已读）。别的来源（定时任务、后台检测）回合中途到的提示不带本请求编号，仍按原规则留给下一轮；后台续跑里工具排的提示也留给下一条前台回复。
 - **使用方**：learnpack 她自己装包、开安装单时的宿主提示（`capability/learnpack_notices`）。
 - **验证**：`test_host_notices.py` 新用例（真实工具调用里排提示：当轮在工具之后发布、进 channel_delivery、提交后不再待送达；同轮别的来源的提示留到下一轮）；变异见 TESTS.md learnpack 第五轮。
+# 长任务组合真机复验补充
+
+L/T 第二候选通过 1190 项组合回归和严格 gate，原测试 Goal 在更新 Gateway、原 session TUI 重连后继续执行。首次真实创建定时任务时模型未填 precheck，仍按失败保存；工具 schema 原生适配及创建/清除合同通过，现补清通用参数说明后另起新会话复验。详见长任务报告，不将模型声称成功当作结构化配置。
+
+预检真机出现 PATH_NOT_FOUND 后，宿主只读片已改用原后台请求属性装配，保留原工具错误码；相关 91 项通过，新包真机待复验。活动 Goal 扩容及双插话结果、一次本地夹具隔离失误按事实记入长任务报告。
+
+定时生命周期续接：`conversation/runtime.py` 复用原 scheduler repository 核实持久任务来源，与 Goal 共用 durable_task_id/objective；历史查找及宿主事件一致排除该持久编号，普通额外用户请求缺失仍报错。真实第四候选失败记录保留，新增八项红绿回归及十文件 436 项通过，真机重验中。
+
+原生停止验证已确认真实进程退出与文件停止增长；Goal 暂停来源漏记由同事务补 user_control，前台及轮间停止回归覆盖。

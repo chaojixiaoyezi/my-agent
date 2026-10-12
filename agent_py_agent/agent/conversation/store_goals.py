@@ -20,6 +20,7 @@ from .goal_progress_fuse import (
     record_goal_continuation_fuse,
     reset_goal_continuation_fuse,
 )
+from .goal_transition import goal_transition_event, goal_with_accounted_usage
 from .models import (
     THREAD_GOAL_OBJECTIVE_MAX_CHARS,
     THREAD_GOAL_STATUSES,
@@ -310,7 +311,7 @@ class GoalStore:
         return goal
 
     # LLM: Compare exact Goal/status/content revision before mutation; usage accounting never increments this revision.
-    # 函数用途: 原子保存目标并拒绝过期草稿；保留用量和历史，不把模型计费刷新误判为编辑冲突。
+    # 函数用途: 原子保存目标及同次变更来源，拒绝过期草稿；模型计费刷新不作为内容编辑。
     def update(self, request: dict[str, Any]) -> ThreadGoal | None:
         thread_id = str(request.get("thread_id") or "").strip()
         requested_status = str(request.get("status") or "").strip().lower()
@@ -385,6 +386,11 @@ class GoalStore:
                 time_used_seconds=next_time_used,
                 updated_at=current_time,
                 revision=current.revision + 1,
+                transition=goal_transition_event(
+                    current, status=status, revision=current.revision + 1, now=current_time,
+                    source="budget" if status == "budget_limited" and status != requested_status else str(request.get("transition_source") or "unknown"),
+                    context=request.get("transition_context"), objective_changed=bool(objective and objective != current.objective),
+                ),
             )
             return _goal_collection_payload(
                 [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
@@ -488,7 +494,7 @@ class GoalStore:
         return deleted
 
     # LLM: Charge only the exact active goal; reaching the budget is a system-owned status transition.
-    # 函数用途: 原子累计目标 token 和活跃耗时，并在达到预算时标记 budget_limited。
+    # 函数用途: 原子累计用量，达到预算时记录预算停止来源；不覆盖完成声明或提升验证结论。
     def account_usage(self, request: dict[str, Any]) -> ThreadGoal | None:
         thread_id = str(request.get("thread_id") or "").strip()
         expected_goal_id = str(request.get("goal_id") or "").strip()
@@ -518,28 +524,7 @@ class GoalStore:
             if current is None or current.status not in allowed_statuses:
                 return data
             changed = True
-            tokens_used = current.tokens_used + token_delta
-            status = current.status
-            if (
-                current.status == "active"
-                and current.token_budget is not None
-                and tokens_used >= current.token_budget
-            ):
-                status = "budget_limited"
-            time_used = current.time_used_seconds + time_delta
-            if (
-                current.status == "active"
-                and current.duration_seconds is not None
-                and time_used >= current.duration_seconds
-            ):
-                status = "budget_limited"
-            updated_goal = replace(
-                current,
-                tokens_used=tokens_used,
-                time_used_seconds=time_used,
-                status=status,
-                updated_at=current_time,
-            )
+            updated_goal = goal_with_accounted_usage(current, token_delta=token_delta, time_delta=time_delta, now=current_time)
             return _goal_collection_payload(
                 [updated_goal if goal.goal_id == current.goal_id else goal for goal in goals]
             )

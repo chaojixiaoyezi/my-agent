@@ -87,7 +87,11 @@ def execute_local_model_operation(agent: object, session_id: str, operation: str
         "owner_id": getattr(home, "owner_id", ""),
         "owner_home": str(getattr(home, "owner_home_dir", "")), "title": "会话设置",
     })
-    return execute_model_profile_operation(agent, operation, payload, thread_id=thread.thread_id)
+    from .model_scope import thread_model_execution_status
+
+    result = execute_model_profile_operation(agent, operation, payload, thread_id=thread.thread_id)
+    result["model_execution"] = thread_model_execution_status(agent, thread.thread_id)
+    return result
 
 
 # LLM: 调用方必须先用认证 channel binding 解析 thread；再次校验宿主 owner 防止误传其他用户的 store/thread。
@@ -140,8 +144,8 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
     return store.threads.update_atomic(thread_id, update).model_profile_id
 
 
-# LLM: 每工作片只解析一次配置引用，后续 scope 绑定不可变对象；不临时修改 owner selected 来模拟会话切换。
-# 函数用途: 为前台、后台、恢复和手动 Compact 取得同一个会话选定的模型配置。
+# LLM: 读取原 canonical 选择；请求边界由 selection_refresh 采用，不改 owner selected，也不热改在途响应。
+# 函数用途: 为前台、后台、恢复和手动 Compact 取得会话当前选定的模型配置。
 def thread_model_config(agent: object, thread_id: str):
     return selected_model_config(agent, profile_id=thread_model_profile_id(agent, thread_id))
 

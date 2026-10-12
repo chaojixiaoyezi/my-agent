@@ -1,5 +1,7 @@
 # 设计台账
 
+本轮 L/T/IM 整合（2026-10-12）：按用户要求三方吸收 `codex/long-task-runtime-l` 的选模、Goal 与调度改动，保留当前委派/公共包；修正 IM 来源模型和显式隔离的冻结收件人，1801 项及隔离真机 smoke 通过。组合版本保存在独立本地双父整合分支，原暂存布局保留；未打包/推送/合并 main。见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
+
 本轮实施记录：独立执行线程引用、受理时冻结 `/delegate` 策略、真实 ToolExecutor 宿主派工、孩子终态后模型汇总及 public 安装范围 v5 已落本地；测试边界和剩余验收见 [实施交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。旧评估章节是历史基线，当前命令和验收以交接文档为准。
 
 ## 管理员发布公共能力包（2026-10-12，本地实现与相关验收完成，未发布）
@@ -129,6 +131,21 @@ Linux 真模型和慢读取注入分别记录。详见[输入延迟交接](docs/
 ## TUI 插话与停止修复（2026-10-09，实施中）
 
 实际执行统一从原 claim、请求绑定和 core run/attempt 投影；TUI 观察 job 不再决定插话/停止目标。输入结算按原 target 类型隔离，outbox 按发送顺序恢复，预留与未知提交分别处理。本地定向回归已过；1.8 的 MiniMax-M2.7 原生 TUI 已验证连续插话、多 TUI 与等待 B、Esc 后续跑、stop 以及长 shell 进程树清理。旧 rejected 批次和 UI 接回失败的恢复缺陷也已修正。后续真机补验了自动 Compact 前/中/后输入、等待子代理和跨线程停止隔离；在途工具崩溃保留 unknown，恢复提示不再提前宣称已续跑。完整矩阵和 P6 维护排空尚未收口。见 [实施记录](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md)。
+长任务 L 线（2026-10-10，候选待复审）：请求边界切模、Goal 来源/CAS/进度、纯元数据、S1–S3 与 T 固定快照已实现；真实目录、子代理来源及等待最终投递缺陷已修。组合 1190 项、增量回归及严格 gate 通过，最终子代理原生 TUI 正确交付 12/686。固定同版 M2.7/200K/90% 长测自然运行 6 小时 00 分 27 秒，续接通过；公开 600/600、保留 1197/1200，单测和 README 仍失败。完成回执、交付缺口及 T/S11 待办见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；未推送或发布生产。
+
+## 长任务 L 线（2026-10-10，本地候选已实现、待复审）
+
+唯一事实源仍为 thread、GoalStore、scheduler repository 与模型调用账。候选已实现请求边界显式选模、Goal 变更及完整进度计数、元数据投影和 S1–S3 策略；不增加质量硬门。定时开始在后台车道准入后记录，预检同范围可取消，经原工具归档与事件账保存证据，完整输出的宿主观察不使用模型预览；检查点随原 done 事务提交。字段、默认值、恢复与来源交付见 [调度合同](docs/design/SCHEDULER_EXECUTION_POLICIES.md)，真实失败样本及未完成矩阵见 [长任务报告](docs/design/LONG_TASK_RUNTIME_REVIEW.md)。T 控制绑定已按固定候选快照集成；新版 AGENTS 来源合同仍待上游，不复制第二套身份或学习排除名单。
+
+预检目录复用原后台属性装配，保留原工具失败码，真机 changed/no_change/失败均已取证。定时持久来源沿原 repository 核实；waiting 结束还须核原 claim 与 pending wake，先保存最终回执、后确认 wake 和原 run；空指针与省略保持不同，公开 schema 对齐已有 null 语义。最终原生 TUI 回收和文件交付通过，长任务质量失败与 Compact 第 19 代错误另行分析。
+
+固定版本长任务复验已自然结束：官方 MiniMax-M2.7、200K/90%，同一 Gateway 连续六小时，主/子级共 18 代 Compact；持续运行通过，交付完整性未通过。配置触发线与输出预留容量边界不同：实际 max_tokens=50000 时，共享 200K 窗口还须遵守 150K 输入容量边界。沿现有 context_pressure/compact 和结构化事件说明，不另建阈值或改测试输出预算，详见长任务报告末节。
+
+新实测待分析：第 4 代摘要因 provider_invalid_summary_shape 进入完整机械回退，达到 426286 字符，一次读取后再次压缩；第 5 代恢复到 4808 字符并继续工作。沿现有 Compact 生成事实设计记录原辅助调用形状、完整回退与候选/实际容量对照，保持原 refs 覆盖和 checkpoint/CAS；不另造摘要状态源。本轮未修改该链，固定版本长测与后续 Compact 诊断修复分开，证据见长任务报告末节。
+
+同轮子级容量线索（待诊断）：worker-4 五代检查点保留同两条早期带产物引用的工具回执，压缩后投影从 41632 升至 117323，最终仍 DONE。先核现有 compact_tool_partition 的引用可覆盖判据、tool_ir_history 的连续前缀运行事实回收及完整请求分项，再决定是否修复；目前尚未证明这就是现场增长原因，不放宽未知引用覆盖。详见长任务报告末节。
+
+完成声明反馈（待修）：真实 Goal 完成时 verification=not_evaluated、open_count=9，原 goal_tools._goal_response 仍产生无条件 Goal achieved 指引；原工具账还保留已知单测失败，最终未披露。推荐让完成回执和 closeout 消费既有验证、进度、工具操作及产物 refs，准确提示声明/未核验/未关闭项，由模型返工或说明；不新增质量硬门、第二套状态或按自然语言判完成。README 示例失败、原公开检查通过与保留集失败各自保留，不互相覆盖。
 
 ## 不可交付回复诊断（wsempty4，2026-10-09；本地WIP、部署窗口暂停，未集成部署）
 

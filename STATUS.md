@@ -1,8 +1,11 @@
 # 当前状态
 
+L/T/IM 整合（2026-10-12，本地整合验收完成）：来源 `51767a3c6` 已三方整合到当前临时工作树，冲突保留双方功能；新来源/冻结通知组合 5 项通过，79 文件 1801 项通过，隔离 Linux 真模型/真子进程/SSH TUI smoke 通过。原长测交付质量问题仍开放，未发布。见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
+
 IM 多任务和公共包（2026-10-12，本地实现与相关验收完成，未发布）：定时 IM 独立线程、当日 `/delegate`、真实孩子执行和父模型汇总、公共内容包 v5 已落地。739 项联合回归与新增权限用例通过；Linux 官方 MiniMax/真实孩子、SSH TUI 和到期调度通过。真实飞书出站未验；立即触发真实复测已进入计划管理，保留原 APPROVAL_REQUIRED 确认边界。未打包、未推送/合并、未切换线上。见 [交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
 
 临时离线包（2026-10-10，独立分支，未合并）：`0.3.0-tui-preview.20261010.2` 自带 CPython 3.11，业务模块仅字节码；固定 `/app/my-agent-preview/data`，沿原 owner 目录布局。三版 Ubuntu 断网容器安装/更新、普通账户与 HOME 改变、1.8 原生 MiniMax-M2.7 TUI/工具、随包沙箱及真实历史更新恢复通过。发布相关组合 81 passed/3 skipped，控制组合 49 passed，最终安装器 8 passed；各组合有重叠，不累加。严格静态门通过，线上 CI 未作为验收来源；主线/生产继续等待用户指令。见[发行指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md)与[交接追加](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md#临时离线发行追加记录2026-10-10)。
+长任务 L 线（2026-10-10，候选待复审）：请求边界切模、Goal 来源/CAS/进度、纯元数据、S1–S3 与 T 固定快照已实现；真实目录、子代理来源及等待最终投递缺陷已修。组合 1190 项、增量回归及严格 gate 通过，最终子代理原生 TUI 正确交付 12/686。固定同版 M2.7/200K/90% 长测自然运行 6 小时 00 分 27 秒，续接通过；公开 600/600、保留 1197/1200，单测和 README 仍失败。完成回执、交付缺口及 T/S11 待办见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；未推送或发布生产。
 
 compactview（07/c1，2026-10-09，本地实现、待集成）：最终校准计量与联合恢复旧快照退休已落地；相关 200、guards9 194 通过，详见 TESTS。未验证真实 TUI/飞书、mc4 原线程、真实模型缓存及 Linux 全量；不推送、不部署。
 wsempty2（2026-10-09，本地实现，待复核）：已复现原端点六失败；宿主 is_probe 请求局部豁免完整空工具/视觉探测，

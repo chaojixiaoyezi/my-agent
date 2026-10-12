@@ -95,6 +95,8 @@ def start_model_call_record(
         f"{uuid.uuid4().hex[:8]}"
     )
     backend = getattr(agent, "backend", None)
+    from ...settings.model_scope import model_selection_metadata
+
     ledger.started(
         ModelCallStartedParams(
             call_id=call_id,
@@ -110,6 +112,7 @@ def start_model_call_record(
                 "thread_id": str((getattr(params, "task_attributes", None) or {}).get("conversation_thread_id") or ""),
                 "logical_call_id": logical_call_id,
                 "physical_attempt": physical_attempt,
+                "model_selection": model_selection_metadata(agent),
                 "first_token_timeout_estimate": estimate.to_dict(),
             },
         )

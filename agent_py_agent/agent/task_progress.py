@@ -61,6 +61,22 @@ def read_task_progress_report(root: str | Path, run_id: str) -> tuple[dict[str, 
     return progress, load_error
 
 
+# LLM: 使用原 task-path 身份和 owner root；计数覆盖完整账本，open_ids 只是有界投影，不从摘要、标题或产物猜覆盖。
+# 函数用途: 为 Goal 收口提供无正文的进度事实；没有清单表示未知，不表示全部完成。
+def goal_progress_metadata(agent: object, task_id: str) -> dict[str, Any]:
+    from .agent_core.runtime.owner_roots import runtime_owner_root
+    from .agent_core.runtime.task_identity import conversation_task_progress_ledger_id
+
+    ledger_id = conversation_task_progress_ledger_id(getattr(agent, "conversation_store", None), task_id)
+    progress, error = read_task_progress_report(runtime_owner_root(agent), ledger_id)
+    items = progress.get("items") or []
+    open_ids = [item["id"] for item in items if not task_progress_status_is_closed(item.get("status"))]
+    return {"ledger_id": ledger_id, "state": "unavailable" if error else "tracked" if items else "untracked",
+            "revision": (progress.get("display_plan") or {}).get("revision"),
+            "counts": progress.get("counts") or {}, "open_count": len(open_ids), "open_ids": open_ids[:64],
+            "ids_truncated": len(open_ids) > 64, "verification": "not_evaluated"}
+
+
 def _normalize_existing_task_progress(root: str | Path, run_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
     payload, load_error = _read_json_file_report(progress_path(root, run_id))
     if not payload:

@@ -15,6 +15,7 @@ def save_goal_objective(agent, store, goal, *, objective: str, expected_revision
         updated = store.goals.update({
             "thread_id": goal.thread_id, "goal_id": goal.goal_id, "objective": text,
             "expected_revision": expected_revision,
+            "transition_source": "user_control",
         })
         if updated is None:
             return None

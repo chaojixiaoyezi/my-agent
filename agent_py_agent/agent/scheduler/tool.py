@@ -18,6 +18,14 @@ from ..tooling.models import (
     ToolRuntimePolicy,
 )
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+from .execution_policy import (
+    EXECUTION_SCHEMA,
+    PRECHECK_SCHEMA,
+    normalize_execution,
+    normalize_precheck,
+    validate_execution_for_agent,
+)
+from .policy import normalize_policy
 from .repository import (
     SchedulerConflictError,
     SchedulerJobCreateRequest,
@@ -42,6 +50,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
             "网关重启后仍会恢复；支持一次、固定间隔和五段 cron。"
             "create 只登记未来计划，不会立即运行正文；run_now 才是立即触发。用户要求建好定时计划但不现在执行时，"
             "应创建计划，不需要再索要一次确认，也不能只用 task_progress 保存计划草稿冒充定时计划。"
+            "可显式设置独立上下文、固定模型、重叠与失败策略；需要变化检查时在 precheck 对象填写 tool_name 和 arguments。"
         ),
         input_schema={
             "type": "object",
@@ -88,8 +97,18 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "cron": {"type": "string", "description": "五段 cron 表达式（分 时 日 月 周）。"},
                 "timezone": {"type": "string", "description": "IANA 时区，如 Asia/Shanghai。"},
                 "misfire_grace_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "错过后允许补执行的秒数。"},
+                "policy": {"type": "object", "description": "可选运行策略；不提供保持原行为。超宽限可跳过或合并补一次，失败只影响以后周期，不重放已执行动作。",
+                    "properties": {
+                        "misfire": {"type": "string", "enum": ["skip", "coalesce"]},
+                        "queue_timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "预留后最长排队时间；0 不限制。"},
+                        "failure_pause_after": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败多少次后暂停；0 不自动暂停。"},
+                        "failure_backoff_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败指数退避基数，最长七天；0 不退避。"}},
+                    "additionalProperties": False},
                 "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "固定到计划的当前可用 Skill 稳定 ID。"},
+                "execution": EXECUTION_SCHEMA,
+                "precheck": PRECHECK_SCHEMA,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "list/history 的返回条数。"},
+                "metadata_only": {"type": "boolean", "description": "list/get/history/status 只输出状态、时间和编号，排除名字、提示词、回复预览及原始错误正文。"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -110,6 +129,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
             examples=(
                 '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90}',
                 '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai"}',
+                '{"tool":"schedule","action":"create","name":"资料更新","prompt":"汇总资料变化","schedule_kind":"every","every_seconds":600,"precheck":{"tool_name":"read_file","arguments":{"path":"source.txt"}}}',
                 '{"tool":"schedule","action":"list"}',
                 '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
             ),
@@ -120,6 +140,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 调度读写都经原 repository；元数据查询不得改变鉴权、生命周期或持久字段。
+# 类用途: 管理当前 owner 的计划并查询运行和交付状态。
 class ScheduleTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
@@ -149,8 +171,15 @@ class ScheduleTool(BaseTool):
             input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
         )
 
+    # LLM: 元数据模式只读；已知拒绝零写入，异常消息可能带路径或任务正文，必须在失败投影前去掉。
+    # 函数用途: 校验动作后调用调度账本，将存储失败转换成可诊断原因码。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
+        metadata_only = params.get("metadata_only", False)
+        if not isinstance(metadata_only, bool):
+            return _error("metadata_only 必须是布尔值", "TOOL_INVALID_ARGUMENTS")
+        if metadata_only and action not in {"list", "get", "history", "status"}:
+            return _error("纯元数据模式仅支持查询动作", "TOOL_INVALID_ARGUMENTS", metadata_only=True)
         if action not in {
             "create",
             "list",
@@ -170,22 +199,27 @@ class ScheduleTool(BaseTool):
         try:
             return self._execute(repository, action, params)
         except ScheduleValidationError as exc:
-            return _error(str(exc), "SCHEDULER_INVALID_SCHEDULE")
+            return _error(str(exc), "SCHEDULER_INVALID_SCHEDULE", metadata_only=metadata_only)
         except SchedulerNotFoundError as exc:
-            return _error(str(exc), "SCHEDULER_NOT_FOUND")
+            return _error(str(exc), "SCHEDULER_NOT_FOUND", metadata_only=metadata_only)
         except SchedulerConflictError as exc:
-            return _error(str(exc), "SCHEDULER_CONFLICT")
+            return _error(str(exc), "SCHEDULER_CONFLICT", metadata_only=metadata_only)
         except OwnerQuotaExceeded as exc:
-            return _error(str(exc), "OWNER_DISK_QUOTA_EXCEEDED")
+            return _error(str(exc), "OWNER_DISK_QUOTA_EXCEEDED", metadata_only=metadata_only)
         except OwnerQuotaUnavailable:
             return _error("owner 配额策略当前不可用，已拒绝写入", "OWNER_QUOTA_UNAVAILABLE")
         except (OSError, SchedulerRepositoryError, ValueError) as exc:
             # 存储异常可能发生在落盘期间，工具无法证明副作用是否已发生。
-            return _error(str(exc), "SCHEDULER_UNAVAILABLE", effect_outcome="unknown")
+            return _error(str(exc), "SCHEDULER_UNAVAILABLE", effect_outcome="not_started" if metadata_only else "unknown", metadata_only=metadata_only)
+        except Exception:  # noqa: BLE001 - 元数据查询的未知失败也不能回显自由文本
+            if not metadata_only:
+                raise
+            return _error("", "SCHEDULER_UNAVAILABLE", metadata_only=True)
 
-    # LLM: list 以权威 job 和 active-run 快照投影，遵守声明的 limit 并返回截断事实；写入仍由 repository CAS 管理。
-    # 函数用途: 执行定时动作，列表不再忽略用户的条数上限，也不把截断当作全部。
+    # LLM: list/get/history 的元数据模式贯穿嵌套 run 投影；读取原账本，写入仍由 repository CAS 管理。
+    # 函数用途: 执行定时动作，列表保留截断事实，诊断查询排除正文和名字。
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
+        metadata_only = params.get("metadata_only", False) is True
         if action == "status":
             return _success(action, {"scheduler": repository.runtime_snapshot()})
         if action == "list":
@@ -198,6 +232,7 @@ class ScheduleTool(BaseTool):
                         _job_projection(
                             job,
                             include_prompt=False,
+                            metadata_only=metadata_only,
                             active_run=active_runs.get(str(job["job_id"])),
                         )
                         for job in jobs[:_limit(params)]
@@ -219,6 +254,7 @@ class ScheduleTool(BaseTool):
                     "job": _job_projection(
                         job,
                         include_prompt=True,
+                        metadata_only=metadata_only,
                         active_run=active_runs.get(str(job["job_id"])),
                     ),
                     "load_error_codes": run_errors,
@@ -230,7 +266,7 @@ class ScheduleTool(BaseTool):
                 action,
                 {
                     "job_id": job_id,
-                    "runs": [_run_projection(row) for row in rows],
+                    "runs": [_run_projection(row, metadata_only=metadata_only) for row in rows],
                     "load_error_codes": errors,
                 },
             )
@@ -261,8 +297,8 @@ class ScheduleTool(BaseTool):
             )
         return _success(action, {"job": _job_projection(job, include_prompt=True)})
 
-    # LLM: 创建只从可信源 thread 的通道绑定决定隔离，宿主操作键固定身份；job 保存源/执行引用，不接受模型路由参数。
-    # 函数用途: 保存持久计划，IM 创建独立后台线程，TUI 和旧计划保持原行为。
+    # LLM: 先用原纯合同校验完整策略，再创建 IM 线程和 job；来源读可信绑定，模型不能改回送地址或凭据。
+    # 函数用途: 保存可恢复计划，IM 保持后台、TUI 沿原行为；非法执行/预检/失败策略不留下空后台线程。
     def _create(self, repository, params: dict[str, object]) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
@@ -279,6 +315,10 @@ class ScheduleTool(BaseTool):
             return skill_refs
         current = time.time()
         schedule = _schedule_from_params(self.agent, params, now=current)
+        execution = validate_execution_for_agent(self.agent, params.get("execution"))
+        policy = normalize_policy(params.get("policy"))
+        precheck = normalize_precheck(params.get("precheck"))
+        execution = validate_execution_for_agent(self.agent, params.get("execution"))
         source_thread_id = thread_id
         source_request_id = _source_request_id(self.agent, params)
         from .execution_policy import schedule_execution_thread
@@ -296,6 +336,9 @@ class ScheduleTool(BaseTool):
                 source_request_id=source_request_id,
                 source_thread_id=source_thread_id,
                 now=current,
+                policy=policy,
+                execution=execution,
+                precheck=precheck,
             )
         )
         return _success(
@@ -303,11 +346,15 @@ class ScheduleTool(BaseTool):
             {"job": _job_projection(job, include_prompt=True), "deduplicated": deduped},
         )
 
+    # LLM: 只更新显式给定字段，固定模型引用在写事务前校验，已经预留的 run 仍沿原冻结策略。
+    # 函数用途: 将模型工具参数转换成原仓库的计划修改，保留 null 关闭预检的含义。
     def _update_patch(self, params: dict[str, object]) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
-        for key in ("name", "prompt", "misfire_grace_seconds"):
+        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck"):
             if key in params:
                 patch[key] = params[key]
+        if "execution" in patch:
+            patch["execution"] = validate_execution_for_agent(self.agent, patch["execution"])
         if "skill_ids" in params:
             refs = _skill_refs(self.agent, params.get("skill_ids"))
             if isinstance(refs, ToolHandlerOutcome):
@@ -461,30 +508,42 @@ def _source_request_id(agent: object, params: dict[str, object]) -> str:
     return ":".join(item for item in (request_id, call_id) if item)
 
 
-# LLM: This projection is model-visible and owner-safe; current_run must come from the
-# repository's structured active ledger and must never be reconstructed from job prose.
-# 函数用途: 把定时任务和当前在途执行合并成模型可读状态，避免把长时间运行误判成漏触发。
+# LLM: 白名单投影原 job 与 active run；metadata_only 不读取 name/prompt/skill_refs，不从正文推导状态。
+# 函数用途: 展示计划及在途执行，支持没有名称或正文的状态诊断。
 def _job_projection(
     job: dict[str, object],
     *,
     include_prompt: bool,
     active_run: dict[str, object] | None = None,
+    metadata_only: bool = False,
 ) -> dict[str, object]:
+    from .policy import normalize_policy
+
     payload: dict[str, object] = {
         "job_id": job["job_id"],
-        "execution_mode": "background" if job.get("source_thread_id", job["thread_id"]) != job["thread_id"] else "current",
-        "name": job["name"],
+        "execution_mode": "background" if normalize_execution(job.get("execution"))["mode"] == "isolated" or job.get("source_thread_id", job["thread_id"]) != job["thread_id"] else "current",
         "status": job["status"],
-        "schedule": job["schedule"],
+        "schedule": ({key: value for key, value in job["schedule"].items()
+                      if key in {"kind", "at", "timezone", "every_seconds", "anchor_at", "expression"}}
+                     if metadata_only else job["schedule"]),
         "next_run_at": iso_from_timestamp(job.get("next_run_at")),
         "misfire_grace_seconds": job["misfire_grace_seconds"],
-        "skill_refs": job.get("skill_refs") or [],
         "version": job["version"],
         "last_run_at": iso_from_timestamp(job.get("last_run_at")),
         "last_run_status": job.get("last_run_status") or "",
         "last_error_code": job.get("last_error_code") or "",
-        "current_run": _run_projection(active_run) if active_run is not None else None,
+        "policy": normalize_policy(job.get("policy")),
+        "execution": normalize_execution(job.get("execution")),
+        "precheck_enabled": job.get("precheck") is not None,
+        "consecutive_failures": job.get("consecutive_failures", 0),
+        "backoff_until": iso_from_timestamp(job.get("backoff_until")),
+        "current_run": _run_projection(active_run, metadata_only=metadata_only) if active_run is not None else None,
     }
+    if metadata_only:
+        return payload
+    payload["name"] = job["name"]
+    payload["precheck"] = job.get("precheck")
+    payload["skill_refs"] = job.get("skill_refs") or []
     prompt = str(job.get("prompt") or "")
     payload["prompt" if include_prompt else "prompt_preview"] = (
         prompt if include_prompt else prompt[:240]
@@ -492,27 +551,40 @@ def _job_projection(
     return payload
 
 
-# LLM: Keep this bounded projection free of claim ids, process ids, prompts, and owner paths;
-# timestamps and typed status are sufficient for a caller to observe a live run.
-# 函数用途: 输出一次定时执行的安全状态摘要，既用于历史，也用于当前运行展示。
-def _run_projection(run: dict[str, object]) -> dict[str, object]:
-    return {
+# LLM: 白名单读取 run 状态、时间及预检原工具原因码；不读取回复/错误正文，执行成功不推导交付成功。
+# 函数用途: 展示执行、交付和预检错误来源；纯元数据模式排除自由文本。
+def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> dict[str, object]:
+    payload = {
+        "execution": normalize_execution(run.get("execution")),
+        "origin_thread_id": run.get("origin_thread_id", run.get("thread_id")),
+        "thread_id": run.get("thread_id"),
+        "precheck_status": (run.get("precheck_observation") or {}).get("status", "pending" if run.get("precheck") else "disabled"),
+        "precheck_observation": {key: value for key, value in (run.get("precheck_observation") or {}).items()
+                                 if key in {"status", "call_id", "observed_at", "error_code", "error_type", "tool_error_code"}},
         "run_id": run["run_id"],
         "job_id": run["job_id"],
         "trigger": run.get("trigger") or "",
         "status": run["status"],
         "scheduled_for": iso_from_timestamp(run.get("scheduled_for")),
+        "reserved_at": iso_from_timestamp(run.get("created_at")),
+        "queue_deadline_at": iso_from_timestamp(run.get("queue_deadline_at")),
+        "misfire_policy": run.get("misfire_policy", "skip"),
+        "lateness_seconds": run.get("lateness_seconds"),
         "claimed_at": iso_from_timestamp(run.get("claimed_at")),
         "started_at": iso_from_timestamp(run.get("started_at")),
         "waiting_since": iso_from_timestamp(run.get("waiting_since")),
         "updated_at": iso_from_timestamp(run.get("updated_at")),
         "ended_at": iso_from_timestamp(run.get("ended_at")),
         "delivery_status": run.get("delivery_status") or "",
-        "delivery_reason": run.get("delivery_reason") or "",
         "error_code": run.get("error_code") or "",
-        "error_message": run.get("error_message") or "",
-        "response_preview": str(run.get("response") or "")[:500],
     }
+    if not metadata_only:
+        payload.update({
+            "delivery_reason": run.get("delivery_reason") or "",
+            "error_message": run.get("error_message") or "",
+            "response_preview": str(run.get("response") or "")[:500],
+        })
+    return payload
 
 
 def _success(action: str, payload: dict[str, object]) -> ToolHandlerOutcome:
@@ -523,19 +595,19 @@ def _success(action: str, payload: dict[str, object]) -> ToolHandlerOutcome:
     )
 
 
-# LLM: Scheduler 的已知校验/CAS/不存在/配额拒绝都发生在 repository 写入前；必须显式
-#   投影 not_started，避免 ToolOperationCoordinator 把可修正冲突升级成 unknown。
-# 函数用途: 生成定时工具的结构化失败；只有存储执行期异常由调用方显式传 unknown。
+# LLM: 元数据错误只输出固定错误码；已知写前拒绝保持 not_started，写入异常才允许 unknown。
+# 函数用途: 生成结构化失败；元数据查询不回显含正文或私有路径的异常说明。
 def _error(
     message: str,
     code: str,
     *,
     effect_outcome: str = "not_started",
+    metadata_only: bool = False,
 ) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         "schedule",
         False,
-        json.dumps({"ok": False, "error": message}, ensure_ascii=False),
+        json.dumps({"ok": False, **({"error_code": code, "metadata_only": True} if metadata_only else {"error": message})}, ensure_ascii=False),
         error_code=code,
         effect_outcome=effect_outcome,
     )

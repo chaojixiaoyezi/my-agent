@@ -156,7 +156,7 @@ def test_goal_task_origin_is_not_reported_as_a_history_request(tmp_path, goal_st
     context = _goal_runtime_context(SimpleNamespace(), store, request)
     _prompt, _injections, trigger = _background_model_inputs(
         request, task_objective=context.task_objective, wake_prompt="唤醒说明",
-        goal_origin=(context.durable_goal_task_id, context.durable_goal_objective),
+        task_origin=(context.durable_task_id, context.durable_task_objective),
     )
 
     # Goal 的持久任务编号是任务来源，没有历史用户消息：不进 origin_request_ids，目标原文走 origin_task。

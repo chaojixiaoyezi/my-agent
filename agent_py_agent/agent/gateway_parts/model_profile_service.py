@@ -49,6 +49,8 @@ def handle_client_models(handler, server) -> None:
         # 向量模型是全局设置（不属于会话），管理员判定在 embedding_selection 里按已认证 owner 做。
         result = (execute_embedding_operation(config_host, operation, body) if operation in EMBEDDING_OPERATIONS
                   else execute_model_profile_operation(config_host, operation, body, thread_id=thread.thread_id))
+        if operation not in EMBEDDING_OPERATIONS:
+            result["model_execution"] = _model_execution_snapshot(server.agent, scope, config_host, thread.thread_id)
     except json.JSONDecodeError:
         handler._send_json(400, {"ok": False, "message": "模型配置请求格式错误。"})
         return
@@ -59,6 +61,17 @@ def handle_client_models(handler, server) -> None:
         handler._send_json(500, {"ok": False, "message": "无法读取或保存模型配置，原配置未被主动清除。"})
         return
     handler._send_json(200, result)
+
+
+# LLM: 状态只复用已加载的同 owner Agent；冷查询保持轻量，不初始化后端，也不把其他用户的活动映射过来。
+# 函数用途: 为模型菜单附加当前选择、待采用及最近请求状态。
+def _model_execution_snapshot(base_agent, scope, config_host, thread_id: str) -> dict:
+    from ..settings.model_scope import thread_model_execution_status
+    from .request_worker import _resolve_loaded_request_agent_for_owner
+
+    owner = resolve_gateway_scope_owner(base_agent, scope)
+    loaded = _resolve_loaded_request_agent_for_owner(base_agent, owner)
+    return thread_model_execution_status(loaded or config_host, thread_id)
 
 
 # LLM: 菜单与文字 /model 共用：只按已认证 scope 解析 owner 和会话线程，冷用户不物化完整 Agent；线程缺失时按原方式创建。
@@ -88,6 +101,7 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
         if command.operation == "vector":
             return _vector_text_control(host, command.value)
         listing = execute_model_profile_operation(host, "list", {}, thread_id=thread.thread_id)
+        listing["model_execution"] = _model_execution_snapshot(base_agent, scope, host, thread.thread_id)
         if command.operation == "view":
             return ConversationControlResult("model", True, render_model_choices(listing) + _admin_hint(base_agent, listing, scope))
         row = _choice_by_reference(listing, command.value)
@@ -107,7 +121,7 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
         )
     return ConversationControlResult(
         "model", True,
-        f"本会话已选择 {row['model_name']}，上下文 {row.get('model_context_window_tokens', '?')} tokens，下一条消息生效。",
+        f"本会话已选择 {row['model_name']}，上下文 {row.get('model_context_window_tokens', '?')} tokens。当前响应和已开始的工具结束后，下一次模型请求采用新选择。",
     )
 
 
@@ -220,13 +234,17 @@ def _choice_by_reference(listing: dict, reference: str) -> dict | None:
 #   默认行按结构化字段 default_source 标注：部署默认，或管理员指定的初始模型（普通用户）。
 # 函数用途: 把模型列表整理成聊天文字：当前会话模型、新会话默认、编号列表和用法。
 def render_model_choices(listing: dict) -> str:
+    from ..settings.model_selection_status import render_model_execution_status
     rows = _selectable_choices(listing)
     names = {row.get("id"): row.get("model_name") for row in listing.get("profiles", [])}
     current = listing.get("selected", "default")
     lines = [
-        f"当前会话模型：{names.get(current) or '未选择'}",
+        f"当前会话已选模型：{names.get(current) or '未选择'}",
         f"新会话默认：{names.get(listing.get('default_selected', 'default')) or '未设置'}",
     ]
+    execution = render_model_execution_status(listing.get("model_execution"))
+    if execution:
+        lines.append(execution)
     if not rows:
         lines.append("还没有可选模型。请让管理员在终端 TUI 的 /model →「默认模型与共享」里开放一个模型或指定初始模型，再发送 /model 查看。")
     else:

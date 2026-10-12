@@ -4,7 +4,7 @@
 #   job 周期不动。后续工作某一项读不出来时按"仍有后续工作"继续等（fail closed），打节流的结构化告警；只剩读不出、
 #   又停满宽限期的 6 倍，才按 SCHEDULED_TASK_FOLLOW_UP_UNREADABLE 结算，避免一个坏记录让任务永远等下去。
 #   管理员的人工出口是 /endtask（只要求执行树里没有正在跑的执行，不看后续工作事实）。改动时联查 scheduler/service.py 的 reconcile_waiting_run、conversation/runtime._finish_scheduler_wake_claim
-#   与 test_scheduler_waiting_deadlock。
+#   与 test_scheduler_waiting_deadlock、test_scheduler_execution。completed 也必须先排除正在执行或欠投递的生命周期片。
 # 模块用途: 决定一轮没做完的定时执行是继续等待后续事件，还是结算成受阻、放 job 按周期继续跑（2026-09-29 修复永久 waiting 死锁）。
 from __future__ import annotations
 
@@ -293,6 +293,19 @@ def _task_execution_claim_live_or_unknown(service: SchedulerService, run: dict[s
     if not claim:
         return False
     return _claim_may_still_execute(claim, thread_id, task_id, claim_scope_id)
+
+
+# LLM: TaskLink completed 只说明模型工作结束，不代表后台交付已提交；复用原 claim 和 FollowUpQuery 的 pending_wakes
+#   事实。原 wake 仅在交付确认后 handled，因此冻结重投期间也不能结束 run 或推进 checkpoint；未知保持 waiting。
+# 函数用途: 在等待任务成功收口前，检查是否还有执行者或待确认的生命周期通知，不读取回复正文。
+def waiting_completion_pending(service: SchedulerService, run: dict[str, object], *, now: float | None) -> bool:
+    from ..conversation.task_follow_up import FOLLOW_UP_PENDING_WAKES
+
+    if _task_execution_claim_live_or_unknown(service, run):
+        return True
+    facts = _follow_up(service, run, (), now=now)
+    return (facts is None or FOLLOW_UP_PENDING_WAKES in facts.present
+            or any(item == FOLLOW_UP_PENDING_WAKES for item, _code in facts.unreadable))
 
 
 # LLM: 只在已过宽限期时调用，unreadable_periods = 连续"只剩读不出"的时长 / 宽限期（宽限期由配置推出，门槛和

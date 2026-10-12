@@ -48,7 +48,8 @@ class GatewayStatusTool(BaseTool):
                         "是否统计本次 Gateway 生命周期的异常签名；默认 true。"
                         "只返回计数，不返回原始日志。"
                     ),
-                }
+                },
+                "metadata_only": {"type": "boolean", "description": "仅返回进程、队列、模型选择和状态元数据；不读日志诊断，不返回路径、地址或原始错误。"},
             },
             "additionalProperties": False,
         },
@@ -100,14 +101,28 @@ class GatewayStatusTool(BaseTool):
     def __init__(self, agent: object) -> None:
         self.agent = agent
 
-    # LLM: caller_model 与真实模型请求共用执行上下文绑定；仅读白名单，不泄漏 key/headers，也不热切正在工作的模型。
-    # 函数用途: 返回网关健康信息和本次真正配置的模型，防止多个会话共享网关时答成启动默认模型。
+    # LLM: caller_model 共用请求依赖；metadata_only 关闭日志读取并从入口白名单投影，绑定与实际 HTTP 事实不混同。
+    # 函数用途: 返回网关健康及模型选择状态，诊断可排除路径、地址和原始错误。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        metadata_only = params.get("metadata_only", False)
+        if not isinstance(metadata_only, bool):
+            return ToolHandlerOutcome("gateway_status", False, '{"error_code":"TOOL_INVALID_ARGUMENTS"}', error_code="TOOL_INVALID_ARGUMENTS")
+        try:
+            snapshot = self._snapshot(params, metadata_only=metadata_only)
+        except Exception:  # noqa: BLE001 - 元数据诊断不能从错误出口回显私有路径
+            if not metadata_only:
+                raise
+            return ToolHandlerOutcome("gateway_status", False, '{"error_code":"TOOL_EXECUTION_FAILED"}', error_code="TOOL_EXECUTION_FAILED")
+        return ToolHandlerOutcome(self.model_spec.name, True, json.dumps(snapshot, ensure_ascii=False))
+
+    # LLM: 只读现有 Gateway 快照和精确当前 thread 选择；错误保持未知，不猜测其他会话或启动默认模型。
+    # 函数用途: 组装完整状态或纯元数据状态，不修改模型、Goal 或后台运行。
+    def _snapshot(self, params: dict, *, metadata_only: bool) -> dict:
         include_diagnostics = params.get("include_log_diagnostics", True)
         snapshot = gateway_runtime_snapshot(
             self.agent,
             gateway_paths(self.agent),
-            include_log_diagnostics=bool(include_diagnostics),
+            include_log_diagnostics=bool(include_diagnostics) and not metadata_only,
         )
         config = getattr(self.agent, "config", None)
         backend = getattr(self.agent, "backend", None)
@@ -119,11 +134,49 @@ class GatewayStatusTool(BaseTool):
             "profile_id": str(source.get("profile_id") or ""),
         }
         snapshot["quarantined_wakes"] = _quarantined_wake_count(self.agent)
-        return ToolHandlerOutcome(
-            self.model_spec.name,
-            True,
-            json.dumps(snapshot, ensure_ascii=False),
-        )
+        current = getattr(self.agent, "_current_run_params", None)
+        thread_id = str((getattr(current, "task_attributes", None) or {}).get("conversation_thread_id") or "")
+        if thread_id:
+            from ..settings.model_scope import thread_model_execution_status
+
+            snapshot["model_selection"] = thread_model_execution_status(self.agent, thread_id)
+        return _metadata_projection(snapshot) if metadata_only else snapshot
+
+
+# LLM: 嵌套对象逐字段白名单，未来完整快照新增正文或地址不会自动泄漏；不复制 load_errors 或日志内容。
+# 函数用途: 将原 Gateway 快照转换成可供无正文诊断使用的状态。
+def _metadata_projection(snapshot: dict) -> dict:
+    result = {key: snapshot.get(key) for key in (
+        "schema", "status", "alive", "uptime_seconds", "quarantined_wakes",
+    )}
+    result["metadata_only"] = True
+    for group, keys in (
+        ("identity", ("pid", "process_start_time")),
+        ("heartbeat", ("updated_at", "age_seconds", "stale_after_seconds")),
+        ("queue", ("pending", "processing", "oldest_pending_age_seconds", "oldest_processing_age_seconds")),
+        ("caller_model", ("model_name", "backend", "source", "profile_id")),
+    ):
+        row = snapshot.get(group) or {}
+        result[group] = {key: row.get(key) for key in keys}
+    result["queue"]["inflight_total"] = ((snapshot.get("queue") or {}).get("inflight") or {}).get("total")
+    selection = snapshot.get("model_selection")
+    if isinstance(selection, dict):
+        result["model_selection"] = {key: selection.get(key) for key in (
+            "thread_id", "state", "reason_code", "pending", "pending_reason",
+        )}
+        for group, keys in (
+            ("selected", ("profile_id", "revision", "source", "selected_at")),
+            ("bound", ("model_name", "backend", "profile_id", "selection_revision", "explicit_revision", "adopted_at",
+                       "selection_source", "selection_thread_id", "scheduler_run_id")),
+            ("activity", ("phase", "updated_at")),
+            ("last_request", ("call_id", "request_id", "run_id", "task_id", "model_name", "backend", "status", "started_at", "finished_at",
+                              "profile_id", "selection_revision", "selected_at", "adopted_at", "provider_usage_reported",
+                              "selection_source", "selection_thread_id", "scheduler_run_id", "call_time_clock", "selection_time_clock",
+                              "cached_input_tokens", "cache_creation_input_tokens")),
+        ):
+            row = selection.get(group)
+            result["model_selection"][group] = {key: row.get(key) for key in keys} if isinstance(row, dict) else None
+    return result
 
 
 # LLM: 只数调用方 owner 的结案目录文件（store.wakes.attempts.quarantined_count，不读内容、不含归档）；读不到会话存储时

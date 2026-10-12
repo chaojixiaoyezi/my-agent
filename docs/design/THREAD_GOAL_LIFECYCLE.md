@@ -10,6 +10,12 @@ workspace 是控制输入的一部分，必须纳入持久回执的版本化摘�
 
 ## 当前改造决策
 
+L 线新增完成来源：`goal_transition.py` 在原 Goal 写事务记录最近变更 source、前后 revision、执行编号、验证引用与进度计数。模型 complete 是声明，验证始终标 `not_evaluated`；单次测试 passed/full 或 Todo 全勾选均不升级为业务验收通过。
+
+主 Goal prompt 和完成回执复用原 task-path 进度账本。计数读取完整集合，最多显示 64 个未完成 ID 并标截断；未建清单是 untracked，读失败是 unavailable，均不假称全部完成。不新增“必须列满 Todo”或质量硬门；已有 closeout 引导开关仍控制请求中的额外进度提示。
+
+用户编辑记录 `user_control`，预算耗尽记录 `budget`，无进展熔断记录 `no_progress_fuse`。用量记账不推进内容 revision；晚到用量不覆盖先前完成来源。扩大目标后旧模型持有的 revision 不得完成新目标。
+
 本节替代下文历史多目标试验的产品方向，下文保留为旧数据兼容与失败证据。
 
 - 一个代理对应一个 canonical agent thread，最多一个未结束 Goal（暂停、阻塞、预算受限也算未结束）。完成记录保留历史。

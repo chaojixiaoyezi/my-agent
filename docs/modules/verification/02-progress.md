@@ -1,5 +1,9 @@
 # Verification：开发推进
 
+## L 线 Goal 完成引用（候选）
+
+`verification_task_metadata` 沿原 owner/thread/task 精确查询最新验证事件，只返回 event_id/status/scope。缺库不创建，SQLite 以只读方式打开；允许 SQLite 原 WAL 读者产生自身协调文件，不写验证事件。Goal 保存引用时继续标 not_evaluated，未知或不支持的状态不伪造 passed；回归覆盖查询无业务写入、精确归属和正文排除。
+
 ## J16 第 9 节：观察截图 _meta 协商（vision2，2026-10-05，待非作者复审）
 
 - 宿主按当前模型档案的结构化 `model_input_modalities` 决定"要不要截图"：`tool_call_runtime` 写进 `trusted_run_context` → `executor._handler_arguments` 注入内部参数 `__observation_screenshot` → `mcp_registration._declared_proxy` 只给观察工具声明 → `observation_binding` 附进 `_meta` 扩展键 `my-agent/observation-screenshot`（v1）。

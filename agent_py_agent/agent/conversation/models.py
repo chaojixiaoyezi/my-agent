@@ -5,6 +5,7 @@
 # 模块用途: 保存会话、消息、模型版本与任务选择标记；选择来源不代表采用授权或永久固定。
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -448,6 +449,9 @@ class ConversationThread:
     model_selection_revision: int = field(default=0, kw_only=True)
     model_selection_source: str = field(default="unknown", kw_only=True)
     model_selection_last_explicit_revision: int = field(default=0, kw_only=True)
+    # LLM: 只由原线程选择版本事务打时间；旧记录未知为 None，不使用 thread.updated_at 推断选择时刻。
+    # 字段用途: 区分保存选择与实际采用的时间，普通会话更新不改变它。
+    model_selection_selected_at: float | None = field(default=None, kw_only=True)
     # LLM: 覆盖信封只存字段及 revision，不复制默认值、凭据或阶段计时；旧记录显式迁移为空覆盖。
     # 字段用途: 保存本会话临时决策偏好，删除字段即可恢复 owner/部署配置的继承。
     decision_settings: dict[str, Any] = field(default_factory=empty_decision_settings)
@@ -511,14 +515,17 @@ class ConversationThread:
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # LLM: 构造与 replace 都验证同一事实类型；有已知选择事件必须有原 profile 引用，不能靠空引用承载假事件。
-    # 函数用途: 在持久化前拒绝坏模型选择字段；默认未知仍允许读取历史线程。
+    # LLM: 构造与 replace 同源验证选择事实；选择时间缺失保持未知，非有限数或错误类型不得混入诊断。
+    # 函数用途: 在持久化前拒绝坏模型选择字段，旧线程缺少时间仍可读取。
     def __post_init__(self) -> None:
         _validate_model_selection_fields(
             self.model_selection_revision, self.model_selection_source, self.model_selection_last_explicit_revision,
         )
         if self.model_selection_revision and not self.model_profile_id:
             raise ValueError("已知模型选择缺少模型引用，原记录未修改。")
+        stamp = self.model_selection_selected_at
+        if stamp is not None and (type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp < 0):
+            raise ValueError("会话模型选择时间无效，原记录未修改。")
 
     # LLM: 原 v10 同次序列化选择事实、设置和历史/Compact/校准投影；不另写事件账或模型秘密，须同步旧记录迁移测试。
     # 函数用途: 将线程写成 JSON；方法账本为空时省略新增键，不改旧摘要或指纹字段。
@@ -553,6 +560,7 @@ class ConversationThread:
             owner_home=str(data.get("owner_home") or ""),
             model_profile_id=str(data.get("model_profile_id") or ""),
             **_model_selection_fields(data),
+            model_selection_selected_at=data.get("model_selection_selected_at"),
             decision_settings=decision_settings,
             title=str(data.get("title") or ""),
             status=str(data.get("status") or "active"),
@@ -979,19 +987,19 @@ class ThreadGoal:
     updated_at: float = 0.0
     revision: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
+    transition: dict[str, Any] = field(default_factory=dict)
 
     # LLM: Goal records cross process boundaries as plain JSON with no model-derived status aliases.
     # 函数用途: 把目标状态转换成持久化字典。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    # LLM: 公开目标编号供同会话精确选择；不公开任务路径、迁移快照或 owner 私有 metadata。
-    # 函数用途: 展示目标、状态与用量，多目标时可按稳定编号操作而不是猜名称。
-    def public_dict(self) -> dict[str, Any]:
+    # LLM: 白名单投影唯一 Goal 记录；metadata_only 不读取名字、目标正文或私有 metadata，保持默认展示兼容。
+    # 函数用途: 展示目标状态与用量；纯元数据诊断只提供编号、版本、时间和预算，不输出任务内容。
+    def public_dict(self, *, metadata_only: bool = False) -> dict[str, Any]:
         payload = {
             "goalId": self.goal_id,
             "threadId": self.thread_id,
-            "objective": self.objective,
             "status": self.status,
             "tokensUsed": self.tokens_used,
             "timeUsedSeconds": self.time_used_seconds,
@@ -999,12 +1007,20 @@ class ThreadGoal:
             "updatedAt": int(self.updated_at),
             "revision": self.revision,
         }
-        if self.name:
-            payload["name"] = self.name
+        if not metadata_only:
+            payload["objective"] = self.objective
+            if self.name:
+                payload["name"] = self.name
+        else:
+            payload["taskId"] = self.task_id
         if self.token_budget is not None:
             payload["tokenBudget"] = self.token_budget
         if self.duration_seconds is not None:
             payload["durationSeconds"] = self.duration_seconds
+        if self.transition:
+            from .goal_transition import public_goal_transition
+
+            payload["transition"] = public_goal_transition(self.transition)
         return payload
 
     # LLM: Unknown statuses remain visible for fail-closed validation in the store; they are not silently normalized.
@@ -1012,8 +1028,11 @@ class ThreadGoal:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ThreadGoal:
         metadata = data.get("metadata")
+        from .goal_transition import public_goal_transition
+
         return cls(
             goal_id=str(data.get("goal_id") or ""),
+            transition=public_goal_transition(data.get("transition")),
             thread_id=str(data.get("thread_id") or ""),
             objective=str(data.get("objective") or ""),
             task_id=str(data.get("task_id") or ""),

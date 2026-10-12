@@ -1361,6 +1361,21 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="当前请求没有可信会话绑定；不能猜测或新建目标会话。请从真实用户会话重新登记计划。",
     ),
+    "SCHEDULER_QUEUE_EXPIRED": ErrorContract(
+        code="SCHEDULER_QUEUE_EXPIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="本次定时运行尚未开始就超过计划的队列期限，已跳过；可调整执行模式或期限，后续周期使用新配置。",
+    ),
+    "SCHEDULER_PRECHECK_FAILED": ErrorContract(
+        code="SCHEDULER_PRECHECK_FAILED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="只读预检失败，未推进检查点；核对原工具账、权限和 JSON 指针，修改计划后由后续周期或显式运行再检查。",
+    ),
+    "SCHEDULER_ORIGIN_BINDING_CHANGED": ErrorContract(
+        code="SCHEDULER_ORIGIN_BINDING_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="独立定时执行的原会话绑定已变化；保留冻结答复，不猜测新接收者，也不重跑模型工作。",
+    ),
     "SCHEDULER_TASK_BINDING_INVALID": ErrorContract(
         code="SCHEDULER_TASK_BINDING_INVALID",
         category="state",

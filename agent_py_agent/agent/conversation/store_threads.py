@@ -109,7 +109,7 @@ def _get_or_create_bound_thread(store, request: dict) -> ConversationThread:
 
 # LLM: 原文件事务内校验身份与选择版本；omit_empty 的已知字段清空时移除旧键，未知扩展仍保持原样。
 #   由 ThreadStore.update_atomic 在原锁内调用；不读写独立状态，不让扩展合并复活已移除的会话方法。联测 store/commands。
-# 函数用途: 校验并合并一份线程更新，保留模型选择的单调性，尊重可选字段的清空。
+# 函数用途: 校验并合并线程更新；模型选择时间只在原选择版本提交时更新，其余更新保留旧时间。
 def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> dict:
     thread = ConversationThread.from_dict(payload)
     if not thread.thread_id:
@@ -120,6 +120,9 @@ def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> di
     if updated.thread_id != thread_id:
         raise DataCorruptionError(f"conversation thread updater changed identity: {thread_id}")
     _validate_model_selection_update(thread, updated)
+    updated = replace(updated, model_selection_selected_at=(
+        now() if updated.model_selection_revision != thread.model_selection_revision else thread.model_selection_selected_at
+    ))
     serialized = updated.to_dict()
     omitted = {item.name for item in fields(updated) if item.metadata.get("omit_empty") and item.name not in serialized}
     return {**{key: value for key, value in payload.items() if key not in omitted}, **serialized}

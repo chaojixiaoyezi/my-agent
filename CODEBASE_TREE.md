@@ -1,5 +1,7 @@
 # Codebase Tree
 
+本轮整合新入口：`agent_py_agent/tests/test_scheduler_im_l_integration.py` 验证 IM/调度策略共用；`docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md` 保存来源、冲突处理、证据和未发布边界。生产新模块沿 L 源分支的现有文件树条目，不再重复列第二套入口。
+
 IM 多任务和公共包的新长期入口及关键文件职责（均复用原 Store，不增加第二套任务账）：
 
 ```text
@@ -615,6 +617,7 @@ agent_py_agent/
 |   |   |-- decision_planning.py        # 原 Todo read 的当前未完成项精确优先级软建议
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- tool_request_capture.py    # 从真实运行参数共用捕获完整请求，不重复目录或上下文准备
+|   |   |-- tool_only_execution.py     # 宿主只读工具工作片，沿原身份、权限、取消令牌和收口
 |   |   |-- compact_request_recovery.py # 三宿主一次准备、完整候选计量和原CAS后同次发送
 |   |   |-- compact_active_projection.py # 精确保留IR与归档交接投影，保留原工具账和媒体插话
 |   |   |-- compact_tool_partition.py # 原生工具完整往返与归档同源分区，不完整和未知材料保留
@@ -627,6 +630,8 @@ agent_py_agent/
 |   |   |   |-- record_lesson_tool.py   # 子代理专属 record_lesson：身份取 runner 上下文，把一条可复用做法记进本 run 的 lessons.jsonl
 |   |   |   |-- turn_trigger.py         # 回合触发类型：生命周期唤醒以“# Host Event”开头、固定推荐短名单、本片注入不进后续重放
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
+|   |   |   |-- selection_refresh.py   # 请求安全点采用最新显式模型选择，保持原执行和工具身份
+|   |   |   |-- selection_history.py   # 换协议时保留工具/媒体并从原 Compact 来源恢复兼容历史
 |   |   |   |-- context_calibration_carry.py # owner 级按分词身份的校准比值缓存（O/data/context/calibration.json），线程观测对不上时回落
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
 |   |   |-- tool_loop/segment_planning.py # 仅按调用和实时查询选择并发段，不执行工具
@@ -745,6 +750,8 @@ agent_py_agent/
 |   |   |-- owner_recovery.py           # /recover owner：空 thread 历史 unknown 只读投影、集合确认码、批量共享 CAS 与幂等回执
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   |-- execution_target.py        # T 候选：原 claim/request/task 的实际执行投影与代次复核
+|   |   |-- execution_control.py       # T 候选：前后台共用的插话和停止目标解析
 |   |   |-- local_client_token.py       # G1：本机客户端持久凭据，缺则私有生成、宿主严格读取，不进模型环境
 |   |   |-- client_credentials.py       # G3：原请求头共用凭据选择，配置token优先；读不到时按 gateway_require_local_credential 降级或拒绝
 |   |   |-- http_routes.py              # G2a：实际HTTP分发和观察唯一同源，路由模板及四档属性
@@ -821,6 +828,9 @@ agent_py_agent/
 |   |   |-- store_usage.py              # 模型用量领域、累计增量去重及线程数字显示的原子更新
 |   |   |-- store_claims.py             # 执行租约的领取、续租、精确终态、恢复归属与旧账归档
 |   |   |-- store_goals.py              # 目标集合、内容版本 CAS、预算结算及共享时钟依赖
+|   |   |-- goal_transition.py          # 原 Goal 最近变更来源、版本、验证引用及进度元数据
+|   |   |-- unbound_thread_store.py     # 在原 ThreadStore 幂等物化无通道绑定的独立执行上下文
+|   |   |-- claim_execution_binding.py # T 候选：core 实际 run/attempt CAS 发布到原后台 claim
 |   |   |-- store_observations.py       # 观察事件构造、追加、待处理扫描与原子确认
 |   |   |-- store_wakes.py              # 唤醒入口、观察链接、投递冻结与消费确认
 |   |   |-- store_wake_publication.py   # 原去重记录冻结完整发布、固定身份恢复与纯读回执
@@ -923,7 +933,12 @@ agent_py_agent/
 |   |   |-- goal_clock.py              # 同一会话存储的前后台共享单调时钟，避免重复累计目标耗时
 |   |   |-- authority.py               # 标记会话 transcript 为当前多轮对话唯一事实源
 |   |   `-- task_promotion.py          # 任务工具触发提升、完成/中断候选选择与关闭
-|   |-- scheduler/                     # owner 持久 at/every/cron、CAS job/run 账本、claim/heartbeat 与同 thread 唤醒
+|   |-- scheduler/                     # owner 持久 at/every/cron、原 job/run/claim 与来源或独立上下文执行
+|   |   |-- execution.py               # 实际开工、独立线程、模型来源和冻结原会话交付
+|   |   |-- execution_policy.py        # 执行与预检配置的唯一规范及工具 schema
+|   |   |-- policy.py                  # 错过周期、队列期限、未来周期失败退避和暂停
+|   |   |-- precheck.py                # 原只读工具观察、变化判定和失败/无变化收口
+|   |   `-- run_preparation.py         # 原 run 上的来源冻结、claim 复核与预检观察 CAS
 |   |-- verification/                  # owner 被动验证事件、targeted/full 投影与文件写后 stale
 |   |   |-- runtime.py                 # 公共工具出口读取结构化执行结果，记录验证或文件修改
 |   |   |-- repository.py              # 按 owner/thread/task 保存事件和过期状态，不升级验证范围
@@ -968,7 +983,8 @@ agent_py_agent/
 |   |   |-- model_provider_operations.py # 锁内服务商/模型管理，密钥保留与显式清除
 |   |   |-- model_provider_network.py   # 用户主动目录 GET/短问候（可带未保存连接），不执行工具或创建任务
 |   |   |-- model_connections.py        # 按连接一次加多个模型（add_models）：连接去重、重复跳过、整批落盘
-|   |   |-- model_scope.py              # 主工作片冻结 config/backend/prompts，切换不热改在途执行
+|   |   |-- model_scope.py              # 逐请求依赖绑定与选模版本；不热改已经开始的响应
+|   |   |-- model_selection_status.py   # 原调用账的无正文模型、采用、阶段和缓存投影
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
 |   |   |-- cache_freshness.py          # 文件代次指纹与粗 mtime 窗口判断的唯一实现，供 json_io/响应轮询/子代理缓存共用
 |   |   |-- cancellation.py             # UI、Gateway 和工具共用的唯一进程内取消令牌与上下文绑定
@@ -1122,6 +1138,16 @@ agent_py_agent/
 |       |-- factory.py                 # 显式配置构造唯一后端，缺配置判据与调度共享
 |       `-- tool_protocol_adapter.py   # native 事件或显式完整 text 帧到 canonical ToolCall 的唯一适配口
 |-- tests/                             # 单元、集成、真实链路回归
+|   |-- test_background_input_recovery.py # T 候选：失败 attempt 的提交前输入精确释放
+|   |-- test_background_steer_gateway.py # T 候选：真实后台工作片的 Gateway 插话与停止
+|   |-- test_gateway_execution_target.py # T 候选：前后台活动目标、旧快照与 claim/attempt 归属
+|   |-- test_gateway_input_target_lifecycle.py # T 候选：输入绑定生命周期与同名旧请求隔离
+|   |-- test_tui_input_ordering.py      # T 候选：outbox 顺序、未知首条与迟到回执
+|   |-- test_runtime_model_selection_refresh.py # 真实 Gateway/工具配假 HTTP 的安全点选模及配置竞态
+|   |-- test_model_selection_history.py # Compact 原来源恢复、媒体保留和工具不重放
+|   |-- test_scheduler_execution.py    # 独立历史/模型、实际开工与原会话冻结交付
+|   |-- test_scheduler_policy.py       # 可控时钟的错过周期、排队期限及失败策略
+|   |-- test_scheduler_precheck.py     # 真实工具执行器的变化、失败、取消、恢复及检查点
 |   |-- fixtures/decision/jev_capability_rounding.json # 合成材料真实Jev响应的脱敏概率舍入replay，不含凭据
 |   |-- test_skill_proposals.py         # 自学习 S1：默认关闭、幂等提案、迁移不碰、确认拒绝矩阵、快照可见、runner 自动确认与 CLI 往返
 |   |-- test_parameter_registry.py     # 参数中心登记表：覆盖全部字段、YAML 说明（上方注释优先，其次行尾注释）、空说明基线、安全等级、凭据脱敏、搜索排序、派生实际效果、常用层级守卫
@@ -1790,6 +1816,10 @@ docs/
 |-- PRODUCT_FACTS.md                    # 当前功能与边界说明；发布风险统一指向 STATUS
 |-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
+|-- design/LONG_TASK_RUNTIME_REVIEW.md # 长任务问题、模块边界及 L 线实施验收
+|-- design/SCHEDULER_EXECUTION_POLICIES.md # 原调度链的上下文、模型、失败策略和预检合同
+|-- tasks/TUI_STEER_CONTROL_HANDOFF.md # T 核心候选的原交接与未完成矩阵
+|-- tasks/LONG_TASK_RUNTIME_HANDOFF.md # L/T 组合候选的源码、测试、真实验收与接手边界
 |-- design/MANAGED_BACKGROUND_PROCESS_SESSIONS.md # 后台命令 host 所有权、跨进程记录与安全回收设计
 |-- design/HOST_CONFIG_WRITE_GUARD.md # 宿主托管文件（配置、运行状态、任务核验记录）对模型只读、凭据对文件工具不可读（H3）的拦截层与已知边界
 |-- design/GATEWAY_LOCAL_TRUST.md # Gateway 本机来源信任收紧：回环不再自带信任、特权入口认宿主客户端凭据、模型命令沙箱按端口连不到 Gateway（定稿，实施中）
@@ -2440,3 +2470,10 @@ docs/
 - `agent_py_agent/tests/test_input_media.py`：字节、归属、历史恢复和媒体预算合同测试。
 
 - `docs/tasks/TUI_STEER_CONTROL_HANDOFF.md`：TUI 插话与停止 T 线的持续实施记录、测试证据和集成边界。
+- `docs/design/LONG_TASK_RUNTIME_REVIEW.md`：长任务 Goal、模型采用与持久调度的审查和 L 线执行依据。
+- `docs/design/SCHEDULER_EXECUTION_POLICIES.md`：S1–S3 的配置、同一执行身份、交付与检查点；实现入口为 `scheduler/execution.py`、`policy.py`、`precheck.py`、`run_preparation.py`。
+- `agent_py_agent/agent/agent_core/model/selection_refresh.py`、`selection_history.py`：显式选模安全点与历史兼容；只复用 canonical thread、原 Compact 和调用账。
+- `agent_py_agent/agent/agent_core/tool_only_execution.py`：宿主显式只读工具的原权限、取消、归档、事件与执行收口入口，不构造模型请求。
+- `docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md`：L/T 固定候选的验证、安装证据和剩余边界，作为后续评审导航。
+- `agent_py_agent/agent/conversation/goal_transition.py`：Goal 最近变更和进度投影，模型 complete 不等同独立验收。
+- `agent_py_agent/agent/gateway_parts/execution_target.py`、`execution_control.py`：T 候选从原 claim 与回合绑定读取、固定真实控制目标；L 组合沿同一入口。

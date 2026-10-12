@@ -28,8 +28,12 @@
 - 已有显式部署配置仍可选择，不复制密钥给客户端。新增密钥输入掩码显示，读取列表不返回密钥。
 - 保存只新增，不覆盖同名记录；使用稳定配置 ID 区分同名、不同接口/地址的模型。选择另行确认。
 - 「选择模型 → 对话模型」只改变当前 canonical 会话；同一用户其他 TUI/IM 会话不受影响。
-  「默认模型与共享 → 我的新会话默认模型」只初始化未来新会话，正在执行的工作片冻结原配置；当前 child 不被菜单中断。
+  「默认模型与共享 → 我的新会话默认模型」只初始化未来新会话；显式切当前会话模型在当前响应和已开始工具结束后、下一请求装配前采用，已有 child 保持自己的选择。
   会话固定编号及恢复语义见 [会话模型选择](SESSION_MODEL_SELECTION.md)。
+- `model_execution` 分开显示 selected、bound、pending、实际 last_request；保存不等于请求发出。
+  待采用阶段只读原活动投影的 thinking/responding/tool/compacting 等字段，缺失保持未知。
+  provider 未报告的缓存计数为 null；绑定时间是 Unix，调用时钟是 monotonic，不能混减。
+  定时 fixed 模型不等待原会话选模，inherit 读取来源会话；实际调用仍归执行线程。
 - 聊天文字形式 `/model`、`/model <编号>`、`/model default <编号>` 供 IM 与 TUI 使用（TUI 单独 `/model` 仍开菜单）：
   经 Gateway 控制面按已认证 scope 解析 owner/会话，与菜单共用同一轻量宿主和 `execute_model_profile_operation` 写入口；
   只做查看、会话选择和新会话默认，编号取同一次列表的可选行，不按模型名模糊匹配；不新增、不收发密钥、不显示接口地址。

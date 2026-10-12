@@ -1,5 +1,7 @@
 2026-10-12 临时更新收口：发行 20261012.5，输入计时、退出鼠标、状态/角色、群聊 mention、管理员绑定目标、单条流式恢复及长候选窗口已实现。定向回归与本地静态 gate 已通过；Ubuntu 24.04 真 TUI/官方 MiniMax 对照和真实 SSH 已验，真实模型原句发送由通道替身确认。现场校时关联与真实飞书客户端展示尚无证据，详见 docs/design/TUI_IM_PREVIEW.md。
 
+L/T/IM 整合（2026-10-12，验收完成）：新 `test_scheduler_im_l_integration.py` 五项覆盖真实工具/Store 的来源模型、冻结通知和非法配置零线程；联合 79 文件 1801 项和 Linux 官方模型 smoke 已通过，结果见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
+
 IM 多任务/公共包（2026-10-12，相关验收完成；739 项联合回归及新增权限/时区用例通过）：新五个合同/组合文件验证原 HTTP 入站快照、真实创建服务/G1、每日到期/DST/重启、调度独立线程、两用户公共读取/主子 grants/撤销/范围升级。配套回归包含 scheduler、Gateway 控制、SessionTask、运行收口、结构化后端。Linux 用单 Gateway 和官方 MiniMax-M2.7，在隔离 home 提交普通需求观察原账；出站 fake 适配器必须明确标记，不能称真实飞书实发。记录见 [交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
 
 2026-10-12 TUI/IM 临时更新：新增计时倒退对照、管理员绑定目标、群聊直接 mention、单条进度编辑/重启/失败不吞终态及退出真实 PTY 清理回归。当前开发验证见 `test_tui_im_preview.py`、`test_im_progress_draft.py`，验收结果待真实发行包复验后填写；合同见 docs/design/TUI_IM_PREVIEW.md。
@@ -49,6 +51,27 @@ Ubuntu 20/22/24 断网安装、原位置更新的 413 文件内容保留、发�
 ## TUI 插话目标修复（2026-10-09，局部验证）
 
 实际执行统一从原 claim、请求绑定和 core run/attempt 投影；TUI 观察 job 不再决定插话/停止目标。输入结算按原 target 类型隔离，outbox 按发送顺序恢复，预留与未知提交分别处理。本地定向回归已过；1.8 的 MiniMax-M2.7 原生 TUI 已验证连续插话、多 TUI 与等待 B、Esc 后续跑、stop 以及长 shell 进程树清理。旧 rejected 批次和 UI 接回失败的恢复缺陷也已修正。后续真机补验了自动 Compact 前/中/后输入、等待子代理和跨线程停止隔离；在途工具崩溃保留 unknown，恢复提示不再提前宣称已续跑。完整矩阵和 P6 维护排空尚未收口。见 [实施记录](docs/tasks/TUI_STEER_CONTROL_HANDOFF.md)。
+## 长任务同版本复验（2026-10-10，自然终态已验）
+
+用户指定官方 MiniMax-M2.7 与 90% 压缩阈值；固定已安装的 `134f43c3`、200K 档案及同一 Gateway，未在运行中升级、重启或切档案。新目录通过原生 TUI 提交一次原 MiniQL 需求，公开 600/隐藏 1200 检查不变。6 小时 00 分 27 秒后模型自然完成 Goal，来源 model_tool/revision 2/verification=not_evaluated；随后主任务与六个子代理全部终态。主级 829 次工具完成、11 代 Compact，子级合计 838 次工具完成、7 代 Compact；持续执行与自动续接通过，交付完整性未通过。身份和完整边界见 [报告](docs/design/LONG_TASK_RUNTIME_REVIEW.md#同一候选长任务复验2026-10-10已自然结束)。
+
+三小时处测试者曾设定六小时观察窗口；约五小时二十一分钟用户追加“汇报下情况但是不要停”后取消停止计划，最终没有发送 `/stop` 或第二次业务需求。Goal 时间/token 预算始终无限制。714 份状态观察只见同一 Gateway PID/启动时间，最大采样间隔 30.274 秒；开跑、各小时及最终 1610 个安装文件均一致，SPEC/cases/check 未变。主级按 call_id/attempt_id 精确关联 813 个实际 HTTP 200 请求，全部 M2.7、temperature 1、max_tokens 50000；子进程未装 wire 包装，不把主级记录当作子级逐请求抓包。
+
+自然终点后的独立只读验收：公开 600/600、保留 1197/1200、额外泛化/错误合同 10/11；保留集失败为 NULL 排序和空/全 NULL 的 DISTINCT SUM，额外失败为歧义列未拒绝。模型自写单测 40/48，SQLite 参考执行该套测试也有 5 项失败；README 示例 TypeError，8 条 core smoke 未使用结果断言。表达式列标签另有 60/118 处差异，不替换原计分。输入不变、源码前后 SHA256 一致，外部检查器和输出仅在证据目录，未向模型反馈或代修产物。
+
+本轮新增现场问题：已收到单测 8 项失败回执，最终报告仍未披露；完成时原进度账 open_count=9，Goal 回执虽保留 not_evaluated，却仍输出无条件 Goal achieved 指引。Compact 第 4 代一次完整机械回退膨胀到 426286 字符，随后恢复；worker-4 保留两条早期产物引用且五代压缩后水位从 41632 升到 117323，最终仍 DONE，因果分析待分项证据。代码地点和修复方向见报告末节。本轮产品代码未改，不重复旧代码回归；文档收口 doc sync、diff check、clean-package 已通过，线上 CI 未作为验收来源。
+
+## 长任务 L 线（2026-10-10，候选待复审）
+
+候选代码 `134f43c3aea166be0210dd79dbbb3973143455b4`。L/T 组合 53 文件 1190 passed；各阶段增量 98、91、436、142、503、24、50 passed，存在重复用例，不能相加。清单、JUnit、命令及轮次边界见 [交接](docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md)；最后一轮 nullable schema 修复是 50 passed，代码候选严格 gate 为 `v7-strict-gates.json`，最终文档及完整基线检查为 `final-review-gates.json`。
+
+关键有效红绿：合法 owner 内 read_file 的 cwd 错误；定时子代理来源误认（6 failed/2 passed→8 passed）；停止来源 unknown（2 failed→两文件 142 passed）；waiting 在投递确认前错误确认 checkpoint（四例全红→十二文件 503 passed）；nullable 指针 schema 与规范化不一致（1 failed/1 passed→三文件 50 passed）。等待回执重启恢复、活执行者及错身份/未提交回执拒收补测后执行文件 24 passed。未扩大到全仓 pytest，线上 CI 未作为验收来源。
+
+真实验收采用隔离测试机单 Gateway、原生 TUI、官方 MiniMax-M2.7；被测模型自己执行和产出。普通批量 10/100/300 条正确率为 8/10、100/100、300/300；活动目标 50→300 后 300/300 正确；切档案采用延迟约 4.28/27.12/37.57 秒，实际请求参数有白名单 wire 证据。同名 MiniMax 档案不是跨品牌模型对照。22 个 no_change 调度 run 零模型调用；父子停止后均不再写计数，长任务停止的 source=user_control 已真验。
+
+MiniQL 最后真实工具进展在初始需求后 3 小时 2 分 56 秒，主 Compact 7 次、工具完成 498 次。连续测试升级的第四次直接停启触发现有非计划续跑上限 3，不是三小时限制；测试终点公开 228/600、隐藏 497/1200 通过，README/report 缺失，判未完成。行值/列数之外的列标签差异单独记录。混合版本运行不能算最终版本多小时质量通过；一个 child 的 COMPACT_CANDIDATE_TOO_LARGE 及模型计划配置失败保留。第七候选真实子代理回收已通过：正确文件 12/686、最终回复入原 run 并显示 TUI；waiting/活 claim/pending wake 期间无 checkpoint，done 时确认；6 次主体请求固定 B/0.8/HTTP 200，外部 14 项事实核验全通过。详细身份、时间和边界见报告。
+
+开发隔离注意：pytest 外构造 Agent 必须显式指定临时 my_agent_home。本轮误建默认 owner 合成计划已精确取消、删去未来调度并保存记录。code-size 使用临时 --report，避免和测试同时改 tracked 文件。实际准备错误、首次失败及复验分别保存，不修复被测任务产物。
 
 ## 空回复结构化诊断（wsempty4，2026-10-09，本地实现、待集成）
 
