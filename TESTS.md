@@ -1,3 +1,15 @@
+2026-10-12 需求修订（文档，未实施）：R03 默认上限确定为 100 字符，后续验收覆盖 99/100/101、多次更新及自定义上限，最终结果不受短过程上限限制；R06 普通用户、管理员非 full-access、管理员 full-access 分别覆盖主/子/孙及各写入口，审批模式与有效文件范围分别核验。重点从真实 IM 派发入口验证 `/delegate enable` 的后台主子链，TUI 未启动时分别完成父级能力裁决、主代理自身与孩子的用户工具审批；同时验证其它聊天/任务可继续、拒绝/失联/取消/换代、disable/跨零点和恢复，旧决定不串任务或重复副作用。复用原测试入口补缺口，本次仅做文档同步与 diff 检查，不新增或重跑功能测试。见 [需求总表](docs/design/TUI_IM_PREVIEW.md#requirements-overview-20261012) 和 [权限矩阵](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#7-验证记录及实施验收)。
+
+2026-10-12 用户级监控与重启/接管评估（未实施）：已有 `test_scheduler_service.py::test_service_reuses_deduped_wake_after_restart`、`test_scheduler_policy.py`、`test_scheduler_unknown_recovery.py`、`test_scheduler_due_index.py`、`test_admin_identity_gateway.py` 共 40 项通过；临时目录和替身验证原去重、错过周期、死亡证明/claim 代次、owner 到期发现和管理员绑定。未改产品或新增永久测试，未重启真实 Gateway/TUI、未发送飞书。后续须补 TUI/IM 同用户全会话计数、无新聊天的重启恢复、跨入口并发控制及原执行不重复、独立通知切换和群/普通用户隔离，见 [验收矩阵](docs/design/SCHEDULER_EXECUTION_POLICIES.md#owner-schedule-recovery-control-review)。
+
+2026-10-12 监控查询紧凑展示评估（未实施）：按用户要求取消平台层级，列表一行一个监控，详情保留 run/status 与规则短语、LLM/NO，历史默认 3 条。后续验收须覆盖 running/stop 的整体启停投影、run 按真实开始去重、last 非结束/投递时间、规则异常独立提示及无记录/未知状态；本轮只改文档，doc sync 与 diff check 验证，未新增产品测试或运行任务。
+
+2026-10-12 多规则整体任务评估（未实施）：只读源码确认当前 SchedulerJobCreateRequest 仅有单 schedule，无 rules/整体分组身份；原 build_schedule/parse_cron 纯函数验证每日 9/18 点可共用 cron。未重复前轮 32 项回归、未创建真实监控；后续需覆盖一个整体多规则、多个平台监控平铺计数、整体/局部控制、规则数据截止、条件状态、慢分析与探测并发、原额度和显式迁移，见 [方案与验收](docs/design/SCHEDULER_EXECUTION_POLICIES.md#composite-scheduled-task-review)。
+
+2026-10-12 定时任务查询评估（未实施）：`test_scheduler_repository.py`、`test_scheduler_tool.py`、`test_scheduler_im_l_integration.py` 三文件 32 项通过。临时合成账本使用真实 SchedulerRepository 验证暂停计划仍有运行中一轮、一次性结束归入 paused 且投递可失败、当前运行与上次完成分离，以及 last_run_at 的收口时间语义。没有新命令、永久测试、真实模型或飞书调用；新展示需补身份/来源筛选、锁门、分页和大历史只读验收，见 [评估](docs/design/SCHEDULER_EXECUTION_POLICIES.md#im-schedule-visibility-review)。
+
+2026-10-12 家目录权限评估（未修复）：`test_owner_home_workspace`、`test_child_own_workspace_write`、`test_second_layer_write_scope`、`test_main_owner_scope_default`、`test_path_access_owner_scope`、`test_remote_owner_workspace_scope`、`test_background_tool_approval` 七文件 98 项通过；`test_gateway_agent_control_service`、`test_subagent_effective_runtime_context`、`test_owner_approval_mode`、`test_plugin_gate_consumers` 按 `approv or permission or consumer or scoped_owner or full_shell or restricted_shell` 筛选 53 项通过。额外临时探针使用完整 HomePaths、生产范围合并、真实 ToolExecutor 与 macOS Seatbelt，确认父 full-access 的孩子自身目录文件工具/Shell 不一致、tasks 写根丢失、locked_files 没进入 Shell 保护；同 sink 跨 child attempt 缓存复用是合成故障注入，未执行具体工具。后续回归须纳入完整 HomePaths 和同文件跨入口对照，不能只验文件 handler。未新增永久测试、未修代码，Linux/TUI/真实模型复验仍待做；详见 [评估](docs/design/OWNER_HOME_PERMISSION_REVIEW.md)。
+
 2026-10-12 临时更新收口：发行 20261012.5，输入计时、退出鼠标、状态/角色、群聊 mention、管理员绑定目标、单条流式恢复及长候选窗口已实现。定向回归与本地静态 gate 已通过；Ubuntu 24.04 真 TUI/官方 MiniMax 对照和真实 SSH 已验，真实模型原句发送由通道替身确认。现场校时关联与真实飞书客户端展示尚无证据，详见 docs/design/TUI_IM_PREVIEW.md。
 
 最终发布 focused（2026-10-12，追加个人密码门后）：39 文件 368 passed、无失败/错误/跳过；密码门三文件独立 35 项通过，与 focused 有重复，不累加。Ruff、doc sync、strict code-size（hard=0、blocked=False）、diff check、clean-package 通过；全仓门另记实际最终结果。

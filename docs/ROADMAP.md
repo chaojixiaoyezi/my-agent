@@ -1,5 +1,21 @@
 # 后续开发与验证
 
+## 飞书命令入口、角色帮助与离线更新（2026-10-12，仅评估，待实施）
+
+- 当前统一范围为 [R01～R13 共 13 项](design/TUI_IM_PREVIEW.md#requirements-overview-20261012)：IM 交互 5、权限与审批 2、监控管理 5、安装更新 1。用户正在总览，当前不启动产品实施；已有能力和旧问题复验另列，避免重复计数或误关问题。
+- 最新修订：R03 默认 100 字符已确定；R06 同时必验普通用户、管理员非 full-access 与 full-access 的主子代理，重点贯通 `/delegate enable` 的后台执行链。R07 同时覆盖父级能力裁决、后台主代理自身和孩子的用户工具审批，IM 单独在线也要能继续原任务，详见 [方案](design/OWNER_HOME_PERMISSION_REVIEW.md#background-delegation-permissions-review)。全部项目先盘点并复用/改造原入口和事实源，只有明确缺口才补最小通用能力；开发等待用户开始指令。
+- 解决问题：群里 @机器人后斜杠命令因消息格式而失效，IM `/help` 未接入且可见命令未按有效权限区分；离线更新依赖反复输入 prefix，容易额外安装副本。
+- 当前证据：`.20261012.8` 原源码的 text/post 命令差异、裸 `/help` unsupported 与敏感前缀问题已本地复现；已有安装器四项定向检查通过。
+- 待做：共用入站规范化；原命令目录的角色/场景投影及 help；扩展原 `update` 支持离线包与准确安装发现/服务恢复。
+- 用户追加：`/verbose stream` 过程窗口默认最多 100 字符已确定，每次只更新最新短内容，最终结果另发完整消息；沿原草稿入口提供统一可配置上限，详见 [待实施方案](design/TUI_IM_PREVIEW.md#短过程窗口追加2026-10-12评估完成待实施)。
+- 优先新增家目录权限修复：父 full-access 的孩子自身目录已复现文件可写、Shell 被拒；tasks 合并误拦及 locked_files 未进 Shell 保护也已确认。151 项现有回归通过未覆盖这些组合，审批缓存换代为条件性缺口。证据与防越权矩阵见 [评估](design/OWNER_HOME_PERMISSION_REVIEW.md)。
+- 定时任务查询追加：`/status` 分列启用/暂停/一次性已结束计划与运行/排队/等待执行；拟议 `/schedule` 列表、单项详情及 history，重点展示最新一轮、最近已结束一轮和独立投递结果。三文件 32 项现有回归通过，新命令尚未实现；详见 [调度可见性评估](design/SCHEDULER_EXECUTION_POLICIES.md#im-schedule-visibility-review)。
+- 整体监控追加：用户已确认通过对话制定一个监控、内含 1～N 项规则，逐规则选择是否使用 LLM，保留原时间范围；按原 scheduler job 扩展规则和准确 run 身份，列表先展示整体任务。A/B 各三个监控显示六个，不按内部规则拆散。需先落实统一模型、结果依赖、整体/局部控制及迁移，再接查询；见 [复合定时任务评估](design/SCHEDULER_EXECUTION_POLICIES.md#composite-scheduled-task-review)。仅评估，当前仍为单 schedule job。
+- 用户将查询收敛为 [紧凑格式](design/SCHEDULER_EXECUTION_POLICIES.md#schedule-compact-display)：取消平台分层，列表一行一个监控，详情一行一个 rule（LLM/NO），历史默认 3 条；运行次数/last/整体启停需从原结构化事实投影，仅异常或在途增补短提示。尚未实现。
+- 管理员跨入口管理追加：本人总表覆盖 TUI/绑定 IM 全部会话；Gateway 重启恢复原计划，退出 TUI 不取消监控。IM 可按准确任务执行查看、管理和恢复，通知切换另有生效点；复用原身份、调度/运行/交付账。已有恢复与身份回归 40 项通过，新入口与真实重启矩阵未验；见 [统一范围与恢复](design/SCHEDULER_EXECUTION_POLICIES.md#owner-schedule-recovery-control-review)。
+- 群 API 凭据私聊卡仍按独立合同实施，联测首次个人密码设置、未解锁及原任务归属。详细边界与顺序见 [设计台账](../DESIGN_LEDGER.md#飞书命令角色帮助与离线更新入口2026-10-12评估完成待实施)。
+- 本轮只评估与更新文档，未修复产品、打包、推送或部署。建议先修家目录裁决一致性与锁保护，IM 入口/帮助/短窗口和安装模块可分开安排，等待用户实施指令。
+
 L/T/IM 本地整合完成：来源分支的切模、Goal 与调度策略已与当前委派/公共包整合，79 文件 1801 项及隔离 Linux 真模型/子代理/SSH TUI smoke 通过。未推送或发布；原长测交付质量缺口仍开放。见 [整合记录](tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 
 IM 多任务/公共包已完成本地实现与相关验收，后续真实飞书出站及发布另行安排；具体当前状态见 [交接](tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。后续发布仍等待用户指令。

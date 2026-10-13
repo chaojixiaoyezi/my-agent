@@ -1,5 +1,7 @@
 # Codebase Tree
 
+权限评估入口：[OWNER_HOME_PERMISSION_REVIEW.md](docs/design/OWNER_HOME_PERMISSION_REVIEW.md) 记录主子家目录、父 full-access、文件/Shell 裁决差异与审批换代边界；仅评估，未修改权限实现。
+
 本轮验证新增入口：
 
 ```text
@@ -31,7 +33,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 `-- docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md  # 本轮证据与交接
 ```
 
-临时更新关键文件：`agent/gateway_parts/status_projection.py` 只读 TUI 同代上下文、角色与权限；`cli/chat_parts/tui_application.py` 接管单调重绘计时；`adapter/progress_draft.py` 沿原 pending 保存编辑消息身份。新回归 `tests/test_tui_im_preview.py` 与 `tests/test_im_progress_draft.py` 验证时间跳变、管理员绑定、群聊 mention、退出清理与进度恢复。方案见 [TUI/IM 临时更新](docs/design/TUI_IM_PREVIEW.md)。
+临时更新关键文件：`agent/gateway_parts/status_projection.py` 只读 TUI 同代上下文、角色与权限；`cli/chat_parts/tui_application.py` 接管单调重绘计时；`adapter/progress_draft.py` 沿原 pending 保存编辑消息身份。新回归 `tests/test_tui_im_preview.py` 与 `tests/test_im_progress_draft.py` 验证时间跳变、管理员绑定、群聊 mention、退出清理与进度恢复。方案及后续 13 项需求总表见 [TUI/IM 临时更新](docs/design/TUI_IM_PREVIEW.md)。
 
 ## AGENTS 第 6 轮（mc2-agentsr6，2026-10-09）
 
@@ -330,6 +332,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
 |-- docs/design/IM_TASK_EXECUTION_POLICY.md # IM 定时后台、当天委派开关与零点失效的待实施合同
 |-- docs/design/PUBLIC_CAPABILITY_PACKS.md # 管理员公共发布、普通用户只读消费与原执行权限隔离的评估
+|-- docs/design/OWNER_HOME_PERMISSION_REVIEW.md # 家目录授权误拦、Shell 锁保护与子代理审批换代的证据及待实施方案
 |-- docs/design/CAPABILITY_PACKS.md       # 能力包协议、生命周期、隔离召回和任务版本合同
 |-- docs/design/CAPABILITY_MIGRATION.md   # 从固定来源到候选、安装、验收、迭代和回退的操作流程
 |-- docs/design/CAPABILITY_SOURCE_COVERAGE.md # 固定上游入口、脚本、依赖与样包迁移缺口

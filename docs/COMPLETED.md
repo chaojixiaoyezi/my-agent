@@ -1,5 +1,21 @@
 # 已实现能力索引
 
+## 飞书命令与离线更新评估（2026-10-12，评估已完成，功能未实施）
+
+- 已按用户要求完成 [13 项需求总览](design/TUI_IM_PREVIEW.md#requirements-overview-20261012)，归并重复问题，保留已确认显示、建议参数、已有能力回归和旧现场未验事项；只完成文档整理，未新增可用功能。
+- 已按用户最新意见修订：stream 默认 100 字符；R06 普通用户与管理员非 full-access/full-access 均为必修必验，重点为自动委派后的后台主子链路；R07 扩为主子审批，包含父级能力裁决及主代理自身/孩子的用户工具审批，并补无 TUI 的 IM 验收。补全逐模块复用落点及最小扩展原则。仅修改需求与验收说明，未启动开发。
+- 解决问题：确认用户所述群命令、帮助/角色展示、重复安装风险和私密凭据收集分别缺在哪一层。
+- 基于已发布 `.20261012.8` / `08fd572f6`，本地复现 text/post 群命令差异、IM `/help` unsupported 与敏感前缀漏识别；现有安装器四项定向回归通过。
+- 已记录共用命令规范化、角色帮助、扩展原更新入口和私聊凭据合同的方案，见 [设计台账](../DESIGN_LEDGER.md#飞书命令角色帮助与离线更新入口2026-10-12评估完成待实施)。
+- 已补充用户的 stream 短窗口需求：用户确定默认 100 字符，每次原地更新仍有界，最终结果另发且不受限；当前代码仍是 8000 字符窗口，短展示方案仅完成评估，见 [模块追加](design/TUI_IM_PREVIEW.md#短过程窗口追加2026-10-12评估完成待实施)。
+- 家目录权限评估追加完成：151 项已有定向回归通过；临时 ToolExecutor＋真实 Seatbelt 对照暴露自身工作区 Shell 误拦、tasks 授权丢失及锁保护不一致，审批同 sink 换代另有条件性缓存缺口。详见 [证据与范围](design/OWNER_HOME_PERMISSION_REVIEW.md)，问题仍未修复。
+- 定时任务可见性评估追加完成：核实 `/status` 尚无 scheduler 区块、无 `/schedule` 斜杠入口，已有 job/run/history 可复用；32 项已有回归通过，临时原 repository 对照确认计划/执行/投递须分开展示。方案见 [模块追加](design/SCHEDULER_EXECUTION_POLICIES.md#im-schedule-visibility-review)，新展示和命令均未实施。
+- 同一监控多周期评估追加完成：源码确认单 job 单 schedule、无整体/规则身份，原 cron 解析验证 9/18 可为一条规则；修订查询方案为整体任务优先、内部规则展开，记录有限条件/数据依赖、整体与局部控制、资源和迁移边界。见 [方案](design/SCHEDULER_EXECUTION_POLICIES.md#composite-scheduled-task-review)，没有实现或创建实际监控。
+- 产品边界确认：对话制定/调整，一个监控含 1～N 项规则，每项明确是否使用 LLM；固定间隔保留 60 秒～1 年并与监控存续期限区分。已同步设计与路线图，未改变可用功能，文档检查作为本轮验证。
+- 展示评估按用户修订：平铺监控、整体 run/status/last、逐规则短语和 LLM/NO，历史默认 3 条；取消原平台分层及默认长详情，明确整体启用与在途执行不同。仅文档变更，见 [紧凑稿](design/SCHEDULER_EXECUTION_POLICIES.md#schedule-compact-display)。
+- 重启与跨入口管理评估追加：核实持久 job/run、去重唤醒、到期 owner 索引及管理员私聊映射可复用，当前控制多按原会话、尚非通用接管。记录本人跨会话总表、TUI/IM 监控恢复、IM 控制与通知变更方案，40 项现有定向回归通过；未实施新功能或重启真实服务，见 [模块追加](design/SCHEDULER_EXECUTION_POLICIES.md#owner-schedule-recovery-control-review)。
+- 仅修改设计/索引文档，没有产品修复、真实飞书验收、模型调用、打包、提交远端或部署。建议下一步优先修家目录与 Shell 一致性和锁保护；安装、IM 可独立安排，等待用户实施指令。
+
 L/T/IM 本地整合完成：来源分支的切模、Goal 与调度策略已与当前委派/公共包整合，79 文件 1801 项及隔离 Linux 真模型/子代理/SSH TUI smoke 通过。未推送或发布；原长测交付质量缺口仍开放。见 [整合记录](tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 
 IM 多任务/公共包已完成本地实现、739 项联合回归与补充权限用例，以及 Linux 真模型/真子进程/SSH TUI/到期调度验证；出站为 fake，不能当成发布或真实飞书实发验收。完整功能和证据边界见 [交接](tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。
