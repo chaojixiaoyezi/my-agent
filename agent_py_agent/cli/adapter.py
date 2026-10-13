@@ -3,6 +3,9 @@
 # 模块用途: 运行文件和 IM 适配器并下发实际短窗口配置；凭据不可用时按 G2b 开关降级或拒绝启动无凭据的 Gateway 客户端。
 from __future__ import annotations
 
+# LLM: 通道守护入口沿原 owner/runtime 路径和注册表生命周期运行；状态心跳须保留 requested_channel 供离线更新精确恢复。
+# 模块用途: 启动、停止和查询 IM 通道进程，周期保存服务状态并处理退出清理。
+
 """CLI entrypoints for file and channel adapters.
 
 Small helper functions keep daemon, foreground, and file-loop flows below soft limits.
@@ -282,7 +285,7 @@ def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
             {"requested_channel": options.channel, "channels": manager.runtime_channel_statuses()},
         )
         print(f"started adapters: {manager.list_adapters()}", file=sys.stderr)
-        _wait_for_adapter_shutdown(manager, gpaths)
+        _wait_for_adapter_shutdown(manager, gpaths, requested_channel=options.channel)
     except BaseException as exc:
         _finish_adapter_process(manager, gpaths, "failed", {"reason": "unhandled_error", "error": _error_record(exc)})
         raise
@@ -318,9 +321,9 @@ def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -
 
 
 # LLM: 等待循环里的周期状态写入走守卫版：写失败只记账、下一轮重试，绝不让 OSError 逃出循环杀掉进程。
-#   stop_event 可注入只为测试驱动停止；信号处理照常安装（测试用 monkeypatch 替掉 signal.signal）。
+#   stop_event 可注入只为测试驱动停止；保留原 requested_channel，更新器可恢复同一启动范围。
 # 函数用途: 挂住主线程直到收到 SIGINT/SIGTERM（或注入的 stop_event 置位），期间周期刷新状态文件。
-def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: threading.Event | None = None) -> None:
+def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: threading.Event | None = None, *, requested_channel: str | None = None) -> None:
     stop_event = stop_event if stop_event is not None else threading.Event()
 
     def _sig_handler(signum, frame):
@@ -330,7 +333,10 @@ def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: thre
     signal.signal(signal.SIGTERM, _sig_handler)
     try:
         while not stop_event.wait(ADAPTER_STATE_WRITE_INTERVAL_SECONDS):
-            _write_adapter_state_guarded(gpaths, "running", {"channels": manager.runtime_channel_statuses()})
+            extra = {"channels": manager.runtime_channel_statuses()}
+            if requested_channel is not None:
+                extra["requested_channel"] = requested_channel
+            _write_adapter_state_guarded(gpaths, "running", extra)
     except KeyboardInterrupt:
         pass
 

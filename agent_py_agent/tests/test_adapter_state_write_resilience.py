@@ -106,7 +106,8 @@ def test_periodic_state_write_failure_does_not_kill_loop_and_recovers(tmp_path, 
     stop_event = threading.Event()
     state_path = gpaths.root / "adapter_state.json"
     thread = threading.Thread(
-        target=adapter._wait_for_adapter_shutdown, args=(_FakeManager(), gpaths, stop_event), daemon=True
+        target=adapter._wait_for_adapter_shutdown, args=(_FakeManager(), gpaths, stop_event),
+        kwargs={"requested_channel": "feishu"}, daemon=True
     )
     with caplog.at_level(logging.WARNING, logger="agent_py_agent.adapter"):
         thread.start()  # 撤修复：第一次写的 ENOSPC 从线程里炸出，循环结束，状态文件永远不出现
@@ -119,6 +120,7 @@ def test_periodic_state_write_failure_does_not_kill_loop_and_recovers(tmp_path, 
     assert not thread.is_alive()
     payload = _read_state(gpaths)
     assert payload["state"] == "running" and payload["state_write_failures"] == 1
+    assert payload["requested_channel"] == "feishu"
     assert payload["last_state_write_error"]["type"] == "OSError"
     assert payload["last_state_write_error"]["state"] == "running"
     assert any("adapter_state_write_failed state=running" in record.getMessage() for record in caplog.records)

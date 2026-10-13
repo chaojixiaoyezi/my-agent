@@ -1,3 +1,5 @@
+2026-10-13 离线更新补验：安装器使用原 owner/runtime 合同定位服务，默认空 workspace 不再漏掉 Gateway/adapter；旧周期状态按 registry channels 明确迁移，新的心跳保留 requested_channel。默认/相对/绝对服务目录、旧/新排空协议与非法状态拒绝纳入发行回归。
+
 2026-10-13 R21 收口：定时来源空 owner 只投影原 run 的准确身份；发送前发现非空 origin owner 改变则拒绝。68 项最终路线补验通过，联合本机 1467 / Linux 313 通过，详见本期实施记录。
 
 2026-10-13 收口补验：H2 拒绝码在原直接文件 handler 中保留；云写入后的响应投影失败记 unknown，进度线程在原 final 前等待有界运输完成。213 项相关验证通过。

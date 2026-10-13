@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-12，用户已授权将 L/T/IM 整合版本合入远端 main 并构建 `0.3.0-tui-preview.20261012.8`。本次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。发布检查与未解决边界见 [整合交接](../tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。历史 `.2` / `.5` 的验收不能冒充本次包的验收。
+状态：2026-10-13，用户已授权 R01–R21 合入远端 main，并要求生成新的离线包。候选版本为 `0.3.0-tui-preview.20261013.2`；每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。功能与验收边界见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 
@@ -75,14 +75,21 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## 同一路径更新
 
-1. 等当前任务结束，退出本安装的所有 TUI；若运行飞书等独立通道，用固定入口执行 `adapter stop`，然后执行 `gateway stop`。
-2. 上传新版 `.run`，再次执行 `bash 新包.run --prefix /app/.my-agent`。
-3. 用同一固定入口查看 `--version`，执行 `gateway start --ready-timeout 30` 启动后台；原先运行飞书的安装再执行 `adapter start --channel feishu --daemon`，然后进入 TUI。
+1. 等当前任务结束，退出本安装的所有 TUI；上传新版 `.run` 和配套 `SHA256SUMS`。
+2. 执行 `sha256sum -c SHA256SUMS`，然后 `bash 新包.run --update --prefix /app/.my-agent`。
+3. 用同一固定入口查看 `--version` 并进入 TUI。更新器自动保存并恢复原先开启的 Gateway 和 adapter，不必提前手工停止它们；原来关闭的服务继续保持关闭。
 
-`gateway stop` 不等于 `adapter stop`；通道是独立进程，停止 Gateway 后可能继续占用旧版运行时。停止通道不删除飞书配置/凭据或记忆，更新期间连接暂时中断，恢复后须实测收发。
+新版也可执行 `/app/.my-agent/bin/my-agent-preview update --package 新包.run`。
+省略 `--prefix` 时自动识别当前账户的原安装；存在多个安装时要求明确选原路径，填成新的路径会拒绝建立第二套 Gateway。
+从 `.20261012.8` 更新须使用新包的 `bash … --update` 入口；旧 CLI 不具备新版的离线 update 子命令。
+旧版未声明排空协议，更新器沿原 CLI 执行 `gateway stop --stop-background --background-timeout 30`；因此先等任务结束。
+新版 `drain.v1` 版本先排空请求再停止。更新器复用 canonical owner/runtime 服务目录，不用当前工作目录或安装器的 HOME 猜 PID 地址。
+旧版心跳丢失启动通道时，更新器明确从原 registry 的 `channels[].name` 快照迁移；空、非法或冲突记录会在停服务前拒绝更新。
+
+`gateway stop` 不等于 `adapter stop`；通道是独立进程，停止 Gateway 后可能继续占用旧版运行时。自动更新分别控制两者。若已手工停止服务，更新后按需执行 `gateway start --ready-timeout 30`、`adapter start --channel feishu --daemon`。更新期间连接暂时中断，停止不删除飞书配置/凭据或记忆，恢复后须实测收发。
 
 安装器先核对包 SHA256 与逐文件清单，再复制到新的版本目录，最后原子切换 current。
-安装过程中发现本安装仍有活动 Python 进程时会停止更新并列出 PID，不自动杀任务。
+停服务前发现本安装仍有交互 TUI 时拒绝更新；原服务控制完成后仍有活动旧进程则列出 PID 并拒绝切换，不按进程名称批量杀任务。
 同版本不同内容拒绝覆盖；传输损坏不切换当前版本。更新保留 data 内的配置、历史和工作文件原字节。
 不自动变更 Linux HOME、不迁移其它 my-agent 安装；安装服务器只切换该 prefix 的发行版本，不操作开发仓库。
 保留旧程序不等于数据库降级方案；本临时更新流程不承诺跨任意未来数据 schema 的自动回退。

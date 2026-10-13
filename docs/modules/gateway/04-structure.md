@@ -1,3 +1,5 @@
+2026-10-13 离线发行服务控制：scripts/private_release/installer.py 从原 configured_home_root → owner resolver → runtime_paths_for_agent 获得 GatewayPaths；安装器的 HOME、cwd 和外部 MY_AGENT_HOME 不能另造服务地址。原 adapter 心跳保留 requested_channel，旧发行仅按 channels[].name 的精确注册快照迁移，不从日志或自然语言猜通道。
+
 2026-10-13：R20 原资源策略/云工具与 R21 入站冻结 owner、H2 服务队列和 chat_id 发送实施中，见 [设计](../../design/HOST_CLOUD_RESOURCE_ACCESS.md)。管理员私人 IM 可 `/sessions control <thread_id> /approve <密码>` 或 `/deny` 决定本人原 TUI pending；原审批账及 waiter 不变，嵌套密码在入站/控制/TUI 历史均遮蔽，普通用户/群不能跨接管理员 TUI。
 
 # Gateway Structure

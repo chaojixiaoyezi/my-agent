@@ -217,7 +217,7 @@ def resolve_install_prefix(requested: Path | None, *, roots=None) -> Path:
     return found[0] if found else Path('/app/.my-agent')
 
 
-# LLM: 使用原 CLI 停止/恢复准确实例；不按名字 kill python、不动数据。TUI 或旧进程未退出时仍禁止切换。
+# LLM: 使用原 owner/runtime 路径合同和 CLI 停止/恢复准确实例；不依赖安装器的 HOME/env，不按名字 kill python。
 # 函数用途: 更新前保存原后台服务状态，沿既有命令停止，切换成功或失败后恢复原来开启的服务。
 def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None) -> tuple[bool,bool,str]:
     import subprocess
@@ -226,10 +226,21 @@ def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None
     from agent_py_agent.agent.gateway_parts.daemon_control import get_running_pid
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.agent.settings import load_config
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.home_root import configured_home_root
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
 
     launcher = str(prefix / 'bin' / 'my-agent-preview')
     config = load_config(prefix / 'data' / 'config' / 'agent_config.yaml')
-    paths = gateway_paths_from_root(workspace_path(prefix) / config.gateway_workspace)
+    base = home_paths(configured_home_root(config, env={'MY_AGENT_HOME': str(prefix / 'data')}))
+    owner = resolve_owner_home(base.root, owner_identity_from_config(config))
+    scoped = home_paths_with_owner(base, owner)
+    paths = gateway_paths_from_root(runtime_paths_for_agent(config, owner.home_dir, scoped)['gateway_workspace'])
     # LLM: PID 是原服务记录，只用生存事实，不以状态文案猜服务是否运行。
     # 函数用途: 核对原实例当前服务 PID。
     def alive(path):
@@ -239,9 +250,7 @@ def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None
     channel='all'
     if restore is None and adapter_alive:
         state=json.loads((paths.root / 'adapter_state.json').read_text(encoding='utf-8'))
-        channel=state.get('requested_channel')
-        if channel not in {'feishu','qq','all'}:
-            raise ValueError('原适配器通道记录不可用，未停止服务')
+        channel=restore_channel(state)
     original = restore if restore is not None else (alive(paths.pid), adapter_alive, channel)
     commands = ([['gateway','start','--ready-timeout','60']] if original[0] else []) + ([['adapter','start','--daemon','--channel',original[2]]] if original[1] else [])
     if restore is None:
@@ -258,6 +267,23 @@ def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None
             update_services(prefix, restore=original)
         raise
     return original
+
+
+# LLM: 旧发行的周期状态没有 requested_channel，显式从原 registry channels 快照迁移；非法/冲突记录在停服务前拒绝。
+# 函数用途: 从结构化启动参数或已注册通道确定恢复范围，不读取命令行正文、不把未知通道猜成 all。
+def restore_channel(state: dict) -> str:
+    if not isinstance(state, dict):
+        raise ValueError('原适配器通道记录不可用，未停止服务')
+    rows = state.get('channels')
+    names = [row.get('name') for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    if not names or len(names) != len(rows) or any(not isinstance(name, str) or name not in {'feishu', 'qq'} for name in names) or len(names) != len(set(names)):
+        raise ValueError('原适配器通道记录不可用，未停止服务')
+    requested = state.get('requested_channel')
+    if requested is not None:
+        if not isinstance(requested, str) or requested not in {'feishu', 'qq', 'all'} or (requested != 'all' and set(names) != {requested}):
+            raise ValueError('原适配器通道记录冲突，未停止服务')
+        return requested
+    return names[0] if len(names) == 1 else 'all'
 
 
 # LLM: 安装切换复用原目录/服务排空；任何 subprocess 超时必须作为安装错误返回，恢复路径仍由原服务控制负责。

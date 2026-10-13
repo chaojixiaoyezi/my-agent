@@ -18607,3 +18607,10 @@ Linux 2C/约4G 隔离环境实际 Shell `sleep 245` 通过原 ToolExecutor，tim
 Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝；从 Ubuntu 发行包只加载 `bwrap-userns-restrict` 后就绪。随后发现 Linux 写根祖先合并抹掉子根授权，修复后核心自身目录/PTY/进度/通知组合通过。本机六文件通知/原 IM/长工具组合 `73 passed in 9.92s`。更广 24 文件第一次 `683 passed / 2 failed / 15 skipped`：两个失败发现后台目录扩展不应扩大前台 Schema，正在修复后复验；不可用此前通过数字掩盖。
 
 `test_im_tool_liveness`、`test_plugin_event_runtime`、`test_im_progress_draft`、`test_gateway_agent_control_service` 组合 67 passed。真实 Registry/Executor 与原 HTTP 投影覆盖静默 handler、异常、取消、拒绝不发、终态后不刷新、off 极简与 stream 状态；只替换模型/handler 和运输，不在测试中代产品发心跳。默认配置已按最新用户要求改为 120 秒；实际 Linux 长等待、同条时间正文和失联仍待验，首批不是完成证明。
+
+## 2026-10-13 离线更新服务定位补验
+
+- `test_private_release.py` 使用真实 owner/runtime/PID record，覆盖默认、相对、绝对 Gateway 路径；安装器环境指向其它 HOME 时仍找到原 prefix；旧版无 drain.v1 / 新版带 drain.v1 分别沿原 CLI 停止，恢复相同通道。
+- 老版周期状态缺 requested_channel 时仅迁移原 channels 注册快照；空、未知、重复与冲突通道在停服务前拒绝。
+- `test_adapter_state_write_resilience.py` 同时验证状态写失败恢复后仍保留启动通道；不放宽原 ENOSPC 和退出清理断言。
+- 发行定向组合：private_release、adapter_state_write_resilience、cli_update。真实包另做三版断网与 Linux 原生 Gateway/TUI 验收，报告随包交付；真实飞书连接恢复由用户服务器验证。

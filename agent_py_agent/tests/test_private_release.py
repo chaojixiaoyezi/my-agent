@@ -165,3 +165,69 @@ def test_multiple_installations_require_explicit_selection(tmp_path, monkeypatch
     with pytest.raises(ValueError,match='多个安装'):
         installer.resolve_install_prefix(None,roots=[root])
     assert installer.resolve_install_prefix(root/'two',roots=[root])==root/'two'
+
+
+@pytest.mark.parametrize("workspace", ["", "custom/gateway", "/tmp/explicit-update-service"])
+@pytest.mark.parametrize("protocol", [None, "drain.v1"])
+def test_update_services_uses_canonical_prefix_paths_and_restores_old_channel(tmp_path, monkeypatch, workspace, protocol):
+    from agent_py_agent.agent.gateway_parts.daemon_control import write_pid_record
+
+    prefix = tmp_path / "install"
+    monkeypatch.setattr(installer, "active_processes", lambda _: [])
+    installer.install(_bundle(tmp_path / "bundle"), prefix)
+    config = prefix / "data/config/agent_config.yaml"
+    config.write_text('my_agent_home: ""\ngateway_workspace: ' + json.dumps(workspace) + '\n')
+    owner = installer.workspace_path(prefix)
+    service = Path(workspace) if Path(workspace).is_absolute() else owner / "workspace" / (workspace or "runtime/services/gateway")
+    # 绝对覆盖使用 tmp_path，不能让测试往真正 /tmp 公共服务路径写 PID。
+    if workspace.startswith("/"):
+        service = tmp_path / "absolute-service"
+        config.write_text('my_agent_home: ""\ngateway_workspace: ' + json.dumps(str(service)) + '\n')
+    service.mkdir(parents=True)
+    write_pid_record(service / "gateway.pid")
+    write_pid_record(service / "adapter.pid")
+    (service / "adapter_state.json").write_text(json.dumps({"channels": [{"name": "feishu"}]}))
+    manifest = prefix / "current/release.json"
+    release = json.loads(manifest.read_text())
+    if protocol:
+        release["protocols"] = {"offline_update": protocol}
+    manifest.write_text(json.dumps(release))
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "other-home"))
+    commands = []
+    original_run = subprocess.run
+
+    def run(command, **kwargs):
+        if command[0] == str(prefix / "bin/my-agent-preview"):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    original = installer.update_services(prefix)
+    assert original == (True, True, "feishu")
+    assert [row[1:3] for row in commands] == [["adapter", "stop"], ["gateway", "stop"]]
+    assert ("--drain" in commands[-1]) == bool(protocol)
+    installer.update_services(prefix, restore=original)
+    assert commands[-2][1:3] == ["gateway", "start"]
+    assert commands[-1][1:] == ["adapter", "start", "--daemon", "--channel", "feishu"]
+
+
+@pytest.mark.parametrize("state,expected", [
+    ({"channels": [{"name": "feishu"}]}, "feishu"),
+    ({"channels": [{"name": "qq"}]}, "qq"),
+    ({"channels": [{"name": "feishu"}, {"name": "qq"}]}, "all"),
+    ({"requested_channel": "all", "channels": [{"name": "feishu"}]}, "all"),
+    ({"channels": []}, None),
+    ({"channels": [{"name": "unknown"}]}, None),
+    ({"channels": [{"name": "feishu"}, {"name": "feishu"}]}, None),
+    ({"requested_channel": "qq", "channels": [{"name": "feishu"}]}, None),
+    ({"requested_channel": "invalid", "channels": [{"name": "feishu"}]}, None),
+    ({"channels": [{"name": []}]}, None),
+    ({"requested_channel": [], "channels": [{"name": "feishu"}]}, None),
+])
+def test_update_channel_uses_structured_old_and_current_state(state, expected):
+    if expected is None:
+        with pytest.raises(ValueError, match="通道记录"):
+            installer.restore_channel(state)
+    else:
+        assert installer.restore_channel(state) == expected
