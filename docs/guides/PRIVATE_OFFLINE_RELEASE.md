@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-13，用户已授权 R01–R21 合入远端 main，并要求生成新的离线包。候选版本为 `0.3.0-tui-preview.20261013.3`；每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。功能与验收边界见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
+状态：2026-10-13，用户已授权 R01–R21 合入远端 main，并要求生成新的离线包。候选版本为 `0.3.0-tui-preview.20261013.4`；每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。功能与验收边界见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 
@@ -103,7 +103,7 @@ export PATH="$HOME/.local/bin:$PATH"
 也编译进包。自解压头仅需 Ubuntu 自带 bash/tar/gzip/coreutils。
 
 相对源码发行，只有三个产品适配点：Landlock 启动器读取真实模块 origin；包工作区识别 `.pyc` 入口；
-参数读取方的展示元数据使用同源构建快照。快照不决定配置权限或运行路由。
+参数读取方的展示元数据使用同源构建快照。Landlock 启动与断网探测显式传入 `-B`，避免 `-I` 忽略环境变量后向发行运行时写标准库缓存。快照不决定配置权限或运行路由。
 
 校验分两层：源码继续走原 clean-package；有意编译的私有发行按 `release.json` 枚举的文件检查，
 禁止 `__pycache__`、额外成员、外链、运行数据和业务 `.py`。不要将本格式的有意字节码误称为源码缓存，

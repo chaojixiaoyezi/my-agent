@@ -18614,3 +18614,5 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 - 老版周期状态缺 requested_channel 时仅迁移原 channels 注册快照；空、未知、重复与冲突通道在停服务前拒绝。
 - `test_adapter_state_write_resilience.py` 同时验证状态写失败恢复后仍保留启动通道；不放宽原 ENOSPC 和退出清理断言。
 - 发行定向组合：private_release、adapter_state_write_resilience、cli_update。真实包另做三版断网与 Linux 原生 Gateway/TUI 验收，报告随包交付；真实飞书连接恢复由用户服务器验证。
+
+- 原生发行包实际工具执行后发现 Landlock 子进程的 `-I` 忽略环境禁写设置、写入标准库缓存；原启动和断网探测现显式 `-B`。原端口隔离 argv 合同继续验证，包本体另检查执行后的发行清单与重装校验。

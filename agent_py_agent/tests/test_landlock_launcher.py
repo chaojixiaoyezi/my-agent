@@ -116,9 +116,9 @@ def test_wrap_with_landlock_wraps_when_ready(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_py_agent.agent.attempt.sandbox.landlock_net_readiness",
                         lambda _p: (True, "LANDLOCK_READY"))
     wrapped = sandbox._wrap_with_landlock(["bwrap", "--ro-bind", "/", "/"])
-    assert wrapped[0] == sys.executable and wrapped[1] == "-I" and wrapped[2] == str(_LAUNCHER)
-    assert wrapped[3:6] == ["--deny", "8420", "--"]
-    assert wrapped[6:] == ["bwrap", "--ro-bind", "/", "/"]
+    assert wrapped[0] == sys.executable and wrapped[1:3] == ["-I", "-B"] and wrapped[3] == str(_LAUNCHER)
+    assert wrapped[4:7] == ["--deny", "8420", "--"]
+    assert wrapped[7:] == ["bwrap", "--ro-bind", "/", "/"]
 
 
 def test_wrap_with_landlock_plain_when_unavailable(tmp_path, monkeypatch):

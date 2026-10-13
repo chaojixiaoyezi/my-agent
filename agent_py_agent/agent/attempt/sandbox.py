@@ -1,6 +1,6 @@
 # LLM: attempt 沙箱负责平台执行边界；Seatbelt 读规则含根一级最低启动读取和链节点精确 metadata，不据规则形状宣称真进程成功。
 #   同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
-#   独立 Landlock 启动器按 Python 导入器的真实 origin 定位，支持源码及无源码发行包。
+#   独立 Landlock 启动器按 Python 导入器的真实 origin 定位；隔离解释器显式 -B，不能改写发行 runtime。
 # 模块用途: 为不同平台构造执行隔离，批处理等待可被本 run 取消，不消费 Gateway 输入、不绕过隔离。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
@@ -351,7 +351,8 @@ class AttemptExecutionSandbox:
     #   landlock_net_readiness——它和 gateway_isolation_fact 读同一个探测，所以“包了”必然 applied、“没包”必然 unavailable:<原因>，
     #   不会出现“报了 applied 其实没挡”。环境没能力时不包、命令照跑（如实报 unavailable、靠第 (2) 层兜底）；施加失败的 fail-closed
     #   在启动器里（exec 前失败即非零退出、不 exec）。没登记端口时原样返回，Linux 既有 argv 逐字节不变。
-    # 函数用途: Linux 下按就绪情况给 bwrap argv 套 Landlock 端口拒绝启动器。
+    #   -B 必须显式传入：-I 会忽略 PYTHONDONTWRITEBYTECODE，离线包启动器不能往不可变 runtime 写标准库缓存。
+    # 函数用途: Linux 下按就绪情况给 bwrap argv 套 Landlock 端口拒绝启动器，启动过程不写字节码缓存。
     def _wrap_with_landlock(self, bwrap_argv: list[str]) -> list[str]:
         ports = self.spec.deny_gateway_ports
         if not ports:
@@ -361,7 +362,7 @@ class AttemptExecutionSandbox:
             return bwrap_argv
         deny = ",".join(str(port) for port in dict.fromkeys(ports))
         # -I 隔离模式跑启动器：忽略 PYTHONPATH/用户 site，避免 Gateway 的 PYTHONPATH 或脚本目录遮住 ctypes/os（ae 复审）。
-        return [sys.executable, "-I", str(_LANDLOCK_LAUNCHER), "--deny", deny, "--", *bwrap_argv]
+        return [sys.executable, "-I", "-B", str(_LANDLOCK_LAUNCHER), "--deny", deny, "--", *bwrap_argv]
 
     # LLM: 本沙箱这次对 Gateway 端口隔离的结构化事实，唯一来源是模块级 gateway_isolation_status（见其注释）：
     #   按“平台 + 本 spec 登记的端口 + Landlock 就绪”算，和 /status、_wrap_with_landlock 的包裹决定同一个探测。不依赖副作用。
@@ -633,11 +634,12 @@ def _persona_file_literal_denies(protected_persona_root: Path | None) -> list[st
 # LLM: 要求断网时，平台沙箱本身可用还不够，必须真能隔离网络：Linux 实跑一次 bwrap --unshare-net（容器里缺 NET_ADMIN
 #   时回环配置会失败），macOS 实跑一次带 (deny network*) 的 Seatbelt。失败按沙箱不可用 fail-closed，
 #   不能让命令以“bwrap 启动失败”的形态跑完再被误判成程序自己的输出。结果由 require_ready 随 readiness 缓存。
-# 函数用途: 平台沙箱可用且要求断网时，再探测一次本机能否在沙箱里切断网络；其余情况原样返回平台探测结果。
+#   隔离解释器显式禁写缓存，不依赖会被 -I 忽略的环境变量。
+# 函数用途: 平台沙箱可用且要求断网时，无缓存写入地探测能否切断网络；其余情况原样返回平台探测结果。
 def _network_checked(report: SandboxReadiness, platform_name: str, spec: AttemptSandboxSpec) -> SandboxReadiness:
     if not report.ready or spec.network_access:
         return report
-    command = [sys.executable, "-I", "-S", "-c", "pass"]
+    command = [sys.executable, "-I", "-B", "-S", "-c", "pass"]
     if platform_name == "Linux":
         argv = [str(spec.bwrap_path or find_bwrap()), "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--", *command]
     else:
