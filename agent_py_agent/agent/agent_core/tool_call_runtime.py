@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -213,10 +214,11 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     return execution
 
 
-# LLM: 仅 typed IM sink 才注入观察回调；配置 0 关闭，off 只显示极简心跳，不改变工具范围、模型请求或账本。
+# LLM: typed IM 回调只由宿主注入，stop 谓词经 keyword 交 writer，不进参数/JSON；0 禁用，不改工具范围或账本。
 # 函数用途: 给唯一执行器装配同回合的短窗口刷新，TUI 不创建多余线程。
 def _tool_liveness_context(runtime_request: ToolCallRuntimeRequest) -> dict[str, object]:
-    sink = getattr(runtime_request.request.params, "effective_on_chunk", None)
+    callback = getattr(runtime_request.request.params, "effective_on_chunk", None)
+    sink = getattr(callback, '__self__', None) or callback
     publish = getattr(sink, "write_tool_liveness", None)
     if not getattr(sink, "tool_liveness_enabled", False) or not callable(publish):
         return {}
@@ -224,13 +226,15 @@ def _tool_liveness_context(runtime_request: ToolCallRuntimeRequest) -> dict[str,
         interval = float(getattr(runtime_request.agent.config, "im_stream_heartbeat_seconds", 120.0))
     except (AttributeError, TypeError, ValueError):
         interval = 120.0
+    if not math.isfinite(interval):
+        interval = 120.0
     if interval <= 0:
         return {}
-    # LLM: 回调只为原事件补宿主轮次，不访问模型文本或工作区；执行器控制其寿命。
+    # LLM: 回调补宿主轮次并传同观察 stop，不访问正文或工作区；Registry 明确接 guarded 接口，不能来自模型参数。
     # 函数用途: 把运行时间事实交给原 chunk 流，继续沿原消息 ID 投递。
-    def publish_liveness(event: dict[str, object]) -> None:
+    def publish_liveness(event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
         publish({**event, "round": runtime_request.request.tool_rounds,
-                 "call_index": runtime_request.request.idx})
+                 "call_index": runtime_request.request.idx}, still_current=still_current)
     return {"tool_liveness_sink": publish_liveness, "tool_liveness_interval": min(120.0, max(1.0, interval))}
 
 

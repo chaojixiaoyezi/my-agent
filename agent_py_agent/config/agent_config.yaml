@@ -606,7 +606,8 @@ feishu_app_id: ""
 feishu_group_require_bot_mention: true
 # /verbose stream 同一条过程消息每次最多展示多少字符，默认 100；有效范围 1～8000，最终答复不受影响。
 im_stream_preview_max_chars: 100
-# IM 无输出长工具的存活状态刷新间隔，单位秒，默认 120；verbose off 仅显示极简状态与时间。
+# IM 无可见输出的长工具和模型请求等待刷新间隔，单位秒，默认 120；verbose off 仅显示极简状态与时间。
+# 模型心跳只表示同一已发出请求尚未返回及已等待时长，不表示完成了业务进展；停止/超时后不继续刷新。
 # 0 关闭心跳，有效刷新间隔 1～120 秒；stream 有新正文时仍沿原节流更新，不额外调用 LLM。
 im_stream_heartbeat_seconds: 120.0
 # 飞书自建应用的 App Secret，用于以你的飞书应用身份收发消息。

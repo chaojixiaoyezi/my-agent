@@ -752,7 +752,7 @@ class ToolRegistry:
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
     # cwd/root set. 审批模式沿 owner 唯一策略，读失败不放行；调用来源只能由宿主参数指定，不能从模型参数提权。
-    # 函数用途: 在本轮统一工作目录和授权根下执行工具，并返回可审计的标准执行结果；展示回调只从宿主上下文取得。
+    # 函数用途: 统一工作目录与授权执行；guarded 展示回调只从宿主上下文传给原执行器，不读取模型参数。
     def execute_tool(
         self,
         call: ToolCall,
@@ -797,7 +797,7 @@ class ToolRegistry:
                 event_context=_host_event_context(trusted_run_context),
                 plugin_gate_reviewer=self.plugin_gate_reviewer,
                 call_origin=(trusted_run_context or {}).get("call_origin", "model"),
-                on_handler_progress=(trusted_run_context or {}).get("tool_liveness_sink"),
+                on_handler_progress_guarded=(trusted_run_context or {}).get("tool_liveness_sink"),
                 handler_progress_interval_seconds=(trusted_run_context or {}).get("tool_liveness_interval", 120.0),
             )
         )

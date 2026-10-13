@@ -10,18 +10,21 @@
 |-- agent_py_agent/agent/user_space/feishu_cloud_authorization.py # 真实个人/群协作者权限验证
 |-- agent_py_agent/agent/user_space/feishu_sheet_authorization.py # 表格保护范围与准确主体编辑权限
 |-- agent_py_agent/agent/contracts/model_call_latency.py # 原模型调用账的匿名单调耗时
+|-- agent_py_agent/agent/agent_core/model/im_wait_activity.py # 当前物理模型调用的 IM 等待观察
+|-- agent_py_agent/agent/gateway_parts/stream_liveness.py # 原 chunk 出口的工具与模型等待接口
 |-- agent_py_agent/tests/test_im_control_repair.py # 后置提及、时区、诊断、审批与计时运输
 |-- agent_py_agent/tests/test_scheduler_repair.py # 无写锁快照、死亡恢复和旧群归属
 |-- agent_py_agent/tests/test_feishu_cloud_collaborator_authorization.py # 自助授权、撤权、wiki 与保护范围
 |-- agent_py_agent/tests/test_feishu_sheet_cloud_authorization.py # A1 保护范围、编辑者与追加位置不确定
 |-- agent_py_agent/tests/test_model_latency_accounting.py # 物理调用耗时、用途分区与旧数据未知
+|-- agent_py_agent/tests/test_model_wait_progress.py # 同消息等待展示、停止、超时及思考隐私
 |-- docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md # 本轮 14 项定位及修复验收
 |-- docs/tasks/IM_SCHEDULER_REPAIR_HANDOFF.md # 调度修复交接
 |-- docs/tasks/IM_CLOUD_REPAIR_HANDOFF.md # 云授权修复交接
 `-- docs/tasks/IM_LATENCY_REPAIR_HANDOFF.md # 耗时与按任务规模收敛交接
 ```
 
-关键职责：store_snapshot 只读取原 scheduler store 的完整代次；recovery 只结算原 claim/run/history；creator_migration 不借当前群发言者猜旧身份；云授权只使用当前准确主体的供应商权限证据；model_call_latency 不建立第二份用量账。实际验收与发行状态见本轮核查报告。
+关键职责：store_snapshot 只读取原 scheduler store 的完整代次；recovery 只结算原 claim/run/history；creator_migration 不借当前群发言者猜旧身份；云授权只使用当前准确主体的供应商权限证据；model_call_latency 不建立第二份用量账。im_wait_activity 只在实际模型调用边界观察等待，stream_liveness 仍写原 chunk，不创建第二个消息或执行状态源。实际验收与发行状态见本轮核查报告。
 
 2026-10-13 新权威入口与验证（凭据/owner/运行账均复用原模块）：
 

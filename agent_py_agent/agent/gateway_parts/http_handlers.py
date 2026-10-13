@@ -451,9 +451,9 @@ def handle_progress(handler, server) -> None:
     )
 
 
-# LLM: /progress 只公开白名单事件：模型过程说明、按档位的工具进度，以及等待确认的工具审批（只含工具名与已脱敏摘要，
+# LLM: /progress 只公开白名单事件：模型过程说明、请求尚未返回的数值等待、按档位的工具进度和工具审批（只含工具名与已脱敏摘要，
 #   不含 binding、选项或参数原文）。审批事件只是提示，授权仍只能经 /approve、/deny 控制写入精确决定文件。
-# 函数用途: 按行游标读取一段 chunk 流，并投影成 IM 适配器可渲染的公开进度事件。
+# 函数用途: 按行游标公开过程及真实模型/工具等待，不发送思考或请求正文。
 def _read_public_progress_events(
     path, since: int, *, channel: str = ""
 ) -> tuple[list[dict[str, object]], int]:
@@ -488,6 +488,13 @@ def _read_public_progress_events(
             permission_event = _public_permission_request_event(row, channel)
             if permission_event is not None:
                 events.append(permission_event)
+            continue
+        if row.get("kind") == "model_liveness":
+            progress = row.get("progress")
+            if isinstance(progress, dict) and progress.get("wait_state") == "model_response":
+                events.append({"kind": "model_liveness", "level": "stream" if row.get("verbose_level") == "stream" else "minimal",
+                               **{key: progress[key] for key in ("model_call_id", "phase", "wait_state", "elapsed_seconds") if key in progress},
+                               **_progress_preview_limit(row), **_progress_update_time(row)})
             continue
         if row.get("kind") != "tool_progress":
             continue

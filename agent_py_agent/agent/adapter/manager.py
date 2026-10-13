@@ -76,7 +76,7 @@ def _utc_now_iso() -> str:
 
 # LLM: 只渲染 Gateway /progress 的结构化事件；permission_requested 只提示可发送的控制命令，既不代表批准，
 #   也不是最终回复（最终正文仍由原请求结果 watcher 发送）；提示只含工具名与 Gateway 已脱敏的摘要。
-# 函数用途: 把一条过程事件渲染成 IM 可读文本；运行中心跳显示真实时长，工具等待确认时提示控制命令。
+# 函数用途: 渲染 IM 过程和模型请求等待时长，不宣称业务进展；工具待确认时提示控制命令。
 def _render_gateway_progress(event: dict[str, object]) -> str:
     kind = str(event.get("kind") or "")
     if kind in {"assistant_commentary", "model_draft"}:
@@ -84,6 +84,9 @@ def _render_gateway_progress(event: dict[str, object]) -> str:
     if kind == "permission_requested":
         summary = str(event.get("summary") or event.get("tool") or "一个工具操作").strip()
         return f"代理请求：{summary}。回复 /approve <管理员密码> 允许本次，/deny 拒绝。"
+    if kind == "model_liveness" and event.get("wait_state") == "model_response":
+        elapsed = event.get("elapsed_seconds")
+        return f"模型请求尚未返回，已等待 {float(elapsed):.2f} 秒" if type(elapsed) in {int, float} else "模型请求尚未返回"
     tool = str(event.get("tool") or "工具")
     status = str(event.get("status") or "").strip()
     elapsed = event.get("elapsed_seconds")
@@ -685,7 +688,7 @@ class _GatewayReplyPollClient:
                   and type(event.get("preview_max_chars")) is int and 1 <= event["preview_max_chars"] <= 8000]
         updates = [event.get("updated_at") for event in source_events if isinstance(event, dict) and isinstance(event.get("updated_at"), str)]
         return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode,
-                                    bool(snapshot_indices) or any(isinstance(e, dict) and e.get("kind") == "tool_liveness" for e in source_events),
+                                    bool(snapshot_indices) or any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
                                     limits[-1] if limits else None, updates[-1] if updates else "")
 
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，

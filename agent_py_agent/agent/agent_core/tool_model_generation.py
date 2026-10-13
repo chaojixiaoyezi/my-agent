@@ -144,18 +144,40 @@ class ModelCallAbandonedError(RuntimeError):
 
 
 # LLM: 每次物理模型调用一份；guard 放弃（墙钟超时、用户停止）时置位，worker 在发出前于同一把锁内复核。
-#   只表达"这次调用是否仍是当前调用"，不替代账本终态，不改变重试判据；锁内只做本地登记与一次提交，不做网络 I/O。
-# 类用途: 让被放弃调用的迟到工作线程既不把插话提交到作废的调用编号，也不再发出请求。
+#   只表达当前调用事实，不替代终态或重试；放弃时锁外收回展示观察，不等待尚未返回的模型 worker。
+# 类用途: 阻止迟到调用发请求，并在 stop/timeout 时收回该调用的进度心跳。
 class _CallLiveness:
+    # LLM: 每物理调用独占执行标记与展示引用；不复用上一次调用的 observer，不产生 I/O。
+    # 函数用途: 初始化本次调用的发出守卫和可停止进度观察。
     def __init__(self) -> None:
         self._lock = Lock()
         self.abandoned = False
+        self._display_waiter = None
 
-    # 函数用途: guard 放弃这次调用时标记；之后的发出前复核都会看到。worker 正在锁内做发出前登记时会等它做完
-    #   （登记有界、无网络 I/O），这点延迟是正确性所需。
+    # LLM: 标记在原锁内提交，只发无等待 stop；原 guard 随即取消 provider，外层 finally 才有界 close。
+    # 函数用途: 立即停止新展示，不用展示回调阻塞底层连接取消。
     def abandon(self) -> None:
         with self._lock:
             self.abandoned = True
+            waiter = self._display_waiter
+        if waiter is not None:
+            waiter.stop()
+
+    # LLM: 只绑定本物理调用的可选展示；守卫已放弃则不启动，不改变已有请求提交或取消语义。
+    # 函数用途: 在实际 generate 边界登记并启动同一调用的等待观察。
+    def bind_display_waiter(self, waiter: object) -> None:
+        with self._lock:
+            if not self.abandoned:
+                self._display_waiter = waiter
+                waiter.start()
+
+    # LLM: close 可重入；摘引用后锁外有界 join，无法撤销在途外部回调，不宣称阻塞线程已回收。
+    # 函数用途: 有界结束展示，供已取消连接的外层守卫和模型返回共用。
+    def close_display_waiter(self) -> None:
+        with self._lock:
+            waiter, self._display_waiter = self._display_waiter, None
+        if waiter is not None:
+            waiter.close()
 
     # 函数用途: 在同一把锁内复核仍是当前调用后执行发出前登记；已放弃则不执行并返回 False。
     def run_if_current(self, operation) -> bool:
@@ -1096,7 +1118,8 @@ def _trace_model_failure(request: ModelGenerateParams, exc: BaseException) -> No
 
 # LLM: 一次模型请求失败（含墙钟超时、用户停止）后，这次调用的回复不会再被采纳：先按这次调用编号退回随它发出的
 #   插话，再把原异常交给上层的超时重试或模型轮重试。流中止会换成合成回复、上下文超限走原恢复链，这两类不在这里退回。
-# 函数用途: 调用模型；失败时把本次调用带出的补充消息退回可重新提交的状态，再原样抛出异常。
+#   无论守卫如何退出，都先收回本次展示 observer；底层 worker 未退出不代表请求仍是当前调用。
+# 函数用途: 调用模型、结束等待展示；失败时退回可重提的补充消息并保留原异常。
 def _generate_with_wall_timeout(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
@@ -1110,6 +1133,10 @@ def _generate_with_wall_timeout(
         if not is_context_window_error(exc):
             _restore_failed_call_turn_input(state)
         raise
+    finally:
+        closer = getattr(getattr(state, 'liveness', None), 'close_display_waiter', None)
+        if callable(closer):
+            closer()
 
 
 # LLM: 退回失败只会让这批插话保持“提交不明”（守卫因此拒绝重试，与改动前一致），绝不能盖住原始模型异常。
@@ -1477,11 +1504,20 @@ def _generate_with_request_options(backend, prompt: str, state: _ModelGeneration
 
 
 # LLM: 两条组装路径共用的唯一发送点；诊断只读记录形状（tools 数、输出条目类型/长度），不改载荷、结果或重试。
-# 函数用途: 发出一次模型请求，把结构化形状证据留在本轮参数上，原样返回模型结果。
+# 函数用途: 发出一次模型请求，在原活性守卫内观察等待，结束后保存只读形状证据。
 def _generate_and_remember(backend, prompt: str, state: _ModelGenerationState, kwargs: dict[str, object]):
     from ..backends.reply_diagnostics import remember_model_call
+    from .model.im_wait_activity import model_wait_activity
 
-    result = backend.generate(prompt, **kwargs)
+    waiter = model_wait_activity(state)
+    liveness = getattr(state, 'liveness', None)
+    if waiter is not None and liveness is not None:
+        liveness.bind_display_waiter(waiter)
+    try:
+        result = backend.generate(prompt, **kwargs)
+    finally:
+        if waiter is not None:
+            waiter.close()
     remember_model_call(getattr(state, "params", None), result, kwargs)
     return result
 

@@ -2,6 +2,10 @@
 
 2026-10-13 追加 R16：飞书入站附件按 /ask 的可信消息身份解析真实 owner，统一落到 owner media/input，不再使用共享 adapter.workspace_root/inbound_media。两个私聊用户、群聊和绑定管理员遵守现有 owner 路由；权限不放宽，重试不串户，原子文件 0600。实现与验收见 [本期实施记录](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
 
+2026-10-14 追加 B：前台 IM 模型等待复用原 `im_stream_heartbeat_seconds`（默认 120 秒，0 关闭）、原 chunk/progress/draft 和同一消息 ID。真实 `backend.generate` 开始后才启动观察，只发送当前已登记 `model_call_id`、`wait_state=model_response` 与单调经过时长；长 thinking 无可见正文同样刷新“模型请求尚未返回，已等待 X 秒”，不传思考、prompt、参数或凭据，也不宣称业务进展。返回/异常以及原 `_CallLiveness.abandon`、外层守卫退出都收回观察，不能等待迟到 backend worker 的 finally 才停。普通后台巡检没有显式 IM 展示 sink，不新增进度窗口，静默策略保持。模型与工具共用 `tooling/liveness.ActivityHeartbeat` 观察核；实现与测试见 `agent_core/model/im_wait_activity.py` 和 `tests/test_model_wait_progress.py`。首轮回归先复现 3 项失败，再接线修复；最终真实渠道送达仍需独立验收。
+
+B 非作者取消审查补充：等待观察 stop 无等待，close 有固定 100ms 预算；原 guard 先取消真实 provider，不被展示 sink 拖住。模型/工具 typed 等待沿同一停止谓词在原追加锁后、下一投影前复核；writer close 拒绝新等待。已经进入第三方回调或系统 I/O 的旧观察无法撤销，保留其原时间，不宣称线程必已回收；普通正文 flush 不因本补修变为有界。回归与边界见 [耗时交接](../tasks/IM_LATENCY_REPAIR_HANDOFF.md)。
+
 <a id="requirements-overview-20261012"></a>
 
 ## 本轮需求总表（2026-10-12 起，21 项，实施中）

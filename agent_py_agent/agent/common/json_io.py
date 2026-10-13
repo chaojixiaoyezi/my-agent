@@ -1,5 +1,5 @@
-# LLM: JSON 文件仍共用原线程锁和 OS 锁；显式非阻塞准入只改变等待方式，不建立另一锁名或写入入口。
-# 模块用途: 提供运行元数据的读取、原子写入与共享文件锁，让管理准备在资源繁忙时及时返回。
+# LLM: JSON 共用原线程/OS 锁；非阻塞准入不另建锁名，可选展示谓词仅在原 append 锁后复核，不保存或序列化。
+# 模块用途: 提供元数据读取、原子写与共享锁；已失效展示等待不新追加，普通写保持原协议。
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -438,11 +439,13 @@ def write_private_jsonl_records(path: Path, records: list[dict[str, object]], *,
 
 
 # LLM: 追加无法原子替换整文件；这里只保证私有：目录 0700、新文件出生 0600、已有文件先收紧再追加，
-#   锁沿用 locked_json_path（与 append_jsonl_records 同一协议）。调用方负责序列化格式。
-# 函数用途: 以仅本人可读写的权限向文本文件追加内容（写文件、可能 chmod 文件与目录）。
-def append_private_text(path: Path, content: str) -> None:
+#   锁沿用 locked_json_path；可选展示谓词在取得原锁后复核，不保存或序列化。
+# 函数用途: 私有追加文本；已失效的可选展示不新写，普通调用保留原字节和锁语义。
+def append_private_text(path: Path, content: str, *, still_current: Callable[[], bool] | None = None) -> None:
     ensure_private_dir(path.parent)
     with _locked_json_path(path):
+        if still_current is not None and not still_current():
+            return
         _ensure_private_file(path)
         _tighten_private_file(path)
         with path.open("a", encoding="utf-8") as handle:

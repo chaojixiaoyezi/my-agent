@@ -1,4 +1,4 @@
-# LLM: Gateway 流出口只拥有请求级缓冲、公开投影和审批交互；canonical 历史、执行权及最终结果由调用方提交。
+# LLM: Gateway 流出口组合请求缓冲、公开投影、审批和等待 mixin；执行权及最终结果由调用方提交，等待关闭只拦展示。
 # 事件先写原 chunk 再投影，模型候选与确认消息必须区分；修改时同步 streaming、审批、插话和重连回归。
 # 模块用途: 将模型、工具和控制过程按原顺序写给客户端，保留权限、脱敏和迟到客户端读取边界。
 from __future__ import annotations
@@ -29,6 +29,7 @@ from .stream_events import (
     public_model_text,
     thinking_event,
 )
+from .stream_liveness import StreamLiveness
 
 # 分块流刷新间隔 0.08 秒：输出攒够 128 字符或超时即推给对端。
 _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS = 0.08
@@ -47,20 +48,23 @@ def open_chunk_stream(chunk_path: Path) -> tuple[Path, float]:
 # LLM: typed progress 与模型 delta 共用归档文件但保留 kind，客户端不得再解析“[工具]”正文猜状态。
 #   追加走私有原语：新文件出生 0600、已有宽权限文件先收紧再追加、缺失目录按 0700 建；
 #   序列化格式与原来逐字节一致（ensure_ascii=False、行尾换行）。
-# 函数用途: 追加一个带类型的 Gateway 流事件；展示写入失败不改变请求结果。
-def write_chunk_event(chunk_path: Path, payload: dict[str, object]) -> None:
+# 函数用途: 追加 typed 流事件；可选谓词在原文件锁后复核，展示故障不改变请求结果。
+def write_chunk_event(chunk_path: Path, payload: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
     try:
         line = json.dumps({"t": time.time(), **payload}, ensure_ascii=False)
-        append_private_text(chunk_path, line + "\n")
+        if still_current is None:
+            append_private_text(chunk_path, line + "\n")
+        else:
+            append_private_text(chunk_path, line + "\n", still_current=still_current)
     except OSError:
         pass
 
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
 # 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；审批模式提供者由宿主绑定，显示故障不能中止请求。
-# 类用途: 缓冲模型/工具事件，并为支持的 TUI 投递逐轮说明、折叠思考、结构化结果和审批等待。
+# 类用途: 缓冲模型/工具事件、组合 IM 等待接口；公开投影复核等待资格，TUI 继续消费原富事件。
 @dataclass
-class BufferedChunkStreamWriter:
+class BufferedChunkStreamWriter(StreamLiveness):
     """Buffer model deltas and persist typed user-visible stream events."""
 
     chunk_path: Path
@@ -109,15 +113,22 @@ class BufferedChunkStreamWriter:
     def __call__(self, text: str) -> None:
         self.write(text)
 
-    # LLM: 原 chunk 是公开事件出口；两种投影不改变 payload/顺序，异常只丢展示，不能反噬模型回合。
-    # 函数用途: 发布已清洗事件，分别同步同会话的状态条和正文，不扩大审批入口。
-    def _write_event(self, event: dict[str, object]) -> None:
+    # LLM: 谓词不进 JSON，落盘和下一投影前复核；已进入外部回调不可撤销，不让迟到继续调用后一出口。
+    # 函数用途: 发布已清洗事件，关闭等待后不追加新进度或推进后续投影。
+    def _write_event(self, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
+        if still_current is not None and not still_current():
+            return
         if self._verbose_level == "stream" and not self.rich_transcript:
             event = {**event, "preview_max_chars": self._im_preview_max_chars}
-        if not self.rich_transcript and event.get("kind") in {"tool_progress", "assistant_commentary", "model_draft"}:
+        if not self.rich_transcript and event.get("kind") in {"tool_progress", "assistant_commentary", "model_draft", "model_liveness"}:
             event = {**event, "updated_at": display_now(self._display_timezone).isoformat(timespec="seconds")}
-        write_chunk_event(self.chunk_path, event)
+        if still_current is None:
+            write_chunk_event(self.chunk_path, event)
+        else:
+            write_chunk_event(self.chunk_path, event, still_current=still_current)
         for sink in (self.main_activity_sink, self.transcript_sink):
+            if still_current is not None and not still_current():
+                return
             if not callable(sink):
                 continue
             try:
@@ -299,19 +310,6 @@ class BufferedChunkStreamWriter:
             },
         )
 
-    # LLM: rich transcript 不新增心跳；IM off 也给最小运行状态，不从模型正文判定启用。
-    # 函数用途: 告诉宿主本请求是否需要无输出长工具的状态刷新。
-    @property
-    def tool_liveness_enabled(self) -> bool:
-        return not self.rich_transcript and not supports_transcript_delivery(self.delivery_channel)
-
-    # LLM: 执行器只传数值和工具身份；此入口不 flush 模型缓冲，不伪造 commentary 或更改真实工具状态。
-    # 函数用途: 将长工具心跳写入原 chunk，投递端继续编辑同一条短窗口。
-    def write_tool_liveness(self, event: dict[str, object]) -> None:
-        if self.tool_liveness_enabled:
-            self._write_event({"kind": "tool_progress", "verbose_level": self._verbose_level,
-                               "heartbeat": True, "preview_max_chars": self._im_preview_max_chars, "progress": dict(event)})
-
     # LLM: Sanitize the full thinking before preview clipping and archive through the bound
     # owner/thread sink. Events carry only preview/ref; display failure never changes model state.
     # 函数用途: 保留完整公开思考原文，再发送有界预览和引用；保持思考先于正文，不丢失长思考中间部分。
@@ -470,9 +468,10 @@ class BufferedChunkStreamWriter:
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先刷新原事件再关闭展示投影；chunk 文件保留给迟到读者，流关闭不提交任务终态或消费唤醒。
-    # 函数用途: 收口前台输出和遗留动画，不把流关闭当作工具/任务成功。
+    # LLM: 先拒绝等待新发布，再刷新非等待事件；在途外部回调不可撤销，原时间/生命周期继续供消费者裁决。
+    # 函数用途: 收口显示并拒绝迟到等待事件，不把流关闭当作工具或任务成功。
     def close(self) -> None:
+        self._liveness_closed = True
         self.flush()
         for sink in (self.main_activity_sink, self.transcript_sink):
             closer = getattr(sink, "close", None)

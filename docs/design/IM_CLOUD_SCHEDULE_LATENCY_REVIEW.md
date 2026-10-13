@@ -232,3 +232,41 @@ Linux 唯一失败修正后，整份 scan_costs 45 passed/0 skipped；Mac 同文
 ### 多 Python 进程反馈
 
 用户服务器截图中可见 6 个 appuser 的 python3；顶部 281 tasks 属于全机进程总数。结合用户此前更新输出，只能确认 PID 504266 为 Gateway、504294 为 adapter，其他进程职责及 CPU 原因未经现场命令证实。内存约 1.6 GiB available、swap 未使用，不据截图认定 OOM 或重复 Gateway。新增隔离验收采样自有 TUI/Gateway 的空闲/工作/停止元数据，禁止按 python 名称杀全机进程；不能将测试机结果外推为现网六个 PID 已诊断。
+
+## 追加缺陷 A：末轮非空文本被当作定时回执（只读定位，未修复）
+
+用户反馈 `.20261013.4` 一次定时巡检有 25 次调用、0 重试，末轮却产生无关的分类 JSON，并沿 `delivery=origin` 投递为 `sent`。本次未读取生产正文或根请求日志；**现场文本来自主模型偏题、辅助响应串用、提示上下文或其它来源，尚未确认**。已验的 14 项源码与 `.20261013.5` 候选包不代表 A 已解决；候选包当时尚未发布，后续 B 修复与 `.6` 发布另行验收。
+
+### 当前机制与合成证据
+
+- `agent_core/tool_loop/response_decision.py::_no_tool_calls_decision` 核对协议、取消、截断、未知副作用和空正文；正常非空末轮可以直接 `break`，没有任务语义匹配审查。
+- `conversation/channels.py::project_user_reply` 净化明确内部/工具协议，普通 JSON 可合法作为用户回复，保留原文是当前合同。
+- `conversation/background_execution.py::collect_background_execution_result` 将最终正文投影为字符串；当前公开交付未携带该文本对应的模型调用用途与回复阶段绑定。
+- `conversation/background_delivery.py::record_background_response` 核对真实 owner/来源绑定、投递资格、任务终态以及正文/附件，未验证正文是否是当前定时运行的公开回执。`done` 是执行生命周期，`sent` 是运输回执，均不等于业务内容已验证。
+
+使用临时目录、原正式调度器/Store 与模型、运输替身复现，未调用真实模型或渠道，未修改产品代码：
+
+| 合成检查 | 观察结果 |
+| --- | --- |
+| 一份非空合成 JSON，ResponseDecision 参数带 25 个已执行工具标记（不是 25 次真实工具执行） | `break`，正文不变，空正文修复 0 次 |
+| 相同正文进入用户投影及现有 natural_user_reply 形态检查 | `plain_text`，原样保留并接受 |
+| 原 scheduler + Store，`delivery=origin` | 外发 1 次，历史 `done/sent`，唤醒确认 |
+| 相同正文，`delivery=local` | 外发 0 次，历史 `done/local_only`，监控正常结算 |
+
+这些结果复现了“非空末轮直接成为 origin 回执”的机制，**没有复现或确认现场模型为何偏题**。不能根据 JSON 外形、分类字段、关键词或占位符推断来源，不能把合法 JSON 一律拦下。
+
+### 现有正式控制与未实施方案
+
+可明确执行 `/schedule notify <job_id> local`，也可选 `none`：监控继续运行并保留内部执行结果，后续运行不把原始收尾正文逐轮外发。这是已有正式通知控制，**不是语义校验或偏题修复**。已预留/在跑的 run 保持原冻结通知策略，不无依据修改所有 `origin` 任务。新 IM 任务默认 `local` 已实现；非空内部结果可成功静默。供应商空回复仍走已有有界修复，不等于运行时已收到“本回合无需公开回执”的声明。
+
+最小通用方向尚未实施：先复用原调用账与交付信封，保留最终回复的准确 `call_id/purpose/run_id/task_id/thread_id` 和宿主回复阶段，拒绝将其它用途或其它 run 的响应冒充公开回执；再分离内部执行结果与公开回执，优先复用 `queue_natural_user_reply` 的结构化事实包、零工具表达轮及消息工具真实回执的去重机制。来源绑定能阻止响应串用，不能保证主模型自身不偏题。
+
+`require_user_facing_reply` 当前并不存在，不能当作已支持参数；内部结果与公开回执分离、明确无公开回执状态均是待设计能力。现有 `delivery_contract_doctor` 校验合同结构，`decision_delivery_quality` 提供验证焦点建议，`natural_user_reply` 检查响应形态，它们都不是现成的任务语义审查器。内容质量若增加复核，应采用有界提示/返工/弃权，不新造业务质量硬门，不依据自然语言裁决授权或完成。
+
+建议下一步：先用不含正文的末轮调用来源与阶段元数据区分响应串用和主模型偏题，再决定通用修复；回归须同时覆盖合法 JSON、跨 run/错误用途回复、内部静默成功、公开回执缺失不误报，以及冻结重投不重跑业务。A 的定位与方案不得计入 `.5` 已修复清单。
+
+## B 和本轮发布源码收口
+
+B 复用原 120 秒配置与同消息窗口，补实际模型长等待，并修复独立审查发现的展示阻塞取消风险。最终 33 focused 文件 602 passed、0 failed、0 skipped；原14项1250通过与Linux切片的数字各自保留、不重复累加。Ruff、doc sync、strict code-size、diff、clean-package 均通过；匿名真实锁与停止/超时的独立故障注入确认 provider cancel 先行、关闭后的旧事件不补写。新交付候选为 `.20261013.6`，从严格 gate 的准确源码提交构建，包内清单绑定 commit/source SHA；实际整包验证事实随包保存。
+
+A 的偏题源头和公开回执分离仍未完成，不能据 B 通过或 main 发布宣布 A 已修复。真实飞书云权限/运输、现场长历史与 Windows SSH 客户端没有本轮完整验收；测试机 Ubuntu24.04 的轮恢复、原生TUI/官方MiniMax及候选更新各按真实范围记录。

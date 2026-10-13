@@ -98,3 +98,29 @@ test_response_decision_native_tool_use.py
 ## 需要主线协调与建议下一步
 
 集成者完成最终字节码安装包 smoke 与严格 gate，再提交打包；上线后以匿名原模型账观察用户实际慢请求，区分主调用、冷启动探测、决策、审批或工具等待。可并行审计匿名计时和执行权限，但真实模型与部署由一人统一，不能为求快降低用户档位、放宽权限或假设工具/审批时间为零。
+
+## B：模型无可见输出期间的 IM 等待窗口补修
+
+本期原 R15 已支持工具 handler 的默认 120 秒心跳，但前台模型等待没有独立展示观察：non-rich IM writer 不公开 typed thinking，模型没有可见正文时原 draft 无新事件。服务 4 秒心跳只证明 Gateway 活着，不能替代当前请求的执行证据。委派后台有原 `BackgroundIMProgress`；普通 scheduled 巡检没有 `IM_TASK_EXECUTION_KEY`，不创建窗口是静默策略，不能由此推断巡检卡死。
+
+补修复用原配置、原等待观察核和唯一进度运输：
+
+- `tooling/liveness.py` 把原工具 timer 泛化为 `ActivityHeartbeat`；工具事件身份保持原样，不多出 LLM 或业务状态。
+- `agent_core/model/im_wait_activity.py` 只消费已登记非空 `state.call_id` 和具备声明能力的原 IM sink；支持原 bound callback 的 owner。0 关闭，合法间隔沿原 1～120 秒范围，非有限配置不意外变成一秒。
+- `tool_model_generation._generate_and_remember` 在真实 `backend.generate` 边界启动；原 `_CallLiveness` 绑定同一观察，`abandon` 只给无等待停止信号，原 guard 随即取消 provider，外层 finally 再用固定短预算结束观察。底层 worker 未返回不继续给旧请求发布新进度；模型返回及异常均停止。
+- `gateway_parts/stream_liveness.py` 是原 writer 的同职责 mixin，继续交由 `_write_event` 写原 chunk；HTTP 白名单、manager 渲染和原 draft 合并沿 `model_liveness/wait_state=model_response` 展示“模型请求尚未返回，已等待 X 秒”，更新时间和 100 字符上限沿原逻辑。这里不发送思考或业务正文，也不宣称业务正在前进。
+- 本地 TUI、没有声明 IM 进度能力的后台 sink、静默 scheduled 巡检不启动新窗口。未发出请求且仍等并发槽的阶段不冒充模型已请求；本项未补另一种排队展示。
+
+新增模型等待回归先复现 3 项失败，再通过补修；模型/进度/后台/档案共 118 项通过，原发出前放弃竞态、慢模型、子代理首次选模、热路径和中断恢复另 78 项通过。新增覆盖同消息编辑、完整 final 独立、backend exception、外层 guard 每个出口、worker 未返回时 abandon、取消前不建线程、已 close 不重开、非 IM、0、非有限值、无调用 ID、bound callback、长 thinking 不泄露正文。原 commentary 精确断言补纳原已有 `updated_at` 并校验 ISO 时区，仍严格核对正文和其它字段。切片 Ruff、diff check 与 strict code-size 通过（尺寸报告只写临时目录），整树 gate 由集成者统一运行。
+
+Linux `.20261013.5` 冻结字节码包的原 handler 链另做 300 秒无输出真实 `sleep` 子进程验收，由明确 read_only 合成工具进入正式 Executor/Writer/Progress/DeliveryWorker，供应商运输为替身：实际 handler 时间 120.001 与 240.059 秒产生两条心跳，同一消息 create 1 次/edit 1 次，300.03 秒无输出结束；final 独立、其后无迟到编辑。正常 timer 加调度和传输耗时，不宣称墙钟严格小于 120.000 秒。此样本没有业务 prompt 或真实 IM 外发，不算真实模型/渠道送达。
+
+同节点正式 `ShellTool`（包括测试自身 full-access）因 bwrap `uid map: Permission denied` 前置拒绝，未运行 300 秒，**不算 Shell 沙箱通过**；未修改系统限制或绕过产品 preflight。进度初次 checker 的三位数值与显示两位小数比较不匹配，另 `render-audit.json` 按显示精度只读核验，两个实际 elapsed 均可见。证据留在隔离测试根 `tui-acceptance/read-only-silent-command-300/`，包括原 `evidence.json/chunks.jsonl` 与该只读审计；失败的 Shell 证据分别保留，未覆盖。
+
+建议下一步：集成者注册新增两个小模块和测试的导航，进行非作者审查、整树严格 gate，再构建 `.6`；可以并行审计取消边界和匿名字段，实际部署由一个执行者统一。最终 `.6` 与真实飞书送达仍需验收，不把 `.5` handler 样本当作新模型等待链的线上证据。
+
+### B 非作者取消审查追加
+
+非作者发现初版 observer 的无界 join 会在真实 chunk 锁或阻塞展示 sink 下挡住 provider 取消。新增真实 writer/原 chunk 锁 × stop/timeout 的四项回归先红，再改为 stop 无等待、close 最多 100ms 并返回实际回收状态；已进入第三方回调不能撤销，未回收线程不能宣称已退出。模型和 canonical 工具只接 typed guarded callback，沿原 writer 和 `append_private_text` 可选谓词在实际原锁取得后、下一投影前复核；谓词不进入 JSON，不改普通追加的原字节或锁语义。工具 handler 返回后仍在等锁的 heartbeat 不会迟到追加；卡在第一个外部 sink 的已写旧事件保留，关闭后第二 sink 不再调用。原 draft 最终回执仍由既有终态收口，不重开。
+
+这只保证展示观察不挡住真实 transport 取消，以及关闭后的新等待发布被拦；不承诺撤销已进入的第三方或系统 I/O，也未把普通非等待正文 flush 改为异步或有界。真实渠道和整包复验依然由集成者完成。

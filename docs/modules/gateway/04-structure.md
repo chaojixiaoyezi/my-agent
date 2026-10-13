@@ -2860,3 +2860,5 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 
 发布门补充：`im_dispatch_policy.capture_im_dispatch` 只在真实 Agent owner 存在时冻结偏好；显式 agent=None 的队列宿主保持原请求，不制造 owner 或偏好。执行目标换代的错误在 contracts/error_taxonomy 单点分类为不可自动重放。
 2026-10-13 追加接线：schedule_diagnostics 是原控制的纯参数/无正文失败投影；scheduler/store_snapshot 只读原子代次，recovery 共用原 claim/run/history 终态，creator_migration 仅按不可变 execution_origin 取证。status_projection 将原 model_metrics 的 request 整数白名单跨 IM/TUI 传输，不新建用量账或请求；权限、控制与重启仍沿原 owner/CAS。云工具使用当前准确主体协作者和表格保护证据，宿主凭据不下发；缺证据明确拒绝。详情见 [核查报告](../../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)。
+
+B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed IM sink 和原配置构建观察，物理 call_id 必须存在；`_CallLiveness` 管理其开始与收回。`tooling/liveness.ActivityHeartbeat` 为工具/模型共用的无持久状态观察，`stream_liveness.StreamLiveness` 由原 BufferedChunkStreamWriter 组合并写原事件出口；HTTP 与 adapter 只传输受限等待字段，不发思考、不建立新的投递或调用账。

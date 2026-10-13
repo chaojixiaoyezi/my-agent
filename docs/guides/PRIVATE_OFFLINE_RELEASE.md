@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-13，R01–R21 的 `.20261013.4` 为上一版；用户已授权本轮 M01–M09/C01–C04/L01 修复推送 main 并打包，候选版本 `0.3.0-tui-preview.20261013.5`。每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。本轮见 [核查与实施](../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)，上一轮见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
+状态：2026-10-13，R01–R21 的 `.20261013.4` 为上一版；用户已授权本轮 M01–M09/C01–C04/L01 修复推送 main 并打包。`.20261013.5` 是 14 项修复的隔离验收候选，随后追加模型等待刷新，交付版本改为 `0.3.0-tui-preview.20261013.6`。每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。本轮见 [核查与实施](../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)，上一轮见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 

@@ -352,10 +352,14 @@ def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     commentary = [row for row in rows if row.get("kind") == "assistant_commentary"]
     events, cursor = _read_public_progress_events(path, 0)
 
+    from datetime import datetime
+
+    updated_at = commentary[0]['updated_at']
+    assert datetime.fromisoformat(updated_at).tzinfo is not None
     assert commentary == [
-        {"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。"}
+        {"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。", 'updated_at': updated_at}
     ]
-    assert events == [{"kind": "assistant_commentary", "text": "我先检查 main.py。"}]
+    assert events == [{"kind": "assistant_commentary", "text": "我先检查 main.py。", 'updated_at': updated_at}]
     assert _render_gateway_progress(events[0]) == "我先检查 main.py。"
     assert cursor == len(rows)
     assert "接下来" not in json.dumps(commentary, ensure_ascii=False)

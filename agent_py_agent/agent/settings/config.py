@@ -532,7 +532,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_group_require_bot_mention: bool = True
     # /verbose stream 整条过程正文的字符上限；只影响展示，不裁剪最终回复。
     im_stream_preview_max_chars: int = 100
-    # /verbose stream 长工具状态刷新间隔（秒）；0 关闭，不调用额外 LLM。
+    # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。
     im_stream_heartbeat_seconds: float = 120.0
     feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首设/闲置锁定都暂存消息，验证成功后续送，异常不放行；群聊不锁
     feishu_personal_idle_lock_seconds: int = 10800  # 私聊闲置多久后锁定(秒,默认 3h);feishu_session_lock_enabled 开启时生效

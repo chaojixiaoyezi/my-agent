@@ -1,4 +1,4 @@
-# LLM: 模型与显式宿主管理共用状态机；B5 来源/征询由宿主注入，decide 后只收紧，不扩大权限或自动修写参数。
+# LLM: 共用唯一执行状态机；来源/征询和 guarded 展示均由宿主注入，观察有界收口，不扩大权限或模型参数。
 # 模块用途: 统一工具校验、授权、执行和结果记录，区分未执行、已执行与副作用未知。
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from ..runtime_db.managed_operation_store import (
 )
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
 from .event_observation import ToolEventObservation
-from .liveness import ToolHandlerLiveness
+from .liveness import ActivityHeartbeat
 from .models import (
     ResourceScopeResolutionError,
     ToolAvailability,
@@ -81,7 +81,7 @@ class ToolExecution:
 
 
 # LLM: 模型参数与宿主配置分离；审批、事件身份、调用来源和征询回调只由可信调用方设置，来源默认 model，不能从 ToolCall 参数提权。
-# 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用；可选展示心跳不携带权限。
+# 类用途: 汇总本次调用与取消上下文；typed guarded/单参观察回调只择一，不改变权限或工具结果。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
     call: ToolCall
@@ -107,6 +107,7 @@ class ToolExecutorRequest:
     event_context: EventPointContext | None = None
     on_handler_started: Callable[[], None] | None = None
     on_handler_progress: Callable[[dict[str, object]], None] | None = None
+    on_handler_progress_guarded: Callable[..., None] | None = None
     handler_progress_interval_seconds: float = 120.0
     # 来源与征询提供方仅由宿主注入；模型参数没有任何来源控制权。
     call_origin: str = "model"
@@ -266,8 +267,9 @@ def _execute_authorized(
             )
     states.append("running")
     observation = ToolEventObservation(request.event_context, call, decision.resolved_effect)
-    liveness = ToolHandlerLiveness(call, request.on_handler_progress,
-        request.handler_progress_interval_seconds, request.cancellation_token)
+    liveness = ActivityHeartbeat({"call_id": call.call_id, "tool": call.tool_name,
+        "phase": "running", "status": "执行中", "wait_state": "handler_result"}, request.on_handler_progress,
+        request.handler_progress_interval_seconds, request.cancellation_token, guarded_sink=request.on_handler_progress_guarded)
     # LLM: 开始事实只由 Registry 真正进入 handler 触发，原观察、宿主回调和心跳共用该边界。
     # 函数用途: 发布真实开始事件并启动可选展示，不提前把授权成功当成已执行。
     def handler_started() -> None:

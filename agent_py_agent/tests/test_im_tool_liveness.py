@@ -125,8 +125,8 @@ def test_real_model_tool_seam_passes_liveness_into_registry(gateway, tmp_path):
     writer.set_verbose_level("stream")
     original = writer.write_tool_liveness
 
-    def observe(event):
-        original(event)
+    def observe(event, **kwargs):
+        original(event, **kwargs)
         pulse.set()
 
     writer.write_tool_liveness = observe
@@ -200,3 +200,61 @@ def test_real_silent_shell_updates_window_and_stops_after_final(tmp_path):
     time.sleep(0.05)
     worker.run_once()
     assert len(provider.edits) == count
+
+
+def test_guarded_tool_wait_drops_pending_append_after_handler_returns(tmp_path):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    entered, release_handler, callback_done, completed = (threading.Event() for _ in range(4))
+    writer = BufferedChunkStreamWriter(tmp_path / 'chunks.jsonl', delivery_channel='feishu')
+    results = []
+
+    class BlockedTool(_CountingTool):
+        def execute(self, params):
+            assert release_handler.wait(2)
+            return ToolHandlerOutcome(self.model_spec.name, True, 'done')
+
+    def progress(event, *, still_current):
+        entered.set()
+        try:
+            writer.write_tool_liveness(event, still_current=still_current)
+        finally:
+            callback_done.set()
+
+    tool = BlockedTool()
+
+    def execute():
+        results.append(ToolExecutor().execute(ToolExecutorRequest(call=_call(tool, {'value': 'synthetic'}),
+            runtime_snapshot=_snapshot(tool), workspace_root=tmp_path, operation_store_required=False,
+            on_handler_progress_guarded=progress, handler_progress_interval_seconds=.02)))
+        completed.set()
+
+    worker = threading.Thread(target=execute)
+    with locked_json_path(writer.chunk_path):
+        worker.start()
+        try:
+            assert entered.wait(1)
+            release_handler.set()
+            assert completed.wait(.4), 'handler 返回后被展示锁阻塞'
+            assert not writer.chunk_path.exists()
+        finally:
+            release_handler.set()
+    worker.join(2)
+    assert callback_done.wait(1)
+    assert results[0].result.ok and not writer.chunk_path.exists()
+
+
+def test_guarded_callback_is_single_selected_publisher(tmp_path):
+    pulse, opaque, guarded = threading.Event(), [], []
+    tool = SilentTool(pulse)
+
+    def publish(event, *, still_current):
+        assert still_current()
+        guarded.append(event)
+        pulse.set()
+
+    result = ToolExecutor().execute(ToolExecutorRequest(call=_call(tool, {'value': 'synthetic'}),
+        runtime_snapshot=_snapshot(tool), workspace_root=tmp_path, operation_store_required=False,
+        on_handler_progress=opaque.append, on_handler_progress_guarded=publish,
+        handler_progress_interval_seconds=.02))
+    assert result.result.ok and len(guarded) == 1 and not opaque
