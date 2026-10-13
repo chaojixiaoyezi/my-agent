@@ -1,3 +1,5 @@
+# LLM: scheduler 原 owner store 是唯一任务权威；只读完整快照不取写锁，变更仍经 quota→原锁→版本/claim CAS。
+# 模块用途: 持久化监控、运行与历史，确保并发查询、崩溃恢复和正常收尾共用原 owner 账本。
 from __future__ import annotations
 
 """Owner-scoped durable scheduler job and run repository.
@@ -30,7 +32,6 @@ from ..common.heartbeat import process_start_time, start_time_relation
 from ..common.json_io import (
     append_private_jsonl_records,
     locked_json_path,
-    read_json_object_report,
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
 )
@@ -53,6 +54,7 @@ from .schedule import (
     schedule_timestamp,
     validate_schedule,
 )
+from .store_snapshot import read_atomic_store_bytes
 
 _STORE_SCHEMA = "scheduler_store.v1"
 _JOB_SCHEMA = "scheduler_job.v1"
@@ -92,8 +94,18 @@ _WAITING_PROJECTION_LOCK = threading.Lock()
 _WAITING_PROJECTION_STATS: dict[str, int] = {"hit": 0, "miss": 0, "guard": 0, "skip": 0}
 
 
+# LLM: 对外只暴露稳定类别和安全诊断字段，不要求调用方解析文案或向用户展示私有路径。
+# 类用途: 表示调度仓库故障，并给命令、日志提供结构化原因。
 class SchedulerRepositoryError(RuntimeError):
     """Base class for durable scheduler failures."""
+
+    # LLM: 子类沿用同一错误载荷；details 只存异常类型、errno、行列等无正文事实。
+    # 函数用途: 初始化可定位的故障类别，同时保留现有异常消息与继承关系。
+    def __init__(self, message: str, *, error_code: str = "SCHEDULER_UNAVAILABLE", details: dict | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.details = dict(details or {})
+        self.errno = self.details.get("errno")
 
 
 class SchedulerStateError(SchedulerRepositoryError):
@@ -448,8 +460,8 @@ class _SchedulerRunOperations:
             }
             self._write_store_unlocked(store, admission)
 
-    # LLM: Expiry only opens runner-identity verification; reclaims require death proof and a locked queued CAS.
-    # 函数用途: 领取已排队 run；旧 runner 活着或身份不明时，不分配第二个执行权。
+    # LLM: 过期仅开启 PID/指纹核验；未开工死亡须原 queued CAS，已开工死亡写 unknown 历史，活/未知不授第二份执行权。
+    # 函数用途: 领取已排队 run，并在同一原事务收口已证实死亡的旧领取者。
     def claim_run(
         self,
         run_id: str,
@@ -467,9 +479,15 @@ class _SchedulerRunOperations:
             if resolved is None:
                 return None
             if resolved is not run:
+                if resolved["status"] == "unknown":
+                    from .recovery import settle_dead_run
+
+                    terminal = settle_dead_run(self, store, run, current=current)
+                    self._write_store_unlocked(store, admission, history_records=[terminal])
+                    return None
                 run = resolved
                 store["runs"][run_id] = run
-                # 先落盘死亡证明后的明确 queued 状态，再独立提交新 epoch。
+                # 已确认未开工且旧 runner 死亡，先提交 queued，再产生新领取 epoch。
                 self._write_store_unlocked(store, admission)
             if run["status"] not in _ACTIVE_RUN_STATUSES:
                 return None
@@ -552,6 +570,8 @@ class _SchedulerRunOperations:
             self._write_store_unlocked(store, admission)
         return True
 
+    # LLM: 终态必须匹配原 claim/epoch，在原 quota→锁事务移出活动 run、更新 job 并追加历史，不能由回复正文触发。
+    # 函数用途: 保存准确领取者的执行结果；与 waiting 和死亡恢复共用原终态状态变更入口。
     def finish_run(
         self,
         run_id: str,
@@ -565,14 +585,18 @@ class _SchedulerRunOperations:
         with self._mutation_scope() as (store, admission):
             run = self._require_claim(store, run_id, claim_id)
             terminal = _terminal_run_payload(run, result, now=current)
-            store["runs"].pop(run_id, None)
-            job_id = str(run["job_id"])
-            raw_job = store["jobs"].get(job_id)
-            job, _error = self._parse_job(raw_job)
-            if job is not None:
-                store["jobs"][job_id] = _job_after_run(job, terminal, now=current)
+            self._record_terminal_unlocked(store, run, terminal, now=current)
             self._write_store_unlocked(store, admission, history_records=[terminal])
         return deepcopy(terminal)
+
+    # LLM: 正常 claim、waiting 与死亡恢复共用同一终态状态变更；调用方必须先持原锁并证明自己的状态或死亡事实。
+    # 函数用途: 移出活动 run 并更新原 job；历史提交仍由同一 _write_store_unlocked 事务入口执行。
+    def _record_terminal_unlocked(self, store, run, terminal, *, now: float) -> None:
+        store["runs"].pop(str(run["run_id"]), None)
+        job_id = str(run["job_id"])
+        job, _error = self._parse_job(store["jobs"].get(job_id))
+        if job is not None:
+            store["jobs"][job_id] = _job_after_run(job, terminal, now=now)
 
     def history(
         self,
@@ -603,13 +627,8 @@ class _SchedulerRunOperations:
         )
         return deepcopy(selected[: max(1, min(int(limit or 50), 200))]), sorted(set(errors))
 
-    # LLM: 这是只读能力投影,只回答"当前 owner 的调度账本长什么样",不参与任何裁决;调用方
-    # 是模型显式发起的 scheduler status。它曾经进两次锁、每次都在锁内把整个 store.json 读+全量
-    # 解析一遍(实测 N=10000 条 run: 锁内 12.3ms + 15.4ms,并发等锁者中位 13.4ms)。现在锁外
-    # 只读一次字节、算一次摘要、做一次全量解析,锁内只复核"这份字节是否仍是当前文件";复核
-    # 通过就直接用锁外结论,因此稳态锁持有时间与 run 条数无关。复核不通过或探针不可用一律
-    # 退回锁内权威读取,坏账本仍返回 unavailable,返回字段与旧实现逐字一致。
-    # 函数用途: 汇总定时任务与活跃 run 的只读快照(active/paused 计数、schedule 种类、活跃 run 数)。
+    # LLM: 只读健康投影不参与执行裁决；完整现读快照不取写锁，job/run 损坏均报告 degraded，读取失败标记 unavailable。
+    # 函数用途: 汇总监控与活动运行数量，保留无法查询的原因，不把不可用的零计数当没有监控。
     def runtime_snapshot(self) -> dict[str, object]:
         try:
             active_jobs, paused_jobs, active_runs, errors, schedule_kinds = (
@@ -634,49 +653,27 @@ class _SchedulerRunOperations:
             "schedule_kinds": schedule_kinds,
         }
 
-    # 函数用途: 产出 runtime_snapshot 的字段元组;锁外解析 + 锁内一次 stat 复核,复核不过才退回权威读取。
+    # LLM: 健康读取与普通查询共用完整只读快照，不申请写锁，不用上一代缓存冒充当前状态。
+    # 函数用途: 从一次原子快照汇总监控与活动运行，并保留损坏事实。
     def _runtime_snapshot_summary(self) -> tuple[int, int, int, list[str], list[str]]:
-        probe = _probe_store_bytes(self.store_path, digest=False)
-        if probe is not None:
-            try:
-                # 探针字节与摘要绑定同一次读取:锁内复核 stat 键相等即可确认"解析的就是当前文件版本"。
-                summary = self._runtime_summary_from_store(
-                    self._load_store_from_bytes_unlocked(probe.data)
-                )
-            except Exception:  # noqa: BLE001 - 探针本身坏 ≠ 账本坏: 交给下面的权威读取判定
-                # 锁外读到的那份字节可能是旧的/瞬时截断的,而磁盘上的账本此刻已经有效。因此
-                # **不能**把"探针解析失败"当成"账本不可用"(那会让 runtime_snapshot 报
-                # unavailable,而真实账本明明可读),一律退回锁内权威读取。
-                summary = None
-            if summary is not None:
-                with locked_json_path(self.store_path):
-                    if _store_stat_key(self.store_path) == probe.stat_key:
-                        return summary
-        with locked_json_path(self.store_path):
-            return self._runtime_summary_from_store(self._load_store_unlocked())
+        return self._runtime_summary_from_store(self._store_snapshot())
 
-    # LLM: 只读投影的统一入口。锁内**不允许**再出现读盘或全量解析:先在锁外读一次字节并解析,
-    # 锁内只用一次 stat 复核"这份字节仍是当前文件";复核不过或探针不可用才退回锁内权威读取。
-    # 单次调用绑定单次读到的字节,因此不需要跨调用的缓存/摘要比对(与 runtime_snapshot 同一形状)。
-    # 写路径不适用:它必须在锁内做读-改-写,不在这里改动。
-    # 函数用途: 取得一份"已验证仍是当前文件"的 owner 账本快照,供各类只读投影使用。
+    # LLM: 原子 rename 保证读到一代完整 JSON；只读入口不获取可写锁，写方 CAS 和 quota 不经过此函数。
+    # 函数用途: 获取有界现读快照，探针被替换或损坏时重新读取原文件，不改账本或目录。
     def _store_snapshot(self) -> dict[str, Any]:
         probe = _probe_store_bytes(self.store_path, digest=False)
         if probe is not None:
             try:
                 store = self._load_store_from_bytes_unlocked(probe.data)
-            except Exception:  # noqa: BLE001 - 探针坏 ≠ 账本坏: 交给下面的权威读取判定
+            except SchedulerStateError:
                 store = None
-            if store is not None:
-                with locked_json_path(self.store_path):
-                    if _store_stat_key(self.store_path) == probe.stat_key:
-                        return store
-        with locked_json_path(self.store_path):
-            return self._load_store_unlocked()
+            if store is not None and _store_stat_key(self.store_path) == probe.stat_key:
+                return store
+        return self._load_store_unlocked()
 
     # LLM: 纯函数式的账本投影(不做 I/O、不读共享状态),因此锁内锁外调用都不改变语义:
     # jobs 侧与 list_jobs(include_deleted=False) 同源同过滤,schedule 种类只看未删除 job;
-    # runs 侧用与旧实现逐字相同的 _parse_run + 活跃状态判定,坏 run 跳过而不是让整份投影失败。
+    # runs 侧共用 _valid_runs；坏 run 跳过计数但错误码必须进入健康事实，不影响健康记录执行。
     # 函数用途: 从已解析的 store 字典里数出 runtime_snapshot 需要的计数与错误码。
     def _runtime_summary_from_store(
         self, store: dict[str, Any]
@@ -687,30 +684,19 @@ class _SchedulerRunOperations:
         schedule_kinds = sorted(
             {str(rule["schedule"]["kind"]) for job in jobs if job["status"] != "deleted" for rule in (job.get("rules") or [job])}
         )
-        active_runs = sum(
-            1
-            for raw in store["runs"].values()
-            if (run := self._parse_run(raw)[0]) is not None
-            and run["status"] in _ACTIVE_RUN_STATUSES
-        )
-        return active_jobs, paused_jobs, active_runs, errors, schedule_kinds
+        runs, run_errors = self._valid_runs(store)
+        return active_jobs, paused_jobs, len(runs), errors + run_errors, schedule_kinds
 
 
 # LLM: Waiting is a claim-free durable phase, separate from queued/claimed/running process work.
 # Keep every transition CAS-backed through the same owner store and exact scheduler run id.
 # 类用途: 管理模型工作片结束后、根任务仍在继续时的等待、重启对账读取和最终结算。
 class _SchedulerWaitingRunOperations:
-    # LLM: Restart reconciliation needs a bounded snapshot of runs whose model slice ended while
-    # their same-id conversation task stayed active. This is read-only and never scans task prose.
-    # The returned rows are always deepcopies of the cached projection, so callers can neither
-    # mutate cached state nor observe a projection that no longer matches store.json bytes.
-    # 函数用途: 读取等待任务终态的定时执行，供 Gateway 生命周期对账。
+    # LLM: waiting 只读投影按本次现读签名和摘要复核；不取写锁，返回 deepcopy 不允许调用方改缓存状态。
+    # 函数用途: 读取等待任务终态的执行，缓存未变账本的解析结果，不创建锁文件或等待写方。
     def waiting_runs(self) -> tuple[list[dict[str, object]], list[str]]:
-        # 读盘与内容摘要在锁外完成: 锁内只做 stat 复核 + 命中判定(或对已读字节做解析),
-        # 因此锁持有时间只会比"锁内 read + 全量解析"更短,不会更长。
         probe = _probe_store_bytes(self.store_path)
-        with locked_json_path(self.store_path):
-            projection = self._waiting_runs_projection_unlocked(probe)
+        projection = self._waiting_runs_projection_unlocked(probe)
         return [deepcopy(row) for row in projection.rows], list(projection.errors)
 
     # LLM: A model slice may legitimately yield after spawning durable child work. Preserve the
@@ -761,12 +747,7 @@ class _SchedulerWaitingRunOperations:
             if str(run.get("status") or "") != "waiting":
                 raise SchedulerConflictError("scheduler run is not waiting for task completion")
             terminal = _terminal_run_payload(run, result, now=current)
-            store["runs"].pop(run_id, None)
-            job_id = str(run["job_id"])
-            raw_job = store["jobs"].get(job_id)
-            job, _error = self._parse_job(raw_job)
-            if job is not None:
-                store["jobs"][job_id] = _job_after_run(job, terminal, now=current)
+            self._record_terminal_unlocked(store, run, terminal, now=current)
             self._write_store_unlocked(store, admission, history_records=[terminal])
         return deepcopy(terminal)
 
@@ -784,9 +765,11 @@ class _SchedulerStoreSupport:
             with locked_json_path(self.store_path):
                 yield self._load_store_unlocked(), admission
 
+    # LLM: 写方已持原锁，读方无锁；两者现读同一代 no-follow 文件，不吞权限或文件系统错误。
+    # 函数用途: 读取和校验原账本，缺失按空账本处理，坏内容提供明确错误码。
     def _load_store_unlocked(self) -> dict[str, Any]:
-        report = read_json_object_report(self.store_path, context="scheduler.store.read")
-        return self._validate_store_unlocked(report.payload, report.load_error)
+        content = _read_store_bytes(self.store_path)
+        return self._validate_store_unlocked({}, None) if content is None else self._load_store_from_bytes_unlocked(content)
 
     def _load_store_from_bytes_unlocked(self, data: bytes) -> dict[str, Any]:
         """从"已经读进内存的 store.json 字节"解析,语义与 _load_store_unlocked 逐字一致。
@@ -800,6 +783,8 @@ class _SchedulerStoreSupport:
         payload, load_error = _parse_json_object_bytes(self.store_path, data)
         return self._validate_store_unlocked(payload, load_error)
 
+    # LLM: 只接受原 schema/owner 与对象形状；空缺账本维持初始化语义，坏内容不回落历史或其他 owner。
+    # 函数用途: 校验同一代账本，给命令提供内容、schema、身份不同的稳定诊断码。
     def _validate_store_unlocked(
         self,
         payload: dict[str, Any],
@@ -807,7 +792,8 @@ class _SchedulerStoreSupport:
     ) -> dict[str, Any]:
         """校验已解析的 store 负载并返回权威字典(空负载 → 空账本默认值)。"""
         if load_error is not None:
-            raise SchedulerStateError("owner scheduler store is unreadable")
+            raise SchedulerStateError("owner scheduler store is unreadable", error_code="SCHEDULER_STORE_INVALID_CONTENT",
+                details={key: load_error[key] for key in ("error_type", "line_no", "column") if key in load_error})
         if not payload:
             return {
                 "schema_version": _STORE_SCHEMA,
@@ -818,24 +804,16 @@ class _SchedulerStoreSupport:
             }
         store = payload
         if store.get("schema_version") != _STORE_SCHEMA:
-            raise SchedulerStateError("unsupported owner scheduler store schema")
+            raise SchedulerStateError("unsupported owner scheduler store schema", error_code="SCHEDULER_STORE_SCHEMA_MISMATCH")
         if store.get("owner") != self.owner:
-            raise SchedulerStateError("owner scheduler store identity mismatch")
+            raise SchedulerStateError("owner scheduler store identity mismatch", error_code="SCHEDULER_STORE_OWNER_MISMATCH")
         if not isinstance(store.get("jobs"), dict) or not isinstance(store.get("runs"), dict):
-            raise SchedulerStateError("owner scheduler store jobs/runs must be objects")
+            raise SchedulerStateError("owner scheduler store jobs/runs must be objects", error_code="SCHEDULER_STORE_INVALID_CONTENT")
         return store
 
+    # LLM: 投影同时匹配现读 stat、该代完整字节和摘要；无写锁，只缓存解析结果，不成为写 CAS 或授权事实。
+    # 函数用途: 查找 waiting 的有界缓存，文件变化或内容变化时现读解析，错误不留脏缓存。
     def _waiting_runs_projection_unlocked(self, probe: _StoreBytesProbe | None) -> _WaitingRunsProjection:
-        """读 store.json 并返回 waiting 行投影;未变化的数据不重复解析。
-
-        LLM: 命中条件是"锁内 stat 键与缓存一致 + 锁外读到的字节与锁内 stat 一致 + 字节摘要
-        与缓存一致",三条都要成立:
-        ① stat 键(mtime_ns/size/inode/device)覆盖"文件被替换/被截断/被原子改写";
-        ② 锁外探针与锁内 stat 一致,保证"摘要绑定的那份字节"就是当前文件;
-        ③ 内容摘要覆盖"时间戳粒度粗的文件系统上同尺寸原地改写"。
-        任一条不成立都退到 _parse_waiting_projection_unlocked 全量解析(①②不成立时还打结构化
-        告警/guard 计数),绝不返回陈旧结论。投影只缓存 waiting 行与错误码,调用方每次拿到 deepcopy。
-        """
         cache_key = self.waiting_projection_cache_key()
         stat_key = _store_stat_key(self.store_path)
         if stat_key is None:
@@ -873,16 +851,12 @@ class _SchedulerStoreSupport:
             str(self.owner.get("id") or ""),
         )
 
+    # LLM: probe 与现读 stat 匹配才缓存；fallback 仍为 no-follow 完整快照，读取失败移除缓存而非返回旧结论。
+    # 函数用途: 解析本次 waiting 记录，使用原有界缓存减少重复扫描，全程不取写锁。
     def _parse_waiting_projection_unlocked(
         self,
         probe: _StoreBytesProbe | None,
     ) -> _WaitingRunsProjection:
-        """全量解析 store.json 并(可选)写入有界投影缓存;任何异常都不留下脏缓存。
-
-        ``probe`` 是锁外已经读好并算好摘要的那份字节(与锁内 stat 一致时可用):解析因此不需要
-        在锁内做 I/O 或哈希,锁持有时间不会比改动前更长。probe 不可用就回退唯一权威读取路径
-        (锁内 read_json_object_report),由它给结构化结果;这条回退路不写缓存。
-        """
         cache_key = self.waiting_projection_cache_key()
         try:
             if probe is not None:
@@ -970,23 +944,12 @@ class _SchedulerStoreSupport:
             "corrupt": bool(job_errors or run_errors),
         }
 
-    # LLM: Expired runs use the same structured PID/starttime proof as claim_run; only dead owners are CAS-cleared to queued.
-    # 函数用途: 把已证实死亡的过期执行清成可领取状态；活着或不可核验的 runner 保持原记录。
-    def recover_interrupted_executions(
-        self,
-        *,
-        now: float | None = None,
-    ) -> list[str]:
-        """清除已证实死亡 runner 的过期 claim：未开跑的转 queued 供新 epoch 领取，已开跑的转 unknown 终态。"""
-        current = _now(now)
-        with self._mutation_scope() as (store, admission):
-            recovered = _collect_expired_dead_runs(
-                store["runs"], self._parse_run, current
-            )
-            if recovered:
-                store["runs"].update(recovered)
-                self._write_store_unlocked(store, admission)
-        return list(recovered)
+    # LLM: 与 claim_run 共用过期与死亡判定；已开跑只记 unknown，恢复沿原终态/history 提交，不自动重放副作用。
+    # 函数用途: 启动或周期清理明确死亡的领取，并迁移旧版误留活动账本的 unknown。
+    def recover_interrupted_executions(self, *, now: float | None = None) -> list[str]:
+        from .recovery import recover_runs
+
+        return recover_runs(self, current=_now(now))
 
     def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         """逐条解析 runs: 坏记录跳过并收集错误(与 _valid_jobs 同容错模式)。"""
@@ -1229,10 +1192,8 @@ class _WaitingRunsProjection:
     errors: tuple[str, ...]
 
 
-# LLM: One lock-free read of store.json bound to the stat key observed just before it. The probe
-# is only usable while the in-lock stat still matches, which is what lets the locked section parse
-# already-read bytes instead of doing I/O and hashing while holding the owner lock.
-# 类用途: 把"读盘 + 内容摘要"移出临界区,锁内只做版本复核与命中判定。
+# LLM: 完整只读快照的 stat 与字节来源绑定，摘要供跨调用投影复核；不取写锁、不授权任何变更。
+# 类用途: 保存一代原账本字节与指纹，让查询和 waiting 缓存复用完整内容。
 @dataclass(frozen=True)
 class _StoreBytesProbe:
     stat_key: tuple[int, int, int, int]
@@ -1249,12 +1210,15 @@ def _store_stat_key(path: Path) -> tuple[int, int, int, int] | None:
     return (status.st_mtime_ns, status.st_size, status.st_ino, status.st_dev)
 
 
+# LLM: no-follow 完整读取保留 OSError；权限故障不能变成不存在或空账本。
+# 函数用途: 读取 store.json 一代字节，供摘要和解析共用。
 def _read_store_bytes(path: Path) -> bytes | None:
-    """读 store.json 原始字节(摘要与解析共用同一份,保证绑定精确);失败返回 None。"""
     try:
-        return path.read_bytes()
-    except OSError:
-        return None
+        return read_atomic_store_bytes(path)
+    except OSError as exc:
+        code = "SCHEDULER_STORE_BUSY" if isinstance(exc, BlockingIOError) else "SCHEDULER_STORE_UNREADABLE"
+        raise SchedulerStateError("owner scheduler snapshot could not be read", error_code=code,
+            details={"error_type": type(exc).__name__, "errno": exc.errno}) from exc
 
 
 def _store_bytes_digest(data: bytes) -> str:
@@ -1262,18 +1226,9 @@ def _store_bytes_digest(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
+# LLM: 原子快照读取与现读 stat 共同绑定字节；已过期探针不能作为缓存权威，写方仍独占原锁。
+# 函数用途: 读取一代完整账本并选择性生成摘要，供查询或跨调用 waiting 缓存校验。
 def _probe_store_bytes(path: Path, *, digest: bool = True) -> _StoreBytesProbe | None:
-    """锁外探针: 一次 stat + 一次读字节 (+ 可选内容摘要),三者绑定同一份内容。
-
-    LLM: 命中判定要求"探针 stat == 锁内 stat",所以锁外读到的字节与锁内看到的文件版本一致;
-    不一致(外部改写竞态)时调用方会丢弃探针,回退锁内权威读取路径。返回 None 表示文件缺失/
-    不可读,调用方同样走权威路径。
-
-    ``digest=False`` 只服务"单次调用、锁内只复核 stat 键"的读者(见 ``_store_snapshot``): 这类
-    读者不复用结论,摘要算出来也没人比对,而 4-5MB 账本上 blake2b 要花几毫秒——不必要地拖慢每次
-    读取。跨调用缓存(waiting 投影)必须保持 digest=True:它的命中判定依赖内容摘要兜住"同 stat
-    不同内容"。
-    """
     stat_key = _store_stat_key(path)
     if stat_key is None:
         return None
@@ -1287,6 +1242,8 @@ def _probe_store_bytes(path: Path, *, digest: bool = True) -> _StoreBytesProbe |
     )
 
 
+# LLM: 解析失败只报告异常类型与行列，不向外暴露正文；schema/owner 校验继续由原仓库裁决。
+# 函数用途: 解析同一代字节，并为坏 JSON、UTF-8 或根类型提供结构化诊断。
 def _parse_json_object_bytes(
     path: Path,
     data: bytes,
@@ -1302,6 +1259,8 @@ def _parse_json_object_bytes(
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         report = runtime_error_report(exc, context=context)
         report["path"] = str(path)
+        if isinstance(exc, json.JSONDecodeError):
+            report.update(line_no=exc.lineno, column=exc.colno)
         return {}, report
     if isinstance(payload, dict):
         return payload, None

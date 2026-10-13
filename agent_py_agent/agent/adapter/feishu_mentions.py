@@ -1,15 +1,15 @@
 # LLM: 群聊触发只看飞书结构化 mention 与探针取得的 bot open_id；不得按正文、昵称或 @all 文案匹配。
-# 模块用途: 共用 webhook/WS 的直接 @机器人判据与命令前提及规范化，保留其它用户和命令参数。
+# 模块用途: 共用 webhook/WS 的直接 @机器人判据与命令首尾寻址规范化，保留其它用户和命令参数。
 from __future__ import annotations
 
 import json
 from copy import deepcopy
 
-from .feishu_media import post_content_block
+from .feishu_media import extract_feishu_content, post_content_block
 
 
-# LLM: 只移除可信 bot ID 对应的前置 mention；post 与正文读取共用语言/包裹层投影，展示昵称不授予控制权。
-# 函数用途: 让群里先 @机器人再发斜杠命令沿原解析入口执行，不改其它人的提及和参数。
+# LLM: 只移除可信 bot ID 对应的寻址 mention；尾部只在显式 slash 控制中处理，正文与其它用户不授予控制权。
+# 函数用途: 让机器人前后提及都沿原斜杠入口执行，保留真正参数与普通富文本内容。
 def command_content_without_bot_mention(message: dict[str, object], bot_open_id: str) -> object:
     raw = message.get("content")
     if not bot_open_id:
@@ -28,12 +28,53 @@ def command_content_without_bot_mention(message: dict[str, object], bot_open_id:
         while (key := next((key for key in sorted(keys, key=len, reverse=True)
                             if text.startswith(key) and (len(text) == len(key) or text[len(key)].isspace() or text[len(key)] == "/")), "")):
             text = text[len(key):].lstrip()
+        if _is_control_text(text):
+            text = _without_trailing_bot_keys(text, keys)
         content["text"] = text
     elif kind == "post":
         locale = post_content_block(content)
         if isinstance(locale.get("content"), list):
-            locale["content"] = _post_without_leading_bot_nodes(locale["content"], bot_open_id)
+            rows = _post_without_leading_bot_nodes(locale["content"], bot_open_id)
+            text, _media = extract_feishu_content("post", {**locale, "content": rows})
+            locale["content"] = _post_without_trailing_bot_nodes(rows, bot_open_id) if _is_control_text(text) else rows
     return content
+
+
+# LLM: 仅复用显式系统协议判据，不按正文关键词猜测指令；未知 slash 仍交原解析器拒绝。
+# 函数用途: 判断尾部机器人提及是否属于命令的寻址包裹。
+def _is_control_text(text: str) -> bool:
+    from ..command_catalog import system_slash_command_name
+
+    return bool(system_slash_command_name(text))
+
+
+# LLM: key 来自已核验 bot ID 的结构化 mention；只删除独立尾部 token，不裁掉密码/普通参数中的子串。
+# 函数用途: 移除斜杠命令结尾的机器人寻址占位，并保留其他提及。
+def _without_trailing_bot_keys(text: str, keys: set[str]) -> str:
+    text = text.rstrip()
+    while key := next((key for key in sorted(keys, key=len, reverse=True)
+                      if text.endswith(key) and len(text) > len(key) and text[-len(key)-1].isspace()), ""):
+        text = text[:-len(key)].rstrip()
+    return text
+
+
+# LLM: 只删除最后的 bot at 节点及包裹空白，跨行保持原 content；中间节点、代码块和其它用户均不变。
+# 函数用途: 在显式控制富文本中去除后置机器人提及，不用昵称或转换后的文本替换内容。
+def _post_without_trailing_bot_nodes(content: list, bot_open_id: str) -> list:
+    trailing = True
+    rows = []
+    for row in reversed(content):
+        nodes = []
+        for node in reversed(row if isinstance(row, list) else []):
+            if trailing and isinstance(node, dict):
+                if node.get("tag") == "at" and node.get("user_id") == bot_open_id:
+                    continue
+                if node.get("tag") == "text" and not str(node.get("text") or "").strip():
+                    continue
+            nodes.append(node)
+            trailing = False
+        rows.append(list(reversed(nodes)))
+    return list(reversed(rows))
 
 
 # LLM: 只移除头部精确机器人节点；第一段其它实质内容之后保持所有 at/text 节点和原分行。

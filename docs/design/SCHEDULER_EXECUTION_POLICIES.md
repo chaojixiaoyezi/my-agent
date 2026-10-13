@@ -423,3 +423,36 @@ A 平台有 3 个独立监控、B 平台有 3 个独立监控时，用户看到�
 4. **真实 Linux/IM：** 在独立单 Gateway 测试实例中，从真实 TUI 与管理员 IM 布置合成监控，退出 TUI、重启 Gateway、不先发聊天，再核对下一触发和原 ID；随后从 IM 接管查看/控制并验证实际送达。只观察被测对象自己执行，不手补产物，不读取无关业务正文。
 
 建议下一步：把此需求与整体监控模型、紧凑 `/schedule` 一起实施，先贯通本人范围与耐久状态，再接 IM 管理。恢复/控制/投递的身份衔接由一个负责人贯通；安装更新、只读查询展示和测试场景可独立准备。当前仅完善评估，未修改产品、真实任务或发布包，等待用户实施指令。
+
+
+## IM 调度诊断与崩溃恢复收口（2026-10-13，已实现，待整合验收）
+
+本节覆盖此前评估中的只读可用性、死亡恢复、坏运行健康和旧群创建人边界，主链继续使用原 owner 的 `store.json`、`history.jsonl`、ThreadStore 与 due index。
+
+### 查询与写入
+
+- `list/get/status/queued/waiting/active/corruption` 读取 `store_snapshot.py` 的完整只读快照，不创建锁文件、不申请写方配额，不因另一个线程持有写锁阻塞。
+- 写方保留原 quota→JSON/flock 锁顺序、版本 CAS 与 claim epoch 栅栏，仍通过临时文件原子替换 JSON。锁文件持续存在属于 flock 锁锚点；不能按文件存在或 mtime 删除活跃锁。
+- 读方拒绝符号链接、硬链接或非普通叶子。并发替换或违规原地写入导致签名变化时最多重读三次；不回放历史替代当前权威，不无限等待。读取权限/文件系统故障保留 errno，坏内容提供行列，schema 与 owner 不匹配分开报告。
+- 稳定错误码为 `SCHEDULER_STORE_BUSY`、`SCHEDULER_STORE_UNREADABLE`、`SCHEDULER_STORE_INVALID_CONTENT`、`SCHEDULER_STORE_SCHEMA_MISMATCH`、`SCHEDULER_STORE_OWNER_MISMATCH`。命令文案和结构化日志复用这些事实；无需用户刷新客户端。
+- 健康汇总包含 job 与 run 的解析错误。坏 run 可以被隔离，但不能被悄悄丢弃后显示 healthy。
+
+### 启动、周期与终态
+
+`SchedulerService` 初始化与后续调度 tick 均复用同一恢复函数；无候选时只读，不写锁或刷账。已过期且 PID/启动指纹证实死亡时：未开工的 claimed 清为 queued，保留原 run 身份和 epoch 后重新领取；已开工的 running 结算 unknown，进入原历史并移出活动账，不自动重做动作。
+
+正常结束、waiting 收尾、领取时发现死亡和周期恢复共用 `_record_terminal_unlocked` 更新原 job 与活动 run，历史由原写入事务入口提交。history 已提交而 store 替换失败时，仅采纳同 owner/run/job/thread/epoch 的准确终态，不能把真实 done 覆盖成 unknown。旧版误留活动账的合法 unknown 只迁移到原历史，不重做任务。
+
+租约到期不是死亡证明。活 PID/相同指纹、缺失身份、指纹不可读或不可比较均保留；删除/暂停 job 也不强行终止活跃 running/waiting。调度恢复不调用 `runtime-stale-attempts --settle`，后者属于 RuntimeDB 的另一张 attempt 账本。
+
+### 旧群监控创建人
+
+`creator_migration.py` 仅在原 group owner 冷启动，从计划线程的 `host_execution_origin.v1` 与准确 source/thread/owner/operation 引用恢复冻结 actor，不使用群的最新发言人，也不回落管理员。迁移写原 job 的显式版本记录，规则和在途 run 来源不变。
+
+缺少不可变来源证据时记 `creator_migration.status=unmanaged` 与原因码，不赋予当前查询者控制权。管理员诊断只投影未归属数量/准确 job ID，不展示其它成员监控名称或正文。冷查询本身仍只读，不偷偷迁移；已有准确 creator 的监控维持原过滤和普通用户隔离。
+
+### 验证边界
+
+`test_scheduler_repair.py` 先复现旧只读锁故障、unknown 遗留、健康假正常与创建人缺口，再覆盖只读锁拒绝、写锁持有时十次查询、错误类别/errno、有界竞争、启动和 tick 恢复、已删除 job、history 提交后替换失败、旧 unknown 迁移、冻结 actor/跨 owner 拒绝。原死亡/PID 重用/CAS、扫描缓存、quota、服务与命令测试一起回归。
+
+测试使用临时账本和进程状态替身，不是用户生产数据的证明。真实 Linux Gateway kill/restart、IM 命令及安装包验证由集成线执行；活跃运行、投递身份与未确认副作用边界必须一同复核。

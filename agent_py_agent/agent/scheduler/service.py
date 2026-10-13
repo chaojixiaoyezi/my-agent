@@ -15,6 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
+from .recovery import fail_unstarted, prepare_repository
 from .repository import (
     SchedulerConflictError,
     SchedulerNotFoundError,
@@ -135,7 +136,7 @@ class SchedulerService:
 
     # LLM: follow_up 是组合根注入的 SchedulerFollowUpPolicy（task_follow_up 查询 + 从配置推出的宽限期），
     #   供 active_run_closeout 判定；未注入时一律保持原来的 waiting 行为（fail closed），不走限期结算。
-    # 函数用途: 绑定调度账本、会话存储和两个只读查询。
+    # 函数用途: 绑定原账本和会话；冷启动按准确来源迁移创建人，复核死亡 claim 并沿原终态写历史。
     def __init__(
         self,
         repository: SchedulerRepository,
@@ -148,14 +149,16 @@ class SchedulerService:
         self.conversation_store = conversation_store
         self.skill_snapshot_provider = skill_snapshot_provider
         self.follow_up = follow_up
+        prepare_repository(repository, conversation_store, now=time.time())
 
     # LLM: Every queued scheduler run is also the durable root task for its wake. Keep the
     # run id in both typed wake identity and metadata so background lifecycle reads one authority.
-    # 函数用途: 预留到期执行并投递同一任务身份的会话唤醒，供 Gateway 后台实际运行。
+    # 函数用途: 先复核已死亡领取，再预留到期执行；仅新 queued 会唤醒，不重跑已开工的未知结果。
     def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32) -> list[str]:
         from .policy import queue_expired
 
         current = float(time.time() if now is None else now)
+        self.repository.recover_interrupted_executions(now=current)
         self.repository.reserve_due_runs(now=current, limit=limit)
         wake_ids: list[str] = []
         for run in self.repository.queued_runs(now=current, limit=max(1, limit * 2)):
@@ -492,27 +495,7 @@ class SchedulerService:
         now: float,
         status: str = "failed",
     ) -> None:
-        claimed = self.repository.claim_run(
-            str(run.get("run_id") or ""),
-            lease_seconds=30,
-            now=now,
-        )
-        if claimed is None:
-            return
-        from .execution import close_unstarted_task
-
-        close_unstarted_task(self, claimed, now=now)
-        claim_id = str(claimed.get("claim_id") or "")
-        self.repository.finish_run(
-            str(run["run_id"]),
-            claim_id,
-            SchedulerRunFinish(
-                status=status,
-                error_code=error_code,
-                error_message="scheduled run failed before model execution",
-                now=now,
-            ),
-        )
+        fail_unstarted(self, run, error_code, now=now, status=status)
 
 
 def _wake_metadata(run: dict[str, object]) -> dict[str, object]:

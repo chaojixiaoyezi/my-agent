@@ -1,5 +1,4 @@
-# LLM: 管理员专用管控工具：只在 is_permission_admin(当前 home) 时由 core 注册，子代理不可用；每次调用都要管理员本人确认
-#   （ApprovalPolicy always，自主/Full Access 模式也不免确认），保证"让 my-agent 跨用户审计"只能由管理员明确允许。
+# LLM: 管理员工具只供可信管理员主代理；只读查询不弹确认，授权变更沿 always_effects 保持管理员本人确认，auto/Full Access 不免除。
 #   写入唯一走 owner_admin_controls.set_owner_admin_controls（目标 owner 自己的 tool_policy.json，锁内读改写）；
 #   目标只接受 list 返回的规范 owner 编号，不创建用户目录，不从自然语言推断身份。
 #   改动须同步 owner_admin_controls、audit_records 工具、错误码块与 test_decision_audit_controls。
@@ -52,7 +51,7 @@ def _owner_row(owner_id: str, home: object) -> dict:
 
 
 # LLM: 与 core 注册条件配套：只有本机管理员主代理拿得到本工具；执行时仍按 home 复核管理员身份（替身调用也拒绝）。
-# 类用途: 管理员查看并修改用户控制与云资源名单；所有修改仍需管理员本人确认。
+# 类用途: 管理员直接查询控制与资源许可，所有授权修改仍需本人确认。
 class AdminControlsTool(BaseTool):
     model_spec = ToolModelSpec(
         name=TOOL_NAME,
@@ -63,7 +62,7 @@ class AdminControlsTool(BaseTool):
             "resources 查看指定 owner 的云资源许可；resource_grant/resource_revoke 按 resource 精确登记/撤销。"
             "resource 含 provider、resource_type、resource_token、operations；飞书 sheet 操作为 sheet_read/sheet_append/sheet_update，"
             "docx 操作为 document_read/document_append，wiki 定位为 wiki_resolve；不填写密钥。"
-            "每次调用都会请管理员本人确认；只在管理员明确要求时使用，不要自行开启跨用户审计。"
+            "list/resources 直接只读查询；set/resource_grant/resource_revoke 会请管理员本人确认，不要自行开启跨用户审计。"
         ),
         input_schema={
             "type": "object",
@@ -94,7 +93,7 @@ class AdminControlsTool(BaseTool):
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", (("list", "read_only"), ("resources", "read_only"))),)),
-        approval_policy=ApprovalPolicy("always"),
+        approval_policy=ApprovalPolicy("always", always_effects=("mutating", "dangerous")),
         sandbox_policy=SandboxPolicy("none"),
         concurrency_policy=ConcurrencyPolicy("serial"),
         idempotency_policy=IdempotencyPolicy("operation"),

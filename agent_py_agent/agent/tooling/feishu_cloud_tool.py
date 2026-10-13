@@ -1,5 +1,5 @@
-# LLM: 云文档入口属于原 ToolRegistry；owner 资源名单、网络上界和原操作账共同裁决，模型不能拿到应用秘密或任意 HTTP 通道。
-# 模块用途: 为主子代理提供已授权飞书表格读写、文档块读写和 wiki 定位，不复制应用凭据。
+# LLM: 云入口属于原 ToolRegistry；准确 owner 许可或实时本人/群证明、网络上界和原操作账共同裁决，不暴露应用秘密或任意 HTTP。
+# 模块用途: 让主子代理使用本人或群已共享的飞书资源，宿主定位 wiki、核验权限并返回明确错误。
 from __future__ import annotations
 
 import json
@@ -7,8 +7,14 @@ from urllib.parse import quote, urlencode
 
 from ..adapter.feishu_cloud import FeishuCloudError, request_cloud_api
 from ..capability.runtime_config_reload import capability_config_for_agent
+from ..user_space.feishu_cloud_authorization import authorize_cloud_resource, resolve_cloud_resource
+from ..user_space.feishu_sheet_authorization import authorize_sheet_write
 from ..user_space.owner_policy import resolve_effective_owner_policy
-from ..user_space.resource_grants import normalized_resource_grant, resource_operation_allowed
+from ..user_space.resource_grants import (
+    normalized_resource_grant,
+    read_resource_grants,
+    resource_operation_allowed,
+)
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -32,13 +38,17 @@ _READ_ACTIONS = {'sheet_read', 'document_read', 'wiki_resolve'}
 # 函数用途: 构造模型可见的准确资源接口，不开放配置或请求头参数。
 def _model_spec() -> ToolModelSpec:
     return ToolModelSpec(name='feishu_cloud', description=(
-        '读写管理员给当前用户授权的飞书云资源。sheet_read 读范围，sheet_append 追加行，sheet_update 更新范围；'
+        '使用宿主凭据读写本人或当前群已共享的飞书云资源，或管理员准确授权的资源。sheet_read 读范围，sheet_append 追加行，sheet_update 更新范围；'
         'document_read 分页读文档块，document_append 写入文档块；wiki_resolve 返回对象 resource_id/resource_type。'
         '分页结果 next_cursor 对应下一次 page_token。'
-        '用 resource_token 传准确编号；wiki 解析后的 sheet/docx 仍须单独授权。凭据由宿主托管，勿索取 app_secret。'
+        '用 resource_token 传准确编号；知识库链接的节点编号可设 resource_type=wiki，由宿主定位并核验实际对象权限，无需重复人工授权。'
+        '当前群必须是文档协作者，群成员个人权限不等于群共享。凭据由宿主托管，勿索取 app_secret。'
+        '表格更新会核验与正规 A1 范围相交的保护；追加的目的行由飞书决定，存在保护时须本人拥有所有保护范围编辑权。'
+        '群不能借个人保护范围编辑权；未知保护信息会拒绝代写。'
         '写后用读操作核对；未知写入错误不能直接重试追加。'),
         input_schema={'type': 'object', 'properties': {
             'action': {'type': 'string', 'enum': list(_TYPES)}, 'resource_token': {'type': 'string'},
+            'resource_type': {'type': 'string', 'description': '可选：wiki 表示传入知识库节点编号；否则与动作对应的 sheet/docx 一致。'},
             'range': {'type': 'string', 'description': '表格动作必填，sheet_id!A1:C10 或追加范围。'},
             'values': {'type': 'array', 'items': {'type': 'array', 'items': {}}, 'description': '追加或更新的二维单元格数据。'},
             'block_id': {'type': 'string', 'description': '文档块父编号，缺省为文档根。'},
@@ -46,7 +56,7 @@ def _model_spec() -> ToolModelSpec:
             'page_token': {'type': 'string', 'description': 'document_read 分页游标。'},
         }, 'required': ['action', 'resource_token'], 'additionalProperties': False},
         hints=ToolModelHints(category='network', keywords=('飞书', '云文档', '表格', 'wiki'),
-            default_deferred=True, deferred_summary='使用宿主凭据读写当前用户已授权的飞书表格和云文档'))
+            default_deferred=True, deferred_summary='使用宿主凭据读写本人或当前群已共享的飞书表格和云文档'))
 
 
 # LLM: 参数校验无网络；准确编号阻止路径替换，条件必填阻止默认误写，API 长度限制只守客观载荷上界。
@@ -55,7 +65,10 @@ def _validate_params(params: dict) -> None:
     action = params.get('action')
     if action not in _TYPES:
         raise ValueError('action 无效。')
-    normalized_resource_grant({'provider': 'feishu', 'resource_type': _TYPES[action],
+    resource_type = params.get('resource_type', _TYPES[action])
+    if resource_type not in {_TYPES[action], 'wiki'} or (action == 'wiki_resolve' and resource_type != 'wiki'):
+        raise ValueError('resource_type 与动作不一致。')
+    normalized_resource_grant({'provider': 'feishu', 'resource_type': resource_type,
         'resource_token': params.get('resource_token'), 'operations': [action]})
     if action.startswith('sheet_') and (not isinstance(params.get('range'), str) or not params['range'].strip() or len(params['range']) > 512):
         raise ValueError('表格动作需要准确 range。')
@@ -80,8 +93,6 @@ def _request_plan(params: dict) -> tuple[str, str, dict | None]:
             return 'GET', path + '/' + quote(params['range'], safe=''), None
         body = {'valueRange': {'range': params['range'], 'values': params['values']}}
         return ('POST', path + '_append', body) if action == 'sheet_append' else ('PUT', path, body)
-    if action == 'wiki_resolve':
-        return 'GET', '/wiki/v2/spaces/get_node?' + urlencode({'token': params['resource_token']}), None
     parent = quote(params.get('block_id') or params['resource_token'], safe='')
     path = f'/docx/v1/documents/{token}/blocks/{parent}/children'
     if action == 'document_append':
@@ -89,8 +100,8 @@ def _request_plan(params: dict) -> tuple[str, str, dict | None]:
     return 'GET', path + '?' + urlencode({'page_size': 50, 'page_token': params.get('page_token', '')}), None
 
 
-# LLM: 同一工具供所有 owner 注册；宿主实例固定 owner，子代理工具快照仍由原派工裁剪。Full Access 不豁免资源名单。
-# 类用途: 在用户资源授权通过后复用飞书适配器进行一次云操作。
+# LLM: 工具实例固定 owner，子代理继承原工具和网络上界；Full Access 不代替资源许可，群只使用当前群的共享证明。
+# 类用途: 核验准确资源许可或实时飞书权限，再通过原适配器执行一项云操作。
 class FeishuCloudTool(BaseTool):
     model_spec = _model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -122,8 +133,8 @@ class FeishuCloudTool(BaseTool):
             return ToolHandlerOutcome('feishu_cloud', False, '云资源参数不完整或无效；请核对编号、range 和对应数据。', error_code='TOOL_INVALID_ARGUMENTS')
         return None
 
-    # LLM: 请求前重读当前授权及网络上界；先拒绝再解析凭据。原执行器管理确认、并发、操作 claim 和未知写入，不能新造重试账。
-    # 函数用途: 调用已授权云接口，成功返回数据，拒绝给出明确中文原因。
+    # LLM: 先核查网络和原策略，再现查准确资源/表格保护权限；wiki 数据与主体 ID 授权前不外露，原操作账管理副作用，不自动重放未知写入。
+    # 函数用途: 让用户按飞书已有分享权限使用云资源，核验保护范围后代写，返回本次许可来源及可读错误。
     def execute(self, params):
         try:
             _validate_params(params)
@@ -131,20 +142,37 @@ class FeishuCloudTool(BaseTool):
                 return _failure('TOOL_UNAVAILABLE', '飞书云资源工具未启用。')
             if params.get('__network_access_mode') == 'disabled' or not resolve_effective_owner_policy(self.agent.home_paths).network_enabled:
                 return _failure('NETWORK_DISABLED', '当前用户或父代理未开放工具网络权限。')
-            if not resource_operation_allowed(self.agent.home_paths, 'feishu', _TYPES[params['action']], params['resource_token'], params['action']):
-                return _failure('CLOUD_RESOURCE_NOT_AUTHORIZED', '当前用户没有这份资源的此项操作授权，请管理员登记准确资源编号和操作；未发送云请求。')
+            read_resource_grants(self.agent.home_paths)
+            config = capability_config_for_agent(self.agent)
+            collaborator_enabled = bool(getattr(config, 'feishu_cloud_collaborator_authorization_enabled', False))
+            resource_type = params.get('resource_type', _TYPES[params['action']])
+            if resource_type == 'wiki' and not collaborator_enabled and not resource_operation_allowed(
+                    self.agent.home_paths, 'feishu', 'wiki', params['resource_token'], 'wiki_resolve'):
+                return _failure('CLOUD_RESOURCE_NOT_AUTHORIZED', '自助资源权限未启用，知识库定位需要准确的管理员许可。')
             adapter = self.agent.channel_registry.adapter_for('feishu')
             if adapter is None:
                 return _failure('FEISHU_CREDENTIAL_UNAVAILABLE', '宿主未配置飞书应用凭据，请管理员配置；无需向助手发送 app_secret。')
-            result = request_cloud_api(adapter, *_request_plan(params))
-            return ToolHandlerOutcome('feishu_cloud', True, json.dumps({'action': params['action'], 'data': result}, ensure_ascii=False))
+            resource = resolve_cloud_resource(adapter, resource_type, params['resource_token'], params['action'])
+            if params['action'] != 'wiki_resolve' and resource.resource_type != _TYPES[params['action']]:
+                return _failure('CLOUD_RESOURCE_TYPE_MISMATCH', '知识库实际对象与所选操作类型不一致，请选择相应云资源动作。')
+            authorization = authorize_cloud_resource(self.agent, adapter, resource, params['action'],
+                                                     collaborator_enabled=collaborator_enabled)
+            authorize_sheet_write(adapter, resource, params, authorization)
+            result = resource.wiki_data if params['action'] == 'wiki_resolve' else request_cloud_api(
+                adapter, *_request_plan({**params, 'resource_token': resource.resource_token}))
+            public_authorization = {key: value for key, value in authorization.items() if key != 'principal_id'}
+            return ToolHandlerOutcome('feishu_cloud', True, json.dumps(
+                {'action': params['action'], 'data': result, 'resource_authorization': public_authorization}, ensure_ascii=False))
         except FeishuCloudError as exc:
-            return _failure(exc.code, str(exc), unknown=exc.unknown)
+            return _failure(exc.code, str(exc), unknown=exc.unknown, facts=exc.public_facts())
         except (ValueError, TypeError, OSError):
             return _failure('CLOUD_RESOURCE_POLICY_INVALID', '云资源参数或用户授权策略不可验证，未继续调用；请管理员核查。')
 
 
-# LLM: unknown 保留真实供应商不确定性，not_started 只用于未调用或明确拒绝；不按文字猜副作用。
-# 函数用途: 生成可读错误并交给原操作账处理。
-def _failure(code: str, message: str, *, unknown: bool = False):
-    return ToolHandlerOutcome('feishu_cloud', False, message, error_code=code, effect_outcome='unknown' if unknown else 'not_started')
+# LLM: 数值错误事实来自宿主异常，不含正文或秘密；unknown 保留供应商不确定性，不按展示文字重试。
+# 函数用途: 返回可读错误与结构化原因，交给原操作账保存真实副作用状态。
+def _failure(code: str, message: str, *, unknown: bool = False, facts: dict | None = None):
+    details = dict(facts or {})
+    output = json.dumps({'error': message, **details}, ensure_ascii=False) if details else message
+    return ToolHandlerOutcome('feishu_cloud', False, output, error_code=code,
+                              effect_outcome='unknown' if unknown else 'not_started', result_envelope={'cloud_error': details} if details else {})

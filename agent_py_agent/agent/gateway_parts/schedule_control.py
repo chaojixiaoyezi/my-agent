@@ -2,14 +2,15 @@
 # 模块用途: 查询监控、规则和最近三次历史，并原地暂停、恢复、试跑和改通知，不创建替代任务。
 from __future__ import annotations
 
+import time
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..conversation.control_commands import ConversationControlResult
 from ..scheduler.repository import SchedulerRepository, SchedulerRepositoryError
-from ..scheduler.schedule import ScheduleValidationError
+from ..scheduler.schedule import ScheduleValidationError, _canonical_zone_name
 from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+from .schedule_diagnostics import ScheduleOwnerChanged, schedule_arguments, schedule_failure
 
 
 # LLM: 本人身份来自认证 scope/admin 绑定；个人私聊可查看自己在各群创建的监控，群查询只在本 owner，不泄露私人监控。
@@ -49,6 +50,11 @@ def visible_monitors(agent, scope):
     for repo in repositories:
         jobs, failures = repo.list_jobs()
         errors.extend(failures)
+        if repo.owner['kind'] == 'group':
+            from ..scheduler.creator_migration import unmanaged_monitor_ids
+
+            if unmanaged_monitor_ids(repo):
+                errors.append('SCHEDULER_CREATOR_UNRESOLVED')
         for job in jobs:
             creator = job.get('creator')
             owned = ((creator or {}).get('channel'), (creator or {}).get('actor_id')) in identities
@@ -75,27 +81,29 @@ def monitor_counts(agent, scope):
         return {'unavailable': True}
 
 
-# LLM: 命令参数只选择已授权列表的精确 job/alias；模糊别名冲突拒绝，不修改来源、当前运行或他人的监控。
-# 函数用途: 展示简短监控列表、详情、历史，或控制原监控未来执行和回执方式。
+# LLM: 参数先校验、精确 owner/creator 再读取；失败按 typed 错误保存无正文诊断，写操作仍原 version CAS，不盲重试。
+# 函数用途: 展示监控及历史并控制未来执行，异常提供可行动原因而不是要求用户刷新。
 def execute_schedule_control(agent, command, scope):
+    started, operation, stage = time.monotonic(), 'invalid', 'arguments'
     try:
+        operation, identifier, parts = schedule_arguments(command.value)
+        stage = 'query'
         rows, errors = visible_monitors(agent, scope)
-        parts = command.value.split()
         if not parts:
             text = '\n'.join(f"监控名（{job.get('alias',job['job_id'])}）：{job['name'][:70]}  {_state(job)}  last:{_time(job.get('last_run_at'),agent)}" for _repo, job in rows)
-            return _result(True, text or '暂无监控。', {'total':len(rows), 'load_error_codes':errors})
-        operation, identifier = (parts[0], parts[1]) if parts[0] in {'history','pause','resume','run','notify'} and len(parts) > 1 else ('get',parts[0])
-        if (operation=='get' and len(parts)!=1) or (operation=='history' and len(parts)!=2) or (operation in {'pause','resume','run'} and len(parts) not in {2,3}):
-            raise ScheduleValidationError('监控命令参数无效')
+            return _result(True, (text or ('暂无可确认归属的监控。' if errors else '暂无监控。')) + _query_notice(errors), {'total':len(rows), 'load_error_codes':errors})
         matches = [(repo,job) for repo,job in rows if identifier in {job['job_id'],job.get('alias')}]
         if len(matches) != 1:
-            return _result(False,'没有唯一匹配的本人监控，请用完整 job_id 查询。', code='SCHEDULER_NOT_FOUND')
+            return _result(False,'没有唯一匹配的本人监控，请用完整 job_id 查询。'+_query_notice(errors),
+                           {'load_error_codes':errors}, code='SCHEDULER_NOT_FOUND')
         repo, job = matches[0]
         if operation == 'history':
+            stage = 'history'
             history, failures = repo.history(job_id=job['job_id'], limit=3)
             text = '\n'.join(f"{_time(run.get('started_at') or run.get('scheduled_for'),agent)}  {run.get('rule_id') or 'rule1'}  {run['status']}  投递:{run.get('delivery_status') or '未知'}" for run in history)
-            return _result(True, '最近3次执行：\n'+(text or '暂无执行历史。'), {'load_error_codes':failures})
+            return _result(True, '最近3次执行：\n'+(text or '暂无执行历史。')+_query_notice(failures), {'load_error_codes':failures})
         if operation not in {'get', 'history'}:
+            stage = 'control'
             repo = _live_repository(agent, repo)
         if operation == 'run':
             run = repo.reserve_manual_run(job['job_id'], rule_id=parts[2] if len(parts)>2 else '')
@@ -106,8 +114,16 @@ def execute_schedule_control(agent, command, scope):
         text += '\n' + '\n'.join(f"{r['id']}：{r['name'][:80]}（{'LLM' if r['use_llm'] else 'NO'}）{' stop' if not r['enabled'] else ''}" for r in rules)
         text += f"\n通知:{job['delivery']['mode']}（更改只影响后续运行；暂停不终止已开工的规则）"
         return _result(True,text,{'job_id':job['job_id'],'version':job['version']})
-    except (OSError, ValueError, AttributeError, SchedulerRepositoryError, ScheduleValidationError):
-        return _result(False,'监控查询或控制未完成，请刷新后重试。',code='SCHEDULER_UNAVAILABLE')
+    except (OSError, ValueError, AttributeError, KeyError, SchedulerRepositoryError, ScheduleValidationError) as exc:
+        return schedule_failure(exc, scope, operation=operation, stage=stage, started=started)
+
+
+# LLM: 仅输出仓库结构化失败的存在事实，不泄露未授权旧任务名或其它创建人；部分查询不能伪装完整空表。
+# 函数用途: 提示监控读取不完整或旧归属未确认，避免误报没有任务。
+def _query_notice(errors):
+    if not errors:
+        return ''
+    return '\n部分记录无法核验或旧创建人尚未确认；已核验的本人监控如上，请管理员核对归属与账本。'
 
 
 # LLM: 状态只根据 job.status，不用名称或回复判断运行；running 表示计划已开启，规则实际开工另有统计。
@@ -135,10 +151,10 @@ def _completed_monitor(job):
     return job['status']=='paused' and job['schedule']['kind']=='at' and job.get('last_run_status')=='done'
 
 
-# LLM: 时间来自原 run/job，缺失明确显示暂无，不用当前时间补造执行。
+# LLM: 时间来自原 run/job，时区复用调度同一解析，空配置表示本机时区；不以当前时间补造执行。
 # 函数用途: 按部署时区显示最近开工及历史时间。
 def _time(value,agent):
-    return datetime.fromtimestamp(float(value), ZoneInfo(agent.config.timezone)).strftime('%m-%d %H:%M:%S') if value else '暂无'
+    return datetime.fromtimestamp(float(value), ZoneInfo(_canonical_zone_name(agent.config.timezone))).strftime('%m-%d %H:%M:%S') if value else '暂无'
 
 
 # LLM: 查询与控制返回结构化错误和原 job/run ID；展示不作为状态写入或执行授权。
@@ -147,7 +163,7 @@ def _result(ok,text,details=None,*,code=''):
     return ConversationControlResult('schedule',ok,text,details=details,error_code=code)
 
 
-# LLM: 只为已经按原创建人过滤的精确 group owner 加载原 Agent，写入必须沿其真实配额、due_index 和运行资源。
+# LLM: 只为已按原创建人过滤的 group owner 加载控制仓库，身份变化返回 typed 拒绝；写入守原配额和 CAS。
 # 函数用途: 把冷查询仓库换成原控制仓库，禁止无配额临时仓库写入。
 def _live_repository(base,repository):
     from .request_worker import _resolve_request_agent_for_owner
@@ -156,7 +172,7 @@ def _live_repository(base,repository):
         return repository
     live=_resolve_request_agent_for_owner(base,identity).scheduler_repository
     if live.owner!=repository.owner:
-        raise ValueError('监控 owner 已变化')
+        raise ScheduleOwnerChanged('监控 owner 已变化')
     return live
 
 

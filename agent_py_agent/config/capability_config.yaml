@@ -8,8 +8,11 @@ im_task_delegation_enabled: true
 im_tool_approvals_enabled: true
 # 私人密文输入卡（需 secrets extra 的 cryptography）；模型仅使用任务/监控限定引用。
 im_task_credentials_enabled: true
-# 飞书云资源工具开关；凭据只留在宿主，空资源授权名单不能调用文档，不继承管理员文档权限。
+# 飞书云资源工具开关；凭据只留在宿主，不继承管理员文档权限。
 feishu_cloud_tools_enabled: true
+# 每次使用云资源时，允许宿主查询当前用户/群的准确协作者权限，无须管理员逐份登记。
+# 新增官方只读网络查询；关闭后只接受原管理员准确资源授权。不能仅凭应用有权或链接文字授予权限。
+feishu_cloud_collaborator_authorization_enabled: true
 # 普通用户可发现并按自身权限使用管理员已发布的公共内容能力包；不开放普通插件或管理员私有包。
 public_capability_packages_enabled: true
 # 说明：

@@ -18616,3 +18616,6 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 - 发行定向组合：private_release、adapter_state_write_resilience、cli_update。真实包另做三版断网与 Linux 原生 Gateway/TUI 验收，报告随包交付；真实飞书连接恢复由用户服务器验证。
 
 - 原生发行包实际工具执行后发现 Landlock 子进程的 `-I` 忽略环境禁写设置、写入标准库缓存；原启动和断网探测现显式 `-B`。原端口隔离 argv 合同继续验证，包本体另检查执行后的发行清单与重装校验。
+2026-10-13 M01–M09/C01–C04/L01 修复联合验收：冻结源码 53 focused 文件 **1250 passed、0 failed、0 skipped**，XML 在 `/tmp/my-agent-im-repair-20261013.5/focused.xml`。覆盖调度、命令/状态、云协作者/保护、原模型计量、提示默认、审批、普通/群权限及安装边界；不重复累计子线测试数。Ruff、doc sync、strict code-size、diff 检查通过；clean-package 须在新增文件登记到 Git 后复验。Linux 原生、真实官方 MiniMax/TUI 和准确包更新继续验收，合成 HTTP 不算真实飞书租户送达。进程验收只采样测试自有进程的 PID/角色/CPU，不能把全机 tasks 数当 Python 数，也不能按名称批量杀进程。
+2026-10-13 本轮追加源码验收：错误合同登记后 68 项通过。Linux 524 项首轮 523 passed/1 failed/0 skipped；事实缓存夹具同尺寸原地写入在旧84a基线也失败，改为生产原子 JSON writer 保留断言并定向复验。Ubuntu 24.04/2 CPU/CPython 3.11/官方 MiniMax 原生 TUI 两次单 prompt：问答 8.62s、主调用1、无工具；文件 11.52s、主调用3、Write/Read均成功且产物42，各加冷启动probe1，无retry。回显38/34ms；自有 TUI/Gateway 停止后进程0。原生PID死亡+冷调度服务恢复 unknown 一次，无旧动作重排；这是服务入口验收，完整 Gateway kill 场景不借此宣称已实测。最终字节码安装包与真实飞书租户边界另记同包验收说明。
+2026-10-13 本轮源码验收收口：Linux 唯一失败的原子写夹具修正后，Linux/Mac 整份 scan_costs 各45 passed；其余523项Linux原已通过，不与重叠增量相加。主组合1250 passed、最后错误/命令68 passed；本地严格gate检查采用最终源码与文档，线上CI不作为验收来源。发行 `.20261013.5` 的准确包格式/更新保留/CLI及TUI smoke 记录随包交付。

@@ -113,7 +113,7 @@ class ConversationTaskCommand:
 ConversationCommand = ConversationControlCommand | ConversationTaskCommand
 
 
-# LLM: /status 是显式控制面；上下文只携带 canonical 本代数值，角色来自 owner，子代理按结构化运行状态计数。
+# LLM: /status 是显式控制面；上下文、匿名请求计时及子代理只取原数字事实，角色来自 owner，未知不补零。
 # 类用途: 汇总当前任务、模型、上下文、压缩和权限，供 TUI 与 IM 共用展示，未知事实不能填成当前零值。
 @dataclass(frozen=True)
 class ConversationTaskStatus:
@@ -139,6 +139,7 @@ class ConversationTaskStatus:
     # 本 owner 已结案、不再自动领取的后台唤醒条数（唤醒毒丸结案，不含已归档的）；0 时 /status 不显示这一行。
     quarantined_wakes: int = 0
     monitors: dict[str, object] = field(default_factory=dict)
+    model_timing: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -888,6 +889,10 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
                      f"监控：{facts['total']} 个（开启 {facts['active']}，停止 {facts['paused']}，已结束 {facts.get('completed',0)}）；规则：执行 {facts['running_rules']}，排队 {facts.get('queued_rules',0)}，等待 {facts.get('waiting_rules',0)}；/schedule 查看")
     if status.model_name:
         lines.append(f"模型：{status.model_name}")
+    if status.model_timing:
+        from ..gateway_parts.status_projection import render_model_timing
+
+        lines.append(render_model_timing(status.model_timing))
     from .context_usage import public_context_usage
 
     usage = public_context_usage(status.context_usage)

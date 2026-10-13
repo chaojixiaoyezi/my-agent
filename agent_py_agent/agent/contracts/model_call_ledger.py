@@ -17,9 +17,10 @@ from .model_call_budget import (
     ModelCallInputBudgetMethods,
     ModelCallInputBudgetState,
 )
+from .model_call_latency import MODEL_LATENCY_FIELDS, model_call_latency_facts
 
 # LLM: 本模块是调用、累计用量及显式输入预留的唯一事实源；预算只在原锁/容器扩展，普通调用行为及首个终态保持。
-# 模块用途: 记录模型调用、真实用量和后台传输事实，按 request/run 提供主调用、辅助调用及决策统计。
+# 模块用途: 记录模型调用、真实用量与计时和传输事实，按 request/run 提供主、辅助、决策的原账统计。
 
 # 门槛2 终审边界②(steward seq1622-2): stage 合同单一事实源下沉到账本层。
 # ProviderTimeoutError 构造入口与 ModelCallLedger.timeout 写入入口共用同一
@@ -243,8 +244,8 @@ class ModelCallRecord:
         }
 
 
-# LLM: 这是原累计容器及其用途分区共用的计数实现，不建立第二账本；逻辑身份包含用途，字段来源缺失保留历史解释。
-# 类用途: 增量累计调用、HTTP 尝试和 token，供总计与各用途分区使用同一计算规则。
+# LLM: 原累计及用途分区共用计数实现，不建第二账本；同 call_id 更新按差值累计耗时，时钟缺失保留覆盖计数。
+# 类用途: 增量累计调用、HTTP 尝试、token 和耗时，供总计与各用途分区使用同一计算规则。
 @dataclass
 class _ModelCallTotals:
     logical_call_counts: dict[tuple[str, str], int] = field(default_factory=dict)
@@ -275,10 +276,11 @@ class _ModelCallTotals:
     provider_output_tokens_reported_call_count: int = 0
     provider_cache_read_input_tokens_reported_call_count: int = 0
     provider_cache_write_input_tokens_reported_call_count: int = 0
+    latency_totals: dict[str, int] = field(default_factory=lambda: dict.fromkeys(MODEL_LATENCY_FIELDS, 0))
 
     # LLM: 每个新 call_id 恰好调用一次；同 call_id 的状态变化必须走 observe_update，避免重复累计。
     #   后端/模型在 started 时定下、之后的更新不改，所以按名尝试次数只在这里加，保证只增不减。
-    # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型（含按名尝试次数）和初始状态。
+    # 函数用途: 把一条新模型调用加入累计统计，并登记逻辑回合、后端、模型、初始状态及原时钟耗时。
     def observe_new(self, record: ModelCallRecord) -> None:
         logical_call_id = _logical_call_id(record)
         self.logical_call_counts[logical_call_id] = (
@@ -295,9 +297,10 @@ class _ModelCallTotals:
             self.models.add(record.model)
             self.model_attempt_counts[record.model] = self.model_attempt_counts.get(record.model, 0) + 1
         self._observe_usage_delta(None, record)
+        self._observe_latency_delta(None, record)
 
     # LLM: replacement delta 维护当前终态分布和尝试数；身份字段变化也必须成对撤销旧值再登记新值。
-    # 函数用途: 在同一调用收到首 token、完成、失败、超时或 HTTP 尝试事件时更新累计统计。
+    # 函数用途: 在同一调用收到首 token、完成、失败、超时或 HTTP 尝试事件时更新累计统计及耗时差值。
     def observe_update(
         self,
         previous: ModelCallRecord,
@@ -331,6 +334,14 @@ class _ModelCallTotals:
         if current.model:
             self.models.add(current.model)
         self._observe_usage_delta(previous, current)
+        self._observe_latency_delta(previous, current)
+
+    # LLM: 与用量同一新旧记录差值更新；迟到 HTTP 和重放不重复累计计时，明细被裁后原 scope 仍保留覆盖次数与毫秒。
+    # 函数用途: 在原累计容器内保存模型时钟事实，供匿名耗时诊断和持久增量复用。
+    def _observe_latency_delta(self, previous: ModelCallRecord | None, current: ModelCallRecord) -> None:
+        old, new = model_call_latency_facts(previous), model_call_latency_facts(current)
+        for name in MODEL_LATENCY_FIELDS:
+            self.latency_totals[name] = max(0, self.latency_totals[name] + new[name] - old[name])
 
     # LLM: 按原记录与新记录的差值更新；信封级调用次数保持历史意义，字段级计次只累计显式已报事实。
     # 函数用途: 增量更新 token 总量及来源，部分报告不会把缺失字段的估算误写成供应商真值。
@@ -375,7 +386,7 @@ class _ModelCallTotals:
     # LLM: 旧总量和信封调用计数保持意义；新字段计数仅代表明确报告，不能把 legacy None 解释成真实零。
     #   backends/models 仍是累计出现过的名字集合；backend_attempt_counts/model_attempt_counts 是按名物理尝试次数，
     #   store_usage 落增量行时靠它们的差值算本行身份，改名或改口径要同步 store_usage._IDENTITY_FIELDS。
-    # 函数用途: 生成公开统计快照，帮助消费端区分部分报告、完全缺失与真实零 token，并带按名尝试次数。
+    # 函数用途: 生成公开统计快照，区分缺失和真实零用量、耗时，保留按名尝试次数与原计时覆盖计数。
     def to_summary(self) -> dict[str, object]:
         logical_count = len(self.logical_call_counts)
         physical_count = max(0, self.physical_model_attempt_count)
@@ -384,6 +395,7 @@ class _ModelCallTotals:
             for status in ("started", "first_token", "finished", "failed", "timed_out")
         }
         return {
+            **self.latency_totals,
             "logical_model_turn_count": logical_count,
             "physical_model_attempt_count": physical_count,
             "model_retry_count": max(0, physical_count - logical_count),

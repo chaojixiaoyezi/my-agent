@@ -112,7 +112,9 @@ def test_dead_runner_after_running_becomes_unknown_not_requeued(tmp_path, monkey
     assert repo.get_active_run(run_id) is None, "unknown 是终态"
     assert repo.claim_run(run_id, lease_seconds=10, now=1_007.0) is None
     store = json.loads(repo.store_path.read_text(encoding="utf-8"))
-    assert store["runs"][run_id]["status"] == "unknown"
+    assert run_id not in store["runs"], "unknown 终态进入正常历史，不留在活动账本"
+    history, errors = repo.history()
+    assert errors == [] and history[0]["run_id"] == run_id and history[0]["status"] == "unknown"
 
 
 def test_live_process_keeps_state_fail_closed(tmp_path, monkeypatch) -> None:

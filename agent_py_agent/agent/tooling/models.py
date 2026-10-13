@@ -326,18 +326,27 @@ class EffectResolverPolicy:
         )
 
 
+# LLM: 强制本人确认可限定到原 effect 类型；空集合保持所有调用 always 的旧合同，不能由模型输入修改。
+# 类用途: 声明工具的审批强度与受确认的副作用范围，供 ActionPolicy 和注册校验同源读取。
 @dataclass(frozen=True)
 class ApprovalPolicy:
     mode: str = "dangerous"
     # LLM: 声明哪些公开参数的哪些值代表"可被用户长期允许的一类操作"（如 background_listen_scope=lan）。命中时审批请求
     #   带 grant_key 并多出 approved_owner 选项；自主模式不放行未授权的这类调用。只能声明 schema 里的公开参数。
     owner_grant_parameters: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    always_effects: tuple[str, ...] = ()
 
+    # LLM: 校验仅固化宿主声明，无状态或授权副作用；非 always 的策略不能用 effect 名单改变语义。
+    # 函数用途: 规范化审批策略，拒绝未知副作用声明并保留原默认行为。
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower()
         if mode not in {"never", "dangerous", "mutating", "always"}:
             raise ValueError(f"invalid tool approval mode: {mode}")
         object.__setattr__(self, "mode", mode)
+        effects = tuple(self.always_effects)
+        if (effects and mode != "always") or any(value not in {"read_only", "mutating", "dangerous"} for value in effects):
+            raise ValueError("always effects require an always policy and valid effects")
+        object.__setattr__(self, "always_effects", tuple(dict.fromkeys(effects)))
         declared = []
         for item in self.owner_grant_parameters:
             name, values = item

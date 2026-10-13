@@ -2647,10 +2647,8 @@ def _cancel_request_execution(request_id: str, *, resources: object) -> None:
     ).start()
 
 
-# LLM: 状态仅投影当前请求事实；空闲时读同 owner 的当前模型选择，不把 Gateway 启动占位配置当真实模型。
-# 函数用途:汇总当前请求、排队数、最近阶段、子代理和压缩状态；读取模型设置不发请求或写配置。
-# LLM: 只统计 scope 能看到的原监控，未知读取不能伪造零数量。
-# 函数用途: 只统计 scope 能看到的原监控，未知读取不能伪造零数量。 修改需同步原控制、恢复或权限测试。
+# LLM: 同 owner 模型选择、监控与匿名 request 计时只作投影；缺计时不补零，不把物理累计当墙钟，不发请求或写配置。
+# 函数用途: 汇总当前请求、队列、子代理、压缩及模型等待；只统计 scope 可见的原监控，未知不伪造零数量。
 def _gateway_task_status(
     base_agent: object,
     paths: GatewayPaths,
@@ -2718,6 +2716,7 @@ def _gateway_task_status(
         durable_work=_named_durable_statuses(owner_agent, paths, scope),
         quarantined_wakes=_quarantined_wake_count(owner_agent),
         monitors=monitor_counts(base_agent, scope),
+        model_timing=facts['model_timing'],
     )
 
 

@@ -23,6 +23,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 )
 from agent_py_agent.agent.agent_core.tool_ir_history import record_runtime_facts_turn_ir
 from agent_py_agent.agent.backends.tool_ir import UserTurn
+from agent_py_agent.agent.contracts.model_call_latency import MODEL_LATENCY_FIELDS
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFailureParams,
@@ -62,6 +63,10 @@ def _check_main_only_summary_extensions(summary: dict, *, reported_fields: int =
     assert partitions["main"] == {key: value for key, value in summary.items() if key != "schema"}
     assert partitions["auxiliary"]["physical_model_attempt_count"] == 0
     assert partitions["decision"]["physical_model_attempt_count"] == 0
+    assert summary["timed_model_call_count"] == sum(summary["status_counts"][key] for key in ("finished", "failed", "timed_out"))
+    for name in MODEL_LATENCY_FIELDS:
+        assert type(summary[name]) is int and summary[name] >= 0
+        summary.pop(name)
     provider = summary["usage_breakdown"]["provider"]
     for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_write_input_tokens"):
         assert provider.pop(f"{name}_reported_call_count") == reported_fields

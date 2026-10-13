@@ -43,8 +43,10 @@ class CapabilityConfig:
     im_tool_approvals_enabled: bool = True
     # 私人任务凭据卡及宿主 HTTP 引用注入；不会将密码交给模型或 shell。
     im_task_credentials_enabled: bool = True
-    # 云资源工具使用宿主凭据；仍需管理员给每个 owner 登记准确资源与操作。
+    # 云资源工具使用宿主凭据；准确许可或当前可信用户/群的实时协作者权限决定资源范围。
     feishu_cloud_tools_enabled: bool = True
+    # 新增云端只读权限查询；只核对真实 owner 对应的准确成员，不继承管理员应用的资源范围。
+    feishu_cloud_collaborator_authorization_enabled: bool = True
     public_capability_packages_enabled: bool = True
     # 普通用户（owner_kind=user）发消息开关；默认关，做用户隔离时再打开。
     session_messaging_user_enabled: bool = False

@@ -2859,3 +2859,4 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 定时生命周期续接：`conversation/runtime.py` 复用原 scheduler repository 核实持久任务来源，与 Goal 共用 durable_task_id/objective；历史查找及宿主事件一致排除该持久编号，普通额外用户请求缺失仍报错。真实第四候选失败记录保留，新增八项红绿回归及十文件 436 项通过，真机重验中。
 
 发布门补充：`im_dispatch_policy.capture_im_dispatch` 只在真实 Agent owner 存在时冻结偏好；显式 agent=None 的队列宿主保持原请求，不制造 owner 或偏好。执行目标换代的错误在 contracts/error_taxonomy 单点分类为不可自动重放。
+2026-10-13 追加接线：schedule_diagnostics 是原控制的纯参数/无正文失败投影；scheduler/store_snapshot 只读原子代次，recovery 共用原 claim/run/history 终态，creator_migration 仅按不可变 execution_origin 取证。status_projection 将原 model_metrics 的 request 整数白名单跨 IM/TUI 传输，不新建用量账或请求；权限、控制与重启仍沿原 owner/CAS。云工具使用当前准确主体协作者和表格保护证据，宿主凭据不下发；缺证据明确拒绝。详情见 [核查报告](../../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)。

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_private_jsonl_records
+from ..contracts.model_call_latency import MODEL_LATENCY_FIELDS
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from .models import ConversationThread, ThreadModelUsageEvent
@@ -24,6 +25,7 @@ _PURPOSES = ("main", "auxiliary", "decision", "probe:tool_capability")
 # LLM: 与 _model_usage_snapshot_delta 共用的可加数字段名单；写端判断用途桶“有没有用量”也只读这些字段，
 #   未来加新加法字段时这里与增量函数同步补，判断自动覆盖。
 _ADDITIVE_USAGE_FIELDS = (
+    *MODEL_LATENCY_FIELDS,
     "logical_model_turn_count",
     "physical_model_attempt_count",
     "model_retry_count",

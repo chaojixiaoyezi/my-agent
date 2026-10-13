@@ -8,6 +8,8 @@ import math
 import time
 from collections.abc import Mapping
 
+from ..contracts.model_call_latency import MODEL_LATENCY_FIELDS
+
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA = "model_runtime_metrics.v1"
 # 状态行"决策（关闭/观察/实际）"的结构化值，来自 settings.decision_settings_projection.decision_summary_mode_from_read。
@@ -25,6 +27,10 @@ _COUNTS = (
 # 失败（failed + timed_out 原始次数）、其中已发出后未完成的次数与本地估算输入、分不清是否发出的旧账失败次数
 _DECISION_COUNTS = ("decision_input_reported_calls", "decision_success_count", "decision_failure_count",
                     "decision_unfinished_calls", "decision_estimated_tokens", "decision_unknown_failures")
+_REQUEST_LATENCY_COUNTS = tuple(f"request_{name}" for name in MODEL_LATENCY_FIELDS) + (
+    "request_main_latency_ms", "request_auxiliary_latency_ms", "request_decision_latency_ms",
+    "request_physical_model_attempt_count", "request_logical_model_turn_count",
+)
 
 
 # LLM: 缓存前缀变化按原因码累计，只增不减：一次比较只说明“这一次调用换过什么”，累计次数才能回答
@@ -111,7 +117,7 @@ def _number(value: object) -> float | None:
 #   失败构成出现前写下的旧快照没有 decision_unknown_failures 键：与 unfinished_usage_facts 对旧用量行同一规则，
 #   失败整体记为分不清是否发出，不能补 0（补 0 会让 split_unsent_failures 把旧失败说成“根本没发出去”）。
 #   缓存累计与不可逆去重身份一起清洗，原线程保存及通道投影不得只保留其中一半。
-# 函数用途: 清洗统计条、决策输入与成败次数及缓存诊断，拒绝未知 schema 和任意嵌套正文。
+# 函数用途: 清洗统计条、当前请求耗时及缓存诊断，拒绝未知 schema 和任意嵌套正文；旧快照不补未知耗时。
 def public_model_metrics(value: object) -> dict[str, object]:
     from ..backends.cache_diagnostics import public_cache_diagnostic
 
@@ -128,6 +134,8 @@ def public_model_metrics(value: object) -> dict[str, object]:
     return {
         "schema": _SCHEMA,
         **{key: int(_number(value.get(key)) or 0) for key in _COUNTS},
+        **{key: int(_number(value[key])) for key in _REQUEST_LATENCY_COUNTS
+           if key in value and _number(value[key]) is not None},
         "tool_count": int(_number(value.get("tool_count"))) if _number(value.get("tool_count")) is not None else None,
         "cache_percent": min(100.0, _number(value.get("cache_percent"))) if _number(value.get("cache_percent")) is not None else None,
         # 会话累计命中率 = 累计缓存命中输入 ÷ 累计供应商输入（DeepSeek Harness 页脚同一口径）；没有输入时为 None。
@@ -318,7 +326,7 @@ def publish_model_metrics(agent: object, params: object, *, pending: bool, tool_
 
 # LLM: 使用原范围账本快照；决策分区不计普通轮，usage_only 不覆盖生成状态或等待写锁，异常交外层隔离。
 # 显示写入走 model_usage 的原线程更新能力；缓存累计与去重身份选同一较新快照，不能拼接不同来源。
-# 函数用途: 实现一次模型边界的统计采样和发布，不在 UI 渲染线程扫描数据。
+# 函数用途: 实现一次模型边界的统计采样和发布，耗时复用当前原账范围，不在 UI 渲染线程扫描数据。
 def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count: int | None, response: object, call_id: str, usage_only: bool) -> dict[str, object]:
     if str(getattr(params, "context_scope", "") or "").lower() == "isolated":
         return {}
@@ -340,6 +348,9 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     totals = _previous_totals(agent, params, thread_id, str(summary.get("usage_scope_id") or ""))
     _add_usage(totals, summary)
     payload = {**previous, **totals, "schema": _SCHEMA, "sampled_at_ns": time.time_ns()}
+    for key in _REQUEST_LATENCY_COUNTS:
+        payload.pop(key, None)
+    payload.update(_request_latency_metrics(summary))
     if not usage_only:
         decision = (summary.get("purpose_breakdown") or {}).get("decision", {})
         payload.update(model_rounds=int(summary.get("logical_model_turn_count") or 0) - int(decision.get("logical_model_turn_count") or 0),
@@ -367,6 +378,21 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
     except (OSError, RuntimeError, TypeError, ValueError):
         _LOGGER.warning("模型统计显示更新失败；不影响模型与工具执行", exc_info=False)
     return public
+
+
+# LLM: 显示只读当前 request/run 原累计快照；并行调用毫秒相加不代表回合墙钟，用途按原账分区，不猜工具或审批耗时。
+# 函数用途: 向 TUI 与 IM 的原模型统计投影当前请求模型时间，带覆盖次数并区分主、辅助和决策调用。
+def _request_latency_metrics(summary: Mapping[str, object]) -> dict[str, int]:
+    fields = (*MODEL_LATENCY_FIELDS, "physical_model_attempt_count", "logical_model_turn_count")
+    result = {f"request_{name}": int(_number(summary[name])) for name in fields
+              if name in summary and _number(summary[name]) is not None}
+    purposes = summary.get("purpose_breakdown")
+    if isinstance(purposes, Mapping):
+        for purpose in ("main", "auxiliary", "decision"):
+            row = purposes.get(purpose)
+            if isinstance(row, Mapping) and _number(row.get("model_latency_ms")) is not None:
+                result[f"request_{purpose}_latency_ms"] = int(_number(row["model_latency_ms"]))
+    return result
 
 
 # LLM: 速度及缓存来自 exact call_id 的生成调用；决策无权覆盖这些指标，请求比较只写显示副本。

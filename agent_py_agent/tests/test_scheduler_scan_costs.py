@@ -26,6 +26,7 @@ import pytest
 
 import agent_py_agent.agent.owner_wake_discovery as discovery
 import agent_py_agent.agent.scheduler.repository as repository_module
+from agent_py_agent.agent.common.json_io import write_json_file_atomic_unlocked
 from agent_py_agent.agent.owner_wake_discovery import (
     _FACT_MAX_ENTRY_COUNT,
     _FACT_TTL_SECONDS,
@@ -545,9 +546,8 @@ def _seed_job(repository: SchedulerRepository, name: str, *, at: str = "cron") -
     return job
 
 
-# LLM: 参考实现逐字复刻改动前的 runtime_snapshot(list_jobs 进一次锁 + 锁内再读一次并全量解析
-# runs);新旧两条路径的返回字典必须完全相等,否则说明这次"把解析移出锁"改变了可观测语义。
-# 函数用途: 用旧实现口径算出 runtime_snapshot 的期望字典,供新旧一致性断言使用。
+# LLM: 参考口径直接读取原账本，健康同时包含坏 job 与坏 run；不沿产品聚合 helper 循环证明自己。
+# 函数用途: 独立汇总快照字段，检查只读投影与损坏诊断的一致性。
 def _reference_runtime_snapshot(repository: SchedulerRepository) -> dict[str, object]:
     try:
         jobs, errors = repository.list_jobs(include_deleted=False)
@@ -559,6 +559,7 @@ def _reference_runtime_snapshot(repository: SchedulerRepository) -> dict[str, ob
                 if (run := repository._parse_run(raw)[0]) is not None  # noqa: SLF001
                 and run["status"] in repository_module._ACTIVE_RUN_STATUSES
             )
+            errors.extend(error for raw in store["runs"].values() if (error := repository._parse_run(raw)[1]))
     except Exception as exc:  # noqa: BLE001 - 与实现同款兜底,参考实现要能对齐 unavailable
         return {
             "state": "unavailable",
@@ -617,7 +618,7 @@ def test_runtime_snapshot_matches_reference_projection(tmp_path) -> None:
     assert snapshot["paused_jobs"] == 1
     assert snapshot["active_runs"] == 3
     assert snapshot["schedule_kinds"] == ["cron", "every"]
-    assert snapshot["load_error_codes"] == ["SCHEDULER_OWNER_MISMATCH"]  # 缺 owner 的 job 行
+    assert snapshot["load_error_codes"] == ["SCHEDULER_OWNER_MISMATCH", "SCHEDULER_RUN_INVALID"]
 
 
 def test_runtime_snapshot_parses_outside_the_lock(tmp_path, monkeypatch) -> None:
@@ -661,7 +662,7 @@ def test_runtime_snapshot_parses_outside_the_lock(tmp_path, monkeypatch) -> None
     snapshot = repository.runtime_snapshot()
 
     assert snapshot["active_runs"] == 3
-    assert lock_entries, "锁外解析不等于不进锁:版本复核仍必须在锁内完成"
+    assert lock_entries == [], "完整只读快照不应申请可写锁或等待写方"
     assert ("parse_store", True) not in observed, "JSON 全量解析不得发生在持锁期间"
     assert not [name for name, locked in observed if name == "parse_run" and locked], (
         "逐 run 解析不得发生在持锁期间"
@@ -910,23 +911,18 @@ def test_fact_cache_invalidated_when_subagent_run_settles_in_place(fact_cache, t
 
 
 def test_fact_cache_invalidated_when_scheduler_store_changes(fact_cache, tmp_path) -> None:
-    """调度账本变化(到点 job)必须重新判定。"""
+    """生产同源原子替换的调度账本变化必须重新判定，不依赖文件系统的 mtime 精度。"""
     owners = tmp_path / "owners"
     home = _owner_home(owners, "u1")
     now = time.time()
     for next_run_at, expected in ((now + 3_600, []), (now - 1, ["u1"])):
         path = home / "data" / "scheduler" / "store.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "scheduler_store.v1",
-                    "jobs": {"job_1": {"status": "active", "next_run_at": next_run_at}},
-                    "runs": {},
-                }
-            ),
-            encoding="utf-8",
-        )
+        write_json_file_atomic_unlocked(path, {
+            "schema_version": "scheduler_store.v1",
+            "jobs": {"job_1": {"status": "active", "next_run_at": next_run_at}},
+            "runs": {},
+        })
         assert [owner.owner_id for owner in discover_wake_pending_owners(owners)] == expected
 
 
@@ -1372,7 +1368,7 @@ def test_scheduler_read_paths_do_not_parse_inside_the_lock(tmp_path, monkeypatch
     repository.get_job(str(jobs[0]["job_id"]))
     repository.corruption_report()
 
-    assert lock_entries, "只读路径仍必须在锁内做字节版本复核"
+    assert lock_entries == [], "只读路径不应创建写锁，写 CAS 仍由变更入口负责"
     assert ("parse_store", True) not in observed, "JSON 全量解析不得发生在持锁期间"
     assert ("load_locked", True) not in observed, "探针可用时不得在锁内做权威读取"
     assert not [name for name, locked in observed if name == "parse_run" and locked], (

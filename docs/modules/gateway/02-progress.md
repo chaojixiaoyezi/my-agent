@@ -1655,3 +1655,4 @@ L/T 第二候选通过 1190 项组合回归和严格 gate，原测试 Goal 在�
 原生停止验证已确认真实进程退出与文件停止增长；Goal 暂停来源漏记由同事务补 user_control，前台及轮间停止回归覆盖。
 
 2026-10-12 发布门补充：仅运输队列的 HTTPServer 明确没有 Agent 时，IM 受理不生成委派偏好，原鉴权/请求保存仍生效；已配 Agent 的默认链不变。EXECUTION_TARGET_CHANGED 已加入唯一错误分类，必须核对新目标，不能自动重放旧控制。待最终 focused/全仓与编译包门通过后统一推 main。
+2026-10-13 追加修复：/schedule 支持可信 bot 后置寻址、默认空时区及稳定错误码/诊断编号；无正文日志不要求 IM 用户刷新。原账只读快照无写锁，启动/tick 死亡恢复将已开工 unknown 写历史，不误收活 runner；旧群创建人只读冻结来源，未知归属不授控制。/status 增加原请求匿名模型累计及计时覆盖，旧字段未知。联合验收与真实 Linux/发行边界见 [核查报告](../../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)。

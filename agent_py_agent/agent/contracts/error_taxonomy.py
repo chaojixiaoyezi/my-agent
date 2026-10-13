@@ -3690,10 +3690,23 @@ ERROR_CONTRACTS.update({
         code="SCHEDULER_CONDITION_UNMET", category="state", retryable=False,
         recommended_action=RecoveryAction.NONE.value,
         recovery_hint="本轮规则的结构化依赖未完成、已过期或条件未满足，按计划跳过，不重试模型或补造依赖结果。"),
+    **{code: ErrorContract(code=code, category='state', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='监控存储或控制不可验证；按诊断编号核查原账本，不能删除锁、换 owner 或重放已经开工的动作。')
+       for code in ('SCHEDULER_STORE_UNREADABLE', 'SCHEDULER_STORE_INVALID_CONTENT', 'SCHEDULER_STORE_SCHEMA_MISMATCH',
+                    'SCHEDULER_STORE_OWNER_MISMATCH', 'SCHEDULER_OWNER_MISMATCH', 'SCHEDULER_PERMISSION_DENIED',
+                    'SCHEDULER_READ_ONLY', 'SCHEDULER_STORE_MISSING', 'SCHEDULER_RESOURCE_EXHAUSTED',
+                    'SCHEDULER_CONTROL_FAILED', 'SCHEDULER_RUN_OUTCOME_UNKNOWN', 'SCHEDULER_CREATOR_UNRESOLVED')},
+    'SCHEDULER_STORE_BUSY': ErrorContract(code='SCHEDULER_STORE_BUSY', category='state', retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint='只读快照持续变化，稍后重试同一查询；此事实不允许重新执行写控制或未知结果的运行。'),
+    'SCHEDULER_ARGUMENTS_INVALID': ErrorContract(code='SCHEDULER_ARGUMENTS_INVALID', category='validation', retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint='按 /schedule 的准确参数格式重发；无效控制没有读取或改变监控。'),
     "CLOUD_RESOURCE_NOT_AUTHORIZED": ErrorContract(
         code="CLOUD_RESOURCE_NOT_AUTHORIZED", category="permission", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
-        recovery_hint="当前 owner 没有准确云资源及此操作的授权；由管理员通过原资源管理入口登记，不索取应用密钥。"),
+        recovery_hint="当前本人或群未获此资源操作授权；共享给本人/当前群并设置对应权限，或请管理员登记准确许可。不索取应用密钥、不借其它 owner。"),
     "CLOUD_RESOURCE_POLICY_INVALID": ErrorContract(
         code="CLOUD_RESOURCE_POLICY_INVALID", category="configuration", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
@@ -3714,6 +3727,26 @@ ERROR_CONTRACTS.update({
         code="FEISHU_CLOUD_API_DENIED", category="permission", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
         recovery_hint="飞书 API 明确拒绝；请管理员核查应用接口权限和这份文档的协作者，不能改用其它 owner 的凭据绕过。"),
+    **{code: ErrorContract(code=code, category='permission', retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint='无法证明当前本人或群的资源权限；核对准确文档、共享主体和操作权限，不借其它用户凭据或扩权。')
+       for code in ('CLOUD_RESOURCE_PRINCIPAL_UNAVAILABLE', 'CLOUD_RESOURCE_PERMISSION_UNKNOWN',
+                    'FEISHU_CLOUD_RESOURCE_FORBIDDEN', 'CLOUD_RESOURCE_RANGE_NOT_AUTHORIZED')},
+    **{code: ErrorContract(code=code, category='validation', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='资源映射或类型不可验证；核对准确来源和服务端返回，不用猜测编号继续写入。')
+       for code in ('CLOUD_RESOURCE_MAPPING_INVALID', 'CLOUD_RESOURCE_TYPE_MISMATCH', 'FEISHU_CLOUD_RESOURCE_NOT_FOUND')},
+    **{code: ErrorContract(code=code, category='configuration', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='宿主应用身份或接口 scope 不足；由管理员核查应用配置，不向模型提供秘密，不换其它 owner 绕过。')
+       for code in ('FEISHU_CLOUD_SCOPE_REQUIRED', 'FEISHU_CLOUD_AUTH_INVALID')},
+    **{code: ErrorContract(code=code, category='network', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='飞书接口限流、额度不足或暂不可用；先核对原操作。写结果未知时先读回，不自动重复追加。')
+       for code in ('FEISHU_CLOUD_RATE_LIMITED', 'FEISHU_CLOUD_QUOTA_EXCEEDED', 'FEISHU_CLOUD_SERVICE_UNAVAILABLE')},
+    'FEISHU_CLOUD_REDIRECT_REFUSED': ErrorContract(code='FEISHU_CLOUD_REDIRECT_REFUSED', category='permission', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='带宿主认证的请求拒绝重定向；不得将 token 发往另一个地址，请管理员检查原官方入口。'),
 })
 
 

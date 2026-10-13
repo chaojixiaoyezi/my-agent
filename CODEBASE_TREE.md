@@ -1,5 +1,28 @@
 # Codebase Tree
 
+2026-10-13 IM 追加修复入口（沿原授权、调度及用量账）：
+
+```text
+|-- agent_py_agent/agent/gateway_parts/schedule_diagnostics.py # 监控参数与无正文错误诊断
+|-- agent_py_agent/agent/scheduler/store_snapshot.py # 原账本完整原子只读快照
+|-- agent_py_agent/agent/scheduler/recovery.py # 原 claim 死亡恢复与终态历史
+|-- agent_py_agent/agent/scheduler/creator_migration.py # 冻结来源的旧群创建人迁移
+|-- agent_py_agent/agent/user_space/feishu_cloud_authorization.py # 真实个人/群协作者权限验证
+|-- agent_py_agent/agent/user_space/feishu_sheet_authorization.py # 表格保护范围与准确主体编辑权限
+|-- agent_py_agent/agent/contracts/model_call_latency.py # 原模型调用账的匿名单调耗时
+|-- agent_py_agent/tests/test_im_control_repair.py # 后置提及、时区、诊断、审批与计时运输
+|-- agent_py_agent/tests/test_scheduler_repair.py # 无写锁快照、死亡恢复和旧群归属
+|-- agent_py_agent/tests/test_feishu_cloud_collaborator_authorization.py # 自助授权、撤权、wiki 与保护范围
+|-- agent_py_agent/tests/test_feishu_sheet_cloud_authorization.py # A1 保护范围、编辑者与追加位置不确定
+|-- agent_py_agent/tests/test_model_latency_accounting.py # 物理调用耗时、用途分区与旧数据未知
+|-- docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md # 本轮 14 项定位及修复验收
+|-- docs/tasks/IM_SCHEDULER_REPAIR_HANDOFF.md # 调度修复交接
+|-- docs/tasks/IM_CLOUD_REPAIR_HANDOFF.md # 云授权修复交接
+`-- docs/tasks/IM_LATENCY_REPAIR_HANDOFF.md # 耗时与按任务规模收敛交接
+```
+
+关键职责：store_snapshot 只读取原 scheduler store 的完整代次；recovery 只结算原 claim/run/history；creator_migration 不借当前群发言者猜旧身份；云授权只使用当前准确主体的供应商权限证据；model_call_latency 不建立第二份用量账。实际验收与发行状态见本轮核查报告。
+
 2026-10-13 新权威入口与验证（凭据/owner/运行账均复用原模块）：
 
 ```text
@@ -433,6 +456,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- docs/tasks/TUI_STEER_CONTROL_HANDOFF.md  # 插话与停止修复的独立实施、依赖和验收记录
 |-- docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md # 输入延迟、终端对照和临时发行验证边界
 |-- docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md # 十五项实施进度、复用落点与最终发布验收
+|-- docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md # 云文档授权、监控查询恢复和任务耗时的只读核查与待实施清单
 |-- agent_py_agent/tests/test_im_command_access.py # 机器人提及、角色帮助与控制身份组合
 |-- agent_py_agent/tests/test_im_tool_liveness.py # 静默长工具、取消及原 Registry/流出口心跳回归
 |-- agent_py_agent/tests/test_im_interaction_refs.py # 私聊交互引用的签名、身份和受保护存储回归
@@ -1924,6 +1948,7 @@ docs/
 
 - `docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md`：输入辅助工作的线程边界、原生 TUI/PuTTY 证据及发行交接。
 - `docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md`：本轮 R01～R13 实施状态与最终合并推送验收记录。
+- `docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md`：14 项追加问题的源码、隔离复现、报告纠正与待实施边界，不表示产品已修复。
 
 - `scripts/private_release/`：临时离线发行唯一构建/安装入口，产物放工作树外；不代替原源码 wheel 发布，不进行 main 合并。
 - `docs/guides/PRIVATE_OFFLINE_RELEASE.md`：版本、程序目录、数据目录、源码可见范围与原目录更新约定。

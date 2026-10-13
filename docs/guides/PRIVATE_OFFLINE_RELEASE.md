@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-13，用户已授权 R01–R21 合入远端 main，并要求生成新的离线包。候选版本为 `0.3.0-tui-preview.20261013.4`；每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。功能与验收边界见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
+状态：2026-10-13，R01–R21 的 `.20261013.4` 为上一版；用户已授权本轮 M01–M09/C01–C04/L01 修复推送 main 并打包，候选版本 `0.3.0-tui-preview.20261013.5`。每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。本轮见 [核查与实施](../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)，上一轮见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 
@@ -23,8 +23,8 @@
 |-- current            # 原子切换的当前版本链接
 |-- bin/my-agent-preview  # 固定启动入口，不依赖登录 HOME
 `-- data/              # 配置、密钥、会话、缓存、临时文件和工作文件
-    `-- owners/local/main/  # 原 owner resolver 返回的默认工作目录
-        `-- workspace/     # 原任务工作文件目录，沿现有产品布局创建
+    `-- owners/local/main/  # 原 owner resolver 返回的默认工作目录；tasks 等业务文件在这里
+        `-- workspace/     # 原运行时工作布局，Gateway 服务状态在这里
 ```
 
 如果 appuser 无权在 /app 建目录，管理员只需准备一次：
@@ -101,6 +101,8 @@ export PATH="$HOME/.local/bin:$PATH"
 `scripts/private_release/prepare_runtime.sh` 准备运行时，`prepare_bwrap.sh` 重建同源沙箱，
 `build.py` 生成参数展示快照、转换字节码、生成逐文件清单及自解压头。`installer.py` 和 `configure.py`
 也编译进包。自解压头仅需 Ubuntu 自带 bash/tar/gzip/coreutils。
+
+纯 Python 修复且依赖未变时，可从已校验上一版载荷复用 Ubuntu 20.04 同源 runtime/native；业务必须重新从准确 Git 提交构建 wheel，清理发行副本中的旧业务目录及旧 dist-info 后安装，不沿用旧业务 pyc。重生成清单前删除旧 release.json，防止它被纳入自身文件哈希。最终包继续执行 verify-only、原位置更新/数据字节保留、版本/新模块导入及 TUI smoke；复用运行时不等于跳过新包验证，也不把上一版三系统结果当本次重新验证。
 
 相对源码发行，只有三个产品适配点：Landlock 启动器读取真实模块 origin；包工作区识别 `.pyc` 入口；
 参数读取方的展示元数据使用同源构建快照。Landlock 启动与断网探测显式传入 `-B`，避免 `-I` 忽略环境变量后向发行运行时写标准库缓存。快照不决定配置权限或运行路由。

@@ -62,6 +62,10 @@ class _CloudHandler(BaseHTTPRequestHandler):
                 return
             if self.server.api_error:
                 result = {'code': 99991672, 'msg': SECRET}
+            if getattr(self.server, 'business_error_code', None):
+                result = {'code': self.server.business_error_code, 'msg': TOKEN + SECRET}
+            if getattr(self.server, 'response_data_override', None) is not None:
+                result = {'code': 0, 'data': self.server.response_data_override}
             if self.server.conflicting_identifiers:
                 result = {'code': 0, 'data': {'obj_token': 'one', 'spreadsheet_token': 'two'}}
         raw = json.dumps(result).encode()
@@ -93,7 +97,12 @@ def _agent(tmp_path, identity):
     config = AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False,
         my_agent_owner_provider=identity.provider, my_agent_owner_kind=identity.owner_kind,
         my_agent_owner_id=identity.owner_id, feishu_app_id='cli_synthetic', feishu_app_secret=SECRET)
-    return SimpleAgent(config, resolve_owner_home(tmp_path/'home', identity).home_dir)
+    agent = SimpleAgent(config, resolve_owner_home(tmp_path/'home', identity).home_dir)
+    # 原准确许可合同仍作为关闭自助权限时的回归；实时协作者路径由独立 HTTP 用例覆盖。
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    agent._capability_config_runtime_snapshot = SimpleNamespace(
+        config=CapabilityConfig(feishu_cloud_collaborator_authorization_enabled=False))
+    return agent
 
 
 def _grant(admin, agent, kind='sheet', token='sheet_one', operations=None):

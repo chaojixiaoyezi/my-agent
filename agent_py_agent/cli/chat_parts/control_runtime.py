@@ -340,6 +340,7 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
         model_name=str(value.get("model_name") or ""),
         compact_generation=compact_generation,
         context_usage=_status_context_usage(value.get("context_usage")),
+        model_timing=_status_model_timing(value.get('model_timing')),
         im_task_status=dict(value.get("im_task_status") or {}),
         user_role=str(value.get("user_role") or ""),
         permission_mode=str(value.get("permission_mode") or ""),
@@ -677,6 +678,7 @@ def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
         user_role=facts["user_role"],
         permission_mode=facts["permission_mode"],
         im_task_status=facts["im_task_status"],
+        model_timing=facts['model_timing'],
     )
 
 
@@ -805,6 +807,16 @@ __all__ = [
     "execute_chat_control",
     "im_only_control_result",
 ]
+
+
+# LLM: 传输只接原状态投影的整数，复用同一字段名单；未知旧客户端或恶意文本不制造耗时。
+# 函数用途: 校验 Gateway 状态中的匿名模型时间，供 TUI 使用。
+def _status_model_timing(value: object) -> dict[str, int]:
+    from ...agent.gateway_parts.status_projection import public_model_timing
+
+    if not isinstance(value, dict):
+        return {}
+    return public_model_timing({'request_' + key: item for key, item in value.items() if isinstance(key, str)})
 
 
 # LLM: 客户端只验证 Gateway 的公开数值快照，不根据显示正文重新计算上下文或角色。

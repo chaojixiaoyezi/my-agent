@@ -438,7 +438,7 @@ def _task_boundary_decision(
     return None
 
 
-# LLM: auto 只免去当前权限内的可选交互确认；此前路径/命令/身份硬门及随后护栏继续执行，always 本人确认不可绕过。
+# LLM: auto 只免去当前权限内的可选确认；always 的宿主 effect 声明只排除明确只读变体，命中的本人确认不可绕过。
 # 第二个返回值只在精确批准 binding 匹配时为 True（用户确实批准过这次调用），沙箱内自动执行、策略不要求、auto 模式都为 False；执行器据此决定批准后是否再复核。
 # 函数用途: 结合用户审批选择、工具策略和精确批准记录决定是否需要弹窗，不把自主模式变成 Full Access。
 def _approval_decision(
@@ -447,6 +447,7 @@ def _approval_decision(
     effect: str,
 ) -> tuple[ActionDecision | None, bool]:
     mode = runtime.runtime_policy.approval_policy.mode
+    always_effects = runtime.runtime_policy.approval_policy.always_effects
     sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
     effect_contained = sandbox_effect_is_contained(
         runtime.runtime_policy.sandbox_policy,
@@ -460,7 +461,7 @@ def _approval_decision(
     ):
         return None, False
     required = (
-        mode == "always"
+        (mode == "always" and (not always_effects or effect in always_effects))
         or (mode == "mutating" and effect in {"mutating", "dangerous"})
         or (mode == "dangerous" and effect == "dangerous")
     )
