@@ -215,10 +215,11 @@ def move_input_cursor_by_wrapped_rows(
 class TuiInputCompleter(Completer):
     # LLM: workspace 与客户端都在 app 创建时绑定；构造不能触发网络或插件发现，路径仍只做原单层枚举。
     # 函数用途: 创建输入补全器及可选的当前宿主目录读取入口。
-    def __init__(self, workspace: Path, *, plugin_client: PluginCommandClient | None = None, catalog_error=None) -> None:
+    def __init__(self, workspace: Path, *, plugin_client: PluginCommandClient | None = None, catalog_error=None, access_context=None) -> None:
         self.workspace = Path(workspace).expanduser().resolve(strict=False)
         self.plugin_client = plugin_client
         self.catalog_error = catalog_error
+        self.access_context = access_context
 
     # LLM: 显式 Tab 才刷新插件目录；HTTP、文件枚举和排序均离开事件线程。候选携带原目录版本，
     # 过期 Document 的结果由原 Buffer 丢弃，不另建补全或提交状态源。
@@ -255,7 +256,11 @@ class TuiInputCompleter(Completer):
         slash_prefix = _slash_command_prefix(before)
         if slash_prefix is not None:
             directory = {}
+            from ...agent.command_catalog import CommandAccessContext, command_access_error
+            access = self.access_context or CommandAccessContext(surface="local", is_admin=True, private_chat=False)
             for spec in COMMAND_CATALOG:
+                if command_access_error(spec, access):
+                    continue
                 directory[spec.name] = spec
                 for separator in spec.namespace_separators:
                     directory[spec.name + separator] = spec

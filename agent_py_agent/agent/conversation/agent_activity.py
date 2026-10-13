@@ -255,6 +255,9 @@ class BackgroundMainActivitySink:
     # LLM: 前后台只写同一 owner Agent 的线程级快照；不得为后台另设状态源。
     # 函数用途: 将后台真实阶段交给共用的 main 显示发布入口。
     def _publish(self, phase: str, activity: str, *, begin: bool = False) -> None:
+        pulse = getattr(self._transcript, "_im_progress", None)
+        if pulse is not None:
+            pulse.update(activity)
         publish_main_activity(
             self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self._transcript.request_id),
             phase=phase, activity=activity, begin=begin,

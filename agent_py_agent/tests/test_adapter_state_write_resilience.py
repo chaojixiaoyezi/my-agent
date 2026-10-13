@@ -128,7 +128,7 @@ def _run_foreground_with(monkeypatch, gpaths, manager: _FakeManager) -> None:
     monkeypatch.setattr(adapter, "ChannelManager", lambda **kwargs: manager)
     monkeypatch.setattr("agent_py_agent.agent.adapter.manager.configure_gateway_client", lambda manager, agent: manager.configure_gateway_client(agent))
     monkeypatch.setattr(adapter, "_register_requested_adapters", lambda manager, channel, agent: None)
-    agent = SimpleNamespace(config=SimpleNamespace(gateway_port=1))
+    agent = SimpleNamespace(config=SimpleNamespace(gateway_port=1, im_stream_preview_max_chars=100))
     adapter._run_adapter_foreground(agent, SimpleNamespace(channel="feishu"), gpaths)
 
 

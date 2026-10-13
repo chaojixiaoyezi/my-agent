@@ -32,6 +32,7 @@ from agent_py_agent.agent.adapter.manager import (
     ChannelManager,
     GatewayAskSubmission,
     _gateway_ask_payload,
+    configure_gateway_client,
 )
 from agent_py_agent.agent.adapter.protocol import IncomingMessage
 from agent_py_agent.agent.gateway_parts.local_client_token import LocalClientCredentialError
@@ -69,6 +70,10 @@ def test_route_persists_authenticated_ingress_before_media_or_gateway_io(
     tmp_path: Path,
 ) -> None:
     manager = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    configure_gateway_client(manager, SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False), tmp_path))
     adapter = _register_dummy(manager)
     adapter.workspace_root = tmp_path / "workspace"
     adapter.fetch_media_to = MagicMock(return_value="image.png")
@@ -114,6 +119,10 @@ def test_transient_media_failure_stays_prepared_and_retries_before_post(
     tmp_path: Path,
 ) -> None:
     manager = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    configure_gateway_client(manager, SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False), tmp_path))
     adapter = _register_dummy(manager)
     adapter.workspace_root = tmp_path / "workspace"
     adapter.fetch_media_to = MagicMock(

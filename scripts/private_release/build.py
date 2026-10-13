@@ -124,6 +124,7 @@ def main() -> int:
         "ubuntu": ["20.04", "22.04", "24.04"], "python": "3.11.15",
         "base_commit": args.base_commit, "source_sha256": args.source_sha256,
         "format": "portable-cpython-sourceless", "compiled_modules": count,
+        "protocols": {"offline_update": "drain.v1"},
         "dependencies": sorted({f"{item.metadata['Name']}=={item.version}" for item in importlib.metadata.distributions()}),
         "source_visibility": "宿主业务模块仅含字节码，可逆向；配置、提示词、公开模板、第三方源码及许可证保留。",
         "files": inventory(root),

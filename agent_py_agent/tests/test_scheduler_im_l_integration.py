@@ -17,9 +17,12 @@ from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 # LLM: 正式工具根据真实 IM binding 创建计划；不手写线程来源或改宿主策略，替身只承接模型/投递运输。
 # 函数用途: 建立同 owner 下的 IM 后台计划，验证合并后显式执行策略不会覆盖原布置者。
-def im_case(tmp_path, *, execution=None, delivery=None):
-    agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False,
-                                   orphan_supervision_interval_seconds=0), tmp_path)
+def im_case(tmp_path, *, execution=None, delivery=None, group=False):
+    config = AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False,
+                         orphan_supervision_interval_seconds=0)
+    if group:
+        config = replace(config, my_agent_owner_provider="feishu", my_agent_owner_kind="group", my_agent_owner_id="oc_group")
+    agent = SimpleAgent(config, tmp_path)
     backend = _Backend()
     agent.backend = backend
     store = agent.conversation_store
@@ -33,6 +36,80 @@ def im_case(tmp_path, *, execution=None, delivery=None):
     assert outcome.ok, outcome.output
     job = agent.scheduler_repository.list_jobs()[0][0]
     return SimpleNamespace(agent=agent, store=store, thread=thread, job=job, backend=backend)
+
+
+@pytest.mark.parametrize("mode", ["followup", "isolated"])
+def test_group_plan_freezes_conversation_even_when_actor_is_admin_and_wake_target_is_wrong(tmp_path, mode):
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.scheduler.execution import resolve_delivery, validate_delivery_origin
+    from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_channel_identity
+
+    case = im_case(tmp_path, execution={"mode": mode}, delivery={"mode": "origin"}, group=True)
+    bind_admin_channel_identity(case.agent.home_paths.root, "feishu", "ou_a")
+    case.agent.scheduler_service.enqueue_ready_runs(now=case.job["next_run_at"])
+    signal = case.store.wakes.pending()[0]
+    run = case.agent.scheduler_repository.get_active_run(signal.root_task_id)
+    assert run["execution_context"]["origin_bindings"][0]["channel_user_id"] == "ou_a"
+    thread = case.store.threads.require(run["thread_id"])
+    request = BackgroundRunRequest(thread_id=thread.thread_id, task_id=run["run_id"], reason="scheduled_job_due",
+                                   route_channel="feishu", route_target="ou_a")
+    origin, channel, target = resolve_delivery(case.agent, thread, request, "feishu", "ou_a")
+    assert (origin.thread_id, channel, target) == (case.thread.thread_id, "feishu", "oc_group")
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    context = DeliveryContext(thread_id=origin.thread_id, channel=channel, target=target)
+    assert validate_delivery_origin(case.agent, request, context)
+    assert not validate_delivery_origin(case.agent, request, replace(context, target="ou_a"))
+    channels = _RetryDelivery()
+    channels.status = "sent"
+    runtime = BackgroundMainAgentRuntime(agent=case.agent, store=case.store, channels=channels)
+    scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": case.store, "scheduler_service": case.agent.scheduler_service})
+    scheduler.tick(now=case.job["next_run_at"])
+    assert len(channels.attempts) == 1 and channels.attempts[0][0].target == "oc_group"
+    history, errors = case.agent.scheduler_repository.history()
+    assert not errors and history[0]["delivery_status"] == "sent"
+
+
+@pytest.mark.parametrize("mode", ["followup", "isolated"])
+def test_wrong_group_delivery_context_cannot_call_transport_or_record_sent(tmp_path, mode):
+    from agent_py_agent.agent.conversation.background_delivery import (
+        BackgroundDeliveryDependencies,
+        record_background_response,
+    )
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+
+    case = im_case(tmp_path, execution={"mode": mode}, delivery={"mode": "origin"}, group=True)
+    case.agent.scheduler_service.enqueue_ready_runs(now=case.job["next_run_at"])
+    signal = case.store.wakes.pending()[0]
+    request = BackgroundRunRequest(thread_id=signal.thread_id, task_id=signal.root_task_id, reason=signal.reason,
+                                   wake_signal={"wake_signal_id": signal.wake_signal_id})
+    channels = _RetryDelivery()
+    channels.status = "sent"
+    context = DeliveryContext(thread_id=case.thread.thread_id, channel="feishu", target="ou_a")
+    result = record_background_response(BackgroundDeliveryDependencies(case.agent, case.store, channels, lambda _: "completed"),
+        request, context, "合成群结果", deliver=True, delivery_reason="scheduled_job_due")
+    assert result.delivery_status == "failed" and not channels.attempts
+    pending = case.store.wakes.pending_one(signal.wake_signal_id)
+    assert pending.metadata["owner_delivery"]["last_delivery_status"] == "failed"
+    assert pending.metadata["owner_delivery"]["message_metadata"]["delivery_error_code"] == "SCHEDULER_ORIGIN_BINDING_CHANGED"
+
+
+@pytest.mark.parametrize("mode", ["followup", "isolated"])
+@pytest.mark.parametrize("owner", ["", "providers/feishu/groups/oc_foreign"])
+def test_frozen_group_delivery_uses_exact_run_owner_and_rejects_origin_owner_change(tmp_path, mode, owner):
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest
+    from agent_py_agent.agent.scheduler.execution import resolve_delivery, validate_delivery_origin
+
+    case = im_case(tmp_path, execution={"mode": mode}, delivery={"mode": "origin"}, group=True)
+    case.agent.scheduler_service.enqueue_ready_runs(now=case.job["next_run_at"])
+    signal = case.store.wakes.pending()[0]
+    case.store.threads.update_atomic(case.thread.thread_id, lambda thread: replace(thread, owner_id=owner))
+    request = BackgroundRunRequest(thread_id=signal.thread_id, task_id=signal.root_task_id, reason=signal.reason)
+    origin, channel, target = resolve_delivery(case.agent, case.store.threads.require(signal.thread_id), request, 'feishu', 'ou_a')
+    assert (channel, target) == ('feishu', 'oc_group')
+    context = DeliveryContext(thread_id=origin.thread_id, channel=channel, target=target)
+    assert validate_delivery_origin(case.agent, request, context) is (not owner)
 
 
 def test_default_im_background_inherits_live_source_model_without_returning_to_chat(tmp_path):

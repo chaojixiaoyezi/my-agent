@@ -13,6 +13,7 @@ it is never persisted and is submitted once directly.
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -573,10 +574,50 @@ class _ChannelIngressCoordinator:
 # LLM: 启动前用原 Agent 数据根与部署 token 同次绑定提交及对账；开关开且凭据不可读时拒绝启动，
 #   开关关时记一次降级 warning 后继续启动。
 # 函数用途: 为适配器原运输设置唯一宿主凭据来源，不写日志、环境或状态文件。
+# LLM: 客户端凭据与入站附件的 owner 解析均绑定真实宿主；下载不得从通道 cwd 或消息正文选择用户目录。
+# 函数用途: 启动适配器时绑定原 Gateway 凭据和身份解析所需的宿主，不初始化其他用户 Agent。
 def configure_gateway_client(manager: ChannelManager, agent: object) -> None:
     credentials = gateway_client_credentials(agent)
     credentials.headers()
     manager._reply_poll_client.credentials = credentials
+    manager._inbound_media_agent = agent
+
+
+# LLM: 复用 /ask 的可信结构和唯一 owner resolver；逐段 no-follow 创建目录，缺失宿主不回退到共享 adapter 工作区。
+# 函数用途: 下载前解析实际消息归属并准备 owner 私有附件目录；只创建目录，不执行模型或改变用户权限。
+def _inbound_media_destination(agent: object, msg: IncomingMessage) -> Path:
+    from ..common.nofollow_fs import open_directory_beneath
+    from ..conversation.input_media import owner_input_media_root
+    from ..gateway_parts.request_worker import _resolve_request_owner_identity
+    from ..user_space.owner_resolver import resolve_owner_home
+
+    if agent is None:
+        raise ValueError("INBOUND_MEDIA_OWNER_UNAVAILABLE")
+    root = Path(agent.home_paths.root)
+    identity = _resolve_request_owner_identity(agent, _gateway_ask_payload(msg))
+    owner = resolve_owner_home(root, identity)
+    destination = owner_input_media_root(owner.home_dir)
+    descriptor = open_directory_beneath(root, destination.relative_to(root).parts, create=True)
+    os.close(descriptor)
+    return destination
+
+
+# LLM: dest 已由同条可信消息解析；集合全部下载后才返回路径。重试保留同一顺序和名称，不把消息 ID 改成资源 API 不认识的编号。
+# 函数用途: 下载原单附件或富文本附件数组，同名附件加稳定序号，防止相互覆盖。
+def _download_inbound_media_refs(adapter, msg, media, dest):
+    items = media.get("items") if isinstance(media.get("items"), list) else [media]
+    paths = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise OSError("INBOUND_MEDIA_REFERENCE_INVALID")
+        reference = dict(item)
+        if len(items) > 1 and reference.get("file_name"):
+            reference["file_name"] = f'{index + 1}-{reference["file_name"]}'
+        name = adapter.fetch_media_to(msg.message_id, reference, dest)
+        if not name or Path(name).name != name or name in {".", ".."}:
+            raise OSError("INBOUND_MEDIA_DOWNLOAD_INCOMPLETE")
+        paths.append(f"[已下载到: {dest / name}]")
+    return paths
 
 
 # LLM: 敏感提交不落盘、不重试；G2b 开关打开时凭据拒绝只返回安全原因，网络错误只记类型，不把密码或 token 带入日志。
@@ -818,6 +859,7 @@ class ChannelManager:
         stream_preview_max_chars: int = 100,
     ) -> None:
         self._adapters: dict[str, BaseChannelAdapter] = {}
+        self._inbound_media_agent: object | None = None
         self._delivery_registry = ChannelAdapterRegistry()
         self._delivery_service = DeliveryService(self._delivery_registry)
         self.gateway_port = gateway_port
@@ -977,7 +1019,7 @@ class ChannelManager:
     # or reply IO. Same-id/same-body reuses the row; same-id/different-body is quarantined.
     # 例外：命令目录声明 sensitive_input 的命令（/admin、/approve、/deny）可能带管理员密码，绝不进入持久入站队列，
     # 改由 _route_sensitive_command 一次性直接提交。
-    # 函数用途: 只登记外部消息并唤醒后台 worker，不在飞书/WS 回调线程访问 Gateway 或通道接口。
+    # 函数用途: 首次落盘前冻结真实 owner，再登记外部消息并唤醒 worker；队列属宿主控制面，不是 main 业务目录。
     def route_message(self, msg: IncomingMessage) -> bool:
         try:
             if self._adapters.get(msg.channel) is None:
@@ -985,6 +1027,16 @@ class ChannelManager:
                 return False
             if sensitive_command_name(msg.content):
                 return self._route_sensitive_command(msg)
+            metadata = dict(getattr(msg, 'metadata', {}) or {})
+            if self._inbound_media_agent is not None:
+                from ..gateway_parts.request_owner_binding import (
+                    REQUEST_OWNER_KEY,
+                    bind_request_owner,
+                )
+
+                frozen = bind_request_owner(self._inbound_media_agent, _gateway_ask_payload(msg))
+                metadata[REQUEST_OWNER_KEY] = frozen[REQUEST_OWNER_KEY]
+                metadata['owner_id'] = frozen['owner_id']
             record = build_gateway_ingress_record(
                 channel=msg.channel,
                 user_id=msg.user_id,
@@ -993,7 +1045,7 @@ class ChannelManager:
                 ).strip(),
                 provider_message_id=msg.message_id,
                 content=msg.content,
-                metadata=dict(getattr(msg, "metadata", {}) or {}),
+                metadata=metadata,
                 timestamp=float(getattr(msg, "timestamp", 0.0) or 0.0),
             )
             _current, _created, quarantined = self._delivery_worker.enqueue(record)
@@ -1050,30 +1102,25 @@ class ChannelManager:
         for record in records:
             adapter.clear_progress_placeholder(record.user_id, record.progress_handle)
 
-    # LLM: Durable ingress asks provider failures to bubble into worker backoff before POST; direct
-    # legacy callers may retain best-effort behavior through the default flag.
-    # 函数用途: 下载入站媒体并注入本地路径；worker 模式失败会重试，直接调用默认只记录告警。
+    # LLM: 单附件和富文本附件数组按 /ask 同一身份落到 owner 私有目录；全部下载后才注入路径，失败沿原 durable 重试。
+    # 函数用途: 下载本条消息的完整附件集合并注入本人可读路径，不能因为某个附件失败而提交不完整消息。
     def _maybe_download_media(
         self,
         msg: IncomingMessage,
         *,
         retry_on_error: bool = False,
     ) -> None:
-        """入站图片/文件下载到 adapter 工作区,content 注入绝对路径(agent 可据此 analyze_image/读文件)。
-        失败静默(不影响消息处理);无 media / 通道不支持媒体直接跳过。"""
         media = (msg.metadata or {}).get("media")
         adapter = self._adapters.get(msg.channel)
-        root = getattr(adapter, "workspace_root", None)
-        if not media or root is None or not hasattr(adapter, "fetch_media_to"):
+        if not media or not hasattr(adapter, "fetch_media_to"):
             return
         try:
-            dest = Path(root) / "inbound_media"
-            name = adapter.fetch_media_to(msg.message_id, media, dest)
-            if name:
-                msg.content = f"{msg.content}\n[已下载到: {dest / name}]"
+            dest = _inbound_media_destination(self._inbound_media_agent, msg)
+            paths = _download_inbound_media_refs(adapter, msg, media, dest)
+            msg.content = "\n".join([msg.content, *paths])
         except Exception as exc:
             suffix = "，等待 durable worker 重试" if retry_on_error else "(不影响处理)"
-            logger.warning(f"入站媒体下载失败{suffix}: {exc}")
+            logger.warning("入站媒体下载失败%s error_type=%s", suffix, type(exc).__name__)
             if retry_on_error:
                 raise
 

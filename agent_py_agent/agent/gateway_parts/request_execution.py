@@ -996,6 +996,8 @@ def _apply_system_task_attributes(
 
 # LLM: 活动回合只由 request_binding 校验；Audit 范围沿准备轮原绑定投影，不从线程旧指针推断执行权。
 # 函数用途: 汇总当前会话、工作模式、事件通道和精确回合归属，交给运行器执行。
+# LLM: 冻结本条可信 channel actor，群内换发言人不能改变原任务发起人。
+# 函数用途: 冻结本条可信 channel actor，群内换发言人不能改变原任务发起人。 修改需同步原控制、恢复或权限测试。
 def _gateway_run_task_attributes(
     conversation: request_context.GatewayConversationContext,
     request: dict,
@@ -1010,6 +1012,7 @@ def _gateway_run_task_attributes(
     if conversation.scope is not None:
         attrs = dict(attrs or {})
         attrs["plugin_event_channel"] = conversation.scope.channel
+        attrs["host_channel_actor"] = {"channel": conversation.scope.channel, "actor_id": conversation.scope.channel_user_id, "conversation_id": conversation.scope.channel_conversation_id}
     if request_binding.gateway_request_owns_active_task_turn(attrs, request, request_id):
         attrs = dict(attrs or {})
         attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True
@@ -1224,6 +1227,8 @@ def _gateway_turn_thread_id(agent: SimpleAgent, context: dict, on_chunk) -> str:
 # LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
 #   带续跑标记的请求在执行前经同一 writer 写一次 turn_resumed 边界；取消提前返回时不写。
 # 函数用途: 执行一条 Gateway 请求并发布开始/收口观察；提前拒绝不冒充执行，观察不改 lease 和业务响应。
+# LLM: IM writer 绑定实际 owner Agent，具体审批继续使用原 pending/private 卡入口。
+# 函数用途: IM writer 绑定实际 owner Agent，具体审批继续使用原 pending/private 卡入口。 修改需同步原控制、恢复或权限测试。
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -1267,6 +1272,7 @@ def _handle_gateway_request(
         delivery_channel=request_history.gateway_request_channel(context["request"]),
     )
 
+    chunk_writer.im_approval_agent = agent
     execution_started_mono = time.monotonic()
     event_context = turn_started(agent, context['request'],
                                  thread_id_of=lambda: _gateway_turn_thread_id(agent, context, chunk_writer))

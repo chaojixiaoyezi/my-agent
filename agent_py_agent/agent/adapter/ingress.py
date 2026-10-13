@@ -54,6 +54,12 @@ class GatewayIngressRecord:
     claim_epoch: int = 0
     claim_expires_at: float = 0.0
 
+    # LLM: owner 编号来自配置宿主在 route_message 解析后的元数据；纯运输测试和旧记录的空值不表示主 owner。
+    # 函数用途: 对外投影明确记录归属，不通过物理队列位置猜 owner。
+    @property
+    def owner_id(self) -> str:
+        return str(self.metadata.get('owner_id') or '')
+
     # LLM: Closed transport states and required provider identity are validated at every disk read;
     # malformed records remain visible on disk and never enter an IO callback.
     # 函数用途: 拒绝缺身份或状态损坏的入站记录，避免错误路由继续推进。
@@ -85,7 +91,7 @@ class GatewayIngressRecord:
     # LLM: Disk schema is explicit and versioned; callers must not serialize an ad-hoc subset.
     # 函数用途: 把完整入站状态转换为可原子写入的 JSON 对象。
     def to_dict(self) -> dict[str, object]:
-        return {"schema_version": _SCHEMA_VERSION, **asdict(self)}
+        return {"schema_version": _SCHEMA_VERSION, **asdict(self), 'owner_id': self.owner_id}
 
     # LLM: Recovery reconstructs only the versioned typed record and does not infer route or state
     # from filenames, logs, or user-visible text.

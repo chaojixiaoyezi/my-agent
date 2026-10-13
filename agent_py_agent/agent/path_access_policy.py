@@ -51,7 +51,10 @@ UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/et
 #   本模块被原样打进插件 SDK，所以布局写成路径片段而不是导入 owner_resolver。
 # 常量用途: 列出对模型工具不开放的宿主托管存储；私密交互密钥和加密材料与插件同样禁止直接读写，任何权限模式生效。
 PRIVATE_INTERACTIONS_OWNER_PARTS: tuple[str, ...] = ("data", "private_interactions")
-HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins"), PRIVATE_INTERACTIONS_OWNER_PARTS)
+# Gateway/adapter 的服务队列是整机控制面，可能含多 owner 正文；即使物理放在 main 下，也不是管理员 Agent 的业务资料。
+HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (
+    ("data", "plugins"), PRIVATE_INTERACTIONS_OWNER_PARTS, ("workspace", "runtime", "services"),
+)
 
 # H3（2026-10-02）宿主配置的唯一声明：改配置只有参数中心（user_config、/settings）和 manage_models（/model）两个权威入口，
 #   模型的文件工具和命令直接写这些目录会绕过边界键、修改账本、撤销和模型目录检查（be 复审语义记忆时发现）。读取照常，只拒写。
@@ -228,7 +231,7 @@ class PathAccessPolicy:
             return PathAccessDecision(
                 False,
                 "PATH_HOST_MANAGED_STORE_BLOCKED",
-                f"宿主托管存储（插件安装库、包库）不对模型工具开放，能力包内容请经宿主工具读取: target={resolved}",
+                f"宿主托管存储（插件、私密交互、整机服务队列）不对模型工具开放，请使用对应宿主工具: target={resolved}",
                 str(store),
             )
         decision = self._mode_decision(resolved)
@@ -605,27 +608,34 @@ def task_host_state_paths(task_root: Path) -> tuple[Path, ...]:
 #   （隔离只本 owner，Full Access 全部已有 owner）。POSIX ERE，owner home 先解析符号链接再按字面转义；Seatbelt 在不区分大小写的
 #   卷上按不区分大小写匹配（本机实测 RUNS/、DATA/、Pack_Verification 变体都拦住）。Linux bwrap 只能挂已存在的路径，不用它：Linux
 #   只保护本任务（registry 按 task_root 给的路径），已知边界。改布局时同步 test_host_files_access.py。
-# 函数用途: 生成 owner home 下所有任务核验记录及其布局目录的拒写正则（每个 owner 一组）。
-def host_readonly_patterns(agent_home_root: Path, owner_home: Path | None = None) -> tuple[str, ...]:
+# directory_operation 将目录类型与写操作分开：runs/audits 由宿主建根；业务 tasks 可新建，但不能挪走核验记录的祖先。
+# 函数用途: 从原任务布局生成记录拒写或目录操作保护，不把同层业务文件当作目录。
+def host_readonly_patterns(agent_home_root: Path, owner_home: Path | None = None, *, directory_operation: str = "") -> tuple[str, ...]:
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
-    return tuple(pattern for home in homes for pattern in _task_record_patterns(_ere_literal(str(home.resolve(strict=False)))))
+    return tuple(pattern for home in homes for pattern in _task_record_patterns(_ere_literal(str(home.resolve(strict=False))), directory_operation=directory_operation))
 
 
 # LLM: 三类正则，前缀都是已转义的 owner home：
 #   1. 核验记录本身及其下内容；
 #   2. 布局各级目录本身（runs、runs/<日期>、runs/<日期>/<键>、audits、audits/<编号> 等，不含其下内容）；
 #   3. 任务根到记录之间的目录本身（data）。
-#   2、3 只拦这些目录自己的改名、删除、新建、chmod，里面的普通读写照常。9b 三审实测：只有第 1 类时，命令能把别的任务的 data/、
+#   2、3 必须结合实际目录 vnode；runs/audits 拒写，业务 tasks 只拒删除/改名，里面的普通读写照常。9b 三审实测：只有第 1 类时，命令能把别的任务的 data/、
 #   日期目录、整个 runs/ 或 audits/ 改名，写进记录再改回来，伪造它的核验记录（7 种绕过）；加上 2、3 后全拦。副作用：模型的命令
-#   不能自己新建任务根、不能在没有 data 的任务里建 data，这本来就是宿主的事。可选层级必须写成显式的 (/[^/]+)? 分组：Seatbelt
+#   不能自己新建 runs/audits 宿主任务根；可按已授权的业务 tasks 创建目录。可选层级必须写成显式的 (/[^/]+)? 分组：Seatbelt
 #   不认 {m,n} 区间，会静默失效（9b 实测）。
 # 函数用途: 给一个 owner home 生成核验记录、布局目录和中间目录三类拒写正则。
-def _task_record_patterns(home: str) -> list[str]:
-    roots = "|".join(_ere_literal(name) + "/[^/]+" * depth for name, depth in TASK_ROOT_LAYOUT)
+def _task_record_patterns(home: str, *, directory_operation: str = "") -> list[str]:
+    if directory_operation not in {"", "write", "unlink"}:
+        raise ValueError("未知任务目录保护操作")
+    selected = [item for item in TASK_ROOT_LAYOUT if not directory_operation or
+                ((item[0] == "tasks") == (directory_operation == "unlink"))]
+    roots = "|".join(_ere_literal(name) + "/[^/]+" * depth for name, depth in selected)
     parts = "|".join("/".join(_ere_literal(part) for part in item) for item in HOST_STATE_TASK_PARTS)
-    layout = [f"^{home}/{_ere_literal(name)}" + "(/[^/]+)?" * depth + "$" for name, depth in TASK_ROOT_LAYOUT]
+    layout = [f"^{home}/{_ere_literal(name)}" + "(/[^/]+)?" * depth + "$" for name, depth in selected]
     between = ["/".join(_ere_literal(part) for part in item[:size]) for item in HOST_STATE_TASK_PARTS for size in range(1, len(item))]
-    return [f"^{home}/({roots})/({parts})(/|$)", *layout, *(f"^{home}/({roots})/{prefix}$" for prefix in dict.fromkeys(between))]
+    if directory_operation:
+        return [*layout, *(f"^{home}/({roots})/{prefix}$" for prefix in dict.fromkeys(between))]
+    return [f"^{home}/({roots})/({parts})(/|$)"]
 
 
 # 函数用途: 把一段文字转成 POSIX ERE 里的字面匹配（给正则元字符加反斜杠）。

@@ -128,6 +128,8 @@ class SchedulerJobCreateRequest:
     execution: object = None
     precheck: object = None
     delivery: object = None
+    rules: object = None
+    creator: object = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
@@ -155,6 +157,8 @@ class SchedulerRunFinish:
 class _SchedulerJobOperations:
     """Public job CRUD operations mixed into the owner repository."""
 
+    # LLM: 别名由原 due_index 分配，复合规则和旧单任务仍写同一个 store。
+    # 函数用途: 别名由原 due_index 分配，复合规则和旧单任务仍写同一个 store。 修改需同步原控制、恢复或权限测试。
     def create_job(
         self,
         request: SchedulerJobCreateRequest,
@@ -176,6 +180,8 @@ class _SchedulerJobOperations:
                 ):
                     self._sync_due_index_unlocked(store)
                     return deepcopy(job), True
+            from .monitor_state import next_alias
+            normalized["alias"] = self.due_index.allocate_job_alias() if self.due_index is not None else next_alias(store)
             store["jobs"][str(normalized["job_id"])] = normalized
             self._write_store_unlocked(store, admission)
         return deepcopy(normalized), False
@@ -209,7 +215,10 @@ class _SchedulerJobOperations:
             job = self._require_mutable_job(store, job_id, expected_version)
             updated = _updated_job(job, patch, now=current)
             store["jobs"][job_id] = updated
-            self._write_store_unlocked(store, admission)
+            from .monitor_state import disabled_rule_ids
+            disabled=disabled_rule_ids(job,updated)
+            cancelled=self._cancel_waiting_runs_unlocked(store,job_id,current,'rule_disabled',rule_ids=disabled) if disabled else []
+            self._write_store_unlocked(store, admission,history_records=cancelled)
         return deepcopy(updated)
 
     def pause_job(
@@ -247,7 +256,10 @@ class _SchedulerJobOperations:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             job = self._require_mutable_job(store, job_id, expected_version)
-            next_run = _resume_next_run(job, current)
+            if job.get("rules"):
+                from .monitor_state import resume_monitor
+                job = resume_monitor(job, current)
+            next_run = float(job["next_run_at"]) if job.get("rules") else _resume_next_run(job, current)
             updated = {
                 **job,
                 "status": "active",
@@ -290,13 +302,18 @@ class _SchedulerJobOperations:
 class _SchedulerRunOperations:
     """Public durable run reservation, claim, completion, and history operations."""
 
-    def reserve_manual_run(self, job_id: str, *, now: float | None = None) -> dict[str, object]:
+    # LLM: 手动运行准确 rule_id，原活动 run 和状态检查不绕过。
+    # 函数用途: 手动运行准确 rule_id，原活动 run 和状态检查不绕过。 修改需同步原控制、恢复或权限测试。
+    def reserve_manual_run(self, job_id: str, *, rule_id: str = "", now: float | None = None) -> dict[str, object]:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             job = self._require_job(store, job_id)
             if job["status"] == "deleted":
                 raise SchedulerNotFoundError(f"scheduler job not found: {job_id}")
-            if self._job_has_active_run(store, job_id):
+            if job.get("rules"):
+                from .monitor_state import manual_rule
+                job = manual_rule(job, rule_id, current)
+            if self._job_has_active_run(store, job_id, str(job.get("rule_id") or "")):
                 raise SchedulerConflictError("scheduler job already has an active run")
             run = _reserved_run(
                 job,
@@ -311,6 +328,8 @@ class _SchedulerRunOperations:
 
     # LLM: 到期检查沿原锁读取 job，按 skip/coalesce 预留最多一次；未来周期退避只延迟新 run，不重放旧执行。
     # 函数用途: 为已到期且不重叠的计划预留原 run，记录错过周期并推进下次自然时间。
+    # LLM: 按独立 rule_id 检查活动运行，原 owner 锁和 due 投影保持。
+    # 函数用途: 按独立 rule_id 检查活动运行，原 owner 锁和 due 投影保持。 修改需同步原控制、恢复或权限测试。
     def reserve_due_runs(
         self,
         *,
@@ -333,13 +352,15 @@ class _SchedulerRunOperations:
                 ),
                 key=lambda job: (float(job["next_run_at"]), str(job["job_id"])),
             )
+            from .monitor_state import due_rule_views
+            due = [view for job in due for view in due_rule_views(job, current)]
             selected = 0
             max_selected = max(1, int(limit or 1))
             for job in due:
                 if selected >= max_selected:
                     break
                 job_id = str(job["job_id"])
-                if self._job_has_active_run(store, job_id):
+                if self._job_has_active_run(store, job_id, str(job.get("rule_id") or "")):
                     continue
                 selected += 1
                 scheduled_for = float(job["next_run_at"])
@@ -349,7 +370,15 @@ class _SchedulerRunOperations:
                         job, scheduled_for=scheduled_for, now=current
                     )
                     skipped.append(skipped_run)
-                    store["jobs"][job_id] = _advance_after_misfire(job, current)
+                    from .monitor_state import merge_rule_view
+                    store["jobs"][job_id] = merge_rule_view(store["jobs"][job_id], _advance_after_misfire(job, current))
+                    continue
+                from .monitor_state import condition_matches, merge_rule_view
+                if not condition_matches(store["jobs"][job_id], job, current):
+                    skipped_run = _terminal_misfire_run(job, scheduled_for=scheduled_for, now=current)
+                    skipped_run.update(error_code="SCHEDULER_CONDITION_UNMET", error_message="结构化依赖未完成、过期或条件未满足")
+                    skipped.append(skipped_run)
+                    store["jobs"][job_id] = merge_rule_view(store["jobs"][job_id], _advance_after_reservation(job, current))
                     continue
                 run = _reserved_run(
                     job,
@@ -359,7 +388,7 @@ class _SchedulerRunOperations:
                     now=current,
                 )
                 store["runs"][str(run["run_id"])] = run
-                store["jobs"][job_id] = _advance_after_reservation(job, current)
+                store["jobs"][job_id] = merge_rule_view(store["jobs"][job_id], _advance_after_reservation(job, current))
                 reserved.append(run)
             # A scheduler poll is read-only unless it actually reserves a run
             # or advances a misfired job.  Writing an unchanged owner ledger
@@ -467,6 +496,8 @@ class _SchedulerRunOperations:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             run = self._require_claim(store, run_id, claim_id)
+            from .monitor_state import record_run_start
+            record_run_start(self, store, run, current)
             store["runs"][run_id] = {
                 **run,
                 "status": "running",
@@ -654,7 +685,7 @@ class _SchedulerRunOperations:
         active_jobs = sum(1 for job in jobs if job["status"] == "active")
         paused_jobs = sum(1 for job in jobs if job["status"] == "paused")
         schedule_kinds = sorted(
-            {str(job["schedule"]["kind"]) for job in jobs if job["status"] != "deleted"}
+            {str(rule["schedule"]["kind"]) for job in jobs if job["status"] != "deleted" for rule in (job.get("rules") or [job])}
         )
         active_runs = sum(
             1
@@ -996,8 +1027,12 @@ class _SchedulerStoreSupport:
                 raise ValueError("job status")
             if not str(raw.get("thread_id") or ""):
                 raise ValueError("thread")
-            validate_schedule(raw.get("schedule"))
-            _validate_name_prompt(str(raw.get("name") or ""), str(raw.get("prompt") or ""))
+            if raw.get("rules") is not None:
+                from .monitor_state import validate_monitor
+                validate_monitor(raw)
+            else:
+                validate_schedule(raw.get("schedule"))
+                _validate_name_prompt(str(raw.get("name") or ""), str(raw.get("prompt") or ""))
             _normalize_skill_refs(raw.get("skill_refs"))
             normalize_policy(raw.get("policy"))
             normalize_execution(raw.get("execution"))
@@ -1081,10 +1116,12 @@ class _SchedulerStoreSupport:
             raise SchedulerConflictError("scheduler run claim changed")
         return run
 
-    def _job_has_active_run(self, store: dict[str, Any], job_id: str) -> bool:
+    # LLM: 复合规则只阻挡自身车道，旧单任务仍按原 job 车道。
+    # 函数用途: 复合规则只阻挡自身车道，旧单任务仍按原 job 车道。 修改需同步原控制、恢复或权限测试。
+    def _job_has_active_run(self, store: dict[str, Any], job_id: str, rule_id: str = "") -> bool:
         for raw in store["runs"].values():
             run, _error = self._parse_run(raw)
-            if run is not None and run["job_id"] == job_id:
+            if run is not None and run["job_id"] == job_id and (not rule_id or run.get("rule_id") == rule_id):
                 return True
         return False
 
@@ -1094,11 +1131,12 @@ class _SchedulerStoreSupport:
         job_id: str,
         current: float,
         error_code: str,
+        *, rule_ids: frozenset[str] | None = None,
     ) -> list[dict[str, object]]:
         cancelled: list[dict[str, object]] = []
         for run_id, raw in list(store["runs"].items()):
             run, _error = self._parse_run(raw)
-            if run is None or run["job_id"] != job_id or run["status"] in {
+            if run is None or run["job_id"] != job_id or (rule_ids is not None and run.get('rule_id') not in rule_ids) or run["status"] in {
                 "running",
                 "waiting",
             }:
@@ -1472,6 +1510,9 @@ def _new_job_payload(
     request: SchedulerJobCreateRequest,
     now: float,
 ) -> dict[str, object]:
+    if request.rules is not None:
+        from .monitor_state import new_monitor
+        return new_monitor(owner, request, now)
     normalized_name, normalized_prompt = _validate_name_prompt(request.name, request.prompt)
     normalized_schedule = validate_schedule(request.schedule)
     normalized_refs = _normalize_skill_refs(request.skill_refs)
@@ -1511,6 +1552,8 @@ def _new_job_payload(
         "thread_id": thread,
         "source_thread_id": request.source_thread_id,
         "source_task_id": request.source_task_id,
+        "creator": deepcopy(request.creator),
+        "run_count": 0,
         "schedule": normalized_schedule,
         "status": "active",
         "next_run_at": next_run,
@@ -1541,6 +1584,9 @@ def _new_job_payload(
 def _updated_job(
     job: dict[str, object], patch: dict[str, object], *, now: float
 ) -> dict[str, object]:
+    if job.get("rules") is not None or "rules" in patch:
+        from .monitor_state import update_monitor
+        return update_monitor(job, patch, now)
     name = str(patch.get("name") if "name" in patch else job["name"])
     prompt = str(patch.get("prompt") if "prompt" in patch else job["prompt"])
     normalized_name, normalized_prompt = _validate_name_prompt(name, prompt)
@@ -1590,6 +1636,10 @@ def _reserved_run(
         "schema_version": _RUN_SCHEMA,
         "run_id": run_id,
         "job_id": str(job["job_id"]),
+        "rule_id": str(job.get("rule_id") or ""),
+        "use_llm": job.get("use_llm", True),
+        "tool": deepcopy(job.get("tool")),
+        "creator": deepcopy(job.get("creator")),
         "job_version": int(job["version"]),
         "owner": deepcopy(job["owner"]),
         "thread_id": f"thread-{run_id}" if execution["mode"] == "isolated" else str(job["thread_id"]),
@@ -1601,7 +1651,7 @@ def _reserved_run(
         "precheck_checkpoint": deepcopy(job.get("precheck_checkpoint")),
         "source_task_id": str(job.get("source_task_id") or ""),
         "name": str(job["name"]),
-        "prompt": str(job["prompt"]),
+        "prompt": str(job.get("prompt") or job["name"]),
         "skill_refs": deepcopy(job.get("skill_refs") or []),
         "trigger": trigger,
         "scheduled_for": float(scheduled_for),
@@ -1696,6 +1746,9 @@ def _job_after_run(
     *,
     now: float,
 ) -> dict[str, object]:
+    if job.get("rules") is not None:
+        from .monitor_state import finish_rule
+        return finish_rule(job, run, now)
     updated = apply_run_policy({
         **job,
         "last_run_at": now,

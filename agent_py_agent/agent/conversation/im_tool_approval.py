@@ -30,6 +30,11 @@ def _scope_identity(scope) -> dict:
 # LLM: 原根任务与 host origin 是来源事实；没有精确 actor 的群不猜最新发言者。本机管理员只可取自己唯一绑定身份。
 # 函数用途: 为本次主子审批解析原发起人的私人接收者，不能指定任意群成员。
 def approval_recipient(agent, scope) -> tuple[str, str]:
+    current = getattr(agent, "_current_run_params", None)
+    attributes = getattr(current, "task_attributes", None) or {}
+    actor = attributes.get("host_channel_actor") or {}
+    if str(getattr(current, "task_id", "")) == scope.root_task_id and actor.get("channel") == "feishu" and actor.get("actor_id"):
+        return actor["channel"], actor["actor_id"]
     store = agent.conversation_store
     link = store.tasks.load(scope.root_task_id)
     thread_id = str(getattr(link, "thread_id", "") or "")
@@ -146,3 +151,22 @@ def resolve_im_tool_approval(agent, payload: dict, *, reference: str, message_id
     request = _approval_request(row.get("request"))
     return resolve_agent_tool_approval(agent, run_id=scope.run_id, request_value=request,
         decision_value=ToolApprovalDecision(request.permission_id, decision))
+
+
+# LLM: 前台 IM 与后台共用唯一 AgentToolApproval 账；不支持 TUI 的来源也必须有真实用户决定，不能直接批准。
+# 函数用途: 将普通用户/群聊的前台工具确认接到同一私人卡和执行代次检查。
+def request_foreground_im_permission(agent, value, *, cancellation_token=None):
+    from types import SimpleNamespace
+
+    from .agent_tool_approval import AgentToolApprovalSinkMixin
+    from .tool_approval_scope import tool_approval_scope
+    current = getattr(agent, '_current_run_params', None)
+    task_id = str(getattr(current, 'task_id', '') or '')
+    try:
+        scope = tool_approval_scope(agent, task_id)
+        sink = SimpleNamespace(agent=agent, task_id=task_id, thread_id=scope.thread_id)
+        return AgentToolApprovalSinkMixin.request_permission(sink, value, cancellation_token=cancellation_token)
+    except (ValueError, RuntimeError, OSError):
+        from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
+        request = ToolApprovalRequest.from_mapping(value)
+        return ToolApprovalDecision(request.permission_id, 'unavailable').to_dict()

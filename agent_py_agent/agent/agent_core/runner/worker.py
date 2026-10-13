@@ -20,6 +20,7 @@ from ...subagents.runner_control import runner_attempt_cancelled
 from ..subagent.params import SubagentRunParams
 from .activity_diagnostics import observe_runner_activity
 from .session_pool import RunnerSessionPoolLease, runner_session_lease
+from .slice_closeout import settle_resumable_worker_slice
 
 _LOGGER = logging.getLogger(__name__)
 # 子代理 runner 会话的固定心跳秒数：与后台会话租约无关（原来借用的 background_claim_heartbeat_interval_seconds 已删除）。
@@ -47,7 +48,7 @@ class RunSubagentWorkerParams:
 # LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
 #   入口先问准入关门（_admission_closed_refusal）：这是顺序批次（gate.run_single_runner）与并行批次（gate._counted_worker）
 #   共同的启动边界，关门时不建 worker、不激活、不续派也不唤醒父级。
-# 函数用途: 运行子代理工作片，续租并诊断长等待，落盘后继续同一 run 的待执行工作或唤醒直属父级。
+# 函数用途: 运行子代理工作片，退出等待片后结束 exact attempt 但保留任务，再继续获批工作或唤醒直属父级；未知副作用不释放。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
@@ -118,6 +119,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
         result,
         timeout_seconds=params.timeout_seconds,
     )
+    settle_resumable_worker_slice(worker, params.run_id, result, attempt_id=attempt_id, dry_run=params.dry_run)
     _continue_pending_run_after_session(worker, params.run_id, attempt_id=attempt_id)
     _resume_direct_parent_after_session(worker, params.run_id)
     return result

@@ -1,6 +1,6 @@
 
 
-# LLM: 文件工具逐项复用唯一 PathAccessPolicy；宿主注入的语法反馈开关不扩大权限，联查三写入口和 owner 边界测试。
+# LLM: 文件工具逐项复用唯一 PathAccessPolicy；H2/H3 稳定拒绝码沿三写入口保留，不能变成可申请的普通写拒绝。
 # 模块用途: 为内置文件工具装配配置、解析路径和检查读写边界，不拥有插件或任务状态。
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..path_access_policy import (
+    HOST_FILE_DENIAL_CODES,
     PATH_SCOPE_FULL,
     PATH_SCOPE_NORMAL,
     PATH_SCOPE_OWNER_WALL,
@@ -109,8 +110,8 @@ _READ_FILE_EXAMPLES = [
 ]
 
 
-# LLM: 写工具把它统一转成 WRITE_FORBIDDEN；只有 access_code 非空（目前仅 H3 宿主托管文件拒写：PATH_HOST_CONFIG_WRITE_BLOCKED、
-#   PATH_HOST_STATE_WRITE_BLOCKED）时改报这个码，让模型和宿主都能按结构化码区分。access_code 只由 resolve_write_path 从
+# LLM: 写工具通常转成 WRITE_FORBIDDEN；只有 access_code 非空的 H2/H3 宿主拒绝时保留原码，
+#   让模型和宿主都能区分普通授权与不可绕过的宿主保护。access_code 只由 resolve_write_path 从
 #   PathAccessDecision.code 写入。
 # 类用途: 表示写目标不在本次结构化写入范围内，或是宿主托管文件。
 class WriteScopeError(ValueError):
@@ -272,7 +273,7 @@ class FileSystemTool(BaseTool):
 
     # LLM: owner-scoped 的写操作只能落在当前结构化 workspace_roots；registry 会把
     #   本轮明确授权的外部输出根临时加入该列表。读操作仍走 resolve_path 的既有策略。
-    #   H3：任何模式下宿主托管文件（配置、运行状态）都拒写（拒写码随 WriteScopeError.access_code 上报），在墙外授权复核之后、
+    #   H2/H3：任何模式下宿主托管文件都拒写（拒绝码随 WriteScopeError.access_code 上报），在墙外授权复核之后、
     #   工作区范围之前判定，所以 Full Access 管理员与声明了自家根的隔离 owner 同样被拒。
     #   逻辑引用编号形态的相对路径段（产品编号前缀 + :call_）在任何解析与落盘之前拒绝，access_code=ARTIFACT_REF_AS_WRITE_PATH。
     # 函数用途: 文件写工具（write_file/apply_patch/edit_file）的统一硬门：先拒绝把逻辑引用编号当写路径（零落盘），
@@ -293,7 +294,8 @@ class FileSystemTool(BaseTool):
             if self.path_access_policy.owner_scope_root:
                 allowed.append(self.path_access_policy.owner_scope_root)
             raise WriteScopeError(
-                f"{exc} 可用的写入位置: {'、'.join(str(p) for p in allowed) or '（无）'}"
+                f"{exc} 可用的写入位置: {'、'.join(str(p) for p in allowed) or '（无）'}",
+                access_code=exc.access_code if exc.access_code in HOST_FILE_DENIAL_CODES else "",
             ) from exc
         host_decision = self.path_access_policy.host_write_decision(candidate)
         if not host_decision.allowed:

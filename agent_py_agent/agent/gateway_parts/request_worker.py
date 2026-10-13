@@ -568,12 +568,16 @@ def _resolve_request_agent(agent, request_payload: dict):
     return _resolve_request_agent_for_owner(agent, owner)
 
 
-# LLM: This resolver freezes the actual owner chosen at ingress. Durable receipts must persist
-# the returned identity and must not rerun channel routing after configuration changes.
+# LLM: 首次入口沿认证通道解析，已落盘请求读取准确宿主 owner；不会随管理员身份解绑或配置变化重绑执行 owner。
 # 已绑定管理员的 IM 私聊（admin_channel_identity_for_request）先于逐用户路由解析为 base owner；控制作用域经同一函数，结果一致。
 # 函数用途: 按当前可信请求事实解析本次实际使用的唯一 owner 身份，但不创建作用域 Agent。
 def _resolve_request_owner_identity(agent, request_payload: dict):
     from ..user_space.owner_resolver import owner_identity_from_config
+    from .request_owner_binding import frozen_request_owner
+
+    fixed = frozen_request_owner(request_payload)
+    if fixed is not None:
+        return fixed
 
     base_owner = owner_identity_from_config(getattr(agent, "config", None))
     if not bool(getattr(getattr(agent, "config", None), "gateway_per_user_owner_scoping", False)):

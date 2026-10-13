@@ -1,4 +1,18 @@
+2026-10-13 本期验收收口：85 文件 1467 passed/9 Linux-only skipped；Linux 313 passed/3 平台条件 skipped。原 run owner 校验最后补验 68 passed，旧缺 owner 只投影原 run 身份、改归属拒绝。五项非 pytest 严格 gate 与暂存 diff 均通过；6571 行生产/测试变化未达到全仓阈值。远端 SHA 随 Git 提交核对，不将线上 CI 或运输替身作为验收来源。下方过程记录保留其历史状态。
+
+2026-10-13 最终补验：80 文件首轮 1377 passed/5 failed/9 skipped，修正旧夹具和群目标断言、保留直接 handler 的 H2 原拒绝码后，相关 213 项通过。Linux 最终切片 155 passed/1 macOS-only skipped；云资源现 18 项，含写后投影失败的 unknown。后台同条进度终态前等待在途发送结束，新增时序回归通过。最后一轮联合和 clean-package 正在执行。
+
+2026-10-13 最新验收：调度执行/恢复/IM 49 项、真实 HTTP owner worker/规则/云资源/配置/错误分类 105 项通过。Linux 103 passed/1 平台跳过；真实官方 MiniMax/TUI v3 指定两脚本与最终结果 12/4 已验证、root/两 child done、回显 83.4ms。合成飞书运输 + 真实入站/Gateway/MiniMax/后台委派 v2 两个 owner 指定文件和 SessionTask done、原群/原用户外发目标，管理员零条；v1 失败保留，不累计测试数或冒充真实 Feishu。最终提交 gate 仍在收尾；详见实施记录最新追加。下方“运行中/未完成”均为此前检查点。
+
+2026-10-13 追加 R20/R21：`test_feishu_cloud_tool.py` 17 项及 `test_channel_owner_isolation.py` 6 项通过；普通/群/首次锁/凭据/审批/委派组合 153 项通过。真实 MiniMax/TUI v2 指定产物不齐且 grant 后续跑慢，判失败；原 RuntimeDB/session 的 `test_runner_slice_closeout.py` 5 项证明退出等待片可结束 exact attempt 保留逻辑任务，未知副作用不放行。修复后相关 127 passed/9 Linux-only skipped；严格 code-size hard=0，Linux v3 仍运行中。运输替身不能算真实飞书，未合并推送。
+
+## 2026-10-13 本期新增故障回归（仍在验收）
+
+压缩三文件与权限联合 197 项通过；网络/工具 94 项通过；凭据、调度和错误控制 85 项通过；富文本入站/附件 82 项通过，新增多附件联合测试待本轮复验。数字有重复、不相加。相对能力申请三类身份均真实复现：存量代码保存相对 grant，修复沿可信执行 cwd 冻结绝对路径；现有 owner 越界用例仅更新规范化路径的断言，拒绝和无落账保持。真实 MiniMax 经测试机 CLI/TUI 暴露该缺陷，不把模型口头完成当成产物验收。最终 main 尚未合并/推送，真实飞书运输尚未作为验收来源。
+
 2026-10-13 R01～R13 实施中：首批权限四文件 110 项、原 IM/进度/审批/控制/媒体五文件 78 项、新命令/短窗口/后台审批/PTY 四文件 70 项分别通过，组合有重复不累计；后续事件配置接线变更须复跑。真实本机 Seatbelt 能写孩子窄根并拒绝兄弟根，Linux/自动委派全链及真实 IM 尚未完成；严格 gate 和远端发布尚未执行。精确范围见 [实施记录](docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
+2026-10-13 本期新增定向验证：test_scheduler_rules.py、test_scheduler_monitors.py、test_schedule_control.py、test_task_credentials.py、test_inbound_media_ownership.py。附件使用真实原子文件写入和 read_file，供应商下载是替身；两用户各自能读且交叉读取拒绝。监控测试沿原 Repository/Service/ToolExecutor，不替模型补产物。真实 Linux 验收继续使用隔离 home、单 Gateway 和官方 MiniMax-M2.7；尚未完成当前切片真实 TUI，不能将替身运输记为真实飞书。严格 gate 报告使用 /tmp，避免修改仓库内统计文件干扰树守卫。
 
 2026-10-12 需求修订（文档，未实施）：R03 默认上限确定为 100 字符，后续验收覆盖 99/100/101、多次更新及自定义上限，最终结果不受短过程上限限制；R06 普通用户、管理员非 full-access、管理员 full-access 分别覆盖主/子/孙及各写入口，审批模式与有效文件范围分别核验。重点从真实 IM 派发入口验证 `/delegate enable` 的后台主子链，TUI 未启动时分别完成父级能力裁决、主代理自身与孩子的用户工具审批；同时验证其它聊天/任务可继续、拒绝/失联/取消/换代、disable/跨零点和恢复，旧决定不串任务或重复副作用。复用原测试入口补缺口，本次仅做文档同步与 diff 检查，不新增或重跑功能测试。见 [需求总表](docs/design/TUI_IM_PREVIEW.md#requirements-overview-20261012) 和 [权限矩阵](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#7-验证记录及实施验收)。
 

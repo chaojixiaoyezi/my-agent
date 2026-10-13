@@ -33,6 +33,7 @@ from .repository import (
     SchedulerNotFoundError,
     SchedulerRepositoryError,
 )
+from .rules import RULES_SCHEMA
 from .schedule import ScheduleValidationError, build_schedule, iso_from_timestamp
 
 if TYPE_CHECKING:
@@ -107,6 +108,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                         "failure_backoff_seconds": {"type": "integer", "minimum": 0, "maximum": 604800, "description": "连续失败指数退避基数，最长七天；0 不退避。"}},
                     "additionalProperties": False},
                 "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "固定到计划的当前可用 Skill 稳定 ID。"},
+                "rules": RULES_SCHEMA,
+                "rule_id": {"type": "string", "description": "多规则监控 run_now 必须选择准确规则编号。"},
                 "execution": EXECUTION_SCHEMA,
                 "precheck": PRECHECK_SCHEMA,
                 "delivery": DELIVERY_SCHEMA,
@@ -224,9 +227,18 @@ class ScheduleTool(BaseTool):
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         metadata_only = params.get("metadata_only", False) is True
         if action == "status":
-            return _success(action, {"scheduler": repository.runtime_snapshot()})
+            facts = repository.runtime_snapshot()
+            if getattr(getattr(self.agent, "home_paths", None), "owner_kind", "") == "group":
+                jobs = _visible_jobs(self.agent, repository.list_jobs()[0])
+                ids={job['job_id'] for job in jobs}
+                runs=repository._valid_runs(repository._store_snapshot())[0]
+                facts.update(active_jobs=sum(j["status"] == "active" for j in jobs), paused_jobs=sum(j["status"] == "paused" for j in jobs),
+                    active_runs=sum(run['job_id'] in ids for run in runs),
+                    schedule_kinds=sorted({rule['schedule']['kind'] for job in jobs for rule in job.get('rules') or [job]}))
+            return _success(action, {"scheduler": facts})
         if action == "list":
             jobs, errors = repository.list_jobs()
+            jobs = _visible_jobs(self.agent, jobs)
             active_runs, run_errors = repository.active_runs_by_job()
             return _success(
                 action,
@@ -248,6 +260,8 @@ class ScheduleTool(BaseTool):
         job_id = str(params.get("job_id") or "").strip()
         if action not in {"create"} and not job_id:
             return _error("job_id 必填", "TOOL_INVALID_ARGUMENTS")
+        if action != "create" and not _visible_jobs(self.agent, [repository.get_job(job_id)]):
+            return _error("目标监控不属于当前用户", "SCHEDULER_NOT_FOUND")
         if action == "get":
             active_runs, run_errors = repository.active_runs_by_job()
             job = repository.get_job(job_id)
@@ -274,7 +288,7 @@ class ScheduleTool(BaseTool):
                 },
             )
         if action == "run_now":
-            run = repository.reserve_manual_run(job_id)
+            run = repository.reserve_manual_run(job_id, rule_id=str(params.get("rule_id") or ""))
             return _success(action, {"run": _run_projection(run)})
         if action == "create":
             return self._create(repository, params)
@@ -305,7 +319,13 @@ class ScheduleTool(BaseTool):
     def _create(self, repository, params: dict[str, object]) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
-        if not name or not prompt or not str(params.get("schedule_kind") or "").strip():
+        rules = params.get("rules")
+        if rules is not None:
+            from .rules import normalize_rules
+            rules = normalize_rules(rules)
+            for rule in rules:
+                validate_execution_for_agent(self.agent, rule["execution"])
+        if not name or (rules is None and (not prompt or not str(params.get("schedule_kind") or "").strip())):
             return _error("create 必须提供 name、prompt、schedule_kind", "TOOL_INVALID_ARGUMENTS")
         thread_id, source_task_id = _conversation_scope(self.agent)
         if not thread_id:
@@ -317,7 +337,7 @@ class ScheduleTool(BaseTool):
         if isinstance(skill_refs, ToolHandlerOutcome):
             return skill_refs
         current = time.time()
-        schedule = _schedule_from_params(self.agent, params, now=current)
+        schedule = rules[0]["schedule"] if rules else _schedule_from_params(self.agent, params, now=current)
         execution = validate_execution_for_agent(self.agent, params.get("execution"))
         policy = normalize_policy(params.get("policy"))
         precheck = normalize_precheck(params.get("precheck"))
@@ -343,6 +363,8 @@ class ScheduleTool(BaseTool):
                 execution=execution,
                 precheck=precheck,
                 delivery=delivery,
+                rules=rules,
+                creator=_creator_identity(self.agent, thread_id),
             )
         )
         return _success(
@@ -354,7 +376,7 @@ class ScheduleTool(BaseTool):
     # 函数用途: 将模型工具参数转换成原仓库的计划和通知修改，保留 null 关闭预检的含义。
     def _update_patch(self, params: dict[str, object]) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
-        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck", "delivery"):
+        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck", "delivery", "rules"):
             if key in params:
                 patch[key] = params[key]
         if "execution" in patch:
@@ -527,9 +549,12 @@ def _job_projection(
         "job_id": job["job_id"],
         "execution_mode": "background" if normalize_execution(job.get("execution"))["mode"] == "isolated" or job.get("source_thread_id", job["thread_id"]) != job["thread_id"] else "current",
         "status": job["status"],
-        "schedule": ({key: value for key, value in job["schedule"].items()
+        "alias": job.get("alias", job["job_id"]),
+        "run_count": job.get("run_count"),
+        "rules": ([{key: value for key, value in rule.items() if key in {"id", "use_llm", "enabled", "next_run_at", "last_run_at", "last_run_status", "run_count"} or not metadata_only} for rule in job.get("rules", [])]),
+        "schedule": ({key: value for key, value in job.get("schedule", {}).items()
                       if key in {"kind", "at", "timezone", "every_seconds", "anchor_at", "expression"}}
-                     if metadata_only else job["schedule"]),
+                     if metadata_only else job.get("schedule")),
         "next_run_at": iso_from_timestamp(job.get("next_run_at")),
         "misfire_grace_seconds": job["misfire_grace_seconds"],
         "version": job["version"],
@@ -566,6 +591,8 @@ def _run_projection(run: dict[str, object], *, metadata_only: bool = False) -> d
         "precheck_status": (run.get("precheck_observation") or {}).get("status", "pending" if run.get("precheck") else "disabled"),
         "precheck_observation": {key: value for key, value in (run.get("precheck_observation") or {}).items()
                                  if key in {"status", "call_id", "observed_at", "error_code", "error_type", "tool_error_code"}},
+        "rule_id": run.get("rule_id", "rule1"),
+        "use_llm": run.get("use_llm", True),
         "run_id": run["run_id"],
         "job_id": run["job_id"],
         "trigger": run.get("trigger") or "",
@@ -619,3 +646,29 @@ def _error(
 
 
 __all__ = ["ScheduleTool", "build_schedule_tool_model_spec"]
+
+
+# LLM: 来源采用已经冻结的 execution_origin；不读取群会话最后发言者，未绑定的本地来源仅代表本 owner。
+# 函数用途: 保存监控创建人的结构身份，供同用户跨入口管理并隔离群成员。
+def _creator_identity(agent, thread_id):
+    from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY
+    store = getattr(agent, 'conversation_store', None)
+    thread = store.threads.load(thread_id) if store is not None else None
+    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY) if thread is not None else None
+    if isinstance(reference, dict):
+        binding = reference['binding']
+        return {'channel': binding['channel'], 'actor_id': binding['actor_id']}
+    current = getattr(agent, '_current_run_params', None)
+    attrs = getattr(current, 'task_attributes', None) or {}
+    actor = attrs.get('channel_user_id') or attrs.get('user_id')
+    return {'channel': attrs.get('channel', ''), 'actor_id': actor} if actor else {'local': True}
+
+
+# LLM: 群 owner 共享上下文不等于共享个人监控控制权；当前 actor 来自原任务冻结事实，不能从工具参数选择人。
+# 函数用途: 在模型工具查询和写操作前过滤本人的监控，与 slash 命令保持同一隔离要求。
+def _visible_jobs(agent, jobs):
+    if getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') != 'group':
+        return jobs
+    thread_id, _task = _conversation_scope(agent)
+    identity = _creator_identity(agent, thread_id)
+    return [job for job in jobs if job.get('creator') == identity and identity.get('actor_id')]

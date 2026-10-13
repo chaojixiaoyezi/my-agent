@@ -807,7 +807,7 @@ def test_grant_cannot_use_broad_agent_workspace_to_cross_owner_wall():
         reloaded = agent.subagents.load(task.id)
 
         assert result.ok is False and payload["ok"] is False
-        assert payload["errors"][0]["rejected_write_roots"] == [str(host_root)]
+        assert payload["errors"][0]["rejected_write_roots"] == [str(host_root.resolve())]
         assert result.error_code == "PATH_OUTSIDE_WORKSPACE" and result.effect_outcome == "failed"
         assert next(item for item in reloaded.capability_requests if item.id == request.id).status == "OPEN"
         assert reloaded.capability_grants == []

@@ -1,5 +1,42 @@
 # Codebase Tree
 
+2026-10-13 新权威入口与验证（凭据/owner/运行账均复用原模块）：
+
+```text
+|-- agent_py_agent/agent/user_space/resource_grants.py # 原 tool_policy 的准确外部资源许可
+|-- agent_py_agent/agent/tooling/feishu_cloud_tool.py # 原注册表的受管云文档工具
+|-- agent_py_agent/agent/adapter/feishu_cloud.py # 固定官方 API、原租户 token 与秘密净化
+|-- agent_py_agent/agent/gateway_parts/request_owner_binding.py # 原入队前冻结 owner
+|-- agent_py_agent/agent/agent_core/runner/slice_closeout.py # 退出等待片结清原 exact attempt
+|-- agent_py_agent/agent/gateway_parts/session_control.py # 绑定管理员管理本人原会话与审批
+|-- agent_py_agent/tests/test_feishu_cloud_tool.py # 三类 owner、授权与实际合成 HTTP
+|-- agent_py_agent/tests/test_channel_owner_isolation.py # 原群发送与宿主队列隐私
+|-- agent_py_agent/tests/test_runner_slice_closeout.py # 可恢复等待与未知副作用门
+|-- agent_py_agent/tests/test_session_control.py # 跨入口审批和嵌套秘密不落盘
+|-- agent_py_agent/tests/test_background_im_progress.py # 同条短窗口与终态
+|-- agent_py_agent/tests/test_im_subagent_permission_matrix.py # 三类身份主子孙真实文件/网络
+`-- docs/design/HOST_CLOUD_RESOURCE_ACCESS.md # 云资源与通道隔离边界
+```
+
+关键文件说明：resource_grants 只管理原用户工具策略的精确许可；feishu_cloud 只运输原宿主凭据请求；request_owner_binding 只冻结原请求身份；slice_closeout 只沿原数据库结束真实退出的工作片，不新建任务或恢复账。
+
+2026-10-13 新维护入口（沿原模块，无新任务账）：
+
+```text
+|-- agent_py_agent/agent/gateway_parts/schedule_control.py # 本人监控查询与原 CAS 控制
+|-- agent_py_agent/agent/scheduler/rules.py # 多规则定义、JSON 条件和 DAG 校验
+|-- agent_py_agent/agent/scheduler/monitor_state.py # 原 job/rule/run 的纯状态变换
+|-- agent_py_agent/agent/scheduler/tool_work.py # NO-LLM 原执行器与内部/外部交付
+|-- agent_py_agent/agent/tooling/task_credential_tool.py # 私人卡请求工具，只返回引用
+|-- agent_py_agent/tests/test_scheduler_rules.py # 多规则合同校验
+|-- agent_py_agent/tests/test_scheduler_monitors.py # 规则并发和真实执行器回归
+|-- agent_py_agent/tests/test_schedule_control.py # 群创建人、本人跨入口与通知控制
+|-- agent_py_agent/tests/test_task_credentials.py # 原卡、锁、密文和注入回归
+|-- agent_py_agent/tests/test_inbound_media_ownership.py # 两用户附件落地、读取及交叉拒绝
+```
+
+关键职责：附件沿原 owner resolver 和 media/input；监控沿原仓库/索引/执行器；凭据沿原私人交互和网络工具。实施/验收状态见 docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md。
+
 权限评估入口：[OWNER_HOME_PERMISSION_REVIEW.md](docs/design/OWNER_HOME_PERMISSION_REVIEW.md) 记录主子家目录、父 full-access、文件/Shell 裁决差异与审批换代边界；仅评估，未修改权限实现。
 
 本轮验证新增入口：
@@ -727,6 +764,7 @@ agent_py_agent/
 |   |   |-- approval_mode.py           # owner 显式审批模式与权限快照映射，子代理同源读取
 |   |   |-- admin_password.py          # 管理员密码 scrypt 记录与按渠道身份的失败节流（config/，0600）
 |   |   |-- admin_channel_identity.py  # 已绑定为管理员的 IM 私聊 (channel, user_id) 精确绑定表
+|   |   |-- task_credentials.py        # 私人任务凭据的加密和 task/job/origin 校验
 |   |   |-- interaction_refs.py         # 群转私聊的 owner/actor/channel/expiry 签名引用；不授予工具权限
 |   |   |-- owner_admin_controls.py    # 管理员对每个 owner 的 Jev/审计开关与本人跨用户审计许可（tool_policy.json 的 admin_controls，失败关闭）
 |   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
@@ -873,6 +911,7 @@ agent_py_agent/
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
 |   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
 |   |   |-- agent_tool_approval.py     # main/child exact ToolApprovalRequest 的唯一耐久记录、consumer 租约与决定等待
+|   |   |-- background_im_progress.py # 原委派 claim/attempt 的同条短进度
 |   |   |-- im_tool_approval.py        # 原 pending 内的私人卡回执、冻结发起人与原 claim/attempt 决定
 |   |   |-- tool_approval_scope.py     # 从canonical任务/线程/main claim/child attempt读取审批归属，隔离恢复换轮
 |   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与共用工具审批 sink

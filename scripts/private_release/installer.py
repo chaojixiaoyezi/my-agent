@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -160,6 +161,9 @@ def install(bundle: Path, prefix: Path) -> dict:
         temporary.write_text(launcher_text(prefix), encoding="utf-8")
         temporary.chmod(0o755)
         os.replace(temporary, launcher)
+        alias = prefix / "bin" / "my-agent"
+        if not alias.exists():
+            alias.symlink_to("my-agent-preview")
         current = prefix / f".current-{os.getpid()}"
         current.symlink_to(Path("releases") / manifest["version"])
         os.replace(current, prefix / "current")
@@ -168,9 +172,100 @@ def install(bundle: Path, prefix: Path) -> dict:
 
 # LLM: CLI 是唯一安装入口；仅打印原 gateway start 与 TUI 命令，不在安装时启动后台或联网。
 # 函数用途: 执行离线安装并打印启动、模型配置与更新命令。
+# LLM: 实例发现只认同 uid 的原安装标记，不递归扫描业务目录；自定义安装从环境/PATH 定位，多实例不猜。
+# 函数用途: 查找当前用户已有离线安装，自动更新原 prefix，输入错目录时明确拒绝第二套实例。
+def discover_installations(roots=None) -> list[Path]:
+    roots = list(roots) if roots is not None else [Path('/app'), Path('/opt'), Path.home()]
+    candidates = []
+    configured = os.environ.get('MY_AGENT_HOME')
+    if configured:
+        candidates.append(Path(configured).expanduser().parent)
+    for name in ('my-agent', 'my-agent-preview'):
+        if executable := shutil.which(name):
+            candidates.append(Path(executable).resolve().parent.parent)
+    for root in roots:
+        if not root.is_dir():
+            continue
+        candidates.append(root)
+        candidates.extend(path for path in root.iterdir() if path.is_dir() and not path.is_symlink())
+    found = set()
+    for path in candidates:
+        marker = path / MARKER
+        if not marker.is_file() or marker.is_symlink():
+            continue
+        try:
+            row = json.loads(marker.read_text(encoding='utf-8'))
+            resolved = path.resolve()
+            if row.get('schema') == SCHEMA and row.get('owner_uid') == os.getuid() and row.get('prefix') == str(resolved) and path.stat().st_uid == os.getuid():
+                found.add(resolved)
+        except (OSError, ValueError):
+            continue
+    return sorted(found)
+
+
+# LLM: 自动更新唯一原实例；显式不同路径也不能意外建第二套，多实例时必须选择已登记 prefix。
+# 函数用途: 决定首装或更新的准确目录，目录检查失败时还未停服务或写磁盘。
+def resolve_install_prefix(requested: Path | None, *, roots=None) -> Path:
+    found = discover_installations(roots)
+    selected = requested.expanduser().resolve() if requested is not None else None
+    if selected is not None:
+        if found and selected not in found:
+            raise ValueError('发现已有安装：' + ', '.join(str(path) for path in found) + '；请更新原目录，不能自动建立第二个 Gateway')
+        return selected
+    if len(found)>1:
+        raise ValueError('发现多个安装，请用 --prefix 精确选择：' + ', '.join(str(path) for path in found))
+    return found[0] if found else Path('/app/.my-agent')
+
+
+# LLM: 使用原 CLI 停止/恢复准确实例；不按名字 kill python、不动数据。TUI 或旧进程未退出时仍禁止切换。
+# 函数用途: 更新前保存原后台服务状态，沿既有命令停止，切换成功或失败后恢复原来开启的服务。
+def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None) -> tuple[bool,bool,str]:
+    import subprocess
+
+    from agent_py_agent.agent.gateway_parts import is_pid_alive
+    from agent_py_agent.agent.gateway_parts.daemon_control import get_running_pid
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.settings import load_config
+
+    launcher = str(prefix / 'bin' / 'my-agent-preview')
+    config = load_config(prefix / 'data' / 'config' / 'agent_config.yaml')
+    paths = gateway_paths_from_root(workspace_path(prefix) / config.gateway_workspace)
+    # LLM: PID 是原服务记录，只用生存事实，不以状态文案猜服务是否运行。
+    # 函数用途: 核对原实例当前服务 PID。
+    def alive(path):
+        pid = get_running_pid(path)
+        return bool(pid and is_pid_alive(pid))
+    adapter_alive=alive(paths.adapter_pid) if restore is None else restore[1]
+    channel='all'
+    if restore is None and adapter_alive:
+        state=json.loads((paths.root / 'adapter_state.json').read_text(encoding='utf-8'))
+        channel=state.get('requested_channel')
+        if channel not in {'feishu','qq','all'}:
+            raise ValueError('原适配器通道记录不可用，未停止服务')
+    original = restore if restore is not None else (alive(paths.pid), adapter_alive, channel)
+    commands = ([['gateway','start','--ready-timeout','60']] if original[0] else []) + ([['adapter','start','--daemon','--channel',original[2]]] if original[1] else [])
+    if restore is None:
+        release = json.loads((prefix / 'current' / 'release.json').read_text(encoding='utf-8'))
+        drain = ['--drain'] if (release.get('protocols') or {}).get('offline_update') == 'drain.v1' else []
+        commands = ([['adapter','stop']] if original[1] else []) + [['gateway','stop',*drain,'--stop-background','--background-timeout','30']]
+    try:
+        for arguments in commands:
+            result = subprocess.run([launcher,*arguments], timeout=6000, check=False)
+            if result.returncode:
+                raise ValueError('原实例服务控制未完成：' + ' '.join(arguments[:2]))
+    except (OSError,ValueError,subprocess.SubprocessError):
+        if restore is None:
+            update_services(prefix, restore=original)
+        raise
+    return original
+
+
+# LLM: 安装切换复用原目录/服务排空；任何 subprocess 超时必须作为安装错误返回，恢复路径仍由原服务控制负责。
+# 函数用途: 校验离线包、更新原实例并恢复连接，对超时或状态异常给出明确失败，不能宣称更新成功。
 def main() -> int:
     parser = argparse.ArgumentParser(description="my-agent 临时离线安装 / 更新")
-    parser.add_argument("--prefix", type=Path, default=Path("/app/my-agent-preview"))
+    parser.add_argument("--prefix", type=Path, help="省略时识别原实例并更新；首装默认 /app/.my-agent")
+    parser.add_argument("--update", action="store_true", help="退出 TUI 后自动停止原实例后台并在更新后恢复原连接")
     parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
     bundle = Path(__file__).resolve().parent
@@ -178,16 +273,38 @@ def main() -> int:
         if args.verify_only:
             print(json.dumps({"verified": verify(bundle)["version"]}, ensure_ascii=False))
             return 0
-        result = install(bundle, args.prefix)
-    except (OSError, ValueError, KeyError) as error:
+        prefix = resolve_install_prefix(args.prefix)
+        verify(bundle)
+        services = None
+        try:
+            if (prefix / MARKER).is_file():
+                assert_interactive_processes_exited(prefix)
+                services = update_services(prefix)
+            result = install(bundle, prefix)
+        finally:
+            if services is not None:
+                update_services(prefix, restore=services)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         print(f"安装失败：{error}", file=sys.stderr)
         return 1
     command = shlex.quote(str(Path(result["prefix"]) / "bin" / "my-agent-preview"))
     print(f"安装完成：{result['version']}\n程序及更新目录：{result['prefix']}\n数据目录：{result['data']}")
     print(f"首次配置模型：{command} --configure-model\n启动后台：{command} gateway start --ready-timeout 30\n进入 TUI：{command}")
-    print(f"更新：退出 TUI、执行 {command} gateway stop，然后 bash 新包.run --prefix {shlex.quote(result['prefix'])}")
+    print(f"更新：退出 TUI 后，执行 {command} update --package 新包.run；也可 bash 新包.run --update（自动识别原目录）")
     return 0
 
+
+
+# LLM: 只读本安装 PID 的 tty 事实，不读取任务正文或向终端发送退出键；确认失败在停服务之前拒绝更新。
+# 函数用途: 要求 TUI/交互进程先退出，避免自动更新途中误关正在输入的用户。
+def assert_interactive_processes_exited(prefix):
+    for pid in active_processes(prefix):
+        try:
+            state=Path(f'/proc/{pid}/stat').read_text().split(')',1)[1].split()
+            if int(state[4])!=0:
+                raise ValueError(f'请先退出本安装 TUI/交互进程再更新：PID {pid}')
+        except (FileNotFoundError,ProcessLookupError):
+            continue
 
 if __name__ == "__main__":
     raise SystemExit(main())

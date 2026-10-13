@@ -321,6 +321,8 @@ def _request_local_tool_for_invocation(
         scoped.shell_tool.path_access_policy = dynamic_policy
     if request.tool_name in {"run_command", "terminal_session"}:
         process_tool = getattr(scoped, "shell_tool", scoped)
+        # 网络总开关只由宿主 boundary 下发，文件 full-access 或一次工具审批不能覆盖。
+        process_tool._sandbox_network_access = (request.write_boundary or {}).get("network_access_mode") != "disabled"
         # 宿主按本次不可变 boundary 下发祖先只读范围；它可被更具体正式写根覆盖，和精确锁分开。
         process_tool._sandbox_forbidden_write_roots = tuple(
             Path(value) for value in _boundary_path_strings(request.write_boundary or {}, "forbidden_write_roots")

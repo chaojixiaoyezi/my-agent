@@ -102,6 +102,8 @@ def reset_restart_drain_state() -> None:
 # LLM: 写入在请求文件锁内完成；同一目标进程已有待执行请求时只追加发起方并返回 coalesced，冷却与防循环按结构化时间判断。
 # requester 只接受调用方已核验的结构化身份字段；reason 仅供展示，截断到 200 字。
 # 函数用途: 提交一次安全重启请求，返回 scheduled / coalesced / cooldown / loop_guard 之一及请求内容；会写请求文件。
+# LLM: restart 与 stop_for_update 显式区分，同 PID 的不同操作不合并，仍沿原排空请求文件。
+# 函数用途: restart 与 stop_for_update 显式区分，同 PID 的不同操作不合并，仍沿原排空请求文件。 修改需同步原控制、恢复或权限测试。
 def submit_restart_request(
     paths: GatewayPaths,
     *,
@@ -109,8 +111,11 @@ def submit_restart_request(
     requester: dict[str, object],
     reason: str,
     cooldown_seconds: float,
+    operation: str = "restart",
     now: float | None = None,
 ) -> dict[str, object]:
+    if operation not in {"restart", "stop_for_update"}:
+        raise ValueError("排空操作无效")
     current = time.time() if now is None else float(now)
     requester = {str(k): v for k, v in dict(requester or {}).items() if v not in (None, "")}
     refusal = _cooldown_or_loop_refusal(paths, requester, current, cooldown_seconds)
@@ -121,6 +126,9 @@ def submit_restart_request(
     def updater(existing: dict) -> dict:
         if existing.get("schema") == REQUEST_SCHEMA and existing.get("status") == "pending" \
                 and int(existing.get("target_pid") or 0) == int(target_pid):
+            if existing.get("operation", "restart") != operation:
+                outcome.update(status="conflict")
+                return existing
             extra = list(existing.get("additional_requesters") or [])
             if requester and requester != existing.get("requester") and requester not in extra:
                 extra.append(requester)
@@ -131,6 +139,7 @@ def submit_restart_request(
             "schema": REQUEST_SCHEMA,
             "request_id": f"gwrestart-{int(current)}-{uuid.uuid4().hex[:12]}",
             "status": "pending",
+            "operation": operation,
             "target_pid": int(target_pid),
             "reason": str(reason or "").strip()[:200],
             "requested_at": current,

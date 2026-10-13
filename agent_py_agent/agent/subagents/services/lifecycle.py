@@ -16,7 +16,7 @@ from ...memory_routing import load_routes, match_routes, resolve_required_paths
 from ...runtime_db.operations import RuntimeConflictError
 from ...runtime_errors import runtime_error_report
 from ..capability_request_identity import find_equivalent_capability_request
-from ..capability_scope import ensure_grant_path_scope_within_owner
+from ..capability_scope import ensure_grant_path_scope_within_owner, normalized_capability_paths
 from ..models import (
     SUBAGENT_WAKE_STATUSES,
     CapabilityGap,
@@ -146,7 +146,8 @@ class SubAgentLifecycleService:
 
     # LLM: Equivalent capability requests are deduplicated against the latest canonical state in
     # one mutate transaction; request prose never acts as lifecycle authority beyond identity data.
-    # 函数用途: 原子登记子代理的能力申请，并复用已经存在的等价申请避免重复排队。
+    # 相对范围先沿工具可信 cwd 冻结为绝对路径，再比较幂等身份；不按 Gateway 进程目录猜授权目标。
+    # 函数用途: 原子登记准确路径的能力申请，复用已经存在的等价申请避免重复排队。
     def record_capability_request(
         self,
         run_id: str,
@@ -158,9 +159,14 @@ class SubAgentLifecycleService:
         # guard; otherwise two simultaneous tool calls can create duplicate OPEN requests.
         # 函数用途: 在权威锁内复用等价能力申请，确实没有时才新增一条。
         def _request_reducer(task: SubAgentTask) -> None:
-            request = find_equivalent_capability_request(task.capability_requests, params)
+            from dataclasses import replace
+
+            frozen = replace(params,
+                path_scope=normalized_capability_paths(self.manager, task, params.path_scope),
+                cwd_scope=normalized_capability_paths(self.manager, task, params.cwd_scope))
+            request = find_equivalent_capability_request(task.capability_requests, frozen)
             if request is None:
-                request = build_capability_request(run_id, params)
+                request = build_capability_request(run_id, frozen)
                 task.capability_requests.append(request)
                 task.updated_at = time.time()
             committed_request.append(request)
@@ -170,7 +176,8 @@ class SubAgentLifecycleService:
 
     # LLM: A grant and its exact request resolution are one lifecycle mutation. Ordinary and MCP
     # tool names must both enter persisted effective permissions while retaining typed audit fields.
-    # 函数用途: 给子代理授权时同步结清申请、合并普通/MCP 工具，并让阻塞轮次重进待执行队列。
+    # 新授权冻结绝对路径；旧记录不改绑或静默迁移，owner 复核仍在同一事务内执行。
+    # 函数用途: 给子代理准确目录授权，同步结清申请、合并工具，并让阻塞轮次重进待执行队列。
     def record_capability_grant(
         self,
         run_id: str,
@@ -192,7 +199,10 @@ class SubAgentLifecycleService:
                 None,
             )
             if grant is None:
-                grant = build_capability_grant(run_id, params)
+                from dataclasses import replace
+
+                grant = build_capability_grant(run_id, replace(params,
+                    path_scope=normalized_capability_paths(self.manager, task, params.path_scope)))
             ensure_grant_path_scope_within_owner(
                 self.manager,
                 task,

@@ -30,7 +30,13 @@ class InputMediaError(ValueError):
 # LLM: owner_home_dir 来自宿主已认证身份；此函数不能接受用户提交的 owner 路径。
 # 函数用途: 返回当前用户唯一的入站附件目录，不创建目录。
 def input_media_root(agent: object) -> Path:
-    return Path(agent.home_paths.owner_home_dir) / "media" / "input"
+    return owner_input_media_root(agent.home_paths.owner_home_dir)
+
+
+# LLM: 入站适配器和模型媒体导入共用唯一目录；owner_home 必须来自宿主 owner resolver，不能取正文或适配器 cwd。
+# 函数用途: 为已解析的 owner 返回同一个私有附件目录，不创建目录或授予读取权限。
+def owner_input_media_root(owner_home: str | Path) -> Path:
+    return Path(owner_home) / "media" / "input"
 
 
 # LLM: 只认档案显式声明的模态（model_input_modalities 含 "image"）；空 = 未知，按不支持处理，不按模型名猜。

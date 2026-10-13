@@ -144,3 +144,24 @@ def test_relocated_console_script_runs_after_directory_move(tmp_path):
     runtime.rename(moved)
     result = subprocess.run([str(moved / "bin/example")], capture_output=True, check=True)
     assert result.stdout.decode("utf-8") == "中文 relocatable\n"
+
+
+def test_auto_update_uses_original_marker_and_rejects_typo(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer,'active_processes',lambda _:[])
+    prefix=tmp_path/'app'/'.my-agent'
+    installer.install(_bundle(tmp_path/'bundle'),prefix)
+    assert installer.resolve_install_prefix(None,roots=[tmp_path/'app'])==prefix
+    with pytest.raises(ValueError,match='第二个 Gateway'):
+        installer.resolve_install_prefix(tmp_path/'app'/'my-agent',roots=[tmp_path/'app'])
+    assert not (tmp_path/'app'/'my-agent').exists()
+
+
+def test_multiple_installations_require_explicit_selection(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer,'active_processes',lambda _:[])
+    bundle=_bundle(tmp_path/'bundle')
+    root=tmp_path/'app'
+    for name in ('one','two'):
+        installer.install(bundle,root/name)
+    with pytest.raises(ValueError,match='多个安装'):
+        installer.resolve_install_prefix(None,roots=[root])
+    assert installer.resolve_install_prefix(root/'two',roots=[root])==root/'two'

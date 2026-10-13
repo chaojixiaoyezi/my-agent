@@ -53,6 +53,7 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # dispatch, model self-report events, or ancestor-wide controls here.
 # 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、只读状态、直属插话、取消和权限裁决，进展由宿主回传。
 # 每个角色默认都能用 record_lesson 记可复用做法（可选），经验随结果交回宿主。
+# 宿主凭据和本人消息工具沿同一 owner/资源/原来源门，默认执行孩子也需要这些通用通道，不能只能在主代理手写凭据脚本。
 ROLE_BASE_TOOLS = [
     *AGENT_PROGRESS_TOOLS,
     *READ_ONLY_TOOLS,
@@ -61,6 +62,9 @@ ROLE_BASE_TOOLS = [
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
     RECORD_LESSON_TOOL,
+    'request_credentials',
+    'feishu_cloud',
+    'send_message',
 ]
 # LLM: This is the complete edge-local management surface. Leaf role snapshots
 # remove every item; only a typed can_spawn_children coordinator may inherit it.

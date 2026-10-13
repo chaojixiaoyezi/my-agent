@@ -1,4 +1,6 @@
 
+# LLM: 预检消费宿主解析后的路径、命令和网络事实；私网设置须与真正连接时的 DNS/重定向安全门一致。
+# 模块用途: 在工具执行前检查参数范围，不从用户正文产生授权，也不替代网络连接时的永久禁止项。
 from __future__ import annotations
 
 import ipaddress
@@ -18,6 +20,8 @@ _URL_KEYS = {"url", "endpoint", "webhook_url"}
 _COMMAND_KEYS = {"command", "cmd", "argv"}
 _PRIVATE_HOSTS = {"localhost"}
 
+# LLM: 私网总开关由宿主传入，逐调用显式 False 可收紧部署设置；本事实对象不读取环境或增加授权。
+# 类用途: 保存工具参数预检所需的同一次路径和网络设置。
 @dataclass(frozen=True)
 class PathUrlCommandFacts:
     payload: object
@@ -27,6 +31,8 @@ class PathUrlCommandFacts:
     path_dangerous_roots: Iterable[str] = ()
     owner_scope_root: str = ""
     allowed_private_hosts: Iterable[str] = ()
+    allow_private_resolution: bool = False
+    network_enabled: bool = True
     local_file_url_fields: Iterable[str] = ()
     allow_shell_operators: bool = False
     allowed_commands: Iterable[str] = ()
@@ -43,6 +49,8 @@ class PathFindingRequest:
     tool_name: str = ""
 
 
+# LLM: URL 预检只消费冻结网络事实；真正连接仍须经过 network_safety 的 DNS、重定向和 Gateway 门。
+# 函数用途: 合并客观路径、URL 和命令拒绝，保证已开启私网的调用不会被旧默认误挡。
 def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     data = facts.payload if isinstance(facts.payload, Mapping) else {}
     roots = _normalized_roots(facts.workspace_root, facts.workspace_roots)
@@ -57,6 +65,8 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     _collect_url_findings(
         data,
         {_normalize_host(item) for item in facts.allowed_private_hosts},
+        facts.allow_private_resolution,
+        facts.network_enabled,
         {_text(item).strip() for item in facts.local_file_url_fields if _text(item).strip()},
         roots,
         path_policy,
@@ -81,9 +91,13 @@ def _collect_path_findings(
             findings.append(finding)
 
 
+# LLM: 私网允许事实只影响 URL 私网预检，file URL 仍沿原精确文件权限；不做网络请求。
+# 函数用途: 检查单个及批量 URL 参数并汇总客观拒绝。
 def _collect_url_findings(
     data: Mapping[object, object],
     allowed_private_hosts: set[str],
+    allow_private_resolution: bool,
+    network_enabled: bool,
     local_file_url_fields: set[str],
     roots: list[Path],
     path_policy: PathAccessPolicy,
@@ -92,7 +106,9 @@ def _collect_url_findings(
     tool_name = _text(data.get("tool")).strip()
     for key, raw_url in _matching_values(data, _URL_KEYS | {"urls"}):
         parsed = urlparse(_text(raw_url))
-        if parsed.scheme.lower() == "file" and key in local_file_url_fields:
+        if parsed.hostname and parsed.scheme.lower() != "file" and not network_enabled:
+            finding = GateFinding("NETWORK_ACCESS_DISABLED", evidence={"field": key})
+        elif parsed.scheme.lower() == "file" and key in local_file_url_fields:
             finding = _local_file_url_finding(
                 field=key,
                 parsed=parsed,
@@ -101,7 +117,7 @@ def _collect_url_findings(
                 tool_name=tool_name,
             )
         else:
-            finding = _url_finding(key, raw_url, allowed_private_hosts)
+            finding = _url_finding(key, raw_url, allowed_private_hosts, allow_private_resolution)
         if finding:
             findings.append(finding)
 
@@ -160,12 +176,14 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
     return None
 
 
-def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str]) -> GateFinding | None:
+# LLM: 宿主私网授权与逐主机授权均可通过这层预检，不能用它跳过 handler 的永久禁止地址和 Gateway 检查。
+# 函数用途: 返回 URL 的文件协议或未授权私网问题，不连接目标。
+def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str], allow_private_resolution: bool = False) -> GateFinding | None:
     parsed = urlparse(_text(raw_url))
     if parsed.scheme == "file":
         return GateFinding("NETWORK_FILE_URL_BLOCKED", evidence={"field": field})
     host = _normalize_host(parsed.hostname)
-    if host and host not in allowed_private_hosts and _is_private_host(host):
+    if host and not allow_private_resolution and host not in allowed_private_hosts and _is_private_host(host):
         return GateFinding("NETWORK_PRIVATE_HOST_BLOCKED", evidence={"field": field, "host": host})
     return None
 

@@ -1,4 +1,14 @@
+2026-10-13 R21 收口：定时来源空 owner 只投影原 run 的准确身份；发送前发现非空 origin owner 改变则拒绝。68 项最终路线补验通过，联合本机 1467 / Linux 313 通过，详见本期实施记录。
+
+2026-10-13 收口补验：H2 拒绝码在原直接文件 handler 中保留；云写入后的响应投影失败记 unknown，进度线程在原 final 前等待有界运输完成。213 项相关验证通过。
+
+2026-10-13：最终补验：两种调度模式统一冻结原目标，真实 HTTP 后原 worker 验证两人/群实际线程归属；wiki 的公开对象/分页编号与认证秘密分别投影，所有新恢复码已登记。
+
+2026-10-13：R20 原资源策略/云工具与 R21 入站冻结 owner、H2 服务队列和 chat_id 发送实施中，见 [设计](../../design/HOST_CLOUD_RESOURCE_ACCESS.md)。管理员私人 IM 可 `/sessions control <thread_id> /approve <密码>` 或 `/deny` 决定本人原 TUI pending；原审批账及 waiter 不变，嵌套密码在入站/控制/TUI 历史均遮蔽，普通用户/群不能跨接管理员 TUI。
+
 # Gateway 维护状态
+
+2026-10-13 当前实现切片：本人级 /schedule 汇总、详情/三条历史/原 CAS 控制与 /status 监控计数已接；多规则沿原 scheduler run/claim/恢复入口，NO 使用原 ToolExecutor。私人凭据复用已认证卡片控制，模型只见引用。后台委派的 120 秒短状态窗口仍复用原 DeliveryService；离线更新可请求原两阶段排空后停止，不拉起旧版本继任者。附件下载复用 /ask owner resolver 后落到 owner media/input。全部严格与真实验收仍进行中，见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
 
 2026-10-13 R07 私人审批接线：原 DeliveryService 声明 control_cards，Feishu 创建返回真实 message/chat ID，SDK/webhook 保留实际点击来源；`/client/private-interaction` 必须有宿主凭据并复用原密码状态、管理员绑定、签名和原审批 scope。错误 actor/转发/旧 claim 不批准，不把按钮文字当权限。原 HTTP 与适配器回调联合通过，真 IM 和后台实际工具继续待验，见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
 

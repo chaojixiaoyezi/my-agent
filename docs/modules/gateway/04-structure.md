@@ -1,4 +1,8 @@
+2026-10-13：R20 原资源策略/云工具与 R21 入站冻结 owner、H2 服务队列和 chat_id 发送实施中，见 [设计](../../design/HOST_CLOUD_RESOURCE_ACCESS.md)。管理员私人 IM 可 `/sessions control <thread_id> /approve <密码>` 或 `/deny` 决定本人原 TUI pending；原审批账及 waiter 不变，嵌套密码在入站/控制/TUI 历史均遮蔽，普通用户/群不能跨接管理员 TUI。
+
 # Gateway Structure
+
+2026-10-13 新接线：schedule_control 为原 job/run 的用户视图，按原 creator 和 admin 绑定查询，冷群仅元数据读取、实际修改加载原 owner Agent；scheduler/rules、monitor_state、tool_work 只扩展原仓库和执行器。task_credentials 属于原 H2 私密交互，private_interaction_service 沿 MAC/actor/锁/实际卡身份接收输入；web_fetch 只在准确 origin 注入。restart_service 的 stop_for_update 复用原排空身份，Gateway CLI 区分停止与重启。adapter/manager 的入站附件使用原 request_worker owner resolver，共用 conversation/input_media 目录合同。
 
 私人控制复用 `delivery/control_cards` 的能力/目标前检与 native 回执、`adapter/private_controls` 的已验证 SDK actor 和原 G1 凭据。Gateway 在加载签名 owner 前核对 MAC/actor/expiry/密码与当前管理员绑定，最终调用 `conversation/im_tool_approval` 写原 pending；没有另一审批队列。新私人控制入口不沿 G2a 无凭据回环兼容放行，普通接口仍保留原协议。签名本身不是用户批准。
 

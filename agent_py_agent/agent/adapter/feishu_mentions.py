@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 
+from .feishu_media import post_content_block
 
-# LLM: 只移除可信 bot ID 对应的前置 mention 或 post at 节点，展示昵称不授予控制权；在持久化和密码判断之前调用。
+
+# LLM: 只移除可信 bot ID 对应的前置 mention；post 与正文读取共用语言/包裹层投影，展示昵称不授予控制权。
 # 函数用途: 让群里先 @机器人再发斜杠命令沿原解析入口执行，不改其它人的提及和参数。
 def command_content_without_bot_mention(message: dict[str, object], bot_open_id: str) -> object:
     raw = message.get("content")
@@ -28,9 +30,8 @@ def command_content_without_bot_mention(message: dict[str, object], bot_open_id:
             text = text[len(key):].lstrip()
         content["text"] = text
     elif kind == "post":
-        for locale in [content, *content.values()]:
-            if not isinstance(locale, dict) or not isinstance(locale.get("content"), list):
-                continue
+        locale = post_content_block(content)
+        if isinstance(locale.get("content"), list):
             locale["content"] = _post_without_leading_bot_nodes(locale["content"], bot_open_id)
     return content
 
@@ -68,7 +69,7 @@ def normalize_mentions(value: object) -> list[dict[str, str]]:
     return rows
 
 
-# LLM: bot 身份未知时群聊不触发；广播节点无论是否错误携带 bot ID 均不算直接 mention；私聊由上层放行。
+# LLM: bot 身份未知时群聊不触发；可信节点沿正文同一包裹层读取，广播仍不算直接 mention；私聊由上层放行。
 # 函数用途: 检查群聊消息是否明确单独 @了此应用机器人。
 def directly_mentions_bot(message: dict[str, object], bot_open_id: str) -> bool:
     if not bot_open_id:
@@ -86,11 +87,9 @@ def directly_mentions_bot(message: dict[str, object], bot_open_id: str) -> bool:
         return False
     if not isinstance(post, dict):
         return False
-    for locale in post.values():
-        if not isinstance(locale, dict):
-            continue
-        for line in locale.get("content", []) if isinstance(locale.get("content"), list) else []:
-            for node in line if isinstance(line, list) else []:
-                if isinstance(node, dict) and node.get("tag") == "at" and node.get("user_id") == bot_open_id:
-                    return True
+    locale = post_content_block(post)
+    for line in locale.get("content", []) if isinstance(locale.get("content"), list) else []:
+        for node in line if isinstance(line, list) else []:
+            if isinstance(node, dict) and node.get("tag") == "at" and node.get("user_id") == bot_open_id:
+                return True
     return False

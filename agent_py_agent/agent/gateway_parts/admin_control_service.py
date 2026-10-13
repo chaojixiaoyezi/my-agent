@@ -1,6 +1,7 @@
 # LLM: /admin、/approve、/deny 的唯一 Gateway 执行入口。作用域只信任已认证 scope 的 channel/user_id/会话和 adapter 给出的
 #   私聊类型；密码只在 command.value 里用于一次校验，结果、日志与回执都不带它（回执正文已由 control_operation_service 脱敏）。
-#   /approve、/deny 只把决定写进既有 permission bridge 的精确决定文件：owner、会话、请求号、permission_id 逐项核对，
+#   /approve、/deny 只把决定写进既有 permission bridge 的精确决定文件：owner、会话、请求号、permission_id 逐项核对；
+#   跨入口审批保留认证 IM 身份，仅由内部选中的本人 TUI scope 查原 pending，不伪造渠道身份，
 #   由原等待方再核对 binding 后继续；本模块不直接执行或跳过工具。改动时同步 control_service 分派、request_worker 的
 #   管理员身份匹配和 test_admin_identity_gateway.py。
 # 模块用途: 让管理员在飞书等 IM 私聊里用密码绑定管理员身份，并对本会话当前唯一等待确认的工具操作做一次批准或拒绝。
@@ -74,12 +75,14 @@ class PendingToolApproval:
 
 # LLM: 先核作用域（非本机通道、功能开启、一对一私聊），再按 kind 分派；/approve 另需当前身份已绑定管理员并校验密码，
 #   /deny 不需要密码但同样只作用于本会话自己的待决审批。返回值只含固定文案、错误码和目标请求号。
-# 函数用途: 执行一条 /admin、/approve 或 /deny 控制命令。
+# 跨入口只接受同 owner 的原终端目标，绑定管理员和密码仍验证原 IM actor；决定仍落原请求/执行代次。
+# 函数用途: 执行管理员身份或单次审批控制，可对内部已核验的本人原 TUI 会话写决定。
 def execute_admin_channel_control(
     agent: object,
     paths: GatewayPaths,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
+    *, approval_scope: GatewayControlScope | None = None,
 ) -> ConversationControlResult:
     identity, refusal = _private_admin_scope(agent, command, scope)
     if refusal is not None:
@@ -91,7 +94,14 @@ def execute_admin_channel_control(
         return _execute_admin_identity(home_root, command, identity)
     if command.kind == "approve" and find_admin_channel_identity(home_root, *identity) is None:
         return _refusal("approve", _NOT_BOUND, "ADMIN_IDENTITY_NOT_BOUND")
-    pending = pending_tool_approvals(agent, paths, scope)
+    selected = approval_scope or scope
+    if approval_scope is not None:
+        from ..conversation.channels import supports_transcript_delivery
+        if (find_admin_channel_identity(home_root, *identity) is None
+                or not supports_transcript_delivery(selected.channel)
+                or resolve_gateway_scope_owner(agent, selected) != resolve_gateway_scope_owner(agent, scope)):
+            return _refusal(command.kind, "只能管理本人原终端会话。", "APPROVAL_TARGET_SCOPE_INVALID")
+    pending = pending_tool_approvals(agent, paths, selected)
     if not pending:
         return _refusal(command.kind, _NO_PENDING, "APPROVAL_NOT_PENDING")
     if len(pending) > 1:

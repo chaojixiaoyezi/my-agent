@@ -1,5 +1,5 @@
 # LLM: 调度模型与线程执行沿原 ThreadStore、模型作用域和 run 身份；独立上下文不产生第二个权限或模型账本。
-# 模块用途: 物化独立定时线程，解析原会话继承或固定档案，并回到原会话交付。
+# 模块用途: 冻结所有定时运行的来源，按需物化独立线程，并向原会话准确交付。
 from __future__ import annotations
 
 import time
@@ -22,6 +22,8 @@ def close_unstarted_task(service, run: dict, *, now: float) -> None:
 
 # LLM: 只包装原后台 run_once；拿到车道后才写 started_at，预检接收同一原后台参数以保留 cwd、Skill 和任务身份。
 # 函数用途: 在同一领取、中断和心跳范围内执行预检及模型工作，不重建一份工作区合同。
+# LLM: 规则实际开工仍在原 run 中登记；NO 使用同一工具执行器，不请求 LLM。
+# 函数用途: 规则实际开工仍在原 run 中登记；NO 使用同一工具执行器，不请求 LLM。 修改需同步原控制、恢复或权限测试。
 def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: float):
     # LLM: 原 claim 已经通过准入和恢复检查；开始、预检、模型仍用一个 run，异常交原后台领取器收尾。
     # 函数用途: 记录实际取得车道的时刻，然后按预检结果继续模型或静默收口。
@@ -29,6 +31,10 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         from .precheck import admit_prechecked_work
 
         service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
+        if not claim.run.get("use_llm", True):
+            from .tool_work import execute_scheduled_tool
+            execute_scheduled_tool(agent, service, claim, signal, kwargs)
+            return None
         if admit_prechecked_work(agent, service, claim, signal, run_kwargs=kwargs, now=now):
             return dependencies.run_once(kwargs)
         return None
@@ -37,11 +43,9 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
 
 
 # LLM: run 属于本 owner；普通来源在首次准备冻结，IM 计划沿原无绑定线程已固定的来源，不因群新发送者改收件人。
-# 函数用途: 入队前创建无通道的独立运行线程；来源、工作区和结果回送仍各自沿原准确记录。
+# 函数用途: 入队前冻结两种执行模式的交付来源，只为独立模式创建无通道运行线程。
 def prepare_execution(service, run: dict, *, now: float) -> dict:
     execution = normalize_execution(run.get("execution"))
-    if execution["mode"] != "isolated":
-        return run
     from ..conversation.models import ConversationThread
     from ..conversation.unbound_thread_store import ensure_unbound_thread
 
@@ -54,6 +58,8 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
         "defined_model_policy": execution["model_policy"],
         "source_selection_revision": origin.model_selection_revision,
     })
+    if execution["mode"] != "isolated":
+        return run
     identity = {"thread_kind": "scheduled", "scheduler_run_id": run["run_id"],
                 "origin_thread_id": origin.thread_id}
     seed = ConversationThread(
@@ -68,7 +74,7 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
 
 
 # LLM: 只有原 IM 计划线程的 canonical 来源引用能冻结 actor；模型参数不能改目标。无此引用保持 L 原绑定快照。
-# 函数用途: 将已有计划的原布置者交给本次独立运行，不让群内后来的发送者替换通知对象。
+# 函数用途: 将已有计划的原布置者交给本次运行，不让群内后来的发送者替换通知对象。
 def _origin_bindings(service, run, origin):
     from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
     from ..runtime_errors import DataCorruptionError
@@ -151,23 +157,23 @@ def scheduled_model_scope(agent, thread, request):
         yield
 
 
-# LLM: 独立线程只负责执行，路由候选使用触发时冻结的绑定；当前索引验证放在每次真正交付前，重置不改接收者。
-# 函数用途: 为原后台路由器提供原会话投影，不给独立线程添加通道绑定。
+# LLM: 两种定时执行模式都使用触发时冻结的绑定；旧线程缺 owner 字段时只投影原 run 的准确 owner，不能回落管理员。
+# 函数用途: 为原后台路由器提供原会话投影，不给运行线程添加或修改通道绑定。
 def delivery_thread(agent, thread, request):
     from ..conversation.models import ChannelBinding
 
     run = execution_run(agent, request)
-    if run is None or normalize_execution(run.get("execution"))["mode"] != "isolated":
+    if run is None:
         return thread
     context = run.get("execution_context") or {}
     origin = agent.conversation_store.threads.load(str(context.get("origin_thread_id") or ""))
     if origin is None:
         raise KeyError("定时交付来源会话不存在")
     bindings = tuple(ChannelBinding(**item) for item in context.get("origin_bindings", ()))
-    return replace(origin, channel_bindings=bindings)
+    return replace(origin, channel_bindings=bindings, owner_id=origin.owner_id or str(run['owner']['id']))
 
 
-# LLM: 普通请求保持原 route；独立执行只以冻结来源绑定调用原路由器，不用 owner 兜底猜收件者。
+# LLM: 普通请求保持原 route；所有定时执行只以冻结来源绑定调用原路由器，不能沿用 wake 中的错误目标。
 # 函数用途: 将执行线程与交付会话分开，首次发送与冻结重投共用同一解析规则。
 def resolve_delivery(agent, thread, request, channel: str, target: str):
     from ..conversation.background_routing import (
@@ -178,31 +184,38 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
     if scheduled_local_delivery(agent, request):
         return thread, "internal", thread.thread_id
     origin = delivery_thread(agent, thread, request)
-    if origin.thread_id == thread.thread_id:
+    if execution_run(agent, request) is None:
         return origin, channel, target
     channel, target = resolve_background_route(BackgroundRouteDependencies(
         load_thread=lambda _key: origin, owner_paths=lambda: (), owner_identity=lambda: ("", "")), origin.thread_id)
     return origin, channel, target
 
 
-# LLM: 只裁决原 run 的冻结绑定，不搜索新通道；返回失败供既有 outbox 保存，禁止重跑模型来弥补交付失败。
-# 函数用途: 投递前核对原会话未重置；静默结果只写精确运行线程，不要求原外部绑定仍可投递。
+# LLM: 只裁决原 run 的冻结绑定与准确目标，不搜索新通道或回落管理员；失败交原 outbox，禁止重跑模型弥补投递。
+# 函数用途: 投递前核对原会话未重置或改归属；静默结果只写精确运行线程，不要求原外部绑定仍可投递。
 def validate_delivery_origin(agent, request, context) -> bool:
     run = execution_run(agent, request)
     if run is not None and scheduled_local_delivery(agent, request):
         return context.thread_id == run["thread_id"] and context.channel == "internal" and context.target == run["thread_id"]
-    if run is None or normalize_execution(run.get("execution"))["mode"] != "isolated":
+    if run is None:
         return True
     frozen = run.get("execution_context") or {}
     origin_id = str(frozen.get("origin_thread_id") or "")
     if context.thread_id != origin_id:
         return False
     store = agent.conversation_store
-    if store.threads.load(origin_id) is None:
+    origin = store.threads.load(origin_id)
+    if origin is None or (origin.owner_id and origin.owner_id != run['owner']['id']):
         return False
     for binding in frozen.get("origin_bindings", ()):
         if binding["channel"] != context.channel:
             continue
+        from ..conversation.channels import binding_delivery_target
+
+        expected_target = binding_delivery_target(binding['channel'], binding['channel_user_id'], binding['channel_conversation_id'],
+            group='/groups/' in str(run['owner']['id']))
+        if context.target != expected_target:
+            return False
         current, error = store.threads.resolve_report(channel=binding["channel"],
             channel_conversation_id=binding["channel_conversation_id"], channel_user_id=binding["channel_user_id"])
         return error is None and current is not None and current.thread_id == origin_id

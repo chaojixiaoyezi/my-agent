@@ -24,6 +24,7 @@ import pytest
 from agent_py_agent.agent.attempt.sandbox import (
     AttemptExecutionSandbox,
     AttemptSandboxSpec,
+    SandboxHostPolicy,
     SandboxUnavailableError,
 )
 from agent_py_agent.agent.attempt.view import build_attempt_view
@@ -668,8 +669,8 @@ def test_shell_passes_the_private_root_only_for_owner_scope(tmp_path, monkeypatc
     root = (tmp_path / "home").resolve()
     owner = root / "owners" / "local" / "main"
     owner.mkdir(parents=True)
-    _sandbox_exec("true", owner, owner, private_roots=(root,))
-    _sandbox_exec("true", owner, "", private_roots=(root,))
+    _sandbox_exec("true", owner, owner, host_policy=SandboxHostPolicy((root,)))
+    _sandbox_exec("true", owner, "", host_policy=SandboxHostPolicy((root,)))
 
     assert captured[0].private_read_roots == (root,)
     assert captured[1].full_access is True and captured[1].private_read_roots == ()
@@ -717,7 +718,7 @@ def test_background_command_carries_the_private_root(tmp_path, monkeypatch):
     tool.execute({"command": "sleep 5", "run_in_background": True, "working_dir": str(owner)})
 
     # 后台命令与前台、终端会话一样把拒读根交给沙箱。
-    assert captured["private_roots"] == (str(tmp_path / "home"),)
+    assert captured["host_policy"].private_roots == (str(tmp_path / "home"),)
 
 
 def test_agent_wires_its_home_root_into_the_shell_tool(tmp_path):

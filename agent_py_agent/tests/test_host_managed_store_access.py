@@ -213,7 +213,9 @@ def test_declared_store_matches_the_canonical_owner_layout(tmp_path):
         OwnerIdentity.local_main(), OwnerIdentity.provider_user("feishu", "u-1"),
         OwnerIdentity.provider_group("feishu", "g-1"))]
 
-    assert (owners[0].plugins_dir.relative_to(owners[0].home_dir).parts,) == HOST_MANAGED_OWNER_STORE_PARTS
+    assert owners[0].plugins_dir.relative_to(owners[0].home_dir).parts in HOST_MANAGED_OWNER_STORE_PARTS
+    assert ('data', 'private_interactions') in HOST_MANAGED_OWNER_STORE_PARTS
+    assert ('workspace', 'runtime', 'services') in HOST_MANAGED_OWNER_STORE_PARTS
     for owner in owners:
         assert owner_home_containing(owner.plugins_dir / "packages" / "x.zip", root) == owner.home_dir
         assert owner_home_containing(owner.home_dir, root) == owner.home_dir

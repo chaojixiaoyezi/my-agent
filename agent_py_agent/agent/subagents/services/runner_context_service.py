@@ -353,7 +353,7 @@ def _task_text_field(task: object, name: str) -> str:
 
 
 # LLM: Execution context write roots are exposed whenever any canonical file
-# mutation tool is granted; omitting an editor here would create a false grant.
+# mutation tool is granted; new grants carry absolute paths, legacy relative grants retain their original task-local contract.
 # 常量用途: 判断当前子代理是否拥有文件写能力，从而生成对应的结构化写入边界。
 _FILESYSTEM_WRITE_GRANT_TOOLS = WRITE_TOOL_NAMES
 
@@ -364,7 +364,7 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
         tools = {str(item or "").strip() for item in getattr(grant, "tools", []) or []}
         if not tools & _FILESYSTEM_WRITE_GRANT_TOOLS:
             continue
-        roots = _merge_list(roots, text_or_sequence_strings(getattr(grant, "path_scope", []) or []))
+        roots = _merge_list(roots, _granted_scope_paths(task, grant))
     return roots
 
 
@@ -372,12 +372,22 @@ def _granted_filesystem_write_roots(task: object) -> list[str]:
 #   "扩展 allowed_read_roots"走投无路)。规则:capability grant 的 path_scope 一律
 #   并入读根——grant 是父代理显式授权的路径,读取是其中的最低权限(能写必能读),
 #   不按工具类型过滤。目录条目天然授权整个子树(执行端 workspace_roots 子树语义)。
-# 函数用途: 把父代理 grant 过的路径范围开放给子代理"读",中途求读权限从此有用。
+# 存量相对授权沿旧 task-local 合同读取，新授权已冻结绝对地址，不能让进程 cwd 静默改变目标。
+# 函数用途: 把父代理准确 grant 路径开放给子代理读取，中途求读权限立即生效。
 def _granted_filesystem_read_roots(task: object) -> list[str]:
     roots: list[str] = []
     for grant in getattr(task, "capability_grants", []) or []:
-        roots = _merge_list(roots, text_or_sequence_strings(getattr(grant, "path_scope", []) or []))
+        roots = _merge_list(roots, _granted_scope_paths(task, grant))
     return roots
+
+
+# LLM: 新授权绝对路径逐字保留；旧相对授权按已声明的 task-local 规则投影，不写迁移记录或改绑存量授权。
+# 函数用途: 消除 runner 对授权范围的进程 cwd 依赖，使文件与命令消费同一准确写根。
+def _granted_scope_paths(task, grant):
+    base = Path(task.task_workspace_dir or task.task_dir)
+    return [str((path if path.is_absolute() else base / path).resolve(strict=False))
+            for raw in text_or_sequence_strings(getattr(grant, "path_scope", []) or [])
+            for path in [Path(raw).expanduser()]]
 
 
 # LLM: This is the last model-execution seam for persisted task/grant tools; apply the canonical

@@ -68,7 +68,7 @@ computer-use-observe = [
   "pillow==11.3.0; sys_platform == 'linux'",
 ]
 # 飞书/企业微信加密事件回调需要的密码学原语（stdlib 无 AES、密码学不能自建）。
-# `secrets` extra 名为已发布安装接口，暂保兼容；已退休的 SecretStore 不再消费它。
+# 私人任务凭据卡复用 secrets extra 的维护中加密库；缺依赖时此能力明确不可用，不保存明文。
 secrets = [
   "cryptography>=42.0",
 ]

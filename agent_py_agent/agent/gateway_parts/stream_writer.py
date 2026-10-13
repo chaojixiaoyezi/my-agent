@@ -72,6 +72,7 @@ class BufferedChunkStreamWriter:
     _verbose_level: str = "off"
     _im_preview_max_chars: int = 100
     _display_timezone: str = ""
+    im_approval_agent: object | None = field(default=None, repr=False)
     _model_segment: list[str] = field(default_factory=list)
     _model_delta_buffer: list[str] = field(default_factory=list)
     _model_delta_chars: int = 0
@@ -438,10 +439,7 @@ class BufferedChunkStreamWriter:
         *,
         cancellation_token: object | None = None,
     ) -> dict[str, object]:
-        return self._approval.request(
-            request_value, options=StreamApprovalRequestOptions(
-                self.interactive_approvals, self.approval_mode_decision_provider, cancellation_token),
-        )
+        return request_stream_permission(self, request_value, cancellation_token)
 
     # LLM: compact boundary 只能由 canonical conversation generation 前进触发；它是显示事件，不复制摘要正文或建立第二会话状态。
     # 函数用途: 在同一 Gateway chunk 流中公布一次上下文压缩代际边界。
@@ -588,3 +586,13 @@ def _flush_model_delta_events(writer: BufferedChunkStreamWriter) -> None:
             "text": content,
         },
     )
+
+
+# LLM: IM 原生卡与富 TUI 执行同一精确确认合同；入口由宿主 channel/client 能力选定，不接受模型文字切换。
+# 函数用途: 将一次审批交给已有原生 IM 等待桥或 TUI chunk 审批组件，取消继续透传。
+def request_stream_permission(writer,request,cancellation_token):
+    if writer.im_approval_agent is not None and not writer.rich_transcript and not supports_transcript_delivery(writer.delivery_channel):
+        from ..conversation.im_tool_approval import request_foreground_im_permission
+        return request_foreground_im_permission(writer.im_approval_agent,request,cancellation_token=cancellation_token)
+    return writer._approval.request(request,options=StreamApprovalRequestOptions(
+        writer.interactive_approvals,writer.approval_mode_decision_provider,cancellation_token))

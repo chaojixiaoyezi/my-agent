@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
 
+from ..common.nofollow_fs import write_bytes_atomic_beneath
 from .base import BaseChannelAdapter
 from .feishu_media import (
     MAX_FILE_BYTES,
@@ -134,6 +135,18 @@ def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -
     return False
 
 
+# LLM: 地址来自原 owner/origin 授权入口；只有两种飞书供应商编号，不能把群地址当用户或回落管理员。
+# 函数用途: 为普通文字、附件和无引用进度选择准确的飞书接收编号类型。
+def _message_send_path(target: str) -> str:
+    if target.startswith('ou_') and len(target) > 3:
+        return '/im/v1/messages?receive_id_type=open_id'
+    if target.startswith('oc_') and len(target) > 3:
+        return '/im/v1/messages?receive_id_type=chat_id'
+    raise ValueError('CHANNEL_TARGET_INVALID')
+
+
+# LLM: 普通发送按准确接收编号构造一次逻辑消息，markdown 回落仍共用原 uuid；不能改变投递目标。
+# 函数用途: 向用户或原群发送渲染后的文字。
 def _send_feishu_rendered(
     user_id: str,
     text: str,
@@ -142,7 +155,7 @@ def _send_feishu_rendered(
 ) -> bool:
     """普通发送一条(markdown→post/否则 text;post 格式错回落 text)。"""
     return _send_with_fallback(text, lambda mt, cj: _feishu_msg_api_with_retry(
-        "POST", "/im/v1/messages?receive_id_type=open_id",
+        "POST", _message_send_path(user_id),
         _message_body(
             receive_id=user_id,
             msg_type=mt,
@@ -197,6 +210,8 @@ def _upload_feishu(path: Path, kind: str, fields: dict[str, str], token: str) ->
     return None
 
 
+# LLM: 附件与文字共用原地址类型判断和 uuid，群目标不能降级为管理员 open_id。
+# 函数用途: 向已授权的用户或群发送图片、文件和音视频。
 def _send_feishu_media(
     user_id: str,
     msg_type: str,
@@ -207,7 +222,7 @@ def _send_feishu_media(
     """发图片/文件/音视频消息(content 含 image_key/file_key)。"""
     result = _feishu_msg_api_with_retry(
         "POST",
-        "/im/v1/messages?receive_id_type=open_id",
+        _message_send_path(user_id),
         _message_body(
             receive_id=user_id,
             msg_type=msg_type,
@@ -268,6 +283,8 @@ def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str) -> 
         return None
 
 
+# LLM: 目录由 manager 的可信 owner 解析提供；原子私有写不跟随目标文件链接，失败保持异常给 durable worker 重试。
+# 函数用途: 获取飞书附件并按 0600 写入指定 owner 目录，返回安全文件名；不使用适配器共享 cwd。
 def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, token: str) -> str | None:
     """下载入站媒体落盘 dest_dir,返回文件名;无媒体/失败 None。"""
     if media.get("image_key"):
@@ -280,8 +297,7 @@ def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, 
     if not blob:
         return None
     name = safe_media_filename(message_id, media, key, suffix)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    (dest_dir / name).write_bytes(blob)
+    write_bytes_atomic_beneath(dest_dir, (name,), blob)
     return name
 
 
@@ -920,7 +936,7 @@ def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, r
     def send(msg_type: str, content: str) -> dict[str, Any]:
         uuid_value = _feishu_request_uuid(idempotency_key, component="progress", index=0)
         body = {"msg_type": msg_type, "content": content, "uuid": uuid_value}
-        path = f"/im/v1/messages/{reply_to}/reply" if reply_to else "/im/v1/messages?receive_id_type=open_id"
+        path = f"/im/v1/messages/{reply_to}/reply" if reply_to else _message_send_path(user_id)
         if not reply_to:
             body["receive_id"] = user_id
         result = _feishu_msg_api_with_retry("POST", path, body, token)

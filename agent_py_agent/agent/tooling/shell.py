@@ -39,7 +39,7 @@ from agent_py_agent.agent.contracts.gates.command_policy import (
 )
 from agent_py_agent.agent.path_access_policy import PathAccessPolicy, agent_home_root_for_owner
 
-from ..attempt.sandbox import sandbox_hides_host_paths
+from ..attempt.sandbox import SandboxHostPolicy, sandbox_hides_host_paths
 from ..common.cancellation import (
     ToolCancelled,
     cancellation_requested,
@@ -670,7 +670,7 @@ def _sandbox_exec(
     read_roots: tuple[Path, ...] | None = None,
     write_protection: SandboxWriteProtection | None = None,
     *,
-    private_roots: tuple[object, ...] = (),
+    host_policy: SandboxHostPolicy | None = None,
 ) -> tuple[Any, bool]:
     """把命令包进 attempt 沙箱（G6 接线）。
 
@@ -685,6 +685,7 @@ def _sandbox_exec(
     from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, gateway_bound_ports
     from .sandbox import strict_posix_shell_argv
 
+    host_policy = host_policy or SandboxHostPolicy()
     protection = write_protection or SandboxWriteProtection()
     owner_text = str(owner_home or "").strip()
     persona_text = str(protected_persona_root or "").strip()
@@ -722,12 +723,15 @@ def _sandbox_exec(
         write_scope_denied_roots=protection.denied_roots,
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
+        network_access=host_policy.network_access,
         # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
         private_read_roots=tuple(
-            Path(str(root)).expanduser().resolve(strict=False) for root in private_roots if str(root or "").strip()
+            Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
         ) if owner_text else (),
         hidden_paths=_host_managed_hidden_paths(owner_text, persona_text),
         protected_write_patterns=host_readonly_patterns_for(owner_text, persona_text),
+        protected_directory_write_patterns=host_readonly_patterns_for(owner_text, persona_text, directory_operation="write"),
+        protected_directory_unlink_patterns=host_readonly_patterns_for(owner_text, persona_text, directory_operation="unlink"),
         # G4：拒绝模型命令连本机 Gateway 的实际绑定端口（回环）。端口由 Gateway 启动时登记在进程内注册表；
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=gateway_bound_ports(),
@@ -774,8 +778,9 @@ def host_readonly_paths_for(owner_text: str, persona_text: str) -> tuple[Path, .
 
 # LLM: H3：同一组 owner 的全部任务核验记录按正则只读（path_access_policy.host_readonly_patterns；只有 macOS 生效）。本任务的记录
 #   另由 registry 按 task_root 精确给出（两个平台都生效）。数据根推不出时不加。只做路径运算。
-# 函数用途: 计算本次模型命令要按正则设成只读的任务核验记录位置。
-def host_readonly_patterns_for(owner_text: str, persona_text: str) -> tuple[str, ...]:
+# 目录保护操作沿原布局声明区分宿主任务根与业务目录，实际 vnode 类型由沙箱过滤。
+# 函数用途: 计算本次模型命令的核验记录拒写或目录保护范围，不授予任何额外业务写根。
+def host_readonly_patterns_for(owner_text: str, persona_text: str, *, directory_operation: str = "") -> tuple[str, ...]:
     from ..path_access_policy import agent_home_root_for_owner, host_readonly_patterns
 
     anchor = owner_text or persona_text
@@ -783,7 +788,7 @@ def host_readonly_patterns_for(owner_text: str, persona_text: str) -> tuple[str,
     if agent_home is None:
         return ()
     owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
-    return host_readonly_patterns(agent_home, owner)
+    return host_readonly_patterns(agent_home, owner, directory_operation=directory_operation)
 
 
 # LLM: 显式后台命令使用前台相同的已校验路径优先级与沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
@@ -791,11 +796,12 @@ def host_readonly_patterns_for(owner_text: str, persona_text: str) -> tuple[str,
 def _background_command_argv(
     command: str, target: Path, owner_home: object, protected_persona_root: object,
     write_roots: tuple[Path, ...] | None, read_roots: tuple[Path, ...] | None,
-    write_protection: SandboxWriteProtection | None, *, private_roots: tuple[object, ...] = (),
+    write_protection: SandboxWriteProtection | None, *, host_policy: SandboxHostPolicy | None = None,
 ) -> list[str]:
+    host_policy = host_policy or SandboxHostPolicy()
     if owner_home or protected_persona_root or os.name == "posix":
         argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
-                                        write_roots, read_roots, write_protection, private_roots=private_roots)
+                                        write_roots, read_roots, write_protection, host_policy=host_policy)
         if use_shell or not isinstance(argv, list):
             raise OSError("managed background sandbox must provide argv execution")
         return argv
@@ -1283,7 +1289,7 @@ class ShellTool(BaseTool):
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
                                             self.protected_persona_root, *sandbox_roots[:2],
                                             SandboxWriteProtection(tuple(sandbox_roots[2] or ()), getattr(self, "_sandbox_forbidden_write_roots", ())),
-                                            private_roots=self.host_private_roots)
+                                            host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True)))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
@@ -2102,7 +2108,7 @@ def _run_attempt_sandboxed_shell_command(
         sandbox_write_roots,
         sandbox_read_roots,
         SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
-        private_roots=tool.host_private_roots,
+        host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True)),
     )
     try:
         proc = subprocess.Popen(

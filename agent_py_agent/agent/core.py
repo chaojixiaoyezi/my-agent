@@ -583,6 +583,7 @@ class SimpleAgent(
                 self.home_paths.global_index_dir / "scheduler_due.sqlite3"
             ),
         )
+        self.scheduler_repository.migrate_monitor_aliases()
         # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性，宽限期从配置推出。
         self.scheduler_service = SchedulerService(
             self.scheduler_repository,
@@ -1294,6 +1295,14 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         agent.tools.register(ManageModelsTool(agent))
     # owner 持久计划使用会话唤醒链；它不是子代理轮询或推进工具。
     agent.tools.register(ScheduleTool(agent))
+    from .tooling.task_credential_tool import RequestCredentialsTool
+    from .user_space.task_credentials import credential_headers
+    agent.tools.register(RequestCredentialsTool(agent))
+    from .tooling.feishu_cloud_tool import FeishuCloudTool
+
+    agent.tools.register(FeishuCloudTool(agent))
+    if (web_tool := agent.tools.tools.get("web_fetch")) is not None:
+        web_tool.credential_resolver = lambda ref, url: credential_headers(agent, ref, url)
     # 内网主机出站授权:用户点名的内网监控目标(跨机数据源)经属主确认后进白名单,解除
     # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。
     # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与

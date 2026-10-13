@@ -3,7 +3,7 @@
 #   写入唯一走 owner_admin_controls.set_owner_admin_controls（目标 owner 自己的 tool_policy.json，锁内读改写）；
 #   目标只接受 list 返回的规范 owner 编号，不创建用户目录，不从自然语言推断身份。
 #   改动须同步 owner_admin_controls、audit_records 工具、错误码块与 test_decision_audit_controls。
-# 模块用途: 让管理员开关某个用户的 Jev 决策使用权、审计工具使用权，以及 my-agent 能否跨用户审计。
+# 模块用途: 让管理员管理用户决策/审计开关及准确外部资源授权，沿原用户工具策略保存，不分发宿主密钥。
 from __future__ import annotations
 
 import json
@@ -52,7 +52,7 @@ def _owner_row(owner_id: str, home: object) -> dict:
 
 
 # LLM: 与 core 注册条件配套：只有本机管理员主代理拿得到本工具；执行时仍按 home 复核管理员身份（替身调用也拒绝）。
-# 类用途: 管理员查看并修改各用户的 Jev / 审计开关和自己的跨用户审计许可。
+# 类用途: 管理员查看并修改用户控制与云资源名单；所有修改仍需管理员本人确认。
 class AdminControlsTool(BaseTool):
     model_spec = ToolModelSpec(
         name=TOOL_NAME,
@@ -60,12 +60,15 @@ class AdminControlsTool(BaseTool):
             "管理员专用：查看或修改各用户的 Jev 决策模型使用权（decision_model_allowed）、审计工具使用权（audit_allowed），"
             "以及是否允许 my-agent 跨用户审计（cross_owner_audit_allowed，只能写在 owner_id=local/main 名下）。"
             "先 action=list 取得规范 owner_id，再 action=set 提交 owner_id 与 changes。"
+            "resources 查看指定 owner 的云资源许可；resource_grant/resource_revoke 按 resource 精确登记/撤销。"
+            "resource 含 provider、resource_type、resource_token、operations；飞书 sheet 操作为 sheet_read/sheet_append/sheet_update，"
+            "docx 操作为 document_read/document_append，wiki 定位为 wiki_resolve；不填写密钥。"
             "每次调用都会请管理员本人确认；只在管理员明确要求时使用，不要自行开启跨用户审计。"
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["list", "set"], "description": "list 查看全部用户的开关；set 修改一个用户。"},
+                "action": {"type": "string", "enum": ["list", "set", "resources", "resource_grant", "resource_revoke"], "description": "list/set 用户控制；resources/resource_grant/resource_revoke 精确资源授权。"},
                 "owner_id": {"type": "string", "description": "set 必填：list 返回的规范 owner_id，例如 local/main 或 providers/feishu/users/<id>。"},
                 "changes": {
                     "type": "object",
@@ -74,6 +77,10 @@ class AdminControlsTool(BaseTool):
                     "description": "set 必填：要修改的开关，值为 true/false；cross_owner_audit_allowed 只能对 local/main 设置。",
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_OWNERS_COUNT, "description": "list 最多列出的用户数，默认 50。"},
+                "resource": {"type": "object", "properties": {
+                    "provider": {"type": "string"}, "resource_type": {"type": "string"},
+                    "resource_token": {"type": "string"}, "operations": {"type": "array", "items": {"type": "string"}},
+                }, "required": ["provider", "resource_type", "resource_token", "operations"], "additionalProperties": False},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -86,7 +93,7 @@ class AdminControlsTool(BaseTool):
             default_deferred=True, deferred_summary="管理员专用：开关各用户的决策模型、审计权限和跨用户审计"),
     )
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", (("list", "read_only"),)),)),
+        effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", (("list", "read_only"), ("resources", "read_only"))),)),
         approval_policy=ApprovalPolicy("always"),
         sandbox_policy=SandboxPolicy("none"),
         concurrency_policy=ConcurrencyPolicy("serial"),
@@ -97,6 +104,7 @@ class AdminControlsTool(BaseTool):
         mutates_workspace=False,
     )
 
+    # LLM: 这里只绑定宿主实例，不能从模型 owner_id 替换当前管理员身份。
     # 函数用途: 保存宿主 agent，身份在执行时从它的 home_paths 读取。
     def __init__(self, agent: object) -> None:
         self._agent = agent
@@ -108,8 +116,8 @@ class AdminControlsTool(BaseTool):
             return ToolAvailability.unavailable("admin controls are managed only by the main administrator agent")
         return ToolAvailability.ready()
 
-    # LLM: list 只读；set 只经 set_owner_admin_controls 写目标 owner 策略文件（副作用），拒绝一律 not_started。
-    # 函数用途: 按 action 列出或修改用户控制，返回结构化回执。
+    # LLM: list/resources 只读；set 与资源授权复用原受保护策略和锁，子代理不能代表管理员变更用户授权。
+    # 函数用途: 列出或修改用户控制与资源名单，返回不含凭据的结构化回执。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         from ..user_space.approval_mode import is_permission_admin
 
@@ -117,6 +125,10 @@ class AdminControlsTool(BaseTool):
         action = params.get("action")
         if not is_permission_admin(home):
             return _refuse("not_admin", "只有本机管理员能使用此工具。")
+        if current_subagent_run_id(self._agent):
+            return _refuse("not_admin", "用户授权只能由管理员主会话管理。")
+        if action in {"resources", "resource_grant", "resource_revoke"}:
+            return _resource_control(home, params)
         if action == "list":
             limit = params.get("limit", 50)
             if type(limit) is not int or not 1 <= limit <= _MAX_OWNERS_COUNT:
@@ -140,6 +152,28 @@ class AdminControlsTool(BaseTool):
         report = {"action": "set", "owner": _owner_row(params["owner_id"].strip(), target),
                   "effective": "下一次决策调用或审计调用即按新值生效，不需要重启。"}
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(report, ensure_ascii=False))
+
+
+# LLM: 目标沿原 owner_admin_controls resolver，不创建冷用户；资源写入仍是目标原 tool_policy 的单事务。
+# 函数用途: 查看、登记或撤销准确云资源许可，不读或展示应用凭据。
+def _resource_control(home, params):
+    from ..user_space.resource_grants import read_resource_grants, set_resource_grant
+    action = params['action']
+    allowed = {'action', 'owner_id'} | ({'resource'} if action != 'resources' else set())
+    if set(params) - allowed:
+        return _refuse('invalid_changes', '资源管理只接受 owner_id 与对应 resource。')
+    target = owner_home_paths_by_id(home, params.get('owner_id'))
+    if target is None:
+        return _refuse('owner_not_found', '找不到这个 owner_id；请先 action=list 取得规范编号。')
+    try:
+        rows = read_resource_grants(target) if action == 'resources' else set_resource_grant(
+            home, target, params.get('resource'), revoke=action == 'resource_revoke')
+    except (ValueError, PermissionError) as exc:
+        return _refuse('invalid_changes', str(exc))
+    except OSError:
+        return ToolHandlerOutcome(TOOL_NAME, False, '资源授权保存失败，请重新 resources 核对。',
+            error_code='TOOL_PERSISTENCE_FAILED', effect_outcome='unknown' if action != 'resources' else 'not_started')
+    return ToolHandlerOutcome(TOOL_NAME, True, json.dumps({'action': action, 'owner_id': params['owner_id'], 'resources': rows}, ensure_ascii=False))
 
 
 # LLM: 身份/范围类拒绝映射 ADMIN_CONTROL_DENIED，策略文件不可读映射 TOOL_PERSISTENCE_FAILED，参数与目标问题映射

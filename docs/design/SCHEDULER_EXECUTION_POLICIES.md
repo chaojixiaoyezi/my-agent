@@ -1,5 +1,7 @@
 # 定时任务执行、模型与预检合同
 
+2026-10-13 实施切片：复合监控增加 monitor_schema=scheduler_monitor.v1 和原 job.rules；规则独立调度、冻结 rule_id/use_llm/tool/delivery，统计在原 mark_run_running 首次开工计数，confirmed JSON 结果供依赖条件使用，不解析模型正文。整体 none 覆盖规则 origin；local/none 仍有内部结果。NO 沿原执行器和交付 outbox。/schedule 只显示本人监控并沿原 CAS 修改；跨入口控制和重启实际验收尚未完成。
+
 ## 2026-10-13 通知策略修复（实施中）
 
 原 create 写死 `delivery.mode=origin`、update 不接受通知字段的问题已在隔离原 Store/模型/运输链复现并接线：模型工具支持 create/update `delivery={mode:origin|local|none}`，纯巡检新 IM 默认 local，明确提醒/告警/报表须声明 origin。默认来自 `scheduler_im_default_delivery_mode`，旧 job 缺字段和底层已发布创建 API 保留 origin；更新只影响以后预留 run，正在跑的 run 固定原策略。来源 thread、原 owner 与冻结绑定不因静默变化，不通过改来源绕外发。

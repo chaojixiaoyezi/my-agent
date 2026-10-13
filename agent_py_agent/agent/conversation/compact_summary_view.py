@@ -163,11 +163,14 @@ def _row_sources(row: dict[str, object]) -> tuple[tuple[str, ...], tuple[dict[st
     } for call_id in call_ids), ()
 
 
-# LLM: 原reader逆序给出已提交行；所有摘要/覆盖先验证，旧正文随消费释放，只保留基础链元数据和首个适用摘要。
-# 函数用途: 构造本次只读摘要基础索引，完整消费及范围校验后才能返回，不因先找到摘要而忽略后面的坏链。
-def _indexed_rows(chain, scope: CompactScope):
+# LLM: 原reader逆序给出已提交行；先选适用范围，再只沿其显式base寻找当前后端可读摘要。
+# 所有摘要/覆盖仍验证，正文随消费释放；同一文件快照只保留最终采用的一份正文，不能从纯元数据索引恢复正文。
+# 函数用途: 构造只读摘要基础索引并在扫描中完成换模型后的读取选择，完整验链后才返回。
+def _indexed_rows(chain, scope: CompactScope, backend):
     by_id: dict[str, dict[str, object]] = {}
     selected = None
+    selection_started = False
+    next_base_id = ""
     # provider_compaction（服务端压缩记录，约 2KB）留在索引里：兼容性回退要沿 base 链逐个检查，不能只看选中行。
     keys = ("checkpoint_id", "schema", "generation", "created_at", "scope", "previous_checkpoint_id",
             "summary_base_checkpoint_id", "source_kind", "source_message_ids", "source_tool_refs",
@@ -182,9 +185,16 @@ def _indexed_rows(chain, scope: CompactScope):
         if row.get("schema") == "conversation_compact_checkpoint.v3":
             _validated_v3_sources(row)
         by_id[str(row["checkpoint_id"])] = {key: row[key] for key in keys if key in row}
-        if selected is None and scope_can_inherit(scope, row_scope, created_at):
-            selected = {**by_id[str(row["checkpoint_id"])], "summary": row["summary"],
-                        "operation_evidence": row.get("operation_evidence")}
+        candidate = (str(row["checkpoint_id"]) == next_base_id if selection_started
+                     else scope_can_inherit(scope, row_scope, created_at))
+        if candidate:
+            selection_started = True
+            next_base_id = ""
+            if _checkpoint_is_readable(backend, row):
+                selected = {**by_id[str(row["checkpoint_id"])], "summary": row["summary"],
+                            "operation_evidence": row.get("operation_evidence")}
+            else:
+                next_base_id = _summary_base_id(row)
     for row in by_id.values():
         base_id = _summary_base_id(row)
         if not base_id:
@@ -207,8 +217,7 @@ def resolve_compact_summary_view(
     if not isinstance(scope, CompactScope):
         raise TypeError("Compact 作用域类型无效")
     with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
-        by_id, selected = _indexed_rows(chain, scope)
-    selected = _readable_checkpoint(agent, by_id, selected)
+        by_id, selected = _indexed_rows(chain, scope, getattr(agent, "backend", None))
     if selected is None:
         return CompactSummaryView()
     messages: set[str] = set()
@@ -246,22 +255,13 @@ def resolve_compact_summary_view(
     )
 
 
-# LLM: 服务端压缩检查点只有同协议同端点的后端能读（compact_remote.provider_compaction_compatible）；当前后端读不了就沿
-#   summary_base 链退到最近一个能读的检查点（通常是文字摘要），退到头返回 None = 没有可用摘要。被跳过的检查点仍在账本里，
-#   它覆盖的行因此重新算作未覆盖，下一次压缩会从归档原文重新做一份该后端能读的摘要（换模型后的自愈，不丢上下文）。
-# 函数用途: 从选中检查点起找当前后端读得了的那一个。
-def _readable_checkpoint(agent, by_id, selected):
+# LLM: 只比较服务端记录的协议与端点，普通文字摘要可读；选择和base遍历均由同次流式扫描负责。
+# 函数用途: 判断当前后端能否读取一条原检查点，不读取文件或扩大来源覆盖。
+def _checkpoint_is_readable(backend, row):
     from .compact_remote import provider_compaction_compatible
 
-    backend = getattr(agent, "backend", None)
-    row = selected
-    while row is not None:
-        record = row.get("provider_compaction")
-        if record is None or provider_compaction_compatible(backend, record):
-            return row
-        base_id = _summary_base_id(row)
-        row = by_id.get(base_id) if base_id else None
-    return None
+    record = row.get("provider_compaction")
+    return record is None or provider_compaction_compatible(backend, record)
 
 
 # LLM: 只接受带 item.encrypted_content 字符串的字典；缺失返回空字典，坏形状视为账本损坏（与 summary 校验同一严格度）。

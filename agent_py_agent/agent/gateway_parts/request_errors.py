@@ -65,6 +65,7 @@ class SystemCommandRoutingError(RuntimeError):
 # PROVIDER_REQUEST_SHAPE_INVALID 是出站协议合同在发送前查出的结构违规，请求没有发出；文案不说"服务拒绝"，只请用户反馈诊断。
 # PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED 是回合层自动重试到总时长上限的收口码：文案说明本轮已停止、
 #   可稍后重试或换模型，不写"系统会自动重试"（那时已不会再有自动重试）。
+# COMPACT_OSERROR 表示恢复记录的读取/校验失败，不能向用户承诺换更大窗口可以解决。
 # 函数用途: 区分尚未配置、压缩、截断、持久化、请求拒绝与发送前结构检查失败，不把未知 400 归咎密钥或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
@@ -77,6 +78,11 @@ def gateway_client_error_message(error_code: object) -> str:
         return (
             "本次随图摘要未完成（预算、供应商窗口、媒体拒绝或截断），原始历史和附件仍保留，本轮没有继续执行；"
             "下一次压缩会自动把旧图降级为归档引用后重试，不需要换模型。"
+        )
+    if code == "COMPACT_OSERROR":
+        return (
+            "压缩恢复记录读取或校验失败，本轮没有继续执行；原始历史和任务文件仍保留。"
+            "请查看压缩诊断并修复读取问题，切换更大上下文的模型不能保证解决。"
         )
     if code.startswith("COMPACT_"):
         return (

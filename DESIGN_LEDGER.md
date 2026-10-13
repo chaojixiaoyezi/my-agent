@@ -1,4 +1,16 @@
+2026-10-13 R01～R21 本地验收完成：85 focused 文件 1467 通过，Linux 313 通过；剩余平台跳过明确记录，原 run owner 投影/改归属拒绝补验 68 通过。严格本地 gate 通过，待按用户授权合 main 推送，不构建发行包或部署。具体边界与真实 MiniMax/TUI/合成 IM 证据见 docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md 最新收口。
+
+2026-10-13 R21 最终来源合同：followup 与 isolated 均在原 run 准备阶段冻结 origin bindings，外发前核对群 chat_id，错误目标不记 sent；新请求在原入队前冻结 owner。写权限恢复只提示原能力申请，不自动改用户目标或放宽子授权。wiki 非秘密对象编号投影为 resource_id、游标为 next_cursor，仍共用原秘密净化。已实施，最终 gate 与 main 快进待收尾；真实供应商实发未作为验收来源。
+
+2026-10-13 R20/R21 追加：宿主云资源沿原适配器凭据及 owner tool_policy 精确授权；共享服务队列纳入 H2，新请求落盘前冻结 owner，群发送使用 chat_id，详见 [设计](docs/design/HOST_CLOUD_RESOURCE_ACCESS.md)。R06/R07 真实模型发现已退出等待片仍持 running attempt；宿主 lease 退出后沿原 settle_agent_attempt 结片，不结束逻辑任务，不释放未知副作用。当前在验收，未合并推送。
+
+## 2026-10-13 IM 本期追加故障（实施中）
+
+本期范围已扩为 R01～R21。R16 附件沿原 owner 路由；R17 换模型压缩读取在同次扫描保留所选 base 正文；R18 私网预检和 HTTP 使用相同宿主配置；R19 富文本按结构保存代码/正文/媒体，不按封闭标签表静默过滤。真实委派又暴露相对能力路径基准不一致，归入 R06，授权须冻结执行 cwd 的绝对路径，不能拿运行存储目录或进程 cwd 猜业务路径。状态及验收边界见 [实施记录](docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
 # 设计台账
+
+2026-10-13 当前实施范围更新：R01～R16 均纳入本期；复合监控、本人级查询、私人任务凭据、离线原实例更新与入站附件归属已有实现切片，联合验收仍在进行，未合 main/推送/打包。原 scheduler、owner resolver、ToolExecutor、私人审批和 DeliveryService 继续是唯一权威入口，详情与剩余验收见 [实施记录](docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
 
 ## IM、复合监控与后台权限（2026-10-13，实施中）
 

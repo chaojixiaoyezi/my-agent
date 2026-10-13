@@ -37,6 +37,9 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
+    CommandSpec("schedule", "/schedule [job编号]", "本人监控列表与规则详情", submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$",
+                help_variants=(("/schedule history job01", "最近3次执行"), ("/schedule pause|resume job01 [rule1]", "原地停止或恢复整体计划或单条规则"),
+                ("/schedule run job01 [rule1]", "立即试跑规则"), ("/schedule notify job01 origin|local|none", "后续回执通知方式"))),
     CommandSpec("delegate", "/delegate enable|disable|status", "当天自动委派任务，部署时区零点自动关闭（IM）",
                 submit_on_enter=True, conversation_suffix=r"(?:\s+(\S+))?\s*$", surfaces=("im",)),
     CommandSpec("help", "/help [命令]", "查看本身份的可用命令和单项用法", submit_on_enter=True,
@@ -48,8 +51,12 @@ COMMAND_CATALOG = (
         help_variants=(
             ("/sessions threads", "列出可接收会话消息的会话（ConversationThread）"),
             ("/sessions inbox", "列出本会话收到的会话间消息与派活任务及其来源"),
+            ("/sessions control <thread_id> /status|/stop|/steer <内容>|/recover <动作>", "管理员从 IM 管理本人原会话，无需原 TUI 在线"),
+            ("/sessions control <thread_id> /approve <管理员密码>|/deny", "绑定管理员私聊批准或拒绝本人原 TUI 的唯一等待操作"),
         ),
         submit_on_enter=True,
+        conversation_suffix=r"(?:\s+(.*))?$",
+        admin_actions=("control",),
     ),
     CommandSpec(
         "tell",
@@ -449,10 +456,16 @@ def system_slash_command_name(text: object) -> str:
     return str(match.group(1) or "").lower() if match is not None else ""
 
 
-# LLM: 只按消息开头的系统命令名查目录声明，不解析参数、不读正文语义；插件命名空间、未知命令和普通文本都返回空串。
+# LLM: 只按命令目录和 sessions control 的明确嵌套语法识别敏感输入；不解析普通文本或插件正文。
 # 函数用途: 判断一条输入是否可能带管理员密码，供适配器、TUI 输入历史决定不落原文。
 def sensitive_command_name(text: object) -> str:
     spec = COMMAND_INDEX.get(system_slash_command_name(text))
+    if spec is not None and spec.name == "sessions":
+        parts = str(text or "").strip().split(maxsplit=3)
+        if len(parts) == 4 and parts[1].casefold() == "control":
+            nested = COMMAND_INDEX.get(system_slash_command_name(parts[3]))
+            if nested is not None and nested.sensitive_input:
+                return spec.name
     return spec.name if spec is not None and spec.sensitive_input else ""
 
 

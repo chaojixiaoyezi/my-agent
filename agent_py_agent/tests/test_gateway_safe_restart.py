@@ -534,3 +534,16 @@ def test_resumed_claim_writes_one_turn_resumed_boundary_before_new_output(tmp_pa
     else:
         assert executed == []
         assert kinds == ["tool_progress"], "认领时已被停止的续跑请求不执行，也不写边界"
+
+
+def test_update_stop_uses_original_drain_but_does_not_launch_successor(tmp_path):
+    paths=_paths(tmp_path)
+    first=service.submit_restart_request(paths,target_pid=123,requester={'kind':'cli'},reason='synthetic update',cooldown_seconds=0,operation='stop_for_update',now=1000)
+    assert first['status']=='scheduled'
+    conflict=service.submit_restart_request(paths,target_pid=123,requester={'kind':'cli'},reason='restart',cooldown_seconds=0,now=1001)
+    assert conflict['status']=='conflict'
+    assert service.pending_restart_request(paths,pid=123)['operation']=='stop_for_update'
+    context=SimpleNamespace(paths=paths)
+    report={'summary':'drained','restart':{'operation':'stop_for_update','request_id':'req-test'}}
+    termination=_classify_gateway_service_return(context,report)
+    assert termination.kind=='planned_update_stop' and termination.exit_code==0

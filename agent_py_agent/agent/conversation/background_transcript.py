@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from .agent_tool_approval import AgentToolApprovalSinkMixin
 from .background_history import BackgroundTurnHistory
+from .background_im_progress import close_background_progress, make_background_progress
 from .channels import (
     project_host_paths_for_channel,
     project_user_reply,
@@ -209,6 +210,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             getattr(agent, "conversation_store", None), self.thread_id
         )
         self.task_id = str(task_id or "").strip()
+        self._im_progress = make_background_progress(agent, self.task_id)
         self.gateway_request_id = gateway_request_id
         self._event_writer = event_writer if callable(event_writer) else None
         self._checkpoint_writer = DisplayCheckpointWriter(agent)
@@ -363,6 +365,8 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             if key in progress
         }
         block_id = self._tool_block_id(progress)
+        from .background_im_progress import update_background_progress
+        update_background_progress(self._im_progress, progress)
         phase = str(progress.get("phase") or "updated").strip().lower()
         if phase == "started":
             self._close_thinking_boundary()
@@ -459,6 +463,7 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         publish_final: bool = False,
         end_reason: str = "",
     ) -> None:
+        close_background_progress(self._im_progress)
         self._clear_tool_input_progress()
         if self._thinking_active:
             self.write_thinking(self._thinking_text, history_incomplete=self._thinking_truncated)

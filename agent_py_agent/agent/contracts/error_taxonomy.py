@@ -11,6 +11,8 @@
 #   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
 #   IM 管理员密码错误与失败锁定共用一个码，不暴露差别；没有待决审批时不得重复批准或替用户重试密码。
 #   执行目标换片或结束后不得把旧控制自动重放到新目标，必须先核对准确身份。
+#   业务写权限被拒绝时保留用户目标，子代理沿原能力申请申请准确范围，不鼓励改落临时目录后声称完成。
+#   云资源、私人卡和禁网保持明确恢复码；未知写入不重放，结构化条件未满足不当成模型故障。
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
@@ -173,7 +175,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="permission",
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint="目标在宿主托管存储（插件安装库、包库）里，模型工具不能直接读写；能力包内容只经宿主的能力工具读取，"
+        recovery_hint="目标在宿主托管存储（插件、私密交互或整机通道队列）里，模型工具不能直接读写；能力包内容只经宿主的能力工具读取，"
         "停用或换代后的旧内容不能再用。",
     ),
     # H3：宿主配置与宿主运行状态只读、凭据不可读（path_access_policy 的 HOST_CONFIG_* / HOST_STATE_* / HOST_CREDENTIAL_* 声明）。
@@ -213,7 +215,8 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="permission",
         retryable=False,
         recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
-        recovery_hint="写入被禁止；改写到 allowed_write_roots，或上报需要授权。",
+        recovery_hint="工具未执行。保留用户指定的目标，不得静默换目录后声称完成；子代理用 capability_request 申请准确工具和目标目录，"
+                      "由直属父代理沿原权限裁决。主代理可明确分配已授权写根或自己完成写入；跨 owner、宿主状态和危险路径不能借申请绕过。",
     ),
     "PLUGIN_GATE_DENIED": ErrorContract(
         code="PLUGIN_GATE_DENIED", category="permission", retryable=False,
@@ -3650,6 +3653,67 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.NONE.value,
         recovery_hint="这张安装单已经执行过，同一张单只执行一次；回执里有当时的结果，要重装请让 my-agent 重新出单。",
     ),
+})
+
+
+# LLM: 原通道、资源和调度入口的错误统一进既有分类表；恢复说明不授予权限，供应商未知写入不得自动重放。
+ERROR_CONTRACTS.update({
+    "NETWORK_ACCESS_DISABLED": ErrorContract(
+        code="NETWORK_ACCESS_DISABLED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="当前 owner 或父代理明确禁网，工具未执行；请管理员核对网络开关，不能换 Shell 或子代理绕过。"),
+    "CREDENTIAL_INPUT_CANCELLED": ErrorContract(
+        code="CREDENTIAL_INPUT_CANCELLED", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="原私人凭据输入已取消、过期或任务结束；不要继续使用旧引用，也不要在群里索取明文。"),
+    "CREDENTIAL_INPUT_UNAVAILABLE": ErrorContract(
+        code="CREDENTIAL_INPUT_UNAVAILABLE", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="私人凭据卡未完成；请核查原任务、私人通道、解锁和加密依赖，不把凭据改发到群聊。"),
+    "CHANNEL_CONTROL_REJECTED": ErrorContract(
+        code="CHANNEL_CONTROL_REJECTED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主拒绝此卡片目标或发送资格；核对当前 owner 与原发起人，不能换成管理员身份。"),
+    "CHANNEL_CONTROL_UNSUPPORTED": ErrorContract(
+        code="CHANNEL_CONTROL_UNSUPPORTED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前通道不支持私人控制卡，未发送；请使用已配置的原私人通道，不降级发送敏感文本。"),
+    "CHANNEL_CONTROL_IO_FAILED": ErrorContract(
+        code="CHANNEL_CONTROL_IO_FAILED", category="network", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="卡片发送没有可验证回执；先核对原交互和供应商记录，不能假称送达或批准。"),
+    "CHANNEL_CONTROL_RECEIPT_MISSING": ErrorContract(
+        code="CHANNEL_CONTROL_RECEIPT_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="供应商未返回准确卡片消息和私聊编号，无法绑定回调；核查原发送记录，不能接受无绑定批准。"),
+    "SCHEDULER_CONDITION_UNMET": ErrorContract(
+        code="SCHEDULER_CONDITION_UNMET", category="state", retryable=False,
+        recommended_action=RecoveryAction.NONE.value,
+        recovery_hint="本轮规则的结构化依赖未完成、已过期或条件未满足，按计划跳过，不重试模型或补造依赖结果。"),
+    "CLOUD_RESOURCE_NOT_AUTHORIZED": ErrorContract(
+        code="CLOUD_RESOURCE_NOT_AUTHORIZED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="当前 owner 没有准确云资源及此操作的授权；由管理员通过原资源管理入口登记，不索取应用密钥。"),
+    "CLOUD_RESOURCE_POLICY_INVALID": ErrorContract(
+        code="CLOUD_RESOURCE_POLICY_INVALID", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="云资源参数或原用户授权策略不可验证；请管理员核查原记录，不能猜授权或继续写入。"),
+    "FEISHU_CREDENTIAL_UNAVAILABLE": ErrorContract(
+        code="FEISHU_CREDENTIAL_UNAVAILABLE", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主飞书应用凭据不可用；请管理员检查原配置，不向模型或各用户分发 app_secret。"),
+    "FEISHU_CLOUD_HTTP_ERROR": ErrorContract(
+        code="FEISHU_CLOUD_HTTP_ERROR", category="network", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="飞书云接口拒绝或未确认请求；核查应用权限、文档协作者、额度和原操作状态，未知写入先读回，不能重复追加。"),
+    "FEISHU_CLOUD_RESPONSE_UNKNOWN": ErrorContract(
+        code="FEISHU_CLOUD_RESPONSE_UNKNOWN", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="云请求未返回可验证结果；写入可能已发生，先读取准确资源核对原操作，不能自动重放。"),
+    "FEISHU_CLOUD_API_DENIED": ErrorContract(
+        code="FEISHU_CLOUD_API_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="飞书 API 明确拒绝；请管理员核查应用接口权限和这份文档的协作者，不能改用其它 owner 的凭据绕过。"),
 })
 
 

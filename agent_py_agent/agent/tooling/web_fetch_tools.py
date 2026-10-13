@@ -6,10 +6,10 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from ..common.cancellation import cancellation_requested
 from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
@@ -121,6 +121,8 @@ class WebFetchTool(BaseTool):
             max_chars = self.response_preview_chars(params, self.max_chars)
             mode = str(params.get("mode", params.get("format", "auto")) or "auto").strip().lower()
             if mode == "extract" or params.get("urls") is not None:
+                if params.get("credential_ref"):
+                    raise ValueError("凭据引用仅用于单接口请求")
                 return _execute_extract(self, params, max_chars)
             request = self._request_parts(params, mode, max_chars)
         except ValueError as exc:
@@ -157,8 +159,10 @@ class WebFetchTool(BaseTool):
             gateway_endpoint=self.gateway_endpoint_config,
         )
 
+    # LLM: 凭据回显净化必须覆盖成功正文和 HTTP 错误回执，并在格式化/归档前完成；真正请求继续复用逐跳 pin。
+    # 函数用途: 发起单次 HTTP 请求，移除本次秘密在响应正文、头和错误中的常见回显。
     def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolHandlerOutcome:
-        return fetch_raw_response(
+        response = fetch_raw_response(
             FetchRawRequest(
                 tool="web_fetch",
                 url=request.url,
@@ -170,7 +174,24 @@ class WebFetchTool(BaseTool):
             format_http_error=self.format_http_error,
             resolve_pin=self._resolve_pin,
         )
+        if isinstance(response, ToolHandlerOutcome) and request.secrets_to_redact:
+            response = replace(response,
+                output=_redact_secret_echo(response.output, request.secrets_to_redact),
+                result_envelope=_redact_secret_echo(response.result_envelope, request.secrets_to_redact))
+        elif isinstance(response, RawResponseParts) and request.secrets_to_redact:
+            body = response.body
+            for secret in _secret_echo_variants(request.secrets_to_redact):
+                body = body.replace(secret.encode("utf-8"), b"[private]")
+            headers = {str(k): str(v) for k, v in response.headers.items()}
+            for key, value in headers.items():
+                for secret in _secret_echo_variants(request.secrets_to_redact):
+                    value = value.replace(secret, "[private]")
+                headers[key] = value
+            response = replace(response, body=body, headers=headers)
+        return response
 
+    # LLM: 引用仅由宿主解析，本次 origin/scope 校验失败不发网络；认证头与同名显式头不能混用。
+    # 函数用途: 校验 HTTP 参数并在内存中注入授权凭据，不把明文写进工具参数或回执。
     def _request_parts(self, params: dict[str, Any], mode: str, max_chars: int) -> _WebFetchRequest:
         body = params.get("body")
         body_text = None if body is None else scalar_text(
@@ -179,16 +200,30 @@ class WebFetchTool(BaseTool):
             max_chars=MAX_BODY_CHARS,
             allow_empty=True,
         )
+        url = self.normalize_url(params.get("url"))
+        headers = {} if params.get("headers") is None else normalize_headers(params.get("headers"))
+        secrets = ()
+        if reference := params.get("credential_ref"):
+            resolver = getattr(self, "credential_resolver", None)
+            if resolver is None:
+                raise ValueError("凭据注入不可用")
+            private_headers, secrets = resolver(reference, url)
+            if {key.lower() for key in private_headers} & {key.lower() for key in headers}:
+                raise ValueError("不能同时指定同名认证头和凭据引用")
+            headers.update(private_headers)
         return _WebFetchRequest(
-            url=self.normalize_url(params.get("url")),
+            url=url,
             method=normalize_method(params.get("method", "GET")),
-            headers={} if params.get("headers") is None else normalize_headers(params.get("headers")),
+            headers=headers,
+            secrets_to_redact=secrets,
             body_text=body_text,
             fmt=normalize_fetch_format(mode),
             max_chars=max_chars,
             refresh=bool(params.get("refresh", False)),
         )
 
+# LLM: 凭据仅存在于本次宿主请求内；secrets_to_redact 只供归档/模型输出前净化，不进入缓存键或工具回执。
+# 类用途: 保存已校验 HTTP 请求和本次需要抹除的秘密回显，执行结束即释放。
 @dataclass(frozen=True)
 class _WebFetchRequest:
     url: str
@@ -198,9 +233,35 @@ class _WebFetchRequest:
     fmt: str
     max_chars: int
     refresh: bool = False
+    secrets_to_redact: tuple[str, ...] = ()
 
 
-# LLM: 缓存命中与单页下载副作用分离，锁只包有界内存操作，不能覆盖网络请求。
+# LLM: 只净化本调用凭据的常见原文、JSON 转义和 URL 编码回显；必须在格式化、归档和模型输出前调用。
+# 函数用途: 生成非空秘密回显变体，先替换长串以免短账号破坏长认证值的匹配。
+def _secret_echo_variants(secrets):
+    values=set()
+    for value in secrets:
+        if not value:
+            continue
+        values.update((value,json.dumps(value,ensure_ascii=True)[1:-1],
+            json.dumps(value,ensure_ascii=False)[1:-1],quote(value,safe='')))
+    return sorted(values,key=len,reverse=True)
+
+
+# LLM: 保持错误信封结构，只替换字符串值；不把外部响应当控制字段，也不泄露 HTTP 失败的认证回显。
+# 函数用途: 清理单条错误文字及嵌套错误证据里的本次秘密，不写文件或发送请求。
+def _redact_secret_echo(value, secrets):
+    if isinstance(value, str):
+        for secret in _secret_echo_variants(secrets):
+            value = value.replace(secret, "[private]")
+    elif isinstance(value, dict):
+        return {key: _redact_secret_echo(item, secrets) for key, item in value.items()}
+    elif isinstance(value, list):
+        return [_redact_secret_echo(item, secrets) for item in value]
+    return value
+
+
+# LLM: 私人认证请求不缓存；HTTP 和格式化沿原路径，锁只包有界内存操作，不能覆盖网络请求。
 # 函数用途: 处理单个 URL 的缓存读取、HTTP 抓取、格式化和请求回执。
 def _execute_single_request(
     tool: WebFetchTool,
@@ -349,6 +410,7 @@ def _web_fetch_model_spec() -> ToolModelSpec:
                     "description": "HTTP 方法，默认 GET；非读取方法属于危险外部副作用并进入审批门。",
                 },
                 "headers": {"type": "object", "description": "可选请求头 JSON 对象。"},
+                "credential_ref": {"type": "string", "description": "request_credentials 返回的本任务/监控限定引用；宿主注入认证头，禁止索要明文。"},
                 "body": {"type": "string", "description": "可选，请求体按 UTF-8 文本发送。"},
                 "refresh": {"type": "boolean", "default": False, "description": "true 时绕过本地缓存重新获取；不代表上游 CDN 必定刷新。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "只限制模型预览，不影响 artifact 保存。"},

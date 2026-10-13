@@ -609,10 +609,12 @@ class TestChannelManagerRouteMessage:
         ]
         assert keys[0] != keys[1]
 
-    def test_maybe_download_media_injects_path(self) -> None:
+    def test_maybe_download_media_injects_path(self, tmp_path) -> None:
         """入站带 media → fetch_media_to 下载,content 注入路径(供 agent 看图/读文件)。"""
-        from pathlib import Path
+        from types import SimpleNamespace
         manager = ChannelManager(gateway_port=8420)
+        manager._inbound_media_agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path),
+            config=SimpleNamespace(gateway_per_user_owner_scoping=True))
         dummy = DummyAdapter()
         dummy.adapter_name = "feishu"
         dummy.workspace_root = Path("/tmp/wsroot")

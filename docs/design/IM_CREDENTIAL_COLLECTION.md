@@ -1,5 +1,7 @@
 # 群任务的私聊凭据收集
 
+2026-10-13 实施切片：request_credentials 复用原私人卡片入口，原发起人、owner、task/root/claim/attempt 和卡片实际 message/chat 参与核对；首设/解锁仍走原个人密码门。数据放 H2 私有交互，Fernet 加密、模型只得 credential_ref。web_fetch 当前支持 basic/bearer/指定 header，在准确 scheme/host/port 注入并净化响应；不授予 shell 读取密文/主密钥。加密实现参考 [cryptography 官方接口](https://cryptography.io/en/latest/fernet/)。实际平台卡片验收和进一步幂等/配额加固仍待做。
+
 状态：2026-10-12，用户询问方案后的设计记录，尚未实现通用 API 凭据工具。本文件不代表当前离线包已经能自动弹 API 账号卡；个人解锁密码首设门是本轮实际实现与验证的另一功能。
 
 ## 推荐行为

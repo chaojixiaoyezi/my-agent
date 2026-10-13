@@ -161,6 +161,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_canonical_owner_home_root(merged, agent)
     _attach_effective_owner_scope(merged, agent, params)
+    _attach_owner_network_scope(merged, agent)
     _attach_runtime_approved_actions(merged, params)
     _attach_task_workspace_roots(merged, params)
     _attach_tool_output_read_root(merged, agent, params)
@@ -194,6 +195,16 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
             merged.get("tool_rate_limit_records"), rate_rows
         )
     return merged or boundary
+
+
+# LLM: 原 owner 总开关和冻结 child 上界取交集；模型参数、临时工具审批或 full-access 不能把禁网变成有网。
+# 函数用途: 把网络禁用事实接到本次实际进程边界，不影响已启用网络的旧默认行为。
+def _attach_owner_network_scope(boundary, agent):
+    owner_enabled = getattr(getattr(agent, "owner_policy", None), "network_enabled", True)
+    permissions = boundary.get("effective_permissions") or {}
+    child_enabled = permissions.get("network_enabled", True) if isinstance(permissions, dict) else True
+    if not owner_enabled or not child_enabled:
+        boundary["network_access_mode"] = "disabled"
 
 
 # LLM: The canonical owner home is an address fact, not a permission grant. Always derive it

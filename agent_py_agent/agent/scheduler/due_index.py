@@ -51,6 +51,17 @@ class SchedulerDueIndex:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
+    # LLM: 展示编号使用原全局 SQLite 的原子分配器，唯一 job 仍在 owner 账；丢弃的预留允许留空号，不回收编号。
+    # 函数用途: 为同一部署的监控分配不冲突的 job01 编号，让跨群/私聊汇总可直接使用。
+    def allocate_job_alias(self) -> str:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("CREATE TABLE IF NOT EXISTS scheduler_job_numbers (number INTEGER PRIMARY KEY AUTOINCREMENT)")
+            cursor = conn.execute("INSERT INTO scheduler_job_numbers DEFAULT VALUES")
+            number = cursor.lastrowid
+            conn.commit()
+        return f"job{number:02d}"
+
     def sync_owner(
         self,
         owner: dict[str, object],

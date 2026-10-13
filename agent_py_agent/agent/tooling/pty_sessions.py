@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..attempt.sandbox import SandboxHostPolicy
 from ..common.cancellation import ToolCancelled, cancellation_requested, raise_if_cancelled
 from ..contracts.gates.command_policy import evaluate_command_policy
 from .models import (
@@ -124,6 +125,7 @@ class PtyAccessScope:
     read_roots: tuple[str, ...] | None
     protected_write_paths: tuple[str, ...] | None
     write_scope_denied_roots: tuple[str, ...] = ()
+    network_access: bool = True
 
 
 # LLM: 一次 PTY 启动的沙箱输入原样收拢，不做任何推断；字段与 tooling/shell._sandbox_exec 的同名参数一一对应，
@@ -137,6 +139,7 @@ class _PtySandboxInputs:
     protected_write_paths: tuple[Path, ...] | None = None
     private_roots: tuple[object, ...] = ()
     write_scope_denied_roots: tuple[Path, ...] = ()
+    network_access: bool = True
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -156,7 +159,7 @@ def _pty_access_scope(
     read_roots: tuple[Any, ...] | None = None,
     protected_write_paths: tuple[Any, ...] | None = None,
     run_scope: object = None,
-    *, write_scope_denied_roots: tuple[Path, ...] = (),
+    *, write_scope_denied_roots: tuple[Path, ...] = (), network_access: bool = True,
 ) -> PtyAccessScope:
     owner = ""
     if owner_home:
@@ -188,6 +191,7 @@ def _pty_access_scope(
         read_roots=normalized_read_roots,
         protected_write_paths=normalized_protected,
         write_scope_denied_roots=tuple(sorted({str(Path(root).resolve(strict=False)) for root in write_scope_denied_roots})),
+        network_access=network_access,
     )
 
 
@@ -218,8 +222,9 @@ class PtySessionRegistry:
         write_protection: SandboxWriteProtection | None = None,
         run_scope: object = None,
         *,
-        private_roots: tuple[object, ...] = (),
+        host_policy: SandboxHostPolicy | None = None,
     ) -> PtySession:
+        host_policy = host_policy or SandboxHostPolicy()
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
         raise_if_cancelled()
@@ -235,7 +240,7 @@ class PtySessionRegistry:
         try:
             protection = write_protection or SandboxWriteProtection()
             sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
-                                        private_roots, protection.denied_roots)
+                                        host_policy.private_roots, protection.denied_roots, host_policy.network_access)
             return self._spawn(session_id, command, target, sandbox, run_scope)
         finally:
             with self._lock:
@@ -254,6 +259,7 @@ class PtySessionRegistry:
             sandbox.protected_write_paths,
             run_scope,
             write_scope_denied_roots=sandbox.write_scope_denied_roots,
+            network_access=sandbox.network_access,
         )
         exec_arg, use_shell = _sandbox_exec(
             command,
@@ -262,7 +268,7 @@ class PtySessionRegistry:
             write_roots=sandbox.write_roots,
             read_roots=sandbox.read_roots,
             write_protection=SandboxWriteProtection(tuple(sandbox.protected_write_paths or ()), sandbox.write_scope_denied_roots),
-            private_roots=sandbox.private_roots,
+            host_policy=SandboxHostPolicy(sandbox.private_roots, sandbox.network_access),
         )
         with self._lock:
             launch = self._pending_starts[session_id]
@@ -754,6 +760,7 @@ class TerminalSessionTool(BaseTool):
             _sandbox_protected_write_paths(params),
             params.get("__run_scope"),
             write_scope_denied_roots=getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ()),
+            network_access=getattr(self.shell_tool, "_sandbox_network_access", True),
         )
 
     # LLM: Action dispatch is the sole model-facing PTY control switch. Keep schema, effect
@@ -819,7 +826,7 @@ class TerminalSessionTool(BaseTool):
                 read_roots,
                 SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
-                private_roots=self.shell_tool.host_private_roots,
+                host_policy=SandboxHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True)),
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))

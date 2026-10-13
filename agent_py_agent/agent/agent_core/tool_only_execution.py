@@ -8,6 +8,12 @@ from .runtime.loop_models import RunParams
 # LLM: params 来自准确 task/thread/claim，工具参数不提供身份；调用方持原执行租约和中断登记，停止不降为工具失败。
 # 函数用途: 运行并归档一项显式只读工具，返回原执行回执和完整输出；不把有界展示正文当作检查事实。
 def execute_read_only_tool(agent, params: RunParams, *, tool_name: str, arguments: dict):
+    return execute_tool_work(agent, params, tool_name=tool_name, arguments=arguments, read_only=True)
+
+
+# LLM: 显式 scheduler 动作仍通过真实 ToolExecutor 权限、审批、取消与原 attempt 账；read_only=False 不代表授权绕过。
+# 函数用途: 执行已登记的一项工具工作，不调用模型；预检继续要求只读，NO 规则使用正常工具策略。
+def execute_tool_work(agent, params: RunParams, *, tool_name: str, arguments: dict, read_only: bool = False):
     from ..common.cancellation import CancellationToken
     from ..concurrency.interrupt import is_interrupted, register_interrupt_callback
     from ..tooling.models import tool_effect_for_runtime_policy
@@ -31,7 +37,7 @@ def execute_read_only_tool(agent, params: RunParams, *, tool_name: str, argument
                 raise InterruptedError("宿主工具执行已中断")
             snapshot = agent.tools.runtime_snapshot(allowed_tools=[tool_name], run_id=bound.run_id)
             runtime = snapshot.runtime(tool_name)
-            if runtime is None or tool_effect_for_runtime_policy(runtime.runtime_policy, arguments) != "read_only":
+            if runtime is None or (read_only and tool_effect_for_runtime_policy(runtime.runtime_policy, arguments) != "read_only"):
                 raise ValueError("宿主只读工具不可用或具有写入副作用")
             call = ToolCall(call_id=f"host-tool-{params.request_id}", tool_name=tool_name, arguments=arguments,
                 source_protocol="text", schema_hash=runtime.model_spec.schema_hash,
@@ -51,7 +57,7 @@ def execute_read_only_tool(agent, params: RunParams, *, tool_name: str, argument
         raise
     finally:
         _settle_main_agent_run_status(agent, run_id=bound.run_id, attempt_id=bound.attempt_id,
-            facts=RunCloseoutFacts(runtime_status=status, runtime_reason="host_read_only_tool", tool_rounds=1))
+            facts=RunCloseoutFacts(runtime_status=status, runtime_reason="host_tool_work", tool_rounds=1))
 
 
 # LLM: 只装配已有 ToolLoopExecuteParams，不启动模型或消费输入；原 run/attempt、工作区、取消及归档配置沿用宿主绑定。

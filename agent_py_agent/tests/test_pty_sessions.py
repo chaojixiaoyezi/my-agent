@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.attempt.sandbox import SandboxHostPolicy
 from agent_py_agent.agent.tooling.pty_sessions import (
     TerminalSessionTool,
     pty_session_registry,
@@ -229,7 +230,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
         write_protection=None,
         run_scope=None,
         *,
-        private_roots=(),
+        host_policy=None,
     ):
         captured.update(
             command=command,
@@ -239,7 +240,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
             read_roots=read_roots,
             protected_write_paths=write_protection.absolute_paths if write_protection else (),
             run_scope=run_scope,
-            private_roots=private_roots,
+            private_roots=host_policy.private_roots if host_policy else (),
             write_scope_denied_roots=write_protection.denied_roots if write_protection else (),
         )
         raise OSError("captured")
@@ -440,11 +441,11 @@ def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(pty_sessions, "_sandbox_exec", fake_sandbox_exec)
     with pytest.raises(OSError, match="captured"):
-        pty_session_registry.start("true", tmp_path, tmp_path, private_roots=(str(tmp_path / "home"),))
+        pty_session_registry.start("true", tmp_path, tmp_path, host_policy=SandboxHostPolicy((str(tmp_path / "home"),)))
 
     # start 打包后交给 _spawn，再原样交给沙箱，不在途中丢掉拒读根。
     assert captured["owner_home"] == tmp_path
-    assert captured["private_roots"] == (str(tmp_path / "home"),)
+    assert captured["host_policy"].private_roots == (str(tmp_path / "home"),)
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from pathlib import Path
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
-    write_json_file_atomic_unlocked,
+    write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
 from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
@@ -42,7 +42,7 @@ def interaction_key(owner_home: Path, *, create: bool = False) -> bytes:
         payload = report.payload
         if not payload and not path.exists():
             payload = {"schema_version": "private_interaction_key.v1", "key": base64.b64encode(secrets.token_bytes(32)).decode()}
-            write_json_file_atomic_unlocked(path, payload)
+            write_private_text_file_atomic_unlocked(path, json.dumps(payload))
         return _key_from_payload(payload)
 
 

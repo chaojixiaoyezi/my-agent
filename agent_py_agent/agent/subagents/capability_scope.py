@@ -374,9 +374,9 @@ def ensure_grant_path_scope_within_owner(
     return decision
 
 
-# LLM: Path resolution is shared by router and explicit parent approval. Non-absolute input is
-# task-local by contract; falling back to manager.workspace_root preserves local-unmanaged tests.
-# 函数用途: 将能力范围里的路径按子代理任务目录解析成绝对路径。
+# LLM: 新申请和授权必须沿真实工具使用的可信 execution_cwd 解析并冻结绝对路径；运行存储目录不是业务 cwd。
+# 旧无 cwd 的本地任务保留原 task-local 解释；owner 硬墙和父级工具权限随后独立裁决。
+# 函数用途: 将能力申请路径解析到与工具相同的工作目录，不写文件、不依据用户文字扩大授权。
 def resolve_capability_scope_path(
     manager: Any,
     task: SubAgentTask,
@@ -385,8 +385,11 @@ def resolve_capability_scope_path(
     try:
         target = Path(raw).expanduser()
         if not target.is_absolute():
+            from .context_bundle_refs import execution_cwd
+
             base_text = str(
-                getattr(task, "task_workspace_dir", "")
+                execution_cwd(task)
+                or getattr(task, "task_workspace_dir", "")
                 or getattr(task, "task_dir", "")
                 or getattr(manager, "workspace_root", "")
                 or ""
@@ -397,6 +400,19 @@ def resolve_capability_scope_path(
         return target.resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+# LLM: 路径解析在 canonical request/grant 的写入锁内调用，只有绝对路径进入新记录；失败不得静默漏掉请求范围。
+# 函数用途: 冻结一组能力范围，使授权续跑不受 Gateway 进程 cwd 或后续界面工作目录影响。
+def normalized_capability_paths(manager, task, paths):
+    result = []
+    for raw in paths or []:
+        path = resolve_capability_scope_path(manager, task, raw)
+        if path is None:
+            raise ValueError("能力范围路径无法解析")
+        if str(path) not in result:
+            result.append(str(path))
+    return result
 
 
 # LLM: This helper compares already normalized paths and has no filesystem mutation side effect.

@@ -212,3 +212,28 @@ __all__ = [
     "take_restart_marker",
     "wait_for_predecessor_exit",
 ]
+
+
+# LLM: 停止使用原 restart 请求、两段排空和完成标记，仅终态 operation 区分不拉起旧版本；晚到旧请求不能换目标进程。
+# 函数用途: 为离线更新排空并停止准确 Gateway，超时保留原服务、不强杀工具；新包成功后原入口恢复。
+def safe_stop_for_update(agent,paths,pid):
+    result=submit_restart_request(paths,target_pid=pid,requester={'kind':'cli'},reason='离线更新排空',
+        cooldown_seconds=0,operation='stop_for_update')
+    if result.get('status') not in {'scheduled','coalesced'}:
+        print('当前有其它重启/排空请求，请等待完成后更新。',file=sys.stderr)
+        return 2
+    request_id=result['request']['request_id']
+    budget=float(agent.config.gateway_restart_turn_wait_seconds)+float(agent.config.gateway_restart_drain_timeout_seconds or 3600)+120
+    deadline=time.monotonic()+budget
+    print('更新正在等待原回合和工具排空，不会强杀执行中的工具。',flush=True)
+    while time.monotonic()<deadline:
+        if not is_pid_alive(pid):
+            return 0
+        state=read_json_file(paths.state)
+        phase=state.get('restart_drain') or {}
+        if phase.get('request_id')==request_id and phase.get('phase')=='cancelled':
+            print('排空取消，原实例保持运行，未更新。',file=sys.stderr)
+            return 2
+        time.sleep(.25)
+    print('等待排空超时，未切换版本。',file=sys.stderr)
+    return 2

@@ -85,6 +85,8 @@ def normalize_precheck(value: object) -> dict | None:
 
 # LLM: 通道只取可信源线程绑定，空/本地绑定不因正文自称 IM 被改路由；写线程的幂等键由原工具操作生成。
 # 函数用途: 返回计划实际执行的线程，IM 计划各自后台单飞，关开关或本地创建保持原线程。
+# LLM: 群规则来源使用冻结可信 actor，执行线程不改变 origin 或 monitor owner。
+# 函数用途: 群规则来源使用冻结可信 actor，执行线程不改变 origin 或 monitor owner。 修改需同步原控制、恢复或权限测试。
 def schedule_execution_thread(agent: object, source_thread_id: str, operation_key: str) -> str:
     config = capability_config_for_agent(agent) or CapabilityConfig()
     if not config.im_scheduled_tasks_background:
@@ -96,6 +98,10 @@ def schedule_execution_thread(agent: object, source_thread_id: str, operation_ke
     source = execution_origin_thread(agent.conversation_store.threads.require, source)
     if not any(binding.channel and not supports_transcript_delivery(binding.channel) for binding in source.channel_bindings):
         return source_thread_id
+    current = getattr(agent, "_current_run_params", None)
+    actor = (getattr(current, "task_attributes", None) or {}).get("host_channel_actor") or {}
+    if actor.get("actor_id") and actor.get("channel") and actor.get("conversation_id"):
+        binding = {key: actor[key] for key in ("channel", "conversation_id", "actor_id")}
     return ensure_execution_thread(
         agent, source.thread_id, operation_key or uuid.uuid4().hex, kind="scheduled", source_binding=binding,
     ).thread_id

@@ -400,18 +400,19 @@ def _builtin_target_validator(channel: str) -> TargetValidator:
     return _validate_feishu_target if channel == "feishu" else _validate_opaque_target
 
 
-# LLM: Feishu 当前发送 API 固定 receive_id_type=open_id，因此只接受 ou_ 前缀的结构化 owner ID。
-# 函数用途: 校验 Feishu 出站目标并标注 open_id 类型。
+# LLM: 此处只校验供应商地址格式，不授予跨群权限；目标授权由原 owner/origin resolver 负责，适配器按同一前缀选 receive_id_type。
+# 函数用途: 接受准确用户 open_id 或群 chat_id，防止合法群目标被当成非法用户地址。
 def _validate_feishu_target(channel: str, target: object) -> ChannelTargetDecision:
     base = _validate_opaque_target(channel, target)
     if not base.allowed:
         return base
     value = str(target or "").strip()
-    allowed = value.startswith("ou_") and len(value) > 3
+    target_type = 'open_id' if value.startswith('ou_') else 'chat_id' if value.startswith('oc_') else 'unknown'
+    allowed = target_type != 'unknown' and len(value) > 3
     return ChannelTargetDecision(
         allowed,
         channel,
-        "open_id",
+        target_type,
         "" if allowed else "CHANNEL_TARGET_INVALID",
     )
 

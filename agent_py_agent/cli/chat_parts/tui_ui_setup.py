@@ -61,6 +61,7 @@ def _make_input_area(
     workspace: Path,
     *, plugin_client: PluginCommandClient | None = None,
     plugin_panels: PluginPanelBoard | None = None,
+    access_context=None,
 ) -> Any:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.layout.dimension import Dimension
@@ -74,7 +75,7 @@ def _make_input_area(
         wrap_lines=True,
         history=FileHistory(history_file_path),
         auto_suggest=TuiHistoryAutoSuggest(),
-        completer=TuiInputCompleter(workspace, plugin_client=plugin_client, catalog_error=runtime.set_notice),
+        completer=TuiInputCompleter(workspace, plugin_client=plugin_client, catalog_error=runtime.set_notice, access_context=access_context),
         complete_while_typing=True,
         input_processors=[TuiQueuedPlaceholderProcessor(runtime)],
     )
@@ -525,8 +526,11 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     plugin_client = PluginCommandClient(params.agent, str(params.current_session_id or "default"), use_gateway=params.use_gateway)
     # 面板只在用户打开时才启动后台刷新；TUI 退出事件会让刷新线程结束
     plugin_panels = PluginPanelBoard(plugin_client.panels, runtime.store.invalidate, stop_event=params.stop_event)
+    from ...agent.command_catalog import CommandAccessContext
+    from ...agent.user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
+    access_context = CommandAccessContext(surface="local", is_admin=owner_identity_from_config(params.agent.config) == OwnerIdentity.local_main())
     input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root), plugin_client=plugin_client,
-                                  plugin_panels=plugin_panels)
+                                  plugin_panels=plugin_panels, access_context=access_context)
     _wire_help_dismiss_on_input(input_area, interaction, params.agent_navigation)
     history_search_area = _make_history_search_area(interaction)
     _wire_history_search_area(history_search_area, input_area, interaction)

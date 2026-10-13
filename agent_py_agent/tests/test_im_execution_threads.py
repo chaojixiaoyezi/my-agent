@@ -38,7 +38,7 @@ def fixture_agent(tmp_path, channel="feishu", *, identity=None):
         "canonical_user_id": "ou_a", "channel": channel, "channel_conversation_id": "oc_source",
         "channel_user_id": "ou_a", "owner_id": home.owner_id, "owner_home": str(home.owner_home_dir),
     })
-    repository = SchedulerRepository(home.owner_home_dir / "scheduler", owner_provider=identity.provider, owner_kind=identity.owner_kind, owner_id=identity.owner_id)
+    repository = SchedulerRepository(home.owner_home_dir / "scheduler", owner_provider=identity.provider, owner_kind=identity.owner_kind, owner_id=home.owner_id)
     return SimpleNamespace(
         conversation_store=store, home_paths=home, root=home.owner_home_dir, scheduler_repository=repository,
         config=SimpleNamespace(timezone="Asia/Shanghai"), current_skill_snapshot=lambda: None,
@@ -109,7 +109,7 @@ def test_group_next_sender_cannot_steal_background_notification_address(tmp_path
     other = replace(source.channel_bindings[0], channel_user_id="ou_b", last_active_at=source.channel_bindings[0].last_active_at + 1)
     agent.conversation_store.threads.update_atomic(source.thread_id, lambda current: replace(current, channel_bindings=(other,)))
     dependencies = BackgroundRouteDependencies(agent.conversation_store.threads.load, lambda: (), lambda: ("feishu", "ou_b"))
-    assert resolve_background_route(dependencies, thread.thread_id) == ("feishu", "ou_a")
+    assert resolve_background_route(dependencies, thread.thread_id) == ("feishu", "oc_source")
     revoked = replace(other, channel_conversation_id="oc_other")
     agent.conversation_store.threads.update_atomic(source.thread_id, lambda current: replace(current, channel_bindings=(revoked,)))
     with pytest.raises(DataCorruptionError):

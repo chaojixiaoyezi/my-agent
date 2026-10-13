@@ -57,6 +57,14 @@ from .process_run import SandboxProcessOptions, run_sandbox_process
 SandboxReadMode = Literal["hide_home", "allowlist"]
 
 
+# LLM: 宿主隐私根与网络上界一起沿请求传递，不是授权存储；不可变对象避免并发工具交换边界。
+# 类用途: 携带一次 Shell/PTY 调用的宿主隐私与网络限制，减少长参数串而不增加第二套权限判断。
+@dataclass(frozen=True)
+class SandboxHostPolicy:
+    private_roots: tuple[object, ...] = ()
+    network_access: bool = True
+
+
 class SandboxUnavailableError(SandboxUnavailable):
     """SANDBOX_UNAVAILABLE：节点缺隔离能力时 handler=0 的载体。
 
@@ -140,6 +148,10 @@ class AttemptSandboxSpec:
     # H3：按正则拒写的宿主托管位置（path_access_policy.host_readonly_patterns：所有任务的核验记录），只有 macOS Seatbelt 能表达；
     # Linux bwrap 只能挂已存在的路径，忽略这一项（只保护 protected_write_paths 里的本任务记录，已知边界）。
     protected_write_patterns: tuple[str, ...] = ()
+    # 目录祖先保护必须匹配实际 vnode 类型，不能把同层普通业务文件当任务目录拒写。
+    protected_directory_write_patterns: tuple[str, ...] = ()
+    # 业务任务目录允许在原写根下创建，但不允许删除/挪走保护记录的祖先。
+    protected_directory_unlink_patterns: tuple[str, ...] = ()
     # G4（Gateway 本机信任，第 (1) 层）：模型命令沙箱要拒绝连本机 Gateway 的实际绑定端口（回环）。macOS 规则写
     # `(deny network-outbound (remote tcp "*:<port>"))`——必须用 `*:` 而不是 `localhost:`，否则沙箱里用 IPv6 连
     # `::ffff:127.0.0.1` 能绕过且 Gateway 认成 127.0.0.1（ae 实测、be 复核）。只由模型 shell 的 _sandbox_exec 填写；
@@ -647,15 +659,21 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
     read_rules = _allowlist_read_rules(spec) if spec.read_mode == "allowlist" else _private_read_rules(spec)
     return [*read_rules, *_ancestor_write_denies(spec), *_pattern_write_denies(spec.protected_write_patterns),
+            *_pattern_write_denies(spec.protected_directory_write_patterns, directories=True),
+            *_pattern_write_denies(spec.protected_directory_unlink_patterns, directories=True, unlink_only=True),
             *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access),
             *_gateway_port_denies(spec.deny_gateway_ports)]
 
 
 # LLM: 正则拒写（H3）：模式是 POSIX ERE，按 JSON 字符串写进规则（本机实测 SBPL 的 regex 认普通字符串）。只拒写，排在写根放行
-#   之后才能盖过它（Seatbelt 后写覆盖先写）；不影响读规则。没有模式时返回空列表，现有配置逐字节不变。
+#   之后才能盖过它（Seatbelt 后写覆盖先写）；目录规则必须限制 vnode 类型，业务祖先只保护删除/改名。没有模式时返回空列表。
 # 函数用途: 把按正则声明的只读位置转成 Seatbelt 写拒绝。
-def _pattern_write_denies(patterns: tuple[str, ...]) -> list[str]:
-    return [f"(deny file-write* (regex {json.dumps(pattern)}))" for pattern in dict.fromkeys(patterns)]
+def _pattern_write_denies(patterns: tuple[str, ...], *, directories: bool = False, unlink_only: bool = False) -> list[str]:
+    filters=[f'(regex {json.dumps(pattern)})' for pattern in dict.fromkeys(patterns)]
+    if directories:
+        filters=[f'(require-all (vnode-type DIRECTORY) {value})' for value in filters]
+    operation='file-write-unlink' if unlink_only else 'file-write*'
+    return [f'(deny {operation} {value})' for value in filters]
 
 
 # LLM: 沙箱通用规则（H3 探针发现，2026-10-02）：Seatbelt 的 subpath/literal 拒绝只认当前路径，命令先把上级目录改名

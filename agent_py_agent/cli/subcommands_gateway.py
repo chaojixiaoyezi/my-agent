@@ -131,6 +131,7 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
         type=float,
         help="等待后台进程确认停止的秒数，默认 10 秒",
     )
+    gateway_stop.add_argument("--drain", action="store_true", help="沿安全重启原排空合同停止，用于离线更新；超时不强杀")
     gateway_stop.set_defaults(func=cmd_gateway_stop)
 
     gateway_restart = gateway_sub.add_parser("restart", help="安全重启 gateway：先排空在跑的回合和工具再换新进程")

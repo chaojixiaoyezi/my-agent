@@ -8,6 +8,33 @@ from copy import deepcopy
 # LLM: 依赖 SchedulerRepository 的原事务与 claim epoch 校验；不自行领取、执行或恢复模型任务。
 # 类用途: 为调度仓库增加幂等准备能力，保证重启不会改变已预留工作身份。
 class SchedulerRunPreparation:
+    # LLM: 老监控只补稳定展示编号，不改 source/rule/run/时间；启动迁移显式记版本，查询不会偷偷写账。
+    # 函数用途: 在原 owner 配额事务中一次迁移旧监控编号，保持原监控身份和历史。
+    def migrate_monitor_aliases(self) -> None:
+        from .monitor_state import next_alias
+        with self._mutation_scope() as (store, admission):
+            jobs, _errors = self._valid_jobs(store)
+            changed = False
+            for job in jobs:
+                if job.get('alias'):
+                    continue
+                alias = self.due_index.allocate_job_alias() if self.due_index is not None else next_alias(store)
+                store['jobs'][str(job['job_id'])] = {**job, 'alias': alias, 'alias_migration': 'scheduler_alias.v1'}
+                changed = True
+            if changed:
+                self._write_store_unlocked(store, admission)
+
+    # LLM: 结果由持有准确 claim 的 NO 工具产生；存入原 run，只有 done 收口才成为依赖确认结果。
+    # 函数用途: 保存 JSON 工具结果；原 owner 配额检查继续约束输出大小。
+    def record_rule_result(self, run_id: str, claim_id: str, value: object) -> None:
+        import json
+
+        json.dumps(value, allow_nan=False)
+        with self._mutation_scope() as (store, admission):
+            run = self._require_claim(store, run_id, claim_id)
+            store["runs"][run_id] = {**run, "structured_result": deepcopy(value)}
+            self._write_store_unlocked(store, admission)
+
     # LLM: 只读原快照并调用同一 epoch/claim 校验；不是续租，执行写入仍须各自 CAS。
     # 函数用途: 准入读完任务记录后确认持有者未变，避免把旧领取报告为当前执行权。
     def check_run_claim(self, run_id: str, claim_id: str) -> None:

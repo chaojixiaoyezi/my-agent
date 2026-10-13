@@ -690,7 +690,7 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
 
 
 # LLM: 鉴权后所有会话命令（含插件）共用持久控制回执；独立 TUI 插件目录仍走 /client/plugins，普通请求沿原作用域绑定。
-# 函数用途: 接收消息与系统命令，避免参数错误成为模型任务；提示观察仅在队列写入成功后发布。
+# 函数用途: 接收消息与命令，原入队前冻结真实 owner；参数错误不成为任务，提示只在成功入队后发布。
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if require_trusted_source(handler):
         return  # 不可信来源(远程无 token)拒绝派工:已发 403(回环本机/单机放行,渠道用户经适配器可提交)
@@ -814,6 +814,9 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         snapshot = capture_im_dispatch(server.agent, _gateway_control_scope(handler, body, user_id=user_id, channel=channel))
         if snapshot is not None:
             request_data[IM_DISPATCH_KEY] = snapshot
+        from .request_owner_binding import bind_request_owner
+
+        request_data = bind_request_owner(server.agent, request_data)
         pending_path = server.paths.inbox / f"{request_id}.json"
         # 旧 /ask 无幂等 ID 路径：提示词正文写进 inbox 队列，必须私有落盘——目录 0700、文件出生 0600、
         # 原子替换（半写不留残档）。输出格式与原来逐字节一致：indent=2、不排序、无尾换行。
@@ -830,7 +833,7 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
 
 # LLM: One stable ingress receipt decides active-turn versus queued disposition before any retry
 # reruns routing. The receipt lock is outside the exact active-turn lock, giving one lock order.
-# 函数用途: 幂等处理普通消息，首次成功排队才发布提示观察，重放和活动插话不重复发。
+# 函数用途: 幂等接收消息并冻结首次 owner，重送不随管理员绑定改变归属；首次入队才发布提示。
 def _handle_idempotent_ordinary_ask(
     handler,
     server,
@@ -870,6 +873,9 @@ def _handle_idempotent_ordinary_ask(
         snapshot = capture_im_dispatch(server.agent, scope)
         if snapshot is not None:
             prepared_request[IM_DISPATCH_KEY] = snapshot
+        from .request_owner_binding import bind_request_owner
+
+        prepared_request = bind_request_owner(server.agent, prepared_request)
         with gateway_input_transition(server.paths, request_id):
             receipt, created = load_or_prepare_gateway_input_locked(
                 server.paths,

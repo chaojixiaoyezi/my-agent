@@ -815,6 +815,8 @@ def _linux_process_cmdline(pid: int) -> str:
     return " ".join(part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part)
 
 
+# LLM: 离线更新排空停止不启动旧版本继任者，普通 restart 保持原流程。
+# 函数用途: 离线更新排空停止不启动旧版本继任者，普通 restart 保持原流程。 修改需同步原控制、恢复或权限测试。
 def _classify_gateway_service_return(
     context: GatewayRunContext,
     report: object,
@@ -828,7 +830,7 @@ def _classify_gateway_service_return(
         marker = report["restart"]
         return _GatewayServiceTermination(
             "stopped",
-            "planned_restart",
+            "planned_update_stop" if marker.get("operation") == "stop_for_update" else "planned_restart",
             str(marker.get("reason") or "safe restart"),
             summary,
             0,
@@ -1146,6 +1148,8 @@ def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
 #   托管后台进程不随 Gateway 退出而停止（生产部署依赖这一点），因此这里默认只列出本 gateway 登记且仍在运行
 #   的后台进程；只有显式 --stop-background 才走既有资源停止路径把它们一并停掉。
 # 函数用途: 请求正在运行的 Gateway 排水退出，超时后按 --kill 强制结束；按显式要求停止遗留后台资源。
+# LLM: 只有 argparse 的显式布尔 drain=True 才走原两阶段排空，缺字段或其它对象不能成为控制指令。
+# 函数用途: 显式 drain 先完成原两阶段排空再停止，遗留后台清理仍沿原入口。 修改需同步原控制、恢复或权限测试。
 def cmd_gateway_stop(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -1157,6 +1161,11 @@ def cmd_gateway_stop(args) -> int:
         return _report_background_processes(args, agent, background)
     if refuse_stopping_hosting_gateway(pid):
         return 2
+
+    if getattr(args, "drain", False) is True:
+        from .gateway_restart_handover import safe_stop_for_update
+        code = safe_stop_for_update(agent, paths, pid)
+        return _report_background_processes(args, agent, background) if code == 0 else code
 
     stop_payload = write_targeted_gateway_stop_request(
         paths.pid,

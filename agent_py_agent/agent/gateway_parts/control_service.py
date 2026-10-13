@@ -366,7 +366,10 @@ def reconcile_gateway_steer_delivery(
 #   事件中心（B6 观察计数）只有一个来源，就挂在 Gateway server 上：调用方（http_handlers 拿到 server）把它放进
 #   scope.event_hub 带下来，本函数只转发、不自己去找；为空（如无 handler 的调用）就按“暂无记录”展示。
 #   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
-# 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止；帮助不进入模型队列。
+# 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
+# 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
+# LLM: 本人监控命令在原会话控制面分派，来源/角色和 owner 仍取认证 scope。
+# 函数用途: 本人监控命令在原会话控制面分派，来源/角色和 owner 仍取认证 scope。 修改需同步原控制、恢复或权限测试。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -375,6 +378,9 @@ def execute_gateway_conversation_control(
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
+    if command.kind in {"admin", "approve", "deny"}:
+        from .admin_control_service import execute_admin_channel_control
+        return execute_admin_channel_control(agent, paths, command, scope)
     from ..command_catalog import (
         COMMAND_INDEX,
         CommandAccessContext,
@@ -396,6 +402,12 @@ def execute_gateway_conversation_control(
         return ConversationControlResult(command.kind, False, "当前身份或入口不能使用此命令。输入 /help 查看可用命令。", error_code=error)
     if command.kind == "help":
         return ConversationControlResult("help", True, render_command_help(access, command.value))
+    if command.kind == "schedule":
+        from .schedule_control import execute_schedule_control
+        return execute_schedule_control(agent, command, scope)
+    if command.kind == "sessions":
+        from .session_control import execute_session_control
+        return execute_session_control(agent,paths,command,scope)
     if command.kind == "delegate":
         from .delegation_control import execute_delegation_control
 
@@ -425,11 +437,6 @@ def execute_gateway_conversation_control(
         from .model_profile_service import execute_model_text_control
 
         return execute_model_text_control(agent, command, scope)
-    if command.kind in {"admin", "approve", "deny"}:
-        # admin_control_service 在导入期依赖本模块的请求匹配，这里延迟导入以免循环引用。
-        from .admin_control_service import execute_admin_channel_control
-
-        return execute_admin_channel_control(agent, paths, command, scope)
     if command.kind == "skills":
         # skill_control_service 在导入期依赖本模块的 owner 解析，这里延迟导入以免循环引用。
         from .skill_control_service import execute_skill_control
@@ -2642,12 +2649,16 @@ def _cancel_request_execution(request_id: str, *, resources: object) -> None:
 
 # LLM: 状态仅投影当前请求事实；空闲时读同 owner 的当前模型选择，不把 Gateway 启动占位配置当真实模型。
 # 函数用途:汇总当前请求、排队数、最近阶段、子代理和压缩状态；读取模型设置不发请求或写配置。
+# LLM: 只统计 scope 能看到的原监控，未知读取不能伪造零数量。
+# 函数用途: 只统计 scope 能看到的原监控，未知读取不能伪造零数量。 修改需同步原控制、恢复或权限测试。
 def _gateway_task_status(
     base_agent: object,
     paths: GatewayPaths,
     scope: GatewayControlScope,
     active: _GatewayRequestRecord | None,
 ) -> ConversationTaskStatus:
+    from .schedule_control import monitor_counts
+
     queued = [
         record
         for record in _matching_requests(paths.inbox, scope)
@@ -2706,6 +2717,7 @@ def _gateway_task_status(
         verbose_level=verbose_level,
         durable_work=_named_durable_statuses(owner_agent, paths, scope),
         quarantined_wakes=_quarantined_wake_count(owner_agent),
+        monitors=monitor_counts(base_agent, scope),
     )
 
 

@@ -620,11 +620,13 @@ def test_every_host_state_item_is_read_only_for_file_tools(tmp_path, monkeypatch
     policy = _admin_policy(home, monkeypatch)
 
     decision = policy.check_write(target)
-    assert (decision.allowed, decision.code) == (False, STATE_CODE)
-    assert policy.check(target).allowed, "只拒写，读照常"
+    managed = policy.host_managed_store(target) is not None
+    expected = "PATH_HOST_MANAGED_STORE_BLOCKED" if managed else STATE_CODE
+    assert (decision.allowed, decision.code) == (False, expected)
+    assert policy.check(target).allowed is not managed, "整机服务队列拒读写，其余状态只拒写"
     for tools in (_registry(home["ws"]), _registry(main, owner_scope=main, roots=[main])):
         outcome = tools["write_file"].execute({"path": str(target), "content": "x"})
-        assert (outcome.ok, outcome.error_code) == (False, STATE_CODE), outcome.output
+        assert (outcome.ok, outcome.error_code) == (False, expected), outcome.output
     assert target.read_bytes() == before
 
 
@@ -674,10 +676,11 @@ def test_task_tree_roots_stay_in_the_pierceable_owner_boundary(tmp_path, monkeyp
              "owner_audit_log_jsonl": "audit_log.jsonl"}
     agent = SimpleNamespace(home_paths=SimpleNamespace(**{key: main / value for key, value in names.items()}))
     scoped: dict[str, object] = {"effective_owner_scope_root": str(main)}
-    _attach_owner_control_write_guards(scoped, agent)
+    params=SimpleNamespace(context_scope='task_local')
+    _attach_owner_control_write_guards(scoped, agent, params)
     assert scoped["forbidden_write_roots"] == [str(main / name) for name in ("runs", "tasks")]
     full: dict[str, object] = {}
-    _attach_owner_control_write_guards(full, agent)
+    _attach_owner_control_write_guards(full, agent, params)
     assert "forbidden_write_roots" not in full, "B 类只在隔离模式挂"
 
     legacy_work = main / "tasks" / "2026-09-01" / "old" / "work"
@@ -1037,8 +1040,12 @@ def test_task_record_patterns_cover_every_task_root_layout(tmp_path):
 
     home = _home(tmp_path)
     root, main = home["root"], home["main"]
-    patterns = host_readonly_patterns(root, main)
-    assert len(host_readonly_patterns(root)) == 3 * len(patterns), "Full Access：全部已有 owner，每个一组"
+    records_patterns = host_readonly_patterns(root, main)
+    directory_patterns = tuple(pattern for operation in ("write", "unlink")
+                               for pattern in host_readonly_patterns(root, main, directory_operation=operation))
+    patterns=(*records_patterns,*directory_patterns)
+    assert sum(len(host_readonly_patterns(root, directory_operation=operation))
+               for operation in ("", "write", "unlink")) == 3 * len(patterns), "Full Access：全部已有 owner，每个一组"
     assert not any("{" in pattern for pattern in patterns), "Seatbelt 不认 {m,n} 区间，可选层级只能写成显式分组"
 
     def hits(path: Path | str) -> bool:

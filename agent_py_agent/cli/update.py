@@ -9,6 +9,7 @@ editable(git 检出)安装是主路径——install.sh 就是 git clone + pip in
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -70,10 +71,13 @@ def _pip_install_editable(repo: Path) -> tuple[int, str]:
 def add_update_subcommand(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("update", help="自更新:拉取最新代码并刷新依赖")
     parser.add_argument("--check", action="store_true", help="只检查有没有更新,不实际更新")
+    parser.add_argument("--package", type=Path, help="离线更新包 .run；保留当前安装目录、配置和数据")
     parser.set_defaults(func=cmd_update)
 
 
 def cmd_update(args) -> int:
+    if package := getattr(args, "package", None):
+        return _offline_update(package)
     source = detect_install_source()
     if source.kind != "git" or source.repo is None:
         print("⚠️ my-agent 不是从 git 检出安装的(可能是 pip 包)。请用 `pip install --upgrade ...` 或重跑安装脚本更新。")
@@ -121,3 +125,24 @@ def _apply_update(repo: Path) -> int:
 
 
 __all__ = ["InstallSource", "add_update_subcommand", "cmd_update", "detect_install_source"]
+
+
+# LLM: 从当前安装 runtime 解析原标记，数据目录或 HOME 不是安装身份；exec 替换 updater，避免它自身阻挡切换。
+# 函数用途: 校验离线更新入口并交给包内原安装器，联网和源码更新仍走原 git 路径。
+def _offline_update(package: Path) -> int:
+    import json
+    package = package.expanduser().resolve()
+    if not package.is_file() or package.suffix != '.run':
+        print('请指定存在的离线 .run 更新包。')
+        return 1
+    executable = Path(sys.executable).resolve()
+    for prefix in executable.parents:
+        marker = prefix / '.my-agent-private-install.json'
+        if marker.is_file():
+            row = json.loads(marker.read_text(encoding='utf-8'))
+            if row.get('schema') != 'my-agent.private-release.v1' or row.get('owner_uid') != os.getuid() or row.get('prefix') != str(prefix):
+                print('当前离线安装标记不一致，未更新。')
+                return 1
+            os.execvp('bash', ['bash', str(package), '--update', '--prefix', str(prefix)])
+    print('当前程序不是离线安装实例，请用 bash 新包.run --update 识别已有实例。')
+    return 1

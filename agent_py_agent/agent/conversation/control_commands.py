@@ -33,6 +33,8 @@ from .channels import redact_host_absolute_paths
 ControlKind = Literal[
     "help",
     "delegate",
+    "schedule",
+    "sessions",
     "status",
     "context",
     "compact",
@@ -136,6 +138,7 @@ class ConversationTaskStatus:
     durable_work: tuple[NamedConversationWorkStatus, ...] = ()
     # 本 owner 已结案、不再自动领取的后台唤醒条数（唤醒毒丸结案，不含已归档的）；0 时 /status 不显示这一行。
     quarantined_wakes: int = 0
+    monitors: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -228,6 +231,13 @@ def parse_conversation_command(
         value = str(trailing or "status").strip()
         return ConversationControlCommand("delegate", value=value, valid=value in {"enable", "disable", "status"},
                                           usage="用法：/delegate enable、disable 或 status（IM，当天有效）。")
+    if name == "schedule":
+        return ConversationControlCommand("schedule", value=str(trailing or "").strip())
+    if name == "sessions":
+        value=str(trailing or '').strip()
+        operation=value.partition(' ')[0] or 'threads'
+        return ConversationControlCommand('sessions',value=value,operation=operation,
+            valid=operation in {'threads','control'},usage='用法：/sessions threads 或 /sessions control <thread_id> <原控制命令>。')
     if name == "status":
         return _argumentless_command("status", trailing, "/status")
     if name == "context":
@@ -580,17 +590,25 @@ def _admin_command(trailing: object) -> ConversationControlCommand:
     )
 
 
-# LLM: 只看结构化 kind/operation：/approve 与 /admin 登录的 value 是密码；status/logout/deny 不带秘密。
+# LLM: 只看结构化 kind/operation；原 sessions control 内的管理员批准也沿同一解析器脱敏，不能把嵌套密码落盘。
 # 函数用途: 判断一条控制命令的参数是否是管理员密码。
 def control_command_carries_secret(command: ConversationControlCommand) -> bool:
+    if command.kind == "sessions" and command.operation == "control":
+        parts = command.value.split(maxsplit=2)
+        inner = parse_conversation_control(parts[2]) if len(parts) == 3 else None
+        return bool(inner and inner.kind in {"approve", "admin"} and control_command_carries_secret(inner))
     return command.kind == "approve" or (command.kind == "admin" and command.operation == "login")
 
 
 # LLM: 管理员密码只在内存里的 command.value 中用于一次校验；控制回执、摘要和日志落盘前必须改用这里的脱敏正文。
-#   脱敏正文仍能被同一解析器还原成相同 kind（回执读回校验依赖这一点）；其余命令原样返回。
+#   脱敏正文仍能还原同一 kind；嵌套批准保留准确 thread_id，只抹去密码，其余命令原样返回。
 # 函数用途: 生成可以安全持久化的控制命令正文，例如把 `/admin 密码` 变成 `/admin ******`。
 def persisted_control_command_text(command: ConversationControlCommand, text: object) -> str:
     if control_command_carries_secret(command):
+        if command.kind == "sessions":
+            parts = command.value.split(maxsplit=2)
+            inner = parse_conversation_control(parts[2])
+            return f"/sessions control {parts[1]} {persisted_control_command_text(inner, parts[2])}"
         return f"/{command.kind} {_REDACTED_SECRET}"
     return str(text or "")
 
@@ -864,6 +882,10 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     )
     if status.queued_count:
         lines.append(f"等待中的消息：{status.queued_count}")
+    if status.monitors:
+        facts = status.monitors
+        lines.append("监控：状态暂不可用" if facts.get("unavailable") or facts.get("load_error_codes") else
+                     f"监控：{facts['total']} 个（开启 {facts['active']}，停止 {facts['paused']}，已结束 {facts.get('completed',0)}）；规则：执行 {facts['running_rules']}，排队 {facts.get('queued_rules',0)}，等待 {facts.get('waiting_rules',0)}；/schedule 查看")
     if status.model_name:
         lines.append(f"模型：{status.model_name}")
     from .context_usage import public_context_usage

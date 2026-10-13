@@ -5,6 +5,7 @@ import hashlib
 import json
 import tracemalloc
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,38 @@ from agent_py_agent.tests.test_compact_scoped_checkpoint import (
 )
 
 compact_case = _compact_case_fixture
+
+
+@pytest.mark.parametrize('compatible', [False, True])
+def test_model_switch_restores_summary_body_and_evidence_from_base(compact_case, compatible):
+    case = compact_case
+    thread = _ledger(case, committed=50, body_size=131_072)
+    path = _checkpoint_path(case)
+    rows = [json.loads(line) for line in path.read_text().split('\n') if line]
+    for row in rows[1:]:
+        row['provider_compaction'] = {
+            'protocol': 'openai_responses', 'endpoint': 'https://provider.invalid/v1',
+            'item': {'type': 'compaction', 'encrypted_content': 'synthetic-cipher'},
+        }
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    del rows
+    case.agent.backend = SimpleNamespace(provider_compaction_scope=lambda: {
+        'protocol': 'openai_responses' if compatible else 'anthropic',
+        'endpoint': 'https://provider.invalid/v1',
+    })
+    tracemalloc.start()
+    try:
+        view = resolve_compact_summary_view(case.agent, thread, THREAD_COMPACT_SCOPE)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    expected = 50 if compatible else 1
+    assert view.generation == expected and view.checkpoint_id == f'legacy-{expected}'
+    assert view.summary.startswith(f'摘要-{expected - 1}')
+    assert view.operation_evidence == {'index': expected - 1}
+    assert view.legacy_message_end_ids == tuple(f'message-{index}' for index in range(expected))
+    assert bool(view.provider_compaction) is compatible
+    assert peak < 2_000_000, f'换模型读取保留了所有摘要: peak={peak}'
 
 
 # LLM: 仅在pytest临时账本构造明确v1链及orphan，不调用writer绕过真实运行提交；thread以测试快照显式给reader。

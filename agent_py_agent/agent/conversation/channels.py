@@ -85,6 +85,14 @@ _HOST_ABSOLUTE_PATH_RE = re.compile(
     r")"
 )
 
+# LLM: 飞书私聊 chat_id 也以 oc_ 开头；只有宿主冻结的 group 标志或 group owner 才允许选群会话地址，不能仅凭字符串猜聊天性质。
+# 函数用途: 从结构化绑定决定回复原群还是原发起人，其它通道保留原地址规则。
+def binding_delivery_target(channel: str, actor_id: str, conversation_id: str, *, group: bool = False) -> str:
+    if channel == 'feishu':
+        return conversation_id if group else actor_id
+    return actor_id or conversation_id
+
+
 def leads_with_internal_signal(content: str) -> bool:
     return str(content or "").lstrip().startswith(INTERNAL_SIGNAL_PREFIXES)
 

@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from .channels import PROACTIVE_PUSH_CHANNELS
+from .channels import PROACTIVE_PUSH_CHANNELS, binding_delivery_target
 from .models import ConversationThread
 
 
@@ -43,8 +43,8 @@ def owner_from_paths(paths: Iterable[str]) -> tuple[str, str]:
     return "", ""
 
 
-# LLM: 独立执行先鲜活核对原聊天引用再读 binding；其它线程保留原 owner 路由，引用失败不降级到别的地址。
-# 函数用途: 按当前线程事实选择后台回复地址；读操作可能失败，但不把地址选择当成发送成功。
+# LLM: 独立执行核对原聊天引用，群标志读取宿主冻结来源；普通绑定按原 group owner 判定，不依据用户正文或回落管理员。
+# 函数用途: 为后台回复选择原用户或原群地址，无法验证来源时不降级换目标。
 def resolve_background_route(
     dependencies: BackgroundRouteDependencies,
     thread_id: str,
@@ -60,15 +60,13 @@ def resolve_background_route(
         thread = execution_origin_thread(dependencies.load_thread, thread)
         if origin is not None:
             binding = origin["binding"]
-            return binding["channel"], binding["actor_id"] or binding["conversation_id"]
+            return binding["channel"], binding_delivery_target(binding['channel'], binding['actor_id'], binding['conversation_id'],
+                group='/groups/' in str(getattr(thread, 'owner_id', '') or ''))
     bindings = list(getattr(thread, "channel_bindings", ()) or ())
     for binding in reversed(bindings):
         channel = str(getattr(binding, "channel", "") or "")
-        target = str(
-            getattr(binding, "channel_user_id", "")
-            or getattr(binding, "channel_conversation_id", "")
-            or ""
-        )
+        target = binding_delivery_target(channel, str(getattr(binding, 'channel_user_id', '') or ''),
+            str(getattr(binding, 'channel_conversation_id', '') or ''), group='/groups/' in str(getattr(thread, 'owner_id', '') or ''))
         if channel in PROACTIVE_PUSH_CHANNELS and target:
             return channel, target
     provider, open_id = owner_from_paths(dependencies.owner_paths())

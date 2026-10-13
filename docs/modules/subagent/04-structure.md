@@ -1,3 +1,9 @@
+2026-10-13：`agent_core/runner/slice_closeout.py` 在原 worker lease 退出后结束可恢复片的 exact attempt，逻辑 run 保持非终态，未结/unknown 副作用不放开续跑。Owner 网络开关经父级上界传到 Shell/PTY/后台原 OS 沙箱，SandboxHostPolicy 只运输隐私与网络限制，不增加权限仓库。普通执行孩子默认可发现 request_credentials/feishu_cloud/send_message，各自仍守原 owner、资源许可及准确目标门。真实验收在隔离 Linux 进行。
+
+## 2026-10-13 本期相对能力范围修正（实施中）
+
+真实 MiniMax 委派暴露：模型申请 `tasks/...`，原请求/授权保存相对路径，而校验、runner 和文件工具使用不同基准。新 request/grant 在原 canonical 锁内沿已有 `context_bundle_refs.execution_cwd` 解析为绝对路径，再执行原 owner/父级上界；不扩大授权。旧相对 grant 只按原 task-local 合同投影，不改绑或覆盖现有记录。三类身份的生产申请/批准/边界/真实文件工具回归已复现，修复验收正在完成。
+
 # Subagent Structure
 
 2026-10-13 权限投影：`tooling/write_boundary.py::ordered_write_scope_roots` 是普通最具体路径顺序的共用投影；`registry_invoke` 将原 forbidden 根放入 request-local handler，locked_files/runtime_install/task host state 留在绝对保护。`attempt/sandbox` 和 `tooling/sandbox` 消费同一排序，精确保护最后覆盖；`pty_sessions.PtyAccessScope` 纳入普通禁止根。`conversation/agent_tool_approval` 缓存以 run/main claim/child attempt/精确工具参数为键，归属验证仍先于缓存；IM 消费端尚未接入。

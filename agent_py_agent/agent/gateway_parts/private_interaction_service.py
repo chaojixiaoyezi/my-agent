@@ -28,14 +28,16 @@ def private_interaction_lock_error(base_agent, actor_id: str) -> str:
 
 # LLM: MAC/actor/expiry 必须先于目标 owner 加载；local/main 还需当前管理员绑定，群来源只接受原发起人的签名私人请求。
 # 函数用途: 对一条已认证 SDK 控制事件核对身份、密码、执行和卡片，再写原批准记录。
+# LLM: 私人凭据 fields 只在 task_credential 接受，审批不收秘密；原锁和实际卡核验先于写账。
+# 函数用途: 私人凭据 fields 只在 task_credential 接受，审批不收秘密；原锁和实际卡核验先于写账。 修改需同步原控制、恢复或权限测试。
 def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_id: str) -> dict:
-    if set(body) != {"reference", "decision", "message_id", "chat_id"}:
+    if set(body) not in ({"reference", "decision", "message_id", "chat_id"}, {"reference", "decision", "message_id", "chat_id", "fields"}):
         raise ValueError("交互字段无效")
     reference = body["reference"]
     if not isinstance(reference, str):
         raise ValueError("交互引用无效")
     payload = verify_interaction_reference(Path(base_agent.home_paths.root), reference, channel=channel, actor_id=actor_id)
-    if payload.get("kind") != "tool_approval":
+    if payload.get("kind") not in {"tool_approval", "task_credential"}:
         raise ValueError("交互类型无效")
     error = private_interaction_lock_error(base_agent, actor_id)
     if error:
@@ -45,6 +47,11 @@ def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_i
             {"channel": channel, "user_id": actor_id, "metadata": {"channel": channel, "channel_chat_type": "p2p"}}) is None:
         raise ValueError("管理员绑定已变化")
     agent = _resolve_request_agent_for_owner(base_agent, owner)
+    if payload["kind"] == "task_credential":
+        from ..user_space.task_credentials import submit_credential_card
+        return submit_credential_card(agent, payload, body)
+    if "fields" in body:
+        raise ValueError("审批不接收表单")
     return resolve_im_tool_approval(agent, payload, reference=reference, message_id=str(body["message_id"]),
         chat_id=str(body["chat_id"]), decision=str(body["decision"]))
 

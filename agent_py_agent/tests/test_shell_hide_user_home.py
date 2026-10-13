@@ -4,6 +4,7 @@
 否则 git 读 ~/.gitconfig 会因 EPERM 直接退出。本机管理员、开关关闭、以及本来就隐藏宿主路径的平台（Linux bwrap）
 都只拒读 my-agent 根，行为不变。
 """
+
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from agent_py_agent.agent.attempt.sandbox import (
     AttemptExecutionSandbox,
     AttemptSandboxSpec,
+    SandboxHostPolicy,
     _private_read_rules,
 )
 from agent_py_agent.agent.settings import load_config
@@ -196,7 +198,7 @@ def test_background_and_terminal_commands_also_get_the_owner_home(tmp_path, monk
     monkeypatch.setattr(pty_sessions, "_sandbox_exec", lambda *_a, **_k: (["/usr/bin/true"], False))
     monkeypatch.setattr(pty_sessions.subprocess, "Popen", fake_popen)
     with pytest.raises(OSError, match="captured"):
-        pty_sessions.pty_session_registry.start("true", paths.owner, paths.owner, private_roots=roots)
+        pty_sessions.pty_session_registry.start("true", paths.owner, paths.owner, host_policy=SandboxHostPolicy(roots))
 
     assert captured["background"]["HOME"] == str(paths.owner)
     assert captured["terminal"]["HOME"] == str(paths.owner)

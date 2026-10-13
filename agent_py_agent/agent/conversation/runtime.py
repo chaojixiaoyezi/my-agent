@@ -1890,8 +1890,8 @@ def _related_subagent_runs(agent: object, root_task_id: str) -> tuple[list[objec
 _INTERNAL_ROUTE_CHANNELS = frozenset({"internal", ""})
 
 
-# LLM: internal 路由只能按 delivery registry 的 proactive capability 升级；显式外部路由保持原样。
-# 函数用途: 为后台回复选择结构化通道和目标。
+# LLM: internal 路由只能按原 proactive capability 升级；飞书按 canonical group owner 选群，其它用户选原发起人，显式路由不变。
+# 函数用途: 为后台回复选择原用户或原群目标，不混淆飞书 chat_id 与 open_id。
 def _resolve_delivery_route(
     thread: object,
     request: BackgroundRunRequest,
@@ -1903,9 +1903,10 @@ def _resolve_delivery_route(
     if channel in _INTERNAL_ROUTE_CHANNELS:
         binding = _latest_proactive_binding(thread, supports_proactive=supports_proactive)
         if binding is not None:
-            # 飞书 send_message 用 receive_id_type=open_id,需要用户 open_id(=binding.channel_user_id);
-            # 缺失才回落 channel_conversation_id。
-            return binding.channel, (binding.channel_user_id or binding.channel_conversation_id)
+            from .channels import binding_delivery_target
+
+            return binding.channel, binding_delivery_target(binding.channel, binding.channel_user_id, binding.channel_conversation_id,
+                group='/groups/' in str(getattr(thread, 'owner_id', '') or ''))
     return channel, route_target or default_route_target(thread, channel)
 
 
