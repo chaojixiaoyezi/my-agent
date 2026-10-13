@@ -167,6 +167,19 @@ def test_multiple_installations_require_explicit_selection(tmp_path, monkeypatch
     assert installer.resolve_install_prefix(root/'two',roots=[root])==root/'two'
 
 
+def test_explicit_registered_nested_prefix_updates_without_environment_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, 'active_processes', lambda _: [])
+    shallow = tmp_path / 'app' / '.my-agent'
+    nested = tmp_path / 'custom' / 'deep' / 'install'
+    bundle = _bundle(tmp_path / 'bundle')
+    installer.install(bundle, shallow)
+    installer.install(bundle, nested)
+    monkeypatch.setenv('MY_AGENT_HOME', str(tmp_path / 'unrelated-home'))
+    assert installer.resolve_install_prefix(nested, roots=[tmp_path / 'app']) == nested
+    with pytest.raises(ValueError, match='第二个 Gateway'):
+        installer.resolve_install_prefix(tmp_path / 'custom' / 'typo', roots=[tmp_path / 'app'])
+
+
 @pytest.mark.parametrize("workspace", ["", "custom/gateway", "/tmp/explicit-update-service"])
 @pytest.mark.parametrize("protocol", [None, "drain.v1"])
 def test_update_services_uses_canonical_prefix_paths_and_restores_old_channel(tmp_path, monkeypatch, workspace, protocol):

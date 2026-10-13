@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-13，用户已授权 R01–R21 合入远端 main，并要求生成新的离线包。候选版本为 `0.3.0-tui-preview.20261013.2`；每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。功能与验收边界见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
+状态：2026-10-13，用户已授权 R01–R21 合入远端 main，并要求生成新的离线包。候选版本为 `0.3.0-tui-preview.20261013.3`；每次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。功能与验收边界见 [本期交接](../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。各历史包验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 
@@ -81,6 +81,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 新版也可执行 `/app/.my-agent/bin/my-agent-preview update --package 新包.run`。
 省略 `--prefix` 时自动识别当前账户的原安装；存在多个安装时要求明确选原路径，填成新的路径会拒绝建立第二套 Gateway。
+深层自定义安装目录用显式 `--prefix` 更新，仍校验同一账户、路径与原安装标记，不要求登录 HOME 或环境变量保持不变。
 从 `.20261012.8` 更新须使用新包的 `bash … --update` 入口；旧 CLI 不具备新版的离线 update 子命令。
 旧版未声明排空协议，更新器沿原 CLI 执行 `gateway stop --stop-background --background-timeout 30`；因此先等任务结束。
 新版 `drain.v1` 版本先排空请求再停止。更新器复用 canonical owner/runtime 服务目录，不用当前工作目录或安装器的 HOME 猜 PID 地址。

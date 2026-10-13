@@ -209,6 +209,8 @@ def resolve_install_prefix(requested: Path | None, *, roots=None) -> Path:
     found = discover_installations(roots)
     selected = requested.expanduser().resolve() if requested is not None else None
     if selected is not None:
+        # 显式更新深层自定义 prefix 仍核对同一标记合同，不能因未列在浅层发现根中误当成第二套安装。
+        found = sorted(set(found) | set(discover_installations([selected])))
         if found and selected not in found:
             raise ValueError('发现已有安装：' + ', '.join(str(path) for path in found) + '；请更新原目录，不能自动建立第二个 Gateway')
         return selected
