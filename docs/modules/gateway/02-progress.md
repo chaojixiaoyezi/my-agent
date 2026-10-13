@@ -1,6 +1,8 @@
 # Gateway 维护状态
 
-2026-10-12 发布依赖边界：Gateway 的 IM 路由调用 `conversation/session_task_dispatch.py` 的原耐久派发流程；模型派活工具也调用同一入口，原身份/链深/配额/正文/wake 不改。状态展示调用 `conversation/im_task_status.py`，由会话领域读取原子代理终态集合；Gateway 不导入 agent_core 工具或 subagents。发行 AST 边界测试曾实际发现两个新依赖，修复不增加豁免或动态导入。
+2026-10-12 私聊首设门：飞书 WS/webhook 共享入站必须先设置个人密码；未设/锁定消息进入原有界队列，设置或解锁成功按准确用户续送。认证只读原服务结构化 ok，卡片颜色不能授权；初始化/状态/提示失败不放行。原主动告警出站不受个人锁影响，不更新用户活跃。
+
+2026-10-12 发布依赖边界：Gateway 的 IM 路由调用 `conversation/session_task_dispatch.py` 的原耐久派发流程；模型派活工具也调用同一入口，原身份/链深/配额/正文/wake 不改。状态展示调用 `conversation/im_task_status.py`，由会话领域读取原子代理终态集合；Gateway 不导入 agent_core 工具或 subagents。发行 AST 边界测试曾实际发现两个新依赖，修复不增加豁免或动态导入。派活/消息测试现在共用完整生产 worker 收尾与正式 BackgroundRunRequest，原停止授权与消息消费断言保留。
 
 2026-10-12 L/T/IM 本地整合完成：原 IM 后台线程与 L 每次隔离策略组合，inherit 读取原聊天，冻结通知沿原计划引用与索引复核。工作树已整合，79 文件 1801 项及真机 smoke 通过，未发布；见 [整合记录](../../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 

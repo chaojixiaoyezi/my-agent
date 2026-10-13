@@ -54,6 +54,15 @@ class _Threads:
             return self._thread, None
         return None, None
 
+    # LLM: 控制入口先按真实渠道绑定解析目标；替身必须提供该只读协议，不把文件存在当停止授权。
+    # 函数用途: 仅返回与三个结构化渠道字段全部匹配的测试线程。
+    def resolve(self, *, channel: str, channel_conversation_id: str, channel_user_id: str):
+        for binding in self._thread.channel_bindings:
+            if (binding.channel == channel and binding.channel_conversation_id == channel_conversation_id
+                    and binding.channel_user_id == channel_user_id):
+                return self._thread
+        return None
+
 
 def _target_thread() -> object:
     binding = ChannelBinding(
@@ -63,7 +72,7 @@ def _target_thread() -> object:
         canonical_user_id=_USER_ID,
         thread_id=_TARGET_THREAD_ID,
     )
-    return SimpleNamespace(thread_id=_TARGET_THREAD_ID, channel_bindings=(binding,))
+    return SimpleNamespace(thread_id=_TARGET_THREAD_ID, channel_bindings=(binding,), metadata={})
 
 
 def _agent(tmp_path: pathlib.Path) -> object:
@@ -262,7 +271,7 @@ def test_stop_session_task_turn_fails_closed_without_structured_facts(tmp_path) 
     # 目标会话没有渠道身份：不发控制。
     no_binding = stop_session_task_turn(
         agent,
-        target_thread=SimpleNamespace(thread_id=_TARGET_THREAD_ID, channel_bindings=()),
+        target_thread=SimpleNamespace(thread_id=_TARGET_THREAD_ID, channel_bindings=(), metadata={}),
         turn_id=_TURN_ID,
     )
     assert no_binding.confirmed is False

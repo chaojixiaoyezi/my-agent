@@ -526,7 +526,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     # 群聊只在直接 @机器人时触发；@全员不触发。
     feishu_group_require_bot_mention: bool = True
-    feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首次发设置卡但不吞消息，设密后闲置才拦截，群聊不锁
+    feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首设/闲置锁定都暂存消息，验证成功后续送，异常不放行；群聊不锁
     feishu_personal_idle_lock_seconds: int = 10800  # 私聊闲置多久后锁定(秒,默认 3h);feishu_session_lock_enabled 开启时生效
     # QQ 适配器配置
     qq_app_id: str = ""

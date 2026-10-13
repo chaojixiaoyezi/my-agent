@@ -1,5 +1,14 @@
 # Codebase Tree
 
+本轮验证新增入口：
+
+```text
+|-- agent_py_agent/tests/test_feishu_first_contact_lock.py  # 连续未设密码入站、设置回调和锁定告警合同
+`-- docs/design/IM_CREDENTIAL_COLLECTION.md  # 群任务私聊凭据方案，尚未实现的独立功能
+```
+
+关键职责：首设密码门沿原 session_lock 与 adapter 入站共用；API 凭据设计不代表当前包已有通用秘密收集工具。
+
 本轮整合新入口：`agent_py_agent/tests/test_scheduler_im_l_integration.py` 验证 IM/调度策略共用；`docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md` 保存来源、冲突处理、证据和未发布边界。生产新模块沿 L 源分支的现有文件树条目，不再重复列第二套入口。
 
 IM 多任务和公共包的新长期入口及关键文件职责（均复用原 Store，不增加第二套任务账）：

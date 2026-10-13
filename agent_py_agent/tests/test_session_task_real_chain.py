@@ -366,34 +366,13 @@ class RealChain:
     scheduler: object
     asks: itertools.count = field(default_factory=lambda: itertools.count(1))
 
-    # 函数用途: 以某个会话的身份跑一轮真实 Gateway 前台 ask（与真实 worker 同样落 processing 文件并收尾）。
-    #   执行期间同 request_worker 一样登记 conversation-request: 可中断名；不登记的话 /stop 会被受理，
-    #   却打不到在途的模型调用。
+    # LLM: 前台回合必须经过真实 worker 的租约、请求绑定、异常与 guidance 收尾；不能只调用内部模型执行再仿造终态。
+    # 函数用途: 沿完整 Gateway worker 执行测试输入，保留停止前未消费消息的实际释放与重新认领。
     def ask(self, label: str, prompt: str):
-        request_id = f"rc-{label.lower()}-{next(self.asks)}"
-        request = {"id": request_id, "kind": "ask", "prompt": prompt, "status": "processing", "turn_phase": "open",
-                   "execution_attempt_id": f"rc-attempt-{request_id}", "conversation": self._conversation(label)}
-        path = self.paths.processing / f"{request_id}.json"
-        path.write_text(json.dumps(request), encoding="utf-8")
-        context = request_context.GatewayAskRunContext(
-            self.agent, request, path, self.paths.responses / f"{request_id}.json", request_id, None,
-        )
-        status = "done"
-        try:
-            with register_interruptible(conversation_request_interrupt_name(request_id)):
-                return request_execution._run_gateway_ask(context)
-        except BaseException:
-            status = "failed"
-            raise
-        finally:
-            terminalize_gateway_request_file(
-                self.paths, path, self.paths.done if status == "done" else self.paths.failed, request_id,
-                conversation_store=self.agent.conversation_store,
-                terminal_response={"id": request_id, "status": status, "ok": status == "done"},
-            )
+        return self.ask_via_worker(label, prompt)
 
-    # 函数用途: 同 ask，但经真实 worker 的请求入口 request_execution._handle_gateway_request 执行（租约、chunk 写入、回合抛错时
-    #   按失败落响应并在收尾时把异常交给补充消息收尾），返回它落下的响应字典；ask 直接调 _run_gateway_ask，碰不到这一层。
+    # LLM: 本 helper 与 ask 共用完整生产 worker；只在测试末尾按原函数移动请求文件，不另外写消费回执。
+    # 函数用途: 返回 worker 落下的真实响应，供已知失败用例核对状态与消息释放。
     def ask_via_worker(self, label: str, prompt: str) -> dict:
         request_id = f"rc-{label.lower()}-{next(self.asks)}"
         request = {"id": request_id, "kind": "ask", "prompt": prompt, "status": "processing", "turn_phase": "open",

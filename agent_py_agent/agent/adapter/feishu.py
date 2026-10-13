@@ -1,6 +1,6 @@
 
 
-# LLM: 飞书沿既有 provider uuid 对消息与分片去重；恢复保证只覆盖声明的去重时间窗，不作无限幂等承诺。
+# LLM: 飞书沿既有 provider uuid 去重；启用个人锁时首设与解锁必须先通过，失败不分发入站，出站告警独立。
 # 模块用途: 管理飞书入站与原生发送接口，声明稳定键支持但无按逻辑键查询接口。
 from __future__ import annotations
 
@@ -313,6 +313,8 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
         logger.error(f"飞书卡片回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
 
 
+# LLM: 卡片操作用户必须匹配目标；只有原密码服务成功，首设/解锁才能按原消息队列续送，失败不改认证。
+# 函数用途: 处理密码卡并就地替换为不含密码的回执，成功后恢复暂存消息。
 def _password_card_action(
     adapter: Any,
     norm: dict[str, Any],
@@ -323,7 +325,11 @@ def _password_card_action(
     if unlock is None:
         return False, None
     try:
-        from ..session_lock.feishu_cards import handle_password_action, is_password_action
+        from ..session_lock.feishu_cards import (
+            build_password_resolved_card,
+            is_password_action,
+            password_action_outcome,
+        )
 
         if not is_password_action(value):
             return False, None
@@ -331,9 +337,10 @@ def _password_card_action(
         expected_user = str(value.get("user_id") or "").strip()
         if not operator or operator != expected_user:
             return True, _password_operator_mismatch_response()
-        resolved = handle_password_action(unlock, value, norm.get("form_value") or {})
-        ok = str((resolved.get("header") or {}).get("template") or "") == "green"
-        if ok and str(value.get("session_lock_action") or "") == "pwd_unlock":
+        result = password_action_outcome(unlock, value, norm.get("form_value") or {})
+        resolved = build_password_resolved_card(ok=result.ok, message=result.message)
+        ok = result.ok
+        if ok and str(value.get("session_lock_action") or "") in {"pwd_set", "pwd_unlock"}:
             adapter._resume_pending_unlock_messages(expected_user)
         return True, {
             "toast": {"type": "success" if ok else "error", "content": "已处理" if ok else "未通过"},
@@ -361,17 +368,22 @@ def _password_operator_mismatch_response() -> dict[str, Any]:
     }
 
 
-# LLM: 私聊密码锁只在用户已经设置密码且进入闲置锁定态时拦截；首次设置卡是非阻塞 onboarding。
-# 函数用途: 判断一条飞书消息是否应被密码锁拦住，并负责记录活跃时间与发送对应卡片。
+# LLM: 启用时无密码、已锁或状态不可读都不能分发私聊；设置/解锁后沿原有界队列续送，群聊及显式关闭不受影响。
+# 函数用途: 在正常分发前核对私聊认证状态，拦截时暂存原消息并发卡，不因卡片或数据库异常放行。
 def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
+    chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
+    if chat_type == "group" or not getattr(adapter, "_session_lock_enabled", True):
+        return False
     unlock = getattr(adapter, "_unlock", None)
     if unlock is None:
-        return False
+        logger.warning("私聊会话锁不可用，消息未分发")
+        return True
     try:
         user_id = str(getattr(msg, "user_id", "") or "")
-        chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
-        if chat_type == "group" or not user_id:
-            return False
+        if not user_id:
+            return True
+        status = unlock.status(user_id, is_group=False)
+        mode = "set" if status.requires_password_setup else "unlock"
         pending = getattr(adapter, "_pending_unlock_messages", None)
         if pending is not None and pending.was_resumed(msg):
             return True
@@ -379,24 +391,20 @@ def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
         if pending_status != "inactive":
             adapter._report_unlock_queue_status(msg, pending_status)
             if not pending.is_draining(user_id):
-                adapter._send_password_card(user_id, "unlock")
+                adapter._send_password_card(user_id, mode)
             return True
-        status = unlock.status(user_id, is_group=False)
-        has_password = unlock.store.has_password(user_id)
-        if status.locked and has_password:
+        if status.locked or status.requires_password_setup:
             adapter._report_unlock_queue_status(
                 msg,
                 adapter._queue_locked_message(msg),
             )
-            adapter._send_password_card(user_id, "unlock")
+            adapter._send_password_card(user_id, mode)
             return True
         unlock.record_activity(user_id)
-        if not has_password:
-            adapter._send_password_card(user_id, "set")
         return False
     except Exception as exc:
-        logger.warning(f"会话锁门异常(放行,不挡消息): {type(exc).__name__}: {exc}")
-        return False
+        logger.warning("私聊会话锁状态不可读，消息未分发: %s", type(exc).__name__)
+        return True
 
 
 # LLM: 密码卡发送失败只能影响 onboarding/解锁提示，不得抛异常破坏 adapter 消息循环。
@@ -425,6 +433,8 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
     adapter_name = "feishu"
     supports_edit_progress = True
 
+    # LLM: 创建原通道状态、认证服务和有界待送队列；显式关闭与初始化失败分开，不把未知状态当作认证成功。
+    # 函数用途: 初始化飞书接入与私聊密码门，不启动消息服务或发送网络请求。
     def __init__(
         self,
         config: dict[str, Any],
@@ -463,16 +473,18 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         self._token_expires_at: float = 0
 
         # 个人私聊会话锁默认开启；显式 false 才关闭。首次私聊要求设置密码，
-        # 私聊闲置超阈值锁定→密码卡解锁;首次无密码引导设置。群聊永不锁。建服务失败=不锁(fail-open)。
+        # 未设置密码也暂存原消息；群聊不受个人锁影响。初始化失败不允许私聊越过认证门。
+        self._session_lock_enabled = str(config.get("feishu_session_lock_enabled", True)).strip().lower() not in {"0", "false", "no", "off"}
         self._unlock = self._init_session_lock(config)
         self._pending_unlock_messages = (
             FeishuUnlockQueue() if self._unlock is not None else None
         )
 
 
+    # LLM: 开关由构造时显式配置固定；缺数据根或数据库失败返回不可用，由锁门拒绝私聊，不退化成关闭。
+    # 函数用途: 打开原私聊密码库与解锁服务，失败只记类型，不记录凭据或回调正文。
     def _init_session_lock(self, config: dict[str, Any]) -> Any:
-        enabled = config.get("feishu_session_lock_enabled", True)
-        if str(enabled).strip().lower() not in {"1", "true", "yes", "on"}:
+        if not self._session_lock_enabled:
             return None
         if not self.my_agent_home:
             return None
@@ -486,7 +498,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
             db_path = Path(self.my_agent_home) / "session_lock" / "private_chat_locks.db"
             return UnlockService(SessionLockStore(db_path), idle_limit_seconds=idle)
         except Exception as exc:
-            logger.warning(f"会话锁初始化失败(不启用,消息照常处理): {type(exc).__name__}: {exc}")
+            logger.warning("会话锁初始化失败，私聊将等待服务恢复: %s", type(exc).__name__)
             return None
 
 
@@ -622,12 +634,13 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
                 logger.warning("飞书机器人身份暂不可用；群聊未派发，30 秒后可重试")
             return self._bot_open_id
 
+    # LLM: WS/webhook 共用此入口；已启用时未设密码不能分发，设置成功只沿原队列继续，不创建第二任务。
+    # 函数用途: 在模型与工具入口之前执行个人私聊认证门，保留正常群聊和显式关闭行为。
     def _session_locked_gate(self, msg: IncomingMessage) -> bool:
         """个人私聊会话锁门。
 
-        还没有密码时，设置卡是首次引导，当前消息照常处理；只有已经设过密码且
-        因闲置进入锁定态时，才拦住消息并要求解锁。群聊、未启用或锁服务异常
-        均不拦普通消息。
+        未设置密码与闲置锁定都暂存原消息，设置/解锁成功后续送。
+        群聊、显式关闭不拦截；启用但服务异常时拒绝私聊分发。
         """
         return _session_message_is_locked(self, msg)
 

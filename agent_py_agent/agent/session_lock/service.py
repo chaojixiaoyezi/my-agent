@@ -1,3 +1,5 @@
+# LLM: 私聊密码状态只有原 SessionLockStore 一个事实源；首设与闲置状态独立，接口不返回密码，发送告警不更新用户活跃。
+# 模块用途: 提供密码设置、闲置状态与解锁验证，供通道入站门决定是否继续处理消息。
 """个人私聊闲置锁 + 密码解锁服务(
 
 个人私聊闲置超过阈值(默认 3h)后锁定,需密码解锁;群聊不锁。首次没密码时引导设置。
@@ -43,6 +45,8 @@ class UnlockStatus:
         }
 
 
+# LLM: 只维护密码库、用户消息活跃和解锁失败节流；状态查询只读，不授予任务、模型或插件权限。
+# 类用途: 核对个人会话是否需要首设或解锁，成功后记录该用户活跃并清除失败计数。
 class UnlockService:
     def __init__(
         self,
@@ -77,21 +81,24 @@ class UnlockService:
             return
         self.store.record_activity(user_id)
 
+    # LLM: 是否需要首设只读取原密码库，与活跃计时独立；查询不创建活跃记录，不将无密码视为已认证。
+    # 函数用途: 返回个人会话的闲置锁和首设要求，群聊不受个人密码门影响。
     def status(self, user_id: str, *, is_group: bool = False) -> UnlockStatus:
         """群聊永不闲置锁;个人私聊闲置超阈值后锁定。"""
         if is_group or not user_id:
             return UnlockStatus(locked=False, idle_seconds=0.0, requires_password_setup=False)
+        requires_setup = not self.store.has_password(user_id)
         last = self.store.last_activity(user_id)
         if last is None:
             # 首次接触:还没锁,活跃从现在起算。
-            return UnlockStatus(locked=False, idle_seconds=0.0, requires_password_setup=False)
+            return UnlockStatus(locked=False, idle_seconds=0.0, requires_password_setup=requires_setup)
         idle = time.time() - last
         if idle <= self._idle_limit_seconds:
-            return UnlockStatus(locked=False, idle_seconds=idle, requires_password_setup=False)
+            return UnlockStatus(locked=False, idle_seconds=idle, requires_password_setup=requires_setup)
         return UnlockStatus(
             locked=True,
             idle_seconds=idle,
-            requires_password_setup=not self.store.has_password(user_id),
+            requires_password_setup=requires_setup,
         )
 
     # -- 暴破防护 --------------------------------------------------------------

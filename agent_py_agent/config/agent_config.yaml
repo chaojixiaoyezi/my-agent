@@ -635,7 +635,8 @@ feishu_connection_mode: "long_connection"
 # 留空时沿用系统里 `HTTPS_PROXY` 一类的环境变量；在 TUN/代理环境下直连飞书 WS 网关不通时，需要在这里显式填代理地址。
 # （安全边界：只能由用户在配置文件里改，模型不能改）
 feishu_ws_proxy: ""
-# 个人私聊会话锁：默认开启；首次私聊发设置卡但仍处理本条消息，设置后闲置 3 小时才要求解锁。
+# 个人私聊会话锁：默认开启；未设置密码先发设置卡并暂存原消息，设置成功后按顺序继续。
+# 设置后闲置 3 小时要求解锁；卡片/锁服务异常不放行。群聊不锁，显式 false 关闭个人密码门。
 feishu_session_lock_enabled: true
 # 个人私聊连续 3 小时没有用户新消息后锁定；群聊不锁。
 feishu_personal_idle_lock_seconds: 10800

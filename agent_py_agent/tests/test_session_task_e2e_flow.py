@@ -122,7 +122,7 @@ def _target_thread() -> object:
         thread_id=_TARGET_THREAD_ID,
     )
     return SimpleNamespace(
-        thread_id=_TARGET_THREAD_ID, status="active", channel_bindings=(binding,), title="B"
+        thread_id=_TARGET_THREAD_ID, status="active", channel_bindings=(binding,), title="B", metadata={}
     )
 
 

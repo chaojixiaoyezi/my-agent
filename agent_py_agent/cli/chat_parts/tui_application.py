@@ -10,11 +10,9 @@ from prompt_toolkit.application import Application
 # LLM: 只接管重绘触发的计时，输入、终端 raw 生命周期、后台任务和 renderer 仍由父类负责；依赖 3.0 的生命周期字段。
 # 类用途: 为聊天界面保留帧率合并，同时保证等待间隔不受系统时间校正影响。
 class TuiApplication(Application):
-    # LLM: 单调时间基线仅属于当前 Application，不持久化、不复用墙钟的 _last_redraw_time。
-    # 函数用途: 创建终端应用并初始化最近一次实际重绘的单调时间。
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._tui_last_redraw_monotonic = 0.0
+    # LLM: 不拦截依赖构造参数；初始标量为只读默认，实际渲染后赋到当前实例，绝不共享可变状态或墙钟基线。
+    # 字段用途: 保留父类原构造接口，首次重绘立即安排，后续帧使用实例自己的单调时间。
+    _tui_last_redraw_monotonic: float = 0.0
 
     # LLM: 可从 worker 调用；先合并 invalidate，再在原事件循环定时执行，不阻塞输入，退出时由父类任务生命周期清理。
     # 函数用途: 在最多一个帧间隔后安排重绘，避免墙钟倒退让 _invalidated 长时间不能清除。

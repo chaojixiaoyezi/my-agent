@@ -191,30 +191,35 @@ def test_handle_password_action_dispatch(tmp_path):
 # ── 适配器锁门:首次要求设密码 ──
 
 
-def test_adapter_first_contact_sends_setup_card_but_keeps_message(tmp_path):
-    import tempfile
-
+def test_adapter_first_contact_requires_setup_then_resumes_message(tmp_path):
     from agent.adapter.feishu import FeishuAdapter
     from agent.adapter.protocol import IncomingMessage
 
-    a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
-    sent = []
-    a._send_password_card = lambda uid, mode: sent.append((uid, mode))
-
-    def _msg(ct="p2p"):
-        return IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="m",
-                               metadata={"feishu_chat_type": ct})
-
-    # 首次(无密码)→ 发设置卡，但首条真实消息仍进入 Agent
-    assert a._session_locked_gate(_msg()) is False
+    adapter = FeishuAdapter(config={"my_agent_home": str(tmp_path)})
+    sent, received = [], []
+    ready = Event()
+    adapter._send_password_card = lambda uid, mode: sent.append((uid, mode))
+    adapter.on_message(lambda message: (received.append(message), ready.set()))
+    original = IncomingMessage(channel="feishu", user_id="ou_x", content="hi", message_id="first",
+                               metadata={"feishu_chat_type": "p2p"})
+    assert adapter._session_locked_gate(original) is True
     assert sent == [("ou_x", "set")]
-    # 设密码后 → 放行(未锁)
-    a._unlock.set_password("ou_x", "Abcd1234")
-    sent.clear()
-    assert a._session_locked_gate(_msg()) is False
-    assert sent == []
-    # 群聊永不拦
-    assert a._session_locked_gate(_msg("group")) is False
+    assert received == []
+    response = adapter._handle_card_action({"value": {"session_lock_action": "pwd_set", "user_id": "ou_x"},
+                                           "form_value": {"pwd": "Abcd1234"}, "operator_open_id": "ou_x"})
+    assert response["toast"]["type"] == "success"
+    assert ready.wait(2)
+    assert received == [original]
+    assert adapter._unlock.store.has_password("ou_x")
+    deadline = time.monotonic() + 2
+    while adapter._pending_unlock_messages.is_draining("ou_x") and time.monotonic() < deadline:
+        time.sleep(.01)
+    following = IncomingMessage(channel="feishu", user_id="ou_x", content="next", message_id="second",
+                                metadata={"feishu_chat_type": "p2p"})
+    assert adapter._session_locked_gate(following) is False
+    group = IncomingMessage(channel="feishu", user_id="ou_x", content="group", message_id="group",
+                            metadata={"feishu_chat_type": "group"})
+    assert adapter._session_locked_gate(group) is False
 
 
 def test_card_action_returns_inplace_replacement_not_new_message(tmp_path):

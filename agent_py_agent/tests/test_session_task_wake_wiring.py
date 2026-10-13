@@ -29,6 +29,7 @@ from agent_py_agent.agent.agent_core.runtime.turn_trigger import (
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation.authority import CONVERSATION_SESSION_TASK_ID_ATTR
 from agent_py_agent.agent.conversation.runtime import (
+    BackgroundRunRequest,
     _background_model_inputs,
     _background_task_attributes,
 )
@@ -52,8 +53,10 @@ def _wake(session_task_id: str = _TASK_ID, *, origin: str = _SENDER) -> dict:
     }
 
 
-def _request(wake: dict) -> SimpleNamespace:
-    return SimpleNamespace(task_id="req-target-1", reason="session_task", wake_signal=wake)
+# LLM: 背景请求使用产品的正式字段默认值，新增宿主身份字段也不能靠不完整 namespace 绕过。
+# 函数用途: 构造原派活唤醒请求，测试属性注入与生产入口同一协议。
+def _request(wake: dict) -> BackgroundRunRequest:
+    return BackgroundRunRequest(thread_id=_TARGET, task_id="req-target-1", reason="session_task", wake_signal=wake)
 
 
 def test_wake_writes_structured_session_task_id(tmp_path) -> None:
