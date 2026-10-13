@@ -40,6 +40,9 @@ DEFAULT_BACKGROUND_ALLOWED_TOOLS = (
     *_BACKGROUND_WORK_TOOLS,
 )
 
+# 后台主代理默认目录补上计划管理；不加入全局“始终直出”豁免集合，前台仍保持原按需加载。
+_BACKGROUND_MANAGEMENT_TOOLS = ("schedule",)
+
 # 发现已经由生产方持久化；上报轮沿既有工具表增加主动投递，仍受 owner/task 和通道路由收紧。
 AUDIT_FINDING_ALLOWED_TOOLS = (
     *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
@@ -198,7 +201,7 @@ def background_tool_policy_decision(
         sources = ["agent_config.background_main_agent_allowed_tools"]
     else:
         profile, default_tools = _default_profile_for_request(request)
-        tools = list(default_tools)
+        tools = list(dict.fromkeys((*default_tools, *_BACKGROUND_MANAGEMENT_TOOLS)))
         sources = [f"default_profile:{profile}"]
     tools = active_model_subagent_tools(tools)
     tools, removed = _apply_policy_limits(tools, request)

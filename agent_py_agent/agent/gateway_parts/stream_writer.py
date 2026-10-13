@@ -9,11 +9,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..common.agent_time import now as display_now
 from ..common.json_io import append_private_text
 from ..common.nofollow_fs import ensure_private_dir
 from ..conversation.channels import (
     project_host_paths_for_channel,
     redact_structured_identifiers,
+    supports_transcript_delivery,
 )
 from ..conversation.compact_progress import normalize_conversation_compact_progress
 from ..conversation.tool_input_progress import public_tool_input_progress
@@ -68,6 +70,8 @@ class BufferedChunkStreamWriter:
     _buffer_chars: int = 0
     _last_flush_at: float = field(default_factory=time.monotonic)
     _verbose_level: str = "off"
+    _im_preview_max_chars: int = 100
+    _display_timezone: str = ""
     _model_segment: list[str] = field(default_factory=list)
     _model_delta_buffer: list[str] = field(default_factory=list)
     _model_delta_chars: int = 0
@@ -107,6 +111,10 @@ class BufferedChunkStreamWriter:
     # LLM: 原 chunk 是公开事件出口；两种投影不改变 payload/顺序，异常只丢展示，不能反噬模型回合。
     # 函数用途: 发布已清洗事件，分别同步同会话的状态条和正文，不扩大审批入口。
     def _write_event(self, event: dict[str, object]) -> None:
+        if self._verbose_level == "stream" and not self.rich_transcript:
+            event = {**event, "preview_max_chars": self._im_preview_max_chars}
+        if not self.rich_transcript and event.get("kind") in {"tool_progress", "assistant_commentary", "model_draft"}:
+            event = {**event, "updated_at": display_now(self._display_timezone).isoformat(timespec="seconds")}
         write_chunk_event(self.chunk_path, event)
         for sink in (self.main_activity_sink, self.transcript_sink):
             if not callable(sink):
@@ -144,11 +152,13 @@ class BufferedChunkStreamWriter:
             if _stream_flush_due(text, self._model_delta_chars, self._last_model_delta_flush_at, self.flush_chars, self.flush_interval_seconds):
                 self._flush_model_deltas()
 
-    # LLM: 详细级别只影响展示字段，不扩大工具权限或改变执行参数。
-    # 函数用途: 规范化本请求的过程显示级别。
-    def set_verbose_level(self, level: str) -> None:
+    # LLM: 详细级别及字符上限消费本请求有效配置，只投影展示，不裁剪内部候选、工具正文或最终结果。
+    # 函数用途: 固定本请求的过程档位、短窗口上限和用户时区，随事件传给 IM 投递端。
+    def set_verbose_level(self, level: str, *, preview_max_chars: int = 100, timezone: str = "") -> None:
         normalized = str(level or "off").strip().lower()
         self._verbose_level = normalized if normalized in {"off", "on", "full", "stream"} else "off"
+        self._im_preview_max_chars = max(1, min(8000, int(preview_max_chars)))
+        self._display_timezone = timezone
 
     # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
     # can call tools. Request payload prose or tool arguments must never choose this scope.
@@ -287,6 +297,19 @@ class BufferedChunkStreamWriter:
                 "progress": progress,
             },
         )
+
+    # LLM: rich transcript 不新增心跳；IM off 也给最小运行状态，不从模型正文判定启用。
+    # 函数用途: 告诉宿主本请求是否需要无输出长工具的状态刷新。
+    @property
+    def tool_liveness_enabled(self) -> bool:
+        return not self.rich_transcript and not supports_transcript_delivery(self.delivery_channel)
+
+    # LLM: 执行器只传数值和工具身份；此入口不 flush 模型缓冲，不伪造 commentary 或更改真实工具状态。
+    # 函数用途: 将长工具心跳写入原 chunk，投递端继续编辑同一条短窗口。
+    def write_tool_liveness(self, event: dict[str, object]) -> None:
+        if self.tool_liveness_enabled:
+            self._write_event({"kind": "tool_progress", "verbose_level": self._verbose_level,
+                               "heartbeat": True, "preview_max_chars": self._im_preview_max_chars, "progress": dict(event)})
 
     # LLM: Sanitize the full thinking before preview clipping and archive through the bound
     # owner/thread sink. Events carry only preview/ref; display failure never changes model state.

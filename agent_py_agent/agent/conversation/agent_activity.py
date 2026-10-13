@@ -92,7 +92,7 @@ class BackgroundMainActivitySink:
         self._publish("running", "处理中")
 
     # LLM: 审批仍由原会话桥核对完整调用与当前 claim；这里仅发布等待阶段，Goal 暂停不撤销审批，中断令牌继续透传。
-    # 函数用途: 将后台主代理具体工具请求交给所属 TUI，决定后继续原调用，不自动放行。
+    # 函数用途: 将后台主代理具体工具请求交给原 TUI/私人 IM 审批，决定后继续原调用，不自动放行。
     def request_permission(self, request_value: dict[str, object], *, cancellation_token: object | None = None) -> dict[str, object]:
         self._publish("waiting_permission", "等待工具审批")
         try:

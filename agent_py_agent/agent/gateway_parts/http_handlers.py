@@ -480,6 +480,8 @@ def _read_public_progress_events(
             ).strip()
             if text:
                 events.append({"kind": str(row["kind"]), "text": text,
+                               **_progress_preview_limit(row),
+                               **_progress_update_time(row),
                                **({"level": "stream"} if row.get("verbose_level") == "stream" else {})})
             continue
         if row.get("kind") == "permission_requested":
@@ -491,10 +493,37 @@ def _read_public_progress_events(
             continue
         level = str(row.get("verbose_level") or "off")
         progress = row.get("progress")
+        if row.get("heartbeat") is True and isinstance(progress, dict) and progress.get("wait_state") == "handler_result":
+            events.append({"level": "stream" if level == "stream" else "minimal", "kind": "tool_liveness",
+                           **{key: progress[key] for key in ("call_id", "round", "call_index", "tool", "phase", "status", "elapsed_seconds", "wait_state") if key in progress},
+                           **_progress_preview_limit(row), **_progress_update_time(row)})
+            continue
         if level not in {"on", "full", "stream"} or not isinstance(progress, dict):
             continue
-        events.append({"level": level, **progress})
+        events.append({"level": level, **progress, **_progress_preview_limit(row), **_progress_update_time(row)})
     return events, min(len(lines), since + 200)
+
+
+# LLM: 字符上限只由宿主 stream event 投影，不能从模型正文提取；畸形字段不下发，原记录和候选正文不改变。
+# 函数用途: 把实际配置的短窗口上限带到 IM 投递端，防止配置只在一端生效。
+def _progress_preview_limit(row: dict[str, object]) -> dict[str, int]:
+    value = row.get("preview_max_chars")
+    return {"preview_max_chars": value} if type(value) is int and 1 <= value <= 8000 else {}
+
+
+# LLM: 更新时间来自宿主 chunk 事件，不采纳模型文字；合法带时区 ISO 时间才能进入公开投影。
+# 函数用途: 将实际执行侧更新时间交给短窗口，避免用适配器的轮询时间伪装执行端活动。
+def _progress_update_time(row: dict[str, object]) -> dict[str, str]:
+    from datetime import datetime
+
+    value = row.get("updated_at")
+    if not isinstance(value, str) or len(value) > 40:
+        return {}
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return {}
+    return {"updated_at": value} if parsed.tzinfo is not None else {}
 
 
 # LLM: 只接受结构化 permission 对象里的工具名和展示摘要；摘要经与最终回复同一的公开投影和宿主路径收敛并限长。

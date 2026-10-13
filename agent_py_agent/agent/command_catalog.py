@@ -15,7 +15,7 @@ from .command_arguments import ArgumentSpec, CommandActionSpec
 # LLM: 尾部正则保留核心自由正文，actions 描述结构化参数；两者不能从 usage/summary 反推或互相替代。
 #   sensitive_input 是声明事实：命令正文可能带管理员密码，入口不得持久化原文（适配器不进持久入站队列、
 #   TUI 不写输入历史、Gateway 回执只存脱敏正文）；它不授予任何权限。
-# 类用途: 保存一种命令的名称、别名、帮助变体、输入行为及可选会话语法，不持有处理器或运行状态。
+# 类用途: 保存命令语法、角色/入口可见性和用法，帮助与执行共同读取这些声明，不持有处理器或运行状态。
 @dataclass(frozen=True)
 class CommandSpec:
     name: str
@@ -29,12 +29,18 @@ class CommandSpec:
     namespace_separators: tuple[str, ...] = ()
     actions: tuple[CommandActionSpec, ...] = ()
     sensitive_input: bool = False
+    admin_only: bool = False
+    private_only: bool = False
+    surfaces: tuple[str, ...] = ()
+    available_locked: bool = False
+    admin_actions: tuple[str, ...] = ()
 
 
 COMMAND_CATALOG = (
     CommandSpec("delegate", "/delegate enable|disable|status", "当天自动委派任务，部署时区零点自动关闭（IM）",
-                submit_on_enter=True, conversation_suffix=r"(?:\s+(\S+))?\s*$"),
-    CommandSpec("help", "/help", "查看帮助和可用命令", submit_on_enter=True),
+                submit_on_enter=True, conversation_suffix=r"(?:\s+(\S+))?\s*$", surfaces=("im",)),
+    CommandSpec("help", "/help [命令]", "查看本身份的可用命令和单项用法", submit_on_enter=True,
+                conversation_suffix=r"(?:\s+(.*))?$", available_locked=True),
     CommandSpec(
         "sessions",
         "/sessions",
@@ -51,6 +57,7 @@ COMMAND_CATALOG = (
         "给同一用户下的另一个本地会话发消息（第一期仅管理员）",
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
+        admin_only=True,
     ),
     CommandSpec(
         "status",
@@ -88,6 +95,7 @@ COMMAND_CATALOG = (
         ),
         conversation_suffix=r"(?:\s+(.*))?$",
         sensitive_input=True,
+        private_only=True, available_locked=True,
     ),
     CommandSpec(
         "approve",
@@ -95,6 +103,7 @@ COMMAND_CATALOG = (
         "在 IM 私聊中批准本会话当前唯一等待确认的工具操作（仅本次）",
         conversation_suffix=r"(?:\s+(.*))?$",
         sensitive_input=True,
+        admin_only=True, private_only=True,
     ),
     CommandSpec(
         "deny",
@@ -103,6 +112,7 @@ COMMAND_CATALOG = (
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
         sensitive_input=True,
+        private_only=True,
     ),
     CommandSpec(
         "permissions",
@@ -157,6 +167,7 @@ COMMAND_CATALOG = (
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
+        admin_actions=("owner",),
     ),
     CommandSpec(
         "restart",
@@ -165,6 +176,7 @@ COMMAND_CATALOG = (
         help_variants=(("/restart <原因>", "附带一句原因，写进 Gateway 日志"),),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
+        admin_only=True,
     ),
     CommandSpec(
         "endtask",
@@ -176,6 +188,7 @@ COMMAND_CATALOG = (
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
+        admin_only=True,
     ),
     CommandSpec(
         "wakes",
@@ -188,6 +201,7 @@ COMMAND_CATALOG = (
         ),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(.*))?$",
+        admin_only=True,
     ),
     CommandSpec(
         "goal",
@@ -204,6 +218,8 @@ COMMAND_CATALOG = (
         "verbose",
         "/verbose [off|on|full|stream]",
         "查看或切换详细过程显示",
+        help_variants=(("/verbose stream", "同一条短过程消息原地更新，默认最多 100 字符；完成后另发完整结果"),
+                       ("/verbose on", "逐步展示工具进展"), ("/verbose off", "关闭详细过程，长工具仍给极简状态与更新时间")),
         aliases=("v",),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(\S+))?\s*$",
@@ -326,6 +342,7 @@ COMMAND_CATALOG = (
                 ArgumentSpec("source", "新版本本地包路径", required=True, path=True),
             ), available=False),
         ),
+        admin_only=True,
     ),
 )
 
@@ -343,6 +360,55 @@ def _command_index(commands: tuple[CommandSpec, ...]) -> Mapping[str, CommandSpe
 
 
 COMMAND_INDEX = _command_index(COMMAND_CATALOG)
+
+
+# LLM: 角色和入口是调用方已认证的结构化事实；本类型不解析用户正文、不读取密钥、不授予任何身份。
+# 类用途: 给帮助、补全和实际控制提供同一份可见性上下文。
+@dataclass(frozen=True)
+class CommandAccessContext:
+    surface: str
+    is_admin: bool
+    private_chat: bool = False
+    locked: bool = False
+
+
+# LLM: 帮助与实际控制共享声明；作用域仍由各控制服务复核，隐藏菜单不能替代鉴权，未知名称由原不支持入口处理。
+# 函数用途: 判断某身份是否能在当前入口使用指定命令或管理员子动作。
+def command_access_error(spec: CommandSpec, context: CommandAccessContext, action: str = "") -> str:
+    if context.locked and not spec.available_locked:
+        return "COMMAND_REQUIRES_UNLOCK"
+    if spec.admin_only and not context.is_admin or action in spec.admin_actions and not context.is_admin:
+        return "COMMAND_ADMIN_REQUIRED"
+    if spec.surfaces and context.surface not in spec.surfaces:
+        return "COMMAND_SURFACE_UNSUPPORTED"
+    if spec.private_only and (context.surface != "im" or not context.private_chat):
+        return "COMMAND_PRIVATE_CHAT_REQUIRED"
+    if context.surface == "im" and spec.conversation_suffix is None and not spec.namespace_separators:
+        return "COMMAND_SURFACE_UNSUPPORTED"
+    return ""
+
+
+# LLM: 只投影公共目录和权限声明；每项用法不调用模型或查询任务，管理员子动作按结构字段过滤，不从 summary 猜权限。
+# 函数用途: 生成本身份的简明帮助或单项说明，未解锁只列基础入口。
+def render_command_help(context: CommandAccessContext, topic: str = "") -> str:
+    topic = topic.strip().lstrip("/")
+    selected = COMMAND_INDEX.get(topic) if topic else None
+    if topic and (selected is None or command_access_error(selected, context)):
+        return "当前身份或入口没有这个可用命令。输入 /help 查看列表。"
+    role = "未解锁，基础帮助" if context.locked else "管理员" if context.is_admin else "普通用户"
+    lines = [f"{role} · 可用命令："]
+    for spec in ((selected,) if selected else COMMAND_CATALOG):
+        if command_access_error(spec, context):
+            continue
+        variants = ((spec.usage, spec.summary), *spec.help_variants) if selected else ((spec.usage, spec.summary),)
+        for usage, summary in variants:
+            parts = usage.split()
+            action = parts[1] if len(parts) > 1 else ""
+            if not command_access_error(spec, context, action):
+                lines.append(f"{usage}：{summary}")
+    if context.locked:
+        lines.append("请在机器人私聊中设置或验证个人解锁密码后继续任务。")
+    return "\n".join(lines)
 _CONVERSATION_MATCHERS = tuple(
     (
         spec,

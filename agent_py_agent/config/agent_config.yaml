@@ -604,6 +604,11 @@ adapter_workspace: ""
 feishu_app_id: ""
 # 群聊只在单独 @机器人时回复，@全员或未 @不触发；私聊不受此设置影响。
 feishu_group_require_bot_mention: true
+# /verbose stream 同一条过程消息每次最多展示多少字符，默认 100；有效范围 1～8000，最终答复不受影响。
+im_stream_preview_max_chars: 100
+# IM 无输出长工具的存活状态刷新间隔，单位秒，默认 120；verbose off 仅显示极简状态与时间。
+# 0 关闭心跳，有效刷新间隔 1～120 秒；stream 有新正文时仍沿原节流更新，不额外调用 LLM。
+im_stream_heartbeat_seconds: 120.0
 # 飞书自建应用的 App Secret，用于以你的飞书应用身份收发消息。
 # 在飞书开放平台（开发者后台）的「凭证与基础信息」里获取。
 # 只有首次接入飞书或更换应用时才需要填；可以写明文，也可以写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文落到配置文件里。
@@ -655,6 +660,9 @@ qq_app_secret: ""
 #   也可用环境变量 AGENT_TIMEZONE 覆盖（优先级最高）。非法时区串只告警并回退，不会崩。
 # - week_start: 周起始（monday/sunday/saturday）；美国/中东常用 sunday/saturday，影响“本周”范围计算。
 timezone: ""
+# 新 IM 创建的定时计划默认 local（内部记录）；origin 回原布置者，none 同样不逐轮外发。
+# 提醒、告警和定时报表可在计划/规则的 delivery.mode 明确设置 origin；现有计划与已预留运行不随默认值改变。
+scheduler_im_default_delivery_mode: local
 # 一周从星期几开始，影响我理解「本周」「这周」时算的日期范围。
 # 可选 monday（周一）或 sunday（周日）；如果你习惯按周日开始算一周，就改成 sunday。
 week_start: "monday"

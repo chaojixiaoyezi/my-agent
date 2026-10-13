@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,25 @@ from agent_py_agent.agent.gateway_parts.control_service import GatewayControlSco
 from agent_py_agent.agent.gateway_parts.http_handlers import read_gateway_client_notices
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+
+
+def test_child_session_cache_requires_new_decision_after_attempt_changes(background, monkeypatch):
+    from agent_py_agent.agent.conversation import agent_tool_approval as bridge
+    from agent_py_agent.agent.conversation.tool_approval_scope import ToolApprovalScope
+
+    ctx = background
+    current = [ToolApprovalScope(ctx.task_id, ctx.task_id, ctx.thread.thread_id, "subagent", "孩子", True,
+                                 execution_attempt_id="execution-a")]
+    published = []
+    monkeypatch.setattr(bridge, "_request_scope", lambda *_args: current[0])
+    monkeypatch.setattr(bridge, "publish_agent_tool_approval", lambda *_args, **_kwargs: published.append(current[0]) or object())
+    monkeypatch.setattr(bridge, "wait_for_agent_tool_approval", lambda *_args, **_kwargs:
+        ToolApprovalDecision(ctx.request.permission_id, "approved_session" if len(published) == 1 else "denied"))
+    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "approved_session"
+    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "approved"
+    current[0] = replace(current[0], execution_attempt_id="execution-b")
+    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "denied"
+    assert len(published) == 2
 
 
 # LLM: 夹具使用真实 owner store、任务关联和 claim；只替代模型调用，不伪造审批结果或权限。

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..common.path_segments import safe_path_segment
+from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
 from .home_layout import MyAgentHomePaths
 from .owner_policy_seed_payloads import (
     default_memory_policy_payload,
@@ -269,7 +270,7 @@ def _owner_home_result(root: Path, identity: OwnerIdentity, home_dir: Path) -> O
 
 # LLM: ensure_owner_home 按这份清单建目录（副作用在调用方）。config/ 是 H3 宿主配置目录（capability_config.yaml 的唯一用户位置，
 #   对模型工具只读）：提前建出来，Linux 命令沙箱才能把它挂成只读，模型命令不能抢先建目录再写（bwrap 只能挂已存在的路径）。
-# 函数用途: 列出新建 owner home 时要确保存在的目录。
+# 函数用途: 列出新建 owner home 的目录，提前建立私密交互保护挂载点，防止旧进程看到后来创建的密钥。
 def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
     return (
         result.home_dir,
@@ -287,6 +288,7 @@ def _owner_directories(result: OwnerHomeResult) -> tuple[Path, ...]:
         result.artifacts_dir,
         result.audit_dir,
         result.data_dir,
+        result.home_dir.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS),
         result.artifact_backups_dir,
         result.scheduler_dir,
         result.logs_dir,

@@ -1,8 +1,55 @@
 # LLM: 群聊触发只看飞书结构化 mention 与探针取得的 bot open_id；不得按正文、昵称或 @all 文案匹配。
-# 模块用途: 共用 webhook/WS 的直接 @机器人判据，并保留结构化 post 内的 at 节点。
+# 模块用途: 共用 webhook/WS 的直接 @机器人判据与命令前提及规范化，保留其它用户和命令参数。
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+
+
+# LLM: 只移除可信 bot ID 对应的前置 mention 或 post at 节点，展示昵称不授予控制权；在持久化和密码判断之前调用。
+# 函数用途: 让群里先 @机器人再发斜杠命令沿原解析入口执行，不改其它人的提及和参数。
+def command_content_without_bot_mention(message: dict[str, object], bot_open_id: str) -> object:
+    raw = message.get("content")
+    if not bot_open_id:
+        return raw
+    try:
+        content = json.loads(raw) if isinstance(raw, str) else deepcopy(raw)
+    except (TypeError, ValueError):
+        return raw
+    if not isinstance(content, dict):
+        return raw
+    kind = message.get("message_type") or message.get("msg_type") or "text"
+    if kind == "text":
+        keys = {row["key"] for row in normalize_mentions(message.get("mentions"))
+                if row["open_id"] == bot_open_id and row["key"] and row["key"] not in {"@_all", "@all"}}
+        text = str(content.get("text") or "").lstrip()
+        while (key := next((key for key in sorted(keys, key=len, reverse=True)
+                            if text.startswith(key) and (len(text) == len(key) or text[len(key)].isspace() or text[len(key)] == "/")), "")):
+            text = text[len(key):].lstrip()
+        content["text"] = text
+    elif kind == "post":
+        for locale in [content, *content.values()]:
+            if not isinstance(locale, dict) or not isinstance(locale.get("content"), list):
+                continue
+            locale["content"] = _post_without_leading_bot_nodes(locale["content"], bot_open_id)
+    return content
+
+
+# LLM: 只移除头部精确机器人节点；第一段其它实质内容之后保持所有 at/text 节点和原分行。
+# 函数用途: 将 post 行逐个规范化，避免命令转换入口深嵌套，同时保留命令参数中的其它人。
+def _post_without_leading_bot_nodes(content: list, bot_open_id: str) -> list:
+    leading = True
+    rows = []
+    for row in content:
+        nodes = []
+        for node in row if isinstance(row, list) else []:
+            if leading and isinstance(node, dict) and node.get("tag") == "at" and node.get("user_id") == bot_open_id:
+                continue
+            nodes.append(node)
+            if not (isinstance(node, dict) and node.get("tag") == "text" and not str(node.get("text") or "").strip()):
+                leading = False
+        rows.append(nodes)
+    return rows
 
 
 # LLM: SDK 对象和 webhook 字典同归一为 key/open_id；不使用展示 name 授权，异常列表视为没有直接 mention。
@@ -15,6 +62,8 @@ def normalize_mentions(value: object) -> list[dict[str, str]]:
         identity = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
         key = item.get("key", "") if isinstance(item, dict) else getattr(item, "key", "")
         open_id = identity.get("open_id", "") if isinstance(identity, dict) else getattr(identity, "open_id", "")
+        if not open_id and isinstance(item, dict):
+            open_id = item.get("open_id", "")
         rows.append({"key": str(key or ""), "open_id": str(open_id or "")})
     return rows
 

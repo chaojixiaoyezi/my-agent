@@ -1,5 +1,5 @@
 # LLM: HTTP分发唯一结构化路由表；G2a观察复用template/access_tier，禁止并排维护计数白名单；原处理器授权/副作用保持。
-# 模块用途: 声明Gateway实际路由与四档属性，使观察键有界且不含请求编号。
+# 模块用途: 声明Gateway实际路由与四档属性，使观察键有界且不含请求编号；私人交互处理器额外要求真实宿主凭据。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -30,6 +30,7 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/ask", "_handle_ask", "credential"),
         GatewayHTTPRoute("/control", "_handle_control", "credential"),
         GatewayHTTPRoute("/client/memory", "_handle_client_memory", "credential"),
+        GatewayHTTPRoute("/client/private-interaction", "handle_private_interaction", "credential", ".private_interaction_service"),
         GatewayHTTPRoute("/client/models", "handle_client_models", "credential", ".model_profile_service"),
         GatewayHTTPRoute("/client/plugins", "handle_client_plugins", "credential", ".plugin_command_service"),
         GatewayHTTPRoute("/plugin-host/query", "handle_plugin_host_query", "plugin_token", "..plugin_host_api"),

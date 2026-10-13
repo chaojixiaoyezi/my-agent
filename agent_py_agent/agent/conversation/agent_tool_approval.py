@@ -51,7 +51,7 @@ class AgentToolApprovalHandle:
     scope_valid: Callable[[], bool] = field(repr=False, compare=False)
 
 
-# LLM: 主/子后台模型 sink 共用精确审批入口；会话缓存也先校验 canonical 归属，不允许缓存跨 run 或 claim 扩权。
+# LLM: 主/子后台模型 sink 共用精确审批入口；先校验 canonical 归属，缓存包含 main claim/child attempt，跨执行代次必须重新取得精确决定。
 # 类用途: 把审批请求发布到原会话账本，并等待决定、取消或接收方失联。
 class AgentToolApprovalSinkMixin:
     agent: object
@@ -74,7 +74,7 @@ class AgentToolApprovalSinkMixin:
             if _cancelled(cancellation_token):
                 return ToolApprovalDecision(request.permission_id, "cancelled").to_dict()
             scope = _request_scope(self.agent, self.task_id, self.thread_id, request)
-            session_key = "" if forced else f"{scope.run_id}:{scope.claim_id}:{_approval_session_key(request)}"
+            session_key = () if forced else (scope.run_id, scope.claim_id, scope.execution_attempt_id, _approval_session_key(request))
             approved_keys = getattr(self, "_approved_session_keys", set())
             if session_key and session_key in approved_keys:
                 return ToolApprovalDecision(
@@ -116,7 +116,7 @@ class AgentToolApprovalSinkMixin:
 
 
 # LLM: 发布先验证 canonical run/thread/root 与有效执行，再原子创建完整请求；main claim 随记录冻结，不更换旧审批身份。
-# 函数用途: 发布一条主/子后台工具审批，供所属用户界面发现。
+# 函数用途: 发布一条主/子后台工具审批，供所属用户界面发现；可选 IM 卡片仍引用同一记录。
 def publish_agent_tool_approval(
     agent: object,
     *,
@@ -137,14 +137,21 @@ def publish_agent_tool_approval(
             raise ValueError("subagent approval identity conflict")
         if not report.payload:
             write_json_file_atomic(path, payload)
-    return AgentToolApprovalHandle(
+    handle = AgentToolApprovalHandle(
         scope, path, request, created_at,
         partial(tool_approval_scope_is_current, agent, scope),
     )
+    from .im_tool_approval import publish_im_tool_approval
+
+    try:
+        publish_im_tool_approval(agent, handle)
+    except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+        pass  # IM 不可用仍保留原 TUI/Web 消费路径，不伪造已送达或用户批准。
+    return handle
 
 
 # LLM: 守门永远是第一句，先于任何自主provider；取消与归属失效优先，原固定选项和无consumer关闭式失败保持。
-# 函数用途: 等待主/子原调用的用户决定，同时阻止插件确认被自主轮询批准。
+# 函数用途: 等待主/子原调用的用户决定，TUI 或有效私人卡均可承接；插件确认仍不可被自主轮询批准。
 def wait_for_agent_tool_approval(
     handle: AgentToolApprovalHandle,
     *,
@@ -179,7 +186,9 @@ def wait_for_agent_tool_approval(
                 return decision
         now = time.time()
         lease_seen_at = _consumer_seen_at(handle.path.parent, handle.scope.root_task_id)
-        lease_fresh = now - lease_seen_at <= max(1.0, float(consumer_lease_seconds))
+        from .im_tool_approval import im_approval_wait_live
+
+        lease_fresh = now - lease_seen_at <= max(1.0, float(consumer_lease_seconds)) or im_approval_wait_live(report.payload, now)
         if not lease_fresh and now - handle.created_at >= max(0.0, float(discovery_seconds)):
             _remove_exact_record(handle)
             return ToolApprovalDecision(handle.request.permission_id, "unavailable")

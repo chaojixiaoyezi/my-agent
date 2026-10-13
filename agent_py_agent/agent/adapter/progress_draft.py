@@ -14,6 +14,8 @@ class GatewayProgressBatch:
     next_cursor: int
     mode: str = "append"
     replace_content: bool = False
+    preview_max_chars: int | None = None
+    updated_at: str = ""
 
     # LLM: 旧 tuple 解包只投影消息和游标；新的 stream mode 由 worker 显式读取。
     # 函数用途: 保持原 poll_progress 调用方可以解包批次。
@@ -22,7 +24,7 @@ class GatewayProgressBatch:
         yield self.next_cursor
 
 
-# LLM: mode 与 ID 来自已保存记录/已授权 Gateway 批次；合并上限 8000 字符，节流只影响展示，final 仍照常轮询。
+# LLM: mode/ID 来自原记录/已授权批次；展示上限读取原 worker 配置，已冻结外发重放不改正文，节流不改变 final 或内部全文。
 # 函数用途: 合并并发送一次进度，持久化失败沿原 dispatch 恢复，不重新创建另一条预览。
 def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch):
     draft = dict(record.progress_draft)
@@ -38,7 +40,15 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
         if not batch.messages:
             return worker._commit_progress(record, batch.next_cursor) if batch.next_cursor != record.progress_cursor else record
         prefix = "" if batch.replace_content else str(draft.get("content") or "")
-        text = (prefix + "\n" + "\n".join(batch.messages)).strip()[-8000:]
+        limit = batch.preview_max_chars if batch.preview_max_chars is not None else worker.stream_preview_max_chars
+        from datetime import datetime
+
+        footer = ""
+        if batch.updated_at:
+            footer = "\n更新于 " + datetime.fromisoformat(batch.updated_at).strftime("%H:%M:%S")
+        limit = max(1, min(8000, int(limit)))
+        content = (prefix + "\n" + "\n".join(batch.messages)).strip()
+        text = (content[-max(0, limit - len(footer)):] if limit > len(footer) else "") + footer[-limit:]
         next_cursor = batch.next_cursor
         draft.update(mode="stream", content=text)
         updated = replace(record, progress_draft=draft)

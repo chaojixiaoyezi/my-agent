@@ -50,6 +50,7 @@ from ..tooling.sandbox import (
     find_bwrap,
     probe_sandbox,
 )
+from ..tooling.write_boundary import SandboxWriteProtection, ordered_write_scope_roots
 from . import landlock_launcher
 from .process_run import SandboxProcessOptions, run_sandbox_process
 
@@ -117,7 +118,8 @@ class AttemptSandboxSpec:
     protected_persona_root: Path | None = None  # SOUL/USER/AGENTS.md 强制只读
     extra_write_roots: tuple[Path, ...] = ()  # __sandbox_write_roots 结构化授权根
     public_read_roots: tuple[Path, ...] = ()  # __sandbox_read_roots 只读根
-    protected_write_paths: tuple[Path, ...] = ()  # forbidden_write_roots，最后覆盖为只读
+    protected_write_paths: tuple[Path, ...] = ()  # 锁、安装与宿主状态，最后绝对只读
+    write_scope_denied_roots: tuple[Path, ...] = ()  # 普通祖先只读根，可被更具体正式写根覆盖
     # Standalone attempt views are writable by definition. Production shell sets False whenever
     # an explicit write-boundary list exists, so a read-only cwd never becomes an implicit RW root.
     implicit_attempt_write_roots: bool = True
@@ -318,6 +320,7 @@ class AttemptExecutionSandbox:
             bwrap_path=self.spec.bwrap_path,
             protected_persona_root=self.spec.protected_persona_root,
             read_only_paths=self.spec.protected_write_paths,
+            write_scope_denied_roots=self.spec.write_scope_denied_roots,
             full_access=self.spec.full_access,
             network_access=self.spec.network_access,
             read_only_root=self.spec.read_only_root,
@@ -369,7 +372,7 @@ class AttemptExecutionSandbox:
             shared=self.spec.shared_workspace,
             protected_persona_root=self.spec.protected_persona_root,
             write_roots=self.spec.extra_write_roots,
-            protected_write_paths=self.spec.protected_write_paths,
+            write_protection=SandboxWriteProtection(self.spec.protected_write_paths, self.spec.write_scope_denied_roots),
             implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
             full_access=self.spec.full_access,
         ), *_spec_rules(self.spec)])
@@ -397,7 +400,8 @@ class AttemptExecutionSandbox:
     # ------------------------------------------------------ macOS SBPL 构造
     # LLM: The profile is a pure projection of structured sandbox facts. Full Access omits the
     # broad write deny but still applies precise persona/control-path denies.
-    # 函数用途: 生成 Seatbelt 规则，区分 WorkspaceOnly 写根与 Full Access 精确只读覆盖。
+    # LLM: 普通允许/禁止按共享路径优先级编译；精确锁与宿主保护最后覆盖，不能由窄写根穿透。同步文件门与 Linux 同文件测试。
+    # 函数用途: 生成 Seatbelt 规则，让自身授权目录可写且保持绝对保护路径只读。
     @staticmethod
     def _macos_profile(
         *,
@@ -406,7 +410,7 @@ class AttemptExecutionSandbox:
         shared: Path,
         protected_persona_root: Path | None = None,
         write_roots: tuple[Path, ...] = (),
-        protected_write_paths: tuple[Path, ...] = (),
+        write_protection: SandboxWriteProtection | None = None,
         implicit_attempt_write_roots: bool = True,
         full_access: bool = False,
     ) -> str:
@@ -418,8 +422,11 @@ class AttemptExecutionSandbox:
         full_access（单租户/显式全权，G6）：不加 file-write deny，文件语义
         与宿主一致，网关统一 + readiness 检查仍生效；persona 文件若在可写
         区内仍以更精确的 literal deny 强制只读。"""
+        protection = write_protection or SandboxWriteProtection()
+        protected_write_paths, write_scope_denied_roots = protection.absolute_paths, protection.denied_roots
         if full_access:
             lines = ["(version 1)", "(allow default)"]
+            lines.extend(_macos_write_scope_rules(write_roots, write_scope_denied_roots))
             lines.extend(_readonly_path_denies(protected_write_paths))
             persona_denies = _persona_file_literal_denies(protected_persona_root)
             if persona_denies:
@@ -439,6 +446,7 @@ class AttemptExecutionSandbox:
             + "".join(f' (subpath {json.dumps(root)})' for root in effective_write_roots)
             + ")",
         ]
+        lines.extend(_macos_write_scope_rules(tuple(Path(path) for path in effective_write_roots), write_scope_denied_roots))
         lines.extend(_readonly_path_denies(protected_write_paths))
         persona_denies = _persona_file_literal_denies(protected_persona_root)
         if persona_denies:
@@ -451,6 +459,18 @@ class AttemptExecutionSandbox:
     def sandbox_readiness_dict() -> dict[str, Any]:
         """跨平台 readiness 汇总（诊断/CLI 用）。"""
         return {"platform": platform.system()}
+
+
+# LLM: Full Access 和普通形态共用同一条目顺序；绝对保护由调用方最后追加，不能在这里被写授权覆盖。
+# 函数用途: 编译普通祖先禁止与正式窄授权，空禁止列表保持原规则。
+def _macos_write_scope_rules(allowed: tuple[Path, ...], denied: tuple[Path, ...]) -> list[str]:
+    if not denied:
+        return []
+    lines = []
+    for root, writable in ordered_write_scope_roots(allowed, denied):
+        encoded = json.dumps(str(root))
+        lines.append(f'({"allow" if writable else "deny"} file-write* (literal {encoded}) (subpath {encoded}))')
+    return lines
 
 
 # LLM: 两平台同步 run 与插件工厂共用 allowlisted_directory；白名单外 cwd 直接拒绝，不继承宿主 cwd、不扩权或回退宽读。

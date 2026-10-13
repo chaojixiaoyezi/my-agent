@@ -170,9 +170,9 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     if extra_roots:
         existing = _string_list(merged.get("allowed_write_roots"))
         merged["allowed_write_roots"] = list(dict.fromkeys([*existing, *extra_roots]))
+    _attach_owner_control_write_guards(merged, agent, params)
     _attach_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
-    _attach_owner_control_write_guards(merged, agent)
     _attach_granted_execution_workspace_roots(merged, agent, params)
     attach_running_install_guard(merged, getattr(agent, "config", None))
     guardrail_rows = tool_guardrail_records(agent)
@@ -469,7 +469,7 @@ def _granted_external_roots(
     return [root for root in granted if not _is_relative_to(Path(root), owner_home)]
 
 
-# LLM: 普通 main/child 的文件墙是同一 owner home；普通 child 仅保留宿主绑定且已授权的自身窄写根，避免祖先 runs 保护吞掉它；Audit 精确授权和 control_plane 不扩大。
+# LLM: 普通 main/child 的文件墙是同一 owner home；保留正式业务写根和宿主绑定的孩子自身窄根，使祖先保护不吞授权；Audit 精确授权和 control_plane 不扩大。
 # 函数用途: 放开自己家里的普通文件操作，继续保护其他用户与宿主权威文件；不看 tasks 命名或模型文字。
 def _attach_owner_task_write_scope(
     boundary: dict[str, object],
@@ -499,7 +499,7 @@ def _attach_owner_task_write_scope(
         # 但宿主创建时下发的"墙外显式工作目录"是结构化授权，不能被 owner home 覆盖：
         # 覆盖会让子代理在用户声明的项目目录里拿 WRITE_FORBIDDEN（2026-09-11 真机复测：
         # 创建时 allowed_write_roots 含目标目录，运行时只剩 owner home，写门直接拒绝）。
-        own_work_roots = _retained_child_work_roots(boundary, params, owner_root)
+        own_work_roots = _retained_child_work_roots(boundary, params, owner_root, agent)
         boundary["allowed_write_roots"] = list(
             dict.fromkeys([str(owner_root), *own_work_roots, *_granted_external_roots(boundary, owner_root)])
         )
@@ -557,22 +557,27 @@ def _attach_owner_task_write_scope(
     boundary["allowed_write_roots"] = scoped
 
 
-# LLM: 仅恢复宿主 runtime_task_attributes 绑定的子代理自身工作目录，而且它必须与 boundary.task_dir 一致并已在 allowed_write_roots 中。
-#   不恢复整棵任务树、产品根或兄弟工作根；缺身份、缺授权、路径不一致/墙外一律不补。无文件或审批副作用；联测 test_child_own_workspace_write。
-# 函数用途: 避免 owner 写范围合并丢失子代理已有的自身窄授权，让原最具体路径规则正常生效。
+# LLM: 只保留宿主既有的 own-owner 业务窄授权；runs 下只接受 runtime_task_attributes 与 task_dir 一致的本孩子自身根。无文件或审批副作用，联测完整 HomePaths 和父 full-access。
+# 函数用途: 保住需要覆盖祖先只读的正式工作目录，不向兄弟运行状态扩权。
 def _retained_child_work_roots(
-    boundary: dict[str, object], params: object, owner_root: Path,
+    boundary: dict[str, object], params: object, owner_root: Path, agent: object,
 ) -> list[str]:
+    forbidden = [_resolved_path(raw) for raw in _string_list(boundary.get("forbidden_write_roots"))]
+    granted = [_resolved_path(raw) for raw in _string_list(boundary.get("allowed_write_roots"))]
+    runs = _resolved_path(getattr(getattr(agent, "home_paths", None), "owner_runs_dir", None))
+    retained = [str(root) for root in granted if root is not None
+                and root != owner_root and _is_relative_to(root, owner_root)
+                and (runs is None or not _is_relative_to(root, runs))
+                and any(guard is not None and root != guard and _is_relative_to(root, guard) for guard in forbidden)]
     if _text(getattr(params, "context_scope", "")).lower() != "task_local":
-        return []
+        return retained
     attrs = getattr(params, "task_attributes", None)
     own = _resolved_path(attrs.get("agent_run_workspace_dir") if isinstance(attrs, dict) else None)
     if own is None or own == owner_root or not _is_relative_to(own, owner_root):
-        return []
+        return retained
     if own != _resolved_path(boundary.get("task_dir")):
-        return []
-    granted = [_resolved_path(raw) for raw in _string_list(boundary.get("allowed_write_roots"))]
-    return [str(own)] if own in granted else []
+        return retained
+    return list(dict.fromkeys([*retained, str(own)])) if own in granted else retained
 
 
 # LLM: B 类（H3 后的口径，3a 2026-10-02 定）：这里只放 owner 隔离时默认禁写、但可被更具体的本任务工作目录穿透的任务树根
@@ -580,20 +585,21 @@ def _retained_child_work_roots(
 #   （3a 定：data/ 整体归 A，不逐个列子目录）。它们走写范围的 forbidden_write_roots，按“命中的最具体条目生效”裁决，文件工具与进程沙箱
 #   共用这一个字段。权限/配额/策略文件、审计流水、runtime.db、Compact、日志等“绝对只读”的宿主文件是 A 类，唯一声明在
 #   path_access_policy（HOST_STATE_* / HOST_CONFIG_*），任何模式都生效、不可穿透，这里不再重复列。改动同步 test_host_files_access.py。
-# 函数用途: 隔离 owner 的任务树根默认禁写（本任务工作目录照常可写），防止模型改别的任务或宿主任务账。
+# 函数用途: 保护运行记录与孩子未授权的任务树；主代理自己的业务 tasks 保持可写，精确宿主文件仍由统一路径门保护。
 def _attach_owner_control_write_guards(
     boundary: dict[str, object],
     agent: object,
+    params: object,
 ) -> None:
     owner_scope = _text(boundary.get("effective_owner_scope_root"))
     if not owner_scope:
         return
     home = getattr(agent, "home_paths", None)
     protected: list[str] = []
-    for name in (
-        "owner_runs_dir",
-        "owner_tasks_dir",
-    ):
+    names = ["owner_runs_dir"]
+    if _text(getattr(params, "context_scope", "")).lower() in {"task_local", "control_plane"}:
+        names.append("owner_tasks_dir")
+    for name in names:
         path = _resolved_path(getattr(home, name, None))
         if path is not None and str(path) not in protected:
             protected.append(str(path))

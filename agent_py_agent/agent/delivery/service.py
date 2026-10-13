@@ -17,6 +17,7 @@ from ..conversation.channels import (
     DeliveryReceipt,
     ReplyEnvelope,
     leads_with_internal_signal,
+    project_host_paths_for_channel,
     project_message_paths_for_channel,
     project_user_reply,
     redact_delivery_context_identifiers,
@@ -100,12 +101,19 @@ class DeliveryService:
     def supports_transcript(self, channel: str) -> bool:
         return supports_transcript_delivery(channel)
 
+    # LLM: 卡片只承运宿主引用，仍经统一目标与能力前检；不将普通消息或模型正文当作审批。
+    # 函数用途: 为原审批或私密输入流程发送原生卡片并返回真实消息身份。
+    def deliver_control_card(self, context: DeliveryContext, card: dict, *, summary: str):
+        from .control_cards import deliver_control_card
+
+        return deliver_control_card(self, context, card, summary=summary)
+
     # LLM: 进度和最终回复共用相同路由/净化/能力前置门；message_id 只可来自 pending 回执，编辑失败不新发替代消息。
-    # 函数用途: 首次创建一条进度消息，以后编辑同一条；返回 provider 消息 ID 供原投递账本耐久保存。
+    # 函数用途: 首次创建一条进度消息，以后编辑同一条；进度不附路径说明，返回 provider 消息 ID 供原投递账本耐久保存。
     def deliver_progress(self, context: DeliveryContext, envelope: ReplyEnvelope, *, message_id: str = ""):
         from .progress import ProgressDeliveryReceipt
 
-        prepared = self._prepare(context, envelope)
+        prepared = self._prepare(context, envelope, progress=True)
         if isinstance(prepared, DeliveryReceipt):
             return ProgressDeliveryReceipt(False, message_id, prepared.error_code or "CHANNEL_PROGRESS_REJECTED")
         attempt = self._resolve_attempt(context, envelope, prepared)
@@ -137,9 +145,9 @@ class DeliveryService:
         return replace(prepared.receipt, delivery_status=status, error_code=error_code)
 
     # LLM: 净化和能力前检不触碰 adapter；任何失败都在 provider 构建和网络副作用前返回回执。
-    # 函数用途: 规范化 context/envelope 并生成待解析投递，或返回无需发送的终态回执。
+    # 函数用途: 规范化 context/envelope 并生成待解析投递，进度只做路径净化，最终消息保留说明，或返回无需发送的终态回执。
     def _prepare(
-        self, context: DeliveryContext, envelope: ReplyEnvelope
+        self, context: DeliveryContext, envelope: ReplyEnvelope, *, progress: bool = False
     ) -> _PreparedDelivery | DeliveryReceipt:
         channel = str(context.channel or "").strip().lower()
         target = str(context.target or "").strip()
@@ -154,7 +162,7 @@ class DeliveryService:
             return replace(receipt, delivery_status="suppressed")
         projection = project_user_reply(raw_content)
         content = redact_delivery_context_identifiers(
-            project_message_paths_for_channel(projection.content, channel),
+            (project_host_paths_for_channel if progress else project_message_paths_for_channel)(projection.content, channel),
             context,
         )
         receipt = replace(receipt, content=content)

@@ -1,5 +1,7 @@
 # Subagent Structure
 
+2026-10-13 权限投影：`tooling/write_boundary.py::ordered_write_scope_roots` 是普通最具体路径顺序的共用投影；`registry_invoke` 将原 forbidden 根放入 request-local handler，locked_files/runtime_install/task host state 留在绝对保护。`attempt/sandbox` 和 `tooling/sandbox` 消费同一排序，精确保护最后覆盖；`pty_sessions.PtyAccessScope` 纳入普通禁止根。`conversation/agent_tool_approval` 缓存以 run/main claim/child attempt/精确工具参数为键，归属验证仍先于缓存；IM 消费端尚未接入。
+
 ## 自身运行工作目录写权限（2026-10-09，w3）
 
 - 权威路径：`subagents/context_bundle_refs.py::runtime_task_attributes` 的 `agent_run_workspace_dir` 与 `services/runner_context_service.py::_build_write_boundary` 的 `task_dir`；授权仍来自同一次 `allowed_write_roots`。
@@ -1467,3 +1469,6 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 - `subagents/runner_start.existing_runner_launch`：过期的旧启动不复用，并在 creation 锁内收掉旧记录（受管 `reclaim_background_start`，文件 `file_runner_start.revoke_file_runner_start`），之后照常 `reserve_runner_start`。
 - 监督计数：`capability_auto_sweep._split_auto_start_result` 把自动启动回执拆成真派与复用；`orphans_revived` 只算真派（上文 2026-08-24 节“不把未启动的进程计作 `orphans_revived`”的口径由此落实到复用场景）。
 - 停机启动边界：`agent_core/runner/worker._admission_closed_refusal` 在 `_run_subagent_worker` 入口读本进程准入表，顺序批次（`gate.run_single_runner`）与并行批次（`gate._counted_worker`）共用；local/main 派工子进程有自己的准入表，不受 Gateway 关门影响。
+# R07 私人审批运输（实施中）
+
+`im_tool_approval.py` 把运输信息保存在原 pending 的 `im_control` 中，回调只写原 ToolApprovalDecision。`interaction_refs` 的 HMAC 仅证明原宿主引用，不取代原请求/claim/attempt/actor/卡片身份核对；主代理不能替用户批准。父级 capability request 仍走原授予流程。原 UI workspace selection 不再当主代理执行权，真正的权威是原 active TaskLink + 当前 claim。

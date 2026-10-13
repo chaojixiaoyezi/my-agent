@@ -69,6 +69,8 @@ def _file_content(content: dict[str, Any]) -> tuple[str, dict[str, str]]:
     return text, media
 
 
+# LLM: bot at 由可信入站规范化提前移除，其它 at 保留为可读参数；标签不产生机器权限，媒体解析仍走原入口。
+# 函数用途: 将 post 文本、链接与其它用户的提及拍平为正文。
 def _flatten_post(content: dict[str, Any]) -> str:
     """post 富文本拍平成可读文本:text/a 取值(媒体省略)。"""
     locale: dict[str, Any] = content
@@ -80,8 +82,9 @@ def _flatten_post(content: dict[str, Any]) -> str:
     lines = [title] if title else []
     rows = locale.get("content") or []
     for row in rows if isinstance(rows, list) else []:
-        parts = [str(el.get("text") or "") for el in row
-                 if isinstance(row, list) and isinstance(el, dict) and el.get("tag") in ("text", "a")]
+        parts = [str(el.get("text") or "") if el.get("tag") in ("text", "a")
+                 else f'@{el.get("user_id") or ""}' for el in row
+                 if isinstance(row, list) and isinstance(el, dict) and el.get("tag") in ("text", "a", "at")]
         lines.append("".join(parts))
     return "\n".join(lines).strip()
 

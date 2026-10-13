@@ -1,5 +1,11 @@
 # Gateway 维护状态
 
+2026-10-13 R07 私人审批接线：原 DeliveryService 声明 control_cards，Feishu 创建返回真实 message/chat ID，SDK/webhook 保留实际点击来源；`/client/private-interaction` 必须有宿主凭据并复用原密码状态、管理员绑定、签名和原审批 scope。错误 actor/转发/旧 claim 不批准，不把按钮文字当权限。原 HTTP 与适配器回调联合通过，真 IM 和后台实际工具继续待验，见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
+2026-10-13 R15：长工具无输出时，原 chunk 携带执行侧真实更新时间，原 pending 草稿编辑同条消息；默认 120 秒，IM off 也保留极简状态/时间，0 关闭。复用 `timezone`，不使用适配器轮询时间伪装执行活跃，不额外请求模型。进度净化路径但不附路径说明；最终结果净化合同保留。67 项长工具/进度/原运行时/控制组合通过；真实 Linux 待验。
+
+2026-10-13 R01/R02/R03 实施中：可信 bot 前置提及在 text/post 转换之前规范化，敏感命令仍走原入站门；`command_catalog` 的角色/入口声明共用于帮助和控制，锁定只回基础帮助。短窗口默认 100，可配置上限由有效 owner 的 writer → 原 progress HTTP → 原投递 batch 传递，消息 ID/dispatch 与完整最终回复不变。基础组合通过，完整入站/配置和真实 IM 待继续验证，见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
 2026-10-12 私聊首设门：飞书 WS/webhook 共享入站必须先设置个人密码；未设/锁定消息进入原有界队列，设置或解锁成功按准确用户续送。认证只读原服务结构化 ok，卡片颜色不能授权；初始化/状态/提示失败不放行。原主动告警出站不受个人锁影响，不更新用户活跃。
 
 2026-10-12 发布依赖边界：Gateway 的 IM 路由调用 `conversation/session_task_dispatch.py` 的原耐久派发流程；模型派活工具也调用同一入口，原身份/链深/配额/正文/wake 不改。状态展示调用 `conversation/im_task_status.py`，由会话领域读取原子代理终态集合；Gateway 不导入 agent_core 工具或 subagents。发行 AST 边界测试曾实际发现两个新依赖，修复不增加豁免或动态导入。派活/消息测试现在共用完整生产 worker 收尾与正式 BackgroundRunRequest，原停止授权与消息消费断言保留。

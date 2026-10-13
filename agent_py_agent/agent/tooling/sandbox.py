@@ -25,6 +25,8 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .write_boundary import ordered_write_scope_roots
+
 # 仓库内置 bwrap(随 my-agent 分发,内网装不了包也自带)。
 _VENDOR_BWRAP = Path(__file__).resolve().parents[2] / "vendor" / "bin" / "bwrap.linux-x86_64"
 
@@ -141,6 +143,7 @@ class SandboxSpec:
     protected_persona_root: Path | None = None
     # Host-authored control metadata remains read-only even when a broader parent root is writable.
     read_only_paths: tuple[Path, ...] = ()
+    write_scope_denied_roots: tuple[Path, ...] = ()
     full_access: bool = False
     # Most owner commands intentionally retain network access.  Pure helper
     # programs (for example a learned source request/response adapter) can opt
@@ -193,6 +196,8 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
             "/dev",
             "/dev",
         ]
+        if spec.write_scope_denied_roots:
+            _append_write_scope_mounts(argv, _normalized_write_roots(spec.write_roots, preserve_nested=True), spec.write_scope_denied_roots)
         _append_readonly_mounts(argv, spec.read_only_paths)
         _append_persona_readonly_mounts(argv, spec.protected_persona_root or spec.owner_home)
         _append_hidden_mounts(argv, spec.hidden_paths)
@@ -238,7 +243,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     for ro in _NETWORK_RO_FILES:  # DNS + TLS 证书,外网/https 必需
         if Path(ro).exists():
             argv += ["--ro-bind", ro, ro]
-    write_roots = _normalized_write_roots(spec.write_roots)
+    write_roots = _normalized_write_roots(spec.write_roots, preserve_nested=bool(spec.write_scope_denied_roots))
     read_roots = _normalized_read_roots(
         spec.public_ro_roots, spec.preserve_public_read_root_aliases
     )
@@ -271,9 +276,7 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
             ]
     # 最后覆盖结构化写根。这样只读源码树里可以有一个明确获批的构建/输出子目录，
     # 而不会把整个只读父目录升级为可写。
-    for root in write_roots:
-        if root.exists():
-            argv += ["--bind", str(root), str(root)]
+    _append_write_scope_mounts(argv, write_roots, spec.write_scope_denied_roots)
     # Broad owner-home write access must not include host-authoritative policy and ledgers.
     # Apply these mounts after writable roots so the more specific read-only paths win.
     _append_readonly_mounts(argv, spec.read_only_paths)
@@ -328,9 +331,7 @@ def _allowlist_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
     for root in _preserved_read_roots(spec.public_ro_roots):
         if root.exists():
             argv += ["--ro-bind", str(root), str(root)]
-    for root in _normalized_write_roots(spec.write_roots):
-        if root.exists():
-            argv += ["--bind", str(root), str(root)]
+    _append_write_scope_mounts(argv, _normalized_write_roots(spec.write_roots, preserve_nested=bool(spec.write_scope_denied_roots)), spec.write_scope_denied_roots)
     _append_allowlist_symlink_aliases(argv, spec)
     _append_hidden_mounts(argv, spec.hidden_paths)
     _append_readonly_mounts(argv, spec.read_only_paths)
@@ -406,9 +407,7 @@ def _read_only_root_argv(bwrap: str, spec: SandboxSpec) -> list[str]:
         "--ro-bind", "/", "/", "--dev", "/dev", *_proc_mount_args(),
     ]
     _append_hidden_root_remounts(argv, spec)
-    for root in _normalized_write_roots(spec.write_roots):
-        if root.exists():
-            argv += ["--bind", str(root), str(root)]
+    _append_write_scope_mounts(argv, _normalized_write_roots(spec.write_roots, preserve_nested=bool(spec.write_scope_denied_roots)), spec.write_scope_denied_roots)
     _append_symlink_aliases(argv, spec)
     _append_readonly_mounts(argv, spec.read_only_paths)
     argv += ["--chdir", str(spec.workspace)]
@@ -433,7 +432,9 @@ def _append_hidden_root_remounts(argv: list[str], spec: SandboxSpec) -> None:
             argv += ["--ro-bind", str(path), str(path)]
 
 
-def _normalized_write_roots(raw_roots: tuple[Path, ...] | None) -> tuple[Path, ...]:
+# LLM: 有祖先禁止规则时不得合并窄授权，否则编译后会失去覆盖该禁止的事实；无禁止时保留原简化。
+# 函数用途: 规范化 Linux 写挂载根，按实际边界决定是否保留父子根。
+def _normalized_write_roots(raw_roots: tuple[Path, ...] | None, *, preserve_nested: bool = False) -> tuple[Path, ...]:
     if raw_roots is None:
         return ()
     roots: list[Path] = []
@@ -441,6 +442,10 @@ def _normalized_write_roots(raw_roots: tuple[Path, ...] | None) -> tuple[Path, .
         try:
             root = Path(raw).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
+            continue
+        if preserve_nested:
+            if root not in roots:
+                roots.append(root)
             continue
         # 已开放父根时不重复挂子根；遇到更宽父根则替换已有子根。
         if any(_is_relative_to(root, existing) for existing in roots):
@@ -522,9 +527,18 @@ def _append_persona_readonly_mounts(argv: list[str], root: Path) -> None:
             argv += ["--ro-bind", str(protected), str(protected)]
 
 
-# LLM: Read-only subpaths are host-authored and applied after every writable bind. Missing paths
-# cannot be mounted; canonical owner control files/directories are seeded before agent creation.
-# 函数用途: 把可写父目录里的权限配置和运行账本重新覆盖成只读挂载。
+# LLM: 共享规则排序与文件工具一致，普通祖先只读后可以重挂正式窄写根；绝对保护由调用方随后追加。只投影已有路径，不创建宿主文件。
+# 函数用途: 把本次允许与禁止范围按路径具体程度编译成 Linux 挂载顺序。
+def _append_write_scope_mounts(
+    argv: list[str], allowed: tuple[Path, ...], forbidden: tuple[Path, ...],
+) -> None:
+    for root, writable in ordered_write_scope_roots(allowed, forbidden):
+        if root.exists():
+            argv += ["--bind" if writable else "--ro-bind", str(root), str(root)]
+
+
+# LLM: 精确宿主保护在普通写范围之后挂载，不能被更窄 allow 覆盖；保持缺失路径的既有行为并同步进程保护测试。
+# 函数用途: 将存在的绝对保护路径只读覆盖到沙箱。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
     seen: set[Path] = set()
     for raw in paths:

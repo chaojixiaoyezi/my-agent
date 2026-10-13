@@ -49,8 +49,9 @@ UNINHERITABLE_ROOT_DIRS = ("/", "/System", "/usr", "/bin", "/sbin", "/private/et
 #   换代统一裁决；模型的文件工具和 shell 直接读写会绕过这些裁决（真实复现：run_command 用 unzip 从包库读出已停用、已换代的旧包）。
 #   必须与规范布局 user_space.owner_resolver 的 plugins_dir 一致（test_host_managed_store_access 有守卫用例）；新增同类存储只在这里加。
 #   本模块被原样打进插件 SDK，所以布局写成路径片段而不是导入 owner_resolver。
-# 常量用途: 列出对模型工具不开放的宿主托管存储相对 owner home 的位置。
-HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins"),)
+# 常量用途: 列出对模型工具不开放的宿主托管存储；私密交互密钥和加密材料与插件同样禁止直接读写，任何权限模式生效。
+PRIVATE_INTERACTIONS_OWNER_PARTS: tuple[str, ...] = ("data", "private_interactions")
+HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (("data", "plugins"), PRIVATE_INTERACTIONS_OWNER_PARTS)
 
 # H3（2026-10-02）宿主配置的唯一声明：改配置只有参数中心（user_config、/settings）和 manage_models（/model）两个权威入口，
 #   模型的文件工具和命令直接写这些目录会绕过边界键、修改账本、撤销和模型目录检查（be 复审语义记忆时发现）。读取照常，只拒写。

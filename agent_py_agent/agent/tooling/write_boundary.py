@@ -11,10 +11,19 @@ prompt 里说'只能写这个目录'只是提醒，真正防止越界写文件�
 # LLM: 本模块是文件写工具的结构化路径裁决层；路径规则按最具体条目优先，且不能从 prompt 推导权限。
 # 模块用途: 在真正写文件前统一核对允许目录、禁止目录和锁定文件，避免子代理越界或被矛盾祖先规则误伤。
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..path_access_policy import HOST_FILE_DENIAL_CODES, PathAccessPolicy, data_root_from_boundary
+
+
+# LLM: 原边界的纯值投影；普通禁止根可被更具体授权覆盖，绝对保护不可覆盖，不能混成同一个 deny 列表。
+# 类用途: 将进程沙箱两类写限制一起传递，减少启动接口参数，同时保留各自优先级。
+@dataclass(frozen=True)
+class SandboxWriteProtection:
+    absolute_paths: tuple[Path, ...] = ()
+    denied_roots: tuple[Path, ...] = ()
 
 # LLM: Every file-mutation capability snapshot and write-scope consumer must
 # reuse this canonical order/set; duplicating partial lists previously hid
@@ -263,6 +272,16 @@ def _forbidden_root_blocks_target(target: Path, root: Path, allowed_roots: list[
         return True
     allowed_specificity = max(len(aroot.parts) for aroot in matching_allowed)
     return len(root.parts) >= allowed_specificity
+
+
+# LLM: 文件门与 OS 投影共用最具体路径及同层 deny 优先；仅处理普通范围，安装/锁/宿主绝对保护由调用方最后覆盖。
+# 函数用途: 把正式读写根排成从宽到窄的规则，供挂载和 Seatbelt 表达与文件工具相同的裁决。
+def ordered_write_scope_roots(
+    allowed_roots: tuple[Path, ...], forbidden_roots: tuple[Path, ...],
+) -> tuple[tuple[Path, bool], ...]:
+    rules = {(Path(root).resolve(strict=False), True) for root in allowed_roots}
+    rules.update((Path(root).resolve(strict=False), False) for root in forbidden_roots)
+    return tuple(sorted(rules, key=lambda item: (len(item[0].parts), str(item[0]), not item[1])))
 
 
 # LLM: 安装目录保护与写入范围无关、也不受“更具体的允许目录胜出”影响：命中就拒，Full Access 同样生效。

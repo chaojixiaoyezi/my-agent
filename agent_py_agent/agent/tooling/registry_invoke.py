@@ -319,6 +319,12 @@ def _request_local_tool_for_invocation(
         scoped.path_access_policy = dynamic_policy
     if request.tool_name == "terminal_session" and hasattr(scoped, "shell_tool"):
         scoped.shell_tool.path_access_policy = dynamic_policy
+    if request.tool_name in {"run_command", "terminal_session"}:
+        process_tool = getattr(scoped, "shell_tool", scoped)
+        # 宿主按本次不可变 boundary 下发祖先只读范围；它可被更具体正式写根覆盖，和精确锁分开。
+        process_tool._sandbox_forbidden_write_roots = tuple(
+            Path(value) for value in _boundary_path_strings(request.write_boundary or {}, "forbidden_write_roots")
+        )
     # LLM: owner 墙以外的硬拦（危险目录、凭据文件）仍由 policy 裁决；这里只把"宿主本轮已授权的
     #   墙外工作根"单独交给 handler，让它和中央路径门用同一份授权事实。
     # 人类: 只能由 registry 逐次下发，模型参数与 workspace_roots 都不能产生这个白名单。
@@ -632,8 +638,8 @@ def _task_host_state_path_strings(boundary: dict[str, object]) -> list[str]:
 
 
 # LLM: 内部运行参数只投影结构化 boundary；sandbox 写根的集合不变，但 task_work_dir 必须排在首位，
-# 供 Linux attempt 沙箱选择独立持久临时根，不能让 working_dir/项目目录承担临时缓存。只读保护路径 = forbidden_write_roots
-# 加 runtime_install_roots（正在运行的安装目录），再加本任务的宿主托管位置（H3：由 boundary.task_root 推出，命令在任务树外
+# 供 Linux attempt 沙箱选择独立持久临时根，不能让 working_dir/项目目录承担临时缓存。绝对只读保护路径 = locked_files
+# 加 runtime_install_roots（正在运行的安装目录），再加本任务的宿主托管位置；普通 forbidden 根由 request-local handler 单独携带，按最具体路径裁决（命令在任务树外
 # 跑、写根也不含本任务时照样只读；ae 块 4 发现，2026-10-02）。
 # 函数用途: 给已授权工具补充模型不可见的写根、读根、临时根顺序和其它运行边界参数。
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
@@ -648,10 +654,10 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
             str(root) for root in request.sandbox_read_roots
         ]
         if request.tool_name in {"run_command", "terminal_session"}:
-            # 禁止写根与正在运行的安装目录一起交给沙箱设为只读（Full Access 的 Seatbelt/bwrap 同样执行）。
+            # 锁、安装目录和宿主记录是绝对保护，不能被更窄的允许写根覆盖。
             task_records = _task_host_state_path_strings(request.write_boundary)
             params["__sandbox_protected_write_paths"] = list(dict.fromkeys([
-                *_boundary_path_strings(request.write_boundary, "forbidden_write_roots"),
+                *_boundary_path_strings(request.write_boundary, "locked_files"),
                 *_boundary_path_strings(request.write_boundary, RUNTIME_INSTALL_ROOTS_KEY),
                 *task_records,
             ]))

@@ -50,6 +50,7 @@ from .shell import (
     _subprocess_text_env,
     parse_shell_command,
 )
+from .write_boundary import SandboxWriteProtection
 
 # PTY 会话最多 32 个：防失控并发把资源占满。
 _MAX_SESSION_COUNT = 32
@@ -122,10 +123,11 @@ class PtyAccessScope:
     write_roots: tuple[str, ...] | None
     read_roots: tuple[str, ...] | None
     protected_write_paths: tuple[str, ...] | None
+    write_scope_denied_roots: tuple[str, ...] = ()
 
 
 # LLM: 一次 PTY 启动的沙箱输入原样收拢，不做任何推断；字段与 tooling/shell._sandbox_exec 的同名参数一一对应，
-#   private_roots 是 owner 隔离时沙箱要拒读的宿主根（my-agent 家目录根，开关打开时可能还有用户家目录）。
+#   private_roots 是拒读的宿主根；普通禁止写根与绝对保护分别投影，跟随同一会话权限键。
 # 类用途: 把 owner、读写根、受保护路径和私有根作为一个整体交给 _spawn。
 @dataclass(frozen=True)
 class _PtySandboxInputs:
@@ -134,6 +136,7 @@ class _PtySandboxInputs:
     read_roots: tuple[Path, ...] | None = None
     protected_write_paths: tuple[Path, ...] | None = None
     private_roots: tuple[object, ...] = ()
+    write_scope_denied_roots: tuple[Path, ...] = ()
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -153,6 +156,7 @@ def _pty_access_scope(
     read_roots: tuple[Any, ...] | None = None,
     protected_write_paths: tuple[Any, ...] | None = None,
     run_scope: object = None,
+    *, write_scope_denied_roots: tuple[Path, ...] = (),
 ) -> PtyAccessScope:
     owner = ""
     if owner_home:
@@ -167,7 +171,7 @@ def _pty_access_scope(
         normalized_read_roots = tuple(
             sorted({str(Path(root).expanduser().resolve(strict=False)) for root in read_roots})
         )
-    normalized_protected = None
+    normalized_protected = ()
     if protected_write_paths is not None:
         normalized_protected = tuple(
             sorted(
@@ -183,6 +187,7 @@ def _pty_access_scope(
         write_roots=normalized_roots,
         read_roots=normalized_read_roots,
         protected_write_paths=normalized_protected,
+        write_scope_denied_roots=tuple(sorted({str(Path(root).resolve(strict=False)) for root in write_scope_denied_roots})),
     )
 
 
@@ -210,7 +215,7 @@ class PtySessionRegistry:
         owner_home: object = None,
         write_roots: tuple[Path, ...] | None = None,
         read_roots: tuple[Path, ...] | None = None,
-        protected_write_paths: tuple[Path, ...] | None = None,
+        write_protection: SandboxWriteProtection | None = None,
         run_scope: object = None,
         *,
         private_roots: tuple[object, ...] = (),
@@ -228,7 +233,9 @@ class PtySessionRegistry:
             session_id = f"pty-{self._counter}-{int(time.time())}"
             self._pending_starts[session_id] = _PtyStart(execution_scope)
         try:
-            sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protected_write_paths, private_roots)
+            protection = write_protection or SandboxWriteProtection()
+            sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
+                                        private_roots, protection.denied_roots)
             return self._spawn(session_id, command, target, sandbox, run_scope)
         finally:
             with self._lock:
@@ -246,6 +253,7 @@ class PtySessionRegistry:
             sandbox.read_roots,
             sandbox.protected_write_paths,
             run_scope,
+            write_scope_denied_roots=sandbox.write_scope_denied_roots,
         )
         exec_arg, use_shell = _sandbox_exec(
             command,
@@ -253,7 +261,7 @@ class PtySessionRegistry:
             owner_home,
             write_roots=sandbox.write_roots,
             read_roots=sandbox.read_roots,
-            protected_write_paths=sandbox.protected_write_paths,
+            write_protection=SandboxWriteProtection(tuple(sandbox.protected_write_paths or ()), sandbox.write_scope_denied_roots),
             private_roots=sandbox.private_roots,
         )
         with self._lock:
@@ -745,6 +753,7 @@ class TerminalSessionTool(BaseTool):
             _sandbox_read_roots(params),
             _sandbox_protected_write_paths(params),
             params.get("__run_scope"),
+            write_scope_denied_roots=getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ()),
         )
 
     # LLM: Action dispatch is the sole model-facing PTY control switch. Keep schema, effect
@@ -808,7 +817,7 @@ class TerminalSessionTool(BaseTool):
                 self.shell_tool.path_access_policy.owner_scope_root,
                 write_roots,
                 read_roots,
-                protected_write_paths,
+                SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
                 private_roots=self.shell_tool.host_private_roots,
             )

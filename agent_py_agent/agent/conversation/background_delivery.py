@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
+from ..scheduler.execution import scheduled_local_delivery
 from .channels import (
     PROACTIVE_PUSH_CHANNELS,
     ChannelAttachment,
@@ -51,7 +52,7 @@ _ROUTE_UNDECLARED = "undeclared"
 # LLM: canonical 记录与外部投递是两条独立事实：正文归属看路线归属（声明级），外发成功与否只看回执。
 # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
 # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
-# 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层。
+# 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层；原调度静默策略只记内部结果。
 def record_background_response(
     delivery: BackgroundDeliveryDependencies,
     request: BackgroundDeliveryRequest,
@@ -70,6 +71,7 @@ def record_background_response(
 ) -> BackgroundDeliveryCommit:
     # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
     # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
+    local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
     projection = project_user_reply(internal_content)
     if _background_reply_suppressed(
         delivery,
@@ -104,12 +106,11 @@ def record_background_response(
         message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
-    route = _background_delivery_route(
+    route = _local_only_route(_background_delivery_route(
         delivery.channels,
         delivery_context,
         route_supports_transcript=route_supports_transcript,
-    )
-    route = _local_only_route(route, local_transcript_only)
+    ), local_transcript_only)
     from ..scheduler.execution import validate_delivery_origin
 
     origin_valid = validate_delivery_origin(delivery.agent, request, delivery_context)

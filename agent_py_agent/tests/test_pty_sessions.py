@@ -226,7 +226,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
         owner_home=None,
         write_roots=None,
         read_roots=None,
-        protected_write_paths=None,
+        write_protection=None,
         run_scope=None,
         *,
         private_roots=(),
@@ -237,9 +237,10 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
             owner_home=owner_home,
             write_roots=write_roots,
             read_roots=read_roots,
-            protected_write_paths=protected_write_paths,
+            protected_write_paths=write_protection.absolute_paths if write_protection else (),
             run_scope=run_scope,
             private_roots=private_roots,
+            write_scope_denied_roots=write_protection.denied_roots if write_protection else (),
         )
         raise OSError("captured")
 

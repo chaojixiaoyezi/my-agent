@@ -366,7 +366,7 @@ def reconcile_gateway_steer_delivery(
 #   事件中心（B6 观察计数）只有一个来源，就挂在 Gateway server 上：调用方（http_handlers 拿到 server）把它放进
 #   scope.event_hub 带下来，本函数只转发、不自己去找；为空（如无 handler 的调用）就按“暂无记录”展示。
 #   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
-# 函数用途: 分派结构化控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止。
+# 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，避免已暂停 Goal 或普通任务的 interrupt 落入资源停止；帮助不进入模型队列。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -375,6 +375,27 @@ def execute_gateway_conversation_control(
 ) -> ConversationControlResult:
     if not command.valid:
         return ConversationControlResult(command.kind, False, command.usage)
+    from ..command_catalog import (
+        COMMAND_INDEX,
+        CommandAccessContext,
+        command_access_error,
+        render_command_help,
+    )
+    from ..conversation.channels import supports_transcript_delivery
+    from ..user_space.owner_resolver import OwnerIdentity
+    from .request_worker import private_channel_identity
+
+    access = CommandAccessContext(
+        surface="local" if supports_transcript_delivery(scope.channel) else "im",
+        is_admin=resolve_gateway_scope_owner(agent, scope) == OwnerIdentity.local_main(),
+        private_chat=private_channel_identity(_scope_request_payload(scope)) is not None,
+    )
+    spec = COMMAND_INDEX.get(command.kind)
+    error = command_access_error(spec, access, command.operation) if spec is not None else ""
+    if error:
+        return ConversationControlResult(command.kind, False, "当前身份或入口不能使用此命令。输入 /help 查看可用命令。", error_code=error)
+    if command.kind == "help":
+        return ConversationControlResult("help", True, render_command_help(access, command.value))
     if command.kind == "delegate":
         from .delegation_control import execute_delegation_control
 

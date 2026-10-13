@@ -33,6 +33,7 @@ class ChannelCapabilities:
     provider_idempotency: bool = False
     # 显式原生能力；进度创建返回 message_id，后续编辑该条，不从方法名猜支持。
     edit_progress: bool = False
+    control_cards: bool = False
 
 
 # LLM: health 是 adapter 生命周期/探针写入的结构化事实；configured、binding 不能隐式升级它。
@@ -326,6 +327,7 @@ def build_default_channel_registry(
             images=True,
             provider_idempotency=True,
             edit_progress=True,
+            control_cards=True,
         ),
         configured=_configured_secret_fields(config, ("feishu_app_id", "feishu_app_secret")),
     )
@@ -383,6 +385,7 @@ def _infer_capabilities(adapter: Any) -> ChannelCapabilities:
         reply=callable(getattr(adapter, "finalize_response", None)),
         proactive=False,
         edit_progress=getattr(adapter, "supports_edit_progress", False) is True,
+        control_cards=getattr(adapter, "supports_control_cards", False) is True,
         files=callable(getattr(adapter, "send_file", None)),
         images=callable(getattr(adapter, "send_image", None)),
         provider_idempotency=bool(

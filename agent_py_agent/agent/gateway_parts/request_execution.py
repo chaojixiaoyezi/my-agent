@@ -426,7 +426,8 @@ def _execute_gateway_conversation_turn(
         context.on_chunk,
         request_history.gateway_identifier_redactions(context, conversation),
     )
-    _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level)
+    _set_gateway_verbose_level(context.on_chunk, conversation.verbose_level, context.agent.config.im_stream_preview_max_chars,
+                               timezone=context.agent.config.timezone)
     _configure_gateway_approval_session(context, conversation)
     if system_slash_command_name(prompt):
         raise SystemCommandRoutingError("系统命令必须在控制入口处理，不能进入模型执行队列")
@@ -815,12 +816,12 @@ def _set_gateway_identifier_redactions(
         setter(identifiers)
 
 
-# LLM: verbose 只改变可见过程，不改变模型请求和事实落账；仅调用输出端显式接口。
-# 函数用途: 将当前会话的展示详细度应用到本轮流输出。
-def _set_gateway_verbose_level(on_chunk: object, level: str) -> None:
+# LLM: verbose 和短窗口上限来自当前 owner 有效配置，只调用 writer 显式接口，不改变模型请求、工具正文或终态落账。
+# 函数用途: 固定本轮可见过程档位及实际配置上限，投递端消费同一事件投影。
+def _set_gateway_verbose_level(on_chunk: object, level: str, preview_max_chars: int, *, timezone: str = "") -> None:
     setter = getattr(on_chunk, "set_verbose_level", None)
     if callable(setter):
-        setter(level)
+        setter(level, preview_max_chars=preview_max_chars, timezone=timezone)
 
 
 # LLM: Gateway execution 只调用 writer 的显式 typed 接口；普通 callable/IM sink 没有该能力时保持静默而不写自然语言 fallback。

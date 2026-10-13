@@ -1,5 +1,7 @@
 # Verification：结构
 
+`tooling/liveness.py` 是展示观察：由 `ToolExecutor` 的原 handler 回调启动、finally 停止，再经原 writer/progress/draft 返回 IM。只公开 call/tool/elapsed/wait_state；不续租、不写验证账，不把定期更新时间作为业务成功证据。
+
 L 线的 `repository.task_metadata` 与 `runtime.verification_task_metadata` 为 Goal 收口提供原事件的无正文引用；不是新的核验器或验收门。入口读取原验证数据库，Goal 的 transition 只保存编号/状态/范围，命令、输出和路径留在原账本。
 
 ## jb6联合链（2026-10-04）

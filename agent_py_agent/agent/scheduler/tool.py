@@ -18,6 +18,7 @@ from ..tooling.models import (
     ToolRuntimePolicy,
 )
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+from .delivery_policy import DELIVERY_SCHEMA, creation_delivery, normalize_delivery
 from .execution_policy import (
     EXECUTION_SCHEMA,
     PRECHECK_SCHEMA,
@@ -46,11 +47,12 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="schedule",
         description=(
-            "管理当前用户自己的持久定时任务或提醒。IM 创建的任务在独立后台会话执行并通知原布置者，TUI 创建沿原会话执行，"
+            "管理当前用户自己的持久定时任务或提醒。IM 创建的任务在独立后台会话执行，默认只记录内部结果，TUI 创建沿原会话执行，"
             "网关重启后仍会恢复；支持一次、固定间隔和五段 cron。"
             "create 只登记未来计划，不会立即运行正文；run_now 才是立即触发。用户要求建好定时计划但不现在执行时，"
             "应创建计划，不需要再索要一次确认，也不能只用 task_progress 保存计划草稿冒充定时计划。"
             "可显式设置独立上下文、固定模型、重叠与失败策略；需要变化检查时在 precheck 对象填写 tool_name 和 arguments。"
+            "用户要求提醒、告警或定时报表时，明确设置 delivery.mode=origin；纯巡检设置 local，正常内部总结不逐轮发消息。"
         ),
         input_schema={
             "type": "object",
@@ -107,6 +109,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "skill_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "固定到计划的当前可用 Skill 稳定 ID。"},
                 "execution": EXECUTION_SCHEMA,
                 "precheck": PRECHECK_SCHEMA,
+                "delivery": DELIVERY_SCHEMA,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "list/history 的返回条数。"},
                 "metadata_only": {"type": "boolean", "description": "list/get/history/status 只输出状态、时间和编号，排除名字、提示词、回复预览及原始错误正文。"},
             },
@@ -127,8 +130,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
             ),
             keywords=("提醒", "定时", "schedule", "cron", "每天", "每周", "稍后", "周期任务"),
             examples=(
-                '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90}',
-                '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai"}',
+                '{"tool":"schedule","action":"create","name":"稍后提醒","prompt":"提醒用户检查备份","schedule_kind":"at","after_seconds":90,"delivery":{"mode":"origin"}}',
+                '{"tool":"schedule","action":"create","name":"周报提醒","prompt":"整理本周项目进展并发给我","schedule_kind":"cron","cron":"0 18 * * 5","timezone":"Asia/Shanghai","delivery":{"mode":"origin"}}',
                 '{"tool":"schedule","action":"create","name":"资料更新","prompt":"汇总资料变化","schedule_kind":"every","every_seconds":600,"precheck":{"tool_name":"read_file","arguments":{"path":"source.txt"}}}',
                 '{"tool":"schedule","action":"list"}',
                 '{"tool":"schedule","action":"pause","job_id":"job_...","expected_version":2}',
@@ -298,7 +301,7 @@ class ScheduleTool(BaseTool):
         return _success(action, {"job": _job_projection(job, include_prompt=True)})
 
     # LLM: 先用原纯合同校验完整策略，再创建 IM 线程和 job；来源读可信绑定，模型不能改回送地址或凭据。
-    # 函数用途: 保存可恢复计划，IM 保持后台、TUI 沿原行为；非法执行/预检/失败策略不留下空后台线程。
+    # 函数用途: 保存可恢复计划，IM 保持后台并明确通知开关、TUI 沿原行为；非法策略不留下空后台线程。
     def _create(self, repository, params: dict[str, object]) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
@@ -318,7 +321,7 @@ class ScheduleTool(BaseTool):
         execution = validate_execution_for_agent(self.agent, params.get("execution"))
         policy = normalize_policy(params.get("policy"))
         precheck = normalize_precheck(params.get("precheck"))
-        execution = validate_execution_for_agent(self.agent, params.get("execution"))
+        delivery = creation_delivery(self.agent, thread_id, params.get("delivery"))
         source_thread_id = thread_id
         source_request_id = _source_request_id(self.agent, params)
         from .execution_policy import schedule_execution_thread
@@ -339,6 +342,7 @@ class ScheduleTool(BaseTool):
                 policy=policy,
                 execution=execution,
                 precheck=precheck,
+                delivery=delivery,
             )
         )
         return _success(
@@ -347,10 +351,10 @@ class ScheduleTool(BaseTool):
         )
 
     # LLM: 只更新显式给定字段，固定模型引用在写事务前校验，已经预留的 run 仍沿原冻结策略。
-    # 函数用途: 将模型工具参数转换成原仓库的计划修改，保留 null 关闭预检的含义。
+    # 函数用途: 将模型工具参数转换成原仓库的计划和通知修改，保留 null 关闭预检的含义。
     def _update_patch(self, params: dict[str, object]) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
-        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck"):
+        for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck", "delivery"):
             if key in params:
                 patch[key] = params[key]
         if "execution" in patch:
@@ -509,7 +513,7 @@ def _source_request_id(agent: object, params: dict[str, object]) -> str:
 
 
 # LLM: 白名单投影原 job 与 active run；metadata_only 不读取 name/prompt/skill_refs，不从正文推导状态。
-# 函数用途: 展示计划及在途执行，支持没有名称或正文的状态诊断。
+# 函数用途: 展示计划、通知策略及在途执行，支持没有名称或正文的状态诊断。
 def _job_projection(
     job: dict[str, object],
     *,
@@ -534,6 +538,7 @@ def _job_projection(
         "last_error_code": job.get("last_error_code") or "",
         "policy": normalize_policy(job.get("policy")),
         "execution": normalize_execution(job.get("execution")),
+        "delivery": normalize_delivery(job.get("delivery")),
         "precheck_enabled": job.get("precheck") is not None,
         "consecutive_failures": job.get("consecutive_failures", 0),
         "backoff_until": iso_from_timestamp(job.get("backoff_until")),

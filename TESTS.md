@@ -1,3 +1,5 @@
+2026-10-13 R01～R13 实施中：首批权限四文件 110 项、原 IM/进度/审批/控制/媒体五文件 78 项、新命令/短窗口/后台审批/PTY 四文件 70 项分别通过，组合有重复不累计；后续事件配置接线变更须复跑。真实本机 Seatbelt 能写孩子窄根并拒绝兄弟根，Linux/自动委派全链及真实 IM 尚未完成；严格 gate 和远端发布尚未执行。精确范围见 [实施记录](docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
 2026-10-12 需求修订（文档，未实施）：R03 默认上限确定为 100 字符，后续验收覆盖 99/100/101、多次更新及自定义上限，最终结果不受短过程上限限制；R06 普通用户、管理员非 full-access、管理员 full-access 分别覆盖主/子/孙及各写入口，审批模式与有效文件范围分别核验。重点从真实 IM 派发入口验证 `/delegate enable` 的后台主子链，TUI 未启动时分别完成父级能力裁决、主代理自身与孩子的用户工具审批；同时验证其它聊天/任务可继续、拒绝/失联/取消/换代、disable/跨零点和恢复，旧决定不串任务或重复副作用。复用原测试入口补缺口，本次仅做文档同步与 diff 检查，不新增或重跑功能测试。见 [需求总表](docs/design/TUI_IM_PREVIEW.md#requirements-overview-20261012) 和 [权限矩阵](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#7-验证记录及实施验收)。
 
 2026-10-12 用户级监控与重启/接管评估（未实施）：已有 `test_scheduler_service.py::test_service_reuses_deduped_wake_after_restart`、`test_scheduler_policy.py`、`test_scheduler_unknown_recovery.py`、`test_scheduler_due_index.py`、`test_admin_identity_gateway.py` 共 40 项通过；临时目录和替身验证原去重、错过周期、死亡证明/claim 代次、owner 到期发现和管理员绑定。未改产品或新增永久测试，未重启真实 Gateway/TUI、未发送飞书。后续须补 TUI/IM 同用户全会话计数、无新聊天的重启恢复、跨入口并发控制及原执行不重复、独立通知切换和群/普通用户隔离，见 [验收矩阵](docs/design/SCHEDULER_EXECUTION_POLICIES.md#owner-schedule-recovery-control-review)。
@@ -18584,3 +18586,10 @@ CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`�
 本轮涉及生产与测试累计增删达到全仓门槛，发布必须追加全仓 pytest。借用其它 checkout 的 Python 虚拟环境时，给本次测试进程显式设置 `PYTHONPATH=$PWD:$PWD/agent_py_agent`，保证派生子进程也只导入待发布 checkout；不要修改其它工作树的虚拟环境安装。首轮无此环境绑定，12 条 Curator 进程回归因子进程错误导入其它 checkout 而失败；显式绑定后原断言 12 项通过，不改测试逻辑或恢复实现。
 
 联合失败还核对辅助模型 deadline 传输签名、实际对话 claim 的取消结算、公共包读取资格、v5 范围/旧迁移夹具、管理员插件执行以及原宿主来源运输。核验器用长工作区与纯解析脱敏用例证明先脱敏再截断；旧格式导出继续用固定 17i 原文件/摘要，不用当前宽化后的解码器冒充旧版。最终 focused 与完整门结果按发行源码提交记录到本次发行验收报告，早期失败和旧包实测不能当成最终包通过。
+# 2026-10-13 IM 长工具状态首批验证（实施中）
+
+Linux 2C/约4G 隔离环境实际 Shell `sleep 245` 通过原 ToolExecutor，timeout=261，原 chunk→HTTP 公开投影→原 pending/DeliveryService 链运行。模型没有介入，Feishu API 用运输替身：off 模式 120 秒、240 秒两次真实 handler 心跳，只创建一条进度消息，后续同 ID 编辑、正文带更新时间，最后独立 final，final 后不再更新。单项 `1 passed in 250.25s`，原 XML 保存于测试机 `real-long-tool.xml`。这是实际 Linux 工具与投递状态机验收，不能算真实 LLM、TUI 或飞书客户端验收。
+
+Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝；从 Ubuntu 发行包只加载 `bwrap-userns-restrict` 后就绪。随后发现 Linux 写根祖先合并抹掉子根授权，修复后核心自身目录/PTY/进度/通知组合通过。本机六文件通知/原 IM/长工具组合 `73 passed in 9.92s`。更广 24 文件第一次 `683 passed / 2 failed / 15 skipped`：两个失败发现后台目录扩展不应扩大前台 Schema，正在修复后复验；不可用此前通过数字掩盖。
+
+`test_im_tool_liveness`、`test_plugin_event_runtime`、`test_im_progress_draft`、`test_gateway_agent_control_service` 组合 67 passed。真实 Registry/Executor 与原 HTTP 投影覆盖静默 handler、异常、取消、拒绝不发、终态后不刷新、off 极简与 stream 状态；只替换模型/handler 和运输，不在测试中代产品发心跳。默认配置已按最新用户要求改为 120 秒；实际 Linux 长等待、同条时间正文和失联仍待验，首批不是完成证明。

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import platform
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,56 @@ from agent_py_agent.agent.subagents.services.runner_context_service import (
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
 from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+
+@pytest.mark.parametrize("access_mode", ["workspace-write", "full-access"])
+def test_child_shell_uses_same_specific_write_grant(child_scope, access_mode):
+    from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec
+
+    scope = child_scope
+    scope.agent.config.access_mode = access_mode
+    boundary = write_boundary_with_runtime_ledger(scope.agent, scope.params)
+    target = scope.own / "shell-probe.txt"
+    assert validate_write_boundary("write_file", {"path": str(target)},
+                                   workspace_root=scope.owner, write_boundary=boundary) == ""
+    sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
+        attempt_view=scope.own, staging_root=scope.own,
+        shared_workspace=scope.owner, owner_home=scope.owner,
+        extra_write_roots=tuple(Path(p) for p in boundary["allowed_write_roots"]),
+        write_scope_denied_roots=tuple(Path(p) for p in boundary["forbidden_write_roots"]),
+        implicit_attempt_write_roots=False,
+        full_access=access_mode == "full-access",
+    ))
+    if platform.system() not in {"Darwin", "Linux"}:
+        pytest.skip("真实进程沙箱仅在 Linux/macOS 验证")
+    result = sandbox.run(["/bin/sh", "-c", f"printf allowed > {shlex.quote(str(target))}"], timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert target.read_text() == "allowed"
+    sibling = scope.own.parent / "subagent-sibling"
+    sibling.mkdir(exist_ok=True)
+    denied_target = sibling / "denied.txt"
+    rejected = sandbox.run(["/bin/sh", "-c", f"printf denied > {shlex.quote(str(denied_target))}"], timeout=10)
+    assert rejected.returncode != 0
+    assert not denied_target.exists()
+
+
+def test_process_projection_keeps_locks_absolute_and_ancestor_rules_separate(child_scope):
+    from agent_py_agent.agent.tooling.registry_invoke import (
+        AuthorizedToolDispatchRequest,
+        _tool_params_with_runtime_boundary,
+    )
+
+    scope = child_scope
+    locked = scope.own / "locked.txt"
+    locked.write_text("original")
+    boundary = write_boundary_with_runtime_ledger(scope.agent, scope.params)
+    boundary["locked_files"] = [str(locked)]
+    params = _tool_params_with_runtime_boundary(AuthorizedToolDispatchRequest(
+        tool_name="run_command", tool=SimpleNamespace(), tool_params={},
+        workspace_root=scope.owner, write_boundary=boundary,
+    ))
+    assert str(locked) in params["__sandbox_protected_write_paths"]
+    assert str(scope.owner / "runs") not in params["__sandbox_protected_write_paths"]
 
 
 @pytest.fixture

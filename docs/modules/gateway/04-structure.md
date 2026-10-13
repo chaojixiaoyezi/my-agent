@@ -1,5 +1,9 @@
 # Gateway Structure
 
+私人控制复用 `delivery/control_cards` 的能力/目标前检与 native 回执、`adapter/private_controls` 的已验证 SDK actor 和原 G1 凭据。Gateway 在加载签名 owner 前核对 MAC/actor/expiry/密码与当前管理员绑定，最终调用 `conversation/im_tool_approval` 写原 pending；没有另一审批队列。新私人控制入口不沿 G2a 无凭据回环兼容放行，普通接口仍保留原协议。签名本身不是用户批准。
+
+2026-10-13 命令/进度接线：`adapter/feishu_mentions` 与 `protocol.feishu_to_incoming` 共用可信 bot 提及规范化；`command_catalog.CommandAccessContext`/原声明被 TUI 帮助和 Gateway 控制共用。`settings.AgentConfig.im_stream_preview_max_chars` 经 request_execution/BufferedChunkStreamWriter 的结构字段，沿 http_handlers 和 GatewayProgressBatch 下发；原 progress_draft 在 dispatch 冻结之前裁短，重放和最终投递保持原正文。R04、调度查询/控制和 IM 审批仍待实施，见 [记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
 2026-10-12 私聊首设门：飞书 WS/webhook 共享入站必须先设置个人密码；未设/锁定消息进入原有界队列，设置或解锁成功按准确用户续送。认证只读原服务结构化 ok，卡片颜色不能授权；初始化/状态/提示失败不放行。原主动告警出站不受个人锁影响，不更新用户活跃。
 
 2026-10-12 发布依赖边界：Gateway 的 IM 路由调用 `conversation/session_task_dispatch.py` 的原耐久派发流程；模型派活工具也调用同一入口，原身份/链深/配额/正文/wake 不改。状态展示调用 `conversation/im_task_status.py`，由会话领域读取原子代理终态集合；Gateway 不导入 agent_core 工具或 subagents。发行 AST 边界测试曾实际发现两个新依赖，修复不增加豁免或动态导入。派活/消息测试现在共用完整生产 worker 收尾与正式 BackgroundRunRequest，原停止授权与消息消费断言保留。

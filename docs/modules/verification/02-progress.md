@@ -1,5 +1,7 @@
 # Verification：开发推进
 
+2026-10-13 IM 长工具观察：`tool_call_runtime` 仅向唯一执行器传宿主 typed sink 和刷新间隔，实际 handler 边界才启动单调时间心跳；不改授权、归档或验证事件。off 只展示极简状态，更新时间来自执行侧事件；拒绝/取消/异常和真实 Registry 联测已覆盖，Linux 长等待验收待做。见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
 ## L 线 Goal 完成引用（候选）
 
 `verification_task_metadata` 沿原 owner/thread/task 精确查询最新验证事件，只返回 event_id/status/scope。缺库不创建，SQLite 以只读方式打开；允许 SQLite 原 WAL 读者产生自身协调文件，不写验证事件。Goal 保存引用时继续标 not_evaluated，未知或不支持的状态不伪造 passed；回归覆盖查询无业务写入、精确归属和正文排除。

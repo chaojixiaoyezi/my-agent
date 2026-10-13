@@ -75,7 +75,7 @@ def _utc_now_iso() -> str:
 
 # LLM: 只渲染 Gateway /progress 的结构化事件；permission_requested 只提示可发送的控制命令，既不代表批准，
 #   也不是最终回复（最终正文仍由原请求结果 watcher 发送）；提示只含工具名与 Gateway 已脱敏的摘要。
-# 函数用途: 把一条过程事件渲染成 IM 可读文本；工具等待确认时告诉用户用 /approve 或 /deny。
+# 函数用途: 把一条过程事件渲染成 IM 可读文本；运行中心跳显示真实时长，工具等待确认时提示控制命令。
 def _render_gateway_progress(event: dict[str, object]) -> str:
     kind = str(event.get("kind") or "")
     if kind in {"assistant_commentary", "model_draft"}:
@@ -87,8 +87,12 @@ def _render_gateway_progress(event: dict[str, object]) -> str:
     status = str(event.get("status") or "").strip()
     elapsed = event.get("elapsed_seconds")
     elapsed_text = f"（{float(elapsed):.2f} 秒）" if isinstance(elapsed, (int, float)) else ""
+    if event.get("level") == "minimal" and event.get("kind") == "tool_liveness":
+        return f"执行中：{tool}"
     if status == "开始":
         message = f"正在执行：{tool}"
+    elif event.get("phase") == "running" and event.get("wait_state") == "handler_result":
+        message = f"仍在执行：{tool}{elapsed_text}，等待工具结果"
     elif status.startswith("失败"):
         message = f"执行失败：{tool} {status}{elapsed_text}"
     elif status == "完成":
@@ -635,8 +639,13 @@ class _GatewayReplyPollClient:
         ]
         from .progress_draft import GatewayProgressBatch
 
-        mode = "stream" if any(isinstance(event, dict) and event.get("level") == "stream" for event in events or []) else "append"
-        return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode, bool(snapshot_indices))
+        mode = "stream" if any(isinstance(event, dict) and event.get("level") in {"stream", "minimal"} for event in events or []) else "append"
+        limits = [event.get("preview_max_chars") for event in source_events if isinstance(event, dict)
+                  and type(event.get("preview_max_chars")) is int and 1 <= event["preview_max_chars"] <= 8000]
+        updates = [event.get("updated_at") for event in source_events if isinstance(event, dict) and isinstance(event.get("updated_at"), str)]
+        return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode,
+                                    bool(snapshot_indices) or any(isinstance(e, dict) and e.get("kind") == "tool_liveness" for e in source_events),
+                                    limits[-1] if limits else None, updates[-1] if updates else "")
 
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，
     #   开关关时降级为不带凭据；远端瞬时状态仍等待。
@@ -798,12 +807,15 @@ def _reply_text_with_host_notices(body: dict) -> object:
 class ChannelManager:
     """管理所有已注册的通道适配器，提供统一的启停和消息路由接口。"""
 
+    # LLM: 原唯一通道管理器持有同一 DeliveryService/worker；上限由 AgentConfig 配置，不能另建消息队列或裁剪终态回复。
+    # 函数用途: 准备通道与可恢复回送服务，将短进度配置传到实际投递入口。
     def __init__(
         self,
         gateway_port: int = 8420,
         *,
         delivery_state_dir: Path | None = None,
         delivery_poll_interval: float = 1.0,
+        stream_preview_max_chars: int = 100,
     ) -> None:
         self._adapters: dict[str, BaseChannelAdapter] = {}
         self._delivery_registry = ChannelAdapterRegistry()
@@ -831,6 +843,7 @@ class ChannelManager:
             ),
             poll_interval=delivery_poll_interval,
         )
+        self._reply_delivery.stream_preview_max_chars = max(1, min(8000, int(stream_preview_max_chars)))
         self._ingress_callbacks = _ChannelIngressCoordinator(self)
         self._delivery_worker = GatewayAdapterDeliveryWorker(
             GatewayIngressStore(delivery_state_dir),

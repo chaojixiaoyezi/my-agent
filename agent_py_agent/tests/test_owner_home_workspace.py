@@ -21,7 +21,7 @@ def _home_case(tmp_path, scope):
         folder.mkdir(parents=True, exist_ok=True)
     registry = _registry(owner)
     registry.owner_scope_root = str(owner)
-    home = SimpleNamespace(owner_home_dir=owner, owner_runs_dir=owner / "runs")
+    home = SimpleNamespace(owner_home_dir=owner, owner_runs_dir=owner / "runs", owner_tasks_dir=owner / "tasks")
     agent = SimpleNamespace(
         tools=registry, home_paths=home,
         subagents=SimpleNamespace(owner_scope_root=str(owner)),
@@ -38,7 +38,7 @@ def _home_case(tmp_path, scope):
             "conversation_rebase_from_task_root": str(second),
             "run_workspace": {"task_root": str(private)},
         },
-        write_boundary={"execution_cwd": str(first), "allowed_write_roots": [str(first)]},
+        write_boundary={"execution_cwd": str(first), "allowed_write_roots": [str(first), str(second)]},
     )
     return registry, write_boundary_with_runtime_ledger(agent, params), owner, first, second, private
 
@@ -60,7 +60,7 @@ def test_main_and_child_read_edit_old_work_without_switching_runtime(tmp_path, s
     }, write_boundary=boundary)
     assert edited.ok, edited.output
     assert target.read_text() == content.replace("Reference:", "Verified:")
-    assert boundary["allowed_write_roots"] == [str(owner.resolve())]
+    assert str(owner.resolve()) in boundary["allowed_write_roots"]
     assert boundary["execution_cwd"] == str(first)
     assert boundary["task_root"] == str(private)
     assert not (private / "report.md").exists()

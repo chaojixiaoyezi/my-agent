@@ -17,7 +17,7 @@ from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 # LLM: 正式工具根据真实 IM binding 创建计划；不手写线程来源或改宿主策略，替身只承接模型/投递运输。
 # 函数用途: 建立同 owner 下的 IM 后台计划，验证合并后显式执行策略不会覆盖原布置者。
-def im_case(tmp_path, *, execution=None):
+def im_case(tmp_path, *, execution=None, delivery=None):
     agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False,
                                    orphan_supervision_interval_seconds=0), tmp_path)
     backend = _Backend()
@@ -28,7 +28,8 @@ def im_case(tmp_path, *, execution=None):
         "owner_home": str(agent.home_paths.owner_home_dir), "cwd": str(tmp_path), "now": 900})
     agent._current_run_params = SimpleNamespace(request_id="create-im-plan", task_attributes={"conversation_thread_id": thread.thread_id})
     outcome = ScheduleTool(agent).execute({"action": "create", "name": "合成提醒", "prompt": "整理自己的合成资料",
-        "schedule_kind": "every", "every_seconds": 600, "execution": execution or {"mode": "followup"}})
+        "schedule_kind": "every", "every_seconds": 600, "execution": execution or {"mode": "followup"},
+        **({"delivery": delivery} if delivery is not None else {})})
     assert outcome.ok, outcome.output
     job = agent.scheduler_repository.list_jobs()[0][0]
     return SimpleNamespace(agent=agent, store=store, thread=thread, job=job, backend=backend)
@@ -52,7 +53,7 @@ def test_default_im_background_inherits_live_source_model_without_returning_to_c
 
 
 def test_explicit_isolated_im_run_keeps_original_sender_after_group_sender_changes(tmp_path):
-    case = im_case(tmp_path, execution={"mode": "isolated"})
+    case = im_case(tmp_path, execution={"mode": "isolated"}, delivery={"mode": "origin"})
     case.store.threads.update_atomic(case.thread.thread_id, lambda thread: replace(thread,
         channel_bindings=tuple(replace(row, channel_user_id="ou_b") for row in thread.channel_bindings)))
     case.agent.scheduler_service.enqueue_ready_runs(now=case.job["next_run_at"])

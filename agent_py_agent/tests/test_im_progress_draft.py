@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from unittest.mock import patch
 
+import pytest
+
 from agent_py_agent.agent.adapter.delivery import (
     GatewayReplyDeliveryStore,
     GatewayReplyDeliveryWorker,
@@ -45,6 +47,91 @@ class Adapter:
     def send_message(self, target, message):
         self.finals.append((target, message.content))
         return True
+
+
+def test_timestamp_is_visible_bounded_and_updated_in_same_message(tmp_path, monkeypatch):
+    from agent_py_agent.agent.adapter.progress_draft import send_gateway_draft
+
+    clock = [1000.0]
+    monkeypatch.setattr("agent_py_agent.agent.adapter.progress_draft.time.time", lambda: clock[0])
+    store = GatewayReplyDeliveryStore(tmp_path)
+    provider = Adapter()
+    registry = ChannelAdapterRegistry()
+    registry.register_adapter("feishu", provider, capabilities=ChannelCapabilities(edit_progress=True))
+    service = DeliveryService(registry)
+    update = ["2026-10-13T17:38:20+08:00"]
+    final = [None]
+    finals = []
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda _: final[0],
+        deliver_response=lambda _, text: finals.append(text) or True,
+        poll_progress=lambda row: GatewayProgressBatch(("执行中：run_command",), row.progress_cursor + 1,
+            "stream", True, 100, update[0]),
+        deliver_progress=lambda row, text: send_gateway_draft(service, row, text))
+    worker.enqueue(PendingGatewayReply(request_id="gw-minimal", channel="feishu", user_id="ou_user", message_id="om_user"))
+    worker.run_once()
+    assert len(provider.created) == 1
+    assert "更新于 17:38:20" in store.pending()[0].progress_draft["content"]
+    clock[0] += 120
+    update[0] = "2026-10-13T17:40:20+08:00"
+    worker.run_once()
+    assert len(provider.created) == 1 and provider.edits[0][0] == "om_preview"
+    assert provider.edits[0][1] == "执行中：run_command\n更新于 17:40:20"
+    assert len(provider.edits[0][1]) <= 100
+    final[0] = "完整结果" * 100
+    worker.run_once()
+    assert finals == [final[0]] and not store.pending()
+    clock[0] += 120
+    worker.run_once()
+    assert len(provider.edits) == 1  # 最终回复后不再编辑旧窗口。
+
+
+def test_progress_redacts_paths_without_note_and_final_keeps_note():
+    from agent_py_agent.agent.conversation.channels import HOST_PATH_REDACTION_NOTE
+
+    provider = Adapter()
+    registry = ChannelAdapterRegistry()
+    registry.register_adapter("feishu", provider, capabilities=ChannelCapabilities(edit_progress=True))
+    service = DeliveryService(registry)
+    context = DeliveryContext(channel="feishu", target="ou_user", mode="reply", idempotency_key="time-preview")
+    text = "执行中 /private/synthetic-home/long-command.sh\n更新于 17:40:20"
+    assert service.deliver_progress(context, ReplyEnvelope(content=text)).ok
+    progress = next(iter(provider.created.values()))[2]
+    assert "/private/" not in progress and HOST_PATH_REDACTION_NOTE not in progress
+    receipt = service.deliver(context, ReplyEnvelope(content=text))
+    assert HOST_PATH_REDACTION_NOTE in receipt.content
+
+
+@pytest.mark.parametrize("limit,size", [(100,99), (100,100), (100,101), (17,80), (100,200)])
+def test_stream_whole_preview_is_bounded_and_final_remains_full(tmp_path, monkeypatch, limit, size):
+    clock = [1000.0]
+    monkeypatch.setattr("agent_py_agent.agent.adapter.progress_draft.time.time", lambda: clock[0])
+    store = GatewayReplyDeliveryStore(tmp_path)
+    provider = Adapter()
+    registry = ChannelAdapterRegistry()
+    registry.register_adapter("feishu", provider, capabilities=ChannelCapabilities(proactive=True, edit_progress=True))
+    service = DeliveryService(registry)
+    current = [("中🙂" * size)[:size]]
+    final = [None]
+    finals = []
+    from agent_py_agent.agent.adapter.progress_draft import send_gateway_draft
+
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda row: final[0],
+        deliver_response=lambda row, text: finals.append(text) or True,
+        poll_progress=lambda row: GatewayProgressBatch((current[0],), row.progress_cursor + 1, "stream", True),
+        deliver_progress=lambda row, text: send_gateway_draft(service, row, text))
+    worker.stream_preview_max_chars = limit
+    worker.enqueue(PendingGatewayReply(request_id="gw-bounded", channel="feishu", user_id="ou_user",
+        message_id="om_user", progress_draft={"mode": "stream"}))
+    worker.run_once()
+    assert store.pending()[0].progress_draft["content"] == current[0][-limit:]
+    clock[0] += 2
+    current[0] = ("更新🙂" * size)[:size]
+    worker.run_once()
+    assert provider.edits[-1][1] == current[0][-limit:]
+    final[0] = "完整结果" * 80
+    clock[0] += 2
+    worker.run_once()
+    assert finals == [final[0]] and len(finals[0]) > limit
 
 
 def test_one_progress_message_survives_worker_restart_and_final_is_separate(tmp_path):
@@ -121,6 +208,7 @@ def test_snapshot_replaces_previous_candidate_without_flooding(tmp_path):
             return replace(record,progress_cursor=cursor)
 
     worker=Worker()
+    worker.stream_preview_max_chars=100
     class Store:
         def commit_claim(self,old,new,**kwargs):
             return new

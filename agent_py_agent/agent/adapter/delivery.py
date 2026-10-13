@@ -1256,6 +1256,8 @@ class GatewayReplyDeliveryWorker(
 ):
     """一个可恢复轮询线程，不对模型响应设置期限。"""
 
+    # LLM: 仅初始化原投递 worker；短进度上限消费宿主配置，claim/dispatch 身份与最终结果原样保持，不在此发网络请求。
+    # 函数用途: 配置可恢复投递循环和流式短窗口，启动仍由原生命周期入口负责。
     def __init__(
         self,
         store: GatewayReplyDeliveryStore,
@@ -1279,6 +1281,7 @@ class GatewayReplyDeliveryWorker(
         self._poll_control_receipt = receipt_callbacks.poll_control
         self._discard_input_receipt = receipt_callbacks.clear_placeholder
         self._poll_interval = max(0.01, float(poll_interval))
+        self.stream_preview_max_chars = 100
         self._claim_owner = lease.owner or (
             f"adapter-reply:{os.getpid()}:{uuid.uuid4().hex}"
         )

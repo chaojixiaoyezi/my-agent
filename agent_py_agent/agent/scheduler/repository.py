@@ -41,6 +41,7 @@ from ..user_space.owner_quota import (
     OwnerQuotaChange,
     OwnerQuotaEnforcer,
 )
+from .delivery_policy import normalize_delivery
 from .due_index import SchedulerDueIndex
 from .execution_policy import normalize_execution, normalize_precheck
 from .policy import apply_run_policy, normalize_policy
@@ -108,7 +109,7 @@ class SchedulerConflictError(SchedulerRepositoryError):
 
 
 # LLM: 创建值对象携带 job 级显式策略，不携带展开后的模型配置或凭据；规范化仍由原仓库执行。
-# 类用途: 将计划时间、来源会话、执行策略及预检作为一次创建事务的输入。
+# 类用途: 将计划时间、来源会话、执行策略、通知开关及预检作为一次创建事务的输入。
 @dataclass(frozen=True)
 class SchedulerJobCreateRequest:
     """Validated create inputs passed as one value through normalization."""
@@ -126,6 +127,7 @@ class SchedulerJobCreateRequest:
     policy: object = None
     execution: object = None
     precheck: object = None
+    delivery: object = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thread_id", str(self.thread_id or "").strip())
@@ -1000,6 +1002,7 @@ class _SchedulerStoreSupport:
             normalize_policy(raw.get("policy"))
             normalize_execution(raw.get("execution"))
             normalize_precheck(raw.get("precheck"))
+            normalize_delivery(raw.get("delivery"))
             if int(raw.get("version") or 0) < 1:
                 raise ValueError("job version")
             return dict(raw), ""
@@ -1033,6 +1036,7 @@ class _SchedulerStoreSupport:
                 raise ValueError("claim epoch")
             normalize_execution(raw.get("execution"))
             normalize_precheck(raw.get("precheck"))
+            normalize_delivery(raw.get("delivery"))
             parsed = dict(raw)
             parsed["claim_epoch"] = claim_epoch
             return parsed, ""
@@ -1460,7 +1464,7 @@ def _claim_matches(run: dict[str, object], claim_id: str) -> bool:
     return current_epoch == token_epoch
 
 
-# LLM: 纯规范化创建输入，幂等摘要包含 execution/precheck/policy；不同明确策略不能被判成同一登记。
+# LLM: 纯规范化创建输入，幂等摘要包含 execution/precheck/policy/delivery；不同明确策略不能被判成同一登记。
 # 函数用途: 构造新的计划记录，落盘及配额由上层原事务负责。
 def _new_job_payload(
     *,
@@ -1474,6 +1478,7 @@ def _new_job_payload(
     policy = normalize_policy(request.policy)
     execution = normalize_execution(request.execution)
     precheck = normalize_precheck(request.precheck)
+    delivery = normalize_delivery(request.delivery)
     thread = request.thread_id
     if not thread:
         raise ScheduleValidationError("thread_id is required")
@@ -1490,6 +1495,7 @@ def _new_job_payload(
                 "policy": policy,
                 "execution": execution,
                 "precheck": precheck,
+                "delivery": delivery,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1509,7 +1515,7 @@ def _new_job_payload(
         "status": "active",
         "next_run_at": next_run,
         "misfire_grace_seconds": grace,
-        "delivery": {"mode": "origin"},
+        "delivery": delivery,
         "skill_refs": normalized_refs,
         "policy": policy,
         "execution": execution,
@@ -1531,7 +1537,7 @@ def _new_job_payload(
 
 
 # LLM: 只改显式 patch，保留未给出的对象和已确认 checkpoint；已预留 run 的快照不在这里改写。
-# 函数用途: 校验计划更新并增加版本，让新周期读取新的完整策略。
+# 函数用途: 校验计划和通知更新并增加版本，让新周期读取新的完整策略；不改来源或已预留运行。
 def _updated_job(
     job: dict[str, object], patch: dict[str, object], *, now: float
 ) -> dict[str, object]:
@@ -1562,13 +1568,14 @@ def _updated_job(
         "policy": normalize_policy(patch.get("policy") if "policy" in patch else job.get("policy")),
         "execution": normalize_execution(patch.get("execution") if "execution" in patch else job.get("execution")),
         "precheck": normalize_precheck(patch.get("precheck") if "precheck" in patch else job.get("precheck")),
+        "delivery": normalize_delivery(patch.get("delivery") if "delivery" in patch else job.get("delivery")),
         "updated_at": now,
         "version": int(job["version"]) + 1,
     }
 
 
 # LLM: New durable runs start at epoch 0; every executable claim advances it and embeds it in claim_id for CAS validation.
-# 函数用途: 构造初始 queued run，固定 scheduler 持久字段，供普通领取与恢复流程沿同一 epoch 递增。
+# 函数用途: 构造初始 queued run，冻结通知策略及 scheduler 持久字段，供普通领取与恢复流程沿同一 epoch 递增。
 def _reserved_run(
     job: dict[str, object],
     *,
@@ -1590,6 +1597,7 @@ def _reserved_run(
         "source_thread_id": str(job.get("source_thread_id") or job["thread_id"]),
         "execution": execution,
         "precheck": deepcopy(job.get("precheck")),
+        "delivery": normalize_delivery(job.get("delivery")),
         "precheck_checkpoint": deepcopy(job.get("precheck_checkpoint")),
         "source_task_id": str(job.get("source_task_id") or ""),
         "name": str(job["name"]),

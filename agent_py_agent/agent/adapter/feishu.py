@@ -285,17 +285,25 @@ def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, 
     return name
 
 
+# LLM: 密码、具体审批和长期设定分属原状态源；审批按钮只承运引用，错误不能回落成聊天或批准。
+# 函数用途: 分发已验证卡片事件，私人审批原地返回回执，密码与长期设定保留原流程。
 def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, Any] | None:
-    """飞书卡片回调。两类分流:
+    """飞书卡片回调。三类分流:
     - 会话锁密码卡:密码走 form_value(绝不进聊天/日志),处理完【返回】就地整卡替换响应
       ({toast, card:{type:raw,data:已决卡}})→ 飞书把原密码卡(含输入框+已输的密码)当场替换消失,
       密码不残留、不另发新消息。这是从 参考实现 抄全的关键:回调同步返回卡片,而非 send 一条新卡。
     - persona 人设确认卡:落写/取消后另发一条确认消息给发起人,返回 None(不走就地替换)。
+    - 工具审批卡:只提交 SDK actor/消息/聊天和签名引用，Gateway 核对原审批后原地返回回执。
     fail-open,绝不抛回长连。"""
     value = norm.get("value") or {}
     password_matched, password_result = _password_card_action(adapter, norm, value)
     if password_matched:
         return password_result
+    from .private_controls import tool_approval_card_action
+
+    approval_result = tool_approval_card_action(adapter, norm)
+    if approval_result is not None:
+        return approval_result
     try:
         from .feishu_card import apply_card_action
 
@@ -384,6 +392,17 @@ def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
             return True
         status = unlock.status(user_id, is_group=False)
         mode = "set" if status.requires_password_setup else "unlock"
+        from ..conversation.control_commands import parse_conversation_control
+
+        control = parse_conversation_control(msg.content)
+        if (status.locked or status.requires_password_setup) and control is not None and control.kind == "help":
+            from ..command_catalog import CommandAccessContext, render_command_help
+
+            token = adapter._get_tenant_access_token()
+            if token:
+                _send_feishu_rendered(user_id, render_command_help(
+                    CommandAccessContext("im", False, private_chat=True, locked=True), control.value), token)
+            return True
         pending = getattr(adapter, "_pending_unlock_messages", None)
         if pending is not None and pending.was_resumed(msg):
             return True
@@ -432,6 +451,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
 
     adapter_name = "feishu"
     supports_edit_progress = True
+    supports_control_cards = True
 
     # LLM: 创建原通道状态、认证服务和有界待送队列；显式关闭与初始化失败分开，不把未知状态当作认证成功。
     # 函数用途: 初始化飞书接入与私聊密码门，不启动消息服务或发送网络请求。
@@ -451,6 +471,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         self.encrypt_key = config.get("feishu_encrypt_key", "")
         # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL.md(与网关同一根)。
         self.my_agent_home = str(config.get("my_agent_home", "") or "")
+        self._gateway_port = int(config.get("gateway_port", 8420))
         # 默认长连接:免公网且能接密码/人格确认卡片回调；webhook 仍可显式选择。
         self.connection_mode = str(
             config.get("feishu_connection_mode", "long_connection") or "long_connection"
@@ -599,12 +620,13 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
     # 函数用途: 私聊照常处理，群聊只允许直接 @机器人，@全员和未提及都不会启动回合。
     def _handle_feishu_event(self, payload: dict[str, Any]) -> None:
         message = (payload.get("event") or {}).get("message") or {}
+        bot_open_id = self._resolve_bot_open_id() if message.get("chat_type") == "group" else ""
         if message.get("chat_type") == "group" and self.group_require_bot_mention:
             from .feishu_mentions import directly_mentions_bot
 
-            if not directly_mentions_bot(message, self._resolve_bot_open_id()):
+            if not directly_mentions_bot(message, bot_open_id):
                 return
-        msg = feishu_to_incoming(payload)
+        msg = feishu_to_incoming(payload, bot_open_id=bot_open_id)
         if msg is None:
             return
         if self._session_locked_gate(msg):  # 会话锁门:锁了就发密码卡、不处理正常消息
@@ -718,6 +740,11 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
     # 函数用途: 创建可反复编辑的一条进度消息，后续统一投递服务用此 ID 更新同一条。
     def start_progress_message(self, user_id: str, text: str, *, reply_to: str = "", idempotency_key: str = "") -> str:
         return _start_feishu_progress(self, user_id, text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    # LLM: 原生卡片不回落文本；目标是宿主解析的私人身份，uuid 保持逻辑发送幂等，回执来自真实 API。
+    # 函数用途: 为审批或私密输入发送一张原生卡，返回后续回调要核对的消息与聊天 ID。
+    def send_control_card(self, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, str]:
+        return _send_feishu_control_card(self, user_id, card, idempotency_key=idempotency_key)
 
     # LLM: 进度始终使用首次创建的 text 类型，不能根据候选出现 Markdown/表格而改变消息类型；只编辑原 ID。
     # 函数用途: 更新原文本进度窗口，普通富文本订正仍由 edit_message 保持已有语义。
@@ -903,3 +930,18 @@ def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, r
 
     send("text", json.dumps({"text": text}, ensure_ascii=False))
     return next((identity for identity in identities if identity), "")
+
+
+# LLM: 卡片创建只接受供应商成功响应中的 message_id/chat_id；不根据 UUID 推断 ID，不回落普通消息。
+# 函数用途: 沿原认证、HTTP 重试和稳定 UUID 发一张私人控制卡，保留精确回调来源。
+def _send_feishu_control_card(adapter: FeishuAdapter, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, str]:
+    token = adapter._get_tenant_access_token()
+    if not token:
+        return {}
+    result = _feishu_msg_api_with_retry("POST", "/im/v1/messages?receive_id_type=open_id",
+        _message_body(receive_id=user_id, msg_type="interactive", content=json.dumps(card, ensure_ascii=False),
+                      uuid_value=_feishu_request_uuid(idempotency_key, component="control", index=0)), token)
+    data = result.get("data") if result.get("code") == 0 else None
+    if not isinstance(data, dict):
+        return {}
+    return {"message_id": str(data.get("message_id") or ""), "chat_id": str(data.get("chat_id") or "")}

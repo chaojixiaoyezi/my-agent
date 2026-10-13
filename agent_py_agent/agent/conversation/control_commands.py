@@ -31,6 +31,7 @@ from .authority import (
 from .channels import redact_host_absolute_paths
 
 ControlKind = Literal[
+    "help",
     "delegate",
     "status",
     "context",
@@ -219,6 +220,10 @@ def parse_conversation_command(
     if plugin_namespace(raw) is not None:
         return ConversationControlCommand("plugins", value=raw)
     name, trailing = match_conversation_command(raw) or ("", None)
+    if name == "help":
+        topic = str(trailing or "").strip().lstrip("/")
+        return ConversationControlCommand("help", value=topic, valid=not any(ch.isspace() for ch in topic),
+                                          usage="用法：/help 或 /help <命令>。")
     if name == "delegate":
         value = str(trailing or "status").strip()
         return ConversationControlCommand("delegate", value=value, valid=value in {"enable", "disable", "status"},
@@ -776,7 +781,7 @@ def _argumentless_command(
 
 
 # LLM: Verbose acknowledgements are deterministic control-plane text, never model-authored claims.
-# 函数用途：根据当前档位和已解析命令生成系统设置回执。
+# 函数用途：根据当前档位和已解析命令生成系统设置回执，说明 IM 关闭详细过程仍保留最小存活展示。
 def render_verbose_control(current_level: str, command: ConversationControlCommand) -> str:
     if not command.valid:
         return command.usage
@@ -785,7 +790,7 @@ def render_verbose_control(current_level: str, command: ConversationControlComma
         labels = {"off": "关闭", "on": "开启", "full": "完整", "stream": "流式更新"}
         return f"当前详细过程模式：{labels.get(level, '关闭')}。"
     if level == "off":
-        return "详细过程已关闭。"
+        return "详细过程已关闭；IM 长工具默认保留极简状态与更新时间。"
     if level == "stream":
         return "流式过程已开启：同一条进度消息持续更新，完成后另发最终结果。"
     if level == "on":

@@ -1,5 +1,11 @@
 # 定时任务执行、模型与预检合同
 
+## 2026-10-13 通知策略修复（实施中）
+
+原 create 写死 `delivery.mode=origin`、update 不接受通知字段的问题已在隔离原 Store/模型/运输链复现并接线：模型工具支持 create/update `delivery={mode:origin|local|none}`，纯巡检新 IM 默认 local，明确提醒/告警/报表须声明 origin。默认来自 `scheduler_im_default_delivery_mode`，旧 job 缺字段和底层已发布创建 API 保留 origin；更新只影响以后预留 run，正在跑的 run 固定原策略。来源 thread、原 owner 与冻结绑定不因静默变化，不通过改来源绕外发。
+
+local/none 不逐轮发送 IM 回执，结果保留原内部运行线程和原 run 历史，合法内部非空总结可正常完成；空供应商响应仍判失败，静默不冒充成功。投递状态 `local_only` 与执行终态分开。后台主代理目录补上 schedule 候选，原 owner/task/权限快照继续收紧，不给子代理额外越权。31 项通知/原 IM 隔离/后台投递组合通过，真实模型与 IM 和本期多规则监控仍待实施验收。
+
 状态：原 L/T/IM 整合能力已进入 `.20261012.8` 发布基线；本页后半的紧凑查询、多规则监控、跨入口管理和重启恢复增补均为待实施设计。已有证据见 [整合记录](../tasks/L_T_IM_INTEGRATION_HANDOFF.md)，来源真实 TUI 验收见 [长任务报告](LONG_TASK_RUNTIME_REVIEW.md)。本合同扩展原 owner scheduler，不另建调度器、任务树、交付队列或模型配置源。
 
 ## 单一事实源与入口

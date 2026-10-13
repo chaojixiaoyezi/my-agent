@@ -140,7 +140,7 @@ def _audit_source_worker_tool_scope_result(
 
 # LLM: 最终 Tool Gateway 携带同一 run 快照、宿主审批消费者存在事实和事件身份；interactive/actor 不从模型参数读，不能扩大工具宇宙。
 # 首个工作工具在权限快照前登记运行身份，供归档与停止查询使用；晋升前后 cwd 和 owner 文件范围不变。
-# 函数用途: 执行并审计一个已追踪工具调用，归档后把完整正文交给可选宿主观察者，再生成模型投影。
+# 函数用途: 执行并审计一个已追踪工具调用，连接可选 IM 展示心跳，归档后把完整正文交给可选宿主观察者，再生成模型投影。
 def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     from ..conversation.input_media import model_accepts_images
     from ..conversation.process_events import process_completion_target
@@ -189,6 +189,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
             # 观察截图意愿（J16 第 9 节 vision2）：宿主按当前模型档案的结构化模态决定，经内部参数传给观察工具，
             # 由绑定层转成 _meta 协商字段；只读 model_input_modalities，不按模型名猜。
             "observation_screenshot": model_accepts_images(runtime_request.agent),
+            **_tool_liveness_context(runtime_request),
         },
         cancellation_token=getattr(runtime_request.request.params, "cancellation_token", None),
         required_action=_required_action_for_call(runtime_request),
@@ -210,6 +211,27 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
     trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
     return execution
+
+
+# LLM: 仅 typed IM sink 才注入观察回调；配置 0 关闭，off 只显示极简心跳，不改变工具范围、模型请求或账本。
+# 函数用途: 给唯一执行器装配同回合的短窗口刷新，TUI 不创建多余线程。
+def _tool_liveness_context(runtime_request: ToolCallRuntimeRequest) -> dict[str, object]:
+    sink = getattr(runtime_request.request.params, "effective_on_chunk", None)
+    publish = getattr(sink, "write_tool_liveness", None)
+    if not getattr(sink, "tool_liveness_enabled", False) or not callable(publish):
+        return {}
+    try:
+        interval = float(getattr(runtime_request.agent.config, "im_stream_heartbeat_seconds", 120.0))
+    except (AttributeError, TypeError, ValueError):
+        interval = 120.0
+    if interval <= 0:
+        return {}
+    # LLM: 回调只为原事件补宿主轮次，不访问模型文本或工作区；执行器控制其寿命。
+    # 函数用途: 把运行时间事实交给原 chunk 流，继续沿原消息 ID 投递。
+    def publish_liveness(event: dict[str, object]) -> None:
+        publish({**event, "round": runtime_request.request.tool_rounds,
+                 "call_index": runtime_request.request.idx})
+    return {"tool_liveness_sink": publish_liveness, "tool_liveness_interval": min(120.0, max(1.0, interval))}
 
 
 # LLM: 所有输出先沿原归档入口保存；观察回调只读原始正文，不改变模型投影或持久账，失败仍归入原执行器归档错误。

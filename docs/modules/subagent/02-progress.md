@@ -1,5 +1,9 @@
 # 子代理维护状态
 
+2026-10-13 R07：主/子/孙审批共用原 pending 与 canonical claim/attempt，增加原发起人的私人卡回执。TUI consumer 不在也可保留这条明确审批，姓名/界面选定工作不成为执行权。缓存按 claim/attempt 隔离，具体用户批准与父级 capability grant 分开；首批状态/卡片/HTTP 回归通过，真实后台工具和父级组合待验。
+
+2026-10-13 R06/R07 实施中：原写边界保留正式业务窄根及当前孩子自身工作根；普通允许/禁止范围按同一最具体路径规则投影到 Seatbelt/bwrap，锁/安装/宿主保护最后覆盖。PTY 和后台命令复用原入口；审批会话缓存包含 child execution_attempt_id。首批真实 macOS 与定向回归通过，Linux、自动委派全链和 IM 审批入口尚待完成，见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
+
 ## 自身运行工作目录的窄授权保留（2026-10-09，w3；本地实现、待 3a 复核）
 
 - 解决问题：researcher 的执行上下文明确允许自身 `runs/<日期>/<任务>/work/agents/<子代理>`，但运行时合并只剩 owner 根，随后祖先 `runs/` 禁写规则使 `write_file` 在 handler 前返回 `WRITE_FORBIDDEN`。

@@ -175,6 +175,8 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
         resolve_background_route,
     )
 
+    if scheduled_local_delivery(agent, request):
+        return thread, "internal", thread.thread_id
     origin = delivery_thread(agent, thread, request)
     if origin.thread_id == thread.thread_id:
         return origin, channel, target
@@ -184,9 +186,11 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
 
 
 # LLM: 只裁决原 run 的冻结绑定，不搜索新通道；返回失败供既有 outbox 保存，禁止重跑模型来弥补交付失败。
-# 函数用途: 投递前核对原会话未重置，并给 canonical 消息提供准确的归属会话。
+# 函数用途: 投递前核对原会话未重置；静默结果只写精确运行线程，不要求原外部绑定仍可投递。
 def validate_delivery_origin(agent, request, context) -> bool:
     run = execution_run(agent, request)
+    if run is not None and scheduled_local_delivery(agent, request):
+        return context.thread_id == run["thread_id"] and context.channel == "internal" and context.target == run["thread_id"]
     if run is None or normalize_execution(run.get("execution"))["mode"] != "isolated":
         return True
     frozen = run.get("execution_context") or {}
@@ -203,3 +207,12 @@ def validate_delivery_origin(agent, request, context) -> bool:
             channel_conversation_id=binding["channel_conversation_id"], channel_user_id=binding["channel_user_id"])
         return error is None and current is not None and current.thread_id == origin_id
     return context.channel in {"", "internal"} and context.target in {"", origin_id}
+
+
+# LLM: 通知资格读取精确原 run 的冻结策略，不读取 job 当前版本、不解析正文；其它后台唤醒不受影响。
+# 函数用途: 判断本次定时运行是否只需留下内部结果，主链和投递边界共用此事实。
+def scheduled_local_delivery(agent, request) -> bool:
+    from .delivery_policy import normalize_delivery
+
+    run = execution_run(agent, request)
+    return run is not None and normalize_delivery(run.get("delivery"))["mode"] in {"local", "none"}

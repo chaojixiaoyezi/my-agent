@@ -172,6 +172,8 @@ class _HomeProviderConfigFields:
     home_lesson_stale_caveat_days: int = 7
     run_task_workspace_enabled: bool = True
     timezone: str = ""  # IANA 时区名(如 Asia/Shanghai、America/New_York);空=服务器本地(审计 #21)
+    # 新 IM 定时计划默认只记录内部结果；明确提醒/报告可在 job/rule 的 delivery.mode 设 origin。
+    scheduler_im_default_delivery_mode: str = "local"
     week_start: str = "monday"  # 周起始 locale:monday/sunday/saturday,影响"本周"范围计算
 
 
@@ -526,6 +528,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     # 群聊只在直接 @机器人时触发；@全员不触发。
     feishu_group_require_bot_mention: bool = True
+    # /verbose stream 整条过程正文的字符上限；只影响展示，不裁剪最终回复。
+    im_stream_preview_max_chars: int = 100
+    # /verbose stream 长工具状态刷新间隔（秒）；0 关闭，不调用额外 LLM。
+    im_stream_heartbeat_seconds: float = 120.0
     feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首设/闲置锁定都暂存消息，验证成功后续送，异常不放行；群聊不锁
     feishu_personal_idle_lock_seconds: int = 10800  # 私聊闲置多久后锁定(秒,默认 3h);feishu_session_lock_enabled 开启时生效
     # QQ 适配器配置

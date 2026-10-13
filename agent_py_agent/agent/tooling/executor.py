@@ -26,6 +26,7 @@ from ..runtime_db.managed_operation_store import (
 )
 from .action_policy import ActionDecision, ActionPolicy, ActionPolicyRequest
 from .event_observation import ToolEventObservation
+from .liveness import ToolHandlerLiveness
 from .models import (
     ResourceScopeResolutionError,
     ToolAvailability,
@@ -80,7 +81,7 @@ class ToolExecution:
 
 
 # LLM: 模型参数与宿主配置分离；审批、事件身份、调用来源和征询回调只由可信调用方设置，来源默认 model，不能从 ToolCall 参数提权。
-# 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用。
+# 类用途: 汇总本次调用、权限、账本和取消上下文，供唯一执行器使用；可选展示心跳不携带权限。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
     call: ToolCall
@@ -105,6 +106,8 @@ class ToolExecutorRequest:
     require_model_visibility: bool = True
     event_context: EventPointContext | None = None
     on_handler_started: Callable[[], None] | None = None
+    on_handler_progress: Callable[[dict[str, object]], None] | None = None
+    handler_progress_interval_seconds: float = 120.0
     # 来源与征询提供方仅由宿主注入；模型参数没有任何来源控制权。
     call_origin: str = "model"
     plugin_gate_reviewer: Callable | None = None
@@ -219,7 +222,7 @@ class ToolExecutor:
 
 
 # LLM: 授权后仍可能被 validator、权限复核或幂等重放拦住；事件开始回调只沿真实 handler 入口传递，不提前发布。
-# 函数用途: 执行已放行调用并收口结果，观察故障不改变授权、操作账本或返回值。
+# 函数用途: 执行已放行调用并收口结果，真实 handler 的心跳必在终态前停止，观察故障不改变授权、操作账本或返回值。
 def _execute_authorized(
     request: ToolExecutorRequest,
     call: ToolCall,
@@ -263,8 +266,23 @@ def _execute_authorized(
             )
     states.append("running")
     observation = ToolEventObservation(request.event_context, call, decision.resolved_effect)
-    observed_request = replace(request, on_handler_started=observation.start)
-    outcome = _invoke_with_operation_policy(observed_request, call, runtime, decision)
+    liveness = ToolHandlerLiveness(call, request.on_handler_progress,
+        request.handler_progress_interval_seconds, request.cancellation_token)
+    # LLM: 开始事实只由 Registry 真正进入 handler 触发，原观察、宿主回调和心跳共用该边界。
+    # 函数用途: 发布真实开始事件并启动可选展示，不提前把授权成功当成已执行。
+    def handler_started() -> None:
+        observation.start()
+        liveness.start()
+        if request.on_handler_started is not None:
+            try:
+                request.on_handler_started()
+            except Exception:  # noqa: BLE001 - 开始观察不能更改实际工具结果
+                pass
+    observed_request = replace(request, on_handler_started=handler_started)
+    try:
+        outcome = _invoke_with_operation_policy(observed_request, call, runtime, decision)
+    finally:
+        liveness.close()
     states.append("succeeded" if outcome.ok else _outcome_state(outcome))
     states.append("reconciled")
     projection = _project_output(request, call, runtime, outcome)

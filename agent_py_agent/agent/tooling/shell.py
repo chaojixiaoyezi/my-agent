@@ -88,6 +88,7 @@ from .process_scope import ProcessAccessScope, ProcessExecutionScope, process_ac
 from .process_session_store import process_session_store_root
 from .sandbox import SandboxUnavailable
 from .shell_syntax import contains_unmanaged_background_operator
+from .write_boundary import SandboxWriteProtection
 
 # shell 命令输出默认最多回 12000 字符：防超长输出撑爆工具结果。
 _DEFAULT_MAX_OUTPUT_CHARS = 12_000
@@ -659,7 +660,7 @@ def _sandbox_roots(
 #   返回沙箱 argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell
 #   fallback（3.txt E.6/E.7）。单租户走 full_access 档：文件语义不变，网关
 #   统一 + 进程隔离 + readiness 检查仍生效（E.8 不取消 sandbox）。
-# 函数用途: 为命令选择跨平台 attempt 沙箱执行参数；返回 (argv, shell=False)。
+# 函数用途: 为命令选择跨平台 attempt 沙箱执行参数；普通范围按最具体路径生效，精确保护最后覆盖，返回 (argv, shell=False)。
 def _sandbox_exec(
     command: str,
     target: Path,
@@ -667,7 +668,7 @@ def _sandbox_exec(
     protected_persona_root: object = None,
     write_roots: tuple[Path, ...] | None = None,
     read_roots: tuple[Path, ...] | None = None,
-    protected_write_paths: tuple[Path, ...] | None = None,
+    write_protection: SandboxWriteProtection | None = None,
     *,
     private_roots: tuple[object, ...] = (),
 ) -> tuple[Any, bool]:
@@ -684,6 +685,7 @@ def _sandbox_exec(
     from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, gateway_bound_ports
     from .sandbox import strict_posix_shell_argv
 
+    protection = write_protection or SandboxWriteProtection()
     owner_text = str(owner_home or "").strip()
     persona_text = str(protected_persona_root or "").strip()
     # Full Access is the absence of an owner wall. Persona and control metadata remain more
@@ -715,8 +717,9 @@ def _sandbox_exec(
         public_read_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (read_roots or ())),
         protected_write_paths=tuple(
             Path(r).expanduser().resolve(strict=False)
-            for r in (*(protected_write_paths or ()), *host_readonly_paths_for(owner_text, persona_text))
+            for r in (*protection.absolute_paths, *host_readonly_paths_for(owner_text, persona_text))
         ),
+        write_scope_denied_roots=protection.denied_roots,
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
         # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
@@ -783,17 +786,16 @@ def host_readonly_patterns_for(owner_text: str, persona_text: str) -> tuple[str,
     return host_readonly_patterns(agent_home, owner)
 
 
-# LLM: 显式后台命令使用前台相同的已校验沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
+# LLM: 显式后台命令使用前台相同的已校验路径优先级与沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
 # 函数用途: 构造后台命令的系统执行参数，此处不启动进程或登记状态。
 def _background_command_argv(
     command: str, target: Path, owner_home: object, protected_persona_root: object,
     write_roots: tuple[Path, ...] | None, read_roots: tuple[Path, ...] | None,
-    protected_write_paths: tuple[Path, ...] | None, *, private_roots: tuple[object, ...] = (),
+    write_protection: SandboxWriteProtection | None, *, private_roots: tuple[object, ...] = (),
 ) -> list[str]:
     if owner_home or protected_persona_root or os.name == "posix":
         argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
-                                        write_roots, read_roots, protected_write_paths,
-                                        private_roots=private_roots)
+                                        write_roots, read_roots, write_protection, private_roots=private_roots)
         if use_shell or not isinstance(argv, list):
             raise OSError("managed background sandbox must provide argv execution")
         return argv
@@ -1279,7 +1281,8 @@ class ShellTool(BaseTool):
     ) -> ToolHandlerOutcome:
         try:
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
-                                            self.protected_persona_root, *sandbox_roots,
+                                            self.protected_persona_root, *sandbox_roots[:2],
+                                            SandboxWriteProtection(tuple(sandbox_roots[2] or ()), getattr(self, "_sandbox_forbidden_write_roots", ())),
                                             private_roots=self.host_private_roots)
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
@@ -2098,7 +2101,7 @@ def _run_attempt_sandboxed_shell_command(
         tool.protected_persona_root,
         sandbox_write_roots,
         sandbox_read_roots,
-        sandbox_protected_paths,
+        SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
         private_roots=tool.host_private_roots,
     )
     try:

@@ -10,6 +10,8 @@ from datetime import datetime
 from ...agent.command_catalog import (
     COMMAND_CATALOG,
     COMMAND_INDEX,
+    CommandAccessContext,
+    render_command_help,
     system_slash_command_name,
     unavailable_command_message,
 )
@@ -22,14 +24,10 @@ from .plugin_command_client import PluginCommandClient
 from .slash_command_types import SlashCommandContext
 
 
-# LLM: 帮助投影公共声明及其用法变体，保持 30 列布局；文案不能反向决定解析与执行。
+# LLM: 帮助与 IM 控制共用角色/入口声明，文案不能反向决定解析与执行；本机静态常量只表示管理员 local 入口。
 # 函数用途: 为 plain/TUI 生成同一份中文帮助，并准确标示尚未开放的命令。
 def _render_chat_help_text() -> str:
-    lines = ["可用命令："]
-    for spec in COMMAND_CATALOG:
-        for usage, summary in ((spec.usage, spec.summary), *spec.help_variants):
-            lines.append(f"{usage:<30} {summary}")
-    return "\n".join(lines) + "\n"
+    return render_command_help(CommandAccessContext("local", True)) + "\n"
 
 
 CHAT_HELP_TEXT = _render_chat_help_text()
@@ -122,10 +120,17 @@ def _handle_control_command(
 def _handle_help_command(
     user: str, ctx: SlashCommandContext, include_plain_help: bool
 ) -> bool | None:
-    if user != "/help":
+    command = parse_conversation_control(user)
+    if command is None or command.kind != "help":
         return None
+    if not command.valid:
+        ctx.print_line(command.usage)
+        return True
+    from ...agent.user_space.approval_mode import is_permission_admin
+
     suffix = "Ctrl+C                        退出\n其他输入                      发送普通消息\n"
-    ctx.print_line(CHAT_HELP_TEXT + (suffix if include_plain_help else ""))
+    text = render_command_help(CommandAccessContext("local", is_permission_admin(getattr(ctx.agent, "home_paths", None))), command.value)
+    ctx.print_line(text + "\n" + (suffix if include_plain_help else ""))
     return True
 
 

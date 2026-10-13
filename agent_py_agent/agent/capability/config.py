@@ -39,6 +39,8 @@ class CapabilityConfig:
     admin_message_channels: list[str] = field(default_factory=lambda: ["feishu"])
     im_scheduled_tasks_background: bool = True
     im_task_delegation_enabled: bool = True
+    # 无 TUI 的主子代理工具审批发到原发起人的私人卡片；具体批准仍回原请求/claim/attempt。
+    im_tool_approvals_enabled: bool = True
     public_capability_packages_enabled: bool = True
     # 普通用户（owner_kind=user）发消息开关；默认关，做用户隔离时再打开。
     session_messaging_user_enabled: bool = False

@@ -395,6 +395,13 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/tests/test_background_steer_gateway.py  # 真实后台 core 与隔离 HTTP 的连续插话
 |-- docs/tasks/TUI_STEER_CONTROL_HANDOFF.md  # 插话与停止修复的独立实施、依赖和验收记录
 |-- docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md # 输入延迟、终端对照和临时发行验证边界
+|-- docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md # 十五项实施进度、复用落点与最终发布验收
+|-- agent_py_agent/tests/test_im_command_access.py # 机器人提及、角色帮助与控制身份组合
+|-- agent_py_agent/tests/test_im_tool_liveness.py # 静默长工具、取消及原 Registry/流出口心跳回归
+|-- agent_py_agent/tests/test_im_interaction_refs.py # 私聊交互引用的签名、身份和受保护存储回归
+|-- agent_py_agent/tests/test_scheduler_delivery_policy.py # IM 巡检内部结果、通知更新与原 run 冻结策略
+|-- agent_py_agent/tests/test_im_control_cards.py # 原生卡片运输、真实消息身份与 SDK/webhook 回调归一
+|-- agent_py_agent/tests/test_im_tool_approval.py # 无 TUI 主子孙私人审批、解锁、防转发及真实 HTTP 接线
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
     |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
@@ -720,6 +727,7 @@ agent_py_agent/
 |   |   |-- approval_mode.py           # owner 显式审批模式与权限快照映射，子代理同源读取
 |   |   |-- admin_password.py          # 管理员密码 scrypt 记录与按渠道身份的失败节流（config/，0600）
 |   |   |-- admin_channel_identity.py  # 已绑定为管理员的 IM 私聊 (channel, user_id) 精确绑定表
+|   |   |-- interaction_refs.py         # 群转私聊的 owner/actor/channel/expiry 签名引用；不授予工具权限
 |   |   |-- owner_admin_controls.py    # 管理员对每个 owner 的 Jev/审计开关与本人跨用户审计许可（tool_policy.json 的 admin_controls，失败关闭）
 |   |   |-- owner_quota.py             # 显式非零磁盘上限的跨进程配额锁；0 时退出热路径
 |   |   |-- home_retention.py          # 结构化终态/时间清理、二次校验、trash tombstone 与 legal hold
@@ -769,6 +777,7 @@ agent_py_agent/
 |   |   |-- local_client_token.py       # G1：本机客户端持久凭据，缺则私有生成、宿主严格读取，不进模型环境
 |   |   |-- client_credentials.py       # G3：原请求头共用凭据选择，配置token优先；读不到时按 gateway_require_local_credential 降级或拒绝
 |   |   |-- http_routes.py              # G2a：实际HTTP分发和观察唯一同源，路由模板及四档属性
+|   |   |-- private_interaction_service.py # 私人卡片签名、宿主凭据/密码/管理员绑定核对及原审批决定
 |   |   |-- plugin_command_service.py  # TUI HTTP 与 IM 会话共用插件服务、可信 owner 目录和管理员授权
 |   |   |-- plugin_panels_http.py      # /client/plugin-panels：作用域解析、只读活动投影与展示服务调用
 |   |   |-- command_stream_protocol.py # 命令有界消息、规范 owner 握手与原审批路径
@@ -864,6 +873,7 @@ agent_py_agent/
 |   |   |-- agent_transcript.py        # 子代理跨进程公开过程事件的 owner 存储、游标和有界裁剪
 |   |   |-- agent_control.py           # owner 树内代理详情、运行中 guidance 与精确停止的通道中立控制面
 |   |   |-- agent_tool_approval.py     # main/child exact ToolApprovalRequest 的唯一耐久记录、consumer 租约与决定等待
+|   |   |-- im_tool_approval.py        # 原 pending 内的私人卡回执、冻结发起人与原 claim/attempt 决定
 |   |   |-- tool_approval_scope.py     # 从canonical任务/线程/main claim/child attempt读取审批归属，隔离恢复换轮
 |   |   |-- background_transcript.py  # 后台 main/child 的有界 typed 过程事件环与共用工具审批 sink
 |   |   |-- background_history.py     # 后台完整展示块快照，随 canonical final 保存并用于恢复重基
@@ -952,6 +962,7 @@ agent_py_agent/
 |   |-- scheduler/                     # owner 持久 at/every/cron、原 job/run/claim 与来源或独立上下文执行
 |   |   |-- execution.py               # 实际开工、独立线程、模型来源和冻结原会话交付
 |   |   |-- execution_policy.py        # 执行与预检配置的唯一规范及工具 schema
+|   |   |-- delivery_policy.py         # 原 job/run 通知策略规范，来源与静默开关分开
 |   |   |-- policy.py                  # 错过周期、队列期限、未来周期失败退避和暂停
 |   |   |-- precheck.py                # 原只读工具观察、变化判定和失败/无变化收口
 |   |   `-- run_preparation.py         # 原 run 上的来源冻结、claim 复核与预检观察 CAS
@@ -962,8 +973,10 @@ agent_py_agent/
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
 |   |   |-- registry.py                # adapter/配置/健康/绑定/capabilities/target validator 唯一注册表
 |   |   |-- progress.py                # 原生可编辑进度的真实消息 ID 与结构化结果
+|   |   |-- control_cards.py           # 原生私人控制卡的真实 message/chat 身份；不授予权限
 |   |   `-- service.py                 # 普通回复、主动消息、可编辑进度及附件的统一发送出口
 |   |-- adapter/
+|   |   |-- private_controls.py        # 已验证 SDK actor/卡片身份到原 Gateway 的私人决定运输
 |   |   |-- feishu_mentions.py         # WS/webhook 共用直接 @机器人判据，不按名称或正文猜
 |   |   |-- progress_draft.py           # 单条草稿在原 pending 内合并、限频、恢复与独立最终回复
 |   |   |-- delivery.py                # 原 pending/sent 外发意图、死亡核验、消息身份与 epoch CAS 回送
@@ -1052,6 +1065,7 @@ agent_py_agent/
 |   |   |-- action_policy.py          # 副作用前唯一 allow/ask/deny 聚合决策
 |   |   |-- executor.py               # approval、sandbox、handler、账本、核对、持久化与投影状态机
 |   |   |-- event_observation.py      # B4 单次工具真实 handler 观察状态；拒绝/重放不发，重试只发一对
+|   |   |-- liveness.py               # 真实 handler 的单调运行时间心跳；不调用模型，不拥有执行权
 |   |   |-- plugin_gate_policy.py     # B5宿主收紧、原批准源精确引用、同源确认/拒绝/无人审批回执，不改参数或授予新批准
 |   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- workspace_read_scope.py   # 沿原 exact 与墙外授权生成本次 cwd 内的读取上界
@@ -1870,6 +1884,7 @@ docs/
 - `docs/design/IM_TASK_EXECUTION_POLICY.md`：普通 IM 多任务的待实施策略，区分定时后台与当天自动委派，记录执行归属、主代理后台汇总、容量与跨零点验收；不表示当前包已具备该能力。
 
 - `docs/tasks/TUI_INPUT_LATENCY_HANDOFF.md`：输入辅助工作的线程边界、原生 TUI/PuTTY 证据及发行交接。
+- `docs/tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md`：本轮 R01～R13 实施状态与最终合并推送验收记录。
 
 - `scripts/private_release/`：临时离线发行唯一构建/安装入口，产物放工作树外；不代替原源码 wheel 发布，不进行 main 合并。
 - `docs/guides/PRIVATE_OFFLINE_RELEASE.md`：版本、程序目录、数据目录、源码可见范围与原目录更新约定。

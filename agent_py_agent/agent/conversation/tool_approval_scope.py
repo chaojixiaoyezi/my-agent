@@ -60,7 +60,7 @@ def tool_approval_scope(agent: object, run_id: str) -> ToolApprovalScope:
     return _main_scope(store, link, thread)
 
 
-# LLM: 主代理审批只属于当前线程选定任务的有效 claim；Goal paused 不影响当前执行，旧 claim 不可给新轮授权。
+# LLM: 主代理审批只属于原任务的有效 claim；界面选择不是执行权，Goal paused 不影响当前执行，旧 claim 不可给新轮授权。
 # 函数用途: 从原任务及租约读取主代理审批资格，不以界面活跃文案判断运行中。
 def _main_scope(store: object, link: object, thread: object) -> ToolApprovalScope:
     claim, error = store.claims.load_report(thread.thread_id)
@@ -69,7 +69,6 @@ def _main_scope(store: object, link: object, thread: object) -> ToolApprovalScop
     claim_id = str(claim.get("claim_id") or "")
     active = bool(
         link.status == THREAD_TASK_LINK_ACTIVE_STATUS
-        and thread.workspace_task_id == link.task_id
         and claim.get("thread_id") == thread.thread_id
         and claim.get("task_id") == link.task_id
         and claim.get("status") == "running"

@@ -1,4 +1,5 @@
-# LLM: 飞书交互卡片——只在改 SOUL 长期人设时发确认卡；USER/AGENTS 由 owner Agent 自主维护
+# LLM: 飞书交互卡片——长期人设确认与共用事件归一；私人审批使用独立控制入口，不能由 persona 处理器批准。
+# 模块用途: 构造长期设定确认卡，规范 SDK/webhook 的真实点击身份；USER/AGENTS 仍由 owner Agent 自主维护。
 #   (全程不阻塞主代理)。build_ 造卡片 JSON;send_ 发卡片(自取 tenant token,fail-open);
 #   extract_card_action / extract_webhook_card_action 把长连接对象或 webhook JSON 归一成同一结构;
 #   apply_card_action 是核心回调
@@ -93,6 +94,8 @@ def send_interactive_card(app_id: str, app_secret: str, open_id: str, card: dict
         return False
 
 
+# LLM: actor/message/chat 只从 SDK 已验证事件读取，value 内自称身份不能覆盖；秘密表单留原密码分支，不当聊天。
+# 函数用途: 将长连接卡片事件规范化，保留实际私人卡身份供防转发和准确决定核对。
 def extract_card_action(data: Any) -> dict[str, Any] | None:
     """lark 卡片回调对象 → 归一化 {value: dict, operator_open_id: str, form_value: dict}。防御式 getattr
     (兼容真 lark 对象与测试假对象);取不到 action.value(dict)视为无效返回 None。value 若为 JSON 串则解析。
@@ -112,11 +115,17 @@ def extract_card_action(data: Any) -> dict[str, Any] | None:
         )
         raw_form = getattr(action, "form_value", None) if action is not None else None
         form_value = raw_form if isinstance(raw_form, dict) else {}
-        return {"value": value, "operator_open_id": operator_open_id, "form_value": form_value}
+        context = getattr(event, "context", None)
+        identity = {"message_id": str(getattr(context, "open_message_id", "") or ""),
+                    "chat_id": str(getattr(context, "open_chat_id", "") or "")}
+        return {"value": value, "operator_open_id": operator_open_id, "form_value": form_value,
+                **(identity if any(identity.values()) else {})}
     except Exception:
         return None
 
 
+# LLM: 上层已完成 webhook 真实性校验；与 SDK 走同一 actor/message/chat 字段，缺少身份不可用于新控制卡。
+# 函数用途: 将已认证 webhook 卡片事件规范化，不从按钮 value 推导点击者或聊天身份。
 def extract_webhook_card_action(payload: object) -> dict[str, Any] | None:
     """飞书 webhook 卡片回调 JSON → 与长连接相同的归一化结构。"""
     if not isinstance(payload, dict):
@@ -136,10 +145,13 @@ def extract_webhook_card_action(payload: object) -> dict[str, Any] | None:
         operator.get("open_id") or operator_id.get("open_id") or event.get("open_id") or ""
     )
     form_value = action.get("form_value") if isinstance(action.get("form_value"), dict) else {}
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    identity = {"message_id": str(context.get("open_message_id") or ""), "chat_id": str(context.get("open_chat_id") or "")}
     return {
         "value": value,
         "operator_open_id": operator_open_id,
         "form_value": form_value,
+        **(identity if any(identity.values()) else {}),
     }
 
 
