@@ -147,8 +147,16 @@ def test_user_message_queued_during_the_third_idle_slice_is_handled_first(world,
     _background_slice(world, 102.0)
     assert _fuse(world) == ("active", 2, "")
     slice_accounted, worker = threading.Event(), []
+    background_claim_ids, finished_claims = [], []
     original_append = request_history.append_gateway_conversation_message
     original_invoke = conversation_runtime._invoke_background_main_agent
+    original_finish = world.store.claims.finish
+
+    # LLM: 保留真实 claim 写入，仅观察确切本片的结算；不能把前台后来换到的当前 claim 当成后台取消证据。
+    # 函数用途: 记录原持久租约的取消事实，验证用户优先确实中断了第三片。
+    def finish(request):
+        finished_claims.append(dict(request))
+        return original_finish(request)
 
     def append_after_accounting(*args, **kwargs):
         # 用户回合已排到车道，停在写入会话之前，直到第 3 片记完账（复现 O4 的先后：记账在用户消息写入之前）。
@@ -159,6 +167,7 @@ def test_user_message_queued_during_the_third_idle_slice_is_handled_first(world,
         if not worker:
             # 第 3 片持有本会话车道时用户发来消息：网关回合排队等车道。
             assert world.store.claims.load(world.thread_id).get("status") == "running"
+            background_claim_ids.append(world.store.claims.load(world.thread_id)["claim_id"])
             submit_gateway_ask(world.paths, params=GatewayAskParams(
                 prompt="我补充一句：先别停", save=False, chat_session_id=_SESSION, agent=world.agent))
             worker.append(threading.Thread(target=_process_gateway_requests, args=(world.agent, world.paths),
@@ -169,7 +178,11 @@ def test_user_message_queued_during_the_third_idle_slice_is_handled_first(world,
 
     monkeypatch.setattr(request_history, "append_gateway_conversation_message", append_after_accounting)
     monkeypatch.setattr(conversation_runtime, "_invoke_background_main_agent", third_slice)
-    _background_slice(world, 103.0)
+    monkeypatch.setattr(world.store.claims, "finish", finish)
+    # 新用户输入抢占本片，原背景执行权结算 cancelled；它不产生普通空片报告，不应计入 idle fuse。
+    assert world.scheduler.tick(now=103.0) == []
+    assert len(background_claim_ids) == 1
+    assert any(row["claim_id"] == background_claim_ids[0] and row["status"] == "cancelled" for row in finished_claims)
 
     # 改前这里已是 ("paused", 3, NO_PROGRESS_REASON_CODE)：第 3 片记账时熔断，用户消息之后只能清计数。
     assert _fuse(world) == ("active", 2, "")

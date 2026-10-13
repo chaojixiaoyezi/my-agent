@@ -43,7 +43,7 @@ def old_readers(monkeypatch):
     return modules[-2].decode_installation_state, modules[-1].PluginInstallStore
 
 
-def test_17i_rejects_v4_without_overwriting_and_exported_v3_keeps_every_plugin(tmp_path, monkeypatch):
+def test_17i_rejects_current_table_without_overwriting_and_exported_v3_keeps_every_plugin(tmp_path, monkeypatch):
     store, _, request = activation_fixture(tmp_path)
     store.change_activation(publication(store.change_activation(request)))
     old_path = upgrade_source(store)
@@ -146,7 +146,7 @@ def test_export_cli_bad_source_never_creates_output(tmp_path, damage):
     if damage in {"future", "missing_grant"}:
         payload = json.loads(source.read_bytes())
         if damage == "future":
-            payload["schema_version"] = "plugin_installations.v5"
+            payload["schema_version"] = "plugin_installations.v6"
         else:
             payload["installations"][0].pop("legacy_permission_grant")
         source.write_text(json.dumps(payload))
@@ -157,13 +157,14 @@ def test_export_cli_bad_source_never_creates_output(tmp_path, damage):
 
 
 @pytest.mark.parametrize("version", ["v1", "v2", "v3"])
-def test_every_original_schema_persists_v4_then_exports_old_readable_all_installs(tmp_path, monkeypatch, version):
+def test_every_original_schema_persists_current_then_exports_old_readable_all_installs(tmp_path, monkeypatch, version):
     store, _, _ = activation_fixture(tmp_path)
     path = store.root / "installations.json"
     payload = json.loads(path.read_bytes())
     payload["schema_version"] = "plugin_installations." + version
     row = payload["installations"][0]
     row.pop("legacy_permission_grant")
+    row.pop("installation_scope")
     if version != "v3":
         row.pop("activation")
         row.update(enabled=False, activation_id="")
@@ -179,7 +180,7 @@ def test_every_original_schema_persists_v4_then_exports_old_readable_all_install
     assert legacy_free(store.snapshot()) and path.read_bytes() == original
     store.install(_request(tmp_path, operation_id="second-install", plugin_id="second-peek"))
     saved = json.loads(path.read_bytes())
-    assert saved["schema_version"] == "plugin_installations.v4"
+    assert saved["schema_version"] == "plugin_installations.v5"
     assert saved["migration"]["from_schema"] == "plugin_installations." + version
     assert saved["migration"]["source_sha256"] == hashlib.sha256(original).hexdigest()
     exported, report = export_installations_v3(path.read_bytes(), store._owner)
@@ -193,3 +194,37 @@ def legacy_free(entries):
     from agent_py_agent.agent.plugin_permissions.state import legacy_permissions
 
     return all(legacy_permissions(entry) is None for entry in entries)
+
+
+def test_current_public_table_never_exports_or_silently_becomes_private(tmp_path):
+    from agent_py_agent.agent.plugin_installation import PluginInstallRequest
+    from agent_py_agent.agent.plugin_package import inspect_plugin_package
+    from agent_py_agent.tests.test_capability_package import content_bundle
+
+    store, _, _ = activation_fixture(tmp_path)
+    store.install(PluginInstallRequest(inspect_plugin_package(content_bundle()), "public-install", 0, installation_scope="public"))
+    path = store.root / "installations.json"
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="公共安装范围"):
+        export_installations_v3(before, store._owner)
+    assert path.read_bytes() == before
+    assert any(row.installation_scope == "public" for row in store.snapshot())
+
+
+def test_explicit_v4_migration_marker_is_unwrapped_for_exact_old_reader(tmp_path, monkeypatch):
+    store, _, _ = granted(tmp_path, "restricted")
+    path = store.root / "installations.json"
+    payload = json.loads(path.read_bytes())
+    payload["schema_version"] = "plugin_installations.v4"
+    for row in payload["installations"]:
+        row.pop("installation_scope")
+    path.write_text(json.dumps(payload))
+    original = path.read_bytes()
+    store.install(_request(tmp_path, operation_id="after-v4", plugin_id="after-v4"))
+    current = path.read_bytes()
+    assert json.loads(current)["migration"]["source_sha256"] == hashlib.sha256(original).hexdigest()
+    exported, report = export_installations_v3(current, store._owner)
+    decode, _ = old_readers(monkeypatch)
+    assert len(decode(exported, store._owner).entries) == 2
+    assert report["source_schema"] == "plugin_installations.v5" and report["v5_scope_migration_marker_lost"] is True
+    assert path.read_bytes() == current

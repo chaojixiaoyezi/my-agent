@@ -53,7 +53,7 @@
 
 ## 主线发布追加（2026-10-12）
 
-- 用户明确授权合入 main、提交远端并打包；待发布版本为 `0.3.0-tui-preview.20261012.7`。
+- 用户明确授权合入 main、提交远端并打包；待发布版本为 `0.3.0-tui-preview.20261012.8`。
 - 发布候选位于独立 `codex/main-release-20261012`；核对远端 `8ade40d6f` 是整合提交 `ec12ccf7` 的祖先，不需再次冲突合并。主工作区及原 T 工作树的未提交改动保留。
 - 远端 main 相对本次整合涉及生产/测试 Python 增删 17,906 行，达到仓库全量阈值；除联合 focused 列表与发行测试外，追加全仓 pytest。静态门、尺寸、干净打包与 diff 检查均以发布候选为对象；任一失败不得推送。
 - 发行相关 focused 首次发现两个 `LAYER_BOUNDARY_FORBIDDEN`：Gateway 直接依赖核心派活工具和子代理终态集合。移位原派发到 `conversation/session_task_dispatch.py`，模型工具与宿主共用；IM 状态投影移到 `conversation/im_task_status.py`。不加边界豁免、动态导入、第二套状态或权限旁路。原普通会话没有委派策略时不执行委派线程引用写入，显式委派仍先绑准确任务 ref 再发布正文/wake。
@@ -66,3 +66,12 @@
 - 发布过程实测结果与包 SHA256 随交付说明保存；不将之前 smoke 或 L 来源六小时长测重复计入新包成绩。原交付质量、Windows 原现场冻结、真实飞书出站的证据边界保持明确。
 
 建议下一步：用户按同 prefix 更新服务器并核对实际版本和飞书收发；其他 agent 可以并行只读审阅剩余交付质量问题，不应同时改发布目录或重启同一 Gateway。
+
+### 发布门修复工作线
+
+- 目标：收口整合版全仓失败，保留原业务断言并构建 `.20261012.8`；分支 `codex/main-release-gate-fix-20261012`，父提交 `b8962e4c3`。
+- 实际改动：显式无 Agent 队列宿主跳过委派快照；核验位置/提示先脱敏再展示截断；补 EXECUTION_TARGET_CHANGED 非自动重放分类；全私有 v5 的旧格式显式导出与公共表拒绝。
+- 相关文件：im_dispatch_policy、pack_verifier_runner/redaction、error_taxonomy、plugin_permissions/rollback、export_plugin_installations_v3 与对应回归。辅助 transport fake 接收原 deadline；旧源夹具删新字段；事件插话夹具提供真实 claim；非管理员插件测试改为原权限禁用零审批/执行，同时保留管理员原重放/查询/精确次数断言。
+- 验证：早期编译 `.7` 的三版离线安装/数据保持、密码锁/告警、两个真实 M2.7 子进程、SSH 回显已验；最终 `.8` 须重建和单独验收，不借用旧版本成绩。完整测试使用显式 checkout PYTHONPATH，修复进程环境归属而不删断言。
+- 边界：原长测质量缺口继续开放；群任务 API 凭据卡仍为设计，不称已实现；真实飞书线上送达仍需用户安装后确认。
+- 建议下一步：最终本地严格门通过后由发布线统一快进 main、非强推远端并交付新包；其他 agent 仅适合并行只读复核，不能同时切安装或写 main。

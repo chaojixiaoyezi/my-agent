@@ -1635,3 +1635,5 @@ L/T 第二候选通过 1190 项组合回归和严格 gate，原测试 Goal 在�
 定时生命周期续接：`conversation/runtime.py` 复用原 scheduler repository 核实持久任务来源，与 Goal 共用 durable_task_id/objective；历史查找及宿主事件一致排除该持久编号，普通额外用户请求缺失仍报错。真实第四候选失败记录保留，新增八项红绿回归及十文件 436 项通过，真机重验中。
 
 原生停止验证已确认真实进程退出与文件停止增长；Goal 暂停来源漏记由同事务补 user_control，前台及轮间停止回归覆盖。
+
+2026-10-12 发布门补充：仅运输队列的 HTTPServer 明确没有 Agent 时，IM 受理不生成委派偏好，原鉴权/请求保存仍生效；已配 Agent 的默认链不变。EXECUTION_TARGET_CHANGED 已加入唯一错误分类，必须核对新目标，不能自动重放旧控制。待最终 focused/全仓与编译包门通过后统一推 main。

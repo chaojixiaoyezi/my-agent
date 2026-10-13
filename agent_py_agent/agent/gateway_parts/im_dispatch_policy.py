@@ -10,10 +10,10 @@ from ..settings.im_task_preferences import delegation_preference
 IM_DISPATCH_KEY = "host_im_dispatch.v1"
 
 
-# LLM: scope 与 owner 原工具政策决定新请求的资格；不读 body 自报开关，快照无路径/凭据，随原 input receipt 一次提交。
-# 函数用途: 在 IM 消息受理时保存该发送者的执行方式和偏好版本，零点、关闭或重送不会改已受理记录。
+# LLM: scope 与 owner 原工具政策决定资格；不读 body 自报开关。显式无 Agent 的队列服务器不生成偏好快照，HTTP 身份门仍由原中间件负责。
+# 函数用途: 在 IM 受理时冻结发送者的执行方式；仅运输队列的宿主保持原请求，零点、关闭或重送不改变已受理记录。
 def capture_im_dispatch(base_agent, scope) -> dict | None:
-    if supports_transcript_delivery(scope.channel):
+    if base_agent is None or supports_transcript_delivery(scope.channel):
         return None
     from .control_service import _request_agent_for_scope
 

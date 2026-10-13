@@ -253,6 +253,7 @@ def test_background_main_run_registers_the_durable_task_control_name(monkeypatch
     class Store:
         claims = Claims()
         wakes = SimpleNamespace(pending_one=lambda _signal_id: None)
+        threads = SimpleNamespace(load_report=lambda _thread_id: (SimpleNamespace(metadata={}), None))
         # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
         guidance = None
         # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。

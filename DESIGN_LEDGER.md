@@ -7821,3 +7821,7 @@ Goal scope 同时公开宿主续跑机制事实，不把 active 或单轮 final 
 解决长历史逐帧处理、旧测试客户端驻留和状态入口拥塞；区分 IM 身份、持久排队、
 执行槽与 HTTP 连接，保持既有任务权威。资源合同与验收边界见
 [资源寿命](docs/design/TUI_RESOURCE_LIFETIME.md)。已在独立测试机分层验收，最终统计见 TESTS；未发布默认环境，不将有限采样外推为无限耐久承诺。
+
+## 2026-10-12 发布门收口补充
+
+已实现、待最终发布验收：无 Agent 的显式队列 Gateway 不读取用户委派偏好，保留原 HTTP 身份门；能力核验位置/提示先完整脱敏再按原展示预算截断；EXECUTION_TARGET_CHANGED 按不可自动重放的人工核对分类。v5 全私有安装表显式导出旧 v3，公共表拒绝转换，原表不覆盖；详见 [主线发布追加](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12) 与 [公共包](docs/design/PUBLIC_CAPABILITY_PACKS.md)。

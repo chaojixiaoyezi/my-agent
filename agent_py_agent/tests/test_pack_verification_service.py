@@ -569,6 +569,27 @@ def test_location_host_paths_are_redacted_before_reaching_the_model(tmp_path, mo
         assert str(env.workspace) not in text and str(Path.home()) not in text and "pack-verifier-" not in text
 
 
+def test_long_host_path_is_redacted_before_display_limits(tmp_path):
+    from agent_py_agent.agent.capability.pack_verifier_redaction import redact_error_samples
+    from agent_py_agent.agent.capability.pack_verifier_runner import (
+        MAX_VERIFIER_HINT_CHARS,
+        MAX_VERIFIER_LOCATION_CHARS,
+        _error_samples,
+    )
+
+    workspace = tmp_path / ("deep-" * 40)
+    target = workspace / "out/d.json"
+    request = types.SimpleNamespace(workspace_root=workspace, target=target, inputs=())
+    raw = _error_samples([{"code": "position", "location": str(target), "hint": "请修改 " + str(target)}])
+    result = PackVerificationResult("check", "content", "failed", error_samples=raw)
+    cleaned = redact_error_samples(result, request, str(tmp_path / "verifier"))
+    assert cleaned.error_samples == ({"code": "position", "location": "out/d.json", "hint": "请修改 out/d.json"},)
+    oversized = _error_samples([{"code": "position", "location": "x" * 500, "hint": "y" * 500}])
+    limited = redact_error_samples(PackVerificationResult("check", "content", "failed", error_samples=oversized), request, str(tmp_path))
+    assert len(limited.error_samples[0]["location"]) == MAX_VERIFIER_LOCATION_CHARS
+    assert len(limited.error_samples[0]["hint"]) == MAX_VERIFIER_HINT_CHARS
+
+
 # 根目录判定固定成这一组名字，不看本机根目录下真有哪些目录：Linux 车道容器把证据目录挂在 /out、仓库挂在 /repo，
 # Mac 上没有这些目录，依赖宿主文件系统的用例两边结果不一样。保留“..”覆盖兼容场景；独立回归会移除它，证明不依赖 /.. 存在。
 _FIXED_ROOT_NAMES = frozenset({"Users", "home", "root", "tmp", "var", "private", ".."})

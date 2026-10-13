@@ -129,7 +129,9 @@ def test_ineligible_scope_stops_before_tool_or_skill_snapshot(tmp_path, conditio
     finally:
         if previous is not None:
             restore_current_subagent_context(fixture.agent, previous)
-    assert fixture.calls == [] and fixture.reads == []
+    # 公共包允许在 enable_plugins=false 时使用，需先只读目录判断；私有候选仍不能选，正文永远不读。
+    assert fixture.calls == ([("current",), ("current",)] if condition == "plugins_off" else [])
+    assert fixture.reads == []
 
 
 @pytest.mark.parametrize("condition", ["missing", "hidden", "unavailable"])

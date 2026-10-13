@@ -219,13 +219,15 @@ def test_rework_text_keeps_old_text_without_hint_and_appends_hint_with_it():
             "（所在对象是 SH01，这里写的是 reference_ids）") in service._rework_text([hinted])
 
 
-def test_error_samples_clean_and_truncate_hint():
+def test_error_samples_clean_hint_and_limit_after_redaction():
+    from agent_py_agent.agent.capability.pack_verifier_redaction import _redact_sample
     raw = "第一行\n第二行\r\n第三行\u2028四行\x07\x1b[31m红\u202e反向\u200f"
     [sample] = runner._error_samples([{"code": "c1", "location": "L", "hint": raw}])
     assert sample["hint"] == "第一行 第二行 第三行 四行[31m红反向"
     [long] = runner._error_samples([{"code": "c1", "location": "L",
                                      "hint": "长" * (runner.MAX_VERIFIER_HINT_CHARS + 50)}])
-    assert len(long["hint"]) == runner.MAX_VERIFIER_HINT_CHARS and long["hint"].endswith("…")
+    limited = _redact_sample(long, [])
+    assert len(limited["hint"]) == runner.MAX_VERIFIER_HINT_CHARS and limited["hint"].endswith("…")
     [bare] = runner._error_samples([{"code": "c1", "location": "L"}])
     assert "hint" not in bare, "没有 hint 时不写键，旧形状逐字不变"
     [blank] = runner._error_samples([{"code": "c1", "location": "L", "hint": "\x00\x07"}])

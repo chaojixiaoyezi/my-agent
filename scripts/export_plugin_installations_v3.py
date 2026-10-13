@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # LLM: 用新运行时做显式回滚导出；不覆盖安装权威、不启停 Gateway，不读取环境/凭据；确认后仅排他创建指定输出。
-# 模块用途: 切回17i前将有效v4导出为v3，完整报告丢失授权，原v4必须保留备份。
+# 模块用途: 切回17i前将有效全私有v4/v5表导出为v3，报告授权损失并保留原表；公共表拒绝导出。
 from __future__ import annotations
 
 import argparse
@@ -24,7 +24,7 @@ from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 # LLM: 参数是管理员显式文件入口，不猜真实 owner 路径；未确认只读预览，输出必须是未存在的独立文件。
 # 函数用途: 解析回滚来源、独立输出和完整预览给出的确认码。
 def arguments():
-    parser = argparse.ArgumentParser(description="新运行时导出插件v3安装表；不会覆盖原v4，不会启停服务。")
+    parser = argparse.ArgumentParser(description="将全私有v4/v5表显式导出为v3；不覆盖原表，不启停服务，公共表拒绝。")
     parser.add_argument("--source", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--confirm", default="")
@@ -71,7 +71,7 @@ def main() -> int:
         return 0
     except (OSError, ValueError, TypeError, KeyError):
         print(json.dumps({"state": "rejected", "reason": "rollback_export_invalid", "source_unchanged": True,
-                          "message": "回滚导出未成功；未覆盖原表，请核对完整v4、规范路径及独立输出。"}, ensure_ascii=False))
+                          "message": "回滚导出未成功；未覆盖原表，请核对全私有v4/v5表、规范路径及独立输出。"}, ensure_ascii=False))
         return 1
 
 

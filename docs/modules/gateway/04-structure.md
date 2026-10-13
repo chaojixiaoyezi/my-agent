@@ -2847,3 +2847,5 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 `scheduler/precheck.py` 的宿主 RunParams 使用原 `conversation.runtime._background_task_attributes` 装配 cwd/roots/Skill/任务身份，错误观察仅加原 tool_error_code 与 call_id；不建立另一套工作目录合同。
 
 定时生命周期续接：`conversation/runtime.py` 复用原 scheduler repository 核实持久任务来源，与 Goal 共用 durable_task_id/objective；历史查找及宿主事件一致排除该持久编号，普通额外用户请求缺失仍报错。真实第四候选失败记录保留，新增八项红绿回归及十文件 436 项通过，真机重验中。
+
+发布门补充：`im_dispatch_policy.capture_im_dispatch` 只在真实 Agent owner 存在时冻结偏好；显式 agent=None 的队列宿主保持原请求，不制造 owner 或偏好。执行目标换代的错误在 contracts/error_taxonomy 单点分类为不可自动重放。

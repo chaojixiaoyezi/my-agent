@@ -44,9 +44,9 @@ def enabled_plugin(tmp_path):
     return service, input_file, f'/plugins@sample-peek read "{input_file}"'
 
 
-def test_nonadmin_explicit_call_approves_once_replays_after_remove_and_queries_own_result(tmp_path):
+def test_admin_explicit_call_approves_once_replays_after_remove_and_queries_own_result(tmp_path):
     admin, source, command = enabled_plugin(tmp_path)
-    service = PluginManagement(replace(admin.context, is_admin=False))
+    service = admin
     revision = service.catalog().revision
     approvals = []
     def approve(value, **kwargs):
@@ -57,8 +57,6 @@ def test_nonadmin_explicit_call_approves_once_replays_after_remove_and_queries_o
     assert result["state"] == "succeeded" and result["connection_cleanup"]["confirmed"], result
     assert "插件原生结果" in result["message"] and len(approvals) == 1
     assert source.with_suffix(".calls").read_text().splitlines() == ["called"]
-    management = service.command("/plugins status enable", revision="", request_id="query-management")
-    assert management["error_code"] == "PLUGIN_PERMISSION_DENIED"
     removed = admin.command("/plugins remove sample-peek", revision=admin.catalog().revision, request_id="remove")
     assert removed["state"] == "succeeded", removed
     replay = service.command(command, revision=revision, request_id="business",
@@ -73,6 +71,16 @@ def test_nonadmin_explicit_call_approves_once_replays_after_remove_and_queries_o
     with repo._runtime_connection() as conn:
         count = conn.execute("SELECT count(*) FROM tool_operations WHERE operation_id=?", (result["operation_id"],)).fetchone()[0]
         assert count == 1
+
+
+def test_nonadmin_explicit_call_and_management_never_approve_or_execute(tmp_path):
+    admin, source, command = enabled_plugin(tmp_path)
+    service = PluginManagement(replace(admin.context, is_admin=False))
+    for text, code in ((command, "TOOL_DISABLED"), ("/plugins status enable", "PLUGIN_PERMISSION_DENIED")):
+        result = service.command(text, revision=service.catalog().revision, request_id="denied-" + str(len(text)),
+            request_permission=lambda *_args, **_kwargs: pytest.fail("普通用户不得进入插件审批"))
+        assert result["state"] == "rejected" and result["error_code"] == code
+        assert not source.with_suffix(".calls").exists()
 
 
 @pytest.mark.parametrize("decision", ["approved", "denied"])

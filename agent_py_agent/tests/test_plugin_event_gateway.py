@@ -312,8 +312,7 @@ def test_prompt_owner_resolution_failure_is_closed_and_disabled_does_not_resolve
 
 # LLM: 活动回合里成功插话的回执是 active_pending，不是 created 的排队；_handle_idempotent_ordinary_ask 只在
 #   "created and receipt.state == 'queued'" 时发 prompt_submitted，所以插话不能重复发一次"用户提交了提示"。
-#   这里不伪造插话结果：processing 里放一条真实活动回合记录（同渠道/会话/用户、turn_phase=open），插话仍经
-#   真实 handle_ask → steer_active_conversation_if_running 路径命中活动回合。
+#   这里不伪造插话结果：原 claim 持有的执行权与 processing 的相同请求绑定都完整，插话经真实 handle_ask 命中该回合。
 # 函数用途: 断言活动回合内的插话不产生第二条 prompt_submitted，原回合只有一次。
 def test_active_turn_steer_does_not_publish_a_second_prompt_submitted(gateway):
     agent, paths, server, events = gateway
@@ -324,10 +323,21 @@ def test_active_turn_steer_does_not_publish_a_second_prompt_submitted(gateway):
     request_id = ask.replies[-1][1]["request_id"]
     assert (paths.inbox / f"{request_id}.json").exists()
 
-    # 把首条请求搬进 processing 并标成开放阶段：这就是"回合正在跑"的结构化事实，
-    # 与真实 worker 认领后写入的形状一致（见 test_plugin_event_e2e.py 的同一做法）。
+    # 运输文件只有状态投影，不能授予执行权；先取得真实 claim，再绑定该请求的原前台身份。
     request = json.loads((paths.inbox / f"{request_id}.json").read_text(encoding="utf-8"))
-    request.update(status="processing", turn_phase="open")
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayConversationLoadRequest,
+        preflight_gateway_conversation,
+    )
+
+    thread_id = preflight_gateway_conversation(GatewayConversationLoadRequest(
+        agent, request, request_id, "开始任务")).thread_id
+    claim = agent.conversation_store.claims.acquire({"thread_id": thread_id, "task_id": "gateway:" + request_id,
+                                                    "reason": "gateway_foreground_turn"})
+    assert claim is not None
+    request.update(status="processing", turn_phase="open", conversation_claim={
+        "schema_version": "gateway_conversation_claim.v1", "request_id": request_id,
+        "thread_id": thread_id, "task_id": "gateway:" + request_id})
     (paths.processing / f"{request_id}.json").write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
     (paths.inbox / f"{request_id}.json").unlink()
 

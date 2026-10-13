@@ -119,7 +119,8 @@ def test_host_binding_keeps_identity_and_reads_live_halt_after_generation(
     )
     assert prompt == "当前请求" and events == ["build", "generate", "strip"]
     assert result.runtime_reason == runtime_reason
-    assert result.runtime_status == "unfinished" and result.usage == {"input_tokens": 19}
+    expected_status = "blocked" if runtime_reason == "TOOL_OPERATION_OUTCOME_UNKNOWN" else "unfinished"
+    assert result.runtime_status == expected_status and result.usage == {"input_tokens": 19}
 
 
 def test_unknown_effect_cannot_become_retryable_when_contract_lookup_fails(monkeypatch):

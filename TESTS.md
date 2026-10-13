@@ -18566,3 +18566,9 @@ CAP06用原session恢复已完成的REOPEN02，仅原生发送一次`/compact`�
   - 最近单项 `test_plugin_sandbox.py::test_client_wraps_launch_and_points_tmpdir_into_data_dir` 仍失败，启用回执的结构化原因是 `plugin_endpoint_failed`；根因未定位，不能算通过。
 - **未验证**：K4/K8/K9/K10 与返工变异未运行；`test_parameter_metadata` 变更后单项未复核；guards9、Ruff、import boundaries、doc-sync、strict code-size、clean-package、size_diff 均未运行；无全套绿证据。
 - **沙箱边界**：macOS `network:false` 真 Seatbelt 自检观察到 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`；`network:true` 真进程探针没有输出 JSON，根因未确证。按任务约束交 9b 在沙箱外复核；Linux bwrap/网络命名空间与真实 Gateway 链路未在本会话验证。
+
+## 2026-10-12 主线发布完整验收环境
+
+本轮涉及生产与测试累计增删达到全仓门槛，发布必须追加全仓 pytest。借用其它 checkout 的 Python 虚拟环境时，给本次测试进程显式设置 `PYTHONPATH=$PWD:$PWD/agent_py_agent`，保证派生子进程也只导入待发布 checkout；不要修改其它工作树的虚拟环境安装。首轮无此环境绑定，12 条 Curator 进程回归因子进程错误导入其它 checkout 而失败；显式绑定后原断言 12 项通过，不改测试逻辑或恢复实现。
+
+联合失败还核对辅助模型 deadline 传输签名、实际对话 claim 的取消结算、公共包读取资格、v5 范围/旧迁移夹具、管理员插件执行以及原宿主来源运输。核验器用长工作区与纯解析脱敏用例证明先脱敏再截断；旧格式导出继续用固定 17i 原文件/摘要，不用当前宽化后的解码器冒充旧版。最终 focused 与完整门结果按发行源码提交记录到本次发行验收报告，早期失败和旧包实测不能当成最终包通过。

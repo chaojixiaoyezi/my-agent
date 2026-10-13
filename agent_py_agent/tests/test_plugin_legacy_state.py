@@ -10,12 +10,15 @@ from agent_py_agent.agent.plugin_permissions.state import legacy_permissions
 from agent_py_agent.tests.test_plugin_activation import activation_fixture, publication, revocation
 
 
+# LLM: 按严格 v3 字段构造旧源，删除 v4 权限与 v5 范围字段；实际迁移仍由正式 Store 完成，不能在旧源冒称 public。
+# 函数用途: 用临时安装生成合法旧表字节，供迁移、撤销与启动回归共用。
 def upgrade_source(store):
     path = store.root / "installations.json"
     payload = json.loads(path.read_text())
     payload["schema_version"] = "plugin_installations.v3"
     for row in payload["installations"]:
         row.pop("legacy_permission_grant", None)
+        row.pop("installation_scope")
     path.write_text(json.dumps(payload))
     return path
 
@@ -46,7 +49,7 @@ def test_new_table_missing_field_never_gets_compatibility(tmp_path):
     store.change_activation(publication(store.change_activation(request)))
     path = store.root / "installations.json"
     payload = json.loads(path.read_text())
-    assert payload["schema_version"] == "plugin_installations.v4"
+    assert payload["schema_version"] == "plugin_installations.v5"
     assert legacy_permissions(store.snapshot()[0]) is None
     payload["installations"][0].pop("legacy_permission_grant")
     path.write_text(json.dumps(payload))
@@ -62,7 +65,7 @@ def test_revoke_and_release_end_the_compatibility_not_just_display(tmp_path):
     assert legacy_permissions(old) is not None
     revoked = store.change_activation(revocation(old)).installation
     assert legacy_permissions(revoked) is None
-    assert json.loads((store.root / "installations.json").read_text())["schema_version"] == "plugin_installations.v4"
+    assert json.loads((store.root / "installations.json").read_text())["schema_version"] == "plugin_installations.v5"
     from agent_py_agent.agent.plugin_activation import prepare_release
     released = prepare_release("disable-a", revoked, (revoked,)).installation
     assert released.activation is None and legacy_permissions(released) is None

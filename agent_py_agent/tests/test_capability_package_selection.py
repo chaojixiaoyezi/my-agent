@@ -117,7 +117,8 @@ def test_auxiliary_three_protocols_use_existing_structured_mode(monkeypatch, pro
     backend = get_backend(protocol, config)
     captured = []
 
-    def fake_request(path, payload, headers):
+    def fake_request(path, payload, headers, *, total_deadline_seconds=None):
+        assert total_deadline_seconds is not None and total_deadline_seconds > 0
         captured.append(payload)
         if protocol == "anthropic_compatible":
             return {"content": [{"type": "tool_use", "id": "envelope-1", "name": "my_agent_structured_output",
@@ -312,7 +313,8 @@ def test_anthropic_existing_schema_retry_keeps_only_reported_usage_and_warns(mon
     backend = get_backend(config.model_backend, config)
     captured = []
 
-    def request_json(path, payload, headers):
+    def request_json(path, payload, headers, *, total_deadline_seconds=None):
+        assert total_deadline_seconds is not None and total_deadline_seconds > 0
         captured.append(payload)
         _emit_provider_attempt({"attempt_id": f"http-{len(captured)}", "status": "finished", "http_status": 200})
         if len(captured) == 1:
@@ -337,7 +339,8 @@ def test_deepseek_selection_keeps_following_business_history_and_effort_high(mon
     backend = get_backend(config.model_backend, config)
     payloads = []
 
-    def request_json(path, payload, headers):
+    def request_json(path, payload, headers, *, total_deadline_seconds=None):
+        assert total_deadline_seconds is None or total_deadline_seconds > 0
         payloads.append(payload)
         return {"choices": [{"message": {"content": '{"selected_ids":[]}', "reasoning_content": "推理"},
                              "finish_reason": "stop"}]}

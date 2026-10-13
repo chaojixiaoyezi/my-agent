@@ -10,6 +10,7 @@
 #   一次选包失败不重放已领取的辅助调用；定时任务绑定失效必须核对原任务记录，不能补造旧任务继续采样。
 #   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
 #   IM 管理员密码错误与失败锁定共用一个码，不暴露差别；没有待决审批时不得重复批准或替用户重试密码。
+#   执行目标换片或结束后不得把旧控制自动重放到新目标，必须先核对准确身份。
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
@@ -57,6 +58,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         code="DECISION_SETTINGS_CONFLICT", category="state", retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="决策设置版本已变化；重新读取当前生效值和 revision，再按新版本提交修改，不重放旧覆盖。",
+    ),
+    "EXECUTION_TARGET_CHANGED": ErrorContract(
+        code="EXECUTION_TARGET_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原执行目标已换片或结束，本次控制未提交；先读取最新状态并核对准确目标，不自动把旧停止或引导重放到后来回合。",
     ),
     "PTY_UNAVAILABLE": ErrorContract(
         code="PTY_UNAVAILABLE", category="tool", retryable=False,

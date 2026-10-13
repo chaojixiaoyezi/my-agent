@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-12，用户已授权将 L/T/IM 整合版本合入远端 main 并构建 `0.3.0-tui-preview.20261012.7`。本次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。发布检查与未解决边界见 [整合交接](../tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。历史 `.2` / `.5` 的验收不能冒充本次包的验收。
+状态：2026-10-12，用户已授权将 L/T/IM 整合版本合入远端 main 并构建 `0.3.0-tui-preview.20261012.8`。本次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。发布检查与未解决边界见 [整合交接](../tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。历史 `.2` / `.5` 的验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 

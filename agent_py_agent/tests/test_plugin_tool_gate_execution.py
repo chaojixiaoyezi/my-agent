@@ -246,6 +246,15 @@ def test_only_two_host_constructors_set_trusted_origin():
     for name in ("plugin_management.py", "plugin_invocation.py", "tooling/registry.py",
                  "contracts/main_agent_foundation_contract_cases.py"):
         for origins in _constructor_origins(root / name):
+            if name == "tooling/registry.py":
+                origin, = origins
+                assert isinstance(origin, ast.Call) and isinstance(origin.func, ast.Attribute) and origin.func.attr == "get"
+                assert [arg.value for arg in origin.args] == ["call_origin", "model"]
+                assert isinstance(origin.func.value, ast.BoolOp)
+                context, empty = origin.func.value.values
+                assert isinstance(context, ast.Name) and context.id == "trusted_run_context"
+                assert isinstance(empty, ast.Dict) and empty.keys == []
+                continue
             assert len(origins) == 1 and isinstance(origins[0], ast.Constant)
             assert origins[0].value == "host_command"
             configured.append(name)

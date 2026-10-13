@@ -220,7 +220,7 @@ def test_transient_retry_reselects_and_accepts_only_final_attempt_params(monkeyp
     from agent_py_agent.agent.model_request_selection import model_request_selection_scope
 
     agent = SimpleNamespace(runtime_guard_policy=None)
-    loop_params = SimpleNamespace(effective_on_chunk=None, live_archive_state=None)
+    loop_params = SimpleNamespace(effective_on_chunk=None, live_archive_state=None, task_attributes={})
     selected, events = [], []
     failure = ProviderTransientError("首次尝试瞬断")
 

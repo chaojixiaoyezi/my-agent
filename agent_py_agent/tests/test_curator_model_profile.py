@@ -234,7 +234,7 @@ def test_model_text_and_tui_lists_display_the_stable_profile_id(host, monkeypatc
         return listing
 
     async def dialog(*args, **_kwargs):
-        labels.extend(label for _, label in args[2].values)  # args = (app, title, choices, actions)
+        labels.extend(label for _, label in _kwargs["focus"].values)
         return None
 
     async def choose(_app, _title, rows):

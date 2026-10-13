@@ -327,7 +327,8 @@ def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeyp
     assert status == 200 and result['ok'] and result['status'] == 'done', result
     assert len(claims) == 1 and claims[0].request_id == request_id
     assert claims[0].execution_attempt_id and claims[0].lease_epoch == 1
-    assert resolved == [owner]
+    # IM 受理和执行各按可信身份复核 owner，所有解析均必须相同；新委派入口不减少原 worker 的身份检查。
+    assert resolved == [owner] * (2 if identity[1] == "feishu" else 1)
     assert not (paths.inbox / f'{request_id}.json').exists()
     assert not (paths.processing / f'{request_id}.json').exists()
     assert (paths.terminal / f'{request_id}.json').exists()

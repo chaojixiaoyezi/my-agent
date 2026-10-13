@@ -65,6 +65,7 @@ def test_missing_authority_and_uncertain_side_effects_never_auto_retry():
         "ACTIVE_TURN_OUTCOME_UNCERTAIN": RecoveryAction.MANUAL_REVIEW.value,
         "PARENT_CREATION_SNAPSHOT_MISSING": RecoveryAction.REPORT_BLOCKER.value,
         "PARENT_TOOL_SNAPSHOT_UNAVAILABLE": RecoveryAction.REPORT_BLOCKER.value,
+        "EXECUTION_TARGET_CHANGED": RecoveryAction.MANUAL_REVIEW.value,
     }
     for code, action in expected.items():
         contract = error_contract(code)

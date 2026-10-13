@@ -9,7 +9,7 @@
 #   （%2FUsers%2F）。故意编码（两次 %-编码、%00、base64、~user/ 等）不在防护范围：信任边界是“能力包由管理员审过才装”，
 #   这里防的是 sys.argv、__file__、异常信息这类无意带出的路径。代价：JSON Pointer 首段恰好是本机根目录名（/home、/Users、/tmp）时整条置成
 #   <redacted>，只丢定位、不泄露。只改 location，不改 code、计数和状态。改动同步 test_pack_verification_service.py。
-# 模块用途: 不让检查程序借 location 把宿主路径带进模型可见的回执和提示。
+# 模块用途: 在原 stdout 上限内先替换完整宿主路径，再限制展示长度，保留长工作区里的相对位置。
 
 from __future__ import annotations
 
@@ -36,11 +36,14 @@ def redact_error_samples(result: object, request: object, temp_dir: str) -> obje
     return replace(result, error_samples=tuple(_redact_sample(item, replacements) for item in samples))
 
 
-# 函数用途: 脱敏一条错误样例的位置和可选修改提示，其余键不保留。
+# LLM: 路径替换必须先于展示截断；上限与清洗仍由原 runner 常量/函数权威定义，不改变 code、计数或验证状态。
+# 函数用途: 将完整位置和提示先脱敏再有界交付，避免长宿主前缀把有效文件名截掉。
 def _redact_sample(item: dict, replacements: list[tuple[str, str]]) -> dict:
-    row = {"code": item["code"], "location": redact_location(item["location"], replacements)}
+    from .pack_verifier_runner import MAX_VERIFIER_LOCATION_CHARS, _clean_hint
+
+    row = {"code": item["code"], "location": redact_location(item["location"], replacements)[:MAX_VERIFIER_LOCATION_CHARS]}
     if item.get("hint"):
-        row["hint"] = redact_location(item["hint"], replacements)
+        row["hint"] = _clean_hint(redact_location(item["hint"], replacements))
     return row
 
 
