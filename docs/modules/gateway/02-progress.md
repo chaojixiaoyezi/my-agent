@@ -1,5 +1,7 @@
 # Gateway 维护状态
 
+2026-10-12 发布依赖边界：Gateway 的 IM 路由调用 `conversation/session_task_dispatch.py` 的原耐久派发流程；模型派活工具也调用同一入口，原身份/链深/配额/正文/wake 不改。状态展示调用 `conversation/im_task_status.py`，由会话领域读取原子代理终态集合；Gateway 不导入 agent_core 工具或 subagents。发行 AST 边界测试曾实际发现两个新依赖，修复不增加豁免或动态导入。
+
 2026-10-12 L/T/IM 本地整合完成：原 IM 后台线程与 L 每次隔离策略组合，inherit 读取原聊天，冻结通知沿原计划引用与索引复核。工作树已整合，79 文件 1801 项及真机 smoke 通过，未发布；见 [整合记录](../../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 
 2026-10-12 IM 多任务：原入口 receipt 冻结发送者 `/delegate` 模式；结构化辅助路由、短接单与独立 SessionTask/Wake 派工已接，后台原 ToolExecutor/G1 真建孩子，待终态后原模型汇总。联合验收见 [交接](../../tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。

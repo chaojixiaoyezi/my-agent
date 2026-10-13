@@ -1,10 +1,11 @@
 # IM 任务执行策略与合同
 
-状态：2026-10-12，本地实现与相关验收完成，未发布；不打包、不推送 main、不切换线上实例。
+状态：2026-10-12，用户已授权主线发布和打包；此前本地验收保留，下方合同作为发布版本的执行语义，服务器安装不自动切换。
 
 IM 新计划绑定原 ThreadStore 的独立执行线程；TUI/旧计划保留原执行线程。L 整合后可显式按次 isolated；inherit 从原布置聊天读取最新合法模型选择，fixed 保存明确档案引用，凭据不复制。见 [整合记录](../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 `/delegate enable|disable|status` 保存逐发送者偏好，到部署时区下一零点失效；原入站回执冻结模式与版本。
-开启后原辅助模型按结构化 chat/task 路由；工作项进入原 SessionTaskStore/WakeStore，聊天主模型只生成接单回应。
+开启后原辅助模型按结构化 chat/task 路由；宿主与模型工具共用 `conversation/session_task_dispatch.py` 的耐久派发，工作项进入原 SessionTaskStore/WakeStore，聊天主模型只生成接单回应。
+`/status` 的 IM 设置与孩子状态由 `conversation/im_task_status.py` 读取原事实源，Gateway 不导入核心派活工具或子代理实现；此次移位不改变 schema、权限、幂等键或任何配额；普通模型派活目标没有宿主委派标记时不写该策略，委派目标仍先绑定准确任务 ref 再发正文与 wake。
 后台主代理经真实 ToolExecutor/G1 启动子代理，复用根/owner 容量，等待孩子后由原自然回复模型汇总；孩子提出结构化能力申请时，根只获得原父级裁决工具，不代做业务。
 容量等待沿原不执行退避；unfinished 不写 DONE，失败不伪装成功；关闭和跨零点不变更已接任务。
 `/status` 补当天偏好、截止时间、后台排队/执行与子代理额度。

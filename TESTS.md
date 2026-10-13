@@ -1,5 +1,9 @@
 2026-10-12 临时更新收口：发行 20261012.5，输入计时、退出鼠标、状态/角色、群聊 mention、管理员绑定目标、单条流式恢复及长候选窗口已实现。定向回归与本地静态 gate 已通过；Ubuntu 24.04 真 TUI/官方 MiniMax 对照和真实 SSH 已验，真实模型原句发送由通道替身确认。现场校时关联与真实飞书客户端展示尚无证据，详见 docs/design/TUI_IM_PREVIEW.md。
 
+本次发行 focused 增补 `test_private_release.py`、参数/打包边界等六文件；AST 层级检查首先报两个新增依赖越界。修正为共用会话领域入口后复跑派活/IM/状态/包边界，并执行 focused、全仓与严格静态门；历史组合成绩不累计为本次结果。
+
+2026-10-12 主线发布：用户已授权将 L/T/IM 整合版合入 main、推送并构建 `.20261012.6`；此前“未发布”描述保留为历史时点。准确源码提交由发行清单记录，发布门与剩余边界见 [发布追加](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。
+
 L/T/IM 整合（2026-10-12，验收完成）：新 `test_scheduler_im_l_integration.py` 五项覆盖真实工具/Store 的来源模型、冻结通知和非法配置零线程；联合 79 文件 1801 项和 Linux 官方模型 smoke 已通过，结果见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 
 IM 多任务/公共包（2026-10-12，相关验收完成；739 项联合回归及新增权限/时区用例通过）：新五个合同/组合文件验证原 HTTP 入站快照、真实创建服务/G1、每日到期/DST/重启、调度独立线程、两用户公共读取/主子 grants/撤销/范围升级。配套回归包含 scheduler、Gateway 控制、SessionTask、运行收口、结构化后端。Linux 用单 Gateway 和官方 MiniMax-M2.7，在隔离 home 提交普通需求观察原账；出站 fake 适配器必须明确标记，不能称真实飞书实发。记录见 [交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。

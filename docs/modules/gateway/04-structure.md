@@ -1,5 +1,7 @@
 # Gateway Structure
 
+2026-10-12 发布依赖边界：Gateway 的 IM 路由调用 `conversation/session_task_dispatch.py` 的原耐久派发流程；模型派活工具也调用同一入口，原身份/链深/配额/正文/wake 不改。状态展示调用 `conversation/im_task_status.py`，由会话领域读取原子代理终态集合；Gateway 不导入 agent_core 工具或 subagents。发行 AST 边界测试曾实际发现两个新依赖，修复不增加豁免或动态导入。
+
 L/T/IM 整合：`scheduler/execution_policy.py` 共用 IM 放置和显式策略规范；`scheduler/execution.py::_origin_bindings` 只桥接 canonical 计划来源。无第二个 scheduler 队列/安装账，来源模型与执行线程分开。见 [整合记录](../../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 
 新增 `im_dispatch_policy.py`（受理快照）、`im_task_routing.py`（结构化选择与原任务派发）、`delegation_control.py`（显式当天命令）；执行策略存在原 ThreadStore，偏好存在 owner config/im_preferences.json，均不复制任务状态。`status_projection.py` 补后台任务与当天偏好。

@@ -5,6 +5,8 @@
 IM 多任务和公共包的新长期入口及关键文件职责（均复用原 Store，不增加第二套任务账）：
 
 ```text
+|-- agent_py_agent/agent/conversation/session_task_dispatch.py  # 模型工具与宿主共用的耐久派发、幂等、链深和配额
+|-- agent_py_agent/agent/conversation/im_task_status.py  # IM 当日设置和后台/孩子状态的同源只读投影
 |-- agent_py_agent/agent/conversation/execution_threads.py  # 独立执行线程和准确来源引用
 |-- agent_py_agent/agent/conversation/im_delegation.py  # 宿主真实派工、等待和主模型汇总
 |-- agent_py_agent/agent/scheduler/execution_policy.py  # 新 IM 计划隔离线程策略
@@ -818,6 +820,8 @@ agent_py_agent/
 |   |   |-- wake_attempt_tracking.py    # 唤醒毒丸接线：批次消费处按尝试记账、跳过阶段读持久退避、结案、进程内在途登记
 |   |   |-- wake_domain_closeout.py     # 唤醒毒丸领域收尾：结案/来源已放弃时派活收 failed 并回报、宿主提示、领域终态判定
 |   |   |-- session_tasks.py            # 会话间派活的唯一权威存储（状态机单一写入方，正文只存 guidance id）
+|   |   |-- session_task_dispatch.py    # 已授权会话任务的唯一耐久派发流程，模型工具与宿主 IM 共用
+|   |   |-- im_task_status.py           # IM 当日偏好、任务和子代理占用的只读控制投影
 |   |   |-- session_pair_rate.py        # 每对会话每小时条数计数（消息/派活/回报/取消通知都计入）
 |   |   |-- store_guidance_records.py   # 插话回执格式、迁移构造与身份校验
 |   |   |-- store_guidance_ledger.py    # 插话回执读取、回合锁及队列与索引修复
@@ -2477,3 +2481,5 @@ docs/
 - `docs/tasks/LONG_TASK_RUNTIME_HANDOFF.md`：L/T 固定候选的验证、安装证据和剩余边界，作为后续评审导航。
 - `agent_py_agent/agent/conversation/goal_transition.py`：Goal 最近变更和进度投影，模型 complete 不等同独立验收。
 - `agent_py_agent/agent/gateway_parts/execution_target.py`、`execution_control.py`：T 候选从原 claim 与回合绑定读取、固定真实控制目标；L 组合沿同一入口。
+
+发布新增领域入口说明：`conversation/session_task_dispatch.py` 持有原任务记录、guidance、wake 和配额副作用，原模型工具只校验/授权后调用；`conversation/im_task_status.py` 读取原孩子终态集合，不让 Gateway 直接依赖子代理内部实现。两者不创建第二套存储。

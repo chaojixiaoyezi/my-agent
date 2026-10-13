@@ -1,5 +1,9 @@
 # 设计台账
 
+发布边界修正（2026-10-12）：原会话任务耐久派发统一归 conversation，模型工具与宿主 IM 共用；状态只读投影也在会话领域，Gateway 不反向引用核心工具/孩子内部类型。schema 与权限不变，见 [IM 合同](docs/design/IM_TASK_EXECUTION_POLICY.md)。
+
+2026-10-12 主线发布：用户已授权将 L/T/IM 整合版合入 main、推送并构建 `.20261012.6`；此前“未发布”描述保留为历史时点。准确源码提交由发行清单记录，发布门与剩余边界见 [发布追加](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。
+
 本轮 L/T/IM 整合（2026-10-12）：按用户要求三方吸收 `codex/long-task-runtime-l` 的选模、Goal 与调度改动，保留当前委派/公共包；修正 IM 来源模型和显式隔离的冻结收件人，1801 项及隔离真机 smoke 通过。组合版本保存在独立本地双父整合分支，原暂存布局保留；未打包/推送/合并 main。见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 
 本轮实施记录：独立执行线程引用、受理时冻结 `/delegate` 策略、真实 ToolExecutor 宿主派工、孩子终态后模型汇总及 public 安装范围 v5 已落本地；测试边界和剩余验收见 [实施交接](docs/tasks/IM_MULTI_TASK_PUBLIC_PACK_HANDOFF.md)。旧评估章节是历史基线，当前命令和验收以交接文档为准。

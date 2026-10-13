@@ -1,5 +1,5 @@
 # LLM: 只消费原入口回执冻结的策略，语义选择经原辅助模型返回结构化 kind；后台任务正文与状态沿原 SessionTaskStore/guidance。
-# 模块用途: 自动委派模式下把工作项派到独立会话，原聊天只做接单回应，不等待长任务或子代理。
+# 模块用途: 自动委派模式下经会话领域唯一派发入口创建独立工作项，原聊天只做接单回应。
 from __future__ import annotations
 
 import hashlib
@@ -60,7 +60,7 @@ def _select_route(context, conversation, prompt: str) -> dict:
 
 
 # LLM: route 标记是原请求的派工决策及准确任务引用，不复制任务状态；旧请求/关模式零额外模型调用，恢复不重读偏好。
-# 函数用途: 冻结语义路由并耐久派工，返回真实任务记录给原主模型生成短接单回应。
+# 函数用途: 冻结语义路由后调用会话领域派工，写原请求/线程策略并返回原任务记录。
 def prepare_im_task_dispatch(context, conversation, prompt: str):
     snapshot = context.request.get(IM_DISPATCH_KEY)
     if snapshot is None or snapshot.get("mode") != "delegated" or context.request.get("system_task"):
@@ -91,7 +91,7 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
         return replace(current, metadata={**current.metadata, IM_TASK_EXECUTION_KEY: existing or policy})
 
     thread = context.agent.conversation_store.threads.update_atomic(thread.thread_id, bind_policy)
-    from ..agent_core.orchestration.tools.create_session_task import dispatch_owned_background_task
+    from ..conversation.session_task_dispatch import dispatch_owned_background_task
 
     config = capability_config_for_agent(context.agent) or CapabilityConfig()
     outcome = dispatch_owned_background_task(context.agent, source_thread_id=conversation.thread_id,

@@ -1,6 +1,6 @@
 # 临时离线发行包
 
-状态：2026-10-10，`0.3.0-tui-preview.20261010.2` 已完成三版 Ubuntu 断网容器验收与 1.8 原生 TUI/更新恢复验收。属于 TUI 修复独立工作树内的临时发行，不代表 main 已合并或生产已发布。
+状态：2026-10-12，用户已授权将 L/T/IM 整合版本合入远端 main 并构建 `0.3.0-tui-preview.20261012.6`。本次发布使用 main 的准确提交冻结源码，安装包 `release.json` 的 `base_commit` 和 `source_sha256` 是对应关系。发布检查与未解决边界见 [整合交接](../tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。历史 `.2` / `.5` 的验收不能冒充本次包的验收。
 
 ## 适用范围与内容
 
@@ -18,7 +18,7 @@
 账户的 Linux HOME 保持原样。安装位置通过 `--prefix` 显式指定，后续更新必须使用同一路径。
 
 ```text
-/app/my-agent-preview/
+/app/.my-agent/
 |-- releases/          # 不可变程序版本；保留旧版本
 |-- current            # 原子切换的当前版本链接
 |-- bin/my-agent-preview  # 固定启动入口，不依赖登录 HOME
@@ -30,19 +30,29 @@
 如果 appuser 无权在 /app 建目录，管理员只需准备一次：
 
 ```bash
-sudo install -d -o appuser -g "$(id -gn appuser)" -m 750 /app/my-agent-preview
+sudo install -d -o appuser -g "$(id -gn appuser)" -m 750 /app/.my-agent
 ```
 
-把 `.run` 上传到当前登录目录（例如 `~/`），首次安装目录 `/app/my-agent-preview` 保持为空；
+把 `.run` 上传到当前登录目录（例如 `~/`），首次安装目录 `/app/.my-agent` 保持为空；
 随后以 appuser 安装。Ubuntu 标准安装自带所需 bash、tar、gzip 和 coreutils，无须另装运行时：
 
 ```bash
-bash my-agent-版本-linux-x86_64.run --prefix /app/my-agent-preview
-/app/my-agent-preview/bin/my-agent-preview --version
-/app/my-agent-preview/bin/my-agent-preview --configure-model
-/app/my-agent-preview/bin/my-agent-preview gateway start --ready-timeout 30
-/app/my-agent-preview/bin/my-agent-preview
+bash my-agent-版本-linux-x86_64.run --prefix /app/.my-agent
+/app/.my-agent/bin/my-agent-preview --version
+/app/.my-agent/bin/my-agent-preview --configure-model
+/app/.my-agent/bin/my-agent-preview gateway start --ready-timeout 30
+/app/.my-agent/bin/my-agent-preview
 ```
+
+如需直接输入 `my-agent`，可为当前用户创建固定入口（不复制程序，后续更新仍跟随 current）：
+
+```bash
+mkdir -p ~/.local/bin
+ln -sfn /app/.my-agent/bin/my-agent-preview ~/.local/bin/my-agent
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+将 PATH 那一行放入自己的 shell 启动文件即可永久生效。已有命令或别名能正常使用时无需重复设置。
 
 首装配置使用独立 Gateway 端口 18420，与普通安装的 8420 分开；用户可以在自己的配置里修改。
 程序始终使用原配置解析器和 Gateway 启动链，没有第二个调度入口。`workspace_root` 保持默认空值，
@@ -66,7 +76,7 @@ bash my-agent-版本-linux-x86_64.run --prefix /app/my-agent-preview
 ## 同一路径更新
 
 1. 等当前任务结束，退出本安装的所有 TUI；若运行飞书等独立通道，用固定入口执行 `adapter stop`，然后执行 `gateway stop`。
-2. 上传新版 `.run`，再次执行 `bash 新包.run --prefix /app/my-agent-preview`。
+2. 上传新版 `.run`，再次执行 `bash 新包.run --prefix /app/.my-agent`。
 3. 用同一固定入口查看 `--version`，执行 `gateway start --ready-timeout 30` 启动后台；原先运行飞书的安装再执行 `adapter start --channel feishu --daemon`，然后进入 TUI。
 
 `gateway stop` 不等于 `adapter stop`；通道是独立进程，停止 Gateway 后可能继续占用旧版运行时。停止通道不删除飞书配置/凭据或记忆，更新期间连接暂时中断，恢复后须实测收发。
@@ -74,7 +84,7 @@ bash my-agent-版本-linux-x86_64.run --prefix /app/my-agent-preview
 安装器先核对包 SHA256 与逐文件清单，再复制到新的版本目录，最后原子切换 current。
 安装过程中发现本安装仍有活动 Python 进程时会停止更新并列出 PID，不自动杀任务。
 同版本不同内容拒绝覆盖；传输损坏不切换当前版本。更新保留 data 内的配置、历史和工作文件原字节。
-不自动变更 Linux HOME、不迁移其它 my-agent 安装，也不自动升级 main。
+不自动变更 Linux HOME、不迁移其它 my-agent 安装；安装服务器只切换该 prefix 的发行版本，不操作开发仓库。
 保留旧程序不等于数据库降级方案；本临时更新流程不承诺跨任意未来数据 schema 的自动回退。
 
 ## 构建与验收

@@ -1,5 +1,7 @@
 # LLM_GUIDE
 
+2026-10-12 主线发布：用户已授权将 L/T/IM 整合版合入 main、推送并构建 `.20261012.6`；此前“未发布”描述保留为历史时点。准确源码提交由发行清单记录，发布门与剩余边界见 [发布追加](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。
+
 L/T/IM 当前整合边界见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)：新 IM 计划仍固定后台，inherit 读取原来源聊天，显式 isolated 的通知继续固定原布置者；原 SessionTask 与 scheduler run 各守准确身份。来源长测质量缺口不算已修。
 
 IM 多任务与公共能力包的新语义见 [执行策略](docs/design/IM_TASK_EXECUTION_POLICY.md) 和 [公共包](docs/design/PUBLIC_CAPABILITY_PACKS.md)。实现复用 Thread/SessionTask/Wake/子代理原账；受理模式被冻结，关闭或跨零点不改变旧任务；普通自然回复由模型生成。公共安装默认 private，管理员显式 `--scope public` 只共享内容，用户执行权限不继承。此次不打包、不合并。
