@@ -6,7 +6,11 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 
-from .execution_policy import normalize_execution
+from .execution_policy import (
+    migrate_queued_execution_origin,
+    normalize_execution,
+    scheduled_execution_metadata,
+)
 
 
 # LLM: 只关闭原 run 精确绑定且尚未开始的 TaskLink；缺失或损坏不补建，跨线程记录不修改，运行收口仍由 scheduler CAS。
@@ -42,8 +46,8 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
     return replace(dependencies, run_once=run_once)
 
 
-# LLM: run 属于本 owner；普通来源在首次准备冻结，IM 计划沿原无绑定线程已固定的来源，不因群新发送者改收件人。
-# 函数用途: 入队前冻结两种执行模式的交付来源，只为独立模式创建无通道运行线程。
+# LLM: run 属于本 owner；来源按准确 creator 冻结，isolated 复用原 execution_origin，不因群新发送者改主体或收件人。
+# 函数用途: 入队前冻结两种执行模式的交付与宿主身份，只为独立模式创建无通道运行线程。
 def prepare_execution(service, run: dict, *, now: float) -> dict:
     execution = normalize_execution(run.get("execution"))
     from ..conversation.models import ConversationThread
@@ -61,7 +65,7 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
     if execution["mode"] != "isolated":
         return run
     identity = {"thread_kind": "scheduled", "scheduler_run_id": run["run_id"],
-                "origin_thread_id": origin.thread_id}
+                "origin_thread_id": origin.thread_id, **scheduled_execution_metadata(service, run)}
     seed = ConversationThread(
         thread_id=run["thread_id"], canonical_user_id=origin.canonical_user_id,
         owner_id=origin.owner_id, owner_home=origin.owner_home, title=run["name"],
@@ -69,12 +73,13 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
         runtime_workspace_roots=origin.runtime_workspace_roots,
         model_profile_id="", metadata=identity,
     )
+    migrate_queued_execution_origin(service, run, seed)
     ensure_unbound_thread(service.conversation_store.threads, seed, identity=identity)
     return run
 
 
-# LLM: 只有原 IM 计划线程的 canonical 来源引用能冻结 actor；模型参数不能改目标。无此引用保持 L 原绑定快照。
-# 函数用途: 将已有计划的原布置者交给本次运行，不让群内后来的发送者替换通知对象。
+# LLM: 原 IM 计划来源与 run.creator 必须一致；关闭后台开关时也只冻结准确 creator，缺证据的旧记录不补最新成员。
+# 函数用途: 将原布置者交给本次运行，不让群内后来的发送者替换通知或审批对象。
 def _origin_bindings(service, run, origin):
     from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
     from ..runtime_errors import DataCorruptionError
@@ -83,11 +88,22 @@ def _origin_bindings(service, run, origin):
     plan_thread = service.conversation_store.threads.require(job["thread_id"])
     reference = plan_thread.metadata.get(EXECUTION_ORIGIN_KEY)
     if reference is None:
+        creator = run.get("creator")
+        if isinstance(creator, dict) and set(creator) == {"channel", "actor_id"}:
+            group = run["owner"]["kind"] == "group"
+            selected = [asdict(replace(row, channel_user_id=creator["actor_id"])) for row in origin.channel_bindings
+                if row.channel == creator["channel"] and (group or row.channel_user_id == creator["actor_id"])]
+            if not selected:
+                raise DataCorruptionError("定时运行创建人没有准确原通道来源")
+            return selected
         return [asdict(binding) for binding in origin.channel_bindings]
     source = execution_origin_thread(service.conversation_store.threads.require, plan_thread)
     if source.thread_id != origin.thread_id:
         raise DataCorruptionError("定时运行与原计划来源不一致")
     frozen = reference["binding"]
+    creator = run.get("creator")
+    if isinstance(creator, dict) and creator.get("actor_id") and creator != {"channel": frozen["channel"], "actor_id": frozen["actor_id"]}:
+        raise DataCorruptionError("定时运行创建人与原计划身份冲突")
     for binding in source.channel_bindings:
         if binding.channel == frozen["channel"] and (
                 binding.channel_conversation_id == frozen["conversation_id"] if frozen["conversation_id"]

@@ -14,7 +14,7 @@ from agent_py_agent.agent.adapter.feishu_ws import (
     FeishuWsClient,
     lark_event_to_webhook_payload,
 )
-from agent_py_agent.agent.adapter.protocol import feishu_to_incoming
+from agent_py_agent.agent.adapter.protocol import FeishuEventDisposition, feishu_to_incoming
 
 
 def _fake_lark_event(
@@ -65,9 +65,9 @@ def test_lark_event_invalid_returns_none() -> None:
 
 def test_ws_client_routes_event_to_on_payload() -> None:
     """FeishuWsClient 收事件 → 归一化 → 交 on_payload(= adapter._handle_feishu_event 同下游);
-    异常事件不掀翻长连(handle 内吞掉)。"""
+    明确受理后才提交 seen，格式缺失事件不交下游。"""
     seen: list[dict] = []
-    client = FeishuWsClient(app_id="a", app_secret="b", on_payload=seen.append)
+    client = FeishuWsClient(app_id="a", app_secret="b", on_payload=lambda payload: seen.append(payload) or FeishuEventDisposition('accepted'))
     client._handle_event(_fake_lark_event(text="收到", open_id="ou_2"))
     assert len(seen) == 1 and feishu_to_incoming(seen[0]).content == "收到"
     client._handle_event(_fake_lark_event(message_id=""))  # 无效事件:不交下游、不抛
@@ -78,7 +78,7 @@ def test_ws_client_dedups_repeated_message_id() -> None:
     """同一 message_id 重复投递(飞书长连重连/重放会重发)只处理一次——防重复回复
     (回归:移植时漏了去重,真机出现"一条消息回好几条")。"""
     seen: list[dict] = []
-    client = FeishuWsClient(app_id="a", app_secret="b", on_payload=seen.append)
+    client = FeishuWsClient(app_id="a", app_secret="b", on_payload=lambda payload: seen.append(payload) or FeishuEventDisposition('accepted'))
     dup = _fake_lark_event(message_id="om_dup", text="hi", open_id="ou_3")
     client._handle_event(dup)
     client._handle_event(dup)  # 同一条再投

@@ -1,3 +1,7 @@
+2026-10-13 宿主主体修复：原 GatewayConversationContext.scope 在入口产生专有 actor 字段，conversation/host_actor 校验准确 owner/thread/root 来源；ScheduleTool、执行线程冻结和私人审批复用，子孙只继承父宿主事实。模型 raw attributes 与最新群绑定不能成为认证主体；同群创建人拒绝与本 owner 编号不存在分别表达。
+
+2026-10-13 入站重投和回执修复：feishu/WS 沿原 seen 与 GatewayIngressStore 区分已受理、稳定不触发和暂不可验证；reaction 不作为请求是否进入的依据。显式后台公开完成只沿原 AgentRunResult 与 channel_delivery 冻结/重投，不增加另一个消息账本；通知策略依原 job/run 保存。
+
 2026-10-13 离线发行服务控制：scripts/private_release/installer.py 从原 configured_home_root → owner resolver → runtime_paths_for_agent 获得 GatewayPaths；安装器的 HOME、cwd 和外部 MY_AGENT_HOME 不能另造服务地址。原 adapter 心跳保留 requested_channel，旧发行仅按 channels[].name 的精确注册快照迁移，不从日志或自然语言猜通道。
 
 2026-10-13：R20 原资源策略/云工具与 R21 入站冻结 owner、H2 服务队列和 chat_id 发送实施中，见 [设计](../../design/HOST_CLOUD_RESOURCE_ACCESS.md)。管理员私人 IM 可 `/sessions control <thread_id> /approve <密码>` 或 `/deny` 决定本人原 TUI pending；原审批账及 waiter 不变，嵌套密码在入站/控制/TUI 历史均遮蔽，普通用户/群不能跨接管理员 TUI。

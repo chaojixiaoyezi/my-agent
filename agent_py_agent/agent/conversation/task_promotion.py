@@ -127,9 +127,7 @@ def promote_current_conversation_task(
         or getattr(current, "prompt", "")
         or task_id
     ).strip()
-    from ..capability.package_selection_scope import new_task_capability_selection
-
-    selection = new_task_capability_selection(agent, current)
+    bind_options = _promotion_bind_options(agent, current, thread_id)
     try:
         link = store.tasks.bind(
             {
@@ -144,7 +142,7 @@ def promote_current_conversation_task(
                     attrs.get(CONVERSATION_CANCELLATION_SCOPE_ATTR) or "foreground"
                 ),
             },
-            **({"capability_selection": selection} if selection is not None else {}),
+            **bind_options,
         )
     except Exception:
         return None
@@ -153,6 +151,18 @@ def promote_current_conversation_task(
     attrs["conversation_task_id"] = task_id
     selected = _materialize_promoted_workspace(agent, current, link, task_goal=task_goal) or link
     return _activate_current_conversation_task(store, current, attrs, selected)
+
+
+# LLM: 新任务能力选择与宿主身份使用各自 typed keyword，不读模型同名属性，执行次序保持原准备链。
+# 函数用途: 组装原 TaskStore.bind 的宿主选项，不建立选择或身份影子账本。
+def _promotion_bind_options(agent, current, thread_id):
+    from ..capability.package_selection_scope import new_task_capability_selection
+    from .host_actor import resolve_host_actor
+
+    selection = new_task_capability_selection(agent, current)
+    actor = resolve_host_actor(agent, thread_id) if getattr(current, "host_channel_actor", None) is not None else None
+    return {**({"capability_selection": selection} if selection is not None else {}),
+        **({"host_channel_actor": actor} if actor is not None else {})}
 
 
 # LLM: Promotion succeeds only after the exact task workspace is durably bound for future turns

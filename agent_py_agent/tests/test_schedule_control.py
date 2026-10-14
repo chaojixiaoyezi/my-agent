@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+from agent_py_agent.agent.conversation.host_actor import actor_from_scope
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.control_service import (
     GatewayControlScope,
@@ -30,6 +31,8 @@ def _job(agent, actor, name):
         'owner_home':str(agent.home_paths.owner_home_dir)})
     agent._current_run_params=SimpleNamespace(request_id=name,task_id='',task_attributes={
         'conversation_thread_id':source.thread_id,'host_channel_actor':{'channel':'feishu','conversation_id':'oc_group','actor_id':actor}})
+    agent._current_run_params.host_channel_actor=actor_from_scope(agent, SimpleNamespace(channel='feishu',
+        channel_conversation_id='oc_group',channel_user_id=actor),source.thread_id,name)
     result=ScheduleTool(agent).execute({'action':'create','name':name,'prompt':'合成检查','schedule_kind':'every','every_seconds':600})
     assert result.ok,result.content if hasattr(result,'content') else result
     return agent.scheduler_repository.list_jobs()[0][-1]
@@ -46,7 +49,10 @@ def test_group_commands_and_tool_only_allow_original_creator(tmp_path):
     denied=execute_schedule_control(agent,parse_conversation_control('/schedule pause '+second['alias']),scope)
     assert not denied.ok and agent.scheduler_repository.get_job(second['job_id'])['status']=='active'
     agent._current_run_params.task_attributes['host_channel_actor']['actor_id']='ou_one'
-    assert ScheduleTool(agent).execute({'action':'get','job_id':second['job_id']}).error_code=='SCHEDULER_NOT_FOUND'
+    thread_id=agent._current_run_params.task_attributes['conversation_thread_id']
+    agent._current_run_params.host_channel_actor=actor_from_scope(agent, SimpleNamespace(channel='feishu',
+        channel_conversation_id='oc_group',channel_user_id='ou_one'),thread_id,'query-own')
+    assert ScheduleTool(agent).execute({'action':'get','job_id':second['job_id']}).error_code=='SCHEDULER_NOT_AUTHORIZED'
     stopped=execute_schedule_control(agent,parse_conversation_control('/schedule pause '+first['alias']),scope)
     assert stopped.ok and 'status:stop' in stopped.message
 

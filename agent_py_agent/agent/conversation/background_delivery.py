@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from ..scheduler.execution import scheduled_local_delivery
+from .background_receipt_contract import public_receipt_delivery_block
 from .channels import (
     PROACTIVE_PUSH_CHANNELS,
     ChannelAttachment,
@@ -59,6 +60,7 @@ def record_background_response(
     delivery_context: DeliveryContext,
     internal_content: str,
     *,
+    public_receipt: dict[str, object] | None = None,
     delivery_artifacts: tuple[dict[str, object], ...] = (),
     operation_verification: dict[str, object] | None = None,
     assistant_commentaries: tuple[str, ...] = (),
@@ -72,6 +74,9 @@ def record_background_response(
     # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
     # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
+    if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
+                                              has_attachments=bool(_channel_attachments(delivery_artifacts)), frozen_retry=frozen_retry):
+        return _uncommitted_delivery("", block)
     projection = project_user_reply(internal_content)
     if _background_reply_suppressed(
         delivery,
@@ -101,11 +106,10 @@ def record_background_response(
         evidence_refs=evidence_refs,
         operation_verification=operation_verification,
         frozen_retry=frozen_retry,
+        public_receipt=public_receipt,
     )
     if display_snapshot is not None and frozen_retry is None:
         message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
-    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
-    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
     route = _local_only_route(_background_delivery_route(
         delivery.channels,
         delivery_context,
@@ -114,14 +118,12 @@ def record_background_response(
     from ..scheduler.execution import validate_delivery_origin
 
     origin_valid = validate_delivery_origin(delivery.agent, request, delivery_context)
-    if origin_valid:
-        receipt, delivery_status = _background_external_delivery(
-            delivery, delivery_context, envelope,
-            _ExternalDeliveryOptions(frozen_retry=frozen_retry, local_transcript_only=local_transcript_only),
-        )
-    else:
-        receipt, delivery_status = SimpleNamespace(content=projection.content), "failed"
-        message_metadata["delivery_error_code"] = "SCHEDULER_ORIGIN_BINDING_CHANGED"
+    receipt, delivery_status = _background_delivery_for_origin(
+        delivery, delivery_context, envelope,
+        origin_valid=origin_valid,
+        external_options=_ExternalDeliveryOptions(frozen_retry=frozen_retry, local_transcript_only=local_transcript_only),
+        message_metadata=message_metadata,
+    )
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
     committed_content = str(getattr(receipt, "content", projection.content) or "")
     commit = _commit_background_response(
@@ -143,7 +145,6 @@ def record_background_response(
         delivery.store,
         _OwnerDeliveryFreeze(
             request=request,
-            wake_signal_id=wake_signal_id,
             content=projection.content,
             delivery_artifacts=delivery_artifacts,
             assistant_commentaries=assistant_commentaries,
@@ -181,7 +182,6 @@ class FrozenOwnerDelivery:
 @dataclass(frozen=True)
 class _OwnerDeliveryFreeze:
     request: BackgroundDeliveryRequest
-    wake_signal_id: str
     content: str
     delivery_artifacts: tuple[dict[str, object], ...]
     assistant_commentaries: tuple[str, ...]
@@ -197,12 +197,14 @@ class _OwnerDeliveryFreeze:
 
 # LLM: 外发义务未完成、应有 canonical 记录未提交，或容量报告要求保留时，冻结完整载荷。
 # 纯附件也需保留；suppressed 和空载荷不冻结。store 写入结果才证明重投载荷已落盘。
-# 函数用途: 把未完成的 owner 交付整封冻结到待处理唤醒上，返回是否已冻结。
+# 函数用途: 从原request取得唯一wake编号并冻结未完成交付的整封载荷，返回实际保存结果。
 def _freeze_pending_owner_delivery(
     store: ConversationStore,
     freeze: _OwnerDeliveryFreeze,
 ) -> bool:
-    if not freeze.wake_signal_id:
+    wake = freeze.request.wake_signal if isinstance(freeze.request.wake_signal, dict) else {}
+    wake_signal_id = str(wake.get("wake_signal_id") or "").strip()
+    if not wake_signal_id:
         return False
     if not (str(freeze.content or "").strip() or freeze.delivery_artifacts):
         return False
@@ -224,7 +226,7 @@ def _freeze_pending_owner_delivery(
     # 冻结成功与否必须来自 store 的真实写入结果：唤醒不存在/已不是 pending 时
     # 载荷不会落盘，此时不能对外声称"已冻结、可重投"。
     cached = store.wakes.cache_delivery(
-        freeze.wake_signal_id,
+        wake_signal_id,
         {
             "schema_version": "wake-owner-delivery.v2",
             "reason": freeze.request.reason,
@@ -285,6 +287,7 @@ def _background_owner_message_metadata(
     evidence_refs: tuple[str, ...],
     operation_verification: dict[str, object] | None,
     frozen_retry: FrozenOwnerDelivery | None,
+    public_receipt: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if frozen_retry is not None and frozen_retry.message_metadata:
         return {
@@ -302,6 +305,8 @@ def _background_owner_message_metadata(
     }
     if operation_verification is not None:
         metadata["operation_verification"] = operation_verification
+    if public_receipt is not None:
+        metadata["public_receipt"] = dict(public_receipt)
     return metadata
 
 
@@ -312,6 +317,18 @@ def _background_owner_message_metadata(
 class _ExternalDeliveryOptions:
     frozen_retry: FrozenOwnerDelivery | None = None
     local_transcript_only: bool = False
+
+
+# LLM: 原来源校验失败不能发网络请求，也不能把失败记为sent；成功只委托原投递出口，metadata记录同一事实。
+# 函数用途: 将来源失效和原实际投递分成明确接缝，保留既有本地、冻结重投及外发顺序。
+def _background_delivery_for_origin(
+    delivery: BackgroundDeliveryDependencies, context: DeliveryContext, envelope: ReplyEnvelope, *,
+    origin_valid: bool, external_options: _ExternalDeliveryOptions, message_metadata: dict[str, object],
+) -> tuple[object, str]:
+    if origin_valid:
+        return _background_external_delivery(delivery, context, envelope, external_options)
+    message_metadata["delivery_error_code"] = "SCHEDULER_ORIGIN_BINDING_CHANGED"
+    return SimpleNamespace(content=envelope.content), "failed"
 
 
 # LLM: 外部发送只有这一个出口：重投时若冻结载荷已证明外发成功，就绝不能再次外发

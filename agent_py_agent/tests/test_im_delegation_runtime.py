@@ -9,7 +9,6 @@ import pytest
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core.orchestration import lifecycle
-from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn
 from agent_py_agent.agent.common.cancellation import CancellationToken
@@ -28,6 +27,7 @@ from agent_py_agent.agent.conversation.im_delegation import (
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
     _close_out_session_task_turn,
+    _run_params,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.im_dispatch_policy import IM_DISPATCH_KEY
@@ -41,7 +41,8 @@ from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapsh
 # LLM: 原主执行身份和线程/task 都通过正式入口建立，后台唤醒不启动真实 subprocess；不伪造 provider tool 往返。
 # 函数用途: 准备一个管理员 IM 的独立任务和可以执行创建服务的本片参数。
 def runtime_fixture(tmp_path, monkeypatch):
-    agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False), tmp_path / "workspace")
+    agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False,
+                                  my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
     source = agent.conversation_store.threads.get_or_create({
         "canonical_user_id": "ou_a", "channel": "feishu", "channel_user_id": "ou_a",
         "channel_conversation_id": "oc_a", "owner_id": agent.home_paths.owner_id,
@@ -56,18 +57,22 @@ def runtime_fixture(tmp_path, monkeypatch):
                         lambda *_: {"kind": "task", "package_refs": []})
     task = prepare_im_task_dispatch(context, source, "整理工作区里的资料")
     thread = agent.conversation_store.threads.require(task.target_thread_id)
-    attrs = {"conversation_thread_id": thread.thread_id, "conversation_session_task_id": task.task_id}
-    authority = _bind_main_agent_authority(agent, RunParams(request_id=task.task_id, run_id="delegate-root", attempt_id="delegate-attempt", task_attributes=attrs))
+    # 使用真实后台装配入口：首片只有 SessionTask，之后晋升 TaskLink，再把原 actor 交给创建服务。
+    background = _run_params(thread.thread_id, BackgroundRunRequest(thread_id=thread.thread_id,
+        reason="session_task", host_session_task_id=task.task_id), agent=agent, thread=thread)
+    authority = _bind_main_agent_authority(agent, replace(background, run_id="delegate-root",
+        attempt_id="delegate-attempt", root_user_prompt=task.goal))
+    attrs = authority.task_attributes
     params = ToolLoopExecuteParams(
         user_prompt=task.goal, root_user_prompt=task.goal, memories=[], runtime_injections=[], prompt_files=[],
         tool_catalog_section="", tool_recommendations_section="", tool_context=[], effective_on_chunk=None,
         allowed_tools=None, write_boundary=None, task_attributes=attrs, request_id=task.task_id,
-        run_id=authority.run_id, task_id="", attempt_id=authority.attempt_id, one_shot_tool_calls=set(),
+        run_id=authority.run_id, task_id=authority.task_id, attempt_id=authority.attempt_id, one_shot_tool_calls=set(),
         executed_tools=[], archive_tool_calls=[], context_scope="conversation", cancellation_token=CancellationToken(),
         tool_runtime_snapshot=agent.tools.runtime_snapshot(run_id=authority.run_id),
         tool_protocol_snapshot=make_test_protocol_snapshot(run_id=authority.run_id, source_protocol="native"),
     )
-    agent._current_run_params = params
+    agent._current_run_params = authority
     monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *_: {"status": "test-deferred"})
     return agent, params, task, context, source
 
@@ -157,7 +162,7 @@ def test_open_child_request_keeps_original_parent_resolution_and_no_business_too
 
     monkeypatch.setattr(capability, "_queue_resolved_child_continuation", lambda *a, **k: {"status": "test-deferred"})
     monkeypatch.setattr(capability, "_wake_subagent", lambda *a, **k: None)
-    agent._current_run_params = resolution
+    # 工具循环参数是投影；宿主当前 RunParams 保留准确身份，allowed_tools 从原子代理裁决门读取。
     granted = capability.ResolveCapabilityRequestsTool(agent).execute({
         "run_id": child_id, "decision": "grant", "reason": "当前用户具有调度权限"})
     assert granted.ok, granted.output

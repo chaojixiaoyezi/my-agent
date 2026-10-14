@@ -133,7 +133,7 @@ class FinalizationService:
                     root=root,
                     request_id=run_request_id,
                     user_prompt=ctx.user_prompt,
-                    response_text=ctx.final_response.text,
+                    response_text=getattr(ctx.final_response, "internal_response", "") or ctx.final_response.text,
                     backend=ctx.final_response.backend,
                     status=str(getattr(ctx.final_response, "runtime_status", "ok") or "ok"),
                     next_actions=ctx.recovery_next_actions or [],
@@ -283,6 +283,8 @@ class FinalizationService:
     # LLM: 最终结果只透传循环已形成的无正文诊断；不重新读取模型、不修改回复或结束事实。
     # 函数用途: 将最终模型回复与运行账组装成结果，让Gateway失败路径仍能取得真实循环计数。
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
+        from .model.response_provenance import response_provenance_projection
+
         ctx = params.ctx
         routed_context = ctx.routed_context
         operation_verification = build_operation_verification(
@@ -311,6 +313,9 @@ class FinalizationService:
             ),
             backend=ctx.final_response.backend,
             used_memories=len(ctx.memories),
+            internal_response=str(getattr(ctx.final_response, "internal_response", "") or ""),
+            public_receipt=getattr(ctx.final_response, "public_receipt", None),
+            final_response_provenance=response_provenance_projection(ctx.final_response),
             model_response=honest_text,
             user_reply_diagnostic=getattr(ctx.final_response, "user_reply_diagnostic", None),
             assistant_commentary_messages=_assistant_commentary_messages(ctx.on_chunk),

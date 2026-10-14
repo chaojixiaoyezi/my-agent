@@ -1,3 +1,7 @@
+2026-10-13 群任务/首次反馈/公开回执最终源码验证：77 个直接相关文件 **1219 passed、0 failed、0 skipped**。首轮 1217 项有 11 个合法本地创建失败，已修原 actor 解析并保留首轮证据；未给本地请求伪造 IM 身份。迁移的真实 claim 竞争已纳入原锁事务并回归。同群他人/跨 owner、主子孙身份与审批、第一次 SessionTask、旧 queued 迁移、通知静默/冻结重投及前后台进度均覆盖；非作者只读审查另列，数字不相加。本地 Ruff、doc sync、strict size（hard=0）、diff 和 clean-package 均已通过；发行验收另存准确提交的包证据，未发送真实飞书。
+
+2026-10-13 群任务/首次反馈/公开回执追加修复（实施中）：沿真实 Gateway 属性和原 ScheduleTool 做本人创建后的正向 CRUD，另验同群他人、跨群、父/子/孙、恢复与伪造字段拒绝；WS/webhook 验暂时身份失败与同 ID 重投、并发只受理一次、reaction 失败不等于丢消息；公开回执验本轮来源、显式不通知、合法 JSON、物理空响应、附件/用户插话及冻结重投。配置/错误分类首轮 43 passed/1 failed（原 heartbeat YAML 值未归一为 float），补共用数值归一后 44 passed；最终组合和发行验收未完成。只用隔离合成数据，未读生产正文或发送真实飞书。
+
 2026-10-13 本期验收收口：85 文件 1467 passed/9 Linux-only skipped；Linux 313 passed/3 平台条件 skipped。原 run owner 校验最后补验 68 passed，旧缺 owner 只投影原 run 身份、改归属拒绝。五项非 pytest 严格 gate 与暂存 diff 均通过；6571 行生产/测试变化未达到全仓阈值。远端 SHA 随 Git 提交核对，不将线上 CI 或运输替身作为验收来源。下方过程记录保留其历史状态。
 
 2026-10-13 最终补验：80 文件首轮 1377 passed/5 failed/9 skipped，修正旧夹具和群目标断言、保留直接 handler 的 H2 原拒绝码后，相关 213 项通过。Linux 最终切片 155 passed/1 macOS-only skipped；云资源现 18 项，含写后投影失败的 unknown。后台同条进度终态前等待在途发送结束，新增时序回归通过。最后一轮联合和 clean-package 正在执行。

@@ -907,6 +907,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
         task_attributes=attrs,
+        host_channel_actor=_gateway_host_actor(context.agent, conversation, context.request_id),
         context_scope="conversation" if conversation.thread_id else "default",
         carried_archive_tool_calls=[dict(item) for item in inputs.carried_archive_tool_calls],
         carried_active_turn_user_inputs=[
@@ -935,6 +936,16 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
 # LLM: Stamp only an exact request/Goal/active workspace before the first model sample. A terminal
 # link may appear here only through exact authority; a historical thread projection alone cannot.
 # 函数用途: 生成本轮结构化会话参数；有精确执行权时先进入原目录，否则由首个工作工具懒建新目录。
+# LLM: 专有 actor 只从入口已验证 scope 生成，不接客户端 metadata 或模型 attrs。
+# 函数用途: 在原 RunParams 发送前绑定准确发起人，损坏或冲突来源立即拒绝。
+def _gateway_host_actor(agent, conversation, request_id):
+    from ..conversation.host_actor import actor_from_scope
+
+    return actor_from_scope(agent, conversation.scope, conversation.thread_id, request_id)
+
+
+# LLM: 会话属性只投影线程、task 与 cwd，认证身份由独立的宿主参数携带，不能放回模型可写属性。
+# 函数用途: 生成本轮业务会话范围，有准确执行权时进入原目录，否则由工作工具懒建。
 def _gateway_task_attributes(conversation: request_context.GatewayConversationContext) -> dict | None:
     attrs: dict[str, object] = {}
     if conversation.thread_id:
@@ -996,8 +1007,8 @@ def _apply_system_task_attributes(
 
 # LLM: 活动回合只由 request_binding 校验；Audit 范围沿准备轮原绑定投影，不从线程旧指针推断执行权。
 # 函数用途: 汇总当前会话、工作模式、事件通道和精确回合归属，交给运行器执行。
-# LLM: 冻结本条可信 channel actor，群内换发言人不能改变原任务发起人。
-# 函数用途: 冻结本条可信 channel actor，群内换发言人不能改变原任务发起人。 修改需同步原控制、恢复或权限测试。
+# LLM: actor 由 RunParams 专有字段冻结；attributes 仅保留通道展示，不能携带认证别名。
+# 函数用途: 装配会话业务属性，群内换发言人不改原任务宿主身份。
 def _gateway_run_task_attributes(
     conversation: request_context.GatewayConversationContext,
     request: dict,
@@ -1012,7 +1023,6 @@ def _gateway_run_task_attributes(
     if conversation.scope is not None:
         attrs = dict(attrs or {})
         attrs["plugin_event_channel"] = conversation.scope.channel
-        attrs["host_channel_actor"] = {"channel": conversation.scope.channel, "actor_id": conversation.scope.channel_user_id, "conversation_id": conversation.scope.channel_conversation_id}
     if request_binding.gateway_request_owns_active_task_turn(attrs, request, request_id):
         attrs = dict(attrs or {})
         attrs[CONVERSATION_TASK_TURN_ACTIVE_ATTR] = True

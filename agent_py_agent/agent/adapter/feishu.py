@@ -1,7 +1,7 @@
 
 
-# LLM: 飞书沿既有 provider uuid 去重；启用个人锁时首设与解锁必须先通过，失败不分发入站，出站告警独立。
-# 模块用途: 管理飞书入站与原生发送接口，声明稳定键支持但无按逻辑键查询接口。
+# LLM: 飞书入站返回显式 accepted/ignored/retryable；未核验或落盘失败不得提交运输去重，原锁与 owner 仍守权限。
+# 模块用途: 管理飞书受理和原生发送接口，以脱敏日志区分未受理和提示失败，不创建第二入站队列。
 from __future__ import annotations
 
 import hashlib
@@ -31,7 +31,13 @@ from .feishu_media import (
 from .feishu_render import build_outbound_payload, split_message, strip_markdown_to_plain_text
 from .feishu_typing import FeishuTypingMixin
 from .feishu_unlock_queue import FeishuUnlockQueue, FeishuUnlockResumeMixin
-from .protocol import IncomingMessage, OutgoingMessage, feishu_to_incoming
+from .protocol import (
+    FeishuEventDisposition,
+    IncomingMessage,
+    OutgoingMessage,
+    feishu_to_incoming,
+    provider_message_reference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -394,18 +400,20 @@ def _password_operator_mismatch_response() -> dict[str, Any]:
 
 # LLM: 启用时无密码、已锁或状态不可读都不能分发私聊；设置/解锁后沿原有界队列续送，群聊及显式关闭不受影响。
 # 函数用途: 在正常分发前核对私聊认证状态，拦截时暂存原消息并发卡，不因卡片或数据库异常放行。
-def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
+# LLM: 私聊认证和原解锁队列是唯一受理事实；服务不可读返回 retryable，只有保留消息或稳定拒绝才完成运输受理。
+# 函数用途: 复用原密码门，区分待解锁、已放行与认证暂不可用，不让运输提前吞掉消息。
+def _session_message_lock_disposition(adapter: Any, msg: IncomingMessage) -> FeishuEventDisposition | None:
     chat_type = str((getattr(msg, "metadata", {}) or {}).get("feishu_chat_type", ""))
     if chat_type == "group" or not getattr(adapter, "_session_lock_enabled", True):
-        return False
+        return None
     unlock = getattr(adapter, "_unlock", None)
     if unlock is None:
         logger.warning("私聊会话锁不可用，消息未分发")
-        return True
+        return FeishuEventDisposition('retryable', 'FEISHU_SESSION_LOCK_UNAVAILABLE')
     try:
         user_id = str(getattr(msg, "user_id", "") or "")
         if not user_id:
-            return True
+            return FeishuEventDisposition('ignored', 'FEISHU_EVENT_INVALID')
         status = unlock.status(user_id, is_group=False)
         mode = "set" if status.requires_password_setup else "unlock"
         from ..conversation.control_commands import parse_conversation_control
@@ -415,31 +423,87 @@ def _session_message_is_locked(adapter: Any, msg: IncomingMessage) -> bool:
             from ..command_catalog import CommandAccessContext, render_command_help
 
             token = adapter._get_tenant_access_token()
-            if token:
-                _send_feishu_rendered(user_id, render_command_help(
+            sent = bool(token) and _send_feishu_rendered(user_id, render_command_help(
                     CommandAccessContext("im", False, private_chat=True, locked=True), control.value), token)
-            return True
+            return FeishuEventDisposition('accepted' if sent else 'retryable', '' if sent else 'FEISHU_INGRESS_UNAVAILABLE')
         pending = getattr(adapter, "_pending_unlock_messages", None)
         if pending is not None and pending.was_resumed(msg):
-            return True
+            return FeishuEventDisposition('accepted', 'FEISHU_UNLOCK_QUEUE_ACCEPTED')
         pending_status = adapter._queue_if_unlock_pending(msg)
         if pending_status != "inactive":
             adapter._report_unlock_queue_status(msg, pending_status)
             if not pending.is_draining(user_id):
                 adapter._send_password_card(user_id, mode)
-            return True
+            return _unlock_queue_disposition(pending_status)
         if status.locked or status.requires_password_setup:
-            adapter._report_unlock_queue_status(
-                msg,
-                adapter._queue_locked_message(msg),
-            )
+            queued = adapter._queue_locked_message(msg)
+            adapter._report_unlock_queue_status(msg, queued)
             adapter._send_password_card(user_id, mode)
-            return True
+            return _unlock_queue_disposition(queued)
         unlock.record_activity(user_id)
-        return False
+        return None
     except Exception as exc:
         logger.warning("私聊会话锁状态不可读，消息未分发: %s", type(exc).__name__)
-        return True
+        return FeishuEventDisposition('retryable', 'FEISHU_SESSION_LOCK_UNAVAILABLE')
+
+
+# LLM: 只读原队列的结构化结果，overflow 沿原用户拒绝提示收口，不把未保留消息当作接受。
+# 函数用途: 把既有解锁暂存结果变成运输回执，不建立第二认证或消息状态。
+def _unlock_queue_disposition(status: str) -> FeishuEventDisposition:
+    if status in {'added', 'duplicate'}:
+        return FeishuEventDisposition('accepted', 'FEISHU_UNLOCK_QUEUE_ACCEPTED')
+    if status == 'overflow':
+        return FeishuEventDisposition('ignored', 'FEISHU_UNLOCK_QUEUE_FULL')
+    return FeishuEventDisposition('retryable', 'FEISHU_SESSION_LOCK_UNAVAILABLE')
+
+
+# LLM: 只记录供应商短引用、类型和结构判断，不输出消息正文、显示名、token、响应文本或异常详情。
+# 函数用途: 为群门、解析和消费者受理生成一条有界诊断，供现场区分没收到与没表情。
+def _feishu_admission_facts(message: dict[str, Any]) -> dict[str, object]:
+    kind = str(message.get('message_type') or message.get('msg_type') or '')
+    return {'message_ref': provider_message_reference(message.get('message_id')),
+            'chat_ref': provider_message_reference(message.get('chat_id')),
+            'message_type': kind if kind in {'text', 'post', 'image', 'file', 'audio', 'media', 'video', 'sticker', 'share_chat', 'system'} else 'other',
+            'chat_type': message.get('chat_type') if message.get('chat_type') in {'group', 'p2p'} else 'other',
+            'bot_known': False, 'mention_gate': 'not_required'}
+
+
+# LLM: 只校验供应商事件包裹，不从缺字段推断身份； malformed 交原受理入口稳定拒绝，不抛正文异常。
+# 函数用途: 读取同一消息对象，保持 WS/webhook 的格式处理一致。
+def _feishu_event_message(payload: object) -> dict[str, Any]:
+    event = payload.get('event') if isinstance(payload, dict) else None
+    message = event.get('message') if isinstance(event, dict) else None
+    return message if isinstance(message, dict) else {}
+
+
+# LLM: 此处只接原解析、认证、派发入口；受理以 callback 正常返回为准，显式 False 必须允许供应商重投。
+# 函数用途: 完成一条已验证飞书事件的受理判断，把暂时失败留给原运输和入站幂等恢复。
+def _admit_feishu_event(adapter: Any, payload: dict[str, Any], facts: dict[str, object]) -> FeishuEventDisposition:
+    from .feishu_mentions import bot_mention_decision
+
+    message = _feishu_event_message(payload)
+    if not isinstance(message, dict) or not message.get('message_id'):
+        return FeishuEventDisposition('ignored', 'FEISHU_EVENT_INVALID')
+    bot = adapter._resolve_bot_open_id() if message.get('chat_type') == 'group' else ''
+    facts['bot_known'] = bool(bot)
+    facts['bot_retry_in_seconds'] = max(0, round(getattr(adapter, '_bot_identity_retry_at', 0.0) - time.monotonic())) if not bot else 0
+    if message.get('chat_type') == 'group' and adapter.group_require_bot_mention:
+        decision = bot_mention_decision(message, bot)
+        facts.update(mention_gate='matched' if decision.allowed else 'unmatched' if decision.verified else 'unverified',
+                     mentions_count=decision.mentions_count, post_at_count=decision.post_at_count)
+        if not decision.allowed:
+            return FeishuEventDisposition('ignored' if decision.verified else 'retryable', decision.reason_code)
+    msg = feishu_to_incoming(payload, bot_open_id=bot)
+    if msg is None:
+        return FeishuEventDisposition('ignored', 'FEISHU_MESSAGE_EMPTY')
+    if not msg.user_id or not msg.conversation_id:
+        return FeishuEventDisposition('ignored', 'FEISHU_EVENT_INVALID')
+    lock_result = _session_message_lock_disposition(adapter, msg)
+    if lock_result is not None:
+        return lock_result
+    if adapter._dispatch(msg) is False:
+        return FeishuEventDisposition('retryable', 'FEISHU_INGRESS_UNAVAILABLE')
+    return FeishuEventDisposition('accepted')
 
 
 # LLM: 密码卡发送失败只能影响 onboarding/解锁提示，不得抛异常破坏 adapter 消息循环。
@@ -632,22 +696,18 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
                 logger.warning(f"飞书 HTTP shutdown 异常: {exc}")
 
 
-    # LLM: 群聊触发门位于解锁和 Gateway 派发之前；只消费已验证入站 mention 和可信机器人身份，不按正文做路由。
-    # 函数用途: 私聊照常处理，群聊只允许直接 @机器人，@全员和未提及都不会启动回合。
-    def _handle_feishu_event(self, payload: dict[str, Any]) -> None:
-        message = (payload.get("event") or {}).get("message") or {}
-        bot_open_id = self._resolve_bot_open_id() if message.get("chat_type") == "group" else ""
-        if message.get("chat_type") == "group" and self.group_require_bot_mention:
-            from .feishu_mentions import directly_mentions_bot
-
-            if not directly_mentions_bot(message, bot_open_id):
-                return
-        msg = feishu_to_incoming(payload, bot_open_id=bot_open_id)
-        if msg is None:
-            return
-        if self._session_locked_gate(msg):  # 会话锁门:锁了就发密码卡、不处理正常消息
-            return
-        self._dispatch(msg)
+    # LLM: callback 结果必须显式返给 WS/webhook；异常仅记类型，暂时失败不伪装接受或永久忽略。
+    # 函数用途: 经原群门与认证入口接收消息，返回运输回执并记录有界脱敏状态。
+    def _handle_feishu_event(self, payload: dict[str, Any]) -> FeishuEventDisposition:
+        message = _feishu_event_message(payload)
+        facts = _feishu_admission_facts(message if isinstance(message, dict) else {})
+        try:
+            result = _admit_feishu_event(self, payload, facts)
+        except Exception as exc:
+            facts['error_type'] = type(exc).__name__
+            result = FeishuEventDisposition('retryable', 'FEISHU_INGRESS_UNAVAILABLE')
+        logger.info('feishu_ingress %s', json.dumps({**facts, 'status': result.status, 'reason_code': result.reason_code}, separators=(',', ':')))
+        return result
 
     # LLM: 身份绑定 app_id，API 失败按单调时间节流；只缓存 open_id，不记录 token、响应正文或用户内容。
     # 函数用途: 向飞书机器人信息接口取得本应用的 open_id，群聊判断不从昵称猜机器人。
@@ -672,15 +732,15 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
                 logger.warning("飞书机器人身份暂不可用；群聊未派发，30 秒后可重试")
             return self._bot_open_id
 
-    # LLM: WS/webhook 共用此入口；已启用时未设密码不能分发，设置成功只沿原队列继续，不创建第二任务。
-    # 函数用途: 在模型与工具入口之前执行个人私聊认证门，保留正常群聊和显式关闭行为。
+    # LLM: 保留既有 bool 认证接口；实际运输使用同一 typed lock disposition 区分暂时失败，不绕过权限。
+    # 函数用途: 供原解锁调用方判断是否阻止直接分发，群聊和显式关闭仍放行。
     def _session_locked_gate(self, msg: IncomingMessage) -> bool:
         """个人私聊会话锁门。
 
         未设置密码与闲置锁定都暂存原消息，设置/解锁成功后续送。
         群聊、显式关闭不拦截；启用但服务异常时拒绝私聊分发。
         """
-        return _session_message_is_locked(self, msg)
+        return _session_message_lock_disposition(self, msg) is not None
 
     def _send_password_card(self, user_id: str, mode: str) -> bool:
         return _send_session_password_card(self, user_id, mode)
@@ -850,6 +910,8 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         return secrets.compare_digest(signature, expected)
 
 
+# LLM: webhook 必须先核验供应商签名，retryable 受理失败返回非成功 HTTP，卡片与验证挑战保持原合同。
+# 类用途: 接收飞书官方 webhook 并将运输 ACK 与真实受理结果对齐。
 class _FeishuCallbackHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
@@ -857,6 +919,8 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass  # 静默日志
 
+    # LLM: 认证后的消息复用原 typed 入站；不能以 HTTP200 吞掉暂时失败，也不能把正文或凭据放错误响应。
+    # 函数用途: 处理原回调路由，稳定接收返回成功，需要重投的消息返回503。
     def do_POST(self) -> None:
         if self.path != "/feishu/callback":
             self._write_json(404, {"error": "not found"})
@@ -901,8 +965,9 @@ class _FeishuCallbackHandler(BaseHTTPRequestHandler):
             self._write_json(200, result if isinstance(result, dict) else {"code": 0})
             return
 
-        adapter._handle_feishu_event(payload)
-        self._write_json(200, {"status": "ok"})
+        result = adapter._handle_feishu_event(payload)
+        self._write_json(503 if result.status == 'retryable' else 200,
+                         {'status': result.status, 'reason_code': result.reason_code})
 
     def do_GET(self) -> None:
         body = b"feishu adapter is running"

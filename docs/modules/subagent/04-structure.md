@@ -1478,3 +1478,17 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 # R07 私人审批运输（实施中）
 
 `im_tool_approval.py` 把运输信息保存在原 pending 的 `im_control` 中，回调只写原 ToolApprovalDecision。`interaction_refs` 的 HMAC 仅证明原宿主引用，不取代原请求/claim/attempt/actor/卡片身份核对；主代理不能替用户批准。父级 capability request 仍走原授予流程。原 UI workspace selection 不再当主代理执行权，真正的权威是原 active TaskLink + 当前 claim。
+
+
+## 宿主通道身份的唯一出处
+
+- conversation/host_actor.py：冻结对象、准确主根/子孙恢复和冲突拒绝；不读模型属性认人。
+- agent_core/runtime/loop_models.py：RunParams.host_channel_actor 是不可变宿主对象；同片 replace 保留。
+- conversation/models.py 与 store_tasks.py：主根专有字段只经 typed bind keyword 在原锁内首次保存，缺失旧记录不补造。
+- subagents/model_task.py、services/base.py：子任务专有字段沿原序列化保存，创建前比较 owner/parent/root；不是 attributes 的一部分。
+- orchestration/create_policy.py、hierarchy/context.py 与 hierarchy/scheduler.py：清除模型身份别名，递归只从 canonical parent 专有字段继承。
+- agent_core/subagent/run_flow.py：每个模型片从准确原任务恢复专有身份，不从 prompt 或模型摘要取 actor。
+
+旧无字段恢复只接受准确原根的宿主记录或不可变来源，然后匹配孩子自己的线程及原谱系。只有不可变目标线程、却没有当前准确根证明，不足以授予身份。原 owner/run/claim/attempt 仍是执行权威，这个字段不承担批准或工具权限。
+
+首片委派在晋升前读取准确原 SessionTask 与 delegated 线程策略；晋升后改读原 TaskLink，不从工具循环投影或模型属性拿身份。定时运行则使用原 run.creator 和冻结 origin_bindings，新隔离线程仍使用同一 execution_origin schema，原领取服务把 actor 保存到首次 TaskLink。原主代理、子代理及孙级都沿这些冻结出处，而不是群的新发言人。

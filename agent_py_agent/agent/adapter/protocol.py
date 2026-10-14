@@ -1,13 +1,55 @@
-# LLM: 适配器只投影平台结构事实，可信 bot 提及规范化先于敏感命令和持久化；不授予角色、不发请求或改会话状态。
-# 模块用途: 把外部通道消息转换为统一入站/出站格式，并保留原会话、身份和媒体引用。
+# LLM: 适配器投影平台结构事实与显式入站受理结果；只有 accepted/稳定 ignored 可完成运输去重，retryable 不授予身份或成功。
+# 模块用途: 转换通道消息并声明受理回执；保留原会话和媒体引用，不发请求或记录正文诊断。
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .feishu_media import extract_feishu_content
+
+
+# LLM: 这是运输受理回执，不代表模型执行或外部回复成功；WS/webhook 只能据它提交或释放原去重 claim。
+# 类用途: 明确一条飞书事件已经交给消费者、稳定不触发，还是需要供应商重投。
+@dataclass(frozen=True)
+class FeishuEventDisposition:
+    status: str
+    reason_code: str = ""
+
+    # LLM: 拒绝未声明状态，避免 None/普通文案被当作已受理；不执行 IO 或修改队列。
+    # 函数用途: 校验运输回执状态，确保去重入口没有模糊成功值。
+    def __post_init__(self) -> None:
+        if self.status not in {"accepted", "ignored", "retryable"}:
+            raise ValueError("invalid Feishu event disposition")
+        if self.reason_code and not _feishu_reason_identifier(self.reason_code):
+            raise ValueError('invalid Feishu disposition reason code')
+
+
+# LLM: 只传内部原因码给 SDK；异常使 WS 返回失败 ACK，不携带用户正文、供应商响应或凭据。
+# 类用途: 通知飞书运输本次尚未受理，需要按原消息编号重投。
+class FeishuRetryableEventError(RuntimeError):
+    # LLM: SDK 会记录异常 str，必须只携带有界协议标识；不能把 callback/供应商异常正文复制进去。
+    # 函数用途: 构造安全的失败 ACK 原因，非法文本收窄成统一未受理码。
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code if _feishu_reason_identifier(reason_code) else 'FEISHU_INGRESS_UNAVAILABLE'
+        super().__init__(self.reason_code)
+
+
+# LLM: 只校验结构化协议标识的字符和上界，不从普通文本推断状态或分类故障。
+# 函数用途: 避免异常正文和凭据被误塞到供应商会输出的 reason_code 中。
+def _feishu_reason_identifier(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r'FEISHU_[A-Z0-9_]{1,64}', value) is not None
+
+
+# LLM: 引用仅为诊断投影，不参与权限/路由/去重；不得用此摘要替代原供应商消息编号。
+# 函数用途: 为现有日志生成稳定短引用，避免直接输出用户或群聊编号。
+def provider_message_reference(value: object) -> str:
+    if not value:
+        return ''
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass

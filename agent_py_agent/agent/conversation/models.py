@@ -257,16 +257,20 @@ class ThreadTaskLink:
     capability_selection: TaskCapabilitySelection | None = None
     # 仅用于无损回写坏 marker；诊断只暴露固定代码，不能记录、展示或执行 raw 内容。
     capability_selection_corruption: InvalidTaskCapabilitySelection | None = field(default=None, repr=False)
+    # 原主根的宿主专有身份，只由 bind 的 typed keyword 写入；旧缺失不从 attributes/当前发言人补。
+    host_channel_actor: dict[str, str] | None = None
 
     # LLM: None 完全省略选择键，保持旧序列化字节；损坏 marker 原值保留，不能因更新状态/pins 丢弃证据或重建 pending。
     #   续跑字段同理：空集合完全省略键，旧档案经普通状态更新重写后字节不变。
-    # 函数用途: 生成原任务 JSON，仅合法非空选择或已存在坏值使用 host_capability_selection.v1 键。
+    # 函数用途: 生成原任务 JSON，空宿主身份省略，保留已有身份及选择标记的原含义。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         selection = payload.pop("capability_selection")
         corruption = payload.pop("capability_selection_corruption")
         refs = payload.pop("continuation_refs")
         diagnostics = payload.pop("continuation_diagnostics")
+        if payload.get("host_channel_actor") is None:
+            payload.pop("host_channel_actor", None)
         if corruption is not None:
             payload[CAPABILITY_SELECTION_KEY] = corruption["raw"]
         elif selection is not None:
@@ -308,6 +312,7 @@ class ThreadTaskLink:
                 else None
             ),
             cancellation_scope=str(data.get("cancellation_scope") or "foreground"),
+            host_channel_actor=data.get("host_channel_actor"),
             context_anchor_message_id=str(
                 data.get("context_anchor_message_id") or ""
             ),

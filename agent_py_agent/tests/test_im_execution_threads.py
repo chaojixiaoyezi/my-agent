@@ -13,6 +13,7 @@ from agent_py_agent.agent.conversation.background_routing import (
     resolve_background_route,
 )
 from agent_py_agent.agent.conversation.execution_threads import ensure_execution_thread
+from agent_py_agent.agent.conversation.host_actor import actor_from_scope
 from agent_py_agent.agent.conversation.models import ConversationThread
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
@@ -39,11 +40,14 @@ def fixture_agent(tmp_path, channel="feishu", *, identity=None):
         "channel_user_id": "ou_a", "owner_id": home.owner_id, "owner_home": str(home.owner_home_dir),
     })
     repository = SchedulerRepository(home.owner_home_dir / "scheduler", owner_provider=identity.provider, owner_kind=identity.owner_kind, owner_id=home.owner_id)
-    return SimpleNamespace(
+    agent = SimpleNamespace(
         conversation_store=store, home_paths=home, root=home.owner_home_dir, scheduler_repository=repository,
         config=SimpleNamespace(timezone="Asia/Shanghai"), current_skill_snapshot=lambda: None,
         _current_run_params=RunParams(request_id="r1", task_attributes={"conversation_thread_id": source.thread_id}),
-    ), source
+    )
+    agent._current_run_params.host_channel_actor = actor_from_scope(agent, SimpleNamespace(
+        channel=channel, channel_conversation_id="oc_source", channel_user_id="ou_a"), source.thread_id, "r1")
+    return agent, source
 
 
 def create_plan(agent, call_id):

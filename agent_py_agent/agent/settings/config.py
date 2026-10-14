@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 # LLM: 默认值须与随包 YAML 一致；B5 超时同时登记规范化范围/参数边界并由征询消费，覆盖仍由原 owner/thread 保存。
+#   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -534,6 +535,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     im_stream_preview_max_chars: int = 100
     # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。
     im_stream_heartbeat_seconds: float = 120.0
+    # 仅显式选择 delivery.reply_policy=explicit 的后台任务使用结构化公开回执；旧 always 策略不变。
+    # 正常收口不新增模型请求；公开形态缺失最多借原零工具阶段修复一次，关闭时拒绝该策略。
+    background_public_receipt_contract_enabled: bool = True
     feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首设/闲置锁定都暂存消息，验证成功后续送，异常不放行；群聊不锁
     feishu_personal_idle_lock_seconds: int = 10800  # 私聊闲置多久后锁定(秒,默认 3h);feishu_session_lock_enabled 开启时生效
     # QQ 适配器配置

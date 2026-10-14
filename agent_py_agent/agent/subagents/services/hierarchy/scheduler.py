@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ....conversation.host_actor import HostChannelActor
 from ...debug_trace import trace_hierarchy_schedule
 from ...models import SubAgentTask
 from ..base import CreateRunParams, PreparedSubagentRun
@@ -140,6 +141,8 @@ def _resolve_child(
     )
 
 
+# LLM: 后代身份只从 canonical parent 的专有 actor 字段继承；spec attributes 不能覆盖归属。
+# 函数用途: 构造递归孩子原创建参数，保留父权限和准确身份。
 def _child_create_params(
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
@@ -185,7 +188,7 @@ def _child_create_params(
 # LLM: Recursive creation maps one already-authorized child spec into the same
 # CreateRunParams used at the root. Description remains display-only while all
 # capability and write bounds continue to come from structured parent facts.
-# 函数用途: 将递归下级规格转成统一创建参数，并保留职责短标题与既有权限边界。
+# 函数用途: 将递归规格和父专有 actor 转成创建参数，保留职责与权限，不读模型身份别名。
 def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParams:
     parent = request.parent
     spec = request.spec
@@ -226,4 +229,5 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
         context_packs=child_context_packs(parent, spec),
         extra_write_roots=request.extra_write_roots,
         attributes=hctx.inherited_hierarchy_attributes(parent, spec),
+        host_channel_actor=HostChannelActor.from_record(parent.host_channel_actor) if parent.host_channel_actor else None,
     )

@@ -23,6 +23,7 @@ from typing import Any
 
 from ...capability.subagent_entry_authority import SubagentEntryInitialization
 from ...common.id_generator import new_id as _framework_new_id
+from ...conversation.host_actor import HostActorError, HostChannelActor, validate_actor_ancestor
 from ...settings.thread_model_selection import PendingSubagentModelAdvice
 from ..authorization_gate import (
     OperationRequest,
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
 # LLM: CreateRunParams is the sole normalized creation contract shared by root
 # and recursive subagent paths. Description is display-only and must never be
 # read as authorization, identity, lifecycle, or acceptance input.
-# 类用途: 汇总创建一个子代理所需的参数；职责短标题只供 TUI/Web 展示。
+# 类用途: 汇总子代理创建参数；专有 actor 只接宿主冻结对象，职责短标题与 attributes 不作认证。
 @dataclass(frozen=True)
 class CreateRunParams:
     """Bundle of create_run parameters."""
@@ -71,6 +72,7 @@ class CreateRunParams:
     extra_write_roots: list[str] | None = None
     normalize_role: bool = True
     attributes: dict[str, object] | None = None
+    host_channel_actor: HostChannelActor | None = None
     parent_access_mode: str = ""
 
 
@@ -95,6 +97,27 @@ class OutputRefRebinding:
 
     def to_dict(self) -> dict[str, str]:
         return {"field": self.field, "from": self.from_ref, "to": self.to_ref}
+
+
+# LLM: 专有 actor 只接宿主对象，原 parent/root 记录必须同 owner；模型 attributes 与顶层 raw 参数不参与。
+# 函数用途: 在原子代理落盘前固定可信发起人，拒绝父级身份漂移。
+def _creation_actor_record(manager, params, parent):
+    actor = params.host_channel_actor
+    if actor is not None and not isinstance(actor, HostChannelActor):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    owner = str(params.owner or getattr(manager, "owner_id", "") or "")
+    if actor is not None and actor.owner_id != owner:
+        raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+    if parent is not None:
+        inherited = HostChannelActor.from_record(parent.host_channel_actor) if parent.host_channel_actor else None
+        if actor != inherited or (actor is not None and parent.owner != owner):
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        if actor is not None and params.root_id != (parent.root_id or parent.id):
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+    if actor is not None:
+        for identifier in {params.parent_id, params.root_id} - {""}:
+            validate_actor_ancestor(manager, identifier, actor)
+    return actor.to_record() if actor else None
 
 
 def _load_parent_task(manager: Any, parent_id: str):
@@ -559,7 +582,7 @@ class SubAgentBaseService:
         }
 
     # LLM: canonical 对象仅使用原准备材料中的身份、父状态和路径；复核投影不得写入，展示短标题仍不改变目标与权限。
-    # 函数用途: 从已冻结的创建材料组装子代理；正式提交沿用原对象，比较投影只用于拒绝漂移。
+    # 函数用途: 组装子代理并核验宿主 actor 的 owner/父来源，比较投影只用于拒绝漂移。
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
         run_id = prepared["run_id"]
@@ -592,6 +615,7 @@ class SubAgentBaseService:
             updated_at=now,
             heartbeat_at=now,
             attributes=_task_attrs_for_create(self.manager, params),
+            host_channel_actor=_creation_actor_record(self.manager, params, parent_task),
             **prepared["paths"],
         )
         task.forbidden_write_roots = _reconciled_forbidden_write_roots(task)

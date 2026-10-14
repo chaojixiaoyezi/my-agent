@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation import BackgroundMainAgentScheduler
+from agent_py_agent.agent.conversation.host_actor import actor_from_scope
 from agent_py_agent.agent.conversation.runtime import BackgroundMainAgentRuntime
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.scheduler.execution import scheduled_model_scope
@@ -17,12 +19,14 @@ from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 # LLM: 正式工具根据真实 IM binding 创建计划；不手写线程来源或改宿主策略，替身只承接模型/投递运输。
 # 函数用途: 建立同 owner 下的 IM 后台计划，验证合并后显式执行策略不会覆盖原布置者。
-def im_case(tmp_path, *, execution=None, delivery=None, group=False):
+def im_case(tmp_path, *, execution=None, delivery=None, group=False, background=True):
     config = AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False,
                          orphan_supervision_interval_seconds=0)
     if group:
         config = replace(config, my_agent_owner_provider="feishu", my_agent_owner_kind="group", my_agent_owner_id="oc_group")
     agent = SimpleAgent(config, tmp_path)
+    agent._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig(
+        im_scheduled_tasks_background=background))
     backend = _Backend()
     agent.backend = backend
     store = agent.conversation_store
@@ -30,6 +34,8 @@ def im_case(tmp_path, *, execution=None, delivery=None, group=False):
         "channel_user_id": "ou_a", "channel_conversation_id": "oc_group", "owner_id": agent.home_paths.owner_id,
         "owner_home": str(agent.home_paths.owner_home_dir), "cwd": str(tmp_path), "now": 900})
     agent._current_run_params = SimpleNamespace(request_id="create-im-plan", task_attributes={"conversation_thread_id": thread.thread_id})
+    agent._current_run_params.host_channel_actor = actor_from_scope(agent, SimpleNamespace(channel="feishu",
+        channel_user_id="ou_a", channel_conversation_id="oc_group"), thread.thread_id, "create-im-plan")
     outcome = ScheduleTool(agent).execute({"action": "create", "name": "合成提醒", "prompt": "整理自己的合成资料",
         "schedule_kind": "every", "every_seconds": 600, "execution": execution or {"mode": "followup"},
         **({"delivery": delivery} if delivery is not None else {})})

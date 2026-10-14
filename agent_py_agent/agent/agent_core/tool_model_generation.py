@@ -867,12 +867,15 @@ def _forwarded_guidance_seen(params: object) -> set:
 
 # LLM: Provider full-thinking must be published before the chunk filter flushes assistant text;
 # otherwise a non-streaming thinking block appears after its answer and breaks transcript order.
-# 函数用途: 先收口一次模型调用的显式思考，再刷新正文、账本、用量显示与 trace。
+# 函数用途: 先收口思考与调用账，再签发同一次响应来源并刷新显示与 trace，不从后端正文恢复身份。
 def _finish_model_generation(request: ModelGenerateParams, state: _ModelGenerationState, response):
     response = _recover_unclosed_long_write_response(request, response)
     _publish_provider_thinking(request, state, response)
     state.chunk_filter.finish()
     record_model_call_finished(state.ledger, state.call_id, response)
+    from .model.response_provenance import stamp_response_provenance
+
+    stamp_response_provenance(request.params, state.ledger, state.call_id, response)
     publish_model_metrics(request.agent, request.params, pending=False, response=response, call_id=state.call_id)
     record_provider_context_observation(
         request.agent,

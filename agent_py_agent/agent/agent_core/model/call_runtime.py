@@ -62,7 +62,7 @@ _HOST_SHUTDOWN_CLOSURE = ModelCallAdmissionClosure(
 # LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
 # provider-observation calibration all share one measurement; fallback construction preserves old
 # auxiliary/test callers without creating a second accounting path.
-# 函数用途: 建立一次模型调用账本，投影真实轮次，并复用同一份上下文快照计算慢模型超时。
+# 函数用途: 在原账登记真实轮次、用途与运行身份，并按同一上下文快照计算慢模型超时。
 def start_model_call_record(
     request: object,
     *,
@@ -96,6 +96,7 @@ def start_model_call_record(
     )
     backend = getattr(agent, "backend", None)
     from ...settings.model_scope import model_selection_metadata
+    from .response_provenance import response_call_purpose
 
     ledger.started(
         ModelCallStartedParams(
@@ -107,6 +108,8 @@ def start_model_call_record(
             request_id=str(getattr(params, "request_id", "") or ""),
             run_id=str(getattr(params, "run_id", "") or ""),
             metadata={
+                "purpose": response_call_purpose(params),
+                "attempt_id": str(getattr(params, "attempt_id", "") or ""),
                 "tool_rounds": getattr(request, "tool_rounds", 0),
                 "task_id": str(getattr(params, "task_id", "") or ""),
                 "thread_id": str((getattr(params, "task_attributes", None) or {}).get("conversation_thread_id") or ""),

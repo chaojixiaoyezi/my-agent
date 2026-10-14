@@ -1,3 +1,19 @@
+## 2026-10-13 群调度主体与首次反馈修复（源码验收完成，发行验收待执行）
+
+已在发布源码5142efb0a复现新群任务创建后模型工具不可见/不可管理：创建读后台冻结actor，查询漏掉真实Gateway的host_channel_actor而变成local=True；owner账本没有切错。slash本人控制正常。子代理可写attributes与可信actor的边界必须一起修，不能简单改读一个字段；冲突/无身份明确拒绝，跨owner不探测。实际外部利用路径未确认。
+
+首次emoji问题的同行/独行@与手打尾文2×2对照正常；但已复现reaction失败仍受理，以及bot身份暂不可用时WS先seen导致同消息重投丢失。截图现场具体触发未确认。A空/非空占位差异不作为文字黑名单权威。修复前证据、配对验收和脱敏诊断边界见[新反馈定位](docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md#新反馈定位2026-10-13未修改产品或重新发布)。用户已授权修复、main提交与新包；不操作真实监控。
+
+主体沿原认证入口冻结为宿主专有字段，子/孙只从 canonical 父继承，模型属性不能造 actor；前台、后台、scheduler 与审批共用解析。入站沿原 WS seen 与 ingress 受理，只有 accepted/稳定 ignored 才提交去重，暂时不可验证释放待重投；reaction成败不代替Gateway受理。
+
+公开回执沿原执行结果和 channel_delivery 分离内部结果：任务显式 delivery.reply_policy=explicit 才使用受管完成结构，正常不额外调用模型，公开形态缺失最多原零工具阶段修复一次。旧 always、local/none 和普通合法JSON不变；开关 background_public_receipt_contract_enabled 默认true只允许显式策略，不代替每个run冻结通知。准确调用来源拒绝别用途/别run结果，不能保证本轮主模型自身绝不偏题。实施/独占边界见[协作表](docs/WORKSTREAMS.md#当前-im-群任务修复协作2026-10-13)。
+
+进度观察沿准确活动 run 的冻结通知策略：local/none/origin+explicit 不启动窗口，普通委派和旧 always 保留反馈；前台原 120 秒等待刷新不变。旧排队执行线程迁移仅在准确同 run、未开工且原 owner/旧元数据全部匹配时进行，不借线程可写属性获得身份。交接见[群调度主体](docs/tasks/IM_SCHEDULER_ACTOR_HANDOFF.md)、[飞书入站](docs/tasks/FEISHU_INGRESS_REPAIR_HANDOFF.md)与[公开回执](docs/tasks/BACKGROUND_PUBLIC_RECEIPT_HANDOFF.md)。下方各节中的待实施状态是历史检查点，当前范围以本节和交接为准。
+
+群附件使用追加（已核查，待单独实施）：未提及机器人的上传文件在群触发门先被忽略，原入站没有缓存；目前 parent/root 只保留编号，没有读取原消息媒体链。现可用同条可信 @ 加云文档链接，或私聊上传并在私聊处理。推荐后续复用原入站媒体下载，允许用户引用准确群内文件再 @ 机器人；必须核对同群/话题/可见消息及当前 owner，不猜“上一条”，不让私聊附件跨到群空间。该建议尚未实现，不列入本次修复完成清单。
+
+77 文件联合 1219 项通过；源、权限和回执完成边界见上述交接，严格提交 gate 及独立包/原位置更新/TUI/官方模型验收按准确提交分别记录。不得把替身运输或来源验证说成真实飞书实发或模型语义正确。
+
 ## 2026-10-13 云文档监控与耗时追加核查
 
 状态：用户已授权修复、推送 main 和打包；基线 `84a63ea87`，14 项定位及实施边界见 [核查报告](docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)。14 项已冻结为 `f6ac19639` 并通过 `.20261013.5` 候选包隔离更新验证；随后追加模型等待修复，正式交付候选改为 `.20261013.6`。准确提交及包校验以 release.json/同包验收说明为准；不自动部署生产服务。

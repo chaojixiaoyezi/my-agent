@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 from ..capability.config import CapabilityConfig
 from ..capability.runtime_config_reload import capability_config_for_agent
@@ -12,6 +13,7 @@ from ..conversation.execution_threads import (
     ensure_execution_thread,
     execution_origin_thread,
 )
+from ..conversation.host_actor import HostActorError, HostChannelActor, resolve_host_actor
 from ..runtime_errors import DataCorruptionError
 from .schedule import ScheduleValidationError
 
@@ -85,23 +87,105 @@ def normalize_precheck(value: object) -> dict | None:
 
 # LLM: 通道只取可信源线程绑定，空/本地绑定不因正文自称 IM 被改路由；写线程的幂等键由原工具操作生成。
 # 函数用途: 返回计划实际执行的线程，IM 计划各自后台单飞，关开关或本地创建保持原线程。
-# LLM: 群规则来源使用冻结可信 actor，执行线程不改变 origin 或 monitor owner。
-# 函数用途: 群规则来源使用冻结可信 actor，执行线程不改变 origin 或 monitor owner。 修改需同步原控制、恢复或权限测试。
+# LLM: 创建与控制共用专有 actor resolver；来源缺失/冲突在写执行线程前拒绝，不取最新群成员。
+# 函数用途: 为 IM 监控冻结准确布置人，执行线程不改变 owner、claim 或通知目标。
 def schedule_execution_thread(agent: object, source_thread_id: str, operation_key: str) -> str:
+    actor = resolve_host_actor(agent, source_thread_id)
     config = capability_config_for_agent(agent) or CapabilityConfig()
     if not config.im_scheduled_tasks_background:
         return source_thread_id
     source, error = agent.conversation_store.threads.load_report(source_thread_id)
     if error is not None or source is None:
         raise DataCorruptionError("定时任务来源会话不可读")
-    binding = (source.metadata.get(EXECUTION_ORIGIN_KEY) or {}).get("binding")
     source = execution_origin_thread(agent.conversation_store.threads.require, source)
     if not any(binding.channel and not supports_transcript_delivery(binding.channel) for binding in source.channel_bindings):
         return source_thread_id
-    current = getattr(agent, "_current_run_params", None)
-    actor = (getattr(current, "task_attributes", None) or {}).get("host_channel_actor") or {}
-    if actor.get("actor_id") and actor.get("channel") and actor.get("conversation_id"):
-        binding = {key: actor[key] for key in ("channel", "conversation_id", "actor_id")}
+    binding = actor.binding() if actor else None
     return ensure_execution_thread(
         agent, source.thread_id, operation_key or uuid.uuid4().hex, kind="scheduled", source_binding=binding,
     ).thread_id
+
+
+# LLM: 运行身份只取原 run 复制的 creator、owner 和首次冻结的 origin_bindings；job 的 immutable 来源仅核对，不从群最新发言者补人。
+# 函数用途: 为新定时主根准备宿主 actor，供隔离线程和原 TaskLink 同源使用；本机和旧无证据任务保持 None。
+def scheduled_run_actor(service, run):
+    creator = run.get("creator")
+    if creator in (None, {"local": True}):
+        return None
+    if (not isinstance(creator, dict) or set(creator) != {"channel", "actor_id"}
+            or run.get("owner") != service.repository.owner):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    context = run.get("execution_context") or {}
+    if context.get("origin_thread_id") != run.get("origin_thread_id"):
+        raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+    bindings = context.get("origin_bindings")
+    if not isinstance(bindings, list):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    matching = [row for row in bindings if isinstance(row, dict)
+                and row.get("channel") == creator["channel"] and row.get("channel_user_id") == creator["actor_id"]]
+    identities = {(row.get("channel"), row.get("channel_conversation_id", ""), row.get("channel_user_id")) for row in matching}
+    if len(identities) != 1:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+    channel, conversation, actor_id = identities.pop()
+    job = service.repository.get_job(str(run["job_id"]), include_deleted=True)
+    thread = service.conversation_store.threads.require(job["thread_id"])
+    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY)
+    entry = str(run["run_id"])
+    if reference is not None:
+        source = execution_origin_thread(service.conversation_store.threads.require, thread)
+        if (source.thread_id != run["origin_thread_id"] or reference["binding"] != {
+                "channel": channel, "conversation_id": conversation, "actor_id": actor_id}):
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        entry = reference["operation_key"]
+    return HostChannelActor.from_record({"owner_id": run["owner"]["id"], "source_thread_id": run["origin_thread_id"],
+        "entry_request_id": entry, "channel": channel, "conversation_id": conversation, "actor_id": actor_id})
+
+
+# LLM: 隔离线程复用原 execution_origin schema，binding 只来自已冻结的 run 与准确 creator；不把 source 最新绑定抄成身份。
+# 函数用途: 给新 isolated IM 线程固定原来源，后续模型、孩子和审批复用原身份解析，不产生第二份身份账。
+def scheduled_execution_metadata(service, run):
+    actor = scheduled_run_actor(service, run)
+    return ({EXECUTION_ORIGIN_KEY: {"source_thread_id": actor.source_thread_id, "kind": "scheduled",
+        "operation_key": actor.entry_request_id, "binding": actor.binding()}} if actor is not None else {})
+
+
+# LLM: 只迁移尚未开工且与原 run 精确匹配的旧 isolated 线程；来源由冻结 creator/context 提供，原线程锁内再复核，不升级未知或活跃身份。
+# 函数用途: 新包继续已排队的旧隔离任务，补原 immutable 来源而保留 cwd、模型、Compact 和全部业务字段。
+def migrate_queued_execution_origin(service, run, seed):
+    reference = seed.metadata.get(EXECUTION_ORIGIN_KEY)
+    if reference is None:
+        return
+    with service.conversation_store.tasks.transition_guard(str(run["run_id"])):
+        _migrate_queued_origin_locked(service, run, seed, reference)
+
+
+# LLM: 调用方持原根锁，再用 repository 原 quota/store mutation scope 读取 run 并写线程；不写 scheduler store，claim/start 不能插入复核与线程写之间。
+# 函数用途: 在原根和原账本事务内迁移一条旧 queued 来源，已领取/开工或冻结上下文变化均拒绝。
+def _migrate_queued_origin_locked(service, run, seed, reference):
+    store = service.conversation_store.threads
+    old, error = store.load_report(seed.thread_id)
+    if error:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    if old is None or old.metadata.get(EXECUTION_ORIGIN_KEY) is not None:
+        return
+    identity = {key: value for key, value in seed.metadata.items() if key != EXECUTION_ORIGIN_KEY}
+
+    # LLM: 原 ThreadStore 事务内逐项核对旧身份；不覆盖已有来源，不改可变设置和正文，不跨 owner 写入。
+    # 函数用途: 给准确旧 queued 线程追加其已知原来源，竞争或已有异源记录明确拒绝。
+    def migrate(current):
+        if (current.thread_id != seed.thread_id or current.owner_id != seed.owner_id
+                or current.owner_home != seed.owner_home or current.channel_bindings
+                or any(current.metadata.get(key) != value for key, value in identity.items())):
+            raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+        existing = current.metadata.get(EXECUTION_ORIGIN_KEY)
+        if existing is not None and existing != reference:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        return replace(current, metadata={**current.metadata, EXECUTION_ORIGIN_KEY: reference})
+
+    with service.repository._mutation_scope() as (ledger, _admission):
+        latest = service.repository._require_run(ledger, str(run["run_id"]))
+        if latest["status"] != "queued" or float(latest.get("started_at") or 0) != 0:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
+        if any(latest.get(key) != run.get(key) for key in ("owner", "thread_id", "creator", "execution_context")):
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        store.update_atomic(seed.thread_id, migrate)

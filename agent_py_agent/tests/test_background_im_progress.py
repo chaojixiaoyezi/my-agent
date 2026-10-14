@@ -1,14 +1,21 @@
 """真实任务/claim/原 DeliveryService；供应商运输替身，周期加速但不替模型编造进展。"""
 from dataclasses import replace
 
-from agent_py_agent.agent.conversation.background_im_progress import BackgroundIMProgress
+import pytest
+
+from agent_py_agent.agent.conversation.background_im_progress import (
+    BackgroundIMProgress,
+    make_background_progress,
+)
 from agent_py_agent.agent.conversation.execution_threads import (
     IM_TASK_EXECUTION_KEY,
     ensure_execution_thread,
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import ChannelCapabilities
+from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.tests.test_scheduler_repository import _every
 
 
 # LLM: 使用正式独立线程、任务和 claim；发送替身仍由原 DeliveryService 保存真实返回的消息句柄。
@@ -98,4 +105,65 @@ def test_disabled_or_non_delegated_work_does_not_create_im_window(tmp_path):
     plain=BackgroundIMProgress(agent,'synthetic-root')
     assert plain.thread is None
     plain.close()
+    assert not sent and not edits
+
+
+# LLM: 只用正式repository冻结通知策略，再绑定原根任务/claim；运输仍是原DeliveryService的合成适配器。
+# 函数用途: 复现定时任务followup沿已有委派线程执行的合法状态，不手写scheduler运行快照。
+def _scheduled_followup(tmp_path, delivery):
+    import time
+
+    agent,work,old_claim,sent,edits=_work(tmp_path)
+    store=agent.conversation_store
+    store.claims.finish({'thread_id':work.thread_id,'claim_id':old_claim['claim_id']})
+    current=time.time()
+    job,_=agent.scheduler_repository.create_job(SchedulerJobCreateRequest(name='合成跟随监控',prompt='检查合成事实',
+        thread_id=work.thread_id,schedule=_every(),delivery=delivery,now=current))
+    run=agent.scheduler_repository.reserve_manual_run(job['job_id'],now=current)
+    scheduler_claim=agent.scheduler_repository.claim_run(run['run_id'],lease_seconds=30,now=current)
+    agent.scheduler_repository.mark_run_running(run['run_id'],scheduler_claim['claim_id'],now=current)
+    store.tasks.bind({'thread_id':work.thread_id,'task_id':run['run_id'],'goal':'合成跟随监控','status':'active'})
+    store.claims.acquire({'thread_id':work.thread_id,'task_id':run['run_id'],'reason':'scheduled_job_due'})
+    return agent,work,job,run,sent,edits
+
+
+@pytest.mark.parametrize('delivery', [{'mode':'origin','reply_policy':'explicit'}, {'mode':'local'}, {'mode':'none'}])
+def test_conditional_or_silent_scheduler_never_opens_delegated_progress_window(tmp_path, delivery):
+    agent,work,job,run,sent,edits=_scheduled_followup(tmp_path,delivery)
+    observer=BackgroundIMProgress(agent,run['run_id'])
+    observer.update('合成长工具等待')
+    observer.close()
+    assert observer.thread is None and not sent and not edits
+
+
+@pytest.mark.parametrize('delivery', [None, {'mode':'origin'}, {'mode':'origin','reply_policy':'always'}])
+def test_legacy_origin_always_keeps_existing_progress_window(tmp_path, delivery):
+    agent,work,job,run,sent,edits=_scheduled_followup(tmp_path,delivery)
+    observer=BackgroundIMProgress(agent,run['run_id'])
+    try:
+        assert observer.thread is not None and observer.interval==120
+        observer._deliver()
+    finally:
+        observer.close()
+    assert len(sent)==1 and len(edits)==1
+
+
+def test_progress_reads_current_run_frozen_policy_instead_of_updated_job(tmp_path):
+    agent,work,job,run,sent,edits=_scheduled_followup(tmp_path,{'mode':'origin','reply_policy':'explicit'})
+    agent.scheduler_repository.update_job(job['job_id'],patch={'delivery':{'mode':'origin','reply_policy':'always'}},
+        expected_version=job['version'])
+    observer=BackgroundIMProgress(agent,run['run_id'])
+    observer.close()
+    assert observer.thread is None and not sent and not edits
+    assert agent.scheduler_repository.get_active_run(run['run_id'])['delivery']=={'mode':'origin','reply_policy':'explicit'}
+
+
+@pytest.mark.parametrize('field', ['run_id','thread_id'])
+def test_wrong_scope_record_cannot_impersonate_current_scheduler_progress(tmp_path, monkeypatch, field):
+    agent,work,job,run,sent,edits=_scheduled_followup(tmp_path,{'mode':'origin','reply_policy':'always'})
+    mismatched={**agent.scheduler_repository.get_active_run(run['run_id']),field:'other-scope'}
+    monkeypatch.setattr(agent.scheduler_repository,'get_active_run',lambda _task_id:mismatched)
+    with pytest.raises(ValueError,match='原根任务或执行线程'):
+        BackgroundIMProgress(agent,run['run_id'])
+    assert make_background_progress(agent,run['run_id']) is None
     assert not sent and not edits

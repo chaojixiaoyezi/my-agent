@@ -123,3 +123,8 @@ class AgentRunResult:
     native_compact_carry: object | None = None
     # 最后逻辑调用及循环预算的只读投影；只有不可交付失败才进入Gateway请求记录。
     user_reply_diagnostic: dict[str, object] | None = None
+    # LLM: 来源和公开意图由同轮完成合同投影，不能从正文推断静默或可信调用。
+    # 字段用途: 单独保存后台内部结果、公开回执及真实最终调用来源。
+    internal_response: str = ""
+    public_receipt: dict[str, object] | None = None
+    final_response_provenance: dict[str, str] | None = None

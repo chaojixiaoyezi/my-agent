@@ -1,7 +1,7 @@
 
 
-# LLM: 渠道统一接口保持原发送合同；恢复能力必须由 adapter 显式声明，不能从名字猜测。
-# 模块用途: 提供渠道生命周期和发送入口，缺省不承诺外部去重或只读查询。
+# LLM: 渠道接口保持原发送合同；入站 callback 返回值必须原样传递，显式 False 不得伪装受理。
+# 模块用途: 提供渠道生命周期、入站回调和发送入口，不推断供应商去重或只读查询能力。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -20,9 +20,11 @@ class BaseChannelAdapter(ABC):
     provider_delivery_queryable: bool = False
     provider_idempotency_window_seconds: float = 0.0
 
+    # LLM: 初始化仅保存配置和 callback；bool/void 消费者仍共用一个派发入口，不另维护接收状态。
+    # 函数用途: 创建未启动的适配器对象，不发请求或写消息队列。
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self._message_callback: Callable[[IncomingMessage], None] | None = None
+        self._message_callback: Callable[[IncomingMessage], object] | None = None
         self._running = False
 
     # -------------------------------------------------------------------------
@@ -48,18 +50,25 @@ class BaseChannelAdapter(ABC):
     # 公共方法 — 子类可复用
     # -------------------------------------------------------------------------
 
-    def on_message(self, callback: Callable[[IncomingMessage], None]) -> None:
+    # LLM: callback 是宿主绑定消费者，不来自消息正文；原 void 回调正常返回仍表示消费完成。
+    # 函数用途: 绑定唯一入站消费者，其返回值供具体通道确认受理。
+    def on_message(self, callback: Callable[[IncomingMessage], object]) -> None:
         """注册消息回调，适配器收到外部消息时调用。"""
         self._message_callback = callback
 
-    def _dispatch(self, msg: IncomingMessage) -> None:
+    # LLM: 原样传递消费者回执和异常，缺消费者返回 False；本入口不捕获异常或提交供应商去重。
+    # 函数用途: 调用已经注册的消费者，让飞书能够识别入站落盘失败。
+    def _dispatch(self, msg: IncomingMessage) -> object:
         """把收到的消息分发给注册的回调。"""
         if self._message_callback:
-            self._message_callback(msg)
+            return self._message_callback(msg)
+        return False
 
-    def dispatch(self, msg: IncomingMessage) -> None:
+    # LLM: 公开派发和内部派发使用相同回执，无第二入口状态或隐式成功。
+    # 函数用途: 把公开调用交给同一消费者并保留实际结果。
+    def dispatch(self, msg: IncomingMessage) -> object:
         """公开的消息分发方法。"""
-        self._dispatch(msg)
+        return self._dispatch(msg)
 
     def send_progress_placeholder(self, user_id: str, message_id: str = "") -> str:
         """收到消息、agent 开始处理时立即给"处理中"反馈,返回可撤销的句柄。

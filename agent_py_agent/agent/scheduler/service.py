@@ -301,7 +301,7 @@ class SchedulerService:
 
     # LLM: 原任务锁内读/建准确 link；started_at 由原 repository 在首次运行时写入，不能从 queued 状态猜首次。
     # 仅从未开始且没有 link 的新 run 可创建；已有记录原样保留，绑定失败由 claim_wake 收口，禁止补全局包或选择资格。
-    # 函数用途: 在后台首轮快照之前准备原 TaskStore 记录，避免新定时工作因缺少链接失败，同时守住旧任务恢复边界。
+    # 函数用途: 在首轮快照前准备原 TaskStore 并固定同一 run 的宿主 actor，已有记录和旧恢复身份不改写。
     def _prepare_task_link(self, claim: SchedulerRunClaim, *, now: float | None) -> str:
         tasks = self.conversation_store.tasks
         with tasks.transition_guard(claim.run_id):
@@ -311,10 +311,12 @@ class SchedulerService:
             if link is None:
                 if float(claim.run.get("started_at") or 0.0) != 0.0:
                     raise ValueError("previously started scheduled task link is missing")
+                from .execution_policy import scheduled_run_actor
+
                 link = tasks.bind({
                     "thread_id": str(claim.run["thread_id"]), "task_id": claim.run_id,
                     "goal": str(claim.run["prompt"]), "status": "active", "now": now,
-                })
+                }, host_channel_actor=scheduled_run_actor(self, claim.run))
             if link.task_id != claim.run_id or link.thread_id != str(claim.run["thread_id"]):
                 raise ValueError("scheduled task link identity differs from the claimed run")
             return str(link.status)

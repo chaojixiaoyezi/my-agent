@@ -13,6 +13,7 @@
 #   执行目标换片或结束后不得把旧控制自动重放到新目标，必须先核对准确身份。
 #   业务写权限被拒绝时保留用户目标，子代理沿原能力申请申请准确范围，不鼓励改落临时目录后声称完成。
 #   云资源、私人卡和禁网保持明确恢复码；未知写入不重放，结构化条件未满足不当成模型故障。
+#   群任务主体只接受宿主冻结事实；缺失、冲突与越权分别拒绝，不从模型属性补人或改用管理员。
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
@@ -1400,7 +1401,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="state",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
-        recovery_hint="计划已不存在或属于别的 owner；先用 schedule action=list 读取当前 owner 清单。",
+        recovery_hint="当前 owner 中没有该计划编号；先用 schedule action=list 核对本人清单，不探测其它 owner。",
     ),
     "SCHEDULER_CONFLICT": ErrorContract(
         code="SCHEDULER_CONFLICT",
@@ -3504,6 +3505,36 @@ __all__ = [
 # LLM: 这三个码只由 user_config（自调等待时间越界）、audit_records（审计无权）、admin_controls（非管理员或越权写）产生；
 #   都是确定的权限/范围事实，不能靠换参数或重放绕过。改文案须同步对应工具与 test_decision_audit_controls。
 ERROR_CONTRACTS.update({
+    **{code: ErrorContract(code=code, category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="最终回复的真实调用来源或用途不可验证，未作为公开回执采用；核对原 request/run/task/attempt 与调用账，不重放已执行工具或从正文补身份。")
+       for code in ("MODEL_RESPONSE_PROVENANCE_MISSING", "MODEL_RESPONSE_PROVENANCE_MISMATCH",
+                    "MODEL_RESPONSE_PURPOSE_MISMATCH")},
+    "BACKGROUND_RECEIPT_CONTRACT_INVALID": ErrorContract(
+        code="BACKGROUND_RECEIPT_CONTRACT_INVALID", category="validation", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="显式后台回执结构未完成，未投递；保留原内部结果，按该任务已冻结合同修复公开收口，不重跑业务工具。"),
+    "BACKGROUND_RECEIPT_PUBLIC_OBLIGATION": ErrorContract(
+        code="BACKGROUND_RECEIPT_PUBLIC_OBLIGATION", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="本轮仍有待答复插话或待投附件，不能声明内部静默成功；按原公开义务收口，不取消附件或用户回复。"),
+    "BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE": ErrorContract(
+        code="BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="公开回执的一次有界表达修复仍未完成；内部结果已保留，检查原公开表达，不假称已送达或重做业务副作用。"),
+    "BACKGROUND_RECEIPT_CONTRACT_DISABLED": ErrorContract(
+        code="BACKGROUND_RECEIPT_CONTRACT_DISABLED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="显式后台公开回执合同已被配置关闭，本次未进入业务执行；核对管理员开关或修改该任务的正式通知策略，不隐式发送原始收尾文本。"),
+    **{code: ErrorContract(code=code, category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前回合的宿主通道主体不可确认或与原来源冲突；本次未授权任务控制。核对准确原会话与根任务，不从模型属性补身份或改用管理员。")
+       for code in ("CHANNEL_ACTOR_IDENTITY_REQUIRED", "CHANNEL_ACTOR_IDENTITY_INVALID",
+                    "CHANNEL_ACTOR_IDENTITY_CONFLICT", "CHANNEL_ACTOR_SCOPE_MISMATCH")},
+    "SCHEDULER_NOT_AUTHORIZED": ErrorContract(
+        code="SCHEDULER_NOT_AUTHORIZED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="此计划不属于当前已认证发起人，本次未查询或改变任务；只能由原创建者或正式接管流程管理，不能换子代理冒充。"),
     "DECISION_TIMEOUT_OUT_OF_BOUNDS": ErrorContract(
         code="DECISION_TIMEOUT_OUT_OF_BOUNDS",
         category="validation",

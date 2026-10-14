@@ -22,6 +22,7 @@ from ...conversation.authority import (
     CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR,
 )
 from ...conversation.compact_progress import COMPACT_TRIGGER_PREFLIGHT
+from ...conversation.host_actor import task_host_actor
 from ...runtime_context import restore_current_subagent_context, set_current_subagent_context
 from ...subagents.context_bundle_refs import runtime_task_attributes
 from ...turn_end import result_turn_end_reason
@@ -279,6 +280,7 @@ def _run_subagent_conversation_turn(
                 prompt=prompt,
                 attempt_id=attempt_id,
                 task_attributes=task_attributes,
+                host_channel_actor=task_host_actor(agent, task),
                 iteration=SubagentModelIteration(
                     current=current,
                     carried_archive_tool_calls=carried_archive_tool_calls,
@@ -494,7 +496,7 @@ def _open_subagent_transcript_sink(agent, task: object, current, attempt_id: str
 # Later tool coverage must not read a different checkpoint than the seed.
 # display callbacks are observers and cannot alter ids, permissions, or carry state. Rejections
 # share the outer attempt's list; approvals are never promoted into this carrier.
-# 函数用途: 组装一次子代理模型调用参数，让初轮和 Compact 后续轮保持同一身份与权限。
+# 函数用途: 组装子代理模型调用参数与原记录的宿主 actor，初轮和 Compact 后续轮保持同一身份。
 def _subagent_model_run_params(
     *,
     context,
@@ -502,6 +504,7 @@ def _subagent_model_run_params(
     attempt_id: str,
     task_attributes: dict[str, object],
     iteration: SubagentModelIteration,
+    host_channel_actor=None,
 ) -> RunParams:
     from ..runner.prompts import subagent_runner_system_prompt
 
@@ -515,6 +518,7 @@ def _subagent_model_run_params(
         run_id=context.run_id,
         task_id=context.root_id or context.run_id,
         task_attributes=task_attributes,
+        host_channel_actor=host_channel_actor,
         system_prompt_override=subagent_runner_system_prompt(context),
         source="subagent_run_model_turn",
         resume_context=False,

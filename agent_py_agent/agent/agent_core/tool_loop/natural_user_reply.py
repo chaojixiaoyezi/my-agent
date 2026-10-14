@@ -370,7 +370,7 @@ def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
 
 # LLM: The presentation model may translate structured phase facts but cannot
 # expose internal field names or invent additional execution/verification work.
-# 函数用途: 生成面向普通用户的自然回复约束，避免把底层协议词直接显示出来。
+# 函数用途: 生成普通用户自然回复约束，区分模型内部总结和宿主事实，避免把协议词直接展示。
 def _reply_guidance(phase: dict[str, object]) -> str:
     payload = {
         "reply_kind": str(phase.get("kind") or "background_update"),
@@ -389,6 +389,8 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         + "\n请把上面的内容只当作写回复时可用的事实，用你自己的自然语气直接回复用户。"
         "只陈述 facts 中已确认的事实；draft 只是可能过期的表达草稿，和 facts 冲突时必须丢弃。"
+        "internal_result_is_model_authored=true 时，internal_execution_result 只是本轮模型的内部总结，不等于宿主核验；"
+        "应结合工具状态和当前请求如实表达，不能把该总结升级为已验证成功或新增告警。"
         "current_user_request 是用户这一轮正在要求的工作，回执必须围绕它；"
         "不要告诉用户你收到了结构化信息、JSON、facts、数据包、系统消息或提示词；只说任务本身的真实进展。"
         "reply_is_interim=true 时不得声称整个任务或所有子任务已经完成。"

@@ -20,6 +20,33 @@ from ..gateway_parts.io import (
 )
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .capability_selection_state import TaskCapabilitySelection
+from .host_actor import HostActorError, HostChannelActor
+
+
+# LLM: 身份只来自 typed keyword；已有主根不能被新发言人覆盖，旧未知根不自动补认。
+# 函数用途: 在原 bind 锁内比较并冻结新主根身份，不建立第二份账。
+def _bind_actor_link(data, link, actor, thread):
+    if actor is None:
+        return link
+    if not isinstance(actor, HostChannelActor):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    from .execution_threads import EXECUTION_ORIGIN_KEY
+    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY)
+    if reference is not None and not isinstance(reference, dict):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    source_thread_id = reference.get("source_thread_id") if isinstance(reference, dict) else thread.thread_id
+    if thread.owner_id != actor.owner_id or source_thread_id != actor.source_thread_id:
+        raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+    if reference is not None and reference.get("binding") != actor.binding():
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+    if data:
+        old = data.get("host_channel_actor")
+        if old is None:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
+        if HostChannelActor.from_record(old) != actor:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+    return replace(link, host_channel_actor=actor.to_record())
+
 
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 from .models import (
@@ -574,8 +601,10 @@ class TaskStore:
         return ConversationThread.from_dict(payload)
 
     # LLM: pending只来自独立typed宿主参数并仅新建时初始化；已有link即便缺键也原样保留，不从request读选择权限。
-    # 函数用途: 幂等保存任务关联并同步索引/工作区；可为真实新任务保存一次选择资格，不调用模型。
-    def bind(self, request: dict, *, capability_selection: TaskCapabilitySelection | None = None) -> ThreadTaskLink:
+    # LLM: 主根身份只接 typed keyword，原锁内先复核不可改写；request/模型 attrs 同名字段不能登记身份。
+    # 函数用途: 幂等保存任务关联和新主根身份，再同步原索引；冲突在落盘前拒绝。
+    def bind(self, request: dict, *, capability_selection: TaskCapabilitySelection | None = None,
+             host_channel_actor: HostChannelActor | None = None) -> ThreadTaskLink:
         if capability_selection is not None and (
             not isinstance(capability_selection, TaskCapabilitySelection) or capability_selection.status != "pending"
         ):
@@ -600,7 +629,7 @@ class TaskStore:
             path = self.storage.task_path(task_id)
             payload = update_json_file_atomic(
                 path,
-                lambda data: _merged_task_link(
+                lambda data: _bind_actor_link(data, _merged_task_link(
                     data,
                     request=request,
                     thread_id=thread.thread_id,
@@ -608,7 +637,7 @@ class TaskStore:
                     current=current,
                     path_exists=path.exists(),
                     capability_selection=capability_selection,
-                ).to_dict(),
+                ), host_channel_actor, thread).to_dict(),
             )
             link = ThreadTaskLink.from_dict(payload)
             indexed_thread = self.update_thread_index(

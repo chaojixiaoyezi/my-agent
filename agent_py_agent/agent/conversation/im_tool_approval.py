@@ -15,8 +15,8 @@ from ..conversation.channels import (
     project_user_reply,
 )
 from ..user_space.interaction_refs import sign_interaction_reference
-from ..user_space.owner_resolver import owner_identity_from_config
-from .execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
+from ..user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
+from .host_actor import HostActorError, background_host_actor, resolve_host_actor, task_host_actor
 
 _CARD_WAIT_SECONDS = 1800.0  # 卡片本次批准有效期 30 分钟；任务/claim/attempt 失效时提前结束。
 
@@ -27,39 +27,54 @@ def _scope_identity(scope) -> dict:
     return {field.name: getattr(scope, field.name) for field in fields(scope) if field.compare}
 
 
-# LLM: 原根任务与 host origin 是来源事实；没有精确 actor 的群不猜最新发言者。本机管理员只可取自己唯一绑定身份。
-# 函数用途: 为本次主子审批解析原发起人的私人接收者，不能指定任意群成员。
+# LLM: 前台专有 actor 与原子任务记录/immutable origin 同源；模型 attrs 不提供私人接收者，群缺身份不回落管理员。
+# 函数用途: 解析原主子审批的发起人，冲突或旧伪造身份明确拒绝。
 def approval_recipient(agent, scope) -> tuple[str, str]:
     current = getattr(agent, "_current_run_params", None)
     attributes = getattr(current, "task_attributes", None) or {}
-    actor = attributes.get("host_channel_actor") or {}
-    if str(getattr(current, "task_id", "")) == scope.root_task_id and actor.get("channel") == "feishu" and actor.get("actor_id"):
-        return actor["channel"], actor["actor_id"]
+    current_root = str(getattr(current, "task_id", "") or "")
+    if current_root and current_root != scope.root_task_id:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
     store = agent.conversation_store
-    link = store.tasks.load(scope.root_task_id)
+    link, error = store.tasks.load_report(scope.root_task_id)
+    if error:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
     thread_id = str(getattr(link, "thread_id", "") or "")
     if not thread_id:
         root = agent.subagents.load(scope.root_task_id)
         thread_id = str((root.attributes or {}).get("conversation_thread_id") or "")
-    thread = store.threads.require(thread_id or scope.thread_id)
-    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY)
-    if reference is not None:
-        execution_origin_thread(store.threads.require, thread)
-        binding = reference["binding"]
-        if binding["channel"] != "feishu" or not binding["actor_id"]:
+        actor = task_host_actor(agent, root)
+    else:
+        actor = background_host_actor(agent, thread_id, scope.root_task_id)
+    if attributes.get("conversation_thread_id") and attributes["conversation_thread_id"] != thread_id:
+        raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+    if getattr(current, "host_channel_actor", None) is not None:
+        active = resolve_host_actor(agent, thread_id)
+        if actor is None or active is None:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
+        if (active.owner_id != actor.owner_id or active.source_thread_id != actor.source_thread_id
+                or active.binding() != actor.binding()):
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+    if actor is not None:
+        if actor.channel != "feishu":
             raise ValueError("审批来源没有可用的私人通道")
-        return "feishu", binding["actor_id"]
-    owner = owner_identity_from_config(agent.config)
+        return actor.channel, actor.actor_id
+    thread = store.threads.require(thread_id or scope.thread_id)
+    home = getattr(agent, "home_paths", None)
+    owner = (OwnerIdentity(home.owner_provider, home.owner_kind, home.owner_id)
+             if home is not None else owner_identity_from_config(agent.config))
     identities = {(binding.channel, binding.channel_user_id) for binding in thread.channel_bindings
                   if owner.owner_kind == "user" and binding.channel == owner.provider
                   and binding.channel_user_id == owner.owner_id}
     if len(identities) == 1:
         return next(iter(identities))
+    if owner.owner_kind != "main" or owner.provider != "local":
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
     from ..capability.channel_message_target import resolve_message_target
 
     channel, actor, _service, error = resolve_message_target(agent, "feishu")
     if error or not actor:
-        raise ValueError("审批来源没有唯一私人接收者")
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
     return channel, actor
 
 

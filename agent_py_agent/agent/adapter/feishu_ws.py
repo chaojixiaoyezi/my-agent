@@ -1,4 +1,5 @@
-
+# LLM: WS 只在原 typed 入站回执 accepted/稳定 ignored 后提交 seen；暂时失败向官方 SDK 抛安全异常以生成失败 ACK。
+# 模块用途: 共用 webhook 解析和原进程内去重，保护并发 claim，不存正文或建立第二消息队列。
 from __future__ import annotations
 
 """飞书长连接(WebSocket)入站客户端 —— 免公网 / 不绑端口部署。
@@ -18,6 +19,8 @@ import time
 from collections import deque
 from collections.abc import Callable
 from typing import Any
+
+from .protocol import FeishuEventDisposition, FeishuRetryableEventError, provider_message_reference
 
 logger = logging.getLogger(__name__)
 
@@ -129,16 +132,20 @@ def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
         return None
 
 
+# LLM: 原 seen 缓存只是运输优化；inflight claim 必须释放，持久执行去重仍由 GatewayIngressStore 负责。
+# 类用途: 把官方 WS 事件交给同一飞书入站入口，按受理事实完成或撤销临时去重。
 class FeishuWsClient:
     """飞书 WS 长连客户端:收事件 → 归一化成 webhook 同构 dict → on_payload(= adapter._handle_feishu_event,
     与 webhook 同一条下游)。lark-oapi 自管握手/心跳/重连,我们只做"事件→归一化→交下游"。"""
 
+    # LLM: 仅初始化原有界 seen 和并发 claim 锁；消费者必须返回 typed disposition，不能把 None 猜成接受。
+    # 函数用途: 创建未连接的 WS 客户端，不写持久账或发送消息。
     def __init__(
         self,
         *,
         app_id: str,
         app_secret: str,
-        on_payload: Callable[[dict[str, Any]], None],
+        on_payload: Callable[[dict[str, Any]], FeishuEventDisposition],
         ws_proxy: str = "",
     ) -> None:
         self.app_id = app_id
@@ -152,19 +159,65 @@ class FeishuWsClient:
         self._dedup_cap = 2048
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
+        self._inflight_ids: set[str] = set()
+        self._dedup_lock = threading.Lock()
 
+    # LLM: claim→共享入口→commit/release；retryable 异常由官方 SDK 转成失败 ACK，不能被这里吞掉或记成 seen。
+    # 函数用途: 只让一个并发事件进入消费者，允许原消息编号在暂时失败后重投。
     def _handle_event(self, data: Any) -> None:
-        """单条 im.message 事件:去重 → 归一化 → 交下游。任何异常不掀翻长连。"""
+        payload = lark_event_to_webhook_payload(data)
+        if payload is None:
+            return
+        message_id = str(payload["event"]["message"]["message_id"])
+        claim = self._claim_message(message_id)
+        if claim == 'duplicate':
+            logger.info('feishu_transport message_ref=%s status=ignored reason_code=FEISHU_EVENT_DUPLICATE', provider_message_reference(message_id))
+            return
+        if claim == 'inflight':
+            logger.info('feishu_transport message_ref=%s status=retryable reason_code=FEISHU_EVENT_INFLIGHT', provider_message_reference(message_id))
+            raise FeishuRetryableEventError('FEISHU_EVENT_INFLIGHT')
         try:
-            payload = lark_event_to_webhook_payload(data)
-            if payload is None:
-                return
-            message_id = str(payload["event"]["message"]["message_id"])
-            if self._is_duplicate(message_id):
-                return  # 飞书长连重连/重投会重发同一 message_id:跳过,绝不重复处理/重复回复
-            self.on_payload(payload)
+            result = self.on_payload(payload)
+            if not isinstance(result, FeishuEventDisposition):
+                raise FeishuRetryableEventError('FEISHU_INGRESS_UNAVAILABLE')
+            if result.status == 'retryable':
+                raise FeishuRetryableEventError(result.reason_code)
+            self._finish_message(message_id, commit=True)
         except Exception as exc:
-            logger.error(f"飞书长连事件处理异常(不中断长连): {type(exc).__name__}: {exc}")
+            self._finish_message(message_id, commit=False)
+            reason = exc.reason_code if isinstance(exc, FeishuRetryableEventError) else 'FEISHU_INGRESS_UNAVAILABLE'
+            logger.warning('feishu_transport message_ref=%s status=retryable reason_code=%s error_type=%s',
+                           provider_message_reference(message_id), reason, type(exc).__name__)
+            raise FeishuRetryableEventError(reason) from None
+
+    # LLM: 锁内只操作现有进程缓存，不能把 inflight 当作完成；锁外才运行消费者。
+    # 函数用途: 原子领取一个未处理的消息编号，防两个 WS 回调同时执行。
+    def _claim_message(self, message_id: str) -> str:
+        with self._dedup_lock:
+            if message_id in self._seen_ids:
+                return 'duplicate'
+            if message_id in self._inflight_ids:
+                return 'inflight'
+            self._inflight_ids.add(message_id)
+            return 'claimed'
+
+    # LLM: commit 仅由 typed accepted/稳定 ignored 触发，异常只释放 claim；不改变原持久入站记录。
+    # 函数用途: 完成本次临时领取，只有明确受理或不触发才记入原 seen 缓存。
+    def _finish_message(self, message_id: str, *, commit: bool) -> None:
+        with self._dedup_lock:
+            self._inflight_ids.discard(message_id)
+            if commit:
+                self._remember_message(message_id)
+
+    # LLM: 调用方必须已持 dedup_lock；容量沿原 dedup_cap，seen 只保留运输完成的编号。
+    # 函数用途: 在原有界缓存中登记一个已处理编号，不持久化正文或新增账本。
+    def _remember_message(self, message_id: str) -> None:
+        if message_id in self._seen_ids:
+            return
+        if len(self._seen_order) >= self._dedup_cap:
+            self._seen_ids.discard(self._seen_order.popleft())
+        self._seen_order.append(message_id)
+        self._seen_ids.add(message_id)
 
     def _handle_card_action(self, data: Any) -> Any:
         """卡片按钮回调:归一化 → 去重 → 交 on_card_action。on_card_action 返回 dict 时(密码卡)
@@ -200,16 +253,16 @@ class FeishuWsClient:
         """订阅了但无需处理的事件(如机器人贴 reaction 后飞书回的 created/deleted 通知)直接忽略,
         避免 lark 报 processor not found 刷屏日志。"""
 
+    # LLM: 卡片点击沿原即记去重合同；普通消息必须使用 claim/finish，不得再调用这个前置提交入口。
+    # 函数用途: 保留卡片回调的原有界去重，并用相同锁保护缓存。
     def _is_duplicate(self, message_id: str) -> bool:
         """按 message_id 去重(有界缓存 _dedup_cap):防飞书重投/重连重放同一消息导致重复回复
         (移植参考实现的去重;原 my-agent base adapter 无去重,移植时漏了→真机踩出重复回复)。"""
-        if message_id in self._seen_ids:
-            return True
-        if len(self._seen_order) >= self._dedup_cap:
-            self._seen_ids.discard(self._seen_order.popleft())
-        self._seen_order.append(message_id)
-        self._seen_ids.add(message_id)
-        return False
+        with self._dedup_lock:
+            if message_id in self._seen_ids:
+                return True
+            self._remember_message(message_id)
+            return False
 
     def start(self) -> None:
         """启动长连(阻塞;lark-oapi 内部自管握手/心跳/重连)。"""

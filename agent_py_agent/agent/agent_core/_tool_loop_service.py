@@ -1404,6 +1404,8 @@ def _native_compact_summary_surface(
 # append current Goal facts without mutating the original seed/message containers.
 # 函数用途: 按本次摘要视图组装文本历史、投递要求与本轮 Goal 归属，前后台和原生工具协议共用。
 def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *, agent: object | None = None) -> list:
+    from .tool_loop.background_public_receipt import public_receipt_contract_prompt
+
     injections = list(params.runtime_injections)
     if not native_tool_use_active(params):
         conversation = _text_conversation_history_section(
@@ -1417,6 +1419,8 @@ def _runtime_injections_with_delivery_contract(params: ToolLoopExecuteParams, *,
             injections.append(runtime_state)
     if isinstance(params.delivery_contract, dict):
         injections.append(render_delivery_contract_section(params.delivery_contract))
+    if receipt_prompt := public_receipt_contract_prompt(params):
+        injections.append(receipt_prompt)
     if agent is not None:
         from ..conversation.goal_prompting import current_goal_scope_prompt
 
@@ -1587,12 +1591,26 @@ def _prebuilt_prompt_first(prompt: str, rebuild: Callable[[], str]) -> Callable[
     return build
 
 
+# LLM: 原pending槽只拥有表达阶段；先核对当前调用用途，后台公开修复只消费一次，不执行工具或恢复持久seal。
+# 函数用途: 收口原零工具回复，将明确的后台公开修复合回内部执行结果。
 def _natural_user_reply_step(
     params: ToolLoopExecuteParams,
     response: ModelResponse,
 ) -> tuple[str, ModelResponse]:
     if pending_natural_user_reply(params) is None:
         return "normal", response
+    if pending_natural_user_reply(params).get("kind") == "background_final_receipt":
+        from .tool_loop.background_public_receipt import finish_background_receipt_repair
+
+        accepted = not natural_user_reply_rejection_reason(response, pending_natural_user_reply(params))
+        discard_pending_natural_user_reply(params)
+        return "finish", finish_background_receipt_repair(params, response, accepted=accepted)
+    from .model.response_provenance import response_provenance_error
+
+    if origin_error := response_provenance_error(params, response, purposes=("natural_user_reply",)):
+        discard_pending_natural_user_reply(params)
+        return "finish", replace(response, text="", runtime_status="failed", runtime_reason=origin_error,
+                                 runtime_source="model_response_provenance")
     rejection_reason = natural_user_reply_rejection_reason(
         response,
         pending_natural_user_reply(params),
@@ -1965,7 +1983,15 @@ def _model_turn_or_retry(
         )
 
 
+# LLM: 原裁决之前核对真实响应与本次请求/运行/用途；模型metadata不能替代来源，普通JSON和工具协议沿原解析。
+# 函数用途: 让主/子/无工具回合共享来源检查，再交原恢复与安全裁决决定下一步。
 def _response_action(agent, loop_params: ToolLoopExecuteParams, response, repair_counters: ToolLoopRepairCounters):
+    from .model.response_provenance import response_provenance_error
+
+    if str(getattr(response, "runtime_status", "ok") or "ok") == "ok":
+        if origin_error := response_provenance_error(loop_params, response):
+            response = replace(response, text="", runtime_status="failed", runtime_reason=origin_error,
+                               runtime_source="model_response_provenance", tool_use_blocks=[])
     state = loop_params.live_archive_state
     turn_id = (
         str(state.get("_current_model_turn_id") or "")

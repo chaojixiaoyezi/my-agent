@@ -658,6 +658,7 @@ class _BackgroundSlicePlan:
     runtime_status: str = ""
     runtime_reason: str = ""
     local_transcript_only: bool = False
+    public_receipt: dict[str, object] | None = None
 
 
 # LLM: 空转片判定与熔断完全同源：复用 goal_progress_fuse.slice_has_progress（工具调用数、
@@ -745,6 +746,7 @@ def _complete_background_slice(
             request,
             plan.delivery_context,
             plan.response,
+            public_receipt=plan.public_receipt,
             delivery_artifacts=plan.delivery_artifacts,
             operation_verification=plan.operation_verification,
             assistant_commentaries=plan.assistant_commentaries,
@@ -875,6 +877,7 @@ class BackgroundMainAgentRuntime:
                 channel=channel,
                 target=target,
                 response=execution_result.response,
+                public_receipt=execution_result.public_receipt,
                 delivery_artifacts=execution_result.delivery_artifacts,
                 message_tool_deliveries=execution_result.message_tool_deliveries,
                 operation_verification=execution_result.operation_verification,
@@ -1958,7 +1961,7 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 
 # LLM: 后台执行使用精确持久任务作为输入回合编号；定时任务保留自己的 run ID，attempt 仍逐次独立。
 #   生命周期续跑的携带记录读不全时，task_attributes 带结构化不完整事实（见 _active_turn_carry_records）。
-# 函数用途: 构造后台模型执行参数，让普通插话、消费回执、归档和续跑共享同一任务身份。
+# 函数用途: 构造后台模型参数，按原任务恢复宿主发起人，让插话、归档和续跑共享真实身份。
 def _run_params(
     thread_id: str,
     request: BackgroundRunRequest,
@@ -1969,6 +1972,8 @@ def _run_params(
     thread: ConversationThread | None = None,
     history_seed: object | None = None,
 ) -> RunParams:
+    from .host_actor import background_host_actor
+
     config = getattr(agent, "config", None)
     conversation_store = getattr(agent, "conversation_store", None)
     resolved_goal_context = goal_context or (
@@ -2011,6 +2016,8 @@ def _run_params(
         # 的任务会被定时 policy 反复叫醒。只在 request 有明确 task_id 时绑定，
         # 普通无任务后台消息不会被误升格成任务。
         task_attributes=task_attributes,
+        host_channel_actor=(background_host_actor(agent, thread_id, request.task_id or _session_task_run_id(request))
+                            if agent is not None and conversation_store is not None and (request.task_id or _session_task_run_id(request)) else None),
         allowed_tools=_background_run_allowed_tools(
             agent,
             config,

@@ -51,6 +51,11 @@ class ModelResponse:
     # 仅本次适配器观察到的调用形状，未知时None；不持有任何原始响应或提示词。
     model_call_diagnostic: dict[str, object] | None = None
     user_reply_diagnostic: dict[str, object] | None = None
+    # 宿主签发的调用身份；后端传入的同名字段由真实生成出口覆盖，不能从持久字典恢复信任。
+    response_provenance: object | None = None
+    # 仅 explicit 后台完成合同设置；模型内部总结与公开正文分开，不把它当作已核验事实。
+    internal_response: str = ""
+    public_receipt: dict[str, object] | None = None
 
 
 # LLM: 后端连接与 top_p/温度是工作片冻结快照；请求头和模型名/密钥一起缓存，流式请求中不可热改。

@@ -610,6 +610,11 @@ im_stream_preview_max_chars: 100
 # 模型心跳只表示同一已发出请求尚未返回及已等待时长，不表示完成了业务进展；停止/超时后不继续刷新。
 # 0 关闭心跳，有效刷新间隔 1～120 秒；stream 有新正文时仍沿原节流更新，不额外调用 LLM。
 im_stream_heartbeat_seconds: 120.0
+# 是否允许后台任务显式选择 delivery.reply_policy=explicit，将内部结果与公开通知分开。
+# 默认开启，但旧任务的 always 策略、普通对话和 local/none 通知都不改变，也不增加常驻模型调用。
+# explicit 的本轮可声明不通知；待投附件或用户插话仍须答复。公开形态缺失时最多新增一次零工具修复。
+# 关闭后不执行 explicit 回执合同，任务必须使用原通知策略；不会把供应商空响应当作静默成功。
+background_public_receipt_contract_enabled: true
 # 飞书自建应用的 App Secret，用于以你的飞书应用身份收发消息。
 # 在飞书开放平台（开发者后台）的「凭证与基础信息」里获取。
 # 只有首次接入飞书或更换应用时才需要填；可以写明文，也可以写成 `env:变量名` 或 `file:路径` 的间接引用，避免明文落到配置文件里。

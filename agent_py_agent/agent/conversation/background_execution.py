@@ -70,6 +70,8 @@ class BackgroundExecutionResult:
     display_snapshot: dict[str, object]
     runtime_status: str = ""
     runtime_reason: str = ""
+    internal_response: str = ""
+    public_receipt: dict[str, object] | None = None
 
 
 # LLM: 仅在同片八次 Compact 都推进 canonical 代次后让出；调度器必须单独处理，不将其记为失败。
@@ -115,7 +117,7 @@ class _BackgroundRunControl(LocalRunControl):
 
 
 # LLM: 只回填 core 已发布的身份；异常退出沿原账释放该 attempt 的提交前预留，submitted 未知仍保留，正常 Compact 保持原恢复路径。
-# 函数用途: 执行后台模型尝试，将身份交给 Compact，并防止中断后未发送的插话永久卡在 reserved。
+# 函数用途: 执行后台模型尝试，将身份交给Compact；完成协议失败先保存内部结果再沿原失败结算，防止业务重跑。
 def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
     from ..agent_core.runtime.run_params import run_params_with_request_id
 
@@ -129,6 +131,9 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     finally:
         control.finish()
     binding = control.runtime_authority()
+    from .background_receipt_contract import raise_background_receipt_failure
+
+    raise_background_receipt_failure(result, persist_result=params.partial_turn_callback)
     return result, replace(params, request_id=resolved.request_id,
         run_id=binding.get("run_id", resolved.run_id), task_id=binding.get("task_id", resolved.task_id),
         attempt_id=binding.get("attempt_id", resolved.attempt_id))
@@ -243,6 +248,9 @@ def run_background_turn_with_compact(
             thread=current,
             history_seed=history_seed,
         )
+        from .background_receipt_contract import configure_background_public_receipt
+
+        configure_background_public_receipt(execution.agent, request, run_params)
         run_params.request_id = slice_request_id or run_params.request_id
         run_params.compact_context = history.compact_context
         if carried_archive_tool_calls is None:
@@ -354,7 +362,7 @@ def _freeze_carry_completeness(run_params: RunParams, frozen: list[dict[str, str
 
 
 # LLM: 原生信封只进入当前 store/thread 的同一 transcript；与公开 final 按宿主回合编号去重，不发消息或修改 wake 生命周期。
-# 函数用途: 保存后台正常、静默让出或异常前的工具历史，外发被抑制时也不丢记录；写盘失败不能冒充保存成功。
+# 函数用途: 保存原生历史与explicit内部总结，静默或公开修复失败也保留原产出；写盘失败不冒充保存成功。
 def _persist_background_native_turn(store: ConversationStore, request: BackgroundExecutionRequest, result: object) -> None:
     from .native_history import (
         CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
@@ -365,7 +373,8 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
     if is_narrow_audit_event(request.reason):
         return
     native = canonical_native_messages_envelope(getattr(result, "canonical_native_messages", None))
-    if not native:
+    internal_result = str(getattr(result, "internal_response", "") or "")
+    if not native and not internal_result:
         return
     store.messages.append_once({
         "thread_id": request.thread_id, "role": "assistant", "content": "", "channel": request.route_channel,
@@ -374,6 +383,8 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
             "assistant_part_id": "native", "task_id": request.task_id,
             "turn_end_reason": result_turn_end_reason(result),
             CANONICAL_NATIVE_MESSAGES_METADATA_KEY: native,
+            "internal_execution_result": internal_result,
+            "public_receipt": getattr(result, "public_receipt", None),
         },
     }, dedupe_key=f"background-native:{request.conversation_turn_id}")
 
@@ -472,4 +483,6 @@ def collect_background_execution_result(
         display_snapshot=display_snapshot,
         runtime_status=str(getattr(result, "runtime_status", "") or ""),
         runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
+        internal_response=str(getattr(result, "internal_response", "") or ""),
+        public_receipt=getattr(result, "public_receipt", None),
     )

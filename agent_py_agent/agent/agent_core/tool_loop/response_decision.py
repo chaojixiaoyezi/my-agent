@@ -295,6 +295,12 @@ def _decided_response(
         )
 
     if not request.agent.config.enable_tools:
+        from .background_public_receipt import explicit_public_receipt_active
+
+        if explicit_public_receipt_active(request.params) and not has_protected_marker:
+            return _no_tool_calls_decision(_NoToolCallsRequest(
+                request.agent, request.params, request.response, request.counters, False, probe_rollback,
+            ))
         final = _disabled_tools_response(request.response, has_protected_marker)
         return ToolLoopResponseDecision("break", final, [], request.counters)
 
@@ -1035,10 +1041,16 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 空正文预算先按"自上次空正文以来是否有真实进展"恢复；下面两处 nudge 消费同一份计数。
         counters = _empty_text_budget_after_progress(request.params, request.counters)
         reply_required = active_turn_user_reply_required(request.params)
-        if reply_required and response_text:
+        from .background_public_receipt import (
+            explicit_public_receipt_active,
+            prepare_background_public_receipt,
+        )
+
+        if reply_required and response_text and not explicit_public_receipt_active(request.params):
             satisfy_active_turn_user_reply(request.params)
         elif (
             reply_required
+            and not response_text
             and counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
         ):
             # This branch is controlled by exact consumed guidance ids. Thinking
@@ -1097,6 +1109,13 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
                 runtime_status="unfinished",
                 runtime_reason="MODEL_RESPONSE_TRUNCATED",
                 runtime_source="tool_loop",
+            )
+        # 完成协议必须在原副作用/产物/截断守卫之后消费，不能借内部成功声明绕过原安全事实。
+        receipt_action, receipt_response = prepare_background_public_receipt(request.params, final_response)
+        if receipt_action != "normal":
+            return ToolLoopResponseDecision(
+                "continue" if receipt_action == "repair" else "break",
+                None if receipt_action == "repair" else receipt_response, [], request.counters,
             )
         # 交付出口（唯一）：若上一枪还有"已产生但没交付"的合法正文，按到达顺序无损并进这次交付；
         # 交付对象仍取自本轮，因此 final_prompt/final_response/usage 的来源同一。没有前导段落时

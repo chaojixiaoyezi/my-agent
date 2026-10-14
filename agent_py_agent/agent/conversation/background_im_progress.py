@@ -7,16 +7,30 @@ from dataclasses import replace
 
 from ..common.agent_time import now as display_now
 from ..delivery import DeliveryContext, ReplyEnvelope
+from ..scheduler.delivery_policy import normalize_delivery
 from .execution_threads import EXECUTION_ORIGIN_KEY, IM_TASK_EXECUTION_KEY, execution_origin_thread
 from .tool_approval_scope import tool_approval_scope, tool_approval_scope_is_current
 
 _KEY='host_progress_delivery.v1'
 
 
+# LLM: 进度外发只读精确根任务的活动调度run冻结策略；不读当前job或正文，错ID/线程不能冒认普通委派。
+# 函数用途: 在原观察者启动前守住静默监控的通知范围，保留普通委派与旧逐轮回执的进度。
+def _scheduled_progress_allowed(agent, root_task_id, thread_id):
+    repository = getattr(agent, 'scheduler_repository', None)
+    run = repository.get_active_run(root_task_id) if repository is not None else None
+    if run is None:
+        return True
+    if run.get('run_id') != root_task_id or run.get('thread_id') != thread_id:
+        raise ValueError('定时进度运行与原根任务或执行线程不匹配')
+    delivery = normalize_delivery(run.get('delivery'))
+    return delivery['mode'] == 'origin' and delivery.get('reply_policy', 'always') == 'always'
+
+
 # LLM: 一个观察者只绑定一个实际工作片；启动、发送失败不改变任务，关闭必须在原 final 投递前调用。
 # 类用途: 周期展示结构化等待阶段，后台聊天任务与执行互不占用车道。
 class BackgroundIMProgress:
-    # LLM: 只有显式委派线程可启动，巡检和其它后台唤醒不因此多发消息；配置 0 禁用，时间与前台保持一致。
+    # LLM: 只有显式委派线程可启动，原调度run冻结local/none/explicit禁止提前外发；配置0禁用，普通交互时间不变。
     # 函数用途: 冻结原身份和回送绑定，启动可停止的轻量观察线程。
     def __init__(self,agent,task_id):
         self.agent=agent
@@ -29,6 +43,8 @@ class BackgroundIMProgress:
             raise ValueError("原任务不存在")
         self.execution=agent.conversation_store.threads.require(link.thread_id)
         if not self.scope.active or IM_TASK_EXECUTION_KEY not in self.execution.metadata:
+            return
+        if not _scheduled_progress_allowed(agent, self.scope.root_task_id, self.execution.thread_id):
             return
         interval=float(agent.config.im_stream_heartbeat_seconds)
         if interval<=0:

@@ -1,11 +1,23 @@
-# LLM: 群聊触发只看飞书结构化 mention 与探针取得的 bot open_id；不得按正文、昵称或 @all 文案匹配。
-# 模块用途: 共用 webhook/WS 的直接 @机器人判据与命令首尾寻址规范化，保留其它用户和命令参数。
+# LLM: 群聊触发只消费供应商结构化 mention/post at 与可信 bot open_id；未知身份不得作为稳定未提及完成去重。
+# 模块用途: 共用 webhook/WS 提及裁决和命令寻址规范化，保留普通正文、其它用户与 @全员边界。
 from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import dataclass
 
 from .feishu_media import extract_feishu_content, post_content_block
+
+
+# LLM: allowed 是直接提及事实，verified 区分稳定不触发与身份/结构尚不可核验，不授予 owner/admin 权限。
+# 类用途: 为入站回执保留匹配结果和安全原因，不依靠 UI 名称或正文判断。
+@dataclass(frozen=True)
+class FeishuMentionDecision:
+    allowed: bool
+    verified: bool
+    reason_code: str
+    mentions_count: int = 0
+    post_at_count: int = 0
 
 
 # LLM: 只移除可信 bot ID 对应的寻址 mention；尾部只在显式 slash 控制中处理，正文与其它用户不授予控制权。
@@ -21,9 +33,9 @@ def command_content_without_bot_mention(message: dict[str, object], bot_open_id:
     if not isinstance(content, dict):
         return raw
     kind = message.get("message_type") or message.get("msg_type") or "text"
+    keys = {row["key"] for row in normalize_mentions(message.get("mentions"))
+            if row["open_id"] == bot_open_id and row["key"] and row["key"] not in {"@_all", "@all"}}
     if kind == "text":
-        keys = {row["key"] for row in normalize_mentions(message.get("mentions"))
-                if row["open_id"] == bot_open_id and row["key"] and row["key"] not in {"@_all", "@all"}}
         text = str(content.get("text") or "").lstrip()
         while (key := next((key for key in sorted(keys, key=len, reverse=True)
                             if text.startswith(key) and (len(text) == len(key) or text[len(key)].isspace() or text[len(key)] == "/")), "")):
@@ -34,9 +46,9 @@ def command_content_without_bot_mention(message: dict[str, object], bot_open_id:
     elif kind == "post":
         locale = post_content_block(content)
         if isinstance(locale.get("content"), list):
-            rows = _post_without_leading_bot_nodes(locale["content"], bot_open_id)
+            rows = _post_without_leading_bot_nodes(locale["content"], bot_open_id, keys)
             text, _media = extract_feishu_content("post", {**locale, "content": rows})
-            locale["content"] = _post_without_trailing_bot_nodes(rows, bot_open_id) if _is_control_text(text) else rows
+            locale["content"] = _post_without_trailing_bot_nodes(rows, bot_open_id, keys) if _is_control_text(text) else rows
     return content
 
 
@@ -58,16 +70,16 @@ def _without_trailing_bot_keys(text: str, keys: set[str]) -> str:
     return text
 
 
-# LLM: 只删除最后的 bot at 节点及包裹空白，跨行保持原 content；中间节点、代码块和其它用户均不变。
+# LLM: 只删除尾部可信 bot ID 或其结构化 key 对应的 at；不按显示名、正文或其它用户裁剪。
 # 函数用途: 在显式控制富文本中去除后置机器人提及，不用昵称或转换后的文本替换内容。
-def _post_without_trailing_bot_nodes(content: list, bot_open_id: str) -> list:
+def _post_without_trailing_bot_nodes(content: list, bot_open_id: str, bot_keys: set[str]) -> list:
     trailing = True
     rows = []
     for row in reversed(content):
         nodes = []
         for node in reversed(row if isinstance(row, list) else []):
             if trailing and isinstance(node, dict):
-                if node.get("tag") == "at" and node.get("user_id") == bot_open_id:
+                if node.get("tag") == "at" and node.get("user_id") in {bot_open_id, *bot_keys}:
                     continue
                 if node.get("tag") == "text" and not str(node.get("text") or "").strip():
                     continue
@@ -77,15 +89,15 @@ def _post_without_trailing_bot_nodes(content: list, bot_open_id: str) -> list:
     return list(reversed(rows))
 
 
-# LLM: 只移除头部精确机器人节点；第一段其它实质内容之后保持所有 at/text 节点和原分行。
+# LLM: 头部 at 只按精确 bot ID 或可信 mention key 移除；其余正文节点和原分行必须保留。
 # 函数用途: 将 post 行逐个规范化，避免命令转换入口深嵌套，同时保留命令参数中的其它人。
-def _post_without_leading_bot_nodes(content: list, bot_open_id: str) -> list:
+def _post_without_leading_bot_nodes(content: list, bot_open_id: str, bot_keys: set[str]) -> list:
     leading = True
     rows = []
     for row in content:
         nodes = []
         for node in row if isinstance(row, list) else []:
-            if leading and isinstance(node, dict) and node.get("tag") == "at" and node.get("user_id") == bot_open_id:
+            if leading and isinstance(node, dict) and node.get("tag") == "at" and node.get("user_id") in {bot_open_id, *bot_keys}:
                 continue
             nodes.append(node)
             if not (isinstance(node, dict) and node.get("tag") == "text" and not str(node.get("text") or "").strip()):
@@ -94,7 +106,7 @@ def _post_without_leading_bot_nodes(content: list, bot_open_id: str) -> list:
     return rows
 
 
-# LLM: SDK 对象和 webhook 字典同归一为 key/open_id；不使用展示 name 授权，异常列表视为没有直接 mention。
+# LLM: SDK/字典同归一 key/open_id；字符串 id 仅接受显式 id_type=open_id，不从昵称或 ID 前缀猜身份。
 # 函数用途: 保留飞书 mention 的结构字段，供两个入站路径使用同一判断。
 def normalize_mentions(value: object) -> list[dict[str, str]]:
     if not isinstance(value, (list, tuple)):
@@ -104,33 +116,60 @@ def normalize_mentions(value: object) -> list[dict[str, str]]:
         identity = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
         key = item.get("key", "") if isinstance(item, dict) else getattr(item, "key", "")
         open_id = identity.get("open_id", "") if isinstance(identity, dict) else getattr(identity, "open_id", "")
+        id_type = item.get("id_type", "") if isinstance(item, dict) else getattr(item, "id_type", "")
+        if isinstance(identity, str) and id_type == "open_id":
+            open_id = identity
         if not open_id and isinstance(item, dict):
             open_id = item.get("open_id", "")
         rows.append({"key": str(key or ""), "open_id": str(open_id or "")})
     return rows
 
 
-# LLM: bot 身份未知时群聊不触发；可信节点沿正文同一包裹层读取，广播仍不算直接 mention；私聊由上层放行。
+# LLM: 原 bool API 只投影唯一结构化裁决；调用方要决定重投时必须读取 bot_mention_decision.verified。
 # 函数用途: 检查群聊消息是否明确单独 @了此应用机器人。
 def directly_mentions_bot(message: dict[str, object], bot_open_id: str) -> bool:
-    if not bot_open_id:
-        return False
+    return bot_mention_decision(message, bot_open_id).allowed
+
+
+# LLM: 顶层 ID 与 post at 同属可信事件结构；按 key 关联，任一精确匹配可触发，未解析字段不能伪装稳定未提及。
+# 函数用途: 区分直接 @机器人、稳定无 @和暂时无法核验，换行与补文字不参与授权。
+def bot_mention_decision(message: dict[str, object], bot_open_id: str) -> FeishuMentionDecision:
     mentions = normalize_mentions(message.get("mentions"))
-    if mentions:
-        return any(row["key"] not in {"@_all", "@all"} and row["open_id"] not in {"all", "@all"}
-                   and row["open_id"] == bot_open_id for row in mentions)
+    targets, valid = _post_at_targets(message)
+    counts = {"mentions_count": len(mentions), "post_at_count": len(targets)}
+    if not bot_open_id or bot_open_id in {'all', '@all', '@_all'}:
+        return FeishuMentionDecision(False, False, "FEISHU_BOT_IDENTITY_UNAVAILABLE", **counts)
+    keys = {row['key'] for row in mentions if row['open_id'] == bot_open_id and row['key'] not in {'@_all', '@all'}}
+    if any(row['open_id'] == bot_open_id and row['key'] not in {'@_all', '@all'} for row in mentions) or any(
+        target == bot_open_id or target in keys for target in targets
+    ):
+        return FeishuMentionDecision(True, True, "", **counts)
+    malformed = message.get('mentions') is not None and not isinstance(message.get('mentions'), (list, tuple))
+    incomplete = any(not row['open_id'] and row['key'] not in {'@_all', '@all'} for row in mentions)
+    if malformed or incomplete or not valid or any(not target.strip() or target.startswith('@_user') for target in targets):
+        return FeishuMentionDecision(False, False, "FEISHU_MENTION_UNVERIFIED", **counts)
+    return FeishuMentionDecision(False, True, "FEISHU_GROUP_NOT_ADDRESSED", **counts)
+
+
+# LLM: 仅读取 canonical post 包裹里的 at.user_id，不解析昵称/正文；格式未知返回不可核验而不是稳定忽略。
+# 函数用途: 保留富文本里的结构化目标，供顶层 mentions 补全与群门共同核验。
+def _post_at_targets(message: dict[str, object]) -> tuple[list[str], bool]:
     if str(message.get("message_type") or message.get("msg_type") or "") != "post":
-        return False
+        return [], True
     try:
         value = message.get("content")
         post = json.loads(value) if isinstance(value, str) else value
     except (TypeError, ValueError):
-        return False
+        return [], False
     if not isinstance(post, dict):
-        return False
+        return [], False
     locale = post_content_block(post)
+    if not isinstance(locale.get('content'), list):
+        return [], False
+    targets = []
     for line in locale.get("content", []) if isinstance(locale.get("content"), list) else []:
         for node in line if isinstance(line, list) else []:
-            if isinstance(node, dict) and node.get("tag") == "at" and node.get("user_id") == bot_open_id:
-                return True
-    return False
+            if isinstance(node, dict) and node.get("tag") == "at":
+                target = node.get('user_id')
+                targets.append(target if isinstance(target, str) else '')
+    return targets, True

@@ -1,5 +1,6 @@
 # LLM: 通道仍沿原 durable worker，G3 凭据只在原 HTTP 身份头附加；读取失败按 G2b 开关处理——开关关（默认）
 #   降级为不带凭据继续发送，开关开才拒绝。秘密不进记录、日志或模型。
+#   受限诊断只投影原 ingress/submission；False 传回运输重投，reaction 不决定请求是否受理。
 # 模块用途: 管理 IM 提交和对账；本机凭据不可用时按开关降级或安全拒绝，敏感命令一次性提交不落盘。
 from __future__ import annotations
 
@@ -43,10 +44,44 @@ from .ingress import (
     GatewayIngressStore,
     build_gateway_ingress_record,
 )
-from .protocol import IncomingMessage
+from .protocol import IncomingMessage, provider_message_reference
 
 logger = logging.getLogger(__name__)
 _SENSITIVE_COMMAND_UNAVAILABLE = "服务暂时不可用，命令没有执行，请稍后重试。"
+
+
+# LLM: 这是原 ingress/submission 的脱敏日志投影，不写第二账；禁止正文、错误描述、用户 ID 或凭据进入字段。
+# 函数用途: 关联真实入站记录与提交回执，让表情失败不能被误判为没有受理。
+def _log_feishu_ingress_stage(record: GatewayIngressRecord | None, phase: str, *, submission: GatewayAskSubmission | None = None) -> None:
+    if record is None or record.channel != 'feishu':
+        return
+    facts = {'message_ref': provider_message_reference(record.provider_message_id),
+             'chat_ref': provider_message_reference(record.conversation_id),
+             'phase': phase, 'ingress_id': record.ingress_id, 'ingress_state': record.state}
+    if submission is not None:
+        facts.update(request_ref=provider_message_reference(submission.request_id),
+                     submission_status=submission.status, submission_ok=submission.ok,
+                     input_state=submission.input_state)
+    logger.info('feishu_ingress_stage %s', json.dumps(facts, separators=(',', ':')))
+
+
+# LLM: 只记消息短引用和异常类型；消费者失败必须返 False，由运输重投原 ingress，不把异常正文暴露到日志。
+# 函数用途: 记录所有通道的受理故障，避免错误对象携带用户输入或凭据。
+def _log_gateway_route_failure(msg: IncomingMessage, exc: Exception) -> None:
+    logger.error('route_message unavailable channel=%s message_ref=%s error_type=%s',
+                 msg.channel, provider_message_reference(msg.message_id), type(exc).__name__)
+
+
+# LLM: 仅登记原 GatewayIngressStore，重放/隔离仍由原 store 裁决；日志投影不能替代原回执或复制正文。
+# 函数用途: 保存一条真实入站并报告登记状态，隔离冲突返回 False，不增加队列或执行请求。
+def _register_gateway_ingress(manager: Any, record: GatewayIngressRecord) -> bool:
+    current, _created, quarantined = manager._delivery_worker.enqueue(record)
+    if quarantined:
+        logger.error('gateway ingress replay quarantined channel=%s message_ref=%s',
+                     record.channel, provider_message_reference(record.provider_message_id))
+        return False
+    _log_feishu_ingress_stage(current, 'recorded')
+    return True
 
 
 # LLM: Submission preserves Gateway's typed input disposition separately from request execution
@@ -466,7 +501,7 @@ class _ChannelIngressCoordinator:
             return {"ok": False, "kind": "credential_error", "error_code": exc.reason_code, "message": str(exc)}
         return asdict(submission)
 
-    # LLM: 原提交回执保留；本机凭据失败用结构化 kind 收口，不创建回复 watcher、不重放；只发安全原因。
+    # LLM: 原提交回执与安全失败不变；reaction 前记录精确回执的受限投影，提示失败不能改变任务受理。
     # 函数用途: 处理原回执或本机拒绝；只对已经发送的普通消息创建占位和 watcher。
     def advance_submission(
         self,
@@ -477,6 +512,7 @@ class _ChannelIngressCoordinator:
                 raise RuntimeError("gateway credential error delivery was not accepted")
             return GatewayIngressAdvance("completed")
         submission = _gateway_ingress_submission(record)
+        _log_feishu_ingress_stage(record, 'submission', submission=submission)
         msg = _gateway_ingress_message(record)
         request_id = submission.request_id
         if submission.status == "control":
@@ -1022,7 +1058,7 @@ class ChannelManager:
     # or reply IO. Same-id/same-body reuses the row; same-id/different-body is quarantined.
     # 例外：命令目录声明 sensitive_input 的命令（/admin、/approve、/deny）可能带管理员密码，绝不进入持久入站队列，
     # 改由 _route_sensitive_command 一次性直接提交。
-    # 函数用途: 首次落盘前冻结真实 owner，再登记外部消息并唤醒 worker；队列属宿主控制面，不是 main 业务目录。
+    # 函数用途: 冻结真实 owner 后登记原队列并记录有界状态；False 必须传回运输允许重投，诊断不记录正文或异常详情。
     def route_message(self, msg: IncomingMessage) -> bool:
         try:
             if self._adapters.get(msg.channel) is None:
@@ -1051,19 +1087,13 @@ class ChannelManager:
                 metadata=metadata,
                 timestamp=float(getattr(msg, "timestamp", 0.0) or 0.0),
             )
-            _current, _created, quarantined = self._delivery_worker.enqueue(record)
-            if quarantined:
-                logger.error(
-                    "gateway ingress replay quarantined channel=%s provider_message_id=%s",
-                    msg.channel,
-                    msg.message_id,
-                )
+            if not _register_gateway_ingress(self, record):
                 return False
             if self._lifecycle_started:
                 self._delivery_worker.start()
             return True
         except Exception as exc:
-            logger.error(f"route_message 异常: {exc}")
+            _log_gateway_route_failure(msg, exc)
             return False
 
     # LLM: 敏感命令不写入口记录、回复 watcher 或占位句柄，也不重试；回调线程只启动一个短生命周期线程后立即返回，

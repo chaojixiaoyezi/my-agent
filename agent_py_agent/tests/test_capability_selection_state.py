@@ -65,6 +65,8 @@ def test_absent_marker_preserves_original_task_json_bytes():
     # 续跑字段与选择键同一序列化口径：空集合完全省略，旧档案重写后字节不变（contref 2026-10-05）。
     old_payload.pop("continuation_refs")
     old_payload.pop("continuation_diagnostics")
+    # 新专有身份为 None 时同样不序列化；这里模拟新增字段之前的原档案，字节相等断言保持。
+    old_payload.pop("host_channel_actor")
     assert CAPABILITY_SELECTION_KEY not in link.to_dict()
     assert (json.dumps(link.to_dict(), ensure_ascii=False, sort_keys=True, indent=2).encode()
             == json.dumps(old_payload, ensure_ascii=False, sort_keys=True, indent=2).encode())

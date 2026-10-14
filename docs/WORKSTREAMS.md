@@ -123,3 +123,18 @@ git -C ../my-agent-worktrees/memory diff main...HEAD
 不同时写同一文件或提交；主代理统一组合和交接。该约定不允许覆盖其它线未提交内容。
 能力包与自动总结个人 Skill 分线：前者由 Codex 负责，后者由 Claude 负责；交叉接口先明确归属。
 main 集成、推送、部署和默认 Gateway 重启由集成方单独操作；真实验收使用独立数据及一个测试 Gateway，多个 TUI 共用。
+
+## 当前 IM 群任务修复协作（2026-10-13）
+
+本轮是一条修复线，使用已附属的 `codex/im-entry-update-assessment` 工作树；其它开发线的脏目录不参与集成。
+同线子代理按下表独占文件，主代理统一审阅、验证、提交和打包；跨模块接口先协调，禁止同时修改同一文件。
+
+| 负责人 | 独占范围 | 交接 |
+| --- | --- | --- |
+| 群任务主体子代理 | shared host actor、scheduler/tool 与 execution_policy、request_execution 的宿主主体冻结、child 创建/继承、IM 审批及相关测试 | [IM_SCHEDULER_ACTOR_HANDOFF](tasks/IM_SCHEDULER_ACTOR_HANDOFF.md) |
+| 飞书入口子代理 | feishu/WS/mentions/typing/base/protocol、manager 的入站与 reaction、相关测试 | [FEISHU_INGRESS_REPAIR_HANDOFF](tasks/FEISHU_INGRESS_REPAIR_HANDOFF.md) |
+| 后台回执子代理 | background_execution/background_delivery/background_im_progress、收口/自然回复与必要调用来源、相关测试 | [BACKGROUND_PUBLIC_RECEIPT_HANDOFF](tasks/BACKGROUND_PUBLIC_RECEIPT_HANDOFF.md) |
+| 主代理 | 错误分类、配置同步、根台账/文档导航、综合验收与发行 | 统一收口 |
+
+沿原 owner、入站、调用和投递账本修复，不另造队列。只用隔离合成资料和独立测试安装；不读取生产聊天正文，不改现场监控或默认服务。
+子代理完成后可以交换做非作者审计，但只报告问题，修复仍由原文件负责人执行。

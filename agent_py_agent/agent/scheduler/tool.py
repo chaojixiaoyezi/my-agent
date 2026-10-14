@@ -6,6 +6,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+from ..conversation.host_actor import HostActorError, resolve_host_actor
 from ..tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -54,6 +55,7 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
             "应创建计划，不需要再索要一次确认，也不能只用 task_progress 保存计划草稿冒充定时计划。"
             "可显式设置独立上下文、固定模型、重叠与失败策略；需要变化检查时在 precheck 对象填写 tool_name 和 arguments。"
             "用户要求提醒、告警或定时报表时，明确设置 delivery.mode=origin；纯巡检设置 local，正常内部总结不逐轮发消息。"
+            "只有出现事项才通知时，使用 delivery={mode:origin,reply_policy:explicit}，运行内按结构化通知意图决定外发。"
         ),
         input_schema={
             "type": "object",
@@ -208,6 +210,8 @@ class ScheduleTool(BaseTool):
             return _error(str(exc), "SCHEDULER_INVALID_SCHEDULE", metadata_only=metadata_only)
         except SchedulerNotFoundError as exc:
             return _error(str(exc), "SCHEDULER_NOT_FOUND", metadata_only=metadata_only)
+        except HostActorError as exc:
+            return _error(str(exc), exc.error_code, metadata_only=metadata_only)
         except SchedulerConflictError as exc:
             return _error(str(exc), "SCHEDULER_CONFLICT", metadata_only=metadata_only)
         except OwnerQuotaExceeded as exc:
@@ -261,7 +265,7 @@ class ScheduleTool(BaseTool):
         if action not in {"create"} and not job_id:
             return _error("job_id 必填", "TOOL_INVALID_ARGUMENTS")
         if action != "create" and not _visible_jobs(self.agent, [repository.get_job(job_id)]):
-            return _error("目标监控不属于当前用户", "SCHEDULER_NOT_FOUND")
+            return _error("目标监控不属于当前发起人，已拒绝操作", "SCHEDULER_NOT_AUTHORIZED")
         if action == "get":
             active_runs, run_errors = repository.active_runs_by_job()
             job = repository.get_job(job_id)
@@ -343,6 +347,7 @@ class ScheduleTool(BaseTool):
         precheck = normalize_precheck(params.get("precheck"))
         delivery = creation_delivery(self.agent, thread_id, params.get("delivery"))
         source_thread_id = thread_id
+        creator = _creator_identity(self.agent, source_thread_id)
         source_request_id = _source_request_id(self.agent, params)
         from .execution_policy import schedule_execution_thread
 
@@ -364,7 +369,7 @@ class ScheduleTool(BaseTool):
                 precheck=precheck,
                 delivery=delivery,
                 rules=rules,
-                creator=_creator_identity(self.agent, thread_id),
+                creator=creator,
             )
         )
         return _success(
@@ -648,20 +653,11 @@ def _error(
 __all__ = ["ScheduleTool", "build_schedule_tool_model_spec"]
 
 
-# LLM: 来源采用已经冻结的 execution_origin；不读取群会话最后发言者，未绑定的本地来源仅代表本 owner。
-# 函数用途: 保存监控创建人的结构身份，供同用户跨入口管理并隔离群成员。
+# LLM: 创建与查询共用宿主专有 actor/不可变来源；模型 attrs 与群最新发言者不提供身份，冲突不降级。
+# 函数用途: 取得准确监控创建人，本机任务保留 local 标记，未知 IM 来源明确拒绝。
 def _creator_identity(agent, thread_id):
-    from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY
-    store = getattr(agent, 'conversation_store', None)
-    thread = store.threads.load(thread_id) if store is not None else None
-    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY) if thread is not None else None
-    if isinstance(reference, dict):
-        binding = reference['binding']
-        return {'channel': binding['channel'], 'actor_id': binding['actor_id']}
-    current = getattr(agent, '_current_run_params', None)
-    attrs = getattr(current, 'task_attributes', None) or {}
-    actor = attrs.get('channel_user_id') or attrs.get('user_id')
-    return {'channel': attrs.get('channel', ''), 'actor_id': actor} if actor else {'local': True}
+    actor = resolve_host_actor(agent, thread_id)
+    return {'channel': actor.channel, 'actor_id': actor.actor_id} if actor else {'local': True}
 
 
 # LLM: 群 owner 共享上下文不等于共享个人监控控制权；当前 actor 来自原任务冻结事实，不能从工具参数选择人。

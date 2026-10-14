@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
+    from ...conversation.host_actor import HostChannelActor
 
 
 # LLM: 消息/逻辑回合/运行/尝试身份独立；原生carry与已应用视图只由同片宿主传入，不能作为持久权限或状态。
-# 类用途: 收拢一次代理调用的配置、上下文和内存回调，不执行模型、工具或写文件。
+# 类用途: 收拢一次代理调用与宿主专有身份；模型可写属性不作认证来源，不执行模型或写文件。
 @dataclass
 class RunParams:
     inject: list[str] | None = None
@@ -28,6 +29,8 @@ class RunParams:
     run_id: str = ""
     task_id: str = ""
     task_attributes: dict | None = None
+    # 宿主专有冻结身份，不能从模型 attributes 或工具参数恢复；replace 在同一片内保留。
+    host_channel_actor: HostChannelActor | None = None
     delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str = "run"

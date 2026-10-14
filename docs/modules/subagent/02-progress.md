@@ -472,3 +472,12 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 - 根修：宿主死在“已预留、未激活”窗口里留下冻住的启动记录，重启后被 `existing_runner_launch` 原样复用、永久卡住；现在过期记录不复用并先收掉（受管标 reclaimed 沿用同一 pending attempt，文件撤销旧预留重新预留），过期判定的唯一权威挪到 `process_control.background_start_record_stale`。
 - 计数：`orphans_revived` 只算真派出去的，复用现存启动另记 `orphan_launches_reused` / `launch_reused`。
 - I5：`worker._run_subagent_worker` 入口读准入关门，顺序与并行批次都不启动、不写 FAILED、保留预留。设计见台账两节，测试与变异见 TESTS.md 同名节。
+
+
+## 群监控与审批的宿主身份继承（2026-10-13，N01，本地实现）
+
+解决子代理属性可伪造发起人，以及群主代理创建监控后本人无法管理的问题。主入口身份只在 RunParams 的冻结 HostChannelActor 专有字段传递；原 ThreadTaskLink 和 SubAgentTask 分别保存主根与子孙出处。模型顶层同名参数及 attributes 中的 host_channel_actor/channel/user 别名不会覆盖宿主字段。
+
+子孙创建、恢复核对原 parent/root/owner/thread；无证据的旧群任务不会迁移成当前发言人，不能借另一人的 work-origin。私人审批始终先核对准确 scope.root 再比对当前执行身份。同本人新入口续准确原根时允许入口编号变化，孩子保留原根旧出处。local/普通用户/admin/full_access 各沿原权限上界，未增加批准、网络或文件权限。
+
+聚焦测试及独立审查证据见 docs/tasks/IM_SCHEDULER_ACTOR_HANDOFF.md；本线不部署、不推送，由整合线完成严格门后发布。

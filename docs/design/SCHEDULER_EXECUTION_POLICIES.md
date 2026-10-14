@@ -456,3 +456,24 @@ A 平台有 3 个独立监控、B 平台有 3 个独立监控时，用户看到�
 `test_scheduler_repair.py` 先复现旧只读锁故障、unknown 遗留、健康假正常与创建人缺口，再覆盖只读锁拒绝、写锁持有时十次查询、错误类别/errno、有界竞争、启动和 tick 恢复、已删除 job、history 提交后替换失败、旧 unknown 迁移、冻结 actor/跨 owner 拒绝。原死亡/PID 重用/CAS、扫描缓存、quota、服务与命令测试一起回归。
 
 测试使用临时账本和进程状态替身，不是用户生产数据的证明。真实 Linux Gateway kill/restart、IM 命令及安装包验证由集成线执行；活跃运行、投递身份与未确认副作用边界必须一同复核。
+
+
+## 群监控发起人统一与旧任务恢复（2026-10-13，已实现，待发布）
+
+解决“创建成功后本人 list 为零、准确编号也被拒绝”的身份口径差异。前台 Gateway 将认证 scope 冻结成 RunParams 的专有 HostChannelActor；schedule 创建和管理共用 conversation/host_actor.py，模型 attributes 的同名键以及旧 channel/user 别名不提供权限。
+
+主根身份只经 TaskStore.bind 的 typed keyword 保存到原 ThreadTaskLink，子孙身份保存到原 SubAgentTask 专有字段；已有主根不允许换人或改写原 entry_request_id。同一个人从新的认证消息继续准确原任务时，新入口编号可以变化，但孩子继承原根出处。full_access 不扩大身份或跨群成员控制权。
+
+后台恢复先核对准确 task/root、owner 和线程，再读取该根专有身份或该根自己的不可变 execution_origin；不能拿模型属性指向另一成员的工作线程来借用身份。旧无证明的非身份类后台工作可以继续，敏感监控/审批/子代理身份派生明确拒绝，不自动认领成最新发言人。
+
+首次 IM 委派唤醒还没有 ThreadTaskLink 时，只读取准确 SessionTask，并要求目标是原 delegated 工作线程、原策略 session_task_id 相同、发送线程等于不可变来源、owner 一致。后台装配使用 request.task_id 或原 session_task 引用，不把 claim 的空 task_id 偷换成消息身份。普通会话派活没有这套证明时 actor 为 None，仍能继续非身份工作。
+
+定时 run 已复制 creator，execution_context 首次冻结 origin_bindings；关掉 IM 默认后台执行开关也使用原 creator，不把后来群成员当布置者。新 isolated IM 线程复用 host_execution_origin.v1，并在原 TaskLink 首次绑定时保存同源专有 actor。followup/isolated、开关开/关四组都经过实际领取、后台参数、监控工具、审批收件人和孩子创建验证，身份仍是 A；新成员 B 不能复用 A 的准确根。
+
+升级时，已存在的旧 isolated queued 线程若尚无 execution_origin，在原 TaskLink transition 锁内继续持原 repository mutation scope（quota→store），从同一锁内账本重读准确 run，仍为 queued、started_at 为零且 owner/thread/creator/context 没变，才在原 ThreadStore 锁内复核旧三字段身份、owner/home 和无绑定后追加来源。写来源之前不能插入 claim/start，调度账本本身不重写。来源仍取该 run 的准确冻结事实，cwd、模型及其它元数据保持不变。已领取、已开工、身份不匹配或无冻结证明均不迁移，不能用最新群成员补旧身份。
+
+本机无外部绑定的普通请求在 TaskLink 晋升前仍可用 actor=None 创建和管理本 owner 监控；这不是一个 IM 身份。群和外部来源缺证明仍明确拒绝，不能把本机合法未晋升任务误报成身份坏账，也不能为测试或运行凭空造一个 IM actor。
+
+错误区分：SCHEDULER_NOT_FOUND 表示本 owner 没有该编号，SCHEDULER_NOT_AUTHORIZED 表示记录存在但属于另一发起人；CHANNEL_ACTOR_IDENTITY_REQUIRED/INVALID/CONFLICT/SCOPE_MISMATCH 分别表示缺证明、坏记录、身份冲突和归属不匹配。固定文案不包含原任务正文、路径或凭据。
+
+验收沿真实 Repository/ConversationStore/TaskLink/子代理原序列化执行，覆盖主群前台、普通用户和管理员私聊、后台工作、孩子与孙级、旧伪造属性、同群不同人、两种审批冲突以及本人新入口续原根。生产飞书卡片运输仍由原签名、claim/attempt 和密码锁合同守门；本测试没有对真实用户外发。

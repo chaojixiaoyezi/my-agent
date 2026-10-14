@@ -82,6 +82,11 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/agent/conversation/session_task_dispatch.py  # 模型工具与宿主共用的耐久派发、幂等、链深和配额
 |-- agent_py_agent/agent/conversation/im_task_status.py  # IM 当日设置和后台/孩子状态的同源只读投影
 |-- agent_py_agent/agent/conversation/execution_threads.py  # 独立执行线程和准确来源引用
+|-- agent_py_agent/agent/conversation/host_actor.py  # 原入口、主根和子孙共用的宿主发起人校验
+|-- agent_py_agent/agent/conversation/background_receipt_contract.py  # 后台公开回执策略和原交付信封接线
+|-- agent_py_agent/agent/contracts/background_public_receipt.py  # 显式公开完成协议的共享标识
+|-- agent_py_agent/agent/agent_core/model/response_provenance.py  # 原模型调用出口签发与核对响应来源
+|-- agent_py_agent/agent/agent_core/tool_loop/background_public_receipt.py  # 显式后台完成协议、内部结果与公开内容分离
 |-- agent_py_agent/agent/conversation/im_delegation.py  # 宿主真实派工、等待和主模型汇总
 |-- agent_py_agent/agent/scheduler/execution_policy.py  # 新 IM 计划隔离线程策略
 |-- agent_py_agent/agent/settings/im_task_preferences.py  # 每发送者当日偏好及到期解析
@@ -1945,6 +1950,11 @@ docs/
 ## Current Storage Roots
 
 ### 关键文件说明
+
+- `conversation/host_actor.py`：认证入口专有字段、原主任务/子任务记录及不可变执行来源共用的发起人解析；普通模型属性不能授权。
+- `conversation/background_receipt_contract.py`、`agent_core/tool_loop/background_public_receipt.py`：仅任务显式选择时启用受管公开收口；内部结果和公开通知仍沿原执行与投递账本保存。
+- `contracts/background_public_receipt.py`：模型循环和会话投递共同使用的 schema 标识，避免会话领域反向依赖模型实现。
+- `agent_core/model/response_provenance.py`：由原调用账签发当前响应的用途与身份，公开字典不能恢复宿主签发权；来源正确不等于正文语义已验证。
 
 - `docs/design/PUBLIC_CAPABILITY_PACKS.md`：公共能力包的待实施发布范围、管理/使用权限矩阵、主子版本与消费用户隔离，记录当前内容包与插件总闸的耦合；不表示当前包已开放公共发布。
 - `docs/design/IM_TASK_EXECUTION_POLICY.md`：普通 IM 多任务的待实施策略，区分定时后台与当天自动委派，记录执行归属、主代理后台汇总、容量与跨零点验收；不表示当前包已具备该能力。

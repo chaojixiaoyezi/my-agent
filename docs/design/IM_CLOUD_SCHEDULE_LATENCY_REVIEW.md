@@ -1,6 +1,6 @@
 # IM 云文档监控与任务耗时核查
 
-日期：2026-10-13。状态：用户已授权修复、推送 main 和打包；14 项已完成原链路实现与源码验收，发行版本为 `.20261013.5`，准确提交/包摘要及包验证由 release.json 和同包验收说明记录。未修改生产配置、聊天、任务或凭据。下方定位段保留修复前证据，实际验证结果以实施追加为准。
+日期：2026-10-13。状态：用户已授权修复、推送 main 和打包；14 项及追加 B 已交付 `.20261013.6`（提交 `5142efb0a`）。新反馈 N01/N02 与 A 公开回执合同已实现，77 文件联合 1219 项通过，正在提交与发行验收；下一候选 `.20261013.7` 尚未发布；准确提交/包摘要及包验证由 release.json 和同包验收说明记录。未修改生产配置、聊天、任务或凭据。下方定位段保留修复前证据，实际验证结果以实施追加为准。
 
 源码基线为 `84a63ea87646570b83e5e808cb29b021c5301b27`，对应最近发布的 `.20261013.4` 源码。本文核对本轮新增反馈和截图，不重复计入以前已交付的 R01～R21。现场报告中的 2026-10-14 时间属于报告原时区，不作为本机部署时间。
 
@@ -270,3 +270,45 @@ Linux 唯一失败修正后，整份 scan_costs 45 passed/0 skipped；Mac 同文
 B 复用原 120 秒配置与同消息窗口，补实际模型长等待，并修复独立审查发现的展示阻塞取消风险。最终 33 focused 文件 602 passed、0 failed、0 skipped；原14项1250通过与Linux切片的数字各自保留、不重复累加。Ruff、doc sync、strict code-size、diff、clean-package 均通过；匿名真实锁与停止/超时的独立故障注入确认 provider cancel 先行、关闭后的旧事件不补写。新交付候选为 `.20261013.6`，从严格 gate 的准确源码提交构建，包内清单绑定 commit/source SHA；实际整包验证事实随包保存。
 
 A 的偏题源头和公开回执分离仍未完成，不能据 B 通过或 main 发布宣布 A 已修复。真实飞书云权限/运输、现场长历史与 Windows SSH 客户端没有本轮完整验收；测试机 Ubuntu24.04 的轮恢复、原生TUI/官方MiniMax及候选更新各按真实范围记录。
+
+## 新反馈定位（2026-10-13，未修改产品或重新发布）
+
+### N01 群内模型 schedule 工具创建与管理身份不一致：已复现
+
+创建先调用 schedule_execution_thread，切换到新后台线程后读取冻结 execution_origin 的 actor；前台列表/get/update/pause/delete 则取当前主群线程。当前 Gateway 只注入可信 host_channel_actor，ScheduleTool._creator_identity 却只在无 origin 时读取旧 channel_user_id/user_id。结果同一真实入口派生的属性下，creator 为 feishu/合成用户，查询身份却是 local=True：创建成功、列表0、准确编号get/pause/delete均 SCHEDULER_NOT_FOUND。仓库 owner 始终是同一群，未发生跨 owner 落盘。
+
+已用原 _gateway_run_task_attributes + ScheduleTool + Repository + ConversationStore 复现，未使用真实群、任务或消息。正常 slash 控制使用认证 scope，同一创建者可列出并暂停该合成任务；所以模型工具与 slash 入口也没有共用主体解析。临时可由创建者本人在原群直接调用 /schedule pause，不把其它群成员变成控制者。
+
+非作者身份矩阵另确认：后台/孩子使用准确 work origin 时正常；孩子仅继承前台属性同样失败；关闭后台开关后创建人直接被存成 local=True，不能靠当前主群最新绑定追补历史创建人。原 test_schedule_control 只验证别人拒绝和本人 slash，缺模型工具本人创建后的 CRUD 正例，因此不能拿既有绿测宣布此问题正常。
+
+需要一起守住权限：origin 与新可信 actor 冲突时当前 helper 不拒绝，条件性合成可继续按旧 actor 控制任务；原子代理属性创建/继承保留模型传入 actor 字段，不能直接把这些可写字段提升为认证身份。完整外部入站利用路径尚未确认，不宣称已有生产越权事件。后续应复用宿主来源/根任务绑定的单一主体解析，前台取准确入站身份，后台取准确冻结来源，孩子只继承宿主事实、清除模型伪造；冲突或无来源明确失败，不返回假空表，也不允许创建无法管理的群任务。
+
+错误与审计：本 owner 内分别表达不存在、无控制权、主体不可确认和账本不可用；跨 owner 不探测他人账本。原审计增加准确 owner、thread/root run、actor来源/冲突、action、job_id 与错误码等受限事实，不记录 prompt、任务正文、凭据或全部工具参数。配对回归覆盖本人创建→列表/查询/暂停/删除、另一成员拒绝、跨群拒绝、父/子/孙、后台续跑、开关关闭及冲突/伪造属性。
+
+### N02 首次群消息无 emoji：现场原因未确认，入口故障条件已复现
+
+用户说明第二次同时改变了 @ 换行与尾部手打文本。原 Adapter/SDK归一/manager 共核对66个隔离合成条件，其中同行/独行 @×有无尾部文本的核心排版对照（含富文本语言包裹及加粗/行内代码/代码块）均正常受理、完整保留清单；额外失败条件按下面的路径分别判定。这个结果不能证明实际截图的结构化 mentions 和内容包裹一致；不能从蓝色昵称或 emoji 缺失判断消息未收到。
+
+已确认独立路径：reaction API 拒绝时，原 manager 仍可提交 Gateway 并建立回复 watcher，只没有 emoji；默认随机表情、token/网络/权限失败都不等于解析失败，当前日志未记录每次所选 emoji 及受理关联。另 bot 身份暂时未知时群门返回，而 WS 已提前记 seen；身份恢复后同 message_id 重投仍被去重，不同 message_id 的重发才可通过。这是已复现的暂时故障消费消息问题，不确认该截图命中了它。
+
+条件性解析缺口：顶层 mentions 非空但无 bot open_id 匹配时，不再检查 post 里的结构化 bot at。需要真实脱敏字段验证两个结构证据是否缺失/冲突，不能改按昵称或正文猜 @。
+
+后续沿原 ingress/WS 去重和受理回执区分 accepted、稳定不触发和暂不可验证；暂时身份失败不能标成已处理。诊断只保留消息/chat引用或哈希、类型、mentions数量/匹配事实、节点类型计数/正文长度、bot身份可用与重试时间、gate/ingress/submission状态、reaction emoji/HTTP/code/句柄事实，不读写正文或秘密。未发真实飞书消息、未改现场任务。
+
+### A 群侧追加证据
+
+出口对空投影且无附件 suppressed；非空“无内容说明”仍按普通正文处理。物理模型空输出在更早阶段仍触发有界修复，所以出口 suppressed 不代表已有合法静默的模型收口合同。缺少通用本轮公开通知意图，不能把括号或固定句子作为机器 authority；用户要求每轮状态或引用字面值时这些字符串可能合法。保持原 local/none 通知开关，并另行设计内部结果/公开回执分离及准确调用来源；未宣布 A 已修复。
+
+建议下一步：先修 N01 的宿主主体与子代理继承，配对验证本人管理和他人拒绝；N02 的无正文受理诊断/暂时失败去重可独立审计，A 的公开回执设计另行复核。当前仅完成定位和文档，不改变真实监控、源工具或发行包。
+
+本轮验证：原真实 Gateway 属性投影→ScheduleTool/Repository/Store 的创建-查询复现已完成；5份既有相关测试67 passed、0 failed、0 skipped，既有负例/协议测试通过不覆盖新发现的本人CRUD缺口。doc sync和diff检查通过。证据仅含隔离合成内容，未调用真实模型或飞书、未操作用户提供的监控编号。
+
+## 新反馈实施追加（2026-10-13，源码组合已通过）
+
+N01 已统一前台/后台、调度、子孙及 IM 审批的宿主 actor 来源；同群创建人可管理本人任务，同群他人与跨 owner 拒绝，不从模型 attributes 或最新群发言人重建身份。恢复时核对准确根 TaskLink；首次委派沿原 SessionTask，旧 queued 执行线程只在同 run 未开工且旧事实全部匹配时迁移。负向身份借用探针未改变原账，现场是否存在实际利用没有证据。交接见 [IM_SCHEDULER_ACTOR_HANDOFF](../tasks/IM_SCHEDULER_ACTOR_HANDOFF.md)。
+
+N02 沿原 WS seen / Gateway ingress 提交去重：accepted 与稳定 ignored 才提交，暂时 bot 身份或锁服务不可用允许同 ID 重投；结构化 post at 与顶层 mentions 都核对准确 bot 身份，仍不使用昵称/手打文本授予触发。reaction 失败独立记录，不替代受理事实。同行/独行 @ 与手打尾文均有合成回归，截图第一条未回应的具体原因尚未确认。交接见 [FEISHU_INGRESS_REPAIR_HANDOFF](../tasks/FEISHU_INGRESS_REPAIR_HANDOFF.md)。
+
+A 已增加准确调用来源及显式公开意图，保持业务内部结果与公开正文分离。仅 origin+explicit 用受管完成结构，合法 internal_only 成功且不外发，物理空供应商结果、附件义务和插话仍按原合同处理。错误完成结构沿原调度失败结算，不重跑业务；冷重投只消费原冻结信封。local/none/origin+explicit 不先启动进度窗口，旧 always/普通委派和前台 120 秒反馈保留。旧任务未自动改策略，不按占位词、JSON 或主题关键词判断通知。来源核验不能保证本轮主模型绝不偏题。设计与验证见 [BACKGROUND_PUBLIC_RECEIPT_CONTRACT](BACKGROUND_PUBLIC_RECEIPT_CONTRACT.md) 和 [交接](../tasks/BACKGROUND_PUBLIC_RECEIPT_HANDOFF.md)。
+
+建议下一步：联合严格 gate 后构建准确提交的独立 Linux 字节码包，复验原实例更新、TUI 与一次官方模型静默监控。非作者可并行只读审查，真实飞书运输与现场首条消息原因继续保留边界；不读取生产正文或替用户停删监控。

@@ -207,7 +207,7 @@ class SecuritySignal:
 
 # LLM: 子代理 run 的持久记录；各 *_jsonl/*_md 路径字段由 task_workspace_adapter 在每次保存时按 canonical
 #   工作区布局写回，读取方只认这些字段，不自行拼路径。新增路径字段须同步 adapter 与相关读取方测试。
-# 类用途: 保存一个子代理任务的目标、状态、权限、工作区路径与结果引用。
+# 类用途: 保存子代理原身份、权限和结果；host_channel_actor 为宿主专有出处，不读取模型 attributes 同名键。
 @dataclass
 class SubAgentTask:
     """Persistent run record for one subagent task."""
@@ -361,6 +361,8 @@ class SubAgentTask:
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
     attributes: dict[str, object] = field(default_factory=dict)
+    # 宿主原字段单独持久化，模型 attributes 无权写入；旧记录缺省 None，不升级旧伪造字段。
+    host_channel_actor: dict[str, str] | None = None
     # LLM: Monotonic canonical revision for exact read-modify-write transactions. It is host-owned
     # and must never be inferred from model text, timestamps, projection versions, or file mtimes.
     # 字段用途: 标记子代理权威状态版本，供并发裁决检测旧快照和记录提交先后；放在末尾保留旧位置参数兼容性。

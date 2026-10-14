@@ -22,6 +22,12 @@ from agent_py_agent.agent.settings.normalize import (
 class TestNormalizeAgentConfig:
     """测试 normalize_agent_config 配置归一化。"""
 
+    @pytest.mark.parametrize("raw, expected", [(True, True), (False, False), ("false", False), ("true", True)])
+    def test_explicit_background_receipt_switch(self, raw, expected):
+        normalized, warnings = normalize_agent_config({"background_public_receipt_contract_enabled": raw})
+        assert normalized["background_public_receipt_contract_enabled"] is expected
+        assert not warnings
+
     def test_normalize_valid_model_backend_echo(self):
         """验证有效的 echo 后端。"""
         data = {"model_backend": "echo"}

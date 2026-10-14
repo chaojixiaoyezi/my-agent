@@ -296,7 +296,10 @@ def _role_policy(
     return RolePolicy(role=role, allowed_tools=allowed_tools)
 
 
+# LLM: 模型只给业务参数，host actor 从父当前宿主字段取得，不从 raw 同名键或 attributes 升级。
+# 函数用途: 组装原子代理创建合同，保留谱系与权限上界并固定可信发起人。
 def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunParams:
+    from ...conversation.host_actor import current_actor_for_child
     raw_params = request.raw_params
     role_policy = request.role_policy
     return CreateRunParams(
@@ -316,6 +319,7 @@ def _create_run_params_from_build(request: CreateRunBuildRequest) -> CreateRunPa
         context_manifest=create_context_manifest(raw_params),
         context_packs=create_context_packs(raw_params),
         attributes=create_task_attributes(raw_params, request.agent),
+        host_channel_actor=current_actor_for_child(request.agent),
         **_lineage_fields(raw_params, request.agent),
         parent_access_mode=_config_access_mode(request.agent),
     )
@@ -448,13 +452,15 @@ def _config_access_mode(agent) -> str:
 # LLM: 根/递归共用属性装配，宿主工具上限、模型引用和智能程度档位覆盖伪造值，决策与命名来源只能由宿主在准备后写入；
 #   input_media_refs 经 input_media_refs.bind_subagent_input_media 解析成 host-owned input_media，失败抛
 #   SubagentInputMediaError（调用方与 ModelProfileError 同样转成 not_started）。
-# 函数用途: 保留显式属性并绑定父工具上限、原模型引用、档位和点名附件；无效显式模型、档位或附件引用在整批创建前报错。
+# 函数用途: 清除模型身份别名后绑定业务属性、父工具上限和附件；宿主 actor 经专有字段传递。
 def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[str, object]:
+    from ...conversation.host_actor import clear_actor_attributes
     attrs = (
         dict(raw_params.get("attributes") or {})
         if isinstance(raw_params.get("attributes"), dict)
         else {}
     )
+    clear_actor_attributes(attrs)
     attrs.pop(DIRECT_PARENT_TOOL_AUTHORITY_ATTR, None)
     attrs.pop("host_model_decision.v1", None)
     attrs.pop("host_subagent_model_advice.v1", None)

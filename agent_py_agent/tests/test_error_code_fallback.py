@@ -63,6 +63,28 @@ def test_mapped_codes_are_registered_in_taxonomy() -> None:
         assert code in ERROR_CONTRACTS, code
 
 
+def test_host_actor_rejections_never_recommend_retry_or_change_owner() -> None:
+    for code in (
+        "CHANNEL_ACTOR_IDENTITY_REQUIRED", "CHANNEL_ACTOR_IDENTITY_INVALID",
+        "CHANNEL_ACTOR_IDENTITY_CONFLICT", "CHANNEL_ACTOR_SCOPE_MISMATCH",
+        "SCHEDULER_NOT_AUTHORIZED",
+    ):
+        contract = ERROR_CONTRACTS[code]
+        assert contract.category == "permission"
+        assert not contract.retryable
+        assert contract.recommended_action == "report_blocker"
+
+
+def test_receipt_identity_errors_do_not_automatically_replay_business_work() -> None:
+    for code in (
+        "MODEL_RESPONSE_PROVENANCE_MISSING", "MODEL_RESPONSE_PROVENANCE_MISMATCH",
+        "MODEL_RESPONSE_PURPOSE_MISMATCH", "BACKGROUND_RECEIPT_CONTRACT_INVALID",
+        "BACKGROUND_RECEIPT_PUBLIC_OBLIGATION", "BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE",
+    ):
+        assert not ERROR_CONTRACTS[code].retryable
+        assert ERROR_CONTRACTS[code].recommended_action in {"report_blocker", "change_strategy"}
+
+
 def test_provider_quota_exhausted_keeps_its_registered_code() -> None:
     # obsfix34b 验证：quota 异常自带 error_code，fallback 第一步原样保留——不是靠类型映射；
     # 若未来去掉该属性，需要补类型映射并让本用例继续通过。
