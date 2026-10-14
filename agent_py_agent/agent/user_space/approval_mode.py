@@ -1,4 +1,4 @@
-# LLM: 审批模式只存既有 owner 策略；插件引用统一守门，自动或长期授权不能代替本人确认，身份边界不变。
+# LLM: 显式模式只存原 owner 策略，缺字段继承宿主唯一 capability 默认；自动执行不扩大身份、路径或插件权限。
 # 模块用途: 保存用户审批模式并为普通请求提供续跑，插件确认始终等待用户。
 
 from __future__ import annotations
@@ -33,13 +33,14 @@ class ApprovalModeError(ValueError):
     pass
 
 
-# LLM: home 由宿主解析；旧文件缺新增可选字段时沿用原 ask 语义，未知 schema/模式和坏 JSON 均拒绝。
+# LLM: home 由宿主解析；缺字段保留为继承，未知 schema/模式和坏 JSON 均拒绝，不能按默认值掩盖坏账。
 # 函数用途: 读取本用户原有工具策略，保留其他字段，不创建文件。
 def _policy(home: object) -> dict:
-    report = read_json_object_report(Path(home.owner_tool_policy_json), context="owner.approval_mode")
+    path = Path(home.owner_tool_policy_json)
+    report = read_json_object_report(path, context="owner.approval_mode")
     if report.load_error is not None:
         raise ApprovalModeError("工具审批配置无法读取，未放宽权限。")
-    data = report.payload or default_tool_policy_payload()
+    data = report.payload if path.exists() else default_tool_policy_payload()
     mode = data.get("permission_mode", "ask")
     if data.get("schema_version") != "tool-policy.v1" or not isinstance(mode, str) or mode not in APPROVAL_MODES:
         raise ApprovalModeError("工具审批配置无效，未放宽权限。")
@@ -61,10 +62,36 @@ def is_permission_admin(home: object) -> bool:
     return getattr(home, "owner_provider", None) == "local" and getattr(home, "owner_kind", None) == "main"
 
 
-# LLM: 手改文件不能为普通 owner 提权；非法 full 模式须明确报错而不是静默降级。
-# 函数用途: 读取经过 owner 身份核验的模式；无用户选择时保留原默认确认。
+# LLM: 宿主默认只从共享 home/config 的 capability 文件读取；普通 owner 的局部配置不能扩大默认审批权限。
+# 函数用途: 查询部署审批默认与有界等待时间，缺文件用随包默认，坏配置明确失败。
+def deployment_approval_config(home: object):
+    from ..capability.runtime_config_reload import deployment_capability_config
+    try:
+        config = deployment_capability_config(home)
+        if config.owner_default_permission_mode not in {"ask", "auto"}:
+            raise ValueError("invalid owner default")
+        if type(config.tool_approval_timeout_seconds) is not int or config.tool_approval_timeout_seconds <= 0:
+            raise ValueError("invalid approval deadline")
+        return config
+    except (OSError, TypeError, ValueError, AttributeError) as exc:
+        raise ApprovalModeError("宿主审批配置无法读取或无效，未放宽权限。") from exc
+
+
+# LLM: 模式和来源是原 owner 策略与宿主默认的只读投影，不含正文、路径或秘密；未知配置拒绝而非猜成 auto。
+# 函数用途: 给执行器与自身能力查询提供同源的审批模式及其来源。
+def read_permission_state(home: object) -> dict:
+    data = _policy(home)
+    explicit = "permission_mode" in data
+    mode = data["permission_mode"] if explicit else deployment_approval_config(home).owner_default_permission_mode
+    return {"mode": mode, "source": "owner" if explicit else "deployment",
+            "approval_mode": "auto" if mode in {"auto", "full-access"} else "ask",
+            "is_admin": is_permission_admin(home)}
+
+
+# LLM: 手改文件不能为普通 owner 提权；显式 full 只认本机管理员，缺字段沿共享部署默认。
+# 函数用途: 返回当前模式；修改默认不会改写任何用户策略文件。
 def read_permission_mode(home: object) -> str:
-    return _policy(home).get("permission_mode", "ask")
+    return read_permission_state(home)["mode"]
 
 
 # LLM: 权限变更在新工作片边界冻结；子代理无条件保持家目录墙，旧部署尚无用户选择时不改原配置。
@@ -131,6 +158,7 @@ def execute_approval_mode_operation(home: object, operation: str, mode: object =
     return {
         "ok": True, "mode": mode, "scope": "current_owner",
         "is_admin": is_permission_admin(home),
+        "source": read_permission_state(home)["source"],
         "message": f"已{'保存' if operation == 'set' else '读取'}：{APPROVAL_MODES[mode]}。"
         "审批设置适用于本用户所有会话和子代理；路径权限在下一回合生效，不中断运行。"
         "子代理仍限定家目录；禁用工具、灾难命令保护和 SOUL 等本人确认不变。",

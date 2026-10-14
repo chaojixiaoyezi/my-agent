@@ -1,5 +1,8 @@
 # Verification：开发推进
 
+2026-10-14 IM 必要输入：原工具归档在完整调用/结果配对后保留 input_id/status/expires_at 和 opaque credential_ref；秘密表单、方案、密文不进入归档。共享 input_tool_boundary 在归档后置 armed、当轮 TASK_INPUT_WAIT 结束，不追加模型轮询；真实 tool + fake native LLM 验证一模型请求后结束，原任务 active 保留。详见 [持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。
+
+
 2026-10-14 B 取消复核：`tool_call_runtime` 的宿主等待回调经 Registry 只接 `on_handler_progress_guarded`，原 Executor 的 observer 以 typed keyword 传 `still_current`；不从模型参数读入、不把谓词序列化、不开第二条发布。停止先给无等待信号，close 固定短预算；真实 chunk 锁后/下一投影前复核，handler 已返回后阻塞等待不新追加。已进入第三方回调不可撤销，如实保留旧事件时间和生命周期，不假装清掉已写的事件。回归覆盖真实 Registry 接线和原 chunk 锁，未放宽任何授权或沙箱。
 
 2026-10-13 IM 长工具观察：`tool_call_runtime` 仅向唯一执行器传宿主 typed sink 和刷新间隔，实际 handler 边界才启动单调时间心跳；不改授权、归档或验证事件。off 只展示极简状态，更新时间来自执行侧事件；拒绝/取消/异常和真实 Registry 联测已覆盖，Linux 长等待验收待做。见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。

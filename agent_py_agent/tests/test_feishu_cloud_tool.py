@@ -43,7 +43,7 @@ class _CloudHandler(BaseHTTPRequestHandler):
             assert body == {'app_id': 'cli_synthetic', 'app_secret': SECRET}
             result = {'code': 0, 'tenant_access_token': TOKEN, 'expire': 7200}
         else:
-            assert self.headers['Authorization'] == 'Bearer ' + TOKEN
+            assert self.headers['Authorization'] == 'Bearer ' + getattr(self.server, 'expected_token', TOKEN)
             if self.command == 'POST' and self.path.endswith('/values_append'):
                 self.server.rows.extend(body['valueRange']['values'])
             elif self.command == 'PUT':
@@ -98,10 +98,13 @@ def _agent(tmp_path, identity):
         my_agent_owner_provider=identity.provider, my_agent_owner_kind=identity.owner_kind,
         my_agent_owner_id=identity.owner_id, feishu_app_id='cli_synthetic', feishu_app_secret=SECRET)
     agent = SimpleAgent(config, resolve_owner_home(tmp_path/'home', identity).home_dir)
+    deployment_file = agent.home_paths.root / 'config' / 'capability_config.yaml'
+    deployment_file.parent.mkdir(exist_ok=True, parents=True)
+    deployment_file.write_text('feishu_cli_backend_enabled: false\n')
     # 原准确许可合同仍作为关闭自助权限时的回归；实时协作者路径由独立 HTTP 用例覆盖。
     from agent_py_agent.agent.capability.config import CapabilityConfig
     agent._capability_config_runtime_snapshot = SimpleNamespace(
-        config=CapabilityConfig(feishu_cloud_collaborator_authorization_enabled=False))
+        config=CapabilityConfig(feishu_cloud_collaborator_authorization_enabled=False, feishu_cli_backend_enabled=False))
     return agent
 
 

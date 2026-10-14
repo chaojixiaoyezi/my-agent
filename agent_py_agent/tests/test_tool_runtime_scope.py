@@ -276,7 +276,7 @@ def test_execution_uses_same_frozen_availability_snapshot_seen_by_model(tmp_path
 
 
 def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
-    """LLM: permission_mode comes from owner identity, not a hard-coded main-agent label."""
+    """LLM: 审批模式来自 owner 原策略，owner 类型只表示作用域；自查不得混用两种事实。"""
     agent = SimpleAgent(
         AgentConfig(
             enable_tools=True,
@@ -300,6 +300,7 @@ def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
     payload = json.loads(
         result.metadata["handler_details"]["tool_output_policy"]["live_prompt_output"]
     )
-    assert payload["permission_mode"] == "owner_scoped"
+    assert payload["permission_scope"] == "owner_scoped"
+    assert payload["permission_mode"] == "auto"
     assert payload["visible_tool_count"] == 1
     assert [item["name"] for item in payload["tools"]] == ["list_tools"]

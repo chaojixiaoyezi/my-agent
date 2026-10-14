@@ -106,6 +106,7 @@ agent_py_agent = [
   "skills/**/*",
   "vendor/bin/*",
   "vendor/bubblewrap/*",  # 随二进制携带原许可、对应源码与来源说明
+  "vendor/lark_cli/*",  # 受控飞书 CLI 的上游身份与编译依赖许可
 ]
 
 [tool.pytest.ini_options]

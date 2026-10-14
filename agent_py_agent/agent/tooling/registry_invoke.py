@@ -10,6 +10,7 @@ from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
@@ -229,7 +230,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
 
 # LLM: 读取/写入范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。
 #   写入上下文只在插件代理协商且工具声明写效果时才下发（见 PluginProxyTool._request_meta）。
-# 函数用途: 冻结本次调用的执行权、取消和插件读取/写入上下文，不修改共享 handler。
+# 函数用途: 冻结本次调用的执行权、取消、文件范围与本人公开权限事实，不修改共享 handler。
 def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationContext:
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
                                          owner_scope_root=request.owner_scope_root,
@@ -237,6 +238,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         execution_authority_check=request.execution_authority_check,
+        execution_permission_context=_execution_permission_context(request.write_boundary),
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
             granted_external_roots=granted_external_work_roots(request.write_boundary, request.owner_scope_root),
@@ -245,6 +247,22 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
         ),
     )
+
+
+# LLM: 只消费执行器已收紧的 write_boundary；不读取模型 args、插件内容或原配置，不把投影用于任何授权决策。
+# 函数用途: 为本人发现冻结实际网络/Shell边界的小字典，不暴露宿主内部路径或秘密。
+def _execution_permission_context(write_boundary):
+    boundary = write_boundary if isinstance(write_boundary, dict) else {}
+    permissions = boundary.get("effective_permissions") or {}
+    child_network = permissions.get("network_enabled", True) if isinstance(permissions, dict) else True
+    raw_scope = boundary.get("network_scope")
+    scope = tuple(value for value in raw_scope if isinstance(value, str)) if isinstance(raw_scope, (list, tuple)) else ()
+    return MappingProxyType({
+        "network_access_mode": str(boundary.get("network_access_mode") or "inherit"),
+        "network_enabled": child_network is not False and boundary.get("network_access_mode") != "disabled",
+        "shell_access_mode": str(boundary.get("shell_access_mode") or ""),
+        "network_scope": scope,
+    })
 
 
 def _with_effective_registry_workspace(

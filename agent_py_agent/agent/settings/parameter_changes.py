@@ -137,8 +137,12 @@ def _target(user_path: Path | None) -> Path:
 #   （agent.capability_config_path 或 default_capability_config_path(agent.root)，由调用方解析传入），
 #   文件不存在时允许新建（运行时读不到时按默认实例走，所以建好文件后重启就能读到）。runtime_guard
 #   运行时没有用户覆盖层，写什么都不会生效，这里直接拒绝，不给目标路径。
+# LLM: 宿主部署字段无参数中心写目标，显式拒绝；不可写成 owner 局部覆盖后假报已经生效。
 # 函数用途: 按参数来源给出实际写入目标（主配置=用户配置文件，capability=运行时读取的文件）。
 def _write_target(spec: ParameterSpec, paths: WritePaths) -> Path:
+    from ..capability.runtime_config_reload import DEPLOYMENT_CAPABILITY_KEYS
+    if spec.key in DEPLOYMENT_CAPABILITY_KEYS:
+        raise ParameterChangeError("PARAMETER_SOURCE_READ_ONLY", "宿主部署配置只能由部署者维护，参数中心不写 owner 局部文件。")
     if spec.source == SOURCE_AGENT:
         return _target(paths.user_path)
     if spec.source == SOURCE_CAPABILITY:

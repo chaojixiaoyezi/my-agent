@@ -37,11 +37,11 @@ def tool_manifest_payload(snapshot: object) -> dict[str, object]:
     permission_mode = _permission_mode(snapshot.owner_type)
     return {
         "schema_name": "tool_runtime_manifest",
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": snapshot.run_id,
         "snapshot_hash": snapshot.snapshot_hash,
         "owner_type": snapshot.owner_type,
-        "permission_mode": permission_mode,
+        "permission_scope": permission_mode,
         "allowed_tools": (
             sorted(snapshot.allowed_tools) if snapshot.allowed_tools is not None else None
         ),
@@ -64,6 +64,8 @@ def tool_manifest_payload(snapshot: object) -> dict[str, object]:
     }
 
 
+# LLM: 只投影当前快照内真实模型声明，不能把用途或示例当作执行授权。
+# 函数用途: 展示工具参数、用途、可用性与原审批策略。
 def _runtime_item(
     runtime: object,
     *,
@@ -97,7 +99,7 @@ def _runtime_item(
         },
         "visible_in_context": True,
         "executable_in_context": executable,
-        "permission_mode": permission_mode,
+        "permission_scope": permission_mode,
     }
 
 
@@ -147,7 +149,14 @@ def _runtime_policy_item(policy: object) -> dict[str, object]:
                 for conditions, effect in resolver.by_parameter_combinations
             ],
         },
-        "approval_policy": {"mode": policy.approval_policy.mode},
+        "approval_policy": {
+            "mode": policy.approval_policy.mode,
+            "always_effects": list(policy.approval_policy.always_effects),
+            "owner_grant_parameters": [
+                {"field": name, "values": list(values)}
+                for name, values in policy.approval_policy.owner_grant_parameters
+            ],
+        },
         "sandbox_policy": {
             "mode": policy.sandbox_policy.mode,
             "contained_by_parameter": [

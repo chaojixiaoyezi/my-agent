@@ -7,6 +7,8 @@ from typing import Any
 
 from ..subagents.role_templates import (
     DIRECT_CHILD_CONTROL_TOOLS,
+    OWNER_TASK_TOOLS,
+    SELF_DISCOVERY_TOOLS,
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
 )
@@ -14,6 +16,12 @@ from .models import SESSION_TASK_WAKE_REASON, SUBAGENT_LIFECYCLE_WAKE_REASONS
 
 # 后台唤醒继续同一 Agent；本表提供默认目录，owner/task 策略在此基础上收紧。
 _BACKGROUND_WORK_TOOLS = (
+    *SELF_DISCOVERY_TOOLS,
+    *OWNER_TASK_TOOLS,
+    "read_artifact",
+    "apply_patch",
+    "web_search",
+    "web_fetch",
     "skill_search",
     "remember",
     "update_persona",

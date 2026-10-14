@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ class ToolApprovalRequest:
     binding: dict[str, str]
     options: tuple[dict[str, str], ...]
     requested_at: float = field(default_factory=time.time)
+    expires_at: float = 0.0
 
     # LLM: 校验必须在跨线程/跨进程发布前完成；不得容忍空 binding 或展示选项注入未知 decision。
     # 函数用途: 规范审批请求并拒绝不完整身份或非法选择。
@@ -76,7 +78,12 @@ class ToolApprovalRequest:
         object.__setattr__(self, "description", str(self.description or ""))
         object.__setattr__(self, "binding", binding)
         object.__setattr__(self, "options", options)
-        object.__setattr__(self, "requested_at", max(0.0, float(self.requested_at or 0.0)))
+        requested_at = max(0.0, float(self.requested_at or 0.0))
+        expires_at = float(self.expires_at or 0.0)
+        if not math.isfinite(requested_at) or not math.isfinite(expires_at) or expires_at < 0:
+            raise ValueError("tool approval times must be finite and nonnegative")
+        object.__setattr__(self, "requested_at", requested_at)
+        object.__setattr__(self, "expires_at", expires_at)
 
     # LLM: payload 只包含已校验公开字段与精确 binding；调用方不得补入原始完整 arguments 或 secret。
     # 函数用途: 生成 Gateway/TUI 可安全传递的审批请求对象。
@@ -93,6 +100,7 @@ class ToolApprovalRequest:
             "binding": dict(self.binding),
             "options": [dict(item) for item in self.options],
             "requested_at": self.requested_at,
+            "expires_at": self.expires_at,
         }
 
     # LLM: 批准记录必须复用请求的完整 binding；UI 返回的文案、option label 或 feedback 都没有授权效力。
@@ -112,12 +120,14 @@ class ToolApprovalRequest:
         if decision.permission_id != self.permission_id or decision.decision not in {
             "denied",
             "cancelled",
+            "unavailable",
         }:
             raise ValueError("approval decision does not reject this request")
         return {
             **self.binding,
             "approval_id": self.permission_id,
             "decision": decision.decision,
+            "reason_code": decision.reason_code,
             "status": "CANCELLED" if decision.decision == "cancelled" else "DENIED",
         }
 
@@ -146,6 +156,7 @@ class ToolApprovalRequest:
             if isinstance(raw_options, (list, tuple))
             else (),
             requested_at=float(value.get("requested_at") or 0.0),
+            expires_at=float(value.get("expires_at") or 0.0),
         )
 
 
@@ -157,6 +168,7 @@ class ToolApprovalDecision:
     decision: ToolApprovalDecisionValue
     feedback: str = ""
     decided_at: float = field(default_factory=time.time)
+    reason_code: str = ""
 
     # LLM: 决定必须精确绑定 permission_id 并落在有限安全枚举；未知字符串 fail-closed。
     # 函数用途: 规范一条审批答复。
@@ -167,6 +179,12 @@ class ToolApprovalDecision:
             raise ValueError("tool approval decision requires permission_id")
         if decision not in _DECISION_VALUES:
             raise ValueError(f"invalid tool approval decision: {decision}")
+        reason = str(self.reason_code or "")
+        if reason not in {"", "APPROVAL_TIMEOUT", "APPROVAL_NONINTERACTIVE", "APPROVAL_UNAVAILABLE", "APPROVAL_TRANSPORT_FAILED"}:
+            raise ValueError("invalid tool approval reason")
+        if reason and decision in {"approved", "approved_session", "approved_owner"}:
+            raise ValueError("a failed approval cannot approve execution")
+        object.__setattr__(self, "reason_code", reason)
         object.__setattr__(self, "permission_id", permission_id)
         object.__setattr__(self, "decision", decision)
         object.__setattr__(self, "feedback", str(self.feedback or "").strip())
@@ -190,6 +208,7 @@ class ToolApprovalDecision:
             "decision": self.decision,
             "feedback": self.feedback,
             "decided_at": self.decided_at,
+            **({"reason_code": self.reason_code} if self.reason_code else {}),
         }
 
     # LLM: 外部 payload 必须重新验证枚举和 id；缺失值不得默认批准。
@@ -201,6 +220,7 @@ class ToolApprovalDecision:
             decision=str(value.get("decision") or "unavailable"),
             feedback=str(value.get("feedback") or ""),
             decided_at=float(value.get("decided_at") or 0.0),
+            reason_code=str(value.get("reason_code") or ""),
         )
 
 
@@ -212,6 +232,20 @@ class ToolApprovalWaitOptions:
     discovery_seconds: float | None = None
     consumer_lease_seconds: float | None = None
     mode_decision_provider: Callable[[ToolApprovalRequest], ToolApprovalDecision | None] | None = None
+
+
+# LLM: 截止取原请求或原 pending 记录；记录需有限正时间，显式请求不能被记录延长；旧无记录请求沿 capability 默认有界。
+# 函数用途: 为等待、展示与回调校验同一绝对截止，不写文件或授予权限。
+def approval_deadline(request: ToolApprovalRequest, recorded_expires_at: object = None) -> float:
+    if recorded_expires_at is not None:
+        recorded = float(recorded_expires_at)
+        if not math.isfinite(recorded) or recorded <= 0:
+            raise ValueError("tool approval record deadline must be finite and positive")
+        return min(request.expires_at, recorded) if request.expires_at else recorded
+    if request.expires_at:
+        return request.expires_at
+    from ..capability.config import CapabilityConfig
+    return request.requested_at + CapabilityConfig().tool_approval_timeout_seconds
 
 
 # LLM: 只读宿主附加的 plugin_gate_ref；未知非空引用也强制询问，解析与精确批准在执行器，合同层不反向导入插件实现。

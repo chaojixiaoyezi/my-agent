@@ -1,4 +1,4 @@
-"""LLM: Role defaults share the common shell surface; exact/read-only grants remain bounded.
+"""LLM: Role defaults share common shell/self-discovery/owner-task groups; exact/read-only grants remain bounded.
 
 模块用途: 加载角色快照与通用工具默认值；交互终端和普通命令都受 owner 权限控制。
 """
@@ -54,7 +54,14 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # 配置用途: worker 保留通用执行能力；coordinator 额外获得创建、只读状态、直属插话、取消和权限裁决，进展由宿主回传。
 # 每个角色默认都能用 record_lesson 记可复用做法（可选），经验随结果交回宿主。
 # 宿主凭据和本人消息工具沿同一 owner/资源/原来源门，默认执行孩子也需要这些通用通道，不能只能在主代理手写凭据脚本。
+# LLM: 当前 owner 的通用任务工具是默认候选，父实时快照、角色和资源门仍取交集；不能将未配置能力默认为 ready。
+# 常量用途: 给普通执行子代理和后台续跑复用同一凭据、云资源与本人消息入口。
+OWNER_TASK_TOOLS = ("request_credentials", "feishu_cloud", "send_message")
+# LLM: 发现入口只读现有授权，默认可查询本人；查询不增加工具、路径或秘密访问权限。
+# 常量用途: 统一主、子和后台任务的本人能力查询入口。
+SELF_DISCOVERY_TOOLS = ("list_tools", "tool_search")
 ROLE_BASE_TOOLS = [
+    *SELF_DISCOVERY_TOOLS,
     *AGENT_PROGRESS_TOOLS,
     *READ_ONLY_TOOLS,
     *REPORT_WRITE_TOOLS,
@@ -62,9 +69,7 @@ ROLE_BASE_TOOLS = [
     *COLLABORATION_TOOLS,
     CAPABILITY_REQUEST_TOOL,
     RECORD_LESSON_TOOL,
-    'request_credentials',
-    'feishu_cloud',
-    'send_message',
+    *OWNER_TASK_TOOLS,
 ]
 # LLM: This is the complete edge-local management surface. Leaf role snapshots
 # remove every item; only a typed can_spawn_children coordinator may inherit it.

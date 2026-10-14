@@ -694,7 +694,7 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
 
 # LLM: 只保留恢复所需结构字段（含 && 串联通过时的 verification_evidence_chain）；process复用模型有界投影，
 #   插件决定仅从executor宿主metadata专键进入tool_result_envelope，writer读取同一路径；禁止复制任意metadata或正文。
-# 函数用途: 保留核验、清理及恢复必要事实，让下一工作片按同一口径读取，不修改执行状态。
+# 函数用途: 保留核验、清理及输入等待的准确恢复引用，让下一工作片按同一口径读取，不修改执行状态。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = _result_details(result)
     # B5 第 5 段：插件门决定由 executor 写在 ToolResult 的 metadata 顶层（不在 handler_details 里）；
@@ -753,6 +753,8 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
     execution = _compact_tool_execution(envelope.get("tool_execution"))
     if execution:
         compact["tool_execution"] = execution
+    from ..conversation.input_tool_boundary import input_archive_facts
+    compact.update(input_archive_facts(envelope))
     output = envelope.get("output")
     if isinstance(output, dict):
         compact["output"] = {key: output[key] for key in keys if key in output}

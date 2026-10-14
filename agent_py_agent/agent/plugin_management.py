@@ -113,16 +113,22 @@ class PluginManagementContext:
     event_hub: object | None = None
     legacy_sandbox_default: bool = True
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    # 唯一宿主部署配置给出的确认期限；不读 owner workspace 局部配置。
+    approval_timeout_seconds: int = 1800
 
 
-# LLM: 冷/热入口共用宿主配置及原权限；环境来源从 config 提取，不借原命令 arguments 注入或显示。
+# LLM: 冷/热入口共用原权限与唯一共享部署期限，读取失败关闭动作；环境来源从 config 提取，不借原命令 arguments 注入。
 # 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
     actor_id: str, channel: str, conversation_id: str, is_admin: bool,
 ) -> PluginManagementContext:
     from .settings.secret_ref import managed_secret_environment_names
-    from .user_space.approval_mode import permission_config, read_approval_mode
+    from .user_space.approval_mode import (
+        deployment_approval_config,
+        permission_config,
+        read_approval_mode,
+    )
     from .user_space.owner_access import (
         is_complete_local_admin_owner,
         resolve_owner_scope_and_access,
@@ -132,7 +138,9 @@ def plugin_management_context(
     policy = resolve_effective_owner_policy(home)
     allowed = not policy.load_errors and bool(config.enable_tools)
     approval_mode = "ask"
+    approval_timeout_seconds = 1800
     try:
+        approval_timeout_seconds = deployment_approval_config(home).tool_approval_timeout_seconds
         effective = permission_config(config, home)
         if hasattr(home, "owner_tool_policy_json"):
             approval_mode = read_approval_mode(home)
@@ -162,7 +170,8 @@ def plugin_management_context(
                                    plugin_events_enabled=bool(getattr(config, "plugin_events_enabled", False)),
                                    legacy_sandbox_default=bool(getattr(config, "plugin_legacy_sandbox_default", True)),
                                    events_owner_allowed=is_complete_local_admin_owner(home),
-                                   host_credential_env_names=managed_secret_environment_names(config))
+                                   host_credential_env_names=managed_secret_environment_names(config),
+                                   approval_timeout_seconds=approval_timeout_seconds)
 
 
 # LLM: 老格式授权和环境来源由同一宿主上下文投影；来源只擦洗进程，不改变 v8/legacy 的权限分流。
@@ -407,13 +416,13 @@ class PluginManagement:
         request = self._request(thread.thread_id, request_id, tool_name, arguments)
         return self._execute(repo, request, arguments, request_permission, cancellation_token)
 
-    # LLM: 原 HostCommand 只使用当前消费者与令牌；结果严格读回后才消费退出证据，清理失败不翻转成功或重跑。
+    # LLM: 原 HostCommand 使用当前消费者、令牌与宿主冻结期限；结果严格读回后才消费退出证据，清理失败不翻转成功或重跑。
     # 函数用途: 在原执行区间处理明确管理动作，并分别返回执行结果与退出证据消费情况。
     def _execute(self, repo: RuntimeRepository, request: HostCommandRequest, arguments: dict,
                  request_permission: Callable | None, cancellation_token: CancellationToken | None) -> dict:
         result = execute_host_command(repo, request, lambda binding: replace(
             self._prepare(repo, binding, arguments), cancellation_token=cancellation_token),
-            request_permission=request_permission)
+            request_permission=request_permission, approval_timeout_seconds=self.context.approval_timeout_seconds)
         cleanup = consume_plugin_cleanup(self.context.owner, repo, request)
         return {**result, "cleanup_consumption": cleanup} if cleanup else result
 

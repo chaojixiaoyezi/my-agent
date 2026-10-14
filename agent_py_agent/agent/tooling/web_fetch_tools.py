@@ -162,18 +162,21 @@ class WebFetchTool(BaseTool):
     # LLM: 凭据回显净化必须覆盖成功正文和 HTTP 错误回执，并在格式化/归档前完成；真正请求继续复用逐跳 pin。
     # 函数用途: 发起单次 HTTP 请求，移除本次秘密在响应正文、头和错误中的常见回显。
     def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolHandlerOutcome:
-        response = fetch_raw_response(
-            FetchRawRequest(
-                tool="web_fetch",
-                url=request.url,
-                method=request.method,
-                headers={"User-Agent": "MyAgent-WebFetch/1.0", **request.headers},
-                data=None if request.body_text is None else request.body_text.encode("utf-8"),
-                timeout=self.timeout,
-            ),
-            format_http_error=self.format_http_error,
-            resolve_pin=self._resolve_pin,
-        )
+        raw = FetchRawRequest(tool="web_fetch", url=request.url, method=request.method,
+            headers={"User-Agent": "MyAgent-WebFetch/1.0", **request.headers},
+            data=None if request.body_text is None else request.body_text.encode("utf-8"), timeout=self.timeout)
+        # LLM: send 固定原逐跳 pin，不接受任意脚本、库或模型提供的请求回调。
+        # 函数用途: 为宿主登录和业务请求复用本工具的实际网络许可。
+        def send(raw_request):
+            return fetch_raw_response(raw_request, format_http_error=self.format_http_error, resolve_pin=self._resolve_pin)
+        try:
+            if request.credential_ref and getattr(self, "credential_authenticator", None):
+                response, secrets = self.credential_authenticator(request.credential_ref, raw, send)
+                request = replace(request, secrets_to_redact=secrets)
+            else:
+                response = send(raw)
+        except (ValueError, KeyError, TypeError):
+            return ToolHandlerOutcome("web_fetch", False, "私人认证未完成、已失效或方案无效。", error_code="CREDENTIAL_INPUT_UNAVAILABLE")
         if isinstance(response, ToolHandlerOutcome) and request.secrets_to_redact:
             response = replace(response,
                 output=_redact_secret_echo(response.output, request.secrets_to_redact),
@@ -203,7 +206,8 @@ class WebFetchTool(BaseTool):
         url = self.normalize_url(params.get("url"))
         headers = {} if params.get("headers") is None else normalize_headers(params.get("headers"))
         secrets = ()
-        if reference := params.get("credential_ref"):
+        reference = str(params.get("credential_ref") or "")
+        if reference and not getattr(self, "credential_authenticator", None):
             resolver = getattr(self, "credential_resolver", None)
             if resolver is None:
                 raise ValueError("凭据注入不可用")
@@ -216,6 +220,7 @@ class WebFetchTool(BaseTool):
             method=normalize_method(params.get("method", "GET")),
             headers=headers,
             secrets_to_redact=secrets,
+            credential_ref=reference,
             body_text=body_text,
             fmt=normalize_fetch_format(mode),
             max_chars=max_chars,
@@ -234,6 +239,7 @@ class _WebFetchRequest:
     max_chars: int
     refresh: bool = False
     secrets_to_redact: tuple[str, ...] = ()
+    credential_ref: str = ""
 
 
 # LLM: 只净化本调用凭据的原文、JSON与URL/表单编码回显；须在格式化、归档和模型前调用，urlencode产生的+不能漏掉。
@@ -268,7 +274,7 @@ def _execute_single_request(
     request: _WebFetchRequest,
     max_chars: int,
 ) -> ToolHandlerOutcome:
-    cache_key = request.method == "GET" and not request.headers and request.body_text is None
+    cache_key = request.method == "GET" and not request.headers and request.body_text is None and not request.credential_ref
     cached = _cache_get(tool, request.url, request.fmt) if cache_key and not request.refresh else None
     cache_hit = cached is not None
     response = cached or tool._fetch_raw_request(request)

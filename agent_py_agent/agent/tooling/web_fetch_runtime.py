@@ -59,6 +59,7 @@ class FetchRawRequest:
     data: bytes | None
     timeout: int
     max_bytes: int = _MAX_BODY_BYTES
+    authorization_origin: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,10 @@ def fetch_raw_response(request: FetchRawRequest, *, format_http_error, resolve_p
         request = replace(request, timeout=remaining)
         outcome = _do_hop(_HopReq(_target_for(url, pin.ip), request, url, body), format_http_error)
         if outcome.redirect_to:
+            if request.authorization_origin:
+                from ..user_space.task_credentials import credential_origin
+                if credential_origin(outcome.redirect_to) != request.authorization_origin:
+                    return ToolHandlerOutcome(request.tool, False, "私人认证请求不能跨 origin 重定向", error_code="TOOL_PERMISSION_DENIED")
             request = _redirect_request(request, url, outcome.redirect_to, outcome.status)
             url, body = request.url, request.data
             continue
@@ -364,7 +369,9 @@ def _finalize_hop(hop: _HopReq, resp: Any, format_http_error) -> RawResponsePart
         )
     if resp.status >= 400:
         err = urllib.error.HTTPError(hop.url, resp.status, resp.reason or "", resp.headers, io.BytesIO(body))
-        return format_http_error(hop.request.tool, err, MIN_RESPONSE_PREVIEW_CHARS)
+        result = format_http_error(hop.request.tool, err, MIN_RESPONSE_PREVIEW_CHARS)
+        result.result_envelope["http_status"] = resp.status
+        return result
     return RawResponseParts(resp.status, resp.headers, body, hop.url)
 
 

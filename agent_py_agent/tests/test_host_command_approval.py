@@ -43,7 +43,7 @@ def test_approve_resumes_exact_pending_call_and_persists_single_execution(tmp_pa
 
 
 @pytest.mark.parametrize("decision,expected", [("denied", "APPROVAL_REJECTED"), ("cancelled", "CANCELLED"),
-                                            ("unavailable", "APPROVAL_REQUIRED"), ("approved_session", "APPROVAL_REQUIRED")])
+                                            ("unavailable", "APPROVAL_UNAVAILABLE"), ("approved_session", "APPROVAL_UNAVAILABLE")])
 def test_denial_cancel_unavailable_and_unsupported_session_never_execute(tmp_path, decision, expected):
     repo, request, tool, prepare = approval_case(tmp_path)
     result = execute_host_command(repo, request, prepare, request_permission=lambda value, **_: {
@@ -61,7 +61,7 @@ def test_denial_cancel_unavailable_and_unsupported_session_never_execute(tmp_pat
 def test_missing_broken_or_mismatched_consumer_keeps_unstarted_result(tmp_path, consumer):
     repo, request, tool, prepare = approval_case(tmp_path)
     result = execute_host_command(repo, request, prepare, request_permission=consumer)
-    assert result["state"] == "approval_required" and tool.calls == 0, result
+    assert result["state"] == "rejected" and result["error_code"] == "APPROVAL_UNAVAILABLE" and tool.calls == 0, result
 
 
 def test_duplicate_while_approval_waits_observes_original_attempt_without_new_prompt(tmp_path):
@@ -113,3 +113,13 @@ def test_approval_transport_error_after_cancellation_remains_cancelled(tmp_path)
     result = execute_host_command(repo, request, lambda binding: replace(prepare(binding), cancellation_token=token),
                                   request_permission=broken)
     assert result["error_code"] == "CANCELLED" and tool.calls == 0, result
+
+
+@pytest.mark.parametrize('reason', ['APPROVAL_TIMEOUT','APPROVAL_NONINTERACTIVE','APPROVAL_TRANSPORT_FAILED'])
+def test_terminal_approval_reason_persists_and_replay_never_requests_again(tmp_path, reason):
+    repo, request, tool, prepare = approval_case(tmp_path)
+    result = execute_host_command(repo, request, prepare, request_permission=lambda payload, **_:
+        ToolApprovalDecision(payload['permission_id'], 'denied', reason_code=reason))
+    assert result['state'] == 'rejected' and result['error_code'] == reason and tool.calls == 0
+    assert execute_host_command(repo, request, prepare,
+        request_permission=lambda *_args, **_kwargs: pytest.fail('不能重新审批终态')) == result

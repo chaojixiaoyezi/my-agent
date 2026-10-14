@@ -159,6 +159,12 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
 #   要么属于宿主控制面。模型永远不能自行改；用户要改就走宿主入口或人工编辑。
 # 常量用途: 声明模型不可自行修改的配置项与原因。
 BOUNDARY_KEYS: dict[str, str] = {
+    "owner_default_permission_mode": "部署默认确认策略；仅部署者修改，模型不能扩大自身执行策略",
+    "tool_approval_timeout_seconds": "工具确认绝对截止；模型不能延长或关闭保护",
+    "feishu_cli_backend_enabled": "决定宿主飞书请求后端；模型不能自行切换执行后端",
+    "feishu_user_oauth_enabled": "本人OAuth功能的部署开关，模型不能自行启用",
+    "feishu_oauth_redirect_uri": "OAuth准确回调地址，模型不能修改认证去向",
+    "feishu_oauth_scopes": "部署允许申请的本人飞书授权范围，模型不能扩权",
     "access_mode": "决定工具/命令的权限档位，属于安全边界",
     "path_access_mode": "决定路径访问模式（normal/full），属于安全边界",
     "path_dangerous_roots": "决定危险目录清单，属于安全边界",
@@ -465,15 +471,20 @@ def _fact_paths(
 #   tunable=false 两个口径，误以为 max_tokens 改不了）。P17 起按登记表的 source 选文件：主配置用传入的
 #   user_path/default_path；capability 的用户文件是运行时实际读取的那份（capability_path，调用方按
 #   capability_config_for_agent 同一路径解析）；runtime_guard 没有用户覆盖层，只有随包默认。
+# LLM: 宿主部署字段忽略 owner capability_path，必须显式提供运行 config；无准确来源时只返回 unknown。
 # 函数用途: 读取某个键的用户值与随包默认值，并给出当前生效值与来源。
 def read_config_fact(
-    key: str, *, user_path: Path | None, default_path: Path, capability_path: Path | None = None
+    key: str, *, user_path: Path | None, default_path: Path, capability_path: Path | None = None,
+    config: object | None = None,
 ) -> dict[str, object]:
     name = str(key or "").strip()
     source = "agent"
     from .parameter_registry import parameter_registry
 
     spec = parameter_registry().get(name)
+    from ..capability.runtime_config_reload import DEPLOYMENT_CAPABILITY_KEYS
+    if spec is not None and name in DEPLOYMENT_CAPABILITY_KEYS:
+        return _deployment_config_fact(spec, config)
     user_path, default_path = _fact_paths(spec, user_path=user_path, default_path=default_path,
                                           capability_path=capability_path)
     if spec is not None and getattr(spec, "source", "agent") != "agent":
@@ -500,6 +511,26 @@ def read_config_fact(
         "packaged_default": mask_value(name, default_value) if default_value is not None else None,
         "boundary_reason": BOUNDARY_KEYS.get(name, ""),
     }
+
+
+# LLM: 部署事实与 running_value 共用 configured_home_root 和唯一加载器，环境覆盖后来源仍须指向实际宿主；
+#   未知来源不得回落 owner 局部值，展示路径用模板，不向普通用户泄露宿主私有位置。
+# 函数用途: 投影宿主部署字段的实际生效值与只读来源，区分 unknown 和随包默认。
+def _deployment_config_fact(spec: object, config: object | None) -> dict[str, object]:
+    from ..user_space.home_root import configured_home_root
+    from .parameter_registry import running_value
+    effective = running_value(spec, config)
+    known = effective != "unknown"
+    configured = False
+    if known:
+        root = configured_home_root(config)
+        configured = bool(root) and (Path(root).expanduser() / "config/capability_config.yaml").exists()
+    return {"key": spec.key, "effective": mask_value(spec.key, effective),
+            "source": "deployment_config" if configured else "packaged_default" if known else "unknown",
+            "source_scope": "deployment", "source_readonly": True, "user_config_path": "",
+            "deployment_config_path": "<my_agent_home>/config/capability_config.yaml",
+            "user_value": mask_value(spec.key, effective) if configured else None,
+            "packaged_default": mask_value(spec.key, spec.default), "boundary_reason": BOUNDARY_KEYS.get(spec.key, "")}
 
 
 # LLM: 用户配置＝当前进程实际加载的配置文件（config.config_path；Gateway 由 --config 指定，本机是

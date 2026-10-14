@@ -4191,10 +4191,16 @@ def test_background_runtime_snapshot_contains_continuation_tools(tmp_path, reaso
         ),
         tmp_path / "service-root",
     )
+    thread = agent.conversation_store.threads.get_or_create({
+        "channel": "tui", "channel_conversation_id": "background-tools", "channel_user_id": "local",
+    })
+    agent.conversation_store.tasks.bind({
+        "thread_id": thread.thread_id, "task_id": "task-1", "goal": "复核原后台目录", "status": "active",
+    })
     params = _run_params(
-        "thread-1",
+        thread.thread_id,
         BackgroundRunRequest(
-            thread_id="thread-1",
+            thread_id=thread.thread_id,
             task_id="task-1",
             reason=reason,
         ),

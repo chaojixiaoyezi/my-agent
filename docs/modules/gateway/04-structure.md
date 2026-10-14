@@ -1,3 +1,5 @@
+2026-10-14 结构：`feishu_oauth_service.py` 只验证原交互MAC、准确owner/actor及依赖后兑换本人凭据；`http_routes.py`仍是唯一路由表。`permission_bridge/stream_approval`处理有期限的确认结果，不建立第二个权限源；`status_projection`读取原self_context事实。输入等待的到期/恢复使用原runtime wake_queue。
+
 2026-10-13 宿主主体修复：原 GatewayConversationContext.scope 在入口产生专有 actor 字段，conversation/host_actor 校验准确 owner/thread/root 来源；ScheduleTool、执行线程冻结和私人审批复用，子孙只继承父宿主事实。模型 raw attributes 与最新群绑定不能成为认证主体；同群创建人拒绝与本 owner 编号不存在分别表达。
 
 2026-10-13 当前安全入口：原 G2b 强制与客户端 G1 读取始终生效，迁移开关及空头降级删除；原 route.access_tier 在处理 body 前校验 credential/admin，公开与插件令牌档独立。安全 HTTP、日志、附件冻结和 Session 目标复核见 [安全说明](../../design/IM_SECURITY_AUDIT_20261013.md)。本文此前开关/迁移档记录保留为历史，不能作为当前操作指引。
@@ -2876,3 +2878,7 @@ B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed 
 `cli/adapter._feishu_adapter_config` 传递原文字与附件开关；`_ChannelIngressCoordinator.prepare_payload` 仍只在原 prepared 阶段读取准确 parent。Gateway prompt 的引用文字 JSON 是外部数据，命令和宿主 actor/owner 继续只取当前请求。引用文字也共用当前消息/parent/chat证明，混合附件完整准备前不提交；payload_ready 是唯一重投载荷，不建 quote 缓存、第二队列或后台 bot 订阅。
 
 各类引用追加：可见文字、媒体与同次已证转发成员仍沿原 prepared/payload_ready；当前 owner/actor 不从源 sender/chat 转换。卡片隐藏回调不作为正文，逐子资源用自己的准确ID下载；覆盖、省略和截断有结构事实，不新增历史查询、权限表或队列。见[引用消息合同](../../design/FEISHU_QUOTED_MEDIA.md)。
+
+根任务必要输入在 `control_service._prepare_main_task_stop` 的原准确停止提交之后回收，不从自然语言识别。孩子取消由共同子代理取消原语按 exact run 接同一输入模块；控制结果继续携带原资源与输入回收的未确认事实。
+
+`conversation/im_task_status.py` 将原已接单SessionTask的准确目标root与输入refs投影成waiting_input，运行数扣除待输入；原子树BLOCKED单列等待。`control_commands.render_conversation_task_status`只渲染这些typed事实，未知/坏账显示不可用，不读任务文字或表单秘密。输入容量与登记共用原TaskStore锁，每根32条引用，不新增执行槽、输入队列或定时线程。

@@ -21,7 +21,7 @@ def test_tool_manifest_payload_includes_failure_contracts() -> None:
 
     assert payload["visible_tools"] == ["read_file", "write_file"]
     assert payload["executable_tools"] == ["read_file", "write_file"]
-    assert payload["permission_mode"] == "same_as_root_agent"
+    assert payload["permission_scope"] == "same_as_root_agent"
     assert payload["failure_taxonomy"] == sorted(payload["failure_taxonomy"])
     assert "PATH_INVALID" in payload["failure_taxonomy"]
     failure_contracts = {item["code"]: item for item in payload["failure_contracts"]}
@@ -36,7 +36,7 @@ def test_tool_manifest_projects_runtime_policy_without_duplicate_approval_flag()
     policy = write_manifest["runtime_policy"]
 
     assert policy["effect_resolver"]["default_effect"] == "mutating"
-    assert policy["approval_policy"] == {"mode": "dangerous"}
+    assert policy["approval_policy"] == {"mode": "dangerous", "always_effects": [], "owner_grant_parameters": []}
     assert policy["sandbox_policy"] == {
         "mode": "required",
         "contained_by_parameter": [{"field": "path", "values": ["host"]}],
@@ -67,9 +67,9 @@ def test_tool_manifest_payload_uses_owner_scoped_permission_mode_for_non_root_ow
 
     payload = tool_manifest_payload(snapshot)
 
-    assert payload["permission_mode"] == "owner_scoped"
+    assert payload["permission_scope"] == "owner_scoped"
     assert payload["visible_tools"] == ["read_file"]
-    assert payload["tools"][0]["permission_mode"] == "owner_scoped"
+    assert payload["tools"][0]["permission_scope"] == "owner_scoped"
 
 
 def _tool_manifest_payload() -> dict[str, object]:

@@ -1,3 +1,7 @@
+P12补验：`test_task_input_capacity`用33真实线程同根验证32槽、幂等、拒绝回滚；`test_task_input_cancel_deadline`使用原停止入口及1001队列；`test_im_task_input_status`核对精确根引用、不可读状态与待输入/子阻塞展示。
+
+2026-10-14 P01–P12 focused 验收入口：`test_unattended_tool_approval`、`test_im_self_discovery`、`test_persistent_task_input`、`test_task_credential_http`、`test_feishu_cli_backend`、`test_feishu_oauth`，结合原IM回调/停止/后台/插件/owner资源测试。Go宿主包装在编译前执行 `go test ./cmd/my-agent-host`，使用合成RoundTripper跑真实官方命令，不连真实飞书。集成gate使用不重复的focused文件集合；容量仅验证有界依赖和原队列，不证明几十万用户吞吐。最终数字和包身份另记发行验收，不合计有交叉的中间批次。
+
 2026-10-14 引用资料最终发行验收：`.20261014.2` 源码 `a488b76bcedd779555256278c7654ddbd50d30c0`；最终30文件691项0fail/error/skip及Ruff/doc-sync/strict code-size/diff/clean-package全部通过。Linux包内实际字节码41文件976项：968通过、8跳过（7项macOS约束、1项既有daemon心跳模拟限制），自然exit0；1个测试资源未注册integration标记告警不改业务结果。独立23771清单文件与归档、1611业务+2辅助模块递归源码/字节码一致；原安装14.1→14.2更新保留三份配置/数据hash、恢复Gateway后正常停机；TUI输入44.7/52.8ms、正常退出和官方M2.7一次需求均通过、无重试/遗留测试进程。真实飞书租户和Ubuntu22未验。
 
 线上CI不作为本次发布验收：旧main `1f4d93b4` 的fast3.10有207失败，full3.12有206失败；Lint及Windows/macOS guard通过。7个代表只读核对，200个未逐项核实，不能统称夹具问题或全仓绿。已确认后台profile说明表遗漏schedule（不属本次引用改动，待单独修复）；未确认新的引用安全阻断。后续须逐项定位并按原G1/actor/owner合同迁移旧用例，不能恢复旁路。候选准备阶段的参数调用错误和修复前解析红证据保留；最终结果用新的日志/XML记录，不覆盖原失败。
@@ -18653,3 +18657,7 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 2026-10-13 本轮源码验收收口：Linux 唯一失败的原子写夹具修正后，Linux/Mac 整份 scan_costs 各45 passed；其余523项Linux原已通过，不与重叠增量相加。主组合1250 passed、最后错误/命令68 passed；本地严格gate检查采用最终源码与文档，线上CI不作为验收来源。发行 `.20261013.5` 的准确包格式/更新保留/CLI及TUI smoke 记录随包交付。
 
 2026-10-13 B 最终源码 gate：33 个直接相关 focused 文件 **602 passed、0 failed、0 skipped**，涵盖实际模型调用等待、真实原 chunk 写锁/阻塞 sink 的 stop/timeout、工具 handler 收口、private append/锁权限、原超时重试、普通/群权限和安装边界；XML 保留于仓库外。初轮 564 项及各子线数字不重复累计。Ruff、doc sync、strict code-size（hard=0）、diff 与 clean-package 通过；文档收口后再核对提交 gate。非作者独立原锁/第一投影×停止/超时四组合均通过，原 provider cancel 先行，旧事件不补写、不推进下一 sink；每例物理 generate=1。14 项已另经1250项组合及Linux切片验收，.5候选包真实更新保留配置与合成数据；B新增后的交付版本为.6，准确包验收以发行清单和随包验证事实为准。线上CI未作为验收来源，真实飞书运输与现场异常收尾来源仍未确认。
+2026-10-14 飞书 CLI 可行性检查：官方 v1.0.98 Linux amd64 校验后在 1.19 专用目录运行，版本/帮助和合成 bot/user 原始 API dry-run 成功；原二进制不含 authsidecar。错误 schema 编号及空配置日程探针超时保留，不计入成功；没有真实 OAuth、租户读写或 my-agent 普通/群工具链验收，未改产品。命令输出和边界见 [CLI 评估](docs/design/FEISHU_CLI_INTEGRATION_ASSESSMENT.md)。
+2026-10-14 无人值守 IM 评估：四个已有文件 owner_approval_mode/im_tool_approval/orchestration_cancel_subagents_tool/im_subagent_permission_matrix，共89项自然exit0。仓库外真实WS回调合成复现两张不同卡只处理第一张、解锁后原卡重试仍被吞；零真实飞书请求。未改生产源码，不称缺陷已修、真实租户或企业容量已验。范围与后续门见 [综合评估](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)。
+2026-10-14 自身功能发现只读审计：根五文件53/53，自查八文件61/61自然exit0、0fail/skip；发现七文件86项为84过2败，默认折叠DECLARED遗漏已注册feishu_cloud，原红log/XML保留，未修测试。合成实证凭据开关false仍在快照/模型目录声明ready、普通worker默认工具名单缺项及策略短投影丢字段；无真实飞书/模型请求，不把有交叉批次求和。出处、产物与未来验收见 [发现审计](docs/design/IM_CAPABILITY_DISCOVERY_AUDIT.md)。
+2026-10-14 群会话审批挂起追加只读审计：控制/steer/后台输入三文件37过，收口/执行器退出/后台审批三文件60过，均自然exit0且零失败/错误/跳过。真实临时RuntimeRepository验证活PID不孤儿回收、死亡PID收口、零审批合法第10代；加速时钟验证1800秒卡过期仍返回可重试APPROVAL_REQUIRED，新调用重开1800秒，fresh TUI可继续等至模拟3600秒。三历史源码54项纯裁决验证restart always既有且auto/full不绕过，零handler。详细文件/证据/未验边界见[综合追加审计](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)；未改产品或测试、不声称现场复现或修复，前轮发现测试两红仍保留。

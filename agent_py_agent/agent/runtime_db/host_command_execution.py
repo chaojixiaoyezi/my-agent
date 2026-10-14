@@ -28,12 +28,14 @@ _LOGGER = logging.getLogger(__name__)
 # LLM: 只有原 pending 领取者拥有执行及释放回调；审批与资源收尾都在同一执行区间，重送只读原结果。
 #   执行器内产生的未启动拒绝（审批取消/拒绝、前置门失配）必须在 attempt_executor 退出事实落库之前写回执：
 #   否则并发的 query_host_command 会在“执行器已退出、回执未到”的窗口里把它投影成 outcome_unknown（2026-09-25 CI 复现）。
+# LLM: 可调审批期限由生产入口从准确宿主配置注入，本层不从 CWD/owner workspace 猜配置来源。
 # 函数用途: 经原审批/工具链执行一次，先释放调用方本次资源再关闭原运行，不换代或重跑 handler。
 def execute_host_command(
     repo: RuntimeRepository, request: HostCommandRequest,
     prepare: Callable[[HostCommandBinding], ToolExecutorRequest],
     *, request_permission: Callable | None = None,
     release_execution: Callable[[], None] | None = None,
+    approval_timeout_seconds: int | None = None,
 ) -> dict:
     binding = repo.register_host_command(request)
     try:
@@ -72,7 +74,7 @@ def execute_host_command(
                 entered_executor = True
                 execution = ToolExecutor().execute(prepared)
                 execution = resolve_host_command_approval(prepared, execution, request_id=request.request_id,
-                                                           consumer=request_permission)
+                                                           consumer=request_permission, timeout_seconds=approval_timeout_seconds)
                 if _operation(repo, binding) is None and not execution.result.handler_executed:
                     unstarted = (execution.result.reported_error_code,
                                  "approval_required" if execution.decision.status == "ask" else "rejected")

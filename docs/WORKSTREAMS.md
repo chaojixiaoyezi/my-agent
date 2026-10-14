@@ -1,3 +1,5 @@
+2026-10-14 当前同线分工：显式 `gpt-6.1-sol` 三个子代理分别独占审批/卡片/host期限、发现目录及本人OAuth、持久输入/凭据/取消；根独占配置统一源、受控CLI/云接线、文档、综合验证和发布。按前述同线共享checkout约定，跨文件接口先消息确认，不重复提交或操作默认服务。对应交接为 `IM_UNATTENDED_APPROVAL_HANDOFF.md`、`IM_SELF_DISCOVERY_HANDOFF.md`、`IM_PERSISTENT_INPUT_HANDOFF.md`。
+
 # Workstreams
 
 这份文档定义并行开发工作台。

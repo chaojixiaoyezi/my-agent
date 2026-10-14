@@ -259,16 +259,21 @@ class ThreadTaskLink:
     capability_selection_corruption: InvalidTaskCapabilitySelection | None = field(default=None, repr=False)
     # 原主根的宿主专有身份，只由 bind 的 typed keyword 写入；旧缺失不从 attributes/当前发言人补。
     host_channel_actor: dict[str, str] | None = None
+    # 输入依赖只存准确 ID 投影；状态、期限和结果仍由 SessionTaskStore 原输入记录负责。
+    input_dependency_refs: tuple[str, ...] = ()
 
     # LLM: None 完全省略选择键，保持旧序列化字节；损坏 marker 原值保留，不能因更新状态/pins 丢弃证据或重建 pending。
     #   续跑字段同理：空集合完全省略键，旧档案经普通状态更新重写后字节不变。
-    # 函数用途: 生成原任务 JSON，空宿主身份省略，保留已有身份及选择标记的原含义。
+    # 函数用途: 生成原任务 JSON，空宿主身份和输入引用省略，保留已有身份及选择标记的原含义。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         selection = payload.pop("capability_selection")
         corruption = payload.pop("capability_selection_corruption")
         refs = payload.pop("continuation_refs")
         diagnostics = payload.pop("continuation_diagnostics")
+        input_refs = payload.pop("input_dependency_refs")
+        if input_refs:
+            payload["input_dependency_refs"] = list(input_refs)
         if payload.get("host_channel_actor") is None:
             payload.pop("host_channel_actor", None)
         if corruption is not None:
@@ -313,6 +318,7 @@ class ThreadTaskLink:
             ),
             cancellation_scope=str(data.get("cancellation_scope") or "foreground"),
             host_channel_actor=data.get("host_channel_actor"),
+            input_dependency_refs=tuple(str(item) for item in data.get("input_dependency_refs", []) if isinstance(item, str) and item),
             context_anchor_message_id=str(
                 data.get("context_anchor_message_id") or ""
             ),

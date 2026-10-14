@@ -12,6 +12,8 @@ _dispatch(下游对来源无感知)。依赖飞书官方 ``lark-oapi`` 的 ws.Cl
 """
 
 import contextlib
+import hashlib
+import json
 import logging
 import random
 import threading
@@ -132,6 +134,32 @@ def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
         return None
 
 
+# LLM: 去重只使用已验证运输身份与 typed 引用，不读取表单秘密；密码提交与未知卡留给原业务幂等入口。
+# 函数用途: 给每张审批或凭据卡的准确按钮生成独立缓存键，避免不同卡片撞成 None:None。
+def _card_action_key(norm: dict) -> str:
+    value = norm.get("value") or {}
+    if value.get("session_lock_action") in {"pwd_set", "pwd_unlock", "pwd_change"}:
+        return ""
+    kind = value.get("kind")
+    if kind in {"my_agent_tool_approval", "my_agent_task_credential"}:
+        identity = [kind, value.get("reference"), value.get("decision"), norm.get("operator_open_id"),
+                    norm.get("message_id"), norm.get("chat_id")]
+        if not identity[1] or not all(identity[3:]):
+            return ""
+    elif not kind and value.get("token") and value.get("choice"):
+        identity = ["persona", value["token"], value["choice"], norm.get("operator_open_id")]
+    else:
+        return ""
+    return "card:" + hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
+
+# LLM: 仅包装原控制处理器公开回执，不加入原事件或表单；重复成功回调返回同一业务回执。
+# 函数用途: 将安全回执转换成飞书 SDK 响应。
+def _card_response(resp: dict):
+    from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
+    return P2CardActionTriggerResponse(resp)
+
+
 # LLM: 原 seen 缓存只是运输优化；inflight claim 必须释放，持久执行去重仍由 GatewayIngressStore 负责。
 # 类用途: 把官方 WS 事件交给同一飞书入站入口，按受理事实完成或撤销临时去重。
 class FeishuWsClient:
@@ -232,24 +260,41 @@ class FeishuWsClient:
             if norm is None:
                 return None
             value = norm.get("value") or {}
-            # 密码卡表单提交不走 token/choice 去重(没这俩键会都撞成 None:None + 合法重试被误杀);
-            # 密码操作重复执行本就安全(set 首设不可覆盖/unlock 重验/change 验旧),放它每次都处理。
-            is_pwd = str(value.get("session_lock_action") or "") in {"pwd_set", "pwd_unlock", "pwd_change"}
-            if not is_pwd:
-                key = f"card:{value.get('token')}:{value.get('choice')}"
-                if self._is_duplicate(key):
-                    return None  # 同一按钮重复回调:不重复处理/不重复回执
-            if self.on_card_action is not None:
-                resp = self.on_card_action(norm)
-                if isinstance(resp, dict):  # 密码卡:同步返回卡片就地替换
-                    from lark_oapi.event.callback.model.p2_card_action_trigger import (
-                        P2CardActionTriggerResponse,
-                    )
-
-                    return P2CardActionTriggerResponse(resp)
+            key = _card_action_key(norm)
+            if key:
+                with self._dedup_lock:
+                    cached = getattr(self, "_card_responses", {}).get(key)
+                if cached is not None:
+                    return _card_response(cached)
+                if self._claim_message(key) != "claimed":
+                    return None
+            try:
+                resp = self.on_card_action(norm) if self.on_card_action is not None else None
+                # 只有成功的 typed 回执才消费按键；未解锁、运输错误和无效来源可在原卡重试。
+                typed = bool(value.get("kind"))
+                committed = (isinstance(resp, dict) and (resp.get("toast") or {}).get("type") == "success") if typed else True
+                if key and committed and isinstance(resp, dict):
+                    self._cache_card_response(key, resp)
+                if key:
+                    self._finish_message(key, commit=committed)
+                return _card_response(resp) if isinstance(resp, dict) else None
+            except Exception:
+                if key:
+                    self._finish_message(key, commit=False)
+                raise
         except Exception as exc:
             logger.error('飞书卡片回调处理异常(不中断长连) error_type=%s', type(exc).__name__)
         return None
+
+    # LLM: 仅缓存控制处理器公开成功回执；原事件、表单值与身份令牌不加入缓存，容量沿原运输 dedup_cap。
+    # 函数用途: 让重复成功回调得到同一回执，不再执行业务决定。
+    def _cache_card_response(self, key: str, response: dict) -> None:
+        with self._dedup_lock:
+            responses = getattr(self, "_card_responses", {})
+            if len(responses) >= self._dedup_cap:
+                responses.pop(next(iter(responses)))
+            responses[key] = response
+            self._card_responses = responses
 
     def _ignore_event(self, data: Any) -> None:
         """订阅了但无需处理的事件(如机器人贴 reaction 后飞书回的 created/deleted 通知)直接忽略,

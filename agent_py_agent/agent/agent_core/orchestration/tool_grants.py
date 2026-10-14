@@ -6,13 +6,17 @@ from __future__ import annotations
 from ...common.value_parsing import TOOL_TEXT_LIST_OPTIONS, string_list
 from ...subagents.role_templates import (
     AGENT_PROGRESS_TOOLS,
+    OWNER_TASK_TOOLS,
     RECORD_LESSON_TOOL,
+    SELF_DISCOVERY_TOOLS,
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
 )
 from ...tooling.write_boundary import WRITE_TOOL_ORDER
 
 CODING_SUBAGENT_TOOLS = [
+    *SELF_DISCOVERY_TOOLS,
+    *OWNER_TASK_TOOLS,
     *AGENT_PROGRESS_TOOLS,
     "list_files",
     "read_file",
@@ -28,6 +32,7 @@ CODING_SUBAGENT_TOOLS = [
     RECORD_LESSON_TOOL,
 ]
 READ_ONLY_SUBAGENT_TOOLS = [
+    *SELF_DISCOVERY_TOOLS,
     *AGENT_PROGRESS_TOOLS,
     "list_files",
     "read_file",

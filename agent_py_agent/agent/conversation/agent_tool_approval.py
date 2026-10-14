@@ -20,6 +20,7 @@ from ..contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
     ToolApprovalWaitOptions,
+    approval_deadline,
     plugin_gate_required,
 )
 from .tool_approval_scope import (
@@ -51,15 +52,16 @@ class AgentToolApprovalHandle:
     scope_valid: Callable[[], bool] = field(repr=False, compare=False)
 
 
-# LLM: 主/子后台模型 sink 共用精确审批入口；先校验 canonical 归属，缓存包含 main claim/child attempt，跨执行代次必须重新取得精确决定。
-# 类用途: 把审批请求发布到原会话账本，并等待决定、取消或接收方失联。
+# LLM: 主/子共用精确审批入口；后台默认不可交互，前台须由宿主显式启用，群禁止剩余人工审批；缓存不跨 claim/attempt。
+# 类用途: 在已有权限内自动续跑，剩余确认只在交互前台发布原会话审批账。
 class AgentToolApprovalSinkMixin:
     agent: object
     thread_id: str
     task_id: str
+    approval_interactive: bool = False
 
-    # LLM: 解析请求后守门永远是第一句，先于缓存/授权/provider；归属、租约和取消仍优先，等待端独立守门。
-    # 函数用途: 上送精确主/子审批，不因原会话或 owner 授权跳过当次插件确认。
+    # LLM: 插件先禁缓存/provider；取消与过期优先，后台和群的剩余确认必须在 pending 与外发前拒绝。
+    # 函数用途: 自动续跑已有权限内操作，交互前台才上送精确确认。
     def request_permission(
         self,
         request_value: Mapping[str, object],
@@ -73,6 +75,8 @@ class AgentToolApprovalSinkMixin:
             forced = plugin_gate_required(request)
             if _cancelled(cancellation_token):
                 return ToolApprovalDecision(request.permission_id, "cancelled").to_dict()
+            if time.time() >= approval_deadline(request):
+                return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT").to_dict()
             scope = _request_scope(self.agent, self.task_id, self.thread_id, request)
             session_key = () if forced else (scope.run_id, scope.claim_id, scope.execution_attempt_id, _approval_session_key(request))
             approved_keys = getattr(self, "_approved_session_keys", set())
@@ -90,6 +94,12 @@ class AgentToolApprovalSinkMixin:
             if grant_key and owner_operation_granted(getattr(self.agent, "home_paths", None), grant_key):
                 # 用户已对这类操作长期允许：不再发布审批，直接以 approved 放行本次精确调用。
                 return ToolApprovalDecision(request.permission_id, "approved").to_dict()
+            automatic = autonomous_tool_decision(self.agent, request) if not forced else None
+            if automatic is not None:
+                return automatic.to_dict()
+            home = getattr(self.agent, "home_paths", None)
+            if not getattr(self, "approval_interactive", False) or getattr(home, "owner_kind", "") == "group":
+                return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_NONINTERACTIVE").to_dict()
             handle = publish_agent_tool_approval(
                 self.agent,
                 run_id=self.task_id,
@@ -115,8 +125,8 @@ class AgentToolApprovalSinkMixin:
         return decision.to_dict()
 
 
-# LLM: 发布先验证 canonical run/thread/root 与有效执行，再原子创建完整请求；main claim 随记录冻结，不更换旧审批身份。
-# 函数用途: 发布一条主/子后台工具审批，供所属用户界面发现；可选 IM 卡片仍引用同一记录。
+# LLM: 发布验证 canonical 身份并冻结原请求绝对截止；缺 expires_at 用宿主配置，不能续租或重新发布延长。
+# 函数用途: 原子创建一条有效交互审批记录，可选私人卡引用同一记录与截止。
 def publish_agent_tool_approval(
     agent: object,
     *,
@@ -128,7 +138,12 @@ def publish_agent_tool_approval(
     scope = _request_scope(agent, run_id, thread_id, request)
     path = _approval_path(agent, scope, request.permission_id)
     created_at = request.requested_at or time.time()
-    payload = _pending_payload(scope, request, created_at)
+    from ..user_space.approval_mode import deployment_approval_config
+    timeout = deployment_approval_config(agent.home_paths).tool_approval_timeout_seconds
+    deadline = min(request.expires_at or created_at + timeout, created_at + timeout)
+    if time.time() >= deadline:
+        raise ValueError("tool approval expired before publication")
+    payload = {**_pending_payload(scope, request, created_at), "expires_at": deadline}
     with locked_json_path(_transition_path(path)):
         report = read_json_object_report(path, context="subagent.tool_approval.publish")
         if report.load_error is not None:
@@ -150,8 +165,8 @@ def publish_agent_tool_approval(
     return handle
 
 
-# LLM: 守门永远是第一句，先于任何自主provider；取消与归属失效优先，原固定选项和无consumer关闭式失败保持。
-# 函数用途: 等待主/子原调用的用户决定，TUI 或有效私人卡均可承接；插件确认仍不可被自主轮询批准。
+# LLM: 插件禁自主批准；原记录 expires_at 是绝对上界，consumer 与私人卡续租不延长；取消与归属失效仍先检查。
+# 函数用途: 等待交互前台原调用决定，到期删除准确 pending 并返回明确拒绝。
 def wait_for_agent_tool_approval(
     handle: AgentToolApprovalHandle,
     *,
@@ -175,6 +190,15 @@ def wait_for_agent_tool_approval(
         report = read_json_object_report(handle.path, context="subagent.tool_approval.wait")
         if report.load_error is not None or not report.payload:
             return ToolApprovalDecision(handle.request.permission_id, "unavailable")
+        now = time.time()
+        try:
+            deadline = approval_deadline(handle.request, report.payload.get("expires_at"))
+        except (TypeError, ValueError):
+            _remove_exact_record(handle)
+            return ToolApprovalDecision(handle.request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
+        if now >= deadline:
+            _remove_exact_record(handle)
+            return ToolApprovalDecision(handle.request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
         decision = _record_decision(handle, report.payload)
         if decision is not None:
             _remove_exact_record(handle)
@@ -190,8 +214,10 @@ def wait_for_agent_tool_approval(
 
         lease_fresh = now - lease_seen_at <= max(1.0, float(consumer_lease_seconds)) or im_approval_wait_live(report.payload, now)
         if not lease_fresh and now - handle.created_at >= max(0.0, float(discovery_seconds)):
+            transport = report.payload.get("im_control") or {}
+            reason = "APPROVAL_TRANSPORT_FAILED" if transport.get("delivery_status") == "failed" else "APPROVAL_UNAVAILABLE"
             _remove_exact_record(handle)
-            return ToolApprovalDecision(handle.request.permission_id, "unavailable")
+            return ToolApprovalDecision(handle.request.permission_id, "unavailable", reason_code=reason)
         time.sleep(interval)
 
 
@@ -268,6 +294,9 @@ def resolve_agent_tool_approval(
             request,
         ):
             raise FileNotFoundError("pending subagent approval not found")
+        deadline = approval_deadline(request, report.payload.get("expires_at"))
+        if time.time() >= deadline:
+            raise FileNotFoundError("tool approval expired")
         prior = _decision_from_payload(report.payload)
         if prior is not None and (
             prior.decision != decision.decision or prior.feedback != decision.feedback
@@ -344,7 +373,10 @@ def _public_pending_record(
         run_id = validate_opaque_id(str(payload.get("run_id") or ""), kind="run_id")
         request = _approval_request(payload.get("request") if isinstance(payload.get("request"), Mapping) else {})
         scope = tool_approval_scope(agent, run_id)
+        deadline = approval_deadline(request, payload.get("expires_at"))
     except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if time.time() >= deadline:
         return None
     if not scope.active or scope.root_task_id != root_task_id or not _record_matches(
         payload, scope, request,

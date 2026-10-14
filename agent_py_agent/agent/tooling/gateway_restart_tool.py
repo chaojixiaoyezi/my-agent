@@ -1,11 +1,8 @@
 # LLM: 只注册给本机管理员主代理（owner_type=main_agent）且 enable_gateway_restart_tool 开启；子代理运行里不可用。
 # 工具只写一份重启请求就返回，真正的排空与换进程由 Gateway 服务主循环执行（gateway_parts/restart_service）。
 # 发起方身份只取结构化事实：owner 三元组、会话 thread_id、会话存储根；不接受模型传入的进程号或路径。
-# effect=dangerous，审批策略 always（3a 2026-10-02 定）：任何审批模式都弹确认，含自主工作（auto）和完全放行（full access）；
-#   IM 走现有审批卡（以 tooling.action_policy._approval_decision 为准）。理由：重启影响所有会话，本来就该用户点头；也堵上
-#   S1 的“改默认模型 → 重启刷新启动快照 → set_embedding”。安排后由 restart_service 两段排空：先等在跑的回合，最多 turn_wait 秒，
-#   到时没跑完的停在下一个副作用工具前、由新进程续跑；再等执行中的副作用工具跑完，最多 drain_timeout 秒，超时就取消这次
-#   重启、不强杀。改动须同步 test_gateway_restart_tool.py。
+# effect=dangerous 保留副作用与幂等事实；已授权本机管理员重启免逐次确认，handler 再核 local/main 与主代理。
+# 排空、冷却和循环保护仍由 restart_service 执行；普通用户、群 owner 及子代理不能借此获得宿主操作权。
 # 模块用途: 让管理员的 my-agent 在排查中发现需要重启时，自己安排一次不会切断回合的 Gateway 安全重启。
 from __future__ import annotations
 
@@ -79,7 +76,7 @@ class RestartGatewayTool(BaseTool):
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("dangerous"),
-        approval_policy=ApprovalPolicy("always"),
+        approval_policy=ApprovalPolicy("never"),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("gateway:current",)),
         promotes_task=False,
@@ -91,10 +88,13 @@ class RestartGatewayTool(BaseTool):
     def __init__(self, agent: object) -> None:
         self.agent = agent
 
-    # LLM: 子代理不能替主会话安排重启；判定只读结构化运行上下文。
-    # 函数用途: 子代理运行里隐藏本工具。
+    # LLM: 重核可信 local/main 与 runner/registry 主代理身份，注册存在不代替当前授权事实。
+    # 函数用途: 非管理员和子代理查询时明确隐藏宿主重启能力。
     def availability(self) -> ToolAvailability:
-        if current_subagent_run_id(self.agent):
+        from ..user_space.approval_mode import is_permission_admin
+
+        if (not is_permission_admin(getattr(self.agent, "home_paths", None)) or current_subagent_run_id(self.agent)
+                or getattr(getattr(self.agent, "tools", None), "owner_type", "main_agent") != "main_agent"):
             return ToolAvailability.unavailable("gateway restart is scheduled only by the main conversation agent")
         return ToolAvailability.ready()
 
@@ -102,6 +102,11 @@ class RestartGatewayTool(BaseTool):
     #   拒绝（不在 Gateway 内、冷却中、防循环）都在写入前返回并标记 not_started。
     # 函数用途: 校验托管身份与发起会话，提交一份安全重启请求并返回 scheduled/coalesced 回执。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        from ..user_space.approval_mode import is_permission_admin
+
+        if (not is_permission_admin(getattr(self.agent, "home_paths", None)) or current_subagent_run_id(self.agent)
+                or getattr(getattr(self.agent, "tools", None), "owner_type", "main_agent") != "main_agent"):
+            return _refuse("只有本机管理员主会话能安排 Gateway 重启。", "TOOL_PERMISSION_DENIED")
         target_pid = hosting_gateway_pid()
         if target_pid <= 0:
             return _refuse("当前会话不在 Gateway 进程内运行，无法安排安全重启。", "GATEWAY_RESTART_NOT_HOSTED")

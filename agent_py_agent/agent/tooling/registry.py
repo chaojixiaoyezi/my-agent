@@ -165,6 +165,8 @@ class ToolRegistryParams:
     operation_store_required: bool = True
     operation_owner_id: str = ""
     approval_mode_reader: Callable[[], str] | None = None
+    # 宿主只读投影：固定当前 owner/actor/运行边界；不能从模型参数指定身份或返回配置正文。
+    self_context_provider: Callable[[ToolRuntimeSnapshot, ToolInvocationContext | None], dict[str, object]] | None = None
     gateway_port: int | None = None
     # B5 征询提供方来自组合根，权限视图共用它；模型不能传入提供方或改变来源。
     plugin_gate_reviewer: Callable | None = None
@@ -175,7 +177,7 @@ class ToolRegistryParams:
 class ListToolsTool(BaseTool):
     model_spec = ToolModelSpec(
         name="list_tools",
-        description="列出当前执行上下文可见的工具清单。",
+        description="查询本人当前身份、审批与文件网络边界，以及当前开放工具、不可用原因和正规使用入口。",
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         hints=ToolModelHints(
             category="system",
@@ -194,6 +196,8 @@ class ListToolsTool(BaseTool):
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("tool_registry",)),
     )
 
+    # LLM: 仅持有原 registry 引用，不读取配置或增加权限；需保持 scoped 调用回归。
+    # 函数用途: 为只读发现工具绑定当前 owner 的工具表。
     def __init__(self, registry: Any):
         self.registry = registry
 
@@ -211,12 +215,22 @@ class ListToolsTool(BaseTool):
         context: ToolInvocationContext,
     ) -> ToolHandlerOutcome:
         _ = params
-        return self._execute_snapshot(context.runtime_snapshot)
+        return self._execute_snapshot(context.runtime_snapshot, context)
 
-    # LLM: 完整归档与紧凑 prompt 输出必须来自同一份 specs，防止两份清单漂移。
+    # LLM: 完整归档与紧凑 prompt 输出必须来自同一快照；宿主本人投影只读当次上下文，不能从模型参数指定身份。
     # 函数用途: 把指定运行快照渲染为完整 manifest 和有界模型视图。
-    def _execute_snapshot(self, snapshot: ToolRuntimeSnapshot) -> ToolHandlerOutcome:
+    def _execute_snapshot(
+        self, snapshot: ToolRuntimeSnapshot, context: ToolInvocationContext | None = None,
+    ) -> ToolHandlerOutcome:
+        from .self_context import registry_self_context
+
+        self_context = registry_self_context(self.registry, snapshot, context)
+        provider = self.registry._construction_params.self_context_provider
+        if provider is not None:
+            self_context.update(provider(snapshot, context))
         payload = tool_manifest_payload(snapshot)
+        payload["self_context"] = self_context
+        payload["permission_mode"] = self_context["permissions"]["mode"]
         payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
         payload["tool_retrieval"] = self.registry.retriever.status()
         live_payload = _live_tool_manifest_payload(payload)
@@ -233,8 +247,8 @@ class ListToolsTool(BaseTool):
         )
 
 
-# LLM: tool_search 只能在请求快照中检索；一次命中即为下一模型回合展开 Schema，但永远不能扩大 allowed_tools 或恢复不可用工具。
-# 类用途: 从本轮已授权且已就绪的 deferred 工具中搜索，并按 会话运行时 的单步协议为下一回合展开命中工具。
+# LLM: tool_search 只能在请求快照中检索；命中即为下一模型回合展开并在同线程累计 Schema，但永远不能扩大 allowed_tools 或恢复不可用工具。
+# 类用途: 从本轮已授权且已就绪的 deferred 工具中搜索，并按原线程发现账持久保留命中工具，当前授权变更仍逐轮过滤。
 class ToolSearchTool(BaseTool):
     """会话运行时 discovery for tools that are registered but not initially exposed."""
 
@@ -243,7 +257,7 @@ class ToolSearchTool(BaseTool):
     model_spec = ToolModelSpec(
         name="tool_search",
         description=(
-            "按当前权限与实时可用性搜索尚未展开的工具。一次搜索即会在下一次模型调用中临时展开命中工具的 Schema，"
+            "按工具名查询完整参数，或按能力搜索当前授权的折叠工具。一次搜索即会在下一次模型调用中展开命中工具的 Schema，同一线程累计加载并跨 Compact 恢复，"
             "不需要再次调用或填写选择参数。"
             "当任务需要 /goal 生命周期、外部协作、web、vision 或 MCP，而当前工具列表里没有对应工具时使用。"
         ),
@@ -280,6 +294,8 @@ class ToolSearchTool(BaseTool):
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("tool_registry",)),
     )
 
+    # LLM: 仅持有原 registry 引用，不读取配置或增加权限；需保持 scoped 调用回归。
+    # 函数用途: 为只读发现工具绑定当前 owner 的工具表。
     def __init__(self, registry: Any):
         self.registry = registry
 
@@ -331,7 +347,7 @@ def _tool_search_invalid_arguments(message: str) -> ToolHandlerOutcome:
 
 
 # LLM: 搜索结果必须同时携带文本协议 Schema 与 typed loaded names，以便原生与文本 Provider 共享单步语义。
-# 函数用途: 搜索最多 limit 个 deferred 工具，返回完整参数说明并标记为下一回合临时可见。
+# 函数用途: 按准确名称读当前工具详情或搜索最多 limit 个 deferred 工具，返回完整Schema并沿线程累计加载。
 def _search_deferred_tool_result(
     registry: Any,
     query: str,
@@ -339,7 +355,8 @@ def _search_deferred_tool_result(
     limit: int,
     snapshot: ToolRuntimeSnapshot,
 ) -> ToolHandlerOutcome:
-    specs = registry.search_deferred_specs(
+    exact = snapshot.runtime(query)
+    specs = [exact.model_spec] if exact is not None and exact.exposure.model_visible else registry.search_deferred_specs(
         query,
         limit=limit,
         runtime_snapshot=snapshot,
@@ -360,6 +377,9 @@ def _search_deferred_tool_result(
             for spec in specs
         ],
         "loaded_for_next_model_call": loaded_names,
+        "loading_scope": "current_thread",
+        "persists_across_compact": True,
+        "authorization_rechecked_each_run": True,
     }
     return ToolHandlerOutcome(
         "tool_search",
@@ -369,6 +389,8 @@ def _search_deferred_tool_result(
     )
 
 
+# LLM: 短目录与完整归档读取同一 manifest，保留用途、确认和不可用事实；详细 schema 仍按需检索。
+# 函数用途: 给模型输出有界自身能力页，不生成新授权或读取其它 owner 配置。
 def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]:
     """Keep the model-facing discovery page bounded while preserving the full manifest."""
     tools = payload.get("tools")
@@ -380,6 +402,8 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
             {
                 "name": str(item.get("name") or ""),
                 "category": str(item.get("category") or ""),
+                "description": str(item.get("description") or "")[:220],
+                "availability": item.get("availability") or {},
                 "schema_hash": str(item.get("schema_hash") or ""),
                 "effect_resolver": dict(
                     (item.get("runtime_policy") or {}).get("effect_resolver") or {}
@@ -396,10 +420,13 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
         )
     return {
         "schema_name": "tool_manifest_live_prompt",
-        "schema_version": 2,
+        "schema_version": 3,
         "visible_tool_count": len(compact_tools),
         "snapshot_hash": str(payload.get("snapshot_hash") or ""),
         "permission_mode": str(payload.get("permission_mode") or ""),
+        "permission_scope": str(payload.get("permission_scope") or ""),
+        "self_context": payload.get("self_context") or {},
+        "unavailable_tools": payload.get("unavailable_tools") or [],
         "tools": compact_tools,
         "tool_retrieval": payload.get("tool_retrieval") or {},
         "full_manifest": "完整参数、示例和失败合同已保存在本次工具输出归档中。",

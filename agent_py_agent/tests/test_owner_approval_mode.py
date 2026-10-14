@@ -40,7 +40,7 @@ def owner_home(root, name="alice", *, admin=False):
 
 def test_mode_roundtrip_preserves_policy_and_owner_isolation(tmp_path):
     alice, bob = owner_home(tmp_path), owner_home(tmp_path, "bob")
-    assert read_permission_mode(alice) == "ask"
+    assert read_permission_mode(alice) == "auto"
     assert not alice.owner_tool_policy_json.exists()
     execute_approval_mode_operation(alice, "set", "auto")
     data = json.loads(alice.owner_tool_policy_json.read_text())
@@ -50,7 +50,7 @@ def test_mode_roundtrip_preserves_policy_and_owner_isolation(tmp_path):
     execute_approval_mode_operation(alice, "set", "ask")
     after = json.loads(alice.owner_tool_policy_json.read_text())
     assert after["disabled_tools"] == ["example"] and after["extra"] == {"preserve": True}
-    assert read_approval_mode(bob) == "ask" and not bob.owner_tool_policy_json.exists()
+    assert read_approval_mode(bob) == "auto" and not bob.owner_tool_policy_json.exists()
     assert alice.owner_tool_policy_json.stat().st_mode & 0o777 == 0o600
 
 
@@ -155,6 +155,7 @@ def test_pending_child_resumes_by_owner_mode_without_waiting_for_parent(tmp_path
 
     agent, _scope, child = _bound_agent_tree(tmp_path)
     request = _child_approval_request(child.id)
+    execute_approval_mode_operation(agent.home_paths, "set", "ask")
     handle = publish_agent_tool_approval(agent, run_id=child.id,
                                            thread_id=child.agent_thread_id, request_value=request)
     assert autonomous_tool_decision(agent, request) is None

@@ -2502,7 +2502,7 @@ def _continue_goal_after_turn_interrupt(
 
 
 # LLM: 后台 Goal→task→claim 内使用 core 原绑定，不回读旧运输 T；前台沿原请求代次核对，进入 creation 后冻结树。
-# 函数用途: 关闭主任务准入、冻结资源并暂停续跑；清理在所有控制锁之外，部分错误不丢清单。
+# 函数用途: 精确关闭主任务并取消其必要输入，再固定原资源清单；输入回收失败保留未确认事实。
 def _prepare_main_task_stop(
     owner_agent: object,
     active: _GatewayRequestRecord,
@@ -2541,6 +2541,11 @@ def _prepare_main_task_stop(
                 )
                 if stopped is None:
                     raise ValueError("停止时任务状态发生冲突")
+                try:
+                    from ..conversation.input_dependencies import cancel_task_inputs
+                    cancel_task_inputs(owner_agent, task_id)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    preparation_errors.append(f"task_input_cancel:{type(exc).__name__}")
                 resources = freeze_task_resources(
                     owner_agent, resource_scope, task_id, related_request_ids=(_record_id(active.linked_request),),
                 )

@@ -139,3 +139,49 @@ def test_ws_card_action_invalid_payload_no_crash() -> None:
     client._handle_card_action(SimpleNamespace(event=None))
     client._handle_card_action(SimpleNamespace())
     assert seen == []
+
+
+# LLM: SDK 运输被替换为公开字典回执，原 extract/claim/handler 去重链不替换，不含表单秘密。
+# 函数用途: 为两类 typed 卡生成同一真实来源结构，验证各卡独立与原卡重试。
+def _typed_card(kind, reference, *, decision='approved'):
+    return SimpleNamespace(event=SimpleNamespace(
+        action=SimpleNamespace(tag='button', value={'kind': kind, 'reference': reference, 'decision': decision}),
+        operator=SimpleNamespace(open_id='ou_same'),
+        context=SimpleNamespace(open_message_id='om_same', open_chat_id='oc_private'),
+    ))
+
+
+def test_typed_approval_and_credential_cards_do_not_collide_and_replay_success(monkeypatch):
+    from agent_py_agent.agent.adapter import feishu_ws
+    monkeypatch.setattr(feishu_ws, '_card_response', lambda response: response)
+    calls = []
+    def decide(value):
+        calls.append(value['value']['reference'])
+        return {'toast': {'type':'success', 'content':'已提交'}}
+    client = _card_client(decide)
+    for kind, ref in [('my_agent_tool_approval','approval-one'), ('my_agent_tool_approval','approval-two'),
+                      ('my_agent_task_credential','credential-one')]:
+        event = _typed_card(kind, ref)
+        first = client._handle_card_action(event)
+        assert client._handle_card_action(event) == first
+    assert calls == ['approval-one','approval-two','credential-one']
+
+
+def test_locked_typed_card_can_be_retried_after_unlock_and_exception(monkeypatch):
+    from agent_py_agent.agent.adapter import feishu_ws
+    monkeypatch.setattr(feishu_ws, '_card_response', lambda response: response)
+    calls = []
+    def decide(_value):
+        calls.append(1)
+        if len(calls) == 1:
+            return {'toast': {'type':'error', 'content':'先解锁'}}
+        if len(calls) == 2:
+            raise OSError('synthetic transport unavailable')
+        return {'toast': {'type':'success', 'content':'已提交'}}
+    client = _card_client(decide)
+    event = _typed_card('my_agent_tool_approval','approval-retry')
+    assert client._handle_card_action(event)['toast']['type'] == 'error'
+    assert client._handle_card_action(event) is None
+    assert client._handle_card_action(event)['toast']['type'] == 'success'
+    assert client._handle_card_action(event)['toast']['type'] == 'success'
+    assert len(calls) == 3

@@ -27,7 +27,7 @@ class _PermissionCloudHandler(_CloudHandler):
             return super()._handle()
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or '{}')
         self.server.calls.append((self.command, self.path, dict(self.headers), body))
-        assert self.headers['Authorization'] == 'Bearer ' + TOKEN
+        assert self.headers['Authorization'] == 'Bearer ' + getattr(self.server, 'expected_token', TOKEN)
         if '/permissions/' in route.path:
             token = route.path.split('/')[-2]
             scope = parse_qs(route.query).get('perm_type', [''])[0]
@@ -79,7 +79,7 @@ def server(monkeypatch):
 
 def _self_agent(tmp_path, identity):
     agent = _agent(tmp_path, identity)
-    agent._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig())
+    agent._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig(feishu_cli_backend_enabled=False))
     return agent
 
 
@@ -255,7 +255,7 @@ def test_unrecognized_write_failure_remains_unknown_and_sensitive_vendor_text_is
     assert len(_business_writes(server)) == 1
 
 
-def test_admin_resources_read_only_entry_skips_confirmation_but_grant_requires_it(tmp_path):
+def test_trusted_admin_resource_management_skips_optional_confirmation(tmp_path):
     admin = _agent(tmp_path, OwnerIdentity.local_main())
     target = _agent(tmp_path, OwnerIdentity.provider_group('feishu', 'oc_one'))
     read = execute_registry_test_call(admin.tools, 'admin_controls', {'action': 'resources', 'owner_id': target.home_paths.owner_id},
@@ -264,4 +264,47 @@ def test_admin_resources_read_only_entry_skips_confirmation_but_grant_requires_i
     write = execute_registry_test_call(admin.tools, 'admin_controls', {'action': 'resource_grant',
         'owner_id': target.home_paths.owner_id, 'resource': {'provider': 'feishu', 'resource_type': 'sheet',
         'resource_token': 'sheet_one', 'operations': ['sheet_read']}}, allowed_tools=['admin_controls'], register_with=admin)
-    assert not write.ok and write.error_code == 'APPROVAL_REQUIRED'
+    assert write.ok, write.output
+    forbidden = execute_registry_test_call(target.tools, 'admin_controls', {'action': 'resource_grant',
+        'owner_id': admin.home_paths.owner_id, 'resource': {'provider': 'feishu', 'resource_type': 'sheet',
+        'resource_token': 'sheet_one', 'operations': ['sheet_read']}}, allowed_tools=['admin_controls'], register_with=target)
+    assert not forbidden.ok
+
+
+def test_personal_oauth_permission_queries_and_business_share_same_identity(tmp_path, server, monkeypatch):
+    from agent_py_agent.agent.adapter import feishu_cli
+    from agent_py_agent.agent.adapter.feishu_cloud import request_cloud_api
+    from agent_py_agent.agent.user_space import feishu_oauth
+
+    agent = _self_agent(tmp_path, OwnerIdentity.provider_user('feishu', 'ou_one'))
+    (agent.home_paths.root / 'config' / 'capability_config.yaml').write_text('feishu_cli_backend_enabled: true\n')
+    server.expected_token = 'synthetic-personal-token'
+    server.members['sheet_one'] = [_member('openid', 'ou_one', 'full_access')]
+    adapter = agent.channel_registry.adapter_for('feishu')
+    monkeypatch.setattr(adapter, '_get_tenant_access_token', lambda: pytest.fail('personal request borrowed application identity'))
+    monkeypatch.setattr(feishu_oauth, 'user_access_token', lambda _agent: server.expected_token)
+    monkeypatch.setattr(feishu_cli, 'cli_binary', lambda: __file__)
+    seen = []
+
+    def hosted_call(scoped, method, path, body=None, *, user_token=''):
+        seen.append(user_token)
+        assert scoped._get_tenant_access_token() == user_token == server.expected_token
+        return request_cloud_api(scoped, method, path, body)
+
+    monkeypatch.setattr(feishu_cli, 'request_cli_cloud_api', hosted_call)
+    result = _call(agent, identity='user', range='sid!A1:B2', values=[['本人', 1]])
+    assert result.ok, result.output
+    assert seen == [server.expected_token]
+    assert server.rows == [['本人', 1]]
+    assert server.calls and all(row[2].get('Authorization') == 'Bearer ' + server.expected_token for row in server.calls)
+    assert server.expected_token not in result.output
+
+
+def test_group_personal_identity_is_explicit_failure_without_any_cloud_request(tmp_path, server, monkeypatch):
+    from agent_py_agent.agent.adapter import feishu_cli
+    agent = _self_agent(tmp_path, OwnerIdentity.provider_group('feishu', 'oc_one'))
+    (agent.home_paths.root / 'config' / 'capability_config.yaml').write_text('feishu_cli_backend_enabled: true\n')
+    monkeypatch.setattr(feishu_cli, 'cli_binary', lambda: __file__)
+    result = _call(agent, 'sheet_read', identity='user', range='sid!A1:B2')
+    assert not result.ok and result.reported_error_code == 'FEISHU_USER_AUTH_REQUIRED'
+    assert not server.calls and result.effect_outcome == 'not_started'

@@ -1750,6 +1750,8 @@ def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) ->
 #   收口时只读取当前空正文预算形成诊断；不改response_decision策略或向模型历史注入遥测。
 # 函数用途: 执行主子共用工具循环并带出只读诊断，仍按原响应、中断和预算推进。
 def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult:
+    from ..conversation.task_rejected_actions import sync_task_rejected_actions
+    sync_task_rejected_actions(agent, params)
     final_prompt, final_response = "", None
     tool_rounds = params.tool_rounds
     repair_counters, provider_response_repairs = ToolLoopRepairCounters(), 0
@@ -2083,13 +2085,17 @@ def _tool_step_or_limit(agent, request: _ToolStepRequest):
 
 
 # LLM: 执行普通工具轮后只处理真实转换；创建子代理不会再触发隐式等待或按产物推断轮结束。
-# 函数用途: 运行本轮工具并交给正常模型循环继续工作，同时保留原进展和错误提示。
+# 函数用途: 运行工具并保存完整配对；必要输入交接立即结束当轮，其余继续模型循环。
 def _run_tool_round(agent, request: ToolRoundExecutionRequest):
     execute_tool_round(request)
     update_runtime_fact_progress_if_enabled(agent, request.params, tool_round=request.tool_rounds)
     append_tool_guardrail_action_block_hint(request)
     # 检索完备性软引导(R5b/R6c 实锤):同一工具系统失败达阈值即提醒枚举未试渠道。
     append_tool_failure_channel_hint(request)
+    from ..conversation.input_tool_boundary import input_wait_response
+    waiting_response = input_wait_response(agent, request.params)
+    if waiting_response is not None:
+        return request.tool_rounds, waiting_response
     final_response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
             request.params,
@@ -2582,6 +2588,10 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     # 灰度双轨：native 下同时把这次「调用+结果」记进结构化 IR 历史（与上面的文本
     # tool_context 共存），供出站翻成原生 messages；text 协议下完全不走这里。
     _record_tool_post_archive(agent, record, archive_record, result_rendered)
+    from ..conversation.input_tool_boundary import record_input_wait
+    record_input_wait(agent, record.params, record.result)
+    from ..conversation.task_rejected_actions import sync_task_rejected_actions
+    sync_task_rejected_actions(agent, record.params)
     if guardrail_hint:
         record.params.tool_context.append(f"[tool-loop-guardrail-hint]\n{guardrail_hint}")
     append_long_content_recovery_context(record)

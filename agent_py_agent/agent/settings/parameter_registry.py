@@ -297,11 +297,28 @@ def parameter_registry() -> dict[str, ParameterSpec]:
 #   实际加载的那份文件（capability_path 由调用方按 capability_config_for_agent 同一路径解析，文件不存在时
 #   运行时按默认实例走，这里也回落登记默认）；runtime_guard 运行时只读随包文件、没有用户覆盖层，
 #   所以固定读随包默认。不写文件、不调模型。
+# LLM: 部署字段沿用 configured_home_root 的宿主根优先级（含历史默认值的环境覆盖），忽略 owner capability_path；
+#   无配置对象、非绝对根或坏配置返回 unknown，不从工作目录猜来源，也不冒充默认。
 # 函数用途: 返回一个参数当前的运行值（按来源分派读取）。
 def running_value(spec: ParameterSpec, config: object | None = None, *, capability_path: Path | None = None) -> object:
     if spec.source == SOURCE_AGENT:
         return getattr(config, spec.key, spec.default) if config is not None else spec.default
     if spec.source == SOURCE_CAPABILITY:
+        from ..capability.runtime_config_reload import (
+            DEPLOYMENT_CAPABILITY_KEYS,
+            deployment_capability_config,
+        )
+        if spec.key in DEPLOYMENT_CAPABILITY_KEYS:
+            from types import SimpleNamespace
+
+            from ..user_space.home_root import configured_home_root
+            try:
+                root = configured_home_root(config) if config is not None else None
+                if not root or not Path(root).expanduser().is_absolute():
+                    return "unknown"
+                return getattr(deployment_capability_config(SimpleNamespace(root=Path(root).expanduser())), spec.key)
+            except (OSError, AttributeError, TypeError, ValueError):
+                return "unknown"
         from ..capability.config import load_capability_config
         from ..capability.runtime_config_reload import resolve_capability_config_path
 

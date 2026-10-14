@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -1266,7 +1266,7 @@ def _tool_runtime_snapshot_hash(
 
 
 # LLM: 上下文不进入模型参数或共享工具实例；权威回调只留宿主，读取快照仅向明确支持协议的插件逐次运输。
-# 类用途: 传递同一调用的快照、取消、精确权限复查和冻结工作区读取范围。
+# 类用途: 传递同一调用的快照、取消、精确权限复查、文件范围与公开权限事实，不运输宿主配置正文。
 @dataclass(frozen=True)
 class ToolInvocationContext:
     runtime_snapshot: ToolRuntimeSnapshot
@@ -1274,6 +1274,8 @@ class ToolInvocationContext:
     execution_authority_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     workspace_read_context: WorkspaceReadContext | None = None
     workspace_write_context: WorkspaceWriteContext | None = None
+    # 宿主实际调用边界的窄只读投影；只能说明网络/Shell，不是执行授权或模型输入。
+    execution_permission_context: Mapping[str, object] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

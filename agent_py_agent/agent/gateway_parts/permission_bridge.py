@@ -1,5 +1,5 @@
-# LLM: Gateway 审批桥保持原文件与精确 binding；插件引用先统一判定，等待自主提供者不能替用户确认，联测取消和改模式。
-# 模块用途: 接收精确用户决定并支持取消，避免等待期间自动批准插件确认。
+# LLM: Gateway 审批桥保持原文件与精确 binding；原请求有绝对截止，取消优先；插件禁自主批准，无人交互在发布前明确拒绝。
+# 模块用途: 接收有界精确确认，到期拒绝和回收原决定文件，防止 consumer 续租使任务永久等待。
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from ..contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
     ToolApprovalWaitOptions,
+    approval_deadline,
     plugin_gate_required,
 )
 from .io import read_json_file_report, write_json_file_atomic
@@ -31,7 +32,7 @@ def gateway_permission_decision_path(
     return Path(chunk_path).parent / ".approvals" / request_hash / f"{permission_hash}.json"
 
 
-# LLM: 写回同时复制请求的精确 binding；Gateway 等待端会逐字段核验，UI label/feedback 无法替换另一条调用的授权。
+# LLM: 写回复制精确 binding 并重核原截止；过期不可写决定，UI label/feedback 不能替换调用身份或复活原操作。
 # 函数用途: 原子提交一条 Gateway 审批决定并返回落盘路径。
 def write_gateway_permission_decision(
     chunk_path: Path,
@@ -42,6 +43,8 @@ def write_gateway_permission_decision(
     decision = _approval_decision(decision_value)
     if decision.permission_id != request.permission_id:
         raise ValueError("gateway permission decision id mismatch")
+    if time.time() >= approval_deadline(request):
+        raise ValueError("gateway permission request expired")
     target = gateway_permission_decision_path(chunk_path, request)
     write_json_file_atomic(
         target,
@@ -54,8 +57,8 @@ def write_gateway_permission_decision(
     return target
 
 
-# LLM: 解析请求后守门永远是第一句，先于任何自主provider；取消和精确用户决定优先，不能依赖提供者自律。
-# 函数用途: 等待用户批准或取消；普通请求允许自主续跑，插件请求禁止等待轮询自动批准。
+# LLM: 插件先禁自主 provider；取消与原绝对截止先于决定消费，超时删精确决定文件，不能靠续租延长。
+# 函数用途: 等待原请求的决定、取消或到期，明确返回拒绝原因。
 def wait_for_gateway_permission_decision(
     chunk_path: Path,
     request_value: ToolApprovalRequest | Mapping[str, object],
@@ -73,6 +76,9 @@ def wait_for_gateway_permission_decision(
     while True:
         if _cancelled(cancellation_token):
             return ToolApprovalDecision(request.permission_id, "cancelled")
+        if time.time() >= approval_deadline(request):
+            _remove_consumed_decision(target)
+            return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
         report = read_json_file_report(target, context="gateway.permission.decision.read")
         if report.load_error is not None:
             return ToolApprovalDecision(request.permission_id, "unavailable")
@@ -93,7 +99,7 @@ def unavailable_gateway_permission_decision(
     request_value: ToolApprovalRequest | Mapping[str, object],
 ) -> ToolApprovalDecision:
     request = _approval_request(request_value)
-    return ToolApprovalDecision(request.permission_id, "unavailable")
+    return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_NONINTERACTIVE")
 
 
 # LLM: 文件内容核验逐字段比较 canonical binding；任何缺失、额外类型或错配都 fail-closed 为 unavailable。

@@ -81,6 +81,8 @@ def gate_context(tmp_path, request):
     call = canonical_test_call(snapshot, "gate_probe", {"mode": "write"}, attempt_id=attempt_id)
     params = SimpleNamespace(effective_on_chunk=sink, request_id="gate-consumer", cancellation_token=SimpleNamespace(cancelled=False),
         runtime_approved_actions=[], runtime_rejected_actions=[], tool_runtime_snapshot=snapshot, tool_context=[])
+    transcript = sink._transcript if request.param == "main" else sink
+    transcript.approval_interactive = True
     ctx = SimpleNamespace(agent=agent, scope=scope, child=child, kind=request.param, root_id=link.task_id,
         claim=claim, sink=sink, snapshot=snapshot, call=call, harness=harness, probe=probe, params=params,
         request=SimpleNamespace(agent=agent, params=params, tool_rounds=1, actor="model"), results=[], errors=[], waiter=None)

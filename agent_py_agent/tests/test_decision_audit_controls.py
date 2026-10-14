@@ -124,7 +124,7 @@ def test_registration_audit_for_main_and_user_admin_controls_only_for_local_main
     assert {"audit_records", "admin_controls"} <= visible["main"]
     assert "audit_records" in visible["alice"] and "admin_controls" not in visible["alice"]
     assert not {"audit_records", "admin_controls"} & visible["group"]
-    assert AdminControlsTool.runtime_policy.approval_policy.mode == "always"
+    assert AdminControlsTool.runtime_policy.approval_policy.mode == "never"
 
 
 def test_owner_controls_default_fail_closed_and_keep_other_policy_fields(tmp_path, monkeypatch):

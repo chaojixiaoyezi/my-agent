@@ -51,6 +51,8 @@ def test_child_session_cache_requires_new_decision_after_attempt_changes(backgro
 @pytest.fixture
 def background(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+    execute_approval_mode_operation(agent.home_paths, "set", "ask")
     store = agent.conversation_store
     thread = store.threads.get_or_create({
         "canonical_user_id": "local-agent", "channel": "chat",
@@ -69,6 +71,8 @@ def background(tmp_path):
                           scope=GatewayControlScope("local-agent", "chat", "session-main"),
                           sink=BackgroundMainActivitySink(agent, thread_id=thread.thread_id, task_id=task_id),
                           token=SimpleNamespace(cancelled=False), response={}, waiter=None)
+    # 显式交互只用于原审批桥测试；产品后台默认仍禁止发布人工确认。
+    ctx.sink._transcript.approval_interactive = True
     yield ctx
     ctx.token.cancelled = True
     if ctx.waiter is not None:

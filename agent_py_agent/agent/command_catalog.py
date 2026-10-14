@@ -395,7 +395,7 @@ def command_access_error(spec: CommandSpec, context: CommandAccessContext, actio
     return ""
 
 
-# LLM: 只投影公共目录和权限声明；每项用法不调用模型或查询任务，管理员子动作按结构字段过滤，不从 summary 猜权限。
+# LLM: 只投影公共目录和权限声明；能力详情引导到原只读发现工具，管理员子动作按结构字段过滤。
 # 函数用途: 生成本身份的简明帮助或单项说明，未解锁只列基础入口。
 def render_command_help(context: CommandAccessContext, topic: str = "") -> str:
     topic = topic.strip().lstrip("/")
@@ -415,6 +415,8 @@ def render_command_help(context: CommandAccessContext, topic: str = "") -> str:
                 lines.append(f"{usage}：{summary}")
     if context.locked:
         lines.append("请在机器人私聊中设置或验证个人解锁密码后继续任务。")
+    elif not topic:
+        lines.append("想了解助手当前能力或失败原因，可请它用 list_tools 自查；具体工具由 tool_search 按需加载。")
     return "\n".join(lines)
 _CONVERSATION_MATCHERS = tuple(
     (

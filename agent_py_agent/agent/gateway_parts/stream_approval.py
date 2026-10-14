@@ -2,6 +2,7 @@
 # 模块用途: 发布精确审批并等待用户决定，避免旧授权绕过插件要求。
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,10 +11,12 @@ from ..contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
     ToolApprovalWaitOptions,
+    approval_deadline,
     plugin_gate_required,
 )
 from .approval_session import ToolApprovalSessionCache
 from .permission_bridge import (
+    _cancelled,
     unavailable_gateway_permission_decision,
     wait_for_gateway_permission_decision,
 )
@@ -65,8 +68,8 @@ class StreamApproval:
         except (OSError, RuntimeError, TypeError, ValueError):
             return ""
 
-    # LLM: 解析请求后守门永远是第一句，必须先于任何缓存/授权/provider；固定选项与两个等待入口同一风格。
-    # 函数用途: 发布当次确认；插件请求只能等用户，不让旧缓存或自主选择直接批准。
+    # LLM: 插件先禁自主批准；取消和绝对截止优先于缓存/provider，无交互的剩余确认在发布前拒绝。
+    # 函数用途: 在已授权范围内自动执行，交互时发布有限期确认，不让旧缓存批准过期请求。
     def request(
         self,
         request_value: dict[str, object],
@@ -77,6 +80,14 @@ class StreamApproval:
         forced = plugin_gate_required(request)
         interactive, mode_decision_provider = options.interactive, options.mode_decision_provider
         cancellation_token = options.cancellation_token
+        if _cancelled(cancellation_token):
+            return ToolApprovalDecision(request.permission_id, "cancelled").to_dict()
+        if time.time() >= approval_deadline(request):
+            return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT").to_dict()
+        if not forced and mode_decision_provider is not None:
+            automatic = mode_decision_provider(request)
+            if automatic is not None:
+                return automatic.to_dict()
         if not interactive:
             return unavailable_gateway_permission_decision(request).to_dict()
         session_key = "" if forced else _permission_session_key(request)

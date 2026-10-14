@@ -26,6 +26,7 @@ from ....subagents.models import (
     task_status_in,
 )
 from ....tooling.models import (
+    ApprovalPolicy,
     BaseTool,
     EffectResolverPolicy,
     IdempotencyPolicy,
@@ -86,8 +87,9 @@ class CancelSubagentsTool(BaseTool):
     runtime_policy = ToolRuntimePolicy(
         # LLM: Model calls always perform a real direct-child interruption;
         # host-only dry runs bypass this model ToolRuntime entirely.
-        # 配置用途: 模型的取消调用统一按真实副作用审批。
+        # 配置用途: 本人止损保留真实副作用、幂等和直接父子授权，但不进入交互审批。
         effect_resolver=EffectResolverPolicy("dangerous"),
+        approval_policy=ApprovalPolicy("never"),
         idempotency_policy=IdempotencyPolicy("operation"),
         # seq 253 闭合：run_id/run_ids 是逻辑 ID（任务标识），不是物理
         # 路径——不标 logical 会被 scope 投影 resolve 成 workspace 假写根，与

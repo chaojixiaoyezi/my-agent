@@ -1,3 +1,5 @@
+2026-10-14：审批终态与持久输入接线；群/无人值守在发布pending前拒绝剩余确认，交互等待有绝对截止。原stream桥区分真实Feishu和TUI恢复，/status共享本人权限投影。本人OAuth在原路由表新增验签回调，秘密不进入URL日志。发布状态见[实施合同](../../design/IM_UNATTENDED_IMPLEMENTATION.md)。
+
 2026-10-13 群任务追加修复进行中：认证入口冻结宿主发起人，模型工具创建/查询/控制与子孙继承沿同一主体；缺失/冲突不返回假空清单。飞书暂时身份失败沿原入站重投，表情反馈与Gateway受理分开记录。公开回执仅显式策略启用，同源调用与内部结果分离；验收收口见本轮交接，未改现场监控。
 
 2026-10-13 当前安全入口：原 G2b 强制与客户端 G1 读取始终生效，迁移开关及空头降级删除；原 route.access_tier 在处理 body 前校验 credential/admin，公开与插件令牌档独立。安全 HTTP、日志、附件冻结和 Session 目标复核见 [安全说明](../../design/IM_SECURITY_AUDIT_20261013.md)。本文此前开关/迁移档记录保留为历史，不能作为当前操作指引。
@@ -1670,3 +1672,7 @@ L/T 第二候选通过 1190 项组合回归和严格 gate，原测试 Goal 在�
 CLI adapter 同源接入 `feishu_quoted_text_enabled`，默认 true，与原引用附件开关独立。原 durable prepare 单次查询准确父消息，文字只作为有界外部资料；当前发送者/owner 和 G1 身份头不从父消息继承。原完整媒体准备后才附文字，payload_ready 冷提交不再查取。文字/原附件/配置120项已过，严格门与同源新包另记；旧14.1不含此追加，真实飞书读取权限未现场验收。
 
 各类引用追加：可见文字、媒体与同次已证转发成员仍沿原 prepared/payload_ready；当前 owner/actor 不从源 sender/chat 转换。卡片隐藏回调不作为正文，逐子资源用自己的准确ID下载；覆盖、省略和截断有结构事实，不新增历史查询、权限表或队列。见[引用消息合同](../../design/FEISHU_QUOTED_MEDIA.md)。
+
+2026-10-14 必要输入根停止：`control_service._prepare_main_task_stop` 在原 task/claim/control 锁确认并提交停止后，调用 `cancel_task_inputs` 清本根待输入；未确认输入回收写入原 preparation_errors，不阻止后续原资源清理，也不宣称完整停止。真实 Gateway `/stop` 与子树取消合同见[持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。
+
+2026-10-14 必要输入状态与容量：`/status` 保留排队/运行字段，accepted必要输入另列待输入并说明不占执行资源；BLOCKED子代理从运行分离成等待/受阻。投影只按原目标root、准确TaskLink refs及子树report读取，坏账显示不可用。每根最多32条必要输入沿原TaskStore锁检查和登记，重复不占新槽，终态释放；超限私凭据无新增卡片/密文记录，更新失败保留旧授权，不建立owner输入队列或poller。隔离回归见[持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。

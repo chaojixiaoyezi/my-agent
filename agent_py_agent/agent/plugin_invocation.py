@@ -51,7 +51,7 @@ def plugin_invocation_context(context: PluginManagementContext, text: str, revis
     return tool_arguments_hash(values).removeprefix("sha256:")
 
 
-# LLM: select/释放仅归原 pending 获得者；prepare 成组传递固定工具/取消信号并设置宿主来源，不从参数豁免审批或换绑。
+# LLM: select/释放仅归原 pending 获得者；宿主期限由 context 明确注入，不从插件参数/工作目录猜授权；固定工具和取消仍走原链。
 # 函数用途: 等待原审批并调用固定工具，在同一执行区间释放连接，分别返回业务及清理结果。
 def execute_plugin_invocation(
     context: PluginManagementContext, repo: RuntimeRepository, request: HostCommandRequest,
@@ -92,7 +92,7 @@ def execute_plugin_invocation(
                 except Exception:  # noqa: BLE001 原资源账保留清理未知，不能改写业务结果或泄露异常正文
                     cleanup = {"confirmed": False}
         result = execute_host_command(repo, request, prepare, request_permission=request_permission,
-                                      release_execution=release_execution)
+                                      release_execution=release_execution, approval_timeout_seconds=context.approval_timeout_seconds)
     return {**result, "connection_cleanup": cleanup} if cleanup is not None else result
 
 

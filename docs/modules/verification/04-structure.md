@@ -357,3 +357,7 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
 
 - 截图意愿由宿主结构化决定、经 `_meta` 扩展键 `my-agent/observation-screenshot` 协商：`tool_call_runtime` → `executor._handler_arguments`（内部参数 `__observation_screenshot`）→ `observation_binding.screenshot_meta`；`computer_use_observation_tools._screenshot_requested` 从严解析（版本匹配且 enabled 为 true），`ScreenObserver.observe(want_screenshot=...)` 才生成缩略图。
 - `input_media.model_accepts_images` 是共享判定（归档落盘、协商发送、注入前复核三处同源）；`tool_model_generation` 注入前复核换模型并丢弃 pending。
+
+## 任务必要输入归档（2026-10-14）
+
+`tool_call_archive_record._compact_result_envelope` 经 `conversation/input_tool_boundary.input_archive_facts` 只投影必要输入的准确引用、状态和期限及凭据 opaque refs；后续归档/IR配对完成后同模块才 arming。`conversation/input_dependencies` 保管唯一输入状态，原 task link 仅存查找 refs，Wake 是恢复出口；输入完成不代表工具或任务完成，也不清除原审批拒绝。

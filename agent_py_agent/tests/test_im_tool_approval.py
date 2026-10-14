@@ -1,4 +1,4 @@
-"""私人审批运输替身 + 原等待记录/签名/租约/密码库；不伪造批准，也不打开 TUI 消费者。"""
+"""显式交互审批运输替身与原记录/签名/密码库；后台与群默认拒绝另有负例。"""
 from __future__ import annotations
 
 import threading
@@ -47,6 +47,8 @@ def _im_pending(ctx, *, actor="ou_admin", bind_admin=True):
     adapter = SimpleNamespace(send_control_card=send)
     ctx.agent.channel_registry.register_adapter("feishu", adapter,
         capabilities=ChannelCapabilities(proactive=True, control_cards=True))
+    sink = getattr(ctx.sink, "_transcript", ctx.sink)
+    sink.approval_interactive = True
     ctx.waiter = threading.Thread(target=lambda: ctx.response.update(
         ctx.sink.request_permission(ctx.request.to_dict(), cancellation_token=ctx.token)))
     ctx.waiter.start()
@@ -155,7 +157,7 @@ def test_selection_change_is_not_a_change_of_execution_authority(background):
     assert ctx.response["decision"] == "approved"
 
 
-def test_group_background_approval_goes_to_frozen_creator_not_latest_speaker(tmp_path):
+def test_group_background_remaining_confirmation_is_rejected_before_private_card(tmp_path):
     from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
     from agent_py_agent.agent.conversation.execution_threads import ensure_execution_thread
     from agent_py_agent.agent.core import SimpleAgent
@@ -179,18 +181,13 @@ def test_group_background_approval_goes_to_frozen_creator_not_latest_speaker(tmp
     ctx = SimpleNamespace(agent=agent, store=store, task_id=task_id, request=request, response={},
         token=SimpleNamespace(cancelled=False), waiter=None,
         sink=BackgroundMainActivitySink(agent, thread_id=work.thread_id, task_id=task_id))
-    try:
-        body, sent = _im_pending(ctx, actor="ou_creator", bind_admin=False)
-        assert sent[0][0] == "ou_creator"
-        with pytest.raises(ValueError):
-            resolve_private_interaction(agent, body, channel="feishu", actor_id="ou_other")
-        assert resolve_private_interaction(agent, body, channel="feishu", actor_id="ou_creator")["ok"]
-        ctx.waiter.join(2)
-        assert ctx.response["decision"] == "approved"
-    finally:
-        ctx.token.cancelled = True
-        if ctx.waiter is not None:
-            ctx.waiter.join(2)
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+    execute_approval_mode_operation(agent.home_paths, "set", "ask")
+    response = ctx.sink.request_permission(request.to_dict(), cancellation_token=ctx.token)
+    assert response["decision"] == "denied"
+    assert response["reason_code"] == "APPROVAL_NONINTERACTIVE"
+    assert list_pending_agent_tool_approvals(agent, root_task_id=task_id) == []
+
 
 
 def test_card_endpoint_requires_real_host_credential_even_with_legacy_loopback_trust():

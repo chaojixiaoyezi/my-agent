@@ -1,3 +1,5 @@
+2026-10-14 结构：`orchestration/tool_grants.py`和`create_policy.py`沿父目录与显式角色生成准确工具集合；`role_contracts/role_templates`不再维护过时业务枚举。`tools/cancel.py`保留直接父子授权、免可选审批，`subagents/cancellation.py`沿原取消合同清理输入依赖，原身份/claim/进程清理不变。
+
 2026-10-13：`agent_core/runner/slice_closeout.py` 在原 worker lease 退出后结束可恢复片的 exact attempt，逻辑 run 保持非终态，未结/unknown 副作用不放开续跑。Owner 网络开关经父级上界传到 Shell/PTY/后台原 OS 沙箱，SandboxHostPolicy 只运输隐私与网络限制，不增加权限仓库。普通执行孩子默认可发现 request_credentials/feishu_cloud/send_message，各自仍守原 owner、资源许可及准确目标门。真实验收在隔离 Linux 进行。
 
 ## 2026-10-13 本期相对能力范围修正（实施中）
@@ -1509,3 +1511,5 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 只认 runtime_path_resolution 的准确 Store，不写新身份账。原权限、渠道、限额和入队合同继续在后续原入口执行。
 新 `test_im_session_target_security.py` 与 `test_im_scheduler_security_matrix.py` 覆盖真实工具执行链和告警目标；
 验收范围见 [安全交接](../../tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。
+
+必要输入停止沿 `cancellation._close_projection` → `conversation/input_dependencies.cancel_task_inputs(root_task_id, run_id=准确节点)`，在原 creation guard 和授权范围内清理；根主 `/stop` 在原 gateway task/control guard 确认停原任务后清整根输入。依赖状态仍属于原 SessionTaskStore，task refs 只是查找投影，不能全根删除来处理单个孩子取消。

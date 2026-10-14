@@ -52,6 +52,9 @@ def _bound_agent_tree(tmp_path):
         ),
         tmp_path / "workspace",
     )
+    # 原交互审批测试明确选择 ask；部署默认 auto 不应被当作待审批的前提。
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+    execute_approval_mode_operation(agent.home_paths, "set", "ask")
     store = agent.conversation_store
     thread = store.threads.get_or_create(
         {
@@ -1228,6 +1231,7 @@ def test_owner_tui_decision_resumes_exact_child_approval(tmp_path, parent_projec
         request_id="child-approval-transcript",
         event_writer=lambda *_args, **_kwargs: None,
     )
+    sink.approval_interactive = True
     result: dict[str, object] = {}
 
     def wait() -> None:
@@ -1321,6 +1325,7 @@ def test_child_session_approval_reuses_same_sink_and_args(tmp_path) -> None:
         request_id="child-session-approval",
         event_writer=lambda *_args, **_kwargs: None,
     )
+    sink.approval_interactive = True
     first = _child_approval_request(child.id, "attempt-session-first")
     first_result: dict[str, object] = {}
     thread = threading.Thread(

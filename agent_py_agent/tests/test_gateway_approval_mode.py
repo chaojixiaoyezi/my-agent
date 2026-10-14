@@ -24,7 +24,7 @@ def test_permissions_api_auth_owner_and_admin_boundary(tmp_path, monkeypatch):
     approval_mode_service.handle_client_approval_mode(handler, server)
     assert handler.reply[0] == 200 and not handler.reply[1]["is_admin"]
     assert read_permission_mode(owner_home(tmp_path)) == "auto"
-    assert read_permission_mode(owner_home(tmp_path, "bob")) == "ask"
+    assert read_permission_mode(owner_home(tmp_path, "bob")) == "auto"
     handler.body["mode"] = "full-access"
     approval_mode_service.handle_client_approval_mode(handler, server)
     assert handler.reply[0] == 400

@@ -1269,7 +1269,7 @@ def _is_active_turn_lifecycle_continuation(
 ) -> bool:
     return (
         bool(str(task_objective or "").strip())
-        and str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS
+        and (str(request.reason or "").strip().lower() in SUBAGENT_LIFECYCLE_WAKE_REASONS or request.reason == "task_input_resolved")
         and not _wake_payload_is_audit_provider_quota(request.wake_signal)
     )
 
@@ -2735,6 +2735,9 @@ def _skip_pending_wake_signal(
     handled: set[str],
     attempted: set[str],
 ) -> bool:
+    from .input_dependencies import task_has_waiting_input
+    if signal.reason not in {'task_input_resolved', 'incoming_channel_message', 'session_message'} and task_has_waiting_input(scheduler.runtime.agent, signal.root_task_id):
+        return True
     if current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0):
         return True
     if signal.wake_signal_id in handled or signal.wake_signal_id in attempted:
@@ -3484,8 +3487,10 @@ def _ready_background_thread_ids(
 #   成功完成通知等待合批，任一成立这一拍就不为它排车道；和工作线程的跳过判定保持一致，避免空转排车道。
 # 函数用途: 判断一条待处理唤醒这一拍是否还不能排后台车道。
 def _wake_waits_this_tick(scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, current: float) -> bool:
+    from .input_dependencies import task_has_waiting_input
     return (
-        current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0)
+        (signal.reason not in {'task_input_resolved', 'incoming_channel_message', 'session_message'} and task_has_waiting_input(scheduler.runtime.agent, signal.root_task_id))
+        or current < scheduler._wake_retry_after.get(signal.wake_signal_id, 0.0)
         or wake_attempt_waiting(scheduler, signal, current)
         or _successful_completion_waiting_for_batch(scheduler, signal, current)
     )
@@ -3715,6 +3720,15 @@ class _BackgroundSchedulerTickMixin:
                 if not task_id or not wake_id:
                     continue
                 try:
+                    if wake.get('kind') == 'task_input_deadline':
+                        from .input_dependencies import (
+                            _schedule_input_deadline,
+                            reconcile_input_dependencies,
+                        )
+                        reconcile_input_dependencies(agent, task_id=task_id, now=now, schedule=False)
+                        repo.complete_wake(wake_id)
+                        _schedule_input_deadline(agent, task_id)
+                        continue
                     thread = self.store.tasks.thread_for(task_id)
                     if thread is None:
                         # 档案没了(任务已终结/未挂线程) → 清字条, 不唤醒
@@ -3755,7 +3769,7 @@ class _BackgroundSchedulerTickMixin:
     # LLM: 低频对账也是基础 owner 补关历史 TaskRun 的入口（unfinished_task_ids 内的 C12c 重放）；会话关联目录取本 agent
     #   实际会话存储的 storage.tasks_dir，不另推路径。改扫描范围要同步 owner_wake_discovery._conversation_task_link_scan
     #   与 test_owner_wake_discovery_task_run_no_link.py。副作用：可能写 wake 字条、清字条、写 task_run.closed。
-    # 函数用途: 每 5 分钟把待唤醒字条与未完成任务对一次账，顺带补关崩溃留下的执行总账。
+    # 函数用途: 每五分钟对账原唤醒与任务；输入期限读准确refs恢复，不能被有界列表遗漏后的Goal补醒覆盖。
     def _reconcile_wake_queue(self, *, now: float) -> None:
         """低频三源对账: 同步"等待者名单"(wake_queue)与任务档案。"""
         try:
@@ -3780,6 +3794,10 @@ class _BackgroundSchedulerTickMixin:
             # 已有 pending 字条的任务不重写到期时间——否则每 5min 对账都会把
             # 闹钟往后推, 永远不响(对账只补缺失, 不续命)。
             for task_id in unfinished:
+                from .input_dependencies import _schedule_input_deadline, task_has_waiting_input
+                if task_has_waiting_input(agent, task_id):
+                    _schedule_input_deadline(agent, task_id)
+                    continue
                 if task_id in pending_tasks:
                     continue
                 if not self._task_has_active_goal(task_id):
@@ -5167,6 +5185,9 @@ def _runnable_due_policies(
 def _progress_policy_suppression_reason(
     store, policy: ProgressPolicy, *, now: float, agent: object | None = None
 ) -> str:
+    from .input_dependencies import task_has_waiting_input
+    if agent is not None and task_has_waiting_input(agent, policy.task_id):
+        return "task_input_wait"
     if _is_removed_ordinary_task_resume_policy(policy):
         return "removed_ordinary_task_resume_policy"
     if _is_removed_dispatch_supervision_policy(policy):

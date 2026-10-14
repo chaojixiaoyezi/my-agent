@@ -236,12 +236,47 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
         recovery_hint="当前动作需要审批；先走审批链路，或者改成不需要高危权限的安全动作。",
     ),
+    "APPROVAL_MODE_UNAVAILABLE": ErrorContract(
+        code="APPROVAL_MODE_UNAVAILABLE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前用户的执行策略无法验证，未执行；请部署者修复配置。",
+    ),
+    "FEISHU_CLI_UNAVAILABLE": ErrorContract(
+        code="FEISHU_CLI_UNAVAILABLE", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="随包受控飞书CLI未安装，请更新完整安装包。",
+    ),
+    "FEISHU_USER_AUTH_REQUIRED": ErrorContract(
+        code="FEISHU_USER_AUTH_REQUIRED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="本人飞书授权不可用或过期；在原私人助手会话使用feishu_auth，不发送token或应用密钥。",
+    ),
     "APPROVAL_REJECTED": ErrorContract(
         code="APPROVAL_REJECTED",
         category="permission",
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="用户已拒绝当前精确工具调用；不要重复同一动作，按反馈改用安全方案或停止。",
+    ),
+    "APPROVAL_TIMEOUT": ErrorContract(
+        code="APPROVAL_TIMEOUT", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="本次确认已超时且未执行；不要重新等待同一操作，改用已授权方案或结束任务。",
+    ),
+    "APPROVAL_NONINTERACTIVE": ErrorContract(
+        code="APPROVAL_NONINTERACTIVE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前群或无人值守任务不能等待人工确认；本次操作已拒绝，未执行。",
+    ),
+    "APPROVAL_UNAVAILABLE": ErrorContract(
+        code="APPROVAL_UNAVAILABLE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="没有可处理本次确认的用户入口；本次操作已拒绝，未执行。",
+    ),
+    "APPROVAL_TRANSPORT_FAILED": ErrorContract(
+        code="APPROVAL_TRANSPORT_FAILED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="确认卡未成功送达；本次操作已拒绝，未执行。",
     ),
     "APPROVAL_BINDING_MISMATCH": ErrorContract(
         code="APPROVAL_BINDING_MISMATCH",

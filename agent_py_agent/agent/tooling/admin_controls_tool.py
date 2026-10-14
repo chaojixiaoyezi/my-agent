@@ -1,4 +1,4 @@
-# LLM: 管理员工具只供可信管理员主代理；只读查询不弹确认，授权变更沿 always_effects 保持管理员本人确认，auto/Full Access 不免除。
+# LLM: 管理员工具只供可信管理员主代理；已授权管理操作免逐次确认，执行时仍核 local/main 与主代理身份。
 #   写入唯一走 owner_admin_controls.set_owner_admin_controls（目标 owner 自己的 tool_policy.json，锁内读改写）；
 #   目标只接受 list 返回的规范 owner 编号，不创建用户目录，不从自然语言推断身份。
 #   改动须同步 owner_admin_controls、audit_records 工具、错误码块与 test_decision_audit_controls。
@@ -51,7 +51,7 @@ def _owner_row(owner_id: str, home: object) -> dict:
 
 
 # LLM: 与 core 注册条件配套：只有本机管理员主代理拿得到本工具；执行时仍按 home 复核管理员身份（替身调用也拒绝）。
-# 类用途: 管理员直接查询控制与资源许可，所有授权修改仍需本人确认。
+# 类用途: 管理员直接查询控制与资源许可，授权修改始终核验可信管理员身份。
 class AdminControlsTool(BaseTool):
     model_spec = ToolModelSpec(
         name=TOOL_NAME,
@@ -62,7 +62,7 @@ class AdminControlsTool(BaseTool):
             "resources 查看指定 owner 的云资源许可；resource_grant/resource_revoke 按 resource 精确登记/撤销。"
             "resource 含 provider、resource_type、resource_token、operations；飞书 sheet 操作为 sheet_read/sheet_append/sheet_update，"
             "docx 操作为 document_read/document_append，wiki 定位为 wiki_resolve；不填写密钥。"
-            "list/resources 直接只读查询；set/resource_grant/resource_revoke 会请管理员本人确认，不要自行开启跨用户审计。"
+            "list/resources 只读查询；set/resource_grant/resource_revoke 执行管理员已要求的修改，不要自行开启跨用户审计。"
         ),
         input_schema={
             "type": "object",
@@ -93,7 +93,7 @@ class AdminControlsTool(BaseTool):
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", (("list", "read_only"), ("resources", "read_only"))),)),
-        approval_policy=ApprovalPolicy("always", always_effects=("mutating", "dangerous")),
+        approval_policy=ApprovalPolicy("never"),
         sandbox_policy=SandboxPolicy("none"),
         concurrency_policy=ConcurrencyPolicy("serial"),
         idempotency_policy=IdempotencyPolicy("operation"),
@@ -108,14 +108,18 @@ class AdminControlsTool(BaseTool):
     def __init__(self, agent: object) -> None:
         self._agent = agent
 
-    # LLM: 用户控制只由主会话管理员操作，子代理运行里隐藏。
-    # 函数用途: 子代理运行中报告本工具不可用。
+    # LLM: 注册之外再核可信 local/main 与当前 runner/registry 主代理身份，不认显示名或模型参数。
+    # 函数用途: 非管理员或子代理查询本工具时明确报告不可用。
     def availability(self) -> ToolAvailability:
-        if current_subagent_run_id(self._agent):
+        from ..user_space.approval_mode import is_permission_admin
+
+        if (not is_permission_admin(getattr(self._agent, "home_paths", None))
+                or current_subagent_run_id(self._agent)
+                or getattr(getattr(self._agent, "tools", None), "owner_type", "main_agent") != "main_agent"):
             return ToolAvailability.unavailable("admin controls are managed only by the main administrator agent")
         return ToolAvailability.ready()
 
-    # LLM: list/resources 只读；set 与资源授权复用原受保护策略和锁，子代理不能代表管理员变更用户授权。
+    # LLM: list/resources 只读；写入复用原受保护策略与锁，执行复核 local/main 和 runner/registry，不能借管理员对象冒充主代理。
     # 函数用途: 列出或修改用户控制与资源名单，返回不含凭据的结构化回执。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         from ..user_space.approval_mode import is_permission_admin
@@ -124,7 +128,8 @@ class AdminControlsTool(BaseTool):
         action = params.get("action")
         if not is_permission_admin(home):
             return _refuse("not_admin", "只有本机管理员能使用此工具。")
-        if current_subagent_run_id(self._agent):
+        if (current_subagent_run_id(self._agent)
+                or getattr(getattr(self._agent, "tools", None), "owner_type", "main_agent") != "main_agent"):
             return _refuse("not_admin", "用户授权只能由管理员主会话管理。")
         if action in {"resources", "resource_grant", "resource_revoke"}:
             return _resource_control(home, params)

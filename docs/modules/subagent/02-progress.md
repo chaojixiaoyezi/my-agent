@@ -1,3 +1,5 @@
+2026-10-14：子代理默认工具目录改为父级真实集合与角色/owner上界交集，补正常自查和已授权业务工具；leaf不获得宿主管理或继续派工。本人取消免可选确认，真实取消链同时关闭精确输入依赖，不能因待凭据挡住父任务结算。相关focused与发布见[实施合同](../../design/IM_UNATTENDED_IMPLEMENTATION.md)。
+
 2026-10-13：真实 TUI v3 验证原父级申请/批准后第二片可续跑并产出指定文件；两 child 与 root done。IM 真实模型 v1 的改写临时目录不算通过，原 WRITE_FORBIDDEN 恢复说明改为保留目标并走父级能力裁决。
 
 2026-10-13：`agent_core/runner/slice_closeout.py` 在原 worker lease 退出后结束可恢复片的 exact attempt，逻辑 run 保持非终态，未结/unknown 副作用不放开续跑。Owner 网络开关经父级上界传到 Shell/PTY/后台原 OS 沙箱，SandboxHostPolicy 只运输隐私与网络限制，不增加权限仓库。普通执行孩子默认可发现 request_credentials/feishu_cloud/send_message，各自仍守原 owner、资源许可及准确目标门。真实验收在隔离 Linux 进行。
@@ -497,3 +499,5 @@ typed 停机错误及准确 request/run/attempt，不重开原调用、不伪签
 同群、跨 owner、full_access、锁定用户告警和目标注入矩阵已在隔离真实 Registry/Executor/Store 下验证。
 会话消息与派活补同源目标 owner/home 核验，原本人完整派活真链仍可用；错落宿主记录不会因本目录而升权。
 详细命令、RED/GREEN 与证明边界见 [安全交接](../../tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。
+
+2026-10-14 必要输入取消接线：共同 `subagents/cancellation._close_projection` 在原授权与执行权关闭后，只按准确 root+run 清理该节点的输入依赖；冻结子树成员逐个清，兄弟与其它活任务保留。重复取消已 CANCELLED 节点可重试输入清理，不改 UNKNOWN 业务结果。合同覆盖真实 cancel_subagent_tree、子孙与兄弟隔离；详见 [持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。

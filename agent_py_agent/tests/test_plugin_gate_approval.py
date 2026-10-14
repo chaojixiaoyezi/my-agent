@@ -62,6 +62,7 @@ def test_agent_plugin_request_publishes_before_cache_or_owner_grant(monkeypatch,
     monkeypatch.setattr(agent_approval, "wait_for_agent_tool_approval",
                         lambda *args, **kw: ToolApprovalDecision(request.permission_id, "denied"))
     sink = agent_approval.AgentToolApprovalSinkMixin()
+    sink.approval_interactive = True
     sink.agent = SimpleNamespace(home_paths=object())
     sink.thread_id, sink.task_id = "thread-gate", "run-gate"
     key = f"run-gate:claim-gate:probe:{request.binding['args_hash']}"

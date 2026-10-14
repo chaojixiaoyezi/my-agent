@@ -11,6 +11,20 @@ from pathlib import Path
 from .config import CapabilityConfig, load_capability_config
 from .runtime_config_models import CapabilityConfigReloadResult, CapabilityConfigSnapshot
 
+DEPLOYMENT_CAPABILITY_KEYS = frozenset({
+    "owner_default_permission_mode", "tool_approval_timeout_seconds", "feishu_cli_backend_enabled",
+    "feishu_user_oauth_enabled", "feishu_oauth_redirect_uri", "feishu_oauth_scopes",
+})
+
+
+# LLM: 部署边界只读共享home的配置，owner局部快照不得覆盖；坏配置向上传递，调用方必须失败关闭。
+# 函数用途: 从整机唯一位置读取审批及受控飞书后端配置，缺文件时使用随包默认。
+def deployment_capability_config(home: object) -> CapabilityConfig:
+    root = getattr(home, "root", None)
+    if root is None or not Path(root).is_absolute():
+        raise ValueError("部署配置未绑定共享数据目录。")
+    return load_capability_config(resolve_capability_config_path(root=root))
+
 
 # LLM: capability 配置文件只有两个角色：随包默认（打包进发布物，只读）与用户位置
 #   （<owner home>/config/capability_config.yaml，参数中心写入与展示的唯一目标）。

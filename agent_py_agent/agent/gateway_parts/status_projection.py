@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from ..conversation.context_usage import context_usage_from_thread
 from ..conversation.im_task_status import im_task_status_facts
+from ..tooling.self_context import permission_self_context
 
 
 # LLM: 身份只认可信 home；上下文和最近请求计时均取原线程投影，未计时不补零或冒充回合墙钟。
-# 函数用途: 共用会话领域只读任务投影生成状态字段，不在查询时重算历史或写执行状态。
+# 函数用途: 从原会话投影和本人审批事实生成状态，与 list_tools 同源区分 ask/auto 及来源，不重算历史或写执行状态。
 def status_display_facts(agent: object, thread: object = None, *, scope: object = None) -> dict[str, object]:
     if scope is not None:
         try:
@@ -20,8 +21,10 @@ def status_display_facts(agent: object, thread: object = None, *, scope: object 
     key = tuple(str(getattr(home, name, "") or "") for name in ("owner_provider", "owner_kind", "owner_id"))
     role = "管理员" if key == ("local", "main", "local/main") else "普通用户" if all(key) else "未知"
     config = getattr(agent, "config", None)
+    permissions = permission_self_context(agent)
     return {"user_role": role,
-            "permission_mode": f"文件 {getattr(config, 'path_access_mode', '未知')}；Shell {getattr(config, 'access_mode', '未知')}",
+            "permissions": permissions,
+            "permission_mode": f"审批 {permissions['mode']}（来源 {permissions['source']}）；文件 {getattr(config, 'path_access_mode', '未知')}；Shell {getattr(config, 'access_mode', '未知')}",
             "context_usage": context_usage_from_thread(thread), "im_task_status": im_task_status_facts(agent, thread, scope),
             "model_timing": public_model_timing(getattr(thread, 'model_metrics', None))}
 

@@ -65,8 +65,8 @@ def test_registered_only_for_admin_main_agent_when_enabled(tmp_path):
     assert "restart_gateway" not in disabled.tools.tools
 
 
-def test_restart_always_asks_even_in_autonomous_or_full_access_mode(tmp_path):
-    """3a 2026-10-02：重启影响所有会话，任何审批模式都弹确认（完全放行在审批层也是 auto）；也堵上 S1 的重启刷新快照路径。"""
+def test_trusted_admin_restart_requires_no_additional_confirmation(tmp_path):
+    """可信管理员已授权的正常重启免逐次审批，handler 仍单独守身份与排空。"""
     from types import SimpleNamespace
 
     from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
@@ -81,4 +81,28 @@ def test_restart_always_asks_even_in_autonomous_or_full_access_mode(tmp_path):
 
     for mode in ("ask", "auto"):
         decision = ActionPolicy().decide(ActionPolicyRequest(call, snapshot, tmp_path, approval_mode=mode))
-        assert decision.status == "ask", mode
+        assert decision.status == "allow", mode
+
+
+def test_direct_handler_rejects_ordinary_group_and_child_without_writing(tmp_path, monkeypatch):
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    monkeypatch.setenv(service.HOSTING_GATEWAY_PID_ENV, str(os.getpid()))
+    for kind in ('user', 'group'):
+        agent = _agent(tmp_path/kind, my_agent_owner_provider='feishu', my_agent_owner_kind=kind,
+                       my_agent_owner_id='synthetic-owner')
+        tool = RestartGatewayTool(agent)
+        assert not tool.availability().available
+        outcome = tool.execute({'reason':'不能借宿主工具'})
+        assert not outcome.ok and outcome.error_code == 'TOOL_PERMISSION_DENIED'
+        assert not service.restart_request_path(gateway_paths(agent)).exists()
+    admin = _agent(tmp_path/'admin')
+    old = set_current_subagent_context(admin, run_id='synthetic-child')
+    try:
+        outcome = RestartGatewayTool(admin).execute({'reason':'子代理不能重启'})
+        assert not outcome.ok and outcome.error_code == 'TOOL_PERMISSION_DENIED'
+    finally:
+        restore_current_subagent_context(admin, old)
+    assert not service.restart_request_path(gateway_paths(admin)).exists()

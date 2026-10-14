@@ -8,7 +8,7 @@ from dataclasses import asdict, fields
 
 from ..capability.runtime_config_reload import capability_config_for_agent
 from ..common.json_io import locked_json_path, read_json_object_report, write_json_file_atomic
-from ..contracts.tool_approval import ToolApprovalDecision
+from ..contracts.tool_approval import ToolApprovalDecision, approval_deadline
 from ..conversation.channels import (
     DeliveryContext,
     project_host_paths_for_channel,
@@ -17,8 +17,6 @@ from ..conversation.channels import (
 from ..user_space.interaction_refs import sign_interaction_reference
 from ..user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
 from .host_actor import HostActorError, background_host_actor, resolve_host_actor, task_host_actor
-
-_CARD_WAIT_SECONDS = 1800.0  # 卡片本次批准有效期 30 分钟；任务/claim/attempt 失效时提前结束。
 
 
 # LLM: scope 原 dataclass 的 compare 字段是唯一身份口径，名称和展示 active 不得悄悄变成新授权键。
@@ -82,7 +80,7 @@ def approval_recipient(agent, scope) -> tuple[str, str]:
 # 函数用途: 构造一张本次调用的两选项审批卡，点击后仍需验证当前执行与私人卡片来源。
 def approval_card(reference: str, request, scope) -> tuple[dict, str]:
     summary = project_host_paths_for_channel(project_user_reply(request.description).content, "feishu")[:240]
-    text = f"{scope.agent_name}申请执行 {request.tool_name}\n{summary}\n本次确认 30 分钟内有效。"
+    text = f"{scope.agent_name}申请执行 {request.tool_name}\n{summary}\n请在本次确认截止前处理，超时将拒绝当前操作。"
     buttons = [{"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": color,
                 "value": {"kind": "my_agent_tool_approval", "reference": reference, "decision": decision}}
                for label, color, decision in (("允许本次", "primary", "approved"), ("拒绝", "default", "denied"))]
@@ -109,7 +107,7 @@ def publish_im_tool_approval(agent, handle) -> None:
             return
         transport = row.get("im_control")
         if not isinstance(transport, dict):
-            expiry = time.time() + _CARD_WAIT_SECONDS
+            expiry = approval_deadline(handle.request, row.get("expires_at"))
             payload = {"kind": "tool_approval", "owner": asdict(owner_identity_from_config(agent.config)),
                        "channel": channel, "actor_id": actor, "scope": _scope_identity(handle.scope),
                        "permission_id": handle.request.permission_id, "expires_at": expiry}
@@ -179,7 +177,7 @@ def request_foreground_im_permission(agent, value, *, cancellation_token=None):
     task_id = str(getattr(current, 'task_id', '') or '')
     try:
         scope = tool_approval_scope(agent, task_id)
-        sink = SimpleNamespace(agent=agent, task_id=task_id, thread_id=scope.thread_id)
+        sink = SimpleNamespace(agent=agent, task_id=task_id, thread_id=scope.thread_id, approval_interactive=True)
         return AgentToolApprovalSinkMixin.request_permission(sink, value, cancellation_token=cancellation_token)
     except (ValueError, RuntimeError, OSError):
         from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest

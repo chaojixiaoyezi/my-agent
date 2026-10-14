@@ -27,8 +27,13 @@ from ...subagents.capability_scope import (
     current_creation_tool_authority,
 )
 from ...subagents.role_templates import (
+    CAPABILITY_REQUEST_TOOL,
     COORDINATOR_TOOLS,
     DIRECT_CHILD_CONTROL_TOOLS,
+    OWNER_TASK_TOOLS,
+    RECORD_LESSON_TOOL,
+    ROLE_BASE_TOOLS,
+    SELF_DISCOVERY_TOOLS,
     role_template_snapshot_for_role,
 )
 from ...subagents.services.base import CreateRunParams
@@ -278,8 +283,8 @@ def _current_published_audit_bindings(
 
 
 # LLM: The structured role snapshot decides whether direct-child controls exist;
-# goal prose and display names never grant a recursive management surface.
-# 函数用途: 根据明确角色为 coordinator 补管理工具，并从普通执行角色删除无用的下级控制工具。
+# goal prose and display names never grant a recursive management surface. 父当轮快照再收紧所有默认业务工具。
+# 函数用途: 组合角色目录并取直属父级真实快照交集；普通 leaf 不获得下级控制或默认宿主管理工具。
 def _role_policy(
     agent,
     raw_params: dict[str, object],
@@ -287,13 +292,39 @@ def _role_policy(
     allowed_tools: list[str] | None,
 ) -> RolePolicy:
     role = _role_from_create_intent(raw_params, goal, agent)
+    if allowed_tools is None:
+        allowed_tools = list(ROLE_BASE_TOOLS)
+    elif raw_params.get("_exact_allowed_tools") is not True and str(raw_params.get("tool_preset") or "") != "read_only":
+        allowed_tools = list(dict.fromkeys([*allowed_tools, *SELF_DISCOVERY_TOOLS, *OWNER_TASK_TOOLS]))
     role_template_dirs = _role_template_dirs(agent)
     is_explicit_root = is_explicit_root_role(role, role_template_dirs)
     if is_explicit_root:
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
     else:
         allowed_tools = leaf_allowed_tools(allowed_tools)
+    allowed_tools = _within_parent_tool_authority(agent, allowed_tools)
     return RolePolicy(role=role, allowed_tools=allowed_tools)
+
+
+# LLM: 实际 Tool Gateway 创建始终绑定 immutable 父快照；内部宿主入口按同 owner registry 取事实，不能按 attributes 造权。
+# 函数用途: 收紧创建候选到父当前就绪工具；子代理专属控制入口只按 owner registry 显式快照复核。
+def _within_parent_tool_authority(agent, tools: list[str]) -> list[str]:
+    from ...tooling.registry import ToolRegistry
+
+    authority = current_creation_tool_authority()
+    registry = getattr(agent, "tools", None)
+    if authority:
+        available = set(authority["available_tool_names"])
+    elif isinstance(registry, ToolRegistry):
+        current = getattr(agent, "_current_run_params", None)
+        available = set(registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None)).available_tool_names)
+    else:
+        # 无 registry 的纯合同调用仍在最终宿主执行边界复核；不以 mock 或自然语言生成工具事实。
+        return tools
+    internal = [CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL]
+    if isinstance(registry, ToolRegistry):
+        available.update(registry.runtime_snapshot(allowed_tools=internal).available_tool_names)
+    return [name for name in tools if name in available]
 
 
 # LLM: 模型只给业务参数，host actor 从父当前宿主字段取得，不从 raw 同名键或 attributes 升级。

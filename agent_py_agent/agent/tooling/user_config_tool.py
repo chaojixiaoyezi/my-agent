@@ -321,7 +321,7 @@ class UserConfigTool(BaseTool):
         }
         if key:
             payload["fact"] = read_config_fact(key, user_path=user_path, default_path=packaged,
-                                               capability_path=capability_path)
+                                               capability_path=capability_path, config=getattr(self._agent, "config", None))
             spec = parameter_registry().get(key)
             if spec is not None:
                 payload["parameter"] = _spec_view(spec, getattr(self._agent, "config", None),
@@ -480,19 +480,25 @@ def _spec_metadata(spec: object) -> dict[str, object]:
 #   只用于推荐，不影响能否修改。登记了派生规则的参数另给 applied_value/applied_rule
 #   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。capability 键运行值按运行时路径读；
 #   runtime_guard 只读随包并标 source_readonly。只读。
+# LLM: 部署字段标明唯一宿主来源与只读边界，运行值不读取 owner capability_path，也不因展示授予修改权限。
 # 函数用途: 把一条参数登记信息投影成给模型看的结构化事实。
 def _spec_view(spec: object, config: object, *, brief: bool = False,
                capability_path: object | None = None) -> dict[str, object]:
+    from ..capability.runtime_config_reload import DEPLOYMENT_CAPABILITY_KEYS
+    deployment = spec.key in DEPLOYMENT_CAPABILITY_KEYS
     description = str(spec.description)
     readonly = spec.source == "runtime_guard"
     view = {
         "key": spec.key, "category": spec.category, "writable": spec.writable, "common": spec.common,
-        "value_type": spec.value_type, "source": spec.source,
+        "value_type": spec.value_type, "source": "deployment_capability" if deployment else spec.source,
         "running_value": mask_value(spec.key, running_value(spec, config, capability_path=capability_path))
         if config is not None else "",
         "default": mask_value(spec.key, spec.default),
         "description": description[:160] + ("…" if brief and len(description) > 160 else "") if brief else description,
     }
+    if deployment:
+        view["source_scope"] = "deployment"
+        view["source_readonly"] = "宿主部署配置，只读；owner 局部配置不能覆盖，模型和 /settings 不修改此字段。"
     if readonly:
         view["source_readonly"] = "随包默认、不可覆盖（该配置运行时没有用户覆盖层）"
     if not brief:

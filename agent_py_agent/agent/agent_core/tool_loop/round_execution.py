@@ -19,6 +19,7 @@ from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
 from ...contracts.model_call_ledger import (
     MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE,
+    ModelCallAdmissionClosedError,
     ModelCallAdmissionClosure,
     model_call_admission_closure,
 )
@@ -26,6 +27,7 @@ from ...contracts.required_actions import required_action_assessment_failed
 from ...contracts.tool_approval import (
     ToolApprovalDecision,
     ToolApprovalRequest,
+    approval_deadline,
     build_tool_approval_request,
     operation_grant_key,
 )
@@ -488,7 +490,34 @@ def _owner_grant_key(request: ToolRoundExecutionRequest, call: ToolCall) -> str:
     return operation_grant_key(call.tool_name, call.arguments, getattr(policy, "owner_grant_parameters", ()))
 
 
-# LLM: 插件引用来自执行器，算好旧ID后附加同源前缀/两选项；无 consumer/unavailable 返回插件无人审批码，普通调用保持旧合同。
+# LLM: 原 ToolCall 生成 binding，宿主 capability 配置只附绝对截止，坏配置使 consumer 不可用；actor/plugin 引用仍来自原宿主事实。
+# 函数用途: 构造有界审批请求及配置有效标志，不发布 pending、不写授权账。
+def _build_runtime_approval_request(
+    request: ToolRoundExecutionRequest, idx: int, execution: ToolExecution,
+) -> tuple[ToolApprovalRequest, bool]:
+    approval_request = build_tool_approval_request(
+        execution.call,
+        request_id=request.params.request_id,
+        round_number=request.tool_rounds,
+        call_index=idx,
+        description=_approval_description(request, idx, execution.call),
+        grant_key=_owner_grant_key(request, execution.call),
+    )
+    from ...user_space.approval_mode import deployment_approval_config
+    valid = True
+    try:
+        home = getattr(request.agent, "home_paths", None)
+        if home is not None:
+            timeout = deployment_approval_config(home).tool_approval_timeout_seconds
+            approval_request = replace(approval_request, expires_at=approval_request.requested_at + timeout)
+    except (OSError, ValueError):
+        valid = False
+    approval_request = _with_request_actor(approval_request, request)
+    approval_request = plugin_gate_approval_request(execution, approval_request)
+    return approval_request, valid
+
+
+# LLM: 插件引用来自执行器，算好旧ID后附加同源前缀/两选项；无 consumer/unavailable 明确拒绝，插件保留无人审批事实，普通调用不再返回 APPROVAL_REQUIRED。
 #   本进程准入读两次（_closed_admission_execution）：发审批请求前已关门的不再询问，免得停机后在 TUI/IM 多弹一张没用的审批卡
 #   （9b 复核）；批准之后、重新执行之前再读一次，等审批期间关门的不执行、不记批准绑定（I3 复审必须修）。两处都配停机结果。
 # 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
@@ -504,36 +533,27 @@ def _resolve_tool_approval(
         return carry_gate_decisions(execution, closed)  # 发审批请求前宿主已停机关门：不再询问
     on_chunk = getattr(request.params, "effective_on_chunk", None)
     consumer = getattr(on_chunk, "request_permission", None)
-    if not callable(consumer):
-        return carry_gate_decisions(execution, plugin_gate_approval_unavailable(execution), unavailable=True)
-    approval_request = build_tool_approval_request(
-        execution.call,
-        request_id=request.params.request_id,
-        round_number=request.tool_rounds,
-        call_index=idx,
-        description=_approval_description(request, idx, execution.call),
-        grant_key=_owner_grant_key(request, execution.call),
-    )
-    approval_request = _with_request_actor(approval_request, request)
-    approval_request = plugin_gate_approval_request(execution, approval_request)
+    approval_request, configured = _build_runtime_approval_request(request, idx, execution)
+    if not configured:
+        consumer = None
     prior_rejection = _matching_runtime_rejection(request.params, approval_request.binding)
     if prior_rejection is not None:
         prior_decision = str(prior_rejection.get("decision") or "denied")
-        if prior_decision not in {"denied", "cancelled"}:
+        if prior_decision not in {"denied", "cancelled", "unavailable"}:
             prior_decision = "denied"
         return carry_gate_decisions(
             execution,
             _rejected_approval_execution(
                 execution,
-                ToolApprovalDecision(approval_request.permission_id, prior_decision),
+                ToolApprovalDecision(approval_request.permission_id, prior_decision,
+                    reason_code=str(prior_rejection.get("reason_code") or "")),
                 repeated=True,
             ),
         )
     try:
-        raw_decision = consumer(
-            approval_request.to_dict(),
-            cancellation_token=request.params.cancellation_token,
-        )
+        raw_decision = (consumer(approval_request.to_dict(), cancellation_token=request.params.cancellation_token)
+                        if callable(consumer) else ToolApprovalDecision(approval_request.permission_id, "unavailable",
+                            reason_code="APPROVAL_UNAVAILABLE"))
         decision = (
             raw_decision
             if isinstance(raw_decision, ToolApprovalDecision)
@@ -541,10 +561,16 @@ def _resolve_tool_approval(
             if isinstance(raw_decision, Mapping)
             else ToolApprovalDecision(approval_request.permission_id, "unavailable")
         )
-    except (TypeError, ValueError):
-        decision = ToolApprovalDecision(approval_request.permission_id, "unavailable")
+    except ModelCallAdmissionClosedError:
+        raise  # 宿主安全重启仍交原耐久恢复，不能伪造成用户拒绝并清理活 claim。
+    except (OSError, RuntimeError, TypeError, ValueError):
+        decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
     if decision.permission_id != approval_request.permission_id:
-        return execution
+        decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
+    if _round_cancelled(request):
+        decision = ToolApprovalDecision(approval_request.permission_id, "cancelled")
+    elif time.time() >= approval_deadline(approval_request):
+        decision = ToolApprovalDecision(approval_request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
     if decision.approved:
         if (closed := _closed_admission_execution(request, original_call)) is not None:
             return carry_gate_decisions(execution, closed)  # 等审批期间宿主停机关门：批准了也不再执行
@@ -577,12 +603,15 @@ def _resolve_tool_approval(
                     f"用户批准 {original_call.tool_name} 时补充：{decision.feedback}"
                 )
         return carry_gate_decisions(execution, resumed)
-    if decision.decision == "unavailable":
-        return carry_gate_decisions(execution, plugin_gate_approval_unavailable(execution), unavailable=True)
+    if decision.decision == "unavailable" and not decision.reason_code:
+        decision = replace(decision, reason_code="APPROVAL_UNAVAILABLE")
     rejected_actions = getattr(request.params, "runtime_rejected_actions", None)
     if isinstance(rejected_actions, list):
         rejected_actions.append(approval_request.rejected_binding(decision))
-    return carry_gate_decisions(execution, _rejected_approval_execution(execution, decision))
+    terminal = _rejected_approval_execution(execution, decision)
+    if decision.decision == "unavailable":
+        terminal = plugin_gate_approval_unavailable(terminal)
+    return carry_gate_decisions(execution, terminal, unavailable=decision.decision == "unavailable")
 
 
 # LLM: 精确重跑裁决allow才附宿主批准事实；等待中换代导致ask/deny不贴已应用，原批准后precheck拒绝也保留未执行。
@@ -623,7 +652,7 @@ def _matching_runtime_rejection(
         if (
             str(item.get("tool_name") or "").strip() == tool_name
             and str(item.get("args_hash") or "").strip() == args_hash
-            and str(item.get("decision") or "").strip() in {"denied", "cancelled"}
+            and str(item.get("decision") or "").strip() in {"denied", "cancelled", "unavailable"}
         ):
             return {str(key): str(value or "") for key, value in item.items()}
     return None
@@ -645,8 +674,8 @@ def _approval_description(
     return f"{call.tool_name}({public_detail})" if public_detail else call.tool_name
 
 
-# LLM: 拒绝/取消配原tool_use终态、handler=False；插件前缀同源清洗且不授权，原错误码/重复拒绝语义保持。
-# 函数用途: 把首次或重复的用户拒绝/取消转换为标准 ToolExecution，并明确告知模型不要重试相同调用。
+# LLM: 拒绝、取消、超时和无人审批均配未执行终态；原 reason_code 与插件事实保留，重复匹配不依赖新 call/attempt。
+# 函数用途: 生成首次或重复的标准拒绝回执，明确说明工具未执行及该操作不可自动重询。
 def _rejected_approval_execution(
     execution: ToolExecution,
     decision: ToolApprovalDecision,
@@ -654,7 +683,7 @@ def _rejected_approval_execution(
     repeated: bool = False,
 ) -> ToolExecution:
     cancelled = decision.decision == "cancelled"
-    code = "CANCELLED" if cancelled else "APPROVAL_REJECTED"
+    code = decision.reason_code or ("CANCELLED" if cancelled else "APPROVAL_REJECTED")
     status = "cancelled" if cancelled else "failed"
     if repeated:
         message = (
@@ -664,6 +693,11 @@ def _rejected_approval_execution(
         )
     else:
         message = "用户取消了这次工具调用，工具没有执行。" if cancelled else "用户拒绝了这次工具调用，工具没有执行。"
+    if decision.reason_code:
+        message = {"APPROVAL_TIMEOUT": "确认已超时，当前操作已拒绝且未执行。",
+                   "APPROVAL_NONINTERACTIVE": "此操作仍需人工确认，当前群或后台任务不等待审批，已拒绝且未执行。",
+                   "APPROVAL_UNAVAILABLE": "没有可用的审批接收端，当前操作已拒绝且未执行。",
+                   "APPROVAL_TRANSPORT_FAILED": "审批卡发送失败，当前操作已拒绝且未执行。"}[decision.reason_code]
     if decision.feedback:
         message = (
             f"{message}\n用户反馈：{decision.feedback}\n"
@@ -678,6 +712,7 @@ def _rejected_approval_execution(
         "deny",
         (code,),
         {
+            **execution.decision.evidence,
             "failure_stage": "authorization",
             "approval_id": decision.permission_id,
             "approval_decision": decision.decision,
@@ -999,12 +1034,17 @@ def _round_cancelled(request: ToolRoundExecutionRequest) -> bool:
     return is_interrupted() or bool(token and getattr(token, "cancelled", False))
 
 
+# LLM: 仅消费成功工具的结构化 handler_details；输入等待与上下文刷新是副作用屏障，正文不可触发续片或暂停。
+# 函数用途: 识别已持久化输入依赖或上下文变更，阻止本轮后续未执行工具继续开跑。
 def _runtime_transition_after_tool(
     result: ToolResult,
 ) -> dict[str, str] | None:
     if not result.ok:
         return None
     details = result.metadata.get("handler_details")
+    dependency = details.get("input_dependency") if isinstance(details, dict) else None
+    if isinstance(dependency, dict) and dependency.get("status") == "waiting_input":
+        return {"kind": "input_wait", "reason": "TASK_INPUT_WAIT", "resume": "external_input"}
     transition = details.get("runtime_transition") if isinstance(details, dict) else None
     if not isinstance(transition, dict):
         return None

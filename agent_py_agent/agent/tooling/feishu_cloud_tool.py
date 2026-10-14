@@ -6,7 +6,10 @@ import json
 from urllib.parse import quote, urlencode
 
 from ..adapter.feishu_cloud import FeishuCloudError, request_cloud_api
-from ..capability.runtime_config_reload import capability_config_for_agent
+from ..capability.runtime_config_reload import (
+    capability_config_for_agent,
+    deployment_capability_config,
+)
 from ..user_space.feishu_cloud_authorization import authorize_cloud_resource, resolve_cloud_resource
 from ..user_space.feishu_sheet_authorization import authorize_sheet_write
 from ..user_space.owner_policy import resolve_effective_owner_policy
@@ -48,6 +51,7 @@ def _model_spec() -> ToolModelSpec:
         '写后用读操作核对；未知写入错误不能直接重试追加。'),
         input_schema={'type': 'object', 'properties': {
             'action': {'type': 'string', 'enum': list(_TYPES)}, 'resource_token': {'type': 'string'},
+            'identity': {'type': 'string', 'enum': ['bot', 'user'], 'description': '默认bot使用应用身份；user须当前私人用户已通过feishu_auth本人授权。群资源使用bot。'},
             'resource_type': {'type': 'string', 'description': '可选：wiki 表示传入知识库节点编号；否则与动作对应的 sheet/docx 一致。'},
             'range': {'type': 'string', 'description': '表格动作必填，sheet_id!A1:C10 或追加范围。'},
             'values': {'type': 'array', 'items': {'type': 'array', 'items': {}}, 'description': '追加或更新的二维单元格数据。'},
@@ -63,6 +67,8 @@ def _model_spec() -> ToolModelSpec:
 # 函数用途: 在审批与操作 claim 前检查本次云调用的形状。
 def _validate_params(params: dict) -> None:
     action = params.get('action')
+    if params.get('identity', 'bot') not in {'bot', 'user'}:
+        raise ValueError('identity 无效。')
     if action not in _TYPES:
         raise ValueError('action 无效。')
     resource_type = params.get('resource_type', _TYPES[action])
@@ -100,8 +106,8 @@ def _request_plan(params: dict) -> tuple[str, str, dict | None]:
     return 'GET', path + '?' + urlencode({'page_size': 50, 'page_token': params.get('page_token', '')}), None
 
 
-# LLM: 工具实例固定 owner，子代理继承原工具和网络上界；Full Access 不代替资源许可，群只使用当前群的共享证明。
-# 类用途: 核验准确资源许可或实时飞书权限，再通过原适配器执行一项云操作。
+# LLM: 工具实例固定 owner，子代理继承原工具与网络上界；CLI/HTTP后端均在同一资源权限门之后。
+# 类用途: 核验准确资源许可或实时飞书权限，再通过已配置宿主后端执行云操作。
 class FeishuCloudTool(BaseTool):
     model_spec = _model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -116,12 +122,22 @@ class FeishuCloudTool(BaseTool):
     def __init__(self, agent):
         self.agent = agent
 
-    # LLM: 开关读原 capability 配置，未知配置失败关闭；资源授权仍逐调用校验。
+    # LLM: 云能力沿owner配置，CLI边界只读共享部署源；坏配置失败关闭，资源授权仍逐调用校验。
     # 函数用途: 关闭功能时隐藏执行能力，不因管理员模式绕过。
     def availability(self):
         config = capability_config_for_agent(self.agent)
         if config is None or not config.feishu_cloud_tools_enabled:
             return ToolAvailability.unavailable('飞书云资源工具未启用。')
+        try:
+            deployment = deployment_capability_config(self.agent.home_paths)
+        except (OSError, ValueError, TypeError):
+            return ToolAvailability.unavailable('飞书后端部署配置无法验证。')
+        if deployment.feishu_cli_backend_enabled:
+            from ..adapter.feishu_cli import cli_binary
+            try:
+                cli_binary()
+            except FileNotFoundError:
+                return ToolAvailability.unavailable('随包飞书 CLI 后端未安装，请更新完整安装包。')
         return ToolAvailability.ready()
 
     # LLM: 与直接 handler 调用共用纯参数校验；不能在审批前请求云数据。
@@ -142,6 +158,23 @@ class FeishuCloudTool(BaseTool):
                 return _failure('TOOL_UNAVAILABLE', '飞书云资源工具未启用。')
             if params.get('__network_access_mode') == 'disabled' or not resolve_effective_owner_policy(self.agent.home_paths).network_enabled:
                 return _failure('NETWORK_DISABLED', '当前用户或父代理未开放工具网络权限。')
+            deployment = deployment_capability_config(self.agent.home_paths)
+            user_token = ''
+            cloud_request = request_cloud_api
+            if deployment.feishu_cli_backend_enabled:
+                from ..adapter.feishu_cli import request_cli_cloud_api
+                cloud_request = request_cli_cloud_api
+            if params.get('identity') == 'user':
+                if not deployment.feishu_cli_backend_enabled:
+                    return _failure('FEISHU_USER_AUTH_REQUIRED', '本人身份需要已配置的受控CLI后端。')
+                from functools import partial
+
+                from ..user_space.feishu_oauth import user_access_token
+                try:
+                    user_token = user_access_token(self.agent)
+                    cloud_request = partial(cloud_request, user_token=user_token)
+                except (OSError, ValueError, TypeError):
+                    return _failure('FEISHU_USER_AUTH_REQUIRED', '本人飞书授权不可用；请在私人助手会话通过feishu_auth授权。')
             read_resource_grants(self.agent.home_paths)
             config = capability_config_for_agent(self.agent)
             collaborator_enabled = bool(getattr(config, 'feishu_cloud_collaborator_authorization_enabled', False))
@@ -152,13 +185,21 @@ class FeishuCloudTool(BaseTool):
             adapter = self.agent.channel_registry.adapter_for('feishu')
             if adapter is None:
                 return _failure('FEISHU_CREDENTIAL_UNAVAILABLE', '宿主未配置飞书应用凭据，请管理员配置；无需向助手发送 app_secret。')
+            if user_token:
+                from ..adapter.feishu_cli import UserCloudIdentity
+                from ..conversation.tool_approval_scope import tool_approval_scope
+                from ..user_space.feishu_oauth import oauth_actor
+                current = getattr(self.agent, '_current_run_params', None)
+                scope = tool_approval_scope(self.agent, str(current.run_id or current.task_id)) if current is not None else None
+                actor = oauth_actor(self.agent, scope)
+                adapter = UserCloudIdentity(adapter.app_id, adapter.app_secret, user_token, actor)
             resource = resolve_cloud_resource(adapter, resource_type, params['resource_token'], params['action'])
             if params['action'] != 'wiki_resolve' and resource.resource_type != _TYPES[params['action']]:
                 return _failure('CLOUD_RESOURCE_TYPE_MISMATCH', '知识库实际对象与所选操作类型不一致，请选择相应云资源动作。')
             authorization = authorize_cloud_resource(self.agent, adapter, resource, params['action'],
                                                      collaborator_enabled=collaborator_enabled)
             authorize_sheet_write(adapter, resource, params, authorization)
-            result = resource.wiki_data if params['action'] == 'wiki_resolve' else request_cloud_api(
+            result = resource.wiki_data if params['action'] == 'wiki_resolve' else cloud_request(
                 adapter, *_request_plan({**params, 'resource_token': resource.resource_token}))
             public_authorization = {key: value for key, value in authorization.items() if key != 'principal_id'}
             return ToolHandlerOutcome('feishu_cloud', True, json.dumps(

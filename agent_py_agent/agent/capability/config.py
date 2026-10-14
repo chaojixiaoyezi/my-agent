@@ -39,6 +39,16 @@ class CapabilityConfig:
     admin_message_channels: list[str] = field(default_factory=lambda: ["feishu"])
     im_scheduled_tasks_background: bool = True
     im_task_delegation_enabled: bool = True
+    # 部署默认只决定是否逐次确认；用户显式选择优先，不改变文件、网络、资源授权。
+    owner_default_permission_mode: str = "auto"
+    # 交互审批的绝对截止；续租、卡片或换代不得延长，0 不表示无限。
+    tool_approval_timeout_seconds: int = 1800
+    # 飞书云操作使用随包受控 CLI 后端；关闭时沿原宿主 HTTP，不开放模型裸 CLI。
+    feishu_cli_backend_enabled: bool = True
+    # 本人 OAuth 只使用此部署回调及 scopes；空回调明确未配置，不借管理员登录。
+    feishu_user_oauth_enabled: bool = True
+    feishu_oauth_redirect_uri: str = ""
+    feishu_oauth_scopes: list[str] = field(default_factory=lambda: ["offline_access"])
     # 无 TUI 的主子代理工具审批发到原发起人的私人卡片；具体批准仍回原请求/claim/attempt。
     im_tool_approvals_enabled: bool = True
     # 私人任务凭据卡及宿主 HTTP 引用注入；不会将密码交给模型或 shell。
@@ -128,7 +138,19 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     """按 dataclass 声明类型归一配置值,不依赖 parse_scalar 的引号类型推断。
 
     自建 yaml 里带引号的标量按 YAML 语义是字符串(qq_app_id: "190…" 等纯数字 ID 必须保字符串),
-    所以这里按字段默认值的真实类型(int/bool)把值coerce回来,'800' 与 800 都能正确落成 int。"""
+    普通策略按 dataclass 类型归一；新增审批和认证部署边界严格校验，未知值不能静默打开能力。"""
+    if field_name == "owner_default_permission_mode":
+        if not isinstance(value, str) or value not in {"ask", "auto"}:
+            raise ValueError("owner_default_permission_mode 必须为 ask 或 auto。")
+        return value
+    if field_name == "tool_approval_timeout_seconds":
+        if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).isdigit() or int(value) <= 0:
+            raise ValueError("tool_approval_timeout_seconds 必须为正整数。")
+        return int(value)
+    if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled"}:
+        if not isinstance(value, bool):
+            raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
+        return value
     default = CapabilityConfig.__dataclass_fields__[field_name].default
     if isinstance(default, bool):
         return _coerce_bool(value, default)

@@ -213,7 +213,7 @@ def _close_authority(manager: object, request: CancelSubagentTaskRequest) -> dic
 
 
 # LLM: 已完成/失败或 UNKNOWN 不改业务终态和执行锁；文件接纳即便处于业务终态也须撤销，DB 事务早已退出。
-# 函数用途: 暂停精确子目标并记录取消投影，清理遗留资源不会抹掉真实业务结果。
+# 函数用途: 暂停精确子目标、取消其必要输入并记录投影；兄弟输入和既有业务终态保持。
 def _close_projection(agent: object, request: CancelSubagentTaskRequest, authority: dict) -> dict[str, object]:
     task = request.task
     now, closed_requests = time.time(), []
@@ -257,6 +257,9 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
         _record_cancelled_lesson_status(task, attempt_id, now)
     transition_delegated_goal(agent.subagents, task, expected_status="active", status="paused")
     link = _sync_cancelled_conversation_link(agent, task.id) if not preserved else {"status": "preserved"}
+    if not preserved or task.status == "CANCELLED":
+        from ..conversation.input_dependencies import cancel_task_inputs
+        cancel_task_inputs(agent, task.root_id, run_id=task.id)
     return {
         "status": task.status, "cancel_status": "preserved" if preserved else "CANCELLED",
         "abandoned_attempt_id": attempt_id if not preserved else "", "conversation_link": link,

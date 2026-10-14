@@ -34,7 +34,7 @@ def normalize_subagent_role(role: str) -> str:
     return cleaned
 
 
-# LLM: 当前创建链必须把 acceptance_checks 清空；历史字段仅由持久层兼容读取。
+# LLM: 当前创建链必须把 acceptance_checks 清空，并按宿主父创建快照收紧角色默认；历史字段仅由持久层兼容读取。
 # 函数用途: 合并角色模板的工具、质量说明和展示属性，不建立机器验收清单。
 def apply_role_contract_to_create_params(params: Any, role_template_dirs: object = None):
     original_role = str(getattr(params, "role", "") or "general")
@@ -48,6 +48,7 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
     effective_role = template_role or contract_role
     template = template_for_role(template_role, role_template_dirs) if template_role else None
     tools = _allowed_tools_for_role(effective_role, getattr(params, "allowed_tools", None), template)
+    tools = _tools_within_creation_scope(tools, getattr(params, "attributes", None))
     quality_contract = _quality_contract_for_role(effective_role, getattr(params, "quality_contract", None), template)
     attributes = _attributes_with_role_template(getattr(params, "attributes", None), template)
     return replace(
@@ -58,6 +59,22 @@ def apply_role_contract_to_create_params(params: Any, role_template_dirs: object
         quality_contract=quality_contract,
         attributes=attributes,
     )
+
+
+# LLM: create_policy 持久化的直属父快照是上界，角色默认不能在最终服务归一化时重新增加父已缺少的业务工具。
+# 函数用途: 在准备与正式提交共用角色入口再次收紧父目录，保留已由宿主复核的子代理专属控制工具。
+def _tools_within_creation_scope(tools, attributes):
+    from .capability_scope import DIRECT_PARENT_TOOL_AUTHORITY_ATTR
+    from .role_templates import CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL
+
+    value = attributes.get(DIRECT_PARENT_TOOL_AUTHORITY_ATTR) if isinstance(attributes, dict) else None
+    if not isinstance(value, dict) or value.get("schema_version") != "direct_parent_tool_authority.v1":
+        return tools
+    names = value.get("available_tool_names")
+    if not isinstance(names, list):
+        return []
+    available = {*names, CAPABILITY_REQUEST_TOOL, RECORD_LESSON_TOOL}
+    return [name for name in tools or [] if name in available]
 
 
 def _default_template_role(role: str) -> str | None:

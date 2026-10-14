@@ -1,3 +1,33 @@
+2026-10-14 无人值守与受控飞书 CLI 新入口（沿原 owner/task/Wake/工具账）：
+
+```text
+|-- agent_py_agent/agent/tooling/self_context.py # 本人能力与权限事实只读投影
+|-- agent_py_agent/agent/conversation/input_dependencies.py # 原任务私人输入期限、恢复和取消
+|-- agent_py_agent/agent/conversation/input_dependency_index.py # 原TaskStore的输入引用索引
+|-- agent_py_agent/agent/conversation/input_tool_boundary.py # 归档后退出待输入工作片
+|-- agent_py_agent/agent/conversation/task_rejected_actions.py # 原任务准确审批拒绝结果
+|-- agent_py_agent/agent/user_space/task_credential_schema.py # 私人密文字段及有效期合同
+|-- agent_py_agent/agent/user_space/task_credential_http.py # 原宿主HTTP的引用登录、会话与签名
+|-- agent_py_agent/agent/user_space/feishu_oauth.py # 当前本人授权、密文token和刷新
+|-- agent_py_agent/agent/tooling/feishu_auth_tool.py # 渐进发现的本人授权交互
+|-- agent_py_agent/agent/gateway_parts/feishu_oauth_service.py # 原Gateway的验签OAuth回调
+|-- agent_py_agent/agent/adapter/feishu_cli.py # 固定随包程序、私有stdin和单次官方运输
+|-- scripts/feishu_cli_host/main.go # 官方Go CLI公开扩展的受控宿主入口
+|-- scripts/build_feishu_cli.py # 固定提交编译、Go验证、来源及许可证
+|-- agent_py_agent/tests/test_unattended_tool_approval.py # 审批终态与绝对截止
+|-- agent_py_agent/tests/test_im_self_discovery.py # 实际工具目录、权限及子代理上界
+|-- agent_py_agent/tests/test_persistent_task_input.py # 真工具/假模型/后台claim与一次恢复
+|-- agent_py_agent/tests/test_task_input_cancel_deadline.py # 真停止入口、兄弟隔离与1001队列输入期限
+|-- agent_py_agent/tests/test_task_input_capacity.py # 原TaskStore锁内并发32容量和拒绝回滚
+|-- agent_py_agent/tests/test_im_task_input_status.py # 同源状态区分运行、待输入和子阻塞
+|-- agent_py_agent/tests/test_task_credential_http.py # 引用登录、CSRF、签名和同源边界
+|-- agent_py_agent/tests/test_feishu_cli_backend.py # 私有运输、停止与未知写入
+|-- agent_py_agent/tests/test_feishu_oauth.py # 本人授权回调、撤销与身份负例
+`-- docs/design/IM_UNATTENDED_IMPLEMENTATION.md # 本期实施合同、部署和验收边界
+```
+
+关键职责：输入引用是原TaskStore查找投影，原runtime wake_queue负责到期与恢复；秘密仍只在原受保护私人交互目录加密存储。CLI 不成为第二套权限或消息发送入口。
+
 # Codebase Tree
 
 2026-10-13 安全追加的新入口（只复用原配置、权限和凭据账）：
@@ -510,6 +540,9 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/tests/test_im_tool_approval.py # 无 TUI 主子孙私人审批、解锁、防转发及真实 HTTP 接线
 `-- docs/design/
     |-- ADMIN_CHANNEL_IDENTITY.md       # IM 管理员身份：管理员密码、私聊精确绑定为 local/main、聊天内 /approve /deny 审批
+    |-- FEISHU_CLI_INTEGRATION_ASSESSMENT.md # 普通用户与群助手 CLI 的官方接口、原生运行证据和待实施接线
+    |-- IM_UNATTENDED_EXECUTION_REVIEW.md # 企业 IM 自动执行、停止、无审批等待资源与凭据/CLI 接缝评估
+    |-- IM_CAPABILITY_DISCOVERY_AUDIT.md # 助手查询自身能力/权限的角色差异、披露缺口与只读验证
     |-- PARAMETER_CENTER.md             # 参数中心：一个参数一个权威定义、安全等级、my-agent 自助修改与回滚、分阶段迁移
     |-- STORAGE_RETENTION.md            # 产品持久数据盘点：写入点、实测大小、现有保留机制与缺口、通用保留方向（未落地）
     |-- WAKE_POISON_PILL.md             # 唤醒毒丸处理：同因连续失败持久计数、瞬时排除、结案与人工重放（方案已审，分步实现中）
@@ -2636,3 +2669,17 @@ docs/
 - `docs/tasks/MODEL_SHUTDOWN_PROVENANCE_HANDOFF.md`：停机晚到模型结果沿原 closure/restart_resume 处理，不绕来源门。
 
 - `agent_py_agent/agent/auth/configuration.py`：启动前校验部署边界并构造原鉴权中间件；不读取秘密、不新建状态。
+
+## IM 凭据与权限专项评估入口（2026-10-14）
+
+```text
+`-- docs/design/IM_SECURITY_CREDENTIAL_ASSESSMENT_20261014.md # 普通/群权限、恶意脚本和受管/明文凭据传播的证据与边界
+```
+
+该报告记录测试与未实施设计，不能替代实际沙箱/卡片/外发结果，也不是新的权限或凭据事实源。
+
+`docs/design/FEISHU_CLI_INTEGRATION_ASSESSMENT.md`：用户调整为 CLI 优先后的可行性、身份使用方式、官方扩展接口与隔离测试记录；尚未增加产品入口。
+
+`docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md`：一个管理员和大量员工的非交互执行目标、审批卡去重/超时重询、活执行锁与会话消息安全点、管理员历史策略差异和待实施路线；不作为产品修复完成。
+
+`docs/design/IM_CAPABILITY_DISCOVERY_AUDIT.md`：原工具/Skill发现链、真实权限状态缺失、普通worker/后台目录及开关披露差异；保留测试红和现场未知边界。

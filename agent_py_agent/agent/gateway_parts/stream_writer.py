@@ -587,10 +587,10 @@ def _flush_model_delta_events(writer: BufferedChunkStreamWriter) -> None:
     )
 
 
-# LLM: IM 原生卡与富 TUI 执行同一精确确认合同；入口由宿主 channel/client 能力选定，不接受模型文字切换。
-# 函数用途: 将一次审批交给已有原生 IM 等待桥或 TUI chunk 审批组件，取消继续透传。
+# LLM: 私人卡只用于宿主准确 feishu 渠道；恢复标记不是渠道授权，TUI 是否交互仍认原 client capability，不从展示支持猜 IM。
+# 函数用途: 把飞书确认交原私人卡桥，其它客户端沿原 stream 审批，安全恢复不丢失原交互能力。
 def request_stream_permission(writer,request,cancellation_token):
-    if writer.im_approval_agent is not None and not writer.rich_transcript and not supports_transcript_delivery(writer.delivery_channel):
+    if writer.im_approval_agent is not None and not writer.rich_transcript and writer.delivery_channel == "feishu":
         from ..conversation.im_tool_approval import request_foreground_im_permission
         return request_foreground_im_permission(writer.im_approval_agent,request,cancellation_token=cancellation_token)
     return writer._approval.request(request,options=StreamApprovalRequestOptions(

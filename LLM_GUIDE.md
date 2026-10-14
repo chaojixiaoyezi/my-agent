@@ -1,4 +1,14 @@
+2026-10-14 实施接线：日常审批默认由共享 `home/config/capability_config.yaml` 的 `owner_default_permission_mode` 决定；owner显式选择保持。`list_tools` 返回当前权限事实和完整不可用原因，`tool_search` 继续逐线程按需加载；`/help` 只给短导航。本人OAuth、CLI后端与审批期限的六项部署键不允许模型写owner局部配置。原输入等待完整归档后释放执行片，回调复核准确任务/人并沿原Wake恢复。见[实施合同](docs/design/IM_UNATTENDED_IMPLEMENTATION.md)。
+
 # LLM_GUIDE
+
+2026-10-14 审批占住群会话追加审计：单卡超时仍返回可重试 APPROVAL_REQUIRED、活 consumer 无总截止；活 PID 等待不属孤儿。generation 10 非审批次数，MCP tool_approvals 非全局开关，三版 restart 的 always 无变化。37/60 两批既有回归通过、加速等待/临时DB/54项历史裁决证据保留；仅文档、未修产品。见 [综合审计追加](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)。
+
+2026-10-14 自身能力只读审计：原发现工具链存在，但真实审批模式与不可用原因披露不全；普通worker默认缺发现/凭据/云工具，关闭凭据仍声明ready已复现。53/61两批绿、86项中2红保留，未改产品或发布。见 [发现审计](docs/design/IM_CAPABILITY_DISCOVERY_AUDIT.md)。
+
+2026-10-14 企业 IM 无人值守评估：复用 auto、原停止和持久等待/Wake，群需审批即时拒绝；同步审批/凭据等待仍占 runner、typed 私卡去重碰撞已合成复现。宿主统一默认与 ready 凭据生命周期待实施，CLI 不代替内部平台认证。见 [综合评估](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)，不当成已修或几十万用户容量证明。
+
+2026-10-14 用户调整为 CLI 优先：普通用户/群助手接入方式与官方 v1.0.98 隔离原生运行已核查，产品接线和本人 OAuth 仍未实施；不把管理员裸 CLI 登录当所有用户已可用。原安全专项按用户要求暂停。见 [CLI 评估](docs/design/FEISHU_CLI_INTEGRATION_ASSESSMENT.md)。
 
 2026-10-14 各类引用发行完成：`.20261014.2` 准确源码a488b76bc，严格691项和Linux包内968通过/8跳过、独立验包/原地更新/TUI均通过。旧主线全套CI失败不作为已通过结果；详见TESTS与设计台账。后续验收元数据提交不冒充包源码。
 

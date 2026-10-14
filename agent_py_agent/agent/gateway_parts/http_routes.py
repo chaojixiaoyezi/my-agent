@@ -1,5 +1,5 @@
-# LLM: HTTP分发唯一结构化路由表；G2a观察复用template/access_tier，禁止并排维护计数白名单；原处理器授权/副作用保持。
-# 模块用途: 声明Gateway实际路由与四档属性，使观察键有界且不含请求编号；私人交互处理器额外要求真实宿主凭据。
+# LLM: HTTP分发唯一路由表；OAuth公开回调仍须原交互MAC与actor验证，不接收宿主凭据头作为本人授权。
+# 模块用途: 声明Gateway路由及有界观察档位，私人交互与本人OAuth由各自处理器验证准确身份。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +18,7 @@ class GatewayHTTPRoute:
 GATEWAY_HTTP_ROUTES = {
     "GET": (
         GatewayHTTPRoute("/status", "_handle_status", "public"),
+        GatewayHTTPRoute("/feishu/oauth/callback*", "handle_feishu_oauth_callback", "public", ".feishu_oauth_service"),
         GatewayHTTPRoute("/result/*", "_handle_result", "credential"),
         GatewayHTTPRoute("/input-status/*", "_handle_input_status", "credential"),
         GatewayHTTPRoute("/control-status/*", "_handle_control_status", "credential"),

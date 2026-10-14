@@ -1021,12 +1021,13 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
-# LLM: ToolRegistry 唯一装配入口；凭据来源上界仅从宿主 config 提取，B5 owner/来源与原 B2 征询合同不变。
-# 函数用途: 按身份和工作区组合工具、来源声明及可选文件反馈，主代理与同进程子代理共用权限接线。
+# LLM: ToolRegistry 唯一装配入口；凭据与自身能力来源均绑定宿主身份，B5 owner/来源与原 B2 征询合同不变。
+# 函数用途: 按身份和工作区组合工具、只读自身状态和来源声明，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
     from .settings.secret_ref import managed_secret_environment_names
+    from .tooling.self_context import tool_self_context
     from .user_space.approval_mode import read_approval_mode
 
     workspace_root = agent.effective_workspace_root
@@ -1112,6 +1113,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
                 getattr(agent.home_paths, "owner_id", "") or "local/main"
             ),
             approval_mode_reader=partial(read_approval_mode, agent.home_paths),
+            self_context_provider=partial(tool_self_context, agent),
             plugin_gate_reviewer=_build_plugin_gate_reviewer(agent, config),
         )
     )
@@ -1306,8 +1308,14 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     from .tooling.feishu_cloud_tool import FeishuCloudTool
 
     agent.tools.register(FeishuCloudTool(agent))
+    from .tooling.feishu_auth_tool import FeishuAuthTool
+
+    agent.tools.register(FeishuAuthTool(agent))
     if (web_tool := agent.tools.tools.get("web_fetch")) is not None:
         web_tool.credential_resolver = lambda ref, url: credential_headers(agent, ref, url)
+        from .user_space.task_credential_http import credential_authenticated_request
+
+        web_tool.credential_authenticator = lambda ref, request, send: credential_authenticated_request(agent, ref, request, send=send)
     # 内网主机出站授权:用户点名的内网监控目标(跨机数据源)经属主确认后进白名单,解除
     # NETWORK_PRIVATE_HOST_BLOCKED;不放松出站闸本身,只接通闸已内置的 allowed_private_hosts。
     # 高吞吐数据流盯守摄取层:代码层结构化预聚合/初筛/背压把 100+/s 压成候选批,主代理与

@@ -856,7 +856,7 @@ def conversation_compact_interrupt_name(
 
 
 # LLM: Status is rendered only from typed runtime facts; guidance text/history is intentionally absent.
-# 函数用途：把当前任务状态整理成用户能直接读懂、且不泄露内部命令和路径的文本。
+# 函数用途：把原任务状态、后台运行和不占执行资源的待输入整理成可读文本，不泄露内部命令、路径或秘密。
 def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     labels = {
         "idle": "空闲",
@@ -923,10 +923,10 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
                 text += f"（到 {expiry.isoformat()}）"
             lines.append(f"当天自动委派：{text}")
             if "queued" in settings:
-                lines.append(f"独立后台任务：排队 {settings['queued']}；运行/汇总 {settings['running']}")
+                lines.append(f"独立后台任务：排队 {settings['queued']}；运行/汇总 {settings['running']}；待输入 {settings.get('waiting_input', 0)}（等待不占执行资源）")
             if "subagent_running" in settings:
                 root_limit, owner_limit = settings["root_subagent_limit"], settings["owner_subagent_limit"]
-                lines.append(f"后台子代理：运行 {settings['subagent_running']}；每根上限 {root_limit or '不限'}；用户上限 {owner_limit or '不限'}")
+                lines.append(f"后台子代理：运行 {settings['subagent_running']}；等待/受阻 {settings.get('subagent_waiting', 0)}（待输入 {settings.get('subagent_waiting_input', 0)}）；每根上限 {root_limit or '不限'}；用户上限 {owner_limit or '不限'}")
     audits = [item for item in status.durable_work if item.kind == "audit"]
     goals = [item for item in status.durable_work if item.kind == "goal"]
     if audits:

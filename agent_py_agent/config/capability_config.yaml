@@ -3,6 +3,18 @@
 im_scheduled_tasks_background: true
 # 允许 IM 用户通过 /delegate 开启当天委派；默认用户偏好关闭，零点到期，不扩大子代理权限或额度。
 im_task_delegation_enabled: true
+# 未显式选择模式的用户/群统一默认自主工作；仅免可选确认，不授予新权限。只允许部署者设置 ask/auto。
+owner_default_permission_mode: auto
+# 交互工具审批从创建起的绝对上限（秒），必须为正整数；无人值守仍直接拒绝，不占槽等待。
+tool_approval_timeout_seconds: 1800
+# 飞书云操作使用随包受控 CLI 后端；沿原 owner/群资源授权，令牌只进入宿主子进程私有输入。
+feishu_cli_backend_enabled: true
+# 本人身份的飞书资源需用户单独授权。共享文档/群资源继续使用应用身份，无需逐人登录。
+feishu_user_oauth_enabled: true
+# 部署者在飞书应用登记的准确回调 URI（HTTPS，路径 /feishu/oauth/callback）；空值表示本人授权尚未配置。
+feishu_oauth_redirect_uri: ""
+# 应用实际已开放的用户 scopes；offline_access允许宿主刷新，模型不能自选扩权。
+feishu_oauth_scopes: ["offline_access"]
 # 后台主/子代理的具体工具审批通过原发起人的私人 IM 卡片收取；不让父代理代替用户批准。
 # 仍核对原调用、主 claim/子 attempt、接收者和实际卡片身份；关闭后沿原 TUI/Web 审批方式。
 im_tool_approvals_enabled: true
