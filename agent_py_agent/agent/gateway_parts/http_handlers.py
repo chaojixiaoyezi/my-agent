@@ -1,4 +1,4 @@
-# LLM: HTTP handlers preserve authenticated owner/thread boundaries and typed protocol fields;
+# LLM: HTTP handlers preserve authenticated owner/thread boundaries and raw HTTPMessage header copies before identity checks;
 # process stream identity affects only display cursors, never model requests or authorization.
 # 控制 workspace 沿持久输入保存，共用宿主权限门；HTTP 投影不自行判定目录权限。
 # 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
@@ -114,13 +114,15 @@ class _AskRequestContext:
     channel: str
 
 
+# LLM: 原HTTPMessage的重复字段必须交同一middleware裁决，不能先dict折叠而把冲突变成本机管理员；无mw只属合法单机。
+# 函数用途: 为正式读写handler投影当前准确身份和权限，不改变原角色/owner门。
 def _request_identity(handler) -> tuple[str, Any]:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return "admin", None
     peer_ip = _handler_peer_ip(handler)
-    user_id, _ = mw.extract_identity(dict(handler.headers), peer_ip)
-    return user_id, mw.get_permission(dict(handler.headers), peer_ip)
+    user_id, _ = mw.extract_identity(handler.headers, peer_ip)
+    return user_id, mw.get_permission(handler.headers, peer_ip)
 
 
 # LLM: /result、/input-status、/progress 三个读端点不挂 require_trusted_source，它们先把身份降为匿名，
@@ -131,7 +133,7 @@ def _request_identity(handler) -> tuple[str, Any]:
 #   这三个端点自己判的每一处拒绝都必须经本函数返回，别再手写裸 403：handle_progress 的读权限拒绝与
 #   记录缺失（403/404）、handle_input_status 的读权限拒绝、_send_archived_terminal_result 的归档读不出与读权限拒绝、
 #   _send_pending_state 的损坏与非本人两个分支——否则同一条降级路径上会出现"有的 403 带码、有的
-#   不带"，客户端又只能靠状态码猜。管理员侧（500/200）不受影响：本函数只在"强制档 + 回环 +
+#   不带"，客户端又只能靠状态码猜。原头必须保留冲突副本，歧义不是缺凭据。管理员侧（500/200）不受影响：本函数只在"强制档 + 回环 +
 #   没带凭据"这一格为真，而那一格普通用户恒走 403。
 # 函数用途: 给降级拒绝或记录缺失的响应体按需补上本机凭据缺失码。
 def _denial_body(handler, body: dict[str, Any]) -> dict[str, Any]:
@@ -139,17 +141,19 @@ def _denial_body(handler, body: dict[str, Any]) -> dict[str, Any]:
     checker = getattr(mw, "needs_local_credential", None)
     if not callable(checker):
         return body
-    headers = dict(getattr(handler, "headers", {}) or {})
+    headers = getattr(handler, "headers", {}) or {}
     if checker(_handler_peer_ip(handler), headers):
         return {**body, "error_code": LOCAL_CREDENTIAL_REQUIRED}
     return body
 
 
+# LLM: 通道和用户来自原未经折叠的HTTPMessage与middleware，不把body或缺/冲突头当新身份源。
+# 函数用途: 给持久回执读取校验当前用户和渠道，保留重复字段的拒绝事实。
 def _request_channel(handler) -> tuple[str, str]:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return "admin", "chat"
-    return mw.extract_identity(dict(handler.headers), _handler_peer_ip(handler))
+    return mw.extract_identity(handler.headers, _handler_peer_ip(handler))
 
 
 def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:

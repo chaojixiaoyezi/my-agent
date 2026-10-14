@@ -1,5 +1,5 @@
 # LLM: 模型调用账本记录与输出上限估算都在这里；输出上限复用 settings/defaults 的唯一公式（窗口没填按 128000 兜底），
-#   不另写数值。记录函数会写调用账本（有副作用），估算函数只读。
+#   不另写数值。记录函数会写调用账本；已被同一停机原因结清的迟到完成抛原准入异常，不签发成功来源。
 # 模块用途: 记录每次模型调用的开始、首包、结束、失败与超时，并给 compact 预算和超时估算提供输出上限。
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 
 from ...contracts.model_call_ledger import (
     ModelCallActivityParams,
+    ModelCallAdmissionClosedError,
     ModelCallAdmissionClosure,
     ModelCallFailureParams,
     ModelCallFinishParams,
@@ -20,6 +21,7 @@ from ...contracts.model_call_ledger import (
     ModelCallStartedParams,
     ModelCallTimeoutParams,
     close_model_call_admission,
+    model_call_admission_closure,
     model_call_purpose,
     summarize_model_call_records,
 )
@@ -208,14 +210,15 @@ def record_model_call_first_token(
     )
 
 
-# LLM: 已报字段由同一归一读取器提供；仅真实 text 可走原正文估算，无 text 的决策响应不得套空正文估算；缺报仍由字段来源表达。
-# 函数用途: 把响应的用量和结束事实提交原账本，逐字段保留真值或估算，不为决策响应伪造生成内容。
+# LLM: 用量沿原归一读取器，首终态仍归原 ledger；准确调用已 failed 且原因与唯一准入 closure 完全匹配时抛原异常，
+#   阻止生成出口签发来源或执行迟到工具。已成功、超时及其它失败不重新归类；不能按正文猜停机或重开终态。
+# 函数用途: 把完成事实提交原账，并将宿主已结清的迟到响应交回原重启恢复出口，不为决策响应伪造生成内容。
 def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: object) -> None:
     input_tokens = input_token_usage(response)
     output_tokens = output_token_usage(response)
     if output_tokens is None:
         output_tokens = estimate_tokens(response.text) if hasattr(response, "text") else 0
-    ledger.finished(
+    record = ledger.finished(
         ModelCallFinishParams(
             call_id=call_id,
             input_tokens=input_tokens,
@@ -232,6 +235,10 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
             truncated=bool(getattr(response, "truncated", False)),
         )
     )
+    closure = model_call_admission_closure()
+    if (closure is not None and record.status == "failed"
+            and record.error_type == closure.error_type and record.error_code == closure.error_code):
+        raise ModelCallAdmissionClosedError(closure)
 
 
 def record_model_call_failed(

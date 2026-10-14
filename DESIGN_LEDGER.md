@@ -1,5 +1,11 @@
 ## 2026-10-13 群调度主体与首次反馈修复（源码验收完成，发行验收待执行）
 
+宿主环境与运输安全交接：[环境来源边界](docs/design/HOST_CREDENTIAL_ENVIRONMENT_BOUNDARY.md)、[owner 权限验收](docs/tasks/IM_OWNER_PERMISSION_SECURITY_HANDOFF.md)、[飞书运输安全](docs/design/FEISHU_OUTBOUND_SECURITY.md)、[独立投递复核](docs/tasks/FEISHU_SECURITY_AUDIT_HANDOFF.md)。原模块/账本保持唯一；最终联合发布结果仍待同源 gate。
+
+
+2026-10-13 追加安全复核（源码严格验收完成，发行按同包清单记录）：回环身份只认宿主凭据，退休迁移开关；原 factory 自动补接鉴权，IM 禁止关闭 owner 隔离；准确宿主 SecretRef 来源清理子进程环境，监控 HTTP 凭据复用当前 owner/TaskCredential，损坏网络策略关闭网络并在每次工具调用重核冻结上界；认证 HTTP 拒绝跳转，附件在原 Delivery 首副作用前冻结 owner/hash/size 一致字节，错落 Session 目标拒绝。普通/admin/full、群/私聊、子孙/后台正反例及真实租户边界详见 [安全复核](docs/design/IM_SECURITY_AUDIT_20261013.md)。
+
+
 已在发布源码5142efb0a复现新群任务创建后模型工具不可见/不可管理：创建读后台冻结actor，查询漏掉真实Gateway的host_channel_actor而变成local=True；owner账本没有切错。slash本人控制正常。子代理可写attributes与可信actor的边界必须一起修，不能简单改读一个字段；冲突/无身份明确拒绝，跨owner不探测。实际外部利用路径未确认。
 
 首次emoji问题的同行/独行@与手打尾文2×2对照正常；但已复现reaction失败仍受理，以及bot身份暂不可用时WS先seen导致同消息重投丢失。截图现场具体触发未确认。A空/非空占位差异不作为文字黑名单权威。修复前证据、配对验收和脱敏诊断边界见[新反馈定位](docs/design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md#新反馈定位2026-10-13未修改产品或重新发布)。用户已授权修复、main提交与新包；不操作真实监控。
@@ -10,9 +16,9 @@
 
 进度观察沿准确活动 run 的冻结通知策略：local/none/origin+explicit 不启动窗口，普通委派和旧 always 保留反馈；前台原 120 秒等待刷新不变。旧排队执行线程迁移仅在准确同 run、未开工且原 owner/旧元数据全部匹配时进行，不借线程可写属性获得身份。交接见[群调度主体](docs/tasks/IM_SCHEDULER_ACTOR_HANDOFF.md)、[飞书入站](docs/tasks/FEISHU_INGRESS_REPAIR_HANDOFF.md)与[公开回执](docs/tasks/BACKGROUND_PUBLIC_RECEIPT_HANDOFF.md)。下方各节中的待实施状态是历史检查点，当前范围以本节和交接为准。
 
-群附件使用追加（已核查，待单独实施）：未提及机器人的上传文件在群触发门先被忽略，原入站没有缓存；目前 parent/root 只保留编号，没有读取原消息媒体链。现可用同条可信 @ 加云文档链接，或私聊上传并在私聊处理。推荐后续复用原入站媒体下载，允许用户引用准确群内文件再 @ 机器人；必须核对同群/话题/可见消息及当前 owner，不猜“上一条”，不让私聊附件跨到群空间。该建议尚未实现，不列入本次修复完成清单。
+群附件使用追加（已实施，联合与发行验收中）：先上传到群，再引用准确文件消息并 @机器人说明任务。原 durable prepare 单次查询明确 parent；核对唯一消息 ID、同群/话题、未撤回，再沿原 owner 媒体下载器落到当前群空间，父发送者不授予权限。当前附件与引用附件分别使用准确源 ID，payload_ready 后冷重投只消费冻结输入；读取失败给模型结构化事实，不猜“上一条”、递归查历史或建立第二缓存。配置 feishu_quoted_media_enabled 默认 true，关闭/私聊/控制命令零新增查询，群触发门仍为原权威；重启飞书通道生效。飞书群消息和资源读取权限须由应用管理员授权，现场租户未验。详见[群引用附件](docs/design/FEISHU_QUOTED_MEDIA.md)。
 
-首版源码 77 文件联合 1219 项通过；真实 `.7` 候选另发现完整 JSON 围栏被误拒，已在 common 窄解码入口修复，最终发行候选改 `.8`，78 文件联合 1251 项通过，严格门和发行按准确新提交分别验收。源、权限和回执完成边界见上述交接，严格提交 gate 及独立包/原位置更新/TUI/官方模型验收按准确提交分别记录。不得把替身运输或来源验证说成真实飞书实发或模型语义正确。
+首版源码 77 文件联合 1219 项通过；真实 `.7` 候选另发现完整 JSON 围栏被误拒，已在 common 窄解码入口修复。`.8` 的 78 文件联合 1251 项、严格门、独立字节码包、原位置更新、TUI 正常退出和一次官方 MiniMax 静默监控均通过；该包未交付，追加群附件后下一候选改 `.9`，须按准确新提交重新验收。源、权限和回执完成边界见上述交接，严格提交 gate 及独立包/原位置更新/TUI/官方模型验收按准确提交分别记录。不得把替身运输或来源验证说成真实飞书实发或模型语义正确。
 
 ## 2026-10-13 云文档监控与耗时追加核查
 

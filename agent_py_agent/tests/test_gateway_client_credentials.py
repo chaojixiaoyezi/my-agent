@@ -1,8 +1,7 @@
 """G3：真实客户端运输接随机端口假服务；凭据只来自 tmp_path。
 
-返工（g3f）：凭据读不到时按 G2b 开关分流——默认（开关关）降级为不带 X-Gateway-Token 继续发送，
-只记一次结构化 warning；开关开才在网络请求前拒绝（零请求、G1 原因码）。成功附凭据、配置 token 优先、
-direct 不读凭据的用例全部保留。
+宿主凭据必需；旧迁移开关的任意值都不能触发空凭据降级。缺失或损坏必须零请求并保留 G1 原因码。
+成功附凭据、配置 token 优先、direct 不读凭据的用例全部保留。
 """
 from __future__ import annotations
 
@@ -103,19 +102,6 @@ def credential_environment(credential_home, fake_gateway, caplog):
     return root, token, fake_gateway.port, caplog, fake_gateway.requests
 
 
-@pytest.fixture(autouse=True)
-def _reset_credential_warning_dedup():
-    """warning 去重是进程级状态；每个用例前后清空，保证“只记一次”断言跨用例真实。"""
-    from agent_py_agent.agent.gateway_parts import client_credentials
-
-    def _clear() -> None:
-        with client_credentials._CREDENTIAL_WARNINGS_LOCK:
-            client_credentials._WARNED_CREDENTIAL_REASONS.clear()
-
-    _clear()
-    yield
-    _clear()
-
 
 def _agent(root, port, configured_token="", *, require_credential=False):
     return SimpleNamespace(
@@ -138,7 +124,7 @@ def _tui(root, port, configured_token="", *, require_credential=False):
     )
 
 
-# LLM: 控制客户端的三项差异（模式、部署 token、是否强制凭据）收进一个小数据对象，避免 helper 参数超过 4 个。
+# LLM: 控制客户端的三项输入（模式、部署 token、存量迁移开关）收进一个小数据对象，避免 helper 参数超过 4 个。
 # 类用途: 描述一个控制测试替身要用的传输模式和凭据来源。
 @dataclass(frozen=True)
 class _ControlOptions:
@@ -158,10 +144,7 @@ def _control(root, port, options: _ControlOptions | None = None):
 
 def _im_manager(root, port, *, require_credential=False):
     manager = ChannelManager(gateway_port=port)
-    if require_credential:
-        manager._reply_poll_client.credentials = GatewayClientCredentials(
-            root, require_local_credential=True,
-        )
+    manager._reply_poll_client.credentials = GatewayClientCredentials(root)
     return manager
 
 
@@ -309,25 +292,23 @@ def test_proxy_health_never_receives_gateway_credential(credential_home, fake_ga
     assert fake_gateway.requests[0][1].get_all("X-Gateway-Token") is None
 
 
-# --- 返工（g3f）：开关关（默认）降级继续发送 / 开关开拒绝 ---
+# --- 存量开关不能降级：每个客户端均在网络前拒绝 ---
 
 
 @pytest.mark.parametrize("client, reason", [(c, r) for c in ("tui", "cli", "im") for r in ("MISSING", "PERMISSIONS", "INVALID")])
-def test_credential_failure_with_switch_off_degrades_and_warns_once(client, reason, credential_environment):
+def test_credential_failure_with_old_false_is_rejected_before_http(client, reason, credential_environment):
     root, token, port, caplog, requests = credential_environment
-    fake_gateway = SimpleNamespace(port=port, requests=requests)
     _break_credential(root, token, reason)
-    caplog.set_level(logging.WARNING, logger=_CREDENTIAL_LOGGER)
-    assert _invoke(client, root, port)["ok"] is True
-    assert _invoke(client, root, port)["ok"] is True
-    assert len(fake_gateway.requests) == 2, "开关关时凭据读不到也必须照常发出请求"
-    assert all(headers.get_all("X-Gateway-Token") is None for _path, headers, _payload in fake_gateway.requests)
-    warnings = _credential_warnings(caplog)
-    assert len(warnings) == 1, "同一原因在同一进程只记一次 warning"
-    assert f"reason_code=LOCAL_CLIENT_CREDENTIAL_{reason}" in warnings[0].getMessage()
-    assert token not in caplog.text
-    for warning in warnings:
-        assert token not in warning.getMessage() and str(root) not in warning.getMessage()
+    for _ in range(2):
+        try:
+            result = _invoke(client, root, port)
+        except LocalClientCredentialError as exc:
+            result = {"ok": False, "error_code": exc.reason_code, "message": str(exc)}
+        assert result["ok"] is False
+        assert result["error_code"] == f"LOCAL_CLIENT_CREDENTIAL_{reason}"
+        assert token not in result["message"] and str(root) not in result["message"]
+    assert requests == []
+    assert token not in caplog.text and not _credential_warnings(caplog)
 
 
 @pytest.mark.parametrize("client", ["tui", "cli", "im"])
@@ -346,19 +327,19 @@ def test_credential_failure_with_switch_on_is_rejected_before_http(client, reaso
     assert fake_gateway.requests == [], "开关开时读取失败不得发送请求"
 
 
-def test_degraded_warning_dedup_is_per_reason(credential_home, fake_gateway, caplog):
+def test_credential_failure_reasons_are_distinct_without_downgrade_warning(credential_home, fake_gateway, caplog):
     root, token = credential_home
-    caplog.set_level(logging.WARNING, logger=_CREDENTIAL_LOGGER)
     path = local_client_credential_path(root)
     path.unlink()
-    _tui(root, fake_gateway.port).post_gateway_json("/client/history", {}, timeout=2)
+    with pytest.raises(LocalClientCredentialError) as missing:
+        _tui(root, fake_gateway.port).post_gateway_json("/client/history", {}, timeout=2)
     path.write_text(token + "-broken", encoding="ascii")
     path.chmod(0o600)
-    _tui(root, fake_gateway.port).post_gateway_json("/client/history", {}, timeout=2)
-    messages = [record.getMessage() for record in _credential_warnings(caplog)]
-    assert len(messages) == 2, "不同原因各记一次"
-    assert "LOCAL_CLIENT_CREDENTIAL_MISSING" in messages[0]
-    assert "LOCAL_CLIENT_CREDENTIAL_INVALID" in messages[1]
+    with pytest.raises(LocalClientCredentialError) as invalid:
+        _tui(root, fake_gateway.port).post_gateway_json("/client/history", {}, timeout=2)
+    assert missing.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_MISSING"
+    assert invalid.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_INVALID"
+    assert fake_gateway.requests == [] and not _credential_warnings(caplog)
 
 
 def test_credential_never_enters_logs_environment_or_error_text(credential_home, fake_gateway, caplog):
@@ -371,28 +352,27 @@ def test_credential_never_enters_logs_environment_or_error_text(credential_home,
     assert all(token not in arg for arg in sys.argv)
     assert all(token not in value for value in os.environ.values())
     local_client_credential_path(root).write_text(token + "-invalid", encoding="ascii")
-    # 降级路径：照常发送，日志里也不得出现凭据或路径。
-    assert _invoke("cli", root, fake_gateway.port)["ok"]
+    # 旧配置 false 同样拒绝，不增加一次请求；错误不能包含凭据或路径。
+    assert _invoke("cli", root, fake_gateway.port)["ok"] is False
+    assert len(fake_gateway.requests) == 3
     assert token not in caplog.text
     for warning in _credential_warnings(caplog):
         assert token not in warning.getMessage() and str(root) not in warning.getMessage()
-    # 开关开路径：错误文字只给原因码。
+    # 任意旧配置值均只返回结构化安全原因。
     try:
         _invoke("tui", root, fake_gateway.port, require_credential=True)
     except LocalClientCredentialError as exc:
         assert token not in str(exc) and token not in repr(exc)
 
 
-def test_adapter_startup_degrades_when_switch_off(credential_home, fake_gateway, caplog):
+def test_adapter_startup_refuses_missing_credential_with_old_false(credential_home, fake_gateway, caplog):
     root, _token = credential_home
     local_client_credential_path(root).unlink()
-    caplog.set_level(logging.WARNING, logger=_CREDENTIAL_LOGGER)
     manager = ChannelManager(gateway_port=fake_gateway.port)
-    configure_gateway_client(manager, _agent(root, fake_gateway.port))
-    result = manager._submit_gateway_ask(_message())
-    assert result.ok and len(fake_gateway.requests) == 1
-    assert fake_gateway.requests[0][1].get_all("X-Gateway-Token") is None
-    assert len(_credential_warnings(caplog)) == 1
+    with pytest.raises(LocalClientCredentialError) as caught:
+        configure_gateway_client(manager, _agent(root, fake_gateway.port))
+    assert caught.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_MISSING"
+    assert fake_gateway.requests == [] and not _credential_warnings(caplog)
 
 
 def test_adapter_startup_refuses_missing_credential_when_switch_on(credential_home, fake_gateway):
@@ -406,15 +386,14 @@ def test_adapter_startup_refuses_missing_credential_when_switch_on(credential_ho
 
 
 @pytest.mark.parametrize("operation", ["catalog", "panels", "stream"])
-def test_plugin_credential_failure_with_switch_off_still_sends(operation, credential_home, fake_gateway, caplog):
+def test_plugin_credential_failure_with_old_false_is_rejected(operation, credential_home, fake_gateway, caplog):
     root, _token = credential_home
     local_client_credential_path(root).unlink()
-    caplog.set_level(logging.WARNING, logger=_CREDENTIAL_LOGGER)
     result = _plugin_request(operation, root, fake_gateway.port)
-    assert result.get("ok", True)
-    assert len(fake_gateway.requests) == 1
-    assert fake_gateway.requests[0][1].get_all("X-Gateway-Token") is None
-    assert len(_credential_warnings(caplog)) == 1
+    assert result["error_code"] == "LOCAL_CLIENT_CREDENTIAL_MISSING"
+    assert result.get("state") != "outcome_unknown"
+    assert "Gateway" in result["message"]
+    assert fake_gateway.requests == [] and not _credential_warnings(caplog)
 
 
 @pytest.mark.parametrize("operation", ["catalog", "panels", "stream"])
@@ -442,17 +421,19 @@ def test_durable_im_credential_failure_with_switch_on_replies_once_without_post(
     assert fake_gateway.requests == []
 
 
-def test_durable_im_credential_failure_with_switch_off_posts_without_token(credential_home, fake_gateway):
+def test_durable_im_credential_failure_with_old_false_is_stable_zero_post(credential_home, fake_gateway, monkeypatch):
     root, _token = credential_home
-    manager = ChannelManager(gateway_port=fake_gateway.port)
+    manager = _im_manager(root, fake_gateway.port)
+    sent = []
+    monkeypatch.setattr(manager, "_send_gateway_reply", lambda msg, request_id, text: sent.append(text) or True)
     local_client_credential_path(root).unlink()
     from agent_py_agent.agent.adapter.ingress import build_gateway_ingress_record
     row = build_gateway_ingress_record(channel="feishu", user_id="user-fixture", conversation_id="session-fixture", provider_message_id="message-fixture", content="问题", metadata={}, timestamp=1.0)
     manager._delivery_worker.enqueue(row)
-    # 没有注册 feishu 适配器时，提交成功后的占位/watcher 阶段会退避；本用例只观察“提交照常发出”。
-    manager._delivery_worker.run_once()
-    assert len(fake_gateway.requests) == 1
-    assert fake_gateway.requests[0][1].get_all("X-Gateway-Token") is None
+    assert manager._delivery_worker.run_once() == 1
+    assert manager._delivery_worker.run_once() == 0
+    assert len(sent) == 1 and "LOCAL_CLIENT_CREDENTIAL_MISSING" in sent[0]
+    assert fake_gateway.requests == []
 
 
 def test_goal_editor_preserves_credential_failure_code(credential_home, fake_gateway):
@@ -464,13 +445,11 @@ def test_goal_editor_preserves_credential_failure_code(credential_home, fake_gat
     assert "Gateway" in result["message"] and fake_gateway.requests == []
 
 
-def test_goal_editor_degrades_with_switch_off(credential_home, fake_gateway, caplog):
+def test_goal_editor_rejects_missing_credential_with_old_false(credential_home, fake_gateway, caplog):
     from agent_py_agent.cli.chat_parts.tui_goal_editor import _request_goal
     root, _token = credential_home
     local_client_credential_path(root).unlink()
-    caplog.set_level(logging.WARNING, logger=_CREDENTIAL_LOGGER)
     result = _request_goal(_tui(root, fake_gateway.port), "session-fixture", {"operation": "view"})
-    assert result.get("ok") is True
-    assert len(fake_gateway.requests) == 1
-    assert fake_gateway.requests[0][1].get_all("X-Gateway-Token") is None
-    assert len(_credential_warnings(caplog)) == 1
+    assert result["error_code"] == "LOCAL_CLIENT_CREDENTIAL_MISSING"
+    assert "Gateway" in result["message"]
+    assert fake_gateway.requests == [] and not _credential_warnings(caplog)

@@ -1,5 +1,5 @@
-
-
+# LLM: QQ 固定认证 HTTP 与统一通道服务共用拒绝重定向运输；不扩充附件能力，不输出 token/供应商正文。
+# 模块用途: 维护原 QQ 文本与 WebSocket 通道，诊断仅保留安全数值和异常类型。
 from __future__ import annotations
 
 import json
@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ..common.authenticated_http import open_authenticated_request
 from .base import BaseChannelAdapter
 from .protocol import IncomingMessage, OutgoingMessage, qq_to_incoming
 from .qq_runtime import (
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 _QQ_API_BASE = "https://api.sgroup.qq.com"
 _QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 
+# LLM: QQ正文沿原目标构造与认证HTTP发送；日志只数值/type，不能打供应商result或exceptionstr。
+# 函数用途: 发送原QQ文本消息，保留原bool回执和目标协议，不新增附件能力。
 def _qq_send_message(self, user_id: str, message: OutgoingMessage) -> bool:
     try:
         token = self._get_access_token()
@@ -45,14 +48,16 @@ def _qq_send_message(self, user_id: str, message: OutgoingMessage) -> bool:
         ok, result = _qq_send_request(req)
         if ok:
             return True
-        logger.error(f"QQ 发送消息失败: {result}")
+        logger.error('QQ 发送消息失败 provider_code=%s', result.get('code') if type(result.get('code')) is int else None)
         return False
     except Exception as exc:
-        logger.error(f"QQ send_message 异常: {exc}")
+        logger.error('QQ send_message 异常 error_type=%s', type(exc).__name__)
         return False
 
+# LLM: 携带QQBot的固定请求拒绝任何跳转，结果仅供原caller判断，不记录供应商正文。
+# 函数用途: 发一次原QQ请求并返回原结构，超时和副作用合同不变。
 def _qq_send_request(req: urllib.request.Request) -> tuple[bool, dict[str, Any]]:
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with open_authenticated_request(req, timeout=10) as resp:
         result = json.loads(resp.read().decode("utf-8", "replace"))
         return result.get("code") == 0 or resp.status == 200, result
 
@@ -72,23 +77,27 @@ def _qq_send_target(user_id: str, message: OutgoingMessage) -> tuple[str, dict[s
         return "", payload
     return f"{_QQ_API_BASE}/channels/{channel_id}/messages", payload
 
+# LLM: 原token仍仅在内存有效期缓存，禁止调试日志打印完整响应；失败不替换凭据或权限。
+# 函数用途: 按原有效期获取QQ认证，日志只记录是否存在而非认证内容。
 def _qq_get_access_token(self) -> str | None:
     now = time.time()
     if self._access_token and now < self._token_expires_at - 60:
         return self._access_token
     try:
         result = _qq_request_token(self.app_id, self.app_secret)
-        logger.debug(f"QQ token response: {result}")
+        logger.debug('QQ token response token_present=%s', bool(result.get('access_token')))
         if "access_token" not in result:
-            logger.error(f"QQ token 响应缺少 access_token: {result}")
+            logger.error('QQ token 响应缺少 access_token')
             return None
         self._access_token = result["access_token"]
         self._token_expires_at = now + float(result.get("expires_in", 7200))
         return self._access_token
     except Exception as exc:
-        logger.error(f"获取 QQ access_token 失败: {exc}")
+        logger.error('获取 QQ access_token 失败 error_type=%s', type(exc).__name__)
         return None
 
+# LLM: 应用secret只发固定认证接口一次，所有HTTP跳转拒绝，不保存或记录请求正文。
+# 函数用途: 申请原QQtoken并让原caller管理缓存。
 def _qq_request_token(app_id: str, app_secret: str) -> dict[str, Any]:
     http_payload = json.dumps({
         "appId": str(app_id),
@@ -99,20 +108,22 @@ def _qq_request_token(app_id: str, app_secret: str) -> dict[str, Any]:
         data=http_payload,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with open_authenticated_request(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
+# LLM: 宿主token只交固定gateway接口且拒绝跳转；失败诊断不打印响应/异常正文。
+# 函数用途: 取原QQWebSocket入口，保持既有启动失败语义。
 def _qq_fetch_gateway_url(self, token: str) -> str | None:
     try:
         req = urllib.request.Request(
             f"{_QQ_API_BASE}/gateway",
             headers={"Authorization": f"QQBot {token}"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with open_authenticated_request(req, timeout=10) as resp:
             result = json.loads(resp.read().decode("utf-8", "replace"))
             return result.get("url")
     except Exception as exc:
-        logger.error(f"获取 QQ gateway URL 失败: {exc}")
+        logger.error('获取 QQ gateway URL 失败 error_type=%s', type(exc).__name__)
         return None
 
 # LLM: 当前 QQ 外发没有稳定消息键/逻辑键查询合同，沿 Base 的默认 False 声明，不复制同一能力事实。
@@ -180,7 +191,7 @@ class QQAdapter(BaseChannelAdapter):
                 try:
                     self._connect_and_run()
                 except Exception as exc:
-                    logger.warning(f"QQ WebSocket 异常: {exc}", exc_info=True)
+                    logger.warning('QQ WebSocket 异常 error_type=%s', type(exc).__name__)
                     self._reconnect_count += 1
 
                 if self._stop_event.is_set():

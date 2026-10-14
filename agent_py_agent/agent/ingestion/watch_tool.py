@@ -1,5 +1,5 @@
-# LLM: watch_stream 的来源 HTTP 必须沿 web_fetch 同一安全闸逐跳解析并 pin，Gateway 端点配置只作后备。
-# 模块用途: 提供可持续盯守的数据流工具，网络策略不得读取不存在的测试专用配置字段。
+# LLM: watch_stream 来源 HTTP 共用 web_fetch 逐跳 pin；所有秘密只在原owner/执行/read范围核验后注入，收割不能借最新前台身份。
+# 模块用途: 提供持久数据流盯守与收割；真实网络出口逐次检查网络权和凭据，不向模型或spool保存秘密回显。
 """watch_stream 工具:高吞吐数据流的盯守摄取入口(open/pull/status/close/list)。
 
 pull 是长轮询:块内持续「拉流→喂引擎」直到出现候选或等待额度用完——游标始终追平
@@ -25,6 +25,7 @@ from ..tooling.models import (
     BaseTool,
     ToolAvailability,
     ToolHandlerOutcome,
+    ToolInvocationContext,
     ToolModelSpec,
     ToolRuntimePolicy,
 )
@@ -131,6 +132,8 @@ _ACTION_PARAMETER_NAMES: dict[str, frozenset[str]] = {
 }
 
 
+# LLM: 原动作形状门只允许已声明的宿主执行字段；网络私有投影不进入公开 schema，也不能由模型提交。
+# 函数用途: 在任何来源网络或状态写入之前拒绝其它动作参数和伪造的内部字段。
 def _action_parameter_error(action: str, params: dict[str, Any]) -> str:
     """Reject fields belonging to another action before any handler runs.
 
@@ -143,7 +146,7 @@ def _action_parameter_error(action: str, params: dict[str, Any]) -> str:
     allowed = _ACTION_PARAMETER_NAMES.get(action)
     if allowed is None:
         return ""
-    # Registry injects only these two host-owned fields after the public Schema
+    # Registry injects only these declared host-owned fields after the public Schema
     # and runtime gate have already accepted the call.  They are execution
     # identity, not action parameters.  Keep the allowlist exact so arbitrary
     # model fields still fail closed.
@@ -153,6 +156,7 @@ def _action_parameter_error(action: str, params: dict[str, Any]) -> str:
         "call_id",
         "__run_scope",
         "__tool_call_id",
+        "__network_access_mode",
     }
     extras = sorted(
         str(name) for name in params if name not in allowed and name not in metadata_fields
@@ -230,6 +234,19 @@ class WatchStreamTool(BaseTool):
         """The role-specific schema narrows actions; the read surface stays usable."""
 
         return ToolAvailability.ready()
+
+    # LLM: 原Registry已冻结调用权限；只在本次工具副本保存上下文，收割闭包保留原scope，不读取最新前台身份。
+    # 函数用途: 为正式来源HTTP准备原owner读取和凭据授权，直接handler或冷无上下文不会获得秘密权限。
+    def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        from .source_credentials import SourceRequestAuthority
+
+        try:
+            self._source_request_authority = SourceRequestAuthority.from_invocation(self.agent, context,
+                network_enabled=params.get('__network_access_mode') != 'disabled')
+        except (ValueError, OSError, AttributeError, TypeError):
+            # 无秘密来源沿原权限入口运行；一旦有引用，HTTP choke 对 None 明确拒绝，不能借缺上下文扩权。
+            self._source_request_authority = None
+        return self.execute(params)
 
     # LLM: watch 的公开 schema 因 provider 兼容保持扁平；这里仅补 action 条件形状，
     # 必须在 operation claim 前纯校验，不能读取/修改 watch 状态或执行任何来源请求。
@@ -708,14 +725,39 @@ def _harvester_fetch(tool: WatchStreamTool):
     return _fetch
 
 
-# LLM: The raw fetch and JSON decode use the same redirect-aware pin callback as web_fetch.
-# 函数用途: 在给定授权主机集合内拉取并解析 JSON，错误时返回结构化错误码。
+# LLM: 原HTTP choke在网络前核全部SecretRef/TaskCredential与原scope，每跳复核origin；回显在JSON/spool前净化，冷无证据拒绝。
+# 函数用途: 在原网络授权范围内发送已获准的来源请求，不读取无权宿主env/file，也不借最新前台身份。
 def _fetch_json_pinned(
     tool: WatchStreamTool,
     request: SourceHttpRequest,
     hosts: tuple[str, ...],
     allow_resolution: bool | None,
 ) -> tuple[bool, object, str]:
+    from .source_credentials import (
+        authorize_source_request,
+        authorized_source_hop,
+        redact_source_response,
+    )
+
+    authority = getattr(tool, '_source_request_authority', None)
+    original_url = request.url
+    try:
+        if not _source_network_allowed(tool, authority):
+            return False, '原父级或当前owner未开放来源网络，未发送请求。', 'NETWORK_DISABLED'
+        request, secrets = authorize_source_request(request, authority)
+    except (ValueError, OSError, AttributeError, TypeError):
+        return False, '来源秘密引用没有原授权，未发送请求；请使用本人文件或重新绑定私人任务凭据。', 'SOURCE_SECRET_UNAVAILABLE'
+
+    def resolve_pin(pin_url):
+        try:
+            if not _source_network_allowed(tool, authority):
+                return PinResult(None, _err('原父级或当前owner未开放来源网络，未继续请求。', 'NETWORK_DISABLED'))
+            if secrets:
+                authorized_source_hop(authority, original_url, pin_url)
+        except (ValueError, OSError, AttributeError, TypeError):
+            return PinResult(None, _err('来源秘密引用授权已失效或目标origin改变，未继续请求。', 'SOURCE_SECRET_UNAVAILABLE'))
+        return tool._resolve_pin_with(pin_url, hosts, allow_resolution)
+
     response = fetch_raw_response(
         FetchRawRequest(
             tool=_TOOL_NAME,
@@ -726,18 +768,29 @@ def _fetch_json_pinned(
             timeout=SOURCE_FETCH_TIMEOUT_SECONDS,
         ),
         format_http_error=_format_http_error,
-        resolve_pin=lambda pin_url: tool._resolve_pin_with(
-            pin_url,
-            hosts,
-            allow_resolution,
-        ),
+        resolve_pin=resolve_pin,
     )
+    response = redact_source_response(response, secrets)
     if isinstance(response, ToolHandlerOutcome):
         return False, response.output, response.error_code
     try:
         return True, json.loads(response.body.decode("utf-8", "replace")), ""
     except json.JSONDecodeError as exc:
         return False, f"响应不是 JSON: {exc}", "SOURCE_ENVELOPE_INVALID"
+
+
+# LLM: 每跳核冻结父网络与原owner当前策略；无秘密的原持续harvester不依赖已结束主attempt，私人授权另由secret choke复核。
+# 函数用途: 给来源HTTP保留原持续抓取生命期，同时即时关闭已撤回或损坏的网络权限。
+def _source_network_allowed(tool, authority):
+    if authority is not None and not authority.network_enabled:
+        return False
+    agent = authority.agent if authority is not None else tool.agent
+    policy = getattr(agent, 'owner_policy', None)
+    if policy is None:
+        return True
+    from ..user_space.owner_policy import resolve_effective_owner_policy
+
+    return bool(policy.network_enabled and resolve_effective_owner_policy(agent.home_paths).network_enabled)
 
 
 # LLM: Resolve once, validate the entire resolved set, and pin the accepted IP; every redirect

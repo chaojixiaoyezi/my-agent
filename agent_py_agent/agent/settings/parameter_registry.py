@@ -264,8 +264,8 @@ def _capability_specs() -> dict[str, ParameterSpec]:
     return specs
 
 
-# LLM: 进程内缓存一次；四份随包配置或 dataclass 变化只随新版本发布生效，不需要热刷新。
-# 函数用途: 返回全部参数的登记表（键 → ParameterSpec），主配置 + capability + runtime_guard。
+# LLM: 进程内缓存一次；宿主专有 metadata 字段不属于参数目录，不能暴露凭据来源上界或让用户写入。
+# 函数用途: 返回用户可见的参数登记表，主配置、capability 与 runtime_guard 仍沿原语义。
 @lru_cache(maxsize=1)
 def parameter_registry() -> dict[str, ParameterSpec]:
     descriptions = _yaml_descriptions()
@@ -273,6 +273,8 @@ def parameter_registry() -> dict[str, ParameterSpec]:
     readers = field_readers()
     registry: dict[str, ParameterSpec] = {}
     for item in fields(AgentConfig):
+        if item.metadata.get("host_only", False):
+            continue
         default = item.default if item.default is not MISSING else (
             item.default_factory() if item.default_factory is not MISSING else None)
         value_type = _value_type(default, item.type)

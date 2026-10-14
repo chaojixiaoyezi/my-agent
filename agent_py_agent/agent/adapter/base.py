@@ -1,7 +1,7 @@
 
 
 # LLM: 渠道接口保持原发送合同；入站 callback 返回值必须原样传递，显式 False 不得伪装受理。
-# 模块用途: 提供渠道生命周期、入站回调和发送入口，不推断供应商去重或只读查询能力。
+# 模块用途: 提供渠道生命周期、入站回调和冻结附件发送合同；未知adapter不允许重新读取不安全Path。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -19,6 +19,7 @@ class BaseChannelAdapter(ABC):
     provider_idempotent_delivery: bool = False
     provider_delivery_queryable: bool = False
     provider_idempotency_window_seconds: float = 0.0
+    supports_frozen_attachment_content: bool = False
 
     # LLM: 初始化仅保存配置和 callback；bool/void 消费者仍共用一个派发入口，不另维护接收状态。
     # 函数用途: 创建未启动的适配器对象，不发请求或写消息队列。
@@ -86,6 +87,11 @@ class BaseChannelAdapter(ABC):
         """交付最终结果:有句柄(handle)就先撤掉"处理中"反馈再发结果,否则直接发。
         默认走 send_message(不支持的通道天然降级);飞书重写为先撤 typing reaction 再发回复。"""
         return self.send_message(user_id, message)
+
+    # LLM: 附件字节只能由Delivery原owner/hash安全读提供；未知adapter显式拒绝，不能回落旧Path重读。
+    # 函数用途: 声明冻结附件接口，支持者须消费content本身而非附件path，默认不发送任何数据。
+    def send_attachment_content(self, user_id, content, *, idempotency_key='', as_image=False) -> bool:
+        return False
 
     @property
     def running(self) -> bool:

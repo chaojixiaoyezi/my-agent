@@ -62,7 +62,7 @@ def execute_plugin_invocation(
     cleanup = None
     token = cancellation_token or CancellationToken()
     with ExitStack() as callbacks:
-        # LLM: 原执行身份已经领取；先核对选择和参数再启动连接，工具与取消信号成组传递，实际发送仍经过原执行权与激活门。
+        # LLM: 原身份先领取；host 环境来源由管理上下文承运，选择/参数/取消/激活门仍在真实启动与发送前检查。
         # 函数用途: 为唯一执行器构造本请求的固定 MCP 代理和权限快照。
         def prepare(binding: HostCommandBinding) -> ToolExecutorRequest:
             nonlocal client
@@ -71,7 +71,8 @@ def execute_plugin_invocation(
                     or tool_arguments_hash(selected.arguments) != "sha256:" + request.input_digest):
                 raise ValueError("原插件调用选择已变化")
             token.raise_if_cancelled()
-            client = PluginMCPClient(context.owner, selected.installation, process_sandbox=context.process_sandbox)
+            client = PluginMCPClient(context.owner, selected.installation, process_sandbox=context.process_sandbox,
+                                     host_credential_env_names=context.host_credential_env_names)
             client.require_settled_previous_resources()
             callbacks.enter_context(token.register_callback(client.stop))
             with bind_cancellation_token(token):

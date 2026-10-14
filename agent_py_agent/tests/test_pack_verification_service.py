@@ -39,6 +39,7 @@ from agent_py_agent.agent.plugin_content_activation import PluginContentActivati
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
 from agent_py_agent.agent.plugin_installation import PluginInstallRequest
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_capability_package import content_bundle
@@ -95,7 +96,7 @@ def _install(tmp_path, checker=REAL_CHECKER):
 
 
 # LLM: 块 3 起的流程用例共用的环境：真实安装并同意的包、任务根、工作区、钉住引用、开关打开的替身 Agent；installed 可以换成
-#   用别的检查程序安装的 (owner, ref)。只改 monkeypatch 能撤销的模块属性，不碰真实 owner home。
+#   用别的检查程序安装的 (owner, ref)。主配置使用正式 AgentConfig，让核验继承宿主来源，不制造缺 config 的旁路。
 # 函数用途: 搭一套宿主核验的测试环境（普通函数，供各测试文件的夹具调用）。
 def build_env(tmp_path, monkeypatch, installed=None):
     owner, ref = installed or _install(tmp_path)
@@ -111,6 +112,7 @@ def build_env(tmp_path, monkeypatch, installed=None):
                         lambda agent, params=None: task_root)
     repo = _Repo()
     agent = types.SimpleNamespace(
+        config=AgentConfig(model_backend="echo", api_key_env="PACK_SOURCE"),
         _capability_config_runtime_snapshot=types.SimpleNamespace(
             config=CapabilityConfig(capability_pack_host_verification_enabled=True)),
         subagents=types.SimpleNamespace(runtime_db=repo))
@@ -201,6 +203,7 @@ def test_post_write_checks_matching_deliverable_and_attaches_bounded_summary(env
                               metadata={"handler_details": {"path": str(target)}})
     assert attach_post_write_verification(env.agent, env.params, failed_write) is failed_write
     assert len(fake_runner) == 1
+    assert fake_runner[0].host_credential_env_names == frozenset({"PACK_SOURCE"})
 
 
 def test_inputs_are_resolved_by_source_and_must_be_unique(env, fake_runner):

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .capability_verifier_consent import (
@@ -67,7 +67,7 @@ from .tooling.models import (
 # 类用途: 接入明确管理员启用，安全策略未就绪就结构化拒绝，不让插件环境留在 preparing。
 # LLM: B7 启用策略：process_sandbox 来自配置 plugin_process_sandbox；events_enabled 是 M 线总开关；
 #   events_owner_allowed 是当前 owner 是否本机管理员。三项都是宿主裁决的结构化事实，打包传给启用工具，避免参数过多。
-#   老格式（v1–v6）的授权输入（arguments、沙箱默认档、宿主保护根）同份承载，工具内部组装 LegacyEnableContext。
+#   老格式授权输入与 host 默认继承擦洗来源同份承运，来源不入授权账，不改变显式插件凭据语义。
 # 类用途: 承载一次插件启用的安全策略判定输入。
 @dataclass(frozen=True)
 class PluginEnablePolicy:
@@ -77,6 +77,7 @@ class PluginEnablePolicy:
     legacy_arguments: dict | None = None
     legacy_sandbox_default: bool = True
     legacy_forbidden_roots: tuple = ()
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 # LLM: 管理候选只消费宿主固定安装快照和结构化策略；启用预检与运行时复用 plugin_sandbox_spec，不另建平台规则。
@@ -84,7 +85,7 @@ class PluginEnablePolicy:
 # 类用途: 校验启用门、沙箱与确认码后执行唯一的插件激活流程。
 class PluginEnableTool(BaseTool):
     # LLM: never 仅免管理动作重复询问；只有未激活的旧版生成计划及资源声明。policy 带来 B7 的沙箱/总开关/owner 判定。
-    #   老格式授权输入在构造时组装成 LegacyEnableContext，确认预先绑定下一 HostCommand，未确认不声明可执行资源。
+    #   老格式授权组装成原上下文；宿主环境来源与原准备 claim 一起传递，不给模型正文或插件 env 扩权。
     # 函数用途: 可启用的旧版包在领取前声明环境；关闭的 v8、内容包、已启用或缺失插件均不构造资源域。
     def __init__(self, owner, repository, binding, installation, catalog_revision,
                  *, policy: PluginEnablePolicy | None = None):
@@ -92,6 +93,7 @@ class PluginEnableTool(BaseTool):
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
         self.events_enabled, self.events_owner_allowed = policy.events_enabled, policy.events_owner_allowed
+        self.host_credential_env_names = policy.host_credential_env_names
         # v8 事件/收紧插件（permissions 非空）强制进沙箱，不管全局 plugin_process_sandbox 开没开（B7 安全底座）。
         self._is_v8 = installation is not None and installation.manifest.permissions is not None
         # v1–v6 可执行包（permissions 为空、不是内容包）：宿主冻结的授权输入在这里组装成原授权上下文。
@@ -215,7 +217,8 @@ class PluginEnableTool(BaseTool):
             facts = _LegacyRetireFacts(self.context, self.target)
             entry, self.previous_cleanup = _retire_before_enable(entry, facts)
         package = inspect_plugin_package(store.package_bytes(entry))
-        operation = PluginEnvironmentOperation.bind(self.owner, self.repository, self.binding, self.plan)
+        operation = PluginEnvironmentOperation.bind(self.owner, self.repository, self.binding, self.plan,
+                                                     host_credential_env_names=self.host_credential_env_names)
         preparing = (PluginActivation(self.plan, "preparing", permission_json=canonical_permission_json(self.grant))
                      if self._is_legacy else PluginActivation(self.plan, "preparing"))
         prepared = store.change_activation(PluginActivationRequest(self.plan.operation_id, entry.revision, preparing))
@@ -234,11 +237,12 @@ class PluginEnableTool(BaseTool):
                 "candidate_cleanup": {"session_id": cleanup.record["session_id"], "confirmed": cleanup.confirmed,
                                       "terminations": [asdict(item) for item in cleanup.terminations]}}
 
-    # LLM: 候选连接前及发现后均复核原授权；finally 精确停止本候选，未确认退出必须 UNKNOWN，不能发布。
+    # LLM: 候选带原宿主来源擦洗并两次复核授权；finally 精确停止本候选，未确认退出 UNKNOWN、不发布。
     # 函数用途: 在固定权限仍成立时核验工具目录，不把候选连接当作已启用。
     def _candidate(self, operation, installation):
         self._require_authorization()
-        client = PluginMCPClient(self.owner, installation, process_sandbox=self.process_sandbox)
+        client = PluginMCPClient(self.owner, installation, process_sandbox=self.process_sandbox,
+                                 host_credential_env_names=self.host_credential_env_names)
         try:
             self._require_authorization()
             transport = client.start()

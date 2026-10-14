@@ -14,11 +14,15 @@ from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_plugin_package import _bundle
 
+_TOKEN = "synthetic-plugin-management-host"
+
 
 class Handler:
     def __init__(self, body, middleware, *, peer="127.0.0.1", user="local-agent", channel="chat"):
         self.body, self._auth_middleware = body, middleware
         self.headers = {"X-User-Id": user, "X-Channel": channel}
+        if middleware is not None:
+            self.headers["X-Gateway-Token"] = _TOKEN
         self.client_address = (peer, 12345) if peer else None
         self.reply = None
 
@@ -30,7 +34,7 @@ class Handler:
 
 
 def host(tmp_path, *, auth=True, bind="127.0.0.1"):
-    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True)) if auth else None
+    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True), auth_token=_TOKEN) if auth else None
     base = SimpleNamespace(config=AgentConfig(auth_enabled=auth, gateway_per_user_owner_scoping=True),
                            home_paths=home_paths(tmp_path))
     return SimpleNamespace(agent=base, auth_middleware=middleware, bind_host=bind)

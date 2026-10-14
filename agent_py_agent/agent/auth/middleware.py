@@ -1,19 +1,7 @@
 
-# LLM: G2a 默认保持回环/未知来源旧信任并只观察；G2b 开关（gateway_require_local_credential）打开后回环不再自带信任、
-#   来源未知不再放行，可信只由有效本机/配置凭据决定。计数不存用户、请求头或凭据；改判定须同步 test_gateway_local_trust_*。
-# 模块用途: 从请求提取可信身份，并观察未迁移的旧本机客户端。
-"""HTTP 请求鉴权中间件 — 从请求中提取身份并进行权限检查。
-
-AuthMiddleware 用于 gateway HTTP 服务,对每个请求按"来源可信度"提取身份:
-1. 可信来源(回环本机 peer,或携带合法 X-Gateway-Token)→ honor X-User-Id / X-Channel 头(本机适配器/CLI
-   转发的真实渠道身份);无头则视为本机终端 = ADMIN。
-2. 不可信来源(非回环 peer 且无合法 token)→ 一律匿名 USER,**绝不**认 header 身份、**绝不**给 ADMIN。
-
-为何这样(审计 #2):身份头 X-User-Id/X-Channel 客户端可伪造,旧逻辑"缺头即 admin + 全凭 header 推角色"
-让任意网络客户端冒充任意用户/管理员。改为只信任回环本机来源(适配器/CLI 走 127.0.0.1),远程来源降匿名,
-配合 #1 的默认 loopback 绑定,杜绝"伪造 X-Channel:chat → admin / 缺头 → admin"。token 供暴露部署做更强校验。
-使用 Bearer token 与受限的本地凭据信任。
-"""
+# LLM: 可信宿主必须持有 G1 本机或配置凭据；回环和未知 peer 不再授予身份。访问层级仍取原路由表，角色和 owner 在业务入口复核。
+# 模块用途: 保留真实重复头并拒绝身份歧义，校验宿主客户端来源、提取渠道身份，并记录无凭据请求的有界计数；不会回落回环管理员。
+"""Gateway HTTP 的身份头只在宿主凭据通过后生效，公开查询和独立插件令牌沿原路由合同。"""
 
 from __future__ import annotations
 
@@ -28,7 +16,7 @@ from .models import Action, Permission, Role
 
 logger = logging.getLogger(__name__)
 
-# 回环对端:本机可信来源(适配器/CLI 走 127.0.0.1 调网关)。
+# 回环地址仅用于缺失凭据诊断和有界计数，不能授予本机可信身份。
 _LOOPBACK_PEERS = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
 
 # LLM: G2b 后旧客户端的可判别拒绝码（设计稿 1.2，9b 建议）：强制档下回环请求没带有效凭据时，
@@ -44,28 +32,30 @@ def _is_loopback_peer(peer_ip: str) -> bool:
     return ip in _LOOPBACK_PEERS or ip.startswith("127.")
 
 
-def _header_value(headers: dict[str, str], name: str) -> str:
+# LLM: 原HTTPMessage.items保留所有头副本，dict测试载体也支持；None专指冲突，缺头空串不能混成冲突。
+# 函数用途: 读取一个不区分大小写的身份字段，拒绝歧义而保留合法缺头宿主终端。
+def _header_value(headers, name: str) -> str | None:
     """Read one HTTP header case-insensitively and reject conflicting copies."""
     selected = [
         str(value or "")
         for key, value in headers.items()
         if str(key or "").casefold() == name.casefold()
     ]
-    if not selected or any(value != selected[0] for value in selected[1:]):
+    if not selected:
         return ""
-    return selected[0]
+    return None if any(value != selected[0] for value in selected[1:]) else selected[0]
 
 
 def _handler_peer_ip(handler) -> str | None:
-    """从 HTTP handler 取对端 IP;取不到返回 None,由 _peer_trusted 按当前档位判定(强制档不再当可信)。"""
+    """从 HTTP handler 取对端 IP;取不到返回 None,由 _peer_trusted 校验凭据，未知来源不授予身份。"""
     addr = getattr(handler, "client_address", None)
     if isinstance(addr, (tuple, list)) and addr:
         return str(addr[0])
     return None
 
 
-# LLM: 身份判定与观察分离；迁移档（默认）不改变无凭据回环权限，强制档按开关收紧；秘密只留内存，不输出。
-# 类用途: 为Gateway提供身份鉴权和迁移阶段的有界观察。
+# LLM: 身份判定与有界计数分离；无凭据请求不获得回环例外，秘密只留宿主内存。
+# 类用途: 为 Gateway 提供凭据鉴权、可信身份和无凭据请求的有界计数。
 class AuthMiddleware:
     """Gateway HTTP 请求鉴权中间件。"""
 
@@ -73,14 +63,11 @@ class AuthMiddleware:
     HEADER_CHANNEL = "X-Channel"
     HEADER_TOKEN = "X-Gateway-Token"
 
-    # LLM: 本机凭据由启动钩子绑定；构造不读文件、不导出环境，观察账仅存进程内。require_local_credential 是 G2b 上线闸：
-    #   打开后回环不再自带信任、来源未知不放行，可信只由有效凭据决定；默认 False 保持 G2a 行为（服务端与客户端读同一份配置）。
+    # LLM: 构造不读取或导出凭据；临时迁移开关已经退场，所有受管身份头必须经同一凭据校验。
     # 函数用途: 初始化原鉴权服务和旧客户端观察账。
-    def __init__(self, auth_manager: AuthManager, auth_token: str = "",
-                 require_local_credential: bool = False) -> None:
+    def __init__(self, auth_manager: AuthManager, auth_token: str = "") -> None:
         self.auth_manager = auth_manager
-        self.auth_token = auth_token  # 暴露部署的局部信任 token(空=只靠回环 peer 信任)
-        self._require_local_credential = bool(require_local_credential)
+        self.auth_token = auth_token  # 可选部署凭据，空值不代替 G1 本机凭据。
         self._local_client_credential = ""
         self._observation_lock = threading.Lock()
         self._uncredentialed_loopback_by_endpoint: dict[str, dict[str, int | float]] = {}
@@ -93,7 +80,7 @@ class AuthMiddleware:
     # LLM: 冲突头沿原拒绝规则；常量时间比较两种凭据，空配置不接受空头。
     # 函数用途: 检查请求是否已携带本机或配置的Gateway凭据。
     def has_gateway_credential(self, headers: dict[str, str]) -> bool:
-        token = _header_value(headers, self.HEADER_TOKEN).encode("utf-8")
+        token = (_header_value(headers, self.HEADER_TOKEN) or "").encode("utf-8")
         return any(secret and hmac.compare_digest(token, secret.encode("utf-8"))
                    for secret in (self._local_client_credential, self.auth_token))
 
@@ -103,7 +90,7 @@ class AuthMiddleware:
         if route.access_tier not in {"credential", "admin"}:
             return
         peer_ip = _handler_peer_ip(handler)
-        if peer_ip is None or not _is_loopback_peer(peer_ip) or self.has_gateway_credential(dict(handler.headers)):
+        if peer_ip is None or not _is_loopback_peer(peer_ip) or self.has_gateway_credential(handler.headers):
             return
         endpoint = route.template
         with self._observation_lock:
@@ -117,30 +104,22 @@ class AuthMiddleware:
         with self._observation_lock:
             return {key: dict(value) for key, value in self._uncredentialed_loopback_by_endpoint.items()}
 
-    # LLM: 强制档（G2b）可信只由有效凭据决定——回环不再自带信任，来源未知（peer_ip=None）不再放行；
-    #   迁移档（G2a）保持回环/未知来源旧分支，其它 peer 持两种宿主凭据之一才可信。
-    # 函数用途: 判定请求来源在当前档位是否可信。
+    # LLM: 可信来源同时要求原有效凭据和无歧义身份副本；peer_ip只作诊断，完全缺身份头仍是合法host终端。
+    # 函数用途: 检查宿主凭据，阻止模型或其它本机进程借回环地址冒充管理员。
     def _peer_trusted(self, peer_ip: str | None, headers: dict[str, str]) -> bool:
-        """来源是否可信:强制档须携带合法凭据;迁移档回环本机(或来源未知)可信,否则须凭据。"""
-        if self._require_local_credential:
-            return self.has_gateway_credential(headers)
-        if peer_ip is None or _is_loopback_peer(peer_ip):
-            return True
-        return self.has_gateway_credential(headers)
+        return (self.has_gateway_credential(headers)
+                and all(_header_value(headers, name) is not None for name in (self.HEADER_USER_ID, self.HEADER_CHANNEL)))
 
-    # LLM: 只回答"这一格拒绝该不该带 LOCAL_CREDENTIAL_REQUIRED"，不改变任何允许/拒绝结果：
-    #   必须同时满足三件事——强制档开着、来源是回环本机、且没有有效凭据。没带凭据和带了错或过期凭据的回环
-    #   都算“没有有效凭据”，同样带码（处置都是重启客户端，且两者回的一样，不多出判别信号）；远程不可信来源、
-    #   来源未知不带码（远程重启也补不上本机凭据，来源未知证明不了是本机），各按既有形态返回。
-    #   判定只看结构化事实（开关档位、对端 IP、凭据比对结果），不解析任何文案。
-    # 函数用途: 判断一次来源拒绝是否属于"回环 + 强制档 + 没有有效凭据（没带，或带了错的/过期的）"这一格。
+    # LLM: 只有明确缺/错误单值凭据的已知回环请求才提示本机凭据；身份或token副本冲突不是缺token。
+    # 函数用途: 为现有客户端提供可行动的缺凭据原因，判定不改变身份或授权。
     def needs_local_credential(self, peer_ip: str | None, headers: dict[str, str]) -> bool:
-        if not self._require_local_credential:
-            return False
-        if peer_ip is None or not _is_loopback_peer(peer_ip):
+        if (peer_ip is None or not _is_loopback_peer(peer_ip)
+                or any(_header_value(headers, name) is None for name in (self.HEADER_TOKEN, self.HEADER_USER_ID, self.HEADER_CHANNEL))):
             return False
         return not self.has_gateway_credential(headers)
 
+    # LLM: 必须区分原头的冲突None与缺失空串；所有handler包装保留HTTPMessage副本，不以dict先抹掉歧义。
+    # 函数用途: 在有效宿主来源下读取原用户/通道，拒绝冲突，缺身份的可信本机终端仍是admin。
     def extract_identity(self, headers: dict[str, str], peer_ip: str | None = None) -> tuple[str, str]:
         """提取 (user_id, channel)。不可信来源 → 匿名 USER(不认 header,绝不 admin)。"""
         if not self._peer_trusted(peer_ip, headers):
@@ -189,25 +168,29 @@ class AuthMiddleware:
         return (True, self.get_permission(headers, peer_ip), 200, {})
 
     def check_trusted(self, headers: dict[str, str], peer_ip: str | None = None) -> bool:
-        """来源是否可信(按当前档位:强制档须合法凭据;迁移档回环本机/合法 token)。不可信来源不得提交任务/驱动 agent。"""
+        """来源是否持有有效宿主凭据。不可信来源不得提交任务/驱动 agent。"""
         return self._peer_trusted(peer_ip, headers)
 
 
+# LLM: 真实header副本不得dict合并，身份只由原凭据/角色门裁决；无middleware保留显式单机合同。
+# 函数用途: 从原HTTP请求提取准确身份，不把冲突头当缺头管理员。
 def extract_user_from_request(handler) -> tuple[str, str]:
     """从 HTTP handler 的 headers 提取 user_id 和 channel(按对端可信度)。"""
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return ("admin", "chat")
-    headers = {key: handler.headers.get(key, "") for key in handler.headers.keys()}
+    headers = handler.headers
     return mw.extract_identity(headers, _handler_peer_ip(handler))
 
 
+# LLM: 保留原HTTPMessage的全部字段副本后查原Action/target，不改业务授权或角色规则。
+# 函数用途: 为原handler按真实宿主和用户身份执行权限检查，歧义不进入业务。
 def require_permission(handler, action: Action, target_user_id: str | None = None) -> bool:
     """在 handler 方法内调用,完成鉴权并发送响应。无权返回 True(已发响应);有权返回 False。"""
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return False  # 无中间件,不拦截(配合 #1:此时只可能是回环本机)
-    headers = {key: handler.headers.get(key, "") for key in handler.headers.keys()}
+    headers = handler.headers
     ok, _permission, status, body = mw.check_permission(headers, action, target_user_id, _handler_peer_ip(handler))
     if not ok:
         handler._send_json(status, body)
@@ -215,12 +198,14 @@ def require_permission(handler, action: Action, target_user_id: str | None = Non
     return False
 
 
+# LLM: 管理员判断仍走原认证角色；先保留重复头，冲突不能归为缺身份的合法host终端。
+# 函数用途: 检查原handler管理员权限，拒绝错误或歧义来源。
 def require_admin_handler(handler) -> bool:
     """在 handler 方法内调用,检查管理员权限。"""
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return False
-    headers = {key: handler.headers.get(key, "") for key in handler.headers.keys()}
+    headers = handler.headers
     ok, _permission, status, body = mw.require_admin(headers, _handler_peer_ip(handler))
     if not ok:
         handler._send_json(status, body)
@@ -228,6 +213,8 @@ def require_admin_handler(handler) -> bool:
     return False
 
 
+# LLM: 原受管入站先核凭据和身份头一致性，不提前dict抹副本；冲突403不是缺token提示。
+# 函数用途: 拒绝未认证或身份歧义的调用，保留原普通用户合法派工与显式单机合同。
 def require_trusted_source(handler) -> bool:
     """提交任务端点用:不可信来源(远程且无合法 token)拒绝。无中间件=回环单机,放行。
 
@@ -241,7 +228,7 @@ def require_trusted_source(handler) -> bool:
     mw = getattr(handler, "_auth_middleware", None)
     if mw is None:
         return False
-    headers = {key: handler.headers.get(key, "") for key in handler.headers.keys()}
+    headers = handler.headers
     peer_ip = _handler_peer_ip(handler)
     if mw.check_trusted(headers, peer_ip):
         return False

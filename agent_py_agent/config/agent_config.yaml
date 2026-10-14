@@ -576,18 +576,13 @@ admin_channel_identity_enabled: true
 # (防"绑 0.0.0.0 + 无鉴权 = 任意网络客户端被当 admin 驱动 agent")。
 gateway_bind_host: "127.0.0.1"
 
-# 网关局部信任 token(暴露部署用)。默认空 = 只靠回环来源信任(本机适配器/CLI 走 127.0.0.1)。
+# 网关局部信任 token（暴露部署用）。默认空时，本机适配器/CLI 使用宿主持久 G1 凭据。
 # 非空时,非回环来源的请求必须携带匹配的 X-Gateway-Token 头才被信任(否则降为匿名 USER、绝不 admin)。
 gateway_auth_token: ""
 
-# 本机凭据强制开关（G2b 上线闸，默认 false；强制阶段稳定后会连同旧分支一起删除）。
-# - false（默认，G2a 计数阶段）：两边都不强制——本机客户端读不到凭据（文件缺失 / 权限不对 / 内容损坏）时，
-#   降级为不带 X-Gateway-Token 继续发送；Gateway 对不带凭据的回环请求照旧放行、只按“无凭据来源”计数。
-# - true（强制阶段）：两边同时生效——Gateway 对不带有效凭据的回环请求降匿名/按原规则拒绝，且启动时凭据
-#   不可用（缺失/权限错/损坏/无数据根）直接拒绝启动；本机客户端读不到凭据时在发请求前拒绝（零请求、带原因码）。
-# 客户端和 Gateway 读同一份配置，所以两边口径一致。凭据文件是 0600：同一系统用户本来就读得到它，它多挡住的是
-# 非 Full Access 的模型命令和其它系统用户，不是同用户的全部进程（完整边界见 docs/design/GATEWAY_LOCAL_TRUST.md）。
-gateway_require_local_credential: false
+# 本机 TUI/CLI/IM 客户端始终携带数据根 secrets 中的 G1 凭据，缺失或不可读时不发送请求。
+# Gateway 首次启动自动生成、重启复用；旧 gateway_require_local_credential 迁移开关已退场。
+# 回环地址不等于管理员，OS 端口隔离只是纵深防护；auth_enabled: false 的显式单机模式不提供多用户隔离。
 
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
@@ -604,6 +599,10 @@ adapter_workspace: ""
 feishu_app_id: ""
 # 群聊只在单独 @机器人时回复，@全员或未 @不触发；私聊不受此设置影响。
 feishu_group_require_bot_mention: true
+# 群里先上传文件，再引用这条文件消息并 @机器人时，读取准确引用的同群附件，默认开启。
+# 需要飞书应用的群消息读取和资源下载权限；文件落到当前群空间，原文件发送者不改变本轮用户身份。
+# 修改后重启飞书通道生效；关闭时不读取引用消息的附件。
+feishu_quoted_media_enabled: true
 # /verbose stream 同一条过程消息每次最多展示多少字符，默认 100；有效范围 1～8000，最终答复不受影响。
 im_stream_preview_max_chars: 100
 # IM 无可见输出的长工具和模型请求等待刷新间隔，单位秒，默认 120；verbose off 仅显示极简状态与时间。

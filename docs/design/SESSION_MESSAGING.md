@@ -132,6 +132,14 @@
 都返回**同一个错误码** `SESSION_TARGET_OUT_OF_SCOPE` 和**同样的** `scope_warnings`，
 不区分"不存在"和"没权限"。发给自己也要拒绝。
 
+**目标记录归属核验（2026-10-13 安全加固）**：`send_session_message` 与 `create_session_task`
+在原 canonical Store 加载目标后，共用 `session_target_owner_identity` 核对声明的 `owner_id` 与
+非空 `owner_home`。本目录中的错落记录不能继承目录所属身份；声明冲突、相对 home 或未知外部
+owner 统一拒绝，且在写 guidance、派活账和 wake 前返回。明确本人 `owner_id` 的旧缺 home 记录仍可用。
+旧本地 `local/main` 的无 owner 记录只在原 `runtime_path_resolution.paths.conversation_workspace`
+指向的准确 Store 中沿原本地合同使用；不会按正文、最新渠道绑定或模型属性补身份，也不改写记录。
+此加固复现的是合成错落记录，不代表正常 IM 入站已能制造这种记录。
+
 ## 防循环
 
 - **派活链深度上限**：由对端 task 触发的 task 携带 `origin_task_id` 链；

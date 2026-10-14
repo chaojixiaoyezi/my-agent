@@ -1,11 +1,10 @@
 """真实 Gateway 回合里的实验对照：原 SimpleAgent.run/设置/Registry/RuntimeDB/Gateway 请求文件与转换锁均不替换；
-只把主模型生成换成 typed 假答复（可发起一次真实工具调用），Jev 连本地 HTTP 服务并统计请求，不调用真实供应商。"""
+只把 backend 模型运输换成 typed 假答复（可发起一次真实工具调用），保留 finished 调用账及来源签发；Jev 连本地 HTTP 服务并统计请求，不调用真实供应商。"""
 import json
 from dataclasses import replace
 
 import pytest
 
-from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_command
 from agent_py_agent.agent.conversation.decision_policy import decision_owner_ref
@@ -57,19 +56,19 @@ def experiment_request(fixture, mode):
     fixture.context.request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
 
 
-# LLM: 首次生成发起一次真实原生工具调用（经原 Registry/ToolExecutor 执行并入工具账），第二次给出最终答复。
-# 函数用途: 以 typed 假答复驱动原工具循环，使实际工具用量来自真实工具账。
-def fake_main_model(monkeypatch, tool_name):
+# LLM: 只替换 backend.generate 运输；真实生成出口、finished 调用账、宿主来源签发、原 IR 和工具执行必须保留，不能直接伪造 final 结果。
+# 函数用途: 给真实 Gateway 回合供应一条原生工具调用和最终答复，保持来源与实际工具用量可核验。
+def fake_main_model(monkeypatch, agent, tool_name):
     calls = []
 
-    def generate(request):
-        calls.append(request.params)
+    def generate(prompt, **kwargs):
+        calls.append((prompt, kwargs))
         if len(calls) == 1 and tool_name:
             return ModelResponse(text="", backend="fixture",
                                  tool_use_blocks=[{"id": "call-1", "name": tool_name, "input": {"text": "看一眼"}}])
         return ModelResponse(text="核对完成", backend="fixture")
 
-    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
+    monkeypatch.setattr(agent.backend, "generate", generate)
     return calls
 
 
@@ -79,7 +78,7 @@ def stored(fixture):
 
 def test_experiment_turn_records_one_sample_and_realized_tools_from_the_real_tool_ledger(gateway_lab, monkeypatch):
     experiment_request(gateway_lab, "observe")
-    fake_main_model(monkeypatch, "presentation_optional_a")
+    fake_main_model(monkeypatch, gateway_lab.agent, "presentation_optional_a")
     result = request_execution._run_gateway_ask(gateway_lab.context)
     assert result.response == "核对完成" and gateway_lab.first.calls == 1
     payload = stored(gateway_lab)
@@ -96,7 +95,7 @@ def test_experiment_turn_records_one_sample_and_realized_tools_from_the_real_too
 
 
 def test_ordinary_turn_writes_no_experiment_keys(gateway_lab, monkeypatch):
-    fake_main_model(monkeypatch, "presentation_optional_a")
+    fake_main_model(monkeypatch, gateway_lab.agent, "presentation_optional_a")
     request_execution._run_gateway_ask(gateway_lab.context)
     payload = stored(gateway_lab)
     assert KEY not in payload and "experiment_grant" not in payload and CAPABILITY_OBSERVATION_KEY not in payload
@@ -138,7 +137,7 @@ def _completed(fixture, request_id):
 def test_apply_turn_promotes_through_the_real_chain_and_observe_turn_never_does(gateway_lab, monkeypatch, mode, applied):
     prior_samples(gateway_lab, 2)
     experiment_request(gateway_lab, mode)
-    fake_main_model(monkeypatch, "presentation_optional_a")
+    fake_main_model(monkeypatch, gateway_lab.agent, "presentation_optional_a")
     request_execution._run_gateway_ask(gateway_lab.context)
     payload = stored(gateway_lab)
     assert payload["experiment_grant"]["previous_request_id"] == "prior-1"

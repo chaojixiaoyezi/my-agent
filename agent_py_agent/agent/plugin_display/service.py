@@ -452,12 +452,14 @@ def _enabled_installations(owner) -> tuple | None:
         return None
 
 
-# LLM: 复用插件业务连接的同一客户端类型与进程资源账，不另建通道；process_sandbox 沿配置 plugin_process_sandbox。
+# LLM: 面板/事件复用原客户端和资源账；host 继承来源与沙箱档由原 factory 注入，显式 native env 授权不变。
 # 函数用途: 为一个固定激活创建插件客户端（不启动进程）。
-def plugin_display_client(owner, installation, *, process_sandbox: bool = False):
+def plugin_display_client(owner, installation, *, process_sandbox: bool = False,
+                          host_credential_env_names: frozenset[str] = frozenset()):
     from ..plugin_runtime import PluginMCPClient
 
-    return PluginMCPClient(owner, installation, process_sandbox=process_sandbox)
+    return PluginMCPClient(owner, installation, process_sandbox=process_sandbox,
+                           host_credential_env_names=host_credential_env_names)
 
 
 # LLM: 非整数或布尔一律视为 0，不从字符串猜数。

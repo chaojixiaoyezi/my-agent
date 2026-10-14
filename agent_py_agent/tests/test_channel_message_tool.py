@@ -23,6 +23,8 @@ from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_cal
 
 
 class _RecordingAdapter:
+    supports_frozen_attachment_content = True
+
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
         self.files: list[tuple[str, Path, str]] = []
@@ -32,14 +34,10 @@ class _RecordingAdapter:
         self.messages.append((user_id, str(getattr(message, "content", "") or "")))
         return self.send_ok
 
-    def send_file(
-        self,
-        user_id: str,
-        path: Path,
-        *,
-        idempotency_key: str = "",
-    ) -> bool:
-        self.files.append((user_id, path, idempotency_key))
+    # LLM: 替身消费生产Delivery已经冻结的bytes，绝不替产品重新读路径或补版本证明。
+    # 函数用途: 记录原路径标识及真实已冻结内容，保持已有工具回执断言。
+    def send_attachment_content(self, user_id, content, *, idempotency_key="", as_image=False) -> bool:
+        self.files.append((user_id, Path(content.attachment.path), idempotency_key))
         return True
 
 
@@ -81,7 +79,7 @@ def _tool(owner_root: Path) -> tuple[SendMessageTool, _RecordingAdapter]:
     channel_registry.register_adapter(
         "feishu",
         adapter,
-        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True),
+        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True, frozen_attachment_content=True),
     )
     return tool, adapter
 

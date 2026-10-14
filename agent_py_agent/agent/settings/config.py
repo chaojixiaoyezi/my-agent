@@ -3,6 +3,7 @@ from __future__ import annotations
 
 # LLM: 默认值须与随包 YAML 一致；B5 超时同时登记规范化范围/参数边界并由征询消费，覆盖仍由原 owner/thread 保存。
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
+#   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -294,7 +295,7 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: 通用决策默认与 MemorySettings 对齐；Curator 档案只存引用，不拼接聊天连接，不接受模型修改，实验开关也不授予请求许可。
+# LLM: 用户默认同步随包配置；host_only 来源名仅宿主冻结，不能由用户层改写；群附件/Curator 的原授权边界不变。
 # 类用途: 汇总模型和运行配置；决策默认关闭，有限正时间只为后续请求提供默认，不管理阶段时钟。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
@@ -506,13 +507,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 否则 fail-closed 拒绝启动(防"绑 0.0.0.0 + 无鉴权 = 未认证远程命令执行")。默认仅监听回环地址。
     gateway_bind_host: str = "127.0.0.1"
     # 网关局部信任 token(暴露部署用):非空时,非回环来源须带匹配的 X-Gateway-Token 才被信任,
-    # 否则降为匿名 USER。默认空=只靠回环 peer 信任(适配器/CLI 走 127.0.0.1)。
+    # 否则降为匿名 USER。默认空时使用持久 G1 本机凭据，回环地址本身不授予身份。
     gateway_auth_token: str = ""
-    # G2b 上线闸(默认 false,强制阶段稳定后退场删除):true 时客户端与 Gateway 两边同时生效——客户端读不到凭据
-    # (缺失/权限错/内容损坏)在发请求前拒绝(零请求、带原因码);Gateway 对不带有效凭据的回环请求降匿名/按原规则
-    # 拒绝,且启动时凭据不可用(含无数据根)直接拒绝启动(fail-closed)。false 时两边都不强制:客户端降级发送,
-    # Gateway 照旧放行并只按 G2a 计数。客户端与 Gateway 读同一份配置,两边口径一致。
-    gateway_require_local_credential: bool = False
     gateway_ready_timeout_seconds: int = 3
     # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
     gateway_restart_turn_wait_seconds: int = 300
@@ -522,15 +518,18 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_restart_cooldown_seconds: int = 30
     adapter_workspace: str = ""
     # 飞书适配器配置
-    feishu_app_id: str = ""
-    feishu_app_secret: str = ""
-    feishu_verification_token: str = ""
-    feishu_encrypt_key: str = ""
+    # metadata 声明这四项实际经 SecretRef 解析；环境上界只读取这些来源，不能遍历 prompt 等自然语言字段。
+    feishu_app_id: str = field(default="", metadata={"secret_ref": True})
+    feishu_app_secret: str = field(default="", metadata={"secret_ref": True})
+    feishu_verification_token: str = field(default="", metadata={"secret_ref": True})
+    feishu_encrypt_key: str = field(default="", metadata={"secret_ref": True})
     feishu_callback_port: int = 8421
     feishu_connection_mode: str = "long_connection"  # 默认长连接:免公网且支持密码/确认卡片回调；webhook 可显式选择
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     # 群聊只在直接 @机器人时触发；@全员不触发。
     feishu_group_require_bot_mention: bool = True
+    # 群里引用文件并触发机器人时，按准确父消息读取同群附件；需要飞书消息和资源读取权限。
+    feishu_quoted_media_enabled: bool = True
     # /verbose stream 整条过程正文的字符上限；只影响展示，不裁剪最终回复。
     im_stream_preview_max_chars: int = 100
     # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。
@@ -541,8 +540,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_session_lock_enabled: bool = True  # 私聊锁默认开启；首设/闲置锁定都暂存消息，验证成功后续送，异常不放行；群聊不锁
     feishu_personal_idle_lock_seconds: int = 10800  # 私聊闲置多久后锁定(秒,默认 3h);feishu_session_lock_enabled 开启时生效
     # QQ 适配器配置
-    qq_app_id: str = ""
-    qq_app_secret: str = ""
+    qq_app_id: str = field(default="", metadata={"secret_ref": True})
+    qq_app_secret: str = field(default="", metadata={"secret_ref": True})
     session_workspace: str = ""
     # 长期主代理会话账本目录。它保存 thread/message/task/policy 机器事实，
     # 不保存真实通道凭证，也不把用户任务变成内置 case。
@@ -563,7 +562,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     log_level: str = "info"
     extension_plugins: list[str] = field(default_factory=list)
     api_base: str = ""
-    api_key: str = ""
+    api_key: str = field(default="", metadata={"credential_environment_source": True})
     api_key_env: str = "AGENT_API_KEY"
     # 显式兼容头只影响模型请求；认证由 api_key 负责，会话头由宿主逐会话生成。
     model_custom_headers: dict[str, str] = field(default_factory=dict)
@@ -613,6 +612,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     config_path: str = ""
     config_sources: dict[str, dict[str, object]] = field(default_factory=dict)
     config_layers: list[dict[str, object]] = field(default_factory=list)
+    # 宿主内部擦洗上界：配置解析/克隆时冻结，不能由 YAML、参数中心或模型覆盖，也不含密钥值。
+    host_credential_env_names: tuple[str, ...] = field(default=(), repr=False, metadata={"host_only": True})
 
     def config_source_for(self, key: str) -> dict[str, object]:
         return dict(self.config_sources.get(key, {}))

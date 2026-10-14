@@ -140,12 +140,12 @@ def create_environment_candidate(owner, reference: str) -> int:
         os.close(parent)
 
 
-# LLM: venv 从第一刻就在最终地址；三个命令均使用同一原 operation，pip 只消费固定哈希，安装后不启动插件 Python 自检。
+# LLM: venv 从第一刻在最终地址；三个命令共用原 operation 的来源擦洗上界，pip 只消费固定哈希，不借插件 env 传 host secret。
 # 函数用途: 依次托管引导、布局探测和离线安装，再从宿主读回内容并复查原执行权。
 def _prepare_candidate(candidate, descriptor, wheels, deadline, reserve, operation) -> None:
     temporary = candidate / "temporary"
     temporary.mkdir(mode=0o700)
-    environment = preparation_environment(temporary)
+    environment = preparation_environment(temporary, host_credential_env_names=operation.host_credential_env_names)
     root = candidate / "python"
     check_environment_candidate(candidate, descriptor, reserve, deadline)
     run_environment_process(

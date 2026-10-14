@@ -1,6 +1,6 @@
 # LLM: 适配器生命周期复用原 Agent 数据根，启动通道前核对 G3 凭据；开关开且凭据不可读时拒绝启动，开关关时记一次降级 warning 后继续。
 # 秘密只留宿主请求头，不能传给 daemon、日志或状态。
-# 模块用途: 运行文件和 IM 适配器并下发实际短窗口配置；凭据不可用时按 G2b 开关降级或拒绝启动无凭据的 Gateway 客户端。
+# 模块用途: 运行文件和 IM 适配器，接线实际短窗口与引用附件开关；凭据不可用时按 G2b 降级或拒绝无凭据客户端。
 from __future__ import annotations
 
 # LLM: 通道守护入口沿原 owner/runtime 路径和注册表生命周期运行；状态心跳须保留 requested_channel 供离线更新精确恢复。
@@ -202,6 +202,8 @@ def _adapter_workspace_root(agent) -> Path:
     return Path(getattr(agent, "root", Path.cwd())).resolve()
 
 
+# LLM: 宿主配置同源接入原 FeishuAdapter；引用读取只加既有 durable prepare 能力，不创建独立队列或配置副本。
+# 函数用途: 解析宿主凭据并接线飞书入站开关，秘密只传运输、不写记录。
 def _feishu_adapter_config(agent) -> dict[str, object]:
     # 凭据字段过 SecretRef 解析:值可写成 env:NAME / file:/path(密钥放源码树外,不内联进 YAML)。
     # 闲置锁 fallback 直接复用运行时常量，避免 CLI adapter 另写一份小时数后再次漂移。
@@ -219,6 +221,7 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
         "feishu_ws_proxy": getattr(agent.config, "feishu_ws_proxy", ""),
         # WS/webhook 共用群聊触发配置，只认机器人直接 mention，@全员不派发。
         "feishu_group_require_bot_mention": getattr(agent.config, "feishu_group_require_bot_mention", True),
+        "feishu_quoted_media_enabled": getattr(agent.config, "feishu_quoted_media_enabled", True),
         # 个人私聊会话锁默认开启；显式 false 才关闭，群聊不锁。
         "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", True),
         "feishu_personal_idle_lock_seconds": getattr(

@@ -3,7 +3,7 @@
 锁定：每个未启动调用前的顺序屏障先读本进程模型调用准入（contracts.model_call_ledger.model_call_admission_closure）；
 关门后当前及后续调用一律不启动，记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（cancelled、未执行、无副作用），关门原因码与模型调用
 账本把在途调用结清成 failed 时用的是同一份；轮中途关门只拦还没启动的；停机优先于普通取消。真实工具循环里，调用在途时
-停机结清、响应稍后带着写文件调用回来：文件不落盘，账本保持 failed，下一次模型调用被准入拒绝、请求不发出。
+停机结清、响应稍后带着写文件调用回来：原模型finish门立即拒绝，不签发响应来源、不进入工具轮；文件不落盘，账本保持 failed。
 审批路径在发审批请求前和批准之后各读一次准入：关门了就不再询问、不执行；关门原因落工具档案和耐久索引时两侧共用
 一个清洗函数（tooling.runtime_facts.project_host_shutdown_facts，单行、不超过 128 字）。
 """
@@ -247,24 +247,34 @@ def test_archive_and_index_share_one_shutdown_sanitizer(raw_value, kept):
     assert index._safe_tool_execution(raw)["host_shutdown"] == expected
 
 
+# LLM: 假供应商只返回原ModelResponse；停机原账结算后不得替响应签provenance或模拟工具执行。
+# 类用途: 保存实际迟到响应，让测试核对模型准入先拒绝、工具账和文件都无副作用。
 class _LateResponseBackend:
     """调用在途时宿主停机结清；物理响应稍后照常回来，并带一个写文件调用。"""
 
     name = "fake_late_response_after_shutdown"
 
+    # LLM: 只初始化测试观察字段，任何模型或工具副作用必须走真实被测链。
+    # 函数用途: 记录调用、原关闭结算与未签发的供应商响应。
     def __init__(self):
         self.requests = 0
         self.settled: tuple = ()
+        self.response = None
 
+    # LLM: 只声明原native工具能力，不制造模型响应身份。
+    # 函数用途: 让真实循环沿原工具协议选择调用方式。
     def probe_tool_capability(self):
         return ProviderToolCapability(provider=self.name, endpoint="local://fake", model="", stream=False,
                                       native_supported=True, evidence="test_fake_native")
 
+    # LLM: 调用实际shutdown结算后返回尚未签发来源的响应；不调用被测工具或改任务文件。
+    # 函数用途: 模拟供应商在宿主关门后仍返回写文件调用，并保存该响应供独立断言。
     def generate(self, prompt: str, on_chunk=None, **kwargs):
         self.requests += 1
         self.settled = settle_open_model_calls_for_shutdown()
-        return ModelResponse(text="", backend=self.name, tool_use_blocks=[
+        self.response = ModelResponse(text="", backend=self.name, tool_use_blocks=[
             {"id": "call_late_write", "name": "write_file", "input": {"path": "late.txt", "content": "迟到响应想写的内容"}}])
+        return self.response
 
 
 def test_late_response_after_shutdown_settlement_writes_nothing(tmp_path):
@@ -272,7 +282,7 @@ def test_late_response_after_shutdown_settlement_writes_nothing(tmp_path):
     backend = _LateResponseBackend()
     agent.backend = backend
 
-    with pytest.raises(ModelCallAdmissionClosedError):
+    with pytest.raises(ModelCallAdmissionClosedError) as refusal:
         agent.run("把这句话写进 late.txt", save=False, allowed_tools=["write_file"])
 
     assert not (Path(agent.effective_workspace_root) / "late.txt").exists(), "迟到响应里的写文件不能执行"
@@ -280,11 +290,10 @@ def test_late_response_after_shutdown_settlement_writes_nothing(tmp_path):
     assert [fact["error_code"] for fact in backend.settled] == [MODEL_CALL_INTERRUPTED_ERROR_CODE]
     record = next(item for item in model_call_ledger(agent).records() if item.call_id == backend.settled[0]["call_id"])
     assert (record.status, record.error_code) == ("failed", MODEL_CALL_INTERRUPTED_ERROR_CODE), "迟到的成功不重开终态"
-    # 工具账写在本次运行的任务工作区里（runs/<日期>/<编号>/work/blobs/tool_outputs/index.jsonl）。
+    assert refusal.value.closure.error_code == record.error_code
+    assert refusal.value.closure.error_type == record.error_type
+    assert backend.response is not None and backend.response.response_provenance is None
+    # 模型原finish门先于工具准入拒绝，迟到响应不得创建工具账或工具结果。
     rows = [json.loads(line) for index in Path(agent.home_paths.root).rglob("work/blobs/tool_outputs/index.jsonl")
             for line in index.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert [(row.get("tool"), row.get("error_code")) for row in rows] == [("write_file", "HOST_SHUTDOWN_TOOL_NOT_STARTED")]
-    # 落盘的停机原因和模型调用账本逐字段对得上（9b 复审建议 2）。
-    assert rows[0]["tool_execution"]["host_shutdown"] == {
-        "reason_code": record.error_code, "error_type": record.error_type, "admission_error_code": "MODEL_CALL_ADMISSION_CLOSED"}
-    assert rows[0]["tool_execution"]["handler_executed"] is False
+    assert rows == [], "模型准入已拒绝，不能创建任何迟到工具记录"

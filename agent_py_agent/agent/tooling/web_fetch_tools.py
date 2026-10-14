@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, quote_plus, urlsplit
 
 from ..common.cancellation import cancellation_requested
 from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
@@ -236,15 +236,15 @@ class _WebFetchRequest:
     secrets_to_redact: tuple[str, ...] = ()
 
 
-# LLM: 只净化本调用凭据的常见原文、JSON 转义和 URL 编码回显；必须在格式化、归档和模型输出前调用。
-# 函数用途: 生成非空秘密回显变体，先替换长串以免短账号破坏长认证值的匹配。
+# LLM: 只净化本调用凭据的原文、JSON与URL/表单编码回显；须在格式化、归档和模型前调用，urlencode产生的+不能漏掉。
+# 函数用途: 生成实际传输使用的非空回显变体，先替换长串以免短账号破坏长认证值的匹配。
 def _secret_echo_variants(secrets):
     values=set()
     for value in secrets:
         if not value:
             continue
         values.update((value,json.dumps(value,ensure_ascii=True)[1:-1],
-            json.dumps(value,ensure_ascii=False)[1:-1],quote(value,safe='')))
+            json.dumps(value,ensure_ascii=False)[1:-1],quote(value,safe=''),quote_plus(value,safe='')))
     return sorted(values,key=len,reverse=True)
 
 

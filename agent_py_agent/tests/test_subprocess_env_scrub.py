@@ -52,3 +52,20 @@ def test_secret_names_cannot_hide_behind_safe_prefixes_or_case():
     secrets = dict.fromkeys(("HOME_API_KEY", "USER_TOKEN", "PYTHON_SECRET", "PIP_PASSWORD", "XDG_PRIVATE_KEY", "agent_api_key", "minimax_api_key"), "test-only")
     assert scrub_subprocess_env(secrets) == {}
     assert scrub_subprocess_env(secrets, passthrough=frozenset({"agent_api_key"})) == {}
+
+
+def test_host_declared_secret_reference_cannot_be_overridden_by_passthrough():
+    env = {'BACKEND_SOURCE': 'synthetic-marker', 'ORDINARY_VAR': 'keep'}
+    assert scrub_subprocess_env(env, host_credential_env_names=frozenset({'BACKEND_SOURCE'}),
+        passthrough=frozenset({'BACKEND_SOURCE'})) == {'ORDINARY_VAR': 'keep'}
+
+
+def test_all_shell_modes_scrub_host_declared_environment_sources(monkeypatch):
+    from agent_py_agent.agent.tooling.shell import _subprocess_text_env
+
+    monkeypatch.setenv('CHANNEL_SOURCE', 'synthetic-marker')
+    monkeypatch.setenv('MINIMAX_API_KEY', 'synthetic-marker')
+    for owner in ('', '/tmp/synthetic-owner'):
+        env = _subprocess_text_env(owner, sandboxed=True, host_credential_env_names=frozenset({'CHANNEL_SOURCE'}))
+        assert 'CHANNEL_SOURCE' not in env and 'MINIMAX_API_KEY' not in env
+    assert 'CHANNEL_SOURCE' in __import__('os').environ

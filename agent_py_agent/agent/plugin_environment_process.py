@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .plugin_environment_plan import PluginEnvironmentPlan
 
 
-# LLM: 这是原 claim 的进程内冻结引用，不能重读当前 holder 补权；持久资源仍归原操作和 ProcessSessionStore。
+# LLM: 原 claim 与 host 来源为进程内冻结投影，不能重读 holder 或模型 params 补权；持久资源仍归原操作 Store。
 # 类用途: 将一批准备命令绑定到真实 owner、会话、任务、尝试和已领取的环境计划。
 @dataclass(frozen=True)
 class PluginEnvironmentOperation:
@@ -38,11 +38,12 @@ class PluginEnvironmentOperation:
     plan: PluginEnvironmentPlan
     store: ManagedOperationStore
     claim: ToolOperationRecord
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
-    # LLM: 仅不重入、不 reopen 的 host command handler 使用；未来若允许重开，必须改由 coordinator 直接传原 claim，不能迟到查询补权。
-    # 函数用途: 从原管理操作读取一次不可变领取身份，供准备期间反复核对。
+    # LLM: 仅原 host handler 绑定，不 reopen；来源只从同次管理 DTO 承运，未来重开必须由 coordinator 传原 claim。
+    # 函数用途: 从原管理操作固定领取身份及宿主擦洗上界，供准备期间反复核对。
     @classmethod
-    def bind(cls, owner, repo, binding, plan) -> PluginEnvironmentOperation:
+    def bind(cls, owner, repo, binding, plan, *, host_credential_env_names: frozenset[str] = frozenset()) -> PluginEnvironmentOperation:
         if owner.owner_id != binding.request.owner_id or plan.operation_id != binding.request.operation_id:
             raise ValueError("环境准备与原管理身份不符")
         store = ManagedOperationStore(repo)
@@ -53,7 +54,7 @@ class PluginEnvironmentOperation:
         )
         if claim is None:
             raise ValueError("环境准备尚无原操作领取")
-        result = cls(owner, binding, plan, store, claim)
+        result = cls(owner, binding, plan, store, claim, frozenset(host_credential_env_names))
         result.authorize()
         return result
 
@@ -95,10 +96,10 @@ class EnvironmentPreparationError(RuntimeError):
         self.exit_confirmed = exit_confirmed
 
 
-# LLM: 复用原密钥擦除并去除 Python/安装器/动态库注入；TMPDIR 只指向本候选，配置禁用是离线安装的必要约束。
+# LLM: 复用宿主准确来源擦洗并去掉安装器/动态库注入；来源只由原准备操作承运，不读取插件声明来透传 host secret。
 # 函数用途: 为准备命令创建受控环境副本，不修改 Gateway 自身环境或用户的全局配置。
-def preparation_environment(temporary_directory: Path) -> dict[str, str]:
-    cleaned = scrub_subprocess_env(dict(os.environ))
+def preparation_environment(temporary_directory: Path, *, host_credential_env_names: frozenset[str] = frozenset()) -> dict[str, str]:
+    cleaned = scrub_subprocess_env(dict(os.environ), host_credential_env_names=host_credential_env_names)
     prefixes = ("PYTHON", "PIP_", "UV_", "CONDA_", "LD_", "DYLD_")
     exact = {"VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "__PYVENV_LAUNCHER__"}
     environment = {

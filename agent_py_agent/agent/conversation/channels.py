@@ -1,5 +1,5 @@
 # LLM: 本模块定义通道投递、用户可见投影和本地 transcript 路由常量；调用方不得从正文猜路由或授权。
-# 模块用途: 为 Gateway、CLI 和消息出口提供统一的通道身份、投递信封与安全正文投影。
+# 模块用途: 为 Gateway、CLI 和消息出口提供统一通道身份、带宿主归属的附件引用与安全正文投影；字节冻结属于 delivery。
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ class UserReplyProjection:
         }
 
 
-# LLM: 通道附件必须来自调用方已完成的 owner/registry 校验；这里只携带发送所需的不可变引用。
+# LLM: 通道附件必须来自当前宿主 owner/registry 校验；owner_root 不能从模型/外部JSON取，载体自身不授予身份或已读内容。
 # 类用途: 描述一个准备通过聊天通道发送的已登记文件。
 @dataclass(frozen=True)
 class ChannelAttachment:
@@ -127,6 +127,7 @@ class ChannelAttachment:
     kind: str = "file"
     sha256: str = ""
     size_bytes: int = 0
+    owner_root: str = ''
 
 
 # LLM: 这是所有用户通道共用的最终出口净化点；内部标记可作为机器协议，但绝不能成为用户正文。

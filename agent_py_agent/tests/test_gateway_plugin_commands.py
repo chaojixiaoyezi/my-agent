@@ -15,13 +15,15 @@ from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.tests.test_gateway_model_profiles import Handler as ModelHandler
 
+_TOKEN = "synthetic-plugin-command-host"
+
 
 class Handler(ModelHandler):
     def __init__(self, body, user="alice"):
         super().__init__(body, user)
-        self.headers = {"X-User-Id": user, "X-Channel": "local"}
+        self.headers = {"X-Gateway-Token": _TOKEN, "X-User-Id": user, "X-Channel": "local"}
         self.client_address = ("127.0.0.1", 12345)
-        self._auth_middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+        self._auth_middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True), auth_token=_TOKEN)
 
 
 
@@ -90,6 +92,13 @@ def test_all_http_command_entries_keep_invalid_and_stale_input_out_of_task_queue
         ("/plugins install sample.whl", snapshot.revision, False, "PLUGIN_PERMISSION_DENIED"),
         ("/plugins help", "old-revision", False, "PLUGIN_CATALOG_STALE"),
     ]
+    if entry != "catalog":
+        # 会话命令先守普通用户角色；目录入口仍保留上方参数/版本全部断言，管理员 HTTP 路径另有原正例。
+        texts = [
+            ("/plugins help install", "", False, "COMMAND_ADMIN_REQUIRED"),
+            ("/plugins install sample.whl", snapshot.revision, False, "COMMAND_ADMIN_REQUIRED"),
+            ("/plugins help", "old-revision", False, "COMMAND_ADMIN_REQUIRED"),
+        ]
     for text, revision, ok, error in texts:
         handler = Handler(
             {
@@ -110,9 +119,8 @@ def test_all_http_command_entries_keep_invalid_and_stale_input_out_of_task_queue
             http_handlers.handle_control(handler, host)
         assert handler.reply[0] == 200
         result = handler.reply[1]
-        # 会话输入没有客户端目录握手；宿主使用本次目录，旧客户端版本仅在 /client/plugins 校验。
-        expected_ok, expected_error = (True, None) if entry != "catalog" and revision == "old-revision" else (ok, error)
-        assert result["ok"] is expected_ok and result.get("error_code") == expected_error
+        expected_ok, expected_error = ok, error
+        assert result["ok"] is expected_ok and result.get("error_code") == expected_error, (text, result)
         if entry == "catalog":
             assert result["request_id"] == "" and result["catalog"] == snapshot.to_payload()
         else:
@@ -246,7 +254,7 @@ def test_real_http_route_roundtrips_catalog_and_preserves_original_identity(tmp_
         paths,
         params=GatewayHTTPServerParams(
             agent=agent,
-            auth_middleware=AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True)),
+            auth_middleware=AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True), auth_token=_TOKEN),
         ),
     )
 
@@ -254,7 +262,7 @@ def test_real_http_route_roundtrips_catalog_and_preserves_original_identity(tmp_
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/client/plugins",
             data=json.dumps({"conversation_id": "session-a", **body}).encode(),
-            headers={"Content-Type": "application/json", "X-User-Id": user, "X-Channel": "local"},
+            headers={"Content-Type": "application/json", "X-Gateway-Token": _TOKEN, "X-User-Id": user, "X-Channel": "local"},
         )
         with urllib.request.urlopen(request, timeout=3) as response:
             assert response.status == 200

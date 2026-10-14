@@ -18,6 +18,7 @@ from agent_py_agent.agent.conversation.control_commands import (
     parse_conversation_control,
 )
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts.client_credentials import GatewayClientCredentials
 from agent_py_agent.agent.gateway_parts.control_operation_service import (
     GatewayControlOperationConflict,
     GatewayControlOperationReceipt,
@@ -824,6 +825,9 @@ def test_http_control_requires_stable_id_and_exposes_pollable_receipt(tmp_path) 
     server = GatewayHTTPServer(port, paths, params=GatewayHTTPServerParams(agent=agent))
     server.start()
     try:
+        headers = {"Content-Type": "application/json",
+                   **GatewayClientCredentials(agent.home_paths.root).headers(),
+                   "X-User-Id": "u-1", "X-Channel": "feishu", "X-Conversation-Id": "c-1"}
         missing_id = urllib.request.Request(
             f"http://127.0.0.1:{port}/control",
             data=json.dumps(
@@ -834,7 +838,7 @@ def test_http_control_requires_stable_id_and_exposes_pollable_receipt(tmp_path) 
                     "conversation_id": "c-1",
                 }
             ).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with pytest.raises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(missing_id, timeout=5)
@@ -850,14 +854,14 @@ def test_http_control_requires_stable_id_and_exposes_pollable_receipt(tmp_path) 
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/control",
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             submitted = json.loads(response.read().decode("utf-8"))
         replay_request = urllib.request.Request(
             f"http://127.0.0.1:{port}/control",
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(replay_request, timeout=5) as response:
             replayed = json.loads(response.read().decode("utf-8"))
@@ -866,12 +870,12 @@ def test_http_control_requires_stable_id_and_exposes_pollable_receipt(tmp_path) 
         conflict_request = urllib.request.Request(
             f"http://127.0.0.1:{port}/control",
             data=json.dumps(conflicting).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with pytest.raises(urllib.error.HTTPError) as conflict_error:
             urllib.request.urlopen(conflict_request, timeout=5)
         with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/control-status/{submitted['operation_id']}",
+            urllib.request.Request(f"http://127.0.0.1:{port}/control-status/{submitted['operation_id']}", headers=headers),
             timeout=5,
         ) as response:
             polled = json.loads(response.read().decode("utf-8"))
@@ -908,7 +912,9 @@ def test_first_http_goal_preserves_workspace_through_control_receipt(tmp_path) -
                 "conversation_id": "first-goal", "metadata": {"message_id": "first-goal-create"},
                 "workspace": {"cwd": str(project), "roots": [str(project)]},
             }).encode(),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     **GatewayClientCredentials(agent.home_paths.root).headers(),
+                     "X-User-Id": "local-agent", "X-Channel": "chat"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             result = json.loads(response.read())

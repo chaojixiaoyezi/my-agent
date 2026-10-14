@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: 所有外部最终回复、主动消息和附件都必须经过本服务，禁止业务层直接调用 provider API。
 
-模块用途: 把可信 DeliveryContext 与无收件人的 ReplyEnvelope 组合，净化正文并调用已注册 IM adapter。
+模块用途: 组合可信路由与无收件人信封，首发前安全冻结所有附件字节，净化正文并调用已注册 IM adapter。
 """
 
 import hashlib
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..conversation.channels import (
+    ChannelAttachment,
     DeliveryContext,
     DeliveryReceipt,
     ReplyEnvelope,
@@ -24,6 +25,7 @@ from ..conversation.channels import (
     redact_host_absolute_paths,
     supports_transcript_delivery,
 )
+from .attachment_content import VerifiedAttachmentContent, verify_attachment_content
 from .registry import ChannelAdapterRegistry, ChannelCapabilities
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,8 +44,8 @@ class _DeliveryFailure:
     detail: str = ""
 
 
-# LLM: adapter 解析后的发送参数打包为不可变 attempt，避免多个 helper 漂移 context/envelope 字段。
-# 类用途: 保存一次已经通过前置校验、准备调用 provider 的投递动作。
+# LLM: attempt 只在本次发送内持有已核 owner/hash/size 的不可变 bytes；不持久化或由模型字段恢复内容。
+# 类用途: 保存通过前置校验的路由/正文和冻结附件，后续上传不重读可被替换的文件路径。
 @dataclass(frozen=True)
 class _DeliveryAttempt:
     adapter: Any
@@ -52,6 +54,7 @@ class _DeliveryAttempt:
     envelope: ReplyEnvelope
     content: str
     projection_status: str
+    attachments: tuple[VerifiedAttachmentContent, ...] = ()
 
 
 # LLM: 前置净化结果把规范化路由、用户正文、能力和基础回执冻结，后续解析 adapter 不再重复计算。
@@ -144,7 +147,7 @@ class DeliveryService:
         status, error_code = self._safe_deliver(attempt)
         return replace(prepared.receipt, delivery_status=status, error_code=error_code)
 
-    # LLM: 净化和能力前检不触碰 adapter；任何失败都在 provider 构建和网络副作用前返回回执。
+    # LLM: 只认宿主typed附件并先拒JSON伪造；净化和能力前检不触碰adapter，失败在provider网络副作用前返回。
     # 函数用途: 规范化 context/envelope 并生成待解析投递，进度只做路径净化，最终消息保留说明，或返回无需发送的终态回执。
     def _prepare(
         self, context: DeliveryContext, envelope: ReplyEnvelope, *, progress: bool = False
@@ -154,6 +157,8 @@ class DeliveryService:
         raw_content = str(envelope.content or "")
         attachments = tuple(envelope.attachments or ())
         receipt = _initial_receipt(context, envelope, channel=channel, target=target)
+        if any(not isinstance(item, ChannelAttachment) for item in attachments):
+            return replace(receipt, delivery_status='rejected', error_code='ARTIFACT_VALIDATION_FAILED')
         if context.mode not in _DELIVERY_MODES:
             return replace(
                 receipt, delivery_status="rejected", error_code="CHANNEL_DELIVERY_MODE_INVALID"
@@ -184,8 +189,8 @@ class DeliveryService:
             capabilities=capabilities,
         )
 
-    # LLM: provider target 和 adapter 只从 registry 解析；未知或不合法时禁止回落其他平台。
-    # 函数用途: 把已净化投递解析为可执行 attempt，或返回拒绝/不可用回执。
+    # LLM: 目标/adapter只从原registry解析，所有附件在首个副作用前按原owner/hash安全读；未知字节接口不回落Path。
+    # 函数用途: 冻结一份可执行投递及完整附件字节，路径/版本/能力失败均在发文字之前拒绝。
     def _resolve_attempt(
         self,
         context: DeliveryContext,
@@ -222,6 +227,14 @@ class DeliveryService:
                 delivery_status="unavailable",
                 error_code="CHANNEL_ADAPTER_UNAVAILABLE",
             )
+        if envelope.attachments and (not prepared.capabilities.frozen_attachment_content
+                or getattr(adapter, 'supports_frozen_attachment_content', False) is not True
+                or not callable(getattr(adapter, 'send_attachment_content', None))):
+            return replace(prepared.receipt, delivery_status='rejected', error_code='CHANNEL_ATTACHMENT_CONTENT_UNSUPPORTED')
+        try:
+            attachments = _verified_delivery_attachments(envelope, prepared.capabilities)
+        except (OSError, ValueError, TypeError):
+            return replace(prepared.receipt, delivery_status='rejected', error_code='ARTIFACT_VALIDATION_FAILED')
         return _DeliveryAttempt(
             adapter=adapter,
             capabilities=prepared.capabilities,
@@ -229,9 +242,10 @@ class DeliveryService:
             envelope=envelope,
             content=prepared.content,
             projection_status=prepared.projection_status,
+            attachments=attachments,
         )
 
-    # LLM: 普通回复走 finalize_response 以保留引用/typing 收口；主动消息走 send_message，附件随后顺序发送。
+    # LLM: 文字/字节均已预检，普通回复仍保留引用/typing，异常日志只类型不放供应商正文或凭据。
     # 函数用途: 调用 adapter 的通用消息和原生附件接口，并把异常收敛为稳定错误码。
     def _safe_deliver(self, attempt: _DeliveryAttempt) -> tuple[str, str]:
         try:
@@ -255,7 +269,7 @@ class DeliveryService:
                     attempt.context.target,
                     "CHANNEL_SEND_EXCEPTION",
                     "channel send exception",
-                    detail=f"type={type(exc).__name__} detail={exc}",
+                    detail=f"type={type(exc).__name__}",
                 )
             )
             return "failed", "CHANNEL_SEND_EXCEPTION"
@@ -298,45 +312,31 @@ class DeliveryService:
     # LLM: 附件能力逐项 fail-closed；不能把不支持的附件退化成服务器路径文本或 MEDIA 标记。
     # 函数用途: 按信封顺序发送所有 typed 附件。
     def _send_attachments(self, attempt: _DeliveryAttempt) -> bool:
-        for index, attachment in enumerate(attempt.envelope.attachments):
+        for index, attachment in enumerate(attempt.attachments):
             if not self._send_attachment(
                 attempt,
-                Path(str(attachment.path or "")),
+                attachment,
                 idempotency_key=_attachment_idempotency_key(
                     attempt.context,
-                    attachment,
+                    attachment.attachment,
                     index,
                 ),
             ):
                 return False
         return True
 
-    # LLM: 单附件只按已注册能力选原生图片或文件 API，不支持时直接失败且不降级成路径文字。
-    # 函数用途: 发送一项 typed attachment。
+    # LLM: 统一只传已核验的不可变字节，adapter不能从原path重读；不支持此协议不能降级旧Path接口。
+    # 函数用途: 将一项已冻结附件交给原生字节发送接口，保留同一稳定投递键。
     def _send_attachment(
         self,
         attempt: _DeliveryAttempt,
-        path: Path,
+        content: VerifiedAttachmentContent,
         *,
         idempotency_key: str,
     ) -> bool:
-        if path.suffix.lower() in _IMAGE_SUFFIXES and attempt.capabilities.images:
-            return bool(
-                attempt.adapter.send_image(
-                    attempt.context.target,
-                    path,
-                    idempotency_key=idempotency_key,
-                )
-            )
-        if attempt.capabilities.files:
-            return bool(
-                attempt.adapter.send_file(
-                    attempt.context.target,
-                    path,
-                    idempotency_key=idempotency_key,
-                )
-            )
-        return False
+        return bool(attempt.adapter.send_attachment_content(
+            attempt.context.target, content, idempotency_key=idempotency_key,
+            as_image=Path(content.attachment.path).suffix.lower() in _IMAGE_SUFFIXES and attempt.capabilities.images))
 
     # LLM: 同类故障只打一条脱敏日志，不能记录完整用户 ID、正文、附件路径或凭据。
     # 函数用途: 去重并记录一次投递失败。
@@ -358,7 +358,22 @@ class DeliveryService:
         )
 
 
-# LLM: 回执只记录正文和附件 ID，不记录附件绝对路径；channel/target 必须使用已规范化可信上下文。
+# LLM: envelope只携带原引用，不信任serialized内容；能力决定原size上限，读取/核验完成前不发任何正文或附件。
+# 函数用途: 按原图片/文件选择规则冻结完整集合，任一失败不返回部分内容。
+def _verified_delivery_attachments(envelope: ReplyEnvelope, capabilities: ChannelCapabilities) -> tuple[VerifiedAttachmentContent, ...]:
+    prepared = []
+    for attachment in envelope.attachments:
+        if not isinstance(attachment, ChannelAttachment):
+            raise ValueError('附件必须来自宿主引用投影')
+        image = Path(attachment.path).suffix.lower() in _IMAGE_SUFFIXES and capabilities.images
+        if not image and not capabilities.files:
+            raise ValueError('通道不支持此附件类型')
+        limit = capabilities.max_image_bytes if image else capabilities.max_file_bytes
+        prepared.append(verify_attachment_content(attachment, max_bytes=limit))
+    return tuple(prepared)
+
+
+# LLM: 回执只记录typed附件ID，不接受JSON blob或路径授权；不记录附件绝对路径；channel/target 必须使用已规范化可信上下文。
 # 函数用途: 构造尚未发送的基础投递回执。
 def _initial_receipt(
     context: DeliveryContext,
@@ -373,7 +388,7 @@ def _initial_receipt(
         content=str(envelope.content or ""),
         thread_id=context.thread_id,
         task_id=context.task_id,
-        attachment_ids=tuple(str(item.artifact_id or "") for item in envelope.attachments),
+        attachment_ids=tuple(str(item.artifact_id or "") for item in envelope.attachments if isinstance(item, ChannelAttachment)),
         evidence_refs=tuple(
             str(item)
             for item in envelope.evidence_refs
@@ -402,7 +417,7 @@ def _delivery_receipt_id(
             target,
             str(envelope.content or ""),
             ",".join(str(item or "") for item in envelope.evidence_refs),
-            ",".join(str(item.artifact_id or "") for item in envelope.attachments),
+            ",".join(str(item.artifact_id or "") for item in envelope.attachments if isinstance(item, ChannelAttachment)),
         )
     )
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:20]

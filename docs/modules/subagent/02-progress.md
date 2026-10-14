@@ -481,3 +481,19 @@ OS 强制终止仍可能缺已完成的 native 信封，取消回执不证明历
 子孙创建、恢复核对原 parent/root/owner/thread；无证据的旧群任务不会迁移成当前发言人，不能借另一人的 work-origin。私人审批始终先核对准确 scope.root 再比对当前执行身份。同本人新入口续准确原根时允许入口编号变化，孩子保留原根旧出处。local/普通用户/admin/full_access 各沿原权限上界，未增加批准、网络或文件权限。
 
 聚焦测试及独立审查证据见 docs/tasks/IM_SCHEDULER_ACTOR_HANDOFF.md；本线不部署、不推送，由整合线完成严格门后发布。
+
+## 已被停机结清的迟到模型响应沿原恢复出口收尾（2026-10-13）
+
+共享模型完成入口保留 `ModelCallLedger.finished` 返回的准确首终态。只有该调用已是 `failed`，且
+`error_type/error_code` 与原进程准入表的 `closure` 同时一致，才抛原 `ModelCallAdmissionClosedError`。
+这样迟到响应不再因缺少成功来源被误归为普通回复失败，也不执行其中的工具；主/子恢复仍使用原
+typed 停机错误及准确 request/run/attempt，不重开原调用、不伪签成功来源。完成在先、超时或其它失败
+保留原语义。合同及真实 SimpleAgent/Gateway 合成传输用例先红后绿，见
+[交接](../../tasks/MODEL_SHUTDOWN_PROVENANCE_HANDOFF.md)；未调用真实供应商或重启生产服务。
+
+## IM 任务与会话目标安全复测（2026-10-13）
+
+监控模型工具和 `/schedule` 控制都沿本人 owner/creator 事实，原冻结 root、后台和租约恢复不变。
+同群、跨 owner、full_access、锁定用户告警和目标注入矩阵已在隔离真实 Registry/Executor/Store 下验证。
+会话消息与派活补同源目标 owner/home 核验，原本人完整派活真链仍可用；错落宿主记录不会因本目录而升权。
+详细命令、RED/GREEN 与证明边界见 [安全交接](../../tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。

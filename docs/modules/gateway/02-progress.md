@@ -1,5 +1,8 @@
 2026-10-13 群任务追加修复进行中：认证入口冻结宿主发起人，模型工具创建/查询/控制与子孙继承沿同一主体；缺失/冲突不返回假空清单。飞书暂时身份失败沿原入站重投，表情反馈与Gateway受理分开记录。公开回执仅显式策略启用，同源调用与内部结果分离；验收收口见本轮交接，未改现场监控。
 
+2026-10-13 当前安全入口：原 G2b 强制与客户端 G1 读取始终生效，迁移开关及空头降级删除；原 route.access_tier 在处理 body 前校验 credential/admin，公开与插件令牌档独立。安全 HTTP、日志、附件冻结和 Session 目标复核见 [安全说明](../../design/IM_SECURITY_AUDIT_20261013.md)。本文此前开关/迁移档记录保留为历史，不能作为当前操作指引。
+
+
 2026-10-13 离线更新补验：安装器使用原 owner/runtime 合同定位服务，默认空 workspace 不再漏掉 Gateway/adapter；旧周期状态按 registry channels 明确迁移，新的心跳保留 requested_channel。默认/相对/绝对服务目录、旧/新排空协议与非法状态拒绝纳入发行回归。
 
 2026-10-13 R21 收口：定时来源空 owner 只投影原 run 的准确身份；发送前发现非空 origin owner 改变则拒绝。68 项最终路线补验通过，联合本机 1467 / Linux 313 通过，详见本期实施记录。
@@ -11,6 +14,8 @@
 2026-10-13：R20 原资源策略/云工具与 R21 入站冻结 owner、H2 服务队列和 chat_id 发送实施中，见 [设计](../../design/HOST_CLOUD_RESOURCE_ACCESS.md)。管理员私人 IM 可 `/sessions control <thread_id> /approve <密码>` 或 `/deny` 决定本人原 TUI pending；原审批账及 waiter 不变，嵌套密码在入站/控制/TUI 历史均遮蔽，普通用户/群不能跨接管理员 TUI。
 
 # Gateway 维护状态
+
+2026-10-13 引用附件切片：群内引用文件消息并明确 @ 后，原 prepared 行持久再 GET 准确 parent；核验 ID/chat/deleted/topic 后复用资源下载，落当前 owner。控制、私聊、关闭开关零新增查取；读取失败以 quoted_media.v1 交原模型，不改身份/权限或新增队列。合成与原文件系统验收，真实飞书 scopes/payload 待实测；见 [引用设计](../../design/FEISHU_QUOTED_MEDIA.md) 和 [交接](../../tasks/FEISHU_QUOTED_MEDIA_HANDOFF.md)。
 
 2026-10-13 当前实现切片：本人级 /schedule 汇总、详情/三条历史/原 CAS 控制与 /status 监控计数已接；多规则沿原 scheduler run/claim/恢复入口，NO 使用原 ToolExecutor。私人凭据复用已认证卡片控制，模型只见引用。后台委派的 120 秒短状态窗口仍复用原 DeliveryService；离线更新可请求原两阶段排空后停止，不拉起旧版本继任者。附件下载复用 /ask owner resolver 后落到 owner media/input。全部严格与真实验收仍进行中，见 [实施记录](../../tasks/IM_MONITOR_PERMISSIONS_IMPLEMENTATION.md)。
 

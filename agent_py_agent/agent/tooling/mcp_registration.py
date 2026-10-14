@@ -353,9 +353,9 @@ def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:
     return configs
 
 
-# LLM: 初次发现与恢复共用固定 transport 发布；未返回句柄的启动失败由 client 自行清理，不终结重试资格。
+# LLM: 初次发现/恢复共用原 transport；默认继承来源由宿主 Registry 冻结，raw server 配置不能伪造内部字段。
 # 函数用途: 启动声明的 MCP 服务并注册工具，保留暂时失败的客户端供后续运行恢复。
-def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioClient]:
+def register_mcp_servers(registry: Any, mcp_servers: object, *, host_credential_env_names: frozenset[str] = frozenset()) -> list[MCPStdioClient]:
     """连接所有配置的 MCP server，把已发现的工具注册进 ``registry``。
 
     返回每个合法配置对应的 ``MCPStdioClient``，包括本次启动失败的 client。失败连接没有
@@ -369,6 +369,7 @@ def register_mcp_servers(registry: Any, mcp_servers: object) -> list[MCPStdioCli
 
     clients: list[MCPStdioClient] = []
     for config in configs:
+        config = replace(config, host_credential_env_names=frozenset(host_credential_env_names))
         client = MCPStdioClient(config)
         clients.append(client)
         transport = None

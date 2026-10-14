@@ -1,11 +1,10 @@
 """G1：只用临时数据根和随机端口传输替身，不读真实 secrets。
 
-Full Access 下模型可读数据根、关闭沙箱的插件与宿主同信任域；本片只验证
-持久文件和隐藏路径声明，不把声明当成真实 Seatbelt/bwrap 隔离证据。
+本片验证持久凭据、私有权限、启动硬门和宿主隐藏路径声明；不把路径声明
+当成实际 Seatbelt/bwrap 隔离证据，也不为 Full Access 或旧开关提供凭据旁路。
 """
 from __future__ import annotations
 
-import http.client
 import json
 import os
 import re
@@ -21,6 +20,7 @@ from agent_py_agent.agent.gateway_parts import http_service, local_client_token
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
+    GatewayLocalCredentialRequired,
 )
 from agent_py_agent.agent.gateway_parts.local_client_token import (
     LocalClientCredentialError,
@@ -170,23 +170,14 @@ def test_start_hook_uses_canonical_root_and_restart_does_not_delete(tmp_path, mo
         server.stop()
 
 
-def _get(port, path):
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    try:
-        connection.request("GET", path)
-        response = connection.getresponse()
-        return response.status, json.loads(response.read())
-    finally:
-        connection.close()
-
 
 @pytest.mark.parametrize("damage,expected_reason", [
     ("corrupt", "LOCAL_CLIENT_CREDENTIAL_INVALID"),
     ("file_mode", "LOCAL_CLIENT_CREDENTIAL_PERMISSIONS"),
     ("dir_mode", "LOCAL_CLIENT_CREDENTIAL_PERMISSIONS"),
 ])
-def test_unavailable_credential_still_starts_and_reports_reason(tmp_path, damage, expected_reason):
-    # G2a 降级：凭据坏/权限不对不拦启动；/status 只报原因码；坏文件与坏权限不被覆盖、不轮换。
+def test_unavailable_credential_refuses_start_with_reason_without_rotation(tmp_path, damage, expected_reason):
+    # G1 必须有效；坏凭据在绑定监听器前拒绝，保留安全原因码，文件不覆盖、不轮换。
     root = tmp_path / "data-root"
     ensure_local_client_credential(root)
     path = _credential_path(root)
@@ -200,40 +191,35 @@ def test_unavailable_credential_still_starts_and_reports_reason(tmp_path, damage
     agent = _agent(root)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=agent))
-    server.start()
-    try:
+    for _restart in range(2):
+        with pytest.raises(GatewayLocalCredentialRequired) as caught:
+            server.start()
+        assert caught.value.reason_code == expected_reason
+        assert server.server is None
         assert server.local_credential_status == f"unavailable:{expected_reason}"
-        status, body = _get(server.server.server_address[1], "/status")
-        assert status == 200 and body["local_credential"] == f"unavailable:{expected_reason}"
         server.stop()
-        server.start()
-        assert server.local_credential_status == f"unavailable:{expected_reason}"
-    finally:
-        server.stop()
+
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
-def test_agent_contract_violation_reports_structured_reason_and_keeps_counting(tmp_path, monkeypatch):
+def test_agent_contract_violation_refuses_listener_with_structured_reason(tmp_path, monkeypatch):
     # 真 Agent 必须有 home_paths；坏合同不能伪装成普通的数据根降级。
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result",
                         lambda handler: handler._send_json(200, {"ok": True}))
     middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=SimpleNamespace(), auth_middleware=middleware))
-    server.start()
-    try:
-        assert server.local_credential_status == "unavailable:agent_contract"
-        assert middleware.has_gateway_credential({}) is False
-        port = server.server.server_address[1]
-        assert _get(port, "/status")[1]["local_credential"] == "unavailable:agent_contract"
-        assert _get(port, "/result/fixture-request")[0] == 200
-        facts = _get(port, "/status")[1]["uncredentialed_loopback_by_endpoint"]
-        assert facts.get("/result/*", {}).get("count") == 1
-    finally:
-        server.stop()
+    with pytest.raises(GatewayLocalCredentialRequired) as caught:
+        server.start()
+    assert caught.value.reason_code == "agent_contract"
+    assert server.local_credential_status == "unavailable:agent_contract"
+    assert middleware.has_gateway_credential({}) is False
+    assert server.server is None
+    assert middleware.uncredentialed_loopback_snapshot() == {}
+    server.stop()
 
 
-def test_agent_none_has_no_data_root_and_never_creates_credentials(tmp_path, monkeypatch):
+def test_authenticated_agent_none_refuses_start_without_inventing_data_root(tmp_path, monkeypatch):
     # 没有 Agent 就没有受信 home_paths 根，即使队列路径看似生产布局也不据此写凭据。
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result",
                         lambda handler: handler._send_json(200, {"ok": True}))
@@ -242,16 +228,14 @@ def test_agent_none_has_no_data_root_and_never_creates_credentials(tmp_path, mon
     gateway_root = root / "owners" / "local" / "main" / "workspace" / "runtime" / "services" / "gateway"
     server = GatewayHTTPServer(0, gateway_paths_from_root(gateway_root),
                                params=GatewayHTTPServerParams(agent=None, auth_middleware=middleware))
-    server.start()
-    try:
-        assert server.local_credential_status == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
-        port = server.server.server_address[1]
-        assert _get(port, "/status")[1]["local_credential"] == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
-        assert _get(port, "/result/fixture-request")[0] == 200
-        facts = _get(port, "/status")[1]["uncredentialed_loopback_by_endpoint"]
-        assert facts.get("/result/*", {}).get("count") == 1
-    finally:
-        server.stop()
+    with pytest.raises(GatewayLocalCredentialRequired) as caught:
+        server.start()
+    assert caught.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
+    assert server.local_credential_status == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
+    assert server.server is None
+    assert middleware.uncredentialed_loopback_snapshot() == {}
+    server.stop()
+
     assert not list(root.rglob("gateway-local-client-token"))
 
 
@@ -267,11 +251,12 @@ def test_n2_root_mismatch_with_derived_data_root_is_agent_contract(tmp_path, mon
     agent = SimpleNamespace(home_paths=SimpleNamespace(root=elsewhere, owner_home_dir=owner_home))
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=agent))
-    server.start()
-    try:
-        assert server.local_credential_status == "unavailable:agent_contract"
-    finally:
-        server.stop()
+    with pytest.raises(GatewayLocalCredentialRequired) as caught:
+        server.start()
+    assert caught.value.reason_code == "agent_contract"
+    assert server.server is None
+    server.stop()
+
     assert not (data_root / "secrets").exists()
     assert not (elsewhere / "secrets").exists()
 
@@ -286,11 +271,12 @@ def test_n4_unresolvable_data_root_is_unavailable_and_writes_nothing(tmp_path, m
     agent = SimpleNamespace(home_paths=SimpleNamespace(root=root, owner_home_dir=root / "somewhere"))
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=agent))
-    server.start()
-    try:
-        assert server.local_credential_status == "unavailable:LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
-    finally:
-        server.stop()
+    with pytest.raises(GatewayLocalCredentialRequired) as caught:
+        server.start()
+    assert caught.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT"
+    assert server.server is None
+    server.stop()
+
     assert not list(root.rglob("gateway-local-client-token"))
 
 

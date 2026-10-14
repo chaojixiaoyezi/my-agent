@@ -179,26 +179,15 @@ v8 插件的启用还多一道身份门：**只有本机管理员（身份是 `l
 
 在 macOS 上锁屏时调用观察，会返回结构化结果 `screen_locked`，消息是"屏幕已锁定，解锁后再观察"。这个检查是只读的、不弹窗；如果查不到锁屏状态，会按"无法确认"继续原来的观察流程，**不会**因为查不到就拒绝你。Linux（X11）没有锁屏这个概念，行为不变。
 
-## 八、本机凭据强制开关（G2b）
+## 八、本机客户端凭据
 
-my-agent 的 Gateway 默认把**本机回环请求**当作可信。G2b 是上面再加一道：**本机客户端也要带凭据**才算管理员。
+Gateway 的身份入口始终校验宿主凭据，包括本机回环。旧迁移开关 gateway_require_local_credential 已退休，不能通过 /settings 关闭这一边界。
 
-| 项目 | 说明 |
-| --- | --- |
-| 开关名 | `gateway_require_local_credential` |
-| 默认 | **关** |
-| 谁能改 | 管理员 |
-| 打开后 | 不带凭据的本机请求降为**匿名普通用户**：不认身份头、绝不给管理员 |
-| 打开前 | 行为不变，只**计数不拦** |
+本机 TUI、CLI 与 IM 客户端沿原宿主数据根读取 G1 凭据；Gateway 首次生成、重启复用，部署 token 非空时保持唯一请求头。缺文件、权限错误或内容损坏时请求不会发送，返回 LOCAL_CLIENT_CREDENTIAL_* 原因码，应由宿主检查后重启客户端。秘密不进入日志、环境或命令行参数。
 
-**打开前请先观察几天**：先看 `/status` 里这两个字段——
+/status 的 local_credential 与 uncredentialed_loopback_by_endpoint 继续用于观测，不授予权限。公开 status/metrics 仍公开；credential/admin 档在业务处理前拒绝无凭据请求。
 
-- `uncredentialed_loopback_by_endpoint`：按端点统计的"没带凭据的回环请求"次数；
-- `local_credential`：本机凭据当前状态（正常 / 不可用及原因码）。
-
-等"没带凭据"的计数归零（说明没有漏网的旧客户端），再打开开关。打开后，**不带凭据的本机请求会被降为匿名**（不认身份头、绝不给管理员）；如果你的客户端连本机凭据自己都有问题（文件丢了、格式坏了、权限不对），会拿到结构化的本机凭据错误码，据此提示"请重启客户端"，而不是对着 403 或匿名行为摸不着头脑。这类码是 `LOCAL_CLIENT_CREDENTIAL_*` 系列，例如 `LOCAL_CLIENT_CREDENTIAL_MISSING`（凭据文件不存在）、`LOCAL_CLIENT_CREDENTIAL_PERMISSIONS`（文件权限不对）、`LOCAL_CLIENT_CREDENTIAL_INVALID`（内容无效）。
-
-**一条例外**：插件进程只拿得到 host-API 令牌、拿不到本机客户端凭据，所以 `/plugin-host/query` 这一条路由接受有效的 host-API 令牌，不要求客户端凭据——G2b 打开后插件宿主 API 照常可用。
+插件进程沿自己的 X-Plugin-Host-Token 访问 /plugin-host/query；该独立令牌不等于宿主凭据，也不能访问其它管理员入口。打开插件沙箱和普通命令沙箱的策略仍各守原权限合同。auth_enabled=false 是明确的单用户无鉴权部署，不提供多用户/IM 安全隔离。
 
 ## 九、锁和私有文件：只动自己建的东西
 
@@ -286,8 +275,8 @@ TUI 或飞书里发 `/settings set plugin_events_enabled true`（只有你能改
 **Q：打开屏幕观察后，它会自己点我的屏幕吗？**
 不会。只看档只交出 `observe_window`，那个适配器进程连鼠标键盘依赖都没加载，点击/输入工具也不会出现在工具目录里。
 
-**Q：G2b 打开后我的脚本都连不上了怎么办？**
-先用 `/status` 的 `uncredentialed_loopback_by_endpoint` 找出是哪些端点在被拒；仓库内的 TUI/CLI、IM、开发脚本都已经会带凭据。仓库外的自建脚本需要照 `X-Gateway-Token: $GW_TOKEN` 的写法带上本机凭据。凭据只进环境变量，不回显、不落盘。
+**Q：脚本因本机凭据被拒怎么办？**
+先用 `/status` 的 `uncredentialed_loopback_by_endpoint` 找出被拒端点；仓库内 TUI/CLI、IM 和开发脚本会读取同一宿主凭据。仓库外宿主脚本应复用 `GatewayClientCredentials.headers()`，只在内存构造 `X-Gateway-Token`，不要经环境或命令行参数传秘密。缺失/损坏时先检查宿主数据根，不能关闭认证作为修复。
 
 ## 十二、还没到的部分
 
@@ -316,6 +305,6 @@ TUI 或飞书里发 `/settings set plugin_events_enabled true`（只有你能改
 | 隐藏家目录 / 只放行插件目录与解释器前缀 / 默认断网 | `agent_py_agent/agent/plugin_sandbox.py` 的 `plugin_sandbox_spec`（`private_read_roots` / `public_read_roots` / `_interpreter_prefixes`）；解释器落在数据根内拒绝的码 `interpreter_inside_hidden_root` |
 | Linux `network:true` 拒 / macOS 拒 Gateway 端口 | `agent_py_agent/agent/plugin_sandbox.py` 的 `plugin_sandbox_problem`（Linux 直接返回 `gateway_port_isolation_unavailable`）；`deny_gateway_ports=gateway_bound_ports()` 在 `plugin_sandbox_spec` 里、端口表在 `agent_py_agent/agent/attempt/sandbox.py` 的 `gateway_bound_ports` |
 | 只有本机管理员能启用 v8，原因 `plugin_events_owner_not_allowed` | `agent_py_agent/agent/plugin_enable_tool.py` 的 `_preflight_failure`；判据 `agent_py_agent/agent/user_space/owner_access.py` 的 `is_complete_local_admin_owner` |
-| G2b 打开后不带凭据降匿名 | `agent_py_agent/agent/auth/middleware.py` 的 `extract_identity`（不可信来源不认 header，固定匿名） |
+| 所有来源无有效宿主凭据均降匿名 | `agent_py_agent/agent/auth/middleware.py` 的 `extract_identity`（不可信来源不认 header，固定匿名） |
 | 本机凭据自身的问题码是 `LOCAL_CLIENT_CREDENTIAL_*` | `agent_py_agent/agent/gateway_parts/local_client_token.py`（`_MISSING` / `_PERMISSIONS` / `_INVALID`）；用例断言见 `agent_py_agent/tests/test_gateway_local_trust_enforcement.py`（`LOCAL_CLIENT_CREDENTIAL_MISSING` / `_INVALID` / `_PERMISSIONS`） |
 | 只看档要用 `/settings set computer_use_observation_enabled true`（obsset 后） | 现在不在用户可写白名单，被拒 `PARAMETER_BOUNDARY`；obsset 把它加进白名单后管理员可改、模型不能改。`computer_use_enabled` 仍不进白名单。 |

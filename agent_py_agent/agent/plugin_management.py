@@ -7,7 +7,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .capability_verifier_consent import CONSENT_KIND, verifier_confirmation_message
@@ -78,7 +78,7 @@ _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGU
 _LEARNPACK_TOOLS = (PLUGIN_INSTALL_TOOL, PLUGIN_UPDATE_TOOL, PLUGIN_ENABLE_TOOL, PLUGIN_DISABLE_TOOL)
 
 
-# LLM: 身份与新默认只来自宿主；展示不改变既有权限代次，原线程是权威，不信正文自称管理员。
+# LLM: 身份与来源只来自宿主；凭据来源仅用于 spawn 擦洗，不进入展示或持久授权账，原线程仍是身份权威。
 # 类用途: 给插件命令传必要身份、权限和存储依赖，业务调用不借用管理员资格或聊天审批缓存。
 @dataclass(frozen=True)
 class PluginManagementContext:
@@ -112,14 +112,16 @@ class PluginManagementContext:
     # 展示层按“暂无记录”降级，绝不为了展示创建 hub 或触发投递。
     event_hub: object | None = None
     legacy_sandbox_default: bool = True
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
-# LLM: 冷/热入口共用宿主新默认及原权限；新默认只用于后续授权，不据此降级当前固定代次。
+# LLM: 冷/热入口共用宿主配置及原权限；环境来源从 config 提取，不借原命令 arguments 注入或显示。
 # 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
     actor_id: str, channel: str, conversation_id: str, is_admin: bool,
 ) -> PluginManagementContext:
+    from .settings.secret_ref import managed_secret_environment_names
     from .user_space.approval_mode import permission_config, read_approval_mode
     from .user_space.owner_access import (
         is_complete_local_admin_owner,
@@ -159,10 +161,11 @@ def plugin_management_context(
                                    process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
                                    plugin_events_enabled=bool(getattr(config, "plugin_events_enabled", False)),
                                    legacy_sandbox_default=bool(getattr(config, "plugin_legacy_sandbox_default", True)),
-                                   events_owner_allowed=is_complete_local_admin_owner(home))
+                                   events_owner_allowed=is_complete_local_admin_owner(home),
+                                   host_credential_env_names=managed_secret_environment_names(config))
 
 
-# LLM: 老格式授权输入随管理上下文冻结传入；v8/内容包同样携带但不会走 legacy 分流，判定在启用工具内部。
+# LLM: 老格式授权和环境来源由同一宿主上下文投影；来源只擦洗进程，不改变 v8/legacy 的权限分流。
 # 函数用途: 为一次启用组装策略输入，避免长参数散在调用点。
 def _enable_policy(context, arguments) -> PluginEnablePolicy:
     roots = tuple(path for path in (context.owner.root, context.path_policy.agent_home_root) if path)
@@ -171,7 +174,7 @@ def _enable_policy(context, arguments) -> PluginEnablePolicy:
                               events_owner_allowed=context.events_owner_allowed,
                               legacy_arguments=arguments,
                               legacy_sandbox_default=context.legacy_sandbox_default,
-                              legacy_forbidden_roots=roots)
+                              legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names)
 
 
 # LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。

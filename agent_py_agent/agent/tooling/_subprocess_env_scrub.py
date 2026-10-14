@@ -1,5 +1,5 @@
-# LLM: Shell/PTY 子进程凭据过滤的唯一入口；显式传递不能覆盖本服务自管凭据，安全前缀不能绕过密钥名检查。
-# 模块用途: 启动子进程前剥离模型与网关密钥，保留普通运行变量及操作者显式放行的第三方凭据。
+# LLM: Shell/PTY 子进程凭据过滤的唯一入口；宿主真实 SecretRef 来源名优先剥离，任何透传声明均不能覆盖该上界。
+# 模块用途: 启动子进程前剥离模型、网关与通道凭据来源，保留普通运行变量和非自管的显式透传。
 from __future__ import annotations
 
 """子进程环境凭据过滤。
@@ -48,14 +48,21 @@ def _is_self_managed_credential(name: str) -> bool:
     return any(s in upper for s in _SECRET_NAME_SUBSTRINGS)
 
 
-# LLM: 返回副本、不改宿主环境；自管名优先拒绝，第三方凭据只接受精确显式 passthrough。
-# 函数用途: 为 Shell 与 PTY 构造去密钥的子进程环境。
-def scrub_subprocess_env(env: dict[str, str], *, passthrough: frozenset[str] = frozenset()) -> dict[str, str]:
+# LLM: 返回副本、不改宿主环境；可信来源名与固定自管名均优先拒绝，普通第三方透传不能扩大宿主来源上界。
+# 函数用途: 为所有 Shell、后台命令和 PTY 构造去密钥环境，调用方只能传宿主配置解析出的来源名。
+def scrub_subprocess_env(
+    env: dict[str, str], *, passthrough: frozenset[str] = frozenset(),
+    host_credential_env_names: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     """从传给子进程的环境里剥掉自管凭据。passthrough=operator/skill 显式放行的变量名——但
     【不能覆盖自管凭据】(抄 GHSA 修复):第三方 key 放行有效,自管凭据的放行声明一律无视。
     返回擦洗后的新 dict(不改原 env)。"""
+    # Windows 的环境名不区分大小写；POSIX 保留来源的准确名称，不能误删另一个大小写不同的普通变量。
+    host_names = {name.upper() if os.name == "nt" else name for name in host_credential_env_names}
     scrubbed: dict[str, str] = {}
     for name, value in env.items():
+        if (name.upper() if os.name == "nt" else name) in host_names:
+            continue
         if _is_self_managed_credential(name):
             # 自管凭据:即便在 passthrough 里也删(GHSA:声明覆盖不了自管凭据)。
             if name.upper() in _SELF_MANAGED_CREDENTIAL_ENV or not _passthrough_allows_nonself(name, passthrough):

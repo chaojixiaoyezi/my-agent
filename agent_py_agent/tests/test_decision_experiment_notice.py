@@ -1,6 +1,7 @@
 """J6：真实晋升回执经原宿主提示、TUI 与 IM 持久回复链；仅模型/供应商传输用隔离替身。"""
 from __future__ import annotations
 
+import hmac
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -19,7 +20,9 @@ from agent_py_agent.agent.conversation.host_notices import (
 from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts import request_execution
+from agent_py_agent.agent.gateway_parts.client_credentials import gateway_client_credentials
 from agent_py_agent.agent.gateway_parts.http_handlers import _public_result
+from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext, _render_block
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnEventAdapter
@@ -51,15 +54,18 @@ from agent_py_agent.tests.test_tool_presentation_projection import (
 )
 
 
-# LLM: 不启动 Gateway；在原执行入口跑真实授权、样本补写、设置 CAS 和 final 提交，chunk writer 也用产品实现。
+# LLM: 不启动 Gateway；仅替 backend 运输，在原执行入口跑授权、调用账/来源签发、样本补写、设置 CAS 和 final 提交。
 # 函数用途: 完成一轮隔离实验并返回 final 与 TUI 实际读取的事件文件。
 def run_turn(lab, monkeypatch, mode="apply", count=2):
     prior_samples(lab, count)
     experiment_request(lab, mode)
-    fake_main_model(monkeypatch, "presentation_optional_a")
+    fake_main_model(monkeypatch, lab.agent, "presentation_optional_a")
     chunk = lab.context.request_path.with_suffix(".chunks.jsonl")
     lab.context = replace(lab.context, on_chunk=BufferedChunkStreamWriter(chunk, rich_transcript=True))
     result = request_execution._run_gateway_ask(lab.context)
+    assert result.final_response_provenance['purpose'] == 'main'
+    assert result.final_response_provenance['request_id'] == lab.context.request_id
+    assert result.final_response_provenance['thread_id'] == lab.conversation.thread_id
     events = [json.loads(line) for line in chunk.read_text(encoding="utf-8").splitlines()]
     return result, events
 
@@ -114,9 +120,12 @@ def test_promotion_reaches_current_tui_and_final_without_replacing_earlier_notic
     assert text not in json.dumps(provider_history_messages_from_rows(rows), ensure_ascii=False)
 
 
-# LLM: 假 urlopen 只提供本轮真实产品 final 的 /result 响应，原 poll client、worker、DeliveryService、路由和 sent 账不替换。
-# 函数用途: 在不调用真实飞书的前提下核对提示确实进入原会话最终发送动作，重建 worker 后也不重发。
-def deliver_offline(tmp_path, monkeypatch, response):
+# LLM: 只替认证HTTP的物理运输并核原身份/G1头；凭据由原宿主临时根真实创建/加载，poll client、worker、DeliveryService和sent账不替换。
+# 函数用途: 在测试宿主目录创建/加载临时G1并核对原最终投递，零真实飞书请求，重建worker后也不重发。
+def deliver_offline(tmp_path, monkeypatch, response, *, agent):
+    credentials = gateway_client_credentials(agent)
+    ensure_local_client_credential(credentials.data_root)
+
     class Response:
         status = 200
 
@@ -129,10 +138,23 @@ def deliver_offline(tmp_path, monkeypatch, response):
         def read(self):
             return json.dumps(response, ensure_ascii=False).encode("utf-8")
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
     pending = PendingGatewayReply(request_id="promotion-request", channel="feishu", user_id="ou_test",
                                   message_id="om-test", conversation_id="oc-same-thread", progress_handle="typing-test")
+
+    # LLM: 只截取正式认证HTTP的运输出口，真实credential.headers与路由不替换；不存token或发网络。
+    # 函数用途: 核对原用户、渠道、请求编号和实际临时凭据，再交回本轮真实产品响应。
+    def fake_transport(request, *, timeout):
+        credential_matches = hmac.compare_digest(str(request.get_header('X-gateway-token') or ''),
+                                                credentials.headers()['X-Gateway-Token'])
+        assert credential_matches
+        assert request.get_header('X-user-id') == pending.user_id
+        assert request.get_header('X-channel') == pending.channel
+        assert request.full_url.endswith('/result/' + pending.request_id)
+        return Response()
+
+    monkeypatch.setattr("agent_py_agent.agent.adapter.manager.open_authenticated_request", fake_transport)
     manager = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    manager._reply_poll_client.credentials = credentials
     adapter = DummyAdapter()
     adapter.adapter_name = "feishu"
     manager.register_adapter(adapter)
@@ -145,6 +167,7 @@ def deliver_offline(tmp_path, monkeypatch, response):
     assert outgoing.metadata["reply_to"] == pending.message_id
     assert outgoing.metadata["delivery_idempotency_key"] == "gateway-reply:om-test:promotion-request:final"
     restarted = ChannelManager(delivery_state_dir=tmp_path / "delivery")
+    restarted._reply_poll_client.credentials = credentials
     restarted.register_adapter(adapter)
     assert not restarted._reply_delivery.enqueue(pending)[1]
     assert restarted._reply_delivery.run_once() == 0 and len(adapter._send_calls) == 1
@@ -159,7 +182,7 @@ def test_promotion_final_delivers_identical_notice_to_same_im_conversation(gatew
     request_execution._update_response_from_result(response, result, gateway_lab.context.request)
     public = _public_result(response)
     assert public["channel_delivery"]["host_notices"] == notices
-    content = deliver_offline(tmp_path, monkeypatch, public)
+    content = deliver_offline(tmp_path, monkeypatch, public, agent=gateway_lab.agent)
     assert content == f"【提示】{notices[0]['text']}\n\n核对完成"
 
 
@@ -188,7 +211,7 @@ def test_duplicate_receipt_and_recreated_store_never_queue_notice_again(tmp_path
 @pytest.mark.parametrize("mode,count", [("observe", 2), ("apply", 0), (None, 0)])
 def test_no_applied_promotion_has_no_tui_or_im_notice(gateway_lab, monkeypatch, mode, count):  # noqa: F811
     if mode is None:
-        fake_main_model(monkeypatch, "presentation_optional_a")
+        fake_main_model(monkeypatch, gateway_lab.agent, "presentation_optional_a")
         result = request_execution._run_gateway_ask(gateway_lab.context)
         events = []
     else:

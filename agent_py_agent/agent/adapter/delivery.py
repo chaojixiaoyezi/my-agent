@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: Gateway 负责执行请求；本模块在原 pending/sent 中记录 dispatch 意图、进程身份和 epoch，禁止 TTL 直接授权重发。
 
-模块用途: 让飞书等交互通道的回调立即返回；长任务完成后由可恢复后台线程把真实结果送回用户。
+模块用途: 让飞书等交互通道的回调立即返回，异常诊断只记录类型和匿名引用；长任务完成后由可恢复后台线程把真实结果送回用户。
 """
 
 import hashlib
@@ -612,6 +612,8 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             ]
             return sorted(records, key=lambda item: (item.created_at, item.stable_id))
 
+    # LLM: pending只读原结构化账并走原隔离；错误日志只匿名引用/type，不回显损坏正文或秘密。
+    # 函数用途: 加载原pending回执，保留坏数据的原隔离处理和恢复协议。
     def _read_pending(self, path: Path) -> PendingGatewayReply | None:
         try:
             record = PendingGatewayReply.from_dict(json.loads(path.read_text(encoding="utf-8")))
@@ -621,7 +623,7 @@ class GatewayReplyDeliveryStore(_GatewayReplyClaimStoreMixin):
             return record
         except Exception as exc:
             # 坏记录必须留在原处供运维修复，不能静默删除并永久丢失回复。
-            _LOGGER.error("pending channel reply record unreadable path=%s error=%s", path, exc)
+            _LOGGER.error("pending channel reply record unreadable record_ref=%s error_type=%s", hashlib.sha256(str(path).encode()).hexdigest()[:12], type(exc).__name__)
             return None
 
     def was_sent(self, stable_id: str) -> bool:
@@ -820,14 +822,14 @@ class _GatewayQuarantineTerminalizeMixin:
             reason=reason,
         )
 
-    # LLM: 沿同一 dispatch 栅栏发送鉴权提示；异常时返回原快照供既有隔离收口，不新增外发路径。
+    # LLM: 沿同一 dispatch 栅栏发送鉴权提示，失败日志只类型；异常时返回原快照供既有隔离收口，不新增外发路径。
     # 函数用途: 把鉴权提示的发送与异常降级抽平，未获 claim 时返回 None 阻止旧回执提交。
     def _dispatch_auth_denial(self, record: PendingGatewayReply, denial_code: str) -> PendingGatewayReply | None:
         try:
             started, _sent = self._dispatch_message(record, _gateway_denial_text(denial_code), ("final", 0))
             return started
         except Exception as exc:
-            _LOGGER.warning("gateway auth denial reply failed request_id=%s error=%s", record.request_id, exc)
+            _LOGGER.warning("gateway auth denial reply failed request_id=%s error_type=%s", record.request_id, type(exc).__name__)
             return record
 
     # LLM: 隔离的统一收口：auth 类（构造时按状态码 + error_code 定的结构化类别，见 QUARANTINE_CATEGORY_*）
@@ -1188,7 +1190,7 @@ class _GatewayReplyDispatchWorkerMixin:
             epoch=record.claim_epoch, release=False,
         )
 
-    # LLM: callback 不持 store 锁；BaseException 模拟/真实退出保持标记，普通异常只成为未确认回执。
+    # LLM: callback 不持 store 锁且异常不回显正文；BaseException 模拟/真实退出保持标记，普通异常只成为未确认回执。
     # 函数用途: 先写外发意图，再调用原渠道 callback，返回实际使用的 claim 快照。
     def _dispatch_message(self, record: PendingGatewayReply, text: str, message: tuple[str, int]) -> tuple[PendingGatewayReply | None, bool]:
         started = self._start_dispatch(record, text, message)
@@ -1211,7 +1213,7 @@ class _GatewayReplyDispatchWorkerMixin:
                 started = committed
             return started, bool(result)
         except Exception as exc:
-            _LOGGER.warning("gateway reply dispatch failed request_id=%s error=%s", record.request_id, exc)
+            _LOGGER.warning("gateway reply dispatch failed request_id=%s error_type=%s", record.request_id, type(exc).__name__)
             return started, False
 
     # LLM: bool False 不证明未发生；只有仍在去重窗口内的 provider 才能退避原键重发，其余收 unknown。
@@ -1568,12 +1570,14 @@ def _record_key(stable_id: str) -> str:
     return hashlib.sha256(stable_id.encode("utf-8", "replace")).hexdigest()
 
 
+# LLM: 按原保留期删除旧回执；失败只匿名引用/type，不打印路径或正文，不改变保留判断。
+# 函数用途: 清理过期已发送回执，沿原静默异常处理继续其他记录。
 def _prune_sent_receipt(path: Path, cutoff: float) -> None:
     try:
         if path.stat().st_mtime < cutoff:
             path.unlink(missing_ok=True)
     except OSError as exc:
-        _LOGGER.warning("cannot prune channel delivery receipt path=%s error=%s", path, exc)
+        _LOGGER.warning("cannot prune channel delivery receipt record_ref=%s error_type=%s", hashlib.sha256(str(path).encode()).hexdigest()[:12], type(exc).__name__)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:

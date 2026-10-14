@@ -51,4 +51,12 @@
 
 本增量重新冻结：通用结构化输出＋A 合同＋A integration **71 passed**，证据 `/tmp/background-receipt-json-fence-focused.xml`；架构、运行模块边界和原生工具接线 **63 passed**，证据 `/tmp/background-receipt-json-fence-boundary.xml`。Ruff、diff check、doc sync 均通过；strict size 为 hard=0、blocked=False（`/tmp/background-receipt-json-fence-size.md`）。计数与前批重叠，不累加为独立用例总数。
 
-建议下一步：由主线程把 `test_structured_output.py` 纳入联合严格 gate，再构建新 sourceless 候选并做少量独立真实模型验收。非作者可并行只读核对完整解码、来源和冷重投边界；保持旧失败证据，不恢复已失败业务，不将格式修复说成模型语义保证。
+## .9 联合回归里的旧运输夹具
+
+主线程首批联合验收的原证据 `/tmp/my-agent-im-repair-20261013.9/focused.xml` 中，`test_decision_experiment_notice.py` 五项报 `UserReplyUnavailableError`。已提取原失败栈到 `/tmp/decision-experiment-notice-before.json`，不覆盖首批 XML。原因是该文件导入的共享 `test_decision_experiment_gateway_turn.fake_main_model` 直接替换 `generate_model_response`、返回未签发的 `ModelResponse`，绕过真实生成出口的 `ledger.finished` 和宿主来源签发；新增来源门正确拒绝这份测试响应，随后原 Gateway 拒绝空公开正文。
+
+只修复这两份测试的共享 helper：供应商替身移到 `agent.backend.generate`，所有引用同一次修改；原 SimpleAgent、模型生成出口、调用账、私有来源、IR、工具执行和 Gateway 回复收口均保持产品实现。未手工构造 seal、伪造终答或放宽生产门。notice 夹具额外核对最终来源的 `purpose/request_id/thread_id`。两文件 **12 passed**，证据 `/tmp/decision-experiment-notice-after.xml`。
+
+此处只解释五个旧夹具失败，不能解释或抹掉同批其它失败。N01 同时确认的在途 shutdown 调用先结算 failed、随后缺 seal 吞掉原恢复语义，是另一个生产接缝，由主线程协调修复；本次未改生产代码，不把联合 gate 说成已通过。
+
+建议下一步：主线程先修复 shutdown 的原 typed 恢复语义，再把这两共享 helper 的全部引用与来源/关机合同纳入联合严格 gate，之后构建和独立核包。非作者可并行只读复核准确已关闭调用不得重新签发 seal、不得执行迟到工具的边界；保持旧失败证据，不恢复已失败业务，不将格式修复说成模型语义保证。

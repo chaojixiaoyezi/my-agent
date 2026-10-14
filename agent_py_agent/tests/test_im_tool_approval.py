@@ -194,7 +194,7 @@ def test_group_background_approval_goes_to_frozen_creator_not_latest_speaker(tmp
 
 
 def test_card_endpoint_requires_real_host_credential_even_with_legacy_loopback_trust():
-    middleware = AuthMiddleware(None, auth_token="synthetic-host-credential", require_local_credential=False)
+    middleware = AuthMiddleware(None, auth_token="synthetic-host-credential")
     responses = []
     handler = SimpleNamespace(_auth_middleware=middleware, headers={"X-User-Id": "ou_admin", "X-Channel": "feishu"},
         _send_json=lambda status, payload: responses.append((status, payload)),

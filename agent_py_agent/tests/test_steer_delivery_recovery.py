@@ -288,7 +288,7 @@ def test_tui_steer_survives_a_transient_failure_through_an_isolated_gateway(tmp_
     monkeypatch.setattr(retry, "wait_interruptibly", lambda _delay: None)
     agent, paths = _gateway_agent(tmp_path)
     port = _free_port()
-    client = GatewayChatClientAgent(SimpleNamespace(), SimpleNamespace(gateway_port=port), tmp_path / "ws",
+    client = GatewayChatClientAgent(SimpleNamespace(), replace(agent.config, gateway_port=port), tmp_path / "ws",
                                     [tmp_path / "ws"], SimpleNamespace())
     turn: list[str] = []
     backend = _TuiSteerBackend(client, turn)

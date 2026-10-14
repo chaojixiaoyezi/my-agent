@@ -21,9 +21,11 @@ from agent_py_agent.agent.agent_core.runtime.guidance import (
     mark_injected_turn_input_submitted,
 )
 from agent_py_agent.agent.capability.config import CapabilityConfig
+from agent_py_agent.agent.common.json_io import write_json_file_atomic
 from agent_py_agent.agent.conversation.models import ConversationThread
 from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
 from agent_py_agent.agent.conversation.session_messaging import SESSION_TASK_ORIGIN_KIND
+from agent_py_agent.agent.conversation.session_tasks import SessionTask
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
@@ -84,7 +86,13 @@ def _dispatch(store: ConversationStore, task_id: str, goal: str) -> str:
     return entry.guidance_id
 
 
+# LLM: 首片派活恢复必须存在精确原 SessionTask，正文隔离仍由原 guidance 认领协议判断。
+# 函数用途: 在测试临时账中补齐普通本地派活的真实任务事实，再沿原后台入口创建回合。
 def _turn(agent, task_id: str):
+    store = agent.conversation_store.session_tasks
+    if store.load(task_id) is None:
+        task = SessionTask(task_id=task_id, sender_thread_id=_SENDER, target_thread_id=_TARGET, goal="普通本地派活")
+        write_json_file_atomic(store._path(task_id), task.to_dict())
     params = _run_params(
         _TARGET,
         BackgroundRunRequest(thread_id=_TARGET, task_id="", reason="session_task", wake_signal=_wake(task_id)),

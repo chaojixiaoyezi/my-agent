@@ -1,5 +1,35 @@
 # Codebase Tree
 
+2026-10-13 安全追加的新入口（只复用原配置、权限和凭据账）：
+
+```text
+|-- agent_py_agent/agent/auth/configuration.py # CLI/HTTP 共用原配置认证构造与启动拒绝
+|-- agent_py_agent/agent/ingestion/source_credentials.py # 原来源 fetch 的当前 owner/TaskCredential 授权
+|-- agent_py_agent/tests/test_gateway_auth_configuration.py # 实际生命周期零凭据及非法 IM 共享档拒绝
+|-- agent_py_agent/tests/test_gateway_header_ambiguity.py # 重复认证/身份头真实 HTTP 拒绝
+|-- agent_py_agent/tests/test_host_secret_environment_boundary.py # 准确 SecretRef 名冻结与真实命令环境
+|-- agent_py_agent/tests/test_owner_network_policy_integrity.py # 策略损坏及活实例主子孙网络封顶
+|-- agent_py_agent/tests/test_ingestion_secret_scope.py # 宿主秘密、同源跳转和回显原入口拒绝
+|-- agent_py_agent/tests/test_ingestion_task_credential_scope.py # 私人卡、任务/监控/子孙/恢复精确授权
+|-- docs/design/OWNER_NETWORK_POLICY_INTEGRITY.md # 当前文件与创建期权限交集边界
+|-- docs/design/WATCH_SOURCE_SECRET_AUTHORITY.md # 无新秘密账的来源凭据注入及恢复限制
+`-- docs/tasks/IM_SOURCE_SECRET_SECURITY_HANDOFF.md # 合成攻击与合法私人凭据回归证据
+```
+
+关键职责：configuration 在监听或恢复前校验结构化部署事实；source_credentials 只在原请求出口解引用原授权，不把秘密或授权对象写回来源状态；权限文件仍是原唯一策略。
+
+
+Gateway 安全初始化：`agent/auth/configuration.py` 是 CLI 与 HTTP 服务共用的配置→鉴权唯一入口，拒绝关闭鉴权的多 owner 组合及任何 IM 未隔离组合，配置缺中间件不能静默放行。
+
+
+宿主环境与运输安全交接：[环境来源边界](docs/design/HOST_CREDENTIAL_ENVIRONMENT_BOUNDARY.md)、[owner 权限验收](docs/tasks/IM_OWNER_PERMISSION_SECURITY_HANDOFF.md)、[飞书运输安全](docs/design/FEISHU_OUTBOUND_SECURITY.md)、[独立投递复核](docs/tasks/FEISHU_SECURITY_AUDIT_HANDOFF.md)。原模块/账本保持唯一；最终同源源码门已通过；包内验收及发布身份以同包发行清单为准。
+
+
+安全追加：`common/authenticated_http.py` 统一固定认证接口不可重定向运输；`delivery/attachment_content.py` 只在一次 DeliveryAttempt 冻结 owner/hash/size 一致字节；`adapter/feishu_attachment.py` 上传同一冻结字节。域授权仍属于原 owner/context/artifact，详见 [安全设计](docs/design/IM_SECURITY_AUDIT_20261013.md) 与 [会话交接](docs/tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。
+
+
+群引用附件入口：`agent_py_agent/agent/adapter/feishu_quoted_media.py` 核验准确父消息 ID、同群/话题和未撤回事实，只把可信资源引用交给原 owner 下载器；不引入历史缓存或父发送者权限。`agent_py_agent/tests/test_feishu_quoted_media.py` 验证原入站、资源来源、开关/控制命令及 owner 读取边界；[设计说明](docs/design/FEISHU_QUOTED_MEDIA.md) 记录用户步骤、飞书权限和失败事实。
+
 2026-10-13 IM 追加修复入口（沿原授权、调度及用量账）：
 
 ```text
@@ -1043,12 +1073,15 @@ agent_py_agent/
 |   |   `-- project_facts.py           # 从项目显式声明识别验证命令，不按报告文字猜测已验证
 |   |-- delivery/                      # 多 IM 统一投递：registry、可信 context、reply envelope、receipt
 |   |   |-- registry.py                # adapter/配置/健康/绑定/capabilities/target validator 唯一注册表
+|   |   |-- attachment_content.py     # 有界 no-follow 安全读原附件，单次投递冻结 bytes，不新增持久账
 |   |   |-- progress.py                # 原生可编辑进度的真实消息 ID 与结构化结果
 |   |   |-- control_cards.py           # 原生私人控制卡的真实 message/chat 身份；不授予权限
 |   |   `-- service.py                 # 普通回复、主动消息、可编辑进度及附件的统一发送出口
 |   |-- adapter/
 |   |   |-- private_controls.py        # 已验证 SDK actor/卡片身份到原 Gateway 的私人决定运输
 |   |   |-- feishu_mentions.py         # WS/webhook 共用直接 @机器人判据，不按名称或正文猜
+|   |   |-- feishu_attachment.py      # 飞书上传已核验的同一不可变字节，不重新打开路径
+|   |   |-- feishu_quoted_media.py     # 同群准确 parent 核验与资源源 ID，不改变当前 owner/actor
 |   |   |-- progress_draft.py           # 单条草稿在原 pending 内合并、限频、恢复与独立最终回复
 |   |   |-- delivery.py                # 原 pending/sent 外发意图、死亡核验、消息身份与 epoch CAS 回送
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复
@@ -1086,6 +1119,7 @@ agent_py_agent/
 |   |   |-- model_scope.py              # 逐请求依赖绑定与选模版本；不热改已经开始的响应
 |   |   |-- model_selection_status.py   # 原调用账的无正文模型、采用、阶段和缓存投影
 |   |-- common/                        # 跨域小权威：safe_id、path_normalize、json_io、日志脱敏、结构化输出批处理
+|   |   |-- authenticated_http.py    # 带宿主认证的固定 HTTP 请求拒绝跳转，保留原状态/超时
 |   |   |-- cache_freshness.py          # 文件代次指纹与粗 mtime 窗口判断的唯一实现，供 json_io/响应轮询/子代理缓存共用
 |   |   |-- cancellation.py             # UI、Gateway 和工具共用的唯一进程内取消令牌与上下文绑定
 |   |   |-- directory_lock.py           # 原后台与安装 Store 共用的永久目录系统锁，不降级为仅线程互斥
@@ -2587,3 +2621,9 @@ docs/
 - `agent_py_agent/agent/gateway_parts/execution_target.py`、`execution_control.py`：T 候选从原 claim 与回合绑定读取、固定真实控制目标；L 组合沿同一入口。
 
 发布新增领域入口说明：`conversation/session_task_dispatch.py` 持有原任务记录、guidance、wake 和配额副作用，原模型工具只校验/授权后调用；`conversation/im_task_status.py` 读取原孩子终态集合，不让 Gateway 直接依赖子代理内部实现。两者不创建第二套存储。
+
+- `docs/design/IM_SECURITY_AUDIT_20261013.md`：本期攻击事实、原权威修复、覆盖矩阵和未验边界。
+- `docs/tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md`：Session 目标完整性与 actor/监控安全验收交接。
+- `docs/tasks/MODEL_SHUTDOWN_PROVENANCE_HANDOFF.md`：停机晚到模型结果沿原 closure/restart_resume 处理，不绕来源门。
+
+- `agent_py_agent/agent/auth/configuration.py`：启动前校验部署边界并构造原鉴权中间件；不读取秘密、不新建状态。

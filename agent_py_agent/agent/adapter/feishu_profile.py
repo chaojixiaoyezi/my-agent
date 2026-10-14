@@ -1,3 +1,5 @@
+# LLM: 用户资料和 token 均只访问原固定 Feishu/Lark 地址，拒绝认证跳转；失败仍不改变聊天权限或主链。
+# 模块用途: 读取官方显示名并沿原 owner 人格工具种子保存，网络错误不输出认证或正文。
 """飞书用户资料:按 open_id 查显示名,首聊时种进 USER.md 的"称呼"(全程 fail-open)。
 
 用于"新飞书用户首次私聊→自动用其飞书姓名称呼"。任何失败(无通讯录权限/网络/解析)都返回 None/不写,
@@ -13,6 +15,8 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.authenticated_http import open_authenticated_request
+
 if TYPE_CHECKING:
     from ..capability.persona_repository import PersonaRepository
 
@@ -23,6 +27,8 @@ _FEISHU_PROFILE_TIMEOUT_SECONDS = 8.0
 _CALL_NAME_RE = re.compile(r"^([ \t]*-[ \t]*称呼[:：])[ \t]*$", re.MULTILINE)
 
 
+# LLM: 凭据仅访问原Feishu/Lark官方目标并拒绝跳转；显示名不赋权，网络失败不记录正文。
+# 函数用途: 为首聊获取显示名，缺权限/网络失败仍不阻塞普通对话。
 def fetch_feishu_display_name(
     app_id: str, app_secret: str, open_id: str, domain: str = "feishu"
 ) -> str | None:
@@ -37,7 +43,7 @@ def fetch_feishu_display_name(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(tok_req, timeout=_FEISHU_PROFILE_TIMEOUT_SECONDS) as resp:
+        with open_authenticated_request(tok_req, timeout=_FEISHU_PROFILE_TIMEOUT_SECONDS) as resp:
             token = json.loads(resp.read()).get("tenant_access_token")
         if not token:
             return None
@@ -47,7 +53,7 @@ def fetch_feishu_display_name(
         info_req = urllib.request.Request(
             url, headers={"Authorization": f"Bearer {token}"}, method="GET"
         )
-        with urllib.request.urlopen(info_req, timeout=_FEISHU_PROFILE_TIMEOUT_SECONDS) as resp:
+        with open_authenticated_request(info_req, timeout=_FEISHU_PROFILE_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read())
         if data.get("code") != 0:
             return None  # 无权限/无此人:code!=0

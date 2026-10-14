@@ -1,5 +1,8 @@
 # LLM_GUIDE
 
+2026-10-13 追加安全复核（源码严格验收完成，发行按同包清单记录）：回环身份只认宿主凭据，退休迁移开关；原 factory 自动补接鉴权，IM 禁止关闭 owner 隔离；准确宿主 SecretRef 来源清理子进程环境，监控 HTTP 凭据复用当前 owner/TaskCredential，损坏网络策略关闭网络并在每次工具调用重核冻结上界；认证 HTTP 拒绝跳转，附件在原 Delivery 首副作用前冻结 owner/hash/size 一致字节，错落 Session 目标拒绝。普通/admin/full、群/私聊、子孙/后台正反例及真实租户边界详见 [安全复核](docs/design/IM_SECURITY_AUDIT_20261013.md)。
+
+
 2026-10-12 主线发布：用户已授权将 L/T/IM 整合版合入 main、推送并构建 `.20261012.8`；此前“未发布”描述保留为历史时点。准确源码提交由发行清单记录，发布门与剩余边界见 [发布追加](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md#主线发布追加2026-10-12)。
 
 L/T/IM 当前整合边界见 [整合记录](docs/tasks/L_T_IM_INTEGRATION_HANDOFF.md)：新 IM 计划仍固定后台，inherit 读取原来源聊天，显式 isolated 的通知继续固定原布置者；原 SessionTask 与 scheduler run 各守准确身份。来源长测质量缺口不算已修。

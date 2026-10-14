@@ -1,5 +1,6 @@
-"""Gateway同一真实turn的展示恢复：原设置/Registry/Skill/Compact/DB，仅模型答复为fake。"""
+"""Gateway同一真实turn的展示恢复：原设置/Registry/Skill/Compact/DB/生成签发，仅后端答复为fake。"""
 import json
+from contextvars import ContextVar
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
@@ -41,6 +42,9 @@ from agent_py_agent.tests.test_gateway_conversation_compact import (
 from agent_py_agent.tests.test_tool_presentation_projection import (
     prepared as tool_surface,  # noqa: F401
 )
+
+# 主生成的测试观察范围随原 copy_context 进入 backend worker；Compact 摘要不走此包装，不从提示词猜用途。
+_CAPTURED_MAIN_CALL = ContextVar('test_gateway_capability_main_call', default=None)
 
 
 # LLM: 同一fixture的原协议事实由fake backend声明；原推荐和Compact仍各自按生产入口准备真实快照。
@@ -136,7 +140,7 @@ def test_unselected_compact_surface_retains_original_bytes_without_extra_decisio
     assert len(calls) == (mode == "observe")
 
 
-# LLM: 原SimpleAgent.run/RuntimeDB/设置/快照/渲染/Compact均不替换；fake只供应商答复和最后工具循环边界。
+# LLM: 原SimpleAgent.run/RuntimeDB/设置/快照/渲染/Compact/生成签发均不替换；fake只供应商返回。
 # 函数用途: 准备真实Gateway请求与已完成历史，使一次模拟overflow经过原压缩再生成新的DB attempt。
 @pytest.fixture
 def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F811
@@ -168,19 +172,34 @@ def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     return SimpleNamespace(agent=agent, context=context, conversation=conversation, first=first, second=second, backend=backend)
 
 
-# LLM: 保留原工具循环和Gateway observer；仅在模型生成边界返回typed假答复，不能跳过deferred恢复的render/select。
-# 函数用途: 在同一真实Gateway请求中捕获原始和恢复后的模型面，并可在首次溢出后改变配置。
-def capture_gateway_loop(monkeypatch, *, after_overflow=None):
+# LLM: 包装只观察后调用原生成，账本 finished/宿主来源必须由真实出口签发；fake 只在 backend 返回，摘要沿原后端。
+# 函数用途: 捕获原始和恢复模型面，以测试调用范围区分主请求/摘要，保持首次溢出和配置变化语义。
+def capture_gateway_loop(monkeypatch, agent, *, after_overflow=None):
     captured = []
-    def generate(request):
-        params = request.params
-        captured.append((params, request.prompt, resolve_native_tools(request.agent, params)))
-        overflow = len(captured) == 1
+    original_generate = _tool_loop_service.generate_model_response
+    original_backend = agent.backend.generate
+
+    def backend_generate(prompt, **kwargs):
+        call = _CAPTURED_MAIN_CALL.get()
+        if call is None:
+            return original_backend(prompt, **kwargs)
+        overflow = call == 1
         if overflow and after_overflow:
             after_overflow()
         return ModelResponse(text="继续核对", backend="fixture",
                              runtime_status="context_overflow" if overflow else "ok")
-    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
+
+    def observe(request):
+        params = request.params
+        captured.append((params, request.prompt, resolve_native_tools(request.agent, params)))
+        token = _CAPTURED_MAIN_CALL.set(len(captured))
+        try:
+            return original_generate(request)
+        finally:
+            _CAPTURED_MAIN_CALL.reset(token)
+
+    monkeypatch.setattr(agent.backend, 'generate', backend_generate)
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", observe)
     return captured
 
 
@@ -188,7 +207,7 @@ def capture_gateway_loop(monkeypatch, *, after_overflow=None):
 def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compact_surface(gateway_surface, monkeypatch, choice):
     fixture = gateway_surface
     calls = provider(monkeypatch, choice=choice)
-    captured = capture_gateway_loop(monkeypatch)
+    captured = capture_gateway_loop(monkeypatch, fixture.agent)
     starting = []
     original_run = fixture.agent.run
     def run(prompt, *, params):
@@ -237,11 +256,12 @@ def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compac
 def test_compact_rejects_then_never_revives_display_or_redecides_after_configuration_recovers(gateway_surface, monkeypatch):
     fixture = gateway_surface
     calls = provider(monkeypatch)
-    captured = capture_gateway_loop(monkeypatch, after_overflow=lambda: setattr(fixture.backend, "api_base", "https://changed.example.test"))
+    captured = capture_gateway_loop(monkeypatch, fixture.agent, after_overflow=lambda: setattr(fixture.backend, "api_base", "https://changed.example.test"))
     original = fixture.backend.generate
     def summary(prompt, **kwargs):
         response = original(prompt, **kwargs)
-        del fixture.backend.api_base
+        if _CAPTURED_MAIN_CALL.get() is None:
+            del fixture.backend.api_base
         return response
     monkeypatch.setattr(fixture.backend, "generate", summary)
     result = request_execution._run_gateway_ask(fixture.context)
@@ -259,11 +279,12 @@ def test_same_gateway_turn_retains_baseline_after_no_selection_without_repeating
     if mode != "failed":
         patch(fixture.agent, {"points.skill_tool.mode": mode})
     calls = provider(monkeypatch, fail=RuntimeError("fake decision failure") if mode == "failed" else None)
-    captured = capture_gateway_loop(monkeypatch)
+    captured = capture_gateway_loop(monkeypatch, fixture.agent)
     original = fixture.backend.generate
     def summary(prompt, **kwargs):
         response = original(prompt, **kwargs)
-        patch(fixture.agent, {"points.skill_tool.mode": "apply"})
+        if _CAPTURED_MAIN_CALL.get() is None:
+            patch(fixture.agent, {"points.skill_tool.mode": "apply"})
         return response
     monkeypatch.setattr(fixture.backend, "generate", summary)
     result = request_execution._run_gateway_ask(fixture.context)

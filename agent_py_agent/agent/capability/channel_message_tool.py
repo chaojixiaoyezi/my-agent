@@ -413,8 +413,8 @@ def _owner_delivery_identity(agent: object, channel: str = "") -> tuple[str, str
     return provider, target, owner_root
 
 
-# LLM: registry 记录和当前文件 hash 必须一致；路径即使在记录中也要重新 resolve 防 symlink 逃逸。
-# 函数用途: 把 artifact_id/路径引用解析成通过 owner 边界验证的通道附件。
+# LLM: 只承运ready registry的原hash/size和宿主owner_root；唯一Delivery安全FD核验内容，缺旧证明不从当前文件重签。
+# 函数用途: 把原已登记版本及owner边界交统一投递核验，不提前无界重复读取文件。
 def _resolve_attachments(
     owner_root: Path,
     refs: list[str],
@@ -435,17 +435,18 @@ def _resolve_attachments(
             return _error("产物路径不在当前用户的隔离目录内", "PATH_OUTSIDE_WORKSPACE")
         if not path.is_file():
             return _error(f"产物文件不存在：{path.name}", "PATH_NOT_FOUND")
-        digest = _sha256_file(path)
-        if record.sha256 and digest != record.sha256:
-            return _error(f"产物内容已变化，需要重新登记：{path.name}", "ARTIFACT_VALIDATION_FAILED")
+        if (not record.sha256 or len(record.sha256) != 64
+                or type(record.size_bytes) is not int or record.size_bytes < 0):
+            return _error("产物缺少原始版本校验信息，请重新验证产物", "ARTIFACT_VALIDATION_FAILED")
         attachments.append(
             ChannelAttachment(
                 artifact_id=record.artifact_id,
                 path=str(path),
                 name=path.name,
                 kind=record.kind or path.suffix.lower().lstrip(".") or "file",
-                sha256=digest,
-                size_bytes=path.stat().st_size,
+                sha256=record.sha256,
+                size_bytes=record.size_bytes,
+                owner_root=str(owner_root),
             )
         )
     return tuple(attachments)
@@ -588,16 +589,6 @@ def _success_result(
             }
         },
     )
-
-
-# LLM: hash 用于验证 registry 指向的内容没有在登记后漂移。
-# 函数用途: 分块计算文件 SHA-256。
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 # LLM: 工具失败统一返回结构化错误码，避免 UNKNOWN_ERROR 让模型误判为不可恢复。

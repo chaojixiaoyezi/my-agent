@@ -235,7 +235,7 @@ class TestChannelManagerRouteMessage:
             conversation_id="oc_chat1",
         )
 
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request") as mock_urlopen:
             # Mock gateway /ask 响应
             mock_resp = MagicMock()
             mock_resp.__enter__ = MagicMock(
@@ -513,7 +513,7 @@ class TestChannelManagerRouteMessage:
             message_id="m1",
         )
 
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__ = MagicMock(
                 return_value=MagicMock(
@@ -534,7 +534,7 @@ class TestChannelManagerRouteMessage:
         manager.register_adapter(dummy)
         msg = IncomingMessage(channel="feishu", user_id="ou_123", content="hi", message_id="m1")
 
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__ = MagicMock(
                 return_value=MagicMock(read=MagicMock(return_value=b'{"request_id": "req_1"}'))
@@ -727,7 +727,7 @@ class TestChannelManagerDurableDelivery:
         response.__enter__.return_value = response
         response.__exit__.return_value = False
 
-        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", return_value=response) as urlopen:
             text = manager._poll_gateway_once(pending, interval=0.0)
 
         request = urlopen.call_args.args[0]
@@ -827,7 +827,7 @@ class TestChannelManagerDurableDelivery:
         response.__enter__.return_value = response
         response.__exit__.return_value = False
 
-        with patch("urllib.request.urlopen", return_value=response):
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", return_value=response):
             submission = manager._submit_gateway_ask(msg)
 
         assert submission == GatewayAskSubmission(
@@ -857,7 +857,7 @@ class TestChannelManagerDurableDelivery:
         response.__enter__.return_value = response
         response.__exit__.return_value = False
 
-        with patch("urllib.request.urlopen", return_value=response):
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", return_value=response):
             submission = manager._submit_gateway_ask(msg)
 
         assert submission.request_id == "turn-9"
@@ -1104,7 +1104,7 @@ class TestChannelManagerDurableDelivery:
         response.__enter__.return_value = response
         response.__exit__.return_value = False
 
-        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", return_value=response) as urlopen:
             result = manager._poll_gateway_control_receipt(pending)
 
         request = urlopen.call_args.args[0]
@@ -1299,7 +1299,7 @@ class TestChannelManagerDurableDelivery:
             fp=None,
         )
 
-        with patch("urllib.request.urlopen", side_effect=error), pytest.raises(
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", side_effect=error), pytest.raises(
             GatewayReplyQuarantineError,
             match=reason,
         ):
@@ -1439,7 +1439,7 @@ class TestChannelManagerDurableDelivery:
         response.__enter__.return_value = response
         response.__exit__.return_value = False
 
-        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", return_value=response) as urlopen:
             state = manager._poll_gateway_input_receipt(self._pending())
 
         request = urlopen.call_args.args[0]
@@ -1555,7 +1555,7 @@ def test_result_poll_credential_404_becomes_typed_quarantine(tmp_path) -> None:
         hdrs=None,
         fp=BytesIO(b'{"error": "not_found", "error_code": "LOCAL_CREDENTIAL_REQUIRED"}'),
     )
-    with patch("urllib.request.urlopen", side_effect=error):
+    with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", side_effect=error):
         with pytest.raises(GatewayReplyQuarantineError) as caught:
             manager._poll_gateway_once(record, interval=0.0)
     assert caught.value.reason == "gateway_result_auth_http_404"

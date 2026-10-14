@@ -229,7 +229,7 @@ def test_reaction_uses_documented_typing_and_retains_safe_http_code(caplog):
     adapter._get_tenant_access_token = lambda: 'synthetic-token'
     error = HTTPError('https://synthetic.invalid', 400, 'synthetic-secret', {},
                       BytesIO(b'{"code":231008,"msg":"response-secret"}'))
-    with patch('agent_py_agent.agent.adapter.feishu_typing.urllib.request.urlopen', side_effect=error):
+    with patch('agent_py_agent.agent.adapter.feishu_typing.open_authenticated_request', side_effect=error):
         response = _add_reaction('om_test', 'Typing', 'synthetic-token')
     assert response['code'] == 231008 and response['http_status'] == 400
     with patch('agent_py_agent.agent.adapter.feishu_typing._add_reaction', return_value=response) as add:

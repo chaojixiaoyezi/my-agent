@@ -565,12 +565,14 @@ class ModelCallAdmissionClosure:
 
 
 # LLM: 准入关闭后到来的新 call_id 一律抛它，调用方据此不发请求；重复登记同一 call_id 仍返回原记录、不抛。
-#   不是供应商错误，不参与供应商重试；错误码固定，关门原因放在 closure。
-# 类用途: 表示宿主已进入停机结清，这次模型调用没有被接纳、请求没有发出。
+#   已被准确同一关门原因结清的迟到响应也沿它回到恢复出口，禁止当成 finished、签发成功来源或执行工具。
+#   不是供应商错误，不参与供应商重试；错误码固定，关门原因放在 closure，不改变账本的首终态规则。
+# 类用途: 表示宿主已进入停机结清，新请求未发出或在途调用已中断，供原恢复链按停机收尾。
 class ModelCallAdmissionClosedError(RuntimeError):
     error_code = MODEL_CALL_ADMISSION_CLOSED_ERROR_CODE
 
-    # 函数用途: 带上关门原因建立拒绝错误，消息只含错误码，不含提示词或正文。
+    # LLM: 只携带唯一准入表的结构化原因，供调用方识别停机；不改账本、不得从模型正文建立原因。
+    # 函数用途: 带上关门原因建立停机错误，消息只含错误码，不含提示词或正文。
     def __init__(self, closure: ModelCallAdmissionClosure) -> None:
         super().__init__(f"model call admission closed: {closure.error_code}")
         self.closure = closure
@@ -1065,9 +1067,9 @@ def _ledger_inflight_snapshot(ledger: ModelCallLedger) -> tuple[int, float]:
     return len(active), oldest_age
 
 
-# LLM: 调用方（决策入口、子代理失败分类、运行错误报告）认“停机准入拒绝”的唯一判定：只沿显式 __cause__（raise ... from）
+# LLM: 调用方（决策入口、子代理失败分类、运行错误报告）认新调用拒绝或准确已结清迟到响应的唯一判定：只沿显式 __cause__（raise ... from）
 #   往里找 ModelCallAdmissionClosedError，不沿 __context__、不读异常文本；有环防护。找不到返回 None。
-# 函数用途: 从异常及其显式原因链里找出停机准入拒绝，供调用方按“宿主停机”而不是普通失败收尾。
+# 函数用途: 从异常及其显式原因链里找出宿主停机事实，供调用方交回原停机恢复出口。
 def find_model_call_admission_error(exc: BaseException | None) -> ModelCallAdmissionClosedError | None:
     seen: set[int] = set()
     current = exc

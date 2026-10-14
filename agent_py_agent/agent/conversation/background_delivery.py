@@ -89,7 +89,7 @@ def record_background_response(
     ):
         return _uncommitted_delivery(projection.content if deliver else "", "suppressed")
     # 信封只携带用户投影，避免投递层把内部控制正文当作普通回复。
-    attachments = _channel_attachments(delivery_artifacts)
+    attachments = _channel_attachments(delivery_artifacts, owner_root=str(getattr(getattr(delivery.agent, 'home_paths', None), 'owner_home_dir', '') or ''))
     evidence_refs = _background_evidence_refs_for(delivery, request, frozen_retry)
     # 重投路径由 redeliver_cached_wake 把冻结载荷的 delivery_artifacts 当作 delivery_artifacts
     # 传进来，因此附件与过程回复必须继续从参数推导；重投只额外接管 metadata 与"是否已外发"。
@@ -827,10 +827,11 @@ def mirror_message_tool_deliveries(
     return "\n\n".join(rendered)
 
 
-# LLM: 附件来自执行器验证的结构化结果；只投影 ok/path 事实，不从正文寻找文件或重新赋予产物权限。
-# 函数用途: 把已完成的产物转换成投递服务需要的附件引用，不读写文件。
+# LLM: 原产物只提供引用/hash/size；owner_root 由当前已验证宿主另行提供，不能从序列化JSON重建权限或内容。
+# 函数用途: 投影已完成产物及当前宿主归属，冷重投仍须统一服务安全重读同版本字节，不读写文件。
 def _channel_attachments(
     artifacts: tuple[dict[str, object], ...],
+    *, owner_root: str = '',
 ) -> tuple[ChannelAttachment, ...]:
     attachments: list[ChannelAttachment] = []
     for item in artifacts:
@@ -849,6 +850,7 @@ def _channel_attachments(
                 kind=str(item.get("kind") or "file"),
                 sha256=str(item.get("sha256") or ""),
                 size_bytes=size_bytes,
+                owner_root=owner_root,
             )
         )
     return tuple(attachments)

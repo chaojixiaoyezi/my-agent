@@ -83,7 +83,7 @@ class CatalogRenderConfig:
     declared_deferred_names: frozenset[str] = frozenset()
 
 
-# LLM: ToolRegistry 单一装配配置；B5 提供方、审批与来源由 core 绑定，权限视图共用，不从模型参数推导或另建通道。
+# LLM: 单一宿主装配配置；凭据环境上界与 B5 来源/审批由 core 绑定，权限视图/MCP共用，不能从模型参数推导。
 # 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
@@ -106,6 +106,8 @@ class ToolRegistryParams:
     protected_persona_root: str = ""  # 三份 Persona 只走专用入口；admin bypass 也不清空
     # owner 隔离时 Shell 沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录）
     host_private_roots: tuple[str, ...] = ()
+    # 仅宿主装配；模型参数和工具目录不得覆盖或显示凭据环境来源。
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     owner_quota_max_bytes: int = 0
     owner_quota_policy_available: bool = True
     access_mode: str = "workspace-write"
@@ -1104,6 +1106,8 @@ def _safe_tool_availability(tool: BaseTool) -> ToolAvailability:
         return ToolAvailability.unavailable(f"availability check failed: {type(exc).__name__}")
 
 
+# LLM: 仅原 registry 初始化调用；source 上界来自原构建 DTO，raw MCP 映射不能覆盖，原可选连接失败策略不变。
+# 函数用途: 惰性连接已配置 MCP，并把宿主环境擦洗边界固定到原客户端供后续重连。
 def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | None) -> list[Any]:
     """惰性连接 MCP server 并注册其工具；返回全部合法配置的 client(供重连和 close)。
 
@@ -1116,7 +1120,8 @@ def _connect_mcp_servers(registry: ToolRegistry, mcp_servers: dict[str, Any] | N
     try:
         from .mcp_registration import register_mcp_servers
 
-        return register_mcp_servers(registry, mcp_servers)
+        return register_mcp_servers(registry, mcp_servers,
+                                    host_credential_env_names=registry._construction_params.host_credential_env_names)
     except Exception:  # 兜底：连接子系统整体异常也不崩主流程。
         logging.getLogger(__name__).exception("MCP server 连接子系统初始化失败，已跳过")
         return []

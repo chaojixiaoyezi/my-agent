@@ -1,5 +1,8 @@
 2026-10-13 宿主主体修复：原 GatewayConversationContext.scope 在入口产生专有 actor 字段，conversation/host_actor 校验准确 owner/thread/root 来源；ScheduleTool、执行线程冻结和私人审批复用，子孙只继承父宿主事实。模型 raw attributes 与最新群绑定不能成为认证主体；同群创建人拒绝与本 owner 编号不存在分别表达。
 
+2026-10-13 当前安全入口：原 G2b 强制与客户端 G1 读取始终生效，迁移开关及空头降级删除；原 route.access_tier 在处理 body 前校验 credential/admin，公开与插件令牌档独立。安全 HTTP、日志、附件冻结和 Session 目标复核见 [安全说明](../../design/IM_SECURITY_AUDIT_20261013.md)。本文此前开关/迁移档记录保留为历史，不能作为当前操作指引。
+
+
 2026-10-13 入站重投和回执修复：feishu/WS 沿原 seen 与 GatewayIngressStore 区分已受理、稳定不触发和暂不可验证；reaction 不作为请求是否进入的依据。显式后台公开完成只沿原 AgentRunResult 与 channel_delivery 冻结/重投，不增加另一个消息账本；通知策略依原 job/run 保存。
 
 2026-10-13 离线发行服务控制：scripts/private_release/installer.py 从原 configured_home_root → owner resolver → runtime_paths_for_agent 获得 GatewayPaths；安装器的 HOME、cwd 和外部 MY_AGENT_HOME 不能另造服务地址。原 adapter 心跳保留 requested_channel，旧发行仅按 channels[].name 的精确注册快照迁移，不从日志或自然语言猜通道。
@@ -7,6 +10,8 @@
 2026-10-13：R20 原资源策略/云工具与 R21 入站冻结 owner、H2 服务队列和 chat_id 发送实施中，见 [设计](../../design/HOST_CLOUD_RESOURCE_ACCESS.md)。管理员私人 IM 可 `/sessions control <thread_id> /approve <密码>` 或 `/deny` 决定本人原 TUI pending；原审批账及 waiter 不变，嵌套密码在入站/控制/TUI 历史均遮蔽，普通用户/群不能跨接管理员 TUI。
 
 # Gateway Structure
+
+引用附件沿 `adapter/manager._ChannelIngressCoordinator.prepare_payload` → `feishu_quoted_media` 精确父证明 → 原 `_download_inbound_media_refs`。FeishuAdapter 只增加单条 GET，CLI 接线原 feishu_quoted_media_enabled；parent.sender/text 不搬到当前 IncomingMessage。逐资源 source ID 只来自本次证明，当前 media 任意 source 字段不能选择另一消息；路径始终由当前 `/ask` owner resolver 和原私有写入口生成。失败结构与供应商边界见 [设计](../../design/FEISHU_QUOTED_MEDIA.md)。
 
 2026-10-13 新接线：schedule_control 为原 job/run 的用户视图，按原 creator 和 admin 绑定查询，冷群仅元数据读取、实际修改加载原 owner Agent；scheduler/rules、monitor_state、tool_work 只扩展原仓库和执行器。task_credentials 属于原 H2 私密交互，private_interaction_service 沿 MAC/actor/锁/实际卡身份接收输入；web_fetch 只在准确 origin 注入。restart_service 的 stop_for_update 复用原排空身份，Gateway CLI 区分停止与重启。adapter/manager 的入站附件使用原 request_worker owner resolver，共用 conversation/input_media 目录合同。
 

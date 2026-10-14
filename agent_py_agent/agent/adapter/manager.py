@@ -1,6 +1,7 @@
 # LLM: 通道仍沿原 durable worker，G3 凭据只在原 HTTP 身份头附加；读取失败按 G2b 开关处理——开关关（默认）
 #   降级为不带凭据继续发送，开关开才拒绝。秘密不进记录、日志或模型。
 #   受限诊断只投影原 ingress/submission；False 传回运输重投，reaction 不决定请求是否受理。
+#   群引用附件只在 durable prepare 读取准确 parent，失败事实交原 prompt，当前 actor/owner 不从父消息继承。
 # 模块用途: 管理 IM 提交和对账；本机凭据不可用时按开关降级或安全拒绝，敏感命令一次性提交不落盘。
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..command_catalog import sensitive_command_name
+from ..common.authenticated_http import open_authenticated_request
 from ..conversation.host_notices import with_host_notice_lines
 from ..delivery import ChannelAdapterRegistry, DeliveryContext, DeliveryService, ReplyEnvelope
 from ..gateway_parts.client_credentials import GatewayClientCredentials, gateway_client_credentials
@@ -36,6 +38,14 @@ from .delivery import (
     GatewayReplyQuarantineError,
     GatewayReplyReceiptCallbacks,
     PendingGatewayReply,
+)
+from .feishu_quoted_media import (
+    FeishuQuotedMediaError,
+    ValidatedQuotedMedia,
+    append_quoted_media_failure,
+    quoted_media_references,
+    quoted_media_requested,
+    read_quoted_media,
 )
 from .ingress import (
     GatewayAdapterDeliveryWorker,
@@ -473,15 +483,29 @@ class _ChannelIngressCoordinator:
     def __init__(self, manager: ChannelManager) -> None:
         self._manager = manager
 
-    # LLM: Media provider IO runs only after the prepared row is durable. The resulting exact
-    # Gateway body is returned to the worker for CAS persistence before POST.
-    # 函数用途: 恢复原始通道消息、下载媒体并生成待提交的 Gateway 请求体。
+    # LLM: 媒体与准确 parent 查询只在原 prepared 行持久后执行，控制不新增 parent 请求；核验失败不当成成功或无限重试。
+    #   最终精确 Gateway body 仍由原 worker CAS 冻结；父读取失败不能绕过同条当前附件的原硬门或提交部分路径。
+    # 函数用途: 恢复原消息、读取被引用附件并下载完整集合；不可读取事实随原需求提交给模型。
     def prepare_payload(
         self,
         record: GatewayIngressRecord,
     ) -> dict[str, object]:
         msg = _gateway_ingress_message(record)
-        self._manager._maybe_download_media(msg, retry_on_error=True)
+        adapter = self._manager._adapters.get(msg.channel)
+        quoted = None
+        if quoted_media_requested(adapter, msg):
+            try:
+                quoted = read_quoted_media(adapter, msg)
+            except FeishuQuotedMediaError as exc:
+                original_content = msg.content
+                self._manager._maybe_download_media(msg, retry_on_error=True)
+                msg.content = original_content
+                append_quoted_media_failure(msg, exc)
+                return _gateway_ask_payload(msg)
+        if quoted is None:
+            self._manager._maybe_download_media(msg, retry_on_error=True)
+        else:
+            self._manager._maybe_download_media(msg, retry_on_error=True, quoted_media=quoted)
         return _gateway_ask_payload(msg)
 
     # LLM: 原持久正文提交合同不变；G3 凭据失败落安全拒绝码而非网络重试，秘密不进持久行。
@@ -641,9 +665,10 @@ def _inbound_media_destination(agent: object, msg: IncomingMessage) -> Path:
     return destination
 
 
-# LLM: dest 已由同条可信消息解析；集合全部下载后才返回路径。重试保留同一顺序和名称，不把消息 ID 改成资源 API 不认识的编号。
-# 函数用途: 下载原单附件或富文本附件数组，同名附件加稳定序号，防止相互覆盖。
-def _download_inbound_media_refs(adapter, msg, media, dest):
+# LLM: dest 已由当前消息解析；source_message_id 仅由准确 parent 核验器传入，不读取 media 自带的任意源字段。
+#   集合全部下载后才返回路径，当前附件原失败合同不变；引用资源缺失转有界事实，文件系统失败仍抛异常。
+# 函数用途: 用真实当前或父消息 ID 下载完整附件集合，同名附件加稳定序号；不改变 owner。
+def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None):
     items = media.get("items") if isinstance(media.get("items"), list) else [media]
     paths = []
     for index, item in enumerate(items):
@@ -652,10 +677,23 @@ def _download_inbound_media_refs(adapter, msg, media, dest):
         reference = dict(item)
         if len(items) > 1 and reference.get("file_name"):
             reference["file_name"] = f'{index + 1}-{reference["file_name"]}'
-        name = adapter.fetch_media_to(msg.message_id, reference, dest)
+        name = adapter.fetch_media_to(source_message_id or msg.message_id, reference, dest)
         if not name or Path(name).name != name or name in {".", ".."}:
+            if source_message_id:
+                raise FeishuQuotedMediaError('FEISHU_QUOTED_MEDIA_RESOURCE_UNAVAILABLE')
             raise OSError("INBOUND_MEDIA_DOWNLOAD_INCOMPLETE")
         paths.append(f"[已下载到: {dest / name}]")
+    return paths
+
+
+# LLM: 当前附件默认取当前 source；引用必须逐项通过本次 GET 证明。集合全部成功才返回，路径由原私有下载器生成。
+# 函数用途: 组合当前与被引用附件的下载，任何一项失败都不向模型注入部分路径。
+def _download_complete_inbound_media(adapter, msg, media, dest, quoted):
+    paths = _download_inbound_media_refs(adapter, msg, media, dest) if media else []
+    if quoted is not None:
+        references = quoted_media_references(msg, quoted)
+        paths.extend(_download_inbound_media_refs(adapter, msg, references, dest,
+            source_message_id=quoted.parent_message_id))
     return paths
 
 
@@ -683,8 +721,8 @@ class _GatewayReplyPollClient:
         self._gateway_port = int(gateway_port)
         self.credentials = GatewayClientCredentials(home_paths().root)
 
-    # LLM: 原游标/身份保持，凭据在运输 try 之前读取；开关开时凭据异常不混成远端瞬时错误，开关关时降级发送。
-    # 函数用途: 带宿主凭据拉取 Gateway 进度，保留明确模式和候选快照身份；不写秘密、不从正文猜档位。
+    # LLM: 原游标/用户身份/宿主凭据不变；缺凭据在请求前失败，认证HTTP拒绝任何重定向。
+    # 函数用途: 只读拉取原进度快照，保持原游标/档位/等待状态，不输出秘密。
     def poll_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
         import urllib.error
         import urllib.request
@@ -697,7 +735,7 @@ class _GatewayReplyPollClient:
         headers.update(self.credentials.headers())
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with open_authenticated_request(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             denial_code = _gateway_http_error_code(exc)
@@ -730,6 +768,8 @@ class _GatewayReplyPollClient:
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，
     #   开关关时降级为不带凭据；远端瞬时状态仍等待。
     # 函数用途: 带凭据查询普通消息投递状态，不重复提交。
+    # LLM: 原稳定输入ID只读对账；宿主凭据缺失在请求前失败，固定认证接口不重定向。
+    # 函数用途: 查询原普通消息状态，不重复提交，也不从文字猜测成功。
     def poll_input_receipt(self, pending: PendingGatewayReply) -> str:
         import urllib.error
         import urllib.parse
@@ -742,7 +782,7 @@ class _GatewayReplyPollClient:
             headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel, **self.credentials.headers()},
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with open_authenticated_request(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             denial_code = _gateway_http_error_code(exc)
@@ -767,6 +807,8 @@ class _GatewayReplyPollClient:
     # LLM: 控制仍按 operation ID 和完整签发范围对账；凭据在同一身份头入口添加，不改别名/目标核对合同。
     #   开关开时读取失败不发请求，开关关时降级发送。
     # 函数用途: 带宿主凭据及原通道/会话/群聊身份读取控制回执。
+    # LLM: 原control ID精确对账，token只入运输头且拒绝HTTP跳转；保持原状态处理。
+    # 函数用途: 查询原控制回执，不改控制事实或落盘正文。
     def poll_control_receipt(
         self,
         pending: PendingGatewayReply,
@@ -790,7 +832,7 @@ class _GatewayReplyPollClient:
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with open_authenticated_request(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             denial_code = _gateway_http_error_code(exc)
@@ -836,6 +878,8 @@ class _GatewayReplyPollClient:
     # LLM: 凭据读取在广义运输异常捕获之外：开关开时失败明确抛原因码，开关关时降级为不带凭据；
     #   真正的网络/5xx 仍沿原等待语义。
     # 函数用途: 带宿主凭据查最终结果，秘密不进回复或日志，未完成继续等待。
+    # LLM: 原用户/渠道头与结果字段保持，认证HTTP不重定向；异常只交原显式等待/隔离裁决。
+    # 函数用途: 读取原Gateway结果并沿已有回执返回，不创建新任务或复制秘密。
     def poll_response(
         self,
         pending: PendingGatewayReply,
@@ -850,7 +894,7 @@ class _GatewayReplyPollClient:
             headers={"X-User-Id": pending.user_id, "X-Channel": pending.channel, **self.credentials.headers()},
         )
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with open_authenticated_request(req, timeout=5) as resp:
                 body = json.loads(resp.read().decode("utf-8", "replace"))
             if resp.status == 200 and body.get("ok"):
                 return _reply_text_with_host_notices(body)
@@ -882,7 +926,7 @@ def _reply_text_with_host_notices(body: dict) -> object:
     return with_host_notice_lines(content, delivery.get("host_notices")) if isinstance(content, str) else content
 
 
-# LLM: IM 仍沿唯一入站/回复 worker；G3 凭据只在运输头使用，配置来源从 CLI Agent 绑定，不落到记录或模型上下文。
+# LLM: 固定回环认证接口拒绝HTTP跳转、日志不回显正文；IM 仍沿唯一入站/回复 worker；G3 凭据只在运输头使用，配置来源从 CLI Agent 绑定，不落到记录或模型上下文。
 # 类用途: 管理通道并以宿主凭据提交和对账；原用户身份和持久投递状态不变。
 class ChannelManager:
     """管理所有已注册的通道适配器，提供统一的启停和消息路由接口。"""
@@ -974,6 +1018,8 @@ class ChannelManager:
     # LLM: Adapters start before durable recovery so media and channel callbacks have a live provider;
     # only the combined delivery worker is started, never the reply worker's own thread.
     # 函数用途: 启动所有通道后恢复未完成的入站提交和结果回送。
+    # LLM: 只启动原登记adapter/worker，失败诊断仅类型；不改变注册、owner或后台恢复语义。
+    # 函数用途: 启动当前管理器的原通道，保留既有启动顺序和失败处理。
     def start_all(self) -> None:
         """启动所有已注册的适配器。"""
         for adapter in self._adapters.values():
@@ -998,7 +1044,7 @@ class ChannelManager:
                     checked_at=_utc_now_iso(),
                     error_code="CHANNEL_ADAPTER_START_FAILED",
                 )
-                logger.error(f"启动适配器 {adapter.adapter_name} 失败: {exc}")
+                logger.error('启动适配器 channel=%s error_type=%s', adapter.adapter_name, type(exc).__name__)
                 continue
             self._delivery_registry.mark_health(
                 adapter.adapter_name,
@@ -1020,6 +1066,8 @@ class ChannelManager:
     # LLM: Stop joins the only adapter delivery thread before provider shutdown and leaves durable
     # rows untouched for the next process.
     # 函数用途: 停止恢复线程和所有已注册通道，不删除未完成工作。
+    # LLM: 仅停止本管理器原通道/worker，错误只记类型，不回显provider/认证响应。
+    # 函数用途: 沿原顺序收尾通道与线程，不改变pending投递事实。
     def stop_all(self) -> None:
         """停止所有已注册的适配器。"""
         self._lifecycle_started = False
@@ -1037,7 +1085,7 @@ class ChannelManager:
                     checked_at=_utc_now_iso(),
                     error_code="CHANNEL_ADAPTER_STOP_FAILED",
                 )
-                logger.error(f"停止适配器 {adapter.adapter_name} 失败: {exc}")
+                logger.error('停止适配器 channel=%s error_type=%s', adapter.adapter_name, type(exc).__name__)
                 continue
             self._delivery_registry.mark_health(
                 adapter.adapter_name,
@@ -1135,22 +1183,26 @@ class ChannelManager:
         for record in records:
             adapter.clear_progress_placeholder(record.user_id, record.progress_handle)
 
-    # LLM: 单附件和富文本附件数组按 /ask 同一身份落到 owner 私有目录；全部下载后才注入路径，失败沿原 durable 重试。
-    # 函数用途: 下载本条消息的完整附件集合并注入本人可读路径，不能因为某个附件失败而提交不完整消息。
+    # LLM: 当前及准确引用附件均按 /ask 当前身份落 owner 私有目录；全部下载后才注入路径。
+    #   当前附件/文件系统失败沿原 durable 硬门，引用不可读投影结构化事实；不复制父 sender 或正文。
+    # 函数用途: 下载当前消息和被引用的完整附件集合，避免把部分路径当作完整用户材料。
     def _maybe_download_media(
         self,
         msg: IncomingMessage,
         *,
         retry_on_error: bool = False,
+        quoted_media: ValidatedQuotedMedia | None = None,
     ) -> None:
         media = (msg.metadata or {}).get("media")
         adapter = self._adapters.get(msg.channel)
-        if not media or not hasattr(adapter, "fetch_media_to"):
+        if (not media and quoted_media is None) or not hasattr(adapter, "fetch_media_to"):
             return
         try:
             dest = _inbound_media_destination(self._inbound_media_agent, msg)
-            paths = _download_inbound_media_refs(adapter, msg, media, dest)
+            paths = _download_complete_inbound_media(adapter, msg, media, dest, quoted_media)
             msg.content = "\n".join([msg.content, *paths])
+        except FeishuQuotedMediaError as exc:
+            append_quoted_media_failure(msg, exc)
         except Exception as exc:
             suffix = "，等待 durable worker 重试" if retry_on_error else "(不影响处理)"
             logger.warning("入站媒体下载失败%s error_type=%s", suffix, type(exc).__name__)
@@ -1179,7 +1231,7 @@ class ChannelManager:
             headers=_gateway_identity_headers(msg, self._reply_poll_client.credentials),
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with open_authenticated_request(req, timeout=30) as resp:
                 result = json.loads(resp.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             # LLM: G2b 拒绝路径：401/403 是确定性鉴权拒绝，重试不会变好；按 G3 凭据拒绝同一口径收口成
@@ -1191,7 +1243,7 @@ class ChannelManager:
         request_id = str(result.get("request_id") or "").strip()
         status = str(result.get("status") or "queued").strip().lower()
         if not request_id and status != "control":
-            logger.error(f"gateway /ask 未返回 request_id: {result}")
+            logger.error('gateway /ask 未返回 request_id result_type=%s', type(result).__name__)
         return GatewayAskSubmission(
             request_id=request_id,
             status=status,
@@ -1276,6 +1328,8 @@ class ChannelManager:
         except (json.JSONDecodeError, OSError):
             return None
 
+    # LLM: 沿原当前会话通道投影写入，失败仅记录类型；不能从错误正文派生渠道或权限。
+    # 函数用途: 保存原活跃通道投影，不维护第二身份账。
     def _update_active_channel(self, user_id: str, channel: str) -> None:
         """更新用户当前活跃通道到本地文件。"""
 
@@ -1289,7 +1343,7 @@ class ChannelManager:
             self._session_channel_file.parent.mkdir(parents=True, exist_ok=True)
             self._session_channel_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning(f"更新活跃通道失败: {exc}")
+            logger.warning('更新活跃通道失败 error_type=%s', type(exc).__name__)
 
     def update_active_channel(self, user_id: str, channel: str) -> None:
         """公开的更新活跃通道方法。"""

@@ -58,7 +58,7 @@ _SANDBOX_TIMEOUT_EXIT_CODE = 143
 
 
 # LLM: 请求只带宿主已解析的结构化身份与绝对路径；target 和 inputs 里的文件由调用方按交付物/输入声明挑出。
-#   inputs 是 (参数名, 路径) 对，只有包里声明过的参数名会被传给检查程序。
+#   inputs 是声明输入；凭据来源仅由宿主作用域装配，不进入脚本 argv 或公开核验事实。
 # 类用途: 描述一次“用某个包的某个检查程序检查某个交付物”的宿主请求。
 @dataclass(frozen=True)
 class PackVerifierRequest:
@@ -68,6 +68,7 @@ class PackVerifierRequest:
     target: Path
     workspace_root: Path
     inputs: tuple[tuple[str, Path], ...] = ()
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 # LLM: 事实字段是入账唯一来源；status 包含 passed/failed/not_run/error/cancelled，取消不属于质量错误，不得触发返工。
@@ -235,12 +236,14 @@ def _run_result(outcome: tuple[subprocess.CompletedProcess, float, str] | None, 
     return _parsed_result(completed.stdout or "", base)
 
 
-# 函数用途: 生成断网、整根只读、只写临时目录的沙箱规格。
+# LLM: 来源上界由原宿主请求承运，不从包正文或脚本参数读取；不改变原断网与目录权限。
+# 函数用途: 生成只读根、私有临时写区和凭据擦洗来源一致的核验沙箱规格。
 def _sandbox_spec(request: PackVerifierRequest, temp: Path) -> AttemptSandboxSpec:
     owner_home = Path(getattr(request.owner, "home_dir", request.workspace_root))
     return AttemptSandboxSpec(attempt_view=temp, staging_root=temp, shared_workspace=request.workspace_root,
                               owner_home=owner_home, network_access=False, implicit_attempt_write_roots=False,
-                              extra_write_roots=(temp,), read_only_root=True)
+                              extra_write_roots=(temp,), read_only_root=True,
+                              host_credential_env_names=request.host_credential_env_names)
 
 
 # LLM: 解释器用宿主自身的 Python（-I -S：不读环境变量、不加 site），参数模板只替换唯一的 {target}，

@@ -5229,6 +5229,25 @@ def test_gateway_followup_subagent_lineage_uses_active_task_root(tmp_path):
     assert create_params.depth == 1
 
 
+# LLM: 本机父请求同样必须有原 canonical 线程/根记录；本地 actor 沿宿主 resolver 得到 None，不能伪造 IM actor。
+# 函数用途: 补齐子代理工作目录测试的真实本人父任务事实，保持 cwd、workspace 和父任务编号原断言。
+def _register_local_child_fixture_parent(agent):
+    from agent_py_agent.agent.conversation.host_actor import actor_from_scope
+
+    params = agent._current_run_params
+    thread = agent.conversation_store.threads.get_or_create({"channel": "chat",
+        "channel_conversation_id": params.request_id, "channel_user_id": "local-agent",
+        "canonical_user_id": "local-agent", "owner_id": agent.home_paths.owner_id,
+        "owner_home": str(agent.home_paths.owner_home_dir)})
+    actor = actor_from_scope(agent, SimpleNamespace(channel="chat", channel_conversation_id=params.request_id,
+        channel_user_id="local-agent"), thread.thread_id, params.request_id)
+    assert actor is None
+    params.task_attributes["conversation_thread_id"] = thread.thread_id
+    params.host_channel_actor = actor
+    agent.conversation_store.tasks.bind({"thread_id": thread.thread_id, "task_id": params.task_id,
+        "goal": "本机工作目录测试"}, host_channel_actor=actor)
+
+
 def test_gateway_subagent_relative_outputs_keep_actual_cwd_not_runtime_archive(tmp_path):
     service_root = tmp_path / "service"
     client_root = tmp_path / "client-project"
@@ -5257,6 +5276,7 @@ def test_gateway_subagent_relative_outputs_keep_actual_cwd_not_runtime_archive(t
             },
         },
     )
+    _register_local_child_fixture_parent(agent)
     try:
         create_params = create_run_params(
             agent,
@@ -5312,6 +5332,7 @@ def test_gateway_child_inherits_declared_workspace_over_home(
             CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR: [str(client_root)],
         },
     )
+    _register_local_child_fixture_parent(agent)
     try:
         create_params = create_run_params(
             agent,
@@ -5363,6 +5384,7 @@ def test_gateway_child_inherits_home_when_no_workspace_declared(
             "conversation_task_id": "gw-cwd-home-child",
         },
     )
+    _register_local_child_fixture_parent(agent)
     try:
         create_params = create_run_params(
             agent,

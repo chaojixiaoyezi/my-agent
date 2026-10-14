@@ -1,4 +1,4 @@
-# LLM: HTTP传输沿唯一结构化分发表，观察复用同一路由模板；启动先确保/绑定持久凭据，秘密不进状态、日志或环境。
+# LLM: 真实Agent认证配置与CLI共用原factory，漏middleware不得降为无鉴权；HTTP传输沿唯一结构化分发表，观察复用同一路由模板；启动先确保/绑定持久凭据，秘密不进状态、日志或环境。
 # 模块用途: 提供有界 Gateway HTTP 监听器与宿主客户端入口。
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from ..auth.configuration import build_gateway_auth_middleware, validate_gateway_auth_configuration
 from ..runtime_errors import runtime_error_report
 from .bounded_http_server import GatewayBoundedHTTPServer
 from .http_handlers import (
@@ -64,6 +65,8 @@ if TYPE_CHECKING:
 _server_instance: GatewayHTTPServer | None = None
 
 
+# LLM: 原依赖只决定监听和认证；没有迁移开关，无中间件是显式单机无鉴权边界。
+# 类用途: 绑定宿主 Agent、原认证服务和监听地址，标准启动必须准备 G1 凭据。
 @dataclass(frozen=True)
 class GatewayHTTPServerParams:
     cross_channel: CrossChannelSession | None = None
@@ -71,8 +74,6 @@ class GatewayHTTPServerParams:
     auth_middleware: AuthMiddleware | None = None
     bind_host: str = "127.0.0.1"  # 默认仅本机可达;暴露到网络须配鉴权(见 _guard_network_exposure)
     agent: SimpleAgent | None = None
-    # G2b 上线闸：true 时本机凭据不可用拒绝启动（fail-closed），由 gateway_process 从与客户端同一份配置读入。
-    require_local_credential: bool = False
 
 
 # 回环地址:仅本机可达。空串/0.0.0.0/::/LAN IP 一律判非回环(=暴露到网络,须鉴权)。默认仅监听回环地址。
@@ -113,8 +114,8 @@ def _generate_request_id() -> str:
     return f"req_{int(time.time() * 1000)}_{os.getpid()}_{next(_REQUEST_ID_COUNTER)}"
 
 
-# LLM: 分发表同时决定处理器和观察模板；原业务授权不变，无中间件档不观察，不含G2b强制。
-# 类用途: 接收HTTP请求并交给原业务入口，顺带观察需迁移的旧客户端。
+# LLM: 原路由 access_tier 决定宿主凭据前检；通过后仍复核角色、owner 和操作授权，无中间件仅属显式单机。
+# 类用途: 先阻止无凭据特权请求，再交原业务入口处理，计数不含身份或秘密。
 class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
@@ -160,18 +161,18 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         return json.loads(body.decode("utf-8", "replace"))
 
-    # LLM: GET/POST共用实际分发表，未知路径404，公开/插件档不计迁移流量。
+    # LLM: GET/POST 共用实际分发表，未知路径 404，公开/插件档不进入宿主凭据门。
     # 函数用途: 沿结构化分发表分发只读HTTP请求。
     def do_GET(self) -> None:
         self._dispatch_route("GET")
 
-    # LLM: 只改变组织与观察，原业务授权/owner/副作用仍在各处理器；不新增G2b强制。
+    # LLM: 写请求同样先核宿主凭据，角色/owner/副作用仍由原处理器复核。
     # 函数用途: 分发HTTP写入口并只观察旧客户端流量。
     def do_POST(self) -> None:
         self._dispatch_route("POST")
 
-    # LLM: 同一个route既决定处理器又提供有界观察键，每请求只观察一次；惰性导入保留旧服务加载时机。
-    # 函数用途: 匹配实际路由，记录无凭据回环观察并调用原处理入口。
+    # LLM: 同一个 route 决定凭据层级、处理器及有界计数；认证先于 body 读取/业务副作用，插件令牌沿独立原合同。
+    # 函数用途: 拒绝无凭据特权调用，通过后调用原处理器，公开查询保持可用。
     def _dispatch_route(self, method: str) -> None:
         self._inject_auth_middleware()
         route = match_gateway_http_route(method, self.path)
@@ -181,6 +182,11 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         middleware = getattr(self, "_auth_middleware", None)
         if middleware is not None:
             middleware.observe_loopback_request(self, route)
+            if route.access_tier in {"credential", "admin"}:
+                from ..auth.middleware import require_trusted_source
+
+                if require_trusted_source(self):
+                    return
         if route.handler_module:
             module = importlib.import_module(route.handler_module, __package__)
             getattr(module, route.handler_name)(self, _server_instance)
@@ -282,18 +288,18 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         handle_admin_summary(self, _server_instance)
 
 
-# LLM: G2b 强制阶段凭据不可用时拒绝启动的结构化错误；reason_code 是机器合同（G1 原因码，含 LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT），
+# LLM: 受管宿主凭据不可用时拒绝启动的结构化错误；reason_code 是机器合同（G1 原因码，含 LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT），
 #   消息不含路径、内容或凭据，调用方（gateway_process 启动链）据此给出可诊断的失败。
-# 类用途: 表示"已开启强制开关但本机凭据不可用"，让宿主启动 fail-closed。
+# 类用途: 表示本机凭据不可用，让宿主在恢复任务、绑定端口前拒绝启动。
 class GatewayLocalCredentialRequired(RuntimeError):
     # LLM: 只接受内部生成的原因码；不包装底层异常，避免路径或内容进入错误链。
     # 函数用途: 构造只含原因码的启动拒绝错误。
     def __init__(self, reason_code: str) -> None:
         self.reason_code = reason_code
-        super().__init__(f"网关拒绝启动: 已开启 gateway_require_local_credential，但本机客户端凭据不可用（{reason_code}）")
+        super().__init__(f"网关拒绝启动: 本机客户端凭据不可用（{reason_code}）")
 
 
-# LLM: G2b 启动预检与 GatewayHTTPServer.start() 必须用同一份"服务端准备凭据"逻辑：缺失时生成、坏文件不改写、
+# LLM: CLI 启动预检与 GatewayHTTPServer.start() 必须用同一份"服务端准备凭据"逻辑：缺失时生成、坏文件不改写、
 #   推不出数据根或合同不符时抛结构化原因码。预检先用它，才能既在副作用之前拒绝，又不把"缺了就生成"误判成失败。
 #   不看 gateway_auth_token（那是部署 token，不是本机凭据）；ensure 幂等，预检与 start() 各调一次没问题。
 # 函数用途: 按真实 Agent 的 home 合同准备本机凭据，返回凭据内容或抛出结构化原因码。
@@ -355,8 +361,7 @@ class GatewayHTTPServer:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self.last_error_report: dict[str, Any] | None = None
-        # G2b 开关：true 时凭据不可用拒绝启动；false（G2a）只降级为状态。状态串只给 ok / unavailable:原因码，不给路径或内容。
-        self.require_local_credential = bool(server_params.require_local_credential)
+        # 受管鉴权服务凭据不可用时拒绝启动；显式无鉴权监听器仅供单机，不提供 owner 隔离。
         self.local_credential_status = "unavailable:not_prepared"
         self._local_client_credential = ""
         # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
@@ -371,10 +376,11 @@ class GatewayHTTPServer:
                 "请置 auth_enabled=True,或把 gateway_bind_host 设回 127.0.0.1。"
             )
 
-    # LLM: 唯一监听启动点，暴露检查先于 bind/全局指针；G2a 档凭据准备失败降级为状态不拦启动，G2b 开关打开时 fail-closed 拒绝启动，
+    # LLM: 唯一监听启动点，原认证配置/依赖、暴露及G1检查先于bind/全局指针；漏middleware自动保护，不安全部署拒绝，
     #   拒绝发生在设置全局指针与 bind 之前；停机不删凭据。
     # 函数用途: 检查暴露边界、准备本机凭据状态后启动 HTTP 服务线程。
     def start(self) -> None:
+        self._prepare_authentication()
         self._guard_network_exposure()  # fail-closed 必须先于任何全局副作用(拒绝时不污染 _server_instance)
         self._prepare_local_credential()
         global _server_instance
@@ -401,9 +407,19 @@ class GatewayHTTPServer:
 
         register_gateway_bound_port(bound_port)
 
+    # LLM: 真实Agent配置是部署权威；显式传mw也不能绕过unsafe模式；缺依赖时复用原factory，None Agent不猜配置。
+    # 函数用途: 在原监听/凭据准备前保护受管认证，避免authTrue但调用者漏传middleware时静默开放。
+    def _prepare_authentication(self) -> None:
+        if self.agent is None:
+            return
+        config = getattr(self.agent, 'config', None)
+        validate_gateway_auth_configuration(config, self.auth_middleware)
+        if self.auth_middleware is None:
+            self.auth_middleware = build_gateway_auth_middleware(config)
+
     # LLM: 数据根只从真实 Agent.home_paths.owner_home_dir 经共享 canonical 推导取得；缺失属性是合同错误，None Agent 不授权队列路径写凭据。
-    #   凭据准备失败走 _degrade_or_refuse：G2a 档只降级为结构化状态、不拦启动；G2b 强制档拒绝启动。凭据不进入状态或 env。
-    # 函数用途: 准备持久本机客户端凭据，失败时降级记录或按开关拒绝启动。
+    #   受管服务准备失败即拒绝；仅无 Agent 且无认证的独立单机监听器记录 unavailable。凭据不进入状态或 env。
+    # 函数用途: 准备持久本机客户端凭据，保护任务恢复前的启动边界。
     def _prepare_local_credential(self) -> None:
         try:
             credential = prepare_local_client_credential(self.agent)
@@ -412,12 +428,11 @@ class GatewayHTTPServer:
             return
         self._apply_local_credential(credential, "ok")
 
-    # LLM: 强制档（开关打开）凭据不可用必须 fail-closed：抛结构化错误，调用方拒绝启动且不 bind 端口；
-    #   迁移档只把原因写成公开降级状态（unavailable:原因码），照常启动，不覆盖坏文件、不轮换。
-    # 函数用途: 按当前档位处理"凭据不可用"——降级记状态或拒绝启动。
+    # LLM: 有 Agent 或认证服务时凭据不可用必拒绝，不能因为旧配置 false 降级；不覆盖坏文件或轮换。
+    # 函数用途: 保存安全原因码并拒绝受管启动，仅独立无鉴权监听器保留不可用状态。
     def _degrade_or_refuse(self, reason_code: str) -> None:
         self._apply_local_credential("", f"unavailable:{reason_code}")
-        if self.require_local_credential:
+        if self.agent is not None or self.auth_middleware is not None:
             raise GatewayLocalCredentialRequired(reason_code)
 
     # LLM: 凭据值、公开状态与中间件绑定必须同步更新；失败时清空绑定，避免上一轮或坏文件残留可用凭据的错觉。

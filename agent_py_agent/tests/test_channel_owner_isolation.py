@@ -19,10 +19,12 @@ from agent_py_agent.agent.conversation.background_routing import (
 from agent_py_agent.agent.conversation.execution_threads import ensure_execution_thread
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.delivery import ChannelCapabilities
+from agent_py_agent.agent.gateway_parts.client_credentials import GatewayClientCredentials
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
 )
+from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_owner_binding import (
     REQUEST_OWNER_KEY,
@@ -49,7 +51,9 @@ def _base(tmp_path, *, full=False):
     config = AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False,
         gateway_per_user_owner_scoping=True, admin_channel_identity_enabled=True,
         access_mode='full-access' if full else 'workspace-write')
-    return SimpleAgent(config, resolve_owner_home(tmp_path/'home', OwnerIdentity.local_main()).home_dir)
+    agent = SimpleAgent(config, resolve_owner_home(tmp_path/'home', OwnerIdentity.local_main()).home_dir)
+    ensure_local_client_credential(agent.home_paths.root)
+    return agent
 
 
 def _payload(actor='ou_one', chat='oc_private', kind='p2p'):
@@ -73,7 +77,8 @@ def test_true_http_freezes_distinct_owner_before_queue_and_base_does_not_receive
                 # 不可信 body owner 字段必须被入口丢弃。
                 REQUEST_OWNER_KEY: asdict(OwnerIdentity.local_main())}).encode()
             request = urllib.request.Request(f'http://127.0.0.1:{server.port}/ask', data=data,
-                headers={'Content-Type': 'application/json', 'X-Channel': 'feishu', 'X-User-Id': actor})
+                headers={'Content-Type': 'application/json', 'X-Channel': 'feishu', 'X-User-Id': actor,
+                         **GatewayClientCredentials(base.home_paths.root).headers()})
             with urllib.request.urlopen(request, timeout=5) as response:
                 receipt = json.loads(response.read())
             row = json.loads((paths.inbox/(receipt['request_id']+'.json')).read_text())

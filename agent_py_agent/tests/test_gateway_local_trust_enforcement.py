@@ -1,8 +1,7 @@
-"""G2b：开关 gateway_require_local_credential 打开后的服务端强制判定、启动 fail-closed、插件令牌豁免与 TUI 启动预检。
+"""G1 宿主凭据始终生效：启动、身份、插件令牌和 TUI 预检都沿原真实路径验证。
 
-只用临时数据根、随机端口和假处理器；不读真实 secrets、不连真实 Gateway。
-开关关的行为不变由 G1/G2a/G3 既有测试与守卫覆盖，本文件聚焦开关打开的差异：
-无凭据回环一律匿名/按原规则拒绝，来源未知（peer_ip=None）不再当可信，插件令牌档要求本机回环、不要求客户端凭据。
+仅使用临时根、随机端口和假业务处理器，不读真实秘密、不访问真实 Gateway。
+退休开关的 raw 配置不能恢复回环信任；本机和配置凭据均保持合法可用。
 """
 from __future__ import annotations
 
@@ -34,10 +33,9 @@ LOCAL = "127.0.0.1"
 
 
 # LLM: 强制档中间件统一构造入口；凭据只留在内存，不写日志/env。测试专用 helper。
-# 函数用途: 构造开启 G2b 开关的鉴权中间件，可选绑定本机/配置凭据。
+# 函数用途: 构造必需宿主凭据的鉴权中间件，可选绑定本机/配置凭据。
 def _forced(credential: str = "", auth_token: str = "") -> AuthMiddleware:
-    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True), auth_token=auth_token,
-                                require_local_credential=True)
+    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True), auth_token=auth_token)
     if credential:
         middleware.set_local_client_credential(credential)
     return middleware
@@ -107,8 +105,7 @@ def test_enforced_startup_generates_missing_credential_and_starts(tmp_path):
     # G1 的"缺则生成"是正常初始化路径：强制档下缺失也照常生成并启动，不是 fail-closed 场景。
     root = tmp_path / "data-root"
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
-                               params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              require_local_credential=True))
+                               params=GatewayHTTPServerParams(agent=_agent_with_root(root)))
     server.start()
     try:
         assert server.local_credential_status == "ok"
@@ -122,8 +119,7 @@ def test_enforced_startup_refuses_when_credential_cannot_be_created(tmp_path):
     root = tmp_path / "data-root"
     root.write_text("not a directory", encoding="utf-8")
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
-                               params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              require_local_credential=True))
+                               params=GatewayHTTPServerParams(agent=_agent_with_root(root)))
     with pytest.raises(GatewayLocalCredentialRequired) as caught:
         server.start()
     assert caught.value.reason_code.startswith("LOCAL_CLIENT_CREDENTIAL_")
@@ -145,8 +141,7 @@ def test_enforced_startup_refuses_unusable_credential(tmp_path, damage, expected
         path.chmod(0o644)
     before = (path.read_bytes(), path.stat().st_mtime_ns)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
-                               params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              require_local_credential=True))
+                               params=GatewayHTTPServerParams(agent=_agent_with_root(root)))
     with pytest.raises(GatewayLocalCredentialRequired) as caught:
         server.start()
     assert caught.value.reason_code == expected_reason
@@ -157,7 +152,7 @@ def test_enforced_startup_refuses_unusable_credential(tmp_path, damage, expected
 
 def test_enforced_startup_refuses_without_data_root(tmp_path):
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
-                               params=GatewayHTTPServerParams(agent=SimpleNamespace(), require_local_credential=True))
+                               params=GatewayHTTPServerParams(agent=SimpleNamespace()))
     with pytest.raises(GatewayLocalCredentialRequired) as caught:
         server.start()
     # luna4 的 G1 加固：Agent 缺 home_paths 合同按 agent_contract 拒绝（旧码 no_data_root 已由 LOCAL_CLIENT_CREDENTIAL_NO_DATA_ROOT 取代）。
@@ -170,8 +165,7 @@ def test_enforced_startup_starts_with_available_credential(tmp_path):
     credential = ensure_local_client_credential(root)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_forced(credential=credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_forced(credential=credential)))
     server.start()
     try:
         assert server.local_credential_status == "ok"
@@ -181,8 +175,10 @@ def test_enforced_startup_starts_with_available_credential(tmp_path):
 
 @pytest.fixture
 def enforced_listener(tmp_path, monkeypatch):
-    # 函数用途: 起一个开关打开的随机端口服务，业务处理器换成返回身份投影的 echo。
+    # 函数用途: 起隔离的真实凭据 listener，记录业务入口到达情况并返回身份投影。
+    reached = []
     def echo(handler):
+        reached.append(handler.path)
         handler._send_json(200, {"identity": list(extract_user_from_request(handler))})
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_ask", echo)
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result", echo)
@@ -190,20 +186,24 @@ def enforced_listener(tmp_path, monkeypatch):
     credential = ensure_local_client_credential(root)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_forced(credential=credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_forced(credential=credential)))
     server.start()
     try:
+        server.fixture_reached_handlers = reached
         yield server, server.server.server_address[1], credential
     finally:
         server.stop()
 
 
-def test_enforced_http_loopback_without_credential_is_anonymous(enforced_listener):
-    _server, port, _credential = enforced_listener
-    assert _request(port, "POST", "/ask", {"X-User-Id": "fixture-user", "X-Channel": "feishu"}) == (
-        200, {"identity": ["anonymous", "external"]})
-    assert _request(port, "GET", "/result/fixture-request")[1]["identity"] == ["anonymous", "external"]
+def test_enforced_http_loopback_without_credential_is_rejected_before_handler(enforced_listener):
+    server, port, _credential = enforced_listener
+    for method, path, headers in [("POST", "/ask", {"X-User-Id": "fixture-user", "X-Channel": "feishu"}),
+                                   ("GET", "/result/fixture-request", {})]:
+        status, body = _request(port, method, path, headers)
+        assert status == 403 and body["error"] == "forbidden"
+        assert body["error_code"] == "LOCAL_CREDENTIAL_REQUIRED"
+        assert "identity" not in body
+    assert server.fixture_reached_handlers == []
 
 
 def test_enforced_http_valid_credential_keeps_identity(enforced_listener):
@@ -213,14 +213,17 @@ def test_enforced_http_valid_credential_keeps_identity(enforced_listener):
     assert _request(port, "GET", "/result/fixture-request", {"X-Gateway-Token": credential})[1]["identity"] == ["admin", "chat"]
 
 
-def test_enforced_http_wrong_or_empty_credential_is_anonymous(enforced_listener):
-    _server, port, _credential = enforced_listener
-    assert _request(port, "POST", "/ask", {"X-Gateway-Token": "wrong-token"})[1]["identity"] == ["anonymous", "external"]
-    assert _request(port, "POST", "/ask", {"X-Gateway-Token": ""})[1]["identity"] == ["anonymous", "external"]
+def test_enforced_http_wrong_or_empty_credential_is_rejected_before_handler(enforced_listener):
+    server, port, _credential = enforced_listener
+    for token in ("wrong-token", ""):
+        status, body = _request(port, "POST", "/ask", {"X-Gateway-Token": token})
+        assert status == 403 and body["error_code"] == "LOCAL_CREDENTIAL_REQUIRED"
+        assert "identity" not in body
+    assert server.fixture_reached_handlers == []
 
 
 def test_enforced_plugin_token_route_passes_without_client_credential(enforced_listener, monkeypatch):
-    # be 注意 3：插件进程只有 host-API 令牌、没有本机凭据，开关打开时 /plugin-host/query 仍通。
+    # 插件进程只有独立 host-API 令牌、没有本机客户端凭据时 /plugin-host/query 仍通。
     from agent_py_agent.agent import plugin_host_api as api
 
     _server, port, _credential = enforced_listener
@@ -238,7 +241,7 @@ def test_enforced_plugin_token_route_still_rejects_without_valid_token(enforced_
     assert _request(port, "POST", "/plugin-host/query", {"X-Plugin-Host-Token": "forged"})[0] == 403
 
 
-# LLM: 必须修 1（9b 终审）：有效插件令牌也必须来自本机回环；直接调 handler，覆盖开关开、关两种档位。
+# LLM: 必须修 1（9b 终审）：有效插件令牌也必须来自本机回环；直接调 handler，覆盖原角色鉴权的两种模式。
 # 函数用途: 打桩令牌校验与查询，直接调 handle_plugin_host_query，返回最后一次响应。
 def _run_plugin_query(monkeypatch, peer, token, middleware):
     from agent_py_agent.agent import plugin_host_api as api
@@ -255,27 +258,28 @@ def _run_plugin_query(monkeypatch, peer, token, middleware):
     return sent[-1]
 
 
-@pytest.mark.parametrize("enforced", [True, False])
-def test_plugin_token_remote_peer_is_rejected_switch_on_and_off(monkeypatch, enforced):
-    middleware = _forced() if enforced else AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+@pytest.mark.parametrize("auth_enabled", [True, False])
+def test_plugin_token_remote_peer_is_rejected_with_both_role_modes(monkeypatch, auth_enabled):
+    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=auth_enabled))
     status, _body = _run_plugin_query(monkeypatch, "192.0.2.10", "valid", middleware)
     assert status == 403
 
 
-@pytest.mark.parametrize("enforced", [True, False])
-def test_plugin_token_loopback_peer_passes_switch_on_and_off(monkeypatch, enforced):
-    middleware = _forced() if enforced else AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+@pytest.mark.parametrize("auth_enabled", [True, False])
+def test_plugin_token_loopback_peer_passes_with_both_role_modes(monkeypatch, auth_enabled):
+    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=auth_enabled))
     status, body = _run_plugin_query(monkeypatch, "127.0.0.1", "valid", middleware)
     assert status == 200 and body == {"ok": True, "reached_query": True}
 
 
-# --- TUI 启动预检（3a 插话：开关开且凭据不可用时拒绝启动并给原因码，与 IM 适配器同口径） ---
+# --- TUI 启动预检：所有客户端缺凭据都在 HTTP 前拒绝，与 IM 适配器同口径 ---
 
 
-# 函数用途: 写一个只含开关的临时配置，供 make_gateway_chat_client 读取。
-def _write_require_config(tmp_path, enabled: bool) -> str:
-    path = tmp_path / f"enforced-{str(enabled).lower()}.yaml"
-    path.write_text(f"gateway_require_local_credential: {str(enabled).lower()}\n", encoding="utf-8")
+# LLM: 凭据已非配置开关；隔离配置不带退休字段，不能改变 G1 门。
+# 函数用途: 写最小临时配置，让真实 TUI 客户端沿当前配置接口加载。
+def _write_require_config(tmp_path) -> str:
+    path = tmp_path / "credential-client.yaml"
+    path.write_text("{}\n", encoding="utf-8")
     return str(path)
 
 
@@ -286,21 +290,26 @@ def test_tui_startup_refuses_unavailable_credential_when_enforced(tmp_path, monk
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
-    args = SimpleNamespace(config=_write_require_config(tmp_path, True), workspace_root="")
+    args = SimpleNamespace(config=_write_require_config(tmp_path), workspace_root="")
     with pytest.raises(LocalClientCredentialError) as caught:
         make_gateway_chat_client(args)
     assert caught.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_MISSING"
 
 
-def test_tui_startup_degrades_when_not_enforced(tmp_path, monkeypatch):
+def test_tui_default_startup_refuses_missing_credential_before_http(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.local_client_token import LocalClientCredentialError
     from agent_py_agent.cli.bootstrap import DEFAULT_CONFIG
     from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
 
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
-    client = make_gateway_chat_client(SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=""))
-    assert client.gateway_client_only is True
+    http_calls = []
+    monkeypatch.setattr(http.client.HTTPConnection, "request", lambda *_a, **_kw: http_calls.append(True))
+    with pytest.raises(LocalClientCredentialError) as caught:
+        make_gateway_chat_client(SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=""))
+    assert caught.value.reason_code == "LOCAL_CLIENT_CREDENTIAL_MISSING"
+    assert http_calls == []
 
 
 def test_tui_startup_passes_when_enforced_and_credential_available(tmp_path, monkeypatch):
@@ -311,11 +320,11 @@ def test_tui_startup_passes_when_enforced_and_credential_available(tmp_path, mon
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
     ensure_local_client_credential(home_paths().root)
-    client = make_gateway_chat_client(SimpleNamespace(config=_write_require_config(tmp_path, True), workspace_root=""))
+    client = make_gateway_chat_client(SimpleNamespace(config=_write_require_config(tmp_path), workspace_root=""))
     assert client.gateway_client_only is True
 
 
-# --- 必须修 3（9b 终审）：从配置到服务端的两处开关接线必须有用例（变异 R5/R6 曾存活） ---
+# --- 必须修 3（9b 终审）：从旧配置到服务端的两处接线不能恢复无凭据信任（变异 R5/R6 曾存活） ---
 
 
 # 函数用途: 构造带 G2b 开关的假配置，供接线用例断言。
@@ -324,19 +333,19 @@ def _wiring_config(enabled: bool):
                            gateway_require_local_credential=enabled, gateway_bind_host="127.0.0.1")
 
 
-def test_middleware_switch_is_wired_from_config():
-    # R5：_build_gateway_auth_middleware 必须把配置开关传给中间件——回环无凭据请求在开关打开时不可信。
+def test_retired_raw_switch_cannot_restore_middleware_loopback_trust():
+    # 原配置接线必须忽略退休字段：两个 raw 值都不能授予回环身份。
     from agent_py_agent.cli.gateway_process import _build_gateway_auth_middleware
 
     on = _build_gateway_auth_middleware(_wiring_config(True))
     off = _build_gateway_auth_middleware(_wiring_config(False))
     assert on is not None and off is not None
     assert on.check_trusted({}, "127.0.0.1") is False
-    assert off.check_trusted({}, "127.0.0.1") is True
+    assert off.check_trusted({}, "127.0.0.1") is False
 
 
-def test_http_server_switch_is_wired_from_config(monkeypatch):
-    # R6：_start_gateway_http 构造的 GatewayHTTPServerParams 必须跟着配置开关走（截获参数断言）。
+def test_http_server_uses_mandatory_middleware_and_has_no_retired_switch(monkeypatch):
+    # 服务端只接原认证中间件；退休参数不能重新进入 HTTP 构造合同。
     from agent_py_agent.cli import gateway_process
 
     captured = {}
@@ -349,11 +358,13 @@ def test_http_server_switch_is_wired_from_config(monkeypatch):
     monkeypatch.setattr(gateway_process, "start_http_server", capture)
     agent = SimpleNamespace(config=_wiring_config(True))
     gateway_process._start_gateway_http(agent, SimpleNamespace(), 48080)
-    assert captured["params"].require_local_credential is True
+    assert captured["params"].auth_middleware.check_trusted({}, LOCAL) is False
+    assert not hasattr(captured["params"], "require_local_credential")
 
     captured.clear()
     gateway_process._start_gateway_http(SimpleNamespace(config=_wiring_config(False)), SimpleNamespace(), 48080)
-    assert captured["params"].require_local_credential is False
+    assert captured["params"].auth_middleware.check_trusted({}, LOCAL) is False
+    assert not hasattr(captured["params"], "require_local_credential")
 
 
 # 函数用途: 构造一个只够 cmd_gateway_run 预检用的假 agent（开关 + 数据根 root）。
@@ -381,7 +392,7 @@ def test_gateway_run_preflight_refuses_before_any_startup_side_effect(tmp_path, 
 
 
 def test_gateway_run_preflight_generates_missing_credential_and_reaches_setup(tmp_path, monkeypatch):
-    # g2bf2 用例 1：开关开 + 凭据缺失 → 预检必须"生成"而不是退出；随后照常进入 setup，凭据权限 0600。
+    # g2bf2 用例 1：必需 G1 凭据缺失 → 预检必须"生成"而不是退出；随后照常进入 setup，凭据权限 0600。
     from agent_py_agent.agent.gateway_parts.local_client_token import local_client_credential_path
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.cli import gateway_process
@@ -410,7 +421,7 @@ def test_gateway_run_preflight_generates_missing_credential_and_reaches_setup(tm
 
 
 def test_gateway_run_preflight_refuses_even_with_configured_token(tmp_path, monkeypatch):
-    # g2bf2 用例 2：开关开 + 配了 gateway_auth_token + 本机凭据坏 → 预检仍必须拒绝（exit 2，setup 不被调用）。
+    # g2bf2 用例 2：配了 gateway_auth_token + 本机凭据坏 → 预检仍必须拒绝（exit 2，setup 不被调用）。
     # 旧实现用客户端只读逻辑，配了 token 就完全不读本机凭据，这里会错误放行。
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.cli import gateway_process
@@ -430,23 +441,14 @@ def test_gateway_run_preflight_refuses_even_with_configured_token(tmp_path, monk
     assert calls["setup"] == 0
 
 
-def test_gateway_run_preflight_passes_and_proceeds_when_not_enforced(tmp_path, monkeypatch):
-    # 开关关（G2a 档）：预检不拦，照常进入 setup（用哨兵异常在 setup 处停下，断言确实走到了）。
-    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+def test_gateway_run_preflight_old_false_cannot_bypass_invalid_data_root(tmp_path, monkeypatch):
     from agent_py_agent.cli import gateway_process
 
+    root = tmp_path / "blocked-root"
+    root.write_text("not a directory", encoding="utf-8")
     calls = {"setup": 0}
-
-    class _ReachedSetup(Exception):
-        pass
-
-    def stop_at_setup(*_args):
-        calls["setup"] += 1
-        raise _ReachedSetup
-
-    monkeypatch.setattr(gateway_process, "make_agent", lambda args: _run_agent(tmp_path / "root", False))
+    monkeypatch.setattr(gateway_process, "make_agent", lambda args: _run_agent(root, False))
     monkeypatch.setattr(gateway_process, "gateway_paths", lambda agent: gateway_paths_from_root(tmp_path / "queue"))
-    monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", stop_at_setup)
-    with pytest.raises(_ReachedSetup):
-        gateway_process.cmd_gateway_run(SimpleNamespace(config="", workspace_root="", after_pid=0))
-    assert calls["setup"] == 1
+    monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", lambda *_a: calls.__setitem__("setup", calls["setup"] + 1))
+    assert gateway_process.cmd_gateway_run(SimpleNamespace(config="", workspace_root="", after_pid=0)) == 2
+    assert calls == {"setup": 0}

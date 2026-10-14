@@ -6,7 +6,7 @@ from __future__ import annotations
 """Tool wrapper for grant-backed subagent exec requests."""
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,16 +34,24 @@ from .models import (
 )
 
 
+# LLM: 参数仍来自通过验证的模型调用；凭据来源仅由 registry 的宿主工具选项承运，不从 params/write_boundary 恢复。
+# 类用途: 将受控命令调用与宿主环境擦洗边界一起交给原 grant 执行入口。
 @dataclass(frozen=True)
 class ControlledExecToolRequest:
     params: dict[str, Any]
     workspace_root: Path
     write_boundary: dict[str, object] | None = None
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 # LLM: apply=true 会直接进入 subprocess.Popen，当前没有 bwrap/OS sandbox；即使已有父级 grant 也必须单独审批。
 # 类用途: 让子代理在父级限定的命令和目录内先预览计划，获得用户批准后再真正执行。
 class ControlledExecTool(BaseTool):
+    # LLM: 仅 registry 构造注入宿主来源，grant 和用户 apply 参数都不能把自管凭据加入环境。
+    # 函数用途: 固定受控命令不可继承的环境变量来源，不启动进程。
+    def __init__(self, *, host_credential_env_names: frozenset[str] = frozenset()):
+        self.host_credential_env_names = frozenset(host_credential_env_names)
+
     model_spec = ToolModelSpec(
         name="controlled_exec",
         description="Plan or run a parent-granted shell command inside scoped task roots.",
@@ -129,6 +137,8 @@ class ControlledExecTool(BaseTool):
         return ToolHandlerOutcome(self.model_spec.name, False, "controlled_exec requires registry write_boundary", error_code="TOOL_EXECUTION_FAILED")
 
 
+# LLM: 原 grant、审批和清理合同不变；实际 shell 启动沿宿主来源擦洗，不把来源名写入计划或工具结果。
+# 函数用途: 预览受控命令或执行已经获批的命令和任务清理，并保留原结构化结果。
 def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolHandlerOutcome:
     grant_ref, grant_error = _select_controlled_exec_grant(request.params, request.write_boundary)
     if grant_error:
@@ -163,7 +173,8 @@ def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolHand
             _trash_payload(trash_result, grant.id, plan.reason),
         )
     if exec_request.apply and plan.allowed and plan.action == "execute_shell":
-        execution = execute_shell_command(shell_request_from_controlled_exec(exec_request))
+        execution = execute_shell_command(shell_request_from_controlled_exec(exec_request),
+                                          host_credential_env_names=request.host_credential_env_names)
         if execution.cancelled:
             return ToolHandlerOutcome(
                 "controlled_exec",

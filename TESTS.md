@@ -1,3 +1,17 @@
+2026-10-13 安全最终源码门：348个不重叠相关文件、3个隔离pytest进程共6103项，**6092 passed / 0 failed / 0 errors / 11 skipped**，三进程自然退出0（1883/1899/2321项），XML为source-recheck-2-shard-1/2/3。9项Linux bwrap、1项既有daemon heartbeat模拟限制、1项没有非回环本机地址；不隐瞒跳过。原单进程首轮8红完整保留，均沿真实凭据/任务根或更早拒绝模型的合同修复，定向87/95/106绿有重叠不相加。Ruff、doc sync、strict code-size hard=0、工作/暂存diff和clean-package均通过；暂存末尾空行发现和修复亦保留。生产/测试增删约9.1K，未达约10K全仓pytest阈值，未跑全仓或以线上CI作为验收。包内原生/更新/真实官方模型结果由准确source commit的发行验证清单单列，不把源码测试当安装包通过。
+
+2026-10-13 安全最终组合首轮：348 文件、6103 项，6085 passed / 8 failed / 10 skipped，真实 pytest 自然退出1，原 XML/log 保留。失败为三个旧 G1 正例夹具、三条缺准确本地任务根的 SessionTask 夹具、TUI 客户端缺实际宿主配置，以及原停机已先拒模型响应却仍期待创建工具记录的旧断言；没有放宽产品身份门。后者加强为原失败模型账不重开、迟到响应无 provenance、无工具账、零文件写入。9 skip 为 Linux bwrap，1 为既有 daemon heartbeat 模拟限制，不统称全部平台跳过。修复后的完整348文件按不重叠文件清单分3个独立pytest进程重验，分别使用独立basetemp/cache并保留每份XML和自然退出码；这是同一候选的全组合重验，不能以定向绿替代首轮红。静态严格 gate 与包验证仍待收口。
+
+来源非作者最终7文件145/145、共享HTTP两文件29/29通过；真实表单URL回显红→绿证据保留。额外公共包/资源/Session权限四文件106/106通过，包含撤销、版本与准确成员hash、跨owner/子代理上界和插件admin门；与主组合有重叠，不相加。源/测试已冻结后由主线统一发行，未读生产秘密或发送真实飞书。
+
+2026-10-13 群引用附件追加：作者 8 文件 **217 passed**；非作者两组定向复核分别 **89 passed**、**107 passed**，有重叠，不相加。另用原群事件/入站/owner 下载和真实 ReadFile/TaskLink 审批验证两组空间：本人可读、跨群 PATH_CROSS_OWNER_BLOCKED、0600 私有文件、父发送者 admin 不改变当前 actor，审批仍回当前引用者。引用 GET 失败绕过当前媒体硬门的接缝已按 3 红→绿修复，仍不提交部分集合路径。新开关 YAML/dataclass/normalize/CLI/adapter 原启动均接线，关闭、控制、私聊和未触发群消息零新增请求。仅合成供应商运输，不证明真实租户 scopes、历史消息可见性或送达；最终 `.9` 源码联合 gate 和发行验收分别记录。
+
+宿主环境与运输安全交接：[环境来源边界](docs/design/HOST_CREDENTIAL_ENVIRONMENT_BOUNDARY.md)、[owner 权限验收](docs/tasks/IM_OWNER_PERMISSION_SECURITY_HANDOFF.md)、[飞书运输安全](docs/design/FEISHU_OUTBOUND_SECURITY.md)、[独立投递复核](docs/tasks/FEISHU_SECURITY_AUDIT_HANDOFF.md)。原模块/账本保持唯一；最终联合发布结果仍待同源 gate。
+
+
+2026-10-13 追加安全复核（修复已落、联合与发行验收中）：回环身份只认宿主凭据，退休迁移开关；原 factory 自动补接鉴权，IM 禁止关闭 owner 隔离；准确宿主 SecretRef 来源清理子进程环境，监控 HTTP 凭据复用当前 owner/TaskCredential，损坏网络策略关闭网络并在每次工具调用重核冻结上界；认证 HTTP 拒绝跳转，附件在原 Delivery 首副作用前冻结 owner/hash/size 一致字节，错落 Session 目标拒绝。普通/admin/full、群/私聊、子孙/后台正反例及真实租户边界详见 [安全复核](docs/design/IM_SECURITY_AUDIT_20261013.md)。
+
+
 2026-10-13 `.8` 最终源码：追加完整 JSON 包装修复后，78 个直接相关文件 **1251 passed、0 failed、0 skipped**。`.7` 候选真实模型返回合法四字段但使用 json 围栏，被原完整文本解码拒绝，原 run 已失败结算、零外发，未重跑业务。修复沿 common 完整值解码，不扫描正文、增加调用或放宽原 schema/来源；正负包装及正式 scheduler integration 已覆盖。最终严格 gate 与新包验收分开核对，旧候选不交付；真实飞书运输不作为本轮验收来源。
 
 2026-10-13 群任务/首次反馈/公开回执最终源码验证：77 个直接相关文件 **1219 passed、0 failed、0 skipped**。首轮 1217 项有 11 个合法本地创建失败，已修原 actor 解析并保留首轮证据；未给本地请求伪造 IM 身份。迁移的真实 claim 竞争已纳入原锁事务并回归。同群他人/跨 owner、主子孙身份与审批、第一次 SessionTask、旧 queued 迁移、通知静默/冻结重投及前后台进度均覆盖；非作者只读审查另列，数字不相加。本地 Ruff、doc sync、strict size（hard=0）、diff 和 clean-package 均已通过；发行验收另存准确提交的包证据，未发送真实飞书。

@@ -32,10 +32,14 @@ def _resolved_max_agents(value: Any) -> int:
     return max(1, resolved if resolved > 0 else _DEFAULT_MAX_AGENT_COUNT)
 
 
+# LLM: owner 身份只由宿主池提供；克隆前保留凭据来源的擦洗上界，不从用户属性构造配置权威。
+# 函数用途: 为用户实例覆盖 owner 三字段，同时保留宿主环境来源的内部安全上界。
 def _config_with_owner(base_config: Any, owner: Any) -> Any:
     """克隆基础 config,把 owner 三字段覆盖成该用户(其余配置原样继承)。"""
+    from .settings.secret_ref import freeze_managed_secret_environment
+
     return dataclasses.replace(
-        base_config,
+        freeze_managed_secret_environment(base_config),
         my_agent_owner_provider=owner.provider,
         my_agent_owner_kind=owner.owner_kind,
         my_agent_owner_id=owner.owner_id,

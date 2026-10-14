@@ -1,3 +1,5 @@
+# LLM: 用户配置只能进入 public_config_keys；宿主凭据来源上界与诊断字段均不可从 YAML 或任务覆盖注入。
+# 模块用途: 合并配置来源优先级并隔离宿主内部字段，避免用户覆盖擦洗边界。
 from __future__ import annotations
 
 import os
@@ -11,6 +13,7 @@ INTERNAL_RUNTIME_CONFIG_FIELDS = {
     "config_layers",
     "config_path",
     "config_sources",
+    "host_credential_env_names",
 }
 
 

@@ -161,8 +161,13 @@ def file_message_type(path: Path) -> str:
     return "file"
 
 
+# LLM: header参数是文件名等不可信数据；禁止控制字符并转义quoted-string，字节正文仍原样上传。
+# 函数用途: 构造原multipart并保持合法名称/MIME扩展，不让文件名插入另一个HTTP部件头。
 def build_multipart(fields: dict[str, str], file_field: str, filename: str, blob: bytes) -> tuple[bytes, str]:
     """构造 multipart/form-data body + content-type(图片/文件上传用)。"""
+    fields = {_multipart_header_value(str(key)): value for key, value in fields.items()}
+    file_field = _multipart_header_value(file_field)
+    filename = _multipart_header_value(filename)
     boundary = "----myagent" + secrets.token_hex(8)
     out = bytearray()
     for key, value in fields.items():
@@ -171,6 +176,14 @@ def build_multipart(fields: dict[str, str], file_field: str, filename: str, blob
     out += blob
     out += f"\r\n--{boundary}--\r\n".encode()
     return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+# LLM: multipart quoted-string只容数据，不接受CRLF/C0/DEL协议控制；按原RFC反斜杠转义保留引号等合法名字。
+# 函数用途: 校验并转义单个部件头参数，防止任意文件名覆盖上传字段或注入认证头。
+def _multipart_header_value(value: str) -> str:
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('multipart header parameter contains a control character')
+    return value.replace('\\', '\\\\').replace('"', '\\"')
 
 
 # LLM: message_id、原名和资源 key 只作为文件名数据；任何一段都不能携带路径或覆盖另一条消息的目录。

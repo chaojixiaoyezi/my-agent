@@ -1,3 +1,5 @@
+# LLM: 严格二进制读取必须把require_dir_fd透传原目录入口，缺dirfd/no-follow/directory能力不回落路径读取。
+# 模块用途: 统一受管FD读写；严格附件读取复用原完整平台能力核验，不另造权限或文件状态。
 """LLM: 宿主文件读写固定受信根；文本和二进制共用逐段 no-follow 原语，不能用它代替业务权限。
 
 模块用途: 当模型或 shell 能修改工作区目录时，宿主通过受信根逐段拒绝符号链接地读写内部账本，
@@ -82,7 +84,7 @@ def open_readonly_file_beneath(root: str | Path, relative_parts: tuple[str, ...]
         os.close(parent_fd)
 
 
-# LLM: 与文本读取共用 no-follow 链；严格来源读取可要求 dirfd，能力不足不能降级 portable；预算限制实际读取而非仅相信 stat。
+# LLM: 与文本读取共用no-follow链；require_dir_fd透传原目录入口，缺dirfd/O_NOFOLLOW/O_DIRECTORY不得portable回落；预算限制实际读取。
 # 函数用途: 有界读取宿主管理的普通二进制文件，不跟随链接，也不创建目录。
 def read_bytes_beneath(
     root: str | Path,
@@ -99,7 +101,7 @@ def read_bytes_beneath(
             raise NoFollowPathError("strict no-follow reading is unavailable")
         return _read_bytes_portable(root, relative_parts, max_bytes)
     try:
-        parent_fd = open_directory_beneath(root, relative_parts[:-1])
+        parent_fd = open_directory_beneath(root, relative_parts[:-1], require_dir_fd=require_dir_fd)
     except FileNotFoundError:
         return None
     descriptor = -1

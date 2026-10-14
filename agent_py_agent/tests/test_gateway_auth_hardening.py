@@ -1,7 +1,7 @@
 """审计 #1 修复真测:网关默认绑 loopback + 暴露须鉴权(fail-closed)+ 写端点权限校验。
 
 真起 HTTP server、真发请求(urllib),断言:默认只绑 127.0.0.1;绑非 loopback 无鉴权拒绝启动;
-伪造非管理员外部通道身份派工/停网关被 403;本机回环终端仍 admin 放行(单机路径不破)。
+伪造非管理员外部通道身份派工/停网关被 403;本机持宿主凭据的终端仍可正常使用管理员路径。
 学 通道运行时:默认 loopback、暴露到网络须鉴权。
 """
 
@@ -17,6 +17,7 @@ import pytest
 
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.bounded_http_server import (
     GatewayBoundedHTTPServer,
 )
@@ -26,6 +27,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServerParams,
     _is_loopback_host,
 )
+from agent_py_agent.agent.settings import AgentConfig
 
 
 class _Paths:
@@ -48,13 +50,24 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
+_TOKEN = "synthetic-auth-hardening"
+
+
 def _auth_mw() -> AuthMiddleware:
-    return AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+    return AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True), auth_token=_TOKEN)
+
+
+# LLM: 原 G1 启动入口需要真实临时宿主数据根；不跳过预检、不借用用户默认目录。
+# 函数用途: 为本组 HTTP 边界测试构造有明确宿主身份的最小对象。
+def _host(tmp_path):
+    root = tmp_path / "host"
+    return SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(root), enable_plugins=False, enable_subagents=False, timezone="UTC", gateway_per_user_owner_scoping=False), tmp_path)
 
 
 def _post(port: int, path: str, headers: dict | None = None, body: dict | None = None) -> int:
     data = json.dumps(body or {}).encode("utf-8")
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method="POST")
+    req.add_header("X-Gateway-Token", _TOKEN)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
@@ -100,7 +113,7 @@ def test_refuse_nonloopback_without_auth(tmp_path) -> None:
 def test_nonloopback_with_auth_starts(tmp_path) -> None:
     server = GatewayHTTPServer(
         _free_port(), _Paths(tmp_path),
-        params=GatewayHTTPServerParams(bind_host="0.0.0.0", auth_middleware=_auth_mw()),
+        params=GatewayHTTPServerParams(bind_host="0.0.0.0", agent=_host(tmp_path), auth_middleware=_auth_mw()),
     )
     server.start()  # 有鉴权 → 允许暴露
     try:
@@ -110,10 +123,10 @@ def test_nonloopback_with_auth_starts(tmp_path) -> None:
 
 
 def test_trusted_channel_user_can_submit_but_not_admin(tmp_path) -> None:
-    # #2 修正:回环本机 = 可信来源,渠道用户(经适配器转发)可提交自己的任务(202),
+    # 凭据确认宿主来源，渠道用户经适配器携自身身份可提交任务(202),
     # 但不是 admin —— 停网关被 403。远程不可信来源的拒绝在 test_gateway_identity_trust 的中间件级真测。
     port = _free_port()
-    server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(auth_middleware=_auth_mw()))
+    server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(agent=_host(tmp_path), auth_middleware=_auth_mw()))
     server.start()
     try:
         assert _post(port, "/ask", headers={"X-Channel": "feishu", "X-User-Id": "bob"},
@@ -125,10 +138,10 @@ def test_trusted_channel_user_can_submit_but_not_admin(tmp_path) -> None:
 
 def test_loopback_terminal_still_admin(tmp_path) -> None:
     port = _free_port()
-    server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(auth_middleware=_auth_mw()))
+    server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(agent=_host(tmp_path), auth_middleware=_auth_mw()))
     server.start()
     try:
-        # 无身份头 = 本机终端 = admin → 派工放行(单机路径不破)
+        # 持宿主凭据且无渠道身份头 = 宿主终端 → 管理员派工放行
         status = _post(port, "/ask", body={"kind": "ask", "goal": "hello"})
         assert status == 202
     finally:
@@ -137,7 +150,7 @@ def test_loopback_terminal_still_admin(tmp_path) -> None:
 
 def test_stop_requires_admin(tmp_path) -> None:
     port = _free_port()
-    server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(auth_middleware=_auth_mw()))
+    server = GatewayHTTPServer(port, _Paths(tmp_path), params=GatewayHTTPServerParams(agent=_host(tmp_path), auth_middleware=_auth_mw()))
     server.start()
     try:
         assert _post(port, "/stop", headers={"X-Channel": "feishu", "X-User-Id": "attacker"}) == 403  # 非管理员停不了

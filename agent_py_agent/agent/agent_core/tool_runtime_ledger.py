@@ -22,6 +22,7 @@ from ..plugin_observation import (
     observation_event_payload_from_envelope,
 )
 from ..tooling.runtime_contracts import tool_arguments_hash
+from ..user_space.owner_policy import resolve_effective_owner_policy
 from .run_task_workspace_writer import current_run_tool_output_archive_root
 from .runtime_write_guards import attach_running_install_guard
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
@@ -197,10 +198,19 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     return merged or boundary
 
 
-# LLM: 原 owner 总开关和冻结 child 上界取交集；模型参数、临时工具审批或 full-access 不能把禁网变成有网。
-# 函数用途: 把网络禁用事实接到本次实际进程边界，不影响已启用网络的旧默认行为。
+# LLM: 每次读取原 owner 策略并与创建期/child 上界取交集；坏权限或真实 owner 缺 home 关闭，独立库无 owner 不新增授权。
+# 函数用途: 在实际工具入口复核网络撤权，主子孙和后台均不能靠旧缓存继续联网；不覆盖持久快照或策略文件。
 def _attach_owner_network_scope(boundary, agent):
-    owner_enabled = getattr(getattr(agent, "owner_policy", None), "network_enabled", True)
+    policy = getattr(agent, "owner_policy", None)
+    owner_enabled = bool(getattr(policy, "network_enabled", True))
+    home = getattr(agent, "home_paths", None)
+    if home is not None:
+        try:
+            owner_enabled = owner_enabled and resolve_effective_owner_policy(home).network_enabled
+        except (AttributeError, OSError, TypeError, ValueError):
+            owner_enabled = False
+    elif getattr(policy, "owner_home", "") or getattr(policy, "owner_id", ""):
+        owner_enabled = False
     permissions = boundary.get("effective_permissions") or {}
     child_enabled = permissions.get("network_enabled", True) if isinstance(permissions, dict) else True
     if not owner_enabled or not child_enabled:

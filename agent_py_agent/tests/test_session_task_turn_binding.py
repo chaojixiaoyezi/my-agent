@@ -12,13 +12,11 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 from agent_py_agent.agent.agent_core.runtime.guidance import inject_pending_guidance
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.conversation.authority import CONVERSATION_SESSION_TASK_ID_ATTR
 from agent_py_agent.agent.conversation.background_execution import BackgroundExecutionResult
-from agent_py_agent.agent.conversation.models import ConversationThread
+from agent_py_agent.agent.conversation.models import ChannelBinding, ConversationThread
 from agent_py_agent.agent.conversation.runtime import (
     BackgroundRunRequest,
     _background_task_attributes,
@@ -29,6 +27,8 @@ from agent_py_agent.agent.conversation.runtime import (
 from agent_py_agent.agent.conversation.session_messaging import SESSION_TASK_ORIGIN_KIND
 from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
 from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 _SENDER = "thread-a"
@@ -61,24 +61,20 @@ def _request(wake: dict) -> BackgroundRunRequest:
     )
 
 
-def _agent(tmp_path) -> tuple[SimpleNamespace, ConversationStore]:
-    store = ConversationStore(tmp_path / "conv")
-    store.threads.write(
-        ConversationThread(
-            thread_id=_TARGET,
-            canonical_user_id="local-agent",
-            owner_id="main",
-            owner_home="",
-            title="目标会话",
-        )
-    )
-    agent = SimpleNamespace(
-        conversation_store=store,
-        config=CapabilityConfig(),
-        _capability_config_runtime_snapshot=type(
-            "_S", (), {"config": CapabilityConfig()}
-        )(),
-    )
+# LLM: 真实Core提供canonical local/main home与Store；原TaskLink绑定精确后台根，本地不构造IM actor、不修改后台恢复门。
+# 函数用途: 补齐本地派活夹具的发送方、目标线程和原根事实，仍由真实_run_params生成回合号和正文认领。
+def _agent(tmp_path) -> tuple[SimpleAgent, ConversationStore]:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_plugins=False,
+        my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
+    store = agent.conversation_store
+    for identifier, title in ((_SENDER, "发送会话"), (_TARGET, "目标会话")):
+        binding = ChannelBinding(channel="cli", channel_conversation_id=identifier,
+            channel_user_id="local-agent", canonical_user_id="local-agent", thread_id=identifier)
+        store.threads.write(ConversationThread(thread_id=identifier, canonical_user_id="local-agent",
+            owner_id=agent.home_paths.owner_id, owner_home=str(agent.home_paths.owner_home_dir),
+            cwd=str(agent.home_paths.owner_workspace_dir), title=title, channel_bindings=(binding,)))
+    store.tasks.bind({"thread_id": _TARGET, "task_id": _TASK_ID, "goal": _GOAL, "status": "active"})
+    agent._capability_config_runtime_snapshot = type("_S", (), {"config": CapabilityConfig()})()
     return agent, store
 
 
@@ -120,6 +116,7 @@ def test_run_params_carry_session_task_turn_id(tmp_path) -> None:
     assert params.request_id == _TASK_ID
     assert params.run_id == _TASK_ID
     assert params.task_id == _TASK_ID
+    assert params.host_channel_actor is None
 
 
 def test_run_params_without_wake_id_stay_taskless(tmp_path) -> None:

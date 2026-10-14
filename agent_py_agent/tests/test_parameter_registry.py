@@ -147,7 +147,7 @@ def test_registry_covers_every_config_field_with_yaml_descriptions():
     registry = parameter_registry()
     # P17：登记表覆盖三份配置；主配置部分仍必须与 AgentConfig 字段一一对应（capability 31 / runtime_guard 23
     # 由各自来源测试锁定），防止登记表悄悄丢字段。
-    assert {key for key, spec in registry.items() if spec.source == "agent"} == {item.name for item in fields(AgentConfig)}
+    assert {key for key, spec in registry.items() if spec.source == "agent"} == {item.name for item in fields(AgentConfig) if not item.metadata.get("host_only")}
     assert "64K" in registry["max_tokens"].description
     assert registry["max_tokens"].value_type == "int" and registry["enable_self_learning"].value_type == "bool"
     fuse = registry["goal_continuation_idle_limit"]
@@ -261,8 +261,9 @@ def test_credential_names_match_whole_trailing_segments_only():
                                                   "aws_secret_access_key", "basic_auth", "auth", "pass"))
     assert not any(is_credential_key(key) for key in ("auth_enabled", "access_mode", "path_access_mode", "oauth", "bypass",
                                                       "compass", "model_auth_ref", "aws_access_key_id", "pwd_hint"))
-    # 开关式键（值是 true/false）不算凭据：不脱敏（用户要能看到开关状态），但仍是安全边界（credential 记号），模型不能改。
-    assert not is_credential_key("gateway_require_local_credential")
+    # 旧迁移开关已退休，不再向参数目录提供可关闭的宿主认证边界。
+    assert "gateway_require_local_credential" not in parameter_registry()
+    assert is_credential_key("gateway_require_local_credential")
     assert classify_safety("gateway_require_local_credential", "bool") == SAFETY_BOUNDARY
     # 凭据名即使是数字类型也仍是边界（不因“数字不指向任何东西”被放开）
     assert classify_safety("bot_token", "int") == SAFETY_BOUNDARY and classify_safety("bot_token_limit", "int") != SAFETY_BOUNDARY

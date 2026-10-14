@@ -1,4 +1,4 @@
-"""真实 Gateway 队列、原生工具循环、临时安装和 Compact 提交；只替换模型传输，不接生产。"""
+"""真实 Gateway 队列、生成签发、原生工具循环、临时安装和 Compact 提交；仅后端传输为假，不接生产。"""
 from __future__ import annotations
 
 from agent_py_agent.agent.agent_core import _tool_loop_service, tool_ir_history
@@ -65,8 +65,14 @@ def test_three_gateway_turns_read_compact_restore_once_with_real_tools(tmp_path,
             deliveries.append((params.request_id, text))
         return result
 
-    def generate(request):
+    original_generate = _tool_loop_service.generate_model_response
+
+    # 来源签发不能由测试手填；观察包装只捕获正式请求，供应商响应在 backend.generate 替身返回。
+    def observe_generation(request):
         requests.append(request)
+        return original_generate(request)
+
+    def generate(prompt, **kwargs):
         if len(requests) in (1, 2):
             arguments = {"action": "get", "package_id": "carry-gateway"}
             if len(requests) == 2:
@@ -76,7 +82,8 @@ def test_three_gateway_turns_read_compact_restore_once_with_real_tools(tmp_path,
         return ModelResponse(text="继续完成业务", backend="fixture")
 
     monkeypatch.setattr(tool_ir_history, "record_runtime_facts_turn_ir", observe)
-    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
+    monkeypatch.setattr(agent.backend, 'generate', generate)
+    monkeypatch.setattr(_tool_loop_service, "generate_model_response", observe_generation)
     first_id, first, _chunks = _ask(tmp_path, agent, paths, "第一轮读方法")
     assert first["ok"] and len(requests) == 3, first
     store, tid = agent.conversation_store, _thread_id(agent)

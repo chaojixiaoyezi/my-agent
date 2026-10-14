@@ -217,7 +217,7 @@ def _require_legacy_policy_ready(owner, policy) -> None:
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
-    # LLM: 构造只读规范环境和设置；私有值只放子进程环境，包声明的 effect 不降低原危险工具门。
+    # LLM: 构造冻结宿主继承擦洗来源；明确插件设置/host API 原 native env 保持授权语义，包 effect 不降低危险工具门。
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
 #   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
 #   process_sandbox=True（配置 plugin_process_sandbox）时启动命令套进平台沙箱，只可写数据目录，TMPDIR 指向其中的 .tmp；
@@ -225,7 +225,7 @@ class PluginMCPClient(MCPStdioClient):
 #   沙箱不可用时这里抛 SandboxUnavailable，调用方应先用 plugin_sandbox_problem 结构化拒绝。
     # 函数用途: 将已准备的插件环境（Python 或 v6 随包文件）接到原 MCP 客户端，不在构造时启动进程；runtime_repo 是 owner 权威库，供观察新鲜度复核只读。
     def __init__(self, owner, installation: PluginInstallation, *, runtime_repo: object | None = None,
-                 process_sandbox: bool = False):
+                 process_sandbox: bool = False, host_credential_env_names: frozenset[str] = frozenset()):
         self.runtime_repo = runtime_repo
         activation = installation.activation
         if activation is None or activation.phase not in {"preparing", "active"}:
@@ -266,6 +266,7 @@ class PluginMCPClient(MCPStdioClient):
             name="plugin_" + installation.manifest.plugin_id,
             command=command, args=args, cwd=str(cwd),
             env={"MY_AGENT_PLUGIN_SETTINGS": settings, PLUGIN_DATA_DIR_ENV: str(data_dir), **host_api_env, **sandbox_env},
+            host_credential_env_names=frozenset(host_credential_env_names),
             catalog_category="plugins",
         ), activation=self.activation_ref)
 

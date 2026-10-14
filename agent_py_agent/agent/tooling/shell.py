@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +119,8 @@ _INTERNAL_AGENT_RUN_RE = re.compile(
 )
 
 
+# LLM: Shell 的宿主选项只能由 registry 装配；凭据来源是擦洗上界，不得从模型调用参数恢复或透传。
+# 类用途: 保存命令执行的权限、输出和宿主环境边界，前台、后台与 PTY 共用这些事实。
 @dataclass(frozen=True)
 class ShellToolOptions:
     workspace_roots: list[Path] | None = None
@@ -135,6 +137,7 @@ class ShellToolOptions:
     # owner 隔离时沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录），其中本 owner 的可见范围
     # 仍放行；full access 不生效。空=不加读拒绝。HOME 落在这些根里时，子进程 HOME 改指到 owner home。
     host_private_roots: tuple[str, ...] = ()
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     # 来自配置 shell_sandbox_boundary_facts：owner 隔离时命令以非零码退出，结果附带沙箱边界事实，说明里多一条边界提示。
     sandbox_boundary_facts: bool = True
 
@@ -441,9 +444,11 @@ def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, obje
 # cache 变量；未知工具仍使用开放世界的 TMPDIR/XDG 路径。凭据擦洗仍先执行，不能因此恢复 secret。
 # hidden_roots 是沙箱拒读的宿主根：宿主 HOME 落在其中时改指到 owner home（见 _redirected_home）。
 # sandboxed=True（只给真的进了 attempt 沙箱的命令：前台、后台、PTY）时设 H3 的“宿主状态只读”标记，否则去掉继承来的同名变量。
+# 凭据擦洗对所有权限档生效；宿主来源名不是模型参数，full-access 的文件访问范围保持原合同。
 # 函数用途: 构造 shell 子进程环境，并把普通缓存及 npm 缓存安全地放进任务持久临时区。
 def _subprocess_text_env(
     owner_home: object = None, *, hidden_roots: tuple[str, ...] = (), sandboxed: bool = False,
+    host_credential_env_names: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     from ..path_access_policy import HOST_STATE_READ_ONLY_ENV
 
@@ -459,13 +464,10 @@ def _subprocess_text_env(
     if sandboxed:
         env[HOST_STATE_READ_ONLY_ENV] = "1"
     _apply_owner_scoped_pip_env(env, owner_home)
-    # 选项1-C 凭据擦洗:owner-scoped(降权,per-user 不可信命令)+ bwrap 放行外网 → 剥掉自管凭据
-    # (MINIMAX_API_KEY / 飞书 app_secret 等),防 `curl 带 $KEY` 外泄(真机实锤 env 泄漏)。
-    # admin/单租户(owner_home 空)= 可信 operator shell,保留全量(抄 长期助手 本地后端语义,不破单机)。
-    if str(owner_home or "").strip():
-        from ._subprocess_env_scrub import scrub_subprocess_env
+    from ._subprocess_env_scrub import scrub_subprocess_env
 
-        env = scrub_subprocess_env(env)
+    env = scrub_subprocess_env(env, host_credential_env_names=host_credential_env_names)
+    if str(owner_home or "").strip():
         env["TMPDIR"] = "/tmp"
         env["XDG_CACHE_HOME"] = "/tmp/.cache"
         env["NPM_CONFIG_CACHE"] = "/tmp/.cache/npm"
@@ -724,6 +726,7 @@ def _sandbox_exec(
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
         network_access=host_policy.network_access,
+        host_credential_env_names=host_policy.host_credential_env_names,
         # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
         private_read_roots=tuple(
             Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
@@ -983,7 +986,7 @@ def _build_shell_runtime_policy(default_timeout: int) -> ToolRuntimePolicy:
 # LLM: ShellTool 是命令执行的唯一注册入口；后台参数必须在 runtime policy 中声明为 dangerous。
 # 类用途: 在工作区内执行一次性命令，或启动可查看、可停止的受管后台进程。
 class ShellTool(BaseTool):
-    # LLM: model spec、effect、sandbox、幂等和受信补参必须在同一个 runtime policy 中同步构造。
+    # LLM: model spec、effect、sandbox、幂等和受信补参必须同源；宿主凭据来源只从 options 保存，模型参数不得覆盖。
     # 函数用途: 按工作区和访问选项初始化 shell 工具的展示 schema 与执行边界。
     def __init__(
         self,
@@ -1011,6 +1014,7 @@ class ShellTool(BaseTool):
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
         self.host_private_roots = tuple(str(root) for root in options.host_private_roots if str(root or "").strip())
+        self.host_credential_env_names = frozenset(options.host_credential_env_names)
         self.artifact_backup_root = (
             Path(options.artifact_backup_root).expanduser().resolve(strict=False)
             if options.artifact_backup_root is not None
@@ -1277,7 +1281,7 @@ class ShellTool(BaseTool):
             sandbox_protected_paths,
         )
 
-    # LLM: 先预留真实执行归属，再由 host 启动和明确交接；原回合取消只影响交接前，日志上限由 host 独占。
+    # LLM: 先预留真实执行归属，spawn 带同一宿主擦洗上界；取消只影响交接前，日志与进程交接仍由 host 独占。
     # 函数用途: 启动可跨工作片管理的后台命令，返回稳定句柄及真实启动或清理结果。
     def _start_background_command(
         self, command: str, target: Path, sandbox_roots: _ShellSandboxRoots,
@@ -1289,7 +1293,8 @@ class ShellTool(BaseTool):
             argv = _background_command_argv(command, target, self.path_access_policy.owner_scope_root,
                                             self.protected_persona_root, *sandbox_roots[:2],
                                             SandboxWriteProtection(tuple(sandbox_roots[2] or ()), getattr(self, "_sandbox_forbidden_write_roots", ())),
-                                            host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True)))
+                                            host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True),
+                                                                          self.host_credential_env_names))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
@@ -1297,7 +1302,7 @@ class ShellTool(BaseTool):
             request = BackgroundLaunchRequest(
                 argv=argv, command=command, cwd=target, log_path=log_path,
                 env=_subprocess_text_env(self.path_access_policy.owner_scope_root, hidden_roots=self.host_private_roots,
-                                         sandboxed=True),
+                                         sandboxed=True, host_credential_env_names=self.host_credential_env_names),
                 max_log_bytes=_MAX_BG_LOG_BYTES,
                 store_root=process_session_store_root(self.workspace_root, access_scope.owner_home),
                 access_scope=access_scope, execution_scope=execution_scope or ProcessExecutionScope(owner_home=access_scope.owner_home),
@@ -2041,7 +2046,7 @@ def _background_session_hint(*, running: bool) -> str:
     )
 
 
-# LLM: 普通前台命令必须是独立的非交互执行，不能继承宿主终端输入；POSIX 经 attempt 沙箱，Windows 单租户保持同一 stdin 语义。
+# LLM: 前台独立执行不继承宿主输入；两平台环境都擦除准确宿主来源，POSIX attempt 与 Windows 原路径权限不变。
 # 函数用途: 选择平台执行路径并等待命令完成；管道和重定向由命令自身提供输入，人工交互使用 PTY 会话。
 def _run_shell_command(
     tool: ShellTool,
@@ -2079,7 +2084,8 @@ def _run_shell_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(tool.path_access_policy.owner_scope_root),
+            env=_subprocess_text_env(tool.path_access_policy.owner_scope_root,
+                                     host_credential_env_names=tool.host_credential_env_names),
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         return _communicate_process(proc, command=command, timeout=timeout)
@@ -2088,7 +2094,7 @@ def _run_shell_command(
     )
 
 
-# LLM: 前台命令只能吃 attempt 沙箱 argv；显式关闭继承 stdin，防止 Gateway/TUI 输入被抢读；加载失败不回退宿主 shell。
+# LLM: 前台只能吃 attempt argv；stdin 关闭且准确 host 环境来源剥离，沙箱失败不回退宿主 shell。
 # 函数用途: 在 attempt 沙箱内运行非交互命令并等待完成；无显式输入时得到 EOF，而不是白等宿主终端四分钟。
 def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
@@ -2108,7 +2114,7 @@ def _run_attempt_sandboxed_shell_command(
         sandbox_write_roots,
         sandbox_read_roots,
         SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
-        host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True)),
+        host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names),
     )
     try:
         proc = subprocess.Popen(
@@ -2121,7 +2127,8 @@ def _run_attempt_sandboxed_shell_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True),
+            env=_subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True,
+                                     host_credential_env_names=tool.host_credential_env_names),
             start_new_session=True,
         )
     except OSError as exc:

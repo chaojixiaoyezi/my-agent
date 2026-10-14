@@ -1,7 +1,7 @@
 """审计 #2 修复真测:网关按来源可信度提取身份,不信可伪造的 X-User-Id/X-Channel 头。
 
 中间件级(安全边界):远程不可信来源 → 匿名 USER(伪造 X-Channel:chat / X-User-Id:admin 都骗不到 admin);
-回环本机 → honor 真实身份;token 供暴露部署。真 HTTP:回环转发 X-User-Id → 网关 inbox 记真实渠道用户
+所有来源（包括回环）必须持宿主凭据才采用身份头。真 HTTP:凭据 + X-User-Id → 网关 inbox 记真实渠道用户
 (修"渠道用户全跑成 admin");真驱动 AdapterManager 验证适配器确实带上身份头。学 长期助手 局部凭据信任。
 """
 
@@ -19,13 +19,16 @@ import pytest
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
 from agent_py_agent.agent.auth.models import Role
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
 )
+from agent_py_agent.agent.settings import AgentConfig
 
 REMOTE = "203.0.113.7"  # 非回环(模拟远程攻击者)
 LOCAL = "127.0.0.1"
+_TOKEN = "synthetic-identity-trust"
 
 
 def _mw(token: str = "") -> AuthMiddleware:
@@ -47,37 +50,39 @@ def test_remote_spoofed_terminal_channel_not_admin() -> None:
 
 
 def test_loopback_honors_channel_identity() -> None:
-    mw = _mw()
-    assert mw.extract_identity({"X-Channel": "feishu", "X-User-Id": "bob"}, LOCAL) == ("bob", "feishu")
-    assert mw.get_permission({"X-Channel": "feishu", "X-User-Id": "bob"}, LOCAL).role == Role.USER
+    mw = _mw(_TOKEN)
+    headers = {"X-Gateway-Token": _TOKEN, "X-Channel": "feishu", "X-User-Id": "bob"}
+    assert mw.extract_identity(headers, LOCAL) == ("bob", "feishu")
+    assert mw.get_permission(headers, LOCAL).role == Role.USER
 
 
 def test_loopback_http_headers_are_case_insensitive() -> None:
-    mw = _mw()
+    mw = _mw(_TOKEN)
     assert mw.extract_identity(
-        {"x-user-id": "bob", "X-CHANNEL": "feishu"}, LOCAL
+        {"x-gateway-token": _TOKEN, "x-user-id": "bob", "X-CHANNEL": "feishu"}, LOCAL
     ) == ("bob", "feishu")
 
 
 def test_conflicting_case_variants_fail_closed() -> None:
-    mw = _mw()
-    user_id, channel = mw.extract_identity(
-        {
-            "X-User-Id": "alice",
-            "x-user-id": "bob",
-            "X-Channel": "feishu",
-        },
-        LOCAL,
-    )
-    assert (user_id, channel) == ("anonymous", "feishu")
+    mw = _mw(_TOKEN)
+    headers = {
+        "X-Gateway-Token": _TOKEN,
+        "X-User-Id": "alice",
+        "x-user-id": "bob",
+        "X-Channel": "feishu",
+    }
+    # 统一拒绝歧义来源，不能保留部分身份让HTTP派工仍入队，更不能与无头host terminal混同。
+    assert mw.extract_identity(headers, LOCAL) == ("anonymous", "external")
+    assert mw.check_trusted(headers, LOCAL) is False
 
 
-def test_loopback_no_header_is_admin() -> None:
-    assert _mw().extract_identity({}, LOCAL) == ("admin", "chat")  # 回环终端=admin(单机不破)
+def test_loopback_no_header_is_anonymous() -> None:
+    assert _mw().extract_identity({}, LOCAL) == ("anonymous", "external")
+    assert _mw(_TOKEN).extract_identity({"X-Gateway-Token": _TOKEN}, LOCAL) == ("admin", "chat")
 
 
-def test_peer_none_is_trusted_backward_compat() -> None:
-    assert _mw().extract_identity({}, None) == ("admin", "chat")  # 未提供来源=可信(既有调用/单测)
+def test_peer_none_is_not_implicitly_trusted() -> None:
+    assert _mw().extract_identity({}, None) == ("anonymous", "external")
 
 
 def test_token_grants_trust_to_remote() -> None:
@@ -90,16 +95,17 @@ def test_token_grants_trust_to_remote() -> None:
 
 def test_check_trusted_gate() -> None:
     mw = _mw(token="t")
-    assert mw.check_trusted({}, LOCAL) is True
+    assert mw.check_trusted({}, LOCAL) is False
+    assert mw.check_trusted({"X-Gateway-Token": "t"}, LOCAL) is True
     assert mw.check_trusted({}, REMOTE) is False
     assert mw.check_trusted({"X-Gateway-Token": "t"}, REMOTE) is True
 
 
 def test_require_admin_denies_remote_and_user() -> None:
-    mw = _mw()
+    mw = _mw(_TOKEN)
     ok_remote, _p, status, _b = mw.require_admin({"X-Channel": "chat", "X-User-Id": "admin"}, REMOTE)
     assert not ok_remote and status == 403  # 远程伪造 admin → 拒
-    ok_user, _p2, _s2, _b2 = mw.require_admin({"X-Channel": "feishu", "X-User-Id": "bob"}, LOCAL)
+    ok_user, _p2, _s2, _b2 = mw.require_admin({"X-Gateway-Token": _TOKEN, "X-Channel": "feishu", "X-User-Id": "bob"}, LOCAL)
     assert not ok_user  # 可信但非管理员 → 拒
 
 
@@ -133,7 +139,8 @@ def _free_port() -> int:
 
 
 def _server(tmp_path) -> GatewayHTTPServer:
-    return GatewayHTTPServer(_free_port(), _Paths(tmp_path), params=GatewayHTTPServerParams(auth_middleware=_mw()))
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "host"), enable_plugins=False, enable_subagents=False, timezone="UTC", gateway_per_user_owner_scoping=False), tmp_path)
+    return GatewayHTTPServer(_free_port(), _Paths(tmp_path), params=GatewayHTTPServerParams(agent=agent, auth_middleware=_mw(_TOKEN)))
 
 
 def test_channel_identity_propagates_to_inbox(tmp_path) -> None:
@@ -144,7 +151,7 @@ def test_channel_identity_propagates_to_inbox(tmp_path) -> None:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/ask",
             data=json.dumps({"kind": "ask", "goal": "hi"}).encode("utf-8"),
-            headers={"Content-Type": "application/json", "X-User-Id": "bob", "X-Channel": "feishu"},
+            headers={"Content-Type": "application/json", "X-Gateway-Token": _TOKEN, "X-User-Id": "bob", "X-Channel": "feishu"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -164,6 +171,8 @@ def test_adapter_submit_propagates_identity(tmp_path) -> None:
     server.start()
     try:
         mgr = ChannelManager(gateway_port=port)
+        from agent_py_agent.agent.gateway_parts.client_credentials import GatewayClientCredentials
+        mgr._reply_poll_client.credentials = GatewayClientCredentials(tmp_path / "host", _TOKEN)
         msg = SimpleNamespace(content="hi", channel="feishu", user_id="alice", message_id="m1")
         submission = mgr._submit_gateway_ask(msg)  # 真驱动适配器转发
         assert submission.request_id
@@ -187,7 +196,7 @@ def test_finished_result_uses_archived_request_owner(tmp_path) -> None:
     try:
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/result/{request_id}",
-            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+            headers={"X-Gateway-Token": _TOKEN, "X-User-Id": "alice", "X-Channel": "feishu"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             assert response.status == 200
@@ -195,7 +204,7 @@ def test_finished_result_uses_archived_request_owner(tmp_path) -> None:
 
         other_user_request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/result/{request_id}",
-            headers={"X-User-Id": "bob", "X-Channel": "feishu"},
+            headers={"X-Gateway-Token": _TOKEN, "X-User-Id": "bob", "X-Channel": "feishu"},
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(other_user_request, timeout=5)
@@ -249,7 +258,7 @@ def test_user_finished_result_hides_internal_paths(tmp_path) -> None:
     try:
         user_request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/result/{request_id}",
-            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+            headers={"X-Gateway-Token": _TOKEN, "X-User-Id": "alice", "X-Channel": "feishu"},
         )
         with urllib.request.urlopen(user_request, timeout=5) as response:
             public = json.loads(response.read())
@@ -272,7 +281,7 @@ def test_admin_finished_result_keeps_internal_diagnostics(tmp_path) -> None:
     try:
 
         with urllib.request.urlopen(
-            f"http://127.0.0.1:{server.port}/result/{request_id}",
+            urllib.request.Request(f"http://127.0.0.1:{server.port}/result/{request_id}", headers={"X-Gateway-Token": _TOKEN}),
             timeout=5,
         ) as response:
             admin = json.loads(response.read())
@@ -290,7 +299,7 @@ def test_user_cannot_probe_corrupt_pending_request(tmp_path) -> None:
     try:
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/result/{request_id}",
-            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+            headers={"X-Gateway-Token": _TOKEN, "X-User-Id": "alice", "X-Channel": "feishu"},
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(request, timeout=5)
@@ -311,7 +320,7 @@ def test_user_cannot_read_finished_result_without_request_record(tmp_path) -> No
     try:
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/result/{request_id}",
-            headers={"X-User-Id": "alice", "X-Channel": "feishu"},
+            headers={"X-Gateway-Token": _TOKEN, "X-User-Id": "alice", "X-Channel": "feishu"},
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(request, timeout=5)

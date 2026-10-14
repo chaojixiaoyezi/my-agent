@@ -10,10 +10,11 @@
 - 智能程度检测：结论排进发起检测的会话，/effort 看过、或重新开始检测时清掉。
 - 本轮工具排的提示（queue_turn_host_notice，带本轮请求编号）在本轮回复之后发布、随本轮回复提交；别的来源回合中途到的
   提示仍留给下一轮；没有会话时不排。
-全部用 echo 后端或假传输，零网络，不读真实配置。
+全部用 echo 后端或假传输，零网络，不读真实配置；模型替身只替换后端出站，保留真实调用账与宿主来源签发。
 """
 from __future__ import annotations
 
+import hmac
 import json
 from types import SimpleNamespace
 
@@ -23,7 +24,6 @@ from agent_py_agent.agent.adapter.manager import (
     _GatewayReplyPollClient,
     _reply_text_with_host_notices,
 )
-from agent_py_agent.agent.agent_core import _tool_loop_service
 from agent_py_agent.agent.backends.base import EchoBackend, ModelResponse
 from agent_py_agent.agent.conversation.background_context import _minimal_context_bundle
 from agent_py_agent.agent.conversation.background_transcript import (
@@ -52,10 +52,12 @@ from agent_py_agent.agent.gateway_parts import (
     gateway_paths,
     submit_gateway_ask,
 )
+from agent_py_agent.agent.gateway_parts.client_credentials import gateway_client_credentials
 from agent_py_agent.agent.gateway_parts.http_handlers import (
     _public_result,
     _read_public_progress_events,
 )
+from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.gateway_parts.request_history import GatewayAssistantTurn
 from agent_py_agent.agent.gateway_parts.stream_writer import write_host_notice_events
 from agent_py_agent.agent.settings import reasoning_probe as probe
@@ -187,17 +189,20 @@ def test_a_notice_queued_by_this_turn_shows_after_the_reply_and_other_sources_wa
         assert queue_host_notice(store, thread_id, queued["other"])
         return original_execute(params)
 
+    # 只模拟供应商响应；真实生成出口必须完成调用账和来源签发，不能替换 tool_loop 的已签发响应入口。
     # 首次生成发起一次真实原生工具调用（经原工具循环执行），第二次给出最终答复。
-    def generate(request):
-        calls.append(request)
+    def generate(self, prompt, *args, **kwargs):
+        calls.append((prompt, args, kwargs))
         if len(calls) == 1:
             return ModelResponse(text="", backend="fixture",
                                  tool_use_blocks=[{"id": "call-1", "name": "list_files", "input": {"path": "."}}])
         return ModelResponse(text="看完了", backend="fixture")
 
     monkeypatch.setattr(tool, "execute", execute)
-    monkeypatch.setattr(_tool_loop_service, "generate_model_response", generate)
+    monkeypatch.setattr(EchoBackend, "generate", generate)
     request_id, response, chunks = _ask(tmp_path, agent, paths, "第二句")
+    assert response["ok"], response.get("error_code")
+    assert len(calls) == 2
     turn = queued["turn"]
     assert turn is not None and dict(turn.details)["turn_request_id"] == request_id
     kinds = [row.get("kind") for row in chunks]
@@ -248,9 +253,25 @@ def test_progress_does_not_forward_notices_and_im_puts_them_before_the_body(tmp_
         def read(self):
             return json.dumps(body).encode("utf-8")
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: _Response())
+    agent, _ = _gateway_agent(tmp_path)
+    credentials = gateway_client_credentials(agent)
+    ensure_local_client_credential(credentials.data_root)
+
+    # LLM: 物理HTTP替身不绕过真实G1读取；原提示正文和进度过滤断言仍由正式poll client消费。
+    # 函数用途: 检查原临时凭据与IM身份，避免测试误连本机实际Gateway。
+    def fake_transport(request, *, timeout):
+        credential_matches = hmac.compare_digest(str(request.get_header('X-gateway-token') or ''),
+                                                credentials.headers()['X-Gateway-Token'])
+        assert credential_matches
+        assert request.get_header('X-user-id') == 'u' and request.get_header('X-channel') == 'feishu'
+        assert request.full_url.endswith('/result/req')
+        return _Response()
+
+    monkeypatch.setattr("agent_py_agent.agent.adapter.manager.open_authenticated_request", fake_transport)
     pending = SimpleNamespace(request_id="req", user_id="u", channel="feishu")
-    assert _GatewayReplyPollClient(8420).poll_response(pending, 0.0) == f"【提示】{_TEXT}\n\n模型回复"
+    client = _GatewayReplyPollClient(8420)
+    client.credentials = credentials
+    assert client.poll_response(pending, 0.0) == f"【提示】{_TEXT}\n\n模型回复"
 
 
 def test_tui_turn_and_same_conversation_windows_show_one_gray_system_line(tmp_path):

@@ -1,4 +1,4 @@
-"""G2a：只用随机端口、临时数据根和无业务副作用的假处理器。"""
+"""凭据门后的有界观察：只用随机端口、临时根和无业务副作用的假处理器。"""
 from __future__ import annotations
 
 import http.client
@@ -37,7 +37,9 @@ def _request(port, method, path, headers=None):
 
 @pytest.fixture
 def listener(tmp_path, monkeypatch):
+    reached = []
     def echo(handler):
+        reached.append(handler.path)
         handler._send_json(200, {"identity": list(extract_user_from_request(handler))})
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_ask", echo)
     monkeypatch.setattr(http_service.GatewayHTTPHandler, "_handle_result", echo)
@@ -51,6 +53,7 @@ def listener(tmp_path, monkeypatch):
                                ))
     server.start()
     try:
+        server.fixture_reached_handlers = reached
         yield server, server.server.server_address[1], tmp_path
     finally:
         server.stop()
@@ -63,13 +66,17 @@ def _observations(port):
     return body["uncredentialed_loopback_by_endpoint"]
 
 
-def test_uncredentialed_loopback_keeps_identity_and_counts_template(listener):
+def test_uncredentialed_loopback_is_rejected_and_counts_only_template(listener):
     server, port, root = listener
     headers = {"X-User-Id": "fixture-user", "X-Channel": "feishu"}
-    assert _request(port, "POST", "/ask", headers) == (200, {"identity": ["fixture-user", "feishu"]})
-    assert _request(port, "GET", "/result/fixture-request-A")[1]["identity"] == ["admin", "chat"]
-    assert _request(port, "GET", "/result/fixture-request-B?since=2")[0] == 200
-    assert _request(port, "POST", "/sessions/fixture-session/bind")[0] == 200
+    for method, path, request_headers in [("POST", "/ask", headers),
+          ("GET", "/result/fixture-request-A", {}), ("GET", "/result/fixture-request-B?since=2", {}),
+          ("POST", "/sessions/fixture-session/bind", {})]:
+        status, body = _request(port, method, path, request_headers)
+        assert status == 403 and body["error_code"] == "LOCAL_CREDENTIAL_REQUIRED"
+        assert "identity" not in body
+    assert server.fixture_reached_handlers == []
+
     facts = _observations(port)
     assert set(facts) == {"/ask", "/result/*", "/sessions/*/bind"}
     assert facts["/result/*"]["count"] == 2 and facts["/ask"]["count"] == 1
@@ -117,23 +124,25 @@ def test_valid_activation_token_alone_reaches_plugin_route_without_count(listene
 
 
 def test_counter_thread_safety_and_bounded_schema(listener):
-    _server, port, _root = listener
+    server, port, _root = listener
     with ThreadPoolExecutor(max_workers=4) as pool:
         replies = list(pool.map(lambda index: _request(port, "GET", f"/result/fixture-request-{index}"), range(24)))
-    assert all(reply[0] == 200 for reply in replies)
+    assert all(status == 403 and body["error_code"] == "LOCAL_CREDENTIAL_REQUIRED" for status, body in replies)
+    assert server.fixture_reached_handlers == []
     facts = _observations(port)
     assert set(facts) == {"/result/*"}
     assert facts["/result/*"]["count"] == 24
 
 
-def test_uncredentialed_remote_and_unknown_peer_keep_old_behavior(listener):
+def test_uncredentialed_remote_and_unknown_peer_are_never_trusted(listener):
     server, port, _root = listener
     mw = server.auth_middleware
     headers = {"X-User-Id": "fixture-user", "X-Channel": "chat"}
     assert mw.extract_identity(headers, "192.0.2.1") == ("anonymous", "external")
     assert not mw.check_trusted(headers, "192.0.2.1")
-    # G2a不提前删除未知来源兼容，G2b才处理。
-    assert mw.extract_identity({}, None) == ("admin", "chat")
+    # 未知来源和已知远程均不能借无凭据字段取得管理员身份。
+    assert mw.extract_identity({}, None) == ("anonymous", "external")
+    assert not mw.check_trusted({}, None)
     assert _observations(port) == {}
 
 
@@ -154,7 +163,8 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 26 and len({(method, template) for method, template, _ in pairs}) == 26
+    assert len(pairs) == 27 and len({(method, template) for method, template, _ in pairs}) == 27
+    assert ("POST", "/client/goal", "credential") in pairs
     assert {(method, path) for method, path, tier in pairs if tier == "public"} == {("GET", "/status"), ("GET", "/metrics")}
     assert {(method, path) for method, path, tier in pairs if tier == "plugin_token"} == {("POST", "/plugin-host/query")}
     assert {path for _, path, tier in pairs if tier == "admin"} == {"/sessions/*/channels", "/admin/summary", "/stop", "/sessions/*/bind"}
@@ -173,7 +183,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
             assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == 26
+        assert len(called) == len(pairs) == 27
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()

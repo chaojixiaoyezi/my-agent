@@ -107,7 +107,10 @@ def test_secret_refs_resolve_only_for_transient_request_and_are_redacted(monkeyp
     ]
 
     rendered = render_source_http_request(url, request, cursor=2, page_size=None)
-    assert rendered.headers["Authorization"] == "Bearer real-secret-value"
+    # 纯渲染器运输未解析引用；宿主环境值只能由正式 owner 出口裁决，此类 raw env 来源不再读取。
+    assert "Authorization" not in rendered.headers
+    assert rendered.secret_bindings[0]["secret_ref"] == "env:AUDIT_TEST_BEARER"
+    assert "real-secret-value" not in repr(rendered)
 
 
 def test_plain_sensitive_headers_are_rejected():

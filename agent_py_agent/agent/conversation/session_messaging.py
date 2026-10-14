@@ -1,10 +1,12 @@
 # LLM: 会话间消息与派活的权限判定唯一权威。只读结构化字段（owner_kind/kind/开关/同 owner/同 thread），
 #   绝不解析自然语言、任务正文、模型摘要或报告文本来决定放行；显式参数与当前 runner 上下文冲突时只返回
 #   scope_warnings，不静默猜、不冒充别的会话。错误码字符串是本模块的公开合同，改名前先全局搜索调用方与测试。
-# 模块用途: 给"会话间发消息"和"会话间派任务"提供可单测的纯权限判定，供模型工具、TUI 命令与后续服务端入口共用。
+#   目标声明 owner/home 冲突不能因落在本目录而升权；旧本地无 owner 记录只认原 runtime 路径的准确 Store。
+# 模块用途: 给会话消息和派活提供纯权限判定及只读目标归属核验；模型工具、TUI 与服务端共用原身份和存储。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..user_space.owner_resolver import OwnerIdentity
 from .wake_poison import WAKE_POISON_SAME_CAUSE_LIMIT_COUNT
@@ -100,6 +102,41 @@ class SessionMessagingDecision:
     allowed: bool
     error_code: str = ""
     scope_warnings: tuple[str, ...] = ()
+
+
+# LLM: 目标来自原 Store 但仍须核对声明的 owner/home；非空冲突与未知外部 owner 都返回 None，不写状态或升级记录。
+#   旧 local/main 无 owner 仅接受原 runtime_path_resolution 的准确会话目录，不能从模型 attrs 或临时目录补身份。
+# 函数用途: 为消息与派活共用本人目标核验，保留已知 owner 的旧缺 home 记录及原本地目录合同。
+def session_target_owner_identity(agent: object, thread: object, sender: OwnerIdentity) -> OwnerIdentity | None:
+    declared = getattr(thread, "owner_id", "")
+    if not isinstance(declared, str):
+        return None
+    if declared != sender.owner_id:
+        if declared or sender.provider != "local" or sender.owner_kind != OWNER_KIND_MAIN:
+            return None
+        resolution = getattr(agent, "runtime_path_resolution", None)
+        paths = getattr(resolution, "paths", {})
+        storage = getattr(getattr(agent, "conversation_store", None), "storage", None)
+        if not isinstance(paths, dict) or not _same_absolute_path(
+                getattr(storage, "root", None), paths.get("conversation_workspace")):
+            return None
+    declared_home = getattr(thread, "owner_home", "")
+    if not isinstance(declared_home, (str, Path)):
+        return None
+    if declared_home and not _same_absolute_path(
+            declared_home, getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)):
+        return None
+    return sender
+
+
+# LLM: 只归一当前宿主路径与记录路径，可能读取符号链接元数据；相对、坏路径或无法核验时拒绝，不猜 cwd、不写文件。
+# 函数用途: 证明 owner home 或原 Store 是同一绝对目录，避免相对路径和别名绕过归属核对。
+def _same_absolute_path(first: object, second: object) -> bool:
+    try:
+        left, right = Path(first), Path(second)
+        return left.is_absolute() and right.is_absolute() and left.resolve() == right.resolve()
+    except (TypeError, ValueError, OSError, RuntimeError):
+        return False
 
 
 # LLM: 纯函数，无 IO、无副作用；顺序固定：先 kind 合法性，再身份 fail closed，再目标归属，再渠道白名单，
@@ -206,6 +243,7 @@ __all__ = [
     "SESSION_MESSAGE_RELEASE_LIMIT",
     "SESSION_MESSAGE_RELEASE_LIMIT_REACHED",
     "session_message_dedupe_key",
+    "session_target_owner_identity",
     "OWNER_KIND_MAIN",
     "SESSION_KINDS",
     "SESSION_KIND_MESSAGE",

@@ -59,6 +59,7 @@ from agent_py_agent.agent.conversation.runtime import (
 )
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import control_service
+from agent_py_agent.agent.gateway_parts.client_credentials import GatewayClientCredentials
 from agent_py_agent.agent.gateway_parts.control_operation_service import (
     execute_gateway_control_operation,
     gateway_control_operation_status_payload,
@@ -3536,6 +3537,8 @@ def test_stop_expected_turn_never_switches_to_newer_live_request(tmp_path) -> No
     assert payload.get("turn_phase", "open") == "open"
 
 
+# LLM: 异常路径也必须清理自己的worker/transport；真实停止事实与耗时在cleanup前固定，不能清理制造通过。
+# 函数用途: 验证原停止回执不会等待慢关闭，并让失败样本也能正常结束测试进程。
 def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -3549,30 +3552,36 @@ def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> N
     ready = threading.Event()
     release_cleanup = threading.Event()
     observed = threading.Event()
+    fixture_cleanup = threading.Event()
 
     def worker() -> None:
         with register_interruptible("conversation-request:req-slow-close"):
             with register_interrupt_callback(release_cleanup.wait):
                 ready.set()
-                while not is_interrupted():
-                    time.sleep(0.01)
-            observed.set()
+                while not is_interrupted() and not fixture_cleanup.wait(0.01):
+                    pass
+            if is_interrupted():
+                observed.set()
 
     thread = threading.Thread(target=worker)
     thread.start()
-    assert ready.wait(timeout=2)
+    try:
+        assert ready.wait(timeout=2)
 
-    started = time.monotonic()
-    result = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
-    elapsed = time.monotonic() - started
+        started = time.monotonic()
+        result = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
+        elapsed = time.monotonic() - started
+
+        stop_observed = observed.wait(timeout=2)
+    finally:
+        fixture_cleanup.set()
+        release_cleanup.set()
+        thread.join(timeout=2)
 
     assert result.ok is True
     assert elapsed < 0.5
-    assert observed.wait(timeout=2)
-    release_cleanup.set()
-    thread.join(timeout=2)
+    assert stop_observed
     assert not thread.is_alive()
-
 
 def test_stop_interrupts_active_ordinary_task_after_foreground_yield(tmp_path) -> None:
     """前台请求已结束、没有 claim/进程时，thread 的 active root 仍必须可被 /stop。"""
@@ -3898,6 +3907,12 @@ def test_control_fails_closed_for_other_user(tmp_path) -> None:
     assert result.request_id == ""
 
 
+# LLM: 正例HTTP也须使用真实Gateway启动产生的原G1临时凭据；不绕middleware、不伪造用户角色或更改payload。
+# 函数用途: 从测试宿主的准确数据根读取原认证头，让原控制断言继续经过实际HTTP权限门。
+def _http_host_headers(agent) -> dict[str, str]:
+    return GatewayClientCredentials(agent.home_paths.root).headers()
+
+
 def test_http_control_endpoint_returns_immediate_conversation_status(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -3926,7 +3941,8 @@ def test_http_control_endpoint_returns_immediate_conversation_status(tmp_path) -
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/control",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **_http_host_headers(agent),
+                     "X-User-Id": "u-1", "X-Channel": "feishu"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
@@ -3969,6 +3985,7 @@ def test_http_ask_routes_verbose_before_active_turn_guidance(tmp_path) -> None:
             data=body,
             headers={
                 "Content-Type": "application/json",
+                **_http_host_headers(agent),
                 "X-User-Id": "u-1",
                 "X-Channel": "feishu",
             },
@@ -3992,6 +4009,8 @@ def test_http_ask_routes_verbose_before_active_turn_guidance(tmp_path) -> None:
     assert list(paths.inbox.glob("*.json")) == []
 
 
+# LLM: 真实HTTP停止结果在fixture_cleanup前固定；HTTP拒绝/断言异常仍收尾本测试线程，不能把cleanup算业务停止。
+# 函数用途: 核对stop入站触发准确live请求，并保证任一失败路径都不遗留解释器退出阻塞。
 def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),
@@ -4003,35 +4022,38 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
     write_json_file(request_path, _request("req-1"))
     ready = threading.Event()
     stopped = threading.Event()
+    fixture_cleanup = threading.Event()
 
     def worker() -> None:
         with register_interruptible("conversation-request:req-1"):
             ready.set()
-            while not is_interrupted():
-                time.sleep(0.01)
-            stopped.set()
+            while not is_interrupted() and not fixture_cleanup.wait(0.01):
+                pass
+            if is_interrupted():
+                stopped.set()
 
     thread = threading.Thread(target=worker)
     thread.start()
-    assert ready.wait(timeout=2)
-    agent.conversation_store.guidance.append(
-        {
-            "target_type": "request",
-            "target_id": "req-1",
-            "message": "尚未消费的旧引导",
-            "sender": "feishu:u-1",
-            "delivery": "current_request",
-        }
-    )
-    auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
-    port = _free_port()
-    server = GatewayHTTPServer(
-        port,
-        paths,
-        params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
-    )
-    server.start()
+    server = None
     try:
+        assert ready.wait(timeout=2)
+        agent.conversation_store.guidance.append(
+            {
+                "target_type": "request",
+                "target_id": "req-1",
+                "message": "尚未消费的旧引导",
+                "sender": "feishu:u-1",
+                "delivery": "current_request",
+            }
+        )
+        auth = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
+        port = _free_port()
+        server = GatewayHTTPServer(
+            port,
+            paths,
+            params=GatewayHTTPServerParams(agent=agent, auth_middleware=auth),
+        )
+        server.start()
         body = json.dumps(
             {
                 "kind": "ask",
@@ -4048,26 +4070,33 @@ def test_http_ask_routes_stop_to_live_window_interrupt(tmp_path) -> None:
             data=body,
             headers={
                 "Content-Type": "application/json",
+                **_http_host_headers(agent),
                 "X-User-Id": "u-1",
                 "X-Channel": "feishu",
             },
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        stop_observed = stopped.wait(timeout=2)
     finally:
-        server.stop()
-    thread.join(timeout=2)
+        fixture_cleanup.set()
+        try:
+            if server is not None:
+                server.stop()
+        finally:
+            thread.join(timeout=2)
 
     current = json.loads(request_path.read_text(encoding="utf-8"))
     assert payload["status"] == "control"
     assert payload["kind"] == "stop"
     assert payload["request_id"] == "req-1"
-    assert stopped.is_set()
+    assert stop_observed
+    assert not thread.is_alive()
     assert current["cancel_requested"] is True
     assert agent.conversation_store.guidance.pending("request", "req-1") == []
 
 
-# LLM: 仅启动临时 HTTP 测试夹具，路径/身份和请求与原用例相同；finally 停止夹具，不能作为生产 Gateway 验收。
+# LLM: 临时HTTP夹具带原G1凭据，路径/用户身份和payload与原用例相同；finally 停止夹具，不能作为生产 Gateway 验收。
 # 函数用途: 发一次插件控制请求并读回真实 HTTP 回执，拆平测试函数而不删掉中断、引导或原请求断言。
 def _http_plugin_control_payload(server, endpoint, command) -> dict:
     server.start()
@@ -4078,7 +4107,8 @@ def _http_plugin_control_payload(server, endpoint, command) -> dict:
         }).encode("utf-8")
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/{endpoint}", data=body,
-            headers={"Content-Type": "application/json", "X-User-Id": "u-1", "X-Channel": "feishu"},
+            headers={"Content-Type": "application/json", "X-User-Id": "u-1", "X-Channel": "feishu",
+                     **_http_host_headers(server.agent)},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -4181,6 +4211,7 @@ def test_http_audit_start_executes_control_instead_of_queueing_or_steering(tmp_p
             data=body,
             headers={
                 "Content-Type": "application/json",
+                **_http_host_headers(agent),
                 "X-User-Id": "u-1",
                 "X-Channel": "feishu",
             },
@@ -4230,6 +4261,7 @@ def test_http_ask_steers_active_turn_without_creating_a_second_request(tmp_path)
             data=body,
             headers={
                 "Content-Type": "application/json",
+                **_http_host_headers(agent),
                 "X-User-Id": "u-1",
                 "X-Channel": "feishu",
             },
@@ -4626,3 +4658,40 @@ def test_manual_compact_reports_typed_failure_instead_of_generic_retry(tmp_path)
     assert result.error_code == "COMPACT_FIXED_PREFIX_TOO_LARGE"
     assert "无法容纳" in result.message
     assert "请稍后重试" not in result.message
+
+
+# LLM: 异常清理在独立临时进程核验；若旧worker泄漏，只终止本测试子进程，不向production发停止或伪造通过。
+# 函数用途: 在原stop正例关键入口注入失败，要求预期异常仍存在且没有非daemon线程阻塞解释器退出。
+@pytest.mark.parametrize('case', ['http', 'slow_close'])
+def test_stop_fixture_exception_path_never_leaves_a_live_worker(tmp_path, case):
+    import os
+    import subprocess
+
+    script = r'''
+import threading
+from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
+from agent_py_agent.tests import test_gateway_conversation_control as controls
+root = Path(__import__('sys').argv[1])
+case = __import__('sys').argv[2]
+error = HTTPError('http://127.0.0.1/owned-test', 403, 'synthetic rejection', {}, None) if case == 'http' else RuntimeError('synthetic control failure')
+entry = controls.test_http_ask_routes_stop_to_live_window_interrupt if case == 'http' else controls.test_stop_ack_is_bounded_when_provider_transport_close_blocks
+patch_name = '_http_host_headers' if case == 'http' else 'execute_gateway_conversation_control'
+with patch.object(controls, patch_name, side_effect=error):
+    try:
+        entry(root)
+    except type(error):
+        pass
+    else:
+        raise AssertionError('injected failure must remain visible')
+assert not [thread for thread in threading.enumerate() if thread is not threading.main_thread() and not thread.daemon]
+'''
+    environment = {'PATH': os.defpath, 'HOME': str(tmp_path / 'host-home'),
+        'MY_AGENT_HOME': str(tmp_path / 'host-home' / '.my-agent'), 'PYTHONDONTWRITEBYTECODE': '1'}
+    try:
+        result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'work'), case],
+            cwd=Path(__file__).resolve().parents[2], env=environment, capture_output=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        pytest.fail('原测试worker在异常后阻塞解释器退出')
+    assert result.returncode == 0, result.stderr.decode('utf-8', 'replace')

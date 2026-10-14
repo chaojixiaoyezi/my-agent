@@ -14,6 +14,7 @@ from agent_py_agent.agent.conversation.display_archive import (
 )
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts import display_archive_service
+from agent_py_agent.agent.gateway_parts.client_credentials import GatewayClientCredentials
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 from agent_py_agent.agent.gateway_parts.display_archive_service import read_gateway_display_page
 from agent_py_agent.agent.user_space.home_layout import home_paths
@@ -173,7 +174,9 @@ def test_http_route_reads_page_without_model_or_prompt_submission(tmp_path, monk
     try:
         data = {"user_id": "local-agent", "channel": "chat", "conversation_id": "session", "reference": ref, "page_index": 0}
         request = urllib.request.Request(f"http://127.0.0.1:{port}/client/display-page",
-                                         data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
+                                         data=json.dumps(data).encode(), headers={"Content-Type": "application/json",
+                                         **GatewayClientCredentials(agent.home_paths.root).headers(),
+                                         "X-User-Id": "local-agent", "X-Channel": "chat"})
         with urllib.request.urlopen(request, timeout=3) as response:
             result = json.loads(response.read())
         assert result["ok"] and result["rows"][0]["text"] == "真实显示页"

@@ -1,3 +1,5 @@
+# LLM: 公开来源参数只声明未解析ref，不提供宿主actor/root/网络权；内部网络上界仅来自原Executor可信投影。
+# 模块用途: 声明watch工具模型schema与原运行策略，私人凭据仍由同一受权HTTP出口验证和注入。
 """watch_stream 的模型契约与运行策略（长描述和执行逻辑分开）。"""
 
 from __future__ import annotations
@@ -86,7 +88,8 @@ _PARAMETERS = {
     "http_request": "HTTP open 可选结构对象，保存该具体来源刚刚试通的请求事实：method、"
     "普通 headers、JSON 请求体、游标和分页大小放在 query 还是 json_body，以及 SecretRef。"
     "它不是来源类型模板。GET + URL 中的 <next>/<cursor>/<limit> 可省略对应绑定；其他请求按"
-    "实际文档填写。敏感值只允许通过 secret_bindings 的 env:/file: 引用，不保存明文",
+    "实际文档填写。敏感值使用 credential_ref 的私人任务引用，或本owner原授权读取范围内的 file:；"
+    "env:不读取宿主环境，旧env来源须重新绑定私人凭据，不保存明文",
     "source_adapter": "仅 mode=adapter 使用。path 是当前命名 Audit 工作区内刚刚写入并试通的"
     "相对 Python 脚本路径，sha256 钉住准确版本。脚本只根据不透明 checkpoint 规划下一次"
     "请求并把响应拆成完整 records，不能联网、不能读取密钥、不能写文件；网络、安全闸、"
@@ -384,6 +387,7 @@ _PARAMETER_SCHEMA = {
                 "maxItems": 32,
                 "items": _secret_binding_schema(),
             },
+            "credential_ref": {"type": "string", "description": "request_credentials返回的原任务/监控引用，宿主核验owner、actor、origin与准确root；无原授权的冷来源不发送。"},
         },
     },
     "source_adapter": {
@@ -723,12 +727,16 @@ def _watch_stream_model_spec(
     )
 
 
+# LLM: 原角色表面、幂等与资源范围保持不变；新增网络内部投影只能消费宿主write_boundary，模型字段不能覆盖。
+# 函数用途: 把同一公开schema与原执行权限绑定，让持续来源遵守父级网络上界。
 def build_watch_stream_runtime_policy(*, surface: str = "ordinary") -> ToolRuntimePolicy:
     actions = _SURFACE_ACTIONS.get(surface)
     if actions is None:
         raise ValueError(f"unknown watch_stream surface: {surface}")
     names = _surface_parameter_names(surface)
     trusted = _trusted_parameter_bindings(surface, names)
+    trusted['__network_access_mode'] = TrustedParameterBinding(
+        source_refs=('write_boundary.network_access_mode',), authority='host_authoritative')
     return ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(
             "mutating",
@@ -773,7 +781,7 @@ def build_watch_stream_runtime_policy(*, surface: str = "ordinary") -> ToolRunti
         ),
         output_policy=OutputPolicy(trust="external_data"),
         input_policy=ToolInputPolicy(
-            internal_parameters=("__run_scope", "__tool_call_id"),
+            internal_parameters=("__run_scope", "__tool_call_id", "__network_access_mode"),
             trusted_parameter_bindings=tuple(trusted.items()),
             local_file_url_parameters=(("url",) if "url" in names else ()),
         ),

@@ -1,5 +1,5 @@
 # LLM: 各配置域共用默认和校验；人格线程冻结同其它home开关归一为布尔，字符串false不能误开；须同步加载测试。
-#   IM 心跳秒数统一归一为有限数字，显式后台回执开关不能因字符串 false 而意外开启。
+#   IM 心跳秒数统一归一为有限数字，后台回执和群引用附件开关不能因字符串 false 而意外开启。
 # 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 意外启用工具反馈、回查提示或决策记录。
 """Domain-specific normalize services for config fields.
 
@@ -437,7 +437,7 @@ def _normalize_tool_int_fields(out: dict[str, object], defaults: object) -> list
     return _apply_int_fields(out, defaults, TOOL_INT_FIELDS)
 
 
-# LLM: 工具、插件与显式后台回执开关共用布尔转换和 dataclass 默认；新增开关同时检查 YAML、管理入口和配置回归。
+# LLM: 工具、插件、显式后台回执和群引用附件共用布尔转换与默认；新增开关同时检查 YAML、原启动入口和配置回归，不在加载时取资源。
 # 函数用途: 把配置中的开关转成真实布尔值，避免带引号的 false 在权限判断中变成真。
 def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> list[str]:
     return _apply_bool_fields(
@@ -455,6 +455,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "computer_use_enabled",
             "computer_use_observation_enabled",
             "background_public_receipt_contract_enabled",
+            "feishu_quoted_media_enabled",
         ),
     )
 

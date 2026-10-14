@@ -103,7 +103,7 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(EditFileTool(registry.workspace_root, workspace_roots, access_options))
 
 
-# LLM: 抓取工具用 G4 的进程级绑定端口注册表，并补充配置正端口覆盖 TUI/跨进程部署。
+# LLM: 抓取工具沿 G4 端口守门；命令工具携带宿主冻结凭据来源，不能从模型参数覆盖环境擦洗规则。
 # 函数用途: 注册网络工具并传入配置端口；实际绑定端口在每跳检查时从统一注册表读取。
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
@@ -130,6 +130,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             max_output_chars=params.shell_tool_output_max_chars,
             listen_scope_enforce=params.background_process_listen_scope_enforce,
             host_private_roots=params.host_private_roots,
+            host_credential_env_names=params.host_credential_env_names,
             sandbox_boundary_facts=params.shell_sandbox_boundary_facts,
         ),
     )
@@ -147,7 +148,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
     )
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
-    registry.register(ControlledExecTool())
+    registry.register(ControlledExecTool(host_credential_env_names=params.host_credential_env_names))
 
 
 def _runtime_fact_roots(registry: Any, params: Any) -> list[Any]:

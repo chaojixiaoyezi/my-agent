@@ -185,7 +185,7 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
 #   端点猜了个遍全 401,最后写了"声称产物存在"的清单提前交付。把本代理自用的
 #   api_base/model_name 以 AGENT_API_BASE/AGENT_MODEL_NAME 暴露进进程环境,
 #   run_command 子进程自然继承,脚本可用同一套凭据+端点完成 LLM 子调用。
-#   setdefault:用户显式设置的同名变量优先;非敏感信息(key 本就在环境)。
+#   setdefault 保留宿主显式端点；自管凭据来源由 spawn 前擦洗，不承诺把宿主密钥交给脚本。
 # 函数用途: 让"帮手脚本也能调到模型"不再靠猜端点。
 def _export_model_endpoint_env(config) -> None:
     api_base = str(getattr(config, "api_base", "") or "").strip()
@@ -496,7 +496,7 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
-    # LLM: 所有持久服务仍按 canonical owner/workspace 装配；Skill 与内容包共享快照入口但根目录隔离，联测主子范围及旧插件。
+    # LLM: 持久服务按 canonical owner/workspace 装配；选模型/权限视图前冻结宿主凭据来源，子孙和后台克隆不得丢失。
     # 函数用途: 初始化代理的模型、存储、工具和能力发现服务；可能初始化用户目录，不安装或执行能力包。
     def __init__(
         self,
@@ -511,6 +511,9 @@ class SimpleAgent(
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
         最后只注册创建、查看、发消息/纠偏、中断取消和能力裁决等用户级子代理操作。
         """
+        from .settings.secret_ref import freeze_managed_secret_environment
+
+        config = freeze_managed_secret_environment(config)
         self.config = config
         _export_model_endpoint_env(config)
         self.runtime_guard_policy = runtime_guard_policy()
@@ -1018,11 +1021,12 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
-# LLM: ToolRegistry 唯一装配入口；B5 提供方、owner 与来源合同由宿主装配，真实征询仍复用 Gateway 唯一 B2 池。
+# LLM: ToolRegistry 唯一装配入口；凭据来源上界仅从宿主 config 提取，B5 owner/来源与原 B2 征询合同不变。
 # 函数用途: 按身份和工作区组合工具、来源声明及可选文件反馈，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
+    from .settings.secret_ref import managed_secret_environment_names
     from .user_space.approval_mode import read_approval_mode
 
     workspace_root = agent.effective_workspace_root
@@ -1053,6 +1057,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             # full access 视图不生效，所以这里无条件给出。
             host_private_roots=owner_hidden_host_roots(
                 agent.home_paths, config, platform_hides_host_paths=sandbox_hides_host_paths()),
+            host_credential_env_names=managed_secret_environment_names(config),
             owner_quota_max_bytes=(
                 max(0, int(getattr(agent.owner_policy, "max_disk_mb", 0))) * 1024 * 1024
                 if owner_scope_root

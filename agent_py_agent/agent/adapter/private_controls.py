@@ -1,16 +1,17 @@
 # LLM: 只转交 SDK 已验证的 actor 与真实 message/chat 身份，不传表单正文；原 Gateway 核对引用、密码和执行代次。
-# 模块用途: 处理私人工具审批卡，返回原卡片的就地回执；需要首设/解锁时复用原密码卡。
+# 模块用途: 固定回环认证HTTP拒绝跳转； 处理私人工具审批卡，返回原卡片的就地回执；需要首设/解锁时复用原密码卡。
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
+from ..common.authenticated_http import open_authenticated_request
 from ..gateway_parts.client_credentials import GatewayClientCredentials
 
 
-# LLM: 未匹配该 typed kind 返回 None 让原密码/persona 处理；此 kind 的失败不可转成普通聊天或调用模型。
-# 函数用途: 将一张工具审批卡提交到原 Gateway，显示真实决定或需要解锁的回执。
+# LLM: 原typedkind与真实actor/message/chat必须匹配，宿主凭据只入原回环HTTP且不重定向。
+# 函数用途: 提交原私人审批/凭据表单并回显原真实决定；失败不落聊天或授予权限。
 def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     value = norm.get("value") or {}
     if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential"}:
@@ -27,7 +28,7 @@ def tool_approval_card_action(adapter, norm: dict) -> dict | None:
                    **GatewayClientCredentials(Path(adapter.my_agent_home)).headers()}
         request = Request(f"http://127.0.0.1:{adapter._gateway_port}/client/private-interaction",
                           data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-        with urlopen(request, timeout=2) as response:
+        with open_authenticated_request(request, timeout=2) as response:
             result = json.loads(response.read().decode("utf-8"))
     except (OSError, RuntimeError, TypeError, ValueError):
         return {"toast": {"type": "error", "content": "确认未完成，请稍后重试原卡片。"}}

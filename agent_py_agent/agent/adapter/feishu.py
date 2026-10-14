@@ -1,7 +1,7 @@
 
 
 # LLM: 飞书入站返回显式 accepted/ignored/retryable；未核验或落盘失败不得提交运输去重，原锁与 owner 仍守权限。
-# 模块用途: 管理飞书受理和原生发送接口，以脱敏日志区分未受理和提示失败，不创建第二入站队列。
+# 模块用途: 管理飞书受理与固定认证接口，附件上传消费已核验bytes、禁止重定向和原始错误泄露，不创建第二入站队列。
 from __future__ import annotations
 
 import hashlib
@@ -16,10 +16,12 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+from urllib.parse import quote
 
+from ..common.authenticated_http import open_authenticated_request
 from ..common.nofollow_fs import write_bytes_atomic_beneath
 from .base import BaseChannelAdapter
+from .feishu_attachment import FeishuAttachmentMixin
 from .feishu_media import (
     MAX_FILE_BYTES,
     MAX_IMAGE_BYTES,
@@ -50,15 +52,26 @@ _FEISHU_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 # LLM: 标准 API 出站共用此入口；GET 不携带请求体，POST/PUT 仍发送 JSON，凭据只进认证头，不作为正文或日志。
 # 函数用途: 调用机器人信息与消息接口，保持十秒运输超时及同一响应解析。
 def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
-    """统一飞书消息 API 调用(urllib);method=POST/PUT,body→JSON。返回响应 dict。"""
+    """统一飞书消息 API 调用；GET 不携带正文，其余方法发送 JSON，返回响应对象。"""
     req = urllib.request.Request(
         f"{_FEIHSU_API_BASE}{path}",
         data=None if method == "GET" else json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
         method=method,
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with open_authenticated_request(req, timeout=10) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+# LLM: 只读取明确 message_id，不查历史；caller 必须核验 exact ID/chat/deleted/topic。凭据不进入响应事实。
+# 函数用途: 用现有宿主认证单次查询被引用消息，认证不可用返回安全结构化原因。
+def _fetch_message_by_id(adapter: Any, message_id: str) -> dict[str, Any]:
+    from .feishu_quoted_media import FeishuQuotedMediaError
+
+    token = adapter._get_tenant_access_token()
+    if not token:
+        raise FeishuQuotedMediaError('FEISHU_QUOTED_MEDIA_AUTH_UNAVAILABLE')
+    return _feishu_msg_api('GET', '/im/v1/messages/' + quote(message_id, safe=''), {}, token)
 
 
 def _feishu_msg_api_with_retry(
@@ -137,7 +150,7 @@ def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -
         result = send("text", fallback)
         if result.get("code") == 0:
             return True
-    logger.error(f"飞书发送失败: {result}")
+    logger.error('飞书发送失败 provider_code=%s', result.get('code') if type(result.get('code')) is int else None)
     return False
 
 
@@ -197,22 +210,32 @@ def _edit_feishu_rendered(message_id: str, text: str, token: str) -> bool:
         "PUT", f"/im/v1/messages/{message_id}", {"msg_type": mt, "content": cj}, token))
 
 
+# LLM: 旧直接Path调用也要一次no-follow读成bytes，不在上传时重读；正式Delivery的同hash冻结内容走_upload_feishu_bytes。
+# 函数用途: 保留直接附件调用的本地接口，安全读取后交同一bytes上传器；不会跟随符号链接。
 def _upload_feishu(path: Path, kind: str, fields: dict[str, str], token: str) -> str | None:
-    """multipart 上传(kind=image/file),返回 image_key/file_key;超限/失败返回 None。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+
     max_bytes = MAX_IMAGE_BYTES if kind == "image" else MAX_FILE_BYTES
-    if path.stat().st_size > max_bytes:
-        logger.error(f"飞书上传超大小上限: {path.name}")
+    absolute = path.parent.resolve(strict=True) / path.name
+    blob = read_bytes_beneath(Path(absolute.anchor), absolute.parts[1:], max_bytes=max_bytes, require_dir_fd=True)
+    return _upload_feishu_bytes(blob, path.name, kind, fields, token) if blob is not None else None
+
+
+# LLM: blob来自本次真实安全读；上传同一不可变bytes且限实际长度，固定认证接口禁止第二跳，失败日志不带API正文。
+# 函数用途: 用原multipart格式上传已冻结附件字节，保留文件名、类型和供应商key，绝不重新打开path。
+def _upload_feishu_bytes(blob: bytes, name: str, kind: str, fields: dict[str, str], token: str) -> str | None:
+    if len(blob) > (MAX_IMAGE_BYTES if kind == 'image' else MAX_FILE_BYTES):
         return None
-    body, content_type = build_multipart(fields, kind, path.name, path.read_bytes())
+    body, content_type = build_multipart(fields, kind, name, blob)
     req = urllib.request.Request(f"{_FEIHSU_API_BASE}/im/v1/{kind}s", data=body,
         headers={"Content-Type": content_type, "Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with open_authenticated_request(req, timeout=30) as resp:
         result = json.loads(resp.read().decode("utf-8", "replace"))
     data = result.get("data") or {}
     key = str(data.get("image_key") or data.get("file_key") or "")
     if key:
         return key
-    logger.error(f"飞书上传失败: {result.get('msg')}")
+    logger.error('飞书上传失败 provider_code=%s', result.get('code') if type(result.get('code')) is int else None)
     return None
 
 
@@ -239,7 +262,7 @@ def _send_feishu_media(
     )
     if result.get("code") == 0:
         return True
-    logger.error(f"飞书媒体消息发送失败: {result.get('msg')}")
+    logger.error('飞书媒体消息发送失败 provider_code=%s', result.get('code') if type(result.get('code')) is int else None)
     return False
 
 
@@ -276,16 +299,21 @@ def _send_feishu_file(
     )
 
 
+# LLM: 消息和资源 ID 都是独立 URL path 参数，不允许关闭路径；失败关闭响应，只记类型/数值状态，不输出正文或 token。
+# 函数用途: 沿原消息资源 API 获取入站附件，未完成返回 None，私有文件落盘仍由原下载器负责。
 def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str) -> bytes | None:
     """下载入站媒体 bytes;失败 None。"""
     req = urllib.request.Request(
-        f"{_FEIHSU_API_BASE}/im/v1/messages/{message_id}/resources/{key}?type={kind}",
+        f"{_FEIHSU_API_BASE}/im/v1/messages/{quote(message_id, safe='')}/resources/{quote(key, safe='')}?type={kind}",
         headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with open_authenticated_request(req, timeout=30) as resp:
             return resp.read()
     except Exception as exc:
-        logger.warning(f"飞书媒体下载失败: {exc}")
+        logger.warning('飞书媒体下载失败 error_type=%s http_status=%s', type(exc).__name__,
+            exc.code if isinstance(exc, urllib.error.HTTPError) else 0)
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
         return None
 
 
@@ -340,7 +368,7 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
         if token:
             _send_feishu_rendered(reply_to, text, token)
     except Exception as exc:
-        logger.error(f"飞书卡片回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
+        logger.error('飞书卡片回调处理异常(不影响长连) error_type=%s', type(exc).__name__)
 
 
 # LLM: 卡片操作用户必须匹配目标；只有原密码服务成功，首设/解锁才能按原消息队列续送，失败不改认证。
@@ -377,7 +405,7 @@ def _password_card_action(
             "card": {"type": "raw", "data": resolved},
         }
     except Exception as exc:
-        logger.error(f"密码卡回调处理异常(不影响长连): {type(exc).__name__}: {exc}")
+        logger.error('密码卡回调处理异常(不影响长连) error_type=%s', type(exc).__name__)
         return True, None
 
 
@@ -516,13 +544,13 @@ def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
         card = build_password_card(mode=mode, user_id=user_id)
         return bool(send_interactive_card(adapter.app_id, adapter.app_secret, user_id, card))
     except Exception as exc:
-        logger.warning(f"密码卡发送失败: {type(exc).__name__}: {exc}")
+        logger.warning('密码卡发送失败 error_type=%s', type(exc).__name__)
         return False
 
 
 # LLM: 原 send/reply 已派生最长 50 字符的分片 uuid；本声明只供 delivery 在有效窗口内恢复同一逻辑消息。
-# 类用途: 提供飞书发送、回复和媒体能力；没有 UUID 到消息的只读查询保证。
-class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapter):
+# 类用途: 提供飞书发送、回复与准确消息/媒体读取；没有 UUID 到消息的只读查询保证。
+class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachmentMixin, BaseChannelAdapter):
     # LLM: uuid 是有限窗口去重，不覆盖跨窗口重发；channel delivery 必须先查首次 dispatch 时间。
     # 字段用途: 向统一通道注册表声明 provider 原生幂等能力。
     provider_idempotent_delivery = True
@@ -534,7 +562,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
     supports_control_cards = True
 
     # LLM: 创建原通道状态、认证服务和有界待送队列；显式关闭与初始化失败分开，不把未知状态当作认证成功。
-    # 函数用途: 初始化飞书接入与私聊密码门，不启动消息服务或发送网络请求。
+    # 函数用途: 初始化飞书接入、引用附件开关与私聊密码门，不启动消息服务或发送网络请求。
     def __init__(
         self,
         config: dict[str, Any],
@@ -558,6 +586,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         ).strip().lower()
         self.ws_proxy = config.get("feishu_ws_proxy", "")
         self.group_require_bot_mention = str(config.get("feishu_group_require_bot_mention", True)).lower() not in {"false", "0", "off"}
+        self.quoted_media_enabled = str(config.get('feishu_quoted_media_enabled', True)).lower() not in {'false', '0', 'off'}
         self._bot_open_id = ""
         self._bot_identity_app_id = ""
         self._bot_identity_retry_at = 0.0
@@ -644,6 +673,8 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         self._ws_thread = run_ws_client_thread(self._ws_client, lambda: setattr(self, "_running", False))
         logger.info("飞书适配器已启动(长连接 WS 模式,免公网/不绑端口)")
 
+    # LLM: 原回调服务异常只记类型，不能回显消息/认证正文，不以日志推断已受理。
+    # 函数用途: 维持原HTTP回调服务生命周期并安全记录失败。
     def _serve(self) -> None:
         if self._server is None:
             return
@@ -652,7 +683,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         except Exception as exc:
             # 原 except:pass 把异常静默吞掉 + _running 仍 True → 通道无声死亡而健康探测/supervisor 误判在线
             # (审计 #15)。记录异常并置 _running=False,让 running/状态检查感知它已死、可触发重启。
-            logger.error(f"飞书回调服务器异常退出(通道已死,需重启): {type(exc).__name__}: {exc}")
+            logger.error('飞书回调服务器异常退出(通道已死,需重启) error_type=%s', type(exc).__name__)
             self._running = False
 
     def stop(self) -> None:
@@ -671,6 +702,8 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         if client is not None:
             client.close()  # 尽力关闭底层 ws(关不掉就靠 daemon 线程随进程退出)
 
+    # LLM: 只关闭原HTTP服务，异常日志只类型；不改timeout/线程退出或事件受理事实。
+    # 函数用途: 在原关闭线程退出回调服务，保留既有生命周期清理。
     def _shutdown_server_async(self) -> None:
         if not self._server:
             return
@@ -678,7 +711,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
             t = threading.Thread(target=self._do_shutdown, daemon=True)
             t.start()
         except Exception as exc:
-            logger.warning(f"关闭飞书 HTTP 服务异常: {exc}")
+            logger.warning('关闭飞书 HTTP 服务异常 error_type=%s', type(exc).__name__)
         self._server = None
 
     def _join_server_thread(self) -> None:
@@ -687,13 +720,15 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         self._server_thread.join(timeout=5)
         self._server_thread = None
 
+    # LLM: 原服务关闭异常只记类型，不能从异常文本复制回调或认证数据。
+    # 函数用途: 关闭原服务连接，不改变外发或owner状态。
     def _do_shutdown(self) -> None:
         if self._server:
             try:
                 self._server.shutdown()
                 self._server.server_close()
             except Exception as exc:
-                logger.warning(f"飞书 HTTP shutdown 异常: {exc}")
+                logger.warning('飞书 HTTP shutdown 异常 error_type=%s', type(exc).__name__)
 
 
     # LLM: callback 结果必须显式返给 WS/webhook；异常仅记类型，暂时失败不伪装接受或永久忽略。
@@ -751,6 +786,8 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
         return _reply_after_card_action(self, norm)
 
 
+    # LLM: 正文来自统一投递的净化结果；认证运输不重定向，异常只输出类型，不回显供应商或用户内容。
+    # 函数用途: 沿原富文本/分片/uuid通路发送消息，不保存第二份投递记录。
     def send_message(self, user_id: str, message: OutgoingMessage) -> bool:
         try:
             token = self._get_tenant_access_token()
@@ -777,7 +814,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
             ]
             return all(results)
         except Exception as exc:
-            logger.error(f"飞书 send_message 异常: {exc}")
+            logger.error('飞书 send_message 异常 error_type=%s', type(exc).__name__)
             return False
 
     def reply_message(
@@ -869,11 +906,20 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
             idempotency_key,
         )
 
+    # LLM: message_id 来自原当前消息或已核验的准确 parent；凭据只给资源 API，不写入 owner。
+    # 函数用途: 使用真实资源源消息下载附件到当前 owner 私有目录，返回原安全文件名。
     def fetch_media_to(self, message_id: str, media: dict[str, str], dest_dir: Path) -> str | None:
         """下载入站媒体到 dest_dir,返回文件名;无媒体/失败 None。"""
         token = self._get_tenant_access_token()
         return _fetch_media_to_dir(message_id, media, dest_dir, token) if token else None
 
+    # LLM: 只读取明确 message_id，不查历史或递归 root；caller 必须核验返回 exact ID/chat/deleted/topic 再下载。
+    # 函数用途: 用宿主 token 单次查取被引用消息；认证失败只返回结构化原因，不暴露凭据。
+    def fetch_message(self, message_id: str) -> dict[str, Any]:
+        return _fetch_message_by_id(self, message_id)
+
+    # LLM: 凭据仍沿原有效期缓存，失败日志只exceptiontype，不以异常正文形成用户回复。
+    # 函数用途: 按原周期获取飞书token，失败明确不可发送。
     def _get_tenant_access_token(self) -> str | None:
         now = time.time()
         if self._tenant_access_token and now < self._token_expires_at - 60:
@@ -886,14 +932,16 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, BaseChannelAdapt
                 self._token_expires_at = now + result.get("expire", 7200)
                 return self._tenant_access_token
         except Exception as exc:
-            logger.error(f"获取飞书 token 失败: {exc}")
+            logger.error('获取飞书 token 失败 error_type=%s', type(exc).__name__)
         return None
 
+    # LLM: 应用凭据仅发原固定认证目标且拒绝HTTP跳转，原token响应只供本adapter内存缓存。
+    # 函数用途: 用原超时申请宿主token，不记录或导出凭据正文。
     def _request_tenant_access_token(self) -> dict[str, Any]:
         url = f"{_FEIHSU_API_BASE}/auth/v3/tenant_access_token/internal"
         payload = json.dumps({"app_id": self.app_id, "app_secret": self.app_secret}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with open_authenticated_request(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8", "replace"))
 
 

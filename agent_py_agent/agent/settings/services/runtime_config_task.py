@@ -2,12 +2,14 @@
 # 模块用途: 读取子代理原配置覆盖并生成最终配置，把预览与日志级别应用副作用分开。
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from ..config import AgentConfig, apply_log_level
 from ..memory import normalize_agent_memory_config
 from ..runtime_scope_config import load_runtime_config_layer, merge_runtime_config_layers
+from ..secret_ref import freeze_managed_secret_environment
 
 
 # LLM: worker 的原调用入口复用只读投影；只有实际存在覆盖时应用原日志级别，不改变原无覆盖对象身份。
@@ -24,7 +26,7 @@ def apply_task_runtime_config_overlay(
     return config
 
 
-# LLM: 只读原 overlay 文件并复用原优先级/规范化；不写文件、不改 base_config 或日志，不构造任务、后端或线程。
+# LLM: 只读原 overlay 并复用优先级；克隆保留宿主来源上界，任务文件的内部字段伪造无效，不改变原无覆盖对象。
 # 函数用途: 为正式 worker 和创建前候选共同投影最终配置，保留模型来源与覆盖警告。
 def project_task_runtime_config_overlay(
     base_config: AgentConfig,
@@ -40,7 +42,7 @@ def project_task_runtime_config_overlay(
     path = _resolve_overlay_ref(overlay_ref, workspace_root=workspace_root, task=task)
     layer = load_runtime_config_layer(path, scope=scope, config_cls=type(base_config))
     effective = merge_runtime_config_layers(base_config, [layer], config_cls=type(base_config))
-    config = AgentConfig(**effective.values)
+    config = freeze_managed_secret_environment(replace(freeze_managed_secret_environment(base_config), **effective.values))
     config.config_path = base_config.config_path
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)

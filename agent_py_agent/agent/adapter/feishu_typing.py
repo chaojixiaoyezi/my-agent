@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from ..common.authenticated_http import open_authenticated_request
 from .protocol import OutgoingMessage, provider_message_reference
 
 logger = logging.getLogger(__name__)
@@ -27,11 +28,11 @@ _FEISHU_API_BASE = "https://open.feishu.cn/open-apis"
 _PROGRESS_EMOJI = 'Typing'
 
 
-# LLM: API 响应只用于同一次 reaction；HTTPError 保留数值状态/code，不把响应文字或 Authorization 放日志。
+# LLM: reaction 认证 HTTP 拒绝跳转；API 响应只用于同一次 reaction；HTTPError 保留数值状态/code，不把响应文字或 Authorization 放日志。
 # 函数用途: 执行原表情接口，并让错误响应保留可诊断的状态而不是只有“400”。
 def _reaction_request(req: urllib.request.Request) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with open_authenticated_request(req, timeout=10) as resp:
             result = json.loads(resp.read(16384).decode('utf-8', 'replace'))
             result['http_status'] = getattr(resp, 'status', None)
             return result

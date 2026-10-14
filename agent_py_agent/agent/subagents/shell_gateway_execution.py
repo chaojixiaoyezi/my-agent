@@ -58,7 +58,11 @@ class _ExecutionCapture:
     cancelled: bool = False
 
 
-def execute_shell_command(request: ShellGatewayRequest) -> ShellGatewayExecutionResult:
+# LLM: 计划只认原 grant；凭据来源仅是宿主 keyword 输入，不进入请求正文、决策审计或模型可覆写字段。
+# 函数用途: 运行获批的受控命令并存原输出产物，默认剥除宿主自管环境凭据。
+def execute_shell_command(
+    request: ShellGatewayRequest, *, host_credential_env_names: frozenset[str] = frozenset(),
+) -> ShellGatewayExecutionResult:
     decision = plan_shell_command(request)
     result = ShellGatewayExecutionResult(decision=decision)
     if not decision.allowed:
@@ -71,6 +75,7 @@ def execute_shell_command(request: ShellGatewayRequest) -> ShellGatewayExecution
             int(budget["stdout_bytes"]),
             int(budget["stderr_bytes"]),
             int(budget["timeout_seconds"]),
+            host_credential_env_names=host_credential_env_names,
         )
     except Exception as exc:  # pragma: no cover - platform-specific subprocess failures.
         text = str(exc).encode()
@@ -79,14 +84,17 @@ def execute_shell_command(request: ShellGatewayRequest) -> ShellGatewayExecution
     return _execution_result_from_capture(result, capture, output_dir, start)
 
 
-# LLM: 此入口没有交互输入协议，stdin 必须显式关闭；输出预算、取消、进程树终止和产物审计保持原语义。
+# LLM: stdin 显式关闭且环境走唯一凭据擦洗；宿主来源不能从 decision.audit 或模型 params 反推。
 # 函数用途: 启动一个非交互受控进程，收集限额输出并在取消或超时时回收，避免读取宿主键盘输入。
 def _run_subprocess_with_budget(
     decision: ShellGatewayDecision,
     stdout_limit: int,
     stderr_limit: int,
     timeout_seconds: int,
+    *, host_credential_env_names: frozenset[str] = frozenset(),
 ) -> _ExecutionCapture:
+    from ..tooling._subprocess_env_scrub import scrub_subprocess_env
+
     process = subprocess.Popen(
         decision.argv,
         cwd=decision.cwd,
@@ -94,6 +102,7 @@ def _run_subprocess_with_budget(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,
+        env=scrub_subprocess_env(dict(os.environ), host_credential_env_names=host_credential_env_names),
         start_new_session=os.name != "nt",
         creationflags=(
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)

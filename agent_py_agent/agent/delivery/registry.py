@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: 适配器注册表是 provider 到 adapter 的唯一解析入口；禁止在发送服务里硬编码 channel if/else。
 
-模块用途: 注册已启动的 IM adapter 或按需构建的出站 adapter，并声明其稳定投递能力。
+模块用途: 注册 IM adapter 并声明真实投递/冻结字节能力和原文件上限；未知附件接口不允许路径重读回落。
 """
 
 import logging
@@ -34,6 +34,9 @@ class ChannelCapabilities:
     # 显式原生能力；进度创建返回 message_id，后续编辑该条，不从方法名猜支持。
     edit_progress: bool = False
     control_cards: bool = False
+    frozen_attachment_content: bool = False
+    max_file_bytes: int = 0
+    max_image_bytes: int = 0
 
 
 # LLM: health 是 adapter 生命周期/探针写入的结构化事实；configured、binding 不能隐式升级它。
@@ -141,7 +144,7 @@ class ChannelAdapterRegistry:
             self._support[key] = str(support or "builtin_adapter")
             self._health[key] = ChannelHealth()
 
-    # LLM: adapter 解析只走注册事实，未知 channel 返回 None，绝不能回落到某个默认 provider。
+    # LLM: adapter 解析只走注册事实，未知 channel 返回 None，不回落默认 provider；构造异常仅记类型，不回显认证。
     # 函数用途: 取得已注册 adapter，并在需要时至多调用一次懒工厂。
     def adapter_for(self, channel: str) -> Any | None:
         key = _channel_key(channel)
@@ -155,10 +158,9 @@ class ChannelAdapterRegistry:
                 adapter = factory()
             except Exception as exc:
                 _LOGGER.error(
-                    "channel adapter factory failed channel=%s error=%s: %s",
+                    "channel adapter factory failed channel=%s error_type=%s",
                     key,
                     type(exc).__name__,
-                    exc,
                 )
                 adapter = None
             self._resolved[key] = adapter
@@ -315,6 +317,8 @@ def build_default_channel_registry(
     *,
     runtime_health_provider: RuntimeHealthProvider | None = None,
 ) -> ChannelAdapterRegistry:
+    from ..adapter.feishu_media import MAX_FILE_BYTES, MAX_IMAGE_BYTES
+
     registry = ChannelAdapterRegistry(runtime_health_provider)
     registry.register_factory(
         "feishu",
@@ -328,6 +332,9 @@ def build_default_channel_registry(
             provider_idempotency=True,
             edit_progress=True,
             control_cards=True,
+            frozen_attachment_content=True,
+            max_file_bytes=MAX_FILE_BYTES,
+            max_image_bytes=MAX_IMAGE_BYTES,
         ),
         configured=_configured_secret_fields(config, ("feishu_app_id", "feishu_app_secret")),
     )
@@ -377,7 +384,7 @@ def _configured_secret_fields(config: Any, fields: tuple[str, ...]) -> bool:
     )
 
 
-# LLM: 现成 adapter 的附件能力可由真实 callable 方法判定，主动发送仍需注册方显式声明。
+# LLM: 附件bytes能力必须显式声明且接口真实存在，不能从旧send_file推定安全；主动发送仍需注册方声明。
 # 函数用途: 为运行中的入站 adapter 推导不会越权的默认能力。
 def _infer_capabilities(adapter: Any) -> ChannelCapabilities:
     return ChannelCapabilities(
@@ -388,6 +395,10 @@ def _infer_capabilities(adapter: Any) -> ChannelCapabilities:
         control_cards=getattr(adapter, "supports_control_cards", False) is True,
         files=callable(getattr(adapter, "send_file", None)),
         images=callable(getattr(adapter, "send_image", None)),
+        frozen_attachment_content=getattr(adapter, 'supports_frozen_attachment_content', False) is True
+            and callable(getattr(adapter, 'send_attachment_content', None)),
+        max_file_bytes=int(getattr(adapter, 'max_file_bytes', 0) or 0),
+        max_image_bytes=int(getattr(adapter, 'max_image_bytes', 0) or 0),
         provider_idempotency=bool(
             getattr(adapter, "provider_idempotent_delivery", False)
         ),

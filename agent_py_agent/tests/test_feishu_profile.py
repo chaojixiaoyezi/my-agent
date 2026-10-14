@@ -26,18 +26,18 @@ class _FakeResp:
 
 def test_fetch_name_success():
     seq = [_FakeResp({"tenant_access_token": "t"}), _FakeResp({"code": 0, "data": {"user": {"name": "大叶子"}}})]
-    with patch.object(fp.urllib.request, "urlopen", side_effect=seq):
+    with patch.object(fp, "open_authenticated_request", side_effect=seq):
         assert fp.fetch_feishu_display_name("a", "b", "ou_x") == "大叶子"
 
 
 def test_fetch_name_no_permission_returns_none():
     seq = [_FakeResp({"tenant_access_token": "t"}), _FakeResp({"code": 99991672, "msg": "no permission"})]
-    with patch.object(fp.urllib.request, "urlopen", side_effect=seq):
+    with patch.object(fp, "open_authenticated_request", side_effect=seq):
         assert fp.fetch_feishu_display_name("a", "b", "ou_x") is None
 
 
 def test_fetch_name_network_error_fail_open():
-    with patch.object(fp.urllib.request, "urlopen", side_effect=OSError("boom")):
+    with patch.object(fp, "open_authenticated_request", side_effect=OSError("boom")):
         assert fp.fetch_feishu_display_name("a", "b", "ou_x") is None
 
 

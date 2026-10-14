@@ -99,7 +99,9 @@ def redact_env_for_log(env: dict[str, str] | None) -> dict[str, str]:
     return safe
 
 
-def build_safe_env(user_env: dict[str, str] | None) -> dict[str, str]:
+# LLM: 默认继承先擦除宿主准确凭据来源；显式 env 属原受管 MCP/native 配置授权，仍按原合同单独叠加，不接受工具参数透传。
+# 函数用途: 为 MCP 服务保留普通安全基线与明确授予的环境值，避免 XDG 等默认变量携带宿主密钥。
+def build_safe_env(user_env: dict[str, str] | None, *, host_credential_env_names: frozenset[str] = frozenset()) -> dict[str, str]:
     """构造给 stdio 子进程的隔离环境：只继承安全基线变量 + 用户显式声明的变量。
 
     默认 **不** 把父进程整盘 os.environ 漏给 MCP server，
@@ -110,6 +112,9 @@ def build_safe_env(user_env: dict[str, str] | None) -> dict[str, str]:
     for key, value in os.environ.items():
         if key in _SAFE_ENV_KEYS or key.startswith("XDG_"):
             env[key] = value
+    from ._subprocess_env_scrub import scrub_subprocess_env
+
+    env = scrub_subprocess_env(env, host_credential_env_names=host_credential_env_names)
     for key, value in (user_env or {}).items():
         env[str(key)] = str(value)
     return env
@@ -125,7 +130,7 @@ class MCPToolInfo:
 
 
 # LLM: This config is the canonical per-server MCP declaration. Catalog placement only affects
-# model exposure; it must never change effect, approval, owner, workspace, or runtime authority.
+# model exposure; host 环境上界只由创建期 DTO 携带，raw 映射不能改 effect/审批/身份或擦洗来源。
 # 类用途: 保存一个 MCP 服务的启动、超时、展示分类和逐工具风险配置，供注册与断线重连复用。
 @dataclass
 class MCPServerConfig:
@@ -157,6 +162,8 @@ class MCPServerConfig:
     # 逐工具观察声明（和插件 manifest v5 同形）：{tool: {"observation": {...}} | {"observation_ref": {...}}}。
     # observation 只能挂只读工具，observation_ref 的 param 必须是该工具 schema 里可选的 string 参数，发布前按发现到的工具核对。
     tool_observations: dict[str, PluginToolObservation | PluginToolObservationRef] = field(default_factory=dict)
+    # 只由 Root config/Registry/插件宿主构造注入，from_mapping 不读取这个内部字段。
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     # LLM: Parse deployment-owned structure only. Reject malformed catalog categories instead of
     # silently changing whether a server's tools are direct or deferred.
@@ -450,7 +457,7 @@ class MCPStdioClient:
                     self._exit_registered = True
             return self._start_transport()
 
-    # LLM: 插件只走原托管启动；接管前失败回收原资源，普通 MCP 保留原启动；候选关闭不能再次发布 ready。
+    # LLM: 插件只走原托管启动；两种进程都先擦洗 host 默认继承再叠加原 native env，来源不从 RPC 参数读取。
     # 函数用途: 启动固定来源的进程和读线程，完成握手并保留未知清理事实。
     def _start_transport(self) -> MCPTransport:
         transport = None
@@ -461,13 +468,13 @@ class MCPStdioClient:
 
                 managed = ManagedMCPProcess.launch(
                     self._activation, argv=[self.config.command, *self.config.args], cwd=Path(self.config.cwd),
-                    environment=build_safe_env(self.config.env), timeout=self.config.connect_timeout,
+                    environment=build_safe_env(self.config.env, host_credential_env_names=self.config.host_credential_env_names), timeout=self.config.connect_timeout,
                 )
                 process = managed.hosted.process
             else:
                 process = subprocess.Popen(
                     [self.config.command, *self.config.args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, env=build_safe_env(self.config.env), cwd=self.config.cwd or None,
+                    stderr=subprocess.PIPE, env=build_safe_env(self.config.env, host_credential_env_names=self.config.host_credential_env_names), cwd=self.config.cwd or None,
                     text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True,
                 )
             transport = MCPTransport(process, self.config.name, max_line_chars=self.config.max_line_chars,

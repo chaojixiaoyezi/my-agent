@@ -165,21 +165,23 @@ def current_plugin_channel_pool():
     return plugin_channel_pool(_server_instance) if _server_instance is not None else None
 
 
-# LLM: 只在 _SERVICE_LOCK 内调用；已存在的池原样返回，不存在才按沙箱开关新建并挂上 server。
+# LLM: 只在原锁内取共用池；新 factory 冻结 host config 的环境来源，显式插件/native env 授权不改变。
 #   已关闭的 server 一律拒绝：池是进程级共享资源，停机后再建一个就没人在关它了。
 # 函数用途: 取或建 server 上的唯一池（调用方已持锁）。
 def _locked_shared_pool(server, process_sandbox: bool | None):
     from ..plugin_channel import PluginChannelPool
     from ..plugin_display.service import plugin_display_client
+    from ..settings.secret_ref import managed_secret_environment_names
 
     if _channel_closed(server):
         raise PluginChannelRevoked("插件通道已随 Gateway 停机关闭")
     pool = getattr(server, "plugin_channel_pool", None)
     if pool is None:
+        config = getattr(getattr(server, "agent", None), "config", None)
         if process_sandbox is None:
-            config = getattr(getattr(server, "agent", None), "config", None)
             process_sandbox = bool(getattr(config, "plugin_process_sandbox", False))
-        pool = PluginChannelPool(client_factory=partial(plugin_display_client, process_sandbox=process_sandbox))
+        pool = PluginChannelPool(client_factory=partial(plugin_display_client, process_sandbox=process_sandbox,
+                                                       host_credential_env_names=managed_secret_environment_names(config)))
         server.plugin_channel_pool = pool
     return pool
 

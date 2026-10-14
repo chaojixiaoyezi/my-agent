@@ -19,13 +19,22 @@ import pytest
 from agent_py_agent.agent.adapter.manager import _reply_text_with_host_notices
 from agent_py_agent.agent.agent_core.model.call_runtime import (
     MODEL_CALL_INTERRUPTED_ERROR_CODE,
+    record_model_call_finished,
     settle_open_model_calls_for_shutdown,
 )
+from agent_py_agent.agent.agent_core.model.call_runtime import (
+    model_call_ledger as runtime_model_call_ledger,
+)
 from agent_py_agent.agent.backends import gateway_helpers, http
+from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.contracts import model_call_ledger
 from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallAdmissionClosedError,
     ModelCallAdmissionClosure,
+    ModelCallFailureParams,
+    ModelCallLedger,
+    ModelCallStartedParams,
+    ModelCallTimeoutParams,
 )
 from agent_py_agent.agent.conversation import store_claims, turn_resume_notice
 from agent_py_agent.agent.conversation.turn_resume_notice import turn_resumed_notice_text
@@ -183,6 +192,71 @@ def test_tui_and_im_share_one_notice_table():
     assert turn_resumed_notice_text("新原因") == turn_resume_notice.TURN_RESUMED_FALLBACK_NOTICE
 
 
+# LLM: 使用同一真实调用账与进程准入栅栏；不假写 finished，也不从响应内容推断宿主停止。
+# 函数用途: 给迟到响应测试建立准确请求与调用编号，所有状态仅在测试内登记。
+def _started_call():
+    ledger = ModelCallLedger()
+    ledger.started(ModelCallStartedParams(call_id="shutdown-late", backend="synthetic", model="synthetic",
+        input_tokens=10, request_id="gwreq-shutdown-late", run_id="root-shutdown-late"))
+    return ledger, ModelResponse(text="迟到正文", backend="synthetic")
+
+
+def test_shutdown_settled_late_response_raises_original_admission_without_reopening_record():
+    ledger, response = _started_call()
+    settle_open_model_calls_for_shutdown()
+    original = ledger.records()[0]
+    with pytest.raises(ModelCallAdmissionClosedError) as caught:
+        record_model_call_finished(ledger, original.call_id, response)
+    assert caught.value.closure == _CLOSURE
+    assert ledger.records()[0] == original
+    assert original.status == "failed" and original.error_code == MODEL_CALL_INTERRUPTED_ERROR_CODE
+    assert response.response_provenance is None
+
+
+def test_finished_response_before_shutdown_keeps_original_success():
+    ledger, response = _started_call()
+    record_model_call_finished(ledger, "shutdown-late", response)
+    original = ledger.records()[0]
+    assert original.status == "finished"
+    assert settle_open_model_calls_for_shutdown() == ()
+    record_model_call_finished(ledger, original.call_id, ModelResponse(text="另一段迟到正文", backend="synthetic"))
+    assert ledger.records()[0] == original
+
+
+def test_shutdown_shaped_failure_without_closed_admission_keeps_original_failure():
+    ledger, response = _started_call()
+    ledger.failed(ModelCallFailureParams(call_id="shutdown-late", error_type=_CLOSURE.error_type,
+        error_code=_CLOSURE.error_code))
+    original = ledger.records()[0]
+    assert model_call_ledger.model_call_admission_closure() is None
+    record_model_call_finished(ledger, original.call_id, response)
+    assert ledger.records()[0] == original
+
+
+@pytest.mark.parametrize("error_type,error_code", [
+    ("ProviderRequestRejectedError", "PROVIDER_REJECTED"),
+    ("InterruptedError", "INTERRUPTED"),
+    ("HostShutdownInterrupted", "TRANSIENT_ERROR"),
+    ("ProviderRequestRejectedError", MODEL_CALL_INTERRUPTED_ERROR_CODE),
+])
+def test_other_failed_records_are_not_reclassified_as_shutdown(error_type, error_code):
+    ledger, response = _started_call()
+    ledger.failed(ModelCallFailureParams(call_id="shutdown-late", error_type=error_type, error_code=error_code))
+    original = ledger.records()[0]
+    settle_open_model_calls_for_shutdown()
+    record_model_call_finished(ledger, original.call_id, response)
+    assert ledger.records()[0] == original
+
+
+def test_timeout_before_shutdown_is_not_reclassified_as_shutdown():
+    ledger, response = _started_call()
+    ledger.timeout(ModelCallTimeoutParams(call_id="shutdown-late", timeout_seconds=1, timeout_stage="wall_clock"))
+    original = ledger.records()[0]
+    settle_open_model_calls_for_shutdown()
+    record_model_call_finished(ledger, original.call_id, response)
+    assert ledger.records()[0] == original
+
+
 # ---------------------------------------------------------------- 真实链路：真实 SimpleAgent + Gateway 入口，只替换供应商传输
 
 
@@ -236,6 +310,14 @@ def test_real_chain_refused_turn_resumes_after_restart(tmp_path, monkeypatch):
     wire = _ShutdownWire()
     monkeypatch.setattr(http, "post_json", wire)
     agent = _real_agent(tmp_path)
+    tools_called = []
+    original_list_files = agent.tools.tools["list_files"].execute
+
+    def tracked_list_files(arguments):
+        tools_called.append(arguments)
+        return original_list_files(arguments)
+
+    monkeypatch.setattr(agent.tools.tools["list_files"], "execute", tracked_list_files)
     paths = _gateway(agent)
     owner = agent.home_paths.owner_id
     request_id = "gwreq-real-shutdown"
@@ -245,6 +327,10 @@ def test_real_chain_refused_turn_resumes_after_restart(tmp_path, monkeypatch):
     first = request_execution._handle_gateway_request(agent, path)
     _finish_claimed_gateway_request(paths, path, request_id, first, conversation_store=agent.conversation_store)
     assert first["restart_resume"] == _MARKER and wire.main_calls == 1, "第二次模型调用被准入拒绝，没有发出"
+    assert tools_called == [], "停机已结清的迟到工具请求不能执行"
+    original_calls = runtime_model_call_ledger(agent).records()
+    interrupted = [call for call in original_calls if call.error_code == MODEL_CALL_INTERRUPTED_ERROR_CODE]
+    assert len(interrupted) == 1 and interrupted[0].status == "failed", "不重开停机原账，也不伪造成功来源"
     assert _left_in_processing(paths, request_id)
 
     # 重启：新进程有自己的准入表和新的 agent，启动恢复按死进程（这里是没有进程身份）把请求重排；

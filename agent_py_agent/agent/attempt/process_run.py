@@ -8,7 +8,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..common.cancellation import (
@@ -54,7 +54,7 @@ class _ProcessRun:
             self._closed = True
 
 
-# LLM: 只承载已经过沙箱入口裁决的启动/等待参数；cwd=None 保留命名空间的 --chdir，不在此补根或猜 cwd。
+# LLM: 只承载已裁决的启动/等待与宿主环境上界；cwd=None 保留 --chdir，不能从 argv 重选来源或目录权限。
 # 类用途: 将同步命令的期限、回收宽限、捕获与工作目录打包，避免接口参数超过四个。
 @dataclass(frozen=True)
 class SandboxProcessOptions:
@@ -62,17 +62,21 @@ class SandboxProcessOptions:
     grace_seconds: float
     capture_output: bool
     cwd: Path | None
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 # LLM: argv/cwd 已由唯一沙箱入口校验，Popen 必须显式接收 cwd，不继承一个白名单外的宿主目录；不在此裁决权限。
-#   取消前后都检查，DEVNULL stdin、独立会话、回调撤销及 143 超时合同保持不变。
+#   取消前后都检查，DEVNULL stdin/原超时合同不变；环境沿统一擦洗，不能把宿主 SecretRef 来源交给检查程序。
 # 函数用途: 启动一次非交互命令，注册取消回收并等待终态；取消抛共用 ToolCancelled，超时仍返回 143。
 def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
+    from ..tooling._subprocess_env_scrub import scrub_subprocess_env
+
     raise_if_cancelled()
     proc = subprocess.Popen(argv, cwd=options.cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE if options.capture_output else None,
                             stderr=subprocess.PIPE if options.capture_output else None,
-                            text=options.capture_output, start_new_session=True)
+                            text=options.capture_output, start_new_session=True,
+                            env=scrub_subprocess_env(dict(os.environ), host_credential_env_names=options.host_credential_env_names))
     state = _ProcessRun(proc, options.grace_seconds)
     try:
         with register_cancellation_callback(state.stop):

@@ -129,7 +129,7 @@ class PtyAccessScope:
 
 
 # LLM: 一次 PTY 启动的沙箱输入原样收拢，不做任何推断；字段与 tooling/shell._sandbox_exec 的同名参数一一对应，
-#   private_roots 是拒读的宿主根；普通禁止写根与绝对保护分别投影，跟随同一会话权限键。
+#   private_roots 是拒读的宿主根；凭据来源仅由 Shell 的宿主选项传入，不能读模型参数或削弱擦洗上界。
 # 类用途: 把 owner、读写根、受保护路径和私有根作为一个整体交给 _spawn。
 @dataclass(frozen=True)
 class _PtySandboxInputs:
@@ -140,6 +140,7 @@ class _PtySandboxInputs:
     private_roots: tuple[object, ...] = ()
     write_scope_denied_roots: tuple[Path, ...] = ()
     network_access: bool = True
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -210,7 +211,7 @@ class PtySessionRegistry:
         self.idle_timeout_seconds = 0.0
         self._idle_thread: threading.Thread | None = None
 
-    # LLM: 容量和执行身份一起预留；所有 spawn 成败路径释放同一预留，不吞掉宿主取消。
+    # LLM: 容量和执行身份一起预留；宿主来源名随本次 spawn 冻结，不入模型参数或持久会话权限账。
     # 函数用途: 有界创建终端，让明确的资源停止请求可以命中尚未完成的启动。
     def start(
         self,
@@ -240,13 +241,14 @@ class PtySessionRegistry:
         try:
             protection = write_protection or SandboxWriteProtection()
             sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
-                                        host_policy.private_roots, protection.denied_roots, host_policy.network_access)
+                                        host_policy.private_roots, protection.denied_roots, host_policy.network_access,
+                                        host_policy.host_credential_env_names)
             return self._spawn(session_id, command, target, sandbox, run_scope)
         finally:
             with self._lock:
                 self._pending_starts.pop(session_id, None)
 
-    # LLM: Popen 前后都核对同一预留；取消后的迟到进程仍登记并终止，不能返回运行成功。
+    # LLM: Popen 前后核对同一预留；环境只经 Shell 唯一擦洗入口，取消后的迟到进程仍登记并终止。
     # 函数用途: 启动 PTY 并排空输出，封住启动期间收到停止后留下孤儿进程的窗口。
     def _spawn(self, session_id, command, target, sandbox: _PtySandboxInputs, run_scope) -> PtySession:
         import pty
@@ -288,7 +290,7 @@ class PtySessionRegistry:
                 start_new_session=True,
                 close_fds=True,
                 env=_subprocess_text_env(owner_home, hidden_roots=tuple(str(root) for root in sandbox.private_roots),
-                                         sandboxed=True),
+                                         sandboxed=True, host_credential_env_names=sandbox.host_credential_env_names),
             )
         except Exception:
             os.close(master_fd)
@@ -798,7 +800,7 @@ class TerminalSessionTool(BaseTool):
         )
 
     # LLM: PTY 启动与普通 shell 复用唯一命令解析入口；命令策略、cwd、沙箱与保护路径必须
-    # 先于进程启动裁决。解析接口改动时同步 shell 和 PTY 回归，不能调用已删除的私有方法。
+    # 先于启动裁决；凭据来源仅由 shell_tool 的宿主 options 传入，params 不能覆盖环境上界。
     # 函数用途: 校验命令和目录后启动受沙箱保护的交互进程，返回可按会话管理的句柄。
     def _start(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         command_result = parse_shell_command(self.model_spec.name, params.get("command", ""))
@@ -826,7 +828,8 @@ class TerminalSessionTool(BaseTool):
                 read_roots,
                 SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
-                host_policy=SandboxHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True)),
+                host_policy=SandboxHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True),
+                                               self.shell_tool.host_credential_env_names),
             )
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))

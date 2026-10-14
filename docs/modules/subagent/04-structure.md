@@ -1492,3 +1492,20 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 旧无字段恢复只接受准确原根的宿主记录或不可变来源，然后匹配孩子自己的线程及原谱系。只有不可变目标线程、却没有当前准确根证明，不足以授予身份。原 owner/run/claim/attempt 仍是执行权威，这个字段不承担批准或工具权限。
 
 首片委派在晋升前读取准确原 SessionTask 与 delegated 线程策略；晋升后改读原 TaskLink，不从工具循环投影或模型属性拿身份。定时运行则使用原 run.creator 和冻结 origin_bindings，新隔离线程仍使用同一 execution_origin schema，原领取服务把 actor 保存到首次 TaskLink。原主代理、子代理及孙级都沿这些冻结出处，而不是群的新发言人。
+
+## 模型完成与停机来源边界（2026-10-13）
+
+`agent_core/model/call_runtime.record_model_call_finished` 将完成事实提交原 `ModelCallLedger` 后，
+消费它返回的准确首终态。`failed` 与 `model_call_admission_closure()` 的类型、原因码全部一致时，
+抛原准入异常回到已有 Gateway/子代理恢复路径；不把原 `failed` 改为 `finished`，不生成第二个停止
+标记。`tool_model_generation` 在此入口之后才签发成功 `ResponseProvenance` 并交原工具/IR 裁决，
+因此停机结清的迟到响应不会跨越成功来源门。非闭门、先完成、其它失败和超时不重解释。结构、
+验证边界与相邻回归见 [交接](../../tasks/MODEL_SHUTDOWN_PROVENANCE_HANDOFF.md)。
+
+## 会话目标归属与安全验证（2026-10-13）
+
+`conversation/session_messaging.py::session_target_owner_identity` 是消息/派活目标记录的共享只读核验点。
+两个原工具加载目标后先核对 owner_id 与非空绝对 owner_home；未知外部目标拒绝，旧本地无 owner
+只认 runtime_path_resolution 的准确 Store，不写新身份账。原权限、渠道、限额和入队合同继续在后续原入口执行。
+新 `test_im_session_target_security.py` 与 `test_im_scheduler_security_matrix.py` 覆盖真实工具执行链和告警目标；
+验收范围见 [安全交接](../../tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。

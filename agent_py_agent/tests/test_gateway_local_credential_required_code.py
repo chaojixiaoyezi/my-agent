@@ -1,14 +1,7 @@
-"""G2b 服务端结构化拒绝码 LOCAL_CREDENTIAL_REQUIRED（g2bfix1）。
+"""本机缺凭据固定为 LOCAL_CREDENTIAL_REQUIRED，错误分类不泄露目标存在性。
 
-背景与判据（见 docs/design/GATEWAY_LOCAL_TRUST.md 1.2 节 9b 建议）：
-- 强制打开 gateway_require_local_credential 后，回环请求没带凭据会被拒，但客户端光看 403
-  分不清"本机客户端没换代码/没带凭据"（重启即可）和"远程来源真的越权"。
-- 本文件钉住：只有"强制档 + 回环 + 没带凭据"这一格带 error_code=LOCAL_CREDENTIAL_REQUIRED；
-  带了凭据放行；开关关着行为完全不变（不带码、不拦）。
-- 覆盖两类入口：挂 require_trusted_source 的端点，以及 /progress、/input-status、/result
-  这三个"先降匿名、再由端点自己判 403/404"的读端点。
-
-只用临时数据根、随机端口和假处理器；不读真实 secrets、不连真实 Gateway。
+受管入口在业务读取之前统一鉴权；有效凭据仍进入原本人/其他 owner 与归档诊断路径。
+退休开关不再提供回环例外，远程拒绝与缺凭据仍可区分。仅用临时根、随机端口，不读真实秘密。
 """
 from __future__ import annotations
 
@@ -36,10 +29,10 @@ from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 LOCAL = "127.0.0.1"
 
 
-# 函数用途: 构造鉴权中间件；enforced 决定强制档位，credential 非空时绑定本机凭据。
-def _middleware(enforced: bool, credential: str = "") -> AuthMiddleware:
-    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True),
-                                require_local_credential=enforced)
+# LLM: 原中间件始终要求宿主凭据；不再把退休字段传入产品构造器。
+# 函数用途: 构造当前凭据门，非空凭据仅在宿主内存绑定。
+def _middleware(credential: str = "") -> AuthMiddleware:
+    middleware = AuthMiddleware(AuthManager(admin_user_id="admin", auth_enabled=True))
     if credential:
         middleware.set_local_client_credential(credential)
     return middleware
@@ -67,7 +60,7 @@ def _request(port, method, path, headers=None):
 
 
 def test_needs_local_credential_only_for_enforced_loopback_without_credential():
-    forced = _middleware(True, credential="right-token")
+    forced = _middleware(credential="right-token")
     # 这一格才成立。
     assert forced.needs_local_credential(LOCAL, {}) is True
     assert forced.needs_local_credential("::1", {}) is True
@@ -79,9 +72,9 @@ def test_needs_local_credential_only_for_enforced_loopback_without_credential():
     assert forced.needs_local_credential(None, {}) is False
 
 
-def test_needs_local_credential_is_false_when_switch_off():
-    # 迁移档（开关关着）行为不变：没有这个码。
-    assert _middleware(False, credential="right-token").needs_local_credential(LOCAL, {}) is False
+def test_needs_local_credential_remains_true_without_a_migration_switch():
+    # 默认构造也必须要求凭据，不能借不存在的迁移字段恢复信任。
+    assert _middleware(credential="right-token").needs_local_credential(LOCAL, {}) is True
 
 
 @pytest.mark.parametrize("peer,headers,expected_code", [
@@ -92,7 +85,7 @@ def test_needs_local_credential_is_false_when_switch_off():
     (None, {}, False),
 ])
 def test_require_trusted_source_body_carries_code_only_in_the_enforced_loopback_cell(peer, headers, expected_code):
-    middleware = _middleware(True, credential="right-token")
+    middleware = _middleware(credential="right-token")
     replies = []
 
     def handler_for():
@@ -112,9 +105,9 @@ def test_require_trusted_source_body_carries_code_only_in_the_enforced_loopback_
         assert body["error_code"] == LOCAL_CREDENTIAL_REQUIRED
 
 
-def test_require_trusted_source_switch_off_never_carries_code():
-    # 开关关着：回环本来就放行，拒绝路径上也永远不带这个码。
-    middleware = _middleware(False)
+def test_require_trusted_source_remote_peer_denial_has_no_local_code():
+    # 远程无凭据是普通来源拒绝，不能冒充本机客户端缺凭据。
+    middleware = _middleware()
     replies = []
     handler = SimpleNamespace(_auth_middleware=middleware, headers={}, client_address=("192.0.2.10", 51234),
                               _send_json=lambda status, body: replies.append((status, body)))
@@ -134,8 +127,7 @@ def enforced_listener(tmp_path):
     credential = ensure_local_client_credential(root)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(True, credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_middleware(credential)))
     server.start()
     try:
         yield server, server.server.server_address[1], credential
@@ -143,14 +135,13 @@ def enforced_listener(tmp_path):
         server.stop()
 
 
-# 函数用途: 起一个开关关着的随机端口服务，用于证明迁移档行为不变。
+# 函数用途: 用默认中间件起真实隔离服务，验证没有退休开关也必须鉴权。
 @pytest.fixture
-def migration_listener(tmp_path):
+def default_listener(tmp_path):
     root = tmp_path / "data-root"
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "queue"),
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(False),
-                                                              require_local_credential=False))
+                                                              auth_middleware=_middleware()))
     server.start()
     try:
         yield server, server.server.server_address[1]
@@ -185,11 +176,11 @@ def test_guarded_endpoints_carry_code_without_credential(enforced_listener, meth
     _assert_guarded_endpoint(port, method, path, credential)
 
 
-# 三个自判读端点：降匿名后由端点自己判 403/404，同样要能分辨"是没带凭据"。
+# 三个只读入口：无凭据统一在业务读取前拒绝，带凭据保留原业务分流。
 @pytest.mark.parametrize("method,path,expected_status", [
-    ("GET", "/progress/fixture-request", 404),
-    ("GET", "/input-status/fixture-request", 404),
-    ("GET", "/result/fixture-request", 404),
+    ("GET", "/progress/fixture-request", 403),
+    ("GET", "/input-status/fixture-request", 403),
+    ("GET", "/result/fixture-request", 403),
 ])
 def test_self_judging_read_endpoints_carry_code_without_credential(
     enforced_listener, method, path, expected_status
@@ -211,7 +202,7 @@ def test_self_judging_read_endpoints_carry_code_without_credential(
 #
 # LLM: 普通客户端（有效凭据 + 非终端身份头）查 /progress：记录不存在回 404、记录属于别人回 403，
 #   与 /result、/input-status 同口径；两种拒绝都干净（凭据有效，不带缺凭据码）。同一端口上
-#   无凭据回环请求（强制档）两种形状仍各带 LOCAL_CREDENTIAL_REQUIRED。
+#   无凭据请求两种目标形状都在业务读取前统一403并带LOCAL_CREDENTIAL_REQUIRED。
 # 函数用途: 造"别人的记录"，在强制档端口上钉住 /progress 的 404/403 分流与缺凭据码两侧。
 def test_progress_missing_record_is_404_and_other_owner_is_403(tmp_path):
     root = tmp_path / "data-root"
@@ -221,8 +212,7 @@ def test_progress_missing_record_is_404_and_other_owner_is_403(tmp_path):
     write_json_file_atomic(paths.inbox / f"{other_id}.json", {"user_id": "someone-else"})
     server = GatewayHTTPServer(0, paths,
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(True, credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_middleware(credential)))
     server.start()
     try:
         port = server.server.server_address[1]
@@ -242,30 +232,28 @@ def test_progress_missing_record_is_404_and_other_owner_is_403(tmp_path):
         status, body = _request(port, "GET", f"/progress/{own_id}", user_headers)
         assert status == 200
         assert body == {"request_id": own_id, "events": [], "next": 0}
-        # 无凭据回环（强制档）：记录缺失与别人的记录都仍带缺凭据码。
+        # 无凭据回环：缺失与别人的记录均在业务读取前403，不泄露存在性。
         status, body = _request(port, "GET", "/progress/fixture-progress-missing")
-        assert (status, body.get("error_code")) == (404, LOCAL_CREDENTIAL_REQUIRED)
+        assert (status, body.get("error_code")) == (403, LOCAL_CREDENTIAL_REQUIRED)
         status, body = _request(port, "GET", f"/progress/{other_id}")
         assert (status, body.get("error_code")) == (403, LOCAL_CREDENTIAL_REQUIRED)
     finally:
         server.stop()
 
 
-def test_guarded_endpoint_and_read_endpoint_switch_off_have_no_code(migration_listener):
-    # 迁移档（开关关着）行为完全不变：回环放行（端点继续走自己的业务校验），读端点拒绝时也不带码。
-    _server, port = migration_listener
-    ask_status, ask_body = _request(port, "POST", "/ask")
-    assert ask_status != 403, "开关关着时回环提交不该被鉴权拒绝"
-    assert "LOCAL_CREDENTIAL_REQUIRED" not in json.dumps(ask_body)
-    for path in ("/progress/fixture-request", "/input-status/fixture-request", "/result/fixture-request"):
-        status, body = _request(port, "GET", path)
-        assert "error_code" not in body, f"开关关着时 {path} 不该带缺凭据码"
-        assert status in {200, 403, 404}
+def test_default_middleware_rejects_submit_and_reads_before_business(default_listener):
+    _server, port = default_listener
+    for method, path in [("POST", "/ask"), ("GET", "/progress/fixture-request"),
+                         ("GET", "/input-status/fixture-request"), ("GET", "/result/fixture-request")]:
+        status, body = _request(port, method, path)
+        assert status == 403 and body["error"] == "forbidden"
+        assert body["error_code"] == LOCAL_CREDENTIAL_REQUIRED
+        assert "request_id" not in body and "result_load_error" not in body
 
 
 def test_remote_peer_denial_never_carries_code(tmp_path):
     # 远程不可信来源经 require_trusted_source 被拒时不带这个码（它不是"没带凭据"，是真越权）。
-    middleware = _middleware(True, credential="right-token")
+    middleware = _middleware(credential="right-token")
     replies = []
     handler = SimpleNamespace(_auth_middleware=middleware, headers={}, client_address=("192.0.2.10", 5555),
                               _send_json=lambda status, body: replies.append((status, body)))
@@ -274,13 +262,9 @@ def test_remote_peer_denial_never_carries_code(tmp_path):
     assert "error_code" not in replies[-1][1]
 
 
-# --- /result 自己判的两处 403：记录属于别人、记录损坏（g2bfix1b） ---------------
-#
-# LLM: 这两处原先手写裸 403，和同一端点"记录不存在"分支（走 _denial_body）口径不一致：
-#   没带凭据的旧客户端在"记录坏掉/是别人的"时仍只能看到裸 403，分不清是缺凭据还是真越权。
-#   用例把两种形状都造出来（真实 handler + 随机端口），钉住带码/不带码两侧。
-#   注意：降匿名后身份是 anonymous，记录里 user_id 写别的值才会落到"不是本人"这一支。
-# 函数用途: 在隔离数据根里预置一条属于别人的队列记录和一条损坏记录，返回它们的 request_id。
+# --- /result 目标记录异常：凭据前检不泄露正文或诊断 -------------------------
+# LLM: 无凭据统一在业务读取前403；有凭据保留原管理员数据/损坏诊断，不能抹掉业务可用性断言。
+# 函数用途: 在临时账中预置其他 owner 的记录与坏 JSON，返回准确 request_id。
 def _seed_other_owner_and_corrupt(request_paths):
     other_id, corrupt_id = "fixture-other-owner", "fixture-corrupt"
     write_json_file_atomic(request_paths.inbox / f"{other_id}.json", {"user_id": "someone-else"})
@@ -299,8 +283,7 @@ def test_result_self_judged_forbidden_branches_carry_code(tmp_path, shape):
     target = other_id if shape == "other_owner" else corrupt_id
     server = GatewayHTTPServer(0, paths,
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(True, credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_middleware(credential)))
     server.start()
     try:
         port = server.server.server_address[1]
@@ -319,21 +302,22 @@ def test_result_self_judged_forbidden_branches_carry_code(tmp_path, shape):
         server.stop()
 
 
-# 函数用途: 开关关着时，两条 /result 自判 403 形状都不带缺凭据码（迁移档行为不变）。
+# 函数用途: 默认中间件同样必须在读取别人或损坏记录之前拒绝，无目标细节。
 @pytest.mark.parametrize("shape", ["other_owner", "corrupt"])
-def test_result_self_judged_forbidden_branches_have_no_code_when_switch_off(tmp_path, shape):
+def test_default_middleware_rejects_queued_or_corrupt_result_without_details(tmp_path, shape):
     root = tmp_path / "data-root"
     paths = gateway_paths_from_root(tmp_path / "queue")
     other_id, corrupt_id = _seed_other_owner_and_corrupt(paths)
     target = other_id if shape == "other_owner" else corrupt_id
     server = GatewayHTTPServer(0, paths,
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(False),
-                                                              require_local_credential=False))
+                                                              auth_middleware=_middleware()))
     server.start()
     try:
         status, body = _request(server.server.server_address[1], "GET", f"/result/{target}")
-        assert "error_code" not in body, f"开关关着时 {shape} 不该带缺凭据码"
+        assert status == 403 and body["error_code"] == LOCAL_CREDENTIAL_REQUIRED
+        assert body["error"] == "forbidden"
+        assert "request_id" not in body and "result_load_error" not in body
     finally:
         server.stop()
 
@@ -360,8 +344,7 @@ def test_result_archived_terminal_owned_by_someone_else_carries_code(tmp_path):
     })
     server = GatewayHTTPServer(0, paths,
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(True, credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_middleware(credential)))
     server.start()
     try:
         port = server.server.server_address[1]
@@ -380,12 +363,8 @@ def test_result_archived_terminal_owned_by_someone_else_carries_code(tmp_path):
 # --- 归档读不出（load_error 分支）的 403（g2bfix1c）---------------------------
 
 
-# LLM: _send_archived_terminal_result 还有一处自判拒绝在"降匿名读路径"上：归档文件存在但
-#   read_gateway_terminal_envelope_report 报 load_error 时，普通用户拿 403、管理员拿 500 + 诊断。
-#   403 那一侧原先手写裸 _send_json(status, body)，与同端点的其它拒绝口径不一致——客户端在
-#   "归档坏掉"时仍只能靠状态码猜。本用例造一条结构损坏的归档文件（读不出即 load_error），
-#   钉住三格：匿名带码、带凭据走管理员侧 500 + result_load_error、开关关着不带码。
-# 函数用途: 在隔离数据根里放一条结构损坏的归档终态文件，返回它的 request_id。
+# LLM: 原归档业务仅在凭据已通过后执行，管理员仍拿500与原诊断；未认证者无法得知归档损坏。
+# 函数用途: 在隔离数据根中放一条损坏归档，让真实HTTP验证入口拒绝和管理员诊断两侧。
 def _seed_broken_archive(request_paths):
     broken_id = "fixture-broken-archive"
     request_paths.terminal.mkdir(parents=True, exist_ok=True)
@@ -401,17 +380,16 @@ def test_result_broken_archive_carries_code_without_credential(tmp_path):
     broken_id = _seed_broken_archive(paths)
     server = GatewayHTTPServer(0, paths,
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(True, credential),
-                                                              require_local_credential=True))
+                                                              auth_middleware=_middleware(credential)))
     server.start()
     try:
         port = server.server.server_address[1]
         assert port != 8420
         status, body = _request(port, "GET", f"/result/{broken_id}")
-        assert status == 403, f"匿名请求损坏归档应被拒，实际 {status} {body}"
+        assert status == 403, f"未认证请求应在归档读取前被拒，实际 {status} {body}"
         assert body["error_code"] == LOCAL_CREDENTIAL_REQUIRED, "归档读不出的 403 应带缺凭据码"
-        assert body["error"] == "terminal result unavailable"
-        assert body["request_id"] == broken_id
+        assert body["error"] == "forbidden"
+        assert "request_id" not in body
         assert "result_load_error" not in body, "普通用户不该拿到诊断细节"
 
         # 带凭据：鉴权档不再判缺凭据，请求放行到管理员侧——500 + result_load_error，且不带缺凭据码。
@@ -425,22 +403,21 @@ def test_result_broken_archive_carries_code_without_credential(tmp_path):
         server.stop()
 
 
-# 函数用途: 开关关着时，回环无凭据仍是可信来源，损坏归档走管理员诊断视图（500）且不带缺凭据码。
-def test_result_broken_archive_has_no_code_when_switch_off(tmp_path):
+# 函数用途: 默认凭据门不因坏归档而打开管理员诊断，未认证访问统一拒绝。
+def test_default_middleware_broken_archive_does_not_expose_diagnostic_view(tmp_path):
     root = tmp_path / "data-root"
     paths = gateway_paths_from_root(tmp_path / "queue")
     broken_id = _seed_broken_archive(paths)
     server = GatewayHTTPServer(0, paths,
                                params=GatewayHTTPServerParams(agent=_agent_with_root(root),
-                                                              auth_middleware=_middleware(False),
-                                                              require_local_credential=False))
+                                                              auth_middleware=_middleware()))
     server.start()
     try:
         status, body = _request(server.server.server_address[1], "GET", f"/result/{broken_id}")
-        # 迁移档（开关关着）回环自带信任，降匿名不发生，所以走的是管理员侧诊断视图；
-        # 关键是这条响应不带缺凭据码——迁移档行为不变。
-        assert status == 500, f"迁移档回环是可信来源，损坏归档走诊断视图，实际 {status} {body}"
-        assert body["error"] == "terminal result unavailable"
-        assert "error_code" not in body, f"开关关着时不该带缺凭据码：{body}"
+        # 缺凭据时在读取归档前拒绝，不泄露坏档存在性或管理员诊断。
+        assert status == 403 and body["error"] == "forbidden"
+        assert body["error_code"] == LOCAL_CREDENTIAL_REQUIRED
+        assert "request_id" not in body and "result_load_error" not in body
+
     finally:
         server.stop()

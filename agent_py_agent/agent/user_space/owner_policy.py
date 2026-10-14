@@ -1,11 +1,14 @@
-
+# LLM: Owner 权限只读原策略事实；存在但坏/不可读权限不得回退成网络开启，缺失仍沿原初始化合同，不自动修复。
+# 模块用途: 合并用户、父级与临时授权策略，保留读取诊断并让失效网络授权安全关闭。
 from __future__ import annotations
 
+import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
+    JsonObjectReadReport,
     locked_json_path,
     read_json_object_report,
     write_private_json_file_atomic_unlocked,
@@ -101,8 +104,10 @@ def read_owner_policy_bundle(home: MyAgentHomePaths) -> OwnerPolicyBundle:
     return read_owner_policy_bundle_report(home).bundle
 
 
+# LLM: 各原文件仍只有一份读取报告；权限文件额外验证存在性及网络 schema，坏原件保留、不写回默认值。
+# 函数用途: 读取 owner 的原策略与错误，让调用方明确区分初次缺失和已存授权损坏。
 def read_owner_policy_bundle_report(home: MyAgentHomePaths) -> OwnerPolicyBundleReport:
-    permissions = read_json_object_report(home.owner_permissions_json, context="owner_policy.permissions")
+    permissions = _read_permissions_report(home.owner_permissions_json)
     quota = read_json_object_report(home.owner_quota_json, context="owner_policy.quota")
     retention = read_json_object_report(home.owner_retention_json, context="owner_policy.retention")
     memory_policy = read_json_object_report(home.owner_memory_policy_json, context="owner_policy.memory_policy")
@@ -132,6 +137,8 @@ def read_owner_policy_bundle_report(home: MyAgentHomePaths) -> OwnerPolicyBundle
     )
 
 
+# LLM: 权限读取诊断是安全输入；有权限文件错误时网络关闭并向子孙封顶，不能借默认 True 补出授权。
+# 函数用途: 组合原 owner 与父级上界，保留错误供宿主修复，不替用户改坏策略。
 def resolve_effective_owner_policy(
     home: MyAgentHomePaths,
     *,
@@ -147,7 +154,8 @@ def resolve_effective_owner_policy(
 
     filesystem = _dict_value(permissions.get("filesystem"))
     shell = _dict_value(permissions.get("shell"))
-    network_enabled = _effective_network_enabled(permissions, parent_policy)
+    permissions_available = not any(error.get("context") == "owner_policy.permissions" for error in report.load_errors)
+    network_enabled = permissions_available and _effective_network_enabled(permissions, parent_policy)
     disabled_tools = _effective_disabled_tools(tool_policy, network_enabled, parent_policy)
     memory_enabled = _effective_memory_enabled(memory_policy, parent_policy)
     skills_enabled = _effective_skills_enabled(skill_policy, parent_policy)
@@ -196,6 +204,8 @@ def resolve_effective_owner_policy(
     )
 
 
+# LLM: 调用方已核权限文件 schema/读取可用性；真缺失仍是原 bootstrap 默认，已存网络只接受严格布尔。
+# 函数用途: 计算当前网络开关并按原父级上界封顶。
 def _effective_network_enabled(
     permissions: dict[str, Any],
     parent_policy: EffectiveOwnerPolicy | None,
@@ -203,6 +213,37 @@ def _effective_network_enabled(
     network = _dict_value(permissions.get("network"))
     enabled = bool(network.get("enabled", True))
     return enabled if parent_policy is None else bool(enabled and parent_policy.network_enabled)
+
+
+# LLM: lstat 区分真正不存在与坏链接/不可读；原 JSON 报告保留原因字段并明确权限失败码，禁止空 payload 补授权或自动重试。
+# 函数用途: 只读检查原 permissions 文件及 network 布尔合同，不初始化或覆盖坏文件。
+def _read_permissions_report(path: Path) -> JsonObjectReadReport:
+    try:
+        status = path.lstat()
+    except FileNotFoundError:
+        return JsonObjectReadReport({})
+    except OSError:
+        return JsonObjectReadReport({}, _permissions_error(path, "OWNER_PERMISSIONS_UNAVAILABLE"))
+    if not stat.S_ISREG(status.st_mode):
+        return JsonObjectReadReport({}, _permissions_error(path, "OWNER_PERMISSIONS_INVALID"))
+    report = read_json_object_report(path, context="owner_policy.permissions")
+    if report.load_error is not None:
+        invalid = report.load_error.get("error_type") in {"JSONDecodeError", "UnicodeDecodeError", "ValueError"}
+        code = "OWNER_PERMISSIONS_INVALID" if invalid else "OWNER_PERMISSIONS_UNAVAILABLE"
+        return JsonObjectReadReport(report.payload, {**report.load_error, **_permissions_error(path, code)})
+    payload = report.payload
+    network = payload.get("network")
+    if (payload.get("schema_version") != "permissions.v1" or not isinstance(network, dict)
+            or type(network.get("enabled")) is not bool):
+        return JsonObjectReadReport(payload, _permissions_error(path, "OWNER_PERMISSIONS_INVALID"))
+    return report
+
+
+# LLM: 诊断只含固定 code/context 与原策略地址，不包含文件正文、模型描述或凭据。
+# 函数用途: 为宿主显示已存权限不可使用的原因，提醒修复而不是自动重试打开网络。
+def _permissions_error(path: Path, code: str) -> dict[str, object]:
+    return {"context": "owner_policy.permissions", "error_code": code, "path": str(path),
+            "recoverable": False, "detail": "用户权限策略不可使用，网络权限已关闭；请修复原策略文件。"}
 
 
 def effective_memory_enabled(memory_policy: dict[str, Any]) -> bool:

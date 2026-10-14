@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +57,8 @@ class _CapturingBackend:
 
 
 class _RecordingFeishuAdapter:
+    supports_frozen_attachment_content = True
+
     """替身飞书 adapter:记录文本与原生媒体发送,不发网络。"""
 
     def __init__(self) -> None:
@@ -67,26 +70,11 @@ class _RecordingFeishuAdapter:
         self.sent.append((user_id, str(getattr(message, "content", "") or "")))
         return True
 
-    def send_file(
-        self,
-        user_id: str,
-        path: Path,
-        *,
-        idempotency_key: str = "",
-    ) -> bool:
-        _ = idempotency_key
-        self.files.append((user_id, path))
-        return True
-
-    def send_image(
-        self,
-        user_id: str,
-        path: Path,
-        *,
-        idempotency_key: str = "",
-    ) -> bool:
-        _ = idempotency_key
-        self.images.append((user_id, path))
+    # LLM: 原Delivery版本/owner核验负责读bytes，替身只消费其typed结果，不能通过Path回读绕过门。
+    # 函数用途: 记录原媒体路由，让真实投递测试继续验证文件和图片入口。
+    def send_attachment_content(self, user_id, content, *, idempotency_key="", as_image=False) -> bool:
+        target = self.images if as_image else self.files
+        target.append((user_id, Path(content.attachment.path)))
         return True
 
 
@@ -157,7 +145,7 @@ def _register_recording_adapter(service: DeliveryService, adapter: _RecordingFei
     service.registry.register_adapter(
         "feishu",
         adapter,
-        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True, images=True),
+        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True, files=True, images=True, frozen_attachment_content=True),
     )
 
 
@@ -719,6 +707,9 @@ def test_gateway_channel_hub_sends_registered_attachment_with_native_file_api(tm
                     path=str(artifact),
                     name=artifact.name,
                     kind="xlsx",
+                    sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    size_bytes=artifact.stat().st_size,
+                    owner_root=str(tmp_path),
                 ),
             ),
         )

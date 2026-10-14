@@ -6,6 +6,7 @@ import json
 import urllib.error
 import urllib.request
 
+from ..common.authenticated_http import open_authenticated_request
 from ..common.log_redaction import redact_sensitive_value
 
 API_BASE = 'https://open.feishu.cn/open-apis'
@@ -31,15 +32,6 @@ class FeishuCloudError(RuntimeError):
     def public_facts(self) -> dict:
         return {'http_status': self.http_status, 'provider_code': self.provider_code,
                 'reason': self.reason, 'effect_outcome': 'unknown' if self.unknown else 'not_started'}
-
-
-# LLM: urllib 默认会跟随重定向；携带宿主 token 的云调用必须拒绝跳转，不能把租户权限送到另一个 origin。
-# 类用途: 为固定官方接口关闭 HTTP 重定向。
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    # LLM: 返回 None 令原 urllib 抛 HTTPError，不发起第二跳。
-    # 函数用途: 拒绝供应商跳转请求。
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 # LLM: 响应净化先于工具结果和归档；精确秘密的 JSON/URL 编码也移除，字典键不能成为泄露旁路。
@@ -90,7 +82,7 @@ def request_cloud_api(adapter, method: str, path: str, body: dict | None = None,
         headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json; charset=utf-8'})
     mutating = method != 'GET' and not read_only
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=20) as response:
+        with open_authenticated_request(request, timeout=20) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ValueError('response too large')

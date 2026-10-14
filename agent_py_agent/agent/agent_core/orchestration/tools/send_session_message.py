@@ -19,6 +19,7 @@ from ....conversation.session_messaging import (
     SessionMessagingRequest,
     decide_session_messaging,
     session_message_dedupe_key,
+    session_target_owner_identity,
 )
 from ....runtime_errors import runtime_error_report
 from ....tooling.models import (
@@ -209,8 +210,8 @@ def _sender_context(agent: object) -> tuple[OwnerIdentity, str] | ToolHandlerOut
 
 # LLM: 目标 thread 必须在本 owner 的 store 里能读到；读不到（不存在、损坏、或不属本 owner）一律返回
 #   (None, None)，让权限判定统一按越界码处理，不区分"不存在/无权限"，不泄露存在性。
-#   能读到时目标必然同 owner，直接返回发送方身份作为目标身份，不做无法从 v10 thread 记录推导的 provider 猜测。
-# 函数用途: 读取目标会话，供权限判定与唤醒使用。
+#   能读到仍核对声明的 owner/home；未知外部记录不借本目录升权，旧本地目录只认原 runtime 路径。
+# 函数用途: 读取并核验本人目标会话，冲突时不入队或唤醒，也不泄露目标存在性。
 def _load_target_thread(
     agent: object,
     thread_id: str,
@@ -234,7 +235,7 @@ def _load_target_thread(
             details=runtime_error_report(exc, context="send_session_message.target"),
             effect_outcome="not_started",
         )
-    if load_error is not None or thread is None:
+    if load_error is not None or thread is None or session_target_owner_identity(agent, thread, sender_identity) is None:
         return None, None
     return thread, sender_identity
 

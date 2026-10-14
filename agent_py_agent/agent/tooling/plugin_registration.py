@@ -12,7 +12,7 @@ from .mcp_client import MCPError
 logger = logging.getLogger(__name__)
 
 
-# LLM: 只在新运行准备调用；先登记再复查共享关闭标记，未登记候选须关闭，旧代清理未知仍保留原句柄。
+# LLM: 新运行只沿原安装/关闭权威同步；host 环境来源从 registry DTO 固定给 client，显式插件 native env 不变。
 # 函数用途: 将当前 owner 的已启用程序插件同步到原 MCP 集合；纯内容能力包不创建连接，撤销只影响准确旧连接。
 def synchronize_plugin_clients(registry) -> None:
     from ..user_space.owner_resolver import OwnerIdentity
@@ -45,7 +45,8 @@ def synchronize_plugin_clients(registry) -> None:
         try:
             client = PluginMCPClient(owner, installation,
                                      runtime_repo=getattr(registry._construction_params, "runtime_repo", None),
-                                     process_sandbox=bool(getattr(registry._construction_params, "plugin_process_sandbox", False)))
+                                     process_sandbox=bool(getattr(registry._construction_params, "plugin_process_sandbox", False)),
+                                     host_credential_env_names=registry._construction_params.host_credential_env_names)
             client.require_settled_previous_resources()
             registry._mcp_clients.append(client)
             if registry._mcp_closed.is_set():

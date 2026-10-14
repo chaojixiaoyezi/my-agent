@@ -1,3 +1,5 @@
+# LLM: 来源渲染只运输未解析引用；不得从模型 source/旧重放直接读取宿主 env/file。真正注入唯一属于受权 HTTP 出口。
+# 模块用途: 生成来源请求结构和游标绑定，不读秘密、不发网络；变更需联查 watch HTTP 出口和来源重放测试。
 """HTTP source request facts learned for one concrete watch source.
 
 The runtime knows how to validate and execute a request description.  It does
@@ -15,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from ..settings.secret_ref import is_secret_ref, resolve_secret_ref
+from ..settings.secret_ref import is_secret_ref
 from ..tooling.web import _normalize_url
 from ..tooling.web_http_helpers import normalize_headers, normalize_method
 
@@ -29,6 +31,7 @@ _REQUEST_FIELDS = frozenset(
         "cursor_binding",
         "page_size_binding",
         "secret_bindings",
+        "credential_ref",
     }
 )
 _BINDING_FIELDS = frozenset({"location", "name", "path", "initial", "offset"})
@@ -53,14 +56,18 @@ _SENSITIVE_PLAIN_HEADERS = frozenset(
 _TOP_LEVEL_JSONPATH_RE = re.compile(r"^\$\.([^\.\[\]]+)(?:\[\]|\[\*\])?$")
 
 
+# LLM: 载体只保留未解析 source 引用；模型 JSON 不能提供宿主授权，反射和冻结认证只在正式 HTTP choke 完成。
+# 类用途: 运输已渲染的普通请求和待授权引用；不因这个 DTO 而获得文件或凭据读取权。
 @dataclass(frozen=True)
 class SourceHttpRequest:
-    """A fully rendered request.  Resolved secrets live only in this object."""
+    """普通数据已经渲染，秘密引用必须在正式 owner HTTP 入口重新授权。"""
 
     url: str
     method: str
     headers: dict[str, str]
     data: bytes | None
+    secret_bindings: tuple[dict[str, Any], ...] = ()
+    credential_ref: str = ""
 
 
 _ADAPTER_REQUEST_FIELDS = frozenset({"url", "headers", "json_body"})
@@ -81,6 +88,8 @@ def normalize_top_level_response_field(value: object) -> str:
     return matched.group(1)
 
 
+# LLM: 请求只登记未解析私人引用；不会读取 host secrets、授予 owner/root 权或把普通头变成秘密授权。
+# 函数用途: 校验一次来源的普通 HTTP 与游标描述，让后续唯一 HTTP 出口能够完整核对待注入引用。
 def normalize_source_http_request(
     raw_url: object,
     raw_request: object,
@@ -119,6 +128,7 @@ def normalize_source_http_request(
     cursor = _merge_inferred_binding(cursor, inferred_cursor, "cursor_binding")
     page_size = _merge_inferred_binding(page_size, inferred_limit, "page_size_binding")
     secrets = _normalize_secret_bindings(raw.get("secret_bindings"))
+    credential = _credential_reference(raw.get("credential_ref"))
 
     if poll:
         if cursor is not None or page_size is not None:
@@ -142,9 +152,13 @@ def normalize_source_http_request(
         request["page_size_binding"] = page_size
     if secrets:
         request["secret_bindings"] = secrets
+    if credential:
+        request["credential_ref"] = credential
     return url, request
 
 
+# LLM: 普通结构和游标可由模型声明，但秘密绑定保持未解析；所有发送者必须沿 watch 原受权 HTTP choke。
+# 函数用途: 不读取 env/file 地生成请求，旧 source 重放也不会直接解密或打开文件。
 def render_source_http_request(
     source_url: str,
     request: dict[str, Any],
@@ -179,17 +193,6 @@ def render_source_http_request(
     if isinstance(page_binding, dict) and page_size is not None:
         query, body = _apply_value_binding(query, body, page_binding, int(page_size))
 
-    for binding in list(request.get("secret_bindings") or []):
-        ref = str(binding.get("secret_ref") or "")
-        value = resolve_secret_ref(ref)
-        if not value:
-            raise ValueError("来源请求所需 SecretRef 当前不可用")
-        location = str(binding.get("location") or "")
-        if location == "header":
-            headers[str(binding["name"])] = value
-        else:
-            query, body = _apply_value_binding(query, body, binding, value)
-
     parts = urlsplit(source_url)
     rendered_url = urlunsplit(
         (
@@ -212,9 +215,12 @@ def render_source_http_request(
             raise ValueError(f"来源请求体超过 {_MAX_BODY_BYTES} 字节")
         if not any(key.casefold() == "content-type" for key in headers):
             headers["Content-Type"] = "application/json"
-    return SourceHttpRequest(rendered_url, method, headers, data)
+    return SourceHttpRequest(rendered_url, method, headers, data,
+        tuple(_normalize_secret_bindings(request.get("secret_bindings"))), _credential_reference(request.get("credential_ref")))
 
 
+# LLM: adapter 只能改原 origin 的普通传输字段；即使原绑定含旧 env/file，也只运输引用而不读取宿主秘密。
+# 函数用途: 生成动态来源请求，将所有凭据留给正式 HTTP 出口按当前原授权核验。
 def render_source_adapter_request(
     source_url: str,
     request: dict[str, Any],
@@ -253,19 +259,6 @@ def render_source_adapter_request(
         raise ValueError("GET 来源适配器不能生成 json_body")
 
     query = parse_qsl(urlsplit(rendered_url).query, keep_blank_values=True)
-    for binding in list(request.get("secret_bindings") or []):
-        if not isinstance(binding, dict):
-            raise ValueError("来源请求的 secret_bindings 已损坏")
-        ref = str(binding.get("secret_ref") or "")
-        value = resolve_secret_ref(ref)
-        if not value:
-            raise ValueError("来源请求所需 SecretRef 当前不可用")
-        location = str(binding.get("location") or "")
-        if location == "header":
-            headers[str(binding["name"])] = value
-        else:
-            query, body = _apply_value_binding(query, body, binding, value)
-
     parts = urlsplit(rendered_url)
     rendered_url = _normalize_url(
         urlunsplit(
@@ -289,7 +282,18 @@ def render_source_adapter_request(
             raise ValueError(f"来源请求体超过 {_MAX_BODY_BYTES} 字节")
         if not any(key.casefold() == "content-type" for key in headers):
             headers["Content-Type"] = "application/json"
-    return SourceHttpRequest(rendered_url, method, headers, data)
+    return SourceHttpRequest(rendered_url, method, headers, data,
+        tuple(_normalize_secret_bindings(request.get("secret_bindings"))), _credential_reference(request.get("credential_ref")))
+
+
+# LLM: 这里只校验原 TaskCredential 的引用形状，不读取记录、授予本人身份或把引用当 bearer token。
+# 函数用途: 允许来源请求使用已有私人凭据编号，真正 scope/origin 校验仍在发送前执行。
+def _credential_reference(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or not re.fullmatch(r"cred_[0-9a-f]{32}", value):
+        raise ValueError("credential_ref 必须是 request_credentials 返回的准确引用")
+    return value
 
 
 def _origin_key(url: str) -> tuple[str, str, int | None]:

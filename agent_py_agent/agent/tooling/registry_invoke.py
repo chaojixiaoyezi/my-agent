@@ -554,7 +554,7 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
     return str(value).strip().lower() in {"1", "true"}
 
 
-# LLM: 授权后的普通工具只有一个执行分支；开始观察在真实派发前触发，观察故障不能成为工具失败。
+# LLM: 授权工具只有一个执行分支；controlled 命令的环境源只从冻结 handler 取，开始观察故障不能成为工具失败。
 # 函数用途: 执行已通过权限和边界门的工具，并把实现异常统一收敛为结构化失败，不将未派发调用记成工具事件。
 def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandlerOutcome:
     if request.invocation_context is None:
@@ -586,6 +586,7 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
                         params=request.tool_params,
                         workspace_root=request.workspace_root,
                         write_boundary=request.write_boundary,
+                        host_credential_env_names=request.tool.host_credential_env_names,
                     )
                 )
             else:

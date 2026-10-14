@@ -35,7 +35,7 @@ import sys
 import tempfile
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -57,12 +57,13 @@ from .process_run import SandboxProcessOptions, run_sandbox_process
 SandboxReadMode = Literal["hide_home", "allowlist"]
 
 
-# LLM: 宿主隐私根与网络上界一起沿请求传递，不是授权存储；不可变对象避免并发工具交换边界。
+# LLM: 宿主隐私、网络与环境来源上界沿原请求传递，不是授权存储；凭据来源不能由模型参数覆盖。
 # 类用途: 携带一次 Shell/PTY 调用的宿主隐私与网络限制，减少长参数串而不增加第二套权限判断。
 @dataclass(frozen=True)
 class SandboxHostPolicy:
     private_roots: tuple[object, ...] = ()
     network_access: bool = True
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 class SandboxUnavailableError(SandboxUnavailable):
@@ -106,7 +107,7 @@ def _is_forbidden_system_root(path: Path) -> bool:
     return path == Path("/") or any(root == path or root in path.parents for root in forbidden)
 
 
-# LLM: AttemptSandboxSpec separates readable cwd from explicit writable roots; read_mode=allowlist must not infer cwd access.
+# LLM: 沙箱规格区分 cwd/显式写根；host 环境来源仅擦洗默认继承，不授予文件、网络或工具权限。
 #   Production process tools set implicit_attempt_write_roots=False with an explicit host boundary; hide_home keeps its prior projection.
 # 类用途: 描述一次命令的读模式、授权根、保护路径和网络范围，供 Linux/macOS 共用。
 @dataclass(frozen=True)
@@ -157,6 +158,8 @@ class AttemptSandboxSpec:
     # `::ffff:127.0.0.1` 能绕过且 Gateway 认成 127.0.0.1（ae 实测、be 复核）。只由模型 shell 的 _sandbox_exec 填写；
     # 插件进程沙箱不填（它要连 /plugin-host/query，网络由 M 线 B7 管）。端口取运行中 Gateway 实际绑定值，不写死配置。
     deny_gateway_ports: tuple[int, ...] = ()
+    # 仅宿主源配置投影，同步 run 默认环境必须剥离这些准确来源，不影响文件/网络授权。
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
 # LLM: 只负责平台规则和就绪门；同步 run 的取消及回收交给 process_run，不新增无沙箱旁路，联测 attempt 与 verifier。
@@ -392,7 +395,7 @@ class AttemptExecutionSandbox:
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 就绪/argv 仍走唯一平台边界；allowlist cwd 复用插件工厂的同一根覆盖判定，未获准则 Popen 前结构化拒绝。
-    #   macOS 显式传工作目录，Linux 仍靠 bwrap --chdir；等待/取消回收共用 process_run，不改显式 PTY 通道。
+    #   macOS 显式传工作目录，Linux 靠 bwrap --chdir；同步进程带宿主来源擦洗上界，不从业务 argv 推断秘密。
     # 函数用途: 执行非交互沙箱命令并响应本 run 的取消；已取消不启动，运行中取消回收完整组后抛 ToolCancelled。
     def run(
         self,
@@ -407,7 +410,7 @@ class AttemptExecutionSandbox:
         self.require_ready()
         argv = self.build_argv(command_argv)
         options = SandboxProcessOptions(timeout, grace_seconds, capture_output,
-                                        _sandbox_process_cwd(self.spec, self._platform))
+                                        _sandbox_process_cwd(self.spec, self._platform), self.spec.host_credential_env_names)
         return run_sandbox_process(argv, options)
 
     # ------------------------------------------------------ macOS SBPL 构造

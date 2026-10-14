@@ -1,5 +1,5 @@
 # LLM: WS 只在原 typed 入站回执 accepted/稳定 ignored 后提交 seen；暂时失败向官方 SDK 抛安全异常以生成失败 ACK。
-# 模块用途: 共用 webhook 解析和原进程内去重，保护并发 claim，不存正文或建立第二消息队列。
+# 模块用途: 共用 webhook 解析与安全诊断和原进程内去重，保护并发 claim，不存正文或建立第二消息队列。
 from __future__ import annotations
 
 """飞书长连接(WebSocket)入站客户端 —— 免公网 / 不绑端口部署。
@@ -219,6 +219,8 @@ class FeishuWsClient:
         self._seen_order.append(message_id)
         self._seen_ids.add(message_id)
 
+    # LLM: 原卡身份/密码门/重复控制保持原样，未知异常只记录类型，不能回显表单秘密或认证头。
+    # 函数用途: 沿原真实点击身份处理卡片并就地替换，失败不掀翻长连或把秘密带进诊断。
     def _handle_card_action(self, data: Any) -> Any:
         """卡片按钮回调:归一化 → 去重 → 交 on_card_action。on_card_action 返回 dict 时(密码卡)
         包成 P2CardActionTriggerResponse 同步返回飞书 → 原卡【就地整卡替换】(密码框+密码当场消失,
@@ -246,7 +248,7 @@ class FeishuWsClient:
 
                     return P2CardActionTriggerResponse(resp)
         except Exception as exc:
-            logger.error(f"飞书卡片回调处理异常(不中断长连): {type(exc).__name__}: {exc}")
+            logger.error('飞书卡片回调处理异常(不中断长连) error_type=%s', type(exc).__name__)
         return None
 
     def _ignore_event(self, data: Any) -> None:

@@ -14,6 +14,7 @@ from ....conversation.session_messaging import (
     SESSION_MESSAGE_HOST_EVENT_MARKER,
     SessionMessagingRequest,
     decide_session_messaging,
+    session_target_owner_identity,
 )
 from ....conversation.session_task_dispatch import (
     SESSION_TASK_TOOL_NAME,
@@ -151,8 +152,8 @@ def _sender_context(agent: object) -> tuple[OwnerIdentity, str] | ToolHandlerOut
     return OwnerIdentity(provider=provider, owner_kind=owner_kind, owner_id=owner_id), thread_id
 
 
-# LLM: 目标必须在本 owner 的 store 里读到；读不到按越界处理（与不存在共用），能读到即同 owner。
-# 函数用途: 读取目标会话，供权限判定使用。
+# LLM: 目标来自原 Store 仍须核对声明 owner/home；读不到或归属冲突均按越界处理，不借当前目录升级未知外部记录。
+# 函数用途: 读取并核验本人派活目标，不匹配时不建任务、投正文或唤醒。
 def _load_target(
     agent: object, thread_id: str, *, sender_identity: OwnerIdentity
 ) -> tuple[object, OwnerIdentity] | tuple[None, None] | ToolHandlerOutcome:
@@ -168,7 +169,7 @@ def _load_target(
             error_code="TOOL_EXECUTION_FAILED",
             details=runtime_error_report(exc, context="create_session_task.target"),
         )
-    if load_error is not None or thread is None:
+    if load_error is not None or thread is None or session_target_owner_identity(agent, thread, sender_identity) is None:
         return None, None
     return thread, sender_identity
 

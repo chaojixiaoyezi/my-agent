@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 
@@ -97,6 +97,7 @@ class _RunScope:
     written: frozenset[str] = frozenset()
     pack_root: Path | None = None
     originals: dict[str, OriginalFile] | None = None
+    host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
     # LLM: 当前候选模式只来自本回合钉住的包；closeout 的 current 与 post-write 的 known_current 共用它。
     # 函数用途: 按钉住包声明汇总当前核验需要认的路径模式。
@@ -215,8 +216,11 @@ def _verification_section(scope: _RunScope) -> str:
     return _rework_text(failed)
 
 
-# 函数用途: 组装本次核验的宿主事实；任何前提不满足（开关关、没有 owner/账本/钉住包）返回 None。
+# LLM: 只从原 Agent 配置冻结凭据环境来源，不把 names 记入核验账本或信任 params 的业务属性。
+# 函数用途: 组装本次核验的宿主事实与擦洗上界，前提不满足时不启动核验。
 def _run_scope(agent: object, params: object) -> _RunScope | None:
+    from ..settings.secret_ref import managed_secret_environment_names
+
     if not host_verification_enabled(agent):
         return None
     owner = verification_owner(agent)
@@ -231,7 +235,8 @@ def _run_scope(agent: object, params: object) -> _RunScope | None:
                      WorkspaceScan.from_payload(baseline.get("scan")) if baseline else None,
                      (str(getattr(params, "run_id", "") or ""), str(getattr(params, "attempt_id", "") or "")),
                      getattr(getattr(agent, "subagents", None), "runtime_db", None), ledger.written_paths(),
-                     ledger.path.parent, load_task_originals(ledger.path.parent))
+                     ledger.path.parent, load_task_originals(ledger.path.parent),
+                     managed_secret_environment_names(agent.config))
 
 
 # LLM: 写后检查先看写后反馈上限（_paused_post_write），到上限的检查对象不跑检查程序；收尾检查照常全跑。
@@ -277,14 +282,15 @@ def _applicable(scope: _RunScope, path: Path) -> list[tuple[PinnedVerificationPa
     return pairs
 
 
-# LLM: 每次执行前看本 run 取消；已取消不进运行器、逐目标写取消事实。cancelled 不是完成的检查，显式恢复后不能复用。
+# LLM: 每次执行前检查本 run 取消；宿主来源只投影到进程请求，原核验缓存/事实账不保存凭据来源。
 # 函数用途: 跑一次检查或复用有效结果，取消则仅记账和事件，不启动新程序。
 def _run_once(scope: _RunScope, pair: tuple, target: Path, trigger: str) -> tuple[str, PackVerificationResult]:
     package, verifier = pair
     inputs, matches = _resolve_inputs(scope, verifier, target, trigger)
     key = _cache_key(package, verifier, target, inputs)
     cached = scope.ledger.cached_fact(key)
-    request = PackVerifierRequest(scope.owner, package.installation, verifier.id, target, scope.root, inputs)
+    request = PackVerifierRequest(scope.owner, package.installation, verifier.id, target, scope.root, inputs,
+                                  scope.host_credential_env_names)
     if cancellation_requested():
         result = cancelled_pack_verifier(request)
     elif cached is not None and cached.get("status") != "cancelled":

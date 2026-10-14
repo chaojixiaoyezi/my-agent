@@ -1,5 +1,5 @@
 # LLM: 飞书交互卡片——长期人设确认与共用事件归一；私人审批使用独立控制入口，不能由 persona 处理器批准。
-# 模块用途: 构造长期设定确认卡，规范 SDK/webhook 的真实点击身份；USER/AGENTS 仍由 owner Agent 自主维护。
+# 模块用途: 通过不可重定向认证接口构造长期设定确认卡，规范 SDK/webhook 的真实点击身份；USER/AGENTS 仍由 owner Agent 自主维护。
 #   (全程不阻塞主代理)。build_ 造卡片 JSON;send_ 发卡片(自取 tenant token,fail-open);
 #   extract_card_action / extract_webhook_card_action 把长连接对象或 webhook JSON 归一成同一结构;
 #   apply_card_action 是核心回调
@@ -12,6 +12,8 @@ import logging
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from ..common.authenticated_http import open_authenticated_request
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,8 @@ def build_persona_confirm_card(
     }
 
 
+# LLM: 原卡片数据与宿主认证只发固定接口，失败仅类型日志，不影响未确认人格的权限门。
+# 函数用途: 沿原认证运输发送确认卡，失败依旧不写长期人格。
 def send_interactive_card(app_id: str, app_secret: str, open_id: str, card: dict[str, Any]) -> bool:
     """发交互卡片到 open_id(自取 tenant token,纯 urllib)。任何失败(缺凭据/网络/飞书报错)返回
     False 且不抛(fail-open):发不出去 → 上层回落"就地不写 + 提示用户"。"""
@@ -90,7 +94,7 @@ def send_interactive_card(app_id: str, app_secret: str, open_id: str, card: dict
         )
         return resp.get("code") == 0
     except Exception as exc:
-        logger.warning(f"飞书确认卡片发送失败(fail-open,不写不阻塞): {type(exc).__name__}: {exc}")
+        logger.warning('飞书确认卡片发送失败(fail-open,不写不阻塞) error_type=%s', type(exc).__name__)
         return False
 
 
@@ -262,6 +266,8 @@ def _tenant_access_token(app_id: str, app_secret: str) -> str | None:
     return str(token) if token else None
 
 
+# LLM: 固定卡片与认证接口拒绝HTTP跳转，返回原响应只供caller，不输出秘密或正文。
+# 函数用途: 发一次卡片/认证POST，响应生命周期和原超时不变。
 def _post_json(
     url: str, body: dict[str, Any], headers: dict[str, str] | None = None
 ) -> dict[str, Any]:
@@ -270,7 +276,7 @@ def _post_json(
     if headers:
         hdrs.update(headers)
     req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
-    with urllib.request.urlopen(req, timeout=_FEISHU_CARD_TIMEOUT_SECONDS) as resp:
+    with open_authenticated_request(req, timeout=_FEISHU_CARD_TIMEOUT_SECONDS) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.gateway_parts import client_service
+from agent_py_agent.agent.gateway_parts.client_credentials import GatewayClientCredentials
 from agent_py_agent.agent.gateway_parts.client_service import (
     execute_gateway_client_memory,
     read_gateway_client_history,
@@ -45,11 +46,15 @@ def _paths(root: Path) -> GatewayPaths:
     )
 
 
-def _post_json(port: int, path: str, payload: dict) -> dict:
+# LLM: HTTP正例沿真实服务器生成的G1与原身份头，不绕middleware或从body授权。
+# 函数用途: 用测试自己的宿主客户端提交原记忆/历史请求。
+def _post_json(port: int, path: str, payload: dict, agent) -> dict:
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json",
+                 **GatewayClientCredentials(agent.home_paths.root).headers(),
+                 "X-User-Id": payload["user_id"], "X-Channel": payload["channel"]},
     )
     with urllib.request.urlopen(request, timeout=2.0) as response:
         return json.loads(response.read().decode())
@@ -205,8 +210,8 @@ def test_gateway_http_routes_client_memory_and_history(monkeypatch, tmp_path) ->
             "channel": "chat",
             "conversation_id": "sess-test",
         }
-        memory = _post_json(port, "/client/memory", {**common, "operation": "recent"})
-        history = _post_json(port, "/client/history", {**common, "limit": 3})
+        memory = _post_json(port, "/client/memory", {**common, "operation": "recent"}, server.agent)
+        history = _post_json(port, "/client/history", {**common, "limit": 3}, server.agent)
     finally:
         server.stop()
 

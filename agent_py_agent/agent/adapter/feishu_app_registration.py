@@ -1,3 +1,5 @@
+# LLM: 原应用注册轮询只访问固定官方认证接口且拒绝HTTP跳转，原请求/状态/二维码流程保持不变。
+# 模块用途: 为原Feishu/Lark应用注册复用安全运输，不能把client/device秘密交给第二个origin。
 """飞书/Lark 应用「扫码自助建应用」设备码 OAuth 流程。
 
 借鉴 通道运行时 extensions/feishu/src/app-registration.ts:用户拿飞书/Lark App 扫码,
@@ -21,6 +23,8 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
+
+from ..common.authenticated_http import open_authenticated_request
 
 FeishuDomain = Literal["feishu", "lark"]
 
@@ -63,6 +67,8 @@ def _accounts_base_url(domain: FeishuDomain) -> str:
     return _ACCOUNTS_URL.get(domain, _ACCOUNTS_URL["feishu"])
 
 
+# LLM: 请求含device/client秘密，固定认证目标不重定向；原错误JSON仅交结构化注册状态裁决。
+# 函数用途: 用原超时发单次注册表单，保持正常与pending响应解析，不另加重试或认证源。
 def _post_registration(domain: FeishuDomain, body: dict[str, str]) -> dict:
     """POST 表单到注册端点,返回解析后的 JSON(注册 poll 在 pending/error 时也返回 JSON 体)。"""
     url = _accounts_base_url(domain) + _REGISTRATION_PATH
@@ -74,7 +80,7 @@ def _post_registration(domain: FeishuDomain, body: dict[str, str]) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_SECONDS) as resp:
+        with open_authenticated_request(req, timeout=_REQUEST_TIMEOUT_SECONDS) as resp:
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         # 4xx 也带 JSON 体(pending/error 状态),读出来交给上层判定。

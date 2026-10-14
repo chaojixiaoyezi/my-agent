@@ -35,7 +35,10 @@ from agent_py_agent.agent.adapter.manager import (
     configure_gateway_client,
 )
 from agent_py_agent.agent.adapter.protocol import IncomingMessage
-from agent_py_agent.agent.gateway_parts.local_client_token import LocalClientCredentialError
+from agent_py_agent.agent.gateway_parts.local_client_token import (
+    LocalClientCredentialError,
+    ensure_local_client_credential,
+)
 from agent_py_agent.tests.test_adapter_manager import DummyAdapter
 
 
@@ -73,7 +76,9 @@ def test_route_persists_authenticated_ingress_before_media_or_gateway_io(
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    configure_gateway_client(manager, SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False), tmp_path))
+    host = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False), tmp_path)
+    ensure_local_client_credential(host.home_paths.root)
+    configure_gateway_client(manager, host)
     adapter = _register_dummy(manager)
     adapter.workspace_root = tmp_path / "workspace"
     adapter.fetch_media_to = MagicMock(return_value="image.png")
@@ -122,7 +127,9 @@ def test_transient_media_failure_stays_prepared_and_retries_before_post(
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    configure_gateway_client(manager, SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False), tmp_path))
+    host = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'), enable_plugins=False), tmp_path)
+    ensure_local_client_credential(host.home_paths.root)
+    configure_gateway_client(manager, host)
     adapter = _register_dummy(manager)
     adapter.workspace_root = tmp_path / "workspace"
     adapter.fetch_media_to = MagicMock(
@@ -515,7 +522,7 @@ def test_transient_result_http_error_remains_wait_and_is_not_user_visible(
         fp=None,
     )
 
-    with patch("urllib.request.urlopen", side_effect=error):
+    with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", side_effect=error):
         assert manager._poll_gateway_once(pending, interval=0.0) is None
 
 
@@ -528,7 +535,7 @@ def test_ask_submission_auth_denial_becomes_credential_error(tmp_path: Path) -> 
     error = urllib.error.HTTPError(
         "http://127.0.0.1:8420/ask", 403, "forbidden", hdrs=None, fp=BytesIO(body)
     )
-    with patch("urllib.request.urlopen", side_effect=error):
+    with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", side_effect=error):
         with pytest.raises(LocalClientCredentialError) as caught:
             manager._submit_gateway_payload({"goal": "x"}, _message())
     assert caught.value.reason_code == "LOCAL_CREDENTIAL_REQUIRED"
@@ -543,7 +550,7 @@ def test_ask_submission_transient_error_still_raises(tmp_path: Path) -> None:
     error = urllib.error.HTTPError(
         "http://127.0.0.1:8420/ask", 503, "unavailable", hdrs=None, fp=None
     )
-    with patch("urllib.request.urlopen", side_effect=error):
+    with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", side_effect=error):
         with pytest.raises(urllib.error.HTTPError):
             manager._submit_gateway_payload({"goal": "x"}, _message())
 
@@ -555,7 +562,7 @@ def test_ask_submission_401_without_code_uses_generic_denial_code(tmp_path: Path
     error = urllib.error.HTTPError(
         "http://127.0.0.1:8420/ask", 401, "unauthorized", hdrs=None, fp=None
     )
-    with patch("urllib.request.urlopen", side_effect=error):
+    with patch("agent_py_agent.agent.adapter.manager.open_authenticated_request", side_effect=error):
         with pytest.raises(LocalClientCredentialError) as caught:
             manager._submit_gateway_payload({"goal": "x"}, _message())
     assert caught.value.reason_code == "GATEWAY_AUTH_DENIED"
