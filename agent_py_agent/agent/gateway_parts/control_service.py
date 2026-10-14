@@ -3026,24 +3026,35 @@ def _subagent_status(agent: object, request_ids: list[str]) -> _SubagentStatusCo
     return _SubagentStatusCounts(len(related), running, done, max(0, len(related) - running - done), other_labels)
 
 
-# LLM: Progress summarizes typed phase/ok only; display text and raw tool data never drive /status.
-# 函数用途:从最近一条 typed 工具事件生成不泄露内部执行细节的阶段描述。
+# LLM: /status 只读取最新 typed 等待/终态/内容事件及更新时间；started 不证明仍执行，正文不得参与裁决。
+# 函数用途: 从原 chunk 显示最近的真实阶段和更新时间，避免旧开始事件冒充当前运行。
 def _recent_progress(paths: GatewayPaths, request_id: str) -> str:
     if not request_id:
         return ""
-    for row in reversed(_tail_json_rows(gateway_chunk_path(paths, request_id))):
-        if row.get("kind") != "tool_progress" or not isinstance(row.get("progress"), dict):
+    rows = _tail_json_rows(gateway_chunk_path(paths, request_id))
+    for row in reversed(rows):
+        if row.get("kind") in {"model_delta", "model_draft", "assistant_commentary"}:
+            return "模型已返回内容，等待后续状态更新"
+        progress = row.get("progress")
+        if not isinstance(progress, dict):
             continue
-        phase = str(row["progress"].get("phase") or "")
-        if phase == "started":
-            return "正在执行一个步骤"
+        kind = str(row.get("kind") or "")
+        phase = str(progress.get("phase") or "")
+        updated = str(row.get("updated_at") or "")
+        suffix = "（最近更新 " + updated + "）" if updated else "（更新时间未知）"
+        if kind == "model_liveness":
+            return "等待模型响应" + suffix
+        if kind != "tool_progress":
+            continue
+        if phase == "running":
+            return "等待工具结果，已等待 " + str(progress.get("elapsed_seconds", 0)) + " 秒" + suffix
         if phase == "finished":
-            if row["progress"].get("ok") is False:
-                return "一个步骤失败，正在处理"
-            return "刚完成一个执行步骤"
+            return ("一个步骤失败，等待后续状态" if progress.get("ok") is False else "刚完成一个执行步骤") + suffix
         if phase == "interrupted":
-            return "正在停止"
-    return "正在处理"
+            return "正在停止" + suffix
+        if phase == "started":
+            return "步骤已开始，等待当前状态更新" + suffix
+    return "正在处理（尚无当前进度）"
 
 
 # LLM: The tail reader is byte-bounded so /status cannot load an unbounded stream file into memory.

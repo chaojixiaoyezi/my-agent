@@ -30,6 +30,8 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
     draft = dict(record.progress_draft)
     if draft.get("disabled"):
         return worker._commit_progress(record, batch.next_cursor)
+    if not record.dispatch and time.time() < float(draft.get("retry_at") or 0):
+        return record
     if record.dispatch:
         text = str(draft.get("content") or "")
         next_cursor = int(record.dispatch["next_cursor"])
@@ -47,7 +49,10 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
         if batch.updated_at:
             footer = "\n更新于 " + datetime.fromisoformat(batch.updated_at).strftime("%H:%M:%S")
         limit = max(1, min(8000, int(limit)))
-        content = (prefix + "\n" + "\n".join(batch.messages)).strip()
+        from ..common.log_redaction import redact_sensitive_text
+
+        content = redact_sensitive_text((prefix + "\n" + "\n".join(batch.messages)).strip(),
+            redacted_marker="[REDACTED]", redact_assignment_labels=True)
         text = (content[-max(0, limit - len(footer)):] if limit > len(footer) else "") + footer[-limit:]
         next_cursor = batch.next_cursor
         draft.update(mode="stream", content=text)

@@ -32,6 +32,16 @@ from .task_credential_schema import (
 )
 
 
+# LLM: 只携带宿主固定码、阶段及副作用事实，不复制供应商响应或明文；仍是 ValueError 供既有调用方处理。
+# 类用途: 区分原任务无效、私人卡前置拒绝和可能已发送但没有回执的失败。
+class CredentialInputError(ValueError):
+    # LLM: 公开消息固定由宿主产生；调用方按 code/stage 判断，禁止解析文案产生授权。
+    # 函数用途: 保存可直接写入原工具错误事实的凭据交互失败。
+    def __init__(self, code, message, *, stage='preflight', effect_outcome='not_started'):
+        super().__init__(message)
+        self.code, self.stage, self.effect_outcome = code, stage, effect_outcome
+
+
 # LLM: 只使用已声明 cryptography 实现，缺依赖明确不可用，不自行实现加密或退回明文。
 # 函数用途: 由原 owner 主密钥派生独立用途的加密密钥。
 def _cipher(home):
@@ -74,13 +84,15 @@ class CredentialCardOptions:
 def request_credential_card(agent, *, url, authentication, header_name='Authorization', job_id='', call_id='', options=None):
     options = options or CredentialCardOptions()
     fields, auth_config, ttl_seconds, refresh_ref = options.fields, options.auth_config, options.ttl_seconds, options.refresh_ref
-    current = agent._current_run_params
+    current = getattr(agent, '_current_run_params', None)
+    if current is None:
+        raise CredentialInputError('CREDENTIAL_TASK_NOT_ACTIVE', '当前没有可绑定的活动任务，未发送凭据卡。')
     scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
     if not scope.active:
-        raise ValueError('原任务已失效')
+        raise CredentialInputError('CREDENTIAL_TASK_NOT_ACTIVE', '原任务已失效，未发送凭据卡。')
     channel, actor = approval_recipient(agent, scope)
     if channel != 'feishu':
-        raise ValueError('当前来源没有私人输入卡通道')
+        raise CredentialInputError('CREDENTIAL_CHANNEL_UNAVAILABLE', '当前来源不支持私人凭据卡，不能改在群里发送密码。')
     header_name = credential_header_name(header_name)
     fields = credential_fields(authentication, fields)
     auth_config = credential_auth_config(authentication, auth_config, fields)
@@ -89,7 +101,7 @@ def request_credential_card(agent, *, url, authentication, header_name='Authoriz
         job = agent.scheduler_repository.get_job(job_id)
         creator = job.get('creator') or {}
         if owner_identity_from_config(agent.config).owner_kind == 'group' and creator != {'channel':channel,'actor_id':actor}:
-            raise ValueError('监控不属于请求人')
+            raise CredentialInputError('CREDENTIAL_NOT_AUTHORIZED', '这项监控不属于当前发起人，未发送凭据卡。')
     home = agent.home_paths.owner_home_dir
     _cipher(home)
     from ..conversation.im_tool_approval import _scope_identity
@@ -132,12 +144,15 @@ def request_credential_card(agent, *, url, authentication, header_name='Authoriz
     if not receipt.ok:
         from ..conversation.input_dependencies import resolve_input_dependency
         resolve_input_dependency(agent, row['input_id'], status='failed')
-        raise ValueError('私人输入卡未送达')
+        unknown = receipt.error_code in {'CHANNEL_CONTROL_IO_FAILED', 'CHANNEL_CONTROL_RECEIPT_MISSING'}
+        raise CredentialInputError(receipt.error_code or 'CREDENTIAL_CARD_NOT_DELIVERED',
+            '私人凭据卡没有可验证的送达回执；请在机器人私聊确认可交互状态，勿在群内发送密码。',
+            stage='delivery', effect_outcome='unknown' if unknown else 'not_started')
     return reference, scope
 
 
-# LLM: 只有本次未发卡generation可撤回；超限先失败于原TaskStore锁，更新失败必须保留原ready密文与绑定。
-# 函数用途: 登记凭据通用输入，失败时删除新待输入行或恢复先前授权，不发送网络请求。
+# LLM: 只有本次未发卡generation可撤回；登记失败在原记录锁内撤回后报告 typed input_registration，不能误判成 origin/actor 拒绝。
+# 函数用途: 登记凭据通用输入，失败时删除新行或恢复先前授权；不发送卡片、泄露异常正文或留永久等待。
 def _register_credential_input(agent, scope, row, path, previous):
     from ..conversation.input_dependencies import create_input_dependency
     try:
@@ -152,7 +167,9 @@ def _register_credential_input(agent, scope, row, path, previous):
                     _save_credential_row(admission,path,previous)
                 else:
                     path.unlink(missing_ok=True)
-        raise
+        raise CredentialInputError('CREDENTIAL_INPUT_UNAVAILABLE',
+            '原任务私人输入未能登记：请检查任务输入容量、状态与存储；未发送卡片。',
+            stage='input_registration') from None
 
 
 # LLM: 原 owner 配额锁先于记录锁，密文写入不能绕过其它文件工具的同一磁盘上限。

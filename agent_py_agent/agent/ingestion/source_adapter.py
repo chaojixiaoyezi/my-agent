@@ -16,7 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -63,12 +63,15 @@ class AdapterPlan:
     context: dict[str, Any]
 
 
+# LLM: query_evidence 只是 pinned parser 与真实请求观察，records/checkpoint/has_more 仍守原协议，不把解析数当源端总数。
+# 类用途: 携带一页完整来源记录、后续检查点及脱敏查询回执。
 @dataclass(frozen=True)
 class AdapterPage:
     records: list[dict[str, Any]]
     checkpoint: dict[str, Any]
     has_more: bool
     record_keys: tuple[str, ...] = ()
+    query_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize_source_adapter(raw: object) -> dict[str, str]:
@@ -130,6 +133,8 @@ def plan_source_request(
     return AdapterPlan(request=request, context=context)
 
 
+# LLM: pinned parser 协议输出只是来源解析观察；无协议脚本 stdout 不经此入口，记录数不代表 source truth。
+# 函数用途: 校验分页记录/游标并附加脱敏真实请求与 parser 版本观察，不执行额外查询。
 def accept_source_response(
     *,
     owner_home: Path,
@@ -139,6 +144,7 @@ def accept_source_response(
     context: dict[str, Any],
     response: object,
     max_records: int,
+    actual_request: SourceHttpRequest | None = None,
 ) -> AdapterPage:
     """Frame a fetched response and return the next opaque source checkpoint."""
 
@@ -179,7 +185,15 @@ def accept_source_response(
             "SOURCE_CURSOR_STALLED",
         )
     record_keys = _record_keys(output.get("record_keys"), len(records))
-    return AdapterPage(records, next_checkpoint, has_more, record_keys)
+    from ..tooling.query_evidence import QueryObservation, query_evidence
+    from .source_http import public_rendered_source_request
+    evidence = query_evidence(QueryObservation(
+        source="source_adapter", conditions=public_rendered_source_request(actual_request) if actual_request is not None else {},
+        returned_count=len(records), observed_count=len(records), coverage="page_window" if has_more else "parser_observation",
+        parser_version=str(adapter.get("sha256") or "unknown"), count_unit="parser_records",
+    ))
+    evidence.update(parser_protocol=_PROTOCOL, has_more=has_more, request_known=actual_request is not None)
+    return AdapterPage(records, next_checkpoint, has_more, record_keys, evidence)
 
 
 def _record_keys(raw: object, count: int) -> tuple[str, ...]:

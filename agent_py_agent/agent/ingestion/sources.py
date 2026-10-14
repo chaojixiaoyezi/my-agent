@@ -1,3 +1,5 @@
+# LLM: 多来源共用原 DrainResult；最近真实请求的 query_evidence 只作为回执，不改变游标/请求/权限。
+# 模块用途: 按原声明来源边界拉取记录并如实携带瞬时查询观察。
 """多形态数据源:file、poll、cursor 与 prepare 现场学习 adapter 的统一 drain 入口。
 
 四种进数据方式的源侧支撑:
@@ -131,6 +133,8 @@ def drain_watch_source(
     )
 
 
+# LLM: pinned adapter 解析记录不代表全源事实，最新 query_evidence 来自实际请求且只在当前 drain 携带。
+# 函数用途: 沿原网络门和检查点有界拉取动态来源。
 def drain_adapter_source(state, fetch_json, budget: DrainBudget) -> DrainResult:
     """Drain one open-world HTTP source through its pinned pure adapter.
 
@@ -197,11 +201,13 @@ def drain_adapter_source(state, fetch_json, budget: DrainBudget) -> DrainResult:
                 context=plan.context,
                 response=payload,
                 max_records=requested_page_limit,
+                actual_request=plan.request,
             )
         except SourceAdapterError as exc:
             result.error = str(exc)[:500]
             result.error_code = exc.code
             return result
+        result.query_evidence = page.query_evidence
         start = result.cursor
         page_keys = _adapter_page_record_keys(page.records, page.record_keys)
         if page.records and len(page_keys) != len(page.records):
@@ -524,6 +530,8 @@ def persist_file_fragment(state, drain: DrainResult) -> bool:
     return True
 
 
+# LLM: poll 的记录边界是整份响应，不能从未知 JSON 子数组猜业务记录数或零结果。
+# 函数用途: 在原节拍到期时抓取一次快照，携带实际请求的瞬时观察。
 def drain_poll_source(
     fetch_json,
     source_url: str,
@@ -567,6 +575,8 @@ def drain_poll_source(
         result.error = str(payload)[:500]
         result.error_code = error_code or "NETWORK_REQUEST_FAILED"
         return result
+    from .source_http import source_query_evidence
+    result.query_evidence = source_query_evidence(request, count=1, parser_version="source_poll_response.v1", count_unit="response_snapshots")
     result.cursor = cursor + 1
     result.events.append((result.cursor, {"polled_at": round(now, 3), "response": payload}))
     return result

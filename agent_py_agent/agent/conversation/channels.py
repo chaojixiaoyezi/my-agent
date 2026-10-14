@@ -130,10 +130,12 @@ class ChannelAttachment:
     owner_root: str = ''
 
 
-# LLM: 这是所有用户通道共用的最终出口净化点；内部标记可作为机器协议，但绝不能成为用户正文。
-# 函数用途: 普通回复经协议清洗后保留，任何内部状态信号都不进入用户正文。
+# LLM: 所有用户通道在路径投影、裁剪与投递前共用凭据/协议净化；不从正文产生路由或授权。
+# 函数用途: 遮蔽回复中的标注凭据并移除内部协议，防止模型复述聊天明文进入群或最终消息。
 def project_user_reply(content: str) -> UserReplyProjection:
-    text = str(content or "").strip()
+    from ..common.log_redaction import redact_sensitive_text
+
+    text = redact_sensitive_text(str(content or ""), redacted_marker="[REDACTED]", redact_assignment_labels=True).strip()
     if not leads_with_internal_signal(text):
         return _plain_user_reply_projection(text)
     return UserReplyProjection(

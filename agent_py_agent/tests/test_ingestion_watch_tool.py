@@ -654,6 +654,7 @@ def test_named_audit_adapter_probe_uses_typed_identity_before_watch_commit(
             records=[{"seq": 0}],
             checkpoint={"next": 1},
             has_more=False,
+            query_evidence={},
         )
 
     monkeypatch.setattr("agent.ingestion.source_adapter.plan_source_request", plan)

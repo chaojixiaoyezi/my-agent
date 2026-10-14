@@ -138,7 +138,7 @@ def _render_gateway_progress(event: dict[str, object]) -> str:
     elapsed = event.get("elapsed_seconds")
     elapsed_text = f"（{float(elapsed):.2f} 秒）" if isinstance(elapsed, (int, float)) else ""
     if event.get("level") == "minimal" and event.get("kind") == "tool_liveness":
-        return f"执行中：{tool}"
+        return f"执行中：{tool}{elapsed_text}，等待工具结果"
     if status == "开始":
         message = f"正在执行：{tool}"
     elif event.get("phase") == "running" and event.get("wait_state") == "handler_result":

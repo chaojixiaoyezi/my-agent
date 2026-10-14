@@ -40,10 +40,11 @@ from .schedule import ScheduleValidationError, build_schedule, iso_from_timestam
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_MUTATING_EXISTING_ACTIONS = frozenset({"update", "pause", "resume", "delete"})
+_ACTIONS = ("create", "list", "get", "update", "pause", "resume", "delete", "takeover", "execution", "cancel", "recover", "run_now", "history", "status")
+_MUTATING_EXISTING_ACTIONS = frozenset({"update", "pause", "resume", "delete", "takeover", "cancel", "recover"})
 
 
-# LLM: 参数声明同时解释 create/立即运行的不同副作用及来源隔离；不根据模型文案认定计划已创建，必须读原 repository 回执。
+# LLM: 参数声明同时解释 create/立即运行及控制、取消、未来通知接管的不同副作用和来源隔离；不根据模型文案认定计划已创建，必须读原 repository 回执。
 # 函数用途: 给模型完整的持久计划操作合同，避免只写计划草稿或把登记误认为马上执行。
 def build_schedule_tool_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
@@ -62,19 +63,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
             "properties": {
                 "action": {
                 "type": "string",
-                "enum": [
-                    "create",
-                    "list",
-                    "get",
-                    "update",
-                    "pause",
-                    "resume",
-                    "delete",
-                    "run_now",
-                    "history",
-                    "status",
-                ],
-                    "description": "create/list/get/update/pause/resume/delete/run_now/history/status。",
+                "enum": list(_ACTIONS),
+                    "description": "create/list/get/update/pause/resume/delete/takeover/execution/cancel/recover/run_now/history/status。takeover 只接管本机计划未来通知到当前绑定管理员私聊，不迁移执行。",
                 },
                 "job_id": {"type": "string", "description": "除 create/list/status 外，使用 list/get 返回的精确 job_id。"},
                 "expected_version": {"type": "integer", "minimum": 1, "description": "更新现有任务时使用 get/list 返回的 version。"},
@@ -151,6 +141,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
 # LLM: 调度读写都经原 repository；元数据查询不得改变鉴权、生命周期或持久字段。
 # 类用途: 管理当前 owner 的计划并查询运行和交付状态。
 class ScheduleTool(BaseTool):
+    # LLM: 新控制动作沿同一工具副作用和幂等策略；显式 ask 保持原权限裁决，不通过 slash 入口改变模型调用策略。
+    # 函数用途: 装配计划工具与准确动作策略，查询只读，删除和当前取消仍声明危险副作用。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.model_spec = build_schedule_tool_model_spec()
@@ -169,6 +161,10 @@ class ScheduleTool(BaseTool):
                         ("pause", "mutating"),
                         ("resume", "mutating"),
                         ("delete", "dangerous"),
+                        ("takeover", "mutating"),
+                        ("execution", "read_only"),
+                        ("cancel", "dangerous"),
+                        ("recover", "mutating"),
                         ("run_now", "dangerous"),
                     ),
                 ),),
@@ -188,18 +184,7 @@ class ScheduleTool(BaseTool):
             return _error("metadata_only 必须是布尔值", "TOOL_INVALID_ARGUMENTS")
         if metadata_only and action not in {"list", "get", "history", "status"}:
             return _error("纯元数据模式仅支持查询动作", "TOOL_INVALID_ARGUMENTS", metadata_only=True)
-        if action not in {
-            "create",
-            "list",
-            "get",
-            "update",
-            "pause",
-            "resume",
-            "delete",
-            "run_now",
-            "history",
-            "status",
-        }:
+        if action not in _ACTIONS:
             return _error("action 不受支持", "TOOL_INVALID_ARGUMENTS")
         repository = getattr(self.agent, "scheduler_repository", None)
         if repository is None:
@@ -227,7 +212,7 @@ class ScheduleTool(BaseTool):
             return _error("", "SCHEDULER_UNAVAILABLE", metadata_only=True)
 
     # LLM: list/get/history 的元数据模式贯穿嵌套 run 投影；读取原账本，写入仍由 repository CAS 管理。
-    # 函数用途: 执行定时动作，列表保留截断事实，诊断查询排除正文和名字。
+    # 函数用途: 执行定时动作，删除和通知接管走共用控制服务，列表保留截断事实，诊断查询排除正文和名字。
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         metadata_only = params.get("metadata_only", False) is True
         if action == "status":
@@ -264,8 +249,13 @@ class ScheduleTool(BaseTool):
         job_id = str(params.get("job_id") or "").strip()
         if action not in {"create"} and not job_id:
             return _error("job_id 必填", "TOOL_INVALID_ARGUMENTS")
-        if action != "create" and not _visible_jobs(self.agent, [repository.get_job(job_id)]):
+        if action != "create" and not _visible_jobs(self.agent, [repository.get_job(job_id, include_deleted=action == 'delete')]):
             return _error("目标监控不属于当前发起人，已拒绝操作", "SCHEDULER_NOT_AUTHORIZED")
+        if action == 'execution':
+            from .control import inspect_monitor_execution
+            thread_id, _task = _conversation_scope(self.agent)
+            return _success(action, inspect_monitor_execution(self.agent, repository, job_id,
+                actor=resolve_host_actor(self.agent, thread_id)))
         if action == "get":
             active_runs, run_errors = repository.active_runs_by_job()
             job = repository.get_job(job_id)
@@ -303,8 +293,8 @@ class ScheduleTool(BaseTool):
             job = repository.pause_job(job_id, expected_version=expected_version)
         elif action == "resume":
             job = repository.resume_job(job_id, expected_version=expected_version)
-        elif action == "delete":
-            job = repository.delete_job(job_id, expected_version=expected_version)
+        elif action in {'delete', 'takeover', 'cancel', 'recover'}:
+            return self._control_existing(repository, action, job_id, expected_version)
         else:
             patch = self._update_patch(params)
             if isinstance(patch, ToolHandlerOutcome):
@@ -317,6 +307,21 @@ class ScheduleTool(BaseTool):
                 expected_version=expected_version,
             )
         return _success(action, {"job": _job_projection(job, include_prompt=True)})
+
+    # LLM: 原 tool actor 与命令共用控制服务；不可从参数替换收件人、身份或取消范围，仍由原 job CAS 验证。
+    # 函数用途: 执行删除、当前取消、恢复核对和未来通知接管，返回原账本准确事实。
+    def _control_existing(self, repository, action, job_id, expected_version):
+        from .control import cancel_monitor, delete_monitor, recover_monitor, takeover_notifications
+        thread_id, _task = _conversation_scope(self.agent)
+        actor = resolve_host_actor(self.agent, thread_id)
+        if action == 'recover':
+            return _success(action, recover_monitor(self.agent, repository, job_id, expected_version, actor=actor))
+        if action in {'delete', 'cancel'}:
+            handler = delete_monitor if action == 'delete' else cancel_monitor
+            facts = handler(self.agent, repository, job_id, expected_version, actor=actor)
+            return _success(action, {**facts, 'job': _job_projection(facts['job'], include_prompt=True)})
+        job = takeover_notifications(self.agent, repository, job_id, expected_version, actor)
+        return _success(action, {'job': _job_projection(job, include_prompt=True)})
 
     # LLM: 先用原纯合同校验完整策略，再创建 IM 线程和 job；来源读可信绑定，模型不能改回送地址或凭据。
     # 函数用途: 保存可恢复计划，IM 保持后台并明确通知开关、TUI 沿原行为；非法策略不留下空后台线程。
@@ -569,6 +574,7 @@ def _job_projection(
         "policy": normalize_policy(job.get("policy")),
         "execution": normalize_execution(job.get("execution")),
         "delivery": normalize_delivery(job.get("delivery")),
+        "notification_binding_version": int((job.get('notification_binding') or {}).get('version') or 0),
         "precheck_enabled": job.get("precheck") is not None,
         "consecutive_failures": job.get("consecutive_failures", 0),
         "backoff_until": iso_from_timestamp(job.get("backoff_until")),

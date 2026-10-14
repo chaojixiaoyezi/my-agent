@@ -173,7 +173,7 @@ def scheduled_model_scope(agent, thread, request):
         yield
 
 
-# LLM: 两种定时执行模式都使用触发时冻结的绑定；旧线程缺 owner 字段时只投影原 run 的准确 owner，不能回落管理员。
+# LLM: 两种定时执行模式都使用触发时冻结的绑定或明确通知接管引用；旧线程缺 owner 字段时只投影原 run 的准确 owner，不能回落管理员。
 # 函数用途: 为原后台路由器提供原会话投影，不给运行线程添加或修改通道绑定。
 def delivery_thread(agent, thread, request):
     from ..conversation.models import ChannelBinding
@@ -182,6 +182,14 @@ def delivery_thread(agent, thread, request):
     if run is None:
         return thread
     context = run.get("execution_context") or {}
+    notification = run.get('notification_binding')
+    if notification is not None:
+        from .notification_binding import bound_notification_thread
+        origin = bound_notification_thread(agent, notification)
+        binding = notification['binding']
+        selected = tuple(row for row in origin.channel_bindings if row.channel == binding['channel']
+            and row.channel_user_id == binding['actor_id'] and row.channel_conversation_id == binding['conversation_id'])
+        return replace(origin, channel_bindings=selected)
     origin = agent.conversation_store.threads.load(str(context.get("origin_thread_id") or ""))
     if origin is None:
         raise KeyError("定时交付来源会话不存在")
@@ -207,7 +215,7 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
     return origin, channel, target
 
 
-# LLM: 只裁决原 run 的冻结绑定与准确目标，不搜索新通道或回落管理员；失败交原 outbox，禁止重跑模型弥补投递。
+# LLM: 只裁决原 run 的冻结绑定、接管认证代次与准确目标，不搜索新通道或回落管理员；失败交原 outbox，禁止重跑模型弥补投递。
 # 函数用途: 投递前核对原会话未重置或改归属；静默结果只写精确运行线程，不要求原外部绑定仍可投递。
 def validate_delivery_origin(agent, request, context) -> bool:
     run = execution_run(agent, request)
@@ -215,6 +223,17 @@ def validate_delivery_origin(agent, request, context) -> bool:
         return context.thread_id == run["thread_id"] and context.channel == "internal" and context.target == run["thread_id"]
     if run is None:
         return True
+    if run.get('notification_binding') is not None:
+        from ..conversation.channels import binding_delivery_target
+        from .notification_binding import bound_notification_thread
+        try:
+            notification = run['notification_binding']
+            origin = bound_notification_thread(agent, notification)
+            binding = notification['binding']
+            return (context.thread_id == origin.thread_id and context.channel == binding['channel']
+                and context.target == binding_delivery_target(binding['channel'], binding['actor_id'], binding['conversation_id'], group=False))
+        except (ValueError, KeyError, OSError):
+            return False
     frozen = run.get("execution_context") or {}
     origin_id = str(frozen.get("origin_thread_id") or "")
     if context.thread_id != origin_id:

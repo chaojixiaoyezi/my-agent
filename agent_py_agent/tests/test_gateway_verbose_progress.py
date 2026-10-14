@@ -867,6 +867,7 @@ def test_gateway_session_approval_cache_survives_request_writer_turns(
     )
     first_writer.configure_approval_session(cache, lambda: scope)
     request = {
+        "expires_at": time.time() + 300,
         "permission_id": "approval:abc",
         "request_id": "req-1",
         "tool_name": "run_command",
@@ -974,3 +975,14 @@ def test_gateway_session_approval_cache_is_exact_scope_and_bounded(tmp_path) -> 
     cache.approve(changed_cwd_scope, "run_command:h3")
     cache.approve(changed_access_scope, "run_command:h3")
     assert cache.is_approved(first_scope, "run_command:h3") is False
+
+
+@pytest.mark.parametrize("expiry", [0, 1])
+def test_approval_missing_or_expired_deadline_does_not_consult_cached_authority(tmp_path, expiry):
+    writer = BufferedChunkStreamWriter(tmp_path / "expired.jsonl", rich_transcript=True, interactive_approvals=True)
+    request = {"permission_id": "expired", "request_id": "request", "tool_name": "run_command",
+        "expires_at": expiry, "binding": {"tool_name": "run_command", "run_id": "run",
+            "operation_id": "op", "idempotency_key": "key", "args_hash": "hash"},
+        "options": [{"id": "allow", "label": "允许", "decision": "approved"}, {"id": "deny", "label": "拒绝", "decision": "denied"}]}
+    result = writer.request_permission(request)
+    assert result["decision"] == "denied" and result["reason_code"] == "APPROVAL_TIMEOUT"

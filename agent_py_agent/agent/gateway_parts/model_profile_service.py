@@ -93,7 +93,7 @@ def _scoped_model_host(base_agent, scope) -> tuple[SimpleNamespace, object]:
 
 
 # LLM: 目标只认当前列表里的编号或精确配置编号；select 只改本会话，set_default 只改未来默认，都经原写入口。
-# 列表与回执不含密钥和接口地址；新增、改密钥、共享开关仍只在 TUI 菜单里做。
+# 列表不含密钥和接口地址；IM 卡的私人表单走原签名控制，TUI 与文字选择继续沿原入口。
 # 函数用途: 执行聊天里的 /model 文字命令并返回可直接发给用户的中文回执；select/set_default 会写模型配置。
 def execute_model_text_control(base_agent, command: ConversationControlCommand, scope) -> ConversationControlResult:
     try:
@@ -102,6 +102,16 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
             return _vector_text_control(host, command.value)
         listing = execute_model_profile_operation(host, "list", {}, thread_id=thread.thread_id)
         listing["model_execution"] = _model_execution_snapshot(base_agent, scope, host, thread.thread_id)
+        if command.operation == "view" and scope.channel == "feishu" and getattr(base_agent, "delivery_service", None) is not None:
+            from ..capability.runtime_config_reload import capability_config_for_agent
+            from .model_control_cards import send_model_control_card
+            capability = capability_config_for_agent(base_agent)
+            if capability is None or getattr(capability, "im_model_cards_enabled", True):
+                owner = resolve_gateway_scope_owner(base_agent, scope)
+                target = scope.conversation_id if scope.metadata.get("channel_chat_type") == "group" else scope.user_id
+                send_model_control_card(base_agent, host, owner, actor_id=scope.user_id, thread_id=thread.thread_id,
+                                        target=target, listing=listing)
+                return ConversationControlResult("model", True, "请在模型卡选择本会话或新会话默认；新增、编辑将发送到本人私聊。")
         if command.operation == "view":
             return ConversationControlResult("model", True, render_model_choices(listing) + _admin_hint(base_agent, listing, scope))
         row = _choice_by_reference(listing, command.value)
@@ -261,5 +271,5 @@ def render_model_choices(listing: dict) -> str:
     # 未选模型时投影给的是 TUI 菜单用语（“新增并选择”），聊天里改由上面的“未选择”和用法引导，不重复显示。
     if listing.get("warning") and not (current == "default" and not listing.get("selection_available")):
         lines.append(str(listing["warning"]))
-    lines.append("新增或修改模型、密钥请在终端 TUI 的 /model 里操作，聊天里不收发密钥。")
+    lines.append("新增或修改模型请使用模型卡的私人表单或终端 TUI，普通聊天里不收发密钥。")
     return "\n".join(lines)

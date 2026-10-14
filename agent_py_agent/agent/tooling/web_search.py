@@ -1,3 +1,5 @@
+# LLM: 搜索候选仅是 provider/parser 观察，query_evidence 记录真实条件和覆盖未知，不把 HTML 空结果当来源真空。
+# 模块用途: 查询公开搜索来源并回传候选及实际过滤/失败事实；复查仍由模型在原权限和预算内选择。
 
 from __future__ import annotations
 
@@ -7,7 +9,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
@@ -54,11 +56,14 @@ class _SearchRequest:
     blocked_domains: list[str]
 
 
+# LLM: observations 只记实际 provider/parser 返回窗口，不携带网络认证或把候选窗口声明成互联网总数。
+# 类用途: 保留当前搜索候选、逐来源失败与有界观察。
 @dataclass(frozen=True)
 class _ProviderSearchResult:
     provider_name: str
     rows: list[dict[str, str]]
     failures: list[dict[str, str]]
+    observations: list[dict[str, Any]] = field(default_factory=list)
 
 
 class WebSearchProvider:
@@ -78,6 +83,7 @@ class DuckDuckGoHtmlProvider(WebSearchProvider):
     """Built-in DuckDuckGo HTML provider that needs no external API key."""
 
     name = "duckduckgo_html"
+    parser_version = "duckduckgo_html.v1"
 
     def __init__(self, *, timeout: int):
         self.timeout = timeout
@@ -115,6 +121,7 @@ class BingHtmlProvider(WebSearchProvider):
     """Built-in Bing HTML provider that needs no external API key."""
 
     name = "bing_html"
+    parser_version = "bing_html.v1"
 
     def __init__(self, *, timeout: int):
         self.timeout = timeout
@@ -379,6 +386,8 @@ class WebSearchTool(BaseTool):
             output_policy=OutputPolicy(trust="external_data"),
         )
 
+    # LLM: 实际条件及查询观察进入原结果/归档，复查不自动执行；失败仍使用原工具错误码。
+    # 函数用途: 执行一次已声明网页搜索并如实报告覆盖未知。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             request = _search_request_from_params(params, self.max_results)
@@ -401,18 +410,24 @@ class WebSearchTool(BaseTool):
                 error_code="CANCELLED",
             )
         if not provider_result.rows:
-            payload = {"query": request.query, "provider_failures": provider_result.failures}
+            payload = {"query": request.query, "provider_failures": provider_result.failures,
+                       "query_evidence": _web_query_evidence(provider_result, request, 0)}
+            payload["query"] = payload["query_evidence"]["conditions"]["query"]
             if provider_result.failures:
                 # 所有 provider 都抛异常(网络/HTTP/反爬挑战)→ 工具暂时不可用,可重试或改用 web_fetch
-                return ToolHandlerOutcome("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE")
+                return ToolHandlerOutcome("web_search", False, json.dumps(payload, ensure_ascii=False), error_code="TOOL_UNAVAILABLE",
+                                          result_envelope={"query_evidence": payload["query_evidence"]})
             # provider 正常响应但查询无匹配→不是工具故障,是"搜索无结果";ok=True 避免被当成工具坏了而放弃
+            payload["query"] = payload["query_evidence"]["conditions"]["query"]
             payload["results"] = []
             payload["note"] = "搜索无匹配结果(也可能是来源限流返回空)。换更具体/不同关键词重试,或改用 web_fetch 直接抓已知 URL。"
-            return ToolHandlerOutcome("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return ToolHandlerOutcome("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                                      result_envelope={"query_evidence": payload["query_evidence"]})
         results = _normalized_provider_results(provider_result)
         results = _filter_search_results(results, allowed_domains=request.allowed_domains, blocked_domains=request.blocked_domains)
         payload = _search_payload(provider_result, request, _dedupe_search_results(results, request.limit))
-        return ToolHandlerOutcome("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return ToolHandlerOutcome("web_search", True, json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                                      result_envelope={"query_evidence": payload["query_evidence"]})
 
 
 def _search_request_from_params(params: dict[str, Any], max_results: int) -> _SearchRequest:
@@ -435,6 +450,7 @@ def _search_with_providers(
     allowed_domains: list[str] | None = None, blocked_domains: list[str] | None = None,
 ) -> _ProviderSearchResult:
     failures: list[dict[str, str]] = []
+    observations: list[dict[str, Any]] = []
     for provider in providers:
         if cancellation_requested():
             raise ToolCancelled("cancelled")
@@ -448,6 +464,8 @@ def _search_with_providers(
         except (urllib.error.URLError, TimeoutError, Exception) as exc:
             failures.append({"provider": provider.name, "error": exc.__class__.__name__})
             continue
+        observations.append({"provider": provider.name, "returned_count": len(rows),
+                             "parser_version": str(getattr(provider, "parser_version", "unknown"))})
         if rows:
             candidate = _ProviderSearchResult(provider.name, rows, failures)
             valid = _filter_search_results(_normalized_provider_results(candidate),
@@ -455,8 +473,8 @@ def _search_with_providers(
             urls = {item.url for item in valid}
             filtered = [row for row in rows if str(row.get("url", "")) in urls]
             if filtered:
-                return _ProviderSearchResult(provider.name, filtered, failures)
-    return _ProviderSearchResult("", [], failures)
+                return _ProviderSearchResult(provider.name, filtered, failures, observations)
+    return _ProviderSearchResult("", [], failures, observations)
 
 
 # LLM: 搜索 HTML 与抓取正文一样必须有读取上限；超过容量报告来源失败，不能先读完再切片。
@@ -491,17 +509,37 @@ def _normalized_provider_results(provider_result: _ProviderSearchResult) -> list
     ]
 
 
+# LLM: 公开查询条件脱敏后与原候选共用一个回执，不另存解析账本。
+# 函数用途: 渲染网页搜索候选及实际查询观察。
 def _search_payload(
     provider_result: _ProviderSearchResult,
     request: _SearchRequest,
     results: list[_SearchResult],
 ) -> dict[str, Any]:
     return {
+        "query_evidence": _web_query_evidence(provider_result, request, len(results)),
         "engine": provider_result.provider_name,
-        "query": request.query,
+        "query": _web_query_evidence(provider_result, request, len(results))["conditions"]["query"],
         "provider_failures": provider_result.failures,
         "results": [
             {"source": item.source, "title": item.title, "url": item.url, "snippet": item.snippet}
             for item in results
         ],
     }
+
+
+# LLM: provider 的返回窗口不是互联网总数；未知 parser/失败单列，不从页面正文断言完整空集合。
+# 函数用途: 汇总真实网页搜索条件和 provider 窗口观察，不额外执行网络查询。
+def _web_query_evidence(provider_result: _ProviderSearchResult, request: _SearchRequest, returned: int) -> dict:
+    from .query_evidence import QueryObservation, query_evidence
+    evidence = query_evidence(QueryObservation(
+        source="web_search", conditions={"query": request.query, "limit": request.limit,
+            "allowed_domains": request.allowed_domains, "blocked_domains": request.blocked_domains},
+        returned_count=returned, observed_count=len(provider_result.rows), coverage="provider_window",
+        parser_version="web_search_provider_projection.v1",
+        error_code="TOOL_UNAVAILABLE" if not returned and provider_result.failures else '',
+        count_unit="candidate_urls",
+    ))
+    evidence["provider_observations"] = provider_result.observations
+    evidence["provider_failures"] = provider_result.failures
+    return evidence

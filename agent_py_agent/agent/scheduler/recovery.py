@@ -82,16 +82,20 @@ def settle_dead_run(repository, store: dict, run: dict, *, current: float) -> di
 
 
 # LLM: expired/dead 由原 _resolve_expired_claim 决定；queued 可新领，running 只结算 unknown；无候选不写锁或配额。
-# 函数用途: 启动和周期复核同一份 scheduler 账，旧 unknown 迁移只做记录收口，不产生任务执行。
-def recover_runs(repository, *, current: float) -> list[str]:
+# 函数用途: 启动和周期复核同一份 scheduler 账，显式 job_id 只复核本人指定监控；旧 unknown 迁移只做记录收口，不产生任务执行。
+def recover_runs(repository, *, current: float, job_id: str = '', expected_version: int | None = None) -> list[str]:
     from .repository import _collect_expired_dead_runs
 
-    if not recovery_candidates(repository._store_snapshot(), current):
+    if not job_id and not recovery_candidates(repository._store_snapshot(), current):
         return []
     recovered = []
     with repository._mutation_scope() as (store, admission):
-        changes = _collect_expired_dead_runs(store["runs"], repository._parse_run, current)
-        for identifier, raw in store["runs"].items():
+        if job_id:
+            repository._require_mutable_job(store, job_id, expected_version)
+        selected = {key: row for key, row in store['runs'].items()
+            if not job_id or isinstance(row, dict) and row.get('job_id') == job_id}
+        changes = _collect_expired_dead_runs(selected, repository._parse_run, current)
+        for identifier, raw in selected.items():
             if isinstance(raw, dict) and raw.get("status") == "unknown":
                 terminal, _error = repository._parse_run(raw, terminal=True)
                 if terminal is not None:

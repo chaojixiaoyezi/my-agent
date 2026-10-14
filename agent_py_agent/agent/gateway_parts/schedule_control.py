@@ -15,7 +15,7 @@ from .schedule_diagnostics import ScheduleOwnerChanged, schedule_arguments, sche
 
 # LLM: 本人身份来自认证 scope/admin 绑定；个人私聊可查看自己在各群创建的监控，群查询只在本 owner，不泄露私人监控。
 # 函数用途: 汇总本人的合法监控仓库与 job，冷群只读取原账本、不实例化 Agent。
-def visible_monitors(agent, scope):
+def visible_monitors(agent, scope, *, include_deleted=False):
     from ..user_space.admin_channel_identity import list_admin_channel_identities
     from .control_service import _request_agent_for_scope
 
@@ -48,7 +48,7 @@ def visible_monitors(agent, scope):
                 repositories.append(cold)
     rows, errors = [], []
     for repo in repositories:
-        jobs, failures = repo.list_jobs()
+        jobs, failures = repo.list_jobs(include_deleted=include_deleted)
         errors.extend(failures)
         if repo.owner['kind'] == 'group':
             from ..scheduler.creator_migration import unmanaged_monitor_ids
@@ -81,14 +81,14 @@ def monitor_counts(agent, scope):
         return {'unavailable': True}
 
 
-# LLM: 参数先校验、精确 owner/creator 再读取；失败按 typed 错误保存无正文诊断，写操作仍原 version CAS，不盲重试。
+# LLM: 参数先校验、精确 owner/creator 再读取；坏 run 的取消不得展示成已停止，失败按 typed 错误保存无正文诊断，写操作仍原 version CAS。
 # 函数用途: 展示监控及历史并控制未来执行，异常提供可行动原因而不是要求用户刷新。
 def execute_schedule_control(agent, command, scope):
     started, operation, stage = time.monotonic(), 'invalid', 'arguments'
     try:
         operation, identifier, parts = schedule_arguments(command.value)
         stage = 'query'
-        rows, errors = visible_monitors(agent, scope)
+        rows, errors = visible_monitors(agent, scope, include_deleted=operation == 'delete')
         if not parts:
             text = '\n'.join(f"监控名（{job.get('alias',job['job_id'])}）：{job['name'][:70]}  {_state(job)}  last:{_time(job.get('last_run_at'),agent)}" for _repo, job in rows)
             return _result(True, (text or ('暂无可确认归属的监控。' if errors else '暂无监控。')) + _query_notice(errors), {'total':len(rows), 'load_error_codes':errors})
@@ -105,6 +105,39 @@ def execute_schedule_control(agent, command, scope):
         if operation not in {'get', 'history'}:
             stage = 'control'
             repo = _live_repository(agent, repo)
+        if operation in {'delete', 'takeover', 'execution', 'cancel', 'recover'}:
+            from ..scheduler.control import (
+                cancel_monitor,
+                delete_monitor,
+                inspect_monitor_execution,
+                recover_monitor,
+                takeover_notifications,
+            )
+            owner_agent = _control_agent(agent, repo)
+            actor = _control_actor(owner_agent, scope)
+            if operation in {'execution', 'recover'}:
+                facts = (inspect_monitor_execution(owner_agent, repo, job['job_id'], actor=actor) if operation == 'execution'
+                    else recover_monitor(owner_agent, repo, job['job_id'], job['version'], actor=actor))
+                text = '\n'.join(f"{row['rule_id']} {row['run_id']}：{row['status']}；任务:{row['task_status']}；取消:{'已请求' if row['cancel_requested'] else '未请求'}"
+                    for row in facts['runs'])
+                return _result(True, ('已重新核对原执行；未启动新工作。\n' if operation == 'recover' else '当前执行：\n') + (text or '暂无当前执行。'), facts)
+            if operation in {'delete', 'cancel'}:
+                handler = delete_monitor if operation == 'delete' else cancel_monitor
+                facts = handler(owner_agent, repo, job['job_id'], job['version'], actor=actor)
+                message = ('已删除监控；后续运行已停止，当前执行已停止。' if facts['cancellation_status'] == 'stopped'
+                    else '已删除监控；后续运行已停止，当前执行已请求取消，等待准确收口。')
+                if operation == 'cancel':
+                    message = ('当前执行已停止；未来计划保留。' if facts['cancellation_status'] == 'stopped' else '当前执行已请求取消，等待准确收口；未来计划保留。')
+                if facts['load_error_codes']:
+                    message = ('已删除监控；未来运行已停止，当前执行记录不完整，取消或停止尚未确认。' if operation == 'delete'
+                        else '当前执行记录不完整，取消或停止尚未确认；未来计划保留。')
+                return _result(True, message, {**facts, 'job_id': job['job_id'], 'version': facts['job']['version']})
+            if scope.metadata.get('channel_chat_type') not in {'p2p', 'private'}:
+                from ..conversation.host_actor import HostActorError
+                raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+            updated = takeover_notifications(owner_agent, repo, job['job_id'], job['version'], actor)
+            return _result(True, '已接管后续触发的通知到当前管理员私聊；已预留或正在执行的运行保持原通知目标和原执行者。',
+                {'job_id': job['job_id'], 'version': updated['version'], 'notification_binding_version': updated['notification_binding']['version']})
         if operation == 'run':
             run = repo.reserve_manual_run(job['job_id'], rule_id=parts[2] if len(parts)>2 else '')
             return _result(True,f"已排队：{job['name']} {run.get('rule_id') or 'rule1'}。", {'run_id':run['run_id']})
@@ -192,3 +225,35 @@ def _apply_monitor_control(repository,job,operation,parts):
             raise ScheduleValidationError('用法：/schedule notify job01 origin|local|none')
         return repository.update_job(job['job_id'],patch={'delivery':{'mode':parts[2]}},expected_version=job['version'])
     return job
+
+
+# LLM: 冷群控制只加载已经通过 creator 过滤的准确 owner，不借用本机管理员或其它群 Agent。
+# 函数用途: 取得原监控的执行资源宿主，供整树停止使用。
+def _control_agent(base, repository):
+    from .request_worker import _resolve_request_agent_for_owner
+    if getattr(base, 'scheduler_repository', None) is repository:
+        return base
+    owner = repository.owner
+    identity = OwnerIdentity(owner['provider'], owner['kind'], owner['id'].split('/')[-1])
+    candidate = _resolve_request_agent_for_owner(base, identity)
+    if candidate.scheduler_repository.owner != repository.owner:
+        raise ScheduleOwnerChanged('监控 owner 已变化')
+    return candidate
+
+
+# LLM: slash actor 只取认证 scope 和原 ThreadStore；不消费命令正文、引用作者、管理员名称或模型参数。
+# 函数用途: 给共用监控控制服务提供准确入口身份，本地控制保持无 IM actor。
+def _control_actor(agent, scope):
+    from types import SimpleNamespace
+
+    from ..conversation.channels import supports_transcript_delivery
+    from ..conversation.host_actor import HostActorError, actor_from_scope
+    if supports_transcript_delivery(scope.channel):
+        return None
+    thread, error = agent.conversation_store.threads.resolve_report(channel=scope.channel,
+        channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+    if error or thread is None:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_REQUIRED')
+    return actor_from_scope(agent, SimpleNamespace(channel=scope.channel,
+        channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id),
+        thread.thread_id, str(scope.metadata.get('channel_message_id') or 'schedule-control'))

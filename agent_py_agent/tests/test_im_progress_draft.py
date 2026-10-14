@@ -174,7 +174,7 @@ def test_one_progress_message_survives_worker_restart_and_final_is_separate(tmp_
         clock[0]+=1.1
         adapter.edit_ok=False
         assert worker.run_once()==0
-        assert store.pending()[0].progress_draft['disabled'] is True
+        assert store.pending()[0].progress_draft['disabled'] is False
         final[0]='最终结果'
         clock[0]+=1.1
         assert worker.run_once()==1
@@ -308,3 +308,82 @@ def test_long_model_draft_keeps_latest_window_after_complete_redaction(monkeypat
     assert observed==[(len(content),0)]
     assert len(events[0]['text'])==8000
     assert events[0]['text'].endswith('最新结果')
+
+
+def test_failed_edit_recovers_same_id_and_uses_latest_content(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("agent_py_agent.agent.adapter.progress_draft.time.time", lambda: clock[0])
+    monkeypatch.setattr("agent_py_agent.agent.adapter.delivery.time.time", lambda: clock[0])
+    store = GatewayReplyDeliveryStore(tmp_path)
+    calls = []
+    state = ["初始"]
+    def send(row, text):
+        calls.append((row.progress_draft.get("message_id"), text))
+        return ProgressDeliveryReceipt(len(calls) != 2, "same-id", "" if len(calls) != 2 else "IO")
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda _: None,
+        deliver_response=lambda *_: True, deliver_progress=send,
+        poll_progress=lambda row: GatewayProgressBatch((state[0],), row.progress_cursor + 1, "stream", True))
+    worker.enqueue(PendingGatewayReply(request_id="retry", channel="feishu", user_id="ou_test", message_id="in"))
+    worker.run_once()
+    clock[0] += 2
+    state[0] = "失败候选"
+    worker.run_once()
+    assert not store.pending()[0].progress_draft["disabled"]
+    state[0] = "最新候选"
+    worker.run_once()
+    assert len(calls) == 2
+    clock[0] += 3
+    worker.run_once()
+    assert calls[-1] == ("same-id", "最新候选")
+    assert store.pending()[0].progress_draft["failures"] == 0
+
+
+def test_unknown_first_send_is_not_repeated_and_final_has_priority(tmp_path):
+    calls, final = [], [None]
+    store = GatewayReplyDeliveryStore(tmp_path)
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda _: final[0],
+        deliver_response=lambda *_: True,
+        poll_progress=lambda row: GatewayProgressBatch(("等待",), row.progress_cursor + 1, "stream"),
+        deliver_progress=lambda *_: calls.append(1) or ProgressDeliveryReceipt(False))
+    worker.enqueue(PendingGatewayReply(request_id="unknown", channel="feishu", user_id="ou_test", message_id="in"))
+    worker.run_once()
+    worker.run_once()
+    assert calls == [1]
+    final[0] = "完成"
+    assert worker.run_once() == 1 and calls == [1]
+
+
+@pytest.mark.parametrize("kind,expected", [("permanent", 1), ("unknown", 3), ("transient", 3)])
+def test_edit_failure_budget_is_bounded(tmp_path, monkeypatch, kind, expected):
+    clock = [1000.0]
+    monkeypatch.setattr("agent_py_agent.agent.adapter.delivery.time.time", lambda: clock[0])
+    monkeypatch.setattr("agent_py_agent.agent.adapter.progress_draft.time.time", lambda: clock[0])
+    calls = []
+    store = GatewayReplyDeliveryStore(tmp_path)
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda _: None,
+        deliver_response=lambda *_: True,
+        poll_progress=lambda row: GatewayProgressBatch(("当前",), row.progress_cursor + 1, "stream", True),
+        deliver_progress=lambda *_: calls.append(1) or ProgressDeliveryReceipt(False, "known-id", "IO", kind))
+    worker.enqueue(PendingGatewayReply(request_id="bounded", channel="feishu", user_id="ou_test", message_id="in",
+        progress_draft={"mode": "stream", "message_id": "known-id"}))
+    for _ in range(8):
+        worker.run_once()
+        clock[0] += 31
+    assert len(calls) == expected and store.pending()[0].progress_draft["disabled"]
+
+
+def test_status_uses_latest_typed_state_not_stale_start(monkeypatch):
+    from agent_py_agent.agent.gateway_parts import control_service
+    monkeypatch.setattr(control_service, "gateway_chunk_path", lambda *_: "unused")
+    rows = [{"kind": "tool_progress", "progress": {"phase": "started", "call_id": "a"}}]
+    monkeypatch.setattr(control_service, "_tail_json_rows", lambda _: rows)
+    assert "等待当前状态更新" in control_service._recent_progress(None, "request")
+    rows.append({"kind": "tool_progress", "updated_at": "2026-10-14T01:02:03Z",
+        "progress": {"phase": "running", "call_id": "a", "elapsed_seconds": 120}})
+    assert "120 秒" in control_service._recent_progress(None, "request")
+    rows.append({"kind": "tool_progress", "progress": {"phase": "finished", "call_id": "a", "ok": True}})
+    assert "刚完成" in control_service._recent_progress(None, "request")
+    rows.append({"kind": "model_liveness", "updated_at": "2026-10-14T01:04:03Z", "progress": {"wait_state": "model_response"}})
+    assert "等待模型响应" in control_service._recent_progress(None, "request")
+    rows.append({"kind": "model_delta", "text": "secret not read"})
+    assert "模型已返回内容" in control_service._recent_progress(None, "request")

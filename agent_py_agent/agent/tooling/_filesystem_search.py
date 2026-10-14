@@ -529,7 +529,8 @@ class SearchTextTool(FileSystemTool):
         return payload
 
 
-# LLM: No-match and incomplete-search decisions come only from typed execution facts. The
+# LLM: 通用 query_evidence 包括真实条件/数量/分页；坏 rg JSON 必须转原后备实查，不能冒充正常零结果。
+# No-match and incomplete-search decisions come only from typed execution facts. The
 # envelope does not infer repository absence or auto-route based on natural-language queries.
 # 函数用途: 统一记录本地搜索范围、匹配方式、后端和覆盖状态，让模型知道空结果究竟代表什么。
 def _search_result_envelope(
@@ -562,7 +563,19 @@ def _search_result_envelope(
         if request.literal:
             suggested_actions.append("use_explicit_regex")
         suggested_actions.append("use_web_search_for_internet_scope")
+    from .query_evidence import QueryObservation, query_evidence
+    observation = QueryObservation(
+        source="local_workspace", conditions={"query": request.query, "path": tool.display_path(target),
+            "file_glob": request.file_glob, "literal": request.literal, "ignore_case": request.ignore_case,
+            "include_ignored": request.include_ignored, "offset": request.offset, "limit": request.limit,
+            "context": request.context, "output_mode": request.output_mode, "access_filter": "current_tool_path_policy"},
+        returned_count=int(page_window["returned"]), observed_count=total_items,
+        coverage="incomplete" if scan_limited else "page_window" if not page_window["complete"] else "complete",
+        parser_version="local_text_search.v1", total_count=total_items if page_window["complete"] else None,
+        count_unit="matching_files" if request.output_mode in {"count", "files_with_matches"} else "matching_lines",
+    )
     return {
+        "query_evidence": query_evidence(observation),
         "page_window": page_window,
         "search_result": {
             "schema": "local_text_search.v1",
@@ -615,6 +628,7 @@ def _with_search_result_guidance(
         text,
         "",
         "[local-search-result]",
+        "- query_evidence: " + json.dumps(result_envelope.get("query_evidence", {}), ensure_ascii=False, sort_keys=True),
         f"- status: {status or 'unknown'}",
         f"- hint_code: {facts.get('hint_code', '')}",
         f"- searched_path: {facts.get('source_path', '')}",
@@ -772,6 +786,8 @@ def _rg_hits_from_process(
     return hits if return_code == 0 else None
 
 
+# LLM: 坏 JSON 必须失败回原 Python 实查；不能把未解析 stdout 的零条当有效 no_matches。
+# 函数用途: 流式读取已声明 rg JSON 协议并保留分页上界。
 def _read_rg_hits(
     tool: SearchTextTool,
     process: subprocess.Popen[str],
@@ -788,7 +804,7 @@ def _read_rg_hits(
             hit = _hit_from_rg_line(tool, raw_line, request)
         except MalformedRgOutput:
             _stop_process(process)
-            return [], True
+            raise
         if hit is None:
             continue
         if not _append_search_hit(RgHitAppendRequest(
@@ -821,6 +837,8 @@ def _rg_counts_from_process(
     return counts if return_code == 0 else None
 
 
+# LLM: 数量只由有效 rg match 事件累加；解析损坏抛错给原后备执行路径。
+# 函数用途: 从声明 JSON 协议统计匹配文件行数，避免误报正常零结果。
 def _read_rg_counts(
     tool: SearchTextTool,
     process: subprocess.Popen[str],
@@ -836,7 +854,7 @@ def _read_rg_counts(
             hit = _hit_from_rg_line(tool, raw_line, request, include_context=False)
         except MalformedRgOutput:
             _stop_process(process)
-            return {}
+            raise
         if hit is not None:
             counts[hit.rel] = counts.get(hit.rel, 0) + 1
     return counts

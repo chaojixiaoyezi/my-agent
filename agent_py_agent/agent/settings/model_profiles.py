@@ -294,7 +294,7 @@ def _with_point_diagnostics(agent: object, result: dict) -> dict:
 
 
 # LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用，
-#   set_initial 只改共享目录里的「其他用户初始模型」；add_models 按连接一次加多个模型（见 model_connections）。
+#   set_initial 只改共享目录里的初始模型；select 可携带 expected_revision 原线程 CAS，save_profile 显式编辑独立连接；add_models 按连接批量新增。
 # 函数用途: 管理模型与决策设置；决策操作不初始化生成选择，网络只在显式认证/目录/连接测试时发生，回执不含令牌。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
     decision_operations = {"decision_read": "read", "decision_patch": "patch", "decision_reset": "reset"}
@@ -324,7 +324,8 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
 
         if not thread_id:
             raise ModelProfileError("选择模型需要当前会话；修改新会话默认值请使用 set_default。")
-        thread_model_profile_id(agent, thread_id, select=str(payload.get("profile_id") or ""))
+        thread_model_profile_id(agent, thread_id, select=str(payload.get("profile_id") or ""),
+                                expected_revision=payload.get("expected_revision"))
         operation = "list"
     if operation == "set_shared":
         set_shared_profile(agent, payload.get("profile_id"), payload.get("enabled"))

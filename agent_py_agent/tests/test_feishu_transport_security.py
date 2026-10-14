@@ -248,6 +248,6 @@ def test_other_host_credential_routes_refuse_redirect(monkeypatch, tmp_path, rou
             assert result['toast']['type'] == 'error'
         else:
             monkeypatch.setattr(feishu_app_registration, '_accounts_base_url', lambda _: base)
-            with pytest.raises(ValueError):
+            with pytest.raises(feishu_app_registration.FeishuRegistrationError, match='拒绝 HTTP 跳转'):
                 feishu_app_registration._post_registration('feishu', {'client_secret': 'OWNED_APP_SECRET'})
         assert not received

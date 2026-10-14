@@ -16,6 +16,11 @@ _A1_RECTANGLE = re.compile(r'\$?([A-Za-z]+)\$?([1-9][0-9]*)(?::\$?([A-Za-z]+)\$?
 def authorize_sheet_write(adapter, resource: CloudResource, params: dict, authorization: dict) -> None:
     if params['action'] not in {'sheet_append', 'sheet_update'} or authorization['source'] == 'administrator_grant':
         return
+    if (authorization.get('source') not in {'feishu_collaborator', 'feishu_owner'}
+            or authorization.get('permission') not in {'edit', 'full_access'}
+            or authorization.get('principal_type') not in {'openid', 'openchat'}
+            or not authorization.get('principal_id')):
+        raise _denied('当前本人或当前群的资源编辑许可尚未核验，未发送表格写入。')
     parts = params['range'].split('!')
     if len(parts) != 2 or not parts[0]:
         raise _unknown('无法从 range 核验准确工作表编号。')
@@ -33,26 +38,48 @@ def authorize_sheet_write(adapter, resource: CloudResource, params: dict, author
             raise _denied('当前本人没有目标保护范围编辑权；请在飞书保护设置中授权本人或改用未受保护的范围。')
 
 
-# LLM: extFields 必须显式申请保护事实；只有唯一准确 sheet 与显式保护数组能证明无保护，缺字段和非表格块不能当作开放权限。
+# LLM: extFields 显式申请保护事实；官方 v1.1.48 SDK 的 omitempty 只在完整唯一元数据中归为空，畸形数组/不完整响应/非表格块不能开放权限。
 # 函数用途: 读取当前目标工作表的所有保护编号，不返回其它工作表信息。
 def _sheet_protections(adapter, token: str, sheet_id: str) -> list[dict]:
     path = '/sheets/v2/spreadsheets/' + quote(token, safe='') + '/metainfo?'
     data = request_cloud_api(adapter, 'GET', path + urlencode({'extFields': 'protectedRange', 'user_id_type': 'open_id'}))
     sheets = data.get('sheets')
     if not isinstance(sheets, list) or any(not isinstance(row, dict) for row in sheets):
-        raise _unknown('飞书未返回可核验的工作表保护信息。')
+        raise _unknown('飞书未返回完整工作表清单；请核对元数据 API 响应和应用读取权限。', reason='protection_metadata_incomplete')
+    sheet_ids = [row.get('sheetId') for row in sheets]
+    if any(not isinstance(value, str) or not value for value in sheet_ids) or len(set(sheet_ids)) != len(sheet_ids):
+        raise _unknown('工作表清单编号无效或重复；请核对元数据 API 响应。', reason='protection_metadata_invalid')
     matched = [row for row in sheets if row.get('sheetId') == sheet_id]
     if len(matched) != 1 or 'blockInfo' in matched[0]:
-        raise _unknown('目标工作表归属无法核验，或该对象不是可写表格。')
-    protections = matched[0].get('protectedRange')
+        raise _unknown('目标工作表不在唯一清单中或不是可写表格；请核对准确工作表编号。', reason='protection_target_missing')
+    target = matched[0]
+    if 'protectedRange' not in target:
+        return _omitted_protections(data, target, len(sheets))
+    protections = target['protectedRange']
     if not isinstance(protections, list) or any(not isinstance(row, dict) for row in protections):
-        raise _unknown('目标工作表保护字段缺失，未使用应用权限代写。')
+        raise _unknown('目标工作表保护范围不是有效数组；请核对 API 响应，未使用应用权限代写。', reason='protection_metadata_invalid')
     ids = [row.get('protectId') for row in protections]
     if any(not isinstance(value, str) or not value or ',' in value for value in ids) or len(set(ids)) != len(ids):
-        raise _unknown('飞书返回了无效或重复的保护范围编号。')
+        raise _unknown('飞书返回了无效或重复的保护范围编号。', reason='protection_metadata_invalid')
     if any(row.get('sheetId') != sheet_id for row in protections):
-        raise _unknown('保护范围的工作表归属不一致。')
+        raise _unknown('保护范围的工作表归属不一致。', reason='protection_metadata_invalid')
     return protections
+
+
+# LLM: 官方旧 SDK Sheet.ProtectedRange 是 omitempty；只在同 extFields 请求的完整 metadata 中接受合法省略，不把重复缺字段响应推断为无保护。
+# 函数用途: 核验可省略空保护集合的工作表清单规模、真实网格及矛盾保护指标，全程不发网络请求。
+def _omitted_protections(data: dict, target: dict, sheet_count: int) -> list[dict]:
+    properties = data.get('properties')
+    count = properties.get('sheetCount') if isinstance(properties, dict) else None
+    dimensions = (target.get('rowCount'), target.get('columnCount'))
+    if (type(count) is not int or count != sheet_count or count < 1
+            or any(type(value) is not int or value < 1 for value in dimensions)):
+        raise _unknown('保护数组省略，但工作表总数或网格维度不完整；请核对元数据 API 响应，无需重新分享资源。',
+                       reason='protection_metadata_incomplete')
+    if any(key in target for key in ('protect', 'protectedRanges', 'protected_range', 'protected_ranges', 'lockInfo')):
+        raise _unknown('工作表同时出现无法核验的保护字段；请核对当前 API 版本，未执行写入。',
+                       reason='protection_metadata_invalid')
+    return []
 
 
 # LLM: 官方接口每批最多五个准确 protectId；响应必须一一对应当前工作表，不允许缺失范围或重复范围变成漏检。
@@ -126,8 +153,8 @@ def _is_editor(protection: dict, member_id: str) -> bool:
 
 # LLM: 固定宿主错误保留未知事实边界，不把不完整 API 响应转成无保护的许可。
 # 函数用途: 返回保护事实无法确认的可读原因。
-def _unknown(message: str) -> FeishuCloudError:
-    return FeishuCloudError('CLOUD_RESOURCE_PERMISSION_UNKNOWN', message)
+def _unknown(message: str, *, reason: str = 'sheet_protection_unverifiable') -> FeishuCloudError:
+    return FeishuCloudError('CLOUD_RESOURCE_PERMISSION_UNKNOWN', message, reason=reason)
 
 
 # LLM: 明确没有保护范围权限属于授权拒绝，不表示请求已发送或副作用未知。

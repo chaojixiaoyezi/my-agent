@@ -210,12 +210,15 @@ class PromptBuilder:
         )
         return render_prepared_prompt(self.prepare_render_input(request))
 
-    # LLM: 这是有读取行为的宿主准备层；保持文件、persona、Skill、时钟的原采集顺序（管理员自身开发约定会检查开发工作树是否存在），
+    # LLM: canonical system 包括 override 共用可关闭的查询复查软指导；保持文件、persona、Skill、时钟原采集顺序，
     #   注入列表复制为元组，部署路径只采集到动态事实；纯投影只消费返回值，回合触发类型原样冻结。
     # 函数用途: 冻结材料与当前部署位置；线程人格按已提交断点保存，部署路径不进入固定前缀。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
+        from ..tooling.query_evidence import query_zero_result_guidance
         system_prompt = request.system_prompt_override or self.config.system_prompt
+        if query_guidance := query_zero_result_guidance(self.config):
+            system_prompt += "\n\n" + query_guidance
         task_local = _is_task_local_context(request.context_scope)
         memory_text = _memory_text([] if task_local else request.memories)
         owner_scope = _owner_scope_text(self)

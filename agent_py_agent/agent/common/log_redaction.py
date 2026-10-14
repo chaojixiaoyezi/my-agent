@@ -1,4 +1,4 @@
-# LLM: 日志与模型工具输出共用脱敏；源码模式只保留确定的插值结构，仍遮蔽 URL 明文凭证和已知密钥，不改原文件。
+# LLM: 日志、公开投递与模型工具输出共用脱敏；PASS/短口令/完整引号值均遮蔽，源码专用模式由调用方显式指定。
 # 模块用途: 在公开输出前隐藏秘密，并避免把源码变量引用和行尾语法误当成密钥删掉。
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ _SENSITIVE_FIELD_NAMES = frozenset(
         "id_token",
         "master_key",
         "password",
+        "pass",
+        "passphrase",
+        "pw",
         "passwd",
         "private_key",
         "pwd",
@@ -65,6 +68,7 @@ _LOG_SENSITIVE_QUERY_RE = re.compile(rf"(?i){_SENSITIVE_QUERY_PREFIX}([^&#\s]+)"
 #   authorization 不进 _CREDENTIAL_KEY_NAMES——词表路径会让无引号头被 _SECRET_ASSIGNMENT_RE 二次处理（rejectdiag3 回归）。
 #   正则只有单层量词，扫描逐字符前进，整体线性（ReDoS 计时见 TESTS.md rejectdiag4 节）。
 _AUTHORIZATION_KEY_RE = re.compile(r"(?i)([\"']?)\b((?:proxy-)?authorization)\b([\"']?)(\s*[:=]\s*)([\"']?)")
+_COOKIE_KEY_RE = re.compile(r"(?i)([\"']?)\b((?:set-)?cookie)\b([\"']?)(\s*[:=]\s*)([\"']?)")
 # 授权值开头的方案名（RFC 7235：credentials = auth-scheme [ 1*SP ( token68 / #auth-param ) ]）；只保留它，其后整段当凭据。
 _AUTH_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9._~+/-]*)(\s+)(\S.*)", re.S)
 # 键名按"完整末尾片段"认，与 settings/user_config_capability.is_credential_key 同口径：键名等于凭据词，
@@ -80,7 +84,7 @@ _AUTH_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9._~+/-]*)(\s+)(\S.*)", re.S)
 # 等号赋值）改由授权头专用规则覆盖（rejectdiag4 起是 `_AUTHORIZATION_KEY_RE` + `_redact_authorization_values`，见其注释）。
 _CREDENTIAL_KEY_NAMES = (
     r"access_key|access-token|access_token|api-key|api_key|apikey|app_secret|client_secret|cookie|credential|"
-    r"encrypt_key|id_token|master_key|password|passwd|private_key|pwd|refresh_token|secret|signature|"
+    r"encrypt_key|id_token|master_key|password|passwd|pass|passphrase|pw|private_key|pwd|refresh_token|secret|signature|"
     r"tenant_access_token|ticket|token|verification_token|x-amz-credential|x-amz-signature"
 )
 # 凭据键名判定与 settings/user_config_capability.is_credential_key 同口径：键名等于凭据词，或以
@@ -115,7 +119,13 @@ def _is_credential_key_name(name: str) -> bool:
 # 常量用途: 匹配"键名[:=]值"，键名与值都由回调按完整末尾片段决定是否打码。
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(^|[^\w.-])([A-Za-z0-9_.-]+)(\s*[:=]\s*)([\"']?)"
-    r"([^\s,;&\"']{4,})(\4)"
+    r"([^\s,;&\"']{1,})(\4)"
+)
+# LLM: 整体遮蔽引号中的凭据赋值，避免空格和转义引号后的尾段泄露；普通字段保持原文。
+# 常量用途: 只匹配凭据键的完整引号值，跨行或未闭合也整段遮蔽，普通外层字符串不吞掉内部匹配。
+_SECRET_QUOTED_ASSIGNMENT_RE = re.compile(
+    rf"(?i)(^|[^\w.-])((?:[A-Za-z0-9_.-]*[_.-])?(?:{_CREDENTIAL_KEY_NAMES}))(\s*[:=]\s*)([\"'])"
+    r"((?:\\[\s\S]|(?!\4)[^\\])*)(\4|$)"
 )
 # LLM: 与文本赋值规则（_SECRET_ASSIGNMENT_RE）同口径：正则只用不嵌套的单量词取出整段带引号键名，
 #   是不是凭据键交给回调里的 _is_credential_key_name 判（同一份词表、同一套末尾片段规则）。
@@ -181,13 +191,13 @@ def _redact_assignment(match: re.Match[str], marker: str, labels_only: bool) -> 
     if not _is_credential_key_name(match.group(2)):
         return match.group(0)
     if labels_only:
-        return marker
+        return match.group(1) + marker
     return match.group(1) + match.group(2) + match.group(3) + match.group(4) + _mask_secret_value(match.group(5), marker) + match.group(6)
 
 
 # LLM: JSON 字段规则与文本赋值规则同口径：正则只取整段带引号键名，凭据判定交给同一个
 #   _is_credential_key_name。分组为 1=键名开引号、2=键名、3=引号+冒号、4=值开引号、5=值、6=闭引号。
-#   非凭据键原样返回（`{"max_tokens": 4096}` 这类不能被误伤）；值仍是纯全大写变量引用时，
+#   非凭据键原样返回（`{"max_tokens": 4096}` 这类不能被误伤）；值仍是带美元符号的纯变量引用时，
 #   _mask_secret_value 会照 rdv2 的口径保留原文。
 # 函数用途: 判一条 "键": "值" 要不要打码；要打就把值遮住，不要就原样返回。
 def _redact_json_field(match: re.Match[str], marker: str, labels_only: bool) -> str:
@@ -202,12 +212,12 @@ def _redact_json_field(match: re.Match[str], marker: str, labels_only: bool) -> 
 # LLM: 逐个定位授权键并从值的结束位置继续找下一个，整体线性。值以 `{`/`[` 开头是结构（如 JSON schema 片段）不是凭据，
 #   原样保留并从键后继续找（嵌套里的真凭据照样遮）。labels 模式（拒绝诊断摘要）把“键名到值结束（含闭引号）”整段换成标记；
 #   普通模式保留方案名，其后整段过 _mask_secret_value（纯变量引用如 `Bearer $TOKEN` 原样保留）。
-# 函数用途: 遮住文本里所有 Authorization / Proxy-Authorization 的凭据值，保留键名、方案名和外层结构。
-def _redact_authorization_values(text: str, marker: str, labels_only: bool) -> str:
+# 函数用途: 按同一结构扫描遮住 Authorization 或 Cookie 整个值，Cookie 分号后字段不能泄漏。
+def _redact_authorization_values(text: str, marker: str, labels_only: bool, *, key_pattern=_AUTHORIZATION_KEY_RE) -> str:
     parts, position = [], 0
-    while (match := _AUTHORIZATION_KEY_RE.search(text, position)) is not None:
+    while (match := key_pattern.search(text, position)) is not None:
         # 值不能跨过下一个授权键：扫描上限定在它前面（下一个键另行处理），每段只扫一次，整体线性。
-        following = _AUTHORIZATION_KEY_RE.search(text, match.end())
+        following = key_pattern.search(text, match.end())
         start = match.end()
         end = _authorization_value_end(text, match, following.start() if following is not None else len(text))
         value = text[start:end]
@@ -318,9 +328,12 @@ def redact_sensitive_text(
         text,
     )
     text = _redact_authorization_values(text, redacted_marker, redact_assignment_labels)
+    text = _redact_authorization_values(text, redacted_marker, redact_assignment_labels, key_pattern=_COOKIE_KEY_RE)
     if not code_file:
         text = _SECRET_JSON_FIELD_RE.sub(
             lambda match: _redact_json_field(match, redacted_marker, redact_assignment_labels), text)
+        text = _SECRET_QUOTED_ASSIGNMENT_RE.sub(
+            lambda match: _redact_assignment(match, redacted_marker, redact_assignment_labels), text)
         text = _SECRET_ASSIGNMENT_RE.sub(
             lambda match: _redact_assignment(match, redacted_marker, redact_assignment_labels), text)
     password_pattern = _URL_PASSWORD_RE if code_file else _LOG_URL_PASSWORD_RE
@@ -416,9 +429,11 @@ def redact_sensitive_value(
     return value
 
 
+# LLM: 结构字段与文本赋值采用同一完整凭据后缀，不按任意子串判断，操作计数与编号不能被误删。
+# 函数用途: 判断一个结构字段是否承载凭据，覆盖带业务前缀的密码字段。
 def _field_is_sensitive(name: str) -> bool:
     normalized = str(name or "").strip().lower().replace("-", "_")
-    return normalized in _SENSITIVE_FIELD_NAMES
+    return normalized in _SENSITIVE_FIELD_NAMES or _is_credential_key_name(normalized)
 
 
 def install_log_redaction() -> None:

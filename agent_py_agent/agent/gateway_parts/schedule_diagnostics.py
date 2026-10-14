@@ -13,7 +13,7 @@ from ..scheduler.repository import SchedulerConflictError, SchedulerNotFoundErro
 from ..scheduler.schedule import ScheduleValidationError
 
 _LOGGER = logging.getLogger(__name__)
-_USAGE = '用法：/schedule [job01]；/schedule history|pause|resume|run <job01>；/schedule notify <job01> origin|local|none。'
+_USAGE = '用法：/schedule [job01]；/schedule history|pause|resume|run|delete|takeover|execution|cancel|recover <job01>；/schedule notify <job01> origin|local|none。'
 _MESSAGES = {
     'SCHEDULER_ARGUMENTS_INVALID': _USAGE,
     'SCHEDULER_STORE_BUSY': '监控账本正在频繁更新，本次读取未完成，请稍后再发同一查询。',
@@ -28,6 +28,10 @@ _MESSAGES = {
     'SCHEDULER_STORE_OWNER_MISMATCH': '监控账本归属与当前用户不一致；未跨用户读取或修改，请管理员核对归属。',
     'SCHEDULER_CONFLICT': '监控刚被另一操作修改，本次没有覆盖；请重新查询后再控制。',
     'SCHEDULER_NOT_FOUND': '没有找到可管理的本人监控，请先发送 /schedule 查询。',
+    'CHANNEL_ACTOR_SCOPE_MISMATCH': '监控创建人或入口归属不一致，已拒绝操作。',
+    'CHANNEL_ACTOR_IDENTITY_CONFLICT': '原通知绑定已变化，请重新从管理员私聊接管未来通知。',
+    'CHANNEL_ACTOR_IDENTITY_REQUIRED': '当前入口缺少可信发起人，已拒绝操作。',
+    'CHANNEL_ACTOR_IDENTITY_INVALID': '原发起人记录不可用，已拒绝操作。',
     'SCHEDULER_CONTROL_FAILED': '监控控制出现内部错误，请管理员按诊断编号核查。',
 }
 
@@ -44,15 +48,15 @@ class ScheduleOwnerChanged(ValueError):
     error_code = 'SCHEDULER_OWNER_MISMATCH'
 
 
-# LLM: 只解析原 slash 参数；控制必须先通过形状检查，避免无效输入触发 owner 初始化或读取。
-# 函数用途: 给监控列表、详情和控制返回一致的 operation、编号和参数。
+# LLM: 只解析原 slash 查询、删除、当前取消、恢复和未来通知接管参数；控制必须先通过形状检查，避免无效输入触发 owner 初始化或读取。
+# 函数用途: 给监控列表、详情与准确生命周期控制返回一致的 operation、编号和参数，不请求模型。
 def schedule_arguments(value: str) -> tuple[str, str, list[str]]:
     parts = value.split()
     if not parts:
         return 'list', '', parts
-    operations = {'history', 'pause', 'resume', 'run', 'notify'}
+    operations = {'history', 'pause', 'resume', 'run', 'notify', 'delete', 'takeover', 'execution', 'cancel', 'recover'}
     operation, identifier = (parts[0], parts[1] if len(parts) > 1 else '') if parts[0] in operations else ('get', parts[0])
-    limits = {'get': {1}, 'history': {2}, 'pause': {2, 3}, 'resume': {2, 3}, 'run': {2, 3}, 'notify': {3}}
+    limits = {'get': {1}, 'history': {2}, 'pause': {2, 3}, 'resume': {2, 3}, 'run': {2, 3}, 'notify': {3}, 'delete': {2}, 'takeover': {2}, 'execution': {2}, 'cancel': {2}, 'recover': {2}}
     if len(parts) not in limits[operation] or (operation == 'notify' and parts[2] not in {'origin', 'local', 'none'}):
         raise ScheduleArgumentsError(_USAGE)
     return operation, identifier, parts

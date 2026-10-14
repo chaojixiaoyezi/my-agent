@@ -118,12 +118,12 @@ class DeliveryService:
 
         prepared = self._prepare(context, envelope, progress=True)
         if isinstance(prepared, DeliveryReceipt):
-            return ProgressDeliveryReceipt(False, message_id, prepared.error_code or "CHANNEL_PROGRESS_REJECTED")
+            return ProgressDeliveryReceipt(False, message_id, prepared.error_code or "CHANNEL_PROGRESS_REJECTED", "permanent")
         attempt = self._resolve_attempt(context, envelope, prepared)
         if isinstance(attempt, DeliveryReceipt):
-            return ProgressDeliveryReceipt(False, message_id, attempt.error_code)
+            return ProgressDeliveryReceipt(False, message_id, attempt.error_code, "permanent")
         if not attempt.capabilities.edit_progress:
-            return ProgressDeliveryReceipt(False, message_id, "CHANNEL_PROGRESS_UNSUPPORTED")
+            return ProgressDeliveryReceipt(False, message_id, "CHANNEL_PROGRESS_UNSUPPORTED", "permanent")
         try:
             text = attempt.content[-8000:]
             if message_id:

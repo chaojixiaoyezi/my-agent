@@ -98,7 +98,7 @@ def test_original_gateway_projection_shows_real_elapsed_without_model_or_stdout(
              "status": "执行中", "wait_state": "handler_result", "elapsed_seconds": 61.25}
     writer.write_tool_liveness(event)
     assert _read_public_progress_events(writer.chunk_path, 0)[0][0]["level"] == "minimal"
-    assert _render_gateway_progress(_read_public_progress_events(writer.chunk_path, 0)[0][0]) == "执行中：run_command"
+    assert _render_gateway_progress(_read_public_progress_events(writer.chunk_path, 0)[0][0]) == "执行中：run_command（61.25 秒），等待工具结果"
     writer.set_verbose_level("stream", preview_max_chars=100)
     writer.write_tool_liveness(event)
     public, _ = _read_public_progress_events(writer.chunk_path, 0, channel="feishu")
@@ -258,3 +258,29 @@ def test_guarded_callback_is_single_selected_publisher(tmp_path):
         on_handler_progress=opaque.append, on_handler_progress_guarded=publish,
         handler_progress_interval_seconds=.02))
     assert result.result.ok and len(guarded) == 1 and not opaque
+
+
+def test_heartbeat_recovers_transient_sink_fault_and_bounds_persistent_fault():
+    from agent_py_agent.agent.tooling.liveness import ActivityHeartbeat
+    recovered = threading.Event()
+    calls = []
+    def sink(event):
+        calls.append(event)
+        if len(calls) == 1:
+            raise OSError("transient")
+        recovered.set()
+    beat = ActivityHeartbeat({"call_id": "exact"}, sink=sink, interval_seconds=.01)
+    beat.start()
+    assert recovered.wait(1)
+    beat.close()
+    assert len(calls) >= 2 and calls[1]["elapsed_seconds"] > calls[0]["elapsed_seconds"]
+    assert all(row["call_id"] == "exact" for row in calls)
+    failures = []
+    def broken(event):
+        failures.append(event)
+        raise OSError("persistent")
+    beat = ActivityHeartbeat({"call_id": "exact"}, sink=broken, interval_seconds=.01)
+    beat.start()
+    beat._thread.join(1)
+    assert len(failures) == 3
+    beat.close()

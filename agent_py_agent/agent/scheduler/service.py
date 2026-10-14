@@ -136,7 +136,7 @@ class SchedulerService:
 
     # LLM: follow_up 是组合根注入的 SchedulerFollowUpPolicy（task_follow_up 查询 + 从配置推出的宽限期），
     #   供 active_run_closeout 判定；未注入时一律保持原来的 waiting 行为（fail closed），不走限期结算。
-    # 函数用途: 绑定原账本和会话；冷启动按准确来源迁移创建人，复核死亡 claim 并沿原终态写历史。
+    # 函数用途: 绑定原账本、会话与取消重试能力；冷启动按准确来源迁移创建人，复核死亡 claim 并沿原终态写历史。
     def __init__(
         self,
         repository: SchedulerRepository,
@@ -144,20 +144,25 @@ class SchedulerService:
         conversation_store: Any,
         skill_snapshot_provider: Callable[[], Any] | None = None,
         follow_up: Any | None = None,
+        cancellation_handler: Callable[[dict], Any] | None = None,
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store
         self.skill_snapshot_provider = skill_snapshot_provider
         self.follow_up = follow_up
+        self.cancellation_handler = cancellation_handler
         prepare_repository(repository, conversation_store, now=time.time())
 
     # LLM: Every queued scheduler run is also the durable root task for its wake. Keep the
     # run id in both typed wake identity and metadata so background lifecycle reads one authority.
-    # 函数用途: 先复核已死亡领取，再预留到期执行；仅新 queued 会唤醒，不重跑已开工的未知结果。
+    # 函数用途: 先沿持久意图重试准确取消并复核已死亡领取，再预留到期执行；仅新 queued 会唤醒，不重跑已开工的未知结果。
     def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32) -> list[str]:
         from .policy import queue_expired
 
         current = float(time.time() if now is None else now)
+        if self.cancellation_handler is not None:
+            for run in self.repository.pending_cancellation_runs():
+                self.cancellation_handler(run)
         self.repository.recover_interrupted_executions(now=current)
         self.repository.reserve_due_runs(now=current, limit=limit)
         wake_ids: list[str] = []
@@ -410,6 +415,10 @@ class SchedulerService:
         terminal_status = scheduler_terminal_status_for_task(task_status)
         if terminal_status is None:
             return settle_stale_waiting(self, run, now=now) if task_status == "active" else None
+        if run.get('cancel_requested_at'):
+            from .active_run_closeout import _task_execution_claim_live_or_unknown
+            if not run.get('cancel_cleanup_confirmed') or _task_execution_claim_live_or_unknown(self, run):
+                return None
         if terminal_status == "done" and waiting_completion_pending(self, run, now=now):
             return None
         error_code = "" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}"

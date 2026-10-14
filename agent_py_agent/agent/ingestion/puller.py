@@ -1,3 +1,5 @@
+# LLM: 游标拉取只按原源信封推进，query_evidence 是本次瞬时观察，不进入第二状态账本。
+# 模块用途: 在原预算与网络出口内分页拉取，记录缺口、真实请求条件与最后解析结果。
 """游标增量拉取:按 offset 续读源接口直到追平流末尾或预算耗尽;缺口如实入账。
 
 fetch_json 由调用方注入(工具层带出站闸),本模块纯逻辑可测。
@@ -9,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .source_http import render_source_http_request
+from .source_http import render_source_http_request, source_query_evidence
 
 # 一轮源抓取的时间预算，同时也是 watch_stream 单次 HTTP 抓取的超时（watch_tool 与 harvester 共用这一份）。
 SOURCE_FETCH_TIMEOUT_SECONDS = 15
@@ -22,6 +24,8 @@ class DrainBudget:
     deadline: float
 
 
+# LLM: query_evidence 仅携带最近实际请求观察，不保存秘密、不替代原游标/spool 提交。
+# 类用途: 汇总当前有界来源拉取的记录、游标、错误和可投影查询事实。
 @dataclass
 class DrainResult:
     events: list[tuple[int, dict]] = field(default_factory=list)
@@ -34,6 +38,7 @@ class DrainResult:
     # contents or a business/device id; the harvester commits it atomically
     # with cursor/spool so only an overlapping retry of that position dedupes.
     source_record_keys: dict[int, str] = field(default_factory=dict)
+    query_evidence: dict[str, Any] = field(default_factory=dict)
     pages: int = 0
     reached_end: bool = False
     gap_events: int = 0
@@ -107,6 +112,8 @@ def drain_source(
     return result
 
 
+# LLM: 查询观察来自同次 render/fetch/解析，不从正文猜总数，错误继续沿原失败合同。
+# 函数用途: 拉取并验证一页真实游标记录，在原结果中携带最新查询条件。
 def _pull_one_page(
     fetch_json,
     source_url: str,
@@ -177,6 +184,7 @@ def _pull_one_page(
         )
         result.error_code = "SOURCE_CURSOR_STALLED"
         return False
+    result.query_evidence = source_query_evidence(request, count=len(items), parser_version="source_cursor_envelope.v1", has_more=has_more)
     previous_external_cursor = request_cursor
     appended = _append_items(
         result,

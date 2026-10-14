@@ -536,6 +536,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     im_stream_preview_max_chars: int = 100
     # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。
     im_stream_heartbeat_seconds: float = 120.0
+    # 空查询复核只增加共享模型提示，基线由模型在原权限/预算内执行，不启动自动查询或告警。
+    query_zero_result_review_enabled: bool = True
     # 仅显式选择 delivery.reply_policy=explicit 的后台任务使用结构化公开回执；旧 always 策略不变。
     # 正常收口不新增模型请求；公开形态缺失最多借原零工具阶段修复一次，关闭时拒绝该策略。
     background_public_receipt_contract_enabled: bool = True

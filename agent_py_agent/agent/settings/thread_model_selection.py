@@ -105,9 +105,9 @@ def _require_owner(agent: object, thread: object) -> None:
             raise ModelProfileError("当前模型选择不能访问其他用户的会话。")
 
 
-# LLM: 显式同值选择也在 canonical thread 原子前进版本并终结 pending；旧空引用初始化不是旧手动事件，不热改运行片。
+# LLM: 显式同值选择在 canonical thread 原子前进版本；expected_revision 在原锁内拒绝旧卡，不能热改运行片。
 # 函数用途: 读取或显式设置模型与覆盖事实；只在实际换模型时清除校准，不增加自动采用或确认流程。
-def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None = None) -> str:
+def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None = None, expected_revision: int | None = None) -> str:
     store = agent.conversation_store
     thread = store.threads.load(thread_id)
     if thread is None:
@@ -124,6 +124,8 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
     # 函数用途: 原子保存选择版本和建议失效原因，保留压缩、消息游标以及同模型校准。
     def update(latest):
         _require_owner(agent, latest)
+        if expected_revision is not None and latest.model_selection_revision != expected_revision:
+            raise ModelProfileError("模型选择已经变化，请重新打开原会话模型卡。")
         if select is None and latest.model_profile_id:
             return latest
         advice = latest.metadata.get(SUBAGENT_MODEL_ADVICE_KEY)

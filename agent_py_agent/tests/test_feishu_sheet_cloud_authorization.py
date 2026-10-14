@@ -1,4 +1,5 @@
 """保护范围真实 HTTP + ToolExecutor 合成验收，不访问租户文档。"""
+import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -118,3 +119,125 @@ def test_explicit_exact_admin_grant_remains_authority_and_does_not_require_colla
     assert _call(group).ok
     assert not any('/permissions/' in row[1] or '/metainfo' in row[1] for row in server.calls)
     assert not _call(group, 'sheet_update').ok
+
+
+# LLM: 合成省略响应保留官方 metainfo 的完整清单与正网格；不读取生产表格，不以标题或 lockInfo 授权。
+# 函数用途: 创建没有保护范围的合法官方 SDK 省略形态。
+def _unprotected_metadata(*, omitted=True):
+    target = {'sheetId': 'sid', 'rowCount': 100, 'columnCount': 26}
+    if not omitted:
+        target['protectedRange'] = []
+    return {'properties': {'sheetCount': 1}, 'sheets': [target]}
+
+
+@pytest.mark.parametrize('omitted', [True, False])
+@pytest.mark.parametrize(('identity', 'kind', 'member'), [
+    (OwnerIdentity.provider_user('feishu', 'ou_one'), 'openid', 'ou_one'),
+    (OwnerIdentity.provider_group('feishu', 'oc_one'), 'openchat', 'oc_one'),
+])
+def test_legal_empty_or_omitted_protection_allows_verified_principal_and_reads_back(tmp_path, server, omitted, identity, kind, member):
+    agent = _self_agent(tmp_path, identity)
+    server.members['sheet_one'] = [_member(kind, member, 'edit')]
+    server.sheet_metadata = _unprotected_metadata(omitted=omitted)
+    result = _call(agent)
+    assert result.ok, result.output
+    assert len(_business_writes(server)) == 1
+    calls = [row[1] for row in server.calls if '/auth/' not in row[1]]
+    assert '/permissions/' in calls[0] and '/metainfo?' in calls[1]
+    assert not any('/protected_range_batch_get' in path for path in calls)
+    read = _call(agent, 'sheet_read')
+    assert json.loads(read.output)['data']['valueRange']['values'] == [['合成行', 123]]
+
+
+@pytest.mark.parametrize('mode', ['no-properties', 'wrong-count', 'bool-count', 'missing-dimension',
+    'bool-dimension', 'zero-dimension', 'duplicate-sheet', 'missing-target', 'null-protection',
+    'dict-protection', 'duplicate-protection', 'cross-sheet-protection', 'opposite-protect'])
+def test_malformed_metadata_stays_typed_and_sends_no_write(tmp_path, server, mode):
+    agent = _self_agent(tmp_path, OwnerIdentity.provider_group('feishu', 'oc_one'))
+    server.members['sheet_one'] = [_member('openchat', 'oc_one', 'edit')]
+    data = _unprotected_metadata()
+    target = data['sheets'][0]
+    if mode == 'no-properties':
+        data.pop('properties')
+    elif mode == 'wrong-count':
+        data['properties']['sheetCount'] = 2
+    elif mode == 'bool-count':
+        data['properties']['sheetCount'] = True
+    elif mode == 'missing-dimension':
+        target.pop('columnCount')
+    elif mode == 'bool-dimension':
+        target['columnCount'] = True
+    elif mode == 'zero-dimension':
+        target['rowCount'] = 0
+    elif mode == 'duplicate-sheet':
+        data['sheets'].append(dict(target))
+    elif mode == 'missing-target':
+        target['sheetId'] = 'other'
+    elif mode == 'null-protection':
+        target['protectedRange'] = None
+    elif mode == 'dict-protection':
+        target['protectedRange'] = {}
+    elif mode == 'duplicate-protection':
+        target['protectedRange'] = [{'protectId': 'p1', 'sheetId': 'sid'}] * 2
+    elif mode == 'cross-sheet-protection':
+        target['protectedRange'] = [{'protectId': 'p1', 'sheetId': 'other'}]
+    else:
+        target['protect'] = {'lock': 'LOCK'}
+    server.sheet_metadata = data
+    result = _call(agent)
+    assert not result.ok and result.reported_error_code == 'CLOUD_RESOURCE_PERMISSION_UNKNOWN'
+    facts = json.loads(result.output)
+    assert facts['reason'] in {'protection_metadata_incomplete', 'protection_metadata_invalid', 'protection_target_missing'}
+    assert facts['effect_outcome'] == 'not_started' and not _business_writes(server)
+
+
+@pytest.mark.parametrize('members', [
+    [_member('openid', 'ou_one', 'edit')],
+    [_member('openchat', 'oc_other', 'edit')],
+    [_member('openchat', 'oc_one', 'view')],
+])
+def test_omitted_protection_never_bypasses_group_namespace_or_resource_permission(tmp_path, server, members):
+    agent = _self_agent(tmp_path, OwnerIdentity.provider_group('feishu', 'oc_one'))
+    server.members['sheet_one'] = members
+    server.sheet_metadata = _unprotected_metadata()
+    result = _call(agent)
+    assert not result.ok and result.reported_error_code == 'CLOUD_RESOURCE_NOT_AUTHORIZED'
+    assert not _business_writes(server) and not any('/metainfo' in row[1] for row in server.calls)
+
+
+def test_omitted_protection_proof_read_failure_preserves_provider_reason(tmp_path, server, monkeypatch):
+    agent = _self_agent(tmp_path, OwnerIdentity.provider_group('feishu', 'oc_one'))
+    server.members['sheet_one'] = [_member('openchat', 'oc_one', 'edit')]
+    server.sheet_metadata = _unprotected_metadata()
+    from agent_py_agent.agent.adapter.feishu_cloud import FeishuCloudError
+    from agent_py_agent.agent.user_space import feishu_sheet_authorization
+
+    def failed_read(adapter, method, path):
+        assert method == 'GET' and '/metainfo?' in path
+        raise FeishuCloudError('FEISHU_CLOUD_RESOURCE_FORBIDDEN', '保护元数据读取被拒绝。',
+            provider_code=91403, reason='resource_permission_required')
+    monkeypatch.setattr(feishu_sheet_authorization, 'request_cloud_api', failed_read)
+    result = _call(agent)
+    assert not result.ok and result.reported_error_code == 'FEISHU_CLOUD_RESOURCE_FORBIDDEN'
+    assert json.loads(result.output)['provider_code'] == 91403
+    assert any('/permissions/' in row[1] for row in server.calls)
+    assert not _business_writes(server)
+
+
+@pytest.mark.parametrize('authorization', [
+    {'source': 'feishu_collaborator', 'permission': 'view', 'principal_type': 'openchat', 'principal_id': 'oc_one'},
+    {'source': 'feishu_collaborator', 'permission': 'edit', 'principal_type': 'openid'},
+    {'source': 'unverified', 'permission': 'edit', 'principal_type': 'openchat', 'principal_id': 'oc_one'},
+])
+def test_sheet_guard_requires_prior_structured_edit_authority(monkeypatch, authorization):
+    from agent_py_agent.agent.adapter.feishu_cloud import FeishuCloudError
+    from agent_py_agent.agent.user_space import feishu_sheet_authorization
+    from agent_py_agent.agent.user_space.feishu_cloud_authorization import CloudResource
+
+    reads = []
+    monkeypatch.setattr(feishu_sheet_authorization, 'request_cloud_api', lambda *_: reads.append(1))
+    with pytest.raises(FeishuCloudError) as error:
+        feishu_sheet_authorization.authorize_sheet_write(None,
+            CloudResource('sheet', 'sheet_one', 'sheet', 'sheet_one'),
+            {'action': 'sheet_append', 'range': 'sid!A1:B2', 'values': [[1]]}, authorization)
+    assert error.value.code == 'CLOUD_RESOURCE_RANGE_NOT_AUTHORIZED' and not reads

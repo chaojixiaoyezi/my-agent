@@ -543,12 +543,15 @@ class AvailabilityPolicy:
         object.__setattr__(self, "mode", mode)
 
 
+# LLM: 输入用途只能由宿主工具声明；元数据 URL 不产生网络许可，实际连接仍走原 URL/DNS/重定向守门。
+# 类用途: 声明内部注入、默认参数以及仅用于绑定用途的 URL 字段。
 @dataclass(frozen=True)
 class ToolInputPolicy:
     internal_parameters: tuple[str, ...] = ()
     safe_parameter_defaults: tuple[tuple[str, Any], ...] = ()
     trusted_parameter_bindings: tuple[tuple[str, TrustedParameterBinding], ...] = ()
     local_file_url_parameters: tuple[str, ...] = ()
+    metadata_url_parameters: tuple[str, ...] = ()
 
 
 # LLM: 条件只读模型 schema 已声明的字符串参数；比较器是宿主代码枚举，不执行表达式、不解释用户自然语言。
@@ -1016,6 +1019,10 @@ def _validate_runtime_policy(
         raise ValueError(f"tool input schema properties must be an object: {model_spec.name}")
     public_names = {str(name) for name in properties}
     policy = runtime_policy.input_policy
+    for name in policy.metadata_url_parameters:
+        _require_public_input_parameter(model_spec, public_names, name, "metadata URL")
+        if properties[name].get("type") != "string":
+            raise ValueError(f"metadata URL must be a string: {model_spec.name}.{name}")
     internal_names = {str(name) for name in policy.internal_parameters}
     if len(internal_names) != len(policy.internal_parameters) or "" in internal_names:
         raise ValueError(f"duplicate or empty internal parameter: {model_spec.name}")

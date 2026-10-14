@@ -62,8 +62,9 @@ class ActivityHeartbeat:
         return self._thread is None or not self._thread.is_alive()
 
     # LLM: 时间来自 monotonic，取消读取原 token；只公开宿主等待身份和时长，不读取参数、文件、思考或 stdout。
-    # 函数用途: 按设定间隔刷新同一等待的真实经过时间，取消后不再声明仍在执行。
+    # 函数用途: 按原间隔刷新真实经过时间，连续三次展示失败才停止；成功清零，取消立即失权。
     def _run(self) -> None:
+        failures = 0
         while not self._stopped.wait(self.interval_seconds):
             if not self.is_current():
                 return
@@ -74,5 +75,8 @@ class ActivityHeartbeat:
                     self.guarded_sink(event, still_current=self.is_current)
                 else:
                     self.sink(event)
+                failures = 0
             except Exception:  # noqa: BLE001 - 展示故障不得改变真实工具结果
-                return
+                failures += 1
+                if failures >= 3:
+                    return

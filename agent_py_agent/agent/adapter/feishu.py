@@ -1063,12 +1063,12 @@ def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, r
 
 
 # LLM: 卡片创建只接受供应商成功响应中的 message_id/chat_id；不根据 UUID 推断 ID，不回落普通消息。
-# 函数用途: 沿原认证、HTTP 重试和稳定 UUID 发一张私人控制卡，保留精确回调来源。
+# 函数用途: 沿原认证、准确个人/群编号与稳定 UUID 发控制卡，保留精确回调来源。
 def _send_feishu_control_card(adapter: FeishuAdapter, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, str]:
     token = adapter._get_tenant_access_token()
     if not token:
         return {}
-    result = _feishu_msg_api_with_retry("POST", "/im/v1/messages?receive_id_type=open_id",
+    result = _feishu_msg_api_with_retry("POST", _message_send_path(user_id),
         _message_body(receive_id=user_id, msg_type="interactive", content=json.dumps(card, ensure_ascii=False),
                       uuid_value=_feishu_request_uuid(idempotency_key, component="control", index=0)), token)
     data = result.get("data") if result.get("code") == 0 else None

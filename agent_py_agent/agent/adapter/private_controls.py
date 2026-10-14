@@ -1,4 +1,4 @@
-# LLM: 只转交 SDK 已验证的 actor 与真实 message/chat 身份，不传表单正文；原 Gateway 核对引用、密码和执行代次。
+# LLM: SDK actor/真实卡身份和私人表单只交宿主回环；表单不进入聊天队列，原 Gateway 核对引用、密码和代次。
 # 模块用途: 固定回环认证HTTP拒绝跳转； 处理私人工具审批卡，返回原卡片的就地回执；需要首设/解锁时复用原密码卡。
 from __future__ import annotations
 
@@ -14,13 +14,15 @@ from ..gateway_parts.client_credentials import GatewayClientCredentials
 # 函数用途: 提交原私人审批/凭据表单并回显原真实决定；失败不落聊天或授予权限。
 def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     value = norm.get("value") or {}
-    if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential"}:
+    if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential", "my_agent_model_configuration"}:
         return None
     actor = str(norm.get("operator_open_id") or "")
     body = {"reference": value.get("reference"), "decision": value.get("decision"),
             "message_id": norm.get("message_id"), "chat_id": norm.get("chat_id")}
-    if value["kind"] == "my_agent_task_credential":
-        body["fields"] = norm.get("form_value") or {}
+    if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration"}:
+        body["fields"] = dict(norm.get("form_value") or {})
+        if value["kind"] == "my_agent_model_configuration" and value.get("decision") != "save":
+            body["fields"] = {"profile_id": str(value.get("profile_id") or "")}
     if not actor or not body["message_id"] or not body["chat_id"]:
         return {"toast": {"type": "error", "content": "无法确认卡片来源，请回原私人卡片操作。"}}
     try:
@@ -37,6 +39,6 @@ def tool_approval_card_action(adapter, norm: dict) -> dict | None:
         return {"toast": {"type": "warning", "content": result["message"]}}
     if not result.get("ok"):
         return {"toast": {"type": "error", "content": "这张确认卡已失效，请检查原任务状态。"}}
-    text = (result.get("message") or "凭据输入已处理。") if value["kind"] == "my_agent_task_credential" else ("已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
+    text = (result.get("message") or "私人配置已处理。") if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration"} else ("已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
     return {"toast": {"type": "success", "content": text}, "card": {"type": "raw", "data": {
         "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]}}}

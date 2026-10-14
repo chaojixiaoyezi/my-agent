@@ -1676,3 +1676,7 @@ CLI adapter 同源接入 `feishu_quoted_text_enabled`，默认 true，与原引�
 2026-10-14 必要输入根停止：`control_service._prepare_main_task_stop` 在原 task/claim/control 锁确认并提交停止后，调用 `cancel_task_inputs` 清本根待输入；未确认输入回收写入原 preparation_errors，不阻止后续原资源清理，也不宣称完整停止。真实 Gateway `/stop` 与子树取消合同见[持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。
 
 2026-10-14 必要输入状态与容量：`/status` 保留排队/运行字段，accepted必要输入另列待输入并说明不占执行资源；BLOCKED子代理从运行分离成等待/受阻。投影只按原目标root、准确TaskLink refs及子树report读取，坏账显示不可用。每根最多32条必要输入沿原TaskStore锁检查和登记，重复不占新槽，终态释放；超限私凭据无新增卡片/密文记录，更新失败保留旧授权，不建立owner输入队列或poller。隔离回归见[持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。
+
+### 2026-10-14 R07/R08 监控控制
+
+新增确定性 `/schedule delete|cancel|execution|recover|takeover job01`，工具与命令共用原监控控制服务。删除与当前取消沿原 job/run CAS、RuntimeDB 权限、TaskLink、必要输入和冻结整树资源收口；重启重试持久取消，不删历史。管理员私人接管只影响未来通知，保留原 creator/source 与已预留执行，原群目标不改。详见[监控人类控制](../../design/SCHEDULER_HUMAN_CONTROL.md)，本地合同测试见 `test_scheduler_control_lifecycle.py`；真实 IM 与发行由主线统一验收。

@@ -1190,7 +1190,7 @@ class _GatewayReplyDispatchWorkerMixin:
             epoch=record.claim_epoch, release=False,
         )
 
-    # LLM: callback 不持 store 锁且异常不回显正文；BaseException 模拟/真实退出保持标记，普通异常只成为未确认回执。
+    # LLM: callback 不持 store 锁且异常不回显正文；已知 ID 编辑沿原 claim 有界恢复，未知首发不重发，BaseException 保留原冻结意图。
     # 函数用途: 先写外发意图，再调用原渠道 callback，返回实际使用的 claim 快照。
     def _dispatch_message(self, record: PendingGatewayReply, text: str, message: tuple[str, int]) -> tuple[PendingGatewayReply | None, bool]:
         started = self._start_dispatch(record, text, message)
@@ -1201,9 +1201,14 @@ class _GatewayReplyDispatchWorkerMixin:
             from ..delivery.progress import ProgressDeliveryReceipt
 
             if isinstance(result, ProgressDeliveryReceipt):
+                identity = result.message_id or str(started.progress_draft.get("message_id") or "")
+                failures = 0 if result.ok else int(started.progress_draft.get("failures") or 0) + 1
+                recoverable = bool(identity) and result.failure_kind != "permanent" and failures < 3
                 updated = replace(started, progress_draft={**started.progress_draft,
-                    "message_id": result.message_id, "disabled": not result.ok,
-                    "error_code": result.error_code, "sent_at": time.time()})
+                    "message_id": identity, "disabled": not result.ok and not recoverable,
+                    "failures": failures, "failure_kind": result.failure_kind,
+                    "error_code": result.error_code, "sent_at": time.time(),
+                    "retry_at": 0 if result.ok else time.time() + min(30, 2 ** failures)})
                 try:
                     committed = self.store.commit_claim(started, updated, owner=self._claim_owner, epoch=started.claim_epoch, release=False)
                 except OSError:
@@ -1385,17 +1390,19 @@ class GatewayReplyDeliveryWorker(
 
     # LLM: 先把进度快照送达并推进游标，再取最终回复；任一步隔离已收口或归还认领时返回 None，
     #   调用方直接结束本次处理，不进入投递。
-    # 函数用途: 依次跑 progress 与 response 两步轮询，返回 (记录, 最终正文) 或 None。
+    # 函数用途: 先检查最终回复，未完成才刷新进度；最终回复不被展示重试延迟。
     def _poll_progress_then_response(
         self, claimed: PendingGatewayReply
     ) -> tuple[PendingGatewayReply, str] | None:
+        response, quarantined = self._quarantine_aware(self._poll_response, claimed, "response")
+        if quarantined:
+            return None
+        if response is not None and not claimed.dispatch:
+            return claimed, response
         progressed, quarantined = self._quarantine_aware(
             self._deliver_available_progress, claimed, "progress"
         )
         if quarantined or progressed is None:
-            return None
-        response, quarantined = self._quarantine_aware(self._poll_response, progressed, "response")
-        if quarantined:
             return None
         if response is None:
             self.store.release_claim(

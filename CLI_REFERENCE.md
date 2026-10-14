@@ -79,12 +79,16 @@ python -m agent_py_agent --help
 | `/restart [<原因>]` | 管理员安全重启 Gateway：先停领新请求、等在跑的回合结束，再等执行中的工具跑完后换新进程；期间的消息排队，重启后自动处理。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；冷却中或同一会话短时间内重复重启会被拒。仅 Gateway 模式。 |
 | `/endtask [<任务ID> [confirm]]` | 管理员处理卡在等待中的定时会话任务：不带参数列出等待中的定时执行、能否结束及后续工作事实码；`/endtask <任务ID>` 只读预览（同样写明后续工作事实码）；`/endtask <任务ID> confirm` 把会话任务记为 cancelled，并立即结算它堵住的定时执行，定时任务按计划起新一轮运行。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；只处理“定时执行 waiting、会话任务 active、执行树没有未结束的执行”的任务，其余一律拒绝且不改动；不改运行库、不重做未确认的操作。仅 Gateway 模式。 |
 | `/wakes [quarantined]`、`/wakes replay <唤醒ID> [confirm]` | 管理员查看反复失败、已结案不再自动领取的后台唤醒：`/wakes` 列出结构化行（ID、会话、reason、原因码、次数、结案时间、已重放次数）；`/wakes replay <唤醒ID>` 只读预览重放会做什么；带 `confirm` 按原 ID 和原内容放回待处理队列、失败计数清零。 | 只有本机管理员（及已绑定为管理员的 IM 身份）可用；已归档、读不出、待处理队列已有同 ID、对应的会话任务或会话消息已结束的，一律拒绝且不改动。仅 Gateway 模式。 |
-| `/model [<编号>\|default <编号>]` | 不带参数列出本会话模型、新会话默认和可选模型；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 只选择已保存或管理员共享的模型，不在聊天里新增模型或收发密钥；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
+| `/model [<编号>\|default <编号>]` | 飞书不带参数发送本会话模型选择卡，可向原操作者私发新增/编辑表单；`/model <编号>` 为当前会话选择，`/model default <编号>` 设为新会话默认。 | 群中私人表单仍配置原群的模型，供该群执行使用；表单密钥不进入聊天/模型，旧卡与异值重放拒绝；TUI 里单独输入 `/model` 仍打开菜单。仅 Gateway 模式。 |
+| `/schedule [job01]`、`/schedule history job01` | 查看本人监控、规则与最近运行；编号沿当前 owner 唯一匹配。 | 群按原可信创建人；不借其他成员或管理员身份。 |
+| `/schedule delete job01` | 删除本人的监控，关闭未来并沿原 task/run 整树取消当前轮。 | 保留历史与产物；取消未确认/坏记录如实提示，B 不可删 A。 |
+| `/schedule execution job01`、`/schedule cancel job01`、`/schedule recover job01` | 查看执行、只取消当前或核对死亡/等待收口。 | cancel 保留未来计划；recover 不重放未知业务或创建替代任务。 |
+| `/schedule takeover job01` | 绑定管理员私人 IM 接管本人 TUI 监控的未来通知。 | 原 owner/来源/创建人不变；已预留运行不改目标，群入口不授予本机权限。 |
 | `/admin <管理员密码>`、`/admin status`、`/admin logout` | 仅 IM 一对一私聊：用本机设置的管理员密码把本私聊绑定为管理员，之后按本机主用户 local/main 运行；`status` 查看、`logout` 解除。 | 绑定写 `config/admin-channel-identities.json`；密码不进回执、记录和日志；群聊与本机终端拒绝。仅 Gateway 模式。 |
 | `/approve <管理员密码>` | 仅已绑定管理员的 IM 私聊：批准本会话当前唯一等待确认的工具操作，只批准这一次。 | 写原 permission bridge 的精确决定文件；没有或多于一个待决时拒绝。 |
 | `/deny` | 仅 IM 私聊：拒绝本会话当前唯一等待确认的工具操作，不需要密码。 | 同上；终端里请直接在审批面板中选择。 |
 | `/goal ...` | 查看或修改当前 thread 的持久目标。 | 系统控制；命令词不进入模型。 |
-| `/verbose [off|on|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
+| `/verbose [off|on|stream|full]` | 查看或修改当前 thread 的过程显示档位。 | 系统设置；不创建模型请求、不写 transcript。 |
 | `/effort [auto\|off\|low\|medium\|high\|max\|default]` | 查看或设置本会话的智能程度（推理强度）。TUI 里单独输入 `/effort` 会打开档位菜单（上下键选、回车设置、Esc 不改）；查看回执末尾列出可选档位。回执说明在当前模型上的实际效果：按档位发送、按思考预算发送，或“不支持调节、本设置暂不改变请求”；`default` 清除本会话设置、回到全局默认 `model_reasoning_effort`。子代理可在 `create_subagents` 用 `effort` 单独指定，省略则继承当前档位。当前模型未声明思考控制方式且解析为不支持时，设成 auto 以外的档位会在后台自动检测一次（开关 `reasoning_control_auto_probe`），`/effort` 查看进度与结论。 | 写当前 thread 的 `reasoning_effort`；自动检测时后台发 9 次短请求。仅 Gateway 模式。 |
 | `/effort probe` | 在后台检测当前模型是否真的支持按档位调节智能程度（同一道短题按低 / 最高 / 不带参数各发 3 次，比较用量里的 token），确认支持就把模型档案的思考控制改为按档位发送。结论会在同一会话下一条回复顶部提示一次（`/effort` 看过就不再提示）。 | 后台发 9 次短请求；可能写本人模型档案或（仅管理员、部署默认模型）全局配置，并记账。仅 Gateway 模式。 |
 | `/effort revert <编号>` | 撤销一次由检测写入的模型档案修改（编号至少 6 位，见检测结果里的提示）。 | 写本人模型档案与档案账本。仅 Gateway 模式。 |

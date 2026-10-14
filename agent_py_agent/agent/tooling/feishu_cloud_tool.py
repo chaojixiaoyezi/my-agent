@@ -12,6 +12,7 @@ from ..capability.runtime_config_reload import (
 )
 from ..user_space.feishu_cloud_authorization import authorize_cloud_resource, resolve_cloud_resource
 from ..user_space.feishu_sheet_authorization import authorize_sheet_write
+from ..user_space.feishu_sheet_verification import verify_sheet_write
 from ..user_space.owner_policy import resolve_effective_owner_policy
 from ..user_space.resource_grants import (
     normalized_resource_grant,
@@ -48,7 +49,7 @@ def _model_spec() -> ToolModelSpec:
         '当前群必须是文档协作者，群成员个人权限不等于群共享。凭据由宿主托管，勿索取 app_secret。'
         '表格更新会核验与正规 A1 范围相交的保护；追加的目的行由飞书决定，存在保护时须本人拥有所有保护范围编辑权。'
         '群不能借个人保护范围编辑权；未知保护信息会拒绝代写。'
-        '写后用读操作核对；未知写入错误不能直接重试追加。'),
+        '表格写入回执区分已接受与读回 verified/mismatch/unverifiable/disabled；未核验不代表未写入，不能直接重复追加。'),
         input_schema={'type': 'object', 'properties': {
             'action': {'type': 'string', 'enum': list(_TYPES)}, 'resource_token': {'type': 'string'},
             'identity': {'type': 'string', 'enum': ['bot', 'user'], 'description': '默认bot使用应用身份；user须当前私人用户已通过feishu_auth本人授权。群资源使用bot。'},
@@ -149,7 +150,7 @@ class FeishuCloudTool(BaseTool):
             return ToolHandlerOutcome('feishu_cloud', False, '云资源参数不完整或无效；请核对编号、range 和对应数据。', error_code='TOOL_INVALID_ARGUMENTS')
         return None
 
-    # LLM: 先核查网络和原策略，再现查准确资源/表格保护权限；wiki 数据与主体 ID 授权前不外露，原操作账管理副作用，不自动重放未知写入。
+    # LLM: 先核查网络和原策略，再现查准确资源/表格保护权限；写后同身份读回独立报告核验状态，读失败不撤销已接受写入或重放。
     # 函数用途: 让用户按飞书已有分享权限使用云资源，核验保护范围后代写，返回本次许可来源及可读错误。
     def execute(self, params):
         try:
@@ -202,8 +203,12 @@ class FeishuCloudTool(BaseTool):
             result = resource.wiki_data if params['action'] == 'wiki_resolve' else cloud_request(
                 adapter, *_request_plan({**params, 'resource_token': resource.resource_token}))
             public_authorization = {key: value for key, value in authorization.items() if key != 'principal_id'}
-            return ToolHandlerOutcome('feishu_cloud', True, json.dumps(
-                {'action': params['action'], 'data': result, 'resource_authorization': public_authorization}, ensure_ascii=False))
+            payload = {'action': params['action'], 'data': result, 'resource_authorization': public_authorization}
+            if params['action'] in {'sheet_append', 'sheet_update'}:
+                payload['write_verification'] = verify_sheet_write(adapter, cloud_request,
+                    {**params, 'resource_token': resource.resource_token}, result,
+                    enabled=bool(getattr(config, 'feishu_cloud_verify_sheet_writes_enabled', True)))
+            return ToolHandlerOutcome('feishu_cloud', True, json.dumps(payload, ensure_ascii=False))
         except FeishuCloudError as exc:
             return _failure(exc.code, str(exc), unknown=exc.unknown, facts=exc.public_facts())
         except (ValueError, TypeError, OSError):

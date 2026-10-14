@@ -2,6 +2,7 @@
 # 模块用途: 提供可归档的单页/批量 HTTP 读取，准确报告缓存、失败和未完成 URL。
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -242,8 +243,8 @@ class _WebFetchRequest:
     credential_ref: str = ""
 
 
-# LLM: 只净化本调用凭据的原文、JSON与URL/表单编码回显；须在格式化、归档和模型前调用，urlencode产生的+不能漏掉。
-# 函数用途: 生成实际传输使用的非空回显变体，先替换长串以免短账号破坏长认证值的匹配。
+# LLM: 只净化本调用已知凭据的原文、JSON、URL/表单及常见 Base64 回显；须在格式化、归档和模型前调用，不能猜任意外部字符串是密钥。
+# 函数用途: 生成本次秘密的有限编码变体，先替换长串；不改变实际请求或增加跨 owner 的秘密表。
 def _secret_echo_variants(secrets):
     values=set()
     for value in secrets:
@@ -251,6 +252,9 @@ def _secret_echo_variants(secrets):
             continue
         values.update((value,json.dumps(value,ensure_ascii=True)[1:-1],
             json.dumps(value,ensure_ascii=False)[1:-1],quote(value,safe=''),quote_plus(value,safe='')))
+        for encoder in (base64.b64encode, base64.urlsafe_b64encode):
+            encoded = encoder(value.encode('utf-8')).decode('ascii')
+            values.update((encoded, encoded.rstrip('=')))
     return sorted(values,key=len,reverse=True)
 
 

@@ -2882,3 +2882,5 @@ B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed 
 根任务必要输入在 `control_service._prepare_main_task_stop` 的原准确停止提交之后回收，不从自然语言识别。孩子取消由共同子代理取消原语按 exact run 接同一输入模块；控制结果继续携带原资源与输入回收的未确认事实。
 
 `conversation/im_task_status.py` 将原已接单SessionTask的准确目标root与输入refs投影成waiting_input，运行数扣除待输入；原子树BLOCKED单列等待。`control_commands.render_conversation_task_status`只渲染这些typed事实，未知/坏账显示不可用，不读任务文字或表单秘密。输入容量与登记共用原TaskStore锁，每根32条引用，不新增执行槽、输入队列或定时线程。
+
+监控人类控制共用 `scheduler/control.py`：命令和工具先验证准确 owner/creator，再由原 repository 写 job/run CAS；`notification_binding.py` 只校验原 job/run 的未来通知绑定与管理员登录代次，不建立收件人账。删除及当前取消复用 TaskLink、RuntimeDB、输入依赖、冻结整树资源，service 冷启动/周期回读原取消意图；execution 只投影已经冻结的目标，原来源和群地址保留。协议与验收边界见[监控人类控制](../../design/SCHEDULER_HUMAN_CONTROL.md)。

@@ -1,3 +1,5 @@
+2026-10-14 R01–R09 统一验收：源码 81 个相关 focused 文件验收 2068 通过、10 项按平台跳过，零失败/错误，覆盖进度/状态、云表格、私人凭据、零查询、模型卡、监控取消/接管及普通/群/主子权限。独立凭据安全矩阵 59 项、三文件 stream 组合 113 项均通过；原输入容量满额回滚被总组合发现错误分类缺失，现改 typed input_registration 并在原错误分类表登记，保留旧 ready 密文及零发送。跨批公开流沿累计净化安全行，未完成后缀在结构化边界释放。注册认证 3xx 不读取响应体，仍拒绝第二 origin。源码严格 gate、准确包字节码、Linux/Mac 原生及安装/更新证据统一保存在本期私有发行目录；最终数字以同包 RELEASE_ACCEPTANCE.md 为准，不能把分线重复复验累加为独立案例。实际飞书租户点击/收信、现场保护权限和生产历史明文迁移未冒称通过。无全仓 pytest 或线上 CI 作为本期验收来源。详见 [实施与边界](docs/tasks/IM_R01_R09_RELEASE.md)。
+
 P12补验：`test_task_input_capacity`用33真实线程同根验证32槽、幂等、拒绝回滚；`test_task_input_cancel_deadline`使用原停止入口及1001队列；`test_im_task_input_status`核对精确根引用、不可读状态与待输入/子阻塞展示。
 
 2026-10-14 P01–P12 focused 验收入口：`test_unattended_tool_approval`、`test_im_self_discovery`、`test_persistent_task_input`、`test_task_credential_http`、`test_feishu_cli_backend`、`test_feishu_oauth`，结合原IM回调/停止/后台/插件/owner资源测试。Go宿主包装在编译前执行 `go test ./cmd/my-agent-host`，使用合成RoundTripper跑真实官方命令，不连真实飞书。集成gate使用不重复的focused文件集合；容量仅验证有界依赖和原队列，不证明几十万用户吞吐。最终数字和包身份另记发行验收，不合计有交叉的中间批次。

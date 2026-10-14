@@ -45,6 +45,7 @@ from ..user_space.owner_quota import (
 from .delivery_policy import normalize_delivery
 from .due_index import SchedulerDueIndex
 from .execution_policy import normalize_execution, normalize_precheck
+from .notification_binding import normalize_notification_binding
 from .policy import apply_run_policy, normalize_policy
 from .run_preparation import SchedulerRunPreparation
 from .schedule import (
@@ -285,6 +286,81 @@ class _SchedulerJobOperations:
             self._write_store_unlocked(store, admission)
         return deepcopy(updated)
 
+    # LLM: 原 job version CAS 只取消本次已有 run；新周期保留，active run 记录持久意图，排队取消保留原历史。
+    # 函数用途: 请求停止本人监控的当前所有规则，不暂停或删除未来计划。
+    def cancel_job_runs(self, job_id, *, expected_version):
+        current = _now(None)
+        with self._mutation_scope() as (store, admission):
+            job = self._require_mutable_job(store, job_id, expected_version)
+            cancelled = self._cancel_waiting_runs_unlocked(store, job_id, current, 'job_cancelled')
+            updated = {**job, 'version': int(job['version']) + 1, 'updated_at': current,
+                'cancel_pending_run_ids': list(dict.fromkeys([*(job.get('cancel_pending_run_ids') or []),
+                    *(row['run_id'] for row in cancelled)]))}
+            store['jobs'][job_id] = updated
+            for run_id, raw in list(store['runs'].items()):
+                run, _error = self._parse_run(raw)
+                if run is not None and run['job_id'] == job_id and run['status'] in {'running', 'waiting'}:
+                    store['runs'][run_id] = {**run, 'cancel_requested_at': current, 'cancel_reason': 'job_cancelled'}
+                    updated['cancel_pending_run_ids'].append(run_id)
+            updated['cancel_pending_run_ids'] = list(dict.fromkeys(updated['cancel_pending_run_ids']))
+            self._write_store_unlocked(store, admission, history_records=cancelled)
+        return deepcopy(updated)
+
+    # LLM: 只记录准确 run 已请求取消后的资源清理确认；终态仍归执行者或 waiting 对账，不能用该字段替代 claim 死亡事实。
+    # 函数用途: 在原 run 保存清理是否确认，Gateway 重启后能继续原取消意图。
+    def record_cancel_cleanup(self, run_id, *, confirmed):
+        with self._mutation_scope() as (store, admission):
+            run, _error = self._parse_run(store['runs'].get(run_id))
+            if run is not None and run.get('cancel_requested_at'):
+                store['runs'][run_id] = {**run, 'cancel_cleanup_confirmed': confirmed is True}
+            elif confirmed:
+                store['jobs'] = {identifier: {**raw, 'cancel_pending_run_ids': [key for key in raw.get('cancel_pending_run_ids', ()) if key != run_id]}
+                    if run_id in raw.get('cancel_pending_run_ids', ()) else raw for identifier, raw in store['jobs'].items()}
+            else:
+                return
+            self._write_store_unlocked(store, admission)
+
+    # LLM: 取消范围由原 job tombstone 与 run/history ID 决定；不根据任务名或工具正文查找，坏历史保留未确认。
+    # 函数用途: 为冷启动及重复删除取回尚待取消的准确执行，包含已归档的排队运行。
+    def pending_cancellation_runs(self):
+        store = self._store_snapshot()
+        runs, _errors = self._valid_runs(store)
+        result = [run for run in runs if run.get('cancel_requested_at')]
+        pending = {key for job in store['jobs'].values()
+            for key in job.get('cancel_pending_run_ids', ())}
+        if pending:
+            active_ids = {row['run_id'] for row in result}
+            rows = read_jsonl_objects_report(self.history_path, context='scheduler.cancel.history').records
+            for row in rows:
+                if row.get('run_id') in pending - active_ids and row.get('status') in _TERMINAL_RUN_STATUSES:
+                    run, _error = self._parse_run(row, terminal=True)
+                    if run is not None:
+                        result.append(run)
+        return result
+
+    # LLM: 原 job CAS 保存通知绑定；调用方已验证认证入口，本方法不接受任意 patch 或改来源，预留 run 不变。
+    # 函数用途: 原子保存未来通知接管并增加 job 版本，保留原创建和来源审计。
+    def update_notification_binding(self, job_id, binding, *, expected_version):
+        normalized = normalize_notification_binding(binding)
+        if normalized is None or normalized['owner'] != self.owner:
+            raise SchedulerConflictError('notification owner mismatch')
+        current = _now(None)
+        with self._mutation_scope() as (store, admission):
+            job = self._require_mutable_job(store, job_id, expected_version)
+            previous = job.get('notification_binding')
+            if normalized['version'] != int((previous or {}).get('version') or 0) + 1:
+                raise SchedulerConflictError('notification binding version changed')
+            updated = {**job, 'notification_binding': deepcopy(normalized),
+                'notification_binding_history': [*(job.get('notification_binding_history') or []),
+                    *([deepcopy(previous)] if previous else [])],
+                'delivery': {**normalize_delivery(job.get('delivery')), 'mode': 'origin'},
+                'version': int(job['version']) + 1, 'updated_at': current}
+            store['jobs'][job_id] = updated
+            self._write_store_unlocked(store, admission)
+        return deepcopy(updated)
+
+    # LLM: 原 CAS 关闭未来并持久记录准确 active run 取消意图，已删除重复请求不新增账；运行清理由控制服务消费。
+    # 函数用途: 留下监控 tombstone 和历史，取消排队并请求正在执行或等待的整树停止。
     def delete_job(
         self,
         job_id: str,
@@ -294,17 +370,30 @@ class _SchedulerJobOperations:
     ) -> dict[str, object]:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
+            job = self._require_job(store, job_id)
+            if job['status'] == 'deleted':
+                if expected_version not in {job['version'], job.get('delete_expected_version')}:
+                    raise SchedulerConflictError('job version changed')
+                return deepcopy(job)
             job = self._require_mutable_job(store, job_id, expected_version)
             deleted = {
                 **job,
                 "status": "deleted",
                 "deleted_at": current,
+                "delete_expected_version": expected_version,
                 "next_run_at": 0.0,
                 "updated_at": current,
                 "version": int(job["version"]) + 1,
             }
             store["jobs"][job_id] = deleted
             cancelled = self._cancel_waiting_runs_unlocked(store, job_id, current, "job_deleted")
+            for run_id, raw in list(store['runs'].items()):
+                run, _error = self._parse_run(raw)
+                if run is not None and run['job_id'] == job_id and run['status'] in {'running', 'waiting'}:
+                    store['runs'][run_id] = {**run, 'cancel_requested_at': current, 'cancel_reason': 'job_deleted'}
+            deleted['cancel_pending_run_ids'] = list(dict.fromkeys([*(job.get('cancel_pending_run_ids') or []),
+                *(row['run_id'] for row in cancelled),
+                *(key for key, row in store['runs'].items() if row.get('job_id') == job_id and row.get('cancel_requested_at'))]))
             self._write_store_unlocked(store, admission, history_records=cancelled)
         return deepcopy(deleted)
 
@@ -945,11 +1034,11 @@ class _SchedulerStoreSupport:
         }
 
     # LLM: 与 claim_run 共用过期与死亡判定；已开跑只记 unknown，恢复沿原终态/history 提交，不自动重放副作用。
-    # 函数用途: 启动或周期清理明确死亡的领取，并迁移旧版误留活动账本的 unknown。
-    def recover_interrupted_executions(self, *, now: float | None = None) -> list[str]:
+    # 函数用途: 启动或周期清理明确死亡的领取，显式控制可只复核准确 job；迁移旧版误留活动账本的 unknown。
+    def recover_interrupted_executions(self, *, now: float | None = None, job_id: str = '', expected_version: int | None = None) -> list[str]:
         from .recovery import recover_runs
 
-        return recover_runs(self, current=_now(now))
+        return recover_runs(self, current=_now(now), job_id=job_id, expected_version=expected_version)
 
     def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         """逐条解析 runs: 坏记录跳过并收集错误(与 _valid_jobs 同容错模式)。"""
@@ -974,7 +1063,7 @@ class _SchedulerStoreSupport:
                 errors.append(error)
         return jobs, sorted(set(errors))
 
-    # LLM: schema/owner/计划及可选执行策略共用这里校验；错误只返回结构化码，读路径不迁移或覆盖原文件。
+    # LLM: schema/owner/计划、执行策略及带版本通知接管共用这里校验；错误只返回结构化码，读路径不迁移或覆盖原文件。
     # 函数用途: 识别可信的当前 owner 计划，将非法记录排除于实际调度之外。
     def _parse_job(self, raw: object) -> tuple[dict[str, object] | None, str]:
         if not isinstance(raw, dict):
@@ -1001,13 +1090,20 @@ class _SchedulerStoreSupport:
             normalize_execution(raw.get("execution"))
             normalize_precheck(raw.get("precheck"))
             normalize_delivery(raw.get("delivery"))
+            binding = normalize_notification_binding(raw.get('notification_binding'))
+            if binding is not None and binding['owner'] != self.owner:
+                raise ValueError('notification owner')
+            pending = raw.get('cancel_pending_run_ids', [])
+            if (not isinstance(pending, list) or any(not isinstance(key, str) or not key.startswith('srun_') for key in pending)
+                    or len(pending) != len(set(pending))):
+                raise ValueError('cancel pending IDs')
             if int(raw.get("version") or 0) < 1:
                 raise ValueError("job version")
             return dict(raw), ""
         except (TypeError, ValueError, ScheduleValidationError):
             return None, "SCHEDULER_JOB_INVALID"
 
-    # LLM: 旧 run 默认 epoch 0；读取时校验冻结执行策略，损坏记录不能等到领取后才猜执行位置或预检动作。
+    # LLM: 旧 run 默认 epoch 0；读取时校验冻结执行策略与通知接管目标，损坏记录不能等到领取后才猜执行位置或预检动作。
     # 函数用途: 解析新旧 scheduler run，拒绝非法 epoch 和配置，确保后续 CAS 有确定基线。
     def _parse_run(
         self,
@@ -1035,6 +1131,14 @@ class _SchedulerStoreSupport:
             normalize_execution(raw.get("execution"))
             normalize_precheck(raw.get("precheck"))
             normalize_delivery(raw.get("delivery"))
+            binding = normalize_notification_binding(raw.get('notification_binding'))
+            if binding is not None and binding['owner'] != self.owner:
+                raise ValueError('notification owner')
+            requested = raw.get('cancel_requested_at', 0)
+            if (isinstance(requested, bool) or not isinstance(requested, (int, float))
+                    or not math.isfinite(requested) or requested < 0
+                    or 'cancel_cleanup_confirmed' in raw and type(raw['cancel_cleanup_confirmed']) is not bool):
+                raise ValueError('cancel intent')
             parsed = dict(raw)
             parsed["claim_epoch"] = claim_epoch
             return parsed, ""
@@ -1580,7 +1684,7 @@ def _updated_job(
 
 
 # LLM: New durable runs start at epoch 0; every executable claim advances it and embeds it in claim_id for CAS validation.
-# 函数用途: 构造初始 queued run，冻结通知策略及 scheduler 持久字段，供普通领取与恢复流程沿同一 epoch 递增。
+# 函数用途: 构造初始 queued run，冻结通知策略、带版本通知绑定及 scheduler 持久字段，供普通领取与恢复流程沿同一 epoch 递增。
 def _reserved_run(
     job: dict[str, object],
     *,
@@ -1607,6 +1711,7 @@ def _reserved_run(
         "execution": execution,
         "precheck": deepcopy(job.get("precheck")),
         "delivery": normalize_delivery(job.get("delivery")),
+        "notification_binding": deepcopy(normalize_notification_binding(job.get('notification_binding'))),
         "precheck_checkpoint": deepcopy(job.get("precheck_checkpoint")),
         "source_task_id": str(job.get("source_task_id") or ""),
         "name": str(job["name"]),

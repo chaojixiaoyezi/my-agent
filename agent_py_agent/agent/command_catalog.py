@@ -39,7 +39,10 @@ class CommandSpec:
 COMMAND_CATALOG = (
     CommandSpec("schedule", "/schedule [job编号]", "本人监控列表与规则详情", submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$",
                 help_variants=(("/schedule history job01", "最近3次执行"), ("/schedule pause|resume job01 [rule1]", "原地停止或恢复整体计划或单条规则"),
-                ("/schedule run job01 [rule1]", "立即试跑规则"), ("/schedule notify job01 origin|local|none", "后续回执通知方式"))),
+                ("/schedule run job01 [rule1]", "立即试跑规则"), ("/schedule delete job01", "删除本人监控并请求停止当前整树执行"),
+                ("/schedule takeover job01", "管理员私聊接管本机监控未来通知，保留当前执行"),
+                ("/schedule execution job01", "查看准确执行、等待与取消状态"), ("/schedule cancel job01", "停止当前规则，保留未来计划"),
+                ("/schedule recover job01", "重新核对死亡执行与等待状态，不启动新工作"), ("/schedule notify job01 origin|local|none", "后续回执通知方式"))),
     CommandSpec("delegate", "/delegate enable|disable|status", "当天自动委派任务，部署时区零点自动关闭（IM）",
                 submit_on_enter=True, conversation_suffix=r"(?:\s+(\S+))?\s*$", surfaces=("im",)),
     CommandSpec("help", "/help [命令]", "查看本身份的可用命令和单项用法", submit_on_enter=True,

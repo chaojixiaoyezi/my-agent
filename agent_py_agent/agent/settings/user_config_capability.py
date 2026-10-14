@@ -165,6 +165,8 @@ BOUNDARY_KEYS: dict[str, str] = {
     "feishu_user_oauth_enabled": "本人OAuth功能的部署开关，模型不能自行启用",
     "feishu_oauth_redirect_uri": "OAuth准确回调地址，模型不能修改认证去向",
     "feishu_oauth_scopes": "部署允许申请的本人飞书授权范围，模型不能扩权",
+    "im_model_cards_enabled": "私人模型配置卡的部署开关；模型不能自行启用密钥输入控制面",
+    "feishu_cloud_verify_sheet_writes_enabled": "云表格写后核验的部署策略；模型不能关闭核验后声称已验证",
     "access_mode": "决定工具/命令的权限档位，属于安全边界",
     "path_access_mode": "决定路径访问模式（normal/full），属于安全边界",
     "path_dangerous_roots": "决定危险目录清单，属于安全边界",

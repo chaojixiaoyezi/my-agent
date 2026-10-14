@@ -34,6 +34,7 @@ class PathUrlCommandFacts:
     allow_private_resolution: bool = False
     network_enabled: bool = True
     local_file_url_fields: Iterable[str] = ()
+    metadata_url_fields: Iterable[str] = ()
     allow_shell_operators: bool = False
     allowed_commands: Iterable[str] = ()
     # 宿主解析出的数据根（写边界 canonical_owner_home_root 推出）；空时策略退回环境变量（H3 二审）。
@@ -63,7 +64,7 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     findings: list[GateFinding] = []
     _collect_path_findings(data, roots, path_policy, findings)
     _collect_url_findings(
-        data,
+        {key: value for key, value in data.items() if str(key) not in set(facts.metadata_url_fields)},
         {_normalize_host(item) for item in facts.allowed_private_hosts},
         facts.allow_private_resolution,
         facts.network_enabled,

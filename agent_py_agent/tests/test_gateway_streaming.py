@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,13 +117,14 @@ def _permission_request(request_id: str):
         turn_id="gateway-permission-turn",
         attempt_id="gateway-permission-attempt",
     )
-    return build_tool_approval_request(
+    request = build_tool_approval_request(
         call,
         request_id=request_id,
         round_number=1,
         call_index=1,
         description="run_command(printf fixture)",
     )
+    return replace(request, requested_at=time.time(), expires_at=time.time() + 300)
 
 
 def test_gateway_chunk_path_is_in_processing(tmp_path):
@@ -409,7 +411,8 @@ def test_noninteractive_gateway_permission_fails_closed_without_waiting(tmp_path
     decision = writer.request_permission(request.to_dict())
 
     assert decision["permission_id"] == request.permission_id
-    assert decision["decision"] == "unavailable"
+    assert decision["decision"] == "denied"
+    assert decision["reason_code"] == "APPROVAL_NONINTERACTIVE"
     assert not chunk_path.exists()
 
 

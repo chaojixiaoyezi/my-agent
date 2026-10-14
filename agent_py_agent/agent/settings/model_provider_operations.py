@@ -71,27 +71,35 @@ def _delete(data: dict, operation: str, payload: dict) -> None:
         data["profiles"].pop(key, None)
 
 
-# LLM: 快捷 add 幂等保留用途，立即规范为 provider + model；与用途分离测试同步，不建立第二份凭据。
-# 函数用途: 将快捷新增变为一个服务商和一个模型的原子保存，决策模型不会被存成聊天用途。
+# LLM: 快捷 add 幂等保留用途；显式编辑只更新独立连接，稳定模型/服务商 ID 不变，禁止借编辑改其它模型凭据。
+# 函数用途: 将快捷新增或明确编辑变为一个服务商和模型的原子保存，模型用途保持显式。
 def _add_flat(data: dict, payload: dict) -> None:
     key = _model_id(payload.get("profile_id"))
     row = validate_model_profile(payload.get("profile"))
-    provider_id = "provider-" + key
+    previous = data["profiles"].get(key)
+    editing = payload.get("editing") is True
+    if editing and previous is None:
+        raise ModelProfileError("待编辑模型已不存在。")
+    provider_id = previous["provider_id"] if editing else "provider-" + key
+    if editing and any(other != key and model["provider_id"] == provider_id for other, model in data["profiles"].items()):
+        raise ModelProfileError("此连接被多个模型使用，请在终端管理连接。")
     provider = validate_provider({**row, "display_name": row["model_name"],
         "capabilities": [row["capability"]],
         "custom_headers": row.get("model_custom_headers", {}), "session_header": row.get("model_session_header", "")})
     model = validate_model({**row, "provider_id": provider_id})
-    if key in data["profiles"] and (data["profiles"][key] != model or data["providers"].get(provider_id) != provider):
+    if not editing and key in data["profiles"] and (data["profiles"][key] != model or data["providers"].get(provider_id) != provider):
         raise ModelProfileError("这个保存编号已被使用，请重新打开新增模型。")
     data["providers"][provider_id] = provider
     data["profiles"][key] = model
 
 
-# LLM: operation 是结构化管理命令，所有校验在唯一文件锁内完成；未知动作不写盘。
+# LLM: operation 是结构化管理命令，save_profile 必须显式 editing；所有校验在唯一文件锁内完成，未知动作不写盘。
 #   add_models 返回实际新增的模型名（已存在的同连接同名模型被跳过），其余动作返回 None。
 # 函数用途: 修改当前用户的模型配置内存快照，由调用方一次落盘。
 def mutate_profiles(data: dict, operation: str, payload: dict) -> list[str] | None:
-    if operation == "add":
+    if operation in {"add", "save_profile"}:
+        if operation == "save_profile" and payload.get("editing") is not True:
+            raise ModelProfileError("编辑模型需要显式 editing。")
         _add_flat(data, payload)
         return
     if operation == "save_provider":

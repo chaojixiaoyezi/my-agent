@@ -3771,6 +3771,17 @@ ERROR_CONTRACTS.update({
         code="CREDENTIAL_INPUT_UNAVAILABLE", category="configuration", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
         recovery_hint="私人凭据卡未完成；请核查原任务、私人通道、解锁和加密依赖，不把凭据改发到群聊。"),
+    **{code: ErrorContract(code=code, category=category, retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value, recovery_hint=hint)
+        for code, category, hint in (
+            ('CREDENTIAL_TASK_NOT_ACTIVE', 'state', '原任务已结束或尚未活动，未发卡；只在原活动任务申请，不冒用其它任务。'),
+            ('CREDENTIAL_CHANNEL_UNAVAILABLE', 'configuration', '原通道无法提供私人凭据交互；不能改发群内明文或借管理员身份。'),
+            ('CREDENTIAL_NOT_AUTHORIZED', 'permission', '当前原发起人无此凭据任务或监控授权；不得改用其它 owner 或引用。'),
+            ('CREDENTIAL_CARD_NOT_DELIVERED', 'network', '私人卡片没有可核验送达事实；先核查原发送，不重复外发或降级明文。'),
+            ('CREDENTIAL_ENCRYPTION_UNAVAILABLE', 'configuration', '宿主加密依赖不可用，未发卡；请管理员修复依赖，不能保存明文。'),
+            ('CREDENTIAL_BINDING_INVALID', 'state', '目标、参数或原任务绑定不符，未完成卡片操作；按原任务核对，不猜新身份。'),
+            ('CREDENTIAL_STORAGE_UNAVAILABLE', 'configuration', '宿主私人凭据存储异常；先核对原记录与副作用，不让模型或任意脚本读取密钥。'),
+        )},
     "CHANNEL_CONTROL_REJECTED": ErrorContract(
         code="CHANNEL_CONTROL_REJECTED", category="permission", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,

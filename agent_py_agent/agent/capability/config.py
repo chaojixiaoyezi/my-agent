@@ -53,8 +53,12 @@ class CapabilityConfig:
     im_tool_approvals_enabled: bool = True
     # 私人任务凭据卡及宿主 HTTP 引用注入；不会将密码交给模型或 shell。
     im_task_credentials_enabled: bool = True
+    # IM 模型选择与原发起人私人配置卡；仅改变本 owner 目录，不允许普通用户发布全机模型。
+    im_model_cards_enabled: bool = True
     # 云资源工具使用宿主凭据；准确许可或当前可信用户/群的实时协作者权限决定资源范围。
     feishu_cloud_tools_enabled: bool = True
+    # 表格写入后用相同身份和后端只读核验一次，未知/不一致不自动重放写入。
+    feishu_cloud_verify_sheet_writes_enabled: bool = True
     # 新增云端只读权限查询；只核对真实 owner 对应的准确成员，不继承管理员应用的资源范围。
     feishu_cloud_collaborator_authorization_enabled: bool = True
     public_capability_packages_enabled: bool = True

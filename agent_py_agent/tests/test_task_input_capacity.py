@@ -22,6 +22,7 @@ from agent_py_agent.agent.gateway_parts.private_interaction_service import (
 from agent_py_agent.agent.tooling.task_credential_tool import RequestCredentialsTool
 from agent_py_agent.agent.user_space.task_credentials import (
     CredentialCardOptions,
+    CredentialInputError,
     request_credential_card,
 )
 from agent_py_agent.tests.test_background_tool_approval import background
@@ -108,8 +109,10 @@ def test_credential_update_capacity_failure_restores_previous_encrypted_authoriz
     previous = path.read_text()
     for number in range(32):
         _create(background,f'capacity-{number}')
-    with pytest.raises(ValueError,match='TASK_INPUT_CAPACITY_EXCEEDED'):
+    with pytest.raises(CredentialInputError) as failure:
         request_credential_card(background.agent,url='https://example.com/api',authentication='basic',
             options=CredentialCardOptions(refresh_ref=reference))
+    assert failure.value.code == 'CREDENTIAL_INPUT_UNAVAILABLE'
+    assert failure.value.stage == 'input_registration'
     assert path.read_text()==previous and len(sent)==1
     assert not input_dependency_path(background.agent,reference+':2').exists()

@@ -67,8 +67,8 @@ def _accounts_base_url(domain: FeishuDomain) -> str:
     return _ACCOUNTS_URL.get(domain, _ACCOUNTS_URL["feishu"])
 
 
-# LLM: 请求含device/client秘密，固定认证目标不重定向；原错误JSON仅交结构化注册状态裁决。
-# 函数用途: 用原超时发单次注册表单，保持正常与pending响应解析，不另加重试或认证源。
+# LLM: 请求含device/client秘密，固定认证目标不重定向；3xx直接拒绝且不读拒绝响应体，其它错误JSON保持原注册裁决。
+# 函数用途: 用原超时发单次注册表单，拒绝跳转和失败响应读取异常，不重试或更换认证源。
 def _post_registration(domain: FeishuDomain, body: dict[str, str]) -> dict:
     """POST 表单到注册端点,返回解析后的 JSON(注册 poll 在 pending/error 时也返回 JSON 体)。"""
     url = _accounts_base_url(domain) + _REGISTRATION_PATH
@@ -83,8 +83,14 @@ def _post_registration(domain: FeishuDomain, body: dict[str, str]) -> dict:
         with open_authenticated_request(req, timeout=_REQUEST_TIMEOUT_SECONDS) as resp:
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            raise FeishuRegistrationError('应用注册拒绝 HTTP 跳转') from None
         # 4xx 也带 JSON 体(pending/error 状态),读出来交给上层判定。
-        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            raw = exc.read().decode("utf-8", errors="replace")
+        except OSError:
+            raise FeishuRegistrationError('应用注册错误响应不可读') from None
     return json.loads(raw)
 
 

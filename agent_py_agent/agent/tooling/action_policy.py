@@ -374,6 +374,7 @@ def _path_url_command_decision(
                 private_setting if type(private_setting) is bool else None),
             network_enabled=boundary.get("network_access_mode") != "disabled",
             local_file_url_fields=runtime.runtime_policy.input_policy.local_file_url_parameters,
+            metadata_url_fields=runtime.runtime_policy.input_policy.metadata_url_parameters,
             allow_shell_operators=_shell_operators_allowed(boundary),
             allowed_commands=_controlled_exec_allowed_commands(boundary),
             data_root=str(data_root_from_boundary(boundary) or ""),

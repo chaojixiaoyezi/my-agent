@@ -614,6 +614,8 @@ im_stream_preview_max_chars: 100
 # 模型心跳只表示同一已发出请求尚未返回及已等待时长，不表示完成了业务进展；停止/超时后不继续刷新。
 # 0 关闭心跳，有效刷新间隔 1～120 秒；stream 有新正文时仍沿原节流更新，不额外调用 LLM。
 im_stream_heartbeat_seconds: 120.0
+# 带条件查询零命中时，提醒模型做一次有界同范围对照，再下否定结论；不会自动联网或发送零条告警。
+query_zero_result_review_enabled: true
 # 是否允许后台任务显式选择 delivery.reply_policy=explicit，将内部结果与公开通知分开。
 # 默认开启，但旧任务的 always 策略、普通对话和 local/none 通知都不改变，也不增加常驻模型调用。
 # explicit 的本轮可声明不通知；待投附件或用户插话仍须答复。公开形态缺失时最多新增一次零工具修复。

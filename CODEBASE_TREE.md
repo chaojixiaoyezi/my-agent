@@ -1,3 +1,34 @@
+2026-10-14 R01–R09 新入口（原任务/模型/监控/权限事实源）：
+
+```text
+|-- agent_py_agent/agent/gateway_parts/model_control_cards.py # 原模型目录的签名选择/私人配置卡
+|-- agent_py_agent/agent/scheduler/control.py # 人类命令和模型工具共用准确监控取消与恢复
+|-- agent_py_agent/agent/scheduler/notification_binding.py # 冻结后续监控通知与管理员绑定代次
+|-- agent_py_agent/agent/tooling/query_evidence.py # 实际查询条件/计数与零结果软指导
+|-- agent_py_agent/agent/user_space/feishu_sheet_verification.py # 同身份写后有界读回，不重放写入
+|-- agent_py_agent/tests/test_feishu_sheet_verification.py # 表格写回一致与未知副作用
+|-- agent_py_agent/tests/test_im_credential_card_preflight.py # 原凭据工具参数和内网绑定/真实网络权限
+|-- agent_py_agent/tests/test_im_credential_public_redaction.py # 初发/编辑/最终/公开事件统一脱敏
+|-- agent_py_agent/tests/test_im_credentials_security_matrix.py # 普通/群/主子实际沙箱与受管秘密隔离
+|-- agent_py_agent/tests/test_im_model_cards.py # 原操作者/原群/版本/幂等/模型密钥隔离
+|-- agent_py_agent/tests/test_query_evidence.py # 实际零查询与真工具/fake模型基线回放
+|-- agent_py_agent/tests/test_scheduler_control_lifecycle.py # 准确取消树/坏记录/未来通知冻结
+|-- docs/design/IM_MODEL_CONTROL_CARDS.md # 模型表单作用域与权限合同
+|-- docs/design/IM_PROGRESS_RECOVERY.md # 短草稿心跳/失败恢复与停止优先合同
+|-- docs/design/IM_SHEET_PROTECTION_METADATA.md # 官方保护缺省字段及写后核对合同
+|-- docs/design/QUERY_ZERO_RESULT_REVIEW.md # 查询证据与有限基线边界
+|-- docs/design/SCHEDULER_HUMAN_CONTROL.md # 本人控制/创建人权限与管理员接管
+|-- docs/tasks/IM_R01_R09_RELEASE.md # 本期统一实现/测试/发行记录
+|-- docs/tasks/IM_CREDENTIALS_SECURITY_HANDOFF.md # 非作者受管秘密攻防与边界证据
+|-- docs/tasks/IM_R01_R02_HANDOFF.md # 本期独占文件分线交接
+|-- docs/tasks/IM_R03_HANDOFF.md # 本期独占文件分线交接
+|-- docs/tasks/IM_R05_HANDOFF.md # 本期独占文件分线交接
+|-- docs/tasks/IM_R06_HANDOFF.md # 本期独占文件分线交接
+`-- docs/tasks/IM_R07_R08_HANDOFF.md # 本期独占文件分线交接
+```
+
+关键职责：控制与查询复用原账本；公开净化不改实际执行输入，私人密钥不交给模型或任意脚本。
+
 2026-10-14 无人值守与受控飞书 CLI 新入口（沿原 owner/task/Wake/工具账）：
 
 ```text

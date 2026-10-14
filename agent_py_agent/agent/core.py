@@ -588,11 +588,14 @@ class SimpleAgent(
         )
         self.scheduler_repository.migrate_monitor_aliases()
         # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性，宽限期从配置推出。
+        from .scheduler.control import cancel_scheduled_task
+
         self.scheduler_service = SchedulerService(
             self.scheduler_repository,
             conversation_store=self.conversation_store,
             skill_snapshot_provider=self.current_skill_snapshot,
             follow_up=_scheduler_follow_up_policy(self),
+            cancellation_handler=lambda run: cancel_scheduled_task(self, self.scheduler_repository, run),
         )
         self.subagents = _build_subagent_manager(self, paths)
         # Adapter daemon health belongs to the shared gateway process, while channel binding,

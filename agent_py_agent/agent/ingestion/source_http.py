@@ -546,6 +546,50 @@ __all__ = [
     "normalize_top_level_response_field",
     "public_source_envelope",
     "public_source_http_request",
+    "public_rendered_source_request",
+    "source_query_evidence",
     "render_source_adapter_request",
     "render_source_http_request",
 ]
+
+
+# LLM: 仅公开已渲染真实条件，认证 header 值与显式 secret binding 槽全部去除；不重新读取 SecretRef 或推断业务字段。
+# 函数用途: 给查询回执提供实际 URL/query/body 的脱敏视图，不改变出站请求或权限。
+def public_rendered_source_request(request: SourceHttpRequest) -> dict[str, Any]:
+    from ..common.log_redaction import redact_sensitive_value
+    parts = urlsplit(request.url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    body = json.loads(request.data) if request.data else None
+    for binding in request.secret_bindings:
+        if binding.get('location') == 'query':
+            query = [(key, '<redacted>' if key == binding.get('name') else value) for key, value in query]
+        elif binding.get('location') == 'json_body':
+            current = body
+            path = binding.get('path') or []
+            for segment in path[:-1]:
+                current = current.get(segment) if isinstance(current, dict) else None
+            if path and isinstance(current, dict) and path[-1] in current:
+                current[path[-1]] = '<redacted>'
+    shown_query = [(key, redact_sensitive_value(value, field_name=key)) for key, value in query]
+    netloc = parts.hostname or ''
+    if ':' in netloc:
+        netloc = '[' + netloc + ']'
+    if parts.port:
+        netloc += ':' + str(parts.port)
+    return {'url': urlunsplit((parts.scheme, netloc, parts.path, urlencode(shown_query), '')),
+            'method': request.method, 'query': [list(item) for item in shown_query],
+            'json_body': redact_sensitive_value(body), 'header_names': sorted(request.headers),
+            'authentication_configured': bool(request.secret_bindings or request.credential_ref
+                                               or any(key.casefold() in {'authorization', 'cookie', 'x-api-key'} for key in request.headers))}
+
+
+# LLM: HTTP/adapter/poll 统一计数来源是调用方声明的解析边界，has_more 只证明当前分页状态，不证明全源总数。
+# 函数用途: 将真实已执行请求与解析记录数投影到原查询事实，不写独立状态或发起复查。
+def source_query_evidence(request: SourceHttpRequest, *, count: int, parser_version: str,
+                          has_more: bool | None = None, count_unit: str = 'parser_records') -> dict[str, Any]:
+    from ..tooling.query_evidence import QueryObservation, query_evidence
+    result = query_evidence(QueryObservation(source='source_http', conditions=public_rendered_source_request(request),
+        returned_count=count, observed_count=count, coverage='page_window' if has_more else 'parser_observation',
+        parser_version=parser_version, count_unit=count_unit))
+    result['has_more'] = has_more
+    return result

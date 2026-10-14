@@ -525,7 +525,7 @@ class WatchStreamTool(BaseTool):
         return _current_run_id(self.agent)
 
 
-# LLM: Inline pull keeps one lock across source drain, digest, and payload projection so its cursor
+# LLM: Inline pull carries latest actual query evidence in original receipt; one lock across source drain, digest, and payload projection so its cursor
 # cannot race the background harvester. This helper is the only inline polling loop.
 # 函数用途: 在等待额度内持续拉取来源，直到出现候选或达到截止时间。
 def _pull_locked(
@@ -552,7 +552,10 @@ def _pull_locked(
         "seen_this_call": aggregate["seen"],
         "pages_this_call": aggregate["pages"],
     }
-    return _ok_payload(render_pull_payload(state, digest, extras))
+    payload = render_pull_payload(state, digest, extras)
+    if aggregate.get("query_evidence"):
+        payload["query_evidence"] = aggregate["query_evidence"]
+    return _ok_payload(payload)
 
 
 # LLM: Drain persistence must succeed before the source cursor can become authoritative. The model
@@ -561,7 +564,7 @@ def _pull_locked(
 def _drain_and_digest(
     tool: WatchStreamTool,
     state: WatchState,
-    aggregate: dict[str, int],
+    aggregate: dict[str, Any],
 ):
     from .harvester import content_batch_size, is_content_mode
     from .sources import (
@@ -1878,6 +1881,7 @@ def _probe_adapter_source_envelope(
         return {**base, "invalid_reason": "动态来源适配器缺少准确的命名 Audit 归属"}
     checkpoint: dict[str, Any] = {}
     request_count = 0
+    query_observations = []
     # Probe with the same page budget the persisted watch will use.  A fixed
     # one-record probe changes the source protocol: overlap-capable adapters
     # may need several complete records before their opaque checkpoint can
@@ -1911,36 +1915,14 @@ def _probe_adapter_source_envelope(
             context=plan.context,
             response=payload,
             max_records=probe_page_limit,
+            actual_request=plan.request,
         )
+        query_observations.append(page.query_evidence)
         if page.has_more:
-            checkpoint = page.checkpoint
-            plan = plan_source_request(
-                owner_home=state.owner_home,
-                audit_id=audit_id,
-                source_url=state.source_url,
-                request_facts=request_facts,
-                adapter=adapter_facts,
-                checkpoint=checkpoint,
-                page_limit=probe_page_limit,
-                now_unix=time.time(),
-            )
-            ok, payload, code = fetch_json(plan.request)
             request_count += 1
-            if not ok:
-                return {
-                    **base,
-                    "probe_error_code": str(code or "NETWORK_REQUEST_FAILED").strip().upper(),
-                    "probe_error": _probe_fetch_error("动态来源第二次探针请求失败", payload),
-                }
-            accept_source_response(
-                owner_home=state.owner_home,
-                audit_id=audit_id,
-                adapter=adapter_facts,
-                checkpoint=checkpoint,
-                context=plan.context,
-                response=payload,
-                max_records=probe_page_limit,
-            )
+            page = _probe_adapter_continuation(fetch_json, state, request_facts=request_facts,
+                adapter_facts=adapter_facts, audit_id=audit_id, checkpoint=page.checkpoint, page_limit=probe_page_limit)
+            query_observations.append(page.query_evidence)
     except SourceAdapterError as exc:
         return {
             **base,
@@ -1952,7 +1934,23 @@ def _probe_adapter_source_envelope(
         "valid": True,
         "continuation_verified": True,
         "probe_request_count": request_count,
+        "query_evidence": page.query_evidence,
+        "query_observations": query_observations,
     }
+
+
+# LLM: 继续沿原 probe 两页上界和网络出口；实际 request 与 pinned parser 同次投影，不产生基线额外请求。
+# 函数用途: 验证已声明还有数据的来源下一页，复用原游标/解析错误合同。
+def _probe_adapter_continuation(fetch_json, state, *, request_facts, adapter_facts, audit_id, checkpoint, page_limit):
+    from .source_adapter import SourceAdapterError, accept_source_response, plan_source_request
+    plan = plan_source_request(owner_home=state.owner_home, audit_id=audit_id, source_url=state.source_url,
+        request_facts=request_facts, adapter=adapter_facts, checkpoint=checkpoint, page_limit=page_limit, now_unix=time.time())
+    ok, payload, code = fetch_json(plan.request)
+    if not ok:
+        raise SourceAdapterError(_probe_fetch_error("动态来源第二次探针请求失败", payload),
+                                 str(code or "NETWORK_REQUEST_FAILED").strip().upper())
+    return accept_source_response(owner_home=state.owner_home, audit_id=audit_id, adapter=adapter_facts,
+        checkpoint=checkpoint, context=plan.context, response=payload, max_records=page_limit, actual_request=plan.request)
 
 
 def _probe_http_source_envelope(
@@ -1998,6 +1996,7 @@ def _probe_http_source_envelope(
             "mode": "poll",
             "record_boundary": "whole_response",
             "request": request_facts,
+            "query_evidence": _http_query_evidence(request, payload, None),
             "response_type": type(payload).__name__,
             "top_level_keys": (
                 sorted(str(key) for key in payload)[:32] if isinstance(payload, dict) else []
@@ -2034,9 +2033,23 @@ def _probe_http_source_envelope(
             cursor["probe_error_code"] = continuation_code
             cursor["probe_error"] = continuation_error
         return cursor
+    cursor["query_evidence"] = _http_query_evidence(request, payload, cursor)
     cursor["continuation_verified"] = True
     cursor["probe_request_count"] = 2
     return cursor
+
+
+# LLM: HTTP 记录数只按已验证的 cursor 数组或 poll 整份响应边界计算，不从未知 JSON 字段猜源端总数。
+# 函数用途: 给原来源探针回执附实际请求、解析边界与覆盖未知的查询观察，不执行第二条查询链。
+def _http_query_evidence(request, payload, envelope):
+    from ..tooling.query_evidence import QueryObservation, query_evidence
+    from .source_http import public_rendered_source_request
+    count = len(_cursor_probe_items(payload, envelope)) if envelope is not None else 1
+    return query_evidence(QueryObservation(
+        source="source_http", conditions=public_rendered_source_request(request), returned_count=count, observed_count=count,
+        coverage="parser_observation", parser_version="source_cursor_envelope.v1" if envelope is not None else "source_poll_response.v1",
+        count_unit="parser_records" if envelope is not None else "response_snapshots",
+    ))
 
 
 def _cursor_continuation_failure(
@@ -2778,7 +2791,9 @@ def _collection_window_is_open(state: WatchState) -> bool:
     )
 
 
-def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:
+# LLM: 聚合只携带最近实际查询，未到 poll 节拍不虚构新观察；不新增 WatchState 持久字段。
+# 函数用途: 吸收原 drain 的已提交位置与本次回执事实。
+def _absorb_drain(state: WatchState, drain, aggregate: dict[str, Any]) -> None:
     state.last_error = ""
     state.last_error_code = ""
     state.cursor = drain.cursor
@@ -2791,6 +2806,8 @@ def _absorb_drain(state: WatchState, drain, aggregate: dict[str, int]) -> None:
     state.last_reached_end = drain.reached_end
     state.last_pull_at = time.time()
     state.totals["gap_events"] += drain.gap_events
+    if getattr(drain, "query_evidence", None):
+        aggregate["query_evidence"] = drain.query_evidence
     aggregate["seen"] += len(drain.events)
     aggregate["pages"] += drain.pages
 
