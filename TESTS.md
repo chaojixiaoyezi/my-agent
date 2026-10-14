@@ -1,3 +1,7 @@
+2026-10-14 引用资料最终发行验收：`.20261014.2` 源码 `a488b76bcedd779555256278c7654ddbd50d30c0`；最终30文件691项0fail/error/skip及Ruff/doc-sync/strict code-size/diff/clean-package全部通过。Linux包内实际字节码41文件976项：968通过、8跳过（7项macOS约束、1项既有daemon心跳模拟限制），自然exit0；1个测试资源未注册integration标记告警不改业务结果。独立23771清单文件与归档、1611业务+2辅助模块递归源码/字节码一致；原安装14.1→14.2更新保留三份配置/数据hash、恢复Gateway后正常停机；TUI输入44.7/52.8ms、正常退出和官方M2.7一次需求均通过、无重试/遗留测试进程。真实飞书租户和Ubuntu22未验。
+
+线上CI不作为本次发布验收：旧main `1f4d93b4` 的fast3.10有207失败，full3.12有206失败；Lint及Windows/macOS guard通过。7个代表只读核对，200个未逐项核实，不能统称夹具问题或全仓绿。已确认后台profile说明表遗漏schedule（不属本次引用改动，待单独修复）；未确认新的引用安全阻断。后续须逐项定位并按原G1/actor/owner合同迁移旧用例，不能恢复旁路。候选准备阶段的参数调用错误和修复前解析红证据保留；最终结果用新的日志/XML记录，不覆盖原失败。
+
 2026-10-14 各类引用整合：五文件210项自然exit0，0fail/error/skip（my-agent-quoted-all-integration-20261014.xml）；解析独立窄边角红证据保留，修复数字/null直接文本和未经来源核验的根/嵌套 message_type 信封。media/text原安全断言保留；各类媒体与开放后缀、代码/链接、卡片隐藏值、未知资料、同次转发关系/逐child源ID、开关省略、owner私有落盘和partialfailure均覆盖。新增两纯helper沿原合同，不新增真实飞书调用。最终严格门、独立安全与Linux包内原生结果分别按准确源码/包记录；真实租户和Ubuntu22未代验。
 
 2026-10-14 群引用文字TDD：原18项中8 RED（父正文丢弃、没有文字开关），`/tmp/my-agent-quoted-text-red-20261014.xml`保留。沿原查取和准备合同实现后，文字/原附件/配置三文件120项0失败/错误/跳过，`/tmp/my-agent-quoted-text-complete-20261014.xml`；纯文字current/parent/chat证明、bot/admin父来源不授身份、text/post、明确截断、混合文件失败、@all/私聊/控制零GET与冷重投冻结均覆盖。旧附件夹具显式关闭新增文字开关，原不带父正文断言仍保留。Ruff import排序曾报1处并修复；最终非作者/严格gate/准确新包尚待完成，不声称14.1已有此功能。
