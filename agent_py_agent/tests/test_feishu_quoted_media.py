@@ -41,13 +41,14 @@ def _parent(*, chat='oc_team', key='file_synthetic', name='example.txt'):
 
 # LLM: 宿主 owner 解析、资源私有原子落盘和 durable prepare 保留生产实现；只替换实际供应商传输。
 # 函数用途: 构造已绑定宿主的管理器和飞书适配器，记录每次父查取与资源源消息。
-def _manager(tmp_path, monkeypatch, response=None, enabled=True):
+def _manager(tmp_path, monkeypatch, response=None, enabled=True, text_enabled=False):
     root = tmp_path / 'home'
     root.mkdir()
     host = SimpleNamespace(home_paths=SimpleNamespace(root=root), config=AgentConfig())
     manager = ChannelManager(delivery_state_dir=tmp_path / 'delivery')
     manager._inbound_media_agent = host
-    adapter = FeishuAdapter({'feishu_session_lock_enabled': False, 'feishu_quoted_media_enabled': enabled})
+    adapter = FeishuAdapter({'feishu_session_lock_enabled': False,
+        'feishu_quoted_media_enabled': enabled, 'feishu_quoted_text_enabled': text_enabled})
     adapter._resolve_bot_open_id = lambda: 'ou_bot'
     adapter._get_tenant_access_token = lambda: 'synthetic-token'
     gets, resources = [], []

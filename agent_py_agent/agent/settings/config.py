@@ -530,6 +530,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_group_require_bot_mention: bool = True
     # 群里引用文件并触发机器人时，按准确父消息读取同群附件；需要飞书消息和资源读取权限。
     feishu_quoted_media_enabled: bool = True
+    # 明确引用同群文字并触发机器人时，只把正文作为外部资料；当前引用者仍决定身份和权限。
+    feishu_quoted_text_enabled: bool = True
     # /verbose stream 整条过程正文的字符上限；只影响展示，不裁剪最终回复。
     im_stream_preview_max_chars: int = 100
     # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。

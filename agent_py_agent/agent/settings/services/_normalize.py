@@ -456,6 +456,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "computer_use_observation_enabled",
             "background_public_receipt_contract_enabled",
             "feishu_quoted_media_enabled",
+            "feishu_quoted_text_enabled",
         ),
     )
 

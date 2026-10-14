@@ -1,8 +1,8 @@
-# LLM: 通道仍沿原 durable worker，G3 凭据只在原 HTTP 身份头附加；读取失败按 G2b 开关处理——开关关（默认）
-#   降级为不带凭据继续发送，开关开才拒绝。秘密不进记录、日志或模型。
+# LLM: 通道沿原 durable worker，宿主凭据只在受管 HTTP 身份头附加；读取失败拒绝，不降级无凭据发送。
+#   秘密不进记录、日志或模型；显式控制与自然任务仍使用同一原身份/入站账。
 #   受限诊断只投影原 ingress/submission；False 传回运输重投，reaction 不决定请求是否受理。
-#   群引用附件只在 durable prepare 读取准确 parent，失败事实交原 prompt，当前 actor/owner 不从父消息继承。
-# 模块用途: 管理 IM 提交和对账；本机凭据不可用时按开关降级或安全拒绝，敏感命令一次性提交不落盘。
+#   群引用文字/附件只在 durable prepare 读取准确 parent；文字作外部资料，当前 actor/owner 不从父消息继承。
+# 模块用途: 管理 IM 提交与对账、准备当前群的引用资料；凭据失败拒绝，敏感命令一次性提交不落盘。
 from __future__ import annotations
 
 """LLM: ChannelManager persists authenticated adapter ingress before any Gateway or provider IO.
@@ -43,6 +43,7 @@ from .feishu_quoted_media import (
     FeishuQuotedMediaError,
     ValidatedQuotedMedia,
     append_quoted_media_failure,
+    append_quoted_text,
     quoted_media_references,
     quoted_media_requested,
     read_quoted_media,
@@ -485,7 +486,7 @@ class _ChannelIngressCoordinator:
 
     # LLM: 媒体与准确 parent 查询只在原 prepared 行持久后执行，控制不新增 parent 请求；核验失败不当成成功或无限重试。
     #   最终精确 Gateway body 仍由原 worker CAS 冻结；父读取失败不能绕过同条当前附件的原硬门或提交部分路径。
-    # 函数用途: 恢复原消息、读取被引用附件并下载完整集合；不可读取事实随原需求提交给模型。
+    # 函数用途: 恢复原消息、读取准确引用并完整下载附件；完成后才附引用文字资料，不改本轮身份。
     def prepare_payload(
         self,
         record: GatewayIngressRecord,
@@ -502,10 +503,10 @@ class _ChannelIngressCoordinator:
                 msg.content = original_content
                 append_quoted_media_failure(msg, exc)
                 return _gateway_ask_payload(msg)
-        if quoted is None:
-            self._manager._maybe_download_media(msg, retry_on_error=True)
-        else:
-            self._manager._maybe_download_media(msg, retry_on_error=True, quoted_media=quoted)
+        downloads_ready = self._manager._maybe_download_media(msg, retry_on_error=True,
+            quoted_media=quoted if quoted is not None and quoted.items else None)
+        if quoted is not None and downloads_ready:
+            append_quoted_text(msg, quoted)
         return _gateway_ask_payload(msg)
 
     # LLM: 原持久正文提交合同不变；G3 凭据失败落安全拒绝码而非网络重试，秘密不进持久行。
@@ -665,9 +666,9 @@ def _inbound_media_destination(agent: object, msg: IncomingMessage) -> Path:
     return destination
 
 
-# LLM: dest 已由当前消息解析；source_message_id 仅由准确 parent 核验器传入，不读取 media 自带的任意源字段。
+# LLM: dest 已由当前消息解析；source_message_id 仅由准确引用核验器传入，不读取 media 自带的任意源字段。
 #   集合全部下载后才返回路径，当前附件原失败合同不变；引用资源缺失转有界事实，文件系统失败仍抛异常。
-# 函数用途: 用真实当前或父消息 ID 下载完整附件集合，同名附件加稳定序号；不改变 owner。
+# 函数用途: 用真实当前或引用成员 ID 下载完整附件集合，同名附件加稳定序号；不改变 owner。
 def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None):
     items = media.get("items") if isinstance(media.get("items"), list) else [media]
     paths = []
@@ -692,8 +693,12 @@ def _download_complete_inbound_media(adapter, msg, media, dest, quoted):
     paths = _download_inbound_media_refs(adapter, msg, media, dest) if media else []
     if quoted is not None:
         references = quoted_media_references(msg, quoted)
-        paths.extend(_download_inbound_media_refs(adapter, msg, references, dest,
-            source_message_id=quoted.parent_message_id))
+        for index, item in enumerate(references['items']):
+            reference = dict(item)
+            if len(references['items']) > 1 and reference.get('file_name'):
+                reference['file_name'] = f'{index + 1}-{reference["file_name"]}'
+            paths.extend(_download_inbound_media_refs(adapter, msg, reference, dest,
+                source_message_id=item['source_message_id']))
     return paths
 
 
@@ -1184,23 +1189,24 @@ class ChannelManager:
             adapter.clear_progress_placeholder(record.user_id, record.progress_handle)
 
     # LLM: 当前及准确引用附件均按 /ask 当前身份落 owner 私有目录；全部下载后才注入路径。
-    #   当前附件/文件系统失败沿原 durable 硬门，引用不可读投影结构化事实；不复制父 sender 或正文。
-    # 函数用途: 下载当前消息和被引用的完整附件集合，避免把部分路径当作完整用户材料。
+    #   当前附件/文件系统失败沿原 durable 硬门；返回是否完整准备，供同次引用文字决定能否附入，不复制父 sender。
+    # 函数用途: 下载完整附件集合并返回准备结果，避免把部分路径或失败时的文字当作完整用户材料。
     def _maybe_download_media(
         self,
         msg: IncomingMessage,
         *,
         retry_on_error: bool = False,
         quoted_media: ValidatedQuotedMedia | None = None,
-    ) -> None:
+    ) -> bool:
         media = (msg.metadata or {}).get("media")
         adapter = self._adapters.get(msg.channel)
         if (not media and quoted_media is None) or not hasattr(adapter, "fetch_media_to"):
-            return
+            return True
         try:
             dest = _inbound_media_destination(self._inbound_media_agent, msg)
             paths = _download_complete_inbound_media(adapter, msg, media, dest, quoted_media)
             msg.content = "\n".join([msg.content, *paths])
+            return True
         except FeishuQuotedMediaError as exc:
             append_quoted_media_failure(msg, exc)
         except Exception as exc:
@@ -1208,6 +1214,7 @@ class ChannelManager:
             logger.warning("入站媒体下载失败%s error_type=%s", suffix, type(exc).__name__)
             if retry_on_error:
                 raise
+        return False
 
     # LLM: The adapter copies Gateway's typed routing fields without inferring acceptance from
     # HTTP success or the human message. Missing fields remain empty for explicit validation.

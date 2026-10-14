@@ -34,6 +34,12 @@ class TestNormalizeAgentConfig:
         assert normalized["feishu_quoted_media_enabled"] is expected
         assert not warnings
 
+    @pytest.mark.parametrize("raw, expected", [(True, True), (False, False), ("false", False), ("true", True)])
+    def test_feishu_quoted_text_switch(self, raw, expected):
+        normalized, warnings = normalize_agent_config({"feishu_quoted_text_enabled": raw})
+        assert normalized["feishu_quoted_text_enabled"] is expected
+        assert not warnings
+
     def test_normalize_valid_model_backend_echo(self):
         """验证有效的 echo 后端。"""
         data = {"model_backend": "echo"}

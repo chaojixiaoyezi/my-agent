@@ -203,7 +203,7 @@ def _adapter_workspace_root(agent) -> Path:
 
 
 # LLM: 宿主配置同源接入原 FeishuAdapter；引用读取只加既有 durable prepare 能力，不创建独立队列或配置副本。
-# 函数用途: 解析宿主凭据并接线飞书入站开关，秘密只传运输、不写记录。
+# 函数用途: 解析宿主凭据并接线飞书引用文字/附件等入站开关，秘密只传运输、不写记录。
 def _feishu_adapter_config(agent) -> dict[str, object]:
     # 凭据字段过 SecretRef 解析:值可写成 env:NAME / file:/path(密钥放源码树外,不内联进 YAML)。
     # 闲置锁 fallback 直接复用运行时常量，避免 CLI adapter 另写一份小时数后再次漂移。
@@ -222,6 +222,7 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
         # WS/webhook 共用群聊触发配置，只认机器人直接 mention，@全员不派发。
         "feishu_group_require_bot_mention": getattr(agent.config, "feishu_group_require_bot_mention", True),
         "feishu_quoted_media_enabled": getattr(agent.config, "feishu_quoted_media_enabled", True),
+        "feishu_quoted_text_enabled": getattr(agent.config, "feishu_quoted_text_enabled", True),
         # 个人私聊会话锁默认开启；显式 false 才关闭，群聊不锁。
         "feishu_session_lock_enabled": getattr(agent.config, "feishu_session_lock_enabled", True),
         "feishu_personal_idle_lock_seconds": getattr(

@@ -146,3 +146,7 @@ main 集成、推送、部署和默认 Gateway 重启由集成方单独操作；
 复用当前已附 worktree，由根串行集成；三条并行线按文件互斥，未创建新分支或新权限权威。根负责 G1/G2b 退场、原路由门、错误分类/文档/最终 gate 与发布；环境线负责准确 SecretRef 名上界和原子进程接线；运输线负责原认证 HTTP、日志及 Delivery 不可变附件；会话线负责原 Session 目标归属、攻击矩阵及独立复核。任一新生产失败保留证据，不能越过失败 gate 推 main。
 
 交接：[安全设计](design/IM_SECURITY_AUDIT_20261013.md)、[会话/调度安全](tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)、[停机模型来源](tasks/MODEL_SHUTDOWN_PROVENANCE_HANDOFF.md)。
+
+## 2026-10-14 手动引用各类资料
+
+根独占原引用证明、manager下载接线、配置、根文档、test_feishu_quoted_inputs/text/media和发布。内容线独占新增feishu_quoted_content及测试；成员线独占新增feishu_quoted_members及测试。两线冻结后由非作者交换审查，根统一focused/strict/native gate与main推送；无同时写同一文件。引用来源只作外部资料；无真实租户外发、生产监控修改或第二owner/状态权威。交接入口为[引用消息合同](design/FEISHU_QUOTED_MEDIA.md)和同包测试清单。

@@ -2871,3 +2871,8 @@ GatewayModelObservation现承接render/prepare_request/select三个顺序点：�
 2026-10-13 追加接线：schedule_diagnostics 是原控制的纯参数/无正文失败投影；scheduler/store_snapshot 只读原子代次，recovery 共用原 claim/run/history 终态，creator_migration 仅按不可变 execution_origin 取证。status_projection 将原 model_metrics 的 request 整数白名单跨 IM/TUI 传输，不新建用量账或请求；权限、控制与重启仍沿原 owner/CAS。云工具使用当前准确主体协作者和表格保护证据，宿主凭据不下发；缺证据明确拒绝。详情见 [核查报告](../../design/IM_CLOUD_SCHEDULE_LATENCY_REVIEW.md)。
 
 B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed IM sink 和原配置构建观察，物理 call_id 必须存在；`_CallLiveness` 管理其开始与收回。`tooling/liveness.ActivityHeartbeat` 为工具/模型共用的无持久状态观察，`stream_liveness.StreamLiveness` 由原 BufferedChunkStreamWriter 组合并写原事件出口；HTTP 与 adapter 只传输受限等待字段，不发思考、不建立新的投递或调用账。
+# 群引用资料的 Gateway 边界（2026-10-14）
+
+`cli/adapter._feishu_adapter_config` 传递原文字与附件开关；`_ChannelIngressCoordinator.prepare_payload` 仍只在原 prepared 阶段读取准确 parent。Gateway prompt 的引用文字 JSON 是外部数据，命令和宿主 actor/owner 继续只取当前请求。引用文字也共用当前消息/parent/chat证明，混合附件完整准备前不提交；payload_ready 是唯一重投载荷，不建 quote 缓存、第二队列或后台 bot 订阅。
+
+各类引用追加：可见文字、媒体与同次已证转发成员仍沿原 prepared/payload_ready；当前 owner/actor 不从源 sender/chat 转换。卡片隐藏回调不作为正文，逐子资源用自己的准确ID下载；覆盖、省略和截断有结构事实，不新增历史查询、权限表或队列。见[引用消息合同](../../design/FEISHU_QUOTED_MEDIA.md)。

@@ -28,7 +28,14 @@ Gateway 安全初始化：`agent/auth/configuration.py` 是 CLI 与 HTTP 服务�
 安全追加：`common/authenticated_http.py` 统一固定认证接口不可重定向运输；`delivery/attachment_content.py` 只在一次 DeliveryAttempt 冻结 owner/hash/size 一致字节；`adapter/feishu_attachment.py` 上传同一冻结字节。域授权仍属于原 owner/context/artifact，详见 [安全设计](docs/design/IM_SECURITY_AUDIT_20261013.md) 与 [会话交接](docs/tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。
 
 
-群引用附件入口：`agent_py_agent/agent/adapter/feishu_quoted_media.py` 核验准确父消息 ID、同群/话题和未撤回事实，只把可信资源引用交给原 owner 下载器；不引入历史缓存或父发送者权限。`agent_py_agent/tests/test_feishu_quoted_media.py` 验证原入站、资源来源、开关/控制命令及 owner 读取边界；[设计说明](docs/design/FEISHU_QUOTED_MEDIA.md) 记录用户步骤、飞书权限和失败事实。
+群引用资料入口：`agent_py_agent/agent/adapter/feishu_quoted_media.py` 核验准确父消息 ID、同群/话题和未撤回事实；文字作为有界外部资料，资源交原 owner 下载器，不引入历史缓存或父发送者权限。`agent_py_agent/tests/test_feishu_quoted_media.py` 保留附件边界，`agent_py_agent/tests/test_feishu_quoted_text.py` 验证人/机器人文字、当前 actor、截断、混合失败与冷重投；[设计说明](docs/design/FEISHU_QUOTED_MEDIA.md) 记录用户步骤、飞书权限和失败事实。
+
+```text
+|-- agent_py_agent/tests/test_feishu_quoted_text.py # 群引用文字的来源、权限、混合准备与冻结重投
+|-- agent_py_agent/tests/test_feishu_quoted_content.py # 可见/隐藏/未知正文和有界解析正反例
+|-- agent_py_agent/tests/test_feishu_quoted_members.py # 转发根、准确关系、重复/撤回/深度成员限制
+|-- agent_py_agent/tests/test_feishu_quoted_inputs.py  # 各类引用资料、逐源下载和原入站安全整合
+```
 
 2026-10-13 IM 追加修复入口（沿原授权、调度及用量账）：
 
@@ -1081,7 +1088,9 @@ agent_py_agent/
 |   |   |-- private_controls.py        # 已验证 SDK actor/卡片身份到原 Gateway 的私人决定运输
 |   |   |-- feishu_mentions.py         # WS/webhook 共用直接 @机器人判据，不按名称或正文猜
 |   |   |-- feishu_attachment.py      # 飞书上传已核验的同一不可变字节，不重新打开路径
-|   |   |-- feishu_quoted_media.py     # 同群准确 parent 核验与资源源 ID，不改变当前 owner/actor
+|   |   |-- feishu_quoted_media.py     # 准确根与同次转发成员的文字/资源证明，当前 owner/actor 不变
+|   |   |-- feishu_quoted_content.py     # 引用可见文字、代码、链接与媒体的纯投影，隐藏树不读取
+|   |   |-- feishu_quoted_members.py     # 同次准确转发成员闭包与来源限制，不改变主体
 |   |   |-- progress_draft.py           # 单条草稿在原 pending 内合并、限频、恢复与独立最终回复
 |   |   |-- delivery.py                # 原 pending/sent 外发意图、死亡核验、消息身份与 epoch CAS 回送
 |   |   `-- ingress.py                 # POST 前 durable ingress、冲突隔离与单线程全链恢复

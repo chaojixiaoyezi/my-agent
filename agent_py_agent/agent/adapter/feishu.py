@@ -562,7 +562,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachment
     supports_control_cards = True
 
     # LLM: 创建原通道状态、认证服务和有界待送队列；显式关闭与初始化失败分开，不把未知状态当作认证成功。
-    # 函数用途: 初始化飞书接入、引用附件开关与私聊密码门，不启动消息服务或发送网络请求。
+    # 函数用途: 初始化飞书接入、引用文字/附件开关与私聊密码门，不启动消息服务或发送网络请求。
     def __init__(
         self,
         config: dict[str, Any],
@@ -587,6 +587,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachment
         self.ws_proxy = config.get("feishu_ws_proxy", "")
         self.group_require_bot_mention = str(config.get("feishu_group_require_bot_mention", True)).lower() not in {"false", "0", "off"}
         self.quoted_media_enabled = str(config.get('feishu_quoted_media_enabled', True)).lower() not in {'false', '0', 'off'}
+        self.quoted_text_enabled = str(config.get('feishu_quoted_text_enabled', True)).lower() not in {'false', '0', 'off'}
         self._bot_open_id = ""
         self._bot_identity_app_id = ""
         self._bot_identity_retry_at = 0.0
