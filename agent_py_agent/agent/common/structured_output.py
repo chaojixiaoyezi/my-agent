@@ -1,3 +1,5 @@
+# LLM: 本模块提供领域无关的结构化输出解码和有界批处理；完整协议值不得使用正文扫描器替代，调用方仍负责 schema 与来源验证。
+# 模块用途: 复用结构化模型输出的包装解析和分批恢复，区分完整协议响应与可搜索的正文对象，不执行业务工具。
 """Provider-independent helpers for reliable structured model output.
 
 This module deliberately knows nothing about audit verdicts or any other domain.
@@ -11,6 +13,7 @@ It supplies two protocol-level guarantees shared by structured LLM callers:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -18,6 +21,21 @@ from typing import Any, Generic, TypeVar
 
 _Row = TypeVar("_Row")
 _Value = TypeVar("_Value")
+
+_COMPLETE_JSON_FENCE = re.compile(
+    r"(?P<fence>`{3,}|~{3,})[ \t]*json[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n(?P=fence)[ \t]*",
+    flags=re.IGNORECASE,
+)
+
+
+# LLM: 仅解码整个响应的一份 JSON；可剥离唯一完整 json 围栏，不扫描嵌入对象、不接受前后说明，schema 和身份仍由调用方裁决。
+# 函数用途: 兼容模型对完整 JSON 加代码围栏的展示包装，避免把合规协议误判为失败，不增加请求或改变普通正文。
+def json_value_from_complete_response(text: str) -> Any:
+    if not isinstance(text, str):
+        raise TypeError("完整 JSON 响应必须为文本")
+    source = text.strip()
+    fence = _COMPLETE_JSON_FENCE.fullmatch(source)
+    return json.loads(fence.group("body") if fence is not None else source)
 
 
 @dataclass(frozen=True)
@@ -222,4 +240,5 @@ __all__ = [
     "StructuredBatchRequest",
     "collect_structured_batches",
     "json_objects_from_text",
+    "json_value_from_complete_response",
 ]

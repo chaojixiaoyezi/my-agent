@@ -133,7 +133,7 @@ main 集成、推送、部署和默认 Gateway 重启由集成方单独操作；
 | --- | --- | --- |
 | 群任务主体子代理 | shared host actor、scheduler/tool 与 execution_policy、request_execution 的宿主主体冻结、child 创建/继承、IM 审批及相关测试 | [IM_SCHEDULER_ACTOR_HANDOFF](tasks/IM_SCHEDULER_ACTOR_HANDOFF.md) |
 | 飞书入口子代理 | feishu/WS/mentions/typing/base/protocol、manager 的入站与 reaction、相关测试 | [FEISHU_INGRESS_REPAIR_HANDOFF](tasks/FEISHU_INGRESS_REPAIR_HANDOFF.md) |
-| 后台回执子代理 | background_execution/background_delivery/background_im_progress、收口/自然回复与必要调用来源、相关测试 | [BACKGROUND_PUBLIC_RECEIPT_HANDOFF](tasks/BACKGROUND_PUBLIC_RECEIPT_HANDOFF.md) |
+| 后台回执子代理 | background_execution/background_delivery/background_im_progress、收口/自然回复与必要调用来源、common 完整 JSON 解码和相关测试 | [BACKGROUND_PUBLIC_RECEIPT_HANDOFF](tasks/BACKGROUND_PUBLIC_RECEIPT_HANDOFF.md) |
 | 主代理 | 错误分类、配置同步、根台账/文档导航、综合验收与发行 | 统一收口 |
 
 沿原 owner、入站、调用和投递账本修复，不另造队列。只用隔离合成资料和独立测试安装；不读取生产聊天正文，不改现场监控或默认服务。

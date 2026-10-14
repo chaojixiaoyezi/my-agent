@@ -46,6 +46,31 @@ def test_explicit_no_public_content_keeps_monitor_success_without_extra_model_ca
     assert not any(row.content == '内部完成，无公开内容。' for row in rows)
 
 
+def test_real_provider_json_fence_completes_original_scheduler_without_public_send(tmp_path):
+    internal = '合成监控静默检查执行完毕。样本数 3，全部探测成功，未发现异常，无需对外通知。'
+    text = '```json\n' + _body('internal_only', '', internal) + '\n```'
+    case, prompts, channels, scheduler = _case(tmp_path, [text])
+    reports = scheduler.tick(now=case.job['next_run_at'])
+    history, errors = case.agent.scheduler_repository.history()
+    assert not errors and history[0]['status'] == 'done' and history[0]['delivery_status'] == 'suppressed'
+    assert len(prompts) == 1 and not channels.attempts and reports[0].wake_handled
+    rows = case.store.messages.recent(history[0]['thread_id'], limit=0)
+    assert any(row.metadata.get('internal_execution_result') == internal for row in rows)
+    assert not any(row.content == text or row.content == internal for row in rows)
+
+
+@pytest.mark.parametrize('wrap', ['说明\n{body}', '{body}\n后记', '```python\n{body}\n```',
+    '```json\n{body}\n```\n```json\n{body}\n```'])
+def test_ambiguous_or_non_json_wrapper_cannot_silently_complete_or_reexecute(tmp_path, wrap):
+    case, prompts, channels, scheduler = _case(tmp_path, [wrap.format(body=_body('internal_only', ''))])
+    with pytest.raises(RuntimeError, match='BACKGROUND_RECEIPT_CONTRACT_INVALID'):
+        scheduler.tick(now=case.job['next_run_at'])
+    history, errors = case.agent.scheduler_repository.history()
+    assert not errors and history[0]['status'] == 'failed'
+    assert len(prompts) == 1 and not channels.attempts
+    assert scheduler.tick(now=case.job['next_run_at'] + 31) == [] and len(prompts) == 1
+
+
 def test_explicit_public_json_only_reaches_original_group_and_preserves_source(tmp_path):
     public = '{"legitimate_json":true,"count":3}'
     case, prompts, channels, scheduler = _case(tmp_path, [_body(public=public)])

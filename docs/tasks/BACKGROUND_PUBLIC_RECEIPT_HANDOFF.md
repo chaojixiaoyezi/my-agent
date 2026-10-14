@@ -43,4 +43,12 @@
 
 追加修复已重新冻结：原后台进度＋A 两新文件＋前台工具/模型等待与进度草稿组合 **85 passed**，证据 `/tmp/background-receipt-progress-gate.xml`。正式 repo/原 RootLink 用例覆盖 explicit/local/none 不建窗口、旧 origin/always 和普通委派保留 120 秒反馈、job 更新不能改本 run 冻结策略，以及错误 run/thread scope 不冒认当前调度。A 文件 Ruff、diff check 和全树 strict size 通过（`/tmp/receipt-progress-code-size.md`，hard=0、blocked=False）；该批与前面的39/220有重叠，不累加为独立用例总数。
 
-建议下一步：由非作者复核来源签发、原安全守卫顺序、显式静默及冷重投边界，再由主线程运行联合严格 gate、Linux sourceless 包和少量真实模型验收。可并行审查 N01/N02；保持生产正文和真实飞书外发隔离，不将合成测试称为真实相关性验证。
+## .7 真实失败与完整 JSON 包装修复
+
+`.20261013.7` 独立 MiniMax-M2.7 验收首先在 `run_now` 后立即 tick，尚未越过原 `dispatch_after=预约时间+2 秒`，所以 0 模型、history missing 不算真实业务失败。主线程随后沿同一原 run 唤醒；真实原生请求里含完整完成合同，供应商确实返回四字段 `internal_only`、空 `public_reply` 和非空内部总结，但用一份完整 `json` 代码围栏包装。原 `json.loads` 误拒绝它，正式历史记录 `BACKGROUND_RECEIPT_CONTRACT_INVALID/failed`，没有对外投递；完整请求和响应保留在独立合成原生消息账。
+
+修复只增加 `common/structured_output.py::json_value_from_complete_response` 完整包装解码：原完整 JSON 或全响应唯一明确标注 `json` 围栏可解码；前后说明、多 JSON/多块、非 JSON 标签、缺围栏和嵌套提取均不许可。`parse_background_result` 继续原严格 schema/来源/公开义务校验，不复用任意正文扫描器，不加关键词静默规则、不改普通文本/JSON路径、不增模型请求。旧失败 run 保持终态，未重跑业务或补产物；修后候选 `.20261013.8` 的真实验收由主线程另行执行，当前不能声称已真实通过。
+
+本增量重新冻结：通用结构化输出＋A 合同＋A integration **71 passed**，证据 `/tmp/background-receipt-json-fence-focused.xml`；架构、运行模块边界和原生工具接线 **63 passed**，证据 `/tmp/background-receipt-json-fence-boundary.xml`。Ruff、diff check、doc sync 均通过；strict size 为 hard=0、blocked=False（`/tmp/background-receipt-json-fence-size.md`）。计数与前批重叠，不累加为独立用例总数。
+
+建议下一步：由主线程把 `test_structured_output.py` 纳入联合严格 gate，再构建新 sourceless 候选并做少量独立真实模型验收。非作者可并行只读核对完整解码、来源和冷重投边界；保持旧失败证据，不恢复已失败业务，不将格式修复说成模型语义保证。

@@ -67,6 +67,39 @@ def test_explicit_internal_only_is_success_with_internal_result_preserved():
     assert pending_natural_user_reply(params) is None
 
 
+def test_real_provider_complete_json_fence_retains_internal_success_and_provenance():
+    params = _params()
+    internal = '合成监控静默检查执行完毕。样本数 3，全部探测成功，未发现异常，无需对外通知。'
+    text = '```json\n' + _body('internal_only', '', internal) + '\n```'
+    response, _ = _response(params, text)
+    action, final = receipt.prepare_background_public_receipt(params, response)
+    assert action == 'finish' and final.runtime_status == 'ok' and final.text == ''
+    assert final.internal_response == internal
+    assert final.public_receipt['notification_intent'] == 'internal_only'
+    assert final.public_receipt['execution_source']['call_id'] == 'call-1'
+    assert pending_natural_user_reply(params) is None
+    assert receipt.prepare_background_public_receipt(_params(explicit=False), response) == ('normal', response)
+    other = replace(params, run_id='other-run')
+    action, failed = receipt.prepare_background_public_receipt(other, response)
+    assert action == 'finish' and failed.runtime_reason == 'MODEL_RESPONSE_PROVENANCE_MISMATCH'
+
+
+@pytest.mark.parametrize('text', [
+    '说明\n```json\n' + _body('internal_only', '') + '\n```',
+    '```json\n' + _body('internal_only', '') + '\n```\n后记',
+    '```json\n' + _body('internal_only', '') + '\n```\n```json\n' + _body() + '\n```',
+    '```python\n' + _body('internal_only', '') + '\n```',
+    '```json\n' + _body('internal_only', '不得靠围栏隐藏矛盾正文') + '\n```',
+    '```json\n' + json.dumps({'nested': json.loads(_body('internal_only', ''))}) + '\n```',
+])
+def test_json_wrapping_does_not_relax_whole_response_or_completion_schema(text):
+    params = _params()
+    response, _ = _response(params, text)
+    action, final = receipt.prepare_background_public_receipt(params, response)
+    assert action == 'finish' and final.runtime_reason == 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
+    assert final.runtime_status == 'failed' and final.text == '' and final.public_receipt is None
+
+
 def test_normal_user_json_remains_public_json_and_no_extra_phase():
     params = _params()
     json_reply = '{"classification":"合成合法结果","count":2}'

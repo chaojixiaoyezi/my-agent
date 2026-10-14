@@ -27,6 +27,8 @@
 
 `internal_result` 必须非空，是模型的执行总结，**不是宿主核验结论**。公开意图只能是 `publish` 或 `internal_only`，不能通过普通正文、关键词、占位符或用户自然语言直接触发机器状态。合法 JSON 可以完整放在 `public_reply` 字符串里。只有已启用的受管完成阶段解析这个 schema，普通任务正文不解析它。
 
+完整受管响应可以是原始 JSON，或整个响应只有一份明确标注 `json` 的代码围栏。通用解码入口位于 `common/structured_output.py::json_value_from_complete_response`：只去掉完整包装，不扫描正文中的 JSON，不接受前后说明、多个对象或多个围栏、其它代码标签及嵌套提取。解码后仍沿原四字段 schema、调用来源和公开义务校验；原 `json_objects_from_text` 的正文扫描用途保持独立，不能替代协议权威。普通文本和普通 JSON 的交付路径不使用此入口，不增加模型调用。
+
 程序先走原取消、未知副作用、声明产物和截断守卫，再消费完成协议；`enable_tools=false` 的显式任务同样走完成出口。显式内部成功不发消息，内部结果和原生历史保存在原 owner 会话的同一内部记录，没有第二套消息队列或业务账本。
 
 实际待交付附件不能被 `internal_only` 取消。已消费插话的回复欠账也不能被静默取消；合法现成公开回复直接清偿欠账。附件已就绪时允许 `publish` 的正文为空，附件仍走原交付链。
@@ -58,3 +60,5 @@
 定向测试：`test_background_public_receipt_contract.py`、`test_background_public_receipt_integration.py`。覆盖准确来源/用途、伪造 dict 和 provider metadata、旧响应、物理空响应、正常 JSON、内部成功、附件/插话欠账、一次公开表达修复、旧策略零成本、原调度成功/失败和冻结重投。组合验证保留原模型计量、finalization、委派、unknown-effect、delivery contract、native 响应和架构边界测试。
 
 真实模型内容相关性、真实飞书外发和长期监控仍需最终验收；本切片的合成运输不能充当真实外发证据。
+
+`.20261013.7` 候选的独立 MiniMax-M2.7 合成验收已确认完整完成合同进入真实原生请求，模型返回合法四字段 `internal_only` 信封，但用单一 `json` 代码围栏包装。原直接 `json.loads` 把包装误判为 `BACKGROUND_RECEIPT_CONTRACT_INVALID`，该运行已正式失败且没有外发。此缺陷由上述完整包装解码修复，保留原失败证据；不重跑原已失败业务、不修改产物，修后候选由主线程另行做同需求的独立验收。这一结果不证明模型永远不会偏题。

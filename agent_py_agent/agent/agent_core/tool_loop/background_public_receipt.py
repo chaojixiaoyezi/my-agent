@@ -1,10 +1,10 @@
-# LLM: 此合同只在冻结的 explicit+origin 后台回合生效；语义由模型判断，宿主只守形态、来源和已有回复义务，不按正文词表过滤。
+# LLM: 此合同只在冻结的 explicit+origin 后台回合生效；完整 JSON 可带单一 json 围栏，语义由模型判断，宿主只守形态、来源和已有回复义务。
 # 模块用途: 分离后台内部执行结果与公开通知，允许无公开内容的成功运行，并复用原零工具表达修复。
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 
+from ...common.structured_output import json_value_from_complete_response
 from ...contracts.background_public_receipt import CONTRACT_KEY, RESULT_SCHEMA
 from ...conversation.user_visible_text import sanitize_user_visible_text
 from ..model.response_provenance import response_provenance_error, response_provenance_projection
@@ -39,11 +39,11 @@ def public_receipt_contract_prompt(params: object) -> str:
     )
 
 
-# LLM: 只解析受管阶段的显式 schema；普通任务 JSON、纯文本及自然语言均不被当作机器通知判断。
-# 函数用途: 校验一份通用后台完成信封，返回结构化声明或明确的协议错误。
+# LLM: 只解码整个受管响应的一份 JSON 或其单一 json 围栏，再校验显式 schema；不得搜索说明文字中的对象或改变普通正文路径。
+# 函数用途: 校验完整后台完成信封，兼容无歧义的模型展示包装，返回结构化声明或明确的协议错误。
 def parse_background_result(text: str) -> tuple[dict[str, str] | None, str]:
     try:
-        value = json.loads(text)
+        value = json_value_from_complete_response(text)
     except (ValueError, TypeError):
         return None, 'BACKGROUND_RECEIPT_CONTRACT_INVALID'
     if not isinstance(value, dict) or set(value) != _RESULT_KEYS:

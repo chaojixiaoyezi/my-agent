@@ -11,7 +11,27 @@ from agent_py_agent.agent.common.structured_output import (
     StructuredBatchRequest,
     collect_structured_batches,
     json_objects_from_text,
+    json_value_from_complete_response,
 )
+
+
+@pytest.mark.parametrize('wrapper', ['{body}', '```json\n{body}\n```', '~~~~JSON\r\n{body}\r\n~~~~'])
+def test_complete_json_response_accepts_only_whole_value_or_json_fence(wrapper):
+    body = '{"value":"合成值","nested":{"count":3}}'
+    assert json_value_from_complete_response(wrapper.format(body=body)) == json.loads(body)
+
+
+@pytest.mark.parametrize('text', [
+    '说明 {"value":1}', '{"value":1} 后记', '{"value":1}\n{"value":2}',
+    '说明\n```json\n{"value":1}\n```', '```json\n{"value":1}\n```\n后记',
+    '```json\n{"value":1}\n```\n```json\n{"value":2}\n```',
+    '```python\n{"value":1}\n```', '```\n{"value":1}\n```',
+    '```json\n{"value":1}', '```json\n{"value":1}\n~~~~',
+    '```json\n{"value":1}\n{"value":2}\n```',
+])
+def test_complete_json_response_does_not_extract_objects_from_ambiguous_text(text):
+    with pytest.raises(ValueError):
+        json_value_from_complete_response(text)
 
 
 def test_json_objects_from_text_ignores_chatter_and_incomplete_braces() -> None:
