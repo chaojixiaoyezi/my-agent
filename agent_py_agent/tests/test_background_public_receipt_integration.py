@@ -1,6 +1,8 @@
 """原调度/后台主模型/投递链的回执回归；模型与外发是替身，其余使用正式事务和原账。"""
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
@@ -108,6 +110,8 @@ def test_legacy_or_local_delivery_has_no_completion_schema_or_extra_call(tmp_pat
         assert not channels.attempts
 
 
+# LLM: 重投沿原尝试账的截止时间，不能假设模型和事务在一秒内结束；仍验证截止前零副作用与到期后冻结信封。
+# 函数用途: 用真实持久重试时间检查公开回执拒收后的退避和恢复，模型、运输仍仅为替身。
 def test_explicit_final_failure_freezes_public_envelope_and_cold_retry_has_zero_model_call(tmp_path):
     case, prompts, channels, scheduler = _case(tmp_path, [_body(public='原运行的公开内容。')])
     channels.status = 'rejected'
@@ -116,8 +120,14 @@ def test_explicit_final_failure_freezes_public_envelope_and_cold_retry_has_zero_
     frozen = pending.metadata['owner_delivery']
     assert frozen['content'] == '原运行的公开内容。'
     assert frozen['message_metadata']['public_receipt']['public_source']['purpose'] == 'main'
+    state, error = case.store.wakes.attempts.state_report(pending.wake_signal_id)
+    assert error is None and state.redelivery_failures == 1
+    retry_at = state.next_attempt_at
+    assert retry_at > case.job['next_run_at']
     channels.status = 'sent'
-    reports = scheduler.tick(now=case.job['next_run_at'] + 31)
+    assert scheduler.tick(now=math.nextafter(retry_at, -math.inf)) == []
+    assert len(prompts) == len(channels.attempts) == 1
+    reports = scheduler.tick(now=retry_at)
     assert reports and reports[0].wake_handled and len(prompts) == 1
     assert [item[1].content for item in channels.attempts] == ['原运行的公开内容。', '原运行的公开内容。']
 

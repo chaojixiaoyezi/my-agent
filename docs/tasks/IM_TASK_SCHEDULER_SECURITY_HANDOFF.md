@@ -114,3 +114,27 @@
 
 建议下一步：主线复验当前准确候选的联合 gate 后提交/打包；可并行只读复核恢复与真实原工具链，
 继续保留缺身份拒绝，不用测试目标或自然语言补造授权。
+
+## Native 安装包验收的耐久重试时间校准
+
+`.9` Linux 原字节码验收自然退出 1：803 项中 794 通过、1 失败、8 跳过。原失败 log/XML
+保留在 VM `/home/mdzhu/im-repair-build-20261013.9/bytecode-acceptance.log` 与 `bytecode.xml`，
+没有覆盖或重复运行。唯一失败是公开回执用例的第二次冷投递，不是首次拒收或信封冻结失败。
+
+只读原合成账确认首次 tick 时间为 `1791965138.3120348`，尝试结束时间为
+`1791965139.4204137`，原尝试账 `next_attempt_at=1791965169.4204137`。旧测试固定传
+初次时间加 31 秒，即 `1791965169.3120348`，仍比允许重试早 `0.108378887` 秒；返回空列表
+符合原失败结束时刻加 30 秒合同。wake 仍 pending、v2 信封仍为 rejected，TaskLink completed、
+run queued 且无活动 claim、后台 claim finished。没有发现未知租约或冷恢复丢失回执。
+
+仅调整 `test_background_public_receipt_integration.py` 的该用例：读取原
+`attempts.state_report` 的耐久截止时间，先在该时刻的前一个浮点数 tick，验证仍退避且模型和
+投递均只有一次；再在准确截止时间重试。原公开内容、来源、两次投递和模型调用总数为 1 的
+断言全部保留。不改生产退避、权限、账本或包业务字节，不添加 sleep 或放大等待常数。
+
+该文件及原 scheduler runtime、后台 owner delivery、wake attempt wiring 四文件 **84/84**
+通过，0 failures/errors/skips，`/tmp/IM_PUBLIC_RECEIPT_RETRY_DEADLINE_FOCUSED.xml`。
+原 `.9` Native 红证据仍是失败结果；本地 focused 不能代替后续新候选字节码验收。
+
+建议下一步：主线用测试修订的新提交构建 `20261014.1`，再做安装包字节码验收；可并行审包和
+更新流程，守住原业务字节、隔离 homes 与无真实飞书/模型副作用的边界。
