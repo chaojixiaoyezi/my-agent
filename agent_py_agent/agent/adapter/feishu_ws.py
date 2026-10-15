@@ -1,4 +1,4 @@
-# LLM: WS 只在原 typed 入站回执 accepted/稳定 ignored 后提交 seen；连接健康只投影 SDK 原连接，代理继承既有配置，SDK 日志走共享脱敏。
+# LLM: WS 只在原 typed 入站回执 accepted/稳定 ignored 后提交 seen；连接健康只投影 SDK 原连接，安全观测只记元数据，不改变 SDK 分发/ACK。
 # 模块用途: 共用 webhook 解析、安全诊断和原进程内去重，展示真实连接事实，不建立第二消息队列或健康状态账。
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import random
+import sys
 import threading
 import time
 from collections import deque
@@ -23,6 +24,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_text
+from .feishu_ws_observation import card_response_stage, install_ws_observation, log_card_stage
 from .protocol import FeishuEventDisposition, FeishuRetryableEventError, provider_message_reference
 
 logger = logging.getLogger(__name__)
@@ -74,33 +76,71 @@ def _patch_ws_connect(proxy: str = "") -> None:
         pass
 
 
-# LLM: 保留真实 SDK 连接错误并复用共享文本脱敏；异常正文中的代理密码与 WS URL 令牌不得进入 SDK 自带 handler。
-# 类用途: 过滤未订阅处理器噪音并净化 SDK 诊断，避免第三方 handler 绕过应用日志格式器。
-class _LarkProcessorNotFoundFilter(logging.Filter):
-    """丢弃 lark 的 "processor not found" 噪音:订阅了但我们不注册处理器的事件(如有人进 bot 私聊的
-    bot_p2p_chat_entered、bot 被加群等)会被 lark 当 ERROR 刷屏。这些事件本就无需处理,静默丢弃即可
-    (比按事件名逐个 register 忽略更省心、对新事件类型也不漏)。只丢这一类,真错误(鉴权/连接)照常出。"""
+_SDK_WS_LOG_STAGES = {
+    'start': ('started', 'connect_failed'), '_try_connect': ('reconnect_attempt', 'connect_failed'),
+    '_connect': ('connected', 'connect_failed'), '_disconnect': ('disconnected', 'disconnect_failed'),
+    '_ping_loop': ('ping', 'ping_failed'), '_receive_message_loop': ('receiving', 'receive_loop_exited'),
+    '_handle_message': ('frame_received', 'frame_failed'), '_handle_data_frame': ('data_frame_received', 'dispatch_failed'),
+    '_reconnect': ('reconnecting', 'reconnect_callback_failed'),
+    '_fire_on_reconnected': ('reconnected', 'reconnected_callback_failed'),
+}
+_SDK_SAFE_ERROR_TYPES = frozenset({'ValueError', 'TypeError', 'RuntimeError', 'OSError', 'TimeoutError',
+    'ConnectionError', 'SSLError', 'ProxyError', 'InvalidProxyMessage', 'InvalidHandshake', 'InvalidStatus',
+    'InvalidStatusCode', 'ConnectionClosed', 'ConnectionClosedError', 'ConnectionClosedOK', 'InvalidMessage',
+    'WebSocketException', 'JSONDecodeError', 'UnicodeDecodeError', 'DecodeError', 'EncodeError', 'AssertionError',
+    'UnmarshalException', 'EventException', 'ClientException', 'ServerException', 'HeaderNotFoundException',
+    'ConnectionClosedException', 'ServerUnreachableException', 'AccessDeniedException', 'InvalidArgsException'})
 
-    # LLM: 脱敏已格式化的完整消息，清空旧 args 防止再次插入秘密；不将异常文本转换为连接状态。
-    # 函数用途: 原位净化 SDK 日志后放行真实错误，不记录或改写业务状态。
+
+# LLM: 仅审计过的 SDK 运输及 dispatcher 源文件使用固定日志；其它来源仍走共享脱敏，不按异常正文推断业务状态。
+# 函数用途: 在 SDK 自带 handler 输出前去掉任意异常、URL、标识和 traceback，只保留固定阶段、类型和整数错误码。
+def _safe_sdk_log_record(record: logging.LogRecord) -> str | None:
+    source = record.pathname.replace('\\', '/')
+    if source.endswith('/lark_oapi/ws/client.py'):
+        stages = _SDK_WS_LOG_STAGES.get(record.funcName, ('transport', 'transport_failed'))
+    elif source.endswith('/lark_oapi/event/dispatcher_handler.py'):
+        stages = ('event_access', 'event_failed')
+    else:
+        return None
+    stage = stages[1 if record.levelno >= logging.WARNING else 0]
+    exception = (record.exc_info or sys.exc_info())[1]
+    kind = type(exception).__name__ if exception is not None else 'none'
+    kind = kind if kind in _SDK_SAFE_ERROR_TYPES or kind == 'none' else 'other'
+    code = getattr(exception, 'code', None)
+    code = code if type(code) is int and -(2**31) <= code < 2**31 else None
+    record.exc_info = record.exc_text = record.stack_info = None
+    return f'feishu_sdk stage={stage} error_type={kind} provider_code={code}'
+
+
+# LLM: 审计过的 SDK 运输日志只保留固定诊断；其它日志共享脱敏，不让第三方 handler 输出任意异常或 payload。
+# 类用途: 收窄 SDK 诊断并保留其它来源的既有未注册处理器噪音过滤。
+class _LarkProcessorNotFoundFilter(logging.Filter):
+    """原 SDK 的运输/分发错误保留 severity 和固定阶段，不输出自由文本或 traceback。"""
+
+    # LLM: 固定日志先于 getMessage，避免格式化 payload；清空旧 args，异常诊断不改变 SDK 的实际异常、分发或 ACK。
+    # 函数用途: 在原 logger 上净化记录后保留错误，未知来源仍按原共享规则脱敏。
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = record.getMessage()
-            if "processor not found" in message:
+            safe = _safe_sdk_log_record(record)
+            message = safe if safe is not None else record.getMessage()
+            if safe is None and "processor not found" in message:
                 return False
-            record.msg = redact_sensitive_text(message)
+            record.msg = message if safe is not None else redact_sensitive_text(message)
             record.args = ()
             return True
         except Exception:
             record.msg, record.args = "飞书 SDK 日志格式异常", ()
+            record.exc_info = record.exc_text = record.stack_info = None
             return True
 
 
 _lark_noise_filtered = False
 
 
+# LLM: 原 SDK logger 的过滤器先于它自带的所有 handler 执行，只安装一次，不改变日志级别或运输行为。
+# 函数用途: 在启动唯一长连接前安装安全诊断边界。
 def _suppress_lark_processor_not_found() -> None:
-    """给 "Lark" logger 装一次过滤器消 processor-not-found 刷屏(幂等)。"""
+    """给原 Lark logger 安装一次固定运输诊断及共享脱敏过滤器。"""
     global _lark_noise_filtered
     if _lark_noise_filtered:
         return
@@ -282,17 +322,19 @@ class FeishuWsClient:
         self._seen_order.append(message_id)
         self._seen_ids.add(message_id)
 
-    # LLM: 原卡身份/密码门/重复控制保持原样，未知异常只记录类型，不能回显表单秘密或认证头。
+    # LLM: 原卡身份/密码门/重复控制保持原样；阶段观测只读固定结果及消息摘要，未知异常不回显表单或认证头。
     # 函数用途: 沿原真实点击身份处理卡片并就地替换，失败不掀翻长连或把秘密带进诊断。
     def _handle_card_action(self, data: Any) -> Any:
         """卡片按钮回调:归一化 → 去重 → 交 on_card_action。on_card_action 返回 dict 时(密码卡)
         包成 P2CardActionTriggerResponse 同步返回飞书 → 原卡【就地整卡替换】(密码框+密码当场消失,
         不残留);返回 None(persona 卡)则由 on_card_action 侧另发消息。任何异常不掀翻长连。"""
+        log_card_stage(self._client, 'entered')
         try:
             from .feishu_card import extract_card_action
 
             norm = extract_card_action(data)
             if norm is None:
+                log_card_stage(self._client, 'invalid')
                 return None
             value = norm.get("value") or {}
             key = _card_action_key(norm)
@@ -300,11 +342,15 @@ class FeishuWsClient:
                 with self._dedup_lock:
                     cached = getattr(self, "_card_responses", {}).get(key)
                 if cached is not None:
+                    log_card_stage(self._client, 'duplicate_cached', message_id=norm.get('message_id'))
                     return _card_response(cached)
                 if self._claim_message(key) != "claimed":
+                    log_card_stage(self._client, 'claim_rejected', message_id=norm.get('message_id'))
                     return None
             try:
                 resp = self.on_card_action(norm) if self.on_card_action is not None else None
+                stage = card_response_stage(resp) if self.on_card_action is not None else 'handler_missing'
+                log_card_stage(self._client, stage, message_id=norm.get('message_id'))
                 # 只有成功的 typed 回执才消费按键；未解锁、运输错误和无效来源可在原卡重试。
                 typed = bool(value.get("kind"))
                 committed = (isinstance(resp, dict) and (resp.get("toast") or {}).get("type") == "success") if typed else True
@@ -318,6 +364,7 @@ class FeishuWsClient:
                     self._finish_message(key, commit=False)
                 raise
         except Exception as exc:
+            log_card_stage(self._client, 'exception')
             logger.error('飞书卡片回调处理异常(不中断长连) error_type=%s', type(exc).__name__)
         return None
 
@@ -346,6 +393,8 @@ class FeishuWsClient:
             self._remember_message(message_id)
             return False
 
+    # LLM: 原 SDK 仍独占分发与 ACK；观测只包装本次实例的元数据入口，不开启 DEBUG 或增加连接。
+    # 函数用途: 注册原事件及卡片处理器，安装安全观测后启动唯一长连接。
     def start(self) -> None:
         """启动长连(阻塞;lark-oapi 内部自管握手/心跳/重连)。"""
         try:
@@ -369,6 +418,8 @@ class FeishuWsClient:
         self._client = lark.ws.Client(
             self.app_id, self.app_secret, event_handler=handler, log_level=lark.LogLevel.INFO,
         )
+        install_ws_observation(self._client, card_handler_registered=self.on_card_action is not None
+                               and hasattr(builder, 'register_p2_card_action_trigger'))
         logger.info("飞书长连接(WebSocket)已启动:主动连飞书网关收消息(免公网/不绑端口)")
         self._client.start()  # 阻塞:内部 wss 长连 + 自动重连
 

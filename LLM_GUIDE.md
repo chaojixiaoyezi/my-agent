@@ -1,6 +1,10 @@
+2026-10-15 飞书受限网络发行：`.20261014.8` 冻结源码f6357d8d3，源码415项、双端包内及原生验收通过，本机已部署。真实普通私聊status/模型表单保存已核，凭据与群真实场景尚未全验；旧式UI回执无本机原账不可代算。准确实例、两域限制及清理见[飞书快检](docs/guides/FEISHU_QUICK_CHECK.md#2026-10-15-受限网络与准确实例验收)，后续文档不冒充包源码。
+
 2026-10-14 实施接线：日常审批默认由共享 `home/config/capability_config.yaml` 的 `owner_default_permission_mode` 决定；owner显式选择保持。`list_tools` 返回当前权限事实和完整不可用原因，`tool_search` 继续逐线程按需加载；`/help` 只给短导航。本人OAuth、CLI后端与审批期限的六项部署键不允许模型写owner局部配置。原输入等待完整归档后释放执行片，回调复核准确任务/人并沿原Wake恢复。见[实施合同](docs/design/IM_UNATTENDED_IMPLEMENTATION.md)。
 
 # LLM_GUIDE
+
+2026-10-15 卡片链路诊断：原SDK实例只观察帧头摘要和固定处理阶段，原回环记录白名单错误码，不读表单或更改分发/ACK。B已首设未锁、群卡已发，不代表点击已到当前实例；须以真实新诊断版继续定位。SDK DEBUG含完整载荷，禁止用它采集凭据表单。
 
 2026-10-14 审批占住群会话追加审计：单卡超时仍返回可重试 APPROVAL_REQUIRED、活 consumer 无总截止；活 PID 等待不属孤儿。generation 10 非审批次数，MCP tool_approvals 非全局开关，三版 restart 的 always 无变化。37/60 两批既有回归通过、加速等待/临时DB/54项历史裁决证据保留；仅文档、未修产品。见 [综合审计追加](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -14,13 +15,25 @@ from ..common.authenticated_http import open_authenticated_request
 from ..gateway_parts.client_credentials import GatewayClientCredentials
 from ..gateway_parts.local_client_token import LocalClientCredentialError
 
+logger = logging.getLogger(__name__)
 
-# LLM: 原typedkind与真实actor/message/chat必须匹配，宿主凭据只入原回环HTTP且不重定向。
-# 函数用途: 提交原卡回调并显示安全操作者；cancel丢弃表单，群资格查询和认证回环是网络副作用。
+
+# LLM: 调用方只传本模块已核白名单或字面量，禁止传表单、回执正文或原始异常；日志故障不得阻断实际控制。
+# 函数用途: 尽力记录固定阶段，让磁盘或日志处理器异常不改变原卡片调用、返回和重试。
+def _log_control_stage(stage, *, reason_code="", kind=""):
+    try:
+        logger.info("feishu_control stage=%s reason_code=%s kind=%s", stage, reason_code, kind)
+    except Exception:
+        pass
+
+
+# LLM: 原typedkind与真实actor/message/chat必须匹配；诊断仅记录固定kind/阶段/错误码，表单、引用和回执正文不得进入日志。
+# 函数用途: 提交认证回环并记录安全处理阶段；cancel丢弃表单，群资格查询和回环是网络副作用。
 def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     value = norm.get("value") or {}
     if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"}:
         return None
+    _log_control_stage("entered", kind=value["kind"])
     actor = str(norm.get("operator_open_id") or "")
     body = {"reference": value.get("reference"), "decision": value.get("decision"),
             "message_id": norm.get("message_id"), "chat_id": norm.get("chat_id")}
@@ -29,25 +42,31 @@ def tool_approval_card_action(adapter, norm: dict) -> dict | None:
         if value["kind"] == "my_agent_model_configuration" and value.get("decision") not in {"save","cancel"}:
             body["fields"] = {"profile_id": str(value.get("profile_id") or "")}
     if not actor or not body["message_id"] or not body["chat_id"]:
+        _log_control_stage("prepare", reason_code="IM_CONTROL_IDENTITY_MISSING")
         return {"toast": {"type": "error", "content": "无法确认卡片来源，请回原私人卡片操作。"}}
     try:
         if value["kind"] in {"my_agent_task_credential","my_agent_model_configuration"} and _group_reference_hint(body["reference"],body["decision"]):
             member = _current_group_member(adapter, str(body["chat_id"]), actor)
             if not member:
+                _log_control_stage("prepare", reason_code="IM_GROUP_MEMBER_REJECTED")
                 return {"toast": {"type": "error", "content": "当前账号不在原群，无法提交这张群凭据卡。"}}
             body["submitter"] = {"actor_id": actor, "chat_id": body["chat_id"], "current_group_member": member}
         result = _submit_control_request(adapter, actor, body)
     except GroupMembershipError as exc:
+        reason = "IM_GROUP_MEMBERSHIP_BUDGET_EXCEEDED" if exc.code == "IM_GROUP_MEMBERSHIP_BUDGET_EXCEEDED" else "IM_GROUP_MEMBERSHIP_UNAVAILABLE"
+        _log_control_stage("prepare", reason_code=reason)
         message = "群成员核验超过本次时间或分页预算，请稍后重试原卡片。" if exc.code == "IM_GROUP_MEMBERSHIP_BUDGET_EXCEEDED" else "暂时无法核验群成员，请检查机器人查看群成员权限或网络后重试原卡片。"
         return {"toast": {"type": "error", "content": message}}
     except (OSError, RuntimeError, TypeError, ValueError):
         return _control_failure_toast("IM_CONTROL_PREPARATION_FAILED", "prepare")
     if result.get("error_code") in {"IM_PASSWORD_SETUP_REQUIRED", "IM_UNLOCK_REQUIRED"}:
+        _log_control_stage("interaction", reason_code=result["error_code"])
         adapter._send_password_card(actor, "set" if result["error_code"] == "IM_PASSWORD_SETUP_REQUIRED" else "unlock")
         return {"toast": {"type": "warning", "content": result["message"]}}
     if not result.get("ok"):
         return _control_failure_toast(str(result.get("error_code") or "IM_INTERACTION_INVALID"),
                                       str(result.get("error_stage") or "interaction"))
+    _log_control_stage("completed", reason_code="IM_CONTROL_COMPLETED")
     text = result.get("message") or ("私人配置已处理。" if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"} else "已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
     facts = result.get("clicked_by") or result.get("cancelled_by")
     if isinstance(facts,dict) and facts.get("clicked_at") and facts["clicked_at"] not in text:
@@ -128,8 +147,8 @@ def _current_group_member(adapter, chat_id, actor):
     raise GroupMembershipError("IM_GROUP_MEMBERSHIP_BUDGET_EXCEEDED")
 
 
-# LLM: 只显示固定码/阶段，不复制HTTP正文或异常；模型配置、审批和凭据复用同一路径，不放宽私人锁。
-# 函数用途: 给用户可追踪且可区分的控制失败回执，提示宿主检查对应环节。
+# LLM: 展示和日志共用固定码/阶段白名单，不复制HTTP正文、异常、表单或未知错误值；不得放宽私人锁。
+# 函数用途: 返回可追踪的失败回执并记录安全错误码，让真实点击与宿主故障可以对应。
 def _control_failure_toast(code, stage):
     messages = {
         "IM_CONTROL_CREDENTIAL_UNAVAILABLE": "宿主认证凭据不可用，请检查适配器与Gateway使用同一数据根和配置。",
@@ -149,6 +168,7 @@ def _control_failure_toast(code, stage):
         code = "IM_CONTROL_PREPARATION_FAILED"
     if stage not in {"prepare", "credential", "http", "transport", "response", "interaction", "execution"}:
         stage = "interaction"
+    _log_control_stage(stage, reason_code=code)
     return {"toast": {"type": "error", "content": messages.get(code, "卡片请求未完成，请检查宿主回调配置。") + f"（{code}/{stage}）"}}
 
 

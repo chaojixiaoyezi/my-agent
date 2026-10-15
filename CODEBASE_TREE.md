@@ -1,3 +1,12 @@
+2026-10-15 卡片回调安全诊断：
+
+```text
+|-- agent_py_agent/agent/adapter/feishu_ws_observation.py # 原SDK实例帧头摘要与卡片固定阶段，不读载荷或改变分发
+`-- agent_py_agent/tests/test_feishu_ws_observation.py # 零网络SDK分发/ACK不变与任意表单秘密不入日志
+```
+
+关键职责：观测沿原连接与卡片handler，原private_controls统一记录固定失败码/阶段；不创建回调账本、第二连接或新的授权来源。
+
 2026-10-14 工具计划预算复审新增：
 
 ```text
@@ -1204,6 +1213,7 @@ agent_py_agent/
 |   |   `-- service.py                 # 普通回复、主动消息、可编辑进度及附件的统一发送出口
 |   |-- adapter/
 |   |   |-- private_controls.py        # 已验证 SDK actor/卡片身份到原 Gateway 的私人决定运输
+|   |   |-- feishu_ws_observation.py   # SDK帧头及连接摘要、固定卡片阶段；不读取payload或改变ACK
 |   |   |-- feishu_mentions.py         # WS/webhook 共用直接 @机器人判据，不按名称或正文猜
 |   |   |-- feishu_attachment.py      # 飞书上传已核验的同一不可变字节，不重新打开路径
 |   |   |-- feishu_quoted_media.py     # 准确根与同次转发成员的文字/资源证明，当前 owner/actor 不变

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter
 from agent_py_agent.agent.adapter.feishu_card import (
     extract_card_action,
@@ -92,3 +94,43 @@ def test_control_no_token_and_network_failure_are_distinct(monkeypatch):
     result = service.deliver_control_card(context, {}, summary='输入')
     assert result.error_code == 'CHANNEL_CONTROL_IO_FAILED' and result.effect_outcome == 'unknown'
     assert 'secret-transport-body' not in str(result)
+
+
+@pytest.mark.parametrize('result,expected', [
+    ({'ok': True, 'message': 'canary-control-private-reply'}, 'IM_CONTROL_COMPLETED'),
+    ({'ok': False, 'error_code': 'IM_CONTROL_HTTP_AUTH_REJECTED', 'error_stage': 'http'},
+     'IM_CONTROL_HTTP_AUTH_REJECTED'),
+    ({'ok': False, 'error_code': 'canary-control-private-code', 'error_stage': 'canary-control-private-stage'},
+     'IM_CONTROL_PREPARATION_FAILED'),
+    ({'ok': False, 'error_code': 'IM_UNLOCK_REQUIRED', 'message': 'canary-control-private-reply'},
+     'IM_UNLOCK_REQUIRED'),
+])
+def test_control_diagnostics_never_log_fields_refs_or_provider_text(monkeypatch, caplog, result, expected):
+    from agent_py_agent.agent.adapter import private_controls
+
+    monkeypatch.setattr(private_controls, '_submit_control_request', lambda *_: result)
+    adapter = SimpleNamespace(_send_password_card=lambda *_: None)
+    norm = {'value': {'kind': 'my_agent_model_configuration', 'decision': 'save',
+                      'reference': 'canary-control-private-reference'},
+            'operator_open_id': 'ou_fixture', 'message_id': 'om_fixture', 'chat_id': 'oc_fixture',
+            'form_value': {'api_key': 'canary-control-private-key',
+                           'arbitrary_field': 'canary-control-private-arbitrary'}}
+    with caplog.at_level('INFO', logger=private_controls.__name__):
+        reply = private_controls.tool_approval_card_action(adapter, norm)
+    assert isinstance(reply, dict)
+    assert 'stage=entered' in caplog.text and expected in caplog.text
+    assert 'canary-control-private' not in caplog.text
+
+
+def test_control_logging_sink_failure_does_not_prevent_or_repeat_submission(monkeypatch):
+    from agent_py_agent.agent.adapter import private_controls
+
+    calls = []
+    monkeypatch.setattr(private_controls.logger, 'info', lambda *_: (_ for _ in ()).throw(OSError('synthetic-log-sink')))
+    monkeypatch.setattr(private_controls, '_submit_control_request',
+                        lambda *_: calls.append(True) or {'ok': True, 'message': '合成完成'})
+    norm = {'value': {'kind': 'my_agent_model_configuration', 'decision': 'add'},
+            'operator_open_id': 'ou_fixture', 'message_id': 'om_fixture', 'chat_id': 'oc_fixture'}
+    reply = private_controls.tool_approval_card_action(SimpleNamespace(), norm)
+    assert calls == [True]
+    assert reply['toast'] == {'type': 'success', 'content': '合成完成'}
