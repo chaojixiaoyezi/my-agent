@@ -1,3 +1,16 @@
+## 群公共凭据增量（2026-10-15）
+
+```text
+|-- agent_py_agent/agent/user_space/task_credential_groups.py # 原加密凭据的同群发现、实际填写人选择与当前版本投影
+|-- agent_py_agent/tests/test_group_shared_credentials.py # 原群卡、共享选择、管理、替换及越权矩阵
+|-- agent_py_agent/tests/test_task_credential_discovery.py # 渐进发现、旧群卡显式共享与注册表闭环
+|-- agent_py_agent/tests/test_group_credential_http.py # 实际HTTP引用、认证通知、秘密净化与锁外查询
+|-- docs/tasks/GROUP_SHARED_CREDENTIAL_HANDOFF.md # 群共享权威及测试交接
+`-- docs/tasks/GROUP_CREDENTIAL_DISCOVERY_HANDOFF.md # 凭据发现和共享工具交接
+```
+
+关键文件说明：task_credential_groups只投影原owner私密row，复用原官方群成员事实；不建立第二个秘密库或授权表。
+
 2026-10-15 自动委派调度来源回归：
 
 ```text

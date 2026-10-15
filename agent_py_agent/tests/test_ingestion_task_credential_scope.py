@@ -19,6 +19,7 @@ from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
 from agent_py_agent.agent.scheduler.service import SchedulerService
 from agent_py_agent.agent.scheduler.tool import ScheduleTool
 from agent_py_agent.agent.user_space.task_credentials import (
+    CredentialCardOptions,
     credential_path,
     request_credential_card,
 )
@@ -49,8 +50,8 @@ def _active(agent, *, actor_id=None, root_id=None):
     return thread, actor, claim
 
 
-# LLM: 模拟的只有卡片运输，申请/签名/提交/加密/作用域均走原产品入口，合成 secret 永不写普通文本。
-# 函数用途: 为当前本人任务或监控输入一次私人凭据，返回不可直接解密的引用。
+# LLM: 本文件验证显式task私密范围；模拟只有运输，申请/签名/提交/加密/作用域均走原入口，群默认共享另有矩阵。
+# 函数用途: 为本人任务或监控输入一次明确不共享的凭据，返回不可直接解密引用。
 def _credential(agent, url, *, job_id=''):
     from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_channel_identity
 
@@ -60,7 +61,8 @@ def _credential(agent, url, *, job_id=''):
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda *_args, **_kwargs:
         {'message_id': 'om_' + uuid.uuid4().hex, 'chat_id': agent.config.my_agent_owner_id if agent.home_paths.owner_kind == 'group' else 'oc_private_card'}),
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
-    reference, _ = request_credential_card(agent, url=url, authentication='bearer', job_id=job_id)
+    reference, _ = request_credential_card(agent, url=url, authentication='bearer', job_id=job_id,
+        options=CredentialCardOptions(access_scope='task'))
     path = credential_path(agent.home_paths.owner_home_dir, reference)
     row = read_json_object_report(path, context='synthetic.private-card').payload
     body = {'reference': row['reference'], 'decision': 'submit', 'message_id': row['message_id'],

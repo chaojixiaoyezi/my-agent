@@ -10,7 +10,7 @@ from agent_py_agent.agent.user_space import task_credentials as tc
 from agent_py_agent.tests.test_ingestion_task_credential_scope import _active, _agent
 
 
-# LLM: 真实Agent/活动任务/输入账与签名沿产品入口；只替换飞书卡片运输。
+# LLM: 显式task私密范围的真实Agent/输入账与签名沿原入口；只替换运输，共享默认另有完整成员矩阵。
 # 函数用途: 构造私人或群卡，不访问真实租户，不把合成秘密交给模型。
 def _card(tmp_path, kind):
     agent = _agent(tmp_path, kind)
@@ -18,7 +18,8 @@ def _card(tmp_path, kind):
     target = agent.config.my_agent_owner_id if kind == 'group' else 'oc_private_synthetic'
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda *_a, **_k:
         {'message_id':'om_card', 'chat_id':target}), capabilities=ChannelCapabilities(control_cards=True, proactive=True))
-    ref, _ = tc.request_credential_card(agent, url='https://example.com', authentication='bearer', call_id='replay')
+    ref, _ = tc.request_credential_card(agent, url='https://example.com', authentication='bearer', call_id='replay',
+        options=tc.CredentialCardOptions(access_scope='task'))
     path = tc.credential_path(agent.home_paths.owner_home_dir, ref)
     row = json.loads(path.read_text())
     body = {'reference':row['reference'], 'decision':'submit', 'message_id':'om_card', 'chat_id':target,

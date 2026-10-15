@@ -1,4 +1,4 @@
-# LLM: 网页缓存和批量抓取必须有总容量；refresh 只绕过本地缓存，不改变网络权限。
+# LLM: 缓存/批量必须有总容量；凭据选择仅来自原宿主并进入安全回执，refresh不改变网络或凭据权限。
 # 模块用途: 提供可归档的单页/批量 HTTP 读取，准确报告缓存、失败和未完成 URL。
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from urllib.parse import quote, quote_plus, urlsplit
 
 from ..common.cancellation import cancellation_requested
 from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
+from ..user_space.task_credential_storage import CredentialInputError
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -160,8 +161,8 @@ class WebFetchTool(BaseTool):
             gateway_endpoint=self.gateway_endpoint_config,
         )
 
-    # LLM: 凭据回显净化必须覆盖成功正文和 HTTP 错误回执，并在格式化/归档前完成；真正请求继续复用逐跳 pin。
-    # 函数用途: 发起单次 HTTP 请求，移除本次秘密在响应正文、头和错误中的常见回显。
+    # LLM: 凭据错误保留宿主code/stage，不混成发卡等待；净化覆盖成功/失败正文且在归档前，传输仍逐跳pin。
+    # 函数用途: 发起一次HTTP请求，保留可行动的群凭据拒绝原因并移除秘密回显。
     def _fetch_raw_request(self, request: _WebFetchRequest) -> RawResponseParts | ToolHandlerOutcome:
         raw = FetchRawRequest(tool="web_fetch", url=request.url, method=request.method,
             headers={"User-Agent": "MyAgent-WebFetch/1.0", **request.headers},
@@ -176,6 +177,9 @@ class WebFetchTool(BaseTool):
                 request = replace(request, secrets_to_redact=secrets)
             else:
                 response = send(raw)
+        except CredentialInputError as exc:
+            return ToolHandlerOutcome('web_fetch', False, str(exc), error_code=exc.code,
+                effect_outcome=exc.effect_outcome, result_envelope={'credential_error': {'stage': exc.stage, 'error_code': exc.code}})
         except (ValueError, KeyError, TypeError):
             return ToolHandlerOutcome("web_fetch", False, "私人认证未完成、已失效或方案无效。", error_code="CREDENTIAL_INPUT_UNAVAILABLE")
         if isinstance(response, ToolHandlerOutcome) and request.secrets_to_redact:
@@ -271,8 +275,8 @@ def _redact_secret_echo(value, secrets):
     return value
 
 
-# LLM: 私人认证请求不缓存；HTTP 和格式化沿原路径，锁只包有界内存操作，不能覆盖网络请求。
-# 函数用途: 处理单个 URL 的缓存读取、HTTP 抓取、格式化和请求回执。
+# LLM: 认证请求不缓存，宿主选择事实只附安全回执，服务端正文不改变它；锁不能覆盖网络请求。
+# 函数用途: 处理单页抓取和格式化，并把实际凭据选择交给原工具审计。
 def _execute_single_request(
     tool: WebFetchTool,
     request: _WebFetchRequest,
@@ -297,6 +301,8 @@ def _execute_single_request(
             cache_hit=cache_hit,
         )
     )
+    if response.credential_selection is not None:
+        result = replace(result, result_envelope={**result.result_envelope, 'credential_selection': response.credential_selection})
     attach_http_advisory(result, HttpRequestParts(
         url=request.url,
         method=request.method,
@@ -420,7 +426,7 @@ def _web_fetch_model_spec() -> ToolModelSpec:
                     "description": "HTTP 方法，默认 GET；非读取方法属于危险外部副作用并进入审批门。",
                 },
                 "headers": {"type": "object", "description": "可选请求头 JSON 对象。"},
-                "credential_ref": {"type": "string", "description": "request_credentials 返回的本任务/监控限定引用；宿主注入认证头，禁止索要明文。"},
+                "credential_ref": {"type": "string", "description": "request_credentials发现或返回的引用；群共享按当前发起人优先本人凭据，无本人凭据时用本群同站点可用账号。本人失败须先撤销，不能自动借更高权限；个人仍限原任务/监控，宿主注入且不返回明文。"},
                 "body": {"type": "string", "description": "可选，请求体按 UTF-8 文本发送。"},
                 "refresh": {"type": "boolean", "default": False, "description": "true 时绕过本地缓存重新获取；不代表上游 CDN 必定刷新。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "只限制模型预览，不影响 artifact 保存。"},

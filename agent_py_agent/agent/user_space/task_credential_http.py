@@ -17,18 +17,18 @@ from ..tooling.models import ToolHandlerOutcome
 from ..tooling.web_fetch_runtime import RawResponseParts
 from .task_credential_verification import credential_http_status, credential_response_outcome
 from .task_credentials import (
-    _assert_credential_scope,
     _cipher,
+    _credential_for_use,
+    _credential_headers_from_values,
     _credential_mutation,
     _save_credential_row,
-    credential_headers,
     credential_origin,
     credential_path,
 )
 
 
-# LLM: 解密前核原 owner/actor/root/monitor/期限；登录错误仍交原 typed 结果与净化器，GET/HEAD最多原一次刷新，写请求不重放。
-# 函数用途: 执行带私人认证的请求，保留认证拒绝/权限/网络分类，并把本次全部秘密交原 web 归档前净化器。
+# LLM: 解密前在原owner/origin选择实际凭据并只查一次成员；401写实际引用/代次，选择事实无秘密，GET/HEAD至多原会话刷新。
+# 函数用途: 执行当前允许的认证请求，群按本人优先选账号，保存真实失败及净化值，写请求不重放。
 def credential_authenticated_request(agent, reference, request, *, send):
     capability = capability_config_for_agent(agent)
     if capability is None or not capability.im_task_credentials_enabled:
@@ -37,9 +37,10 @@ def credential_authenticated_request(agent, reference, request, *, send):
     scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
     if not scope.active or not tool_approval_scope_is_current(agent, scope):
         raise ValueError('原任务执行已失效')
-    path = credential_path(agent.home_paths.owner_home_dir, reference)
-    row = read_json_object_report(path, context='credentials.http').payload
-    _assert_credential_scope(agent, row, scope, request.url)
+    row = _credential_for_use(agent, reference, scope, request.url)
+    path = credential_path(agent.home_paths.owner_home_dir, row['credential_ref'])
+    selection = {'schema': 'credential-selection.v1', 'requested_credential_ref': reference,
+                 'effective_credential_ref': row['credential_ref'], 'access_scope': row.get('access_scope', 'task')}
     if row['authentication'] == 'collected':
         raise ValueError('凭据已保存但尚未配置认证方式，请用 request_credentials configure 绑定用法')
     cipher = _cipher(agent.home_paths.owner_home_dir)
@@ -47,14 +48,14 @@ def credential_authenticated_request(agent, reference, request, *, send):
     config = row.get('auth_config', {})
     secrets = list(values.values())
     if row['authentication'] in {'basic', 'bearer', 'header'}:
-        headers, secret_values = credential_headers(agent, reference, request.url)
+        headers, secret_values = _credential_headers_from_values(row, values)
         secrets.extend(secret_values)
     elif row['authentication'] == 'signature':
         headers = _signed_headers(config, values, request)
     elif row['authentication'] == 'login':
         session = _login_headers(agent, path, row, values, request, send, cipher)
         if isinstance(session, ToolHandlerOutcome):
-            return session, tuple(set(secrets))
+            return _with_credential_selection(session, selection), tuple(set(secrets))
         headers, session_secrets = session
         secrets.extend(session_secrets)
     else:
@@ -66,11 +67,21 @@ def credential_authenticated_request(agent, reference, request, *, send):
         row = {**row, 'session_expires_at': 0}
         session = _login_headers(agent, path, row, values, request, send, cipher)
         if isinstance(session, ToolHandlerOutcome):
-            return session, tuple(set(secrets))
+            return _with_credential_selection(session, selection), tuple(set(secrets))
         headers, session_secrets = session
         secrets.extend((*session_secrets, *headers.values()))
         result = send(_authenticated(request, headers, row['origin']))
-    return credential_response_outcome(agent, path, row, result), tuple(set(secrets))
+    return _with_credential_selection(credential_response_outcome(agent, path, row, result), selection), tuple(set(secrets))
+
+
+# LLM: 只有宿主认证入口可构造本事实；引用均已原路径校验，绝不复制账号、密文或认证头，不能据展示裁决权限。
+# 函数用途: 让工具审计准确记录请求引用与实际使用的凭据，便于确认群成员使用了哪个账号范围。
+def _with_credential_selection(response, selection):
+    if selection['access_scope'] != 'group':
+        return response
+    if isinstance(response, ToolHandlerOutcome):
+        return replace(response, result_envelope={**response.result_envelope, 'credential_selection': selection})
+    return replace(response, credential_selection=selection) if isinstance(response, RawResponseParts) else response
 
 
 # LLM: 同名认证头冲突在发送前拒绝；authorization_origin 由原 fetch 逐跳核验，防止跨源 307 携带登录正文。

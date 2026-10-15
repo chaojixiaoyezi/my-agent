@@ -1,5 +1,5 @@
-# LLM: 任务凭据只保存在原 owner 的受保护私密交互目录，Fernet 加密；模型只拿引用，原网络工具在确切作用域解密注入。
-# 模块用途: 私人卡收集 API 凭据，绑定原发起人、任务或监控、接口 origin，避免群聊天及日志保存明文。
+# LLM: 凭据唯一存于原owner私密目录；显式group按当前成员和实际填写人择取，task继续原根/监控约束，秘密仅宿主注入。
+# 模块用途: 收集并加密接口凭据，群默认复用和个人任务隔离共用原卡/存储/网络门，不向聊天或模型交明文。
 from __future__ import annotations
 
 import base64
@@ -72,10 +72,11 @@ class CredentialCardOptions:
     ttl_seconds: int | None = None
     refresh_ref: str = ''
     collection_mode: str = 'username_password'
+    access_scope: str = ''
 
 
-# LLM: 请求者采用原scope/actor，ready期限只取原能力默认/显式选项；卡片仍有界，发送意图先落原记录防盲重放。
-# 函数用途: 为准确任务发布凭据卡，默认保存后持续复用；容量或发卡失败不会占等待槽。
+# LLM: 新群授权显式落原row并签名；原actor/输入/监控仍为出处，group只改变使用范围，个人与旧task不推断升级。
+# 函数用途: 为活动任务发布有界卡片，群默认共享、个人限定任务；发送意图仍先落原记录。
 def request_credential_card(agent, *, url='', authentication='collected', header_name='Authorization', job_id='', call_id='', options=None):
     options = options or CredentialCardOptions()
     fields, auth_config, ttl_seconds, refresh_ref = options.fields, options.auth_config, options.ttl_seconds, options.refresh_ref
@@ -95,6 +96,12 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     if capability is None:
         raise CredentialInputError('TOOL_UNAVAILABLE', '凭据有效期配置不可用，未发送卡片。', stage='configuration', effect_outcome='not_started')
     ttl_seconds = credential_seconds(ttl_seconds, default=capability.im_task_credentials_ttl_seconds, allow_unlimited=True)
+    if options.access_scope not in {'', 'task', 'group'}:
+        raise ValueError('凭据使用范围无效')
+    from .task_credential_groups import new_credential_access_scope
+    access_scope = 'task' if options.access_scope == 'task' else new_credential_access_scope(agent, scope)
+    if options.access_scope == 'group' and access_scope != 'group':
+        raise ValueError('当前来源不能登记群共享凭据')
     if job_id:
         job = agent.scheduler_repository.get_job(job_id)
         creator = job.get('creator') or {}
@@ -111,7 +118,8 @@ def request_credential_card(agent, *, url='', authentication='collected', header
         identity = json.dumps({'scope':_scope_identity(scope),'call_id':call_id},sort_keys=True).encode()
         reference = refresh_ref or 'cred_'+(hmac.digest(interaction_key(home,create=True),identity,'sha256').hex()[:32] if call_id else uuid.uuid4().hex)
         payload = {'kind':'task_credential','owner':asdict(owner_identity_from_config(agent.config)), 'channel':channel,
-                   'actor_id':actor,'expires_at':time.time()+1800, 'credential_ref':reference,'scope':_scope_identity(scope)}
+                   'actor_id':actor,'expires_at':time.time()+1800, 'credential_ref':reference,'scope':_scope_identity(scope),
+                   'access_scope':access_scope}
         owner = owner_identity_from_config(agent.config)
         if owner.owner_kind == 'group':
             payload.update(presentation={'kind':'group','chat_id':owner.owner_id}, submitter_policy='current_group_member')
@@ -136,14 +144,21 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     return row['credential_ref'], scope
 
 
-# LLM: 仅改原受管凭据记录；旧ready更新生成新候选而不改旧授权，pending代次须重新签名且保持原配额/锁序。
-# 函数用途: 保存发卡前状态或复用已发送请求，返回准确记录位置及用于失败恢复的原记录。
+# LLM: 重发身份/实时成员在原锁外核验，锁内CAS同次观察；成功替换沿原replaces_ref/generation留出处，不另建目录或alias。
+# 函数用途: 保存或复用卡片请求，旧ready保留到新输入完成，待填取消不会使旧授权退休。
 def _persist_credential_request(agent, row, scope, refresh_ref):
     home = agent.home_paths.owner_home_dir
     path = credential_path(home, row['credential_ref'])
+    observed = None
+    if refresh_ref:
+        from .task_credential_forms import assert_credential_reissue_scope
+        observed = read_credential_row(path, stage='reissue_preflight')
+        assert_credential_reissue_scope(agent, observed, scope)
     with credential_stage('record_prepare'):
         with _credential_mutation(agent,path) as admission:
             previous = read_credential_row(path, stage='record_read')
+            if observed is not None:
+                _assert_credential_unchanged(agent, observed, previous, scope)
             if refresh_ref and not previous:
                 raise ValueError('待更新的凭据不存在')
             if _reuse_credential_request(agent, previous, row, scope, row['origin'], refresh_ref):
@@ -151,11 +166,13 @@ def _persist_credential_request(agent, row, scope, refresh_ref):
                 return path, previous, True
             if refresh_ref and previous.get('status') == 'ready':
                 row.update(credential_ref='cred_'+uuid.uuid4().hex, replaces_ref=refresh_ref,
-                    previous_submitter_actor_id=previous.get('submitter_actor_id', previous['actor_id']))
+                    previous_submitter_actor_id=previous.get('submitter_actor_id', previous['actor_id']),
+                    replaces_generation=previous.get('generation', 1))
                 path = credential_path(home, row['credential_ref'])
             row['input_id'] = row['credential_ref']+':'+str(row['generation'])
             signed_fields = {key:row[key] for key in ('kind','owner','channel','actor_id','expires_at','credential_ref','scope','generation')}
-            signed_fields.update({key:row[key] for key in ('presentation','submitter_policy') if key in row})
+            signed_fields.update({key:row[key] for key in ('presentation','submitter_policy','access_scope',
+                'replaces_ref','replaces_generation','previous_submitter_actor_id') if key in row})
             row['reference'] = sign_interaction_reference(home, signed_fields)
             if row.get('replaces_ref'):
                 with locked_json_path(path):
@@ -223,23 +240,20 @@ def _merge_credential_receipt(latest, row, receipt, effect):
         latest['provider_code'] = provider_code
 
 
-# LLM: 幂等恢复仅依赖原记录发送事实；started 或旧无事实记录不能猜未发送，未开始则递增原输入代次。
-# 函数用途: 核对原请求是否可复用，或准备尚未发送请求的安全重试。
+# LLM: 调用方已锁外核重发管理权并锁内CAS；本函数仅判发送/参数幂等，不发网络、不推断权限或旧卡结果。
+# 函数用途: 复用准确原请求或递增未发送代次，发送未知时拒绝盲重放。
 def _reuse_credential_request(agent, previous, row, scope, url, refresh_ref):
     if not previous:
         return False
-    keys = ('channel','job_id') if refresh_ref else ('actor_id','channel','origin','authentication','header_name','job_id','fields','auth_config')
+    keys = ('channel','access_scope') if refresh_ref and previous.get('access_scope') == 'group' else ('channel','job_id') if refresh_ref else ('actor_id','channel','origin','authentication','header_name','job_id','fields','auth_config','access_scope')
     if any(previous.get(key)!=row.get(key) for key in keys) or (not refresh_ref and previous.get('scope') != row['scope']):
         raise ValueError('同一调用凭据参数冲突')
     if previous.get('delivery_state') == 'started' and not previous.get('message_id'):
         raise CredentialInputError('CREDENTIAL_DELIVERY_RECONCILIATION_REQUIRED',
             '原卡发送已启动但回执未提交，请核对原操作。', stage='delivery_recovery', effect_outcome='unknown')
-    if refresh_ref:
-        from .task_credential_forms import assert_credential_reissue_scope
-        assert_credential_reissue_scope(agent, previous, scope)
-    elif previous.get('message_id') and previous.get('status') in {'pending','ready'}:
+    if not refresh_ref and previous.get('message_id') and previous.get('status') in {'pending','ready'}:
         return True
-    elif previous.get('delivery_state') != 'not_started':
+    elif not refresh_ref and previous.get('delivery_state') != 'not_started':
         raise CredentialInputError('CREDENTIAL_DELIVERY_RECONCILIATION_REQUIRED',
             '原卡结果需要核对，不能重复发卡。', stage='delivery_recovery', effect_outcome='unknown')
     row['generation'] = int(previous.get('generation', 1)) + 1
@@ -308,8 +322,8 @@ def _save_credential_row(admission,path,row):
     write_private_text_file_atomic_unlocked(path,text)
 
 
-# LLM: 输入采用原卡原生密文input；按钮只携带签名引用，群或私人目标由可信呈现范围决定，不在普通文本回显输入。
-# 函数用途: 创建最少字段的原群或私人表单，展示目标和用途；实际保存和授权由提交入口处理。
+# LLM: 展示只能读取已签名access_scope，group presentation不是授权；提交仍走原MAC/当前成员，不显示秘密。
+# 函数用途: 在原表单说明群共享或原任务用途，保留取消与原输入控件。
 def credential_card(row):
     inputs = [{'tag':'input','name':field['name'],'input_type':'password','show_icon':True,
         'label':{'tag':'plain_text','content':field['label']}} for field in row.get('fields', credential_fields(row['authentication']))]
@@ -318,16 +332,18 @@ def credential_card(row):
     inputs.extend({'tag':'input','name':name,'required':False,'label':{'tag':'plain_text','content':label}}
                   for name,label in [('credential_name','名称（可选）'),('credential_note','备注（可选）')])
     submit = {'tag':'button','name':'submit','action_type':'form_submit','type':'primary',
-        'text':{'tag':'plain_text','content':'仅供此任务使用'}, 'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'submit'}}
+        'text':{'tag':'plain_text','content':'保存并供本群助手使用' if row.get('access_scope') == 'group' else '仅供此任务使用'}, 'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'submit'}}
     cancel = {'tag':'button','text':{'tag':'plain_text','content':'取消'},
         'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'cancel'}}
     target = '监控 '+row['job_id'] if row['job_id'] else '当前任务'
+    usage = ('本群成员可让助手复用；优先使用自己填写的账号，主动取消后可使用本群其它账号。'
+             if row.get('access_scope') == 'group' else '仅限原发起人的当前任务或已绑定监控。')
     return {'config':{'wide_screen_mode':True,'update_multi':True},'elements':[
-        {'tag':'div','text':{'tag':'plain_text','content':f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n输入不进入聊天、模型或记忆。"}},
+        {'tag':'div','text':{'tag':'plain_text','content':f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n{usage}\n输入不进入聊天、模型或记忆。"}},
         {'tag':'form','name':'credentials','elements':[*inputs,submit]}, {'tag':'action','actions':[cancel]}]}
 
 
-# LLM: 上游已MAC/actor/解锁；同卡同代终态不变，提交期限取原请求，零ready不改变卡片截止；不覆盖旧ready引用。
+# LLM: 上游已MAC/actor/解锁；群共享关闭时不收旧group卡新值但允许取消；同卡同代终态和原期限不变。
 # 函数用途: 接受输入或取消并加密保存；填写与保存后的期限分开，明文仅在首次提交进程内存在。
 def submit_credential_card(agent,payload,body):
     from ..capability.runtime_config_reload import capability_config_for_agent
@@ -344,6 +360,9 @@ def submit_credential_card(agent,payload,body):
             credential_callback_replay,
         )
         assert_credential_callback_identity(row, payload, body)
+        if (body['decision'] != 'cancel' and row.get('access_scope') == 'group'
+                and getattr(capability, 'im_group_shared_credentials_enabled', False) is not True):
+            raise ValueError('本群共享凭据已关闭，请取消原卡')
         actor = credential_submitter(row, body)
         if body['decision']=='cancel' and row['status'] not in {'pending','cancelled'}:
             from .interaction_cancellation import already_handled_result
@@ -379,16 +398,41 @@ def submit_credential_card(agent,payload,body):
     return credential_cancel_result(row) if row['status']=='cancelled' else {'ok':True,'decision':row['status'],'message':'凭据已安全保存，尚未验证。'}
 
 
-# LLM: 只为当前调用的原任务/监控和同发起人注入指定 origin；引用泄漏不等于可解密，重定向仍由原网络门处理。
-# 函数用途: 给网络工具返回请求头及需净化的秘密值，不交给模型或普通 shell。
+# LLM: 私密凭据守原根，group由同群当前成员按实际提供者择取；仅此入口解密，不能把引用作为跨群授权。
+# 函数用途: 为本次请求取得允许使用的认证头和净化值，不向模型或普通shell交秘密。
 def credential_headers(agent,reference,url):
     current = agent._current_run_params
     scope = tool_approval_scope(agent,str(current.run_id or current.task_id))
     if not scope.active or not tool_approval_scope_is_current(agent,scope):
         raise ValueError('原任务执行已失效')
-    row = read_json_object_report(credential_path(agent.home_paths.owner_home_dir,reference),context='credentials.use').payload
-    _assert_credential_scope(agent, row, scope, url)
+    row = _credential_for_use(agent, reference, scope, url)
     value = json.loads(_cipher(agent.home_paths.owner_home_dir).decrypt(row['ciphertext'].encode()))
+    return _credential_headers_from_values(row, value)
+
+
+# LLM: 调用方已核active scope；共享选择只在原group+准确origin内，返回当前实际row，不写alias、任务或凭据。
+# 函数用途: 让普通HTTP和来源请求复用同一凭据选择，原引用失效后仍遵循用户的本群择取规则。
+def _credential_for_use(agent, reference, scope, url):
+    row = read_credential_row(credential_path(agent.home_paths.owner_home_dir, reference), stage='credential_use')
+    if row.get('access_scope') == 'group':
+        from .task_credential_groups import resolve_group_credential
+        row = resolve_group_credential(agent, row, scope, origin=credential_origin(url))
+        if (row.get('owner') != asdict(owner_identity_from_config(agent.config))
+                or row.get('access_scope') != 'group' or row.get('origin') != credential_origin(url)
+                or row.get('status') != 'ready' or row.get('verification_status') == 'rejected'
+                or credential_ready_expired(row, now=time.time())):
+            raise ValueError('本群没有本次可使用的站点凭据')
+    else:
+        _assert_credential_scope(agent, row, scope, url)
+    import logging
+    logging.getLogger(__name__).info('credential_selection requested_ref=%s effective_ref=%s access_scope=%s',
+        reference, row['credential_ref'], row.get('access_scope', 'task'))
+    return row
+
+
+# LLM: 纯格式化只接收已授权且解密的原row/value，不读文件、发网络或自行选择凭据；调用方必须提供净化返回值。
+# 函数用途: 共用基本认证头的组装，避免HTTP入口重复查群成员和重复解密。
+def _credential_headers_from_values(row, value):
     if row['authentication'] not in {'basic','bearer','header'}:
         raise ValueError('此认证需要受控 HTTP 请求入口')
     secret = value['secret']
@@ -404,14 +448,20 @@ def credential_headers(agent,reference,url):
     return headers, tuple({*value.values(),token,*headers.values()})
 
 
-# LLM: 引用仍限原 owner/actor、原任务或原监控及准确 origin；零ready期限不绕过认证拒绝、撤销或授权。
-# 函数用途: 统一核对读取、刷新、撤销和宿主认证的作用域，不返回秘密。
-def _assert_credential_scope(agent, row, scope, url, *, require_ready=True):
+# LLM: 准确owner/channel/origin先核，显式group交同一动作门，task继续原actor/root/job；管理不能继承共享使用权。
+# 函数用途: 核对具体凭据授权；HTTP需自动择取时先走_credential_for_use，状态/配置/撤销只裁决原引用。
+def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, operation='use'):
     channel, actor = approval_recipient(agent,scope)
-    if not row or (row['channel'],row['actor_id'])!=(channel,actor) or row['origin']!=(credential_origin(url) if url else ''):
+    if (not row or row.get('owner') != asdict(owner_identity_from_config(agent.config))
+            or row['channel'] != channel or row['origin'] != (credential_origin(url) if url else '')):
         raise ValueError('凭据不属于此调用或接口')
     if require_ready and (row.get('verification_status') == 'rejected' or row.get('status')!='ready' or credential_ready_expired(row, now=time.time())):
         raise ValueError('凭据未就绪、已过期或已撤销，请重新申请私人输入')
+    from .task_credential_groups import group_credential_access
+    if group_credential_access(agent, row, scope, operation=operation):
+        return
+    if row.get('access_scope', 'task') != 'task' or row['actor_id'] != actor:
+        raise ValueError('凭据不属于此调用或接口')
     if row['job_id']:
         run = agent.scheduler_repository.get_active_run(scope.root_task_id)
         if (run or {}).get('job_id')!=row['job_id'] and scope.root_task_id!=row['scope']['root_task_id']:
@@ -420,7 +470,7 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True):
         raise ValueError('凭据不属于此任务')
 
 
-# LLM: 通知资格仍读取原runner与凭据唯一记录，不接受外部scope、不解密；旧代/撤销/跨owner均不得发新提醒。
+# LLM: 通知资格读取原runner和当前凭据投影；已成功替换的群旧ref、旧代/撤销/跨owner不得再发提醒，不解密。
 # 函数用途: 在原任务上下文核对这代凭据仍被明确拒绝，供后台通知发送和未发送重投复核。
 def credential_rejection_current(agent, reference, generation):
     try:
@@ -430,7 +480,7 @@ def credential_rejection_current(agent, reference, generation):
             return False
         row = read_credential_row(credential_path(agent.home_paths.owner_home_dir, reference),
                                   stage='notification_read', effect_outcome='not_started')
-        _assert_credential_scope(agent, row, scope, row.get('origin', ''), require_ready=False)
+        _assert_credential_scope(agent, row, scope, row.get('origin', ''), require_ready=False, operation='notification')
         return (type(generation) is int and generation > 0 and type(row.get('generation')) is int and row['generation'] == generation
                 and row.get('owner') == asdict(owner_identity_from_config(agent.config))
                 and row.get('status') == 'ready' and row.get('verification_status') == 'rejected')
@@ -438,17 +488,19 @@ def credential_rejection_current(agent, reference, generation):
         return False
 
 
-# LLM: 状态与使用共用ready期限，零为持续使用；撤销清除密文/会话缓存，不能跨任务管理别人的授权。
-# 函数用途: 查询有效期或撤销当前任务/监控凭据，回执不含输入或加密正文。
+# LLM: 群成员/管理资格在原凭据锁外核验，锁内比较原授权事实和current scope；撤销只清准确引用，不替他人取消。
+# 函数用途: 查询或撤销凭据，群提供者可跨自己的新任务管理，返回值不含秘密。
 def manage_credential(agent, reference, *, operation):
     current = agent._current_run_params
     scope = tool_approval_scope(agent,str(current.run_id or current.task_id))
-    if not scope.active:
+    if not scope.active or not tool_approval_scope_is_current(agent, scope):
         raise ValueError('当前任务无效')
     path = credential_path(agent.home_paths.owner_home_dir, reference)
+    observed = read_credential_row(path, stage='management_preflight')
+    _assert_credential_scope(agent, observed, scope, observed.get('origin', ''), require_ready=False, operation=operation)
     with _credential_mutation(agent,path) as admission:
         row = read_json_object_report(path,context='credentials.manage').payload
-        _assert_credential_scope(agent,row,scope,row.get('origin',''),require_ready=False)
+        _assert_credential_unchanged(agent, observed, row, scope)
         if operation == 'revoke':
             row.update(status='revoked',revoked_at=time.time())
             row.pop('ciphertext',None)
@@ -462,3 +514,14 @@ def manage_credential(agent, reference, *, operation):
     return {'credential_ref':reference,'status':status,'origin':row['origin'],
             'expires_at':row.get('ready_expires_at',row['expires_at']),
             'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
+
+
+# LLM: 仅比较同次锁外观察的权限/密文事实，session缓存变化不授予权限；原scope必须仍current，不查网络或解密。
+# 函数用途: 在凭据管理锁内防止检查后被换代、撤销或换提供者，避免持文件锁访问飞书。
+def _assert_credential_unchanged(agent, observed, current, scope):
+    keys = ('schema_version', 'owner', 'channel', 'actor_id', 'submitter_actor_id', 'scope', 'job_id',
+            'origin', 'access_scope', 'generation', 'status', 'verification_status', 'ready_expires_at',
+            'expires_at', 'reference', 'ciphertext', 'authentication', 'auth_config', 'header_name')
+    if (not tool_approval_scope_is_current(agent, scope)
+            or any(observed.get(key) != current.get(key) for key in keys)):
+        raise ValueError('凭据或执行已变化，请重新查询后操作')

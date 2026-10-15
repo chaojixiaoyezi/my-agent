@@ -55,6 +55,8 @@ class CapabilityConfig:
     im_task_credentials_enabled: bool = True
     # 新填凭据提交后的默认有效秒数；0 持续使用到认证拒绝或撤销，不改变卡片填写期限。
     im_task_credentials_ttl_seconds: int = 0
+    # 新群卡默认供本群助手复用；实际填写人优先自己的账号，撤销后才恢复群公共账号，不改变个人凭据。
+    im_group_shared_credentials_enabled: bool = True
     # 认证明确被拒时沿原任务向原来源提醒用户；不改变正常巡检静默，也不自动收集新密码。
     background_user_action_notice_enabled: bool = True
     # IM 模型选择与原发起人私人配置卡；仅改变本 owner 目录，不允许普通用户发布全机模型。
@@ -176,7 +178,7 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
             raise ValueError("tool_approval_timeout_seconds 必须为正整数。")
         return int(value)
     if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled",
-                      "background_user_action_notice_enabled",
+                      "background_user_action_notice_enabled", "im_group_shared_credentials_enabled",
                       "im_group_authorization_required", "feishu_bot_subscriptions_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")

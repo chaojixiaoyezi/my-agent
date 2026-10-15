@@ -97,7 +97,7 @@ def _assert_input_reply_execution(backend, tool, kind='input_wait'):
     return facts
 
 
-# LLM: 基础 Gateway 与 owner 目录故意不同，工具必须使用原 writer 的队列路径；仅真实运输由记录器替换。
+# LLM: 基础Gateway与owner目录不同；队列/任务/默认group均用原入口，只替换运输和完整官方群成员事实。
 # 函数用途: 把一个普通飞书请求入队，建立其真实 scoped Agent，返回可执行的隔离环境。
 def _queued_input(tmp_path, kind, *, tool='request_credentials', arguments=None):
     base = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
@@ -118,7 +118,13 @@ def _queued_input(tmp_path, kind, *, tool='request_credentials', arguments=None)
         sent.append((target, card))
         return {'message_id': 'om_synthetic', 'chat_id': 'oc_synthetic'}
 
-    owner.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=send),
+    # LLM: 仅替代官方完整成员响应，不能替fixture预建任务或扩大真实权限。
+    # 函数用途: 为首次群请求提供可核验的合成provider成员事实。
+    def snapshot(chat):
+        return {'provider': 'feishu', 'chat_id': chat, 'app_id': 'app_synthetic',
+            'tenant_key': 'tenant_synthetic', 'owner_id': 'ou_synthetic', 'member_ids': ['ou_synthetic'],
+            'members_complete': True, 'bot_is_member': True}
+    owner.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=send, group_authority_snapshot=snapshot),
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
     assert owner is not base and gateway_paths(owner).root != paths.root
     return SimpleNamespace(base=base, agent=owner, paths=paths, request_id=request_id,

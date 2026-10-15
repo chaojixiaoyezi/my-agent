@@ -1,3 +1,7 @@
+2026-10-15 群公共凭据最终源码严格门：87 focused文件收集1972项，1967通过、4项既有runtime_guidance xfail、1项8420端口占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package和离线lock全通过。非作者7文件186项独立通过，换代通知及查询期间取消两P2复验关闭。旧fixture红与首轮中断完整保留；本地严格gate为验收来源，不将线上CI或真实平台密码变更外推为通过。Mac/Linux同源发行另记。
+
+2026-10-15 群公共凭据验收计划：新增group_shared_credentials、task_credential_discovery、group_credential_http三矩阵，原签名卡/加密Store/注册表/HTTP入口只替代群官方事实及末端网络；覆盖本人优先、撤销后复用、拒绝不换号、跨群/私聊/陈旧actor、换代通知、脱敏、停用和锁外成员查询。保留首轮旧fixture红及精确HEAD既有self-discovery群fixture红；修复fixture以显式task/实际群授权表示原意，未放宽产品门或缩小清单。最终focused/strict与双端发行结果另记，不以合成输入冒充真实平台密码验证。
+
 2026-10-15 凭据持续使用候选验证：生命周期/HTTP作者及非作者独立92项通过；通知8文件165项通过（专项44项包含其中，不重复相加），覆盖普通/群owner、precheck/NO/LLM、原outbox冷重投、取消/删除/撤销/换代/来源变化及重投耗尽结案。统一80文件严格gate和新双端发行证据在仓外保存；未验证真实外部平台改密码，不复用旧.8成功为本次证据。
 
 2026-10-15 `.8` 最终源码严格门通过：66 focused 收集1550项，1545通过、4项既有runtime_guidance xfail、1项目标8420占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package、离线lock全部通过。输入投影原12红转绿，作者193项与独立102项通过；仅增加原 typed 终态和运输确认的安全展示，不加模型调用、权限或新状态源。双端同源工件与新版真实输入表达仍待验，旧 `.7` 失败及限定canary扫描原证据保留。

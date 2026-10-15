@@ -1,4 +1,4 @@
-# LLM: 仅沿原凭据与输入账恢复同卡回执；不接受新秘密、不跨代次/提交者，也不把过期确认变成新工作。
+# LLM: 仅沿原凭据/输入账恢复同卡回执，access_scope须与宿主签名一致；不跨代次/提交者或从过期确认生成新工作。
 # 模块用途: 在凭据已保存但输入发布或HTTP回执失败后，让原卡安全重试。
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ import time
 from .task_credential_storage import read_credential_row
 
 
-# LLM: 签名payload来自上游核验；重复提交仍核对精确owner/scope/代次，不只依赖可复制的引用字符串。
-# 函数用途: 核对这次卡片事件对应原记录，拒绝旧卡、跨任务和不同真实消息。
+# LLM: 签名payload来自上游核验；owner/scope/代次与共享范围都须一致，缺字段旧卡按task，不能靠群展示升级。
+# 函数用途: 拒绝旧卡、跨任务、范围篡改或不同真实消息的提交。
 def assert_credential_callback_identity(row, payload, body):
     if not row or any(row.get(key) != body.get(key) for key in ('reference', 'message_id', 'chat_id')):
         raise ValueError('私人卡身份不匹配')
     keys = ('owner', 'scope', 'credential_ref', 'expires_at')
     if any(row.get(key) != payload.get(key) for key in keys) or row.get('generation', 1) != payload.get('generation', 1):
         raise ValueError('原卡代次或任务不匹配')
+    if row.get('access_scope', 'task') != payload.get('access_scope', 'task'):
+        raise ValueError('原卡凭据使用范围不匹配')
 
 
 # LLM: 同终态/同实际提交者才确认，fields从不参与重放；原输入pending只在原任务活跃且未过期时继续发布。

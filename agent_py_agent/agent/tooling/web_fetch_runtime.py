@@ -1,5 +1,5 @@
 
-# LLM: 本模块是 web_fetch 的受限 HTTP 传输与正文格式化边界；响应解码、大小上限和 SSRF 逐跳校验必须保持在同一条主链。
+# LLM: 受限HTTP、解码、SSRF逐跳门保持原主链；credential_selection仅宿主附加的无秘密事实，不从服务端响应头构造。
 # 模块用途: 安全抓取网页/API，解压常见 HTTP 正文，并把文本预览或二进制产物整理成统一工具结果。
 
 from __future__ import annotations
@@ -42,12 +42,15 @@ _TEXTUAL_CONTENT_MARKERS = (
 _SUPPORTED_CONTENT_ENCODINGS = frozenset({"identity", "gzip", "x-gzip", "deflate"})
 
 
+# LLM: 传输层只构造HTTP四字段；认证选择由宿主附加，不能据响应正文或此展示字段授予权限。
+# 类用途: 保存实际HTTP响应与可选凭据选择审计事实，不保存秘密。
 @dataclass(frozen=True)
 class RawResponseParts:
     status: int
     headers: Any
     body: bytes
     url: str
+    credential_selection: dict | None = None
 
 
 @dataclass(frozen=True)

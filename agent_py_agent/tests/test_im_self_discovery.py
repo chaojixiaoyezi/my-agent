@@ -46,18 +46,27 @@ def _discover(agent, **kwargs):
 
 @pytest.mark.parametrize('kind', ['main', 'user', 'group'])
 def test_modes_status_and_manifest_share_owner_authority(tmp_path, kind):
-    agent = _agent(tmp_path, kind=kind)
-    execute_approval_mode_operation(agent.home_paths, 'set', 'ask')
-    ask = _discover(agent)['self_context']
-    execute_approval_mode_operation(agent.home_paths, 'set', 'auto')
-    auto = _discover(agent)['self_context']
+    if kind == 'group':
+        from agent_py_agent.tests.test_group_authorization import _allow
+        from agent_py_agent.tests.test_group_shared_credentials import _group_case
+        ctx = _group_case(tmp_path, actor='ou_actor_a')
+        agent, raw = ctx.agent, ctx.raw
+        actor = agent._current_run_params.host_channel_actor
+        _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
+    else:
+        agent = _agent(tmp_path, kind=kind)
+    execute_approval_mode_operation(agent.home_paths, 'set', 'ask', authorization_host=agent)
+    authority = {'run_id': agent._current_run_params.run_id, 'register_with': agent} if kind == 'group' else {}
+    ask = _discover(agent, **authority)['self_context']
+    execute_approval_mode_operation(agent.home_paths, 'set', 'auto', authorization_host=agent)
+    auto = _discover(agent, **authority)['self_context']
     status = status_display_facts(agent)
     assert ask['permissions']['mode'] == 'ask'
     assert auto['permissions'] == status['permissions']
     assert '审批 auto' in status['permission_mode']
     assert auto['permissions']['source'] == 'owner'
     assert auto['identity']['owner_id'] == agent.home_paths.owner_id
-    assert auto['identity']['actor'] is None
+    assert bool(auto['identity']['actor']) == (kind == 'group')
     encoded = json.dumps(auto)
     assert 'owner_tool_policy_json' not in encoded and 'host_credential_env_names' not in encoded
     assert auto['usage']['help'] == '/help'

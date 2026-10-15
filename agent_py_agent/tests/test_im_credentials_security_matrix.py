@@ -155,7 +155,7 @@ def test_card_transport_failure_leaves_no_wait_dependency_or_secret_in_public_co
         return False
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=send),
         capabilities=ChannelCapabilities(control_cards=failed != 'unsupported', proactive=True))
-    result = _formal_call(agent, 'request_credentials', {'url': 'https://10.1.2.3/api', 'authentication': 'bearer'})
+    result = _formal_call(agent, 'request_credentials', {'url': 'https://10.1.2.3/api', 'authentication': 'bearer', 'access_scope': 'task'})
     assert not result.ok
     assert _SECRET not in result.output
     task = agent.conversation_store.tasks.load(agent._current_run_params.task_id)
@@ -196,7 +196,7 @@ def test_labelled_secret_matrix_masks_complete_input_before_all_public_boundarie
     assert all(secret not in caplog.text for secret in secrets)
 
 
-# LLM: 只有卡片发送采用替身；申请、签名、任务依赖和正式注册表都沿产品接口，提交字段不进入模型参数。
+# LLM: 显式task私密卡只替换运输；签名、依赖及注册表沿原接口，群共享默认另有矩阵，提交不进模型参数。
 # 函数用途: 建立待输入私人卡，给回调验权测试取得合成的原卡身份。
 def _pending_card(agent):
     from agent_py_agent.agent.common.json_io import read_json_object_report
@@ -209,7 +209,7 @@ def _pending_card(agent):
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda *_args, **_kwargs:
         {'message_id': 'om_' + uuid.uuid4().hex, 'chat_id': agent.config.my_agent_owner_id if agent.home_paths.owner_kind == 'group' else 'oc_private_matrix'}),
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
-    result = _formal_call(agent, 'request_credentials', {'url': 'https://10.1.2.3/api', 'authentication': 'bearer'})
+    result = _formal_call(agent, 'request_credentials', {'url': 'https://10.1.2.3/api', 'authentication': 'bearer', 'access_scope': 'task'})
     assert result.ok and _SECRET not in result.output
     reference = json.loads(result.output)['credential_ref']
     path = credential_path(agent.home_paths.owner_home_dir, reference)

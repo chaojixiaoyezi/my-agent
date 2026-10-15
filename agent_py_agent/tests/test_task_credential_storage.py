@@ -68,7 +68,8 @@ def test_same_request_recovers_before_send_but_never_repeats_after_send(tmp_path
             raise OSError(errno.EROFS, 'SYNTHETIC_NEVER_EXPOSE')
         return original(admission, path, row)
     monkeypatch.setattr(credentials, '_save_credential_row', save)
-    args = {'url':'https://example.com', 'authentication':'bearer', 'call_id':'same-operation'}
+    args = {'url':'https://example.com', 'authentication':'bearer', 'call_id':'same-operation',
+        'options':credentials.CredentialCardOptions(access_scope='task')}
     with pytest.raises(credentials.CredentialInputError) as error:
         credentials.request_credential_card(agent, **args)
     assert error.value.stage == ('delivery_prepare' if stage == 'started' else 'receipt_commit')

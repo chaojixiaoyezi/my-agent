@@ -11,9 +11,11 @@ from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_cal
 from agent_py_agent.tests.test_ingestion_task_credential_scope import _active, _agent
 
 
-# LLM: 活动任务和宿主参数沿原生产接口，假运输仅记录发卡，不访问 URL 或真实飞书。
+# LLM: 本夹具显式测task私密卡，活动任务和宿主参数沿原接口；群共享默认与成员事实另有完整矩阵。
 # 函数用途: 通过原注册表调用凭据卡，保存真实权限边界用于比较实际网络工具。
 def _invoke(agent, params):
+    if params.get('operation', 'request') in {'request', 'update'}:
+        params = {'access_scope': 'task', **params}
     current = agent._current_run_params
     boundary = write_boundary_with_runtime_ledger(agent, current)
     boundary.update(allow_private_resolution=False, allowed_private_hosts=[], network_access_mode='disabled')
@@ -29,7 +31,7 @@ def test_private_url_binding_can_send_private_card_without_network_authority(tmp
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda target, card, **kwargs:
         sent.append((target, card)) or {'message_id': 'om_synthetic', 'chat_id': 'oc_private'}),
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
-    result, boundary = _invoke(agent, {'url': 'https://10.1.2.3/api', 'authentication': 'basic'})
+    result, boundary = _invoke(agent, {'url': 'https://10.1.2.3/api', 'authentication': 'basic', 'access_scope': 'task'})
     assert result.ok, (result.reported_error_code, result.output)
     assert sent[0][0] == ('oc_synthetic' if kind == 'group' else actor.actor_id)
     blocked = execute_registry_test_call(agent.tools, 'web_fetch', {'url': 'https://10.1.2.3/api'},
@@ -53,7 +55,7 @@ def test_missing_conditional_parameters_do_not_enter_handler(tmp_path, params):
 def test_unavailable_transport_fails_dependency_without_infinite_pending(tmp_path):
     agent = _agent(tmp_path, 'group')
     _thread, _actor, _claim = _active(agent)
-    result, _ = _invoke(agent, {'url':'https://example.com/api', 'authentication':'bearer'})
+    result, _ = _invoke(agent, {'url':'https://example.com/api', 'authentication':'bearer', 'access_scope':'task'})
     assert not result.ok and result.reported_error_code == 'CHANNEL_ADAPTER_UNAVAILABLE'
     assert result.effect_outcome == 'not_started'
     link = agent.conversation_store.tasks.load(agent._current_run_params.task_id)

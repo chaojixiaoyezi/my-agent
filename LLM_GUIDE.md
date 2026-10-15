@@ -1,3 +1,5 @@
+2026-10-15 群凭据复用：群新卡默认本群共享，先request_credentials find准确url，有可用引用直接web_fetch；本人账号优先，认证失败不换别人，用户主动撤销后才可选群内其它凭据。旧task卡不会自动共享；本人明确要求才share。权限仍认原owner/actor/实时成员及网络边界，开关在capability配置；参见[凭据合同](docs/design/IM_CREDENTIAL_COLLECTION.md)。
+
 2026-10-15 凭据持续使用候选：新填凭据默认保存后不自动过期，可明确拒绝/主动撤销；卡片填写仍30分钟，登录Cookie/Token缓存仍有限。旧finite记录不猜原意、不静默延长，原owner/actor/root/job/origin边界不变。明确HTTP401和网络/权限失败分开，静默监控需用户处理通知沿原收尾链和原Wake/outbox接入，统一严格gate与双端工件分别保留证据；见[凭据收集合同](docs/design/IM_CREDENTIAL_COLLECTION.md)。
 
 2026-10-15 `.8` 最终源码严格门通过：66 focused 收集1550项，1545通过、4项既有runtime_guidance xfail、1项目标8420占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package、离线lock全部通过。输入投影原12红转绿，作者193项与独立102项通过；仅增加原 typed 终态和运输确认的安全展示，不加模型调用、权限或新状态源。双端同源工件与新版真实输入表达仍待验，旧 `.7` 失败及限定canary扫描原证据保留。

@@ -225,3 +225,20 @@ class TestShippedCapabilityTemplate:
     def test_every_config_field_is_in_the_template(self):
         """CapabilityConfig 的每个字段都必须写进模板（带中文注释），不能只藏在 dataclass 里；不用的字段直接删。"""
         assert _config_field_names() - set(load_simple_yaml(SHIPPED_TEMPLATE)) == set()
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_group_shared_credential_flag_is_strict_and_matches_shipped_default(tmp_path, enabled):
+    assert CapabilityConfig().im_group_shared_credentials_enabled is True
+    assert load_capability_config(SHIPPED_TEMPLATE).im_group_shared_credentials_enabled is True
+    path = tmp_path / 'capability.yaml'
+    path.write_text('im_group_shared_credentials_enabled: ' + str(enabled).lower() + '\n')
+    assert load_capability_config(path).im_group_shared_credentials_enabled is enabled
+
+
+@pytest.mark.parametrize('invalid', ['yes', '1', 'null', 'auto'])
+def test_group_shared_credential_flag_does_not_coerce_invalid_values(tmp_path, invalid):
+    path = tmp_path / 'capability.yaml'
+    path.write_text('im_group_shared_credentials_enabled: ' + invalid + '\n')
+    with pytest.raises(ValueError):
+        load_capability_config(path)
