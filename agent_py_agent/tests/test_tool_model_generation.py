@@ -1516,14 +1516,34 @@ class _KwargRecordingBackend:
         return ModelResponse(text="ok", backend=self.name)
 
 
+# LLM: 物理模型入口必须持真实state的宿主/params/call身份；普通前台参数不属于scheduler，测试禁止访问其账本。
+# 函数用途: 为provider参数测试构造完整状态，不用缺字段的SimpleNamespace绕开事件开始边界。
+def _backend_generation_state(**overrides):
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        ToolBoundaryChunkFilter,
+        _ModelGenerationState,
+    )
+
+    def unexpected_scheduler_access(*_args, **_kwargs):
+        pytest.fail('普通模型轮不得读写scheduler账本')
+
+    host = SimpleNamespace(scheduler_repository=SimpleNamespace(
+        effect_run=unexpected_scheduler_access,
+        begin_event_effect=unexpected_scheduler_access,
+        finish_event_effect=unexpected_scheduler_access,
+    ))
+    return _ModelGenerationState(agent=host, params=overrides.pop('params', _tool_loop_params()),
+        chunk_filter=ToolBoundaryChunkFilter(on_chunk=None), ledger=None, call_id='fixture-provider-options',
+        tool_rounds=0, first_token_timeout_seconds=0, on_chunk=None, retry_sink=None, **overrides)
+
+
 def _do_generate_with_tool_choice(backend, tool_choice):
     from agent_py_agent.agent.agent_core.tool_model_generation import _do_backend_generate
 
-    state = SimpleNamespace(
+    state = _backend_generation_state(
         tools=[{"name": "remember", "description": "remember a fact"}],
         tool_choice=tool_choice,
         messages=[{"role": "user", "content": "hi"}],
-        on_chunk=None,
     )
     return _do_backend_generate(backend, "prompt", state)
 
@@ -1563,12 +1583,11 @@ def test_isolated_presentation_turn_does_not_stream_thinking_delta():
             raise AssertionError("presentation reasoning must stay private")
 
     backend = _KwargRecordingBackend()
-    state = SimpleNamespace(
+    state = _backend_generation_state(
         tools=[],
         tool_choice=ToolChoice.auto("presentation"),
         messages=None,
-        on_chunk=None,
-        params=SimpleNamespace(
+        params=replace(_tool_loop_params(),
             context_scope="isolated",
             effective_on_chunk=Sink(),
         ),
@@ -1590,12 +1609,11 @@ def test_native_tool_turn_passes_tool_input_progress_only_to_capable_backend():
     class CapableBackend(_KwargRecordingBackend):
         supports_tool_input_progress = True
 
-    state = SimpleNamespace(
+    state = _backend_generation_state(
         tools=[{"name": "write_file", "description": "write"}],
         tool_choice=ToolChoice.auto("native"),
         messages=[],
-        on_chunk=None,
-        params=SimpleNamespace(
+        params=replace(_tool_loop_params(),
             context_scope="shared",
             effective_on_chunk=Sink(),
         ),
@@ -1617,12 +1635,11 @@ def test_model_turn_passes_host_guidance_only_to_system_capable_backend():
         supports_system_instructions = True
         supports_provider_request_options = True
 
-    state = SimpleNamespace(
+    state = _backend_generation_state(
         tools=[],
         tool_choice=None,
         messages=[],
-        on_chunk=None,
-        params=SimpleNamespace(context_scope="shared", effective_on_chunk=None),
+        params=replace(_tool_loop_params(), context_scope="shared", effective_on_chunk=None),
         system_instruction=VERIFICATION_EVIDENCE_BOUNDARY,
     )
 
