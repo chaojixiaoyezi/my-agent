@@ -40,17 +40,17 @@ from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapsh
 
 # LLM: 原主执行身份和线程/task 都通过正式入口建立，后台唤醒不启动真实 subprocess；不伪造 provider tool 往返。
 # 函数用途: 准备一个管理员 IM 的独立任务和可以执行创建服务的本片参数。
-def runtime_fixture(tmp_path, monkeypatch):
+def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a'):
     agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False,
                                   my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
     source = agent.conversation_store.threads.get_or_create({
         "canonical_user_id": "ou_a", "channel": "feishu", "channel_user_id": "ou_a",
-        "channel_conversation_id": "oc_a", "owner_id": agent.home_paths.owner_id,
+        "channel_conversation_id": conversation_id, "owner_id": agent.home_paths.owner_id,
         "owner_home": str(agent.home_paths.owner_home_dir),
     })
     path = tmp_path / "request.json"
     request = {IM_DISPATCH_KEY: {"mode": "delegated", "owner_id": agent.home_paths.owner_id, "preference_revision": 1,
-                                "channel": "feishu", "conversation_id": "oc_a", "actor_id": "ou_a"}}
+                                "channel": "feishu", "conversation_id": conversation_id, "actor_id": "ou_a"}}
     write_json_file_atomic(path, request)
     context = SimpleNamespace(agent=agent, request=request, request_path=path, request_id="input-one")
     monkeypatch.setattr("agent_py_agent.agent.gateway_parts.im_task_routing._select_route",

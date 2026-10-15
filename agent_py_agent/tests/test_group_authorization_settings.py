@@ -97,7 +97,8 @@ def test_group_user_config_legacy_yaml_set_and_reset_remain_forbidden(tmp_path):
         assert not outcome.ok and outcome.error_code == 'TOOL_PERMISSION_DENIED'
 
 
-def test_original_signed_group_model_form_rechecks_revocation_but_cancel_is_free(tmp_path, monkeypatch):
+@pytest.mark.parametrize('topic', [False, True])
+def test_original_signed_group_model_form_rechecks_revocation_but_cancel_is_free(tmp_path, monkeypatch, topic):
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.gateway_parts import model_profile_service
     from agent_py_agent.agent.user_space.group_authorization import (
@@ -108,8 +109,15 @@ def test_original_signed_group_model_form_rechecks_revocation_but_cancel_is_free
     from agent_py_agent.agent.user_space.group_authorization_context import current_group_authority
     from agent_py_agent.tests.test_im_model_cards import callback, setup, submit
 
+    if topic:
+        from agent_py_agent.tests import test_im_model_cards
+
+        scope_type = test_im_model_cards.GatewayControlScope
+        monkeypatch.setattr(test_im_model_cards, 'GatewayControlScope',
+            lambda **kwargs: scope_type(**{**kwargs, 'conversation_id': 'oc_group:thread:om_topic'}))
     base, _owner, scope, host, _thread = setup(tmp_path, monkeypatch, group=True)
     assert model_profile_service.execute_model_text_control(base, parse_conversation_control('/model'), scope).ok
+    assert base.delivery_service.sent[0][0].target == 'oc_group'
     assert submit(base, callback(base))['ok']
     block = read_group_authorization(host.home_paths)[1]
     owner_actor = replace(host._current_run_params.host_channel_actor, actor_id='ou_fixture_owner')
@@ -121,6 +129,78 @@ def test_original_signed_group_model_form_rechecks_revocation_but_cancel_is_free
         submit(base, callback(base, decision='save', fields=form))
     assert not model_profiles_path(host.home_paths).exists()
     assert submit(base, callback(base, decision='cancel', fields={}))['ok']
+
+
+def test_topic_model_card_private_form_save_keeps_exact_signed_source(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+    from agent_py_agent.agent.gateway_parts import model_profile_service
+    from agent_py_agent.tests import test_im_model_cards
+
+    scope_type = test_im_model_cards.GatewayControlScope
+    monkeypatch.setattr(test_im_model_cards, 'GatewayControlScope',
+        lambda **kwargs: scope_type(**{**kwargs, 'conversation_id': 'oc_group:thread:om_topic'}))
+    base, _, scope, host, thread = test_im_model_cards.setup(tmp_path, monkeypatch, group=True)
+    assert model_profile_service.execute_model_text_control(base, parse_conversation_control('/model'), scope).ok
+    assert base.delivery_service.sent[-1][0].target == 'oc_group'
+    assert base.delivery_service.sent[-1][0].thread_id == thread.thread_id
+    assert test_im_model_cards.submit(base, test_im_model_cards.callback(base))['ok']
+    assert base.delivery_service.sent[-1][0].target == 'ou_actor'
+    fields = {'model_backend': 'openai_compatible', 'api_base': 'https://example.test/v1',
+        'model_name': 'synthetic-topic', 'model_context_window_tokens': '64000', 'api_key': 'synthetic-canary'}
+    result = test_im_model_cards.submit(base, test_im_model_cards.callback(base, decision='save', fields=fields))
+    assert result['ok']
+    assert len(json.loads(model_profiles_path(host.home_paths).read_text())['profiles']) == 1
+    assert host._current_run_params.host_channel_actor.conversation_id == 'oc_group:thread:om_topic'
+    assert host.conversation_store.threads.require(thread.thread_id).channel_bindings[0].channel_conversation_id == 'oc_group:thread:om_topic'
+
+
+@pytest.mark.parametrize('conversation_id', ['oc_other:thread:om_topic', 'oc_group_extra:thread:om_topic',
+    'oc_group:thread:', 'oc_group:thread:bad/topic', 'oc_group:thread:om_topic:extra'])
+@pytest.mark.parametrize('metadata', [{}, {'channel_chat_type': 'group'}])
+def test_model_card_invalid_or_cross_group_topic_has_zero_outbound(tmp_path, monkeypatch, conversation_id, metadata):
+    from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+    from agent_py_agent.agent.gateway_parts import model_profile_service
+    from agent_py_agent.tests.test_im_model_cards import setup
+
+    base, _, scope, _, _ = setup(tmp_path, monkeypatch, group=True)
+    result = model_profile_service.execute_model_text_control(base, parse_conversation_control('/model'),
+        replace(scope, conversation_id=conversation_id, metadata=metadata))
+    assert not result.ok and base.delivery_service.sent == []
+
+
+def test_group_model_card_uses_canonical_owner_when_chat_type_metadata_is_missing(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+    from agent_py_agent.agent.gateway_parts import model_profile_service
+    from agent_py_agent.tests.test_im_model_cards import setup
+
+    base, _, scope, _, _ = setup(tmp_path, monkeypatch, group=True)
+    result = model_profile_service.execute_model_text_control(base, parse_conversation_control('/model'),
+        replace(scope, conversation_id='oc_group:thread:future_topic', metadata={}))
+    assert result.ok and base.delivery_service.sent[-1][0].target == 'oc_group'
+
+
+@pytest.mark.parametrize('fault', ['ambiguous_binding', 'wrong_owner', 'wrong_actor'])
+def test_signed_group_callback_does_not_guess_or_borrow_original_source(tmp_path, monkeypatch, fault):
+    from agent_py_agent.agent.user_space.group_authorization_context import (
+        bind_group_interaction_host,
+    )
+    from agent_py_agent.tests.test_im_model_cards import setup
+
+    base, _, _, host, thread = setup(tmp_path, monkeypatch, group=True)
+    payload = {'channel': 'feishu', 'thread_id': thread.thread_id, 'actor_id': 'ou_actor', 'control_id': 'synthetic'}
+    before = host._current_run_params.host_channel_actor
+    if fault == 'ambiguous_binding':
+        host.conversation_store.threads.write(replace(thread, channel_bindings=(*thread.channel_bindings,
+            replace(thread.channel_bindings[0], channel_conversation_id='oc_group:thread:future_topic'))))
+    elif fault == 'wrong_owner':
+        host.conversation_store.threads.write(replace(thread, owner_id='other-owner'))
+    else:
+        payload['actor_id'] = 'ou_other'
+    with pytest.raises(GroupAuthorizationError):
+        bind_group_interaction_host(base, host, payload, 'ou_actor')
+    assert host._current_run_params.host_channel_actor == before and base.delivery_service.sent == []
 
 
 def test_manual_oauth_rechecks_after_network_and_does_not_hold_policy_lock(tmp_path, monkeypatch):

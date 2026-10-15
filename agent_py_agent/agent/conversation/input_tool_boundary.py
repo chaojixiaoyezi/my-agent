@@ -1,5 +1,5 @@
 # LLM: 消费真实宿主工具信封，不从文字或工具名猜等待；归档/native pair 在调用前完成，恢复沿原 input dependency/Wake。
-# 模块用途: 在完整工具记录边界登记等待，沿原零工具表达生成回执，再让出执行等原输入事件。
+# 模块用途: 在完整工具记录边界登记等待，携带原归档的安全执行事实生成零工具回执，再让出执行等原输入事件。
 from __future__ import annotations
 
 import json
@@ -31,7 +31,7 @@ def record_input_wait(agent, params, result):
         state['waiting_input_id'] = row['input_id']
 
 
-# LLM: 只从原输入行白名单取事实，不读秘密或把正文当状态；复用同模型零工具表达，不能重跑申请或合成用户回执。
+# LLM: 输入行仅取白名单，主轮执行仅复用公开归档核验；pending不证明投递，不能带秘密、整包历史、重跑申请或合成回执。
 # 函数用途: 为已armed的准确输入准备一次自然等待回执；已结算输入不重新等待，不创建第二个输入或调度器。
 def prepare_input_wait_reply(agent, params):
     state = getattr(params, 'live_archive_state', None) or {}
@@ -50,13 +50,15 @@ def prepare_input_wait_reply(agent, params):
         return False
     if not row.get('armed') or not input_dependency_current(agent, row):
         raise ValueError('原输入等待范围不可用')
+    from ..agent_core.tool_loop.completion import turn_execution_reply_facts
     from ..agent_core.tool_loop.natural_user_reply import queue_natural_user_reply
 
     queue_natural_user_reply(params, kind='input_wait', facts={
+        **turn_execution_reply_facts(agent, params),
         'input_dependency': {key: row[key] for key in ('input_id', 'provider', 'status', 'expires_at')},
         'reply_is_interim': True, 'user_input_required': True,
         'task_continues_without_more_user_input': False, 'input_request_registered': True,
-        'tool_execution_observed': True, 'current_user_request': str(params.user_prompt or '')[:4000],
+        'current_user_request': str(params.user_prompt or '')[:4000],
     })
     return True
 

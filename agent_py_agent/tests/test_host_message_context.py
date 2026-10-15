@@ -15,7 +15,7 @@ from agent_py_agent.agent.conversation.host_message_context import (
 
 # LLM: 沿真实委派/Store/主根晋升创建原输入，仅替代模型路由和传输；不接生产平台。
 # 函数用途: 建立可恢复的委派根及其原引用，供主子孙和阴性合同测试复用。
-def delegated_case(tmp_path, monkeypatch):
+def delegated_case(tmp_path, monkeypatch, *, conversation_id='oc_a'):
     from agent_py_agent.agent.conversation.im_delegation import prepare_delegated_execution
     from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
     from agent_py_agent.tests.test_schedule_control import _agent
@@ -28,11 +28,11 @@ def delegated_case(tmp_path, monkeypatch):
     # 函数用途: 为合成委派fixture提供同请求认证引用。
     def capture(context, conversation):
         actor = actor_from_scope(context.agent, SimpleNamespace(channel='feishu', channel_user_id='ou_a',
-            channel_conversation_id='oc_a'), conversation.thread_id, context.request_id)
+            channel_conversation_id=conversation_id), conversation.thread_id, context.request_id)
         return HostMessageContext(actor, refs)
 
     monkeypatch.setattr('agent_py_agent.agent.gateway_parts.im_task_routing._message_context', capture)
-    agent, params, task, context, source = runtime_fixture(tmp_path, monkeypatch)
+    agent, params, task, context, source = runtime_fixture(tmp_path, monkeypatch, conversation_id=conversation_id)
     actor = agent._current_run_params.host_channel_actor
     from agent_py_agent.tests.test_group_authorization import (
         grant_synthetic_group_monitor_capability,
@@ -60,14 +60,16 @@ def select_child(agent, child):
     return record
 
 
-def test_delegate_root_child_grandchild_and_restore_use_single_original_input(tmp_path, monkeypatch):
+@pytest.mark.parametrize('topic', [False, True])
+def test_delegate_root_child_grandchild_and_restore_use_single_original_input(tmp_path, monkeypatch, topic):
     from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.subagents.services.hierarchy.scheduler import (
         HierarchyChildSpec,
         HierarchyScheduleRequest,
     )
 
-    agent, actor, refs, task, context, _ = delegated_case(tmp_path, monkeypatch)
+    agent, actor, refs, task, context, _ = delegated_case(tmp_path, monkeypatch,
+        conversation_id='oc_a:thread:om_topic' if topic else 'oc_a')
     link = agent.conversation_store.tasks.load(task.task_id)
     assert link.host_message_context == {'source': 'session_task', 'task_id': task.task_id}
     assert references_for_run(agent, actor) == refs
@@ -87,10 +89,12 @@ def test_delegate_root_child_grandchild_and_restore_use_single_original_input(tm
 
 
 @pytest.mark.parametrize('corruption', ['new_gateway', 'stale_attempt', 'wrong_owner', 'wrong_root', 'forged_ref', 'wrong_actor'])
-def test_original_context_rejects_unrelated_or_stale_execution(tmp_path, monkeypatch, corruption):
+@pytest.mark.parametrize('topic', [False, True])
+def test_original_context_rejects_unrelated_or_stale_execution(tmp_path, monkeypatch, corruption, topic):
     from dataclasses import replace
 
-    agent, actor, refs, task, _, _ = delegated_case(tmp_path, monkeypatch)
+    agent, actor, refs, task, _, _ = delegated_case(tmp_path, monkeypatch,
+        conversation_id='oc_a:thread:future_topic' if topic else 'oc_a')
     child = agent.subagents.list_runs()[0]
     record = select_child(agent, child)
     current = agent._current_run_params
@@ -128,13 +132,15 @@ def test_delegated_replay_cannot_replace_original_reference_input(tmp_path, monk
     assert agent.conversation_store.session_tasks.load(task.task_id).to_dict() == before
 
 
-def test_delegated_child_creates_nested_subscription_via_original_proof_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize('topic', [False, True])
+def test_delegated_child_creates_nested_subscription_via_original_proof_path(tmp_path, monkeypatch, topic):
     import json
 
     from agent_py_agent.agent.scheduler import event_source_tool as sources
     from agent_py_agent.agent.scheduler.tool import ScheduleTool
 
-    agent, _, refs, _, _, _ = delegated_case(tmp_path, monkeypatch)
+    agent, _, refs, _, _, _ = delegated_case(tmp_path, monkeypatch,
+        conversation_id='oc_a:thread:om_topic' if topic else 'oc_a')
     select_child(agent, agent.subagents.list_runs()[0])
     seen = []
     monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_: {'provider': 'feishu', 'chat_id': 'oc_a',

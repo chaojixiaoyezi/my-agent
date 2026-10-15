@@ -15,6 +15,7 @@ from agent_py_agent.agent.user_space.group_authorization import (
     GroupAuthorizationError,
     GroupProviderEvent,
     change_group_authorization,
+    group_chat_id,
     read_group_authorization,
     record_group_provider_event,
 )
@@ -25,10 +26,14 @@ from agent_py_agent.tests.test_im_execution_threads import fixture_agent
 
 # LLM: 使用原线程/HostActor 工厂，只将 provider 查询替换为明确合成元数据，不写真实授权或发消息。
 # 函数用途: 为角色、成员、CAS 与子孙上下文验证提供一个隔离群。
-def _case(tmp_path):
+def _case(tmp_path, *, conversation_id='oc_source'):
     agent, source = fixture_agent(tmp_path, identity=OwnerIdentity('feishu', 'group', 'oc_source'))
+    if conversation_id != 'oc_source':
+        source = agent.conversation_store.threads.get_or_create({'canonical_user_id': 'ou_owner', 'channel': 'feishu',
+            'channel_conversation_id': conversation_id, 'channel_user_id': 'ou_owner',
+            'owner_id': agent.home_paths.owner_id, 'owner_home': str(agent.home_paths.owner_home_dir)})
     actor = actor_from_scope(agent, SimpleNamespace(channel='feishu', channel_user_id='ou_owner',
-        channel_conversation_id='oc_source'), source.thread_id, 'synthetic-request')
+        channel_conversation_id=conversation_id), source.thread_id, 'synthetic-request')
     agent._current_run_params = RunParams(request_id='synthetic-request', host_channel_actor=actor,
         task_attributes={'conversation_thread_id': source.thread_id})
     raw = {'provider': 'feishu', 'chat_id': 'oc_source', 'app_id': 'app_synthetic', 'tenant_key': 'tenant_synthetic',
@@ -41,6 +46,60 @@ def _case(tmp_path):
     adapter = SimpleNamespace(group_authority_snapshot=snapshot)
     agent.delivery_service = SimpleNamespace(registry=SimpleNamespace(adapter_for=lambda channel: adapter))
     return agent, source, actor, raw, calls
+
+
+def test_topic_group_authority_can_grant_without_rewriting_original_actor(tmp_path):
+    topic = 'oc_source:thread:om_topic'
+    agent, _, actor, raw, _ = _case(tmp_path, conversation_id=topic)
+    assert _allow(agent, raw, actor)['grants'][0]['subjects'] == {'ou_member': 0}
+    assert agent._current_run_params.host_channel_actor.conversation_id == topic
+
+
+def test_topic_member_uses_existing_base_group_grant(tmp_path):
+    topic = 'oc_source:thread:om_topic'
+    agent, source, actor, raw, calls = _case(tmp_path, conversation_id=topic)
+    _allow(agent, raw, replace(actor, conversation_id='oc_source'))
+    agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
+    with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
+        assert agent._current_run_params.host_channel_actor.conversation_id == topic
+    assert calls == ['oc_source']
+
+
+@pytest.mark.parametrize('conversation_id', ['oc_other:thread:om_topic', 'oc_source_extra:thread:om_topic',
+    'oc_source:thread:', 'oc_source:thread:bad/topic', 'oc_source:thread:bad:topic', 'oc_source:thread:om_one:thread:om_two',
+    'oc_source:thread:om_one/other', 'oc_source:other:om_one', 'oc_source/other'])
+def test_topic_cannot_borrow_base_grant_through_prefix_or_malformed_address(tmp_path, conversation_id):
+    agent, source, actor, raw, calls = _case(tmp_path, conversation_id=conversation_id)
+    _allow(agent, raw, replace(actor, conversation_id='oc_source'))
+    before = agent.home_paths.owner_tool_policy_json.read_bytes()
+    agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
+    with pytest.raises(GroupAuthorizationError):
+        with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
+            pytest.fail('坏地址不能借群权限')
+    assert calls == [] and agent.home_paths.owner_tool_policy_json.read_bytes() == before
+
+
+@pytest.mark.parametrize('topic', ['om_topic', 'omt_topic', 'future_topic-format', '4f41f7bc77a45926'])
+def test_topic_parser_has_one_exact_group_address_contract(topic):
+    from agent_py_agent.agent.adapter.protocol import parse_feishu_conversation_address
+
+    assert parse_feishu_conversation_address('oc_group') == ('oc_group', '')
+    assert parse_feishu_conversation_address('oc_group:thread:' + topic) == ('oc_group', topic)
+    for value in [None, '', 'oc_', ' oc_group', 'oc_group ', 'ou_person', 'oc_group:thread:' + topic + '\n',
+            'oc_group:thread:%6Fm_fake', 'oc_group:thread:' + 'a' * 257]:
+        with pytest.raises(ValueError):
+            parse_feishu_conversation_address(value)
+
+
+def test_same_base_other_topic_does_not_replace_original_host_actor(tmp_path):
+    agent, source, actor, raw, calls = _case(tmp_path, conversation_id='oc_source:thread:om_original')
+    _allow(agent, raw, actor, subject=actor.actor_id)
+    before = agent.home_paths.owner_tool_policy_json.read_bytes()
+    with pytest.raises(ValueError):
+        with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id,
+                actor=replace(actor, conversation_id='oc_source:thread:om_forged')):
+            pytest.fail('同群不允许替换原topic身份')
+    assert calls == [] and agent.home_paths.owner_tool_policy_json.read_bytes() == before
 
 
 def _snapshot(raw):
@@ -152,8 +211,9 @@ def test_inviter_departure_and_bot_reentry_do_not_restore_old_authority_or_grant
     assert block['grants'][0]['group_epoch'] != block['group_epoch']
 
 
-def test_cas_revoke_and_expired_copied_context_cannot_reuse_lease(tmp_path):
-    agent, source, actor, raw, calls = _case(tmp_path)
+@pytest.mark.parametrize('conversation_id', ['oc_source', 'oc_source:thread:om_topic'])
+def test_cas_revoke_and_expired_copied_context_cannot_reuse_lease(tmp_path, conversation_id):
+    agent, source, actor, raw, calls = _case(tmp_path, conversation_id=conversation_id)
     saved = _allow(agent, raw, actor)
     agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
     with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
@@ -194,10 +254,10 @@ def test_missing_flag_on_fake_config_does_not_disable_boundary(tmp_path, monkeyp
             pytest.fail('缺 flag 不可放行')
 
 
-# LLM: 老调度测试显式建立隔离群授权前提，不关闭安全开关或改变产品默认；provider 只用合成完整事实。
-# 函数用途: 让原 creator/取消测试继续验证既有边界，并复用真正的人工授权写入和原 tool_policy 锁。
+# LLM: 老调度测试显式建立隔离群授权前提；provider只给owner基础群，原actor可以是topic，不关闭安全开关或改身份。
+# 函数用途: 复用真实人工授权及原tool_policy锁，为creator/取消/话题卡片准备合成前提。
 def grant_synthetic_group_monitor_capability(agent, actor, *, members, capability="monitors.create"):
-    raw = {'provider': agent.home_paths.owner_provider, 'chat_id': actor.conversation_id,
+    raw = {'provider': agent.home_paths.owner_provider, 'chat_id': group_chat_id(agent.home_paths),
         'app_id': 'app_synthetic', 'tenant_key': 'tenant_synthetic', 'owner_id': 'ou_fixture_owner',
         'member_ids': sorted(set(members) | {'ou_fixture_owner'}), 'members_complete': True, 'bot_is_member': True}
     adapter = SimpleNamespace(group_authority_snapshot=lambda chat: dict(raw))

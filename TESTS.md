@@ -1,3 +1,7 @@
+2026-10-15 `.5` 冻结前组合严格验收：55 focused 文件收集1255项，1250通过、4项既有runtime_guidance xfail、1项目标8420端口占用跳过；不连接既有服务。Ruff、文档同步、strict code-size、导入边界、diff、clean-package、离线uv lock全通过。包含群话题授权、运输及原签名模型卡和输入等待公开核验事实；真实 `.5` 自然表达、订阅创建/投递/取消仍须同版部署复测。原始JUnit和命令退出码保留于同版发行工件；远端旧全仓Test失败未作为验收来源。
+
+2026-10-15 `.4`真实群凭据卡/提交/唯一原Wake/后继attempt完成已由准确元数据与根UI分别核验，等待正文仍误称无工具，作为单独失败保留。通用薄表达补接既有presentation_only及当前请求公开归档核验，群/私聊凭据与OAuth沿实际native消息断言，零工具/单卡/原恢复次数不变；空归档不制造成功，秘密canary不得进入phase、表达IR或native消息。旧源码3反例缺turn_execution先红；5文件181项为177通过/4既有xfail，后续严格gate与新包真实自然表达另验，详见[表达交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#输入等待薄表达事实追加2026-10-15)。
+
 2026-10-15 新版冻结前统一严格验收：48 focused文件1078项收集，1073通过、4项既有runtime_guidance预期失败、1项目标8420端口已占用跳过；没有连接或影响既有服务。Ruff、doc_sync、strict code-size、import-boundaries、diff、clean-package与离线uv lock全通过。只作为当前冻结源码的本地验收，真实卡提交/原Wake及订阅正例仍待同版部署，上一提交远端Test失败不作为通过证据。原始JUnit与各命令退出码在同版发行工件保留。
 
 2026-10-15 引用订阅补测：真实 `.3` 多规则 schema/短引用映射缺口已用原工具重放修复；`test_host_message_context.py` 沿真实Store、SessionTask、G1子孙与RuntimeDB覆盖delegate/恢复、同Goal新输入、旧attempt/错误owner/父根及业务role=main不借权。集中12文件247通过，独立原输入收尾24文件618通过/4既有xfail；最终统一focused/strict与真实租户重验另记，不累计交叉成绩。凭据schema仅澄清普通账号密码使用collection_mode，URL/名称/备注由宿主补充，避免模型重复声明为秘密字段。

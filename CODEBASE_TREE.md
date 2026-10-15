@@ -1,3 +1,5 @@
+2026-10-15 既有模块职责补充：adapter/protocol 的会话地址反向解析由群授权、conversation/channels 和Feishu运输共用；逻辑topic保留，运输只用已核basechat。未新增状态、目录或协议账本。输入表达复用completion的公开操作事实，不另存凭据或业务正文。
+
 2026-10-15 原请求引用与后台谱系（实施中）：
 
 ```text

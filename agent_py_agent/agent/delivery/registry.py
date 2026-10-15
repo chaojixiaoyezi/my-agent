@@ -434,8 +434,8 @@ def _builtin_target_validator(channel: str) -> TargetValidator:
     return _validate_feishu_target if channel == "feishu" else _validate_opaque_target
 
 
-# LLM: 此处只校验供应商地址格式，不授予跨群权限；目标授权由原 owner/origin resolver 负责，适配器按同一前缀选 receive_id_type。
-# 函数用途: 接受准确用户 open_id 或群 chat_id，防止合法群目标被当成非法用户地址。
+# LLM: 此处只核供应商receive_id，不剥内部topic或授予跨群权限；原owner/origin先投影basechat，适配器同源严格复核。
+# 函数用途: 接受实际用户或群地址，拒绝把内部话题键直接送平台，不执行运输或改绑定。
 def _validate_feishu_target(channel: str, target: object) -> ChannelTargetDecision:
     base = _validate_opaque_target(channel, target)
     if not base.allowed:
@@ -443,6 +443,14 @@ def _validate_feishu_target(channel: str, target: object) -> ChannelTargetDecisi
     value = str(target or "").strip()
     target_type = 'open_id' if value.startswith('ou_') else 'chat_id' if value.startswith('oc_') else 'unknown'
     allowed = target_type != 'unknown' and len(value) > 3
+    if target_type == 'chat_id':
+        from ..adapter.protocol import parse_feishu_conversation_address
+
+        try:
+            _chat, topic = parse_feishu_conversation_address(value)
+            allowed = not topic
+        except ValueError:
+            allowed = False
     return ChannelTargetDecision(
         allowed,
         channel,

@@ -1,3 +1,5 @@
+2026-10-15 `.4` 真实群验收与表达修复（源码待发行）：真实卡已发送，B提交后准确输入ready、原Wake唯一handled、原主运行后继attempt完成，TaskLink完成；卡字段无重复。自然等待正文却误称没有工具，这是单独的表达失败，不能由输入账通过抵消。当前输入等待薄表达仅带pending事实，缺少其它阶段已有的presentation_only与公开归档核验；现从completion抽取同一安全投影供input_wait及后续input_resume_pending共用，仍以零工具、同模型生成正文。成功计数只认当前请求已归档操作，不从pending推断投递；参数、输出、任意metadata、内部ID/ref与旧业务历史均不进入该投影。native实际唯一canonical UserTurn含这些事实，公共布局随后仍附RuntimeFactsTurn，不宣称它是wire最后一条user消息。真实provider wire未保存，缺口由部署源码及fake/native红绿定位；新候选仍须少量真实自然表达复验。详见[表达交接](../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#输入等待薄表达事实追加2026-10-15)。
+
 2026-10-15 首次普通 Gateway 输入入口（源码已修复，真实租户待验）：真实本机请求在密钥初始化前因缺 ConversationTaskLink 失败；原前台 claim 与持久 task 编号不同又会导致资格误拒绝。已沿原任务晋升、typed writer、执行目标和 RuntimeDB 修复；作者及非作者独立复现同一 15 文件 343 项全部通过，数字不相加。当前不宣称真实凭据卡提交/取消/Wake 或租户 OAuth 已验收，详见 [本次交接](../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。下方历史阶段描述保持原时点。
 
 2026-10-14 实施更新（第一批联合验收中）：S21/S22/S23已接入原工具、TaskCredential和输入依赖。存储/密钥/配额/发送回执分阶段；四种简单表单、原群当前成员提供、原任务重发、独立候选和同卡重复决定恢复已实现。私人首设/解锁、模型私密配置保持原锁。CLI适配器补传实际Gateway端口与配置认证，模型按钮在隔离回环服务通过；真实飞书客户端字段渲染、密码控件兼容与租户点击未验，不能将历史现场故障宣布为全部消除。下文“待实施”为原评估时点，准确测试结果见本期实施记录。

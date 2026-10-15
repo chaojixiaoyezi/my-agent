@@ -21,6 +21,7 @@ from .group_authorization import (
     GROUP_CAPABILITIES,
     GroupAuthoritySnapshot,
     GroupAuthorizationError,
+    actor_group_chat_id,
     group_chat_id,
     member_has_group_capability,
     read_group_authorization,
@@ -100,8 +101,8 @@ def _reject_foreign_active_lease(home):
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
 
 
-# LLM: actor 只认宿主专有字段/认证控制；runner 线程优先，缺线程的 child 不退父级；显式参数仍核原 ThreadStore。
-# 函数用途: 为实际工具、子代理或人工控制取得准确发起人，缺证明明确拒绝。
+# LLM: actor只认宿主专有字段及原ThreadStore；topic用同源严格地址parser核基础群，保留完整绑定，缺child线程不退父级。
+# 函数用途: 为工具、子孙及人工配置控制核准确原话题发起人，归群投影不扩大其作用域。
 def group_operation_actor(agent, thread_id='', actor=None):
     if not thread_id:
         from ..runtime_context import current_subagent_run_id, current_task_attributes
@@ -119,7 +120,7 @@ def group_operation_actor(agent, thread_id='', actor=None):
     elif isinstance(actor, HostChannelActor):
         actor = _validate_scope(agent, thread_id, actor)
     if (not isinstance(actor, HostChannelActor) or actor.owner_id != agent.home_paths.owner_id
-            or actor.channel != agent.home_paths.owner_provider or actor.conversation_id != group_chat_id(agent.home_paths)):
+            or actor.channel != agent.home_paths.owner_provider or actor_group_chat_id(actor) != group_chat_id(agent.home_paths)):
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
     return actor
 
@@ -186,17 +187,26 @@ def bind_group_control_host(base, host, scope, thread_id):
     return host
 
 
-# LLM: 调用方已核真实 SDK actor、原签名及卡片来源；仅恢复签名原群线程的 actor，cancel 不需建立配置写权限。
-# 函数用途: 为私人模型表单最终保存绑定原群来源，避免把私聊位置变成另一个 owner 或借其它成员身份。
+# LLM: 调用方已核真实SDK actor/签名/卡来源；仅从签名准确thread的原origin唯一绑定恢复topic，歧义/跨owner拒绝，不读attrs/latest。
+# 函数用途: 为私聊模型表单恢复原群或话题发起人，仍由原配置grant锁内复核，cancel无需写权限。
 def bind_group_interaction_host(base, host, payload, actor_id):
     host.delivery_service = getattr(base, 'delivery_service', None)
     if getattr(host.home_paths, 'owner_kind', '') != 'group':
         return host
     if not actor_id or payload.get('actor_id') != actor_id:
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
-    scope = SimpleNamespace(channel=payload.get('channel'), conversation_id=group_chat_id(host.home_paths),
+    from ..conversation.execution_threads import execution_origin_thread
+
+    thread_id = payload.get('thread_id', '')
+    source = execution_origin_thread(host.conversation_store.threads.require,
+        host.conversation_store.threads.require(thread_id))
+    conversations = {binding.channel_conversation_id for binding in source.channel_bindings
+        if binding.channel == payload.get('channel')}
+    if source.owner_id != host.home_paths.owner_id or len(conversations) != 1:
+        raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
+    scope = SimpleNamespace(channel=payload.get('channel'), conversation_id=next(iter(conversations)),
         user_id=actor_id, metadata={'channel_message_id': payload.get('control_id', '')})
-    return bind_group_control_host(base, host, scope, payload.get('thread_id', ''))
+    return bind_group_control_host(base, host, scope, thread_id)
 
 
 # LLM: 最终人格仓库按实际目标文件的原布局逆解析 owner；扩大构造 owner_home 不能掩盖受管群文件，内容不作授权。

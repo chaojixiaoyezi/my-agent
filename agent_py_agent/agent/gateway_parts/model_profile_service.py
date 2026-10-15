@@ -96,8 +96,8 @@ def _scoped_model_host(base_agent, scope) -> tuple[SimpleNamespace, object]:
 
 
 # LLM: 目标只认当前列表里的编号或精确配置编号；select 只改本会话，set_default 只改未来默认，都经原写入口。
-# 列表不含密钥和接口地址；IM 卡的私人表单走原签名控制，TUI 与文字选择继续沿原入口。
-# 函数用途: 执行聊天里的 /model 文字命令并返回可直接发给用户的中文回执；select/set_default 会写模型配置。
+# 列表不含密钥；群卡先核原群actor再把topic仅投影到运输basechat，签名thread仍保持原会话，私人表单走原控制。
+# 函数用途: 执行/model查看及配置选择；群卡不向内部topic键或跨群地址外发，select/default沿原写入口。
 def execute_model_text_control(base_agent, command: ConversationControlCommand, scope) -> ConversationControlResult:
     try:
         host, thread = _scoped_model_host(base_agent, scope)
@@ -111,7 +111,13 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
             capability = capability_config_for_agent(base_agent)
             if capability is None or getattr(capability, "im_model_cards_enabled", True):
                 owner = resolve_gateway_scope_owner(base_agent, scope)
-                target = scope.conversation_id if scope.metadata.get("channel_chat_type") == "group" else scope.user_id
+                from ..conversation.channels import binding_delivery_target
+                from ..user_space.group_authorization_context import group_operation_actor
+
+                if host.home_paths.owner_kind == 'group':
+                    group_operation_actor(host, thread.thread_id)
+                target = binding_delivery_target(scope.channel, scope.user_id, scope.conversation_id,
+                    group=host.home_paths.owner_kind == 'group')
                 send_model_control_card(base_agent, host, owner, actor_id=scope.user_id, thread_id=thread.thread_id,
                                         target=target, listing=listing)
                 return ConversationControlResult("model", True, "请在模型卡选择本会话或新会话默认；新增、编辑将发送到本人私聊。")

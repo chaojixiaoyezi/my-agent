@@ -1,3 +1,5 @@
+2026-10-15 话题卡片补验：群/model卡使用已核owner的group事实，将逻辑topic仅投影为实际运输群；签名thread仍沿原记录，私聊表单从精确原线程恢复唯一来源，撤权仍在最终写门复核。坏地址/跨群/歧义来源拒绝，真实新包卡片验收待收口，见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。
+
 2026-10-15 输入等待真实收尾修复：卡已发送后沿原零工具自然回复表达等待，pending 归 needs_user_input，不将持久输入判作业务失败；准确原 Wake 待消费时保留 TASK_INPUT_RESUME_PENDING，取消及已核后继只静默收当前执行片，不伪造 Goal 续跑。独立 24 文件 618 通过、4 项既有 xfail，真实新卡提交验收待新版部署，见[凭据入口交接](../../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。
 
 2026-10-15 群治理实施中：/group人工授权沿原tool_policy/CAS与provider事实；监控新工作与配置最终写门持同一策略锁，停止取消保持原权限。bot观察不走/ask，经原认证Ingress与scheduler event_source运行，不扩大普通无@人类消息。新scope与真实租户验收单列，见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。

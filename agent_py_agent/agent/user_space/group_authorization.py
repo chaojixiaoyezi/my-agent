@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from uuid import uuid4
 
+from ..adapter.protocol import parse_feishu_conversation_address
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
@@ -103,7 +104,7 @@ class GroupProviderEvent:
 
 
 # LLM: group owner 的规范身份来自已解析 home；不能从最新会话、显示名或模型参数选另一个群。
-# 函数用途: 取得本次策略对应的准确群编号，非群上下文明确拒绝。
+# 函数用途: 取得策略唯一基础群编号；飞书owner不得含话题或坏供应商地址，非群上下文拒绝。
 def group_chat_id(home) -> str:
     owner = getattr(home, 'owner_id', '')
     provider = getattr(home, 'owner_provider', '')
@@ -113,7 +114,23 @@ def group_chat_id(home) -> str:
     chat_id = owner.removeprefix(prefix)
     if not chat_id or '/' in chat_id:
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
+    if provider == 'feishu':
+        try:
+            base, topic = parse_feishu_conversation_address(chat_id)
+        except ValueError as exc:
+            raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID') from exc
+        if topic or base != chat_id:
+            raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
     return chat_id
+
+
+# LLM: 仅投影已核HostActor的群地址，完整topic身份不变；飞书只复用protocol严格parser，其它provider保持原准确相等合同。
+# 函数用途: 为群授权比较取得基础群，不把投影当作新的宿主身份或授权证明。
+def actor_group_chat_id(actor: HostChannelActor) -> str:
+    try:
+        return parse_feishu_conversation_address(actor.conversation_id)[0] if actor.channel == 'feishu' else actor.conversation_id
+    except ValueError as exc:
+        raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID') from exc
 
 
 # LLM: 缺授权块表示初次未授权，不能继承 auto、旧 operation_grants 或本机管理员权限。
@@ -190,11 +207,11 @@ def _same_application(block, snapshot):
     return (block['app_id'], block['tenant_key']) == (snapshot.app_id, snapshot.tenant_key)
 
 
-# LLM: 人工管理者必须仍在群内；历史邀请人仅来自本应用真实 bot-added 事件，老群不猜第一个发言人。
-# 函数用途: 为一次明确人工授权核验当前群主或有效邀请人身份。
+# LLM: 人工管理者仍须本应用/原基础群/当前成员；topic仅经同源parser核归群，不改原actor或邀请人证据。
+# 函数用途: 在原授权锁内核验话题或主群发起的人工授予/撤销，老群不猜邀请人。
 def _grantor_authority(home, block, snapshot, actor):
     if (not isinstance(actor, HostChannelActor) or actor.owner_id != home.owner_id
-            or snapshot.provider != home.owner_provider or actor.channel != snapshot.provider or actor.conversation_id != snapshot.chat_id
+            or snapshot.provider != home.owner_provider or actor.channel != snapshot.provider or actor_group_chat_id(actor) != snapshot.chat_id
             or snapshot.chat_id != group_chat_id(home)):
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
     if actor.actor_id not in snapshot.member_ids:

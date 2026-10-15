@@ -32,6 +32,7 @@ from agent_py_agent.agent.user_space.task_credentials import (
     manage_credential,
     request_credential_card,
 )
+from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 from agent_py_agent.tests.test_background_tool_approval import background
 from agent_py_agent.tests.test_task_credentials import _card
 from agent_py_agent.tests.test_tool_loop_recovery_scope import _params
@@ -84,8 +85,10 @@ def test_callback_before_pair_archive_is_recorded_but_not_dispatched(background)
 
 def test_wait_tool_queues_one_reply_from_canonical_input_facts(background, monkeypatch):
     from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        natural_user_reply_model_params,
         pending_natural_user_reply,
     )
+    from agent_py_agent.agent.backends.tool_ir import UserTurn
 
     _card(background)
     monkeypatch.setattr('agent_py_agent.agent.tooling.task_credential_tool.capability_config_for_agent',
@@ -101,6 +104,17 @@ def test_wait_tool_queues_one_reply_from_canonical_input_facts(background, monke
     assert phase['facts']['input_dependency']['input_id'] == dependency['input_id']
     assert phase['facts']['input_dependency']['status'] == 'pending'
     assert phase['facts']['user_input_required'] is True
+    assert phase['facts']['turn_execution'] == {
+        'presentation_only': True, 'tool_execution_observed': False,
+        'executed_tool_count': 0, 'successful_operation_count': 0, 'failed_operation_count': 0,
+    }
+    assert 'operation_verification' not in phase['facts']
+    expression = natural_user_reply_model_params(replace(params,
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id=params.run_id, source_protocol='native')))
+    assert expression.allowed_tools == [] and expression.tool_context == []
+    assert len(expression.tool_ir_history) == 1
+    assert isinstance(expression.tool_ir_history[-1], UserTurn)
+    assert expression.tool_ir_history[-1].text == '# User Task\n' + expression.user_prompt
     assert not prepare_input_wait_reply(background.agent, params)
     assert task_has_waiting_input(background.agent, background.task_id)
     assert background.store.wakes.pending() == []
@@ -117,14 +131,29 @@ def test_disabled_credentials_never_publishes_input(background, monkeypatch):
 def test_input_wait_projects_safe_row_facts_and_precedes_dispatch_without_draining(background, monkeypatch):
     from agent_py_agent.agent.agent_core import _tool_loop_service as loop
     from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        natural_user_reply_model_params,
         pending_natural_user_reply,
         queue_natural_user_reply,
     )
+    from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, UserTurn
 
     row = create_input_dependency(background.agent, tool_approval_scope(background.agent, background.task_id),
         input_id='generic-safe-projection', provider='test-provider', expires_at=time.time()+60,
         metadata={'untrusted_extra': 'Synthetic-Private-Canary'})
     params = _params(task_id=background.task_id, run_id=background.task_id)
+    params.executed_tools.append('write_file')
+    params.archive_tool_calls.append({
+        'tool': 'write_file', 'ok': True, 'handler_executed': True,
+        'tool_operation_status': 'succeeded', 'effect_outcome': 'confirmed',
+        'parameters': {'path': 'Synthetic-Private-Canary', 'content': 'Synthetic-Private-Canary',
+            'action': 'Synthetic-Private-Canary'},
+        'output': 'Synthetic-Private-Canary',
+        'metadata': {'secret': 'Synthetic-Private-Canary'},
+        'tool_result_envelope': {'secret': 'Synthetic-Private-Canary'},
+        'operation_id': 'Synthetic-Private-Canary', 'call_id': 'Synthetic-Private-Canary',
+        'result_refs': ['Synthetic-Private-Canary'],
+    })
     queue_natural_user_reply(params, kind='background_dispatch', facts={'dispatch_registered': True})
     record_input_wait(background.agent, params, SimpleNamespace(ok=True, metadata={
         'handler_details': {'input_dependency': {'input_id': row['input_id'], 'status': 'waiting_input'}}}))
@@ -133,6 +162,28 @@ def test_input_wait_projects_safe_row_facts_and_precedes_dispatch_without_draini
     assert phase['kind'] == 'input_wait'
     assert set(phase['facts']['input_dependency']) == {'input_id', 'provider', 'status', 'expires_at'}
     assert 'Synthetic-Private-Canary' not in json.dumps(phase)
+    assert phase['facts']['turn_execution']['successful_operation_count'] == 1
+    assert set(phase['facts']['operation_verification']) == {
+        'schema', 'status', 'operation_count', 'omitted_operation_count', 'counts', 'groups',
+    }
+    assert set(phase['facts']['operation_verification']['groups'][0]) == {
+        'tool', 'action', 'label', 'status', 'count', 'replayed',
+    }
+    params.tool_context.append('Synthetic-Private-Canary')
+    params.tool_ir_history.extend([UserTurn('Synthetic-Private-Canary'),
+        AssistantTurn(text='Synthetic-Private-Canary')])
+    params.provider_history_messages.append({'role': 'user', 'content': 'Synthetic-Private-Canary'})
+    expression = natural_user_reply_model_params(replace(params,
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id=params.run_id, source_protocol='native')))
+    assert expression.allowed_tools == [] and expression.tool_context == []
+    assert expression.provider_history_messages == []
+    assert len(expression.tool_ir_history) == 1
+    assert isinstance(expression.tool_ir_history[-1], UserTurn)
+    assert 'Synthetic-Private-Canary' not in str(expression.tool_ir_history)
+    assert 'Synthetic-Private-Canary' not in expression.user_prompt
+    wire = _native_provider_messages(background.agent, expression)
+    assert wire and wire[-1]['role'] == 'user'
+    assert 'Synthetic-Private-Canary' not in json.dumps(wire)
     monkeypatch.setattr(loop, '_drain_pending_deferred_tool_calls', lambda *args: pytest.fail('等待回执不能重执行业务'))
     assert loop._pending_drain_outcome(background.agent, params, 1) == (1, None, False, '')
     phase['kind'] = 'input_resume_pending'

@@ -102,3 +102,26 @@ python3 -m pytest agent_py_agent/tests/test_gateway_credential_live_entry.py age
 ### 建议下一步
 
 根先等待非作者按冻结diff复核事件等待、静默取消、原attempt/CAS与父兄弟边界，再串行跑最终严格gate并发行新版；随后用真实新卡完成提交单Wake验收。可并行只读复核或隔离fake回归，真实卡/私密配置/服务/发行保持根单一执行者。不要把原`.3`卡成功当作本次全过程验收，也不要把旧343项和本轮计数累计。
+
+
+## 输入等待薄表达事实追加（2026-10-15）
+
+### 真实事实与归因边界
+
+已发布`.20261015.4`（`9f2bc0120869cd07a3b2eb18f9d8ae8b2da07890`）真实群卡出现、字段无重复；根以B提交合成值后，本线仅读准确测试请求元数据：原输入ready、唯一原Wake handled、后继attempt done、主运行与TaskLink done，申请操作仍仅一次。根观察等待自然正文却称无工具/无法发卡，故卡片与权限链通过、自然表达失败分别记账。未读取秘密/表单值，未做实际canary等值扫描；原工具输出只检查敏感值字段有无，不扩大成全链路秘密证明。
+
+准确Gateway响应不保留provider prompt，不能反推实际wire全文；原model usage证明业务采样加表达采样各一次，无重试。部署源码中`prepare_input_wait_reply`没有其它阶段已有的`turn_execution.presentation_only`与公开操作核验，零工具薄表达清掉了业务历史。此为可证上下文缺口；不声称已经证明模型内部因果。安全诊断、两次快照及红绿JUnit均保留仓外，不复制真实owner/actor、表单或聊天正文进仓库。
+
+### 最小通用修复与验证
+
+沿本交接已有Codex/Agents参考和原自然表达合同，仅将`completion._interim_reply_facts`既有安全执行投影抽为`turn_execution_reply_facts`，原调用与`input_tool_boundary.prepare_input_wait_reply`共用。当前请求归档经`public_operation_verification`只留下聚合工具/Schema动作/终态及计数；presentation_only说明表达轮有意无工具，成功数不由输入pending、正文或任意metadata制造。input_resume_pending重写保留同一事实，不新增业务模型采样、卡片、Wake、输出关键词门或固定回执。无归档时真实成功数为0。
+
+本片独占生产仅`agent_core/tool_loop/completion.py`和`conversation/input_tool_boundary.py`；测试仅`test_gateway_credential_live_entry.py`、`test_persistent_task_input.py`，文档仅本交接、凭据设计与TESTS。无新文件、依赖或配置；不改公共native布局。真实fake backend messages中的唯一canonical UserTurn包含准确JSON事实，其后公共RuntimeFactsTurn仍投影为user role；测试分别核验末尾typed UserTurn和实际wire事实，不把二者混称。合成canary注入参数、output、任意metadata、信封、内部operation/call/ref、旧IR/provider历史及tool_context，验证phase、表达IR/user_prompt和native消息均不含canary。
+
+首轮3项反例均在旧源码缺turn_execution处红；最终冻结下列5文件181收集=177通过、4项既有runtime_guidance xfail、0失败/错误，包含更严格native canary断言；JUnit为仓外`input-expression-facts-final.xml`，安全摘要为`input-expression-facts-finalfreeze.json`，不累计交叉数字。局部Ruff、doc_sync、strict尺寸（hard=0、blocked=False）与diff均通过；根统一严格gate、构包和真实自然表达重验。本线未提交、部署、外发或改真实数据。
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_gateway_credential_live_entry.py agent_py_agent/tests/test_persistent_task_input.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_background_public_receipt_contract.py agent_py_agent/tests/test_current_turn_execution.py -q --tb=short
+```
+
+建议下一步：根先统一审阅2生产文件的安全投影与5文件冻结结果，再与其它独占线集成严格gate及新包；真实群/私聊仅少量验证自然表达和提交单Wake。可并行只读复核，实际UI、配置、服务、发行继续由根串行执行，不以fake正文代替真实表达验收。

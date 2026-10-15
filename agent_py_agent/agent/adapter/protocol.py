@@ -1,5 +1,5 @@
 # LLM: 适配器投影平台结构事实与显式入站受理结果；只有 accepted/稳定 ignored 可完成运输去重，retryable 不授予身份或成功。
-# 模块用途: 转换通道消息并声明受理回执；保留原会话和媒体引用，不发请求或记录正文诊断。
+# 模块用途: 转换通道消息、校验准确飞书会话地址并声明受理回执；保留原话题身份，不发请求或记录正文诊断。
 from __future__ import annotations
 
 import hashlib
@@ -134,6 +134,15 @@ def feishu_conversation_id(message: dict[str, Any]) -> str:
     if chat_id and topic_id:
         return f"{chat_id}:thread:{topic_id}"
     return chat_id or topic_id
+
+
+# LLM: 此解析器只核基础群及固定thread地址结构；topic为有界opaque锚，不枚举前缀或当API消息ID，不授予权限或改actor。
+# 函数用途: 取得逻辑会话的原群和可选话题锚；坏地址明确拒绝，调用方仍保留完整会话绑定。
+def parse_feishu_conversation_address(value: object) -> tuple[str, str]:
+    match = re.fullmatch(r'(oc_[A-Za-z0-9_-]{1,256})(?::thread:([A-Za-z0-9_-]{1,256}))?', value) if isinstance(value, str) else None
+    if match is None:
+        raise ValueError('CHANNEL_TARGET_INVALID')
+    return match.group(1), match.group(2) or ''
 
 
 # 兼容此前模块内使用者；新入口应导入不带下划线的公共 helper，避免规模化链路

@@ -163,13 +163,13 @@ def test_missing_background_actor_cannot_make_group_approval_or_monitor(tmp_path
 
 # LLM: 使用真正 SimpleAgent、创建服务、ThreadTaskLink 和序列化；只给一次合成 root 绑定，不替 runner 做任务。
 # 函数用途: 验证主根不是 SubAgentTask 时仍能创建/恢复孩子，且孙级沿原专有字段继承。
-def managed_child(tmp_path):
+def managed_child(tmp_path, *, conversation_id='oc_group'):
     agent = _agent(tmp_path, group="oc_group")
-    source = agent.conversation_store.threads.get_or_create({"channel": "feishu", "channel_conversation_id": "oc_group",
+    source = agent.conversation_store.threads.get_or_create({"channel": "feishu", "channel_conversation_id": conversation_id,
         "channel_user_id": "ou_one", "canonical_user_id": "ou_one", "owner_id": agent.home_paths.owner_id,
         "owner_home": str(agent.home_paths.owner_home_dir)})
     actor = actor_from_scope(agent, SimpleNamespace(channel="feishu", channel_user_id="ou_one",
-        channel_conversation_id="oc_group"), source.thread_id, "gwreq-one")
+        channel_conversation_id=conversation_id), source.thread_id, "gwreq-one")
     agent._current_run_params = RunParams(request_id="gwreq-one", task_id="gwreq-one",
         task_attributes={"conversation_thread_id": source.thread_id}, host_channel_actor=actor)
     from agent_py_agent.tests.test_group_authorization import (
@@ -184,8 +184,9 @@ def managed_child(tmp_path):
     return agent, source, actor, child
 
 
-def test_model_top_level_and_attributes_cannot_override_persisted_child_actor(tmp_path):
-    agent, source, actor, child = managed_child(tmp_path)
+@pytest.mark.parametrize('conversation_id', ['oc_group', 'oc_group:thread:om_topic'])
+def test_model_top_level_and_attributes_cannot_override_persisted_child_actor(tmp_path, conversation_id):
+    agent, source, actor, child = managed_child(tmp_path, conversation_id=conversation_id)
     restored = agent.subagents.load(child.id)
     assert restored.host_channel_actor == actor.to_record()
     assert "host_channel_actor" not in restored.attributes and "channel_user_id" not in restored.attributes
@@ -201,8 +202,9 @@ def test_model_top_level_and_attributes_cannot_override_persisted_child_actor(tm
     assert task_host_actor(agent, grandchild) == actor
 
 
-def test_child_actor_controls_own_monitor_and_same_recipient_after_restore(tmp_path):
-    agent, source, actor, child = managed_child(tmp_path)
+@pytest.mark.parametrize('conversation_id', ['oc_group', 'oc_group:thread:om_topic'])
+def test_child_actor_controls_own_monitor_and_same_recipient_after_restore(tmp_path, conversation_id):
+    agent, source, actor, child = managed_child(tmp_path, conversation_id=conversation_id)
     agent._current_run_params = RunParams(task_id=child.root_id, run_id=child.id,
         task_attributes=child.attributes, host_channel_actor=task_host_actor(agent, child))
     tool = ScheduleTool(agent)
@@ -311,8 +313,9 @@ def test_legacy_main_root_cannot_borrow_foreign_work_for_monitors_or_approval(tm
     assert agent.scheduler_repository.store_path.read_bytes() == before
 
 
-def test_child_owner_root_or_parent_actor_conflict_is_rejected(tmp_path):
-    agent, _source, actor, child = managed_child(tmp_path)
+@pytest.mark.parametrize('conversation_id', ['oc_group', 'oc_group:thread:future_topic'])
+def test_child_owner_root_or_parent_actor_conflict_is_rejected(tmp_path, conversation_id):
+    agent, _source, actor, child = managed_child(tmp_path, conversation_id=conversation_id)
     child.owner = "other-owner"
     with pytest.raises(HostActorError) as caught:
         task_host_actor(agent, child)
@@ -343,11 +346,12 @@ def test_first_delegated_session_task_restores_actor_before_main_root_promotion(
 
 
 @pytest.mark.parametrize("invalid", ["wrong_target", "wrong_sender", "wrong_policy", "scheduled", "owner", "bad_root"])
-def test_delegated_restore_requires_original_task_target_source_policy_and_owner(tmp_path, monkeypatch, invalid):
+@pytest.mark.parametrize('conversation_id', ['oc_a', 'oc_a:thread:future_topic'])
+def test_delegated_restore_requires_original_task_target_source_policy_and_owner(tmp_path, monkeypatch, invalid, conversation_id):
     from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
     from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
 
-    agent, _, task, _, source = runtime_fixture(tmp_path, monkeypatch)
+    agent, _, task, _, source = runtime_fixture(tmp_path, monkeypatch, conversation_id=conversation_id)
     thread_id = task.target_thread_id
     if invalid == "wrong_target":
         thread_id = source.thread_id

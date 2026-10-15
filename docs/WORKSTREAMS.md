@@ -1,3 +1,7 @@
+2026-10-15 `.5` 源码冻结：input与topic两线已停写，独立只读复核未见可证P1/P2；根统一55 focused收集1255项，1250通过/4既有xfail/1端口占用跳过及全部严格门通过。共享freeze由发行线单点，Mac/Linux按平台独占并行；生产配置/服务/UI和原应用恢复由根独占。真实自然表达、订阅正例及取消未验，不计作通过。
+
+2026-10-15 真实补验第三轮：输入线独占completion/input_tool_boundary及直接测试/原凭据文档，复用公开执行事实，不改native全局布局；话题线独占原protocol/群授权/context/channels/Delivery registry/Feishu与model_profile_service，保留完整actor/topic仅投影运输地址。发行线只写新`.5`仓外工件与离线输入；根独占真实双账号、配置/服务、全局文档与最终main。
+
 2026-10-15 真实补验第二轮：凭据线独占原 input_tool_boundary、tool_loop自然表达、runtime收尾及其7份测试，冻结后非作者独立618通过/4既有xfail。引用线独占 Feishu 引用/manager、Gateway引用入参、scheduler event_source/rules/tool，随后获准沿原 TaskLink/SessionTask 增加受保护根输入引用，主子孙只核原根谱系，不放模型attrs。根独占真实双账号、配置/服务/发行与全局文档，引用线不得改凭据线冻结文件；模型配置与凭据测试仅使用合成值。
 
 2026-10-15 首次 Gateway 凭据入口修复：沿根准确 main 集成树逐文件独占。凭据线负责原 tool_approval_scope、凭据/授权工具、获根批准的 OAuth status 小切片及直接测试；非作者只读核验 typed writer、基础队列来源、owner/thread/当前 attempt、停止与输入回调。作者及非作者独立同命令 343 项通过，不重复累计。该线另获授权独占本期七份全局文档最小同步；根独占真实 UI、私密配置、最终严格 gate、提交、部署与发行。无 writer 的独立 HTTP 审批回调不猜队列，真实租户凭据提交/取消/Wake 仍待验。文件和交接见 [IM_CREDENTIAL_LIVE_ENTRY_HANDOFF](tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。

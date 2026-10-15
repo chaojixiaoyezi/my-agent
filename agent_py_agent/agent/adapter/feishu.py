@@ -40,6 +40,7 @@ from .protocol import (
     IncomingMessage,
     OutgoingMessage,
     feishu_to_incoming,
+    parse_feishu_conversation_address,
     provider_message_reference,
 )
 
@@ -156,12 +157,15 @@ def _send_with_fallback(text: str, send: Callable[[str, str], dict[str, Any]]) -
     return False
 
 
-# LLM: 地址来自原 owner/origin 授权入口；只有两种飞书供应商编号，不能把群地址当用户或回落管理员。
-# 函数用途: 为普通文字、附件和无引用进度选择准确的飞书接收编号类型。
+# LLM: 地址来自原owner/origin投影；内部topic必须先由授权绑定选basechat，运输不自行剥topic借权，不回落管理员。
+# 函数用途: 选择供应商接收编号类型，原始topic或坏群地址在发请求前拒绝。
 def _message_send_path(target: str) -> str:
     if target.startswith('ou_') and len(target) > 3:
         return '/im/v1/messages?receive_id_type=open_id'
     if target.startswith('oc_') and len(target) > 3:
+        _chat, topic = parse_feishu_conversation_address(target)
+        if topic:
+            raise ValueError('CHANNEL_TARGET_INVALID')
         return '/im/v1/messages?receive_id_type=chat_id'
     raise ValueError('CHANNEL_TARGET_INVALID')
 

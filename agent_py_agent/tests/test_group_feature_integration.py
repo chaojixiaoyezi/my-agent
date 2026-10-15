@@ -100,7 +100,8 @@ def test_event_rule_cannot_forge_sender_or_enable_deployment_switch_locally(tmp_
         sources.schedule_from_event_input(agent, {'source_message_ids': ['om_one']})
 
 
-def test_source_network_preflight_does_not_hold_policy_lock_and_revoke_wins_final_write(tmp_path, monkeypatch):
+@pytest.mark.parametrize('topic', [False, True])
+def test_source_network_preflight_does_not_hold_policy_lock_and_revoke_wins_final_write(tmp_path, monkeypatch, topic):
     from agent_py_agent.agent.common.json_io import locked_json_path
     from agent_py_agent.agent.user_space.group_authorization import (
         GroupAuthorizationChange,
@@ -108,7 +109,8 @@ def test_source_network_preflight_does_not_hold_policy_lock_and_revoke_wins_fina
     )
     from agent_py_agent.tests.test_group_authorization import _snapshot
 
-    agent, _source, actor, raw, _calls = _case(tmp_path)
+    agent, _source, actor, raw, _calls = _case(tmp_path,
+        conversation_id='oc_source:thread:om_topic' if topic else 'oc_source')
     saved = _allow(agent, raw, actor, subject=actor.actor_id)
     monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_args: dict(raw))
     def resolve(_agent, chat, message):
@@ -144,6 +146,86 @@ def test_event_model_schema_exposes_references_for_top_level_and_each_rule():
     assert validate_tool_input(base, build_schedule_tool_model_spec().input_schema).ok
     base['rules'][0]['schedule']['source_message_ids'] = ['om_one']
     assert not validate_tool_input(base, build_schedule_tool_model_spec().input_schema).ok
+
+
+def test_topic_group_delivery_projects_only_transport_address():
+    from agent_py_agent.agent.conversation.channels import binding_delivery_target
+
+    topic = 'oc_source:thread:om_topic'
+    assert binding_delivery_target('feishu', 'ou_member', topic, group=True) == 'oc_source'
+    assert binding_delivery_target('feishu', 'ou_member', topic, group=False) == 'ou_member'
+
+
+@pytest.mark.parametrize('target', ['oc_source:thread:om_topic', 'oc_source:thread:omt_topic',
+    'oc_source:thread:', 'oc_source:other:om_topic', 'oc_source/other'])
+def test_raw_topic_or_malformed_receive_id_is_rejected_before_transport(target):
+    from agent_py_agent.agent.adapter.feishu import _message_send_path
+    from agent_py_agent.agent.delivery.registry import _validate_feishu_target
+
+    assert not _validate_feishu_target('feishu', target).allowed
+    with pytest.raises(ValueError, match='CHANNEL_TARGET_INVALID'):
+        _message_send_path(target)
+
+
+def test_topic_subscription_proof_background_route_and_provider_use_exact_base_group(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.adapter import feishu
+    from agent_py_agent.agent.adapter.protocol import provider_message_reference
+    from agent_py_agent.agent.conversation.background_routing import (
+        BackgroundRouteDependencies,
+        resolve_background_route,
+    )
+    from agent_py_agent.agent.delivery import (
+        ChannelAdapterRegistry,
+        ChannelCapabilities,
+        DeliveryContext,
+        DeliveryService,
+        ReplyEnvelope,
+    )
+
+    topic = 'oc_source:thread:om_topic'
+    agent, source, actor, raw, _ = _case(tmp_path, conversation_id=topic)
+    _allow(agent, raw, actor, subject=actor.actor_id)
+    agent._current_run_params.source = 'gateway'
+    reference = provider_message_reference('om_source')
+    agent._current_run_params.host_message_references = ((reference, 'om_source'),)
+    seen, sent = [], []
+    monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_: dict(raw))
+
+    # LLM: 仅替代原官方Get传输，记录精确basechat+消息；原schema/授权/规则与持久化均为真实入口。
+    # 函数用途: 为合成来源证明返回同应用同群的其他机器人身份。
+    def get_source(_agent, chat, message):
+        seen.append((chat, message))
+        return {'app_id': raw['app_id'], 'chat_id': chat, 'source_message_id': message,
+            'sender_id': 'cli_other_bot', 'sender_id_type': 'app_id'}
+
+    monkeypatch.setattr(sources, 'resolve_bot_source', get_source)
+    result = ScheduleTool(agent).execute({'action': 'create', 'name': '合成订阅', 'prompt': '合成一行',
+        'schedule_kind': 'event_source', 'event_source': {'source_message_refs': [reference]}, 'delivery': {'mode': 'origin'}})
+    assert result.ok, result.output
+    job = agent.scheduler_repository.get_job(json.loads(result.output)['job']['job_id'])
+    assert seen == [('oc_source', 'om_source')] and job['source_thread_id'] == source.thread_id
+    assert agent._current_run_params.host_channel_actor == actor and actor.conversation_id == topic
+    channel, target = resolve_background_route(BackgroundRouteDependencies(agent.conversation_store.threads.load,
+        lambda: (), lambda: ('', '')), job['thread_id'])
+    assert (channel, target) == ('feishu', 'oc_source')
+
+    # LLM: 仅替代平台HTTP出口，不补投递结果账；真实Delivery/adapter正文构造必须给准确供应商receive_id。
+    # 函数用途: 记录最终物理群地址并返回供应商成功形状，无网络。
+    def provider(method, path, body, _token):
+        sent.append((method, path, body['receive_id']))
+        return {'code': 0}
+
+    monkeypatch.setattr(feishu, '_feishu_msg_api_with_retry', provider)
+    registry = ChannelAdapterRegistry()
+    registry.register_adapter('feishu', SimpleNamespace(send_message=lambda target, message:
+        feishu._send_feishu_rendered(target, message.content, 'synthetic-token')),
+        capabilities=ChannelCapabilities(text=True, proactive=True))
+    receipt = DeliveryService(registry).deliver(DeliveryContext(channel=channel, target=target, mode='proactive'),
+        ReplyEnvelope(content='合成一行'))
+    assert receipt.delivery_status == 'sent'
+    assert sent == [('POST', '/im/v1/messages?receive_id_type=chat_id', 'oc_source')]
 
 
 def test_nested_event_public_input_resolves_host_reference_before_canonical_rules(tmp_path, monkeypatch):

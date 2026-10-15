@@ -83,3 +83,25 @@ Gateway请求文件回收后仍可从准确原输入恢复；不把引用复制�
 这些合成合同与回放不代表生产部署或真实订阅成功；`.3`故障证据保留，真实租户须在新发行后独立重验。
 
 建议下一步：根统一严格gate、提交及新发行，再由独占测试入口完成普通群成员、授权成员与真实引用订阅验收；可并行只读审计，主线单点部署，不自动扩大平台scope。
+
+## 2026-10-15 话题来源群授权修复（本地合同验收，待新发行）
+
+`.20261015.4` 的真实引用订阅已进入正确公开schema及原来源证明，但授权门将完整话题会话键与基础群编号强等，
+在副作用前以GROUP_AUTHORIZATION_INVALID拒绝，已有grant尚未参与判定；该失败不算订阅成功，原发行证据保留。
+
+`adapter/protocol.parse_feishu_conversation_address`统一解析基础群及固定`:thread:`地址结构。
+话题锚为有界安全字符的opaque标识，不封闭枚举前缀、不当作API消息编号；空段、额外分隔、空白及路径字符拒绝。
+归群只比较完整解析后的基础群，不按starts-with或随意拆分放宽；权限仍来自准确原ThreadStore、HostActor、owner及当前人工授权。
+主群和已核同群话题可共用原群grant；原HostActor.conversation_id、source_thread、TaskLink及委派/子孙身份始终保留完整话题。
+同基础群的另一个topic也不能替换原绑定，跨群/坏地址/陈旧attempt或坏原谱系仍拒绝。
+
+原bot证明继续从group owner取准确基础群，官方Get的消息编号、发送应用、群及人工授权合同不变。
+最终群通知仅在原结构化group上下文中投影为基础群运输地址；不把内部topic键放入receive_id，不增加API、scope或网络请求。
+原/model群卡同样核canonical group owner后投基础群，不能因缺channel_chat_type元数据改为私聊。
+私人表单回调只从签名准确thread的原origin唯一同channel绑定恢复完整topic，再复核actor与原配置grant；不猜latest binding或消费模型attrs。
+源owner不符、歧义绑定、错误actor或撤销后的保存均拒绝；取消继续原止损入口，不以新增配置权为条件。
+
+测试沿原/model、签名控制、私人表单保存/撤销、真实SessionTask/G1/子孙及DeliveryService/适配器路径，仅替换平台或模型传输。
+合成通过不能外推真实飞书订阅/卡片成功；新版本仍须统一严格gate、发行及独占真实验收。逻辑topic与物理basechat分离参考OpenClaw的targets/send-target/thread-bindings职责边界，本地采用严格单一parser，不复制宽松前缀权限。
+
+建议下一步：根统一新源码gate及发行后重验原普通授权成员引用订阅；只读审计可并行，真实服务、launcher和部署保持根单点。

@@ -41,6 +41,7 @@ class _InputBackend:
         self.arguments = arguments or {}
         self.calls = 0
         self.observed = ''
+        self.reply_messages = []
         self.tool_counts = []
 
     # LLM: 模型按需先发现工具，再发一次申请或查询；后续仅返回合成正文，不补产物或替宿主登记输入。
@@ -58,8 +59,41 @@ class _InputBackend:
             return ModelResponse(text='', backend=self.name, tool_use_blocks=[{
                 'id': 'synthetic-input-call', 'name': self.tool, 'input': self.arguments,
             }])
-        self.observed = json.dumps(kwargs.get('messages') or [], ensure_ascii=False, default=str)
+        self.reply_messages = kwargs.get('messages') or []
+        self.observed = json.dumps(self.reply_messages, ensure_ascii=False, default=str)
         return ModelResponse(text='已处理合成输入请求。', backend=self.name)
+
+
+# LLM: 核验 native 实际唯一 canonical 用户消息，而非 prompt 诊断副本；RuntimeFactsTurn 仍沿公共布局追加，不由回执文字推断成功。
+# 函数用途: 确认零工具输入表达收到已发生的执行事实，同时保持薄视图和秘密隔离。
+def _assert_input_reply_execution(backend, tool, kind='input_wait'):
+    user_tasks = []
+    for message in backend.reply_messages:
+        assert message['role'] == 'user'
+        content = message['content']
+        if isinstance(content, list):
+            assert all(item['type'] == 'text' for item in content)
+            content = ''.join(item['text'] for item in content)
+        if content.startswith('# User Task\n'):
+            user_tasks.append(content)
+    assert len(user_tasks) == 1
+    content = user_tasks[0]
+    assert content.startswith('# User Task\n[natural-user-reply]\n')
+    payload, _ = json.JSONDecoder().raw_decode(content.split('[natural-user-reply]\n', 1)[1])
+    assert payload['reply_kind'] == kind
+    facts = payload['facts']
+    execution = facts['turn_execution']
+    assert execution['presentation_only'] is True
+    assert execution['tool_execution_observed'] is True
+    assert execution['executed_tool_count'] >= 1
+    assert execution['successful_operation_count'] == 1
+    assert execution['failed_operation_count'] == 0
+    verification = facts['operation_verification']
+    assert verification['status'] == 'succeeded' and verification['operation_count'] == 1
+    assert len(verification['groups']) == 1
+    assert verification['groups'][0]['tool'] == tool
+    assert verification['groups'][0]['status'] == 'succeeded'
+    assert backend.tool_counts[-1] == 0
 
 
 # LLM: 基础 Gateway 与 owner 目录故意不同，工具必须使用原 writer 的队列路径；仅真实运输由记录器替换。
@@ -100,6 +134,7 @@ def test_first_gateway_credential_request_materializes_original_task_and_waits(t
     assert response['runtime_reason'] == 'TASK_INPUT_WAIT' and response['turn_end_reason'] == 'blocked'
     assert world.backend.calls == 2 and world.backend.tool_counts[-1] == 0
     assert '[natural-user-reply]' in world.backend.observed
+    _assert_input_reply_execution(world.backend, 'request_credentials')
     run = world.agent.subagents.runtime_db.main_agent_run_for_task(world.request_id)
     assert run['status'] == 'created'
     attempt = world.agent.subagents.runtime_db.current_attempt(run['agent_run_id'])
@@ -265,6 +300,9 @@ def test_card_resolved_during_expression_uses_remaining_input_or_original_wake(t
     elif not other_input:
         assert response['runtime_reason'] == 'TASK_INPUT_RESUME_PENDING' and response['ok']
     assert len(world.sent) == 1 and world.backend.calls == (2 if cancelled else 3)
+    if not cancelled:
+        _assert_input_reply_execution(world.backend, 'request_credentials',
+            'input_wait' if other_input else 'input_resume_pending')
     link = world.agent.conversation_store.tasks.load(world.request_id)
     assert link.status == 'active' and len(link.input_dependency_refs) == int(other_input)
     assert len(world.agent.conversation_store.wakes.pending()) == (1 if decision == 'submit' else 0)
@@ -368,6 +406,7 @@ def test_first_gateway_authorize_materializes_task_then_callback_uses_original_w
     assert response['ok'], (response.get('error_code'), response.get('error'))
     assert response['runtime_status'] == 'needs_user_input' and response['turn_end_reason'] == 'blocked'
     assert world.backend.calls == 3 and world.backend.tool_counts[-1] == 0
+    _assert_input_reply_execution(world.backend, 'feishu_auth')
     run = world.agent.subagents.runtime_db.main_agent_run_for_task(world.request_id)
     assert run['status'] == 'created'
     assert len(world.sent) == 1, json.loads(world.response_path.read_text())

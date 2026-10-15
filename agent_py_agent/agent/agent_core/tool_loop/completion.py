@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # LLM: 工具结果只驱动正常下一轮；本模块维护显式上下文转换和自然让出后的依赖等待，不因创建自动停工。
-# 模块用途: 处理工具轮收尾和模型阶段答复，避免把派工误当成任务完成或强制等待。
+# 模块用途: 处理工具轮收尾和模型阶段答复，共享安全执行事实投影，避免把派工误当成任务完成或强制等待。
 import json
 import time
 from dataclasses import dataclass
@@ -510,26 +510,9 @@ def _active_named_audit_facts(
     }
 
 
-def _interim_reply_facts(
-    agent: object,
-    params: ToolLoopExecuteParams,
-    *,
-    tool_rounds: int,
-    delegated: dict[str, object] | None = None,
-) -> dict[str, object]:
-    current_request = str(params.root_user_prompt or params.user_prompt or "").strip()
-    facts: dict[str, object] = {
-        "reply_is_interim": True,
-        "task_continues_without_more_user_input": True,
-        "current_user_request": _bounded_reply_fact_text(
-            current_request,
-            _MAX_WAIT_REPLY_REQUEST_CHARS,
-        ),
-        "completed_action_count": len(list(params.executed_tools or [])),
-        "tool_round_count": max(0, int(tool_rounds or 0)),
-    }
-    if len(current_request) > _MAX_WAIT_REPLY_REQUEST_CHARS:
-        facts["current_user_request_truncated"] = True
+# LLM: 仅从当前请求归档及既有公开核验投影取表达事实；不得携带参数、正文、任意metadata、路径或内部引用，也不从pending输入推断成功。
+# 函数用途: 为零工具自然回执说明已执行的主轮工作，供阶段回执和输入等待共用，不产生副作用。
+def turn_execution_reply_facts(agent: object, params: ToolLoopExecuteParams) -> dict[str, object]:
     verification = public_operation_verification(
         build_operation_verification(
             agent,
@@ -554,19 +537,44 @@ def _interim_reply_facts(
             if str(item or "").strip()
         }
     )
-    facts["turn_execution"] = {
-        # The follow-up model call only writes the user-facing sentence.  It
-        # intentionally receives no executable schemas, so that local detail
-        # must never be confused with the tool access or work already observed
-        # in the main turn.
-        "presentation_only": True,
-        "tool_execution_observed": bool(executed_tool_names or operation_count),
-        "executed_tool_count": len(executed_tool_names),
-        "successful_operation_count": succeeded_operation_count,
-        "failed_operation_count": failed_operation_count,
+    facts: dict[str, object] = {
+        "turn_execution": {
+            # 本表达轮无工具不代表主轮没有执行；成功数只认原归档操作终态。
+            "presentation_only": True,
+            "tool_execution_observed": bool(executed_tool_names or operation_count),
+            "executed_tool_count": len(executed_tool_names),
+            "successful_operation_count": succeeded_operation_count,
+            "failed_operation_count": failed_operation_count,
+        }
     }
     if operation_count > 0:
         facts["operation_verification"] = verification
+    return facts
+
+
+# LLM: 等待阶段只汇总当前请求和公开执行事实；新增状态须继续沿同一安全投影，不能恢复整包业务载荷。
+# 函数用途: 为活跃任务准备有界自然回执上下文，保留原用户指引及委派状态。
+def _interim_reply_facts(
+    agent: object,
+    params: ToolLoopExecuteParams,
+    *,
+    tool_rounds: int,
+    delegated: dict[str, object] | None = None,
+) -> dict[str, object]:
+    current_request = str(params.root_user_prompt or params.user_prompt or "").strip()
+    facts: dict[str, object] = {
+        "reply_is_interim": True,
+        "task_continues_without_more_user_input": True,
+        "current_user_request": _bounded_reply_fact_text(
+            current_request,
+            _MAX_WAIT_REPLY_REQUEST_CHARS,
+        ),
+        "completed_action_count": len(list(params.executed_tools or [])),
+        "tool_round_count": max(0, int(tool_rounds or 0)),
+    }
+    if len(current_request) > _MAX_WAIT_REPLY_REQUEST_CHARS:
+        facts["current_user_request_truncated"] = True
+    facts.update(turn_execution_reply_facts(agent, params))
     guidance = active_turn_user_input_texts(params.active_turn_user_inputs)
     if guidance:
         selected_guidance = guidance[-_MAX_WAIT_REPLY_GUIDANCE_ITEM_COUNT:]
@@ -735,4 +743,5 @@ __all__ = [
     "queue_interim_reply_for_tool_round_limit",
     "queue_reply_for_audit_prepare",
     "task_local_wait_response_for_open_subagents",
+    "turn_execution_reply_facts",
 ]
