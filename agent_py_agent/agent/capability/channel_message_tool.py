@@ -266,7 +266,9 @@ class SendMessageTool(BaseTool):
             task_id=base_context.task_id,
             idempotency_key=receipt_key,
         )
-        receipt = self._delivery.deliver(delivery_context, envelope)
+        receipt = _deliver_with_scheduler_scope(self.agent, self._delivery, delivery_context, envelope)
+        if isinstance(receipt, ToolHandlerOutcome):
+            return receipt
         if receipt.delivery_status != "sent":
             return _error(
                 "消息或附件没有成功送达当前聊天通道",
@@ -302,6 +304,19 @@ class SendMessageTool(BaseTool):
             payload,
             evidence_refs=evidence_refs,
         )
+
+
+# LLM: 原tool-call/idempotency键只引用既有操作，事件根由宿主task树取得；原job CAS准入先于实际运输，只有明确未准入才报告not_started。
+# 函数用途: 在原显式发送入口取得事件资格，不持store锁跨运输；普通任务零scheduler写，原Delivery回执仍是结果权威。
+def _deliver_with_scheduler_scope(agent, delivery, context, envelope):
+    from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
+
+    try:
+        with scheduler_effect_scope(agent, context.task_id, context.idempotency_key, kind='delivery'):
+            return delivery.deliver(context, envelope)
+    except SchedulerEffectRejected as exc:
+        return _error('原监控已停止或来源不可核验，消息未发送', exc.error_code,
+            effect_outcome='not_started', effect_source_ref='scheduler:event_effect_admission')
 
 
 # LLM: attachments 是开放世界的 artifact 引用数组；这里只限制资源数量和元素标量类型。

@@ -31,6 +31,7 @@ from .feishu_media import (
     file_upload_type,
     safe_media_filename,
 )
+from .feishu_observations import FeishuObservationMixin
 from .feishu_render import build_outbound_payload, split_message, strip_markdown_to_plain_text
 from .feishu_typing import FeishuTypingMixin
 from .feishu_unlock_queue import FeishuUnlockQueue, FeishuUnlockResumeMixin
@@ -508,7 +509,11 @@ def _feishu_event_message(payload: object) -> dict[str, Any]:
 # LLM: 此处只接原解析、认证、派发入口；受理以 callback 正常返回为准，显式 False 必须允许供应商重投。
 # 函数用途: 完成一条已验证飞书事件的受理判断，把暂时失败留给原运输和入站幂等恢复。
 def _admit_feishu_event(adapter: Any, payload: dict[str, Any], facts: dict[str, object]) -> FeishuEventDisposition:
+    from .feishu_group_events import GROUP_EVENT_TYPES, admit_group_provider_event
     from .feishu_mentions import bot_mention_decision
+
+    if (payload.get('header') or {}).get('event_type') in GROUP_EVENT_TYPES:
+        return admit_group_provider_event(adapter, payload)
 
     message = _feishu_event_message(payload)
     if not isinstance(message, dict) or not message.get('message_id'):
@@ -516,6 +521,12 @@ def _admit_feishu_event(adapter: Any, payload: dict[str, Any], facts: dict[str, 
     bot = adapter._resolve_bot_open_id() if message.get('chat_type') == 'group' else ''
     facts['bot_known'] = bool(bot)
     facts['bot_retry_in_seconds'] = max(0, round(getattr(adapter, '_bot_identity_retry_at', 0.0) - time.monotonic())) if not bot else 0
+    sender_type = ((payload.get('event') or {}).get('sender') or {}).get('sender_type')
+    if sender_type in {'bot', 'app'}:
+        from .feishu_observations import admit_bot_observation
+        return admit_bot_observation(adapter, payload, bot)
+    if sender_type != 'user':
+        return FeishuEventDisposition('ignored', 'FEISHU_SENDER_TYPE_UNVERIFIED')
     if message.get('chat_type') == 'group' and adapter.group_require_bot_mention:
         decision = bot_mention_decision(message, bot)
         facts.update(mention_gate='matched' if decision.allowed else 'unmatched' if decision.verified else 'unverified',
@@ -592,7 +603,7 @@ def _feishu_runtime_health(adapter: Any) -> dict[str, str]:
 
 # LLM: 原send/reply的uuid只保证窗口内幂等；runtime_health实时读入站运输，不以running替连接，也不改变REST出站权限。
 # 类用途: 提供飞书发送、回复、准确消息/媒体读取与入站健康快照，没有UUID到消息的只读查询保证。
-class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachmentMixin, BaseChannelAdapter):
+class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachmentMixin, BaseChannelAdapter):
     # LLM: uuid 是有限窗口去重，不覆盖跨窗口重发；channel delivery 必须先查首次 dispatch 时间。
     # 字段用途: 向统一通道注册表声明 provider 原生幂等能力。
     provider_idempotent_delivery = True

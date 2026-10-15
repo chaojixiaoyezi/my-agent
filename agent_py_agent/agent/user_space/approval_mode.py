@@ -136,9 +136,9 @@ def autonomous_tool_decision(agent: object, request: ToolApprovalRequest) -> Too
     return None
 
 
-# LLM: set 只更新审批字段；锁内读改写防止丢失禁用工具等策略；不把自然语言标题作为枚举值。
+# LLM: set 核目标与授权宿主准确 owner/root/path 一致，再消费目标群租约并复用原策略锁；get/本机管理员边界保持。
 # 函数用途: 列出或保存本用户的审批模式，保存后适用于本用户的会话和子代理，其他用户不变。
-def execute_approval_mode_operation(home: object, operation: str, mode: object = None) -> dict:
+def execute_approval_mode_operation(home: object, operation: str, mode: object = None, *, authorization_host=None) -> dict:
     if operation not in {"get", "set"}:
         raise ApprovalModeError("不支持的审批配置操作。")
     if operation == "set":
@@ -147,8 +147,16 @@ def execute_approval_mode_operation(home: object, operation: str, mode: object =
         if mode == "full-access" and not is_permission_admin(home):
             raise ApprovalModeError("Full Access 仅本机管理员可用。")
         path = Path(home.owner_tool_policy_json)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with locked_json_path(path):
+        from .group_authorization_context import (
+            group_capability_guard,
+            group_policy_write_lock,
+            require_group_mutation_lease,
+        )
+
+        host = _approval_mutation_host(home, authorization_host)
+        with group_capability_guard(host, "assistant.configure"), group_policy_write_lock(home):
+            require_group_mutation_lease(home, "assistant.configure")
+            path.parent.mkdir(parents=True, exist_ok=True)
             data = _policy(home)
             data.update(permission_mode=mode, permission_mode_updated_at=time.time())
             write_json_file_atomic_unlocked(path, data)
@@ -163,3 +171,26 @@ def execute_approval_mode_operation(home: object, operation: str, mode: object =
         "审批设置适用于本用户所有会话和子代理；路径权限在下一回合生效，不中断运行。"
         "子代理仍限定家目录；禁用工具、灾难命令保护和 SOUL 等本人确认不变。",
     }
+
+
+# LLM: 授权 host 与实际策略目标必须同 root/provider/kind/owner 和 canonical 路径，不能借群 A grant 写群 B 或本机策略。
+# 函数用途: 核对审批写入的宿主范围，缺 group host 时仍由原能力门失败关闭，不执行 IO。
+def _approval_mutation_host(home, authorization_host):
+    from types import SimpleNamespace
+
+    from .group_authorization import GroupAuthorizationError
+
+    if authorization_host is None:
+        return SimpleNamespace(home_paths=home)
+    source = getattr(authorization_host, "home_paths", None)
+    try:
+        identity = ("owner_provider", "owner_kind", "owner_id")
+        if any(not getattr(home, key) or getattr(home, key) != getattr(source, key) for key in identity):
+            raise ValueError("owner mismatch")
+        for key in ("root", "owner_home_dir", "owner_tool_policy_json"):
+            left, right = Path(getattr(home, key)), Path(getattr(source, key))
+            if not left.is_absolute() or not right.is_absolute() or left.resolve() != right.resolve():
+                raise ValueError("canonical target mismatch")
+    except (OSError, TypeError, ValueError, AttributeError) as exc:
+        raise GroupAuthorizationError("GROUP_AUTHORIZATION_INVALID") from exc
+    return authorization_host

@@ -1,3 +1,5 @@
+2026-10-15 群治理实施中：/group人工授权沿原tool_policy/CAS与provider事实；监控新工作与配置最终写门持同一策略锁，停止取消保持原权限。bot观察不走/ask，经原认证Ingress与scheduler event_source运行，不扩大普通无@人类消息。新scope与真实租户验收单列，见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。
+
 2026-10-14：审批终态与持久输入接线；群/无人值守在发布pending前拒绝剩余确认，交互等待有绝对截止。原stream桥区分真实Feishu和TUI恢复，/status共享本人权限投影。本人OAuth在原路由表新增验签回调，秘密不进入URL日志。发布状态见[实施合同](../../design/IM_UNATTENDED_IMPLEMENTATION.md)。
 
 2026-10-13 群任务追加修复进行中：认证入口冻结宿主发起人，模型工具创建/查询/控制与子孙继承沿同一主体；缺失/冲突不返回假空清单。飞书暂时身份失败沿原入站重投，表情反馈与Gateway受理分开记录。公开回执仅显式策略启用，同源调用与内部结果分离；验收收口见本轮交接，未改现场监控。

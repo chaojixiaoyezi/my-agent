@@ -36,6 +36,12 @@ def im_case(tmp_path, *, execution=None, delivery=None, group=False, background=
     agent._current_run_params = SimpleNamespace(request_id="create-im-plan", task_attributes={"conversation_thread_id": thread.thread_id})
     agent._current_run_params.host_channel_actor = actor_from_scope(agent, SimpleNamespace(channel="feishu",
         channel_user_id="ou_a", channel_conversation_id="oc_group"), thread.thread_id, "create-im-plan")
+    if group:
+        from agent_py_agent.tests.test_group_authorization import (
+            grant_synthetic_group_monitor_capability,
+        )
+
+        grant_synthetic_group_monitor_capability(agent, agent._current_run_params.host_channel_actor, members={"ou_a"})
     outcome = ScheduleTool(agent).execute({"action": "create", "name": "合成提醒", "prompt": "整理自己的合成资料",
         "schedule_kind": "every", "every_seconds": 600, "execution": execution or {"mode": "followup"},
         **({"delivery": delivery} if delivery is not None else {})})

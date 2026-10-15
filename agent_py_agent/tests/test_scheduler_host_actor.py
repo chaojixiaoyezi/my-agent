@@ -44,6 +44,11 @@ def group_case(tmp_path, *, actor_id="ou_a", background=True):
         "conversation_thread_id": source.thread_id}, host_channel_actor=actor)
     agent._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig(
         im_scheduled_tasks_background=background))
+    from agent_py_agent.tests.test_group_authorization import (
+        grant_synthetic_group_monitor_capability,
+    )
+
+    grant_synthetic_group_monitor_capability(agent, actor, members={actor_id, "ou_a", "ou_b"})
     return agent, source, actor, ScheduleTool(agent)
 
 
@@ -167,6 +172,11 @@ def managed_child(tmp_path):
         channel_conversation_id="oc_group"), source.thread_id, "gwreq-one")
     agent._current_run_params = RunParams(request_id="gwreq-one", task_id="gwreq-one",
         task_attributes={"conversation_thread_id": source.thread_id}, host_channel_actor=actor)
+    from agent_py_agent.tests.test_group_authorization import (
+        grant_synthetic_group_monitor_capability,
+    )
+
+    grant_synthetic_group_monitor_capability(agent, actor, members={"ou_one", "ou_other"})
     params = create_run_params(agent, {"goal": "合成孩子", "host_channel_actor": {"actor_id": "ou_forged"},
         "attributes": {"host_channel_actor": {"actor_id": "ou_forged"}, "channel_user_id": "ou_forged"}},
         "合成孩子", ["schedule", "create_subagents"])

@@ -6,11 +6,12 @@ from __future__ import annotations
 import json
 
 from ..user_space.approval_mode import ApprovalModeError, execute_approval_mode_operation
+from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import resolve_gateway_scope_owner
 
 
-# LLM: 复用可信源和精确 owner 作用域；只传枚举给唯一策略写入口，禁止客户端改权限/禁用表/其他用户。
+# LLM: 复用可信源与原冷 host 绑定真实群 actor；唯一策略写入口持群能力锁复核，禁止客户端改禁用表或其它用户。
 # 函数用途: 读取或原子保存本用户审批模式，配置错误明确失败且不泄漏策略正文。
 def handle_client_approval_mode(handler, server) -> None:
     from .http_handlers import (
@@ -34,9 +35,14 @@ def handle_client_approval_mode(handler, server) -> None:
         owner = resolve_gateway_scope_owner(server.agent, scope)
         base = server.agent.home_paths
         home = home_paths_with_owner(base, resolve_owner_home(base.root, owner))
-        result = execute_approval_mode_operation(home, str(body.get("operation") or ""), body.get("mode"))
-    except (json.JSONDecodeError, ApprovalModeError) as exc:
-        handler._send_json(400, {"ok": False, "message": str(exc) if isinstance(exc, ApprovalModeError) else "审批请求格式错误。"})
+        from .model_profile_service import _scoped_model_host
+
+        host = None
+        if home.owner_kind == "group" and body.get("operation") == "set":
+            host, _thread = _scoped_model_host(server.agent, scope)
+        result = execute_approval_mode_operation(home, str(body.get("operation") or ""), body.get("mode"), authorization_host=host)
+    except (json.JSONDecodeError, ApprovalModeError, GroupAuthorizationError) as exc:
+        handler._send_json(400, {"ok": False, "message": str(exc) if isinstance(exc, (ApprovalModeError, GroupAuthorizationError)) else "审批请求格式错误。"})
         return
     except Exception:  # noqa: BLE001 不外发私有策略和鉴权异常
         handler._send_json(500, {"ok": False, "message": "审批配置操作失败，未确认保存成功。"})

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 from ..conversation.host_actor import HostActorError, resolve_host_actor
@@ -18,8 +19,16 @@ from ..tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from ..user_space.group_authorization import GroupAuthorizationError
+from ..user_space.group_authorization_context import group_capability_guard
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .delivery_policy import DELIVERY_SCHEMA, creation_delivery, normalize_delivery
+from .event_source_tool import (
+    EVENT_SOURCE_INPUT_SCHEMA,
+    EventSourceInputError,
+    prepare_event_sources,
+    schedule_from_event_input,
+)
 from .execution_policy import (
     EXECUTION_SCHEMA,
     PRECHECK_SCHEMA,
@@ -51,7 +60,10 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
         name="schedule",
         description=(
             "管理当前用户自己的持久定时任务或提醒。IM 创建的任务在独立后台会话执行，默认只记录内部结果，TUI 创建沿原会话执行，"
-            "网关重启后仍会恢复；支持一次、固定间隔和五段 cron。"
+            "网关重启后仍会恢复；支持一次、固定间隔、五段 cron 以及已授权群内准确机器人的消息订阅。"
+            "群内新建、扩展、恢复或手动运行须先由群主/真实邀请人通过 /group 显式授权；停止取消仍走原创建者权限。"
+            "订阅机器人时用 schedule_kind=event_source 与 event_source.source_message_ids 指定用户引用的原消息，"
+            "宿主核验来源，机器人正文只是外部资料。自然语言条件写 prompt；暂停或删除即可取消订阅。"
             "create 只登记未来计划，不会立即运行正文；run_now 才是立即触发。用户要求建好定时计划但不现在执行时，"
             "应创建计划，不需要再索要一次确认，也不能只用 task_progress 保存计划草稿冒充定时计划。"
             "可显式设置独立上下文、固定模型、重叠与失败策略；需要变化检查时在 precheck 对象填写 tool_name 和 arguments。"
@@ -70,7 +82,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "expected_version": {"type": "integer", "minimum": 1, "description": "更新现有任务时使用 get/list 返回的 version。"},
                 "name": {"type": "string", "description": "create 必填的简短名称；update 可选。"},
                 "prompt": {"type": "string", "description": "到点后执行的完整用户要求，执行与通知身份由宿主固定。"},
-                "schedule_kind": {"type": "string", "enum": ["at", "every", "cron"], "description": "计划类型。"},
+                "schedule_kind": {"type": "string", "enum": ["at", "every", "cron", "event_source"], "description": "计划类型。"},
+                "event_source": EVENT_SOURCE_INPUT_SCHEMA,
                 "at": {
                 "type": "string",
                 "description": (
@@ -175,8 +188,8 @@ class ScheduleTool(BaseTool):
             input_policy=ToolInputPolicy(internal_parameters=("__tool_call_id", "__run_scope")),
         )
 
-    # LLM: 元数据模式只读；已知拒绝零写入，异常消息可能带路径或任务正文，必须在失败投影前去掉。
-    # 函数用途: 校验动作后调用调度账本，将存储失败转换成可诊断原因码。
+    # LLM: 群新工作在真实 actor 与原策略锁内写入；只读/停止不受新建授权门限制，失败不泄露正文。
+    # 函数用途: 校验动作后调用调度账本，写前权限失败保持 not_started，存储失败单独诊断。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
         metadata_only = params.get("metadata_only", False)
@@ -191,6 +204,8 @@ class ScheduleTool(BaseTool):
             return _error("当前 owner 的 scheduler 未装配", "TOOL_UNAVAILABLE")
         try:
             return self._execute(repository, action, params)
+        except (GroupAuthorizationError, EventSourceInputError) as exc:
+            return _error(str(exc), exc.error_code, metadata_only=metadata_only)
         except ScheduleValidationError as exc:
             return _error(str(exc), "SCHEDULER_INVALID_SCHEDULE", metadata_only=metadata_only)
         except SchedulerNotFoundError as exc:
@@ -287,11 +302,19 @@ class ScheduleTool(BaseTool):
                     "load_error_codes": errors,
                 },
             )
+        prepared = prepare_event_sources(self.agent, params) if action in {'create', 'update'} else None
+        with _monitor_work_guard(self.agent, action):
+            if action == "create":
+                return self._create(repository, params, prepared)
+            return self._mutate_existing(repository, action, params, prepared)
+
+    # LLM: 已核原 job/creator 后才持群新工作门；写入沿原 CAS，未知编号不触发 provider 查询或泄露其它 owner。
+    # 函数用途: 执行已授权的立即运行或现有监控变更，停止取消保持原权限和原语义。
+    def _mutate_existing(self, repository, action, params, prepared):
+        job_id = str(params.get('job_id') or '').strip()
         if action == "run_now":
             run = repository.reserve_manual_run(job_id, rule_id=str(params.get("rule_id") or ""))
             return _success(action, {"run": _run_projection(run)})
-        if action == "create":
-            return self._create(repository, params)
         expected_version = _expected_version(params, required=action in _MUTATING_EXISTING_ACTIONS)
         if isinstance(expected_version, ToolHandlerOutcome):
             return expected_version
@@ -302,7 +325,7 @@ class ScheduleTool(BaseTool):
         elif action in {'delete', 'takeover', 'cancel', 'recover'}:
             return self._control_existing(repository, action, job_id, expected_version)
         else:
-            patch = self._update_patch(params)
+            patch = self._update_patch(params, prepared)
             if isinstance(patch, ToolHandlerOutcome):
                 return patch
             if not patch:
@@ -329,15 +352,13 @@ class ScheduleTool(BaseTool):
         job = takeover_notifications(self.agent, repository, job_id, expected_version, actor)
         return _success(action, {'job': _job_projection(job, include_prompt=True)})
 
-    # LLM: 先用原纯合同校验完整策略，再创建 IM 线程和 job；来源读可信绑定，模型不能改回送地址或凭据。
+    # LLM: 事件来源网络预检来自本次宿主prepared，实际写入持群策略锁；原纯合同先校验再建线程/job，不接受模型替代来源证明。
     # 函数用途: 保存可恢复计划，IM 保持后台并明确通知开关、TUI 沿原行为；非法策略不留下空后台线程。
-    def _create(self, repository, params: dict[str, object]) -> ToolHandlerOutcome:
+    def _create(self, repository, params: dict[str, object], prepared) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
-        rules = params.get("rules")
+        rules = prepared.rules
         if rules is not None:
-            from .rules import normalize_rules
-            rules = normalize_rules(rules)
             for rule in rules:
                 validate_execution_for_agent(self.agent, rule["execution"])
         if not name or (rules is None and (not prompt or not str(params.get("schedule_kind") or "").strip())):
@@ -352,7 +373,7 @@ class ScheduleTool(BaseTool):
         if isinstance(skill_refs, ToolHandlerOutcome):
             return skill_refs
         current = time.time()
-        schedule = rules[0]["schedule"] if rules else _schedule_from_params(self.agent, params, now=current)
+        schedule = rules[0]["schedule"] if rules else prepared.schedule or _schedule_from_params(self.agent, params, now=current)
         execution = validate_execution_for_agent(self.agent, params.get("execution"))
         policy = normalize_policy(params.get("policy"))
         precheck = normalize_precheck(params.get("precheck"))
@@ -388,15 +409,17 @@ class ScheduleTool(BaseTool):
             {"job": _job_projection(job, include_prompt=True), "deduplicated": deduped},
         )
 
-    # LLM: 只更新显式给定字段，固定模型引用在写事务前校验，已经预留的 run 仍沿原冻结策略。
+    # LLM: 只更新显式字段，事件来源使用同次锁外网络预检；已预留run保持原冻结策略，写入仍持原群权限锁。
     # 函数用途: 将模型工具参数转换成原仓库的计划和通知修改，保留 null 关闭预检的含义。
-    def _update_patch(self, params: dict[str, object]) -> dict[str, object] | ToolHandlerOutcome:
+    def _update_patch(self, params: dict[str, object], prepared) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
         for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck", "delivery", "rules"):
             if key in params:
                 patch[key] = params[key]
         if "execution" in patch:
             patch["execution"] = validate_execution_for_agent(self.agent, patch["execution"])
+        if "rules" in patch:
+            patch["rules"] = prepared.rules
         if "skill_ids" in params:
             refs = _skill_refs(self.agent, params.get("skill_ids"))
             if isinstance(refs, ToolHandlerOutcome):
@@ -410,6 +433,7 @@ class ScheduleTool(BaseTool):
             "anchor_at",
             "cron",
             "timezone",
+            "event_source",
         }
         if any(key in params for key in schedule_keys):
             if not str(params.get("schedule_kind") or "").strip():
@@ -417,13 +441,29 @@ class ScheduleTool(BaseTool):
                     "修改执行时间时必须同时提供完整 schedule_kind 及对应参数",
                     "TOOL_INVALID_ARGUMENTS",
                 )
-            patch["schedule"] = _schedule_from_params(self.agent, params, now=time.time())
+            patch["schedule"] = prepared.schedule or _schedule_from_params(self.agent, params, now=time.time())
         return patch
 
 
+# LLM: 原 owner/creator 校验后才取群能力；查/停/取消/删除不申请新建许可，策略锁覆盖真正副作用。
+# 函数用途: 为监控新工作返回原群授权事务，非群保持原执行路径。
+def _monitor_work_guard(agent, action):
+    if action in {'create', 'update', 'resume', 'run_now'} and getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') == 'group':
+        return group_capability_guard(agent, 'monitors.create', thread_id=_conversation_scope(agent)[0])
+    return nullcontext()
+
+
+# LLM: 事件来源只接受准确消息引用并由宿主核验；普通定时保持原时间合同，不能混用两类参数。
+# 函数用途: 生成原调度计划，事件订阅不根据文字或名字推断来源。
 def _schedule_from_params(
     agent: object, params: dict[str, object], *, now: float
 ) -> dict[str, object]:
+    if params.get('schedule_kind') == 'event_source':
+        if any(params.get(key) not in (None, '') for key in ('at', 'after_seconds', 'every_seconds', 'anchor_at', 'cron', 'timezone')):
+            raise ScheduleValidationError('事件订阅不能同时填写定时参数。')
+        return schedule_from_event_input(agent, params.get('event_source'))
+    if 'event_source' in params:
+        raise ScheduleValidationError('event_source 需要 schedule_kind=event_source。')
     config = getattr(agent, "config", None)
     at = params.get("at")
     after_seconds = params.get("after_seconds")

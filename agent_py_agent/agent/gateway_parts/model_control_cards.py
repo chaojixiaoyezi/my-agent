@@ -162,10 +162,19 @@ def send_model_control_card(base, host, owner, *, actor_id, thread_id, target, l
     return {'ok': True, 'message': '模型卡片已发送。'}
 
 
-# LLM: 宿主先验签/真实actor/解锁；原卡锁内cancel仅终止本卡并记原actor，不改配置；completed仅同逻辑摘要重放。
+# LLM: 宿主先验签/真实actor/解锁；非取消恢复原群 actor 并核配置 grant，最终 save 再核；cancel 不需 grant，completed 仅同摘要重放。
 # 函数用途: 将原操作者卡片回调应用到原 owner 模型目录或原会话选择。
 def submit_model_control(base, host, owner, payload, body, *, actor_id=""):
+    from ..user_space.group_authorization_context import (
+        bind_group_interaction_host,
+        group_capability_guard,
+    )
     from .model_control_dispatch import dispatch_model_form
+
+    if body["decision"] != "cancel":
+        bind_group_interaction_host(base, host, payload, actor_id)
+        with group_capability_guard(host, "assistant.configure", thread_id=payload.get("thread_id", "")):
+            pass  # 表单准备前短核验；真正保存会在原写事务内再次持锁复核。
     if payload.get('mode')=='selection' and body['decision'] in {'add','edit'}:
         return dispatch_model_form(base,host,owner,payload,body)
     path = _record_path(host.home_paths.owner_home_dir, payload['control_id'])

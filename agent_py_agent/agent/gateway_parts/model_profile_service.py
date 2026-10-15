@@ -17,6 +17,7 @@ from ..settings.embedding_selection import (
     execute_embedding_operation,
 )
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
+from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import _scope_request_payload, resolve_gateway_scope_owner
 from .owner_conversation_store import owner_conversation_store
@@ -54,7 +55,7 @@ def handle_client_models(handler, server) -> None:
     except json.JSONDecodeError:
         handler._send_json(400, {"ok": False, "message": "模型配置请求格式错误。"})
         return
-    except ModelProfileError as exc:
+    except (ModelProfileError, GroupAuthorizationError) as exc:
         handler._send_json(400, {"ok": False, "message": str(exc)})
         return
     except Exception:  # noqa: BLE001 配置错误不得泄露凭证或内部路径
@@ -74,7 +75,7 @@ def _model_execution_snapshot(base_agent, scope, config_host, thread_id: str) ->
     return thread_model_execution_status(loaded or config_host, thread_id)
 
 
-# LLM: 菜单与文字 /model 共用：只按已认证 scope 解析 owner 和会话线程，冷用户不物化完整 Agent；线程缺失时按原方式创建。
+# LLM: 菜单与文字 /model 共用认证 scope 解析 owner/线程，并向新冷 host 绑定原 HostChannelActor；不物化完整 Agent 或改共享身份。
 # 函数用途: 构造只带 home/config/会话库的轻量宿主和当前会话线程，供模型配置读写使用；可能新建“会话设置”线程。
 def _scoped_model_host(base_agent, scope) -> tuple[SimpleNamespace, object]:
     owner = resolve_gateway_scope_owner(base_agent, scope)
@@ -89,7 +90,9 @@ def _scoped_model_host(base_agent, scope) -> tuple[SimpleNamespace, object]:
         "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,
         "title": "会话设置",
     })
-    return config_host, thread
+    from ..user_space.group_authorization_context import bind_group_control_host
+
+    return bind_group_control_host(base_agent, config_host, scope, thread.thread_id), thread
 
 
 # LLM: 目标只认当前列表里的编号或精确配置编号；select 只改本会话，set_default 只改未来默认，都经原写入口。
@@ -120,7 +123,7 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
                 "model", False, f"没有编号为 {command.value} 的可选模型。\n" + render_model_choices(listing),
             )
         execute_model_profile_operation(host, command.operation, {"profile_id": row["id"]}, thread_id=thread.thread_id)
-    except ModelProfileError as exc:
+    except (ModelProfileError, GroupAuthorizationError) as exc:
         return ConversationControlResult("model", False, str(exc))
     except Exception:  # noqa: BLE001 配置错误不得泄露凭证或内部路径
         return ConversationControlResult("model", False, "无法读取或保存模型配置，原配置未被主动清除。")

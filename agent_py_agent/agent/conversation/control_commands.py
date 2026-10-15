@@ -32,6 +32,7 @@ from .channels import redact_host_absolute_paths
 
 ControlKind = Literal[
     "help",
+    "group",
     "delegate",
     "schedule",
     "sessions",
@@ -215,7 +216,7 @@ def parse_conversation_control(
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
-# /restart 的尾随文字只作为展示用原因。
+# /restart 的尾随文字只作为展示用原因；/group 只承载人工固定语法，普通对话不能产生群授权。
 def parse_conversation_command(
     text: object,
     *,
@@ -235,6 +236,8 @@ def parse_conversation_command(
                                           usage="用法：/delegate enable、disable 或 status（IM，当天有效）。")
     if name == "schedule":
         return ConversationControlCommand("schedule", value=str(trailing or "").strip())
+    if name == "group":
+        return ConversationControlCommand("group", value=str(trailing or "").strip())
     if name == "sessions":
         value=str(trailing or '').strip()
         operation=value.partition(' ')[0] or 'threads'

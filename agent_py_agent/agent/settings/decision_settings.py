@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 
 from ..common.json_io import locked_json_path
+from ..user_space.group_authorization_context import group_capability_guard
 from .decision_settings_projection import decision_profile, decision_settings_projection
 from .decision_settings_schema import (
     DecisionSettingsAccessError,
@@ -179,7 +181,7 @@ def _execute_transaction(context: object, operation: str, payload: dict, thread_
         return _owner_operation(context, path, data, None, operation, payload, scope)
 
 
-# LLM: 授权只接宿主专用参数，不接受 payload 中自报许可；所有写入沿原 CAS/读回/锁外通知，设置本身不调用模型。
+# LLM: 手动群覆盖/实验建立先过群配置门并持策略锁到原 CAS 提交；read/revoke 保持免新增授权，通知仍在锁外。
 # 函数用途: 共用覆盖和实验许可事务；普通工具只开放读取与撤销，保存成功后令旧建议失效。
 def execute_decision_settings_operation(context: object, operation: str, payload: dict, *, thread_id: str = "", blocking: bool = True,
                                         host_authorization: dict | None = None) -> dict:
@@ -188,7 +190,26 @@ def execute_decision_settings_operation(context: object, operation: str, payload
         raise DecisionSettingsAccessError("建立实验许可只接受宿主显式用户控制入口。")
     if type(blocking) is not bool or not blocking and operation != "read":
         raise ModelProfileError("非阻塞选项仅供宿主读取决策设置。")
-    result = _execute_transaction(context, operation, payload, thread_id, scope, blocking, host_authorization)
+    guard = (group_capability_guard(context, "assistant.configure", thread_id=thread_id)
+             if operation not in {"read", "experiment_revoke"} else nullcontext())
+    with guard:
+        result = _execute_transaction(context, operation, payload, thread_id, scope, blocking, host_authorization)
+    return _finalize_settings_operation(context, operation, payload, result)
+
+
+# LLM: 仅原已授权宿主状态机调用，当前唯一调用是实验 grant/CAS 已复核后的自动 promotion；工具与 HTTP 不可选择此来源。
+# 函数用途: 提交系统自动设置转移，保留原 thread CAS、记账和通知，不把自动状态更新误判成人工配置。
+def _execute_host_decision_settings_patch(context, payload, *, thread_id):
+    scope = _validate_request(context, "patch", payload, thread_id)
+    if scope != "thread":
+        raise DecisionSettingsAccessError("宿主自动设置只支持原线程。")
+    result = _execute_transaction(context, "patch", payload, thread_id, scope, True, None)
+    return _finalize_settings_operation(context, "patch", payload, result)
+
+
+# LLM: 原文件事务已完成；记账和进程内通知不授予新权限、不持群策略锁，系统与人工提交共用原结果。
+# 函数用途: 在设置落盘后记录公开原因及通知当前工作片重新核对版本。
+def _finalize_settings_operation(context, operation, payload, result):
     if operation == "experiment_revoke":
         from .decision_experiment import revoke_original_experiment_budget
 

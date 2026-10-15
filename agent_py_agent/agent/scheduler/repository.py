@@ -44,6 +44,9 @@ from ..user_space.owner_quota import (
 )
 from .delivery_policy import normalize_delivery
 from .due_index import SchedulerDueIndex
+from .event_effects import SchedulerEventEffectOperations
+from .event_source_repository import SchedulerEventSourceOperations
+from .event_sources import sync_event_sources
 from .execution_policy import normalize_execution, normalize_precheck
 from .notification_binding import normalize_notification_binding
 from .policy import apply_run_policy, normalize_policy
@@ -177,11 +180,13 @@ class _SchedulerJobOperations:
         request: SchedulerJobCreateRequest,
     ) -> tuple[dict[str, object], bool]:
         current = _now(request.now)
-        normalized = _new_job_payload(
+        normalized = sync_event_sources(_new_job_payload(
             owner=self.owner,
             request=request,
             now=current,
-        )
+        ))
+        from .event_source_lifecycle import validate_event_job
+        validate_event_job(normalized)
         with self._mutation_scope() as (store, admission):
             for raw in store["jobs"].values():
                 job, _error = self._parse_job(raw)
@@ -226,7 +231,10 @@ class _SchedulerJobOperations:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             job = self._require_mutable_job(store, job_id, expected_version)
-            updated = _updated_job(job, patch, now=current)
+            updated = sync_event_sources(_updated_job(job, patch, now=current), job)
+            from .event_source_lifecycle import cancel_retired_event_runs, validate_event_job
+            validate_event_job(updated)
+            updated = cancel_retired_event_runs(store, updated, now=current)
             store["jobs"][job_id] = updated
             from .monitor_state import disabled_rule_ids
             disabled=disabled_rule_ids(job,updated)
@@ -254,6 +262,9 @@ class _SchedulerJobOperations:
                     "updated_at": current,
                     "version": int(job["version"]) + 1,
                 }
+                job = sync_event_sources(job, retire=True)
+                from .event_source_lifecycle import cancel_retired_event_runs
+                job = cancel_retired_event_runs(store, job, now=current)
                 store["jobs"][job_id] = job
             cancelled = self._cancel_waiting_runs_unlocked(store, job_id, current, "job_paused")
             self._write_store_unlocked(store, admission, history_records=cancelled)
@@ -273,7 +284,7 @@ class _SchedulerJobOperations:
                 from .monitor_state import resume_monitor
                 job = resume_monitor(job, current)
             next_run = float(job["next_run_at"]) if job.get("rules") else _resume_next_run(job, current)
-            updated = {
+            updated = sync_event_sources({
                 **job,
                 "status": "active",
                 "next_run_at": next_run,
@@ -281,7 +292,7 @@ class _SchedulerJobOperations:
                 "paused_reason": "",
                 "updated_at": current,
                 "version": int(job["version"]) + 1,
-            }
+            }, job, retire=True)
             store["jobs"][job_id] = updated
             self._write_store_unlocked(store, admission)
         return deepcopy(updated)
@@ -296,6 +307,7 @@ class _SchedulerJobOperations:
             updated = {**job, 'version': int(job['version']) + 1, 'updated_at': current,
                 'cancel_pending_run_ids': list(dict.fromkeys([*(job.get('cancel_pending_run_ids') or []),
                     *(row['run_id'] for row in cancelled)]))}
+            updated = sync_event_sources(updated, retire=True)
             store['jobs'][job_id] = updated
             for run_id, raw in list(store['runs'].items()):
                 run, _error = self._parse_run(raw)
@@ -385,6 +397,7 @@ class _SchedulerJobOperations:
                 "updated_at": current,
                 "version": int(job["version"]) + 1,
             }
+            deleted = sync_event_sources(deleted, retire=True)
             store["jobs"][job_id] = deleted
             cancelled = self._cancel_waiting_runs_unlocked(store, job_id, current, "job_deleted")
             for run_id, raw in list(store['runs'].items()):
@@ -599,10 +612,15 @@ class _SchedulerRunOperations:
             self._write_store_unlocked(store, admission)
         return deepcopy(claimed)
 
+    # LLM: 开始沿原claim CAS，事件代次必须仍有效；实际模型/运输仍需原副作用开始CAS，不能只靠这一快照。
+    # 函数用途: 登记当前领取者开始工作，并拒绝已经暂停或更新的事件运行。
     def mark_run_running(self, run_id: str, claim_id: str, *, now: float | None = None) -> None:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             run = self._require_claim(store, run_id, claim_id)
+            from .event_sources import event_run_current
+            if not event_run_current(self._require_job(store, run['job_id']), run):
+                raise SchedulerConflictError('事件订阅已停止或更新')
             from .monitor_state import record_run_start
             record_run_start(self, store, run, current)
             store["runs"][run_id] = {
@@ -1063,88 +1081,6 @@ class _SchedulerStoreSupport:
                 errors.append(error)
         return jobs, sorted(set(errors))
 
-    # LLM: schema/owner/计划、执行策略及带版本通知接管共用这里校验；错误只返回结构化码，读路径不迁移或覆盖原文件。
-    # 函数用途: 识别可信的当前 owner 计划，将非法记录排除于实际调度之外。
-    def _parse_job(self, raw: object) -> tuple[dict[str, object] | None, str]:
-        if not isinstance(raw, dict):
-            return None, "SCHEDULER_JOB_INVALID"
-        try:
-            if raw.get("schema_version") != _JOB_SCHEMA:
-                raise ValueError("job schema")
-            if raw.get("owner") != self.owner:
-                return None, "SCHEDULER_OWNER_MISMATCH"
-            if not str(raw.get("job_id") or "").startswith("job_"):
-                raise ValueError("job id")
-            if str(raw.get("status") or "") not in _JOB_STATUSES:
-                raise ValueError("job status")
-            if not str(raw.get("thread_id") or ""):
-                raise ValueError("thread")
-            if raw.get("rules") is not None:
-                from .monitor_state import validate_monitor
-                validate_monitor(raw)
-            else:
-                validate_schedule(raw.get("schedule"))
-                _validate_name_prompt(str(raw.get("name") or ""), str(raw.get("prompt") or ""))
-            _normalize_skill_refs(raw.get("skill_refs"))
-            normalize_policy(raw.get("policy"))
-            normalize_execution(raw.get("execution"))
-            normalize_precheck(raw.get("precheck"))
-            normalize_delivery(raw.get("delivery"))
-            binding = normalize_notification_binding(raw.get('notification_binding'))
-            if binding is not None and binding['owner'] != self.owner:
-                raise ValueError('notification owner')
-            pending = raw.get('cancel_pending_run_ids', [])
-            if (not isinstance(pending, list) or any(not isinstance(key, str) or not key.startswith('srun_') for key in pending)
-                    or len(pending) != len(set(pending))):
-                raise ValueError('cancel pending IDs')
-            if int(raw.get("version") or 0) < 1:
-                raise ValueError("job version")
-            return dict(raw), ""
-        except (TypeError, ValueError, ScheduleValidationError):
-            return None, "SCHEDULER_JOB_INVALID"
-
-    # LLM: 旧 run 默认 epoch 0；读取时校验冻结执行策略与通知接管目标，损坏记录不能等到领取后才猜执行位置或预检动作。
-    # 函数用途: 解析新旧 scheduler run，拒绝非法 epoch 和配置，确保后续 CAS 有确定基线。
-    def _parse_run(
-        self,
-        raw: object,
-        *,
-        terminal: bool = False,
-    ) -> tuple[dict[str, object] | None, str]:
-        if not isinstance(raw, dict):
-            return None, "SCHEDULER_RUN_INVALID"
-        try:
-            if raw.get("schema_version") != _RUN_SCHEMA:
-                raise ValueError("run schema")
-            if raw.get("owner") != self.owner:
-                return None, "SCHEDULER_OWNER_MISMATCH"
-            if not str(raw.get("run_id") or "").startswith("srun_"):
-                raise ValueError("run id")
-            allowed = _TERMINAL_RUN_STATUSES if terminal else _ACTIVE_RUN_STATUSES
-            if str(raw.get("status") or "") not in allowed:
-                raise ValueError("run status")
-            if not str(raw.get("job_id") or "").startswith("job_"):
-                raise ValueError("job id")
-            claim_epoch = raw.get("claim_epoch", 0)
-            if isinstance(claim_epoch, bool) or not isinstance(claim_epoch, int) or claim_epoch < 0:
-                raise ValueError("claim epoch")
-            normalize_execution(raw.get("execution"))
-            normalize_precheck(raw.get("precheck"))
-            normalize_delivery(raw.get("delivery"))
-            binding = normalize_notification_binding(raw.get('notification_binding'))
-            if binding is not None and binding['owner'] != self.owner:
-                raise ValueError('notification owner')
-            requested = raw.get('cancel_requested_at', 0)
-            if (isinstance(requested, bool) or not isinstance(requested, (int, float))
-                    or not math.isfinite(requested) or requested < 0
-                    or 'cancel_cleanup_confirmed' in raw and type(raw['cancel_cleanup_confirmed']) is not bool):
-                raise ValueError('cancel intent')
-            parsed = dict(raw)
-            parsed["claim_epoch"] = claim_epoch
-            return parsed, ""
-        except (TypeError, ValueError):
-            return None, "SCHEDULER_RUN_INVALID"
-
     def _require_job(self, store: dict[str, Any], job_id: str) -> dict[str, object]:
         normalized = str(job_id or "").strip()
         job, _error = self._parse_job(store["jobs"].get(normalized))
@@ -1237,14 +1173,108 @@ class _SchedulerStoreSupport:
         return [record for record in records if str(record.get("run_id") or "") not in existing]
 
 
+# LLM: 纯解析原job/run的schema、owner和冻结来源，不写账、不迁移、不建立新权威；错误仍由原repository报告。
+# 类用途: 将原记录校验与store I/O分开，供原所有读取和CAS共用。
+class _SchedulerRecordParsing:
+    # LLM: schema/owner/计划、执行策略及带版本通知接管共用这里校验；错误只返回结构化码，读路径不迁移或覆盖原文件。
+    # 函数用途: 识别可信的当前 owner 计划，将非法记录排除于实际调度之外。
+    def _parse_job(self, raw: object) -> tuple[dict[str, object] | None, str]:
+        if not isinstance(raw, dict):
+            return None, "SCHEDULER_JOB_INVALID"
+        try:
+            if raw.get("schema_version") != _JOB_SCHEMA:
+                raise ValueError("job schema")
+            if raw.get("owner") != self.owner:
+                return None, "SCHEDULER_OWNER_MISMATCH"
+            if not str(raw.get("job_id") or "").startswith("job_"):
+                raise ValueError("job id")
+            if str(raw.get("status") or "") not in _JOB_STATUSES:
+                raise ValueError("job status")
+            if not str(raw.get("thread_id") or ""):
+                raise ValueError("thread")
+            if raw.get("rules") is not None:
+                from .monitor_state import validate_monitor
+                validate_monitor(raw)
+            else:
+                validate_schedule(raw.get("schedule"))
+                _validate_name_prompt(str(raw.get("name") or ""), str(raw.get("prompt") or ""))
+            _normalize_skill_refs(raw.get("skill_refs"))
+            normalize_policy(raw.get("policy"))
+            normalize_execution(raw.get("execution"))
+            normalize_precheck(raw.get("precheck"))
+            normalize_delivery(raw.get("delivery"))
+            binding = normalize_notification_binding(raw.get('notification_binding'))
+            if binding is not None and binding['owner'] != self.owner:
+                raise ValueError('notification owner')
+            pending = raw.get('cancel_pending_run_ids', [])
+            if (not isinstance(pending, list) or any(not isinstance(key, str) or not key.startswith('srun_') for key in pending)
+                    or len(pending) != len(set(pending))):
+                raise ValueError('cancel pending IDs')
+            if int(raw.get("version") or 0) < 1:
+                raise ValueError("job version")
+            from .event_source_lifecycle import validate_event_job
+            validate_event_job(raw)
+            return dict(raw), ""
+        except (TypeError, ValueError, ScheduleValidationError):
+            return None, "SCHEDULER_JOB_INVALID"
+
+    # LLM: 旧run默认epoch 0；读取时校验冻结执行策略、事件来源及通知接管目标，损坏来源不能变成普通任务绕过开始CAS。
+    # 函数用途: 解析新旧 scheduler run，拒绝非法 epoch 和配置，确保后续 CAS 有确定基线。
+    def _parse_run(
+        self,
+        raw: object,
+        *,
+        terminal: bool = False,
+    ) -> tuple[dict[str, object] | None, str]:
+        if not isinstance(raw, dict):
+            return None, "SCHEDULER_RUN_INVALID"
+        try:
+            if raw.get("schema_version") != _RUN_SCHEMA:
+                raise ValueError("run schema")
+            if raw.get("owner") != self.owner:
+                return None, "SCHEDULER_OWNER_MISMATCH"
+            if not str(raw.get("run_id") or "").startswith("srun_"):
+                raise ValueError("run id")
+            allowed = _TERMINAL_RUN_STATUSES if terminal else _ACTIVE_RUN_STATUSES
+            if str(raw.get("status") or "") not in allowed:
+                raise ValueError("run status")
+            if not str(raw.get("job_id") or "").startswith("job_"):
+                raise ValueError("job id")
+            claim_epoch = raw.get("claim_epoch", 0)
+            if isinstance(claim_epoch, bool) or not isinstance(claim_epoch, int) or claim_epoch < 0:
+                raise ValueError("claim epoch")
+            normalize_execution(raw.get("execution"))
+            normalize_precheck(raw.get("precheck"))
+            normalize_delivery(raw.get("delivery"))
+            from .event_source_lifecycle import validate_event_run
+            validate_event_run(raw)
+            binding = normalize_notification_binding(raw.get('notification_binding'))
+            if binding is not None and binding['owner'] != self.owner:
+                raise ValueError('notification owner')
+            requested = raw.get('cancel_requested_at', 0)
+            if (isinstance(requested, bool) or not isinstance(requested, (int, float))
+                    or not math.isfinite(requested) or requested < 0
+                    or 'cancel_cleanup_confirmed' in raw and type(raw['cancel_cleanup_confirmed']) is not bool):
+                raise ValueError('cancel intent')
+            parsed = dict(raw)
+            parsed["claim_epoch"] = claim_epoch
+            return parsed, ""
+        except (TypeError, ValueError):
+            return None, "SCHEDULER_RUN_INVALID"
+
+
+
 # LLM: 组合原 job/run/store 与执行准备操作；所有状态仍归同一 owner store 和 history，不能引入平行权威文件。
 # 类用途: 提供定时任务的持久化入口，供工具、调度服务和诊断查询共用。
 class SchedulerRepository(
+    SchedulerEventEffectOperations,
+    SchedulerEventSourceOperations,
     SchedulerRunPreparation,
     _SchedulerJobOperations,
     _SchedulerRunOperations,
     _SchedulerWaitingRunOperations,
     _SchedulerStoreSupport,
+    _SchedulerRecordParsing,
 ):
     """Single owner-local facade over job, run, and store responsibilities."""
 
@@ -1581,6 +1611,8 @@ def _new_job_payload(
     normalized_refs = _normalize_skill_refs(request.skill_refs)
     policy = normalize_policy(request.policy)
     execution = normalize_execution(request.execution)
+    if normalized_schedule['kind'] == 'event_source':
+        execution = {**execution, 'mode': 'isolated'}
     precheck = normalize_precheck(request.precheck)
     delivery = normalize_delivery(request.delivery)
     thread = request.thread_id
@@ -1675,7 +1707,8 @@ def _updated_job(
         "misfire_grace_seconds": grace,
         "next_run_at": next_run,
         "policy": normalize_policy(patch.get("policy") if "policy" in patch else job.get("policy")),
-        "execution": normalize_execution(patch.get("execution") if "execution" in patch else job.get("execution")),
+        "execution": {**normalize_execution(patch.get("execution") if "execution" in patch else job.get("execution")),
+            **({'mode': 'isolated'} if schedule['kind'] == 'event_source' else {})},
         "precheck": normalize_precheck(patch.get("precheck") if "precheck" in patch else job.get("precheck")),
         "delivery": normalize_delivery(patch.get("delivery") if "delivery" in patch else job.get("delivery")),
         "updated_at": now,
@@ -1695,7 +1728,7 @@ def _reserved_run(
 ) -> dict[str, object]:
     run_id = f"srun_{uuid.uuid4().hex}"
     execution = normalize_execution(job.get("execution"))
-    return {
+    payload = {
         "schema_version": _RUN_SCHEMA,
         "run_id": run_id,
         "job_id": str(job["job_id"]),
@@ -1740,6 +1773,10 @@ def _reserved_run(
         "error_code": "",
         "error_message": "",
     }
+    if (job.get('schedule') or {}).get('kind') == 'event_source':
+        state = job['event_source_state'][str(job.get('rule_id') or '')]
+        payload.update(event_source={'generation': state['generation'], 'source': deepcopy(job['schedule']['source'])}, event_batch=[])
+    return payload
 
 
 def _terminal_misfire_run(
@@ -1880,6 +1917,8 @@ def _resume_next_run(job: dict[str, object], current: float) -> float:
 
 
 def _initial_next_run(schedule: dict[str, object], current: float) -> float:
+    if schedule['kind'] == 'event_source':
+        return 0.0
     if schedule["kind"] == "at":
         target = schedule_timestamp(schedule)
         if target <= current:

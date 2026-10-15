@@ -33,6 +33,13 @@ def _job(agent, actor, name):
         'conversation_thread_id':source.thread_id,'host_channel_actor':{'channel':'feishu','conversation_id':'oc_group','actor_id':actor}})
     agent._current_run_params.host_channel_actor=actor_from_scope(agent, SimpleNamespace(channel='feishu',
         channel_conversation_id='oc_group',channel_user_id=actor),source.thread_id,name)
+    if agent.home_paths.owner_kind == 'group':
+        from agent_py_agent.tests.test_group_authorization import (
+            grant_synthetic_group_monitor_capability,
+        )
+
+        grant_synthetic_group_monitor_capability(agent, agent._current_run_params.host_channel_actor,
+            members={'ou_one', 'ou_two', actor})
     result=ScheduleTool(agent).execute({'action':'create','name':name,'prompt':'合成检查','schedule_kind':'every','every_seconds':600})
     assert result.ok,result.content if hasattr(result,'content') else result
     return agent.scheduler_repository.list_jobs()[0][-1]

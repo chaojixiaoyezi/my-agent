@@ -14,6 +14,7 @@
 #   业务写权限被拒绝时保留用户目标，子代理沿原能力申请申请准确范围，不鼓励改落临时目录后声称完成。
 #   云资源、私人卡和禁网保持明确恢复码；未知写入不重放，结构化条件未满足不当成模型故障。
 #   群任务主体只接受宿主冻结事实；缺失、冲突与越权分别拒绝，不从模型属性补人或改用管理员。
+#   群能力及机器人来源失败保留固定码；没有人工授权或准确原消息证明时不能反复调用或降级绕过。
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
@@ -3889,6 +3890,38 @@ ERROR_CONTRACTS.update({
     'FEISHU_CLOUD_REDIRECT_REFUSED': ErrorContract(code='FEISHU_CLOUD_REDIRECT_REFUSED', category='permission', retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint='带宿主认证的请求拒绝重定向；不得将 token 发往另一个地址，请管理员检查原官方入口。'),
+})
+
+
+# LLM: 群授权门与事件登记的已知写前拒绝共享恢复合同；不能吞成 UNKNOWN_ERROR，也不因错误授予身份。
+ERROR_CONTRACTS.update({
+    **{code: ErrorContract(code=code, category='permission', retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint='由当前群主或已核验邀请人使用 /group 明确授权；原群、实际操作者及能力范围必须一致，不借管理员或其它成员身份。停止取消仍走原入口。')
+       for code in ('GROUP_AUTHORIZATION_REQUIRED', 'GROUP_AUTHORIZATION_NOT_AUTHORITY',
+                    'GROUP_AUTHORIZATION_MEMBER_REQUIRED', 'GROUP_AUTHORIZATION_INVALID')},
+    **{code: ErrorContract(code=code, category='configuration', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint='群授权、当前平台事实或部署配置不可核验；保留原任务与边界，请部署者检查，不自动放宽或关闭保护。')
+       for code in ('GROUP_AUTHORIZATION_UNAVAILABLE', 'GROUP_AUTHORITY_UNAVAILABLE',
+                    'EVENT_SOURCE_DISABLED', 'EVENT_SOURCE_UNAVAILABLE')},
+    **{code: ErrorContract(code=code, category='state', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='原事件监控已经暂停、取消、更新或无法确认准确运行；本次副作用没有获准开始。读取原监控和执行状态，不自动重放或改用其它会话。')
+       for code in ('SCHEDULER_EVENT_EFFECT_RETIRED', 'SCHEDULER_EFFECT_SOURCE_UNAVAILABLE')},
+    'GROUP_AUTHORIZATION_CONFLICT': ErrorContract(code='GROUP_AUTHORIZATION_CONFLICT', category='state', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='群授权版本已变化；重新 /group 查看准确状态后，由有权真人明确提交，不重放旧修改。'),
+    **{code: ErrorContract(code=code, category='permission', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='仅订阅当前群准确原消息证明的其他机器人；核对原引用、接收应用与来源类型。缺平台权限请部署者检查，不改用昵称、正文或其它 owner 绕过。')
+       for code in ('EVENT_SOURCE_GROUP_REQUIRED', 'EVENT_SOURCE_SCOPE_UNVERIFIED', 'EVENT_SOURCE_SENDER_UNVERIFIED',
+                    'FEISHU_PROVIDER_AUTH_UNAVAILABLE', 'FEISHU_PROVIDER_UNAVAILABLE',
+                    'FEISHU_PROVIDER_SCOPE_REQUIRED', 'FEISHU_PROVIDER_READ_REJECTED', 'FEISHU_PROVIDER_RESPONSE_INVALID',
+                    'FEISHU_SOURCE_MESSAGE_UNVERIFIED', 'FEISHU_SOURCE_MESSAGE_SCOPE_MISMATCH',
+                    'FEISHU_SOURCE_MESSAGE_REQUIRED', 'FEISHU_OTHER_BOT_SOURCE_REQUIRED',
+                    'FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED', 'FEISHU_GROUP_ROLES_UNVERIFIED',
+                    'FEISHU_GROUP_MEMBERS_INCOMPLETE', 'FEISHU_OBSERVATION_SCOPE_MISMATCH', 'FEISHU_BOT_LOOP_SUPPRESSED')},
 })
 
 

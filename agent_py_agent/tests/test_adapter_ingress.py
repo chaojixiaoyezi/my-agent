@@ -577,20 +577,20 @@ def test_progress_cursor_commit_failure_once_still_delivers_final(tmp_path: Path
     store = GatewayReplyDeliveryStore(tmp_path / "delivery")
     progress_sent: list[str] = []
     final_sent: list[str] = []
+    state = {"failed": False}
 
     def poll_progress(record):
         return (["进度A"], 1) if record.progress_cursor < 1 else ([], record.progress_cursor)
 
     worker = GatewayReplyDeliveryWorker(
         store,
-        poll_response=lambda _record: "最终回复",
+        # 最终回复优先于进度；必须先模拟仍在执行，才会真正触发进度游标写入故障。
+        poll_response=lambda _record: "最终回复" if state["failed"] else None,
         deliver_response=lambda record, text: final_sent.append(text) is None,
         poll_progress=poll_progress,
         deliver_progress=lambda record, text: progress_sent.append(text) is None,
     )
     original_commit = store.commit_claim
-    state = {"failed": False}
-
     def flaky_commit(expected, replacement, **claim):
         if not claim.get("release", True) and replacement.progress_cursor == 1 and not state["failed"]:
             state["failed"] = True

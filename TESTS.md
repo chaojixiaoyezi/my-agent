@@ -96,6 +96,8 @@ IM 多任务/公共包（2026-10-12，相关验收完成；739 项联合回归�
 
 # 测试与发布验收
 
+2026-10-15 群治理追加验收中：新增group_authorization与group_feature_integration使用原owner/HostActor/ThreadStore/策略锁，只替换官方provider事实；覆盖默认拒绝、真人显式授权、跨actor/群来源、并行thread/asyncTask租约复制、离群与同时间旧邀请事件重放、写前零线程/零job副作用。机器人观察复用原Ingress/scheduler，需另验去重冲突、满批背压、坏订阅不伪装未订阅、退代后模型与投递边界。最终focused与严格gate、同commit Mac/Linux包内与原生验收由发行证据记录；真实租户未验不计通过，新增scope不代开。见[群治理合同](docs/design/IM_GROUP_GOVERNANCE.md)。
+
 2026-10-15 卡片可观测性追加：原SDK实例只记录帧头/连接摘要和固定卡片阶段，原认证回环记录白名单错误码；新增零网络 SDK EVENT/CARD 分发及 ACK 不变、异常保留和任意表单 canary 不入日志测试。真实按钮是否到当前实例仍待新诊断版复测，不把合成 SDK 分支或零写入当真实卡已拒绝。最终严格 gate 和发行身份另记。
 
 ## TUI 回合结束后冻结定位（2026-10-12，Ubuntu 24.04 真机；未复现现场冻结）

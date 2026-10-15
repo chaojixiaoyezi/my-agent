@@ -157,52 +157,8 @@ class SchedulerService:
     # run id in both typed wake identity and metadata so background lifecycle reads one authority.
     # 函数用途: 先沿持久意图重试准确取消并复核已死亡领取，再预留到期执行；仅新 queued 会唤醒，不重跑已开工的未知结果。
     def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32) -> list[str]:
-        from .policy import queue_expired
-
-        current = float(time.time() if now is None else now)
-        if self.cancellation_handler is not None:
-            for run in self.repository.pending_cancellation_runs():
-                self.cancellation_handler(run)
-        self.repository.recover_interrupted_executions(now=current)
-        self.repository.reserve_due_runs(now=current, limit=limit)
-        wake_ids: list[str] = []
-        for run in self.repository.queued_runs(now=current, limit=max(1, limit * 2)):
-            if queue_expired(run, current):
-                self._fail_without_execution(run, "SCHEDULER_QUEUE_EXPIRED", now=current, status="skipped")
-                continue
-            skill_error = self._skill_reference_error(run)
-            if skill_error:
-                self._fail_without_execution(run, skill_error, now=current)
-                continue
-            try:
-                from .execution import prepare_execution
-
-                run = prepare_execution(self, run, now=current)
-                signal = self.conversation_store.wakes.raise_signal(
-                    {
-                        "thread_id": str(run["thread_id"]),
-                        # 定时执行本身就是这次后台工作的唯一根任务。只把 run_id
-                        # 放在 metadata 会让 BackgroundRunRequest 变成 taskless，
-                        # 于是模型刚派完子代理时调度器读不到仍为 active 的任务链接，
-                        # 误把第一片模型回复结算成 done。
-                        "root_task_id": str(run["run_id"]),
-                        "urgency": "normal",
-                        "reason": _SCHEDULER_WAKE_REASON,
-                        "summary": f"Scheduled job is ready: {run['name']}",
-                        "dedupe_key": f"scheduler-run:{run['run_id']}",
-                        "metadata": _wake_metadata(run),
-                        "now": current,
-                    }
-                )
-                wake_id = str(getattr(signal, "wake_signal_id", "") or "")
-                self.repository.attach_wake_signal(str(run["run_id"]), wake_id)
-                if wake_id:
-                    wake_ids.append(wake_id)
-            except (KeyError, SchedulerNotFoundError):
-                # The conversation or run was removed concurrently. A missing
-                # thread cannot be guessed or recreated by the scheduler.
-                self._fail_without_execution(run, "SCHEDULER_THREAD_UNAVAILABLE", now=current)
-        return wake_ids
+        from .dispatch import enqueue_ready_runs
+        return enqueue_ready_runs(self, now=now, limit=limit)
 
     # LLM: 领取后回读 pending 并验证 TaskLink；此处仅 claimed，原后台车道准入后才由 execution 写 running。
     # 函数用途: 领取定时工作或欠发回复；绑定异常结算，合法冻结只重投，不把等待执行的时间记成工作开始。
@@ -224,6 +180,9 @@ class SchedulerService:
         run = self.repository.get_active_run(run_id)
         if run is None or str(run.get("job_id") or "") != job_id:
             return SchedulerWakeClaimResult("stale")
+        if not self.repository.event_run_is_current(run):
+            self._fail_without_execution(run, 'EVENT_SOURCE_RETIRED', now=float(time.time() if now is None else now), status='cancelled')
+            return SchedulerWakeClaimResult('stale')
         if (
             str(getattr(signal, "thread_id", "") or "") != str(run["thread_id"])
             or str(getattr(signal, "root_task_id", "") or "") != run_id

@@ -29,6 +29,7 @@ from ..tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .persona_repository import (
     PersonaBatchMutationRequest,
@@ -478,7 +479,7 @@ def _persona_read_result(
     return ToolHandlerOutcome("update_persona", True, json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: Repository entry/CAS/security exceptions arise before _commit_persona_mutation;
+# LLM: 群正式人格变更先持原策略锁和真实 actor 能力；Repository entry/CAS/security exceptions arise before _commit_persona_mutation;
 # mark only those as not_started. I/O or generic repository errors may follow a partial
 # commit and must retain unknown-effect reconciliation. Keep repository and runtime tests aligned.
 # 函数用途: 区分画像尚未写入的校验拒绝与可能部分写入的异常，让模型能改正条目编号而不丢失副作用保护。
@@ -488,41 +489,46 @@ def _execute_persona_mutation(
     request: _PersonaToolRequest,
 ) -> ToolHandlerOutcome:
     try:
-        source = _persona_source(agent)
-        if request.operations:
-            payload = repository.mutate_batch(
-                PersonaBatchMutationRequest(
-                    target=request.target,
-                    operations=tuple(
-                        PersonaMutationRequest(
-                            target=request.target,
-                            action=operation.action,
-                            content=operation.content,
-                            entry_id=operation.entry_id,
-                            source_quote=operation.source_quote,
-                            confirmed=True,
-                            source=source,
-                        )
-                        for operation in request.operations
-                    ),
-                    expected_sha256=request.expected_sha256,
-                    source=source,
+        from ..user_space.group_authorization_context import group_capability_guard
+
+        with group_capability_guard(agent, "assistant.configure"):
+            source = _persona_source(agent)
+            if request.operations:
+                payload = repository.mutate_batch(
+                    PersonaBatchMutationRequest(
+                        target=request.target,
+                        operations=tuple(
+                            PersonaMutationRequest(
+                                target=request.target,
+                                action=operation.action,
+                                content=operation.content,
+                                entry_id=operation.entry_id,
+                                source_quote=operation.source_quote,
+                                confirmed=True,
+                                source=source,
+                            )
+                            for operation in request.operations
+                        ),
+                        expected_sha256=request.expected_sha256,
+                        source=source,
+                    )
                 )
-            )
-        else:
-            payload = repository.mutate(
-                PersonaMutationRequest(
-                    target=request.target,
-                    action=request.action,
-                    content=request.content,
-                    entry_id=request.entry_id,
-                    source_quote=request.source_quote,
-                    confirmed=True,
-                    expected_sha256=request.expected_sha256,
-                    rollback_version=request.rollback_version,
-                    source=source,
+            else:
+                payload = repository.mutate(
+                    PersonaMutationRequest(
+                        target=request.target,
+                        action=request.action,
+                        content=request.content,
+                        entry_id=request.entry_id,
+                        source_quote=request.source_quote,
+                        confirmed=True,
+                        expected_sha256=request.expected_sha256,
+                        rollback_version=request.rollback_version,
+                        source=source,
+                    )
                 )
-            )
+    except GroupAuthorizationError as exc:
+        return _err(str(exc), exc.error_code, effect_outcome="not_started")
     except PersonaEntryNotFoundError:
         return _err(
             "entry_id 或版本不存在；请重新 list/history 后再操作", "PERSONA_ENTRY_NOT_FOUND",

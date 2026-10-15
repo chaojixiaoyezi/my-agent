@@ -81,6 +81,12 @@ def _external_owner(tmp_path, identity):
         channel_conversation_id=conversation), source.thread_id, "gwreq-" + identity.owner_id)
     agent._current_run_params = RunParams(request_id=actor.entry_request_id,
         task_attributes={"conversation_thread_id": source.thread_id}, host_channel_actor=actor)
+    if identity.owner_kind == "group":
+        from agent_py_agent.tests.test_group_authorization import (
+            grant_synthetic_group_monitor_capability,
+        )
+
+        grant_synthetic_group_monitor_capability(agent, actor, members={actor.actor_id})
     return agent, ScheduleTool(agent)
 
 

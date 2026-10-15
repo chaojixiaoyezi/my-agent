@@ -1,3 +1,33 @@
+2026-10-15 群授权与原调度机器人观察：
+
+```text
+|-- agent_py_agent/agent/user_space/group_authorization.py # 原tool_policy里的群显式授权、CAS和可信成员事件失效
+|-- agent_py_agent/agent/user_space/group_authorization_context.py # 原HostActor、实时provider事实及同步写租约
+|-- agent_py_agent/agent/gateway_parts/group_authorization_control.py # 人工/group控制，不向模型开放授予
+|-- agent_py_agent/agent/adapter/feishu_provider_facts.py # 原REST凭据查询完整群事实与准确原消息来源
+|-- agent_py_agent/agent/adapter/feishu_group_events.py # 真实成员与机器人事件归一化，不猜邀请人
+|-- agent_py_agent/agent/adapter/feishu_observations.py # bot观察字段规范，不制造真人actor
+|-- agent_py_agent/agent/adapter/channel_observations.py # 原Ingress观察提交和重投接线
+|-- agent_py_agent/agent/gateway_parts/channel_observations.py # 宿主认证观察入口，按原群owner登记
+|-- agent_py_agent/agent/scheduler/event_sources.py # canonical事件计划、稳定代次和有界模型视图
+|-- agent_py_agent/agent/scheduler/event_source_repository.py # 原scheduler store的事件去重、背压及原srun预留
+|-- agent_py_agent/agent/scheduler/event_source_tool.py # 模型只给原消息引用，宿主核验后登记计划
+|-- agent_py_agent/agent/scheduler/event_source_lifecycle.py # 原执行与投递共享退代检查
+|-- agent_py_agent/agent/scheduler/event_effects.py # 原job事件状态中的有界副作用开始租约，不复制结果账
+|-- agent_py_agent/agent/scheduler/effect_scope.py # 原模型/后台/工具投递共用准入与同nonce清理
+|-- agent_py_agent/agent/scheduler/dispatch.py # 原SchedulerService入队实现，无第二队列
+|-- agent_py_agent/tests/test_group_authorization.py # 角色/成员/撤销与并行上下文借权反例
+|-- agent_py_agent/tests/test_group_feature_integration.py # 原工具、部署开关、来源证明及认证路由集成
+|-- agent_py_agent/tests/test_group_authorization_settings.py # 配置最终写入、撤权原卡、准确owner与系统初始化
+|-- agent_py_agent/tests/test_feishu_bot_observations.py # 官方字段形状、bot分型和原Ingress认证观察
+|-- agent_py_agent/tests/test_scheduler_event_sources.py # 原事件store/run、长期有界去重及冷owner恢复
+|-- agent_py_agent/tests/test_scheduler_event_effects.py # 真后台模型与运输边界上的暂停竞争，不调用真实模型或外发
+|-- docs/design/SCHEDULER_EVENT_SOURCES.md # 来源、背压、时间窗、准入与平台权限合同
+`-- docs/design/IM_GROUP_GOVERNANCE.md # 授权、订阅、取消与平台权限边界
+```
+
+关键文件说明：群授权只写原策略，event_source只扩原job/rule/store/run；观察与真人请求分型，不增加第二权限账、执行队列或WS连接。真实租户与发行验收单独记录。
+
 2026-10-15 卡片回调安全诊断：
 
 ```text

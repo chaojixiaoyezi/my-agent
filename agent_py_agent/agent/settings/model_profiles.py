@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from ..common.json_io import locked_json_path
+from ..user_space.group_authorization_context import group_capability_guard
 from .model_provider_schema import (
     SCHEMA,
     ModelProfileError,
@@ -293,7 +294,7 @@ def _with_point_diagnostics(agent: object, result: dict) -> dict:
             "diagnostics_window_hours": 24}
 
 
-# LLM: 目录写入锁内原子进行；select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用，
+# LLM: 手动群目录写入先持原群授权策略锁；自动 seed/增强物化不走此手动门。select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用，
 #   set_initial 只改共享目录里的初始模型；select 可携带 expected_revision 原线程 CAS，save_profile 显式编辑独立连接；add_models 按连接批量新增。
 # 函数用途: 管理模型与决策设置；决策操作不初始化生成选择，网络只在显式认证/目录/连接测试时发生，回执不含令牌。
 def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
@@ -349,7 +350,7 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     added = None
-    with locked_json_path(path):
+    with group_capability_guard(agent, "assistant.configure", thread_id=thread_id), locked_json_path(path):
         data = read_model_profiles(path)
         check = _WRITE_CHECK.get()
         before = deepcopy(data) if check is not None else None
@@ -512,7 +513,7 @@ def inherit_model_profile(attrs: dict, agent: object, *, model: object = None) -
     attrs["host_model_profile.v1"] = {"profile_id": selected or "default"}
 
 
-# LLM: 任务先经 owner/dispatch 授权；已物化 child thread 是选择权威，创建引用只初始化未物化/旧线程，不读 owner 默认。
+# LLM: 任务先经 owner/dispatch 授权；冻结引用仅按 inherited 来源初始化空 child，不进入手动群配置门、不覆盖已有选择。
 # 函数用途: 给重启后的子代理恢复其独立线程模型；父会话后续切换不会覆盖子代理。
 def inherited_model_config(agent: object, task: object):
     attrs = getattr(task, "attributes", {}) or {}
@@ -524,9 +525,9 @@ def inherited_model_config(agent: object, task: object):
     thread_id = str(getattr(task, "agent_thread_id", "") or "")
     thread = store.threads.load(thread_id) if store is not None and thread_id else None
     if thread is not None:
-        from .thread_model_selection import thread_model_config, thread_model_profile_id
+        from .thread_model_selection import initialize_inherited_thread_model, thread_model_config
 
         if not thread.model_profile_id:
-            thread_model_profile_id(agent, thread_id, select=profile_id)
+            initialize_inherited_thread_model(agent, thread_id, profile_id)
         return thread_model_config(agent, thread_id)
     return selected_model_config(agent, profile_id=profile_id)

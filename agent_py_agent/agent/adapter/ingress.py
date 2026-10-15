@@ -20,7 +20,7 @@ from ..common.json_io import locked_json_path
 from .delivery import GatewayClaimLeaseConfig, GatewayReplyDeliveryWorker
 
 _LOGGER = logging.getLogger(__name__)
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 # 入站记录保留 7 天：足够排查与审计，又不长期占用存储。
 _TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _INGRESS_STATES = frozenset(
@@ -41,6 +41,7 @@ class GatewayIngressRecord:
     canonical_payload_digest: str
     content: str
     metadata: dict[str, object]
+    kind: str = 'message'
     timestamp: float = 0.0
     state: str = "prepared"
     gateway_payload: dict[str, object] | None = None
@@ -70,10 +71,13 @@ class GatewayIngressRecord:
         required = (
             self.ingress_id,
             self.channel,
-            self.user_id,
             self.provider_message_id,
             self.canonical_payload_digest,
         )
+        if self.kind not in {'message', 'observation'} or (self.kind == 'message' and not self.user_id):
+            raise ValueError('invalid gateway ingress sender kind')
+        if self.kind == 'observation' and (self.user_id or not isinstance(self.metadata.get('observation'), dict)):
+            raise ValueError('observation cannot carry a human actor')
         if not all(str(value or "").strip() for value in required):
             raise ValueError("gateway ingress record is missing authenticated identity")
         claim_owner = str(self.claim_owner or "").strip()
@@ -102,6 +106,7 @@ class GatewayIngressRecord:
         gateway_payload = data.get("gateway_payload")
         submission = data.get("submission")
         return cls(
+            kind=str(data.get('kind') or 'message'),
             ingress_id=str(data.get("ingress_id") or "").strip(),
             channel=str(data.get("channel") or "").strip(),
             user_id=str(data.get("user_id") or "").strip(),

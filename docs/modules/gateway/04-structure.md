@@ -13,6 +13,10 @@
 
 # Gateway Structure
 
+事件采样/投递开始裁决使用 `scheduler/event_effects.py` 的原job有界租约，经 `effect_scope.py` 接原模型、后台最终/冻结重投及显式消息入口；控制与begin在原store锁内排序，锁不跨慢I/O。原run/history及Delivery仍为结果权威，普通前台任务不写scheduler；已准入在途与尚未开始分开显示。
+
+2026-10-15：group_authorization_control只接受认证人工slash，原HostActor与provider当前事实组合原策略锁；配置仓库最终写入口消费同调用活租约。channel_observations在原route表注册credential档且处理器再次核宿主凭据，bot不带真人user_id；Ingress类型与原scheduler event_source store/run维持唯一事实源，原generation阻断退休执行/投递。见[群治理合同](../../design/IM_GROUP_GOVERNANCE.md)。
+
 引用附件沿 `adapter/manager._ChannelIngressCoordinator.prepare_payload` → `feishu_quoted_media` 精确父证明 → 原 `_download_inbound_media_refs`。FeishuAdapter 只增加单条 GET，CLI 接线原 feishu_quoted_media_enabled；parent.sender/text 不搬到当前 IncomingMessage。逐资源 source ID 只来自本次证明，当前 media 任意 source 字段不能选择另一消息；路径始终由当前 `/ask` owner resolver 和原私有写入口生成。失败结构与供应商边界见 [设计](../../design/FEISHU_QUOTED_MEDIA.md)。
 
 2026-10-13 新接线：schedule_control 为原 job/run 的用户视图，按原 creator 和 admin 绑定查询，冷群仅元数据读取、实际修改加载原 owner Agent；scheduler/rules、monitor_state、tool_work 只扩展原仓库和执行器。task_credentials 属于原 H2 私密交互，private_interaction_service 沿 MAC/actor/锁/实际卡身份接收输入；web_fetch 只在准确 origin 注入。restart_service 的 stop_for_update 复用原排空身份，Gateway CLI 区分停止与重启。adapter/manager 的入站附件使用原 request_worker owner resolver，共用 conversation/input_media 目录合同。

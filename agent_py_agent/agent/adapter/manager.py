@@ -491,6 +491,8 @@ class _ChannelIngressCoordinator:
         self,
         record: GatewayIngressRecord,
     ) -> dict[str, object]:
+        if record.kind == 'observation':
+            return dict(record.metadata['observation'])
         msg = _gateway_ingress_message(record)
         adapter = self._manager._adapters.get(msg.channel)
         quoted = None
@@ -517,6 +519,9 @@ class _ChannelIngressCoordinator:
     ) -> dict[str, object]:
         if not isinstance(record.gateway_payload, dict):
             raise ValueError("gateway ingress payload is missing")
+        if record.kind == 'observation':
+            from .channel_observations import submit_channel_observation
+            return submit_channel_observation(self._manager, record.gateway_payload)
         try:
             submission = self._manager._submit_gateway_payload(
                 record.gateway_payload,
@@ -532,6 +537,10 @@ class _ChannelIngressCoordinator:
         self,
         record: GatewayIngressRecord,
     ) -> GatewayIngressAdvance:
+        if record.kind == 'observation':
+            if not isinstance(record.submission, dict) or record.submission.get('status') not in {'accepted', 'ignored'}:
+                raise ValueError('observation receipt is invalid')
+            return GatewayIngressAdvance('completed')
         if isinstance(record.submission, dict) and record.submission.get("kind") == "credential_error":
             if not self._manager._send_gateway_reply(_gateway_ingress_message(record), record.ingress_id, record.submission["message"]):
                 raise RuntimeError("gateway credential error delivery was not accepted")
@@ -1001,12 +1010,8 @@ class ChannelManager:
 
     def register_adapter(self, adapter: BaseChannelAdapter) -> None:
         """注册一个通道适配器。"""
-        name = adapter.adapter_name
-        if name in self._adapters:
-            logger.warning(f"适配器 {name} 已注册，将被替换")
-        self._adapters[name] = adapter
-        self._delivery_registry.register_adapter(name, adapter, configured=True)
-        logger.info(f"已注册通道适配器: {name}")
+        from .channel_observations import register_channel_adapter
+        register_channel_adapter(self, adapter)
 
     def get_adapter(self, name: str) -> BaseChannelAdapter | None:
         """获取指定名称的适配器。"""

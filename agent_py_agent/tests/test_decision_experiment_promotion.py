@@ -190,16 +190,14 @@ def test_observe_only_authorization_never_applies_but_the_proposal_is_readable(l
 
 def test_user_change_between_read_and_write_is_kept_and_promotion_skips(lane, monkeypatch):
     turn = ready_turn(lane)
-    original, calls = promotion.execute_decision_settings_operation, []
+    original = promotion._execute_host_decision_settings_patch
 
-    # 锁内第一次读之后、任何后续设置调用之前，用户改了另一个字段；晋升必须用第一次读到的版本做 CAS。
-    def racing(agent, operation, payload, *, thread_id=""):
-        calls.append(operation)
-        if len(calls) == 2:
-            patch(lane.host, {"points.skill_tool.timeout_seconds": 3}, thread_id=thread_id, scope="thread")
-        return original(agent, operation, payload, thread_id=thread_id)
+    # 原 read 之后、宿主自动 patch 提交之前注入人工变化；来源拆分不改变原 CAS 的拒绝义务。
+    def racing(agent, payload, *, thread_id=""):
+        patch(lane.host, {"points.skill_tool.timeout_seconds": 3}, thread_id=thread_id, scope="thread")
+        return original(agent, payload, thread_id=thread_id)
 
-    monkeypatch.setattr(promotion, "execute_decision_settings_operation", racing)
+    monkeypatch.setattr(promotion, "_execute_host_decision_settings_patch", racing)
     finish(turn)
     overrides = view(lane)["overrides"]["thread"]
     assert FIELD not in overrides and overrides["points.skill_tool.timeout_seconds"] == 3

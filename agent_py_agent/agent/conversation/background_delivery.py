@@ -53,6 +53,7 @@ _ROUTE_UNDECLARED = "undeclared"
 # LLM: canonical 记录与外部投递是两条独立事实：正文归属看路线归属（声明级），外发成功与否只看回执。
 # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
 # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
+# 已外发的冻结回执只补canonical，不受新准入否决而再次外发；未外发事件仍须原generation与开始CAS。
 # 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层；原调度静默策略只记内部结果。
 def record_background_response(
     delivery: BackgroundDeliveryDependencies,
@@ -115,9 +116,7 @@ def record_background_response(
         delivery_context,
         route_supports_transcript=route_supports_transcript,
     ), local_transcript_only)
-    from ..scheduler.execution import validate_delivery_origin
-
-    origin_valid = validate_delivery_origin(delivery.agent, request, delivery_context)
+    origin_valid = _validated_background_origin(delivery.agent, request, delivery_context, frozen_retry)
     receipt, delivery_status = _background_delivery_for_origin(
         delivery, delivery_context, envelope,
         origin_valid=origin_valid,
@@ -159,6 +158,16 @@ def record_background_response(
         ),
     )
     return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
+
+
+# LLM: 已external_sent冻结事实只授权canonical收尾，未外发信封仍核当前代次且实际运输另走begin CAS；普通任务仅只读。
+# 函数用途: 区分已发生外发的原回执收口与尚待发送的来源预检，不产生副作用或新重投身份。
+def _validated_background_origin(agent, request, context, frozen_retry):
+    from ..scheduler.execution import validate_delivery_origin
+
+    if frozen_retry is not None and frozen_retry.external_sent:
+        return validate_delivery_origin(agent, request, context, admitted_completion=True)
+    return validate_delivery_origin(agent, request, context)
 
 
 # LLM: 重投载荷必须是整封 owner envelope 的不可变快照：正文、附件（delivery_artifacts）、
@@ -332,8 +341,8 @@ def _background_delivery_for_origin(
 
 
 # LLM: 外部发送只有这一个出口：重投时若冻结载荷已证明外发成功，就绝不能再次外发
-# （只补本地 canonical），否则会对真实用户重复发消息。
-# 函数用途: 执行本次外部投递或复用冻结的外发事实，返回 (回执, 投递状态)。
+# （只补本地 canonical），否则会对真实用户重复发消息。事件实际运输先经原job CAS准入，普通任务零scheduler写。
+# 函数用途: 沿原运输执行已准入投递或复用冻结外发事实；原回执仍唯一决定外发结果，不持store锁跨运输。
 def _background_external_delivery(
     delivery: BackgroundDeliveryDependencies,
     delivery_context: DeliveryContext,
@@ -368,7 +377,14 @@ def _background_external_delivery(
             ),
             "local_only",
         )
-    receipt = delivery.channels.deliver(delivery_context, envelope)
+    from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
+
+    try:
+        with scheduler_effect_scope(delivery.agent, delivery_context.task_id, delivery_context.idempotency_key,
+                kind='delivery', allow_terminal=frozen_retry is not None):
+            receipt = delivery.channels.deliver(delivery_context, envelope)
+    except SchedulerEffectRejected as exc:
+        return SimpleNamespace(content=envelope.content, error_code=exc.error_code), 'failed'
     return receipt, str(getattr(receipt, "delivery_status", "") or "sent")
 
 

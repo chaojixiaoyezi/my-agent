@@ -49,6 +49,8 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
 # LLM: run 属于本 owner；来源按准确 creator 冻结，isolated 复用原 execution_origin，不因群新发送者改主体或收件人。
 # 函数用途: 入队前冻结两种执行模式的交付与宿主身份，只为独立模式创建无通道运行线程。
 def prepare_execution(service, run: dict, *, now: float) -> dict:
+    if not service.repository.event_run_is_current(run):
+        raise ValueError('事件订阅已停止或更新')
     execution = normalize_execution(run.get("execution"))
     from ..conversation.models import ConversationThread
     from ..conversation.unbound_thread_store import ensure_unbound_thread
@@ -66,6 +68,8 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
         return run
     identity = {"thread_kind": "scheduled", "scheduler_run_id": run["run_id"],
                 "origin_thread_id": origin.thread_id, **scheduled_execution_metadata(service, run)}
+    if run.get('event_source') is not None:
+        identity['scheduler_event_source'] = run['event_source']
     seed = ConversationThread(
         thread_id=run["thread_id"], canonical_user_id=origin.canonical_user_id,
         owner_id=origin.owner_id, owner_home=origin.owner_home, title=run["name"],
@@ -121,6 +125,10 @@ def execution_run(agent, request) -> dict | None:
     if repository is None or not task_id:
         return None
     run = repository.get_active_run(task_id)
+    if run is None and task_id.startswith('srun_'):
+        candidate = repository.effect_run(task_id)
+        if candidate is not None and candidate.get('event_source') is not None:
+            run = candidate
     if run is not None and str(run["thread_id"]) != request.thread_id:
         raise ValueError("定时执行线程与任务不匹配")
     return run
@@ -215,10 +223,12 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
     return origin, channel, target
 
 
-# LLM: 只裁决原 run 的冻结绑定、接管认证代次与准确目标，不搜索新通道或回落管理员；失败交原 outbox，禁止重跑模型弥补投递。
-# 函数用途: 投递前核对原会话未重置或改归属；静默结果只写精确运行线程，不要求原外部绑定仍可投递。
-def validate_delivery_origin(agent, request, context) -> bool:
+# LLM: 只读原冻结绑定/代次/目标；此快照不能替代运输前原begin CAS。admitted_completion仅用于已external_sent冻结回执补canonical，不授新发送。
+# 函数用途: 核对原会话归属与事件代次，普通任务零写；已外发重投沿原回执收尾，未外发失败仍交原outbox不重跑模型。
+def validate_delivery_origin(agent, request, context, *, admitted_completion=False) -> bool:
     run = execution_run(agent, request)
+    if run is not None and not admitted_completion and not agent.scheduler_repository.event_run_is_current(run):
+        return False
     if run is not None and scheduled_local_delivery(agent, request):
         return context.thread_id == run["thread_id"] and context.channel == "internal" and context.target == run["thread_id"]
     if run is None:

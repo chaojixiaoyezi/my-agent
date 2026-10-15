@@ -163,7 +163,9 @@ def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
         sender = getattr(event, "sender", None)
         sender_id = getattr(sender, "sender_id", None) if sender is not None else None
         open_id = str(getattr(sender_id, "open_id", "") or "") if sender_id is not None else ""
+        header = getattr(data, 'header', None)
         return {
+            'header': {key: str(getattr(header, key, '') or '') for key in ('app_id', 'tenant_key', 'event_id', 'event_type', 'create_time')},
             "event": {
                 "message": {
                     "message_id": message_id,
@@ -180,7 +182,9 @@ def lark_event_to_webhook_payload(data: Any) -> dict[str, Any] | None:
                     "thread_id": str(getattr(msg, "thread_id", "") or ""),
                     "create_time": str(getattr(msg, "create_time", "") or ""),
                 },
-                "sender": {"sender_id": {"open_id": open_id}},
+                "sender": {"sender_id": {"open_id": open_id},
+                    'sender_type': str(getattr(sender, 'sender_type', '') or ''),
+                    'tenant_key': str(getattr(sender, 'tenant_key', '') or '')},
             }
         }
     except Exception:
@@ -292,6 +296,18 @@ class FeishuWsClient:
             logger.warning('feishu_transport message_ref=%s status=retryable reason_code=%s error_type=%s',
                            provider_message_reference(message_id), reason, type(exc).__name__)
             raise FeishuRetryableEventError(reason) from None
+
+    # LLM: 群生命周期事件只经原入口写授权失效事实，event_id 幂等由原策略账负责；失败必须返回 SDK 失败 ACK。
+    # 函数用途: 把官方成员事件交给同一个已认证消费者，不构造消息或人类 actor。
+    def _handle_group_event(self, data: Any) -> None:
+        from .feishu_group_events import lark_group_event_payload
+
+        try:
+            result = self.on_payload(lark_group_event_payload(data))
+            if not isinstance(result, FeishuEventDisposition) or result.status not in {'accepted', 'ignored'}:
+                raise FeishuRetryableEventError('FEISHU_GROUP_EVENT_UNAVAILABLE')
+        except Exception:
+            raise FeishuRetryableEventError('FEISHU_GROUP_EVENT_UNAVAILABLE') from None
 
     # LLM: 锁内只操作现有进程缓存，不能把 inflight 当作完成；锁外才运行消费者。
     # 函数用途: 原子领取一个未处理的消息编号，防两个 WS 回调同时执行。
@@ -411,6 +427,12 @@ class FeishuWsClient:
             .register_p2_im_message_reaction_created_v1(self._ignore_event)
             .register_p2_im_message_reaction_deleted_v1(self._ignore_event)
         )
+        for name in ('register_p2_im_chat_member_bot_added_v1', 'register_p2_im_chat_member_bot_deleted_v1',
+                'register_p2_im_chat_member_user_added_v1', 'register_p2_im_chat_member_user_deleted_v1'):
+            register = getattr(builder, name, None)
+            if not callable(register):
+                raise RuntimeError('FEISHU_GROUP_EVENT_SDK_UNAVAILABLE')
+            builder = register(self._handle_group_event)
         # 卡片按钮回调(飞书人设确认):仅在接线了 on_card_action 且 SDK 版本支持该注册时挂上(防旧版无此方法)。
         if self.on_card_action is not None and hasattr(builder, "register_p2_card_action_trigger"):
             builder = builder.register_p2_card_action_trigger(self._handle_card_action)

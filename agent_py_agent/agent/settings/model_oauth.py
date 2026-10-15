@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hmac
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
 from ..common.json_io import locked_json_path
+from ..user_space.group_authorization_context import group_capability_guard
 from .model_oauth_schema import chatgpt_callback_uri, has_credential, oauth_binding, stored_oauth
 from .model_oauth_wire import (
     browser_authorize,
@@ -46,12 +48,12 @@ def _projection(auth: dict, *, reveal_code: bool = False) -> dict:
     return result
 
 
-# LLM: CAS 比较配置绑定及登录请求编号；旧网页授权不能覆盖新请求或恢复已退出账号。
+# LLM: 手动 OAuth 网络返回后重新查询群授权并持策略锁提交原 CAS；迟到结果、撤权及旧请求不能写回。
 # 函数用途: 在配置未变且请求仍有效时提交登录状态。
-def _commit(path: Path, provider_id: str, binding: str, attempt: str, update: dict) -> dict:
+def _commit(path: Path, provider_id: str, binding: str, attempt: str, update: dict, *, agent) -> dict:
     from .model_profiles import _save_profiles
 
-    with locked_json_path(path):
+    with group_capability_guard(agent, "assistant.configure"), locked_json_path(path):
         data, row = _provider(path, provider_id)
         if not row["enabled"] or oauth_binding(row) != binding or row["auth"].get("pending", {}).get("id") != attempt:
             raise ModelProfileError("登录已取消或配置已变化，迟到结果未保存。")
@@ -63,7 +65,7 @@ def _commit(path: Path, provider_id: str, binding: str, attempt: str, update: di
         return _projection(row["auth"], reveal_code=True)
 
 
-# LLM: 每服务商一个登录请求；取消及启动失败只清匹配请求，退出才清凭据换代，网络不持有文件锁。
+# LLM: 手动写阶段持群能力锁；读取/取消免新增 grant，自动 refresh 不走此手动入口；每服务商一个请求，网络不持文件锁。
 # 函数用途: 执行用户明确选择的认证动作；空闲不会自行登录或调用模型。
 def execute_oauth(agent: object, operation: str, payload: dict) -> dict:
     from .model_profiles import _save_profiles, model_profiles_path
@@ -71,8 +73,10 @@ def execute_oauth(agent: object, operation: str, payload: dict) -> dict:
     path = model_profiles_path(agent.home_paths)
     provider_id = validate_provider_id(payload.get("provider_id"))
     if operation in BROWSER_OPERATIONS:
-        return _browser_login(path, provider_id, operation, payload)
-    with locked_json_path(path):
+        return _browser_login(path, provider_id, operation, payload, agent=agent)
+    guard = (nullcontext() if operation in {"auth_status", "auth_parameters", "auth_cancel"}
+             else group_capability_guard(agent, "assistant.configure"))
+    with guard, locked_json_path(path):
         data, row = _provider(path, provider_id)
         auth = row["auth"]
         binding = oauth_binding(row)
@@ -119,23 +123,23 @@ def execute_oauth(agent: object, operation: str, payload: dict) -> dict:
             execute_oauth(agent, "auth_cancel", {"provider_id": provider_id, "attempt_id": attempt})
             raise
         pending["next_poll_at"] = time.time() + pending["interval"]
-        return _commit(path, provider_id, binding, attempt, {"pending": pending})
+        return _commit(path, provider_id, binding, attempt, {"pending": pending}, agent=agent)
     status, fields = poll_device(auth, pending)
     if status == "connected":
-        return _commit(path, provider_id, binding, attempt, {**fields, "generation": uuid4().hex, "pending": None})
+        return _commit(path, provider_id, binding, attempt, {**fields, "generation": uuid4().hex, "pending": None}, agent=agent)
     pending["interval"] += 5 if status == "slow_down" else 0
     pending["next_poll_at"] = time.time() + pending["interval"]
-    return _commit(path, provider_id, binding, attempt, {"pending": pending})
+    return _commit(path, provider_id, binding, attempt, {"pending": pending}, agent=agent)
 
 
 # LLM: 浏览器登录与设备码共用唯一 pending 槽位和 _commit 的 CAS：开始只写本次 PKCE 等待状态（不联网），完成时锁内核对
 #   请求编号、期限与 state，锁外兑换一次授权码，再按配置绑定和请求编号提交；state 不符不清等待状态，伪造回调不能打断真实登录。
 #   只支持已启用的 ChatGPT 订阅服务商；通用 OAuth 仍走设备码。改动须同步 test_model_oauth 的浏览器登录用例。
 # 函数用途: 处理 TUI 发起的 ChatGPT 浏览器登录的开始与完成两步；会写 owner 私有模型目录，完成时向授权服务器换一次令牌。
-def _browser_login(path: Path, provider_id: str, operation: str, payload: dict) -> dict:
+def _browser_login(path: Path, provider_id: str, operation: str, payload: dict, *, agent) -> dict:
     from .model_profiles import _save_profiles
 
-    with locked_json_path(path):
+    with group_capability_guard(agent, "assistant.configure"), locked_json_path(path):
         data, row = _provider(path, provider_id)
         auth, binding = row["auth"], oauth_binding(row)
         if not row["enabled"] or auth["mode"] != "chatgpt":
@@ -154,7 +158,7 @@ def _browser_login(path: Path, provider_id: str, operation: str, payload: dict) 
         if problem:
             raise ModelProfileError(problem)
     fields = exchange_browser_code(auth, pending, str(payload["code"]))
-    return _commit(path, provider_id, binding, pending["id"], {**fields, "generation": uuid4().hex, "pending": None})
+    return _commit(path, provider_id, binding, pending["id"], {**fields, "generation": uuid4().hex, "pending": None}, agent=agent)
 
 
 # LLM: 只比结构化字段：请求编号、期限、state（常量时间比较）和授权码形状；不解析网页或错误文字。

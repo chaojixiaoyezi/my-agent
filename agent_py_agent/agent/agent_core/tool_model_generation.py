@@ -1526,11 +1526,14 @@ def _generate_and_remember(backend, prompt: str, state: _ModelGenerationState, k
 
 
 # LLM: 覆盖的清除不在物理调用层：每次物理尝试都清会让超时重试丢档、并误伤共享参数的其它用途
-#   （见 generate_model_response 的逻辑调用级归属判定）。本函数只负责组装并发出一次请求。
-# 函数用途: 组装一次模型请求参数并调用模型后端。
+#   （见 generate_model_response 的逻辑调用级归属判定）。事件根须在原begin CAS获准后才进入backend，不持原store锁跨请求。
+# 函数用途: 组装一次模型请求参数，取得当前事件操作资格后调用模型后端；普通任务不写scheduler。
 def _do_backend_generate(backend, prompt: str, state: _ModelGenerationState):
+    from ..scheduler.effect_scope import scheduler_effect_scope
+
     _generate_started = time.monotonic()
-    result = _generate_with_request_options(backend, prompt, state)
+    with scheduler_effect_scope(state.agent, getattr(state.params, 'task_id', ''), state.call_id, kind='model'):
+        result = _generate_with_request_options(backend, prompt, state)
     if os.environ.get("MY_AGENT_STAGE_DEBUG") == "1":
         # 诊断行走 stderr（gateway 的 nohup 2>&1 已并入日志文件）。
         import sys

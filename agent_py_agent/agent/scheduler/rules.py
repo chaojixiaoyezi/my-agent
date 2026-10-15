@@ -48,6 +48,8 @@ def _normalize_rule(raw: object) -> dict:
     if not isinstance(prompt, str) or len(prompt) > 32000 or (use_llm and not prompt.strip()):
         raise ScheduleValidationError("LLM 规则需要非空 prompt，最多 32000 字符")
     tool = _normalize_tool(raw.get("tool"), use_llm=use_llm)
+    if (raw.get('schedule') or {}).get('kind') == 'event_source' and not use_llm:
+        raise ScheduleValidationError('事件订阅条件必须由原 LLM 研判')
     dependencies = raw.get("depends_on", [])
     if not isinstance(dependencies, list) or any(not isinstance(item, str) for item in dependencies) or len(set(dependencies)) != len(dependencies):
         raise ScheduleValidationError("depends_on 必须是同监控的不重复规则编号数组")
@@ -112,7 +114,7 @@ RULES_SCHEMA = {'type':'array','minItems':1,'items':{'type':'object','additional
     'properties':{
         'id':{'type':'string'},'name':{'type':'string'},'enabled':{'type':'boolean'},'use_llm':{'type':'boolean'},
         'schedule':{'type':'object','additionalProperties':False,'properties':{
-            'kind':{'type':'string','enum':['every','at','cron']},'every_seconds':{'type':'integer','minimum':60,'maximum':31622400},
+            'kind':{'type':'string','enum':['every','at','cron','event_source']},'every_seconds':{'type':'integer','minimum':60,'maximum':31622400},
             'anchor_at':{},'at':{'type':'string'},'expression':{'type':'string'},'timezone':{'type':'string'}},'required':['kind']},
         'prompt':{'type':'string'},'tool':{'type':'object','additionalProperties':False,
             'properties':{'name':{'type':'string'},'arguments':{'type':'object'}},'required':['name','arguments']},
@@ -123,3 +125,8 @@ RULES_SCHEMA = {'type':'array','minItems':1,'items':{'type':'object','additional
                 'value':{},'max_age_seconds':{'type':'integer','minimum':0}},'required':['rule_id','op']}},
     'required':['id','name','schedule','use_llm']},
     'description':'同一监控的独立规则；LLM 给 prompt，NO 给 tool；cron.expression 支持 0 9,18 * * *。depends_on/condition 只读同监控确认 JSON 工具结果。'}
+
+from .event_sources import EVENT_SOURCE_SCHEDULE_SCHEMA  # noqa: E402
+
+RULES_SCHEMA['items']['properties']['schedule']['properties'].update({key: value
+    for key, value in EVENT_SOURCE_SCHEDULE_SCHEMA['properties'].items() if key != 'kind'})

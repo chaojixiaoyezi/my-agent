@@ -163,6 +163,13 @@ def test_detached_source_and_pure_adapter_cannot_borrow_latest_active_credential
 # LLM: reserve/enqueue/claim 均使用原 scheduler 和不可变来源；私人凭据仍在同 actor 的旧根申请，只允许准确监控后续 run。
 # 函数用途: 准备原监控的真实执行关联和会话 claim，不从当前群成员补造身份。
 def _scheduled_execution(agent):
+    if agent.home_paths.owner_kind == "group":
+        from agent_py_agent.tests.test_group_authorization import (
+            grant_synthetic_group_monitor_capability,
+        )
+
+        actor = agent._current_run_params.host_channel_actor
+        grant_synthetic_group_monitor_capability(agent, actor, members={actor.actor_id})
     tool = ScheduleTool(agent)
     result = tool.execute({'action': 'create', 'name': '合成凭据监控', 'prompt': '检查合成 API',
         'schedule_kind': 'every', 'every_seconds': 600, '__tool_call_id': uuid.uuid4().hex})

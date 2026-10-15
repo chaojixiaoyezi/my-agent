@@ -37,6 +37,10 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
+    CommandSpec("group", "/group [show]", "查看当前群的监控与配置授权", surfaces=("im",),
+                submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$",
+                help_variants=(("/group allow monitors.create|assistant.configure [member:<open_id>|all-current]", "当前群主或邀请人显式授予能力，缺省只授予本人"),
+                               ("/group revoke <grant_id>", "撤销准确群授权，不中断已运行任务"))),
     CommandSpec("schedule", "/schedule [job编号]", "本人监控列表与规则详情", submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$",
                 help_variants=(("/schedule history job01", "最近3次执行"), ("/schedule pause|resume job01 [rule1]", "原地停止或恢复整体计划或单条规则"),
                 ("/schedule run job01 [rule1]", "立即试跑规则"), ("/schedule delete job01", "删除本人监控并请求停止当前整树执行"),

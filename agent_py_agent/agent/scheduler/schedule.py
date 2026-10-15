@@ -75,6 +75,8 @@ class CronFields:
         return dom_matches or dow_matches
 
 
+# LLM: 时间表达式由这里构造，事件来源使用同模块校验及专门的纯结构 normalize_event_schedule；不把正文当触发器。
+# 函数用途: 构造可持久化时间计划，新增形态须同步校验与下一次运行计算。
 def build_schedule(
     *,
     kind: object,
@@ -126,13 +128,18 @@ def build_schedule(
             "expression": expression,
             "timezone": zone_name,
         }
-    raise ScheduleValidationError("schedule_kind must be at, every, or cron")
+    raise ScheduleValidationError("schedule_kind must be at, every, cron, or event_source")
 
 
+# LLM: 持久计划只认显式 kind，event_source 不生成定时到期时间。
+# 函数用途: 校验原调度器所有计划形态，不产生副作用。
 def validate_schedule(schedule: object) -> dict[str, object]:
     if not isinstance(schedule, dict):
         raise ScheduleValidationError("schedule must be an object")
     kind = str(schedule.get("kind") or "").strip().lower()
+    if kind == 'event_source':
+        from .event_sources import normalize_event_schedule
+        return normalize_event_schedule(schedule)
     if kind == "at":
         instant = parse_instant(
             schedule.get("at"), timezone_name=str(schedule.get("timezone") or "UTC")
@@ -162,9 +169,13 @@ def validate_schedule(schedule: object) -> dict[str, object]:
     raise ScheduleValidationError("stored schedule kind is invalid")
 
 
+# LLM: 事件只由准确入站预留，不允许计算出历史轮询时间；原时间表达式保持旧算法。
+# 函数用途: 返回下次时间到期，事件来源返回 None。
 def compute_next_run(schedule: dict[str, object], *, after: float) -> float | None:
     normalized = validate_schedule(schedule)
     kind = str(normalized["kind"])
+    if kind == 'event_source':
+        return None
     if kind == "at":
         instant = parse_instant(normalized["at"], timezone_name=str(normalized["timezone"]))
         timestamp = instant.timestamp()

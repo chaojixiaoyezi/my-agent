@@ -159,6 +159,8 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
 #   要么属于宿主控制面。模型永远不能自行改；用户要改就走宿主入口或人工编辑。
 # 常量用途: 声明模型不可自行修改的配置项与原因。
 BOUNDARY_KEYS: dict[str, str] = {
+    "im_group_authorization_required": "群能力显式授权的部署安全边界；模型不能关闭或绕过",
+    "feishu_bot_subscriptions_enabled": "群机器人消息订阅的部署安全边界；模型不能自行扩大接收范围",
     "owner_default_permission_mode": "部署默认确认策略；仅部署者修改，模型不能扩大自身执行策略",
     "tool_approval_timeout_seconds": "工具确认绝对截止；模型不能延长或关闭保护",
     "feishu_cli_backend_enabled": "决定宿主飞书请求后端；模型不能自行切换执行后端",

@@ -56,6 +56,13 @@ def setup(tmp_path, monkeypatch, *, group=False, admin=False):
     scope = GatewayControlScope(user_id='ou_actor', channel='feishu', conversation_id='oc_group' if group else 'oc_private',
                                 metadata={'channel_chat_type': 'group' if group else 'p2p'})
     host, thread = model_profile_service._scoped_model_host(base, scope)
+    if group:
+        from agent_py_agent.tests.test_group_authorization import (
+            grant_synthetic_group_monitor_capability,
+        )
+
+        grant_synthetic_group_monitor_capability(host, host._current_run_params.host_channel_actor,
+            members={"ou_actor"}, capability="assistant.configure")
     if admin:
         base.conversation_store = host.conversation_store
     return base, owner, scope, host, thread

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 
 from ..backends.errors import ModelNotConfiguredError
+from ..user_space.group_authorization_context import group_capability_guard
 from .model_profiles import (
     ModelProfileError,
     model_profiles_path,
@@ -105,7 +107,7 @@ def _require_owner(agent: object, thread: object) -> None:
             raise ModelProfileError("当前模型选择不能访问其他用户的会话。")
 
 
-# LLM: 显式同值选择在 canonical thread 原子前进版本；expected_revision 在原锁内拒绝旧卡，不能热改运行片。
+# LLM: 显式群选择先持原策略锁到 canonical thread CAS；系统默认/增强物化不需手动配置 grant，不能热改运行片。
 # 函数用途: 读取或显式设置模型与覆盖事实；只在实际换模型时清除校准，不增加自动采用或确认流程。
 def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None = None, expected_revision: int | None = None) -> str:
     store = agent.conversation_store
@@ -143,7 +145,26 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
             model_context_usage={} if changed else latest.model_context_usage,
         )
 
-    return store.threads.update_atomic(thread_id, update).model_profile_id
+    guard = group_capability_guard(agent, "assistant.configure", thread_id=thread_id) if select is not None else nullcontext()
+    with guard:
+        return store.threads.update_atomic(thread_id, update).model_profile_id
+
+
+# LLM: 仅宿主从原 child 冻结引用恢复空线程；不是显式切模，已有选择永不覆盖，不接受模型来源标签绕过手动门。
+# 函数用途: 在旧子线程首次恢复时记录 inherited 初始绑定，保留原 owner/CAS 与配置校验。
+def initialize_inherited_thread_model(agent, thread_id: str, profile_id: str):
+    selected_model_config(agent, profile_id=profile_id)
+
+    # LLM: 锁内再次核 owner 与空选择，竞争中已显式选择的最新值优先；初始化只建立一次 inherited 来源。
+    # 函数用途: 为未物化线程提交原继承模型，保持其它会话状态。
+    def update(latest):
+        _require_owner(agent, latest)
+        if latest.model_profile_id:
+            return latest
+        return replace(latest, model_profile_id=profile_id, model_selection_revision=latest.model_selection_revision + 1,
+                       model_selection_source="inherited")
+
+    return agent.conversation_store.threads.update_atomic(thread_id, update).model_profile_id
 
 
 # LLM: 读取原 canonical 选择；请求边界由 selection_refresh 采用，不改 owner selected，也不热改在途响应。

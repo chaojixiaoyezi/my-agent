@@ -6,6 +6,8 @@
 
 2026-10-14 此前同线分工（历史阶段）：显式 `gpt-6.1-sol` 三个子代理分别独占审批/卡片/host期限、发现目录及本人OAuth、持久输入/凭据/取消；根独占配置统一源、受控CLI/云接线、文档、综合验证和发布。对应交接为 `IM_UNATTENDED_APPROVAL_HANDOFF.md`、`IM_SELF_DISCOVERY_HANDOFF.md`、`IM_PERSISTENT_INPUT_HANDOFF.md`。
 
+2026-10-15 群治理追加（`.20261015.1` 验证发行后）：继续使用准确 main 集成树，6.1-sol high 按文件独占共享工作树。授权线独占 `user_space/group_authorization*`、人工群授权服务、原设置最终写门及 `scheduler/control.py`；机器人线独占 adapter 观察与 provider facts、原 scheduler event_source/schema/store/run/投递接线；根独占配置、命令目录/解析/分发、HTTP 路由、`scheduler/tool.py`、`gateway_parts/schedule_control.py`、全局文档及最终验收发行。非作者只读审查 owner/actor、撤销竞争、取消与资源上限，不另造授权权威、队列或 WS 连接。真实飞书新增 scope 未获授权时不代开，以明确能力缺口记录，不以模拟测试冒充真实租户验收。
+
 # Workstreams
 
 这份文档定义并行开发工作台。

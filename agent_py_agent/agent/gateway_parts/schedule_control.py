@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ..conversation.control_commands import ConversationControlResult
 from ..scheduler.repository import SchedulerRepositoryError
 from ..scheduler.schedule import ScheduleValidationError, _canonical_zone_name
+from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.owner_resolver import OwnerIdentity
 from .schedule_diagnostics import ScheduleOwnerChanged, schedule_arguments, schedule_failure
 
@@ -54,7 +56,7 @@ def monitor_counts(agent, scope):
         return {'unavailable': True}
 
 
-# LLM: 参数与精确owner先校验；查询含同群所有创建者，写入统一原creator/实时离群代清理授权，取消未确认不得说停止。
+# LLM: 查询含同群创建者，写入核原creator；恢复/试跑/改通知须持群能力锁，停止取消不依赖新建授权。
 # 函数用途: 展示监控及历史并控制未来执行，异常提供可行动原因而不是要求用户刷新。
 def execute_schedule_control(agent, command, scope):
     started, operation, stage = time.monotonic(), 'invalid', 'arguments'
@@ -116,17 +118,32 @@ def execute_schedule_control(agent, command, scope):
             return _result(True, '已接管后续触发的通知到当前管理员私聊；已预留或正在执行的运行保持原通知目标和原执行者。',
                 {'job_id': job['job_id'], 'version': updated['version'], 'notification_binding_version': updated['notification_binding']['version']})
         if operation == 'run':
-            run = repo.reserve_manual_run(job['job_id'], rule_id=parts[2] if len(parts)>2 else '')
+            with _new_monitor_work_guard(agent, repo, scope, operation):
+                run = repo.reserve_manual_run(job['job_id'], rule_id=parts[2] if len(parts)>2 else '')
             return _result(True,f"已排队：{job['name']} {run.get('rule_id') or 'rule1'}。", {'run_id':run['run_id']})
         creator_display = job['creator_display']
-        job = {**_apply_monitor_control(repo, job, operation, parts), 'creator_display': creator_display}
+        with _new_monitor_work_guard(agent, repo, scope, operation):
+            job = {**_apply_monitor_control(repo, job, operation, parts), 'creator_display': creator_display}
         text = f"监控名（{job.get('alias',job['job_id'])}）：{job['name']}  run次数:{job.get('run_count','未知')}  status:{_state(job)}  创建者:{job.get('creator_display', '身份待核验')}"
         rules = job.get('rules') or [{'id':'rule1','name':job['name'],'use_llm':True,'enabled':True}]
         text += '\n' + '\n'.join(f"{r['id']}：{r['name'][:80]}（{'LLM' if r['use_llm'] else 'NO'}）{' stop' if not r['enabled'] else ''}" for r in rules)
         text += f"\n通知:{job['delivery']['mode']}（更改只影响后续运行；暂停不终止已开工的规则）"
         return _result(True,_space_label(scope)+'\n'+text,{'job_id':job['job_id'],'version':job['version']})
+    except GroupAuthorizationError as exc:
+        return _result(False, str(exc), code=exc.error_code)
     except (OSError, ValueError, AttributeError, KeyError, SchedulerRepositoryError, ScheduleValidationError) as exc:
         return schedule_failure(exc, scope, operation=operation, stage=stage, started=started)
+
+
+# LLM: 群能力锁覆盖实际 reserve/update，不能只在前面的授权预检时持有；停止、取消、删除、恢复核对都不申请新能力。
+# 函数用途: 为人工恢复/试跑/通知修改绑定当前认证 actor，非群与只读保持原行为。
+def _new_monitor_work_guard(agent, repository, scope, operation):
+    if repository.owner['kind'] != 'group' or operation not in {'resume', 'run', 'notify'}:
+        return nullcontext()
+    from ..user_space.group_authorization_context import group_capability_guard
+    owner_agent = _control_agent(agent, repository)
+    actor = _control_actor(owner_agent, scope)
+    return group_capability_guard(owner_agent, 'monitors.create', thread_id=actor.source_thread_id, actor=actor)
 
 
 # LLM: 仅输出仓库结构化失败的存在事实，不泄露未授权旧任务名或其它创建人；部分查询不能伪装完整空表。

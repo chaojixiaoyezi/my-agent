@@ -368,8 +368,8 @@ def reconcile_gateway_steer_delivery(
 #   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
 # 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
 # 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
-# LLM: 本人监控命令在原会话控制面分派，来源/角色和 owner 仍取认证 scope。
-# 函数用途: 本人监控命令在原会话控制面分派，来源/角色和 owner 仍取认证 scope。 修改需同步原控制、恢复或权限测试。
+# LLM: 监控与人工群授权均沿原已认证控制面分派；/group只接受原群owner，模型消息/子代理上下文不得制造批准。
+# 函数用途: 按准确身份和入口分派即时命令，群能力授予不进入普通模型任务，保持原控制/恢复/权限测试一致。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -402,6 +402,11 @@ def execute_gateway_conversation_control(
         return ConversationControlResult(command.kind, False, "当前身份或入口不能使用此命令。输入 /help 查看可用命令。", error_code=error)
     if command.kind == "help":
         return ConversationControlResult("help", True, render_command_help(access, command.value))
+    if command.kind == "group":
+        if resolve_gateway_scope_owner(agent, scope).owner_kind != 'group':
+            return ConversationControlResult('group', False, '请在群里单独 @ 助手后使用 /group。', error_code='GROUP_AUTHORIZATION_INVALID')
+        from .group_authorization_control import execute_group_authorization_control
+        return execute_group_authorization_control(agent, command, scope)
     if command.kind == "schedule":
         from .schedule_control import execute_schedule_control
         return execute_schedule_control(agent, command, scope)

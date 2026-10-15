@@ -12,7 +12,10 @@ import time
 
 from ..conversation.decision_experiment_evaluation import SKILL_TOOL_PROPOSAL
 from ..conversation.decision_policy import decision_owner_ref
-from ..settings.decision_settings import execute_decision_settings_operation
+from ..settings.decision_settings import (
+    _execute_host_decision_settings_patch,
+    execute_decision_settings_operation,
+)
 from ..settings.decision_settings_schema import DecisionSettingsConflict
 from ..settings.model_provider_schema import ModelProfileError
 from .request_experiment import EXPERIMENT_GRANT_KEY
@@ -96,14 +99,14 @@ def _write_receipt(context: object, receipt: dict, *, create: bool) -> bool:
     return written
 
 
-# LLM: 唯一写设置的地方：原设置服务 patch、thread 范围、expected_revision 取锁内刚读到的版本（完整 CAS）。
+# LLM: 原 experiment grant 已由宿主冻结复核；此自动系统来源走内部 patch，工具不能从 payload 选择豁免，thread CAS 不变。
 #   冲突=没有写入（skipped）；字段/身份校验失败也在写入前；其它异常可能已写入，记 uncertain，不重试不恢复。
 # 函数用途: 按原设置 CAS 把 skill_tool 改为 apply，并返回对应回执。
 def _apply(context: object, view: dict, grant: dict, evaluation: dict) -> dict:
     before = {"before": _field_value(view)}
     try:
-        result = execute_decision_settings_operation(
-            context.agent, "patch", {"scope": "thread", "expected_revision": view["revision"],
+        result = _execute_host_decision_settings_patch(
+            context.agent, {"scope": "thread", "expected_revision": view["revision"],
                                      "changes": {SKILL_TOOL_PROPOSAL["field"]: SKILL_TOOL_PROPOSAL["to"]}},
             thread_id=grant["thread_id"])
     except DecisionSettingsConflict:

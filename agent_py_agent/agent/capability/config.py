@@ -55,6 +55,10 @@ class CapabilityConfig:
     im_task_credentials_enabled: bool = True
     # IM 模型选择与原发起人私人配置卡；仅改变本 owner 目录，不允许普通用户发布全机模型。
     im_model_cards_enabled: bool = True
+    # 群新建/恢复监控与持久配置，须由当前群主或已证邀请人明确授权；停用不受此门限制。
+    im_group_authorization_required: bool = True
+    # 仅订阅准确机器人身份的群消息，沿原调度账本运行；没有订阅时不增加模型调用或轮询。
+    feishu_bot_subscriptions_enabled: bool = True
     # 跨owner投递/一次复刻仍需双端真人确认精确清单，不能复制权限或秘密。
     skill_transfers_enabled: bool = True
     # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。
@@ -144,6 +148,8 @@ def _coerce_int(value: object, default: int) -> int:
     return default
 
 
+# LLM: 部署安全开关严格校验实际布尔类型，不能通过未知值关闭群授权或开启机器人入口；须同步 YAML 和默认值测试。
+# 函数用途: 按唯一 dataclass 归一配置，安全边界参数非法时明确拒绝加载。
 def _coerce_capability_value(field_name: str, value: object) -> object:
     """按 dataclass 声明类型归一配置值,不依赖 parse_scalar 的引号类型推断。
 
@@ -161,7 +167,8 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
         if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).isdigit() or int(value) <= 0:
             raise ValueError("tool_approval_timeout_seconds 必须为正整数。")
         return int(value)
-    if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled"}:
+    if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled",
+                      "im_group_authorization_required", "feishu_bot_subscriptions_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value

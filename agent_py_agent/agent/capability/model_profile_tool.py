@@ -43,6 +43,7 @@ from ..tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from ..user_space.group_authorization import GroupAuthorizationError
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -297,7 +298,7 @@ class ManageModelsTool(BaseTool):
     #   目录写入都在 model_profile_write_check(catalog_write_check(agent)) 里做：会改变当前向量模型端点主机的写入在落盘前被拒
     #   （be 复审 M1），回 needs_user_choice / EMBEDDING_HOST_DIFFERS。ModelProfileError 都在落盘前抛出，标记 not_started；
     #   其余异常保留未知副作用。
-    # 函数用途: 校验参数、解析当前会话、调用唯一的模型配置服务，并返回不含密钥的回执。
+    # 函数用途: 校验参数与真实群授权、调用唯一模型配置服务，拒绝保留固定群错误码且不回传密钥。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _parse_request(params)
         if isinstance(request, ToolHandlerOutcome):
@@ -316,6 +317,8 @@ class ManageModelsTool(BaseTool):
                 result = execute_model_profile_operation(
                     self.agent, request.operation, request.payload, thread_id=thread_id,
                 )
+        except GroupAuthorizationError as exc:
+            return _err(str(exc), exc.error_code, effect_outcome="not_started")
         except ModelProfileError as exc:
             if exc.reason == EMBEDDING_HOST_CHANGE_REASON:
                 return _embedding_host_change_outcome(request, str(exc))

@@ -32,6 +32,7 @@ from ..settings.user_config_capability import (
     read_config_fact,
     user_config_path,
 )
+from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.owner_access import is_complete_local_admin_owner
 from .models import (
     BaseTool,
@@ -338,7 +339,7 @@ class UserConfigTool(BaseTool):
 #   本工具各动作共用一份扁平 schema，reason/key/value 等别的动作的字段也能过 schema；这里不替模型删字段，
 #   服务拒绝时回执写明 unknown_fields 与 allowed_fields（2026-09-28 生产上连续被拒三次，旧回执看不出是哪个字段）。
 #   与类状态无关，抽成模块级函数给 execute 调用，避免 UserConfigTool 类超行数软上限。
-# 函数用途: 调用共同决策设置服务修改原覆盖或撤销许可，身份与过期版本不能由模型覆盖，自调等待时间受上下限约束。
+# 函数用途: 调用原决策设置服务；群配置拒绝返回固定码，撤销保留免 grant，原身份/CAS 与等待上限不变。
 def _decision(agent: object | None, operation: str, params: dict) -> ToolHandlerOutcome:
     from ..settings.decision_settings import execute_decision_settings_operation
     from ..settings.decision_settings_schema import (
@@ -359,6 +360,8 @@ def _decision(agent: object | None, operation: str, params: dict) -> ToolHandler
         return refusal
     try:
         report = execute_decision_settings_operation(agent, operation, payload, thread_id=thread_id)
+    except GroupAuthorizationError as exc:
+        return ToolHandlerOutcome("user_config", False, str(exc), error_code=exc.error_code, effect_outcome="not_started")
     except DecisionSettingsConflict as exc:
         return ToolHandlerOutcome("user_config", False, str(exc), error_code="STALE_VERSION", reported_error_code="DECISION_SETTINGS_CONFLICT", effect_outcome="not_started")
     except DecisionSettingsAccessError as exc:

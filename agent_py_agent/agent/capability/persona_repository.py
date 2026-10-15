@@ -1,5 +1,5 @@
 # LLM: Owner-scoped Persona authority; keep document bytes, baseline/version snapshots,
-# quota admission, and rollback under the same typed repository contract.
+# quota admission, and rollback under the same typed repository contract; canonical group writes require a live host capability lease.
 # 模块用途: 安全加载并按用户隔离地修改 SOUL/USER/AGENTS，同时保存首次修改前基线和后续版本。
 """Owner-scoped Persona repository with guarded loading and versioned writes."""
 
@@ -360,11 +360,21 @@ class PersonaRepository:
         raw = path.read_text(encoding="utf-8") if path.exists() else ""
         return _sha256_text(raw)
 
+    # LLM: 正式群人格写入必须消费当前同步原策略租约；读取/引导初始化不经过此门。
+    # 函数用途: 核群配置能力后写一个人格变更，保持原配额和版本事务。
     def mutate(self, request: PersonaMutationRequest) -> dict[str, object]:
+        from ..user_space.group_authorization_context import require_group_persona_lease
+
+        require_group_persona_lease(self.path_for(request.target))
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_document(self, admission, request)
 
+    # LLM: 批量与单项共用正式群人格租约，不允许批量绕过原能力门。
+    # 函数用途: 核群配置能力后提交原批量变更，保持原 CAS 和配额。
     def mutate_batch(self, request: PersonaBatchMutationRequest) -> dict[str, object]:
+        from ..user_space.group_authorization_context import require_group_persona_lease
+
+        require_group_persona_lease(self.path_for(request.target))
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_batch_document(self, admission, request)
 

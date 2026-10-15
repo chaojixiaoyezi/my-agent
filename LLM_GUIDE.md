@@ -4,6 +4,8 @@
 
 # LLM_GUIDE
 
+2026-10-15 群治理追加：`.20261015.1` 已交付；群新建/恢复监控与持久配置须经当前群主/已证邀请人 `/group` 显式授权，停止取消不受新增门阻塞。指定 bot 订阅用原消息证明、原 Ingress 与 scheduler，不把 bot 变成真人 actor；平台新 scope 不自动开通。实施验收中，见[群治理](docs/design/IM_GROUP_GOVERNANCE.md)。
+
 2026-10-15 卡片链路诊断：原SDK实例只观察帧头摘要和固定处理阶段，原回环记录白名单错误码，不读表单或更改分发/ACK。B已首设未锁、群卡已发，不代表点击已到当前实例；须以真实新诊断版继续定位。SDK DEBUG含完整载荷，禁止用它采集凭据表单。
 
 2026-10-14 审批占住群会话追加审计：单卡超时仍返回可重试 APPROVAL_REQUIRED、活 consumer 无总截止；活 PID 等待不属孤儿。generation 10 非审批次数，MCP tool_approvals 非全局开关，三版 restart 的 always 无变化。37/60 两批既有回归通过、加速等待/临时DB/54项历史裁决证据保留；仅文档、未修产品。见 [综合审计追加](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)。

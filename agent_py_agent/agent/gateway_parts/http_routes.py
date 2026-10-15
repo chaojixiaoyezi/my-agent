@@ -29,6 +29,7 @@ GATEWAY_HTTP_ROUTES = {
     ),
     "POST": (
         GatewayHTTPRoute("/ask", "_handle_ask", "credential"),
+        GatewayHTTPRoute("/channel-observations", "handle_channel_observation", "credential", ".channel_observations"),
         GatewayHTTPRoute("/control", "_handle_control", "credential"),
         GatewayHTTPRoute("/client/memory", "_handle_client_memory", "credential"),
         GatewayHTTPRoute("/client/private-interaction", "handle_private_interaction", "credential", ".private_interaction_service"),
