@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -28,7 +28,7 @@ Issues = "https://github.com/chaojixiaoyezi/my-agent/issues"
 
 [project.optional-dependencies]
 dev = [
-  "setuptools>=77",  # 自有插件离线标准构建所需后端；只用于开发，不进入插件或宿主运行依赖
+  "setuptools>=83",  # 自有插件离线标准构建所需后端；只用于开发，不进入插件或宿主运行依赖
   "coverage>=7.6",
   "pytest>=8.0",
   "pytest-timeout>=2",
@@ -46,26 +46,26 @@ computer-use = [
 ]
 # J16 屏幕观察（macOS AX/ScreenCaptureKit + Linux X11）自己实现采集，不调上游 computer_control_mcp 的任何内部对象，
 # 因此生产不需要那个会带进 222 个包的上游执行器。这里按平台钉死观察链路真正用到的库，让部署能照仓库声明装。
-# 版本来自 3a 在生产运行时的克隆上的实测，以及 Linux 桌面层车道镜像（my-agent-linux-test:py312-desktop）里实际装到的版本。
+# MCP/Pillow 采用已修复安全告警且支持 Python 3.10 的准确版本，其余观察依赖保持原版本。
 # 自动执行的点击（pyautogui）不在本 extra 里：生产保持关闭，要开就用上面的 computer-use。
 # MCP 的 Python SDK 必须在清单里：适配器就是靠它收发 stdio（computer_use_server.py 顶层 import
 # mcp.server.fastmcp / mcp.server.stdio），只看档也离不开；它本身不带点击能力（点击来自 pyautogui 与
-# computer-control-mcp，两个都不在本 extra 里）。版本跟上游 computer-control-mcp==0.3.13 钉的同一版，
-# 避免生产与开发两套 SDK 行为分叉。
+# computer-control-mcp，两个都不在本 extra 里）。上游自动执行 extra 仍钉旧 SDK/Pillow；
+# 两种安装形态在 tool.uv.conflicts 显式互斥，不覆写上游依赖，也不能同时安装。
 computer-use-observe = [
-  "mcp==1.13.0; sys_platform == 'darwin'",
+  "mcp==1.28.1; sys_platform == 'darwin'",
   "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
   "pyobjc-framework-ScreenCaptureKit==12.2.2; sys_platform == 'darwin'",
   "pyobjc-framework-ApplicationServices==12.2.2; sys_platform == 'darwin'",
   "mss==10.2.0; sys_platform == 'darwin'",
   "rapidocr-onnxruntime==1.2.3; sys_platform == 'darwin'",
-  "pillow==11.3.0; sys_platform == 'darwin'",
+  "pillow==12.3.0; sys_platform == 'darwin'",
   # Linux：python-xlib 拿窗口与几何、mss 截图、rapidocr 出文字，和车道镜像里的版本一致。
   "python-xlib==0.33; sys_platform == 'linux'",
-  "mcp==1.13.0; sys_platform == 'linux'",
+  "mcp==1.28.1; sys_platform == 'linux'",
   "mss==10.2.0; sys_platform == 'linux'",
   "rapidocr-onnxruntime==1.2.3; sys_platform == 'linux'",
-  "pillow==11.3.0; sys_platform == 'linux'",
+  "pillow==12.3.0; sys_platform == 'linux'",
 ]
 # 飞书/企业微信加密事件回调需要的密码学原语（stdlib 无 AES、密码学不能自建）。
 # 私人任务凭据卡复用 secrets extra 的维护中加密库；缺依赖时此能力明确不可用，不保存明文。
@@ -172,3 +172,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # 真实压力脚本故意保留 f-string 形态，便于同组 prompt 后续插入轮次变量。
 "scripts/live_lab/main_agent_limit_cases.py" = ["F541"]
+
+# 上游自动执行器固定旧 MCP/Pillow；观察能力独立使用安全版本，两种安装形态不可同时解析安装。
+[tool.uv]
+conflicts = [[{ extra = "computer-use" }, { extra = "computer-use-observe" }]]

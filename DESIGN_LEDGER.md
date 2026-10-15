@@ -1,3 +1,7 @@
+2026-10-14 构建工具安全基线（依赖声明已同步，发行待验）：setuptools构建/dev下限83并由uv定点锁83.0.0；pip26.2.0仅由新候选发行环境安装记录，不引入项目runtime依赖。旧上游自动执行extra及前端告警仍保留，见[发行指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md#202610147-观察依赖安全追加)。
+
+2026-10-14 观察依赖安全（已实施，发行待根最终gate）：保留Mac观察能力，observe独立锁MCP1.28.1/Pillow12.3.0；与仍固定旧依赖的自动执行extra用uv conflicts显式互斥，不override、不改开关。真实SDK元数据与合成图片验收不触屏，最终runtime须另验实际依赖；旧自动执行extra/前端告警不宣称已修。见[发行追加](docs/guides/PRIVATE_OFFLINE_RELEASE.md#202610147-观察依赖安全追加)。
+
 2026-10-14 全22项后续实施中：当前空间监控/创建者与代清理、status原累计用量、HTTP/CLI错误分类、原operation跨attempt只读核对和no-save审计已集成；Skill单调revision/CAS与不可变快照已集成，维护/确认/投递复刻继续并线。工具S17–20以原执行器上的有限只读JSON计划实施，假模型5/3/2请求对照只说明结构往返，不推断真实供应商速度；详情见[工具执行合同](docs/design/TOOL_PROGRAM_EXECUTION.md)。尚未统一发行或部署，权限与预算非作者审查继续。
 
 ## 2026-10-14 本期 22 项全部实施（用户已授权，第一批集成中）

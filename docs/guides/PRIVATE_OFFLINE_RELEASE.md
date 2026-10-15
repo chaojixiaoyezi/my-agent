@@ -142,3 +142,19 @@ python -m pytest agent_py_agent/tests/test_task_credential_storage.py agent_py_a
 剩余19条告警位于frontend/package-lock.json（14开发范围、5前端运行范围），本次wheel和离线包不包含frontend；它们仍影响前端开发或单独前端部署，等待另一个明确范围的修复，不改npm锁、不冒称全仓无漏洞。所列23条没有CLI Go清单项；这不能替代CLI二进制完整漏洞审查。真实供应商、代理配置和客户端渲染等原未验边界不因锁同步而改变。
 
 建议下一步：根先核隔离验证venv/新Mac候选实际依赖，跑原凭据、加密事件和Feishu运输相关focused，再严格gate并重新冻结`.6`；可并行只读比对平台依赖版本与原发行清单，不自动扩大到前端升级或新专项测试。
+
+
+## 20261014.7 观察依赖安全追加
+
+最新 open Dependabot 从23条变为40条：前端仍19条（14开发、5前端运行），新增21条为MCP/Pillow。它们属于已声明的观察extra，但退役Mac `.6`实际装有MCP1.13.0/Pillow11.3.0，不能声称未入包；Linux stage未安装这两包。本机原配置保持 `computer_use_enabled=false`、`computer_use_observation_enabled=true`，保留观察能力。
+
+观察extra的darwin/linux准确pins升级为MCP1.28.1（MIT、Python>=3.10）与Pillow12.3.0（MIT-CMU、Python>=3.10），官方元数据为 [MCP PyPI](https://pypi.org/pypi/mcp/1.28.1/json) 与 [Pillow PyPI](https://pypi.org/pypi/pillow/12.3.0/json)。原uv机制重新生成304包完整锁；其中新旧MCP/Pillow按互斥extra分支分别保存，新增PyJWT2.15.1，不用override篡改上游要求。
+
+上游最新computer-control-mcp0.3.13仍精确要求旧MCP1.13.0/Pillow11.3.0。`tool.uv.conflicts`明确自动执行 `computer-use` 与 `computer-use-observe` 不能同时安装；原自动执行extra不删、不偷偷升级，但仍含已知安全告警，本期观察runtime不安装它。默认依赖与自动执行开关均不变，不能使用`--all-extras`。若要自动执行安装形态，必须单独解决上游兼容和漏洞，不能沿用本期观察验收结论。
+
+隔离验证venv只更新MCP/Pillow和必要PyJWT，并卸除该验证克隆中未启用的旧自动执行器，`pip check`通过；原共享venv、实际旧runtime不动。退役Mac `.6`的实际METADATA没有computer-control-mcp。真实SDK测试经原computer_use_server完成stdio initialize/list_tools（仅observe_window，tools/call=0），替换桌面后端构造避免真实屏幕，合成PixelBuffer经原PNG编码、Pillow解码/重编码通过。SDK构造出现pydantic-settings的lifespan前向引用警告，未导致元数据协议失败，不把这次元数据验证等同真实屏幕/OCR或完整自动执行验收。
+
+Mac ARM/Python3.12离线安装材料放本期artifact `dependency-wheels/observe-security`，`observe-security-manifest.json`逐wheel记录filename/name/version/SHA256，不覆盖urllib3清单。最终候选须离线安装该组并检查实际METADATA及pip check，再做准确新包字节码验收，不能复用旧候选身份或仅用锁证明已安装修复。前端19条和旧自动执行extra告警仍待修，不宣称全仓无漏洞。
+
+
+构建工具安全基线追加：项目构建后端与dev依赖下限同步为 `setuptools>=83`，uv定点锁83.0.0；发行实际环境的pip需26.2.0、setuptools需83.0.0。pip不是项目运行依赖，不加进pyproject，升级由根在新候选/构建隔离环境执行并记录实际METADATA与wheel SHA；旧runtime与共享venv保持。该基线不改变默认业务依赖、不开启自动执行extra，旧上游执行器和前端仍有未修告警，不声称全仓无漏洞。

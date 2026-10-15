@@ -279,6 +279,11 @@ def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
     data = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
     extras = data["project"]["optional-dependencies"]
 
+    assert data["build-system"]["requires"] == ["setuptools>=83"]
+    assert "setuptools>=83" in extras["dev"]
+    assert data["tool"]["uv"]["conflicts"] == [[
+        {"extra": "computer-use"}, {"extra": "computer-use-observe"},
+    ]]
     observe = extras["computer-use-observe"]
     assert len(observe) == len(set(observe)), "computer-use-observe 有重复条目"
 
@@ -294,21 +299,21 @@ def test_computer_use_observe_extra_pins_platform_dependencies() -> None:
 
     assert set(parsed) == {"sys_platform == 'darwin'", "sys_platform == 'linux'"}
     assert parsed["sys_platform == 'darwin'"] == {
-        "mcp": "1.13.0",
+        "mcp": "1.28.1",
         "pyobjc-framework-Quartz": "12.2.2",
         "pyobjc-framework-ScreenCaptureKit": "12.2.2",
         "pyobjc-framework-ApplicationServices": "12.2.2",
         "mss": "10.2.0",
         "rapidocr-onnxruntime": "1.2.3",
-        "pillow": "11.3.0",
+        "pillow": "12.3.0",
     }
-    # Linux 版本对齐桌面层车道镜像 my-agent-linux-test:py312-desktop 里实际装到的版本。
+    # Linux 和 Mac 的 MCP/Pillow 均使用已修复版本，其余平台依赖保留原观察清单。
     assert parsed["sys_platform == 'linux'"] == {
-        "mcp": "1.13.0",
+        "mcp": "1.28.1",
         "python-xlib": "0.33",
         "mss": "10.2.0",
         "rapidocr-onnxruntime": "1.2.3",
-        "pillow": "11.3.0",
+        "pillow": "12.3.0",
     }
 
     # 自动执行的 pyautogui 属生产关闭的能力，不能被顺手带进观察依赖。

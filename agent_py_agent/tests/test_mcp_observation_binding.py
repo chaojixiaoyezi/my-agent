@@ -270,7 +270,9 @@ def test_always_approval_is_projected_and_asks_even_in_autonomous_mode(tmp_path)
     registry = _published(_Repo(), _Client(_config(), {"content": "{}", "isError": False}))
     read, plain = registry.tools["mcp__srv__read"], registry.tools["mcp__srv__plain"]
     manifest = tool_manifest_payload(runtime_snapshot_for_tools({"mcp__srv__read": read}))
-    assert manifest["tools"][0]["runtime_policy"]["approval_policy"] == {"mode": "always"}
+    assert manifest["tools"][0]["runtime_policy"]["approval_policy"] == {
+        "mode": "always", "always_effects": [], "owner_grant_parameters": [],
+    }
     snapshot = runtime_snapshot_for_tools({"mcp__srv__read": read, "mcp__srv__plain": plain})
     for mode, expected in (("ask", "ask"), ("auto", "ask")):
         decision = ActionPolicy().decide(ActionPolicyRequest(canonical_test_call(snapshot, "mcp__srv__read", {}), snapshot, tmp_path, approval_mode=mode))

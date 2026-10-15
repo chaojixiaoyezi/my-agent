@@ -1,3 +1,7 @@
+2026-10-14 构建工具依赖基线：build-system/dev setuptools>=83，原uv锁83.0.0并lock --check；pip26.2.0仅属于发行实际环境升级，不是项目runtime依赖。test_packaging核对原分发合同，完整新候选由根冻结后验收，不改旧runtime/共享venv。
+
+2026-10-14 观察依赖安全：MCP1.28.1/Pillow12.3.0与自动执行extra显式互斥；隔离venv运行观察/屏幕mock及MCP合同回归，真实SDK stdio仅initialize/list_tools，合成内存PNG经原编码/Pillow解码，无真实屏幕/点击。旧新版均复现审批manifest断言遗漏canonical空授权字段，测试精确补齐且保留always模式在auto下仍ask。依赖实际安装与旧extra告警边界见发行指南观察追加。
+
 2026-10-14 分层回归：纯并发段规划下沉到 tooling，原执行轮和嵌套 tool_program 共用；验证 segment/round/program/budget 定向测试及 check_import_boundaries，不增加边界白名单。
 
 2026-10-14 全22项第一批（凭据卡S21–23与模型卡回调）验收：14份focused文件287项，286 passed、1 skipped；18420已由现有服务占用，相关真实端口绑定测试跳过，不触碰现有服务，非默认端口/认证配置替身及隔离随机端口真实HTTP按钮均通过。覆盖加密/配额/发送前后故障、四种表单、同群成员/跨群/私人锁、重填与旧密文保护、已保存决定的幂等回调恢复及原Wake一次发布。联合首次暴露输入已failed却当pending替换，生产修复后回归；历史重复提交拒绝断言随明确幂等恢复更新，追加保持密文不变/不同决定拒绝。真实租户表单渲染与收卡未验，不以HTTP回环冒称实际飞书成功。证据见本期IM_22_ITEM_IMPLEMENTATION及其私有验收目录，严格gate另按提交记录。
