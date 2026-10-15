@@ -880,7 +880,6 @@ agent_py_agent/
 |   |   |   |-- selection_history.py   # 换协议时保留工具/媒体并从原 Compact 来源恢复兼容历史
 |   |   |   |-- context_calibration_carry.py # owner 级按分词身份的校准比值缓存（O/data/context/calibration.json），线程观测对不上时回落
 |   |   |-- tool_loop/                  # 工具轮次执行、恢复与自然结束
-|   |   |-- tool_loop/segment_planning.py # 仅按调用和实时查询选择并发段，不执行工具
 |   |   |-- tool_loop/closeout.py       # 绑定原收口操作，按结构化副作用事实生成未完成交接
 |   |   |-- tool_loop/model_turn.py     # 绑定模型请求／超限恢复、用量与输入确认，保持原顺序
 |   |   |-- tool_loop/display_archive.py # 执行当时的公开工具原文归档与轻量预览引用
@@ -1291,6 +1290,7 @@ agent_py_agent/
 |   |   |-- screen_ui_candidates.py   # 候选来源无关部分（片 G）：动作名、label 清洗、控件 + OCR 合并去重与动作判定
 |   |   |-- computer_text_input.py    # 按平台提交可靠文本，校验 Unicode 并保留后置验证边界
 |   |   |-- models.py                 # ToolModelSpec、ToolRuntimePolicy、ToolRuntime/Snapshot 与 handler outcome
+|   |   |-- segment_planning.py       # 执行轮与嵌套派发共用的纯并发段和批上限规划，不依赖agent_core
 |   |   |-- runtime_contracts.py      # 唯一 canonical ToolCall/ToolResult、ToolChoice、协议与 operation 合同
 |   |   |-- runtime_facts.py          # 工具回复、归档索引及恢复共用的有界执行事实（含停机关门原因的唯一清洗口），不依赖 Agent
 |   |   |-- tool_search_state.py      # 主/子/Gateway 共用的纯工具发现归档投影，不导入执行循环
@@ -2214,7 +2214,7 @@ docs/
 - `agent_py_agent/agent/settings/embedding_selection.py`：语义记忆“向量模型”唯一选择入口（用户 10-02 拍板）；`embedding_model_profile`/`memory_semantic_recall` 是全局配置，只给本机管理员；经 `user_settings_write_scope` 调参数中心写两项并记账，重启 Gateway 生效；manage_models 自配只在本人目录嵌入档案且与默认对话模型同端点主机时直写，主机不同回 `needs_user_choice`。
 - `agent_py_agent/agent/capability/model_profile_tool.py`：`manage_models` 工具；把 TUI /model 的 list/add/save_provider/save_model/select/set_default/delete_model/delete_provider/probe/discover（以及向量模型 set_embedding/disable_embedding）暴露给主会话代理，唯一写入口仍是 `execute_model_profile_operation`；delete_provider 为 dangerous，子代理不可用，`select` 只读结构化 `conversation_thread_id`，回执只含 `has_key`，开关 `enable_model_profile_tool`。
 - `agent_py_agent/tests/test_decision_skill_proposal_review.py`、`test_decision_skill_proposal_review_integration.py`：前者只替换决策服务边界，覆盖资格、隐私、逐题校验、并发变化与取消；后者经真实 CLI、设置、模型目录、决策服务与调用账，只替换 HTTP 发送，覆盖输出逐字节不变、observe 记账、错误/冷却/超时、中断、30 条窗口门、默认值与 TUI 菜单。
-- `agent_py_agent/agent/agent_core/tool_loop/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。
+- `agent_py_agent/agent/tooling/segment_planning.py`：只接canonical调用、有效批上限、Compact及并发描述查询；审批、线程和provider顺序记账仍归原执行轮。
 - `agent_py_agent/agent/subagents/services/run_authority.py`：子代理创建时 runtime.db 权威运行链（Task/TaskRun/AgentRun/pending Attempt/Delegation）的唯一写入点与链身份回存；有 home 上下文时 fail-closed，由 `SubAgentBaseService.create_run` 调用。
 - `agent_py_agent/agent/agent_core/tool_guard/identical_failure.py`、`agent_py_agent/tests/test_identical_tool_failure_halt.py`、`agent_py_agent/tests/test_subagent_identical_failure_halt.py`：主代理同一回合“同一调用（工具名＋规范化参数摘要）同一错误码”连续段与硬上限（复用 `repeated_failure_halt_threshold`）；命中只结束当前回合（unfinished＋`REPEATED_IDENTICAL_TOOL_FAILURE`，宿主自写收口、不再调模型），任务与 Goal 保留且不自动续跑；子代理同样生效，按 blocked 收口并经 `tool_failure_halt` 事实通知直属父级，同一次调用授权阶段收口优先。
 - `agent_py_agent/agent/agent_core/tool_loop/closeout.py`：统一请求、收口响应处理和延后结束原因读取，不持有Agent或完整回合参数，不执行工具或增加模型重试。

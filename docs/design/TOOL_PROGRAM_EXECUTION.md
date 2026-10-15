@@ -4,7 +4,7 @@
 
 ## 参考与取舍
 
-沿原 `ToolRegistry`、`ToolExecutor`、`ToolCall` 与 `tool_loop/segment_planning`，保留一次模型多调用、连续只读并发段和写屏障。参考本机Codex源码 `tools/parallel.rs`、`tools/code_mode/delegate.rs`、`handlers/unified_exec/exec_command.rs`：内部调用继续原ToolRouter/运行身份/取消，长过程返回原句柄；没有照搬动态JS运行时、宿主函数注入或另建工具权限系统。原合同索引已在前期评估检查，本轮仅追读这些具体入口。
+沿原 `ToolRegistry`、`ToolExecutor`、`ToolCall` 与 `tooling/segment_planning`，保留一次模型多调用、连续只读并发段和写屏障。参考本机Codex源码 `tools/parallel.rs`、`tools/code_mode/delegate.rs`、`handlers/unified_exec/exec_command.rs`：内部调用继续原ToolRouter/运行身份/取消，长过程返回原句柄；没有照搬动态JS运行时、宿主函数注入或另建工具权限系统。原合同索引已在前期评估检查，本轮仅追读这些具体入口。
 
 既有批量执行适合独立调用，不能在同一模型响应中可靠填入尚未返回的数据。最小新增入口是默认渐进加载的 `tool_program`：有限JSON数据计划，不执行Python/JS、不提供imports/eval、不注入shell桥。第一版只允许原策略解析为read_only的动作，写入、删除、主动发消息仍用原工具。这个限制不会把工具作者误声明只读变成可靠安全保证，工具自身仍须正确声明效果与执行门。
 

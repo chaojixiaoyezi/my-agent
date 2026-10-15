@@ -484,17 +484,17 @@ def _orchestration_result_is_blocked(output: object) -> bool:
     return bool(payload.get("blocked"))
 
 
-# LLM: 内层编排仍记原owner最小工具审计，批上限与普通轮共用同一解析器；记录不含参数或正文，不是权限来源。
+# LLM: 内层编排仍记原owner最小工具审计，批上限与普通轮共用 tooling.segment_planning 唯一纯解析器，禁止工具层反向依赖此核心模块；记录不含参数或正文，不是权限来源。
 # 函数用途: 为确定只读程序提供宿主并发上限与逐调用审计接线。
 def _tool_program_context(runtime_request):
     if runtime_request.call.tool_name != 'tool_program':
         return {}
+    from ..tooling.segment_planning import parse_optional_batch_limit, resolve_parallel_batch_limit
     from .runtime.minimal_tool_audit import archive_minimal_tool_audit
     from .tool_loop.round_execution import (
         _capture_parallel_thread_context,
         run_with_parallel_thread_context,
     )
-    from .tool_loop.segment_planning import parse_optional_batch_limit, resolve_parallel_batch_limit
     thread_context = _capture_parallel_thread_context(runtime_request.agent)
     # LLM: 只继承当前宿主已验证身份，不从子参数重建线程权限。
     # 函数用途: 在原并行线程协议中执行一次嵌套子调用并对称恢复。

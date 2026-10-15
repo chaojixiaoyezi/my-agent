@@ -6,17 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core.tool_loop import segment_planning
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     _effective_parallel_batch_limit,
 )
-from agent_py_agent.agent.agent_core.tool_loop.segment_planning import (
+from agent_py_agent.agent.tooling import segment_planning
+from agent_py_agent.agent.tooling.concurrency import ToolConcurrencyDescriptor
+from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+from agent_py_agent.agent.tooling.segment_planning import (
     parallel_segment_end,
     parse_optional_batch_limit,
     resolve_parallel_batch_limit,
 )
-from agent_py_agent.agent.tooling.concurrency import ToolConcurrencyDescriptor
-from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 
 
 # LLM: 测试只创建已接纳的 canonical 调用身份，不借工具名决定并发资格。
@@ -199,3 +199,11 @@ def test_invalid_task_values_fall_back_without_turning_boolean_into_a_limit():
     assert _effective_parallel_batch_limit(request) == 2
     with pytest.raises(OverflowError):
         parse_optional_batch_limit(float("inf"))
+
+
+def test_execution_round_uses_canonical_tooling_planner():
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution
+
+    assert round_execution.parallel_segment_end is segment_planning.parallel_segment_end
+    assert round_execution.parse_optional_batch_limit is segment_planning.parse_optional_batch_limit
+    assert round_execution.resolve_parallel_batch_limit is segment_planning.resolve_parallel_batch_limit

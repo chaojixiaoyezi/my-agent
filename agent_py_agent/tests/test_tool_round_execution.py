@@ -14,7 +14,6 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.tool_loop import round_execution as round_module
-from agent_py_agent.agent.agent_core.tool_loop import segment_planning
 from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
     ToolProgressEvent,
     ToolRoundExecutionRequest,
@@ -25,6 +24,7 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
 )
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.common.cancellation import CancellationToken
+from agent_py_agent.agent.tooling import segment_planning
 from agent_py_agent.agent.tooling.action_policy import ActionDecision
 from agent_py_agent.agent.tooling.executor import ToolExecution
 from agent_py_agent.agent.tooling.runtime_contracts import (

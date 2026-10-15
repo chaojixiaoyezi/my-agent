@@ -1,3 +1,5 @@
+2026-10-14 分层修复：纯并发段/批上限规划统一放在 `tooling/segment_planning.py`；执行轮与嵌套只读派发直接共用，删除核心层旧位置。核验、审批、取消及逐调用审计仍由原执行器持有，不增加权限入口。
+
 # Verification：开发推进
 
 2026-10-14 IM 必要输入：原工具归档在完整调用/结果配对后保留 input_id/status/expires_at 和 opaque credential_ref；秘密表单、方案、密文不进入归档。共享 input_tool_boundary 在归档后置 armed、当轮 TASK_INPUT_WAIT 结束，不追加模型轮询；真实 tool + fake native LLM 验证一模型请求后结束，原任务 active 保留。详见 [持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。

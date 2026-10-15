@@ -39,8 +39,8 @@ class NestedToolDispatcher:
     # LLM: 段选择仍用原parallel_segment_end；前置与handler取消、网络和文件权限全部由原执行器判断，不调用handler捷径。
     # 函数用途: 执行共享累计数据预算的批次，沿原线程身份协议并按顺序保留全部已尝试调用。
     def batch(self, entries, *, budget=None):
-        from ..agent_core.tool_loop.segment_planning import parallel_segment_end
         from .executor import ToolExecutor
+        from .segment_planning import parallel_segment_end
         if self.count + len(entries) > 32:
             raise ValueError('程序工具调用超过32项')
         capture_budget = budget or DataBudget()

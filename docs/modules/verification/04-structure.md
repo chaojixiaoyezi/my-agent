@@ -1,3 +1,5 @@
+2026-10-14 分层修复：纯并发段/批上限规划统一放在 `tooling/segment_planning.py`；执行轮与嵌套只读派发直接共用，删除核心层旧位置。核验、审批、取消及逐调用审计仍由原执行器持有，不增加权限入口。
+
 # Verification：结构
 
 `ToolExecutorRequest.on_handler_progress_guarded` 是宿主展示接口，优先且只选一路；原单参 `on_handler_progress` 继续用于已有 opaque 观察。原 `ActivityHeartbeat` 不承担执行权，stop 不等待，close 返回是否已收回且最多等待 100ms。停止谓词经 typed keyword 到原 writer/private append，在原文件锁后复核，未进入的新追加和后续投影取消；已经进入的外部回调是明确不可撤销边界，不新建账本或队列。

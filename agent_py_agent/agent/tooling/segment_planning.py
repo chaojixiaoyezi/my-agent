@@ -1,11 +1,11 @@
-# LLM: 本模块只按既有调度描述和实时 Compact 查询选连续段，不接 Agent、回合参数、执行器或持久状态；查询异常原样上抛。
+# LLM: tooling 唯一纯规划模块供执行轮和嵌套派发共用；只按既有调度描述和实时 Compact 查询选连续段，不接 Agent、回合参数、执行器或持久状态；查询异常原样上抛。
 # 模块用途: 计算下一批可并行工具的范围及批上限，让执行轮继续独占取消、审批、线程和记账顺序。
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from ...tooling.concurrency import ToolConcurrencyDescriptor, concurrency_conflicts
-from ...tooling.runtime_contracts import ToolCall
+from .concurrency import ToolConcurrencyDescriptor, concurrency_conflicts
+from .runtime_contracts import ToolCall
 
 # 默认最大并行工具调用数。
 _DEFAULT_MAX_PARALLEL_TOOL_CALL_COUNT = 8

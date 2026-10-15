@@ -1,3 +1,5 @@
+2026-10-14 分层回归：纯并发段规划下沉到 tooling，原执行轮和嵌套 tool_program 共用；验证 segment/round/program/budget 定向测试及 check_import_boundaries，不增加边界白名单。
+
 2026-10-14 全22项第一批（凭据卡S21–23与模型卡回调）验收：14份focused文件287项，286 passed、1 skipped；18420已由现有服务占用，相关真实端口绑定测试跳过，不触碰现有服务，非默认端口/认证配置替身及隔离随机端口真实HTTP按钮均通过。覆盖加密/配额/发送前后故障、四种表单、同群成员/跨群/私人锁、重填与旧密文保护、已保存决定的幂等回调恢复及原Wake一次发布。联合首次暴露输入已failed却当pending替换，生产修复后回归；历史重复提交拒绝断言随明确幂等恢复更新，追加保持密文不变/不同决定拒绝。真实租户表单渲染与收卡未验，不以HTTP回环冒称实际飞书成功。证据见本期IM_22_ITEM_IMPLEMENTATION及其私有验收目录，严格gate另按提交记录。
 
 2026-10-14 R01–R09 统一验收：源码 81 个相关 focused 文件验收 2068 通过、10 项按平台跳过，零失败/错误，覆盖进度/状态、云表格、私人凭据、零查询、模型卡、监控取消/接管及普通/群/主子权限。独立凭据安全矩阵 59 项、三文件 stream 组合 113 项均通过；原输入容量满额回滚被总组合发现错误分类缺失，现改 typed input_registration 并在原错误分类表登记，保留旧 ready 密文及零发送。跨批公开流沿累计净化安全行，未完成后缀在结构化边界释放。注册认证 3xx 不读取响应体，仍拒绝第二 origin。源码严格 gate、准确包字节码、Linux/Mac 原生及安装/更新证据统一保存在本期私有发行目录；最终数字以同包 RELEASE_ACCEPTANCE.md 为准，不能把分线重复复验累加为独立案例。实际飞书租户点击/收信、现场保护权限和生产历史明文迁移未冒称通过。无全仓 pytest 或线上 CI 作为本期验收来源。详见 [实施与边界](docs/tasks/IM_R01_R09_RELEASE.md)。
@@ -18678,3 +18680,5 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 最终发行另用同源冻结测试验Mac/Linux准确新runtime的pyc，测试依赖在bundle外且记录实际origin；native沙箱单列，跳过不能算通过。Linux安装/更新隔离在Docker容器，本机更新保存配置hash/旧runtime并核单Gateway/adapter。真正Feishu卡渲染、租户权限与远端现网消息未作为本轮验收来源；线上CI状态独立报告，不能替代本地严格gate。
 
 最终宽组合另定位卡片静默取消误影响泛用cancelled输入Wake；现仅卡片退休在原input行写resolution_delivery=retire。原capacity测试保持不变，普通取消继续原唤醒，静默退休保留read/arm和post-arm时序回归。
+
+2026-10-14 最终发行 `.20261014.7`：远端 import-boundary 检查发现嵌套工具派发反向依赖 agent_core；已将无副作用的分段规划器移至原 tooling 层，主执行轮和嵌套派发共用同一实现，无白名单或兼容入口。原95项定向测试及 import-boundary 检查通过，最终源码与发行包重新冻结验收。

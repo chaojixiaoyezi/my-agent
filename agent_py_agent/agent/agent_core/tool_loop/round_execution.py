@@ -1,4 +1,4 @@
-# LLM: 本模块执行一轮 canonical ToolCall；仅将连续段判定交给窄查询，审批、并发、取消与 provider 顺序记账仍由原链负责。
+# LLM: 本模块执行一轮 canonical ToolCall；仅将连续段判定交给 tooling 唯一纯规划器的窄查询，审批、并发、取消与 provider 顺序记账仍由原链负责。
 #   每个未启动调用前的顺序屏障先读本进程模型调用准入是否已关（宿主停机，contracts.model_call_ledger）：关了就不再启动
 #   任何工具，当前及后续调用记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（I3：停机后才到的迟到响应里的工具不执行）；审批通过之后、
 #   重新执行之前再读一次（等审批期间可能已经关门，9b 复审必须修）。
@@ -48,6 +48,11 @@ from ...tooling.runtime_contracts import (
     ToolFailureFacts,
     ToolResult,
 )
+from ...tooling.segment_planning import (
+    parallel_segment_end,
+    parse_optional_batch_limit,
+    resolve_parallel_batch_limit,
+)
 from .._runtime_params import ToolLoopExecuteParams
 from ..model.context_pressure import should_compact_before_more_tool_output
 from ..runtime.context_compactor import runtime_compact_policy
@@ -57,11 +62,6 @@ from ..tool_context.call_reducer import (
     render_assistant_tool_round_context,
 )
 from ..tool_context.decision_action_execute import HostAction, record_auto_execution
-from .segment_planning import (
-    parallel_segment_end,
-    parse_optional_batch_limit,
-    resolve_parallel_batch_limit,
-)
 
 # 无动作闸只由执行轮消费和计数；收口层读取原halt事实，不另设阈值副本。
 _NO_ACTION_GATE_STREAK_ATTR = "_no_action_gate_streak"
