@@ -1,3 +1,7 @@
+2026-10-15 `.6` 最终源码严格门：61 focused收集1396项，1391通过、4项既有runtime_guidance xfail、1项8420端口已占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package及离线lock全部通过。旧15夹具红与未暂存handoff的packaging阻断均保留，不覆盖为成功。长命令完整运输probe及服务端同消息读取证实编辑已发生，客户端旧视图切会话后恢复；不据此添加产品补丁。双端发行与 `.6` 真实自动派工订阅/姓名尚待验，线上旧全仓Test不作为通过来源。
+
+2026-10-15 `.6` 分工冻结：姓名线独占 provider facts、group context、原 identity index 三生产文件及直接测试；IM 委派线独占 im_delegation 与直接测试、模块交接；非作者只读复核。根负责全局文档、严格 gate、main 推送与唯一生产实例/UI；发行线单点 shared freeze 后 Mac/Linux 独占并行。`.5` 真实委派失败保留，不能以工具可见测试冒充 `.6` 真实后台订阅已成。
+
 2026-10-15 `.5` 源码冻结：input与topic两线已停写，独立只读复核未见可证P1/P2；根统一55 focused收集1255项，1250通过/4既有xfail/1端口占用跳过及全部严格门通过。共享freeze由发行线单点，Mac/Linux按平台独占并行；生产配置/服务/UI和原应用恢复由根独占。真实自然表达、订阅正例及取消未验，不计作通过。
 
 2026-10-15 真实补验第三轮：输入线独占completion/input_tool_boundary及直接测试/原凭据文档，复用公开执行事实，不改native全局布局；话题线独占原protocol/群授权/context/channels/Delivery registry/Feishu与model_profile_service，保留完整actor/topic仅投影运输地址。发行线只写新`.5`仓外工件与离线输入；根独占真实双账号、配置/服务、全局文档与最终main。

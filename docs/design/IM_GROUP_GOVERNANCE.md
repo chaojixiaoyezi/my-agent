@@ -105,3 +105,16 @@ Gateway请求文件回收后仍可从准确原输入恢复；不把引用复制�
 合成通过不能外推真实飞书订阅/卡片成功；新版本仍须统一严格gate、发行及独占真实验收。逻辑topic与物理basechat分离参考OpenClaw的targets/send-target/thread-bindings职责边界，本地采用严格单一parser，不复制宽松前缀权限。
 
 建议下一步：根统一新源码gate及发行后重验原普通授权成员引用订阅；只读审计可并行，真实服务、launcher和部署保持根单点。
+
+
+## 创建者姓名展示（2026-10-15，源码已修复，待新版验收）
+
+`.20261015.5`真实指定bot订阅已完成原消息证明、单事件运行和本群投递，随后由创建者删除；创建者ID正确，但界面仍为“姓名未知”。根用同一正式群成员API只读确认可用name，原provider身份索引却不存在。缺口属于展示资料接线，不属于创建者或群授权判断。
+
+仅沿原认证成员分页保留`member_id_type=open_id`行的可选name，全部分页成功后才返回`member_display_names`。`current_group_authority`完成准确provider/chat/完整成员校验后，将名单内名字交原`identity_store.remember_provider_display_names`；不从模型、显示名、最近发言人或其它群推断主体，不增加contact查询、scope、平台连接或配置开关。
+
+原provider索引同时服务关联解析，不能当作纯展示缓存随意覆盖。更新在其原文件锁内读取原字节、追加确实变化的展示快照并用原私有原子writer保存，原owner_kind/owner_id/canonical_user_id/owner_home及扩展字段完整保留；缺索引的新行仅等价原provider默认user身份，不创建owner目录或管理员关联。空名不清旧名；无可用名字在读索引前直接结束，相同名字不追加、不重写。并发更新沿同一锁排序；展示索引锁忙用原非阻塞锁明确让出，记录异常类型后继续原授权，后续原认证快照可再补；不创建后台重试。坏索引不重建。
+
+普通用户与群创建者仍由`creator_display_rows`读取同一索引，只显示名字加准确provider/actor ID；同名、跨群、名称“管理员”都不授予权限。`creator`、HostActor、成员集、原tool_policy、租约及最终写门不改变。展示索引预期IO/结构故障仅记录固定事件与异常类型，不记录名字、ID、平台值或异常正文，也不吞原provider/授权校验错误。缺名继续原“姓名未知”，无需额外平台探测。
+
+5个直接相关文件214项通过、零失败/错误/跳过；三层红测保留，最终严格gate和新版真实姓名展示由根执行。已有姓名记录如何长期保留/清理沿原身份索引合同，本片不新建第二索引。交接见[姓名追加](../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#创建者姓名投影追加2026-10-15)。

@@ -112,6 +112,13 @@ def test_ack_is_presentation_only_from_real_task_facts(tmp_path, monkeypatch):
     assert projected is not params
     assert projected.allowed_tools == []
     assert task.task_id in projected.user_prompt
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+
+    facts = pending_natural_user_reply(params)['facts']
+    assert facts['current_turn_role'] == 'dispatch_acknowledgement'
+    assert facts['worker_execution_outcome'] == 'not_observed_in_this_turn'
 
 
 def test_model_does_not_self_grant_delegation(tmp_path, monkeypatch):
@@ -167,6 +174,185 @@ def test_open_child_request_keeps_original_parent_resolution_and_no_business_too
         "run_id": child_id, "decision": "grant", "reason": "当前用户具有调度权限"})
     assert granted.ok, granted.output
     assert "schedule" in agent.subagents.load(child_id).allowed_tools
+
+
+def test_automatic_im_child_inherits_ready_parent_business_tool_in_real_factory(tmp_path, monkeypatch):
+    agent, params, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    assert 'schedule' in params.tool_runtime_snapshot.available_tool_names
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    assert 'schedule' in child.allowed_tools
+    assert agent.tools.runtime_snapshot(allowed_tools=child.allowed_tools).runtime('schedule') is not None
+    assert not {'create_subagents', 'send_guidance', 'cancel_subagents', 'resolve_capability_requests'} & set(child.allowed_tools)
+
+
+@pytest.mark.parametrize('owner_kind,access_mode', [('main', 'full-access'), ('main', 'restricted'),
+                                                   ('user', 'workspace-write'), ('group', 'workspace-write')])
+def test_im_child_uses_current_owner_snapshot_without_inheriting_full_shell(tmp_path, monkeypatch, owner_kind, access_mode):
+    owned = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False, my_agent_home=str(tmp_path / 'home'),
+        my_agent_owner_provider='local' if owner_kind == 'main' else 'feishu', my_agent_owner_kind=owner_kind,
+        my_agent_owner_id={'main': 'main', 'user': 'ou_a', 'group': 'oc_a'}[owner_kind],
+        access_mode=access_mode), tmp_path / 'workspace')
+    monkeypatch.setitem(runtime_fixture.__globals__, 'SimpleAgent', lambda *_: owned)
+    agent, params, task, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    assert agent.home_paths.owner_kind == owner_kind
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    snapshot = agent.subagents.runner_context.build_execution_context(child.id)
+    from agent_py_agent.agent.subagents.role_templates import DIRECT_CHILD_CONTROL_TOOLS
+
+    assert not set(DIRECT_CHILD_CONTROL_TOOLS) & set(snapshot.allowed_tools)
+    assert child.owner == agent.home_paths.owner_id
+    assert 'schedule' in snapshot.allowed_tools
+    assert agent.tools.runtime_snapshot(allowed_tools=snapshot.allowed_tools).runtime('schedule') is not None
+    assert child.attributes['direct_parent_tool_authority']['available_tool_names'] == sorted(params.tool_runtime_snapshot.available_tool_names)
+    assert child.attributes['conversation_request_id'] == task.task_id
+    assert snapshot.effective_permissions['shell_access_mode'] != 'full-access'
+    assert snapshot.effective_permissions['shell_access_mode'] == (
+        'restricted' if agent.config.access_mode == 'restricted' else 'workspace-write')
+    from agent_py_agent.agent.conversation.host_actor import task_host_actor
+
+    assert task_host_actor(agent, child) == agent._current_run_params.host_channel_actor
+
+
+@pytest.mark.parametrize('business_tool', ['read_file', 'run_command'])
+def test_im_parent_narrow_snapshot_cannot_gain_schedule_from_coding_defaults(tmp_path, monkeypatch, business_tool):
+    agent, params, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    parent_names = ['create_subagents', business_tool]
+    params = replace(params, tool_runtime_snapshot=agent.tools.runtime_snapshot(allowed_tools=parent_names))
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    assert 'schedule' not in child.allowed_tools
+    assert set(child.allowed_tools) <= {business_tool, 'capability_request', 'record_lesson'}
+    assert child.attributes['direct_parent_tool_authority']['available_tool_names'] == parent_names
+    assert 'process_session' not in child.allowed_tools  # run_command依赖闭包仍不能越过父快照。
+
+
+def test_real_group_child_schedule_visibility_does_not_bypass_actor_grant(tmp_path, monkeypatch):
+    from agent_py_agent.agent.scheduler.tool import ScheduleTool
+    from agent_py_agent.tests.test_group_authorization import (
+        grant_synthetic_group_monitor_capability,
+    )
+    from agent_py_agent.tests.test_host_message_context import select_child
+    from agent_py_agent.tests.test_schedule_control import _agent
+
+    owned = _agent(tmp_path, group='oc_a')
+    monkeypatch.setitem(runtime_fixture.__globals__, 'SimpleAgent', lambda *_: owned)
+    agent, params, _, _, _ = runtime_fixture(tmp_path, monkeypatch, conversation_id='oc_a:thread:future_topic')
+    assert agent.home_paths.owner_kind == 'group'
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    assert 'schedule' in agent.subagents.runner_context.build_execution_context(child.id).allowed_tools
+    select_child(agent, child)
+    raw = {'provider': 'feishu', 'chat_id': 'oc_a', 'app_id': 'app_synthetic', 'tenant_key': 'tenant_synthetic',
+        'owner_id': 'ou_fixture_owner', 'member_ids': ['ou_a', 'ou_fixture_owner'],
+        'members_complete': True, 'bot_is_member': True}
+    adapter = SimpleNamespace(group_authority_snapshot=lambda _: dict(raw))
+    agent.delivery_service = SimpleNamespace(registry=SimpleNamespace(adapter_for=lambda _: adapter))
+    args = {'action': 'create', 'name': '合成回归', 'prompt': '合成内部检查', 'schedule_kind': 'every', 'every_seconds': 600}
+    denied = ScheduleTool(agent).execute(args)
+    assert not denied.ok and denied.error_code == 'GROUP_AUTHORIZATION_REQUIRED'
+    assert agent.scheduler_repository.list_jobs()[0] == []
+    actor = agent._current_run_params.host_channel_actor
+    grant_synthetic_group_monitor_capability(agent, actor, members={'ou_a'})
+    created = ScheduleTool(agent).execute(args)
+    assert created.ok, created.output
+    job = json.loads(created.output)['job']
+    assert job['creator'] == {'channel': 'feishu', 'actor_id': 'ou_a'}
+    assert actor.conversation_id == 'oc_a:thread:future_topic'
+
+
+def test_manual_child_default_stays_conservative(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    agent, _, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    result = CreateSubagentsTool(agent).execute({'goal': '合成手工任务'})
+    assert result.ok, result.output
+    assert 'schedule' not in agent.subagents.list_runs()[0].allowed_tools
+
+
+def test_im_child_owner_revocation_keeps_network_and_disabled_dependency_closed(tmp_path, monkeypatch):
+    agent, params, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    agent.subagents.owner_policy_snapshot = {'network': {'enabled': False},
+        'tools': {'disabled_tools': ['schedule', 'process_session']}}
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    context = agent.subagents.runner_context.build_execution_context(child.id)
+    assert context.effective_permissions['network_enabled'] is False
+    assert not {'schedule', 'process_session'} & set(context.allowed_tools)
+    assert {'schedule', 'process_session'} <= set(context.effective_permissions['disabled_tools'])
+
+
+def test_blocked_child_with_open_request_still_enters_direct_parent_resolution(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityRequestParams
+
+    agent, params, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    request = agent.subagents.lifecycle.record_capability_request(child.id, RecordCapabilityRequestParams(
+        problem='合成缺能力', needed_capability='合成工具', requested_tools=['schedule']))
+    child = agent.subagents.load(child.id)
+    child.status = 'BLOCKED'
+    child.verification_status = 'UNVERIFIED'
+    child.failure_type = 'capability_request'
+    agent.subagents.save(child)
+    params.live_archive_state.clear()
+    resolution = prepare_delegated_execution(agent, params)
+    assert resolution is not None and resolution.allowed_tools == ['resolve_capability_requests']
+    assert agent.subagents.load(child.id).capability_requests[0].id == request.id
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+
+    assert pending_natural_user_reply(params) is None
+    from agent_py_agent.agent.agent_core import _tool_loop_service as service
+    from agent_py_agent.agent.agent_core.orchestration.tools import capability
+    from agent_py_agent.agent.backends import ModelResponse
+
+    # LLM: 仅替代模型网络，参数投影及请求采纳仍用正式seam；工具裁决随后走真实Resolve工具，不把模型正文当授权。
+    # 函数用途: 验证BLOCKED申请确实能成为有resolve工具的模型请求，而非仍被零工具失败回执抢先。
+    def generate(request_params):
+        assert request_params.params is resolution
+        assert request_params.params.allowed_tools == ['resolve_capability_requests']
+        assert request_params.params.run_id == params.run_id and request_params.params.attempt_id == params.attempt_id
+        return ModelResponse('合成父级裁决响应', 'fake')
+
+    monkeypatch.setattr(service, 'generate_model_response', generate)
+    _, sampled = service._request_tool_loop_model_response(agent, resolution, 0, first_prompt='合成结构化申请上下文')
+    assert sampled.backend == 'fake'
+
+    monkeypatch.setattr(capability, '_wake_subagent', lambda *a, **k: None)
+    granted = capability.ResolveCapabilityRequestsTool(agent).execute({
+        'run_id': child.id, 'request_id': request.id, 'decision': 'grant', 'reason': '合成父级裁决'})
+    assert granted.ok, granted.output
+    restored = agent.subagents.load(child.id)
+    assert restored.status == 'PENDING'
+    assert restored.capability_requests[0].status == 'GRANTED'
+    assert len(agent.subagents.list_runs()) == 1
+
+
+@pytest.mark.parametrize('status,request_status', [('BLOCKED', 'GAP'), ('BLOCKED', 'CLOSED'),
+                                                  ('FAILED', 'OPEN'), ('CANCELLED', 'OPEN'), ('DONE', 'OPEN')])
+def test_terminal_or_gap_children_do_not_reenter_resolution_or_background_wait(tmp_path, monkeypatch, status, request_status):
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+    from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityRequestParams
+
+    agent, params, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    agent.subagents.lifecycle.record_capability_request(child.id, RecordCapabilityRequestParams(
+        problem='合成申请', needed_capability='合成', requested_tools=['schedule']))
+    child = agent.subagents.load(child.id)
+    child.status = status
+    child.capability_requests[0].status = request_status
+    agent.subagents.save(child)
+    params.live_archive_state.clear()
+    assert prepare_delegated_execution(agent, params) is None
+    phase = pending_natural_user_reply(params)
+    assert phase['kind'] == ('delegated_result' if status == 'DONE' else 'delegated_failure')
+    assert phase['facts']['task_continues_without_more_user_input'] is False
 
 
 def test_request_replay_uses_saved_route_and_new_disabled_message_is_original(tmp_path, monkeypatch):

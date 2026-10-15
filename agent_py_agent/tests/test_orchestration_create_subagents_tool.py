@@ -9,6 +9,24 @@ from unittest.mock import MagicMock
 import pytest
 
 
+# LLM: 这些参数合同测试明确模拟无IM身份的本地父；typed空上下文不能让MagicMock动态属性冒充认证actor或线程。
+# 函数用途: 保留原创建服务替身，只固定本case没有宿主通道身份，不关闭生产身份校验。
+def _local_mock_agent():
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent = MagicMock()
+    agent._current_run_params = RunParams(task_attributes={}, host_channel_actor=None)
+    return agent
+
+
+def test_unbound_magicmock_is_not_host_actor_authority():
+    from agent_py_agent.agent.conversation.host_actor import HostActorError, current_actor_for_child
+
+    assert current_actor_for_child(_local_mock_agent()) is None
+    with pytest.raises(HostActorError):
+        current_actor_for_child(MagicMock())
+
+
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
 # 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
 @pytest.fixture(autouse=True)
@@ -16,10 +34,10 @@ def _isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
-# LLM: 参数测试用显式内存任务表；创建与读取返回同一记录，不让 MagicMock 动态属性假装 canonical 状态。
-# 函数用途: 构造不运行模型的批量创建替身，实际启动和并发控制由管理器集成测试覆盖。
+# LLM: 参数测试用显式本地空身份与内存任务表；创建读取同一记录，不让MagicMock动态属性假装认证actor或canonical状态。
+# 函数用途: 构造无IM身份且不运行模型的批量创建替身，真实身份、启动和并发由管理器集成测试覆盖。
 def _mock_create_items_agent(task_count: int = 3):
-    mock_agent = MagicMock()
+    mock_agent = _local_mock_agent()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
     mock_agent.subagents.workspace_root = Path("/tmp/project")
@@ -261,7 +279,7 @@ class TestCreateSubagentsToolExecute:
         """配置禁用时返回错误。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = False
 
         tool = CreateSubagentsTool(mock_agent)
@@ -274,7 +292,7 @@ class TestCreateSubagentsToolExecute:
         """缺少必填 goal 参数时返回错误。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -288,7 +306,7 @@ class TestCreateSubagentsToolExecute:
         """空 goal 返回错误。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -301,7 +319,7 @@ class TestCreateSubagentsToolExecute:
         """模型工具不得把同一个可写任务按 count 克隆。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 2
 
@@ -325,7 +343,7 @@ class TestCreateSubagentsToolExecute:
         """单 goal 只创建一个 child；多个 child 必须显式列出 items。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_task = MagicMock()
@@ -397,7 +415,7 @@ class TestCreateSubagentsToolExecute:
     def test_per_call_and_current_task_capacity_are_enforced(self):
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 50
         mock_agent.config.subagent_hierarchy_max_children_per_tool_call = 2
@@ -425,7 +443,7 @@ class TestCreateSubagentsToolExecute:
     def test_capacity_state_failure_rejects_whole_batch(self):
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 50
         mock_agent.subagents.list_runs.side_effect = OSError("registry offline")
@@ -446,7 +464,7 @@ class TestCreateSubagentsToolExecute:
         """
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_task = MagicMock()
@@ -469,7 +487,7 @@ class TestCreateSubagentsToolExecute:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.settings import AgentConfig
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config = SimpleNamespace(enable_subagents=True)
         mock_task = MagicMock()
         mock_task.id = "run_1"
@@ -775,7 +793,7 @@ class TestCreateSubagentsToolConfigDefaults:
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
         from agent_py_agent.agent.settings import AgentConfig
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config = SimpleNamespace(
             enable_subagents=True,
             max_subagents=10,
@@ -803,7 +821,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """默认给子代理基础内置工具，避免少填 allowed_tools 变成残废代理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.config.access_mode = "full-access"
@@ -837,7 +855,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """显式 read_only 是结构化工具边界，不保留写入工具。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -864,7 +882,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """模型传 tool_preset=none 时回退自动策略，不创建空工具子代理。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -887,7 +905,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """模型误把 role 写到 tool_preset 时，应回退给 role template 自动决定工具。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -916,7 +934,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """未知 tool_preset 不创建新分支；显式工具列表仍补基础工具。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_task = MagicMock()
@@ -945,7 +963,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """output_files 是目标事实；即使没有额外写根，也不应阻止普通子代理开工。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_task = MagicMock()
@@ -972,7 +990,7 @@ class TestCreateSubagentsToolTemplatePolicy:
         """用户要求不要注释时，子任务保留“不要写注释”不应被误判为要求写注释。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = _local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "只输出完整 HTML，不要注释。"

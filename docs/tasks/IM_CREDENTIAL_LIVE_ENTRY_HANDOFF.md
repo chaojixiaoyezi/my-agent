@@ -125,3 +125,37 @@ python3 -m pytest agent_py_agent/tests/test_gateway_credential_live_entry.py age
 ```
 
 建议下一步：根先统一审阅2生产文件的安全投影与5文件冻结结果，再与其它独占线集成严格gate及新包；真实群/私聊仅少量验证自然表达和提交单Wake。可并行只读复核，实际UI、配置、服务、发行继续由根串行执行，不以fake正文代替真实表达验收。
+
+
+## 创建者姓名投影追加（2026-10-15）
+
+### 基本信息与目标
+
+同一main集成树，基线`b3ff9ac3f45721e537efd5df5cfbdc0afbe5b975`，输入线获根授权独占3生产与3测试文件；不提交、推送、部署或改生产配置/身份索引。真实`.5`原订阅与群投递已由根UI及只读结构快照分别证明，创建者ID正确；根随后用原正式members接口确认2项均有name，而原展示索引不存在。只修原认证资料到展示索引接线，不改任务、创建者或授权合同。
+
+### 实际完成与改动文件
+
+- `adapter/feishu_provider_facts.py`从同次完整open_id分页响应保留可选姓名，无额外查询；adapter本身不猜home或写展示索引。
+- `user_space/group_authorization_context.py`完成原provider/chat/完整成员核验后，名单内姓名才交身份模块；展示IO/结构失败只记录固定事件及异常类型，不含值，不吞原授权拒绝。
+- `user_space/identity_store.py`复用原provider索引和同一锁，读取原字节并追加变化的展示行，原私有原子writer保存；不嵌套调用自取非重入锁的append入口。原关联、subject及扩展字段保留，新记录仅默认user；空名不覆盖、无名字不读、同名零追加/重写、并发同锁防丢更新；锁忙由原blocking=False明确让出，展示调用点记录BlockingIOError类型后继续授权，不等待或加后台重试；坏索引不重建。
+- 原`test_feishu_bot_observations.py`、`test_home_identity_store.py`、`test_group_authorization.py`；原群治理、设计台账、TESTS、gateway两页模块说明及本交接。无新文件、依赖、配置或第二身份索引，因此无文件树变动。
+
+参考先读本仓库原identity_store关联解析、私有JSONL/锁、GroupAuthoritySnapshot及creator展示合同；检索OpenClaw合同索引未命中此窄分支，再读`extensions/feishu/src/directory.ts`（`9cf12734e675a1ec63abb09bf65e4f6d76835a1e`）中稳定open_id与可选name分离的投影，仅复用其展示/身份分离思想，不复制contact查询或fallback。
+
+### 测试命令和结果
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_feishu_bot_observations.py agent_py_agent/tests/test_home_identity_store.py agent_py_agent/tests/test_group_authorization.py agent_py_agent/tests/test_schedule_owner_scope.py agent_py_agent/tests/test_group_authorization_settings.py -q --tb=short
+```
+
+另补原索引锁真实竞争红测，旧默认阻塞等待2秒，改用原非阻塞锁后授权不等展示锁；`creator-name-display-lock-red.xml`保留。三层首红分别为缺member_display_names、缺展示更新helper及真实creator显示仍未知，仓外`creator-name-wiring-red.xml`保留。最终5文件214 passed、0 failed/error/skipped，JUnit为`creator-name-wiring-focused.xml`，不与此前87项或其它组合重复累计。首次扩展矩阵一项fixture误用OwnerHomeResult.owner_kind，已按真实identity.owner_kind修正而未改产品契约。局部Ruff、doc_sync、strict尺寸和diff以冻结安全摘要为准；最终严格gate由根执行。
+
+覆盖已有main/linked/非默认owner完整关联及扩展policy字段、仅默认user新记录、不创建owner、同名不同subject/群不借权、原provider/chat/完整成员错误零展示写、非open_id和分页边界、空名及同名不擦写、无名不扫描索引、并发主体不丢、坏JSON保留原字节、预期展示写失败不阻断授权且日志无值。
+
+### 影响范围、复查点和剩余风险
+
+provider身份索引仍参与既有关联解析，根应重点审查仅display_name/updated_at变化及新默认user等价性，不能把它降格成可任意重建的缓存。显示失败不授予或撤销权限；只有原provider/成员/策略/actor检查决定授权。新数据仅来自已有认证响应，不从USER.md正文、模型、同名或最近群成员猜人。索引命中但已有异常映射的情况只保留原映射，不借姓名修复或覆盖它。
+
+真实`.6`姓名展示、跨平台包内运行与发行尚未验证；当前`.5`服务及原失败证据未动。姓名历史积累沿原索引保留合同，本片没有新索引/清理器/周期平台查询，也不宣称解决全公司身份索引性能。无可用姓名在索引读取前退出，未变化不产生写入。
+
+建议下一步：根先审3生产文件的数据来源、原关联保留及同锁写入，再统一focused/严格gate并构新候选；少量真实原群资料读取后验证创建者姓名。可并行只读审阅或包准备，真实UI、配置、服务、提交和发行仍由根单点执行，不以合成显示代替新版真实验收。

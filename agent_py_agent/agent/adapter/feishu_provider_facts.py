@@ -1,5 +1,5 @@
 # LLM: 只通过宿主原 Delivery registry 的真实 REST adapter 读取平台事实；不寻找另一进程的 WS 实例，不保存权限账或接受模型 token。
-# 模块用途: 为群授权和事件订阅共用当前群角色、完整成员及精确来源消息证明，不启动连接或申请权限。
+# 模块用途: 为群授权和事件订阅共用角色、完整成员及可选姓名投影和原消息证明，不启动连接或申请权限；姓名不参与授权。
 from __future__ import annotations
 
 import time
@@ -91,15 +91,15 @@ def adapter_group_authority_snapshot(adapter, chat_id):
     return _group_authority_snapshot(adapter, token, chat_id)
 
 
-# LLM: 只有全部官方分页成功才能返回 members_complete，token自己在群不等于任意人被授权。
-# 函数用途: 共用实际群角色和成员读取，不保存第二权限账。
+# LLM: 只有全部官方open_id分页成功才返回成员及可选姓名；姓名独立投影，不影响权限、不额外查询或猜home写索引。
+# 函数用途: 共用实际群角色和成员读取，保留同次认证响应已有姓名供宿主展示，不保存第二权限账。
 def _group_authority_snapshot(adapter, token, chat_id):
     path = '/im/v1/chats/' + quote(chat_id, safe='')
     info = _read(token, path + '?user_id_type=open_id')
     own = _read(token, path + '/members/is_in_chat')
     if own.get('is_in_chat') is not True or info.get('chat_mode') not in {'group', 'topic'}:
         raise FeishuProviderFactError('FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED')
-    members, seen, cursor, deadline = set(), set(), '', time.monotonic() + 5
+    members, names, seen, cursor, deadline = set(), {}, set(), '', time.monotonic() + 5
     for _page in range(10):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -113,11 +113,13 @@ def _group_authority_snapshot(adapter, token, chat_id):
                 or not isinstance(row.get('member_id'), str) or not row['member_id'] for row in rows):
             break
         members.update(row['member_id'] for row in rows)
+        names.update({row['member_id']: row['name'].strip() for row in rows
+            if isinstance(row.get('name'), str) and row['name'].strip()})
         if data.get('has_more') is False:
             owner = str(info.get('owner_id') or '') if info.get('owner_id_type') == 'open_id' else ''
             return {'provider': 'feishu', 'channel': 'feishu', 'app_id': adapter.app_id, 'chat_id': chat_id,
                 'tenant_key': str(info.get('tenant_key') or ''), 'owner_id': owner, 'owner_id_type': 'open_id',
-                'member_ids': sorted(members), 'members_complete': True,
+                'member_ids': sorted(members), 'member_display_names': names, 'members_complete': True,
                 'bot_is_member': True, 'observed_at': time.time()}
         cursor = data.get('page_token')
         if not isinstance(cursor, str) or not cursor or cursor in seen:

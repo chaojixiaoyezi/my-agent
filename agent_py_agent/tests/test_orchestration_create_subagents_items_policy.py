@@ -8,6 +8,24 @@ from unittest.mock import MagicMock
 import pytest
 
 
+# LLM: 这些参数合同测试明确模拟无IM身份的本地父；typed空上下文不能让MagicMock动态属性冒充认证actor或线程。
+# 函数用途: 保留原创建服务替身，只固定本case没有宿主通道身份，不关闭生产身份校验。
+def _local_mock_agent():
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent = MagicMock()
+    agent._current_run_params = RunParams(task_attributes={}, host_channel_actor=None)
+    return agent
+
+
+def test_unbound_magicmock_is_not_host_actor_authority():
+    from agent_py_agent.agent.conversation.host_actor import HostActorError, current_actor_for_child
+
+    assert current_actor_for_child(_local_mock_agent()) is None
+    with pytest.raises(HostActorError):
+        current_actor_for_child(MagicMock())
+
+
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
 # 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
 @pytest.fixture(autouse=True)
@@ -15,8 +33,10 @@ def _isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
+# LLM: 批量参数测试只模拟无IM身份的本地父，原角色/路径断言保持；需要认证身份的集成另走真实Store。
+# 函数用途: 准备显式空宿主上下文与创建结果替身，避免动态mock字段意外进入权限入口。
 def _mock_items_agent(task_count: int = 3):
-    mock_agent = MagicMock()
+    mock_agent = _local_mock_agent()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
     mock_agent.subagents.workspace_root = Path("/tmp/project")

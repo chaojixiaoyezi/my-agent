@@ -1,3 +1,5 @@
+2026-10-15 姓名投影补线（源码已修复，待新包）：群授权读取的原完整members响应同时保留可选name，准确provider/chat校验后沿原provider索引仅补展示字段；未知名不擦已知、同名不重复写，索引失败仅记录无值异常类型，原授权及停止取消保持。5文件214项通过，真实姓名展示待新版验收；见[群治理](../../design/IM_GROUP_GOVERNANCE.md#创建者姓名展示2026-10-15源码已修复待新版验收)。
+
 2026-10-15 话题卡片补验：群/model卡使用已核owner的group事实，将逻辑topic仅投影为实际运输群；签名thread仍沿原记录，私聊表单从精确原线程恢复唯一来源，撤权仍在最终写门复核。坏地址/跨群/歧义来源拒绝，真实新包卡片验收待收口，见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。
 
 2026-10-15 输入等待真实收尾修复：卡已发送后沿原零工具自然回复表达等待，pending 归 needs_user_input，不将持久输入判作业务失败；准确原 Wake 待消费时保留 TASK_INPUT_RESUME_PENDING，取消及已核后继只静默收当前执行片，不伪造 Goal 续跑。独立 24 文件 618 通过、4 项既有 xfail，真实新卡提交验收待新版部署，见[凭据入口交接](../../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。

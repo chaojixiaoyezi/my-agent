@@ -1,5 +1,5 @@
-# LLM: 宿主策略只从 canonical 独立线程读；真正派工经原 ToolExecutor/G1/创建容量账，模型只汇总，不伪造工具往返。
-# 模块用途: 为自动委派后台任务启动实际子代理，恢复准确孩子引用，并让主代理依据真实结果交付。
+# LLM: 派工沿原ToolExecutor/G1及父当前工具上界；OPEN能力阻塞仍交原父裁决，不能把BLOCKED误当结束或自动批准。
+# 模块用途: 为IM自动委派启动有准确业务工具范围的孩子，恢复原引用，并依据真实结果或能力申请继续处理。
 from __future__ import annotations
 
 import json
@@ -15,8 +15,8 @@ from .execution_threads import (
 )
 
 
-# LLM: 接单事实来自宿主耐久 SessionTask；沿现有 natural_user_reply 生成无工具短回复，正文不是任务完成依据。
-# 函数用途: 在聊天回合里确认已排队的任务，避免主聊天又执行一次同样工作。
+# LLM: 接单事实来自宿主耐久SessionTask；无工具只是本片表达角色，不证明孩子缺能力或执行失败，正文不是完成依据。
+# 函数用途: 为已排队任务登记模型短回执及尚未观察结果的事实，避免主聊天重复执行或误报能力失败。
 def prepare_dispatch_ack(params):
     from ..agent_core.tool_loop.natural_user_reply import (
         pending_natural_user_reply,
@@ -28,6 +28,9 @@ def prepare_dispatch_ack(params):
         queue_natural_user_reply(params, kind="background_dispatch", facts={
             **ack, "current_user_request": params.user_prompt, "reply_is_interim": True,
             "task_continues_without_more_user_input": ack["status"] not in {"done", "failed", "cancelled"},
+            "current_turn_role": "dispatch_acknowledgement",
+            "worker_execution_outcome": "not_observed_in_this_turn",
+            "coordinator_role": "本片仅确认宿主派工，不评估孩子的业务能力；无工具表达轮不能证明孩子无法执行。",
         })
 
 
@@ -86,8 +89,8 @@ def _prepare_root(agent, params, policy):
     return allowed
 
 
-# LLM: 宿主创建仍走原冻结授权和 operation ledger；根只汇总或裁决直属孩子的结构化申请，不能代做业务，容量只让出。
-# 函数用途: 创建或恢复真实子代理；需要追加权限时保留原父级裁决工具，孩子结束后汇总真实结果。
+# LLM: 宿主创建仍走原冻结授权及operation账；只有活跃或BLOCKED孩子的OPEN申请可交直属父裁决，GAP/其它终态不复活。
+# 函数用途: 创建或恢复孩子并处理真实能力等待；BLOCKED+OPEN先裁决，其余结束状态按实际结果汇总。
 def prepare_delegated_execution(agent, params):
     resolved = _execution_policy(agent, params)
     if resolved is None:
@@ -126,7 +129,9 @@ def prepare_delegated_execution(agent, params):
 
     active = any(child.status not in SUBAGENT_ENDED_STATUSES for child in children)
     failed = not active and any(child.status != TaskStatus.DONE.value for child in children)
-    resolution = _prepare_capability_resolution(params, children) if active else None
+    resolution_children = [child for child in children
+        if child.status not in SUBAGENT_ENDED_STATUSES or child.status == TaskStatus.BLOCKED.value]
+    resolution = _prepare_capability_resolution(params, resolution_children)
     if resolution is not None:
         return resolution
     queue_natural_user_reply(params, kind="subagents_active" if active else "delegated_failure" if failed else "delegated_result", facts={
@@ -158,11 +163,13 @@ def _prepare_capability_resolution(params, children):
     return replace(params, allowed_tools=["resolve_capability_requests"])
 
 
-# LLM: 宿主调用仍受冻结快照授权、路径、停止和原创建服务容量限制；不注入助手/tool IR，不给普通用户跨会话权限。
-# 函数用途: 真正提交一次子代理创建，把原执行账返回的准确孩子编号交给恢复绑定。
+# LLM: 仅IM自动派工显式传当前父snapshot的就绪工具，经原leaf/退休过滤及create二次authority交集；owner/资源/网络门不变。
+# 函数用途: 沿原执行账创建同owner业务孩子，避免默认coding工具集丢失父级正常业务能力；不改手工子代理默认或自动批准。
 def _start_child(agent, params, task, allowed):
+    from ..agent_core.orchestration.create_policy import leaf_allowed_tools
     from ..agent_core.tool_loop.recovery import runtime_run_scope
     from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from ..subagents.role_templates import active_model_subagent_tools
     from .background_execution import BackgroundCapacityDeferred
 
     runtime = params.tool_runtime_snapshot.runtime("create_subagents")
@@ -170,7 +177,9 @@ def _start_child(agent, params, task, allowed):
         raise DataCorruptionError("当前用户没有子代理创建权限")
     call = ToolCall(
         call_id=f"host-delegate:{task.task_id}", tool_name="create_subagents",
-        arguments={"goal": task.goal, "allowed_skills": allowed},
+        arguments={"goal": task.goal, "allowed_skills": allowed,
+                   "allowed_tools": leaf_allowed_tools(active_model_subagent_tools(
+                       sorted(params.tool_runtime_snapshot.available_tool_names)))},
         source_protocol=params.tool_protocol_snapshot.source_protocol, schema_hash=runtime.model_spec.schema_hash,
         run_id=params.run_id, turn_id=f"{params.run_id}:host-delegate", attempt_id=params.attempt_id,
     )

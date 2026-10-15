@@ -48,6 +48,90 @@ def _case(tmp_path, *, conversation_id='oc_source'):
     return agent, source, actor, raw, calls
 
 
+def test_current_group_facts_seed_display_names_but_same_name_never_grants_authority(tmp_path):
+    from agent_py_agent.agent.scheduler.creator_access import creator_display_rows
+    from agent_py_agent.agent.user_space.group_authorization_context import current_group_authority
+
+    agent, source, actor, raw, calls = _case(tmp_path)
+    raw['member_display_names'] = dict.fromkeys(raw['member_ids'], '合成同名')
+    raw['member_display_names']['ou_foreign'] = '不属于完整成员'
+    policy_before = agent.home_paths.owner_tool_policy_json.read_bytes() if agent.home_paths.owner_tool_policy_json.exists() else None
+    current_group_authority(agent)
+    rows = creator_display_rows(agent, [{'creator': {'channel': 'feishu', 'actor_id': 'ou_member'}}])
+    assert rows[0]['creator_display'] == '合成同名（feishu:ou_member）'
+    from agent_py_agent.agent.user_space.identity_store import lookup_provider_identity
+    assert lookup_provider_identity(agent.home_paths, provider='feishu', provider_subject_id='ou_foreign') is None
+    assert (agent.home_paths.owner_tool_policy_json.read_bytes() if agent.home_paths.owner_tool_policy_json.exists() else None) == policy_before
+    _allow(agent, raw, actor)
+    for attempted in (replace(actor, actor_id='ou_inviter'), replace(actor, owner_id='providers/feishu/groups/oc_other')):
+        agent._current_run_params.host_channel_actor = attempted
+        with pytest.raises(ValueError):
+            with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
+                pytest.fail('同名不得借其它actor或群权限')
+    assert calls
+
+
+@pytest.mark.parametrize('fault', ['io', 'structure'])
+def test_display_index_failure_is_value_free_and_does_not_block_existing_authorization(tmp_path, monkeypatch, caplog, fault):
+    from agent_py_agent.agent.user_space import identity_store
+
+    agent, source, actor, raw, _ = _case(tmp_path)
+    raw['member_display_names'] = {'ou_member': 'Synthetic-Name-Canary'}
+    _allow(agent, raw, actor)
+    agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
+    def fail(*args, **kwargs):
+        raise (OSError if fault == 'io' else ValueError)('Synthetic-Name-Canary')
+    monkeypatch.setattr(identity_store, 'remember_provider_display_names', fail)
+    with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
+        pass
+    assert 'group_member_display_projection_failed' in caplog.text
+    assert 'Synthetic-Name-Canary' not in caplog.text
+
+
+def test_busy_display_index_does_not_delay_original_authorization(tmp_path, caplog):
+    import threading
+    import time
+
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    agent, source, actor, raw, _ = _case(tmp_path)
+    raw['member_display_names'] = {'ou_member': '合成名字'}
+    _allow(agent, raw, actor)
+    agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
+    held, release = threading.Event(), threading.Event()
+
+    def hold_index():
+        with locked_json_path(agent.home_paths.provider_identity_dir / 'feishu.jsonl'):
+            held.set()
+            release.wait(2)
+
+    thread = threading.Thread(target=hold_index)
+    thread.start()
+    try:
+        assert held.wait(1)
+        started = time.monotonic()
+        with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
+            pass
+        assert time.monotonic() - started < 1
+        assert 'exception_type=BlockingIOError' in caplog.text
+    finally:
+        release.set()
+        thread.join(3)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize('field,value', [('provider', 'other'), ('chat_id', 'oc_foreign'), ('members_complete', False)])
+def test_wrong_or_incomplete_group_facts_never_seed_display_index(tmp_path, field, value):
+    from agent_py_agent.agent.user_space.group_authorization_context import current_group_authority
+
+    agent, _, _, raw, _ = _case(tmp_path)
+    raw['member_display_names'] = {'ou_member': '不可信名字'}
+    raw[field] = value
+    with pytest.raises(GroupAuthorizationError):
+        current_group_authority(agent)
+    assert not (agent.home_paths.provider_identity_dir / 'feishu.jsonl').exists()
+
+
 def test_topic_group_authority_can_grant_without_rewriting_original_actor(tmp_path):
     topic = 'oc_source:thread:om_topic'
     agent, _, actor, raw, _ = _case(tmp_path, conversation_id=topic)

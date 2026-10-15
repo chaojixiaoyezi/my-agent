@@ -1,3 +1,11 @@
+2026-10-15 IM 自动派工模块交接：
+
+```text
+`-- docs/tasks/IM_DELEGATION_TOOL_SCOPE_HANDOFF.md # 父工具交集、原能力等待修复与真实委派失败和验收边界
+```
+
+关键文件说明：自动派工只改原 im_delegation 的创建参数与 OPEN 申请投影，不新增执行队列、授权账或权限入口。
+
 2026-10-15 既有模块职责补充：adapter/protocol 的会话地址反向解析由群授权、conversation/channels 和Feishu运输共用；逻辑topic保留，运输只用已核basechat。未新增状态、目录或协议账本。输入表达复用completion的公开操作事实，不另存凭据或业务正文。
 
 2026-10-15 原请求引用与后台谱系（实施中）：

@@ -1,3 +1,11 @@
+2026-10-15 `.6` 最终源码严格门：61 focused收集1396项，1391通过、4项既有runtime_guidance xfail、1项8420端口已占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package及离线lock全部通过。旧15夹具红与未暂存handoff的packaging阻断均保留，不覆盖为成功。长命令完整运输probe及服务端同消息读取证实编辑已发生，客户端旧视图切会话后恢复；不据此添加产品补丁。双端发行与 `.6` 真实自动派工订阅/姓名尚待验，线上旧全仓Test不作为通过来源。
+
+2026-10-15 `.6` 统一首轮61 focused收集1394项，15失败均在两份旧 create_subagents MagicMock 夹具；准确 b3ff 基线精确15节点同样失败，原证据保留。夹具改为显式 typed local 上下文，保留原断言和不绑定MagicMock不得制造actor的阴性；不改生产身份门、不删清单。最终重新严格gate另记。
+
+2026-10-15 IM 委派真实失败先红后绿：父快照有 schedule 而原自动 worker 无该工具；BLOCKED+OPEN 被误作结束，两项原失败保留。切片 10 文件 253 通过；覆盖真实 factory、同 topic HostActor、无群 grant 零副作用、人工 grant 后创建、普通/admin/群及禁用/网络上界、手工默认、原 resolve 恢复同孩子与终态。`.5` 真实凭据原 Wake 和合成值持久零命中、机器人订阅创建/原群自动回复/删除后安静、话题模型选择回调通过；长命令仅原 chunks 证明 120 秒心跳，实际中间编辑未算通过。最终 `.6` 61 focused 严格门、双平台与实测另记，见[委派交接](docs/tasks/IM_DELEGATION_TOOL_SCOPE_HANDOFF.md)。
+
+2026-10-15 创建者姓名接线：原正式群members有name但展示索引缺失，三个合同层反例先红；修复后5文件214 passed、0 failed/error/skipped。覆盖原分页无额外contact请求、仅open_id及可选姓名、完整provider/chat核验后写入、普通/群同名准确ID展示不借权、已有main/linked/非默认owner与扩展policy字段保持、新记录仅默认user、空名/同名零写入、空批不读索引、并发不丢主体、坏索引原字节保留，以及展示写失败无值日志且不阻断原授权。准确命令和待验边界见[姓名交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#创建者姓名投影追加2026-10-15)；本片未部署或改真实身份数据，不将合成测试计作真实姓名已显示。
+
 2026-10-15 `.5` 冻结前组合严格验收：55 focused 文件收集1255项，1250通过、4项既有runtime_guidance xfail、1项目标8420端口占用跳过；不连接既有服务。Ruff、文档同步、strict code-size、导入边界、diff、clean-package、离线uv lock全通过。包含群话题授权、运输及原签名模型卡和输入等待公开核验事实；真实 `.5` 自然表达、订阅创建/投递/取消仍须同版部署复测。原始JUnit和命令退出码保留于同版发行工件；远端旧全仓Test失败未作为验收来源。
 
 2026-10-15 `.4`真实群凭据卡/提交/唯一原Wake/后继attempt完成已由准确元数据与根UI分别核验，等待正文仍误称无工具，作为单独失败保留。通用薄表达补接既有presentation_only及当前请求公开归档核验，群/私聊凭据与OAuth沿实际native消息断言，零工具/单卡/原恢复次数不变；空归档不制造成功，秘密canary不得进入phase、表达IR或native消息。旧源码3反例缺turn_execution先红；5文件181项为177通过/4既有xfail，后续严格gate与新包真实自然表达另验，详见[表达交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#输入等待薄表达事实追加2026-10-15)。
@@ -244,7 +252,7 @@ MiniQL 最后真实工具进展在初始需求后 3 小时 2 分 56 秒，主 Co
 - 首轮完整结果：`17 failed, 1271 passed, 6 skipped, 1 error`，退出码 1，耗时 9107.58s。没有把失败删掉或改断言，也不把命令超时推断为权限拒绝。
 - 失败分布：`test_host_files_access.py` 7 项、`test_host_managed_store_access.py` 2 项、`test_pack_verification_protection.py` 7 项、`test_tool_call_guardrail_runtime.py` 1 项。输出主要是 `TOOL_TIMEOUT (30s)`；另外有 CLI PermissionError 被改为 SystemExit，以及重复执行标志不符合预期。失败根因不能仅凭这些输出定成沙箱限制。
 - 首轮另有 `test_host_files_access.py::test_every_host_state_item_is_read_only_for_commands[tool_policy.json]` 的 teardown error：被跟踪 `CODE_SIZE_REPORT.md` 在回归执行期间变化。已还原生成物，不再交叉执行尺寸门禁；原 node 与新文件、guards9 联跑复核通过，未修改该断言。
-- 最终联跑命令：上述 pytest 共用命令的范围替换为 `agent_py_agent/tests/test_child_own_workspace_write.py 'agent_py_agent/tests/test_host_files_access.py::test_every_host_state_item_is_read_only_for_commands[tool_policy.json]' $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)`；结果 `213 passed in 180.83s`，退出码 0（包含 18 项新用例、错误 node 复核及 guards9 全清单）。
+- 最终联跑命令：上述 pytest 共用命令的范围替换为 `agent_py_agent/tests/test_child_own_workspace_write.py 'agent_py_agent/tests/test_host_files_access.py::test_every_host_state_item_is_read_only_for_commands[tool_policy.json]' $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)`；结果 `214 passed in 180.83s`，退出码 0（包含 18 项新用例、错误 node 复核及 guards9 全清单）。
 - 真实基线复核：使用 `git worktree add --detach /private/tmp/claude-501/w3-baseline-d7e68e492 d7e68e492`；已核对完整 SHA 为 `d7e68e49206ac522ecb0466552586d5c88a406dc`。在该根目录、`PYTHONPATH` 指向该目录，用上方同一 pytest 命令和独立 `--basetemp=/private/tmp/claude-501/m-w3-baseline` 显式运行首轮 17 个失败 node；结果 `17 failed in 3153.22s`，退出码 1。失败节点和断言与本分支一致，说明这些是该基线在当前环境也存在的失败，并非此次窄根保留新增；具体超时原因仍未确定，不以此替代沙箱外复核。临时基线工作树按规则用 `git worktree remove` 清理。
 - 基线重跑时，上方 pytest 共用命令的 `<范围>` 显式替换为以下 17 个 node（独立 basetemp 如上），没有重跑无变化的整个引用集合：
 
@@ -1861,7 +1869,7 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 
 - 背景与两条改法见 `DESIGN_LEDGER.md` 同名小节。
 - 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
-  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_log_redaction_variable_refs.py agent_py_agent/tests/test_provider_rejection_diagnostics.py agent_py_agent/tests/test_gateway_request_runtime_errors.py -q` → **213 passed**。
+  - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_log_redaction.py agent_py_agent/tests/test_log_redaction_variable_refs.py agent_py_agent/tests/test_provider_rejection_diagnostics.py agent_py_agent/tests/test_gateway_request_runtime_errors.py -q` → **214 passed**。
   - guards9 全部 12 个文件 → **190 passed**；`check_import_boundaries.py` → findings=0；ruff 过；`check_doc_sync.py --base 54b48b625` → DOC_SYNC_PASS；strict code-size hard=0；`size_diff.sh` → **新增 0 / 消失 56**；`check_clean_package.py .` → OK；`git diff --check` 干净。
 - 新增用例：`test_authorization_key_shapes_masked_without_false_positives`、`test_body_excerpt_redacts_authorization_key_shapes`、`test_header_values_redact_credentials_without_masking_request_ids`、`test_content_type_redacts_embedded_credential`、`test_redaction_before_truncation_leaves_no_secret_prefix`、`test_rejection_credentials_never_reach_response_files_or_audit`（落盘/审计/user_error 三处端到端）。
 - 变异（3 个，全部 KILLED；脚本 `/private/tmp/claude-501/rejectdiag3/mut.py`，跑完字节还原、`git status` 只余有意改动）：去头值清洗、去授权头引号形状识别、清洗与截断顺序颠倒。
@@ -16078,7 +16086,7 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 命令：对 `test_decision_model_profiles.py`、`test_model_profiles.py`、`test_model_provider_management.py`、
 `test_shared_model_catalog.py`、`test_thread_model_selection.py`、`test_gateway_model_profiles.py` 运行 focused pytest，
 再覆盖 `test_model_oauth.py`、`test_model_oauth_transport.py`、`test_tui_model_menu.py`、`test_provider_sampling.py`；
-最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，213 passed in 4.29s。
+最终联合命令使用 `python3 -m pytest <以上十个文件> -o addopts='' -q --tb=short`，214 passed in 4.29s。
 
 ## 第 9 步插件面板真实 TUI（本机，fae9d5855 / wheel 86339f65，模型 MiniMax-M2.7）
 

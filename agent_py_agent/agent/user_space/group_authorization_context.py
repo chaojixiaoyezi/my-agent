@@ -1,8 +1,9 @@
 # LLM: 群能力门只组合原 HostChannelActor、实时 provider 事实与 tool_policy；临时持锁载体不保存第二身份或授权账。
-# 模块用途: 在真实配置和监控副作用前复核群授权，并让撤销 CAS 与同步写入按原策略锁排序。
+# 模块用途: 复核群授权并按原锁排序写入；同次认证成员的可选姓名仅补原展示索引，失败不改变授权。
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -41,6 +42,7 @@ class _GroupMutationLease:
 
 
 _ACTIVE_LEASES: ContextVar[tuple[_GroupMutationLease, ...]] = ContextVar('group_mutation_leases', default=())
+_LOGGER = logging.getLogger(__name__)
 
 
 # LLM: 开关只读共享部署 capability，缺字段按要求开启；owner 局部配置及模型属性不能关掉这道边界。
@@ -58,20 +60,38 @@ def group_authorization_required(home) -> bool:
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_UNAVAILABLE') from exc
 
 
-# LLM: 原 registry 的 adapter 是唯一 provider 查询入口；不读取模型给的成员、角色、token 或 app_id。
-# 函数用途: 获取本次完整官方群事实，失败时只给稳定错误，不初始化第二连接或缓存权限。
+# LLM: 只认原registry认证事实并先核provider/chat；完整成员内的可选姓名再best-effort写原展示索引，不读模型身份或缓存权限。
+# 函数用途: 获取完整官方群事实，附带已有姓名不增加网络；展示写入失败不阻断已核授权。
 def current_group_authority(agent) -> GroupAuthoritySnapshot:
     home = agent.home_paths
     try:
         adapter = agent.delivery_service.registry.adapter_for(home.owner_provider)
-        snapshot = GroupAuthoritySnapshot.from_mapping(adapter.group_authority_snapshot(group_chat_id(home)))
+        raw = adapter.group_authority_snapshot(group_chat_id(home))
+        snapshot = GroupAuthoritySnapshot.from_mapping(raw)
         if snapshot.provider != home.owner_provider or snapshot.chat_id != group_chat_id(home):
             raise ValueError('provider scope mismatch')
-        return snapshot
     except GroupAuthorizationError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
         raise GroupAuthorizationError('GROUP_AUTHORITY_UNAVAILABLE') from exc
+    _remember_member_display_names(home, snapshot, raw.get('member_display_names'))
+    return snapshot
+
+
+# LLM: 仅当前准确provider/chat完整成员的姓名可入展示索引；索引故障仅记录异常类型，不吞授权错误、不打印名字或平台值。
+# 函数用途: 将本次已有姓名交原身份模块安全保存，缺名不写，展示失败仍让授权主链继续。
+def _remember_member_display_names(home, snapshot, names):
+    if names is None:
+        return
+    from .identity_store import remember_provider_display_names
+
+    try:
+        if not isinstance(names, dict):
+            raise ValueError('member display projection is invalid')
+        remember_provider_display_names(home, provider=snapshot.provider,
+            names={subject: name for subject, name in names.items() if subject in snapshot.member_ids})
+    except (OSError, TypeError, ValueError) as exc:
+        _LOGGER.warning('group_member_display_projection_failed exception_type=%s', type(exc).__name__)
 
 
 # LLM: 同步嵌套只有仍活跃且准确 owner/capability/actor 的原持锁对象可复用，结束后任何复制上下文均无效。

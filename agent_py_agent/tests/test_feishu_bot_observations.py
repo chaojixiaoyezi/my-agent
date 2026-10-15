@@ -177,6 +177,68 @@ def test_snapshot_proves_complete_human_members_separately_from_bot_membership(m
     assert snapshot['bot_is_member'] is True and snapshot['owner_id'] == 'owner'
 
 
+def test_complete_members_exposes_optional_names_without_another_provider_query(monkeypatch):
+    paths = []
+
+    def read(token, path, **kwargs):
+        paths.append(path)
+        result = provider_read(token, path, **kwargs)
+        if '/members?' in path:
+            result['items'][0]['name'] = '合成同名'
+            result['items'][1]['name'] = '  合成成员  '
+        return result
+
+    monkeypatch.setattr(facts, '_read', read)
+    snapshot = adapter().group_authority_snapshot('group')
+    assert snapshot['member_display_names'] == {'owner': '合成同名', 'member': '合成成员'}
+    assert snapshot['member_ids'] == ['member', 'owner']
+    assert len(paths) == 3 and not any('/contact/' in path for path in paths)
+
+
+@pytest.mark.parametrize('name', [None, '', '  ', {'untrusted': '不是姓名'}, 42])
+def test_missing_or_invalid_member_name_does_not_change_membership(monkeypatch, name):
+    def read(token, path, **kwargs):
+        result = provider_read(token, path, **kwargs)
+        if '/members?' in path:
+            result['items'][0]['name'] = name
+        return result
+
+    monkeypatch.setattr(facts, '_read', read)
+    snapshot = adapter().group_authority_snapshot('group')
+    assert snapshot['member_display_names'] == {}
+    assert snapshot['member_ids'] == ['member', 'owner'] and snapshot['members_complete'] is True
+
+
+@pytest.mark.parametrize('identity_type', ['app_id', 'user_id', 'union_id'])
+def test_optional_name_does_not_turn_non_open_id_into_a_human_member(monkeypatch, identity_type):
+    def read(token, path, **kwargs):
+        result = provider_read(token, path, **kwargs)
+        if '/members?' in path:
+            result['items'][0].update(member_id_type=identity_type, name='合成名字')
+        return result
+
+    monkeypatch.setattr(facts, '_read', read)
+    with pytest.raises(facts.FeishuProviderFactError, match='FEISHU_GROUP_MEMBERS_INCOMPLETE'):
+        adapter().group_authority_snapshot('group')
+
+
+def test_member_names_accumulate_only_with_complete_original_pagination(monkeypatch):
+    calls = []
+
+    def read(token, path, **kwargs):
+        calls.append(path)
+        if '/members?' in path:
+            second = 'page_token=second' in path
+            return {'items': [{'member_id_type': 'open_id', 'member_id': 'member' if second else 'owner',
+                'name': '合成成员' if second else '合成群主'}], 'has_more': not second, 'page_token': '' if second else 'second'}
+        return provider_read(token, path, **kwargs)
+
+    monkeypatch.setattr(facts, '_read', read)
+    snapshot = adapter().group_authority_snapshot('group')
+    assert snapshot['member_display_names'] == {'owner': '合成群主', 'member': '合成成员'}
+    assert snapshot['members_complete'] is True and len(calls) == 4
+
+
 @pytest.mark.parametrize('chat_type', ['private', 'public'])
 @pytest.mark.parametrize('chat_mode', ['group', 'topic'])
 def test_group_chat_mode_accepts_private_and_public_visibility(monkeypatch, chat_type, chat_mode):
