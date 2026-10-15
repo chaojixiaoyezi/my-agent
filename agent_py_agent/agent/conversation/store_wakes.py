@@ -1,5 +1,5 @@
 # LLM: 唤醒沿原文件发布；稳定键由 store_wake_publication 在原锁内冻结完整配对后安装，查询不补账。
-# 模块用途: 保存唤醒、可靠交接配对观察并确认处理，显式依赖线程与观察能力，不运行模型。
+# 模块用途: 保存唤醒、配对观察、宿主认证义务与处理回执；模型正文仍归原投递冻结，不运行模型。
 from __future__ import annotations
 
 import json
@@ -124,7 +124,7 @@ def _read_wake_signal_entry(
 
 
 # LLM: 显式复用 storage 与线程/观察回调；发布、去重、冻结及确认顺序必须联测。
-# 类用途: 保存唤醒和处理回执，提供调度读取及模型投递冻结能力。
+# 类用途: 保存唤醒和处理回执，准确原任务的认证义务与投递冻结同沿此账，不新建通知队列。
 class WakeStore:
     # LLM: 唤醒只接收线程校验/活动更新和观察确认；发布顺序保持，不能反向访问整个 Store。
     # 函数用途: 连接原唤醒队列及跨领域回调，并挂上毒丸尝试账子对象 attempts；不注册调度任务或发起模型请求。
@@ -279,6 +279,37 @@ class WakeStore:
 
         update_json_file_atomic(path, updater, require_existing=True)
         return cached
+
+    # LLM: 仅宿主typed工具结果调用；原pending wake锁内核exact task/thread，首次义务不可覆盖，正文仍归owner_delivery。
+    # 函数用途: 给现有唤醒冻结需要用户处理的安全事实，不新建队列，不改变调度或消息身份。
+    def freeze_required_user_action(self, wake_signal_id: str, *, thread_id: str, task_id: str, actions: list) -> WakeSignal | None:
+        from .required_user_action import normalize_required_action
+
+        selected = [value for item in actions if (value := normalize_required_action(item)) is not None]
+        path = self._find_path(wake_signal_id)
+        if not selected or path is None:
+            return None
+        frozen = None
+
+        # LLM: 同一原wake只写一次；来源不匹配或已终结返回无写，不能借错误通知替换收件人。
+        # 函数用途: 原子保存同片认证拒绝义务，重启仍读取同一事实。
+        def updater(data):
+            nonlocal frozen
+            signal = WakeSignal.from_dict(data)
+            if (signal.wake_signal_id != wake_signal_id or signal.status != 'pending'
+                    or signal.thread_id != thread_id or signal.root_task_id != task_id):
+                return data
+            metadata = dict(signal.metadata or {})
+            expected = {'schema': 'wake-required-user-action.v1',
+                'thread_id': thread_id, 'task_id': task_id, 'actions': selected}
+            if 'required_user_action' in metadata and metadata['required_user_action'] != expected:
+                return data
+            metadata['required_user_action'] = expected
+            frozen = replace(signal, metadata=metadata)
+            return frozen.to_dict()
+
+        update_json_file_atomic(path, updater, require_existing=True)
+        return frozen
 
     # LLM: 紧急级别和创建时间排序、limit 及逐条错误必须保持原语义。
     # 函数用途: 合并所选队列的待处理信号与读取错误。

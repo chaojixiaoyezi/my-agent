@@ -2905,3 +2905,7 @@ B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed 
 
 
 本期所有交互卡提供取消：凭据、模型、审批、密码首设/解锁/改密、OAuth与人设。签名/实际actor/群归属仍校验，只退休原卡/输入，不撤回已生效值；过期取消可免锁但不授权其它动作。原行CAS记录首个点击人、姓名与时间，迟到OAuth成功/模型子卡不能越过取消。见 [卡片取消交接](../../tasks/CARD_CANCELLATION_HANDOFF.md)。
+
+## 2026-10-15 认证需要用户处理的后台通知
+
+认证明确拒绝的首次宿主事实独立于普通结果 `local/none` 静默：precheck、NO和后台LLM共用原 owner/thread/task/HostActor，finalization 前把义务冻结原 Wake。已有公开LLM回执可复用，否则仅走原零工具模型表达；实际外发前再核原来源、当前代次/撤销、active任务与原job状态。未发缓存重投必须在原 BackgroundClaim 内，业务和认证不重跑；已发回执只补canonical，后续换代不会重复外发。既有wake重投期限耗尽沿原quarantine及queued claim/finish CAS收失败片，不能抢其它活跃claim、复活终态、停计划或删除凭据。通知开关默认开启，关闭后原义务退休而不回落业务。详见 [模块交接](../../tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md)。

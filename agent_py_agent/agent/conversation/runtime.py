@@ -816,10 +816,16 @@ class BackgroundMainAgentRuntime:
             agent.conversation_store = store
         self.channels = channels or FakeDeliveryService()
 
-    # LLM: 后台轮先冻结目标/子树阶段；独立调度按原 run 解析交付会话，执行/控制身份保持原线程，展示不参与裁决。
-    # 函数用途: 准备一次后台唤醒，消费具名执行结果，并沿原事务记录或发送模型回复。
+    # LLM: 原wake需处理义务先只通知、不重业务；普通工作仍沿原身份与结果链，认证事实在finalization前冻结，展示不参与授权。
+    # 函数用途: 执行后台工作或恢复原必要通知，沿同一冻结投递结束原失败片，不能将静默当已通知。
     def run_once(self, params: dict) -> BackgroundMainAgentReport:
         request = _run_request(params)
+        from .required_user_action import deliver_required_notice, required_notice
+        if required_notice(self.agent, request) is not None:
+            signal = self.store.wakes.pending_one(request.wake_signal["wake_signal_id"])
+            if signal is not None and cached_owner_delivery(signal) is not None:
+                return self.redeliver_cached_wake(signal, channel=request.route_channel, target=request.route_target, now=request.now)
+            return deliver_required_notice(self, request)
         if callable(getattr(getattr(self.store, 'threads', None), 'load_report', None)):
             thread, load_error = self.store.threads.load_report(request.thread_id)
             if load_error is not None:
@@ -848,6 +854,8 @@ class BackgroundMainAgentRuntime:
             proactive_delivery_available=route_supports_proactive,
             transcript_delivery_available=route_supports_transcript,
         )
+        if required_notice(self.agent, request) is not None:
+            return deliver_required_notice(self, request, execution_result)
         delivery_context = DeliveryContext(
             channel=channel,
             target=target,
@@ -898,8 +906,8 @@ class BackgroundMainAgentRuntime:
             ),
         )
 
-    # LLM: 只重投原冻结信封，不运行模型；独立调度复用原 run 交付绑定，确认仍以实际提交事实为准。
-    # 函数用途: 为待发送唤醒补外发或本地落账，保持原回合身份、附件、过程回复与去重键。
+    # LLM: 只重投原冻结信封；认证新发送仍复核原active claim/代次，已sent仅补canonical不再外发，不运行模型/业务。
+    # 函数用途: 为原唤醒补投或落账，必要通知交付后结束defer的失败工作片。
     def redeliver_cached_wake(
         self,
         signal: WakeSignal,
@@ -935,6 +943,15 @@ class BackgroundMainAgentRuntime:
         route_supports_transcript = channel_supports_transcript(self.channels, channel)
         ownership = background_route_ownership(self.channels, channel)
         frozen = frozen_owner_delivery(prepared)
+        from .required_user_action import (
+            _undelivered_report,
+            notice_is_current,
+            required_notice,
+            settle_notice_task,
+        )
+        notice = required_notice(self.agent, request)
+        if notice is not None and not frozen.external_sent and not notice_is_current(self.agent, request):
+            return _undelivered_report(self.agent, request, 'required_action_superseded')
         commit = record_background_response(
             BackgroundDeliveryDependencies(
                 agent=self.agent, store=self.store, channels=self.channels,
@@ -957,6 +974,8 @@ class BackgroundMainAgentRuntime:
             canonical_record=bool(route_supports_transcript or ownership != ROUTE_EXTERNAL),
             commit=commit,
         )
+        if notice is not None and wake_handled:
+            settle_notice_task(self.agent, request)
         return BackgroundMainAgentReport(
             thread_id=signal.thread_id,
             task_id=signal.root_task_id,
@@ -4148,13 +4167,18 @@ def _retire_cancelled_task_wake(
     return True
 
 
-# LLM: 调用方须先准确回读原pending信封；只复用原缓存校验、地址解析和交付器，不创建第二份交付状态。
+# LLM: 调用方先准确回读pending；未发送认证通知须由原claim内重投，已sent只补canonical，其它原冻结回复保持原路径。
 # 函数用途: 对有效冻结回复执行外发或补落账，无有效缓存则返回None，取消抑制与去重由原交付层裁决。
 def _redeliver_frozen_wake(
     scheduler: BackgroundMainAgentScheduler, signal: WakeSignal, *, now: float,
 ) -> _WakeExecution | None:
-    if cached_owner_delivery(signal) is None:
+    cached = cached_owner_delivery(signal)
+    if cached is None:
         return None
+    from .required_user_action import required_notice
+    request = BackgroundRunRequest(thread_id=signal.thread_id, task_id=signal.root_task_id, reason=signal.reason, wake_signal=signal.to_dict())
+    if required_notice(scheduler.runtime.agent, request) is not None and not frozen_owner_delivery(cached).external_sent:
+        return None  # 未发送的认证通知必须在下方原BackgroundClaim内重投，不能在领取前借缓存恢复权限。
     channel, target = resolve_background_route(
         _background_route_dependencies(scheduler), signal.thread_id,
     )

@@ -1,5 +1,5 @@
 # LLM: 收口沿原模型账本和会话领域；用量事件身份由原 store 按范围/快照派生，禁止依赖物理调用数代替快照。
-# 模块用途: 保存运行结果、归档与用量，并触发原后续维护；不拥有第二份模型费用账。
+# 模块用途: 保存运行结果、归档与用量；原后台认证义务在任务终结前冻结，不拥有第二份模型或通知账。
 from __future__ import annotations
 
 import time as time_module
@@ -54,12 +54,12 @@ class FinalizationService:
     def __init__(self, agent):
         self._agent = agent
 
-    # LLM: Finalization archives run facts and only requests Curator after a typed task terminal state; it never writes dialogue to long-term.
-    #   The same typed terminal state also submits one bounded skill-learning request (self-learning on only).
-    # 函数用途: 收口一轮模型运行、写恢复事实并在任务完成时登记后台记忆提炼与自动总结 Skill 请求。
+    # LLM: 原后台首次认证拒绝在关任务前冻结同wake义务；交付确认前不关闭active TaskLink，不复活终态，其余归档/用量/记忆合同不变。
+    # 函数用途: 收口模型事实，先保留必要通知资格，再按真实终态登记任务完成和原后台学习请求。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
-        if _conversation_turn_is_terminal(ctx):
+        from ..conversation.required_user_action import defer_required_action_completion
+        if _conversation_turn_is_terminal(ctx) and not defer_required_action_completion(self._agent, ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
             # 也不再扫描 output/ 或要求模型额外提交验收。
             from ..conversation.task_promotion import complete_current_conversation_task

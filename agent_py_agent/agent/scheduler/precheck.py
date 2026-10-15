@@ -1,5 +1,5 @@
 # LLM: 预检经原后台参数、ToolRegistry/Executor 执行，只接受 read_only；cwd、Skill 和身份沿既有后台装配，不从 prompt 或工具参数推断。
-# 模块用途: 在模型工作前比较完整观察，保留工具原因码；失败与无变化分开，动作完成前不推进检查点。
+# 模块用途: 在模型工作前比较完整观察；首次认证拒绝交原wake通知，普通失败与无变化保持原收口，不推进检查点。
 from __future__ import annotations
 
 import hashlib
@@ -9,20 +9,22 @@ import time
 from .execution_policy import normalize_precheck
 
 
-# LLM: 只携带原 ToolResult 的结构化错误码与调用编号，不保留输出正文或从异常文案解析原因。
+# LLM: 只携带原ToolResult的错误码、调用编号及首次typed认证义务，不保留输出正文或从异常文案解析原因。
 # 类用途: 将工具失败原因交给预检状态记录，便于纯元数据诊断。
 class PrecheckToolFailure(RuntimeError):
     # LLM: 参数必须来自共享执行器的回执，不能传入用户提示词；异常仅作为宿主结构化失败载体。
     # 函数用途: 保存原错误码和真实工具调用编号，不复制工具正文。
-    def __init__(self, error_code: str, call_id: str):
+    def __init__(self, error_code: str, call_id: str, result=None):
         super().__init__("只读预检工具执行失败")
         self.tool_error_code = error_code
         self.call_id = call_id
+        from ..conversation.required_user_action import required_action_from_result
+        self.required_user_action = required_action_from_result(result)
 
 
 # LLM: 调用时已持 scheduler 与后台 claim，停止与心跳均已注册；同 run 已有观察原样复用，不重跑预检。
-# 函数用途: 返回是否需要继续模型工作，跳过或失败时沿原 TaskStore/run/wake 收口。
-def admit_prechecked_work(agent, service, claim, signal, *, run_kwargs: dict, now: float) -> bool:
+# 函数用途: 决定继续工作、原失败收口或仅表达认证通知；通知不重做工具也不推进检查点。
+def admit_prechecked_work(agent, service, claim, signal, *, run_kwargs: dict, now: float, notify=None):
     spec = normalize_precheck(claim.run.get("precheck"))
     if spec is None:
         return True
@@ -33,6 +35,11 @@ def admit_prechecked_work(agent, service, claim, signal, *, run_kwargs: dict, no
     if observation["status"] == "changed":
         return True
     failed = observation["status"] == "failed"
+    if failed and observation.get('required_user_action') is not None and notify is not None:
+        from ..conversation.required_user_action import freeze_request_notice
+        from ..conversation.runtime import _run_request
+        if freeze_request_notice(agent, _run_request(run_kwargs), [observation['required_user_action']]):
+            return notify(run_kwargs)
     service.conversation_store.tasks.update_status({
         "task_id": claim.run_id, "status": "abandoned" if failed else "completed", "expected_status": "active", "now": now,
     })
@@ -66,6 +73,8 @@ def observe(agent, claim, spec: dict, *, run_kwargs: dict) -> dict:
                   "error_type": type(exc).__name__, "observed_at": time.time()}
         if isinstance(exc, PrecheckToolFailure):
             result.update(tool_error_code=exc.tool_error_code, call_id=exc.call_id)
+            if exc.required_user_action is not None:
+                result['required_user_action'] = exc.required_user_action
         return result
 
 
@@ -85,7 +94,7 @@ def _execute_read_only(agent, claim, spec: dict, *, run_kwargs: dict) -> tuple[s
         task_attributes=attributes, write_boundary={"task_id": claim.run_id})
     execution, output = execute_read_only_tool(agent, params, tool_name=spec["tool_name"], arguments=spec["arguments"])
     if not execution.result.ok:
-        raise PrecheckToolFailure(execution.result.error_code or "PRECHECK_TOOL_FAILED", execution.call.call_id)
+        raise PrecheckToolFailure(execution.result.error_code or "PRECHECK_TOOL_FAILED", execution.call.call_id, execution.result)
     return output, execution.call.call_id
 
 

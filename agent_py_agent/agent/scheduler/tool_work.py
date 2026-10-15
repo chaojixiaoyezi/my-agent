@@ -1,4 +1,4 @@
-# LLM: NO 规则经过原后台车道、领取、工具策略和历史收口；不请求模型，也不以输出文字猜成功或告警。
+# LLM: NO业务经原后台车道、工具与历史；只有typed首次认证拒绝可转原零工具通知，不以输出文字猜成功或告警。
 # 模块用途: 执行监控的明确工具动作并记录结构化 JSON 结果，供同监控规则条件使用。
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import time
 
 
 # LLM: 调用方已 mark_run_running 且持有原租约，中断沿原后台路径传播；工具失败与通知失败分别记录。
-# 函数用途: 运行一条 NO 规则，保存原工具回执、可解析 JSON 结果，并结束准确 TaskLink/wake。
-def execute_scheduled_tool(agent, service, claim, signal, kwargs):
+# 函数用途: 运行NO工具并保存结果；准确认证拒绝交原通知表达，普通业务保持零模型与原TaskLink收口。
+def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None):
     from ..agent_core.runtime.loop_models import RunParams
     from ..agent_core.tool_only_execution import execute_tool_work
     from ..conversation.background_execution import _BackgroundRunControl
@@ -23,6 +23,10 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs):
     action = claim.run['tool']
     execution, output = execute_tool_work(agent, params, tool_name=action['name'], arguments=action['arguments'])
     ok = execution.result.ok
+    if not ok and notify is not None:
+        from ..conversation.required_user_action import freeze_tool_notice
+        if freeze_tool_notice(agent, _run_request(kwargs), execution.result):
+            return notify(kwargs)
     if ok:
         try:
             value = json.loads(output)

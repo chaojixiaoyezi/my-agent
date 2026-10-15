@@ -1,5 +1,5 @@
 # LLM: 来源沿原ThreadStore/HostActor与run；旧work双引用证明仅交原queued CAS规范，不产生第二个权限、迁移或模型账。
-# 模块用途: 冻结规范定时来源、显式恢复合法旧委派计划并物化独立线程，交付仍回原会话。
+# 模块用途: 冻结规范定时来源并物化独立线程；原认证通知与普通结果策略分开，失败重投不重执业务。
 from __future__ import annotations
 
 import time
@@ -24,24 +24,26 @@ def close_unstarted_task(service, run: dict, *, now: float) -> None:
                                                         "expected_status": "active", "now": now})
 
 
-# LLM: 只包装原后台 run_once；拿到车道后才写 started_at，预检接收同一原后台参数以保留 cwd、Skill 和任务身份。
-# 函数用途: 在同一领取、中断和心跳范围内执行预检及模型工作，不重建一份工作区合同。
-# LLM: 规则实际开工仍在原 run 中登记；NO 使用同一工具执行器，不请求 LLM。
-# 函数用途: 规则实际开工仍在原 run 中登记；NO 使用同一工具执行器，不请求 LLM。 修改需同步原控制、恢复或权限测试。
+# LLM: 原claim/车道不变；已冻结需处理义务只通知、不重业务，预检与NO沿同一工具执行器，首次拒绝转原零工具表达。
+# 函数用途: 在同一领取范围执行一次工作，失败通知重投不会再次认证或执行写操作。
 def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: float):
-    # LLM: 原 claim 已经通过准入和恢复检查；开始、预检、模型仍用一个 run，异常交原后台领取器收尾。
-    # 函数用途: 记录实际取得车道的时刻，然后按预检结果继续模型或静默收口。
+    # LLM: 原wake义务优先，只有新工作写started；通知的原TaskLink保持active到确认或明确结束，不另建任务。
+    # 函数用途: 分离一次实际工作与其失败通知，重启后不重新执行失败业务。
     def run_once(kwargs):
+        from ..conversation.required_user_action import required_notice
+        from ..conversation.runtime import _run_request
         from .precheck import admit_prechecked_work
 
+        if required_notice(agent, _run_request(kwargs)) is not None:
+            return dependencies.run_once(kwargs)
         service.repository.mark_run_running(claim.run_id, claim.claim_id, now=now)
         if not claim.run.get("use_llm", True):
             from .tool_work import execute_scheduled_tool
-            execute_scheduled_tool(agent, service, claim, signal, kwargs)
-            return None
-        if admit_prechecked_work(agent, service, claim, signal, run_kwargs=kwargs, now=now):
+            return execute_scheduled_tool(agent, service, claim, signal, kwargs, notify=dependencies.run_once)
+        admission = admit_prechecked_work(agent, service, claim, signal, run_kwargs=kwargs, now=now, notify=dependencies.run_once)
+        if admission is True:
             return dependencies.run_once(kwargs)
-        return None
+        return admission if admission is not False else None
 
     return replace(dependencies, run_once=run_once)
 
@@ -297,10 +299,13 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
     return context.channel in {"", "internal"} and context.target in {"", origin_id}
 
 
-# LLM: 通知资格读取精确原 run 的冻结策略，不读取 job 当前版本、不解析正文；其它后台唤醒不受影响。
-# 函数用途: 判断本次定时运行是否只需留下内部结果，主链和投递边界共用此事实。
+# LLM: 正常结果静默读取原run策略；原wake首次认证拒绝义务独立，仍须原来源和发送前资格门，不据正文取消或外发。
+# 函数用途: 区分正常周期结果与必须由原用户处理的通知，local/none不吞掉准确宿主义务。
 def scheduled_local_delivery(agent, request) -> bool:
+    from ..conversation.required_user_action import required_notice
     from .delivery_policy import normalize_delivery
 
     run = execution_run(agent, request)
+    if run is not None and required_notice(agent, request) is not None:
+        return False
     return run is not None and normalize_delivery(run.get("delivery"))["mode"] in {"local", "none"}

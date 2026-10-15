@@ -287,6 +287,8 @@ Gateway 安全初始化：`agent/auth/configuration.py` 是 CLI 与 HTTP 服务�
 |-- agent_py_agent/tests/test_scheduler_monitors.py # 规则并发和真实执行器回归
 |-- agent_py_agent/tests/test_schedule_control.py # 群创建人、本人跨入口与通知控制
 |-- agent_py_agent/tests/test_task_credentials.py # 原卡、锁、密文和注入回归
+|-- agent_py_agent/tests/test_task_credential_lifetime.py # 持续保存、有限期限与原scope撤销边界
+|-- agent_py_agent/tests/test_task_credential_http_failures.py # 登录/请求失败分类与认证拒绝单次转换
 |-- agent_py_agent/tests/test_inbound_media_ownership.py # 两用户附件落地、读取及交叉拒绝
 ```
 
@@ -2897,3 +2899,13 @@ agent_py_agent/tests/
 ```
 
 交接见 `docs/tasks/CARD_CANCELLATION_HANDOFF.md`。
+2026-10-15 凭据持续使用与认证拒绝通知：沿原凭据记录、原调度 run 和原 Wake/outbox 扩展，不新增授权库或通知队列。
+
+```text
+|-- agent_py_agent/agent/conversation/required_user_action.py # 原后台任务的需用户处理事实、表达与投递前资格核验
+|-- agent_py_agent/tests/test_scheduler_user_action_notice.py # 静默监控认证拒绝、来源隔离、取消和原outbox重投
+|-- docs/tasks/CREDENTIAL_HTTP_FAILURE_HANDOFF.md # HTTP认证失败分类与同代单次拒绝记录的交接
+`-- docs/tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md # 原后台通知主链、测试证据与边界交接
+```
+
+关键职责：`required_user_action` 只读取原工具记录与凭据代次，持久义务仍属于原 Wake；授权继续由原 owner/actor/root/job/origin 决定。生命周期与HTTP直接回归入口见下方凭据文件条目。

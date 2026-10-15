@@ -49,7 +49,7 @@ def _signal(payload: dict[str, Any]) -> WakeSignal:
     return signal
 
 
-# LLM: 投递冻结只允许增加 owner_delivery，消费只改变 status/handled_at；其余信号内容不可漂移。
+# LLM: 宿主消费只允许追加 owner_delivery/required_user_action，消费只改变 status/handled_at；发布身份、原事件不可漂移。
 # 函数用途: 提取用于对账的信号不可变字段，不把处理时间当发布冲突。
 def _stable_signal(signal: WakeSignal) -> dict[str, Any]:
     payload = signal.to_dict()
@@ -57,6 +57,7 @@ def _stable_signal(signal: WakeSignal) -> dict[str, Any]:
     payload.pop("handled_at")
     metadata = dict(payload["metadata"])
     metadata.pop("owner_delivery", None)
+    metadata.pop("required_user_action", None)
     payload["metadata"] = metadata
     return payload
 

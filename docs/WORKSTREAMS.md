@@ -1,3 +1,5 @@
+2026-10-15 凭据持续使用切片：根独占TTL/schema/tool、capability默认配置与全局文档/集成/发布；credential_live_preflight独占原HTTP/verification与test_task_credential_http_failures及模块交接；linux_group_release独占原调度/后台需用户处理通知及新回归，保持单outbox和原actor/topic；live_route_attribution只读参考/独立复核。子代理全部6.1-sol high；本轮不读生产凭据，不接新平台，不增加机器人连接。
+
 2026-10-15 输入事件补验切片：根独占真实平台、服务与全局文档；credential_live_preflight 独占原输入唤醒/安全工具回执/薄表达和定向测试；live_route_attribution 只读独立复核；linux_group_release 只做仓外发行 runner 与 Linux 包准备。源码从 `.7` 的 `4f6aa346` 开始；新输入修复门、工件和真实重验未完成，不复用旧成功记录。
 
 2026-10-15 `.7` 源码最终严格门通过：65 focused收集1497项，1492通过、4项既有runtime_guidance xfail、1项目标8420占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package、离线lock全部通过。独立来源复核59项通过，原两红及 `.6` 真实queued失败保留。`.6` 真实145秒命令在120秒已由同消息API与前台客户端同时证实更新，最终退出0；姓名展示通过。`.7` 精确双端工件、旧计划恢复与新计划创建/投递/删除后静默尚待验，不外推全仓CI或租户云文档写入。

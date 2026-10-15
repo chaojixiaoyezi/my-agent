@@ -1,5 +1,5 @@
-# LLM: 后台交付沿原外发、canonical 提交、审计回执和整封冻结顺序；不拥有模型运行、调度或唤醒租约。
-# 模块用途: 独立维护后台回复的投递与历史落账，修改时同步回执去重、冻结重投、附件及取消回归。
+# LLM: 后台交付沿原来源、canonical和整封冻结顺序；首次认证拒绝的宿主义务独立于普通结果静默，不能扩大owner/actor或重执业务。
+# 模块用途: 维护后台回复和必要失败提醒的原投递、发送前代次复核与冻结重投，回执仍唯一证明外发。
 from __future__ import annotations
 
 import time
@@ -54,7 +54,7 @@ _ROUTE_UNDECLARED = "undeclared"
 # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
 # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
 # 已外发的冻结回执只补canonical，不受新准入否决而再次外发；未外发事件仍须原generation与开始CAS。
-# 函数用途: 处理渠道投递，并把真实正文和本工作片显示交给唯一会话提交层；原调度静默策略只记内部结果。
+# 函数用途: 处理渠道投递与唯一会话提交；正常结果保持原静默，已核认证义务可通知，发送前仍复核原记录。
 def record_background_response(
     delivery: BackgroundDeliveryDependencies,
     request: BackgroundDeliveryRequest,
@@ -120,7 +120,7 @@ def record_background_response(
     receipt, delivery_status = _background_delivery_for_origin(
         delivery, delivery_context, envelope,
         origin_valid=origin_valid,
-        external_options=_ExternalDeliveryOptions(frozen_retry=frozen_retry, local_transcript_only=local_transcript_only),
+        external_options=_ExternalDeliveryOptions(frozen_retry=frozen_retry, local_transcript_only=local_transcript_only, request=request),
         message_metadata=message_metadata,
     )
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
@@ -321,11 +321,12 @@ def _background_owner_message_metadata(
 
 # LLM: 本次外部投递的“既有事实”打包：重投载荷与空片本地转录标记互不排斥，
 #   合并后 _background_external_delivery 参数回到 4 个以内，调用点也不容易漏传。
-# 类用途: 承载外部投递的两个可选事实（冻结重投载荷、空片只做本地转录）。
+# 类用途: 承载原请求及冻结/本地投递事实，使新通知在运输前复核准确原任务，不从正文重建身份。
 @dataclass(frozen=True)
 class _ExternalDeliveryOptions:
     frozen_retry: FrozenOwnerDelivery | None = None
     local_transcript_only: bool = False
+    request: BackgroundDeliveryRequest | None = None
 
 
 # LLM: 原来源校验失败不能发网络请求，也不能把失败记为sent；成功只委托原投递出口，metadata记录同一事实。
@@ -342,7 +343,7 @@ def _background_delivery_for_origin(
 
 # LLM: 外部发送只有这一个出口：重投时若冻结载荷已证明外发成功，就绝不能再次外发
 # （只补本地 canonical），否则会对真实用户重复发消息。事件实际运输先经原job CAS准入，普通任务零scheduler写。
-# 函数用途: 沿原运输执行已准入投递或复用冻结外发事实；原回执仍唯一决定外发结果，不持store锁跨运输。
+# 函数用途: 沿原运输执行已准入投递，认证提醒最后复核当前代次；已外发仅补记录，不持锁跨运输。
 def _background_external_delivery(
     delivery: BackgroundDeliveryDependencies,
     delivery_context: DeliveryContext,
@@ -377,6 +378,10 @@ def _background_external_delivery(
             ),
             "local_only",
         )
+    from .required_user_action import notice_is_current, required_notice
+    request = external_options.request
+    if request is not None and required_notice(delivery.agent, request) is not None and not notice_is_current(delivery.agent, request):
+        return SimpleNamespace(content=''), 'suppressed'
     from ..scheduler.effect_scope import SchedulerEffectRejected, scheduler_effect_scope
 
     try:

@@ -19,7 +19,9 @@ _FIXTURES=(background,)
 server = _server_fixture
 
 
-def _card(ctx):
+# LLM: 仅为隔离测试准备原任务的合成输入卡；可显式传有效期，不触碰真实凭据或通道。
+# 函数用途: 返回原卡及提交参数，供加密、生命周期和授权回归共用。
+def _card(ctx, *, options=None):
     ctx.agent.config.feishu_session_lock_enabled=False
     ctx.agent._current_run_params=SimpleNamespace(run_id=ctx.task_id,task_id=ctx.task_id,task_attributes={})
     bind_admin_channel_identity(ctx.agent.home_paths.root,'feishu','ou_synthetic')
@@ -28,7 +30,7 @@ def _card(ctx):
         sent.append(card)
         return {'message_id':'om_'+__import__('uuid').uuid4().hex,'chat_id':'oc_private'}
     ctx.agent.channel_registry.register_adapter('feishu',SimpleNamespace(send_control_card=send),capabilities=ChannelCapabilities(control_cards=True,proactive=True))
-    reference,_=request_credential_card(ctx.agent,url='https://example.com/api',authentication='basic')
+    reference,_=request_credential_card(ctx.agent,url='https://example.com/api',authentication='basic',options=options)
     from agent_py_agent.agent.common.json_io import read_json_object_report
     path=credential_path(ctx.agent.home_paths.owner_home_dir,reference)
     row=read_json_object_report(path,context='test').payload

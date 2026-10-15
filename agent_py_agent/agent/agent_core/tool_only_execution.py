@@ -1,5 +1,5 @@
-# LLM: 宿主显式只读工具沿主代理同一身份、权限、执行、归档与事件账；不会构造模型请求，不创建第二棵任务树。
-# 模块用途: 为宿主只读操作提供工具工作片与完整输出，当前 attempt 在成功、失败和中断时沿原路径收尾。
+# LLM: 宿主工具及必要通知表达共用原身份/attempt/取消/用量链；工具工作不请求模型，表达工作零工具，不创建第二棵任务树。
+# 模块用途: 执行显式工具或已有事实的有界自然表达，各自在原attempt内结算，不重执业务。
 from __future__ import annotations
 
 from .runtime.loop_models import RunParams
@@ -67,8 +67,65 @@ def _tool_only_params(bound, snapshot, cancellation, tool_name):
 
     return ToolLoopExecuteParams(user_prompt=bound.root_user_prompt, root_user_prompt=bound.root_user_prompt,
         memories=[], runtime_injections=[], prompt_files=[], tool_catalog_section="", tool_recommendations_section="",
-        tool_context=[], effective_on_chunk=bound.on_chunk, allowed_tools=[tool_name], write_boundary=bound.write_boundary,
+        tool_context=[], effective_on_chunk=bound.on_chunk, allowed_tools=[tool_name] if tool_name else [], write_boundary=bound.write_boundary,
         task_attributes=bound.task_attributes, request_id=bound.request_id, run_id=bound.run_id, task_id=bound.task_id,
         attempt_id=bound.attempt_id, one_shot_tool_calls=set(), executed_tools=[], archive_tool_calls=[],
         tool_runtime_snapshot=snapshot, cancellation_token=cancellation, source=bound.source, save=bound.save,
         conversation_turn_id=bound.conversation_turn_id, consume_pending_turn_input=False)
+
+
+# LLM: 仅调用原natural-user-reply入口，当前claim/HostActor由调用方冻结；无业务工具、无输入消费，来源与成本仍由原模型账签发。
+# 函数用途: 对尚无LLM公开回复的宿主失败生成有界自然提醒，不固定用户回执或重跑认证/业务。
+def express_required_user_action(agent, params: RunParams, facts: dict):
+    from dataclasses import replace
+
+    from ..common.cancellation import CancellationToken
+    from ..concurrency.interrupt import is_interrupted
+    from ..contracts.background_public_receipt import BackgroundPublicReceiptError
+    from ._tool_loop_service import _request_tool_loop_model_response
+    from .model.response_provenance import response_provenance_error
+    from .native_tool_protocol import select_tool_protocol
+    from .runtime_mixin import (
+        RunCloseoutFacts,
+        _bind_main_agent_turn_params,
+        _settle_main_agent_run_status,
+        current_prompt_scope,
+    )
+    from .tool_loop.natural_user_reply import (
+        discard_pending_natural_user_reply,
+        finish_natural_user_reply,
+        natural_user_reply_model_params,
+        natural_user_reply_rejection_reason,
+        queue_natural_user_reply,
+        retry_natural_user_reply,
+    )
+
+    params = replace(params, source='background_user_action_notice', allowed_tools=[])
+    bound = _bind_main_agent_turn_params(agent, '', params)
+    status = 'failed'
+    try:
+        with current_prompt_scope(agent, '', bound):
+            loop = _tool_only_params(bound, agent.tools.runtime_snapshot(allowed_tools=[], run_id=bound.run_id), CancellationToken(_external_check=is_interrupted), '')
+            loop = replace(loop, tool_protocol_snapshot=select_tool_protocol(agent, run_id=bound.run_id, request_id=bound.request_id))
+            queue_natural_user_reply(loop, kind='background_user_action_required', facts=facts)
+            while True:
+                if is_interrupted():
+                    raise InterruptedError('后台通知已停止')
+                _, response = _request_tool_loop_model_response(agent, natural_user_reply_model_params(loop), 0)
+                if response.runtime_status in {'cancelled', 'aborted'}:
+                    status = 'cancelled'
+                    discard_pending_natural_user_reply(loop)
+                    return response
+                error = response_provenance_error(loop, response, purposes=('natural_user_reply',))
+                reason = error or natural_user_reply_rejection_reason(response)
+                if not reason:
+                    status = 'ok'
+                    return finish_natural_user_reply(loop, response, accepted=True)
+                if error or not retry_natural_user_reply(loop, rejection_reason=reason, response=response):
+                    raise BackgroundPublicReceiptError(error or 'BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE')
+    except (InterruptedError, KeyboardInterrupt):
+        status = 'cancelled'
+        raise
+    finally:
+        _settle_main_agent_run_status(agent, run_id=bound.run_id, attempt_id=bound.attempt_id,
+            facts=RunCloseoutFacts(runtime_status=status, runtime_reason='required_user_action_notice', tool_rounds=0))

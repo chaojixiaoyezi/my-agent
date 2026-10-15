@@ -2,6 +2,7 @@
 # 模块用途: 校验私人多字段卡、有效期及 HTTP 登录/签名方案，复用原 TaskCredential 存储和网络授权。
 from __future__ import annotations
 
+import math
 import re
 
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\Z")
@@ -40,14 +41,32 @@ def credential_header_name(value: object) -> str:
     return value
 
 
-# LLM: 数值不能来自布尔/NaN/无限；上下限同时约束输入卡和 ready 凭据寿命。
-# 函数用途: 规范显式有效秒数，避免永不过期的隐式授权。
-def credential_seconds(value: object, *, default: int, maximum: int = 31536000) -> int:
+# LLM: 只有 ready 凭据可显式允许零值，登录会话缓存仍须有限；布尔/NaN/无限不得成为期限。
+# 函数用途: 规范有效秒数；allow_unlimited 时零表示持续使用，正值保留原有范围。
+def credential_seconds(value: object, *, default: int, maximum: int = 31536000, allow_unlimited: bool = False) -> int:
     if value is None:
-        return default
+        value = default
+    if allow_unlimited and type(value) is int and value == 0:
+        return 0
     if isinstance(value, bool) or not isinstance(value, int) or not 60 <= value <= maximum:
         raise ValueError("有效期必须是 60 秒到一年之间的整数")
     return value
+
+
+# LLM: 只认原记录明确的 ttl=0/deadline=0；缺失、布尔或损坏记录仍失败关闭，不迁移旧有限期限。
+# 函数用途: 给使用、状态和登录缓存提交共用一个 ready 期限判定，不读取秘密或改账。
+def credential_ready_expired(row: dict, *, now: float) -> bool:
+    deadline = row.get('ready_expires_at')
+    if type(deadline) not in {int, float}:
+        return True
+    try:
+        if not math.isfinite(deadline) or deadline < 0:
+            return True
+    except OverflowError:
+        return True
+    if deadline == 0:
+        return type(row.get('ttl_seconds')) is not int or row['ttl_seconds'] != 0
+    return now >= deadline
 
 
 # LLM: 登录和签名只允许声明式映射；没有 eval、shell、任意代码或不受控目标，参数不含秘密值。

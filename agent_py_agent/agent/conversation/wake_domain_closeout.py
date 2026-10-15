@@ -3,14 +3,14 @@
 #   - 会话消息（session_message）：回执不动（2026-09-29 3a 以"做法 2"取代原裁定 b）。毒丸隔离的是唤醒这条执行路径，不代表
 #     消息本身有毒；被释放或还没认领的消息仍能交给目标的下一次回合，消息的去留只由回执层自己的上限
 #     （SESSION_MESSAGE_RELEASE_LIMIT_REACHED）决定。宿主提示的 details 带 message_dedupe_key 与回执当前状态，注明消息仍待投递；
-#   - 其它 reason：不改领域状态。
+#   - 原认证通知：仅已quarantine且准确宿主义务沿原claim/finish结束失败工作片，不改计划或凭据；其它reason不改领域状态。
 #   四个入口：唤醒结案（failed_permanently）后的收尾、领取后准入判为"来源已放弃"时的收尾（派活正文达到释放上限）、
 #   长时间不计数提醒，以及上一片随进程消失时按它的回合号收尾补充消息（C6，settle_abandoned_turn）。
 #   宿主提示来源 wake_poison、code 为原因码，同一会话同一原因码只留最新一条。
 #   全部在后台路径上调用：领域写失败只打结构化日志、不抛异常，唤醒结案与否不受影响。第 4 步的人工重放与拒绝提示用
 #   wake_domain_status / wake_domain_terminal 判定"领域已是终态、不必重放"，与收尾同一处判据。改动须同步 test_wake_domain_closeout.py、
 #   test_wake_attempt_wiring.py 与 WAKE_POISON_PILL 第 6 节。
-# 模块用途: 唤醒被结案或来源已放弃时，把派活任务收成 failed 并回报发送方，给会话留一条宿主提示（会话消息只提示、不改回执）。
+# 模块用途: 唤醒结案时收回派活或准确认证通知工作片并保留原提示；原claim CAS防抢占，不停计划或改凭据。
 from __future__ import annotations
 
 import json
@@ -40,8 +40,15 @@ _LOG_PREFIX = "[background-wake-poison]"
 
 # LLM: 唤醒已按 failed_permanently 结案后调用；signal 是结案时落盘的那份信封（读不出时是选批时冻结的副本），只读它的
 #   结构化字段。先收领域状态再留宿主提示，任何一步失败都不影响另一步。副作用：写会话任务与回报、写会话线程。
-# 函数用途: 唤醒被毒丸结案后，把对应的派活任务收成 failed（会话消息留待下一次回合），并提醒这个会话。
+# 函数用途: 唤醒结案后收回原派活或认证通知工作片，普通会话消息仍留待下一回合；不把通知失败当计划被停用。
 def close_out_quarantined_wake(agent: Any, signal: WakeSignal, decision: QuarantineDecision) -> None:
+    try:
+        _close_required_notice(agent, signal)
+    except Exception as exc:  # noqa: BLE001 - 领域写入失败不取消原quarantine提示，也不冒充收口成功
+        try:
+            _log('required_notice_closeout_failed', signal, {'error_type': type(exc).__name__})
+        except Exception:  # noqa: BLE001 - 日志故障不反噬原宿主提示
+            pass
     reason = _reason(signal)
     text = (f"后台唤醒（{reason or '未知来源'}）同一原因连续失败 {decision.same_cause_count} 次，已停止自动重试。"
             f"原因码：{decision.reason_code}。")
@@ -178,3 +185,38 @@ __all__ = [
     "wake_domain_status",
     "wake_domain_terminal",
 ]
+
+
+# LLM: 仅原quarantine宿主义务有资格收原task/thread；有其它活跃claim不夺取，原终态不复活，不发消息、不重业务或改job/凭据。
+# 函数用途: 用原queued领取与终结CAS结束超过既有重投上限的认证通知，避免defer永久占住任务。
+def _close_required_notice(agent, signal):
+    from ..scheduler.repository import SchedulerRunFinish
+    from .required_user_action import normalize_required_action
+
+    value = signal.metadata.get('required_user_action')
+    if (signal.status != 'failed_permanently' or not isinstance(value, dict)
+            or value.get('schema') != 'wake-required-user-action.v1'
+            or value.get('thread_id') != signal.thread_id or value.get('task_id') != signal.root_task_id
+            or not any(normalize_required_action(item) is not None for item in value.get('actions', ()))):
+        return
+    link = agent.conversation_store.tasks.load(signal.root_task_id)
+    if link is None or link.thread_id != signal.thread_id or link.status != 'active':
+        return
+    repository = agent.scheduler_repository
+    run = repository.get_active_run(signal.root_task_id)
+    claim = None
+    if run is not None:
+        if run['thread_id'] != signal.thread_id or run['status'] != 'queued':
+            return
+        claim = repository.claim_run(run['run_id'], lease_seconds=30, now=signal.handled_at)
+        if claim is None:
+            return
+    try:
+        agent.conversation_store.tasks.update_status({'task_id': link.task_id, 'status': 'abandoned', 'expected_status': 'active'})
+        if claim is not None:
+            repository.finish_run(claim['run_id'], claim['claim_id'], SchedulerRunFinish(
+                status='failed', delivery_status='failed', delivery_reason='required_action_delivery_exhausted',
+                error_code='PERMISSION_BLOCKED', now=signal.handled_at))
+    finally:
+        if claim is not None:
+            repository.release_run_claim(claim['run_id'], claim['claim_id'], now=signal.handled_at)

@@ -12,10 +12,10 @@ from pathlib import Path
 
 from ..settings.config import load_simple_yaml
 
-# LLM: 子代理权限、运行投影、包候选展示和阶段提醒的唯一默认配置；新增字段同步随包 YAML 与配置一致性测试。
+# LLM: 子代理权限、凭据默认保留期限、运行投影和包候选的唯一默认配置；新增字段同步随包 YAML 与测试。
 # 模块用途: 集中读取协作能力设置；包候选只影响上下文，阶段提醒不作为执行超时或权限授予。
 
-# LLM: 包准备默认关闭；主会话方法沿用默认开，但不授予权限或增加模型调用；预算和 YAML 须保持同源。
+# LLM: 包准备默认关闭，方法沿用默认开；凭据期限不改变owner/任务授权；默认与YAML须保持同源。
 # 类用途: 定义子代理能力和包上下文设置；推荐只展示摘要，选包会消耗模型用量并记录原任务，数值配额为零仍受模型窗口限制。
 @dataclass
 class CapabilityConfig:
@@ -53,6 +53,10 @@ class CapabilityConfig:
     im_tool_approvals_enabled: bool = True
     # 原群/本人私聊任务凭据卡及宿主 HTTP 引用注入；可先收集后配置认证，不把密码交给模型或 shell。
     im_task_credentials_enabled: bool = True
+    # 新填凭据提交后的默认有效秒数；0 持续使用到认证拒绝或撤销，不改变卡片填写期限。
+    im_task_credentials_ttl_seconds: int = 0
+    # 认证明确被拒时沿原任务向原来源提醒用户；不改变正常巡检静默，也不自动收集新密码。
+    background_user_action_notice_enabled: bool = True
     # IM 模型选择与原发起人私人配置卡；仅改变本 owner 目录，不允许普通用户发布全机模型。
     im_model_cards_enabled: bool = True
     # 群新建/恢复监控与持久配置，须由当前群主或已证邀请人明确授权；停用不受此门限制。
@@ -148,13 +152,17 @@ def _coerce_int(value: object, default: int) -> int:
     return default
 
 
-# LLM: 部署安全开关严格校验实际布尔类型，不能通过未知值关闭群授权或开启机器人入口；须同步 YAML 和默认值测试。
+# LLM: 部署安全开关及凭据默认期限严格校验，未知值不能扩大授权；须同步 YAML 和默认值测试。
 # 函数用途: 按唯一 dataclass 归一配置，安全边界参数非法时明确拒绝加载。
 def _coerce_capability_value(field_name: str, value: object) -> object:
     """按 dataclass 声明类型归一配置值,不依赖 parse_scalar 的引号类型推断。
 
     自建 yaml 里带引号的标量按 YAML 语义是字符串(qq_app_id: "190…" 等纯数字 ID 必须保字符串),
     普通策略按 dataclass 类型归一；新增审批和认证部署边界严格校验，未知值不能静默打开能力。"""
+    if field_name == "im_task_credentials_ttl_seconds":
+        if type(value) is not int or (value != 0 and not 60 <= value <= 31536000):
+            raise ValueError("im_task_credentials_ttl_seconds 必须为0或60秒到一年的整数。")
+        return value
     if field_name == "owner_default_permission_mode":
         if not isinstance(value, str) or value not in {"ask", "auto"}:
             raise ValueError("owner_default_permission_mode 必须为 ask 或 auto。")
@@ -168,6 +176,7 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
             raise ValueError("tool_approval_timeout_seconds 必须为正整数。")
         return int(value)
     if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled",
+                      "background_user_action_notice_enabled",
                       "im_group_authorization_required", "feishu_bot_subscriptions_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")

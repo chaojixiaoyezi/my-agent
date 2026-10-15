@@ -1,6 +1,6 @@
 
 # LLM: 工具回执、文件引用及删除记录进入同一 exact run 账本；不从正文提取路径或完成状态。
-# 模块用途: 归档输出、原始调用身份和文件交接；复用 tooling 的有界清理投影，与耐久索引恢复保持一致。
+# 模块用途: 归档输出、调用身份和文件交接；首次认证拒绝仅保留typed安全义务，秘密与HTTP正文不进入通知事实。
 from __future__ import annotations
 
 import base64
@@ -692,9 +692,8 @@ def _tool_result_refs_from_result(result: object) -> list[dict[str, object]]:
     return refs
 
 
-# LLM: 只保留恢复所需结构字段（含 && 串联通过时的 verification_evidence_chain）；process复用模型有界投影，
-#   插件决定仅从executor宿主metadata专键进入tool_result_envelope，writer读取同一路径；禁止复制任意metadata或正文。
-# 函数用途: 保留核验、清理及输入等待的准确恢复引用，让下一工作片按同一口径读取，不修改执行状态。
+# LLM: 只保留恢复所需结构字段；认证通知义务仅由已执行typed工具结果生成，不接受任意metadata、正文或模型dict。
+# 函数用途: 保留核验、清理、输入等待和首次认证拒绝的安全事实，供同片与恢复共用，不复制秘密或改变执行状态。
 def _compact_result_envelope(result: object) -> dict[str, object]:
     envelope = _result_details(result)
     # B5 第 5 段：插件门决定由 executor 写在 ToolResult 的 metadata 顶层（不在 handler_details 里）；
@@ -755,6 +754,9 @@ def _compact_result_envelope(result: object) -> dict[str, object]:
         compact["tool_execution"] = execution
     from ..conversation.input_tool_boundary import input_archive_facts
     compact.update(input_archive_facts(envelope))
+    from ..conversation.required_user_action import required_action_from_result
+    if action := required_action_from_result(result):
+        compact['required_user_action'] = action
     output = envelope.get("output")
     if isinstance(output, dict):
         compact["output"] = {key: output[key] for key in keys if key in output}

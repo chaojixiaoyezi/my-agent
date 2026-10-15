@@ -1,4 +1,4 @@
-# LLM: 此工具只申请原任务的私人凭据卡，返回 opaque ref；不接收密码参数，不给管理员身份或额外文件权限。
+# LLM: 此工具申请原任务凭据卡，返回 opaque ref与准确期限；默认持续复用，不接收密码参数或增加权限。
 # 模块用途: 让 IM 主子代理请求接口认证信息并返回原状态与运输确认投影；HTTP 明文注入只发生在 web_fetch 宿主侧。
 from __future__ import annotations
 
@@ -30,15 +30,15 @@ from .models import (
 # LLM: 工具始终绑定当前 owner Agent；开关在 capability 配置，运输确认只读宿主记录，失败/取消不能变成完成或聊天凭据收集。
 # 类用途: 发布原任务输入卡并返回安全状态或管理授权，不等待、不调用模型，不公开输入值。
 class RequestCredentialsTool(BaseTool):
-    # LLM: 所有生命周期都要求规范任务，原 Registry 在 handler 前沿 promotes_task 晋升；注册不读密钥或发卡。
-    # 函数用途: 声明原任务输入及标准/自定义字段分工，避免重复收集；首次普通请求也能持久等待和恢复。
+    # LLM: 所有生命周期要求规范任务，原Registry先晋升；零有效期只作用于ready凭据，注册不读秘密或发卡。
+    # 函数用途: 声明输入字段与持续使用选项；首次请求能持久等待，有限期限仍可显式指定。
     def __init__(self,agent):
         self.agent = agent
         self.model_spec = ToolModelSpec(name='request_credentials', description='接口需要账号密码或 API Key 时，向原发起人发私人密文输入卡；群来源在原群发卡，个人来源在本人私聊发卡；可仅收密码，缺链接在卡上填写。无需先选认证协议；返回 credential_ref；默认collected只保存，不能直接HTTP使用。需要使用时先operation=configure并传原引用与准确认证方案，配置后web_fetch再传此引用；可给 job_id 绑定已有本人的监控。',
             input_schema={'type':'object','properties':{'url':{'type':'string'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
             'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string'},'job_id':{'type':'string'},
             'fields':{'type':'array','description':'需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。', 'items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},
-            'auth_config':{'type':'object'},'ttl_seconds':{'type':'integer','minimum':60},
+            'auth_config':{'type':'object'},'ttl_seconds':{'type':'integer','anyOf':[{'const':0},{'minimum':60,'maximum':31536000}], 'description':'保存后有效秒数；0持续复用直到认证拒绝或撤销，缺省使用能力配置（默认0）。不改变卡片填写期限。'},
             'operation':{'type':'string','enum':['request','status','update','configure','revoke']},'credential_ref':{'type':'string'}},
             'anyOf':[
                 {'properties':{'operation':{'enum':['request']}},'required':[]},
@@ -51,8 +51,8 @@ class RequestCredentialsTool(BaseTool):
             idempotency_policy=IdempotencyPolicy(scope='operation'),timeout_policy=TimeoutPolicy(seconds=30),
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
-    # LLM: 条件必填在副作用前核验；scope 不可用与存储失败分开，发送后读取失败保持unknown且禁止盲重发，不展示异常正文。
-    # 函数用途: 申请、更新、查询或撤销原任务凭据，模型只获得引用、期限、状态与原运输确认，不获得表单值。
+    # LLM: 条件必填在副作用前核验，ready回执展示ready期限；发送后读失败保持unknown且禁盲重发，不展示异常正文。
+    # 函数用途: 管理原任务凭据；模型只得引用、准确阶段期限、状态和运输确认，不获得表单值。
     def execute(self, params):
         from ..user_space.task_credentials import manage_credential
         config = capability_config_for_agent(self.agent)
@@ -87,7 +87,7 @@ class RequestCredentialsTool(BaseTool):
             if not all(key in row for key in ('origin', 'status', 'expires_at')):
                 raise CredentialInputError('CREDENTIAL_RECORD_INVALID', '已发送卡片的原记录不可读取，请先核对原操作。',
                     stage='result_read', effect_outcome='unknown')
-            result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row['expires_at'],
+            result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row.get('ready_expires_at', row['expires_at']),
                 'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref',''),
                 'request_delivery': _request_delivery(row)}
             envelope = {'credential': result}

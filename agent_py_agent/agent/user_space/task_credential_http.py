@@ -1,5 +1,5 @@
 # LLM: 所有秘密只在宿主内存和原加密凭据记录中；send 必须是 web_fetch 原网络门，登录/刷新不允许任意脚本、目标或环境变量。
-# 模块用途: 用任务引用执行同源 JSON 登录、Cookie/CSRF、有限会话刷新和声明式请求签名。
+# 模块用途: 用任务引用执行同源认证及有限会话刷新，保留原HTTP/网络错误供安全回报，不自动重发卡或重做写请求。
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +15,7 @@ from ..common.json_io import read_json_object_report
 from ..conversation.tool_approval_scope import tool_approval_scope, tool_approval_scope_is_current
 from ..tooling.models import ToolHandlerOutcome
 from ..tooling.web_fetch_runtime import RawResponseParts
+from .task_credential_verification import credential_http_status, credential_response_outcome
 from .task_credentials import (
     _assert_credential_scope,
     _cipher,
@@ -26,8 +27,8 @@ from .task_credentials import (
 )
 
 
-# LLM: 解密前核原 owner/actor/root/monitor/TTL，网络入口只能把本次同源请求交宿主，不返回秘密到工具参数。
-# 函数用途: 执行带私人认证的请求，并把本次全部秘密交给 web 的归档前净化器。
+# LLM: 解密前核原 owner/actor/root/monitor/期限；登录错误仍交原 typed 结果与净化器，GET/HEAD最多原一次刷新，写请求不重放。
+# 函数用途: 执行带私人认证的请求，保留认证拒绝/权限/网络分类，并把本次全部秘密交原 web 归档前净化器。
 def credential_authenticated_request(agent, reference, request, *, send):
     capability = capability_config_for_agent(agent)
     if capability is None or not capability.im_task_credentials_enabled:
@@ -51,7 +52,10 @@ def credential_authenticated_request(agent, reference, request, *, send):
     elif row['authentication'] == 'signature':
         headers = _signed_headers(config, values, request)
     elif row['authentication'] == 'login':
-        headers, session_secrets = _login_headers(agent, path, row, values, request, send, cipher)
+        session = _login_headers(agent, path, row, values, request, send, cipher)
+        if isinstance(session, ToolHandlerOutcome):
+            return session, tuple(set(secrets))
+        headers, session_secrets = session
         secrets.extend(session_secrets)
     else:
         raise ValueError('宿主认证方式无效')
@@ -60,12 +64,13 @@ def credential_authenticated_request(agent, reference, request, *, send):
     # 仅 GET/HEAD 可在明确 401 后重试；变更请求不重做未知副作用。
     if row['authentication'] == 'login' and request.method in {'GET', 'HEAD'} and _unauthorized(result):
         row = {**row, 'session_expires_at': 0}
-        headers, session_secrets = _login_headers(agent, path, row, values, request, send, cipher)
+        session = _login_headers(agent, path, row, values, request, send, cipher)
+        if isinstance(session, ToolHandlerOutcome):
+            return session, tuple(set(secrets))
+        headers, session_secrets = session
         secrets.extend((*session_secrets, *headers.values()))
         result = send(_authenticated(request, headers, row['origin']))
-    from .task_credential_verification import record_credential_verification
-    record_credential_verification(agent, path, row, result)
-    return result, tuple(set(secrets))
+    return credential_response_outcome(agent, path, row, result), tuple(set(secrets))
 
 
 # LLM: 同名认证头冲突在发送前拒绝；authorization_origin 由原 fetch 逐跳核验，防止跨源 307 携带登录正文。
@@ -89,8 +94,8 @@ def _signed_headers(config, values, request):
     return {config['header']: signature}
 
 
-# LLM: cache 只存同源会话密文，ready TTL 和 generation 复核阻止更新/撤销期间旧登录覆盖；不持配额锁发网络。
-# 函数用途: 取得有效会话或用私人字段登录，保存有限期限的 Cookie/Token/CSRF 密文。
+# LLM: cache只存同源密文，原ready helper/generation阻止旧登录覆盖；会话期限始终有限，原ready不限期不使session无限期；不持锁发网络。
+# 函数用途: 取得会话或同源登录，保留原typed失败；成功才在原锁内保存有限Cookie/Token/CSRF密文。
 def _login_headers(agent, path, row, values, request, send, cipher):
     config = row['auth_config']
     if credential_origin(config['url']) != row['origin']:
@@ -102,19 +107,27 @@ def _login_headers(agent, path, row, values, request, send, cipher):
         login = replace(request, url=config['url'], method='POST', data=body,
                         headers={'Content-Type': 'application/json'}, authorization_origin=row['origin'])
         response = send(login)
+        response = credential_response_outcome(agent, path, row, response, login_response=True)
+        if isinstance(response, ToolHandlerOutcome):
+            return response
         if not isinstance(response, RawResponseParts):
             raise ValueError('宿主登录未成功')
-        if _unauthorized(response):
-            from .task_credential_verification import record_credential_verification
-            record_credential_verification(agent, path, row, response)
-            raise ValueError('账号或密码错误，凭据未通过认证')
-        headers = _session_headers(config, response)
+        try:
+            headers = _session_headers(config, response)
+        except (ValueError, KeyError, TypeError):
+            return ToolHandlerOutcome('web_fetch', False, '登录响应缺少声明的有效会话信息，无法完成认证；未判定凭据错误。',
+                error_code='CREDENTIAL_INPUT_UNAVAILABLE', result_envelope={'http_status': response.status})
         with _credential_mutation(agent, path) as admission:
+            from .task_credential_schema import credential_ready_expired
             latest = read_json_object_report(path, context='credentials.session').payload
-            if latest.get('status') != 'ready' or latest.get('generation') != row['generation'] or time.time() >= latest.get('ready_expires_at', 0):
+            now = time.time()
+            if (latest.get('status') != 'ready' or latest.get('generation') != row['generation']
+                    or latest.get('verification_status') == 'rejected' or credential_ready_expired(latest, now=now)):
                 raise ValueError('登录期间原凭据已失效')
+            deadline = latest['ready_expires_at']
+            session_deadline = now + config['session_seconds']
             latest.update(session_ciphertext=cipher.encrypt(json.dumps(headers).encode()).decode(),
-                          session_expires_at=min(time.time()+config['session_seconds'], latest['ready_expires_at']))
+                          session_expires_at=min(session_deadline, deadline) if deadline > 0 else session_deadline)
             _save_credential_row(admission, path, latest)
     secrets = list(headers.values())
     if config['token_path']:
@@ -154,9 +167,7 @@ def _session_headers(config, response):
     return headers
 
 
-# LLM: 仅结构化 HTTP status 允许安全读取请求刷新，不解析错误文案或从网络异常推断认证失效。
-# 函数用途: 判断宿主 HTTP 返回是否明确为 401。
+# LLM: 复用验证模块的同一typed状态投影；只有明确401允许安全读取请求刷新，不解析正文或从网络异常推断失效。
+# 函数用途: 判断原宿主响应是否明确401，拒绝浮点或模型字典冒充HTTP状态。
 def _unauthorized(response):
-    if isinstance(response, RawResponseParts):
-        return response.status == 401
-    return isinstance(response, ToolHandlerOutcome) and response.result_envelope.get('http_status') == 401
+    return credential_http_status(response) == 401

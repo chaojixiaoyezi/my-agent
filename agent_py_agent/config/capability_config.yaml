@@ -21,6 +21,11 @@ im_tool_approvals_enabled: true
 # 任务凭据卡（需 secrets extra 的 cryptography）：群来源在原群、个人来源在本人私聊；模型仅得任务/监控限定引用。
 # 可只收密码，缺链接由卡上补填；保存与认证验证分开，用户要求才重发，不扩大网络权限。
 im_task_credentials_enabled: true
+# 新填凭据保存后的默认有效秒数：0 表示持续复用，直到认证被拒或主动撤销。
+# 显式正值为60秒到一年；卡片仍需30分钟内填写。旧凭据保留原已登记期限，不静默延长。
+im_task_credentials_ttl_seconds: 0
+# 后台认证明确被拒时向原来源提醒需要用户处理；正常静默结果仍不发，不自动重发凭据卡。
+background_user_action_notice_enabled: true
 # /model 提供模型选择与私人配置卡；密钥不进入聊天/模型，群表单冻结原 owner 和发起人。
 # 仅部署者控制此入口，关闭后保留原文字查询/选择命令。
 im_model_cards_enabled: true

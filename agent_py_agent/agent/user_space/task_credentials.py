@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..capability.runtime_config_reload import capability_config_for_agent
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
@@ -29,6 +30,7 @@ from .task_credential_schema import (
     credential_auth_config,
     credential_fields,
     credential_header_name,
+    credential_ready_expired,
     credential_seconds,
 )
 from .task_credential_storage import CredentialInputError, credential_stage, read_credential_row
@@ -72,8 +74,8 @@ class CredentialCardOptions:
     collection_mode: str = 'username_password'
 
 
-# LLM: 请求者采用原scope/actor；存储阶段保留安全诊断，发送意图先落原记录防盲重放；修改同步工具与故障测试。
-# 函数用途: 为准确任务发布私人卡并登记有界输入，容量或发卡失败不会占等待槽。
+# LLM: 请求者采用原scope/actor，ready期限只取原能力默认/显式选项；卡片仍有界，发送意图先落原记录防盲重放。
+# 函数用途: 为准确任务发布凭据卡，默认保存后持续复用；容量或发卡失败不会占等待槽。
 def request_credential_card(agent, *, url='', authentication='collected', header_name='Authorization', job_id='', call_id='', options=None):
     options = options or CredentialCardOptions()
     fields, auth_config, ttl_seconds, refresh_ref = options.fields, options.auth_config, options.ttl_seconds, options.refresh_ref
@@ -89,7 +91,10 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     header_name = credential_header_name(header_name)
     fields = collection_fields(authentication, fields, options.collection_mode)
     auth_config = credential_auth_config(authentication, auth_config, fields)
-    ttl_seconds = credential_seconds(ttl_seconds, default=86400)
+    capability = capability_config_for_agent(agent)
+    if capability is None:
+        raise CredentialInputError('TOOL_UNAVAILABLE', '凭据有效期配置不可用，未发送卡片。', stage='configuration', effect_outcome='not_started')
+    ttl_seconds = credential_seconds(ttl_seconds, default=capability.im_task_credentials_ttl_seconds, allow_unlimited=True)
     if job_id:
         job = agent.scheduler_repository.get_job(job_id)
         creator = job.get('creator') or {}
@@ -322,8 +327,8 @@ def credential_card(row):
         {'tag':'form','name':'credentials','elements':[*inputs,submit]}, {'tag':'action','actions':[cancel]}]}
 
 
-# LLM: 上游已MAC/actor/解锁；同卡同代终态不变，首次cancel记录真实actor，群重复取消只展示原决定；不覆盖旧ready引用。
-# 函数用途: 接受私人或群成员输入、取消，或确认已保存决定；明文只在首次提交的进程内存在。
+# LLM: 上游已MAC/actor/解锁；同卡同代终态不变，提交期限取原请求，零ready不改变卡片截止；不覆盖旧ready引用。
+# 函数用途: 接受输入或取消并加密保存；填写与保存后的期限分开，明文仅在首次提交进程内存在。
 def submit_credential_card(agent,payload,body):
     from ..capability.runtime_config_reload import capability_config_for_agent
     capability = capability_config_for_agent(agent)
@@ -357,8 +362,9 @@ def submit_credential_card(agent,payload,body):
                 from .task_credential_forms import credential_submission_values
                 value, metadata = credential_submission_values(row, body.get('fields'), credential_origin)
                 row.update(metadata)
+                ttl = credential_seconds(row.get('ttl_seconds'), default=86400, allow_unlimited=True)
                 row.update(status='ready',ciphertext=_cipher(home).encrypt(json.dumps(value).encode()).decode(),
-                           verification_status='unverified', submitted_at=time.time(),ready_expires_at=time.time()+row.get('ttl_seconds',86400))
+                           verification_status='unverified', submitted_at=time.time(),ready_expires_at=(time.time()+ttl if ttl else 0))
             else:
                 raise ValueError('提交动作无效')
             _save_credential_row(admission,path,row)
@@ -398,13 +404,13 @@ def credential_headers(agent,reference,url):
     return headers, tuple({*value.values(),token,*headers.values()})
 
 
-# LLM: 引用只在原 owner/actor、原任务或原监控及准确 origin 内可用；ready 期限独立于卡片输入期。
+# LLM: 引用仍限原 owner/actor、原任务或原监控及准确 origin；零ready期限不绕过认证拒绝、撤销或授权。
 # 函数用途: 统一核对读取、刷新、撤销和宿主认证的作用域，不返回秘密。
 def _assert_credential_scope(agent, row, scope, url, *, require_ready=True):
     channel, actor = approval_recipient(agent,scope)
     if not row or (row['channel'],row['actor_id'])!=(channel,actor) or row['origin']!=(credential_origin(url) if url else ''):
         raise ValueError('凭据不属于此调用或接口')
-    if require_ready and (row.get('verification_status') == 'rejected' or row.get('status')!='ready' or time.time() >= float(row.get('ready_expires_at') or 0)):
+    if require_ready and (row.get('verification_status') == 'rejected' or row.get('status')!='ready' or credential_ready_expired(row, now=time.time())):
         raise ValueError('凭据未就绪、已过期或已撤销，请重新申请私人输入')
     if row['job_id']:
         run = agent.scheduler_repository.get_active_run(scope.root_task_id)
@@ -414,7 +420,25 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True):
         raise ValueError('凭据不属于此任务')
 
 
-# LLM: 凭据管理只更改原引用；撤销清除密文/会话缓存且取消依赖，不能跨任务管理别人的授权。
+# LLM: 通知资格仍读取原runner与凭据唯一记录，不接受外部scope、不解密；旧代/撤销/跨owner均不得发新提醒。
+# 函数用途: 在原任务上下文核对这代凭据仍被明确拒绝，供后台通知发送和未发送重投复核。
+def credential_rejection_current(agent, reference, generation):
+    try:
+        current = agent._current_run_params
+        scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
+        if not scope.active or not tool_approval_scope_is_current(agent, scope):
+            return False
+        row = read_credential_row(credential_path(agent.home_paths.owner_home_dir, reference),
+                                  stage='notification_read', effect_outcome='not_started')
+        _assert_credential_scope(agent, row, scope, row.get('origin', ''), require_ready=False)
+        return (type(generation) is int and generation > 0 and type(row.get('generation')) is int and row['generation'] == generation
+                and row.get('owner') == asdict(owner_identity_from_config(agent.config))
+                and row.get('status') == 'ready' and row.get('verification_status') == 'rejected')
+    except (AttributeError, KeyError, OSError, RuntimeError, ValueError):
+        return False
+
+
+# LLM: 状态与使用共用ready期限，零为持续使用；撤销清除密文/会话缓存，不能跨任务管理别人的授权。
 # 函数用途: 查询有效期或撤销当前任务/监控凭据，回执不含输入或加密正文。
 def manage_credential(agent, reference, *, operation):
     current = agent._current_run_params
@@ -433,7 +457,7 @@ def manage_credential(agent, reference, *, operation):
         elif operation != 'status':
             raise ValueError('凭据管理动作无效')
     status = row['status']
-    if status == 'ready' and time.time() >= float(row.get('ready_expires_at') or 0):
+    if status == 'ready' and credential_ready_expired(row, now=time.time()):
         status = 'expired'
     return {'credential_ref':reference,'status':status,'origin':row['origin'],
             'expires_at':row.get('ready_expires_at',row['expires_at']),
