@@ -820,3 +820,8 @@ FT-158/160 两份旧业务文件直接修改，未再出现路径回绑或改写
 - 真实验收样本：单个活动回合的工具循环把 69 万字节报告读完，上下文冲到窗口 129%，恢复压缩报 `COMPACT_CANDIDATE_TOO_LARGE`。根因不是单条输出过大（`read_file` 分页 16k 字符、通用输出超预览即外置），而是同一轮多条结果在下一次预检之前全部内联进入上下文，压缩候选保留区随之放不下。
 - 修法（通用，不看工具名）：`tool_call_archive_record._headroom_forces_externalize` 在归档时用 preflight 同一口径 `model_visible_context_budget` 取距自动压缩点的剩余余量，本条输出估算 token 不小于余量时给 `ExternalizeToolOutputRequest.force_externalize`（`read_file` 分页也外置，正文落 artifact，模型只看预览与恢复锚点，记录带 `output_externalized_reason=tool_result_headroom`），并在 `live_archive_state` 登记 `tool_context_window_overflow(reason=tool_result_headroom)`，让下一次预检必走统一 Compact 链。开关 `tool_output_externalize_on_low_headroom`（默认开）；配置阈值为 0、已达阈值、输出不长于预览、窗口未知或预算计算出错时不介入。
 - 测试：`test_tool_output_headroom_externalize.py`（外置 + 溢出登记 + 预检消费、同轮累加、余量够时内联、开关关、预算未知回退）；`test_compact_native_ir_recovery.py` 的超预算原生历史夹具改为显式关掉该开关，继续验证"历史已经超预算时恢复宿主先压缩再发业务请求"的既有合同。
+
+2026-10-14 有限只读编排：内部调用保持原ToolExecutor、运行权威、预算、取消、插件及输出归档；每条写原owner最小工具事实，数据整理不能吞失败。原SimpleAgent假模型串行/已有批量/有限计划分别5/3/2次请求，不当成真实模型性能。完整合同见docs/design/TOOL_PROGRAM_EXECUTION.md。
+
+
+本期Skill维护统一原registry、当前owner与人工确认；模型只登记采用，宿主原验证账提交后才登记准确run/hash效果。显式投递/复刻复用原IM控制的双端真人确认，接收不继承源权限或秘密。参见 [维护交接](../../tasks/SKILL_MAINTENANCE_HANDOFF.md) 与 [投递交接](../../tasks/SKILL_TRANSFER_HANDOFF.md)。

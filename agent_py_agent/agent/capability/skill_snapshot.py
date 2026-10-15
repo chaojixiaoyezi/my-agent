@@ -62,7 +62,7 @@ class SkillLoadError:
         }
 
 
-# LLM: 原公开 Skill 元数据与正文摘要保持原语义；to_ref 只投影现有任务授权账，不含路径。
+# LLM: 原公开身份/ref不变；frozen_path仅宿主固定已登记的不可变版本，不进公开投影，不扩大读取或工具授权。
 # 类用途: 固定一个全局可发现 Skill 的身份与正文版本，供索引、读取和委派共同使用。
 @dataclass(frozen=True)
 class SkillSnapshotEntry:
@@ -80,6 +80,8 @@ class SkillSnapshotEntry:
     capabilities: tuple[str, ...] = ()
     tools_required: tuple[str, ...] = ()
     risk_level: str = "low"
+    frozen_path: str = ""
+    recommended: bool = True
 
     # LLM: 与原 skill_snapshot_refs 四字段一致；不把展示文案或文件路径当权限来源。
     # 函数用途: 返回可保存到现有任务和授权记录的正文引用。
@@ -202,19 +204,24 @@ class SkillSnapshot:
         fingerprint = _content_sha256(self.fingerprint + "\0" + json.dumps(material, sort_keys=True, ensure_ascii=False))
         return replace(self, packages=packages, errors=errors, fingerprint=fingerprint)
 
+    # LLM: 自学条目读宿主固定不可变版本，其它条目仍核当前文件hash；原路径guard继续约束授权，不从公开ref选任意历史路径。
+    # 函数用途: 读取本轮已授权正文，跨自学更新保留旧版，不写文件或扩大Skill范围。
     def read_body(self, reference: str, *, max_chars: int = 0) -> str:
         entry = self.resolve(reference)
         if entry is None:
             raise SkillSnapshotError("SKILL_NOT_AVAILABLE", f"reference={reference}")
-        path = Path(entry.path)
+        path = Path(entry.frozen_path or entry.path)
         try:
-            body = path.read_text(encoding="utf-8")
+            from .skill_learning_versions import read_frozen_learned_body
+            body = read_frozen_learned_body(entry) if entry.frozen_path else path.read_text(encoding="utf-8")
+            if body is None:
+                raise FileNotFoundError("pinned skill version unavailable")
         except OSError as exc:
             raise SkillSnapshotError("SKILL_READ_FAILED", f"skill={entry.stable_id}: {exc}") from exc
         if _content_sha256(body) != entry.content_sha256:
             raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")
         decision = evaluate_skill_guard_gate(
-            path.parent,
+            Path(entry.path).parent,
             SkillGuardRequest(source=entry.source, skill_name=entry.name),
         )
         if not decision.allowed:
@@ -246,16 +253,20 @@ class SkillSnapshot:
             entry = self.resolve_reference(reference)
             if entry is None:
                 raise SkillSnapshotError("SKILL_NOT_AVAILABLE", f"reference={reference}")
-            wanted_sha = expected.get(entry.stable_id) or expected.get(reference)
+            wanted_sha = expected.get(entry.stable_id) or expected.get(reference) or ((refs or {}).get(entry.stable_id) or {}).get("content_sha256")
             if wanted_sha and wanted_sha != entry.content_sha256:
-                raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")
+                from .skill_learning_versions import resolve_learned_revision
+                historical = resolve_learned_revision(entry,wanted_sha) if isinstance(entry,SkillSnapshotEntry) else None
+                if historical is None:
+                    raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")
+                entry = historical
             if isinstance(entry, CapabilityPackageSnapshot):
                 _validate_package_reference(entry, refs)
             if entry.stable_id not in seen:
                 (packages if isinstance(entry, CapabilityPackageSnapshot) else selected).append(entry)
                 seen.add(entry.stable_id)
         fingerprint = _content_sha256(
-            self.fingerprint + "\0" + "\0".join(entry.stable_id for entry in (*selected, *packages))
+            self.fingerprint + "\0" + "\0".join(entry.stable_id+":"+entry.content_sha256 for entry in (*selected, *packages))
         )
         return SkillSnapshot(
             entries=tuple(selected),

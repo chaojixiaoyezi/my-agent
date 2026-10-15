@@ -756,3 +756,28 @@ def test_v2_network_unknown_is_not_reported_as_stopped(monkeypatch):
     result = network.managed_process_network_status(SimpleNamespace(session_id="bg-unknown", status="unknown"))
     assert result["lan_reachability"] == "unknown"
     assert result["process_status"] == "unknown"
+
+
+def test_wait_returns_control_with_original_handle_and_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.process_registry import process_registry
+    from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
+    seen = []
+    monkeypatch.setattr(process_registry, 'wait', lambda session, seconds, *_args:
+        seen.append((session, seconds)) or {'status':'running', 'session_id':session})
+    result = ProcessSessionTool(owner_scope_root=tmp_path,workspace_root=tmp_path).execute({'action':'wait',
+        'session_id':'bg-synthetic', 'timeout_seconds':600, '__run_scope':{'owner_id':'owner-a','session_id':'thread-a'}})
+    assert result.ok and seen == [('bg-synthetic',30)]
+    data = json.loads(result.output)
+    assert data['session_id'] == 'bg-synthetic' and data['status'] == 'running'
+    assert data['wait_budget'] == {'requested_seconds':600,'effective_seconds':30,'control_returned':True}
+
+
+def test_zero_wait_slice_uses_original_protocol_limit(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.process_registry import process_registry
+    from agent_py_agent.agent.tooling.process_sessions import ProcessSessionTool
+    seen=[]
+    monkeypatch.setattr(process_registry, 'wait', lambda session, seconds, *_args:
+        seen.append(seconds) or {'status':'running','session_id':session})
+    result=ProcessSessionTool(owner_scope_root=tmp_path,workspace_root=tmp_path,max_wait_seconds=0).execute({
+        'action':'wait','session_id':'bg-synthetic','timeout_seconds':600,'__run_scope':{'owner_id':'owner-a','session_id':'thread-a'}})
+    assert result.ok and seen == [600]

@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,7 @@ def _restart_gate_not_started(request: ToolOperationExecutionRequest) -> ToolHan
     )
 
 
-# LLM: 原 execute_tool_operation 主体，调用方已通过重启关口；领取与结算语义不变。
+# LLM: 已过重启门后沿原操作领取；等价UNKNOWN返回原operation时所有核对/结算引用都绑定原编号，不新开操作。
 # 函数用途: 在已准入的前提下领取、执行一次并持久化副作用工具调用。
 def _execute_admitted_tool_operation(request: ToolOperationExecutionRequest) -> ToolHandlerOutcome:
     if not _operation_store_available(request.store):
@@ -150,6 +150,9 @@ def _execute_admitted_tool_operation(request: ToolOperationExecutionRequest) -> 
     attempt = _claim_operation(request)
     if isinstance(attempt, ToolHandlerOutcome):
         return attempt
+    if attempt.claim.record.operation_id != request.operation_id:
+        request = replace(request, operation_id=attempt.claim.record.operation_id,
+            idempotency_key=attempt.claim.record.idempotency_key)
     resolved = _resolve_claim(request, attempt)
     if isinstance(resolved, ToolHandlerOutcome):
         return resolved
@@ -312,6 +315,8 @@ def _resolve_claim(
     )
 
 
+# LLM: 核对在原独占claim中执行；跨attempt只读标记禁止safe_to_retry重开，只有带证据的终态可结算。
+# 函数用途: 调用原工具有界核对并CAS保存终态，UNKNOWN和失败核对不触发重执行。
 def _reconcile_unknown_operation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
@@ -364,6 +369,9 @@ def _reconcile_unknown_operation(
             diagnostic="reconciliation_source_ref_missing",
         )
     if outcome in {"not_started", "safe_to_retry"}:
+        if claim.record.reconciliation_only:
+            _release_unknown_reconciliation(request, attempt)
+            return _unknown_claim_result(request, claim, diagnostic="reconciliation_only_no_reexecute", source_ref=source_ref)
         return _reopen_unknown_operation(
             request,
             attempt,
@@ -467,7 +475,7 @@ def _claim_unknown_reconciliation(
             attempt.claim,
             diagnostic="operation_store_reconciliation_claim_missing",
         )
-    claim_request = _reconciliation_claim_request(attempt)
+    claim_request = _reconciliation_claim_request(attempt, request)
     try:
         claimed = claim_reconciliation(claim_request)
     except Exception as exc:  # noqa: BLE001 - claim authority failure leaves UNKNOWN unchanged
@@ -500,15 +508,16 @@ def _release_unknown_reconciliation(
     if not callable(release):
         return
     try:
-        release(_reconciliation_claim_request(attempt))
+        release(_reconciliation_claim_request(attempt, request))
     except Exception:  # noqa: BLE001 - UNKNOWN and lease expiry remain the safe fallback
         logger.warning("tool operation reconciliation release failed", exc_info=True)
 
 
-# LLM: Claim and release must use the identical structured holder, generation, and lease values.
+# LLM: claim/release携同一holder/generation/lease及真实当前attempt；跨attempt只读接管不能据此重执行。
 # 函数用途: 从当前 UNKNOWN claim 构造核对租约请求。
 def _reconciliation_claim_request(
     attempt: _ToolOperationClaimAttempt,
+    request: ToolOperationExecutionRequest,
 ) -> ToolOperationReconciliationClaimRequest:
     record = attempt.claim.record
     return ToolOperationReconciliationClaimRequest(
@@ -518,6 +527,8 @@ def _reconciliation_claim_request(
         expected_generation=record.generation,
         holder=attempt.holder,
         lease_expires_at=attempt.lease_expires_at,
+        authority_attempt_id=request.attempt_id, task_id=request.task_id,
+        tool_name=request.tool_name, args_hash=request.args_hash,
     )
 
 

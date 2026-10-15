@@ -1681,3 +1681,14 @@ CLI adapter 同源接入 `feishu_quoted_text_enabled`，默认 true，与原引�
 
 新增确定性 `/schedule delete|cancel|execution|recover|takeover job01`，工具与命令共用原监控控制服务。删除与当前取消沿原 job/run CAS、RuntimeDB 权限、TaskLink、必要输入和冻结整树资源收口；重启重试持久取消，不删历史。管理员私人接管只影响未来通知，保留原 creator/source 与已预留执行，原群目标不改。详见[监控人类控制](../../design/SCHEDULER_HUMAN_CONTROL.md)，本地合同测试见 `test_scheduler_control_lifecycle.py`；真实 IM 与发行由主线统一验收。
 2026-10-14 本期第一批卡片修复（集成验收中）：CLI 适配器传递配置 Gateway 端口与原宿主凭据，避免普通消息与控制回调访问不同端口；回调分认证/路由/连接/超时/格式/执行阶段。群凭据按原群与当前成员提交，模型/审批和个人卡保留原锁。输入替换沿原 TaskStore 容量临界区，终态/代次不被迟到回执覆盖。测试与发行状态见 [本期实施](../../tasks/IM_22_ITEM_IMPLEMENTATION.md)。
+
+2026-10-14 当前空间监控：默认只读当前owner，群展示全部创建者，所有控制共用原HostActor与creator_access；仅完整实时成员事实证明创建者离开时允许本群成员停删。status累计用量沿原public_model_metrics，不新增模型调用。见SCHEDULE_OWNER_SCOPE_HANDOFF。
+
+
+本期Skill维护统一原registry、当前owner与人工确认；模型只登记采用，宿主原验证账提交后才登记准确run/hash效果。显式投递/复刻复用原IM控制的双端真人确认，接收不继承源权限或秘密。参见 [维护交接](../../tasks/SKILL_MAINTENANCE_HANDOFF.md) 与 [投递交接](../../tasks/SKILL_TRANSFER_HANDOFF.md)。
+
+
+UNKNOWN恢复二次审查：结算/重开统一核验原活跃attempt、TaskRun状态与epoch；终态重放核验持久owner/root/调用执行链。取消后不提交，跨root不重放。见 [恢复审查交接](../../tasks/S07_AUTHORITY_FENCE_HANDOFF.md)。
+
+
+本期所有交互卡提供取消：凭据、模型、审批、密码首设/解锁/改密、OAuth与人设。签名/实际actor/群归属仍校验，只退休原卡/输入，不撤回已生效值；过期取消可免锁但不授权其它动作。原行CAS记录首个点击人、姓名与时间，迟到OAuth成功/模型子卡不能越过取消。见 [卡片取消交接](../../tasks/CARD_CANCELLATION_HANDOFF.md)。

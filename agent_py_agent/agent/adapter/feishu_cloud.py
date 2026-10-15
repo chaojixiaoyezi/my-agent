@@ -19,19 +19,20 @@ class FeishuCloudError(RuntimeError):
     # LLM: unknown 仅表示请求可能到达供应商；HTTP/API 数值和固定 reason 不含供应商正文，原操作账不能自动重放写入。
     # 函数用途: 保存可读原因及公开诊断字段，供工具返回明确下一步。
     def __init__(self, code: str, message: str, *, unknown: bool = False,
-                 http_status: int = 0, provider_code: int | None = None, reason: str = ''):
+                 http_status: int = 0, provider_code: int | None = None, reason: str = '', request_stage: str = 'preflight'):
         super().__init__(message)
         self.code = code
         self.unknown = unknown
         self.http_status = http_status
         self.provider_code = provider_code
         self.reason = reason
+        self.request_stage = request_stage
 
     # LLM: 公开字段由本模块产生，绝不复制 URL、响应正文、认证头或异常文本。
     # 函数用途: 返回能用于诊断和恢复判断的最小结构化事实。
     def public_facts(self) -> dict:
         return {'http_status': self.http_status, 'provider_code': self.provider_code,
-                'reason': self.reason, 'effect_outcome': 'unknown' if self.unknown else 'not_started'}
+                'reason': self.reason, 'request_stage': self.request_stage, 'effect_outcome': 'unknown' if self.unknown else 'not_started'}
 
 
 # LLM: 响应净化先于工具结果和归档；精确秘密的 JSON/URL 编码也移除，字典键不能成为泄露旁路。
@@ -69,7 +70,7 @@ def _public_identifiers(value):
     return value
 
 
-# LLM: 只接收宿主生成的官方路径；read_only 只给元数据 POST 使用，业务写入默认保持 unknown，不接受模型 URL 或自动重试。
+# LLM: 只接宿主官方路径；HTTP/CLI共用明确拒绝裁决，保留真实状态和阶段；未知写入不重试，read_only仅用于元数据POST。
 # 函数用途: 发一次有界云请求，净化成功数据并为失败保留 HTTP/API 原因事实。
 def request_cloud_api(adapter, method: str, path: str, body: dict | None = None, *, read_only: bool = False) -> dict:
     if not path.startswith('/') or path.startswith('//') or '..' in path.split('?')[0].split('/'):
@@ -83,6 +84,8 @@ def request_cloud_api(adapter, method: str, path: str, body: dict | None = None,
     mutating = method != 'GET' and not read_only
     try:
         with open_authenticated_request(request, timeout=20) as response:
+            status = getattr(response, 'status', 0)
+            http_status = status if type(status) is int else 0
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ValueError('response too large')
@@ -92,12 +95,12 @@ def request_cloud_api(adapter, method: str, path: str, body: dict | None = None,
     except urllib.error.HTTPError as exc:
         # 429/5xx 不能据此推断写操作未发生，保留 unknown，不复制供应商正文。
         provider_code = _http_error_code(exc)
-        raise _classified_error(exc.code, provider_code, unknown=mutating and (exc.code >= 500 or exc.code == 429)) from None
+        raise _classified_error(exc.code, provider_code, unknown=mutating and (exc.code >= 500 or exc.code == 429) and not _provider_rejection_known(provider_code, path)) from None
     except (OSError, ValueError, TypeError, RecursionError):
         raise FeishuCloudError('FEISHU_CLOUD_RESPONSE_UNKNOWN', '飞书云接口未返回可验证结果；写操作请先读回核对，不能直接重复追加。', unknown=mutating,
-                               reason='response_unknown') from None
+                               reason='response_unknown', request_stage='response') from None
     if result['code'] != 0:
-        raise _classified_error(0, result['code'], unknown=mutating and _provider_error_details(result['code']) is None)
+        raise _classified_error(http_status, result['code'], unknown=mutating and not _provider_rejection_known(result['code'], path))
     secrets = (token, str(getattr(adapter, 'app_secret', '') or ''))
     try:
         payload = result.get('data')
@@ -106,7 +109,7 @@ def request_cloud_api(adapter, method: str, path: str, body: dict | None = None,
         return _clean_response(redact_sensitive_value(_public_identifiers(payload or {})), secrets)
     except (ValueError, TypeError, RecursionError):
         raise FeishuCloudError('FEISHU_CLOUD_RESPONSE_UNKNOWN', '云接口响应无法投影；写操作请先读回核对，不能直接重复追加。', unknown=mutating,
-                               reason='response_projection_unknown') from None
+                               reason='response_projection_unknown', http_status=http_status, request_stage='response_projection') from None
 
 
 # LLM: HTTP 错误体只能贡献数值 code；读量有界，其余字段包括 msg、headers 和正文不进入公开错误。
@@ -127,12 +130,18 @@ def _classified_error(http_status: int, provider_code: int | None, *, unknown: b
     details = _provider_error_details(provider_code) or _http_error_details(http_status)
     code, reason, message = details
     return FeishuCloudError(code, message, unknown=unknown, http_status=http_status,
-                           provider_code=provider_code, reason=reason)
+                           provider_code=provider_code, reason=reason, request_stage='provider_response')
 
 
-# LLM: 固定供应商 code 优先于 HTTP 包装；只使用官方编号，不从 msg 内容猜授权或隐式扩大重试范围。
+# LLM: 官方code优先于HTTP包装，范围/工作表与权限分别报告；副作用是否明确由原动作路径另行裁决，不解析msg。
 # 函数用途: 将飞书明确返回的应用和资源错误转换为稳定的宿主诊断。
 def _provider_error_details(provider_code: int | None) -> tuple[str, str, str] | None:
+    if provider_code == 90202:
+        return ('FEISHU_CLOUD_RANGE_INVALID', 'sheet_range_invalid', '飞书表格范围或单元格数据校验失败，请核对准确工作表范围和 values 形状。')
+    if provider_code == 90215:
+        return ('FEISHU_CLOUD_SHEET_NOT_FOUND', 'sheet_not_found', '飞书找不到指定工作表，请核对 sheet_id 与表格中的实际工作表编号。')
+    if provider_code == 90213:
+        return ('FEISHU_CLOUD_RESOURCE_FORBIDDEN', 'resource_permission_required', '飞书拒绝表格访问，请检查准确资源和保护范围的编辑权限。')
     if provider_code in {99991672, 99991679}:
         return ('FEISHU_CLOUD_SCOPE_REQUIRED', 'application_scope_required',
             '飞书应用缺少接口权限或用户授权 scope；请管理员在开放平台启用对应权限并发布。')
@@ -170,3 +179,14 @@ def _http_error_details(http_status: int) -> tuple[str, str, str]:
             '飞书云接口返回重定向，宿主未转发认证信息，请核对官方接口。')
     return ('FEISHU_CLOUD_HTTP_ERROR' if http_status else 'FEISHU_CLOUD_API_DENIED',
             'provider_rejected', '飞书云接口拒绝请求，请按结构化 HTTP 状态和 API 错误编号核查。')
+
+
+# LLM: 表格参数拒绝只有在原values动作合同内证明未写入；陌生路径不能因同码就获得重放许可。
+# 函数用途: 区分明确的供应商拒绝与真正未知写入，HTTP和CLI共用同一事实裁决。
+def _provider_rejection_known(provider_code: int | None, path: str) -> bool:
+    if _provider_error_details(provider_code) is None:
+        return False
+    if provider_code not in {90202, 90215}:
+        return True
+    route = path.split('?', 1)[0]
+    return route.startswith('/sheets/v2/spreadsheets/') and (route.endswith('/values') or route.endswith('/values_append') or '/values/' in route)

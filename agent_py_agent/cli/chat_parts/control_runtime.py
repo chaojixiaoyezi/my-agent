@@ -28,6 +28,7 @@ from ...agent.conversation.control_commands import (
     render_conversation_task_status,
     render_verbose_control,
 )
+from ...agent.conversation.model_metrics import public_model_metrics
 from ...agent.conversation.models import new_id
 from ...agent.gateway_parts.client_credentials import gateway_client_credentials
 from ...agent.gateway_parts.local_client_token import LocalClientCredentialError
@@ -300,7 +301,7 @@ def _gateway_control_result_from_body(
 
 # LLM: HTTP task status is untrusted adapter input. Restore only the frozen scalar fields and
 # bounded durable-work rows; malformed values cannot become a compact boundary or runtime state.
-# 函数用途: 把 Gateway 控制结果里的结构化任务状态安全恢复成共享 dataclass，供 TUI 消费真实 Compact 代数。
+# 函数用途: 将Gateway任务状态与原模型指标安全恢复为共享dataclass，保留真实Compact代数与同会话累计，不从正文推断。
 def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus | None:
     if not isinstance(value, dict):
         return None
@@ -341,6 +342,7 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
         compact_generation=compact_generation,
         context_usage=_status_context_usage(value.get("context_usage")),
         model_timing=_status_model_timing(value.get('model_timing')),
+        model_usage=public_model_metrics(value.get('model_usage')),
         im_task_status=dict(value.get("im_task_status") or {}),
         user_role=str(value.get("user_role") or ""),
         permission_mode=str(value.get("permission_mode") or ""),
@@ -650,7 +652,7 @@ def _execute_local_verbose(
         )
 
 
-# LLM: 本地 /status 与 Gateway 共用角色、权限和 canonical 本代上下文快照；不创建线程、写快照或调用模型。
+# LLM: 本地/status与Gateway共用角色、权限、上下文及原模型累计快照，不创建线程、写快照或调用模型。
 # 函数用途:生成本地直跑任务的即时状态快照。
 def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
     from types import SimpleNamespace
@@ -679,6 +681,7 @@ def _local_status(execution: ChatControlExecution) -> ConversationTaskStatus:
         permission_mode=facts["permission_mode"],
         im_task_status=facts["im_task_status"],
         model_timing=facts['model_timing'],
+        model_usage=facts['model_usage'],
     )
 
 

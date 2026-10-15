@@ -120,10 +120,10 @@ def input_dependency_current(agent, row):
         return False
 
 
-# LLM: armed 仅在完整工具归档与 native 配对之后写；先到回调可提交状态，但必须等此边界才发布恢复。
+# LLM: armed只在完整归档/native配对后写；同一_mutate锁内卡片静默退休不得重臂，泛用cancelled仍按原Wake合同，原子返回终态由边界决定不等待。
 # 函数用途: 让已归档的输入等待可被一次唤醒，保留崩溃后可重放的同源记录。
 def arm_input_dependency(agent, input_id):
-    row = _mutate(agent, input_id, lambda row: {**row, 'armed': True} if row else _missing())
+    row = _mutate(agent,input_id,lambda row:{**row,'armed':not (row.get('status')=='cancelled' and row.get('resolution_delivery')=='retire')} if row else _missing())
     _schedule_input_deadline(agent, row['scope']['root_task_id'])
     return _publish_resolution(agent, row)
 

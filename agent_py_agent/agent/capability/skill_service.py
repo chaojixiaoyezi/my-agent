@@ -8,7 +8,7 @@ import hashlib
 import json
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
@@ -61,8 +61,10 @@ class SkillsService:
         policy_provider: Callable[[], EffectiveOwnerPolicy],
         plugin_roots: Callable[[], Iterable[tuple[Path, str]]] | None = None,
         package_provider: Callable[[], Iterable[CapabilityPackageSnapshot]] | None = None,
+        learning_recommended_limit_provider: Callable[[],int] | None = None,
     ) -> None:
         self.home_paths = home_paths
+        self.learning_recommended_limit_provider = learning_recommended_limit_provider or (lambda:50)
         # 已启用插件自带的 Skill 目录（来源 plugin:<ID>）；每次快照都重新读取，停用后下一轮自然消失
         self.plugin_roots = plugin_roots
         self.package_provider = package_provider
@@ -103,7 +105,8 @@ class SkillsService:
         manifest, discovery_errors = _build_manifest(roots)
         packages, package_errors = self._packages()
         discovery_errors.extend(package_errors)
-        fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace, packages)
+        from .skill_learning_versions import learning_state_fingerprint
+        fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace, packages) + learning_state_fingerprint(self.home_paths) + str(self.learning_recommended_limit_provider())
         cache_key = (policy.owner_id, str(workspace))
         if not force_reload:
             with self._lock:
@@ -111,6 +114,9 @@ class SkillsService:
             if cached is not None and cached.fingerprint == fingerprint:
                 return cached
         snapshot = _build_snapshot(manifest, discovery_errors, policy, workspace, packages)
+        from .skill_learning_versions import freeze_learned_snapshot
+        snapshot = freeze_learned_snapshot(snapshot, self.home_paths,recommended_limit=self.learning_recommended_limit_provider())
+        snapshot = replace(snapshot,fingerprint=fingerprint)
         with self._lock:
             self._cache[cache_key] = snapshot
         return snapshot

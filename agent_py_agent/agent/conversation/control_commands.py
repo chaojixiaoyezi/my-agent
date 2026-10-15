@@ -140,6 +140,7 @@ class ConversationTaskStatus:
     quarantined_wakes: int = 0
     monitors: dict[str, object] = field(default_factory=dict)
     model_timing: dict[str, int] = field(default_factory=dict)
+    model_usage: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -475,6 +476,7 @@ def _model_command(trailing: object) -> ConversationControlCommand:
 
 
 _SKILLS_USAGE = (
+    "学习候选：/skills learned proposals、proposal-show <编号>、confirm|reject <编号> <修订>；维护：pin|unpin|disable|enable|restore <名称>。"
     "用法：/skills 查看待确认的技能提案与自动总结的 Skill；/skills proposals [all] 列出提案；"
     "/skills show <提案编号>；/skills confirm <提案编号> <版本>；/skills reject <提案编号> <版本>；"
     "/skills learned 列出自动总结的 Skill；/skills learned show|revert|remove <名称>；"
@@ -492,6 +494,8 @@ _SKILLS_SIMPLE = {"": "overview", "help": "help", "proposals": "proposals", "lea
 # 函数用途: 把 `/skills …` 解析成结构化的技能提案/自动 Skill 控制。
 def _skills_command(trailing: object) -> ConversationControlCommand:
     raw = str(trailing or "").split()
+    if raw and raw[0].casefold() == "transfer":
+        return ConversationControlCommand("skills",value=" ".join(raw),operation="transfer",valid=len(raw)>=2,usage="用法：/skills transfer authorize|accept <编号>")
     if raw and raw[0].casefold() == "using":
         return _skills_using_command(raw[1:])
     # 参数统一小写：提案编号是十六进制、Skill 名按合同只含小写，子命令大小写不敏感。
@@ -507,6 +511,16 @@ def _skills_command(trailing: object) -> ConversationControlCommand:
         return ConversationControlCommand("skills", value=" ".join(tokens), operation=head,
                                           valid=ref_ok and shape_ok, usage=_SKILLS_USAGE)
     action = rest[0] if head == "learned" and rest else ""
+    if action in {"proposals", "proposal-show", "confirm", "reject"}:
+        valid = (len(rest)==1 if action == "proposals" else len(rest)==2 if action == "proposal-show" else len(rest)==3 and rest[2].isdigit() and int(rest[2])>0)
+        if action != "proposals":
+            valid = valid and len(rest)>=2 and bool(re.fullmatch(r"learning-proposal-[0-9a-f]{32}",rest[1]))
+        return ConversationControlCommand("skills",value=" ".join(tokens),operation="learning_proposal",valid=valid,usage="用法：/skills learned proposals；/skills learned proposal-show <编号>；/skills learned confirm|reject <编号> <修订>")
+    if action in {"pin", "unpin", "disable", "enable", "restore", "feedback"}:
+        valid = len(rest)==(5 if action == "feedback" else 2) and bool(_LEARNED_SKILL_NAME.fullmatch(rest[1]))
+        if action == "feedback":
+            valid = valid and bool(re.fullmatch(r"[0-9a-f]{64}",rest[2])) and rest[3] in {"effective","ineffective","environment","unknown"}
+        return ConversationControlCommand("skills",value=" ".join(tokens),operation="learning_maintenance",valid=valid,usage="用法：/skills learned pin|unpin|disable|enable|restore <名称>；/skills learned feedback <名称> <hash> effective|ineffective|environment|unknown <任务编号>")
     known = action in {"show", "revert", "remove"}
     valid = known and len(rest) == 2 and bool(_LEARNED_SKILL_NAME.fullmatch(rest[1]))
     return ConversationControlCommand("skills", value=" ".join(tokens), operation=f"learned_{action}" if known else "unknown",
@@ -855,7 +869,7 @@ def conversation_compact_interrupt_name(
     return "conversation-compact:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
-# LLM: Status is rendered only from typed runtime facts; guidance text/history is intentionally absent.
+# LLM: 状态仅渲染结构化运行事实；监控坏记录保留未知而不补零，guidance和历史正文不参与裁决。
 # 函数用途：把原任务状态、后台运行和不占执行资源的待输入整理成可读文本，不泄露内部命令、路径或秘密。
 def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     labels = {
@@ -885,10 +899,11 @@ def render_conversation_task_status(status: ConversationTaskStatus) -> str:
         lines.append(f"等待中的消息：{status.queued_count}")
     if status.monitors:
         facts = status.monitors
-        lines.append("监控：状态暂不可用" if facts.get("unavailable") or facts.get("load_error_codes") else
-                     f"监控：{facts['total']} 个（开启 {facts['active']}，停止 {facts['paused']}，已结束 {facts.get('completed',0)}）；规则：执行 {facts['running_rules']}，排队 {facts.get('queued_rules',0)}，等待 {facts.get('waiting_rules',0)}；/schedule 查看")
+        lines.append(_monitor_status_text(facts))
     if status.model_name:
         lines.append(f"模型：{status.model_name}")
+    from ..gateway_parts.status_projection import render_session_model_usage
+    lines.append(render_session_model_usage(status.model_usage))
     if status.model_timing:
         from ..gateway_parts.status_projection import render_model_timing
 
@@ -1007,3 +1022,16 @@ __all__ = [
     "render_conversation_task_status",
     "render_verbose_control",
 ]
+
+
+# LLM: 监控计数只是状态投影，原读取错误不能变成零；规则未知仍保留已确认监控计数，不阻塞聊天或控制。
+# 函数用途: 显示当前空间监控和规则计数，坏记录时明确未知并指向原查询入口。
+def _monitor_status_text(facts):
+    if (facts.get('unavailable') or facts.get('job_counts_known') is False
+            or facts.get('load_error_codes') and 'job_counts_known' not in facts):
+        return '监控：状态暂不可用'
+    known = facts.get('run_counts_known', True)
+    counts = [facts.get(key, 0) if known else '未知'
+        for key in ('running_rules', 'queued_rules', 'waiting_rules')]
+    return (f"监控：{facts['total']} 个（开启 {facts['active']}，停止 {facts['paused']}，已结束 {facts.get('completed',0)}）；"
+        f"规则：执行 {counts[0]}，排队 {counts[1]}，等待 {counts[2]}；/schedule 查看")

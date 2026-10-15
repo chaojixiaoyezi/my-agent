@@ -212,7 +212,7 @@ def _fail_oauth(agent, actor, input_id):
     path = oauth_path(agent, actor)
     with _credential_mutation(agent, path) as admission:
         row = read_json_object_report(path, context="oauth.fail").payload
-        if row and row.get("input_id") == input_id and row.get("status") != "revoked":
+        if row and row.get("input_id") == input_id and row.get("status") in {"pending", "exchanging"}:
             _save_credential_row(admission, path, {**row, "status": "failed", "ciphertext": ""})
     dependency = read_json_object_report(input_dependency_path(agent, input_id), context="oauth.fail_input").payload
     if dependency and dependency.get("status") == "pending":
@@ -262,11 +262,18 @@ def _deliver_oauth_card(agent, scope, row, challenge):
         "scope": " ".join(row["requested_scopes"]), "code_challenge": challenge, "code_challenge_method": "S256"})
     card = {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": "请用本人飞书账号授权；凭据由宿主管理。"}},
                          {"tag": "action", "actions": [{"tag": "button", "type": "primary", "url": link,
-                            "text": {"tag": "plain_text", "content": "授权我的飞书账号"}}]}]}
+                            "text": {"tag": "plain_text", "content": "授权我的飞书账号"}},
+                            {"tag":"button","type":"default","text":{"tag":"plain_text","content":"取消"},
+                             "value":{"kind":"my_agent_feishu_oauth","reference":row['state'],"decision":"cancel"}}]}]}
     receipt = agent.delivery_service.deliver_control_card(DeliveryContext(channel="feishu", target=row["actor_id"],
         mode="reply", task_id=scope.run_id, thread_id=scope.thread_id, idempotency_key=row["input_id"]), card, summary="本人飞书授权")
     if not receipt.ok:
         raise ValueError("本人授权卡未送达。")
+    with _credential_mutation(agent,oauth_path(agent,row['actor_id'])) as admission:
+        latest=read_json_object_report(oauth_path(agent,row['actor_id']),context='oauth.card_receipt').payload
+        if latest and latest.get('state')==row['state'] and latest.get('input_id')==row['input_id']:
+            _save_credential_row(admission,oauth_path(agent,row['actor_id']),{**latest,'im_control':{
+                'message_id':receipt.message_id,'chat_id':receipt.chat_id}})
 
 
 # LLM: 已验签请求仍须核对 owner、actor、期限、pending 输入和原配置；ready 重放仅补原依赖，不重新兑换 code。
@@ -416,3 +423,33 @@ def oauth_status(agent, *, revoke=False):
         resolve_input_dependency(agent, row["input_id"], status="revoked")
     return {"status": status, "expires_at": row.get("ready_expires_at", 0) if row else 0,
             "identity": "current_user", "granted_scopes": row.get("granted_scopes", "") if row else ""}
+
+
+# LLM: 上游已验证MAC/原actor且cancel可过期；这里只CAS退休原pending/state，不撤销ready token，不把迟到exchange变成成功。
+# 函数用途: 关闭准确OAuth卡和原输入依赖，重放展示首次点击者，不能撤销既有有效授权。
+def cancel_oauth_card(agent,payload,body,*,actor_id):
+    from .interaction_actor_audit import interaction_actor_text, record_interaction_actor
+    if (body.get('decision')!='cancel' or actor_id!=payload.get('actor_id')
+            or payload.get('owner')!=asdict(owner_identity_from_config(agent.config))):
+        raise ValueError('授权卡取消归属不匹配')
+    actor,input_id=actor_id,payload['input_id']
+    path=oauth_path(agent,actor)
+    with _credential_mutation(agent,path) as admission:
+        row=read_json_object_report(path,context='oauth.cancel').payload
+        control=row.get('im_control') or {} if row else {}
+        if (not row or row.get('input_id')!=input_id or row.get('state')!=body['reference']
+                or control.get('message_id')!=body.get('message_id') or control.get('chat_id')!=body.get('chat_id')):
+            raise ValueError('卡片不是原本人授权请求')
+        if row.get('status')=='cancelled':
+            facts=row['cancelled_by']
+        elif row.get('status') in {'pending','exchanging'}:
+            facts=record_interaction_actor(agent,payload,decision='cancel',actor=actor)
+            _save_credential_row(admission,path,{**row,'status':'cancelled','ciphertext':'','cancelled_by':facts})
+        else:
+            return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED',
+                    'message':'原卡已处理，取消没有撤销或修改已完成的操作。'}
+    dependency=read_json_object_report(input_dependency_path(agent,input_id),context='oauth.cancel_input').payload
+    if dependency and dependency.get('status') in {'pending','cancelled'}:
+        resolve_input_dependency(agent,input_id,status='cancelled')
+    return {'ok':True,'status':'cancelled','clicked_by':facts,
+            'message':interaction_actor_text(facts)+' 已取消这次授权卡；既有授权和其他任务未改变。'}

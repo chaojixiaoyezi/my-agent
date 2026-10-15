@@ -32,3 +32,9 @@
 定向测试从原 `/model` 和 `private-interaction` 入口覆盖个人/群/管理员、错人/转发/错卡/错群、密码首设/锁定、过期、管理员解绑、目录与线程版本、锁内并发写、稳定编辑/空 key/换地址、共享凭据不可见不可编辑、回调幂等、原 adapter form 转交和群发送编号。没有真实飞书外发或真实模型请求。
 
 打开、保存卡片不探测网络，也不声称连接成功。卡片没有“测试连接”按钮：原终端 probe 的网络边界独立维护，不能在 2 秒 SDK 回调里发送 60 秒模型探测或新增第二模型传输链。
+
+## 每卡取消与真实操作者
+
+模型选择、新增和编辑私人表单均有独立取消按钮，不提交表单秘密。原MAC、owner、真实message/chat和记录锁不变；群选择卡只对cancel单独签名当前成员范围，select/default/edit/save继续原actor与个人锁。private form取消仍限原actor。有效签名cancel可免个人解锁并关闭过期原卡，不能改模型目录/选择或撤回已完成配置。首次取消持原卡锁保存cancelled_by/真实ID、身份索引展示名、UTC时间；重复/两人争点只展示首次取消者，不覆盖完成态，toast与就地卡均可见。
+
+选择卡add/edit投递私人子卡时，原卡先锁内领取dispatch_id并写dispatching，Delivery网络在锁外，返回后仅同dispatch_id且仍dispatching才能completed；cancel赢先则保留原取消终态。私人子卡签入parent_control_id，保存前核原父已完成add/edit；迟到子卡不能越过已取消父卡保存配置。未知投递记dispatch_failed，不自动重发，原卡仍可取消。

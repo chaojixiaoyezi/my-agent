@@ -2885,3 +2885,11 @@ B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed 
 
 监控人类控制共用 `scheduler/control.py`：命令和工具先验证准确 owner/creator，再由原 repository 写 job/run CAS；`notification_binding.py` 只校验原 job/run 的未来通知绑定与管理员登录代次，不建立收件人账。删除及当前取消复用 TaskLink、RuntimeDB、输入依赖、冻结整树资源，service 冷启动/周期回读原取消意图；execution 只投影已经冻结的目标，原来源和群地址保留。协议与验收边界见[监控人类控制](../../design/SCHEDULER_HUMAN_CONTROL.md)。
 2026-10-14 卡片维护入口：`adapter/private_controls.py` 只运输已验证 SDK 表单到准确宿主端口，`gateway_parts/private_interaction_service.py` 按原类型/来源验权；`conversation/input_dependency_index.py` 沿原任务锁处理必要输入的容量替换，输入行仍是唯一状态源。凭据阶段诊断/提交版本留在 `user_space/task_credential_*`，无新 Gateway 队列或凭据库；详见 [统一实施记录](../../tasks/IM_22_ITEM_IMPLEMENTATION.md)。
+
+2026-10-14 当前空间监控：默认只读当前owner，群展示全部创建者，所有控制共用原HostActor与creator_access；仅完整实时成员事实证明创建者离开时允许本群成员停删。status累计用量沿原public_model_metrics，不新增模型调用。见SCHEDULE_OWNER_SCOPE_HANDOFF。
+
+
+本期Skill维护统一原registry、当前owner与人工确认；模型只登记采用，宿主原验证账提交后才登记准确run/hash效果。显式投递/复刻复用原IM控制的双端真人确认，接收不继承源权限或秘密。参见 [维护交接](../../tasks/SKILL_MAINTENANCE_HANDOFF.md) 与 [投递交接](../../tasks/SKILL_TRANSFER_HANDOFF.md)。
+
+
+本期所有交互卡提供取消：凭据、模型、审批、密码首设/解锁/改密、OAuth与人设。签名/实际actor/群归属仍校验，只退休原卡/输入，不撤回已生效值；过期取消可免锁但不授权其它动作。原行CAS记录首个点击人、姓名与时间，迟到OAuth成功/模型子卡不能越过取消。见 [卡片取消交接](../../tasks/CARD_CANCELLATION_HANDOFF.md)。

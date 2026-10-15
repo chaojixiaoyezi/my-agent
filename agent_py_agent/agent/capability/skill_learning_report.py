@@ -22,7 +22,9 @@ from .skill_snapshot import skill_content_sha256
 # 函数用途: 生成一个自动总结 Skill 的展示行。
 def learned_skill_row(store: SkillLearningStore, record: LearnedSkill) -> dict[str, object]:
     path = store.skill_path(record.name)
-    if path.is_symlink() or not path.is_file():
+    if record.maintenance.get("state") in {"archived","disabled","cooled"}:
+        state = record.maintenance["state"]
+    elif path.is_symlink() or not path.is_file():
         state = "missing"
     else:
         state = "active" if skill_content_sha256(path.read_text(encoding="utf-8")) == record.sha256 else "user_modified"

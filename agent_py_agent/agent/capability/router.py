@@ -273,6 +273,8 @@ class CapabilityRouter:
         unavailable_text = _render_unavailable_package_references(self._snapshot())
         budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable_text)), budget.token_based)
         packages = sorted(self.cards(kinds={"capability_package"}), key=lambda card: card.name)
+        if selected_skill_ids is None:
+            skills = [card for card in skills if card.metadata.get("recommended",True) or card.metadata.get("stable_id") in {*required_skill_ids,*in_use_method_ids}]
         skills = using_method_cards(skills, in_use_method_ids)
         packages = using_method_cards(packages, in_use_method_ids)
         required_skill_ids = (*required_skill_ids, *in_use_method_ids)
@@ -389,6 +391,7 @@ def from_skill_snapshot_entry(entry: SkillSnapshotEntry) -> CapabilityCard:
     card.path = ""
     card.metadata["stable_id"] = entry.stable_id
     card.metadata["content_sha256"] = entry.content_sha256
+    card.metadata["recommended"] = entry.recommended
     return card
 
 

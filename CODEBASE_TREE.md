@@ -1,3 +1,35 @@
+2026-10-14 工具计划预算复审新增：
+
+```text
+|-- agent_py_agent/tests/test_tool_program_budget.py # 累计展开预算、原线程身份与完整归档/有界模型视图
+`-- docs/tasks/TOOL_PROGRAM_BUDGET_HANDOFF.md # 非作者预算缺口修复与回放交接
+```
+
+关键职责：编排保留JSON的共享2MB预算在展开前计量；最终模型视图按UTF-8 16KB，完整payload仍走原归档；底层工具本身的读取/输出上限继续由原工具负责。
+
+2026-10-14 后续监控/恢复/Skill版本/只读批量入口：
+
+```text
+|-- agent_py_agent/agent/agent_core/runtime/minimal_tool_audit.py # 与聊天保存解耦的原owner最小工具事实
+|-- agent_py_agent/agent/runtime_db/operation_reconciliation_authority.py # 当前attempt只读核对接管和原操作CAS
+|-- agent_py_agent/agent/tooling/feishu_cloud_recovery.py # 原写操作精确目标只读核验，不重复追加
+|-- agent_py_agent/agent/tooling/nested_dispatch.py # 原身份派生的有限只读工具派发
+|-- agent_py_agent/agent/tooling/program_data.py # 有界JSON引用与筛选去重统计分页
+|-- agent_py_agent/agent/tooling/tool_program.py # 渐进加载的确定数据计划，不执行代码
+|-- agent_py_agent/agent/capability/skill_learning_versions.py # 已学Skill不可变正文快照授权
+|-- agent_py_agent/tests/test_feishu_cloud_error_facts.py # HTTP/CLI原数值错误与副作用分类
+|-- agent_py_agent/tests/test_feishu_cloud_operation_recovery.py # 原Registry同/跨attempt核验与追加屏障
+|-- agent_py_agent/tests/test_managed_operation_reconciliation_authority.py # 恢复者代次、取消与并发CAS
+|-- agent_py_agent/tests/test_minimal_tool_audit.py # no-save原工具审计不存正文与秘密
+|-- agent_py_agent/tests/test_skill_learning_versions.py # 迟到学习、回滚、版本不可覆写和旧快照
+|-- agent_py_agent/tests/test_tool_program.py # 程序权限、原代理回放与批量测量
+|-- docs/design/TOOL_PROGRAM_EXECUTION.md # S17–20受限数据计划/长操作合同与实测
+|-- docs/design/FEISHU_CLOUD_RECOVERY_AUDIT.md # 云分类、原操作恢复和审计合同
+`-- docs/tasks/FEISHU_CLOUD_RECOVERY_AUDIT_HANDOFF.md # 原账CAS与故障测试交接
+```
+
+关键职责：工具计划只整理数据，原执行器和操作账仍是授权/副作用权威；恢复接管不迁移原执行身份，也不自动重发未知追加。Skill历史正文不覆盖，旧snapshot仍核当前授权。
+
 2026-10-14 凭据表单和卡片恢复入口（22项第一批）：
 
 ```text
@@ -125,6 +157,9 @@ Gateway 安全初始化：`agent/auth/configuration.py` 是 CLI 与 HTTP 服务�
 |-- agent_py_agent/agent/scheduler/store_snapshot.py # 原账本完整原子只读快照
 |-- agent_py_agent/agent/scheduler/recovery.py # 原 claim 死亡恢复与终态历史
 |-- agent_py_agent/agent/scheduler/creator_migration.py # 冻结来源的旧群创建人迁移
+|-- agent_py_agent/agent/scheduler/creator_access.py # 宿主创建者显示与有界实时离群代清理证明
+|-- agent_py_agent/tests/test_schedule_owner_scope.py # 当前owner监控、同群代清理及原累计指标矩阵
+|-- docs/tasks/SCHEDULE_OWNER_SCOPE_HANDOFF.md # S01–S05独立开发线交接
 |-- agent_py_agent/agent/user_space/feishu_cloud_authorization.py # 真实个人/群协作者权限验证
 |-- agent_py_agent/agent/user_space/feishu_sheet_authorization.py # 表格保护范围与准确主体编辑权限
 |-- agent_py_agent/agent/contracts/model_call_latency.py # 原模型调用账的匿名单调耗时
@@ -2734,3 +2769,53 @@ docs/
 `docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md`：一个管理员和大量员工的非交互执行目标、审批卡去重/超时重询、活执行锁与会话消息安全点、管理员历史策略差异和待实施路线；不作为产品修复完成。
 
 `docs/design/IM_CAPABILITY_DISCOVERY_AUDIT.md`：原工具/Skill发现链、真实权限状态缺失、普通worker/后台目录及开关披露差异；保留测试红和现场未知边界。
+
+S01–S05关键职责：`scheduler/creator_access.py`只读原身份索引与官方完整当前成员，不另建权限账；所有写操作沿`control.authorize_job`，列表和计数只读当前owner。原线程累计模型指标不跨空间合并。
+
+## 本期 Skill 维护、迁移与计数诊断入口
+
+```text
+agent_py_agent/agent/capability/
+|   |   |-- skill_learning_publish.py  # S3 用户确认后的受控发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
+|   |   |-- skill_learning_budget.py # 共享home根的UTC日部署总模型预算，与owner预算并守
+|   |   |-- skill_learning_proposals.py # 待确认S3候选，准确修订的人类确认/拒绝后才走原发布
+|   |   |-- skill_learning_host_feedback.py # 原验证命令/包检查器的准确采用质量反馈
+|   |   |-- skill_learning_maintenance.py # 原registry的观察、固定/停用、冷藏、可恢复归档与推荐
+|   |   |-- skill_learning_protection.py # 原任务/子代理/未删除监控refs保护与完整性
+|   |   |-- skill_learning_migration.py # 按原committed来源与hash纳管S1，保原路径和身份
+|   |   |-- skill_feedback_tool.py # 当前任务结构化采用声明，不能冒充人类结果或自批
+|   |   |-- skill_learning_versions.py # 自学单调修订与不可变正文快照固定，撤销后禁止读历史
+|   |-- test_skill_learning_confirmation.py # S3仅候选、精确确认/拒绝、停用阻旧确认及IM用户入口
+|   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效
+|   |-- test_skill_learning_versions.py # 自学CAS/回滚交错、版本不可覆盖和旧快照正文回归
+|   |   |-- skill_transfer.py           # 精确清单签名、来源授权与接收入口
+|   |   |-- skill_transfer_manifest.py  # 当前owner快照与显式资源安全清单
+|   |   |-- skill_transfer_import.py    # 原配额/registry事务下整批接收与恢复
+|   |   |-- skill_transfer_memory.py    # 明确记忆候选转入目标原待审核账
+|   |   |-- skill_transfer_control.py   # 原IM/TUI人类双端确认与群成员证明
+agent_py_agent/tests/
+|-- test_monitor_counts_degraded.py  # 账本不可读或孤儿run时计数未知，不伪装为零
+|-- test_skill_transfer.py  # 双端确认、资源隔离、一次复刻与撤回竞态
+`-- test_skill_learning_host_feedback.py  # 宿主准确run/hash验证归因
+```
+
+Skill维护见 `docs/tasks/SKILL_MAINTENANCE_HANDOFF.md`，显式投递见 `docs/tasks/SKILL_TRANSFER_HANDOFF.md`；监控计数故障交接见 `docs/tasks/MONITOR_COUNT_UNKNOWN_HANDOFF.md`。
+
+`tests/test_managed_operation_recovery_fences.py`：同attempt取消/终态及跨root重放生产API回归；交接见 `docs/tasks/S07_AUTHORITY_FENCE_HANDOFF.md`。
+
+`tests/test_skill_summarize_owner_scope.py`：普通/群当前claim只产候选与准确本人确认；`tests/test_skill_transfer_grant_race.py`：授权撤回线性化、反向并发锁序及资源父链接回归。
+
+## 交互卡取消入口
+
+```text
+agent_py_agent/agent/
+|-- user_space/interaction_actor_audit.py  # 原owner安全点击者审计与显示
+|-- user_space/interaction_cancellation.py  # 模型/凭据原卡取消回执
+|-- gateway_parts/model_control_dispatch.py  # 模型子卡锁外投递与父卡CAS
+`-- session_lock/card_control.py  # 原密码用户行卡片nonce和取消生命周期
+agent_py_agent/tests/
+|-- test_card_cancellation.py  # 凭据/模型空表单、并发与输入收口
+`-- test_card_cancellation_controls.py  # 审批、密码、OAuth、人设取消及迟到回执
+```
+
+交接见 `docs/tasks/CARD_CANCELLATION_HANDOFF.md`。

@@ -1,3 +1,5 @@
+# LLM: 原操作账是副作用唯一权威；恢复请求显式携当前attempt，跨attempt核对不能获得重新执行权。
+# 模块用途: 定义并持久化工具执行与核对事实，保护UNKNOWN原身份和幂等边界。
 from __future__ import annotations
 
 """Authoritative, owner-scoped tool operation state.
@@ -64,6 +66,8 @@ class ToolOperationClaimRequest:
     attempt_id: str = ""
 
 
+# LLM: 记录原操作身份/代数/结果；reconciliation_only是持久只读恢复限制，不是新执行许可。
+# 类用途: 给执行器和核对器提供同一操作事实，旧记录默认不改变既有同attempt行为。
 @dataclass(frozen=True)
 class ToolOperationRecord:
     owner_id: str
@@ -89,6 +93,7 @@ class ToolOperationRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     completed_at: float = 0.0
+    reconciliation_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,8 @@ class ToolOperationReopenRequest:
     now: float | None = None
 
 
+# LLM: 新恢复调用必须显式携当前attempt及原任务/tool/args；旧同attempt调用字段可空，但不能跨attempt猜身份。
+# 类用途: 在原账申请独占只读核对，不等于重新执行授权。
 @dataclass(frozen=True)
 class ToolOperationReconciliationClaimRequest:
     """Atomic ownership request for inspecting one unknown side effect."""
@@ -136,6 +143,10 @@ class ToolOperationReconciliationClaimRequest:
     holder: ToolOperationHolder
     lease_expires_at: float
     now: float | None = None
+    authority_attempt_id: str = ""
+    task_id: str = ""
+    tool_name: str = ""
+    args_hash: str = ""
 
 
 class ToolOperationStateError(RuntimeError):

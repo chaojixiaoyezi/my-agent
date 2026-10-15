@@ -1513,3 +1513,5 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 验收范围见 [安全交接](../../tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。
 
 必要输入停止沿 `cancellation._close_projection` → `conversation/input_dependencies.cancel_task_inputs(root_task_id, run_id=准确节点)`，在原 creation guard 和授权范围内清理；根主 `/stop` 在原 gateway task/control guard 确认停原任务后清整根输入。依赖状态仍属于原 SessionTaskStore，task refs 只是查找投影，不能全根删除来处理单个孩子取消。
+
+自学lesson来源仍由SkillProposalService/Candidate核验，runner_result_service不再承担确认；skill_learning_migration只把精确committed来源和未改正文登记到原SkillLearningStore，来源不明或用户改过不接管。

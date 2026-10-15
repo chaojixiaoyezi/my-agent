@@ -22,7 +22,7 @@ def credential_submission_values(row, fields, origin_for):
     return {name: fields[name] for name in names}, metadata
 
 
-# LLM: 群成员提供权限来自可信运输事实，取消/覆盖仍限原请求人或既有提供者；不认表单姓名。
+# LLM: 群成员提供权限来自可信运输事实，取消只终止本卡允许当前成员，覆盖仍限原请求人或既有提供者；不认表单姓名。
 # 函数用途: 在写入凭据前核验当前提交者并返回应记账的飞书身份。
 def credential_submitter(row, body):
     presentation = row.get('presentation', {})
@@ -32,9 +32,7 @@ def credential_submitter(row, body):
     actor = submitter.get('actor_id')
     if not actor or submitter.get('chat_id') != presentation['chat_id'] or submitter.get('current_group_member') is not True:
         raise ValueError('群凭据提交者无法核验')
-    if body.get('decision') == 'cancel' and actor != row['actor_id']:
-        raise ValueError('仅原请求人可取消凭据输入')
-    if row.get('replaces_ref') and actor not in {row['actor_id'], row.get('previous_submitter_actor_id')}:
+    if body.get('decision') != 'cancel' and row.get('replaces_ref') and actor not in {row['actor_id'], row.get('previous_submitter_actor_id')}:
         raise ValueError('当前成员没有替换原凭据的权限')
     return actor
 
@@ -80,18 +78,25 @@ def configure_credential(agent, reference, *, authentication, auth_config=None, 
 
 
 # LLM: 重发仅退休准确旧输入，不产生取消Wake；新代次沿原登记/截止账本，旧卡引用不再可提交。
-# 函数用途: 新卡登记成功后释放旧待填输入槽，避免迟到或重复卡占住任务容量。
+# 函数用途: 在重发或精确取消后释放原待填输入槽并清理原截止调度，避免迟到或重复卡占住任务容量。
 def retire_credential_input(agent, previous):
-    from ..conversation.input_dependencies import _mutate, update_task_input_refs
+    import time
+
+    from ..conversation.input_dependencies import (
+        _mutate,
+        _schedule_input_deadline,
+        update_task_input_refs,
+    )
     input_id = previous['input_id']
 
-    # LLM: 输入锁内只将尚未结算的一代取消，不能覆盖并发完成事实。
+    # LLM: 输入锁内只退休准确pending/cancelled卡输入并标resolution_delivery=retire；不覆盖ready，泛用取消不受此静默标记影响。
     # 函数用途: 在原输入记录上退休重发前的待填卡。
     def retire(row):
-        return {**row, 'status':'cancelled', 'armed':False} if row and row['status'] == 'pending' else row
+        return {**row,'status':'cancelled','armed':False,'resolved_at':row.get('resolved_at') or time.time(),'resolution_delivery':'retire'} if row and row['status'] in {'pending','cancelled'} else row
 
     _mutate(agent, input_id, retire)
     update_task_input_refs(agent, previous['scope']['root_task_id'], input_id, remove=True)
+    _schedule_input_deadline(agent,previous['scope']['root_task_id'])
 
 
 # LLM: 重发授权独立于读取授权，仅按当前真实claim/原线程/owner/原请求人或提供者核验；绝不读取密文或放宽HTTP root/job限制。

@@ -179,6 +179,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
         trusted_run_context={
             "interactive": _interactive_approvals(runtime_request),
+            **_tool_program_context(runtime_request),
             "process_completion_target": process_completion_target(runtime_request.agent, runtime_request.request.params),
             "task_attributes": dict(
                 runtime_request.request.params.task_attributes
@@ -238,13 +239,19 @@ def _tool_liveness_context(runtime_request: ToolCallRuntimeRequest) -> dict[str,
     return {"tool_liveness_sink": publish_liveness, "tool_liveness_interval": min(120.0, max(1.0, interval))}
 
 
-# LLM: 所有输出先沿原归档入口保存；观察回调只读原始正文，不改变模型投影或持久账，失败仍归入原执行器归档错误。
+# LLM: 所有输出按实际子调用参数与父链路沿原归档入口保存；观察回调只读原始正文，不改变模型投影或持久账，失败仍归入原执行器归档错误。
 # 函数用途: 为宿主结构化检查提供完整输出，防止预览截断或展示脱敏掩盖数据变化。
 def _archive_runtime_tool_output(runtime_request, call, outcome):
     from .tool_call_archive_record import archive_tool_output_projection
 
+    parent = runtime_request.call
+    nested = call.call_id != parent.call_id
+    if nested:
+        outcome = replace(outcome, result_envelope={**outcome.result_envelope,
+            'tool_program_lineage':{'parent_call_id':parent.call_id,
+                'step_key':call.call_id.removeprefix(parent.call_id + '/')}})
     projection = archive_tool_output_projection(runtime_request.agent, runtime_request.request.params,
-        call, outcome, model_call=runtime_request.model_call)
+        call, outcome, model_call=call if nested else runtime_request.model_call)
     if runtime_request.output_observer is not None:
         runtime_request.output_observer(str(outcome.output or ""))
     return projection
@@ -475,3 +482,37 @@ def _orchestration_result_is_blocked(output: object) -> bool:
     if not isinstance(payload, dict):
         return False
     return bool(payload.get("blocked"))
+
+
+# LLM: 内层编排仍记原owner最小工具审计，批上限与普通轮共用同一解析器；记录不含参数或正文，不是权限来源。
+# 函数用途: 为确定只读程序提供宿主并发上限与逐调用审计接线。
+def _tool_program_context(runtime_request):
+    if runtime_request.call.tool_name != 'tool_program':
+        return {}
+    from .runtime.minimal_tool_audit import archive_minimal_tool_audit
+    from .tool_loop.round_execution import (
+        _capture_parallel_thread_context,
+        run_with_parallel_thread_context,
+    )
+    from .tool_loop.segment_planning import parse_optional_batch_limit, resolve_parallel_batch_limit
+    thread_context = _capture_parallel_thread_context(runtime_request.agent)
+    # LLM: 只继承当前宿主已验证身份，不从子参数重建线程权限。
+    # 函数用途: 在原并行线程协议中执行一次嵌套子调用并对称恢复。
+    def run_child(invoke):
+        return run_with_parallel_thread_context(runtime_request.agent, thread_context, invoke)
+    params = runtime_request.request.params
+    attributes = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    limit = parse_optional_batch_limit(attributes.get('max_parallel_tool_calls'))
+    if limit is None:
+        limit = parse_optional_batch_limit(getattr(runtime_request.agent.config, 'max_parallel_tool_calls', None))
+    # LLM: 原执行器回调的call/result是事实，绝不把模型自报状态或参数正文写成审计。
+    # 函数用途: 写一次内部调用最小事件，和原程序外层记录分别定位。
+    def observe(call, result):
+        archive_minimal_tool_audit(runtime_request.agent, params, {
+            'tool':call.tool_name, 'call_id':call.call_id, 'operation_id':call.operation_id,
+            'ok':result.ok, 'handler_executed':result.handler_executed,
+            'error_code':result.error_code, 'reported_error_code':result.reported_error_code,
+            'effect_outcome':result.effect_outcome, 'failure_stage':result.failure_stage,
+            'parameters':dict(call.arguments), 'tool_result_envelope':result.metadata.get('handler_details', {})})
+    return {'nested_tool_thread_runner':run_child, 'nested_tool_result_sink':observe, 'max_parallel_tool_calls':resolve_parallel_batch_limit(
+        limit, parse_optional_batch_limit(attributes.get('max_tool_calls_per_round')))}

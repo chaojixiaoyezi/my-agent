@@ -270,12 +270,15 @@ def list_pending_agent_tool_approvals(
 
 # LLM: 决定写回在原记录锁内重读归属与完整请求；main 的 claim 换轮使旧决定失效，文案和行号不授予权限。
 # 函数用途: 将用户对主/子后台原调用的决定原子写回同一等待记录。
+# LLM: IM点击审计只接受已认证入口提供的payload，首决和原transition CAS同锁，重复不能改写原点击者。
+# 函数用途: 写入准确原审批决定及可选点击者事实，不停止其它任务。
 def resolve_agent_tool_approval(
     agent: object,
     *,
     run_id: str,
     request_value: ToolApprovalRequest | Mapping[str, object],
     decision_value: ToolApprovalDecision | Mapping[str, object],
+    interaction_actor: dict | None = None,
 ) -> dict[str, object]:
     scope = tool_approval_scope(agent, run_id)
     request = _approval_request(request_value)
@@ -305,12 +308,16 @@ def resolve_agent_tool_approval(
         payload = dict(report.payload)
         payload["status"] = "decided"
         payload["decision"] = decision.to_dict()
+        if prior is None and interaction_actor is not None:
+            from ..user_space.interaction_actor_audit import record_interaction_actor
+            payload['decision_by']=record_interaction_actor(agent,interaction_actor,decision=decision.decision,actor=interaction_actor['actor_id'])
         write_json_file_atomic(path, payload)
     return {
         "ok": True,
         "run_id": selected,
         "permission_id": request.permission_id,
         "decision": decision.decision,
+        **({'clicked_by':payload['decision_by']} if payload.get('decision_by') else {}),
     }
 
 

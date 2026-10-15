@@ -858,7 +858,7 @@ def _build_shell_tool_model_spec(
         name="run_command",
         description=(
             "Execute one shell command in the workspace. For a server or other persistent "
-            "process, pass run_in_background=true and keep the command itself in foreground "
+            "process or a command expected to take tens of seconds, pass run_in_background=true; keep the command itself in foreground "
             "form; shell '&' backgrounding is rejected because it cannot return a managed session. "
             "The tool already returns the final exit code; do not append '; echo $?' or another "
             "always-successful command because that masks an earlier failure. Long output is already "
@@ -887,7 +887,7 @@ def _build_shell_tool_model_spec(
                     "type": "boolean",
                     "description": (
                         "When true, start a managed background command and briefly observe startup. "
-                        "If it remains alive, return status=started plus session_id/output_file; "
+                        "If it remains alive, promptly return status=started plus session_id/output_file; do not start the same command again. "
                         "if it exits immediately, return status=exited plus exit_code/output_tail."
                     ),
                 },

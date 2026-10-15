@@ -24,6 +24,8 @@ _TARGET_LABEL = {"soul": "长期人设(SOUL)"}
 _TARGET_FIELD = {"soul": "soul_md"}
 
 
+# LLM: 按钮只携原pending token/明确choice，独立cancel不替确认、不扩大写权限。
+# 函数用途: 构造人设确认、不写与取消三项卡，真正状态由原pending CAS决定。
 def build_persona_confirm_card(
     token: str,
     target: str,
@@ -65,6 +67,8 @@ def build_persona_confirm_card(
                         "type": "default",
                         "value": {"token": token, "choice": "decline"},
                     },
+                    {"tag":"button","type":"default","text":{"tag":"plain_text","content":"取消"},
+                     "value":{"token":token,"choice":"cancel"}},
                 ],
             },
         ],
@@ -169,6 +173,8 @@ def _coerce_action_value(value: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+# LLM: 原actor/token先核对，confirm与cancel同记录锁；展示姓名不参与身份，审计不收设定正文。
+# 函数用途: 将人设卡明确动作交原待确认记录，取消不修改已有SOUL。
 def apply_card_action(
     value: dict[str, Any],
     my_agent_home: str | Path,
@@ -185,6 +191,8 @@ def apply_card_action(
     choice = str((value or {}).get("choice") or "").strip().lower()
     if not token:
         return {"wrote": False, "owner_id": None, "reply_text": ""}
+    if choice=='cancel':
+        return persona_pending.cancel(my_agent_home,token,str(operator_open_id or '').strip())
     pending = persona_pending.load(my_agent_home, token)
     if pending is None:
         return {
@@ -199,9 +207,10 @@ def apply_card_action(
             "owner_id": None,
             "reply_text": "只有这条长期设定的发起人可以确认或取消；待确认内容没有改动。",
         }
-    if choice != "confirm":
-        persona_pending.pop(my_agent_home, token)  # 明确取消:丢弃待确认记录(在的话)
-        return {"wrote": False, "owner_id": None, "reply_text": "好的,已取消,没有改动。"}
+    if choice == "decline":
+        return persona_pending.cancel(my_agent_home,token,operator)
+    if choice != 'confirm':
+        return {'wrote':False,'owner_id':None,'reply_text':'卡片动作无效，待确认内容没有改动。'}
     record = persona_pending.pop(my_agent_home, token)  # 原子领取(幂等基石)
     if record is None:
         return {
@@ -209,6 +218,14 @@ def apply_card_action(
             "owner_id": None,
             "reply_text": "这条确认已经失效了(可能超时或已处理过),没有改动。",
         }
+    from ..user_space.interaction_actor_audit import (
+        interaction_actor_text,
+        interaction_audit_host,
+        record_interaction_actor,
+    )
+    owner={'provider':record.owner_provider,'owner_kind':record.owner_kind,'owner_id':record.owner_id}
+    facts=record_interaction_actor(interaction_audit_host(my_agent_home,owner),
+        {'kind':'persona','channel':'feishu','owner':owner,'input_id':record.token},decision='confirm',actor=operator)
     if not _write_confirmed_persona(record, my_agent_home):
         return {
             "wrote": False,
@@ -219,7 +236,8 @@ def apply_card_action(
     return {
         "wrote": True,
         "owner_id": record.owner_id,
-        "reply_text": f"✅ 已写进你的{label}:{record.content}",
+        "clicked_by":facts,
+        "reply_text": f"{interaction_actor_text(facts)} ✅ 已写进你的{label}:{record.content}",
     }
 
 

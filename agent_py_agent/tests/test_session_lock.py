@@ -191,6 +191,24 @@ def test_handle_password_action_dispatch(tmp_path):
 # ── 适配器锁门:首次要求设密码 ──
 
 
+# LLM: 替换仅飞书运输回执；密码动作走生产签名/nonce/卡身份，与旧无签名测试输入隔离。
+# 函数用途: 给既有密码卡回归建立真实原卡事实，重复回调沿用同nonce。
+def _signed_password_action(adapter,norm):
+    value=norm.get('value') or {}
+    if str(value.get('session_lock_action') or '').startswith('pwd_'):
+        from agent.session_lock.card_control import bind_password_card, prepare_password_card
+        mode={'pwd_set':'set','pwd_unlock':'unlock','pwd_change':'change'}.get(value['session_lock_action'],'unlock')
+        key=(value['user_id'],mode)
+        cache=getattr(adapter,'_test_password_cards',{})
+        if key not in cache:
+            reference,payload=prepare_password_card(adapter,value['user_id'],mode)
+            bind_password_card(adapter,payload,{'message_id':'om_password','chat_id':'oc_private'})
+            cache[key]=reference
+            adapter._test_password_cards=cache
+        norm={**norm,'value':{**value,'reference':cache[key]},'message_id':'om_password','chat_id':'oc_private'}
+    return adapter._handle_card_action(norm)
+
+
 def test_adapter_first_contact_requires_setup_then_resumes_message(tmp_path):
     from agent.adapter.feishu import FeishuAdapter
     from agent.adapter.protocol import IncomingMessage
@@ -205,7 +223,7 @@ def test_adapter_first_contact_requires_setup_then_resumes_message(tmp_path):
     assert adapter._session_locked_gate(original) is True
     assert sent == [("ou_x", "set")]
     assert received == []
-    response = adapter._handle_card_action({"value": {"session_lock_action": "pwd_set", "user_id": "ou_x"},
+    response = _signed_password_action(adapter,{"value": {"session_lock_action": "pwd_set", "user_id": "ou_x"},
                                            "form_value": {"pwd": "Abcd1234"}, "operator_open_id": "ou_x"})
     assert response["toast"]["type"] == "success"
     assert ready.wait(2)
@@ -233,7 +251,7 @@ def test_card_action_returns_inplace_replacement_not_new_message(tmp_path):
     a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
     norm = {"value": {"session_lock_action": "pwd_set", "user_id": "ou_x"},
             "form_value": {"pwd": "Abcd1234"}, "operator_open_id": "ou_x"}
-    resp = a._handle_card_action(norm)
+    resp = _signed_password_action(a,norm)
     # 返回就地替换响应(dict),而不是 None(None → 另发消息老路 → 原卡残留)
     assert isinstance(resp, dict)
     assert resp["card"]["type"] == "raw"
@@ -253,7 +271,7 @@ def test_persona_card_action_still_returns_none(tmp_path):
     a = FeishuAdapter(config={"feishu_session_lock_enabled": True, "my_agent_home": tempfile.mkdtemp()})
     # persona 卡 value 带 token/choice、不带 session_lock_action → 不是密码动作
     norm = {"value": {"token": "deadbeef", "choice": "decline"}, "form_value": {}, "operator_open_id": "ou_x"}
-    assert a._handle_card_action(norm) is None
+    assert _signed_password_action(a,norm) is None
 
 
 def test_adapter_gate_explicitly_disabled_passes_through():
@@ -282,7 +300,7 @@ def test_password_card_rejects_different_operator(tmp_path):
         "form_value": {"pwd": "Abcd1234"},
         "operator_open_id": "ou_other",
     }
-    response = a._handle_card_action(norm)
+    response = _signed_password_action(a,norm)
     assert response["toast"]["type"] == "error"
     assert a._unlock.store.has_password("ou_owner") is False
 
@@ -313,7 +331,7 @@ def _locked_message(message_id: str, content: str):
 
 
 def _unlock_card_action(adapter):
-    return adapter._handle_card_action(
+    return _signed_password_action(adapter,
         {
             "value": {
                 "session_lock_action": "pwd_unlock",
@@ -353,7 +371,7 @@ def test_wrong_password_does_not_resume_original_message(tmp_path):
     original = _locked_message("m-locked", "不要丢掉这句话")
 
     assert adapter._session_locked_gate(original) is True
-    response = adapter._handle_card_action(
+    response = _signed_password_action(adapter,
         {
             "value": {
                 "session_lock_action": "pwd_unlock",

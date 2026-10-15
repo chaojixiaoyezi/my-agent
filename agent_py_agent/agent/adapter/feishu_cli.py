@@ -104,7 +104,7 @@ def execute_cli_request(payload: dict, *, cancellation_token=None, timeout: floa
             _stop_process(process)
 
 
-# LLM: token只从宿主适配器读取；调用者仍须先通过owner/群/资源权限门，结果交原净化和错误分类。
+# LLM: token只由宿主读取；先通过owner/群/资源门，HTTP/API状态和明确拒绝交原共享分类器，未知写入仍不重放。
 # 函数用途: 通过官方CLI后端执行固定云请求，保持未知写入不能重放。
 def request_cli_cloud_api(adapter, method: str, path: str, body=None, *, read_only=False, cancellation_token=None, user_token=""):
     from ..common.log_redaction import redact_sensitive_value
@@ -112,6 +112,7 @@ def request_cli_cloud_api(adapter, method: str, path: str, body=None, *, read_on
         FeishuCloudError,
         _classified_error,
         _clean_response,
+        _provider_rejection_known,
         _public_identifiers,
     )
 
@@ -145,13 +146,12 @@ def request_cli_cloud_api(adapter, method: str, path: str, body=None, *, read_on
     if status >= 300 and status < 400:
         raise _classified_error(status, None)
     if status >= 400:
-        raise _classified_error(status, code if type(code) is int else None, unknown=mutating and (status >= 500 or status == 429))
+        raise _classified_error(status, code if type(code) is int else None, unknown=mutating and (status >= 500 or status == 429) and not _provider_rejection_known(code, path))
     if error or not 200 <= status < 300 or not result["request_sent"] or not isinstance(response, dict) or type(code) is not int:
         raise FeishuCloudError("FEISHU_CLOUD_RESPONSE_UNKNOWN", "飞书 CLI 返回结果无法验证；写操作请先读回核对。",
                                unknown=mutating and result["request_sent"], reason="cli_response_invalid")
     if code != 0:
-        from .feishu_cloud import _provider_error_details
-        raise _classified_error(0, code, unknown=mutating and _provider_error_details(code) is None)
+        raise _classified_error(status, code, unknown=mutating and not _provider_rejection_known(code, path))
     data = response.get("data")
     if data is None:
         data = {}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..conversation.context_usage import context_usage_from_thread
 from ..conversation.im_task_status import im_task_status_facts
+from ..conversation.model_metrics import public_model_metrics
 from ..tooling.self_context import permission_self_context
 
 
@@ -26,6 +27,7 @@ def status_display_facts(agent: object, thread: object = None, *, scope: object 
             "permissions": permissions,
             "permission_mode": f"审批 {permissions['mode']}（来源 {permissions['source']}）；文件 {getattr(config, 'path_access_mode', '未知')}；Shell {getattr(config, 'access_mode', '未知')}",
             "context_usage": context_usage_from_thread(thread), "im_task_status": im_task_status_facts(agent, thread, scope),
+            "model_usage": public_model_metrics(getattr(thread, 'model_metrics', None)),
             "model_timing": public_model_timing(getattr(thread, 'model_metrics', None))}
 
 
@@ -54,3 +56,18 @@ def render_model_timing(facts: dict[str, int]) -> str:
     if facts.get('split_latency_call_count') and 'post_first_token_ms' in facts:
         text += f"；首包后累计 {facts['post_first_token_ms'] / 1000:.1f}s"
     return text + '。累计值不含工具时间，并行时不等于实际等待时长。'
+
+
+# LLM: 直接渲染原public_model_metrics快照，累计输入与TUI同含估算、决策排除在原账完成；缓存未知不补零。
+# 函数用途: 显示本会话累计输入/输出与缓存命中，当前上下文长度仍由原状态独立显示。
+def render_session_model_usage(metrics):
+    if not metrics:
+        return '本会话累计模型用量：未知。'
+    known = metrics.get('totals_known') is True
+    estimate = int(metrics.get('estimated_tokens') or 0)
+    tokens = int(metrics.get('input_tokens') or 0) + estimate
+    input_text = ('约 ' if estimate else '') + f'{tokens:,}' if known else '未知'
+    output_text = f"{int(metrics.get('output_tokens') or 0):,}" if known else '未知'
+    cache = metrics.get('cache_percent_session')
+    cache_text = f'{cache:.2f}%' if cache is not None else '未知'
+    return f'本会话累计模型用量：输入 {input_text} tokens；输出 {output_text} tokens；缓存命中率 {cache_text}。'

@@ -150,6 +150,12 @@ class FeishuCloudTool(BaseTool):
             return ToolHandlerOutcome('feishu_cloud', False, '云资源参数不完整或无效；请核对编号、range 和对应数据。', error_code='TOOL_INVALID_ARGUMENTS')
         return None
 
+    # LLM: 原协调器持有UNKNOWN核对claim；本入口只读原目标，不写表、不重做分析或换operation编号。
+    # 函数用途: 让准确更新在目标状态可证明时沿原操作结算，追加位置未知时继续安全受阻。
+    def reconcile_operation(self, params, context):
+        from .feishu_cloud_recovery import reconcile_cloud_operation
+        return reconcile_cloud_operation(self, params, context)
+
     # LLM: 先核查网络和原策略，再现查准确资源/表格保护权限；写后同身份读回独立报告核验状态，读失败不撤销已接受写入或重放。
     # 函数用途: 让用户按飞书已有分享权限使用云资源，核验保护范围后代写，返回本次许可来源及可读错误。
     def execute(self, params):

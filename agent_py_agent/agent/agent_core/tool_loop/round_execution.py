@@ -833,39 +833,41 @@ def _execute_parallel_segment(
     ]
 
 
+# LLM: 普通并行轮与嵌套工具共用线程身份安装/恢复协议；模型可见调用仍沿原轮配对。
+# 函数用途: 在当前runner快照下执行一条并行工具，异常时恢复线程身份。
 def _execute_parallel_call(
     request: ToolRoundExecutionRequest,
     idx: int,
     call: ToolCall,
     context: _ParallelThreadContext,
 ) -> ToolExecution:
-    restore_values = _install_parallel_thread_context(request.agent, context)
+    return run_with_parallel_thread_context(request.agent, context, lambda: request.execute_one(
+        ToolCallExecuteParams(request.params, request.tool_rounds, idx, call,
+            model_call=_model_visible_call(request, idx, call))))
+
+
+# LLM: 普通轮与嵌套工具共享同一线程上下文协议；无论成功/异常均恢复接收线程原身份，禁止模型提供字段。
+# 函数用途: 在已捕获的宿主身份下调用函数，临时安装Agent属性与runner上下文。
+def run_with_parallel_thread_context(agent, context, invoke):
+    restore_values = _install_parallel_thread_context(agent, context)
     previous_runner: dict[str, object] | None = None
     if context.subagent_run_id:
         from ...runtime_context import set_current_subagent_context
 
         previous_runner = set_current_subagent_context(
-            request.agent,
+            agent,
             run_id=context.subagent_run_id,
             attempt_id=context.subagent_attempt_id,
             task_attributes=context.task_attributes,
         )
     try:
-        return request.execute_one(
-            ToolCallExecuteParams(
-                request.params,
-                request.tool_rounds,
-                idx,
-                call,
-                model_call=_model_visible_call(request, idx, call),
-            )
-        )
+        return invoke()
     finally:
         if previous_runner is not None:
             from ...runtime_context import restore_current_subagent_context
 
-            restore_current_subagent_context(request.agent, previous_runner)
-        _restore_parallel_thread_context(request.agent, restore_values)
+            restore_current_subagent_context(agent, previous_runner)
+        _restore_parallel_thread_context(agent, restore_values)
 
 
 # LLM: 并行工具只继承本线程显式依赖与 runner 身份，不能读取其它会话的模型连接；接收线程必须对称恢复。

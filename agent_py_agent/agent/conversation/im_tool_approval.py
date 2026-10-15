@@ -77,13 +77,13 @@ def approval_recipient(agent, scope) -> tuple[str, str]:
 
 
 # LLM: 显示正文只经原公开投影，按钮只带宿主签名引用及固定决定；未包含原参数或秘密。
-# 函数用途: 构造一张本次调用的两选项审批卡，点击后仍需验证当前执行与私人卡片来源。
+# 函数用途: 构造本次调用的允许、拒绝与独立取消审批卡，点击后仍需验证当前执行与私人卡片来源。
 def approval_card(reference: str, request, scope) -> tuple[dict, str]:
     summary = project_host_paths_for_channel(project_user_reply(request.description).content, "feishu")[:240]
     text = f"{scope.agent_name}申请执行 {request.tool_name}\n{summary}\n请在本次确认截止前处理，超时将拒绝当前操作。"
     buttons = [{"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": color,
                 "value": {"kind": "my_agent_tool_approval", "reference": reference, "decision": decision}}
-               for label, color, decision in (("允许本次", "primary", "approved"), ("拒绝", "default", "denied"))]
+               for label, color, decision in (("允许本次", "primary", "approved"), ("拒绝", "default", "denied"), ("取消", "default", "cancel"))]
     return {"config": {"wide_screen_mode": True}, "elements": [
         {"tag": "div", "text": {"tag": "plain_text", "content": text}}, {"tag": "action", "actions": buttons}]}, text
 
@@ -151,6 +151,8 @@ def resolve_im_tool_approval(agent, payload: dict, *, reference: str, message_id
     from .agent_tool_approval import _approval_path, _approval_request, resolve_agent_tool_approval
     from .tool_approval_scope import tool_approval_scope
 
+    if decision == 'cancel':
+        return _cancel_approval_card(agent,payload,reference,message_id,chat_id)
     scope = tool_approval_scope(agent, str((payload.get("scope") or {}).get("run_id") or ""))
     if not scope.active or _scope_identity(scope) != payload.get("scope") or decision not in {"approved", "denied"}:
         raise ValueError("原执行已改变或决定无效")
@@ -163,7 +165,7 @@ def resolve_im_tool_approval(agent, payload: dict, *, reference: str, message_id
         raise ValueError("卡片不是原私人请求或已失效")
     request = _approval_request(row.get("request"))
     return resolve_agent_tool_approval(agent, run_id=scope.run_id, request_value=request,
-        decision_value=ToolApprovalDecision(request.permission_id, decision))
+        decision_value=ToolApprovalDecision(request.permission_id, decision), interaction_actor=payload)
 
 
 # LLM: 前台 IM 与后台共用唯一 AgentToolApproval 账；不支持 TUI 的来源也必须有真实用户决定，不能直接批准。
@@ -183,3 +185,49 @@ def request_foreground_im_permission(agent, value, *, cancellation_token=None):
         from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
         request = ToolApprovalRequest.from_mapping(value)
         return ToolApprovalDecision(request.permission_id, 'unavailable').to_dict()
+
+
+# LLM: 取消只退休签名冻结的原等待，过期/失活可关闭；不读取当前新代次批准、不停止任务，CAS与确认共用原transition锁。
+# 函数用途: 幂等取消准确原审批卡并记录实际点击者，已完成决定不能被撤销。
+def _cancel_approval_card(agent,payload,reference,message_id,chat_id):
+    from ..common.opaque_id import validate_opaque_id
+    from ..user_space.interaction_actor_audit import (
+        interaction_actor_text,
+        record_interaction_actor,
+    )
+    from .agent_tool_approval import (
+        _approval_path,
+        _approval_request,
+        _record_matches,
+        _transition_path,
+    )
+    from .tool_approval_scope import ToolApprovalScope
+    identity=dict(payload['scope'])
+    validate_opaque_id(identity['run_id'],kind='run_id')
+    validate_opaque_id(identity['root_task_id'],kind='root_task_id')
+    scope=ToolApprovalScope(**identity,agent_name='',active=False)
+    path=_approval_path(agent,scope,str(payload.get('permission_id') or ''))
+    with locked_json_path(_transition_path(path)):
+        report=read_json_object_report(path,context='tool_approval.im.cancel')
+        row=report.payload or {}
+        if report.load_error:
+            raise ValueError('审批记录不可读')
+        if not row:
+            return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED'}
+        request=_approval_request(row.get('request'))
+        transport=row.get('im_control') or {}
+        if (not _record_matches(row,scope,request) or transport.get('reference')!=reference
+                or transport.get('message_id')!=message_id or transport.get('chat_id')!=chat_id):
+            raise ValueError('卡片不是原审批请求')
+        if row.get('status')!='pending':
+            if (row.get('decision') or {}).get('decision')!='cancelled':
+                return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED'}
+            facts=row.get('decision_by')
+            if not facts:
+                return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED'}
+        else:
+            facts=record_interaction_actor(agent,payload,decision='cancel',actor=payload['actor_id'])
+            row={**row,'status':'decided','decision':ToolApprovalDecision(request.permission_id,'cancelled').to_dict(),'decision_by':facts}
+            write_json_file_atomic(path,row)
+    return {'ok':True,'decision':'cancelled','clicked_by':facts,
+            'message':interaction_actor_text(facts)+' 已取消这次确认；任务和其他卡片保持原状态。'}

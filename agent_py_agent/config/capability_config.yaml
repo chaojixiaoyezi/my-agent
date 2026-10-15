@@ -24,6 +24,12 @@ im_task_credentials_enabled: true
 # /model 提供模型选择与私人配置卡；密钥不进入聊天/模型，群表单冻结原 owner 和发起人。
 # 仅部署者控制此入口，关闭后保留原文字查询/选择命令。
 im_model_cards_enabled: true
+# 开启Skill投递/一次复刻入口；双端真人确认后才复制，失败不计成功，不复制权限和秘密。
+skill_transfers_enabled: true
+# 有限只读批量计划：按需加载；最多16步/32调用，不执行代码、不允许写动作，内部仍逐工具授权和取消。
+tool_program_enabled: true
+# 后台进程wait每片最多等待30秒，保留原句柄/完成事件/停止；0不加片限制，协议仍最多600秒。
+process_session_wait_slice_seconds: 30
 # 飞书云资源工具开关；凭据只留在宿主，不继承管理员文档权限。
 feishu_cloud_tools_enabled: true
 # 表格写入成功后增加一次同身份只读核验；结果未知或不一致不重复写入。

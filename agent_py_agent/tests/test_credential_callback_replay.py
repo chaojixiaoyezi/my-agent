@@ -34,16 +34,18 @@ def _card(tmp_path, kind):
 def test_same_card_replays_saved_decision_without_overwriting_secret(tmp_path, monkeypatch, kind, decision, failure):
     agent, path, payload, body = _card(tmp_path, kind)
     body['decision'] = decision
-    original = dep.publish_credential_resolution
+    from agent_py_agent.agent.user_space import task_credential_forms
+    module,name = (task_credential_forms,'retire_credential_input') if decision=='cancel' else (dep,'publish_credential_resolution')
+    original = getattr(module,name)
     def failed_publish(*args):
         if failure == 'after_publish':
             original(*args)
         raise OSError(28, 'SYNTHETIC_FAILURE')
     if failure != 'lost_response':
-        monkeypatch.setattr(dep, 'publish_credential_resolution', failed_publish)
+        monkeypatch.setattr(module,name,failed_publish)
         with pytest.raises(OSError):
             tc.submit_credential_card(agent, payload, body)
-        monkeypatch.setattr(dep, 'publish_credential_resolution', original)
+        monkeypatch.setattr(module,name,original)
     else:
         tc.submit_credential_card(agent, payload, body)
     saved = path.read_text()
@@ -82,8 +84,11 @@ def test_replay_does_not_expand_scope_or_replace_decision(tmp_path, monkeypatch,
         else:
             body['submitter']['actor_id'] = 'other-actor'
     saved = path.read_text()
-    with pytest.raises(ValueError):
-        tc.submit_credential_card(agent, payload, body)
+    if attack=='opposite':
+        assert tc.submit_credential_card(agent,payload,body)['error_code']=='IM_INTERACTION_ALREADY_HANDLED'
+    else:
+        with pytest.raises(ValueError):
+            tc.submit_credential_card(agent, payload, body)
     assert path.read_text() == saved
 
 

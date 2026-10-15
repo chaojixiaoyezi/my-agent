@@ -112,6 +112,7 @@ class ToolRegistryParams:
     owner_quota_policy_available: bool = True
     access_mode: str = "workspace-write"
     shell_tool_timeout: int = 30
+    process_session_wait_slice_seconds: int = 30
     shell_tool_output_max_chars: int = 12_000
     # PTY 会话空闲兜底回收阈值（分钟，0=不限制）；装配点据此配置进程级 PTY 注册表。
     pty_session_idle_timeout_minutes: int = 30

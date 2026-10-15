@@ -1,4 +1,4 @@
-# LLM: 自学习 S3 的自动闸门与发布（代替人工确认，依据用户 2026-09-26 决定）。顺序固定：重名/删过的名字/数量上限
+# LLM: 自学习 S3 用户明确确认后的发布闸门；调用方须先验证候选id/revision与真实人类权限。顺序固定：重名/删过的名字/数量上限
 #   （新建）或登记在册且磁盘 hash 未被用户改动（更新）→ 字段脱敏 → 暂存目录渲染 SKILL.md 并按 require_frontmatter
 #   解析、核对 frontmatter 无损往返 → agent_generated guard（从不 force，caution/dangerous 都拒）→ 原子安装/替换 →
 #   版本全文 → 登记表。登记表写失败会回滚本次安装，保证“磁盘上的自学 Skill”与登记表一致。全部在 store.state_lock 内完成。
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..common.log_redaction import redact_sensitive_text
+from ..common.nofollow_fs import read_text_beneath
 from ..contracts.gates.skill_guard import SkillScanResult, install_decision, scan_skill
 from .skill_learning_prompt import DECISION_CREATE, SkillLearningDecision
 from .skill_learning_store import (
@@ -26,6 +27,7 @@ from .skill_learning_store import (
     SkillLearningEvent,
     SkillLearningRegistry,
     SkillLearningStore,
+    SkillLearningStoreError,
     replace_skill_file,
     utc_now,
 )
@@ -69,6 +71,8 @@ class PublishRequest:
     taken_names: frozenset[str] = frozenset()
     max_skills: int = 0
     guard_config: object | None = None
+    expected_revision: int | None = None
+    expected_sha256: str = ""
 
 
 # LLM: 入口只接受 create/update；skip 不应走到这里。整个发布在 state_lock 内完成，返回写账本用的事件。
@@ -106,43 +110,48 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     target = store.learned_root / name
     _stage_check_and_move(store, publish, text, target)
     now = utc_now()
-    record = LearnedSkill(name, 1, skill_content_sha256(text), now, now, _runs((), publish.request))
+    record = LearnedSkill(name, 1, skill_content_sha256(text), now, now, _runs((), publish.request), last_operation_id=str(publish.request.get("operation_id") or ""))
     try:
         store.save_version(name, 1, text)
         store.save_registry(replace(registry, skills={**registry.skills, name: record}))
-    except OSError as exc:
+    except (OSError, SkillLearningStoreError) as exc:
         shutil.rmtree(target, ignore_errors=True)
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
     return _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else "")
 
 
-# LLM: 只更新登记在册、磁盘 hash 等于登记值的自学 Skill；内容没变记 skipped/UNCHANGED；登记表写失败时写回旧版本。
+# LLM: 只更新登记在册、磁盘hash与总结开始时revision/hash均相符的自学Skill；内容没变记 skipped/UNCHANGED；登记表写失败时写回旧版本。
 #   副作用：原子替换 SKILL.md（保留同目录其它文件），写 versions/ 与 registry.json。
 # 函数用途: 在锁内更新一个自学 Skill。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
     current = _owned_record(store, registry, publish.decision.name)
+    if current.maintenance.get("state") in {"disabled","archived"}:
+        raise SkillLearningGateError("SKILL_LEARNING_TARGET_DISABLED")
+    if publish.expected_revision != current.revision or publish.expected_sha256 != current.sha256:
+        raise SkillLearningGateError("SKILL_LEARNING_REVISION_CONFLICT")
     publish, redacted = _redacted_publish(publish)
     text = render_learned_skill(publish.decision)
     sha = skill_content_sha256(text)
     if sha == current.sha256:
         return _event(EVENT_SKIPPED, current, publish, CODE_UNCHANGED)
     path = store.skill_path(current.name)
-    previous = path.read_text(encoding="utf-8")
+    previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
     _stage_and_check(store, publish, text)
-    record = replace(current, version=current.version + 1, sha256=sha, updated_at=utc_now(),
-                     source_run_ids=_runs(current.source_run_ids, publish.request))
+    record = replace(current, version=current.revision + 1, revision=current.revision + 1, sha256=sha, updated_at=utc_now(),
+                     source_run_ids=_runs(current.source_run_ids, publish.request), last_operation_id=str(publish.request.get("operation_id") or ""))
     try:
+        store.check_write(path,text)
         replace_skill_file(path, text)
         store.save_version(current.name, record.version, text)
         store.save_registry(replace(registry, skills={**registry.skills, current.name: record}))
-    except OSError as exc:
+    except (OSError, SkillLearningStoreError) as exc:
         replace_skill_file(path, previous)
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
     return _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else "")
 
 
-# LLM: 回滚只作用于登记在册且未被用户改动的 Skill；v1 回滚等同删除。回到上一版本时版本号减一，hash 取旧版本全文。
+# LLM: 回滚只作用于登记在册且未被用户改动的Skill；v1回滚等同删除。激活版本回退但revision单调递增，历史文件不可重用。
 # 函数用途: 把一个自学 Skill 退回上一个版本，返回账本事件。
 def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningEvent:
     with store.state_lock():
@@ -153,7 +162,8 @@ def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningE
         text = store.read_version(name, current.version - 1)
         if text is None:
             raise SkillLearningGateError(CODE_VERSION_MISSING, {"version": current.version - 1})
-        record = replace(current, version=current.version - 1, sha256=skill_content_sha256(text), updated_at=utc_now())
+        record = replace(current, version=current.version - 1, revision=current.revision + 1, sha256=skill_content_sha256(text), updated_at=utc_now())
+        store.save_version(name, record.revision, text)
         replace_skill_file(store.skill_path(name), text)
         store.save_registry(replace(registry, skills={**registry.skills, name: record}))
     return SkillLearningEvent(EVENT_REVERTED, "", name, record.version, record.sha256)
@@ -204,7 +214,7 @@ def _owned_record(store: SkillLearningStore, registry: SkillLearningRegistry, na
     path = store.skill_path(name)
     if path.is_symlink() or not path.is_file():
         raise SkillLearningGateError(code, {"skill_name": name, "state": "missing"})
-    if skill_content_sha256(path.read_text(encoding="utf-8")) != current.sha256:
+    if skill_content_sha256(read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)) != current.sha256:
         raise SkillLearningGateError(code, {"skill_name": name, "state": "user_modified"})
     return current
 
@@ -228,7 +238,7 @@ def _redacted_publish(publish: PublishRequest) -> tuple[PublishRequest, bool]:
 def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, text: str, target: Path) -> None:
     stage = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=store.directory))
     try:
-        staged = _staged_skill(stage, publish, text)
+        staged = _staged_skill(store, stage, publish, text)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
             raise SkillLearningGateError(CODE_NAME_TAKEN, {"skill_name": publish.decision.name})
@@ -244,7 +254,7 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
 def _stage_and_check(store: SkillLearningStore, publish: PublishRequest, text: str) -> None:
     stage = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=store.directory))
     try:
-        _staged_skill(stage, publish, text)
+        _staged_skill(store, stage, publish, text)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -252,11 +262,12 @@ def _stage_and_check(store: SkillLearningStore, publish: PublishRequest, text: s
 # LLM: 解析必须带 frontmatter 且 name/description/when_to_use/tags 与决定逐字一致；guard 以 agent_generated
 #   来源扫描、从不 force，文件数与大小上限沿 guard_config。返回暂存的 Skill 目录。
 # 函数用途: 在暂存目录写入并通过解析与安全扫描两道检查。
-def _staged_skill(stage: Path, publish: PublishRequest, text: str) -> Path:
+def _staged_skill(store: SkillLearningStore, stage: Path, publish: PublishRequest, text: str) -> Path:
     decision = publish.decision
     skill_dir = stage / decision.name
     skill_dir.mkdir()
     skill_md = skill_dir / "SKILL.md"
+    store.check_write(skill_md,text)
     skill_md.write_text(text, encoding="utf-8")
     try:
         card = parse_skill_file(skill_md, source="owner", require_frontmatter=True)

@@ -225,7 +225,7 @@ def test_proof_failure_returns_typed_public_reason_without_business_effect(tmp_p
     result = _call(agent)
     assert not result.ok and result.reported_error_code == expected
     facts = json.loads(result.output)
-    assert facts['http_status'] == (0 if status == 200 else status)
+    assert facts['http_status'] == status
     assert SECRET not in result.output and TOKEN not in result.output
     assert result.effect_outcome != 'unknown' and not _business_writes(server)
 

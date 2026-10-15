@@ -67,9 +67,9 @@ def sign_interaction_reference(owner_home: Path, payload: dict[str, object]) -> 
 
 
 # LLM: 先校验格式/收件人/期限，再按纯 owner 解析读取已有密钥；失败不得创建 owner 或密钥，签名通过也不代替原执行/权限校验。
-# 函数用途: 核验私聊原操作者提交的引用，拒绝转发、改字段、过期和错误用户。
+# 函数用途: 核验原操作者/已签群成员引用；只有cancel允许关闭过期原卡，其余动作拒绝过期。
 def verify_interaction_reference(
-    home_root: Path, reference: str, *, channel: str, actor_id: str, submitter: dict | None = None,
+    home_root: Path, reference: str, *, channel: str, actor_id: str, submitter: dict | None = None, decision: str = "",
 ) -> dict[str, object]:
     if len(reference) > 8192:
         raise ValueError("交互引用无效")
@@ -80,7 +80,7 @@ def verify_interaction_reference(
     payload = json.loads(raw)
     expiry = float(payload.get("expires_at") or 0) if isinstance(payload, dict) else 0
     if (not isinstance(payload, dict) or payload.get("channel") != channel
-            or not math.isfinite(expiry) or expiry <= time.time()):
+            or not math.isfinite(expiry) or expiry <= 0 or (expiry <= time.time() and decision != "cancel")):
         raise ValueError("交互引用不属于此用户或已过期")
     owner = payload.get("owner")
     if not isinstance(owner, dict) or set(owner) != {"provider", "owner_kind", "owner_id"}:
@@ -90,23 +90,33 @@ def verify_interaction_reference(
     expected = hmac.new(interaction_key(resolved.home_dir), b"im-interaction-v1\0" + raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise ValueError("交互引用签名无效")
-    validate_interaction_submitter(payload, actor_id=actor_id, submitter=submitter)
+    validate_interaction_submitter(payload, actor_id=actor_id, submitter=submitter, decision=decision)
     return payload
 
 
-# LLM: 群开放只适用于凭据输入；原 actor 仍保留为任务授权事实，成员事实只来自认证适配器。
+# LLM: 群开放只适用于凭据输入及签名模型选择卡cancel；其它模型决定仍锁原actor，成员事实只来自认证适配器。
 # 函数用途: 核对签名中的呈现范围与可信实际提交者，不向审批和模型设置扩散群权限。
-def validate_interaction_submitter(payload, *, actor_id, submitter=None):
-    presentation = payload.get("presentation")
+def validate_interaction_submitter(payload, *, actor_id, submitter=None, decision=""):
+    presentation = interaction_presentation(payload,decision)
     if presentation is None:
         if payload.get("actor_id") != actor_id:
             raise ValueError("交互引用不属于此用户")
         return
     owner = payload.get("owner") or {}
-    if (payload.get("kind") != "task_credential" or payload.get("channel") != "feishu"
+    if (payload.get("kind") not in {"task_credential","model_configuration"} or payload.get("channel") != "feishu"
             or owner.get("provider") != "feishu" or owner.get("owner_kind") != "group"
             or presentation != {"kind": "group", "chat_id": owner.get("owner_id")}
-            or payload.get("submitter_policy") != "current_group_member"
+            or (payload.get("submitter_policy") if payload.get("kind")=="task_credential" else payload.get("cancellation_submitter_policy")) != "current_group_member"
             or submitter != {"actor_id": actor_id, "chat_id": owner.get("owner_id"), "current_group_member": True}
             or not actor_id):
         raise ValueError("群交互提交者范围无效")
+
+
+# LLM: 模型群取消资格单独签名，不把cancel授权扩散到select/save/edit；原私人form没有群取消呈现。
+# 函数用途: 取当前准确动作能使用的签名群范围，普通模型操作保持原actor限制。
+def interaction_presentation(payload,decision=''):
+    if payload.get('kind')=='model_configuration':
+        if payload.get('presentation') is not None:
+            raise ValueError('模型卡不能借用群凭据输入权限')
+        return payload.get('cancellation_presentation') if decision=='cancel' and payload.get('mode')=='selection' else None
+    return payload.get('presentation')

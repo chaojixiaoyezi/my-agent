@@ -453,11 +453,12 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
 
 
 # LLM: 自学习关闭时返回 None，收口与 Gateway 车道都按缺席处理；开启时与 Curator 共用同一 backend（owner 选定模型、
-#   非流式），快照只读 SkillsService 当前 owner 视图。服务没有模型可调用入口，发布只经自动闸门。
+#   非流式），快照只读当前owner视图；只生成待确认候选，维护保护原任务/监控引用。
 # 函数用途: 按自学习开关为当前 owner 创建自动总结 Skill 服务。
 def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearningService | None:
     if not config.enable_self_learning:
         return None
+    from .capability.skill_learning_protection import learning_protection_for_agent
     return SkillLearningService(
         SkillLearningStore.for_home(agent.home_paths),
         SkillLearningSettings.from_config(config),
@@ -466,6 +467,9 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
             snapshot_provider=lambda: agent.skills_service.snapshot_for(),
             guard_config=config,
             owner_id=str(agent.home_paths.owner_id or "local/main"),
+            protection_provider=lambda: learning_protection_for_agent(agent),
+            lesson_provider=lambda: SkillProposalService(agent.home_paths, config=config),
+            deployment_root=agent.home_paths.root,
         ),
     )
 
@@ -560,6 +564,7 @@ class SimpleAgent(
             policy_provider=lambda: resolve_effective_owner_policy(self.home_paths),
             plugin_roots=self._plugin_skill_roots,
             package_provider=self._capability_packages,
+            learning_recommended_limit_provider=lambda: config.self_learning_recommended_limit,
         )
         self.capability_router = CapabilityRouter(
             config=config,
@@ -1088,6 +1093,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             retrieval_limit=TOOL_RETRIEVAL_LIMIT_COUNT,
             vector_search_enabled=config.tool_vector_search_enabled,
             shell_tool_timeout=config.tool_shell_timeout,
+            process_session_wait_slice_seconds=(capability_config_for_agent(agent) or CapabilityConfig()).process_session_wait_slice_seconds,
             shell_tool_output_max_chars=config.tool_shell_output_max_chars,
             pty_session_idle_timeout_minutes=config.pty_session_idle_timeout_minutes,
             background_process_listen_scope_enforce=config.background_process_listen_scope_enforce,
@@ -1251,7 +1257,7 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 
 # LLM: Gateway 状态与安全重启仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
 #   audit_records 与 user_config 同范围注册（执行时再按 owner 控制与管理员许可裁决）；admin_controls 只按 is_permission_admin 注册。
-#   record_lesson 只在启用子代理时注册，并由注册表默认隐藏，主线程工具面、tool_search 与 list_tools 都看不到它。
+#   record_lesson只按原子代理开关隐藏；普通/群手动总结只产本owner候选，迁移工具只prepare/status，正式确认仍走原人类控制。
 # 函数用途: 把配置、审计、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
@@ -1265,8 +1271,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         agent.tools.register(PackageBuildTool(agent))
         # learnpack：按"自动装"开关安装她打的包，开关关着只开待确认安装单（默认收起），同样只给本机管理员。
         agent.tools.register(PackageInstallTool(agent))
-        # learnpack：用户让她"总结一下"时交给自学习流水线（默认收起）；自学习关着时如实回执。
-        agent.tools.register(SkillSummarizeTool(agent))
+    # 所有owner只总结自己的当前执行；工具核验原scope，正式发布仍由人类确认。
+    agent.tools.register(SkillSummarizeTool(agent))
     # 普通 user 也能经原 owner/thread 设置服务操作自己的决策覆盖；group/未知 owner 不扩权。
     # 统一审计工具同一范围注册：只读本人结构化记录，跨用户审计另需管理员明确许可（工具内复核）。
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
@@ -1284,6 +1290,13 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(PublishAuditUpdateTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
+    from .tooling.skill_transfer_tool import SkillTransferTool
+
+    agent.tools.register(SkillTransferTool(agent))
+    if agent.config.enable_self_learning:
+        from .capability.skill_feedback_tool import SkillFeedbackTool
+
+        agent.tools.register(SkillFeedbackTool(agent))
     # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/
     # 时间窗,让模型能查/翻本地历史记录(记忆、产物、归档),零 LLM 成本纯读。
     agent.tools.register(SessionSearchTool(agent))
@@ -1308,6 +1321,11 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     from .tooling.task_credential_tool import RequestCredentialsTool
     from .user_space.task_credentials import credential_headers
     agent.tools.register(RequestCredentialsTool(agent))
+    from .tooling.tool_program import ToolProgramTool
+
+    # 原快照和每次执行都核查开关；程序不能借包装器发现/执行未授权工具。
+    agent.tools.register(ToolProgramTool(lambda: bool(
+        (capability := capability_config_for_agent(agent)) and capability.tool_program_enabled)))
     from .tooling.feishu_cloud_tool import FeishuCloudTool
 
     agent.tools.register(FeishuCloudTool(agent))

@@ -287,3 +287,38 @@ YAML 写中文注释，AgentConfig 写默认值，整数走 `_TIMEOUT_INT_FIELDS
 - 容量预留、暂存校验、激活和成功次数沿同一原子提交/幂等记录；并发学习与导入不能各自通过旧余量后一起超配。保护被引用版本，失败留明确终态；不将配额不足伪装为“没有可学内容”。
 
 后续验收重点：50 满额接收新方法、全部常用项被固定、同源重复与同名冲突、批量超过常用上限、实际存储不足、归档/版本/暂存计费、并发导入抢余量、崩溃重试不半份复刻、不重复计成功、个人与群隔离、记忆不越权及凭据不随 Skill/资源迁移。本轮只有源码与既有用例核对、设计记录，没有新建接收接口或调整配额。
+
+
+## 18. 版本安全切片（2026-10-14，本地实施、未发布）
+
+托管登记新增单调 `revision`，`version`仍表示当前激活正文版本。总结材料冻结当时revision/hash，提交在原state锁内比较；期间用户回滚、并发更新均使旧结果返回 `SKILL_LEARNING_REVISION_CONFLICT`。旧登记无revision时从既有版本编号恢复高水位，不覆盖历史文件。
+
+回滚激活旧正文并增加revision；每次状态修订归档不可变正文，后续新正文以新revision编号发布。`save_version`同编号同内容幂等、异内容拒绝。暂不按五份清理历史，后续统一维护依据运行/等待/监控引用与owner配额回收；不能为了控制份数删掉在途正文。
+
+SkillsService只为准确registry归属、canonical路径和hash一致的自学条目固定已存在的版本路径；公开ref字段不变。读取历史正文仍检查原托管身份存在和原guard，删除/撤销登记后旧快照不可读；不把历史目录变成任意owner可读库。普通手写/共享/包Skill沿原合同。此切片只覆盖S3现有的SKILL.md，额外用户资源不被私自纳管；资源版本与持久恢复引用由后续统一维护切片接线。
+
+本切片不改变内容发布策略；历史自动发布代码与本轮AGENTS正式候选确认要求的统一仍属下一切片必须完成内容，不因本次CAS通过就声称确认边界已修。无真实模型/服务调用，无远端提交或部署。
+
+## 19. 第11—16项维护实施（2026-10-14，本地待集成）
+
+最新用户确认边界覆盖本文第1—15节历史自动发布：S3总结生成同一learning store中的有界待确认候选（proposals/），S1 runner仅提案，不再actor=auto确认。正式内容必须经人类CLI或原认证 `/skills learned confirm|reject <编号> <修订>`，S1仍沿 `/skills confirm`。候选先脱敏/解析/guard，不保留完整聊天材料；show展示准确来源、理由、内容与适用场景。模型的skill_feedback没有confirm/human参数。
+
+单一registry纳管S1/S3：S1只接原committed提案、仍有效Candidate、准确原路径与未改hash，layout=owner保原stable_id和位置；S3为learned。用户手改、来源不明、内置/共享/插件/公共包不接管。revision用于内容及显式启停冲突；维护元数据不能写入可伪造frontmatter。旧任务/子代理持久expected_refs按准确历史hash恢复托管正文；普通来源换版仍失败关闭。撤销/删除/停用后旧历史不可借恢复继续使用。
+
+采用与效果分开：模型仅声明准确当前快照/claim的adopted，登记run/root/task和hash。人类effective/ineffective必须匹配该任务的采用回执和准确hash/actor；同一周期job只算一份质量证据，不因连续成功刷分。读get、整轮完成和环境失败不当有效性证明。多任务观察可进入后续已有方法更新材料，仍生成候选等待确认。`self_learning_include_background=false`保持原缺省；显式开启后允许已完成后台/定时任务在同一预算内提交学习请求。
+
+推荐默认50与持久库分开：新增self_learning_recommended_limit=50只过滤默认模型目录，搜索、显式get与任务必需/在用条目不被名额剥夺。self_learning_max_skills新默认0；原显式非零仍按原新建硬上限，不偷换成推荐数。52个实际托管Skill可保存且当前任务显式读取名单外条目。所有请求、候选、版本、正式文件、registry/账本沿原owner quota事务；暂存和历史同占字节，不旁路超配。
+
+维护默认observe；显式autonomous才按配置冷藏后归档，默认阈值30/180天可改，0关闭对应动作。旧条目首次建立baseline；固定、用户停用、原活跃/等待任务、子代理及所有未删除监控（含暂停/年度/远期）的原skill_refs等准确引用被保护。保护账读不完整不归档。归档与blocked_names用户删除分开，目录移动/登记失败回滚；恢复只恢复原身份，用户删除不能自动复活。冷藏仍可检索，重新采用可恢复试用推荐；环境故障不会降级。
+
+成本仍复用原后台车道，不建每owner线程。新增self_learning_global_daily_limit=2000（0不限），原home根data/skill_learning_budget.json按UTC跨owner锁内保留调用，与owner日预算并守；全局已满先预检，不反复消费owner额度。候选满20时不再发模型请求。所有调用失败仍消耗已保留额度；并发最后一个名额竞争失败可能保守消耗一次owner额度，不会超全局模型上限。
+
+跨owner投递/复刻由独立skill_transfer模块沿registry.import_operations preparing/committed/failed原子记录；SkillsService隐藏未committed目标并将registry hash纳入缓存失效，不能在批量导入中露半份。该运输线另行验收。当前公开Skill资源入口仍只读正文，能力包成员沿原package snapshot，不能把复制资源字节冒充已有公开Skill资源执行入口。
+
+### 宿主客观质量反馈
+
+原 `verification.runtime.record_tool_verification` 在项目声明验证命令的原证据账提交后，对同 run 已登记采用的准确方法 hash 记一次宿主有效证据。一般 shell 成功、整轮成功、未分类命令和命令非零不等于方法有效/无效；无法区分环境失败时不降分。原 `pack_verification_service._run_once` 在原检查账写入成功后，使用钉住原版检查器的 `valid=true/false` 记有效/无效；`error/not_run/cancelled` 不评分。检查器复用结果不重复登记。同一 task/job 最多一份质量样本，人类纠正覆盖该主体宿主评分，不以读取次数或监控循环次数刷分。未登记采用、run/hash不一致、禁用自学习或记账失败时跳过，不改变原工具/核验结果。
+
+### 全owner手动总结
+
+`skill_summarize` 不再限制首期local admin，普通用户和群沿各自owner的 `enable_self_learning` 及原TaskLink/claim/attempt申请总结。工具核对服务store的精确owner位置，运行scope与准确thread/root；previous也只读当前已授权thread的原有最近完成缓存。配置管理与正式候选确认仍由原人类control权限控制。成功只登记当前owner待确认候选，不能模型自批或跨owner读取。晚到验证回执必须call.run_id与当前run一致才能反馈质量。

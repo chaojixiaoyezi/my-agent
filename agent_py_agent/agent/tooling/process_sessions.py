@@ -79,7 +79,7 @@ class ProcessSessionTool(BaseTool):
                     "type": "number",
                     "minimum": 0,
                     "maximum": _MAX_WAIT_SECONDS,
-                    "description": "wait 最多等待秒数，默认 30，最大 600；等待可由宿主取消，届满不代表进程失败。",
+                    "description": "请求等待秒数，默认30、协议最大600；宿主默认每片最多30秒后交回控制，届满不代表进程失败，保留原session_id继续查询或停止。",
                 },
                 "port": {
                     "type": "integer",
@@ -95,7 +95,7 @@ class ProcessSessionTool(BaseTool):
             category="shell",
             use_cases=(
                 "后台构建、下载或服务启动后查看状态和日志尾部",
-                "需要有界等待后台命令完成时",
+                "长命令先取得原句柄；wait届满仍运行就保留句柄，让宿主完成事件恢复，不用sleep或密集模型轮询",
                 "需要停止当前会话启动的后台命令时",
                 "需要确认服务监听范围、主机防火墙和局域网验证边界时",
             ),
@@ -150,14 +150,16 @@ class ProcessSessionTool(BaseTool):
 
     # LLM: owner_scope_root and workspace_root are fixed by ToolRegistry, never by
     # model arguments. Together they locate the protected cross-process store.
-    # 函数用途: 创建绑定当前用户根和工作区的后台进程会话工具。
+    # 函数用途: 创建绑定当前用户根和工作区、单片等待预算的进程工具，不启动进程。
     def __init__(
         self,
         owner_scope_root: object = "",
         workspace_root: object = ".",
+        max_wait_seconds: int = 30,
     ) -> None:
         self.owner_scope_root = str(owner_scope_root or "")
         self.workspace_root = str(workspace_root or ".")
+        self.max_wait_seconds = max(0, min(600, int(max_wait_seconds)))
 
     # LLM: action 只分派到 registry 的 scope-aware 方法；持久地址与 shell 同读可信 scope.owner_home，
     # 不能由可变路径权限或 cwd 决定。未知、越界与不存在记录均
@@ -234,7 +236,12 @@ class ProcessSessionTool(BaseTool):
             result = process_registry.kill(session_id, scope, store_root)
         else:
             timeout = self._wait_timeout(params.get("timeout_seconds"))
-            result = process_registry.wait(session_id, timeout, scope, store_root)
+            slice_limit = self.max_wait_seconds or _MAX_WAIT_SECONDS
+            effective_timeout = min(timeout, slice_limit)
+            result = process_registry.wait(session_id, effective_timeout, scope, store_root)
+            if isinstance(result, dict):
+                result = {**result, 'wait_budget': {'requested_seconds':timeout,
+                    'effective_seconds':effective_timeout, 'control_returned':True}}
         if result is None:
             return self._error(
                 "PROCESS_NOT_FOUND",

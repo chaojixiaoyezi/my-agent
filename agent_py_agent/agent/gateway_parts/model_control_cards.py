@@ -79,7 +79,7 @@ def _model_submission_digest(home, control_id, decision, fields):
 
 
 # LLM: scope_label 仅来自签名原 owner 的结构身份；卡无密钥/API 地址/探测，按钮只携带签名引用与稳定编号。
-# 函数用途: 渲染当前会话与未来默认模型选择，私人表单按钮不会在群里展示输入框。
+# 函数用途: 渲染当前会话与未来默认选择以及取消；私人表单按钮不在群里展示输入框。
 def model_selection_card(listing, reference, scope_label):
     from .model_profile_service import _selectable_choices, render_model_choices
     elements = [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': scope_label + '\n\n' + render_model_choices(listing)}}]
@@ -90,7 +90,7 @@ def model_selection_card(listing, reference, scope_label):
             actions.append(_button('私聊编辑', reference, 'edit', row['id']))
         elements.extend([{'tag': 'div', 'text': {'tag': 'plain_text', 'content': str(row['model_name'])}},
                          {'tag': 'action', 'actions': actions}])
-    elements.append({'tag': 'action', 'actions': [_button('私聊新增模型', reference, 'add')]})
+    elements.append({'tag': 'action', 'actions': [_button('私聊新增模型', reference, 'add'),_button('取消',reference,'cancel')]})
     return {'config': {'wide_screen_mode': True, 'update_multi': True, 'enable_forward': False}, 'elements': elements}
 
 
@@ -106,7 +106,7 @@ def _button(label, reference, operation, profile_id='', *, submit=False):
 
 
 # LLM: 私人表单 scope_label 仍属原群/本人 owner；仅预填公开连接，密码空且使用官方 password input，不走聊天/模型。
-# 函数用途: 渲染仅原操作者可提交的模型表单。
+# 函数用途: 渲染仅原操作者可提交的模型表单；取消放在form外，不被必填校验拦住。
 def model_configuration_card(reference, scope_label, public=None):
     public = public or {}
     inputs = []
@@ -120,17 +120,24 @@ def model_configuration_card(reference, scope_label, public=None):
         inputs.append(row)
     return {'config': {'wide_screen_mode': True, 'update_multi': True, 'enable_forward': False},
             'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': scope_label + '\n密钥不进入聊天、模型或记忆。'}},
-                         {'tag': 'form', 'name': 'model_configuration', 'elements': [*inputs, _button('保存', reference, 'save', submit=True)]}]}
+                         {'tag': 'form', 'name': 'model_configuration', 'elements': [*inputs, _button('保存', reference, 'save', submit=True)]},
+                         {'tag':'action','actions':[_button('取消',reference,'cancel')]}]}
 
 
 # LLM: 签名冻结原 actor/owner/thread/版本/期限/idempotency；发送沿唯一 Delivery，失败不登记无限输入等待。
-# 函数用途: 创建并投递模型选择或私人表单，保存供应商真实卡片身份。
-def send_model_control_card(base, host, owner, *, actor_id, thread_id, target, listing=None, profile_id=''):
+# 函数用途: 创建并投递模型选择或私人表单，保存真实卡身份；群selection仅为取消单独签当前成员范围。
+def send_model_control_card(base, host, owner, *, actor_id, thread_id, target, listing=None, form_origin=None):
+    from .model_control_dispatch import ModelFormOrigin
+    origin=form_origin or ModelFormOrigin()
+    profile_id=origin.profile_id
     control_id = str(uuid4())
     payload = {'kind': 'model_configuration', 'owner': asdict(owner), 'channel': 'feishu', 'actor_id': actor_id,
                'thread_id': thread_id, 'control_id': control_id, 'expires_at': time.time() + 1800,
                'mode': 'selection' if listing is not None else 'form', 'profile_id': profile_id,
+               'parent_control_id':origin.parent_control_id,
                **_versions(host, thread_id)}
+    if owner.owner_kind=='group' and listing is not None and target==owner.owner_id:
+        payload.update(cancellation_presentation={'kind':'group','chat_id':owner.owner_id},cancellation_submitter_policy='current_group_member')
     reference = sign_interaction_reference(host.home_paths.owner_home_dir, payload)
     public = {}
     if profile_id:
@@ -155,15 +162,21 @@ def send_model_control_card(base, host, owner, *, actor_id, thread_id, target, l
     return {'ok': True, 'message': '模型卡片已发送。'}
 
 
-# LLM: 宿主先验签/解锁；真实原卡/版本先复核，completed 只接同逻辑载荷的 keyed 摘要重放；不保存明文表单。
+# LLM: 宿主先验签/真实actor/解锁；原卡锁内cancel仅终止本卡并记原actor，不改配置；completed仅同逻辑摘要重放。
 # 函数用途: 将原操作者卡片回调应用到原 owner 模型目录或原会话选择。
-def submit_model_control(base, host, owner, payload, body):
+def submit_model_control(base, host, owner, payload, body, *, actor_id=""):
+    from .model_control_dispatch import dispatch_model_form
+    if payload.get('mode')=='selection' and body['decision'] in {'add','edit'}:
+        return dispatch_model_form(base,host,owner,payload,body)
     path = _record_path(host.home_paths.owner_home_dir, payload['control_id'])
     with locked_json_path(path):
         row = read_json_object_report(path, context='model.control').payload
         if (not row or row.get('reference') != body['reference'] or row.get('message_id') != body['message_id']
                 or row.get('chat_id') != body['chat_id']):
             raise ValueError('模型卡身份不匹配')
+        if body['decision']=='cancel':
+            from ..user_space.interaction_cancellation import cancel_model_interaction
+            return cancel_model_interaction(base,path,row,payload,actor_id)
         fields = body.get('fields', {})
         if not isinstance(fields, dict):
             raise ValueError('模型字段无效')
@@ -183,6 +196,8 @@ def submit_model_control(base, host, owner, payload, body):
             result = _save_model_form(host, row, fields)
         else:
             raise ValueError('模型动作无效')
+        if result.get('ok') is not True:
+            return result
         row.update(status='completed', decision=operation, submission_digest=submission_digest, result=result)
         write_private_text_file_atomic_unlocked(path, json.dumps(row, ensure_ascii=False))
         return result
@@ -199,8 +214,9 @@ def _selection_submit(base, host, owner, row, operation, fields):
     if operation == 'add' or operation == 'edit':
         if operation == 'edit' and (profile_id not in choices or profile_id == 'default' or choices[profile_id].get('shared')):
             raise ValueError('共享模型不可编辑')
+        from .model_control_dispatch import ModelFormOrigin
         return send_model_control_card(base, host, owner, actor_id=row['actor_id'], thread_id=row['thread_id'],
-                                       target=row['actor_id'], profile_id=profile_id if operation == 'edit' else '')
+                                       target=row['actor_id'],form_origin=ModelFormOrigin(profile_id if operation=='edit' else '',row['control_id']))
     if operation not in {'select', 'set_default'} or profile_id not in choices:
         raise ValueError('模型选择无效')
     if operation == 'select':
@@ -229,9 +245,13 @@ def _require_current(host, row):
         raise ValueError('模型卡版本已过期')
 
 
-# LLM: 写前复核原目录代次并保护管理员向量端点；空 key 保留仅同 endpoint 原凭据，换 endpoint 必须重新输入。
+# LLM: 写前复核原父卡未取消和目录代次，保护管理员向量端点；空key只保留同endpoint原凭据，不持锁做网络探测。
 # 函数用途: 原子保存一个本人模型与其连接，密钥不进入返回值。
 def _save_model_form(host, row, fields):
+    from .model_control_dispatch import model_form_parent_error
+    parent_error=model_form_parent_error(host,row)
+    if parent_error is not None:
+        return parent_error
     allowed = {'model_backend', 'api_base', 'model_name', 'model_context_window_tokens', 'api_key'}
     if set(fields) != allowed or any(not isinstance(value, str) for value in fields.values()):
         raise ValueError('模型表单字段无效')

@@ -1,6 +1,6 @@
 """learnpack 第 5 步："让她总结一下"（skill_summarize）。
 
-锁定：只注册给本机管理员且默认收起；自学习关着如实返回 SKILL_SUMMARIZE_DISABLED；不在对话回合里返回 SKILL_SUMMARIZE_NO_RUN；
+锁定：所有owner均注册且默认收起；自学习关着如实返回 SKILL_SUMMARIZE_DISABLED；不在对话回合里返回 SKILL_SUMMARIZE_NO_RUN；
 按结构化参数 target 分流：current 要求这一轮正在做活（否则 SKILL_SUMMARIZE_NO_CURRENT_TASK），按会话任务 id 打标记，那个任务
 收尾（哪怕在后面的运行里）入队、不受最少工具轮数限制、只用一次；previous 当场入队这个会话最近完成的那次活（找不到如实返回
 SKILL_SUMMARIZE_NOTHING_RECENT）。同一次活对用户只入队一次（两条路同一个用户请求键，已入队过如实说），不被自动总结去重；
@@ -24,6 +24,8 @@ from agent_py_agent.agent.settings.config import AgentConfig
 
 
 def _agent(tmp_path, monkeypatch, *, owner_kind="main", owner_id="main", **config) -> SimpleAgent:
+    # 原用例只测请求状态与材料，执行租约另由全owner真实claim回归覆盖。
+    monkeypatch.setattr("agent_py_agent.agent.tooling.skill_summarize_tool._authorized_learning_scope",lambda *_args:True)
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
     return SimpleAgent(AgentConfig(model_backend="echo", enable_tools=True, my_agent_owner_provider="local",
                                    my_agent_owner_kind=owner_kind, my_agent_owner_id=owner_id, **config),
@@ -47,12 +49,12 @@ def _pending(service) -> list[dict]:
     return [json.loads(path.read_text(encoding="utf-8")) for path in service.store.pending_requests()]
 
 
-def test_registered_for_admin_only_and_folded(tmp_path, monkeypatch):
+def test_registered_for_owner_and_folded(tmp_path, monkeypatch):
     admin = _agent(tmp_path, monkeypatch)
     hints = admin.tools.tools["skill_summarize"].model_spec.hints
     assert hints.default_deferred and hints.deferred_summary
     user = _agent(tmp_path / "u", monkeypatch, owner_kind="user", owner_id="alice")
-    assert "skill_summarize" not in user.tools.tools
+    assert "skill_summarize" in user.tools.tools
 
 
 def test_self_learning_off_is_reported_honestly(tmp_path, monkeypatch):

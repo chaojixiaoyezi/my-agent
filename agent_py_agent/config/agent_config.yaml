@@ -332,18 +332,10 @@ subagent_takeover_chain_max_depth: 0
 # - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启
 subagent_debug_trace_level: 0
 
-# 自学习（默认关闭）：
-# - false：不自动总结 Skill；子代理的 lesson 只进入统一记忆候选账本，不生成任何 Skill 提案，也不创建提案目录。
-# - true：
-#   1. 主代理正常完成、且本轮工具轮数达到 self_learning_min_tool_rounds 的任务，会在 owner 的 data/skill_learning/
-#      下登记一条有界学习请求；Gateway 后台记忆整理车道用 owner 当前选定的模型判断是否值得沉淀，
-#      值得就新建或更新 owner 的 skills/learned/<名字>/SKILL.md，下一轮自动可用。
-#   2. 不需要用户逐条确认：发布前必须通过自动闸门（输出格式、重名、数量上限、只改自己生成且用户没改过的 Skill、
-#      解析检查、明文密钥检查、安全扫描）；每次写入都记账并保存版本，可用
-#      `my-agent skills learned list/show/revert/remove` 查看、回滚或删除（删除后同名不再自动新建）。
-#   3. 带精确任务/运行来源的子代理 lesson 生成的 Skill 提案会立即走原确认链自动安装（回执标 confirmed_by=auto）；
-#      以前遗留的待确认提案仍可用 `my-agent skills proposals list/show/confirm/reject` 管理。
-# - 会额外消耗模型调用（受下面每日上限约束），并写 owner 的 skills 目录。
+# 自学习（默认关闭）：开启后后台总结主任务、子代理lesson生成待确认候选。
+# 正式Skill的新建或更新必须经用户确认；开关、模型理由及自动维护都不代替确认。
+# 用户可通过 /skills learned proposals 查看，按候选编号和修订确认/拒绝；子代理候选沿 /skills proposals。
+# 会额外消耗受每日预算限制的模型调用，候选保存前脱敏并经过原解析和guard。
 enable_self_learning: false
 
 # 自动总结 Skill 的触发与预算（只在 enable_self_learning 为 true 时生效）：
@@ -356,10 +348,23 @@ self_learning_min_tool_rounds: 6
 # 只有当你嫌它太费模型调用、或反过来觉得总结不够及时想放宽时才需要改。
 # 填 `0` 表示不限次数。
 self_learning_daily_limit: 20
-# 自动总结最多能新建出的自学技能数量上限。
+# 同一部署全部owner每日自学模型调用总上限（UTC），失败调用也计数；0不限，避免大量owner各自绕过总成本预算。
+self_learning_global_daily_limit: 2000
+# 兼容显式配置的新建硬上限，默认0由owner存储配额控制；旧配置的非零值仍按原硬上限，不偷换成推荐数。
 # 只有当你希望给自学技能的总数设个天花板、不让它无限增长时才需要改。
 # 填 `0` 表示不限；它只管新建、不算更新，已有技能的更新不受这个数影响。
-self_learning_max_skills: 50
+self_learning_max_skills: 0
+# 默认常用目录最多展示的自学Skill数；不影响完整搜索、显式读取或持久保存。0表示不限制。
+self_learning_recommended_limit: 50
+# observe只观察；autonomous在引用完整、未固定且仍属托管时允许可恢复冷藏/归档，不发布新内容。
+self_learning_maintenance_mode: observe
+# 冷藏与归档的空闲秒数，0关闭对应动作；默认30天/180天仅在autonomous显式开启时生效。
+self_learning_cool_seconds: 2592000
+self_learning_archive_seconds: 15552000
+# 是否让已完成的后台/定时任务也提交学习请求；默认关闭，开启仍受同一日预算与候选确认。
+self_learning_include_background: false
+# 自主维护且引用完整时，未被引用方法保留最近修订数；当前激活版另保留，固定/在途/监控方法历史不裁剪。0不限。
+self_learning_keep_versions: 5
 # 自动总结时单次调用模型最多等多少秒。
 # 超过就按这次调用失败处理。
 # 只有当你用的模型特别慢、总结经常卡到超时，或反过来想让它更快放弃时才需要调整，并且不能设得比最小允许值更低。

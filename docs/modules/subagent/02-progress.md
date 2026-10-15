@@ -501,3 +501,5 @@ typed 停机错误及准确 request/run/attempt，不重开原调用、不伪签
 详细命令、RED/GREEN 与证明边界见 [安全交接](../../tasks/IM_TASK_SCHEDULER_SECURITY_HANDOFF.md)。
 
 2026-10-14 必要输入取消接线：共同 `subagents/cancellation._close_projection` 在原授权与执行权关闭后，只按准确 root+run 清理该节点的输入依赖；冻结子树成员逐个清，兄弟与其它活任务保留。重复取消已 CANCELLED 节点可重试输入清理，不改 UNKNOWN 业务结果。合同覆盖真实 cancel_subagent_tree、子孙与兄弟隔离；详见 [持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。
+
+2026-10-14 自学维护本地切片：runner的lesson仅生成待确认S1提案，不再actor=auto安装；准确用户确认后按原来源/hash纳入同一learning registry，保原owner路径与stable_id。未部署；详见SKILL_AUTO_SUMMARY的后续实施追加。

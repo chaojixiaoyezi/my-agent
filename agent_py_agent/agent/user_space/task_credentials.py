@@ -322,12 +322,12 @@ def credential_card(row):
         {'tag':'form','name':'credentials','elements':[*inputs,submit]}, {'tag':'action','actions':[cancel]}]}
 
 
-# LLM: 上游已MAC/actor/解锁；同卡同代同决定重试只复用密文并恢复原输入发布，禁止不同fields覆盖或跨提交者重放。
+# LLM: 上游已MAC/actor/解锁；同卡同代终态不变，首次cancel记录真实actor，群重复取消只展示原决定；不覆盖旧ready引用。
 # 函数用途: 接受私人或群成员输入、取消，或确认已保存决定；明文只在首次提交的进程内存在。
 def submit_credential_card(agent,payload,body):
     from ..capability.runtime_config_reload import capability_config_for_agent
     capability = capability_config_for_agent(agent)
-    if capability is None or not capability.im_task_credentials_enabled:
+    if body.get('decision')!='cancel' and (capability is None or not capability.im_task_credentials_enabled):
         raise ValueError('私人凭据输入未启用')
     home = agent.home_paths.owner_home_dir
     path = credential_path(home,payload['credential_ref'])
@@ -340,15 +340,19 @@ def submit_credential_card(agent,payload,body):
         )
         assert_credential_callback_identity(row, payload, body)
         actor = credential_submitter(row, body)
+        if body['decision']=='cancel' and row['status'] not in {'pending','cancelled'}:
+            from .interaction_cancellation import already_handled_result
+            return already_handled_result()
         if row['status'] != 'pending':
-            publish = credential_callback_replay(agent, row, body, actor)
+            publish = False if row['status']=='cancelled' and body['decision']=='cancel' else credential_callback_replay(agent,row,body,actor)
         else:
             from ..conversation.input_dependencies import credential_submission_current
-            if time.time() >= row['expires_at'] or not credential_submission_current(agent, row):
+            if body['decision']!='cancel' and (time.time() >= row['expires_at'] or not credential_submission_current(agent, row)):
                 raise ValueError('原任务或卡片已失效')
             row['submitter_actor_id'] = actor
             if body['decision']=='cancel':
-                row['status']='cancelled'
+                from .interaction_actor_audit import record_interaction_actor
+                row.update(status='cancelled',cancelled_by=record_interaction_actor(agent,payload,decision='cancel',actor=actor))
             elif body['decision']=='submit':
                 from .task_credential_forms import credential_submission_values
                 value, metadata = credential_submission_values(row, body.get('fields'), credential_origin)
@@ -360,9 +364,13 @@ def submit_credential_card(agent,payload,body):
             _save_credential_row(admission,path,row)
             publish = True
     from ..conversation.input_dependencies import publish_credential_resolution
-    if publish:
+    if row['status']=='cancelled':
+        from .task_credential_forms import retire_credential_input
+        retire_credential_input(agent,row)
+    elif publish:
         publish_credential_resolution(agent, row)
-    return {'ok':True,'decision':row['status'],'message':'凭据已安全保存，尚未验证。' if row['status']=='ready' else '已取消凭据输入。'}
+    from .interaction_cancellation import credential_cancel_result
+    return credential_cancel_result(row) if row['status']=='cancelled' else {'ok':True,'decision':row['status'],'message':'凭据已安全保存，尚未验证。'}
 
 
 # LLM: 只为当前调用的原任务/监控和同发起人注入指定 origin；引用泄漏不等于可解密，重定向仍由原网络门处理。

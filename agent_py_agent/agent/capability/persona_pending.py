@@ -2,6 +2,7 @@
 #   网关侧(update_persona 工具存)与适配器侧(飞书卡片回调取)同一 my_agent_home 根、都能读到。一条记录=
 #   {token, owner_*, target=soul, content, created_at}。pop 用原子领取(os.replace)保证并发/重复
 #   回调只有一个调用能拿到记录 → 只写一次(幂等基石)。TTL 过期(默认 24h)自动作废。改动时同步测试。
+# 模块用途: 保存原人设待确认记录，确认与取消共用单记录锁，取消不撤销已生效设定。
 from __future__ import annotations
 
 import json
@@ -11,6 +12,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from ..common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
 
 _DIR_NAME = "pending_persona"
 # 待确认画像变更的默认存活秒数，超时后丢弃。
@@ -84,7 +87,7 @@ def load(root: str | Path, token: str, ttl_seconds: float = _DEFAULT_TTL_SECONDS
     except (OSError, json.JSONDecodeError):
         return None
     record = _record_from_dict(data)
-    if record is None or record.is_expired(ttl_seconds):
+    if data.get('status','pending')!='pending' or record is None or record.is_expired(ttl_seconds):
         return None
     return record
 
@@ -95,6 +98,16 @@ def pop(root: str | Path, token: str, ttl_seconds: float = _DEFAULT_TTL_SECONDS)
     path = _record_path(root, token)
     if path is None:
         return None
+    with locked_json_path(path):
+        current=load(root,token,ttl_seconds)
+        if current is None:
+            return None
+        return _pop_locked(path,ttl_seconds)
+
+
+# LLM: 调用方已持原记录锁，确认与取消不可同时赢得原token；原子rename仍防其它进程重复写入。
+# 函数用途: 领取准确原待确认记录，副作用只限删除这一条pending文件。
+def _pop_locked(path,ttl_seconds):
     claim = path.parent / f"{path.stem}.claim.{uuid.uuid4().hex}"
     try:
         os.replace(path, claim)  # 原子领取:并发下只有一个 replace 成功,其余 FileNotFoundError
@@ -195,3 +208,33 @@ def _unlink_quiet(path: Path) -> None:
 
 
 __all__ = ["PendingPersona", "add", "load", "pop", "purge_expired"]
+
+
+# LLM: 取消与confirm共用原记录锁；允许过期记录被关闭，但不复活确认、不改已提交SOUL，也不建立另一批准账。
+# 函数用途: 验证原发起人并幂等取消准确人设提案，点击审计仅在首次赢得原行时记录。
+def cancel(root,token,operator):
+    from ..user_space.interaction_actor_audit import (
+        interaction_actor_text,
+        interaction_audit_host,
+        record_interaction_actor,
+    )
+    path=_record_path(root,token)
+    if path is None:
+        raise ValueError('人设引用无效')
+    with locked_json_path(path):
+        if not path.is_file():
+            return {'wrote':False,'owner_id':None,'reply_text':'原卡已处理，取消没有撤销或修改已完成的操作。'}
+        data=json.loads(path.read_text())
+        record=_record_from_dict(data)
+        if record is None or not operator or operator!=record.owner_id:
+            return {'wrote':False,'owner_id':None,'reply_text':'只有原发起人可以取消这条长期设定。'}
+        if data.get('status','pending') not in {'pending','cancelled'}:
+            return {'wrote':False,'owner_id':None,'reply_text':'原卡已处理，未修改已有设定。'}
+        facts=data.get('cancelled_by')
+        if data.get('status')!='cancelled':
+            owner={'provider':record.owner_provider,'owner_kind':record.owner_kind,'owner_id':record.owner_id}
+            payload={'kind':'persona','channel':'feishu','owner':owner,'input_id':token}
+            facts=record_interaction_actor(interaction_audit_host(root,owner),payload,decision='cancel',actor=operator)
+            write_private_json_file_atomic_unlocked(path,{**data,'status':'cancelled','cancelled_by':facts})
+        return {'wrote':False,'owner_id':operator,'clicked_by':facts,
+                'reply_text':interaction_actor_text(facts)+' 已取消这条人设提案；已有长期设定未改变。'}

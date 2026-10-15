@@ -98,6 +98,7 @@ class _RunScope:
     pack_root: Path | None = None
     originals: dict[str, OriginalFile] | None = None
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    learning_feedback: object = None
 
     # LLM: 当前候选模式只来自本回合钉住的包；closeout 的 current 与 post-write 的 known_current 共用它。
     # 函数用途: 按钉住包声明汇总当前核验需要认的路径模式。
@@ -220,6 +221,7 @@ def _verification_section(scope: _RunScope) -> str:
 # 函数用途: 组装本次核验的宿主事实与擦洗上界，前提不满足时不启动核验。
 def _run_scope(agent: object, params: object) -> _RunScope | None:
     from ..settings.secret_ref import managed_secret_environment_names
+    from .skill_learning_host_feedback import observe_pack_verification
 
     if not host_verification_enabled(agent):
         return None
@@ -236,7 +238,8 @@ def _run_scope(agent: object, params: object) -> _RunScope | None:
                      (str(getattr(params, "run_id", "") or ""), str(getattr(params, "attempt_id", "") or "")),
                      getattr(getattr(agent, "subagents", None), "runtime_db", None), ledger.written_paths(),
                      ledger.path.parent, load_task_originals(ledger.path.parent),
-                     managed_secret_environment_names(agent.config))
+                     managed_secret_environment_names(agent.config),
+                     learning_feedback=lambda result,key: observe_pack_verification(agent,params,result,key))
 
 
 # LLM: 写后检查先看写后反馈上限（_paused_post_write），到上限的检查对象不跑检查程序；收尾检查照常全跑。
@@ -297,8 +300,10 @@ def _run_once(scope: _RunScope, pair: tuple, target: Path, trigger: str) -> tupl
         return key, PackVerificationResult.from_fact(cached)
     else:
         result = run_pack_verifier(request)
-    scope.ledger.append({"kind": "result", "trigger": trigger, "key": key, "input_matches": matches,
+    recorded = scope.ledger.append({"kind": "result", "trigger": trigger, "key": key, "input_matches": matches,
                          "fact": result.to_fact()})
+    if recorded and scope.learning_feedback is not None:
+        scope.learning_feedback(result,key)
     _append_event(scope, result, trigger)
     return key, result
 

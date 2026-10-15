@@ -1,3 +1,5 @@
+# LLM: 原实时归档遵守聊天保存开关；工具最小审计单独保留结构事实，不写正文或改变operation权威。
+# 模块用途: 保存运行实时经历或最小工具审计，后台save=False不再丢失安全诊断。
 
 from __future__ import annotations
 
@@ -79,6 +81,8 @@ def archive_assistant_tool_round_if_enabled(
         _record_live_archive_error(params, exc, context="live_archive.assistant_tool_round")
 
 
+# LLM: 完整档案仍受save控制，关闭时只调用同owner最小审计投影；修改需同步后台与脱敏回归。
+# 函数用途: 归档真实工具事实，save=False也保留操作和供应商数值诊断，不复制参数/输出正文。
 def archive_tool_call_if_enabled(
     agent: object,
     params: object,
@@ -88,6 +92,8 @@ def archive_tool_call_if_enabled(
     tool_index: int,
 ) -> None:
     if not _live_archive_enabled(agent, params):
+        from .minimal_tool_audit import archive_minimal_tool_audit
+        archive_minimal_tool_audit(agent, params, archive_record)
         return
     try:
         result = None

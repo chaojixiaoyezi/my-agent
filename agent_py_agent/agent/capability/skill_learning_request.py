@@ -30,19 +30,19 @@ _EXCLUDED_SOURCES = frozenset({"background_main_agent"})
 
 # LLM: 全部是结构化判据；子代理（task_local）、后台唤醒/定时/Goal 续跑回合、不落盘的回合和工具轮数不足的回合都不学。
 # 函数用途: 判断这次收口是否值得登记学习请求。
-def learning_request_eligible(ctx: object, min_tool_rounds: int) -> bool:
+def learning_request_eligible(ctx: object, min_tool_rounds: int, *, include_background: bool = False) -> bool:
     return (
         bool(getattr(ctx, "do_save", False))
         and str(getattr(ctx, "context_scope", "") or "").strip().lower() != "task_local"
-        and str(getattr(ctx, "source", "") or "").strip().lower() not in _EXCLUDED_SOURCES
+        and (include_background or str(getattr(ctx, "source", "") or "").strip().lower() not in _EXCLUDED_SOURCES)
         and int(getattr(ctx, "tool_rounds", 0) or 0) >= max(1, int(min_tool_rounds))
     )
 
 
 # LLM: 不合格或缺少运行身份时返回 None；返回的字典就是要写进队列的请求，之后只读（重试时只改 attempts）。
 # 函数用途: 从收口上下文构造一条学习请求。
-def build_learning_request(ctx: object, min_tool_rounds: int) -> dict[str, object] | None:
-    if not learning_request_eligible(ctx, min_tool_rounds):
+def build_learning_request(ctx: object, min_tool_rounds: int, *, include_background: bool = False) -> dict[str, object] | None:
+    if not learning_request_eligible(ctx, min_tool_rounds, include_background=include_background):
         return None
     identity = str(getattr(ctx, "run_id", "") or getattr(ctx, "request_id", "") or "").strip()
     if not identity:

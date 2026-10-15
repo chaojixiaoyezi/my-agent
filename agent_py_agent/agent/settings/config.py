@@ -434,13 +434,23 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_hierarchy_max_children_per_tool_call: int = 0
     subagent_takeover_chain_max_depth: int = 0
     subagent_debug_trace_level: int = 0
-    # 自学习默认关闭；开启后主代理完成的多轮工具任务会在后台自动总结成 owner 的 skills/learned/ Skill（自动闸门代替人工确认），
-    # 子代理 lesson 提案也会立即走原确认链自动安装。
+    # 自学习默认关闭；开启后只生成待确认候选，主代理与子代理正式内容都须用户显式确认。
     enable_self_learning: bool = False
     # 自动总结 Skill 的触发与预算：工具轮数门槛、每 owner 每日模型调用上限（0 不限）、自学 Skill 数量上限（0 不限，只限新建）、单次调用超时秒数。
     self_learning_min_tool_rounds: int = 6
     self_learning_daily_limit: int = 20
-    self_learning_max_skills: int = 50
+    # 同一部署全部owner自学模型调用的UTC日总上限，0不限。
+    self_learning_global_daily_limit: int = 2000
+    self_learning_max_skills: int = 0
+    # 常用推荐数量不限制保存；维护默认只观察，显式autonomous才冷藏/归档。
+    self_learning_recommended_limit: int = 50
+    self_learning_maintenance_mode: str = "observe"
+    self_learning_cool_seconds: int = 2592000
+    self_learning_archive_seconds: int = 15552000
+    # 后台/定时任务完成也可贡献学习请求；默认关闭，开启仍受同owner日预算。
+    self_learning_include_background: bool = False
+    # 只清理无固定/在途/监控引用的旧修订；0不限，当前激活版永保留。
+    self_learning_keep_versions: int = 5
     self_learning_timeout_seconds: int = 180
     # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
     enable_model_profile_tool: bool = True

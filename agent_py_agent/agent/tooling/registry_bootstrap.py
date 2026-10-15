@@ -139,6 +139,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
         ProcessSessionTool(
             params.owner_scope_root,
             registry.workspace_root,
+            max_wait_seconds=params.process_session_wait_slice_seconds,
         )
     )
     registry.register(TerminalSessionTool(shell_tool))

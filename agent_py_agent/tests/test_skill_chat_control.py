@@ -80,11 +80,13 @@ def test_gateway_dispatch_reaches_the_skill_service_not_steer_or_stop(monkeypatc
     from agent_py_agent.agent.gateway_parts import control_service
 
     seen = []
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    monkeypatch.setattr(control_service,"resolve_gateway_scope_owner",lambda *_args:OwnerIdentity.local_main())
     monkeypatch.setattr(module, "execute_skill_control",
                         lambda agent, command, scope: seen.append(command.operation) or "handled")
-    assert control_service.execute_gateway_conversation_control(None, None, _skills("/skills"), None) == "handled"
+    assert control_service.execute_gateway_conversation_control(None, None, _skills("/skills"), control_service.GatewayControlScope("local-agent","chat","session")) == "handled"
     assert seen == ["overview"]
-    invalid = control_service.execute_gateway_conversation_control(None, None, _skills("/skills show 01"), None)
+    invalid = control_service.execute_gateway_conversation_control(None, None, _skills("/skills show 01"), control_service.GatewayControlScope("local-agent","chat","session"))
     assert invalid.ok is False and "/skills confirm" in invalid.message and seen == ["overview"]
 
 

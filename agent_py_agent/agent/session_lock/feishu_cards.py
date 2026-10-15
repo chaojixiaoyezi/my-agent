@@ -20,7 +20,7 @@ _MODE_ACTION = {"set": "pwd_set", "unlock": "pwd_unlock", "change": "pwd_change"
 
 # LLM: 表单提交值走私聊卡片回调，不放入消息正文；模式是显式控制动作，不能从普通聊天文字推断。
 # 函数用途: 生成首设、解锁或改密卡，说明认证前暂存消息以及告警仍可接收。
-def build_password_card(*, mode: str, user_id: str) -> dict[str, Any]:
+def build_password_card(*, mode: str, user_id: str, reference: str = "") -> dict[str, Any]:
     """密码输入卡:用卡片输入框收密码,值走表单回调、不进聊天记录(防密码留痕)。
 
     mode:'set'(首次设)/ 'unlock'(解锁)/ 'change'(改密码,旧+新两个框)。
@@ -34,8 +34,7 @@ def build_password_card(*, mode: str, user_id: str) -> dict[str, Any]:
         "change": "改密码需**先输旧密码再输新的**(新密码 ≥8 位、含大小写字母和数字)。**都不进聊天记录。**",
     }
     action = _MODE_ACTION[mode]
-    # input_type=password:飞书原生密文输入,内容显示为 • 圆点(不明文);show_icon 给眼睛图标可切换显隐。
-    # 旧版卡片(config/header/elements)即支持此字段(飞书客户端 V6.8+)。
+    # 保留既有字段形态；input_type/password和show_icon的真实客户端兼容尚未验证，不能把mock送达当成已遮蔽。
     def _pwd_input(name: str, label: str, placeholder: str) -> dict[str, Any]:
         return {"tag": "input", "name": name, "input_type": "password", "show_icon": True,
                 "label": {"tag": "plain_text", "content": label},
@@ -50,7 +49,7 @@ def build_password_card(*, mode: str, user_id: str) -> dict[str, Any]:
     submit = {
         "tag": "button", "text": {"tag": "plain_text", "content": "✅ 提交"}, "type": "primary",
         "action_type": "form_submit", "name": "submit",
-        "value": {PWD_ACTION_FIELD: action, "user_id": user_id},
+        "value": {PWD_ACTION_FIELD: action, "user_id": user_id, "reference": reference},
     }
     return {
         "config": {"wide_screen_mode": True, "update_multi": True},
@@ -58,6 +57,8 @@ def build_password_card(*, mode: str, user_id: str) -> dict[str, Any]:
         "elements": [
             {"tag": "markdown", "content": hints[mode]},
             {"tag": "form", "name": "pwd_form", "elements": [*inputs, submit]},
+            {"tag":"action","actions":[{"tag":"button","type":"default","text":{"tag":"plain_text","content":"取消"},
+                "value":{PWD_ACTION_FIELD:'pwd_cancel','user_id':user_id,'reference':reference}}]},
         ],
     }
 
@@ -74,7 +75,7 @@ def build_password_resolved_card(*, ok: bool, message: str) -> dict[str, Any]:
 
 def is_password_action(value: dict[str, Any]) -> bool:
     """卡片回调 value 是不是密码卡动作(据此和 persona 等其它卡分流)。"""
-    return isinstance(value, dict) and str(value.get(PWD_ACTION_FIELD) or "") in {"pwd_set", "pwd_unlock", "pwd_change"}
+    return isinstance(value, dict) and str(value.get(PWD_ACTION_FIELD) or "") in {"pwd_set", "pwd_unlock", "pwd_change", "pwd_cancel"}
 
 
 # LLM: 只携带密码服务的裁决与无秘密提示；展示模板不能反向变成授权状态。

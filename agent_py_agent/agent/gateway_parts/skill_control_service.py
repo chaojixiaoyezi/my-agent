@@ -44,7 +44,7 @@ _SHORT_ID_CHARS = 8
 _BODY_MAX_CHARS = 3000
 _EVENT_ROWS = 10
 _STATUS_LABELS = {"pending_confirmation": "待确认", "committed": "已确认并安装", "rejected": "已拒绝"}
-_STATE_LABELS = {"active": "生效中", "user_modified": "已被你修改（不再自动更新）", "missing": "文件已不存在"}
+_STATE_LABELS = {"archived":"已归档（可restore）", "disabled":"用户已停用", "cooled":"已冷藏（仍可检索）", "active": "生效中", "user_modified": "已被你修改（不再自动更新）", "missing": "文件已不存在"}
 _REVIEW_NOTE = "已按决策模型建议的审核顺序排列，仅供参考；确认或拒绝仍需你逐条执行。"
 _FAILURE_HINTS = {
     CODE_REVISION_MISMATCH: "提案已有更新，版本号对不上；请先用 /skills show 查看最新内容和版本再操作。",
@@ -52,7 +52,7 @@ _FAILURE_HINTS = {
     CODE_TARGET_EXISTS: "同名 Skill 已经存在，这条提案不能安装；可以用 /skills reject 拒绝它。",
 }
 # 会改提案或 Skill 的子命令：改动可能在异常前已经生效（例如删除后追加账本失败），回执不能承诺“没有改动”。
-_WRITE_OPERATIONS = frozenset({"confirm", "reject", "learned_revert", "learned_remove", "using_remove"})
+_WRITE_OPERATIONS = frozenset({"confirm", "reject", "learned_revert", "learned_remove", "using_remove", "learning_proposal", "learning_maintenance", "transfer"})
 _READ_FAILURE = "技能提案或自动 Skill 暂时读不到，请稍后重试。"
 _WRITE_UNCONFIRMED = "这次操作的结果没能完整确认，可能已经生效；请先发 /skills 或 /skills learned 查看当前状态，再决定是否重试。"
 
@@ -64,6 +64,7 @@ class SkillControlHost:
     home_paths: object
     config: object
     capability_config_path: str = ""
+    actor_id: str = ""
 
 
 # LLM: 只表示可预期的用户输入问题（编号找不到或不唯一），消息直接给用户看，不含路径。
@@ -80,6 +81,9 @@ def execute_skill_control(base_agent: object, command: ConversationControlComman
     if not command.valid:
         return ConversationControlResult(_KIND, False, command.usage)
     try:
+        if command.operation == "transfer":
+            from ..capability.skill_transfer_control import execute_transfer_control
+            return execute_transfer_control(base_agent,scope,command.value.split()[1:])
         if command.operation in {"using", "using_remove"}:
             return _execute_using_control(base_agent, command, scope)
         text = run_skill_control(_scoped_host(base_agent, scope), command)
@@ -130,7 +134,7 @@ def _scoped_host(base_agent: object, scope: object) -> SkillControlHost:
     home = home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner))
     same_owner = all(getattr(base_home, key) == getattr(home, key) for key in ("owner_provider", "owner_kind", "owner_id"))
     path = capability_config_path_for(base_agent) if same_owner else default_capability_config_path(home.owner_home_dir)
-    return SkillControlHost(home, base_agent.config, str(path))
+    return SkillControlHost(home, base_agent.config, str(path),str(scope.user_id))
 
 
 # LLM: 按解析器给出的 operation 分派；tokens 是解析器规范化后的参数（含子命令本身）；help 与未知子命令回用法。
@@ -166,6 +170,9 @@ def _overview(host: SkillControlHost, tokens: list[str]) -> str:
     lines = _proposal_list_lines(host, status=PROPOSAL_PENDING)
     report = learned_skills_report(SkillLearningStore.for_home(host.home_paths), host.config)
     lines += ["", f"自动总结的 Skill：{report['count']} 个（发 /skills learned 查看）。"]
+    from ..capability.skill_learning_proposals import list_learning_proposals
+    drafts = [row for row in list_learning_proposals(SkillLearningStore.for_home(host.home_paths)) if row["status"]=="pending"]
+    lines.append(f"待确认学习候选：{len(drafts)}份（/skills learned proposals 查看，确认前不写正式Skill）。")
     return "\n".join(lines)
 
 
@@ -237,7 +244,7 @@ def _show(host: SkillControlHost, tokens: list[str]) -> str:
 def _confirm(host: SkillControlHost, tokens: list[str]) -> str:
     service = _proposals_service(host)
     proposal = _proposal_by_ref(service, tokens[1])
-    return _outcome_text(service.confirm(proposal.proposal_id, int(tokens[2])), proposal)
+    return _outcome_text(service.confirm(proposal.proposal_id, int(tokens[2]),actor=host.actor_id or "user"), proposal)
 
 
 # LLM: 版本号原样交给服务端复核；拒绝只改提案状态（写文件），不碰 Skill 目录。
@@ -285,8 +292,12 @@ def _learned_show(host: SkillControlHost, tokens: list[str]) -> str:
         f"{item['name']}：第 {item['version']} 版，{_STATE_LABELS.get(item['state'], item['state'])}",
         f"创建于 {item['created_at']}，更新于 {item['updated_at']}",
         f"来源运行：{'、'.join(item['source_run_ids']) or '无'}",
+        f"正文hash：{item['sha256']}",
         "最近事件：",
     ]
+    for observation in item.get('maintenance',{}).get('observations',[])[-3:]:
+        if observation.get('authority')=='model':
+            lines.append(f"采用任务：{observation['task_id']}；有效反馈：/skills learned feedback {item['name']} {observation['sha256']} effective {observation['task_id']}")
     for event in detail["events"]:
         code = f" {event.get('code')}" if event.get("code") else ""
         lines.append(f"- {event.get('at')} {event.get('event')} 第 {event.get('version')} 版{code} {event.get('reason') or ''}".rstrip())
@@ -302,7 +313,45 @@ def _learned_action(host: SkillControlHost, tokens: list[str]) -> str:
     return f"已把 {result['skill_name']} 退回到第 {result['version']} 版。"
 
 
+
+# LLM: 此入口只收已认证用户control，候选确认不暴露给模型工具；原owner裁决和expected revision不变。
+# 函数用途: 让普通/群IM用户查看并确认或拒绝自己的学习候选，不依赖管理员CLI。
+def _learning_proposal(host, tokens):
+    from ..capability.skill_learning_proposals import (
+        learning_proposal,
+        list_learning_proposals,
+        resolve_learning_proposal,
+    )
+    store = SkillLearningStore.for_home(host.home_paths)
+    action = tokens[1]
+    if action == 'proposals':
+        rows = [row for row in list_learning_proposals(store) if row['status']=='pending']
+        return '\n'.join(f"{row['proposal_id']} 修订{row['revision']}：{row['decision']['name']}；查看 /skills learned proposal-show {row['proposal_id']}" for row in rows) or '没有待确认学习候选。'
+    row = learning_proposal(store,tokens[2])
+    if action == 'proposal-show':
+        return f"{row['decision']['name']} 修订{row['revision']}\n来源任务：{row['request'].get('task_id','')}；运行：{row['request'].get('run_id','')}\n原因：{row['decision']['reason']}\n适用场景：{row['decision']['when_to_use']}\n{row['decision']['description']}\n{row['decision']['body'][:3000]}\n确认：/skills learned confirm {row['proposal_id']} {row['revision']}\n拒绝：/skills learned reject {row['proposal_id']} {row['revision']}"
+    result = resolve_learning_proposal(store,tokens[2],int(tokens[3]),decision=action,guard_config=host.config,actor_id=host.actor_id)
+    return '学习候选已确认并安装。' if result['status']=='committed' else '已拒绝学习候选。'
+
+
+# LLM: 固定/停用/恢复/反馈属于用户显式control；不解析聊天成功失败，不把模型采用声明变成人类确认。
+# 函数用途: 执行原owner的维护动作，反馈绑定用户给出的准确正文hash与任务编号。
+def _learning_maintenance(host,tokens):
+    from ..capability.skill_learning_maintenance import (
+        LearningObservationSource,
+        control_learning,
+        observe_learning,
+    )
+    store = SkillLearningStore.for_home(host.home_paths)
+    if tokens[1]=='feedback':
+        result = observe_learning(store,tokens[2],sha256=tokens[3],outcome=tokens[4],task_id=tokens[5],source=LearningObservationSource(authority='human',actor_id=host.actor_id,receipt_id='user-control:'+tokens[5]+':'+tokens[3]))
+        return f"已登记该版本反馈：{result['quality']}。"
+    control_learning(store,tokens[2],operation=tokens[1])
+    return '已更新该Skill维护状态。'
+
 _HANDLERS: dict[str, Callable[[SkillControlHost, list[str]], str]] = {
+    "learning_proposal": _learning_proposal,
+    "learning_maintenance": _learning_maintenance,
     "overview": _overview,
     "proposals": _proposals,
     "show": _show,

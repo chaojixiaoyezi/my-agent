@@ -55,6 +55,12 @@ class CapabilityConfig:
     im_task_credentials_enabled: bool = True
     # IM 模型选择与原发起人私人配置卡；仅改变本 owner 目录，不允许普通用户发布全机模型。
     im_model_cards_enabled: bool = True
+    # 跨owner投递/一次复刻仍需双端真人确认精确清单，不能复制权限或秘密。
+    skill_transfers_enabled: bool = True
+    # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。
+    tool_program_enabled: bool = True
+    # 后台过程等待默认30秒交回控制；0不加工作片限制，仍受工具协议600秒与取消边界约束。
+    process_session_wait_slice_seconds: int = 30
     # 云资源工具使用宿主凭据；准确许可或当前可信用户/群的实时协作者权限决定资源范围。
     feishu_cloud_tools_enabled: bool = True
     # 表格写入后用相同身份和后端只读核验一次，未知/不一致不自动重放写入。
@@ -147,11 +153,15 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
         if not isinstance(value, str) or value not in {"ask", "auto"}:
             raise ValueError("owner_default_permission_mode 必须为 ask 或 auto。")
         return value
+    if field_name == "process_session_wait_slice_seconds":
+        if type(value) is not int or not 0 <= value <= 600:
+            raise ValueError("process_session_wait_slice_seconds 必须为0到600的整数。")
+        return value
     if field_name == "tool_approval_timeout_seconds":
         if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).isdigit() or int(value) <= 0:
             raise ValueError("tool_approval_timeout_seconds 必须为正整数。")
         return int(value)
-    if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled"}:
+    if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value

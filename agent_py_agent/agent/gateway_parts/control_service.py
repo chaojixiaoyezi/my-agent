@@ -2652,7 +2652,7 @@ def _cancel_request_execution(request_id: str, *, resources: object) -> None:
     ).start()
 
 
-# LLM: 同 owner 模型选择、监控与匿名 request 计时只作投影；缺计时不补零，不把物理累计当墙钟，不发请求或写配置。
+# LLM: 同owner监控与原线程模型累计/匿名request计时只作投影；缺指标不补零，不跨线程或owner统计，不发请求或写配置。
 # 函数用途: 汇总当前请求、队列、子代理、压缩及模型等待；只统计 scope 可见的原监控，未知不伪造零数量。
 def _gateway_task_status(
     base_agent: object,
@@ -2722,6 +2722,7 @@ def _gateway_task_status(
         quarantined_wakes=_quarantined_wake_count(owner_agent),
         monitors=monitor_counts(base_agent, scope),
         model_timing=facts['model_timing'],
+        model_usage=facts['model_usage'],
     )
 
 

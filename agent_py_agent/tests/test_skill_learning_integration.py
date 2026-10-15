@@ -173,7 +173,13 @@ def _published_store(tmp_path: Path) -> SkillLearningStore:
                           request_id="req-1", task_id="task-1", task_attributes={}, user_prompt="写发布说明",
                           final_response=SimpleNamespace(text="已完成"), archive_tool_calls=[])
     service.enqueue_from_finalize(ctx)
-    assert service.run_pending().status == "published"
+    assert service.run_pending().status == "proposed"
+    from agent_py_agent.agent.capability.skill_learning_proposals import (
+        list_learning_proposals,
+        resolve_learning_proposal,
+    )
+    proposal = list_learning_proposals(service.store)[0]
+    assert resolve_learning_proposal(service.store,proposal['proposal_id'],1,decision='confirm')['status'] == 'committed'
     return service.store
 
 
@@ -200,14 +206,14 @@ def test_cli_list_show_revert_remove_round_trip(tmp_path: Path, capsys) -> None:
 
     assert listed[0] == 0 and listed[1]["self_learning_enabled"] is True and listed[1]["calls_today"] == 1
     assert [(item["name"], item["state"], item["version"]) for item in listed[1]["skills"]] == [(NAME, "active", 1)]
-    assert shown[0] == 0 and [event["event"] for event in shown[1]["events"]] == ["published"]
+    assert shown[0] == 0 and [event["event"] for event in shown[1]["events"]] == ["proposed", "published"]
     assert missing[0] == 1 and missing[1]["error_code"] == "SKILL_LEARNING_NOT_LEARNED"
     assert human_code == 0 and NAME in human and "今日总结调用 1/20 次" in human
     assert [item["state"] for item in edited[1]["skills"]] == ["user_modified"]
     assert refused[0] == 1 and refused[1]["error_code"] == "SKILL_LEARNING_USER_MODIFIED"
     assert removed[0] == 0 and removed[1]["code"] == "removed"
     assert again[0] == 1 and again[1]["error_code"] == "SKILL_LEARNING_NOT_LEARNED"
-    assert [event["event"] for event in store.events(NAME, 0)] == ["published", "removed"]
+    assert [event["event"] for event in store.events(NAME, 0)] == ["proposed", "published", "removed"]
     assert NAME in store.load_registry().blocked_names and not (store.learned_root / NAME).exists()
 
 
@@ -216,7 +222,7 @@ def _subagent_task(run_id: str) -> SubAgentTask:
                         output_json=f"/artifacts/{run_id}/output.json", updated_at=100.0)
 
 
-def test_subagent_lesson_proposals_are_auto_confirmed_when_self_learning_is_on(tmp_path: Path) -> None:
+def test_subagent_lesson_proposals_wait_for_user_confirmation(tmp_path: Path) -> None:
     home = ensure_my_agent_home(tmp_path / "home")
     manager = SubAgentManager(tmp_path / "subagents", candidate_service=CandidateService(home.owner_memory_candidates_jsonl))
     manager.skill_proposals = SkillProposalService(home)
@@ -232,9 +238,11 @@ def test_subagent_lesson_proposals_are_auto_confirmed_when_self_learning_is_on(t
     [proposal] = manager.skill_proposals.list()
     work_log = Path(manager.load(task.id).work_log_file).read_text(encoding="utf-8")
 
-    assert result.ok is True and proposal.status == "committed" and proposal.receipt["confirmed_by"] == "auto"
+    assert result.ok is True and proposal.status == "pending_confirmation" and not proposal.receipt
+    assert not (home.owner_home_dir / "skills" / proposal.target.skill_name / "SKILL.md").exists()
+    assert manager.skill_proposals.confirm(proposal.proposal_id,proposal.revision).ok
     assert (home.owner_home_dir / "skills" / proposal.target.skill_name / "SKILL.md").is_file()
-    assert "skill_proposals=1 skill_proposals_committed=1" in work_log
+    assert "skill_proposals=1 skill_proposals_committed=0" in work_log
 
 
 def test_self_learning_budget_keys_ship_in_yaml_dataclass_and_normalizer() -> None:
@@ -248,7 +256,7 @@ def test_self_learning_budget_keys_ship_in_yaml_dataclass_and_normalizer() -> No
 
     assert shipped.enable_self_learning is False
     assert (shipped.self_learning_min_tool_rounds, shipped.self_learning_daily_limit) == (6, 20)
-    assert (shipped.self_learning_max_skills, shipped.self_learning_timeout_seconds) == (50, 180)
+    assert (shipped.self_learning_max_skills, shipped.self_learning_timeout_seconds) == (0, 180)
     assert normalized["self_learning_min_tool_rounds"] == 6 and normalized["self_learning_daily_limit"] == 5
-    assert normalized["self_learning_max_skills"] == 50 and normalized["self_learning_timeout_seconds"] == 180
+    assert normalized["self_learning_max_skills"] == 0 and normalized["self_learning_timeout_seconds"] == 180
     assert len(warnings) == 3

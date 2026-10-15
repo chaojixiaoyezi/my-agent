@@ -397,7 +397,7 @@ _RUNTIME_BOOL_FIELDS = (
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
     "decision_observe_sampling_enabled", "decision_observe_nonblocking_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
-    "enable_subagents", "enable_self_learning",
+    "enable_subagents", "enable_self_learning", "self_learning_include_background",
     "audit_enabled",
 )
 
@@ -411,13 +411,16 @@ def _normalize_runtime_bools(out: dict[str, object], defaults: object) -> list[s
     return warnings
 
 
+# LLM: 运行策略只读显式枚举，维护缺省observe，非法值不得默开自主归档；同步YAML/dataclass与学习设置测试。
+# 函数用途: 规范日志级别和自学维护策略，返回可追踪的配置告警。
 def _normalize_runtime_choices(out: dict[str, object], defaults: object) -> list[str]:
+    maintenance_warnings = _apply_choice_field(out, defaults, "self_learning_maintenance_mode", ("observe","autonomous"))
     value, warn = CoercionService.coerce_choice(
         "log_level", out.get("log_level"), defaults.log_level,
         choices=("debug", "info", "warning", "error", "critical"),
     )
     out["log_level"] = value
-    return [warn] if warn else []
+    return maintenance_warnings + ([warn] if warn else [])
 
 
 class RuntimeBoolFieldsService:
@@ -617,7 +620,12 @@ _TIMEOUT_INT_FIELDS = (
     ("gateway_restart_cooldown_seconds", 0, None),
     ("self_learning_min_tool_rounds", 1, None),
     ("self_learning_daily_limit", 0, None),
+    ("self_learning_global_daily_limit", 0, None),
     ("self_learning_max_skills", 0, None),
+    ("self_learning_recommended_limit", 0, None),
+    ("self_learning_cool_seconds", 0, None),
+    ("self_learning_archive_seconds", 0, None),
+    ("self_learning_keep_versions", 0, None),
     ("self_learning_timeout_seconds", 10, None),
     ("runner_failure_retry_limit", 0, None),
     ("background_context_max_total_tokens", 0, None),

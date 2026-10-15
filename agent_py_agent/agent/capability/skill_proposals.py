@@ -1,6 +1,6 @@
 # LLM: 自学习 S1 的唯一 Skill 提案权威。只接受带精确 task/run 来源的子代理 lesson Candidate，按固定模板
 #   （不调用模型）渲染草稿，存为 <owner_home>/data/skill_proposals/<proposal_id>.json；正式 SKILL.md 只经 confirm
-#   写入：用户 CLI（actor=user）或自学习开启时 runner 结果链自动确认（actor=auto，用户 2026-09-26 决定不逐条审批），
+#   写入：用户CLI或已认证人类控制显式确认，runner仅提案，不得因enable_self_learning自动确认，
 #   两者都在同一 owner 目录锁内复核提案版本、来源 hash、目标不存在、frontmatter 解析与 agent_generated guard
 #   （从不 force）再原子安装。目录名不得改成 learning_drafts：Curator 每次持 lease 前的 Memory 迁移会递归迁走并
 #   删除该名字的目录。不要为本模块注册任何模型可调用的确认工具。
@@ -14,6 +14,8 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +28,16 @@ from ..common.json_io import (
 from ..contracts.gates.skill_guard import SkillScanResult, install_decision, scan_skill
 from ..memory_store.candidate_models import MemoryCandidate
 from ..memory_store.candidates import CandidateService, CandidateStoreCorruptError
+from ..user_space.owner_quota import (
+    OwnerQuotaChange,
+    OwnerQuotaExceeded,
+    OwnerQuotaUnavailable,
+    owner_quota_enforcer_from_policy,
+)
 from .skill_snapshot import skill_content_sha256
 from .skills import parse_skill_file
+
+_PROPOSAL_QUOTA = ContextVar("skill_proposal_quota",default=None)
 
 SKILL_PROPOSAL_SCHEMA_VERSION = "my-agent.skill-proposal.v1"
 SKILL_PROPOSAL_TRIGGER = "subagent_lesson_candidate"
@@ -203,6 +213,7 @@ class SkillProposalService:
         self.skills_root = Path(home_paths.owner_home_dir) / "skills"
         self.candidates_path = Path(home_paths.owner_memory_candidates_jsonl)
         self.config = config
+        self.home_paths = home_paths
 
     # LLM: 只处理 lesson_candidate_eligible 通过的候选；同一 candidate+hash 的提案用 O_EXCL 创建，已存在（含已拒绝）
     #   即跳过，所以重放、重复 run 或用户拒绝后都不会重复提案。副作用：首次创建提案目录与提案文件。
@@ -233,11 +244,20 @@ class SkillProposalService:
         with self._locked():
             return _read_proposal(path)
 
-    # LLM: 用户 CLI（actor=user）或自学习开启时 runner 结果链（actor=auto）调用；必须带确认方看到的 revision。
+    # LLM: 只由用户CLI或已认证control调用，必须带确认方看到的revision；确认后按原来源/hash纳入统一维护登记，runner不能自动确认。
     #   成功时安装 Skill 并把提案标为 committed（revision+1），回执 confirmed_by 记录确认方。
     # 函数用途: 确认一条提案，复核全部前提后安装为正式 owner Skill。
     def confirm(self, proposal_id: str, expected_revision: int, *, actor: str = "user") -> SkillProposalOutcome:
-        return self._resolve(proposal_id, expected_revision, lambda path, item: self._commit_locked(path, item, actor))
+        outcome = self._resolve(proposal_id, expected_revision, lambda path, item: self._commit_locked(path, item, actor))
+        if outcome.ok:
+            from .skill_learning_migration import adopt_committed_lessons
+            from .skill_learning_store import SkillLearningStore
+            try:
+                adopt_committed_lessons(SkillLearningStore.for_home(self.home_paths),self)
+            except (OSError,ValueError,RuntimeError):
+                # 正式确认已成功，纳管失败不能改写安装回执或删除内容；下一维护批重试原来源。
+                return replace(outcome,detail={**outcome.detail,'maintenance_adoption':'pending_retry'})
+        return outcome
 
     # LLM: 拒绝只改提案状态（revision+1），从不读写 Skill 目录或 Candidate 账本。
     # 函数用途: 用户拒绝一条提案，之后同一候选内容不会再生成新提案。
@@ -260,6 +280,8 @@ class SkillProposalService:
                 return action(path, current)
         except SkillProposalError as exc:
             return SkillProposalOutcome(False, exc.code, detail=exc.detail)
+        except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
+            return SkillProposalOutcome(False,"SKILL_PROPOSAL_STORAGE_LIMIT")
 
     # LLM: 顺序固定：草稿 hash→来源 Candidate→目标不存在→临时目录写入并解析→guard→os.replace 安装→写 committed；
     #   写 committed 失败时删除刚安装的目标，保证失败不留下正式 Skill。副作用：写 skills/<name>/ 与提案文件。
@@ -271,9 +293,11 @@ class SkillProposalService:
         _require_absent(target)
         stage = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=self.directory))
         try:
+            _PROPOSAL_QUOTA.get().check([OwnerQuotaChange(stage/proposal.target.skill_name/'SKILL.md',len(render_skill_markdown(proposal.target.skill_name,proposal.draft).encode()))])
             staged, scan = _stage_and_scan(stage, proposal, self.config)
-            _install(staged, target)
             committed = _committed_proposal(proposal, target, scan, actor)
+            _PROPOSAL_QUOTA.get().check([OwnerQuotaChange(path,len(_encode_record(committed)))])
+            _install(staged, target)
             try:
                 _write_record(path, committed)
             except SkillProposalError:
@@ -287,6 +311,7 @@ class SkillProposalService:
     # 函数用途: 提案文件不存在时创建它并返回提案，已存在时返回 None。
     def _create_if_absent(self, proposal: SkillProposal) -> SkillProposal | None:
         path = self.directory / f"{proposal.proposal_id}.json"
+        _PROPOSAL_QUOTA.get().check([OwnerQuotaChange(path,len(_encode_record(proposal)))])
         try:
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         except FileExistsError:
@@ -312,8 +337,15 @@ class SkillProposalService:
 
     # LLM: 同一 owner 的提案读写共用这把线程锁 + 文件锁；锁文件位于提案目录，首次加锁会创建该目录。
     # 函数用途: 返回当前 owner 提案目录的互斥临界区。
+    @contextmanager
     def _locked(self):
-        return locked_json_path(self.directory / _LOCK_NAME)
+        with owner_quota_enforcer_from_policy(self.skills_root.parent).admission() as admission:
+            with locked_json_path(self.directory / _LOCK_NAME):
+                token = _PROPOSAL_QUOTA.set(admission)
+                try:
+                    yield
+                finally:
+                    _PROPOSAL_QUOTA.reset(token)
 
 
 # LLM: 资格只看结构化字段：MemoryCandidate、lesson 类型、subagent_lesson 来源（排除 model_inferred 自省）、同时具备
@@ -576,6 +608,9 @@ def _read_proposal(path: Path) -> SkillProposal:
 # 函数用途: 原子覆盖一条提案文件。
 def _write_record(path: Path, proposal: SkillProposal) -> None:
     try:
+        admission = _PROPOSAL_QUOTA.get()
+        if admission is not None:
+            admission.check([OwnerQuotaChange(path,len(_encode_record(proposal)))])
         write_json_file_atomic_unlocked(path, proposal.to_record())
     except (OSError, TypeError, ValueError) as exc:
         raise SkillProposalError(CODE_RECORD_WRITE_FAILED, f"{type(exc).__name__}: {exc}") from exc

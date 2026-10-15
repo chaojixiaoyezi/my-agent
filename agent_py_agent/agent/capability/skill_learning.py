@@ -1,12 +1,13 @@
 # LLM: 自学习 S3（自动总结 Skill）的服务入口，只在 enable_self_learning 开启时由组合根装配到 agent.skill_learning。
 #   收口侧 enqueue_from_finalize 只写一条有界请求；Gateway 后台记忆整理车道调用 run_pending：非阻塞运行锁、
 #   前台同端点模型在忙就顺延、每日上限、无工具结构化调用（复用记忆整理的 backend 与 call_backend_with_timeout）、
-#   严格解析、自动闸门发布、账本、删请求。模型失败最多重试 MAX_REQUEST_ATTEMPT_COUNT 次；输出不合规和闸门拒绝不重试。
+#   严格解析、原guard、待用户确认候选、账本、删请求。模型失败最多重试 MAX_REQUEST_ATTEMPT_COUNT 次；输出不合规和闸门拒绝不重试。
 #   不给模型注册任何工具。同步检查 core.py 装配、_finalization_service.py、cli/gateway_loops.py 与 test_skill_learning*.py。
 # 模块用途: 把主代理完成的复杂任务在后台总结成 owner 的自学 Skill，全程不需要用户确认、全程留账。
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 from ..backends.provider_headers import provider_session_scope
 from ..backends.request_scope import foreground_model_active
 from ..memory_store.curator_backend import CuratorModelStillRunningError, call_backend_with_timeout
+from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .skill_learning_prompt import (
     DECISION_SKIP,
     EXISTING_DESCRIPTION_CHARS,
@@ -23,7 +25,7 @@ from .skill_learning_prompt import (
     skill_learning_prompt,
     skill_learning_response_schema,
 )
-from .skill_learning_publish import PublishRequest, SkillLearningGateError, publish_learned_skill
+from .skill_learning_publish import PublishRequest, SkillLearningGateError
 from .skill_learning_request import bounded_text, build_learning_request, recalled_memories
 from .skill_learning_store import (
     CODE_QUEUE_FULL,
@@ -60,8 +62,15 @@ UPDATABLE_COUNT = 3
 class SkillLearningSettings:
     min_tool_rounds: int = 6
     daily_limit: int = 20
-    max_skills: int = 50
+    global_daily_limit: int = 2000
+    max_skills: int = 0
     timeout_seconds: int = 180
+    recommended_limit: int = 50
+    maintenance_mode: str = "observe"
+    cool_seconds: int = 2592000
+    archive_seconds: int = 15552000
+    include_background: bool = False
+    keep_versions: int = 5
 
     # LLM: 读不到或类型不对时用默认值，不因配置损坏而关掉整条链。
     # 函数用途: 从 AgentConfig 读取自动总结设置。
@@ -71,8 +80,15 @@ class SkillLearningSettings:
         return cls(
             min_tool_rounds=_config_int(config, "self_learning_min_tool_rounds", defaults.min_tool_rounds),
             daily_limit=_config_int(config, "self_learning_daily_limit", defaults.daily_limit),
+            global_daily_limit=_config_int(config,"self_learning_global_daily_limit",2000),
             max_skills=_config_int(config, "self_learning_max_skills", defaults.max_skills),
             timeout_seconds=_config_int(config, "self_learning_timeout_seconds", defaults.timeout_seconds),
+            recommended_limit=_config_int(config,"self_learning_recommended_limit",50),
+            maintenance_mode=str(getattr(config,"self_learning_maintenance_mode","observe")),
+            cool_seconds=_config_int(config,"self_learning_cool_seconds",2592000),
+            archive_seconds=_config_int(config,"self_learning_archive_seconds",15552000),
+            include_background=getattr(config,"self_learning_include_background",False) is True,
+            keep_versions=_config_int(config,"self_learning_keep_versions",5),
         )
 
 
@@ -86,6 +102,9 @@ class SkillLearningRuntime:
     snapshot_provider: Callable[[], object]
     guard_config: object | None = None
     owner_id: str = "local/main"
+    protection_provider: Callable[[],dict] | None = None
+    lesson_provider: Callable[[],object] | None = None
+    deployment_root: Path | None = None
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -209,7 +228,7 @@ class SkillLearningService:
             if focus is not None:
                 outcome = self._enqueue_requested(ctx, material, focus)
             else:
-                request = build_learning_request(ctx, self.settings.min_tool_rounds)
+                request = build_learning_request(ctx, self.settings.min_tool_rounds,include_background=self.settings.include_background)
                 outcome = "ineligible" if request is None else self._enqueue(request)
         finally:
             if material is not None and material.get("thread_id"):
@@ -256,11 +275,18 @@ class SkillLearningService:
     # LLM: 纯文件系统检查，供 Gateway 车道准入使用。
     # 函数用途: 判断是否有待处理的学习请求。
     def has_pending(self) -> bool:
-        return bool(self.store.pending_requests())
+        return bool(self.store.pending_requests()) or (self.settings.maintenance_mode == "autonomous" and self.store.registry_path.exists() and time.time()-self.store.registry_path.stat().st_mtime >= 86400)
 
     # LLM: 每次最多处理一条；前台同端点模型在忙、运行锁被占时返回 busy，请求原样保留。
     # 函数用途: 在后台处理最早的一条学习请求。
     def run_pending(self) -> SkillLearningRunResult:
+        if self.runtime.lesson_provider:
+            from .skill_learning_migration import adopt_committed_lessons
+            adopt_committed_lessons(self.store,self.runtime.lesson_provider())
+        if self.settings.maintenance_mode == "autonomous":
+            from .skill_learning_maintenance import maintain_learning
+            protection = self.runtime.protection_provider() if self.runtime.protection_provider else {'protection_complete':False}
+            maintain_learning(self.store,mode=self.settings.maintenance_mode,cool_seconds=self.settings.cool_seconds,archive_seconds=self.settings.archive_seconds,keep_versions=self.settings.keep_versions,**protection)
         if not self.store.pending_requests():
             return SkillLearningRunResult(STATUS_IDLE)
         if foreground_model_active(self.runtime.backend):
@@ -272,6 +298,8 @@ class SkillLearningService:
             return SkillLearningRunResult(STATUS_BUSY)
         except SkillLearningStoreError as exc:
             return SkillLearningRunResult(EVENT_FAILED, exc.code)
+        except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
+            return SkillLearningRunResult(EVENT_FAILED,"SKILL_LEARNING_STORAGE_LIMIT")
 
     # LLM: 顺序固定：取最早请求→损坏即丢弃→占每日额度→材料→模型→决定→账本→删请求。
     # 函数用途: 在运行锁内处理一条请求。
@@ -284,8 +312,19 @@ class SkillLearningService:
         if request is None:
             self.store.discard_request(path)
             return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
+        from .skill_learning_proposals import list_learning_proposals
+        if sum(row["status"]=="pending" for row in list_learning_proposals(self.store)) >= 20:
+            return SkillLearningRunResult("awaiting_confirmation",request_key=str(request.get("request_key") or ""))
+        from .skill_learning_budget import (
+            deployment_learning_available,
+            reserve_deployment_learning,
+        )
+        if not deployment_learning_available(self.runtime.deployment_root,self.settings.global_daily_limit):
+            return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
         if not self.store.consume_daily_call(self.settings.daily_limit):
             return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
+        if not reserve_deployment_learning(self.runtime.deployment_root,self.settings.global_daily_limit):
+            return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
         material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
             response = self._call_model(material)
@@ -309,8 +348,8 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: skip 直接记账；create/update 走自动闸门；输出不合规与闸门拒绝都记 rejected（不重试）。
-    # 函数用途: 把模型输出变成一条账本事件（可能伴随发布）。
+    # LLM: skip直接记账；create/update只生成待用户确认候选，不能自动写正式Skill；输出不合规与guard拒绝不重试。
+    # 函数用途: 把模型输出变成待确认候选或跳过/拒绝账本事实，不自动发布正式内容。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
@@ -321,9 +360,14 @@ class SkillLearningService:
         if decision.decision == DECISION_SKIP:
             return replace(_request_event(EVENT_SKIPPED, "", request), reason=decision.reason)
         publish = PublishRequest(decision, request, material.taken_names, self.settings.max_skills,
-                                 self.runtime.guard_config)
+                                 self.runtime.guard_config,
+                                 expected_revision=next((item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
+                                 expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""))
         try:
-            return publish_learned_skill(self.store, publish)
+            from .skill_learning_proposals import propose_learning
+            return propose_learning(self.store, publish)
+        except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
+            return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:
             rejected = _request_event(EVENT_REJECTED, exc.code, request)
             return replace(rejected, skill_name=decision.name, reason=decision.reason)
@@ -360,7 +404,7 @@ def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
 
 
 # LLM: existing 是全部来源的名字索引（描述截断）；updatable 只收本轮 skill_search get 读过、登记在册、
-#   快照条目确实指向 learned/<name>/SKILL.md 且磁盘 hash 等于登记值的自学 Skill，最多 UPDATABLE_COUNT 个。
+#   或有跨任务结构化采用证据、registry/path/hash一致的自学Skill；S1原owner布局也由登记裁决，最多UPDATABLE_COUNT个。
 #   读取登记表；登记表损坏时抛 SkillLearningStoreError，由 run_pending 记 failed 且保留请求。
 # 函数用途: 组装一次总结调用的材料。
 def _material(store: SkillLearningStore, request: dict[str, object], entries: tuple[object, ...]) -> SkillLearningMaterial:
@@ -374,6 +418,10 @@ def _material(store: SkillLearningStore, request: dict[str, object], entries: tu
         for entry in entries
     )
     used = {str(item) for item in (request.get("used_skill_ids") or [])}
+    for name, record in registry.skills.items():
+        evidence = [row for row in record.maintenance.get('observations',[]) if row.get('sha256')==record.sha256]
+        if len({row.get('subject') for row in evidence}) >= 2:
+            used.add('owner:'+name)
     candidates = (_updatable(store, registry, entry) for entry in entries if getattr(entry, "stable_id", "") in used)
     updatable = tuple(item for item in candidates if item is not None)[:UPDATABLE_COUNT]
     taken = frozenset(item["name"] for item in existing if item["name"])
@@ -394,7 +442,7 @@ def _updatable(store: SkillLearningStore, registry: SkillLearningRegistry, entry
     if skill_content_sha256(text) != record.sha256:
         return None
     card = parse_skill_file(path, source="owner", require_frontmatter=True)
-    return {"name": name, "version": record.version, "description": card.description,
+    return {"name": name, "version": record.version, "revision": record.revision, "sha256":record.sha256, "evidence":record.maintenance.get("observations",[])[-10:], "description": card.description,
             "when_to_use": card.when_to_use, "tags": list(card.tags), "body": _body_of(text)}
 
 

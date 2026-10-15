@@ -1,3 +1,5 @@
+2026-10-14 全22项后续实施中：当前空间监控/创建者与代清理、status原累计用量、HTTP/CLI错误分类、原operation跨attempt只读核对和no-save审计已集成；Skill单调revision/CAS与不可变快照已集成，维护/确认/投递复刻继续并线。工具S17–20以原执行器上的有限只读JSON计划实施，假模型5/3/2请求对照只说明结构往返，不推断真实供应商速度；详情见[工具执行合同](docs/design/TOOL_PROGRAM_EXECUTION.md)。尚未统一发行或部署，权限与预算非作者审查继续。
+
 ## 2026-10-14 本期 22 项全部实施（用户已授权，第一批集成中）
 
 - 用户要求先修第 1/2 项并提交远端 main，再修剩余全部项目，可按验收切片提交；最后 main、本机部署与离线包统一收口。此前“未来功能”是讨论阶段，第 17/18 项分享/一次复刻也进入后续实施，第 20 项仍先量化再选最小编排入口。进度和证据统一见 [实施记录](docs/tasks/IM_22_ITEM_IMPLEMENTATION.md)。
@@ -8217,3 +8219,10 @@ Goal scope 同时公开宿主续跑机制事实，不把 active 或单轮 final 
 用户提供现场 10-15 报告：群 active/BLOCKED、当前 PID 执行锁、attempt 第10代与新消息不处理。隔离确认单卡到期返回普通可重试 APPROVAL_REQUIRED，新调用可重开期限；活 consumer 没总截止，执行心跳仍续租，已有孤儿回收不会取消活等待。generation 是执行代次、attempt-exec 是单 run 执行权，不能代替现场因果证据；stale --settle 只针对缺 PID 旧记录。三版 restart always 源码相同，不能归为14.2新增；auto不免always，管理员免审需独立策略修订。关闭IM卡不关审批，tool_approvals仅MCP配置。37/60两批既有回归、加速等待/真实临时DB与54项历史裁决证据见[追加报告](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)；后续先沿原取消/终态/原claim完成等待截止，不能删除活锁或重放未知副作用。本轮未修改产品或现场、未发布。
 
 2026-10-14 用户要求逐项说明修改办法：已在同一综合报告列P01～P12（默认auto、管理员策略、本人止损、审批终态、等待与聊天恢复、typed卡片、能力自查、目录一致、主子继承、凭据、CLI、配额诊断）。先完成取消/拒绝收口再切默认；保留原owner/actor/操作与资源权限，输入等待不能占runner。仅方案细化，不视为开发或部署完成。
+
+
+## 本期22项后续集成（2026-10-14）
+
+状态：本地集成与非作者安全审查中。Skill沿原registry候选确认、版本CAS、采用/客观质量分离和可恢复维护，推荐50与存储配额分开；双端真人确认的定向投递/一次复刻不转移权限。受限工具编排沿原executor，只接受有界JSON数据流和原句柄，不运行动态程序。具体合同、失败反例及发行状态见 [本期实施](docs/tasks/IM_22_ITEM_IMPLEMENTATION.md)、[Skill维护](docs/tasks/SKILL_MAINTENANCE_HANDOFF.md)、[Skill迁移](docs/tasks/SKILL_TRANSFER_HANDOFF.md)、[工具编排](docs/design/TOOL_PROGRAM_EXECUTION.md)。
+
+用户追加交互卡统一取消：取消是独立安全控制，只关闭准确输入/卡，不批准也不撤销已生效值；仍校MAC、真实身份和群归属，允许免私人解锁以便止损。实际点击人/时间留原审计，本期实施入口同上。

@@ -96,6 +96,29 @@ def _ctx(run_id: str = "run-1", **overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
+
+# LLM: 旧发布闸门测试显式模拟用户逐候选确认，不改变产品默认仅生成候选；新确认测试直接使用原service。
+# 类用途: 为既有发布回归提供同次人工确认步骤，使测试继续覆盖真正publisher而非恢复自动发布。
+class _ConfirmedTestService(SkillLearningService):
+    def run_pending(self):
+        from agent_py_agent.agent.capability.skill_learning import SkillLearningRunResult
+        from agent_py_agent.agent.capability.skill_learning_proposals import (
+            list_learning_proposals,
+            resolve_learning_proposal,
+        )
+        result = super().run_pending()
+        if result.status != "proposed":
+            return result
+        proposal = next(row for row in list_learning_proposals(self.store) if row['request']['request_key'] == result.request_key)
+        try:
+            decided = resolve_learning_proposal(self.store,proposal['proposal_id'],proposal['revision'],decision='confirm')
+            event = decided['receipt']
+            return SkillLearningRunResult(event['event'],event['code'],event['skill_name'],result.request_key)
+        except SkillLearningGateError as exc:
+            from agent_py_agent.agent.capability.skill_learning_store import SkillLearningEvent
+            self.store.append_event(SkillLearningEvent('rejected',exc.code))
+            return SkillLearningRunResult('rejected',exc.code)
+
 def _runtime(tmp_path: Path, *responses: object, settings: SkillLearningSettings | None = None) -> SimpleNamespace:
     home = ensure_my_agent_home(tmp_path / "home")
     skills = SkillsService(
@@ -104,7 +127,7 @@ def _runtime(tmp_path: Path, *responses: object, settings: SkillLearningSettings
         policy_provider=lambda: resolve_effective_owner_policy(home),
     )
     backend = _FakeBackend(*responses)
-    service = SkillLearningService(
+    service = _ConfirmedTestService(
         SkillLearningStore.for_home(home),
         settings or SkillLearningSettings(min_tool_rounds=3),
         SkillLearningRuntime(backend=backend, snapshot_provider=lambda: skills.snapshot_for(force_reload=True)),
@@ -117,7 +140,7 @@ def _learned_file(ctx: SimpleNamespace, name: str = NAME) -> Path:
 
 
 def _events(ctx: SimpleNamespace) -> list[tuple[str, str]]:
-    return [(item["event"], item["code"]) for item in ctx.store.events(limit=0)]
+    return [(item["event"], item["code"]) for item in ctx.store.events(limit=0) if item["event"] != "proposed"]
 
 
 def _publish_first(ctx: SimpleNamespace) -> None:

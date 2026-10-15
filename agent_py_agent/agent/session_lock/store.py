@@ -1,3 +1,5 @@
+# LLM: 密码/hash、活跃与输入卡nonce共用原用户行；卡片取消不得改认证事实或另造权限账。
+# 模块用途: 持久化个人会话锁及准确输入卡生命周期，SQLite迁移保留既有密码。
 """会话锁状态存储(自洽 SQLite:密码 hash + 私聊最近活跃时间)。
 
 按飞书用户 open_id 建表。连接按操作即用即建(gateway 多线程安全),WAL 提并发。
@@ -28,10 +30,14 @@ class SessionLockStore:
         self._init_lock = threading.Lock()
         self._init()
 
+    # LLM: 密码与输入卡状态共用原用户行；迁移只加UI nonce字段，不改旧hash/活跃事实。
+    # 函数用途: 初始化原数据库并迁移卡片生命周期字段，会写数据库。
     def _init(self) -> None:
         with self._init_lock, self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
+            from .card_control import initialize_card_columns
+            initialize_card_columns(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=10.0)

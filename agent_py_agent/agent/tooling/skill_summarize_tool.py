@@ -1,4 +1,4 @@
-# LLM: "让她总结一下"的入口 skill_summarize（只注册给本机管理员主代理，默认收起）。把那次的活连同那次召回的相关记忆
+# LLM: "让她总结一下"的入口 skill_summarize（当前owner可用，默认收起）。把那次的活连同那次召回的相关记忆
 #   （自学习服务在会话任务收尾时备好）交给自学习流水线。它不写技能、不调模型，按当前这一轮的
 #   结构化参数 target 分两种落点（由她按用户的话选，宿主只认这个参数，不靠"这一轮有没有升格"去猜；复审 5 轮两次）：
 #   - target=current：这一轮正在做的活（必须 conversation_task_turn_active、有会话任务 id、还没完成）：按会话任务 id 记标记，
@@ -16,7 +16,6 @@ from ..capability.skill_learning import FOCUS_LIMIT_CHARS
 from ..capability.skill_learning_request import bounded_text
 from ..conversation.authority import CONVERSATION_TASK_TURN_ACTIVE_ATTR
 from ..conversation.task_state import conversation_task_completed
-from ..user_space.owner_access import is_complete_local_admin_owner
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -31,10 +30,10 @@ SKILL_SUMMARIZE_TOOL = "skill_summarize"
 # 回执里展示"总结的是哪一次的活"时，那次提问最多显示的字符数。
 _SUMMARIZED_PROMPT_PREVIEW_CHARS = 80
 # 结果怎么看、怎么删、怎么退回（给模型照抄告诉用户）。
-_MANAGE_HINT = "结果用 /skills learned show 查看，不想要用 /skills learned remove <名称> 删掉，改坏了用 /skills learned revert <名称> 退回。"
+_MANAGE_HINT = "总结先生成待确认候选；用 /skills learned proposals 查看，再由用户按准确编号和修订确认或拒绝。"
 
 
-# LLM: 只认本机管理员；落点只按结构化参数 target 与当前运行参数里的会话任务属性（不读运行编号、不猜）；记标记、入队都交给
+# LLM: 当前owner启用自学习且原claim/attempt有效才能总结；落点按target和准确会话任务属性，记标记、入队交给
 #   agent.skill_learning（自学习服务）：current 只改服务内存里的标记，previous 会经服务写 requests/ 与账本。
 # 类用途: 把用户要求总结的那次活交给自学习流水线。
 class SkillSummarizeTool(BaseTool):
@@ -79,15 +78,15 @@ class SkillSummarizeTool(BaseTool):
     #   requests/ 与账本（有写文件副作用），current 成功时只记内存标记。
     # 函数用途: 把要总结的那次活交给自学习流水线，并告诉模型总结的是哪一次、之后怎么跟用户说。
     def execute(self, params: dict) -> ToolHandlerOutcome:
-        if not is_complete_local_admin_owner(getattr(self._agent, "home_paths", None)):
-            return _error("TOOL_PERMISSION_DENIED", "第一期只对本机管理员开放。")
         service = getattr(self._agent, "skill_learning", None)
-        if service is None:
+        if service is None or not getattr(getattr(self._agent,"config",None),"enable_self_learning",False):
             return _error("SKILL_SUMMARIZE_DISABLED", "自学习开关 enable_self_learning 关着，没法总结成内部技能；"
                           "管理员可发 /settings set enable_self_learning true 打开（回执会写明什么时候生效）。")
         attrs = getattr(getattr(self._agent, "_current_run_params", None), "task_attributes", None)
         if not isinstance(attrs, dict):
             return _error("SKILL_SUMMARIZE_NO_RUN", "当前不在一次对话回合里，没法确定要总结哪一次的活。")
+        if not _authorized_learning_scope(self._agent,service,attrs):
+            return _error("TOOL_PERMISSION_DENIED","无法核验当前owner、会话与有效执行，未登记学习请求。")
         target, focus = str(params.get("target") or ""), str(params.get("focus") or "").strip()[:FOCUS_LIMIT_CHARS]
         if target == "previous":
             return _recent_receipt(service, str(attrs.get("conversation_thread_id") or ""), focus)
@@ -101,6 +100,27 @@ class SkillSummarizeTool(BaseTool):
         asked = bounded_text(getattr(self._agent, "_current_user_prompt", "") or "", _SUMMARIZED_PROMPT_PREVIEW_CHARS)
         return _ok({"mode": "this_task", "task_id": task_id, "summarizes": asked, "focus": focus,
                     "message": f"已记下：这一轮正在做的活（提问：{asked}）收尾时连同这次召回的相关记忆交给自学习流水线总结。{_MANAGE_HINT}"})
+
+
+# LLM: owner服务位置必须精确相同，真实claim/attempt和thread来自原ToolApprovalScope；模型不能以attrs选其它owner或会话缓存。
+# 函数用途: 在普通/群/本机总结入口复核当前运行授权，不改变配置管理和正式确认边界。
+def _authorized_learning_scope(agent,service,attrs):
+    from pathlib import Path
+
+    from ..conversation.tool_approval_scope import (
+        tool_approval_scope,
+        tool_approval_scope_is_current,
+    )
+    try:
+        home = agent.home_paths
+        if service.store.directory != Path(home.owner_skill_learning_dir) or service.store.skills_root != Path(home.owner_home_dir)/'skills':
+            return False
+        current = agent._current_run_params
+        scope = tool_approval_scope(agent,str(current.run_id or current.task_id))
+        return bool(tool_approval_scope_is_current(agent,scope) and attrs.get('conversation_thread_id')==scope.thread_id
+                    and (not attrs.get('conversation_task_id') or attrs['conversation_task_id']==scope.root_task_id))
+    except (AttributeError,OSError,RuntimeError,TypeError,ValueError):
+        return False
 
 
 # LLM: target=previous：当场入队这个会话最近完成的那次活；找不到、队列满都如实报，不说"已记下"；已按用户要求入队过的如实说

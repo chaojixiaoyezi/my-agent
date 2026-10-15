@@ -262,6 +262,8 @@ COMMAND_CATALOG = (
         "/skills",
         "查看待确认的技能提案与自动总结的 Skill（IM 可用）",
         help_variants=(
+            ("/skills learned proposals", "查看待确认学习候选，proposal-show看内容，confirm|reject带准确编号/修订（IM可用）"),
+            ("/skills learned pin|unpin|disable|enable|restore <名称>", "固定、停用或恢复自己托管的方法；结果反馈用learned feedback准确hash/任务编号"),
             ("/skills show <提案编号>", "查看一条提案的来源、触发原因、拟保存内容与适用场景（IM 可用）"),
             ("/skills confirm <提案编号> <版本>", "确认并安装一条提案；版本号取列表或详情里显示的当前版本（IM 可用）"),
             ("/skills reject <提案编号> <版本>", "拒绝一条提案（IM 可用）"),

@@ -76,6 +76,7 @@ class RegistryToolInvokeRequest:
     owner_type: str = "main_agent"
     cancellation_token: object | None = None
     execution_authority_check: Callable[[], None] | None = None
+    tool_dispatch: object | None = None
     # Canonical executor supplies the exact immutable binding selected from the
     # run snapshot. Missing bindings fail closed; this is not a public adapter.
     runtime: ToolRuntime | None = None
@@ -237,7 +238,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
                                          agent_home_root=data_root_from_boundary(request.write_boundary))
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
-        execution_authority_check=request.execution_authority_check,
+        execution_authority_check=request.execution_authority_check, tool_dispatch=request.tool_dispatch,
         execution_permission_context=_execution_permission_context(request.write_boundary),
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,

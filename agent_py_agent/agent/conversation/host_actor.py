@@ -10,6 +10,9 @@ from .execution_threads import EXECUTION_ORIGIN_KEY, IM_TASK_EXECUTION_KEY, exec
 
 _FIELDS = {"owner_id", "source_thread_id", "entry_request_id", "channel", "conversation_id", "actor_id"}
 _MESSAGES = {
+    "SCHEDULER_MEMBERSHIP_UNAVAILABLE": "创建者成员状态待核验：群成员权限、网络或完整分页不可用，未授权代为清理。",
+    "SCHEDULER_CURRENT_MEMBER_REQUIRED": "当前操作者不在原群，已拒绝代为清理。",
+    "SCHEDULER_CREATOR_STILL_MEMBER": "创建者仍在原群，只有原创建者可管理该监控。",
     "CHANNEL_ACTOR_IDENTITY_REQUIRED": "当前执行缺少可信发起人身份，请从原会话重新发起。",
     "CHANNEL_ACTOR_IDENTITY_INVALID": "原发起人身份记录不可读或已损坏，已拒绝猜测身份。",
     "CHANNEL_ACTOR_IDENTITY_CONFLICT": "当前发起人与原任务冻结身份冲突，已拒绝操作。",

@@ -110,6 +110,7 @@ class ToolExecutorRequest:
     on_handler_progress_guarded: Callable[..., None] | None = None
     handler_progress_interval_seconds: float = 120.0
     # 来源与征询提供方仅由宿主注入；模型参数没有任何来源控制权。
+    allow_nested_dispatch: bool = True
     call_origin: str = "model"
     plugin_gate_reviewer: Callable | None = None
 
@@ -755,6 +756,7 @@ def _invoke_request(
         runtime=runtime,
         cancellation_token=request.cancellation_token,
         execution_authority_check=_operation_authority_check(request, call),
+        tool_dispatch=_nested_dispatch(request, call),
         on_handler_started=request.on_handler_started,
     )
 
@@ -1238,3 +1240,12 @@ __all__ = [
     "ToolExecutorRequest",
     "ToolOutputProjection",
 ]
+
+
+# LLM: 只为有限程序本次构造派发器，内层再入时关闭，避免循环与权限放大；不执行工具。
+# 函数用途: 为原调用上下文附加同身份的只读批次入口。
+def _nested_dispatch(request, call):
+    if not request.allow_nested_dispatch or call.tool_name != 'tool_program':
+        return None
+    from .nested_dispatch import NestedToolDispatcher
+    return NestedToolDispatcher(request, call)

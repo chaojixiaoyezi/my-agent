@@ -1283,6 +1283,8 @@ class ToolInvocationContext:
     workspace_write_context: WorkspaceWriteContext | None = None
     # 宿主实际调用边界的窄只读投影；只能说明网络/Shell，不是执行授权或模型输入。
     execution_permission_context: Mapping[str, object] | None = field(default=None, repr=False, compare=False)
+    # 仅原执行器注入的只读内部派发器，不进入模型参数或共享handler。
+    tool_dispatch: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

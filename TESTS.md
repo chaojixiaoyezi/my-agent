@@ -18665,3 +18665,14 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 2026-10-14 无人值守 IM 评估：四个已有文件 owner_approval_mode/im_tool_approval/orchestration_cancel_subagents_tool/im_subagent_permission_matrix，共89项自然exit0。仓库外真实WS回调合成复现两张不同卡只处理第一张、解锁后原卡重试仍被吞；零真实飞书请求。未改生产源码，不称缺陷已修、真实租户或企业容量已验。范围与后续门见 [综合评估](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)。
 2026-10-14 自身功能发现只读审计：根五文件53/53，自查八文件61/61自然exit0、0fail/skip；发现七文件86项为84过2败，默认折叠DECLARED遗漏已注册feishu_cloud，原红log/XML保留，未修测试。合成实证凭据开关false仍在快照/模型目录声明ready、普通worker默认工具名单缺项及策略短投影丢字段；无真实飞书/模型请求，不把有交叉批次求和。出处、产物与未来验收见 [发现审计](docs/design/IM_CAPABILITY_DISCOVERY_AUDIT.md)。
 2026-10-14 群会话审批挂起追加只读审计：控制/steer/后台输入三文件37过，收口/执行器退出/后台审批三文件60过，均自然exit0且零失败/错误/跳过。真实临时RuntimeRepository验证活PID不孤儿回收、死亡PID收口、零审批合法第10代；加速时钟验证1800秒卡过期仍返回可重试APPROVAL_REQUIRED，新调用重开1800秒，fresh TUI可继续等至模拟3600秒。三历史源码54项纯裁决验证restart always既有且auto/full不绕过，零handler。详细文件/证据/未验边界见[综合追加审计](docs/design/IM_UNATTENDED_EXECUTION_REVIEW.md)；未改产品或测试、不声称现场复现或修复，前轮发现测试两红仍保留。
+
+
+## 2026-10-14 本期22项与交互卡取消
+
+按 `docs/tasks/IM_22_ITEM_IMPLEMENTATION.md` 的当前121份focused清单验证：凭据存储/表单/模型回调，普通/群owner监控和创建者控制，云接口数值错误、原操作核对与最小审计，S1/S3人工确认/版本/维护/投递/一次复刻，受限JSON工具数据流及原进程句柄yield。新增六类卡取消，验证空表单、免锁仅cancel、真实点击人审计、OAuth迟到成功、模型子卡迟到、input取消/arm原子竞争。
+
+最初源码组合2635项中2个旧断言失败（真实HTTP200被预期成0、手动总结旧admin专限），与新合同核对后修正；定向复验通过，保留失败证据。非作者生产API反例均转回归；不得删除反例或放宽授权来通过。严格远端gate使用focused/Ruff/doc-sync/strict code-size/diff/clean-package；累计代码改动不足约一万行，按本轮AGENTS不额外全仓pytest。
+
+最终发行另用同源冻结测试验Mac/Linux准确新runtime的pyc，测试依赖在bundle外且记录实际origin；native沙箱单列，跳过不能算通过。Linux安装/更新隔离在Docker容器，本机更新保存配置hash/旧runtime并核单Gateway/adapter。真正Feishu卡渲染、租户权限与远端现网消息未作为本轮验收来源；线上CI状态独立报告，不能替代本地严格gate。
+
+最终宽组合另定位卡片静默取消误影响泛用cancelled输入Wake；现仅卡片退休在原input行写resolution_delivery=retire。原capacity测试保持不变，普通取消继续原唤醒，静默退休保留read/arm和post-arm时序回归。

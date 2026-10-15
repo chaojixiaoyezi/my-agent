@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,8 +25,9 @@ from ..common.json_io import (
     read_json_object_report,
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
-    write_text_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
+from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 
 REQUEST_SCHEMA_VERSION = "my-agent.skill-learning-request.v1"
 REGISTRY_SCHEMA_VERSION = "my-agent.skill-learning-registry.v1"
@@ -33,7 +37,6 @@ LEARNED_DIR_NAME = "learned"
 MAX_PENDING_REQUESTS = 20
 # 单条学习请求最多重试次数。
 MAX_REQUEST_ATTEMPT_COUNT = 2
-MAX_KEPT_VERSIONS = 5
 MAX_LEDGER_EVENTS = 2000
 # 同一来源运行最多保留条数。
 MAX_SOURCE_RUN_COUNT = 10
@@ -78,6 +81,10 @@ class LearnedSkill:
     created_at: str
     updated_at: str
     source_run_ids: tuple[str, ...] = ()
+    revision: int = 1
+    last_operation_id: str = ""
+    maintenance: dict = field(default_factory=dict)
+    layout: str = "learned"
 
     # LLM: 字段名是持久化协议；元组写成 JSON 数组。
     # 函数用途: 转成写入 registry.json 的字典。
@@ -85,6 +92,10 @@ class LearnedSkill:
         return {
             "name": self.name,
             "version": self.version,
+            "revision": self.revision,
+            "last_operation_id":self.last_operation_id,
+            "maintenance":dict(self.maintenance),
+            "layout":self.layout,
             "sha256": self.sha256,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -103,11 +114,16 @@ class LearnedSkill:
         sha = str(payload.get("sha256") or "")
         if not _SHA256_RE.fullmatch(sha):
             raise ValueError("learned skill sha256 is invalid")
+        revision = payload.get("revision", version)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < version:
+            raise ValueError("learned skill revision is invalid")
         runs = payload.get("source_run_ids") or []
         if not isinstance(runs, list) or not all(isinstance(item, str) for item in runs):
             raise ValueError("learned skill source_run_ids must be a list of ids")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}",_text(payload,"name")) or payload.get("layout","learned") not in {"owner","learned"}:
+            raise ValueError("learned skill layout/name invalid")
         return cls(_text(payload, "name"), version, sha, _text(payload, "created_at"),
-                   _text(payload, "updated_at"), tuple(runs))
+                   _text(payload, "updated_at"), tuple(runs), revision, str(payload.get("last_operation_id") or ""), dict(payload.get("maintenance") or {}), str(payload.get("layout") or "learned"))
 
 
 # LLM: skills 是自学 Skill 的唯一登记；blocked_names 是用户删过的名字，自动流程永不再新建；
@@ -119,6 +135,7 @@ class SkillLearningRegistry:
     blocked_names: tuple[str, ...] = ()
     daily_date: str = ""
     daily_calls: int = 0
+    import_operations: dict = field(default_factory=dict)
 
     # LLM: 按名字排序输出，保证同一状态写出同一文件。
     # 函数用途: 转成写入 registry.json 的字典。
@@ -128,6 +145,7 @@ class SkillLearningRegistry:
             "skills": {name: self.skills[name].to_record() for name in sorted(self.skills)},
             "blocked_names": sorted(set(self.blocked_names)),
             "daily": {"date": self.daily_date, "calls": self.daily_calls},
+            "import_operations":dict(self.import_operations),
         }
 
 
@@ -176,6 +194,7 @@ class SkillLearningStore:
         self.ledger_path = self.directory / "ledger.jsonl"
         self.versions_dir = self.directory / "versions"
         self.removed_dir = self.directory / "removed"
+        self._quota_admission = ContextVar("skill_learning_quota", default=None)
 
     # LLM: 与 SkillProposalService 同一推导：数据目录来自 owner_skill_learning_dir，Skill 根是 owner_home/skills。
     # 函数用途: 按 owner 路径投影构造存储。
@@ -183,10 +202,25 @@ class SkillLearningStore:
     def for_home(cls, home_paths: object) -> SkillLearningStore:
         return cls(Path(home_paths.owner_skill_learning_dir), Path(home_paths.owner_home_dir) / "skills")
 
-    # LLM: 短临界区：登记表、队列、版本和发布的读改写都在它里面完成，不能在持有期间调用模型。
+    # LLM: owner配额→state锁固定顺序；登记、队列、版本、导入同源事务，不能在持锁期间调用模型或发网络请求。
     # 函数用途: 返回登记表与队列的互斥区。
+    @contextmanager
     def state_lock(self):
-        return locked_json_path(self.directory / ".state")
+        with owner_quota_enforcer_from_policy(self.skills_root.parent).admission() as admission:
+            with locked_json_path(self.directory / ".state"):
+                token = self._quota_admission.set(admission)
+                try:
+                    yield admission
+                finally:
+                    self._quota_admission.reset(token)
+
+    # LLM: 写入必须处于owner配额→state锁序内，按最终UTF-8字节检查，不新建第二配额权威。
+    # 函数用途: 给发布、候选和版本文件复用同一owner磁盘限制。
+    def check_write(self, path, text):
+        admission = self._quota_admission.get()
+        if admission is None:
+            raise RuntimeError("学习写入缺少原配额事务")
+        admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
 
     # LLM: 非阻塞：拿不到抛 BlockingIOError，调用方按 busy 顺延；进程崩溃时 OS 锁自动释放。
     # 函数用途: 返回“同一 owner 同时只跑一个总结”的运行锁。
@@ -205,6 +239,7 @@ class SkillLearningStore:
             if len(pending) >= MAX_PENDING_REQUESTS:
                 return "queue_full"
             name = f"{int(time.time() * 1000):013d}-{key}.json"
+            self.check_write(self.requests_dir/name,json.dumps(request,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
             write_json_file_atomic_unlocked(self.requests_dir / name, request)
         return "queued"
 
@@ -229,6 +264,7 @@ class SkillLearningStore:
     def rewrite_request(self, path: Path, request: dict[str, object]) -> None:
         with self.state_lock():
             if path.is_file():
+                self.check_write(path,json.dumps(request,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
                 write_json_file_atomic_unlocked(path, request)
 
     # LLM: 幂等删除；处理完、丢弃或损坏的请求都走这里。
@@ -245,13 +281,19 @@ class SkillLearningStore:
         try:
             if report.load_error is not None:
                 raise ValueError("unreadable registry")
-            return _registry_from(report.payload)
+            registry = _registry_from(report.payload)
+            # 旧登记没有高水位：只从既有不可变版本文件恢复编号，不重用回滚前已出现的版本名。
+            records = report.payload.get("skills", {})
+            migrated = {name: replace(item, revision=max(item.revision, max((_version_number(path) for path in (self.versions_dir / name).glob("v*.md")), default=item.version)))
+                        if "revision" not in records[name] else item for name, item in registry.skills.items()}
+            return replace(registry, skills=migrated)
         except (TypeError, ValueError) as exc:
             raise SkillLearningStoreError(CODE_REGISTRY_CORRUPT, str(exc)) from exc
 
     # LLM: 调用方必须已持 state_lock；原子替换整份登记表。
     # 函数用途: 写回登记表。
     def save_registry(self, registry: SkillLearningRegistry) -> None:
+        self.check_write(self.registry_path, json.dumps(registry.to_record(),ensure_ascii=False,indent=2,sort_keys=True)+"\n")
         write_json_file_atomic_unlocked(self.registry_path, registry.to_record())
 
     # LLM: 计数按 UTC 日期滚动；limit<=0 表示不限。在 state_lock 内读改写，发请求前扣减，失败也算一次调用。
@@ -269,7 +311,12 @@ class SkillLearningStore:
     # LLM: 有界追加（保留最近 MAX_LEDGER_EVENTS 条），自带 per-path 锁，调用方不需要持 state_lock。
     # 函数用途: 往账本追加一条事件。
     def append_event(self, event: SkillLearningEvent) -> None:
-        append_private_jsonl_capped(self.ledger_path, event.to_record(), max_records=MAX_LEDGER_EVENTS)
+        row = event.to_record()
+        with owner_quota_enforcer_from_policy(self.skills_root.parent).admission() as admission:
+            existing = read_jsonl_objects_report(self.ledger_path,context="skill_learning.ledger.quota").records if self.ledger_path.exists() else []
+            text = "".join(json.dumps(item,ensure_ascii=False,sort_keys=True)+"\n" for item in [*existing,row][-MAX_LEDGER_EVENTS:])
+            admission.check([OwnerQuotaChange(self.ledger_path,len(text.encode()))])
+            append_private_jsonl_capped(self.ledger_path, row, max_records=MAX_LEDGER_EVENTS)
 
     # LLM: 坏行由 read_jsonl_objects_report 跳过；name 为空时返回全部事件的最后 limit 条。
     # 函数用途: 读取某个 Skill（或全部）的最近事件。
@@ -280,25 +327,29 @@ class SkillLearningStore:
         selected = [item for item in records if not name or item.get("skill_name") == name]
         return selected[-limit:] if limit > 0 else selected
 
-    # LLM: 每个版本存全文供回滚；只保留最近 MAX_KEPT_VERSIONS 个版本文件。调用方必须已持 state_lock，
+    # LLM: 每个发布修订存不可变全文供回滚和在途快照；同编号异内容拒绝，暂不清理仍可能被引用的版本。调用方必须已持 state_lock，
     #   所以用不再取 per-path 锁的原子写，版本目录里不会留下 .lock 文件。副作用：写 versions/<name>/。
     # 函数用途: 保存一个已发布版本的 SKILL.md 全文。
     def save_version(self, name: str, version: int, text: str) -> None:
         directory = self.versions_dir / name
-        write_text_file_atomic_unlocked(directory / f"v{version}.md", text)
-        for stale in sorted(directory.glob("v*.md"), key=_version_number)[:-MAX_KEPT_VERSIONS]:
-            stale.unlink(missing_ok=True)
+        path = directory / f"v{version}.md"
+        existing = read_text_beneath(self.directory, ("versions", name, path.name))
+        if existing is not None:
+            if existing != text:
+                raise SkillLearningStoreError("SKILL_LEARNING_VERSION_CONFLICT")
+            return
+        self.check_write(path,text)
+        write_text_atomic_beneath(self.directory, ("versions", name, path.name), text)
 
     # LLM: 版本文件不存在（已被裁剪或从未保存）时返回 None，由回滚方给出结构化拒绝。
     # 函数用途: 读取某个版本的 SKILL.md 全文。
     def read_version(self, name: str, version: int) -> str | None:
-        path = self.versions_dir / name / f"v{version}.md"
-        return path.read_text(encoding="utf-8") if path.is_file() else None
+        return read_text_beneath(self.directory, ("versions", name, f"v{version}.md"))
 
     # LLM: 删除不物理删文件：整个 learned/<name>/ 目录移到 removed/<name>-<时间>/；目录不存在时什么都不做。
     # 函数用途: 把一个自学 Skill 目录移出扫描范围并返回归档位置。
     def archive_removed(self, name: str) -> Path | None:
-        source = self.learned_root / name
+        source = self.skill_path(name).parent
         if not source.exists():
             return None
         target = self.removed_dir / f"{name}-{int(time.time() * 1000):013d}"
@@ -309,6 +360,9 @@ class SkillLearningStore:
     # LLM: 发布目录固定为 skills/learned/<name>/SKILL.md，名字已由输出合同限定为安全目录名。
     # 函数用途: 返回某个自学 Skill 的 SKILL.md 路径。
     def skill_path(self, name: str) -> Path:
+        record = self.load_registry().skills.get(name)
+        if record and record.layout == "owner":
+            return self.skills_root / name / "SKILL.md"
         return self.learned_root / name / "SKILL.md"
 
 
@@ -342,7 +396,7 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
     calls = daily.get("calls") or 0
     if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
         raise ValueError("registry daily calls must be a non-negative integer")
-    return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), str(daily.get("date") or ""), calls)
+    return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), str(daily.get("date") or ""), calls, dict(payload.get("import_operations") or {}))
 
 
 # LLM: 必填字符串字段；空值视为损坏。

@@ -361,3 +361,8 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
 ## 任务必要输入归档（2026-10-14）
 
 `tool_call_archive_record._compact_result_envelope` 经 `conversation/input_tool_boundary.input_archive_facts` 只投影必要输入的准确引用、状态和期限及凭据 opaque refs；后续归档/IR配对完成后同模块才 arming。`conversation/input_dependencies` 保管唯一输入状态，原 task link 仅存查找 refs，Wake 是恢复出口；输入完成不代表工具或任务完成，也不清除原审批拒绝。
+
+2026-10-14 有限只读编排：内部调用保持原ToolExecutor、运行权威、预算、取消、插件及输出归档；每条写原owner最小工具事实，数据整理不能吞失败。原SimpleAgent假模型串行/已有批量/有限计划分别5/3/2次请求，不当成真实模型性能。完整合同见docs/design/TOOL_PROGRAM_EXECUTION.md。
+
+
+本期Skill维护统一原registry、当前owner与人工确认；模型只登记采用，宿主原验证账提交后才登记准确run/hash效果。显式投递/复刻复用原IM控制的双端真人确认，接收不继承源权限或秘密。参见 [维护交接](../../tasks/SKILL_MAINTENANCE_HANDOFF.md) 与 [投递交接](../../tasks/SKILL_TRANSFER_HANDOFF.md)。

@@ -16,22 +16,22 @@ from ..gateway_parts.local_client_token import LocalClientCredentialError
 
 
 # LLM: 原typedkind与真实actor/message/chat必须匹配，宿主凭据只入原回环HTTP且不重定向。
-# 函数用途: 提交原审批/凭据表单；群成员查询与宿主请求是网络副作用，失败不落聊天或授予权限。
+# 函数用途: 提交原卡回调并显示安全操作者；cancel丢弃表单，群资格查询和认证回环是网络副作用。
 def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     value = norm.get("value") or {}
-    if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential", "my_agent_model_configuration"}:
+    if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"}:
         return None
     actor = str(norm.get("operator_open_id") or "")
     body = {"reference": value.get("reference"), "decision": value.get("decision"),
             "message_id": norm.get("message_id"), "chat_id": norm.get("chat_id")}
     if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration"}:
-        body["fields"] = dict(norm.get("form_value") or {})
-        if value["kind"] == "my_agent_model_configuration" and value.get("decision") != "save":
+        body["fields"] = {} if value.get("decision")=="cancel" else dict(norm.get("form_value") or {})
+        if value["kind"] == "my_agent_model_configuration" and value.get("decision") not in {"save","cancel"}:
             body["fields"] = {"profile_id": str(value.get("profile_id") or "")}
     if not actor or not body["message_id"] or not body["chat_id"]:
         return {"toast": {"type": "error", "content": "无法确认卡片来源，请回原私人卡片操作。"}}
     try:
-        if value["kind"] == "my_agent_task_credential" and _group_reference_hint(body["reference"]):
+        if value["kind"] in {"my_agent_task_credential","my_agent_model_configuration"} and _group_reference_hint(body["reference"],body["decision"]):
             member = _current_group_member(adapter, str(body["chat_id"]), actor)
             if not member:
                 return {"toast": {"type": "error", "content": "当前账号不在原群，无法提交这张群凭据卡。"}}
@@ -48,14 +48,18 @@ def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     if not result.get("ok"):
         return _control_failure_toast(str(result.get("error_code") or "IM_INTERACTION_INVALID"),
                                       str(result.get("error_stage") or "interaction"))
-    text = (result.get("message") or "私人配置已处理。") if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration"} else ("已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
+    text = result.get("message") or ("私人配置已处理。" if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"} else "已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
+    facts = result.get("clicked_by") or result.get("cancelled_by")
+    if isinstance(facts,dict) and facts.get("clicked_at") and facts["clicked_at"] not in text:
+        from ..user_space.interaction_actor_audit import interaction_actor_text
+        text += "\n" + interaction_actor_text(facts)
     return {"toast": {"type": "success", "content": text}, "card": {"type": "raw", "data": {
         "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": text}}]}}}
 
 
 # LLM: 未验签内容仅决定是否查询群成员，不授予权限；Gateway 仍重新验 MAC/owner/chat 与当前任务。
 # 函数用途: 读取群呈现提示，避免个人卡额外调用群接口。
-def _group_reference_hint(reference):
+def _group_reference_hint(reference,decision=""):
     try:
         if not isinstance(reference, str) or len(reference) > 8192:
             return False
@@ -63,7 +67,8 @@ def _group_reference_hint(reference):
         if prefix != "ir1" or len(signature) != 64:
             return False
         payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        presentation = payload.get("presentation") if isinstance(payload, dict) else None
+        from ..user_space.interaction_refs import interaction_presentation
+        presentation = interaction_presentation(payload,decision) if isinstance(payload, dict) else None
         return isinstance(presentation, dict) and presentation.get("kind") == "group"
     except (AttributeError, IndexError, TypeError, ValueError):
         return False
@@ -135,6 +140,9 @@ def _control_failure_toast(code, stage):
         "IM_CONTROL_RESPONSE_INVALID": "Gateway回调响应格式无效，请检查端口与运行版本。",
         "IM_INTERACTION_HOST_UNAVAILABLE": "宿主暂时无法处理卡片，请检查存储和服务状态后重试。",
         "IM_INTERACTION_INVALID": "这张卡片的身份、版本或原会话已失效，请重新打开原控制入口。",
+        "IM_INTERACTION_IN_PROGRESS": "原卡正在准备私人表单，请稍后重试；也可以取消原卡。",
+        "IM_INTERACTION_DISPATCH_UNCONFIRMED": "私人表单投递结果尚未确认，请关闭原卡并重新打开模型入口。",
+        "IM_INTERACTION_ALREADY_HANDLED": "这张卡片已处理，取消没有撤销或修改已完成的操作。",
         "LOCAL_CREDENTIAL_REQUIRED": "Gateway未收到有效宿主认证，请检查适配器认证配置。",
     }
     if code not in messages:

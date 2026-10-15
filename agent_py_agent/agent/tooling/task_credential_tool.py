@@ -50,7 +50,7 @@ class RequestCredentialsTool(BaseTool):
             idempotency_policy=IdempotencyPolicy(scope='operation'),timeout_policy=TimeoutPolicy(seconds=30),
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
-    # LLM: 条件必填在副作用前核验；阶段错误保留安全诊断于原工具账，发送后读取失败保留 confirmed，不展示异常正文。
+    # LLM: 条件必填在副作用前核验；阶段错误保留安全诊断于原工具账，发送后读取失败保持unknown且禁止盲重发，不展示异常正文。
     # 函数用途: 申请、更新、查询或撤销原任务凭据，模型只获得引用、期限和状态。
     def execute(self, params):
         from ..user_space.task_credentials import manage_credential
@@ -82,10 +82,10 @@ class RequestCredentialsTool(BaseTool):
                     auth_config=params.get('auth_config'), collection_mode=params.get('collection_mode','username_password'), ttl_seconds=params.get('ttl_seconds'),
                     refresh_ref=params['credential_ref'] if operation == 'update' else ''))
             row = read_credential_row(credential_path(self.agent.home_paths.owner_home_dir, reference),
-                stage='result_read', effect_outcome='confirmed')
+                stage='result_read', effect_outcome='unknown')
             if not all(key in row for key in ('origin', 'status', 'expires_at')):
                 raise CredentialInputError('CREDENTIAL_RECORD_INVALID', '已发送卡片的原记录不可读取，请先核对原操作。',
-                    stage='result_read', effect_outcome='confirmed')
+                    stage='result_read', effect_outcome='unknown')
             result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row['expires_at'],
                 'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
             envelope = {'credential': result}

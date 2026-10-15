@@ -3601,6 +3601,15 @@ ERROR_CONTRACTS.update({
         recovery_hint="当前回合的宿主通道主体不可确认或与原来源冲突；本次未授权任务控制。核对准确原会话与根任务，不从模型属性补身份或改用管理员。")
        for code in ("CHANNEL_ACTOR_IDENTITY_REQUIRED", "CHANNEL_ACTOR_IDENTITY_INVALID",
                     "CHANNEL_ACTOR_IDENTITY_CONFLICT", "CHANNEL_ACTOR_SCOPE_MISMATCH")},
+    **{code: ErrorContract(code=code, category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="只允许准确原创建者管理；本群代清理还需要完整实时成员证明。查询失败不代表离开，不能改用名字、模型声明或其它owner绕过。")
+       for code in ("SCHEDULER_MEMBERSHIP_UNAVAILABLE", "SCHEDULER_CURRENT_MEMBER_REQUIRED", "SCHEDULER_CREATOR_STILL_MEMBER")},
+    # Skill迁移必须按稳定码与双端grant处理，不能用模型的成功文案替代真实提交。
+    **{code: ErrorContract(code=code, category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="核对当前owner、精确清单与双端本人确认；保留原引用查询，不换身份、路径或操作编号绕过权限/容量与一次复刻限制。")
+       for code in ('SKILL_TRANSFER_ARGUMENTS_INVALID', 'SKILL_TRANSFER_CLONE_ALREADY_USED', 'SKILL_TRANSFER_DISABLED', 'SKILL_TRANSFER_GUARD_BLOCKED', 'SKILL_TRANSFER_MANIFEST_INVALID', 'SKILL_TRANSFER_MEMBERSHIP_UNAVAILABLE', 'SKILL_TRANSFER_MEMORY_MANIFEST_INVALID', 'SKILL_TRANSFER_MEMORY_NOT_EXPORTABLE', 'SKILL_TRANSFER_NAME_CONFLICT', 'SKILL_TRANSFER_NOT_AUTHORIZED', 'SKILL_TRANSFER_OPERATION_CONFLICT', 'SKILL_TRANSFER_OWNER_INVALID', 'SKILL_TRANSFER_PENDING_LIMIT', 'SKILL_TRANSFER_REFERENCE_INVALID', 'SKILL_TRANSFER_RESOURCE_INVALID', 'SKILL_TRANSFER_SECRET_BLOCKED', 'SKILL_TRANSFER_SNAPSHOT_INVALID', 'SKILL_TRANSFER_SOURCE_CHANGED', 'SKILL_TRANSFER_SOURCE_NOT_EXPORTABLE', 'SKILL_TRANSFER_TOO_LARGE', 'SKILL_TRANSFER_UNAVAILABLE')},
     "SCHEDULER_NOT_AUTHORIZED": ErrorContract(
         code="SCHEDULER_NOT_AUTHORIZED", category="permission", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
@@ -3767,6 +3776,12 @@ ERROR_CONTRACTS.update({
         code="CREDENTIAL_INPUT_CANCELLED", category="state", retryable=False,
         recommended_action=RecoveryAction.NONE.value,
         recovery_hint="原私人凭据输入已取消、过期或任务结束；不要继续使用旧引用，也不要在群里索取明文。"),
+    **{code: ErrorContract(code=code, category='validation', retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value, recovery_hint=hint)
+        for code, hint in (
+            ('TOOL_PROGRAM_INVALID', '有限只读程序缺少原执行上下文或结构无效；不能直调handler、换身份或执行任意代码。'),
+            ('TOOL_PROGRAM_INCOMPLETE', '程序有失败、取消、权限拒绝或预算缺口；核对calls与coverage，不能把空页或部分结果当完整成功。'),
+        )},
     "CREDENTIAL_INPUT_UNAVAILABLE": ErrorContract(
         code="CREDENTIAL_INPUT_UNAVAILABLE", category="configuration", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
@@ -3842,6 +3857,10 @@ ERROR_CONTRACTS.update({
         code="FEISHU_CLOUD_HTTP_ERROR", category="network", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="飞书云接口拒绝或未确认请求；核查应用权限、文档协作者、额度和原操作状态，未知写入先读回，不能重复追加。"),
+    **{code: ErrorContract(code=code, category='validation', retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint='供应商明确拒绝表格范围或工作表；核对准确sheet_id、range和values形状，再沿原任务修正参数，不误报资源权限。')
+       for code in ('FEISHU_CLOUD_RANGE_INVALID', 'FEISHU_CLOUD_SHEET_NOT_FOUND')},
     "FEISHU_CLOUD_RESPONSE_UNKNOWN": ErrorContract(
         code="FEISHU_CLOUD_RESPONSE_UNKNOWN", category="state", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,

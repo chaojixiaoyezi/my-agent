@@ -32,7 +32,16 @@ def test_repeated_messages_without_setting_password_never_dispatch(tmp_path):
 # LLM: 操作身份来自可信平台字段，表单值仅由密码服务验证；失败不产生认证、续送或回显。
 # 函数用途: 在测试里模拟首设/解锁卡提交，保留对应用户的真实身份检查。
 def submit(adapter, action="pwd_set", password="Abcd1234", operator="ou_new_user"):
-    return adapter._handle_card_action({"value": {"session_lock_action": action, "user_id": "ou_new_user"},
+    from agent_py_agent.agent.session_lock.card_control import (
+        bind_password_card,
+        prepare_password_card,
+    )
+    if not getattr(adapter,'_test_password_reference',''):
+        reference,payload=prepare_password_card(adapter,'ou_new_user','set')
+        bind_password_card(adapter,payload,{'message_id':'om_setup','chat_id':'oc_test_private'})
+        adapter._test_password_reference=reference
+    return adapter._handle_card_action({"value": {"session_lock_action": action, "user_id": "ou_new_user",
+        'reference':adapter._test_password_reference},'message_id':'om_setup','chat_id':'oc_test_private',
                                        "form_value": {"pwd": password}, "operator_open_id": operator})
 
 

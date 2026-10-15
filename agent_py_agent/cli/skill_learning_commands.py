@@ -33,7 +33,7 @@ from ..agent.user_space.owner_resolver import (
     resolve_owner_home,
 )
 
-_STATE_LABELS = {"active": "生效中", "user_modified": "已被你修改（不再自动更新）", "missing": "文件已不存在"}
+_STATE_LABELS = {"archived":"已归档（可restore）", "disabled":"用户已停用", "cooled":"已冷藏（仍可检索）", "active": "生效中", "user_modified": "已被你修改（不再自动更新）", "missing": "文件已不存在"}
 _NAME_HELP = "自动总结的 Skill 名（可从 list 获得）"
 
 
@@ -67,6 +67,16 @@ def add_learned_skill_subcommands(areas: argparse._SubParsersAction) -> None:
         parser.add_argument("name", help=_NAME_HELP)
         parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
         parser.set_defaults(func=handler)
+
+    proposals = actions.add_parser("proposals", help="列出待确认的学习候选")
+    proposals.add_argument("--json", action="store_true")
+    proposals.set_defaults(func=cmd_learning_proposals)
+    for action in ("proposal-show", "confirm", "reject"):
+        candidate = actions.add_parser(action, help="查看、确认或拒绝学习候选")
+        candidate.add_argument("proposal_id")
+        candidate.add_argument("--revision", type=int, required=action != "proposal-show")
+        candidate.add_argument("--json", action="store_true")
+        candidate.set_defaults(func=cmd_learning_proposals)
 
 
 # LLM: 只读列出，不创建目录。
@@ -207,3 +217,26 @@ __all__ = [
     "cmd_skills_learned_revert",
     "cmd_skills_learned_show",
 ]
+
+
+# LLM: 只有用户CLI控制进入确认；模型工具目录不暴露此处理器，确认必须带用户看到的候选revision。
+# 函数用途: 查看或裁决待确认学习候选，正式写入仍走原publisher与CAS。
+def cmd_learning_proposals(args):
+    from ..agent.capability.skill_learning_proposals import (
+        learning_proposal,
+        list_learning_proposals,
+        resolve_learning_proposal,
+    )
+
+    # LLM: owner解析沿原CLI上下文，不接受候选内容指定owner。
+    # 函数用途: 执行这一条用户候选命令。
+    def operation(context, selected):
+        action = selected.skills_learned_action
+        if action == "proposals":
+            return {"ok":True,"proposals":list_learning_proposals(context.store)}
+        if action == "proposal-show":
+            return {"ok":True,"proposal":learning_proposal(context.store,selected.proposal_id)}
+        row = resolve_learning_proposal(context.store,selected.proposal_id,selected.revision,decision=action,guard_config=context.config,actor_id="local-cli")
+        return {"ok":True,"proposal":row}
+
+    return _run(args,"skills learned "+args.skills_learned_action,operation)

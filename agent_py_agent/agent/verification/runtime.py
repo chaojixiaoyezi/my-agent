@@ -32,7 +32,7 @@ from .repository import VerificationContext, VerificationEvidence, VerificationE
 # the last event as `verification_evidence` and adds the ordered `verification_evidence_chain`. When a
 # verifier ran but a pipe, `;`, `||` or background `&` hid its exit status, nothing is written to the ledger
 # and the envelope carries `verification_skipped` so the model can rerun it in a countable form.
-# 函数用途: 根据一次真实工具结果，记录测试证据或让旧证据过期。
+# 函数用途: 根据真实工具结果记录测试证据、标记旧证据过期；已落账通过事实反馈本run采用的准确自学版本，不改变原工具结果。
 def record_tool_verification(
     agent: object,
     call: ToolCall,
@@ -51,6 +51,8 @@ def record_tool_verification(
                 result=result,
             )
             if evidence:
+                from ..capability.skill_learning_host_feedback import observe_command_verifications
+                observe_command_verifications(agent,call,evidence)
                 # 单条证据的形状保持不变；&& 串联整体通过时另附完整有序列表，读归档的消费者不能漏看前面几段。
                 additions["verification_evidence"] = evidence[-1]
             if len(evidence) > 1:

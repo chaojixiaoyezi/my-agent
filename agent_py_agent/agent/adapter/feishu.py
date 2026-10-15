@@ -386,7 +386,6 @@ def _password_card_action(
         from ..session_lock.feishu_cards import (
             build_password_resolved_card,
             is_password_action,
-            password_action_outcome,
         )
 
         if not is_password_action(value):
@@ -395,7 +394,8 @@ def _password_card_action(
         expected_user = str(value.get("user_id") or "").strip()
         if not operator or operator != expected_user:
             return True, _password_operator_mismatch_response()
-        result = password_action_outcome(unlock, value, norm.get("form_value") or {})
+        from ..session_lock.card_control import resolve_password_card
+        result = resolve_password_card(adapter,norm,value)
         resolved = build_password_resolved_card(ok=result.ok, message=result.message)
         ok = result.ok
         if ok and str(value.get("session_lock_action") or "") in {"pwd_set", "pwd_unlock"}:
@@ -406,7 +406,7 @@ def _password_card_action(
         }
     except Exception as exc:
         logger.error('密码卡回调处理异常(不影响长连) error_type=%s', type(exc).__name__)
-        return True, None
+        return True, {'toast':{'type':'error','content':'这张密码卡已失效或来源不匹配，请重新请求原私人卡。'}}
 
 
 def _password_operator_mismatch_response() -> dict[str, Any]:
@@ -538,14 +538,17 @@ def _admit_feishu_event(adapter: Any, payload: dict[str, Any], facts: dict[str, 
 # 函数用途: 构造并发送设置或解锁密码卡，返回飞书是否接收成功。
 def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
     try:
+        from ..session_lock.card_control import bind_password_card, prepare_password_card
         from ..session_lock.feishu_cards import build_password_card
-        from .feishu_card import send_interactive_card
-
-        card = build_password_card(mode=mode, user_id=user_id)
-        return bool(send_interactive_card(adapter.app_id, adapter.app_secret, user_id, card))
-    except Exception as exc:
-        logger.warning('密码卡发送失败 error_type=%s', type(exc).__name__)
+        reference,payload=prepare_password_card(adapter,user_id,mode)
+        receipt=_send_feishu_control_card(adapter,user_id,build_password_card(mode=mode,user_id=user_id,reference=reference),
+            idempotency_key=payload['nonce'])
+        bind_password_card(adapter,payload,receipt)
+        return bool(receipt.get('message_id') and receipt.get('chat_id'))
+    except (OSError,RuntimeError,TypeError,ValueError):
+        logger.error('发送密码卡失败，未修改密码或解锁状态')
         return False
+
 
 
 # LLM: 原 send/reply 已派生最长 50 字符的分片 uuid；本声明只供 delivery 在有效窗口内恢复同一逻辑消息。

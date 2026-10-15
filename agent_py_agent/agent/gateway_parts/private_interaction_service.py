@@ -26,7 +26,7 @@ def private_interaction_lock_error(base_agent, actor_id: str) -> str:
     return "IM_PASSWORD_SETUP_REQUIRED" if status.requires_password_setup else "IM_UNLOCK_REQUIRED" if status.locked else ""
 
 
-# LLM: MAC/actor/expiry 先于目标 owner 加载；只有签名群凭据按当前成员事实提交，其余控制保留私人锁与管理员绑定。
+# LLM: MAC/actor/expiry先于owner加载；签名群凭据及模型selection取消按当前成员核验，其余模型动作保留私人锁/原actor。
 # 函数用途: 对一条已认证 SDK 控制事件核对身份、密码、执行和卡片，再写原批准记录。
 # LLM: fields 仅在凭据/模型配置类型接受；模型控制走轻量原 owner store，不创建运行任务，原锁先于写账。
 # 函数用途: 私人凭据 fields 只在 task_credential 接受，审批不收秘密；原锁和实际卡核验先于写账。 修改需同步原控制、恢复或权限测试。
@@ -39,13 +39,15 @@ def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_i
     reference = body["reference"]
     if not isinstance(reference, str):
         raise ValueError("交互引用无效")
-    payload = verify_interaction_reference(Path(base_agent.home_paths.root), reference, channel=channel, actor_id=actor_id, submitter=body.get("submitter"))
-    if payload.get("kind") not in {"tool_approval", "task_credential", "model_configuration"}:
+    payload = verify_interaction_reference(Path(base_agent.home_paths.root), reference, channel=channel, actor_id=actor_id, submitter=body.get("submitter"), decision=str(body["decision"]))
+    if payload.get("kind") not in {"tool_approval", "task_credential", "model_configuration", "feishu_oauth"}:
         raise ValueError("交互类型无效")
-    group_input = payload.get("presentation", {}).get("kind") == "group"
-    if group_input and body["chat_id"] != payload["presentation"]["chat_id"]:
+    from ..user_space.interaction_refs import interaction_presentation
+    presentation = interaction_presentation(payload,str(body["decision"])) or {}
+    group_input = presentation.get("kind") == "group"
+    if group_input and body["chat_id"] != presentation["chat_id"]:
         raise ValueError("群卡来源不匹配")
-    error = "" if group_input else private_interaction_lock_error(base_agent, actor_id)
+    error = "" if group_input or body["decision"]=="cancel" else private_interaction_lock_error(base_agent, actor_id)
     if error:
         return {"ok": False, "error_code": error, "message": "请先在机器人私聊设置或解锁个人密码，再确认原卡片。"}
     owner = OwnerIdentity(**payload["owner"])
@@ -56,10 +58,13 @@ def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_i
         from ..capability.runtime_config_reload import capability_config_for_agent
         from .model_control_cards import model_control_host, submit_model_control
         capability = capability_config_for_agent(base_agent)
-        if capability is not None and not getattr(capability, "im_model_cards_enabled", True):
+        if body["decision"]!="cancel" and capability is not None and not getattr(capability, "im_model_cards_enabled", True):
             raise ValueError("模型卡未启用")
-        return submit_model_control(base_agent, model_control_host(base_agent, owner), owner, payload, body)
+        return submit_model_control(base_agent, model_control_host(base_agent, owner), owner, payload, body, actor_id=actor_id)
     agent = _resolve_request_agent_for_owner(base_agent, owner)
+    if payload["kind"] == "feishu_oauth":
+        from ..user_space.feishu_oauth import cancel_oauth_card
+        return cancel_oauth_card(agent,payload,body,actor_id=actor_id)
     if payload["kind"] == "task_credential":
         from ..user_space.task_credentials import submit_credential_card
         return submit_credential_card(agent, payload, body)

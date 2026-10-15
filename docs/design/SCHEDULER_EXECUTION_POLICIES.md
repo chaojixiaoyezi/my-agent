@@ -477,3 +477,19 @@ A 平台有 3 个独立监控、B 平台有 3 个独立监控时，用户看到�
 错误区分：SCHEDULER_NOT_FOUND 表示本 owner 没有该编号，SCHEDULER_NOT_AUTHORIZED 表示记录存在但属于另一发起人；CHANNEL_ACTOR_IDENTITY_REQUIRED/INVALID/CONFLICT/SCOPE_MISMATCH 分别表示缺证明、坏记录、身份冲突和归属不匹配。固定文案不包含原任务正文、路径或凭据。
 
 验收沿真实 Repository/ConversationStore/TaskLink/子代理原序列化执行，覆盖主群前台、普通用户和管理员私聊、后台工作、孩子与孙级、旧伪造属性、同群不同人、两种审批冲突以及本人新入口续原根。生产飞书卡片运输仍由原签名、claim/attempt 和密码锁合同守门；本测试没有对真实用户外发。
+
+## 2026-10-14 当前助手空间与离群代清理（S01–S05，本地实施）
+
+此节覆盖此前“私人汇总本人跨群监控”和“同群只可查看本人监控”的展示口径。监控仓库仍只有原owner job/run；私人助手只查本人owner，群助手展示当前群所有创建者，不扫描其他群，不新增all聚合。列表、详情、历史、状态计数与模型工具同范围；已知跨owner编号仍不可查、不可改。旧creator缺证明可展示为待核验，但不能由当前成员认领。
+
+姓名只从原宿主身份索引的display_name读取，一批相同creator只查一次；无名字显示“姓名未知”及准确provider/actor ID。本机local creator无映射时明确本机来源，不猜员工名字。姓名、备注、USER.md和模型属性不影响授权。
+
+所有写操作走统一`authorize_job`，包括原先只依赖列表过滤的pause/resume/run/update/notify。创建者仍在群时B不可管理A；只有宿主当次完整官方群成员列表同时证明B仍在原群、A已不在原群，才允许B执行pause/cancel/delete。resume、试跑、修改规则/通知、恢复执行或接管不因此开放。原creator永久保留；代清理意图沿原owner AuditLogger记录实际actor、原creator、job/version/request，不把授权意图写为执行已完成。审计写失败保持原审计降级规则，不因记录失败扩大权限。
+
+成员证明仅限Feishu官方members接口，每次重新读取，至多十页、成员查询总预算两秒；原adapter token认证仍按原有限超时。任何权限/网络/格式/分页不完整/循环/预算不足均是未知，不得当作离群或离职。重新入群即时重新裁决，不持久缓存离开授权。离职只要表现为官方完整群成员快照已无此人即可满足本群代清理；未暴露群离开的组织状态不会被猜测为已离职。未来接其他provider需提供同等可信实时事实，当前未知provider不开放代清理。
+
+管理员绑定IM可沿原local/main管理明确local creator的本人TUI监控；不因管理员称号查询或控制其它群。slash仅在需要写控制且缺原入口线程时，按已解析owner与认证scope创建原ThreadStore绑定；不从任务名、模型参数或显示名补身份。
+
+`/status`累计模型输入、输出和缓存命中率直接投影原线程`public_model_metrics`，与TUI同口径；估算输入标“约”，未知总数/缓存显示未知，不取平均百分比、不另建用量账或发模型请求。当前上下文占用继续单独显示。Gateway/local控制及HTTP状态恢复均保留同一指标。
+
+隔离回归涵盖原Repository、真实HostChannelActor/ThreadStore、前台/后台、私有10/A群10/B群5与同群他人、当前/离群/未知/操作者离群、同名不同ID、重新入群、跨群和缺creator、完整/损坏/循环/超预算成员分页、管理员IM控制本人TUI以及同源模型指标。未调用真实飞书、不部署；运输/组织权限可用性仍待专用租户验收。具体测试与集成边界见[交接](../tasks/SCHEDULE_OWNER_SCOPE_HANDOFF.md)。

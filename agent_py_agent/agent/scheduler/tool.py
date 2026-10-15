@@ -251,6 +251,12 @@ class ScheduleTool(BaseTool):
             return _error("job_id 必填", "TOOL_INVALID_ARGUMENTS")
         if action != "create" and not _visible_jobs(self.agent, [repository.get_job(job_id, include_deleted=action == 'delete')]):
             return _error("目标监控不属于当前发起人，已拒绝操作", "SCHEDULER_NOT_AUTHORIZED")
+        if action not in {'create', 'get', 'history', 'execution', 'delete', 'cancel', 'takeover', 'recover'}:
+            from .control import authorize_job
+            thread_id, _task = _conversation_scope(self.agent)
+            authorize_job(repository, repository.get_job(job_id, include_deleted=action == 'delete'),
+                resolve_host_actor(self.agent, thread_id), home_root=getattr(getattr(self.agent, 'home_paths', None), 'root', None),
+                agent=self.agent, operation=action)
         if action == 'execution':
             from .control import inspect_monitor_execution
             thread_id, _task = _conversation_scope(self.agent)
@@ -258,7 +264,7 @@ class ScheduleTool(BaseTool):
                 actor=resolve_host_actor(self.agent, thread_id)))
         if action == "get":
             active_runs, run_errors = repository.active_runs_by_job()
-            job = repository.get_job(job_id)
+            job = _visible_jobs(self.agent, [repository.get_job(job_id)])[0]
             return _success(
                 action,
                 {
@@ -582,7 +588,9 @@ def _job_projection(
     }
     if metadata_only:
         return payload
+    payload["creator"] = job.get("creator")
     payload["name"] = job["name"]
+    payload["creator_display"] = job.get("creator_display") or "创建者身份待核验"
     payload["precheck"] = job.get("precheck")
     payload["skill_refs"] = job.get("skill_refs") or []
     prompt = str(job.get("prompt") or "")
@@ -666,11 +674,11 @@ def _creator_identity(agent, thread_id):
     return {'channel': actor.channel, 'actor_id': actor.actor_id} if actor else {'local': True}
 
 
-# LLM: 群 owner 共享上下文不等于共享个人监控控制权；当前 actor 来自原任务冻结事实，不能从工具参数选择人。
-# 函数用途: 在模型工具查询和写操作前过滤本人的监控，与 slash 命令保持同一隔离要求。
+# LLM: 查询只使用已经装配的当前owner仓库，全群创建者可见；写授权在authorize_job统一核对，显示名不授予权限。
+# 函数用途: 给当前空间的监控添加可信创建者展示，与slash同空间，不跨群合并。
 def _visible_jobs(agent, jobs):
-    if getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') != 'group':
-        return jobs
-    thread_id, _task = _conversation_scope(agent)
-    identity = _creator_identity(agent, thread_id)
-    return [job for job in jobs if job.get('creator') == identity and identity.get('actor_id')]
+    from .creator_access import creator_display_rows
+    if getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') == 'group':
+        thread_id, _task = _conversation_scope(agent)
+        _creator_identity(agent, thread_id)
+    return creator_display_rows(agent, jobs)

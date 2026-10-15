@@ -158,3 +158,24 @@ def test_strict_record_reader_rejects_aliases(tmp_path, link_kind):
         alias.hardlink_to(original)
     with pytest.raises((credentials.CredentialInputError, ValueError, OSError)):
         read_credential_row(alias, stage='record_read')
+
+
+@pytest.mark.parametrize('kind', ['user','group','main'])
+def test_result_read_after_send_preserves_unknown_typed_outcome(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.tooling import task_credential_tool
+    agent = _agent(tmp_path, kind)
+    _thread, actor, _claim = _active(agent)
+    if kind == 'main':
+        bind_admin_channel_identity(agent.home_paths.root, 'feishu', actor.actor_id)
+    sent = []
+    agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda *_a, **_k:
+        sent.append(True) or {'message_id':'om_synthetic','chat_id':'oc_synthetic'}),
+        capabilities=ChannelCapabilities(control_cards=True, proactive=True))
+    def unavailable(*args, **kwargs):
+        raise credentials.CredentialInputError('CREDENTIAL_STORAGE_UNAVAILABLE', '受管读取失败',
+            stage='result_read', effect_outcome=kwargs['effect_outcome'])
+    monkeypatch.setattr(task_credential_tool, 'read_credential_row', unavailable)
+    result, _ = _invoke(agent, {'url':'https://example.com','authentication':'bearer'})
+    assert len(sent) == 1 and not result.ok
+    assert result.reported_error_code == 'CREDENTIAL_STORAGE_UNAVAILABLE'
+    assert result.effect_outcome == 'unknown'

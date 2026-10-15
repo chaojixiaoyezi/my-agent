@@ -1,4 +1,4 @@
-# LLM: 监控控制诊断只投影结构化异常、errno 和可信 scope；不记录输入正文、参数、文件路径或凭据，不决定重试副作用。
+# LLM: 监控控制诊断只投影结构化异常、errno和可信scope；新增成员未知/仍在群/操作者离群固定码，不从名字或文案判资格。
 # 模块用途: 解析监控命令参数并提供可追踪的失败回执，IM 用户无需刷新或查看宿主日志。
 from __future__ import annotations
 
@@ -15,6 +15,9 @@ from ..scheduler.schedule import ScheduleValidationError
 _LOGGER = logging.getLogger(__name__)
 _USAGE = '用法：/schedule [job01]；/schedule history|pause|resume|run|delete|takeover|execution|cancel|recover <job01>；/schedule notify <job01> origin|local|none。'
 _MESSAGES = {
+    'SCHEDULER_MEMBERSHIP_UNAVAILABLE': '创建者成员状态待核验：群成员权限、网络或完整分页不可用，未授权代为清理。',
+    'SCHEDULER_CURRENT_MEMBER_REQUIRED': '当前操作者不在原群，已拒绝代为清理。',
+    'SCHEDULER_CREATOR_STILL_MEMBER': '创建者仍在原群，只有原创建者可管理该监控。',
     'SCHEDULER_ARGUMENTS_INVALID': _USAGE,
     'SCHEDULER_STORE_BUSY': '监控账本正在频繁更新，本次读取未完成，请稍后再发同一查询。',
     'SCHEDULER_PERMISSION_DENIED': '宿主无法读取或写入监控账本；请管理员检查目录与锁文件权限。',

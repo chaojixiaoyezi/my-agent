@@ -9,17 +9,20 @@ from ..common.json_io import read_json_object_report
 from .input_dependencies import arm_input_dependency, input_dependency_path
 
 
-# LLM: 只消费 executor 的 handler_details.input_dependency；不得接受普通模型 JSON 或把未知输入 ID 当成有效依赖。
+# LLM: 只消费executor真实input_dependency；取消可能早于工具归档，带resolution_delivery=retire的卡取消不得重新armed/发Wake或进入等待，泛用取消不变。
 # 函数用途: 将已归档工具的结构化输入依赖置为可恢复；完整本轮其它工具仍按原配对记录。
 def record_input_wait(agent, params, result):
     envelope = (getattr(result, 'metadata', {}) or {}).get('handler_details', {})
     dependency = envelope.get('input_dependency') if isinstance(envelope, dict) else None
     if result.ok and isinstance(dependency, dict) and dependency.get('status') == 'waiting_input':
         previous = read_json_object_report(input_dependency_path(agent, dependency['input_id']), context='task_input.replay').payload
-        if previous.get('armed') and previous.get('status') != 'pending':
+        if (previous.get('status')=='cancelled' and previous.get('resolution_delivery')=='retire') or (previous.get('armed') and previous.get('status') != 'pending'):
             params.tool_context.append('[task-input-resolution]\n' + json.dumps({'input_id': previous['input_id'], 'status': previous['status'], 'result_refs': previous.get('result_refs', [])}))
             return
         row = arm_input_dependency(agent, dependency['input_id'])
+        if row.get('status')=='cancelled' and row.get('resolution_delivery')=='retire':
+            params.tool_context.append('[task-input-resolution]\n' + json.dumps({'input_id':row['input_id'],'status':row['status'],'result_refs':row.get('result_refs',[])}))
+            return
         state = params.live_archive_state
         state['waiting_input_id'] = row['input_id']
 

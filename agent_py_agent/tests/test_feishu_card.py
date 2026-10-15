@@ -27,11 +27,12 @@ def test_build_card_has_two_buttons_carrying_token_and_choice():
     div_text = card["elements"][0]["text"]["content"]
     assert "语气偏活泼" in div_text and "SOUL" in div_text
     actions = card["elements"][1]["actions"]
-    assert len(actions) == 2
+    assert len(actions) == 3
     values = {a["value"]["choice"]: a["value"]["token"] for a in actions}
     assert values == {
         "confirm": "tok123",
         "decline": "tok123",
+        "cancel": "tok123",
     }  # 两按钮 action.value 都带同一 token
 
 

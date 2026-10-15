@@ -73,7 +73,7 @@ def test_default_timezone_lists_started_monitor_and_real_history(tmp_path):
 def test_schedule_failures_distinguish_errno_and_log_no_arguments(monkeypatch, caplog, number, code):
     import agent_py_agent.agent.gateway_parts.schedule_control as controls
 
-    def fail(_agent, _scope):
+    def fail(_agent, _scope, **kwargs):
         raise OSError(number, 'PRIVATE_EXCEPTION_BODY')
 
     monkeypatch.setattr(controls, 'visible_monitors', fail)
@@ -144,7 +144,7 @@ def test_partial_status_timing_is_unknown_instead_of_zero_or_keyerror(facts):
 
 def test_unresolved_monitor_lookup_keeps_partial_query_diagnostic(monkeypatch):
     monkeypatch.setattr('agent_py_agent.agent.gateway_parts.schedule_control.visible_monitors',
-                        lambda *_: ([], ['SCHEDULER_CREATOR_UNRESOLVED']))
+                        lambda *_, **kwargs: ([], ['SCHEDULER_CREATOR_UNRESOLVED']))
     result = execute_schedule_control(SimpleNamespace(), parse_conversation_control('/schedule job01'), None)
     assert not result.ok and result.error_code == 'SCHEDULER_NOT_FOUND'
     assert result.details['load_error_codes'] == ['SCHEDULER_CREATOR_UNRESOLVED']
@@ -159,7 +159,7 @@ def test_unresolved_monitor_lookup_keeps_partial_query_diagnostic(monkeypatch):
 def test_repository_wrapped_diagnostics_preserve_numeric_cause(monkeypatch, caplog, internal, details, expected):
     from agent_py_agent.agent.scheduler.repository import SchedulerRepositoryError
 
-    def fail(*_):
+    def fail(*_, **kwargs):
         raise SchedulerRepositoryError('PRIVATE_BODY', error_code=internal,
                                        details={**details, 'path': 'PRIVATE_PATH', 'message': 'PRIVATE_BODY'})
 

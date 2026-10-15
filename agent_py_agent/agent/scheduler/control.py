@@ -8,11 +8,13 @@ from .notification_binding import SCHEMA, bound_notification_thread
 from .repository import SchedulerConflictError
 
 
-# LLM: 调用方提供宿主冻结 actor；本地主身份仅控制明确 local creator，旧不明创建人需显式迁移，不升级管理员群身份。
-# 函数用途: 在敏感写入前核对准确 owner 和原创建人，工具与命令复用。
-def authorize_job(repository, job, actor=None, *, home_root=None):
+# LLM: 调用方提供宿主冻结actor与明确动作；原创建者沿旧授权，代清理仅允许当前群成员对已证离群创建者stop/delete，不扩大其它写入。
+# 函数用途: 核对准确owner/原创建者，或已证明离群的必要止损授权；只读查询仅核owner，工具与命令共用。
+def authorize_job(repository, job, actor=None, *, home_root=None, agent=None, operation="manage"):
     if job.get('owner') != repository.owner:
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    if operation == 'read':
+        return
     creator = job.get('creator')
     local = repository.owner['provider'] == 'local' and repository.owner['kind'] == 'main'
     if creator == {'local': True} and (local or repository.owner['kind'] == 'user' and actor is None):
@@ -21,13 +23,16 @@ def authorize_job(repository, job, actor=None, *, home_root=None):
             raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
         return
     if actor is None or creator != {'channel': actor.channel, 'actor_id': actor.actor_id}:
-        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+        if agent is None:
+            raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+        from .creator_access import authorize_departed_creator
+        authorize_departed_creator(agent, repository, job, actor, operation)
     if actor.owner_id != repository.owner['id']:
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
 
 
 # LLM: 删除先在原仓库 CAS 关闭未来与 queued/claimed，再请求准确 active run 整树停止；异常保存 requested，不能宣称已退出。
-# 函数用途: 删除本人监控并回收其当前工作，重复删除沿同一 tombstone 重试未确认取消。
+# 函数用途: 删除已授权监控并回收当前工作；群代清理保留原creator，重复删除沿原tombstone重试未确认取消。
 def delete_monitor(agent, repository, job_id, expected_version, *, actor=None):
     return _cancel_monitor(agent, repository, job_id, expected_version, actor=actor, delete=True)
 
@@ -42,7 +47,8 @@ def cancel_monitor(agent, repository, job_id, expected_version, *, actor=None):
 # 函数用途: 执行当前取消或删除，汇总所有规则的准确取消结果。
 def _cancel_monitor(agent, repository, job_id, expected_version, *, actor, delete):
     job = repository.get_job(job_id, include_deleted=delete)
-    authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None))
+    authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None),
+                  agent=agent, operation='delete' if delete else 'cancel')
     before, errors = repository._valid_runs(repository._store_snapshot())
     deleted = (repository.delete_job(job_id, expected_version=expected_version) if delete
         else repository.cancel_job_runs(job_id, expected_version=expected_version))
@@ -164,7 +170,7 @@ def cancel_scheduled_task(agent, repository, run):
 def inspect_monitor_execution(agent, repository, job_id, *, actor=None):
     from .repository import _runner_liveness
     job = repository.get_job(job_id)
-    authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None))
+    authorize_job(repository, job, actor, home_root=getattr(getattr(agent, 'home_paths', None), 'root', None), operation='read')
     rows, errors = repository._valid_runs(repository._store_snapshot())
     result = []
     for run in rows:

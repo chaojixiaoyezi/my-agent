@@ -174,6 +174,8 @@ class ManagedOperationStore:
         _require_running_authority(row, request.run_id, attempt_id)
 
     # ------------------------------------------------------------- claim
+    # LLM: 同事务核验当前attempt后，等价UNKNOWN先走原操作核对，不许新call编号绕过；不改未来独立run。
+    # 函数用途: 原子领取一次执行或返回原未知操作，会写操作账/资源锁，修改需同步幂等和跨attempt回归。
     def claim_tool_operation(
         self,
         request: ToolOperationClaimRequest,
@@ -228,6 +230,12 @@ class ManagedOperationStore:
             ).fetchone()
             if existing is not None:
                 decision = _existing_operation_decision(conn, existing, request, now)
+                conn.commit()
+                return decision
+            from .operation_reconciliation_authority import equivalent_managed_unknown
+            unresolved = equivalent_managed_unknown(conn, run['agent_run_id'], request)
+            if unresolved is not None:
+                decision = _existing_operation_decision(conn, unresolved, request, now)
                 conn.commit()
                 return decision
             _insert_executing_operation(conn, run, request, now)
@@ -386,6 +394,8 @@ class ManagedOperationStore:
         )
 
     # ------------------------------------------------------------- reopen
+    # LLM: 重开写入必须与结算共用当前运行权门；同attempt取消不能因current指针仍保留而重新取得执行权。
+    # 函数用途: 在原事务核验活跃身份和准确核对holder后重开原操作，拒绝已停止任务并保持UNKNOWN。
     def reopen_tool_operation_after_reconciliation(
         self,
         request: ToolOperationReopenRequest,
@@ -425,6 +435,8 @@ class ManagedOperationStore:
                     f"reconcile 重开必须拒绝）"
                 )
             payload = _outcome_payload(row)
+            from .operation_reconciliation_authority import assert_reconciliation_completion
+            assert_reconciliation_completion(conn, row, payload)
             holder = payload.get("holder") if isinstance(payload.get("holder"), dict) else {}
             marker = payload.get("reconciliation_claim")
             if (
@@ -721,9 +733,8 @@ class ManagedOperationStore:
         return records
 
 
-# LLM: Managed UNKNOWN reconciliation is one runtime.db transaction: current-attempt fence,
-# exclusive lease, workspace locks, mutation ownership, and payload claim advance together.
-# 函数用途: 在 runtime.db 中原子领取未知副作用核对权，并返回新的权威 holder 记录。
+# LLM: 当前活跃恢复者按owner/root/tool/args核验，跨attempt只增原操作代数和只读标记，执行attempt保持不变。
+# 函数用途: 同事务独占原UNKNOWN核对和资源锁，禁止取消/旧attempt取得新核对权。
 def _claim_managed_tool_operation_reconciliation(
     repo: Any,
     request: ToolOperationReconciliationClaimRequest,
@@ -735,22 +746,11 @@ def _claim_managed_tool_operation_reconciliation(
         raise AuthorityContextMissing("MANAGED run 无权威库（repo 缺失）")
     with repo._runtime_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            """
-            SELECT op.*, ar.workspace_epoch AS _workspace_epoch
-            FROM tool_operations op
-            JOIN agent_runs ar ON ar.agent_run_id = op.agent_run_id
-            WHERE op.operation_id = ?
-              AND op.attempt_id = ar.current_attempt_id
-              AND op.attempt_generation = ar.current_attempt_generation
-            """,
-            (request.operation_id,),
-        ).fetchone()
-        if row is None:
-            raise ToolOperationOwnershipError(
-                f"tool operation reconciliation target is missing or fenced: "
-                f"{request.operation_id}"
-            )
+        from .operation_reconciliation_authority import (
+            load_reconciliation_authority,
+            reconciliation_authority_marker,
+        )
+        row, cross_attempt = load_reconciliation_authority(conn, request)
         blocked = _managed_reconciliation_claim_decision(row, request, current)
         if blocked is not None:
             conn.commit()
@@ -770,20 +770,26 @@ def _claim_managed_tool_operation_reconciliation(
                 _record_from_row(row, owner_id=request.owner_id),
                 "reconciliation_scope_busy",
             )
+        generation = int(row['tool_operation_generation']) + int(cross_attempt)
+        authority = reconciliation_authority_marker(row, request, cross_attempt)
+        if cross_attempt:
+            payload['reconciliation_only'] = True
         payload["holder"] = _holder_dict(request.holder)
         payload["lease_expires_at"] = float(request.lease_expires_at)
         payload["reconciliation_claim"] = {
             "holder": _holder_dict(request.holder),
             "lease_expires_at": float(request.lease_expires_at),
-            "generation": int(row["tool_operation_generation"]),
+            "generation": generation,
+            **authority,
         }
         updated = conn.execute(
-            "UPDATE tool_operations SET outcome_json = ?, updated_at = ? "
+            "UPDATE tool_operations SET outcome_json = ?, updated_at = ?, tool_operation_generation = ? "
             "WHERE operation_id = ? AND status = ? AND "
             "tool_operation_generation = ? AND settled_at = 0",
             (
                 json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 current,
+                generation,
                 request.operation_id,
                 OP_UNKNOWN,
                 int(request.expected_generation),
@@ -795,7 +801,7 @@ def _claim_managed_tool_operation_reconciliation(
             )
         for scope in scopes:
             _upsert_mutation_mutating_in_tx(
-                conn, scope, attempt_id=str(row["attempt_id"]), now=current
+                conn, scope, attempt_id=request.authority_attempt_id or str(row["attempt_id"]), now=current
             )
         conn.commit()
     claimed = _operation_record(
@@ -827,6 +833,7 @@ def _managed_reconciliation_claim_decision(
     return None
 
 
+# LLM: 核对锁归当前显式恢复attempt及新操作代数；原执行attempt不变，锁冲突回滚全部核对状态。
 # LLM: Resource locks are reacquired before the reconciliation marker is committed. Any overlap
 # rolls back the transaction and leaves the UNKNOWN row untouched.
 # 函数用途: 为 managed 未知操作核对重新取得其原始结构化资源锁。
@@ -843,10 +850,10 @@ def _acquire_managed_reconciliation_scopes(
                 conn,
                 scope,
                 request.holder,
-                attempt_id=str(row["attempt_id"]),
-                attempt_generation=int(row["attempt_generation"]),
+                attempt_id=request.authority_attempt_id or str(row["attempt_id"]),
+                attempt_generation=int(row["_current_attempt_generation"] if request.authority_attempt_id else row["attempt_generation"]),
                 workspace_epoch=int(row["_workspace_epoch"]),
-                tool_operation_generation=int(row["tool_operation_generation"]),
+                tool_operation_generation=int(row["tool_operation_generation"]) + int(row["attempt_id"] != row["_current_attempt_id"] or row["attempt_generation"] != row["_current_attempt_generation"]),
                 lease_expires_at=float(request.lease_expires_at),
                 now=current,
             )
@@ -1230,6 +1237,8 @@ def _mark_mutation_stable_in_tx(
         )
 
 
+# LLM: 所有已有操作先核验真实owner/root及调用attempt所属执行链；UNKNOWN可接受新调用键但仍只核对，不迁移执行权。
+# 函数用途: 判定已有操作是可重放、需要核对还是占用中，不新增副作用。
 def _existing_operation_decision(
     conn: Any,
     row: sqlite3.Row,
@@ -1241,10 +1250,18 @@ def _existing_operation_decision(
     决策里的 UNKNOWN 标记必须在本事务内联（conn 已 BEGIN IMMEDIATE）：开第二
     连接写会撞外层写锁（SQLITE_BUSY，seq 245 P3）。
     """
-    record = _record_from_row(row, owner_id=request.owner_id)
-    mismatch = _claim_mismatch_reason(record, request)
+    from .operation_reconciliation_authority import assert_operation_request_identity
+    assert_operation_request_identity(conn, row, request)
+    record = _record_from_row(row, owner_id=request.owner_id, run_id=request.run_id, task_id=request.task_id)
+    mismatch = _claim_mismatch_reason(record, request, reconciliation_only=str(row['status']) == OP_UNKNOWN and request.idempotency_scope == 'operation')
     if mismatch:
         return ToolOperationClaim("conflict", record, mismatch)
+    if str(row['status']) == OP_UNKNOWN:
+        from .operation_reconciliation_authority import load_reconciliation_authority
+        load_reconciliation_authority(conn, ToolOperationReconciliationClaimRequest(
+            owner_id=request.owner_id, run_id=request.run_id, operation_id=str(row['operation_id']),
+            expected_generation=record.generation, holder=request.holder, lease_expires_at=request.lease_expires_at,
+            authority_attempt_id=request.attempt_id, task_id=request.task_id, tool_name=request.tool, args_hash=request.args_hash))
     status = str(row["status"] or "")
     if status in {OP_SUCCEEDED, OP_FAILED, "CANCELLED"}:
         return ToolOperationClaim("replay", record)
@@ -1318,9 +1335,12 @@ def _mark_managed_unknown(
     return _record_from_row(fresh, owner_id="") or None
 
 
+# LLM: 仅原UNKNOWN只读核对可忽略派生调用键变化，工具/参数/namespace等身份始终匹配。
+# 函数用途: 比较操作的结构化身份，不解析展示文本或给新执行授权。
 def _claim_mismatch_reason(
     record: ToolOperationRecord,
     request: ToolOperationClaimRequest,
+    *, reconciliation_only: bool = False,
 ) -> str:
     comparisons = (
         ("tool", record.tool, request.tool),
@@ -1333,7 +1353,8 @@ def _claim_mismatch_reason(
         ),
         ("idempotency_key", record.idempotency_key, request.idempotency_key),
     )
-    changed = [name for name, previous, current in comparisons if previous != current]
+    changed = [name for name, previous, current in comparisons
+               if previous != current and not (reconciliation_only and name == "idempotency_key")]
     return (
         "operation identity was reused with different structured input: "
         + ",".join(changed)
@@ -1378,6 +1399,8 @@ def _managed_reconciliation_claim_is_live(
 
 # ------------------------------------------------------------------ finish 内部
 
+# LLM: 结算仍在原事务核对holder/generation；跨attempt只读claim还须当前活跃attempt/epoch精确匹配，旧执行身份不迁移。
+# 函数用途: 原子结算原操作并释放资源锁，拒绝旧holder、取消状态和过期接管者。
 def _settle_operation_via_repo(
     repo: Any,
     operation_id: str,
@@ -1442,7 +1465,10 @@ def _settle_operation_via_repo(
                 f"(提交 gen={expected_generation}, "
                 f"行 gen={row['tool_operation_generation']})"
             )
-        claim_epoch = int(payload.get("workspace_epoch") or 0)
+        from .operation_reconciliation_authority import assert_reconciliation_completion
+        recovery_authorized = assert_reconciliation_completion(conn, row, payload)
+        claim_epoch = int((payload.get('reconciliation_claim') or {}).get('workspace_epoch') if recovery_authorized
+                          else payload.get('workspace_epoch') or 0)
         if claim_epoch != int(row["_current_epoch"]):
             raise RuntimeConflictError(
                 f"settle 拒绝: operation {operation_id} workspace_epoch 已翻新"
@@ -1455,12 +1481,12 @@ def _settle_operation_via_repo(
             WHERE operation_id = ?
               AND settled_at = 0
               AND tool_operation_generation = ?
-              AND attempt_id = (
+              AND ((attempt_id = (
                   SELECT current_attempt_id FROM agent_runs r
                   WHERE r.agent_run_id = tool_operations.agent_run_id)
               AND attempt_generation = (
                   SELECT current_attempt_generation FROM agent_runs r
-                  WHERE r.agent_run_id = tool_operations.agent_run_id)
+                  WHERE r.agent_run_id = tool_operations.agent_run_id)) OR ?)
               AND (? != 'CANCELLED' OR handler_started_at = 0)
             """,
             (
@@ -1470,6 +1496,7 @@ def _settle_operation_via_repo(
                 now,
                 operation_id,
                 int(row["tool_operation_generation"]),
+                recovery_authorized,
                 outcome,
             ),
         ).rowcount
@@ -1762,6 +1789,8 @@ def _operation_record(
     )
 
 
+# LLM: 投影保留原执行身份和只读恢复限制；字段不从自然语言恢复，修改需同步操作回放测试。
+# 函数用途: 从原数据库行构造安全的操作事实，不授予新执行权。
 def _record_from_row(
     row: sqlite3.Row,
     *,
@@ -1796,6 +1825,7 @@ def _record_from_row(
         created_at=float(row["created_at"] or 0),
         updated_at=float(row["updated_at"] or 0),
         completed_at=float(row["settled_at"] or 0),
+        reconciliation_only=payload.get("reconciliation_only") is True,
     )
 
 

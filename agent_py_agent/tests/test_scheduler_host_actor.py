@@ -77,10 +77,13 @@ def test_other_group_member_is_distinct_from_absent_record(tmp_path, action):
     agent, source, actor, tool = group_case(tmp_path)
     job = create(tool)
     agent._current_run_params.host_channel_actor = replace(actor, actor_id="ou_b")
-    assert json.loads(tool.execute({"action": "list"}).output)["total"] == 0
+    assert json.loads(tool.execute({"action": "list"}).output)["total"] == 1
     before = agent.scheduler_repository.store_path.read_bytes()
     result = tool.execute({"action": action, "job_id": job["job_id"], "expected_version": job["version"], "prompt": "不会写入"})
-    assert result.error_code == "SCHEDULER_NOT_AUTHORIZED"
+    if action in {'get', 'history'}:
+        assert result.ok
+    else:
+        assert result.error_code == ('SCHEDULER_MEMBERSHIP_UNAVAILABLE' if action in {'pause', 'delete'} else 'CHANNEL_ACTOR_SCOPE_MISMATCH')
     assert agent.scheduler_repository.store_path.read_bytes() == before
     assert tool.execute({"action": "get", "job_id": "job_absent"}).error_code == "SCHEDULER_NOT_FOUND"
     assert resolve_host_actor(agent, source.thread_id).actor_id == "ou_b"
