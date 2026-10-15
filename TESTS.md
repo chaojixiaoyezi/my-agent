@@ -1,6 +1,12 @@
+2026-10-15 新版冻结前统一严格验收：48 focused文件1078项收集，1073通过、4项既有runtime_guidance预期失败、1项目标8420端口已占用跳过；没有连接或影响既有服务。Ruff、doc_sync、strict code-size、import-boundaries、diff、clean-package与离线uv lock全通过。只作为当前冻结源码的本地验收，真实卡提交/原Wake及订阅正例仍待同版部署，上一提交远端Test失败不作为通过证据。原始JUnit与各命令退出码在同版发行工件保留。
+
+2026-10-15 引用订阅补测：真实 `.3` 多规则 schema/短引用映射缺口已用原工具重放修复；`test_host_message_context.py` 沿真实Store、SessionTask、G1子孙与RuntimeDB覆盖delegate/恢复、同Goal新输入、旧attempt/错误owner/父根及业务role=main不借权。集中12文件247通过，独立原输入收尾24文件618通过/4既有xfail；最终统一focused/strict与真实租户重验另记，不累计交叉成绩。凭据schema仅澄清普通账号密码使用collection_mode，URL/名称/备注由宿主补充，避免模型重复声明为秘密字段。
+
 2026-10-15 首次普通 Gateway 凭据入口：作者与非作者独立复现同一 15 文件 **343 passed、0 failed/error/skipped**，不叠加计数。首次 group/user fake LLM 请求在改前真实返回 `CREDENTIAL_STORAGE_UNAVAILABLE/preflight/FileNotFoundError` 且零发卡；已有 TaskLink 的前台 claim 用例为 inactive，修复后转绿。普通用户 OAuth status 的真实工具状态也先红后绿，不以模型最终正文代替工具结果。
 
 新增 `test_gateway_credential_live_entry.py` 覆盖原基础队列与 scoped owner、首次晋升、假卡片运输、提交/取消/单 Wake、OAuth authorize/status；`test_tool_approval_foreground_scope.py` 覆盖不同 request/run/task/运输与 core attempt、旧 claim/attempt、错误 writer/owner/请求状态及 scope 错误分层。组合保留原存储、主子审批、私人锁、输入容量与截止回归；旧群审批 fixture 通过真实合成 HostActor 和群配置授权补齐前提，没有绕产品门。完整 15 文件命令、Codex 参考和未修边界见 [交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。局部 Ruff/diff 和 strict code-size 通过；真实飞书字段渲染、点击、提交/取消/Wake 与租户 OAuth 仍待验，根最终严格 gate 和同版包证据另记。
+
+2026-10-15 通用输入收尾补测：`.3`真实卡已出现但随后整轮`USER_REPLY_UNAVAILABLE`，旧343项没有断言最终response.ok及RuntimeDB状态；新增整轮group/user凭据与OAuth先红，修复后验证同模型零工具回执、card一次、主run.created/attempt.done、submit单Wake与cancel清理。补表达越权工具拒绝/有界重写、空正文及typed provider异常不伪造回执、真实stop优先、表达中submit/cancel与其它pending输入、child/grandchild原root Wake路由、缺失/handled Wake及准确attempt后继证据、standalone等待投影。只用合成owner和假运输；原真实失败保留，新版submit单Wake尚待根验收。完整24文件命令与最终数字见[收尾交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#通用输入等待收尾追加2026-10-15)，不与历史成绩累计。
 
 2026-10-15 `.2` 首次包内回归保留：同源码e3d6d2456的Mac 2122通过/2失败/1跳过/2源码分流，Linux 2123通过/2失败/零跳过/2源码分流。共同两红是异常清理测试的子解释器没有父验收显式测试资源桥，未执行产品路径；只修fixture以准确测试文件和当前pytest依赖参数加载，产品包和路径不补源码。保留原异常可见、线程零泄漏和5秒截止，不跳测或扩大分流；新提交须重新严格gate与双端验包，旧候选不交付。
 

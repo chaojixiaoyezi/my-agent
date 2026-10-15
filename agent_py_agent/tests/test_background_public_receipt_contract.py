@@ -153,7 +153,7 @@ def test_publish_missing_body_uses_exactly_one_existing_zero_tool_repair():
     assert phase['kind'] == 'background_final_receipt'
     assert phase['facts']['internal_result_is_model_authored'] is True
     repair, _ = _response(params, '这是根据本轮执行情况补充的公开回复。', purpose='background_receipt_repair', call_id='call-2')
-    verdict, final = _natural_user_reply_step(params, repair)
+    verdict, final = _natural_user_reply_step(None, params, repair)
     assert verdict == 'finish' and final.runtime_status == 'ok'
     assert final.internal_response and final.public_receipt['public_source']['call_id'] == 'call-2'
     assert final.public_receipt['execution_source']['call_id'] == 'call-1'
@@ -165,7 +165,7 @@ def test_failed_public_repair_preserves_internal_result_without_second_queue():
     response, _ = _response(params, _body(public=''))
     assert receipt.prepare_background_public_receipt(params, response)[0] == 'repair'
     repair, _ = _response(params, '', purpose='background_receipt_repair', call_id='call-2')
-    verdict, final = _natural_user_reply_step(params, repair)
+    verdict, final = _natural_user_reply_step(None, params, repair)
     assert verdict == 'finish' and final.runtime_reason == 'BACKGROUND_RECEIPT_PUBLIC_UNAVAILABLE'
     assert final.internal_response and final.text == '' and final.public_receipt is None
     assert pending_natural_user_reply(params) is None

@@ -1,3 +1,5 @@
+2026-10-15 真实补验正在修复：`.20261015.3` 模型私人配置保存、凭据卡发送/取消已验，空等待正文与多规则引用订阅暴露新缺口。输入依赖收尾已做独立 618 项通过/4 既有 xfail，引用宿主证明与后台谱系已完成合同回归；新版源码 gate、真实提交单 Wake 与订阅正例未完成，见[交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。
+
 2026-10-15 飞书受限网络发行：`.20261014.8` 冻结源码f6357d8d3，源码415项、双端包内及原生验收通过，本机已部署。真实普通私聊status/模型表单保存已核，凭据与群真实场景尚未全验；旧式UI回执无本机原账不可代算。准确实例、两域限制及清理见[飞书快检](docs/guides/FEISHU_QUICK_CHECK.md#2026-10-15-受限网络与准确实例验收)，后续文档不冒充包源码。
 
 2026-10-14 实施接线：日常审批默认由共享 `home/config/capability_config.yaml` 的 `owner_default_permission_mode` 决定；owner显式选择保持。`list_tools` 返回当前权限事实和完整不可用原因，`tool_search` 继续逐线程按需加载；`/help` 只给短导航。本人OAuth、CLI后端与审批期限的六项部署键不允许模型写owner局部配置。原输入等待完整归档后释放执行片，回调复核准确任务/人并沿原Wake恢复。见[实施合同](docs/design/IM_UNATTENDED_IMPLEMENTATION.md)。

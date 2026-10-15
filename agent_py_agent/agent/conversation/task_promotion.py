@@ -153,16 +153,19 @@ def promote_current_conversation_task(
     return _activate_current_conversation_task(store, current, attrs, selected)
 
 
-# LLM: 新任务能力选择与宿主身份使用各自 typed keyword，不读模型同名属性，执行次序保持原准备链。
-# 函数用途: 组装原 TaskStore.bind 的宿主选项，不建立选择或身份影子账本。
+# LLM: 能力选择/宿主身份/原输入各用typed keyword，不读模型属性；委派引用保留在原SessionTask，TaskLink只指向它。
+# 函数用途: 为原TaskStore.bind准备宿主选项，冻结原根输入位置，不建立第二引用或身份账本。
 def _promotion_bind_options(agent, current, thread_id):
     from ..capability.package_selection_scope import new_task_capability_selection
     from .host_actor import resolve_host_actor
+    from .host_message_context import promotion_context_binding
 
     selection = new_task_capability_selection(agent, current)
     actor = resolve_host_actor(agent, thread_id) if getattr(current, "host_channel_actor", None) is not None else None
+    context = promotion_context_binding(agent, current, actor, thread_id)
     return {**({"capability_selection": selection} if selection is not None else {}),
-        **({"host_channel_actor": actor} if actor is not None else {})}
+        **({"host_channel_actor": actor} if actor is not None else {}),
+        **({"host_message_context": context} if context is not None else {})}
 
 
 # LLM: Promotion succeeds only after the exact task workspace is durably bound for future turns

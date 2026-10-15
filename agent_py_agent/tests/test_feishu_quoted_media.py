@@ -23,10 +23,10 @@ from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_ch
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
 
-# LLM: 事件、父消息与资源都是测试内合成；当前 sender 永远不从父消息派生。
-# 函数用途: 生成引用根文件的群内明确提及消息，允许逐字段负例。
+# LLM: 合成人类入口显式携带 provider sender_type；父消息不派生当前身份，不靠产品接受未知 sender 才通过测试。
+# 函数用途: 生成引用根文件的群内明确提及消息，允许逐字段负例，遵守真实入口来源合同。
 def _event(*, actor='ou_user', chat='oc_team', content='读这个文件', mention='ou_bot', parent='om_file'):
-    return {'event': {'sender': {'sender_id': {'open_id': actor}}, 'message': {
+    return {'event': {'sender': {'sender_type': 'user', 'sender_id': {'open_id': actor}}, 'message': {
         'message_id': 'om_reply', 'chat_id': chat, 'chat_type': 'group', 'message_type': 'text',
         'parent_id': parent, 'root_id': parent, 'content': {'text': '@_user1 ' + content},
         'mentions': [{'key': '@_user1', 'id': {'open_id': mention}}],

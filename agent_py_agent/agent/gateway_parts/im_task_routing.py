@@ -59,8 +59,8 @@ def _select_route(context, conversation, prompt: str) -> dict:
 
 
 
-# LLM: route 标记是原请求的派工决策及准确任务引用，不复制任务状态；旧请求/关模式零额外模型调用，恢复不重读偏好。
-# 函数用途: 冻结语义路由后调用会话领域派工，写原请求/线程策略并返回原任务记录。
+# LLM: route只冻结派工选择；认证引用另经同一Gateway校验存原SessionTask，不进入模型attrs或孩子副本，重放必须同输入。
+# 函数用途: 冻结路由并派工，保存准确原输入位置，写原请求/线程策略并返回任务记录。
 def prepare_im_task_dispatch(context, conversation, prompt: str):
     snapshot = context.request.get(IM_DISPATCH_KEY)
     if snapshot is None or snapshot.get("mode") != "delegated" or context.request.get("system_task"):
@@ -95,11 +95,26 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
 
     config = capability_config_for_agent(context.agent) or CapabilityConfig()
     outcome = dispatch_owned_background_task(context.agent, source_thread_id=conversation.thread_id,
-                                            target_thread=thread, goal=prompt, config=config)
+                                            target_thread=thread, goal=prompt, config=config,
+                                            host_message_context=_message_context(context, conversation))
     if not outcome.ok:
         raise DataCorruptionError("IM 后台任务派发结果未确认")
     task_id = load_strict_json(outcome.output)["task_id"]
     return context.agent.conversation_store.session_tasks.load(task_id)
+
+
+# LLM: 只消费本请求认证metadata及scope，复用Gateway白名单解析；缺引用零快照，不能从prompt/attrs补恢复。
+# 函数用途: 在委派前冻结入站引用和原人工身份，不执行平台请求或新增持久写入。
+def _message_context(context, conversation):
+    if (context.request.get('metadata') or {}).get('quoted_message_references') is None:
+        return None
+    from ..conversation.host_actor import actor_from_scope
+    from ..conversation.host_message_context import HostMessageContext
+    from .request_execution import _gateway_message_references
+
+    refs = _gateway_message_references(context.request, conversation)
+    actor = actor_from_scope(context.agent, conversation.scope, conversation.thread_id, context.request_id)
+    return HostMessageContext(actor, refs)
 
 
 # LLM: 元数据写入原请求锁，保留租约、输入和执行身份；失败不得凭内存标记宣称已持久。

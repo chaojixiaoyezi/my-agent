@@ -31,13 +31,13 @@ from .models import (
 # 类用途: 发布绑定原发起人的私聊输入卡或管理授权，不等待、不调用模型。
 class RequestCredentialsTool(BaseTool):
     # LLM: 所有生命周期都要求规范任务，原 Registry 在 handler 前沿 promotes_task 晋升；注册不读密钥或发卡。
-    # 函数用途: 保存当前 owner 并声明原任务输入接口，首次普通请求也能持久等待和恢复。
+    # 函数用途: 声明原任务输入及标准/自定义字段分工，避免重复收集；首次普通请求也能持久等待和恢复。
     def __init__(self,agent):
         self.agent = agent
         self.model_spec = ToolModelSpec(name='request_credentials', description='接口需要账号密码或 API Key 时，向原发起人发私人密文输入卡；群来源在原群发卡，个人来源在本人私聊发卡；可仅收密码，缺链接在卡上填写。无需先选认证协议；返回 credential_ref；默认collected只保存，不能直接HTTP使用。需要使用时先operation=configure并传原引用与准确认证方案，配置后web_fetch再传此引用；可给 job_id 绑定已有本人的监控。',
             input_schema={'type':'object','properties':{'url':{'type':'string'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
-            'collection_mode':{'type':'string','enum':['username_password','password']},'header_name':{'type':'string'},'job_id':{'type':'string'},
-            'fields':{'type':'array','items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},
+            'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string'},'job_id':{'type':'string'},
+            'fields':{'type':'array','description':'需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。', 'items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},
             'auth_config':{'type':'object'},'ttl_seconds':{'type':'integer','minimum':60},
             'operation':{'type':'string','enum':['request','status','update','configure','revoke']},'credential_ref':{'type':'string'}},
             'anyOf':[

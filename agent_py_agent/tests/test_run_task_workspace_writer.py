@@ -451,6 +451,8 @@ def test_terminal_workspace_status_uses_only_typed_runtime_facts():
     )
 
     params = SimpleNamespace(task_attributes={})
+    for status in ('needs_user_input', 'approval_required'):
+        assert _terminal_workspace_status(params, SimpleNamespace(runtime_status=status)) == 'BLOCKED'
     assert _terminal_workspace_status(params, SimpleNamespace(runtime_status="ok")) == "DONE"
     assert (
         _terminal_workspace_status(

@@ -21,6 +21,7 @@ from ..gateway_parts.io import (
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .capability_selection_state import TaskCapabilitySelection
 from .host_actor import HostActorError, HostChannelActor
+from .host_message_context import HostMessageContextBinding
 
 
 # LLM: 身份只来自 typed keyword；已有主根不能被新发言人覆盖，旧未知根不自动补认。
@@ -46,6 +47,21 @@ def _bind_actor_link(data, link, actor, thread):
         if HostChannelActor.from_record(old) != actor:
             raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
     return replace(link, host_channel_actor=actor.to_record())
+
+
+# LLM: 上下文只认typed宿主参数；已有根不能被新输入补认或改写，普通生命周期保留原值，锁由bind持有。
+# 函数用途: 在原TaskLink同次写入中冻结唯一引用输入位置，不接模型request同名字段。
+def _bind_message_context(data, link, binding):
+    if binding is None:
+        return link
+    if not isinstance(binding, HostMessageContextBinding) or link.host_channel_actor is None:
+        raise ValueError('根引用上下文缺少可信宿主身份')
+    if binding.snapshot is not None and binding.snapshot.actor.to_record() != link.host_channel_actor:
+        raise ValueError('根引用上下文与发起人冲突')
+    record = binding.to_record()
+    if data and data.get('host_message_context') != record:
+        raise ValueError('已有根引用上下文不可改写')
+    return replace(link, host_message_context=record)
 
 
 _STORE_LOGGER = logging.getLogger("agent.conversation.store")
@@ -602,9 +618,10 @@ class TaskStore:
 
     # LLM: pending只来自独立typed宿主参数并仅新建时初始化；已有link即便缺键也原样保留，不从request读选择权限。
     # LLM: 主根身份只接 typed keyword，原锁内先复核不可改写；request/模型 attrs 同名字段不能登记身份。
-    # 函数用途: 幂等保存任务关联和新主根身份，再同步原索引；冲突在落盘前拒绝。
+    # 函数用途: 幂等保存任务/主根身份及不可变引用输入，再同步原索引；冲突在原锁内落盘前拒绝。
     def bind(self, request: dict, *, capability_selection: TaskCapabilitySelection | None = None,
-             host_channel_actor: HostChannelActor | None = None) -> ThreadTaskLink:
+             host_channel_actor: HostChannelActor | None = None,
+             host_message_context: HostMessageContextBinding | None = None) -> ThreadTaskLink:
         if capability_selection is not None and (
             not isinstance(capability_selection, TaskCapabilitySelection) or capability_selection.status != "pending"
         ):
@@ -629,7 +646,7 @@ class TaskStore:
             path = self.storage.task_path(task_id)
             payload = update_json_file_atomic(
                 path,
-                lambda data: _bind_actor_link(data, _merged_task_link(
+                lambda data: _bind_message_context(data, _bind_actor_link(data, _merged_task_link(
                     data,
                     request=request,
                     thread_id=thread.thread_id,
@@ -637,7 +654,7 @@ class TaskStore:
                     current=current,
                     path_exists=path.exists(),
                     capability_selection=capability_selection,
-                ), host_channel_actor, thread).to_dict(),
+                ), host_channel_actor, thread), host_message_context).to_dict(),
             )
             link = ThreadTaskLink.from_dict(payload)
             indexed_thread = self.update_thread_index(

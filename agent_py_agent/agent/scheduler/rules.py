@@ -1,5 +1,5 @@
-# LLM: 一个监控的规则保存在原 job；运行、依赖、通知只读结构字段，不从监控名/提示词推断 LLM、周期或条件。
-# 模块用途: 校验监控规则、工具动作和依赖图，供原调度仓库及工具 schema 共用，不执行副作用。
+# LLM: 原 job 只保存 canonical 规则；公开 schema 的事件引用先经 event_source_tool 宿主证明，不向模型暴露持久身份。
+# 模块用途: 校验持久监控规则、动作和依赖图，并声明公开规则输入，不执行副作用。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -126,7 +126,11 @@ RULES_SCHEMA = {'type':'array','minItems':1,'items':{'type':'object','additional
     'required':['id','name','schedule','use_llm']},
     'description':'同一监控的独立规则；LLM 给 prompt，NO 给 tool；cron.expression 支持 0 9,18 * * *。depends_on/condition 只读同监控确认 JSON 工具结果。'}
 
-from .event_sources import EVENT_SOURCE_SCHEDULE_SCHEMA  # noqa: E402
+from .event_source_tool import EVENT_SOURCE_INPUT_SCHEMA  # noqa: E402
 
-RULES_SCHEMA['items']['properties']['schedule']['properties'].update({key: value
-    for key, value in EVENT_SOURCE_SCHEDULE_SCHEMA['properties'].items() if key != 'kind'})
+RULES_SCHEMA['items']['properties']['schedule']['properties'].update(deepcopy(EVENT_SOURCE_INPUT_SCHEMA['properties']))
+RULES_SCHEMA['items']['properties']['schedule']['oneOf'] = [
+    {'properties': {'kind': {'enum': ['every', 'at', 'cron']}}},
+    {'properties': {'kind': {'const': 'event_source'}},
+        'oneOf': deepcopy(EVENT_SOURCE_INPUT_SCHEMA['oneOf'])},
+]

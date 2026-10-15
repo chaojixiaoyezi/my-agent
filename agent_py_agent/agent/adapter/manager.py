@@ -299,6 +299,8 @@ def _gateway_ingress_submission(record: GatewayIngressRecord) -> GatewayAskSubmi
     )
 
 
+# LLM: 只投影认证入站白名单；引用映射来自已证引用读取器，模型正文与任意metadata不能补造引用或owner。
+# 函数用途: 冻结原消息的Gateway需求与通道身份，携带本请求引用；不访问网络或写入服务状态。
 def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
     # 真实入站消息始终有 conversation_id；getattr 兼容旧的嵌入调用和轻量测试替身。
     conversation_id = str(getattr(msg, "conversation_id", "") or "").strip()
@@ -316,6 +318,11 @@ def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
         metadata["channel_chat_type"] = chat_type
     if chat_id:
         metadata["channel_chat_id"] = chat_id
+    quoted = incoming_metadata.get('quoted_message_references')
+    if (isinstance(quoted, dict) and quoted.get('schema') == 'quoted_message_references.v1'
+            and quoted.get('channel') == msg.channel == 'feishu' and chat_type == 'group'
+            and quoted.get('chat_id') == chat_id and quoted.get('current_message_id') == msg.message_id):
+        metadata['quoted_message_references'] = dict(quoted)
     payload: dict[str, object] = {
         "kind": "ask",
         "prompt": msg.content,

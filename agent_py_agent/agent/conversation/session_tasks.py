@@ -4,7 +4,7 @@
 #   accepted 由目标会话确认消费正文，或宿主沿真实 G1 创建回执把正文交给准确孩子后写入，同时把该回合的
 #   request id 绑成 conversation_request_id；done/failed/cancelled 只由目标请求的终态事件写入。
 #   禁止出现"这里说 done、目标请求其实 failed"的双账。
-# 模块用途: 保存会话间派活的任务记录与状态，供派活工具、状态查询、取消和结果回报共用。
+# 模块用途: 保存派活状态及宿主typed原输入快照；正文仍仅guidance一份，模型不能改写原输入。
 from __future__ import annotations
 
 import time
@@ -198,12 +198,21 @@ class SessionTaskStore:
 
     # LLM: 幂等创建：同 dedupe_key 且同输入返回原记录（不新建、不改状态）；同键异文报错。
     #   链深在调用方按 origin_task_id 结构化计算后传入校验结果，本方法不读模型给的深度。
-    # 函数用途: 新建一条会话派活记录；同键重放返回原记录。
-    def create(self, draft: SessionTaskDraft, *, now: float | None = None) -> SessionTask:
+    # LLM: 原输入上下文仅typed宿主参数可写；同dedupe必须同快照，模型Draft无此字段，重放不能借旧身份。
+    # 函数用途: 新建原派活记录及可选不可变输入快照；同键重放严格核对输入，不新增账本。
+    def create(self, draft: SessionTaskDraft, *, now: float | None = None, host_message_context=None) -> SessionTask:
+        from .host_message_context import CONTEXT_KEY, HostMessageContext
+
+        if host_message_context is not None and (not isinstance(host_message_context, HostMessageContext)
+                or host_message_context.actor.source_thread_id != draft.sender_thread_id):
+            raise ValueError('原派活引用上下文身份无效')
+        snapshot = host_message_context.to_record() if host_message_context is not None else None
         current = now if now is not None else time.time()
         key = str(draft.dedupe_key or "").strip()
         replayed = self._replay_existing(key, draft)
         if replayed is not None:
+            if replayed.metadata.get(CONTEXT_KEY) != snapshot:
+                raise ValueError('原派活幂等键与引用输入冲突')
             return replayed
         task = SessionTask(
             task_id=new_id("stask"),
@@ -216,6 +225,7 @@ class SessionTaskStore:
             origin_task_id=str(draft.origin_task_id or ""),
             created_at=current,
             updated_at=current,
+            metadata={CONTEXT_KEY: snapshot} if snapshot is not None else {},
         )
         write_json_file_atomic(self._path(task.task_id), task.to_dict())
         self._write_lookup_indexes(key, str(draft.body_dedupe_key or "").strip(), task.task_id)

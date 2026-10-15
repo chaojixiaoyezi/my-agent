@@ -1,3 +1,12 @@
+2026-10-15 原请求引用与后台谱系（实施中）：
+
+```text
+|-- agent_py_agent/agent/conversation/host_message_context.py # 原TaskLink/SessionTask唯一宿主引用输入与当前attempt谱系复核
+`-- agent_py_agent/tests/test_host_message_context.py # 原根/子孙/后台恢复及跨owner、旧attempt与伪引用阴性
+```
+
+关键文件说明：引用快照只保存原HostActor和原消息ID映射，普通新Gateway只读本次认证输入；后台/子孙沿原根读取，模型attrs不能登记或改写来源。与原event_source公开输入共同验证，不扩大群授权或平台权限。
+
 2026-10-15 首次普通 Gateway 凭据入口：
 
 ```text

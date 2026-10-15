@@ -428,9 +428,13 @@ _WAITING_USER_RUNTIME_STATUSES = frozenset({"needs_user_input", "approval_requir
 #   的轮次按 reason 保留非终态是正确的（初审 rco-f3）。
 #   判据不可用时（导入或调用异常）不静默悬挂：记结构化 error 日志并按不可续跑收口 failed——
 #   收口可逆（create_attempt 对终态放行、会重开），悬挂没有任何机制能救（初审 rco-f4）。
-# 函数用途: 把非终态 runtime_status 映射成 run 收口终态；返回空串表示保留非终态。
+#   输入已结算只在原Wake回执pending时发出精确TASK_INPUT_RESUME_PENDING，不加入Goal技术续跑族。
+# 函数用途: 把非终态 runtime_status 映射成 run 收口终态；返回空串表示保留原用户或原事件等待。
 def _nonterminal_run_closeout_status(runtime_status: str, runtime_reason: str, runtime_source: str) -> str:
     if runtime_status in _WAITING_USER_RUNTIME_STATUSES:
+        return ""
+    if (runtime_status == 'unfinished' and runtime_reason == 'TASK_INPUT_RESUME_PENDING'
+            and runtime_source == 'input_dependency'):
         return ""
     try:
         from ..turn_end import should_continue_task

@@ -16,7 +16,7 @@ from agent_py_agent.agent.conversation.input_dependencies import (
     task_has_waiting_input,
 )
 from agent_py_agent.agent.conversation.input_tool_boundary import (
-    input_wait_response,
+    prepare_input_wait_reply,
     record_input_wait,
 )
 from agent_py_agent.agent.conversation.task_rejected_actions import sync_task_rejected_actions
@@ -82,7 +82,11 @@ def test_callback_before_pair_archive_is_recorded_but_not_dispatched(background)
         resolve_input_dependency(background.agent, row['input_id'], status='cancelled')
 
 
-def test_wait_tool_returns_immediately_with_structured_boundary(background, monkeypatch):
+def test_wait_tool_queues_one_reply_from_canonical_input_facts(background, monkeypatch):
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+
     _card(background)
     monkeypatch.setattr('agent_py_agent.agent.tooling.task_credential_tool.capability_config_for_agent',
                         lambda _agent: SimpleNamespace(im_task_credentials_enabled=True))
@@ -91,8 +95,13 @@ def test_wait_tool_returns_immediately_with_structured_boundary(background, monk
     assert outcome.ok and dependency['status'] == 'waiting_input'
     params = _params(task_id=background.task_id, run_id=background.task_id)
     record_input_wait(background.agent, params, SimpleNamespace(ok=True, metadata={'handler_details':outcome.result_envelope}))
-    result = input_wait_response(background.agent, params)
-    assert result.text == '' and result.runtime_reason == 'TASK_INPUT_WAIT' and result.turn_end_reason == 'blocked'
+    assert prepare_input_wait_reply(background.agent, params)
+    phase = pending_natural_user_reply(params)
+    assert phase['kind'] == 'input_wait'
+    assert phase['facts']['input_dependency']['input_id'] == dependency['input_id']
+    assert phase['facts']['input_dependency']['status'] == 'pending'
+    assert phase['facts']['user_input_required'] is True
+    assert not prepare_input_wait_reply(background.agent, params)
     assert task_has_waiting_input(background.agent, background.task_id)
     assert background.store.wakes.pending() == []
 
@@ -103,6 +112,50 @@ def test_disabled_credentials_never_publishes_input(background, monkeypatch):
     outcome = RequestCredentialsTool(background.agent).execute({'url':'https://example.com/api','authentication':'bearer'})
     assert outcome.error_code == 'TOOL_UNAVAILABLE'
     assert not list((background.store.session_tasks.storage.session_tasks_dir/'inputs').glob('*.json'))
+
+
+def test_input_wait_projects_safe_row_facts_and_precedes_dispatch_without_draining(background, monkeypatch):
+    from agent_py_agent.agent.agent_core import _tool_loop_service as loop
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+        queue_natural_user_reply,
+    )
+
+    row = create_input_dependency(background.agent, tool_approval_scope(background.agent, background.task_id),
+        input_id='generic-safe-projection', provider='test-provider', expires_at=time.time()+60,
+        metadata={'untrusted_extra': 'Synthetic-Private-Canary'})
+    params = _params(task_id=background.task_id, run_id=background.task_id)
+    queue_natural_user_reply(params, kind='background_dispatch', facts={'dispatch_registered': True})
+    record_input_wait(background.agent, params, SimpleNamespace(ok=True, metadata={
+        'handler_details': {'input_dependency': {'input_id': row['input_id'], 'status': 'waiting_input'}}}))
+    assert prepare_input_wait_reply(background.agent, params)
+    phase = pending_natural_user_reply(params)
+    assert phase['kind'] == 'input_wait'
+    assert set(phase['facts']['input_dependency']) == {'input_id', 'provider', 'status', 'expires_at'}
+    assert 'Synthetic-Private-Canary' not in json.dumps(phase)
+    monkeypatch.setattr(loop, '_drain_pending_deferred_tool_calls', lambda *args: pytest.fail('等待回执不能重执行业务'))
+    assert loop._pending_drain_outcome(background.agent, params, 1) == (1, None, False, '')
+    phase['kind'] = 'input_resume_pending'
+    assert loop._pending_drain_outcome(background.agent, params, 1) == (1, None, False, '')
+
+
+@pytest.mark.parametrize('status', ['ready', 'cancelled', 'expired'])
+def test_input_settled_after_archive_does_not_queue_stale_wait(background, status):
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+
+    row = _dependency(background)
+    params = _params(task_id=background.task_id, run_id=background.task_id)
+    record_input_wait(background.agent, params, SimpleNamespace(ok=True, metadata={
+        'handler_details': {'input_dependency': {'input_id': row['input_id'], 'status': 'waiting_input'}}}))
+    resolve_input_dependency(background.agent, row['input_id'], status=status)
+    assert not prepare_input_wait_reply(background.agent, params)
+    assert pending_natural_user_reply(params) is None
+    resolution = json.loads(params.tool_context[-1].split('\n', 1)[1])
+    assert resolution['input_id'] == row['input_id'] and resolution['status'] == status
+    assert len(background.store.wakes.pending()) == 1
+    assert not task_has_waiting_input(background.agent, background.task_id)
 
 
 @pytest.mark.parametrize('status', ['cancelled', 'expired'])
@@ -179,7 +232,7 @@ def test_same_task_rejected_actions_survive_new_attempt(background):
     assert other.runtime_rejected_actions == []
 
 
-def test_real_tool_fake_model_archives_pair_and_stops_after_one_model_request(background):
+def test_real_tool_fake_model_archives_pair_then_only_generates_no_tools_reply(background):
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
     from agent_py_agent.agent.backends import ModelResponse
     from agent_py_agent.agent.capability.config import CapabilityConfig
@@ -190,7 +243,12 @@ def test_real_tool_fake_model_archives_pair_and_stops_after_one_model_request(ba
     class Backend(_CaptureBackend):
         def generate(self, prompt, on_chunk=None, **kwargs):
             self.prompts.append(prompt)
-            assert len(self.prompts) == 1, '必要输入不得继续模型轮询'
+            assert len(self.prompts) <= 2, '必要输入只允许业务申请和一次零工具表达，不得轮询'
+            if len(self.prompts) == 2:
+                assert not kwargs.get('tools')
+                assert '[natural-user-reply]' in json.dumps(kwargs.get('messages') or [])
+                return ModelResponse(text='请填写已发出的凭据卡，提交后继续原任务。', backend=self.name,
+                    turn_end_reason='completed')
             return ModelResponse(text='', backend=self.name, tool_use_blocks=[{'id':'request-private-input',
                 'name':'request_credentials','input':{'url':'https://example.com/api','authentication':'bearer'}}])
     backend = Backend()
@@ -200,7 +258,9 @@ def test_real_tool_fake_model_archives_pair_and_stops_after_one_model_request(ba
         allowed_tools=['request_credentials'], task_attributes={'conversation_thread_id':background.thread.thread_id,
                                                               'conversation_task_id':background.task_id}))
     assert result.runtime_reason == 'TASK_INPUT_WAIT'
-    assert result.turn_end_reason == 'blocked' and len(backend.prompts) == 1
+    assert result.runtime_status == 'needs_user_input'
+    assert result.response == '请填写已发出的凭据卡，提交后继续原任务。'
+    assert result.turn_end_reason == 'blocked' and len(backend.prompts) == 2
     assert len(result.archive_tool_calls) == 1
     assert result.archive_tool_calls[0]['tool'] == 'request_credentials'
     assert result.archive_tool_calls[0]['tool_result_envelope']['input_dependency']['status'] == 'waiting_input'
@@ -214,12 +274,18 @@ def test_replayed_wait_result_after_ready_does_not_park_again(background):
     params = _params(task_id=background.task_id)
     record_input_wait(background.agent, params, SimpleNamespace(ok=True,metadata={'handler_details':{
         'input_dependency':{'input_id':row['input_id'],'status':'waiting_input'}}}))
-    assert input_wait_response(background.agent, params) is None
+    assert not prepare_input_wait_reply(background.agent, params)
     assert 'opaque-ref' in params.tool_context[-1]
 
 
 @pytest.mark.parametrize('depth',[1,2])
 def test_blocked_child_private_input_resolves_via_original_root(background, depth):
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.conversation.input_tool_boundary import reconcile_input_wait_reply
+
     _card(background)
     root_id, parent_id = background.task_id, background.task_id
     for _ in range(depth):
@@ -230,6 +296,9 @@ def test_blocked_child_private_input_resolves_via_original_root(background, dept
     ref, _scope = request_credential_card(background.agent,url='https://example.com/api',authentication='bearer')
     row = read_json_object_report(credential_path(background.agent.home_paths.owner_home_dir,ref),context='test').payload
     arm_input_dependency(background.agent,row['input_id'])
+    params = _params(task_id=root_id, run_id=child.id)
+    params.live_archive_state['waiting_input_id'] = row['input_id']
+    assert prepare_input_wait_reply(background.agent, params)
     background.agent.subagents.lifecycle.set_status(child.id,'BLOCKED')
     body = {'reference':row['reference'],'decision':'submit','message_id':row['message_id'],'chat_id':row['chat_id'],
             'fields':{'secret':'SyntheticChildToken'}}
@@ -237,6 +306,47 @@ def test_blocked_child_private_input_resolves_via_original_root(background, dept
     wake = background.store.wakes.pending()[-1]
     assert wake.root_task_id == root_id and wake.thread_id == background.thread.thread_id
     assert wake.metadata['input_run_id'] == child.id
+    verdict, _ = reconcile_input_wait_reply(background.agent, params, ModelResponse(text='旧草稿', backend='synthetic'))
+    assert verdict == 'changed'
+    assert pending_natural_user_reply(params)['kind'] == 'input_resume_pending'
+    assert background.store.wakes.delivery_receipt(background.thread.thread_id, 'task-input:' + row['input_id']) == 'pending'
+
+
+@pytest.mark.parametrize('receipt', ['', 'handled'])
+def test_input_terminal_without_original_pending_wake_fails_explicitly(background, receipt, monkeypatch):
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.conversation.input_tool_boundary import reconcile_input_wait_reply
+
+    row = _dependency(background)
+    params = _params(task_id=background.task_id, run_id=background.task_id)
+    params.live_archive_state['waiting_input_id'] = row['input_id']
+    arm_input_dependency(background.agent, row['input_id'])
+    assert prepare_input_wait_reply(background.agent, params)
+    resolve_input_dependency(background.agent, row['input_id'])
+    monkeypatch.setattr(background.store.wakes, 'delivery_receipt', lambda *args: receipt)
+    verdict, response = reconcile_input_wait_reply(background.agent, params, ModelResponse(text='旧草稿', backend='synthetic'))
+    assert verdict == 'finish' and response.runtime_status == 'failed'
+    assert response.runtime_reason == 'TASK_INPUT_WAKE_UNAVAILABLE'
+    assert not response.text and len(background.store.wakes.pending()) == 1
+
+
+@pytest.mark.parametrize('wrong_run', [False, True])
+def test_handled_input_requires_same_runtime_run_and_a_real_successor_attempt(background, wrong_run):
+    from agent_py_agent.agent.conversation.input_tool_boundary import _consumed_input_reply_status
+
+    db = background.agent.subagents.runtime_db
+    record = db.record_run_creation(owner_id='local/main', goal='合成输入恢复',
+        conversation_task_id=background.task_id, thread_id=background.thread.thread_id,
+        run_id='business-main-run', role='main')
+    row = _dependency(background)
+    params = _params(task_id=background.task_id, run_id='business-main-run', attempt_id=record['attempt_id'])
+    assert record['agent_run_id'] != params.run_id
+    assert _consumed_input_reply_status(background.agent, params, row, 'handled') == ('failed', 'TASK_INPUT_WAKE_UNAVAILABLE')
+    db.create_attempt(record['agent_run_id'])
+    if wrong_run:
+        params = replace(params, run_id='unrelated-run')
+    assert _consumed_input_reply_status(background.agent, params, row, 'handled') == (
+        ('failed', 'TASK_INPUT_WAKE_UNAVAILABLE') if wrong_run else ('cancelled', 'TASK_INPUT_SUPERSEDED'))
 
 
 def test_real_background_claim_is_released_for_pending_input(background):
@@ -258,8 +368,11 @@ def test_real_background_claim_is_released_for_pending_input(background):
     class Backend(_CaptureBackend):
         def generate(self, prompt, on_chunk=None, **kwargs):
             self.prompts.append(prompt)
-            assert len(self.prompts) <= 2
+            assert len(self.prompts) <= 3
             if len(self.prompts) == 2:
+                assert not kwargs.get('tools')
+                return ModelResponse(text='请填写已发出的卡片，提交后继续。', backend=self.name)
+            if len(self.prompts) == 3:
                 return ModelResponse(text='原任务已沿输入引用恢复。',backend=self.name)
             return ModelResponse(text='', backend=self.name, tool_use_blocks=[{'id':'bg-private-input',
                 'name':'request_credentials','input':{'url':'https://example.com/api','authentication':'bearer'}}])
@@ -268,7 +381,7 @@ def test_real_background_claim_is_released_for_pending_input(background):
     scheduler = BackgroundMainAgentScheduler({'runtime':runtime,'store':background.store})
     report = run_claimed(_background_claim_dependencies(scheduler), {
         'thread_id':background.thread.thread_id,'task_id':background.task_id,'reason':'incoming_channel_message'})
-    assert report.runtime_reason == 'TASK_INPUT_WAIT' and len(backend.prompts) == 1
+    assert report.runtime_reason == 'TASK_INPUT_WAIT' and len(backend.prompts) == 2
     claim, error = background.store.claims.load_report(background.thread.thread_id)
     assert not error and claim['status'] != 'running'
     assert background.store.tasks.load(background.task_id).status == 'active'
@@ -286,6 +399,6 @@ def test_real_background_claim_is_released_for_pending_input(background):
                 'chat_id':credential['chat_id'],'fields':{'secret':'SyntheticResumeToken'}}
     assert resolve_private_interaction(background.agent,callback,channel='feishu',actor_id='ou_synthetic')['ok']
     scheduler.tick_thread(background.thread.thread_id)
-    assert len(backend.prompts) == 2
+    assert len(backend.prompts) == 3
     scheduler.tick_thread(background.thread.thread_id)
-    assert len(backend.prompts) == 2
+    assert len(backend.prompts) == 3

@@ -214,7 +214,7 @@ def test_cancel_buttons_are_outside_required_forms_and_empty_sdk_form_reaches_ha
 
 def test_cancel_before_tool_archive_is_not_rearmed_or_left_waiting(tmp_path,monkeypatch):
     from agent_py_agent.agent.conversation.input_tool_boundary import (
-        input_wait_response,
+        prepare_input_wait_reply,
         record_input_wait,
     )
     agent,path,payload,body=_card(tmp_path,'user')
@@ -223,7 +223,7 @@ def test_cancel_before_tool_archive_is_not_rearmed_or_left_waiting(tmp_path,monk
     params=SimpleNamespace(tool_context=[],live_archive_state={})
     result=SimpleNamespace(ok=True,metadata={'handler_details':{'input_dependency':{'status':'waiting_input','input_id':payload['input_id']}}})
     record_input_wait(agent,params,result)
-    assert input_wait_response(agent,params) is None
+    assert not prepare_input_wait_reply(agent,params)
     assert 'cancelled' in params.tool_context[0]
     dependency=inputs.read_json_object_report(inputs.input_dependency_path(agent,payload['input_id']),context='test').payload
     assert dependency['status']=='cancelled' and dependency['armed'] is False
@@ -300,5 +300,5 @@ def test_cancel_between_precheck_and_atomic_arm_never_rearms(tmp_path,monkeypatc
     boundary.record_input_wait(agent,params,result)
     row=inputs.read_json_object_report(inputs.input_dependency_path(agent,payload['input_id']),context='test').payload
     assert row['status']=='cancelled' and row['armed'] is False
-    assert boundary.input_wait_response(agent,params) is None
+    assert not boundary.prepare_input_wait_reply(agent,params)
     assert 'cancelled' in params.tool_context[0]

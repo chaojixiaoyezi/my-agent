@@ -1,3 +1,5 @@
+# LLM: 表达轮只消费宿主结构化事实，同一模型零工具采样；不得执行工具或以正文改任务生命周期，输入等待复用原needs_user_input状态。
+# 模块用途: 为派工、进度和必要输入生成有界自然回执，保留原执行与恢复身份，不代写普通用户回复。
 from __future__ import annotations
 
 import hashlib
@@ -19,8 +21,8 @@ _STATE_KEY = "_pending_natural_user_reply"
 _MAX_GENERATION_ATTEMPT_COUNT = 2
 
 
-# LLM: pending state 只保存结构化事实、可丢弃草稿和内部完成信封；不能在这里预写用户句子。
-# 函数用途: 为下一次同模型无工具短轮登记回复阶段，并保持派工回执不被低优先级更新覆盖。
+# LLM: pending state 只保存结构化事实、可丢弃草稿和内部完成信封；真实输入等待优先保留生命周期，不能在这里预写用户句子。
+# 函数用途: 为下一次同模型无工具短轮登记回复阶段；派工优先于普通更新，必要输入等待优先于派工。
 def queue_natural_user_reply(
     params: ToolLoopExecuteParams,
     *,
@@ -35,7 +37,7 @@ def queue_natural_user_reply(
     current = state.get(_STATE_KEY)
     current = current if isinstance(current, dict) else {}
     current_kind = str(current.get("kind") or "")
-    if current_kind == "background_dispatch" and kind != "background_dispatch":
+    if current_kind == "background_dispatch" and kind not in {"background_dispatch", "input_wait"}:
         return
     attempts = int(current.get("attempts") or 0) if current_kind == kind else 0
     payload: dict[str, object] = {
@@ -287,8 +289,8 @@ def retry_natural_user_reply(
     return attempts < _MAX_GENERATION_ATTEMPT_COUNT
 
 
-# LLM: 表达轮只用于等待、派工和前台让出等 interim 状态；普通最终回复直接来自主模型 turn。
-# 函数用途: 清除 pending 状态并把本次模型短轮归一成最终 ModelResponse。
+# LLM: 表达轮只用于等待、派工等interim状态；输入等待沿needs_user_input保留原run，表达完成不能变成任务completed。
+# 函数用途: 清除pending并归一模型短轮；只改结构化状态，不代写用户回执或重执行业务。
 def finish_natural_user_reply(
     params: ToolLoopExecuteParams,
     response: ModelResponse,
@@ -301,6 +303,7 @@ def finish_natural_user_reply(
     phase = phase if isinstance(phase, dict) else {}
     kind = str(phase.get("kind") or "background_update")
     runtime_status, runtime_reason, runtime_source = _reply_runtime_state(kind)
+    end_reason = 'blocked' if kind in {'input_wait', 'input_resume_pending'} else response.turn_end_reason
     if not accepted:
         # A tool-bearing response's prose is normally a pre-tool transition,
         # not a complete answer.  会话运行时 returns a rejected call as tool output
@@ -325,6 +328,7 @@ def finish_natural_user_reply(
                     else runtime_source + "_unauthorized_tools_rejected"
                 ),
                 tool_use_blocks=[],
+                turn_end_reason=end_reason,
             )
         return replace(
             response,
@@ -337,6 +341,7 @@ def finish_natural_user_reply(
             runtime_reason=runtime_reason,
             runtime_source=runtime_source,
             tool_use_blocks=[],
+            turn_end_reason=end_reason,
         )
     return replace(
         response,
@@ -345,12 +350,17 @@ def finish_natural_user_reply(
         runtime_reason=runtime_reason,
         runtime_source=runtime_source,
         tool_use_blocks=[],
+        turn_end_reason=end_reason,
     )
 
 
 # LLM: Interim lifecycle replies must remain nonterminal in the shared turn-end protocol; presentation prose cannot turn active descendants into a completed root turn.
-# 函数用途: 将自然回执的结构化种类映射成运行状态，保证等待子代理时主任务仍显示为可续跑。
+# 函数用途: 将自然回执种类映射成原运行状态；输入等用户事件，子代理等待沿原续跑判据。
 def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
+    if kind == "input_wait":
+        return "needs_user_input", "TASK_INPUT_WAIT", "input_dependency"
+    if kind == 'input_resume_pending':
+        return 'unfinished', 'TASK_INPUT_RESUME_PENDING', 'input_dependency'
     if kind == "tool_round_limit":
         return "unfinished", "TOOL_ROUND_LIMIT_REACHED", "tool_loop"
     if kind == "subagents_active":

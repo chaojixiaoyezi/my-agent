@@ -35,7 +35,13 @@
 ## 指定机器人的消息订阅
 
 沿原 scheduler job/rule/store/run/Wake/额度与投递。用户引用当前群目标机器人的真实消息并 @ 助手说明条件。
-schedule 工具使用 schedule_kind=event_source、event_source.source_message_ids；宿主 Get 原消息核验发送应用。
+schedule 工具使用 schedule_kind=event_source、event_source.source_message_refs 原样选择当前请求引用；
+多规则使用每条 rules[].schedule.kind=event_source 和相同公开字段。也可显式提供已知原供应商
+source_message_ids（om_ 编号），两种输入只能选一种，诊断短引用不得冒充供应商编号。
+公开 schema 不接受 app_id、tenant_key、sender_ids、proofs；宿主 Get 原消息核验发送应用后，
+才转换为唯一 canonical source 并交原规则/store 校验，不能把持久身份结构直接交模型填写。
+引用上下文沿原TaskLink或委派SessionTask唯一输入保存；后台主根、子孙在同owner/原HostActor/root及当前attempt核验后读取，
+不从模型attrs/context_bundle恢复。新独立请求缺引用失败关闭；官方Get和当前群人工授权仍在每次订阅登记时执行。
 可选 min_interval_seconds 默认60（60～86400）、max_batch_events 默认16（1～16）。
 不能用昵称、正文、其它群或自报应用编号制造来源身份；event 的 bot/open_id 与 Get 的 app/app_id 不隐式互换。
 自然语言条件只写规则 prompt，由 LLM 研判；路由只读准确结构身份，外部告警不构成指令或授权。
@@ -56,4 +62,24 @@ feishu_bot_subscriptions_enabled 默认 true，只读部署配置；无订阅不
 服务器仍只用 open.feishu.cn:443、msg-frontier.feishu.cn:443，不增加第三方运行依赖。
 合成合同与离线 SDK 通过不代替真实租户验收，具体状态由同版发行证据记录。
 
-建议下一步：先完成普通群成员、授权成员、撤销竞争和取消重投的独立验收，再冻结源码发行；可并行只读审计，主线单点部署，不自动扩大平台 scope。
+## 2026-10-15 引用与规则公开输入修复（本地合同验收通过，待同版发行）
+
+`.20261015.3` 的真实引用请求失败在副作用前：模型传入诊断短引用，并在嵌套规则使用事件计划，
+旧规则表面却暴露持久 source 身份，宿主尚未执行原消息证明即拒绝；没有创建订阅。
+本地修复统一单计划与 1..N 规则的公开引用输入。准确父消息 GET 的结果在原入站 payload_ready
+内冻结 current-message/chat/ref→真实 ID 绑定，经认证 Gateway metadata 交本请求专有 RunParams。
+不从 prompt、模型 attrs、群昵称或历史消息恢复绑定，不新建消息/订阅/授权账。
+引用选择仍须同 owner/actor/entry_request_id，平台 Get 继续证明同群、接收应用与准确其他机器人；
+任何来源读取得到的旧结果不能替代最后的群授权锁/CAS，撤销期间仍不创建任务。
+
+直接前台请求只消费本次认证引用；同Goal后续Gateway有/无新引用都不会改写原根快照或借用旧引用。
+`/delegate enable` 已沿原SessionTask唯一输入快照和TaskLink精确引用接通；后台主根及子孙只读恢复前，
+核原HostActor、owner/thread/root、当前RuntimeDB attempt及canonical父子记录，业务role（包括main）不作为主子身份。
+Gateway请求文件回收后仍可从准确原输入恢复；不把引用复制进孩子attrs，也不另建引用账本。
+本地12文件集中247项通过、零失败/跳过；其后补齐非空RuntimeDB父引用缺记录的拒绝防线，最终上下文25项定向复核。
+上下文测试覆盖主根/子孙、原Store重开恢复、同Goal新请求、
+错误原输入引用/绑定回合/终态、伪造属性、跨owner、陈旧attempt以及main角色的伪root/parent。
+单计划及1..N规则、真实工具与fake模型回放沿同一公开schema→原官方Get替身→canonical规则持久化。
+这些合成合同与回放不代表生产部署或真实订阅成功；`.3`故障证据保留，真实租户须在新发行后独立重验。
+
+建议下一步：根统一严格gate、提交及新发行，再由独占测试入口完成普通群成员、授权成员与真实引用订阅验收；可并行只读审计，主线单点部署，不自动扩大平台scope。

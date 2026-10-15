@@ -4,6 +4,8 @@
 
 2026-10-14 R04/R09：沿既有 TaskCredential 入口修复内网目标绑定误拦、依赖参数、真实卡片失败码/副作用阶段与公开出口脱敏；不改变真实网络策略。私人卡值仍密文保存在原受保护交互目录，不进入群或模型。历史明文迁移和实际飞书租户卡片验收另行核对，详见 [本期实施](../tasks/IM_R01_R09_RELEASE.md)。
 
+2026-10-15 通用必要输入等待收尾（源码修复，待独立复核/新版真实验收）：`.3`真实首次入口已发卡，但原工具边界直接返回空正文及`unfinished/TASK_INPUT_WAIT`，Gateway因此报`USER_REPLY_UNAVAILABLE`且主run误收failed。现在沿原`queue_natural_user_reply`由同模型零工具表达，pending输入使用既有`needs_user_input/blocked`，不重发卡、不重执行业务。表达结束再核对原输入与同Task refs：其它输入仍pending就继续等待；单卡retire仅以`cancelled/TASK_INPUT_CANCELLED/input_dependency`静默结束当前片，不取消TaskLink/父兄弟；已结算只在原`task-input:<id>`发布回执pending时使用`unfinished/TASK_INPUT_RESUME_PENDING/input_dependency`，该reason不进入Goal技术续跑。handled须有准确旧attempt与后继core attempt证据才退休旧表达；缺失或无恢复证据用`TASK_INPUT_WAKE_UNAVAILABLE`明确失败。typed provider表达失败保留原输入而公开回复失败，预算、宿主中断与代码异常不吞；standalone原等待状态投影BLOCKED。此前343项仅证明入口/输入账，未断言整轮自然回执，不能代替本轮收尾验收。证据、状态表、成熟参考及命令见[交接追加](../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md#通用输入等待收尾追加2026-10-15)。
+
 # 任务凭据收集
 
 2026-10-14 最新用户定稿（S23，待实施）：凭据卡是简单的信息收集入口，群助手在原群发起，个人助手在本人私聊发起；普通群表单或仅本人可见输入均可，不将私密页面/定向可见作为功能前置要求。有链接时收账号+密码或仅密码，没链接时卡片增加链接，名称/备注可选。发错卡、密码错后由用户要求重发，不自动催填；无验证方式允许先保存。原有加密、准确任务/目标绑定、重填不破坏有效凭据保持。文末定稿覆盖下方历史方案中必须仅指定人可见、自动补填及必须先有 URL/认证方式的约束。S21/S22 的存储和发送阶段缺陷另行保留，均尚未实施。

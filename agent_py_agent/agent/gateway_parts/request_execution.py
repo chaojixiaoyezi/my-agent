@@ -908,6 +908,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         root_user_prompt=inputs.prompt,
         task_attributes=attrs,
         host_channel_actor=_gateway_host_actor(context.agent, conversation, context.request_id),
+        host_message_references=_gateway_message_references(request, conversation),
         context_scope="conversation" if conversation.thread_id else "default",
         carried_archive_tool_calls=[dict(item) for item in inputs.carried_archive_tool_calls],
         carried_active_turn_user_inputs=[
@@ -942,6 +943,38 @@ def _gateway_host_actor(agent, conversation, request_id):
     from ..conversation.host_actor import actor_from_scope
 
     return actor_from_scope(agent, conversation.scope, conversation.thread_id, request_id)
+
+
+# LLM: 原引用只取本次认证scope与请求metadata，绑定当前消息/群且复算ref；不从prompt、attrs、历史或外部ID恢复。
+# 函数用途: 把已核入站引用变成当前RunParams专有的不可变映射，坏映射在模型和工具前拒绝。
+def _gateway_message_references(request, conversation):
+    from ..adapter.protocol import provider_message_reference
+
+    scope = conversation.scope
+    metadata = request.get('metadata') or {}
+    quoted = metadata.get('quoted_message_references')
+    if quoted is None:
+        return ()
+    if (scope is None or scope.channel != 'feishu' or metadata.get('channel_chat_type') != 'group'
+            or not isinstance(quoted, dict) or set(quoted) != {'schema', 'channel', 'chat_id', 'current_message_id', 'references'}
+            or quoted.get('schema') != 'quoted_message_references.v1' or quoted.get('channel') != scope.channel
+            or quoted.get('chat_id') != metadata.get('channel_chat_id')
+            or quoted.get('current_message_id') != metadata.get('message_id')
+            or not quoted.get('current_message_id')):
+        raise ValueError('本请求引用身份无效')
+    references = quoted.get('references')
+    if not isinstance(references, list) or not 1 <= len(references) <= 256:
+        raise ValueError('本请求引用集合无效')
+    result = []
+    for row in references:
+        if (not isinstance(row, dict) or set(row) != {'ref', 'message_id'}
+                or not isinstance(row.get('message_id'), str) or not row['message_id'].startswith('om_')
+                or row.get('ref') != provider_message_reference(row['message_id'])):
+            raise ValueError('本请求引用绑定无效')
+        result.append((row['ref'], row['message_id']))
+    if len({key for key, _value in result}) != len(result):
+        raise ValueError('本请求引用重复')
+    return tuple(result)
 
 
 # LLM: 会话属性只投影线程、task 与 cwd，认证身份由独立的宿主参数携带，不能放回模型可写属性。

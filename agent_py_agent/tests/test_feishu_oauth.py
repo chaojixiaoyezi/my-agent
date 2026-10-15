@@ -397,7 +397,10 @@ def test_real_tool_fake_llm_uses_input_archive_boundary_once(ctx):
     class Backend(_CaptureBackend):
         def generate(self, prompt, on_chunk=None, **kwargs):
             self.prompts.append(prompt)
-            assert len(self.prompts) == 1
+            assert len(self.prompts) <= 2
+            if len(self.prompts) == 2:
+                assert not kwargs.get('tools') and '[natural-user-reply]' in prompt
+                return ModelResponse(text='请完成已发出的本人授权，之后继续原工作。', backend=self.name)
             return ModelResponse(text='', backend=self.name, tool_use_blocks=[{
                 'id': 'oauth-private-input', 'name': 'feishu_auth', 'input': {'action': 'authorize'}}])
     backend = Backend()
@@ -405,8 +408,9 @@ def test_real_tool_fake_llm_uses_input_archive_boundary_once(ctx):
     result = ctx.agent.run('读取本人已授权的云文档，缺本人授权时向我申请。', params=RunParams(
         source='background_main_agent', save=False, run_id=ctx.task_id, task_id=ctx.task_id, allowed_tools=['feishu_auth'],
         task_attributes={'conversation_thread_id': ctx.thread.thread_id, 'conversation_task_id': ctx.task_id}))
+    assert result.runtime_status == 'needs_user_input'
     assert result.runtime_reason == 'TASK_INPUT_WAIT' and result.turn_end_reason == 'blocked'
-    assert len(result.archive_tool_calls) == 1 and len(backend.prompts) == 1
+    assert len(result.archive_tool_calls) == 1 and len(backend.prompts) == 2
     facts = result.archive_tool_calls[0]['tool_result_envelope']['input_dependency']
     assert facts['status'] == 'waiting_input'
     archived = json.dumps(result.archive_tool_calls)

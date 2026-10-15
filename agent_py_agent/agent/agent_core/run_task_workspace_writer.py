@@ -250,7 +250,7 @@ def _run_workspace_finish_request(
 
 
 # LLM: 仅将 typed runtime result 映射为 workspace 投影；wait/background 和显式 goal 非成功结果保持活跃。
-# 函数用途: 决定 standalone 顶层返回后应该记录 DONE、CANCELLED、BLOCKED 还是 FAILED。
+# 函数用途: 决定standalone顶层的工作区投影；原用户输入/审批等待与其它可恢复状态同记BLOCKED，不误标失败。
 def _terminal_workspace_status(params: object, result: object) -> str:
     runtime_status = str(getattr(result, "runtime_status", "ok") or "ok").strip().lower()
     runtime_reason = str(getattr(result, "runtime_reason", "") or "").strip().lower()
@@ -264,7 +264,7 @@ def _terminal_workspace_status(params: object, result: object) -> str:
         return "DONE"
     if runtime_status == "cancelled":
         return "CANCELLED"
-    if runtime_status in {"blocked", "context_overflow", "unfinished"}:
+    if runtime_status in {"blocked", "context_overflow", "unfinished", "needs_user_input", "approval_required"}:
         return "BLOCKED"
     return "FAILED"
 

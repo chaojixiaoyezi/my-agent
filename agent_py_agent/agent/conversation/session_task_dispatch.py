@@ -75,8 +75,8 @@ class SessionTaskDispatchPlan:
 
 
 # LLM: 宿主自动派工只允许准确来源下的同 owner 独立线程，不开放模型跨会话管理员权限；沿原记录/正文/唤醒及配额。
-# 函数用途: 把已冻结的 IM 工作项送入自己的后台线程，重放终态时只回读任务，不再唤醒或扣额。
-def dispatch_owned_background_task(agent, *, source_thread_id: str, target_thread, goal: str, config):
+# 函数用途: 将冻结IM工作项及typed原输入送入同owner后台线程，重放必须同引用快照，不再唤醒或扣额。
+def dispatch_owned_background_task(agent, *, source_thread_id: str, target_thread, goal: str, config, host_message_context=None):
     from .execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 
@@ -89,23 +89,35 @@ def dispatch_owned_background_task(agent, *, source_thread_id: str, target_threa
     if errors:
         return session_task_dispatch_error("会话任务账本不可读。", error_code="TOOL_EXECUTION_FAILED")
     previous = next((task for task in existing if task.dedupe_key == _task_dedupe_key(plan)), None)
+    from .host_message_context import CONTEXT_KEY, HostMessageContext
+
+    if host_message_context is not None:
+        actor = host_message_context.actor if isinstance(host_message_context, HostMessageContext) else None
+        origin = target_thread.metadata[EXECUTION_ORIGIN_KEY]
+        if (actor is None or actor.owner_id != str(agent.home_paths.owner_id) or actor.source_thread_id != source_thread_id
+                or actor.entry_request_id != origin.get('operation_key') or actor.binding() != origin.get('binding')):
+            return session_task_dispatch_error('原派活引用身份不一致。', error_code=SESSION_IDENTITY_UNAVAILABLE)
+    snapshot = host_message_context.to_record() if host_message_context is not None else None
+    if previous is not None and previous.metadata.get(CONTEXT_KEY) != snapshot:
+        return session_task_dispatch_error('原派活引用输入冲突。', error_code=SESSION_IDENTITY_UNAVAILABLE)
     if previous is not None and previous.status in SESSION_TASK_TERMINAL_STATUSES:
         return ToolHandlerOutcome(SESSION_TASK_TOOL_NAME, True, json.dumps({"task_id": previous.task_id, "status": previous.status}))
     if previous is None and (error := session_task_pair_limit_error(agent, source_thread_id, target_thread.thread_id, config)):
         return error
-    return dispatch_session_task(agent, plan, target_thread, config, count_pair=previous is None)
+    return dispatch_session_task(agent, plan, target_thread, config, count_pair=previous is None,
+                                 host_message_context=host_message_context)
 
 
 
 # LLM: 建记录 → 投正文（guidance，幂等）→ 目标 active 时唤醒。正文只存一份，记录里只留它的 id。
 #   记录先于正文写入，绑定准确 guidance id 后发布唤醒；只有显式委派目标需要写线程策略引用。
-# 函数用途: 落权威记录并把任务正文投递给目标会话。
+# 函数用途: 在原记录冻结typed输入位置并投递正文；引用不进guidance正文/模型attrs，唤醒仍沿原队列。
 def dispatch_session_task(
     agent: object,
     plan: SessionTaskDispatchPlan,
     target_thread: object,
     config: object,
-    *, count_pair: bool = True,
+    *, count_pair: bool = True, host_message_context=None,
 ) -> ToolHandlerOutcome:
     store = agent.conversation_store
     if limit_error := _chain_limit_error(store, plan.origin_task_id, config):
@@ -125,7 +137,7 @@ def dispatch_session_task(
                 body_dedupe_key=body_dedupe_key,
                 dedupe_key=dedupe_key,
                 origin_task_id=plan.origin_task_id,
-            )
+            ), host_message_context=host_message_context,
         )
         from .execution_threads import IM_TASK_EXECUTION_KEY, bind_delegated_task
 

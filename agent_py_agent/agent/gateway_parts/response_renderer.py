@@ -79,19 +79,23 @@ def current_context_token_estimate(payload: Any) -> int:
     return 0
 
 
-# LLM: A user stop is a typed control result, not an assistant message; UI layers
-# must suppress it without matching localized response prose.
-# 中文说明：用户停止属于结构化控制结果，不是助手回复；界面层只能依据状态字段静默处理，
-# 不能匹配“当前任务已停止”之类的自然语言。
+# LLM: 用户停止和原输入退休/后继接管是不同的typed控制结果；后者必须同时匹配input_dependency来源与准确reason，不能互作状态别名。
+# 函数用途: 判断应静默的当前执行片控制结果；不取消TaskLink、父兄弟或其它输入，不匹配自然语言正文。
 def is_silent_user_stop(payload: Any) -> bool:
-    """Return whether a typed user-stop result must stay out of chat history."""
+    """Keep typed silent controls out of chat history; retain the historical entry name."""
     if isinstance(payload, dict):
         status = str(payload.get("status", "") or "").strip().lower()
         error_code = str(payload.get("error_code", "") or "").strip().upper()
         return status == "interrupted" and error_code == "INTERRUPTED"
     runtime_status = str(getattr(payload, "runtime_status", "") or "").strip().lower()
     runtime_reason = str(getattr(payload, "runtime_reason", "") or "").strip().lower()
-    return runtime_status == "cancelled" and runtime_reason == "user_stop"
+    runtime_source = str(getattr(payload, "runtime_source", "") or "").strip()
+    return runtime_status == "cancelled" and (
+        runtime_reason == "user_stop" or (
+            runtime_source == 'input_dependency'
+            and runtime_reason in {'task_input_cancelled', 'task_input_superseded'}
+        )
+    )
 
 
 def _int_value(payload: Any, key: str) -> int:

@@ -1,3 +1,5 @@
+2026-10-15 真实卡片与引用订阅补验（修复中、尚未发行）：`.20261015.3` 首次发卡与取消已实测，整轮仍触发空自然回复失败；已沿原自然表达、输入等待/原 Wake 修复并由非作者 618 项通过、4 项既有 xfail。引用 bot 的公开短引用须在宿主核验后解回准确原消息，并让多规则使用同一公开输入 schema；delegate/主子孙恢复已沿原根输入接通，合同验收通过，未宣称真实订阅通过。详见[凭据交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)与[群治理](docs/design/IM_GROUP_GOVERNANCE.md)。
+
 ## 2026-10-15 首次 Gateway 凭据输入（源码修复与独立回归完成，真实租户待验）
 
 - 本机准确请求已进入原 SDK/Ingress 和 RuntimeDB，但首次普通请求尚无 ConversationTaskLink；`request_credentials` 未声明任务晋升，因而在密钥初始化前抛无 errno 的 FileNotFoundError，被误报存储不可用。已有 fixture 预建 TaskLink，掩盖此入口；即使补链接，原 main scope 把 `gateway:<request_id>` 前台 claim 与持久 task 作同值比较仍会拒绝。

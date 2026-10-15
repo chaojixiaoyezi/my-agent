@@ -18,6 +18,13 @@
 7. 媒体目录继续由当前消息的 `/ask` owner resolver 决定，落到该 owner 的 `media/input`。纯文字不创建媒体目录；当前附件与父附件全部准备成功才附文字资料及路径，部分下载不给部分路径或引用正文。纯文字也复用当前消息/parent/chat 来源证明，不因附件为空跳过核验。
 8. 精确 Gateway 请求仍在原入站账 `payload_ready` 冻结。冷重投沿原请求正文，不重新查询父消息或生成另一任务。
 
+2026-10-15 本地修复：`quoted_message.v1.source_message_refs` 仍是公开 opaque 选择引用，不能当作供应商 ID。
+已核父消息/成员的真实编号只保存在同一入站请求的白名单 metadata，并核 current-message/chat 及引用摘要对应关系，
+Gateway 将其投影为本次 RunParams 专有字段；模型正文与 attrs 均不能补造绑定。订阅工具据此取得真实编号后仍须原官方
+Get 与群人工授权，不从引用正文或原发送者借权。前台主根只在原TaskLink冻结一次输入；自动委派则只在原SessionTask保存快照，TaskLink只存精确任务引用。
+后台主根及子孙沿原HostActor、owner/root/thread和RuntimeDB当前attempt恢复；不复制到孩子attrs，不依赖Gateway原请求保留期。
+新独立Gateway只用本次认证映射，缺引用不得借原根；同键重放换快照、错误输入引用、跨owner和陈旧attempt均拒绝。
+
 `coverage` 区分完整投影与仅可见资料，`unreadable_count/member_count` 记录转发及解析缺口；附件开关省略写 `media_omitted_count`，文字开关省略写 `text_omitted`。未知协议不称完整。显示树还有4096节点/32层预算，坏 JSON、隐藏/不明信封与 opaque 名片不会变成伪成功占位。
 
 没有第二个附件缓存、消息账、队列或新的身份表；查询最多一次，资源下载沿原入口。只有原 prepared 阶段尚未冻结时的崩溃恢复可能再次读取同一 parent，文件名与归属保持稳定。

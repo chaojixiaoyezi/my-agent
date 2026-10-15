@@ -179,20 +179,23 @@ def quoted_media_references(msg: IncomingMessage, quoted: ValidatedQuotedMedia) 
     return {'items': [dict(item) for item in quoted.items]}
 
 
-# LLM: 文字与附件共用当前消息/parent/chat证明；JSON资料不参与命令、身份、授权或路由，正文不写日志。
-# 函数用途: 完整准备成功后把引用资料附到原需求，说明外部来源、覆盖缺口、开关省略及真实截断状态。
+# LLM: 文字/附件共用当前消息、parent、chat证明；公开短引用只作选择，真实ID绑定仅入认证metadata，不从正文反推权限。
+# 函数用途: 准备成功后附加外部资料，并冻结本请求已证引用供宿主原Get复核；不写日志或授予订阅权限。
 def append_quoted_text(msg: IncomingMessage, quoted: ValidatedQuotedMedia) -> None:
     quoted_media_references(msg, quoted)
     if not quoted.text and not quoted.items:
         return
+    identifiers = quoted.source_message_ids or (quoted.parent_message_id,)
+    msg.metadata['quoted_message_references'] = {'schema': 'quoted_message_references.v1',
+        'channel': msg.channel, 'chat_id': quoted.chat_id, 'current_message_id': msg.message_id,
+        'references': [{'ref': provider_message_reference(value), 'message_id': value} for value in identifiers]}
     facts = {'schema': 'quoted_message.v1', 'status': 'available', 'untrusted': True,
         'source_message_ref': provider_message_reference(quoted.parent_message_id),
         'content': quoted.text, 'original_chars': quoted.original_chars,
         'truncated': quoted.original_chars > len(quoted.text), 'coverage': quoted.coverage,
         'unreadable_count': quoted.unreadable_count, 'member_count': quoted.member_count,
         'media_omitted_count': quoted.media_omitted_count, 'text_omitted': quoted.text_omitted,
-        'source_message_refs': [provider_message_reference(value)
-            for value in quoted.source_message_ids or (quoted.parent_message_id,)]}
+        'source_message_refs': [provider_message_reference(value) for value in identifiers]}
     msg.content += '\n\n[引用消息资料]\n' + json.dumps(facts, ensure_ascii=False)
 
 

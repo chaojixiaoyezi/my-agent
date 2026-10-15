@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from ...conversation.host_actor import HostChannelActor
 
 
-# LLM: 消息/逻辑回合/运行/尝试身份独立；原生carry与已应用视图只由同片宿主传入，不能作为持久权限或状态。
+# LLM: 消息/回合/运行/尝试身份独立；引用映射仅本次认证入站专有，carry与已应用视图不作为持久权限或状态。
 # 类用途: 收拢一次代理调用与宿主专有身份；模型可写属性不作认证来源，不执行模型或写文件。
 @dataclass
 class RunParams:
@@ -31,6 +31,8 @@ class RunParams:
     task_attributes: dict | None = None
     # 宿主专有冻结身份，不能从模型 attributes 或工具参数恢复；replace 在同一片内保留。
     host_channel_actor: HostChannelActor | None = None
+    # 仅当前认证入站请求的引用绑定；不写模型 attrs、不继承到新请求或子代理，不承担群授权。
+    host_message_references: tuple[tuple[str, str], ...] = ()
     delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str = "run"

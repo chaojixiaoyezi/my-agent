@@ -1,3 +1,5 @@
+2026-10-15 输入等待真实收尾修复：卡已发送后沿原零工具自然回复表达等待，pending 归 needs_user_input，不将持久输入判作业务失败；准确原 Wake 待消费时保留 TASK_INPUT_RESUME_PENDING，取消及已核后继只静默收当前执行片，不伪造 Goal 续跑。独立 24 文件 618 通过、4 项既有 xfail，真实新卡提交验收待新版部署，见[凭据入口交接](../../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。
+
 2026-10-15 群治理实施中：/group人工授权沿原tool_policy/CAS与provider事实；监控新工作与配置最终写门持同一策略锁，停止取消保持原权限。bot观察不走/ask，经原认证Ingress与scheduler event_source运行，不扩大普通无@人类消息。新scope与真实租户验收单列，见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。
 
 2026-10-14：审批终态与持久输入接线；群/无人值守在发布pending前拒绝剩余确认，交互等待有绝对截止。原stream桥区分真实Feishu和TUI恢复，/status共享本人权限投影。本人OAuth在原路由表新增验签回调，秘密不进入URL日志。发布状态见[实施合同](../../design/IM_UNATTENDED_IMPLEMENTATION.md)。

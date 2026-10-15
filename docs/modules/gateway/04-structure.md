@@ -1,3 +1,5 @@
+2026-10-15 输入依赖收尾：response_renderer 只对已认证的 input_dependency / TASK_INPUT_CANCELLED、TASK_INPUT_SUPERSEDED 退休当前表达；原 needs_user_input 和原 Wake 待消费仍走既有等待合同。工具归档、零工具自然表达、原输入复读与 RuntimeDB attempt CAS 各守原模块边界，不能把静默控制别名为 user_stop。见[入口与收尾交接](../../tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。
+
 2026-10-14 结构：`feishu_oauth_service.py` 只验证原交互MAC、准确owner/actor及依赖后兑换本人凭据；`http_routes.py`仍是唯一路由表。`permission_bridge/stream_approval`处理有期限的确认结果，不建立第二个权限源；`status_projection`读取原self_context事实。输入等待的到期/恢复使用原runtime wake_queue。
 
 2026-10-13 宿主主体修复：原 GatewayConversationContext.scope 在入口产生专有 actor 字段，conversation/host_actor 校验准确 owner/thread/root 来源；ScheduleTool、执行线程冻结和私人审批复用，子孙只继承父宿主事实。模型 raw attributes 与最新群绑定不能成为认证主体；同群创建人拒绝与本 owner 编号不存在分别表达。

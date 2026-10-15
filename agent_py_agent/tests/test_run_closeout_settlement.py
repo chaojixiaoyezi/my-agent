@@ -296,3 +296,16 @@ def test_nonterminal_judgement_failure_logs_and_settles_failed(repo, monkeypatch
     run = repo.agent_run_for_run_id("run-f4")
     assert str(run["status"]) == "failed"
     assert any("分族判据不可用" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize('status,reason,source,expected', [
+    ('unfinished', 'TASK_INPUT_RESUME_PENDING', 'input_dependency', ''),
+    ('unfinished', 'TASK_INPUT_RESUME_PENDING', 'tool_loop', 'failed'),
+    ('blocked', 'TASK_INPUT_RESUME_PENDING', 'input_dependency', 'failed'),
+    ('unfinished', 'TASK_INPUT_WAIT', 'input_dependency', 'failed'),
+])
+def test_input_resume_wait_requires_exact_event_contract_without_goal_continuation(status, reason, source, expected):
+    from agent_py_agent.agent.turn_end import should_continue_task
+
+    assert runtime_mixin._nonterminal_run_closeout_status(status, reason, source) == expected
+    assert not should_continue_task(SimpleNamespace(runtime_status=status, runtime_reason=reason, runtime_source=source))[0]

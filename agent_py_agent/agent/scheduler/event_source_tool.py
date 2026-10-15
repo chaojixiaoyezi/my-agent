@@ -1,7 +1,8 @@
-# LLM: 模型只提供准确引用消息，宿主沿原 REST 身份核验来源；不能用模型传入的应用、租户、群或姓名授予订阅权限。
-# 模块用途: 将机器人引用转换为原监控事件计划，并在规则新增/更新时复核真实来源，不保存第二授权账。
+# LLM: 单计划和规则只接收公开引用，当前请求专有映射后沿原 REST 核验；模型不能传应用/租户/proofs，最终仍守原 actor/CAS。
+# 模块用途: 将公开机器人引用转换为原监控 canonical 计划，来源证明不另存账本或继承到新请求。
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 
 from ..adapter.feishu_provider_facts import (
@@ -10,15 +11,19 @@ from ..adapter.feishu_provider_facts import (
     resolve_bot_source,
 )
 from ..capability.runtime_config_reload import deployment_capability_config
+from ..conversation.host_actor import resolve_host_actor
 from ..user_space.group_authorization import group_chat_id
 from .event_sources import normalize_event_schedule
 from .schedule import ScheduleValidationError
 
 EVENT_SOURCE_INPUT_SCHEMA = {
-    'type': 'object', 'additionalProperties': False, 'required': ['source_message_ids'],
+    'type': 'object', 'additionalProperties': False,
+    'oneOf': [{'required': ['source_message_refs']}, {'required': ['source_message_ids']}],
     'properties': {
+        'source_message_refs': {'type': 'array', 'minItems': 1, 'maxItems': 32,
+            'items': {'type': 'string'}, 'description': '原样复制本请求引用资料的 source_message_refs；宿主解析真实消息，不能自行构造。'},
         'source_message_ids': {'type': 'array', 'minItems': 1, 'maxItems': 32,
-            'items': {'type': 'string'}, 'description': '当前群被引用的其他机器人原消息编号，宿主核验实际发送应用。'},
+            'items': {'type': 'string'}, 'description': '已知准确的供应商 om_ 消息编号，不能填诊断短引用；与 source_message_refs 二选一。'},
         'min_interval_seconds': {'type': 'integer', 'minimum': 60, 'maximum': 86400},
         'max_batch_events': {'type': 'integer', 'minimum': 1, 'maximum': 16},
     },
@@ -33,14 +38,21 @@ class PreparedEventSources:
     rules: list | None = None
 
 
-# LLM: 查询外部平台不持原群策略写锁；结果只是本次来源证明，不是权限租约，不能绕过最终 actor/CAS 核对。
-# 函数用途: 在创建或更新前规范规则并核验事件来源，普通定时计划不增加平台请求。
+# LLM: 公开单计划与每条规则先经同一宿主来源解析，再进入持久规则校验；不持群策略写锁，最终写仍复核 actor/CAS。
+# 函数用途: 在创建或更新前把公开引用转换为规范规则，普通定时计划不增加平台请求，不修改模型参数。
 def prepare_event_sources(agent, params):
     from .rules import normalize_rules
 
-    rules = normalize_rules(params['rules']) if 'rules' in params else None
-    if rules is not None:
-        verify_event_rule_sources(agent, rules)
+    rules = None
+    if 'rules' in params:
+        raw = deepcopy(params['rules'])
+        if isinstance(raw, list):
+            for rule in raw:
+                schedule = rule.get('schedule') if isinstance(rule, dict) else None
+                if isinstance(schedule, dict) and schedule.get('kind') == 'event_source':
+                    rule['schedule'] = schedule_from_event_input(agent, {key: value
+                        for key, value in schedule.items() if key != 'kind'})
+        rules = normalize_rules(raw)
     schedule = None
     if params.get('schedule_kind') == 'event_source':
         if any(params.get(key) not in (None, '') for key in ('at', 'after_seconds', 'every_seconds', 'anchor_at', 'cron', 'timezone')):
@@ -102,33 +114,47 @@ def _source_proofs(agent, scope, message_ids):
     return list(proofs.values())
 
 
+# LLM: Gateway只消费本次专有引用，后台子孙须经原根/actor/当前attempt校验；不从prompt或attrs恢复，未知引用在Get前拒绝。
+# 函数用途: 将本请求或准确原根的opaque引用解析为供应商编号，仍须原官方Get和人工授权。
+def _message_ids(agent, raw):
+    refs, identifiers = raw.get('source_message_refs'), raw.get('source_message_ids')
+    if (refs is None) == (identifiers is None):
+        raise ScheduleValidationError('source_message_refs 与 source_message_ids 必须且只能提供一个。')
+    values = refs if refs is not None else identifiers
+    if (not isinstance(values, list) or not 1 <= len(values) <= 32
+            or any(not isinstance(value, str) or not value or len(value) > 256 for value in values)
+            or len(set(values)) != len(values)):
+        raise ScheduleValidationError('消息引用需要 1～32 个不重复的字符串。')
+    if refs is None:
+        if any(not value.startswith('om_') for value in identifiers):
+            raise ScheduleValidationError('source_message_ids 只能填写原供应商 om_ 编号；引用资料请使用 source_message_refs。')
+        return identifiers
+    current = getattr(agent, '_current_run_params', None)
+    thread_id = str((getattr(current, 'task_attributes', None) or {}).get('conversation_thread_id') or '')
+    actor = resolve_host_actor(agent, thread_id)
+    from ..conversation.host_message_context import references_for_run
+
+    if actor is None or actor.channel != 'feishu':
+        raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '当前请求没有可核验的原消息引用。')
+    try:
+        mapping = dict(references_for_run(agent, actor))
+    except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+        raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '原请求引用执行身份不可核验。') from exc
+    if any(reference not in mapping for reference in refs):
+        raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '引用不属于当前请求，未创建订阅。')
+    return [mapping[reference] for reference in refs]
+
+
 # LLM: 人工权限门应先于本函数；这里只生成已核来源的原 schedule，数据库、线程与运行创建由既有工具负责。
-# 函数用途: 将模型的精确引用输入转换为 canonical event_source 计划，不扩大普通消息接收权限。
+# 函数用途: 把公开引用经本请求映射和官方 Get 证明转换为唯一 canonical 计划，不接受模型身份字段。
 def schedule_from_event_input(agent, raw):
-    if not isinstance(raw, dict) or set(raw) - {'source_message_ids', 'min_interval_seconds', 'max_batch_events'}:
+    if not isinstance(raw, dict) or set(raw) - {'source_message_refs', 'source_message_ids', 'min_interval_seconds', 'max_batch_events'}:
         raise ScheduleValidationError('event_source 参数无效。')
+    identifiers = _message_ids(agent, raw)
     scope = _source_scope(agent)
-    proofs = _source_proofs(agent, scope, raw.get('source_message_ids'))
+    proofs = _source_proofs(agent, scope, identifiers)
     return normalize_event_schedule({'kind': 'event_source',
         'source': {'channel': 'feishu', 'event_type': 'message', 'app_id': scope['app_id'],
             'tenant_key': scope['tenant_key'], 'chat_id': scope['chat_id'], 'sender_type': 'bot',
             'sender_id_type': 'app_id', 'sender_ids': [row['sender_id'] for row in proofs], 'proofs': proofs},
         **{key: raw[key] for key in ('min_interval_seconds', 'max_batch_events') if key in raw}})
-
-
-# LLM: canonical schema 校验不等于来源授权；所有 event_source 规则写入前仍逐条核验原群、接收应用和准确发送应用。
-# 函数用途: 防止通过多规则入口直接伪造应用/租户/群身份，普通定时规则不发额外请求。
-def verify_event_rule_sources(agent, rules):
-    for rule in rules:
-        schedule = rule.get('schedule') or {}
-        if schedule.get('kind') != 'event_source':
-            continue
-        schedule = normalize_event_schedule(schedule)
-        source = schedule['source']
-        scope = _source_scope(agent)
-        if any(source[key] != scope[key] for key in ('app_id', 'tenant_key', 'chat_id')):
-            raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '事件规则只能订阅当前群的准确机器人来源。')
-        facts = _source_proofs(agent, scope, [row['source_message_id'] for row in source['proofs']])
-        if {row['sender_id']: row['source_message_id'] for row in facts} != {
-                row['sender_id']: row['source_message_id'] for row in source['proofs']}:
-            raise EventSourceInputError('EVENT_SOURCE_SENDER_UNVERIFIED', '事件规则发送应用与原引用消息不一致。')

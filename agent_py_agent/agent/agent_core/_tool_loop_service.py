@@ -1591,14 +1591,27 @@ def _prebuilt_prompt_first(prompt: str, rebuild: Callable[[], str]) -> Callable[
     return build
 
 
-# LLM: 原pending槽只拥有表达阶段；先核对当前调用用途，后台公开修复只消费一次，不执行工具或恢复持久seal。
-# 函数用途: 收口原零工具回复，将明确的后台公开修复合回内部执行结果。
+# LLM: 原pending槽只拥有表达阶段；核对原输入回调和typed取消，再核对调用用途；不执行工具或恢复持久seal。
+# 函数用途: 收口原零工具回复，过期输入草稿有界重写，后台公开修复合回内部执行结果。
 def _natural_user_reply_step(
+    agent,
     params: ToolLoopExecuteParams,
     response: ModelResponse,
 ) -> tuple[str, ModelResponse]:
     if pending_natural_user_reply(params) is None:
         return "normal", response
+    if response.runtime_status in {'cancelled', 'aborted'}:
+        discard_pending_natural_user_reply(params)
+        return 'finish', response
+    from ..conversation.input_tool_boundary import reconcile_input_wait_reply
+
+    input_verdict, response = reconcile_input_wait_reply(agent, params, response)
+    if input_verdict == 'finish':
+        return 'finish', response
+    if input_verdict == 'changed':
+        if retry_natural_user_reply(params, rejection_reason='input_state_changed'):
+            return 'retry', response
+        return 'finish', finish_natural_user_reply(params, response, accepted=False, rejection_reason='input_state_changed')
     if pending_natural_user_reply(params).get("kind") == "background_final_receipt":
         from .tool_loop.background_public_receipt import finish_background_receipt_repair
 
@@ -1792,7 +1805,7 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
                 params.live_archive_state["turn_end_reason"] = PENDING_TURN_INPUT_LIMIT_REASON
                 break
             continue
-        natural_reply_verdict, final_response = _natural_user_reply_step(params, final_response)
+        natural_reply_verdict, final_response = _natural_user_reply_step(agent, params, final_response)
         if natural_reply_verdict == "retry":
             continue
         if natural_reply_verdict == "finish":
@@ -1880,9 +1893,12 @@ def _routed_action_step(action):
 
 
 
-# LLM: 消费延迟工具时沿用本 run 的宿主与参数，保持回复及其来源 prompt 成对返回；需核对延迟收口归属测试。
-# 函数用途: 驱动待处理工具并归一化有无结果的分支，返回轮数、回复、是否命中及来源 prompt。
+# LLM: 必要输入表达阶段禁止重开延迟业务工具；其它延迟队列仍沿本 run，回复和来源 prompt 成对返回。
+# 函数用途: 驱动待处理工具并归一化分支；已登记等待回执时让原零工具模型先完成表达。
 def _pending_drain_outcome(agent, params, tool_rounds):
+    phase = pending_natural_user_reply(params)
+    if phase is not None and phase.get('kind') in {'input_wait', 'input_resume_pending'}:
+        return tool_rounds, None, False, ""
     pending = _drain_pending_deferred_tool_calls(agent, params, tool_rounds)
     if pending is None:
         return tool_rounds, None, False, ""
@@ -1930,7 +1946,8 @@ def _drain_pending_deferred_tool_calls(
 # LLM: 原执行权和Goal开始仍在本装配点；仅将采样／响应确认交给窄操作，空响应返工及插话注入保持当前循环内。
 # 计量、恢复与确认显式接收实际产出响应的那份参数；返回具名结果，由循环显式换参。
 # 恢复宿主已提交候选时，异常分支先换成候选参数：同轮重跑不能在压缩前的原参数上重建或回收。
-# 函数用途: 在有效工作片内请求下一轮模型，绑定原计量和消息账本，处理无可用响应时的一次修复。
+# 原输入表达的typed供应商失败只保留已核验等待，公开空回复仍失败；宿主中断、预算及代码异常原样上抛。
+# 函数用途: 在有效工作片内采样并绑定原计量和消息账；表达失败不销毁原输入，其它空响应沿原修复边界。
 def _model_turn_or_retry(
     agent,
     loop_params: ToolLoopExecuteParams,
@@ -1974,6 +1991,10 @@ def _model_turn_or_retry(
         # typed mailbox item at this safe point and run the same turn again.
         if _pending_turn_input_supersedes_unusable_response(agent, loop_params, exc):
             return _ModelTurnOutcome("", None, False, True, provider_response_repairs, loop_params)
+        from ..conversation.input_tool_boundary import input_wait_expression_failure
+
+        if (waiting_response := input_wait_expression_failure(agent, loop_params, exc)) is not None:
+            return _ModelTurnOutcome('', waiting_response, True, False, provider_response_repairs, loop_params)
         if _should_retry_empty_model_response(loop_params, exc, provider_response_repairs):
             context = _empty_model_response_retry_context(loop_params)
         else:
@@ -2085,17 +2106,16 @@ def _tool_step_or_limit(agent, request: _ToolStepRequest):
 
 
 # LLM: 执行普通工具轮后只处理真实转换；创建子代理不会再触发隐式等待或按产物推断轮结束。
-# 函数用途: 运行工具并保存完整配对；必要输入交接立即结束当轮，其余继续模型循环。
+# 函数用途: 运行工具并保存完整配对；必要输入只追加原零工具表达，不再执行业务或直接返回空正文。
 def _run_tool_round(agent, request: ToolRoundExecutionRequest):
     execute_tool_round(request)
     update_runtime_fact_progress_if_enabled(agent, request.params, tool_round=request.tool_rounds)
     append_tool_guardrail_action_block_hint(request)
     # 检索完备性软引导(R5b/R6c 实锤):同一工具系统失败达阈值即提醒枚举未试渠道。
     append_tool_failure_channel_hint(request)
-    from ..conversation.input_tool_boundary import input_wait_response
-    waiting_response = input_wait_response(agent, request.params)
-    if waiting_response is not None:
-        return request.tool_rounds, waiting_response
+    from ..conversation.input_tool_boundary import prepare_input_wait_reply
+    if prepare_input_wait_reply(agent, request.params):
+        return request.tool_rounds, None
     final_response = completion_response_after_tool_round(
         ToolRoundCompletionRequest(
             request.params,
