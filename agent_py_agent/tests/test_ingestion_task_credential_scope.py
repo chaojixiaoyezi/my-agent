@@ -58,13 +58,15 @@ def _credential(agent, url, *, job_id=''):
     if agent.home_paths.owner_kind == 'main':
         bind_admin_channel_identity(agent.home_paths.root, 'feishu', agent._current_run_params.host_channel_actor.actor_id)
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda *_args, **_kwargs:
-        {'message_id': 'om_' + uuid.uuid4().hex, 'chat_id': 'oc_private_card'}),
+        {'message_id': 'om_' + uuid.uuid4().hex, 'chat_id': agent.config.my_agent_owner_id if agent.home_paths.owner_kind == 'group' else 'oc_private_card'}),
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
     reference, _ = request_credential_card(agent, url=url, authentication='bearer', job_id=job_id)
     path = credential_path(agent.home_paths.owner_home_dir, reference)
     row = read_json_object_report(path, context='synthetic.private-card').payload
     body = {'reference': row['reference'], 'decision': 'submit', 'message_id': row['message_id'],
         'chat_id': row['chat_id'], 'fields': {'secret': _SECRET}}
+    if row.get('presentation', {}).get('kind') == 'group':
+        body['submitter'] = {'actor_id': row['actor_id'], 'chat_id': row['chat_id'], 'current_group_member': True}
     assert resolve_private_interaction(agent, body, channel='feishu', actor_id=row['actor_id'])['ok']
     assert _SECRET not in path.read_text()
     return reference

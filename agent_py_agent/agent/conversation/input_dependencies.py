@@ -52,9 +52,9 @@ def _origin_request_id(agent, scope):
                or scope.root_task_id)
 
 
-# LLM: 输入需要真实执行资格；原TaskStore锁内最多32准确refs，重复ID不占新槽，超限在canonical写入前拒绝。
+# LLM: 输入需要真实执行资格；原TaskStore锁内最多32准确refs，替换仅接同owner/scope/provider的pending输入；超限或写入失败保留旧槽。
 # 函数用途: 有界登记必要输入，同ID异绑定拒绝；不启动等待线程或新模型回合。
-def create_input_dependency(agent, scope, *, input_id, provider, expires_at, reference='', metadata=None):
+def create_input_dependency(agent, scope, *, input_id, provider, expires_at, reference='', metadata=None, replaces_input_id=''):
     if (not scope.active or isinstance(expires_at, bool) or not isinstance(expires_at, (int, float))
             or not math.isfinite(expires_at) or expires_at <= time.time() or not provider
             or not isinstance(input_id, str) or not input_id):
@@ -77,6 +77,10 @@ def create_input_dependency(agent, scope, *, input_id, provider, expires_at, ref
         if not available:
             raise ValueError('TASK_INPUT_CAPACITY_EXCEEDED')
         return row
+    if replaces_input_id:
+        previous = read_json_object_report(input_dependency_path(agent, replaces_input_id), context='task_input.replace').payload
+        if not previous or previous.get('status') != 'pending' or any(previous.get(key) != row[key] for key in ('owner','scope','provider')):
+            raise ValueError('被替换输入绑定无效')
     saved = {}
     # LLM: owner配额→原task→输入记录固定锁序；回调仅保存依赖，不获取worker或发卡。
     # 函数用途: 在容量判断所在任务锁内写canonical行，拒绝时不留下新依赖。
@@ -84,7 +88,7 @@ def create_input_dependency(agent, scope, *, input_id, provider, expires_at, ref
         saved.update(_mutate(agent, input_id, lambda previous: create(previous, available), admission=admission))
         return saved
     with agent.owner_quota.admission() as admission:
-        update_task_input_refs(agent, scope.root_task_id, input_id, persist=persist)
+        update_task_input_refs(agent, scope.root_task_id, input_id, persist=persist, replaces_input_id=replaces_input_id)
     _schedule_input_deadline(agent, scope.root_task_id)
     return saved
 

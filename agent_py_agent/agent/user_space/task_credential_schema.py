@@ -14,7 +14,7 @@ _FORBIDDEN_HEADERS = {"host", "content-length", "transfer-encoding", "connection
 def credential_fields(authentication: str, fields: object = None) -> list[dict[str, str]]:
     if fields is None:
         fields = ([{"name": "username", "label": "账号"}, {"name": "secret", "label": "密码"}]
-                  if authentication == "basic" else [{"name": "secret", "label": "API Key / Token"}])
+                  if authentication in {"basic", "collected"} else [{"name": "secret", "label": "API Key / Token"}])
     if not isinstance(fields, list) or not 1 <= len(fields) <= 8:
         raise ValueError("凭据表单需要一到八个字段")
     result = []
@@ -22,11 +22,11 @@ def credential_fields(authentication: str, fields: object = None) -> list[dict[s
         if not isinstance(field, dict) or set(field) != {"name", "label"}:
             raise ValueError("凭据字段只能声明 name 和 label")
         name, label = field["name"], field["label"]
-        if not isinstance(name, str) or not _NAME.fullmatch(name) or not isinstance(label, str) or not 1 <= len(label) <= 64:
+        if not isinstance(name, str) or not _NAME.fullmatch(name) or name in {"target_url", "credential_name", "credential_note"} or not isinstance(label, str) or not 1 <= len(label) <= 64:
             raise ValueError("凭据字段名称无效")
         result.append({"name": name, "label": label})
     names = {field["name"] for field in result}
-    required = {"username", "secret"} if authentication == "basic" else {"secret"}
+    required = {"username", "secret"} if authentication in {"basic", "collected"} else {"secret"}
     if len(names) != len(result) or (authentication in {"basic", "bearer", "header"} and names != required):
         raise ValueError("凭据字段重复或与认证方式不符")
     return result
@@ -57,7 +57,7 @@ def credential_auth_config(authentication: str, value: object, fields: list[dict
     if not isinstance(config, dict):
         raise ValueError("认证方案必须是对象")
     names = {field["name"] for field in fields}
-    if authentication in {"basic", "bearer", "header"}:
+    if authentication in {"basic", "bearer", "header", "collected"}:
         if config:
             raise ValueError("此认证方式不需要额外方案")
         return {}
@@ -115,3 +115,13 @@ def _signature_config(config: dict, names: set[str]) -> dict:
             raise ValueError("签名组成无效")
     return {"algorithm": config["algorithm"], "secret_field": secret,
             "header": credential_header_name(config.get("header", "X-Signature")), "parts": list(parts)}
+
+
+# LLM: 收集模式只决定准确字段，不根据名称或备注猜认证协议；保留显式协议的原字段校验。
+# 函数用途: 为普通账号密码或仅密码卡生成最小字段集合。
+def collection_fields(authentication, fields, collection_mode):
+    if collection_mode not in {"username_password", "password"}:
+        raise ValueError("凭据收集字段模式无效")
+    if authentication == "collected" and fields is None:
+        fields = ([{"name": "username", "label": "账号"}] if collection_mode == "username_password" else []) + [{"name": "secret", "label": "密码"}]
+    return credential_fields(authentication, fields)

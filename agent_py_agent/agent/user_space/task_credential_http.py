@@ -39,6 +39,8 @@ def credential_authenticated_request(agent, reference, request, *, send):
     path = credential_path(agent.home_paths.owner_home_dir, reference)
     row = read_json_object_report(path, context='credentials.http').payload
     _assert_credential_scope(agent, row, scope, request.url)
+    if row['authentication'] == 'collected':
+        raise ValueError('凭据已保存但尚未配置认证方式，请用 request_credentials configure 绑定用法')
     cipher = _cipher(agent.home_paths.owner_home_dir)
     values = json.loads(cipher.decrypt(row['ciphertext'].encode()))
     config = row.get('auth_config', {})
@@ -61,6 +63,8 @@ def credential_authenticated_request(agent, reference, request, *, send):
         headers, session_secrets = _login_headers(agent, path, row, values, request, send, cipher)
         secrets.extend((*session_secrets, *headers.values()))
         result = send(_authenticated(request, headers, row['origin']))
+    from .task_credential_verification import record_credential_verification
+    record_credential_verification(agent, path, row, result)
     return result, tuple(set(secrets))
 
 
@@ -100,6 +104,10 @@ def _login_headers(agent, path, row, values, request, send, cipher):
         response = send(login)
         if not isinstance(response, RawResponseParts):
             raise ValueError('宿主登录未成功')
+        if _unauthorized(response):
+            from .task_credential_verification import record_credential_verification
+            record_credential_verification(agent, path, row, response)
+            raise ValueError('账号或密码错误，凭据未通过认证')
         headers = _session_headers(config, response)
         with _credential_mutation(agent, path) as admission:
             latest = read_json_object_report(path, context='credentials.session').payload

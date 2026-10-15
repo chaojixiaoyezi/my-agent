@@ -47,8 +47,9 @@ def test_private_card_encrypted_bound_and_http_injection(background):
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(ValueError):
         credential_headers(background.agent,ref,'https://other.example.com/api')
-    with pytest.raises(ValueError):
-        resolve_private_interaction(background.agent,body,channel='feishu',actor_id='ou_synthetic')
+    saved = path.read_text()
+    assert resolve_private_interaction(background.agent,body,channel='feishu',actor_id='ou_synthetic')['ok']
+    assert path.read_text() == saved
 
 
 @pytest.mark.parametrize('change',[{'message_id':'forwarded'},{'chat_id':'other'},{'reference':'bad'}])

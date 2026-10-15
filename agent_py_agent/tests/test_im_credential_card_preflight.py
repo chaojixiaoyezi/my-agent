@@ -31,14 +31,14 @@ def test_private_url_binding_can_send_private_card_without_network_authority(tmp
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
     result, boundary = _invoke(agent, {'url': 'https://10.1.2.3/api', 'authentication': 'basic'})
     assert result.ok, (result.reported_error_code, result.output)
-    assert sent[0][0] == actor.actor_id
+    assert sent[0][0] == ('oc_synthetic' if kind == 'group' else actor.actor_id)
     blocked = execute_registry_test_call(agent.tools, 'web_fetch', {'url': 'https://10.1.2.3/api'},
         write_boundary=boundary, run_id=agent._current_run_params.run_id, call_id=uuid.uuid4().hex, register_with=agent)
     assert not blocked.ok and not blocked.handler_executed
     assert blocked.reported_error_code == 'NETWORK_ACCESS_DISABLED'
 
 
-@pytest.mark.parametrize('params', [{'authentication':'basic'}, {'url':'https://example.com'},
+@pytest.mark.parametrize('params', [{'operation':'configure'}, {'operation':'configure','credential_ref':'cred_missing'},
     {'operation':'status'}, {'operation':'update', 'url':'https://example.com', 'authentication':'bearer'}])
 def test_missing_conditional_parameters_do_not_enter_handler(tmp_path, params):
     agent = _agent(tmp_path, 'group')

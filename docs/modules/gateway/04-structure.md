@@ -2884,3 +2884,4 @@ B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed 
 `conversation/im_task_status.py` 将原已接单SessionTask的准确目标root与输入refs投影成waiting_input，运行数扣除待输入；原子树BLOCKED单列等待。`control_commands.render_conversation_task_status`只渲染这些typed事实，未知/坏账显示不可用，不读任务文字或表单秘密。输入容量与登记共用原TaskStore锁，每根32条引用，不新增执行槽、输入队列或定时线程。
 
 监控人类控制共用 `scheduler/control.py`：命令和工具先验证准确 owner/creator，再由原 repository 写 job/run CAS；`notification_binding.py` 只校验原 job/run 的未来通知绑定与管理员登录代次，不建立收件人账。删除及当前取消复用 TaskLink、RuntimeDB、输入依赖、冻结整树资源，service 冷启动/周期回读原取消意图；execution 只投影已经冻结的目标，原来源和群地址保留。协议与验收边界见[监控人类控制](../../design/SCHEDULER_HUMAN_CONTROL.md)。
+2026-10-14 卡片维护入口：`adapter/private_controls.py` 只运输已验证 SDK 表单到准确宿主端口，`gateway_parts/private_interaction_service.py` 按原类型/来源验权；`conversation/input_dependency_index.py` 沿原任务锁处理必要输入的容量替换，输入行仍是唯一状态源。凭据阶段诊断/提交版本留在 `user_space/task_credential_*`，无新 Gateway 队列或凭据库；详见 [统一实施记录](../../tasks/IM_22_ITEM_IMPLEMENTATION.md)。

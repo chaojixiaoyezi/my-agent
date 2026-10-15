@@ -3770,7 +3770,7 @@ ERROR_CONTRACTS.update({
     "CREDENTIAL_INPUT_UNAVAILABLE": ErrorContract(
         code="CREDENTIAL_INPUT_UNAVAILABLE", category="configuration", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
-        recovery_hint="私人凭据卡未完成；请核查原任务、私人通道、解锁和加密依赖，不把凭据改发到群聊。"),
+        recovery_hint="凭据卡未完成；按安全诊断核查原任务、原群或本人私聊、加密和输入容量；不要把密码发成普通聊天消息。"),
     **{code: ErrorContract(code=code, category=category, retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value, recovery_hint=hint)
         for code, category, hint in (
@@ -3781,6 +3781,17 @@ ERROR_CONTRACTS.update({
             ('CREDENTIAL_ENCRYPTION_UNAVAILABLE', 'configuration', '宿主加密依赖不可用，未发卡；请管理员修复依赖，不能保存明文。'),
             ('CREDENTIAL_BINDING_INVALID', 'state', '目标、参数或原任务绑定不符，未完成卡片操作；按原任务核对，不猜新身份。'),
             ('CREDENTIAL_STORAGE_UNAVAILABLE', 'configuration', '宿主私人凭据存储异常；先核对原记录与副作用，不让模型或任意脚本读取密钥。'),
+            ('CREDENTIAL_STORAGE_INVALID', 'permission', '受管凭据路径未满足安全文件约束；保留原记录，由宿主检查，不放宽目录权限或跟随符号链接。'),
+            ('CREDENTIAL_KEY_INVALID', 'configuration', '原凭据密钥无效；保留原件并由宿主诊断，不能重建密钥掩盖损坏。'),
+            ('CREDENTIAL_RECORD_INVALID', 'state', '原凭据记录损坏或不可读；不能当作缺失重建，先核对原记录和发送阶段。'),
+            ('CREDENTIAL_QUOTA_BUSY', 'state', '原用户配额锁暂忙；本次发送事实以effect_outcome为准，先核对原请求后有界恢复。'),
+            ('CREDENTIAL_QUOTA_EXCEEDED', 'configuration', '当前用户存储配额不足；由有权者调整或清理，不绕过配额保存秘密。'),
+            ('CREDENTIAL_QUOTA_UNAVAILABLE', 'configuration', '当前用户配额策略或计量不可用；修复原策略，不放宽目录或绕过配额。'),
+            ('CREDENTIAL_INPUT_SUPERSEDED', 'state', '本次凭据输入已被新卡代次替代；回到原任务使用当前卡片，不重放旧输入。'),
+            ('CREDENTIAL_RECEIPT_SUPERSEDED', 'state', '旧卡回执晚到，未覆盖当前新卡；核对原发送记录，不盲目再发。'),
+            ('CREDENTIAL_DELIVERY_RECONCILIATION_REQUIRED', 'state', '原卡发送结果尚待核对；保持原幂等记录，不能换编号自动重发。'),
+            ('CHANNEL_CONTROL_PROVIDER_REJECTED', 'configuration', '平台明确拒绝原卡片；按provider_code核对字段格式或应用权限，未发送不等于运输未知。'),
+            ('CHANNEL_CONTROL_AUTH_UNAVAILABLE', 'configuration', '宿主未取得发送卡片所需的通道认证；核对应用配置或认证服务，不借其它用户身份。'),
         )},
     "CHANNEL_CONTROL_REJECTED": ErrorContract(
         code="CHANNEL_CONTROL_REJECTED", category="permission", retryable=False,

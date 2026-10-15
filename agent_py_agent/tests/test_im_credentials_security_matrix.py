@@ -13,6 +13,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+from agent_py_agent.agent.common.json_io import read_json_object_report
 from agent_py_agent.agent.common.log_redaction import install_log_redaction, redact_sensitive_text
 from agent_py_agent.agent.conversation.channels import project_user_reply
 from agent_py_agent.agent.delivery import (
@@ -206,7 +207,7 @@ def _pending_card(agent):
         bind_admin_channel_identity(agent.home_paths.root, 'feishu', actor)
     agent.config.feishu_session_lock_enabled = False
     agent.channel_registry.register_adapter('feishu', SimpleNamespace(send_control_card=lambda *_args, **_kwargs:
-        {'message_id': 'om_' + uuid.uuid4().hex, 'chat_id': 'oc_private_matrix'}),
+        {'message_id': 'om_' + uuid.uuid4().hex, 'chat_id': agent.config.my_agent_owner_id if agent.home_paths.owner_kind == 'group' else 'oc_private_matrix'}),
         capabilities=ChannelCapabilities(control_cards=True, proactive=True))
     result = _formal_call(agent, 'request_credentials', {'url': 'https://10.1.2.3/api', 'authentication': 'bearer'})
     assert result.ok and _SECRET not in result.output
@@ -215,6 +216,8 @@ def _pending_card(agent):
     row = read_json_object_report(path, context='synthetic.security.card').payload
     body = {'reference': row['reference'], 'decision': 'submit', 'message_id': row['message_id'],
         'chat_id': row['chat_id'], 'fields': {'secret': _SECRET}}
+    if row.get('presentation', {}).get('kind') == 'group':
+        body['submitter'] = {'actor_id': actor, 'chat_id': row['chat_id'], 'current_group_member': True}
     return path, body, actor
 
 
@@ -234,7 +237,10 @@ def test_private_card_callback_actor_message_and_unlock_gates_do_not_publish_sec
             lock.set_password(actor, 'SyntheticMatrixLockPassword-123')
             lock.store.record_activity(actor, now=1)
         result = resolve_private_interaction(agent, body, channel='feishu', actor_id=actor)
-        assert not result['ok'] and result['error_code'] == ('IM_PASSWORD_SETUP_REQUIRED' if attack == 'password-unset' else 'IM_UNLOCK_REQUIRED')
+        if kind == 'group':
+            assert result['ok'] and read_json_object_report(path, context='synthetic.group.ready').payload['status'] == 'ready'
+        else:
+            assert not result['ok'] and result['error_code'] == ('IM_PASSWORD_SETUP_REQUIRED' if attack == 'password-unset' else 'IM_UNLOCK_REQUIRED')
         assert _SECRET not in str(result)
     else:
         if attack == 'forwarded':
@@ -245,7 +251,9 @@ def test_private_card_callback_actor_message_and_unlock_gates_do_not_publish_sec
         with pytest.raises(ValueError) as error:
             resolve_private_interaction(agent, body, channel='feishu', actor_id='ou_foreign' if attack == 'actor' else actor)
         assert _SECRET not in str(error.value)
-    assert path.read_bytes() == before and _SECRET not in path.read_text()
+    if kind != 'group' or attack not in {'password-unset', 'locked'}:
+        assert path.read_bytes() == before
+    assert _SECRET not in path.read_text()
 
 
 def test_ready_monitor_ref_cannot_be_reassigned_by_forged_job_attributes(tmp_path, sink):

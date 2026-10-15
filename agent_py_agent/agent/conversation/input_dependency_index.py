@@ -9,9 +9,9 @@ from .agent_tool_approval import AGENT_TOOL_APPROVAL_MAX_PENDING_COUNT
 from .models import ThreadTaskLink
 
 
-# LLM: refs 只是查找投影；容量检查与 persist 回调共用原 TaskStore 锁，不能更改任务状态或复制输入期限。
+# LLM: refs 只是查找投影；容量检查与 persist 回调共用原 TaskStore 锁；replaces_input_id仅在persist成功后原子退休旧槽，不能更改任务状态。
 # 函数用途: 原子维护准确任务的输入引用，最多沿原私交互上限保留32条，终态移除后放槽。
-def update_task_input_refs(agent, task_id: str, input_id: str, *, remove: bool = False, persist=None):
+def update_task_input_refs(agent, task_id: str, input_id: str, *, remove: bool = False, persist=None, replaces_input_id: str = ""):
     path = agent.conversation_store.tasks.storage.task_path(task_id)
     # LLM: 同一任务的不同输入并发提交不得互相覆盖；任务身份从原文件复核。
     # 函数用途: 在任务记录锁内合并或移除一个引用。
@@ -21,7 +21,7 @@ def update_task_input_refs(agent, task_id: str, input_id: str, *, remove: bool =
             raise ValueError('输入任务绑定冲突')
         if persist is not None and link.status != 'active':
             raise ValueError('输入任务已失效')
-        refs = [item for item in link.input_dependency_refs if item != input_id]
+        refs = [item for item in link.input_dependency_refs if item != input_id and item != replaces_input_id]
         available = input_id in link.input_dependency_refs or len(refs) < AGENT_TOOL_APPROVAL_MAX_PENDING_COUNT
         if persist is not None:
             saved = persist(available)

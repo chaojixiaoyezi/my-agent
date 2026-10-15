@@ -203,7 +203,7 @@ def _adapter_workspace_root(agent) -> Path:
 
 
 # LLM: 宿主配置同源接入原 FeishuAdapter；引用读取只加既有 durable prepare 能力，不创建独立队列或配置副本。
-# 函数用途: 解析宿主凭据并接线飞书引用文字/附件等入站开关，秘密只传运输、不写记录。
+# 函数用途: 解析宿主凭据、回调端口和入站开关；卡片与普通消息同源，秘密只传运输、不写记录。
 def _feishu_adapter_config(agent) -> dict[str, object]:
     # 凭据字段过 SecretRef 解析:值可写成 env:NAME / file:/path(密钥放源码树外,不内联进 YAML)。
     # 闲置锁 fallback 直接复用运行时常量，避免 CLI adapter 另写一份小时数后再次漂移。
@@ -233,6 +233,9 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
         # my_agent_home 根:卡片按钮回调据此读待确认记录 + 定位 owner 的 SOUL.md(与网关侧
         # update_persona 写入用的 home_paths.root 同一根,跨进程一致)。
         "my_agent_home": str(getattr(getattr(agent, "home_paths", None), "root", "") or ""),
+        # 控制卡回调与普通消息使用同一宿主端口和配置凭据，不能回落到默认8420。
+        "gateway_port": getattr(agent.config, "gateway_port", 8420),
+        "gateway_auth_token": getattr(agent.config, "gateway_auth_token", ""),
     }
 
 

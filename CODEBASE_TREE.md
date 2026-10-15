@@ -1,3 +1,23 @@
+2026-10-14 凭据表单和卡片恢复入口（22项第一批）：
+
+```text
+|-- agent_py_agent/agent/user_space/task_credential_storage.py # 原存储安全读取、阶段错误和脱敏诊断
+|-- agent_py_agent/agent/user_space/task_credential_forms.py # 收集字段、原任务重发和实际提交者授权
+|-- agent_py_agent/agent/user_space/task_credential_replay.py # 同卡同代决定恢复原输入发布
+|-- agent_py_agent/agent/user_space/task_credential_verification.py # 原HTTP认证事实更新候选验证状态
+|-- agent_py_agent/tests/test_task_credential_storage.py # 密钥/配额/发送前后持久化故障
+|-- agent_py_agent/tests/test_task_credential_forms.py # 四种表单、重填候选和精确目标范围
+|-- agent_py_agent/tests/test_credential_callback_replay.py # 保存后回执丢失与同决定幂等恢复
+|-- agent_py_agent/tests/test_credential_group_callbacks.py # 原群成员回调与私人锁隔离
+|-- agent_py_agent/tests/test_card_callback_recovery.py # 配置端口/认证和真实回环模型按钮
+|-- docs/tasks/IM_22_ITEM_IMPLEMENTATION.md # 全22项授权范围、实施状态与发行证据
+|-- docs/tasks/CREDENTIAL_STORAGE_HANDOFF.md # 分阶段存储与副作用交接
+|-- docs/tasks/CREDENTIAL_FORM_HANDOFF.md # 简单收集与重填版本交接
+`-- docs/tasks/CREDENTIAL_GROUP_HANDOFF.md # 群回调和模型卡端口交接
+```
+
+关键职责：沿原 TaskCredential、输入依赖与 Wake 保存秘密和恢复任务，不创建第二凭据库；模型卡仍走原模型目录和私人配置授权。飞书SDK事件与成员证明由适配器提供，手填姓名不是身份。
+
 2026-10-14 R01–R09 新入口（原任务/模型/监控/权限事实源）：
 
 ```text

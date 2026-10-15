@@ -1680,3 +1680,4 @@ CLI adapter 同源接入 `feishu_quoted_text_enabled`，默认 true，与原引�
 ### 2026-10-14 R07/R08 监控控制
 
 新增确定性 `/schedule delete|cancel|execution|recover|takeover job01`，工具与命令共用原监控控制服务。删除与当前取消沿原 job/run CAS、RuntimeDB 权限、TaskLink、必要输入和冻结整树资源收口；重启重试持久取消，不删历史。管理员私人接管只影响未来通知，保留原 creator/source 与已预留执行，原群目标不改。详见[监控人类控制](../../design/SCHEDULER_HUMAN_CONTROL.md)，本地合同测试见 `test_scheduler_control_lifecycle.py`；真实 IM 与发行由主线统一验收。
+2026-10-14 本期第一批卡片修复（集成验收中）：CLI 适配器传递配置 Gateway 端口与原宿主凭据，避免普通消息与控制回调访问不同端口；回调分认证/路由/连接/超时/格式/执行阶段。群凭据按原群与当前成员提交，模型/审批和个人卡保留原锁。输入替换沿原 TaskStore 容量临界区，终态/代次不被迟到回执覆盖。测试与发行状态见 [本期实施](../../tasks/IM_22_ITEM_IMPLEMENTATION.md)。

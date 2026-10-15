@@ -26,20 +26,26 @@ def private_interaction_lock_error(base_agent, actor_id: str) -> str:
     return "IM_PASSWORD_SETUP_REQUIRED" if status.requires_password_setup else "IM_UNLOCK_REQUIRED" if status.locked else ""
 
 
-# LLM: MAC/actor/expiry 必须先于目标 owner 加载；local/main 还需当前管理员绑定，群来源只接受原发起人的签名私人请求。
+# LLM: MAC/actor/expiry 先于目标 owner 加载；只有签名群凭据按当前成员事实提交，其余控制保留私人锁与管理员绑定。
 # 函数用途: 对一条已认证 SDK 控制事件核对身份、密码、执行和卡片，再写原批准记录。
 # LLM: fields 仅在凭据/模型配置类型接受；模型控制走轻量原 owner store，不创建运行任务，原锁先于写账。
 # 函数用途: 私人凭据 fields 只在 task_credential 接受，审批不收秘密；原锁和实际卡核验先于写账。 修改需同步原控制、恢复或权限测试。
 def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_id: str) -> dict:
-    if set(body) not in ({"reference", "decision", "message_id", "chat_id"}, {"reference", "decision", "message_id", "chat_id", "fields"}):
+    allowed = {"reference", "decision", "message_id", "chat_id", "fields", "submitter"}
+    if not set(body) <= allowed or not {"reference", "decision", "message_id", "chat_id"} <= set(body):
+        raise ValueError("交互字段无效")
+    if "submitter" not in body and set(body) not in ({"reference", "decision", "message_id", "chat_id"}, {"reference", "decision", "message_id", "chat_id", "fields"}):
         raise ValueError("交互字段无效")
     reference = body["reference"]
     if not isinstance(reference, str):
         raise ValueError("交互引用无效")
-    payload = verify_interaction_reference(Path(base_agent.home_paths.root), reference, channel=channel, actor_id=actor_id)
+    payload = verify_interaction_reference(Path(base_agent.home_paths.root), reference, channel=channel, actor_id=actor_id, submitter=body.get("submitter"))
     if payload.get("kind") not in {"tool_approval", "task_credential", "model_configuration"}:
         raise ValueError("交互类型无效")
-    error = private_interaction_lock_error(base_agent, actor_id)
+    group_input = payload.get("presentation", {}).get("kind") == "group"
+    if group_input and body["chat_id"] != payload["presentation"]["chat_id"]:
+        raise ValueError("群卡来源不匹配")
+    error = "" if group_input else private_interaction_lock_error(base_agent, actor_id)
     if error:
         return {"ok": False, "error_code": error, "message": "请先在机器人私聊设置或解锁个人密码，再确认原卡片。"}
     owner = OwnerIdentity(**payload["owner"])
@@ -64,7 +70,7 @@ def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_i
 
 
 # LLM: 新跨 owner 控制必须有实际宿主凭据，即使 G2a 旧回环兼容仍开；模型不能靠 localhost 或复制签名引用代人批准。
-# 函数用途: 校验适配器来源后处理私人卡回调，失败只返回稳定错误码，不暴露原请求或秘密。
+# 函数用途: 校验适配器来源后处理控制卡；区分身份/版本拒绝和宿主执行故障，只返回固定码与阶段，不暴露原请求。
 def handle_private_interaction(handler, server) -> None:
     middleware = getattr(handler, "_auth_middleware", None)
     if middleware is None or not middleware.has_gateway_credential(dict(handler.headers)):
@@ -78,8 +84,12 @@ def handle_private_interaction(handler, server) -> None:
         if not channel or not actor_id:
             raise ValueError("缺少已验证发送者")
         result = resolve_private_interaction(server.agent, handler._read_json(), channel=channel, actor_id=actor_id)
-    except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError, KeyError):
+    except (OSError, RuntimeError):
+        handler._send_json(503, {"ok": False, "error_code": "IM_INTERACTION_HOST_UNAVAILABLE",
+                                 "error_stage": "execution", "message": "宿主暂时无法处理卡片，请稍后重试。"})
+        return
+    except (TypeError, ValueError, KeyError):
         handler._send_json(403, {"ok": False, "error_code": "IM_INTERACTION_INVALID",
-                                 "message": "这张确认卡已失效，或不属于当前私人会话。"})
+                                 "error_stage": "interaction", "message": "这张确认卡已失效，或不属于当前私人会话。"})
         return
     handler._send_json(200, result)

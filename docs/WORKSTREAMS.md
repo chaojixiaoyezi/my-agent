@@ -1,3 +1,5 @@
+2026-10-14 全22项实施：根集成树 `main-release-gate-fix-20261012` 从56617f7a8起。首批storage/form/group三个独立worktree仅交patch，根整合交叉文件并统一gate/main提交。后续独占线为监控S01–05、云与后台S06–08、Skill S09–16，根负责工具S17–20及总集成；全部子代理6.1-sol，开发线不推送、不部署，不读生产凭据。每线保留原权威，完成按原交接模板写证据，真实飞书租户不在当前环境中。
+
 2026-10-14 R01–R09 实施分工：用户授权九项全部实施、严格验收后合 main/推送/本机更新/发行，子代理统一 `gpt-6.1-sol`。沿本任务已附属 `codex/im-entry-update-assessment` 同线共享工作树逐文件独占；根负责统一配置、凭据 R04、脱敏 R09、总文档、集成测试与发布。进度线随后独占 R03 云保护与写后核对，并独立做 R04/R09 安全矩阵；模型线随后独占 R05 查询事实与 canonical prompt；进度线独占 liveness、progress_draft、进度投递重试、状态最近进度及相关测试；模型线独占模型卡片/控制回调、model_profile_service 和私人卡路由，改 R04 共享接口先协调；监控线独占 schedule 控制/仓库/工具/投递迁移及相关取消/路由适配。所有线不提交、不推送、不碰真实服务；新增配置/根台账/文件树/TESTS 由根合并。交接使用原模板，分别记录到 `docs/tasks/IM_R01_R02_HANDOFF.md`、`IM_R06_HANDOFF.md`、`IM_R07_R08_HANDOFF.md`，根统一审阅、验权与发包。
 
 2026-10-14 此前同线分工（历史阶段）：显式 `gpt-6.1-sol` 三个子代理分别独占审批/卡片/host期限、发现目录及本人OAuth、持久输入/凭据/取消；根独占配置统一源、受控CLI/云接线、文档、综合验证和发布。对应交接为 `IM_UNATTENDED_APPROVAL_HANDOFF.md`、`IM_SELF_DISCOVERY_HANDOFF.md`、`IM_PERSISTENT_INPUT_HANDOFF.md`。

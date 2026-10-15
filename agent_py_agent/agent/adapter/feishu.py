@@ -50,8 +50,8 @@ _FEISHU_RETRYABLE_HTTP_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
 # LLM: 标准 API 出站共用此入口；GET 不携带请求体，POST/PUT 仍发送 JSON，凭据只进认证头，不作为正文或日志。
-# 函数用途: 调用机器人信息与消息接口，保持十秒运输超时及同一响应解析。
-def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) -> dict[str, Any]:
+# 函数用途: 调用机器人信息与消息接口，默认十秒超时；有总预算的成员查询显式传入剩余时间。
+def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str, *, timeout: float = 10) -> dict[str, Any]:
     """统一飞书消息 API 调用；GET 不携带正文，其余方法发送 JSON，返回响应对象。"""
     req = urllib.request.Request(
         f"{_FEIHSU_API_BASE}{path}",
@@ -59,7 +59,7 @@ def _feishu_msg_api(method: str, path: str, body: dict[str, Any], token: str) ->
         headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
         method=method,
     )
-    with open_authenticated_request(req, timeout=10) as resp:
+    with open_authenticated_request(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
 
@@ -580,6 +580,7 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachment
         # my_agent_home 根:卡片按钮回调据此读待确认记录、定位 owner 的 SOUL.md(与网关同一根)。
         self.my_agent_home = str(config.get("my_agent_home", "") or "")
         self._gateway_port = int(config.get("gateway_port", 8420))
+        self._gateway_auth_token = str(config.get("gateway_auth_token", "") or "")
         # 默认长连接:免公网且能接密码/人格确认卡片回调；webhook 仍可显式选择。
         self.connection_mode = str(
             config.get("feishu_connection_mode", "long_connection") or "long_connection"
@@ -855,9 +856,9 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachment
     def start_progress_message(self, user_id: str, text: str, *, reply_to: str = "", idempotency_key: str = "") -> str:
         return _start_feishu_progress(self, user_id, text, reply_to=reply_to, idempotency_key=idempotency_key)
 
-    # LLM: 原生卡片不回落文本；目标是宿主解析的私人身份，uuid 保持逻辑发送幂等，回执来自真实 API。
-    # 函数用途: 为审批或私密输入发送一张原生卡，返回后续回调要核对的消息与聊天 ID。
-    def send_control_card(self, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, str]:
+    # LLM: 原生卡片不回落文本；目标是宿主解析的个人或原群身份，uuid 幂等；回执仅含真实身份或安全平台错误事实。
+    # 函数用途: 发送原生控制卡，返回消息/聊天 ID 或明确拒绝诊断，不返回供应商正文。
+    def send_control_card(self, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, Any]:
         return _send_feishu_control_card(self, user_id, card, idempotency_key=idempotency_key)
 
     # LLM: 进度始终使用首次创建的 text 类型，不能根据候选出现 Markdown/表格而改变消息类型；只编辑原 ID。
@@ -1062,16 +1063,19 @@ def _start_feishu_progress(adapter: FeishuAdapter, user_id: str, text: str, *, r
     return next((identity for identity in identities if identity), "")
 
 
-# LLM: 卡片创建只接受供应商成功响应中的 message_id/chat_id；不根据 UUID 推断 ID，不回落普通消息。
+# LLM: 卡片只认供应商成功身份；明确拒绝仅保留数字code和固定宿主码，绝不回传供应商正文或秘密。
 # 函数用途: 沿原认证、准确个人/群编号与稳定 UUID 发控制卡，保留精确回调来源。
-def _send_feishu_control_card(adapter: FeishuAdapter, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, str]:
+def _send_feishu_control_card(adapter: FeishuAdapter, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, Any]:
     token = adapter._get_tenant_access_token()
     if not token:
-        return {}
+        return {"error_code": "CHANNEL_CONTROL_AUTH_UNAVAILABLE", "effect_outcome": "not_started"}
     result = _feishu_msg_api_with_retry("POST", _message_send_path(user_id),
         _message_body(receive_id=user_id, msg_type="interactive", content=json.dumps(card, ensure_ascii=False),
                       uuid_value=_feishu_request_uuid(idempotency_key, component="control", index=0)), token)
-    data = result.get("data") if result.get("code") == 0 else None
+    code = result.get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and code != 0:
+        return {"error_code": "CHANNEL_CONTROL_PROVIDER_REJECTED", "provider_code": code, "effect_outcome": "not_started"}
+    data = result.get("data") if code == 0 else None
     if not isinstance(data, dict):
         return {}
     return {"message_id": str(data.get("message_id") or ""), "chat_id": str(data.get("chat_id") or "")}

@@ -51,7 +51,7 @@ class CapabilityConfig:
     feishu_oauth_scopes: list[str] = field(default_factory=lambda: ["offline_access"])
     # 无 TUI 的主子代理工具审批发到原发起人的私人卡片；具体批准仍回原请求/claim/attempt。
     im_tool_approvals_enabled: bool = True
-    # 私人任务凭据卡及宿主 HTTP 引用注入；不会将密码交给模型或 shell。
+    # 原群/本人私聊任务凭据卡及宿主 HTTP 引用注入；可先收集后配置认证，不把密码交给模型或 shell。
     im_task_credentials_enabled: bool = True
     # IM 模型选择与原发起人私人配置卡；仅改变本 owner 目录，不允许普通用户发布全机模型。
     im_model_cards_enabled: bool = True

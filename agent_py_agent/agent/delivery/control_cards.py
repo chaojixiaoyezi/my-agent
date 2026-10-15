@@ -15,9 +15,11 @@ class ControlCardDeliveryReceipt:
     message_id: str = ""
     chat_id: str = ""
     error_code: str = ""
+    provider_code: int | None = None
+    effect_outcome: str = "not_started"
 
 
-# LLM: 只调用已声明 control_cards 的 adapter，目标只取可信 context；发送失败或不支持都不另发普通消息。
+# LLM: 只调用已声明 control_cards 的 adapter；明确平台拒绝保留安全数字code与未执行事实，异常或缺成功身份才是未知运输。
 # 函数用途: 发送一张私聊审批/输入卡，使用原目标验证、去重键和 provider 消息回执。
 def deliver_control_card(service, context: DeliveryContext, card: dict, *, summary: str) -> ControlCardDeliveryReceipt:
     envelope = ReplyEnvelope(content=summary)
@@ -32,7 +34,11 @@ def deliver_control_card(service, context: DeliveryContext, card: dict, *, summa
     try:
         receipt = attempt.adapter.send_control_card(context.target, card, idempotency_key=context.idempotency_key)
     except Exception:  # noqa: BLE001 - 传输故障不能被当作批准或转发到别的平台
-        return ControlCardDeliveryReceipt(False, error_code="CHANNEL_CONTROL_IO_FAILED")
+        return ControlCardDeliveryReceipt(False, error_code="CHANNEL_CONTROL_IO_FAILED", effect_outcome="unknown")
+    if isinstance(receipt, dict) and receipt.get("error_code") in {"CHANNEL_CONTROL_PROVIDER_REJECTED", "CHANNEL_CONTROL_AUTH_UNAVAILABLE"}:
+        code = receipt.get("provider_code")
+        return ControlCardDeliveryReceipt(False, error_code=receipt["error_code"],
+            provider_code=code if isinstance(code, int) and not isinstance(code, bool) else None)
     if not isinstance(receipt, dict) or not receipt.get("message_id") or not receipt.get("chat_id"):
-        return ControlCardDeliveryReceipt(False, error_code="CHANNEL_CONTROL_RECEIPT_MISSING")
-    return ControlCardDeliveryReceipt(True, str(receipt["message_id"]), str(receipt["chat_id"]))
+        return ControlCardDeliveryReceipt(False, error_code="CHANNEL_CONTROL_RECEIPT_MISSING", effect_outcome="unknown")
+    return ControlCardDeliveryReceipt(True, str(receipt["message_id"]), str(receipt["chat_id"]), effect_outcome="confirmed")

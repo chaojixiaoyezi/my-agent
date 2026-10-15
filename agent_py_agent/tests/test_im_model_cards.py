@@ -237,7 +237,7 @@ def test_adapter_routes_native_form_only_to_authenticated_control(tmp_path, monk
             return self
         def __exit__(self, *_):
             return False
-        def read(self):
+        def read(self, *args):
             return json.dumps(submit(base, captured[-1])).encode()
     def send(request, **kwargs):
         captured.append(json.loads(request.data))

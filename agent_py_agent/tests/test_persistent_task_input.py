@@ -62,8 +62,8 @@ def test_callback_survives_finished_claim_and_replays_one_wake(background):
     background.store.wakes.mark_handled(wakes[0].wake_signal_id)
     reconcile_input_dependencies(background.agent, task_id=background.task_id)
     assert background.store.wakes.pending(limit=0) == []
-    with pytest.raises(ValueError):
-        resolve_private_interaction(background.agent, body, channel='feishu', actor_id='ou_synthetic')
+    assert resolve_private_interaction(background.agent, body, channel='feishu', actor_id='ou_synthetic')['ok']
+    assert background.store.wakes.pending(limit=0) == []
     successor = background.store.claims.acquire({'thread_id':background.thread.thread_id,
         'task_id':background.task_id,'reason':'task_input_resolved'})
     assert successor['claim_id'] != background.claim['claim_id']
@@ -156,8 +156,10 @@ def test_credential_ready_ttl_update_and_revoke(background, monkeypatch):
     with pytest.raises(ValueError, match='过期'):
         credential_headers(background.agent, ref, 'https://example.com/api')
     updated, _scope = request_credential_card(background.agent, url='https://example.com/api', authentication='basic', options=CredentialCardOptions(refresh_ref=ref))
-    assert updated == ref and len(sent) == 2
-    updated_row = read_json_object_report(path, context='test').payload
+    assert updated != ref and len(sent) == 2
+    updated_row = read_json_object_report(credential_path(background.agent.home_paths.owner_home_dir, updated), context='test').payload
+    assert updated_row['replaces_ref'] == ref
+    assert read_json_object_report(path, context='test').payload == row
     assert updated_row['generation'] == 2 and updated_row['input_id'] != row['input_id']
     assert manage_credential(background.agent, ref, operation='revoke')['status'] == 'revoked'
     assert 'ciphertext' not in path.read_text()

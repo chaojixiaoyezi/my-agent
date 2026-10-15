@@ -18,7 +18,8 @@ feishu_oauth_scopes: ["offline_access"]
 # 后台主/子代理的具体工具审批通过原发起人的私人 IM 卡片收取；不让父代理代替用户批准。
 # 仍核对原调用、主 claim/子 attempt、接收者和实际卡片身份；关闭后沿原 TUI/Web 审批方式。
 im_tool_approvals_enabled: true
-# 私人密文输入卡（需 secrets extra 的 cryptography）；模型仅使用任务/监控限定引用。
+# 任务凭据卡（需 secrets extra 的 cryptography）：群来源在原群、个人来源在本人私聊；模型仅得任务/监控限定引用。
+# 可只收密码，缺链接由卡上补填；保存与认证验证分开，用户要求才重发，不扩大网络权限。
 im_task_credentials_enabled: true
 # /model 提供模型选择与私人配置卡；密钥不进入聊天/模型，群表单冻结原 owner 和发起人。
 # 仅部署者控制此入口，关闭后保留原文字查询/选择命令。

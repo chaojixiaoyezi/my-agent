@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from ..capability.runtime_config_reload import capability_config_for_agent
+from ..user_space.task_credential_storage import credential_stage, read_credential_row
 from ..user_space.task_credentials import (
     CredentialCardOptions,
     CredentialInputError,
@@ -31,15 +33,16 @@ class RequestCredentialsTool(BaseTool):
     # 函数用途: 保存当前 owner 并声明无明文参数的输入接口。
     def __init__(self,agent):
         self.agent = agent
-        self.model_spec = ToolModelSpec(name='request_credentials', description='接口需要账号密码或 API Key 时，向原发起人发私人密文输入卡；群内不收集明文。返回 credential_ref，之后 web_fetch 传此引用；可给 job_id 绑定已有本人的监控。',
-            input_schema={'type':'object','properties':{'url':{'type':'string'}, 'authentication':{'type':'string','enum':['basic','bearer','header','login','signature']},
-            'header_name':{'type':'string'},'job_id':{'type':'string'},
+        self.model_spec = ToolModelSpec(name='request_credentials', description='接口需要账号密码或 API Key 时，向原发起人发私人密文输入卡；群来源在原群发卡，个人来源在本人私聊发卡；可仅收密码，缺链接在卡上填写。无需先选认证协议；返回 credential_ref；默认collected只保存，不能直接HTTP使用。需要使用时先operation=configure并传原引用与准确认证方案，配置后web_fetch再传此引用；可给 job_id 绑定已有本人的监控。',
+            input_schema={'type':'object','properties':{'url':{'type':'string'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
+            'collection_mode':{'type':'string','enum':['username_password','password']},'header_name':{'type':'string'},'job_id':{'type':'string'},
             'fields':{'type':'array','items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},
             'auth_config':{'type':'object'},'ttl_seconds':{'type':'integer','minimum':60},
-            'operation':{'type':'string','enum':['request','status','update','revoke']},'credential_ref':{'type':'string'}},
+            'operation':{'type':'string','enum':['request','status','update','configure','revoke']},'credential_ref':{'type':'string'}},
             'anyOf':[
-                {'properties':{'operation':{'enum':['request']}},'required':['url','authentication']},
-                {'properties':{'operation':{'enum':['update']}},'required':['operation','url','authentication','credential_ref']},
+                {'properties':{'operation':{'enum':['request']}},'required':[]},
+                {'properties':{'operation':{'enum':['update']}},'required':['operation','credential_ref']},
+                {'properties':{'operation':{'enum':['configure']}},'required':['operation','credential_ref','authentication']},
                 {'properties':{'operation':{'enum':['status','revoke']}},'required':['operation','credential_ref']},
             ],'additionalProperties':False},
             hints=ToolModelHints(category='orchestration'))
@@ -47,53 +50,68 @@ class RequestCredentialsTool(BaseTool):
             idempotency_policy=IdempotencyPolicy(scope='operation'),timeout_policy=TimeoutPolicy(seconds=30),
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
-    # LLM: 条件必填在副作用前核验；只按固定类型/码报告原任务、加密或发送失败，不展示凭据和异常正文。
+    # LLM: 条件必填在副作用前核验；阶段错误保留安全诊断于原工具账，发送后读取失败保留 confirmed，不展示异常正文。
     # 函数用途: 申请、更新、查询或撤销原任务凭据，模型只获得引用、期限和状态。
     def execute(self, params):
-        from ..common.json_io import read_json_object_report
         from ..user_space.task_credentials import manage_credential
         config = capability_config_for_agent(self.agent)
         if config is None or not config.im_task_credentials_enabled:
             return _credential_error('TOOL_UNAVAILABLE', '当前未启用私人凭据输入。')
         operation = params.get('operation', 'request')
-        required = ('credential_ref',) if operation in {'status', 'revoke'} else ('url', 'authentication')
+        required = ('credential_ref',) if operation in {'status', 'revoke', 'configure'} else ()
+        if operation == 'configure':
+            required += ('authentication',)
         if operation == 'update':
             required += ('credential_ref',)
         if any(not isinstance(params.get(name), str) or not params[name].strip() for name in required):
             return _credential_error('TOOL_INVALID_ARGUMENTS', '凭据参数缺失：' + '、'.join(required) + '；未发送卡片。')
         try:
+            if operation == 'configure':
+                from ..user_space.task_credential_forms import configure_credential
+                result = configure_credential(self.agent, params['credential_ref'], authentication=params.get('authentication'), auth_config=params.get('auth_config'), header_name=params.get('header_name','Authorization'))
+                return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope={'credential':result})
             if operation in {'status', 'revoke'}:
-                result = manage_credential(self.agent, params['credential_ref'], operation=operation)
+                with credential_stage('record_management', effect_outcome='not_started' if operation == 'status' else 'unknown'):
+                    result = manage_credential(self.agent, params['credential_ref'], operation=operation)
                 return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope={'credential': result})
             if operation not in {'request', 'update'}:
                 raise ValueError('凭据动作无效')
-            reference, _scope = request_credential_card(self.agent, url=params['url'], authentication=params['authentication'],
+            reference, _scope = request_credential_card(self.agent, url=params.get('url',''), authentication=params.get('authentication','collected'),
                 header_name=params.get('header_name','Authorization'), job_id=params.get('job_id',''),
                 call_id=str(params.get('__tool_call_id') or ''), options=CredentialCardOptions(fields=params.get('fields'),
-                    auth_config=params.get('auth_config'), ttl_seconds=params.get('ttl_seconds'),
+                    auth_config=params.get('auth_config'), collection_mode=params.get('collection_mode','username_password'), ttl_seconds=params.get('ttl_seconds'),
                     refresh_ref=params['credential_ref'] if operation == 'update' else ''))
-            row = read_json_object_report(credential_path(self.agent.home_paths.owner_home_dir, reference), context='credentials.result').payload
-            result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row['expires_at']}
+            row = read_credential_row(credential_path(self.agent.home_paths.owner_home_dir, reference),
+                stage='result_read', effect_outcome='confirmed')
+            if not all(key in row for key in ('origin', 'status', 'expires_at')):
+                raise CredentialInputError('CREDENTIAL_RECORD_INVALID', '已发送卡片的原记录不可读取，请先核对原操作。',
+                    stage='result_read', effect_outcome='confirmed')
+            result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row['expires_at'],
+                'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
             envelope = {'credential': result}
             if row['status'] == 'pending':
                 result['status'] = 'waiting_input'
-                envelope['input_dependency'] = {'input_id': row['input_id'], 'status': 'waiting_input', 'expires_at': row['expires_at']}
+                envelope['input_dependency'] = {'input_id': row['input_id'], 'status': 'waiting_input', 'expires_at': row['expires_at'], 'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
             return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope=envelope)
         except CredentialInputError as exc:
-            return _credential_error(exc.code, str(exc), stage=exc.stage, effect_outcome=exc.effect_outcome)
+            exc.diagnostic['operation_id'] = str(params.get('__tool_call_id') or '')
+            return _credential_error(exc.code, str(exc), stage=exc.stage, effect_outcome=exc.effect_outcome, diagnostic=exc.diagnostic)
         except ImportError:
             return _credential_error('CREDENTIAL_ENCRYPTION_UNAVAILABLE', '私人凭据加密依赖不可用，请管理员修复；勿在群里发送密码。')
         except (ValueError, KeyError) as exc:
             from ..conversation.host_actor import HostActorError
             code = exc.error_code if isinstance(exc, HostActorError) else 'CREDENTIAL_BINDING_INVALID'
             return _credential_error(code, '凭据参数或原发起人/任务绑定无法核验，未完成卡片操作。')
-        except (OSError, RuntimeError):
-            return _credential_error('CREDENTIAL_STORAGE_UNAVAILABLE', '私人凭据存储不可用，请管理员检查；勿在群里发送密码。',
-                stage='storage', effect_outcome='unknown')
+        except (OSError, RuntimeError) as exc:
+            return _credential_error('CREDENTIAL_STORAGE_UNAVAILABLE', '凭据前置检查不可用，未发送卡片。',
+                stage='preflight', effect_outcome='not_started', diagnostic={'exception_type': type(exc).__name__,
+                    **({'errno': exc.errno} if isinstance(exc, OSError) and isinstance(exc.errno, int) else {})})
 
 
-# LLM: 所有错误沿原 ToolHandlerOutcome 保留 code/stage/副作用事实；不复制自由异常文字、密钥或私有路径。
+# LLM: 所有错误沿原 ToolHandlerOutcome 保留 code/stage/副作用及安全诊断；不复制自由异常文字、密钥或私有路径。
 # 函数用途: 生成模型可理解的凭据失败回执，避免缺参或前置拒绝被混报成发卡结果未知。
-def _credential_error(code, message, *, stage='preflight', effect_outcome='not_started'):
+def _credential_error(code, message, *, stage='preflight', effect_outcome='not_started', diagnostic=None):
+    logging.getLogger(__name__).warning('credential_tool_failure code=%s stage=%s effect_outcome=%s diagnostic=%s',
+        code, stage, effect_outcome, diagnostic or {})
     return ToolHandlerOutcome('request_credentials', False, message, error_code=code,
-        effect_outcome=effect_outcome, result_envelope={'credential_error': {'stage': stage, 'error_code': code}})
+        effect_outcome=effect_outcome, result_envelope={'credential_error': {'stage': stage, 'error_code': code, 'diagnostic': diagnostic or {}}})
