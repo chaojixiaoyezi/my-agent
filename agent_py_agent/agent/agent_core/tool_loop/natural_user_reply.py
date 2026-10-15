@@ -378,9 +378,8 @@ def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
     return "ok", kind, "model_user_reply"
 
 
-# LLM: The presentation model may translate structured phase facts but cannot
-# expose internal field names or invent additional execution/verification work.
-# 函数用途: 生成普通用户自然回复约束，区分模型内部总结和宿主事实，避免把协议词直接展示。
+# LLM: 表达模型只软解释宿主事实，不增加状态硬门；输入登记、运输确认、结果可用和认证验证必须保持不同语义。
+# 函数用途: 生成普通用户自然回复约束，解释输入等待和已结算事实，避免暴露协议或建议秘密绕过安全输入面。
 def _reply_guidance(phase: dict[str, object]) -> str:
     payload = {
         "reply_kind": str(phase.get("kind") or "background_update"),
@@ -417,6 +416,10 @@ def _reply_guidance(phase: dict[str, object]) -> str:
         "本表达轮故意没有工具，不能据此声称主轮没有工具或要求用户提供工具；"
         "tool_execution_observed=true 或 successful_operation_count>0 时，必须承认本轮已经发生了工具执行，"
         "但不要向用户罗列内部工具名。"
+        "input_dependency 中只有 request_delivery.status=confirmed 才证明输入界面已送达，登记或未知状态不证明送达。"
+        "status=ready 且 result_available=true 表示原输入已提交，可沿原授权引用继续，无需重填但不代表认证已验证；"
+        "expired/cancelled/revoked/failed 表示原输入已结束。"
+        "需要输入时只引导已确认的安全输入界面，不建议把秘密发到普通聊天或文件。"
         "把 delegated_work 翻成普通用户听得懂的子代理进展；不要把 operation、verification、envelope、"
         "mutation、wake 或字段名原样说给用户，也不要凭这些内部词另编一个不存在的验证阶段。"
         "子代理的直属/后代关系只以 delegated_work.topology 为准；"

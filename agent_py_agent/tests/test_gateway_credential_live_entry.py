@@ -94,6 +94,7 @@ def _assert_input_reply_execution(backend, tool, kind='input_wait'):
     assert verification['groups'][0]['tool'] == tool
     assert verification['groups'][0]['status'] == 'succeeded'
     assert backend.tool_counts[-1] == 0
+    return facts
 
 
 # LLM: 基础 Gateway 与 owner 目录故意不同，工具必须使用原 writer 的队列路径；仅真实运输由记录器替换。
@@ -134,7 +135,9 @@ def test_first_gateway_credential_request_materializes_original_task_and_waits(t
     assert response['runtime_reason'] == 'TASK_INPUT_WAIT' and response['turn_end_reason'] == 'blocked'
     assert world.backend.calls == 2 and world.backend.tool_counts[-1] == 0
     assert '[natural-user-reply]' in world.backend.observed
-    _assert_input_reply_execution(world.backend, 'request_credentials')
+    facts = _assert_input_reply_execution(world.backend, 'request_credentials')
+    assert facts['input_dependency']['request_delivery'] == {'status': 'confirmed'}
+    assert facts['input_dependency']['result_available'] is False
     run = world.agent.subagents.runtime_db.main_agent_run_for_task(world.request_id)
     assert run['status'] == 'created'
     attempt = world.agent.subagents.runtime_db.current_attempt(run['agent_run_id'])
@@ -185,6 +188,34 @@ def test_original_first_request_callback_only_resumes_exact_input_once(tmp_path,
     assert len(wakes) == (1 if decision == 'submit' else 0)
     if wakes:
         assert wakes[0].root_task_id == link.task_id and wakes[0].thread_id == link.thread_id
+        from dataclasses import asdict
+
+        from agent_py_agent.agent.conversation.lifecycle_wake_event import (
+            lifecycle_wake_turn_trigger,
+        )
+        trigger = lifecycle_wake_turn_trigger('task_input_resolved', asdict(wakes[0]), [world.request_id])
+        facts = json.loads(trigger.event_facts)['input_dependency']
+        assert facts['status'] == 'ready' and facts['result_available'] is True
+        assert facts['user_input_required'] is False
+        from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeLoopParams
+        from agent_py_agent.agent.agent_core.runtime.loop_support import (
+            _native_initial_tool_ir_history,
+        )
+        from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn
+        from agent_py_agent.agent.conversation.runtime import (
+            BackgroundRunRequest,
+            _background_model_inputs,
+        )
+
+        _, _, resume_trigger = _background_model_inputs(BackgroundRunRequest(thread_id=link.thread_id,
+            task_id=link.task_id, reason='task_input_resolved', wake_signal=asdict(wakes[0])),
+            task_objective=link.goal, wake_prompt='合成原输入唤醒')
+        history = _native_initial_tool_ir_history(RuntimeLoopParams(user_prompt=link.goal,
+            root_user_prompt=link.goal, memories=[], runtime_injections=[], routed_context=None,
+            resume_context_section='', turn_trigger=resume_trigger), carried_handoff='', carried_user_inputs=[])
+        assert isinstance(history[0], RuntimeFactsTurn)
+        assert '"status": "ready"' in history[0].text and '"result_available": true' in history[0].text
+        assert 'Synthetic-Password-91e2' not in history[0].text
     assert 'Synthetic-Password-91e2' not in json.dumps(saved)
     assert 'Synthetic-Password-91e2' not in json.dumps(wakes, default=str)
 

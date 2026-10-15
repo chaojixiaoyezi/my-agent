@@ -1,5 +1,5 @@
 # LLM: 此工具只申请原任务的私人凭据卡，返回 opaque ref；不接收密码参数，不给管理员身份或额外文件权限。
-# 模块用途: 让 IM 主子代理请求接口认证信息并继续原任务，HTTP 明文注入只发生在 web_fetch 宿主侧。
+# 模块用途: 让 IM 主子代理请求接口认证信息并返回原状态与运输确认投影；HTTP 明文注入只发生在 web_fetch 宿主侧。
 from __future__ import annotations
 
 import json
@@ -27,8 +27,8 @@ from .models import (
 )
 
 
-# LLM: 工具始终绑定当前 owner Agent；开关在 capability 配置，卡片失败/取消不能变成完成或聊天凭据收集。
-# 类用途: 发布绑定原发起人的私聊输入卡或管理授权，不等待、不调用模型。
+# LLM: 工具始终绑定当前 owner Agent；开关在 capability 配置，运输确认只读宿主记录，失败/取消不能变成完成或聊天凭据收集。
+# 类用途: 发布原任务输入卡并返回安全状态或管理授权，不等待、不调用模型，不公开输入值。
 class RequestCredentialsTool(BaseTool):
     # LLM: 所有生命周期都要求规范任务，原 Registry 在 handler 前沿 promotes_task 晋升；注册不读密钥或发卡。
     # 函数用途: 声明原任务输入及标准/自定义字段分工，避免重复收集；首次普通请求也能持久等待和恢复。
@@ -52,7 +52,7 @@ class RequestCredentialsTool(BaseTool):
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
     # LLM: 条件必填在副作用前核验；scope 不可用与存储失败分开，发送后读取失败保持unknown且禁止盲重发，不展示异常正文。
-    # 函数用途: 申请、更新、查询或撤销原任务凭据，模型只获得引用、期限和状态。
+    # 函数用途: 申请、更新、查询或撤销原任务凭据，模型只获得引用、期限、状态与原运输确认，不获得表单值。
     def execute(self, params):
         from ..user_space.task_credentials import manage_credential
         config = capability_config_for_agent(self.agent)
@@ -88,11 +88,13 @@ class RequestCredentialsTool(BaseTool):
                 raise CredentialInputError('CREDENTIAL_RECORD_INVALID', '已发送卡片的原记录不可读取，请先核对原操作。',
                     stage='result_read', effect_outcome='unknown')
             result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row['expires_at'],
-                'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
+                'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref',''),
+                'request_delivery': _request_delivery(row)}
             envelope = {'credential': result}
             if row['status'] == 'pending':
                 result['status'] = 'waiting_input'
                 envelope['input_dependency'] = {'input_id': row['input_id'], 'status': 'waiting_input', 'expires_at': row['expires_at'], 'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
+                envelope['input_dependency']['request_delivery'] = result['request_delivery']
             return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope=envelope)
         except ToolApprovalScopeUnavailable:
             return _credential_error('CREDENTIAL_TASK_NOT_ACTIVE', '当前任务执行范围不可用，未发送凭据卡。',
@@ -110,6 +112,13 @@ class RequestCredentialsTool(BaseTool):
             return _credential_error('CREDENTIAL_STORAGE_UNAVAILABLE', '凭据前置检查不可用，未发送卡片。',
                 stage='preflight', effect_outcome='not_started', diagnostic={'exception_type': type(exc).__name__,
                     **({'errno': exc.errno} if isinstance(exc, OSError) and isinstance(exc.errno, int) else {})})
+
+
+# LLM: 只读已由原凭据宿主验证的记录，不接收模型参数；missing/非法状态一律 unknown，pending/armed 不证明卡片送达。
+# 函数用途: 把原运输状态压成无消息标识、地址或表单值的公开事实，只有 confirmed 才表示平台已确认。
+def _request_delivery(row):
+    status = row.get('delivery_state')
+    return {'status': status if isinstance(status, str) and status in {'not_started', 'started', 'unknown', 'confirmed'} else 'unknown'}
 
 
 # LLM: 所有错误沿原 ToolHandlerOutcome 保留 code/stage/副作用及安全诊断；不复制自由异常文字、密钥或私有路径。

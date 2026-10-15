@@ -1,5 +1,5 @@
 # LLM: 消费真实宿主工具信封，不从文字或工具名猜等待；归档/native pair 在调用前完成，恢复沿原 input dependency/Wake。
-# 模块用途: 在完整工具记录边界登记等待，携带原归档的安全执行事实生成零工具回执，再让出执行等原输入事件。
+# 模块用途: 在完整工具记录边界登记等待，携带原归档与运输确认的安全事实生成零工具回执，再让出执行等原输入事件。
 from __future__ import annotations
 
 import json
@@ -14,7 +14,7 @@ from .input_dependencies import (
 
 
 # LLM: 只消费executor真实input_dependency；取消可能早于工具归档，带resolution_delivery=retire的卡取消不得重新armed/发Wake或进入等待，泛用取消不变。
-# 函数用途: 将已归档工具的结构化输入依赖置为可恢复；完整本轮其它工具仍按原配对记录。
+# 函数用途: 将已归档工具的结构化输入依赖置为可恢复，短暂保存准确输入的公开运输状态；其它工具仍按原配对记录。
 def record_input_wait(agent, params, result):
     envelope = (getattr(result, 'metadata', {}) or {}).get('handler_details', {})
     dependency = envelope.get('input_dependency') if isinstance(envelope, dict) else None
@@ -29,10 +29,15 @@ def record_input_wait(agent, params, result):
             return
         state = params.live_archive_state
         state['waiting_input_id'] = row['input_id']
+        delivery = dependency.get('request_delivery')
+        status = delivery.get('status') if isinstance(delivery, dict) else None
+        state.pop('waiting_input_delivery', None)
+        if isinstance(status, str) and status in {'not_started', 'started', 'unknown', 'confirmed'}:
+            state['waiting_input_delivery'] = (row['input_id'], status)
 
 
 # LLM: 输入行仅取白名单，主轮执行仅复用公开归档核验；pending不证明投递，不能带秘密、整包历史、重跑申请或合成回执。
-# 函数用途: 为已armed的准确输入准备一次自然等待回执；已结算输入不重新等待，不创建第二个输入或调度器。
+# 函数用途: 为已armed的准确输入准备一次自然等待回执，匹配本工具的确认事实；已结算输入不重新等待，不创建第二个输入或调度器。
 def prepare_input_wait_reply(agent, params):
     state = getattr(params, 'live_archive_state', None) or {}
     input_id = state.get('waiting_input_id')
@@ -43,6 +48,7 @@ def prepare_input_wait_reply(agent, params):
     if report.load_error or not row or row.get('input_id') != input_id:
         raise ValueError('原输入等待记录不可读')
     state.pop('waiting_input_id', None)
+    delivery = state.pop('waiting_input_delivery', None)
     if row.get('status') != 'pending':
         params.tool_context.append('[task-input-resolution]\n' + json.dumps({
             'input_id': row['input_id'], 'status': row['status'], 'result_refs': row.get('result_refs', []),
@@ -53,9 +59,13 @@ def prepare_input_wait_reply(agent, params):
     from ..agent_core.tool_loop.completion import turn_execution_reply_facts
     from ..agent_core.tool_loop.natural_user_reply import queue_natural_user_reply
 
+    dependency = {key: row[key] for key in ('input_id', 'provider', 'status', 'expires_at')}
+    dependency['result_available'] = False
+    if isinstance(delivery, tuple) and len(delivery) == 2 and delivery[0] == input_id:
+        dependency['request_delivery'] = {'status': delivery[1]}
     queue_natural_user_reply(params, kind='input_wait', facts={
         **turn_execution_reply_facts(agent, params),
-        'input_dependency': {key: row[key] for key in ('input_id', 'provider', 'status', 'expires_at')},
+        'input_dependency': dependency,
         'reply_is_interim': True, 'user_input_required': True,
         'task_continues_without_more_user_input': False, 'input_request_registered': True,
         'current_user_request': str(params.user_prompt or '')[:4000],

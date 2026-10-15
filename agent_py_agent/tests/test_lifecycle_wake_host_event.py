@@ -266,7 +266,12 @@ def test_wake_recommendations_are_a_fixed_shortlist_led_by_list_agents(tmp_path)
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"),
         tmp_path / "service-root",
     )
-    params = _run_params("thread-1", BackgroundRunRequest(thread_id="thread-1", task_id=_TASK, reason=_CHILD_WAKE), agent)
+    thread = agent.conversation_store.threads.get_or_create({
+        "canonical_user_id": "owner", "channel": "tui", "channel_conversation_id": "synthetic"})
+    agent.conversation_store.tasks.bind({"thread_id": thread.thread_id, "task_id": _TASK,
+        "goal": _OBJECTIVE, "status": "active"})
+    params = _run_params(thread.thread_id,
+        BackgroundRunRequest(thread_id=thread.thread_id, task_id=_TASK, reason=_CHILD_WAKE), agent)
 
     def recommendations(allowed_tools, trigger):
         runtime_snapshot = agent.tools.runtime_snapshot(allowed_tools=allowed_tools, run_id=params.run_id)
@@ -533,3 +538,54 @@ def test_history_incomplete_exit_can_supersede_a_done_child(tmp_path, monkeypatc
     source = agent.subagents.load(child.id)
     assert source.status == "DONE" and source.superseded_by == replacement.id
     assert replacement.attributes["replacement_for_run_ids"] == [child.id]
+
+
+@pytest.mark.parametrize('status', ['ready', 'expired', 'cancelled', 'failed', 'revoked'])
+@pytest.mark.parametrize('has_result', [True, False])
+def test_input_wake_projects_only_typed_terminal_facts(status, has_result):
+    signal = {'source_agent_id': 'original-run', 'evidence_refs': ['opaque-result'] if has_result else [],
+        'metadata': {'schema_version': 'task-input-event.v1', 'input_id': 'opaque-input',
+            'input_provider': 'extensible-provider', 'input_status': status, 'input_run_id': 'original-run',
+            'form': 'Synthetic-Secret-Canary', 'result': {'password': 'Synthetic-Secret-Canary'}}}
+    trigger = lifecycle_wake_turn_trigger('task_input_resolved', signal, ['original-request'])
+    facts = json.loads(trigger.event_facts)
+    assert facts['input_dependency'] == {'input_id': 'opaque-input', 'provider': 'extensible-provider',
+        'status': status, 'result_available': status == 'ready' and has_result, 'user_input_required': False}
+    assert 'Synthetic-Secret-Canary' not in trigger.event_facts
+    assert 'opaque-result' not in trigger.event_facts
+    request = BackgroundRunRequest(thread_id='thread-1', task_id=_TASK,
+        reason='task_input_resolved', wake_signal=signal)
+    _, _, native_trigger = _background_model_inputs(request, task_objective=_OBJECTIVE, wake_prompt='原输入事件')
+    history = _native_initial_tool_ir_history(_loop_params(native_trigger), carried_handoff='', carried_user_inputs=[])
+    assert isinstance(history[0], RuntimeFactsTurn)
+    assert '"result_available": ' + ('true' if status == 'ready' and has_result else 'false') in history[0].text
+    assert 'Synthetic-Secret-Canary' not in history[0].text
+
+
+@pytest.mark.parametrize('change', [
+    {'input_status': {'status': 'ready', 'secret': 'Synthetic-Secret-Canary'}},
+    {'input_provider': {'secret': 'Synthetic-Secret-Canary'}},
+    {'input_id': ['Synthetic-Secret-Canary']}, {'input_status': 'pending'},
+    {'schema_version': 'untrusted.v1'},
+])
+def test_input_wake_rejects_untyped_or_unresolved_metadata(change):
+    metadata = {'schema_version': 'task-input-event.v1', 'input_id': 'input',
+        'input_provider': 'provider', 'input_status': 'ready', **change}
+    facts = lifecycle_wake_turn_trigger('task_input_resolved', {'metadata': metadata}, [])
+    assert 'input_dependency' not in json.loads(facts.event_facts)
+    assert 'Synthetic-Secret-Canary' not in facts.event_facts
+
+
+def test_input_metadata_on_child_reason_does_not_change_child_projection():
+    before = _trigger().event_facts
+    after = _trigger(schema_version='task-input-event.v1', input_id='input', input_provider='provider', input_status='ready').event_facts
+    assert after == before
+
+
+@pytest.mark.parametrize('refs', [None, 'opaque-ref', {'secret': 'Synthetic-Secret-Canary'}, [None, {}], []])
+def test_ready_wake_requires_original_typed_result_refs(refs):
+    trigger = lifecycle_wake_turn_trigger('task_input_resolved', {'evidence_refs': refs,
+        'metadata': {'schema_version': 'task-input-event.v1', 'input_id': 'input',
+            'input_provider': 'provider', 'input_status': 'ready'}}, [])
+    assert json.loads(trigger.event_facts)['input_dependency']['result_available'] is False
+    assert 'Synthetic-Secret-Canary' not in trigger.event_facts

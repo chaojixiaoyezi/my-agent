@@ -40,6 +40,61 @@ from agent_py_agent.tests.test_tool_loop_recovery_scope import _params
 _FIXTURES = (background,)
 
 
+@pytest.mark.parametrize('delivery', [None, 'unknown', 'started', 'not_started',
+    {'secret': 'Synthetic-Private-Canary'}, 'invalid', 'confirmed'])
+def test_credential_delivery_public_fact_uses_only_host_row(background, monkeypatch, delivery):
+    from agent_py_agent.agent.tooling import task_credential_tool as module
+
+    _card(background)
+    monkeypatch.setattr(module, 'capability_config_for_agent', lambda _: SimpleNamespace(im_task_credentials_enabled=True))
+    read = module.read_credential_row
+
+    # LLM: 只替换临时宿主记录的投递字段；模型同名参数和秘密扩展都不得成为公开确认事实。
+    # 函数用途: 模拟旧记录缺字段、未知回执或损坏字段，不接触真实凭据。
+    def host_row(*args, **kwargs):
+        row = read(*args, **kwargs)
+        row.pop('delivery_state', None)
+        if delivery is not None:
+            row['delivery_state'] = delivery
+        row['untrusted_extra'] = 'Synthetic-Private-Canary'
+        return row
+
+    monkeypatch.setattr(module, 'read_credential_row', host_row)
+    outcome = RequestCredentialsTool(background.agent).execute({'url': 'https://example.com/api',
+        'request_delivery': {'status': 'confirmed', 'secret': 'Synthetic-Private-Canary'}})
+    assert outcome.ok
+    expected = delivery if isinstance(delivery, str) and delivery in {'confirmed', 'unknown', 'started', 'not_started'} else 'unknown'
+    assert outcome.result_envelope['credential']['request_delivery'] == {'status': expected}
+    assert 'Synthetic-Private-Canary' not in outcome.output
+    params = _params(task_id=background.task_id, run_id=background.task_id)
+    record_input_wait(background.agent, params, SimpleNamespace(ok=True, metadata={'handler_details': outcome.result_envelope}))
+    assert prepare_input_wait_reply(background.agent, params)
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        natural_user_reply_model_params,
+    )
+    expression = natural_user_reply_model_params(replace(params,
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id=params.run_id, source_protocol='native')))
+    assert 'Synthetic-Private-Canary' not in str(expression.tool_ir_history)
+    assert f'"status": "{expected}"' in expression.user_prompt
+
+
+@pytest.mark.parametrize('delivery', [None, {'status': {'secret': 'Synthetic-Private-Canary'}},
+    {'status': 'invalid', 'secret': 'Synthetic-Private-Canary'}])
+def test_generic_input_does_not_inherit_previous_or_untyped_delivery(background, delivery):
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        pending_natural_user_reply,
+    )
+    row = _dependency(background)
+    params = _params(task_id=background.task_id, run_id=background.task_id)
+    params.live_archive_state['waiting_input_delivery'] = ('other-input', 'confirmed')
+    record_input_wait(background.agent, params, SimpleNamespace(ok=True, metadata={'handler_details': {
+        'input_dependency': {'input_id': row['input_id'], 'status': 'waiting_input', 'request_delivery': delivery}}}))
+    assert prepare_input_wait_reply(background.agent, params)
+    facts = pending_natural_user_reply(params)['facts']
+    assert 'request_delivery' not in facts['input_dependency']
+    assert 'Synthetic-Private-Canary' not in json.dumps(facts)
+
+
 def _dependency(ctx, input_id='test-input', expires_at=None):
     scope = tool_approval_scope(ctx.agent, ctx.task_id)
     return create_input_dependency(ctx.agent, scope, input_id=input_id, provider='test-provider',
@@ -103,6 +158,7 @@ def test_wait_tool_queues_one_reply_from_canonical_input_facts(background, monke
     assert phase['kind'] == 'input_wait'
     assert phase['facts']['input_dependency']['input_id'] == dependency['input_id']
     assert phase['facts']['input_dependency']['status'] == 'pending'
+    assert phase['facts']['input_dependency']['request_delivery'] == {'status': 'confirmed'}
     assert phase['facts']['user_input_required'] is True
     assert phase['facts']['turn_execution'] == {
         'presentation_only': True, 'tool_execution_observed': False,
@@ -160,7 +216,7 @@ def test_input_wait_projects_safe_row_facts_and_precedes_dispatch_without_draini
     assert prepare_input_wait_reply(background.agent, params)
     phase = pending_natural_user_reply(params)
     assert phase['kind'] == 'input_wait'
-    assert set(phase['facts']['input_dependency']) == {'input_id', 'provider', 'status', 'expires_at'}
+    assert set(phase['facts']['input_dependency']) == {'input_id', 'provider', 'status', 'expires_at', 'result_available'}
     assert 'Synthetic-Private-Canary' not in json.dumps(phase)
     assert phase['facts']['turn_execution']['successful_operation_count'] == 1
     assert set(phase['facts']['operation_verification']) == {
@@ -357,6 +413,13 @@ def test_blocked_child_private_input_resolves_via_original_root(background, dept
     wake = background.store.wakes.pending()[-1]
     assert wake.root_task_id == root_id and wake.thread_id == background.thread.thread_id
     assert wake.metadata['input_run_id'] == child.id
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.conversation.lifecycle_wake_event import lifecycle_wake_turn_trigger
+    facts = json.loads(lifecycle_wake_turn_trigger('task_input_resolved', asdict(wake), []).event_facts)
+    assert facts['input_dependency']['status'] == 'ready'
+    assert facts['input_dependency']['result_available'] is True
+    assert 'SyntheticChildToken' not in json.dumps(facts)
     verdict, _ = reconcile_input_wait_reply(background.agent, params, ModelResponse(text='旧草稿', backend='synthetic'))
     assert verdict == 'changed'
     assert pending_natural_user_reply(params)['kind'] == 'input_resume_pending'

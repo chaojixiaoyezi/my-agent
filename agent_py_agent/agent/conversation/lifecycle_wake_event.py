@@ -1,7 +1,7 @@
 # LLM: 生命周期唤醒片的宿主事件只从唤醒信封的结构化字段确定性投影：字段白名单、键排序、字符串与列表有界；
 #   不复制后台上下文注入，不收原始结果 JSON（runner_result_json/output_json）。宿主决策仍只读 turn_trigger 与 wake_signal，
 #   事实文本只给模型看。改字段或上限时同步 test_lifecycle_wake_host_event。
-# 模块用途: 把一次子代理生命周期唤醒转换成回合触发类型（TurnTrigger），让后台工作片把本片记为宿主事件而不是新的用户任务。
+# 模块用途: 把子代理或原输入结算唤醒转换成回合触发类型；只呈现安全事实，不增加恢复或结果读取权限。
 from __future__ import annotations
 
 import json
@@ -38,7 +38,7 @@ _WAKE_FACT_DEPTH_LIMIT = 3
 #   对象，JSON 按键排序。纯计算。origin_request_ids 只能放会话历史里真有用户消息的请求；原任务不在历史里（已核实的
 #   Goal 任务来源，或唤醒没有请求编号只能取任务链接）时，调用方传 origin_task，事件附一段有界原文并如实标记
 #   origin_task_attached，事件首句据此不再声称原任务在历史里。不另写用户任务。
-# 函数用途: 生成本次生命周期唤醒的回合触发类型和给模型看的宿主事件事实。
+# 函数用途: 生成子代理或输入结算的宿主事件事实，原输入终态只展示，不作为新的用户请求或恢复权限。
 def lifecycle_wake_turn_trigger(
     reason: str, wake_signal: object, origin_request_ids: Sequence[str], origin_task: str = "",
 ) -> TurnTrigger:
@@ -52,6 +52,9 @@ def lifecycle_wake_turn_trigger(
         **_picked(signal, _SIGNAL_FIELDS),
         "child": _picked(metadata, _CHILD_FIELDS),
     }
+    input_facts = _input_resolution_facts(normalized_reason, signal, metadata)
+    if input_facts:
+        facts['input_dependency'] = input_facts
     attached = bool(str(origin_task or "").strip())
     if attached:
         facts["origin_task"] = _bounded(str(origin_task).strip(), 0)
@@ -64,6 +67,24 @@ def lifecycle_wake_turn_trigger(
         event_facts=json.dumps(facts, ensure_ascii=False, sort_keys=True, indent=2),
         origin_task_attached=attached,
     )
+
+
+# LLM: 仅原 task-input-event.v1 的终态标量进入输入事实；结果只投影原 evidence_refs 的存在布尔值，不复制引用或表单。
+# 函数用途: 让恢复模型知道原输入已经结算，避免把 ready 当成尚需填写；不改变原 Wake 调度和子代理事实。
+def _input_resolution_facts(reason, signal, metadata):
+    if reason != 'task_input_resolved' or metadata.get('schema_version') != 'task-input-event.v1':
+        return {}
+    status = metadata.get('input_status')
+    if not isinstance(status, str) or status not in {'ready', 'cancelled', 'expired', 'revoked', 'failed'}:
+        return {}
+    if any(not isinstance(metadata.get(key), str) or not metadata[key].strip()
+           for key in ('input_id', 'input_provider')):
+        return {}
+    refs = signal.get('evidence_refs')
+    available = isinstance(refs, (list, tuple)) and any(isinstance(ref, str) and ref.strip() for ref in refs)
+    return {'input_id': metadata['input_id'][:_WAKE_FACT_TEXT_LIMIT_CHARS],
+        'provider': metadata['input_provider'][:_WAKE_FACT_TEXT_LIMIT_CHARS],
+        'status': status, 'result_available': status == 'ready' and available, 'user_input_required': False}
 
 
 # LLM: 只取名单内且有值的字段（布尔与数字 0 也算有值），逐个做有界投影；不读名单外的键。

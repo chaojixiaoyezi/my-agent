@@ -159,3 +159,13 @@ provider身份索引仍参与既有关联解析，根应重点审查仅display_n
 真实`.6`姓名展示、跨平台包内运行与发行尚未验证；当前`.5`服务及原失败证据未动。姓名历史积累沿原索引保留合同，本片没有新索引/清理器/周期平台查询，也不宣称解决全公司身份索引性能。无可用姓名在索引读取前退出，未变化不产生写入。
 
 建议下一步：根先审3生产文件的数据来源、原关联保留及同锁写入，再统一focused/严格gate并构新候选；少量真实原群资料读取后验证创建者姓名。可并行只读审阅或包准备，真实UI、配置、服务、提交和发行仍由根单点执行，不以合成显示代替新版真实验收。
+
+## 原输入结算与运输事实投影追加（2026-10-15，.8 候选）
+
+基线 `4f6aa346b4a6fc1daf16b2e94507551533224ec0`。真实 `.7` 私聊原卡送达并提交后，输入 ready、原 Wake handled、后继 attempt done；原工具账的两个独立 operation 分别返回 waiting_input、ready。模型初轮否认发卡能力、后继仍催填写属于表达/投影缺口，不能把卡片和输入账成功当成自然正文正确。精确只读诊断在仓外 `private-input-v7-expression-diagnostic.json`，原 Wake 引用类型确认在 `private-input-v7-wake-ref-types.json`；没有读取表单值、私密凭据文件或原始密钥。
+
+复核原自然回执、InputDependency/Wake、宿主事件合同及此前 Codex `request_user_input.rs` / Agents SDK interruption 参考后，复用原 typed 事件与公开回执：不增加状态源、恢复入口、正文关键词门或固定普通回复。改动仅四生产：`conversation/lifecycle_wake_event.py`、`tooling/task_credential_tool.py`、`conversation/input_tool_boundary.py`、`agent_core/tool_loop/natural_user_reply.py`。原终态事件只带准确标量与结果存在布尔值；原凭据行的投递确认进入本次匹配输入的易失薄表达，未知不能冒充已发送。子代理投影、owner/attempt、原 opaque 引用权限及原单 Wake 保持。
+
+直接测试为 `test_lifecycle_wake_host_event.py`、`test_gateway_credential_live_entry.py`、`test_persistent_task_input.py`；既有推荐工具测试补真实临时 TaskLink 前提，未放宽 HostActor 产品门。首红 12 项因缺 input_dependency/request_delivery 失败，证据 `private-input-state-red.xml`；三文件随后 102 项通过。最终 focused 额外包含 `test_task_credentials.py`、`test_tool_approval_foreground_scope.py`、`test_im_credentials_security_matrix.py`，结果与冻结 SHA 保存仓外交接，不能将组合重复累计为新增覆盖。没有新增重要文件、依赖或配置，因此无需文件树变化。模块设计已同步；全局 TESTS/DESIGN_LEDGER 与严格 gate 由根统一。
+
+建议下一步：根先结合独立只读审阅运行最终严格 gate，再在准确新版少量复验私聊/群的等待和提交后表达；可以并行准备离线 runner，真实 UI、凭据、服务与外发仍由根唯一操作。即使模型偶发继续说错，也应记录事实并重新定位通用上下文，不扩成正文硬判定。

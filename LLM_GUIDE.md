@@ -1,3 +1,7 @@
+2026-10-15 `.8` 最终源码严格门通过：66 focused 收集1550项，1545通过、4项既有runtime_guidance xfail、1项目标8420占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package、离线lock全部通过。输入投影原12红转绿，作者193项与独立102项通过；仅增加原 typed 终态和运输确认的安全展示，不加模型调用、权限或新状态源。双端同源工件与新版真实输入表达仍待验，旧 `.7` 失败及限定canary扫描原证据保留。
+
+2026-10-15 `.7` 真实来源闭环已通过：原委派旧计划经正式恢复后由新告警生成新 run，原群收到结果；历史 cancelled run 保持终态。新单 prompt 自动委派创建计划已规范到原聊天，同来源新告警完成并回本群，正式删除后超过冷却间隔的新告警不再产生 run。临时群授权已由群主撤销，合成告警 bot 已停用。额外普通私聊卡已真实发送、提交并保存，但模型前后说明误读输入状态；已证原 task-input-event 在唤醒投影丢失 typed 输入状态，正在 `.8` 沿原公开事实补齐，不解析回复正文、不新增状态源。验收仍只限准确测试应用/双账号，未把真实管理员、租户云写或容量外推为通过。
+
 2026-10-15 `.7` 源码最终严格门通过：65 focused收集1497项，1492通过、4项既有runtime_guidance xfail、1项目标8420占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package、离线lock全部通过。独立来源复核59项通过，原两红及 `.6` 真实queued失败保留。`.6` 真实145秒命令在120秒已由同消息API与前台客户端同时证实更新，最终退出0；姓名展示通过。`.7` 精确双端工件、旧计划恢复与新计划创建/投递/删除后静默尚待验，不外推全仓CI或租户云文档写入。
 
 2026-10-15 自动委派监控来源修复（实施中）：`.6` 真实单prompt已由子代理创建监控且正确显示群创建者姓名；但job保存委派work、计划线程保存原聊天，原严格来源门因此让事件run持续queued。根用原/schedule暂停，queued原run正常cancelled归档，未直接改账；停止入口不受阻。`.7` 在原创建点复用ExecutionOrigin规范来源，并仅在原未claim/未start/context未冻结的CAS里为可证同源旧run记录显式来源迁移；历史job与task/request审计不覆盖，错误owner/actor/topic仍拒绝。详见[调度执行策略](docs/design/SCHEDULER_EXECUTION_POLICIES.md)。新版统一gate、双端包和真实恢复/新建/投递/取消尚待验。

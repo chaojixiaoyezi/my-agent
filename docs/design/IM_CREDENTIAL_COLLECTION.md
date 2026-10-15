@@ -122,3 +122,15 @@
 各简单字段组合及带/不带URL的凭据表单沿同一取消按钮。有效MAC和原actor（已签群卡需当前成员事实）可取消准确原卡，个人锁或卡片期限不阻止仅关闭操作；错误chat/message、旧代次和伪造引用仍拒绝。取消不写秘密、不撤销旧ready引用，也不取消父或兄弟任务。原输入账锁内pending变cancelled、armed=false并保存resolved_at，移除原task等待refs并清理截止调度；不启动业务Wake。取消后容量立即释放，可重新发卡；若记录保存后输入收尾失败，原卡重试仅补准确输入退休，不重复审计。首次真实取消者ID、身份索引展示名与UTC时间存在原行，群重复取消展示首个决定；已完成提交收到取消只返回已处理。
 
 卡片静默取消在原输入行明确保存 `resolution_delivery=retire`，原arm与归档边界只对此准确标记禁止重臂/等待；泛用 `resolve_input_dependency(cancelled)` 不带此标记，继续原终态Wake与容量释放合同，不能按cancelled状态一概静默。
+
+## 输入回执与恢复事实投影（2026-10-15，.8 候选）
+
+真实 `.7` 私聊原卡已送达，提交后原输入 ready、唯一 Wake 已消费、后继工具返回 ready，但模型先否认发卡能力，恢复后又要求填写。只读精确账证明它不是旧工具回执重放：两次不同操作分别返回 waiting_input 和 ready。根记录的原生 UI 与输入账成功，不等于自然回复正确。
+
+通用缺口在两处安全投影：首次零工具表达只知道输入已登记，没有原运输确认；`task_input_resolved` 沿子代理白名单渲染时丢掉原 `task-input-event.v1` 的输入终态。修复复用原链，不新增输入状态、Wake 或业务调用：
+
+- 凭据工具从原宿主记录 `delivery_state` 投影 `request_delivery.status`，只有 confirmed 表示确认送达；缺失、非法值为 unknown。pending、armed、工具成功本身不证明卡片送达；公开回执不复制 message/chat 标识、表单或任意元数据。
+- 输入归档边界只把匹配 input_id 的标量运输状态短暂交给本次薄表达，换输入或重写阶段保守清除，不持久保存第二状态。自然回复仅软解释确认、等待、已提交与尚未验证的区别，不解析或硬拦模型正文。
+- 生命周期事件仅对准确原因和 schema 投影 `input_dependency`：input_id、provider、原终态、`user_input_required=false`；`result_available` 必须 ready 且原 evidence_refs 有非空字符串，仅输出布尔值，不复制引用。ready 不代表认证验证或业务完成；expired/cancelled/revoked/failed 不冒充可填写或保存成功。原 child 投影、owner/attempt 核验、opaque 引用读取授权及稳定 Wake 幂等不变。
+
+红测覆盖两处真实缺口后，定向验证私聊/群首次 native 薄表达及原回调进入 native Host Event、全部终态、ready 无结果引用、非输入事件/坏 schema/嵌套载荷拒绝、缺失和未确认投递、子孙恢复与敏感 canary 隔离。没有增加模型请求、网络或后台任务；本节记录候选合同，真实新版模型表达仍待少量验收，不能把结构事实充分等同于模型每次措辞正确。
