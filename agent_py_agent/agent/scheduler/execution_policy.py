@@ -1,5 +1,5 @@
-# LLM: 每项计划的显式执行配置保存在原 job，预留时复制到 run；预检只认结构化配置。指针 null 与省略均比较原输出，schema 必须与规范化一致。
-# 模块用途: 统一 IM 计划后台归属、每次隔离、固定模型和预检校验；配置保存在原 job，不保存凭据或展开模型。
+# LLM: job来源沿原ExecutionOrigin/typed actor规范，执行位置与原聊天分开；策略保存在原job并复制到run，不从文本或attrs补身份。
+# 模块用途: 统一IM计划的原聊天、后台位置、隔离、模型和预检合同，不保存凭据或另建来源账。
 from __future__ import annotations
 
 import uuid
@@ -85,8 +85,29 @@ def normalize_precheck(value: object) -> dict | None:
             **({"json_pointer": pointer} if pointer is not None else {})}
 
 
-# LLM: 通道只取可信源线程绑定，空/本地绑定不因正文自称 IM 被改路由；写线程的幂等键由原工具操作生成。
-# 函数用途: 返回计划实际执行的线程，IM 计划各自后台单飞，关开关或本地创建保持原线程。
+# LLM: 来源只沿原ExecutionOrigin解析并复核当前typed HostActor；不取模型attrs或最新绑定，空本地owner字段保持原旧线程合同。
+# 函数用途: 在创建计划时固定原聊天来源，让委派工作位置与模型继承/投递来源分开，不写线程或账本。
+def schedule_source_thread_id(agent, thread_id):
+    actor = resolve_host_actor(agent, thread_id)
+    try:
+        source = agent.conversation_store.threads.require(thread_id)
+        origin = execution_origin_thread(agent.conversation_store.threads.require, source)
+    except (DataCorruptionError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID') from exc
+    home = getattr(agent, 'home_paths', None)
+    owner_id = agent.scheduler_repository.owner['id']
+    if home is not None and home.owner_id != owner_id:
+        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    if any((row.owner_id and row.owner_id != owner_id)
+           or (home is not None and row.owner_home and row.owner_home != str(home.owner_home_dir)) for row in (source, origin)):
+        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    if actor is not None and (actor.owner_id != owner_id or actor.source_thread_id != origin.thread_id):
+        raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+    return origin.thread_id
+
+
+# LLM: 物理工作线程仍沿原严格来源与creator绑定创建；caller保存的job source必须同用schedule_source_thread_id，不能记录中间work。
+# 函数用途: 返回计划实际执行的线程，IM计划后台单飞；关闭开关保持原执行位置，来源身份仍单独规范。
 # LLM: 创建与控制共用专有 actor resolver；来源缺失/冲突在写执行线程前拒绝，不取最新群成员。
 # 函数用途: 为 IM 监控冻结准确布置人，执行线程不改变 owner、claim 或通知目标。
 def schedule_execution_thread(agent: object, source_thread_id: str, operation_key: str) -> str:

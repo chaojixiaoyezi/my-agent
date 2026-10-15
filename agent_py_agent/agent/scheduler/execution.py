@@ -1,5 +1,5 @@
-# LLM: 调度模型与线程执行沿原 ThreadStore、模型作用域和 run 身份；独立上下文不产生第二个权限或模型账本。
-# 模块用途: 冻结所有定时运行的来源，按需物化独立线程，并向原会话准确交付。
+# LLM: 来源沿原ThreadStore/HostActor与run；旧work双引用证明仅交原queued CAS规范，不产生第二个权限、迁移或模型账。
+# 模块用途: 冻结规范定时来源、显式恢复合法旧委派计划并物化独立线程，交付仍回原会话。
 from __future__ import annotations
 
 import time
@@ -46,8 +46,8 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
     return replace(dependencies, run_once=run_once)
 
 
-# LLM: run 属于本 owner；来源按准确 creator 冻结，isolated 复用原 execution_origin，不因群新发送者改主体或收件人。
-# 函数用途: 入队前冻结两种执行模式的交付与宿主身份，只为独立模式创建无通道运行线程。
+# LLM: 来源按原creator冻结；旧委派work只在原双引用同源且queued未claim时显式规范，owner/topic门不放宽，终态不可复活。
+# 函数用途: 入队前规范合法旧来源并冻结交付/宿主身份，原store记录迁移证明，只为isolated创建运行线程。
 def prepare_execution(service, run: dict, *, now: float) -> dict:
     if not service.repository.event_run_is_current(run):
         raise ValueError('事件订阅已停止或更新')
@@ -55,15 +55,16 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
     from ..conversation.models import ConversationThread
     from ..conversation.unbound_thread_store import ensure_unbound_thread
 
-    origin = service.conversation_store.threads.load(run["origin_thread_id"])
-    if origin is None or (origin.owner_id and origin.owner_id != run["owner"]["id"]):
-        raise KeyError("定时来源会话不可用")
-    run = service.repository.prepare_run_context(str(run["run_id"]), {
+    origin, migration = _execution_origin(service, run)
+    context = {
         "origin_thread_id": origin.thread_id,
-        "origin_bindings": _origin_bindings(service, run, origin),
+        "origin_bindings": _origin_bindings(service, {**run, 'origin_thread_id': origin.thread_id}, origin),
         "defined_model_policy": execution["model_policy"],
         "source_selection_revision": origin.model_selection_revision,
-    })
+    }
+    if migration is not None:
+        context['origin_migration'] = migration
+    run = service.repository.prepare_run_context(str(run["run_id"]), context, origin_migration=migration)
     if execution["mode"] != "isolated":
         return run
     identity = {"thread_kind": "scheduled", "scheduler_run_id": run["run_id"],
@@ -80,6 +81,35 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
     migrate_queued_execution_origin(service, run, seed)
     ensure_unbound_thread(service.conversation_store.threads, seed, identity=identity)
     return run
+
+
+# LLM: 旧run/source/job须同一work，两份原引用指向同topic/creator且三线程owner/home均属原quota owner_root；不写或猜来源。
+# 函数用途: 为旧合法委派计划生成显式old/new及引用证明，真正修改由原queued/context CAS一次完成。
+def _execution_origin(service, run):
+    from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
+    from ..runtime_errors import DataCorruptionError
+
+    threads = service.conversation_store.threads
+    original = threads.load(run['origin_thread_id'])
+    if original is None or (original.owner_id and original.owner_id != run['owner']['id']):
+        raise KeyError('定时来源会话不可用')
+    origin = execution_origin_thread(threads.require, original)
+    if origin.thread_id == original.thread_id:
+        return origin, None
+    job = service.repository.get_job(run['job_id'], include_deleted=True)
+    plan = threads.require(job['thread_id'])
+    source = execution_origin_thread(threads.require, plan)
+    before, planned = original.metadata[EXECUTION_ORIGIN_KEY], plan.metadata.get(EXECUTION_ORIGIN_KEY)
+    owner_home = service.repository.quota_enforcer.owner_root
+    if (any(row.owner_id != run['owner']['id'] or row.owner_home != str(owner_home) for row in (original, plan, origin))
+            or planned is None or source.thread_id != origin.thread_id or before['binding'] != planned['binding']
+            or job['source_thread_id'] != original.thread_id or run['source_thread_id'] != original.thread_id
+            or job['source_task_id'] != run['source_task_id']
+            or run.get('creator') != {'channel': before['binding']['channel'], 'actor_id': before['binding']['actor_id']}):
+        raise DataCorruptionError('定时运行与原计划来源不一致')
+    return origin, {'schema_version': 'scheduler_origin_migration.v1', 'from_thread_id': original.thread_id,
+        'to_thread_id': origin.thread_id, 'owner': run['owner'], 'owner_home': str(owner_home), 'source_task_id': run['source_task_id'],
+        'plan_thread_id': plan.thread_id, 'source_reference': before, 'plan_reference': planned}
 
 
 # LLM: 原 IM 计划来源与 run.creator 必须一致；关闭后台开关时也只冻结准确 creator，缺证据的旧记录不补最新成员。

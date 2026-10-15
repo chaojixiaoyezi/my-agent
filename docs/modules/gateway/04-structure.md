@@ -1,3 +1,5 @@
+2026-10-15 委派监控来源规范化（源码实施、待统一验收）：scheduler create继续以当前工作线程核HostActor，job来源复用原ExecutionOrigin指向聊天；计划执行与通知不改owner/topic/creator。可证同源旧job保持历史，只有未领取queued run可在原prepare上下文CAS中规范来源并记录原work/plan证明；暂停/取消/终态不复活。原strict来源门保留，不增加队列或投递旁路，见[执行策略](../../design/SCHEDULER_EXECUTION_POLICIES.md)。
+
 2026-10-15 创建者姓名数据流：`adapter/feishu_provider_facts._group_authority_snapshot`只投影原完整open_id成员的可选姓名；`user_space/group_authorization_context.current_group_authority`先核provider/chat，再best-effort调用原`identity_store.remember_provider_display_names`。原索引非阻塞锁内保留字节前缀、关联及扩展字段，只追加变化展示快照；无名字不读、未变化不写，缺记录仅默认user投影。`scheduler/creator_access.creator_display_rows`继续读该唯一索引，名字不进入权限、owner路由或actor核验，既有关联解析语义保持；不增contact请求或另一身份库，见[群治理](../../design/IM_GROUP_GOVERNANCE.md#创建者姓名展示2026-10-15源码已修复待新版验收)。
 
 2026-10-15 逻辑会话与运输地址分离：原/model来源保留完整topic，binding_delivery_target仅在可信group事实下解析basechat；私聊表单恢复原签名thread对应唯一绑定。原群授权和最终配置写门不复用展示名或模型metadata。协议地址解析和真实边界见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。

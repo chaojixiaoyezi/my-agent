@@ -1,5 +1,5 @@
-# LLM: 持久计划经当前 owner 的原 repository 与可信 thread 归属提交；新 IM 隔离线程，TUI 沿原线程，状态只读原回执。
-# 模块用途: 向模型提供统一的计划登记、管理和触发工具，不用草稿或回复文案充当计划事实。
+# LLM: 持久计划经原owner repository/typed actor提交，原聊天来源与后台执行位置分开冻结；草稿、名称和回复均不授权。
+# 模块用途: 统一登记、管理与触发计划，委派创建仍保留原聊天来源和原工作审计编号。
 from __future__ import annotations
 
 import json
@@ -354,8 +354,8 @@ class ScheduleTool(BaseTool):
         job = takeover_notifications(self.agent, repository, job_id, expected_version, actor)
         return _success(action, {'job': _job_projection(job, include_prompt=True)})
 
-    # LLM: 事件来源网络预检来自本次宿主prepared，实际写入持群策略锁；原纯合同先校验再建线程/job，不接受模型替代来源证明。
-    # 函数用途: 保存可恢复计划，IM 保持后台并明确通知开关、TUI 沿原行为；非法策略不留下空后台线程。
+    # LLM: 锁外事件证明与锁内群授权仍守原门；job source沿原ExecutionOrigin/typed actor规范，工作任务编号仅作原执行审计。
+    # 函数用途: 保存原聊天来源与准确后台位置的计划，避免委派work被误当投递/选模来源；非法策略不留下空后台线程。
     def _create(self, repository, params: dict[str, object], prepared) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
@@ -380,11 +380,11 @@ class ScheduleTool(BaseTool):
         policy = normalize_policy(params.get("policy"))
         precheck = normalize_precheck(params.get("precheck"))
         delivery = creation_delivery(self.agent, thread_id, params.get("delivery"))
-        source_thread_id = thread_id
-        creator = _creator_identity(self.agent, source_thread_id)
-        source_request_id = _source_request_id(self.agent, params)
-        from .execution_policy import schedule_execution_thread
+        from .execution_policy import schedule_execution_thread, schedule_source_thread_id
 
+        source_thread_id = schedule_source_thread_id(self.agent, thread_id)
+        creator = _creator_identity(self.agent, thread_id)
+        source_request_id = _source_request_id(self.agent, params)
         thread_id = schedule_execution_thread(self.agent, thread_id, source_request_id)
         job, deduped = repository.create_job(
             SchedulerJobCreateRequest(

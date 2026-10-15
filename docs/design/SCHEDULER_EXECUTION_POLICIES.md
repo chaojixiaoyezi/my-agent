@@ -113,6 +113,32 @@ M2 中 `bound` 只证明宿主当前依赖，`last_request` 来自实际模型�
 
 定向测试入口：`test_scheduler_execution.py`、`test_scheduler_precheck.py`、`test_scheduler_policy.py`，与原 scheduler runtime/service/unknown/frozen delivery 组合测试一起运行。异常注入覆盖开始写入失败、旧 claim、停止、预检配置变更和服务恢复。
 
+## 2026-10-15 委派创建来源规范（.7 本地实施，真实验收待发布）
+
+`.6` 真实自动委派孩子已成功登记事件计划，事件也已预留原 srun，但在 wake 前持续排队。
+当时 `job.source_thread_id` 保存了委派 work，而计划执行线程的原 `host_execution_origin.v1` 已指向准确原聊天；`_origin_bindings` 的严格比较正确拒绝了两种来源混写。
+due-owner 索引租约持续推进，Gateway 队列准备栈停在这个比较处；不是 provider 姓名索引漏群、模型没工作或订阅没登记。
+根随后通过正式 `/schedule pause` 暂停原 job，原 queued run 已按原产品取消；本次恢复不能复活这个 cancelled run。
+
+新建计划先通过原 `execution_origin_thread` 与当前专有 HostActor 解析原聊天，再保存 `job.source_thread_id`。
+creator 校验仍在当前真实工作线程完成，不能用原聊天替代当前根/子/孙的执行身份；`source_task_id`、`source_request_id` 保留原执行出处。
+计划工作位置仍由原 `schedule_execution_thread` 和开关决定，owner、完整 topic、群人工授权、文件与网络权限没有扩大。
+没有按名字、提示词或任务种类选择来源。
+
+合法旧计划的历史 job/source_task 不重写。新 run 排队准备时，只在以下原结构化证明齐全时规范其 origin：
+
+- 原 run/source 与 job.source 必须准确指向同一个旧工作线程；source_task、owner 和 creator 必须一致。
+- 旧 work 与计划线程两份原 ExecutionOrigin 必须解到同一原线程；三者 owner/home 均须匹配原 repository 配额对象的可信 owner_root，不能只相互相等，并保留同一准确 topic、actor、通道绑定。
+- 沿原 scheduler store 的 context 冻结事务重查 active job、queued run、claim_epoch=0、未 start；claim 后即使 release 清了当前 claim 字段也不迁移。已冻结异源 context、暂停/删除、取消或竞争改变来源一律拒绝且不写迁移。
+- 原 run 同次保存规范 origin 与 `execution_context.origin_migration`，其中有 schema、old/new、owner、source_task、计划线程及两份原引用证明；没有第二个恢复账本。
+- 重启、重复准备沿已冻结的同一记录，不再写新迁移或产生第二个 wake。原严格来源比较、原模型继承与原投递检查继续生效。
+
+这属于原准备事务内的显式结构迁移，诊断过程没有代替生产执行或手改真实账。暂停的旧合法 job 只有在用户正式 resume 并收到新事件后才会有新的可准备 run；原取消历史仍保持终态。
+
+新增直接测试 `test_scheduler_delegated_origin.py` 覆盖普通/群/local main、direct/委派主/子/孙、followup/isolated、新旧事件、重启领取、错误 owner/topic/actor、缺源、反向/循环、冻结 context、控制/claim 竞争和重复准备；模型与供应商为替身。
+对照 OpenClaw `spawn-requester-origin.ts` 的同 agent 保留原入站账号与准确 origin、`cron/isolated-agent/run.ts` 的持久执行与交付分离；实现复用本仓库更严格的原 ExecutionOrigin，不移植其地址推断或另建调度器。
+最终定向计数、SHA 和红绿证据由根本轮严格 gate 与仓外 frozen handoff 记录；离线通过不等于真实 `.7` 旧 job 恢复或新建事件订阅通过。
+
 真实验收从测试机原生 TUI 提交普通需求，由被测 agent 创建计划、修改文件并产生回复。测试者只准备合成输入、执行明确控制操作和观察证据，不能补任务产物。
 
 学习来源继续使用既有结构化合同；本基线的 Skill 自学习已经排除 `background_main_agent`，预检不进入 FinalizationService。报告所指新版 AGENTS 来源合同未在本基线集成；该组合单独列为依赖，不在 scheduler 添加第二张学习排除名单。

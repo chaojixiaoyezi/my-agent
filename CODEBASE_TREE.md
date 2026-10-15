@@ -1,3 +1,11 @@
+2026-10-15 自动委派调度来源回归：
+
+```text
+`-- agent_py_agent/tests/test_scheduler_delegated_origin.py # 原聊天与工作线程同源、旧queued准备CAS及跨owner/actor拒绝
+```
+
+关键文件说明：来源复用原ExecutionOrigin；迁移事实附原run，不新增队列或授权账本。
+
 2026-10-15 IM 自动派工模块交接：
 
 ```text

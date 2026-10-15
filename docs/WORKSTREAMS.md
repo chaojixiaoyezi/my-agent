@@ -1,3 +1,7 @@
+2026-10-15 `.7` 源码最终严格门通过：65 focused收集1497项，1492通过、4项既有runtime_guidance xfail、1项目标8420占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package、离线lock全部通过。独立来源复核59项通过，原两红及 `.6` 真实queued失败保留。`.6` 真实145秒命令在120秒已由同消息API与前台客户端同时证实更新，最终退出0；姓名展示通过。`.7` 精确双端工件、旧计划恢复与新计划创建/投递/删除后静默尚待验，不外推全仓CI或租户云文档写入。
+
+2026-10-15 自动委派监控来源修复（实施中）：`.6` 真实单prompt已由子代理创建监控且正确显示群创建者姓名；但job保存委派work、计划线程保存原聊天，原严格来源门因此让事件run持续queued。根用原/schedule暂停，queued原run正常cancelled归档，未直接改账；停止入口不受阻。`.7` 在原创建点复用ExecutionOrigin规范来源，并仅在原未claim/未start/context未冻结的CAS里为可证同源旧run记录显式来源迁移；历史job与task/request审计不覆盖，错误owner/actor/topic仍拒绝。详见[调度执行策略](docs/design/SCHEDULER_EXECUTION_POLICIES.md)。新版统一gate、双端包和真实恢复/新建/投递/取消尚待验。
+
 2026-10-15 `.6` 最终源码严格门：61 focused收集1396项，1391通过、4项既有runtime_guidance xfail、1项8420端口已占用跳过；Ruff、doc-sync、strict code-size、导入边界、diff、clean-package及离线lock全部通过。旧15夹具红与未暂存handoff的packaging阻断均保留，不覆盖为成功。长命令完整运输probe及服务端同消息读取证实编辑已发生，客户端旧视图切会话后恢复；不据此添加产品补丁。双端发行与 `.6` 真实自动派工订阅/姓名尚待验，线上旧全仓Test不作为通过来源。
 
 2026-10-15 `.6` 分工冻结：姓名线独占 provider facts、group context、原 identity index 三生产文件及直接测试；IM 委派线独占 im_delegation 与直接测试、模块交接；非作者只读复核。根负责全局文档、严格 gate、main 推送与唯一生产实例/UI；发行线单点 shared freeze 后 Mac/Linux 独占并行。`.5` 真实委派失败保留，不能以工具可见测试冒充 `.6` 真实后台订阅已成。

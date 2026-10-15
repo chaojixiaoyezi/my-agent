@@ -1,3 +1,5 @@
+2026-10-15 委派监控来源规范化（源码实施、待统一验收）：scheduler create继续以当前工作线程核HostActor，job来源复用原ExecutionOrigin指向聊天；计划执行与通知不改owner/topic/creator。可证同源旧job保持历史，只有未领取queued run可在原prepare上下文CAS中规范来源并记录原work/plan证明；暂停/取消/终态不复活。原strict来源门保留，不增加队列或投递旁路，见[执行策略](../../design/SCHEDULER_EXECUTION_POLICIES.md)。
+
 2026-10-15 姓名投影补线（源码已修复，待新包）：群授权读取的原完整members响应同时保留可选name，准确provider/chat校验后沿原provider索引仅补展示字段；未知名不擦已知、同名不重复写，索引失败仅记录无值异常类型，原授权及停止取消保持。5文件214项通过，真实姓名展示待新版验收；见[群治理](../../design/IM_GROUP_GOVERNANCE.md#创建者姓名展示2026-10-15源码已修复待新版验收)。
 
 2026-10-15 话题卡片补验：群/model卡使用已核owner的group事实，将逻辑topic仅投影为实际运输群；签名thread仍沿原记录，私聊表单从精确原线程恢复唯一来源，撤权仍在最终写门复核。坏地址/跨群/歧义来源拒绝，真实新包卡片验收待收口，见[群治理](../../design/IM_GROUP_GOVERNANCE.md)。
