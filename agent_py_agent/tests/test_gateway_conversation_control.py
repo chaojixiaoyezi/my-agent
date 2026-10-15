@@ -4660,7 +4660,8 @@ def test_manual_compact_reports_typed_failure_instead_of_generic_retry(tmp_path)
     assert "请稍后重试" not in result.message
 
 
-# LLM: 异常清理在独立临时进程核验；若旧worker泄漏，只终止本测试子进程，不向production发停止或伪造通过。
+# LLM: 子解释器业务仍由原 sys.executable 加载；只显式挂当前测试资源和已加载 pytest 依赖，不搜索开发环境或往包内补源码。
+# 若旧 worker 泄漏，只终止测试子进程；原异常、非 daemon 线程清理和 5 秒截止必须保持。
 # 函数用途: 在原stop正例关键入口注入失败，要求预期异常仍存在且没有非daemon线程阻塞解释器退出。
 @pytest.mark.parametrize('case', ['http', 'slow_close'])
 def test_stop_fixture_exception_path_never_leaves_a_live_worker(tmp_path, case):
@@ -4668,13 +4669,28 @@ def test_stop_fixture_exception_path_never_leaves_a_live_worker(tmp_path, case):
     import subprocess
 
     script = r'''
+import importlib.util
+import sys
 import threading
+import types
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
-from agent_py_agent.tests import test_gateway_conversation_control as controls
-root = Path(__import__('sys').argv[1])
-case = __import__('sys').argv[2]
+import agent_py_agent.agent
+root = Path(sys.argv[1])
+case = sys.argv[2]
+test_file = Path(sys.argv[3]).resolve(strict=True)
+pytest_dependencies = Path(sys.argv[4]).resolve(strict=True)
+sys.path.append(str(pytest_dependencies))
+# 只补 tests 命名空间；生产 package.__path__ 保持当前解释器原解析结果。
+tests = types.ModuleType('agent_py_agent.tests')
+tests.__path__ = [str(test_file.parent)]
+sys.modules[tests.__name__] = tests
+spec = importlib.util.spec_from_file_location('agent_py_agent.tests.test_gateway_conversation_control', test_file)
+assert spec is not None and spec.loader is not None
+controls = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = controls
+spec.loader.exec_module(controls)
 error = HTTPError('http://127.0.0.1/owned-test', 403, 'synthetic rejection', {}, None) if case == 'http' else RuntimeError('synthetic control failure')
 entry = controls.test_http_ask_routes_stop_to_live_window_interrupt if case == 'http' else controls.test_stop_ack_is_bounded_when_provider_transport_close_blocks
 patch_name = '_http_host_headers' if case == 'http' else 'execute_gateway_conversation_control'
@@ -4690,7 +4706,8 @@ assert not [thread for thread in threading.enumerate() if thread is not threadin
     environment = {'PATH': os.defpath, 'HOME': str(tmp_path / 'host-home'),
         'MY_AGENT_HOME': str(tmp_path / 'host-home' / '.my-agent'), 'PYTHONDONTWRITEBYTECODE': '1'}
     try:
-        result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'work'), case],
+        result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'work'), case,
+            str(Path(__file__).resolve()), str(Path(pytest.__file__).resolve().parent.parent)],
             cwd=Path(__file__).resolve().parents[2], env=environment, capture_output=True, timeout=5)
     except subprocess.TimeoutExpired:
         pytest.fail('原测试worker在异常后阻塞解释器退出')
