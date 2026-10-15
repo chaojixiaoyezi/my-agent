@@ -403,3 +403,20 @@ def test_observe_only_adapter_dependencies_are_all_declared_in_the_observe_extra
 # 函数用途: 判断一个顶层 import 名是否像第三方包（排除 my-agent 自身包、标准库与相对导入）。
 def _looks_third_party(name: str) -> bool:
     return name not in sys.stdlib_module_names and name != "agent_py_agent"
+
+
+def test_runtime_dependencies_include_async_socks_for_websocket_proxy():
+    from packaging.requirements import Requirement
+
+    project_root = Path(__file__).resolve().parents[2]
+    data = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in data["project"]["dependencies"]]
+    socks = next(requirement for requirement in requirements if requirement.name == "python-socks")
+    assert socks.extras == {"asyncio"}
+    assert socks.marker is None
+    assert socks.specifier.contains("2.7.2")
+    assert not socks.specifier.contains("3.0.0")
+    websocket = next(requirement for requirement in requirements if requirement.name == "websockets")
+    assert websocket.specifier.contains("15.0.1")
+    assert not websocket.specifier.contains("14.2")
+    assert not websocket.specifier.contains("16.0")

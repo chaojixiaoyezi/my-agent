@@ -27,6 +27,7 @@ from agent_py_agent.agent.adapter.feishu import (
     _send_feishu_file,
 )
 from agent_py_agent.agent.adapter.protocol import IncomingMessage, OutgoingMessage
+from agent_py_agent.agent.session_lock.card_control import bind_password_card, prepare_password_card
 
 
 class TestFeishuSignatureVerification:
@@ -306,6 +307,8 @@ class TestFeishuLifecycle:
         adapter.stop()
         assert adapter.running is False
 
+    # LLM: 保留真实nonce/MAC/原卡message与chat核验，只替代provider投递回执；不得为旧fixture放宽认证门。
+    # 函数用途: 用真实开卡记录验证已认证webhook提交密码，HTTP只走本机临时端口。
     def test_webhook_card_callback_can_set_private_chat_password(self, tmp_path: Path) -> None:
         adapter = FeishuAdapter(
             config={
@@ -317,6 +320,9 @@ class TestFeishuLifecycle:
             },
             callback_port=0,
         )
+        reference, pending = prepare_password_card(adapter, "ou_webhook", "set")
+        receipt = {"message_id": "om_webhook_card", "chat_id": "oc_webhook_private"}
+        bind_password_card(adapter, pending, receipt)
         adapter.start()
         try:
             assert adapter._server is not None
@@ -326,10 +332,12 @@ class TestFeishuLifecycle:
                 "header": {"token": "verify-me"},
                 "event": {
                     "operator": {"open_id": "ou_webhook"},
+                    "context": {"open_message_id": receipt["message_id"], "open_chat_id": receipt["chat_id"]},
                     "action": {
                         "value": {
                             "session_lock_action": "pwd_set",
                             "user_id": "ou_webhook",
+                            "reference": reference,
                         },
                         "form_value": {"pwd": "Abcd1234"},
                     },
@@ -345,6 +353,10 @@ class TestFeishuLifecycle:
                 body = json.loads(response.read().decode("utf-8"))
             assert body["card"]["data"]["header"]["template"] == "green"
             assert adapter._unlock.store.has_password("ou_webhook") is True
+            with adapter._unlock.store._connect() as conn:
+                row = conn.execute("SELECT card_nonce,card_status FROM private_chat_locks WHERE user_id=?", ("ou_webhook",)).fetchone()
+            assert row["card_nonce"] == pending["nonce"]
+            assert row["card_status"] == "completed"
         finally:
             adapter.stop()
 

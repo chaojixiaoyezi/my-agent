@@ -1,3 +1,5 @@
+2026-10-14 真实飞书连接追加：根独占应用鉴权、真实客户端、连接/部署/打包和全局文档；6.1-sol high运输线独占WS、依赖、日志与其回归，健康线独占FeishuAdapter/registry/health及旧密码fixture，发行准备线只写任务工件。源码冻结后根串行focused/strict，不让tracked-file测试与并行写入竞争。目标运行外网仅open.feishu.cn:443和msg-frontier.feishu.cn:443，既有服务不以同应用第二连接替代；真实身份、原卡回执与owner状态共同验收。
+
 2026-10-14 全22项实施：根集成树 `main-release-gate-fix-20261012` 从56617f7a8起。首批storage/form/group三个独立worktree仅交patch，根整合交叉文件并统一gate/main提交。后续独占线为监控S01–05、云与后台S06–08、Skill S09–16，根负责工具S17–20及总集成；全部子代理6.1-sol，开发线不推送、不部署，不读生产凭据。每线保留原权威，完成按原交接模板写证据，真实飞书租户不在当前环境中。
 
 2026-10-14 R01–R09 实施分工：用户授权九项全部实施、严格验收后合 main/推送/本机更新/发行，子代理统一 `gpt-6.1-sol`。沿本任务已附属 `codex/im-entry-update-assessment` 同线共享工作树逐文件独占；根负责统一配置、凭据 R04、脱敏 R09、总文档、集成测试与发布。进度线随后独占 R03 云保护与写后核对，并独立做 R04/R09 安全矩阵；模型线随后独占 R05 查询事实与 canonical prompt；进度线独占 liveness、progress_draft、进度投递重试、状态最近进度及相关测试；模型线独占模型卡片/控制回调、model_profile_service 和私人卡路由，改 R04 共享接口先协调；监控线独占 schedule 控制/仓库/工具/投递迁移及相关取消/路由适配。所有线不提交、不推送、不碰真实服务；新增配置/根台账/文件树/TESTS 由根合并。交接使用原模板，分别记录到 `docs/tasks/IM_R01_R02_HANDOFF.md`、`IM_R06_HANDOFF.md`、`IM_R07_R08_HANDOFF.md`，根统一审阅、验权与发包。

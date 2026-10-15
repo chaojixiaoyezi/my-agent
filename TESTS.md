@@ -1,3 +1,5 @@
+2026-10-14 飞书真实连接追加验证：新增SOCKS离线依赖声明、SDK真实连接状态到跨进程channel health投影、掉线时REST独立可用及代理/WS URL日志脱敏回归。旧webhook密码fixture更新为真实nonce/MAC/原卡回执；普通输入回执测试显式mock同轮轮询并断言零HTTP，不再误连本机日常Gateway。统一focused与strict gate、准确Mac/Linux包内验证及真实卡片验收结果在最终发行证据记录；未完成项不得提前标通过。
+
 2026-10-14 构建工具依赖基线：build-system/dev setuptools>=83，原uv锁83.0.0并lock --check；pip26.2.0仅属于发行实际环境升级，不是项目runtime依赖。test_packaging核对原分发合同，完整新候选由根冻结后验收，不改旧runtime/共享venv。
 
 2026-10-14 观察依赖安全：MCP1.28.1/Pillow12.3.0与自动执行extra显式互斥；隔离venv运行观察/屏幕mock及MCP合同回归，真实SDK stdio仅initialize/list_tools，合成内存PNG经原编码/Pillow解码，无真实屏幕/点击。旧新版均复现审批manifest断言遗漏canonical空授权字段，测试精确补齐且保留always模式在auto下仍ask。依赖实际安装与旧extra告警边界见发行指南观察追加。

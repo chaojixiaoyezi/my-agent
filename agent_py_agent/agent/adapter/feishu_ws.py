@@ -1,5 +1,5 @@
-# LLM: WS 只在原 typed 入站回执 accepted/稳定 ignored 后提交 seen；暂时失败向官方 SDK 抛安全异常以生成失败 ACK。
-# 模块用途: 共用 webhook 解析与安全诊断和原进程内去重，保护并发 claim，不存正文或建立第二消息队列。
+# LLM: WS 只在原 typed 入站回执 accepted/稳定 ignored 后提交 seen；连接健康只投影 SDK 原连接，代理继承既有配置，SDK 日志走共享脱敏。
+# 模块用途: 共用 webhook 解析、安全诊断和原进程内去重，展示真实连接事实，不建立第二消息队列或健康状态账。
 from __future__ import annotations
 
 """飞书长连接(WebSocket)入站客户端 —— 免公网 / 不绑端口部署。
@@ -22,6 +22,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
+from ..common.log_redaction import redact_sensitive_text
 from .protocol import FeishuEventDisposition, FeishuRetryableEventError, provider_message_reference
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ _RECONNECT_STABLE_RESET_SECONDS = 60.0
 _ws_connect_patched = False
 
 
+# LLM: 空代理保持系统/环境发现，显式 HTTP/SOCKS 原样交上游；SOCKS 运行依赖由 pyproject 提供，不得失败后偷换直连。
+# 函数用途: 在原 SDK 参数副本中补握手超时与用户代理，不改进程环境或发送请求。
 def _fixed_ws_kwargs(orig_kw: dict[str, Any], has_open_timeout: bool, proxy: str) -> dict[str, Any]:
     """补 open_timeout + 纠正 proxy(移植自 参考实现 真机踩坑;详见 _patch_ws_connect)。
     (1) 慢链路握手 >10s(websockets 默认)会 timed out → 调大到 45s;(2) SDK 硬塞 proxy=None 在
@@ -71,15 +74,25 @@ def _patch_ws_connect(proxy: str = "") -> None:
         pass
 
 
+# LLM: 保留真实 SDK 连接错误并复用共享文本脱敏；异常正文中的代理密码与 WS URL 令牌不得进入 SDK 自带 handler。
+# 类用途: 过滤未订阅处理器噪音并净化 SDK 诊断，避免第三方 handler 绕过应用日志格式器。
 class _LarkProcessorNotFoundFilter(logging.Filter):
     """丢弃 lark 的 "processor not found" 噪音:订阅了但我们不注册处理器的事件(如有人进 bot 私聊的
     bot_p2p_chat_entered、bot 被加群等)会被 lark 当 ERROR 刷屏。这些事件本就无需处理,静默丢弃即可
     (比按事件名逐个 register 忽略更省心、对新事件类型也不漏)。只丢这一类,真错误(鉴权/连接)照常出。"""
 
+    # LLM: 脱敏已格式化的完整消息，清空旧 args 防止再次插入秘密；不将异常文本转换为连接状态。
+    # 函数用途: 原位净化 SDK 日志后放行真实错误，不记录或改写业务状态。
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            return "processor not found" not in record.getMessage()
+            message = record.getMessage()
+            if "processor not found" in message:
+                return False
+            record.msg = redact_sensitive_text(message)
+            record.args = ()
+            return True
         except Exception:
+            record.msg, record.args = "飞书 SDK 日志格式异常", ()
             return True
 
 
@@ -189,6 +202,28 @@ class FeishuWsClient:
         self._seen_order: deque[str] = deque()
         self._inflight_ids: set[str] = set()
         self._dedup_lock = threading.Lock()
+
+    # LLM: 只读取 SDK 的原 _conn 和 websockets 协议状态；启动线程/SDK 存在都不等于已连接，未知事实不得报健康。
+    # 函数用途: 返回无凭据的实时连接健康投影，不建连接、不写状态、不调用网络。
+    def transport_health(self) -> dict[str, str]:
+        from websockets.protocol import State
+
+        if self._stopped:
+            return {"status": "stopped", "reason_code": "FEISHU_WS_STOPPED"}
+        connection = getattr(self._client, "_conn", None)
+        if connection is None:
+            return {"status": "degraded", "reason_code": "FEISHU_WS_CONNECTING"}
+        state = getattr(connection, "state", None)
+        if isinstance(state, State):
+            if state is State.OPEN:
+                return {"status": "healthy", "reason_code": "FEISHU_WS_CONNECTED"}
+            reason = "FEISHU_WS_CONNECTING" if state is State.CONNECTING else "FEISHU_WS_DISCONNECTED"
+            return {"status": "degraded", "reason_code": reason}
+        closed = getattr(connection, "closed", None) if state is None else None
+        if closed is False:
+            return {"status": "healthy", "reason_code": "FEISHU_WS_CONNECTED"}
+        reason = "FEISHU_WS_DISCONNECTED" if closed is True else "FEISHU_WS_STATE_UNKNOWN"
+        return {"status": "degraded", "reason_code": reason}
 
     # LLM: claim→共享入口→commit/release；retryable 异常由官方 SDK 转成失败 ACK，不能被这里吞掉或记成 seen。
     # 函数用途: 只让一个并发事件进入消费者，允许原消息编号在暂时失败后重投。
@@ -356,6 +391,8 @@ def run_ws_client_thread(client: FeishuWsClient, on_dead: Callable[[], None]) ->
     return thread
 
 
+# LLM: 原 SDK 重连和显式 close 是唯一控制；外层异常只记录类型，不能回显代理 URL/密钥或误判健康。
+# 函数用途: 在原线程内退避重试并在停止后通知适配器，不创建第二连接或持久状态。
 def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> None:
     """跑长连;lark 客户端整体死掉(内部重连耗尽)时,**进程内指数退避重连**——不靠重启整个进程。
     只在 close()(主动停)时退出循环。借鉴 长期助手 每通道断线重连看门狗:补上"WS 彻底死后没人救"的洞
@@ -366,9 +403,9 @@ def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> Non
         connected_at = time.monotonic()
         try:
             client.start()  # 阻塞:返回/抛出 = 这条 WS 整体结束
-            reason = "连接正常结束"
+            error_type = "none"
         except Exception as exc:
-            reason = f"{type(exc).__name__}: {exc}"
+            error_type = type(exc).__name__
         if client._stopped:
             break  # 主动停:不再重连
         # 稳定连过一段又断 → 退避归零(是"连上后掉线"而非"连不上死循环")
@@ -376,8 +413,7 @@ def _run_ws_blocking(client: FeishuWsClient, on_dead: Callable[[], None]) -> Non
             backoff, attempt = _RECONNECT_INITIAL_BACKOFF_SECONDS, 0
         attempt += 1
         wait = backoff + random.uniform(0, min(backoff, 1.0))
-        safe = reason.replace(client.app_secret, "***") if getattr(client, "app_secret", "") else reason
-        logger.warning(f"飞书长连断开(第 {attempt} 次),{wait:.1f}s 后进程内重连: {safe}")
+        logger.warning("飞书长连断开(第 %s 次),%.1fs 后进程内重连 error_type=%s", attempt, wait, error_type)
         time.sleep(wait)
         backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
     on_dead()  # 主动停 → 置 _running=False

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 """LLM: 适配器注册表是 provider 到 adapter 的唯一解析入口；禁止在发送服务里硬编码 channel if/else。
 
-模块用途: 注册 IM adapter 并声明真实投递/冻结字节能力和原文件上限；未知附件接口不允许路径重读回落。
+模块用途: 注册IM adapter、真实运输健康、冻结字节能力与原文件上限；未知附件不回落路径重读，健康不新增发送门或状态账。
 """
 
 import logging
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from ..conversation.channels import ChannelTargetDecision, DeliveryContext
@@ -83,8 +84,8 @@ class ChannelRuntimeSnapshot:
         }
 
 
-# LLM: 注册表支持真实 adapter 实例和懒工厂；解析结果含失败 None 都缓存，避免缺凭据时反复构建。
-# 类用途: 维护 channel 名、构建方式和能力声明之间的一一映射。
+# LLM: 注册表支持真实adapter与懒工厂；解析含失败均缓存，显式运输健康实时读取且不得被生命周期升级。
+# 类用途: 维护通道构建、能力和健康的唯一投影，避免缺凭据反复构建或连接失败被误报在线。
 class ChannelAdapterRegistry:
     # LLM: 每个运行边界持有自己的 registry，adapter 和凭据状态不得跨 owner 隐式共享。
     # 函数用途: 创建空的线程安全通道注册表。
@@ -244,14 +245,19 @@ class ChannelAdapterRegistry:
             ready=ready,
         )
 
-    # LLM: 现成 runtime adapter 的 running 属性是进程内健康事实；懒出站工厂不能用它推断连接健康。
-    # 函数用途: 在没有跨进程覆盖时把已注册 adapter 的实时 running 状态投影出来。
+    # LLM: 未启动成功先保留原显式启动失败；其余消费runtime_health且异常不得回落running，不改变REST投递门。
+    # 函数用途: 实时读取运输健康，防止线程存活误报在线或未运行投影覆盖准确启动失败。
     def _local_health(self, key: str) -> ChannelHealth:
         health = self._health.get(key, ChannelHealth())
         if self._support.get(key) != "runtime_adapter":
             return health
         adapter = self._resolved.get(key)
         running = getattr(adapter, "running", None)
+        if running is False and health.state == "unhealthy" and health.error_code == "CHANNEL_ADAPTER_START_FAILED":
+            return health
+        provider = getattr(adapter, "runtime_health", None)
+        if callable(provider):
+            return _adapter_runtime_health(provider)
         if running is True:
             return ChannelHealth(state="healthy", checked_at=health.checked_at)
         if running is False and health.state == "healthy":
@@ -308,6 +314,23 @@ class ChannelAdapterRegistry:
         with self._lock:
             validator = self._target_validators.get(key) or _builtin_target_validator(key)
         return validator(key, target)
+
+
+# LLM: 只消费适配器显式健康协议，不复制错误正文或凭据；失败保持不可用，调用不产生网络或持久状态。
+# 函数用途: 校验当前健康快照，隔离适配器查询异常并禁止凭线程存活伪造连接成功。
+def _adapter_runtime_health(provider: Callable[[], object]) -> ChannelHealth:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    try:
+        result = provider()
+        if isinstance(result, Mapping) and result.get("state") in {
+                "not_probed", "registered", "starting", "healthy", "unhealthy", "stopped"}:
+            error = result.get("error_code", "")
+            if isinstance(error, str) and len(error) <= 128 and all(
+                    char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for char in error):
+                return ChannelHealth(state=result["state"], checked_at=checked_at, error_code=error)
+    except Exception:
+        pass
+    return ChannelHealth(state="unhealthy", checked_at=checked_at, error_code="CHANNEL_HEALTH_PROTOCOL_INVALID")
 
 
 # LLM: 默认注册表只登记官方实现的 Feishu adapter；新增 IM 通过新工厂注册，不修改投递主流程。

@@ -5,6 +5,21 @@
 插件命令另有 IM 控制测试（见 [TESTS.md](../../TESTS.md) 的 C11 节）；但真实飞书收发和私聊锁，只能由本清单在真实飞书上补测。
 手测不挡收口，有问题把下面说的信息发给开发就行。
 
+## 部署者先查连接与代理
+
+- `feishu_ws_proxy` 空值保持系统/环境代理发现（包括 `wss_proxy`、系统 SOCKS、`HTTPS_PROXY` 和 `no_proxy`）；无代理才直连。
+  显式 HTTP/HTTPS/SOCKS URL 直接交给 `websockets`，不会在代理失败后绕过代理重试直连，也不改进程环境。
+- 包固定使用 `websockets>=15,<16` 的正式代理接口，并随包安装 `python-socks[asyncio]>=2.7.2,<3`。
+  如果日志出现缺少 `python-socks`，安装包的依赖闭包不完整，不能靠清空环境代理掩盖。
+- SOCKS 复用上游 [正式接口](https://websockets.readthedocs.io/en/15.0.1/topics/proxies.html)；
+  [python-socks 2.7.2](https://github.com/romis2012/python-socks/tree/v2.7.2) 使用 Apache-2.0，支持 Python 3.8 及以上，
+  asyncio extra 在 Python 3.10 额外带 `async-timeout`。选择维护中的库是为复用握手、认证和异步取消；替代方案自写协议成本高且无必要。
+  依赖仅在打包阶段安装，运行时不请求新的外网服务，不扩大飞书现有网络放行范围。
+- 健康只读 SDK 原连接：`OPEN` 才健康，初次握手未成功、关闭或未知连接事实都降级；旧连接接口仅在明确 `closed=False` 时健康。
+  `transport_health()` 返回固定 `status/reason_code`，不以线程存在或 SDK 启动日志代替连通证据。
+- SDK 自带日志处理器也经过共享脱敏，保留错误类型和连接诊断，隐藏代理密码和 WebSocket URL 令牌。
+  离线参数/健康回归不能替代真实入站和出站验收；未收到消息仍需按下方清单补测。
+
 开始前：
 - 用手机或电脑打开飞书，进入和机器人的**私聊**；
 - 确认你已经用 `/admin <密码>` 绑定过管理员。没绑过就先发这条命令，发完把含密码的消息撤回；

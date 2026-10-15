@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
+
+import pytest
+from websockets.protocol import State
 
 from agent_py_agent.agent.adapter import feishu_ws
 
@@ -89,3 +95,92 @@ def test_suppress_lark_noise_is_idempotent():
     feishu_ws._suppress_lark_processor_not_found()  # 第二次应空操作
     cnt = sum(1 for x in lark_logger.filters if isinstance(x, feishu_ws._LarkProcessorNotFoundFilter))
     assert cnt == 1
+
+
+@pytest.mark.parametrize("proxy", ["", "http://proxy.invalid:8080", "https://proxy.invalid:8443", "socks5://proxy.invalid:1080", "socks5h://proxy.invalid:1080"])
+def test_sdk_patch_preserves_proxy_selection_without_connecting(monkeypatch, proxy):
+    import websockets
+
+    package, ws, sdk = (ModuleType(name) for name in ("lark_oapi", "lark_oapi.ws", "lark_oapi.ws.client"))
+    package.ws, ws.client = ws, sdk
+    original = {"proxy": None}
+    sdk._ws_connect_kwargs = lambda: original
+    for module in (package, ws, sdk):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    def connect(_uri, *, proxy=True, open_timeout=10):
+        pytest.fail("参数回归不得启动连接")
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    monkeypatch.setattr(feishu_ws, "_ws_connect_patched", False)
+    feishu_ws._patch_ws_connect(proxy)
+    assert feishu_ws._ws_connect_patched is True
+    assert sdk._ws_connect_kwargs() == ({"open_timeout": 45.0, "proxy": proxy} if proxy else {"open_timeout": 45.0})
+    assert original == {"proxy": None}
+    feishu_ws._patch_ws_connect("http://different.invalid:8080")
+    assert sdk._ws_connect_kwargs().get("proxy", "") == proxy
+
+
+def test_ws_kwargs_keeps_sdk_timeout_and_explicit_proxy():
+    assert feishu_ws._fixed_ws_kwargs({"open_timeout": 60, "proxy": "http://sdk.invalid"}, True, "") == {
+        "open_timeout": 60, "proxy": "http://sdk.invalid",
+    }
+    assert feishu_ws._fixed_ws_kwargs({}, False, "") == {}
+
+
+def test_lark_log_filter_redacts_proxy_password_and_ws_token():
+    record = logging.LogRecord("Lark", logging.ERROR, "", 0,
+        "connect failed %s wss://msg-frontier.feishu.cn/ws?token=%s", ("socks5h://synthetic:proxy-secret@proxy.invalid:1080", "ws-secret"), None)
+    assert feishu_ws._LarkProcessorNotFoundFilter().filter(record) is True
+    rendered = record.getMessage()
+    assert "proxy-secret" not in rendered and "ws-secret" not in rendered
+    assert "connect failed" in rendered
+
+
+def test_outer_reconnect_never_logs_raw_proxy_error(caplog):
+    client = _FakeClient(stop_at=2)
+
+    def start():
+        client.starts += 1
+        client._stopped = client.starts >= 2
+        raise RuntimeError("socks5h://synthetic:proxy-secret@proxy.invalid:1080 app-secret")
+
+    client.start = start
+    with caplog.at_level(logging.WARNING):
+        _run(client)
+    assert "proxy-secret" not in caplog.text and "app-secret" not in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+
+
+@pytest.mark.parametrize(("connection", "status", "reason"), [
+    (None, "degraded", "FEISHU_WS_CONNECTING"),
+    (SimpleNamespace(state=State.CONNECTING), "degraded", "FEISHU_WS_CONNECTING"),
+    (SimpleNamespace(state=State.OPEN), "healthy", "FEISHU_WS_CONNECTED"),
+    (SimpleNamespace(state=State.CLOSING, closed=False), "degraded", "FEISHU_WS_DISCONNECTED"),
+    (SimpleNamespace(state=State.CLOSED), "degraded", "FEISHU_WS_DISCONNECTED"),
+    (SimpleNamespace(closed=False), "healthy", "FEISHU_WS_CONNECTED"),
+    (SimpleNamespace(closed=True), "degraded", "FEISHU_WS_DISCONNECTED"),
+    (SimpleNamespace(state="OPEN", closed=False), "degraded", "FEISHU_WS_STATE_UNKNOWN"),
+    (SimpleNamespace(), "degraded", "FEISHU_WS_STATE_UNKNOWN"),
+])
+def test_transport_health_reads_sdk_connection_fact(connection, status, reason):
+    client = feishu_ws.FeishuWsClient(app_id="synthetic", app_secret="synthetic-secret", on_payload=lambda _p: None)
+    assert client.transport_health() == {"status": "degraded", "reason_code": "FEISHU_WS_CONNECTING"}
+    client._client = SimpleNamespace(_conn=connection)
+    assert client.transport_health() == {"status": status, "reason_code": reason}
+    client._stopped = True
+    assert client.transport_health() == {"status": "stopped", "reason_code": "FEISHU_WS_STOPPED"}
+
+
+def test_transport_health_projects_live_transition_without_second_state():
+    connection = SimpleNamespace(state=State.OPEN)
+    client = feishu_ws.FeishuWsClient(app_id="synthetic", app_secret="synthetic-secret", on_payload=lambda _p: None)
+    client._client = SimpleNamespace(_conn=connection)
+    assert client.transport_health()["status"] == "healthy"
+    connection.state = State.CLOSED
+    assert client.transport_health()["status"] == "degraded"
+    client._client._conn = None
+    assert client.transport_health()["status"] == "degraded"
+    connection.state = State.OPEN
+    client._client._conn = connection
+    assert client.transport_health()["status"] == "healthy"

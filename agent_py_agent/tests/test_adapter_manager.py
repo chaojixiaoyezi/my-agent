@@ -319,11 +319,21 @@ class TestChannelManagerRouteMessage:
             dummy,
             "send_progress_placeholder",
             return_value="typing-steer",
-        ) as placeholder:
+        ) as placeholder, patch.object(
+            manager._reply_delivery,
+            "_poll_input_receipt",
+            return_value="active_pending",
+        ) as poll_input, patch(
+            "agent_py_agent.agent.adapter.manager.open_authenticated_request",
+            side_effect=AssertionError("输入回执路由单测不得访问真实 Gateway"),
+        ) as transport:
+            # 同轮 run_once 会推进新建 watcher；显式冻结回执事实，不受本机已运行的 Gateway 影响。
             assert manager.route_message(msg) is True
             assert manager._delivery_worker.run_once() == 1
 
         placeholder.assert_called_once_with("ou_123", "m-steer")
+        poll_input.assert_called_once()
+        transport.assert_not_called()
         pending = manager._reply_delivery.store.pending()
         assert len(pending) == 1
         assert pending[0].request_id == "stable-input-1"

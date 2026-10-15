@@ -1,3 +1,5 @@
+2026-10-14 真实飞书受限网络验收（修复已实施，发行验收中）：临时应用鉴权确认机器人身份；现有SDK在系统SOCKS代理下因离线包缺python-socks持续重连，旧healthy只证明线程存活。保留原代理合同，补随包SOCKS依赖并将websockets最低版与正式proxy接口对齐；运输健康只读SDK连接事实，REST发送独立。SDK诊断复用统一脱敏。运行所需外网仍限open.feishu.cn:443、msg-frontier.feishu.cn:443；不增加运行时下载。真实卡片需以本机入站/原卡状态和客户端点击联合验收，不能将另一消费者的旧卡或mock当真验。详见[飞书快检](docs/guides/FEISHU_QUICK_CHECK.md)。
+
 2026-10-14 构建工具安全基线（依赖声明已同步，发行待验）：setuptools构建/dev下限83并由uv定点锁83.0.0；pip26.2.0仅由新候选发行环境安装记录，不引入项目runtime依赖。旧上游自动执行extra及前端告警仍保留，见[发行指南](docs/guides/PRIVATE_OFFLINE_RELEASE.md#202610147-观察依赖安全追加)。
 
 2026-10-14 观察依赖安全（已实施，发行待根最终gate）：保留Mac观察能力，observe独立锁MCP1.28.1/Pillow12.3.0；与仍固定旧依赖的自动执行extra用uv conflicts显式互斥，不override、不改开关。真实SDK元数据与合成图片验收不触屏，最终runtime须另验实际依赖；旧自动执行extra/前端告警不宣称已修。见[发行追加](docs/guides/PRIVATE_OFFLINE_RELEASE.md#202610147-观察依赖安全追加)。

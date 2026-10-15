@@ -76,3 +76,15 @@
 - A 两新文件非作者原断言 **39 项通过**，XML：`/tmp/my-agent-A-independent.xml`。只读审查来源签发、显式 schema、默认无工具和冻结冷重投未确认新的阻断；额外使用真实 declared output target 与原 archive ready artifact ref，验证附件不能被 internal_only 取消，publish 空正文加真实附件仍允许。
 - 所有上述复核均使用隔离合成记录，没有实际生产利用、生产泄漏或真实 Feishu 应用权限验证结论；A 的 39 项与 N01 的 56 项不是最终整片联合验收数。
 - 建议下一步：主线程冻结全部切片后统一严格 gate、安装包及少量真实模型验收；现场首条消息未受理原因仍需受限元数据，不能凭蓝色 @ 或缺少表情断言根因。可并行只读审查，不并发修改产品或生产数据。
+
+## 2026-10-14 WS 代理依赖与真实连接健康追加
+
+- 本线在根集成工作树逐文件独占 `feishu_ws.py`、`test_feishu_ws_reconnect.py`、`test_packaging.py`、`pyproject.toml` 和快速核对指南；不提交、不推送、不读私人配置、不启动连接。根负责全局台账、测试入口和准确安装包，健康投影线负责 adapter/registry。
+- 问题证据由根保留：`.7` 的 lark-oapi 1.7.1 持续报告缺少 SOCKS 运行依赖。已读准确安装 SDK 的 `_ws_connect_kwargs` 与 `_conn` 赋值位置，确认空配置原合同是系统/环境发现，首连成功前 `_conn=None`。
+- 保留原代理合同，声明 `websockets>=15,<16` 的正式代理接口，并补 `python-socks[asyncio]>=2.7.2,<3`；显式 HTTP/SOCKS 不回退直连，依赖随包安装，不新增运行外网服务。接口、许可、替代方案见 [快速核对指南](../guides/FEISHU_QUICK_CHECK.md)。
+- `transport_health()` 只读原 SDK `_conn.state`（`websockets.protocol.State`）；旧接口只认明确布尔 `closed`。返回 `status=healthy/degraded/stopped` 与固定 `reason_code=FEISHU_WS_CONNECTED/CONNECTING/DISCONNECTED/STATE_UNKNOWN/STOPPED`。启动线程和首连失败不算健康，没有第二份健康账或回调状态。
+- SDK 原日志过滤器复用 `common.log_redaction` 净化格式化后的消息与参数，防 SDK 自带 handler 暴露代理密码/WS URL 令牌。外层重连只记异常类型，不记异常正文。
+- 4 文件 focused 74 项通过：`test_feishu_ws_reconnect.py`、`test_adapter_feishu_ws.py`、`test_packaging.py`、`test_feishu_transport_security.py`。相邻 Responses WS 与共享脱敏 2 文件 109 项通过；本线 Ruff、doc sync、diff-check 通过。
+- 使用原 `.7` Python 3.12、准确 lark-oapi 1.7.1 / websockets 15.0.1 做进程内无连接探针：真实 SDK 参数包装、HTTP/SOCKS/继承三组、实时 OPEN→CLOSED 健康和日志脱敏均通过。没有修改安装内容或运行网络握手。
+- strict code-size 在并行健康线施工中曾报告 `feishu.py` 类长/嵌套超限，已交原负责人处理；根须按最终同版源码重跑完整严格 gate，不能把本线定向通过当全局发布通过。
+- 建议下一步：根先审依赖闭包并构建准确新包，再在已授权 `open.feishu.cn:443`、`msg-frontier.feishu.cn:443` 范围验首连与断线投影；其它 agent 可并行只读复核，真实安装/重启/发消息由根统一，禁止旁路直连或扩大放行。

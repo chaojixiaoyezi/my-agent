@@ -1,7 +1,7 @@
 
 
 # LLM: 飞书入站返回显式 accepted/ignored/retryable；未核验或落盘失败不得提交运输去重，原锁与 owner 仍守权限。
-# 模块用途: 管理飞书受理与固定认证接口，附件上传消费已核验bytes、禁止重定向和原始错误泄露，不创建第二入站队列。
+# 模块用途: 管理飞书受理与固定认证接口，附件只消费已核验bytes并禁止重定向；实时投影WS健康，不创建第二队列或状态账。
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -551,8 +552,46 @@ def _send_session_password_card(adapter: Any, user_id: str, mode: str) -> bool:
 
 
 
-# LLM: 原 send/reply 已派生最长 50 字符的分片 uuid；本声明只供 delivery 在有效窗口内恢复同一逻辑消息。
-# 类用途: 提供飞书发送、回复与准确消息/媒体读取；没有 UUID 到消息的只读查询保证。
+# LLM: 启动原唯一WS客户端与卡片回调；running仍是宿主生命周期，连接健康只由SDK实时事实投影。
+# 函数用途: 接好既有长连接入站并启动线程，实际建连和重试由原WS客户端负责，不添加第二连接。
+def _start_feishu_long_connection(adapter: Any) -> None:
+    from .feishu_ws import FeishuWsClient, run_ws_client_thread
+
+    adapter._ws_client = FeishuWsClient(
+        app_id=adapter.app_id, app_secret=adapter.app_secret,
+        on_payload=adapter._handle_feishu_event, ws_proxy=adapter.ws_proxy,
+    )
+    adapter._ws_client.on_card_action = adapter._handle_card_action if adapter.my_agent_home else None
+    adapter._ws_thread = run_ws_client_thread(adapter._ws_client, lambda: setattr(adapter, "_running", False))
+    logger.info("飞书适配器已启动(长连接 WS 模式,免公网/不绑端口)")
+
+
+# LLM: 原running与WS连接分别投影，健康读取不产生网络或持久状态；原JSON health协议供registry直接消费。
+# 函数用途: 将飞书运输的固定状态码转换成通道健康，不用日志文字或线程存活推断已连接。
+def _feishu_runtime_health(adapter: Any) -> dict[str, str]:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    if not adapter.running:
+        return {"state": "stopped", "error_code": "CHANNEL_ADAPTER_NOT_RUNNING", "checked_at": checked_at}
+    if not adapter._is_long_connection():
+        return {"state": "healthy", "error_code": "", "checked_at": checked_at}
+    state, error = "unhealthy", "FEISHU_WS_STATE_UNKNOWN"
+    try:
+        transport = adapter._ws_client.transport_health() if adapter._ws_client is not None else {
+            "status": "degraded", "reason_code": "FEISHU_WS_CONNECTING"}
+        state, error = {
+            ("healthy", "FEISHU_WS_CONNECTED"): ("healthy", ""),
+            ("degraded", "FEISHU_WS_CONNECTING"): ("starting", "FEISHU_WS_CONNECTING"),
+            ("degraded", "FEISHU_WS_DISCONNECTED"): ("unhealthy", "FEISHU_WS_DISCONNECTED"),
+            ("degraded", "FEISHU_WS_STATE_UNKNOWN"): ("unhealthy", "FEISHU_WS_STATE_UNKNOWN"),
+            ("stopped", "FEISHU_WS_STOPPED"): ("unhealthy", "FEISHU_WS_STOPPED"),
+        }.get((transport.get("status"), transport.get("reason_code")), (state, error))
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        pass
+    return {"state": state, "error_code": error, "checked_at": checked_at}
+
+
+# LLM: 原send/reply的uuid只保证窗口内幂等；runtime_health实时读入站运输，不以running替连接，也不改变REST出站权限。
+# 类用途: 提供飞书发送、回复、准确消息/媒体读取与入站健康快照，没有UUID到消息的只读查询保证。
 class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachmentMixin, BaseChannelAdapter):
     # LLM: uuid 是有限窗口去重，不覆盖跨窗口重发；channel delivery 必须先查首次 dispatch 时间。
     # 字段用途: 向统一通道注册表声明 provider 原生幂等能力。
@@ -653,6 +692,11 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachment
     def _is_long_connection(self) -> bool:
         return self.connection_mode in ("long_connection", "longconn", "ws", "websocket")
 
+    # LLM: 只投影原running与WS实时运输事实；不探测网络、不触发重连、不缓存第二份健康状态，registry读取本协议。
+    # 函数用途: 区分适配器进程运行和入站连接可用，让SDK内部持续重试时也能如实显示未连接。
+    def runtime_health(self) -> dict[str, str]:
+        return _feishu_runtime_health(self)
+
     def _start_webhook_server(self) -> None:
         self._server = ThreadingHTTPServer(
             ("0.0.0.0", self.callback_port),
@@ -664,19 +708,10 @@ class FeishuAdapter(FeishuUnlockResumeMixin, FeishuTypingMixin, FeishuAttachment
         self._server_thread.start()
         logger.info(f"飞书适配器已启动(webhook 模式)，回调端口={self.callback_port}")
 
+    # LLM: 复用模块内原唯一WS接线，启动不代表连接成功；卡片仍仅在拥有home时注册。
+    # 函数用途: 从既有生命周期入口启动长连接，健康状态由runtime_health独立读取。
     def _start_long_connection(self) -> None:
-        # 长连接 WS:主动连飞书网关(免公网/不绑端口),事件走与 webhook 同一条下游(_handle_feishu_event);
-        # 异常退出回调置 _running=False,让健康探测/supervisor 感知通道死、触发重启。
-        from .feishu_ws import FeishuWsClient, run_ws_client_thread
-
-        self._ws_client = FeishuWsClient(
-            app_id=self.app_id, app_secret=self.app_secret,
-            on_payload=self._handle_feishu_event, ws_proxy=self.ws_proxy,
-        )
-        # 有 my_agent_home 才挂卡片回调(否则无处定位待确认记录/人格文件);无则不注册,行为不变。
-        self._ws_client.on_card_action = self._handle_card_action if self.my_agent_home else None
-        self._ws_thread = run_ws_client_thread(self._ws_client, lambda: setattr(self, "_running", False))
-        logger.info("飞书适配器已启动(长连接 WS 模式,免公网/不绑端口)")
+        _start_feishu_long_connection(self)
 
     # LLM: 原回调服务异常只记类型，不能回显消息/认证正文，不以日志推断已受理。
     # 函数用途: 维持原HTTP回调服务生命周期并安全记录失败。
