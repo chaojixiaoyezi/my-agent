@@ -113,3 +113,32 @@ export PATH="$HOME/.local/bin:$PATH"
 
 验收至少包括：断网首次安装、路径含空格、原位置升级、配置/历史字节不变、坏包不切换、活动进程阻止切换，
 Ubuntu 三版 CLI 启动、UTF-8、真实 Gateway + TUI，以及原输入/停止修复回归。未完成项必须留在交接记录。
+
+
+## 20261014.6 依赖安全与锁图同步
+
+本期22项及全卡取消的发行候选从 `.20261014.5` 改为 `0.3.0-tui-preview.20261014.6`。`.5`已冻结身份只作为被替代的候选证据，不把其源码hash或旧wheel身份标成`.6`；根完成本地严格gate并推送后，重新以准确干净main冻结源码、wheel与各平台清单。
+
+GitHub实际23条开放Dependabot告警中，4条来自uv.lock：urllib3 2.7.0的3条（2 high、1 medium，修复2.8.0），cryptography 49.0.0的1条（high，修复50.0.0）。本次用原uv机制准确锁urllib3 2.8.0、cryptography 50.0.2及原依赖元数据/hash，不手填下载hash、不放宽pyproject范围。旧锁只有70包，其根metadata没有源码早已声明的computer-use/computer-use-observe extras，dev图也缺少后续已有声明。原uv解析补全为301包，只有上述两个既有包升级；其它新增节点是已声明可选/开发依赖的锁图同步，**不是新增默认依赖或把桌面执行器装入发行包**。发行仍选择原默认依赖与scale/secrets，不使用`--all-extras`。
+
+`uv lock --check`必须对最终完整锁通过，不能交仅替换两个stanza却仍与pyproject漂移的半锁。uv0.11.2定点命令为：
+
+```bash
+uv lock --upgrade-package 'urllib3==2.8.0' --upgrade-package 'cryptography==50.0.2'
+uv lock --check
+uv export --locked --no-dev --extra scale --extra secrets --no-emit-project --format requirements.txt --output-file /tmp/my-agent-release-requirements.txt
+```
+
+完整锁已用 `uv lock --check` 核验且检查前后hash相同；原发行选择导出63个包要求，不包含computer-control-mcp、pyautogui、pyobjc、pytest或hypothesis。63是跨平台带marker的导出要求数，不是对每个平台实际安装数量或payload大小的断言。
+
+根升级新候选后可运行以下兼容focused（本锁文件切片只做解析/导出检查，不运行服务或大套件）：
+
+```bash
+python -m pytest agent_py_agent/tests/test_task_credential_storage.py agent_py_agent/tests/test_feishu_crypto.py agent_py_agent/tests/test_feishu_transport_security.py agent_py_agent/tests/test_feishu_cli_backend.py -q --tb=short
+```
+
+本轮不改运行中的旧runtime。Linux准备目录已读到urllib3 2.8.0、cryptography50.0.2；Mac旧基座仍urllib32.7.0，不能仅克隆后`pip --no-deps`安装业务wheel就声称漏洞已修。根负责在新Mac候选和隔离验证venv同步到准确依赖版本，保留原旧实例，然后记录新payload实际METADATA和完整性清单、运行既定focused/字节码/native验收。锁文件更新本身不证明现有环境已升级。
+
+剩余19条告警位于frontend/package-lock.json（14开发范围、5前端运行范围），本次wheel和离线包不包含frontend；它们仍影响前端开发或单独前端部署，等待另一个明确范围的修复，不改npm锁、不冒称全仓无漏洞。所列23条没有CLI Go清单项；这不能替代CLI二进制完整漏洞审查。真实供应商、代理配置和客户端渲染等原未验边界不因锁同步而改变。
+
+建议下一步：根先核隔离验证venv/新Mac候选实际依赖，跑原凭据、加密事件和Feishu运输相关focused，再严格gate并重新冻结`.6`；可并行只读比对平台依赖版本与原发行清单，不自动扩大到前端升级或新专项测试。
