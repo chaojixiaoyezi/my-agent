@@ -1,3 +1,5 @@
+2026-10-15 首次 Gateway 凭据入口修复：沿根准确 main 集成树逐文件独占。凭据线负责原 tool_approval_scope、凭据/授权工具、获根批准的 OAuth status 小切片及直接测试；非作者只读核验 typed writer、基础队列来源、owner/thread/当前 attempt、停止与输入回调。作者及非作者独立同命令 343 项通过，不重复累计。该线另获授权独占本期七份全局文档最小同步；根独占真实 UI、私密配置、最终严格 gate、提交、部署与发行。无 writer 的独立 HTTP 审批回调不猜队列，真实租户凭据提交/取消/Wake 仍待验。文件和交接见 [IM_CREDENTIAL_LIVE_ENTRY_HANDOFF](tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。
+
 2026-10-14 真实飞书连接追加：根独占应用鉴权、真实客户端、连接/部署/打包和全局文档；6.1-sol high运输线独占WS、依赖、日志与其回归，健康线独占FeishuAdapter/registry/health及旧密码fixture，发行准备线只写任务工件。源码冻结后根串行focused/strict，不让tracked-file测试与并行写入竞争。目标运行外网仅open.feishu.cn:443和msg-frontier.feishu.cn:443，既有服务不以同应用第二连接替代；真实身份、原卡回执与owner状态共同验收。
 
 2026-10-14 全22项实施：根集成树 `main-release-gate-fix-20261012` 从56617f7a8起。首批storage/form/group三个独立worktree仅交patch，根整合交叉文件并统一gate/main提交。后续独占线为监控S01–05、云与后台S06–08、Skill S09–16，根负责工具S17–20及总集成；全部子代理6.1-sol，开发线不推送、不部署，不读生产凭据。每线保留原权威，完成按原交接模板写证据，真实飞书租户不在当前环境中。

@@ -1,3 +1,7 @@
+2026-10-15 首次普通 Gateway 凭据入口：作者与非作者独立复现同一 15 文件 **343 passed、0 failed/error/skipped**，不叠加计数。首次 group/user fake LLM 请求在改前真实返回 `CREDENTIAL_STORAGE_UNAVAILABLE/preflight/FileNotFoundError` 且零发卡；已有 TaskLink 的前台 claim 用例为 inactive，修复后转绿。普通用户 OAuth status 的真实工具状态也先红后绿，不以模型最终正文代替工具结果。
+
+新增 `test_gateway_credential_live_entry.py` 覆盖原基础队列与 scoped owner、首次晋升、假卡片运输、提交/取消/单 Wake、OAuth authorize/status；`test_tool_approval_foreground_scope.py` 覆盖不同 request/run/task/运输与 core attempt、旧 claim/attempt、错误 writer/owner/请求状态及 scope 错误分层。组合保留原存储、主子审批、私人锁、输入容量与截止回归；旧群审批 fixture 通过真实合成 HostActor 和群配置授权补齐前提，没有绕产品门。完整 15 文件命令、Codex 参考和未修边界见 [交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。局部 Ruff/diff 和 strict code-size 通过；真实飞书字段渲染、点击、提交/取消/Wake 与租户 OAuth 仍待验，根最终严格 gate 和同版包证据另记。
+
 2026-10-15 `.2` 首次包内回归保留：同源码e3d6d2456的Mac 2122通过/2失败/1跳过/2源码分流，Linux 2123通过/2失败/零跳过/2源码分流。共同两红是异常清理测试的子解释器没有父验收显式测试资源桥，未执行产品路径；只修fixture以准确测试文件和当前pytest依赖参数加载，产品包和路径不补源码。保留原异常可见、线程零泄漏和5秒截止，不跳测或扩大分流；新提交须重新严格gate与双端验包，旧候选不交付。
 
 2026-10-15 群治理统一回归：首轮85文件2127项，6失败/1跳过的原日志保留；一项旧路由计数遗漏OAuth与观察入口，五项provider参数fixture遗漏真实模型状态的宿主/调用身份。仅校准两份测试，保留准确鉴权集合、原provider请求断言并禁止普通模型轮访问scheduler；定向174项与54项分别通过，不相加冒充完整gate。最终统一严格门和双端包结果按同版发行证据记录，真实无@bot scope未开通，不以离线通过代算。

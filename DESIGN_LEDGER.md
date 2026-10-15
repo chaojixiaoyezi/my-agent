@@ -1,3 +1,10 @@
+## 2026-10-15 首次 Gateway 凭据输入（源码修复与独立回归完成，真实租户待验）
+
+- 本机准确请求已进入原 SDK/Ingress 和 RuntimeDB，但首次普通请求尚无 ConversationTaskLink；`request_credentials` 未声明任务晋升，因而在密钥初始化前抛无 errno 的 FileNotFoundError，被误报存储不可用。已有 fixture 预建 TaskLink，掩盖此入口；即使补链接，原 main scope 把 `gateway:<request_id>` 前台 claim 与持久 task 作同值比较仍会拒绝。
+- 复用原 `ToolRuntimePolicy` 晋升和 `promote_conversation_task_for_run`，凭据生命周期共用规范 root，OAuth 仅 authorize 触发条件晋升。前台 scope 只从当前 typed `GatewayTaskBindingWriter` 取得基础队列来源，沿原执行目标、write-ahead 绑定和 RuntimeDB 核验 owner/thread/main run/当前 attempt，并冻结 core attempt；不猜 owner 队列或仅按前缀放行。缺 scope 明确为 `CREDENTIAL_TASK_NOT_ACTIVE/execution_scope/not_started`，存储阶段分类保留。
+- 普通飞书用户 OAuth status 从 canonical owner 确认本人，不创建任务；管理员、revoke 和缺当前 writer 的独立 HTTP 前台审批回调保留原范围，不宣称这些既有边界已改造。输入提交/取消仍沿原 TaskLink、输入行和单次 Wake。
+- 作者与非作者独立复现同一 15 文件 343 项全通过，局部 Ruff、diff 与 strict code-size 通过；最终严格 gate、发布身份和真实租户卡片验收由根另记。Codex `ToolInvocation` 与 `PendingHostApprovalKey` 的身份分离参考及准确版本见 [交接](docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)，模块合同见 [凭据收集](docs/design/IM_CREDENTIAL_COLLECTION.md)。
+
 2026-10-15 真实飞书受限网络验收（修复已发布，真实验收部分完成）：`.20261014.8` 准确源码f6357d8d3，415项与严格gate、双端包内413项及原生8/9项通过，本机已部署。SOCKS缺失与线程假健康已修，真实普通私聊status及模型表单保存有原账证据。后续旧式UI回执无本机入站/点击事实，实际消费者待核。用户已明确授权开通群@权限，群status和B的model原入站/owner/actor已核；凭据提交/取消/Wake和群卡决定不标通过。两域服务器路径不增加外网依赖，既有扫码创建应用不适用于此限制；未进行完整出口抓包。首轮替身及合成模型已清理；第二轮仅回环替身运行，未选用。后续验收文档不改变安装包源码身份，详见[准确实例与网络边界](docs/guides/FEISHU_QUICK_CHECK.md#2026-10-15-受限网络与准确实例验收)。
 
 2026-10-14 真实飞书连接修复：保留原代理合同，补随包SOCKS依赖并将websockets最低版与正式proxy接口对齐；运输健康只读SDK连接事实，REST发送独立。SDK诊断复用统一脱敏；不增加运行时下载。真实卡片需以本机入站/原卡状态和客户端点击联合验收，不能将另一消费者的旧卡或mock当真验。

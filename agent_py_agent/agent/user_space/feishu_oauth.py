@@ -401,11 +401,15 @@ def _stored_deadline(value):
     return value
 
 
-# LLM: 状态/撤销不返回密文、state 或 URL；过期 ready 如实投影，取消原 pending/exchanging 输入使旧回调不能复活。
-# 函数用途: 查询或撤销本人授权，允许离线止损，不伪造供应商远端撤销。
+# LLM: 普通飞书用户的只读状态从 canonical owner 取本人身份，不要求晋升任务；管理员及撤销保留原执行范围。
+# 状态不返回密文/state/URL；撤销结算原输入，使旧回调不能复活，联测 Gateway 首次查询及原 OAuth 回调矩阵。
+# 函数用途: 查询或撤销本人授权；查询不创建任务，撤销会清密文并结算原输入，不伪造供应商远端撤销。
 def oauth_status(agent, *, revoke=False):
     current = getattr(agent, "_current_run_params", None)
-    scope = tool_approval_scope(agent, str(getattr(current, "run_id", "") or getattr(current, "task_id", ""))) if current else None
+    owner = owner_identity_from_config(agent.config)
+    needs_scope = revoke or owner.provider != "feishu" or owner.owner_kind != "user"
+    scope = (tool_approval_scope(agent, str(getattr(current, "run_id", "") or getattr(current, "task_id", "")))
+             if current and needs_scope else None)
     actor = oauth_actor(agent, scope)
     with _credential_mutation(agent, oauth_path(agent, actor)) as admission:
         row = read_json_object_report(oauth_path(agent, actor), context="oauth.status").payload

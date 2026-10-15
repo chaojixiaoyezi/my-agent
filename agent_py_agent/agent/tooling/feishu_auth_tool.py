@@ -21,12 +21,13 @@ from .models import (
     ToolInputPolicy,
     ToolModelHints,
     ToolModelSpec,
+    ToolParameterCondition,
     ToolRuntimePolicy,
     TrustedParameterBinding,
 )
 
 
-# LLM: schema仅有固定交互动作，不接受owner/token/URL/scopes；身份与范围取宿主。
+# LLM: schema仅有固定交互动作；authorize 沿原条件晋升持久任务，status/revoke 不凭查询创建任务；身份与范围取宿主。
 # 类用途: 为本人飞书资源建立独立授权。
 class FeishuAuthTool(BaseTool):
     model_spec = ToolModelSpec(name="feishu_auth", description=(
@@ -39,6 +40,7 @@ class FeishuAuthTool(BaseTool):
                              default_deferred=True, deferred_summary="查询或建立本人飞书授权，登录卡私发，宿主保存凭据"))
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating",
         by_parameter=(("action", (("status", "read_only"),)),)), idempotency_policy=IdempotencyPolicy("operation"),
+        promotes_task_when=(ToolParameterCondition('action', 'equals', 'authorize'),),
         input_policy=ToolInputPolicy(internal_parameters=("__network_access_mode",), trusted_parameter_bindings=(
             ("__network_access_mode", TrustedParameterBinding(source_refs=("write_boundary.network_access_mode",), authority="host_authoritative")),)))
 

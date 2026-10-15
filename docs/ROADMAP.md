@@ -1,3 +1,5 @@
+2026-10-15 首次 Gateway 凭据入口（源码修复/独立回归完成，真实租户验收待做）：本机原请求已证实无 TaskLink 与前台 claim/task 编号误比较两处缺陷，现复用原任务晋升、typed writer、执行目标和 RuntimeDB 修复。作者及非作者各自同命令 343 项全通过，不相加。下一步由根串行严格 gate、准确版本部署和真实凭据卡提交/取消/Wake 验收；普通用户 OAuth status 不建任务，管理员/revoke/无当前 writer 的独立审批仍守原范围。历史评估状态保留，准确合同、Codex 参考和验证命令见 [交接](tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)及[模块设计](design/IM_CREDENTIAL_COLLECTION.md)。
+
 2026-10-14 R01–R09：用户已授权实施、严格验收后合 main/推送、本机更新与发行；当前九项接线完成进入统一验收，历史“待实施/暂停”只描述此前时点。准确进度与边界见 [实施发行记录](tasks/IM_R01_R09_RELEASE.md)。
 
 2026-10-14 当前收口：企业IM无人值守 P01–P12 已进入综合验收。日常工作、取消与卡片终态沿原合同；凭据/OAuth持久待输入、能力自查和受控CLI后端已实现。待本地严格gate、独立发行验收和本机部署完成后登记发布身份；不把合成HTTP测试当真实租户OAuth验收，见[实施合同](design/IM_UNATTENDED_IMPLEMENTATION.md)。

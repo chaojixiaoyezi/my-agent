@@ -1,3 +1,13 @@
+2026-10-15 首次普通 Gateway 凭据入口：
+
+```text
+|-- agent_py_agent/tests/test_gateway_credential_live_entry.py # 原队列首次主请求、持久输入与准确回调/Wake/OAuth状态
+|-- agent_py_agent/tests/test_tool_approval_foreground_scope.py # 原typed writer、前台车道、owner与当前attempt资格
+`-- docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md # 现场根因、通用修复、343项独立回归与真实租户边界
+```
+
+关键职责：原 ToolRuntimePolicy 负责晋升，tool_approval_scope 复用原执行目标与 RuntimeDB；TaskLink、输入行和 Wake 保持唯一，不增加存储或队列。
+
 2026-10-15 群授权与原调度机器人观察：
 
 ```text
@@ -2153,6 +2163,7 @@ docs/
 
 ### 关键文件说明
 
+- `docs/tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md`：首次普通 Gateway 请求的 TaskLink/前台 claim 根因、原 promotion 与 typed scope 修复、独立 343 项回归及真实租户待验边界；两份新增入口与 scope 测试由此导航。
 - `conversation/host_actor.py`：认证入口专有字段、原主任务/子任务记录及不可变执行来源共用的发起人解析；普通模型属性不能授权。
 - `conversation/background_receipt_contract.py`、`agent_core/tool_loop/background_public_receipt.py`：仅任务显式选择时启用受管公开收口；内部结果和公开通知仍沿原执行与投递账本保存。
 - `contracts/background_public_receipt.py`：模型循环和会话投递共同使用的 schema 标识，避免会话领域反向依赖模型实现。

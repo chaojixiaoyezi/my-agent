@@ -158,10 +158,16 @@ def test_selection_change_is_not_a_change_of_execution_authority(background):
 
 
 def test_group_background_remaining_confirmation_is_rejected_before_private_card(tmp_path):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
     from agent_py_agent.agent.conversation.agent_activity import BackgroundMainActivitySink
     from agent_py_agent.agent.conversation.execution_threads import ensure_execution_thread
+    from agent_py_agent.agent.conversation.host_actor import actor_from_scope
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+    from agent_py_agent.tests.test_group_authorization import (
+        grant_synthetic_group_monitor_capability,
+    )
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
         my_agent_owner_provider="feishu", my_agent_owner_kind="group", my_agent_owner_id="oc_group"), tmp_path)
@@ -169,6 +175,13 @@ def test_group_background_remaining_confirmation_is_rejected_before_private_card
     source = store.threads.get_or_create({"channel": "feishu", "channel_user_id": "ou_creator",
         "channel_conversation_id": "oc_group", "canonical_user_id": "ou_creator", "owner_id": agent.home_paths.owner_id,
         "owner_home": str(agent.home_paths.owner_home_dir)})
+    actor = actor_from_scope(agent, SimpleNamespace(channel='feishu', channel_user_id='ou_creator',
+        channel_conversation_id='oc_group'), source.thread_id, 'synthetic-setting-request')
+    agent._current_run_params = RunParams(request_id='synthetic-setting-request', host_channel_actor=actor,
+        task_attributes={'conversation_thread_id': source.thread_id})
+    grant_synthetic_group_monitor_capability(agent, actor, members={'ou_creator'}, capability='assistant.configure')
+    execute_approval_mode_operation(agent.home_paths, 'set', 'ask', authorization_host=agent)
+    del agent._current_run_params
     work = ensure_execution_thread(agent, source.thread_id, "group-work", kind="delegated")
     store.threads.update_atomic(source.thread_id, lambda thread: replace(thread,
         channel_bindings=tuple(replace(binding, channel_user_id="ou_other") for binding in thread.channel_bindings)))
@@ -181,8 +194,6 @@ def test_group_background_remaining_confirmation_is_rejected_before_private_card
     ctx = SimpleNamespace(agent=agent, store=store, task_id=task_id, request=request, response={},
         token=SimpleNamespace(cancelled=False), waiter=None,
         sink=BackgroundMainActivitySink(agent, thread_id=work.thread_id, task_id=task_id))
-    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
-    execute_approval_mode_operation(agent.home_paths, "set", "ask")
     response = ctx.sink.request_permission(request.to_dict(), cancellation_token=ctx.token)
     assert response["decision"] == "denied"
     assert response["reason_code"] == "APPROVAL_NONINTERACTIVE"

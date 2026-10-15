@@ -6,6 +6,7 @@ import json
 import logging
 
 from ..capability.runtime_config_reload import capability_config_for_agent
+from ..conversation.tool_approval_scope import ToolApprovalScopeUnavailable
 from ..user_space.task_credential_storage import credential_stage, read_credential_row
 from ..user_space.task_credentials import (
     CredentialCardOptions,
@@ -29,8 +30,8 @@ from .models import (
 # LLM: 工具始终绑定当前 owner Agent；开关在 capability 配置，卡片失败/取消不能变成完成或聊天凭据收集。
 # 类用途: 发布绑定原发起人的私聊输入卡或管理授权，不等待、不调用模型。
 class RequestCredentialsTool(BaseTool):
-    # LLM: 注册只声明 schema，不读取密钥、不发卡；原 Registry 决定可用工具和权限。
-    # 函数用途: 保存当前 owner 并声明无明文参数的输入接口。
+    # LLM: 所有生命周期都要求规范任务，原 Registry 在 handler 前沿 promotes_task 晋升；注册不读密钥或发卡。
+    # 函数用途: 保存当前 owner 并声明原任务输入接口，首次普通请求也能持久等待和恢复。
     def __init__(self,agent):
         self.agent = agent
         self.model_spec = ToolModelSpec(name='request_credentials', description='接口需要账号密码或 API Key 时，向原发起人发私人密文输入卡；群来源在原群发卡，个人来源在本人私聊发卡；可仅收密码，缺链接在卡上填写。无需先选认证协议；返回 credential_ref；默认collected只保存，不能直接HTTP使用。需要使用时先operation=configure并传原引用与准确认证方案，配置后web_fetch再传此引用；可给 job_id 绑定已有本人的监控。',
@@ -46,11 +47,11 @@ class RequestCredentialsTool(BaseTool):
                 {'properties':{'operation':{'enum':['status','revoke']}},'required':['operation','credential_ref']},
             ],'additionalProperties':False},
             hints=ToolModelHints(category='orchestration'))
-        self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating"),
+        self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating"), promotes_task=True,
             idempotency_policy=IdempotencyPolicy(scope='operation'),timeout_policy=TimeoutPolicy(seconds=30),
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
-    # LLM: 条件必填在副作用前核验；阶段错误保留安全诊断于原工具账，发送后读取失败保持unknown且禁止盲重发，不展示异常正文。
+    # LLM: 条件必填在副作用前核验；scope 不可用与存储失败分开，发送后读取失败保持unknown且禁止盲重发，不展示异常正文。
     # 函数用途: 申请、更新、查询或撤销原任务凭据，模型只获得引用、期限和状态。
     def execute(self, params):
         from ..user_space.task_credentials import manage_credential
@@ -93,6 +94,9 @@ class RequestCredentialsTool(BaseTool):
                 result['status'] = 'waiting_input'
                 envelope['input_dependency'] = {'input_id': row['input_id'], 'status': 'waiting_input', 'expires_at': row['expires_at'], 'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
             return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope=envelope)
+        except ToolApprovalScopeUnavailable:
+            return _credential_error('CREDENTIAL_TASK_NOT_ACTIVE', '当前任务执行范围不可用，未发送凭据卡。',
+                stage='execution_scope', effect_outcome='not_started')
         except CredentialInputError as exc:
             exc.diagnostic['operation_id'] = str(params.get('__tool_call_id') or '')
             return _credential_error(exc.code, str(exc), stage=exc.stage, effect_outcome=exc.effect_outcome, diagnostic=exc.diagnostic)
