@@ -242,6 +242,7 @@ def test_promote_triggers_condense_on_long_term_write(
         return original(self, **kwargs)
 
     monkeypatch.setattr(JsonlMemory, "condense", _spy_condense)
-    result = service.promote(candidate.candidate_id, automatic=True)
+    service.review(candidate.candidate_id, approved=True, reviewer="explicit-test-user")
+    result = service.promote(candidate.candidate_id, confirmed=True)
     assert result.promoted
     assert calls, "long_term 晋升成功后必须触发 condense"

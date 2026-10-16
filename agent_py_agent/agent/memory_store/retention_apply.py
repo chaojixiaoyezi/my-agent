@@ -3,7 +3,7 @@ from __future__ import annotations
 """Memory v2 retention 计划的重验证与执行。"""
 
 # LLM: apply 只能执行刚在同一锁内生成的 typed actions；每个目标仍需 fingerprint/status/cutoff 二次核验。
-# 模块用途: 安全删除文件、批量清理终态候选、把任务/会话移入回收站并记录无正文审计。
+# 模块用途: 安全删除文件、清理终态候选和快照清单；执行前重核引用与指纹，并记录可恢复回收及无正文审计。
 
 import json
 import shutil
@@ -27,10 +27,15 @@ from .retention_models import (
     MemoryRetentionError,
     MemoryRetentionReport,
 )
-from .retention_scan import file_fingerprint, paths_fingerprint, tree_fingerprint
+from .retention_scan import (
+    current_tool_manifest_references,
+    file_fingerprint,
+    paths_fingerprint,
+    tree_fingerprint,
+)
 
 
-# LLM: candidate actions 必须一次批量删除，否则首条写入会让同一计划其余 ledger fingerprint 失效。
+# LLM: candidate 必须一次批量删除；清单阶段只扫描一次当前引用，快照动作失败或变化时保护仍被引用的清单。
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # 函数用途: 执行一份已验证计划，并返回每条动作状态及结构化错误。
 def execute_retention_plan(
@@ -42,15 +47,19 @@ def execute_retention_plan(
     allowed_external_roots: tuple[Path, ...] = (),
 ) -> MemoryRetentionReport:
     results, errors = _apply_candidate_phase(candidates, plan)
+    manifest_references = None
     for action in plan.actions:
         if action.operation == "candidate_delete":
             continue
         try:
+            if action.category == "tool_manifest" and manifest_references is None:
+                manifest_references = current_tool_manifest_references(home)
             result = _apply_action(
                 home=home,
                 action=action,
                 now=now,
                 allowed_external_roots=allowed_external_roots,
+                manifest_references=manifest_references,
             )
         except Exception as exc:  # noqa: BLE001 - one failed target is reported without hiding later independent targets.
             result = replace(
@@ -181,7 +190,7 @@ def _apply_candidate_actions(
     return results, errors
 
 
-# LLM: operation 是封闭的 host-owned 执行枚举；未知值必须失败，不能从 reason 文本猜动作。
+# LLM: operation 是宿主执行枚举；未知值失败；清单回收必须复核快照阶段之后的当前引用，不能只信规划结果。
 # 函数用途: 分派一条非候选 retention 动作。
 def _apply_action(
     *,
@@ -189,6 +198,7 @@ def _apply_action(
     action: MemoryRetentionAction,
     now: datetime,
     allowed_external_roots: tuple[Path, ...],
+    manifest_references: tuple[frozenset[str], bool] | None = None,
 ) -> MemoryRetentionAction:
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
@@ -196,6 +206,12 @@ def _apply_action(
         return _delete_file(action)
     if action.operation == "trash_tree":
         return _trash_tree(home=home, action=action, now=now)
+    if action.operation == "trash_file":
+        if action.category == "tool_manifest":
+            referenced, complete = manifest_references or current_tool_manifest_references(home)
+            if not complete or action.path.stem in referenced:
+                return replace(action, status="state_changed")
+        return _trash_file(home=home, action=action, now=now)
     if action.operation == "delete_tree":
         return _delete_tree(action)
     if action.operation == "conversation_trash":
@@ -245,6 +261,51 @@ def _trash_tree(
         shutil.rmtree(destination, ignore_errors=True)
         raise
     return replace(action, status="trashed")
+
+
+# LLM: 单文件版 _trash_tree：没有 authority 状态文件可核对，只按"计划时的字节指纹 + 计划 cutoff"重验证；
+#   文件在 plan 之后被改过或变新都跳过（state_changed）。移走最后一个文件后顺手删空的父目录
+#   （仅空目录，沿用 home_layout._remove_dir_if_empty 的口径），例如快照的日期目录。
+# 函数用途: 把一个过期单文件（快照 / 工具清单）连同 tombstone 安全移入可恢复回收站。
+def _trash_file(
+    *,
+    home: object,
+    action: MemoryRetentionAction,
+    now: datetime,
+) -> MemoryRetentionAction:
+    if not action.path.exists():
+        return replace(action, status="missing")
+    if (
+        action.path.is_symlink()
+        or file_fingerprint(action.path) != action.source_fingerprint
+        or action.cutoff_timestamp is None
+        or action.path.stat().st_mtime >= action.cutoff_timestamp
+    ):
+        return replace(action, status="state_changed")
+    destination = _validated_destination(home, action)
+    destination.mkdir(parents=True, exist_ok=False)
+    payload = destination / "payload"
+    _write_tombstone(destination, action=action, payload=payload, now=now, status="moving")
+    try:
+        shutil.move(str(action.path), str(payload))
+        _prune_empty_directory(action.path.parent)
+        _write_tombstone(destination, action=action, payload=payload, now=now, status="trashed")
+    except Exception:
+        if payload.exists() and not action.path.exists():
+            action.path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(payload), str(action.path))
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    return replace(action, status="trashed")
+
+
+# LLM: 仅删除已经空掉的直接父目录；rmdir 原子拒绝有新内容的目录，绝不递归删除未规划的子目录或链接。
+# 函数用途: 文件回收后尝试移除空日期目录，失败不改变已完成的回收结果。
+def _prune_empty_directory(directory: Path) -> None:
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
 
 
 # LLM: trash purge 也必须核对 tombstone 和整棵容器 fingerprint，防止 plan 后加入的新文件被一起删除。

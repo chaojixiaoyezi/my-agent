@@ -289,18 +289,114 @@ def test_compact_preparation_uses_same_frozen_persona_and_tail(scene, monkeypatc
     assert "压缩前新规则" in dict(prepared.volatile_sections)["prompt.persona_updates"]
 
 
-def test_compact_run_binds_canonical_thread_not_stale_surface(monkeypatch):
+# LLM: 使用显式临时home和真实会话账本，不绕开来源或人格权限；仅供本文件压缩准备边界测试，不能在pytest外执行。
+# 函数用途: 建立隔离的本机owner与canonical线程，让夹具沿正式请求准备入口取得完整typed请求。
+@pytest.fixture
+def canonical_compact_scene(tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+
+    home = tmp_path / "my-agent-home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    agent = SimpleAgent(AgentConfig(
+        model_backend="echo", my_agent_home=str(home), prompt_files=[],
+        model_context_window_tokens=64_000, model_input_modalities=["text"],
+        compact_media_policy="auto",
+    ), tmp_path / "workspace")
+    assert agent.home_paths.root.resolve() == home.resolve()
+    thread = agent.conversation_store.threads.get_or_create({
+        "channel": "local", "channel_conversation_id": "canonical-compact",
+        "channel_user_id": "local-agent", "canonical_user_id": "local-agent",
+        "owner_id": agent.home_paths.owner_id,
+        "owner_home_dir": str(agent.home_paths.owner_home_dir),
+    })
+    return agent, thread
+
+
+@pytest.mark.parametrize("with_image", [False, True])
+def test_compact_run_binds_canonical_thread_not_stale_surface(
+    canonical_compact_scene, tmp_path, monkeypatch, with_image,
+):
+    from agent_py_agent.agent.conversation import compact, compact_media_policy
+    from agent_py_agent.agent.conversation.compact_provider_surface import (
+        ConversationCompactModelSurface,
+        ConversationCompactProviderSurface,
+    )
+    from agent_py_agent.agent.conversation.input_media import (
+        import_input_media,
+        input_media_blocks,
+        input_media_root,
+    )
+    from agent_py_agent.agent.conversation.native_history import (
+        CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
+        canonical_native_messages_envelope,
+        provider_history_messages_from_rows,
+    )
+    from agent_py_agent.tests.test_media_compact_preflight import PNG
+
+    agent, thread = canonical_compact_scene
+    store = agent.conversation_store
+    metadata = {"conversation_request_id": "prior-request"}
+    if with_image:
+        png = tmp_path / "prior.png"
+        png.write_bytes(PNG)
+        image = input_media_blocks([import_input_media(png, input_media_root(agent))])
+        metadata[CANONICAL_NATIVE_MESSAGES_METADATA_KEY] = canonical_native_messages_envelope([
+            {"role": "user", "content": [{"type": "text", "text": "历史图"}, *image]},
+            {"role": "assistant", "content": "历史答复"},
+        ])
+    row = store.messages.append({
+        "thread_id": thread.thread_id, "role": "assistant", "content": "历史答复",
+        "metadata": metadata,
+    })
+    original = ConversationCompactModelSurface(thread_id="stale-thread")
+    request = compact._prepare_compact_request(
+        agent, store, thread, compact.ConversationCompactOptions(force=True, model_surface=original),
+    )
+    assert isinstance(request, compact._CompactRunRequest)
+    assert tuple(item.message_id for item in request.pending) == (row.message_id,)
+    captured = []
+    provider = ConversationCompactProviderSurface("prepared", None, "")
+    monkeypatch.setattr(compact, "prepare_conversation_compact_provider_surface",
+                        lambda agent, surface, *, run_id: captured.append(surface) or provider)
+    monkeypatch.setattr(compact_media_policy, "vision_capability_fact",
+                        lambda *_: pytest.fail("声明准备不得另发视觉探针"))
+    resolved = compact._resolved_provider_surface(request)
+    assert resolved.stable_prompt_prefix == "prepared"
+    if with_image:
+        assert resolved.transcript_prefix is None
+        assert resolved.media_decision.reason == "COMPACT_PREFIX_MEDIA_UNSUPPORTED"
+        assert resolved.media_decision.policy == "archived_refs"
+    else:
+        assert resolved.transcript_prefix is not None
+        assert resolved.transcript_prefix.source_ids == (row.message_id,)
+        assert list(resolved.transcript_prefix(request.pending)) == list(
+            provider_history_messages_from_rows(request.pending)
+        )
+    assert captured[0].thread_id == thread.thread_id
+    assert original.thread_id == "stale-thread"
+    assert store.threads.require(thread.thread_id).compact_generation == 0
+
+
+def test_empty_compact_source_does_not_prepare_unused_provider_prefix(
+    canonical_compact_scene, monkeypatch,
+):
+    from agent_py_agent.agent.agent_core import compact_transcript_prefix
     from agent_py_agent.agent.conversation import compact
     from agent_py_agent.agent.conversation.compact_provider_surface import (
         ConversationCompactModelSurface,
     )
 
-    original = ConversationCompactModelSurface(thread_id="stale-thread")
-    request = SimpleNamespace(provider_surface=None, model_surface=original, agent=object(), run_id="compact-one",
-                              thread=SimpleNamespace(thread_id="canonical-thread"))
-    captured = []
+    agent, thread = canonical_compact_scene
     monkeypatch.setattr(compact, "prepare_conversation_compact_provider_surface",
-                        lambda agent, surface, *, run_id: captured.append(surface) or "prepared")
-    assert compact._resolved_provider_surface(request) == "prepared"
-    assert captured[0].thread_id == "canonical-thread"
-    assert original.thread_id == "stale-thread"
+                        lambda *_args, **_kwargs: pytest.fail("空来源不应准备provider面"))
+    monkeypatch.setattr(compact_transcript_prefix, "capture_preflight_prefix",
+                        lambda *_args: pytest.fail("空来源不应构造冻结前缀"))
+    result = compact.prepare_conversation_context(
+        agent, agent.conversation_store, thread,
+        options=compact.ConversationCompactOptions(
+            force=True, model_surface=ConversationCompactModelSurface(thread_id="stale-thread"),
+        ),
+    )
+    assert result.compacted is False and result.messages == ()
+    assert result.thread.thread_id == thread.thread_id
+    assert agent.conversation_store.threads.require(thread.thread_id).compact_generation == 0

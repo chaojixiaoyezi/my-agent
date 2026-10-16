@@ -1,3 +1,54 @@
+## F1 网关减负集成增量（2026-10-16）
+
+2026-10-16 F2公平队列新增回归入口（产品复用原backends与Gateway模块）：
+
+```text
+|-- agent_py_agent/tests/test_provider_queue.py # 同owner顺序、跨owner公平、取消和资源归还
+|-- agent_py_agent/tests/test_provider_queue_transport.py # HTTP/WS物理准入、关闭、迟到与默认关闭路径
+|-- agent_py_agent/tests/test_provider_queue_entries.py # 可信owner与真实线程入口作用域
+|-- agent_py_agent/tests/test_provider_queue_projection.py # 原进度、计时和模型尝试账本投影
+`-- agent_py_agent/tests/test_provider_queue_config.py # 真配置规范化与模型不可改部署额度
+```
+
+关键文件：`backends/request_scope.py`持有本进程队列，`gateway_helpers.py`/`responses_websocket.py`围绕真实请求借还lease；不替换权限或建立跨进程配额。
+
+
+```text
+|-- agent_py_agent/agent/user_space/context_bundle_tool_manifest.py # 原快照工具清单的内容寻址、摘要v4及当前owner读口
+|-- agent_py_agent/agent/gateway_parts/progress_reader.py # 进度流有界稀疏位置索引、完整行读取及替换重建
+|-- agent_py_agent/agent/io/sqlite_connection.py # 请求scope内的物理连接和游标回收
+|-- agent_py_agent/agent/io/sqlite_lease.py # 当前借用租期与PID/线程边界
+|-- agent_py_agent/agent/io/sqlite_schema.py # 纯schema声明摘要及持久初始化标记
+|-- agent_py_agent/agent/io/sqlite_scope.py # 当前请求的有界连接生命周期和到期失效
+|-- agent_py_agent/tests/test_context_bundle_single_write.py # 单次真实写、无保存零写及精确事实
+|-- agent_py_agent/tests/test_context_bundle_tool_manifest.py # v2/v3旧内联与v4摘要、清单复用和归属
+|-- agent_py_agent/tests/test_context_bundle_snapshot_retention.py # 活动引用、任务保留及清理竞争
+|-- agent_py_agent/tests/test_gateway_io_update_dedup.py # 精确字节、原私有写状态及外部替换
+|-- agent_py_agent/tests/test_gateway_terminal_projection_scan.py # 追平节流、旧游标、欠账与持续积压推进
+|-- agent_py_agent/tests/test_gateway_progress_incremental.py # 行游标、增量字节、半行与同长改写
+|-- agent_py_agent/tests/test_gateway_sqlite_reuse.py # 正式配置、真实请求与owner拒绝
+|-- agent_py_agent/tests/test_sqlite_*.py # 连接/借用/游标/fork/schema/恢复及同条件计量测试组
+|-- agent_py_agent/tests/test_release_sqlite_integration.py # 原存储与lease同一次生命周期组合
+|-- agent_py_agent/tests/support/sqlite_*.py # 独立子进程和跨线程边界探针
+|-- scripts/diag/background_tick_cost.py # 原调度存储阶段同事实计量，不替代全Gateway容量测试
+|-- agent_py_agent/tests/test_background_tick_cheap_checks.py # 缓存原子快照、故障和失效预算
+|-- agent_py_agent/tests/test_background_tick_cost.py # 同输入时读量和连接次数对照
+|-- agent_py_agent/tests/test_background_tick_main_integration.py # 保留主调度取消、到点、事件与owner边界
+|-- agent_py_agent/tests/test_sandbox_output_capture.py # 双流排空、真实退出、取消、坏编码及高fd
+|-- agent_py_agent/tests/test_pack_verifier_capture_limit.py # stdout完整性及原解析前拒绝
+`-- agent_py_agent/tests/test_process_log_tail_limit.py # 同fd有限尾读及截断/错误事实
+```
+
+关键文件说明：清单和位置索引是原权威的可重建投影；SQLite lease仅管理生命周期，不授权owner或延迟规范提交。E4保留main原schema hash核验，未引入来源不可靠的免hash冻结快路。
+
+## 七块功能接手评估（2026-10-15）
+
+```text
+`-- docs/design/SEVEN_FEATURE_INTEGRATION.md # 固定候选对照、复用与冲突裁决、逐批合并及验收边界
+```
+
+关键文件说明：该文档记录接手评估，不代表七块已移植；原始对照与批次回执放仓外工件目录。
+
 ## 飞书图片与群监控增量（2026-10-15）
 
 ```text
@@ -225,6 +276,107 @@
 关键职责：输入引用是原TaskStore查找投影，原runtime wake_queue负责到期与恢复；秘密仍只在原受保护私人交互目录加密存储。CLI 不成为第二套权限或消息发送入口。
 
 # Codebase Tree
+
+## Tree
+
+2026-10-16 F4/F5 组合候选新增的重要模块与直接测试如下；这是本轮结构增量，后续原文件树与历史阶段保留。未列出的同组回归仍以测试目录为准，运行时资料不逐项列入。
+
+```text
+|-- agent_py_agent/
+|   |-- agent/
+|   |   |-- agent_core/
+|   |   |   `-- self_map_bootstrap.py # 在原 Agent 装配阶段接入只读自我目录，不创建服务或触发运行维护。
+|   |   |-- capability/
+|   |   |   |-- _agents_contract_fields.py # 提供三个冻结接口共同的结构化校验错误。
+|   |   |   |-- agents_control_ledger.py # 安全持久保存预览、直接确认原授权和一次性消费状态。
+|   |   |   |-- agents_learning_contract.py # 冻结可学习来源、自动化排除和子代理标签，不接候选库或curator。
+|   |   |   |-- agents_source_cache.py # 拆平HTTPS成功提交、last-good降级和冻结元数据复核，保持原控制文件与锁。
+|   |   |   |-- agents_source_configuration.py # 有界严格读回owner配置并精确验证唯一记录。
+|   |   |   |-- agents_source_contract.py # 冻结来源加载、缓存、配置 CAS 与前缀交接使用的数据结构。
+|   |   |   |-- agents_source_create.py # 防止默认文件缺失时绕过来源CAS、覆盖用户抢先创建的文件或误删外部正文。
+|   |   |   |-- agents_source_files.py # 固定每段目录/最终文件身份，从同一FD读写，并安全提交小型owner配置。
+|   |   |   |-- agents_source_host.py # 将唯一AGENTS来源服务接进现有宿主身份、参数和权限裁决。
+|   |   |   |-- agents_source_limits.py # 拦住超过注入预算的新增，同时让历史超限正文仍能受控缩小。
+|   |   |   |-- agents_source_load_contract.py # 给来源正文与元数据一个不可变、可校验的交接包。
+|   |   |   |-- agents_source_local.py # 拆平同FD本地写回，不改变CAS/摘要/权限/硬帽检查顺序。
+|   |   |   |-- agents_source_network.py # 安全读取 HTTPS 来源，并返回供缓存逐跳重新授权的不可变原字节结果。
+|   |   |   |-- agents_source_options.py # 用一个不可变依赖集合绑定开关、URL许可、严格传输和活path policy。
+|   |   |   |-- agents_source_processes.py # 用结构化来源版本给宿主进程绑定边界并在提交前请求原注册表退役，不检查stdin文本。
+|   |   |   |-- agents_source_publish.py # 把完整正文一次发布到缺失的默认来源，并保留可验证的回滚FD。
+|   |   |   |-- agents_source_read_lock.py # 协调同进程来源读写并保留无副作用读取。
+|   |   |   |-- agents_source_repository.py # 管理默认和显式本地来源的安全加载及受授权写入；URL由独立传输模块加载，不授予额外权限。
+|   |   |   |-- agents_source_rollback.py # 消除校验到unlink之间的公开路径替换竞态，冲突时保留外部数据。
+|   |   |   |-- agents_source_switch.py # 拆平配置提交前后校验和资源退役，保持唯一来源仓库的小步事务。
+|   |   |   |-- agents_write_contract.py # 冻结用户本人明确写入请求与宿主核对上下文。
+|   |   |   |-- agents_write_service.py # TUI/IM共享AGENTS预览→确认→一次提交，身份由宿主绑定。
+|   |   |   |-- memory_tool_recovery.py # 为记忆工具接续删除遗留清理并投影准确提交事实。
+|   |   |   |-- persona_body_transaction.py # 提交普通人格正文并在失败时只撤回本事务拥有的文件。
+|   |   |   |-- persona_snapshot_transaction.py # 准备人格版本快照并提供条件回滚材料。
+|   |   |   |-- persona_storage_io.py # 安全读写人格版本与快照的底层文件。
+|   |   |   |-- persona_version_ledger.py # 原子发布人格版本记录并保留可恢复的事务边界。
+|   |   |   |-- self_map_memory.py # 登记记忆、Persona和学习组件的安全元信息、数量未知原因及原读入口。
+|   |   |   `-- self_map_skills.py # 登记普通方法、数量和管理员权威位置，保留stable_id及合法正文入口。
+|   |   |-- conversation/
+|   |   |   |-- learning_source.py # 构造、解码学习来源投影，并从线程与消息推导当次有效来源事实。
+|   |   |   |-- self_map_context.py # 登记上下文和 Compact 的只读元数据。
+|   |   |   `-- self_map_work.py # 登记本 owner 与当前代理的工作元信息，正文和唤醒/维护副作用不进入目录。
+|   |   |-- gateway_parts/
+|   |   |   |-- agents_control_service.py # 沿现有公共控制链提供同owner的规则来源、预览与一次确认，保留原HostActor和群配置租约。
+|   |   |   |-- memory_candidate_control.py # 让本人在IM或终端查看并准确确认记忆候选，普通/memory搜索仍走原入口。
+|   |   |   `-- memory_candidate_review.py # 绑定候选完整版本和目标CAS，先耐久消费再准确审核提交；未知永不重放。
+|   |   |-- memory_store/
+|   |   |   |-- _jsonl_maintenance.py # 验证维护源并携带是否真正读到文件的事实，保护破坏性派生重建。
+|   |   |   |-- candidate_commit_lock.py # 协调候选提交和正式删除后的同步清理。
+|   |   |   |-- candidate_source_coverage.py # 让多次候选合并可补齐同引用来源，同时永久保留显式来源否决。
+|   |   |   |-- candidate_target_binding.py # 防止旧消息或工具证据借改写候选、切换动作或入口重新取得正式目标版本。
+|   |   |   |-- curator_learning_source.py # 为策展候选绑定完整引用集合的学习资格。
+|   |   |   |-- curator_promotion_receipts.py # 为策展运行保留不含私密正文的晋升摘要。
+|   |   |   |-- curator_rejected_bindings.py # 阻止同一被拒证据通过重放刷新正式目标版本。
+|   |   |   |-- evidence_admission.py # 拦住失败、未知或身份不完整的工具事实来源。
+|   |   |   |-- learning_source_authority.py # 为直接记忆与策展路径取得一致的宿主学习来源。
+|   |   |   `-- promotion_remove_recovery.py # 在重启和故障后收拾已删除记忆的候选与派生残留。
+|   |   |-- plugin_self_map.py # 分开能力包安装/构建/普通方法及插件库存，提供权威位置，不复制授权状态。
+|   |   |-- settings/
+|   |   |   `-- self_map_settings.py # 登记模型库存和有效配置元数据，普通用户只开放原 decision-only 面。
+|   |   |-- tooling/
+|   |   |   |-- pty_process_lifecycle.py # 保留真实PTY组长的内核退出身份供原注册表清退，不用根退出推断整树死亡。
+|   |   |   |-- self_map_availability.py # 以同一纯判据决定本次模型输入是否可提示self_map入口。
+|   |   |   |-- self_map_display.py # 给自我目录提供短行、共享精确详情模板及数量/完整性说明，不读盘或保存状态。
+|   |   |   |-- self_map_mcp.py # 登记 MCP 配置、连接和发布状态；配置与本机 transport 观测分别计数。
+|   |   |   |-- self_map_registry.py # 提供自我目录登记、只读上下文和分页来源合同，新领域只需登记 reader。
+|   |   |   |-- self_map_tool.py # 以短总览、分块分页和精确条目回答关于代理自己的问题。
+|   |   |   `-- self_map_tools.py # 为自我目录登记当前授权工具的用途、来源、展开及不可用原因。
+|   |   `-- user_space/
+|   |       `-- self_map_paths.py # 登记目录与权限分块，区分模型直写、宿主专用入口与未知观测。
+|   `-- tests/
+|       |-- memory_confirmation_fixtures.py # 仅测试临时owner和原人工确认链的隔离helper
+|       |-- test_agents_control_transport.py # 当前用户封印、真实控制回执与作用域还原
+|       |-- test_agents_source_lifecycle_review39.py # 来源切换、资源退役与未知状态
+|       |-- test_agents_source_mount_order.py # 人格祖先与原hidden/拒写/精确授权的纯argv组合合同
+|       |-- test_agents_source_repository.py # 唯一来源配置与读写权限及缓存身份
+|       |-- test_agents_source_closed_owner_host.py # closed宿主重建与来源活许可、修复和再次撤销
+|       |-- test_agents_source_sandbox_cli.py # 模块定义顺序与fake binary的真实CLI子进程回归
+|       |-- test_agents_write_contract.py # 精确意图、owner/actor/有效期及正文版本
+|       |-- test_memory_candidate_control.py # 本人候选控制真实临时认证、CAS、unknown、并发与完整显示
+|       |-- test_memory_remove_recovery_guards.py # 删除墓碑恢复和派生坏库不假成功
+|       |-- test_memory_user_confirmation.py # 来源资格不代替正式内容确认
+|       |-- test_self_map_contract.py # 领域、分页、未知事实、路径与原权限负例
+|       |-- test_self_map_model_surface.py # 普通/Compact资格、关闭开关与main媒体保留
+|       `-- test_self_map_runtime.py # 正式工具执行、撤回、cursor与fake LLM/replay
+`-- docs/
+    `-- design/
+        `-- SELF_MAP.md # 自我目录公开读口、权限、完整性与导航合同
+```
+
+## 关键文件说明
+
+- `agent_py_agent/tests/test_agents_source_closed_owner_host.py`：以真实本机与普通 owner 验证来源构造不签权、坏权限不读正文或缓存，修复后按活策略恢复。
+
+- `agents_source_repository` 是本人规则来源读写组合入口；configuration 只给配置元信息，load/缓存与实时权限各有原合同。`agents_write_service` 与原用户控制回执负责精确预览和一次消费，不能从模型文字重建授权。
+- `memory_candidate_control`/`memory_candidate_review` 组合原认证、owner/HostActor、候选与 promotion 服务；nonce 沿原 Gateway preview receipt，无第二正式库或审批账。来源覆盖、目标绑定和删除恢复继续落原唯一候选/正式记录。
+- `self_map_bootstrap` 只装配领域 reader；`self_map_registry/tool/display` 提供原范围内的聚合、完整性与分页，实际权限、库存、状态和正文读取各归原模块。F5 不代替 list_tools/tool_search，不新增网络、执行或授权入口。
+- 本轮详细边界见[规则归属](docs/design/PERSONA_AGENTS_OWNERSHIP.md)、[自我目录](docs/design/SELF_MAP.md)和[集成设计](docs/design/SEVEN_FEATURE_INTEGRATION.md)。最终组合 gate、真实入口和发布未由文件已存在推断为完成。
+
 
 2026-10-13 安全追加的新入口（只复用原配置、权限和凭据账）：
 
@@ -980,6 +1132,7 @@ agent_py_agent/
 |   |   |-- tool_request_capture.py    # 从真实运行参数共用捕获完整请求，不重复目录或上下文准备
 |   |   |-- tool_only_execution.py     # 宿主只读工具工作片，沿原身份、权限、取消令牌和收口
 |   |   |-- compact_request_recovery.py # 三宿主一次准备、完整候选计量和原CAS后同次发送
+|   |   |-- compact_transcript_prefix.py # 同次主请求连续历史前缀与受保护事实边界验证
 |   |   |-- compact_active_projection.py # 精确保留IR与归档交接投影，保留原工具账和媒体插话
 |   |   |-- compact_tool_partition.py # 原生工具完整往返与归档同源分区，不完整和未知材料保留
 |   |   |-- subagent/compact_recovery.py # child独立历史与固定注入位置到公共完整恢复器的适配
@@ -1591,6 +1744,14 @@ agent_py_agent/
 |   |-- test_compact_remote_provider.py  # 服务端压缩：触发项/压缩项线层、远端助手回退、检查点与视图兼容性、live 摘要走远端
 |   |-- test_midturn_compact_prefix.py  # 回合中途密文/文本摘要两回合前缀延伸与辅助压缩同源投影
 |   |-- test_compactcall_websocket.py  # 订阅WS完整头体、自动preflight/live缓存路由和粘性工具边界
+|   |-- test_transcript_compact_prefix.py # 同源连续覆盖、工具配对与当前宿主媒体保护
+|   |-- test_compact_prefix_fallback.py # 容量优化可解除与原小窗口分段可用性
+|   |-- test_compact_prefix_lifetime.py # 前缀容量下界、校准边界与发布前旧历史释放
+|   |-- test_compact_single_empty_repair.py # 完整空摘要有界一次重试及异常不重试
+|   |-- test_context_usage_binding.py # 真实采样绑定、迟到CAS与跨store/thread隔离
+|   |-- test_f7_request_surface_contract.py # 三协议缓存表面、宿主图与当前工具权限
+|   |-- test_f7_usage_accounting_contract.py # 主摘要分账、未知缓存与物理尝试和耗时
+|   |-- test_f7_queued_compact_contract.py # F6媒体摘要经F2公平队列到原checkpoint同链
 |   |-- test_thread_tool_discovery.py  # 线程累计加载的兼容序列化、身份隔离和原子恢复
 |   |-- test_tui_status_line_display.py  # 状态行布局（2026-10-08）：总缓存两位小数、累计会话只算输入、决策（关闭/观察/实际）、速度按整次调用时长、Context 行模型名与思考档位
 |   |-- test_compact_cache_surface_fit.py  # 压缩请求装进窗口：输出预留同源、超预算先瘦身再单次、Responses configuration_update 降档、会话累计命中率
@@ -2958,3 +3119,17 @@ agent_py_agent/tests/
 docs/tasks/
 `-- CI_BASELINE_REPAIR_20261016.md         # 上轮main CI失败分组、真实修复与验证边界
 ```
+
+- `agent_core/compact_transcript_prefix.py` 只校验同次主投影与连续覆盖，不签发权限；`test_context_usage_binding.py` 与三个 `test_f7_*_contract.py` 验证采样CAS和当前缓存/队列账本。
+
+## 六项统一验收支持（2026-10-16）
+
+```text
+agent_py_agent/tests/
+|-- test_compact_independent_contracts.py # 连续前缀、媒体屏障、有界恢复与迟到上下文统计的独立回归
+`-- support/
+    |-- ci_cli_owner_fixtures.py # CLI旧替身使用真实临时owner路径，不补造权限
+    `-- ci_release_layout.py # 源码/正式pyc布局的准确来源与子进程校验
+```
+
+上述测试支持只服务隔离验收；不是新的产品权限、记忆或运行时权威。

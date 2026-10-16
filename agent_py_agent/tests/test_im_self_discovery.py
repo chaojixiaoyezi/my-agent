@@ -111,7 +111,7 @@ def test_short_manifest_retains_purpose_and_always_grant_contract(tmp_path):
 
 def test_worker_creation_intersects_actual_parent_and_keeps_discovery(tmp_path):
     agent = _agent(tmp_path)
-    parent_tools = ['list_tools', 'tool_search', 'read_file', 'create_subagents', 'run_command']
+    parent_tools = ['list_tools', 'tool_search', 'self_map', 'read_file', 'create_subagents', 'run_command']
     parent = agent.tools.runtime_snapshot(allowed_tools=parent_tools, run_id='parent')
     with bind_creation_tool_authority(parent):
         params = create_run_params(agent, {'goal': '执行已授权任务', 'role': 'worker'}, '执行已授权任务', subagent_allowed_tools({}))
@@ -126,7 +126,7 @@ def test_worker_creation_intersects_actual_parent_and_keeps_discovery(tmp_path):
 
 def test_default_worker_inherits_parent_cloud_credentials_message_but_read_only_does_not(tmp_path):
     agent = _agent(tmp_path)
-    tools = ['list_tools', 'tool_search', 'read_file', 'request_credentials', 'feishu_cloud', 'send_message']
+    tools = ['list_tools', 'tool_search', 'self_map', 'read_file', 'request_credentials', 'feishu_cloud', 'send_message']
     # 可用性替身仅代表已配外部依赖，创建与角色合同仍用真实 immutable registry 快照。
     for name in ['request_credentials', 'feishu_cloud', 'send_message']:
         agent.tools.tools[name].availability = lambda: ToolAvailability(True)

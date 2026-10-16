@@ -6,6 +6,8 @@ from __future__ import annotations
 # 模块用途: 幂等合并观察、审核状态转换、晋升标记、过期和硬删除正文清理。
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ from ..common.json_io import (
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.text_norm import fold_key
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaEnforcer
+from .candidate_commit_lock import candidate_commit_lock, candidate_redaction_lock
 from .candidate_models import (
     CANDIDATE_ORIGINS,
     CANDIDATE_SCHEMA_VERSION,
@@ -35,10 +38,18 @@ from .candidate_models import (
     normalize_iso_time,
     normalize_reference_list,
     normalize_string_list,
+    normalize_target_entry_version,
     stable_candidate_id,
     stable_observation_key,
     utc_now_iso,
+    versioned_candidate_id,
 )
+from .candidate_source_coverage import (
+    initial_source_coverage,
+    merge_source_coverage,
+    source_coverage_projection,
+)
+from .candidate_target_binding import TargetEvidenceVersionBindings, binding_history
 from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
 
@@ -53,6 +64,16 @@ class CandidateStoreCorruptError(RuntimeError):
 # 类用途: 表示一次不在统一状态图中的非法审核或晋升转换。
 class CandidateTransitionError(RuntimeError):
     pass
+
+
+# LLM: 表示候选快照已变，不自动重试或把新内容继承为已审核；调用方应重新核对。
+# 类用途: 区分候选并发变更与目标库版本冲突。
+class CandidateStateChangedError(RuntimeError):
+    # LLM: 只携带当前状态用于稳定拒绝回执，不修改候选。
+    # 函数用途: 保存并发变更后的候选状态。
+    def __init__(self, status: str):
+        super().__init__("candidate changed after verification")
+        self.status = status
 
 
 # LLM: Service 只接收结构化 observation/review；不解析聊天正文或相似文本。
@@ -92,6 +113,16 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission)
                 return committed
 
+    # LLM: 结构已校验；好观察先原子合并，坏观察只可新建阻塞行而绝不修改同ID旧行，全批只落盘一次。
+    # 函数用途: 保留首次缺证据候选的可修复回执，同时禁止借证据与坏操作污染。
+    def observe_evidence_batch(self, observations: list, failures: list[str]) -> list:
+        from .evidence_admission import assemble_evidence_batch
+
+        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+            rows, results = assemble_evidence_batch(self._load_unlocked(), observations, failures)
+            _write_candidates_unlocked(self.path, rows, admission=admission)
+            return results
+
     # LLM: 读取同样严格解析全部行；状态/内容过滤只在完整事实集验证后执行。
     # 函数用途: 列出候选，可按状态过滤并保留确定性创建顺序。
     def list(
@@ -116,11 +147,44 @@ class CandidateService:
                 return item
         raise KeyError(target)
 
-    # LLM: 审核只能走统一有向状态边；reviewer/note 随记录保存，不能另建 decision ledger。
+    # LLM: 调用方已持quota→policy；候选锁覆盖快照核对和正式写入，期间不能合并/审核该候选。
+    # 函数用途: 为最终提交锁定已验证的完整候选快照。
+    @contextmanager
+    def locked_snapshot(self, expected: MemoryCandidate) -> Iterator[MemoryCandidate]:
+        with candidate_commit_lock(self.path):
+            rows = self._load_unlocked()
+            current = next((row for row in rows if row.candidate_id == expected.candidate_id), None)
+            if current != expected:
+                raise CandidateStateChangedError(current.status if current is not None else "missing")
+            yield current
+
+    # LLM: 只补尚未指定的长期落点；调用方已用统一目标政策判断，完整快照CAS先于任何字段写入。
+    # 函数用途: 同状态下持久化默认目标，不放开通用状态机或改写终态候选。
+    def fill_long_term_target(self, expected: MemoryCandidate, reviewer: str) -> MemoryCandidate:
+        actor = str(reviewer or "").strip()
+        if not actor:
+            raise ValueError("candidate reviewer is required")
+        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+            rows = self._load_unlocked()
+            index = _candidate_index(rows, expected.candidate_id)
+            current = rows[index]
+            if current != expected:
+                raise CandidateStateChangedError(current.status)
+            if (current.promotion_target not in {"", "none"}
+                    or current.status in TERMINAL_CANDIDATE_STATUSES):
+                return current
+            now = utc_now_iso()
+            rows[index] = replace(current, promotion_target="long_term", updated_at=now,
+                status_history=[*current.status_history,
+                    _status_event(current.status, actor=actor, note="default_long_term_target", at=now)])
+            _write_candidates_unlocked(self.path, rows, admission=admission)
+            return rows[index]
+
+    # LLM: 字符串保持旧审核入口；传完整候选则锁内CAS后转换，改目标ID仍清除旧版本，不新增授权来源。
     # 函数用途: 推进候选状态并可补充替换目标、冲突和晋升落点。
     def transition(
         self,
-        candidate_id: str,
+        candidate_id: str | MemoryCandidate,
         target_status: str,
         *,
         reviewer: str,
@@ -130,6 +194,8 @@ class CandidateService:
         conflicts_with: list[str] | tuple[str, ...] | None = None,
         promotion_target: str | None = None,
     ) -> MemoryCandidate:
+        expected = candidate_id if isinstance(candidate_id, MemoryCandidate) else None
+        candidate_id = expected.candidate_id if expected is not None else candidate_id
         target = str(target_status or "").strip().lower()
         actor = str(reviewer or "").strip()
         if not actor:
@@ -139,6 +205,8 @@ class CandidateService:
                 candidates = self._load_unlocked()
                 index = _candidate_index(candidates, candidate_id)
                 current = candidates[index]
+                if expected is not None and current != expected:
+                    raise CandidateStateChangedError(current.status)
                 if target == current.status:
                     return current
                 if not candidate_transition_allowed(current.status, target):
@@ -148,6 +216,7 @@ class CandidateService:
                 now = utc_now_iso()
                 updated = replace(
                     current,
+                    target_evidence_bindings=binding_history(current),
                     status=target,
                     reviewer=actor,
                     review_note=str(review_note or "").strip(),
@@ -161,6 +230,11 @@ class CandidateService:
                         str(target_entry_id or "").strip()
                         if target_entry_id is not None
                         else current.target_entry_id
+                    ),
+                    target_entry_version=(
+                        None if target_entry_id is not None and
+                        str(target_entry_id or "").strip() != current.target_entry_id
+                        else current.target_entry_version
                     ),
                     conflicts_with=(
                         normalize_string_list(conflicts_with)
@@ -191,46 +265,26 @@ class CandidateService:
         promotion_ref: str,
         review_note: str = "",
     ) -> MemoryCandidate:
-        ref = str(promotion_ref or "").strip()
+        with _quota_admission(self.quota_enforcer) as admission:
+            return self.mark_promoted_admitted(candidate_id, admission,
+                (reviewer, promotion_ref, review_note))
+
+    # LLM: 晋升提交复用准入/候选锁；remove终态与同hash正文脱敏必须在同一次原子替换中落盘。
+    # 函数用途: 提交不会留下“已晋升但未脱敏”中间状态的候选终态。
+    def mark_promoted_admitted(self, candidate_id, admission, review: tuple[str, str, str]):
+        ref = str(review[1] or "").strip()
         if not ref:
             raise ValueError("promotion_ref is required")
-        with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
-                candidates = self._load_unlocked()
-                index = _candidate_index(candidates, candidate_id)
-                current = candidates[index]
-                if current.status == "promoted":
-                    if current.promotion_ref != ref:
-                        raise CandidateTransitionError(
-                            "promoted candidate cannot be rebound to a different ref"
-                        )
-                    return current
-                if not candidate_transition_allowed(current.status, "promoted"):
-                    raise CandidateTransitionError(
-                        f"candidate transition {current.status} -> promoted is not allowed"
-                    )
-                now = utc_now_iso()
-                updated = replace(
-                    current,
-                    status="promoted",
-                    reviewer=str(reviewer or "promotion-service").strip(),
-                    review_note=str(review_note or "").strip(),
-                    promoted_at=now,
-                    promotion_ref=ref,
-                    updated_at=now,
-                    status_history=[
-                        *current.status_history,
-                        _status_event(
-                            "promoted",
-                            actor=str(reviewer or "promotion-service"),
-                            note=review_note,
-                            at=now,
-                        ),
-                    ],
-                )
-                candidates[index] = updated
-                _write_candidates_unlocked(self.path, candidates, admission=admission)
-                return updated
+        with candidate_redaction_lock(self.path):
+            candidates = self._load_unlocked()
+            index = _candidate_index(candidates, candidate_id)
+            current = candidates[index]
+            _require_promotable_binding(current, ref)
+            if current.status == "promoted" and current.proposed_action != "remove":
+                return current
+            rows = _promoted_rows(candidates, index, review)
+            _write_candidates_unlocked(self.path, rows, admission=admission)
+            return rows[index]
 
     # LLM: Hard delete 清正文但保留 hash/id/status 审计，不得改写 ConversationStore 原话。
     # 函数用途: 清除与已硬删除长期记忆相同的候选正文。
@@ -258,7 +312,7 @@ class CandidateService:
         if not hashes:
             return 0
         now = utc_now_iso()
-        with locked_json_path(self.path):
+        with candidate_redaction_lock(self.path):
             candidates = self._load_unlocked()
             replacements = [
                 _redacted_candidate(item, hashes=hashes, excluded=excluded,
@@ -297,12 +351,14 @@ class CandidateService:
         cutoff = before.astimezone(timezone.utc)
         result: list[str] = []
         for item in self.list(statuses={"rejected", "expired", "superseded"}):
+            if _is_binding_tombstone(item):
+                continue
             if datetime.fromisoformat(item.updated_at) < cutoff:
                 result.append(item.candidate_id)
         return result
 
-    # LLM: 删除候选必须精确 ID 且只允许 retention 终态；不能用正文或自然语言范围。
-    # 函数用途: 应用候选 retention 删除并返回实际删除数量。
+    # LLM: 精确ID且仅retention终态；带版本绑定的行必须脱敏留约束，不能硬删后重新授权旧证据。
+    # 函数用途: 清理终态候选正文与引用，返回本次实际清理条数。
     def delete_terminal(self, candidate_ids: list[str] | tuple[str, ...]) -> int:
         ids = set(normalize_string_list(candidate_ids))
         if not ids:
@@ -319,8 +375,7 @@ class CandidateService:
                         raise CandidateTransitionError(
                             f"candidate {item.candidate_id} is not retention-terminal"
                         )
-                retained = [item for item in candidates if item.candidate_id not in ids]
-                deleted = len(candidates) - len(retained)
+                retained, deleted = _retention_records(candidates, ids)
                 if deleted:
                     _write_candidates_unlocked(self.path, retained, admission=admission)
                 return deleted
@@ -373,58 +428,65 @@ class CandidateIdentityConflictError(ValueError):
     pass
 
 
-# LLM: Curator batch commit and the ordinary observe_many path share this exact pure merge;
-# neither may invent a second candidate ID or occurrence-count rule.
-# 函数用途: 将一批 observation 合并进已验证账本并返回新的完整账本和对应当前态。
+# LLM: 两个提交入口共用纯合并；先按规范证据及精确目标校验版本，再按候选/观察身份合并。
+#   正文、动作、入口和引用并集不刷新旧绑定；首拒草稿只保留版本责任，不赋予其范围条件/观察键占据合法身份的权力。
+#   同批观察依次累积；已晋升或脱敏行不属于首拒草稿，失败仍不写任何账本。
+# 函数用途: 将一批 observation 合并进已验证账本，先核对既有观察权威再返回完整新账本。
 def merge_candidate_observations(
     candidates: list[MemoryCandidate],
     observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
 ) -> tuple[list[MemoryCandidate], list[MemoryCandidate]]:
     prepared = _prepare_observations(observations)
     result = list(candidates)
+    bindings = TargetEvidenceVersionBindings(result)
     committed: list[MemoryCandidate] = []
     for normalized, candidate_id, observation_key in prepared:
-        by_id = {item.candidate_id: item for item in result}
-        existing = by_id.get(candidate_id)
-        if existing is None:
-            existing = next(
-                (
-                    item
-                    for item in result
-                    if observation_key in item.observation_keys
-                ),
-                None,
+        if bindings.conflicts(normalized):
+            raise CandidateIdentityConflictError("candidate evidence cannot refresh target observation version")
+        matches = [item for item in result
+                   if observation_key in item.observation_keys and not _rejected_draft(item)]
+        if any(not _same_candidate_identity(item, normalized) for item in matches):
+            raise CandidateIdentityConflictError(
+                "candidate observation identity was reused for a different typed subject"
             )
+        by_id = {item.candidate_id: item for item in result}
+        existing = by_id.get(candidate_id) or next(iter(matches), None)
         if existing is None:
             candidate = _new_candidate(normalized, candidate_id, observation_key)
             result.append(candidate)
         else:
-            if not _same_candidate_identity(existing, normalized):
+            if not _rejected_draft(existing) and not _same_candidate_identity(existing, normalized):
                 raise CandidateIdentityConflictError(
                     "candidate observation identity was reused for a different typed subject"
                 )
             candidate = _merge_candidate(existing, normalized, observation_key)
             result[result.index(existing)] = candidate
+        bindings.add(normalized)
         committed.append(candidate)
     return result, committed
 
 
-# LLM: An observation replay may paraphrase content, but it cannot change the typed candidate
+# LLM: 同一观察可改述但不能换主题、范围、动作或目标版本；独立证据才能基于新目标版本创建观察。
 # subject, scope, action, target, or promotion authority behind the same host identity.
 #   主题键与范围必须按与身份计算（stable_candidate_id 的 fold_key、Curator 观察身份的规范范围键）同一口径比较：
 #   只差大小写/书写形式的主题不能被当成“另一个主题”而让整批提交失败（J13，2026-10-02）。
+# LLM: 同一观察也不得改绑正式目标版本；需要基于新版本的独立观察，不能重放旧证据刷新覆盖权。
 # 函数用途: 判断一个已存在候选是否可安全接收同 observation key 的重放。
 def _same_candidate_identity(
     current: MemoryCandidate,
     observation: CandidateObservation,
 ) -> bool:
+    from .candidate_models import effective_promotion_target
+
     return (
         current.candidate_type == observation.candidate_type
         and fold_key(current.subject_key) == fold_key(observation.subject_key)
         and _identity_scope(current.scope) == _identity_scope(observation.scope)
         and current.proposed_action == observation.proposed_action
         and current.target_entry_id == observation.target_entry_id
-        and current.promotion_target == observation.promotion_target
+        and current.target_entry_version == observation.target_entry_version
+        and effective_promotion_target(current.promotion_target, current.origin, current.candidate_type)
+        == effective_promotion_target(observation.promotion_target, observation.origin, observation.candidate_type)
     )
 
 
@@ -458,8 +520,8 @@ def split_identity_conflicts(
     return tuple(kept), len(observations) - len(kept)
 
 
-# LLM: Complete validation happens before the caller writes any ledger, preserving batch
-# all-or-nothing behavior for both standalone and Curator transactions.
+# LLM: 整批输入在任何候选写入前完成校验；目标版本属于观察身份，坏批次不得部分落盘。
+# all-or-nothing behavior for both standalone and Curator transactions; target versions are part of mutation identity.
 # 函数用途: 规范化 observation 并预先计算稳定 candidate/observation 身份。
 def _prepare_observations(
     observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
@@ -477,15 +539,46 @@ def _prepare_observations(
             proposed_action=normalized.proposed_action,
             target_entry_id=normalized.target_entry_id,
         )
+        if normalized.proposed_action in {"replace", "remove", "merge"}:
+            candidate_id = versioned_candidate_id(candidate_id, normalized.target_entry_version)
         prepared.append(
             (normalized, candidate_id, stable_observation_key(normalized, candidate_id))
         )
     return prepared
 
 
-# LLM: Hard-delete redaction is a pure per-row decision so lock/IO nesting stays shallow and
-# every retained audit field is explicit.
-# 函数用途: 对命中 hash 的候选清正文并在需要时转为 superseded。
+# LLM: 调用方已持候选锁；已晋升引用不可改绑，其余状态只按唯一状态机裁决。
+# 函数用途: 拒绝非法终态提交并保持幂等绑定。
+def _require_promotable_binding(current: MemoryCandidate, ref: str) -> None:
+    if current.status == "promoted":
+        if current.promotion_ref != ref:
+            raise CandidateTransitionError("promoted candidate cannot be rebound to a different ref")
+        return
+    if not candidate_transition_allowed(current.status, "promoted"):
+        raise CandidateTransitionError(f"candidate transition {current.status} -> promoted is not allowed")
+
+
+# LLM: 调用方已核验状态转换并持候选锁；新promoted和remove脱敏生成同一待写快照，未写前不改正式事实。
+# 函数用途: 一次组装晋升终态及其必须清除的全部同hash隐私。
+def _promoted_rows(candidates, index, review):
+    reviewer, promotion_ref, review_note = review
+    rows = list(candidates)
+    current = rows[index]
+    now = utc_now_iso()
+    if current.status != "promoted":
+        rows[index] = replace(current, status="promoted", reviewer=str(reviewer or "promotion-service").strip(),
+            review_note=str(review_note or "").strip(), promoted_at=now,
+            promotion_ref=str(promotion_ref).strip(), updated_at=now,
+            status_history=[*current.status_history,
+                _status_event("promoted", actor=str(reviewer or "promotion-service"), note=review_note, at=now)])
+    if current.proposed_action == "remove":
+        rows = [_redacted_candidate(row, hashes={current.content_hash}, excluded=set(),
+                    reviewer=reviewer, now=now) or row for row in rows]
+    return rows
+
+
+# LLM: 硬删除先冻结版本约束，再清除正文、引用quote、来源自由文本和历史审核note；不依赖retention后补。
+# 函数用途: 将命中hash的候选脱敏，活跃候选按原状态机转为superseded。
 def _redacted_candidate(
     item: MemoryCandidate,
     *,
@@ -494,31 +587,22 @@ def _redacted_candidate(
     reviewer: str,
     now: str,
 ) -> MemoryCandidate | None:
-    if item.candidate_id in excluded or item.content_hash not in hashes or not item.content:
+    if item.candidate_id in excluded or item.content_hash not in hashes:
         return None
-    target = item.status
-    history = list(item.status_history)
-    if item.status not in TERMINAL_CANDIDATE_STATUSES:
-        target = "superseded"
-        if candidate_transition_allowed(item.status, target):
-            history.append(
-                _status_event(
-                    target,
-                    actor=reviewer,
-                    note="正文随正式记忆硬删除清除，仅保留 hash。",
-                    at=now,
-                )
-            )
-    return replace(
-        item,
-        content="",
-        status=target,
-        reviewer=reviewer,
-        review_note="正文随正式记忆硬删除清除，仅保留 hash。",
-        updated_at=now,
-        content_redacted_at=now,
-        status_history=history,
-    )
+    if not any((item.content, item.evidence_refs, item.source_message_refs, item.source_tool_refs,
+                item.source_artifact_refs, item.source_task_ids, item.source_run_ids,
+                item.learning_source, item.learning_source_coverage)):
+        return None
+    target = item.status if item.status in TERMINAL_CANDIDATE_STATUSES else "superseded"
+    history = [{**event, "note": ""} for event in item.status_history]
+    note = "正文及引用随正式记忆硬删除清除，仅保留身份与版本约束。"
+    if target != item.status and candidate_transition_allowed(item.status, target):
+        history.append(_status_event(target, actor=reviewer, note=note, at=now))
+    return replace(item, content="", status=target, reviewer=reviewer, review_note=note,
+        updated_at=now, content_redacted_at=now, status_history=history,
+        target_evidence_bindings=binding_history(item), evidence_refs=[], source_message_refs=[],
+        source_tool_refs=[], source_artifact_refs=[], source_task_ids=[], source_run_ids=[],
+        learning_source={}, learning_source_coverage={})
 
 
 # LLM: quota 锁必须先于候选文件锁，和其他 owner 仓库保持统一锁序。
@@ -593,7 +677,7 @@ def _mark_excluded_candidates(
     return changed
 
 
-# LLM: 候选初次观察先记录 observed，再以同一状态图进入 pending/blocked，不允许直接 approved。
+# LLM: 初次观察保存来源覆盖并走统一初审；观察版本原样持久化，不在入库或晋升时重读当前版本。
 # 函数用途: 构造一条新候选当前态和完整初始状态历史。
 def _new_candidate(
     observation: CandidateObservation,
@@ -603,6 +687,7 @@ def _new_candidate(
     now = utc_now_iso()
     observed_at = normalize_iso_time(observation.observed_at, default=now, allow_empty=False)
     status = _initial_review_status(observation)
+    coverage = initial_source_coverage(observation)
     history = [_status_event("observed", actor="candidate-service", note="", at=now)]
     if status != "observed":
         history.append(
@@ -635,9 +720,12 @@ def _new_candidate(
         confidence=float(observation.confidence),
         proposed_action=observation.proposed_action,
         target_entry_id=observation.target_entry_id,
+        target_entry_version=observation.target_entry_version,
         conflicts_with=normalize_string_list(observation.conflicts_with),
         promotion_target=observation.promotion_target,
         promotion_mode=observation.promotion_mode,
+        learning_source=source_coverage_projection(coverage),
+        learning_source_coverage=coverage,
         status=status,
         reviewer="candidate-service" if status.startswith("blocked_") else "",
         review_note=_initial_review_note(status),
@@ -652,14 +740,35 @@ def _new_candidate(
     )
 
 
-# LLM: Merge may repair only a missing-evidence origin when a new canonical ref supports the
-# replacement origin; terminal state, review decisions, and promotion refs remain immutable.
-# 函数用途: 幂等合并同一候选；仅允许被缺证据卡住的来源用新结构化消息/工具引用纠正。
+# LLM: 只有宿主证据门从未接受且未脱敏/晋升的草稿可重建；它仍贡献目标版本约束，但不占用合法业务身份。
+# 函数用途: 区分可以重新申请的拒绝草稿与已有正式历史的候选。
+def _rejected_draft(current: MemoryCandidate) -> bool:
+    return (current.status == "blocked_missing_evidence" and current.reviewer == "evidence_gate"
+            and not current.content_redacted_at and not current.promotion_ref)
+
+
+# LLM: 首拒草稿仅用新证据重建；拒绝历史及旧来源—目标版本约束保留，旧引用/覆盖不贡献晋升资格。
+# 函数用途: 用独立新观察重新申请同一候选，避免一次失败证据永久污染后续合法重试。
+def _retry_rejected_draft(current: MemoryCandidate, observation: CandidateObservation,
+                          observation_key: str) -> MemoryCandidate:
+    fresh = _new_candidate(observation, current.candidate_id, observation_key)
+    return replace(fresh, created_at=current.created_at,
+                   target_evidence_bindings=binding_history(current),
+                   promotion_exclusion=current.promotion_exclusion,
+                   status_history=[*current.status_history, *fresh.status_history])
+
+
+# LLM: 准入首拒草稿仅保留拒绝历史后以新观察重建；其余候选按来源覆盖合并，终态、审核与脱敏状态不变。
+# 函数用途: 合并已接受的候选来源，并让从未接受的拒绝草稿可以合法重试。
 def _merge_candidate(
     current: MemoryCandidate,
     observation: CandidateObservation,
     observation_key: str,
 ) -> MemoryCandidate:
+    if not current.content and current.content_redacted_at:
+        return current
+    if current.status == "blocked_missing_evidence" and current.reviewer == "evidence_gate":
+        return _retry_rejected_draft(current, observation, observation_key)
     observed_at = normalize_iso_time(
         observation.observed_at,
         default=utc_now_iso(),
@@ -671,9 +780,13 @@ def _merge_candidate(
         observation_keys.append(observation_key)
     resolved_origin = _resolved_blocked_origin(current, observation)
     origin_repaired = resolved_origin != current.origin
+    coverage = merge_source_coverage(current, observation)
     merged = replace(
         current,
         origin=resolved_origin,
+        # 未知引用不能继承另一条可学消息的资格；人工入口无投影语义单独保留。
+        learning_source=source_coverage_projection(coverage),
+        learning_source_coverage=coverage,
         evidence_refs=_merge_refs(current.evidence_refs, observation.evidence_refs),
         source_message_refs=_merge_refs(
             current.source_message_refs, observation.source_message_refs
@@ -789,7 +902,7 @@ def _initial_review_note(status: str) -> str:
     return ""
 
 
-# LLM: 新 add observation 还必须使用可召回的规范 typed scope；replace/remove 保留旧目标键供迁移修复。
+# LLM: 新add须用规范typed scope；变更保留旧目标键供迁移修复，宿主观察版本必须是真实正整数或未知。
 # 函数用途: 规范化一次候选观察，并在写候选账本前拒绝不可召回的新增 scope。
 def _normalize_observation(observation: CandidateObservation) -> CandidateObservation:
     if not isinstance(observation, CandidateObservation):
@@ -836,6 +949,7 @@ def _normalize_observation(observation: CandidateObservation) -> CandidateObserv
         promotion_mode=host_promotion_mode(observation),
         confidence=confidence,
         target_entry_id=str(observation.target_entry_id or "").strip(),
+        target_entry_version=normalize_target_entry_version(observation.target_entry_version),
     )
 
 
@@ -883,3 +997,39 @@ __all__ = [
     "merge_candidate_observations",
     "split_identity_conflicts",
 ]
+
+
+# LLM: retention保留版本绑定和硬删除防重放约束；无绑定add被正式删除后也必须留下不含原话的身份墓碑。
+# 函数用途: 计算终态保留清理后的候选集合与实际清理条数。
+def _retention_records(candidates: list[MemoryCandidate], ids: set[str]) -> tuple[list[MemoryCandidate], int]:
+    retained: list[MemoryCandidate] = []
+    cleaned = 0
+    for item in candidates:
+        if item.candidate_id not in ids:
+            retained.append(item)
+            continue
+        history = binding_history(item)
+        if not history and not item.content_redacted_at:
+            cleaned += 1
+            continue
+        if _is_binding_tombstone(item):
+            retained.append(item)
+            continue
+        now = utc_now_iso()
+        retained.append(replace(item, content="", content_redacted_at=now, updated_at=now,
+            evidence_refs=[], source_message_refs=[], source_tool_refs=[], source_artifact_refs=[],
+            source_task_ids=[], source_run_ids=[], learning_source={}, learning_source_coverage={},
+            target_evidence_bindings=history, reviewer="retention", review_note="retained_version_bindings",
+            status_history=[_status_event(item.status, actor="retention", note="retained_version_bindings", at=now)]))
+        cleaned += 1
+    return retained, cleaned
+
+
+# LLM: 空正文不等于清理完成；所有带引用/来源内容字段都必须为空，才能跳过retention。
+# 函数用途: 判断当前记录是否已是没有原话的版本绑定或硬删除防重放墓碑。
+def _is_binding_tombstone(item: MemoryCandidate) -> bool:
+    return bool(item.content_redacted_at
+        and item.reviewer == "retention" and item.review_note == "retained_version_bindings"
+        and not any((item.content, item.evidence_refs, item.source_message_refs,
+            item.source_tool_refs, item.source_artifact_refs, item.source_task_ids,
+            item.source_run_ids, item.learning_source, item.learning_source_coverage)))

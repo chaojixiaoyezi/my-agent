@@ -1,5 +1,6 @@
 # LLM: 任务进程终态由原 ProcessSessionStore 核实，共享激活不参与业务通知；通知只进入既有 ConversationStore wake。
 # 不重放命令、不新建任务、不靠正文判完成；同 session 的通知发布与重启补发共用去重键。
+# 便宜检查只影响初次目录内容读取，正式通知前仍核原始状态、归属与去重回执。
 # 模块用途: 让后台命令结束后主动叫醒所属主会话，或在活动主回合安全点交接，省掉模型短轮询。
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ def _agent_process_root(agent: object) -> Path | None:
     return process_session_store_root(workspace or owner, owner)
 
 
-# LLM: 宿主周期 tick 与前台安全点共用此入口；先持久去重入队，再标记已发布，崩溃重入不丢不重。
+# LLM: 宿主周期tick与前台安全点共用；配置仅控制初步目录内容读取，发通知前仍核原status/target并持久去重，不缓存通知结论。
 # 仅任务的自然 exited 可唤醒，共享激活不通知；starting/unknown 不通知，明确停止只结算；写回重读原 ID。
 # 函数用途: 自动收割已结束后台命令并通知所属主会话；一个损坏记录不会阻塞其它会话。
 def reconcile_process_completions(agent: object) -> int:
@@ -56,7 +57,10 @@ def reconcile_process_completions(agent: object) -> int:
     if not getattr(getattr(agent, "config", None), "background_process_notifications", True):
         return 0
     authority = ProcessSessionStore(root)
-    records, errors = authority.list_records()
+    cheap_checks = bool(
+        getattr(getattr(agent, "config", None), "background_tick_cheap_checks", False)
+    )
+    records, errors = authority.list_records(cheap_checks=cheap_checks)
     if errors:
         _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s", len(errors))
     sent = 0

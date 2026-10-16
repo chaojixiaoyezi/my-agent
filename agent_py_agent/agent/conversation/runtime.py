@@ -1,4 +1,5 @@
 # LLM: 后台稳定 task 身份与逐轮请求分离；唤醒共用 coordinator 软指导，不能生成永久禁写或额外授权。
+#   便宜检查由实时配置控制，只跳过可证明无候选的查询，原取消、事件、通知和低频对账每拍保持推进。
 # 上下文和历史准备通过独立模块调用，修改执行顺序时同步后台历史、取消、Compact 和投递回归。
 # 进度计算和供应退避各有独立实现；本模块保留配置组装、实例寿命、读取时机、租约和持久落账。
 # Goal、scheduler run、投递地址与执行 claim 各守原事实源；持久任务续接不虚构聊天请求，来源消费仍归原编排。
@@ -90,6 +91,7 @@ from .background_tool_policy import (
     background_tool_policy_decision,
 )
 from .compact_guard import is_provider_quota_failure
+from .learning_source import LEARNING_SOURCE_KEY, background_projection
 from .models import (
     SESSION_MESSAGE_WAKE_REASON,
     SESSION_TASK_WAKE_REASON,
@@ -3609,8 +3611,7 @@ class _BackgroundSchedulerThreadLaneMixin:
         return reports
 
 
-# LLM: Maintenance and recovery helpers stay model-free until a lane consumer
-# explicitly calls the wake, observation, or policy execution path.
+# LLM: 维护与恢复不运行模型；便宜检查只复用内容或只读探针，实际唤醒仍调用原消费/回收/调度事务。
 # 类用途: 管理后台调度的维护、恢复和持久入队。
 class _BackgroundSchedulerTickMixin:
     """Tick maintenance and durable scheduling helpers."""
@@ -3685,6 +3686,8 @@ class _BackgroundSchedulerTickMixin:
         except Exception:
             _HEARTBEAT_LOGGER.warning("orphan reclaim scan failed", exc_info=True)
 
+    # LLM: 合并探针为假才跳过本拍回收与消费，缺失/错误走原步骤；低频三源对账不受开关影响。
+    # 函数用途: 消费实时到期唤醒并定期补齐未完成任务的闹钟，不延迟原提交或取消。
     def _enqueue_unfinished_task_resume_wakes(self, *, now: float) -> None:
         """扫描治理(2026-08-17 owner 拍板): 热层消费到期字条 + 低频三源对账。
 
@@ -3699,12 +3702,38 @@ class _BackgroundSchedulerTickMixin:
 
         WK-INT: 每 tick 先回收 lease 过期的 claimed 字条(崩溃/卡死恢复)。
         """
-        self._reclaim_expired_wake_leases(now=now)
-        self._consume_due_wake_queue(now=now)
+        agent = getattr(getattr(self, "runtime", None), "agent", None)
+        if not self._tick_cheap_checks(agent) or self._wake_queue_might_have_work(agent, now=now):
+            self._reclaim_expired_wake_leases(now=now)
+            self._consume_due_wake_queue(now=now)
         last = getattr(self, "_wake_reconcile_last_at", 0.0)
         if now - last >= _WAKE_RECONCILE_INTERVAL_SECONDS:
             self._wake_reconcile_last_at = now
             self._reconcile_wake_queue(now=now)
+
+
+    # LLM: E10 一期开关在拍内动态读取: 改了配置下一拍就生效(配置生效测试口径), 默认关。
+    # 函数用途: 读本拍"便宜检查"开关, 关闭时所有便宜判据短路回原路径。
+    def _tick_cheap_checks(self, agent: object) -> bool:
+        return bool(getattr(getattr(agent, "config", None), "background_tick_cheap_checks", False))
+
+
+    # LLM: E10 一期候选①: 一条只读合并探针判断 wake_queue 有没有 reclaim/pop 该处理的行;
+    #   为假才允许跳过两个写事务(判据与写操作条件逐字相同, 下一拍再看, 不漏)。
+    #   repo 缺失/不支持/报错一律返回 True(回退原两步), 宁多查不漏查。
+    # 函数用途: 判断本拍是否需要执行 wake 回收与消费两步。
+    def _wake_queue_might_have_work(self, agent: object, *, now: float) -> bool:
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is None or not callable(getattr(repo, "wakes_need_attention", None)):
+            return True
+        try:
+            return bool(repo.wakes_need_attention(now=now))
+        except Exception:
+            _HEARTBEAT_LOGGER.warning(
+                "wake queue attention probe failed; falling back to full checks", exc_info=True
+            )
+            return True
+
 
     def _reclaim_expired_wake_leases(self, *, now: float) -> None:
         """WK-INT: 回收 lease 过期的 claimed 字条(崩溃/卡死恢复, 回 pending 重试)。"""
@@ -3886,14 +3915,19 @@ class _BackgroundSchedulerTickMixin:
             return "active"
         return "terminal"
 
+    # LLM: 每拍现读开关并传给原service；事件预留、取消恢复和通知继续由主线dispatch逐拍执行。
+    # 函数用途: 对账等待运行并预留当前到期计划；可选内容缓存不决定是否已经到期。
     def _enqueue_scheduler_runs(self, *, now: float) -> None:
         if self.scheduler_service is None:
             return
         try:
-            self.scheduler_service.reconcile_waiting_runs(now=now)
+            agent = getattr(getattr(self, "runtime", None), "agent", None)
+            cheap_checks = self._tick_cheap_checks(agent)
+            self.scheduler_service.reconcile_waiting_runs(now=now, cheap_checks=cheap_checks)
             self.scheduler_service.enqueue_ready_runs(
                 now=now,
                 limit=PENDING_WAKE_CONSUME_LIMIT_COUNT,
+                cheap_checks=cheap_checks,
             )
         except Exception:
             _HEARTBEAT_LOGGER.warning("owner scheduler enqueue failed", exc_info=True)
@@ -4493,6 +4527,8 @@ def _deliver_quota_fallback(
     return status, status == "sent"
 
 
+# LLM: 此处只记录原后台配额失败通知并附后台不可学来源，不创建真人输入或修改投递/配额语义。
+# 函数用途: 将后台配额降级通知写入会话记录，保留真实触发来源。
 def _record_quota_fallback_message(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -4511,6 +4547,8 @@ def _record_quota_fallback_message(
                 "failure_type": "provider_quota_exhausted",
                 "wake_signal_id": signal.wake_signal_id,
                 "task_id": signal.root_task_id,
+                # 系统回退消息属于后台片：显式来源投影 fail-closed（不可学）。
+                LEARNING_SOURCE_KEY: background_projection(),
             },
         }
     )

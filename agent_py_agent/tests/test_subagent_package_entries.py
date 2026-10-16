@@ -366,19 +366,25 @@ def test_child_two_packages_share_budget_and_are_both_pinned(tmp_path, monkeypat
     assert "capability:entry-one" in pins and "capability:entry-two" in pins
 
 
+# LLM: 只将当前模块唯一包用途比较的全局值替成不相等对象；不改canonical常量、不复制函数，源码/pyc同走原真实child链。
+# 函数用途: 注入“未领取包准备”的因果反例，确认真实序列化请求断言能发现入口丢失。
 def test_causal_mutation_missing_package_claim_is_detected(tmp_path, monkeypatch):
-    import inspect
+    import dis
 
     from agent_py_agent.agent.agent_core.subagent import model_selection
+    from agent_py_agent.agent.capability import subagent_entry_authority
 
-    source = inspect.getsource(model_selection._claim_first_request_preparation)
-    needle = 'marker.get("purpose") == PACKAGE_ENTRY_PURPOSE'
-    assert source.count(needle) == 1
-    namespace = dict(vars(model_selection))
-    exec(compile(source.replace(needle, "False"), "<causal-package-claim>", "exec"), namespace)
-    monkeypatch.setattr(model_selection, "_claim_first_request_preparation", namespace["_claim_first_request_preparation"])
+    reads = [instruction for instruction in dis.get_instructions(model_selection._claim_first_request_preparation)
+             if instruction.opname == "LOAD_GLOBAL" and instruction.argval == "PACKAGE_ENTRY_PURPOSE"]
+    assert len(reads) == 1
+    original_purpose = subagent_entry_authority.PACKAGE_ENTRY_PURPOSE
+    assert original_purpose == model_selection.PACKAGE_ENTRY_PURPOSE
+    sentinel = object()
+    assert sentinel != original_purpose
+    monkeypatch.setattr(model_selection, "PACKAGE_ENTRY_PURPOSE", sentinel)
     with pytest.raises(AssertionError, match="# story-a"):
         test_package_entry_is_in_real_serialized_child_request_without_selection_model(tmp_path, monkeypatch)
+    assert subagent_entry_authority.PACKAGE_ENTRY_PURPOSE is original_purpose
 
 
 def test_causal_mutation_existing_thread_reinitialization_is_detected(tmp_path, monkeypatch):

@@ -1,4 +1,5 @@
 # LLM: 定时运行只经原领取、会话任务绑定和完成协议进入后台；身份或版本不可证明时禁止采样，不补建旧任务。
+#   cheap_checks只控制原仓库的只读投影，不能跳过当前事件预留、取消、恢复或通知策略。
 # 合法冻结交付复用原claim而不重开执行；终态映射由本模块统一提供给领取、等待对账和交付收口。
 # 模块用途: 把持久定时任务接入原会话唤醒队列，保持执行领取、TaskLink 与收口在同一条主链路。
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ..conversation.learning_source import LEARNING_SOURCE_KEY, schedule_projection
 from .active_run_closeout import settle_stale_waiting, waiting_completion_pending
 from .recovery import fail_unstarted, prepare_repository
 from .repository import (
@@ -130,6 +132,7 @@ class SchedulerRunHeartbeat:
 
 
 # LLM: 本服务只写原 scheduler/ConversationStore 事实；新执行准入可建原 TaskLink，已有 pins/marker 不得覆盖。
+#   便宜检查只透传原仓库读口，不能替换创建人、事件来源、取消恢复或静默通知合同。
 # 类用途: 预留、领取和收口定时工作，把准确任务身份交给已有后台执行器，不另建权限或执行循环。
 class SchedulerService:
     """Reserve, publish, claim, and close scheduler runs using durable facts only."""
@@ -153,12 +156,11 @@ class SchedulerService:
         self.cancellation_handler = cancellation_handler
         prepare_repository(repository, conversation_store, now=time.time())
 
-    # LLM: Every queued scheduler run is also the durable root task for its wake. Keep the
-    # run id in both typed wake identity and metadata so background lifecycle reads one authority.
+    # LLM: queued run仍是唯一durable root，便宜检查仅透传给现行dispatch读取；取消、事件和恢复顺序不变。
     # 函数用途: 先沿持久意图重试准确取消并复核已死亡领取，再预留到期执行；仅新 queued 会唤醒，不重跑已开工的未知结果。
-    def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32) -> list[str]:
+    def enqueue_ready_runs(self, *, now: float | None = None, limit: int = 32, cheap_checks: bool = False) -> list[str]:
         from .dispatch import enqueue_ready_runs
-        return enqueue_ready_runs(self, now=now, limit=limit)
+        return enqueue_ready_runs(self, now=now, limit=limit, cheap_checks=cheap_checks)
 
     # LLM: 领取后回读 pending 并验证 TaskLink；此处仅 claimed，原后台车道准入后才由 execution 写 running。
     # 函数用途: 领取定时工作或欠发回复；绑定异常结算，合法冻结只重投，不把等待执行的时间记成工作开始。
@@ -401,9 +403,10 @@ class SchedulerService:
 
     # LLM: Gateway restart and missed lifecycle notifications converge by scanning only scheduler
     # rows already typed as waiting, then applying the same exact-task reconciliation as live wakes.
+    # LLM: 可选投影只提供waiting行；每条运行仍按准确ID现读原任务并执行同一终态对账。
     # 函数用途: 批量对账当前 owner 的等待定时执行，保证重启后最终状态仍会收口。
-    def reconcile_waiting_runs(self, *, now: float | None = None) -> list[str]:
-        runs, _errors = self.repository.waiting_runs()
+    def reconcile_waiting_runs(self, *, now: float | None = None, cheap_checks: bool = False) -> list[str]:
+        runs, _errors = self.repository.waiting_runs(cheap_checks=cheap_checks)
         settled: list[str] = []
         for run in runs:
             run_id = str(run.get("run_id") or "")
@@ -468,6 +471,8 @@ class SchedulerService:
         fail_unstarted(self, run, error_code, now=now, status=status)
 
 
+# LLM: 来源仅由持久scheduler run构造；定时唤醒不可学习，模型字段不能覆盖，保留main的任务/权限元数据。
+# 函数用途: 把定时运行事实投影到当前后台唤醒元数据。
 def _wake_metadata(run: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": "scheduler_wake.v1",
@@ -479,6 +484,7 @@ def _wake_metadata(run: dict[str, object]) -> dict[str, object]:
         "scheduler_prompt": str(run["prompt"]),
         "scheduler_skill_refs": list(run.get("skill_refs") or []),
         "scheduler_source_task_id": str(run.get("source_task_id") or ""),
+        LEARNING_SOURCE_KEY: schedule_projection(),
     }
 
 

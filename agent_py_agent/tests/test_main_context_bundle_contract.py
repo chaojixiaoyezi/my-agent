@@ -38,7 +38,7 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
 from agent_py_agent.agent.user_space import context_bundle as context_bundle_module
 from agent_py_agent.agent.user_space.context_bundle import (
     MainContextBundleRequest,
-    _rewrite_bundle_files,
+    _snapshot_paths,
     _write_bundle_files,
     build_main_context_bundle,
 )
@@ -47,6 +47,9 @@ from agent_py_agent.agent.user_space.context_bundle_artifacts import (
     update_main_context_bundle_artifacts,
 )
 from agent_py_agent.agent.user_space.context_bundle_rendering import render_markdown_bundle
+from agent_py_agent.agent.user_space.context_bundle_tool_manifest import (
+    load_bundle_tool_manifest,
+)
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests._tool_runtime_harness import (
@@ -94,14 +97,13 @@ def _expected_json_bytes(bundle: dict[str, object]) -> bytes:
 
 
 @_POSIX_ONLY
-def test_context_bundle_initial_writer_preserves_exact_bytes_before_rewrite(
-    tmp_path: Path, open_umask
-) -> None:
+def test_context_bundle_writer_preserves_exact_bytes(tmp_path: Path, open_umask) -> None:
     request, bundle, home_paths = _private_context_bundle_inputs(tmp_path)
     archive = Path(home_paths.owner_home_dir) / "memory_archive"
     base = archive / "snapshots" / "context_bundles" / date.today().isoformat()
     directory_result = ensure_private_directory_chain(archive, base)
-    json_path, markdown_path = _write_bundle_files(request, bundle, directory_result)
+    json_path, markdown_path = _snapshot_paths(request, directory_result)
+    _write_bundle_files(json_path, markdown_path, bundle, directory_result)
     latest_json = base / "latest_context_bundle.json"
     latest_markdown = base / "latest_context_bundle.md"
     expected_json = _expected_json_bytes(bundle)
@@ -145,7 +147,7 @@ def test_context_bundle_first_write_is_private_and_byte_stable(tmp_path: Path, o
 
 
 @_POSIX_ONLY
-def test_context_bundle_rewrite_tightens_files_and_preserves_exact_output(tmp_path: Path) -> None:
+def test_context_bundle_single_write_tightens_files_and_preserves_exact_output(tmp_path: Path) -> None:
     request, _bundle, home_paths = _private_context_bundle_inputs(tmp_path)
     archive = Path(home_paths.owner_home_dir) / "memory_archive"
     result = build_main_context_bundle(replace(request, save=True))
@@ -163,7 +165,7 @@ def test_context_bundle_rewrite_tightens_files_and_preserves_exact_output(tmp_pa
     rewritten = json.loads(json.dumps(bundle, ensure_ascii=False))
     rewritten["tooling"]["runtime_injection_count_before_bundle"] += 1
     directory_result = PrivateDirectoryChainResult(archive, base, True, None)
-    _rewrite_bundle_files(json_path, markdown_path, rewritten, directory_result)
+    _write_bundle_files(json_path, markdown_path, rewritten, directory_result)
     expected_json = _expected_json_bytes(rewritten)
     expected_markdown = render_markdown_bundle(rewritten, json_path=str(json_path)).encode("utf-8")
 
@@ -298,10 +300,10 @@ def test_context_bundle_with_symlinked_archive_root_creates_missing_date_directo
     observed = []
     real_write = context_bundle_module._write_bundle_files
 
-    def probe(request_, bundle_, directory_result_):
+    def probe(json_path_, markdown_path_, bundle_, directory_result_):
         # 目录链准备阶段就必须建好当天目录；删掉 _skip_private_directory_chain 里的 mkdir 会在这里失败。
         observed.append(Path(directory_result_.directory).is_dir())
-        return real_write(request_, bundle_, directory_result_)
+        return real_write(json_path_, markdown_path_, bundle_, directory_result_)
 
     monkeypatch.setattr(context_bundle_module, "_write_bundle_files", probe)
     with caplog.at_level(logging.WARNING):
@@ -352,12 +354,15 @@ def test_main_context_bundle_contains_contract_surfaces_and_self_check(tmp_path:
     assert payload["run_scope"]["locked_files"] == [str((root / "README.md").resolve())]
     assert payload["tool_manifest"]["visible_tools"] == ["read_file", "write_file"]
     assert payload["tool_manifest"]["executable_tools"] == ["read_file", "write_file"]
-    assert "WRITE_FORBIDDEN" in payload["tool_manifest"]["failure_taxonomy"]
+    # failure_taxonomy / failure_contracts / tools 在按引用存放的完整清单里：解引用后再断言，含义不削弱；
+    # tool_runtimes 已不再内联重复，等价断言改到完整清单的 tools 上（任务书 E1b 要求）。
+    full_manifest = load_bundle_tool_manifest(payload, snapshot_path=result.json_path)
+    assert "WRITE_FORBIDDEN" in full_manifest["failure_taxonomy"]
     failure_contracts = {
-        item["code"]: item for item in payload["tool_manifest"]["failure_contracts"]
+        item["code"]: item for item in full_manifest["failure_contracts"]
     }
     assert failure_contracts["WRITE_FORBIDDEN"]["recommended_action"] == "request_permission"
-    assert payload["tool_manifest"]["tool_runtimes"][0]["visible_in_context"] is True
+    assert full_manifest["tools"][0]["visible_in_context"] is True
     assert payload["artifact_refs"]["items"][0]["ref"].endswith("outputs/index.html")
     assert payload["acceptance_contract"]["items"] == ["有登录", "有购买"]
     assert payload["acceptance_contract"]["constraints"] == ["单文件 HTML"]

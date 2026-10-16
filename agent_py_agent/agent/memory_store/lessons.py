@@ -30,6 +30,12 @@ _MAX_HOT_RULE_CHARS = 300
 # 注入预算：HOT 全量注入的硬顶（字符≈token，中文 1:1）。超出的按活跃度截断，
 # 冷条目在写入时降级回 lessons（lesson 正文保留，路由仍可命中，零信息丢失）。
 HOT_MAX_INJECT_CHARS = 5000
+# 可重建导航投影（memory/routing/INDEX.md）的上限口径（设计 §3.5.3；参考 Claude Code 200 行/25KB 量级）：
+# 文件换行数上限：≤ 200 行。
+_ROUTING_INDEX_MAX_LINE_COUNT = 200
+# UTF-8 总字节数上限：≤ 25600（25KiB）；字符数 ≤ 字节数（中文 1 字符≈3 字节，字节口径更严）。
+# 超限时按最近更新优先保留、其余省略；它不是全部历史正文的存储上限——lesson 正文完整留在 memory/lessons/。
+_ROUTING_INDEX_MAX_BYTES = 25 * 1024
 
 
 # LLM: LessonRecord 元数据与同文件正文一起提交；routing 只是可重建导航投影。
@@ -57,6 +63,17 @@ class LessonRecord:
         payload = asdict(self)
         payload.pop("content", None)
         return payload
+
+
+# LLM: 只在已取得正式lesson记录后使用；异常携带本轮写入事实，不把派生失败冒充审核失败。
+# 类用途: 保留正式正文成功但导航索引待恢复的回执。
+class LessonRoutingPendingError(RuntimeError):
+    # LLM: reference来自已提交目标；changed来自目标锁内实际写入，不解析异常文字。
+    # 函数用途: 向Promotion保留具体正式引用及本次变更事实。
+    def __init__(self, record: LessonRecord, changed: bool):
+        super().__init__("LESSON_ROUTING_PENDING")
+        self.promotion_ref = record.path + "#" + record.lesson_id
+        self.formal_memory_changed = changed
 
 
 # LLM: HOT metadata 和短规则同处 memory-hot.md，不另建第二事实账本。
@@ -87,14 +104,19 @@ class LessonRepository:
         ensure_private_dir(self.lessons_dir)
         ensure_private_dir(self.routing_index_path.parent)
 
-    # LLM: lesson 晋升要求审核、证据和跨任务/运行/日期重复；confidence 不能替代这些闸。lesson 文件按私有原子写落盘。
-    # 函数用途: 幂等创建一个正式 lesson（仅本人可读写）并重建 routing index。
-    def promote(
+    # LLM: 兼容既有调用方只取正式记录；权限、幂等及写入事实仍由同一锁内实现裁决。
+    # 函数用途: 创建或复用一个正式lesson并重建派生索引。
+    def promote(self, candidate: MemoryCandidate, *, min_occurrences: int = 2) -> LessonRecord:
+        return self.promote_with_receipt(candidate, min_occurrences=min_occurrences)[0]
+
+    # LLM: lesson目标锁内记录实际创建事实；派生routing重建不是正式正文变更，供Promotion准确投影。
+    # 函数用途: 返回lesson和本轮是否真正创建，避免重试虚增提交。
+    def promote_with_receipt(
         self,
         candidate: MemoryCandidate,
         *,
         min_occurrences: int = 2,
-    ) -> LessonRecord:
+    ) -> tuple[LessonRecord, bool]:
         _validate_lesson_candidate(candidate, min_occurrences=min_occurrences)
         lesson_id = "lesson-" + hashlib.sha256(
             candidate.candidate_id.encode("utf-8")
@@ -119,15 +141,15 @@ class LessonRepository:
             path=f"memory/lessons/{filename}",
         )
         with locked_json_path(path):
-            if path.exists():
-                existing = _read_lesson(path)
-                if existing.candidate_id != candidate.candidate_id:
-                    raise RuntimeError("lesson path collision")
-                record = existing
+            changed = not path.exists()
+            if not changed:
+                record = _read_lesson(path)
             else:
                 write_private_text_file_atomic_unlocked(path, _render_lesson(record))
-        self.rebuild_routing_index()
-        return record
+            if record.candidate_id != candidate.candidate_id:
+                raise RuntimeError("lesson path collision")
+        _rebuild_committed_lesson_routing(self, record, changed)
+        return record, changed
 
     # LLM: 无 v1 元数据 marker 的 .md 有两种合法语义,以迁移 marker 是否已建立区分:
     # 未迁移(升级前/全新 home)→ legacy,读路径容忍跳过,由 MemoryMigrationService 自愈,
@@ -163,13 +185,7 @@ class LessonRepository:
     # LLM: routing 完全由 lesson metadata 确定性重建，模型不能重写索引全文。索引含正文摘录（topic），按私有原子写。
     # 函数用途: 以仅本人可读写的权限更新 memory/routing/INDEX.md。
     def rebuild_routing_index(self) -> Path:
-        sections = [_routing_section(record) for record in self.list()]
-        text = "# Memory Routing Index\n\n"
-        text += (
-            "此文件由正式 lesson 元数据确定性生成；它是导航索引，不是第二份教训正文。\n"
-        )
-        if sections:
-            text += "\n" + "\n\n".join(sections) + "\n"
+        text = _render_routing_index(self.list())
         with locked_json_path(self.routing_index_path):
             write_private_text_file_atomic_unlocked(self.routing_index_path, text)
         return self.routing_index_path
@@ -186,15 +202,20 @@ class HotRuleRepository:
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
         ensure_private_dir(self.path.parent)
 
-    # LLM: HOT 需要 approved hot candidate、默认三次观察和至少两个独立任务/运行/日期证据。
-    # 函数用途: 将一个短规则绑定到正式 lesson 并幂等写入 HOT。
-    def promote(
+    # LLM: 旧接口只返回记录，写入门槛与真实副作用事实全部委托同一实现。
+    # 函数用途: 兼容调用者把短规则绑定到正式lesson。
+    def promote(self, candidate: MemoryCandidate, *, lesson: LessonRecord, min_occurrences: int = 3) -> HotRuleRecord:
+        return self.promote_with_receipt(candidate, lesson=lesson, min_occurrences=min_occurrences)[0]
+
+    # LLM: HOT锁内识别幂等复用，返回真实写入事实；不用锁外exists或候选状态猜测副作用。
+    # 函数用途: 返回短规则以及本轮是否改写了正式HOT。
+    def promote_with_receipt(
         self,
         candidate: MemoryCandidate,
         *,
         lesson: LessonRecord,
         min_occurrences: int = 3,
-    ) -> HotRuleRecord:
+    ) -> tuple[HotRuleRecord, bool]:
         _validate_hot_candidate(candidate, lesson, min_occurrences=min_occurrences)
         hot_id = "hot-" + hashlib.sha256(candidate.candidate_id.encode("utf-8")).hexdigest()[:20]
         record = HotRuleRecord(
@@ -211,10 +232,10 @@ class HotRuleRepository:
         with locked_json_path(self.path):
             existing = _read_hot_records(self.path)
             prior = next((item for item in existing if item.hot_id == hot_id), None)
+            if prior is not None and (prior.candidate_id != candidate.candidate_id or prior.rule != record.rule):
+                raise RuntimeError("HOT id collision")
             if prior is not None:
-                if prior.candidate_id != candidate.candidate_id or prior.rule != record.rule:
-                    raise RuntimeError("HOT id collision")
-                return prior
+                return prior, False
             write_private_text_file_atomic_unlocked(self.path, _render_hot([*existing, record]))
             demoted = _demote_hot_excess_unlocked(self.path)
         if demoted:
@@ -223,7 +244,7 @@ class HotRuleRepository:
                 len(demoted),
                 ", ".join(item.hot_id for item in demoted),
             )
-        return record
+        return record, True
 
     # LLM: 只解析程序 marker；自由文本 HOT 被视为 legacy，迁移前不能静默混入正式规则。
     # 函数用途: 列出正式 HOT 规则。
@@ -378,6 +399,45 @@ def _routing_section(record: LessonRecord) -> str:
     )
 
 
+# LLM: 导航投影按"最近更新优先"排序（结构化 updated_at/created_at 为活跃信号），行数/字节双帽内截断；
+#   省略只影响索引导航，lesson 正文文件仍是唯一正文，不因索引省略而删除。
+# 函数用途: 把 lesson 元数据渲染成有界导航索引文本（超限省略尾部并标注）。
+def _render_routing_index(records: list[LessonRecord]) -> str:
+    ordered = sorted(
+        records,
+        key=lambda record: (record.updated_at or "", record.created_at or "", record.lesson_id),
+        reverse=True,
+    )
+    sections = [_routing_section(record) for record in ordered]
+    while True:
+        omitted = len(ordered) - len(sections)
+        text = _assemble_routing_index(sections, omitted)
+        if _routing_index_within_bounds(text) or not sections:
+            return text
+        sections.pop()
+
+
+# LLM: 拼接口径与重建前完全一致（标题、说明、空行分隔），省略标注只在截断时追加。
+# 函数用途: 组装导航索引文本。
+def _assemble_routing_index(sections: list[str], omitted: int) -> str:
+    text = "# Memory Routing Index\n\n"
+    text += "此文件由正式 lesson 元数据确定性生成；它是导航索引，不是第二份教训正文。\n"
+    if sections:
+        text += "\n" + "\n\n".join(sections) + "\n"
+    if omitted:
+        text += f"（已省略 {omitted} 条导航；lesson 正文仍完整保存在 memory/lessons/。）\n"
+    return text
+
+
+# LLM: 帽口径 = 换行数（行）与 UTF-8 字节数；两个帽任一超出即需截断。
+# 函数用途: 判断导航索引文本是否在行数/字节上限内。
+def _routing_index_within_bounds(text: str) -> bool:
+    return (
+        text.count("\n") <= _ROUTING_INDEX_MAX_LINE_COUNT
+        and len(text.encode("utf-8")) <= _ROUTING_INDEX_MAX_BYTES
+    )
+
+
 # LLM: trigger keywords 只由稳定 subject_key 机械拆分，模型不能借重建索引注入新规则。
 # 函数用途: 生成路由关键词。
 def _trigger_keywords(subject_key: str) -> list[str]:
@@ -489,3 +549,12 @@ __all__ = [
     "LessonRecord",
     "LessonRepository",
 ]
+
+
+# LLM: 仅包住正式正文提交后的派生步骤；原验证错误不进入本函数，重试不重写正文。
+# 函数用途: 将routing重建失败与lesson审核门槛不满足明确区分。
+def _rebuild_committed_lesson_routing(repository, record, changed):
+    try:
+        repository.rebuild_routing_index()
+    except Exception as exc:
+        raise LessonRoutingPendingError(record, changed) from exc

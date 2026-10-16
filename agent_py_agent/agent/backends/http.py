@@ -1,10 +1,11 @@
 # LLM: 此模块独占 HTTP 后端公共传输、能力探针和目录元数据；保持请求局部预算、取消与配置错误合同。
-# 模块用途: 为模型协议提供统一网络入口和有界工具探测；修改时联合后端、OAuth 和传输测试。
+# 模块用途: 为模型协议提供带物理并发限制的统一网络入口和有界工具探测；联合后端、OAuth、关闭与排队回归。
 from __future__ import annotations
 
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -103,6 +104,18 @@ def _fail_probe_call(scope: object | None, call_id: str, exc: BaseException) -> 
     record_model_call_failed(scope.ledger, call_id, exc)
 
 
+# LLM: 限流开启后 collector 提前返回也必须关流归还名额；默认关闭保持原收尾，list 等无 close 的替身不动作。
+# 函数用途: 在需要归还名额时显式关闭同一个实际流；解析成功、提前结束和异常共用此出口。
+@contextmanager
+def provider_stream_scope(lines, *, enabled: bool = True):
+    try:
+        yield lines
+    finally:
+        close = getattr(lines, "close", None) if enabled else None
+        if callable(close):
+            close()
+
+
 # LLM: HTTP 请求控制只在显式给出时透传；流入口与测试替身须保持既有调用合同，不在此重试。
 #   cabfix：多一个可选的绝对期限——两者都没给时才退回最简两参调用，保持旧后端/替身零改动。
 # 函数用途: 调用流式传输入口，按需附加当前请求的首事件等待预算。
@@ -192,16 +205,16 @@ def stream_call_deadline(options: StreamCallOptions) -> float | None:
 
 # LLM: 所有内置 HTTP backend 都必须把 system_instruction 映射到供应商真实高优先级字段，而非拼回 user prompt。
 # 类用途: 共享真实模型 HTTP、能力探针、连接和 metadata 逻辑，并声明支持独立 system 指令。
-# LLM: HTTP 主链统一应用连接和会话头；新的协议必须复用同一传输、取消与超时语义。
-# 类用途: 为模型接口提供 HTTP 请求、能力探测和上下文目录读取。
+# LLM: HTTP 主链统一应用连接、会话头和冻结物理上限；新协议复用同一传输、取消与超时语义。
+# 类用途: 为模型接口提供物理排队请求、能力探测和上下文目录读取。
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
 
     supports_system_instructions = True
     supports_provider_request_options = True
 
-    # LLM: 复制可变选项并校验 top_p；多线程仅用 request-local 身份，不能热改共享后端采样或头部。
-    # 函数用途: 初始化可复用后端和媒体预算，非法采样在发送 HTTP 之前报错。
+    # LLM: 复制可变选项并冻结物理并发上限；多线程仅用 request-local 身份，不能热改共享后端采样或头部。
+    # 函数用途: 初始化可复用后端、媒体预算和默认关闭的排队限制，非法采样在发送前报错。
     def __init__(
         self,
         options: BackendOptions,
@@ -211,6 +224,7 @@ class HttpBackend(BaseBackend):
         self.model_name = str(options.model_name)
         self.request_timeout = int(options.request_timeout)
         self.connect_timeout = float(options.connect_timeout)
+        self.provider_max_concurrent_requests = max(0, int(options.provider_max_concurrent_requests))
         self.max_tokens = int(options.max_tokens)
         self.custom_headers = dict(options.custom_headers)
         self.session_header = options.session_header
@@ -403,7 +417,7 @@ class HttpBackend(BaseBackend):
     #   cabfix：total_deadline_seconds 是调用方给的绝对墙钟上界，换算成 monotonic 时刻存进信封的
     #   deadline 字段——传输层已有该字段的完整机制（发送前、读正文、流式都共享同一条时限），
     #   不必另造一套。None 表示不设总期限，主模型与旧调用方语义完全不变。
-    # 函数用途: 组装统一 HTTP 请求，把已授权后台预算传到底层；普通流式空闲/取消语义不变。
+    # 函数用途: 组装统一 HTTP 请求，将后台预算与物理并发限制传到底层；普通流式空闲/取消语义不变。
     def _gateway_request(
         self,
         call: StreamCall | str,
@@ -429,6 +443,7 @@ class HttpBackend(BaseBackend):
             connect_timeout=self.connect_timeout,
             first_event_timeout=options.first_event_timeout_seconds,
             deadline=deadline,
+            provider_max_concurrent_requests=getattr(self, "provider_max_concurrent_requests", 0),
         )
 
     # LLM: 供应商上下文窗口只从模型 metadata API 的结构化字段读取；失败或字段缺失返回 0，

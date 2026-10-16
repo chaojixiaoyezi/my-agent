@@ -10,6 +10,14 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from .attempt.sandbox import SandboxUnavailableError
+from .capability._agents_contract_fields import AgentsContractError
+from .capability.agents_source_processes import (
+    process_source_change_affects,
+    process_source_configurations,
+    process_source_configurations_current,
+    register_source_registry,
+    source_process_boundary,
+)
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
 from .plugin_activation_ref import PluginActivationRef
@@ -236,6 +244,9 @@ class PluginMCPClient(MCPStdioClient):
             raise ValueError("插件安装已变化")
         environment = owner.plugins_dir / "environments" / activation.plan.environment_ref
         command, args, cwd = _launch_argv(owner, installation.manifest, environment, activation.plan.interpreter_fingerprint)
+        self._source_raw_argv = (command, *args)
+        self._source_sandbox_spec = None
+        self._source_configurations = ()
         # 插件自有数据按 owner + 插件 ID 固定一处，跨版本、停用和重新启用保留；卸载默认也不清（见 PLUGIN_LIFECYCLE）
         data_dir = plugin_data_dir(owner, installation.manifest.plugin_id)
         descriptor = open_directory_beneath(owner.root, data_dir.relative_to(owner.root).parts, create=True)
@@ -253,6 +264,7 @@ class PluginMCPClient(MCPStdioClient):
             if legacy_policy is not None:
                 _require_legacy_policy_ready(owner, legacy_policy)
             spec = plugin_sandbox_spec(cwd=cwd, data_dir=data_dir, owner_home=owner.home_dir, sandbox_policy=policy)
+            self._source_sandbox_spec = spec
             command, *args = sandboxed_plugin_argv([command, *args], spec)
             sandbox_env = {"TMPDIR": str(data_dir / SANDBOX_TMP_DIRECTORY)}
         settings = canonical_plugin_settings(load_strict_json(installation.settings_json or "{}"),
@@ -269,12 +281,21 @@ class PluginMCPClient(MCPStdioClient):
             host_credential_env_names=frozenset(host_credential_env_names),
             catalog_category="plugins",
         ), activation=self.activation_ref)
+        register_source_registry(self)
 
-    # LLM: 每次启动（业务首次拉起、面板、候选、重连）都重核固定激活与授权事实；失败结构化拒绝、不启动进程。
-    # 函数用途: 老格式插件在真正拉起进程前复核；v8/内容包保持原启动路径。
+    # LLM: 先拿来源协调锁、再由原MCP取连接锁；只在无旧transport时从未包装argv重建最新投影，不重绑活连接。
+    # 函数用途: 鲜活复核固定激活和来源版本后启动插件，旧策略失效须原资源清理再重连。
     def start(self):
-        self._require_legacy_launch_facts()
-        return super().start()
+        with source_process_boundary():
+            self._require_legacy_launch_facts()
+            if self.is_running() and not self._source_configurations_current():
+                self._retire_source_transport()
+                raise MCPError("插件来源版本已变化，须重连", code="MCP_CONNECTION_CLOSED")
+            with self._state_lock:
+                fresh = self._transport is None and not self.is_closed()
+            if fresh:
+                self._refresh_source_launch()
+            return super().start()
 
     # LLM: 先鲜活读表确认固定激活仍在（未撤销、未换代），再按固定 permission_json 重算全部事实。
     # 函数用途: 为本次启动复核老格式插件授权；事实变化一律拒绝，不自动换绑、不降 wide。
@@ -357,3 +378,61 @@ class PluginMCPClient(MCPStdioClient):
             self.validated_tools = tools
 
         self.publish_tools(transport, publish)
+
+
+    # LLM: 原重连仍先核旧树清理；外层锁固定为来源→连接，避免set_source通知与基类重连反序死锁。
+    # 函数用途: 清退失效来源连接，再由原MCP创建最新策略的固定transport。
+    def reconnect(self):
+        with source_process_boundary():
+            if self._transport is not None and not self._source_configurations_current():
+                self._retire_source_transport()
+            return super().reconnect()
+
+
+    # LLM: 只用固定激活owner、原未包装argv和原沙箱权限spec；来源从唯一repository现读，替换config不修改旧transport。
+    # 函数用途: 为下一次实际启动刷新来源CAS和平台argv，禁止嵌套包装或沿用构造时的旧profile。
+    def _refresh_source_launch(self):
+        spec = self._source_sandbox_spec
+        configurations = process_source_configurations(self.activation_ref.owner().home_dir,
+                                                       full_access=bool(spec and spec.full_access))
+        argv = list(self._source_raw_argv)
+        if spec is not None:
+            argv = sandboxed_plugin_argv(argv, spec)
+        self.config = replace(self.config, command=argv[0], args=argv[1:])
+        self._source_configurations = configurations
+
+
+    # LLM: 固定激活owner不来自模型；沙箱FullAccess依赖集合每次鲜活复核，普通插件只比较本owner。
+    # 函数用途: 判断当前连接来源版本及owner保护集合是否仍可用。
+    def _source_configurations_current(self):
+        spec = self._source_sandbox_spec
+        return process_source_configurations_current(self._source_configurations,
+                                                     owner_home=self.activation_ref.owner().home_dir,
+                                                     full_access=bool(spec and spec.full_access))
+
+
+    # LLM: 仅消费结构化完整CAS通知；资源仍是本客户端原transport/Store，未确认停止不放行来源提交。
+    # 函数用途: 切源前临时撤销旧插件连接，不永久关闭客户端，使确认清理后能按新策略重连。
+    def retire_agents_source(self, owner_home, proposed_cas):
+        spec = self._source_sandbox_spec
+        if process_source_change_affects(self._source_configurations, owner_home, proposed_cas,
+                                         bound_scope=(self.activation_ref.owner().home_dir,
+                                                      bool(spec and spec.full_access))):
+            if str(self.activation_ref.owner().home_dir) != owner_home:
+                raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "cross_owner_plugin")
+            self._retire_source_transport()
+
+
+    # LLM: 撤销和清理沿原MCP/Managed Store；原句柄保留供reconnect核回执，不靠Popen.poll猜后代已退出。
+    # 函数用途: 请求原插件资源退役，清理未知时抛错而不启动替代连接。
+    def _retire_source_transport(self):
+        with self._state_lock:
+            transport = self._transport
+            launch_unknown = self._starting or self._launch_failure is not None
+        if transport is None:
+            if launch_unknown:
+                raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "plugin_launch")
+            return
+        receipt = self.disconnect(transport=transport)
+        if not receipt.confirmed:
+            raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "plugin_resource")

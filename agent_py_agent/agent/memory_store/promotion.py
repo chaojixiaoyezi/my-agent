@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """统一候选证据审核、冲突裁决和正式晋升服务。"""
 
-# LLM: 任何 Candidate 到 long_term/Persona/lesson/HOT 的正式写入都必须经过这个 Service。
-# 模块用途: 核验消息/工具证据，执行保守自动策略，并在正式落点成功后标 promoted。
+# LLM: 正式晋升仅经本服务；自动学习只候选，人工审核提交守原quota/policy/candidate锁和证据CAS。
+# 模块用途: 核验候选证据与用户审核，正式落点成功后标promoted，并恢复已提交删除的清理。
 
 import hashlib
 import json
@@ -29,6 +29,7 @@ from ..common.tool_index_stream import (
     tool_index_prescreen_pattern,
 )
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
+from ..conversation.learning_source import projection_is_learnable
 from ..user_space.owner_policy import read_learning_exclusions
 from ..user_space.owner_quota import OwnerQuotaAdmission
 from .candidate_models import (
@@ -37,13 +38,19 @@ from .candidate_models import (
     host_promotion_mode,
     normalize_reference_list,
 )
-from .candidates import CandidateService
-from .jsonl import JsonlMemory, MemoryRecord
+from .candidates import CandidateService, CandidateStateChangedError
+from .jsonl import (
+    JsonlMemory,
+    MemoryLibraryWriteCapExceeded,
+    MemoryRecord,
+    MemoryVersionConflict,
+)
 from .learning_exclusions import excluded_candidate_ids
-from .lessons import HotRuleRepository, LessonRepository
+from .lessons import HotRuleRepository, LessonRepository, LessonRoutingPendingError
 from .operations import normalized_memory_content
 
-_LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project"})
+# LLM: working_agreement 第 1 期起与事实/事件/项目同走唯一长期库（JSONL），不再写 AGENTS。
+_LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project", "working_agreement"})
 
 # 写路径查重:表述变体(LCS 覆盖率)与长度差双闸,只合并"逐字近重复"的同一断言,
 # 绝不把不同事实(加信息/换词义)并掉——漏并多存一条,误并丢信息,后者更糟。
@@ -361,11 +368,15 @@ class MemoryPromotionResult:
     status: str
     reason_code: str
     promotion_ref: str = ""
+    formal_memory_changed: bool = False
 
-    # LLM: 结果只序列化决策码和正式 ref，不暴露候选或 Persona 正文。
+    # LLM: 结果只序列化决策码和正式ref；未新增提交时省略变更标志，保持旧消费者字段兼容。
     # 函数用途: 将晋升结果转换为 CLI/Curator 可消费字典。
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        if not self.formal_memory_changed:
+            payload.pop("formal_memory_changed")
+        return payload
 
 
 # LLM: 提交上下文显式携带外层 quota；不把准入藏在 service 的可变属性中，线程间不会串用。
@@ -377,16 +388,24 @@ class _PromotionWriteContext:
     admission: OwnerQuotaAdmission
 
 
+# LLM: 正式目标写入处显式携带副作用事实；引用被复用不等于本轮写入。
+# 类用途: 区分实际提交与仅采用已有正式引用。
+@dataclass(frozen=True)
+class _TargetCommit:
+    reference: str
+    changed: bool
+
+
 # LLM: 四种目标共用唯一仓库，接收已经取得的外层配额准入。
 # 类用途: 执行正式目标写入，不重复获取 owner quota 锁。
 class _PromotionCommitMixin:
-    # LLM: 每个正式目标只有一个 repository；禁止在这里另写 Markdown/JSONL 旁路。
-    # 函数用途: 提交目标并返回正式引用。
+    # LLM: 每个正式目标只有一个repository，正式变更只取其锁内回执；引用复用不能猜成一次新写入。
+    # 函数用途: 提交目标并返回正式引用及本次真实写入事实。
     def _commit_target(
         self,
         candidate: MemoryCandidate,
         context: _PromotionWriteContext,
-    ) -> str:
+    ) -> _TargetCommit:
         target = _promotion_target(candidate)
         if target == "long_term":
             return self._commit_long_term(candidate, context.admission)
@@ -397,43 +416,45 @@ class _PromotionCommitMixin:
                 context,
             )
         if target == "lesson":
-            lesson = self.lessons.promote(
+            lesson, changed = self.lessons.promote_with_receipt(
                 candidate,
                 min_occurrences=self.lesson_min_occurrences,
             )
-            return lesson.path + "#" + lesson.lesson_id
+            return _TargetCommit(lesson.path + "#" + lesson.lesson_id, changed)
         if target == "hot":
             lesson = self.lessons.get(candidate.target_entry_id)
-            hot = self.hot.promote(
+            hot, changed = self.hot.promote_with_receipt(
                 candidate,
                 lesson=lesson,
                 min_occurrences=self.hot_min_occurrences,
             )
-            return "memory-hot.md#" + hot.hot_id
+            return _TargetCommit("memory-hot.md#" + hot.hot_id, changed)
         raise ValueError(f"candidate promotion_target {target!r} is not promotable")
 
     # LLM: subject 冲突只在同 scope 内；新时间不能覆盖，replace/remove 必须精确 target_entry_id。
     # 函数用途: 按 proposed_action 分发长期记忆提交。
-    def _commit_long_term(self, candidate: MemoryCandidate, admission: OwnerQuotaAdmission) -> str:
+    def _commit_long_term(self, candidate: MemoryCandidate, admission: OwnerQuotaAdmission) -> _TargetCommit:
         if candidate.candidate_type not in _LONG_TERM_TARGET_TYPES:
             raise ValueError("candidate type cannot be stored in long_term memory")
-        if candidate.origin == "model_inferred":
+        if candidate.origin == "model_inferred" and candidate.candidate_type != "working_agreement":
             raise ValueError("model_inferred candidate cannot become a formal fact")
         _ensure_recallable_scope_for_add(candidate)
         existing = _same_subject_scope(self.long_term.all(), candidate)
         same_content = _same_content_in(existing, candidate)
         if same_content is not None and candidate.proposed_action == "add":
-            return "memory/long_term/memory.jsonl#" + same_content.entry_id
+            return _TargetCommit("memory/long_term/memory.jsonl#" + same_content.entry_id, False)
         if candidate.proposed_action == "add":
-            return self._commit_long_term_add(candidate, existing, admission)
-        return self._commit_long_term_existing(candidate, existing, admission)
+            return _TargetCommit(self._commit_long_term_add(candidate, existing, admission), True)
+        return _TargetCommit(self._commit_long_term_existing(candidate, existing, admission), True)
 
     # LLM: 保留原 add 调用接缝；独立提交原语仍共用已有准入、冲突判据和确定性 ID。
     # 函数用途: 委托正式仓库提交新增长期事实，不隐式改为替换。
     def _commit_long_term_add(self, candidate: MemoryCandidate, existing: list[MemoryRecord], admission: OwnerQuotaAdmission) -> str:
         return _commit_long_term_add(self, candidate, existing, admission)
 
-    # LLM: replace/merge 必须精确 target_entry_id 且 target 在 same subject scope 内。
+    # LLM: replace/merge 必须精确 target_entry_id 且 target 在 same subject scope 内；提交前必须
+    # 确认持久化的观察版本与目标一致；缺版本或版本变化按冲突阻断，不以墙钟或临提交版本补猜；
+    # 读取与提交之间的并发由 apply_batch 的 expected_version CAS 兜底并同样转成冲突结果。
     # 函数用途: 提交对既有长期条目的 replace/merge/remove。
     def _commit_long_term_existing(
         self,
@@ -448,42 +469,51 @@ class _PromotionCommitMixin:
                 tuple(item.entry_id for item in existing),
             )
         prior = next(item for item in existing if item.entry_id == target)
+        stale_code = _stale_target_observation(candidate, prior)
+        if stale_code:
+            raise _PromotionConflict(stale_code, (target,))
         action = candidate.proposed_action
         if action in {"replace", "merge"}:
-            record = self.long_term.apply_batch(
-                [
-                    {
-                        "action": "replace",
-                        "entry_id": target,
-                        "content": candidate.content,
-                        "kind": _long_term_kind(candidate.candidate_type),
-                        "tags": [candidate.candidate_type, candidate.origin],
-                        "attributes": _long_term_attributes(candidate),
-                        "source": f"candidate:{candidate.candidate_id}",
-                        "expires_at": _expiry_epoch(candidate.valid_until),
-                        "expected_version": prior.version,
-                    }
-                ], _admission=admission,
-            )[0]
+            try:
+                record = self.long_term.apply_batch(
+                    [
+                        {
+                            "action": "replace",
+                            "entry_id": target,
+                            "content": candidate.content,
+                            "kind": _long_term_kind(candidate.candidate_type),
+                            "tags": [candidate.candidate_type, candidate.origin],
+                            "attributes": _long_term_attributes(candidate),
+                            "source": f"candidate:{candidate.candidate_id}",
+                            "expires_at": _expiry_epoch(candidate.valid_until),
+                            "expected_version": candidate.target_entry_version,
+                        }
+                    ], _admission=admission,
+                )[0]
+            except MemoryVersionConflict:
+                raise _PromotionConflict("TARGET_ENTRY_CONCURRENT_WRITE", (target,)) from None
             return "memory/long_term/memory.jsonl#" + record.entry_id
         if action == "remove":
-            self.long_term.apply_batch([{"action": "remove", "entry_id": target,
-                "source": f"candidate:{candidate.candidate_id}", "expected_version": prior.version}],
-                _admission=admission)
+            try:
+                self.long_term.apply_batch([{"action": "remove", "entry_id": target,
+                    "source": f"candidate:{candidate.candidate_id}", "expected_version": candidate.target_entry_version}],
+                    _admission=admission)
+            except MemoryVersionConflict:
+                raise _PromotionConflict("TARGET_ENTRY_CONCURRENT_WRITE", (target,)) from None
             return "memory/long_term/memory.jsonl#" + target + ":removed"
         raise ValueError("long_term promotion proposed_action must be add/replace/remove/merge")
 
-    # LLM: USER facts require user_explicit evidence and SOUL alone requires current-turn
+    # LLM: USER仍核user_explicit，SOUL仍需原确认；AGENTS最终提交一律拒绝，只能由用户 /agents 预览确认。
     # confirmation. 第 0 期（v2）：promotion 的最终提交入口一律拒绝 agents——本方法对 agents
     # 直接抛出稳定的 _PromotionBlocked，任何到达提交层的路径都无法再写 AGENTS；用户直接要求
-    # 写 AGENTS 走 update_persona，不经本服务。
+    # 写AGENTS走用户 /agents 预览确认，不经本服务。
     # 函数用途: 通过唯一 PersonaRepository 提交人格目标。
     def _commit_persona(
         self,
         candidate: MemoryCandidate,
         target: str,
         context: _PromotionWriteContext,
-    ) -> str:
+    ) -> _TargetCommit:
         reviewer, confirmed = context.reviewer, context.confirmed
         if target == "agents":
             raise _PromotionBlocked(candidate.status, "AGENTS_WRITE_USER_ONLY")
@@ -508,7 +538,7 @@ class _PromotionCommitMixin:
         if action == "add":
             adopted = self._adopt_existing_persona_tool_write(candidate, target=target)
             if adopted:
-                return adopted
+                return _TargetCommit(adopted, False)
         quote = next(
             (str(ref.get("quote") or "") for ref in candidate.source_message_refs if str(ref.get("quote") or "")),
             "",
@@ -525,7 +555,7 @@ class _PromotionCommitMixin:
             )
         )
         entry_id = str(result.get("entry_id") or candidate.target_entry_id)
-        return f"{target.upper()}.md#{entry_id or result.get('sha256', '')}"
+        return _TargetCommit(f"{target.upper()}.md#{entry_id or result.get('sha256', '')}", bool(result.get("changed")))
 
     # LLM: 保留原提交接缝，结构化事实验证独立于写入编排，避免四目标 mixin 继续膨胀。
     # 函数用途: 委托只读验证器复用本回合已正式提交的人格事实引用。
@@ -551,9 +581,7 @@ def _commit_long_term_add(
             "SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE",
             tuple(item.entry_id for item in existing),
         )
-    entry_id = "memory-" + hashlib.sha256(
-        candidate.candidate_id.encode("utf-8")
-    ).hexdigest()[:24]
+    entry_id = _long_term_entry_id(candidate.candidate_id)
     record = service.long_term.apply_batch(
         [
             {
@@ -576,6 +604,12 @@ def _commit_long_term_add(
         )
     committed = record[0]
     return "memory/long_term/memory.jsonl#" + committed.entry_id
+
+
+# LLM: add与旧格式删除恢复必须共用精确ID派生，不能按内容或subject猜历史归属。
+# 函数用途: 从候选稳定ID计算唯一正式记忆条目ID。
+def _long_term_entry_id(candidate_id: str) -> str:
+    return "memory-" + hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:24]
 
 
 # LLM: 已被 update_persona 提交的同一事实只认成功工具、精确参数、确定性 ID 与当前仓库，不写改述。
@@ -617,34 +651,50 @@ def _commit_with_exclusion_guard(
     *,
     reviewer: str,
     confirmed: bool,
-) -> str:
+) -> tuple[_TargetCommit, MemoryCandidate]:
     try:
         return _commit_admitted(service, candidate, (reviewer, confirmed))
     except _PromotionConflict as exc:
-        blocked = service.candidates.transition(candidate.candidate_id, "blocked_conflict",
+        blocked = service.candidates.transition(candidate, "blocked_conflict",
             reviewer=reviewer, review_note=exc.reason_code, conflicts_with=list(exc.conflicts_with))
         raise _PromotionBlocked(blocked.status, exc.reason_code) from None
+    except MemoryLibraryWriteCapExceeded as exc:
+        # 写入硬帽拒绝（设计 §3.5.1）：候选保持原状态、不丢弃；结构化码原样上抛。
+        raise _PromotionBlocked(candidate.status, exc.code) from None
 
 
-# LLM: 人工/remember 没有 curator 租约，必须直接在 policy 之外领 quota 并贯穿正式写入。
+# LLM: quota→policy→候选锁贯穿正式写入、promoted和remove脱敏，锁内回调用同一准入；解锁前不暴露半成功。
 # 函数用途: 依目标的原配额策略领取准入，在名单锁内核对并写入正式目标。
-def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool]) -> str:
+def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool]) -> tuple[_TargetCommit, MemoryCandidate]:
     enforcer = service.persona.quota_enforcer
     if _promotion_target(candidate) == "long_term" and service.long_term.quota_enforcer is not None:
         enforcer = service.long_term.quota_enforcer
     with enforcer.admission() as admission:
-        with _learning_exclusion_scope(service):
+        with _learning_exclusion_scope(service), service.candidates.locked_snapshot(candidate):
             _ensure_not_excluded(service, candidate)
-            return _commit_target_blocked(service, candidate, _PromotionWriteContext(*review, admission))
+            context = _PromotionWriteContext(*review, admission)
+            outcome = _commit_target_blocked(service, candidate, context)
+            promoted = _complete_candidate_commit(service, candidate, context, outcome.reference)
+            return outcome, promoted
+
+
+# LLM: 调用方已正式提交并持quota/policy/候选锁；删除终态写入失败须保留本轮提交事实及清理责任。
+# 函数用途: 正式写入后同步候选终态，失败时准确报告删除已提交而非吞掉异常。
+def _complete_candidate_commit(service, candidate, context, promotion_ref):
+    from ._jsonl_indexing import removal_cleanup_phase
+
+    is_remove = candidate.proposed_action == 'remove' and _promotion_target(candidate) == 'long_term'
+    with removal_cleanup_phase(formal_memory_changed=True, enabled=is_remove):
+        return service.candidates.mark_promoted_admitted(candidate.candidate_id, context.admission,
+            (context.reviewer, promotion_ref, ""))
 
 
 # LLM: 准入与写入共用同一目标解析，空/none 的用户事实仍落 long_term，不能错领 disabled persona 配额。
 # 函数用途: 统一规范化最终晋升目标，保持原用户事实默认落点。
 def _promotion_target(candidate: MemoryCandidate) -> str:
-    target = str(candidate.promotion_target or "").strip().lower()
-    if target in {"", "none"} and candidate.origin == "user_explicit" and candidate.candidate_type in _LONG_TERM_TARGET_TYPES:
-        return "long_term"
-    return target
+    from .candidate_models import effective_promotion_target
+
+    return effective_promotion_target(candidate.promotion_target, candidate.origin, candidate.candidate_type)
 
 
 # 函数用途: 返回提交期 policy 锁上下文（未接线时为空）。
@@ -695,7 +745,7 @@ def _commit_target_blocked(
     service: MemoryPromotionService,
     candidate: MemoryCandidate,
     context: _PromotionWriteContext,
-) -> str:
+) -> _TargetCommit:
     try:
         return service._commit_target(candidate, context)
     except ValueError as exc:
@@ -728,6 +778,27 @@ def _is_successful_persona_add(
     )
 
 
+# LLM: 只抽出证据/状态变更前的纯判定，保持已晋升→自动权限→AGENTS→排除标记的优先级。
+# 函数用途: 返回已有终态或结构化提前拒绝；None表示继续核验证据。
+def _promotion_precheck(candidate: MemoryCandidate, automatic: bool) -> MemoryPromotionResult | None:
+    if candidate.status == "promoted":
+        return MemoryPromotionResult(candidate.candidate_id, True, "promoted", "ALREADY_PROMOTED", candidate.promotion_ref)
+    code = _promotion_precheck_code(candidate, automatic)
+    if code:
+        return MemoryPromotionResult(candidate.candidate_id, False, candidate.status, code)
+    return None
+
+
+# LLM: 仅返回拒绝码，顺序仍为自动权限、AGENTS禁写、排除名单；无状态或存储副作用。
+# 函数用途: 用平铺的提前返回保持各项拒绝原因的优先级。
+def _promotion_precheck_code(candidate: MemoryCandidate, automatic: bool) -> str:
+    if automatic and str(candidate.promotion_mode or "").strip().lower() != "auto_eligible":
+        return "PROMOTION_MANUAL_REQUIRED"
+    if str(candidate.promotion_target or "").strip().lower() == "agents":
+        return "AUTO_AGENTS_WRITE_FORBIDDEN" if automatic else "AGENTS_WRITE_USER_ONLY"
+    return str(candidate.promotion_exclusion or "").strip() if automatic else ""
+
+
 # LLM: PromotionService 不解析聊天意图；只消费已审核 Candidate 和两个 typed verifier。
 # 类用途: 唯一执行 long_term、Persona、lesson 与 HOT 正式晋升。
 class MemoryPromotionService(_PromotionCommitMixin):
@@ -754,11 +825,11 @@ class MemoryPromotionService(_PromotionCommitMixin):
         self.lesson_min_occurrences = max(2, int(thresholds.lesson_min_occurrences))
         self.hot_min_occurrences = max(3, int(thresholds.hot_min_occurrences))
 
-    # LLM: review 只推进统一 CandidateService 状态，不创建独立 decision ledger。
-    # 函数用途: 管理员审核通过或拒绝一条精确 candidate_id。
+    # LLM: review只推进唯一CandidateService的结构化审核；最终写入仍重核证据、当前目标版本和候选CAS。
+    # 函数用途: 人工审核精确候选；传完整快照时复用原CandidateService的锁内CAS，不允许确认期间换正文。
     def review(
         self,
-        candidate_id: str,
+        candidate_id: str | MemoryCandidate,
         *,
         approved: bool,
         reviewer: str,
@@ -780,9 +851,10 @@ class MemoryPromotionService(_PromotionCommitMixin):
 
     # LLM: 第 0 期（设计 v2 §3.1）：memory promotion 的最终提交入口一律拒绝 agents 目标——
     # 自动、积压重试、人工晋升与审核后提交都算；候选保持原状态并带结构化原因码，不丢弃、
-    # 不标失败。用户直接要求写 AGENTS 走 update_persona，不经本服务。证据、精确 mutation id、
+    # 不标失败。用户直接要求写 AGENTS 走 /agents 预览确认，不经本服务。证据、精确 mutation id、
     # 冲突、门槛、临时过期与目标仓库仍照常 fail-closed。
-    # 函数用途: 核验证据并提交一个候选的正式落点。
+    #   正式提交沿原quota/policy/candidate锁序，自动学习不创建批准，删除恢复只清既有墓碑。
+    # 函数用途: 核验证据并提交正式落点；人工预览可绑定准确审核后快照，迟到候选不得借旧批准提交。
     def promote(
         self,
         candidate_id: str,
@@ -790,120 +862,61 @@ class MemoryPromotionService(_PromotionCommitMixin):
         reviewer: str = "memory-promotion-service",
         automatic: bool = False,
         confirmed: bool = False,
+        expected_candidate: MemoryCandidate | None = None,
     ) -> MemoryPromotionResult:
+        try:
+            return self._promote_snapshot(candidate_id, reviewer=reviewer, automatic=automatic, confirmed=confirmed,
+                                          expected_candidate=expected_candidate)
+        except CandidateStateChangedError as exc:
+            return MemoryPromotionResult(candidate_id, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+
+    # LLM: 每步沿用核对快照；人工预览后的完整预期先于证据读取核验，最终提交持原候选锁；清理错误不猜成功。
+    # 函数用途: 核对预期完整快照后晋升候选；正式删除或lesson派生故障仍返回准确提交事实。
+    def _promote_snapshot(
+        self,
+        candidate_id: str,
+        *,
+        reviewer: str,
+        automatic: bool,
+        confirmed: bool,
+        expected_candidate: MemoryCandidate | None = None,
+    ) -> MemoryPromotionResult:
+        from .promotion_remove_recovery import recover_promotion_result
+
         candidate = self.candidates.get(candidate_id)
-        if candidate.status == "promoted":
-            return MemoryPromotionResult(
-                candidate_id,
-                True,
-                "promoted",
-                "ALREADY_PROMOTED",
-                candidate.promotion_ref,
-            )
-        # 权限闸(automatic=True)：必须显式 auto_eligible；legacy 空值或任何未知值均在
-        # evidence/status/target mutation 前 fail-closed，只有 approved + manual 路径可晋升。
-        if automatic and str(candidate.promotion_mode or "").strip().lower() != "auto_eligible":
-            return MemoryPromotionResult(
-                candidate_id,
-                False,
-                candidate.status,
-                "PROMOTION_MANUAL_REQUIRED",
-            )
-        # AGENTS 硬拦（v2）：不分自动/人工，在证据与状态变更之前整体拒绝。
-        if str(candidate.promotion_target or "").strip().lower() == "agents":
-            return MemoryPromotionResult(
-                candidate_id,
-                False,
-                candidate.status,
-                "AUTO_AGENTS_WRITE_FORBIDDEN" if automatic else "AGENTS_WRITE_USER_ONLY",
-            )
-        # 学习来源排除标记（如 LEARNING_SOURCE_EXCLUDED）只拦自动路径：候选保持原状态、不丢；
-        # 用户显式人工复核（automatic=False）不受影响。判定只看结构化字段，不看正文。
-        exclusion_code = str(candidate.promotion_exclusion or "").strip()
-        if automatic and exclusion_code:
-            return MemoryPromotionResult(
-                candidate_id,
-                False,
-                candidate.status,
-                exclusion_code,
-            )
+        if expected_candidate is not None and candidate != expected_candidate:
+            return MemoryPromotionResult(candidate_id, False, candidate.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+        recovery = recover_promotion_result(self, candidate, reviewer)
+        if recovery is not None:
+            return recovery
+        early_result = _promotion_precheck(candidate, automatic)
+        if early_result is not None:
+            return early_result
         evidence_code = self._verify_evidence(candidate)
         if evidence_code:
             return self._block_missing_evidence(candidate, reviewer, evidence_code)
         candidate = self._fill_default_target(candidate, reviewer)
         authority_code = _absolute_authority_block(candidate)
         if authority_code:
-            return MemoryPromotionResult(
-                candidate_id,
-                False,
-                candidate.status,
-                authority_code,
-            )
+            return MemoryPromotionResult(candidate_id, False, candidate.status, authority_code)
         if automatic:
             policy_code = _automatic_policy_block(candidate)
             if policy_code:
-                return MemoryPromotionResult(
-                    candidate_id,
-                    False,
-                    candidate.status,
-                    policy_code,
-                )
-            candidate = self._apply_automatic_policy(candidate, reviewer)
+                return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
         if candidate.status != "approved":
-            return MemoryPromotionResult(
-                candidate_id,
-                False,
-                candidate.status,
-                "REVIEW_REQUIRED",
-            )
-        try:
-            promotion_ref = self._commit_with_conflict_handling(
-                candidate, reviewer, confirmed
-            )
-        except _PromotionBlocked as exc:
-            return MemoryPromotionResult(
-                candidate.candidate_id,
-                False,
-                exc.status,
-                exc.reason_code,
-            )
-        return self._finalize_promotion(candidate, reviewer, promotion_ref)
+            return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
+        return _commit_promotion_result(self, candidate, reviewer, confirmed)
 
-    # LLM: 宿主确定性补全仅修复 user_explicit 长期事实遗漏的 target；Persona、lesson、HOT
-    # 必须由各自生产入口显式声明结构化 target，不能靠正文猜测，也不代表它们需要人工审核。
-    # 函数用途: 空 target 的 user_explicit 长期事实候选补 default long_term。
+    # LLM: 与提交/恢复共用目标解析；持久补全使用完整快照CAS，不借用同状态transition空操作。
+    # 函数用途: 为符合原默认政策的用户长期事实补上实际保存的落点。
     def _fill_default_target(
         self,
         candidate: MemoryCandidate,
         reviewer: str,
     ) -> MemoryCandidate:
-        if str(candidate.promotion_target or "").strip().lower() in {"", "none"}:
-            if (
-                candidate.origin == "user_explicit"
-                and candidate.candidate_type in _LONG_TERM_TARGET_TYPES
-            ):
-                candidate = self.candidates.transition(
-                    candidate.candidate_id,
-                    candidate.status,
-                    reviewer=reviewer,
-                    promotion_target="long_term",
-                )
-        return candidate
-
-    # LLM: automatic 路径只做结构化放行,不做任何文本判断。
-    # 函数用途: pending_review 候选按 conservative_v1 自动策略转 approved。
-    def _apply_automatic_policy(
-        self,
-        candidate: MemoryCandidate,
-        reviewer: str,
-    ) -> MemoryCandidate:
-        if candidate.status == "pending_review":
-            candidate = self.candidates.transition(
-                candidate.candidate_id,
-                "approved",
-                reviewer=reviewer,
-                review_note="owner_autonomous_v1：结构化权威与安全门通过。",
-            )
+        if (str(candidate.promotion_target or "").strip().lower() in {"", "none"}
+                and _promotion_target(candidate) == "long_term"):
+            return self.candidates.fill_long_term_target(candidate, reviewer)
         return candidate
 
     # LLM: 提交在 policy 锁内先复核名单（mc4-3103）：cleanup 的名单追加与晋升提交不能交错，
@@ -914,68 +927,48 @@ class MemoryPromotionService(_PromotionCommitMixin):
         candidate: MemoryCandidate,
         reviewer: str,
         confirmed: bool,
-    ) -> str:
+    ) -> tuple[_TargetCommit, MemoryCandidate]:
         return _commit_with_exclusion_guard(
             self, candidate, reviewer=reviewer, confirmed=confirmed
         )
 
     # LLM: 总量闸:long_term 写成功后顺带治理(超上限按访问信号浓缩,user_explicit 不淘汰)。
     # 放在 promote 成功路径,任何写入口(remember/curator)都自动触发,无需单独 cron。
-    # 函数用途: 晋升成功后治理、标记 promoted 并按需脱敏 remove 候选。
+    # 函数用途: 使用提交锁内返回的终态快照生成回执，不再依赖提交后的候选读取。
     def _finalize_promotion(
         self,
         candidate: MemoryCandidate,
         reviewer: str,
-        promotion_ref: str,
+        outcome: _TargetCommit,
     ) -> MemoryPromotionResult:
         try:
             if str(candidate.promotion_target or "").strip().lower() in {"", "none", "long_term"}:
                 self.long_term.condense()
         except Exception:
             pass  # 治理失败不影响本次晋升本身
-        promoted = self.candidates.mark_promoted(
-            candidate.candidate_id,
-            reviewer=reviewer,
-            promotion_ref=promotion_ref,
-        )
-        if candidate.proposed_action == "remove":
-            self.candidates.redact_content(
-                content_hashes={candidate.content_hash},
-                reviewer=reviewer,
-            )
-            promoted = self.candidates.get(candidate.candidate_id)
         return MemoryPromotionResult(
             candidate.candidate_id,
             True,
-            promoted.status,
+            candidate.status,
             "PROMOTED",
-            promotion_ref,
+            outcome.reference,
+            formal_memory_changed=outcome.changed,
         )
 
-    # LLM: user_explicit 必须逐条回查 ConversationStore；tool_verified 必须逐条回查 Tool Agent 终态。
+    # LLM: user_explicit 逐条回查消息；工具事实及所有声明产物均逐条回查生产调用的宿主成功终态。
     # 函数用途: 返回空字符串表示证据通过，否则返回稳定阻塞码。
     def _verify_evidence(self, candidate: MemoryCandidate) -> str:
         if candidate.origin == "user_explicit":
             if not candidate.source_message_refs:
                 return "USER_MESSAGE_EVIDENCE_MISSING"
             verified = [self.message_verifier.verify(ref) for ref in candidate.source_message_refs]
-            if not any(item and item.get("role") == "user" for item in verified):
+            if not all(verified) or not any(item and item.get("role") == "user" for item in verified):
                 return "USER_MESSAGE_EVIDENCE_INVALID"
-        if candidate.origin == "tool_verified":
-            if not candidate.source_tool_refs:
-                return "TOOL_EVIDENCE_MISSING"
-            verified_tools = [self.tool_verifier.verify(ref) for ref in candidate.source_tool_refs]
-            if not verified_tools or not all(
-                item is not None
-                and item.successful
-                and item.terminal_status == "succeeded"
-                and item.effect_outcome not in {"unknown", "not_started"}
-                for item in verified_tools
-            ):
-                return "TOOL_EVIDENCE_NOT_SUCCEEDED"
-        return ""
+        from .evidence_admission import tool_evidence_failure
 
-    # LLM: 证据失败从 pending/approved 进入统一 blocked 状态；终态只返回结果不改写历史。
+        return tool_evidence_failure(candidate, self.tool_verifier)
+
+    # LLM: 证据失败CAS原快照进入blocked；终态只返回结果，旧失败不得覆盖并发已提交候选。
     # 函数用途: 持久化缺证据阻塞。
     def _block_missing_evidence(
         self,
@@ -985,7 +978,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
     ) -> MemoryPromotionResult:
         if candidate.status in {"pending_review", "approved"}:
             blocked = self.candidates.transition(
-                candidate.candidate_id,
+                candidate,
                 "blocked_missing_evidence",
                 reviewer=reviewer,
                 review_note=reason_code,
@@ -1001,15 +994,16 @@ class MemoryPromotionService(_PromotionCommitMixin):
         )
 
 
-# LLM: Automatic policy consumes the shared host authority result plus exact mutation/conflict/scope
-# facts. It never uses confidence, prose, elapsed time, or a model-authored approval claim.
-# AGENTS is hard-blocked for every automatic path (the user writes it via update_persona or an
-# owner-run manual review only); the candidate stays pending, keeps its state, and reports a
-# stable reason code so the phase-1 migration can route it into long-term memory.
-# 函数用途: 返回空表示非 SOUL 候选可自主尝试正式写入，否则返回稳定阻塞码。
+# LLM: 自动学习只产生候选；宿主核实的学习来源不是用户对精确内容的批准，末端必须拒绝正式发布。
+#   保留来源/证据/范围的诊断优先级；人工review-approved后promote(automatic=False)沿原CAS和证据提交。
+# 函数用途: 给自动学习返回结构化待确认原因，不写正式记忆、Persona、lesson或HOT。
 def _automatic_policy_block(candidate: MemoryCandidate) -> str:
     if str(candidate.promotion_target or "").strip().lower() == "agents":
         return "AUTO_AGENTS_WRITE_FORBIDDEN"
+    # 自动学习对旧空来源也保守关闭；人工审核不调用此策略，不能借空字段授予自动资格。
+    source = candidate.learning_source if isinstance(candidate.learning_source, dict) else {}
+    if not projection_is_learnable(source):
+        return "AUTO_POLICY_LEARNING_SOURCE_UNVERIFIED"
     if host_promotion_mode(candidate) != "auto_eligible":
         return "AUTO_POLICY_AUTHORITY_REQUIRES_REVIEW"
     if candidate.proposed_action in {"replace", "remove", "merge"} and not candidate.target_entry_id:
@@ -1019,20 +1013,22 @@ def _automatic_policy_block(candidate: MemoryCandidate) -> str:
     scope = MemoryScope.from_value(candidate.scope)
     if scope.scope_type == "temporary" and not candidate.valid_until:
         return "AUTO_POLICY_TEMPORARY_REQUIRES_EXPIRY"
-    return ""
+    return "AUTO_PROMOTION_CONFIRMATION_REQUIRED"
 
 
-# LLM: No review or autonomous path can manufacture formal user facts or SOUL authority.
+# LLM: 人工审核也不能把模型推断制造成正式用户事实或SOUL权威；AGENTS禁写与会话/临时范围约束不可绕过。
 # AGENTS is user-write-only: every automatic promotion path is blocked earlier in
 # _automatic_policy_block (AUTO_AGENTS_WRITE_FORBIDDEN), while temporary/session instructions
 # still cannot become a durable USER profile.
 # 函数用途: 返回模型自主或人工路径都不能绕过的正式事实与 SOUL/USER 权威阻塞码。
 def _absolute_authority_block(candidate: MemoryCandidate) -> str:
-    if candidate.origin == "model_inferred" and candidate.promotion_target in {
-        "long_term",
-        "user",
-        "soul",
-    }:
+    if (
+        candidate.origin == "model_inferred"
+        and candidate.promotion_target in {"long_term", "user", "soul"}
+        and candidate.candidate_type != "working_agreement"
+    ):
+        # working_agreement 的可信来源由学习来源门承担（§3.3 专门的审核规则）；
+        # 事实/事件/项目仍要求 user_explicit/tool_verified。
         return "MODEL_INFERRED_FORMAL_AUTHORITY_FORBIDDEN"
     if (
         candidate.promotion_target in {"user", "soul"}
@@ -1115,6 +1111,17 @@ def _same_scope_identity(scope_type: str, scope_key: object, candidate_scope: Me
         return str(scope_key or "") == str(candidate_scope.scope_key or "")
 
 
+# LLM: 正式覆盖只能使用宿主冻结的观察版本；旧缺字段候选保守阻断，墙钟先后不能授予覆盖权。
+# 函数用途: 核对目标观察版本并返回稳定冲突码，后续写入继续使用同一版本CAS。
+def _stale_target_observation(candidate: MemoryCandidate, prior: MemoryRecord) -> str:
+    version = candidate.target_entry_version
+    if type(version) is not int or version < 1:
+        return "TARGET_ENTRY_OBSERVATION_VERSION_MISSING"
+    if prior.version != version:
+        return "TARGET_ENTRY_STALE_OBSERVATION"
+    return ""
+
+
 # LLM: conflict 比较明确读取 subject_key + scope_type + scope_key；适用条件文字不参与身份猜测。
 # 函数用途: 查找同主题同范围（canonical 等价）的 active 长期记忆。
 def _same_subject_scope(
@@ -1155,7 +1162,7 @@ def _exact_content_entry_ids(
 # 函数用途: 构造 long_term 记录元数据。
 def _long_term_attributes(candidate: MemoryCandidate) -> dict[str, object]:
     scope = MemoryScope.from_value(candidate.scope)
-    return {
+    attributes: dict[str, object] = {
         "candidate_id": candidate.candidate_id,
         "candidate_type": candidate.candidate_type,
         "origin": candidate.origin,
@@ -1177,23 +1184,38 @@ def _long_term_attributes(candidate: MemoryCandidate) -> dict[str, object]:
             ]
         )[:32],
     }
+    # 工作约定与子代理来源：来源投影和 run/task 关联进正式记录，撤回与审计可回溯标签。
+    learning = candidate.learning_source if isinstance(candidate.learning_source, dict) else {}
+    if learning:
+        attributes["learning_source"] = dict(learning)
+    if candidate.source_run_ids or candidate.source_task_ids:
+        attributes["source_run_ids"] = list(candidate.source_run_ids)[:32]
+        attributes["source_task_ids"] = list(candidate.source_task_ids)[:32]
+    return attributes
 
 
 # LLM: lesson 永不写进 long_term；这里只映射允许的事实种类。
 # 函数用途: 选择长期记忆 kind。
 def _long_term_kind(candidate_type: str) -> str:
-    return {"long_term_fact": "fact", "event": "event", "project": "project"}[candidate_type]
+    return {
+        "long_term_fact": "fact",
+        "event": "event",
+        "project": "project",
+        "working_agreement": "working_agreement",
+    }[candidate_type]
 
 
-# LLM: valid_until 是唯一过期来源，缺失不从“临时”等正文词推断。
-# 函数用途: 将 ISO 失效时间转为 JsonlMemory epoch。
+# LLM: valid_until是唯一过期来源；转换和正式仓库非负约束共用，工具全批预检可在写入前调用。
+# 函数用途: 将带时区ISO失效时间转为已经通过正式约束的epoch。
 def _expiry_epoch(value: str) -> float:
+    from .jsonl import _operation_expiry
+
     if not str(value or "").strip():
         return 0.0
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("candidate valid_until lacks timezone")
-    return parsed.timestamp()
+    return _operation_expiry(parsed.timestamp())
 
 
 # LLM: Persona 行显式携带 typed scope，避免 macOS/Linux 等不同环境事实变成无范围冲突文本。
@@ -1239,3 +1261,29 @@ __all__ = [
     "ToolEvidenceVerifier",
     "VerifiedToolEvidence",
 ]
+
+
+# LLM: 仅提交阶段捕获已分类失败，正文提交事实和派生修复责任不得丢失；使用已核验候选快照。
+# 函数用途: 把提交与清理的不同终态转换为准确晋升回执。
+def _commit_promotion_result(service, candidate, reviewer, confirmed):
+    from ._jsonl_indexing import RemovalCleanupError
+
+    candidate_id = candidate.candidate_id
+    try:
+        outcome, promoted = service._commit_with_conflict_handling(
+            candidate, reviewer, confirmed
+        )
+    except LessonRoutingPendingError as exc:
+        return MemoryPromotionResult(candidate_id, False, candidate.status, "LESSON_ROUTING_PENDING",
+                                     exc.promotion_ref, formal_memory_changed=exc.formal_memory_changed)
+    except RemovalCleanupError as exc:
+        return MemoryPromotionResult(candidate_id, False, candidate.status, "REMOVE_CLEANUP_PENDING",
+                                     formal_memory_changed=exc.formal_memory_changed)
+    except _PromotionBlocked as exc:
+        return MemoryPromotionResult(
+            candidate.candidate_id,
+            False,
+            exc.status,
+            exc.reason_code,
+        )
+    return service._finalize_promotion(promoted, reviewer, outcome)

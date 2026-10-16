@@ -1083,7 +1083,7 @@ def test_allowlist_real_process_through_external_directory_symlink_chain(tmp_pat
 
 
 # LLM: 只截取正式 process_run 交给 Popen 的参数，不启动真实进程、不替换权限判定或等待入口。
-# 函数用途: 用可立即 communicate 的假进程记录启动 argv/cwd，给两平台参数形状测试复用。
+# 函数用途: 用可立即 wait 的假进程记录启动 argv/cwd，给两平台参数形状测试复用。
 @pytest.fixture
 def captured_sandbox_popen(monkeypatch):
     from types import SimpleNamespace
@@ -1092,7 +1092,7 @@ def captured_sandbox_popen(monkeypatch):
 
     calls = []
     proc = SimpleNamespace(pid=987654321, stdout=None, stderr=None, returncode=0,
-                           communicate=lambda timeout: ("", ""))
+                           wait=lambda timeout: 0)
 
     def capture(argv, **kwargs):
         calls.append((argv, kwargs))

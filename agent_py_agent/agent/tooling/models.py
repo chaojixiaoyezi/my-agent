@@ -1,5 +1,5 @@
 # LLM: 本模块定义不可变工具合同；宿主展示投影不改注册身份或权限，执行权威回调只留在当前调用上下文。
-# 模块用途: 统一工具声明、结果、展示投影与调用上下文，让原执行器始终使用同一份真实工具绑定。
+# 模块用途: 统一工具声明、结果和调用上下文；self_map等发现入口只保护展示，不增加授权。
 from __future__ import annotations
 
 """Defines stable tool metadata, retrieval hits, and base execution contracts."""
@@ -1169,8 +1169,8 @@ def _validate_trusted_source_ref(tool_name: str, source_ref: object) -> None:
 
 
 # LLM: 发现入口不能被自适应展示收起；此集合不是权限白名单，只保护当前快照中本来存在的入口。
-# 常量用途: 保留查找完整工具和 Skill 的原发现路径。
-TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "list_tools", "skill_search"})
+# 常量用途: 保留查找完整工具、Skill和自我目录的原发现路径；没有注册时不会凭空增加。
+TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "list_tools", "skill_search", "self_map"})
 
 
 # LLM: 该快照固定原授权/就绪绑定；可选展示名集合只属本工作片，由宿主按原配置生成，不参与权限或snapshot_hash。

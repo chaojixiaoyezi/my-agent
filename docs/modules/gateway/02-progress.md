@@ -1,3 +1,25 @@
+## 2026-10-16 F6/F7 正式组合候选（未发行、未部署）
+
+在准确 R2 候选上顺序组合 F6、迟到遥测 P2、typed 旧夹具与 F7。冻结前缀只在容量可容纳时采用；本地 typed 超窗在模型发送前复用原完整来源与分段，保留小窗口可用性、媒体与单一 checkpoint/CAS。首次完整空摘要有界补一次；真实采样先捕获 generation/revision，迟到保存不得重新签版本。
+
+F7 生产零新增路径，复用原缓存布局、工具状态、用途/物理尝试/耗时与 cache usage。F4 learning_source/source-CAS、F5 实际 self_map 资格、F2 scope/队列与当前宿主图片均保留。91 文件 1475 项定向组合通过，静态门结果见本轮 TESTS；无真实模型、外网、服务或日常 home 操作，不外推真实命中率、费用或容量。
+## 2026-10-16 F4/F5 人工控制与目录（组合候选，未发布）
+
+- `/agents` 与显式 `/memory candidates` 沿原 command_catalog→parser→HTTP/direct→control-once；当前认证活封印只在原 C 锁首次执行传给回执还原 scope，重放不重新签权或执行。
+- 普通/群本人候选 list/show/preview/confirm/reject/cancel/receipt 已可达；600 秒预览绑定准确 owner/actor/topic/thread、完整候选 SHA 与目标 CAS。运输 accepted 与业务 consumed_unknown 分开，成功/拒绝/取消重放读原结果，unknown 永不重做。
+- 原 typed HostActor 与群配置租约保持，额外群授权仍只管监控；不新增全机 admin 门、monitor grant、来源队列或权限库。学习来源贯穿原请求/后台/调度与归档，不按正文猜用户批准。
+- F5 `self_map` 聚合原本人公开读口，保留 main list_tools/tool_search 渐进加载、不可用原因、凭据卡/群 cref、机器人订阅、原生/引用媒体、零查询复核；配置关闭同步移除入口与请求/Compact 指引。
+- F1 的进度/JSON/SQLite 与 F2 的可信 owner 物理排队接缝不回退；TLS/网络安全不新增探测。阶段证据与最终未验见[TESTS](../../../TESTS.md)，详细[命令参考](../../../CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布)及[自我目录](../../design/SELF_MAP.md)。
+
+2026-10-16 F2候选已接线：排队发生在物理started/计时前，等待不记物理尝试，沿原typed进度和closed/still_current门展示；队列默认0，非零也不跨Python进程。组合严格门与发行尚未完成。
+
+## 2026-10-16 F1 网关减负（集成验收中）
+
+- JSON 更新在同锁下比较规范序列化后的精确字节与原私有文件状态；相同才跳过，数值类型变化、缺失损坏和需收紧的文件仍正常替换。主线 append 的 still_current 谓词保持。
+- /progress 接有界稀疏位置索引，半行不消费，替换/截断重建，公开白名单、模型/工具等待、时间戳与脱敏保持；超限只带结构化行号/字节数。
+- 终态投影追平后以目录观察跳过重复 glob，启动及每小时重核；错误/未结算欠账继续轮转，不重做业务。SQLite 复用只在当前请求原 owner 解析成功后的 scope，默认关闭。
+- 新增开关、受影响合同和准确验收见七块合并设计与 TESTS；真实服务/发行另验。
+
 2026-10-15 `.12`监控成功回执：原policy guard退出后复用creator_display_rows补create/mutation的自有JSON.job展示；只替换output、保creator/effect/错误，姓名网络在锁外，list/get/metadata_only不重做。真实`.11`列表及原账正确、裸成功回执占位的证据保留，补丁1664项联合回归通过。
 
 2026-10-15 群监控简化：/group仅额外控制监控，全群显式grant覆盖未来实际成员，原个人快照不扩大。原provider安全诊断直接给IM可见错误，创建者缺名沿当前群成员接口补索引；普通聊天/配置原边界保持。联合验收待收口，见[群合同](../../design/IM_GROUP_GOVERNANCE.md)。
@@ -1714,3 +1736,9 @@ UNKNOWN恢复二次审查：结算/重开统一核验原活跃attempt、TaskRun�
 认证明确拒绝的首次宿主事实独立于普通结果 `local/none` 静默：precheck、NO和后台LLM共用原 owner/thread/task/HostActor，finalization 前把义务冻结原 Wake。已有公开LLM回执可复用，否则仅走原零工具模型表达；实际外发前再核原来源、当前代次/撤销、active任务与原job状态。未发缓存重投必须在原 BackgroundClaim 内，业务和认证不重跑；已发回执只补canonical，后续换代不会重复外发。既有wake重投期限耗尽沿原quarantine及queued claim/finish CAS收失败片，不能抢其它活跃claim、复活终态、停计划或删除凭据。通知开关默认开启，关闭后原义务退休而不回落业务。详见 [模块交接](../../tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md)。
 
 2026-10-16 CI 基线：请求 owner 冻结读者与写者统一支持规范 local/user、local/group；仍拒绝未知 main、非规范路径和身份冲突。身份写入成功后不能在恢复时误报损坏；见 test_request_owner_roundtrip。
+
+## 2026-10-16 F6 摘要生命周期补充（候选，未发布）
+
+三宿主旧历史释放回归揭示冻结前缀仍在摘要栈持有完整投影。恢复解绑边界与自动 preflight 现先用原请求 token/输出预留/校准规则求可覆盖前缀的保守容量下界；确定必超原预算时不发布优化，原 tool_source 原样进入主线分段链。可容纳或未知仍交后续完整请求精确门，取消/身份/媒体/网络错误不转容量回退；无新配置、网络调用、持久状态或权限变化。原三宿主内存阈值与覆盖/首业务请求断言保持，最终证据随该修复交接，不能沿用旧 FINAL_02 全仓结果代替修改后验收。
+
+同批覆盖“大正文加明确不支持的历史图片”：仅将既有 typed CompactMediaDecision 沿当前 provider surface 传入，解绑前释放不可用前缀；在探针前按候选自己的 canonical 媒体事实/类型复核，保留原 COMPACT_PREFIX_MEDIA_UNSUPPORTED、归档 refs 和单 checkpoint，不把全来源的 video 拒绝套到只含已支持 image 的较小候选，off 和未知声明保持原链。

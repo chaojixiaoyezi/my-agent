@@ -100,13 +100,13 @@ class _SubagentStatusCounts(NamedTuple):
     other_labels: tuple[tuple[str, int], ...] = ()
 
 
-# LLM: Authenticated issuer facts and a once-resolved owner are separate. Durable control receipts
+# LLM: 认证发起人和一次解析的owner分别保存；持久回执不能从正文或后续配置恢复AGENTS活请求授权。
 # persist both; callers must never derive owner authority from command text or a later config read.
 # workspace 是未校验的客户端 JSON，必须经过共享目录校验才可写入线程，不能据此取得权限。
 # event_hub 是 B6 观察计数用的只读事件中心句柄，全进程只有 Gateway server 一个来源；
 #   它是纯展示依赖，不参与身份、权限或 owner 判定，缺省 None 时展示“暂无记录”。
 #   因此从相等、哈希和 repr 里排除：两个只差 hub 的 scope 必须相等、哈希相同，打印 scope 也不该带出对象地址。
-# 类用途: 保存一条控制命令的可信来源、会话定位、可选的固定 owner 身份，以及只读展示依赖。
+# 类用途: 保存控制的可信来源及短期人工封印；封印不序列化，恢复回执不能重建当前批准。
 @dataclass(frozen=True)
 class GatewayControlScope:
     user_id: str
@@ -117,6 +117,8 @@ class GatewayControlScope:
     resolved_owner: OwnerIdentity | None = None
     workspace: object = None
     event_hub: object | None = field(default=None, compare=False, hash=False, repr=False)
+    agents_ingress: object | None = field(default=None, compare=False, hash=False, repr=False)
+    memory_ingress: object | None = field(default=None, compare=False, hash=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -368,7 +370,7 @@ def reconcile_gateway_steer_delivery(
 #   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
 # 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
 # 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
-# LLM: 监控与人工群授权均沿原已认证控制面分派；/group只接受原群owner，模型消息/子代理上下文不得制造批准。
+# LLM: 监控及人工配置沿原认证面分派；Memory候选只传给活封印控制，模型/子代理不得制造批准。
 # 函数用途: 按准确身份和入口分派即时命令，群能力授予不进入普通模型任务，保持原控制/恢复/权限测试一致。
 def execute_gateway_conversation_control(
     agent: object,
@@ -447,6 +449,12 @@ def execute_gateway_conversation_control(
         from .skill_control_service import execute_skill_control
 
         return execute_skill_control(agent, command, scope)
+    if command.kind == "memory":
+        from .memory_candidate_control import execute_memory_candidate_control
+        return execute_memory_candidate_control(agent, paths, command, scope)
+    if command.kind == "agents":
+        from .agents_control_service import execute_agents_control
+        return execute_agents_control(agent, command, scope)
     if command.kind == "settings":
         # settings_control_service 同样在导入期依赖本模块的 owner 解析，延迟导入以免循环引用。
         from .settings_control_service import execute_settings_control

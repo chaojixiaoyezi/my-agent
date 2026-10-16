@@ -1,6 +1,6 @@
 # LLM: 该模块只消费已脱敏的 Gateway typed chunk，发布到前后台共用的 owner/thread main 标量。
 # request/thread/task 绑定来自持锁请求对象，等待审批只跟踪显式 permission ID；不触碰正文、模型缓存或执行权。
-# 模块用途: 把前台真实工作阶段和上下文数字同步给同会话的其他窗口，避免显示旧后台等待状态。
+# 模块用途: 把前台真实工作/排队阶段和上下文数字同步给同会话窗口，避免显示旧后台等待状态。
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class GatewayMainActivitySink:
         self._publish("running", "整理任务上下文", begin=True)
 
     # LLM: 只读显式事件 kind/结构化工具阶段；任意模型正文与错误字符串均不能成为状态依据。
-    # 函数用途: 在原 chunk 已发出的边界同步工作及审批等待；无关审批回执不能清掉当前等待。
+    # 函数用途: 同步真实工作、物理排队及审批等待；无关排队或审批事件不能改变其它会话或清除审批。
     def __call__(self, event: dict[str, object]) -> None:
         if self.closed:
             return
@@ -65,6 +65,12 @@ class GatewayMainActivitySink:
             return
         if kind == "runtime_progress" and isinstance(event.get("retry"), dict):
             self._publish("retrying", _retry_activity(event["retry"]))
+            return
+        if kind == "runtime_progress" and isinstance(event.get("provider_queue"), dict):
+            from .stream_events import provider_queue_event
+
+            if public := provider_queue_event(event["provider_queue"]):
+                self._publish("running", public["text"])
             return
         if kind in {"context_window_compacted", "conversation_compacted"}:
             self._publish("running", "继续当前任务")

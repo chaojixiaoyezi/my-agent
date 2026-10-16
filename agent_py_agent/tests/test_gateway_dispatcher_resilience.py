@@ -76,6 +76,7 @@ class _FailingStderr:
         return None
 
 
+# LLM: 绕过真实构造器只隔离执行池副作用，仍须与构造器同步扫描和启动状态；退避测试继续调用真实 tick。
 # 函数用途: 用真实 tick/派发/扫描门、假执行池组一个派发者：submit 只记请求编号并置位 stop_event。
 def _stub_dispatcher(paths: GatewayPaths, claims: list[str], stop_event: threading.Event):
     dispatcher = object.__new__(gateway_loops._RequestDispatcher)
@@ -84,6 +85,7 @@ def _stub_dispatcher(paths: GatewayPaths, claims: list[str], stop_event: threadi
     dispatcher._scan_gate = rw.GatewayInboxScanGate()
     dispatcher._recover_throttle = SimpleNamespace(due=lambda: False)
     dispatcher._next_terminal_projection_at = float("inf")
+    dispatcher._terminal_projection_startup = True
     dispatcher._next_input_reconcile_at = float("inf")
     dispatcher.bootstrap_agent = SimpleNamespace(config=SimpleNamespace())
     dispatcher.backoff = LoopErrorBackoff()

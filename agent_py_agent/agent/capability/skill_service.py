@@ -1,5 +1,5 @@
 # LLM: 原全局 Skill 根与独立能力包分别装配到同一快照，不能把私有资源目录交给递归 Skill 扫描或名称去重。
-# 模块用途: 按 owner、工作区和当前有效安装构造可缓存的发现快照，包读取失败不吞掉无关普通 Skill。
+# 模块用途: 提供唯一Skill根声明及逐轮发现快照；目录仅读根声明，不扫描正文或吞掉无关方法。
 from __future__ import annotations
 
 """Single owner-scoped Skill discovery, policy, cache, and snapshot service."""
@@ -135,22 +135,25 @@ class SkillsService:
         except (OSError, ValueError, TypeError) as exc:
             return (), [SkillLoadError("", "CAPABILITY_PACKAGE_DISCOVERY_FAILED", type(exc).__name__, "capability_package")]
 
+    # LLM: 只返回本服务的规范根声明，不发现正文、不调用插件根或策略回调；正常发现也复用同一来源。
+    # 函数用途: 提供普通方法的权威位置元信息，避免目录工具另造路径。
+    def base_roots(self, workspace_root: Path) -> tuple[SkillRoot, ...]:
+        roots = [SkillRoot(path, "workspace") for path in self._extra_roots]
+        roots.extend((SkillRoot(workspace_root / ".agents" / "skills", "workspace"),
+                      SkillRoot(Path(self.home_paths.owner_home_dir) / "skills", "owner"),
+                      SkillRoot(Path(self.home_paths.shared_skills_dir), "shared"),
+                      SkillRoot(Path(self.home_paths.shared_builtin_dir), "builtin")))
+        return tuple(roots)
+
+    # LLM: 原来源过滤与优先级不变；只复用规范根声明，插件根仍最后且只在真实发现入口调用。
+    # 函数用途: 给普通方法发现生成原授权根集合，不增加扫描或来源授权。
     def _skill_roots(
         self,
         workspace_root: Path,
         policy: EffectiveOwnerPolicy,
     ) -> tuple[SkillRoot, ...]:
         enabled = set(policy.enabled_skill_sources)
-        roots: list[SkillRoot] = []
-        if not enabled or "workspace" in enabled:
-            roots.extend(SkillRoot(path, "workspace") for path in self._extra_roots)
-            roots.append(SkillRoot(workspace_root / ".agents" / "skills", "workspace"))
-        if not enabled or "owner" in enabled:
-            roots.append(SkillRoot(Path(self.home_paths.owner_home_dir) / "skills", "owner"))
-        if not enabled or "shared" in enabled:
-            roots.append(SkillRoot(Path(self.home_paths.shared_skills_dir), "shared"))
-        if not enabled or "builtin" in enabled:
-            roots.append(SkillRoot(Path(self.home_paths.shared_builtin_dir), "builtin"))
+        roots = [root for root in self.base_roots(workspace_root) if not enabled or root.source in enabled]
         # 插件 Skill 由插件启用这一显式操作授权，不受旧的来源名单限制（已有 owner 的名单不含 plugin），
         # 但排在最后、优先级最低，不能覆盖同名的工作区/用户/内置 Skill；总闸关闭时上面已返回空快照
         if self.plugin_roots is not None:

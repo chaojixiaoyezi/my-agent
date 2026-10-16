@@ -280,6 +280,8 @@ class CuratorExtraction:
     unresolved_refs: tuple[dict[str, object], ...]
     warnings: tuple[str, ...]
     next_cursor: dict[str, object]
+    # 只由宿主校验器产生，模型Schema不暴露；拒绝只贡献无正文版本约束，不贡献候选资格。
+    rejected_target_bindings: tuple[dict[str, object], ...] = ()
 
 
 # LLM: run audit 不含输入正文和候选正文，只保存数量、游标、模型和稳定失败码。
@@ -297,8 +299,12 @@ class CuratorRunResult:
     candidates: int = 0
     failure_code: str = ""
     warnings: tuple[str, ...] = ()
+    promotion_results: tuple[dict[str, object], ...] = ()
+    formal_commits: int = 0
+    cleanup_recovered: int = 0
+    cleanup_pending: int = 0
 
-    # LLM: CLI/Gateway 只消费稳定状态、计数与错误码，不能借此取得候选正文。
+    # LLM: CLI/Gateway只消费无正文回执、状态与计数；本轮正式提交与历史清理分列，不将恢复虚报成新增事实。
     # 函数用途: 将一次 Curator 运行结果转换为可序列化字典。
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -418,10 +424,11 @@ def _parse_daily_draft(payload: dict[str, object]) -> CuratorDailyDraft:
     )
 
 
-# LLM: CandidateObservation 解析只允许模型提出字段；host-owned ID/status/reviewer 不可由模型覆盖。
+# LLM: CandidateObservation 解析只允许模型提出字段；host-owned ID/status/reviewer 不可由模型覆盖，
+#   learning_source与target_entry_version是宿主事实，模型输出里出现也直接拒绝。
 # 函数用途: 将一条策展候选草稿交给唯一 CandidateService。
 def _parse_candidate_observation(payload: dict[str, object]) -> CandidateObservation:
-    allowed = set(CandidateObservation.__dataclass_fields__)
+    allowed = set(CandidateObservation.__dataclass_fields__) - {"learning_source", "target_entry_version"}
     if set(payload) - allowed:
         raise ValueError("curator candidate contains host-owned or unknown fields")
     return CandidateObservation(

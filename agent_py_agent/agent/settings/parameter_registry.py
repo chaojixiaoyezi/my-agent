@@ -59,7 +59,9 @@ _TARGET_TOKENS = frozenset({
 _BOUNDARY_NAMES = frozenset({
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
-    "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "gateway_restart_cooldown_seconds",
+    # 物理请求资源上限由部署者设置；模型不能把0当作绕过共享并发额度的开关。
+    "provider_max_concurrent_requests",
+    "enable_tools", "enable_gateway_restart_tool", "enable_model_profile_tool", "enable_self_map", "gateway_restart_cooldown_seconds",
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
     "cli_audit_cleanup_days", "plugin_tool_gate_timeout_ms",
@@ -69,6 +71,8 @@ _BOUNDARY_NAMES = frozenset({
     "plugin_events_enabled",
     # 老插件权限：老格式新授权默认收紧也是安全边界，只能用户经 /settings 改。
     "plugin_legacy_sandbox_default",
+    # 规则来源及网络读取由用户控制；模型不能关闭规则来源或自行开启URL加载。
+    "agents_source_enabled", "agents_source_network_enabled",
 })
 # 常用参数：/settings 默认只列这些，user_config 的搜索结果也标出来，方便先推荐。这是封闭的产品决策名单（2026-09-27 配置分类
 # 的 common 层：99% 的用户只会碰到它们），不是开放世界的类型识别；其余参数仍可用 /settings all、search、show 查到和修改。

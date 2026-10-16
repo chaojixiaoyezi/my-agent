@@ -2,7 +2,7 @@
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
 # 联合候选绑定消息及工具分区，须同时满足输入触发线和已知输出预留；取消不提交、不计熔断。
 # 人格缓存面只绑定本次已提交线程，不使用候选代次；与普通提示冻结共享唯一快照。
-# 模块用途: 在隔离的会话历史上压缩并记录真实消耗；坏摘要不得推进游标，近期完整对话仍保留原文。
+# 模块用途: 复用可容纳主前缀，必超预算时先释放优化再沿原分段恢复；完整原文和 checkpoint/CAS 保持权威。
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -309,7 +310,7 @@ class _LandmarkRebuild:
 
 
 # LLM: 摘要模型返回后的收尾输入；rows 是本次全部行（机械回退保留原文用），foreground_rows 是去掉后台审计投递的行。
-# 类用途: 收拢 _finish_summary 需要的上一代摘要、证据、行、工具来源文本、媒体要点与调用参数。
+# 类用途: 收拢摘要收尾材料和结构化回退原因，上一代摘要、原文与证据仍守原权威。
 @dataclass(frozen=True)
 class _SummaryFinish:
     agent: SimpleAgent
@@ -320,6 +321,7 @@ class _SummaryFinish:
     tool_source_text: str
     media_digest: str
     call: _CompactSummaryCall
+    fallback_reason: str = "compact provider completed without summary text"
 
 
 # LLM: Never derive owner or thread authority from prompt text in this projection.
@@ -936,8 +938,8 @@ class _RejectedCandidates:
         return replace(self.smallest, candidates_tried=self.count, fixed_tokens=_fixed_request_tokens(self.request))
 
 
-# LLM: 宿主已备provider_surface原样沿用；新建面绑定已提交线程人格及累计加载名，不用候选代次；失败走原记账。
-# 函数用途: 为本次Compact取得同线程缓存面，准备失败与候选失败共用原记账。
+# LLM: 宿主已备surface原样沿用；新建面绑定已提交人格/加载名，前缀下界必超原预算时不保留旧正文，完整精确门仍执行。
+# 函数用途: 为本次Compact冻结同线程缓存面及可容纳前缀，准备错误沿原记账，不借容量优化吞掉身份/取消错误。
 def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompactProviderSurface | None:
     provider_surface = request.provider_surface
     if provider_surface is not None or request.model_surface is None:
@@ -945,7 +947,20 @@ def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompa
     try:
         surface = replace(request.model_surface, thread_id=request.thread.thread_id,
                           loaded_tool_names=_bound_loaded_tools(request.model_surface, request.thread))
-        return prepare_conversation_compact_provider_surface(request.agent, surface, run_id=request.run_id)
+        from ..agent_core.compact_transcript_prefix import (
+            capture_preflight_prefix,
+            declared_transcript_prefix_media_decision,
+            transcript_prefix_exceeds_capacity,
+        )
+
+        provider = prepare_conversation_compact_provider_surface(request.agent, surface, run_id=request.run_id)
+        prefix = capture_preflight_prefix(request, surface)
+        media_decision = declared_transcript_prefix_media_decision(request.agent, prefix)
+        if media_decision is not None:
+            return replace(provider, media_decision=media_decision)
+        if transcript_prefix_exceeds_capacity(request.agent, provider, prefix, request.calibration):
+            return provider
+        return replace(provider, transcript_prefix=prefix)
     except Exception as exc:
         record_compact_failure(request.store, request.thread, code=compact_exception_code(exc), now=request.attempted_at)
         raise
@@ -988,8 +1003,22 @@ def _commit_compact_candidate_or_record_failure(
         raise
 
 
-# LLM: 候选继承同scope摘要和证据，携带自己的工具分区；双来源共同摘要和完整计量，不能提前提交任何一侧。
-# 函数用途: 流式消费同源地址并报告进度，候选保留范围视图，交原接受门而不提前改游标。
+# LLM: 全来源的声明拒绝只作原媒体决定载体；候选须有canonical媒体事实且其实际类型仍被原声明拒绝，off不改。
+# 函数用途: 在视觉探针之前按本候选范围复核早先决定，避免把未覆盖尾部的媒体拒绝套到较小候选。
+def _candidate_prefix_media_decision(agent, surface, rows, decision, facts):
+    if (surface is None or surface.media_decision is None or decision is None
+            or decision.policy == MEDIA_POLICY_OFF or not facts.blocks):
+        return decision
+    from .compact_media_policy import declared_prefix_media_unsupported
+
+    with closing(iter_provider_history_messages_from_rows(rows)) as messages:
+        if declared_prefix_media_unsupported(agent, messages):
+            return surface.media_decision
+    return decision
+
+
+# LLM: 候选继承同scope摘要/工具分区，媒体决定在探针前按本候选canonical范围复核；双来源和完整计量不提前提交。
+# 函数用途: 流式构造同源候选，保留媒体归档原因且不持已拒用前缀，范围与提交仍由原接受门裁决。
 def _build_compact_candidate(
     request: _CompactRunRequest,
     compact_rows: Sequence[MessageLogEntry],
@@ -1003,20 +1032,13 @@ def _build_compact_candidate(
     # 媒体事实只从 canonical 信封统计；策略为 off 或没有决定时不统计、也不写 checkpoint 字段。
     media_facts = (media_archive_facts(compact_rows)
                    if media_decision is not None and media_decision.policy != MEDIA_POLICY_OFF else MediaArchiveFacts())
-    if media_decision is not None and media_facts.blocks > 0:
-        # 只有范围内确有媒体块才解析视觉能力事实（声明或缓存探针）；纯文字候选零额外请求。
-        # LLM: 解析可能触发一次未缓存的工具能力探针，照选模调用点绑定记账 scope（账本 + 请求身份），
-        #   让压缩触发的探测也进 model_usage 的 probe:tool_capability 桶；缓存命中不重复记账。
-        from ..agent_core.model.call_runtime import model_call_ledger
-        from ..backends.provider_headers import ProbeAccountingScope, probe_accounting_scope
-
-        scope = ProbeAccountingScope(
-            model_call_ledger(request.agent),
-            request_id=str(request.request_id or ""),
-            run_id=str(request.run_id or ""),
+    media_decision = _candidate_prefix_media_decision(request.agent, provider_surface, compact_rows, media_decision, media_facts)
+    # 已证明主前缀由同一后端直接读取媒体，不为其另发视觉探针；归档决策仅用于结果。
+    if (media_decision is not None and media_facts.blocks > 0
+            and not (provider_surface is not None and provider_surface.transcript_prefix is not None)):
+        media_decision = _resolve_summary_vision_candidate(
+            request.agent, media_decision, request.request_id, request.run_id,
         )
-        with probe_accounting_scope(scope):
-            media_decision = resolve_vision_candidate(request.agent, media_decision)
     base_summary = (request.compact_context.view.summary if request.compact_context is not None
                     else request.thread.summary)
     base_evidence = (request.compact_context.view.operation_evidence if request.compact_context is not None
@@ -1412,10 +1434,10 @@ def _projected_context_tokens(
     return max(legacy_tokens, native_tokens)
 
 
-# LLM: 摘要为软上下文，操作证据另守权威；原缓存面追加完整工具模型投影，摘要选择 none，超量沿原分段器。
+# LLM: 摘要为软上下文，操作证据另守权威；主前缀可容纳时原样发送，容量不足或声明不支持时复用原来源。
 # 严格恢复空文本/工具调用回退保留旧摘要与全部消息/工具来源，最终容量门裁决；网络异常不提交、不执行工具。
 # 普通单次摘要不新增截断拒绝；失败形状沿共用分类记录，日志不是新的恢复或 checkpoint 事实。
-# 函数用途: 从可重放原生投影分段归纳完整来源，再附原文锚点；只在可容纳的实际请求边界物化正文。
+# 函数用途: 优先按冻结主前缀摘要；容量不足解除优化复用原分段恢复，完整来源与 checkpoint 不变。
 def _summarize(
     agent: SimpleAgent,
     previous_summary: str,
@@ -1424,7 +1446,49 @@ def _summarize(
     *,
     call: _CompactSummaryCall | None = None,
 ) -> str:
-    selected_call = call or _CompactSummaryCall()
+    try:
+        return _summarize_once(agent, previous_summary, operation_evidence, rows, call=call)
+    except ConversationCompactError as error:
+        fallback = _nonprefix_capacity_call(agent, call or _CompactSummaryCall(), error)
+        return _summarize_once(agent, previous_summary, operation_evidence, rows, call=fallback)
+
+
+# LLM: 仅 PREFIX_TOO_LARGE 可解除一次前缀优化；其它错误原样抛出，旧来源/媒体策略/CAS 仍由原链负责。
+# 函数用途: 小窗口不能容纳整前缀时复用原分段和媒体摘要能力，不要求用户切换模型。
+def _nonprefix_capacity_call(agent, call, error):
+    surface = call.provider_surface
+    if error.code != "COMPACT_PREFIX_TOO_LARGE" or surface is None or surface.transcript_prefix is None:
+        raise error
+    raise_if_compact_interrupted(call.interrupt_check)
+    decision = call.media_decision
+    if decision is not None and call.media_facts.blocks > 0:
+        decision = _resolve_summary_vision_candidate(agent, decision, call.request_id, call.run_id)
+    return replace(call, provider_surface=replace(surface, transcript_prefix=None), media_decision=decision,
+                   media_policy=decision.policy if decision is not None else call.media_policy)
+
+
+# LLM: 模态判定始终复用原事实模块与探针记账范围；只有确有媒体的候选或容量回退调用，不读模型自述。
+# 函数用途: 主前缀解除后恢复原媒体能力准入，必要探针仍归属同请求/运行账本。
+def _resolve_summary_vision_candidate(agent, decision, request_id, run_id):
+    from ..agent_core.model.call_runtime import model_call_ledger
+    from ..backends.provider_headers import ProbeAccountingScope, probe_accounting_scope
+
+    scope = ProbeAccountingScope(model_call_ledger(agent), request_id=str(request_id or ""), run_id=str(run_id or ""))
+    with probe_accounting_scope(scope):
+        return resolve_vision_candidate(agent, decision)
+
+
+# LLM: 单次来源选择不提交状态；冻结主前缀原样发送，普通来源继续原预算/分段/媒体 digest 合同。
+# 函数用途: 生成一次 transcript 摘要并收尾；外层只在明确前缀容量错误后解除优化重试一次。
+def _summarize_once(
+    agent: SimpleAgent,
+    previous_summary: str,
+    operation_evidence: dict[str, object],
+    rows: Sequence[MessageLogEntry],
+    *,
+    call: _CompactSummaryCall | None = None,
+) -> str:
+    selected_call = _prefix_media_summary_call(agent, call or _CompactSummaryCall(), rows)
     from ..backends.message_adapter import AnthropicMessageAdapter
     from .compact_tool_summary import compact_tool_summary_history, compact_tool_summary_text
 
@@ -1440,6 +1504,8 @@ def _summarize(
         cache_safe=provider_surface is not None,
         media_archived=selected_call.media_archived,
         media_digest=media_digest,
+        media_prefix_refs=(selected_call.media_facts.refs
+                           if provider_surface is not None and provider_surface.transcript_prefix is not None else ()),
     )
     if provider_surface is None:
         prompt = _legacy_conversation_summary_prompt(
@@ -1452,7 +1518,8 @@ def _summarize(
         system_instruction = ""
     else:
         prompt = conversation_compact_provider_prompt(provider_surface, instruction)
-        message_source = conversation_compact_provider_source(
+        message_source = (provider_surface.transcript_prefix(rows)
+                          if provider_surface.transcript_prefix is not None else conversation_compact_provider_source(
             previous_summary,
             selected_call.compact_generation,
             foreground_rows,
@@ -1461,21 +1528,18 @@ def _summarize(
             project_message=(project_archived_media_message
                              if selected_call.media_policy != MEDIA_POLICY_OFF else None),
             previous_provider_compaction=selected_call.previous_provider_compaction,
-        )
+        ))
         provider_tools = (
             list(provider_surface.tools)
             if provider_surface.tools is not None
             else None
         )
         system_instruction = provider_surface.system_instruction
-    if tool_source_text:
+    if tool_source_text and (provider_surface is None or provider_surface.transcript_prefix is None):
         if message_source is None:
             prompt = f"{prompt}\n\n{tool_source_text}"
         else:
             message_source = message_source.with_tail(AnthropicMessageAdapter().to_provider_messages(tool_history))
-    marker = _remote_transcript_summary(agent, selected_call, message_source) if message_source is not None else ""
-    if marker:
-        return marker
     from .auxiliary_model_call import AuxiliaryModelCallRequest
     from .compact_request_budget import (
         compact_summary_response_outcome,
@@ -1494,6 +1558,10 @@ def _summarize(
         purpose="conversation_compact_summary",
         thread_id=selected_call.thread_id,
     )
+    _require_transcript_prefix_capacity(summary_request, message_source, selected_call.calibration)
+    marker = _remote_transcript_summary(agent, selected_call, message_source) if message_source is not None else ""
+    if marker:
+        return marker
     response = generate_bounded_compact_response(
         summary_request,
         interrupt_check=selected_call.interrupt_check,
@@ -1505,7 +1573,45 @@ def _summarize(
     summary, _reason = compact_summary_response_outcome(response, reject_truncated=False, request=summary_request)
     return _finish_summary(_SummaryFinish(
         agent, previous_summary, operation_evidence, rows, foreground_rows, tool_source_text, media_digest, selected_call,
+        fallback_reason=_reason or 'compact provider completed without summary text',
     ), summary)
+
+
+# LLM: 同一完整请求预算必须先于远端/本地模型调用；本地容量不足只解除优化，不发送已知会失败的探路请求。
+# 函数用途: 在任何摘要网络调用前检查冻结主前缀，用现有 token/校准/输出预留公式裁决。
+def _require_transcript_prefix_capacity(request, source, calibration):
+    if source is None or not source.preserve_prefix:
+        return
+    from .compact_request_budget import compact_cache_surface_budget, compact_request_tokens
+
+    tokens = calibrated_compact_request_tokens(compact_request_tokens(request, source), calibration)
+    if tokens > compact_cache_surface_budget(request.agent):
+        raise ConversationCompactError("主前缀超出本次容量，改用原完整来源", code="COMPACT_PREFIX_TOO_LARGE")
+
+
+# LLM: 以transcript_prefix结构事实区分来源；局部替换只影响摘要请求，绝不改主请求、原始行或覆盖身份。
+# 函数用途: 复用主媒体前缀，明确能力不支持才丢弃前缀转旧归档选源，并让checkpoint收到原因。
+def _prefix_media_summary_call(agent, call, rows):
+    from .compact_media_policy import (
+        COMPACT_PREFIX_MEDIA_UNSUPPORTED,
+        declared_prefix_media_unsupported,
+    )
+
+    surface = call.provider_surface
+    if surface is None or surface.transcript_prefix is None:
+        return call
+    with closing(iter(surface.transcript_prefix(rows))) as messages:
+        unsupported = declared_prefix_media_unsupported(agent, messages)
+    decision = call.media_decision or CompactMediaDecision(call.media_policy, "")
+    if unsupported:
+        surface = replace(surface, transcript_prefix=None)
+        decision = replace(archived_refs_fallback(decision, COMPACT_PREFIX_MEDIA_UNSUPPORTED),
+                           fact_source="declared", vision_candidate=False)
+    else:
+        decision = replace(decision, policy=(MEDIA_POLICY_OFF if call.media_policy == MEDIA_POLICY_OFF
+                                            else MEDIA_POLICY_ARCHIVED_REFS),
+                           fact_source="frozen_main_prefix", vision_candidate=False)
+    return replace(call, provider_surface=surface, media_decision=decision, media_policy=decision.policy)
 
 
 # LLM: 服务端压缩（compact_remote）：材料与客户端单次缓存面请求同源（同 system、同工具、同一份可重放来源，只是没有压缩指令），
@@ -1538,11 +1644,13 @@ def _remote_transcript_summary(agent, selected_call, message_source) -> str:
 
 # LLM: 模型没给正文时生成机械续接包（保留媒体要点）；再追加原话备份段，并把可按更小预算重建的对象交给调用方。
 #   严格恢复的机械回退仍在备份段之后原样附上一代摘要与本次全部原文，由容量门决定能否提交。
-# 函数用途: 把摘要模型的回复收尾成最终摘要文本（机械回退、原话备份、尾随来源）。
+# 函数用途: 按结构化失败原因收尾摘要、媒体要点与原文备份，不改变证据权威或提交边界。
 def _finish_summary(finish: _SummaryFinish, summary: str) -> str:
     mechanical = not summary
     if mechanical:
-        summary = _mechanical_conversation_summary(finish.previous_summary, finish.operation_evidence, finish.foreground_rows)
+        summary = _mechanical_conversation_summary(
+            finish.previous_summary, finish.operation_evidence, finish.foreground_rows, finish.fallback_reason,
+        )
         if finish.media_digest:
             # 机械回退也不能丢掉已经花请求换来的图中要点。
             summary = f"{summary}\n\n附件内容要点：\n{finish.media_digest}"
@@ -1639,7 +1747,7 @@ def _media_blocks_archived(candidate: _CompactCandidate) -> int:
 
 # LLM: These shared rules are content guidance only. The cache-safe flag describes where the rows
 # live on the wire; it cannot authorize evidence, select a partition, or change commit semantics.
-# media_archived / media_digest 只是软引导：前者说明图已换成引用，后者是看图小请求产出的图中要点文字，要求摘要把要点并到对应引用旁。
+# media_archived / media_digest / media_prefix_refs 只是软引导：冻结前缀媒体在请求中原样存在，归档仅约束结果引用。
 # 函数用途: 生成 transcript Compact 的统一摘要要求，并说明历史是原生消息还是兼容 prompt 正文。
 def _conversation_summary_instruction(
     operation_evidence: dict[str, object],
@@ -1648,6 +1756,7 @@ def _conversation_summary_instruction(
     cache_safe: bool,
     media_archived: bool = False,
     media_digest: str = "",
+    media_prefix_refs: tuple[str, ...] = (),
 ) -> str:
     row_location = (
         "The chronological provider messages immediately before this request are the new "
@@ -1667,7 +1776,11 @@ def _conversation_summary_instruction(
             "Also preserve user preferences, unfinished work, promises, and important references.",
             *(["Image or video attachments in the rows were replaced by [附件引用 ...] reference blocks; keep those",
                "references and the conclusions drawn from them at the time. Do not claim the media itself is present."]
-              if media_archived else []),
+              if media_archived and not media_prefix_refs else []),
+            *(["Media blocks in the frozen main prefix are present unchanged in this request. Read them directly;",
+               "the committed summary and subsequent display archive them as references, not media blocks.",
+               "Keep attachment conclusions and cite [附件引用 sha256:<hash>] using these hashes: "
+               + ", ".join(media_prefix_refs)] if media_prefix_refs else []),
             *(["Attachment content notes from a separate vision pass over the same rows are appended after the optional",
                "user instructions. Treat them as what those attachments showed, fold the relevant points into the summary",
                "next to the matching [附件引用 ...] reference, and keep the attachment hash so the summary can refer to it."]
@@ -1730,16 +1843,17 @@ def _legacy_conversation_summary_prompt(
 # carried by _finish_summary), sanitized transcript projection, and structured operation evidence already
 # selected for this Compact candidate. It cannot decide
 # task completion or replace the separate authoritative operation-evidence field.
-# 函数用途: 摘要模型正常结束却没输出正文时，生成有界的会话续接包，避免空回复把长期会话打断。
+# 函数用途: 无有效摘要时携结构化原因生成有界续接包，原始记录与独立证据保持权威。
 def _mechanical_conversation_summary(
     previous_summary: str,
     operation_evidence: dict[str, object],
     rows: list[MessageLogEntry],
+    reason: str = "compact provider completed without summary text",
 ) -> str:
     lines = [
         "[conversation-compact-mechanical-fallback]",
         "- schema_version: conversation-compact-mechanical-fallback.v1",
-        "- reason: compact provider completed without summary text",
+        f"- reason: {reason}",
         "- authority: non-authoritative conversation continuation; structured operation evidence and raw transcript remain authoritative",
     ]
     # 上一代的原话备份段由收尾统一继承；这里只放语义部分，否则备份标题落进本段，收尾剥离旧备份时会把后面的原文一起切掉。

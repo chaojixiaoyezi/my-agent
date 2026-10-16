@@ -9,10 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.capability.memory_tool import RememberTool
+from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer, OwnerQuotaExceeded
+from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
 
 
 def test_memory_stable_id_replace_remove_and_versions(tmp_path: Path) -> None:
@@ -138,6 +140,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
             "channel": "internal",
             "channel_conversation_id": "chat-1",
             "channel_user_id": "user-1",
+            "learning_source": user_dialogue_projection(),
         }
     )
 
@@ -157,7 +160,7 @@ def test_remember_tool_crud_uses_stable_ids(tmp_path: Path) -> None:
             task_attributes={"conversation_thread_id": thread.thread_id},
         )
 
-    tool = RememberTool(agent)
+    tool = ConfirmedRememberWorkflow(agent)
     bind_user_message("add", "请记住项目代号青竹")
     added = tool.execute(
         {

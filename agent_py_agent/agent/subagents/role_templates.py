@@ -1,6 +1,6 @@
 """LLM: Role defaults share common shell/self-discovery/owner-task groups; exact/read-only grants remain bounded.
 
-模块用途: 加载角色快照与通用工具默认值；交互终端和普通命令都受 owner 权限控制。
+模块用途: 加载角色快照与通用工具默认值；自身发现、交互终端和命令都受原父授权交集控制。
 """
 
 from __future__ import annotations
@@ -57,9 +57,9 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # LLM: 当前 owner 的通用任务工具是默认候选，父实时快照、角色和资源门仍取交集；不能将未配置能力默认为 ready。
 # 常量用途: 给普通执行子代理和后台续跑复用同一凭据、云资源与本人消息入口。
 OWNER_TASK_TOOLS = ("request_credentials", "feishu_cloud", "send_message")
-# LLM: 发现入口只读现有授权，默认可查询本人；查询不增加工具、路径或秘密访问权限。
-# 常量用途: 统一主、子和后台任务的本人能力查询入口。
-SELF_DISCOVERY_TOOLS = ("list_tools", "tool_search")
+# LLM: 三个发现入口共用当前owner事实；子代理仍与父实时快照取交集，不因目录可见增加工具、路径或秘密权限。
+# 常量用途: 为主、子和后台复用list_tools、tool_search及只读self_map的统一入口组。
+SELF_DISCOVERY_TOOLS = ("list_tools", "tool_search", "self_map")
 ROLE_BASE_TOOLS = [
     *SELF_DISCOVERY_TOOLS,
     *AGENT_PROGRESS_TOOLS,

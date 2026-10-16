@@ -616,25 +616,44 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
 # 各来源已自带上限(HOT 5000 硬顶/long_term top_k 检索/lessons 路由命中),这里是最后保险丝:
 # 优先级让位——HOT 全保(最后砍),lessons 次之,long_term 先砍;组内超预算截断尾部。
 _FORMAL_MEMORY_BUDGET_CHARS = 10000
+# 工作约定从总召回额度内分配子预算，不能挤占全部正式记忆。
+_WORKING_AGREEMENT_SUB_BUDGET_CHARS = 4000
 
 
+# LLM: 最终注入从总预算内给工作约定分配子预算；保持HOT优先级，检查首条超限与现有召回测试。
+# 函数用途: 在主上下文注入前限制正式记忆与工作约定的正文总量。
 def _budgeted_formal_memories(records: list) -> list:
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
     lessons = [record for record in records if str(getattr(record, "kind", "") or "") == "lesson"]
+    agreements = [
+        record
+        for record in records
+        if str(getattr(record, "kind", "") or "") == "working_agreement"
+    ]
     rest = [
         record
         for record in records
-        if str(getattr(record, "kind", "") or "") not in {"hot", "lesson"}
+        if str(getattr(record, "kind", "") or "") not in {"hot", "lesson", "working_agreement"}
     ]
     kept = list(hot)
     total = sum(len(str(getattr(record, "content", "") or "")) for record in kept)
-    for group in (lessons, rest):
+    for group in (lessons, agreements, rest):
+        group_cap = (
+            _WORKING_AGREEMENT_SUB_BUDGET_CHARS
+            if group is agreements
+            else _FORMAL_MEMORY_BUDGET_CHARS
+        )
+        group_total = 0
         for record in group:
             cost = len(str(getattr(record, "content", "") or ""))
-            if kept and total + cost > _FORMAL_MEMORY_BUDGET_CHARS:
+            if (
+                total + cost > _FORMAL_MEMORY_BUDGET_CHARS
+                or group_total + cost > group_cap
+            ):
                 break
             kept.append(record)
             total += cost
+            group_total += cost
     return kept
 
 

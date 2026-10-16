@@ -1,6 +1,9 @@
 
 from __future__ import annotations
 
+# LLM: 维护操作只改可重建投影与显式调用的本库事实；FTS 回填完成键须与实际回填同事务提交。
+# 模块用途: 提供本地索引维护、统计和完整性检查，不决定 owner 权限。
+
 """implements LocalStore maintenance, statistics, reset, FTS rebuild, and integrity checks.
 
 这个文件只管维护类动作。
@@ -12,14 +15,19 @@ from typing import Any
 from ..common.nofollow_fs import ensure_private_dir
 
 
+# LLM: 维护器通过 schema 提供的连接访问当前库，不缓存其它用户数据；显式 reset 保持旧契约。
+# 类用途: 管理可重建全文索引和本地库维护动作。
 class LocalStoreMaintenanceMixin:
 
+    # LLM: 读取正文权威回填投影，开始即持写锁；完成键与回填同提交，中途失败不谎报已完成。
+    # 函数用途: 原子重建本库 FTS 并清除持久待回填标记。
     def rebuild_fts(self) -> int:
         """用 `records` 表和文件系统内容重建 FTS5 索引。"""
 
         if not self.fts_available:
             return 0
         with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM records_fts")
             rows = conn.execute("SELECT id, title, content_path, content_preview FROM records").fetchall()
             count = 0
@@ -28,7 +36,9 @@ class LocalStoreMaintenanceMixin:
                 self._replace_fts_row(conn, row["id"], row["title"], content)
                 count += 1
             self._record_event(conn, "fts_rebuilt", "", {"count": count})
+            self._record_fts_rebuild_complete(conn)
             conn.commit()
+        self._fts_needs_rebuild = False
         return count
 
     def reset(self, *, remove_content_files: bool = False, reset_events_file: bool = True) -> None:

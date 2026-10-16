@@ -11,7 +11,7 @@
 #   实验发送许可不支持（拒绝发送）。
 #   与官方 Codex 一致不主动发心跳 ping，只自动回应服务端 ping（09-30 审计：49 次里 2 次在 23–24 秒中途断开，紧跟客户端
 #   第 20 秒的 ping）。改动须同步 test_responses_websocket。
-# 模块用途: 让 ChatGPT 订阅模型的长回复（含 Compact 摘要）不再中途断线。
+# 模块用途: 通过 WebSocket 运输订阅模型长回复；每次连接独占物理名额，关闭或失败立即归还。
 from __future__ import annotations
 
 import email.message
@@ -29,6 +29,7 @@ from .gateway_helpers import (
     GatewayRequest,
     _dump_provider_rejection,
     _emit_provider_attempt,
+    _emit_provider_queue,
     _is_timeout_exception,
     _network_retry_delay_seconds,
     _provider_interrupt_callback,
@@ -42,6 +43,7 @@ from .gateway_helpers import (
     gateway_request_body,
 )
 from .gateway_request_limits import remaining_deadline_seconds
+from .request_scope import acquire_provider_request, release_provider_response
 
 # Responses WebSocket 协议版本头；与官方命令行使用的取值一致，服务端据此启用 response.create 消息。
 BETA_HEADER_VALUE = "responses_websockets=2026-02-06"
@@ -69,7 +71,7 @@ def websocket_url(url: str) -> str:
 
 # LLM: 生成器：打开连接、限时发 response.create、逐条产出事件；取消直接关 socket，正常收尾用有限 close_timeout。
 #   请求体沿用 payload（含 stream=true），只加 type 字段；发送许可不支持时拒绝，不发任何字节。
-# 函数用途: 通过 WebSocket 限时发送 Responses 请求，逐条返回服务端事件（JSON 文本）。
+# 函数用途: 限时发送 Responses 请求并逐条返回事件；所有出口关闭原连接并归还物理名额。
 def iter_responses_websocket(request: GatewayRequest) -> Iterator[str]:
     if request.send_permit is not None:
         raise ValueError("WebSocket 传输不支持实验发送许可，未发送请求。")
@@ -82,22 +84,32 @@ def iter_responses_websocket(request: GatewayRequest) -> Iterator[str]:
             yield from _events(connection, request)
             completed = True
     finally:
+        _close_admitted_connection(connection, completed)
+
+
+# LLM: 正常关闭和用户中止均只触碰当前连接；close 自身报错也无条件归还物理名额。
+# 函数用途: 按完成事实关闭 WebSocket，并及时归还供应商名额而不依赖 GC。
+def _close_admitted_connection(connection, completed: bool) -> None:
+    try:
         if completed:
             connection.close()
         else:
             connection.close_socket()
+    finally:
+        release_provider_response(connection)
 
 
 # LLM: 握手失败按 HTTP 同一套可重试状态和网络错误判断；每次尝试都发布 started / failed / response_opened 观察事件，
 #   与 HTTP 传输的账本口径一致（method=WEBSOCKET）。用户停止优先，不进入重试。
-# 函数用途: 建立 WebSocket 连接，失败时在有限次数内重试，返回已打开的连接。
+# 函数用途: 先取得名额再记录真实握手；失败释放后有限重试，返回已打开且持有名额的连接。
 def _open_connection(request: GatewayRequest):
     last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS) if request.max_retries is None else request.max_retries
     for attempt in range(last_attempt + 1):
+        lease = acquire_provider_request(request, _emit_provider_queue)
         event = {"attempt_id": f"provider-ws:{time.time_ns()}:{attempt + 1}", "method": "WEBSOCKET", "path": request.path}
         _emit_provider_attempt({**event, "status": "started"})
         try:
-            connection = _connect(request)
+            connection = _connect_admitted(request, lease)
         except Exception as exc:  # noqa: BLE001 握手/网络异常统一交给下面的分类，不吞掉
             retry = _handshake_retry(exc, request, attempt, last_attempt)
             _emit_provider_attempt({**event, "status": "failed", "error_type": type(exc).__name__,
@@ -109,6 +121,20 @@ def _open_connection(request: GatewayRequest):
         _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
         return connection
     raise RuntimeError("unreachable websocket retry state")
+
+
+# LLM: 每次握手在 started 前已取得名额；失败先释放再交原退避，成功名额跟随 connection 到关闭。
+# 函数用途: 用已准入名额保护一次 WebSocket 连接，排队不计入握手/首包等待。
+def _connect_admitted(request: GatewayRequest, lease):
+    try:
+        connection = _connect(request)
+        if lease is not None:
+            connection._provider_request_lease = lease
+        return connection
+    except BaseException:
+        if lease is not None:
+            lease.release()
+        raise
 
 
 # LLM: 代理沿环境变量（与 urllib 相同的 HTTPS_PROXY 等），不绕开本机代理；连接超时用 connect_timeout；

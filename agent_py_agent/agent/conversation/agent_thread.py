@@ -17,6 +17,7 @@ from .compact_projection import ConversationCompactSource, ConversationCompactVi
 from .compact_scope import THREAD_COMPACT_SCOPE
 from .compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
 from .history_seed import freeze_history_source
+from .learning_source import child_projection_from_parent
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
@@ -71,6 +72,13 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
     attrs = getattr(task, "attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
     parent_thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    # 子代理来源从 spawn 边界冻结的父级事实合成（subagent 标签 + run/task 关联，trigger 沿链条继承）；
+    # 父级缺失或坏值时保持 None，由线程侧归一为空（未知、不可学），不在读取处猜来源。
+    learning_source = child_projection_from_parent(
+        attrs.get("learning_source"),
+        run_id=run_id,
+        task_id=str(getattr(task, "root_id", "") or "").strip() or run_id,
+    )
     root_thread_id = parent_thread_id
     parent_id = str(getattr(task, "parent_id", "") or "").strip()
     if parent_id:
@@ -125,6 +133,7 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
             "title": title,
             "cwd": cwd,
             "runtime_workspace_roots": roots,
+            "learning_source": learning_source,
             "model_advice": model_advice,
             "package_entry_initialization": package_entry_initialization,
         }

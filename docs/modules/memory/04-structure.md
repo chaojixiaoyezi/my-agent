@@ -1,3 +1,17 @@
+## 2026-10-16 F4/F5 当前结构（组合候选）
+
+- `capability/agents_source_repository.py` 与 `agents_source_configuration/cache/local/network/switch/publish` 沿唯一来源配置、严格描述符、revision/内容 CAS 与缓存身份；`agents_write_contract/service` 只认当前用户封印，`agents_control_ledger` 记录预览和一次消费。
+- `persona_body_transaction`、`persona_snapshot_transaction`、`persona_storage_io` 与 `persona_version_ledger` 维护原正文/版本/前像事务；来源写失败或未知退役不冒称新配置生效。
+- `conversation/learning_source.py`、`memory_store/learning_source_authority.py`、`candidate_source_coverage.py` 与 `candidate_target_binding.py` 保存宿主来源、完整引用覆盖与观察时目标版本；不是批准来源，工具或候选正文不能签权。
+- `gateway_parts/memory_candidate_control.py` 是当前真实 HTTP/direct 控制组合根；`memory_candidate_review.py` 使用原 control preview receipt 作 nonce，全记录 SHA/完整展示/当前身份校验后先消费 unknown，再原 CandidateService/PromotionService。`promote(expected_candidate=...)` 保留可选默认与原最终锁/CAS，阻断 review→promote 期间变更。
+- `promotion_remove_recovery.py`、`curator_promotion_receipts.py`、`_jsonl_maintenance.py`、`memory_tool_recovery.py` 处理既有墓碑和派生清理回执；坏行或 SQL/向量失败不当空库，不重做新晋升。原 quota/policy/candidate 锁序、E11 审计游标与唯一长期库保持。
+- F5 `capability/self_map_memory.py`、`self_map_skills.py` 仅读组件/快照元信息，`skill_learning_versions.frozen_learned_metadata` 复核撤回；地图不新增正式库、候选副本、审批或 Skill 授权。当前合同见[规则设计](../../design/PERSONA_AGENTS_OWNERSHIP.md)与[自我目录](../../design/SELF_MAP.md)。
+
+## 2026-10-16 上下文快照与工具清单
+
+- `user_space/context_bundle_tool_manifest.py` 是清单摘要/归档/读取统一入口；快照内的绝对路径不产生读取权。完整内容只按实际 snapshot 路径及内容摘要在当前 owner 的 `memory_archive/snapshots/tool_manifests` 解析。
+- `retention_scan` 规划快照/清单 trash_file，`retention_apply` 在快照动作后复核磁盘当前引用，再执行原可恢复清理；不是第二份事实表。原 Curator 有界扫描与 F4 来源传播分别归属，未因 F1 回退或混合。
+
 # Memory Structure
 
 ## WS缓存路由与工具粘性（compactcall2，2026-10-08）

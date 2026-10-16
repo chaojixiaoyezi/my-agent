@@ -161,6 +161,28 @@ class _FormalMemorySourceProbe:
         )
 
 
+# LLM: 与生产一致使用本owner的正式SQLite verifier；空账本不能凭audit文本获得成功资格。
+# 函数用途: 为Curator服务夹具连接真实工具证据验证器。
+def _curator_tool_verifier(tmp_path, owner_id):
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.memory_store.promotion import LocalStoreToolEvidenceVerifier
+
+    return LocalStoreToolEvidenceVerifier(LocalStore(tmp_path / "tool-evidence.sqlite3"),
+                                          owner_id=owner_id, owner_root=tmp_path)
+
+
+# LLM: 仅成功正例显式写入指定操作的宿主终态，不从audit字段推导或批量放行所有样本。
+# 函数用途: 补齐成功工具夹具的独立正式证据。
+def _record_curator_tool_success(tmp_path, operation_id):
+    from agent_py_agent.agent.local_storage import LocalStore, RuntimeGateLedgerRecord
+
+    LocalStore(tmp_path / "tool-evidence.sqlite3").record_runtime_gate_ledger(RuntimeGateLedgerRecord(
+        run_id="run-1", task_id="task-1", operation_id=operation_id, tool="read_file",
+        args_hash="fixture-hash", idempotency_key=operation_id, status="succeeded"))
+
+
+# LLM: 组装生产Curator及正式工具核验器，模型保持固定输出，其余来源验证和落盘使用真实实现。
+# 函数用途: 创建隔离且不绕过证据门的Curator测试服务。
 def _service(
     tmp_path: Path,
     backend: object,
@@ -200,6 +222,7 @@ def _service(
             ),
             formal_memory_source=formal_memory_source,
             tool_reference_source=tool_reference_source,
+            tool_evidence_verifier=_curator_tool_verifier(tmp_path, owner_id),
         ),
     )
 
@@ -504,6 +527,10 @@ def test_curator_real_service_writes_daily_candidate_and_advances_cursor(tmp_pat
     assert backend.calls == 1
 
 
+# LLM: 固定完整规范引用的字段及身份；不把外置正文拷入候选，也不丢弃工具调用绑定。
+# 函数用途: 核对大工具输出的引用增强及正文隔离。
+# LLM: 大正文只在隔离工具归档中，成功由独立SQLite终态确认；保留所有投影大小和隐私断言。
+# 函数用途: 验证大工具证据可引用但正文和参数不复制进候选。
 def test_curator_enriches_large_tool_output_ref_without_copying_body(
     tmp_path: Path,
 ) -> None:
@@ -512,6 +539,7 @@ def test_curator_enriches_large_tool_output_ref_without_copying_body(
     audit_dir.mkdir(parents=True)
     audit_event_id = "audit-tool-large-1"
     tool_call_id = "call-large-1"
+    _record_curator_tool_success(tmp_path, "tool-operation-large-1")
     audit_dir.joinpath("1970-01-01.jsonl").write_text(
         json.dumps(
             {
@@ -521,6 +549,7 @@ def test_curator_enriches_large_tool_output_ref_without_copying_body(
                 "status": "ok",
                 "tool_name": "read_file",
                 "tool_call_id": tool_call_id,
+                "operation_id": "tool-operation-large-1",
                 "tool_success": True,
                 "run_id": "run-1",
                 "task_id": "task-1",
@@ -582,6 +611,7 @@ def test_curator_enriches_large_tool_output_ref_without_copying_body(
         tmp_path,
         backend,
         store,
+        owner_id="local/test",
         tool_reference_source=CuratorToolReferenceSource(
             tmp_path,
             query=_tool_reference_query,
@@ -603,7 +633,8 @@ def test_curator_enriches_large_tool_output_ref_without_copying_body(
     daily = service.daily_store.list(day="1970-01-01")[0]
     candidate = service.candidate_service.list()[0]
     assert daily.artifact_refs == (expected_ref,)
-    assert candidate.source_artifact_refs == [expected_ref]
+    assert candidate.source_artifact_refs == [{**expected_ref, "operation_id": "tool-operation-large-1", "owner_id": "local/test",
+                                               "tool_call_id": "call-large-1", "tool_name": "read_file"}]
     assert body_marker not in backend.prompts[0]
     assert "/private/source-must-not-leak" not in backend.prompts[0]
     assert len(json.dumps(asdict(daily), ensure_ascii=False)) < 10_000
@@ -719,9 +750,12 @@ def test_curator_drops_non_success_tool_verified_evidence(
     ]
 
 
+# LLM: 成功正例同时拥有audit和独立SQLite终态；不放宽失败与未知工具的拒绝断言。
+# 函数用途: 验证完整工具证据在真实核验器接入后仍可保留并晋升候选。
 def test_curator_accepts_host_successful_tool_call_evidence(tmp_path: Path) -> None:
     """只有完整工具身份、宿主成功布尔与已知 effect 的真实 tool_call
     才能保留为 tool_verified 引用。"""
+    _record_curator_tool_success(tmp_path, "tool-operation-read-1")
     store, thread, message = _conversation(tmp_path)
     audit_dir = tmp_path / "audit"
     audit_dir.mkdir(parents=True)
@@ -756,7 +790,7 @@ def test_curator_accepts_host_successful_tool_call_evidence(tmp_path: Path) -> N
     candidate["source_tool_refs"] = [{"event_id": event_id}]
     output["processed_audit_refs"] = [{"event_id": event_id}]
     output["next_cursor"]["last_audit_event_id"] = event_id
-    service = _service(tmp_path, _StaticStructuredBackend(output), store)
+    service = _service(tmp_path, _StaticStructuredBackend(output), store, owner_id="local/test")
 
     result = service.run(reason="admin")
 

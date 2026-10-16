@@ -404,6 +404,14 @@ def write_private_json_file_atomic_no_newline(path: Path, payload: object, *, so
         write_private_json_file_atomic_no_newline_unlocked(path, payload, sort_keys=sort_keys)
 
 
+# LLM: 无尾换行私有 JSON 的规范序列化。内容去重（gateway_parts/io.update_json_file_atomic）必须用
+#   同一函数把 updater 结果转成文本、再与磁盘原文逐字比较：比较文本与落盘文本同源，任何一边
+#   单独改 json.dumps 参数都会让“跳过”与“写入”的字节语义分叉（mc4-501 的教训）。
+# 函数用途: 把 JSON 载荷序列化为无尾换行私有写入原语将落盘的精确文本。
+def serialize_private_json_no_newline(payload: object, *, sort_keys: bool = True) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys)
+
+
 # LLM: 同 write_private_json_file_atomic_no_newline；调用方须已持有 locked_json_path(path)。
 # 函数用途: 持锁场景下以仅本人可读写的权限原子替换一个 JSON 文件，不加尾换行。
 def write_private_json_file_atomic_no_newline_unlocked(
@@ -415,7 +423,7 @@ def write_private_json_file_atomic_no_newline_unlocked(
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             os.chmod(tmp, 0o600)
-            handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys))
+            handle.write(serialize_private_json_no_newline(payload, sort_keys=sort_keys))
         _replace_with_retry(tmp, path, keep_mode=False)
     finally:
         _unlink_tmp_file(tmp)

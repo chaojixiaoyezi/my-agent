@@ -1,3 +1,5 @@
+# LLM: 实时归档只透传宿主thread/request，保持原档位与去重；修改需核归档来源和隐私回归。
+# 模块用途: 将助手工具轮及工具事实写入唯一原始归档。
 
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ from .event_builders import (
 from .turn_archiver import ArchiveRunTurnResult
 
 
+# LLM: 调用者绑定规范归档根与宿主thread；不在此推导来源或授予记忆发布权。
+# 类用途: 收拢实时助手工具轮的归档输入。
 @dataclass(frozen=True)
 class ArchiveAssistantToolRoundParams:
     root: str | Path
@@ -34,8 +38,11 @@ class ArchiveAssistantToolRoundParams:
     created_at: str = ""
     preview_limits: dict[int, int] | None = None
     summary_chars: int = 96
+    thread_id: str = ""
 
 
+# LLM: 工具内容与宿主身份分开；真实thread只读本参数，不采信tool_record自报。
+# 类用途: 收拢实时工具事件与原档位、宿主身份。
 @dataclass(frozen=True)
 class ArchiveLiveToolCallParams:
     root: str | Path
@@ -51,8 +58,11 @@ class ArchiveLiveToolCallParams:
     archive_level: int = 3
     created_at: str = ""
     preview_limits: dict[int, int] | None = None
+    thread_id: str = ""
 
 
+# LLM: 线程身份只由调用者宿主上下文传入，归档不从工具正文推断；用于Curator精确请求关联。
+# 函数用途: 把助手工具轮保存为带宿主线程身份的审计事件。
 def archive_assistant_tool_round(params: ArchiveAssistantToolRoundParams) -> ArchiveRunTurnResult:
     timestamp = params.created_at or utc_now_iso()
     tool_names = [
@@ -66,6 +76,7 @@ def archive_assistant_tool_round(params: ArchiveAssistantToolRoundParams) -> Arc
             sequence=max(0, int(params.tool_round)),
             session_id=str(params.session_id),
             request_id=str(params.request_id),
+            thread_id=str(params.thread_id),
             run_id=str(params.run_id),
             task_id=str(params.task_id),
         ),
@@ -85,6 +96,8 @@ def archive_assistant_tool_round(params: ArchiveAssistantToolRoundParams) -> Arc
     return _append_live_events(params.root, [event], token_payload={"content": content, "tool_names": tool_names})
 
 
+# LLM: 实时工具事件的thread只取宿主参数，不采信工具结果同名字段；写后保留原事件引用。
+# 函数用途: 构造并落盘带可信请求关联的实时工具事件。
 def archive_live_tool_call(params: ArchiveLiveToolCallParams) -> ArchiveRunTurnResult:
     timestamp = params.created_at or utc_now_iso()
     record = dict(params.tool_record or {})
@@ -97,6 +110,7 @@ def archive_live_tool_call(params: ArchiveLiveToolCallParams) -> ArchiveRunTurnR
             sequence=max(0, int(params.tool_round)) * 1000 + max(0, int(params.tool_index)),
             session_id=str(params.session_id),
             request_id=str(params.request_id),
+            thread_id=str(params.thread_id),
             run_id=str(params.run_id),
             task_id=str(params.task_id),
         ),

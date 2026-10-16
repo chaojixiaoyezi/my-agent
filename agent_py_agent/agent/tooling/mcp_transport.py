@@ -100,7 +100,7 @@ class MCPTransport:
         with self.cleanup_lock:
             if self._cleanup_error is not None:
                 raise self._cleanup_error
-            if self._receipt is None:
+            if self._receipt is None or not self._receipt.confirmed:
                 try:
                     if self.binding.managed is not None:
                         self._receipt = self.binding.managed.terminate()

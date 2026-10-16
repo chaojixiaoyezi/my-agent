@@ -22,6 +22,7 @@ from agent_py_agent.cli.resume_contract import (
     record_budget_exhausted,
     resume_prompt_for,
 )
+from agent_py_agent.tests.support.ci_cli_owner_fixtures import isolated_cli_owner_paths
 
 
 @pytest.fixture
@@ -125,10 +126,12 @@ def test_bind_cli_run_conversation_continuation_reuses_thread(tmp_path):
     """续跑轮复用同一 conversation thread（root channel id），消息带标记。"""
     from agent_py_agent.agent.conversation.store import ConversationStore
 
-    store = ConversationStore(tmp_path / "conv")
+    paths = isolated_cli_owner_paths(tmp_path)
+    store = ConversationStore(paths.owner_home_dir / "conversations")
     agent = SimpleNamespace(
         conversation_store=store,
-        root="/tmp",
+        home_paths=paths,
+        root=str(paths.owner_home_dir),
         config=SimpleNamespace(),
         runtime_guard_policy=None,
     )
@@ -329,6 +332,8 @@ def test_record_budget_exhausted_event(repo):
 # ------------------------------------------------- 切片4: resume_loop 循环
 
 
+# LLM: 仅替换模型回合结果，路径和会话使用真实临时 owner；续跑仍读原学习政策与 active Goal。
+# 类用途: 构造首轮 unfinished、随后完成的 CLI 宿主，保持完整线程和续跑谱系合同。
 class _FakeRunAgent:
     """fake agent：首轮 unfinished，续跑轮逐个演进（第 3 轮 ok）。
 
@@ -344,7 +349,8 @@ class _FakeRunAgent:
         )
         from agent_py_agent.agent.conversation.store import ConversationStore
 
-        self.conversation_store = ConversationStore(tmp_path / "conv")
+        self.home_paths = isolated_cli_owner_paths(tmp_path)
+        self.conversation_store = ConversationStore(self.home_paths.owner_home_dir / "conversations")
         self.calls = []
         # thread 按 bind_cli_run_conversation 的真实 channel 身份预建，
         # base.request_id=channel_id 时 bind 复用同一线程。
@@ -352,7 +358,8 @@ class _FakeRunAgent:
             {
                 "canonical_user_id": _CLI_RUN_USER_ID, "channel": _CLI_RUN_CHANNEL,
                 "channel_conversation_id": channel_id, "channel_user_id": _CLI_RUN_USER_ID,
-                "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
+                "owner_id": self.home_paths.owner_id,
+                "owner_home": str(self.home_paths.owner_home_dir), "title": "t",
             }
         )
         # 自动续跑授权只来自 active goal，与 bind 后
@@ -542,32 +549,8 @@ def test_active_goal_continues_without_ordinary_resume_policy(tmp_path):
 
     class _NoPolicyAgent(_FakeRunAgent):
         def __init__(self, tmp_path):
-            import time
-
-            from agent_py_agent.agent.agent_core.cli_run_conversation import (
-                _CLI_RUN_CHANNEL,
-                _CLI_RUN_USER_ID,
-            )
-            from agent_py_agent.agent.conversation.store import ConversationStore
-
-            # 与 _FakeRunAgent 唯一区别只是独立 thread/task 身份。
-            self.conversation_store = ConversationStore(tmp_path / "conv")
-            self.calls = []
-            self._thread = self.conversation_store.threads.get_or_create(
-                {
-                    "canonical_user_id": _CLI_RUN_USER_ID, "channel": _CLI_RUN_CHANNEL,
-                    "channel_conversation_id": "req-nopol", "channel_user_id": _CLI_RUN_USER_ID,
-                    "owner_id": "local/main", "owner_home": str(tmp_path), "title": "t",
-                }
-            )
-            # 自动续跑只建 active Goal，不发普通 progress policy。
-            self.conversation_store.goals.create(
-                {
-                    "thread_id": self._thread.thread_id,
-                    "objective": "继续推进任务直到完成",
-                    "task_id": "task-nopol",
-                }
-            )
+            # 共用真实临时 owner 与 active Goal；这里只改变原独立 thread/task 身份，不发普通 policy。
+            super().__init__(tmp_path, task_id="task-nopol", channel_id="req-nopol")
 
     fake = _NoPolicyAgent(tmp_path)
     base = run_params_with_request_id(

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 971,
+  "count": 1008,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -498,6 +498,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "优先级让位——HOT 全保(最后砍),lessons 次之,long_term 先砍;组内超预算截断尾部。"
+    },
+    {
+      "name": "_WORKING_AGREEMENT_SUB_BUDGET_CHARS",
+      "file": "agent_py_agent/agent/agent_core/runtime/loop_support.py",
+      "value": 4000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "工作约定从总召回额度内分配子预算，不能挤占全部正式记忆。"
     },
     {
       "name": "_FINDING_EVIDENCE_INLINE_MAX_CHARS",
@@ -1028,6 +1036,38 @@
       "description": "白名单头条数上限：x-ratelimit-* 前缀可能一次回很多个，超出只收前若干条并记 headers_truncated。"
     },
     {
+      "name": "PROVIDER_QUEUE_MAX_ENDPOINT_COUNT",
+      "file": "agent_py_agent/agent/backends/request_scope.py",
+      "value": 128,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "在途端点数量也有界；空端点立即删除，不累计历史端点。"
+    },
+    {
+      "name": "PROVIDER_QUEUE_MAX_WAITER_COUNT",
+      "file": "agent_py_agent/agent/backends/request_scope.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "全进程最多 1024 个等待者，约为默认 500 执行槽的两倍，防止多端点队列无界增长。"
+    },
+    {
+      "name": "PROVIDER_QUEUE_NOTICE_SECONDS",
+      "file": "agent_py_agent/agent/backends/request_scope.py",
+      "value": 2.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "两秒以内不刷屏，之后每次排队只报告一次；收到名额或退出时报告解除。"
+    },
+    {
+      "name": "PROVIDER_QUEUE_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/backends/request_scope.py",
+      "value": 120.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "两分钟给正常拥塞排空机会，但不允许线程无限等；调用方绝对期限更短时不能滚动延长。"
+    },
+    {
       "name": "_MAX_MESSAGE_BYTES",
       "file": "agent_py_agent/agent/backends/responses_websocket.py",
       "value": 67108864,
@@ -1162,6 +1202,38 @@
       "unit": "个",
       "category": "重试",
       "description": "看图探测最多试 2 次：一次失败可能是偶发，再多会拖慢探测；证据以成功回包为准。"
+    },
+    {
+      "name": "AGENTS_CONTROL_MAX_BYTES",
+      "file": "agent_py_agent/agent/capability/agents_source_files.py",
+      "value": 524288,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "来源配置和last-good控制JSON最多512KiB，拒绝损坏记录造成无界解析。"
+    },
+    {
+      "name": "AGENTS_SOURCE_MAX_BYTES",
+      "file": "agent_py_agent/agent/capability/agents_source_files.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "本地来源原字节最大2MiB；读取同FD时多取一字节判断超限，不静默裁剪正文。"
+    },
+    {
+      "name": "AGENTS_WRITE_MAX_CHARS",
+      "file": "agent_py_agent/agent/capability/agents_source_limits.py",
+      "value": 20000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "模块用途: 拦住超过注入预算的新增，同时让历史超限正文仍能受控缩小。"
+    },
+    {
+      "name": "PREVIEW_SECONDS",
+      "file": "agent_py_agent/agent/capability/agents_write_service.py",
+      "value": 600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "常量用途: 用户确认原AGENTS写预览的有效期（秒）；过期只能重新预览，不沿旧预览签权。"
     },
     {
       "name": "_MAX_ATTACHMENT_COUNT",
@@ -3404,6 +3476,22 @@
       "description": "读取凭据文件的最大字节数；避免损坏的大文件拖累宿主启动。"
     },
     {
+      "name": "_DISPLAY_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/memory_candidate_review.py",
+      "value": 12000,
+      "unit": "字节",
+      "category": "其它",
+      "description": "字节；超过可完整展示的上限时不提供确认。"
+    },
+    {
+      "name": "_MEMORY_CANDIDATE_PREVIEW_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/memory_candidate_review.py",
+      "value": 600,
+      "unit": "秒",
+      "category": "其它",
+      "description": "秒；真人预览的确认窗口，重放原请求不会延期。"
+    },
+    {
       "name": "_APPROVAL_POLL_SECONDS",
       "file": "agent_py_agent/agent/gateway_parts/permission_bridge.py",
       "value": 0.05,
@@ -3412,12 +3500,60 @@
       "description": "审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。"
     },
     {
+      "name": "_ANCHOR_STRIDE_LINE_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/progress_reader.py",
+      "value": 64,
+      "unit": "个",
+      "category": "其它",
+      "description": "锚点间隔行数：读 200 行时最多回退 63 行重新扫描（进度行 KB 级，最多几十 KB）。"
+    },
+    {
+      "name": "_MAX_FILE_ANCHOR_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/progress_reader.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每文件锚点上限：覆盖约 6.5 万行；到达上限后停增锚点，读更远的行退化为从最后锚点扫描（正确但慢）。"
+    },
+    {
+      "name": "_MAX_INDEXED_FILES",
+      "file": "agent_py_agent/agent/gateway_parts/progress_reader.py",
+      "value": 64,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "缓存文件数上限：IM 并发轮询的会话量级是几十；超出按 LRU 淘汰最旧（索引可重建）。"
+    },
+    {
+      "name": "_MAX_LINE_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/progress_reader.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "上限（异常文件可以把网关内存撑爆）；正常事件最大来自工具边界的完整 commentary，远小于此值。"
+    },
+    {
+      "name": "_READ_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/progress_reader.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": "单行读取块上限（字节）：正常进度行是 KB 级；超过即按超长行处理（跨块拼完整，内存按单行上限算）。"
+    },
+    {
       "name": "MAX_UNPLANNED_RESUME_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/recovery.py",
       "value": 3,
       "unit": "个",
       "category": "上限预算",
       "description": "同一个 Gateway 用户回合因非计划重启自动续跑的次数上限；用完后再被打断就收成 failed，不再续跑。"
+    },
+    {
+      "name": "_TERMINAL_PROJECTION_FULL_RESCAN_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/recovery.py",
+      "value": 3600.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "只节流可重建投影；启动和每小时完整复核兜住原位改写，规范终态与结算仍逐条核验。"
     },
     {
       "name": "_SCAN_LIMIT_COUNT",
@@ -4116,6 +4252,14 @@
       "description": "文件锁表容量水位；达到后清理不再使用的锁条目，防长跑进程锁表无界增长（无物理单位）。"
     },
     {
+      "name": "_SQLITE_SCOPE_MAX_CONNECTIONS_COUNT",
+      "file": "agent_py_agent/agent/io/sqlite_scope.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "一个 WAL 库约三个句柄；每作用域八条仅限制闲置缓存，不是进程上限，也不限制在用的嵌套短连接。"
+    },
+    {
       "name": "_MAX_RUN_COUNT",
       "file": "agent_py_agent/agent/llm_scale/cost_ledger.py",
       "value": 10000,
@@ -4572,6 +4716,14 @@
       "description": "预检结果里每条新增事实给决策模型看的摘要长度，与已选记忆的摘要长度一致。"
     },
     {
+      "name": "MEMORY_LIBRARY_WRITE_CAP_CHARS",
+      "file": "agent_py_agent/agent/memory_store/jsonl.py",
+      "value": 20000,
+      "unit": "字符",
+      "category": "其它",
+      "description": "拒绝并给结构化错误，已超帽的文件仍允许受控净缩减（清理才能进行）。"
+    },
+    {
       "name": "HOT_MAX_INJECT_CHARS",
       "file": "agent_py_agent/agent/memory_store/lessons.py",
       "value": 5000,
@@ -4586,6 +4738,22 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "单条热门规则元数据最多 300 字符：防止超长规则撑爆内存。"
+    },
+    {
+      "name": "_ROUTING_INDEX_MAX_BYTES",
+      "file": "agent_py_agent/agent/memory_store/lessons.py",
+      "value": 25600,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "超限时按最近更新优先保留、其余省略；它不是全部历史正文的存储上限——lesson 正文完整留在 memory/lessons/。"
+    },
+    {
+      "name": "_ROUTING_INDEX_MAX_LINE_COUNT",
+      "file": "agent_py_agent/agent/memory_store/lessons.py",
+      "value": 200,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "文件换行数上限：≤ 200 行。"
     },
     {
       "name": "_MAX_CANDIDATE_CHARS",
@@ -4610,6 +4778,14 @@
       "unit": "字符",
       "category": "其它",
       "description": "英文关键词最短 3 个字符：太短没有区分度；只收 ASCII 词面，用于 BM25 跨语言命中。"
+    },
+    {
+      "name": "_CONTEXT_BUNDLE_SNAPSHOT_DAYS",
+      "file": "agent_py_agent/agent/memory_store/retention_scan.py",
+      "value": 30,
+      "unit": "天",
+      "category": "其它",
+      "description": "快照与工具清单的保留期：30 天（诊断和人工排查够用）。"
     },
     {
       "name": "_DAY_SECONDS",
@@ -4706,6 +4882,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "(多租户/多测试目录)把缓存撑大。"
+    },
+    {
+      "name": "AGENTS_PROTECTION_CONFIG_MAX_BYTES",
+      "file": "agent_py_agent/agent/path_access_policy.py",
+      "value": 524288,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "模块用途: 为现有路径门扩展同owner来源保护，原凭据和整机服务队列规则保持原样。"
     },
     {
       "name": "ERROR_BACKOFF_SECONDS",
@@ -5130,6 +5314,54 @@
       "unit": "个",
       "category": "上限预算",
       "description": "单个任务最多带 32 个 Skill 引用：引用太多会让认领快照过大，实际任务用不到这么多。"
+    },
+    {
+      "name": "_PROJECTION_ESTIMATE_MAX_DEPTH_COUNT",
+      "file": "agent_py_agent/agent/scheduler/repository.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "只读调度投影大小估算最多递归的层数，超限即不用廉价缓存。"
+    },
+    {
+      "name": "_PROJECTION_ESTIMATE_MAX_ITEM_COUNT",
+      "file": "agent_py_agent/agent/scheduler/repository.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "只读调度投影单容器最多估算的项数，超限即走原账本读取。"
+    },
+    {
+      "name": "_STORE_PROJECTION_FULL_READ_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/scheduler/repository.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "就无条件重核一次：防时间戳精度与极端竞态。命中复用的条目不会刷新这个时间。"
+    },
+    {
+      "name": "_STORE_PROJECTION_MAX_BYTES_COUNT",
+      "file": "agent_py_agent/agent/scheduler/repository.py",
+      "value": 262144,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "\"少量超大行\"，超限不缓存（下次全读，只慢不错）。"
+    },
+    {
+      "name": "_STORE_PROJECTION_MAX_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/scheduler/repository.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "owner 下次整读，只变慢不出错。"
+    },
+    {
+      "name": "_STORE_PROJECTION_MAX_ROWS_COUNT",
+      "file": "agent_py_agent/agent/scheduler/repository.py",
+      "value": 512,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单条三切片投影最多 512 行（waiting + queued 键 + due 键合计）：行数太多说明账本异常，直接视为需要全量重读。"
     },
     {
       "name": "_WAITING_PROJECTION_MAX_ENTRIES_COUNT",
@@ -6164,6 +6396,22 @@
       "description": "滚动输出缓冲:查询时从日志文件尾部最多读这么多字符,够看进度/结论又不撑爆 prompt。"
     },
     {
+      "name": "_PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/tooling/process_session_store.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "防时间戳精度与极端竞态。命中复用不会刷新这个时间。"
+    },
+    {
+      "name": "_PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/tooling/process_session_store.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "进程记录投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）；被逐出的 owner 下次全读，只变慢不出错。"
+    },
+    {
       "name": "_DEFAULT_WAIT_SECONDS",
       "file": "agent_py_agent/agent/tooling/process_sessions.py",
       "value": 30.0,
@@ -6178,6 +6426,38 @@
       "unit": "秒",
       "category": "上限预算",
       "description": "进程等待上限 600 秒：长时间命令也够，又不无限等。"
+    },
+    {
+      "name": "_DARWIN_KINFO_PROC_SIZE_BYTES",
+      "file": "agent_py_agent/agent/tooling/pty_process_lifecycle.py",
+      "value": 648,
+      "unit": "字节",
+      "category": "其它",
+      "description": "常量用途: 当前Darwin kinfo_proc的原ABI长度（字节），实际读取长度不符必须拒绝。"
+    },
+    {
+      "name": "_DARWIN_P_PID_OFFSET_BYTES",
+      "file": "agent_py_agent/agent/tooling/pty_process_lifecycle.py",
+      "value": 40,
+      "unit": "字节",
+      "category": "其它",
+      "description": "常量用途: Darwin原p_pid在kinfo_proc中的字节偏移，用来核实返回的确切PID。"
+    },
+    {
+      "name": "_DARWIN_P_STAT_OFFSET_BYTES",
+      "file": "agent_py_agent/agent/tooling/pty_process_lifecycle.py",
+      "value": 36,
+      "unit": "字节",
+      "category": "其它",
+      "description": "常量用途: Darwin原p_stat在kinfo_proc中的字节偏移；与下方实际结构/PID自检共用。"
+    },
+    {
+      "name": "_DARWIN_P_XSTAT_OFFSET_BYTES",
+      "file": "agent_py_agent/agent/tooling/pty_process_lifecycle.py",
+      "value": 280,
+      "unit": "字节",
+      "category": "其它",
+      "description": "常量用途: Darwin原p_xstat等待状态在kinfo_proc中的字节偏移，不是秒或容量。"
     },
     {
       "name": "_DEFAULT_READ_BYTES",
@@ -6434,6 +6714,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "默认最大并行工具调用数。"
+    },
+    {
+      "name": "SELF_MAP_PAGE_DEFAULT_COUNT",
+      "file": "agent_py_agent/agent/tooling/self_map_tool.py",
+      "value": 60,
+      "unit": "个",
+      "category": "其它",
+      "description": "常见目录最多60条；只改变紧凑目录条数，不调大原输出归档阈值。"
+    },
+    {
+      "name": "SELF_MAP_PAGE_DEFAULT_MAX_CHARS",
+      "file": "agent_py_agent/agent/tooling/self_map_tool.py",
+      "value": 3500,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "默认 JSON 页字符上限，同时服从原预览字符/外置字节阈值；不是提高归档上限。"
     },
     {
       "name": "_CLEANUP_WARNING_PID_LIMIT_COUNT",

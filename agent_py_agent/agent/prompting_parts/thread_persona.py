@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -35,6 +35,7 @@ class RenderedPersonaSections:
     truncated_targets: frozenset[str]
     # None 表示调用方未提供代次（旧路径/测试构造），冻结时不核对；提供时与持久代次不一致即拒绝写。
     persona_epoch: int | None = None
+    agents_source_metadata: dict | None = None
 
 
 # LLM: 主/子/后台渲染安全点共用，只加载线程元数据，不读消息；缺线程保持一次性准备语义。
@@ -71,19 +72,35 @@ def _snapshot_path(home: Path, thread_id: str) -> Path:
 
 
 # LLM: 原锁内首建/内容修复/换代只存安全渲染段；截断集合仅控制当轮删除资格，不借此刷新快照。
+#   来源在首帧/换代写回前也核当前权限，防止没有旧快照时把已撤权的在途render首次激活。
+#   同epoch差分消费独立复核当前来源的完整metadata，与旧active共享一个网络期限；拒绝不撤销合法旧前缀。
 #   渲染之后发生过受控失效（清理迁移推进了持久代次）时，禁止把旧渲染写回快照：返回空固定段，
 #   让调用方下一轮按当前人格重新渲染，旧约定不再从固定前缀注入（2905）。
 # 函数用途: 原子维护唯一固定人格，按同次截断事实计算增量；安全路径/写入错误仍暴露。
-def freeze_thread_persona(home: Path, scope: ThreadPersonaScope, current: RenderedPersonaSections) -> tuple[list[str], str]:
+def freeze_thread_persona(home: Path, scope: ThreadPersonaScope, current: RenderedPersonaSections,
+                          *, source_repository=None) -> tuple[list[str], str]:
+    from ..capability.agents_source_network import source_request_budget
     path = _snapshot_path(home, scope.thread_id)
     epoch = {"compact_generation": scope.compact_generation, "model_profile_id": scope.model_profile_id,
              "protocol": list(scope.protocol)}
     # LLM: 外层线程前缀锁把「核对代次→写快照」整体圈进临界区：expire 的「推进代次→失效」
     #   也在同一把锁内，任何交错都被互斥挡住（mc4-3102）。
-    with locked_json_path(_thread_prefix_lock_path(home)):
+    with source_request_budget(), locked_json_path(_thread_prefix_lock_path(home)):
         if current.persona_epoch is not None and current.persona_epoch != _read_persona_epoch(home):
             return [], ""
+        saved = _read_snapshot(path) if source_repository is not None else None
+        if saved is not None and _revoke_source_locked(home, path, saved, source_repository):
+            return [value for value in saved["sections"].values() if value], ""
+        candidate = _snapshot_record(epoch, current)
+        revoke_candidate = (source_repository is not None and current.agents_source_metadata is not None
+                            and (saved is None or saved["epoch"] != epoch))
+        if revoke_candidate and _revoke_source_locked(home, path, candidate, source_repository):
+            return [value for value in candidate["sections"].values() if value], ""
         sections = _read_or_freeze_snapshot(path, epoch, current)
+        saved = _read_snapshot(path) if source_repository is not None else None
+        if saved is not None and (_source_is_pending(saved, current)
+                                  or _source_diff_denied(current, source_repository)):
+            current = replace(current, sections=current.sections | {"agents": sections["agents"], "diagnostics": sections["diagnostics"]})
     return [value for value in sections.values() if value], persona_updates(sections, current)
 
 
@@ -96,9 +113,59 @@ def _read_or_freeze_snapshot(
     with locked_json_path(path):
         saved = _read_snapshot(path)
         if saved is None or saved["epoch"] != epoch:
-            saved = {"schema_version": 1, "epoch": epoch, "sections": current.sections}
+            saved = _snapshot_record(epoch, current)
             write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
         return saved["sections"]
+
+
+# LLM: 无I/O；来源元数据属于同次渲染，首帧及正常换代共用同一记录形状。
+# 函数用途: 构造待冻结记录，元数据缺失时保持旧版本格式。
+def _snapshot_record(epoch: dict, current: RenderedPersonaSections) -> dict:
+    saved = {"schema_version": 1, "epoch": epoch, "sections": current.sections}
+    if current.agents_source_metadata is not None:
+        saved["agents_source"] = current.agents_source_metadata
+    return saved
+
+
+# LLM: 已持原thread_prefix锁；撤权只推进一次持久代次并清空agents，不能把在途旧render写回；保留其它人格。
+# 函数用途: 让失去授权或原路径身份的active来源立即失效。
+def _revoke_source_locked(home, path, saved, repository) -> bool:
+    if saved.get("agents_source_revoked"):
+        return False
+    try:
+        repository.require_active_permission(saved.get("agents_source"))
+        return False
+    except (ValueError, OSError):
+        _bump_persona_epoch(home)
+        saved["sections"] = saved["sections"] | {"agents": "", "diagnostics": ""}
+        saved["agents_source_revoked"] = True
+        with locked_json_path(path):
+            write_private_text_file_atomic_unlocked(path, json.dumps(saved, ensure_ascii=False))
+        return True
+
+
+# LLM: 仅比较来源CAS而非抓取时间/状态；旧无元数据快照视为原owner默认，新source不得提前进差分。
+# 函数用途: 判断当前渲染是不是还没有到断点激活的新来源。
+def _source_is_pending(saved, current) -> bool:
+    if saved.get("agents_source_revoked"):
+        return True
+    before, after = saved.get("agents_source"), current.agents_source_metadata
+    if before is None:
+        return after is not None and after["snapshot"]["kind"] != "owner_default"
+    if after is None:
+        return True
+    fields = ("owner", "kind", "locator", "config_version", "revision")
+    return any(before["snapshot"][key] != after["snapshot"][key] for key in fields)
+
+
+# LLM: 差分是一次新的正文消费；CAS或摘要相同也不能复用旧redirect权限，拒绝只屏蔽AGENTS差分。
+# 函数用途: 复核本次渲染来源，避免撤权的新正文进入动态增量。
+def _source_diff_denied(current, repository) -> bool:
+    try:
+        repository.require_active_permission(current.agents_source_metadata)
+        return False
+    except (ValueError, OSError):
+        return True
 
 
 # LLM: 内容损坏等价于缺失，调用方须在原锁内重建；链接/非普通文件和IO安全错误仍抛出，不含正文日志。

@@ -1,5 +1,5 @@
 # LLM: 显式配置到后端实例只有此工厂；缺配置判据供调度共用，不读取凭据、不探测网络、不选择替代模型。
-# 模块用途: 构造用户指定的本地、HTTP 或 OAuth 后端；修改时核对会话模型选择与认证测试。
+# 模块用途: 构造用户指定的后端并透传物理并发配置；修改时核对会话模型选择、排队与认证测试。
 from __future__ import annotations
 
 from typing import Any
@@ -33,7 +33,7 @@ def _temperature_options(config: Any) -> dict[str, Any]:
 
 
 # LLM: 只按显式协议构造后端；缺配置判据与后台准入共用，OAuth 引用附加认证层，不因失败换接口。
-# 函数用途: 创建用户指定的适配器并透传媒体预算；尚未配置时真实调用明确拒绝。
+# 函数用途: 创建用户指定的适配器，透传媒体预算与物理并发上限；缺配置时真实调用明确拒绝。
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     """Resolve a configured backend name to a backend adapter instance."""
 
@@ -50,6 +50,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         model_name=config.model_name,
         input_media_max_bytes=getattr(config, "input_media_max_bytes", 16 * 1024 * 1024),
         request_timeout=config.request_timeout,
+        provider_max_concurrent_requests=getattr(config, "provider_max_concurrent_requests", 0),
         # 输出上限按已知窗口统一夹取（唯一权威见 effective_max_output_tokens），默认模型与模型档案走同一规则。
         max_tokens=effective_max_output_tokens(config),
         context_window_tokens=configured_context_window_tokens(config),

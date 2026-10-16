@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # LLM: 子代理执行器复用原 attempt、权限与心跳；退出后只读同 run 最新 canonical 决定接续，旧 result 仅保留历史；联测授权收口交错、超时及准确启动。
-# 模块用途: 启动和收口子代理工作片，并把新结果交回直属父级。
+# 模块用途: 启动和收口子代理工作片，线程内绑定可信排队 owner，并把新结果交回直属父级。
 import logging
 import threading
 import time
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+from ...backends.provider_headers import provider_agent_owner_scope
 from ...runtime_db.operations import RuntimeConflictError
 from ...settings import AgentConfig
 from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
@@ -286,8 +287,8 @@ def _attach_worker_local_store(worker, local_store: object | None) -> None:
     worker.memory.local_store = local_store
 
 
-# LLM: 真实执行前绑定 exact attempt 给取消令牌与心跳观测；身份不可被后来的执行代替换。
-# 函数用途: 给普通子代理建立可中断边界和活动身份，停止不影响共享 Gateway 内其它代理。
+# LLM: 真实执行前绑定 exact attempt 和已解析 worker.home_paths 的排队 owner；退出复位，不改变取消/权限权威。
+# 函数用途: 给普通子代理建立可中断边界与匿名公平身份，停止不影响其它代理。
 def _run_subagent_worker_interruptibly(
     worker,
     params: RunSubagentWorkerParams,
@@ -297,7 +298,7 @@ def _run_subagent_worker_interruptibly(
     from ...concurrency.interrupt import register_interruptible
 
     interrupt_name = f"subagent-runner-attempt:{params.run_id}:{attempt_id}"
-    with register_interruptible(interrupt_name):
+    with register_interruptible(interrupt_name), provider_agent_owner_scope(worker):
         if runner_attempt_cancelled(worker.subagents, params.run_id, attempt_id):
             raise InterruptedError("原子代理执行轮已停止")
         return worker.run_subagent(
@@ -313,8 +314,8 @@ def _run_subagent_worker_interruptibly(
         )
 
 
-# LLM: 仅执行显式 timeout，活动提醒不能进入这条取消路径；执行和观测使用同一个预备 attempt。
-# 函数用途: 为明确有时间预算的子代理启动执行线程，到期按原合同收口，而不是因模型慢自行判死。
+# LLM: 仅执行显式 timeout；线程内绑定 exact attempt 与已解析 worker 的排队 owner，退出复位，不改原取消/收口。
+# 函数用途: 为有时间预算的子代理启动准确身份的执行线程，到期按原合同收口。
 def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *, attempt_id: str):
     from ...concurrency.interrupt import (
         interrupt_by_name,
@@ -328,9 +329,11 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *
     payload: dict[str, object] = {}
     timeout_requested = threading.Event()
 
+    # LLM: 新线程不自动继承 ContextVar；本地 scope 只读取 worker.home_paths，异常退出也复位 owner。
+    # 函数用途: 执行可中断的子代理调用，把真实结果或异常交回原超时收口。
     def _target() -> None:
         try:
-            with register_interruptible(interrupt_name):
+            with register_interruptible(interrupt_name), provider_agent_owner_scope(worker):
                 if runner_attempt_cancelled(worker.subagents, params.run_id, attempt_id):
                     raise InterruptedError("原子代理执行轮已停止")
                 # Close the registration race: a very short timeout may fire

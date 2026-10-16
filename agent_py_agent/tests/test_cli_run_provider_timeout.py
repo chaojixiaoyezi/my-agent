@@ -14,6 +14,7 @@ from agent_py_agent.agent.backends.errors import (
     is_provider_recoverable_error,
 )
 from agent_py_agent.cli.local_commands import cmd_run
+from agent_py_agent.tests.support.ci_cli_owner_fixtures import isolated_cli_owner_paths
 
 
 class _NoopSpinner:
@@ -24,20 +25,19 @@ class _NoopSpinner:
         return None
 
 
+# LLM: 原 CLI 入口先写真实临时 owner 的用户记录，再由替身抛 provider 错误；不 mock 政策读取或权限门。
+# 函数用途: 保留超时分类测试的失败来源，让模型前的会话绑定具备当前完整路径合同。
 def _mock_agent(tmp_path, run_side_effect):
-    """构造 cmd_run 所需的 mock agent（含真实 ConversationStore 供会话绑定）。"""
     from agent_py_agent.agent.conversation.store import ConversationStore
 
+    paths = isolated_cli_owner_paths(tmp_path)
     return SimpleNamespace(
         config=SimpleNamespace(request_timeout=23),
-        conversation_store=ConversationStore(tmp_path / "conv"),
+        conversation_store=ConversationStore(paths.owner_home_dir / "conversations"),
         run=MagicMock(side_effect=run_side_effect),
         root=str(tmp_path),
         runtime_guard_policy=None,
-        home_paths=SimpleNamespace(
-            owner_id="local/main",
-            owner_home_dir=str(tmp_path),
-        ),
+        home_paths=paths,
     )
 
 

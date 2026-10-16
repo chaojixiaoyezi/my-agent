@@ -1,13 +1,20 @@
 # LLM: 原 Store 是 v2/v3/v4 session 唯一权威，锁内先恢复 redo；任务/激活分别冻结，共享和显式保留记录只在原结果落账后消费。
+#   便宜检查仅复用已可信读取的目录内容，发布与停止仍在原事务重读，不缓存通知或执行结论。
 # 模块用途: 为 launcher、host 和 Gateway 串行管理预留与停止意图，保留原目录、CAS 和 v1 显式句柄权限。
 from __future__ import annotations
 
 import hashlib
+import stat
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.directory_lock import locked_private_directory
 from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
 from ..common.nofollow_fs import unlink_file_beneath
@@ -29,6 +36,93 @@ from .process_session_records import (
     validate_process_record,
     validate_session_id,
 )
+
+
+# LLM: 一期候选③（background_tick_cheap_checks）的进程记录目录投影缓存: 缓存"读到的记录/错误 +
+#   目录身份 + 最近一次全量读取时刻",不含任何"无事"结论——调用方每次重新决定要不要通知。
+#   命中只凭目录身份 (dev, ino, mtime_ns): 记录的新建/改写/删除全走 root 内 rename/unlink,
+#   目录 mtime 必变;锁文件稳态 flock 不改 mtime。2 秒保护窗口 + 60 秒全量兜底由共用设施保证。
+#   条目上限按 owner 数 LRU: 测试机 owner 池上限 600,但热点轮转窗口远小于池上限,单条缓存
+#   只有几条记录;被逐出的 owner 下次全读,只变慢不出错。调用方拿到的永远是 deepcopy。
+# 类用途: 保存一代目录中的记录与错误；命中仅提供内容，调用方仍实时决定完成通知。
+@dataclass(frozen=True)
+class _ProcessRecordsProjection:
+    stat_key: tuple[int, int, int]
+    records: tuple[dict[str, object], ...]
+    errors: tuple[dict[str, object], ...]
+    verified_at: float
+
+
+# 进程记录投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）；被逐出的 owner 下次全读，只变慢不出错。
+_PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT = 64
+# 便宜检查下,距最近一次全量读取(事务 + glob + 逐文件读)超过这个秒数就无条件重读一次:
+# 防时间戳精度与极端竞态。命中复用不会刷新这个时间。
+_PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS = 60.0
+_PROCESS_RECORDS_PROJECTION_CACHE: OrderedDict[str, _ProcessRecordsProjection] = OrderedDict()
+_PROCESS_RECORDS_PROJECTION_LOCK = threading.Lock()
+
+
+# LLM: 仅真实目录可命中优化；链接或类型异常交回原Store事务，原锚点正规化和允许/拒绝语义不变。
+# 函数用途: 取进程记录目录的身份指纹,供便宜检查判定缓存是否仍绑定当前目录状态。
+def _process_dir_stat_key(root: Path) -> tuple[int, int, int] | None:
+    try:
+        status = root.lstat()
+    except OSError:
+        return None
+    return (status.st_dev, status.st_ino, status.st_mtime_ns) if stat.S_ISDIR(status.st_mode) else None
+
+
+# LLM: 便宜命中(一期候选③): 只做一次 stat。条件与设计逐字对应:
+#   ① 目录身份与缓存一致;② mtime 已离开 2 秒粗粒度保护窗口(cache_freshness 唯一实现);
+#   ③ 距最近一次全量读取不足 60 秒。命中不刷新 verified_at;未命中返回 None(调用方走原路径)。
+# 函数用途: 判断缓存记录投影能否仅凭目录身份复用;命中时原子提级 LRU。
+def _lookup_process_records_projection(root: Path) -> _ProcessRecordsProjection | None:
+    stat_key = _process_dir_stat_key(root)
+    if stat_key is None:
+        return None
+    key = str(root)
+    now = time.time()
+    with _PROCESS_RECORDS_PROJECTION_LOCK:
+        entry = _PROCESS_RECORDS_PROJECTION_CACHE.get(key)
+        if entry is None or entry.stat_key != stat_key:
+            return None
+        if not cache_entry_trustworthy(stat_key[2]):
+            return None
+        if now - entry.verified_at >= _PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS:
+            return None
+        _PROCESS_RECORDS_PROJECTION_CACHE.move_to_end(key)
+        return entry
+
+
+# LLM: 全量读取完成后写缓存: 只有"读取前"与"读取后"目录身份一致(读期间没有写者/恢复落盘)
+#   才绑定缓存——否则这份记录可能已经过期,宁可不缓存(下次全读,只慢不错)。
+#   MC4-902/1201 返工: "读取时是否可信"由调用方在读取前冻结(read_trusted),本函数只在发布时
+#   复核目录身份没变——不再用发布时的目录年龄代替读取时的判断(跨窗口延迟发布时旧结果不得
+#   变成可信缓存)。
+#   MC4-903 返工: 入缓存前 deepcopy,缓存与调用方拿到的返回值不共享可变对象(防调用方原地修改
+#   污染缓存)。
+# 函数用途: 把一次完整目录读取的结果绑定到目录身份写入有界缓存(信任判断由调用方读取前冻结)。
+def _store_process_records_projection(
+    root: Path,
+    before: tuple[int, int, int] | None,
+    records: list[dict[str, object]],
+    errors: list[dict[str, object]],
+) -> None:
+    after = _process_dir_stat_key(root)
+    if before is None or after is None or after != before:
+        return
+    entry = _ProcessRecordsProjection(
+        stat_key=after,
+        records=tuple(deepcopy(record) for record in records),
+        errors=tuple(deepcopy(error) for error in errors),
+        verified_at=time.time(),
+    )
+    key = str(root)
+    with _PROCESS_RECORDS_PROJECTION_LOCK:
+        _PROCESS_RECORDS_PROJECTION_CACHE[key] = entry
+        _PROCESS_RECORDS_PROJECTION_CACHE.move_to_end(key)
+        while len(_PROCESS_RECORDS_PROJECTION_CACHE) > _PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT:
+            _PROCESS_RECORDS_PROJECTION_CACHE.popitem(last=False)
 
 
 # LLM: 读取损坏与记录不存在必须区分；异常不能暴露原始命令、环境或记录内容。
@@ -208,6 +302,7 @@ class ProcessSessionTransaction:
 
 # LLM: 公共入口共用原目录锁和恢复；v2/v3/v4 原版本更新，v1 不参与按任务控制，共享激活另按完整归属冻结。
 # 类用途: 提供跨进程的后台会话存取，以及需要持锁多检查点的启动与停止事务。
+# LLM: 可选目录投影仅用于初读内容；实际恢复、通知写回、停止与revision CAS仍读取原Store事务。
 class ProcessSessionStore:
     # LLM: 构造只规范路径，不创建目录；缺失目录的纯查询保持无副作用。
     # 函数用途: 绑定一个后台会话权威目录。
@@ -254,15 +349,38 @@ class ProcessSessionStore:
             )
 
     # LLM: 只有普通 session 损坏可返回健康子集；事务日志损坏影响整个视图，必须返回空集及错误。
+    #   cheap_checks（background_tick_cheap_checks 开时）先试目录身份门：目录未变且过了保护
+    #   窗口 → 直接复用上次读取的记录（deepcopy 返回）；否则走原路径（事务 + glob + 逐文件读）。
+    #   关闭时（默认）走原路径，与改动前逐字相同。
     # 函数用途: 读取同一目录中的后台会话，并保留结构化错误。
-    def list_records(self) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    def list_records(
+        self, *, cheap_checks: bool = False
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        if cheap_checks:
+            hit = _lookup_process_records_projection(self.root)
+            if hit is not None:
+                return (
+                    [deepcopy(record) for record in hit.records],
+                    [deepcopy(error) for error in hit.errors],
+                )
+        before = _process_dir_stat_key(self.root) if cheap_checks else None
+        # MC4-1201: 在读取这一刻冻结"本次读取是否可信"——读取前目录 mtime 已离开 2 秒窗口才允许
+        #   把结果写进缓存;发布处只认这个事实,不用发布时的目录年龄(跨窗口延迟发布时旧结果不得
+        #   变成可信缓存)。
+        read_trusted = before is not None and cache_entry_trustworthy(before[2])
         try:
             if not self.root.exists():
                 return [], []
             with self.transaction() as transaction:
-                return transaction.list_records()
+                records, errors = transaction.list_records()
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
+        if cheap_checks and read_trusted:
+            _store_process_records_projection(self.root, before, records, errors)
+        # MC4-903 返工: 冷读返回值同样 deepcopy, 调用方原地修改不会污染缓存或事务内部对象。
+        if cheap_checks:
+            return [deepcopy(record) for record in records], [deepcopy(error) for error in errors]
+        return records, errors
 
     # LLM: 与预留和交接共用锁；调用方先关闭旧执行轮准入；include_terminal 只扩展同一精确身份的退出证据。
     # 函数用途: 提交任务停止清单，插件准备收口可一并核验终态 host，信号仍在锁外发送。

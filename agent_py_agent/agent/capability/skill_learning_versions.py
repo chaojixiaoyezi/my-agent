@@ -1,5 +1,5 @@
 # LLM: 自学版本引用沿原registry归属和snapshot授权，只固定已存在且hash相符的历史正文；不创建文件或接管手写Skill。
-# 模块用途: 为已登记的自学Skill绑定不可变正文，使在途快照跨更新仍可读取原版。
+# 模块用途: 为自学Skill绑定不可变正文和同源撤回元信息；在途快照跨更新保留原版，撤回后仍拒读。
 from __future__ import annotations
 
 from dataclasses import replace
@@ -47,17 +47,30 @@ def freeze_learned_snapshot(snapshot, home_paths, *, recommended_limit=50):
     return replace(snapshot, entries=tuple(entries))
 
 
-# LLM: 固定正文不固定授权；删除/撤销登记后旧快照不能借历史文件继续读，用户手写同名目录不能复活原授权。
-# 函数用途: 复核原托管身份仍存在后安全读取固定版本，不回退到活动文件。
-def read_frozen_learned_body(entry):
+# LLM: 元信息和正文读取共用原托管授权判据；读取registry和路径事实但不读正文，不把在途快照当成永久授权。
+# 函数用途: 为自身发现返回自学Skill当前生命周期和是否仍可请求原固定版本。
+def frozen_learned_metadata(entry):
     frozen = Path(entry.frozen_path)
     store = SkillLearningStore(frozen.parents[2], frozen.parents[4]/"skills")
     try:
         registry = store.load_registry()
     except SkillLearningStoreError as exc:
         raise OSError("learned skill registry unavailable") from exc
-    if entry.name not in registry.skills or registry.skills[entry.name].maintenance.get('state') in {'disabled','archived'} or Path(entry.path) != store.skill_path(entry.name) or not Path(entry.path).is_file():
+    record = registry.skills.get(entry.name)
+    state = record.maintenance.get('state', 'trial') if record is not None else 'removed'
+    authorized = bool(record is not None and state not in {'disabled', 'archived'}
+                      and Path(entry.path) == store.skill_path(entry.name) and Path(entry.path).is_file())
+    return {"state": state, "authorized": authorized,
+            "revision": record.revision if record else None, "version": record.version if record else None}
+
+
+# LLM: 固定正文不固定授权；原metadata判据仍拒绝删除、停用和路径替换，不增加fallback或读取活动正文。
+# 函数用途: 在同源授权复核通过后读取原固定版本；拒绝语义保持不变。
+def read_frozen_learned_body(entry):
+    if not frozen_learned_metadata(entry)["authorized"]:
         raise FileNotFoundError('learned skill authorization no longer available')
+    frozen = Path(entry.frozen_path)
+    store = SkillLearningStore(frozen.parents[2], frozen.parents[4]/"skills")
     return read_text_beneath(store.directory, ('versions', entry.name, frozen.name))
 
 

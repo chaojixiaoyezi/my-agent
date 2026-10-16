@@ -44,11 +44,35 @@ def _apply(service, request, store=None):
         candidate_service=service.candidates, request=request, curator_state_store=store)
 
 
+# LLM: 历史超限正文是迁移输入，不能再通过当前新增硬帽构造；不修改生产限制或迁移实现。
+# 函数用途: 写入500条旧版自动晋升记录及匹配快照，保持原规模和归属判定输入。
+def _seed_legacy_large_agents(repo):
+    from hashlib import sha256
+
+    from agent_py_agent.agent.capability.persona_repository import persona_entry_id
+
+    text, records = "# AGENTS\n\n", []
+    for i in range(500):
+        content = f"规模约定{i:03}：" + "审核证据后再交付。" * 12
+        text += f"- {content}\n"
+        digest = sha256(text.encode()).hexdigest()
+        backup = repo._write_version_snapshot("agents", i + 1, digest, text)
+        records.append({"target": "agents", "action": "add", "version": i + 1,
+            "entry_id": persona_entry_id("agents", content), "sha256": digest,
+            "source": "memory-promotion:synthetic:contract",
+            "backup_ref": str(backup.relative_to(repo.owner_home))})
+    repo.path_for("agents").write_text(text)
+    json_io.append_private_jsonl_records(repo.versions_path, records)
+    assert len(text) > 20_000
+    assert len(repo.list_entries("agents")["entries"]) == 500
+
+
+# LLM: 在真实锁/仓库上迁移历史500条超限正文，保留全阶段持锁、单批删除及锁序断言。
+# 函数用途: 验证大规模清理不会放开临界区或与忙碌curator重叠。
 def test_500_entries_single_critical_section_and_busy_curator_cost(tmp_path, monkeypatch):
     service, conversations, _, home = _setup(tmp_path)
     repo = service.persona
-    for i in range(500):
-        _seed(repo, f"规模约定{i:03}：" + "审核证据后再交付。" * 12)
+    _seed_legacy_large_agents(repo)
     request = migration.AgentsCleanupRequest("scale-500", ("excluded-scale",),
         plan_digest=migration.plan_agents_cleanup(persona=repo).plan_digest)
     store = MemoryCuratorStateStore(repo.owner_home / "memory/curator/state.json")
@@ -72,7 +96,7 @@ def test_500_entries_single_critical_section_and_busy_curator_cost(tmp_path, mon
                 active.remove(path)
 
     monkeypatch.setattr(json_io, "_locked_json_path", trace)
-    for name in ("plan_agents_cleanup", "_ensure_snapshot", "_archive_planned", "_remove_batch",
+    for name in ("_plan_agents_cleanup_from_report", "_ensure_snapshot", "_archive_planned", "_remove_batch",
                  "_append_conversations", "_expire_thread_snapshots", "_write_record"):
         original = getattr(migration, name)
 
@@ -87,6 +111,7 @@ def test_500_entries_single_critical_section_and_busy_curator_cost(tmp_path, mon
     assert result["removed_count"] == 500
     assert batches == [500], batches
     assert stages and all(held for _, held in stages), stages
+    assert "_plan_agents_cleanup_from_report" in {name for name, _ in stages}
     assert acquisitions.count(repo.path_for("agents")) == 1
     assert (home.owner_memory_policy_json, repo.path_for("agents")) in edges
     assert not any(b == home.owner_memory_policy_json for a, b in edges if a == repo.path_for("agents"))
@@ -118,9 +143,11 @@ def _wait_writer_ready(child, ready):
     assert ready.exists() and child.poll() is None
 
 
+# LLM: 拦截实际锁内重判定函数，保留真实子进程写入和所有持锁断言。
+# 函数用途: 在迁移已持锁时发起并发用户改写，验证用户内容不会被迁移吞掉。
 def _resume_probes(state, monkeypatch):
     repo, ready = state.repo, state.ready
-    original = migration.plan_agents_cleanup
+    original = migration._plan_agents_cleanup_from_report
     original_lock = json_io._locked_json_path
     original_tail = migration.versions_ledger_tail
 
@@ -133,8 +160,8 @@ def _resume_probes(state, monkeypatch):
             finally:
                 state.held.remove(path)
 
-    def reclassify(**kwargs):
-        plan = original(**kwargs)
+    def reclassify(*args, **kwargs):
+        plan = original(*args, **kwargs)
         assert repo.path_for("agents") in state.held
         assert len(plan.removable) == 1
         state.children.append(subprocess.Popen([sys.executable, "-c", USER_WRITER,
@@ -144,14 +171,14 @@ def _resume_probes(state, monkeypatch):
         return plan
 
     monkeypatch.setattr(json_io, "_locked_json_path", trace)
-    monkeypatch.setattr(migration, "plan_agents_cleanup", reclassify)
+    monkeypatch.setattr(migration, "_plan_agents_cleanup_from_report", reclassify)
 
     def tail(path):
         state.tail_reads.append(repo.path_for("agents") in state.held)
         return original_tail(path)
 
     monkeypatch.setattr(migration, "versions_ledger_tail", tail)
-    return original
+    return lambda **kwargs: original(kwargs["persona"], kwargs["persona"].list_entries("agents"))
 
 
 def test_resume_reclassification_and_tail_must_share_persona_lock(tmp_path, monkeypatch):
@@ -294,7 +321,7 @@ def test_backlog_promotion_also_holds_curator_lease(tmp_path, monkeypatch):
 
     def promote(ids):
         seen.append(curator.state_store.load().active_lease)
-        return 1, ()
+        return 1, (), ()
 
     monkeypatch.setattr(curator, "_promote_eligible", promote)
     result = curator.run_if_due(now=datetime(2026, 10, 9, 12, tzinfo=timezone.utc))

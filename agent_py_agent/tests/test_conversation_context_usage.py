@@ -65,14 +65,18 @@ def test_model_context_store_is_generation_fenced_and_not_recency(tmp_path):
 
 @pytest.mark.parametrize("isolated", [False, True])
 def test_preflight_context_uses_exact_main_or_child_thread(tmp_path, isolated):
-    from agent_py_agent.agent.conversation.context_usage import record_model_context_usage
+    from agent_py_agent.agent.conversation.context_usage import (
+        capture_context_usage_binding,
+        record_model_context_usage,
+    )
     store = ConversationStore(tmp_path)
     main = store.threads.get_or_create({"canonical_user_id": "main", "channel_conversation_id": "main"})
     child = store.threads.get_or_create({"canonical_user_id": "child", "channel_conversation_id": "child"})
     agent = SimpleNamespace(conversation_store=store)
     attrs = {"agent_thread_id": child.thread_id, "conversation_thread_id": main.thread_id}
     params = SimpleNamespace(task_attributes=attrs, context_scope="isolated" if isolated else "default")
-    assert record_model_context_usage(agent, params, usage()) is (not isolated)
+    binding = capture_context_usage_binding(agent, params)
+    assert record_model_context_usage(agent, params, usage(), binding=binding) is (not isolated)
     assert bool(store.threads.load(child.thread_id).model_context_usage) is (not isolated)
     assert store.threads.load(main.thread_id).model_context_usage == {}
 
@@ -162,3 +166,36 @@ def test_unknown_child_context_is_not_displayed_as_zero():
     lines = _render_subagent_activity_row({"name": "child", "status": "DONE", "context_known": False}, TuiRenderContext(width=120))
     text = "".join(fragment[1] for line in lines for fragment in line)
     assert "ctx —" in text and "ctx 0" not in text
+
+
+@pytest.mark.parametrize("revision", [0, True, "1"])
+def test_model_selection_change_rejects_stale_or_invalid_context_revision(tmp_path, revision):
+    from agent_py_agent.agent.conversation.context_usage import save_context_usage_snapshot
+
+    store = ConversationStore(tmp_path / "home")
+    captured = store.threads.get_or_create({"canonical_user_id": "alice"})
+    selected = store.threads.update_atomic(captured.thread_id, lambda row: replace(
+        row, model_profile_id="new-model", model_selection_revision=1,
+        model_selection_source="explicit", model_selection_last_explicit_revision=1,
+    ))
+    assert save_context_usage_snapshot(store, captured, usage()) is False
+    denied = store.model_usage.update_context_usage(
+        selected.thread_id, {**usage(), "model_selection_revision": revision}, expected_compact_generation=0,
+    )
+    assert denied.model_context_usage == {}
+    assert denied.model_selection_revision == 1
+
+
+def test_model_selection_context_revision_is_private_and_persists_under_same_lock(tmp_path):
+    from agent_py_agent.agent.conversation.context_usage import (
+        public_context_usage,
+        save_context_usage_snapshot,
+    )
+
+    store = ConversationStore(tmp_path / "home")
+    thread = store.threads.get_or_create({"canonical_user_id": "alice"})
+    assert save_context_usage_snapshot(store, thread, usage()) is True
+    current = store.threads.require(thread.thread_id)
+    assert current.model_context_usage["model_selection_revision"] == thread.model_selection_revision
+    assert "model_selection_revision" not in public_context_usage(current.model_context_usage)
+    assert current.updated_at == thread.updated_at

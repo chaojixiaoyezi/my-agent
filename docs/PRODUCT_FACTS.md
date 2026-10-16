@@ -4,6 +4,12 @@
 [STATUS](../STATUS.md) 为准，后续开发见 [ROADMAP](ROADMAP.md)，验收方法见 [TESTS](../TESTS.md)。
 旧部署现场、历史性能数据和单次成功记录不作为当前产品承诺。
 
+## F4/F5 当前组合候选（2026-10-16，未发布）
+
+当前独立组合候选增加本人规则来源与准确确认、`/memory candidates` 人工候选闭环和只读 self_map。普通/群用户可在原 owner/HostActor 范围完整预览后确认；来源可学不等于批准，正式内容不自动发布。self_map 只聚合原可见读口，不代表授权、外部查询或服务已验证；unknown/partial 如实保留，关闭开关不提示不存在入口。
+
+原 main 凭据卡/群共享引用、群监控额外授权、机器人订阅、原生及引用图片、零查询与 Skill 生命周期继续按各自合同工作。组合回归发现的 bwrap 人格保护挂载次序 P1 与 CLI 定义顺序缺口，已由准确独立补充修复并完成非作者离线复核；源码合同闭合不代表真实 Linux 内核或发行已验。最终组合/包内/真实入口验收尚未完成，使用和限制见[命令参考](../CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布)、[自我目录](design/SELF_MAP.md)和[STATUS](../STATUS.md)。
+
 ## 使用入口
 
 | 能力 | 当前行为 | 重要边界 |
@@ -29,8 +35,7 @@
 - 同一 owner/thread 只有一份 canonical transcript。展示分页、子代理通知和后台恢复不另造模型历史。
 - 普通回合保留已提交历史的稳定前缀；真正摘要替换才走 Compact。主、子、孙代理各自使用同一套
   checkpoint 与 generation 协议，不共享彼此的正文或长期记忆。
-- 长期记忆由所属用户的代理维护；普通记忆可自主更新，SOUL 修改需要用户确认。技能索引按需发现、
-  正文显式读取；现行 runner 可生成记忆候选，尚无生产 Skill 提案链，候选不会自动成为正式技能。
+- 长期记忆按所属 owner 隔离。当前 F4/F5 候选中，自动学习和 Remember 只准备候选，本人通过原显式控制预览确认后正式提交；SOUL 与正式 Skill 仍守原用户确认/版本 CAS，AGENTS 只走本人规则控制。技能索引按需发现、正文显式读取，候选不因模型口述或来源资格自动成为正式内容；已发布版本边界另按 STATUS 核对。
 
 详细说明见 [家目录布局](architecture/MY_AGENT_HOME_LAYOUT.md)、[上下文](design/CONVERSATION_CONTEXT_DESIGN.md)、
 [Gateway](design/GATEWAY_DESIGN.md) 和 [子代理运行协议](modules/subagent/SUBAGENT_RUNBOOK.md)。

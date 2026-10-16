@@ -3,7 +3,7 @@
 #   视频块、字节预算、摘要预算任一不满足都落归档引用并写 reason。视觉能力事实只来自档案声明（model_input_modalities）
 #   或 backends.vision_capability 的结构化探针，不读模型自述。调用方不得自行判定。随图摘要的实际发送（按预算打包的看图小请求）
 #   在 compact_media_digest.py；本模块只做决定、准入与投影。
-# 模块用途: 决定含图历史压缩时走归档引用还是随图摘要，并把媒体块投影成可重新附上的引用文字块。
+# 模块用途: 裁决含图历史的归档与摘要策略；主前缀仅按明确模态声明回退，不改变原始媒体。
 from __future__ import annotations
 
 import logging
@@ -24,6 +24,9 @@ MEDIA_POLICY_VISION_SUMMARY = "vision_summary"
 MEDIA_POLICIES = frozenset({MEDIA_POLICY_OFF, MEDIA_POLICY_ARCHIVED_REFS, MEDIA_POLICY_AUTO})
 # B 路径的 typed 失败码：写进线程 compact_vision_failed_generation，同代次下一次压缩据此选 A；不计入熔断。
 COMPACT_VISION_SUMMARY_FAILED = "COMPACT_VISION_SUMMARY_FAILED"
+# LLM: 冻结主前缀仅在明确的模态声明排除实际媒体类型时才失去缓存，未知能力不视为拒绝。
+# 常量用途: 记录这次媒体摘要改走旧存档选源的结构化原因。
+COMPACT_PREFIX_MEDIA_UNSUPPORTED = "COMPACT_PREFIX_MEDIA_UNSUPPORTED"
 # B 部分成功的结构化原因：范围内只有一部分图块被看图小请求总结（预算或次数上限所限），其余按归档引用；不是失败。
 MEDIA_REASON_DIGEST_PARTIAL = "vision_digest_partial"
 
@@ -82,6 +85,19 @@ def vision_capability_fact(agent: object) -> VisionFact:
         logger.warning("视觉能力探针暂不可用，本次按归档引用：%s", type(exc).__name__)
         return VisionFact(False, "probe_unavailable")
     return VisionFact(capability.supported, capability.fact_source)
+
+
+# LLM: 只读能力声明和消息块类型，不读媒体/正文，不发探针；无声明并非不支持，同后端已接受的块原样复用。
+# 函数用途: 判断声明是否明确排除了冻结前缀实际包含的媒体模态。
+def declared_prefix_media_unsupported(agent: object, messages: Iterable[dict[str, Any]]) -> bool:
+    declared = {str(item or "").strip().lower() for item in
+                (getattr(getattr(agent, "config", None), "model_input_modalities", None) or ())}
+    declared.discard("")
+    if not declared:
+        return False
+    return any(block.get("type") in {"image", "video"} and block["type"] not in declared
+               for message in messages if isinstance(message.get("content"), list)
+               for block in message["content"] if isinstance(block, dict))
 
 
 # LLM: 请求前的结构化决定（不发请求）：off/archived_refs 直接落；auto 下 forced 恢复一律 A；线程同代次记录过 B 失败一律 A；

@@ -4,7 +4,7 @@
 # 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
 from __future__ import annotations
 
-from ..common.json_io import jsonl_lines, write_private_json_file_atomic_no_newline
+from ..common.json_io import write_private_json_file_atomic_no_newline
 from ..contracts.model_call_ledger import model_call_inflight_snapshot
 
 """Endpoint handlers used by the gateway HTTP server.
@@ -92,6 +92,7 @@ from .input_delivery_service import (
 from .io import gateway_request_counts, write_json_file_atomic
 from .loop_health import loop_health
 from .paths import GatewayPaths, gateway_chunk_path, gateway_chunk_path_candidates
+from .progress_reader import read_progress_lines
 from .request_client import GatewayAskExecutionOptions
 from .response_renderer import read_gateway_terminal_envelope_report
 
@@ -457,17 +458,14 @@ def handle_progress(handler, server) -> None:
 
 # LLM: /progress 只公开白名单事件：模型过程说明、请求尚未返回的数值等待、按档位的工具进度和工具审批（只含工具名与已脱敏摘要，
 #   不含 binding、选项或参数原文）。审批事件只是提示，授权仍只能经 /approve、/deny 控制写入精确决定文件。
+#   读取复用有界增量位置索引，半行不消费，超限只投影行号和字节数；main 的等待/草稿/时间与脱敏保持。
 # 函数用途: 按行游标公开过程及真实模型/工具等待，不发送思考或请求正文。
 def _read_public_progress_events(
     path, since: int, *, channel: str = ""
 ) -> tuple[list[dict[str, object]], int]:
-    try:
-        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-        lines = jsonl_lines(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError):
-        return [], since
+    lines, next_cursor = read_progress_lines(path, since)
     events: list[dict[str, object]] = []
-    for line in lines[since : since + 200]:
+    for line in lines:
         try:
             row = json.loads(line)
         except (json.JSONDecodeError, TypeError):
@@ -487,6 +485,9 @@ def _read_public_progress_events(
                                **_progress_preview_limit(row),
                                **_progress_update_time(row),
                                **({"level": "stream"} if row.get("verbose_level") == "stream" else {})})
+            continue
+        if row.get("kind") == "progress_oversize":
+            events.append({"kind": "progress_oversize", "line": row.get("line"), "bytes": row.get("bytes")})
             continue
         if row.get("kind") == "permission_requested":
             permission_event = _public_permission_request_event(row, channel)
@@ -512,7 +513,7 @@ def _read_public_progress_events(
         if level not in {"on", "full", "stream"} or not isinstance(progress, dict):
             continue
         events.append({"level": level, **progress, **_progress_preview_limit(row), **_progress_update_time(row)})
-    return events, min(len(lines), since + 200)
+    return events, next_cursor
 
 
 # LLM: 字符上限只由宿主 stream event 投影，不能从模型正文提取；畸形字段不下发，原记录和候选正文不改变。
@@ -1100,7 +1101,7 @@ def handle_control(handler, server) -> None:
     )
 
 
-# LLM: Both HTTP control entrypoints must prepare the same durable operation before invoking any
+# LLM: HTTP控制先准备原持久操作再执行；AGENTS及记忆候选只在当前认证栈封印实际命令，丢响应不重复副作用。
 # command service. Response loss therefore replays the stored result instead of repeating effects.
 #   事件中心（B6 观察计数）只有一个来源：本处从 server 取到后放进 scope.event_hub 沿控制链带下去；
 #   绝不从 server.agent 取，也不为了展示新建 hub。
@@ -1114,13 +1115,24 @@ def _handle_persistent_control_operation(
     scope: GatewayControlScope,
 ) -> None:
     try:
-        receipt = execute_gateway_control_operation(
-            server.agent,
-            server.paths,
-            command,
-            replace(scope, event_hub=getattr(server, "plugin_event_hub", None)),
-            command_text=command_text,
-        )
+        from contextlib import nullcontext
+
+        from .agents_control_service import agents_http_ingress
+        prepared = replace(scope, event_hub=getattr(server, "plugin_event_hub", None))
+        from .memory_candidate_control import memory_control_failure, memory_http_ingress
+        permission = _request_identity(handler)[1] if command.kind in {"agents", "memory"} else None
+        if command.kind in {"agents", "memory"} and permission is None:
+            from .agents_control_service import _failure
+            failure = (_failure("AGENTS_WRITE_NOT_USER_REQUEST") if command.kind == "agents"
+                       else memory_control_failure("MEMORY_CONTROL_NOT_USER_REQUEST"))
+            handler._send_json(403, {"status": "control", **failure.to_dict()})
+            return
+        factory = {"agents": agents_http_ingress, "memory": memory_http_ingress}.get(command.kind)
+        boundary = factory(prepared, command, permission) if factory else nullcontext(prepared)
+        with boundary as issued_scope:
+            receipt = execute_gateway_control_operation(
+                server.agent, server.paths, command, issued_scope, command_text=command_text,
+            )
     except GatewayControlOperationIdentityRequired as exc:
         handler._send_json(
             400,

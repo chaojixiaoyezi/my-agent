@@ -2,7 +2,7 @@
 # 子代理结束页同步投影 canonical thread/message ID；显示层不得从正文猜最终回复身份。
 # Goal 时间从共享 goal_clock 只读查询，不建立展示页自己的计时基线。
 # 前台与后台 main 共用唯一数值/阶段投影，显式审批等待仍属于活动回合；历史正文和生命周期不得由此驱动。
-# 模块用途: 为 TUI/Web 投影主子任务状态，并接续后台主代理的真实工具审批；上下文数字仍独立读取 canonical thread。
+# 模块用途: 投影主子任务及物理排队状态，接续后台原审批和进度；上下文数字仍独立读取 canonical thread。
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ _MAIN_ACTIVITY_LIVE_PHASES = frozenset(
 
 
 # LLM: main 活动行与公开正文只作展示，具体审批复用 transcript sink 的原账本，不发明任务状态或新的权限来源。
-# 类用途: 接收后台主代理的思考、工具、审批和回复阶段，并更新固定 main 行和可滚动正文。
+# 类用途: 接收后台主代理的思考、排队、工具、审批与回复，更新原 main 行和公开过程。
 class BackgroundMainActivitySink:
     # LLM: Construction registers one exact thread/task identity; later updates
     # may replace only that thread's display row under the agent-owned lock.
@@ -164,6 +164,17 @@ class BackgroundMainActivitySink:
         else:
             activity = "正在处理工具结果"
         self._publish("tool", activity)
+
+    # LLM: 排队事实只经原白名单构造展示；沿 _publish 更新同一 main 行和原 IM pulse，不创建模型调用、投递或状态权威。
+    # 函数用途: 显示后台主代理正在排队或已解除等待，保留原请求的短状态窗口。
+    def write_provider_queue(self, value: object) -> bool:
+        from ..gateway_parts.stream_events import provider_queue_event
+
+        public = provider_queue_event(value)
+        if not public:
+            return False
+        self._publish("running", public["text"])
+        return True
 
     # LLM: Retry display uses typed attempt/delay facts only and returns True so
     # provider code does not fall back to leaking an exception string as prose.

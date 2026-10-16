@@ -206,6 +206,12 @@ class CandidateObservation:
     promotion_target: str = "long_term"
     promotion_mode: str = ""
     observation_id: str = ""
+    # LLM: 宿主判定的学习来源投影；构造入口（curator/子代理/remember）填写，模型不能提供。
+    # 字段用途: 让候选携带可追溯来源，晋升门在重试时仍能复核学习资格。
+    learning_source: dict[str, object] = field(default_factory=dict)
+    # LLM: 仅宿主输入快照或工具解析目标时填写，模型不得提出；None 是没有版本证明，不能推测为当前版本。
+    # 字段用途: 固定本次观察所依据的正式目标版本。
+    target_entry_version: int | None = None
 
 
 # LLM: MemoryCandidate 是 candidates.jsonl 的唯一当前态记录；状态历史留在同一记录内。
@@ -251,12 +257,33 @@ class MemoryCandidate:
     #   自动晋升路径，由排除名单同步写回；人工路径不读取它，状态机也不因此改变。
     # 字段用途: 记录候选被排除自动晋升的结构化原因码。
     promotion_exclusion: str = ""
+    # LLM: 宿主判定的学习来源投影；空表示未知来源（自动路径不可学），人工路径不读取它。
+    # 字段用途: 记录候选来源与学习资格，供晋升门复核与正式记录溯源。
+    learning_source: dict[str, object] = field(default_factory=dict)
+    # LLM: 缺字段旧候选按 None 读取；合并、重试与审核不得从当前正式记录补猜版本。
+    # 字段用途: 持久保存观察时的正式目标版本，供最终CAS使用。
+    target_entry_version: int | None = None
 
-    # LLM: 持久化前完整验证，坏行不能被部分加载后继续覆盖。
+    # LLM: 仅候选仓库构造，模型和观察入口均不能提供；缺字段旧记录沿显式来源保守重建。
+    # 字段用途: 区分尚待补齐的来源引用与已经明确不可学的来源。
+    learning_source_coverage: dict[str, object] = field(default_factory=dict)
+    # Host-only immutable historical bindings; no body/quote, retained inside this authority only.
+    target_evidence_bindings: list[dict[str, object]] = field(default_factory=list)
+
+    # LLM: 持久化前完整验证；未知观察版本及空覆盖字段省略，保持旧v2记录的可读兼容。
     # 函数用途: 将候选转换为 JSONL 记录。
     def to_record(self) -> dict[str, object]:
         validate_candidate(self)
-        return asdict(self)
+        payload = asdict(self)
+        if not self.learning_source:
+            payload.pop("learning_source", None)
+        if self.target_entry_version is None:
+            payload.pop("target_entry_version", None)
+        if not self.learning_source_coverage:
+            payload.pop("learning_source_coverage", None)
+        if not self.target_evidence_bindings:
+            payload.pop("target_evidence_bindings", None)
+        return payload
 
     # LLM: 未知字段可忽略以便增量升级，但已知必填字段缺失或非法必须 fail closed。
     # 函数用途: 从 candidates.jsonl 行恢复当前候选对象。
@@ -271,8 +298,8 @@ class MemoryCandidate:
         return candidate
 
 
-# LLM: Candidate ID includes semantic content, scope and requested mutation; add/remove of the same text must not collide.
-# 函数用途: 为同一候选内容、主题、范围、动作和目标生成稳定编号。
+# LLM: 基础候选身份包含语义、范围、动作和精确目标；用于保持旧ID和来源观察去重语义。
+# 函数用途: 为同一候选内容、主题、范围、动作和目标生成稳定基础编号。
 def stable_candidate_id(
     *,
     candidate_type: str,
@@ -299,12 +326,29 @@ def stable_candidate_id(
     return "memory-candidate-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
-# LLM: occurrence_count 只按独立结构化来源增加；重复跑同一事件不能提高 HOT 资格。
+# LLM: 只有既有目标变更在基础ID之上绑定宿主版本；缺版本保留旧身份，不能猜成当前版本。
+# 函数用途: 为版本化变更生成独立候选ID，允许新证据基于新版本重新提案。
+def versioned_candidate_id(candidate_id: str, target_entry_version: int | None) -> str:
+    version = normalize_target_entry_version(target_entry_version)
+    if version is None:
+        return candidate_id
+    material = json.dumps([candidate_id, version], separators=(",", ":"))
+    return "memory-candidate-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+# LLM: occurrence_count只按独立结构化来源增加；同一来源跨目标版本重放仍是同一观察，不能刷新覆盖权。
 # 函数用途: 为一次观察生成稳定去重键。
 def stable_observation_key(observation: CandidateObservation, candidate_id: str) -> str:
     if str(observation.observation_id or "").strip():
         material = str(observation.observation_id).strip()
     else:
+        # 候选身份含版本，来源观察身份故意不含版本：版本变化本身不是一份新证据。
+        if observation.target_entry_version is not None:
+            candidate_id = stable_candidate_id(
+                candidate_type=observation.candidate_type, content=observation.content,
+                subject_key=observation.subject_key, scope=MemoryScope.from_value(observation.scope),
+                proposed_action=observation.proposed_action, target_entry_id=observation.target_entry_id,
+            )
         material = json.dumps(
             {
                 "candidate_id": candidate_id,
@@ -396,6 +440,16 @@ def normalize_string_list(values: object) -> list[str]:
     return list(dict.fromkeys(text for item in values if (text := str(item or "").strip())))
 
 
+# LLM: 只收真实正整数版本；None保留旧记录的未知语义，不把bool、数字文本或浮点数猜成版本。
+# 函数用途: 校验宿主观察目标版本。
+def normalize_target_entry_version(value: object) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 1:
+        raise ValueError("candidate target_entry_version must be a positive integer or null")
+    return value
+
+
 # LLM: 时间字段统一成带时区 ISO；不能比较原始时间字符串决定冲突胜负。
 # 函数用途: 规范化外部观察时间，空值使用调用方给定默认值。
 def normalize_iso_time(value: object, *, default: str = "", allow_empty: bool = True) -> str:
@@ -421,7 +475,18 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# LLM: Promotion authority is derived only from typed candidate fields. SOUL always remains
+# LLM: 默认落点只适用于用户明确的长期类型；用于比较旧none与已补全记录，不赋予证据或自动写权限。
+# 函数用途: 统一解析同一候选在观察和晋升阶段的实际目标。
+def effective_promotion_target(target: str, origin: str, candidate_type: str) -> str:
+    normalized = str(target or "").strip().lower()
+    if normalized in {"", "none"} and origin == "user_explicit" and candidate_type in {
+        "long_term_fact", "event", "project", "working_agreement",
+    }:
+        return "long_term"
+    return normalized
+
+
+# LLM: 资格仅由结构化候选字段及宿主来源计算；auto_eligible只是候选资格，正式自动发布仍由末端确认门拒绝。
 # manual; formal user facts still require user_explicit authority; lessons/HOT remain protected
 # by their target repositories. AGENTS keeps its auto_eligible eligibility record, but every
 # automatic promotion path is blocked at the promotion boundary (AUTO_AGENTS_WRITE_FORBIDDEN):
@@ -461,6 +526,17 @@ def host_promotion_mode(candidate: object) -> str:
     if action not in {"add", "replace", "remove", "merge"}:
         return "manual_required"
     if target == "long_term":
+        if candidate_type == "working_agreement":
+            # 工作约定：学习资格只由宿主来源投影决定（can_learn），不看正文、置信或模型声明；
+            # 来源未知/不可学（派活、定时、后台、缺字段旧候选）一律转人工复核。
+            from ..conversation.learning_source import projection_is_learnable
+
+            source = (
+                values.get("learning_source")
+                if values is not None
+                else getattr(candidate, "learning_source", None)
+            )
+            return "auto_eligible" if projection_is_learnable(source) else "manual_required"
         return (
             "auto_eligible"
             if origin in {"user_explicit", "tool_verified"}
@@ -507,7 +583,7 @@ def host_promotion_mode(candidate: object) -> str:
     return "manual_required"
 
 
-# LLM: 每次读写都走同一完整 Schema 校验，禁止某个入口接受另一套弱字段。
+# LLM: 每次读写校验Schema、观察版本和来源覆盖一致性；旧缺字段可读，但不因此补猜权威。
 # 函数用途: 验证持久候选的所有枚举、引用、范围、时间和状态历史。
 def validate_candidate(candidate: MemoryCandidate) -> None:
     if candidate.schema_version != CANDIDATE_SCHEMA_VERSION:
@@ -585,6 +661,14 @@ def validate_candidate(candidate: MemoryCandidate) -> None:
         raise ValueError("candidate status_history tail must match current status")
     if len(str(candidate.promotion_exclusion or "")) > 120:
         raise ValueError("candidate promotion_exclusion is too long")
+    if not isinstance(candidate.learning_source, dict):
+        raise ValueError("candidate learning_source must be an object")
+    normalize_target_entry_version(candidate.target_entry_version)
+    from .candidate_source_coverage import validate_source_coverage
+    from .candidate_target_binding import validate_binding_history
+
+    validate_source_coverage(candidate)
+    validate_binding_history(candidate.target_evidence_bindings)
 
 
 __all__ = [
@@ -605,8 +689,10 @@ __all__ = [
     "normalize_iso_time",
     "normalize_reference_list",
     "normalize_string_list",
+    "normalize_target_entry_version",
     "stable_candidate_id",
     "stable_observation_key",
     "utc_now_iso",
     "validate_candidate",
+    "versioned_candidate_id",
 ]

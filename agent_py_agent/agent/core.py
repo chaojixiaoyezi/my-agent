@@ -2,7 +2,7 @@
 
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
-# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；源码和无源码发行共用工作区裁决。
+# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；源码和无源码发行共用工作区裁决；只读self_map沿各领域原公开读口装配。
 
 from __future__ import annotations
 
@@ -311,7 +311,7 @@ def _query_curator_tool_references(
     return query_tool_output_refs_for_runs(owner_root, run_ids=run_ids, limit_per_run=limit)
 
 
-# LLM: Formal Memory, Candidate and Persona authorities are constructed once from canonical owner paths before prompts/tools.
+# LLM: 候选、正式记忆和人格从规范owner路径只装配一次；AGENTS来源共用同一实例，不覆盖主线Skill与媒体能力。
 #   同一时刻记下默认对话模型主机快照（agent.embedding_chat_host_snapshot，只读目录），供 my-agent 自配向量模型比对。
 # 函数用途: 为 composition root 接通 LocalStore 派生索引、唯一候选账本、长期记忆和 Persona 仓库。
 def _wire_memory_authorities(
@@ -349,6 +349,10 @@ def _wire_memory_authorities(
         agent.home_paths,
         quota_enforcer=agent.owner_quota,
     )
+    from .capability.agents_source_host import build_agents_source_repository
+
+    agent.agents_source_repository = build_agents_source_repository(agent)
+    agent.persona_repository.agents_source = agent.agents_source_repository
 
 
 # LLM: 复用原 owner 仓库并注入仅返回临时建议的决策 callback；Curator 无模型工具权限，不创建第二 Agent 或配置库。
@@ -1258,7 +1262,8 @@ def _add_skill_snapshot_hashes(target: dict[str, str], value: object) -> None:
 # LLM: Gateway 状态与安全重启仍限本机管理员；user_config 按可信 owner 身份自行缩窄模型 schema 与执行动作，不能把 legacy 配置能力给普通用户。
 #   audit_records 与 user_config 同范围注册（执行时再按 owner 控制与管理员许可裁决）；admin_controls 只按 is_permission_admin 注册。
 #   record_lesson只按原子代理开关隐藏；普通/群手动总结只产本owner候选，迁移工具只prepare/status，正式确认仍走原人类控制。
-# 函数用途: 把配置、审计、编排、检索、记忆、消息和协作工具装入当前 owner 的 registry。
+#   self_map只登记原公开读口，不受子代理开关影响；具体可见性仍由本轮快照与父授权交集控制。
+# 函数用途: 把配置、审计、编排、检索、记忆、消息和只读自我目录装入当前 owner 的 registry。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     # Gateway 状态包含宿主 PID、配置和日志路径，只向本机管理员主代理提供；普通 owner
     # 不注册这项能力，从工具快照源头避免跨用户泄露。
@@ -1360,6 +1365,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         agent.tools.register(ListOwnerSessionsTool(agent))
     # 增量结论账(收尾一公里):确认一条结论就持久化一条到 findings.jsonl,收尾崩/重派/
     # 被取消都不丢;整合/收口层从账合并,最终报告只是汇总视图。子代理与主代理长任务共用。
+    from .agent_core.self_map_bootstrap import register_self_map
+
+    register_self_map(agent)
     if not agent.config.enable_subagents:
         return
     agent.tools.register(CreateSubagentsTool(agent))

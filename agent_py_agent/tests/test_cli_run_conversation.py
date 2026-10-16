@@ -128,9 +128,12 @@ def test_run_exception_preserves_completed_tool_history(tmp_path, error_type):
 
 
 def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None:
+    from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
+
     agent = _agent(tmp_path)
     backend = _RememberOnceBackend()
     agent.backend = backend
+    rules_before = agent.home_paths.owner_agents_md.read_bytes()
 
     result = agent.run(
         "请长期记住：我的阅读清单代号是雪松。",
@@ -144,10 +147,24 @@ def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None
     assert backend.calls == 2
     assert result.conversation_persist_degraded is False
     candidate = agent.memory_candidates.list()[0]
-    assert candidate.status == "promoted"
+    assert candidate.status == "pending_review"
     assert len(candidate.source_message_refs) == 1
     assert candidate.source_message_refs[0]["role"] == "user"
+    assert candidate.learning_source["can_learn"] is True
+    assert agent.memory.all() == []
+    automatic = agent.memory_promotion.promote(candidate.candidate_id, automatic=True, confirmed=True)
+    assert not automatic.promoted
+    assert automatic.reason_code == "AUTO_PROMOTION_CONFIRMATION_REQUIRED"
+    assert agent.memory.all() == []
+    assert agent.home_paths.owner_agents_md.read_bytes() == rules_before
+
+    # CLI 用户原文只赋予候选来源；用户另行审核并确认精确候选后才允许沿原正式提交链写入。
+    approved = confirm_candidate(agent.memory_promotion, candidate.candidate_id)
+    assert approved.promoted and approved.formal_memory_changed
+    assert agent.memory_candidates.get(candidate.candidate_id).status == "promoted"
     assert len(agent.memory.all()) == 1
+    assert agent.memory.all()[0].content == candidate.content
+    assert agent.home_paths.owner_agents_md.read_bytes() == rules_before
 
     threads = agent.conversation_store.threads.list(limit=0)
     assert len(threads) == 1

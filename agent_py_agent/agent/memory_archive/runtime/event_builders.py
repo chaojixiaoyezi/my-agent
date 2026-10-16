@@ -1,3 +1,5 @@
+# LLM: 事件身份规则保持原字节合同；thread只由宿主EventIdentity提供，工具正文中的同名字段不能覆盖。
+# 模块用途: 从固定执行事实生成消息与工具归档事件。
 
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ from ._event_utils import (
 )
 
 
+# LLM: 执行和会话身份只由宿主传入；thread字段不参与旧事件ID，不接受工具记录同名覆盖。
+# 类用途: 绑定归档事件的宿主执行身份与线程关联。
 @dataclass
 class EventIdentity:
     """Shared identity fields for message and tool events."""
@@ -37,6 +41,7 @@ class EventIdentity:
     request_id: str
     run_id: str
     task_id: str
+    thread_id: str = ""
 
 
 @dataclass
@@ -94,6 +99,8 @@ class _ToolFacts:
     preview_limits: dict[int, int] | None = None
 
 
+# LLM: message事件保留宿主提供的thread字段；缺失仍为空，不从正文补造，事件ID规则不变。
+# 函数用途: 构造带线程关联的消息归档记录。
 def _message_event(
     identity: EventIdentity,
     ctx: MessageContext,
@@ -119,6 +126,7 @@ def _message_event(
     event = RawMemoryEvent(
         event_id=event_id,
         session_id=identity.session_id,
+        thread_id=identity.thread_id,
         request_id=identity.request_id,
         run_id=identity.run_id,
         speaker=ctx.speaker,
@@ -157,12 +165,14 @@ def _tool_event(
     )
 
 
-def _tool_raw_event(
+# LLM: 事件ID保持旧字段及序列化规则；线程关联不参与重算既有事件身份。
+# 函数用途: 从固定执行身份生成工具事件编号。
+def _tool_raw_event_id(
     identity: EventIdentity,
     ctx: ToolCallContext,
     fields: _ToolEventFields,
-) -> RawMemoryEvent:
-    event_id = _event_id(
+) -> str:
+    return _event_id(
         {
             "kind": "tool",
             "sequence": identity.sequence,
@@ -177,9 +187,15 @@ def _tool_raw_event(
             "content_hash": fields.content_hash,
         }
     )
+
+
+# LLM: 工具归档的thread由宿主EventIdentity提供，不接受tool_call同名字段；旧身份保持兼容。
+# 函数用途: 将执行事实和可信线程关联写成原始工具事件。
+def _tool_raw_event(identity: EventIdentity, ctx: ToolCallContext, fields: _ToolEventFields) -> RawMemoryEvent:
     event = RawMemoryEvent(
-        event_id=event_id,
+        event_id=_tool_raw_event_id(identity, ctx, fields),
         session_id=identity.session_id,
+        thread_id=identity.thread_id,
         request_id=identity.request_id,
         run_id=identity.run_id,
         speaker="tool",

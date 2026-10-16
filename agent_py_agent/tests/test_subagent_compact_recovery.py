@@ -28,13 +28,14 @@ from agent_py_agent.agent.subagents.models import FailureType
 
 
 # LLM: child、旧历史和 attempt 都由原 store/lifecycle 建立；只在 HTTP 层模拟供应商响应。
-# 函数用途: 构造真实子代理恢复场景，旧历史低于预检阈值，让供应商 overflow 触发压缩。
+# 函数用途: 在显式临时 home 构造真实子代理恢复，旧历史低于预检阈值，由假供应商 overflow 触发压缩。
 def _child(tmp_path, *, backend: str, tools: bool):
     api_base = "https://api.minimaxi.com/anthropic" if backend == "anthropic_compatible" else "https://opencode.ai/zen/go/v1"
     model_name = "MiniMax-M2.7" if backend == "anthropic_compatible" else "deepseek-v4-flash"
     agent = SimpleAgent(AgentConfig(
         model_backend=backend, model_name=model_name, api_base=api_base,
         api_key="fake-private-key", stream_enabled=False, enable_tools=tools,
+        my_agent_home=str(tmp_path / "home"),
         model_context_window_tokens=200_000,
         max_tool_rounds=1,
     ), tmp_path)

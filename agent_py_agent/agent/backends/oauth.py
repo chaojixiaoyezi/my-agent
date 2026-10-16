@@ -1,5 +1,5 @@
 # LLM: OAuth 是已有三种后端的认证层，不另建模型/工具循环；每次请求核对 owner 私有引用并刷新令牌。
-# 模块用途: 将登录账号接入原 HTTP、流式、取消及用量链路，订阅接口的显式差异保持局部。
+# 模块用途: 将登录账号接入原 HTTP、流式、取消、物理排队及用量链路，订阅接口的显式差异保持局部。
 from __future__ import annotations
 
 from .anthropic import AnthropicCompatibleBackend
@@ -12,7 +12,7 @@ from .responses import OpenAIResponsesBackend
 
 
 # LLM: 每个实例持有无秘密的冻结引用；令牌不会缓存在工作片中，也不能修改共享 Agent 配置。
-# 类用途: 为已有协议附加 owner 私有 OAuth 认证。
+# 类用途: 为已有协议附加 owner 私有 OAuth 认证，沿原信封透传冻结的物理并发限制。
 class _OAuthMixin:
     # LLM: 引用由模型配置解析器生成，必须完整；仅 Messages 有版本参数，工厂须显式传入，不接收未知配置。
     # 函数用途: 初始化冻结认证引用并复用原协议构造，不读取账号或发起认证请求。
@@ -51,7 +51,7 @@ class _OAuthMixin:
     #   基类 request_json/request_stream/request_stream_iter 都按新形态调进来；首包预算、绝对期限和后台预算
     #   （provider_request_timeout）都沿用基类口径——fix3ar 实测原先用裸 request_timeout，后台预算在订阅账号上不生效。
     #   每次物理请求使用同一份刷新结果，认证头覆盖生成期旧值；禁止重定向投递 token。同步 test_model_oauth_transport。
-    # 函数用途: 用原传输封装发送带账号信息的请求，不增加自动重试或新后台线程。
+    # 函数用途: 用原传输信封携带账号与物理并发限制，不增加自动重试或新后台线程。
     def _gateway_request(self, call, payload=None, headers=None, *, options=None):
         from ..settings.model_oauth import request_credentials
         from .request_scope import provider_request_timeout
@@ -66,7 +66,8 @@ class _OAuthMixin:
             headers=request_headers(clean, self.custom_headers, self.session_header),
             timeout=provider_request_timeout(self.request_timeout),
             connect_timeout=self.connect_timeout, first_event_timeout=options.first_event_timeout_seconds,
-            deadline=stream_call_deadline(options), allow_redirects=False)
+            deadline=stream_call_deadline(options), allow_redirects=False,
+            provider_max_concurrent_requests=self.provider_max_concurrent_requests)
 
     # LLM: OAuth 用户必须显式填写容量，不能以 metadata 探针向另一条 API 路径附送订阅凭据。
     # 函数用途: 保持容量来自用户配置；目录发现仍是独立显式菜单动作。

@@ -1,3 +1,27 @@
+## 2026-10-16 F6/F7 组合接缝
+
+- request_context._gateway_compact_model_surface 由原 history_projection 冻结同源历史，保留 F4 learning_source；compact_request_recovery 在解绑前接线，不改变原取消、reserve 或提交。
+- agent_core.compact_transcript_prefix 只验证连续覆盖与保护事实；compact_provider_surface 同时保留 F5 self_map 资格和 F6 内存历史载体，不查询目录或签发权限。
+- compact._summarize 的 typed 本地容量分路复用原来源/媒体/分段与单一 checkpoint；compact_request_budget 负责完整冻结请求预检与空摘要有界恢复。
+- context_usage.ContextUsageBinding 只在真实生成准备或调用账本自行估算入口捕获，model.context_pressure 的 typed snapshot 只携带它；call_runtime 发布时沿原 store_usage 双版本 CAS 保存，缺失绑定只弃持久遥测。
+- F7 直接沿原 cache_layout、message_adapter、model_call_ledger/model_metrics 与 F2 请求作用域验证，不加缓存或权威清单。
+## 2026-10-16 F4/F5 控制与目录接缝
+
+- `http_handlers._handle_persistent_control_operation` 使用原认证结果包裹 AGENTS/Memory 活 seal，保留原请求/进度读口；`control_operation_service` 先持 C 锁写 executing，只首次绑定当前 seal，completed/terminal_unknown 仍走原对账。
+- `agents_control_service` 沿原 owner/HostActor 组合规则来源服务；`memory_candidate_control` 只解析显式 candidates，复用原 owner agent、会话与当前群租约，不注册模型写工具。`memory_candidate_review` 的 nonce 就是原预览 receipt，无第二审批账；严格 no-follow 有界取回，非阻塞 preview 锁避免互等。
+- `command_catalog` 同源声明 `/memory candidates` 与 `/agents`，普通/群 `/help` 准确可见；裸 memory 查询只保留终端原 handler。`cli/chat_parts/control_runtime` 序列化与 direct/Gateway 使用同一结构命令，不把确认文本送给模型执行。
+- `conversation/learning_source` 经既有 ingress/request/worker/background/scheduler 与子线程持久归档传递，媒体、owner 与 actor 字段保持原权威；`pty_process_lifecycle` 复用原资源退役回执，不允许 unknown 退役后发布新来源。
+- F5 装配在 `agent_core/self_map_bootstrap`；`tooling/self_map_registry/tool/display/availability` 仅读领域贡献，`conversation/self_map_work/context` 只读绑定工作/上下文。队列缺少 owner 公共读口就未知，不读全局记录。权限仍来自原执行快照和公开 self_context，不归 Gateway 地图管理。
+
+2026-10-16 F2复用backends/request_scope的有界owner队列与lease，Gateway流只投影白名单阶段/计数，不保存请求正文或另建状态源。配置贯通AgentConfig/YAML/BackendOptions，部署边界禁止模型改额度；与F1 SQLite/增量进度顺序组合。
+
+## 2026-10-16 减负读写入口
+
+- `gateway_parts/progress_reader.py` 只缓存每文件最多1024锚点的行号→字节位置，全进程64文件LRU，原chunk仍唯一正文；http_handlers 只在原身份核验后调用并沿 main 白名单投影。
+- `gateway_parts/io.update_json_file_atomic` 与 `common/json_io.serialize_private_json_no_newline` 共用精确序列化；force_write 只供显式需要写动作信号的调用点，不能按Python对象相等吞掉持久化。
+- recovery 原 terminal_cursor 承载目录观察、追平和整轮欠账，不授予任务终态；gateway_loops 首轮强制扫描，日常派发/取消/输入恢复仍走原入口。
+- `io/sqlite_scope`/`sqlite_lease`/`sqlite_connection`/`sqlite_schema` 分别管理有界生命周期、借用失效、游标回收和纯schema声明摘要；schema摘要不缓存数据库或owner授权结论。
+
 2026-10-15 `.12`监控成功回执：原policy guard退出后复用creator_display_rows补create/mutation的自有JSON.job展示；只替换output、保creator/effect/错误，姓名网络在锁外，list/get/metadata_only不重做。真实`.11`列表及原账正确、裸成功回执占位的证据保留，补丁1664项联合回归通过。
 
 2026-10-15 group_authorization/control保留原tool_policy与人工grantor；protocol/feishu_mentions仅将准确平台目标提及规范成member:ID。feishu_provider_facts共用完整成员分页，authority与显示快照形状分开；scheduler/creator_access只补显示、不授予代删。诊断固定字段到显式控制回执，无秘密或第二状态源。
@@ -2917,3 +2941,9 @@ B 接线：`agent_core/model/im_wait_activity.py` 从实际 RunParams 的 typed 
 认证明确拒绝的首次宿主事实独立于普通结果 `local/none` 静默：precheck、NO和后台LLM共用原 owner/thread/task/HostActor，finalization 前把义务冻结原 Wake。已有公开LLM回执可复用，否则仅走原零工具模型表达；实际外发前再核原来源、当前代次/撤销、active任务与原job状态。未发缓存重投必须在原 BackgroundClaim 内，业务和认证不重跑；已发回执只补canonical，后续换代不会重复外发。既有wake重投期限耗尽沿原quarantine及queued claim/finish CAS收失败片，不能抢其它活跃claim、复活终态、停计划或删除凭据。通知开关默认开启，关闭后原义务退休而不回落业务。详见 [模块交接](../../tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md)。
 
 `request_owner_binding.py` 的身份解码复用 OwnerIdentity 工厂并逐字段核对规范形式；local provider 的 user/group 与其它 provider 走同一拒绝式校验，不回退管理员。
+
+### F6 前缀容量与释放边界（2026-10-16）
+
+`agent_core/compact_transcript_prefix.transcript_prefix_exceeds_capacity` 只消费同次 source_ids/joint_end 截出的可覆盖输入，使用原预算与校准函数求保守下界；不读新 owner/线程事实，不吞其它错误。`compact_request_recovery._transcript_summary_surface` 在解绑前拒用必超量前缀并原样返回原 tool_source；`conversation/compact._resolved_provider_surface` 在自动 preflight 发布前采用同一检查。原 `_require_transcript_prefix_capacity` 仍是带全部真实指令的精确门，未新增来源或 checkpoint。`test_host_summary_phase_lifetime.py` 保持三宿主旧历史释放阈值，`test_compact_prefix_lifetime.py` 补校准边界、受保护尾项、原精确门和弱引用释放合同。
+
+`declared_transcript_prefix_media_decision` 只作同次可覆盖前缀的原声明判定；ConversationCompactProviderSurface 的可选 media_decision 只携原类型、不存历史。`compact._candidate_prefix_media_decision` 在 `_build_compact_candidate` 的视觉探针之前按本候选 canonical 媒体事实复核，再沿原摘要与 checkpoint 决定流转；不新增 reason、来源账或批准。

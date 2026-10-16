@@ -50,6 +50,9 @@ from ..conversation.host_notices import (
     pending_host_notices,
     turn_host_notices,
 )
+
+# 前台回合的来源投影与来源键共用此模块（import 顺序按 ruff I001 整理）。
+from ..conversation.learning_source import LEARNING_SOURCE_KEY, thread_source_projection
 from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
 from ..runtime_errors import fallback_error_code
@@ -993,6 +996,11 @@ def _gateway_task_attributes(conversation: request_context.GatewayConversationCo
         # 为 session:<thread_id>；模型和客户端都不需要也不能猜这个内部 scope key。
         attrs["session_id"] = conversation.thread_id
         attrs[CONVERSATION_TRANSCRIPT_AUTHORITATIVE_ATTR] = True
+        # 来源沿入口冻结的宿主判定（与线程创建、排除名单同口径）：可学线程沿用其投影，显式不可学
+        # （派活/定时/后台/排除）原样下传；缺失或坏值不写（fail-closed），spawn 子代理继承不可学。
+        source = thread_source_projection(conversation.learning_source)
+        if source is not None:
+            attrs[LEARNING_SOURCE_KEY] = source
     if conversation.cwd:
         attrs[CONVERSATION_EXECUTION_CWD_ATTR] = conversation.cwd
         attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = list(

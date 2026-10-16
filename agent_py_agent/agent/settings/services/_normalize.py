@@ -227,6 +227,7 @@ class ModelFieldsService:
             (
                 ("request_timeout", 1, 600),
                 ("max_tokens", 1, None),
+                ("provider_max_concurrent_requests", 0, None),
                 ("model_context_window_tokens", 1, None),
             ),
         ))
@@ -292,6 +293,8 @@ _HOME_STRING_FIELDS = (
 )
 _HOME_RUNTIME_BOOL_FIELDS = (
     "home_context_enabled", "run_task_workspace_enabled", "thread_prompt_prefix_freeze_enabled",
+    # 来源开关同样走真实布尔归一，带引号false不能按非空字符串误开启本地或网络读取。
+    "agents_source_enabled", "agents_source_network_enabled",
 )
 def _normalize_home_strings(out: dict[str, object], defaults: object) -> list[str]:
     warnings: list[str] = []
@@ -393,13 +396,14 @@ class UserFieldsService:
 # Runtime bool switches (was _normalize_operational_fields.py)
 # ---------------------------------------------------------------------------
 
-# 带引号的 "false" 必须转成真实布尔值，否则会被当成真值打开开关（含自学习 enable_self_learning）。
+# 带引号的 "false" 必须转成真实布尔值，避免误开自学习、SQLite连接复用和后台廉价检查。
 _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
+    "sqlite_connection_reuse", "background_tick_cheap_checks",
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
     "decision_observe_sampling_enabled", "decision_observe_nonblocking_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
-    "enable_subagents", "enable_self_learning", "self_learning_include_background",
+    "enable_subagents", "enable_self_learning", "enable_self_map", "self_learning_include_background",
     "audit_enabled",
 )
 

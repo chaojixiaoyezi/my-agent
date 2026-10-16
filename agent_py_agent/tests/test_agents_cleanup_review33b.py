@@ -13,6 +13,7 @@ import pytest
 from agent_py_agent.agent.memory_store import agents_migration as migration
 from agent_py_agent.agent.memory_store import curator_lease, curator_state
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaEnforcer
+from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 from agent_py_agent.tests.test_agents_cleanup_review33 import _apply, _candidate, _setup
 
 ROOT = Path(__file__).parent
@@ -228,7 +229,7 @@ def test_parallel_owner_admissions_are_local_to_exact_repository(tmp_path, monke
     def promote(index):
         try:
             barrier.wait(5)
-            results.append(envs[index].service.promote(candidates[index].candidate_id, automatic=target == 'long_term'))
+            results.append(confirm_candidate(envs[index].service, candidates[index].candidate_id) if target == 'long_term' else envs[index].service.promote(candidates[index].candidate_id))
         except BaseException as exc:
             errors.append(repr(exc))
     monkeypatch.setattr(OwnerQuotaAdmission, 'check', checked)

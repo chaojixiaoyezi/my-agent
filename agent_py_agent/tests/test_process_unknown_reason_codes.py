@@ -1,3 +1,5 @@
+# LLM: 用合成回执验证进程未知结果的归因，替身仍须接收并核验原进程出生身份，不能弱化终止器合同。
+# 模块用途: 检查未确认停止的错误码、操作账与原回执，真实测试进程最终仍由正式清退入口关闭。
 """后台进程与终端会话结果未知时带出具体原因码：错误码仍是 TOOL_OPERATION_OUTCOME_UNKNOWN（语义不变、不自动重做），
 reported_error_code 说明卡在哪一步，工具操作账的 unknown_reason 随之可归因。
 
@@ -94,10 +96,20 @@ def test_unconfirmed_terminal_close_reports_its_cause(tmp_path, monkeypatch):
     tool = _terminal_tool(tmp_path)
     started = _payload(tool.execute({"action": "start", "command": f"{shlex.quote(sys.executable)} -q"}))
     session = pty_session_registry.get(started["session_id"])
+    terminations = []
+
+    # LLM: 仅伪造一次未确认回执；核验调用仍携本次进程身份，随后测试使用真实终止器收尾。
+    # 函数用途: 观察终止器的出生令牌，避免旧签名替身掩盖 PID 身份保护的丢失。
+    def unconfirmed_termination(pid, proc, *, expected_birth_token):
+        assert proc is session.process and pid == proc.pid
+        assert expected_birth_token == proc.birth_token
+        terminations.append(expected_birth_token)
+        return ProcessTerminationReceipt("SIGTERM", False, None, 1, (pid,))
+
     with monkeypatch.context() as patch:
-        patch.setattr(pty, "terminate_process_tree", lambda pid, proc: ProcessTerminationReceipt(
-            "SIGTERM", False, None, 1, (pid,)))
+        patch.setattr(pty, "terminate_process_tree", unconfirmed_termination)
         outcome = tool.execute({"action": "close", "session_id": session.session_id})
+    assert terminations == [session.process.birth_token]
     assert (outcome.error_code, outcome.effect_outcome) == (UNKNOWN, "unknown")
     assert outcome.reported_error_code == "PTY_CLOSE_UNCONFIRMED"
     # 终止回执结构化附在 process.termination（ae 复审建议 2），与后台进程停止未确认同一形状。

@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..conversation.authority import conversation_execution_cwd
+from ..conversation.learning_source import child_projection_from_parent
 from ..model_visible_refs import current_model_ref
 from .models import SubAgentTask
 
@@ -64,9 +65,21 @@ def execution_cwd(task: SubAgentTask) -> str:
         return ""
 
 
+# LLM: 子代理来源沿显式spawn lineage继承，未知和自动化不可升级；保留main任务workspace和权限投影。
+# 函数用途: 为子代理运行装配结构化身份、工作区与学习来源属性。
 def runtime_task_attributes(task: SubAgentTask) -> dict[str, object]:
     attrs = getattr(task, "attributes", {}) or {}
     result = dict(attrs) if isinstance(attrs, dict) else {}
+    # 子代理运行期的来源 = 自己的 subagent 投影：trigger 沿 spawn 链继承（自动化禁止来源向后代
+    # 传播），run/task 关联累积；父级缺失或坏值时保持原样，由消费侧按不可学处理，不在这里猜来源。
+    run_id = str(getattr(task, "id", "") or "").strip()
+    child_source = child_projection_from_parent(
+        result.get("learning_source"),
+        run_id=run_id,
+        task_id=str(getattr(task, "root_id", "") or "").strip() or run_id,
+    )
+    if child_source is not None:
+        result["learning_source"] = child_source
     task_root = safe_string_ref(task, "task_workspace_dir") or safe_string_ref(task, "task_dir")
     if task_root:
         root = Path(task_root)

@@ -13,6 +13,7 @@ from ...agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     conversation_task_attributes,
 )
+from ...agent.conversation.learning_source import LEARNING_SOURCE_KEY, user_dialogue_projection
 from ...agent.gateway_parts.response_renderer import (
     current_context_token_estimate,
     is_silent_user_stop,
@@ -118,6 +119,10 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         _next_message_id(ctx),
         preview_chars=_CHAT_COLLAPSE_PREVIEW_CHARS,
     )
+    attrs = conversation_task_attributes(ctx.job.system_task)
+    if not ctx.job.system_task:
+        # plain direct 是用户对话入口：当前回合来源固定为用户对话，只标本轮不追认历史；系统任务回合不标。
+        attrs = {**attrs, LEARNING_SOURCE_KEY: user_dialogue_projection()}
     with register_interruptible(conversation_request_interrupt_name(ctx.job.request_id)):
         ctx.local_run.check_admission()
         result = ctx.agent.run(
@@ -131,7 +136,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             resume_context=resume_context_override(ctx.args),
             recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
             on_chunk=on_chunk,
-            task_attributes=conversation_task_attributes(ctx.job.system_task),
+            task_attributes=attrs,
         )
     agent_response_text = result.response
     if is_silent_user_stop(result):

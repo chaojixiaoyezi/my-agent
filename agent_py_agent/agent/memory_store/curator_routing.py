@@ -133,7 +133,7 @@ def transient_fallback_code(cursor_before: dict, previous: list, view: Callable[
 
 
 # LLM: 多组依次运行时给调用方一个结果：计数相加，状态、失败码、run_id、模型取最后一组（失败即停在那组）；
-#   警告依次拼接并加 curator_model_groups:<组数>。只有一组时原样返回。
+#   警告与逐条回执依次拼接，正式提交/清理计数累加，不能仅取最后一组；一组时原样返回。
 # 函数用途: 把一次触发里各组的运行结果汇总成一个。
 def combined_run_result(results: list[CuratorRunResult]) -> CuratorRunResult:
     if len(results) == 1:
@@ -145,6 +145,10 @@ def combined_run_result(results: list[CuratorRunResult]) -> CuratorRunResult:
         processed_audit_events=sum(item.processed_audit_events for item in results),
         daily_events=sum(item.daily_events for item in results),
         candidates=sum(item.candidates for item in results),
+        promotion_results=tuple(row for item in results for row in item.promotion_results),
+        formal_commits=sum(item.formal_commits for item in results),
+        cleanup_recovered=sum(item.cleanup_recovered for item in results),
+        cleanup_pending=sum(item.cleanup_pending for item in results),
         warnings=(*(warning for item in results for warning in item.warnings), f"curator_model_groups:{len(results)}"),
     )
 

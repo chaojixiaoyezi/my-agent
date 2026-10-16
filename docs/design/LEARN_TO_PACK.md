@@ -1,3 +1,11 @@
+## 2026-10-16 当前正式内容规则（组合候选，未发布）
+
+本节覆盖下文历史“开启自学习后自动发布”的约定。`enable_self_learning` 默认关闭；开启只自动产候选，不能以宿主学习来源合格、模型总结或自动闸门代替用户准确确认。正式 Skill 沿 main 现有确认、版本与 CAS 链，原 registry/ledger/不可变版本仍是权威；撤回、手改保护、适用范围、扫描与数量限制保持。
+
+F4 的 working_agreement 进入原唯一长期库候选，正式 Memory/lesson/HOT 也不因来源可学自动提交。本人终端或 IM 用 `/memory candidates preview <候选ID>` 完整预览后复制当前确认命令；AGENTS 仅 `/agents`，Skill 仅原 `/skills` 链，各守原 owner/actor 和目标 CAS。自动维护可按显式策略调整推荐与可恢复归档，不批准新正式正文或跨 owner 来源。
+
+F5 `self_map` 只显示原元数据、快照及撤回事实，不读取 Skill 正文来构造权限、不发布或刷新 Skill；精确正文与资源继续显式按原 `skill_search` 读口和当前权限加载。当前状态与未验边界见[规则归属](PERSONA_AGENTS_OWNERSHIP.md)、[自我目录](SELF_MAP.md)及[TESTS](../../TESTS.md)，不将本轮源码候选称为已发布。
+
 # 学外部 agent，做成内部技能或能力包（learnpack）
 
 > 3a，2026-10-06。状态：**第一期开发中（3a 单人，分支 `claude/3a-learnpack-p1`）**。事实按 main `e5d7f3c90` 和生产只读核对。

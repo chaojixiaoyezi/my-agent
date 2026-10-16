@@ -11,6 +11,7 @@ from ..capability.subagent_entry_authority import PACKAGE_ENTRY_PURPOSE, Subagen
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from ..settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY, PendingSubagentModelAdvice
+from .learning_source import thread_source_projection
 from .models import ConversationThread
 from .store_io import now, read_json_object_report, safe_file_stem
 from .store_threads import (
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from .store_threads import ThreadStore
 
 
-# LLM: Agent threads use a host-generated exact id and no channel/user indexes. Existing
+# LLM: 子代理线程仅使用宿主生成的精确ID；在原线程锁内重读后补身份，不从模型属性覆盖主线typed身份。
 # records are re-read under the original thread transaction before filling missing identity;
 # the transition lock only serializes materialization and cannot guard model/Compact updates.
 # LLM: typed advice/包入口材料只初始化新 thread；原 advice marker 字节不变，existing 不重放资格，发送仍走原子栅栏。
@@ -96,6 +97,9 @@ def ensure_agent_thread_record(
             ).strip(),
             owner_id=str(request.get("owner_id") or "").strip(),
             owner_home=str(request.get("owner_home") or "").strip(),
+            # 子代理线程来源由宿主在 spawn 边界冻结；坏值或旧入口缺省时归一为空（未知、不可学）。
+            # 已有线程走 _ensure_existing_agent_thread，不覆盖创建时的来源。
+            learning_source=thread_source_projection(request.get("learning_source")) or {},
             model_profile_id=str(request.get("model_profile_id") or "default"),
             model_selection_revision=1,
             model_selection_source="inherited",

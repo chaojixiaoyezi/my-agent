@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # LLM: 后台派工只传任务身份与显式注入；生产模型由 child thread 引用恢复，不能捕获共享宿主的当前连接。
-# 模块用途: 将子代理交给持久进程或隔离线程执行，保存启动回执、失败与结果，不另设模型路由。
+# 模块用途: 将子代理交给原进程或线程执行，绑定可信排队 owner 并保存原启动回执、失败与结果。
 import os
 import subprocess
 import sys
@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ....backends.provider_headers import provider_agent_owner_scope
 from ....concurrency.interrupt import register_interruptible
 from ....runtime_context import current_subagent_run_id
 from ....runtime_errors import runtime_error_report
@@ -511,10 +512,12 @@ def _background_log_path(agent, launch_id: str) -> str:
     return str(workspace / "background_dispatch" / f"{launch_id}.log")
 
 
+# LLM: 后台线程不会自动继承 ContextVar；已解析的 agent.home_paths 是唯一 owner 来源，退出复位且不影响权限。
+# 函数用途: 在可停止和 owner 公平作用域里执行已接纳的后台派工。
 def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
     # 协作中断(批3):以线程名登记,cancel_subagents 可按名递中断旗;
     # finally 自动清旗,线程复用不带脏状态。
-    with register_interruptible(f"my-agent-{request.launch_id}"):
+    with register_interruptible(f"my-agent-{request.launch_id}"), provider_agent_owner_scope(request.agent):
         _background_dispatch_worker_inner(request)
 
 

@@ -1,5 +1,4 @@
-
-# LLM: schema仍是唯一建表权威；显式同线程批次复用短连接，每个操作独立提交或丢弃未提交事务。
+# LLM: schema仍是唯一建表权威；结构摘要涵盖SQL/迁移/FTS，显式同线程批次复用连接但不合并各操作事务。
 # 模块用途: 统一管理本地SQLite表结构与连接生命周期。
 from __future__ import annotations
 
@@ -14,6 +13,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from ..common.nofollow_fs import ensure_private_dir
+from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
+from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 
 # FTS5 records 索引的 schema 版本。中文检索失灵根因:默认 unicode61 把一整段汉字
 # 当作 1 个 token(实测 sqlite 3.53 下 '记忆推送模式...' 整串=单 token),子串/词
@@ -200,40 +201,123 @@ _TOOL_OPERATIONS_SQL = (
 )
 
 
-# LLM: 长寿命store不拥有常驻连接，批次只优化生命周期，不合并操作事务或更改FTS建表策略。
-# 类用途: 为LocalStore提供schema初始化和有界连接范围。
+_LOCAL_MIGRATION_SQL = ("ALTER TABLE agent_runs RENAME TO legacy_agent_runs",)
+_FTS_TABLE_SQL = "CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(id UNINDEXED, title, content, tokenize='{tokenizer}')"
+_FTS_DROP_SQL = "DROP TABLE IF EXISTS records_fts"
+_FTS_REBUILD_PENDING_KEY = "records_fts_rebuild_pending"
+_LOCAL_STATE_SQL = "INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+
+
+# LLM: 只读取目标库的独立状态键，结构摘要不能代替 FTS 可用性或回填完成状态。
+# 函数用途: 读取一个结构化初始化状态，不缓存用户正文。
+def _read_local_state(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+    return row[0] if row is not None else None
+
+
+# LLM: 状态写入必须在调用方事务中提交；SQL 文本也纳入结构指纹。
+# 函数用途: 保存可恢复的 FTS 版本或回填状态。
+def _write_local_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(_LOCAL_STATE_SQL, (key, value))
+
+
+# LLM: 数字版本只能向前迁移；遇到旧程序不认识的非数字版本也保留，不能为了指纹失配降级投影。
+# 函数用途: 判断已有 FTS 是否超出当前程序可安全迁移的版本。
+def _newer_fts_version(stored: str | None) -> bool:
+    if stored is None or stored == _FTS_SCHEMA_VERSION:
+        return False
+    if not stored.isdecimal():
+        return True
+    return _FTS_SCHEMA_VERSION.isdecimal() and int(stored) > int(_FTS_SCHEMA_VERSION)
+
+
+# LLM: 摘要包含全部建表、迁移及 FTS 声明，开关/分词器变化不沿用旧结构；只计算，不访问用户数据。
+# 函数用途: 自动计算 LocalStore 当前结构版本，不需手工递增版本号。
+def _local_schema_fingerprint(enable_fts: bool) -> str:
+    return schema_fingerprint((
+        _BASE_SCHEMA_SQL, _TASK_REGISTRY_SQL, _CONTROL_PLANE_SQL,
+        _RUNTIME_GATE_LEDGER_SQL, _TOOL_OPERATIONS_SQL, _LOCAL_MIGRATION_SQL,
+        enable_fts, _FTS_TABLE_SQL, _FTS_DROP_SQL, _FTS_SCHEMA_VERSION, _FTS_TOKENIZE,
+        sqlite3.sqlite_version, _LOCAL_STATE_SQL, _FTS_REBUILD_PENDING_KEY, _FTS_SCHEMA_VERSION_KEY,
+    ))
+
+
+# LLM: 结构摘要不替代实例 FTS 状态；只读实际虚表验证本 SQLite 能使用它，无 FTS 时保持 LIKE 兜底。
+# 函数用途: 跳过建表时仍恢复正确的全文索引可用性。
+def _existing_fts_available(conn: sqlite3.Connection) -> bool:
+    try:
+        conn.execute("SELECT id FROM records_fts LIMIT 0")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+# LLM: 初始化按库内摘要跳过且恢复FTS实例状态；完整迁移与盖章同事务，有界批次只优化连接生命周期。
+# 类用途: 管理 LocalStore 地基和短连接，确保旧副本会重新迁移。
 class LocalStoreSchemaMixin:
 
+    # LLM: 建目录/建表会写盘，摘要命中时只读取 FTS 状态；原正文回填仍在 schema 事务外执行。
+    # 函数用途: 首次或结构变化时迁移，重复打开时省掉 DDL 并保持检索状态。
     def _init_schema(self) -> None:
         ensure_private_dir(self.root)
         ensure_private_dir(self.files_dir)
         ensure_private_dir(self.events_path.parent)
-        # FTS schema 升级(unicode61 -> trigram)需要 DROP+重建索引,重建后必须用
-        # records 正文回填。回填走 maintenance.rebuild_fts(读内容文件),那在 schema
-        # 事务外做,这里只记一个待回填标记。
+        # 结构指纹只证明 DDL 完成；回填标记独立持久化，失败重开仍会重试。
         self._fts_needs_rebuild = False
+        fingerprint = _local_schema_fingerprint(self.enable_fts)
         with self._connection() as conn:
-            self._execute_schema(conn, _BASE_SCHEMA_SQL)
-            self._migrate_legacy_agent_runs_rename(conn)
-            self._execute_schema(conn, _TASK_REGISTRY_SQL)
-            self._execute_schema(conn, _CONTROL_PLANE_SQL)
-            self._execute_schema(conn, _RUNTIME_GATE_LEDGER_SQL)
-            self._execute_schema(conn, _TOOL_OPERATIONS_SQL)
-            if self.enable_fts:
-                self._init_fts_schema(conn)
-            conn.commit()
+            self._ensure_schema(conn, fingerprint)
         # 索引刚被迁移重建(旧 unicode61 表被丢弃),用现有 records 回填新 trigram 索引。
         # rebuild_fts 由 maintenance mixin 提供;最小 schema-only store 没有它时跳过
         # 回填(它本就没有 records 内容文件,新空索引即正确)。
         rebuild = getattr(self, "rebuild_fts", None)
-        if self._fts_needs_rebuild and self.fts_available and callable(rebuild):
+        if self._fts_needs_rebuild and self._fts_available and callable(rebuild):
             try:
                 rebuild()
+                self._fts_needs_rebuild = False
             except sqlite3.OperationalError:
                 # 回填失败不能让 store 起不来:LIKE 兜底仍可用,下次 rebuild_fts 再补。
                 pass
-        self._fts_needs_rebuild = False
 
+    # LLM: 未命中时持写锁再次核对避免并发重复迁移；异常靠连接出口回滚，不盖失败的结构摘要。
+    # 函数用途: 在同一事务完成需要的建表与迁移，或者只恢复 FTS 实例状态。
+    def _ensure_schema(self, conn: sqlite3.Connection, fingerprint: str) -> None:
+        if schema_is_current(conn, fingerprint) and self._restore_fts_state(conn):
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        if schema_is_current(conn, fingerprint) and self._restore_fts_state(conn):
+            return
+        self._execute_schema(conn, _BASE_SCHEMA_SQL)
+        self._migrate_legacy_agent_runs_rename(conn)
+        self._execute_schema(conn, _TASK_REGISTRY_SQL)
+        self._execute_schema(conn, _CONTROL_PLANE_SQL)
+        self._execute_schema(conn, _RUNTIME_GATE_LEDGER_SQL)
+        self._execute_schema(conn, _TOOL_OPERATIONS_SQL)
+        fts_initialized = not self.enable_fts
+        if self.enable_fts:
+            fts_initialized = self._init_fts_schema(conn)
+        else:
+            self._fts_available = False
+            _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true")
+        self._restore_fts_state(conn)
+        if fts_initialized:
+            stamp_schema(conn, fingerprint)
+        conn.commit()
+
+    # LLM: 即使 DDL 已完成也独立读取虚表及待回填键，避免吞掉上次初始化后的回填失败。
+    # 函数用途: 恢复三个独立事实：配置开启、索引可读、正文待回填。
+    def _restore_fts_state(self, conn: sqlite3.Connection) -> bool:
+        self._fts_available = self.enable_fts and _existing_fts_available(conn)
+        self._fts_needs_rebuild = _read_local_state(conn, _FTS_REBUILD_PENDING_KEY) == "true"
+        return not self.enable_fts or self._fts_available
+
+    # LLM: 只能与实际回填在同一事务内清标记，失败/中断 rollback 后重开仍待回填。
+    # 函数用途: 由维护器在成功回填提交前记下完成状态。
+    def _record_fts_rebuild_complete(self, conn: sqlite3.Connection) -> None:
+        _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "false")
+
+    # LLM: 本迁移仅保留数据改名，SQL 属结构摘要；调用方持写事务，不能同时建立新旧同名权威。
+    # 函数用途: 把旧投影表改名，与 runtime.db 的真实运行表区分。
     def _migrate_legacy_agent_runs_rename(self, conn: sqlite3.Connection) -> None:
         """数据保留迁移：旧投影表 agent_runs → legacy_agent_runs。
 
@@ -248,26 +332,29 @@ class LocalStoreSchemaMixin:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_agent_runs'"
         ).fetchone()
         if has_old and not has_new:
-            conn.execute("ALTER TABLE agent_runs RENAME TO legacy_agent_runs")
+            self._execute_schema(conn, _LOCAL_MIGRATION_SQL)
 
+    # LLM: 仅执行传入的声明 SQL，调用方持写事务；指纹必须包含这份清单。
+    # 函数用途: 按顺序建表和迁移，不自行提交。
     def _execute_schema(self, conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
         for statement in statements:
             conn.execute(statement)
 
-    def _init_fts_schema(self, conn: sqlite3.Connection) -> None:
+    # LLM: FTS SQL/分词器/版本都进入结构摘要；失败保留 LIKE 兜底，DDL 与版本写入在原初始化事务内。
+    # 函数用途: 创建或升级可重建的全文索引，返回语句是否成功以决定能否盖完成指纹。
+    def _init_fts_schema(self, conn: sqlite3.Connection) -> bool:
         try:
             self._migrate_fts_schema(conn)
-            conn.execute(
-                f"""
-                CREATE VIRTUAL TABLE IF NOT EXISTS records_fts
-                USING fts5(id UNINDEXED, title, content, tokenize='{_FTS_TOKENIZE}')
-                """
-            )
+            conn.execute(_FTS_TABLE_SQL.format(tokenizer=_FTS_TOKENIZE))
             self._fts_available = True
             self._record_fts_schema_version(conn)
+            return True
         except sqlite3.OperationalError:
             self._fts_available = False
+            return False
 
+    # LLM: 只丢弃纯 FTS 投影，不动正文事实；迁移 SQL 包含在摘要，调用方在事务外按旧语义回填。
+    # 函数用途: 分词器版本变化时重建索引，并告诉初始化器需要回填。
     def _migrate_fts_schema(self, conn: sqlite3.Connection) -> None:
         """旧 FTS schema(无 trigram)在版本不匹配时丢弃并标记回填。
 
@@ -278,28 +365,25 @@ class LocalStoreSchemaMixin:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='records_fts'"
         ).fetchone()
         if not has_fts:
+            needs_rebuild = conn.execute("SELECT 1 FROM records LIMIT 1").fetchone() is not None
+            _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true" if needs_rebuild else "false")
             return
-        stored = conn.execute(
-            "SELECT value FROM metadata WHERE key = ?",
-            (_FTS_SCHEMA_VERSION_KEY,),
-        ).fetchone()
-        stored_version = stored["value"] if stored else None
-        if stored_version == _FTS_SCHEMA_VERSION:
+        stored_version = _read_local_state(conn, _FTS_SCHEMA_VERSION_KEY)
+        if stored_version == _FTS_SCHEMA_VERSION or _newer_fts_version(stored_version):
             return
-        conn.execute("DROP TABLE IF EXISTS records_fts")
-        self._fts_needs_rebuild = True
+        conn.execute(_FTS_DROP_SQL)
+        _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true")
 
+    # LLM: 新程序可记录已建好的版本，旧程序不能覆盖新库的版本事实。
+    # 函数用途: 保存 FTS 声明版本但不执行降级。
     def _record_fts_schema_version(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            """
-            INSERT INTO metadata(key, value) VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (_FTS_SCHEMA_VERSION_KEY, _FTS_SCHEMA_VERSION),
-        )
+        if not _newer_fts_version(_read_local_state(conn, _FTS_SCHEMA_VERSION_KEY)):
+            _write_local_state(conn, _FTS_SCHEMA_VERSION_KEY, _FTS_SCHEMA_VERSION)
 
+    # LLM: 新连接才设 PRAGMA；仅显式作用域用游标跟踪子类，作用域外保持标准库短连接。
+    # 函数用途: 打开本库并按旧契约启用 WAL、外键和忙等。
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn = sqlite3.connect(self.db_path, timeout=30.0, factory=sqlite_connection_factory())
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
         try:
@@ -325,7 +409,7 @@ class LocalStoreSchemaMixin:
             finally:
                 del state.connection
 
-    # LLM: 默认短连接合同不变；批次借用连接也丢弃本操作未提交事务，避免后续API误提交失败写入，关闭权归批次。
+    # LLM: 批次借用连接仍丢弃未提交事务；非批次操作复用当前显式SQLite作用域，否则保持默认短连接。
     # 函数用途: 给一次存储操作取得连接，批次内省去重复Pragma和schema读取。
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -337,8 +421,5 @@ class LocalStoreSchemaMixin:
             finally:
                 existing.rollback()
             return
-        conn = self._connect()
-        try:
+        with scoped_connection(self.db_path, False, self._connect) as conn:
             yield conn
-        finally:
-            conn.close()

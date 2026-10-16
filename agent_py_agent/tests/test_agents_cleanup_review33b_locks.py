@@ -17,6 +17,7 @@ from agent_py_agent.agent.memory_store import promotion
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 from agent_py_agent.tests.test_agents_phase0_guard import _OTHER_CHAT, _curator, _observe, _runtime
 
 ROOT = Path(__file__).parent
@@ -119,7 +120,7 @@ class _QuotaCycleProbe:
 
     def promote(self):
         try:
-            self.results['promotion'] = asdict(self.service.promote(self.candidate.candidate_id, automatic=self.target == 'long_term'))
+            self.results['promotion'] = asdict(confirm_candidate(self.service, self.candidate.candidate_id) if self.target == 'long_term' else self.service.promote(self.candidate.candidate_id))
         except BaseException as exc:
             self.errors.append({'thread': 'promotion', 'type': type(exc).__name__, 'error': str(exc)})
 

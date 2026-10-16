@@ -326,7 +326,13 @@ def test_tool_verified_memory_accepts_only_successful_archive_refs(tmp_path: Pat
     assert json.loads(rejected.output)["results"][0]["status"] == "blocked_missing_evidence"
     assert json.loads(forged.output)["results"][0]["status"] == "blocked_missing_evidence"
     assert accepted.ok is True
-    assert [record.content for record in agent.memory.all()] == ["成功工具确认了事实"]
+    assert agent.memory.all() == []
+    accepted_payload = json.loads(accepted.output)
+    assert not accepted_payload["saved"] and not accepted_payload["active_memory_changed"]
+    # 工具成功仅核实证据，不代表当前用户准确批准保存这条内容。
+    assert accepted_payload["results"][0]["reason_code"] == "AUTO_POLICY_LEARNING_SOURCE_UNVERIFIED"
+    [valid] = [c for c in agent.memory_candidates.list() if c.subject_key == "tool.success"]
+    assert valid.status == "pending_review"
 
 
 def test_memory_context_is_fenced_escaped_and_scanned() -> None:

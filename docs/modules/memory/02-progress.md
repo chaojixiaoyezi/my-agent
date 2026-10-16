@@ -1,3 +1,18 @@
+## 2026-10-16 F4/F5 规则、学习与本人确认（组合候选，未发布）
+
+- AGENTS 是本人规则，来源配置唯一 CAS；模型只读，来源/正文变更由当前用户完整预览确认。宿主学习来源贯穿真实归档，资格只允许候选，unknown 与自动化不升级成批准。
+- working_agreement 进入唯一长期记忆候选，正式 Memory/lesson/HOT 自动发布关闭；原人工 review-approved→promote(false) 与证据、配额、冲突及目标版本门保留。普通/群 IM 已补 `/memory candidates` 本人预览确认，不把本机 CLI 管理命令当远端入口。
+- 确认绑定候选全记录 SHA、完整显示正文、准确 owner/actor/thread 与目标 CAS；原 receipt 单次 nonce 先耐久 unknown，审核和提交间竞争拒绝，未知不重放。取消不改候选，超限或脱敏不完整不提供确认。
+- 删除墓碑及候选/向量/SQLite/正文派生坏库不假成功，保留 REMOVE_CLEANUP_PENDING 和已提交事实，恢复仅清理；原 E11 有界扫描不回退。
+- F5 仅读绑定组件元信息与当前权限，正式条数未读取就 null；规则 configuration 不是实时正文，新 Skill 确认/撤回和加载仍沿 main 原链。
+- 作者与非作者证据分开见[TESTS](../../../TESTS.md)，当前最终组合 gate、真实资料迁移、供应商/飞书与发布均未完成；详见[规则设计](../../design/PERSONA_AGENTS_OWNERSHIP.md)、[自我目录](../../design/SELF_MAP.md)。
+
+## 2026-10-16 F1 上下文包减负（集成验收中）
+
+- 上下文包在内存定稿后各写一次；完整工具清单按当前 owner 内的实际字节摘要复用。摘要用 v4，已发布内联 v2/v3 显式兼容，完整清单 v3 与 main 权限事实保持。
+- 原 retention 同批管理快照和清单，保护 latest、近期、task legal hold 及执行时仍被快照引用的清单。规划后变化和移动失败不会导致误清仍在用的清单，清理不改规范记忆或任务。
+- 两臂同输入计量及本轮准确组合验收见根 TESTS 和七块合并设计；来源通过不代替 main 组合 gate。
+
 # 记忆与上下文维护状态
 
 ## 压缩请求出站前缀（compactcall，2026-10-08，本地修复待07复核）

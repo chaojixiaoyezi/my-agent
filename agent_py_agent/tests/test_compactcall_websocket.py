@@ -214,7 +214,9 @@ def test_subscription_ws_preflight_route_and_full_prefix(tmp_path, monkeypatch, 
     covered = resolve_compact_summary_view(agent, prepared.thread, THREAD_COMPACT_SCOPE).source_message_ids
     assert first == len(covered) and 0 < first <= len(prior)
     assert _encode(b[:first]) == _encode(a[:first])
-    assert "合成差异" in str(b[first:]) and "/synthetic/runtime" not in str(b[first:])
+    # 主请求仍保留当前动态事实；摘要只覆盖同次 canonical 历史，不把它们补进尾部。
+    assert "合成差异" in str(a[first:]) and "/synthetic/runtime" in str(a[first:])
+    assert "合成差异" not in str(b[first:]) and "/synthetic/runtime" not in str(b[first:])
 
 
 def test_sticky_loading_does_not_grant_tools_or_cross_thread_records(tmp_path, monkeypatch):

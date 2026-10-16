@@ -389,6 +389,8 @@ def test_snapshot_restores_original_bytes(tmp_path: Path):
     assert repo.path_for("agents").read_bytes() == before
 
 
+# LLM: 删除正式提交后报告累计量，恢复不得追加第二次删除或归档；故障仍发生在耐久进度回调前。
+# 函数用途: 核对崩溃续作的实际累计删除数与幂等文件结果。
 def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
     home, repo, candidates = _env(tmp_path)
     for index in range(1, 41):
@@ -410,6 +412,8 @@ def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
     # 全部自动条目已删，续作不能重删、重复归档或误碰基线。
     assert len(repo.list_entries("agents")["entries"]) == 1
     monkeypatch.setattr(migration_module, "_remove_batch", original)
+    committed = repo.versions_path.read_bytes()
+    archived = (directory / "archive.jsonl").read_bytes()
 
     report = apply_agents_cleanup(
         home_paths=home,
@@ -418,7 +422,9 @@ def test_partial_failure_recovers_on_rerun(tmp_path: Path, monkeypatch):
         request=AgentsCleanupRequest(migration_id="m1"),
     )
 
-    assert report["removed_count"] == 0
+    assert report["removed_count"] == 40  # 同迁移累计提交量，不是本次重试新删量。
+    assert repo.versions_path.read_bytes() == committed
+    assert (directory / "archive.jsonl").read_bytes() == archived
     assert report["status"] == "completed"
     remaining = repo.list_entries("agents")["entries"]
     assert {item["content"] for item in remaining} == {_BASELINE_ENTRY}

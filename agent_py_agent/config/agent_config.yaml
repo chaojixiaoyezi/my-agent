@@ -337,6 +337,8 @@ subagent_debug_trace_level: 0
 # 用户可通过 /skills learned proposals 查看，按候选编号和修订确认/拒绝；子代理候选沿 /skills proposals。
 # 会额外消耗受每日预算限制的模型调用，候选保存前脱敏并经过原解析和guard。
 enable_self_learning: false
+# 按当前owner/run只读聚合已有能力与边界目录；不读取正文、不授权限、不发网络，关闭后不注册工具及指引。
+enable_self_map: true
 
 # 自动总结 Skill 的触发与预算（只在 enable_self_learning 为 true 时生效）：
 # - self_learning_min_tool_rounds：本轮工具轮数达到它才登记学习请求，最小 1。
@@ -516,6 +518,10 @@ gateway_processing_timeout_seconds: 900
 # 一个请求失败后最多尝试几次（含第一次）。
 # 上游不稳定时可以调大，但重试也会消耗用量。
 gateway_request_max_attempts: 2
+# 单次 Gateway 请求线程内有界复用 SQLite 连接，结束回收；不延迟原事务提交。默认关闭。
+sqlite_connection_reuse: false
+# 后台检查只缓存可重建内容投影，实际到期、领取和状态写入仍走原权威；默认关闭。
+background_tick_cheap_checks: false
 # 模型接口临时故障（响应流未完整结束、自动重试总时长用尽）导致回合失败时，自动重排续跑的最大次数。
 # 0 表示关闭；每个请求跨 Gateway 重启累计，用满后按失败收口（发“继续”可以手动接着做）。
 # 只对已有完成工具往返的回合生效：重排从已落盘历史继续，不重放工具，退避 30/120 秒。
@@ -802,6 +808,9 @@ model_auth_ref: {}
 # 慢模型或单槽模型的额外排队预算（秒，0 至 86400）；只延长首事件等待，不改变流式空闲超时。
 # /model 可针对每个模型设置；默认 0，普通模型请求不增加等待。
 model_queue_wait_seconds: 0
+# 每个Python进程、每个HTTP origin（协议/主机/端口）的物理请求上限，0关闭。
+# 开启按可信owner公平排队；同origin共用，不跨进程/代理别名计额，不保证消除RPM/TPM限制。
+provider_max_concurrent_requests: 0
 
 # 模型名称；不设置占位名称，不回退到其它模型。
 model_name: ""
@@ -1231,3 +1240,8 @@ memory_decision_pre_recall_fragment_material: query_text
 memory_decision_recall_mode: off  # 记忆召回决策；不绕过原读取权限
 memory_decision_curator_mode: off  # 记忆整理决策；不授予写人格或晋升权限
 memory_decision_curator_relation_mode: off  # 用户后台独立开关：新来源与完整、带版本正式条目的关系建议；不直接合并或晋升
+
+# AGENTS来源配置仅保存在当前owner的persona/agents_source.json；本开关不授予额外路径权限。
+agents_source_enabled: true
+# HTTPS来源只读，默认关闭；启用后仍服从当前owner网络权限。
+agents_source_network_enabled: false

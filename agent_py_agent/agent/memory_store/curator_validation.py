@@ -16,8 +16,10 @@ from .candidate_models import (
     normalize_reference_list,
     normalize_string_list,
 )
+from .candidate_target_binding import binding_history
 from .curator_inputs import CuratorAuditInput, CuratorInputBatch, CuratorMessageInput
 from .curator_models import CURATOR_MODEL_ORIGINS, CuratorExtraction
+from .evidence_admission import tool_evidence_failure
 from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
 
@@ -45,15 +47,28 @@ class CuratorCursorAdvance:
     processed_audit_events: int
 
 
-# LLM: Schema-valid output still cannot grant itself owner evidence; every message/tool ref is
-# replaced with a canonical input-snapshot reference.
-# 函数用途: 验证 CuratorExtraction 的处理覆盖和证据归属。
+# LLM: 与Remember和正式库复用同一expiry门；在整批任何候选/日报写入前执行，不能逐条丢弃再部分提交。
+# 函数用途: 一条非法失效时间使整个模型输出在写入前失败。
+def _preflight_candidate_expiry(extraction: CuratorExtraction) -> None:
+    from .promotion import _expiry_epoch
+
+    try:
+        for candidate in extraction.candidates:
+            _expiry_epoch(candidate.valid_until)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CuratorEvidenceError("candidate_expiry_invalid") from exc
+
+
+# LLM: Provider证据不能自授owner权威；写前全批校验expiry，再冻结引用，拒绝观察只保留无正文来源/版本约束。
+# 函数用途: 验证Curator整批时间约束、处理覆盖和证据归属。
 def validate_extraction(
     extraction: CuratorExtraction,
     batch: CuratorInputBatch,
     *,
     owner_id: str,
+    tool_verifier: object | None = None,
 ) -> CuratorExtraction:
+    _preflight_candidate_expiry(extraction)
     messages = {item.message_id: item for item in batch.messages}
     audits_by_event = {item.event_id: item for item in batch.audit_events}
     audits_by_call = {
@@ -94,22 +109,28 @@ def validate_extraction(
                 raise
             dropped.append(f"daily:{exc.detail_code}")
     candidates: list[object] = []
+    rejected_bindings: list[dict[str, object]] = []
     for observation in extraction.candidates:
+        # 与候选提交使用同一目标ID口径，拒绝路径也必须先归一再查冻结版本和记录约束。
+        observation = replace(observation, target_entry_id=str(observation.target_entry_id or "").strip())
         try:
-            candidates.append(
-                _validated_candidate(
-                    observation,
-                    messages=messages,
-                    audits_by_event=audits_by_event,
-                    audits_by_call=audits_by_call,
-                    audits_by_operation=audits_by_operation,
-                    artifacts_by_ref=artifacts_by_ref,
-                    owner_id=owner_id,
-                )
+            validated = _validated_candidate(
+                observation,
+                messages=messages,
+                audits_by_event=audits_by_event,
+                audits_by_call=audits_by_call,
+                audits_by_operation=audits_by_operation,
+                artifacts_by_ref=artifacts_by_ref,
+                owner_id=owner_id,
             )
+            failure = tool_evidence_failure(validated, tool_verifier)
+            if failure:
+                raise CuratorEvidenceError(failure)
+            candidates.append(replace(validated, target_entry_version=_observed_target_version(validated, batch)))
         except CuratorEvidenceError as exc:
             if exc.detail_code == "host_owned_origin":
                 raise
+            rejected_bindings.extend(_rejected_target_bindings(observation, batch, owner_id))
             dropped.append(f"candidate:{exc.detail_code}")
     warnings = extraction.warnings
     if dropped:
@@ -121,8 +142,42 @@ def validate_extraction(
         extraction,
         daily_events=tuple(daily),
         candidates=tuple(candidates),
+        rejected_target_bindings=tuple(rejected_bindings),
         warnings=warnings,
     )
+
+
+# LLM: 这里只保存宿主audit已解析的身份和冻结版本，不是晋升资格；正式证据暂不可用不能刷新旧观察版本。
+# 函数用途: 保留无正文的拒绝约束，阻止补证重放覆盖后来版本。
+def _rejected_target_bindings(observation, batch: CuratorInputBatch, owner: str) -> list[dict[str, object]]:
+    if observation.proposed_action not in {"replace", "remove", "merge"}:
+        return []
+    events = batch.audit_events
+    tool_refs = _canonical_tool_refs(
+        observation.source_tool_refs, {item.event_id: item for item in events},
+        {item.tool_call_id: item for item in events if item.is_tool_call()},
+        {item.operation_id: item for item in events if item.is_tool_call() and item.operation_id},
+        require_success=True, owner_id=owner)
+    artifact_refs = _canonical_artifact_refs(observation.source_artifact_refs,
+        _artifacts_by_ref(batch), require_success=True, owner_id=owner)
+    safe = replace(observation, target_entry_version=_observed_target_version(observation, batch),
+        source_message_refs=tuple(_canonical_message_refs(observation.source_message_refs,
+            {item.message_id: item for item in batch.messages})),
+        source_tool_refs=tuple(tool_refs), source_artifact_refs=tuple(artifact_refs))
+    return binding_history(safe)
+
+
+# LLM: 只按模型调用前冻结的owner正式记录精确ID取版本；不读取当前库、不接受模型自报，缺失或歧义均未知。
+# 函数用途: 为变更候选绑定模型实际看到的正式目标版本。
+def _observed_target_version(observation: object, batch: CuratorInputBatch) -> int | None:
+    if observation.proposed_action not in {"replace", "remove", "merge"}:
+        return None
+    matches = [item for item in batch.formal_memories
+               if item.authority_type == "long_term" and item.authority_id == observation.target_entry_id]
+    if len(matches) != 1:
+        return None
+    version = matches[0].authority_version
+    return version if type(version) is int and version > 0 else None
 
 
 # LLM: Daily user/tool origins must carry the same canonical evidence standard as candidates;
@@ -202,8 +257,7 @@ def _validated_daily(
     )
 
 
-# LLM: Candidate evidence is canonicalized before CandidateService sees it, and explicit/tool
-# origins cannot be asserted by confidence or prose alone.
+# LLM: Candidate引用必须全部解析且所有工具容器逐条成功，不随origin放宽；缺失只丢该候选，Daily不变。
 # 函数用途: 验证并替换一条候选 observation 的引用。
 def _validated_candidate(
     observation: object,
@@ -232,12 +286,14 @@ def _validated_candidate(
         audits_by_event,
         audits_by_call,
         audits_by_operation,
-        require_success=observation.origin == "tool_verified",
+        require_success=True,
         owner_id=owner_id,
     )
     artifact_refs = _canonical_artifact_refs(
         observation.source_artifact_refs,
         artifacts_by_ref,
+        owner_id=owner_id,
+        require_success=True,
     )
     references = [*message_refs, *tool_refs, *artifact_refs]
     task_ids = tuple(_reference_values(references, "task_id"))
@@ -250,6 +306,7 @@ def _validated_candidate(
         raise CuratorEvidenceError("candidate_tool_verified_without_tool")
     if not (message_refs or tool_refs or artifact_refs or task_ids or run_ids):
         raise CuratorEvidenceError("candidate_without_evidence")
+    _require_complete_candidate_refs(observation, (message_refs, tool_refs, artifact_refs))
     canonical_observation_id = _canonical_observation_id(
         observation,
         message_refs=message_refs,
@@ -277,6 +334,14 @@ def _validated_candidate(
         source_run_ids=run_ids,
         observation_id=canonical_observation_id,
     )
+
+
+# LLM: 规范化函数按输入引用逐条产出；有任一引用无法解析时不能丢掉后再计算来源覆盖，Daily不调用此门。
+# 函数用途: 在候选规范引用交给学习来源绑定之前核对完整解析。
+def _require_complete_candidate_refs(observation, resolved) -> None:
+    claims = (observation.source_message_refs, observation.source_tool_refs, observation.source_artifact_refs)
+    if any(len(normalize_reference_list(raw)) != len(found) for raw, found in zip(claims, resolved, strict=True)):
+        raise CuratorEvidenceError("candidate_evidence_unresolved")
 
 
 # LLM: Artifact identities come only from the frozen owner audit batch; provider text cannot add
@@ -320,24 +385,28 @@ def _earliest_reference_time(refs: list[dict[str, object]]) -> str:
     return min(values)
 
 
-# LLM: Artifact evidence is replaced with the exact audit identity and hash; a model cannot
-# invent a path/ref or attach raw output fields.
+# LLM: Artifact匹配冻结audit；候选要求成功并补生产者身份，Daily保留旧引用字节形状以兼容历史幂等键。
 # 函数用途: 将模型 artifact 引用绑定到本批 audit 中的正式 artifact_ref。
 # 宽容语义:出界引用剔除(不 raise),与 message/tool 引用一致——单条引用幻觉不连坐整批。
 def _canonical_artifact_refs(
     refs: object,
     by_ref: dict[str, CuratorAuditInput],
+    *,
+    owner_id: str = "",
+    require_success: bool = False,
 ) -> list[dict[str, object]]:
     canonical: list[dict[str, object]] = []
     for ref in normalize_reference_list(refs):
         artifact_ref = str(ref.get("artifact_ref") or "").strip()
         source = by_ref.get(artifact_ref)
-        if source is None:
-            continue  # 引用不在本批 owner 审计 → 剔除(不阻断)
+        if source is None or (require_success and not source.is_verified_success()):
+            continue  # 候选由完整性门拒绝缺失/非成功产物；Daily保留原容错。
         canonical.append(
             {
                 "artifact_ref": source.artifact_ref,
                 "event_id": source.event_id,
+                **({"operation_id": source.operation_id, "owner_id": owner_id,
+                    "tool_call_id": source.tool_call_id, "tool_name": source.tool_name} if require_success else {}),
                 "content_hash": source.artifact_hash or source.content_hash,
                 "size_bytes": source.artifact_size_bytes,
                 "task_id": source.task_id,

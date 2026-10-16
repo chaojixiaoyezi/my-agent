@@ -13,6 +13,7 @@
 """
 
 # LLM: schema 只为 Task 身份和真实执行/工具/投递状态建表；只读连接不得初始化或切 WAL，退役表列不再创建或读取。
+#   持久结构摘要由 SQL 与迁移清单自动生成，只跳过相同结构的初始化；显式请求作用域不改变 transaction 的独立提交。
 # 模块用途: 创建并幂等迁移 owner 的运行事实表，为只读查询提供禁止写入的连接。
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
+from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 
 #: 每个 owner 的权威库文件名，位于 owner home 根（A.1 唯一 runtime.db）。
 RUNTIME_DB_FILENAME = "runtime.db"
@@ -384,6 +388,11 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+_RUNTIME_MIGRATION_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
+)
+
+
 def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     try:
         return any(
@@ -396,19 +405,29 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
 
 # LLM: RuntimeSchemaMixin 只向前补当前仍被消费的列；禁止为了清理旧库而
 # 自动 DROP，避免升级时破坏用户历史，旧 acceptance 表仅作为惰性遗留数据。
+#   完成摘要与初始化同事务，连接工厂只在显式作用域跟踪语句，不改变独立 transaction 调用方。
 # 类用途: 初始化 runtime.db、执行安全的幂等迁移并提供 SQLite 连接。
 class RuntimeSchemaMixin:
     """连接与建表。模式对齐 local_storage.schema（WAL+外键+busy_timeout）。"""
 
+    # LLM: 先读持久摘要，未命中时用写事务再次核对；迁移和盖章同提交，不引入进程内 owner 缓存。
+    # 函数用途: 新库或旧副本才建表迁移，正常重复构造只查询一次结构摘要。
     def _init_runtime_schema(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        fingerprint = schema_fingerprint((_BASE_RUNTIME_SQL, _RUNTIME_MIGRATIONS, _RUNTIME_MIGRATION_SQL))
         with self._runtime_connection() as conn:
+            if schema_is_current(conn, fingerprint):
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            if schema_is_current(conn, fingerprint):
+                return
             self._execute_runtime_schema(conn, _BASE_RUNTIME_SQL)
             self._apply_runtime_migrations(conn)
+            stamp_schema(conn, fingerprint)
             conn.commit()
 
     # LLM: 迁移只补当前代码仍消费的列；旧功能残表保留为惰性历史，不能在
-    # 启动时做破坏性清库。
+    # 启动时做破坏性清库；迁移后索引也由声明 SQL 执行并进入完成摘要。
     # 函数用途: 幂等升级存量 runtime.db，并处理并发初始化竞态。
     @staticmethod
     def _apply_runtime_migrations(conn: sqlite3.Connection) -> None:
@@ -434,10 +453,7 @@ class RuntimeSchemaMixin:
                     # 并发连接已先完成本列迁移，目标态已达成。
         # WK-INT: 状态机索引在迁移后统一确保（列可能由 ALTER 补上，基础
         # schema 阶段建索引会因列缺失失败；CREATE IF NOT EXISTS 幂等）。
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease "
-            "ON wake_queue(status, lease_until)"
-        )
+        RuntimeSchemaMixin._execute_runtime_schema(conn, _RUNTIME_MIGRATION_SQL)
 
     @staticmethod
     def _execute_runtime_schema(conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
@@ -445,11 +461,12 @@ class RuntimeSchemaMixin:
             conn.execute(statement)
 
     # LLM: ro 使用标准 SQLite URI 并禁止初始化/WAL 切换；缺失或旧库报错，不在只读查询时偷偷迁移。
-    # 函数用途: 创建对应访问模式的短连接，写模式沿既有 WAL 与外键设置。
+    #   每次真实 connect 才设 PRAGMA；显式请求作用域内工厂跟踪游标，其余保持标准库连接。
+    # 函数用途: 打开对应访问模式的物理连接，写模式沿既有 WAL 与外键设置。
     def _runtime_connect(self) -> sqlite3.Connection:
         read_only = getattr(self, "read_only", False)
         address = self.db_path.resolve().as_uri() + "?mode=ro" if read_only else str(self.db_path)
-        conn = sqlite3.connect(address, timeout=30.0, uri=read_only)
+        conn = sqlite3.connect(address, timeout=30.0, uri=read_only, factory=sqlite_connection_factory())
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
         if not read_only:
@@ -460,10 +477,9 @@ class RuntimeSchemaMixin:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    # LLM: 显式请求作用域才复用空闲连接，不自动提交；transaction() 继续独立新开/关闭，不能改其原子语义。
+    # 函数用途: 借用本库连接，操作结束时丢弃未提交事务。
     @contextmanager
     def _runtime_connection(self) -> Iterator[sqlite3.Connection]:
-        conn = self._runtime_connect()
-        try:
+        with scoped_connection(self.db_path, getattr(self, "read_only", False), self._runtime_connect) as conn:
             yield conn
-        finally:
-            conn.close()

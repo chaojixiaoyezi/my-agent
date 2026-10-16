@@ -38,7 +38,7 @@ def run_slice(fixture, request):
 def test_background_retry_keeps_selection_and_provider_surface_then_new_turn_resets(capability_host, monkeypatch, choice, existing_main):  # noqa: F811
     fixture = capability_host
     thread = fixture.agent.conversation_store.threads.get_or_create({"channel": "chat", "channel_conversation_id": "background"})
-    append_prior_turn(fixture.agent, thread.thread_id)
+    fixture.prior_messages = append_prior_turn(fixture.agent, thread.thread_id)
     request = BackgroundRunRequest(thread_id=thread.thread_id, task_id="background-task", conversation_turn_id="background-turn-1")
     if existing_main:
         fixture.agent.subagents.runtime_db.record_run_creation(
@@ -56,7 +56,7 @@ def test_background_retry_keeps_selection_and_provider_surface_then_new_turn_res
     assert second[1].selected_skill_ids == (() if choice else ("workspace:method-001",))
     assert second[1].binding.run_id == ("foreground-run" if existing_main else request.task_id)
     assert first[0].run_id == second[0].run_id == request.task_id
-    assert_retained_provider_surface(fixture, empty=bool(choice))
+    assert_retained_provider_surface(fixture, empty=bool(choice), summary_carries_cards=False)
     assert "capability_presentation" not in str(asdict(request))
     assert "capability_presentation" not in str(asdict(result))
     result = run_slice(fixture, replace(request, conversation_turn_id="background-turn-2"))

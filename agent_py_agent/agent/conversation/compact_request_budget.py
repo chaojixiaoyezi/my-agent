@@ -104,13 +104,12 @@ def compact_request_tokens(request: AuxiliaryModelCallRequest, source: CompactMe
 
 # LLM: 有工具定义的可缓存摘要保留原 system/messages/tools 并使用 tool_choice=auto，以便服务端继续对齐缓存前缀。
 # 若真实响应含结构化工具调用，响应不得采用，最多额外发一次 no-tools/none 请求；分段路径只摘要局部源，明确不承诺与主历史共享前缀。
-# 显式空工具列表可携带 tool_choice=none；超量或 typed 窗口错误仍走原分段链，I/O 前后复查取消，legacy tools=None 不添接口要求。
+# 显式空工具列表可携带 tool_choice=none；非冻结前缀超量沿原分段链，冻结主前缀只报容量不足，I/O 前后复查取消。
 # Strict replacement sources reject degraded excerpts; 显式message_source只在准备层读取，不能与request.messages竞争权威。
 # vision_summary=True 时来源保留图块、估算加 media_reserve_tokens：超预算、供应商窗口错误、媒体拒绝、截断都抛 typed
 # COMPACT_VISION_SUMMARY_FAILED，绝不转分段（分段不能承载图片）。
 # 分段链使用 summary-only system、空工具和 none，因它不再是原历史的连续前缀；源不能文本化或严格来源不接受降级摘录时按旧语义失败。
-# 函数用途: 窗口够用时发送可缓存的完整摘要请求；超量时逐段覆盖源历史，随图摘要只允许单次请求。
-
+# 函数用途: 按完整输入预算发送摘要，冻结主前缀禁止分段改写；普通来源保留原分段合同。
 def generate_bounded_compact_response(
     request: AuxiliaryModelCallRequest,
     *,
@@ -131,7 +130,8 @@ def generate_bounded_compact_response(
     if vision_summary:
         return _generate_vision_summary_response(request, message_source, budget, interrupt_check, media_reserve_tokens)
     attempt = _CompactAttemptContext(budget, interrupt_check, preserve_complete_fallback, message_source)
-    single_budget = compact_cache_surface_budget(request.agent) if request.tools else budget
+    shared_prefix = message_source is not None and message_source.preserve_prefix
+    single_budget = compact_cache_surface_budget(request.agent) if request.tools or shared_prefix else budget
     cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
     result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source))
               if cached_source is not None else None)
@@ -143,7 +143,17 @@ def generate_bounded_compact_response(
             budget=result.budget,
             tool_call_reply=result.tool_call_reply,
         )
+    if message_source is not None and message_source.preserve_prefix:
+        return _prefix_failure_or_tool_reply(attempt)
     return _summarize_or_return_tool_call(request, attempt, source_progress)
+
+
+# LLM: 此入口只接收已证明的冻结主前缀，媒体不走旧存档的非文本检查；工具回执仍交原机械回退。
+# 函数用途: 前缀不能原样容纳时只报容量不足，禁止分段或改写媒体。
+def _prefix_failure_or_tool_reply(attempt):
+    if attempt.tool_call_reply is not None:
+        return attempt.tool_call_reply
+    raise ConversationCompactError('连续前缀不能分段或改写，原始来源保留', code='COMPACT_PREFIX_TOO_LARGE')
 
 
 # LLM: 单次缓存面请求的来源裁决（10-08）：装得下就原样发；装不下且来源是可重放消息数组时，先把最早的工具结果正文
@@ -171,6 +181,7 @@ class _SurfaceBudget:
         return calibrated_compact_request_tokens(raw_tokens, self.calibration)
 
 
+# LLM: 预算与发送同一冻结材料；连续主前缀超窗必须拒绝，只有非前缀来源允许瘦身副本。
 # 函数用途: 决定单次缓存面请求用哪份来源：原样、瘦身后的副本，或放弃单次请求（None）。
 def _single_request_source(
     request: AuxiliaryModelCallRequest,
@@ -182,6 +193,8 @@ def _single_request_source(
     if tokens <= budget.tokens:
         return _SingleRequestSource(message_source)
     if message_source is None:
+        return None
+    if message_source.preserve_prefix:
         return None
     shrunk = shrink_tool_outputs(message_source, raw_token_excess(raw, tokens, budget.tokens))
     if shrunk is None or budget.measure(_request_tokens(request, shrunk.source)) > budget.tokens:
@@ -215,7 +228,8 @@ class _CompactAttemptResult:
 
 
 # LLM: Only explicit provider window errors shrink the segment budget; structured tool calls never execute.
-# 函数用途: 尝试缓存前缀请求和至多一次 none/no-tools 重试，保留取消、截断与结构化响应语义。
+# 首次单次空正文仅原样补一次，不改缓存面或分段；第二次仍空沿原回退；截断/工具调用不借空正文路径额外重试。
+# 函数用途: 尝试缓存前缀请求、空正文有界补发和至多一次 none/no-tools 重试，保留取消与结构化响应语义。
 def _try_cached_compact_requests(
     request: AuxiliaryModelCallRequest,
     attempt: _CompactAttemptContext,
@@ -223,7 +237,7 @@ def _try_cached_compact_requests(
     rejected_response = None
     try:
         raise_if_compact_interrupted(attempt.interrupt_check)
-        response = _generate_materialized_response(request, attempt.message_source)
+        response = _generate_cached_summary_response(request, attempt)
         raise_if_compact_interrupted(attempt.interrupt_check)
         _raise_if_preserved_compact_truncation(response, request, attempt)
         if not _response_has_tool_calls(response):
@@ -237,6 +251,22 @@ def _try_cached_compact_requests(
     except ProviderContextWindowError:
         # 只响应明确的窗口错误；网络、额度、认证等错误不能变成隐式分段重试。
         return _CompactAttemptResult(None, rejected_response, max(1, attempt.budget // 2))
+
+
+# LLM: 仅有原text字段的单次响应在完整形状为EMPTY时原样补一次；不把无text的旧对象协议当空正文，纯分类不记其它形状，截断仍由原消费点诊断。
+# 函数用途: 一次空摘要先给同一冻结来源一次恢复机会，持续空答仍由原上层保守回退。
+def _generate_cached_summary_response(request, attempt):
+    response = _generate_materialized_response(request, attempt.message_source)
+    raise_if_compact_interrupted(attempt.interrupt_check)
+    if getattr(response, "text", None) is None:
+        return response
+    _text, reason, _shape = _compact_summary_response_facts(response, reject_truncated=True)
+    if reason == "EMPTY":
+        compact_summary_response_outcome(response, request=request)
+        raise_if_compact_interrupted(attempt.interrupt_check)
+        response = _generate_materialized_response(request, attempt.message_source)
+        raise_if_compact_interrupted(attempt.interrupt_check)
+    return response
 
 
 # LLM: The none request preserves the same thread reasoning options; its structured calls remain data, never execution.
@@ -529,16 +559,21 @@ def _verified_segment_response(response: object, summary: str) -> object:
     return ModelResponse(backend=str(getattr(response, "backend", "") or "compact_segments"), **fields)
 
 
-# LLM: 复用原 TOOL_CALL/TRUNCATED/EMPTY 分类；transcript 显式关闭截断拒绝以保持既有普通单次摘要语义。
-# 结构化日志仅为观察投影，绝不解析文案驱动重试，也不含正文/思考/工具参数；分段调用须保留默认严格分类。
-# request 只取请求、会话、用途编号作关联键（缺失保留为空，不从正文或时间邻近猜），并记墙钟时间。
-# 函数用途: 返回可用摘要与原失败码，并在原失败位置记录带关联键的有界响应形状，不新增请求或状态。
-def compact_summary_response_outcome(response: object, *, reject_truncated: bool = True,
-                                     request: object = None) -> tuple[str, str]:
+# LLM: Compact重试与最终收口共用此唯一TOOL_CALL/TRUNCATED/EMPTY纯分类；只读响应形状，不能记录正文、修改来源或产生模型调用。
+# 函数用途: 供原重试和最终收口共用同一次响应的无正文分类。
+def _compact_summary_response_facts(response: object, *, reject_truncated: bool):
     text = str(getattr(response, "text", "") or "").strip()
     shape = auxiliary_response_shape(response)
     truncated = shape["truncated"] or shape["stop_reason"] in {"max_tokens", "length"}
     reason = "TOOL_CALL" if shape["tool_use_count"] else "TRUNCATED" if reject_truncated and truncated else "EMPTY" if not text else ""
+    return text, reason, shape
+
+
+# LLM: transcript显式关闭截断拒绝保原普通摘要语义，分段仍严格分类；仅真正消费无效响应时记录一次形状，不记录正文/思考/凭据，日志不能授重试或提交许可。
+# 函数用途: 返回可用摘要或明确原因，并在当前消费点记录一次有界响应形状。
+def compact_summary_response_outcome(response: object, *, reject_truncated: bool = True,
+                                     request: object = None) -> tuple[str, str]:
+    text, reason, shape = _compact_summary_response_facts(response, reject_truncated=reject_truncated)
     if not reason:
         return text, ""
     diagnostic = {"reason": reason, **shape, **_diagnostic_identity(request)}

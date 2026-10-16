@@ -13,6 +13,7 @@ from agent_py_agent.agent.capability.persona_repository import (
     persona_entry_id,
 )
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import learning_source as ls
 from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
     ExternalizeToolOutputRequest,
     externalize_tool_output_record,
@@ -31,6 +32,7 @@ from agent_py_agent.agent.memory_store.promotion import (
     MemoryPromotionService,
     VerifiedToolEvidence,
 )
+from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 
 
 class _ToolVerifier:
@@ -63,6 +65,8 @@ class _ToolVerifier:
         )
 
 
+# LLM: 隔离仓库明确登记用户线程来源，供消息事实推导；不把缺来源兼容路径当正向授权。
+# 函数用途: 建立独立的晋升测试环境。
 def _runtime(
     tmp_path: Path,
     *,
@@ -80,6 +84,7 @@ def _runtime(
             "channel": "internal",
             "channel_conversation_id": "chat-1",
             "channel_user_id": "user-1",
+            "learning_source": ls.user_dialogue_projection(),
             "now": 10.0,
         }
     )
@@ -111,6 +116,8 @@ def _runtime(
     return service, conversations, thread
 
 
+# LLM: 夹具模拟宿主解析目标时的真实版本快照；版本变化与底层CAS断言必须照旧到达提交边界。
+# 函数用途: 为隔离测试构造用户明确候选，既有目标携带观察版本。
 def _explicit(
     service: MemoryPromotionService,
     conversations: ConversationStore,
@@ -152,9 +159,14 @@ def _explicit(
             origin="user_explicit",
             evidence_refs=(message_ref,) if duplicate_generic_evidence else (),
             source_message_refs=(message_ref,),
+            learning_source=ls.merge_message_sources([ls.facts_for_message(
+                message.metadata, owner="user-1", thread_id=thread.thread_id,
+                thread_source=thread.learning_source)]),
             source_tool_refs=source_tool_refs,
             proposed_action=proposed_action,
             target_entry_id=target_entry_id,
+            target_entry_version=next((row.version for row in service.long_term.all()
+                                       if row.entry_id == target_entry_id), None),
             promotion_target=promotion_target,
             promotion_mode="auto_eligible",
             confidence=0.99,
@@ -171,7 +183,7 @@ def test_user_explicit_exact_message_can_auto_promote_new_long_term_fact(tmp_pat
         content="个人电脑使用 macOS。",
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is True
     records = service.long_term.all()
@@ -190,7 +202,7 @@ def test_long_term_promotion_deduplicates_overlapping_evidence_refs(tmp_path: Pa
         duplicate_generic_evidence=True,
     )
 
-    assert service.promote(candidate.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, candidate.candidate_id).promoted
 
     evidence_refs = service.long_term.all()[0].attributes["evidence_refs"]
     assert len(evidence_refs) == 1
@@ -200,10 +212,10 @@ def test_long_term_promotion_deduplicates_overlapping_evidence_refs(tmp_path: Pa
 def test_newer_same_subject_scope_does_not_silently_replace(tmp_path: Path):
     service, conversations, thread = _runtime(tmp_path)
     first = _explicit(service, conversations, thread, content="个人电脑使用 macOS。")
-    assert service.promote(first.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, first.candidate_id).promoted
     second = _explicit(service, conversations, thread, content="个人电脑使用 Windows。")
 
-    result = service.promote(second.candidate_id, automatic=True)
+    result = confirm_candidate(service, second.candidate_id)
 
     assert result.promoted is False
     assert result.status == "blocked_conflict"
@@ -222,8 +234,8 @@ def test_same_subject_different_scope_can_coexist(tmp_path: Path):
         scope_key="company:acme",
     )
 
-    assert service.promote(personal.candidate_id, automatic=True).promoted
-    assert service.promote(company.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, personal.candidate_id).promoted
+    assert confirm_candidate(service, company.candidate_id).promoted
     assert {record.attributes["scope_key"] for record in service.long_term.all()} == {
         "personal",
         "company:acme",
@@ -248,7 +260,7 @@ def test_company_requires_typed_id_and_is_recallable(tmp_path: Path):
         subject_key="company.servers",
     )
 
-    assert service.promote(company.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, company.candidate_id).promoted
     record = service.long_term.all()[0]
     assert record.attributes["scope_type"] == "company"
     assert record.attributes["scope_key"] == "company:acme"
@@ -312,8 +324,8 @@ def test_normalized_equivalent_replay_reuses_original_entry(
         subject_key="environment.timezone",
     )
 
-    original = service.promote(first.candidate_id, automatic=True)
-    result = service.promote(replay.candidate_id, automatic=True)
+    original = confirm_candidate(service, first.candidate_id)
+    result = confirm_candidate(service, replay.candidate_id)
 
     assert original.promoted is True
     assert result.promoted is True
@@ -344,8 +356,8 @@ def test_same_content_in_different_scope_promotes_as_distinct_fact(tmp_path: Pat
         subject_key="environment.timezone",
     )
 
-    first = service.promote(alpha.candidate_id, automatic=True)
-    second = service.promote(beta.candidate_id, automatic=True)
+    first = confirm_candidate(service, alpha.candidate_id)
+    second = confirm_candidate(service, beta.candidate_id)
 
     assert first.promoted is True
     assert second.promoted is True
@@ -373,7 +385,7 @@ def test_empty_long_term_add_commit_becomes_conflict_not_stop_iteration(
     )
     monkeypatch.setattr(service.long_term, "apply_batch", lambda _operations, **_kwargs: [])
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     assert result.status == "blocked_conflict"
@@ -414,7 +426,7 @@ def test_approved_candidate_with_noncanonical_scope_blocks_at_promotion_boundary
         encoding="utf-8",
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     assert result.status == "blocked_conflict"
@@ -436,7 +448,7 @@ def test_model_inferred_never_auto_promotes(tmp_path: Path):
         )
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     # 权限闸先于权威块:model_inferred 一律 manual_required,automatic 路径直接拒绝。
@@ -462,7 +474,7 @@ def test_automatic_promotion_assigns_authority_then_still_verifies_real_evidence
         )
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert candidate.promotion_mode == "auto_eligible"
     assert result.reason_code == "USER_MESSAGE_EVIDENCE_INVALID"
@@ -494,6 +506,8 @@ def test_model_inferred_cannot_become_formal_fact_even_after_review(tmp_path: Pa
     assert service.long_term.all() == []
 
 
+# LLM: 隔离run明确模拟宿主用户来源；保留真实候选合并次数与lesson门槛，不放宽业务断言。
+# 函数用途: 构造已通过来源门的重复教训观察。
 def _lesson(
     service: MemoryPromotionService,
     *,
@@ -521,6 +535,8 @@ def _lesson(
                 scope=MemoryScope("personal", "personal"),
                 origin=origin,
                 promotion_target="lesson",
+                # These isolated runs represent host-admitted user-dialogue work, not unknown legacy backlog.
+                learning_source=ls.user_dialogue_projection(),
                 source_run_ids=(run,),
                 source_task_ids=(f"task-{index + 1}",) if tasks else (),
                 proposed_action=proposed_action,
@@ -545,7 +561,7 @@ def test_model_inferred_lesson_autonomously_promotes_with_repeated_evidence(
     )
     assert candidate.occurrence_count == 2  # 两次独立观察已合并
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is True
     assert result.reason_code == "PROMOTED"
@@ -564,7 +580,7 @@ def test_model_inferred_single_occurrence_lesson_waits_for_more_evidence(tmp_pat
     service, _conversations, _thread = _runtime(tmp_path)
     candidate = _lesson(service, content="做 X 任务应先备份再修改。", runs=("run-1",))
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     assert result.reason_code == "PROMOTION_THRESHOLD_NOT_MET"
@@ -582,7 +598,7 @@ def test_lesson_automatic_path_blocks_mutation_and_conflict_candidates(tmp_path:
         target_entry_id="lesson-abc",
     )
 
-    result = service.promote(mutation.candidate_id, automatic=True)
+    result = confirm_candidate(service, mutation.candidate_id)
 
     assert result.promoted is False
     assert result.reason_code == "PROMOTION_MANUAL_REQUIRED"
@@ -598,7 +614,7 @@ def test_lesson_automatic_path_rejects_conflicting_candidate(tmp_path: Path):
         conflicts_with=("candidate-other",),
     )
 
-    result = service.promote(conflicting.candidate_id, automatic=True)
+    result = confirm_candidate(service, conflicting.candidate_id)
 
     assert result.promoted is False
     assert result.reason_code == "AUTO_POLICY_CONFLICT_UNRESOLVED"
@@ -622,7 +638,7 @@ def test_failed_tool_evidence_is_blocked(tmp_path: Path):
         )
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     assert result.status == "blocked_missing_evidence"
@@ -668,7 +684,7 @@ def test_non_success_or_unknown_tool_effect_never_promotes(
         )
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.reason_code == "TOOL_EVIDENCE_NOT_SUCCEEDED"
     assert result.status == "blocked_missing_evidence"
@@ -690,7 +706,7 @@ def test_confidence_cannot_replace_user_message_evidence(tmp_path: Path) -> None
         )
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.reason_code == "USER_MESSAGE_EVIDENCE_MISSING"
     assert service.long_term.all() == []
@@ -703,7 +719,7 @@ def test_reviewed_replace_and_merge_require_exact_target_entry_id(
 ) -> None:
     service, conversations, thread = _runtime(tmp_path)
     original = _explicit(service, conversations, thread, content="个人电脑使用 macOS。")
-    assert service.promote(original.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, original.candidate_id).promoted
     target = service.long_term.all()[0]
     replacement = _explicit(
         service,
@@ -726,7 +742,7 @@ def test_reviewed_replace_and_merge_require_exact_target_entry_id(
 def test_reviewed_remove_requires_exact_same_subject_scope_target(tmp_path: Path) -> None:
     service, conversations, thread = _runtime(tmp_path)
     original = _explicit(service, conversations, thread, content="个人电脑使用 macOS。")
-    assert service.promote(original.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, original.candidate_id).promoted
     target = service.long_term.all()[0]
     removal = _explicit(
         service,
@@ -748,7 +764,7 @@ def test_reviewed_remove_requires_exact_same_subject_scope_target(tmp_path: Path
 def test_wrong_replace_target_is_blocked_instead_of_using_newer_time(tmp_path: Path) -> None:
     service, conversations, thread = _runtime(tmp_path)
     original = _explicit(service, conversations, thread, content="个人电脑使用 macOS。")
-    assert service.promote(original.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, original.candidate_id).promoted
     replacement = _explicit(
         service,
         conversations,
@@ -848,7 +864,7 @@ def test_persona_promotion_adopts_exact_prior_update_persona_entry(tmp_path: Pat
         ),
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is True
     assert result.promotion_ref == f"USER.md#{target_entry_id}"
@@ -974,7 +990,7 @@ def test_agents_working_agreement_automatic_write_is_forbidden(tmp_path: Path) -
         promotion_target="agents",
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     assert result.reason_code == "AUTO_AGENTS_WRITE_FORBIDDEN"
@@ -1217,9 +1233,9 @@ def test_similar_add_preserves_distinct_subjects(tmp_path: Path, second_text):
     service, conversations, thread = _runtime(tmp_path)
     original = "生产服务 prod-a 使用 8080 端口，监听所有网卡，保留访问日志。"
     first = _explicit(service, conversations, thread, content=original, subject_key="prod-a")
-    assert service.promote(first.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, first.candidate_id).promoted
     second = _explicit(service, conversations, thread, content=second_text, subject_key="prod-b")
-    assert service.promote(second.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, second.candidate_id).promoted
     assert {r.content for r in service.long_term.all()} == {original, second_text}
 
 
@@ -1231,7 +1247,7 @@ def test_near_duplicate_add_does_not_rewrite_another_subject(tmp_path: Path):
         content="祥子买了两次车。",
         subject_key="xiangzi.car",
     )
-    assert service.promote(first.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, first.candidate_id).promoted
     assert len(service.long_term.all()) == 1
     first_ref = service.long_term.all()[0].entry_id
 
@@ -1240,7 +1256,7 @@ def test_near_duplicate_add_does_not_rewrite_another_subject(tmp_path: Path):
         content="祥子买了两次车",
         subject_key="xiangzi.car-count",  # 不同 subject,模拟模型换主题记同一事实
     )
-    result = service.promote(second.candidate_id, automatic=True)
+    result = confirm_candidate(service, second.candidate_id)
     assert result.promoted
     records = service.long_term.all()
     assert len(records) == 2
@@ -1261,7 +1277,7 @@ def test_distinct_facts_never_merged_by_content_similarity(tmp_path: Path):
             service, conversations, thread,
             content=content, subject_key=subject,
         )
-        assert service.promote(candidate.candidate_id, automatic=True).promoted
+        assert confirm_candidate(service, candidate.candidate_id).promoted
     assert len(service.long_term.all()) == 4
 
 
@@ -1273,7 +1289,7 @@ def test_keywords_en_written_into_long_term_attributes(tmp_path: Path):
         content="祥子(Xiangzi)在北京买了两次车,花费 96 元。",
         subject_key="xiangzi.beijing.car",
     )
-    assert service.promote(candidate.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, candidate.candidate_id).promoted
     record = service.long_term.all()[0]
     assert "xiangzi" in record.attributes["keywords_en"]
     assert "beijing" not in record.attributes["keywords_en"]  # 中文词不进英文关键词
@@ -1287,7 +1303,7 @@ def test_search_scoped_english_keyword_hits_chinese_memory(tmp_path: Path):
         content="祥子(Xiangzi)在北京买了两次车。",
         subject_key="xiangzi.beijing.car",
     )
-    assert service.promote(candidate.candidate_id, automatic=True).promoted
+    assert confirm_candidate(service, candidate.candidate_id).promoted
 
     hits = service.long_term.search_scoped(
         "xiangzi",
@@ -1335,7 +1351,7 @@ def test_old_task_alias_ledger_reused_by_new_project_candidate(tmp_path: Path):
         subject_key="ops.deploy",
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is True
     records = service.long_term.all()
@@ -1474,7 +1490,7 @@ def test_old_task_alias_ledger_conflicts_with_new_project_candidate(tmp_path: Pa
         subject_key="ops.deploy",
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is False
     assert result.status == "blocked_conflict"

@@ -1,6 +1,7 @@
 """Gateway同一真实turn的展示恢复：原设置/Registry/Skill/Compact/DB/生成签发，仅后端答复为fake。"""
 import json
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from agent_py_agent.agent.conversation.compact_provider_surface import (
     conversation_compact_provider_prompt,
     prepare_conversation_compact_provider_surface,
 )
+from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 from agent_py_agent.agent.gateway_parts import request_execution
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 from agent_py_agent.agent.gateway_parts.request_context import GatewayAskRunContext
@@ -39,6 +41,7 @@ from agent_py_agent.tests.test_gateway_conversation_compact import (
     _request,
     _SummaryBackend,
 )
+from agent_py_agent.tests.test_subagent_capability_compact import assert_covered_prior_history
 from agent_py_agent.tests.test_tool_presentation_projection import (
     prepared as tool_surface,  # noqa: F401
 )
@@ -141,7 +144,7 @@ def test_unselected_compact_surface_retains_original_bytes_without_extra_decisio
 
 
 # LLM: 原SimpleAgent.run/RuntimeDB/设置/快照/渲染/Compact/生成签发均不替换；fake只供应商返回。
-# 函数用途: 准备真实Gateway请求与已完成历史，使一次模拟overflow经过原压缩再生成新的DB attempt。
+# 函数用途: 准备真实Gateway请求并预先固定 canonical 历史，使模拟overflow经过原压缩与新DB attempt。
 @pytest.fixture
 def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F811
     agent = _agent(tmp_path, context_tokens=1_000_000)
@@ -169,12 +172,14 @@ def gateway_surface(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     path = paths.processing / (request["id"] + ".json")
     path.write_text(json.dumps(request), encoding="utf-8")
     context = GatewayAskRunContext(agent, request, path, paths.responses / "response.json", request["id"], lambda _: None)
-    return SimpleNamespace(agent=agent, context=context, conversation=conversation, first=first, second=second, backend=backend)
+    prior_messages = provider_history_messages_from_rows(agent.conversation_store.messages.recent(conversation.thread_id, limit=0))
+    return SimpleNamespace(agent=agent, context=context, conversation=conversation, first=first, second=second,
+                           backend=backend, prior_messages=prior_messages)
 
 
-# LLM: 包装只观察后调用原生成，账本 finished/宿主来源必须由真实出口签发；fake 只在 backend 返回，摘要沿原后端。
-# 函数用途: 捕获原始和恢复模型面，以测试调用范围区分主请求/摘要，保持首次溢出和配置变化语义。
-def capture_gateway_loop(monkeypatch, agent, *, after_overflow=None):
+# LLM: 包装观察原生成与出站 kwargs；账本和宿主来源仍由真实出口签发，副本只供测试比较，不改请求。
+# 函数用途: 区分主请求和摘要，按需捕获两次真实主负载，保持首次溢出和配置变化语义。
+def capture_gateway_loop(monkeypatch, agent, *, after_overflow=None, main_kwargs=None):
     captured = []
     original_generate = _tool_loop_service.generate_model_response
     original_backend = agent.backend.generate
@@ -183,6 +188,8 @@ def capture_gateway_loop(monkeypatch, agent, *, after_overflow=None):
         call = _CAPTURED_MAIN_CALL.get()
         if call is None:
             return original_backend(prompt, **kwargs)
+        if main_kwargs is not None:
+            main_kwargs.append(deepcopy(kwargs))
         overflow = call == 1
         if overflow and after_overflow:
             after_overflow()
@@ -207,7 +214,8 @@ def capture_gateway_loop(monkeypatch, agent, *, after_overflow=None):
 def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compact_surface(gateway_surface, monkeypatch, choice):
     fixture = gateway_surface
     calls = provider(monkeypatch, choice=choice)
-    captured = capture_gateway_loop(monkeypatch, fixture.agent)
+    main_kwargs = []
+    captured = capture_gateway_loop(monkeypatch, fixture.agent, main_kwargs=main_kwargs)
     starting = []
     original_run = fixture.agent.run
     def run(prompt, *, params):
@@ -230,7 +238,13 @@ def test_real_gateway_retry_rotates_db_attempt_but_keeps_one_decision_and_compac
     assert first_layout.stable_prefix == second_layout.stable_prefix == prompt_cache_layout(fixture.backend.prompts[0]).stable_prefix
     cards = dict(first_layout.volatile_sections)["prompt.tool_recommendations"]
     assert cards == dict(second_layout.volatile_sections)["prompt.tool_recommendations"]
-    assert cards in [block["text"] for message in fixture.backend.kwargs[0]["messages"] for block in message["content"] if block["type"] == "text"]
+    assert len(main_kwargs) == 2
+    assert main_kwargs[0]["tools"] == main_kwargs[1]["tools"] == fixture.backend.kwargs[0]["tools"]
+    for kwargs in main_kwargs:
+        assert cards in [block["text"] for message in kwargs["messages"] for block in message["content"] if block["type"] == "text"]
+    assert_covered_prior_history(fixture.backend.kwargs[0], fixture.prior_messages,
+                                main_messages=main_kwargs[0]["messages"])
+    assert "BODY-ONLY" not in str((main_kwargs, fixture.backend.kwargs))
     # 携带的展示值（selection）不能落进请求记录；观测键 capability_presentation_observation 是另一回事，只有码与计数。
     assert "capability_presentation" not in json.loads(fixture.context.request_path.read_text(encoding="utf-8"))
     assert "capability_presentation" not in str(asdict(result))

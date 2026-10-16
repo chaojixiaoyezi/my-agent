@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -14,16 +15,35 @@ import pytest
 from agent_py_agent.agent.agent_core.orchestration.dispatch.params import DispatchParams
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.runner_start import reserve_runner_start
+from agent_py_agent.tests.support.ci_release_layout import (
+    assert_business_module,
+    assert_business_origins,
+    child_origin_capture,
+)
 
 
 def test_background_dispatch_project_root_is_repo_root():
-    """后台 dispatch 子进程必须从仓库根启动，避免误导入旧安装版 CLI。"""
+    """后台 cwd 必须可运行同源 CLI；开发 sentinel 只适用于源码树，包内业务仍严格来自当前 runtime。"""
     import agent_py_agent.agent.agent_core.orchestration.background.dispatch as background_dispatch
 
     root = background_dispatch._project_root()
+    origin = assert_business_module(background_dispatch)
 
+    assert root.is_dir()
     assert (root / "agent_py_agent").is_dir()
-    assert (root / "pyproject.toml").is_file()
+    assert (root / "agent_py_agent/config/agent_config.yaml").is_file()
+    if origin.suffix == ".py":
+        assert (root / "pyproject.toml").is_file()
+    # 源码子进程明确加入已校验的 checkout；发行 -I 不加业务源码，沿同一个 sys.prefix 导入。
+    prefix = f"import sys; sys.path.insert(0, {str(root)!r})\n" if origin.suffix == ".py" else ""
+    code = prefix + "import agent_py_agent.agent.agent_core.orchestration.background.dispatch\n"
+    code += "import agent_py_agent.cli\n" + child_origin_capture("print(json.dumps(facts))")
+    child = subprocess.run([sys.executable, "-I", "-c", code], cwd=root,
+                           capture_output=True, text=True, timeout=30)
+    assert child.returncode == 0, child.stdout + child.stderr
+    facts = json.loads(child.stdout)
+    origins = assert_business_origins(facts, cwd=root)
+    assert origins[background_dispatch.__name__] == origin
 
 
 def test_new_background_launch_does_not_inherit_previous_pid(tmp_path):
@@ -188,7 +208,7 @@ def test_worker_recovers_child_model_without_dispatch_backend(tmp_path, monkeypa
             self.subagents = SimpleNamespace(owner_id="alice", workspace_root=root)
             self.conversation_store = ConversationStore(root / "conversations")
 
-    base = AgentConfig(model_backend="openai_compatible", model_name=base_model, my_agent_owner_provider="local",
+    base = AgentConfig(my_agent_home=str(tmp_path / "home"), model_backend="openai_compatible", model_name=base_model, my_agent_owner_provider="local",
                        my_agent_owner_kind="user", my_agent_owner_id="alice")
     host = Worker(base, tmp_path)
     a, _ = add(host, model_name="child-A")

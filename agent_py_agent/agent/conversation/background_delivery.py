@@ -20,6 +20,12 @@ from .channels import (
     project_user_reply,
     supports_transcript_delivery,
 )
+from .learning_source import (
+    LEARNING_SOURCE_KEY,
+    background_projection,
+    derive_source_projection,
+    projection_from_wake_metadata,
+)
 from .models import BackgroundDeliveryCommit, WakeSignal
 from .store import ConversationStore
 
@@ -299,10 +305,19 @@ def _background_owner_message_metadata(
     public_receipt: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if frozen_retry is not None and frozen_retry.message_metadata:
-        return {
+        restored = {
             **frozen_retry.message_metadata,
             "background_delivery_retry_reason": delivery_reason,
         }
+        restored.setdefault(LEARNING_SOURCE_KEY, background_projection())
+        return restored
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    wake_metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
+    source = projection_from_wake_metadata(wake_metadata)
+    if source is None:
+        source = derive_source_projection(wake_metadata)
+    if source is None:
+        source = background_projection()
     metadata: dict[str, object] = {
         "conversation_request_id": request.conversation_turn_id,
         "reason": request.reason,
@@ -311,6 +326,7 @@ def _background_owner_message_metadata(
         "projection_status": projection_status,
         "background_delivery_reason": delivery_reason,
         "evidence_refs": list(evidence_refs),
+        LEARNING_SOURCE_KEY: source,
     }
     if operation_verification is not None:
         metadata["operation_verification"] = operation_verification

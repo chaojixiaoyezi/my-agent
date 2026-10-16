@@ -1,6 +1,6 @@
 # LLM: Gateway 流出口组合请求缓冲、公开投影、审批和等待 mixin；执行权及最终结果由调用方提交，等待关闭只拦展示。
 # 事件先写原 chunk 再投影，模型候选与确认消息必须区分；修改时同步 streaming、审批、插话和重连回归。
-# 模块用途: 将模型、工具和控制过程按原顺序写给客户端，保留权限、脱敏和迟到客户端读取边界。
+# 模块用途: 将模型、工具、排队与控制过程按原顺序写给客户端，保留权限、脱敏和迟到读取边界。
 from __future__ import annotations
 
 import json
@@ -62,9 +62,23 @@ def write_chunk_event(chunk_path: Path, payload: dict[str, object], *, still_cur
         pass
 
 
+# LLM: 排队复用原 writer 的脱敏出口与关闭谓词；落盘/投影前重核，不能复活已关闭的等待展示。
+# 函数用途: 白名单化并发布仍有效的排队通知，关闭后的迟到通知不再写原流。
+def _write_provider_queue_event(writer, value: object) -> None:
+    from .stream_events import provider_queue_event
+
+    # LLM: 仅展示资格，不改变队列/调用生命周期，原文件锁内还会复核同一谓词。
+    # 函数用途: 在每次落盘或投影之前读取原 writer 的关闭状态。
+    def current() -> bool:
+        return not getattr(writer, "_liveness_closed", False)
+
+    if payload := provider_queue_event(value):
+        writer._write_event(payload, still_current=current)
+
+
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
 # 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；审批模式提供者由宿主绑定，显示故障不能中止请求。
-# 类用途: 缓冲模型/工具事件、组合 IM 等待接口；公开投影复核等待资格，TUI 继续消费原富事件。
+# 类用途: 缓冲模型/工具事件，发布白名单排队事实并组合 IM 等待接口；公开投影复核原等待资格。
 @dataclass
 class BufferedChunkStreamWriter(StreamLiveness):
     """Buffer model deltas and persist typed user-visible stream events."""
@@ -378,6 +392,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._reset_tool_input_progress()
         self._write_event(payload)
         return True
+
+    # LLM: 排队事件只沿原 _write_event 的脱敏与生命周期发布，不写执行状态或模型正文。
+    # 函数用途: 将本请求的排队和解除进度交给 TUI 与通道状态消费者。
+    write_provider_queue = _write_provider_queue_event
 
     # LLM: 数字/阶段遥测统一经过显式客户端能力和独立白名单投影，再按原 flush -> event 顺序发布。
     # 函数用途: 共用富客户端遥测的清洗与发布边界，空投影不刷新，不将正文写入统计事件。

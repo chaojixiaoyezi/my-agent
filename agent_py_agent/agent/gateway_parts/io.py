@@ -13,6 +13,7 @@ import errno
 import hashlib
 import json
 import os
+import stat
 import threading
 import time
 import uuid
@@ -24,6 +25,7 @@ from pathlib import Path
 from ..common.json_io import (
     append_private_jsonl_records,
     jsonl_lines,
+    serialize_private_json_no_newline,
     write_private_json_file_atomic_no_newline,
     write_private_json_file_atomic_no_newline_unlocked,
     write_private_text_file_atomic,
@@ -219,29 +221,86 @@ def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> di
 # LLM: require_existing closes move/update races for queue records while preserving the
 # create-or-update behavior used by conversation and collaboration state files.
 #   读-改-写整段在同一把锁内完成，落盘走私有原子写（目录 0700、文件 0600、存量宽权限下次写入收紧）。
-# 函数用途：在单个文件锁内读改写 JSON，并可要求目标必须仍然存在（仅本人可读写）。
-# 函数用途: 在 per-path 锁内读改写一个 JSON 文件，落盘走私有原语（0600/0700）。
+#   内容去重（E3 返工 / mc4-501）：旧文件存在且能正常解析为对象时，把 updater 结果用与写入原语
+#   完全相同的序列化转成文本，与磁盘原文逐字相同才跳过——比较对象是原始文本，不依赖 Python 深度
+#   相等（True==1、1.0==1、-0.0==0.0 都会把类型更正误判成"没变"），updater 原地改也不影响比较。
+#   跳过还要求磁盘安全状态已与写入后等价（mc4-502）：普通文件、nlink==1、0600、属主为本进程，
+#   任一不满足就照常写（存量宽权限文件仍会被收紧）；缺失/损坏/空文件/非对象根照写（保持修复语义）。
+#   force_write 供"写动作本身是可观察信号"的调用点显式退回原行为。
+# 函数用途: 在 per-path 锁内读改写一个 JSON 文件，落盘走私有原语（0600/0700）；内容与安全状态均未变时跳过写入。
 def update_json_file_atomic(
     path: Path,
     updater: Callable[[dict], dict],
     *,
     require_existing: bool = False,
+    force_write: bool = False,
 ) -> dict:
     with _locked_json_path(path):
         if require_existing and not path.is_file():
             raise FileNotFoundError(path)
-        current = _read_json_dict_unlocked(path)
+        current, current_readable, raw_text, read_version = _read_json_dict_unlocked_report(path)
         updated = _updated_json_dict(updater, current)
+        skip_candidate = not force_write and current_readable and _skip_write_is_safe(path, read_version)
+        if skip_candidate and _serialized_matches(updated, raw_text):
+            return updated
         write_private_json_file_atomic_no_newline_unlocked(path, updated, sort_keys=True)
         return updated
 
 
-def _read_json_dict_unlocked(path: Path) -> dict:
+# LLM: 内容去重的最后一步——把 updater 结果用与写入原语完全相同的序列化转成文本，与磁盘原文
+#   逐字比较；不能用 Python 深度相等（True==1、1.0==1、-0.0==0.0 会把类型更正误判成"没变"）。
+# 函数用途: 判断"若现在写入，落盘字节是否与磁盘现有字节完全相同"。
+def _serialized_matches(updated: dict, raw_text: str) -> bool:
+    return serialize_private_json_no_newline(updated, sort_keys=True) == raw_text
+
+
+# LLM: 跳过写入 = 磁盘上不再发生"替换"的副作用，所以必须逐项核对"写入后应有的磁盘状态"现在是否
+#   已经成立：替换写入会（a）把叶子换成普通文件（符号链接被替换、不再跟随）、（b）断开硬链接、
+#   （c）收紧到 0600、（d）属主变成本进程。全部满足才允许跳过，任一不满足照常写（存量宽权限/被
+#   换过的文件仍会被自愈）；lstat 失败按不满足处理（fail-closed）。Windows 没有 os.geteuid，
+#   属主项按平台可核对项跳过，其余三项照查。
+# 函数用途: 判断磁盘上的 JSON 文件是否已处于"私有原子写之后"的等价状态，允许跳过重写。
+def _skip_write_is_safe(path: Path, read_version: os.stat_result | None) -> bool:
     try:
-        current = json.loads(path.read_text(encoding="utf-8"))
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if read_version is None or _json_file_version(info) != _json_file_version(read_version):
+        return False
+    if not stat.S_ISREG(info.st_mode):  # 符号链接/非常规文件：写入会替换成普通文件
+        return False
+    if info.st_nlink != 1:  # 硬链接：写入会断开
+        return False
+    if stat.S_IMODE(info.st_mode) != 0o600:  # 宽权限：写入会收紧
+        return False
+    euid_getter = getattr(os, "geteuid", None)
+    if euid_getter is not None and info.st_uid != euid_getter():  # 属主非本进程：写入会改属主
+        return False
+    return True
+
+
+# LLM: 内容去重需要区分"合法旧内容"与"缺失/损坏/非对象"：只有前者能作为跳过写入的依据，
+#   后者必须照常写回（修复语义）。按bytes解码保留CRLF，避免通用换行把不同字节误判相同；非法 UTF-8 与旧行为
+#   一致地上抛，不在此处吞掉。
+# 函数用途: 读回路径上的 JSON 对象、是否"存在且可正常解析为对象"，以及磁盘原文。
+def _read_json_dict_unlocked_report(path: Path) -> tuple[dict, bool, str, os.stat_result | None]:
+    try:
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            raw_text = handle.read().decode("utf-8")
+            after = os.fstat(handle.fileno())
+        current = json.loads(raw_text)
     except (OSError, json.JSONDecodeError):
-        return {}
-    return current if isinstance(current, dict) else {}
+        return {}, False, "", None
+    if not isinstance(current, dict):
+        return {}, False, raw_text, after
+    return current, _json_file_version(before) == _json_file_version(after), raw_text, after
+
+
+# LLM: 该观测只决定能否省略原写；不授予跨进程事务权，实际写仍由原path锁和原子替换约束。
+# 函数用途: 比较读取时与跳写前的同一文件版本，发现外部替换或原位修改就照常写回。
+def _json_file_version(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _updated_json_dict(updater: Callable[[dict], dict], current: dict) -> dict:

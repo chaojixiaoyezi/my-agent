@@ -1,11 +1,11 @@
-# LLM: context-pressure 的展示和阈值只来自原策略；消息清扫、引导和 ToolChoice 与出站共源，纯计量不读取宿主或校准。
+# LLM: context-pressure 的展示和阈值只来自原策略；纯计量与出站共源，可携带实际调用准备点的线程CAS绑定，本模块不为遥测另读store。
 # 模块用途: 估算即将发送的模型输入并给出结构化压缩信号，保持输出预留、运行期校准及纯投影的边界。
 from __future__ import annotations
 
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...backends.request_content import classify_nontext_content
@@ -21,6 +21,7 @@ from ...conversation.compact_progress import (
     COMPACT_TRIGGER_PREFLIGHT,
     COMPACT_TRIGGER_TOOL_CONTEXT_OVERFLOW,
 )
+from ...conversation.context_usage import ContextUsageBinding
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
@@ -58,8 +59,7 @@ class ModelVisibleContextBudget:
     remaining_to_compact_tokens: int
 
 
-# LLM: This snapshot is the public, read-only projection of the exact preflight total plus
-# estimated provider-visible component shares; component totals must add back to current_tokens.
+# LLM: 本快照携带同一次 preflight 数值及内部捕获代次；组成之和仍等于总量，usage_binding 不进入公开协议或模型内容。
 # 类用途: 保存一次真实模型调用前的上下文总量、窗口、压缩线和各组成部分，供 TUI 实时展示。
 @dataclass(frozen=True)
 class ModelVisibleContextSnapshot:
@@ -78,6 +78,7 @@ class ModelVisibleContextSnapshot:
     # 这次调用实际用的模型名与思考档位（"off" 表示关、"auto" 表示交给模型默认），只给状态行显示；空串表示未知。
     model_name: str = ""
     reasoning_level: str = ""
+    usage_binding: ContextUsageBinding | None = field(default=None, repr=False, compare=False)
 
     # LLM: Public serialization exposes only bounded numeric facts, two short display labels (model name, reasoning
     # level) and the frozen schema id; prompts, messages, tool definitions, and guidance content must never enter the UI event.
@@ -99,15 +100,15 @@ class ModelVisibleContextSnapshot:
         }
 
 
-# LLM: This is the only constructor for live context-display facts. It reuses the same
-# runtime_compact_policy and provider-visible estimator as preflight instead of adding a UI budget.
-# The configured trigger remains stable even when one presentation/no-save call cannot apply it;
-# call-local persistence permission belongs to enforcement, not the public conversation policy.
+# LLM: 这是实时上下文数字的唯一构造入口，沿原策略/估算器；仅携带调用准备点已捕获的版本，不为纯预算查询读store或给旧数重签。
+#   缺绑定只放弃持久遥测；触发线、计量和模型请求仍沿原合同。
 # 函数用途: 计算一次即将发给模型的上下文构成；状态条始终显示统一的自动压缩点，不受单次回合是否允许落盘影响。
 def model_visible_context_snapshot(
     agent: object,
     params: object | None,
     prompt: object,
+    *,
+    usage_binding: ContextUsageBinding | None = None,
 ) -> ModelVisibleContextSnapshot:
     protocol, raw_current, components, surface_fingerprint = _model_visible_context_components(
         agent,
@@ -144,6 +145,7 @@ def model_visible_context_snapshot(
         context_surface_fingerprint=surface_fingerprint,
         model_name=str(getattr(getattr(agent, "backend", None), "model_name", "") or "")[:80],
         reasoning_level=_display_reasoning_level(agent, params),
+        usage_binding=usage_binding,
     )
 
 

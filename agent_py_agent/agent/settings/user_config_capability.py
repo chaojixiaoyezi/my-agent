@@ -212,7 +212,9 @@ USER_SETTINGS_BOUNDARY_KEYS = frozenset(
      # 但管理员本就该能调：调大只会多等，超时仍收紧成 ask，不会变松。
      # 老插件权限：老格式新授权默认收紧是安全边界，模型不能改或降级已收紧的固定激活。
      "plugin_tool_gate_timeout_ms",
-     "plugin_legacy_sandbox_default"})
+     "plugin_legacy_sandbox_default",
+     # 规则来源开关只允许现有可信用户/settings修改；不授予额外路径/网络许可。
+     "agents_source_enabled", "agents_source_network_enabled"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；

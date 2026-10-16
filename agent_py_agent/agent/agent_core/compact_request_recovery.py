@@ -1,5 +1,5 @@
 # LLM: 共用宿主完整准备与原Compact/CAS；宿主投影历史，公共层合并工具交接替换，不能重跑准备或建立持久状态。
-# 模块用途: 让Gateway、子代理及后台复用一次准备、候选计量和取消失败隔离。
+# 模块用途: 让三宿主复用一次准备与可容纳主前缀；必超容量的优化不延长旧历史驻留，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -129,7 +129,7 @@ class PreparedCompactRecovery:
 # 主请求缓存前缀（_active_turn_cache_fork，摘要发送即清）；然后解绑原参数与冻结输入的完整原生历史，
     # 失败/取消/超限收尾都不得再读它。冻结完整请求后先按其表面指纹冻结一次校准观测（同 fingerprint、同代次），自动判定、
     # 压缩前与候选都按它折算；提交后用已接受候选改写本轮观测基线，让同轮下一次真实预检与接受基准一致。
-    # 函数用途: 用完整当前输入选择摘要候选，提交后返回同次恢复轮的新参数与已检查提示。
+    # 函数用途: 解绑前冻结连续主前缀，按完整输入选择候选；提交后才返回同次恢复材料。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
         if self.consumed or not (agent is self.agent and self.matches_request(params)):
             return params, prompt
@@ -167,6 +167,7 @@ class PreparedCompactRecovery:
         # 解绑前先按自动判定同一口径量一次完整旧请求，作为 checkpoint 与进度里的“压缩前”大小：解绑后的冻结输入
         # 已不含历史，再量只剩系统提示和工具（2026-09-26 真机记成 35,915，实际约 31.3 万）。
         before_tokens = _full_request_tokens(agent, frozen)
+        summary_surface, tool_source = _transcript_summary_surface(self, frozen, tool_source)
         self.active_cache_fork = None if source.messages else _active_turn_cache_fork(prompt, frozen)
         frozen = replace(frozen, provider_history_messages=())
         object.__setattr__(params, "provider_history_messages", [])
@@ -208,7 +209,7 @@ class PreparedCompactRecovery:
                         current_prompt=params.user_prompt, exclude_request_id=self.exclude_request_id, force=True,
                         # self.force 才是窗口上限/供应商施压；阈值自动压缩仍整段压完（force=True）但允许随图摘要。
                         pressure_forced=self.force,
-                        source=source, request_projector=project, provider_surface=_summary_surface(frozen),
+                        source=source, request_projector=project, provider_surface=summary_surface,
                         tool_source=tool_source,
                         progress_callback=self.progress_callback,
                         interrupt_check=interrupted,
@@ -550,3 +551,26 @@ def _project_mixed_recovery_material(material, view, max_chars):
         retained_ir_history=view.retained_ir_history,
     )
     return replace(material, params=params, request_input=prepared, projection=project_tool_loop_request(prepared))
+
+
+# LLM: 解绑前绑定实际主input；必超容量时不发布整份前缀并原样保留tool_source，原完整请求精确门/CAS/取消不变。
+# 函数用途: 为恢复构造可容纳的连续前缀面；拒用优化后旧历史能随原解绑释放，不在摘要栈里继续驻留。
+def _transcript_summary_surface(recovery, frozen, tool_source):
+    from .compact_transcript_prefix import (
+        TranscriptPrefixSelection,
+        capture_transcript_prefix,
+        declared_transcript_prefix_media_decision,
+        transcript_prefix_exceeds_capacity,
+    )
+
+    surface = _summary_surface(frozen)
+    if not recovery.source.messages:
+        return surface, tool_source
+    selected = TranscriptPrefixSelection(recovery.render_params, tool_source)
+    prefix = capture_transcript_prefix(frozen, recovery.source, selected)
+    media_decision = declared_transcript_prefix_media_decision(recovery.agent, prefix)
+    if media_decision is not None:
+        return replace(surface, media_decision=media_decision), tool_source
+    if transcript_prefix_exceeds_capacity(recovery.agent, surface, prefix, recovery.calibration):
+        return surface, tool_source
+    return replace(surface, transcript_prefix=prefix), tool_source if prefix.joint_end else None

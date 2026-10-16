@@ -1,5 +1,5 @@
 # LLM: Owner-scoped Persona authority; keep document bytes, baseline/version snapshots,
-# quota admission, and rollback under the same typed repository contract; canonical group writes require a live host capability lease.
+# quota admission, and rollback under the same typed repository contract.
 # 模块用途: 安全加载并按用户隔离地修改 SOUL/USER/AGENTS，同时保存首次修改前基线和后续版本。
 """Owner-scoped Persona repository with guarded loading and versioned writes."""
 
@@ -8,16 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
-    append_private_jsonl_records,
     locked_json_path,
-    read_jsonl_objects_report,
-    write_text_file_atomic,
-    write_text_file_atomic_unlocked,
 )
 from ..user_space.owner_quota import (
     OwnerQuotaAdmission,
@@ -25,6 +22,11 @@ from ..user_space.owner_quota import (
     OwnerQuotaEnforcer,
     owner_quota_enforcer_from_policy,
 )
+from .agents_source_contract import AgentsContractError, AgentsSourceSnapshot
+from .agents_source_limits import enforce_agents_write_limit
+from .persona_storage_io import append_version_records as append_private_jsonl_records
+from .persona_storage_io import versions_lock
+from .persona_version_ledger import _ledger_image, read_version_records
 
 _TARGET_ATTR = {
     "soul": "owner_soul_md",
@@ -73,11 +75,15 @@ class PersonaLoadDiagnostic:
         return asdict(self)
 
 
+# LLM: 正文和诊断来自同一加载结果，来源metadata只描述冻结版本不授予权限；同步检查prompt冻结与撤权。
+# 类用途: 保存一次人格加载的正文、诊断及AGENTS来源信息。
 @dataclass(frozen=True)
 class PersonaDocumentSnapshot:
     target: str
     content: str
     diagnostic: PersonaLoadDiagnostic
+    agents_source: AgentsSourceSnapshot | None = None
+    agents_source_metadata: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -145,9 +151,43 @@ class _PreparedPersonaMutation:
     baseline: _PreparedPersonaBaseline | None = None
 
 
+# LLM: source正文/SHA来自同次严格加载，控制元数据只用于安全冻结、不进入提示文本；默认显示保留旧换行口径。
+# 函数用途: 将AGENTS来源交接转成原Persona清洗/预算文档，同时保留独立原文摘要。
+def _load_agents_source_document(repository):
+    try:
+        result = repository.agents_source.load()
+        snapshot = result.snapshot
+        if result.content is None:
+            return PersonaDocumentSnapshot("agents", "", PersonaLoadDiagnostic("agents", "security", detail=snapshot.failure_code),
+                                           agents_source=snapshot)
+        metadata = repository.agents_source.activation_metadata(snapshot)
+    except AgentsContractError as error:
+        return PersonaDocumentSnapshot("agents", "", PersonaLoadDiagnostic("agents", "security", detail=error.code))
+    raw = result.content
+    display = raw.replace("\r\n", "\n").replace("\r", "\n") if snapshot.kind == "owner_default" else raw
+    sanitized, blocked = _sanitize_persona_text(display)
+    content, truncated = _bounded_prompt_content(sanitized, repository.prompt_max_chars)
+    state = "blocked" if blocked else ("truncated" if truncated else "ok")
+    diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked)
+    return PersonaDocumentSnapshot("agents", content, diagnostic, snapshot, metadata)
+
+
+# LLM: 列举/摘要/版本及旧变更路径共用；显式来源不能退回默认文件，URL不能经本地写入绕过只读。
+# 函数用途: 防止旧Persona API修改没有被本次来源授权指向的默认原件。
+def _require_legacy_persona_target(repository, target: str) -> None:
+    if target != "agents" or repository.agents_source is None:
+        return
+    if repository.agents_source.configuration().kind != "owner_default":
+        raise PersonaRepositoryError("AGENTS_SOURCE_NATIVE_API_REQUIRED")
+
+
+# LLM: 这是当前owner人格与版本的唯一仓库；显式AGENTS来源交同一source服务，USER/SOUL写入仍守原group lease和事务。
+# 类用途: 加载人格、核版本并提交可恢复的人格变更，避免默认路径绕过显式来源。
 class PersonaRepository:
     """Single owner-local authority for SOUL/USER/AGENTS loading and mutation."""
 
+    # LLM: 来源服务只由宿主注入；路径构造时固定为绝对词法形式，保留符号链接供后续no-follow核验。
+    # 函数用途: 组装唯一人格仓库和可选AGENTS来源服务，原USER/SOUL及版本事务不变。
     def __init__(
         self,
         *,
@@ -160,14 +200,15 @@ class PersonaRepository:
     ) -> None:
         self.owner_home = Path(owner_home).resolve(strict=False)
         self.paths = {
-            "soul": Path(soul_path),
-            "user": Path(user_path),
-            "agents": Path(agents_path),
+            "soul": Path(soul_path).absolute(),
+            "user": Path(user_path).absolute(),
+            "agents": Path(agents_path).absolute(),
         }
         self.prompt_max_chars = max(256, int(prompt_max_chars))
         self.versions_path = self.owner_home / "persona" / "versions.jsonl"
         self.backups_dir = self.owner_home / "persona" / "backups"
         self.quota_enforcer = quota_enforcer or owner_quota_enforcer_from_policy(self.owner_home)
+        self.agents_source = None
 
     @classmethod
     def from_home_paths(
@@ -218,7 +259,10 @@ class PersonaRepository:
             ),
         )
 
+    # LLM: 显式来源不允许旧API按默认路径读写；唯一来源授权入口在AgentsSourceRepository，默认兼容不退化。
+    # 函数用途: 返回原owner默认人格路径，显式AGENTS来源要求原生来源API。
     def path_for(self, target: str) -> Path:
+        _require_legacy_persona_target(self, target)
         if target not in self.paths:
             raise ValueError(f"unknown persona target: {target}")
         path = self.paths[target]
@@ -234,106 +278,43 @@ class PersonaRepository:
     def snapshot(self) -> dict[str, PersonaDocumentSnapshot]:
         return {target: self.load(target) for target in ("agents", "soul", "user")}
 
+    # LLM: 只汇总既有安全加载诊断，不暴露正文或私有路径。
+    # 函数用途: 返回运行时人格来源健康状态。
     def runtime_snapshot(self) -> dict[str, object]:
-        """Project guarded Persona load health without content or private paths."""
+        return _persona_runtime_snapshot(self)
 
-        try:
-            snapshots = self.snapshot()
-            targets = []
-            for target in ("agents", "soul", "user"):
-                diagnostic = snapshots[target].diagnostic
-                targets.append(
-                    {
-                        "target": target,
-                        "state": diagnostic.state,
-                        "truncated": diagnostic.truncated,
-                        "blocked_lines": diagnostic.blocked_lines,
-                        "version": self._current_version(target, diagnostic.sha256),
-                    }
-                )
-        except Exception as exc:
-            return {
-                "state": "unavailable",
-                "health": "unavailable",
-                "targets": [],
-                "load_error_codes": [type(exc).__name__],
-            }
-        degraded = any(row["state"] not in {"ok", "missing"} for row in targets)
-        return {
-            "state": "available",
-            "health": "degraded" if degraded else "healthy",
-            "targets": targets,
-            "confirmation_required": ["soul"],
-            "autonomous_targets": ["user", "agents"],
-            "versioned": True,
-        }
-
+    # LLM: 普通读者与mutate/batch共用目标锁；缺失只返回该次观察，不二次绕锁读取新出现的正文。
+    # 函数用途: 只把完整版本的人格正文提供给提示词，不读取写入中间态。
     def load(self, target: str) -> PersonaDocumentSnapshot:
+        if target == "agents" and self.agents_source is not None:
+            return _load_agents_source_document(self)
         try:
             path = self.path_for(target)
-        except PersonaSecurityError as exc:
-            return PersonaDocumentSnapshot(
-                target,
-                "",
-                PersonaLoadDiagnostic(target=target, state="security", detail=str(exc)),
-            )
-        if not path.exists():
-            return PersonaDocumentSnapshot(
-                target,
-                "",
-                PersonaLoadDiagnostic(target=target, state="missing"),
-            )
-        try:
-            if path.is_symlink() or not path.is_file():
-                return PersonaDocumentSnapshot(
-                    target,
-                    "",
-                    PersonaLoadDiagnostic(
-                        target=target,
-                        state="security",
-                        detail="persona source must be a regular file, not a symlink",
-                    ),
-                )
-            stat = path.stat()
-            if stat.st_size > _MAX_PERSONA_FILE_BYTES:
-                return PersonaDocumentSnapshot(
-                    target,
-                    "",
-                    PersonaLoadDiagnostic(
-                        target=target,
-                        state="security",
-                        bytes=int(stat.st_size),
-                        detail="persona source exceeds guarded file-size limit",
-                    ),
-                )
-            raw = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            return PersonaDocumentSnapshot(
-                target,
-                "",
-                PersonaLoadDiagnostic(target=target, state="io", detail=str(exc)),
-            )
-        sha256 = _sha256_text(raw)
-        sanitized, blocked = _sanitize_persona_text(raw)
-        content, truncated = _bounded_prompt_content(sanitized, self.prompt_max_chars)
-        state = "blocked" if blocked else ("truncated" if truncated else "ok")
-        return PersonaDocumentSnapshot(
-            target,
-            content,
-            PersonaLoadDiagnostic(
-                target=target,
-                state=state,
-                sha256=sha256,
-                bytes=int(stat.st_size),
-                chars=len(raw),
-                truncated=truncated,
-                blocked_lines=blocked,
-            ),
-        )
+            if not path.exists():
+                return _empty_persona_snapshot(target, "missing")
+            with locked_json_path(path):
+                return _load_persona_unlocked(self, target)
+        except (PersonaSecurityError, OSError) as exc:
+            state = "security" if isinstance(exc, PersonaSecurityError) else "io"
+            return PersonaDocumentSnapshot(target, "", PersonaLoadDiagnostic(target=target, state=state, detail=str(exc)))
 
+    # LLM: 条目、摘要和诊断必须在同一目标临界区读取；锁序保持target→versions。
+    # 函数用途: 为列表入口读取一份一致的人格快照。
     def list_entries(self, target: str) -> dict[str, object]:
+        with locked_json_path(self.path_for(target)):
+            return self._list_entries_locked(target)
+
+    # LLM: 迁移等调用者已持目标锁；再持来源读边界，防原生来源写者绕过目标锁修改正文。
+    # 函数用途: 为条目、诊断和摘要取得同一完整版本，不重入目标flock。
+    def _list_entries_locked(self, target: str) -> dict[str, object]:
+        with _persona_source_read_boundary(self, target):
+            return self._list_entries_source_locked(target)
+
+    # LLM: 目标和可选来源读边界均已持有；历史读取仍按target→source→versions锁序。
+    # 函数用途: 将同一版本正文和账本信息投影为可展示条目。
+    def _list_entries_source_locked(self, target: str) -> dict[str, object]:
         path = self.path_for(target)
-        snapshot = self.load(target)
+        snapshot = _load_persona_unlocked(self, target)
         if snapshot.diagnostic.state in {"security", "io"}:
             raise PersonaRepositoryError(snapshot.diagnostic.detail or snapshot.diagnostic.state)
         raw = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -347,21 +328,27 @@ class PersonaRepository:
             "diagnostic": snapshot.diagnostic.to_dict(),
         }
 
+    # LLM: 与账本发布共用路径锁；不能把rename/link中间态当作空历史重置版本。
+    # 函数用途: 在完整账本可见时读取目标历史，再供选版和基线判断使用。
     def history(self, target: str) -> list[dict[str, object]]:
         self.path_for(target)
-        report = read_jsonl_objects_report(
-            self.versions_path,
-            context="persona_repository.history",
-        )
-        return [row for row in report.records if str(row.get("target") or "") == target]
+        with versions_lock(self.versions_path):
+            records = read_version_records(self.versions_path)
+        return [row for row in records if str(row.get("target") or "") == target]
 
+    # LLM: 目标→来源读锁内，AGENTS摘要只消费严格来源结果；不能绕许可/身份检查重新普通open。
+    # 函数用途: 返回完整已授权正文的摘要，并保持默认来源换行归一化的旧口径。
     def current_sha256(self, target: str) -> str:
         path = self.path_for(target)
-        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        with locked_json_path(path), _persona_source_read_boundary(self, target):
+            self.path_for(target)
+            if target == 'agents' and self.agents_source is not None:
+                return _agents_source_sha256(self)
+            raw = path.read_text(encoding="utf-8") if path.exists() else ""
         return _sha256_text(raw)
 
-    # LLM: 正式群人格写入必须消费当前同步原策略租约；读取/引导初始化不经过此门。
-    # 函数用途: 核群配置能力后写一个人格变更，保持原配额和版本事务。
+    # LLM: 群人格变更继续消费main原活主体能力；来源或批量API不能绕过群租约。
+    # 函数用途: 核对原群权限后按同一配额和版本事务修改人格。
     def mutate(self, request: PersonaMutationRequest) -> dict[str, object]:
         from ..user_space.group_authorization_context import require_group_persona_lease
 
@@ -369,8 +356,8 @@ class PersonaRepository:
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_document(self, admission, request)
 
-    # LLM: 批量与单项共用正式群人格租约，不允许批量绕过原能力门。
-    # 函数用途: 核群配置能力后提交原批量变更，保持原 CAS 和配额。
+    # LLM: 批量与单项共用main原群能力门；锁内仍按完整CAS一次提交，不放宽owner边界。
+    # 函数用途: 核对原群权限后原子提交一组人格变更。
     def mutate_batch(self, request: PersonaBatchMutationRequest) -> dict[str, object]:
         from ..user_space.group_authorization_context import require_group_persona_lease
 
@@ -378,6 +365,8 @@ class PersonaRepository:
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_batch_document(self, admission, request)
 
+    # LLM: 快照按排他发布，冲突不覆盖；创建责任由当前快照事务保存。
+    # 函数用途: 保存可核验且不覆盖外部文件的版本正文。
     def _write_version_snapshot(
         self,
         target: str,
@@ -385,10 +374,8 @@ class PersonaRepository:
         sha256: str,
         content: str,
     ) -> Path:
-        path = self._version_snapshot_path(target, version, sha256)
-        if not path.exists():
-            write_text_file_atomic(path, content)
-        return path
+        from .persona_snapshot_transaction import write_version_snapshot
+        return write_version_snapshot(self._version_snapshot_path(target, version, sha256), content)
 
     def _version_snapshot_path(self, target: str, version: int, sha256: str) -> Path:
         return self.backups_dir / target / f"{version:08d}-{sha256}.md"
@@ -417,7 +404,7 @@ class PersonaRepository:
         return max((int(row.get("version") or 0) for row in rows), default=0)
 
 
-# LLM: One file-lock critical section prepares, admits, and commits the complete Persona mutation.
+# LLM: 同一目标锁内准备、配额准入并提交整个人格变更；失败只条件撤回本次拥有的正文和版本。
 # 函数用途: 保证 Persona 正文、备份和版本记录要么一起提交，要么都不改变。
 def _mutate_persona_document(
     repository: PersonaRepository,
@@ -430,12 +417,12 @@ def _mutate_persona_document(
     with locked_json_path(path):
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise PersonaSecurityError("persona target must be a regular file")
-        previous = path.read_text(encoding="utf-8") if path.exists() else ""
+        document_existed = path.exists()
+        previous = path.read_text(encoding="utf-8") if document_existed else ""
         prepared = _prepare_persona_mutation(repository, request, previous)
         if isinstance(prepared, dict):
             return prepared
-        _admit_persona_mutation(repository, admission, path, prepared)
-        _commit_persona_mutation(repository, path, prepared)
+        _commit_persona_mutation(repository, prepared, _PersonaCommitContext(path, document_existed, admission))
     return _persona_mutation_result(request, prepared)
 
 
@@ -472,12 +459,12 @@ def _mutate_persona_batch_locked(
     path = repository.path_for(request.target)
     if path.exists() and (path.is_symlink() or not path.is_file()):
         raise PersonaSecurityError("persona target must be a regular file")
-    previous = path.read_text(encoding="utf-8") if path.exists() else ""
+    document_existed = path.exists()
+    previous = path.read_text(encoding="utf-8") if document_existed else ""
     prepared = _prepare_persona_batch_mutation(repository, request, previous)
     if isinstance(prepared, dict):
         return {**prepared, "versions_tail": versions_ledger_tail(repository.versions_path)}
-    _admit_persona_mutation(repository, admission, path, prepared)
-    _commit_persona_mutation(repository, path, prepared)
+    _commit_persona_mutation(repository, prepared, _PersonaCommitContext(path, document_existed, admission))
     committed_tail = versions_ledger_tail(repository.versions_path)
     result = _persona_batch_mutation_result(request, prepared)
     result["versions_tail"] = committed_tail
@@ -716,25 +703,50 @@ def _persona_version_record(
     }
 
 
-# LLM: Quota admission must account for every file written by one Persona transaction.
-# 函数用途: 在落盘前一次性核算正文、新版本、可选初始基线及版本账本的全部增量。
+# LLM: 来源摘要只消费严格加载诊断，调用方已经持目标和来源读锁。
+# 函数用途: 拒绝不安全或不可读来源，并保留合法空文件的摘要口径。
+def _agents_source_sha256(repository):
+    snapshot = _load_agents_source_document(repository)
+    if snapshot.diagnostic.state in {'security', 'io'}:
+        raise PersonaRepositoryError(snapshot.diagnostic.detail or snapshot.diagnostic.state)
+    return snapshot.diagnostic.sha256 or _sha256_text('')
+
+
+# LLM: 绑定同一次目标锁下确定的路径、存在状态和配额准入，不可跨事务重用。
+# 类用途: 将正文提交的目的地与准入上下文作为一个整体传递。
+@dataclass(frozen=True)
+class _PersonaCommitContext:
+    path: Path
+    document_existed: bool
+    admission: OwnerQuotaAdmission
+
+
+# LLM: 已持目标锁；快照/账本按双份计费，冲突件不得抵扣新增恢复量。
+# 函数用途: 按固定FD的原始字节核算整个事务，包括失败时保留的真实前像。
 def _admit_persona_mutation(
     repository: PersonaRepository,
-    admission: OwnerQuotaAdmission,
-    path: Path,
+    context: _PersonaCommitContext,
     prepared: _PreparedPersonaMutation,
+    original: bytes,
 ) -> None:
+    admission, path = context.admission, context.path
+    if prepared.record["target"] == "agents":
+        enforce_agents_write_limit(prepared.previous, prepared.next_text, repository.prompt_max_chars)
+    from .persona_version_ledger import retained_ledger_bytes
+
     version_records = [prepared.record]
     changes = [
-        OwnerQuotaChange(path, len(prepared.next_text.encode("utf-8"))),
-        OwnerQuotaChange(prepared.backup_path, len(prepared.next_text.encode("utf-8"))),
+        OwnerQuotaChange(path, max(len(prepared.next_text.encode("utf-8")), len(original))),
+        OwnerQuotaChange(prepared.backup_path, 2 * len(prepared.next_text.encode("utf-8")), append=True),
+        OwnerQuotaChange(_persona_preimage_path(repository, prepared, original), 2 * len(original), append=True),
     ]
     if prepared.baseline is not None:
         version_records.insert(0, prepared.baseline.record)
         changes.append(
             OwnerQuotaChange(
                 prepared.baseline.backup_path,
-                len(prepared.baseline.content.encode("utf-8")),
+                2 * len(prepared.baseline.content.encode("utf-8")),
+                append=True,
             )
         )
     version_blob = "".join(
@@ -744,53 +756,65 @@ def _admit_persona_mutation(
     changes.append(
         OwnerQuotaChange(
             repository.versions_path,
-            len(version_blob.encode("utf-8")),
+            2 * (len(version_blob.encode("utf-8")) + retained_ledger_bytes(repository.versions_path)),
             append=True,
         )
     )
     admission.check(changes)
 
 
-# LLM: Commit baseline before version one and append both ledger rows as one locked batch.
-# 函数用途: 原子替换 Persona 正文，并在失败时恢复正文、清理本轮创建的基线和版本快照。
+# LLM: 只计算owner内按完整原始SHA去重的恢复路径，不将它加入成功版本账本。
+# 函数用途: 给账外手工修改也留下可定位、不覆盖的真实前像。
+def _persona_preimage_path(repository, prepared, original):
+    return repository.backups_dir / prepared.record['target'] / 'preimages' / (hashlib.sha256(original).hexdigest() + '.md')
+
+
+# LLM: 固定FD后再准入；破坏性写前保存原始前像；账本发布后不再补偿。
+# 函数用途: 提交正文和版本，让已有历史下的双重I/O故障仍可找到本次真实原文。
 def _commit_persona_mutation(
     repository: PersonaRepository,
-    path: Path,
     prepared: _PreparedPersonaMutation,
+    context: _PersonaCommitContext,
 ) -> None:
-    baseline_path = prepared.baseline.backup_path if prepared.baseline is not None else None
-    baseline_existed = bool(baseline_path is not None and baseline_path.exists())
-    backup_existed = prepared.backup_path.exists()
-    document_existed = path.exists()
-    records: list[dict[str, object]] = []
-    try:
-        if prepared.baseline is not None:
-            baseline_path = repository._write_version_snapshot(
-                str(prepared.record["target"]),
-                0,
-                prepared.baseline.sha256,
-                prepared.baseline.content,
-            )
-            records.append(prepared.baseline.record)
-        backup_path = repository._write_version_snapshot(
-            str(prepared.record["target"]),
-            prepared.version,
-            prepared.next_sha,
-            prepared.next_text,
-        )
-        records.append(prepared.record)
-        write_text_file_atomic_unlocked(path, prepared.next_text)
-        append_private_jsonl_records(repository.versions_path, records)
-    except Exception:
-        if document_existed:
-            write_text_file_atomic_unlocked(path, prepared.previous)
-        else:
-            path.unlink(missing_ok=True)
-        if not backup_existed:
-            prepared.backup_path.unlink(missing_ok=True)
-        if baseline_path is not None and not baseline_existed:
-            baseline_path.unlink(missing_ok=True)
-        raise
+    from .persona_snapshot_transaction import snapshot_transaction
+    from .persona_version_ledger import PersonaLedgerPublishedError, append_persona_versions
+
+    path, document_existed = context.path, context.document_existed
+    with snapshot_transaction() as snapshots, _persona_mutation_writer(
+        repository, path, prepared.previous, document_existed,
+    ) as write_content:
+        original = write_content.original if document_existed else b''
+        _admit_persona_mutation(repository, context, prepared, original)
+        recovery = _retain_persona_preimage(repository, prepared, original)
+        try:
+            records = _write_persona_mutation_versions(repository, prepared)
+            write_content(prepared.next_text)
+            append_persona_versions(repository.versions_path, records, append_private_jsonl_records,
+                                    validate=lambda: _verify_persona_commit(write_content, snapshots))
+        except PersonaLedgerPublishedError:
+            raise
+        except Exception as error:
+            _note_persona_preimage(error, repository, recovery)
+            _restore_persona_mutation_files(path, prepared, (document_existed, snapshots), write_content)
+            raise
+
+
+# LLM: 前像成功保存才返回引用；失败发生在正文写入前，不凭计算出的名字报告存在恢复材料。
+# 函数用途: 在任何破坏性正文写入之前保存本次真实原文。
+def _retain_persona_preimage(repository, prepared, original):
+    if not original:
+        return None
+    from .persona_snapshot_transaction import write_version_snapshot
+    recovery = _persona_preimage_path(repository, prepared, original)
+    write_version_snapshot(recovery, original.decode('utf-8'), retain_on_failure=True)
+    return recovery
+
+
+# LLM: 只报告已经发布的前像引用，不改变异常类别或把恢复材料当作成功版本。
+# 函数用途: 让失败操作能定位自己保存的原始正文。
+def _note_persona_preimage(error, repository, recovery):
+    if recovery is not None:
+        error.add_note(f'Persona recovery preimage: {recovery.relative_to(repository.owner_home)}')
 
 
 def _persona_mutation_result(
@@ -833,12 +857,13 @@ def _sha256_text(value: str) -> str:
 
 # LLM: 「版本账本尾」= 文件字节长度 + 最后一条非空记录的 sha256；任何一次追加（哪怕正文 sha
 #   恢复原值）都会改变它，用于迁移删除前的锁内前提核对。文件缺失返回空串（无账本可核对）。
-# 函数用途: 计算版本账本文件的尾部指纹，供迁移前提核对使用。
+# 函数用途: 与发布共用路径锁计算完整账本尾部指纹，不采样发布空窗。
 def versions_ledger_tail(path: Path) -> str:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return ""
+    with versions_lock(path):
+        image = _ledger_image(path)
+        if image is None:
+            return ""
+        data = image[1]
     lines = [line for line in data.splitlines() if line.strip()]
     last = lines[-1] if lines else b""
     return f"{len(data)}:{hashlib.sha256(last).hexdigest()}"
@@ -1021,3 +1046,155 @@ __all__ = [
     "persona_entry_id",
     "versions_ledger_tail",
 ]
+
+
+# LLM: 默认AGENTS复用调用方冻结存在状态，不再重新exists；两种来源writer都拥有明确restore方法。
+# 函数用途: 为Persona事务选择实际正文提交器。
+@contextmanager
+def _persona_mutation_writer(repository: PersonaRepository, path: Path, previous: str, document_existed: bool):
+    source = repository.agents_source
+    if source is None or path != source.default_path:
+        from .persona_body_transaction import persona_body_writer
+        with persona_body_writer(path, previous, document_existed) as writer:
+            yield writer
+        return
+    if not document_existed:
+        from .agents_source_create import missing_default_writer
+        with missing_default_writer(source, path, previous) as writer:
+            yield writer
+        return
+    from .agents_source_local import default_persona_writer
+    with default_persona_writer(source, path, previous) as writer:
+        yield writer
+
+
+# LLM: 新快照及首次基线写入顺序不变；写入器登记排他创建身份，失败按实际归属回滚。
+# 函数用途: 提交当前Persona操作的版本快照并交回同批账本记录。
+def _write_persona_mutation_versions(repository: PersonaRepository, prepared: _PreparedPersonaMutation) -> list[dict]:
+    records = []
+    target = str(prepared.record["target"])
+    if prepared.baseline is not None:
+        repository._write_version_snapshot(target, 0, prepared.baseline.sha256, prepared.baseline.content)
+        records.append(prepared.baseline.record)
+    repository._write_version_snapshot(target, prepared.version, prepared.next_sha, prepared.next_text)
+    records.append(prepared.record)
+    return records
+
+
+# LLM: 三种正文写入器都提供身份/字节核验；快照核验也覆盖复用的既有对象。
+# 函数用途: 在私有账本已写好后，最后复核即将登记的正文和快照。
+def _verify_persona_commit(writer, snapshots):
+    from .persona_snapshot_transaction import verify_snapshots
+    writer.verify()
+    verify_snapshots(snapshots)
+
+
+# LLM: 所有正文写入器均明确登记写入责任；未写入不回滚，冲突保留而不裸unlink。
+# 函数用途: 有条件恢复正文，无论正文是否冲突都撤回自己的新增快照。
+def _restore_persona_mutation_files(path: Path, prepared: _PreparedPersonaMutation, state: tuple, write_content) -> None:
+    from .persona_snapshot_transaction import rollback_snapshots
+    try:
+        write_content.restore()
+    finally:
+        rollback_snapshots(state[1])
+
+
+# LLM: 普通正文的调用者须持目标锁；AGENTS来源服务沿用自己的来源同步协议，迁移锁内读取也复用此实现。
+# 函数用途: 在一致正文上做原有类型、大小、清洗和预算检查，不在内部重复取锁。
+def _load_persona_unlocked(self, target: str) -> PersonaDocumentSnapshot:
+    if target == "agents" and self.agents_source is not None:
+        return _load_agents_source_document(self)
+    try:
+        path = self.path_for(target)
+    except PersonaSecurityError as exc:
+        return _empty_persona_snapshot(target, "security", str(exc))
+    if not path.exists():
+        return _empty_persona_snapshot(target, "missing")
+    try:
+        if path.is_symlink() or not path.is_file():
+            return _empty_persona_snapshot(target, "security", "persona source must be a regular file, not a symlink")
+        stat = path.stat()
+        if stat.st_size > _MAX_PERSONA_FILE_BYTES:
+            return _empty_persona_snapshot(target, "security", "persona source exceeds guarded file-size limit", int(stat.st_size))
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return _empty_persona_snapshot(target, "io", str(exc))
+    return _loaded_persona_snapshot(target, raw, stat, self.prompt_max_chars)
+
+
+# LLM: 保持缺失/拒绝/I/O诊断不返回正文，尺寸字段只在已读stat时提供。
+# 函数用途: 共用人格读取失败的空正文投影。
+def _empty_persona_snapshot(target, state, detail="", byte_count=0):
+    diagnostic = PersonaLoadDiagnostic(target=target, state=state, detail=detail, bytes=byte_count)
+    return PersonaDocumentSnapshot(target, "", diagnostic)
+
+
+# LLM: 汇总load与版本信息，任一读取异常按原合同标为不可用。
+# 函数用途: 生成不含正文的运行时健康投影。
+def _persona_runtime_snapshot(self) -> dict[str, object]:
+    """Project guarded Persona load health without content or private paths."""
+
+    try:
+        snapshots = self.snapshot()
+        targets = []
+        for target in ("agents", "soul", "user"):
+            diagnostic = snapshots[target].diagnostic
+            targets.append(
+                {
+                    "target": target,
+                    "state": diagnostic.state,
+                    "truncated": diagnostic.truncated,
+                    "blocked_lines": diagnostic.blocked_lines,
+                    "version": self._current_version(target, diagnostic.sha256),
+                }
+            )
+    except Exception as exc:
+        return {
+            "state": "unavailable",
+            "health": "unavailable",
+            "targets": [],
+            "load_error_codes": [type(exc).__name__],
+        }
+    degraded = any(row["state"] not in {"ok", "missing"} for row in targets)
+    return {
+        "state": "available",
+        "health": "degraded" if degraded else "healthy",
+        "targets": targets,
+        "confirmation_required": ["soul"],
+        "autonomous_targets": ["user"],
+        "versioned": True,
+    }
+
+
+# LLM: 输入是在目标锁内读取的同一份正文与stat；清洗和预算保持既有规则。
+# 函数用途: 将完整正文转换为提示词与诊断快照。
+def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars):
+    sha256 = _sha256_text(raw)
+    sanitized, blocked = _sanitize_persona_text(raw)
+    content, truncated = _bounded_prompt_content(sanitized, prompt_max_chars)
+    state = "blocked" if blocked else ("truncated" if truncated else "ok")
+    return PersonaDocumentSnapshot(
+        target,
+        content,
+        PersonaLoadDiagnostic(
+            target=target,
+            state=state,
+            sha256=sha256,
+            bytes=int(stat.st_size),
+            chars=len(raw),
+            truncated=truncated,
+            blocked_lines=blocked,
+        ),
+    )
+
+
+# LLM: 仅AGENTS来源服务的本地读者需要来源SH边界；调用方已持目标锁，绝不反向获取它。
+# 函数用途: 列表与摘要跟原生来源写者同步，普通USER/SOUL保持原锁合同。
+@contextmanager
+def _persona_source_read_boundary(repository, target):
+    if target != 'agents' or repository.agents_source is None:
+        yield
+        return
+    from .agents_source_read_lock import source_read_boundary
+    with source_read_boundary(repository.owner_home):
+        yield

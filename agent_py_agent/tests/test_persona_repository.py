@@ -350,7 +350,7 @@ def test_first_persona_mutation_can_rollback_to_prechange_baseline(tmp_path: Pat
     assert [row["version"] for row in repository.history("user")] == [0, 1, 2]
 
 
-def test_first_persona_commit_failure_restores_document_and_removes_snapshots(
+def test_first_persona_commit_failure_restores_document_and_keeps_only_preimage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -369,7 +369,10 @@ def test_first_persona_commit_failure_restores_document_and_removes_snapshots(
 
     assert user_path.read_text(encoding="utf-8") == original
     assert not repository.versions_path.exists()
-    assert not list(repository.backups_dir.rglob("*.md"))
+    # 持久前像合同：失败后只保留一份本次真实原文（preimages/<sha>.md），不留任何版本快照。
+    retained = list(repository.backups_dir.rglob("*.md"))
+    assert [path.parent.name for path in retained] == ["preimages"]
+    assert retained[0].read_bytes() == original.encode("utf-8")
 
 
 def test_persona_batch_is_all_or_nothing_when_later_operation_is_invalid(

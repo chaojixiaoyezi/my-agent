@@ -1,6 +1,8 @@
 """status_commands CLI 命令测试。
 
 测试 status/timeline/memory-list/memory-search/remember 命令。
+# LLM: CLI回归使用完整临时owner路径与正式会话库，不能用缺字段替身绕过学习来源或把持久化失败误当预期错误。
+# 模块用途: 验证状态及运行命令的输出、返回码和真实调用边界，不读取日常用户空间。
 """
 from __future__ import annotations
 
@@ -12,6 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from agent_py_agent.tests.support.ci_cli_owner_fixtures import isolated_cli_owner_paths
 
 
 @pytest.fixture(autouse=True)
@@ -388,13 +392,15 @@ class TestCmdRun:
 
         mock_agent = MagicMock()
         mock_agent.run.return_value = mock_result
-        mock_agent.conversation_store = ConversationStore(tmp_path / "conv")
-        mock_agent.home_paths = MagicMock(owner_id="local/main", owner_home_dir=str(tmp_path))
+        # CLI真实来源绑定读取owner学习政策；用完整临时路径，不能让MagicMock造假JSON或绕过原读取。
+        mock_agent.home_paths = isolated_cli_owner_paths(tmp_path)
+        mock_agent.conversation_store = ConversationStore(mock_agent.home_paths.owner_home_dir / "conversations")
 
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
             result = cmd_run(args)
             assert result == 0
+        mock_agent.run.assert_called_once()
 
     def test_run_streaming_response_not_printed_twice(self, tmp_path: Path, capsys):
         """流式输出已经写到 stdout 时，cmd_run 不应再重复打印完整 response。"""
@@ -437,8 +443,8 @@ class TestCmdRun:
 
         class StreamingAgent:
             def __init__(self):
-                self.conversation_store = ConversationStore(tmp_path / "conv")
-                self.home_paths = SimpleNamespace(owner_id="local/main", owner_home_dir=str(tmp_path))
+                self.home_paths = isolated_cli_owner_paths(tmp_path)
+                self.conversation_store = ConversationStore(self.home_paths.owner_home_dir / "conversations")
                 self.config = SimpleNamespace(request_timeout=23)
 
             def run(self, *args, **kwargs):
@@ -496,8 +502,8 @@ class TestCmdRun:
 
         class StreamingAgent:
             def __init__(self):
-                self.conversation_store = ConversationStore(tmp_path / "conv")
-                self.home_paths = SimpleNamespace(owner_id="local/main", owner_home_dir=str(tmp_path))
+                self.home_paths = isolated_cli_owner_paths(tmp_path)
+                self.conversation_store = ConversationStore(self.home_paths.owner_home_dir / "conversations")
                 self.config = SimpleNamespace(request_timeout=23)
 
             def run(self, *args, **kwargs):
@@ -557,8 +563,8 @@ class TestCmdRun:
 
         class StreamingToolAgent:
             def __init__(self):
-                self.conversation_store = ConversationStore(tmp_path / "conv")
-                self.home_paths = SimpleNamespace(owner_id="local/main", owner_home_dir=str(tmp_path))
+                self.home_paths = isolated_cli_owner_paths(tmp_path)
+                self.conversation_store = ConversationStore(self.home_paths.owner_home_dir / "conversations")
                 self.config = SimpleNamespace(request_timeout=23)
 
             def run(self, *args, **kwargs):
@@ -614,12 +620,18 @@ class TestCmdRun:
 
         mock_agent = MagicMock()
         mock_agent.run.return_value = result_payload
+        from agent_py_agent.agent.conversation.store import ConversationStore
+
+        # 非零必须来自原blocked结果，不能因缺失owner路径/假会话账在模型前返回2而假绿。
+        mock_agent.home_paths = isolated_cli_owner_paths(tmp_path)
+        mock_agent.conversation_store = ConversationStore(mock_agent.home_paths.owner_home_dir / "conversations")
 
         with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.local_commands.ThinkingSpinner"):
             result = cmd_run(args)
 
         assert result == 2
+        mock_agent.run.assert_called_once()
 
 
 class TestStatusUnidentifiedStaleAttempts:

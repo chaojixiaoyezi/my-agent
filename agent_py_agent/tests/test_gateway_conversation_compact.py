@@ -1,3 +1,5 @@
+# LLM: 仅用隔离会话库和 fake provider 验证 Gateway Compact；重试读取结构化响应，不能执行工具或放宽提交边界。
+# 模块用途: 检查压缩摘要、原文保留和有界空答修复，精确记录模型输入与诊断字段。
 from __future__ import annotations
 
 import json
@@ -122,16 +124,24 @@ class _OversizedSummaryBackend(_NativeSummaryBackend):
         return ModelResponse(text="过大的摘要" * 20_000, backend=self.name)
 
 
-class _EmptySummaryBackend(_NativeSummaryBackend):
+# LLM: 第一份响应固定为空，后续响应由测试显式脚本提供；第三次请求会耗尽脚本，不能静默重复。
+# 类用途: 记录实际摘要请求和返回对象，区分持续空答与一次修复成功，不访问网络。
+class _EmptySummaryBackend(_SummaryBackend):
     name = "empty-summary-test"
 
-    def __init__(self) -> None:
-        self.calls = 0
+    # LLM: 只初始化本用例内的响应脚本，默认恰好两份空答；记录沿原 fake 的请求捕获逻辑。
+    # 函数用途: 准备一次空摘要及唯一补发的可观察结果。
+    def __init__(self, texts: tuple[str, ...] = ("", "")) -> None:
+        super().__init__()
+        self._texts = iter(texts)
+        self.responses: list[ModelResponse] = []
 
-    def generate(self, prompt: str, **_kwargs) -> ModelResponse:
-        del prompt
-        self.calls += 1
-        return ModelResponse(text="", backend=self.name)
+    # LLM: 保留父 fake 记录的完整请求，只替换返回正文；响应列表用于证明重试前后的实际结果。
+    # 函数用途: 返回下一份脚本摘要，副作用只限本测试的内存记录。
+    def generate(self, prompt: str, **kwargs) -> ModelResponse:
+        response = replace(super().generate(prompt, **kwargs), text=next(self._texts))
+        self.responses.append(response)
+        return response
 
 
 class _ToolCallingSummaryBackend(_SummaryBackend):
@@ -460,7 +470,14 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
         options=ConversationCompactOptions(current_prompt="继续", force=True),
     )
 
-    assert backend.calls == 1
+    # 完成且空正文只原样补发一次；两次仍空后，原机械回退及全部事实仍须满足。
+    assert backend.calls == 2
+    assert [response.text for response in backend.responses] == ["", ""]
+    assert backend.prompts[0] == backend.prompts[1]
+    # on_chunk 绑定每次调用的账本观察者；其余模型输入、工具和请求选项必须全部相同。
+    assert {key: value for key, value in backend.kwargs[0].items() if key != "on_chunk"} == {
+        key: value for key, value in backend.kwargs[1].items() if key != "on_chunk"
+    }
     assert result.compacted is True
     assert result.thread.compact_generation == 1
     assert result.thread.compact_consecutive_failures == 0
@@ -469,6 +486,39 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
     )
     assert "紫藤项目" in result.thread.summary
     assert "8080" in result.thread.summary
+
+
+def test_first_empty_compact_response_retries_once_then_commits_model_summary(tmp_path) -> None:
+    agent = _agent(tmp_path, context_tokens=20_000)
+    recovered = "修复后摘要：紫藤项目使用端口 8080，已检查项目，下一步运行测试。"
+    backend = _EmptySummaryBackend(("", recovered))
+    agent.backend = backend
+    context = _context(agent, _request("ou_repaired_compact"), "gw-create", "开始")
+    for role, content in (
+        ("user", "继续紫藤项目，保留端口 8080"),
+        ("assistant", "已经检查项目，下一步运行测试"),
+    ):
+        assert append_gateway_conversation_message(
+            agent, {"metadata": {"channel": "feishu"}}, context,
+            request_id=f"gw-repaired-{role}", role=role, content=content,
+        )
+    thread = agent.conversation_store.threads.require(context.thread_id)
+
+    result = prepare_conversation_context(
+        agent, agent.conversation_store, thread,
+        options=ConversationCompactOptions(current_prompt="继续", force=True),
+    )
+
+    assert backend.calls == 2
+    assert [response.text for response in backend.responses] == ["", recovered]
+    assert backend.prompts[0] == backend.prompts[1]
+    assert {key: value for key, value in backend.kwargs[0].items() if key != "on_chunk"} == {
+        key: value for key, value in backend.kwargs[1].items() if key != "on_chunk"
+    }
+    assert result.compacted is True and result.thread.compact_generation == 1
+    assert result.thread.compact_consecutive_failures == 0
+    assert recovered in result.thread.summary
+    assert not result.thread.summary.startswith("[conversation-compact-mechanical-fallback]")
 
 
 def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> None:
@@ -496,10 +546,25 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     )
 
     assert compacted.compact_generation == 1
-    # auto 单次摘要和一次 none 重试都回 tool_use 后，才改走空工具分段；分段按原纠正上限留确定性摘录。
+    # auto 和唯一 none 重试都回 tool_use 后，原机械回退保留事实；冻结前缀禁止额外分段请求。
     assert "- reason: TOOL_CALL" in compacted.compact_summary
     assert not (tmp_path / "compact-tool-must-not-run.txt").exists()
-    assert backend.calls == 3 + budget_module._SEGMENT_REPAIR_LIMIT_COUNT
+    assert backend.calls == 2
+    assert backend.prompts[0] == backend.prompts[1]
+    assert {key: value for key, value in backend.kwargs[0].items()
+            if key not in {"on_chunk", "tools", "tool_choice", "request_options"}} == {
+        key: value for key, value in backend.kwargs[1].items()
+        if key not in {"on_chunk", "tools", "tool_choice", "request_options"}
+    }
+    original_options = backend.kwargs[0]["request_options"]
+    retry_options = backend.kwargs[1]["request_options"]
+    assert retry_options.system_instruction == budget_module._SUMMARY_SYSTEM_INSTRUCTION
+    # none 请求移除工具后重算首包预算；它是传输等待元数据，摘要模型的其余采样选项不能改变。
+    assert original_options.first_event_timeout_seconds > 0 and retry_options.first_event_timeout_seconds > 0
+    assert replace(
+        retry_options, system_instruction=original_options.system_instruction,
+        first_event_timeout_seconds=original_options.first_event_timeout_seconds,
+    ) == original_options
     assert backend.kwargs[0].get("tools")
     assert backend.kwargs[0].get("tool_choice").mode == "auto"
     assert backend.kwargs[1].get("tool_choice").mode == "none"
@@ -526,28 +591,37 @@ def test_empty_transcript_summary_logs_typed_shape_without_content(caplog, think
 
     summary = _summarize(agent, "", {}, [row])
 
-    assert len(calls) == 1 and summary.startswith("[conversation-compact-mechanical-fallback]")
+    expected_calls = 1 if thinking else 2
+    assert len(calls) == expected_calls and summary.startswith("[conversation-compact-mechanical-fallback]")
+    assert all(prompt == calls[0] for prompt in calls)
     records = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
-    assert len(records) == 1
-    identity = {key: records[0].pop(key) for key in ("request_id", "thread_id", "purpose", "logged_at")}
-    assert identity["purpose"] == "conversation_compact_summary" and identity["logged_at"] > 0
-    assert records[0] == {
+    assert len(records) == expected_calls
+    expected_shape = {
         "reason": "EMPTY", "text_chars": 0, "tool_use_count": 0, "thinking_only": thinking,
         "stop_reason": response.stop_reason, "runtime_status": response.runtime_status,
         "runtime_reason": response.runtime_reason, "runtime_source": response.runtime_source,
         "turn_end_reason": response.turn_end_reason, "truncated": thinking,
     }
+    for original in records:
+        record = dict(original)
+        identity = {key: record.pop(key) for key in ("request_id", "thread_id", "purpose", "logged_at")}
+        assert identity["purpose"] == "conversation_compact_summary" and identity["logged_at"] > 0
+        assert record == expected_shape
     assert all(value not in caplog.text for value in ("PRIVATE-THINKING", "PRIVATE-KEY", "PRIVATE-SOURCE"))
 
 
 def test_compact_response_diagnostic_bounds_untrusted_labels(caplog):
     response = ModelResponse(text="", backend="fake", stop_reason="x" * 10000, runtime_reason="PRIVATE BODY\nPRIVATE KEY")
-    agent = SimpleNamespace(backend=SimpleNamespace(generate=lambda prompt: response))
+    calls = []
+    agent = SimpleNamespace(backend=SimpleNamespace(generate=lambda prompt: calls.append(prompt) or response))
     _summarize(agent, "", {}, [])
     records = [record.compact_response_shape for record in caplog.records if hasattr(record, "compact_response_shape")]
-    assert len(records) == 1
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert len(records) == 2
     assert records[0]["stop_reason"] == "invalid_label"
     assert records[0]["runtime_reason"] == "invalid_label"
+    assert all(record["stop_reason"] == "invalid_label" for record in records)
+    assert all(record["runtime_reason"] == "invalid_label" for record in records)
     assert len(caplog.text) < 2000 and "PRIVATE" not in caplog.text
 
 

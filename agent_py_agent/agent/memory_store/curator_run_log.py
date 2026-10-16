@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Memory Curator 无正文运行审计。"""
 
+# LLM: initialize=False仅纯路径绑定零初始化I/O，不授append权；默认保原mkdir，原审计只记录生命周期/count/cursor，不收正文。
 # LLM: Run audit records lifecycle/count/cursor facts only; prompts, responses, daily summaries,
 # candidate bodies, and transaction backups never enter this ledger.
 # 模块用途: 为成功、失败和崩溃回滚生成幂等的 memory/curator/runs 日分片记录。
@@ -76,15 +77,15 @@ class CuratorRunRecord:
             raise ValueError("invalid memory curator run audit") from exc
 
 
-# LLM: The repository is the sole append path for run audit and applies exact record-id
-# idempotency under the existing per-path cross-process lock.
-# 类用途: 管理 memory/curator/runs/YYYY-MM-DD.jsonl。
+# LLM: 仓库仍是原run audit唯一追加路径，record-id幂等及原跨进程锁不变；零初始化构造不创建目录或授予执行。
+# 类用途: 绑定并管理原Curator运行审计，冷metadata只绑定路径。
 class CuratorRunLog:
-    # LLM: 构造器只绑定当前 owner 的 runs 根，不读取或重放历史运行。
-    # 函数用途: 初始化 Curator 无正文运行审计仓库。
-    def __init__(self, runs_dir: str | Path) -> None:
+    # LLM: 默认保原runs目录初始化；initialize=False纯路径绑定零I/O，不改变后续append原账/锁/调用者许可，不读或重放历史。
+    # 函数用途: 绑定当前owner无正文运行审计，冷metadata可显式跳过目录创建。
+    def __init__(self, runs_dir: str | Path, *, initialize: bool = True) -> None:
         self.runs_dir = Path(runs_dir)
-        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        if initialize:
+            self.runs_dir.mkdir(parents=True, exist_ok=True)
 
     # LLM: 普通追加自行取锁；恢复方持同一审计分片锁时共用锁内追加，不在 state 锁内另取文件锁。
     # 函数用途: 原子追加一次 Curator 运行审计。

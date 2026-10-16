@@ -1,5 +1,5 @@
-# LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；保持冻结身份、中断和原 IR 提交时机，出站消息与纯容量投影共用一个转换入口；瞬断重试共用原输入投递判据。
-# 模块用途: 统一模型调用、超时与流输出；重试共用原输入投递判据，使当前模型、原生消息和停止信号准确进入实际请求线程。
+# LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；真实估算前捕获遥测CAS版本，保持冻结身份、中断、排队及原 IR 提交时机；瞬断重试共用原输入投递判据。
+# 模块用途: 统一模型调用、超时、排队展示与流输出；重试仍共用原输入判据，模型、原生消息和停止准确进入请求线程。
 from __future__ import annotations
 
 import os
@@ -20,6 +20,7 @@ from ..concurrency.interrupt import (
     register_interrupt_callback,
     set_interrupt,
 )
+from ..conversation.context_usage import capture_context_usage_binding
 from ..conversation.model_metrics import publish_model_metrics
 from ..model_guidance import provider_system_instruction
 from ..tooling.content_transport_policy import MAX_INLINE_WRITE_CONTENT_CHARS
@@ -640,15 +641,17 @@ def _trace_model_start(request: ModelGenerateParams) -> None:
     )
 
 
-# LLM: 初始化沿原账本与 observed filter；工具选择共用 native_tool_protocol 规则，宿主 sink 仍只发布结构化事件。
+# LLM: 初始化沿原账本与 observed filter；真实估算前捕获线程CAS版本并随同次快照传递，原排队/取消/工具选择不变。
 # 函数用途: 为一次模型请求建立调用账本、流处理器、重连显示出口和 native 参数。
 def _start_model_generation(request: ModelGenerateParams) -> _ModelGenerationState:
     _begin_model_turn_identity(request.params, request.tool_rounds)
     chunk_filter = _build_tool_boundary_chunk_filter(request)
+    usage_binding = capture_context_usage_binding(request.agent, request.params)
     context_snapshot = model_visible_context_snapshot(
         request.agent,
         request.params,
         request.prompt,
+        usage_binding=usage_binding,
     )
     ledger, call_id, first_token_estimate = start_model_call_record(
         request,
@@ -1278,7 +1281,7 @@ def _generate_backend_response(
 
 
 # LLM: 原 observer/并发槽内核对宿主最终请求，再提交 child/guidance 意图；发送前拒绝 HTTP 为零，网络开始后不跨模型重发。
-# 函数用途: 调用真实模型后端，并记录物理请求尝试、耗时、并发和费用。
+# 函数用途: 调用真实模型后端，记录物理尝试、耗时、并发与费用；排队事件只交当前用户显示。
 def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState):
     # LLM 热路径 RED + token + USD 成本埋点(审计 #19):计时 + 成败 + token + cost 发到默认
     # registry,/metrics 暴露。record_llm_call/record_llm_cost 内部异常隔离,绝不影响下面真实调用。
@@ -1292,7 +1295,12 @@ def _invoke_backend_generate(backend, prompt: str, state: _ModelGenerationState)
     label = type(backend).__name__
     model = str(getattr(backend, "model_name", "") or "")
 
+    # LLM: 排队只有本次请求的展示事实，不能写入供应商物理尝试或失败账；保留原 usage/耗时观察。
+    # 函数用途: 将排队直接交给当前 typed sink，真实传输才登记模型调用账。
     def _observe_provider_attempt(event: dict[str, object]) -> None:
+        if event.get("status") == "queued":
+            _publish_transport_retry(state.retry_sink, event)
+            return
         record_model_provider_attempt(state.ledger, state.call_id, event)
         _trace_transport_retry(state, event)
         _publish_transport_retry(state.retry_sink, event)
@@ -1342,9 +1350,12 @@ def _mark_call_before_send(backend, prompt: str, state: _ModelGenerationState) -
     mark_injected_turn_input_submitted(state.agent, state.params, provider_call_id=state.call_id)
 
 
-# LLM: transport observer 只按 retry_scheduled 等结构化字段投递显示事件；显示 sink 失败不得改变模型调用结果。
-# 函数用途: 把 HTTP 层即将执行的退避同步给支持富记录的客户端。
+# LLM: observer 只读结构化排队/重试字段；展示失败不得改变准入、模型或工具执行结果。
+# 函数用途: 把 HTTP 层实际排队或即将执行的退避同步给客户端。
 def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> None:
+    if event.get("status") == "queued":
+        _publish_provider_queue(sink_owner, event.get("provider_queue"))
+        return
     if event.get("status") != "failed" or event.get("retry_scheduled") is not True:
         return
     sink = getattr(sink_owner, "write_provider_retry", None)
@@ -1360,6 +1371,18 @@ def _publish_transport_retry(sink_owner: object, event: dict[str, object]) -> No
         )
     except Exception:
         return
+
+
+# LLM: sink 来自宿主原请求绑定，公开白名单由 writer 统一清洗；观测失败不能反噬请求。
+# 函数用途: 发布排队状态，不假装已经发送或正在退避。
+def _publish_provider_queue(sink_owner: object, value: object) -> None:
+    sink = getattr(sink_owner, "write_provider_queue", None)
+    if not callable(sink):
+        return
+    try:
+        sink(value)
+    except Exception:
+        pass
 
 
 # LLM: The durable retry projection reads only the transport observer's typed retry fields and

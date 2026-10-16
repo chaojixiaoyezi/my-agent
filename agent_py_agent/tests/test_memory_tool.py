@@ -11,8 +11,10 @@ from agent_py_agent.agent.capability.memory_tool import (
     classify_memory_retention,
 )
 from agent_py_agent.agent.conversation.authority import CONVERSATION_AUDIT_PREPARE_ATTR
+from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
 
 
 def _agent_with_current_user(tmp_path, content: str = "请记住 moneywise 项目使用 UTC 保存时间"):
@@ -26,6 +28,7 @@ def _agent_with_current_user(tmp_path, content: str = "请记住 moneywise 项�
             "channel": "internal",
             "channel_conversation_id": "chat-1",
             "channel_user_id": "user-1",
+            "learning_source": user_dialogue_projection(),
         }
     )
     request_id = "req-memory-test"
@@ -48,7 +51,7 @@ def _agent_with_current_user(tmp_path, content: str = "请记住 moneywise 项�
 
 def test_remember_user_explicit_goes_through_candidate_and_promotes(tmp_path):
     agent = _agent_with_current_user(tmp_path)
-    result = RememberTool(agent).execute(
+    result = ConfirmedRememberWorkflow(agent).execute(
         {
             "content": "moneywise 项目使用 UTC 保存时间",
             "kind": "project",
@@ -66,7 +69,7 @@ def test_remember_user_explicit_goes_through_candidate_and_promotes(tmp_path):
     assert len(agent.memory.all()) == 1
     candidate = agent.memory_candidates.list()[0]
     assert candidate.status == "promoted"
-    # 矩阵1:非 batch 单条 add(user_explicit/tool_verified) 持久化 auto_eligible 且自动晋升。
+    # 矩阵1:非 batch 单条 add(user_explicit/tool_verified) 持久化来源资格，正式写另经用户审核。
     assert candidate.promotion_mode == "auto_eligible"
 
 
@@ -102,7 +105,7 @@ def test_remember_single_add_tool_verified_authorized_auto_but_evidence_gate_blo
 
 def test_remember_repairs_mislabeled_tool_origin_with_current_user_evidence(tmp_path):
     agent = _agent_with_current_user(tmp_path)
-    tool = RememberTool(agent)
+    tool = ConfirmedRememberWorkflow(agent)
     common = {
         "content": "moneywise 项目使用 UTC 保存时间",
         "kind": "project",
@@ -121,10 +124,10 @@ def test_remember_repairs_mislabeled_tool_origin_with_current_user_evidence(tmp_
     assert len(agent.memory.all()) == 1
 
 
-def test_remember_batch_adds_autonomously_promote_each_verified_fact(tmp_path):
-    """batch 只保证候选原子入账；每条合格事实随后自主通过同一证据门晋升。"""
+def test_remember_batch_adds_after_user_confirmation_promote_each_verified_fact(tmp_path):
+    """batch 只保证候选原子入账；每条合格事实随后经原CLI审核及正式提交。"""
     agent = _agent_with_current_user(tmp_path)
-    result = RememberTool(agent).execute(
+    result = ConfirmedRememberWorkflow(agent).execute(
         {
             "action": "batch",
             "operations": [
@@ -161,10 +164,10 @@ def test_remember_batch_adds_autonomously_promote_each_verified_fact(tmp_path):
     assert len(agent.memory.all()) == 2
 
 
-def test_remember_batch_single_add_uses_same_autonomous_policy(tmp_path):
+def test_remember_batch_single_add_uses_same_confirmation_flow(tmp_path):
     """入口形态不改变记忆权威；单项 batch 与普通 add 使用同一自主策略。"""
     agent = _agent_with_current_user(tmp_path)
-    result = RememberTool(agent).execute(
+    result = ConfirmedRememberWorkflow(agent).execute(
         {
             "action": "batch",
             "operations": [
@@ -200,10 +203,10 @@ def test_remember_batch_then_single_replay_stays_idempotently_promoted(tmp_path)
         "subject_key": "project.moneywise.timezone",
         "scope": {"scope_type": "project", "scope_key": "project:moneywise"},
     }
-    batch = RememberTool(agent).execute({"action": "batch", "operations": [operation]})
+    batch = ConfirmedRememberWorkflow(agent).execute({"action": "batch", "operations": [operation]})
     assert json.loads(batch.output)["results"][0]["reason_code"] == "PROMOTED"
 
-    replay = RememberTool(agent).execute({key: value for key, value in operation.items() if key != "action"})
+    replay = ConfirmedRememberWorkflow(agent).execute({key: value for key, value in operation.items() if key != "action"})
     payload = json.loads(replay.output)
 
     assert payload["active_memory_changed"] is False
@@ -215,10 +218,10 @@ def test_remember_batch_then_single_replay_stays_idempotently_promoted(tmp_path)
     assert len(agent.memory.all()) == 1
 
 
-def test_remember_replace_and_remove_autonomously_use_exact_entry_id(tmp_path):
-    """replace/remove 有精确 entry_id 和用户证据时自主执行，不再等待人工审核。"""
+def test_remember_replace_and_remove_after_user_confirmation_use_exact_entry_id(tmp_path):
+    """replace/remove 有精确 entry_id 和用户证据时在用户审核确认后执行。"""
     agent = _agent_with_current_user(tmp_path)
-    first = RememberTool(agent).execute(
+    first = ConfirmedRememberWorkflow(agent).execute(
         {
             "content": "moneywise 项目使用 UTC 保存时间",
             "kind": "project",
@@ -230,7 +233,7 @@ def test_remember_replace_and_remove_autonomously_use_exact_entry_id(tmp_path):
     assert json.loads(first.output)["active_memory_changed"] is True
     entry_id = agent.memory.all()[0].entry_id
 
-    replaced = RememberTool(agent).execute(
+    replaced = ConfirmedRememberWorkflow(agent).execute(
         {
             "action": "replace",
             "entry_id": entry_id,
@@ -245,7 +248,13 @@ def test_remember_replace_and_remove_autonomously_use_exact_entry_id(tmp_path):
     assert replaced_payload["results"][0]["reason_code"] == "PROMOTED"
     assert replaced_payload["results"][0]["status"] == "promoted"
 
-    removed = RememberTool(agent).execute(
+    # 删除是新的明确用户请求，不能借同一旧证据刷新刚替换过的目标版本。
+    agent._current_run_params.request_id = 'req-memory-remove-confirmed'
+    agent.conversation_store.messages.append({
+        'thread_id': agent._current_run_params.task_attributes['conversation_thread_id'],
+        'role': 'user', 'content': '请删除这条项目记忆',
+        'metadata': {'gateway_request_id': 'req-memory-remove-confirmed'}})
+    removed = ConfirmedRememberWorkflow(agent).execute(
         {
             "action": "remove",
             "entry_id": entry_id,
@@ -319,7 +328,7 @@ def test_remember_omitted_scope_is_host_bound_to_owner_personal(tmp_path):
 
     agent = _agent_with_current_user(tmp_path, "请记住我偏好先给风险再给方案")
 
-    result = RememberTool(agent).execute(
+    result = ConfirmedRememberWorkflow(agent).execute(
         {
             "content": "我偏好先给风险再给方案",
             "kind": "fact",
@@ -348,7 +357,7 @@ def test_remember_session_scope_is_bound_to_current_thread(tmp_path):
 
     agent = _agent_with_current_user(tmp_path, "请在本会话记住苍穹折页-420871")
 
-    result = RememberTool(agent).execute(
+    result = ConfirmedRememberWorkflow(agent).execute(
         {
             "content": "本会话校验词是苍穹折页-420871",
             "kind": "fact",
@@ -473,7 +482,7 @@ def test_remember_batch_with_one_unsaved_item_says_partial(tmp_path):
     blocked = {"action": "add", "content": "moneywise 构建产物已生成", "kind": "project", "origin": "tool_verified",
                "evidence_refs": ["call-build-1"], "subject_key": "project.moneywise.build",
                "scope": {"scope_type": "project", "scope_key": "project:moneywise"}}
-    result = RememberTool(agent).execute({"action": "batch", "operations": [saved, blocked]})
+    result = ConfirmedRememberWorkflow(agent).execute({"action": "batch", "operations": [saved, blocked]})
     payload = json.loads(result.output)
     assert payload["active_memory_changed"] is True and payload["saved"] is False
     assert payload["hint"].startswith("部分记上了：有 1 条没记上") and "不要对用户说全部记下了" in payload["hint"]

@@ -46,10 +46,16 @@ if TYPE_CHECKING:
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
+# 静态入口指引，不携带库存或运行信息；单位为一段固定中文说明。
+SELF_MAP_GUIDANCE = (
+    "关于自己的目录、能力、模型、权限或工作状态，先用 self_map 无参数看总览，再按 section/item 读取。"
+    "目录只说明当前本人可见事实，unknown/partial不能当作没有；按 next_read 回到原读口。"
+    "工具按需展开仍用 tool_search；目录不授权、不执行，也不是外部查询或任务完成证据。"
+)
 
 
-# LLM: 字段只属于本次 build；Skill ID 是展示投影，不能修改共享 builder/Router 或替代执行授权。
-# 类用途: 把工具段落及可选 Skill 名卡选择一起传给本次 prompt，None 保留原布局。
+# LLM: 字段只属于本次build；Skill名卡和self_map实际可用资格只影响展示，不修改共享状态或替代执行授权。
+# 类用途: 把工具段落、Skill名卡及本次实际可用的自我目录入口传给prompt，None保留原布局。
 @dataclass
 class ToolSections:
     """Bundle for PromptBuilder.build tool-related parameters."""
@@ -61,6 +67,7 @@ class ToolSections:
     # native tool_use 下工具往返由原生 messages 携带，prompt 不再折入 tool_context 文本
     # （避免文本+原生双份重复）。text 协议默认 False，行为不变。
     native_tool_use: bool = False
+    self_map_available: bool = False
     selected_skill_ids: tuple[str, ...] | None = None
     required_skill_ids: tuple[str, ...] = ()
     in_use_method_ids: tuple[str, ...] = ()
@@ -211,12 +218,15 @@ class PromptBuilder:
         return render_prepared_prompt(self.prepare_render_input(request))
 
     # LLM: canonical system 包括 override 共用可关闭的查询复查软指导；保持文件、persona、Skill、时钟原采集顺序，
+    #   self_map只追加固定入口指引，必须开关与本次实际可用资格同时成立，不读取目录；动态库存不进system。
     #   注入列表复制为元组，部署路径只采集到动态事实；纯投影只消费返回值，回合触发类型原样冻结。
     # 函数用途: 冻结材料与当前部署位置；线程人格按已提交断点保存，部署路径不进入固定前缀。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         from ..tooling.query_evidence import query_zero_result_guidance
         system_prompt = request.system_prompt_override or self.config.system_prompt
+        if getattr(self.config, "enable_self_map", True) and _tools.self_map_available:
+            system_prompt += "\n\n" + SELF_MAP_GUIDANCE
         if query_guidance := query_zero_result_guidance(self.config):
             system_prompt += "\n\n" + query_guidance
         task_local = _is_task_local_context(request.context_scope)
@@ -762,12 +772,22 @@ def _persona_home_context_chunks(
     return _persona_context_chunks(repository)
 
 
-# LLM: 无线程现读与冻结调用同一renderer；这里只消费展示段，结构截断集合不进入系统文本。
-# 函数用途: 将安全人格渲染为旧Home段落，保留关闭时字节口径。
+# LLM: 无线程现读与冻结使用同一renderer；消费前按本次metadata复核来源权限，共享整次网络期限。
+# 函数用途: 返回现读人格；渲染后撤权只移除AGENTS，不能泄漏正文，也不删除其他人格。
 def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
+    from ..capability.agents_source_network import source_request_budget
     if repository is None:
         return []
-    return [value for value in _render_persona_sections(repository.snapshot()).sections.values() if value]
+    with source_request_budget():
+        rendered = _render_persona_sections(repository.snapshot())
+        sections = rendered.sections
+        if repository.agents_source is None:
+            return [value for value in sections.values() if value]
+        try:
+            repository.agents_source.require_active_permission(rendered.agents_source_metadata)
+        except (ValueError, OSError):
+            sections = sections | {"agents": "", "diagnostics": ""}
+        return [value for value in sections.values() if value]
 
 
 # LLM: 有线程/开关/home启用时走唯一快照，无资格保持旧read_home_context；仅存安全渲染值，不存被拦原文。
@@ -783,7 +803,7 @@ def _thread_persona_context(builder: PromptBuilder, request: PromptBuildRequest,
     #   被拒，旧渲染不会写回快照；代次读取必须发生在渲染之前，不能事后补读。
     epoch = _read_persona_epoch(repository.owner_home)
     rendered = _render_persona_sections(repository.snapshot(), epoch)
-    return freeze_thread_persona(repository.owner_home, scope, rendered)
+    return freeze_thread_persona(repository.owner_home, scope, rendered, source_repository=repository.agents_source)
 
 
 # LLM: 展示顺序/清洗/截断与旧提示逐字一致；同次diagnostic.truncated给出不完整target，不解析诊断文案。
@@ -821,7 +841,8 @@ def _render_persona_sections(snapshots: dict, persona_epoch: int | None = None) 
         )
     return RenderedPersonaSections(chunks, frozenset(target for target, snapshot in snapshots.items()
                                                     if snapshot.diagnostic.truncated),
-                                   persona_epoch=persona_epoch)
+                                   persona_epoch=persona_epoch,
+                                   agents_source_metadata=getattr(snapshots.get("agents"), "agents_source_metadata", None))
 
 
 def _strip_injection_comments(text: str) -> str:

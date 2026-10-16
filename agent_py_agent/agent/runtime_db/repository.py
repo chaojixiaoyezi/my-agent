@@ -1,4 +1,5 @@
 # LLM: 执行权与 current CAS 共用原 RuntimeDB；查询可禁止初始化和写入，未启动收口同事务核对无操作，联测 UNKNOWN 与换代。
+#   wakes_need_attention只合并读取候选条件，不能更改或缓存实际到期、领取、回收与取消状态。
 # 模块用途: 保存任务、执行轮和委托关系，以事务领取和收回执行权，并提供不修改原账的结果查询。
 """Owner runtime.db 权威实体仓储（3.txt A/C/D/F 节落地面）。
 
@@ -455,7 +456,8 @@ def _uncertain_attempt_mutation_ids(
 
 # LLM: RuntimeRepository 是 owner runtime.db 的唯一写入口；新增状态前必须区分
 # 长期 Task 身份与可停止、失败、恢复的 TaskRun/AgentRun/Attempt 执行状态。
-# 类用途: 为 Gateway、主代理和恢复器提供同一份 SQLite 运行事实源。
+# wake合并探针只读取原WHERE条件，提交与取消仍走现有事务。
+# 类用途: 为 Gateway、主代理和恢复器提供同一份 SQLite 运行事实源；只读wake探针不能替代领取和回收事务。
 class RuntimeRepository(
     RuntimeSchemaMixin,
     RuntimeOperationsMixin,
@@ -3044,6 +3046,23 @@ class RuntimeRepository(
             )
             conn.commit()
             return len(ids)
+
+    # LLM: 一期候选①的便宜判据：一条只读连接 + 一条合并 EXISTS 查询，两个 EXISTS 的条件与
+    #   reclaim_expired_wakes / pop_due_wakes 的 WHERE 逐字相同（改 WHERE 必须同步这里，
+    #   一致性由 tests/test_background_tick_cheap_checks.py 锁住）。为假 ⇒ 两个写操作的
+    #   SELECT 都不可能选出行 ⇒ 两步都可安全跳过；为真或报错 ⇒ 调用方照常执行原两步
+    #   （宁多查不漏查）。只读：不 BEGIN IMMEDIATE、不写、不 commit，不改变任何状态。
+    # 函数用途: 判断 wake_queue 里有没有需要回收或消费的行，供后台拍省掉两个写事务。
+    def wakes_need_attention(self, *, now: float) -> bool:
+        current = float(now)
+        with self._runtime_connection() as conn:
+            row = conn.execute(
+                "SELECT (EXISTS(SELECT 1 FROM wake_queue WHERE status = 'claimed' AND lease_until < ?)) "
+                "OR (EXISTS(SELECT 1 FROM wake_queue WHERE status = 'pending' "
+                "AND next_due_at <= ? AND retry_after <= ?))",
+                (current, current, current),
+            ).fetchone()
+        return bool(row[0]) if row is not None else True
 
     def cancel_wakes_for_task(self, root_task_id: str) -> int:
         """任务终止/接管时清掉它的全部字条, 返回删除行数。"""

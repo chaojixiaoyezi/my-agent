@@ -1,6 +1,23 @@
 # AGENTS.md 归属、指向与自动学习分离
 
-状态：**设计已定（用户 2026-10-08 拍板；第 2 版按 mc4 设计审查修正），第 0 期实施中，第 1 期待实施**。本文是这一主题的唯一权威设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
+状态：**2026-10-16 F4/F5 独立组合候选已适配，未发布、未部署；最终组合与真实入口验收待做**。本文是这一主题的唯一权威设计；`DESIGN_LEDGER.md` 只保留摘要和链接。下列 2026-10-08 背景、分期与历史验证保留，当前行为以本节及准确实现为准。
+
+R2 发现的人格祖先后置 bind 遮掉 main hidden/拒写子覆盖 P1，已用准确独立 mount-order 补丁修复并经非作者复核。新增祖先 mount 时仅重放同次最终有效的更窄原参数；授权仍用原含 hidden 底图。普通 deny 保留窄 allow，绝对 readonly 无写例外，strict owner/full/allowlist 隐藏最后施加；B7 hide_home 的合法 workspace/public/明确写根恢复保持。原断言、来源只读和普通业务写均不弱化。
+
+后续 CLI guard 已移至所有生产构造器定义后，完整模块入口与 import 后调用走同一原探针链。新 fake CLI 明确隔离失败、返回原 typed 失败与exit1，binary-only只证明binary；不得当作Linux readiness正例。当前源码合同 P1/P2 已闭合，离线 argv/差分与 fake 子进程验证仍不代表真实 Linux 内核挂载或最终组合/发行验收。
+
+## 当前实现与确认规则（2026-10-16）
+
+- `persona/agents_source.json` 仍是当前 owner 来源的唯一配置；`AgentsSourceSnapshot` 将 kind/locator、配置版本/revision、内容摘要与加载状态分开。原历史与缓存是附属记录，目录或配置不产生读写/网络权限，F5 仅读安全 configuration 元信息，不加载正文、不暴露 locator，也不把配置修订说成正文实时新鲜。
+- `agents_source_enabled=true`；只读 HTTPS 来源的 `agents_source_network_enabled=false`。二者属于部署配置边界，模型不能用 user_config 自己开。原 /settings 管部署配置的权限保持，普通 owner 的 /agents 不因此新增全机管理员门。远程来源、代理、OS/TLS/网络安全只记录，本轮不作真实探测或放行承诺。
+- 本人 `/agents show|refresh|source local|source url|reset|write|confirm|receipt` 沿原公开控制链；切源和写正文都须完整预览后确认。跨 owner 只允许原完整本机管理员、Full Access 与准确显式目标同时成立；当前 actor 不被目标替换。群仍核原 HostActor/会话租约，不恢复已退出的配置额外监控 grant。
+- 当前认证栈活封印只在原控制 C 锁首次执行传入 receipt 重建 scope，离栈失效；旧回执、role 文本、confirmed/source_quote、工具或模型输出不能重建批准。预览绑定 owner、actor、线程、准确意图、600 秒有效期与旧来源/正文 CAS；先耐久 consumed_unknown 再副作用，unknown 不重放。
+- 本地写沿原可信描述符、精确字节与前像，提交前复核身份、CAS 和权限。切换来源先确认原 PTY/插件资源退役；未确认就保持原配置，不发布新来源。冻结前缀仅按原刷新点激活，权限撤回即时复核，不能为缓存保留已撤回正文。
+- 宿主学习来源随线程、请求、后台/调度、子代理 lineage 与真实归档传播；unknown、外部资料或自动化不能升级成用户本人来源。来源合格只可产生候选，自动正式 Memory/working_agreement/lesson/HOT 发布均须用户确认；AGENTS promotion 一律拒绝。USER/SOUL 及正式 Skill 保留 main 现有允许行为、用户确认和 CAS，不按旧源回退。
+- working_agreement 使用唯一长期库候选。普通/群 IM 本人 `/memory candidates preview <候选ID>` 可达，确认绑定完整候选记录 SHA、正文/展示语义、owner/actor/channel/conversation/thread 与原目标版本 CAS；nonce 复用原 control 预览回执，原 review→promote(false, expected_candidate=...) 两段之间的变化也拒绝。不新增第二审批账。
+- 候选无法安全完整展示时不提供 IM 确认，不用脱敏/摘要批准另一正文。取消仅作废预览，拒绝走原候选状态机；提交后回执失败保持 unknown。正式删除墓碑及候选/向量/SQLite/正文清理失败用 REMOVE_CLEANUP_PENDING 保留真实已提交事实，恢复不重做新正式发布。
+
+当前命令说明见[命令参考](../../CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布)，原读口聚合见[自我目录](SELF_MAP.md)。分线、非作者与最终组合验收分开记录在[TESTS](../../TESTS.md)；真实 IM、网络和发布未由离线成绩代验。
 
 ## 1. 背景（结构化事实，2026-10-08）
 
@@ -179,3 +196,7 @@ curator 要覆盖三处：
 - **网络**：访问内网或本机地址（包括重定向和代理二次解析）；超大内容或解压炸弹；注入内容；首次拉取失败；撤权；旧抓取覆盖新配置。
 - **记忆连贯**：迁移不能丢用户本人写的条目，能从快照完整恢复；待定候选不能因为硬拦而丢失；归档不能被重新召回或学习。
 - **缓存**：指向或内容变化只在冻结刷新点生效，不能让每一轮的固定前缀都变。
+
+## 2026-10-16 closed 宿主的来源装配
+
+来源服务组合根只用规范 owner/home 与 normal owner-wall 静态策略核对 repository 身份；静态策略不承载实际读取授权。所有真实本地来源仍通过同一活 path_policy_provider，URL 仍走原许可复核。坏权限保持 closed+load_errors、来源不可用且不读旧缓存，不覆盖坏权限文件，也不把来源许可变成整个 SimpleAgent 构造的前置条件；修复后由下一次原裁决恢复。本改动不改变 owner_policy、TLS、代理、出口或网络配置。

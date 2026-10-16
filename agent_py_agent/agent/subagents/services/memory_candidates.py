@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 
+from ...conversation.learning_source import child_projection_from_parent, unknown_projection
 from ...memory_store.candidate_models import CandidateObservation, MemoryScope
 from ...memory_store.candidates import CandidateService
 from ..lesson_ledger import LessonLedgerEntry
@@ -102,6 +103,7 @@ class SubAgentMemoryCandidateService:
             source_run_ids=(run_id,),
             observed_at=_observed_at(task),
             confidence=max(0.0, min(1.0, float(confidence or 0.0))),
+            learning_source=_candidate_learning_source(task),
             proposed_action="add",
             promotion_target="lesson",
             observation_id=(
@@ -128,6 +130,7 @@ def _lesson_observation(task: SubAgentTask, text: str) -> CandidateObservation:
         source_run_ids=(run_id,),
         observed_at=_observed_at(task),
         confidence=0.5,
+        learning_source=_candidate_learning_source(task),
         proposed_action="add",
         promotion_target="lesson",
         observation_id=f"subagent:{run_id}:lesson:{digest}",
@@ -162,6 +165,7 @@ def _ledger_lesson_observation(task: SubAgentTask, entry: LessonLedgerEntry) -> 
         source_run_ids=(run_id,),
         observed_at=_iso_time(entry.created_at) or _observed_at(task),
         confidence=0.5,
+        learning_source=_candidate_learning_source(task),
         proposed_action="add",
         promotion_target="lesson",
         observation_id=f"subagent:{run_id}:lesson:{entry.lesson_id}",
@@ -207,6 +211,7 @@ def _finding_observation(
         source_run_ids=(run_id,),
         observed_at=_iso_time(payload.get("created_at")) or _observed_at(task),
         confidence=max(0.0, min(1.0, _float(payload.get("confidence"), 0.0))),
+        learning_source=_candidate_learning_source(task),
         proposed_action="add",
         promotion_target="long_term",
         observation_id=f"subagent:{run_id}:finding:{finding_id or digest}",
@@ -250,6 +255,22 @@ def _output_refs(
 def _task_identity(task: SubAgentTask) -> tuple[str, str]:
     run_id = str(getattr(task, "id", "") or "").strip()
     return str(getattr(task, "root_id", "") or run_id).strip(), run_id
+
+
+# LLM: 子代理候选的来源=spawn 边界冻结的父级事实合成自己的 subagent 投影（标签+run/task 关联，
+#   trigger 沿链条继承：定时/派活/后台触发的子代理一律不可学）；父级缺失或坏值时归为未知
+#   （fail-closed），绝不把子代理候选猜成用户对话。
+# 函数用途: 构造子代理候选级来源投影。
+def _candidate_learning_source(task: SubAgentTask) -> dict[str, object]:
+    attrs = getattr(task, "attributes", None)
+    attrs = attrs if isinstance(attrs, dict) else {}
+    task_id, run_id = _task_identity(task)
+    source = child_projection_from_parent(
+        attrs.get("learning_source"),
+        run_id=run_id,
+        task_id=task_id,
+    )
+    return source if source is not None else unknown_projection()
 
 
 # LLM: observation 时间只作经历时间，不参与自动替换或事实胜负。

@@ -1,3 +1,16 @@
+2026-10-16 六项统一交付：根单点负责 canonical main、最终 gate、远端与生产服务；F1/F2/F4/F5/F6/F7 作者候选组合后统一冻结，旧 main CI 基线单独提交但不单独更新用户安装。测试修复按文件独占，生产无关夹具不降低权限；发行线只做仓外同源离线工件。F3 当前只读准备并后置，网络安全只记录。
+
+## 2026-10-16 七块功能分批集成
+
+用户已授权按 F1→F2→F4→F5→F6→F7→F3 推进；沿 main 的现行合同逐项合并，保留更优实现并补齐当前新增能力。普通实现与非作者复核用 6.1-sol high/xhigh，Astra 仅用于必要设计复核。网络安全差异只记录，F3 默认 Count0。
+
+- 根独占 main 集成树、共享配置与全局文档、性能基线、F1-b/d/e 适配、组合严格 gate、main 推送、服务部署与发行。
+- F1 快照线独占独立 `merge-f1-snapshots-20261016` 工作树的 context_bundle、tool_manifest、对应保留清理和直接测试；不移植 F3 写端口。
+- F1 SQLite 线独占独立 `merge-f1-sqlite-20261016` 工作树的 SQLite scope/lease/schema、原数据库工厂及请求作用域和直接测试；配置差异交根，不修改后台廉价检查语义。
+- F2 线独占独立 `merge-f2-provider-20261016` 工作树的 provider lease/可信 owner、backend 真实传输与模型等待事件和直接测试；配置差异交根，不变更 TLS/网络策略和 F3。
+
+各线固定来源 072f929bd、目标基线 0457b0198，不提交、不推送、不操作真实服务；完成后提供完整路径差异与 HANDOFF_TEMPLATE 格式交接。根按功能顺序移植，F2 可先并行实现但在 F1 冻结后组合验收。全局 main 未提交评估文档保留，原开发目录保持原样。
+
 2026-10-15 飞书原生图片：准确集成树281263885上建立`codex/feishu-native-images`，沿本任务已有共享树逐文件独占，全部子代理6.1-sol high。入站线独占adapter下载/准备/原ingress永久错误及直接测试；后台线独占HostMessageContext、原SessionTask/TaskLink输入恢复、IR媒体表达、自动委派与子孙授权及直接测试；模型线独占原模型卡/档案公开投影与直接测试。根独占图片解码校验、配置/依赖/全局文档、组合验收；各线不自行提交、部署或新开真实平台连接，冻结后统一非作者审阅。实施以[图片合同](design/FEISHU_NATIVE_IMAGES.md)为准。
 
 2026-10-15 群公共凭据：继续准确main集成树逐文件独占，子代理为6.1-sol high。群线独占task_credential_groups及矩阵；发现线独占原request_credentials工具及发现测试；根独占原存储/表单/HTTP/配置/全局文档与最终gate。非作者独立只读审阅，发行线仅仓外同源工件。源码冻结后统一验收；唯一生产配置/服务/部署由根串行操作。
@@ -184,3 +197,7 @@ main 集成、推送、部署和默认 Gateway 重启由集成方单独操作；
 ## 2026-10-14 手动引用各类资料
 
 根独占原引用证明、manager下载接线、配置、根文档、test_feishu_quoted_inputs/text/media和发布。内容线独占新增feishu_quoted_content及测试；成员线独占新增feishu_quoted_members及测试。两线冻结后由非作者交换审查，根统一focused/strict/native gate与main推送；无同时写同一文件。引用来源只作外部资料；无真实租户外发、生产监控修改或第二owner/状态权威。交接入口为[引用消息合同](design/FEISHU_QUOTED_MEDIA.md)和同包测试清单。
+
+## 2026-10-16 F6/F7 正式组合独占
+
+F1 SQLite 线独占 merge-f6-f7-combined-20261016 树，在准确 R2 候选上按 F6→P2→typed fixture→F7 组合及同步相关文档。全部 R2 工作文件预先冻结 SHA；生产仅 F6 与已批准 P2 范围，F5 compact self_map/F4 learning_source 按函数保留。根独占 R2/M/B、全仓与正式发布；本线不带 F3、不提交、不部署，只交相对 R2 的精确补丁与 before/after。只用显式临时 home 的 pytest，不操作真实模型/外网/日常服务。

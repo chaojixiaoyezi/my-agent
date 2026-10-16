@@ -19,6 +19,7 @@ from ...conversation.authority import (
     conversation_runtime_workspace_roots,
     current_conversation_task_attributes,
 )
+from ...conversation.learning_source import LEARNING_SOURCE_KEY, spawn_source_projection
 from ...runtime_context import current_task_root
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import DEFAULT_COMMAND_ACCESS_MODE
@@ -480,7 +481,8 @@ def _config_access_mode(agent) -> str:
     return text or DEFAULT_COMMAND_ACCESS_MODE
 
 
-# LLM: 根/递归共用属性装配，宿主工具上限、模型引用和智能程度档位覆盖伪造值，决策与命名来源只能由宿主在准备后写入；
+# LLM: 根/递归共用属性装配，先清模型身份别名，再由宿主绑定工具上限、模型引用和学习来源；不能让业务属性保留伪造 actor。
+#   决策与命名来源只能由宿主在准备后写入；
 #   input_media_refs 经 input_media_refs.bind_subagent_input_media 解析成 host-owned input_media，失败抛
 #   SubagentInputMediaError（调用方与 ModelProfileError 同样转成 not_started）。
 # 函数用途: 清除模型身份别名后绑定业务属性、父工具上限和附件；宿主 actor 经专有字段传递。
@@ -496,6 +498,8 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     attrs.pop("host_model_decision.v1", None)
     attrs.pop("host_subagent_model_advice.v1", None)
     attrs.pop("host_agent_name_origin.v1", None)
+    # 模型不能自带学习来源（与候选 payload 同规则）；来源只由宿主在下方按当次回合事实写入。
+    attrs.pop(LEARNING_SOURCE_KEY, None)
     if parent_authority := current_creation_tool_authority():
         attrs[DIRECT_PARENT_TOOL_AUTHORITY_ATTR] = parent_authority
     for key in _LIST_ATTRIBUTE_FIELDS:
@@ -522,6 +526,12 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
             attrs[key] = _positive_int(raw_params.get(key), default=0)
     _add_derived_output_refs(attrs, raw_params)
     add_current_conversation_attrs(attrs, agent)
+    # spawn 边界冻结当次回合来源：自动化痕迹（定时/派活/后台）优先，其次显式投影；
+    # 都无时不写（fail-closed，消费侧按不可学），子代理触发链条因此不被洗成用户对话。
+    if agent is not None:
+        source = spawn_source_projection(current_conversation_task_attributes(agent))
+        if source is not None:
+            attrs[LEARNING_SOURCE_KEY] = source
     _inherit_conversation_request_id(attrs, agent)
     _add_current_task_workspace(attrs, agent)
     _inherit_audit_guarantee(attrs, agent)

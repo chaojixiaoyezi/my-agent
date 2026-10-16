@@ -240,6 +240,7 @@ class _RequestDispatcher:
         self._recover_throttle = _RecoverThrottle(self.bootstrap_agent)
         self._next_input_reconcile_at = 0.0
         self._next_terminal_projection_at = 0.0
+        self._terminal_projection_startup = True
         # 派发段失败与逃逸异常共用一份循环退避；三个后台修复段各自一份，失败只推迟自己的下次到期，绝不拖慢派发轮询
         #（tick 的约定：Historical projection and reconciliation scans must never sit in front of an interactive request）。
         self.backoff = LoopErrorBackoff()
@@ -310,9 +311,11 @@ class _RequestDispatcher:
             agent=self.bootstrap_agent,
         )
 
-    # 函数用途: 终态投影段的一次执行。
+    # LLM: 首次强制读取原终态；随后只节流已追平的可重建投影，不改变请求派发和恢复顺序。
+    # 函数用途: 启动完整核对一次终态投影，稳态由原扫描游标控制低频重核。
     def _project_terminals_once(self) -> None:
-        repair_gateway_terminal_projections(self.paths, agent=self.bootstrap_agent, limit=16)
+        startup, self._terminal_projection_startup = self._terminal_projection_startup, False
+        repair_gateway_terminal_projections(self.paths, agent=self.bootstrap_agent, limit=16, full_scan=startup)
 
     # LLM: 对账结果里的错误（对账抛错、带错误的终态未知）要抛给段守卫：进 loop_health 计数与限流打印，并只推迟本段自己的
     #   下次到期；不能像以前那样把 summary 丢掉让坏账回执被静默重读。

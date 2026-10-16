@@ -1,4 +1,4 @@
-# LLM: update_persona 工具——把用户的【长期人设/画像/工作约定】写进对应人格文件(SOUL/USER/AGENTS.md),
+# LLM: update_persona提供USER/SOUL原有编辑与AGENTS只读；AGENTS写入只能经当前用户 /agents 预览确认，
 #   这三件每轮整文件注入系统上下文、真正塑造每次交互。区别于 remember(记"需要时才想起"的具体事实/事件到
 #   长期记忆,按相关性召回)。用户表达"以后叫我X/我是做Y的/你说话别太正式"这类长期设定时用本工具,不用 remember。
 #   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)；首次写入保留 version 0 修改前基线。
@@ -51,17 +51,17 @@ _PERSONA_DESCRIPTION = (
     "**target=user(用户画像/称呼/长期偏好)可直接写**;"
     "同一条用户消息里有多个 USER 事实时，必须把全部变更放进一次 operations 批量调用；"
     "整批全部校验后只写一次，任一项失败则全部不写。"
-    "**target=agents(长期工作约定)由当前 owner 的 Agent 自主维护；"
+    "**target=agents(用户规则)只提供读取，修改必须由用户通过 /agents 显式预览确认；"
     "target=soul(你自己的性格语气)的任何变更必须通过统一危险动作审批门。"
     "禁止改用 write/edit/patch/shell 绕过。**"
 )
 _PERSONA_USE_CASES = (
     "用户说怎么称呼他 / 自我介绍身份角色 / 表达长期偏好 → target=user(直接写)",
     "用户明确要求长期调整性格/语气/风格 → target=soul，由统一审批门裁决",
-    "长期工作约定/产物习惯或反复验证的方法 → target=agents，可自主结构化更新",
+    "用户规则的查看 → target=agents；学到的工作约定先成为长期记忆候选，待用户审核确认",
 )
 _PERSONA_AVOID_WHEN = (
-    "用基础文件或 shell 工具改人格文件 → 必须改用 update_persona；只有 soul 需要用户确认",
+    "用基础文件或 shell 工具改人格文件 → 必须改用 update_persona；AGENTS 使用 /agents 预览确认，SOUL 走原确认链",
     "一次性临时语气(如'这次说话活泼点')→ 当场照做即可,别写进 soul",
     "只是'需要时才想起'的具体事实/事件(如'下周三交报告''项目叫X')→ 用 remember 记 memory",
 )
@@ -80,7 +80,7 @@ _PERSONA_KEYWORDS = (
 )
 _PERSONA_PARAMETERS = {
     "action": "可选。add(默认)/list/replace/remove/batch/history/rollback/status。replace/remove 必须先 list 取得 entry_id。",
-    "target": "必填。user(用户画像/称呼,自主写)/ soul(性格语气,需用户确认)/ agents(长期工作约定,自主写)。",
+    "target": "必填。user(用户画像/称呼,自主写)/ soul(性格语气,需用户确认)/ agents(用户规则,只读；修改走 /agents)。",
     "content": "单项 add/replace 必填。要写进的一句话纯描述；不得换行。list/remove 不需要。",
     "entry_id": "replace/remove 必填。只能使用 list 返回的精确 entry_id，不能按自然语言猜删除目标。",
     "source_quote": (
@@ -178,6 +178,8 @@ def build_update_persona_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 模型可读AGENTS的list/status/history，但不能签发正式修改授权；USER/SOUL仍走既有工具权限和群lease。
+# 类用途: 提供人格查看及已有允许的人格编辑，AGENTS编辑导航到用户预览确认入口。
 class UpdatePersonaTool(BaseTool):
     model_spec = build_update_persona_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -204,7 +206,8 @@ class UpdatePersonaTool(BaseTool):
             parameter_kinds={"target": "logical", "entry_id": "logical"}),
     )
 
-    # 类用途: 把"更新用户人设/画像/工作约定"暴露成模型工具,落到 owner 的 SOUL/USER/AGENTS.md(每轮注入)。
+    # LLM: 宿主绑定唯一owner仓库，构造不读写人格、不签发AGENTS修改权。
+    # 函数用途: 绑定人格工具所属的当前Agent。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
@@ -216,13 +219,20 @@ class UpdatePersonaTool(BaseTool):
             )
         return ToolAvailability.ready()
 
+    # LLM: 先解析结构化参数并按目标拒绝AGENTS修改；模型confirmed/source_quote不自证，不能顺带拒绝USER/SOUL原合法写。
+    # 函数用途: 执行人格查看或现有允许的编辑，并保留群授权边界。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _parse_persona_tool_request(params)
         if isinstance(request, ToolHandlerOutcome):
             return request
+        if request.target == "agents" and request.action not in {"list", "status", "history"}:
+            return _err("AGENTS规则只能由用户在当前请求通过 /agents 预览并确认修改；本次未写入。",
+                        "AGENTS_WRITE_USER_ONLY", hint="请使用 /agents show 查看，或 /agents write <JSON字符串> 预览。",
+                        effect_outcome="not_started")
         try:
             repository = self._repository()
-            repository.path_for(request.target)
+            if request.target != "agents" or repository.agents_source is None:
+                repository.path_for(request.target)
         except PersonaRepositoryError as exc:
             return _err(str(exc), "TOOL_UNAVAILABLE")
         read_result = _persona_read_result(repository, request)
@@ -448,13 +458,16 @@ def _reset_persona_update_rate_limit() -> None:
         _persona_update_last_cleanup = 0.0
 
 
-# LLM: Read-only Persona actions bypass consent and mutation while sharing repository diagnostics.
+# LLM: 只读人格动作不制造修改授权，与唯一仓库共享诊断；AGENTS显式来源须消费同次安全快照。
 # 函数用途: 统一 list/history/status 三种只读返回，避免主执行函数重复异常处理。
 def _persona_read_result(
     repository: PersonaRepository,
     request: _PersonaToolRequest,
 ) -> ToolHandlerOutcome | None:
     try:
+        if (request.target == "agents" and repository.agents_source is not None
+                and request.action in {"list", "status", "history"}):
+            return _agents_read_result(repository, request)
         if request.action == "list":
             payload = repository.list_entries(request.target)
             payload.update({"ok": True, "action": "list"})
@@ -601,3 +614,25 @@ __all__ = [
     "UpdatePersonaTool",
     "build_update_persona_model_spec",
 ]
+
+
+# LLM: AGENTS读取只消费唯一来源的同次安全快照；显式来源历史不冒充默认版本账，不授予修改权或绕过权限。
+# 函数用途: 为模型保留规则列表、状态和历史导航，外部来源仍通过仓库读取并有界输出。
+def _agents_read_result(repository, request):
+    from .persona_repository import _persona_entries_for_output
+    snapshot = repository.load("agents")
+    if snapshot.diagnostic.state in {"security", "io"}:
+        return _err("AGENTS来源当前不可用。", "AGENTS_SOURCE_UNAVAILABLE", effect_outcome="not_started")
+    payload = {"ok": True, "target": "agents", "action": request.action,
+               "diagnostic": snapshot.diagnostic.to_dict(), "writable_by_tool": False,
+               "next_command": "/agents show"}
+    if snapshot.agents_source is not None:
+        payload["source"] = snapshot.agents_source.to_dict()
+    if request.action == "list":
+        payload["entries"] = _persona_entries_for_output(snapshot.content, "agents")
+        payload["sha256"] = snapshot.diagnostic.sha256
+    elif request.action == "history":
+        source = snapshot.agents_source
+        payload["versions"] = repository.history("agents") if source is None or source.kind == "owner_default" else []
+        payload["history_scope"] = "owner_default_versions" if source is None or source.kind == "owner_default" else "source_control_receipts"
+    return ToolHandlerOutcome("update_persona", True, json.dumps(payload, ensure_ascii=False))

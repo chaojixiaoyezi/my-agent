@@ -12,6 +12,7 @@ from agent_py_agent.agent.agent_core.model.context_pressure import (
 )
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.conversation import compact_request_budget
+from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
 from agent_py_agent.agent.conversation.input_media import (
     import_input_media,
@@ -99,7 +100,7 @@ def _image_blocks(wire) -> int:
     return json.dumps(wire["messages"]).count('"type": "image"')
 
 
-# (是否带图, 长文字行数, off 下预期, auto 下预期)
+# (是否带图, 长文字行数, off 下预期, auto 下预期)；本矩阵明确声明不支持图片，故保留旧存档选源断言。
 @pytest.mark.parametrize("case", [
     (True, 6, "sent", "sent"),            # 压缩点以下：原样带图发送
     (True, 16, "sent", "compacted"),      # 越过压缩点、低于窗口：off 带图发送不压缩；auto 归档引用后压缩再发送
@@ -107,6 +108,8 @@ def _image_blocks(wire) -> int:
     (False, 16, "compacted", "compacted"),  # 纯文字对照：原自动压缩后发送
 ])
 @pytest.mark.parametrize("policy", ["off", "auto"])
+# LLM: 纯文字能力声明是回退的结构事实；原落盘/业务/来源断言保留，并锁住回退原因。
+# 函数用途: 验证不支持媒体的摘要后端走旧存档选源，原始记录和归档结果都不丢。
 def test_gateway_media_history_between_trigger_and_window(tmp_path, monkeypatch, case, policy):
     outcome = case[2] if policy == "off" else case[3]
     monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "my-agent-home"))
@@ -123,8 +126,10 @@ def test_gateway_media_history_between_trigger_and_window(tmp_path, monkeypatch,
     business, _ = fake_http(monkeypatch, fixture)
     summaries = []
 
+    # LLM: 这里只捕获结构上不支持图片的旧存档选源请求，不把这一断言外推到冻结主前缀。
+    # 函数用途: 核对文字回退请求的媒体引用和模型回复。
     def summarize(request):
-        # 摘要请求只能看到归档引用文字块，不能带 local_file 媒体引用或附件路径
+        # 声明不支持图片，故此次失去前缀缓存，摘要请求只看到归档引用。
         payload = json.dumps(request.messages or [], ensure_ascii=False) + str(request.prompt)
         summaries.append(("附件引用" in payload, "local_file" in payload))
         return ModelResponse(text="已完整核对原始材料。", backend="fake")
@@ -147,8 +152,97 @@ def test_gateway_media_history_between_trigger_and_window(tmp_path, monkeypatch,
         assert _image_blocks(business[0][0]) == 0
         media = case[0]
         assert all(saw_ref is media and not saw_local for saw_ref, saw_local in summaries), summaries
+        checkpoint = committed_compact_checkpoint_chain(agent, thread)[-1]
+        if media:
+            assert checkpoint["media_policy_reason"] == "COMPACT_PREFIX_MEDIA_UNSUPPORTED"
+            assert checkpoint["media_blocks_archived"] == 1 and checkpoint["media_refs"]
         return
     assert thread.compact_generation == 0 and not summaries
     assert len(business) == (0 if outcome == "refused" else 1)
     if outcome == "sent":
         assert _image_blocks(business[0][0]) == 1
+
+
+@pytest.mark.parametrize("policy", ["auto", "archived_refs"])
+@pytest.mark.parametrize("modalities", [["text", "image"], None])
+# LLM: 只替换HTTP响应，比较实际摘要HTTP与同次冻结主投影；媒体归档只约束checkpoint和后续业务展示。
+# 函数用途: 证明已支持或未声明不支持的媒体原样进入连续前缀，压缩后仍按引用归档。
+def test_frozen_media_prefix_is_sent_unchanged_then_archived(tmp_path, monkeypatch, policy, modalities):
+    from agent_py_agent.tests.test_transcript_compact_prefix import _blocks, _capture_frozen_wires
+
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "my-agent-home"))
+    fixture = actual_request(tmp_path, mode="disabled", original_window=WINDOW)
+    agent = fixture.agent
+    agent.config.compact_media_policy = policy
+    agent.config.model_input_modalities = modalities
+    agent.config.memory_compact_auto_trigger_percent = 50
+    agent.config.max_tokens = 1024
+    ids = _seed(agent, fixture.thread_id, (True, 16), tmp_path)
+    frozen = _capture_frozen_wires(monkeypatch, agent)
+    wires, _ = fake_http(monkeypatch, fixture)
+    assert request_execution._run_gateway_ask(fixture.context).response == "资料整理完成。"
+    assert len(wires) == 2, "只有一次摘要和一次业务HTTP，不另发视觉探针或看图小请求"
+    summary_wire, business_wire = wires[0][0], wires[1][0]
+    source = _blocks(summary_wire)[:-1]
+    assert len(frozen) == 1 and source and source == _blocks(frozen[0])[:len(source)]
+    assert _image_blocks(summary_wire) == 1 and _image_blocks(business_wire) == 0
+    thread = agent.conversation_store.threads.require(fixture.thread_id)
+    checkpoint = committed_compact_checkpoint_chain(agent, thread)[-1]
+    assert checkpoint["media_blocks_archived"] == 1 and checkpoint["media_blocks_summarized"] == 0
+    assert checkpoint["media_refs"] and checkpoint.get("media_policy_reason", "") != "COMPACT_PREFIX_MEDIA_UNSUPPORTED"
+    assert all(sha in json.dumps(summary_wire, ensure_ascii=False) for sha in checkpoint["media_refs"])
+    assert "were replaced by" not in str(summary_wire), "冻结前缀摘要指令不能谎称媒体已从请求移除"
+    assert "local_file" not in thread.summary
+    stored = [row.message_id for row in agent.conversation_store.messages.recent(fixture.thread_id, limit=0)]
+    assert stored[:len(ids)] == ids
+
+
+# LLM: 两种路径只在测试中剥离前缀优化，真实媒体导入/预算/归档/CAS 均执行；同量历史和同窗口不得增加请求。
+# 函数用途: 比较原来源与 F6 在超窗含图历史上的调用数、完整覆盖与图片事实。
+@pytest.mark.parametrize("policy", ["auto", "archived_refs"])
+def test_supported_media_prefix_over_window_recovers_with_original_source(tmp_path, monkeypatch, policy):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.agent_core import compact_request_recovery
+    from agent_py_agent.agent.conversation import compact
+
+    results = []
+    for freeze, name in ((False, "main"), (True, "f6xx")):
+        with monkeypatch.context() as patch:
+            root = tmp_path / name
+            patch.setenv("MY_AGENT_HOME", str(root / "my-agent-home"))
+            fixture = actual_request(root, mode="disabled", original_window=WINDOW)
+            agent = fixture.agent
+            assert agent.home_paths.root.resolve() == (root / "my-agent-home").resolve()
+            agent.config.compact_media_policy = policy
+            agent.config.model_input_modalities = ["text", "image"]
+            agent.config.memory_compact_auto_trigger_percent = 50
+            ids = _seed(agent, fixture.thread_id, (True, 32), root)
+            if not freeze:
+                original_surface = compact_request_recovery._transcript_summary_surface
+
+                def without_prefix(*args):
+                    surface, tools = original_surface(*args)
+                    return replace(surface, transcript_prefix=None), tools
+
+                patch.setattr(compact_request_recovery, "_transcript_summary_surface", without_prefix)
+                original_resolved = compact._resolved_provider_surface
+                patch.setattr(compact, "_resolved_provider_surface", lambda request: replace(
+                    original_resolved(request), transcript_prefix=None))
+            wires, _ = fake_http(patch, fixture)
+            assert request_execution._run_gateway_ask(fixture.context).response == "资料整理完成。"
+            thread = agent.conversation_store.threads.require(fixture.thread_id)
+            checkpoints = committed_compact_checkpoint_chain(agent, thread)
+            assert thread.compact_generation == 1 and len(checkpoints) == 1
+            checkpoint = checkpoints[0]
+            assert checkpoint["source_message_ids"] == ids
+            assert checkpoint["media_blocks_archived"] + checkpoint["media_blocks_summarized"] == 1
+            assert checkpoint["media_refs"] and _image_blocks(wires[-1][0]) == 0
+            if policy == "archived_refs":
+                assert all(_image_blocks(wire[0]) == 0 for wire in wires)
+            stored = [row.message_id for row in agent.conversation_store.messages.recent(fixture.thread_id, limit=0)]
+            assert stored[:len(ids)] == ids
+            results.append((len(wires), {key: checkpoint[key] for key in (
+                "media_refs", "media_blocks_archived", "media_blocks_summarized")}))
+    assert results[0] == results[1], "容量预检不得比原媒体分段路径多发一次失败请求或改变媒体事实"
+    print("media_prefix_fallback_calls", policy, results)

@@ -27,7 +27,6 @@ from agent_py_agent.agent.conversation.background_history_seed import (
 )
 from agent_py_agent.agent.conversation.compact_checkpoint import committed_compact_checkpoint_chain
 from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
-from agent_py_agent.agent.conversation.compact_tool_summary import carried_compact_source_text
 from agent_py_agent.agent.conversation.runtime import _run_params
 from agent_py_agent.tests.test_background_compact_recovery import _background
 from agent_py_agent.tests.test_subagent_compact_recovery import _http
@@ -99,7 +98,10 @@ def _strings(value):
             yield from _strings(item)
 
 
-def test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_facts(tmp_path, monkeypatch):
+# LLM: 已结束旧状态在transcript里完整保存，不能伪装成当轮保护事实；工具对放在最新事实屏障之前。
+# 函数用途: 检查50%和90%预检入口的连续前缀摘要、完整来源覆盖、健康目标及原文保留。
+@pytest.mark.parametrize("trigger_percent", [50, 90])
+def test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_facts(tmp_path, monkeypatch, trigger_percent):
     from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
     from agent_py_agent.agent.backends.tool_ir import AssistantTurn, RuntimeFactsTurn
     from agent_py_agent.agent.tooling.runtime_contracts import ToolResult
@@ -109,42 +111,113 @@ def test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_fa
         tmp_path, backend="anthropic_compatible", detached=False,
     )
     from agent_py_agent.agent.agent_core.runtime import loop_support
+    from agent_py_agent.agent.conversation import compact_request_budget
     agent.config.enable_tools = True
+    agent.config.model_context_window_tokens = 300_000 if trigger_percent == 90 else 384_000
+    agent.config.memory_compact_auto_trigger_percent = trigger_percent
+    agent.config.memory_compact_auto_trigger_max_tokens = 0
     agent.backend.max_tokens = 1024
+    old_snapshot = store.messages.append({
+        "thread_id": thread.thread_id, "role": "assistant", "content": "a" * 415000,
+        "metadata": {"conversation_request_id": "completed-prior-state", "task_id": request.task_id},
+        "now": 13.5,
+    })
     original_prepare = loop_support._tool_loop_execute_params
     call = _call("fixture-big", turn="fixture-turn")
 
+    # LLM: 只调整夹具时间布局；完整工具对不跨越任何当轮事实，禁止跳过中段保护条目。
+    # 函数用途: 为已完成工具构造可覆盖前缀，最新状态仍不可撤回。
     def prepare(*args, **options):
         params = original_prepare(*args, **options)
-        params.tool_ir_history.extend([
-            RuntimeFactsTurn(text="a" * 415000, source="fixture_state"),
+        end = next((i for i, item in enumerate(params.tool_ir_history) if isinstance(item, RuntimeFactsTurn)),
+                   len(params.tool_ir_history))
+        params.tool_ir_history[end:end] = [
             AssistantTurn(tool_calls=[call]), ToolResult.succeeded(call, "b" * 300000),
-            RuntimeFactsTurn(text="最新状态", source="fixture_state"),
-        ])
+        ]
+        params.tool_ir_history.append(RuntimeFactsTurn(text="最新状态", source="fixture_state"))
         return params
 
     monkeypatch.setattr(loop_support, "_tool_loop_execute_params", prepare)
-    seen = []
+    seen, initial_tokens = [], []
     original_projection = recovery_core._candidate_projection
 
     def observe(material, override=None):
         value = original_projection(material, override)
         seen.append(value)
+        if override is not None:
+            initial_tokens.append(override)
         return value
 
     monkeypatch.setattr(recovery_core, "_candidate_projection", observe)
-    monkeypatch.setattr(compact, "_summarize", lambda *args, **kwargs: "旧资料和已完成工具结果已归纳。")
-    business = []
-    _http(monkeypatch, backend="anthropic_compatible", on_business=lambda wire, _n: business.append(wire))
+    original_summary = compact._summarize
+    original_bounded = compact_request_budget.generate_bounded_compact_response
+    summary_sizes, summary_requests = [], []
+    in_summary = False
+
+    # LLM: 同源请求按真实预算实测，不mock整段摘要，不减少巨型正文。
+    # 函数用途: 检查发送前来源为完整连续前缀且一次容纳。
+    def bounded(summary_request, **options):
+        source = options.get("message_source")
+        tokens = compact_request_budget.compact_request_tokens(summary_request, source)
+        budget = compact_request_budget.compact_cache_surface_budget(summary_request.agent)
+        assert source is not None and source.preserve_prefix
+        assert 0 < tokens <= budget
+        summary_sizes.append((tokens, budget))
+        summary_requests.append(json.dumps(list(source), ensure_ascii=False))
+        return original_bounded(summary_request, **options)
+
+    # LLM: 只旁听真实摘要调用，网络替身仍在HTTP边界，不绕过预算或来源验证。
+    # 函数用途: 区分摘要和首业务请求。
+    def summarize(*args, **options):
+        nonlocal in_summary
+        in_summary = True
+        try:
+            return original_summary(*args, **options)
+        finally:
+            in_summary = False
+
+    monkeypatch.setattr(compact_request_budget, "generate_bounded_compact_response", bounded)
+    monkeypatch.setattr(compact, "_summarize", summarize)
+    from agent_py_agent.agent.agent_core import tool_model_generation
+    from agent_py_agent.agent.agent_core.model.context_pressure import model_visible_context_tokens
+
+    preflights = []
+    original_preflight = tool_model_generation.preflight_context_pressure_response
+
+    def preflight(model_request):
+        tokens = model_visible_context_tokens(model_request.agent, model_request.params, model_request.prompt)
+        result = original_preflight(model_request)
+        preflights.append((tokens, result is not None))
+        return result
+
+    monkeypatch.setattr(tool_model_generation, "preflight_context_pressure_response", preflight)
+    business, summary_wires = [], []
+    _http(monkeypatch, backend="anthropic_compatible",
+          on_business=lambda wire, _n: (summary_wires if in_summary else business).append(wire))
     background_execution.run_background_turn_with_compact(
         execution, thread, request, user_prompt="继续核对", continuation_injection=[],
         proactive_delivery_available=False, activity_sink=sink,
     )
     assert len(business) == 1
     policy = runtime_compact_policy(agent, save=True)
+    # 恢复适配器在普通生成预检之前压缩；初始数值来自解绑前真实完整请求，后续发送必须已降到触发线以下。
+    assert initial_tokens and initial_tokens[0] >= policy.trigger_tokens
+    assert preflights and all(tokens < policy.trigger_tokens and not pressure for tokens, pressure in preflights)
     assert seen and seen[-1].projected_tokens <= policy.recovery_target_tokens
     assert store.threads.require(thread.thread_id).compact_generation == 1
     assert not any("a" * 100 in text for text in _strings(business[0]))
+    assert not any("b" * 100 in text for text in _strings(business[0]))
+    assert len(summary_sizes) == len(summary_requests) == 1
+    assert len(summary_wires) == 1
+    assert "a" * 415000 in summary_requests[0] and "b" * 300000 in summary_requests[0]
+    from agent_py_agent.tests.test_transcript_compact_prefix import _blocks
+    assert _blocks(summary_wires[0])[:-1] == _blocks({"messages": json.loads(summary_requests[0])})
+    assert "最新状态" not in json.dumps(summary_wires[0], ensure_ascii=False)
+    assert "最新状态" in json.dumps(business[0], ensure_ascii=False)
+    committed = store.threads.require(thread.thread_id)
+    checkpoint = committed_compact_checkpoint_chain(agent, committed)[0]
+    assert old_snapshot.message_id in checkpoint["source_message_ids"]
+    assert old_snapshot in store.messages.recent(thread.thread_id, limit=0)
     print("preflight_healthy_candidate", seen[-1].projected_tokens, policy.recovery_target_tokens)
 
 
@@ -218,8 +291,12 @@ def test_mixed_recovery_commits_both_sources_and_sends_selected_wire(tmp_path, m
     assert len(source.retained_records) == 1
     assert source.retained_records[0]["model_summary"] == "UNKNOWN_IDENTITY_RETAINED"
     summary_wire = json.dumps(summaries[0], ensure_ascii=False)
-    source_text = carried_compact_source_text(source.source_records)
-    assert any(source_text in item for item in _strings(summaries[0]))
+    # 新合同不再重建Archived Tool Source包裹；仍逐条核对全部正文、原覆盖身份及主投影连续前缀。
+    for record in source.source_records:
+        assert any(record['model_summary'] in item for item in _strings(summaries[0]))
+    from agent_py_agent.tests.test_transcript_compact_prefix import _blocks
+    blocks = _blocks(summaries[0])[:-1]
+    assert blocks == _blocks(business[0])[:len(blocks)]
     selected = [item for item in candidates if _wire_from_material(agent, item) == business[1]]
     assert len(selected) == 1
     material = selected[0]

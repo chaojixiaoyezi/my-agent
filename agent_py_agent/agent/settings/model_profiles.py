@@ -368,17 +368,19 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     return {**result, "added_models": added} if operation == "add_models" else result
 
 
-# LLM: 列表只含私有及管理员显式发布的公开字段；共享不是复制 secrets，默认变化不能投射成旧会话切换。
-# 函数用途: 为菜单区分会话、默认与共享选项；普通用户不会看到其他用户的私有模型。
+# LLM: 列表只含私有及管理员显式发布的公开字段；inventory_status 只标原读口完成/失败，不解析警告或扩大共享。
+# 函数用途: 为菜单和只读自我目录说明会话、默认、共享及来源完整性，不显示其它用户私有模型。
 def _model_selection_projection(agent: object, data: dict, thread_id: str) -> dict:
     from ..user_space.approval_mode import is_permission_admin
 
     result = public_model_profiles(data, agent.config)
+    result["inventory_status"] = {"private": "complete", "shared": "complete"}
     try:
         shared = public_shared_profiles(agent.home_paths)
         initial = initial_profile_key(agent.home_paths)
     except (ModelProfileError, OSError):
         shared, initial = [], ""
+        result["inventory_status"]["shared"] = "unavailable"
         result["warning"] = "共享模型目录暂不可用；仍可选择自己的私有模型或显式部署配置。"
     result["can_share"] = is_permission_admin(agent.home_paths)
     result["initial_profile"] = initial

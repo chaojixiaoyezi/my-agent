@@ -124,8 +124,14 @@ def _seed_large_history(store, thread_id: str, task_id: str) -> None:
         })
 
 
-def test_goal_wake_whose_compaction_hits_quota_is_usage_limited_with_notice(tmp_path) -> None:
-    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+# LLM: 两种窗口使用完全相同旧历史；原窗口必须保留分段恢复，大窗口另覆盖整前缀发送。
+# 函数用途: 经真实后台压缩观察额度失败、唯一通知和Goal的usage_limited状态。
+@pytest.mark.parametrize("window", [0, 512_000])
+def test_goal_wake_whose_compaction_hits_quota_is_usage_limited_with_notice(tmp_path, window) -> None:
+    agent = SimpleAgent(AgentConfig(
+        enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
+        model_context_window_tokens=window, memory_compact_auto_trigger_percent=50 if window else 90,
+    ), tmp_path)
     backend = _WeeklyQuotaBackend()
     agent.backend = backend
     store = agent.conversation_store
@@ -164,10 +170,12 @@ def test_goal_wake_whose_compaction_hits_quota_is_usage_limited_with_notice(tmp_
 
 
 # LLM: 只在 pytest 临时目录里建会话、任务目录、大历史和每 30 秒一次的持久进度策略；后端每次都抛每周额度 429。
+# 原窗口与大窗口各自走分段/冻结前缀；来源条数、正文与额度断言完全一致。
 # 函数用途: 搭好 9a 复审用的真实链路形态（大线程上的持久策略），返回 store、线程、策略和后台调度器。
-def _large_thread_policy(tmp_path):
+def _large_thread_policy(tmp_path, window=0):
     agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home")), tmp_path,
+        AgentConfig(enable_tools=False, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home"),
+                    model_context_window_tokens=window, memory_compact_auto_trigger_percent=50 if window else 90), tmp_path,
     )
     agent.backend = _WeeklyQuotaBackend()
     store = agent.conversation_store
@@ -194,12 +202,13 @@ def _large_thread_policy(tmp_path):
     return store, thread, policy, scheduler
 
 
-def test_large_thread_policy_quota_pauses_lane_without_retiring_or_poison_count(tmp_path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("window", [0, 512_000])
+def test_large_thread_policy_quota_pauses_lane_without_retiring_or_poison_count(tmp_path, monkeypatch, capsys, window) -> None:
     """9a 复审的真实链路形态：大线程上的持久策略，请求前先压缩，压缩撞每周额度 429，连续 3 拍。
     策略仍 enabled、不记失败账；车道进入环境暂停（60 秒起翻倍），不是 30 秒普通冷却；毒丸不计数。"""
     from agent_py_agent.cli import gateway_lane_retry
 
-    store, thread, policy, scheduler = _large_thread_policy(tmp_path)
+    store, thread, policy, scheduler = _large_thread_policy(tmp_path, window)
     lanes = gateway_lane_retry.BackgroundLaneRetry()
     monkeypatch.setattr(gateway_lane_retry.time, "monotonic", lambda: 100.0)
     raised = []

@@ -481,6 +481,7 @@ class ThreadStore:
             canonical_user_id=kwargs.get("canonical_user_id", ""),
             owner_id=str(kwargs.get("owner_id") or ""),
             owner_home=str(kwargs.get("owner_home") or ""),
+            learning_source=_thread_learning_source(kwargs.get("learning_source")),
             model_profile_id=initial_model,
             model_selection_revision=1 if initial_model else 0,
             model_selection_source="default" if initial_model else "unknown",
@@ -547,3 +548,12 @@ def record_thread_compact_vision_failure(
         return replace(thread, compact_vision_failed_generation=thread.compact_generation, updated_at=current)
 
     return threads.update_atomic(thread_id, apply)
+
+
+# LLM: 线程来源只接受合法投影；调用方传坏值或旧入口不传时归一为空（未知、不可学），
+#   辅助事实不能反过来拒绝线程创建，也不能把未知猜成用户。
+# 函数用途: 归一线程创建时的宿主来源投影。
+def _thread_learning_source(value: object) -> dict[str, Any]:
+    from .learning_source import thread_source_projection
+
+    return thread_source_projection(value) or {}

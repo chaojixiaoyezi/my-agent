@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,28 @@ from ..runtime_errors import runtime_error_report
 if TYPE_CHECKING:
     from ..local_storage import LocalSearchResult
     from .jsonl import MemoryRecord
+
+
+# LLM: 已提交删除不能因派生清理失败被误报完整成功；调用方保留墓碑及候选以便重试。
+# 类用途: 区分正式删除之后仍欠隐私清理的失败。
+class RemovalCleanupError(RuntimeError):
+    # LLM: 只有本轮正式删除提交后的必要清理可标True；历史恢复不得据已有墓碑冒充本轮写入。
+    # 函数用途: 将真实删除提交事实和未完成清理责任分开传递给工具回执。
+    def __init__(self, message: str, *, formal_memory_changed: bool = False):
+        super().__init__(message)
+        self.formal_memory_changed = formal_memory_changed
+
+
+# LLM: 仅在正式删除提交之后包住必需清理；本轮提交事实由调用点给定，历史恢复固定为False。
+# 函数用途: 候选、日志或派生层清理失败都保留准确的待清理回执，非删除异常不变。
+@contextmanager
+def removal_cleanup_phase(*, formal_memory_changed: bool, enabled: bool = True):
+    try:
+        yield
+    except Exception as exc:
+        if not enabled:
+            raise
+        raise RemovalCleanupError('REMOVE_CLEANUP_PENDING', formal_memory_changed=formal_memory_changed) from exc
 
 
 # LLM: 此 mixin 只管理可重建检索索引，不能拥有 active memory 状态或写入裁决。
@@ -81,12 +104,27 @@ class JsonlMemoryIndexMixin:
             logging.getLogger(__name__).debug("memory index write failed", exc_info=True)
             return
 
-    # LLM: 这里只写可重建 projection，metadata 必须保留 entry/version/path 供召回二次核验。
-    # 函数用途: 将一条正式记忆 upsert 到 LocalStore/FTS。
+    # LLM: 只有权威锁内确认仍是active的精确版本才写派生正文；与正式删除共享锁，避免延迟写回复活。
+    # 函数用途: 核对当前事实后将一条正式记忆写入LocalStore/FTS。
     def _index_record(self, record: MemoryRecord) -> None:
-        """Write one MemoryRecord into LocalStore when an index is configured."""
+        from ..common.json_io import locked_json_path
+
         if not self.local_store:
             return
+        with locked_json_path(self.path):
+            if self._projection_is_current(record):
+                self._write_record_projection(record)
+
+    # LLM: 调用方必须持权威锁至派生写入完成；只核对完整正式状态，坏读拒绝，不修改事实或候选。
+    # 函数用途: 拒绝已删除、被替换或scope变化的旧索引快照。
+    def _projection_is_current(self, record: MemoryRecord) -> bool:
+        return any(row.entry_id == record.entry_id and row.version == record.version
+                   and row.content == record.content and row.attributes == record.attributes
+                   for row in self._maintenance_records())
+
+    # LLM: 仅由_index_record在权威锁内调用，保留entry/version/path供召回二次核验。
+    # 函数用途: 持有删除互斥边界时写入可重建的LocalStore索引。
+    def _write_record_projection(self, record: MemoryRecord) -> None:
         self.local_store.upsert_record(
             source_type="memory",
             source_id=self._source_id(record),
@@ -161,11 +199,23 @@ class JsonlMemoryIndexMixin:
     def _after_commit_indexes(self, records: list[MemoryRecord]) -> None:
         for record in records:
             if record.action == "remove":
-                self._remove_vector(record.entry_id)
-                self._remove_local_index(record.entry_id)
+                self._purge_committed_indexes(record.entry_id)
                 continue
             self._try_index_record(record)
             self._index_vector(record)
+
+    # LLM: 仅限本轮正式提交后的同步链；历史恢复不经过这里，不虚增本轮变更事实。
+    # 函数用途: 保留删除已提交但隐私清理未完成的双层回执。
+    def _purge_committed_indexes(self, entry_id: str) -> None:
+        try:
+            self.purge_removed_indexes(entry_id)
+        except RemovalCleanupError as exc:
+            raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
+
+    # LLM: 正式提交和崩溃恢复均调用；禁用embedding也不免除旧向量正文清理，任何失败必须可重试。
+    # 函数用途: 严格清理当前owner精确条目的向量、SQLite/FTS和外置正文。
+    def purge_removed_indexes(self, entry_id: str) -> None:
+        _purge_removed_indexes(self, entry_id)
 
     # LLM: LocalStore 只是派生索引，删除失败不能让它重新成为权威；正文文件先清空再移除。
     # 函数用途: 尽力清除某条长期记忆的 SQLite/FTS 和外置内容文件。
@@ -185,3 +235,32 @@ class JsonlMemoryIndexMixin:
         redact = getattr(self.local_store, "redact_tool_ledger_content", None)
         if callable(redact):
             redact(tool="remember", contents=contents)
+
+
+# LLM: 删除与恢复复用现有无embedder回收；持正式库锁计算全部活跃index_text，覆盖所有模型指纹且不误删活跃同文键。
+# 函数用途: 清除孤儿文本向量，真实读写错误转换为可重试删除清理失败。
+def _purge_text_vector_orphans(memory) -> int:
+    from ..common.json_io import locked_json_path
+
+    with locked_json_path(memory.path):
+        dropped, error = memory.reclaim_text_cache_orphans()
+        if error:
+            raise RemovalCleanupError("REMOVE_CLEANUP_PENDING")
+        return dropped
+
+
+# LLM: 同一删除清理流程供正式提交和恢复复用；禁用embedder仍清磁盘派生层，异常一律保留待重试事实。
+# 函数用途: 按记忆身份清除向量、孤儿文本缓存、SQLite/FTS及其外置正文。
+def _purge_removed_indexes(memory, entry_id: str) -> None:
+    from ..retrieval.vector_store import VectorStore
+
+    try:
+        store = memory._vector_store()
+        if store is None:
+            store = VectorStore(memory._vector_store_path())
+        store.remove(entry_id)
+        _purge_text_vector_orphans(memory)
+        if memory.local_store is not None:
+            memory.local_store.delete_record(memory.local_store.make_record_id("memory", entry_id))
+    except Exception as exc:
+        raise RemovalCleanupError("REMOVE_CLEANUP_PENDING") from exc

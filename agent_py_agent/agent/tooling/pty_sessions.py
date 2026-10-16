@@ -12,13 +12,23 @@ import logging
 import os
 import select
 import subprocess
+import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..attempt.sandbox import SandboxHostPolicy
+from ..capability._agents_contract_fields import AgentsContractError
+from ..capability.agents_source_processes import (
+    process_source_change_affects,
+    process_source_configurations,
+    process_source_configurations_current,
+    register_source_registry,
+    source_process_boundary,
+)
 from ..common.cancellation import ToolCancelled, cancellation_requested, raise_if_cancelled
 from ..contracts.gates.command_policy import evaluate_command_policy
 from .models import (
@@ -41,6 +51,7 @@ from .process_registry import (
     terminate_process_tree,
 )
 from .process_scope import ProcessExecutionScope, process_access_scope
+from .pty_process_lifecycle import PtyOwnedProcess
 from .sandbox import SandboxUnavailable
 from .shell import (
     ShellTool,
@@ -90,9 +101,17 @@ class PtySession:
     next_cursor: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
     write_lock: threading.Lock = field(default_factory=threading.Lock)
+    read_lock: threading.Lock = field(default_factory=threading.Lock)
+    io_condition: threading.Condition = field(default_factory=threading.Condition)
+    io_users: int = 0
+    fd_closing: bool = False
     close_lock: threading.Lock = field(default_factory=threading.Lock)
     closed: bool = False
     termination: ProcessTerminationReceipt | None = None
+    source_configurations: tuple = ()
+    retirement_thread: threading.Thread | None = field(default=None, repr=False)
+    # macOS 上父进程保留的一份 slave FD（-1 表示未保留），与 master 一起在尾部排空后关闭。
+    tail_hold_fd: int = -1
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
@@ -115,7 +134,7 @@ class PtySession:
             return chunk, next_cursor, truncated
 
 
-# LLM: This value is the canonical equality key for PTY ownership and filesystem boundaries.
+# LLM: 此不可变值是PTY归属和文件系统边界的唯一比较键；人格根、拒写根和网络上界必须一起保留。
 # 类用途: 冻结 PTY 启动时的 owner、可读、可写和受保护路径。
 @dataclass(frozen=True)
 class PtyAccessScope:
@@ -126,6 +145,7 @@ class PtyAccessScope:
     protected_write_paths: tuple[str, ...] | None
     write_scope_denied_roots: tuple[str, ...] = ()
     network_access: bool = True
+    protected_persona_root: str = ""
 
 
 # LLM: 一次 PTY 启动的沙箱输入原样收拢，不做任何推断；字段与 tooling/shell._sandbox_exec 的同名参数一一对应，
@@ -141,6 +161,14 @@ class _PtySandboxInputs:
     write_scope_denied_roots: tuple[Path, ...] = ()
     network_access: bool = True
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    protected_persona_root: object = None
+
+
+# LLM: 继承原宿主环境/网络上界，只增加独立人格根；由Shell宿主装配，不能从模型参数构造许可。
+# 类用途: 在原host_policy参数内同时携带PTY所需的来源保护根，避免继续增长启动参数。
+@dataclass(frozen=True)
+class PtyHostPolicy(SandboxHostPolicy):
+    protected_persona_root: object = None
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -151,7 +179,7 @@ class _PtyStart:
     cancelled: bool = False
 
 
-# LLM: Normalize every PTY scope path before comparing session ownership; missing lists retain
+# LLM: 先规范全部宿主路径再比会话权限；缺失列表保持未声明语义，不能误变成空拒绝列表或从模型参数补根。
 # their distinct "not constrained by this field" meaning instead of becoming empty deny lists.
 # 函数用途: 把工具边界规范成可稳定比较的 PTY 权限快照。
 def _pty_access_scope(
@@ -161,6 +189,7 @@ def _pty_access_scope(
     protected_write_paths: tuple[Any, ...] | None = None,
     run_scope: object = None,
     *, write_scope_denied_roots: tuple[Path, ...] = (), network_access: bool = True,
+    protected_persona_root: object = None,
 ) -> PtyAccessScope:
     owner = ""
     if owner_home:
@@ -193,6 +222,7 @@ def _pty_access_scope(
         protected_write_paths=normalized_protected,
         write_scope_denied_roots=tuple(sorted({str(Path(root).resolve(strict=False)) for root in write_scope_denied_roots})),
         network_access=network_access,
+        protected_persona_root=str(Path(protected_persona_root).expanduser().resolve(strict=False)) if protected_persona_root else "",
     )
 
 
@@ -210,6 +240,7 @@ class PtySessionRegistry:
         # 未装配时保持 0，单元测试与嵌入式使用不会被后台线程打扰。
         self.idle_timeout_seconds = 0.0
         self._idle_thread: threading.Thread | None = None
+        register_source_registry(self)
 
     # LLM: 容量和执行身份一起预留；宿主来源名随本次 spawn 冻结，不入模型参数或持久会话权限账。
     # 函数用途: 有界创建终端，让明确的资源停止请求可以命中尚未完成的启动。
@@ -232,7 +263,7 @@ class PtySessionRegistry:
         execution_scope = ProcessExecutionScope.from_run_scope(run_scope, owner_home)
         with self._lock:
             _prune_finished_sessions(self)
-            active = sum(session.process.poll() is None for session in self._sessions.values())
+            active = sum(not _source_resource_retired(session) for session in self._sessions.values())
             if active + len(self._pending_starts) >= _MAX_SESSION_COUNT:
                 raise OSError(f"PTY_SESSION_LIMIT: active session limit is {_MAX_SESSION_COUNT}")
             self._counter += 1
@@ -242,8 +273,9 @@ class PtySessionRegistry:
             protection = write_protection or SandboxWriteProtection()
             sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
                                         host_policy.private_roots, protection.denied_roots, host_policy.network_access,
-                                        host_policy.host_credential_env_names)
-            return self._spawn(session_id, command, target, sandbox, run_scope)
+                                        host_policy.host_credential_env_names, getattr(host_policy, "protected_persona_root", None))
+            with source_process_boundary():
+                return self._spawn(session_id, command, target, sandbox, run_scope)
         finally:
             with self._lock:
                 self._pending_starts.pop(session_id, None)
@@ -254,6 +286,7 @@ class PtySessionRegistry:
         import pty
 
         owner_home = sandbox.owner_home
+        source_configurations = process_source_configurations(sandbox.protected_persona_root or owner_home, full_access=not bool(owner_home))
         access_scope = _pty_access_scope(
             owner_home,
             sandbox.write_roots,
@@ -262,11 +295,13 @@ class PtySessionRegistry:
             run_scope,
             write_scope_denied_roots=sandbox.write_scope_denied_roots,
             network_access=sandbox.network_access,
+            protected_persona_root=sandbox.protected_persona_root,
         )
         exec_arg, use_shell = _sandbox_exec(
             command,
             target,
             owner_home,
+            sandbox.protected_persona_root,
             write_roots=sandbox.write_roots,
             read_roots=sandbox.read_roots,
             write_protection=SandboxWriteProtection(tuple(sandbox.protected_write_paths or ()), sandbox.write_scope_denied_roots),
@@ -292,20 +327,22 @@ class PtySessionRegistry:
                 env=_subprocess_text_env(owner_home, hidden_roots=tuple(str(root) for root in sandbox.private_roots),
                                          sandboxed=True, host_credential_env_names=sandbox.host_credential_env_names),
             )
-        except Exception:
+        except BaseException:
             os.close(master_fd)
             os.close(slave_fd)
             raise
-        os.close(slave_fd)
+        tail_hold_fd = _hold_slave_for_tail(slave_fd)
         session = PtySession(
             session_id=session_id,
             command=command,
-            process=process,
+            process=PtyOwnedProcess(process),
+            tail_hold_fd=tail_hold_fd,
             master_fd=master_fd,
             started_at=time.time(),
             last_active_at=time.time(),
             access_scope=access_scope,
             execution_scope=launch.execution_scope,
+            source_configurations=source_configurations,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -328,18 +365,29 @@ class PtySessionRegistry:
             ]
         return sorted(sessions, key=lambda item: (item.started_at, item.session_id))
 
-    def get(self, session_id: str, access_scope: PtyAccessScope | None = None) -> PtySession | None:
-        with self._lock:
-            session = self._sessions.get(session_id)
-        if (
-            session is not None
-            and access_scope is not None
-            and session.access_scope != access_scope
-        ):
+    # LLM: 先核原权限键和完整CAS；有写期限时内层锁与清退等待均不得重置预算，退役继续由原session负责。
+    # 函数用途: 取得仍有效的会话；失效句柄拒绝复用，并在调用预算内请求原资源退出。
+    def get(self, session_id: str, access_scope: PtyAccessScope | None = None, *, deadline=None) -> PtySession | None:
+        with source_process_boundary(deadline=deadline):
+            session = _session_in_scope(self, session_id, access_scope, deadline=deadline)
+            if session is None:
+                return None
+            if process_source_configurations_current(
+                    session.source_configurations, owner_home=session.access_scope.protected_persona_root
+                    or session.access_scope.owner_home, full_access=not bool(session.access_scope.owner_home)):
+                return session
+            if deadline is None:
+                self.close(session_id, access_scope)
+            else:
+                _retire_stale_for_write(self, session, deadline)
             return None
-        return session
 
-    # LLM: 写入前的退出和部分写入分开报告；成功返回证明全部字节已提交，不能再用事后 poll 抹掉此事实。
+    # LLM: 通知仅进入原注册表；相关依赖完整CAS不同才处理，跨owner不擅自停止，未确认抛错阻止提交。
+    # 函数用途: 切源前清退本注册表持有的旧版本PTY。
+    def retire_agents_source(self, owner_home, proposed_cas):
+        _retire_source_sessions(self, owner_home, proposed_cas)
+
+    # LLM: 来源准入、write_lock和实际输入共用原deadline；FD借用允许输出排空，累计字节不被事后poll抹掉。
     # 函数用途: 分段写完一份输入，锁等待/背压共用五秒期限；未写或部分写入均带明确字节数。
     def write(
         self,
@@ -347,31 +395,27 @@ class PtySessionRegistry:
         data: bytes,
         access_scope: PtyAccessScope | None = None,
     ) -> PtySession | None:
-        session = self.get(session_id, access_scope)
+        deadline, written = time.monotonic() + _WRITE_TIMEOUT_SECONDS, 0
+        session = _get_session_for_write(self, session_id, access_scope, deadline)
         if session is None:
             return None
-        deadline, written = time.monotonic() + _WRITE_TIMEOUT_SECONDS, 0
         while not session.write_lock.acquire(timeout=0.02):
             _check_write_deadline(deadline, written)
         try:
             if session.closed or session.process.poll() is not None:
                 raise PtyWriteError("COMMAND_FAILED", 0)
-            while written < len(data):
-                _check_write_deadline(deadline, written)
-                try:
-                    if select.select([], [session.master_fd], [], 0.02)[1]:
-                        written += os.write(session.master_fd, data[written:])
-                except BlockingIOError:
-                    continue
-                except OSError as exc:
-                    raise PtyWriteError("PTY_WRITE_FAILED", written) from exc
+            with _borrow_session_fd(session, deadline=deadline):
+                _write_session_bytes(session, data, deadline)
+        except PtyWriteError:
+            raise
+        except OSError as exc:
+            raise PtyWriteError("COMMAND_FAILED", 0) from exc
         finally:
             session.write_lock.release()
         session.last_active_at = time.time()
         return session
 
-    # LLM: PTY geometry changes must use the kernel TIOCSWINSZ control, matching 会话运行时 resizePty;
-    # terminal escape bytes are ordinary application output and must never stand in for this fact.
+    # LLM: TIOCSWINSZ持FD借用；不持写串行锁阻止输出排空，ESC仍不是真实resize。
     # 函数用途: 调整当前可信会话里指定 PTY 的字符行列，并让交互程序收到真实窗口尺寸变化。
     def resize(
         self,
@@ -388,7 +432,10 @@ class PtySessionRegistry:
         import termios
 
         packed = struct.pack("HHHH", rows, columns, 0, 0)
-        fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, packed)
+        with _borrow_session_fd(session):
+            if session.closed or session.process.poll() is not None:
+                return session
+            fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, packed)
         session.last_active_at = time.time()
         return session
 
@@ -399,23 +446,14 @@ class PtySessionRegistry:
         session_id: str,
         access_scope: PtyAccessScope | None = None,
     ) -> PtySession | None:
-        session = self.get(session_id, access_scope)
+        session = _session_in_scope(self, session_id, access_scope)
         if session is None:
             return None
-        with session.close_lock:
-            if session.termination is None or not session.termination.confirmed:
-                code = session.process.poll()
-                session.termination = (
-                    ProcessTerminationReceipt("already_exited", True, code, 1)
-                    if code is not None else terminate_process_tree(session.process.pid, session.process)
-                )
-            if session.termination.confirmed:
-                _close_session_fd(session)
+        _close_known_session(session)
         return session
 
-    # LLM: 使用 process_scope 的精确选择合同，不以访问范围代替执行归属。
-    # 在锁内冻结句柄和取消预留，锁外异步终止；晚到恢复轮不能被旧停止重新扫描命中。
-    # 函数用途: 明确停止任务资源或取消子代理时圈定其终端，回收进程而不阻塞控制应答。
+    # LLM: 使用process_scope精确选择；父进程退出不免除后代责任，全部未退役原资源均可被停止。
+    # 函数用途: 冻结任务的终端与启动预留，锁外请求清退，不扫描后来恢复的新资源。
     def request_stop(self, *, owner_home: object, thread_id: str = "", task_id: str = "",
                      run_id: str = "", attempt_id: str = "") -> tuple[str, ...]:
         if not owner_home or not ((thread_id and task_id) or run_id):
@@ -431,7 +469,7 @@ class PtySessionRegistry:
             for key in pending:
                 self._pending_starts[key].cancelled = True
             sessions = [session for session in self._sessions.values()
-                        if session.execution_scope.matches(target) and session.process.poll() is None]
+                        if session.execution_scope.matches(target) and not _source_resource_retired(session)]
         for session in sessions:
             threading.Thread(target=self.close, args=(session.session_id,),
                              name=f"stop-{session.session_id}", daemon=True).start()
@@ -448,32 +486,21 @@ class PtySessionRegistry:
     def sweep_idle(self, now: float | None = None) -> tuple[str, ...]:
         return _sweep_idle_sessions(self, now)
 
+    # LLM: clear是关闭请求而非退出证据；未知后代必须保留在唯一注册表，不能靠清表绕过切源。
+    # 函数用途: 尝试关闭全部会话，只删除完整树已确认退役的记录。
     def clear(self) -> None:
         with self._lock:
             ids = list(self._sessions)
         for session_id in ids:
             self.close(session_id)
         with self._lock:
-            self._sessions.clear()
+            self._sessions = {key: value for key, value in self._sessions.items()
+                              if not _source_resource_retired(value)}
 
-    # LLM: fd 为非阻塞，暂时无输出不等于退出；只有 EOF/真实错误才关闭。
+    # LLM: 委派同一原会话的排空；FD读写/resize/关闭共用生命周期锁，不将无输出当退出。
     # 函数用途: 连续排空 PTY 输出，在终态清理有界历史。
     def _drain(self, session: PtySession) -> None:
-        while not session.closed:
-            try:
-                if not select.select([session.master_fd], [], [], 0.1)[0]:
-                    continue
-                chunk = os.read(session.master_fd, 4096)
-            except BlockingIOError:
-                continue
-            except OSError:
-                break
-            if not chunk:
-                break
-            session.append(chunk)
-        _close_session_fd(session)
-        with self._lock:
-            _prune_finished_sessions(self)
+        _drain_session_io(self, session)
 
 
 pty_session_registry = PtySessionRegistry()
@@ -501,8 +528,8 @@ def _configure_idle_timeout(registry: PtySessionRegistry, minutes: object) -> No
         thread.start()
 
 
-# LLM: 同步关闭空闲会话：进程树终止有界，巡检线程可以承受；回执就是各会话自己的 termination。
-# 函数用途: 收掉空闲超时的活跃会话，返回被收回的 session_id 元组。
+# LLM: 空闲选择覆盖所有未退役资源，父进程poll结果不解除后代责任；仅返回已请求清理的句柄。
+# 函数用途: 请求收回超时终端，未确认者仍保留原注册表责任。
 def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None) -> tuple[str, ...]:
     timeout = float(registry.idle_timeout_seconds or 0.0)
     if timeout <= 0:
@@ -511,7 +538,7 @@ def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None) -> tup
     with registry._lock:
         expired = [
             session for session in registry._sessions.values()
-            if session.process.poll() is None and moment - session.last_active_at > timeout
+            if not _source_resource_retired(session) and moment - session.last_active_at > timeout
         ]
     reclaimed = []
     for session in expired:
@@ -522,28 +549,36 @@ def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None) -> tup
     return tuple(reclaimed)
 
 
-# LLM: 调用方持有 registry 锁；仅淘汰已结束且 fd 已关闭的历史，不中断任何活跃进程。
-# 函数用途: 保留最近 32 个已结束 PTY，避免常驻 Gateway 累积历史对象和缓冲。
+# LLM: 调用方持registry锁；只有完整树退役记录可裁剪，poll/closed/历史上限均不免除未知资源责任。
+# 函数用途: 保留最近32个已确认退役历史，同时保留全部未确认资源。
 def _prune_finished_sessions(registry: PtySessionRegistry) -> None:
     finished = [
         key for key, item in registry._sessions.items()
-        if item.closed and item.process.poll() is not None
+        if _source_resource_retired(item) and item.process.poll() is not None
     ]
     for key in finished[:-_MAX_SESSION_COUNT]:
         del registry._sessions[key]
 
 
-# LLM: fd 关闭不等于进程退出；重复关闭幂等，关掉的 fd 不再被读写。
-# 函数用途: 幂等关闭会话 master fd 并标记 closed。
+# LLM: 关闭挡住新写准入并等待全部FD借用；既有写等待输出时仍允许排空，避免双向背压互等。
+# 函数用途: 等实际IO结束后幂等关闭master fd；不以FD关闭冒充进程树退出。
 def _close_session_fd(session: PtySession) -> None:
-    with session.lock:
+    with session.io_condition:
+        if session.closed:
+            return
+        session.fd_closing = True
+        while session.io_users:
+            session.io_condition.wait()
         if session.closed:
             return
         session.closed = True
-        try:
-            os.close(session.master_fd)
-        except OSError:
-            pass
+        for descriptor in (session.master_fd, session.tail_hold_fd):
+            if descriptor < 0:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 # LLM: 巡检周期按阈值收敛（阈值/4，夹在 0.5~30 秒）：默认 30 分钟阈值下每 30 秒查一次，
@@ -751,7 +786,7 @@ class TerminalSessionTool(BaseTool):
     def workspace_roots(self, roots: list[Path]) -> None:
         self.shell_tool.workspace_roots = roots
 
-    # LLM: PTY follow-up actions must reconstruct the exact host-only scope from internal params;
+    # LLM: 后续PTY操作重建相同宿主范围；人格根只取Shell装配，模型知道session_id也不能越owner选择会话。
     # model-visible arguments alone can never select a session.
     # 函数用途: 为列出、启动、读、写、调尺寸和关闭生成同一份 PTY 边界键。
     def _access_scope(self, params: dict[str, Any]) -> PtyAccessScope:
@@ -763,6 +798,7 @@ class TerminalSessionTool(BaseTool):
             params.get("__run_scope"),
             write_scope_denied_roots=getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ()),
             network_access=getattr(self.shell_tool, "_sandbox_network_access", True),
+            protected_persona_root=self.shell_tool.protected_persona_root,
         )
 
     # LLM: Action dispatch is the sole model-facing PTY control switch. Keep schema, effect
@@ -828,9 +864,11 @@ class TerminalSessionTool(BaseTool):
                 read_roots,
                 SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
-                host_policy=SandboxHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True),
-                                               self.shell_tool.host_credential_env_names),
+                host_policy=PtyHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True),
+                                          self.shell_tool.host_credential_env_names, self.shell_tool.protected_persona_root),
             )
+        except AgentsContractError as exc:
+            return self._error("SANDBOX_UNAVAILABLE", exc.code)
         except SandboxUnavailable as exc:
             return self._error("SANDBOX_UNAVAILABLE", str(exc))
         except OSError as exc:
@@ -926,20 +964,7 @@ class TerminalSessionTool(BaseTool):
             )
         except OSError as exc:
             return self._error("COMMAND_FAILED", str(exc))
-        if session is None:
-            return self._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}",
-                               effect_outcome="not_started")
-        if session.process.poll() is not None or session.closed:
-            return self._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
-        actual = os.get_terminal_size(session.master_fd)
-        return self._ok(
-            {
-                "status": "resized",
-                "session_id": session_id,
-                "columns": actual.columns,
-                "rows": actual.lines,
-            }
-        )
+        return _resize_response(self, session_id, session)
 
     # LLM: close 只访问当前权限，确认进程树退出才返回 closed；无法确认沿用工具未知副作用合同，
     #   reported_error_code=PTY_CLOSE_UNCONFIRMED 说明是关闭后进程树退出未确认，终止回执结构化放进 process.termination。
@@ -1000,3 +1025,239 @@ def _pty_session_summary(session: PtySession) -> dict[str, object]:
 
 
 __all__ = ["PtySessionRegistry", "TerminalSessionTool", "pty_session_registry", "reclaim_pty_sessions"]
+
+
+# LLM: 原session串行清退；新PTY先保留组长身份再拍树快照，旧已回收PID不得补发信号或冒充后代已退役。
+# 函数用途: 安全关闭原进程树并保留真实回执，只有确认后才关闭FD。
+def _close_known_session(session):
+    with session.close_lock:
+        if session.termination is None or not session.termination.confirmed:
+            session.termination = _retire_session_process(session.process)
+        if session.termination.confirmed:
+            _finish_session_output(session)
+
+
+# LLM: 只使用session持有的原句柄；WNOWAIT包装器负责后代清退，旧句柄沿用原终止协议。
+# 函数用途: 为一种PTY进程句柄取得真实清退回执。
+def _retire_session_process(process):
+    if isinstance(process, PtyOwnedProcess):
+        return process.retire(terminate_process_tree)
+    code = process.poll()
+    if code is not None:
+        return ProcessTerminationReceipt("already_exited", True, code, 1)
+    return terminate_process_tree(process.pid, process)
+
+
+# LLM: 只在完整树清退后调用；读取与append共用read_lock，关FD前排尽内核已产生的尾字节。
+# 函数用途: 串行保存退出前最后输出，不能拿之前select超时当作输出已排空。
+def _finish_session_output(session):
+    with session.read_lock:
+        _drain_terminal_tail(session)
+        _close_session_fd(session)
+
+
+# LLM: 调用方持read_lock且完整进程树已退役；逐块读取直到无尾字节，再由调用方关闭FD。
+# 函数用途: 把内核中剩余的终端输出全部保存。
+def _drain_terminal_tail(session):
+    while not session.closed:
+        chunk = _read_terminal_tail(session)
+        if not chunk:
+            break
+        session.append(chunk)
+
+
+# LLM: 只在read_lock内且进程树已退役后借用master；EAGAIN/EOF维持原尾部结束语义。
+# 函数用途: 读取退出后当前已缓冲的一块尾字节，不等待未来输出。
+def _read_terminal_tail(session):
+    try:
+        with _borrow_session_fd(session, draining=True):
+            return os.read(session.master_fd, 4096)
+    except OSError:
+        return b""
+
+
+# LLM: deadline来自原write；无期限路径维持原锁语义，超时不能在未获得锁时访问注册表。
+# 函数用途: 在输入的剩余预算内取得一个内部锁。
+@contextmanager
+def _session_lock(lock, deadline=None):
+    if deadline is None:
+        lock.acquire()
+    else:
+        _check_write_deadline(deadline, 0)
+        if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise PtyWriteError("TOOL_TIMEOUT", 0)
+    try:
+        if deadline is not None:
+            _check_write_deadline(deadline, 0)
+        yield
+    finally:
+        lock.release()
+
+
+# LLM: 每个session最多一条在途清退线程；写超时不删除句柄、不伪造退出，原线程继续负责释放。
+# 函数用途: 对失效PTY请求原资源退出，只在剩余输入预算内等待。
+def _retire_stale_for_write(registry, session, deadline):
+    with _session_lock(registry._lock, deadline):
+        worker = session.retirement_thread
+        if worker is None or not worker.is_alive():
+            worker = threading.Thread(target=_close_known_session, args=(session,),
+                                      name=f"retire-{session.session_id}", daemon=True)
+            session.retirement_thread = worker
+            worker.start()
+    while worker.is_alive():
+        _check_write_deadline(deadline, 0)
+        worker.join(timeout=min(.02, max(0.0, deadline - time.monotonic())))
+    _check_write_deadline(deadline, 0)
+
+
+# LLM: 只按原注册表权限键查找，不核来源；close须可清理失效版本，不能通过get递归进入自身。
+# 函数用途: 在原锁下找权限允许的会话，写路径锁等待不能超出调用预算。
+def _session_in_scope(registry, session_id, access_scope, *, deadline=None):
+    with _session_lock(registry._lock, deadline):
+        session = registry._sessions.get(session_id)
+    if session is not None and access_scope is not None and session.access_scope != access_scope:
+        return None
+    return session
+
+
+# LLM: 不复制资源账；只处理结构化来源CAS命中的会话，树回执或自然退出后代未知不能冒充确认。
+# 函数用途: 逐个要求旧PTY停止；外owner相关资源或未确认停止使切源失败关闭。
+def _retire_source_sessions(registry, owner_home, proposed_cas):
+    with registry._lock:
+        sessions = tuple(registry._sessions.values())
+    for session in sessions:
+        if _source_resource_retired(session):
+            continue
+        own_home = session.access_scope.protected_persona_root or session.access_scope.owner_home
+        if not process_source_change_affects(session.source_configurations, owner_home, proposed_cas,
+                                             bound_scope=(own_home, not bool(session.access_scope.owner_home))):
+            continue
+        if own_home != owner_home:
+            raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "cross_owner_resource")
+        registry.close(session.session_id)
+        receipt = session.termination
+        if receipt is None or not receipt.confirmed or receipt.method == "already_exited":
+            raise AgentsContractError("AGENTS_SOURCE_RESOURCE_UNCONFIRMED", "pty_resource")
+
+
+# LLM: 仅已有确认的完整树退役回执可略过历史资源；closed、poll或already_exited都不能证明后代清理。
+# 函数用途: 避免已确认退役历史会话阻断新owner，同时保留未知资源失败关闭。
+def _source_resource_retired(session):
+    receipt = session.termination
+    return bool(session.closed and receipt is not None and receipt.confirmed and receipt.method != "already_exited")
+
+
+# LLM: 复用同一可重入来源锁，get仍核原权限和CAS；等锁超时必须报零写入，不得删锁绕过准入。
+# 函数用途: 把PTY来源检查的锁等待纳入输入的原始期限。
+def _get_session_for_write(registry, session_id, access_scope, deadline):
+    _check_write_deadline(deadline, 0)
+    try:
+        with source_process_boundary(deadline=deadline):
+            session = registry.get(session_id, access_scope, deadline=deadline)
+    except TimeoutError as exc:
+        raise PtyWriteError("TOOL_TIMEOUT", 0) from exc
+    _check_write_deadline(deadline, 0)
+    return session
+
+
+# LLM: macOS 在最后一个 slave FD 关闭时会丢弃 master 里尚未读走的输出；父进程留一份 slave 直到尾部排空，
+#   这样退出前的最后输出仍可读到（读完返回 EAGAIN 而不是 EOF，终态由组长退出观察决定）。其它平台照旧立即关闭。
+# 函数用途: 决定启动后父进程是否保留 slave FD，返回保留的 FD 或 -1。
+def _hold_slave_for_tail(slave_fd: int) -> int:
+    if sys.platform == "darwin":
+        return slave_fd
+    os.close(slave_fd)
+    return -1
+
+
+# LLM: 每个可读块和无数据分支均检查父终态；读取append串行，清退不持read锁，避免与显式close倒锁。
+# 函数用途: 持续排空并及时清退自然退出的终端，清退时保存最后输出。
+def _drain_session_io(registry, session):
+    while not session.closed:
+        try:
+            chunk = _read_and_append_session(session)
+        except OSError:
+            break
+        if isinstance(session.process, PtyOwnedProcess) and session.process.poll() is not None:
+            _close_known_session(session)
+        if chunk == b"":
+            break
+    _close_session_fd(session)
+    if isinstance(session.process, PtyOwnedProcess):
+        session.process.wait()
+        _close_known_session(session)
+    with registry._lock:
+        _prune_finished_sessions(registry)
+
+
+# LLM: 一个读者取得的字节必须在下一个读者前append；不持close锁，避免反向等待。
+# 函数用途: 将终端读取和输出缓冲追加作为一个有序操作。
+def _read_and_append_session(session):
+    with session.read_lock:
+        try:
+            chunk = _poll_session_chunk(session)
+        except BlockingIOError:
+            return None
+        if chunk:
+            session.append(chunk)
+        return chunk
+
+
+# LLM: 等就绪不持写锁；实际read借用同一FD生命周期，允许与输入并行但不能读复用FD。
+# 函数用途: 单次有界读取，None表示暂时无输出，空字节表示终态。
+def _poll_session_chunk(session):
+    if not select.select([session.master_fd], [], [], 0.1)[0]:
+        return None
+    with _borrow_session_fd(session, draining=True):
+        return b"" if session.closed else os.read(session.master_fd, 4096)
+
+
+# LLM: 借用入口锁等待遵守原write期限；最终计数释放必须完成，不能因超时丢失尚在使用的FD责任。
+# 函数用途: 让双向读写共享活FD，closing时只排空既有IO，最后释放唤醒close。
+@contextmanager
+def _borrow_session_fd(session, *, draining=False, deadline=None):
+    with _session_lock(session.io_condition, deadline):
+        if session.closed or (session.fd_closing and (not draining or not session.io_users)):
+            raise OSError("PTY_FD_CLOSED")
+        session.io_users += 1
+    try:
+        yield
+    finally:
+        with session.io_condition:
+            session.io_users -= 1
+            session.io_condition.notify_all()
+
+
+# LLM: 调用方持整份写串行锁及FD借用；累计真实字节和原deadline，部分错误不能改报零字节。
+# 函数用途: 在有界期限内完成输入，同时允许排空线程持续消费输出。
+def _write_session_bytes(session, data, deadline):
+    written = 0
+    while written < len(data):
+        _check_write_deadline(deadline, written)
+        written += _write_session_chunk(session, data[written:], written)
+
+
+# LLM: 仅格式化已按原权限解析的resize会话；size读回须借用原FD，保留原错误码/副作用分类。
+# 函数用途: 返回内核实际尺寸，不读取已经关闭或复用的终端FD。
+def _resize_response(tool, session_id, session):
+    if session is None:
+        return tool._error("PROCESS_NOT_FOUND", f"PTY session 不存在: {session_id}", effect_outcome="not_started")
+    if session.process.poll() is not None or session.closed:
+        return tool._error("COMMAND_FAILED", f"PTY session 已结束: {session_id}")
+    try:
+        with _borrow_session_fd(session):
+            actual = os.get_terminal_size(session.master_fd)
+    except OSError as exc:
+        return tool._error("COMMAND_FAILED", str(exc))
+    return tool._ok({"status": "resized", "session_id": session_id, "columns": actual.columns, "rows": actual.lines})
+
+
+# LLM: 不重新借用FD、不改计时；EAGAIN仅本轮无进展，真实错误保留此前累计字节。
+# 函数用途: 单次等待可写并提交剩余输入，精确保留部分写状态。
+def _write_session_chunk(session, data, written):
+    try:
+        return os.write(session.master_fd, data) if select.select([], [session.master_fd], [], .02)[1] else 0
+    except BlockingIOError:
+        return 0
+    except OSError as exc:
+        raise PtyWriteError("PTY_WRITE_FAILED", written) from exc

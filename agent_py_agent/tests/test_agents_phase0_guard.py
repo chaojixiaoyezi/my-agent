@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.capability.persona_repository import PersonaRepository
 from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import learning_source as ls
 from agent_py_agent.agent.memory_store.candidate_models import (
     CandidateObservation,
     MemoryScope,
@@ -47,6 +48,7 @@ from agent_py_agent.agent.memory_store.promotion import (
     MemoryPromotionDependencies,
     MemoryPromotionService,
 )
+from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 
 _EXCLUDED_CHAT = "chat-excluded-1"
 _OTHER_CHAT = "chat-other-1"
@@ -118,7 +120,7 @@ def _runtime(tmp_path: Path):
 
 
 # 函数用途: 从指定会话观察一条 auto_eligible 候选（env 为 (service, conversations)）。
-def _observe(env, thread, content, *, promotion_target="agents"):
+def _observe(env, thread, content, *, promotion_target="agents", **observation_fields):
     service, conversations = env
     message = conversations.messages.append(
         {"thread_id": thread.thread_id, "role": "user", "content": content, "now": 11.0}
@@ -144,6 +146,9 @@ def _observe(env, thread, content, *, promotion_target="agents"):
             promotion_target=promotion_target,
             promotion_mode="auto_eligible",
             confidence=0.99,
+            # 来源由隔离夹具模拟宿主用户入站，不凭候选正文判断。
+            learning_source=ls.user_dialogue_projection(),
+            **observation_fields,
         )
     )
 
@@ -213,7 +218,7 @@ def test_manual_agents_promotion_is_rejected(tmp_path: Path):
     )
 
 
-def test_automatic_long_term_promotion_unaffected(tmp_path: Path):
+def test_long_term_promotion_requires_explicit_confirmation(tmp_path: Path):
     service, conversations, threads = _runtime(tmp_path)
     candidate = _observe(
         (service, conversations),
@@ -222,7 +227,7 @@ def test_automatic_long_term_promotion_unaffected(tmp_path: Path):
         promotion_target="long_term",
     )
 
-    result = service.promote(candidate.candidate_id, automatic=True)
+    result = confirm_candidate(service, candidate.candidate_id)
 
     assert result.promoted is True
     assert [record.content for record in service.long_term.all()] == ["个人电脑使用 macOS。"]

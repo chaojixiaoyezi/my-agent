@@ -15,6 +15,7 @@
 #   云资源、私人卡和禁网保持明确恢复码；未知写入不重放，结构化条件未满足不当成模型故障。
 #   群任务主体只接受宿主冻结事实；缺失、冲突与越权分别拒绝，不从模型属性补人或改用管理员。
 #   群能力及机器人来源失败保留固定码；没有人工授权或准确原消息证明时不能反复调用或降级绕过。
+#   规则来源HTTP读取失败不自动删除约束或反复请求；来源保护事实不可核验时保留拒写，不扩大权限。
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
@@ -48,6 +49,21 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "AGENTS_SOURCE_HTTP_FAILED": ErrorContract(
+        code="AGENTS_SOURCE_HTTP_FAILED", category="network", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="配置的AGENTS HTTP来源读取失败；核对原来源状态、配置与缓存版本，不删除来源约束或将缺失正文当成功。",
+    ),
+    "PATH_AGENTS_SOURCE_PROTECTION_INVALID": ErrorContract(
+        code="PATH_AGENTS_SOURCE_PROTECTION_INVALID", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="AGENTS来源保护的原定位、配置或文件身份不可核验；本次写入仍拒绝，由宿主修复同一来源事实，不删除保护或扩大写范围。",
+    ),
+    "PROVIDER_QUEUE_TIMEOUT": ErrorContract(
+        code="PROVIDER_QUEUE_TIMEOUT", category="transient", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="模型接口排队超时或队列已满；稍后继续，不代表额度用尽，不重放已执行工具。",
+    ),
     "EDIT_TARGET_MISMATCH": ErrorContract(
         code="EDIT_TARGET_MISMATCH", category="state", retryable=True,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
@@ -1253,6 +1269,21 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.CHOOSE_REGISTERED_TOOL.value,
         recovery_hint="工具名不在当前运行时注册表；按 suggested_tool_name 或当前工具清单选择已注册工具。",
+    ),
+    "SELF_MAP_RESPONSE_TOO_LARGE": ErrorContract(
+        code="SELF_MAP_RESPONSE_TOO_LARGE", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="自我目录预算不能容纳最小回执；改查准确条目或更小分页，不读取托管正文绕过预算。",
+    ),
+    "SELF_MAP_CURSOR_STALE": ErrorContract(
+        code="SELF_MAP_CURSOR_STALE", category="state", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="自我目录的来源或授权快照已变化；放弃旧游标，按next_read重读当前分块。",
+    ),
+    "SELF_MAP_SOURCE_UNAVAILABLE": ErrorContract(
+        code="SELF_MAP_SOURCE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前用户的目录来源暂不可核验；保留unknown或partial，不将读取失败当作空清单或改读其它用户。",
     ),
     "TOOL_INVALID_ARGUMENTS": ErrorContract(
         code="TOOL_INVALID_ARGUMENTS",

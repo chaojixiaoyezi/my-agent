@@ -24,6 +24,7 @@ from ..common.nofollow_fs import ensure_private_dir
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import CandidateService, merge_candidate_observations
+from .curator_rejected_bindings import retain_rejected_target_bindings
 from .curator_run_log import (
     CuratorRunLog,
     CuratorRunRecord,
@@ -52,7 +53,7 @@ from .daily import (
 CURATOR_TRANSACTION_SCHEMA_VERSION = "my-agent.memory-curator-transaction.v1"
 
 
-# LLM: One object binds all four projections to the same run/lease and prevents a caller from
+# LLM: 同一对象绑定全部投影与同run/lease，游标不能对另一批提取结果提交；拒绝绑定与接受候选原子持久。
 # committing a state cursor for a different extracted batch.
 # 类用途: 表示一次已经通过 Schema 与证据校验的 Curator 整批提交请求。
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class CuratorBatchCommit:
     state_commit: CuratorSuccessCommit
     daily_events: tuple[DailyMemoryEvent, ...] = ()
     candidate_observations: tuple[CandidateObservation, ...] = ()
+    rejected_target_bindings: tuple[dict[str, object], ...] = ()
 
 
 # LLM: Result returns stable IDs/counts only; committed candidate bodies remain in the sole
@@ -102,7 +104,7 @@ class _RecoveryPlan:
     blocking: bool = True
 
 
-# LLM: The committer owns no model or promotion capability; it only materializes a validated
+# LLM: 提交器不拥有模型或正式发布能力；只把已验证批次写到原规范账本，并负责事务恢复。
 # batch into the four canonical ledgers.
 # 类用途: 协调 Daily、Candidate、run audit 与 state 的可恢复多文件事务。
 class CuratorBatchCommitter:
@@ -130,27 +132,26 @@ class CuratorBatchCommitter:
     def commit(self, request: CuratorBatchCommit) -> CuratorBatchCommitResult:
         _validate_batch_identity(request)
         paths = self._target_paths(request)
-        with self._admissions() as admissions:
-            with _locked_paths(paths):
-                changes, daily_events, candidates = self._build_changes(request)
-                _check_admissions(admissions, changes)
-                transaction = self._prepare_transaction(request, changes)
+        with self._admissions() as admissions, _locked_paths(paths):
+            changes, daily_events, candidates = self._build_changes(request)
+            _check_admissions(admissions, changes)
+            transaction = self._prepare_transaction(request, changes)
+            try:
+                self._apply_changes(changes)
+            except CuratorStateCorruptError:
+                # state 仓库损坏不是 commit 失败: 原样冒泡, 由上层隔离留证,
+                # 不伪装成 CURATOR_COMMIT_FAILED(回滚写 state 同样会失败)。
+                raise
+            except Exception as exc:
                 try:
-                    self._apply_changes(changes)
-                except CuratorStateCorruptError:
-                    # state 仓库损坏不是 commit 失败: 原样冒泡, 由上层隔离留证,
-                    # 不伪装成 CURATOR_COMMIT_FAILED(回滚写 state 同样会失败)。
-                    raise
-                except Exception as exc:
-                    try:
-                        self._restore_transaction(transaction, paths_locked=True)
-                    except Exception as rollback_exc:
-                        raise CuratorCommitRecoveryError(
-                            "curator batch rollback failed"
-                        ) from rollback_exc
-                    _cleanup_transaction(_transaction_directory(transaction))
-                    raise CuratorBatchCommitError("curator batch commit failed") from exc
-                _cleanup_committed_best_effort(_transaction_directory(transaction))
+                    self._restore_transaction(transaction, paths_locked=True)
+                except Exception as rollback_exc:
+                    raise CuratorCommitRecoveryError(
+                        "curator batch rollback failed"
+                    ) from rollback_exc
+                _cleanup_transaction(_transaction_directory(transaction))
+                raise CuratorBatchCommitError("curator batch commit failed") from exc
+            _cleanup_committed_best_effort(_transaction_directory(transaction))
         return CuratorBatchCommitResult(tuple(daily_events), tuple(candidates))
 
     # LLM: 独立恢复也必须同锁复核、恢复、清理和审计；不领取租约，默认等待规范锁。
@@ -185,8 +186,8 @@ class CuratorBatchCommitter:
             key=lambda item: str(item.resolve(strict=False)),
         )
 
-    # LLM: Pure merge helpers are shared with standalone stores, so transaction mode cannot
-    # silently change candidate occurrence or daily sequence semantics.
+    # LLM: 独立和策展模式共用纯合并；锁内先合拒绝目标约束再接受候选，不能改变次数、身份或观察版本。
+    # silently change occurrence/sequence; rejected constraints join under the same locks before accepted candidates.
     # 函数用途: 读取锁内当前态并构造每个目标文件的完整下一文本。
     def _build_changes(
         self,
@@ -194,7 +195,8 @@ class CuratorBatchCommitter:
     ) -> tuple[dict[Path, str], list[DailyMemoryEvent], list[MemoryCandidate]]:
         current_state = self.state._load_unlocked()
         next_state = build_success_state(current_state, request.state_commit)
-        candidate_rows = self.candidates._load_unlocked()
+        candidate_rows = retain_rejected_target_bindings(
+            self.candidates._load_unlocked(), request.rejected_target_bindings)
         if request.candidate_observations:
             candidate_rows, committed_candidates = merge_candidate_observations(
                 candidate_rows,

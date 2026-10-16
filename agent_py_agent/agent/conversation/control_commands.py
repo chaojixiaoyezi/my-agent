@@ -54,6 +54,8 @@ ControlKind = Literal[
     "approve",
     "deny",
     "skills",
+    "agents",
+    "memory",
     "settings",
     "plugins",
     "unsupported",
@@ -212,11 +214,22 @@ def parse_conversation_control(
     return command if isinstance(command, ConversationControlCommand) else None
 
 
+# LLM: 仅按公共目录已识别的显式命令名分派；解析不签权、不读正文猜审批，真正写入仍核当前宿主封印。
+# 函数用途: 复用原Persona与Memory各自解析器，主命令解析层保持轻量。
+def _personal_storage_command(name, trailing):
+    from ..gateway_parts.agents_control_service import parse_agents_command
+    from ..gateway_parts.memory_candidate_control import parse_memory_candidate_command
+
+    parser = parse_memory_candidate_command if name == "memory" else parse_agents_command
+    return parser(trailing)
+
+
 # LLM: 名称和正文读取公共声明；插件仅以原文本进入专用控制分派，不能在这里重写参数、执行 stop 或退入模型。
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
 # /restart 的尾随文字只作为展示用原因；/group 只承载人工固定语法，普通对话不能产生群授权。
+# /memory仅显式candidates子树进入人工控制；普通搜索不被改成模型批准。
 def parse_conversation_command(
     text: object,
     *,
@@ -236,6 +249,8 @@ def parse_conversation_command(
                                           usage="用法：/delegate enable、disable 或 status（IM，当天有效）。")
     if name == "schedule":
         return ConversationControlCommand("schedule", value=str(trailing or "").strip())
+    if name in {"memory", "agents"}:
+        return _personal_storage_command(name, trailing)
     if name == "group":
         return ConversationControlCommand("group", value=str(trailing or "").strip())
     if name == "sessions":

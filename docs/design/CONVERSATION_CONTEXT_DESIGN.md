@@ -137,8 +137,9 @@ tool-result reducer、archive 和 refs 管理，不用裁剪对话正文代替�
 8. live-tool 摘要的 transport/调用异常、checkpoint 或 CAS 失败时，原生 IR 与 tool-context 恢复到压缩前，
    thread 只增加同一个失败熔断事实。若供应商请求已经正常完成、用量已入账但摘要正文为空，则不重试第二次，
    而是从 typed UserTurn/ToolCall/ToolResult/refs 构造有界机械替代摘要后继续提交；该投影不判断任务完成，精确
-   副作用仍以 archive、operation ledger、artifact 和真实文件为准。transcript Compact 对正常完成的空正文
-   使用相同原则，从旧摘要、raw row 投影和结构化 operation evidence 生成有界续接包。presentation/no-save
+   副作用仍以 archive、operation ledger、artifact 和真实文件为准。transcript Compact 对首次完整、未截断且
+   无工具调用的空正文沿同一请求最多补一次；仍空才从旧摘要、raw row 与结构化 operation evidence 生成
+   有界续接包。presentation/no-save
    辅助回合可做临时窗口整理，但不得推进 generation 或冒充 `compact N`。
    用户 stop/cancellation 不是摘要失败：三条 Compact 路径在慢摘要前后、候选改写前后、checkpoint 前后和
    generation CAS 前读取同一个中断回调；CAS 前恢复未提交的 IR/tool-context 并发布中性
@@ -560,3 +561,25 @@ skills/tools/workflows；随 wheel 发布的 builtin tools/skills 本身也是�
 append_once保持原幂等锁、首个同key内容校验和唯一append/update链，但逐行扫描固定物理EOF，不再载入全量消息；命中后仍校验后续记录，display不参与匹配。写前拒绝缺LF尾行，包括可解析JSON或纯空白，避免后续追加把两条JSON拼坏；不自动修复原文件。读取内存随最大行而非历史总量增长，扫描时间仍线性。
 
 这些字节边界没有授予Compact摘要覆盖或跨任务读权限，不是抗文件替换凭据；scope筛选、完整来源验证及原checkpoint/CAS仍是唯一提交合同。详见[容量审计](../tasks/DECISION_MODEL_CONTEXT_AUDIT.md)。
+
+## F6/F7 组合合同（2026-10-16，候选未发行、未部署）
+
+transcript Compact 在原解绑点冻结同次主请求的连续历史前缀。覆盖 ID 必须属于同次来源的连续前缀，联合工具必须有精确原记录、IR 与 handoff 证明且位于受保护 RuntimeFactsTurn 之前；未知投影保留原工具位置。稳定 system、工具、历史媒体沿当前 Adapter 运输，不另建 checkpoint、覆盖表或授权源。
+
+冻结前缀仅是可容纳时的缓存优化。完整摘要请求先按原估算、校准和输出预留做本地预检；冻结请求预算为窗口减输出预留，原分段预算仍为窗口 80% 减输出预留。本地 typed `COMPACT_PREFIX_TOO_LARGE` 只解除一次优化，直接复用 main 的完整来源、分段与媒体策略，在首次发送前完成裁决，不增加一次失败模型调用。网络、取消或身份错误不触发该分支，单一 checkpoint/CAS 保持。原窗口同量历史 main/F6 都可分段成功，不能以更大模型作为唯一恢复方式。
+
+transcript 的首次完整响应若 text 为空、未截断且无工具调用，沿同一冻结请求有界补一次；再次为空才用原机械续接。截断、工具响应和取消不借此增加重试，判断只读结构化响应形状，不解析模型文案。active-turn/live-tool 的原机械恢复规则不变。
+
+上下文显示的 `ContextUsageBinding` 必须在真实生成/模型调用估算前捕获原 store 对象、精确 thread、compact_generation 与 model_selection_revision，随同一次 ModelVisibleContextSnapshot 传到保存点；wrapper 不得 fresh-load 最新版本给旧采样重签。缺绑定、损坏或跨 store/thread 只弃持久遥测，不挡模型；纯预算查询不增加该读取，live 回执不冒充持久 CAS 成功，公开数值与费用协议不变。
+
+F7 复用当前 PromptCacheLayout、原 Chat/Messages/Responses 组包、缓存断点、metadata/usage 和工具累计加载，无额外答案缓存、人格库或统计账本。动态尾不写入稳定段；工具集合/说明、owner、线程或模型变化必须真实反映到请求表面，sticky 加载不能恢复已撤工具权限。主回答与摘要沿原 purpose/call_id 分别结算物理尝试、耗时、累计 usage；排队展示不计为物理 HTTP 尝试。未知 cache usage 与明确 0 分开，本地请求表面相同不等于 provider 真命中。
+
+F4 原 source-CAS/persona_epoch 仍由唯一 agents_source_repository 与 freeze_thread_persona 管理；每次消费重核 require_active_permission，同代源变化不提前进动态差分。F5 self_map 资格复用当前同源快照，不额外查询目录。RuntimeFactsTurn.media、宿主 base64 图片、原 owner/actor、学习来源、F2 队列与 main 新指标均保留。真实 provider 缓存/延迟/费用、OS/TLS/network 和服务验收未在本轮执行。
+
+## F6 摘要入口的旧历史生命周期修复（2026-10-16，候选未发布）
+
+冻结主前缀是可选优化，不能撤销主线“压缩期间原文不整份驻留”的合同。恢复宿主解绑前和自动 preflight 发布 surface 前，先按 TranscriptInputPrefix 的准确 source_ids / joint_end 取真正可覆盖的前缀，不把当前 RuntimeFactsTurn 等受保护尾项计入。使用原 compact_request_tokens、compact_cache_surface_budget 和 calibrated_compact_request_tokens，估算空摘要指令下的同一请求框架；校准在 observed 边界可能下降，因此同时读取原函数在当前 raw 与未来 observed 边界的值取保守下界。仅下界已严格超过原预算时不发布 prefix，让旧历史随原解绑释放，并原样交回 tool_source 继续原完整来源/分段链。
+
+可容纳、边界相等或尚不能证明超量时保留优化；增加真实摘要指令后的原完整请求精确门仍必须执行。这里不复制校准公式、不增预算参数，不创建 spool 或第二来源，不捕获并转化取消、身份、媒体和网络错误，不额外发模型调用。单一原文、工具覆盖、媒体、checkpoint/CAS 与 usage 采样绑定保持；三宿主原内存阈值及全覆盖回归不降低。
+
+明确不支持的媒体也不能让已不可用的大前缀继续驻留：在同次可覆盖前缀上只做原声明/块类型检查，丢弃正文，仅由现有 ConversationCompactProviderSurface 携原 CompactMediaDecision（默认 None、repr/compare 排除，无新 reason 或持久记录）。构造实际候选时先核 canonical media_archive_facts 及本候选实际模态，再在原视觉探针边界之前采用决定；off、无媒体、未覆盖拒绝模态、未知或现已支持均不盲套全来源结论。COMPACT_PREFIX_MEDIA_UNSUPPORTED 继续沿原 media_outcome/checkpoint 传递，媒体完整来源、覆盖和权限不变，也不多一次视觉探针。

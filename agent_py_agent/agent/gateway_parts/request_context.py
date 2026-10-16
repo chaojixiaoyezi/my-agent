@@ -1,10 +1,10 @@
 # LLM: preflight 先解析 canonical thread；车道内原读取后可执行内部观察钩子，再按 repair、索引、Compact、历史、任务取快照。
 # 同片展示和延迟Compact来源只在原请求内存传递；defer只跳过摘要和提交，不跳过repair、索引及作用域读取。
-# 模块用途: 准备本轮会话和目录事实，必要时补交历史、更新索引并调用模型压缩；任务执行仍由编排层负责。
+# 模块用途: 准备会话与目录事实并冻结同源压缩历史；补交历史、索引与模型调用保持原权限。
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,6 +27,15 @@ from ..conversation.compact_provider_surface import ConversationCompactModelSurf
 from ..conversation.compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from ..conversation.compact_summary_view import AppliedCompactContext, resolve_compact_summary_view
 from ..conversation.history_seed import ConversationHistorySource, freeze_history_source
+from ..conversation.learning_source import (
+    thread_source_projection,
+    unknown_projection,
+    user_dialogue_projection,
+)
+from ..memory_store.learning_exclusions import (
+    curator_learning_exclusions,
+    thread_is_excluded,
+)
 from ..runtime_errors import runtime_error_report
 from . import request_binding, request_history
 from .stream_events import CONTEXT_USAGE_SCHEMA
@@ -74,6 +83,9 @@ class GatewayConversationContext:
     thread_id: str = ""
     cwd: str = ""
     runtime_workspace_roots: tuple[str, ...] = ()
+    # LLM: 入口冻结的有效学习来源（线程记录与排除名单合成）；None 表示宿主不能证明来源，按不可学处理。
+    # 字段用途: 供回合参数与子代理 spawn 继承同一来源事实，来源缺失时保持不写（fail-closed）。
+    learning_source: dict[str, object] | None = None
     compact_summary: str = ""
     compact_operation_evidence: dict[str, object] = field(default_factory=dict)
     compact_operation_evidence_ref: str = ""
@@ -183,6 +195,7 @@ def preflight_gateway_conversation(
             for item in (getattr(thread, "runtime_workspace_roots", ()) or ())
             if str(item or "").strip()
         ),
+        learning_source=_gateway_effective_learning_source(inputs.agent, thread),
         compact_generation=max(0, int(getattr(thread, "compact_generation", 0) or 0)),
     )
 
@@ -258,6 +271,7 @@ def gateway_conversation_context(
             for item in (getattr(thread, "runtime_workspace_roots", ()) or ())
             if str(item or "").strip()
         ),
+        learning_source=_gateway_effective_learning_source(agent, thread),
         compact_summary=compact_context.view.summary,
         compact_operation_evidence=dict(compact_context.view.operation_evidence),
         compact_operation_evidence_ref=(
@@ -279,6 +293,31 @@ def gateway_conversation_context(
         compact_context=compact_context,
         compact_source=compact_source,
     )
+
+
+# LLM: 入口把线程记录与排除名单合成一个有效来源事实：被排除的会话即使带可学投影也按不可学处理，
+#   回合参数与子代理 spawn 继承同一判定；名单不可读或宿主形状不完整时保持原来源（提交侧仍会 fail-closed）。
+# 函数用途: 计算网关入口冻结的有效学习来源投影；无法证明来源时返回 None。
+def _gateway_effective_learning_source(agent: object, thread: object) -> dict[str, object] | None:
+    source = thread_source_projection(getattr(thread, "learning_source", None))
+    excluded_ids = _gateway_excluded_conversation_ids(agent)
+    if excluded_ids and thread_is_excluded(thread, excluded_ids):
+        return unknown_projection()
+    return source
+
+
+# LLM: 排除名单只按结构化通道绑定判定；名单不可读或宿主没有 owner policy 形状时返回空集合，
+#   由提交侧的名单复核继续承担 fail-closed，不在入口制造第二套判定。
+# 函数用途: 读取当前 owner 的学习排除会话 ID 集合。
+def _gateway_excluded_conversation_ids(agent: object) -> frozenset[str]:
+    home = getattr(agent, "home_paths", None)
+    if home is None or not hasattr(home, "owner_memory_policy_json"):
+        return frozenset()
+    try:
+        excluded, unreadable = curator_learning_exclusions(home)
+    except Exception:  # noqa: BLE001 - 入口判定失败保持原来源，提交侧名单复核仍是权威
+        return frozenset()
+    return frozenset() if unreadable else excluded
 
 
 # LLM: 与控制入口共用 workspace_scope 校验，目录错误先失败；存储错误仍独立报告，不混入 prompt。
@@ -309,6 +348,8 @@ def _load_gateway_thread(
                 "title": inputs.prompt[:80] or inputs.request_id,
                 "cwd": cwd,
                 "runtime_workspace_roots": runtime_workspace_roots,
+                # 网关前台请求是用户对话入口；线程创建时写入可学来源，已有线程保持原来源不覆盖。
+                "learning_source": user_dialogue_projection(),
             }
         )
     except Exception as exc:
@@ -320,7 +361,7 @@ def _load_gateway_thread(
 # unchanged; compact failures keep their own typed error code and cannot become transcript corruption.
 # 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
 # defer只读固定完整尾界的范围来源；逐行selector不得重排行，错误保留原因，普通入口沿同一来源压缩。
-# 函数用途: 加载Gateway会话来源，按内部模式立即压缩或返回待准备来源，停止与坏原文不会降级为空。
+# 函数用途: 加载同源历史并冻结给自动压缩；可延后准备，停止与坏原文不降级为空。
 def _load_gateway_compact_context(
     inputs: GatewayConversationLoadRequest,
     store: object,
@@ -361,15 +402,7 @@ def _load_gateway_compact_context(
                     inputs.on_chunk, store=store, thread=thread,
                 ),
                 interrupt_check=is_interrupted,
-                model_surface=inputs.model_surface or ConversationCompactModelSurface(
-                    prompt_files=tuple(
-                        str(item)
-                        for item in inputs.request.get("prompt_files", [])
-                        if str(item or "").strip()
-                    ),
-                    context_scope="conversation",
-                    loaded_tool_names=tuple(inputs.loaded_tool_names),
-                ),
+                model_surface=_gateway_compact_model_surface(inputs, source),
             ),
         )
     except InterruptedError:
@@ -395,6 +428,18 @@ def _load_gateway_compact_context(
         None,
         application,
     )
+
+
+# LLM: 冻结与主种子共用的Gateway投影规则和时刻，Compact只消费这份历史；不生成权限或另筛正文。
+# 函数用途: 让自动preflight取得同时间主历史来源，动态尾项始终在覆盖终点之后。
+def _gateway_compact_model_surface(inputs, source):
+    surface = inputs.model_surface or ConversationCompactModelSurface(
+        prompt_files=tuple(str(item) for item in inputs.request.get('prompt_files', []) if str(item or '').strip()),
+        context_scope='conversation', loaded_tool_names=tuple(inputs.loaded_tool_names),
+    )
+    return replace(surface, history_source=freeze_history_source(
+        source.messages, project_row=history_projection.project_history_row,
+    ))
 
 
 # LLM: The full structured ledger stays owner-local and append-only; the prompt receives only a

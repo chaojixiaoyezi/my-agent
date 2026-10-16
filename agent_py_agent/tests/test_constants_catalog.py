@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.tests.support.ci_release_layout import assert_business_module
 from scripts.build_constants_catalog import (
     _is_protocol_constant,
     _module_entries,
@@ -137,7 +138,8 @@ def test_runtime_catalog_search_finds_by_name_file_and_description():
         assert search_constants(first["description"][:4], limit=50)
 
 
-def test_runtime_locate_line_finds_definition_only_in_that_file():
+def test_runtime_locate_line_finds_definition_only_in_that_file(tmp_path, monkeypatch):
+    import agent_py_agent.agent.settings.constants_catalog as catalog_module
     from agent_py_agent.agent.settings.constants_catalog import (
         entry_with_line,
         load_catalog,
@@ -146,12 +148,26 @@ def test_runtime_locate_line_finds_definition_only_in_that_file():
 
     first = load_catalog()[0]
     line = locate_line(first["file"], first["name"])
-    assert isinstance(line, int) and line > 0, "目录里存在的常数应在它的源码文件里定位到行号"
     view = entry_with_line(first)
-    assert view["line"] == line
+    if assert_business_module(catalog_module).suffix == ".pyc":
+        assert line is None
+        assert "line" not in view
+    else:
+        assert isinstance(line, int) and line > 0, "目录里存在的常数应在它的源码文件里定位到行号"
+        assert view["line"] == line
     assert locate_line(first["file"], "NO_SUCH_CONSTANT_XYZ") is None
     assert locate_line("agent_py_agent/agent/not_a_real_file.py", "MAX_BYTES") is None
     assert locate_line("not_under_package.py", "MAX_BYTES") is None
+
+    # 无论运行于源码还是纯 pyc，都以临时单文件保留准确行号正例；另一文件的同名不能被扫描补回。
+    package = tmp_path / "agent_py_agent"
+    (package / "agent").mkdir(parents=True)
+    (package / "agent/one.py").write_text("# 临时常数\nMAX_BYTES = 7\n", encoding="utf-8")
+    (package / "agent/two.py").write_text("OTHER_BYTES = 9\n", encoding="utf-8")
+    monkeypatch.setattr(catalog_module, "_PACKAGE", package)
+    assert locate_line("agent_py_agent/agent/one.py", "MAX_BYTES") == 2
+    assert entry_with_line({"file": "agent_py_agent/agent/one.py", "name": "MAX_BYTES"})["line"] == 2
+    assert locate_line("agent_py_agent/agent/two.py", "MAX_BYTES") is None
 
 
 def test_line_shift_does_not_invalidate_catalog(tmp_path):

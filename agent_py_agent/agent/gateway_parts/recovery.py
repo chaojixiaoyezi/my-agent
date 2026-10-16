@@ -16,6 +16,7 @@ gateway 如果崩在半路，请求会留在 processing 目录。
 processing liveness 直接读取 lease_service，不再经过 runtime 聚合层。
 """
 
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,8 @@ if TYPE_CHECKING:
 
 
 _TERMINAL_PROJECTION_MARKER_SCHEMA = "gateway_terminal_projection_complete.v1"
+# 只节流可重建投影；启动和每小时完整复核兜住原位改写，规范终态与结算仍逐条核验。
+_TERMINAL_PROJECTION_FULL_RESCAN_SECONDS = 3600.0
 _ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
 GATEWAY_SAFE_RESTART_CAUSE = "gateway_safe_restart"
 # 续跑次数用完时请求收口的错误码（登记在 contracts.error_taxonomy，恢复动作 request_user_input）。
@@ -538,36 +541,127 @@ def _terminal_projection_marker_path(paths: GatewayPaths, request_id: str) -> Pa
     return paths.root / "projection_state" / "terminal_complete" / f"{request_id}.json"
 
 
+# LLM: 目录时间戳（mtime_ns + 条目大小）只在增删文件时变化，用作稳态节流信号；内容被改写不改目录
+#   时间戳，那种破坏交给低频全量复核。目录缺失返回 None，与"没有终态可扫"等价。
+# 函数用途: 返回终态目录的增删时间戳，供扫描节流比较。
+def _terminal_directory_stamp(directory: Path) -> tuple[int, int] | None:
+    try:
+        stat = directory.stat()
+    except OSError:
+        return None
+    return (int(stat.st_mtime_ns), int(stat.st_size))
+
+
+# LLM: 游标里的目录时间戳是上次扫描时的观察值；坏值当没记录（宁可多扫一次，不漏补）。
+# 函数用途: 从游标负载里读出上次记录的终态目录时间戳。
+def _cursor_directory_stamp(cursor: dict) -> tuple[int, int] | None:
+    value = cursor.get("directory_stamp")
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        return (int(value[0]), int(value[1]))
+    except (TypeError, ValueError):
+        return None
+
+
+# LLM: 追平 = 上一轮已沿文件名推进到目录末尾；只有追平之后，目录时间戳没变才能安全跳过。
+#   否则积压（需要处理的文件多于每轮上限）会被节流卡死，崩溃恢复退化成每小时补一批。
+#   旧游标没有这个字段时按未追平处理（宁可多扫一轮，不漏补）。
+# 函数用途: 从游标负载里读出上一轮是否已沿文件名推进到目录末尾。
+def _cursor_caught_up(cursor: dict) -> bool:
+    return cursor.get("caught_up") is True
+
+
+# LLM: 游标是投影扫描唯一的持久进度：last_name 决定轮转起点，directory_stamp 决定稳态是否跳过，
+#   caught_up 决定"目录没变"能不能跳过（未追平必须继续推进），full_scan_at 决定低频全量复核
+#   何时到期；它们必须一起更新，避免"跳过了却没记录"或"没追平却停止"。收成小数据类是为了
+#   另带整轮settlement_pending，失败重试不能被后页成功或稳态节流吞掉；字段一起原子写入。
+# 类用途: 承载终态投影扫描的位置、节奏与整轮欠账观察，不替代原结算账。
+@dataclass(frozen=True)
+class _TerminalProjectionCursor:
+    last_name: str
+    directory_stamp: tuple[int, int] | None
+    full_scan_at: float
+    caught_up: bool
+    settlement_pending: bool = False
+
+
+# LLM: 整轮欠账随原扫描游标持久化，后页成功不得覆盖前页失败；不保存任务/结算权威。
+# 函数用途: 原子写入终态投影游标（轮转位置 + 目录时间戳 + 追平状态 + 上次全量复核时间）。
+def _write_terminal_projection_cursor(
+    cursor_path: Path,
+    state: _TerminalProjectionCursor,
+) -> None:
+    write_json_file_atomic(
+        cursor_path,
+        {
+            "schema_version": "gateway_terminal_projection_cursor.v1",
+            "last_name": state.last_name,
+            "directory_stamp": list(state.directory_stamp) if state.directory_stamp is not None else None,
+            "caught_up": bool(state.caught_up),
+            "settlement_pending": bool(state.settlement_pending),
+            "full_scan_at": state.full_scan_at,
+            "updated_at": time.time(),
+        },
+    )
+
+
 # LLM: The live dispatcher walks canonical terminal authorities in bounded rotating pages. Repair
 # never delays Gateway readiness, and one corrupt archive is reported without blocking others.
-# 函数用途: 后台分批补齐终态请求的完成目录、response、history 和输入回执投影。
+# 稳态节流：目录时间戳没变、且上一轮已沿文件名追平目录末尾（caught_up）、且不在低频全量复核
+# 窗口内时直接跳过（不再每轮 glob+sort 全部历史终态）；未追平（积压多于每轮上限）时继续推进，
+# 保证任何崩溃场景最终补齐。启动全扫由调用方传 full_scan=True；运行中被外部改坏的投影由
+# _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS 到期的全量复核兜住。
+# 函数用途: 分批补齐原终态投影并节流已追平扫描；失败欠账继续轮转，永不重做业务。
 def repair_gateway_terminal_projections(
     paths: GatewayPaths,
     *,
     agent: SimpleAgent | None,
     limit: int = 16,
+    full_scan: bool = False,
 ) -> tuple[int, list[dict]]:
     projected = 0
     errors: list[dict] = []
-    candidates = sorted(paths.terminal.glob("*.json"), key=lambda item: item.name)
-    if not candidates:
-        return projected, errors
     cursor_path = paths.root / "projection_state" / "terminal_cursor.json"
     cursor_report = read_json_file_report(
         cursor_path,
         context="gateway.recovery.terminal_projector.cursor",
     )
-    previous = (
-        str(cursor_report.payload.get("last_name") or "")
-        if cursor_report.load_error is None
-        else ""
-    )
-    start = next(
-        (index for index, path in enumerate(candidates) if path.name > previous),
-        0,
-    )
-    ordered = candidates[start:] + candidates[:start]
-    selected = ordered[: max(1, int(limit or 1))]
+    cursor = cursor_report.payload if cursor_report.load_error is None else None
+    cursor = cursor if isinstance(cursor, dict) else {}
+    previous = str(cursor.get("last_name") or "")
+    caught_up = _cursor_caught_up(cursor)
+    directory_stamp = _terminal_directory_stamp(paths.terminal)
+    now_epoch = time.time()
+    try:
+        last_full_scan_at = float(cursor.get("full_scan_at") or 0.0)
+    except (TypeError, ValueError):
+        last_full_scan_at = 0.0
+    if not math.isfinite(last_full_scan_at):
+        last_full_scan_at = 0.0
+    full_due = full_scan or now_epoch - last_full_scan_at >= _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS
+    if not full_due and caught_up and directory_stamp == _cursor_directory_stamp(cursor):
+        return projected, errors
+    candidates = sorted(paths.terminal.glob("*.json"), key=lambda item: item.name)
+    if not candidates:
+        _write_terminal_projection_cursor(
+            cursor_path,
+            _TerminalProjectionCursor(
+                last_name=previous,
+                directory_stamp=directory_stamp,
+                full_scan_at=now_epoch if full_due else last_full_scan_at,
+                caught_up=True,
+            ),
+        )
+        return projected, errors
+    if full_due or caught_up:
+        previous = ""
+    start = next((index for index, path in enumerate(candidates) if path.name > previous), 0)
+    # 分页保持线性；不把尾部加前缀混成“已覆盖整轮”。并发新增时先推进旧积压，再完整复核下一轮。
+    selected = candidates[start : start + max(1, int(limit or 1))]
+    pass_stamp = directory_stamp if start == 0 else _cursor_directory_stamp(cursor)
+    # 只在新一轮从目录首项开始时清整轮欠账；跨页须保留前页观察。
+    settlement_pending = bool(cursor.get("settlement_pending")) if start > 0 else False
     for canonical in selected:
         if _terminal_projection_marker_matches(paths, canonical):
             continue
@@ -589,11 +683,7 @@ def repair_gateway_terminal_projections(
             continue
         try:
             _recover_committed_terminal_processing(
-                paths,
-                canonical,
-                request_id,
-                payload=report.payload,
-                agent=agent,
+                paths, canonical, request_id, payload=report.payload, agent=agent,
             )
         except Exception as exc:
             failure = runtime_error_report(
@@ -604,13 +694,17 @@ def repair_gateway_terminal_projections(
             errors.append(failure)
             continue
         projected += 1
-    write_json_file_atomic(
+        settlement_pending = settlement_pending or not _terminal_projection_marker_matches(paths, canonical)
+    _write_terminal_projection_cursor(
         cursor_path,
-        {
-            "schema_version": "gateway_terminal_projection_cursor.v1",
-            "last_name": selected[-1].name,
-            "updated_at": time.time(),
-        },
+        _TerminalProjectionCursor(
+            last_name=selected[-1].name,
+            directory_stamp=pass_stamp,
+            full_scan_at=now_epoch if full_due else last_full_scan_at,
+            caught_up=(not settlement_pending and not errors and len(candidates) - start <= len(selected)
+                       and pass_stamp == _terminal_directory_stamp(paths.terminal)),
+            settlement_pending=settlement_pending or bool(errors),
+        ),
     )
     return projected, errors
 

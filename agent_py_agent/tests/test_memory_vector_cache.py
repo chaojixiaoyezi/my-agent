@@ -772,7 +772,7 @@ def test_p5d_remove_subtracts_from_disk_even_if_not_in_memory(tmp_path) -> None:
     victim = text_cache_key("fp", "临时口令放在备忘录第三页")
 
     a.put({victim: [1.0, 0.0]})  # A 写入
-    assert victim not in b.keys()  # B 的内存视图里没有这个键
+    assert victim not in b._items  # 明确观测未刷新内存；公开keys现在按磁盘版本刷新
 
     b.remove([victim])  # B 删它
 

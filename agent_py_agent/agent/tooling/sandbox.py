@@ -1,3 +1,5 @@
+# LLM: 只扩展现有bwrap底图的人格拒写；最终精确限制不可被祖先bind擦除，B7合法重挂仍沿原合同。
+# 模块用途: 构造唯一进程隔离参数与readiness，不在此签发新文件、网络或owner权限。
 
 from __future__ import annotations
 
@@ -19,12 +21,20 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ..path_access_policy import (
+    AgentsSourceProtectionError,
+    persona_process_protection_snapshot,
+    persona_sandbox_root,
+    validate_persona_configuration,
+    validate_persona_source_identity,
+)
 from .write_boundary import ordered_write_scope_roots
 
 # 仓库内置 bwrap(随 my-agent 分发,内网装不了包也自带)。
@@ -166,7 +176,7 @@ class SandboxSpec:
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
 #   workspace 是仅有的可写挂载；新增挂载必须同步安全测试和设计文档。
 # 函数用途: 根据用户目录和本次工作目录构造 bubblewrap 启动参数。
-def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
+def _build_bwrap_base_argv(spec: SandboxSpec) -> list[str]:
     """构造 bwrap argv:文件/进程隔离到 owner home,但放行外网。"""
     bwrap = spec.bwrap_path or find_bwrap()
     if not bwrap:
@@ -199,7 +209,6 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
         if spec.write_scope_denied_roots:
             _append_write_scope_mounts(argv, _normalized_write_roots(spec.write_roots, preserve_nested=True), spec.write_scope_denied_roots)
         _append_readonly_mounts(argv, spec.read_only_paths)
-        _append_persona_readonly_mounts(argv, spec.protected_persona_root or spec.owner_home)
         _append_hidden_mounts(argv, spec.hidden_paths)
         argv += ["--chdir", str(spec.workspace)]
         return argv
@@ -282,10 +291,6 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     _append_readonly_mounts(argv, spec.read_only_paths)
     # 无论 owner home 当前是 rw 还是 ro，都把需要真人确认的长期人格文件明确覆盖成
     # 只读挂载。update_persona 在宿主进程执行，不走 shell，确认后的正式写入仍可完成。
-    _append_persona_readonly_mounts(
-        argv,
-        spec.protected_persona_root or spec.owner_home,
-    )
     _append_hidden_mounts(argv, spec.hidden_paths)
     argv += ["--chdir", str(spec.workspace)]
     return argv
@@ -520,11 +525,6 @@ def _canonical_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(roots)
 
 
-def _append_persona_readonly_mounts(argv: list[str], root: Path) -> None:
-    for name in ("SOUL.md", "USER.md", "AGENTS.md"):
-        protected = root / name
-        if protected.is_file():
-            argv += ["--ro-bind", str(protected), str(protected)]
 
 
 # LLM: 共享规则排序与文件工具一致，普通祖先只读后可以重挂正式窄写根；绝对保护由调用方随后追加。只投影已有路径，不创建宿主文件。
@@ -784,5 +784,321 @@ __all__ = [
 ]
 
 
+# LLM: 本次persona根只由冻结入口签发；namespace名称和host权威是同一不可变定位事实，不保存配置/CAS或授予权限。
+# 类用途: 保存底图构造前的人格原名与canonical配置根，后续步骤不再次转换PathLike或选根。
+@dataclass(frozen=True)
+class _PersonaRootProjection:
+    namespace_root: Path
+    authority_root: Path
+
+
+# LLM: 只在底图发出前解析人格根一次；返回canonical元数据权威，不授予读写且不冻结后续内核bind；解析错误必须拒绝启动。
+# 函数用途: 一次保存人格原名及配置所属原host根，后改host-only别名或PathLike值不能选择另一个空配置。
+def _freeze_persona_root(spec: SandboxSpec) -> _PersonaRootProjection | None:
+    try:
+        root = persona_sandbox_root(spec.owner_home, spec.protected_persona_root)
+        if root is None:
+            return None
+        namespace_root = root.expanduser().absolute()
+        return _PersonaRootProjection(namespace_root, namespace_root.resolve(strict=False))
+    except (AgentsSourceProtectionError, OSError, RuntimeError) as error:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: PATH_AGENTS_SOURCE_PROTECTION_INVALID") from error
+
+
+# LLM: 只保存同次已发mount及原始参数以恢复更窄覆盖；空覆盖不授读权，不能从spec重新推导别名权限。
+# 类用途: 记录人格投影所用挂载事实，祖先加固重挂时保留同一视图的精确子挂载。
+@dataclass(frozen=True)
+class _MountProjection:
+    source: Path | None
+    target: Path
+    writable: bool = False
+    alias: bool = False
+    arguments: tuple[str, ...] = ()
+
+
+# LLM: 只解析本模块已生成argv；同次原参数用于祖先重挂后的精确恢复，不从spec/别名新增授权或模拟内核成功。
+# 函数用途: 冻结底图源、目标、写位和必要的空视图只读参数，供投影及挂载次序保护共用。
+def _mount_snapshot(argv: list[str]) -> tuple[_MountProjection, ...]:
+    mounts: list[_MountProjection] = []
+    for index, flag in enumerate(argv):
+        if flag in {"--bind", "--ro-bind", "--dev-bind"}:
+            mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), flag != "--ro-bind",
+                                           arguments=tuple(argv[index:index + 3])))
+        elif flag == "--symlink":
+            mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), alias=True,
+                                           arguments=tuple(argv[index:index + 3])))
+        elif flag in {"--tmpfs", "--proc", "--dev"}:
+            mounts.append(_MountProjection(None, Path(argv[index + 1]),
+                                           arguments=_empty_mount_arguments(argv, index)))
+    return tuple(mounts)
+
+
+# LLM: 只保留同次空视图紧邻的remount-ro，不把全根稍后的策略或其它mount复制成新授权。
+# 函数用途: 提取一条空挂载及其精确只读标志，供祖先重挂恢复原覆盖。
+def _empty_mount_arguments(argv: list[str], index: int) -> tuple[str, ...]:
+    end = index + 2
+    end += 2 if argv[end:end + 2] == ["--remount-ro", argv[index + 1]] else 0
+    return tuple(argv[index:end])
+
+
+# LLM: 后发父覆盖压过旧子mount；只比较已保存的词法坐标，不能再resolve根或把骨架/symlink当新读源。
+# 函数用途: 找到最终底图覆盖一个namespace路径的有效挂载。
+def _effective_mount(path: Path, mounts: tuple[_MountProjection, ...]) -> _MountProjection | None:
+    return next((mount for mount in reversed(mounts) if _lexically_within(path, mount.target)), None)
+
+
+# LLM: 已发symlink/异名bind沿同批mount映射回host源；元数据根缺mount时只准入口冻结权威，隐藏覆盖不能变成读授权。
+#   其它已核验来源的宿主定位不授予读权；返回路径仍不保证最终内核bind前无竞争。
+# 函数用途: 从冻结namespace名称链投影人格源，host-only根使用已保存权威而不晚读可变别名。
+def _persona_projected_source(
+    path: Path, mounts: tuple[_MountProjection, ...], *, unmounted_root: Path | None = None
+) -> Path | None:
+    location = path.expanduser().absolute()
+    for _ in range(64):
+        mount = _effective_mount(location, mounts)
+        if mount is None or (mount.source is None and mount.target == Path("/")):
+            return unmounted_root if unmounted_root is not None else location.resolve(strict=False)
+        if mount.source is None:
+            return None
+        source = mount.source / location.relative_to(mount.target)
+        if not mount.alias:
+            return source.resolve(strict=False)
+        location = source
+    raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: namespace alias cycle")
+
+
+# LLM: 逐段展开原名及每次readlink目标（包括..），每个symlink都按同次mount快照核父写位；不重解析授权根或扩大读写面。
+#   canonical自绑定不能防目标链目录项unlink/recreate；缺失默认路径仍可选，异常和循环失败关闭，不承诺内核bind前无竞争。
+# 函数用途: 对完整人格名称链及链接目标链中位于实际可写父目录的symlink失败关闭。
+def _reject_persona_mutable_alias(path: Path, mounts: tuple[_MountProjection, ...]) -> None:
+    original = path.expanduser().absolute()
+    parent = Path(original.anchor)
+    pending = list(original.parts[1:])
+    links = 0
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            parent = parent.parent
+            continue
+        node = parent / part
+        try:
+            metadata = node.lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISLNK(metadata.st_mode):
+            parent = node
+            continue
+        if _persona_parent_writable(parent, mounts):
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: mutable persona alias")
+        links += 1
+        if links > 64:
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: persona alias cycle")
+        target = node.readlink()
+        if target.is_absolute():
+            parent = Path(target.anchor)
+            pending = [*target.parts[1:], *pending]
+        else:
+            pending = [*target.parts, *pending]
+
+
+# LLM: 对已冻结host源反向遍历bind/symlink事实；每个候选必须正向核回同一source且仍有有效mount，不能增读或跟随后改spec。
+# 函数用途: 枚举同一保护源在当前namespace中的所有有效名称，包括/tmp异名和多层显式别名。
+def _persona_namespace_names(path: Path, mounts: tuple[_MountProjection, ...]) -> tuple[Path, ...]:
+    source = path.resolve(strict=False)
+    names = {path, source}
+    pending = list(names)
+    while pending:
+        location = pending.pop()
+        for mount in mounts:
+            if mount.source is None or not _lexically_within(location, mount.source):
+                continue
+            name = mount.target / location.relative_to(mount.source)
+            if name not in names:
+                names.add(name)
+                pending.append(name)
+        if len(names) > 4096:
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: namespace aliases")
+    return tuple(sorted((name for name in names if _persona_path_visible(name, mounts)
+                         and _persona_projected_source(name, mounts) == source), key=str))
+
+
+# LLM: 异名祖先只按冻结底图原写位绑定同源，并恢复同次有效子mount；已有mount根不重挂，不能借/tmp投影重露限制。
+# 函数用途: 给异名名称链添加防rename节点，同时保持原精确拒写、隐藏及业务子目录权限。
+def _append_persona_namespace_ancestors(
+    argv: list[str], paths: tuple[Path, ...], mounts: tuple[_MountProjection, ...]
+) -> None:
+    parents = {parent for name in paths for parent in name.parents if parent != Path("/")}
+    for parent in sorted(parents, key=lambda path: (len(path.parts), str(path))):
+        mount = _effective_mount(parent, mounts)
+        source = _persona_projected_source(parent, mounts)
+        if (mount is not None and mount.target != parent and not mount.alias and source is not None and source != parent
+                and _persona_parent_writable(parent, mounts) and source.is_dir()):
+            _append_mount_preserving_children(argv, ("--bind", str(source), str(parent)))
+
+
+# LLM: 元数据权威由入口在底图前冻结；所有名称从最终mount反投影，canonical祖先仅同源自绑定，缺省控制根已拒写时不创建占位。
+#   身份/配置代次返回前复核，路径argv仍不消除最后核验到内核bind的竞争；普通同级业务写位保持原权限。
+# 函数用途: 按同次来源和全部有效namespace别名保护人格及必要名称祖先，未知或不安全链失败关闭。
+def _append_persona_readonly_mounts(
+    argv: list[str], root: _PersonaRootProjection | None, spec: SandboxSpec, *, mounts_snapshot: tuple[_MountProjection, ...]
+) -> list[str]:
+    if root is None:
+        return []
+    placeholders: list[str] = []
+    try:
+        namespace_root = root.namespace_root
+        authority_root = root.authority_root
+        projected_root = _persona_projected_source(namespace_root, mounts_snapshot, unmounted_root=authority_root)
+        if projected_root is not None and projected_root != authority_root:
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: changed authority root")
+        _reject_persona_mutable_alias(namespace_root, mounts_snapshot)
+        snapshot = persona_process_protection_snapshot(authority_root, all_owners=spec.full_access)
+        for item in snapshot:
+            _reject_persona_mutable_alias(item.path, mounts_snapshot)
+        projection = [(name, item.path.resolve(strict=False)) for item in snapshot
+                      for name in _persona_namespace_names(item.path, mounts_snapshot)]
+        sources = dict(projection)
+        paths = tuple(path for path in sources if sources[path].exists() or path.name != "persona"
+                      or _persona_parent_writable(path.parent, mounts_snapshot))
+        ancestors = {parent for _, canonical in projection for parent in canonical.parents
+                     if parent != Path("/") and _persona_parent_writable(parent, mounts_snapshot)
+                     and _persona_projected_source(parent, mounts_snapshot) == parent}
+        identities = {item.path: item.identity for item in snapshot if item.identity is not None}
+        _append_persona_ancestors(argv, ancestors)
+        _append_persona_namespace_ancestors(argv, paths, mounts_snapshot)
+        _append_persona_paths(argv, paths, placeholders, sources=sources, identities=identities)
+        # Check even configured sources outside the visible view; lost identity is not an absent default path.
+        for path, identity in identities.items():
+            validate_persona_source_identity(path, identity)
+        for item in snapshot:
+            validate_persona_configuration(item)
+    except (AgentsSourceProtectionError, OSError, RuntimeError) as error:
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: PATH_AGENTS_SOURCE_PROTECTION_INVALID") from error
+    return placeholders
+
+
+# LLM: 只绑定原可写祖先并保留仍有效的更窄覆盖；不得重露main隐藏/拒写，也不能吞掉明确允许的业务子目录。
+# 函数用途: 建立防rename的祖先挂载节点，保留本轮底图已有的精确权限。
+def _append_persona_ancestors(argv: list[str], ancestors: set[Path]) -> None:
+    for parent in sorted(ancestors, key=lambda path: (len(path.parts), str(path))):
+        if parent.is_dir():
+            _append_mount_preserving_children(argv, ("--bind", str(parent), str(parent)))
+
+
+# LLM: 原名称与canonical源分开；配置identity随同一投影传递，不能重读原别名或丢掉必需身份。
+# 函数用途: 为底图内所有可见保护名称逐条添加同源只读覆盖。
+def _append_persona_paths(
+    argv: list[str], paths: tuple[Path, ...], placeholders: list[str], *,
+    sources: dict[Path, Path] | None = None, identities: dict[Path, str] | None = None
+) -> None:
+    for protected in paths:
+        if sources is None:
+            _append_persona_path(argv, protected, placeholders)
+        else:
+            source = sources[protected]
+            _append_persona_path(argv, protected, placeholders, source=source,
+                                 expected_identity=(identities or {}).get(source))
+
+
+# LLM: 必需配置identity先复核再检查存在，失踪/替换绝不能静默跳过；无配置默认缺persona仍仅做namespace占位。
+# 函数用途: 从已批准canonical源覆盖一个保护名称，未知身份失败关闭，默认缺失控制目录只读占位。
+def _append_persona_path(
+    argv: list[str], protected: Path, placeholders: list[str], *,
+    source: Path | None = None, expected_identity: str | None = None
+) -> None:
+    actual = protected if source is None else source
+    if expected_identity is not None:
+        validate_persona_source_identity(actual, expected_identity)
+    if not actual.exists():
+        if protected.name == "persona":
+            placeholders += ["--tmpfs", str(protected), "--remount-ro", str(protected)]
+        return
+    if actual.is_file() and actual.stat().st_nlink != 1:
+        raise AgentsSourceProtectionError("persona hardlink")
+    argv += ["--ro-bind", str(actual), str(protected)]
+
+
+# LLM: 保护名称必须已有最终mount授权，异名与canonical同等处理；精确source一致性由反投影调用方检查，隐藏覆盖不回退。
+# 函数用途: 判断当前namespace名称是否有非空底图，不能为未挂宿主原名增加读取入口。
+def _persona_path_visible(path: Path, mounts: tuple[_MountProjection, ...]) -> bool:
+    location = path
+    for _ in range(64):
+        mount = _effective_mount(location, mounts)
+        if mount is None or mount.source is None:
+            return False
+        if not mount.alias:
+            return True
+        location = mount.source / location.relative_to(mount.target)
+    raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: namespace alias cycle")
+
+
+# LLM: 只消费同次mount写位，symlink名称沿冻结namespace指向实际mount；readonly/隐藏覆盖和循环均不能授予父写权。
+# 函数用途: 判断canonical或异名祖先的实际写位，不解析spec或从Full Access标志另开权限。
+def _persona_parent_writable(path: Path, mounts: tuple[_MountProjection, ...]) -> bool:
+    location = path
+    for _ in range(64):
+        mount = _effective_mount(location, mounts)
+        if mount is None or mount.source is None:
+            return False
+        if not mount.alias:
+            return mount.writable
+        location = mount.source / location.relative_to(mount.target)
+    raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: namespace alias cycle")
+
+
+# LLM: 祖先挂载会遮住已发子mount；只重放同次最终仍有效的严格子覆盖，原顺序保留B7隐藏后的明确读/写重挂。
+#   这是现有argv组合，不读取新授权；persona节点也一起保留，不能让普通deny重施擦掉名称链的防rename节点。
+# 函数用途: 加固一个祖先挂载时恢复原视图的精确子边界，避免更宽bind重新露出秘密或抹掉合法业务写根。
+def _append_mount_preserving_children(argv: list[str], arguments: tuple[str, ...]) -> None:
+    target = Path(arguments[2])
+    mounts = _mount_snapshot(argv)
+    descendants = [mount for mount in mounts if mount.target != target
+                   and _lexically_within(mount.target, target)
+                   and _effective_mount(mount.target, mounts) is mount]
+    argv.extend(arguments)
+    for mount in descendants:
+        argv.extend(mount.arguments)
+
+
+# LLM: 严格H2隐藏只能最后生效；投影仍使用移除前的完整底图。read_only_root/hide_home允许原workspace/public重挂，不移动其隐藏。
+# 函数用途: 暂移owner/full/allowlist的精确空目录覆盖，等待所有人格bind完成后最终重施。
+def _defer_strict_hidden_mounts(argv: list[str], spec: SandboxSpec) -> None:
+    if spec.read_only_root and spec.read_mode != "allowlist":
+        return
+    hidden = {str(Path(raw).resolve(strict=False)) for raw in spec.hidden_paths}
+    for index in range(len(argv) - 4, -1, -1):
+        if (argv[index] == "--tmpfs" and argv[index + 1] in hidden
+                and argv[index + 2:index + 4] == ["--remount-ro", argv[index + 1]]):
+            del argv[index:index + 4]
+
+
+# LLM: 原普通deny允许更窄明确授权，绝对readonly不允许例外；严格隐藏最后盖住全部绑定。B7整根只读不重复隐藏private根。
+# 函数用途: 在人格加固后收束原写边界和隐藏范围，所有恢复仅消费同次已挂视图。
+def _append_final_mount_protections(argv: list[str], spec: SandboxSpec) -> None:
+    allowed = _normalized_write_roots(spec.write_roots, preserve_nested=True)
+    for path, writable in ordered_write_scope_roots(allowed, spec.write_scope_denied_roots):
+        if not writable and path.exists():
+            _append_mount_preserving_children(argv, ("--ro-bind", str(path), str(path)))
+    _append_readonly_mounts(argv, spec.read_only_paths)
+    if not spec.read_only_root or spec.read_mode == "allowlist":
+        _append_hidden_mounts(argv, spec.hidden_paths)
+
+
+# LLM: 授权只读原完整底图；加固祖先时保留子边界，最终重施main拒写/隐藏且chdir最后，不改变网络/owner/别名权限。
+# 函数用途: 组合原沙箱与人格拒写，确保新增祖先挂载不会擦掉既有安全限制或合法B7重挂。
+def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
+    authority_root = _freeze_persona_root(spec)
+    argv = _build_bwrap_base_argv(spec)
+    mounts = _mount_snapshot(argv)
+    chdir = argv[-2:]
+    del argv[-2:]
+    _defer_strict_hidden_mounts(argv, spec)
+    placeholders = _append_persona_readonly_mounts(argv, authority_root, spec, mounts_snapshot=mounts)
+    _append_final_mount_protections(argv, spec)
+    return [*argv, *placeholders, *chdir]
+
+
+# LLM: CLI必须等所有argv构造器完成定义再启动；只移动启动时机，不把binary成功升级成完整隔离成功。
+# 入口用途: 让模块运行与先import后main使用同一完整探针链和原退出码。
 if __name__ == "__main__":  # pragma: no cover - 容器/K8s 真实探针入口
     raise SystemExit(main())

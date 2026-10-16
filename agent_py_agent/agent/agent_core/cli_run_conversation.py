@@ -7,8 +7,8 @@ user/assistant turn the same authoritative transcript and message evidence used 
 it does not turn the command into an interactive Gateway conversation.
 """
 
-# LLM: This module adapts only cli_run into the existing owner ConversationStore; it must not
-# create a second transcript, relax Memory evidence, or reinterpret a one-shot run as Gateway.
+# LLM: 仅由可信 CLI 宿主入口写原 owner 会话；线程、消息、运行参数共用既有学习来源投影，
+#   明确禁止与自动化痕迹优先。不能放宽 Memory 晋升、升级旧未知线程或另建来源/会话账本。
 # 模块用途: 给一次性运行保存权威用户、回复及异常前的工具记录，同时保持原独立任务和工作区生命周期。
 
 import logging
@@ -17,10 +17,18 @@ from functools import partial
 
 from ..conversation.channels import project_user_reply
 from ..conversation.history_index import index_conversation_message
+from ..conversation.learning_source import (
+    LEARNING_SOURCE_KEY,
+    derive_source_projection,
+    merge_source_projections,
+    unknown_projection,
+    user_dialogue_projection,
+)
 from ..conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
 )
+from ..memory_store.learning_exclusions import curator_learning_exclusions, thread_is_excluded
 from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import result_turn_end_reason
 
@@ -42,7 +50,8 @@ class CliRunConversationPersistenceError(RuntimeError):
     error_code = "CONVERSATION_PERSISTENCE_UNAVAILABLE"
 
 
-# LLM: 只绑定 cli_run 的真实 owner/thread 并写入用户消息；异常回调沿同一正文/原生历史出口，不另外创建会话。
+# LLM: 可信 CLI 输入在模型前绑定原 owner/thread/user 与同一学习来源；续跑沿原 root 来源写 system，
+#   重放源/谱系漂移拒绝，原 owner 排除政策只读一次并收紧；既有禁止来源不升级，提交侧仍最终复核。
 # 函数用途: 为一次性 CLI 建立权威会话记录并写入用户原文；会写 ConversationStore 和检索索引。
 def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
     """Persist one CLI user turn before model/tool execution and return bound params.
@@ -84,6 +93,10 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         getattr(params, "continuation_root_request_id", "") or request_id
     ).strip()
     try:
+        excluded_ids, unreadable = curator_learning_exclusions(agent.home_paths)
+        source = _cli_learning_source(params)
+        if unreadable or root_request_id in excluded_ids:
+            source = unknown_projection()
         thread = store.threads.get_or_create(
             {
                 "canonical_user_id": _CLI_RUN_USER_ID,
@@ -93,19 +106,19 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
                 "owner_id": _owner_id(agent),
                 "owner_home": _owner_home(agent),
                 "title": prompt[:80] or root_request_id,
+                LEARNING_SOURCE_KEY: source,
             }
         )
-        metadata = _message_metadata(params)
-        if continuation:
-            metadata = dict(metadata or {})
-            metadata["is_continuation"] = True
-            metadata["continuation_seq"] = continuation_seq
-            metadata["continuation_reason"] = str(
-                getattr(params, "continuation_reason", "") or ""
-            )
-            metadata["continuation_parent_attempt_id"] = str(
-                getattr(params, "continuation_parent_attempt_id", "") or ""
-            )
+        if continuation and str(getattr(params, "continuation_root_thread_id", "") or "") not in {"", thread.thread_id}:
+            raise ValueError("CLI continuation root thread changed")
+        attributes = dict(getattr(params, "task_attributes", None) or {})
+        attributes["conversation_thread_id"] = str(thread.thread_id)
+        source = _cli_learning_source(params, thread.learning_source)
+        if unreadable or thread_is_excluded(thread, excluded_ids):
+            source = unknown_projection()
+        attributes[LEARNING_SOURCE_KEY] = source
+        bound = replace(params, task_attributes=attributes)
+        metadata = _message_metadata(bound)
         entry = store.messages.append_once(
             {
                 "thread_id": thread.thread_id,
@@ -116,7 +129,7 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
             },
             dedupe_key=_dedupe_key(request_id, role),
         )
-        _require_matching_message_metadata(entry, params)
+        _require_matching_message_metadata(entry, bound)
         _index_message_best_effort(agent, store, entry)
         if not continuation:
             from ..conversation.goal_progress_fuse import reset_goal_progress_fuse
@@ -133,11 +146,8 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
         raise CliRunConversationPersistenceError(
             "CLI run 用户消息无法可靠写入 ConversationStore，已在模型执行前停止。"
         ) from exc
-    attributes = dict(getattr(params, "task_attributes", None) or {})
-    attributes["conversation_thread_id"] = str(thread.thread_id)
     # Do not predeclare conversation_task_id.  cli_run owns a standalone task/workspace; a
     # ConversationStore task link may be created only by a real task-promoting tool.
-    bound = replace(params, task_attributes=attributes)
     return replace(bound, partial_turn_callback=partial(persist_cli_run_assistant, agent, bound))
 
 
@@ -196,17 +206,46 @@ def persist_cli_run_assistant(agent: object, params: object, result: object) -> 
         )
 
 
-# LLM: Message lineage comes solely from typed run parameters and is shared by evidence lookup,
-# retries, Curator ingestion, and corruption checks.
-# 函数用途: 生成会话消息的请求、运行和任务标识元数据，不读取模型正文。
+# LLM: 来源仅在可信 CLI 输入边界构造，已有线程/运行字段中的 false 与坏投影优先；自动化痕迹复用
+#   既有 derive 合同，不能升级旧未知 root，也不从续跑 system 正文或模型 origin 生成用户证据。
+# 函数用途: 合并原宿主学习来源；新用户输入可声明对话来源，续跑仅继承真实 root 的结构化来源。
+def _cli_learning_source(params: object, thread_source: object = None) -> dict[str, object]:
+    attrs = dict(getattr(params, "task_attributes", None) or {})
+    continuation = int(getattr(params, "continuation_seq", 0) or 0) > 0
+    sources = [thread_source] if thread_source else []
+    if continuation and not thread_source:
+        sources.append(unknown_projection())
+    if LEARNING_SOURCE_KEY in attrs:
+        sources.append(attrs[LEARNING_SOURCE_KEY])
+    derived = derive_source_projection(attrs)
+    if derived is not None:
+        sources.append(derived)
+    if not continuation:
+        sources.append(user_dialogue_projection())
+    return merge_source_projections(sources)
+
+
+# LLM: 消息谱系只来自宿主 RunParams，与运行学习来源同投影；续跑原字段保持 typed event，不制造 user 行。
+# 函数用途: 生成原请求、运行、任务与学习来源元数据，供持久化、重放核对及证据读取。
 def _message_metadata(params: object) -> dict[str, object]:
     request_id = str(getattr(params, "request_id", "") or "").strip()
-    return {
+    attrs = dict(getattr(params, "task_attributes", None) or {})
+    metadata = {
         "gateway_request_id": request_id,
         "request_id": request_id,
         "run_id": str(getattr(params, "run_id", "") or "").strip(),
         "task_id": str(getattr(params, "task_id", "") or "").strip(),
+        LEARNING_SOURCE_KEY: attrs.get(LEARNING_SOURCE_KEY, unknown_projection()),
     }
+    continuation_seq = int(getattr(params, "continuation_seq", 0) or 0)
+    if continuation_seq > 0:
+        metadata.update({
+            "is_continuation": True,
+            "continuation_seq": continuation_seq,
+            "continuation_reason": str(getattr(params, "continuation_reason", "") or ""),
+            "continuation_parent_attempt_id": str(getattr(params, "continuation_parent_attempt_id", "") or ""),
+        })
+    return metadata
 
 
 # LLM: Keep this adapter source-exact so programmatic runs and Gateway remain unchanged.
@@ -221,8 +260,7 @@ def _dedupe_key(request_id: str, role: str) -> str:
     return f"cli_run:{request_id}:{role}"
 
 
-# LLM: Content equality alone cannot authorize reuse when run/task lineage differs; fail closed
-# before a stale message can become Memory evidence for another execution.
+# LLM: 原文相等也不能复用不同来源、run/task 或续跑父谱系；在模型前精确核对旧消息，不重写旧来源。
 # 函数用途: 重放命中旧消息时核对结构化运行身份，发现同请求串线就拒绝继续。
 def _require_matching_message_metadata(entry: object, params: object) -> None:
     """Reject a reused request identity whose typed run lineage has drifted."""
@@ -230,7 +268,7 @@ def _require_matching_message_metadata(entry: object, params: object) -> None:
     actual = getattr(entry, "metadata", None)
     actual = actual if isinstance(actual, dict) else {}
     expected = _message_metadata(params)
-    if any(str(actual.get(key) or "") != str(value or "") for key, value in expected.items()):
+    if any(actual.get(key) != value for key, value in expected.items()):
         raise ValueError("CLI run conversation identity reused with different run metadata")
 
 

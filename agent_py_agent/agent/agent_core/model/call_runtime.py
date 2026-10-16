@@ -1,5 +1,5 @@
-# LLM: 模型调用账本记录与输出上限估算都在这里；输出上限复用 settings/defaults 的唯一公式（窗口没填按 128000 兜底），
-#   不另写数值。记录函数会写调用账本；已被同一停机原因结清的迟到完成抛原准入异常，不签发成功来源。
+# LLM: 模型调用账本及同次采样CAS绑定在这里；输出上限复用 settings/defaults 的唯一公式（窗口没填按 128000 兜底），
+#   不另写数值。记录函数会写调用账本；排队不计物理尝试，已结清的迟到完成抛原准入异常，不签发成功来源。
 # 模块用途: 记录每次模型调用的开始、首包、结束、失败与超时，并给 compact 预算和超时估算提供输出上限。
 from __future__ import annotations
 
@@ -25,7 +25,11 @@ from ...contracts.model_call_ledger import (
     model_call_purpose,
     summarize_model_call_records,
 )
-from ...conversation.context_usage import record_model_context_usage
+from ...conversation.context_usage import (
+    ContextUsageBinding,
+    capture_context_usage_binding,
+    record_model_context_usage,
+)
 from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
 from ...settings.defaults import context_window_or_default, output_cap_for_window
@@ -61,9 +65,7 @@ _HOST_SHUTDOWN_CLOSURE = ModelCallAdmissionClosure(
 )
 
 
-# LLM: The caller may pass the exact precomputed context snapshot so timeout, ledger, TUI and
-# provider-observation calibration all share one measurement; fallback construction preserves old
-# auxiliary/test callers without creating a second accounting path.
+# LLM: 调用者可传真实预计算快照，超时/账本/TUI共用一次计量及其捕获代次；遥测缺绑定只弃持久化，不阻模型或重算另一套版本。
 # 函数用途: 在原账登记真实轮次、用途与运行身份，并按同一上下文快照计算慢模型超时。
 def start_model_call_record(
     request: object,
@@ -78,7 +80,8 @@ def start_model_call_record(
     # IR messages/pending guidance/tools —— 首 token 预算按出站可见量估计，
     # 避免多轮工具后 prefill 时间低估（真机 600s ProviderTimeout 根因之一）。
     if context_snapshot is None:
-        context_snapshot = model_visible_context_snapshot(agent, params, prompt)
+        binding = capture_context_usage_binding(agent, params)
+        context_snapshot = model_visible_context_snapshot(agent, params, prompt, usage_binding=binding)
     input_tokens = context_snapshot.current_tokens
     estimate = estimate_first_token_timeout(
         FirstTokenTimeoutParams(
@@ -122,21 +125,24 @@ def start_model_call_record(
             },
         )
     )
-    _publish_model_context_usage(request, context_snapshot.to_public_dict())
+    _publish_model_context_usage(request, context_snapshot.to_public_dict(),
+                                 binding=getattr(context_snapshot, "usage_binding", None))
     publish_model_metrics(agent, params, pending=True)
     return ledger, call_id, estimate
 
 
-# LLM: 真实工作片先持久化同一 numeric preflight 再投影，主/子都绑定 exact thread；隔离表达轮不覆盖。
-# 函数用途: 在调用开始前保存并展示上下文数字，让空闲恢复不依赖仍在 Working 或内存里的旧帧。
+# LLM: 数值与采样时 typed 版本成套保存；禁止用 publish 时最新线程重签旧数，原 live sink 仍只显示本请求实际计量。
+# 函数用途: 在调用开始前交原CAS保存并向请求自己的出口展示数字，缺持久绑定不挡模型或临时展示。
 def _publish_model_context_usage(
     request: object,
     usage: dict[str, object],
+    *,
+    binding: ContextUsageBinding | None = None,
 ) -> bool:
     params = getattr(request, "params", None)
     if not _context_usage_projection_enabled(params):
         return False
-    record_model_context_usage(getattr(request, "agent", None), params, usage)
+    record_model_context_usage(getattr(request, "agent", None), params, usage, binding=binding)
     sink = getattr(params, "effective_on_chunk", None)
     writer = getattr(sink, "write_context_usage", None)
     if not callable(writer):
@@ -259,14 +265,16 @@ def record_model_call_failed(
     )
 
 
-# LLM: 只把传输层观察事件里的结构化字段转成账本参数（含 progress 状态与 transport 分段计时快照），不读正文；
+# LLM: 排队只属展示、不得登记物理尝试；其余传输事件按结构化字段转成账本参数（含 progress 与分段计时），不读正文；
 #   非 dict 的 transport 按未计时处理。事件形状改动须同步 gateway_helpers._gateway_request_attempt 与账本 provider_attempt。
-# 函数用途: 把一次 HTTP 尝试观察事件记到对应模型调用记录上。
+# 函数用途: 把真实 HTTP 尝试记到对应模型调用记录，主请求、辅助、决策与探针共用过滤边界。
 def record_model_provider_attempt(
     ledger: ModelCallLedger,
     call_id: str,
     event: dict[str, object],
 ) -> None:
+    if event.get("status") == "queued":
+        return
     ledger.provider_attempt(
         ModelCallProviderAttemptParams(
             call_id=call_id,

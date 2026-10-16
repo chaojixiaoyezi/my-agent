@@ -1,3 +1,5 @@
+# LLM: 回合归档透传宿主thread，已有实时事件仍按原标识跳过；不改变事件ID、档位或正文脱敏。
+# 模块用途: 在回合收口保存消息及尚未实时归档的工具事件。
 
 
 from __future__ import annotations
@@ -63,6 +65,8 @@ class TurnData:
     tool_calls: list[dict[str, Any]]
 
 
+# LLM: 回合上下文沿宿主原request/run/task/thread透传；空thread兼容旧调用方，不从session补猜。
+# 类用途: 保存回合事件构造共享的执行事实与档位。
 @dataclass(frozen=True)
 class RunContext:
     """Shared runtime fields for turn archiving."""
@@ -75,6 +79,7 @@ class RunContext:
     created_at: str
     preview_limits: dict[int, int] | None = None
     summary_chars: int = 96
+    thread_id: str = ""
 
 
 def _build_run_turn_events(
@@ -89,6 +94,8 @@ def _build_run_turn_events(
     ]
 
 
+# LLM: 回合消息的thread沿用宿主上下文，旧调用方空值兼容，不由session猜测。
+# 函数用途: 构造当前回合的两条消息归档。
 def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMemoryEvent]:
     """Build user and assistant message events for one turn."""
     return [
@@ -97,6 +104,7 @@ def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[Ra
                 sequence=1,
                 session_id=session_id,
                 request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
                 run_id=ctx.run_id,
                 task_id=ctx.task_id,
             ),
@@ -118,6 +126,7 @@ def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[Ra
                 sequence=2,
                 session_id=session_id,
                 request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
                 run_id=ctx.run_id,
                 task_id=ctx.task_id,
             ),
@@ -137,6 +146,8 @@ def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[Ra
     ]
 
 
+# LLM: 未实时归档的工具沿用回合宿主thread；已有归档仍按原标识跳过，不双写。
+# 函数用途: 构造需要在回合结束时补存的工具事件。
 def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMemoryEvent]:
     """Build tool events for one turn."""
     events: list[RawMemoryEvent] = []
@@ -149,6 +160,7 @@ def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMe
                     sequence=index,
                     session_id=session_id,
                     request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
                     run_id=ctx.run_id,
                     task_id=ctx.task_id,
                 ),
@@ -170,6 +182,8 @@ def _already_live_archived(tool_call: dict[str, Any]) -> bool:
     return bool(tool_call.get("raw_archive_event_id") or tool_call.get("raw_archive_path"))
 
 
+# LLM: 终态归档只消费宿主明确传入的线程及工具事实；保持旧事件ID和实时去重。
+# 类用途: 收拢一次运行归档的正文、工具及宿主会话身份。
 @dataclass(frozen=True)
 class ArchiveTurnContext:
     """Context for archiving a single turn."""
@@ -186,6 +200,7 @@ class ArchiveTurnContext:
     created_at: str | None = None
     preview_limits: dict[int, int] | None = None
     summary_chars: int = 96
+    thread_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,8 @@ class ArchiveRunTurnParams:
     ctx: ArchiveTurnContext
 
 
+# LLM: 回合宿主thread贯穿事件，不改变旧事件编号、归档档位和实时去重语义。
+# 函数用途: 将回合消息和未实时保存的工具事件写入原归档。
 def archive_run_turn(
     params: ArchiveRunTurnParams,
 ) -> ArchiveRunTurnResult:
@@ -215,6 +232,7 @@ def archive_run_turn(
         ctx=RunContext(
             backend=str(ctx.backend),
             request_id=str(ctx.request_id),
+            thread_id=str(ctx.thread_id),
             run_id=str(ctx.run_id),
             task_id=str(ctx.task_id),
             source=str(ctx.source),

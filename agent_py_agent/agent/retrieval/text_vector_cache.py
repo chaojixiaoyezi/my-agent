@@ -1,3 +1,5 @@
+# LLM: 缓存是可重建派生数据；读取可降级但清理和写回须完整读成功，跨实例撤回按文件指纹刷新。
+# 模块用途: 缓存正文哈希向量，并在删除失败时保留可追踪的清理错误。
 """正文哈希向量缓存(派生索引,独立文件,绝不写入权威向量库)。
 
 ## 为什么要单独一个文件
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 from collections.abc import Callable, Iterable
@@ -59,9 +62,12 @@ class TextVectorCache:
         cache.remove([key])            # 清理失效键
     """
 
+    # LLM: 构造保留原宽松读取；get的快照指纹必须独立复核，写入/清理使本实例指纹失效。
+    # 函数用途: 建立派生缓存，不把启动快照永久当成磁盘现状。
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path).expanduser()
         self._lock = threading.RLock()
+        self._read_stamp = None
         # LLM: 写失败不能静默吞掉——调用方据此把真实错误反映到健康状态（否则缓存悄悄不生效）。
         # 每次写操作开头清空，写失败时留下异常。
         self.last_write_error: Exception | None = None
@@ -76,31 +82,43 @@ class TextVectorCache:
             self.last_read_error = exc
             self._items = {}
 
-    # LLM: 只有"文件不存在"才当成空缓存；其他读错误（权限、IO）与坏 JSON 一律**放弃这次写**，
-    #   免得把读不出来的缓存当成空、再原子替换成空文件，把整份缓存清掉。
-    #   逐键跳过坏值：一条脏数据不能让整个缓存文件作废（否则缓存被永久关掉，每次都全量重嵌）。
-    # 函数用途: 从磁盘读回正文哈希缓存；文件不存在返回空，其他读取失败抛给调用方。
+    # LLM: 读路径宽松，坏JSON/编码/IO或非对象根都记录故障；写路径必须经_load_for_write确认完整读取。
+    #   逐键跳过坏值，保留好向量但记不完整错误，阻止写回丢值；完整读成功才清除旧错。
+    # 函数用途: 读取当前派生缓存并保留诊断，缺失或读错均向召回返回空集合。
     def _load(self) -> dict[str, list[float]]:
+        self.last_read_error = None
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
-        except json.JSONDecodeError as exc:
-            # 坏 JSON：整份当空（调用方按缺失重算即可），但**不因此写盘**由调用方决定。
-            #   仍要留下读错误：否则维护回收会把"缓存文件读不出内容"当成"盘上没有孤儿"（V5）。
+        except (OSError, ValueError) as exc:
             self.last_read_error = exc
             return {}
         if not isinstance(raw, dict):
+            self.last_read_error = ValueError("cache root is not an object")
             return {}
         items: dict[str, list[float]] = {}
         for key, value in raw.items():
             if not isinstance(key, str) or not isinstance(value, list):
+                self.last_read_error = ValueError("cache entry is not a vector")
                 continue
             try:
-                items[key] = [float(x) for x in value]
-            except (TypeError, ValueError):
-                continue  # 该键含非数值：只丢这条，其余键照常可用
+                vector = [float(x) for x in value]
+                if not all(math.isfinite(x) for x in vector):
+                    raise ValueError("cache vector is not finite")
+                items[key] = vector
+            except (TypeError, ValueError, OverflowError) as exc:
+                self.last_read_error = exc
+                continue  # 好键仍可召回，但不完整快照禁止用于整文件写回。
         return items
+
+    # LLM: 调用方持缓存文件锁；读路径可降级，任何软读错误在副作用之前升级为写失败。
+    # 函数用途: 为put/remove/retain取得可安全修改的完整磁盘快照。
+    def _load_for_write(self) -> dict[str, list[float]]:
+        rows = self._load()
+        if self.last_read_error is not None:
+            raise self.last_read_error
+        return rows
 
     # LLM: 跨进程写锁复用既有 locked_json_path sidecar（与追加方共用同一把锁）。
     #   **只把本次调用的增量写回**：put 只写本次 put 的键，remove/retain 只删本次删的键。
@@ -116,6 +134,7 @@ class TextVectorCache:
         keep: Callable[[], set[str]] | None = None,
     ) -> None:
         added = added or {}
+        self._read_stamp = None
         self.last_write_error = None
         try:
             from ..common.json_io import locked_json_path
@@ -124,7 +143,7 @@ class TextVectorCache:
                 if keep is not None:
                     valid = keep()
                     added = {key: vector for key, vector in added.items() if key in valid}
-                on_disk = self._load()
+                on_disk = self._load_for_write()
                 before = dict(on_disk)
                 for key in removed:
                     on_disk.pop(key, None)
@@ -155,12 +174,31 @@ class TextVectorCache:
     def __len__(self) -> int:
         return len(self._items)
 
-    # LLM: 键缺失与非 list 值都必须视为未命中，调用方据缺失集合现场重嵌，语义臂不能漏项。
-    # 函数用途: 批量取回正文哈希对应的向量，未命中项不出现在结果里。
+    # LLM: 在实例锁内用文件指纹发现其他实例的清理；不变时不解码JSON，读错时清掉旧快照并保留诊断。
+    # 函数用途: 更新跨实例只读缓存，不把删除前的内存向量继续返回。
+    def _refresh_if_changed(self) -> None:
+        try:
+            try:
+                stat = self._path.stat()
+                stamp = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except FileNotFoundError:
+                stamp = ()
+            if stamp != self._read_stamp or self.last_read_error is not None:
+                self.last_read_error = None
+                self._items = self._load()
+                # 用读取之前的指纹：期间若发生原子替换，下次get仍能发现它。
+                self._read_stamp = stamp if self.last_read_error is None else None
+        except (OSError, UnicodeError) as exc:
+            self.last_read_error = exc
+            self._items = {}
+            self._read_stamp = None
+
+    # LLM: 先核对跨实例磁盘换代；缺失与坏值退回现嵌，正常get不做全量解码或复制整个缓存。
+    # 函数用途: 只返回当前请求键的向量副本，不复用已被其他实例清掉的旧键。
     def get(self, keys: Iterable[str]) -> dict[str, list[float]]:
         with self._lock:
-            snapshot = dict(self._items)
-        return {key: list(snapshot[key]) for key in keys if isinstance(snapshot.get(key), list)}
+            self._refresh_if_changed()
+            return {key: list(self._items[key]) for key in keys if isinstance(self._items.get(key), list)}
 
     # LLM: 写入只增补本文件的键，不触碰权威向量库；空输入直接返回，避免无意义 IO。
     #   `keep` 是调用方给的"这些键此刻仍然有效"的判据，在**同一把锁内**复核一遍再写：
@@ -219,16 +257,17 @@ class TextVectorCache:
         keep = {h for h in keep_hashes if isinstance(h, str)}
         return self.retain_matching(lambda key: _content_hash_of(key) in keep)
 
-    # LLM: 回收在文件锁内按磁盘现状重算，避免只按本实例内存删（可能漏掉别的实例写的键）。
-    # 函数用途: 丢磁盘与内存中所有不满足 keep 判据的键。
+    # LLM: 回收在文件锁内按磁盘现状重算；原子写返回False必须记入last_write_error，删除恢复不能误报完整。
+    # 函数用途: 丢弃磁盘与内存中不满足keep判据的键，并暴露真实落盘故障。
     def retain_matching(self, keep_key: Callable[[str], bool]) -> int:
         with self._lock:
             try:
                 from ..common.json_io import locked_json_path
 
                 self.last_write_error = None
+                self._read_stamp = None
                 with locked_json_path(self._path):
-                    on_disk = self._load()
+                    on_disk = self._load_for_write()
                     dropped = frozenset(key for key in on_disk if not keep_key(key))
                     if not dropped and on_disk == self._items:
                         return 0
@@ -236,17 +275,17 @@ class TextVectorCache:
                         on_disk.pop(key, None)
                     self._items = on_disk
                     if dropped:
-                        self._path.parent.mkdir(parents=True, exist_ok=True)
-                        _write_atomic_unlocked(self._path, on_disk)
+                        _persist_reclaimed(self._path, on_disk)
                     return len(dropped)
             except Exception as exc:
                 self.last_write_error = exc
                 return 0
 
-    # LLM: 只读列出当前缓存键（含内存未落盘部分），供测试与诊断使用。
+    # LLM: 只读列键也复核同一文件指纹，避免另一个实例删除后诊断仍返回旧向量身份。
     # 函数用途: 返回缓存里所有键的快照。
     def keys(self) -> list[str]:
         with self._lock:
+            self._refresh_if_changed()
             return list(self._items.keys())
 
 
@@ -302,3 +341,11 @@ def index_text(content: str, attributes: object) -> str:
     else:
         suffix = str(keywords)
     return content + (" " + suffix if suffix else "")
+
+
+# LLM: 调用方已持缓存文件锁；复用原子写入并把False转换成错误，不隐藏删除清理欠账。
+# 函数用途: 保存回收后的缓存，失败交回retain_matching记录。
+def _persist_reclaimed(path, on_disk) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not _write_atomic_unlocked(path, on_disk):
+        raise OSError("cache reclaim write failed")

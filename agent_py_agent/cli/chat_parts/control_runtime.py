@@ -79,7 +79,7 @@ def im_only_control_result(command: ConversationControlCommand) -> ConversationC
 
 
 # LLM: 原控制合同和 IM 专用命令拒绝不变；Gateway 凭据失败按 G2b 开关降级或拒绝，direct 完全不读本机凭据。
-# 函数用途: 按原模式执行控制，Gateway 的本机凭据错误携原因码和处置提示，不静默发送或重试。
+# 函数用途: 按原模式执行控制；候选人工确认沿同一持久once，Gateway凭据错误不静默重试。
 def execute_chat_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -99,6 +99,12 @@ def execute_chat_control(
             message_id=message_id,
             target_control_message_id=target_control_message_id,
         )
+    if command.kind == "memory":
+        from ...agent.gateway_parts.memory_candidate_control import execute_memory_candidate_direct
+        return execute_memory_candidate_direct(execution.agent, command, execution.state.session_id, message_id)
+    if command.kind == "agents":
+        from ...agent.gateway_parts.agents_control_service import execute_agents_direct
+        return execute_agents_direct(execution.agent, command, execution.state.session_id, message_id)
     return _execute_local_control(execution, command)
 
 
@@ -710,7 +716,7 @@ def _recover_command_text(command: ConversationControlCommand) -> str:
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 委托专用还原器保留作用域，/model 保留 default 前缀，
 #   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
-# 函数用途: 将界面的结构化控制还原为服务端共用的命令协议，不发送给模型。
+# 函数用途: 将界面控制还原为服务端共用协议，保留Memory候选准确参数，不发送给模型。
 def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "plugins":
         return command.value
@@ -771,6 +777,8 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "skills":
         # value 是解析器规范化后的完整参数，Gateway 端按同一解析器重新解析。
         return f"/skills {command.value}".rstrip()
+    if command.kind in {"agents", "memory"}:
+        return f"/{command.kind} {command.value}".rstrip()
     if command.kind == "settings":
         # set 的值保留原样（可含空格与中文），Gateway 端按同一解析器重新解析。
         return f"/settings {command.value}".rstrip()

@@ -2,7 +2,7 @@
 #   成员字节只从安装 blob 读（PluginInstallStore.package_bytes 核整包 sha 与描述，read_plugin_member 核成员 sha），工作区副本一律不用；
 #   运行只经唯一沙箱入口 AttemptExecutionSandbox：断网、整根只读、只写本次临时目录；沙箱不可用就不跑，记 sandbox_unavailable。
 #   结果只认 stdout 的 pack_verifier_result.v1 结构化字段（valid、errors/warnings 的 code），不解释 message，不读模型自述；
-#   valid 必须与“errors 为空”一致，退出码不参与判定（只用来识别超时）。
+#   valid 必须与“errors 为空”一致，退出码只识别超时；stdout 捕获截断、坏编码、读取失败或未EOF先按结构化事实拒绝。
 #   关联输入由调用方按包声明解析好再传入，这里只按声明顺序传声明过的参数名；必需输入缺失就不跑，记 verifier_input_unresolved。
 #   取消优先于新执行，正在运行的 ToolCancelled 记 cancelled/verifier_cancelled，不解析半截输出；返工/展示由调用方决定。
 #   改动同步 test_pack_verifier_runner.py 和 test_pack_verification_cancellation.py。
@@ -223,8 +223,9 @@ def _sandboxed_run(request: PackVerifierRequest, verifier: VerifierDeclaration,
         shutil.rmtree(temp, ignore_errors=True)
 
 
-# LLM: 退出码只用来识别超时（沙箱回收约定的退出码且耗时到了声明超时），其余一律按 stdout 合同判定。
-# 函数用途: 把沙箱运行结果转成结构化检查结果。
+# LLM: 先识别原超时合同；同步capture的stdout截断、非法UTF-8或读取错误均以既有invalid码拒绝，绝不送JSON解析。
+#   stderr这些事实不改变stdout判定；正常stdout保持原1MiB校验，缺字段的旧结果兼容，联测捕获/encoding/cancellation。
+# 函数用途: 把沙箱运行结果转成检查事实，格式损坏或读取失败的stdout不能被判为通过。
 def _run_result(outcome: tuple[subprocess.CompletedProcess, float, str] | None, verifier: VerifierDeclaration,
                 base: dict) -> PackVerificationResult:
     if outcome is None:
@@ -233,6 +234,15 @@ def _run_result(outcome: tuple[subprocess.CompletedProcess, float, str] | None, 
     base.update(returncode=completed.returncode, duration_ms=int(elapsed * 1000))
     if completed.returncode == _SANDBOX_TIMEOUT_EXIT_CODE and elapsed >= verifier.timeout_seconds:
         return PackVerificationResult(**base, status="error", reason_code="verifier_timeout")
+    capture = getattr(completed, "capture", {}) or {}
+    if capture.get("streams_eof", {}).get("stdout") is False:
+        return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
+    if capture.get("streams_truncated", {}).get("stdout", False):
+        return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
+    if capture.get("streams_invalid_utf8", {}).get("stdout", False):
+        return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
+    if capture.get("errors", {}).get("stdout"):
+        return PackVerificationResult(**base, status="error", reason_code="verifier_output_invalid")
     return _parsed_result(completed.stdout or "", base)
 
 

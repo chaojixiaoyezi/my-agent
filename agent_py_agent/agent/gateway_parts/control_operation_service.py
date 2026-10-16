@@ -66,6 +66,7 @@ _CONTROL_RESULT_PROJECTION_FIELDS = {
     "guidance_dedupe_key",
     "error_code",
     "task_status",
+    "details",
 }
 
 
@@ -315,7 +316,7 @@ def execute_gateway_control_operation(
         )
 
 
-# LLM: This helper is entered only by the C-lock winner. It writes executing before the generic
+# LLM: 只有原控制锁首次执行者可先记executing再调用副作用；AGENTS/Memory活封印仅本轮透传，重放只读原结果。
 # effect and is the only path allowed to invoke the command service.
 #   event_hub 随 scope 带下来（HTTP 入口从 server 取到）；回执里不存 hub，恢复 scope 时由调用方再传。
 # 函数用途: 在已持控制操作锁时推进 prepared、执行一次副作用并保存 completed/unknown；新 completed 提交后才发布观察，重放不重复发。
@@ -360,12 +361,19 @@ def _execute_gateway_control_operation_locked(
         gateway_control_operation_path(paths, operation_id),
         executing.to_dict(),
     )
+    effect_scope = _receipt_scope(receipt, scope.event_hub)
+    if command.kind == "agents":
+        from .agents_control_service import bind_agents_effect_scope
+        effect_scope = bind_agents_effect_scope(scope, effect_scope, command)
+    if command.kind == "memory":
+        from .memory_candidate_control import bind_memory_effect_scope
+        effect_scope = bind_memory_effect_scope(scope, effect_scope, command)
     try:
         result = execute_gateway_conversation_control(
             agent,
             paths,
             command,
-            _receipt_scope(receipt, scope.event_hub),
+            effect_scope,
         )
     except Exception as exc:  # noqa: BLE001 - any partial command effect must remain unknown.
         uncertain = replace(
@@ -725,9 +733,8 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     return matched_digest_version
 
 
-# LLM: Result dictionaries remain an effect-service projection, but identity and delivery fields
-# must be well typed before any HTTP/TUI/adapter consumer sees them.
-# 函数用途: 校验 completed 控制结果的命令类型、布尔终态、目标与投递三态。
+# LLM: 控制回执是副作用服务的投影；身份、投递和详情必须在交给 HTTP/TUI/IM 前校验，详情中的领域状态不改变外层完成状态。
+# 函数用途: 校验持久控制结果，保留预览确认所需的结构化详情而不把它解释成新授权。
 def _validate_control_operation_result(receipt: GatewayControlOperationReceipt) -> None:
     result = receipt.result
     if str(result.get("kind") or "").strip() != receipt.command_kind:
@@ -747,8 +754,9 @@ def _validate_control_operation_result(receipt: GatewayControlOperationReceipt) 
         "unknown",
     }:
         raise DataCorruptionError("gateway control operation delivery status is invalid")
-    if "task_status" in result and not isinstance(result.get("task_status"), dict):
-        raise DataCorruptionError("gateway control operation task status is invalid")
+    for key in ("task_status", "details"):
+        if key in result and not isinstance(result.get(key), dict):
+            raise DataCorruptionError(f"gateway control operation result {key} is invalid")
 
 
 # LLM: Stable operation identity contains only authenticated routing facts and the opaque message id.

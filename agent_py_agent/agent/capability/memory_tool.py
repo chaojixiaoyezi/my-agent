@@ -3,7 +3,7 @@ from __future__ import annotations
 """remember 工具的 Memory 业务适配层。"""
 
 # LLM: Tool Runtime owns registration, schema enforcement and execution; this module owns only Memory semantics.
-# 模块用途: 把 remember 参数转换为统一候选，核验当前消息或工具引用，再交唯一 PromotionService 晋升。
+# 模块用途: 把 remember 参数转换为统一候选，核验当前消息或工具引用；目标版本由宿主读取并冻结，再交唯一 PromotionService 晋升。
 
 import hashlib
 import json
@@ -17,6 +17,7 @@ from ..conversation.authority import (
     current_conversation_task_attributes,
 )
 from ..memory_store.candidate_models import CandidateObservation, MemoryScope
+from ..memory_store.promotion_remove_recovery import CommittedRemoval
 from ..memory_store.security import scan_memory_content
 from ..tooling.models import (
     BaseTool,
@@ -29,6 +30,7 @@ from ..tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .memory_tool_recovery import prepare_removal_retry as _prepare_removal_retry
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -39,8 +41,8 @@ _MEMORY_ORIGINS = frozenset({"user_explicit", "tool_verified", "model_inferred"}
 _MEMORY_ACTIONS = frozenset({"add", "replace", "remove"})
 
 
-# LLM: Memory 提供业务 schema；说明必须与自主晋升、显式目标版本、Persona 路由一致，不承诺候选都需人工审批。
-# 函数用途: 描述事实记忆的新增、查询和精确修改方式，不把个人偏好误导到 remember。
+# LLM: Memory 提供业务 schema；模型只提供精确 entry_id，目标当前版本由宿主观察并冻结供提交 CAS，说明不得要求未公开的版本输入。
+# 函数用途: 描述事实候选、正式查询和精确修改流程，保持宿主版本核验、用户确认与Persona路由边界。
 def build_remember_model_spec() -> ToolModelSpec:
     scope_schema = _remember_scope_schema()
     operation_schema = _remember_operation_schema(scope_schema)
@@ -50,8 +52,9 @@ def build_remember_model_spec() -> ToolModelSpec:
             "管理需要正式持久化并按明确 scope 召回的具体事实、事件和项目知识。"
             "session scope 的寿命只跟当前真实会话走，不得另填 valid_from/valid_until；"
             "需要按时间过期时使用 temporary scope。新增先进入统一候选并核验证据；"
-            "无冲突的 user_explicit/tool_verified 新事实可自主晋升。替换和删除必须指定 entry_id 与版本，"
-            "经统一证据和安全核验后在本次调用自主生效；不满足条件时返回未晋升原因，不等待用户逐条审批。"
+            "正式保存须由用户通过 /memory candidates preview <候选ID> 完整预览再确认；真实用户或工具证据只说明来源，不等于保存批准。替换和删除必须指定 entry_id；"
+            "宿主读取目标当前版本并冻结，提交时按该版本进行并发校验。"
+            "本工具先写候选并返回待确认原因；审核通过后由原正式提交入口按目标版本生效。"
             "模型推断不得伪装成已验证事实。用户亲口提供或明确要求保存的内容必须使用 user_explicit，即使同轮工具也验证过；"
             "只有事实本身来自成功工具结果时才使用 tool_verified，并提交该调用的精确 evidence_refs。"
             "个人记忆默认写入当前 owner 的 personal 范围，调用时省略 scope 即可；不要把用户 ID 当 scope_key。"
@@ -67,7 +70,7 @@ def build_remember_model_spec() -> ToolModelSpec:
                 "列出正式长期记忆，取得稳定 entry_id 后提出替换或删除",
             ),
             avoid_when=(
-                "USER、SOUL、AGENTS 人格内容应使用 update_persona",
+                "USER、SOUL 使用 update_persona；AGENTS 使用 /agents 显式预览确认",
                 "教训和高频规则进入 lesson/HOT 候选链",
                 "一次性任务细节、验证码、密钥和临时口令不得长期保存",
             ),
@@ -224,7 +227,7 @@ def _remember_parameter_descriptions() -> dict[str, str]:
     }
 
 
-# LLM: The handler must not write long_term, candidates or Persona through any path other than assembled services.
+# LLM: 记忆工具只能调用装配好的候选/晋升服务；新增只候选，正式保存须经原用户审核链，恢复不新授权。
 # 类用途: 连接统一工具运行时与 Memory 候选/晋升服务。
 class RememberTool(BaseTool):
     model_spec = build_remember_model_spec()
@@ -267,7 +270,7 @@ class RememberTool(BaseTool):
             )
         return ToolAvailability.ready()
 
-    # LLM: Every mutation becomes CandidateObservation first; only PromotionService may commit a formal target.
+    # LLM: 结构先全量验证；证据不合格操作在合并前单独拒绝，不能继承同ID候选的成功证据；只有PromotionService可正式写入。
     # 函数用途: 列出正式记忆，或原子记录候选并按保守策略尝试晋升新增事实。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "add").strip().lower()
@@ -290,73 +293,51 @@ class RememberTool(BaseTool):
                 "MEMORY_SERVICE_UNAVAILABLE",
                 not_started=True,
             )
+        from .memory_tool_recovery import observe_prepared, promote_prepared
+
         try:
-            observed = candidates.observe_many(prepared)
+            observed = observe_prepared(candidates, promotion, prepared)
         except Exception as exc:  # noqa: BLE001 - map repository failures to one stable tool result
             return _memory_error(f"候选写入失败: {exc}", "MEMORY_CANDIDATE_WRITE_FAILED")
-        promotion_results: list[dict[str, object]] = []
-        active_changed = False
-        for candidate in observed:
-            # 候选持久化后的宿主权限是唯一事实源；batch/replace/remove 也逐项走相同
-            # 证据、精确目标、CAS 与冲突门，不再因为入口形态要求用户人工审核。
-            can_auto = (
-                str(getattr(candidate, "promotion_mode", "") or "").strip().lower()
-                == "auto_eligible"
-            )
-            if not can_auto:
-                promotion_results.append(
-                    _promotion_result_with_scope(
-                        {
-                            "candidate_id": candidate.candidate_id,
-                            "promoted": False,
-                            "status": candidate.status,
-                            "reason_code": "REVIEW_REQUIRED",
-                            "promotion_ref": "",
-                        },
-                        candidate,
-                    )
-                )
-                continue
-            result = promotion.promote(candidate.candidate_id, automatic=True)
-            payload = _promotion_result_with_scope(result.to_dict(), candidate)
-            promotion_results.append(payload)
-            # ALREADY_PROMOTED 表示幂等命中既有正式条目，不得误报成本轮又改了一次记忆。
-            active_changed = active_changed or payload.get("reason_code") == "PROMOTED"
-        required_repairs = _remember_required_repairs(promotion_results)
-        return ToolHandlerOutcome(
-            "remember",
-            True,
-            json.dumps(
-                {
-                    "ok": True,
-                    "saved": _remember_saved(promotion_results),
-                    "action": action,
-                    "active_memory_changed": active_changed,
-                    "results": promotion_results,
-                    "required_repairs": required_repairs,
-                    "hint": _remember_result_hint(
-                        action,
-                        active_changed,
-                        required_repairs,
-                        promotion_results,
-                    ),
-                },
-                ensure_ascii=False,
-            ),
-        )
+        promotion_results = [promote_prepared(promotion, candidate) for candidate in observed]
+        return _remember_write_result(action, promotion_results)
 
 
-# LLM: Normalization only projects declared fields and never invents origin, scope or subject from content.
-# 函数用途: 把单操作或 batch 参数统一成操作数组。
+# LLM: 纯结果投影；只认显式变更事实，PROMOTED也可能只复用引用，历史清理不计本轮正式变更。
+# 函数用途: 把新增晋升和既有删除恢复的结构化结果装成统一工具回执。
+def _remember_write_result(action: str, promotion_results: list[dict[str, object]]) -> ToolHandlerOutcome:
+    active_changed = any(item.get("formal_memory_changed") is True
+                         for item in promotion_results)
+    required_repairs = _remember_required_repairs(promotion_results)
+    return ToolHandlerOutcome(
+        "remember",
+        True,
+        json.dumps(
+            {
+                "ok": True,
+                "saved": _remember_saved(promotion_results),
+                "action": action,
+                "active_memory_changed": active_changed,
+                "results": promotion_results,
+                "required_repairs": required_repairs,
+                "hint": _remember_result_hint(action, active_changed, required_repairs, promotion_results),
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+# LLM: 仅投影声明字段，不推断来源/范围/主题；batch存在任何非对象元素时整批拒绝，绝不静默过滤。
+# 函数用途: 把合法单操作或完整batch统一成操作数组，坏批次交由后续无副作用报错。
 def _memory_operations(
     params: dict[str, object],
     action: str,
 ) -> list[dict[str, object]]:
     if action == "batch":
         raw = params.get("operations")
-        if not isinstance(raw, list):
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
             return []
-        return [dict(item) for item in raw if isinstance(item, dict)]
+        return [dict(item) for item in raw]
     allowed = {
         "entry_id",
         "content",
@@ -374,16 +355,16 @@ def _memory_operations(
     return [operation]
 
 
-# LLM: All operations validate before observe_many, so an invalid batch leaves no partial candidates.
+# LLM: 整批输入在任何候选写入前完成校验；目标版本属于观察身份，坏批次不得部分落盘。
 # 函数用途: 校验操作并构造统一 CandidateObservation；返回工具错误时调用方不得继续写入。
 def _prepare_observations(
     agent: object,
     memory: object,
     operations: list[dict[str, object]],
-) -> list[CandidateObservation] | ToolHandlerOutcome:
+) -> list[CandidateObservation | CommittedRemoval] | ToolHandlerOutcome:
     if not operations:
         return _memory_error("operations 必须是非空数组", "TOOL_INVALID_ARGUMENTS", not_started=True)
-    observations: list[CandidateObservation] = []
+    observations: list[CandidateObservation | CommittedRemoval] = []
     for index, operation in enumerate(operations, start=1):
         prepared = _prepare_observation(agent, memory, operation, index=index)
         if isinstance(prepared, ToolHandlerOutcome):
@@ -394,22 +375,22 @@ def _prepare_observations(
     return observations
 
 
-# LLM: Exact target records supply replace/remove scope and content; free text never selects an existing entry.
-# 函数用途: 把一个 remember 操作转换为候选，并补齐真实消息或工具证据引用。
+# LLM: 精确目标提供范围和版本；保留所有声明的工具引用与缺失标记，不能用一条用户消息洗白其它来源。
+# 函数用途: 绑定真实目标与全部证据；缺失声明按条拒绝，不能被用户消息掩盖或连坐合法batch项。
 def _prepare_observation(
     agent: object,
     memory: object,
     operation: dict[str, object],
     *,
     index: int,
-) -> CandidateObservation | ToolHandlerOutcome:
+) -> CandidateObservation | CommittedRemoval | ToolHandlerOutcome:
     identity = _validated_action_origin(operation, index=index)
     if isinstance(identity, ToolHandlerOutcome):
         return identity
     action, origin = identity
     target_result = _resolved_target(memory, operation, action=action, index=index)
     if isinstance(target_result, ToolHandlerOutcome):
-        return target_result
+        return _prepare_removal_retry(agent, operation, target_result, index=index)
     entry_id, target = target_result
     body = _validated_candidate_body(operation, target, action=action, index=index)
     if isinstance(body, ToolHandlerOutcome):
@@ -418,10 +399,12 @@ def _prepare_observation(
     domain = _validated_domain_fields(agent, operation, target, index=index)
     if isinstance(domain, ToolHandlerOutcome):
         return domain
+    from ..memory_store.learning_source_authority import remember_source_projection
+
     provenance = _observation_provenance(agent, operation, origin=origin, content=content)
     observation_id = _observation_id(
-        request_id=provenance.request_id,
-        operation_index=index,
+        provenance=provenance,
+        domain=domain,
         action=action,
         entry_id=entry_id,
         content=content,
@@ -446,6 +429,8 @@ def _prepare_observation(
         target_entry_id=entry_id,
         promotion_target="long_term",
         observation_id=observation_id,
+        target_entry_version=getattr(target, "version", None),
+        learning_source=remember_source_projection(agent, provenance.message_refs, provenance.tool_refs),
     )
 
 
@@ -545,7 +530,7 @@ class _MemoryDomainFields:
     scope: MemoryScope
 
 
-# LLM: Target scope/subject cannot be changed by a replace/remove request. Temporary scope always
+# LLM: 替换/删除不能改变目标范围或主题；临时范围须显式期限，会话范围寿命仅由宿主线程管理。
 # carries an explicit expiry, while session scope lifetime is exclusively host/thread-owned.
 # 函数用途: 校验候选的 subject_key、kind 和 scope。
 def _validated_domain_fields(
@@ -601,6 +586,11 @@ def _validated_domain_fields(
             hint="移除 valid_from/valid_until 后重试；需要按时间过期时使用 temporary scope。",
             not_started=True,
         )
+    from .memory_tool_recovery import validate_operation_times
+
+    time_error = validate_operation_times(operation, index=index)
+    if time_error is not None:
+        return time_error
     return _MemoryDomainFields(subject_key, kind, scope)
 
 
@@ -640,9 +630,8 @@ class _ObservationProvenance:
     tool_refs: tuple[dict[str, object], ...]
 
 
-# LLM: Origin selects exactly one evidence adapter; model_inferred receives no fabricated user or
-# tool evidence.
-# 函数用途: 从当前运行构造 observation provenance。
+# LLM: 用户来源仅从当前真实消息补证；任何origin声明的工具句柄都完整解析，成功状态交准入门核验。
+# 函数用途: 构造用户消息和工具来源，不因origin丢弃额外证据。
 def _observation_provenance(
     agent: object,
     operation: dict[str, object],
@@ -655,13 +644,7 @@ def _observation_provenance(
     if origin == "user_explicit":
         message_ref = _current_user_message_ref(agent, content)
         message_refs = (message_ref,) if message_ref else ()
-    elif origin == "tool_verified":
-        tool_refs = tuple(
-            _current_tool_evidence_refs(
-                agent,
-                _normalize_refs(operation.get("evidence_refs")),
-            )
-        )
+    tool_refs = tuple(_current_tool_evidence_refs(agent, _normalize_refs(operation.get("evidence_refs"))))
     current = getattr(agent, "_current_run_params", None)
     request_id = str(getattr(current, "request_id", "") or "").strip()
     task_id = str(getattr(current, "task_id", "") or "").strip()
@@ -790,8 +773,14 @@ def _current_user_message_ref(agent: object, candidate_content: str) -> dict[str
     }
 
 
-# LLM: This function only canonicalizes current typed tool records; PromotionService rechecks the Tool Agent ledger.
-# 函数用途: 把模型提交的当前工具句柄映射成 owner/run/operation 结构化引用。
+# LLM: 无法解析的声明只存去内容化标识，不伪造operation；准入门与晋升verifier均不能据此取得成功证据。
+# 函数用途: 为缺失工具引用保留明确拒绝标记，不泄露原始句柄文字。
+def _unresolved_tool_ref(handle: str) -> dict[str, object]:
+    return {"kind": "unresolved_tool", "ref_id": "unresolved-tool-" + hashlib.sha256(handle.encode()).hexdigest()}
+
+
+# LLM: 当前typed工具记录逐项解析；缺失声明保留无权威标记，使准入门按条拒绝但不连坐合法batch项。
+# 函数用途: 生成规范工具引用和明确未解析标记，防止静默剔除后洗白。
 def _current_tool_evidence_refs(
     agent: object,
     requested_refs: list[str],
@@ -801,11 +790,12 @@ def _current_tool_evidence_refs(
     current_loop = getattr(agent, "_current_tool_loop_params", None)
     archive = getattr(current_loop, "archive_tool_calls", None)
     if not isinstance(archive, list):
-        return []
+        return [_unresolved_tool_ref(ref) for ref in requested_refs]
     current = getattr(agent, "_current_run_params", None)
     default_run_id = str(getattr(current, "run_id", "") or "").strip()
     owner_id = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "").strip()
     found: list[dict[str, object]] = []
+    unresolved = set(requested_refs)
     for record in archive:
         if not isinstance(record, dict):
             continue
@@ -840,34 +830,51 @@ def _current_tool_evidence_refs(
             if value:
                 ref[key] = value
         found.append(ref)
+        unresolved.difference_update(identifiers)
+    found.extend(_unresolved_tool_ref(ref) for ref in sorted(unresolved))
     unique: dict[str, dict[str, object]] = {}
     for item in found:
         unique[json.dumps(item, ensure_ascii=False, sort_keys=True)] = item
     return list(unique.values())
 
 
-# LLM: Stable observation identity uses host request/index and semantic hash; retries cannot inflate occurrence_count.
-# 函数用途: 为 remember 本轮某个操作生成幂等观察编号。
+# LLM: 观察身份绑定宿主规范证据，不含batch位置、引用别名或目标版本；变更提案换措辞也不是新证据。
+#   缺证据时仅以请求隔离无权威的草案，正式晋升仍须验证证据；新增事实保留各自语义身份。
+# 函数用途: 为 remember 生成不可借重放刷新目标版本的观察编号。
 def _observation_id(
     *,
-    request_id: str,
-    operation_index: int,
+    provenance: _ObservationProvenance,
+    domain: _MemoryDomainFields,
     action: str,
     entry_id: str,
     content: str,
 ) -> str:
     material = json.dumps(
         {
-            "request_id": request_id,
-            "operation_index": operation_index,
+            "sources": _canonical_observation_sources(provenance),
+            "subject_key": domain.subject_key if action == "add" else "",
+            "scope": domain.scope.to_dict() if action == "add" else {},
+            "kind": domain.kind if action == "add" else "",
             "action": action,
             "entry_id": entry_id,
-            "content_hash": hashlib.sha256(content.encode("utf-8", "replace")).hexdigest(),
+            "content_hash": hashlib.sha256(content.encode("utf-8", "replace")).hexdigest() if action == "add" else "",
         },
         sort_keys=True,
         separators=(",", ":"),
     )
     return "remember-observation-" + hashlib.sha256(material.encode()).hexdigest()[:24]
+
+
+# LLM: message/thread及owner/run/operation是权威身份；quote/hash和call/artifact别名变化不产生新观察。
+# 函数用途: 将已由宿主解析的证据引用去重排序，供观察身份稳定绑定。
+def _canonical_observation_sources(provenance: _ObservationProvenance) -> list[tuple[str, ...]]:
+    sources = {("message", str(ref["thread_id"]), str(ref["message_id"]))
+               for ref in provenance.message_refs}
+    sources.update(("tool", str(ref["owner_id"]), str(ref["run_id"]), str(ref["operation_id"]))
+                   for ref in provenance.tool_refs if ref.get("kind") != "unresolved_tool")
+    sources.update(("unresolved_tool", str(ref["ref_id"])) for ref in provenance.tool_refs
+                   if ref.get("kind") == "unresolved_tool")
+    return sorted(sources) if sources else [("request", provenance.request_id)]
 
 
 # LLM: Exact entry_id lookup is the only selection mechanism for replace/remove.
@@ -967,11 +974,11 @@ def _promotion_result_with_scope(
     return result
 
 
-# 这两种结果码表示这条已经在正式记忆里（这次写进去的，或早就写过、这次幂等命中）。
-_SAVED_REASON_CODES = frozenset({"PROMOTED", "ALREADY_PROMOTED"})
+# 正式操作完成码包括新提交、幂等命中和已提交删除的隐私清理完成；候选写入本身不算保存。
+_SAVED_REASON_CODES = frozenset({"PROMOTED", "ALREADY_PROMOTED", "REMOVE_CLEANUP_RECOVERED"})
 
 
-# LLM: saved 只看每条 promotion 结果的结构化 reason_code：每一条都在正式记忆里（PROMOTED 或 ALREADY_PROMOTED）才算 true。
+# LLM: saved 只看每条结果的结构化 reason_code：正式操作已提交且所需清理完成才算 true。
 #   "ok" 只表示这次调用跑完了（候选也算副作用），不表示记住了；learnpack 生产复测里她看到 ok 就对用户说"已记下来了"，
 #   其实记忆因缺证据没生效，所以单独给一个一眼可见的字段。纯函数。
 # 函数用途: 判断这次要记的内容是不是全都在正式记忆里了。
@@ -981,7 +988,7 @@ def _remember_saved(promotion_results: list[dict[str, object]]) -> bool:
     )
 
 
-# LLM: Result hints summarize typed repairs and recall scopes already projected beside each
+# LLM: 提示只解释结构化结果和召回范围，不授予权限；未正式保存必须说明未记上，清理未知不得误报成功。
 # promotion result. They are explanation only and never widen machine authority. Every branch
 # where something is not in formal memory starts with "没记上" and tells the model not to claim
 # it was saved (learnpack production retest: "ok": true was read as "saved").
@@ -992,6 +999,14 @@ def _remember_result_hint(
     required_repairs: list[dict[str, object]],
     promotion_results: list[dict[str, object]],
 ) -> str:
+    from .memory_tool_recovery import removal_result_hint
+
+    removal_hint = removal_result_hint(promotion_results)
+    if removal_hint:
+        return removal_hint
+    if any(item.get("reason_code") == "AUTO_PROMOTION_CONFIRMATION_REQUIRED" for item in promotion_results):
+        state = "部分记上了，另有候选等待用户审核确认。" if active_changed else "没记上（等待用户审核确认）：本次只保存了候选，正式记忆没有因此改变。"
+        return state + "请将 required_repairs.user_control 中的 /memory candidates preview 命令交给用户，由本人完整预览后确认；不要重复调用工具或把来源核验说成已批准。"
     unsaved = sum(str(item.get("reason_code") or "") not in _SAVED_REASON_CODES for item in promotion_results)
     if active_changed and unsaved:
         return (
@@ -1013,9 +1028,9 @@ def _remember_result_hint(
                 "不表示跨会话生效。"
             )
         if scope_types == {"personal"}:
-            return "精确证据和安全门已通过，当前用户的个人正式记忆已自主更新。"
+            return "精确证据和安全门已通过，当前用户的个人正式记忆已按审核结果更新。"
         return (
-            "精确证据和安全门已通过，正式记忆已按每条 memory_scope 自主更新；"
+            "精确证据和安全门已通过，正式记忆已按审核结果及每条 memory_scope 更新；"
             "物理存储位置不扩大自动召回范围。"
         )
     if required_repairs:
@@ -1029,8 +1044,8 @@ def _remember_result_hint(
     )
 
 
-# LLM: Repairs are derived only from stable promotion reason codes; prose never changes authority.
-# 函数用途: 把缺消息或缺工具证据转换成模型可执行的结构化重试要求。
+# LLM: 修复动作只从稳定原因码投影；待确认导航当前/memory候选预览，提示及模型重试都不能签权。
+# 函数用途: 将缺证据与待用户确认分成准确的结构化后续动作。
 def _remember_required_repairs(
     promotion_results: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -1040,7 +1055,13 @@ def _remember_required_repairs(
         reason_code = str(result.get("reason_code") or "").strip()
         if reason_code in seen:
             continue
-        if reason_code in {"TOOL_EVIDENCE_MISSING", "TOOL_EVIDENCE_NOT_SUCCEEDED"}:
+        if reason_code == "AUTO_PROMOTION_CONFIRMATION_REQUIRED":
+            repairs.append({"reason_code": reason_code, "action": "user_review_required",
+                            "candidate_id": str(result.get("candidate_id") or ""),
+                            "explicit_user_required": True, "model_retry_authorizes": False,
+                            "user_control": "/memory candidates preview " + str(result.get("candidate_id") or "")})
+            seen.add(reason_code)
+        elif reason_code in {"TOOL_EVIDENCE_MISSING", "TOOL_EVIDENCE_NOT_SUCCEEDED"}:
             repairs.append(
                 {
                     "reason_code": reason_code,
@@ -1076,12 +1097,12 @@ def _normalize_tags(raw: object) -> list[str]:
     return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
 
 
-# LLM: Requested refs are opaque exact handles; this helper never parses paths or prose.
-# 函数用途: 清理空工具引用并保持原顺序去重。
+# LLM: 工具声明是精确句柄；空白也须进入解析器形成缺失标记，不能静默缩小待核验集合。
+# 函数用途: 规范化工具引用并按原顺序去重，但保留空白声明供证据门拒绝。
 def _normalize_refs(raw: object) -> list[str]:
     if not isinstance(raw, list):
         return []
-    return list(dict.fromkeys(str(item).strip() for item in raw if str(item).strip()))
+    return list(dict.fromkeys(str(item).strip() for item in raw))
 
 
 _TRANSIENT_CODE_PATTERNS = (

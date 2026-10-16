@@ -10,40 +10,21 @@ base_params。本文件覆盖回写行为与失败路径。
 from __future__ import annotations
 
 from types import SimpleNamespace
-from types import SimpleNamespace as _StoreDomain
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.cli.resume_loop import ResumeRunOnce
+from agent_py_agent.tests.support.ci_cli_owner_fixtures import isolated_cli_owner_paths
 
 
-class _FakeStore:
-    """最小 ConversationStore：回显 spec 的 metadata 供身份一致性校验。"""
-
-    def __init__(self):
-        self.appends = []
-        self.threads = _StoreDomain(get_or_create=self._fake_get_or_create_thread)
-        self.messages = _StoreDomain(append_once=self._fake_append_message_once)
-
-    def _fake_get_or_create_thread(self, spec):
-        return SimpleNamespace(thread_id="thread-" + str(spec.get("channel_conversation_id") or "t"))
-
-    def _fake_append_message_once(self, spec, dedupe_key=""):
-        self.appends.append(spec)
-        return SimpleNamespace(
-            message_id="m-" + str(len(self.appends)),
-            thread_id=spec.get("thread_id", ""),
-            metadata=dict(spec.get("metadata") or {}),
-        )
-
-
+# LLM: 只替换业务运行结果，身份、来源与线程由原临时 owner 和 ConversationStore 维护，不绕过学习政策。
+# 类用途: 为工作区续跑回写测试提供真实会话绑定，同时观察原 run 参数。
 class _FakeAgent:
     """只提供 bind 与 run 所需属性的最小 agent。"""
 
     def __init__(self, tmp_path, workspace_root=""):
-        self.home_paths = SimpleNamespace(
-            owner_id="owner-1", owner_home_dir=str(tmp_path), root=str(tmp_path)
-        )
-        self.conversation_store = _FakeStore()
+        self.home_paths = isolated_cli_owner_paths(tmp_path)
+        self.conversation_store = ConversationStore(self.home_paths.owner_home_dir / "conversations")
         self.subagents = SimpleNamespace(runtime_db=None)
         self._current_run_task_workspace = workspace_root
         self.run_calls = []

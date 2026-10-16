@@ -2,7 +2,7 @@
 
 这个目录放”可以长期长大”的模块设计文档。
 
-当前增量：[飞书原生图片输入](FEISHU_NATIVE_IMAGES.md)、[群监控授权与机器人订阅](IM_GROUP_GOVERNANCE.md)。源码/真实/发行状态各自单列。
+当前增量：[七块功能合并评估](SEVEN_FEATURE_INTEGRATION.md)（只读对照完成，未移植产品）、[飞书原生图片输入](FEISHU_NATIVE_IMAGES.md)、[群监控授权与机器人订阅](IM_GROUP_GOVERNANCE.md)。源码/真实/发行状态各自单列。
 
 导航：
 - `LLM_GUIDE.md`：LLM 总入口，含开工前/收工后清单
@@ -11,6 +11,14 @@
 - `DESIGN_LEDGER.md`：主设计台账，只负责导航、决策摘要和状态索引
 
 详细方案、字段草案、分阶段开发计划和验收规则应该放到这里的模块文档里。
+
+## 本轮组合合同（2026-10-16，未发布）
+
+- [用户规则来源与学习分离](PERSONA_AGENTS_OWNERSHIP.md)：本人规则、来源 CAS、显式确认、候选正式提交与清理恢复。
+- [自我目录](SELF_MAP.md)：原公开读口聚合、可见范围、渐进加载与 unknown/partial。
+- [七块功能集成](SEVEN_FEATURE_INTEGRATION.md)：固定来源、main 优势保留、实际组合范围与逐轮验收边界。
+
+分线记录不替代最终组合和真实入口验收。
 
 ## 拆分规则
 

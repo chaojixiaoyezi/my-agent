@@ -1,6 +1,6 @@
 # LLM: 此模块独占 Messages 转换；八档换算归 reasoning_control，同次输出上限与冻结档位声明不能在投影/发送间丢失。
 #   只读出站投影与真实发送共用组包，保持缓存、思考、工具及错误合同，联合 native IR 回归。
-# 模块用途: 调用 Messages 接口并规范化流式或完整响应，保留历史、用量和请求局部控制。
+# 模块用途: 调用 Messages 接口并规范化响应；保留历史、用量和局部控制，流结束及时归还物理名额。
 from __future__ import annotations
 
 import json
@@ -18,7 +18,7 @@ from .base import BackendOptions, ModelResponse, ProviderRequestOptions
 from .errors import (
     ProviderResponseError,
 )
-from .http import HttpBackend, bounded_output_tokens, request_stream_lines
+from .http import HttpBackend, bounded_output_tokens, provider_stream_scope, request_stream_lines
 from .provider_headers import endpoint_parts
 from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
 from .response_completion import (
@@ -93,7 +93,7 @@ def anthropic_thinking_fields(
 
 # LLM: 单次物理流必须把 delta、block-stop 与参数 observer 一起交给 collector；重试边界仍由调用方掌权，
 #   不能在此创建工具、展示重放或重试状态。回调收成 _StreamCallbacks 以控制参数个数。
-# 函数用途: 读取并收集一条 Anthropic SSE 响应，保留供应商原始块顺序，返回正文、用量、块与完成信息。
+# 函数用途: 收集一条 Anthropic SSE，保留块顺序并返回正文和用量；离开收集器即关闭流归还名额。
 def _anthropic_stream_text_once(
     backend: AnthropicCompatibleBackend,
     payload: dict[str, Any],
@@ -101,21 +101,14 @@ def _anthropic_stream_text_once(
     callbacks: _StreamCallbacks,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], StreamCompletion]:
     lines = backend.request_stream_iter if callbacks.on_chunk is not None else backend.request_stream
-    return collect_anthropic_stream_with_completion(
-        request_stream_lines(
-            lines,
-            (
-                "/v1/messages",
-                payload,
-                headers,
-                callbacks.first_event_timeout_seconds,
-                getattr(callbacks, "total_deadline_seconds", None),
-            ),
-        ),
-        on_chunk=callbacks.on_chunk,
-        on_thinking_delta=callbacks.on_thinking_delta,
-        on_tool_input_progress=callbacks.on_tool_input_progress,
-    )
+    stream = request_stream_lines(lines, (
+        "/v1/messages", payload, headers, callbacks.first_event_timeout_seconds,
+        getattr(callbacks, "total_deadline_seconds", None)))
+    # message_stop/解析失败离开收集器后关同一个实际流，不等待生成器被回收。
+    with provider_stream_scope(stream, enabled=getattr(backend, "provider_max_concurrent_requests", 0) > 0):
+        return collect_anthropic_stream_with_completion(
+            stream, on_chunk=callbacks.on_chunk, on_thinking_delta=callbacks.on_thinking_delta,
+            on_tool_input_progress=callbacks.on_tool_input_progress)
 
 
 # LLM: Auxiliary JSON 调用与普通 Messages 共用同一条发送链，但输出上限只作用于本次请求的组包，

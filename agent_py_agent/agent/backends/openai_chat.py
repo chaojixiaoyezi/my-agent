@@ -1,6 +1,6 @@
 # LLM: 此模块独占 Chat Completions 转换；只读出站投影与真实发送共用组包；八档换算和声明过滤归 reasoning_control，
 #   本模块只传同次输出上限与冻结声明，保持历史、思考、工具、采样与用量合同。
-# 模块用途: 调用 Chat 接口，转换消息和流式结果；网络、回调及显式启用的私有诊断写入均在既有边界内。
+# 模块用途: 调用 Chat 接口，转换消息并及时关闭流归还名额；网络、回调及私有诊断均在既有边界内。
 from __future__ import annotations
 
 import json
@@ -16,7 +16,7 @@ from .base import ModelResponse, ProviderRequestOptions
 from .errors import (
     ProviderResponseError,
 )
-from .http import HttpBackend, bounded_output_tokens, request_stream_lines
+from .http import HttpBackend, bounded_output_tokens, provider_stream_scope, request_stream_lines
 from .provider_headers import endpoint_parts
 from .reasoning_control import ReasoningPayloadLimits, reasoning_payload_fields
 from .response_completion import (
@@ -103,7 +103,7 @@ def dump_provider_payload(payload: dict[str, Any], *, path: str) -> None:
 
 
 # LLM: Chat 适配器独占消息转换，能力端点使用 HTTP 同源规则；Responses 只复用稳定生成入口，联合协议及 OAuth 回归。
-# 类用途: 把统一生成请求转换为 Chat Completions 网络调用并返回规范化响应。
+# 类用途: 转换 Chat Completions 请求与规范响应，限流时提前收集结束也关闭物理流。
 class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
 
@@ -333,7 +333,7 @@ class OpenAICompatibleBackend(HttpBackend):
 
     # LLM: reasoning_content 与正文必须走不同观察器，并在正文/工具或流结束前封口思考块；
     # 工具参数开始立即封口思考并发布计数；不完整响应零工具执行，仅思考也保留原内容和用量。
-    # 函数用途: 解析 OpenAI SSE，同时展示正文、思考与长工具参数的实时准备进度。
+    # 函数用途: 解析 OpenAI SSE，展示正文、思考和工具准备进度；完成或失败后立即关闭原流归还物理名额。
     def _generate_stream(
         self,
         payload: dict[str, Any],
@@ -343,16 +343,14 @@ class OpenAICompatibleBackend(HttpBackend):
         """Parse OpenAI SSE and concatenate delta.content chunks."""
         on_chunk = observers.on_chunk
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        text, usage, blocks, completion = collect_openai_stream_with_completion(
-            request_stream_lines(
-                lines,
-                (   "/chat/completions", openai_stream_payload(payload), headers,
-                    observers.first_event_timeout_seconds, observers.total_deadline_seconds, ),
-            ),
-            on_chunk=on_chunk,
-            on_thinking_delta=observers.on_thinking_delta,
-            on_tool_input_progress=observers.on_tool_input_progress,
-        )
+        stream = request_stream_lines(lines, (
+            "/chat/completions", openai_stream_payload(payload), headers,
+            observers.first_event_timeout_seconds, observers.total_deadline_seconds))
+        # collector 收到 DONE 可提前返回；即使其它调用方仍保留 stream 也立即释放名额。
+        with provider_stream_scope(stream, enabled=getattr(self, "provider_max_concurrent_requests", 0) > 0):
+            text, usage, blocks, completion = collect_openai_stream_with_completion(
+                stream, on_chunk=on_chunk, on_thinking_delta=observers.on_thinking_delta,
+                on_tool_input_progress=observers.on_tool_input_progress)
         assistant_blocks = _openai_assistant_content_blocks(
             reasoning=_openai_reasoning_from_completion(completion),
             text=text,

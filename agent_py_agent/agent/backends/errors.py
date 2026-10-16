@@ -1,5 +1,5 @@
 # LLM: 模型异常类型和合法 HTTP 属性是分类/恢复的事实源；安全展示不能从异常正文推断状态码或配置错误。
-# 模块用途: 统一 CLI、主子执行和恢复的模型错误边界，并投影可公开的 HTTP 数值。
+# 模块用途: 统一 CLI、主子执行和恢复的模型错误边界，区分本地排队暂时失败并投影可公开的 HTTP 数值。
 
 from __future__ import annotations
 
@@ -157,6 +157,12 @@ class ProviderTransientError(ProviderRecoverableError):
 # 类用途: 表示模型流在完成前被切断，本次采样请求可安全重试。
 class ProviderStreamIncompleteError(ProviderTransientError):
     """The provider stream ended before its completion marker."""
+
+
+# LLM: 本地排队失败是 transient，不是供应商额度或配置错；结构化码须与错误合同同步。
+# 类用途: 区分尚未发出请求的排队到期，让原恢复链仅重试采样步骤。
+class ProviderQueueTimeoutError(ProviderTransientError):
+    error_code = "PROVIDER_QUEUE_TIMEOUT"
 
 
 class ProviderUsageLimitError(ProviderTransientError):

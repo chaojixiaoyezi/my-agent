@@ -37,6 +37,8 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
+    CommandSpec("agents", "/agents [show|refresh|source|reset|write|confirm|receipt]", "查看规则来源或显式预览确认修改",
+        submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
     CommandSpec("group", "/group", "查看当前群的监控授权", surfaces=("im",),
                 submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$",
                 help_variants=(("/group 监控 @某人|全群", "群主或邀请人授权监控；全群包含以后入群的成员"),
@@ -297,7 +299,10 @@ COMMAND_CATALOG = (
     ),
     CommandSpec("expand", "/expand [last|编号]", "展开一条已折叠的助手回复", submit_on_enter=True),
     CommandSpec("exit", "/exit", "退出聊天界面", aliases=("logout", "quit"), submit_on_enter=True),
-    CommandSpec("memory", "/memory [查询内容]", "搜索记忆", submit_on_enter=True),
+    CommandSpec("memory", "/memory candidates [list|show|preview|confirm|reject|cancel|receipt]", "人工审核本人记忆候选",
+        submit_on_enter=True, conversation_suffix=r"\s+(candidates(?:\s+.*)?)\s*$",
+        help_variants=(("/memory candidates preview <候选ID>", "完整预览后按预览编号confirm、reject或cancel，正式保存只认当前本人确认"),
+                       ("/memory [查询内容]", "仅终端：查询正式记忆；IM用candidates人工审核候选"))),
     CommandSpec("remember", "/remember <内容>", "保存一条记忆"),
     CommandSpec("prompt-file", "/prompt-file <路径>", "添加提示文件"),
     CommandSpec("show-prompt", "/show-prompt <问题>", "显示最终 Prompt 和回答"),

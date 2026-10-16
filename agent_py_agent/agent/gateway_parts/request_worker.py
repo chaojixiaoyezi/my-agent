@@ -1,5 +1,6 @@
 # LLM: 本模块负责 Gateway 请求入队、claim 和 worker 调度；文件 payload 的会话身份与客户端能力必须保持结构化且可审计。
 #   owner 解析另认已用管理员密码绑定的 IM 私聊，判据只有结构化渠道身份与绑定表的精确匹配。
+#   SQLite复用仅在已解析owner的请求范围内启用，结束时回收，不改变独立事务和终态提交。
 # 模块用途: 接收 Gateway 请求、写入队列并驱动后台 worker 可靠处理。
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from ..concurrency.interrupt import register_interruptible
 from ..conversation.control_commands import (
     conversation_request_interrupt_name,
 )
+from ..io.sqlite_scope import sqlite_connection_scope
 from ..observability.concurrency_metrics import (
     gateway_admission_blocked_set,
     gateway_inflight,
@@ -815,7 +817,7 @@ def _process_gateway_request_path(
         gateway_worker_busy(-1)
 
 
-# LLM: 请求从 owner 解析到结果落账一直租用同一实例；退出只释放缓存租用，不改变持久任务恢复合同。
+# LLM: 请求从owner解析到结果落账一直租用同一实例；已解析后才按配置进入SQLite scope，退出回收连接且不改变持久任务恢复合同。
 # 函数用途: 处理一个已认领请求，在所有结束路径保留 owner 隔离并释放运行资源。
 def _process_claimed_gateway_request_path(
     agent: SimpleAgent,
@@ -904,7 +906,8 @@ def _process_claimed_gateway_request_path(
         return True
     pool = getattr(agent, "_owner_pool", None)
     lease = pool.pin(request_agent) if pool is not None and request_agent is not agent else nullcontext()
-    with lease, register_interruptible(conversation_request_interrupt_name(request_id)):
+    with (lease, register_interruptible(conversation_request_interrupt_name(request_id)),
+          sqlite_connection_scope(bool(getattr(agent.config, "sqlite_connection_reuse", False)))):
         response = _process_claimed_gateway_request(
             _ClaimedGatewayRequestContext(
                 request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝

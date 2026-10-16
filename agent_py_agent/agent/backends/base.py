@@ -1,5 +1,5 @@
 # LLM: 此模块只定义后端公共合同和本地实现；HTTP/协议/工厂各有唯一模块，变更接口须同步所有适配器与回归。
-# 模块用途: 保存冻结连接选项、请求控制和统一响应，让运行时无需导入具体模型协议。
+# 模块用途: 保存冻结连接/并发选项、请求控制和统一响应，让运行时无需导入具体模型协议。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -58,8 +58,8 @@ class ModelResponse:
     public_receipt: dict[str, object] | None = None
 
 
-# LLM: 后端连接与 top_p/温度是工作片冻结快照；请求头和模型名/密钥一起缓存，流式请求中不可热改。
-# 类用途: 保存 HTTP 模型后端的连接、采样和媒体发送预算。
+# LLM: 后端连接、采样和物理并发上限是工作片冻结快照；与模型名/密钥一起缓存，流式请求中不可热改。
+# 类用途: 保存 HTTP 后端的连接、采样、媒体预算和默认关闭的进程内物理并发限制。
 @dataclass(frozen=True)
 class BackendOptions:
     """Connection and generation options shared by HTTP model backends."""
@@ -87,6 +87,8 @@ class BackendOptions:
     reasoning_update_items: str = "auto"
     # 已解析的结构化输出方式（native/json_object，见 structured_output_mode.py）；随 profile 冻结。
     structured_output: str = "native"
+    # 仅控制本进程每 HTTP origin 的物理请求并发，0 保持原路径。
+    provider_max_concurrent_requests: int = 0
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。

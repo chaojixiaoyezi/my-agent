@@ -1,5 +1,5 @@
 # LLM: 只投影已冻结材料，用户/宿主事件媒体同样参与模态与容量分类；不读取文件、不授权或发送。
-# 模块用途: 让真实工具轮与创建前容量检查共享原 PromptBuilder、原 IR 转换及精确原生 schema。
+# 模块用途: 让真实工具轮与容量检查共享PromptBuilder、原IR和精确schema；自我目录仅透传实际可用资格。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -15,6 +15,7 @@ from ..prompting_parts.builder import (
     render_prepared_prompt,
 )
 from ..tooling.runtime_contracts import ToolChoice, ToolProtocolSnapshot
+from ..tooling.self_map_availability import self_map_available
 from .native_tool_protocol import native_tool_use_active
 from .tool_ir_history import (
     project_native_prompt_history,
@@ -109,7 +110,7 @@ class InputModalityFilter:
 
 # LLM: 参数来自原 ToolLoopExecuteParams；额外三项必须由宿主准备，不能在这里读取 Goal、运行账或执行事实。
 #   回合触发类型原样交给 PromptBuilder，只决定当前回合以用户任务还是宿主事件开头。
-# 函数用途: 统一真实轮次与纯投影输入，透传已冻结在用名单，原系统与作用域不变。
+# 函数用途: 统一真实轮次与纯投影输入，透传在用名单和实际自我目录资格，不执行目录查询。
 def tool_loop_prompt_request(
     params: ToolLoopExecuteParams,
     *,
@@ -135,6 +136,7 @@ def tool_loop_prompt_request(
             tool_context=params.tool_context,
             execution_facts_section=execution_facts,
             native_tool_use=native_tool_use_active(params),
+            self_map_available=self_map_available(params.tool_runtime_snapshot, params.allowed_tools),
         ),
     )
 

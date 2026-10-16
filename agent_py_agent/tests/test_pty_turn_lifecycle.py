@@ -29,7 +29,7 @@ def _clear_pty_sessions():
 
 @pytest.fixture
 def _unsandboxed_spawn(monkeypatch):
-    monkeypatch.setattr(pty, "_sandbox_exec", lambda command, target, owner_home=None, **kw: (command, True))
+    monkeypatch.setattr(pty, "_sandbox_exec", lambda command, target, owner_home=None, protected_persona_root=None, **kw: (command, True))
 
 
 # LLM: 回收的判定是“进程真的退出 + 有终止回执”；真机可观测时 termination.confirmed 也应为 True。

@@ -17,6 +17,7 @@ from agent_py_agent.agent.memory_store import promotion
 from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 from agent_py_agent.tests.test_agents_phase0_guard import _OTHER_CHAT, _observe, _runtime
 
 
@@ -133,7 +134,7 @@ def test_enabled_quota_promotion_cleanup_cannot_form_lock_cycle(tmp_path, monkey
     monkeypatch.setattr(promotion, "_ensure_not_excluded", probe.checked)
     monkeypatch.setattr(json_io, "_locked_json_path", probe.lock)
     promoter = threading.Thread(name="r33-promotion", target=probe.run, args=("promotion",
-        lambda: env.service.promote(candidate.candidate_id, automatic=target == "long_term", confirmed=True)))
+        lambda: confirm_candidate(env.service, candidate.candidate_id) if target == "long_term" else env.service.promote(candidate.candidate_id, confirmed=True)))
     cleaner = threading.Thread(name="r33-cleanup", target=probe.run,
         args=("cleanup", lambda: _cleanup_after_concurrent_persona(env)))
     promoter.start()
@@ -161,12 +162,14 @@ def test_quota_admitted_conflict_replace_and_hard_delete(tmp_path, monkeypatch, 
     env.service.candidates.quota_enforcer = quota
     env.service.long_term.candidate_service = env.service.candidates
     first = _candidate(env, "long_term")
-    assert env.service.promote(first.candidate_id, automatic=True).promoted
+    assert confirm_candidate(env.service, first.candidate_id).promoted
     entry = env.service.long_term.all()[0]
     source = _observe((env.service, env.conversations), env.threads[_OTHER_CHAT],
-        "个人电脑使用 Linux。", promotion_target="long_term")
-    env.service.review(source.candidate_id, approved=True, reviewer="test", proposed_action=action,
-        target_entry_id=entry.entry_id if action != "add" else "")
+        "个人电脑使用 Linux。", promotion_target="long_term", proposed_action=action,
+        target_entry_id=entry.entry_id if action != "add" else "",
+        target_entry_version=entry.version if action != "add" else None)
+    # 目标与冻结版本在观察时一起确定；审核改目标会按合同清除旧版本，所以这里只做批准。
+    env.service.review(source.candidate_id, approved=True, reviewer="test")
     probe = _LockProbe(env)
     monkeypatch.setattr(json_io, "_locked_json_path", probe.lock)
     result = env.service.promote(source.candidate_id)
@@ -280,7 +283,9 @@ def test_release_diagnostic_write_failure_is_returned_not_silent(tmp_path, monke
 def test_default_and_normalized_long_term_use_target_quota(tmp_path, target):
     from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaExceeded
     env = _setup(tmp_path)
-    candidate = replace(_candidate(env, "long_term"), promotion_target=target, origin="user_explicit")
+    # 最终提交核对库内完整快照（CAS），候选必须以该目标真实入库，不能只在内存里改字段。
+    candidate = _observe((env.service, env.conversations), env.threads[_OTHER_CHAT],
+        "个人电脑使用 macOS。", promotion_target=target)
     env.service.long_term.quota_enforcer = OwnerQuotaEnforcer(env.service.persona.owner_home, max_bytes=1)
     with pytest.raises(OwnerQuotaExceeded):
         promotion._commit_admitted(env.service, candidate, ("test", True))

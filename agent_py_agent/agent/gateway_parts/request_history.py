@@ -25,6 +25,11 @@ from ..conversation.history_index import (
     index_conversation_message,
 )
 from ..conversation.host_notices import HostNotice, take_host_notices
+from ..conversation.learning_source import (
+    LEARNING_SOURCE_KEY,
+    thread_source_projection,
+    user_dialogue_projection,
+)
 from ..conversation.native_history import (
     CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     canonical_native_messages_envelope,
@@ -498,7 +503,7 @@ def _metadata_artifact_refs(value: object) -> list[dict[str, object]]:
     return refs
 
 
-# LLM: Assistant prose, artifacts, operation facts, and one immutable terminal tool fold are
+# LLM: 助手正文、工具事实与来源metadata分别持久；公开正文不被投影改写，宿主学习来源不采信模型summary。
 # persisted in separate fields. The public body must stay unchanged while later model turns may
 # consume the bounded fold from metadata.
 # 本地队列来源决定展示通道，owner provider 仍只负责身份；实时和重放不得使用不同的路径策略。
@@ -552,6 +557,11 @@ def append_gateway_conversation_message(
             "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
         }
         entry_metadata.update(request_binding.gateway_message_work_scope(request))
+        if role == "user":
+            # 当前用户消息的消息级来源=回合冻结事实（显式不可学原样保留）；旧线程上下文无来源时
+            # 只给本条补用户对话来源，不追认历史；后台/派活唤醒不经过本入口。
+            frozen = thread_source_projection(getattr(conversation, "learning_source", None))
+            entry_metadata[LEARNING_SOURCE_KEY] = frozen or user_dialogue_projection()
         if role == "assistant":
             entry_metadata["assistant_part_id"] = normalized_part_id
         if role == "assistant" and operation_verification is not None:

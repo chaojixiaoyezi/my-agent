@@ -181,7 +181,7 @@ def test_pty_partial_input_retains_unknown_effect(tmp_path, monkeypatch, written
 def test_pty_exited_before_write_reports_zero_bytes(tmp_path, monkeypatch):
     import threading
 
-    monkeypatch.setattr(pty_session_registry, "get", lambda *args: SimpleNamespace(
+    monkeypatch.setattr(pty_session_registry, "get", lambda *args, **kw: SimpleNamespace(
         closed=True, process=SimpleNamespace(poll=lambda: 0), write_lock=threading.Lock(),
     ))
     result = _tool(tmp_path).execute({"action": "write", "session_id": "exited", "data": "x"})
@@ -231,6 +231,7 @@ def test_terminal_session_carries_structured_write_roots_to_sandbox(
         run_scope=None,
         *,
         host_policy=None,
+        protected_persona_root=None,
     ):
         captured.update(
             command=command,
@@ -409,7 +410,7 @@ def test_unconfirmed_close_keeps_live_session_and_unknown_effect(tmp_path, monke
     started = _payload(tool.execute({"action": "start", "command": f"{shlex.quote(sys.executable)} -q"}))
     session = pty_session_registry.get(started["session_id"])
     with monkeypatch.context() as patch:
-        patch.setattr(pty, "terminate_process_tree", lambda pid, proc: ProcessTerminationReceipt(
+        patch.setattr(pty, "terminate_process_tree", lambda pid, proc, **kw: ProcessTerminationReceipt(
             "SIGTERM", False, None, 1, (pid,),
         ))
         result = tool.execute({"action": "close", "session_id": session.session_id})
@@ -420,14 +421,22 @@ def test_unconfirmed_close_keeps_live_session_and_unknown_effect(tmp_path, monke
     _assert_pty_stopped(session)
 
 
-def test_close_after_natural_exit_does_not_signal_reusable_pid(tmp_path, monkeypatch):
+def test_close_after_natural_exit_retains_exact_birth_identity(tmp_path, monkeypatch):
     from agent_py_agent.agent.tooling import pty_sessions as pty
-
     session = pty_session_registry.start(f"{shlex.quote(sys.executable)} -c 'pass'", tmp_path)
     session.process.wait(timeout=3)
-    monkeypatch.setattr(pty, "terminate_process_tree", lambda *a: pytest.fail("already exited PID"))
+    # 原包装器仍保留未回收PID；只允许核该出生身份清理，不能把poll终态当后代退出证据。
+    original = pty.terminate_process_tree
+    seen = []
+    def checked(pid, proc, **kwargs):
+        assert pid == session.process.pid and proc is session.process
+        assert kwargs['expected_birth_token'] == session.process.birth_token
+        seen.append(pid)
+        return original(pid, proc, **kwargs)
+    with session.close_lock:
+        monkeypatch.setattr(pty, "terminate_process_tree", checked)
     pty_session_registry.close(session.session_id)
-    assert session.termination.confirmed and session.termination.method == "already_exited"
+    assert session.termination.confirmed and session.termination.method != 'already_exited'
 
 
 def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeypatch) -> None:
@@ -435,7 +444,7 @@ def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeyp
 
     captured: dict[str, object] = {}
 
-    def fake_sandbox_exec(command, target, owner_home, **kwargs):
+    def fake_sandbox_exec(command, target, owner_home, protected_persona_root=None, **kwargs):
         captured.update(kwargs, owner_home=owner_home)
         raise OSError("captured")
 
@@ -457,7 +466,7 @@ def test_pty_start_hands_the_private_root_to_the_sandbox(tmp_path: Path, monkeyp
 def _unsandboxed_spawn(monkeypatch):
     from agent_py_agent.agent.tooling import pty_sessions as pty
 
-    monkeypatch.setattr(pty, "_sandbox_exec", lambda command, target, owner_home=None, **kw: (command, True))
+    monkeypatch.setattr(pty, "_sandbox_exec", lambda command, target, owner_home=None, protected_persona_root=None, **kw: (command, True))
 
 
 # LLM: 回收的判定是“进程真的退出 + 有终止回执”；真机可观测时 termination.confirmed 也应为 True，

@@ -86,7 +86,7 @@ def test_update_persona_soul_uses_exact_approval_binding(tmp_path):
     assert "产物用 HTML" not in agents.read_text(encoding="utf-8")
 
 
-def test_update_persona_agents_is_autonomous_without_approval(tmp_path):
+def test_update_persona_agents_requires_explicit_user_control(tmp_path):
     agent, _soul, _user, agents = _agent_with_paths(tmp_path)
 
     execution = execute_canonical_test_call(
@@ -96,10 +96,9 @@ def test_update_persona_agents_is_autonomous_without_approval(tmp_path):
         arguments={"target": "agents", "content": "产物用 HTML"},
     )
 
-    assert execution.result.ok is True
-    assert execution.result.handler_executed is True
-    assert execution.decision.resolved_effect == "mutating"
-    assert "产物用 HTML" in agents.read_text(encoding="utf-8")
+    assert execution.result.ok is False
+    assert execution.result.metadata['reported_error_code'] == 'AGENTS_WRITE_USER_ONLY'
+    assert "产物用 HTML" not in agents.read_text(encoding="utf-8")
 
 
 def test_update_persona_soul_read_is_read_only_without_approval(tmp_path):

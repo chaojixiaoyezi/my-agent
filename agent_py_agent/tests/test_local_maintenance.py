@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -20,6 +20,11 @@ class TestRebuildFts:
         store = make_fake_store_func(mock_conn=mock_db_conn)
         result = store.rebuild_fts()
         assert result == 0
+        assert mock_db_conn.method_calls[-2][0] == "execute"
+        assert mock_db_conn.method_calls[-2].args[1] == ("records_fts_rebuild_pending", "false")
+        assert mock_db_conn.method_calls[-1] == call.commit()
+        mock_db_conn.commit.assert_called_once_with()
+        assert store._fts_needs_rebuild is False
 
     def test_rebuild_fts_with_records(self, make_fake_store_func):
         """验证有记录时重建并返回数量。"""
@@ -42,6 +47,11 @@ class TestRebuildFts:
         store._connection = lambda: ConnCtx()
         result = store.rebuild_fts()
         assert result == 2
+        assert mock_conn.method_calls[-2][0] == "execute"
+        assert mock_conn.method_calls[-2].args[1] == ("records_fts_rebuild_pending", "false")
+        assert mock_conn.method_calls[-1] == call.commit()
+        mock_conn.commit.assert_called_once_with()
+        assert store._fts_needs_rebuild is False
 
 
 class TestReset:

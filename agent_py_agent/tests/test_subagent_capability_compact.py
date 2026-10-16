@@ -7,6 +7,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.subagent import run_flow
 from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
+from agent_py_agent.agent.conversation.native_history import provider_history_messages_from_rows
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
 from agent_py_agent.tests.test_decision_capability_consumer import (
     provider,
@@ -47,12 +48,13 @@ def capability_host(tmp_path, tool_surface, skill_catalog_factory):  # noqa: F81
     return SimpleNamespace(agent=agent, backend=backend, first=first, second=second)
 
 
-# LLM: 旧历史只写入原 child/main thread，使用完成轮 metadata；不伪造 Compact checkpoint 或展示选择。
-# 函数用途: 让真实 transcript Compact 有一轮可压缩材料。
+# LLM: 旧历史只写入原 child/main thread；在业务发送前从 canonical 原行取得预期消息，不从摘要输出反推合同。
+# 函数用途: 写入一轮可压缩材料并返回其原生投影，供三宿主摘要覆盖断言使用。
 def append_prior_turn(agent, thread_id):
     for role in ("user", "assistant"):
         agent.conversation_store.messages.append({"thread_id": thread_id, "role": role,
             "content": "核对来源事实" + role, "metadata": {"conversation_request_id": "prior-turn"}})
+    return provider_history_messages_from_rows(agent.conversation_store.messages.recent(thread_id, limit=0))
 
 
 # LLM: 观察真实宿主参数进入 Agent.run 的状态，callback 对原对象的后续更新不能改写入口快照。
@@ -71,18 +73,28 @@ def capture_host_runs(monkeypatch, agent):
 
 
 # LLM: 生产派工入口负责身份和权限；测试只向模型提供普通任务，未把 carrier 或窗口结论塞入 task attrs。
-# 函数用途: 建立带旧轮历史的 canonical child，供原启动链完整执行。
+# 函数用途: 建立 canonical child，并在原启动前固定旧历史的预期投影供摘要覆盖复核。
 def child_task(fixture, *, prior=True):
     task = fixture.agent.subagents.create_run(goal="核对来源后汇报事实", role="worker",
         allowed_tools=[fixture.first.model_spec.name, fixture.second.model_spec.name, "skill_search", "tool_search", "list_tools"])
     if prior:
-        append_prior_turn(fixture.agent, task.agent_thread_id)
+        fixture.prior_messages = append_prior_turn(fixture.agent, task.agent_thread_id)
     return task
 
 
-# LLM: provider 输入来自真实 normal/summary renderer，测试仅比较缓存前缀、原 schema 和 typed 动态卡片。
-# 函数用途: 检验 Compact 与随后模型重试使用同一个展示面，且不会提前读 Skill 正文或执行工具。
-def assert_retained_provider_surface(fixture, *, empty=False, required=False):
+# LLM: 预期历史在业务前由 canonical store 冻结；backend.generate 的 messages 尚未由 provider builder 追加独立 prompt，须完整比较而非剥掉末行。
+# 函数用途: 核对 F6 摘要只覆盖原主请求连续历史，角色、正文和顺序不丢，当前卡片不能越界。
+def assert_covered_prior_history(summary_kwargs, expected_history, *, main_messages):
+    expected = list(expected_history)
+    assert expected and summary_kwargs["messages"] == expected
+    assert main_messages[:len(expected)] == expected
+    assert "# Recommended Tools" not in str(summary_kwargs["messages"])
+    assert "BODY-ONLY" not in str(summary_kwargs["messages"])
+
+
+# LLM: provider 输入来自真实 renderer；未启用历史前缀的摘要默认严格核卡片，F6 调用显式按 covered canonical 前缀检查，禁止补当前卡片。
+# 函数用途: 比较两次业务请求卡片、摘要来源、稳定前缀和原 schema；正文不得泄露，工具不得执行。
+def assert_retained_provider_surface(fixture, *, empty=False, required=False, summary_carries_cards=True):
     backend = fixture.backend
     assert len(backend.model_prompts) == 2 and len(backend.summary_prompts) == 1
     layouts = [prompt_cache_layout(prompt) for prompt in (*backend.model_prompts, *backend.summary_prompts)]
@@ -91,10 +103,18 @@ def assert_retained_provider_surface(fixture, *, empty=False, required=False):
     text_blocks = [[block["text"] for message in kwargs["messages"]
                     for block in message["content"] if block["type"] == "text"]
                    for kwargs in (*backend.model_kwargs, *backend.summary_kwargs)]
-    cards = next(text for text in text_blocks[2] if text.startswith("# Recommended Tools"))
-    assert cards in text_blocks[0] and cards in text_blocks[1]
+    main_cards = [[text for text in blocks if text.startswith("# Recommended Tools")] for blocks in text_blocks[:2]]
+    assert main_cards[0] == main_cards[1] and main_cards[0]
+    if summary_carries_cards:
+        cards = next(text for text in text_blocks[2] if text.startswith("# Recommended Tools"))
+        assert cards in text_blocks[0] and cards in text_blocks[1]
+    else:
+        cards = main_cards[0][-1]
+        assert_covered_prior_history(backend.summary_kwargs[0], fixture.prior_messages,
+            main_messages=backend.model_kwargs[0]["messages"])
     assert ("workspace:method-001" in cards) is (not empty or required)
     assert "method-059" not in layouts[0].stable_prefix and "BODY-ONLY" not in cards
+    assert "BODY-ONLY" not in str((text_blocks, backend.model_prompts, backend.summary_prompts))
     assert fixture.first.calls == fixture.second.calls == 0
 
 
@@ -113,7 +133,8 @@ def test_child_same_turn_reuses_selection_and_exact_provider_surface(capability_
     assert second[1] is not None and second[2] is True
     assert second[1].selected_skill_ids == (() if choice else ("workspace:method-001",))
     assert fixture.agent.conversation_store.threads.load(task.agent_thread_id).compact_generation == 1
-    assert_retained_provider_surface(fixture, empty=bool(choice), required=bool(second[1].required_skill_ids))
+    assert_retained_provider_surface(fixture, empty=bool(choice), required=bool(second[1].required_skill_ids),
+                                     summary_carries_cards=False)
     assert "capability_presentation" not in str(asdict(result))
     assert "capability_presentation" not in str(fixture.agent.subagents.load(task.id).attributes)
 
@@ -174,12 +195,14 @@ def test_child_compact_clears_stale_selection_even_when_connection_recovers(capa
     assert historical_cards[1][0] == historical_cards[0][0]
     assert len(historical_cards[1]) == 2
     assert "workspace:method-001" in cards[0] and "workspace:method-001" not in cards[1]
-    # 摘要复用真实恢复请求，包括原builder的无候选占位段；失效卡片不能复活。
+    # 当前卡片属于未覆盖尾项；摘要只读原历史，失效卡片和恢复后的占位卡片都不能进入摘要。
     summary_cards = [block["text"] for message in fixture.backend.summary_kwargs[0]["messages"]
                      for block in message["content"]
                      if block["type"] == "text" and block["text"].startswith("# Recommended Tools")]
-    assert summary_cards == [cards[1]]
-    assert "workspace:method-001" not in summary_cards[0]
+    assert summary_cards == []
+    assert_covered_prior_history(fixture.backend.summary_kwargs[0], fixture.prior_messages,
+                                main_messages=fixture.backend.model_kwargs[0]["messages"])
+    assert "workspace:method-001" not in str(fixture.backend.summary_kwargs[0]["messages"])
 
 
 def test_child_next_goal_turn_resets_presentation_with_the_same_attempt(capability_host, monkeypatch):

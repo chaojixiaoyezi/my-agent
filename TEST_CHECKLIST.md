@@ -1294,3 +1294,12 @@
 - [x] 本地候选接替、typed 插话丢弃、关闭不伪造成功；用户输入先于过程。
 - [ ] 新包真实 TUI 的原页/观察页/恢复页完整过程和零重复。
 - [ ] 真实取消、Compact、跨 owner、旧客户端并存与提交前断流恢复组合。
+
+## F6/F7 独立组合检查（2026-10-16，待最终发行门）
+
+- [x] 在 R2 准确候选上保留 F4 learning_source/source-CAS、F5 self_map、F2 scopes/metrics 及当前媒体。
+- [x] 定向验证连续前缀、工具配对、当前/历史图、原小窗口分段与容量前置裁决，取消/网络/身份异常不进入容量分路。
+- [x] 验证真实采样绑定与迟到 generation/revision CAS、缺绑定只弃遥测，主/摘要 usage 和排队/物理尝试分开。
+- [ ] 运行 Ruff、文档同步、strict code-size、diff、clean-package；根统一全仓/线上 CI 与最终发行验收。
+
+上述均只使用 pytest 显式临时 my_agent_home；不以本地相同请求表面推断真实 provider 命中，不操作日常服务或网络策略。

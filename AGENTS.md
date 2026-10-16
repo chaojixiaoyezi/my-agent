@@ -78,21 +78,20 @@
 
 自学习功能由 `enable_self_learning` 控制，默认关闭。
 
-用户 2026-09-26 决定：自学习不再逐条人工确认，由确定性的自动闸门代替（设计见 [docs/design/SKILL_AUTO_SUMMARY.md](docs/design/SKILL_AUTO_SUMMARY.md)）。开启后必须遵守：
-- 只写自学目录：自动总结的 Skill 只发布到 `<owner_home>/skills/learned/<name>/`，子代理经验提案只安装 `<owner_home>/skills/lesson-*`；内置、共享、插件、工作区和用户手写的 Skill 一律不碰。
-- 发布前必须全部通过自动闸门：输出合同、重名（含所有来源）、用户删过的名字、数量上限、脱敏、frontmatter 解析往返、`agent_generated` 安全扫描（不 force）。任何一项失败都不写 Skill。
-- 所有权结构化：自学 Skill 只由登记表 `<owner_home>/data/skill_learning/registry.json` 认定；磁盘内容 hash 与登记值不一致即视为用户修改，自动流程永不覆盖。
-- 更新只针对本轮真正读过（`skill_search get` 成功）的自学 Skill。
-- 每次写入都记账（`ledger.jsonl`）并保存版本全文，用户可随时 `my-agent skills learned revert/remove`；删过的名字不再自动新建。
-- 学习材料和账本不存密钥；账本不写 Skill 正文或对话内容。
-- 用户纠正过的内容优先作为学习信号，但不能覆盖用户的长期偏好（偏好归记忆系统）。
+当前规则（2026-10-16 F4/F5 组合候选，未发布）覆盖 2026-09-26 的自动正式发布历史约定：开启后只能自动生成候选，来源可学不等于用户批准。
+- AGENTS 只认当前用户的 `/agents` 预览确认或用户直接编辑；模型、子代理、定时与后台不能签发正式修改权。
+- 普通/群 IM 本人用 `/memory candidates` 查看记忆候选，再 `preview <候选ID>`，复制该预览给出的 `confirm <预览编号>`；原 owner/actor/thread、完整版本与目标 CAS 必须匹配。正式 Memory、working_agreement、lesson/HOT 不因来源资格自动发布。
+- 正式 Skill 沿 main 现有用户确认、版本与 CAS 链，内置、共享、插件、工作区和用户手写内容不由自动流程覆盖。输出合同、重名、数量、脱敏、frontmatter 和安全扫描仍是必要条件，不能替代确认。
+- 自学 Skill 的所有权仍只由 `<owner_home>/data/skill_learning/registry.json` 认定；内容 hash 不符即视为用户修改，版本全文与原 ledger 保留，撤回和删除不新建第二清单。
+- 学习材料与账本不保存密钥；用户纠正可成为候选信号，不能越过正式内容确认或覆盖未确认偏好。自动维护只按显式策略调整推荐和可恢复归档。
+- `self_map` 只聚合原公开读口，不授权、不执行、不解析正文作权限；普通/群/子代理不得借目录扩大范围，unknown/partial 不能当作空。实现与边界见[自我目录](docs/design/SELF_MAP.md)和[规则归属](docs/design/PERSONA_AGENTS_OWNERSHIP.md)。
 
 建议目录：
 
 ```text
 <owner_home>/data/skill_learning/                     # 自动总结 Skill 的请求队列、登记表、账本、版本全文与删除归档
-<owner_home>/skills/learned/<name>/SKILL.md           # 自动总结发布的 Skill（category=learned）
-<owner_home>/data/skill_proposals/<proposal_id>.json  # 子代理经验 Skill 提案（自学习开启时自动走确认链安装到 <owner_home>/skills/lesson-*）；不得改用 learning_drafts，Curator 迁移会清理该名字的目录
+<owner_home>/skills/learned/<name>/SKILL.md           # 用户确认后发布的自学 Skill（category=learned）
+<owner_home>/data/skill_proposals/<proposal_id>.json  # 子代理经验 Skill 提案（经原用户确认后安装到 <owner_home>/skills/lesson-*）；不得改用 learning_drafts，Curator 迁移会清理该名字的目录
 agent_py_agent/skills/                        # 内置 skill，随仓库发布
 ~/.my-agent/skills/                           # 用户长期 skill，默认不进仓库
 <workspace>/.agent/skills/                    # 项目专属 skill

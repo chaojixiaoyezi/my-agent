@@ -1,3 +1,10 @@
+## 2026-10-16 F4/F5 来源与可见范围（组合候选，未发布）
+
+- 学习来源由可信宿主沿子代理/孙代理 lineage 继承和标记，unknown、外部资料与自动化不升级成用户本人；来源资格只生成候选，不授子代理写 AGENTS 或批准正式记忆/Skill 的权限。
+- F5 discovery 默认集合复用 main 父级真实工具面与角色/owner 上界交集，self_map 查询使用本次精确 child thread 和冻结调用范围，不回退父目录或管理员模型/安装库存。
+- list_tools/tool_search 的渐进 schema、当前不可用原因、父级显式媒体授权、凭据引用和群 HostActor 仍是原链；目录导航不授执行权，缺范围或未观测返回 unknown/partial。
+- 默认自学习关闭、正式 Skill 确认/CAS、原取消与未知副作用语义保持。源码分线与非作者证据已有，最终组合和真实子入口待根验收，见[TESTS](../../../TESTS.md)、[自我目录](../../design/SELF_MAP.md)及[规则来源](../../design/PERSONA_AGENTS_OWNERSHIP.md)。
+
 2026-10-15 图片转交源码已完成：同源HostMessageContext沿原SessionTask/TaskLink恢复，子孙只得canonical子档授权子集；开关关闭创建前拒绝，原输入GC仍可恢复。25专项及12文件327项通过，实际真实视觉/飞书另验，见[图片合同](../../design/FEISHU_NATIVE_IMAGES.md)。
 
 2026-10-14：子代理默认工具目录改为父级真实集合与角色/owner上界交集，补正常自查和已授权业务工具；leaf不获得宿主管理或继续派工。本人取消免可选确认，真实取消链同时关闭精确输入依赖，不能因待凭据挡住父任务结算。相关focused与发布见[实施合同](../../design/IM_UNATTENDED_IMPLEMENTATION.md)。

@@ -50,6 +50,15 @@ def write_runtime_fact_start_if_enabled(agent: object, params: object) -> None:
         _record_live_archive_error(params, exc, context="live_archive.runtime_fact.start")
 
 
+# LLM: 只提取宿主运行属性中的线程编号；缺失保持空，不把session或工具参数变成来源权威。
+# 函数用途: 给实时归档传递可供后续精确核对的线程身份。
+def archive_thread_id(params: object) -> str:
+    attrs = getattr(params, "task_attributes", None)
+    return str(attrs.get("conversation_thread_id") or "") if isinstance(attrs, dict) else ""
+
+
+# LLM: 实时助手归档只使用宿主thread/request身份；保持save开关及归档去重，不从模型参数推导线程。
+# 函数用途: 保存带真实宿主会话身份的助手工具轮。
 def archive_assistant_tool_round_if_enabled(
     agent: object,
     params: object,
@@ -66,6 +75,7 @@ def archive_assistant_tool_round_if_enabled(
                 ArchiveAssistantToolRoundParams(
                     root=root,
                     session_id=_session_id(agent),
+                    thread_id=archive_thread_id(params),
                     request_id=str(getattr(params, "request_id", "") or ""),
                     run_id=str(getattr(params, "run_id", "") or ""),
                     task_id=str(getattr(params, "task_id", "") or ""),
@@ -82,7 +92,7 @@ def archive_assistant_tool_round_if_enabled(
 
 
 # LLM: 完整档案仍受save控制，关闭时只调用同owner最小审计投影；修改需同步后台与脱敏回归。
-# 函数用途: 归档真实工具事实，save=False也保留操作和供应商数值诊断，不复制参数/输出正文。
+# 函数用途: 归档真实工具及宿主thread身份；save=False仍保留原最小审计，不复制参数/输出正文。
 def archive_tool_call_if_enabled(
     agent: object,
     params: object,
@@ -102,6 +112,7 @@ def archive_tool_call_if_enabled(
                 ArchiveLiveToolCallParams(
                     root=root,
                     session_id=_session_id(agent),
+                    thread_id=archive_thread_id(params),
                     request_id=str(getattr(params, "request_id", "") or ""),
                     run_id=str(getattr(params, "run_id", "") or ""),
                     task_id=str(getattr(params, "task_id", "") or ""),

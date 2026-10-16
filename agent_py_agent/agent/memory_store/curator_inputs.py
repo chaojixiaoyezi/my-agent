@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,8 @@ class CuratorMessageInput:
     content_preview: str
     content_hash: str
     metadata: dict[str, object]
+    # LLM: 消息所属线程的宿主来源投影（收集时读取，供候选来源判定用）；缺字段的旧线程为空（未知）。
+    thread_source: dict[str, object] = field(default_factory=dict)
 
     # LLM: Runtime IDs come only from structured ConversationStore metadata; the Gateway's
     # canonical gateway_request_id is normalized to request_id without inferring from prose.
@@ -112,6 +114,8 @@ class CuratorAuditInput:
     artifact_hash: str
     artifact_size_bytes: int
     preview: str
+    # 宿主在收集时冻结，不进入ref/to_model，不允许提取模型提交该字段。
+    learning_source: dict[str, object] = field(default_factory=dict)
 
     # LLM: Event type plus both tool identity fields come from the owner audit row; an
     # assistant round with status=ok must never become a tool reference merely by ID lookup.
@@ -410,6 +414,7 @@ def _collect_messages(
             preview_limit = min(_MESSAGE_PREVIEW_CHARS, max(200, remaining - 250))
             preview = content[:preview_limit]
             metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+            thread_source = getattr(thread, "learning_source", None)
             item = CuratorMessageInput(
                 message_id=str(entry.message_id),
                 thread_id=str(entry.thread_id),
@@ -420,6 +425,7 @@ def _collect_messages(
                 content_preview=preview,
                 content_hash=_content_hash(content),
                 metadata=dict(metadata),
+                thread_source=dict(thread_source) if isinstance(thread_source, dict) else {},
             )
             item_chars = len(json.dumps(item.to_model(), ensure_ascii=False))
             if selected and used_chars + item_chars > max_chars:

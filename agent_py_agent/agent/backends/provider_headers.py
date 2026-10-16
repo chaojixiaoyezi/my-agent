@@ -1,5 +1,5 @@
 # LLM: 请求头仅由显式配置和宿主会话身份生成；禁止覆盖认证/传输边界，主子及辅助请求复用此实现。
-# 模块用途: 校验自定义请求头并附加稳定的匿名会话编号，不复制其它客户端身份。
+# 模块用途: 校验请求头，绑定宿主来源的匿名会话编号与排队 owner；身份不赋予权限、不复制其它客户端。
 from __future__ import annotations
 
 import hashlib
@@ -102,16 +102,40 @@ def validate_session_header(value: object) -> str:
     return value
 
 
-# LLM: owner/thread 是宿主精确事实，哈希用于不向外泄露内部身份；同 thread 多轮/Compact 复用，退出必恢复。
-# 函数用途: 让并发模型请求各自带上自己的稳定会话编号，不改共享 backend。
+# LLM: 宿主身份决定归属；会话哈希含 thread，公平标签只含 owner，防止多开会话抢占轮转。
+#   空身份进入未知桶，嵌套与 context 复制继承归属；退出恢复，不改变权限或请求头。
+# 函数用途: 同时绑定稳定会话编号和匿名排队 owner，不改共享 backend。
 @contextmanager
 def provider_session_scope(owner: tuple[str, ...], thread_id: str):
+    from .request_scope import provider_owner_scope
+
     identity = hashlib.sha256(json.dumps([*owner, thread_id], ensure_ascii=True).encode()).hexdigest() if thread_id else ""
+    owner_key = _opaque_owner_key(owner)
     token = _SESSION.set(identity)
     try:
-        yield
+        with provider_owner_scope(owner_key):
+            yield
     finally:
         _SESSION.reset(token)
+
+
+# LLM: 标签只来自已解析 agent 的 home_paths，不能重读原始通道 user_id；线程入口显式绑定，退出复位。
+# 函数用途: 给后台派工和 runner 线程安装同一 owner 公平标签，不改会话、权限或共享后端。
+@contextmanager
+def provider_agent_owner_scope(agent: object):
+    from .request_scope import provider_owner_scope
+
+    home = getattr(agent, "home_paths", None)
+    owner = tuple(str(getattr(home, key, "")) for key in ("owner_provider", "owner_kind", "owner_id"))
+    with provider_owner_scope(_opaque_owner_key(owner)):
+        yield
+
+
+
+# LLM: 与会话无关的 owner 哈希只有这一处算法；不透明标签不是鉴权结果，缺身份进未知桶。
+# 函数用途: 将宿主 owner 三元组转为匿名公平标签，不存正文或凭据。
+def _opaque_owner_key(owner: tuple[str, ...]) -> str:
+    return hashlib.sha256(json.dumps(owner, ensure_ascii=True).encode()).hexdigest() if any(owner) else ""
 
 
 # LLM: 优先使用宿主 agent_thread_id，子代理不借父 thread；无持久身份的一次独立调用只生成一次临时会话。

@@ -1,4 +1,5 @@
-
+# LLM: 上下文合同投影同一 run 的冻结事实；工具清单存为 owner 内容寻址引用，不能产生第二执行权威。
+# 模块用途: 构造上下文包的范围、工具、产物与自检字段，支持新引用及旧快照读取。
 from __future__ import annotations
 
 import os
@@ -7,6 +8,7 @@ from typing import Any
 
 from ..common.value_parsing import text_value as _text
 from ..contracts.tool_manifest_contract import tool_manifest_payload
+from .context_bundle_tool_manifest import build_tool_manifest_summary
 
 # 主上下文捆的最大提示段 1600 字符：够放身份/范围/契约摘要，又不至于挤占实际对话预算。
 MAIN_CONTEXT_BUNDLE_PROMPT_MAX_CHARS = 1600
@@ -18,12 +20,14 @@ MAIN_CONTEXT_BUNDLE_REQUIRED_FIELDS = [
     "acceptance_contract",
     "self_check",
 ]
+# LLM: request.save 是快照与工具清单共同的落盘控制；不保存时所有合同构造必须无写入。
+# 函数用途: 从原运行事实构造上下文合同段，保存时复用 owner 工具清单。
 def main_context_contract_sections(request: Any, home_paths: Any | None) -> dict[str, Any]:
     return {
         "schema_policy": _schema_policy(),
         "owner_model": _owner_model(request, home_paths),
         "run_scope": _run_scope(request),
-        "tool_manifest": _tool_manifest(request),
+        "tool_manifest": _tool_manifest(request, home_paths),
         "artifact_refs": _artifact_refs(request),
         "acceptance_contract": _acceptance_contract(request),
         "prompt_budget": _prompt_budget(0),
@@ -78,7 +82,11 @@ def _run_scope(request: Any) -> dict[str, Any]:
     }
 
 
-def _tool_manifest(request: Any) -> dict[str, Any]:
+# LLM: 快照只存摘要（小字段 + manifest_sha256 + manifest_ref）；只有保存快照（request.save）时才把
+#   完整清单按内容哈希写入本用户目录，同一工具集跨请求复用同一个文件，不保存则没有落盘副作用。
+#   需要完整清单的读者走 context_bundle_tool_manifest.load_bundle_tool_manifest（传入快照文件自己的路径）。
+# 函数用途: 生成快照的 tool_manifest 段：投影本 run 的不可变工具快照，并按需把完整清单落到本用户目录。
+def _tool_manifest(request: Any, home_paths: Any | None) -> dict[str, Any]:
     from ..tooling.models import ToolRuntimeSnapshot
 
     snapshot = getattr(request, "tool_runtime_snapshot", None)
@@ -92,13 +100,14 @@ def _tool_manifest(request: Any) -> dict[str, Any]:
             owner_type=_owner_type(request),
         )
     payload = tool_manifest_payload(snapshot)
-    payload["tool_runtimes"] = payload["tools"]
     payload["tool_load_errors"] = [
         dict(item)
         for item in _sequence(getattr(request, "tool_runtime_errors", ()))
         if isinstance(item, dict)
     ]
-    return payload
+    return build_tool_manifest_summary(
+        payload, home_paths, save=bool(getattr(request, "save", True))
+    )
 
 
 def _artifact_refs(request: Any) -> dict[str, Any]:

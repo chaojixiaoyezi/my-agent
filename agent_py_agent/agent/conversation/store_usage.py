@@ -1,5 +1,5 @@
 # LLM: 模型费用只从原 canonical 账本累计；快照身份绑定同范围摘要，迟到物理事实只补增量，不改旧账。
-# 模块用途: 保存模型消耗及数字显示投影，供 finalizer、Compact 和 TUI 使用，锁与事件格式保持原合同。
+# 模块用途: 保存模型消耗及数字投影；上下文在原锁内校验压缩及模型选择版本，不改费用合同。
 from __future__ import annotations
 
 import hashlib
@@ -145,8 +145,8 @@ class ModelUsageStore:
 
         return self._update_thread_atomic(thread_id, apply)
 
-    # LLM: 显示快照只接受纯数字协议；generation CAS 防止压缩后写回旧数，不更新会话活跃时间或聊天历史。
-    # 函数用途: 原子保存当前主/子代理最近一次调用前的上下文，失败或旧代不能覆盖当前值。
+    # LLM: 显示快照只接受原公开协议；compact及模型选择代次防止旧数回写；代次存在原字段中，不另建状态或改活跃时间。
+    # 函数用途: 原子保存当前主/子代理的上下文估算及选择绑定，失败或旧代不覆盖当前值。
     def update_context_usage(
         self,
         thread_id: str,
@@ -158,13 +158,16 @@ class ModelUsageStore:
 
         public = public_context_usage(usage)
 
-        # LLM: CAS 在原线程锁内核对代次；迟到遥测不能覆盖压缩后的新一代。
-        # 函数用途: 只合并当前代数值显示，不刷新活跃时间。
+        # LLM: 两种代次在原线程锁内核对；兼容旧调用未带选择预期，但新调用必须绑定采样时的模型选择。
+        # 函数用途: 只合并同代数值显示和其模型选择绑定，不刷新活跃时间。
         def apply(thread: ConversationThread) -> ConversationThread:
-            if not public or thread.compact_generation != expected_compact_generation:
+            revision = usage.get("model_selection_revision", thread.model_selection_revision)
+            if (not public or thread.compact_generation != expected_compact_generation
+                    or type(revision) is not int or revision != thread.model_selection_revision):
                 return thread
             return replace(thread, model_context_usage={
                 **public, "compact_generation": expected_compact_generation,
+                "model_selection_revision": revision,
             })
 
         return self._update_thread_atomic(thread_id, apply)

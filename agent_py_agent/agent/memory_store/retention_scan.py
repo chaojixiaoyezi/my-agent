@@ -32,6 +32,11 @@ _SUBAGENT_SCRATCH_PATHS = (
     Path("compactions"),
     Path("artifacts") / "tool_outputs",
 )
+# 口径与 tool_output_days_after_terminal / trash_days 一致；用户嫌参数多，所以写代码常量、不新增配置项。
+# 快照与工具清单的保留期：30 天（诊断和人工排查够用）。
+_CONTEXT_BUNDLE_SNAPSHOT_DAYS = 30
+# 日期目录里的 latest 副本永远不动：它们是"最近一份快照"的入口，删了会让排查没有起点。
+_CONTEXT_BUNDLE_LATEST_PREFIX = "latest_context_bundle"
 
 
 # LLM: plan 是纯读取；任一 policy/state/candidate ledger 损坏都会留 error，apply 必须拒绝该计划。
@@ -97,8 +102,8 @@ class _RetentionScanContext:
         return frozenset(self.policy.legal_hold_task_ids)
 
 
-# LLM: Every retention category contributes proposals to one plan; none of these scanners mutate disk.
-# 函数用途: 按任务保护关系组合会话、候选、运行记录和回收站的清理动作。
+# LLM: 所有类别只为同一 retention 计划提案；快照和清单必须同批计算引用，不得另写清理状态。
+# 函数用途: 按任务保护关系组合会话、候选、运行记录、回收站与过期快照/工具清单的清理动作。
 def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
     task_actions, selected_task_roots = _task_actions(
         home=context.home,
@@ -110,6 +115,7 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
     actions = list(task_actions)
     actions.extend(_protected_runtime_actions(context, selected_task_roots))
     actions.extend(_aged_file_actions(context, selected_task_roots))
+    actions.extend(_context_bundle_actions(context))
     actions.extend(
         _trash_actions(
             home=context.home,
@@ -191,6 +197,193 @@ def _aged_file_actions(
             )
         )
     return actions
+
+
+# LLM: 快照清理只接进现有 retention 流程（回收站 / legal hold / 执行前复核 / 报告都复用），不另造清理器。
+#   快照与工具清单一起规划：清单"还有没有人用"只由本轮不会被移走的剩余 .json 快照摘要里的
+#   manifest_sha256（结构化字段）决定。先删快照、再按剩余引用删清单的次序由类别名保证——计划最后按
+#   (category, path) 排序，context_bundle_snapshot 排在 tool_manifest 前面，执行时快照先走。
+# 函数用途: 规划过期快照与无人引用的旧工具清单的回收动作（两者都走可恢复回收站）。
+def _context_bundle_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
+    base = Path(context.home.owner_home_dir) / "memory_archive" / "snapshots"
+    actions, kept = _snapshot_retention_actions(context, base / "context_bundles")
+    actions.extend(_manifest_retention_actions(context, base / "tool_manifests", kept))
+    return actions
+
+
+# LLM: 快照范围 = memory_archive/snapshots/context_bundles/<日期>/ 下的 <请求>.json 与 .md；latest 副本
+#   永不参与删除（但它的引用照算）。30 天内改过的都保留，进行中回合的快照天然安全；命中 30 天的交给
+#   trash_file 移进回收站，不做永久删除。清单引用只从"不会被移走的剩余 .json"里读，被移走的那批不算。
+# 函数用途: 扫描过期快照文件，返回动作与剩余 .json 快照（供清单引用判断）。
+def _snapshot_retention_actions(
+    context: _RetentionScanContext,
+    root: Path,
+) -> tuple[list[MemoryRetentionAction], tuple[Path, ...]]:
+    if not root.exists():
+        return [], ()
+    cutoff = context.now.timestamp() - _CONTEXT_BUNDLE_SNAPSHOT_DAYS * _DAY_SECONDS
+    actions: list[MemoryRetentionAction] = []
+    kept: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            context.errors.append(_symlink_error(path))
+            continue
+        if path.is_dir() or path.suffix not in {".json", ".md"} or not path.is_file():
+            continue
+        if _keep_snapshot(context, kept, path, cutoff):
+            continue
+        actions.append(
+            _action(
+                category="context_bundle_snapshot",
+                operation="trash_file",
+                path=path,
+                reason=f"older_than_{_CONTEXT_BUNDLE_SNAPSHOT_DAYS}_days",
+                destination=_trash_destination(
+                    context.home,
+                    category="context_bundle_snapshot",
+                    path=path,
+                    now=context.now,
+                ),
+                proof=_ActionProof(
+                    source_fingerprint=file_fingerprint(path),
+                    cutoff_timestamp=cutoff,
+                ),
+            )
+        )
+    return actions, tuple(kept)
+
+
+# LLM: latest、30 天内修改和显式 legal_hold_task_ids 的快照必须保留；Markdown 通过同名 JSON 的 scope 关联。
+#   保留的 .json 要作为"剩余快照"参与清单引用判断；.md 不含结构化字段，不参与。
+# 函数用途: 判断一个快照文件是否保留；是的话把 .json 记入引用来源并返回 True。
+def _keep_snapshot(
+    context: _RetentionScanContext, kept: list[Path], path: Path, cutoff: float
+) -> bool:
+    keep = (
+        path.name.startswith(_CONTEXT_BUNDLE_LATEST_PREFIX)
+        or _mtime(path) >= cutoff
+        or _snapshot_task_held(context, path)
+    )
+    if keep and path.suffix == ".json":
+        kept.append(path)
+    return keep
+
+
+# LLM: 任务保护只读快照 scope.task_id 与 typed policy 的精确交集；Markdown 不解析正文，读取同名 JSON。
+#   保护策略存在而快照无法读取时关闭式保留并报错，不让损坏记录绕过 hold。
+# 函数用途: 判断某个旧快照是否属于显式禁止清理的任务。
+def _snapshot_task_held(context: _RetentionScanContext, path: Path) -> bool:
+    if not context.held_task_ids:
+        return False
+    metadata_path = path.with_suffix(".json")
+    report = read_json_object_report(metadata_path, context="memory_retention.context_bundle_hold")
+    if report.load_error is not None:
+        context.errors.append(MemoryRetentionError(
+            "MEMORY_RETENTION_CONTEXT_BUNDLE_INVALID", str(metadata_path),
+            "snapshot task scope is unreadable; legal hold cannot be excluded",
+        ))
+        return True
+    scope = report.payload.get("scope")
+    task_id = scope.get("task_id") if isinstance(scope, dict) else None
+    return isinstance(task_id, str) and task_id in context.held_task_ids
+
+
+# LLM: 清单同时满足"修改时间超过 30 天"和"没有任何剩余快照引用"才回收；读不懂任何一份剩余快照时
+#   算不出完整引用集合，本轮不动任何清单（关闭式失败，只报告结构化错误）。
+# 函数用途: 规划无人引用的旧工具清单回收动作。
+def _manifest_retention_actions(
+    context: _RetentionScanContext,
+    root: Path,
+    kept: tuple[Path, ...],
+) -> list[MemoryRetentionAction]:
+    if not root.exists():
+        return []
+    referenced, complete = _referenced_manifest_shas(kept, context.errors)
+    if not complete:
+        return []
+    cutoff = context.now.timestamp() - _CONTEXT_BUNDLE_SNAPSHOT_DAYS * _DAY_SECONDS
+    actions: list[MemoryRetentionAction] = []
+    for path in sorted(root.glob("*.json")):
+        if path.is_symlink():
+            context.errors.append(_symlink_error(path))
+            continue
+        if not path.is_file() or path.stem in referenced:
+            continue
+        if _mtime(path) >= cutoff:
+            continue
+        actions.append(
+            _action(
+                category="tool_manifest",
+                operation="trash_file",
+                path=path,
+                reason=f"unreferenced_older_than_{_CONTEXT_BUNDLE_SNAPSHOT_DAYS}_days",
+                destination=_trash_destination(
+                    context.home,
+                    category="tool_manifest",
+                    path=path,
+                    now=context.now,
+                ),
+                proof=_ActionProof(
+                    source_fingerprint=file_fingerprint(path),
+                    cutoff_timestamp=cutoff,
+                ),
+            )
+        )
+    return actions
+
+
+# LLM: 引用只认结构化字段：manifest_sha256 与 manifest_ref 都非空（与读取端一致——ref 空表示未持久化，
+#   读取端根本不会碰磁盘）；不按文件名猜引用。任一份剩余快照读不懂时返回 complete=False，调用方关闭式跳过。
+# 函数用途: 汇总剩余快照引用的清单 sha 集合与"引用集合是否完整"。
+def _referenced_manifest_shas(
+    kept: tuple[Path, ...],
+    errors: list[MemoryRetentionError],
+) -> tuple[frozenset[str], bool]:
+    shas: set[str] = set()
+    complete = True
+    for path in kept:
+        report = read_json_object_report(path, context="memory_retention.context_bundle_snapshot")
+        if report.load_error is not None:
+            errors.append(
+                MemoryRetentionError(
+                    "MEMORY_RETENTION_CONTEXT_BUNDLE_INVALID",
+                    str(path),
+                    "snapshot summary is unreadable; tool manifests stay untouched this run",
+                )
+            )
+            complete = False
+            continue
+        manifest = report.payload.get("tool_manifest")
+        if not isinstance(manifest, dict):
+            continue
+        sha = str(manifest.get("manifest_sha256") or "").strip()
+        ref = str(manifest.get("manifest_ref") or "").strip()
+        if sha and ref:
+            shas.add(sha)
+    return frozenset(shas), complete
+
+
+# LLM: 执行端在快照动作结束后重读当前引用；返回值仅限本次 apply 使用，不持久化为第二份权威索引。
+# 函数用途: 汇总磁盘上仍存在的快照引用，保护移动失败、规划后变化或新增的快照所用清单。
+def current_tool_manifest_references(home: object) -> tuple[frozenset[str], bool]:
+    root = Path(home.owner_home_dir) / "memory_archive" / "snapshots" / "context_bundles"
+    if not root.exists():
+        return frozenset(), True
+    paths = tuple(root.rglob("*.json"))
+    if root.is_symlink() or any(path.is_symlink() for path in paths):
+        return frozenset(), False
+    errors: list[MemoryRetentionError] = []
+    return _referenced_manifest_shas(paths, errors)
+
+
+# LLM: 符号链接错误采用统一机器码；不读取链接目标，也不靠错误文案决定后续动作。
+# 函数用途: 构造一条"符号链接被跳过"的结构化错误（retention 从不跟随符号链接）。
+def _symlink_error(path: Path) -> MemoryRetentionError:
+    return MemoryRetentionError(
+        "MEMORY_RETENTION_SYMLINK_SKIPPED",
+        str(path),
+        "retention never follows symbolic links",
+    )
 
 
 # LLM: runtime 只接受当前 schema；旧 v1 key 由 MemoryMigrationService 一次性转换。

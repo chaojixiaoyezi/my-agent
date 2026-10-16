@@ -67,7 +67,7 @@ provider capabilities/target validator 和唯一 `DeliveryService`。
 
 ### `io/`
 
-底层本地 I/O 原语层。当前放带锁追加 JSONL。
+底层本地 I/O 原语层。包含带锁追加 JSONL、请求局部 SQLite 连接作用域/借用租期/游标回收及纯 schema 声明摘要；数据库业务迁移仍留各库模块。
 
 允许：无业务含义的文件原语，比如 locked append、atomic write、safe read。
 

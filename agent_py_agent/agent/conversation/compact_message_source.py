@@ -1,5 +1,5 @@
 # LLM: 原Compact的临时provider数组投影；factory必须重放同一冻结来源，非持久历史/覆盖权威，Auxiliary运输仍只接完整列表。
-# 模块用途: 按原JSON参数编码历史数组并复用唯一token公式，超大来源直接进入原字符分段器。
+# 模块用途: 按原 JSON 编码重放历史并共用 token 公式；已证明的主前缀不得瘦身或分段。
 from __future__ import annotations
 
 import json
@@ -20,10 +20,11 @@ SHRINK_KEEP_RECENT_TOOL_RESULT_COUNT = 2
 
 
 # LLM: factory是同一冻结来源的准备层投影，可读盘且须关闭上游；容器不缓存正文，不能进入纯请求投影合同。
-# 类用途: 携带可重复读取的原生消息数组，按需物化单请求或流式编码完整摘要来源。
+# 类用途: 携带可重复读取的消息数组及主前缀证明标记，按需物化或流式编码而不改写来源。
 @dataclass(frozen=True)
 class CompactMessageSource:
     factory: Callable[[], Iterable[dict[str, Any]]]
+    preserve_prefix: bool = False
 
     # LLM: 不缓存已读消息，失败/提前退出关闭上游；调用者不能把一次迭代器当作第二次重放。
     # 函数用途: 顺序读取一遍独立provider消息。

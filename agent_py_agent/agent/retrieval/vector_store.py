@@ -1,3 +1,5 @@
+# LLM: 向量身份和正式记录删除分别守原合同；损坏库不能被当作空库报告删除成功，保留唯一原子存储。
+# 模块用途: 保存并检索正式向量，为精确删除提供可确认的清理结果。
 """暴力 cosine 向量库(Phase 2,纯 Python,零外部依赖)。
 
 参考实现 用 Milvus 做向量库;但 my-agent 面向个人/小团队,记忆量级是百~千条——**暴力遍历算
@@ -287,11 +289,13 @@ class VectorStore:
         return len(items)
 
     # LLM: 删除只去掉精确 id，保留快照头的身份与维度（删向量不引入不可信数据），也不做身份裁决——硬删除的隐私清理
-    #   不能被身份失配挡住。id 不存在返回 False 且不写盘。
+    #   不能被身份失配挡住。坏文件必须报告清理未确认，不能当成不存在；精确 id 不存在才返回 False 且不写盘。
     # 函数用途: 删除一条向量并原子落盘。
     def remove(self, id: str) -> bool:
         with self._lock, locked_json_path(self._path):
             self._refresh()
+            if not self._readable:
+                raise VectorIdentityError("VECTOR_STORE_UNREADABLE")
             if id not in self._items:
                 return False
             items = {key: value for key, value in self._items.items() if key != id}

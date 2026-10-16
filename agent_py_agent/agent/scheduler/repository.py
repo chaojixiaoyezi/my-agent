@@ -1,4 +1,5 @@
 # LLM: scheduler 原 owner store 是唯一任务权威；只读完整快照不取写锁，变更仍经 quota→原锁→版本/claim CAS。
+#   便宜检查只缓存有界内容投影，时间条件每拍重算；关闭时保留原完整字节复核和waiting缓存。
 # 模块用途: 持久化监控、运行与历史，确保并发查询、崩溃恢复和正常收尾共用原 owner 账本。
 from __future__ import annotations
 
@@ -23,11 +24,12 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.heartbeat import process_start_time, start_time_relation
 from ..common.json_io import (
     append_private_jsonl_records,
@@ -35,7 +37,7 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import ensure_private_dir
+from ..common.nofollow_fs import ensure_private_dir, regular_file_exists_beneath
 from ..runtime_errors import runtime_error_report
 from ..user_space.owner_quota import (
     OwnerQuotaAdmission,
@@ -96,6 +98,32 @@ _WAITING_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _WaitingRunsPr
 _WAITING_PROJECTION_LOCK = threading.Lock()
 # 结构化可观测计数:命中/回退/守卫。测试与现场体检用它证明缓存真的在生效、且异常时确实回退。
 _WAITING_PROJECTION_STATS: dict[str, int] = {"hit": 0, "miss": 0, "guard": 0, "skip": 0}
+# 开关打开时的三切片投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）：测试机 owner 池上限 600，
+# 但每拍真正被后台 worker 检查的活跃 owner 受全局 8 个并发 worker 约束、轮转窗口远小于池上限；
+# 单条投影只含 waiting 完整行、queued 轻量键与 due 键（不保留 queued 完整记录），被逐出的
+# owner 下次整读，只变慢不出错。
+_STORE_PROJECTION_MAX_ENTRIES_COUNT = 64
+# 单条三切片投影最多 512 行（waiting + queued 键 + due 键合计）：行数太多说明账本异常，直接视为需要全量重读。
+_STORE_PROJECTION_MAX_ROWS_COUNT = 512
+# 单条三切片投影的载荷字节近似上限（waiting 行字符串 + 轻量键固定开销）：行数上限挡不住
+# "少量超大行"，超限不缓存（下次全读，只慢不错）。
+_STORE_PROJECTION_MAX_BYTES_COUNT = 256 * 1024
+# 便宜检查（background_tick_cheap_checks）下，距最近一次全量核验（读字节+摘要）超过这个秒数
+# 就无条件重核一次：防时间戳精度与极端竞态。命中复用的条目不会刷新这个时间。
+_STORE_PROJECTION_FULL_READ_INTERVAL_SECONDS = 60.0
+_STORE_PROJECTION_CACHE: OrderedDict[tuple[str, str, str, str], _StoreProjection] = (
+    OrderedDict()
+)
+_STORE_PROJECTION_LOCK = threading.Lock()
+# 结构化可观测计数:命中/回退/守卫/便宜命中。测试与现场体检用它证明缓存真的在生效、且异常时确实回退。
+_STORE_PROJECTION_STATS: dict[str, int] = {
+    "hit": 0,
+    "miss": 0,
+    "guard": 0,
+    "skip": 0,
+    "cheap_hit": 0,
+}
+
 
 
 # LLM: 对外只暴露稳定类别和安全诊断字段，不要求调用方解析文案或向用户展示私有路径。
@@ -413,6 +441,7 @@ class _SchedulerJobOperations:
 
 # LLM: run 的预留、领取与终态只写原 owner 仓库；错过周期和退避不创建第二个执行者，恢复仍服从原 claim CAS。
 # 类用途: 管理定时运行的单次身份、实际开工和结果历史，修改时联测过期与交付重试。
+# LLM: 可选内容投影只排除不存在的候选，规则与取消仍在原写事务重核，不缓存时间结论。
 class _SchedulerRunOperations:
     """Public durable run reservation, claim, completion, and history operations."""
 
@@ -442,15 +471,18 @@ class _SchedulerRunOperations:
 
     # LLM: 到期检查沿原锁读取 job，按 skip/coalesce 预留最多一次；未来周期退避只延迟新 run，不重放旧执行。
     # 函数用途: 为已到期且不重叠的计划预留原 run，记录错过周期并推进下次自然时间。
-    # LLM: 按独立 rule_id 检查活动运行，原 owner 锁和 due 投影保持。
+    # LLM: 按独立rule_id检查活动运行；开关开启只用投影排除没有到期键的情形，候选仍进原owner锁实时重核。
     # 函数用途: 按独立 rule_id 检查活动运行，原 owner 锁和 due 投影保持。 修改需同步原控制、恢复或权限测试。
     def reserve_due_runs(
         self,
         *,
         now: float | None = None,
         limit: int = 32,
+        cheap_checks: bool = False,
     ) -> list[dict[str, object]]:
         current = _now(now)
+        if cheap_checks and not self._cheap_due_candidates_exist(now=current):
+            return []
         reserved: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
         with self._mutation_scope() as (store, admission):
@@ -513,8 +545,14 @@ class _SchedulerRunOperations:
                 self._write_store_unlocked(store, admission, history_records=skipped)
         return deepcopy(reserved)
 
-    def queued_runs(self, *, now: float | None = None, limit: int = 64) -> list[dict[str, object]]:
+    # LLM: 便宜路径只排除仍在未来的轻量键；候选必须重读完整原运行，取消、事件代次与投递由原消费者核验。
+    # 函数用途: 按当前时间列出排队运行，未到期的空轮可省去完整账本读取。
+    def queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
         current = _now(now)
+        if cheap_checks:
+            hit = self._cheap_projection_hit()
+            if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
+                return []
         store = self._store_snapshot()
         rows: list[dict[str, object]] = []
         for raw in store["runs"].values():
@@ -795,13 +833,17 @@ class _SchedulerRunOperations:
         return active_jobs, paused_jobs, len(runs), errors + run_errors, schedule_kinds
 
 
-# LLM: Waiting is a claim-free durable phase, separate from queued/claimed/running process work.
-# Keep every transition CAS-backed through the same owner store and exact scheduler run id.
+# LLM: waiting是无进程claim的持久阶段；可选缓存仅提供当前内容投影，每条终态仍回原owner账本按准确run做CAS。
 # 类用途: 管理模型工作片结束后、根任务仍在继续时的等待、重启对账读取和最终结算。
 class _SchedulerWaitingRunOperations:
-    # LLM: waiting 只读投影按本次现读签名和摘要复核；不取写锁，返回 deepcopy 不允许调用方改缓存状态。
+    # LLM: 默认按现读签名和摘要复核；开启后才用2秒可信窗口/60秒重读的有界内容投影，读取仍不取写锁。
     # 函数用途: 读取等待任务终态的执行，缓存未变账本的解析结果，不创建锁文件或等待写方。
-    def waiting_runs(self) -> tuple[list[dict[str, object]], list[str]]:
+    def waiting_runs(self, *, cheap_checks: bool = False) -> tuple[list[dict[str, object]], list[str]]:
+        if cheap_checks:
+            hit = self._cheap_projection_hit()
+            if hit is None:
+                hit = self._store_projection_unlocked(_probe_store_bytes(self.store_path))
+            return [deepcopy(row) for row in hit.waiting_rows], list(hit.errors)
         probe = _probe_store_bytes(self.store_path)
         projection = self._waiting_runs_projection_unlocked(probe)
         return [deepcopy(row) for row in projection.rows], list(projection.errors)
@@ -1264,7 +1306,137 @@ class _SchedulerRecordParsing:
 
 
 
+# LLM: 此mixin只服务开启的内容投影；关闭路径保留主线原有waiting缓存、完整字节摘要与无写锁快照。
+#   三类切片都不缓存now判断，写方仍使用原owner锁、规范账本与CAS。
+# 类用途: 开关打开时的 store.json 三切片投影缓存（命中判定、全量核验与 due 判据）。
+class _SchedulerProjectionSupport:
+    """store.json 三切片投影缓存：全量核验、便宜命中与 due 判据（E10 一期，仅开关打开时使用）。"""
+
+    # LLM: 投影只绑定原子快照字节与现读身份；不可恢复来源旧写锁，异常仍走原读取错误。
+    # 函数用途: 复核完整投影或解析本次账本，供开关开启的三处读取共用。
+    def _store_projection_unlocked(self, probe: _StoreBytesProbe | None) -> _StoreProjection:
+        """只读复核原子快照内容投影，保留当前主线的错误与无写锁读取语义。"""
+        cache_key = self.waiting_projection_cache_key()
+        stat_key = _store_stat_key(self.store_path)
+        if stat_key is None:
+            # 文件缺失/不可 stat:不能绑定任何投影,冷路径(语义: 空账本或结构化读失败)。
+            _drop_store_projection(cache_key)
+            return self._parse_store_projection_unlocked(None)
+        usable_probe = probe if (probe is not None and probe.stat_key == stat_key) else None
+        if usable_probe is not None:
+            hit, stale = _lookup_store_projection(
+                cache_key, stat_key=stat_key, digest=usable_probe.digest
+            )
+            if hit is not None:
+                _bump_store_projection_stat("hit")
+                return hit
+            if stale:
+                _bump_store_projection_stat("guard")
+                _LOGGER.warning(
+                    "scheduler waiting projection guard fallback: stat key unchanged but content "
+                    "digest differs; re-parsing owner store",
+                    extra={
+                        "event": "scheduler_waiting_projection_guard",
+                        "store_path": str(self.store_path),
+                        "stat_key": stat_key,
+                    },
+                )
+                _drop_store_projection(cache_key)
+        return self._parse_store_projection_unlocked(usable_probe)
+
+    # LLM: 不读正文/摘要，但仍复用主线no-follow普通文件校验；身份一致、读取已可信且不足60秒才命中，异常回原读取。
+    # 函数用途: 用文件身份和原访问边界复用有界内容投影，命中只记录诊断计数。
+    def _cheap_projection_hit(self) -> _StoreProjection | None:
+        try:
+            stat_key = _store_stat_key(self.store_path)
+            if stat_key is None:
+                return None
+            if not regular_file_exists_beneath(self.root, (self.store_path.name,)):
+                return None
+            hit = _lookup_cheap_projection(
+                self.waiting_projection_cache_key(), stat_key=stat_key
+            )
+        except Exception:
+            _LOGGER.warning(
+                "scheduler cheap projection check failed; falling back to full read",
+                exc_info=True,
+                extra={
+                    "event": "scheduler_cheap_projection_error",
+                    "store_path": str(self.store_path),
+                },
+            )
+            return None
+        if hit is not None:
+            _bump_store_projection_stat("cheap_hit")
+        return hit
+
+    # LLM: E10 一期候选②的 due 判据: 投影里有没有 next_run_at<=now 的 active job。为假 ⇒
+    #   reserve 原路径必然 reserved/skipped 为空、不写 store ⇒ 可直接返回空(不进写锁/不读盘);
+    #   为真/无缓存/异常 ⇒ True 走原路径(写锁内重新读、重新判)。
+    # 函数用途: 判断本拍是否有到期 job 可能被预留,供 reserve_due_runs 省掉写事务读。
+    def _cheap_due_candidates_exist(self, *, now: float) -> bool:
+        hit = self._cheap_projection_hit()
+        if hit is None:
+            return True
+        return any(next_run_at <= now for next_run_at, _job_id in hit.due_job_keys)
+
+    # LLM: 只缓存与时间无关的切片；读取时可信、发布时身份和载荷界限必须同时满足，不决定变更权限。
+    # 函数用途: 完整读取原账本并建立有界投影，等待行错误与主线保持一致。
+    def _parse_store_projection_unlocked(
+        self,
+        probe: _StoreBytesProbe | None,
+    ) -> _StoreProjection:
+        """解析等待行及轻量候选键，只在读取可信、身份未变且载荷有界时缓存。"""
+        cache_key = self.waiting_projection_cache_key()
+        try:
+            if probe is not None:
+                store = self._load_store_from_bytes_unlocked(probe.data)
+            else:
+                store = self._load_store_unlocked()
+            runs, errors = self._valid_runs(store)
+            jobs, _job_errors = self._valid_jobs(store)
+        except Exception:
+            _drop_store_projection(cache_key)
+            raise
+        rows = tuple(_select_waiting_runs(runs))
+        queued_keys, queued_ok = _collect_queued_keys(runs)
+        due_job_keys, due_ok = _collect_due_job_keys(jobs)
+        projection = _StoreProjection(
+            stat_key=probe.stat_key if probe is not None else (-1, -1, -1, -1),
+            digest=probe.digest if probe is not None else "",
+            waiting_rows=rows,
+            queued_keys=queued_keys,
+            due_job_keys=due_job_keys,
+            errors=tuple(errors),
+            verified_at=time.time(),
+        )
+        _bump_store_projection_stat("miss")
+        total_rows = len(rows) + len(queued_keys) + len(due_job_keys)
+        payload_bytes = _estimate_projection_payload_bytes(rows, queued_keys, due_job_keys)
+        if probe is None or total_rows > _STORE_PROJECTION_MAX_ROWS_COUNT:
+            # 字节不可用 / 超界行数: 不缓存,退化为逐次全量解析(与改动前同,不会更差)。
+            _bump_store_projection_stat("skip")
+            return projection
+        if not queued_ok or not due_ok or payload_bytes is None:
+            # 坏数值键(跳过会与基线的报错行为不一致) / 载荷超字节上限或估算不可靠
+            # (MC4-1202: None 表示嵌套体积超门限/无法可靠估算): 本次结论照常返回,但不缓存。
+            _bump_store_projection_stat("skip")
+            return projection
+        if _store_stat_key(self.store_path) != probe.stat_key:
+            # 解析期间账本又被改写: 本次结论照常返回,但不写缓存(下次重新解析,不赌)。
+            _bump_store_projection_stat("skip")
+            return projection
+        if not probe.trusted_at_read:
+            # MC4-1201: 读取那一刻 mtime 还在 2 秒窗口内 → 不入缓存;用读取前冻结的事实判断,
+            # 不能用发布时的文件年龄代替(跨窗口延迟发布时旧结果不得变成可信缓存)。
+            _bump_store_projection_stat("skip")
+            return projection
+        _write_store_projection_cache(cache_key, projection)
+        return projection
+
+
 # LLM: 组合原 job/run/store 与执行准备操作；所有状态仍归同一 owner store 和 history，不能引入平行权威文件。
+#   开启时的有界投影仅服务读取，事件、规则、原子快照及写入准入仍使用主线原实现。
 # 类用途: 提供定时任务的持久化入口，供工具、调度服务和诊断查询共用。
 class SchedulerRepository(
     SchedulerEventEffectOperations,
@@ -1273,6 +1445,7 @@ class SchedulerRepository(
     _SchedulerJobOperations,
     _SchedulerRunOperations,
     _SchedulerWaitingRunOperations,
+    _SchedulerProjectionSupport,
     _SchedulerStoreSupport,
     _SchedulerRecordParsing,
 ):
@@ -1326,13 +1499,29 @@ class _WaitingRunsProjection:
     errors: tuple[str, ...]
 
 
+# LLM: 只保存已完整读取的时间无关切片；stat/digest绑定字节，verified_at限制60秒重读，命中不延长核验时刻。
+#   2秒窗口内的读取不能入缓存；便宜命中仍核原文件边界，变更和执行权限从不来自投影。
+# 类用途: 在开启优化时共享等待行、排队轻量键与到期键，不保存本拍是否有事的判断。
+@dataclass(frozen=True)
+class _StoreProjection:
+    stat_key: tuple[int, int, int, int]
+    digest: str
+    waiting_rows: tuple[dict[str, object], ...]
+    queued_keys: tuple[tuple[float, float, str], ...]
+    due_job_keys: tuple[tuple[float, str], ...]
+    errors: tuple[str, ...]
+    verified_at: float
+
+
 # LLM: 完整只读快照的 stat 与字节来源绑定，摘要供跨调用投影复核；不取写锁、不授权任何变更。
+#   trusted_at_read只记录读取前是否已离开保护窗口，不允许发布时重新推断该事实。
 # 类用途: 保存一代原账本字节与指纹，让查询和 waiting 缓存复用完整内容。
 @dataclass(frozen=True)
 class _StoreBytesProbe:
     stat_key: tuple[int, int, int, int]
     digest: str
     data: bytes
+    trusted_at_read: bool = False
 
 
 def _store_stat_key(path: Path) -> tuple[int, int, int, int] | None:
@@ -1360,12 +1549,13 @@ def _store_bytes_digest(data: bytes) -> str:
     return hashlib.blake2b(data, digest_size=16).hexdigest()
 
 
-# LLM: 原子快照读取与现读 stat 共同绑定字节；已过期探针不能作为缓存权威，写方仍独占原锁。
+# LLM: 原子快照与现读stat共同绑定字节；读取前冻结可信窗口，保留主线no-follow完整快照与错误事实，不恢复来源旧写锁。
 # 函数用途: 读取一代完整账本并选择性生成摘要，供查询或跨调用 waiting 缓存校验。
 def _probe_store_bytes(path: Path, *, digest: bool = True) -> _StoreBytesProbe | None:
     stat_key = _store_stat_key(path)
     if stat_key is None:
         return None
+    trusted_at_read = cache_entry_trustworthy(stat_key[0])
     data = _read_store_bytes(path)
     if data is None:
         return None
@@ -1373,6 +1563,7 @@ def _probe_store_bytes(path: Path, *, digest: bool = True) -> _StoreBytesProbe |
         stat_key=stat_key,
         digest=_store_bytes_digest(data) if digest else "",
         data=data,
+        trusted_at_read=trusted_at_read,
     )
 
 
@@ -1444,6 +1635,217 @@ def _drop_waiting_projection(cache_key: tuple[str, str, str, str]) -> None:
     """主动丢弃缓存条目(解析失败/内容摘要守卫/文件消失时的保守回退)。"""
     with _WAITING_PROJECTION_LOCK:
         _WAITING_PROJECTION_CACHE.pop(cache_key, None)
+
+
+# 只读调度投影大小估算最多递归的层数，超限即不用廉价缓存。
+_PROJECTION_ESTIMATE_MAX_DEPTH_COUNT = 8
+# 只读调度投影单容器最多估算的项数，超限即走原账本读取。
+_PROJECTION_ESTIMATE_MAX_ITEM_COUNT = 1024
+
+# LLM: 计数仅供诊断，不决定调度状态或是否读取；与投影缓存共用短锁。
+# 函数用途: 累计命中、完整读取和放弃缓存的观察次数。
+def _bump_store_projection_stat(name: str) -> None:
+    """投影缓存结构化计数(命中/回退/守卫/跳过);缺键容忍,计数永不影响主链路。"""
+    with _STORE_PROJECTION_LOCK:
+        _STORE_PROJECTION_STATS[name] = int(_STORE_PROJECTION_STATS.get(name, 0)) + 1
+
+
+# LLM: 仅供只读观测取得不可变投影；不代表当前身份或可执行状态，不更新校验时钟。
+# 函数用途: 取得现存投影供测试和诊断查看。
+def _cached_store_projection(cache_key: tuple[str, str, str, str]) -> _StoreProjection | None:
+    """读投影缓存条目(只读快照,不改变 LRU 顺序;命中判定请走 _lookup_store_projection)。"""
+    with _STORE_PROJECTION_LOCK:
+        return _STORE_PROJECTION_CACHE.get(cache_key)
+
+
+# LLM: 命中判定与 LRU 更新必须**同锁原子**完成。投影缓存是多 owner 共享的(每个 owner 的
+# store.json 文件锁互不互斥),旧实现"先 lookup 释放锁、再单独 move_to_end"中间会被其它 owner
+# 的写入淘汰掉这条 key(上限只有 _STORE_PROJECTION_MAX_ENTRIES_COUNT 条),随后 move_to_end 直接
+# KeyError 冒到等待任务对账路径。这里把"读条目 + 核对 stat 键 + 核对内容摘要 + 提到最新"放进
+# 同一把锁:条目要么整条命中(并原子提级),要么整条不命中,不存在"确认过却又消失"的中间态。
+# digest 命中说明字节刚被完整读过并核对过,顺带刷新 verified_at(60 秒全量核验基准);
+# 便宜命中(_lookup_cheap_projection)不刷新它,到点强制重核。
+# 函数用途: 原子判定投影是否命中;第二个返回值表示"有条目但内容摘要已变"(调用方据此走守卫回退)。
+def _lookup_store_projection(
+    cache_key: tuple[str, str, str, str],
+    *,
+    stat_key: tuple[int, int, int, int],
+    digest: str,
+) -> tuple[_StoreProjection | None, bool]:
+    now = time.time()
+    with _STORE_PROJECTION_LOCK:
+        entry = _STORE_PROJECTION_CACHE.get(cache_key)
+        if entry is None or entry.stat_key != stat_key:
+            return None, False
+        if entry.digest != digest:
+            return None, True
+        entry = replace(entry, verified_at=now)
+        _STORE_PROJECTION_CACHE[cache_key] = entry
+        _STORE_PROJECTION_CACHE.move_to_end(cache_key)
+        return entry, False
+
+
+# LLM: 便宜命中(一期候选②): 只做一次 stat,不读字节、不算摘要。条件与设计逐字对应:
+#   ① stat 键(mtime_ns/size/inode/device)与缓存一致(原子替换必然换 inode → 失效);
+#   ② 文件 mtime 已离开 2 秒粗粒度保护窗口(cache_freshness 的唯一实现,防低精度时间片里
+#      "先读后写"把旧内容留在缓存里);
+#   ③ 距最近一次全量核验(读字节+摘要)不足 60 秒(到点强制重核一次,防时间戳精度与极端竞态)。
+#   命中不刷新 verified_at;未命中返回 None,调用方走原路径(宁多查不漏查)。
+# 函数用途: 判断缓存投影能否仅凭文件身份复用;命中时原子提级 LRU。
+def _lookup_cheap_projection(
+    cache_key: tuple[str, str, str, str],
+    *,
+    stat_key: tuple[int, int, int, int],
+) -> _StoreProjection | None:
+    now = time.time()
+    with _STORE_PROJECTION_LOCK:
+        entry = _STORE_PROJECTION_CACHE.get(cache_key)
+        if entry is None or entry.stat_key != stat_key:
+            return None
+        if not cache_entry_trustworthy(stat_key[0]):
+            return None
+        if now - entry.verified_at >= _STORE_PROJECTION_FULL_READ_INTERVAL_SECONDS:
+            return None
+        _STORE_PROJECTION_CACHE.move_to_end(cache_key)
+        return entry
+
+
+# LLM: 移除进程内优化状态，不写用户账本；下一读取必须重建，不允许返回旧内容。
+# 函数用途: 在读取失败或身份失配后丢弃缓存。
+def _drop_store_projection(cache_key: tuple[str, str, str, str]) -> None:
+    """主动丢弃缓存条目(解析失败/内容摘要守卫/文件消失时的保守回退)。"""
+    with _STORE_PROJECTION_LOCK:
+        _STORE_PROJECTION_CACHE.pop(cache_key, None)
+
+
+# LLM: 仅保留排队候选轻量键，坏数值标记不缓存，不能吞掉原读取错误或缓存now判断。
+# 函数用途: 提取排队时刻与运行编号，实际消费仍重新读取完整运行。
+def _collect_queued_keys(
+    runs: list[dict[str, object]],
+) -> tuple[tuple[tuple[float, float, str], ...], bool]:
+    """收集排队候选轻量键；无法转换的数值只令投影不可缓存，原读取仍可报告错误。"""
+    keys: list[tuple[float, float, str]] = []
+    ok = True
+    for run in runs:
+        if str(run.get("status") or "") != "queued":
+            continue
+        try:
+            keys.append(
+                (
+                    float(run.get("dispatch_after") or 0.0),
+                    float(run.get("scheduled_for") or 0.0),
+                    str(run["run_id"]),
+                )
+            )
+        except (TypeError, ValueError):
+            ok = False
+    return tuple(keys), ok
+
+
+# LLM: 只投影主线已解析active job的到期键；规则与事件选择仍由原预留事务实时裁决。
+# 函数用途: 收集可能到期的计划键，不缓存本拍是否到期。
+def _collect_due_job_keys(
+    jobs: list[dict[str, object]],
+) -> tuple[tuple[tuple[float, str], ...], bool]:
+    """只收集主线已解析计划的到期键；规则、依赖、事件与取消仍由原预留事务判断。"""
+    keys: list[tuple[float, str]] = []
+    ok = True
+    for job in jobs:
+        if job["status"] != "active":
+            continue
+        try:
+            next_run_at = float(job.get("next_run_at") or 0.0)
+        except (TypeError, ValueError):
+            ok = False
+            continue
+        if next_run_at > 0:
+            keys.append((next_run_at, str(job["job_id"])))
+    return tuple(sorted(keys)), ok
+
+
+# 函数用途: 有界估算一个 JSON 值在缓存里的近似字节数; 超深/超宽/未知类型返回 None(不可靠,不缓存)。
+# LLM: 只估算JSON投影载荷；超深、超宽或未知类型返回None拒绝缓存，不阻塞业务读取。
+# 函数用途: 递归有界估算一个值的驻留载荷。
+def _estimate_value_bytes(value: object, depth: int) -> int | None:
+    if depth > _PROJECTION_ESTIMATE_MAX_DEPTH_COUNT:
+        return None
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, (bool, int, float)) or value is None:
+        return 8
+    if isinstance(value, dict):
+        return _estimate_mapping_bytes(value, depth)
+    if isinstance(value, (list, tuple)):
+        return _estimate_sequence_bytes(value, depth)
+    return None
+
+
+# 函数用途: 有界估算字典(键+值)的字节数; 元素超预算或子值不可靠返回 None。
+# LLM: 字典估算包含嵌套键和值，预算失效则禁止缓存，不截断原业务数据。
+# 函数用途: 估算对象载荷并拒绝无法可靠估算的结构。
+def _estimate_mapping_bytes(mapping: dict[object, object], depth: int) -> int | None:
+    if len(mapping) > _PROJECTION_ESTIMATE_MAX_ITEM_COUNT:
+        return None
+    total = 8
+    for key, item in mapping.items():
+        item_bytes = _estimate_value_bytes(item, depth + 1)
+        if item_bytes is None:
+            return None
+        total += len(str(key).encode("utf-8")) + item_bytes
+    return total
+
+
+# 函数用途: 有界估算列表/元组的字节数; 元素超预算或子值不可靠返回 None。
+# LLM: 列表估算受元素数量与递归预算限制；不改变原返回记录。
+# 函数用途: 累加序列载荷，超预算时仅放弃优化。
+def _estimate_sequence_bytes(items: list[object] | tuple[object, ...], depth: int) -> int | None:
+    if len(items) > _PROJECTION_ESTIMATE_MAX_ITEM_COUNT:
+        return None
+    total = 8
+    for item in items:
+        item_bytes = _estimate_value_bytes(item, depth + 1)
+        if item_bytes is None:
+            return None
+        total += item_bytes
+    return total
+
+
+# 函数用途: 有界估算单条 waiting 行的驻留字节(含嵌套字段); 不可靠返回 None → 不缓存。
+# LLM: waiting完整行必须计入嵌套载荷；未知估算结果不能当成零字节。
+# 函数用途: 估算一条等待运行的缓存载荷。
+def _estimate_row_bytes(row: dict[str, object]) -> int | None:
+    return _estimate_value_bytes(row, 0)
+
+
+# 函数用途: 近似估算单条投影的载荷字节; 任一行不可靠或累计超门限返回 None(不缓存)。
+# LLM: 三种切片总载荷必须有界；超额返回None，只禁止缓存，不丢弃业务事实。
+# 函数用途: 计算一条投影能否放入缓存的载荷界限。
+def _estimate_projection_payload_bytes(
+    waiting_rows: tuple[dict[str, object], ...],
+    queued_keys: tuple[tuple[float, float, str], ...],
+    due_job_keys: tuple[tuple[float, str], ...],
+) -> int | None:
+    """有界估算等待完整行与两类轻量键的载荷，超额或未知返回None，业务结果仍完整。"""
+    total = len(queued_keys) * 96 + len(due_job_keys) * 64
+    for row in waiting_rows:
+        row_bytes = _estimate_row_bytes(row)
+        if row_bytes is None:
+            return None
+        total += row_bytes
+        if total > _STORE_PROJECTION_MAX_BYTES_COUNT:
+            return None
+    return total
+
+
+# LLM: 同锁登记与LRU逐出，不延长验证时钟、不写主账；key包含规范路径和owner。
+# 函数用途: 发布一个已校验投影并回收最旧owner缓存。
+def _write_store_projection_cache(cache_key: tuple[str, str, str, str], projection: _StoreProjection) -> None:
+    """原子写入投影缓存并按上限逐出最旧条目(锁内只做赋值与 LRU 维护)。"""
+    with _STORE_PROJECTION_LOCK:
+        _STORE_PROJECTION_CACHE[cache_key] = projection
+        _STORE_PROJECTION_CACHE.move_to_end(cache_key)
+        while len(_STORE_PROJECTION_CACHE) > _STORE_PROJECTION_MAX_ENTRIES_COUNT:
+            _STORE_PROJECTION_CACHE.popitem(last=False)
 
 
 def _select_waiting_runs(runs: list[dict[str, object]]) -> list[dict[str, object]]:

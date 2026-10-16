@@ -169,7 +169,12 @@ class _ApplySummary:
 #   最后记录不一致）时，无法用历史证明未被触碰的条目一律降级为歧义（2902）。
 # 函数用途: 计算当前可清理的自动晋升条目（只读，不修改任何文件）。
 def plan_agents_cleanup(*, persona: PersonaRepository) -> AgentsCleanupPlan:
-    report = persona.list_entries("agents")
+    return _plan_agents_cleanup_from_report(persona, persona.list_entries("agents"))
+
+
+# LLM: 报告来自锁内一致读取；apply已持人格锁，不能重新调用公共列表入口而自锁。
+# 函数用途: 共用正式条目快照计算迁移归属与计划摘要。
+def _plan_agents_cleanup_from_report(persona: PersonaRepository, report: dict) -> AgentsCleanupPlan:
     entries = report.get("entries")
     entry_rows = entries if isinstance(entries, list) else []
     rows = persona.history("agents")
@@ -480,27 +485,19 @@ def _run_cleanup_locked(context: _CleanupContext, admission: OwnerQuotaAdmission
     record = _read_record(directory)
     if _is_completed(record):
         return _completed_report(migration_id, directory, record)
-    plan = plan_agents_cleanup(persona=persona)
-    if record is None:
-        _require_matching_digest(request, plan)
-        record = {**_new_record(migration_id, plan, request), "cleanup_lease_id": context.lease_id,
-            "lease_cleanup_pending": True}
-        _write_record(directory, record)
-    else:
-        # 接受恢复前的合法用户修改，但只用同锁重判定已采样的尾，不另行重采样。
-        record = {**record, "updated_at": _now_iso(), "versions_tail": plan.versions_tail,
-            "cleanup_lease_id": context.lease_id, "lease_cleanup_pending": True}
-        _write_record(directory, record)
+    plan = _plan_agents_cleanup_from_report(persona, persona._list_entries_locked("agents"))
+    record = _prepare_cleanup_record(context, directory, plan, record)
     conversations = _effective_conversations(record, request)
     snapshot = _ensure_snapshot(home_paths, directory, migration_id)
     targets = _resume_targets(record, plan)
     snapshot_map = _snapshot_entry_contents(directory)
     archived_count = _archive_planned(directory, targets, candidate_service, snapshot_map)
 
-    # LLM: 进度写回仍在迁移外锁内；崩溃后只认耐久记录和再次重判定，不反读外部 tail。
-    # 函数用途: 将一次原子删除后的版本尾与计数保存到恢复记录。
+    # LLM: 回调成功才更新内存视图；最终完成记录必须消费这个耐久进度，失败续作从正式账本核账。
+    # 函数用途: 保存本次删除后的累计计数及版本指纹，避免收尾用旧记录覆盖进度。
     def on_batch(progress: _BatchProgress) -> None:
-        _update_record(directory, record, progress)
+        nonlocal record
+        record = _update_record(directory, record, progress)
 
     channel = _RemovalChannel(
         migration_id=migration_id,
@@ -508,7 +505,8 @@ def _run_cleanup_locked(context: _CleanupContext, admission: OwnerQuotaAdmission
         on_batch=on_batch,
         admission=admission,
     )
-    removed_count = _remove_planned(persona, targets, channel)
+    _remove_planned(persona, targets, channel)
+    removed_count = int(record.get("removed_count") or 0)
     conversations_added = _append_conversations(home_paths, conversations, request)
     expired = _expire_thread_snapshots(persona, _planned_contents(record, snapshot_map))
     summary = _ApplySummary(
@@ -521,6 +519,23 @@ def _run_cleanup_locked(context: _CleanupContext, admission: OwnerQuotaAdmission
     )
     _write_record(directory, _final_record(record, directory, summary))
     return _apply_report(directory, plan, record, summary)
+
+
+# LLM: 调用方仍持原临界区；恢复仅用已采样计划及正式账本核账，不重新取得锁外前提。
+# 函数用途: 建立或恢复同一迁移记录，并保存本次精确租约责任。
+def _prepare_cleanup_record(context, directory, plan, record):
+    request = context.request
+    migration_id = request.migration_id
+    if record is None:
+        _require_matching_digest(request, plan)
+        record = _new_record(migration_id, plan, request)
+    else:
+        record = {**record, "updated_at": _now_iso(), "versions_tail": plan.versions_tail,
+            "current_sha256": plan.sha256,
+            "removed_count": _committed_removal_count(context.persona, record, migration_id)}
+    record = {**record, "cleanup_lease_id": context.lease_id, "lease_cleanup_pending": True}
+    _write_record(directory, record)
+    return record
 
 
 # LLM: 迁移与 curator 的互斥用 curator 自己的租约（同一 state 文件上的 CAS）：迁移先领租约、
@@ -751,25 +766,42 @@ def _completed_report(migration_id: str, directory: Path, record: dict) -> dict[
     }
 
 
-# 函数用途: 每批删除后把进度与新的版本账本尾写回事务记录。
+# LLM: 只按正式Persona账本中同迁移、原计划内的真实remove核账，不能用消失条目数推算；调用方持人格锁。
+# 函数用途: 进度记录写失败后找回已提交删除数，不把用户删除或用户重加记成迁移的新删除。
+def _committed_removal_count(persona: PersonaRepository, record: dict, migration_id: str) -> int:
+    planned = {str(item.get("entry_id") or "") for item in record.get("planned_entries") or ()
+        if isinstance(item, dict)}
+    removed = 0
+    for row in persona.history("agents"):
+        if row.get("source") != f"migration:{migration_id}":
+            continue
+        operations = _changed_batch_operations(row.get("operations")) if row.get("action") == "batch" else [row]
+        removed += sum(1 for item in operations
+            if item.get("action") == "remove" and str(item.get("entry_id") or "") in planned)
+    return removed
+
+
+# LLM: 调用方持迁移外锁；累计数以续作时的正式账本核账为基数，私有写成功后才交回新视图。
+# 函数用途: 每批删除后保存累计进度和新的版本指纹，并供最终记录复用。
 def _update_record(
     directory: Path,
     record: dict,
     progress: _BatchProgress,
-) -> None:
+) -> dict:
     payload = dict(record)
     payload.update(
         {
             "status": "in_progress",
             "updated_at": _now_iso(),
             "current_sha256": progress.sha,
-            "removed_count": progress.removed,
+            "removed_count": int(record.get("removed_count") or 0) + progress.removed,
             "remaining_count": progress.remaining,
             "versions_tail": progress.versions_tail
             or str(record.get("versions_tail") or ""),
         }
     )
     _write_record(directory, payload)
+    return payload
 
 
 # 函数用途: 构造 completed 事务记录。

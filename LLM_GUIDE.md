@@ -1,3 +1,9 @@
+2026-10-16 F6/F7 独立组合候选（未发行/部署）：冻结同次主历史前缀仅作容量可容纳时优化，本地 typed 超窗沿 main 完整来源/分段主链，不额外发失败调用；历史/当前宿主图及 F4/F5/F2 接缝保留。迟到上下文显示须携真实采样前捕获绑定，禁止为旧采样 fresh-load 重签。F7 复用原缓存与物理/用途/耗时指标，本地前缀相同不等于 provider 命中。见[会话合同](docs/design/CONVERSATION_CONTEXT_DESIGN.md)与本轮 TESTS，根最终验收另记。
+
+2026-10-16 F4/F5 当前合同（独立组合候选，未发布）：AGENTS 正式修改只走本人 `/agents` 预览确认，普通/群 IM 记忆候选通过 `/memory candidates preview <候选ID>` 后准确 nonce 确认；普通自然语言、模型 confirmed 和学习来源都不签权。自动学习只产候选，正式 Skill 保留 main 用户确认/CAS。self_map 默认开启，只聚合原公开读口和当前 owner/HostActor/父快照权限；关闭后入口及普通/Compact 指引同时消失，不创建第二清单或授权源。保留 main 凭据、群、订阅、媒体、零查询和工具渐进加载设计；完整用法见[命令参考](CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布)，投影合同见[自我目录](docs/design/SELF_MAP.md)。bwrap 挂载次序与 CLI 定义顺序后续已用准确补充修复并完成非作者离线复核；最终组合、真实 Linux 内核及发行验收另记，以下旧阶段说明保留为历史。
+
+2026-10-15 七块功能接手：已对固定来源072f929bd与最新main0457b0198刷新三方观察，未移植产品。合并顺序、现有IM/凭据/媒体保护、共用依赖和Count0边界见[合并评估](docs/design/SEVEN_FEATURE_INTEGRATION.md)；不按旧交接整文件覆盖。
+
 2026-10-15 最新发行`.20261015.12`：飞书图片接原生媒体；群额外授权只管监控，用`/group 监控 @成员`或`/group 监控 全群`（含后续成员），普通聊天不加该门，原owner/admin权限仍守。产品c90741b55，完成证据见STATUS/TESTS；部署和源码历史时点按最新追加读取。
 
 2026-10-15 群监控授权按用户收敛：主用`/group 监控 @某人|全群`，全群含后续实际成员，仅监控有额外门；assistant.configure退出该门而原owner/admin/签名身份保护保持。缺名监控展示可从原完整成员投影补索引，失败不阻断。新用法待本轮发布；见[群合同](docs/design/IM_GROUP_GOVERNANCE.md)。

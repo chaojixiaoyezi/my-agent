@@ -1,7 +1,7 @@
 
 # LLM: 访问与归属读取 process_scope；v2/v3 复用原出生标识和终止回执，共享激活不向业务会话暴露。
 # 前台自然退出也须在回收组长前按启动出生身份清理原组；联测 Store/host/shell，不用旧 PID 重建归属。
-# 模块用途: 查询或精确停止受管进程，并收回前台命令退出后的原组残留；发送信号和命令退出均不等于清理完成。
+# 模块用途: 查询或精确停止受管进程，观测有界日志和读取故障；进程身份、退出与清理事实仍由原生命周期入口决定。
 from __future__ import annotations
 
 import json
@@ -97,7 +97,7 @@ class BackgroundProcess:
     def is_terminal(self) -> bool:
         return self.status in PROCESS_TERMINAL_STATUSES
 
-    # LLM: 摘要保留 v2/v3 原控制标记；调用方先核对资源可见范围，启动未确认时不补开始时间，日志错误不改终态。
+    # LLM: 摘要保留原控制标记；日志文本/字节数/截断/读取错误同取已授权记录的一个fd，日志错误不改进程终态。
     # 函数用途: 生成后台进程的状态和日志观测，耗时与输出增长分开，宿主 PID 保持内部使用。
     def to_summary(self, *, include_output: bool = False, output_tail_chars: int = _OUTPUT_TAIL_CHARS) -> dict[str, Any]:
         summary: dict[str, Any] = {
@@ -118,11 +118,10 @@ class BackgroundProcess:
             if self.persisted_snapshot.get(key):
                 summary[key] = self.persisted_snapshot[key]
         if include_output:
-            summary["output_tail"] = _read_log_tail(self.output_file, output_tail_chars)
-            try:
-                summary["output_bytes"] = Path(self.output_file).stat().st_size if self.output_file else None
-            except OSError:
-                summary["output_bytes"] = None
+            tail = _read_log_tail(self.output_file, output_tail_chars)
+            summary["output_tail"] = tail.text
+            summary["output_bytes"] = tail.output_bytes
+            summary["output_tail_capture"] = tail.to_fact()
         return summary
 
     # LLM: 保留已验证记录的全部版本字段；旧版本不升级，新版本不丢执行身份、revision 或控制事实。
@@ -189,28 +188,59 @@ class BackgroundProcess:
         )
 
 
-def _read_log_tail(output_file: str, max_chars: int) -> str:
-    """惰性读日志文件尾部作为滚动输出缓冲。日志读不到不报错(返回空串),
-    因为进程已启动是事实,日志缺失只影响观测不影响管控。"""
-    if not output_file or max_chars <= 0:
-        return ""
+# LLM: 日志观测只携读取事实，不能决定进程状态或扩大路径权限；正文与元数据分开，避免再造输出归档。
+# 类用途: 保存一次限量日志尾读的文本、同fd文件长度、截断、编码和读取失败事实。
+@dataclass(frozen=True)
+class ProcessLogTail:
+    text: str = ""
+    output_bytes: int | None = None
+    bytes_read: int = 0
+    limit_bytes: int = 0
+    truncated: bool = False
+    invalid_utf8: bool = False
+    error_type: str = ""
+
+    # LLM: 字段来自本次读取，不从展示截断提示推断；没有正文，不修改原进程记录。
+    # 函数用途: 为现有进程工具的 JSON 输出投影机器可判断的日志采集事实。
+    def to_fact(self) -> dict[str, object]:
+        return {"bytes_read": self.bytes_read, "limit_bytes": self.limit_bytes,
+                "truncated": self.truncated, "invalid_utf8": self.invalid_utf8,
+                "error_type": self.error_type}
+
+
+# LLM: 先打开再fstat同一fd，read最多取观察长度与预算的小者；并发追加不纳入本次观察，短读/坏UTF8均结构化。
+#   原max_chars接口实际一直按字节预算；读失败只影响观测，不能改变进程状态、权限或停止目标。
+# 函数用途: 有界读取已授权日志文件尾部，返回文本及同一次读取的截断/失败事实，不吞成假空成功。
+def _read_log_tail(output_file: str, max_chars: int) -> ProcessLogTail:
+    limit = max(0, int(max_chars))
+    if not output_file or not limit:
+        return ProcessLogTail(limit_bytes=limit)
+    size = None
     try:
-        path = Path(output_file)
-        size = path.stat().st_size
-        with path.open("rb") as handle:
-            if size > max_chars:
-                handle.seek(size - max_chars)
-            raw = handle.read()
-    except OSError:
-        return ""
-    text = raw.decode("utf-8", errors="replace")
-    if size > max_chars:
-        # 从中间截断的,丢掉第一行残片避免半个字符/半行误导。
+        with Path(output_file).open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            handle.seek(max(0, size - limit))
+            raw = handle.read(min(size, limit))
+    except OSError as exc:
+        return ProcessLogTail(output_bytes=size, limit_bytes=limit, error_type=type(exc).__name__)
+    return _log_tail_result(raw, size=size, limit=limit)
+
+
+# LLM: 严格解码失败时保留原replacement展示但单列坏编码；读取预算不足和观察后截断都不能声称完整。
+# 函数用途: 将有限日志字节转成原尾部展示与采集事实，日志截断提示只供阅读。
+def _log_tail_result(raw: bytes, *, size: int, limit: int) -> ProcessLogTail:
+    try:
+        text, invalid = raw.decode("utf-8"), False
+    except UnicodeDecodeError:
+        text, invalid = raw.decode("utf-8", errors="replace"), True
+    short_read = len(raw) < min(size, limit)
+    if size > limit:
         newline = text.find("\n")
         if newline != -1:
-            text = text[newline + 1 :]
+            text = text[newline + 1:]
         text = f"...[日志已截断,只显示尾部 {len(text)} 字符]...\n{text}"
-    return text
+    return ProcessLogTail(text, size, len(raw), limit, size > limit or short_read, invalid,
+                          "short_read" if short_read else "")
 
 
 # LLM: 此表只缓存原 Store 记录和本进程句柄；任何冷热查询都先刷新权威，锁顺序始终 registry 到 Store。

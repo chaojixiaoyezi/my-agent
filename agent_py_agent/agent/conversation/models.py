@@ -448,6 +448,13 @@ class ConversationCompactCommit:
     publish_thread_view: bool = True
 
 
+# LLM: 仅恢复现有provider上下文/用量/指标对象，不改变来源权威或补造选择事件；非对象保持原空值语义。
+# 函数用途: 集中读取会话的三个provider诊断字段，让会话恢复入口保持可读。
+def _thread_provider_fields(data):
+    keys = ("provider_context_observation", "model_context_usage", "model_metrics")
+    return {key: data[key] if isinstance(data.get(key), dict) else {} for key in keys}
+
+
 # LLM: ConversationThread 是历史、压缩点、模型引用与选择版本、决策覆盖及上下文投影的唯一持久权威；
 # 选择版本不能代替连接版本或授权；方法账本只经 capability.method_carry 使用，不进入摘要与模型线程投影。
 # 类用途: 保存会话模型引用与选择版本、临时决策覆盖和压缩点；选择来源不替代任务状态或自动采用权限。
@@ -530,6 +537,12 @@ class ConversationThread:
     cwd: str = ""
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+    # LLM: 宿主来源投影（learning_source 模块的 8 字段格式）：线程创建时写入；旧记录缺省为空
+    #   表示未知（不可学），不按消息 role 或正文回填；后台/调度/派活回合由消息级事实覆盖。
+    # 字段用途: 保存本会话的默认学习来源；空值不写 JSON，保持旧记录字节稳定。
+    learning_source: dict[str, Any] = field(
+        default_factory=dict, kw_only=True, metadata={"omit_empty": True}
+    )
 
     # LLM: 构造与 replace 同源验证选择事实；选择时间缺失保持未知，非有限数或错误类型不得混入诊断。
     # 函数用途: 在持久化前拒绝坏模型选择字段，旧线程缺少时间仍可读取。
@@ -551,7 +564,7 @@ class ConversationThread:
         payload["channel_bindings"] = [item.to_dict() for item in self.channel_bindings]
         payload["task_ids"] = list(self.task_ids)
         payload["active_task_ids"] = list(self.active_task_ids)
-        for key in ("conversation_methods", "loaded_tool_names"):
+        for key in ("conversation_methods", "loaded_tool_names", "learning_source"):
             if not getattr(self, key):
                 payload.pop(key, None)
         return payload
@@ -608,17 +621,7 @@ class ConversationThread:
                 int(data["compact_vision_failed_generation"])
                 if isinstance(data.get("compact_vision_failed_generation"), int) else -1
             ),
-            provider_context_observation=(
-                data.get("provider_context_observation")
-                if isinstance(data.get("provider_context_observation"), dict)
-                else {}
-            ),
-            model_context_usage=(
-                data.get("model_context_usage")
-                if isinstance(data.get("model_context_usage"), dict)
-                else {}
-            ),
-            model_metrics=data.get("model_metrics") if isinstance(data.get("model_metrics"), dict) else {},
+            **_thread_provider_fields(data),
             compact_operation_evidence=(
                 data.get("compact_operation_evidence")
                 if isinstance(data.get("compact_operation_evidence"), dict)
@@ -657,6 +660,12 @@ class ConversationThread:
                 data.get("runtime_workspace_roots")
             ),
             metadata=metadata if isinstance(metadata, dict) else {},
+            # 旧记录没有 learning_source 键时为空 dict（未知来源），不回填用户默认。
+            learning_source=(
+                data.get("learning_source")
+                if isinstance(data.get("learning_source"), dict)
+                else {}
+            ),
         )
 
 

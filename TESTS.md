@@ -1,3 +1,72 @@
+## 2026-10-16 六项最终组合收口（未发行、未部署）
+
+F1/F2/F4/F5/F6/F7 使用同一最终候选，F3 延后。原 FINAL_02 focused 为 7,320 passed、15 个 Linux 平台门 skipped；该轮全仓在 15,788 项处遇旧 Gateway Compact 夹具停止，不冒充完整通过。继续扩验发现并保留原失败后，最终 focused/full、严格 gate 与双端正式包仍须重新冻结验收，分线数字不能相加代替。
+
+本轮恢复 main 在子代理创建边界的 `clear_actor_attributes`，模型 `attributes` 的身份别名在宿主绑定前清除；正式 HostActor、学习来源、附件及子孙权限上限不改。PTY 未确认停止的旧替身接收并核验原 `expected_birth_token`，真实终止器和停止回执不削弱；原文件 13 项及 actor/学习来源/创建交集 90 项定向通过。
+
+F4 来源库构造只用规范 owner/home 的静态身份锚点，实际本地来源始终读取原活权限；坏权限使来源返回 `AGENTS_SOURCE_PERMISSION_REVOKED`、不读旧缓存，不阻断 closed 宿主重建。修复后同一实例按下一次真实裁决恢复，再次损坏立即拒绝。原 8 项与新增本机/普通 owner 反例共 10 项修前失败，修后相关 84 项通过；`owner_policy`、URL/TLS/代理及出口策略未改。新增 `test_agents_source_closed_owner_host.py`。
+
+Gateway Compact 旧断言按固定来源已有的“空答仅同输入补发一次”与冻结前缀合同补齐；新增首空次有效提交的因果正例，持续空答、截断、工具零执行、原文/代次和诊断脱敏仍严格检查。四处旧夹具及直接合同 63 项通过，额外 16 文件 465 项通过；三宿主旧历史驻留回归另沿原容量和媒体决定修复，详见本文件生命周期记录。最终统一命令使用明确 PYTHONPATH、隔离 home 和新短 basetemp，避免可编辑安装误导入原 checkout 或长诊断路径触发展示裁剪。
+
+本轮其余旧夹具按真实来源合同适配：`test_status_commands.py` 使用现有完整临时 owner 路径与同 owner ConversationStore，成功及 blocked 均确认实际执行了 run，不以缺路径返回码假绿。文件源写入测试区分正式 owner 人格（基础工具仍拒写）与普通项目同名文件（可写业务）；`source_ref` 完整正文进入通用内容守卫的因果负例与实际 canonical USER 内容校验均保留，不把替身当人工批准。测试副本的目录 mode、缺 Git、multiprocessing 入口和长路径展示裁剪造成的旧诊断失败单列保留，不能借环境噪音修改权限或丢弃原生产回归。
+
+FINAL_03 focused 的 538 文件收集 10,019 项：10,001 普通 passed、1 非严格 XPASS、16 skipped、1 failed。唯一失败是线程人格测试手工构造空来源请求，绕过正式准备入口；原失败保留。夹具现改用真实隔离 owner 的 canonical store/thread/message，经原 `_prepare_compact_request` 获得完整请求，保留旧 surface 不得覆盖 canonical 线程及完整前缀投影断言；空来源走正式 no-op、不准备无用前缀，真实 PNG 的不支持模态分支保留原 typed 决定且不另发视觉探针。产品、权限、容量阈值和来源校验零变；独立副本相关 63 项、最终 persona 文件 26 项通过，最终统一源码及双端工件仍待新冻结验收。
+
+## 2026-10-16 六项组合：F5/F6 原夹具合同适配（未发行）
+
+独立固定 R3 副本的七文件 focused 为 **101 passed、0 failed/error/skipped**；原早红五项与额外子代理/Gateway 五项均在修前原文件上复现并保留，最终十项均通过。没有修改产品、权限、主请求、摘要组包或供应商接口，根最终全仓、严格 gate 与六项统一包内验收仍另记，不继续单独发行 F1/F2。
+
+`test_audit_activation.py` 的普通角色精确工具清单补上 F5 已有只读 `self_map`；原不升级编码角色断言与 F5 的关闭/父级不可用/owner 权限负例继续保留。Compact 的后台、child 和真实 Gateway 恢复均使用 F6 同次 history seed/source 连续前缀，不能要求摘要补入覆盖终点后的当前动态卡片。共享 helper 保留默认 `summary_carries_cards=True` 旧严格分支；这些 F6 恢复调用显式选历史分支，直接 provider surface 仍按原合同核动态卡片。
+
+预期摘要消息在业务调用前从原 canonical store 行投影固定，逐项比较角色、完整正文和顺序，并与第一主请求前缀相等。`backend.generate` 的 `messages` 尚未经末端 provider builder 追加独立摘要 `prompt`，所以比较整个消息列表，不能误删末行。两次业务请求卡片同值、稳定前缀/schema、selection/required/empty、下一轮重评估、失效卡片不复活、Skill 正文不泄露及零工具执行均继续检查；Gateway 额外只读捕获实际出站 kwargs。
+
+定向入口：`test_audit_activation.py`、`test_background_capability_compact.py`、`test_subagent_capability_compact.py`、`test_gateway_capability_compact.py`、`test_transcript_compact_prefix.py`、`test_self_map_model_surface.py`、`test_capability_package_compact.py`。全部通过 pytest 夹具与显式临时 MY_AGENT_HOME/目标 PYTHONPATH，只有本地 fake provider；无真实模型、网络、凭据、服务或日常 home。仓外准确命令/原 XML/修前后 SHA 与独立重放见 `R3_CANONICAL_FIXTURE_*`、`R3_CANONICAL_COMPACT_FIXTURE_*`。
+
+## 2026-10-16 F6/F7 R3 组合验收（未发行、未部署）
+
+定向结果：**1475 passed，0 failed/error/skipped，91 文件，150.704 秒**（含非作者原 P2 probe）。Ruff、文档同步、strict code-size 和候选内容预检的准确结果见仓外 R3 交接；工作树原 clean-package 被未跟踪候选阻断，根准确 stage 后再跑正式 gate。
+
+在准确 R2 的独立组合树中，按 F6→P2 迟到绑定→typed 旧夹具→F7 顺序集成，保留 F4 learning_source/source-CAS、F5 self_map、F2 队列/物理账及 main 媒体与分段可用性。定向组为原 F6 45 文件、F7 37 文件去重后，加真实采样绑定与 F4/F5 组合接缝共 91 个文件；精确命令、临时 MY_AGENT_HOME、PYTHONPATH、逐文件结果和日志由仓外 R3_F6_F7_FOCUSED* 记录。
+
+覆盖自动/强制压缩、原窗口与 512K quota 矩阵、工具配对、旧 checkpoint/CAS、模型切换、历史/当前宿主图、普通/群/子权限、取消/网络错误不进入容量分路、来源撤回与当前工具权限、main/summary usage/耗时/物理尝试和公平 queue。只在 pytest 夹具中构建显式临时 my_agent_home，不调用夹具运行日常资料；仅传输末端替身，无真实模型、外网或服务。
+
+原非作者迟到采样 probe 保留原红并在组合复验；纯预算查询不能多读遥测原账。缓存验证只证明本地 payload/账本合同，不证明 provider cache hit 或真实延迟/费用。完整全仓、线上 CI、发行和真实验收由根统一，不能将本条写成已发布。
+## 2026-10-16 F4/F5 独立组合：文档与验收口径（未发布）
+
+当前是在根冻结的 F1+F2 候选上组合 F4/配置、人工 memory followup 与 F5/配置。产品与测试由根冻结并执行组合 focused；本次文档同步不修改产品、测试、生成配置或生产 home。最终组合测试、全仓、严格 gate、包内和真实 IM 结果尚未在此条宣布通过，不能把分线数字相加代验。
+
+根 R2 组合回归覆盖 230 文件、收集 3776 项，原 3 红保留，不能把该轮记为通过：两常数中文单位说明由根补齐；self_map 的 owner 根原政策拒写已独立证实，最小测试适配同时保留普通业务路径读写未知和 frozen 空根明确拒绝；bwrap 原 hidden 覆盖顺序断言揭示真实 F4 P1。准确 mount-order 补丁与追加 CLI 定义顺序补充已合入并完成下列非作者复核，原断言未弱化；根后续最终组合 focused/全仓/严格 gate 另记。当前挂载证据仅 argv/覆盖投影，不冒称真实 Linux 内核已验。
+
+| 已有证据阶段 | 准确结果 | 适用边界 |
+| --- | --- | --- |
+| F4 作者主批/记忆补批 | 去重 197 文件，3032 passed、6 skipped | 固定独立来源组合；不等于最终全 feature 或真实环境 |
+| F4 非作者代表集 | 17 文件 343 passed；两 CI 夹具组合节点 3 passed | 固定 F4/config，保留可信 owner 与宿主凭据边界 |
+| F4 memory followup 非作者 | 6 文件及独立 help 合同 129 passed、0 skipped，退出 0 | 普通/群真实临时 AuthMiddleware Role.USER、正式 handle_control、fake LLM/direct 与版本/目标 CAS |
+| followup 后非作者仓外探针 | 6 passed、0 skipped | 3 个原 AGENTS 负例重跑与 3 个 memory 独立负例；范围隔离、来源观察变化、提交后回执故障不重放 |
+| F4 mount-order 非作者 | 原最终 10 合同在旧产品 10 failed；补丁后 108 passed、0 skipped；独立差分负例 3 passed | owner/full/allowlist、B7合法重挂、deny/精确allow/绝对只读/hidden、异名与普通业务写；均不执行 mount |
+| F4 CLI 非作者 | 旧完整入口 NameError、binary-only 正常；补丁后 44 passed、0 skipped | 新增真实子进程 fake CLI 两例，假 binary 只允许version、隔离固定失败，原 BWRAP_ISOLATION_FAILED/exit1 与仅binary边界保持 |
+| F5 独立隔离代表集 | 21 文件 293 passed、0 skipped；其中新增合同 38 个 | 自我目录权限负例、fake LLM/replay、原工具渐进加载、媒体/零查询/Skill/Compact 保留 |
+
+`test_agents_source_sandbox_cli.py` 的临时 fake binary 是 POSIX shebang 可执行脚本，仅在原生 Windows（`os.name == 'nt'`）明确跳过该文件两个参数化 case；Linux/macOS 继续实际运行子进程和全部原断言。该平台声明不改变产品沙箱、完整探针失败判据或 binary-only 边界，也不表示 Windows 或真实 Linux 内核隔离已验收。
+
+各阶段有重复 case，不能合计为不同覆盖数。旧 IM 候选发现性合同原红保留，准确 followup 后转绿；初次误写测试文件名只产生 collection error，没有测试执行，正确节点已完整重跑。OS 跳过和真实供应商/远程来源/飞书租户未验边界继续保留。
+
+直接受影响的回归入口可在目标源码根目录运行，使用本项目测试解释器并显式隔离 home（以下为 POSIX 示例）：
+
+```bash
+MY_AGENT_HOME=$(mktemp -d) PYTHONPATH="$PWD" python3 -m pytest agent_py_agent/tests/test_memory_candidate_control.py agent_py_agent/tests/test_memory_user_confirmation.py agent_py_agent/tests/test_remember_learning_source_review.py agent_py_agent/tests/test_agents_working_agreement_library.py agent_py_agent/tests/test_gateway_control_operation.py agent_py_agent/tests/test_conversation_control_commands.py agent_py_agent/tests/test_self_map_contract.py agent_py_agent/tests/test_self_map_runtime.py agent_py_agent/tests/test_self_map_model_surface.py -q --tb=short
+python3 scripts/check_doc_sync.py
+git diff --check
+```
+
+保留普通/群/子代理 owner、当前 HostActor、凭据引用、原生/引用图片、零结果复核、来源撤回、开关关闭和 unknown 不重放负例。完整验收还需根按累计变更规模跑全仓 pytest、Ruff、doc-sync、strict code-size、diff 与 clean-package；线上 CI、准确工件及真实入口各自记录，不借来源历史成绩放行。
+
+2026-10-16 F1+F2组合候选：F1准确代码已在加F2前冻结，根30文件定向回归无失败；F2物理队列、可信owner、取消、运输与配置边界已接入，默认上限0。作者598项和配置9项是分线证据，组合focused/全仓/严格gate、包内与真实验收仍待完成。
+
+2026-10-16 F1代码组合：快照、SQLite、精确字节去重、终态扫描、增量进度、后台廉价检查与输出捕获已接入；非作者发现的清单保护、旧游标和copytruncate竞态已补定向复验。当前累计改动触发全仓pytest，最终strict/线上/包内结果未完成，不以分线成绩相加或来源历史成绩代验。
+
+2026-10-15 七块功能接手评估：交接工具8项离线测试通过，实时对照来源无字节漂移、目标读取窗口稳定；文档同步与diff检查通过。仅设计与对照资料，不运行产品回归，不把来源V10全仓结果算作目标验收。新观察及批次0回执位于仓外my-agent-seven-feature-integration-20261015，范围见[评估](docs/design/SEVEN_FEATURE_INTEGRATION.md)。
+
 2026-10-15 最终发行 `.20261015.12` 已完成：产品提交c90741b552256e23670749535ee61bf4b8373ae5已推main，Mac已沿原服务安全切换，配置/默认选模及旧runtime保留；同包Linux安装/升级/终端验收通过。源码62文件1664全过、本地严格gate通过，包内两端各1663+精确源码审计1，Mac/Linux原生8/9且零跳过。真实独占群已验引用图片、中文全群监控授权、创建、创建者姓名列表、暂停和撤销；最后成功回执补线在新pyc对原真实回执只读重放通过。真实临时home监控已停、grant已撤、临时含密钥配置已删除，日常连接已恢复。
 Linux环境为本机Docker linux/amd64（Rosetta），不算独立物理服务器；真实群与只读重放分开计。当前线上Lint/跨平台门成功、Test仍运行；线上CI未作为验收来源。`.11`首轮源码夹具/包内源码扫描失败及修复/精准分流证据保留，不用旧成功替代新发行。
 
@@ -18753,3 +18822,13 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 2026-10-16 上轮 main CI 基线修复：按原 215 个失败节点的 61 文件分组复现；只在真实合同已变化时更新夹具，保留 owner、原发起人、审批和零执行负例。实际产品修复包括 local user/group 身份往返、canonical 二层子代理身份、Skill 反馈操作声明，以及测量器保留原模型来源。夹具自己显式隔离 home，不依赖 pytest 进程环境。准确 focused/strict 和线上结果见 [基线交接](docs/tasks/CI_BASELINE_REPAIR_20261016.md)，未完成项不提前记绿。
 
 2026-10-16 CI 独立基线最终全仓：`PYTHONPATH=$PWD python -m pytest -q --tb=short`，33546 收集、33474 通过、72 项平台跳过或已有预期失败、零失败/错误；63 文件 focused 1394 全通过。原环境导入及 macOS canonical path 失败证据保留；详情见[基线修复](docs/tasks/CI_BASELINE_REPAIR_20261016.md)。最终严格门和线上 CI 按准确提交另记，不以本机全仓替代跨平台或正式发行。
+
+2026-10-16 六项统一收口（未发行）：用户改为 F1/F2/F4/F5/F6/F7 一起完善验收、一次 main 推进、本机更新与安装包。F1/F2 原全仓 34031 项有 4 红；六项早轮全仓仅部分执行后中断，不能把 10611 项/20 红当完整清单；准确原日志保留。修复同构 dispatcher/FakeStore、完整 capture 字段、CLI 真实 owner/学习源与正式记忆人工确认夹具，并按同源 covered history 核摘要/主请求动态卡片。每条原拒绝、事务、pipefail、稳定前缀、工具 schema、零工具执行断言均保留或加强。最终统一全仓、包内/跨平台与线上 CI 按同一源码另记；F3 保持 Count0，网络安全只记录。
+
+2026-10-16 六项统一第二轮冻结前修复：首轮 7333 项 focused 有 4 红、15 跳过；全仓 fail-fast 在 10938 项时因一个跨模块常量重名停止，均保留原 XML，不能记为完整通过。已原样补回固定来源的 HTTP 来源失败/保护无效两个 ErrorContract，预览常量按独立用途改名但仍600秒；5文件102项及非作者AST核对通过。owner隔离测试改走真实候选review/正式确认与direct规则预览确认，未自动写正式记忆；PTY仅补真实scope和确认退休回执，未知活跃会话仍保留；相关13文件231项通过。第二轮统一422文件和全仓须重新在同一冻结代码上执行。
+
+正式字节码包验区分纯源码投影与运行行为：仅精确源码/仓库扫描节点可凭同提交原始XML逐项绑定，拟19项；其余运行节点保留包内。独立Compact三探针已迁入正式测试，因果变异沿唯一字节码全局读取注入；SDK保持单文件真实加载和拒写/业务写断言。CLI/SQLite/诊断子进程按同runtime准确.pyc来源验证，不用开发cwd假设替代；Linux原生跳过必须单列重验。临时pyc和runner假服务单测均非正式发行通过。
+
+## 2026-10-16 Linux 正式插件样例验收环境
+
+本次扩大 focused 包含原有 Node 插件样例，正式原生验收不得将缺 Node 的 skip 当通过。Linux x86_64 测试镜像在原固定 Ubuntu/Python 基座上仅添加 Node 官方已校验的 x64 测试二进制与许可；与业务 runtime/安装包依赖分离，容器仍断网，目标部署不新增外网域名。Mac 使用本机已有 Node。镜像 ID、官方归档 SHA、父层保留与真实版本回执保存在仓外发行证据；不复用 arm64 镜像证明 x86_64，也不将准备环境当正式包已验。

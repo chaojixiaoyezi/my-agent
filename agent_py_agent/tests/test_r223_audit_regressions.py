@@ -512,7 +512,10 @@ def test_pty_write_backpressure_and_history_are_bounded(monkeypatch):
     master, slave = os_pty.openpty()
     tty.setraw(slave)
     os.set_blocking(master, False)
-    session = pty.PtySession("current", "dummy", SimpleNamespace(poll=lambda: None), master, 0, 0, None)
+    # 正常start即使没有owner也会构造typed scope；None不是可登记的会话，不能绕过来源保护来测写入超时。
+    access_scope = pty._pty_access_scope(None, None)
+    assert isinstance(access_scope, pty.PtyAccessScope)
+    session = pty.PtySession("current", "dummy", SimpleNamespace(poll=lambda: None), master, 0, 0, access_scope)
     registry._sessions["current"] = session
     monkeypatch.setattr(pty, "_WRITE_TIMEOUT_SECONDS", 0.08)
     started = time.monotonic()
@@ -526,10 +529,15 @@ def test_pty_write_backpressure_and_history_are_bounded(monkeypatch):
         os.close(master)
         os.close(slave)
     for n in range(100):
-        registry._sessions[str(n)] = SimpleNamespace(closed=True, process=SimpleNamespace(poll=lambda: 0))
+        # 这里只构造已确认退役的历史数据；closed/poll本身不冒充完整树清退，未知当前会话必须保留。
+        registry._sessions[str(n)] = pty.PtySession(
+            str(n), "historical", SimpleNamespace(poll=lambda: 0), -1, 0, 0, access_scope,
+            closed=True, termination=pty.ProcessTerminationReceipt("test-confirmed-tree", True, 0, 1),
+        )
     with registry._lock:  # ptyleak 把裁剪挪成模块级函数（调用方持锁）
         pty._prune_finished_sessions(registry)
     assert len(registry._sessions) == 33
+    assert "current" in registry._sessions
 
 
 @pytest.mark.parametrize("kind", ["write", "edit", "patch"])

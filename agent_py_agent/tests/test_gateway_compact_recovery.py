@@ -166,11 +166,14 @@ def test_uncommitted_recovery_never_sends_business_request(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("mode,reject", [("disabled", False), ("apply", False), ("apply", True)])
+# LLM: 保留全部旧资料；20K窗口依赖旧分段，现用整段可容纳窗口及较早触发线。
+# 函数用途: 验证初始压缩先于模型采用，拒绝候选仍发送压缩后的原模型请求。
 def test_initial_compact_precedes_model_adoption_and_rejection_baseline(tmp_path, monkeypatch, mode, reject):
     from agent_py_agent.tests.test_decision_settings import patch
     from agent_py_agent.tests.test_gateway_model_adoption import before_final_check
 
-    fixture = _history_request(tmp_path, mode=mode, original_window=20_000, history_repeat=2500)
+    fixture = _history_request(tmp_path, mode=mode, original_window=100_000, history_repeat=2500)
+    fixture.agent.config.memory_compact_auto_trigger_percent = 50
     decision = install_backend(monkeypatch, fixture)
     prepares, summaries, sends, candidates = [], [], [], []
     original = runtime_mixin._prepare_runtime_context

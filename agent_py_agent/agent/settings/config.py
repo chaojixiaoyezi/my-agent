@@ -173,6 +173,10 @@ class _HomeProviderConfigFields:
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
     home_context_enabled: bool = True
     thread_prompt_prefix_freeze_enabled: bool = True
+    # 显式来源允许读取用户选择的规则；仍服从当前owner路径许可，不替代正式修改确认。
+    agents_source_enabled: bool = True
+    # URL加载会发网络请求，默认关闭；只能用户开启且不能扩大owner已有网络权限。
+    agents_source_network_enabled: bool = False
     home_lesson_stale_caveat_days: int = 7
     run_task_workspace_enabled: bool = True
     timezone: str = ""  # IANA 时区名(如 Asia/Shanghai、America/New_York);空=服务器本地(审计 #21)
@@ -436,6 +440,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_debug_trace_level: int = 0
     # 自学习默认关闭；开启后只生成待确认候选，主代理与子代理正式内容都须用户显式确认。
     enable_self_learning: bool = False
+    # 只读自我目录沿原owner/run与公开模块读口聚合，关闭时不注册工具或注入使用指引。
+    enable_self_map: bool = True
     # 自动总结 Skill 的触发与预算：工具轮数门槛、每 owner 每日模型调用上限（0 不限）、自学 Skill 数量上限（0 不限，只限新建）、单次调用超时秒数。
     self_learning_min_tool_rounds: int = 6
     self_learning_daily_limit: int = 20
@@ -490,6 +496,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_processing_timeout_seconds: int = 900
     # 仅计 processing 租约失效的失败次数；服务重启续接不计，0 不限，副作用未知仍禁止盲目重放。
     gateway_request_max_attempts: int = 2
+    # 单次 Gateway 请求线程内有界复用 SQLite 连接；作用域结束回收，原事务及时提交不变。
+    sqlite_connection_reuse: bool = False
+    # 只缓存后台检查的内容投影，实际到期、领取与状态写入始终读取原权威；关闭保持原检查路径。
+    background_tick_cheap_checks: bool = False
     # 供应商临时故障的回合级自动续跑次数上限（0=关闭；跨 Gateway 重启累计，重排不重放工具）。
     provider_transient_turn_resume_max_count: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
@@ -591,6 +601,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     request_timeout: int = 240
     # 单槽位/繁忙模型的额外排队预算，仅加到首事件等待；0 不额外等待，健康流仍无总墙钟限制。
     model_queue_wait_seconds: float = 0.0
+    # 每进程每HTTP origin的物理请求上限；0关闭，只按可信owner轮转，不跨进程计额。
+    provider_max_concurrent_requests: int = 0
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
     # 模型上下文窗口：空 = 用服务商元数据/探测，都拿不到按 128000；填数字 = 就用这个数（原 model_context_window_explicit 已并入）。
     model_context_window_tokens: int | None = None

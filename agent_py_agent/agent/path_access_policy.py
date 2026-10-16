@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit
 
 PATH_ACCESS_MODE_NORMAL = "normal"
 PATH_ACCESS_MODE_FULL = "full"
@@ -97,7 +101,7 @@ HOST_STATE_LOCK_SUFFIX = ".lock"
 # 常量用途: 列出要原码透传的宿主托管文件拒绝码。
 HOST_FILE_DENIAL_CODES: frozenset[str] = frozenset({
     "PATH_HOST_MANAGED_STORE_BLOCKED", "PATH_HOST_CONFIG_WRITE_BLOCKED", "PATH_HOST_STATE_WRITE_BLOCKED",
-    "PATH_HOST_CREDENTIAL_BLOCKED",
+    "PATH_HOST_CREDENTIAL_BLOCKED", "PERSONA_WRITE_REQUIRES_TOOL", "PATH_AGENTS_SOURCE_PROTECTION_INVALID",
 })
 # H3：宿主给沙箱里跑的模型命令设的环境标记，值 "1" 表示这个进程在宿主命令沙箱里、宿主状态只读（任何模式）。只由
 #   tooling/shell._subprocess_text_env 设（不进沙箱的宿主命令会去掉它）；my-agent CLI 按它把启动时的权限类失败换成结构化错误码
@@ -148,6 +152,24 @@ def _is_credential_filename(name: str) -> bool:
         return True
     # .env / .env.local / .env.production …(.env.example 上面已放行)
     return n == ".env" or n.startswith(".env.")
+
+
+# LLM: 描述来自同一政策声明，新增托管项自动进入目录；本模块仍仅用标准库，兼容 SDK 字节分发。
+# 函数用途: 提供 H2/H3/凭据匹配家族的只读目录，不检查存在或读取文件。
+def host_path_descriptions() -> tuple[dict[str, object], ...]:
+    families = (
+        ("managed", "owner", HOST_MANAGED_OWNER_STORE_PARTS),
+        ("config", "home", HOST_CONFIG_HOME_PARTS), ("config", "owner", HOST_CONFIG_OWNER_PARTS),
+        ("state", "owner", (*HOST_STATE_OWNER_FILES, *HOST_STATE_OWNER_DIRS)),
+        ("state", "owner", tuple((name + suffix,) for name in HOST_STATE_OWNER_SQLITE
+                                 for suffix in ("", *SQLITE_SIDECAR_SUFFIXES))),
+        ("state", "owner", tuple((*parts[:-1], parts[-1] + HOST_STATE_LOCK_SUFFIX) for parts in HOST_STATE_OWNER_FILES)),
+        ("state", "task", HOST_STATE_TASK_PARTS), ("credential", "home", HOST_CREDENTIAL_HOME_PARTS),
+    )
+    paths = tuple({"kind": kind, "base": base, "parts": parts} for kind, base, groups in families for parts in groups)
+    matches = ({"kind": "credential", "base": "home", "match": "config/*." + segment + "*"}
+               for segment in sorted(HOST_CONFIG_YAML_SEGMENTS))
+    return (*paths, *matches, {"kind": "credential", "base": "home", "match": "**/" + HOST_SECRET_DIR_NAME + "/**"})
 
 
 # LLM: 结构化决定供宿主和插件共同消费；code 保留原权限分类，不从消息正文推导放行。
@@ -259,7 +281,9 @@ class PathAccessPolicy:
             return PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
         if self.agent_home_root is None:
             return PathAccessDecision(True)
-        return _host_write_block(resolved, self.agent_home_root) or PathAccessDecision(True)
+        return (_host_write_block(resolved, self.agent_home_root)
+                or persona_write_decision(resolved, self.agent_home_root, self.owner_scope_root)
+                or PathAccessDecision(True))
 
     # LLM: H3 凭据只在模式已放行之后才拒（owner 墙、危险根等原拒绝码优先）；判定见 host_credential_for_path，只做路径运算。
     # 函数用途: 目标是宿主凭据时返回 PATH_HOST_CREDENTIAL_BLOCKED，提示改用脱敏的 user_config / manage_models。
@@ -883,3 +907,353 @@ __all__ = [
     "task_host_state_paths",
     "task_root_containing",
 ]
+
+
+# LLM: 这些常量仅约束人格来源的拒写投影，不能替代来源仓库或授予读写权限。
+# 模块用途: 为现有路径门扩展同owner来源保护，原凭据和整机服务队列规则保持原样。
+AGENTS_PROTECTION_CONFIG_MAX_BYTES = 512 * 1024
+_AGENTS_PROTECTION_KEYS = frozenset({"schema_version", "owner", "kind", "value", "revision", "updated_by", "updated_at", "identity"})
+_PERSONA_PROTECTION_NAMES = ("SOUL.md", "USER.md", "AGENTS.md")
+
+# LLM: 投影不可用不等于来源未配置；调用方必须拒写或拒绝启动，不能返回空保护列表。
+# 类用途: 表示来源保护无法安全收窄，等待宿主修复配置或恢复严格文件读取能力。
+class AgentsSourceProtectionError(ValueError):
+    pass
+
+
+# LLM: 原拒写投影只保存本次已核验事实，不提供配置/CAS或正文；persona条目的configuration冻结原权威record，空tuple表示缺配置。
+# 类用途: 在一次平台投影中保存原名称、必需来源身份及原控制记录，供返回前只读复核。
+@dataclass(frozen=True)
+class PersonaProtectedPath:
+    path: Path
+    identity: str | None = None
+    configuration: tuple[tuple[str, object], ...] | None = None
+
+
+# LLM: 显式人格根是宿主事实；插件工厂把cwd写入owner_home时，仅从规范宿主插件库布局反推所属owner，不猜任意cwd。
+# 函数用途: 为平台沙箱选取真实人格根，非owner的旧只读环境保持原权限合同。
+def persona_sandbox_root(owner_home: Path, explicit_root: Path | None) -> Path | None:
+    if explicit_root is not None:
+        return Path(explicit_root)
+    home = Path(owner_home)
+    root = agent_home_root_for_owner(home)
+    canonical = owner_home_containing(home, root) if root is not None else None
+    if canonical == home:
+        return home
+    if canonical is not None and host_managed_store_for_path(home, root) is not None:
+        return canonical
+    if any((home / name).exists() for name in (*_PERSONA_PROTECTION_NAMES, "persona")):
+        return home
+    return None
+
+
+# LLM: 每段都用父FD的nofollow stat/open/fstat复核；目录用search/metadata FD而非读取目录数据，本SDK只依赖stdlib。
+# 函数用途: 安全打开一个路径节点并拒绝符号链接、文件多链接及节点身份替换。
+def _protection_open_node(parent: int, name: str, *, directory: bool) -> int:
+    before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if directory:
+        flags = getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY)) | os.O_NOFOLLOW | os.O_DIRECTORY
+    descriptor = os.open(name, flags, dir_fd=parent)
+    try:
+        actual = os.fstat(descriptor)
+        after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        kind_ok = stat.S_ISDIR(actual.st_mode) if directory else stat.S_ISREG(actual.st_mode) and actual.st_nlink == 1
+        if not kind_ok or not os.path.samestat(before, actual) or not os.path.samestat(after, actual):
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: unsafe node")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+# LLM: 配置有界、来源只读身份，目录仅search/metadata；缺strict能力不能普通open降级，所有FD在异常时关闭。
+# 函数用途: 返回严格路径链身份摘要及可选有界配置原字节，保持业务解析权威不变。
+def _protection_file(path: Path, *, read_config: bool = False) -> tuple[bytes, str]:
+    parent = descriptor = None
+    try:
+        if (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+                or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd
+                or os.stat not in os.supports_follow_symlinks):
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: no strict FD support")
+        directory_flags = getattr(os, "O_SEARCH", getattr(os, "O_PATH", os.O_RDONLY)) | os.O_NOFOLLOW | os.O_DIRECTORY
+        parent = os.open(path.anchor, directory_flags)
+        info = os.fstat(parent)
+        chain = [(info.st_dev, info.st_ino)]
+        for part in path.parts[1:-1]:
+            child = _protection_open_node(parent, part, directory=True)
+            os.close(parent)
+            parent = child
+            info = os.fstat(parent)
+            chain.append((info.st_dev, info.st_ino))
+        descriptor = _protection_open_node(parent, path.name, directory=False)
+        info = os.fstat(descriptor)
+        chain.append((info.st_dev, info.st_ino))
+        raw = _protection_read_config(descriptor) if read_config else b""
+        # 最后按整条原定位复核身份，不能因打开FD后目录被替换而解除原名称的保护。
+        current = [(item.lstat().st_dev, item.lstat().st_ino) for item in (*reversed(path.parents), path)]
+        if current != chain:
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: changed chain")
+        return raw, sha256(json.dumps(chain, separators=(",", ":")).encode()).hexdigest()
+    except (OSError, NotImplementedError, RuntimeError) as error:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: unsafe path") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent is not None:
+            os.close(parent)
+
+
+# LLM: 重复JSON键不能由后值覆盖前值；此处仅验证保护需要的小型投影，不供应配置CAS或来源正文。
+# 函数用途: 为保护层拒绝含重复键的控制记录。
+def _protection_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    record: dict[str, object] = {}
+    for key, value in pairs:
+        if key in record:
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: duplicate key")
+        record[key] = value
+    return record
+
+
+# LLM: owner身份只从可信home规范布局反推，不能接受配置自报的owner作为路径授权。
+# 函数用途: 返回保护投影期望的canonical owner ID，不符合布局时明确拒绝。
+def _protection_owner_id(home: Path) -> str:
+    root = agent_home_root_for_owner(home)
+    if root is None or owner_home_containing(home, root) != home:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: owner layout")
+    return home.relative_to(root / "owners").as_posix()
+
+
+# LLM: 定位仅用于增加拒写；绝对规范路径、无..、跨owner/控制根拒绝，不展开环境变量或用户输入别名。
+# 函数用途: 验证本地保护定位并保持配置的原始路径名称。
+def _protection_locator(value: object, home: Path) -> Path:
+    if type(value) is not str or not value or value.strip() != value or "\x00" in value or "\\" in value:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: locator")
+    path = Path(value)
+    if not path.is_absolute() or str(path) != value or ".." in path.parts:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: locator")
+    root = agent_home_root_for_owner(home)
+    if root is not None and _is_relative_to(path, root) and not _is_relative_to(path, home):
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: cross owner")
+    return path
+
+
+# LLM: 文件门/SDK原tuple[Path]合同不变；配置仍由下方同一只读投影验证，不加载正文/网络或改变配置/CAS。
+# 函数用途: 给原调用方返回当前owner人格控制域与任意名本地来源的拒写路径。
+def persona_protected_paths(owner_home: Path) -> tuple[Path, ...]:
+    return tuple(item.path for item in _persona_protection_snapshot(owner_home))
+
+
+# LLM: AgentsSourceRepository仍为唯一来源权威；按原读取/验证合同冻结完整record及identity，不再签发CAS或读取正文/网络。
+#   配置源失踪不能降为默认缺失路径，默认AGENTS与配置定位重叠时也保留配置identity。
+# 函数用途: 生成同一次保护投影的原名称、必需身份与本次权威控制记录快照，不另建业务配置系统。
+def _persona_protection_snapshot(owner_home: Path) -> tuple[PersonaProtectedPath, ...]:
+    home = Path(owner_home).expanduser().absolute()
+    paths = {path: PersonaProtectedPath(path) for path in
+             (*(home / name for name in _PERSONA_PROTECTION_NAMES), home / "persona")}
+    config = home / "persona/agents_source.json"
+    try:
+        record = _protection_configuration(config, home)
+        paths[config.parent] = PersonaProtectedPath(
+            config.parent, configuration=tuple(sorted(record.items())) if record is not None else ())
+        if record is None:
+            return tuple(paths.values())
+        if record["kind"] == "url":
+            _protection_url(record)
+            return tuple(paths.values())
+        locator = _protection_locator(record["value"], home)
+        if record["kind"] == "owner_default" and locator != home / "AGENTS.md":
+            raise ValueError("default")
+        _, actual_identity = _protection_file(locator)
+        if record["identity"] != actual_identity:
+            raise ValueError("identity changed")
+        paths[locator] = PersonaProtectedPath(locator, actual_identity)
+        return tuple(paths.values())
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as error:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: cannot safely project source") from error
+
+
+# LLM: 平台使用前/返回前都复核原完整nofollow身份链，不能因已保存canonical字符串而接受换inode、失踪或symlink。
+#   FD仅在本次验证内打开并关闭；这不是从argv构造直到bwrap内核bind的FD固定保证。
+# 函数用途: 按同一原身份算法失败关闭已配置来源的后续身份变化。
+def validate_persona_source_identity(path: Path, identity: str) -> None:
+    _, actual = _protection_file(path)
+    if actual != identity:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: source identity changed")
+
+
+# LLM: 复用原权威配置读取合同，只比较冻结record含原revision；坏JSON、切源、增代或缺配置变化都拒绝，不刷新旧值/另建CAS。
+#   同一record的JSON排版不是新代次；此只读复核不保证返回后至内核bind无竞争，不触及许可或持久配置。
+# 函数用途: 在平台保护返回前复核本次配置代次，配置变化不能因旧来源identity仍有效而漏检。
+def validate_persona_configuration(item: PersonaProtectedPath) -> None:
+    if item.configuration is None:
+        return
+    try:
+        record = _protection_configuration(item.path / "agents_source.json", item.path.parent)
+        current = tuple(sorted(record.items())) if record is not None else ()
+        if current != item.configuration:
+            raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: configuration changed")
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as error:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: cannot revalidate configuration") from error
+
+
+# LLM: 保护路径包括控制域子树、源文件、原定位祖先和实际inode别名；不将整个业务workspace按子树拒写。
+# 函数用途: 判断候选是否影响一个保护路径，目录祖先只拦节点自身而不拦正常同级业务文件。
+def persona_path_is_protected(candidate: Path, protected: tuple[Path, ...]) -> bool:
+    resolved = Path(candidate).expanduser().resolve(strict=False)
+    for original in protected:
+        target = original.resolve(strict=False)
+        if (_relative_folded(resolved, target) is not None or _relative_folded(target, resolved) is not None):
+            return True
+        if _protection_same_inode(resolved, target):
+            return True
+    return False
+
+
+# LLM: 原平台调用方的路径tuple保持不变；同一快照投影只增加拒写，不授予读权或改变配置。
+# 函数用途: 返回当前owner或Full Access全部owner的原保护路径列表。
+def persona_process_protected_paths(owner_home: Path, *, all_owners: bool = False) -> tuple[Path, ...]:
+    return tuple(item.path for item in persona_process_protection_snapshot(owner_home, all_owners=all_owners))
+
+
+# LLM: 与原文件门/平台使用同一严格owner枚举和配置投影，只额外携带已核验identity，不加载正文/网络或持久副作用。
+# 函数用途: 为一次进程沙箱返回保护路径与必需身份，供使用前和返回前复核。
+def persona_process_protection_snapshot(owner_home: Path, *, all_owners: bool = False) -> tuple[PersonaProtectedPath, ...]:
+    home = Path(owner_home)
+    root = agent_home_root_for_owner(home)
+    homes = (home,)
+    if all_owners and root is not None:
+        homes = tuple(dict.fromkeys((home, *_persona_owner_homes(root))))
+    return tuple(dict.fromkeys(item for owner in homes for item in _persona_protection_snapshot(owner)))
+
+
+# LLM: 规范owner列表与文件门一致；直接列目录而不使用会吞IO错误的glob，无法完整枚举时不猜空集合。
+# 函数用途: 严格列出本机main及providers下实际存在的用户和群目录。
+def _persona_owner_homes(root: Path) -> tuple[Path, ...]:
+    main = root / "owners/local/main"
+    homes = [main] if main.is_dir() else []
+    for provider in _persona_owner_directories(root / "owners/providers"):
+        for scope in ("users", "groups"):
+            homes.extend(_persona_owner_directories(provider / scope))
+    return tuple(homes)
+
+
+# LLM: 缺目录表示尚未建立；symlink/非目录/读取错误不能按缺失处理，否则可漏掉另一个owner来源。
+# 函数用途: 安全枚举一级owner布局目录，异常交给调用方失败关闭。
+def _persona_owner_directories(directory: Path) -> tuple[Path, ...]:
+    try:
+        metadata = directory.lstat()
+    except FileNotFoundError:
+        return ()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: owner directory")
+    children = tuple(directory.iterdir())
+    if any(path.is_symlink() for path in children):
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: owner symlink")
+    return tuple(path for path in children if path.is_dir())
+
+
+# LLM: 配置或全owner枚举不可读时不能猜任意文件名并放行；只拒写且无配置持久副作用。
+# 函数用途: 为通用路径门返回人格或来源拒写结果，普通业务路径返回None。
+def persona_write_decision(path: Path, agent_home_root: Path, owner_home: Path | None = None) -> PathAccessDecision | None:
+    try:
+        homes = (owner_home,) if owner_home is not None else _persona_owner_homes(agent_home_root)
+    except (AgentsSourceProtectionError, OSError, RuntimeError):
+        return PathAccessDecision(False, "PATH_AGENTS_SOURCE_PROTECTION_INVALID", "无法安全枚举人格保护范围", str(agent_home_root))
+    for home in homes:
+        decision = _persona_home_write_decision(path, home)
+        if decision is not None:
+            return decision
+    return None
+
+
+# LLM: 已有严格FD；最多512KiB+1判断超限，不无界读，不静默裁剪，返回只读保护投影的原字节。
+# 函数用途: 有界读回来源控制记录。
+def _protection_read_config(descriptor: int) -> bytes:
+    if os.fstat(descriptor).st_size > AGENTS_PROTECTION_CONFIG_MAX_BYTES:
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: oversized config")
+    raw = b""
+    while len(raw) <= AGENTS_PROTECTION_CONFIG_MAX_BYTES:
+        chunk = os.read(descriptor, AGENTS_PROTECTION_CONFIG_MAX_BYTES + 1 - len(raw))
+        if not chunk:
+            return raw
+        raw += chunk
+    raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: oversized config")
+
+
+# LLM: 缺配置只能在persona目录自身非链接且文件确实不存在时成立；其它异常由上层失败关闭。
+# 函数用途: 安全取得配置保护投影，缺失返回None。
+def _protection_configuration(config: Path, home: Path) -> dict | None:
+    try:
+        control_info = config.parent.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(control_info.st_mode):
+        raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: persona directory")
+    try:
+        config.lstat()
+    except FileNotFoundError:
+        return None
+    raw, _ = _protection_file(config, read_config=True)
+    record = json.loads(raw.decode("utf-8"), object_pairs_hook=_protection_json_object)
+    _protection_validate_record(record, home)
+    return record
+
+
+# LLM: 只验证拒写投影，不能供应业务配置/CAS或授权；字段及精确类型不因拆分放宽。
+# 函数用途: 核对来源配置的owner、schema、代次和定位类型。
+def _protection_validate_record(record: dict, home: Path) -> None:
+    if type(record) is not dict or set(record) != _AGENTS_PROTECTION_KEYS:
+        raise ValueError("fields")
+    if type(record["owner"]) is not str or record["owner"] != _protection_owner_id(home):
+        raise ValueError("owner")
+    if type(record["schema_version"]) is not int or record["schema_version"] != 1:
+        raise ValueError("schema")
+    if type(record["revision"]) is not int or record["revision"] <= 0:
+        raise ValueError("revision")
+    if type(record["updated_by"]) is not str or not record["updated_by"].strip():
+        raise ValueError("actor")
+    if type(record["updated_at"]) is not float or not math.isfinite(record["updated_at"]) or record["updated_at"] <= 0:
+        raise ValueError("time")
+    if type(record["kind"]) is not str or record["kind"] not in {"owner_default", "local_path", "url"}:
+        raise ValueError("kind")
+    identity = record["identity"]
+    if record["kind"] != "url" and (type(identity) is not str or len(identity) != sha256().digest_size * 2
+                                     or any(char not in "0123456789abcdef" for char in identity)):
+        raise ValueError("identity")
+
+
+# LLM: 网络来源不额外保护本地正文，但坏URL或非空本地identity不能被当合法保护投影。
+# 函数用途: 严格核验URL配置所需的拒写元数据。
+def _protection_url(record: dict) -> None:
+    if type(record["value"]) is not str or record["value"].strip() != record["value"]:
+        raise ValueError("url")
+    url = urlsplit(record["value"])
+    if url.scheme != "https" or not url.hostname or url.username or url.password or url.fragment or record["identity"] != "":
+        raise ValueError("url")
+
+
+# LLM: 缺文件仅不能证明inode别名；原路径及祖先保护已由调用方独立比较，不因此解除它们。
+# 函数用途: 判断两定位是否是同一个实际文件。
+def _protection_same_inode(candidate: Path, target: Path) -> bool:
+    try:
+        return os.path.samestat(candidate.stat(), target.stat())
+    except OSError:
+        return False
+
+
+# LLM: 单owner只读保护投影每次重新加载；坏配置拒绝基础写，不缓存许可或推进epoch。
+# 函数用途: 给一份owner来源返回拒写结果，普通业务文件返回None。
+def _persona_home_write_decision(path: Path, home: Path) -> PathAccessDecision | None:
+    try:
+        protected = persona_protected_paths(home)
+        is_protected = persona_path_is_protected(path, protected)
+    except (AgentsSourceProtectionError, OSError, RuntimeError):
+        return PathAccessDecision(False, "PATH_AGENTS_SOURCE_PROTECTION_INVALID",
+                                  "AGENTS来源保护无法安全核验；本次未写入，请由宿主修复来源配置或文件身份。", str(home))
+    if not is_protected:
+        return None
+    return PathAccessDecision(False, "PERSONA_WRITE_REQUIRES_TOOL",
+                              "人格、persona控制域及已配置AGENTS来源不能用基础文件或命令修改；"
+                              "USER请使用 update_persona target=user（无需用户确认），AGENTS请使用 /agents 显式预览确认，"
+                              "SOUL请使用 update_persona target=soul 用户确认链。", str(home))

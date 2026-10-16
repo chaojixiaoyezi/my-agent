@@ -234,10 +234,17 @@ def test_compact_failure_keeps_its_typed_code_and_does_not_claim_data_corruption
         raise ProviderContextWindowError("source exceeds provider window")
 
     monkeypatch.setattr(request_context, "prepare_conversation_context", fail)
-    # 来源先于准备加载；替身只提供一个占位来源，失败仍由原压缩准备抛出。
-    monkeypatch.setattr(request_context, "load_conversation_compact_source", lambda *_args, **_kwargs: object())
+    from agent_py_agent.agent.conversation.compact_provider_surface import (
+        ConversationCompactModelSurface,
+    )
+
+    # 来源先于准备加载，F6按真实同源表面冻结空历史；typed provider失败仍必须来自原prepare替身。
+    source = SimpleNamespace(messages=())
+    monkeypatch.setattr(request_context, "load_conversation_compact_source", lambda *_args, **_kwargs: source)
     inputs = SimpleNamespace(agent=object(), prompt="继续", request_id="r", on_chunk=None,
-                             request={}, loaded_tool_names=(), model_surface=None, defer_compact=False)
+                             request={}, loaded_tool_names=(),
+                             model_surface=ConversationCompactModelSurface(context_scope="conversation"),
+                             defer_compact=False)
     with pytest.raises(ConversationCompactError) as caught:
         request_context._load_gateway_compact_context(inputs, object(), object())
     assert caught.value.error_code == "COMPACT_MODEL_CONTEXT_WINDOW_EXCEEDED"

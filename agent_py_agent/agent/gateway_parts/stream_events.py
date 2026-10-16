@@ -1,5 +1,5 @@
 # LLM: 公开事件按既有 schema 清洗；除长思考沿绑定 sink 归档外只做投影，不写会话/权限/执行状态。
-# 模块用途: 集中构造流式统计、用户插话、退避和思考载荷；修改时同步脱敏、归档、插话和普通客户端测试。
+# 模块用途: 集中构造统计、插话、排队、退避和思考载荷；修改时同步脱敏、归档及普通客户端测试。
 from __future__ import annotations
 
 from typing import Literal
@@ -30,6 +30,18 @@ _CONTEXT_COMPACTION_FIELDS = (
     "dropped_pairs",
     "preserved_pairs",
 )
+
+
+# LLM: 公开排队只接受阶段和数字白名单；正文、端点及 owner 永不投影，不参与准入或重试裁决。
+# 函数用途: 复用 TUI 已支持的运行进度，给 IM 状态保留同一结构化排队事实。
+def provider_queue_event(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or value.get("phase") not in {"waiting", "admitted", "cancelled"}:
+        return {}
+    phase = value["phase"]
+    public = {"phase": phase, "admission_wait_reason": "provider_concurrency",
+              "wait_seconds": max(0.0, round(float(value.get("wait_seconds") or 0), 3))}
+    text = {"waiting": "模型接口排队中", "admitted": "模型接口排队结束，正在请求", "cancelled": "模型接口排队已结束"}[phase]
+    return {"kind": "runtime_progress", "text": text, "verbose_level": "full", "provider_queue": public}
 
 
 # LLM: Gateway stream sanitization accepts only the frozen schema, known numeric fields and two short display labels

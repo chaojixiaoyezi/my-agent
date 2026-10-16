@@ -1,5 +1,5 @@
 
-# LLM: 主上下文包只持久化运行引用与结构化合同；保存时复用 memory_archive 的目录权限结果并保持文件原子私有写。
+# LLM: 主上下文包只持久化运行引用与结构化合同；内存定稿后各快照单次私有原子写，目录权限结果只准备一次。
 # 模块用途: 构造本轮主上下文包，必要时保存快照并把目录符号链接风险记入结构化日志。
 from __future__ import annotations
 
@@ -66,7 +66,8 @@ class MainContextBundleResult:
     bundle: dict[str, object] | None = None
 
 
-# LLM: 快照只在 save 且有 owner home 时落盘；目录链只准备一次，符号链接警告只记账，不让可选快照拖垮回合。
+# LLM: 快照只在 save 且有 owner home 时落盘；目录链只准备一次、路径先算好，渲染与定稿在内存收敛，
+#   每个快照文件（含 latest 副本）只写一遍，latest 直接用内存文本，不再读回或重写。
 # 函数用途: 构造主上下文包；按需写入私有快照，并保留原有提示段、路径和文件字节。
 def build_main_context_bundle(request: MainContextBundleRequest) -> MainContextBundleResult:
     bundle = _bundle_payload(request)
@@ -76,27 +77,12 @@ def build_main_context_bundle(request: MainContextBundleRequest) -> MainContextB
     bundle = finalize_context_bundle_contracts(bundle, prompt_section)
     if not request.save or request.home_paths is None:
         return MainContextBundleResult(prompt_section=prompt_section, bundle=bundle)
-    archive = _memory_archive_root(request.home_paths)
-    base = archive / "snapshots" / "context_bundles" / date.today().isoformat()
-    directory_result = ensure_private_directory_chain(archive, base)
-    if directory_result.warning:
-        warning = directory_result.warning
-        _LOGGER.warning(
-            "context bundle snapshot directory permissions skipped reason_code=%s path=%s",
-            warning["reason_code"],
-            warning["path"],
-            extra={
-                "reason_code": warning["reason_code"],
-                "severity": warning["severity"],
-                "path": warning["path"],
-                "structured_warning": warning,
-            },
-        )
-    json_path, markdown_path = _write_bundle_files(request, bundle, directory_result)
+    directory_result = _prepare_snapshot_directory(request)
+    json_path, markdown_path = _snapshot_paths(request, directory_result)
     prompt_section = render_prompt_section(bundle, json_path=str(json_path))
     bundle = finalize_context_bundle_contracts(bundle, prompt_section)
-    _rewrite_bundle_files(json_path, markdown_path, bundle, directory_result)
     prompt_section = render_prompt_section(bundle, json_path=str(json_path))
+    _write_bundle_files(json_path, markdown_path, bundle, directory_result)
     return MainContextBundleResult(
         prompt_section=prompt_section,
         json_path=str(json_path),
@@ -230,63 +216,66 @@ def _tooling_payload(request: MainContextBundleRequest) -> dict[str, object]:
     }
 
 
-# LLM: build_main_context_bundle 只准备一次目录链；后续写入复用结果，不再反推归档根或重复收紧目录。
-# 函数用途: 把同一目录准备结果用于首写，并以原路径和原序列化格式写入私有快照与 latest 副本。
-def _write_bundle_files(
+# LLM: 目录链准备与符号链接警告只做一次；警告只记账，不让可选快照拖垮回合。
+# 函数用途: 准备当天快照目录并记录符号链接警告，返回供单次写入复用的目录结果。
+def _prepare_snapshot_directory(request: MainContextBundleRequest) -> PrivateDirectoryChainResult:
+    archive = _memory_archive_root(request.home_paths)
+    base = archive / "snapshots" / "context_bundles" / date.today().isoformat()
+    directory_result = ensure_private_directory_chain(archive, base)
+    if directory_result.warning:
+        warning = directory_result.warning
+        _LOGGER.warning(
+            "context bundle snapshot directory permissions skipped reason_code=%s path=%s",
+            warning["reason_code"],
+            warning["path"],
+            extra={
+                "reason_code": warning["reason_code"],
+                "severity": warning["severity"],
+                "path": warning["path"],
+                "structured_warning": warning,
+            },
+        )
+    return directory_result
+
+
+# LLM: 路径在写之前就能确定（stem 只依赖请求标识）；先算好路径，才能一次渲染定稿、每文件只写一遍。
+# 函数用途: 由目录准备结果与请求标识计算本回合 JSON/Markdown 快照的最终路径。
+def _snapshot_paths(
     request: MainContextBundleRequest,
-    bundle: dict[str, object],
     directory_result: PrivateDirectoryChainResult,
 ) -> tuple[Path, Path]:
     base = directory_result.directory
     stem = _bundle_stem(request)
-    json_path = base / f"{stem}.json"
-    markdown_path = base / f"{stem}.md"
-    json_text = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True)
-    markdown_text = render_markdown_bundle(bundle, json_path=str(json_path))
-    write_private_text_file_atomic(json_path, json_text, ensure_parent_private=False)
-    write_private_text_file_atomic(markdown_path, markdown_text, ensure_parent_private=False)
-    _write_latest_copies(directory_result, json_path, markdown_path)
-    return json_path, markdown_path
+    return base / f"{stem}.json", base / f"{stem}.md"
 
 
-# LLM: 准备结果显式携带归档根；用它构造 latest 路径，不遍历或 chmod 目录链。
-# 函数用途: 从权威快照刷新两个 latest 文件，只做私有原子写，不重复收紧目录链。
-def _write_latest_copies(
-    directory_result: PrivateDirectoryChainResult,
-    json_path: Path,
-    markdown_path: Path,
-) -> None:
-    relative_base = directory_result.directory.relative_to(directory_result.root)
-    latest_json = directory_result.root / relative_base / "latest_context_bundle.json"
-    latest_markdown = directory_result.root / relative_base / "latest_context_bundle.md"
-    write_private_text_file_atomic(
-        latest_json,
-        json_path.read_text(encoding="utf-8"),
-        ensure_parent_private=False,
-    )
-    write_private_text_file_atomic(
-        latest_markdown,
-        markdown_path.read_text(encoding="utf-8"),
-        ensure_parent_private=False,
-    )
-
-
-# LLM: 合同字段重写复用首写时的根锚定结果，不使用 parents 层级推断归档根。
-# 函数用途: 原子重写 JSON/Markdown 快照并刷新 latest，复用本回合唯一一次目录准备结果。
-def _rewrite_bundle_files(
+# LLM: 快照的最终字节只由定稿后的 bundle 决定；json/md 与两个 latest 副本都用内存文本各写一遍，不读回、不重写。
+# 函数用途: 把定稿后的快照 JSON/Markdown 与 latest 副本各写一遍（私有原子写）。
+def _write_bundle_files(
     json_path: Path,
     markdown_path: Path,
     bundle: dict[str, object],
     directory_result: PrivateDirectoryChainResult,
 ) -> None:
-    base = directory_result.directory
-    if json_path.parent != base or markdown_path.parent != base:
-        raise ValueError("context bundle snapshots must share the prepared directory")
     json_text = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True)
     markdown_text = render_markdown_bundle(bundle, json_path=str(json_path))
     write_private_text_file_atomic(json_path, json_text, ensure_parent_private=False)
     write_private_text_file_atomic(markdown_path, markdown_text, ensure_parent_private=False)
-    _write_latest_copies(directory_result, json_path, markdown_path)
+    _write_latest_copies(directory_result, json_text, markdown_text)
+
+
+# LLM: latest 副本直接写内存文本，不把刚写的文件读回来；准备结果显式携带归档根，不遍历或 chmod 目录链。
+# 函数用途: 用同一份内存文本刷新两个 latest 文件，只做私有原子写。
+def _write_latest_copies(
+    directory_result: PrivateDirectoryChainResult,
+    json_text: str,
+    markdown_text: str,
+) -> None:
+    relative_base = directory_result.directory.relative_to(directory_result.root)
+    latest_json = directory_result.root / relative_base / "latest_context_bundle.json"
+    latest_markdown = directory_result.root / relative_base / "latest_context_bundle.md"
+    write_private_text_file_atomic(latest_json, json_text, ensure_parent_private=False)
+    write_private_text_file_atomic(latest_markdown, markdown_text, ensure_parent_private=False)
 
 
 def _memory_archive_root(home_paths: Any) -> Path:

@@ -13,6 +13,14 @@
 
 当前哪些能力稳定、哪些仍有边界，以 [产品能力与边界](docs/PRODUCT_FACTS.md) 为唯一权威；发布风险见 [STATUS](STATUS.md)。
 
+## F4/F5 组合候选（2026-10-16，未发布）
+
+当前独立组合候选接入用户规则与学习分离、人工记忆候选确认和只读 `self_map`。本人在终端或 IM 中用 `/agents` 维护规则；用 `/memory candidates` 查看候选，`/memory candidates preview <候选ID>` 完整预览后复制确认命令。裸 `/memory [查询内容]` 仍仅终端搜索。自动学习只产候选，来源可学不代替正式内容确认。
+
+自我目录从现有模块读当前可见工具、Skill、目录、模型、权限与工作状态，不执行、不授权；unknown/partial 不等于没有。原 `list_tools/tool_search`、凭据卡与群共享引用、群监控授权、机器人订阅、原生及引用图片继续服从 main 当前合同。详见[命令用法](CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布)、[自我目录](docs/design/SELF_MAP.md)和[合并设计](docs/design/SEVEN_FEATURE_INTEGRATION.md)。
+
+分线与非作者证据分别保留；组合 R2 发现的 Linux bwrap 保护次序 P1 已由准确独立补丁修复并通过非作者离线复核，CLI 模块定义顺序缺口也已修；这些源码合同证据不代替真实 Linux 内核或发行验收。最终组合 focused、全仓及严格 gate、准确包和真实 IM 验收尚未完成。本段不表示已推 main、已更新本机服务或已启用全部七块功能。
+
 ## 它解决什么问题
 
 普通聊天助手每次对话都从零开始，任务一长就丢上下文，跑命令没有隔离，做了什么也无法回溯。

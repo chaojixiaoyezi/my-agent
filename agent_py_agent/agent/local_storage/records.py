@@ -136,6 +136,8 @@ class _LocalStoreRecordHelpers:
         return self.root / path
 
 
+# LLM: 派生正文与SQLite记录共享原schema/连接工厂；删除只清精确canonical正文，错误必须向恢复层传播。
+# 类用途: 写入派生检索记录，并在删除或提交前崩溃后擦除对应正文。
 class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
     def upsert_record(
         self,
@@ -271,7 +273,7 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
                 (clean_id,),
             ).fetchone()
         if row is None:
-            return False
+            return self._delete_orphan_content(clean_id)
 
         content_path = self._resolve_content_path(str(row["content_path"] or ""))
         # Wipe first. If unlink later fails, no plaintext remains in the file.
@@ -299,6 +301,22 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
         checkpoint = getattr(self, "_truncate_redacted_wal", None)
         if callable(checkpoint):
             checkpoint()
+        return True
+
+
+    # LLM: 无SQL行时只检查规范单组件ID对应的正文文件，不相信外部路径；擦除失败向上传递以便恢复重试。
+    # 函数用途: 收拾正文已写入、数据库提交前崩溃留下的孤立文件。
+    def _delete_orphan_content(self, record_id: str) -> bool:
+        if record_id in {".", ".."} or any(char in record_id for char in ("/", "\\", "\x00")):
+            return False
+        path = self._content_file(record_id)
+        if not path.exists() and not path.is_symlink():
+            return False
+        write_private_text_file_atomic(path, "")
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return True
 
 

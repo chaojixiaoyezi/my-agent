@@ -59,6 +59,7 @@ from .curator_models import (
     curator_replay_breaker_tripped,
     validate_curator_state,
 )
+from .curator_rejected_bindings import retain_rejected_target_bindings
 from .curator_routing import (
     CURATOR_DEFAULT_FALLBACK_CODES,
     CURATOR_MODEL_GROUP_MAX_COUNT,
@@ -121,7 +122,7 @@ class MemoryCuratorIdentity:
     timezone_name: str = ""
 
 
-# LLM: A dependency bundle replaces a wide constructor and makes the no-tools boundary visible:
+# LLM: 依赖集合明确策展无工具执行能力；只读输入、规范仓库和宿主verifier共用原权威，不装Skill发布器。
 # there is no ToolRegistry, file tool, persona tool, remember tool, or Skill installer field.
 # 类用途: 汇总 Curator 所需的只读输入、规范仓库和可选正式记忆投影。
 @dataclass(frozen=True)
@@ -136,6 +137,8 @@ class MemoryCuratorDependencies:
     identity: MemoryCuratorIdentity = MemoryCuratorIdentity()
     formal_memory_source: FormalMemorySource | None = None
     tool_reference_source: CuratorToolReferenceSource | None = None
+    # 与Promotion使用同一宿主账本核验器；缺失时工具引用失败关闭，不能在合并后才拒绝。
+    tool_evidence_verifier: object | None = None
     promotion_callback: Callable[[str], object] | None = None
     # 升级自愈:每次持 lease 执行前自动应用 Memory v2 迁移(幂等),失败不阻断提炼。
     migration_service: object | None = None
@@ -183,9 +186,10 @@ class _CuratorLifecycleMixin:
             "requested_at": state.pending_requested_at,
         }
 
-    # LLM: 普通维护在同端点前台工作时延后，不消费 pending/游标；pre_compact 屏障例外，避免互等。
+    # LLM: 到期运行只依据配置、租约与前台资源事实；普通维护遇前台延后，pre_compact仍守原屏障。
     # 函数用途: 按持久状态与前台资源事实调度到期批次，不从正文判断优先级。
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
+
         if not self.config.enabled:
             return self._result(status="disabled", reason="interval")
         try:
@@ -552,11 +556,14 @@ class _CuratorExecutionMixin:
             formal_memories=formal,
             tool_reference_source=self.tool_reference_source,
         )
+        from .curator_learning_source import attach_audit_sources
+
+        batch = attach_audit_sources(batch, self.conversation_store, self.owner_id)
         if formal_memory_errors:
             batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
         return batch
 
-    # LLM: committer 最后写 state 并保留租约；晋升完成才释放，不重放已提交计数或游标。
+    # LLM: 合法候选及拒绝版本约束共用事务；committer最后写state并保留租约，晋升完成才释放。
     # 函数用途: 提交规范批次并完成晋升尾段，租约由整轮生命周期在心跳停止后释放。
     def _commit_batch(
         self,
@@ -566,7 +573,11 @@ class _CuratorExecutionMixin:
         *,
         extra_warnings: tuple[str, ...] = (),
     ) -> CuratorRunResult:
-        prepared = _without_identity_conflicts(self.candidate_service, _prepare_outputs(context, batch, extraction))
+        # LLM: 先统一提取候选的落点输出（含来源/身份事实），再做身份冲突过滤；两步都在租约内完成。
+        outputs = _prepare_outputs(
+            context, batch, extraction, owner=self.dependencies.identity.owner_id
+        )
+        prepared = _without_identity_conflicts(self.candidate_service, outputs)
         finished_at = utc_now_iso()
         run_record = _successful_run_record(
             context,
@@ -593,6 +604,7 @@ class _CuratorExecutionMixin:
                     state_commit=state_commit,
                     daily_events=prepared.daily_events,
                     candidate_observations=prepared.candidates,
+                    rejected_target_bindings=prepared.rejected_target_bindings,
                 )
             )
         except CuratorCommitRecoveryError:
@@ -601,8 +613,8 @@ class _CuratorExecutionMixin:
             raise CuratorBatchCommitError("curator batch commit failed") from exc
         return self._post_commit_report(context, batch, prepared, committed, extra_warnings)
 
-    # LLM: 提交成功后仍持有同一租约；新候选和积压候选去重后晋升，失败不回滚已成功事务。
-    # 函数用途: 在租约尾段执行自动晋升并构造成功结果。
+    # LLM: 提交后仍持同一租约；新候选与积压去重晋升，回执分开计正式提交、旧清理恢复和待办，不回滚已成功事务。
+    # 函数用途: 在租约尾段晋升并把逐条无正文结果交给CLI/Gateway。
     def _post_commit_report(
         self,
         context: _RunContext,
@@ -624,7 +636,9 @@ class _CuratorExecutionMixin:
             != "agents"
         ]
         promotable = list(dict.fromkeys((*promotable, *self._pending_promotable_candidate_ids(limit=32))))
-        promoted, promotion_warnings = self._promote_eligible(promotable)
+        from .curator_promotion_receipts import promotion_counts
+
+        promoted, promotion_warnings, receipts = self._promote_eligible(promotable)
         warnings = (
             *prepared.warnings,
             *extra_warnings,
@@ -647,6 +661,8 @@ class _CuratorExecutionMixin:
             daily_events=len(committed.daily_events),
             candidates=len(committed.candidates),
             warnings=warnings,
+            promotion_results=receipts,
+            **promotion_counts(receipts),
         )
 
 
@@ -746,14 +762,16 @@ class _CuratorPromotionMixin:
         except Exception:
             return []
 
-    # LLM: 失败与已成功事务隔离且保持可重试；manual_only 或无回调时不动；每条候选提交前重读名单
-    #   （选中到晋升之间可能有新排除，如清理迁移），命中即跳过并补同步标记（2907）。
-    # 函数用途: 逐条执行保守自动晋升并返回成功数与稳定警告码。
-    def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...]]:
+    # LLM: 晋升在同一租约内逐条重查排除；原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。
+    # 函数用途: 返回本轮成功晋升数、稳定警告和无正文的逐条提交/恢复结果。
+    def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
+        from .curator_promotion_receipts import promotion_receipt
+
         if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
-            return 0, ()
+            return 0, (), ()
         promoted = 0
         warnings: list[str] = []
+        receipts: list[dict] = []
         for candidate_id in candidate_ids:
             skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
             warnings.extend(skip_warnings)
@@ -764,9 +782,13 @@ class _CuratorPromotionMixin:
             except Exception:
                 warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
                 continue
-            if bool(getattr(result, "promoted", False)):
+            receipt = promotion_receipt(candidate_id, result)
+            receipts.append(receipt)
+            if receipt['reason_code'] == 'REMOVE_CLEANUP_PENDING':
+                warnings.append('REMOVE_CLEANUP_PENDING')
+            if receipt['promoted'] and receipt['formal_memory_changed']:
                 promoted += 1
-        return promoted, tuple(dict.fromkeys(warnings))
+        return promoted, tuple(dict.fromkeys(warnings)), tuple(receipts)
 
     # LLM: 名单不可读时不晋升（fail-closed）；命中候选补一次标记同步，让后续人工路径也看到排除；
     #   判定只看结构化 refs 与通道绑定，不解析正文（2907）。
@@ -813,7 +835,7 @@ class _CuratorPromotionMixin:
 #   读写账本，不直接碰 Daily/Candidate；改动同步 test_curator_thread_model_routing.py 与 test_memory_curator_v2.py。
 # 类用途: 提供 Curator 一次触发的分组运行和按组选模型的提取。
 class _CuratorRunMixin:
-    # LLM: 按会话主代理模型分组时，一次触发依次处理各组：每组是一次完整运行（租约、提取、一次事务提交），
+    # LLM: 按宿主会话模型分组逐组运行（租约、提取、事务提交），不从模型正文推测派工或正式批准；
     #   成功且还有组没处理才接着跑下一组，最多 CURATOR_MODEL_GROUP_MAX_COUNT 组；任何一组没成功就停在那组，
     #   已提交的组不会重复落账，那组游标不动、按原规则安全重放。没有路由时只跑一次，与改动前一致。
     # 函数用途: 显式或自动执行 Curator（可能连续处理几组会话）并返回汇总后的无正文运行摘要。
@@ -824,6 +846,7 @@ class _CuratorRunMixin:
         force: bool = False,
         now: datetime | None = None,
     ) -> CuratorRunResult:
+
         results: list[CuratorRunResult] = []
         remaining = 1
         while remaining and len(results) < CURATOR_MODEL_GROUP_MAX_COUNT:
@@ -937,7 +960,8 @@ class _CuratorRunMixin:
     def _extract_with(self, backend: object, context: _RunContext, batch: CuratorInputBatch):
         with provider_session_scope((self.owner_id,), context.run_id):
             attempt = extract_with_retries(backend, self.config, batch)
-        return attempt, validate_extraction(attempt.extraction, attempt.batch, owner_id=self.owner_id)
+        return attempt, validate_extraction(attempt.extraction, attempt.batch, owner_id=self.owner_id,
+            tool_verifier=self.dependencies.tool_evidence_verifier)
 
 
 # LLM: This is the only background Memory extraction service used by Gateway maintenance, CLI,
@@ -1145,7 +1169,7 @@ class MemoryCuratorService(
         }
 
 
-# LLM: Prepared outputs bind host-created Daily records, canonical candidate observations, exact
+# LLM: 提交前绑定宿主Daily、候选、精确游标及无正文告警；拒绝观察仅保留目标约束，不能恢复模型正文。
 # cursor advancement, and non-content warnings before transaction construction.
 # 类用途: 保存一次验证后、尚未落盘的 Curator 批次。
 @dataclass(frozen=True)
@@ -1154,16 +1178,18 @@ class _PreparedOutputs:
     candidates: tuple[CandidateObservation, ...]
     cursor: CuratorCursorAdvance
     warnings: tuple[str, ...]
+    rejected_target_bindings: tuple[dict[str, object], ...] = ()
 
 
 # LLM: 只读候选账本，用提交同一个合并函数预演：撞上已有观察身份但类型化主题不同的单条候选被剔除，
-#   记结构化警告 curator_candidate_identity_conflict_dropped:<条数> 并打日志告警，其余照常整批提交、游标照常推进。
+#   同批拒绝版本约束先进入纯预演；冲突记结构化警告，其余照常整批提交，游标仍按处理声明推进。
 #   预演与提交之间若有别处写入造成新冲突，提交仍按原严格语义失败（极少见，由重放熔断兜底）。
 # 函数用途: 提交前剔除会让整批失败的观察身份冲突候选。
 def _without_identity_conflicts(candidate_service: CandidateService, prepared: _PreparedOutputs) -> _PreparedOutputs:
     if not prepared.candidates:
         return prepared
-    kept, dropped = split_identity_conflicts(candidate_service.list(), prepared.candidates)
+    rows = retain_rejected_target_bindings(candidate_service.list(), prepared.rejected_target_bindings)
+    kept, dropped = split_identity_conflicts(rows, prepared.candidates)
     if not dropped:
         return prepared
     _LOGGER.warning("memory curator dropped %d candidate(s) whose observation identity conflicts", dropped)
@@ -1219,13 +1245,15 @@ def _replay_breaker(run_log: CuratorRunLog, context: _RunContext, failure_code: 
     return CURATOR_REPLAY_BREAKER_OPEN, (f"curator_replay_breaker_open:{failure_code}",)
 
 
-# LLM: Empty runs use the same output object and transaction, proving admin/finalize requests
-# release their lease without a second no-work commit path.
+# LLM: 空批次与正常批次共用提交对象和租约释放；被拒目标绑定独立于学习候选，不获得正式晋升资格。
+# release their lease without a second path; host-only rejected bindings bypass learning/promotion attribution.
 # 函数用途: 将验证后的 extraction 转成宿主持有的提交对象。
 def _prepare_outputs(
     context: _RunContext,
     batch: CuratorInputBatch,
     extraction: CuratorExtraction | None,
+    *,
+    owner: str = "",
 ) -> _PreparedOutputs:
     if extraction is None:
         # 空批次也要消费「整段被排除」的 audit 游标，否则同一排除窗口会被反复扫描。
@@ -1252,21 +1280,39 @@ def _prepare_outputs(
     )
     # 宿主确定性补全漏写的 user_explicit 长期目标，并通过共享权限函数给每条候选赋权；
     # 模型 Schema 不暴露 promotion_mode，正文和 confidence 均不参与权限判断。
+    # 先附宿主来源投影再算权限：工作约定的学习资格只由来源门决定。
     candidates = tuple(
-        _fill_candidate_promotion_authority(item) for item in extraction.candidates
+        _fill_candidate_promotion_authority(
+            _attach_learning_source(item, batch, owner)
+        )
+        for item in extraction.candidates
     )
     # 按会话模型分组时的宿主警告（档案退回、会话退回默认的原因计数、补跑原因）放在最前，保证进运行记录、不被模型警告挤掉。
     host_warnings = (*context.route.get("warnings", ()), *context.route.get("fallback_warnings", ()))
-    return _PreparedOutputs(daily, candidates, cursor, (*host_warnings, *model_warnings)[:RUN_WARNINGS_MAX_COUNT])
+    return _PreparedOutputs(daily, candidates, cursor, (*host_warnings, *model_warnings)[:RUN_WARNINGS_MAX_COUNT],
+                            extraction.rejected_target_bindings)
 
 
-# LLM: Host authority comes from the shared typed candidate policy. This adapter only fills the
-# one deterministic missing long-term target and never inspects prose or confidence.
+# LLM: 模型输出规范化后，对消息/tool/artifact及派生task/run/evidence逐条核对资格；不把单一投影扩大到其他引用。
+# 函数用途: 给候选附上完整引用集合的宿主来源判定。
+def _attach_learning_source(item: object, batch: CuratorInputBatch, owner: str) -> object:
+    from .curator_learning_source import candidate_learning_source
+
+    return replace(item, learning_source=candidate_learning_source(item, batch, owner))
+
+
+# LLM: 只按共享typed策略补默认long_term；工作约定进入唯一长期库候选，绝不到AGENTS，来源资格不等于批准。
+# deterministic missing long-term target (working_agreement always goes to the unique long-term
+# library, never AGENTS) and never inspects prose or confidence.
 # 函数用途: 补全默认长期目标，并调用统一宿主策略设置自主晋升权限。
 def _fill_candidate_promotion_authority(item: object) -> object:
     target = str(getattr(item, "promotion_target", "") or "").strip().lower()
     origin = str(getattr(item, "origin", "") or "").strip().lower()
     ctype = str(getattr(item, "candidate_type", "") or "").strip().lower()
+    if ctype == "working_agreement" and target in {"", "none", "agents"}:
+        # 第 1 期：自动学到的约定进唯一正式库（long_term JSONL），不再指向 AGENTS。
+        item = replace(item, promotion_target="long_term")
+        target = "long_term"
     if not target and origin == "user_explicit" and ctype in {"long_term_fact", "event"}:
         item = replace(item, promotion_target="long_term")
         target = "long_term"

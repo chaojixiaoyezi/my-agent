@@ -39,10 +39,9 @@ def _promote_formal_route(agent: SimpleAgent) -> str:
             )
         )
     assert candidate is not None
-    result = agent.memory_promotion.promote(
-        candidate.candidate_id,
-        automatic=True,
-    )
+    # 用户通过原管理入口审核精确lesson；来源事实本身不授予自动发布权。
+    agent.memory_promotion.review(candidate.candidate_id, approved=True, reviewer="explicit-test-user")
+    result = agent.memory_promotion.promote(candidate.candidate_id, confirmed=True)
     assert result.promoted is True
     return result.promotion_ref.split("#", 1)[0]
 

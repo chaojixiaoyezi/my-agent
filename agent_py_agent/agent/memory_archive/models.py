@@ -1,3 +1,5 @@
+# LLM: 归档事件只保存宿主明确传入的线程和请求；旧档案缺字段保持空，不从session或文本推测来源。
+# 模块用途: 定义实时和终态归档共享的数据结构。
 
 from __future__ import annotations
 
@@ -59,7 +61,7 @@ class CompressionSnapshot:
         return asdict(self)
 
 
-# LLM: RawMemoryEvent is the append-only archive contract. New execution facts must remain
+# LLM: 原始事件是追加归档合同；新thread字段旧行缺失保持空，不通过正文或session推断来源。
 # optional for old rows and round-trip through to_dict without converting prose into authority.
 # 类用途: 保存一条原始会话或工具事件，供后续查询、压缩和记忆证据核验。
 @dataclass
@@ -89,6 +91,8 @@ class RawMemoryEvent:
     visibility: str = "private"
     source: str = ""
     archive_level: int = 3
+    # Host conversation identity; empty on legacy archives, never inferred from session/text.
+    thread_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
 

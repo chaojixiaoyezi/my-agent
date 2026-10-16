@@ -1,6 +1,6 @@
-# LLM: attempt 同步执行共用进程回收与显式 cwd 传递，不含能力包业务或目录授权判定；TERM→宽限→KILL 只作用于本次新建会话的组。
+# LLM: attempt 同步执行共用进程回收、每流有界捕获与显式 cwd 传递；复用 Shell 的采集器，不含能力包或目录授权裁决。
 #   回调与超时串行且幂等；退出前撤销回调、等在途清理完成，不能让旧取消控制后续命令。联测 cancellation 与 shell_stdin。
-# 模块用途: 等待沙箱批处理命令时响应取消，并回收本次命令的完整进程组，不接管其它宿主进程。
+# 模块用途: 有界捕获沙箱批处理输出、响应取消并回收本次进程组，不接管其它宿主进程。
 from __future__ import annotations
 
 import os
@@ -16,6 +16,7 @@ from ..common.cancellation import (
     raise_if_cancelled,
     register_cancellation_callback,
 )
+from ..tooling.process_output_capture import ProcessOutputCapture
 
 # 取消可能仅来自外部结构化检查（没有 token.cancel 回调），每 0.1 秒复核，不能等到整个命令超时。
 _CANCELLATION_POLL_SECONDS = 0.1
@@ -25,15 +26,16 @@ _PIPE_DRAIN_SECONDS = 1.0
 _GROUP_EXIT_POLL_SECONDS = 0.05
 
 
-# LLM: Popen 由 start_new_session 创建，pid 即已冻结组号；不能取消时再 getpgid（组长可能已被 communicate 回收）。
+# LLM: Popen 由 start_new_session 创建，pid 即已冻结组号；不能取消时再 getpgid（组长可能已被 wait 回收）。
 #   lock 只串行本次命令的 TERM/KILL 与关闭；不跨任务、不查询全局进程表。
 # 类用途: 让超时和取消竞争时只回收一次，并在返回前等这次回收完成。
 class _ProcessRun:
-    # LLM: 不启动进程，仅保存本次 Popen 和宽限；关闭标志防止已经撤销的旧回调再发信号。
+    # LLM: 不启动进程或 reader，仅保存 Popen/宽限和本次 capture 槽；关闭标志防已撤销回调再发信号。
     # 函数用途: 为刚启动的独立进程组建立一次性回收句柄。
     def __init__(self, proc: subprocess.Popen, grace_seconds: float):
         self.proc = proc
         self.grace_seconds = grace_seconds
+        self.capture: ProcessOutputCapture | None = None
         self._lock = threading.Lock()
         self._stopped = False
         self._closed = False
@@ -54,7 +56,7 @@ class _ProcessRun:
             self._closed = True
 
 
-# LLM: 只承载已裁决的启动/等待与宿主环境上界；cwd=None 保留 --chdir，不能从 argv 重选来源或目录权限。
+# LLM: 只承载已裁决的启动/等待及宿主凭据来源上界；cwd=None 保留命名空间的 --chdir，不重新授权目录。
 # 类用途: 将同步命令的期限、回收宽限、捕获与工作目录打包，避免接口参数超过四个。
 @dataclass(frozen=True)
 class SandboxProcessOptions:
@@ -66,7 +68,8 @@ class SandboxProcessOptions:
 
 
 # LLM: argv/cwd 已由唯一沙箱入口校验，Popen 必须显式接收 cwd，不继承一个白名单外的宿主目录；不在此裁决权限。
-#   取消前后都检查，DEVNULL stdin/原超时合同不变；环境沿统一擦洗，不能把宿主 SecretRef 来源交给检查程序。
+#   取消前后都检查；二进制管道仅由通用采集器读取，不能再 communicate；DEVNULL、独立会话及 143 合同保持不变。
+#   环境沿主线统一擦洗，宿主 SecretRef 来源不进入命令；不增加新的启动或登记入口。
 # 函数用途: 启动一次非交互命令，注册取消回收并等待终态；取消抛共用 ToolCancelled，超时仍返回 143。
 def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
     from ..tooling._subprocess_env_scrub import scrub_subprocess_env
@@ -75,18 +78,26 @@ def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subp
     proc = subprocess.Popen(argv, cwd=options.cwd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE if options.capture_output else None,
                             stderr=subprocess.PIPE if options.capture_output else None,
-                            text=options.capture_output, start_new_session=True,
+                            start_new_session=True,
                             env=scrub_subprocess_env(dict(os.environ), host_credential_env_names=options.host_credential_env_names))
     state = _ProcessRun(proc, options.grace_seconds)
     try:
+        if options.capture_output:
+            state.capture = ProcessOutputCapture(proc)
         with register_cancellation_callback(state.stop):
             return _wait_for_process(state, argv, options.timeout)
+    except BaseException:
+        state.stop()
+        _drain_stopped_process(state)
+        raise
     finally:
         state.close()
+        if state.capture is not None:
+            state.capture.finish(0)
         _close_process_pipes(proc)
 
 
-# LLM: 每次短 communicate 不改变总 timeout；外部取消无回调时也能停止，取消优先于超时或已捕获的成功输出。
+# LLM: 每次短 wait 不改变总 timeout；输出线程同时排空。只有组长退出且管道结束才返回，取消仍优先于结果。
 # 函数用途: 用单调期限等待命令，分别交回正常结果、超时结果或取消异常。
 def _wait_for_process(state: _ProcessRun, argv: list[str], timeout: float) -> subprocess.CompletedProcess:
     deadline = time.monotonic() + max(0.0, timeout)
@@ -95,52 +106,80 @@ def _wait_for_process(state: _ProcessRun, argv: list[str], timeout: float) -> su
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return _timeout_result(state, argv)
-        output = _communicate_slice(state.proc, min(remaining, _CANCELLATION_POLL_SECONDS))
-        if output is not None:
+        if _wait_slice(state, min(remaining, _CANCELLATION_POLL_SECONDS)):
             _raise_if_run_cancelled(state)
-            return subprocess.CompletedProcess(argv, state.proc.returncode, *output)
+            return _completed_result(state, argv, state.proc.returncode)
 
 
-# LLM: 无回调的 external_check 也走同一次幂等组回收；回收后排空且 reap 组长，再传播统一取消异常。
+# LLM: 无回调 external_check 也先幂等回收组；统一取消异常由 run 外层捕获，完成有界排空/reap 后才交回调用方。
 # 函数用途: 检查当前 run 是否已取消，确保命令被回收后再退出等待。
 def _raise_if_run_cancelled(state: _ProcessRun) -> None:
     if cancellation_requested():
         state.stop()
-        _drain_stopped_process(state.proc)
         raise_if_cancelled()
 
 
-# LLM: TimeoutExpired 只代表本次观察片未完成，不代表总超时；其它错误不吞掉。
-# 函数用途: 有界排空一次 stdout/stderr，未完成时交给等待循环继续判断取消和总期限。
-def _communicate_slice(proc: subprocess.Popen, seconds: float) -> tuple | None:
+# LLM: TimeoutExpired 只代表观察片未完成；管道 reader 是唯一读取者，wait 不读取或无限累积输出。
+# 函数用途: 有界等待组长与管道末尾，未完成时留给外层继续判断总期限和取消。
+def _wait_slice(state: _ProcessRun, seconds: float) -> bool:
     try:
-        return proc.communicate(timeout=seconds)
+        state.proc.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
-        return None
+        return False
+    if state.capture is not None and not state.capture.done():
+        time.sleep(min(0.01, seconds))
+        return False
+    return True
 
 
-# LLM: 保持原沙箱同步 run 的超时 143 合同；取消与超时交错时不能被降为普通超时。
+# LLM: 保持 CompletedProcess 的 argv/退出码/字符串形状及通用换行；capture 字段与 Shell 同源，逐流字节数不按解码后的字符算。
+# 函数用途: 将有限输出和结构化截断事实交给同步入口调用方；不捕获时 stdout/stderr 仍为 None。
+def _completed_result(state: _ProcessRun, argv: list[str], code: int) -> subprocess.CompletedProcess:
+    stdout, stderr, facts = state.capture.result() if state.capture is not None else (None, None, {})
+    stdout = _text_newlines(stdout)
+    stderr = _text_newlines(stderr)
+    completed = subprocess.CompletedProcess(argv, code, stdout, stderr)
+    completed.capture = facts
+    return completed
+
+
+# LLM: 采集器沿 Shell 的 UTF-8 replacement 解码；这里只恢复同步 text=True 原有的通用换行，不影响原始字节计数。
+# 函数用途: 把同步命令输出的 CRLF/CR 换成换行；未捕获时保留 None。
+def _text_newlines(text: str | None) -> str | None:
+    return text.replace("\r\n", "\n").replace("\r", "\n") if text is not None else None
+
+
+# LLM: 保持超时 143 与原 stderr 回收说明；有限 stdout 和捕获事实仍返回，取消交错时不能被降为超时。
 # 函数用途: 到总期限后回收完整组，并返回带回收说明的超时结果。
 def _timeout_result(state: _ProcessRun, argv: list[str]) -> subprocess.CompletedProcess:
     state.stop()
-    output = _drain_stopped_process(state.proc)
+    _drain_stopped_process(state)
     raise_if_cancelled()
-    return subprocess.CompletedProcess(argv, 143, output[0], f"timeout after TERM->grace({state.grace_seconds}s)->KILL")
+    completed = _completed_result(state, argv, 143)
+    completed.stderr = f"timeout after TERM->grace({state.grace_seconds}s)->KILL"
+    return completed
 
 
 # LLM: 组回收后管道仍未 EOF，可能是脱组后代持有描述符，也可能是组信号被拒、组长还活着。沿用改造前的合同：补杀组长、
 #   有界 reap，不向调用方抛 TimeoutExpired（超时路径仍返回 143）；组长被 SIGKILL 后仍 reap 不到时交给 Popen 自身回收。
-# 函数用途: 有界收集回收后的输出并结束本次组长，不等待脱组进程的管道。
-def _drain_stopped_process(proc: subprocess.Popen) -> tuple:
-    output = _communicate_slice(proc, _PIPE_DRAIN_SECONDS)
-    if output is not None:
-        return output
-    proc.kill()
+# 函数用途: 有界等待组长退出并排空有限输出；管道后代不退出也不会无限等待。
+def _drain_stopped_process(state: _ProcessRun) -> None:
+    try:
+        state.proc.wait(timeout=_PIPE_DRAIN_SECONDS)
+    except subprocess.TimeoutExpired:
+        state.proc.kill()
+        _reap_killed_process(state.proc)
+    if state.capture is not None:
+        state.capture.finish(_PIPE_DRAIN_SECONDS)
+
+
+# LLM: 只 reap 本次组长，SIGKILL 后依然未退出时不无限等待；保持原有超时兜底合同，不吞其它等待错误。
+# 函数用途: 在补杀组长后给操作系统有限的回收时间。
+def _reap_killed_process(proc: subprocess.Popen) -> None:
     try:
         proc.wait(timeout=_PIPE_DRAIN_SECONDS)
     except subprocess.TimeoutExpired:
         pass
-    return (None, None)
 
 
 # LLM: 只关闭本次 Popen 创建的管道，stdin 是 DEVNULL；即使取消抛异常也不把管道引用留给后续命令。

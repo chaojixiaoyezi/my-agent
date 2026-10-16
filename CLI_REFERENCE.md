@@ -7,6 +7,33 @@ my-agent --help
 my-agent <command> --help
 ```
 
+## 人工规则与记忆候选控制（组合候选，未发布）
+
+以下是当前 F4/F5 独立组合候选的显式控制语法。终端 direct、Gateway 和 IM 共用原服务，控制本身不调用模型；部署版本须另核，尚未声称真实飞书租户验收完成。普通用户操作本人 owner，群用户保留当前 HostActor/会话边界；不新增全机管理员门或监控 grant。
+
+| 命令 | 行为与边界 |
+| --- | --- |
+| `/agents show`、`/agents refresh` | 查看当前规则来源/状态；按原刷新点处理，不凭配置宣称正文实时新鲜 |
+| `/agents source local <绝对路径>` | 预览切换到本人有权读取的本地来源；配置不增加路径权限 |
+| `/agents source url <https地址>` | 预览只读远端来源；网络来源默认关闭，开启仍受原网络权限，未作真实网络验收 |
+| `/agents reset` | 预览恢复本人默认来源 |
+| `/agents write "完整规则正文\n下一行"` | 使用 JSON 字符串完整预览拟写内容，保留换行与尾空白；模型不能代填确认权 |
+| `/agents confirm <预览编号>`、`/agents receipt <预览编号>` | 由原预览的本人、当前会话确认一次，或只读查回执；来源/正文/权限变化要求重核，unknown 不重放 |
+| `/agents owner <规范owner> <上述操作>` | 显式跨 owner 入口，仅原完整本机管理员且 Full Access 可用；目标选择不改变 actor |
+| `/memory candidates`、`/memory candidates list [起始序号]` | 查看本人唯一候选库元信息，每页 20 条；正式内容尚未保存 |
+| `/memory candidates show <候选ID>` | 查看可安全完整显示的候选内容及范围、动作、目标版本 |
+| `/memory candidates preview <候选ID>` | 创建 600 秒有效的精确预览，返回可复制的 confirm/reject/cancel/receipt 命令 |
+| `/memory candidates confirm <预览编号>` | 确认该完整版本，沿原 review/promote(false)、目标 CAS 和证据门正式提交 |
+| `/memory candidates reject <预览编号>` | 走原候选状态机拒绝，不提交正式内容 |
+| `/memory candidates cancel <预览编号>` | 取消该预览，候选保持原状态 |
+| `/memory candidates receipt <预览编号>` | 只读该预览当前结果；未知不能借新消息重复执行 |
+
+实际操作先发送 `/memory candidates`，复制候选 ID 发 `preview`，核对正文、范围和目标，再复制该预览返回的完整确认命令；不要自己编造预览编号。确认绑定 owner、actor、channel、conversation/thread、完整候选记录 SHA 与目标版本，换人、换群话题、过期或候选变化均需原门复核。超过 12 KiB 或会被现有脱敏/用户投影改变的候选不提供 IM 确认，明确要求受控本机完整核验，不能用摘要批准另一正文。
+
+**IM 只开放 `/memory candidates` 子树。** 裸 `/memory [查询内容]` 仍仅终端搜索正式记忆；原本机 `my-agent memory candidates review/promote` 管理命令保留，但不把它们当成普通 IM 用户的可执行入口。AGENTS 始终走 `/agents`，Skill 沿原 `/skills` 用户确认与 CAS。`consumed_unknown` 表示运输已受理但业务结果未确认，应核原回执/候选/正式内容，不重新提交。
+
+`self_map` 是模型可按权限发现的只读工具，没有新增 `/self_map` 斜杠命令。可直接问“你现在有哪些能力”，模型经总览、领域、准确条目和 cursor 逐步读取；工具参数及 unknown/partial 边界见[自我目录](docs/design/SELF_MAP.md)。原 `/help memory`、`/help agents` 从同一 command_catalog 展示已实现的控制语法，不从文档文字签发权限。
+
 ## 安装与入口
 
 在仓库根目录安装本地开发版本：
@@ -1116,7 +1143,7 @@ my-agent chat --gateway
 
 **随 Gateway 升级原地切换**：部署新版 Gateway 后，正在运行的 TUI 每隔几秒比对 Gateway 状态文件里的 `runtime_prefix` 与自己的安装；不是同一安装且当前空闲（没有进行中的回合、排队、待审批，输入框为空，没在看菜单、翻历史或看子代理）时，在同一个终端里原地换成 Gateway 同版的 `my-agent`：不退出全屏、不闪回 shell，底部显示“正在切换到新版本…”约一两秒后以同一段对话继续，期间按下的键保留。正在忙时只在底部提示。开关 `tui_follow_gateway_upgrade`（默认开），从源码 venv 起 TUI 调试时可关；Windows 只提示重开。2026-09-25 之前启动的 TUI 没有这个能力，需要手动重开一次。
 
-chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
+终端原 `/memory` 查询、`/remember` 和 `/subagents` 仍按各自现有入口处理；`/agents` 与 `/memory candidates` 是显式结构化控制，direct 或 Gateway 都复用原预览/持久回执服务。普通自然语言才进入模型，`--gateway` 模式下沿原 request/response；裸 `/memory` 查询不宣称在 IM 可执行。
 
 chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就是说，只有当主配置把 `memory_resume_auto_context_mode` 设为 `trigger` 或 `always` 时，普通消息才会自动注入 `Recovery Brief`；默认 `off`，不查、不注入。
 

@@ -1,3 +1,10 @@
+## 2026-10-16 F4/F5 来源和只读目录结构
+
+- `conversation/learning_source.py` 定义宿主结构化来源与 lineage；原 child 创建、runner 与归档显式携带本来源。模型 attrs、role、正文和 inspected tree 不成为身份或批准源，缺值仍 unknown。
+- `subagents/role_templates.py` 的默认 discovery 共用 `tooling/models.py` 公共声明，原父 snapshot/显式角色交集继续裁剪，不复制一份带权限的工具目录。
+- `tooling/self_map_registry.SelfMapReadContext` 从实际 runner、当前 ToolInvocationContext 与 main tool_self_context 构造 scope；child 选当前 agent_thread_id，缺失不借父 thread。`self_map_availability` 同源控制普通/Compact 指引资格，关闭或不可见不提示不存在入口。
+- 各领域只投影当前 child 合法元数据，未知库存/队列不从进程全集补齐；Skill 正文与资源仍走原快照、版本、撤回和显式读取，媒体转交仍按 main 原 refs 与父级授权子集。候选确认仅宿主用户控制入口，无新增子代理批准工具。
+
 2026-10-15 host_message_context持久输入媒体，IM委派将原sha交现有input_media_refs；loop_support恢复原授权，RuntimeFactsTurn携图并沿原native投影。首次无TaskLink仅准确queued/accepted SessionTask+RuntimeDB当前main可读，不从模型attrs借权或隐式向手动孩子给根全部图片。
 
 2026-10-14 结构：`orchestration/tool_grants.py`和`create_policy.py`沿父目录与显式角色生成准确工具集合；`role_contracts/role_templates`不再维护过时业务枚举。`tools/cancel.py`保留直接父子授权、免可选审批，`subagents/cancellation.py`沿原取消合同清理输入依赖，原身份/claim/进程清理不变。

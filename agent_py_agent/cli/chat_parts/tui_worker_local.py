@@ -11,6 +11,7 @@ from ...agent.conversation.control_commands import (
     conversation_request_interrupt_name,
     conversation_task_attributes,
 )
+from ...agent.conversation.learning_source import LEARNING_SOURCE_KEY, user_dialogue_projection
 from ...agent.gateway_parts.response_renderer import (
     current_context_token_estimate,
     is_silent_user_stop,
@@ -26,6 +27,9 @@ def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
     from ...agent.conversation.input_media import input_media_root, validate_input_media
 
     attrs = conversation_task_attributes(ctx.job.system_task)
+    if not ctx.job.system_task:
+        # direct TUI 是用户对话入口：当前回合来源固定为用户对话，只标本轮不追认历史；系统任务回合不标。
+        attrs = {**attrs, LEARNING_SOURCE_KEY: user_dialogue_projection()}
     if ctx.job.input_media:
         refs = validate_input_media(ctx.job.input_media, root=input_media_root(ctx.cfg.agent),
                                     max_bytes=ctx.cfg.agent.config.input_media_max_bytes,

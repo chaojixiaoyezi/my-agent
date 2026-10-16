@@ -2,7 +2,7 @@
 # same tool snapshot and PromptBuilder contracts as an ordinary model turn. It must never execute
 # tools, infer cache boundaries from prose, or mutate ConversationThread state. Same-turn display
 # is revalidated from host inputs; failure clears the host carrier without another decision call.
-# 模块用途: 为会话压缩复用普通请求的system、线程冻结人格、工具和动态展示；历史沿原读取边界，不执行工具。
+# 模块用途: 复用主请求缓存面与可用前缀；不可用媒体只携原typed决定，候选重核范围，不持历史或执行目录。
 
 from __future__ import annotations
 
@@ -19,16 +19,18 @@ from ..model_guidance import provider_system_instruction
 from ..prompting_parts.builder import PromptBuilder, PromptBuildRequest, ToolSections
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..prompting_parts.thread_persona import thread_persona_scope
+from ..tooling.self_map_availability import self_map_available
 from .compact_message_source import CompactMessageSource
 from .native_history_replay import prepare_native_history_replay
 
 if TYPE_CHECKING:
     from ..agent_core.runtime.loop_models import RuntimeContextRequest
     from ..capability.decision_recommendation import CapabilityPresentationSelection
+    from .compact_media_policy import CompactMediaDecision
 
 
 # LLM: 身份取宿主RuntimeContextRequest，手动Compact由原请求绑定thread_id；候选不得改代次，callback只清内存旧展示。
-# 类用途: 描述压缩与随后模型轮的同一输入面，含明确线程人格归属；授权和展示不从正文补造。
+# 类用途: 描述压缩与随后模型轮的同一输入面，冻结同源历史及线程人格；授权和展示不从正文补造。
 @dataclass(frozen=True)
 class ConversationCompactModelSurface:
     allowed_tools: tuple[str, ...] | None = None
@@ -43,23 +45,28 @@ class ConversationCompactModelSurface:
         default=None, repr=False, compare=False,
     )
     thread_id: str = ""
+    history_source: object | None = field(default=None, repr=False, compare=False)
 
 
-# LLM: 这里只保存请求展示，不含callback/handler/权限；动态段沿原typed source转原生历史，不能混进稳定前缀。
-# 类用途: 保存一次压缩的稳定prompt、工具Schema、system及同片动态名卡，各候选仍使用自己的历史前缀。
+# LLM: 这里只保存请求展示和可选原typed媒体决定，不含权限；候选须按canonical范围复核决定，不盲用全来源结论。
+# 类用途: 保存稳定prompt/工具/system、可用前缀及不含历史的媒体决定；允许解绑前释放不可用的整份前缀。
 @dataclass(frozen=True)
 class ConversationCompactProviderSurface:
     stable_prompt_prefix: str
     tools: tuple[dict[str, Any], ...] | None
     system_instruction: str
     volatile_sections: tuple[tuple[str, str], ...] = ()
+    transcript_prefix: Callable[[Sequence[object]], CompactMessageSource] | None = field(
+        default=None, repr=False, compare=False,
+    )
+    media_decision: CompactMediaDecision | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: Tool registration, protocol selection, catalog rendering, and native schemas intentionally
 # reuse ordinary helpers; original preparation may synchronize tools/probe capability. Carried
 # display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
 # 包候选沿 model_surface 原范围和重验后的 selected 集合投影，不用默认范围或载体旧选择重新补回未选包。
-# 函数用途: 按原准备链冻结压缩缓存面，复用已提交线程人格并传递其动态变化；失败仍在摘要发送前抛出。
+# 函数用途: 按原链冻结压缩缓存面和实际自我目录资格，复用已提交线程人格；失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
     model_surface: ConversationCompactModelSurface,
@@ -129,6 +136,7 @@ def prepare_conversation_compact_provider_surface(
             tool_catalog_section=tool_catalog,
             tool_recommendations_section=tool_recommendations,
             native_tool_use=True,
+            self_map_available=self_map_available(runtime_snapshot, allowed_tools),
             selected_skill_ids=presentation.selected_skill_ids,
             required_skill_ids=presentation.required_skill_ids,
         ),

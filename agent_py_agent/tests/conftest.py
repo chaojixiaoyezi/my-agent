@@ -486,16 +486,21 @@ def _attach_mock_connection(store, mock_conn) -> None:
     store._connection = conn_ctx
 
 
+# LLM: 维护测试替身复用真实 schema 完成标记钩子；连接仍由用例注入，不初始化磁盘或以空钩子掩盖提交合同。
+# 函数用途: 为本地存储维护测试组装最小同构 Store，避免共享测试访问真实用户库。
 @pytest.fixture
 def make_fake_store_func():
     """Factory 函数：创建自定义 FakeStore。"""
     from agent_py_agent.agent.local_storage.maintenance import LocalStoreMaintenanceMixin
+    from agent_py_agent.agent.local_storage.schema import LocalStoreSchemaMixin
 
     def _make(**kwargs) -> MagicMock:
         """创建 FakeStore 实例。"""
         options = _fake_store_options(kwargs)
 
-        class FakeStore(LocalStoreMaintenanceMixin):
+        # LLM: 与真实 LocalStore 一样由 schema 提供回填完成钩子；不调用 schema 初始化，SQL 只发往注入的假连接。
+        # 类用途: 在维护单测中保留真实回填事务行为，正文、事件和连接由现有测试替身隔离。
+        class FakeStore(LocalStoreSchemaMixin, LocalStoreMaintenanceMixin):
             def __init__(self):
                 self._fts_available = options["fts_available"]
                 self.db_path = options["db_path"] or Path("/tmp/test.db")

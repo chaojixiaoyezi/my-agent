@@ -204,8 +204,10 @@ class FinalizationService:
             )
         )
 
-    # LLM: Run archive/task workspace preserve experience refs only; ordinary user/assistant bodies never enter formal long-term here.
+    # LLM: 运行归档仅保存经历引用，正文不在此晋升；宿主thread身份必须完整透传并保持main后台收口。
     # 函数用途: 按保存开关写任务工作区和运行经历档案，不做长期事实晋升。
+    # LLM: 终态归档只从宿主task_attributes传线程；保留main的save、任务工作区、公开回执与后台通知收口。
+    # 函数用途: 在原归档路径保存回合事实，并为Curator保留精确来源关联。
     def _archive_run_if_needed(self, params: ArchiveRunParams):
         if not params.do_save:
             return None
@@ -224,6 +226,7 @@ class FinalizationService:
                             self._agent, "session_id", self._agent.config.agent_name
                         ),
                         request_id=params.run_request_id,
+                        thread_id=str((params.task_attributes or {}).get("conversation_thread_id") or ""),
                         run_id=params.run_id,
                         task_id=params.task_id,
                         user_prompt=params.user_prompt,
