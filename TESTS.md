@@ -1,3 +1,11 @@
+## 2026-10-16 六项正式包验收：开发合同与发行运行时分层（进行中）
+
+准确 `7df8a33d6` 的 FINAL_04 全仓执行 35,015 项：34,938 普通 passed、5 非严格 XPASS、32 xfailed、40 skipped，零 failure/error；538 文件 focused 执行 10,021 项：10,004 普通 passed、1 非严格 XPASS、16 skipped，零 failure/error。本地严格 gate 已通过；该准确候选 Windows/macOS Python 3.12 手动交叉 CI 通过。上述均为各自原证据，不代表正式包通过。
+
+首个 `.20261016.1` 工件在 Mac/Linux focused 收集时均失败：混合测试顶层导入被正式 `package_boundary_policy` 排除的开发校验器，实际测试调用为零。包、runtime、失败 XML 和日志原样保留；不把开发 harness 塞回产品，也不整文件排除运行时断言。最小修复仅调整 `test_contract_failure_recovery_coverage.py`：开发导入延迟到唯一离线节点，十五项输入表达式及逐项失败/恢复断言保持各一次，六个运行时节点继续要求真实包执行。独立源码 7 项及旧首包 pyc 6 项已实际通过，只用于验证修法；最终新 focused/严格门及 `.20261016.2` 双端新工件仍须重新执行。
+
+新补丁不改产品。原全仓作为准确旧提交的产品基线保留，后续以逐产品文件零差异证明、新 focused XML 和严格门绑定新提交，不能把旧全仓 XML 写成新提交执行。开发专用节点按正式发行策略、实际依赖与源码 XML 逐一核验；Linux 原生 16、Mac 原生 9、两端原 owner OS 主/子/孙/后台四节点及正式 Compact 三探针保持包验义务。
+
 ## 2026-10-16 六项最终组合收口（未发行、未部署）
 
 F1/F2/F4/F5/F6/F7 使用同一最终候选，F3 延后。原 FINAL_02 focused 为 7,320 passed、15 个 Linux 平台门 skipped；该轮全仓在 15,788 项处遇旧 Gateway Compact 夹具停止，不冒充完整通过。继续扩验发现并保留原失败后，最终 focused/full、严格 gate 与双端正式包仍须重新冻结验收，分线数字不能相加代替。
