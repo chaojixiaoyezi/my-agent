@@ -1,5 +1,5 @@
-# LLM: 替换MessageStore只读游标扫描，不改变JSONL/追加/幂等/Compact推进；错误文本与原实现相同。
-# 模块用途: 缓存精确message_id首位置，让稳态空线程零打开、追加线程只校验锚行和读取尾部。
+# LLM: 替换MessageStore只读游标扫描，不改变JSONL/追加/幂等/Compact推进；共享粗时间窗口内不信任或保存定位缓存，错误合同不变。
+# 模块用途: 缓存已稳定文件的精确message_id首位置，让稳态空线程零打开、追加线程校验锚行后读尾，避免同tick等长改写漏报。
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..io.cursor_cache import CursorCache, FileStamp, cursor_key, file_stamp, note_seen
 from ..runtime_errors import DataCorruptionError
 from .display_checkpoint import is_display_checkpoint
@@ -30,10 +31,11 @@ class MessageCursor:
     empty_tail: bool = False
 
 
-# LLM: 同尺寸mtime/ctime变化必须完整扫描，不能因为游标行恰好未变而吞掉前缀新损坏。
-# 函数用途: 判定旧偏移是否有资格进入锚行复核。
+# LLM: 完整stamp在粗时间片内也可能碰撞；共享信任窗口未过必须冷扫，同尺寸变更不能只核锚行而吞前缀损坏。
+# 函数用途: 判定稳定文件的旧偏移是否有资格进入锚行复核，不改持久游标。
 def _may_reuse(cursor: MessageCursor, stamp: FileStamp) -> bool:
-    if not cursor.stamp.same_file(stamp) or stamp.size < cursor.stamp.size:
+    if (not cache_entry_trustworthy(stamp.mtime_ns)
+            or not cursor.stamp.same_file(stamp) or stamp.size < cursor.stamp.size):
         return False
     return stamp.size > cursor.stamp.size or stamp == cursor.stamp
 
@@ -78,10 +80,10 @@ def _note_row(seen: bytearray, row: object) -> str | None:
     return target
 
 
-# LLM: 只在实际描述符与路径指纹一致时存提示；过长ID不驻留，仍由原完整扫描得出结果。
-# 函数用途: 保存已复核的消息首位置，不写文件或推进已消费游标。
+# LLM: 调用方先核同fd指纹，本入口还须拒绝粗时间窗口内的hint；否则刚读后同tick改写会在窗口外留下陈旧命中。
+# 函数用途: 仅为已稳定文件保存消息首位置；不写文件、不推进消费游标，过长ID不驻留。
 def _remember(path: Path, target: str, cursor: MessageCursor) -> None:
-    if len(target) <= 256:
+    if len(target) <= 256 and cache_entry_trustworthy(cursor.stamp.mtime_ns):
         _MESSAGE_CURSORS.put(cursor_key(path, target), cursor)
 
 
@@ -109,14 +111,15 @@ def _locate_open(handle, path: Path, target: str) -> MessageCursor:
     return cursor
 
 
-# LLM: 只有同完整指纹且精确游标就在EOF才能零打开；mtime/ctime参与，大小相同不等于历史未改写。
-# 函数用途: 识别已追平且没有任何文件变化的线程。
+# LLM: 只有共享窗口外的完整指纹且精确游标就在EOF才能零打开；真实stat同tick也会相同，不能把fresh stamp当未改写证明。
+# 函数用途: 识别已稳定且追平的线程；近期写入沿原扫描保留缺cursor与损坏诊断。
 def _unchanged_end(path: Path, target: str) -> bool:
     cached = _MESSAGE_CURSORS.get(cursor_key(path, target))
     if cached is None:
         return False
     stamp = file_stamp(path.stat())
-    return cached.stamp == stamp and (cached.empty_tail or cached.end == stamp.size)
+    return (cache_entry_trustworthy(stamp.mtime_ns) and cached.stamp == stamp
+            and (cached.empty_tail or cached.end == stamp.size))
 
 
 # LLM: 真实读尾仍保留display/坏行/limit原规则；位置只对原始首ID提示，解析消息及错误由MessageStore负责。

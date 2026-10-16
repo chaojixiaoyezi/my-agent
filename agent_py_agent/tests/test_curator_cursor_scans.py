@@ -1,5 +1,5 @@
-# LLM: 原API和冻结baseline逐项比较，只使用合成owner；不改变持久游标/权限，扫描量来自真实文件观察。
-# 模块用途: 锁定E11c消息/审计缓存的等价语义、替换失效和稳态零整扫。
+# LLM: 原API与冻结baseline逐项比较；变异正确性保留fresh真实stat，性能夹具只对明确稳定文件计量，不改持久游标/权限。
+# 模块用途: 锁定E11c等价语义与改写失效，保留共享信任窗口外零打开和有界读尾断言。
 from __future__ import annotations
 
 import os
@@ -18,6 +18,7 @@ from agent_py_agent.tests.support.curator_scan_cases import (
     make_audit,
     make_messages,
     observe_reads,
+    settle_files,
 )
 from agent_py_agent.tests.support.curator_scan_legacy import (
     LegacyMessageReader,
@@ -28,6 +29,7 @@ from agent_py_agent.tests.support.curator_scan_legacy import (
 def test_unchanged_thread_at_cursor_end_has_zero_opens(tmp_path, monkeypatch):
     store, tid, rows = make_messages(tmp_path, count=200, content_chars=2048)
     cursor = rows[-1].message_id
+    settle_files([store.storage.message_path(tid)])
     assert store.messages.after_report(tid, after_message_id=cursor) == ([], [])
     counts = observe_reads(monkeypatch, [store.storage.message_path(tid)])
     for _ in range(2):
@@ -42,10 +44,12 @@ def test_unchanged_thread_at_cursor_end_has_zero_opens(tmp_path, monkeypatch):
 def test_appended_thread_reads_only_anchor_and_tail(tmp_path, monkeypatch):
     store, tid, rows = make_messages(tmp_path, count=200, content_chars=2048)
     cursor = rows[-1].message_id
+    settle_files([store.storage.message_path(tid)])
     assert store.messages.after_report(tid, after_message_id=cursor) == ([], [])
     path = store.storage.message_path(tid)
     new = replace(rows[-1], message_id="new-message", content="新消息")
     path.write_bytes(path.read_bytes() + encode_row(new.to_dict()))
+    settle_files([path])
     counts = observe_reads(monkeypatch, [path])
     assert store.messages.after_report(tid, after_message_id=cursor) == ([new], [])
     assert counts.bytes <= len(encode_row(rows[-1].to_dict())) + len(encode_row(new.to_dict()))
@@ -55,6 +59,7 @@ def test_warm_audit_skips_old_shards_and_cursor_prefix(tmp_path, monkeypatch):
     root = tmp_path / "audit"
     paths, records = make_audit(root, days=4, rows_per_day=100)
     cursor = records[299]["event_id"]
+    settle_files(paths)
     expected = legacy_collect_audit(root, after_event_id=cursor, limit=2, max_chars=20_000)
     assert _collect_audit(root, after_event_id=cursor, limit=2, max_chars=20_000) == expected
     counts = observe_reads(monkeypatch, paths)
@@ -65,6 +70,7 @@ def test_warm_audit_skips_old_shards_and_cursor_prefix(tmp_path, monkeypatch):
 
 def test_advanced_message_cursor_does_not_rescan_prefix(tmp_path, monkeypatch):
     store, tid, rows = make_messages(tmp_path, count=200, content_chars=2048)
+    settle_files([store.storage.message_path(tid)])
     selected, errors = store.messages.after_report(tid, after_message_id=rows[-2].message_id)
     assert selected == rows[-1:] and not errors
     counts = observe_reads(monkeypatch, [store.storage.message_path(tid)])

@@ -169,3 +169,16 @@ main 原请求 usage/耗时/探针、媒体与凭据、群原身份和监控权�
 在准确 R2 的独立候选上按冻结 F6、上下文采样绑定 P2、typed 旧夹具、F7 顺序组合。compact_provider_surface 同时保留 F5 公开 self_map 资格及 F6 history_source/transcript_prefix；request_context 保留 F4 当前 learning_source 与 owner/actor/media。固定源全局超窗硬门被拒绝，容量优化必须可解除以复用 main 原完整来源/媒体/分段；同一 checkpoint/CAS，不增加失败发送。
 
 F7 无生产 delta，沿现有缓存布局/运输/工具状态验证，保留 main 物理尝试、用途、耗时与累计 usage。P2 在真实采样前捕获内存 gen/revision，保存不重签版本；F2 scopes/公平队列、F4 撤权/source-CAS 与 F5 同表面均纳入定向接缝。离线合同结果不外推真实命中/费用/容量；根统一全仓、非作者复核、严格门和真实验收，F3 保持 Count0。
+
+
+## 正式包同时间片文件与验收边界修复（2026-10-16）
+
+状态：准确 fe6ab7097 正式包第二轮失败已保留，修复待统一源码与新包验收；日常部署未切换。源码 focused 与候选交叉 CI 通过不能代替正式包运行结果。
+
+F1 消息与审计 cursor 的 dev/ino/size/mtime_ns/ctime_ns 在 Linux 同一粗时间片内仍可能全部碰撞。复用 `common/cache_freshness.py` 现有两秒信任窗口，窗口内不保存定位 hint、不复用消息 EOF/锚偏移或审计 prefix/anchor，沿原冷扫描保留缺 cursor、损坏与分片错误；窗口外仍核完整 stamp 和真实锚行。owner canonical 键、LRU、预算、持久游标与 schema 不变，没有新增配置或缓存正文。近期及持续写入文件可能持续冷扫，稳态零打开和有界读尾只适用于真实稳定文件；该保护不替代原追加/原子替换写协议，不承诺任意外部原位并发改写的事务快照。
+
+最新上下文快照排序使用整数纳秒，避免浮点时间丢失精度；同目录同时间片优先已发布 latest 副本，真正较新归档及较新日期目录优先。仅访问当前 owner 的原快照根，不以名称推断其它 owner 或运行身份。
+
+发行测试保持正式 package_boundary_policy：业务模块来自指定新 runtime 的 `.pyc`，测试依赖及公共 tests/scripts namespace 只在仓外、同 commit/manifest 的私有临时目录开放，原解释器和业务沙箱不包装、不放宽。纯源码守卫逐 nodeid 从同提交实际源码 XML 绑定；混合节点分离其静态扫描与真实运行断言，不整文件剔除。开发 benchmark 元数据也应记录实际加载的源码或字节码工件和 SHA，不把不存在的业务 `.py` 或旧源码指纹冒充当前包来源。
+
+准确旧全仓、两个正式失败工件及其 runtime 保留，新增生产修复不能再沿用“产品零差异”证明。下一步按新提交重跑 focused/严格 gate，并在全新双端输入中重做运行、原生、安装更新及终端义务；测试加载与源守卫复核可并行，main 推进和日常服务切换由根串行处理。网络安全只记录，F3 仍 Count0。

@@ -1,9 +1,10 @@
-# LLM: 这是开发测量工具，不进入 wheel；只能操作显式已有的隔离 home，安装复用产品服务，真凭据只由该 home 档案解析。
-# 模块用途: 安装样包并测量新会话首句 A/B/C，输出最小 JSONL 和 Markdown，不执行模型工具或包脚本。
+# LLM: 开发测量只操作显式隔离home，不进入wheel；代码指纹必须读取实际加载模块的origin，不能拼业务源码或把pyc冒称源码。
+# 模块用途: 安装样包并测量新会话首句A/B/C，输出原账与真实代码工件元数据，不执行模型工具或包脚本。
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import shlex
@@ -173,19 +174,37 @@ def _cases(questions: list[dict], arms: list[str], args: argparse.Namespace):
         yield from (BenchCase(question, arm, repeat, args.profile or "", args.fake) for question in questions for arm in arms)
 
 
-# LLM: 仅记文件/包/源码指纹与档案编号，不能复制密钥、原句文件或包正文。
-# 函数用途: 固定本次评测输入，便于 3a 对齐真跑版本和结果。
+# LLM: origin只认模块加载器公开事实；源码/pyc共用同一读取路径，缺工件明确失败，不查co_filename或猜不存在的.py。
+# 函数用途: 记录一份实际代码工件的模块名、真实路径、后缀与字节摘要，不复制代码正文。
+def _module_artifact(module: object) -> dict:
+    spec_origin = getattr(getattr(module, "__spec__", None), "origin", None)
+    raw = spec_origin or getattr(module, "__file__", None)
+    if not isinstance(raw, str) or not raw or raw in {"built-in", "frozen"}:
+        raise ValueError("代码模块没有可读取的文件来源")
+    path = Path(raw).resolve(strict=True)
+    return {"module": module.__name__, "origin": str(path), "suffix": path.suffix,
+            "origin_source": "__spec__.origin" if spec_origin else "__file__",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+# LLM: 沿正常import身份取得原测量模块及两处业务入口；不扫描源码目录，不初始化Agent或发请求。
+# 函数用途: 为同一测量链保存实际加载的五份代码工件，源码和正式pyc运行使用相同元数据合同。
+def _code_artifacts() -> list[dict]:
+    names = ("scripts.eval.pack_pick_runtime", "scripts.eval.pack_pick_results",
+             "agent_py_agent.agent.capability.router", "agent_py_agent.agent.agent_core._tool_loop_service")
+    modules = [sys.modules[__name__], *(importlib.import_module(name) for name in names)]
+    return [_module_artifact(module) for module in modules]
+
+
+# LLM: v2用code_artifacts诚实区分.py/.pyc，查询/包/预算事实保持；不能复制密钥、原句或包正文。
+# 函数用途: 保存本次评测输入与实际代码工件指纹，供复核对齐真跑版本，不要求随包携带业务源码。
 def _write_metadata(out: Path, agent: object, args: argparse.Namespace) -> None:
-    source = Path(__file__).resolve().parents[2]
-    files = [*sorted((source / "scripts" / "eval").glob("pack_pick_*.py")),
-             source / "agent_py_agent" / "agent" / "capability" / "router.py",
-             source / "agent_py_agent" / "agent" / "agent_core" / "_tool_loop_service.py"]
     config = capability_config_for_agent(agent)
     budgets = {key: getattr(config, key) for key in ("capability_package_selection_max_input_tokens",
                "capability_candidate_limit", "capability_bundle_max_tokens", "enable_capability_package_recommendations")}
-    data = {"schema": "pack_pick_bench.v1", "fake": args.fake, "profile": args.profile, "arms": args.arms, "capability_settings": budgets,
+    data = {"schema": "pack_pick_bench.v2", "fake": args.fake, "profile": args.profile, "arms": args.arms, "capability_settings": budgets,
             "repeat": args.repeat, "queries_sha256": hashlib.sha256(Path(args.queries).read_bytes()).hexdigest(),
-            "source_sha256": {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest() for path in files},
+            "code_artifacts": _code_artifacts(),
             "packages": [row.to_ref() for row in agent.current_skill_snapshot().packages]}
     (out / "metadata.json").write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 

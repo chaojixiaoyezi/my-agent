@@ -1,5 +1,5 @@
 # LLM: 文件代次指纹与粗 mtime 窗口的唯一实现；所有“按文件指纹缓存”的读取路径共用这里的判定。
-#   改动窗口语义要同步 json_io、response_renderer、subagents persistence 三处消费方及各自回归测试。
+#   改动窗口语义要同步 json_io、response_renderer、subagents persistence、message_cursor、curator_audit_cursor 及各自回归测试。
 # 模块用途: 给按文件内容做缓存的读取路径提供统一的文件代次指纹和 2 秒可信窗口判断，
 #   防止低精度时间片里“先读后写”的原子替换把旧内容留在缓存里。
 

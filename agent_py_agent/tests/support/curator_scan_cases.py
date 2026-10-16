@@ -1,11 +1,14 @@
-# LLM: 只在调用方临时根合成原格式数据，观察真实文件读取，不读正式owner、不启动模型。
-# 模块用途: 给E11c等价、扫描量和性能测试共用合成数据及计数观察器。
+# LLM: 只在临时根合成原格式数据并观察真实读取；稳定年龄仅由性能/LRU夹具显式建立，不改stat或正式owner。
+# 模块用途: 为E11c等价、freshness和扫描性能测试提供合成数据、真实读取计数及稳态文件年龄。
 from __future__ import annotations
 
 import json
+import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
+from agent_py_agent.agent.common.cache_freshness import CACHE_TRUST_AGE_SECONDS
 from agent_py_agent.agent.conversation import ConversationStore
 
 
@@ -101,3 +104,11 @@ def observe_reads(monkeypatch, paths):
 
     monkeypatch.setattr(Path, "open", counted)
     return counts
+
+
+# LLM: 只供稳态性能或LRU夹具建立真实年龄，不用于同tick变异正确性样本；实际stat/读取仍由文件系统给出。
+# 函数用途: 明确把指定测试文件mtime设到共享信任窗口外，不睡眠、不改正文、不伪造stat。
+def settle_files(paths):
+    stable = time.time_ns() - int((CACHE_TRUST_AGE_SECONDS + 1) * 1_000_000_000)
+    for path in paths:
+        os.utime(path, ns=(path.stat().st_atime_ns, stable))

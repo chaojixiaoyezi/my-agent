@@ -1,6 +1,8 @@
-"""w2：隔离安装、真实 Gateway 首请求、假传输；不把脚本化回答当召回率。"""
+# LLM: 隔离fake测量保留真实Gateway/selection/ledger与零handler断言；工件指纹单测不把任意字节冒充可加载pyc。
+# 模块用途: 校准选包测量器和真实加载来源记录，不连接供应商或把脚本化回答当召回率。
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import stat
@@ -16,6 +18,22 @@ from agent_py_agent.agent.capability.package_build import build_capability_pack,
 
 def bench():
     return importlib.import_module("scripts.eval.pack_pick_bench")
+
+
+@pytest.mark.parametrize("suffix,use_spec", [(".py", True), (".pyc", True), (".py", False)])
+def test_code_artifact_uses_loaded_origin_without_source_guess(tmp_path, suffix, use_spec):
+    artifact = tmp_path / ("loaded" + suffix)
+    payload = b"exact code artifact bytes"
+    artifact.write_bytes(payload)
+    module = SimpleNamespace(__name__="fixture.loaded", __file__=str(tmp_path / "missing.py"),
+                             __spec__=SimpleNamespace(origin=str(artifact)) if use_spec else None)
+    if not use_spec:
+        module.__file__ = str(artifact)
+    result = bench()._module_artifact(module)
+    assert result == {"module": "fixture.loaded", "origin": str(artifact.resolve()), "suffix": suffix,
+                      "origin_source": "__spec__.origin" if use_spec else "__file__",
+                      "sha256": hashlib.sha256(payload).hexdigest()}
+    assert not (tmp_path / "missing.py").exists()
 
 
 def test_judgement_reads_structured_get_and_keeps_only_tool_identity():

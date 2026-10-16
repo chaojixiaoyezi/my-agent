@@ -1,5 +1,5 @@
-# LLM: 仅替换Curator审计只读扫描；历史错误逐条保留，缺游标仍AUDIT_CURSOR_MISSING，不改状态schema或推进规则。
-# 模块用途: 用校验后的有界进程缓存跳过旧日分片及游标前缀，冷启动/失效走同一完整扫描。
+# LLM: 仅替换Curator审计只读扫描；共享粗时间窗口内不信任或保存分片hint，历史错误及AUDIT_CURSOR_MISSING不变，不改状态schema。
+# 模块用途: 为稳定分片提供有界定位缓存；近期写入、冷启动和失效均走原扫描，防止同tick改写被旧EOF或前缀吞掉。
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..io.cursor_cache import CursorCache, FileStamp, cursor_key, file_stamp, note_seen
 
 # 128个近期审计游标兼顾多owner和80条批次，淘汰仅重扫；不缓存事件正文或历史异常。
@@ -85,8 +86,8 @@ class _AuditRescan(Exception):
     pass
 
 
-# LLM: 只有旧分片列表/指纹全相同及锚行复核通过，才能跳过历史；不缓存历史坏账以限制驻留内存。
-# 函数用途: 校验一个审计定位提示，失败返回冷扫描。
+# LLM: 旧分片除列表/stamp相同还须离开共享粗时间窗口；同tick等长改写不能凭stat跳过前缀损坏，不缓存历史异常。
+# 函数用途: 校验稳定审计前缀及锚行；近期写入或校验失败沿原冷扫描报告错误。
 def _reuse_cursor(request: AuditRead, paths: list[Path]) -> AuditCursor | None:
     cached = _AUDIT_CURSORS.get(cursor_key(request.root, request.target))
     if cached is None:
@@ -95,18 +96,20 @@ def _reuse_cursor(request: AuditRead, paths: list[Path]) -> AuditCursor | None:
     if index < 0 or tuple(path.name for path in paths[:index]) != tuple(name for name, _ in cached.prefix):
         return None
     try:
-        if any(file_stamp(path.stat()) != stamp for path, (_, stamp) in zip(paths[:index], cached.prefix)):
+        if any(not cache_entry_trustworthy(stamp.mtime_ns) or file_stamp(path.stat()) != stamp
+               for path, (_, stamp) in zip(paths[:index], cached.prefix)):
             return None
         return _validate_anchor(paths[index], request.target, cached)
     except (OSError, ValueError, UnicodeError):
         return None
 
 
-# LLM: 身份/截断/同尺寸改写都失效；完全未变的EOF锚可零打开，否则读回精确ID和相同边界。
-# 函数用途: 复核审计游标所在文件与锚行。
+# LLM: 近期stamp即使五字段相同也不能复用；窗口外仍核身份/截断/同尺寸变更，非EOF锚须读回精确ID和边界。
+# 函数用途: 复核稳定审计文件的锚行；fresh文件返回冷扫描，不把缓存hint当存在证明。
 def _validate_anchor(path: Path, target: str, cached: AuditCursor) -> AuditCursor | None:
     stamp = file_stamp(path.stat())
-    if not cached.stamp.same_file(stamp) or stamp.size < cached.stamp.size:
+    if (not cache_entry_trustworthy(stamp.mtime_ns)
+            or not cached.stamp.same_file(stamp) or stamp.size < cached.stamp.size):
         return None
     if stamp.size == cached.stamp.size and stamp != cached.stamp:
         return None
@@ -223,15 +226,16 @@ def _consume_row(window: AuditWindow, row: AuditRow, scope: tuple[str, FileStamp
     return len(window.selected) >= window.request.limit
 
 
-# LLM: 先收齐当前分片全部错误，才能按预算截尾；整读失败使旧锚不可见，必须全量重定位。
-# 函数用途: 处理一个分片，并为后续分片记录有界的干净指纹。
+# LLM: 先收齐分片错误再按预算截尾；只有共享窗口外的稳定stamp可保存本批hint，fresh前缀不得在日后留下陈旧缓存。
+# 函数用途: 读取分片并记录可复用的干净稳定位置；整读失败仍要求原全量重定位。
 def _consume_file(window: AuditWindow, path: Path, cursor: AuditCursor | None) -> bool:
     empty = cursor and cursor.end == cursor.stamp.size
     result = AuditSlice(stamp=cursor.stamp) if empty else _read_slice(path, cursor)
     if cursor is not None and result.fatal:
         raise _AuditRescan
     window.errors.extend(result.errors)
-    window.cacheable = window.cacheable and not result.errors and result.stamp is not None
+    window.cacheable = (window.cacheable and not result.errors and result.stamp is not None
+                        and cache_entry_trustworthy(result.stamp.mtime_ns))
     for row in result.rows:
         if _consume_row(window, row, (path.name, result.stamp)):
             return True

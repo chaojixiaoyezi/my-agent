@@ -1,5 +1,5 @@
-# LLM: 合成owner和原API验证定位hint的隔离/失效，任何缓存淘汰只影响扫描量，不影响选择或错误。
-# 模块用途: 覆盖E11c多线程预算、首ID保守性、四个变异靶点及只读边界。
+# LLM: 合成owner与原API验证hint隔离/失效；fresh负例仅控制缓存输入与时间年龄，真实stat和原损坏诊断不被替换。
+# 模块用途: 覆盖E11c预算、首ID、LRU及粗时间窗口内不入缓存/不命中，稳态断言只对真实稳定文件成立。
 from __future__ import annotations
 
 import os
@@ -8,9 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common import cache_freshness
 from agent_py_agent.agent.conversation import message_cursor
 from agent_py_agent.agent.conversation.display_checkpoint import DISPLAY_CHECKPOINT_ROLE
-from agent_py_agent.agent.io.cursor_cache import CursorCache, cursor_key
+from agent_py_agent.agent.io.cursor_cache import CursorCache, cursor_key, file_stamp
 from agent_py_agent.agent.memory_store import curator_audit_cursor
 from agent_py_agent.agent.memory_store.curator_inputs import (
     CuratorMessageSource,
@@ -23,6 +24,7 @@ from agent_py_agent.tests.support.curator_scan_cases import (
     make_audit,
     make_messages,
     observe_reads,
+    settle_files,
 )
 from agent_py_agent.tests.support.curator_scan_legacy import (
     LegacyMessageReader,
@@ -84,6 +86,7 @@ def test_message_cache_keys_and_eviction_are_owner_local(tmp_path, monkeypatch):
     a, atid, arows = make_messages(tmp_path / "owner-a")
     b, btid, brows = make_messages(tmp_path / "owner-b")
     apath, bpath = a.storage.message_path(atid), b.storage.message_path(btid)
+    settle_files([apath, bpath])
     cursor = arows[-1].message_id
     assert cursor == brows[-1].message_id and cursor_key(apath, cursor) != cursor_key(bpath, cursor)
     assert a.messages.after_report(atid, after_message_id=cursor) == ([], [])
@@ -100,7 +103,8 @@ def test_audit_cache_keys_and_eviction_are_owner_local(tmp_path, monkeypatch):
     monkeypatch.setattr(curator_audit_cursor, "_AUDIT_CURSORS", cache)
     ar, br = tmp_path / "owner-a/audit", tmp_path / "owner-b/audit"
     apaths, arows = make_audit(ar, days=1)
-    _, brows = make_audit(br, days=1)
+    bpaths, brows = make_audit(br, days=1)
+    settle_files([*apaths, *bpaths])
     cursor = arows[-1]["event_id"]
     assert cursor == brows[-1]["event_id"] and cursor_key(ar, cursor) != cursor_key(br, cursor)
     assert _collect_audit(ar, after_event_id=cursor, limit=10, max_chars=20_000) == ([], [])
@@ -115,6 +119,7 @@ def test_audit_cache_keys_and_eviction_are_owner_local(tmp_path, monkeypatch):
 def test_saturated_first_id_filter_only_slows_cursor_advancement(tmp_path, monkeypatch):
     monkeypatch.setattr(message_cursor, "_MESSAGE_CURSOR_FILTER_BYTES", 1)
     store, tid, rows = make_messages(tmp_path, count=200)
+    settle_files([store.storage.message_path(tid)])
     assert store.messages.after_report(tid, after_message_id=rows[-2].message_id) == (rows[-1:], [])
     counts = observe_reads(monkeypatch, [store.storage.message_path(tid)])
     assert store.messages.after_report(tid, after_message_id=rows[-1].message_id) == ([], [])
@@ -149,6 +154,7 @@ def test_display_only_tail_becomes_empty_without_new_opens(tmp_path, monkeypatch
     cursor = rows[-1].message_id
     with path.open("ab") as handle:
         handle.write(encode_row(replace(rows[-1], role=DISPLAY_CHECKPOINT_ROLE, message_id="display").to_dict()))
+    settle_files([path])
     assert store.messages.after_report(tid, after_message_id=cursor) == ([], [])
     counts = observe_reads(monkeypatch, [path])
     assert store.messages.after_report(tid, after_message_id=cursor) == ([], [])
@@ -201,3 +207,76 @@ def test_blank_after_cursor_still_reads_from_start_after_explicit_offset_lookup(
     assert store.messages.byte_offset_after(tid, " ") == path.stat().st_size
     expected = LegacyMessageReader(store).after_report(tid, after_message_id=" ")
     assert expected[0] and store.messages.after_report(tid, after_message_id=" ") == expected
+
+
+# LLM: 只控制共享freshness的挂钟年龄；stat、fstat、inode、内容与真实读取完全不替换。
+# 函数用途: 让刚写文件在整个负例内保持明确的窗口内年龄，避免慢CI自然跨过两秒造成假绿。
+def hold_fresh_clock(monkeypatch, path):
+    instant = path.stat().st_mtime_ns / 1_000_000_000 + 0.25
+    monkeypatch.setattr(cache_freshness.time, "time", lambda: instant)
+    assert not cache_freshness.cache_entry_trustworthy(path.stat().st_mtime_ns)
+
+
+@pytest.mark.parametrize("kind", ["message", "audit"])
+def test_recent_files_never_admit_cursor_hints(tmp_path, monkeypatch, kind):
+    cache = CursorCache(4)
+    if kind == "message":
+        monkeypatch.setattr(message_cursor, "_MESSAGE_CURSORS", cache)
+        store, tid, rows = make_messages(tmp_path, count=6)
+        path = store.storage.message_path(tid)
+        hold_fresh_clock(monkeypatch, path)
+        assert store.messages.after_report(tid, after_message_id=rows[-1].message_id) == ([], [])
+    else:
+        monkeypatch.setattr(curator_audit_cursor, "_AUDIT_CURSORS", cache)
+        root = tmp_path / "audit"
+        paths, rows = make_audit(root)
+        hold_fresh_clock(monkeypatch, paths[-1])
+        assert _collect_audit(root, after_event_id=rows[-1]["event_id"], limit=3, max_chars=20_000) == ([], [])
+    assert not cache._items
+
+
+@pytest.mark.parametrize("change", ["missing_anchor", "bad_prefix"])
+def test_recent_message_hint_cannot_hide_original_corruption(tmp_path, monkeypatch, change):
+    store, tid, rows = make_messages(tmp_path, count=6)
+    path = store.storage.message_path(tid)
+    settle_files([path])
+    target = rows[-1 if change == "missing_anchor" else 2].message_id
+    store.messages.after_report(tid, after_message_id=target, limit=1)
+    key = cursor_key(path, target)
+    cached = message_cursor._MESSAGE_CURSORS.get(key)
+    assert cached is not None
+    raw = path.read_bytes()
+    changed = raw.replace(target.encode(), b"msg-xxxxx") if change == "missing_anchor" else b"!" + raw[1:]
+    path.write_bytes(changed)
+    # 显式注入同stamp的陈旧hint，模拟已由独立Linux真实重放证明的碰撞；不mock真实stat或正文。
+    message_cursor._MESSAGE_CURSORS.put(key, replace(cached, stamp=file_stamp(path.stat())))
+    hold_fresh_clock(monkeypatch, path)
+    expected = LegacyMessageReader(store).after_report(tid, after_message_id=target, limit=1)
+    assert expected[1]
+    assert store.messages.after_report(tid, after_message_id=target, limit=1) == expected
+
+
+@pytest.mark.parametrize("change", ["missing_anchor", "bad_prefix"])
+def test_recent_audit_hint_cannot_hide_original_corruption(tmp_path, monkeypatch, change):
+    root = tmp_path / "audit"
+    paths, rows = make_audit(root)
+    settle_files(paths)
+    target = rows[7]["event_id"]
+    _collect_audit(root, after_event_id=target, limit=3, max_chars=20_000)
+    key = cursor_key(root, target)
+    cached = curator_audit_cursor._AUDIT_CURSORS.get(key)
+    assert cached is not None
+    path = paths[1 if change == "missing_anchor" else 0]
+    raw = path.read_bytes()
+    path.write_bytes(raw.replace(target.encode(), b"other-1-3") if change == "missing_anchor" else b"!" + raw[1:])
+    # 陈旧hint携带文件系统的真实当前指纹，独立控制的是缓存输入和时间年龄，不替换stat或损坏诊断。
+    if change == "missing_anchor":
+        cached = replace(cached, stamp=file_stamp(path.stat()))
+    else:
+        cached = replace(cached, prefix=tuple((name, file_stamp(path.stat()) if name == path.name else stamp)
+                                             for name, stamp in cached.prefix))
+    curator_audit_cursor._AUDIT_CURSORS.put(key, cached)
+    hold_fresh_clock(monkeypatch, path)
+    expected = legacy_collect_audit(root, after_event_id=target, limit=3, max_chars=20_000)
+    assert expected[1]
+    assert _collect_audit(root, after_event_id=target, limit=3, max_chars=20_000) == expected

@@ -1,3 +1,5 @@
+# LLM: 正式包节点只核运行时参数/常量；全源码字符串和重复定义守卫独立成精确节点，禁止无源码空扫描冒称通过。
+# 模块用途: 分开子代理真实继承合同与源码单一权威约束，包内继续验证原常量和运行行为。
 """子代理参数继承主代理的合同钉子。
 
 钉死：子代理 runner 复用主代理同一个 agent 对象与 AgentConfig（模型、后端、超时、
@@ -49,19 +51,30 @@ def test_subagent_runner_reuses_parent_agent_object():
     assert offenders == [], f"子代理 run_flow 不应自建 agent/config/backend: {offenders}"
 
 
+# LLM: 这两个断言读取正式runtime常量，必须继续在真实pyc包内执行，不能随源码扫描一起排除。
+# 函数用途: 确认原默认thought非空且plan保留四步，不读取业务源码。
 def test_default_templates_have_single_authority():
-    """thought/plan 默认模板只允许定义在 runner/prompts.py；派工链路只引用。"""
+    """默认模板的正式运行时常量保持可用。"""
     assert SUBAGENT_DEFAULT_THOUGHT
     assert len(SUBAGENT_DEFAULT_PLAN) == 4
+
+
+# LLM: 只在完整源码验收运行原重复定义扫描；必须实际扫描至少一个源文件，空集合不能假绿。
+# 函数用途: 核对thought正文仅在runner/prompts.py定义；不改变相邻运行时常量或子代理权限合同。
+def test_default_templates_have_single_source_definition():
+    """thought/plan 默认模板只允许定义在 runner/prompts.py；派工链路只引用。"""
     pattern = re.compile(re.escape(SUBAGENT_DEFAULT_THOUGHT))
     offenders = []
+    scanned = 0
     for path in AGENT_ROOT.rglob("*.py"):
+        scanned += 1
         if "__pycache__" in path.parts:
             continue
         if path.name == "prompts.py" and path.parent.name == "runner":
             continue
         if pattern.search(path.read_text(encoding="utf-8")):
             offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert scanned > 0, "源码守卫必须读取完整源码，不能以空扫描通过"
     assert offenders == [], f"默认 thought 模板出现重复定义: {offenders}"
 
 

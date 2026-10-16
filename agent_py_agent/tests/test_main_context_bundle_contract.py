@@ -717,6 +717,38 @@ def test_context_bundle_latest_cli_reports_observability_payload(tmp_path: Path,
     assert payload["path"].endswith("latest_context_bundle.json")
 
 
+@pytest.mark.parametrize("archive_newer_ns", [0, 1_000])
+def test_latest_context_bundle_orders_exact_timestamp_and_same_generation_copy(
+    tmp_path: Path, archive_newer_ns: int,
+) -> None:
+    home_paths = ensure_my_agent_home(tmp_path / "home")
+    directory = Path(home_paths.owner_home_dir) / "memory_archive" / "snapshots" / "context_bundles" / "2026-10-16"
+    directory.mkdir(parents=True)
+    latest = directory / "latest_context_bundle.json"
+    archive = directory / "run-1792176814706941219.json"
+    timestamp = 1_700_000_000_123_456_000
+    for path in (latest, archive):
+        path.write_text("{}", encoding="utf-8")
+        stamp = timestamp + (archive_newer_ns if path == archive else 0)
+        os.utime(path, ns=(stamp, stamp))
+    assert latest.stat().st_mtime_ns == timestamp
+    assert archive.stat().st_mtime_ns == timestamp + archive_newer_ns
+    expected = archive if archive_newer_ns else latest
+    assert context_bundle_module.latest_main_context_bundle_path(home_paths) == str(expected)
+
+
+def test_latest_context_bundle_timestamp_tie_preserves_newer_directory(tmp_path: Path) -> None:
+    home_paths = ensure_my_agent_home(tmp_path / "home")
+    base = Path(home_paths.owner_home_dir) / "memory_archive" / "snapshots" / "context_bundles"
+    older = base / "2026-10-15" / "latest_context_bundle.json"
+    newer = base / "2026-10-16" / "run-newer.json"
+    for path in (older, newer):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}", encoding="utf-8")
+        os.utime(path, ns=(1_700_000_000_123_456_000, 1_700_000_000_123_456_000))
+    assert context_bundle_module.latest_main_context_bundle_path(home_paths) == str(newer)
+
+
 def test_context_bundle_latest_payload_reports_bad_json(tmp_path: Path) -> None:
     from agent_py_agent.cli.context_bundle_commands import _latest_payload
 

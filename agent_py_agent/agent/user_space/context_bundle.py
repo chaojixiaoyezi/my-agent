@@ -1,5 +1,5 @@
 
-# LLM: 主上下文包只持久化运行引用与结构化合同；内存定稿后各快照单次私有原子写，目录权限结果只准备一次。
+# LLM: 主上下文包只持久化运行引用与结构化合同；快照单次私有原子写，最新选择用整数文件时间并显式处理同代副本同时间片。
 # 模块用途: 构造本轮主上下文包，必要时保存快照并把目录符号链接风险记入结构化日志。
 from __future__ import annotations
 
@@ -285,6 +285,8 @@ def _memory_archive_root(home_paths: Any) -> Path:
     return Path(home_paths.memory_archive_dir)
 
 
+# LLM: 最新选择仍只读取当前owner快照；整数mtime保留文件系统精度，同目录同时间片优先已发布latest副本，不回退其它owner。
+# 函数用途: 稳定排列归档与最新副本；旧日副本不能因名称优先级越过同时间片的新目录归档。
 def _latest_bundle_candidates(base: Path) -> list[Path]:
     latest = [path for path in base.glob("*/latest_context_bundle.json") if path.is_file()]
     regular = [
@@ -292,7 +294,13 @@ def _latest_bundle_candidates(base: Path) -> list[Path]:
         for path in base.glob("*/*.json")
         if path.is_file() and not path.name.startswith("latest_context_bundle")
     ]
-    return sorted([*latest, *regular], key=lambda item: (_safe_mtime(item), str(item)), reverse=True)
+    return sorted(
+        [*latest, *regular],
+        key=lambda item: (
+            _safe_mtime(item), str(item.parent), item.name == "latest_context_bundle.json", item.name,
+        ),
+        reverse=True,
+    )
 
 
 def _bundle_stem(request: MainContextBundleRequest) -> str:
@@ -311,11 +319,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _safe_mtime(path: Path) -> float:
+# LLM: 不把纳秒先转浮点秒，避免相邻快照被舍入成同一代；IO失败仍沿原排序最低值，不伪造文件存在。
+# 函数用途: 只读快照修改时间，保留整数精度且不改变CLI读取错误合同。
+def _safe_mtime(path: Path) -> int:
     try:
-        return path.stat().st_mtime
+        return path.stat().st_mtime_ns
     except OSError:
-        return 0.0
+        return 0
 
 
 __all__ = [

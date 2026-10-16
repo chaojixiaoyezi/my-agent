@@ -1,3 +1,9 @@
+## 2026-10-16 定位缓存信任窗口与最新快照排序
+
+`conversation/message_cursor.py` 与 `memory_store/curator_audit_cursor.py` 共同使用原 `common/cache_freshness.cache_entry_trustworthy`；只有离开两秒窗口才允许 hint 入缓存或复用 EOF、审计 prefix/anchor。近期文件走原冷扫描，`DataCorruptionError`、`AUDIT_CURSOR_MISSING` 和逐分片错误仍由原 reader 产生；LRU、规范路径键和持久 cursor/schema 不变。
+
+`user_space/context_bundle.py::_latest_bundle_candidates` 仅在当前 owner 快照根按整数 `st_mtime_ns`、日期目录、同代 latest 副本与文件名排序；较新归档不被旧 latest 名称覆盖。产品不新增权威目录或状态表，定向与准确包证据见根 TESTS。
+
 ## 2026-10-16 F4/F5 当前结构（组合候选）
 
 - `capability/agents_source_repository.py` 与 `agents_source_configuration/cache/local/network/switch/publish` 沿唯一来源配置、严格描述符、revision/内容 CAS 与缓存身份；`agents_write_contract/service` 只认当前用户封印，`agents_control_ledger` 记录预览和一次消费。

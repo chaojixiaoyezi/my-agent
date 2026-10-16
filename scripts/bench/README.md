@@ -1,3 +1,7 @@
+## 选包测量代码工件元数据（2026-10-16）
+
+`eval/pack_pick_bench.py` 的 `metadata.json` 使用 `pack_pick_bench.v2`：`code_artifacts` 记录测量模块与业务入口实际 `__spec__.origin`（缺失时 `__file__`）、后缀与字节 SHA。源码和正式字节码都读取真实已加载文件，不拼不存在的 `.py`，也不把字节码摘要写成源码摘要。旧 `source_sha256` 不再写出；查询摘要、包 refs、预算和原请求账本口径保持。该工具只操作显式隔离 home，fake 结果不代表真实供应商命中。
+
 # GW-03 / 慢模型相关配对基准
 
 > 决策模型中文质量基准（`decision_quality_bench.py`、`decision_quality/`）是另一组工具，说明见 [decision_quality/README.md](decision_quality/README.md)。
