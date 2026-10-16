@@ -1,3 +1,5 @@
+2026-10-15 `.12`监控成功回执：原policy guard退出后复用creator_display_rows补create/mutation的自有JSON.job展示；只替换output、保creator/effect/错误，姓名网络在锁外，list/get/metadata_only不重做。真实`.11`列表及原账正确、裸成功回执占位的证据保留，补丁1664项联合回归通过。
+
 2026-10-15 group_authorization/control保留原tool_policy与人工grantor；protocol/feishu_mentions仅将准确平台目标提及规范成member:ID。feishu_provider_facts共用完整成员分页，authority与显示快照形状分开；scheduler/creator_access只补显示、不授予代删。诊断固定字段到显式控制回执，无秘密或第二状态源。
 
 2026-10-15 图片输入接线：adapter/inbound_images.py负责本次图片预算与no-follow导入，conversation/input_media_images.py核真实格式/解码；manager/ingress仍是唯一准备和冻结状态机。原request_execution及HostMessageContext传递当前输入，model_control_cards沿原档案服务读写input_modalities，不建第二模型或图片权威。见[图片合同](../../design/FEISHU_NATIVE_IMAGES.md)。

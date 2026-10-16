@@ -1,3 +1,5 @@
+2026-10-15 `.12`监控成功回执：原policy guard退出后复用creator_display_rows补create/mutation的自有JSON.job展示；只替换output、保creator/effect/错误，姓名网络在锁外，list/get/metadata_only不重做。真实`.11`列表及原账正确、裸成功回执占位的证据保留，补丁1664项联合回归通过。
+
 2026-10-15 群监控简化：/group仅额外控制监控，全群显式grant覆盖未来实际成员，原个人快照不扩大。原provider安全诊断直接给IM可见错误，创建者缺名沿当前群成员接口补索引；普通聊天/配置原边界保持。联合验收待收口，见[群合同](../../design/IM_GROUP_GOVERNANCE.md)。
 
 2026-10-15 飞书原生图片实施中：原owner媒体下载与payload_ready增加真实图片refs；坏图/超限沿原入站幂等错误结算。模型卡复用原模态声明，后台输入沿原HostMessageContext恢复；未发布，统一测试待验。见[图片合同](../../design/FEISHU_NATIVE_IMAGES.md)。

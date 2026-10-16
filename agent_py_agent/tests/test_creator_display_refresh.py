@@ -196,3 +196,102 @@ def test_slash_and_model_schedule_query_share_current_group_name_refresh(tmp_pat
         assert result.ok and json.loads(result.output)['jobs'][0]['creator_display'] == '同名（feishu:ou_a）'
     assert len(calls) == 1 and calls[0][0].startswith('/im/v1/chats/oc_source/members?')
     assert agent.scheduler_repository.get_job(job['job_id'])['creator'] == {'channel': 'feishu', 'actor_id': 'ou_a'}
+
+
+@pytest.mark.parametrize('action', ['create', 'update', 'pause', 'resume', 'cancel', 'delete'])
+def test_successful_create_and_mutations_return_same_creator_display(tmp_path, monkeypatch, action):
+    import json
+
+    from agent_py_agent.agent.user_space.identity_store import remember_provider_display_names
+    from agent_py_agent.tests.test_scheduler_host_actor import create, group_case
+
+    agent, _, _, tool = group_case(tmp_path)
+    calls = []
+    agent.delivery_service.registry.adapter_for('feishu').group_member_snapshot = lambda _chat: calls.append(1)
+    remember_provider_display_names(agent.home_paths, provider='feishu', names={'ou_a': '合成创建者'})
+    job = create(tool)
+    if action == 'create':
+        result = job
+    else:
+        if action == 'resume':
+            assert tool.execute({'action': 'pause', 'job_id': job['job_id'], 'expected_version': job['version']}).ok
+        current = agent.scheduler_repository.get_job(job['job_id'])
+        params = {'action': action, 'job_id': job['job_id'], 'expected_version': current['version']}
+        if action == 'update':
+            params['prompt'] = '更新合成正文'
+        outcome = tool.execute(params)
+        assert outcome.ok, (action, outcome.error_code)
+        result = json.loads(outcome.output)['job']
+    assert result['creator'] == {'channel': 'feishu', 'actor_id': 'ou_a'}
+    assert result['creator_display'] == '合成创建者（feishu:ou_a）'
+    assert not calls  # 已有名字无需额外REST；展示不能把名字当作身份或扩充调用权限。
+
+
+@pytest.mark.parametrize('action', ['list', 'get'])
+def test_metadata_only_queries_still_exclude_creator_and_display(tmp_path, monkeypatch, action):
+    import json
+
+    from agent_py_agent.agent.user_space.identity_store import remember_provider_display_names
+    from agent_py_agent.tests.test_scheduler_host_actor import create, group_case
+
+    agent, _, _, tool = group_case(tmp_path)
+    remember_provider_display_names(agent.home_paths, provider='feishu', names={'ou_a': 'Synthetic-Name-Canary'})
+    job = create(tool)
+    result = tool.execute({'action': action, 'job_id': job['job_id'], 'metadata_only': True})
+    assert result.ok
+    payload = json.loads(result.output)
+    rows = payload['jobs'] if action == 'list' else [payload['job']]
+    assert all('creator' not in row and 'creator_display' not in row for row in rows)
+    assert 'Synthetic-Name-Canary' not in result.output
+
+
+def test_create_name_refresh_runs_after_original_group_policy_lease_exits(tmp_path):
+    from agent_py_agent.agent.user_space.group_authorization_context import _active_lease
+    from agent_py_agent.tests.test_scheduler_host_actor import create, group_case
+
+    agent, _, _, tool = group_case(tmp_path)
+    calls = []
+
+    def snapshot(chat):
+        assert _active_lease(agent.home_paths) is None
+        calls.append(chat)
+        return {'provider': 'feishu', 'chat_id': chat, 'members_complete': True,
+            'member_ids': ['ou_a'], 'member_display_names': {'ou_a': '合成创建者'}}
+
+    agent.delivery_service.registry.adapter_for('feishu').group_member_snapshot = snapshot
+    job = create(tool)
+    assert job['creator_display'] == '合成创建者（feishu:ou_a）' and calls == ['oc_source']
+    assert job['creator'] == {'channel': 'feishu', 'actor_id': 'ou_a'}
+
+
+def test_display_enrichment_does_not_allow_group_notification_takeover(tmp_path):
+    from agent_py_agent.agent.user_space.identity_store import remember_provider_display_names
+    from agent_py_agent.tests.test_scheduler_host_actor import create, group_case
+
+    agent, _, _, tool = group_case(tmp_path)
+    remember_provider_display_names(agent.home_paths, provider='feishu', names={'ou_a': '合成创建者'})
+    job = create(tool)
+    before = agent.scheduler_repository.store_path.read_bytes()
+    result = tool.execute({'action': 'takeover', 'job_id': job['job_id'], 'expected_version': job['version']})
+    assert not result.ok and result.error_code == 'CHANNEL_ACTOR_SCOPE_MISMATCH'
+    assert agent.scheduler_repository.store_path.read_bytes() == before
+
+
+def test_display_enrichment_only_replaces_output_fields(tmp_path):
+    import json
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.scheduler.tool import _with_creator_display
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.identity_store import remember_provider_display_names
+
+    agent = SimpleNamespace(home_paths=home_paths(tmp_path))
+    remember_provider_display_names(agent.home_paths, provider='feishu', names={'ou_a': '合成创建者'})
+    outcome = ToolHandlerOutcome('schedule', True, json.dumps({'ok': True, 'action': 'update',
+        'job': {'creator': {'channel': 'feishu', 'actor_id': 'ou_a'}}}), call_id='call_synthetic',
+        handler_executed=True, effect_source_ref='original_effect', result_envelope={'keep': True})
+    updated = _with_creator_display(agent, outcome)
+    assert {key: value for key, value in asdict(updated).items() if key != 'output'} == {
+        key: value for key, value in asdict(outcome).items() if key != 'output'}
+    assert json.loads(updated.output)['job']['creator_display'] == '合成创建者（feishu:ou_a）'

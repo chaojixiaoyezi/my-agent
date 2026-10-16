@@ -1,10 +1,11 @@
-# LLM: 持久计划经原owner repository/typed actor提交，原聊天来源与后台执行位置分开冻结；草稿、名称和回复均不授权。
-# 模块用途: 统一登记、管理与触发计划，委派创建仍保留原聊天来源和原工作审计编号。
+# LLM: 持久计划经原owner/typed actor提交；成功回执的姓名沿原展示投影且在policy锁外补充，名字/回复不授权。
+# 模块用途: 统一登记管理计划，保留原聊天来源/工作审计和准确创建者；展示资料不改变写入结果或归属。
 from __future__ import annotations
 
 import json
 import time
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from ..conversation.host_actor import HostActorError, resolve_host_actor
@@ -228,8 +229,8 @@ class ScheduleTool(BaseTool):
                 raise
             return _error("", "SCHEDULER_UNAVAILABLE", metadata_only=True)
 
-    # LLM: list/get/history 的元数据模式贯穿嵌套 run 投影；读取原账本，写入仍由 repository CAS 管理。
-    # 函数用途: 执行定时动作，删除和通知接管走共用控制服务，列表保留截断事实，诊断查询排除正文和名字。
+    # LLM: 元数据查询原样早返回；写入沿原CAS，成功后退出policy锁再补本工具结构化job的姓名展示，不改变权限或效果字段。
+    # 函数用途: 执行查询和监控控制，成功创建/修改回执共用原创建者展示，诊断查询仍排除正文和名字。
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         metadata_only = params.get("metadata_only", False) is True
         if action == "status":
@@ -307,8 +308,10 @@ class ScheduleTool(BaseTool):
         prepared = prepare_event_sources(self.agent, params) if action in {'create', 'update'} else None
         with _monitor_work_guard(self.agent, action):
             if action == "create":
-                return self._create(repository, params, prepared)
-            return self._mutate_existing(repository, action, params, prepared)
+                outcome = self._create(repository, params, prepared)
+            else:
+                outcome = self._mutate_existing(repository, action, params, prepared)
+        return _with_creator_display(self.agent, outcome)
 
     # LLM: 已核原 job/creator 后才持群新工作门；写入沿原 CAS，未知编号不触发 provider 查询或泄露其它 owner。
     # 函数用途: 执行已授权的立即运行或现有监控变更，停止取消保持原权限和原语义。
@@ -686,6 +689,20 @@ def _success(action: str, payload: dict[str, object]) -> ToolHandlerOutcome:
         True,
         json.dumps({"ok": True, "action": action, **payload}, ensure_ascii=False),
     )
+
+
+# LLM: 仅消费本工具_success的结构化JSON.job，不读模型正文；调用方已退出policy锁，仅替换output，原权限/效果及其它回执不变。
+# 函数用途: 给成功创建或修改回执补同一创建者展示；可选有界姓名刷新失败沿原未知姓名，不改原job或成功状态。
+def _with_creator_display(agent, outcome):
+    if not outcome.ok:
+        return outcome
+    payload = json.loads(outcome.output)
+    if not isinstance(payload.get('job'), dict):
+        return outcome
+    from .creator_access import creator_display_rows
+
+    payload['job'] = creator_display_rows(agent, [payload['job']])[0]
+    return replace(outcome, output=json.dumps(payload, ensure_ascii=False))
 
 
 # LLM: 元数据错误只输出固定错误码；已知写前拒绝保持 not_started，写入异常才允许 unknown。
