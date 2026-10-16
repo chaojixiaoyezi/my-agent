@@ -4,12 +4,12 @@
     {
       "id": "agent_config",
       "path": "agent_py_agent/config/agent_config.yaml",
-      "fieldCount": 235
+      "fieldCount": 250
     },
     {
       "id": "capability_config",
       "path": "agent_py_agent/config/capability_config.yaml",
-      "fieldCount": 42
+      "fieldCount": 62
     }
   ],
   "schema": {
@@ -60,8 +60,8 @@
             "label": "system_prompt（system prompt）",
             "description": "系统人格：每次请求都会放进最终 prompt 的 System 段",
             "type": "text",
-            "defaultValue": "你是 my-agent，一个自主的 CLI 智能体，用工具、多通道网关和子代理完成真实工程与运营任务。 自主决策：用户已经给出明确目标时，优先从当前目录、现有代码、用户约束和工具事实补齐信息；缺少次要实现选择时，不要停下来反问。若仍有多种安全可行方案，选择合理默认，必要时简短说明假设，然后继续执行。只有缺失信息无法从上下文取得，而且任何合理假设都会导致实质偏离、越权或不可逆风险时，才向用户提出一个简短的关键问题；不要输出多选菜单来代替工作。用户已经明确授权你在可行方案中自行选择时，直接选择并继续。任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞。 执行归属：普通回合负责当前用户请求；运行时存在 current_goal 时，本轮负责该目标的完整要求。每个代理最多一个未结束 Goal，历史目标不是本轮的新任务。主子代理目标各自独立，不能替未结束的下级宣布完成。用户新消息仍需回应，明确改派时再按新的执行归属工作。执行纪律：只要本轮负责的目标仍有你已知的未完成部分，而且现有工具、子代理或可用证据还能继续推进，就持续工作，不要停在分析、骨架、局部修复或一份诚实的未完成清单上；把工作推进到实现、验证和清楚交付。工具调用失败时先读真实错误并修正方法，不能把一次可恢复失败当作结束理由。只有目标已经端到端解决、用户明确暂停或改向，或者存在当前确实无法消除的真实阻塞时，才结束本轮。本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付；骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，不能替代本轮目标要求的完整功能、完整测试和可运行交付。验证纪律：验证必须覆盖本轮目标实际要求的可见行为和端到端入口；模块能导入、文件或类存在、代码量或数量达标都只能算局部证据。安装、构建、启动或关键路径失败，说明目标仍未解决；修正后必须重跑同一入口，不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功。能暴露当前缺陷的有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在；应该修实现，确实无法解决时保留真实失败并如实报告。 沟通：尽量简短直接。除非用户要详细，否则别长篇、别加空洞开场和结尾、别堆能力清单；能一两句说清就一两句。 如实报告：测试失败就说明失败；某步跳过就说跳过；只做了一部分就说清未完成项和阻塞。只有真正做完并验证后才说完成，绝不拿旧的、局部的或未验证的结果冒充完整交付。 安全：按当前权限执行已授权范围；未授权的高风险、不可逆或对外动作先确认，不重复索要已有授权。 工作方式：先读取与当前目标直接相关的现有代码、约定和测试，再按可验证的小步实现；失败后根据真实结果调整，不机械重复。只做用户要求的范围。复杂任务能并行时使用子代理，但不要为了显得忙而派工；用户限制主代理只能协调时，实际实现必须留给下级，主代理只做协调、已有产物整合、测试和汇报。 持续目标：用户或直接父级明确要求建立 Goal 时，先调用 create_goal 并确认成功；task_progress 只记计划，不会建立 Goal，也不能代替它。普通任务不自动建立 Goal。已有目标需要纠正时用 update_goal 修改，不为换名字另开目标。派工可只给 prompt，也可显式附 persistent_goal。 任务管理：主子代理可按复杂度自行选择用 task_progress 建清单或直接执行；使用清单时沿用原 id 更新状态，不要在每次唤醒时重复创建同义清单。凡把现有清单中的工作交给子代理，create_subagents 对应 item 必须原样复制该项 id 到 covers；只有下级工作不属于任何现有项或对应关系不能确定时才省略，绝不能拿无关 id 顶替。显式 covers 的 child DONE 后系统会按 id 打勾；未绑定 child 不会关闭原 Todo，父级收到完成事件后应立刻用 task_progress 按 exact id 更新已经由当前证据证实完成的计划项。待办未清空且仍可推进时继续工作；清单只是模型自查，不是宿主机器验收。",
-            "currentValue": "你是 my-agent，一个自主的 CLI 智能体，用工具、多通道网关和子代理完成真实工程与运营任务。 自主决策：用户已经给出明确目标时，优先从当前目录、现有代码、用户约束和工具事实补齐信息；缺少次要实现选择时，不要停下来反问。若仍有多种安全可行方案，选择合理默认，必要时简短说明假设，然后继续执行。只有缺失信息无法从上下文取得，而且任何合理假设都会导致实质偏离、越权或不可逆风险时，才向用户提出一个简短的关键问题；不要输出多选菜单来代替工作。用户已经明确授权你在可行方案中自行选择时，直接选择并继续。任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞。 执行归属：普通回合负责当前用户请求；运行时存在 current_goal 时，本轮负责该目标的完整要求。每个代理最多一个未结束 Goal，历史目标不是本轮的新任务。主子代理目标各自独立，不能替未结束的下级宣布完成。用户新消息仍需回应，明确改派时再按新的执行归属工作。执行纪律：只要本轮负责的目标仍有你已知的未完成部分，而且现有工具、子代理或可用证据还能继续推进，就持续工作，不要停在分析、骨架、局部修复或一份诚实的未完成清单上；把工作推进到实现、验证和清楚交付。工具调用失败时先读真实错误并修正方法，不能把一次可恢复失败当作结束理由。只有目标已经端到端解决、用户明确暂停或改向，或者存在当前确实无法消除的真实阻塞时，才结束本轮。本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付；骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，不能替代本轮目标要求的完整功能、完整测试和可运行交付。验证纪律：验证必须覆盖本轮目标实际要求的可见行为和端到端入口；模块能导入、文件或类存在、代码量或数量达标都只能算局部证据。安装、构建、启动或关键路径失败，说明目标仍未解决；修正后必须重跑同一入口，不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功。能暴露当前缺陷的有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在；应该修实现，确实无法解决时保留真实失败并如实报告。 沟通：尽量简短直接。除非用户要详细，否则别长篇、别加空洞开场和结尾、别堆能力清单；能一两句说清就一两句。 如实报告：测试失败就说明失败；某步跳过就说跳过；只做了一部分就说清未完成项和阻塞。只有真正做完并验证后才说完成，绝不拿旧的、局部的或未验证的结果冒充完整交付。 安全：按当前权限执行已授权范围；未授权的高风险、不可逆或对外动作先确认，不重复索要已有授权。 工作方式：先读取与当前目标直接相关的现有代码、约定和测试，再按可验证的小步实现；失败后根据真实结果调整，不机械重复。只做用户要求的范围。复杂任务能并行时使用子代理，但不要为了显得忙而派工；用户限制主代理只能协调时，实际实现必须留给下级，主代理只做协调、已有产物整合、测试和汇报。 持续目标：用户或直接父级明确要求建立 Goal 时，先调用 create_goal 并确认成功；task_progress 只记计划，不会建立 Goal，也不能代替它。普通任务不自动建立 Goal。已有目标需要纠正时用 update_goal 修改，不为换名字另开目标。派工可只给 prompt，也可显式附 persistent_goal。 任务管理：主子代理可按复杂度自行选择用 task_progress 建清单或直接执行；使用清单时沿用原 id 更新状态，不要在每次唤醒时重复创建同义清单。凡把现有清单中的工作交给子代理，create_subagents 对应 item 必须原样复制该项 id 到 covers；只有下级工作不属于任何现有项或对应关系不能确定时才省略，绝不能拿无关 id 顶替。显式 covers 的 child DONE 后系统会按 id 打勾；未绑定 child 不会关闭原 Todo，父级收到完成事件后应立刻用 task_progress 按 exact id 更新已经由当前证据证实完成的计划项。待办未清空且仍可推进时继续工作；清单只是模型自查，不是宿主机器验收。",
+            "defaultValue": "你是 my-agent，一个自主的 CLI 智能体，用工具、多通道网关和子代理完成真实工程与运营任务。 自主决策：用户已经给出明确目标时，优先从当前目录、现有代码、用户约束和工具事实补齐信息；缺少次要实现选择时，不要停下来反问。若仍有多种安全可行方案，选择合理默认，必要时简短说明假设，然后继续执行。只有缺失信息无法从上下文取得，而且任何合理假设都会导致实质偏离、越权或不可逆风险时，才向用户提出一个简短的关键问题；不要输出多选菜单来代替工作。用户已经明确授权你在可行方案中自行选择时，直接选择并继续。任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞。 执行归属：普通回合负责当前用户请求；运行时存在 current_goal 时，本轮负责该目标的完整要求。每个代理最多一个未结束 Goal，历史目标不是本轮的新任务。主子代理目标各自独立，不能替未结束的下级宣布完成。用户新消息仍需回应，明确改派时再按新的执行归属工作。执行纪律：只要本轮负责的目标仍有你已知的未完成部分，而且现有工具、子代理或可用证据还能继续推进，就持续工作，不要停在分析、骨架、局部修复或一份诚实的未完成清单上；把工作推进到实现、验证和清楚交付。工具调用失败时先读真实错误并修正方法，不能把一次可恢复失败当作结束理由。只有目标已经端到端解决、用户明确暂停或改向，或者存在当前确实无法消除的真实阻塞时，才结束本轮。这里的目标只指本轮已授权范围，不包含顺手发现但用户未要求的改造。本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付；骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，不能替代本轮目标要求的完整功能、完整测试和可运行交付。验证纪律：验证必须覆盖本轮目标实际要求的可见行为和端到端入口；模块能导入、文件或类存在、代码量或数量达标都只能算局部证据。安装、构建、启动或关键路径失败，说明目标仍未解决；修正后必须重跑同一入口，不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功。能暴露当前缺陷的有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在；应该修实现，确实无法解决时保留真实失败并如实报告。验证范围与变更规模和风险相称：相关检查通过且没有新失败或新改动时，直接交付，不重复核验。普通问答或解释不要求创建文件、清单、子代理或运行测试；已有信息足够可靠时直接回答。 沟通：尽量简短直接。除非用户要详细，否则别长篇、别加空洞开场和结尾、别堆能力清单；能一两句说清就一两句。 如实报告：测试失败就说明失败；某步跳过就说跳过；只做了一部分就说清未完成项和阻塞。只有真正做完并验证后才说完成，绝不拿旧的、局部的或未验证的结果冒充完整交付。 安全：按当前权限执行已授权范围；未授权的高风险、不可逆或对外动作先确认，不重复索要已有授权。 工作方式：先判断现有上下文是否已能可靠回答当前问题；能回答就直接给结论，只有缺少必要事实才查。执行任务时先读取与当前目标直接相关的现有代码、约定和测试，再按可验证的小步实现；已有事实或工具结果足够解决本轮要求时收敛，不为了追求更多材料扩大搜索、重复读文件或运行无关检查。失败后根据真实结果调整，不机械重复。只做用户要求的范围。复杂任务能并行时使用子代理，但不要为了显得忙而派工；用户限制主代理只能协调时，实际实现必须留给下级，主代理只做协调、已有产物整合、测试和汇报。 持续目标：用户或直接父级明确要求建立 Goal 时，先调用 create_goal 并确认成功；task_progress 只记计划，不会建立 Goal，也不能代替它。普通任务不自动建立 Goal。已有目标需要纠正时用 update_goal 修改，不为换名字另开目标。派工可只给 prompt，也可显式附 persistent_goal。 任务管理：主子代理可按复杂度自行选择用 task_progress 建清单或直接执行；使用清单时沿用原 id 更新状态，不要在每次唤醒时重复创建同义清单。凡把现有清单中的工作交给子代理，create_subagents 对应 item 必须原样复制该项 id 到 covers；只有下级工作不属于任何现有项或对应关系不能确定时才省略，绝不能拿无关 id 顶替。显式 covers 的 child DONE 后系统会按 id 打勾；未绑定 child 不会关闭原 Todo，父级收到完成事件后应立刻用 task_progress 按 exact id 更新已经由当前证据证实完成的计划项。待办未清空且仍可推进时继续工作；清单只是模型自查，不是宿主机器验收。",
+            "currentValue": "你是 my-agent，一个自主的 CLI 智能体，用工具、多通道网关和子代理完成真实工程与运营任务。 自主决策：用户已经给出明确目标时，优先从当前目录、现有代码、用户约束和工具事实补齐信息；缺少次要实现选择时，不要停下来反问。若仍有多种安全可行方案，选择合理默认，必要时简短说明假设，然后继续执行。只有缺失信息无法从上下文取得，而且任何合理假设都会导致实质偏离、越权或不可逆风险时，才向用户提出一个简短的关键问题；不要输出多选菜单来代替工作。用户已经明确授权你在可行方案中自行选择时，直接选择并继续。任务规模大、耗时长或仅仅有可澄清之处，都不等于阻塞。 执行归属：普通回合负责当前用户请求；运行时存在 current_goal 时，本轮负责该目标的完整要求。每个代理最多一个未结束 Goal，历史目标不是本轮的新任务。主子代理目标各自独立，不能替未结束的下级宣布完成。用户新消息仍需回应，明确改派时再按新的执行归属工作。执行纪律：只要本轮负责的目标仍有你已知的未完成部分，而且现有工具、子代理或可用证据还能继续推进，就持续工作，不要停在分析、骨架、局部修复或一份诚实的未完成清单上；把工作推进到实现、验证和清楚交付。工具调用失败时先读真实错误并修正方法，不能把一次可恢复失败当作结束理由。只有目标已经端到端解决、用户明确暂停或改向，或者存在当前确实无法消除的真实阻塞时，才结束本轮。这里的目标只指本轮已授权范围，不包含顺手发现但用户未要求的改造。本轮自己创建的普通子代理只是分工，仍需接收结果、整合验证和交付；骨架、空壳、最小示例或只显示欢迎信息的 demo 只能算阶段成果，不能替代本轮目标要求的完整功能、完整测试和可运行交付。验证纪律：验证必须覆盖本轮目标实际要求的可见行为和端到端入口；模块能导入、文件或类存在、代码量或数量达标都只能算局部证据。安装、构建、启动或关键路径失败，说明目标仍未解决；修正后必须重跑同一入口，不能把 `|| true`、`|| echo` 等忽略失败包装后的外层成功当成内部成功。能暴露当前缺陷的有效测试不得仅为变绿而删除、跳过、放宽断言或改成只测存在；应该修实现，确实无法解决时保留真实失败并如实报告。验证范围与变更规模和风险相称：相关检查通过且没有新失败或新改动时，直接交付，不重复核验。普通问答或解释不要求创建文件、清单、子代理或运行测试；已有信息足够可靠时直接回答。 沟通：尽量简短直接。除非用户要详细，否则别长篇、别加空洞开场和结尾、别堆能力清单；能一两句说清就一两句。 如实报告：测试失败就说明失败；某步跳过就说跳过；只做了一部分就说清未完成项和阻塞。只有真正做完并验证后才说完成，绝不拿旧的、局部的或未验证的结果冒充完整交付。 安全：按当前权限执行已授权范围；未授权的高风险、不可逆或对外动作先确认，不重复索要已有授权。 工作方式：先判断现有上下文是否已能可靠回答当前问题；能回答就直接给结论，只有缺少必要事实才查。执行任务时先读取与当前目标直接相关的现有代码、约定和测试，再按可验证的小步实现；已有事实或工具结果足够解决本轮要求时收敛，不为了追求更多材料扩大搜索、重复读文件或运行无关检查。失败后根据真实结果调整，不机械重复。只做用户要求的范围。复杂任务能并行时使用子代理，但不要为了显得忙而派工；用户限制主代理只能协调时，实际实现必须留给下级，主代理只做协调、已有产物整合、测试和汇报。 持续目标：用户或直接父级明确要求建立 Goal 时，先调用 create_goal 并确认成功；task_progress 只记计划，不会建立 Goal，也不能代替它。普通任务不自动建立 Goal。已有目标需要纠正时用 update_goal 修改，不为换名字另开目标。派工可只给 prompt，也可显式附 persistent_goal。 任务管理：主子代理可按复杂度自行选择用 task_progress 建清单或直接执行；使用清单时沿用原 id 更新状态，不要在每次唤醒时重复创建同义清单。凡把现有清单中的工作交给子代理，create_subagents 对应 item 必须原样复制该项 id 到 covers；只有下级工作不属于任何现有项或对应关系不能确定时才省略，绝不能拿无关 id 顶替。显式 covers 的 child DONE 后系统会按 id 打勾；未绑定 child 不会关闭原 Todo，父级收到完成事件后应立刻用 task_progress 按 exact id 更新已经由当前证据证实完成的计划项。待办未清空且仍可推进时继续工作；清单只是模型自查，不是宿主机器验收。",
             "category": "basic",
             "categoryLabel": "基础信息",
             "advanced": false,
@@ -425,7 +425,7 @@
           {
             "key": "enable_self_learning",
             "label": "enable_self_learning（enable self learning）",
-            "description": "自学习（默认关闭）： - false：不自动总结 Skill；子代理的 lesson 只进入统一记忆候选账本，不生成任何 Skill 提案，也不创建提案目录。 - true： 1. 主代理正常完成、且本轮工具轮数达到 self_learning_min_tool_rounds 的任务，会在 owner 的 data/skill_learning/ 下登记一条有界学习请求；Gateway 后台记忆整理车道用 owner 当前选定的模型判断是否值得沉淀， 值得就新建或更新 owner 的 skills/learned/<名字>/SKILL.md，下一轮自动可用。 2. 不需要用户逐条确认：发布前必须通过自动闸门（输出格式、重名、数量上限、只改自己生成且用户没改过的 Skill、 解析检查、明文密钥检查、安全扫描）；每次写入都记账并保存版本，可用 `my-agent skills learned list/show/revert/remove` 查看、回滚或删除（删除后同名不再自动新建）。 3. 带精确任务/运行来源的子代理 lesson 生成的 Skill 提案会立即走原确认链自动安装（回执标 confirmed_by=auto）； 以前遗留的待确认提案仍可用 `my-agent skills proposals list/show/confirm/reject` 管理。 - 会额外消耗模型调用（受下面每日上限约束），并写 owner 的 skills 目录。",
+            "description": "自学习（默认关闭）：开启后后台总结主任务、子代理lesson生成待确认候选。 正式Skill的新建或更新必须经用户确认；开关、模型理由及自动维护都不代替确认。 用户可通过 /skills learned proposals 查看，按候选编号和修订确认/拒绝；子代理候选沿 /skills proposals。 会额外消耗受每日预算限制的模型调用，候选保存前脱敏并经过原解析和guard。",
             "type": "boolean",
             "defaultValue": false,
             "currentValue": false,
@@ -476,12 +476,12 @@
             "max": 1000000
           },
           {
-            "key": "self_learning_max_skills",
-            "label": "self_learning_max_skills（self learning max skills）",
-            "description": "自动总结最多能新建出的自学技能数量上限。 只有当你希望给自学技能的总数设个天花板、不让它无限增长时才需要改。 填 `0` 表示不限；它只管新建、不算更新，已有技能的更新不受这个数影响。",
+            "key": "self_learning_global_daily_limit",
+            "label": "self_learning_global_daily_limit（self learning global daily limit）",
+            "description": "同一部署全部owner每日自学模型调用总上限（UTC），失败调用也计数；0不限，避免大量owner各自绕过总成本预算。",
             "type": "number",
-            "defaultValue": 50,
-            "currentValue": 50,
+            "defaultValue": 2000,
+            "currentValue": 2000,
             "category": "basic",
             "categoryLabel": "基础信息",
             "advanced": true,
@@ -493,6 +493,133 @@
             "order": 68,
             "min": 0,
             "max": 1000000
+          },
+          {
+            "key": "self_learning_max_skills",
+            "label": "self_learning_max_skills（self learning max skills）",
+            "description": "兼容显式配置的新建硬上限，默认0由owner存储配额控制；旧配置的非零值仍按原硬上限，不偷换成推荐数。 只有当你希望给自学技能的总数设个天花板、不让它无限增长时才需要改。 填 `0` 表示不限；它只管新建、不算更新，已有技能的更新不受这个数影响。",
+            "type": "number",
+            "defaultValue": 0,
+            "currentValue": 0,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 69,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "self_learning_recommended_limit",
+            "label": "self_learning_recommended_limit（self learning recommended limit）",
+            "description": "默认常用目录最多展示的自学Skill数；不影响完整搜索、显式读取或持久保存。0表示不限制。",
+            "type": "number",
+            "defaultValue": 50,
+            "currentValue": 50,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 70,
+            "min": 0,
+            "max": 1000000
+          },
+          {
+            "key": "self_learning_maintenance_mode",
+            "label": "self_learning_maintenance_mode（self learning maintenance mode）",
+            "description": "observe只观察；autonomous在引用完整、未固定且仍属托管时允许可恢复冷藏/归档，不发布新内容。",
+            "type": "string",
+            "defaultValue": "observe",
+            "currentValue": "observe",
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 71
+          },
+          {
+            "key": "self_learning_cool_seconds",
+            "label": "self_learning_cool_seconds（self learning cool seconds）",
+            "description": "冷藏与归档的空闲秒数，0关闭对应动作；默认30天/180天仅在autonomous显式开启时生效。",
+            "type": "number",
+            "defaultValue": 2592000,
+            "currentValue": 2592000,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 72,
+            "min": 0,
+            "max": 2592000
+          },
+          {
+            "key": "self_learning_archive_seconds",
+            "label": "self_learning_archive_seconds（self learning archive seconds）",
+            "description": "自学技能连续闲置多少秒后可归档；0关闭，仅显式autonomous且引用完整时生效，默认180天。",
+            "type": "number",
+            "defaultValue": 15552000,
+            "currentValue": 15552000,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 73,
+            "min": 0,
+            "max": 15552000
+          },
+          {
+            "key": "self_learning_include_background",
+            "label": "self_learning_include_background（self learning include background）",
+            "description": "是否让已完成的后台/定时任务也提交学习请求；默认关闭，开启仍受同一日预算与候选确认。",
+            "type": "boolean",
+            "defaultValue": false,
+            "currentValue": false,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 74
+          },
+          {
+            "key": "self_learning_keep_versions",
+            "label": "self_learning_keep_versions（self learning keep versions）",
+            "description": "自主维护且引用完整时，未被引用方法保留最近修订数；当前激活版另保留，固定/在途/监控方法历史不裁剪。0不限。",
+            "type": "number",
+            "defaultValue": 5,
+            "currentValue": 5,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 75
           },
           {
             "key": "self_learning_timeout_seconds",
@@ -509,7 +636,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 69,
+            "order": 76,
             "min": 0,
             "max": 3600
           },
@@ -528,7 +655,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 70
+            "order": 77
           },
           {
             "key": "enable_memory_search_tool",
@@ -545,7 +672,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 71
+            "order": 78
           },
           {
             "key": "enable_gateway_restart_tool",
@@ -562,7 +689,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 72
+            "order": 79
           },
           {
             "key": "tui_follow_gateway_upgrade",
@@ -579,7 +706,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 73
+            "order": 80
           },
           {
             "key": "skill_guard_max_files",
@@ -596,7 +723,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 77,
+            "order": 84,
             "min": 0,
             "max": 1000000
           },
@@ -615,7 +742,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 78,
+            "order": 85,
             "min": 0,
             "max": 1000000
           },
@@ -634,7 +761,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 84
+            "order": 91
           },
           {
             "key": "estimated_output_tokens_per_second",
@@ -651,7 +778,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 87,
+            "order": 94,
             "min": 0,
             "max": 200000
           },
@@ -670,7 +797,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 96,
+            "order": 103,
             "min": 0,
             "max": 1000000
           },
@@ -689,7 +816,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 97
+            "order": 104
           },
           {
             "key": "background_threads_per_owner",
@@ -706,7 +833,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 98
+            "order": 105
           },
           {
             "key": "owner_agent_pool_max_agents",
@@ -723,7 +850,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 99,
+            "order": 106,
             "min": 0,
             "max": 1000000
           },
@@ -742,7 +869,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 100,
+            "order": 107,
             "min": 0,
             "max": 3600
           },
@@ -761,14 +888,14 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 101,
+            "order": 108,
             "min": 0,
             "max": 16777216
           },
           {
             "key": "input_media_max_files",
             "label": "input_media_max_files（input media max files）",
-            "description": "一条消息里最多能带几个图片或视频附件（TUI 里 `/attach` 或拖入）。 一般不用改；单个文件的大小上限另由 input_media_max_bytes 控制。",
+            "description": "一条消息里最多能带几个图片或视频附件（TUI `/attach`、拖入，或飞书原生图片输入）。 一般不用改；单个文件的大小上限另由 input_media_max_bytes 控制。",
             "type": "number",
             "defaultValue": 8,
             "currentValue": 8,
@@ -780,9 +907,28 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 102,
+            "order": 109,
             "min": 0,
             "max": 1000000
+          },
+          {
+            "key": "input_image_max_pixels",
+            "label": "input_image_max_pixels（input image max pixels）",
+            "description": "飞书原生图片进入模型前实际解码的累计像素上限；动图逐帧累计，默认4000万像素。 同时最多检查256帧，不启动外部图片解释器；超限明确拒绝，不丢掉图片继续回答。",
+            "type": "number",
+            "defaultValue": 40000000,
+            "currentValue": 40000000,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 110,
+            "min": 0,
+            "max": 40000000
           },
           {
             "key": "owner_maintenance_scan_interval_seconds",
@@ -799,7 +945,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 103,
+            "order": 111,
             "min": 0,
             "max": 3600
           },
@@ -818,7 +964,79 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 110
+            "order": 118
+          },
+          {
+            "key": "im_stream_preview_max_chars",
+            "label": "im_stream_preview_max_chars（im stream preview max chars）",
+            "description": "/verbose stream 同一条过程消息每次最多展示多少字符，默认 100；有效范围 1～8000，最终答复不受影响。",
+            "type": "number",
+            "defaultValue": 100,
+            "currentValue": 100,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 127,
+            "min": 0,
+            "max": 2000000
+          },
+          {
+            "key": "im_stream_heartbeat_seconds",
+            "label": "im_stream_heartbeat_seconds（im stream heartbeat seconds）",
+            "description": "IM 无可见输出的长工具和模型请求等待刷新间隔，单位秒，默认 120；verbose off 仅显示极简状态与时间。 模型心跳只表示同一已发出请求尚未返回及已等待时长，不表示完成了业务进展；停止/超时后不继续刷新。 0 关闭心跳，有效刷新间隔 1～120 秒；stream 有新正文时仍沿原节流更新，不额外调用 LLM。",
+            "type": "number",
+            "defaultValue": 120,
+            "currentValue": 120,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 128,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "query_zero_result_review_enabled",
+            "label": "query_zero_result_review_enabled（query zero result review enabled）",
+            "description": "带条件查询零命中时，提醒模型做一次有界同范围对照，再下否定结论；不会自动联网或发送零条告警。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 129
+          },
+          {
+            "key": "background_public_receipt_contract_enabled",
+            "label": "background_public_receipt_contract_enabled（background public receipt contract enabled）",
+            "description": "是否允许后台任务显式选择 delivery.reply_policy=explicit，将内部结果与公开通知分开。 默认开启，但旧任务的 always 策略、普通对话和 local/none 通知都不改变，也不增加常驻模型调用。 explicit 的本轮可声明不通知；待投附件或用户插话仍须答复。公开形态缺失时最多新增一次零工具修复。 关闭后不执行 explicit 回执合同，任务必须使用原通知策略；不会把供应商空响应当作静默成功。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "basic",
+            "categoryLabel": "基础信息",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 130
           },
           {
             "key": "timezone",
@@ -835,7 +1053,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 127
+            "order": 141
           },
           {
             "key": "week_start",
@@ -852,7 +1070,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 128
+            "order": 143
           },
           {
             "key": "conversation_workspace",
@@ -869,7 +1087,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 130
+            "order": 145
           },
           {
             "key": "background_context_max_total_tokens",
@@ -886,7 +1104,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 131,
+            "order": 146,
             "min": 0,
             "max": 200000
           },
@@ -905,7 +1123,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 132,
+            "order": 147,
             "min": 0,
             "max": 3600
           },
@@ -924,7 +1142,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 133
+            "order": 148
           },
           {
             "key": "collaboration_workspace",
@@ -941,7 +1159,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 134
+            "order": 149
           },
           {
             "key": "collaboration_auto_dispatch_max_runners",
@@ -958,7 +1176,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 135,
+            "order": 150,
             "min": 0,
             "max": 1000000
           },
@@ -977,7 +1195,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 142,
+            "order": 157,
             "choices": [
               "debug",
               "info",
@@ -1001,7 +1219,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 143
+            "order": 158
           },
           {
             "key": "model_custom_headers",
@@ -1018,7 +1236,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 147
+            "order": 162
           },
           {
             "key": "model_session_header",
@@ -1035,7 +1253,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 148
+            "order": 163
           },
           {
             "key": "model_auth_ref",
@@ -1052,7 +1270,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 149
+            "order": 164
           },
           {
             "key": "model_queue_wait_seconds",
@@ -1069,7 +1287,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 150,
+            "order": 165,
             "min": 0,
             "max": 3600
           },
@@ -1088,7 +1306,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 154,
+            "order": 169,
             "min": 0,
             "max": 200000
           },
@@ -1107,7 +1325,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 155
+            "order": 170
           },
           {
             "key": "top_p",
@@ -1124,7 +1342,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 157
+            "order": 172
           },
           {
             "key": "model_reasoning_effort",
@@ -1141,7 +1359,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 158
+            "order": 173
           },
           {
             "key": "model_reasoning_control",
@@ -1158,7 +1376,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 159
+            "order": 174
           },
           {
             "key": "model_reasoning_levels",
@@ -1175,7 +1393,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 160
+            "order": 175
           },
           {
             "key": "model_reasoning_update_items",
@@ -1192,7 +1410,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 161
+            "order": 176
           },
           {
             "key": "reasoning_control_auto_probe",
@@ -1209,7 +1427,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 162
+            "order": 177
           },
           {
             "key": "model_truncation_thinking_downgrade",
@@ -1226,7 +1444,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 163
+            "order": 178
           },
           {
             "key": "model_structured_output",
@@ -1243,7 +1461,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 164
+            "order": 179
           },
           {
             "key": "embedding_model_profile",
@@ -1260,7 +1478,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 165
+            "order": 180
           },
           {
             "key": "anthropic_prompt_cache_enabled",
@@ -1277,7 +1495,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 166
+            "order": 181
           },
           {
             "key": "enable_plugins",
@@ -1294,7 +1512,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 168
+            "order": 183
           },
           {
             "key": "plugin_process_sandbox",
@@ -1311,7 +1529,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 169
+            "order": 184
           },
           {
             "key": "plugin_tool_gate_timeout_ms",
@@ -1328,7 +1546,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 170,
+            "order": 185,
             "min": 0,
             "max": 3600
           },
@@ -1347,7 +1565,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 171
+            "order": 186
           },
           {
             "key": "plugin_legacy_sandbox_default",
@@ -1364,7 +1582,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 172
+            "order": 187
           },
           {
             "key": "max_parallel_tool_calls",
@@ -1381,7 +1599,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 175,
+            "order": 190,
             "min": 0,
             "max": 1000000
           },
@@ -1400,7 +1618,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 177,
+            "order": 192,
             "min": 0,
             "max": 3600
           },
@@ -1419,7 +1637,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 178,
+            "order": 193,
             "min": 0,
             "max": 1000000
           },
@@ -1438,7 +1656,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 184
+            "order": 199
           },
           {
             "key": "path_access_mode",
@@ -1455,7 +1673,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 189
+            "order": 204
           },
           {
             "key": "path_dangerous_roots",
@@ -1504,7 +1722,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 190
+            "order": 205
           },
           {
             "key": "access_mode",
@@ -1521,7 +1739,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 191
+            "order": 206
           },
           {
             "key": "pty_session_idle_timeout_minutes",
@@ -1538,7 +1756,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 193,
+            "order": 208,
             "min": 0,
             "max": 3600
           },
@@ -1557,7 +1775,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 195
+            "order": 210
           },
           {
             "key": "shell_sandbox_hide_user_home",
@@ -1574,7 +1792,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 196
+            "order": 211
           },
           {
             "key": "shell_sandbox_boundary_facts",
@@ -1591,7 +1809,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 197
+            "order": 212
           },
           {
             "key": "mcp_servers",
@@ -1608,7 +1826,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 204
+            "order": 219
           },
           {
             "key": "computer_use_enabled",
@@ -1625,7 +1843,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 205
+            "order": 220
           },
           {
             "key": "computer_use_observation_enabled",
@@ -1642,7 +1860,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 206
+            "order": 221
           },
           {
             "key": "conversation_history_max_turns",
@@ -1659,7 +1877,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 208,
+            "order": 223,
             "min": 0,
             "max": 1000000
           },
@@ -1678,7 +1896,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 209,
+            "order": 224,
             "min": 0,
             "max": 2000000
           },
@@ -1697,7 +1915,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 210
+            "order": 225
           },
           {
             "key": "conversation_terminal_tool_hot_tail_seconds",
@@ -1714,7 +1932,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 211,
+            "order": 226,
             "min": 0,
             "max": 3600
           },
@@ -1733,7 +1951,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 213
+            "order": 228
           },
           {
             "key": "decision_experiment_enabled",
@@ -1750,7 +1968,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 214
+            "order": 229
           },
           {
             "key": "decision_observe_sampling_enabled",
@@ -1767,7 +1985,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 215
+            "order": 230
           },
           {
             "key": "decision_observe_nonblocking_enabled",
@@ -1784,7 +2002,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 216
+            "order": 231
           },
           {
             "key": "decision_timeout_seconds",
@@ -1801,7 +2019,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 217,
+            "order": 232,
             "min": 0,
             "max": 3600
           },
@@ -1820,7 +2038,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 218,
+            "order": 233,
             "min": 0,
             "max": 3600
           },
@@ -1839,7 +2057,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 219,
+            "order": 234,
             "min": 0,
             "max": 3600
           },
@@ -1858,7 +2076,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 220
+            "order": 235
           },
           {
             "key": "decision_skip_records_enabled",
@@ -1875,7 +2093,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 221
+            "order": 236
           },
           {
             "key": "decision_profile_id",
@@ -1892,7 +2110,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 222
+            "order": 237
           },
           {
             "key": "decision_model_selection_mode",
@@ -1909,7 +2127,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 223
+            "order": 238
           },
           {
             "key": "decision_model_selection_cadence",
@@ -1926,7 +2144,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 224
+            "order": 239
           },
           {
             "key": "decision_request_max_chars",
@@ -1943,7 +2161,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 225,
+            "order": 240,
             "min": 0,
             "max": 2000000
           },
@@ -1962,7 +2180,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 226
+            "order": 241
           },
           {
             "key": "decision_planning_mode",
@@ -1979,7 +2197,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 227
+            "order": 242
           },
           {
             "key": "decision_delivery_quality_mode",
@@ -1996,7 +2214,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 228
+            "order": 243
           },
           {
             "key": "decision_action_candidate_mode",
@@ -2013,7 +2231,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 229
+            "order": 244
           },
           {
             "key": "decision_skill_proposal_review_mode",
@@ -2030,7 +2248,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 230
+            "order": 245
           }
         ]
       },
@@ -2078,7 +2296,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 88
+            "order": 95
           },
           {
             "key": "api_base",
@@ -2095,7 +2313,7 @@
             "riskWarning": "会改变运行边界或加载来源，建议只在明确知道影响时修改。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 144
+            "order": 159
           },
           {
             "key": "api_key",
@@ -2112,7 +2330,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 145
+            "order": 160
           },
           {
             "key": "api_key_env",
@@ -2129,7 +2347,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 146
+            "order": 161
           },
           {
             "key": "model_name",
@@ -2146,7 +2364,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 151
+            "order": 166
           },
           {
             "key": "request_timeout",
@@ -2163,7 +2381,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 152,
+            "order": 167,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2183,7 +2401,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 153,
+            "order": 168,
             "unit": "tokens",
             "min": 0,
             "max": 200000
@@ -2203,7 +2421,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 156,
+            "order": 171,
             "min": 0,
             "max": 2
           }
@@ -2230,7 +2448,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 167
+            "order": 182
           },
           {
             "key": "stream_enabled",
@@ -2247,7 +2465,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 173
+            "order": 188
           },
           {
             "key": "max_tool_rounds",
@@ -2264,7 +2482,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 174,
+            "order": 189,
             "min": 0,
             "max": 1000000
           },
@@ -2283,7 +2501,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 176,
+            "order": 191,
             "min": 0,
             "max": 1000000
           },
@@ -2302,7 +2520,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 179,
+            "order": 194,
             "min": 0,
             "max": 2000000
           },
@@ -2321,7 +2539,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 180,
+            "order": 195,
             "min": 0,
             "max": 2000000
           },
@@ -2340,7 +2558,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 181,
+            "order": 196,
             "min": 0,
             "max": 2000000
           },
@@ -2359,7 +2577,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 182
+            "order": 197
           },
           {
             "key": "tool_read_max_chars",
@@ -2376,7 +2594,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 183,
+            "order": 198,
             "min": 0,
             "max": 2000000
           },
@@ -2395,7 +2613,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 185,
+            "order": 200,
             "min": 0,
             "max": 1000000
           },
@@ -2414,7 +2632,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 186,
+            "order": 201,
             "min": 0,
             "max": 1000000
           },
@@ -2433,7 +2651,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 187,
+            "order": 202,
             "min": 0,
             "max": 2000000
           },
@@ -2452,7 +2670,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 188,
+            "order": 203,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2472,7 +2690,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 192,
+            "order": 207,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -2492,7 +2710,7 @@
             "riskWarning": "放宽工具边界会影响模型调用成本和执行风险。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 194,
+            "order": 209,
             "min": 0,
             "max": 2000000
           },
@@ -2511,7 +2729,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 198,
+            "order": 213,
             "choices": [
               "compact",
               "full",
@@ -2534,7 +2752,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 199
+            "order": 214
           },
           {
             "key": "tool_catalog_deferred_categories",
@@ -2563,7 +2781,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 200
+            "order": 215
           },
           {
             "key": "tool_default_deferral_enabled",
@@ -2580,7 +2798,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 201
+            "order": 216
           },
           {
             "key": "tool_catalog_include_examples",
@@ -2597,7 +2815,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 202
+            "order": 217
           },
           {
             "key": "tool_vector_search_enabled",
@@ -2614,7 +2832,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 203
+            "order": 218
           }
         ]
       },
@@ -3206,7 +3424,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 231
+            "order": 246
           },
           {
             "key": "memory_decision_pre_recall_fragment_material",
@@ -3223,7 +3441,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 232
+            "order": 247
           },
           {
             "key": "memory_decision_recall_mode",
@@ -3240,7 +3458,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 233
+            "order": 248
           },
           {
             "key": "memory_decision_curator_mode",
@@ -3257,7 +3475,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 234
+            "order": 249
           },
           {
             "key": "memory_decision_curator_relation_mode",
@@ -3274,7 +3492,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 235
+            "order": 250
           }
         ]
       },
@@ -3449,7 +3667,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 79,
+            "order": 86,
             "min": 0,
             "max": 1000000
           },
@@ -3468,7 +3686,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 80,
+            "order": 87,
             "choices": [
               "auto"
             ]
@@ -3488,7 +3706,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 81,
+            "order": 88,
             "choices": [
               "auto"
             ]
@@ -3508,7 +3726,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 82,
+            "order": 89,
             "choices": [
               "off",
               "auto"
@@ -3531,7 +3749,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 83,
+            "order": 90,
             "min": 0,
             "max": 3600
           },
@@ -3550,7 +3768,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 85,
+            "order": 92,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3570,7 +3788,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 86,
+            "order": 93,
             "unit": "秒",
             "min": 0,
             "max": 10800
@@ -3590,7 +3808,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 89
+            "order": 96
           },
           {
             "key": "gateway_stop_timeout",
@@ -3607,7 +3825,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 90,
+            "order": 97,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3627,7 +3845,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 91,
+            "order": 98,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3647,7 +3865,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 92,
+            "order": 99,
             "min": 0,
             "max": 1000000
           },
@@ -3666,7 +3884,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 93,
+            "order": 100,
             "min": 0,
             "max": 1000000
           },
@@ -3685,7 +3903,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 94,
+            "order": 101,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3705,7 +3923,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 95,
+            "order": 102,
             "min": 0,
             "max": 1000000
           },
@@ -3724,7 +3942,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 104,
+            "order": 112,
             "min": 0,
             "max": 3600
           },
@@ -3743,7 +3961,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 105,
+            "order": 113,
             "min": 0,
             "max": 3600
           },
@@ -3762,7 +3980,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 106,
+            "order": 114,
             "min": 0,
             "max": 3600
           },
@@ -3781,7 +3999,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 107,
+            "order": 115,
             "min": 0,
             "max": 3600
           },
@@ -3800,7 +4018,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 108,
+            "order": 116,
             "min": 0,
             "max": 65535
           },
@@ -3819,7 +4037,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 109
+            "order": 117
           },
           {
             "key": "gateway_bind_host",
@@ -3836,12 +4054,12 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 111
+            "order": 119
           },
           {
             "key": "gateway_auth_token",
             "label": "gateway_auth_token（gateway auth token）",
-            "description": "网关局部信任 token(暴露部署用)。默认空 = 只靠回环来源信任(本机适配器/CLI 走 127.0.0.1)。 非空时,非回环来源的请求必须携带匹配的 X-Gateway-Token 头才被信任(否则降为匿名 USER、绝不 admin)。",
+            "description": "网关局部信任 token（暴露部署用）。默认空时，本机适配器/CLI 使用宿主持久 G1 凭据。 非空时,非回环来源的请求必须携带匹配的 X-Gateway-Token 头才被信任(否则降为匿名 USER、绝不 admin)。",
             "type": "secret",
             "defaultValue": "",
             "currentValue": "",
@@ -3853,15 +4071,15 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 112
+            "order": 120
           },
           {
-            "key": "gateway_require_local_credential",
-            "label": "gateway_require_local_credential（gateway require local credential）",
-            "description": "本机凭据强制开关（G2b 上线闸，默认 false；强制阶段稳定后会连同旧分支一起删除）。 - false（默认，G2a 计数阶段）：两边都不强制——本机客户端读不到凭据（文件缺失 / 权限不对 / 内容损坏）时， 降级为不带 X-Gateway-Token 继续发送；Gateway 对不带凭据的回环请求照旧放行、只按“无凭据来源”计数。 - true（强制阶段）：两边同时生效——Gateway 对不带有效凭据的回环请求降匿名/按原规则拒绝，且启动时凭据 不可用（缺失/权限错/损坏/无数据根）直接拒绝启动；本机客户端读不到凭据时在发请求前拒绝（零请求、带原因码）。 客户端和 Gateway 读同一份配置，所以两边口径一致。凭据文件是 0600：同一系统用户本来就读得到它，它多挡住的是 非 Full Access 的模型命令和其它系统用户，不是同用户的全部进程（完整边界见 docs/design/GATEWAY_LOCAL_TRUST.md）。",
-            "type": "boolean",
-            "defaultValue": false,
-            "currentValue": false,
+            "key": "scheduler_im_default_delivery_mode",
+            "label": "scheduler_im_default_delivery_mode（scheduler im default delivery mode）",
+            "description": "新 IM 创建的定时计划默认 local（内部记录）；origin 回原布置者，none 同样不逐轮外发。 提醒、告警和定时报表可在计划/规则的 delivery.mode 明确设置 origin；现有计划与已预留运行不随默认值改变。",
+            "type": "string",
+            "defaultValue": "local",
+            "currentValue": "local",
             "category": "gateway",
             "categoryLabel": "Gateway / 调度",
             "advanced": false,
@@ -3870,7 +4088,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 113
+            "order": 142
           },
           {
             "key": "daemon_mutate_state",
@@ -3887,7 +4105,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 138
+            "order": 153
           },
           {
             "key": "daemon_start_runners",
@@ -3904,7 +4122,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 139
+            "order": 154
           },
           {
             "key": "daemon_runner_instruction",
@@ -3921,7 +4139,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 140
+            "order": 155
           },
           {
             "key": "lease_stale_without_heartbeat_seconds",
@@ -3938,7 +4156,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 141,
+            "order": 156,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -3966,7 +4184,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 114
+            "order": 121
           },
           {
             "key": "feishu_app_id",
@@ -3983,7 +4201,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 115
+            "order": 122
           },
           {
             "key": "feishu_group_require_bot_mention",
@@ -4000,7 +4218,58 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 116
+            "order": 123
+          },
+          {
+            "key": "feishu_image_input_enabled",
+            "label": "feishu_image_input_enabled（feishu image input enabled）",
+            "description": "将按当前用户/群归属下载且通过真实格式与解码检查的图片，直接作为原生附件交给当前模型。 默认开启；会增加既有模型请求的图片传输与token消耗，不引入OCR服务或新外网域名，不自动换模型。 当前/引用图片整组成功才提交，仍守群@与引用读取开关；关闭只保留既有附件路径行为。 模型/接口须支持图片；自动派给子代理还须开启能力配置中的subagent_input_media_enabled。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "adapters",
+            "categoryLabel": "适配器",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 124
+          },
+          {
+            "key": "feishu_quoted_media_enabled",
+            "label": "feishu_quoted_media_enabled（feishu quoted media enabled）",
+            "description": "群里先上传文件，再引用这条文件消息并 @机器人时，读取准确引用的同群附件，默认开启。 需要飞书应用的群消息读取和资源下载权限；文件落到当前群空间，原文件发送者不改变本轮用户身份。 修改后重启飞书通道生效；关闭时不读取引用消息的附件。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "adapters",
+            "categoryLabel": "适配器",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 125
+          },
+          {
+            "key": "feishu_quoted_text_enabled",
+            "label": "feishu_quoted_text_enabled（feishu quoted text enabled）",
+            "description": "群里引用一条文字/富文本消息并 @机器人说明任务时，读取准确原文作为外部资料，默认开启。 人或机器人发的可见正文同样处理，含卡片可见材料与已证转发；隐藏回调/凭据不读取，链接和代码不自动执行。 同群/话题核验与当前用户权限保持。最多带入16000字符，超长明确标注截断，未知或缺失资料说明覆盖。 与附件开关独立，复用同一次引用消息查询；两项都关闭则不查。需要群消息读取权限，重启飞书通道生效。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "adapters",
+            "categoryLabel": "适配器",
+            "advanced": false,
+            "restartRequired": true,
+            "riskLevel": "low",
+            "riskWarning": "",
+            "requiresUnlock": false,
+            "source": "agent_config.yaml",
+            "order": 126
           },
           {
             "key": "feishu_app_secret",
@@ -4017,7 +4286,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 117
+            "order": 131
           },
           {
             "key": "feishu_verification_token",
@@ -4034,7 +4303,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 118
+            "order": 132
           },
           {
             "key": "feishu_encrypt_key",
@@ -4051,7 +4320,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 119
+            "order": 133
           },
           {
             "key": "feishu_callback_port",
@@ -4068,7 +4337,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 120,
+            "order": 134,
             "min": 0,
             "max": 65535
           },
@@ -4087,7 +4356,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 121
+            "order": 135
           },
           {
             "key": "feishu_ws_proxy",
@@ -4104,7 +4373,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 122
+            "order": 136
           },
           {
             "key": "feishu_session_lock_enabled",
@@ -4121,7 +4390,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 123
+            "order": 137
           },
           {
             "key": "feishu_personal_idle_lock_seconds",
@@ -4138,7 +4407,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 124,
+            "order": 138,
             "min": 0,
             "max": 10800
           },
@@ -4157,7 +4426,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 125
+            "order": 139
           },
           {
             "key": "qq_app_secret",
@@ -4174,7 +4443,7 @@
             "riskWarning": "密钥或凭证字段，保存前确认不要写入真实公开仓库。",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 126
+            "order": 140
           },
           {
             "key": "session_workspace",
@@ -4191,7 +4460,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 129
+            "order": 144
           }
         ]
       },
@@ -4216,7 +4485,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 74
+            "order": 81
           },
           {
             "key": "auth_enabled",
@@ -4233,7 +4502,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 75
+            "order": 82
           },
           {
             "key": "admin_user_id",
@@ -4250,7 +4519,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 76
+            "order": 83
           },
           {
             "key": "audit_enabled",
@@ -4267,7 +4536,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 136
+            "order": 151
           },
           {
             "key": "audit_log_path",
@@ -4284,7 +4553,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 137
+            "order": 152
           }
         ]
       },
@@ -4309,7 +4578,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 207,
+            "order": 222,
             "min": 0,
             "max": 1000000
           },
@@ -4328,7 +4597,7 @@
             "riskWarning": "",
             "requiresUnlock": false,
             "source": "agent_config.yaml",
-            "order": 212,
+            "order": 227,
             "unit": "天",
             "min": 0,
             "max": 3650
@@ -4344,7 +4613,7 @@
           {
             "key": "im_scheduled_tasks_background",
             "label": "im_scheduled_tasks_background（im scheduled tasks background）",
-            "description": "能力路由与子代理运行状态配置文件（随包默认模板） IM 创建的定时计划使用独立后台会话并回送原聊天；TUI 与已存在计划不迁移。修改后重启生效。",
+            "description": "能力路由与子代理运行状态配置文件（随包默认模板） IM 创建的定时计划使用独立后台会话，通知另由 job.delivery 决定；TUI 与已存在计划不迁移。修改后重启生效。",
             "type": "boolean",
             "defaultValue": true,
             "currentValue": true,
@@ -4376,6 +4645,356 @@
             "order": 2
           },
           {
+            "key": "owner_default_permission_mode",
+            "label": "owner_default_permission_mode（owner default permission mode）",
+            "description": "未显式选择模式的用户/群统一默认自主工作；仅免可选确认，不授予新权限。只允许部署者设置 ask/auto。",
+            "type": "string",
+            "defaultValue": "auto",
+            "currentValue": "auto",
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 3
+          },
+          {
+            "key": "tool_approval_timeout_seconds",
+            "label": "tool_approval_timeout_seconds（tool approval timeout seconds）",
+            "description": "交互工具审批从创建起的绝对上限（秒），必须为正整数；无人值守仍直接拒绝，不占槽等待。",
+            "type": "number",
+            "defaultValue": 1800,
+            "currentValue": 1800,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 4,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "feishu_cli_backend_enabled",
+            "label": "feishu_cli_backend_enabled（feishu cli backend enabled）",
+            "description": "飞书云操作使用随包受控 CLI 后端；沿原 owner/群资源授权，令牌只进入宿主子进程私有输入。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 5
+          },
+          {
+            "key": "feishu_user_oauth_enabled",
+            "label": "feishu_user_oauth_enabled（feishu user oauth enabled）",
+            "description": "本人身份的飞书资源需用户单独授权。共享文档/群资源继续使用应用身份，无需逐人登录。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 6
+          },
+          {
+            "key": "feishu_oauth_redirect_uri",
+            "label": "feishu_oauth_redirect_uri（feishu oauth redirect uri）",
+            "description": "部署者在飞书应用登记的准确回调 URI（HTTPS，路径 /feishu/oauth/callback）；空值表示本人授权尚未配置。",
+            "type": "string",
+            "defaultValue": "",
+            "currentValue": "",
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 7
+          },
+          {
+            "key": "feishu_oauth_scopes",
+            "label": "feishu_oauth_scopes（feishu oauth scopes）",
+            "description": "应用实际已开放的用户 scopes；offline_access允许宿主刷新，模型不能自选扩权。",
+            "type": "string_list",
+            "defaultValue": [
+              "offline_access"
+            ],
+            "currentValue": [
+              "offline_access"
+            ],
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 8
+          },
+          {
+            "key": "im_tool_approvals_enabled",
+            "label": "im_tool_approvals_enabled（im tool approvals enabled）",
+            "description": "后台主/子代理的具体工具审批通过原发起人的私人 IM 卡片收取；不让父代理代替用户批准。 仍核对原调用、主 claim/子 attempt、接收者和实际卡片身份；关闭后沿原 TUI/Web 审批方式。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 9
+          },
+          {
+            "key": "im_task_credentials_enabled",
+            "label": "im_task_credentials_enabled（im task credentials enabled）",
+            "description": "任务凭据卡（需 secrets extra 的 cryptography）：群来源在原群、个人来源在本人私聊；模型仅得任务/监控限定引用。 可只收密码，缺链接由卡上补填；保存与认证验证分开，用户要求才重发，不扩大网络权限。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 10
+          },
+          {
+            "key": "im_task_credentials_ttl_seconds",
+            "label": "im_task_credentials_ttl_seconds（im task credentials ttl seconds）",
+            "description": "新填凭据保存后的默认有效秒数：0 表示持续复用，直到认证被拒或主动撤销。 显式正值为60秒到一年；卡片仍需30分钟内填写。旧凭据保留原已登记期限，不静默延长。",
+            "type": "number",
+            "defaultValue": 0,
+            "currentValue": 0,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 11,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "im_group_shared_credentials_enabled",
+            "label": "im_group_shared_credentials_enabled（im group shared credentials enabled）",
+            "description": "新群凭据卡默认由本群助手共享，成员不用重复填写；本人提供的同站点账号优先，主动撤销后可用群内其它账号。 共享仍须当前群成员、准确站点和原工具/网络权限；个人私聊与旧任务凭据不会自动变为群共享。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 12
+          },
+          {
+            "key": "background_user_action_notice_enabled",
+            "label": "background_user_action_notice_enabled（background user action notice enabled）",
+            "description": "后台认证明确被拒时向原来源提醒需要用户处理；正常静默结果仍不发，不自动重发凭据卡。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 13
+          },
+          {
+            "key": "im_model_cards_enabled",
+            "label": "im_model_cards_enabled（im model cards enabled）",
+            "description": "/model 提供模型选择与私人配置卡；密钥不进入聊天/模型，群表单冻结原 owner 和发起人。 仅部署者控制此入口，关闭后保留原文字查询/选择命令。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 14
+          },
+          {
+            "key": "im_group_authorization_required",
+            "label": "im_group_authorization_required（im group authorization required）",
+            "description": "群内新建/扩展/恢复/手动运行监控，须先由当前群主或真实邀请人显式授权；其它功能不受此额外门限制。 授权不扩大文件、网络、插件或本机管理员权限；查询、停止、取消、删除仍按原创建者规则。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 15
+          },
+          {
+            "key": "feishu_bot_subscriptions_enabled",
+            "label": "feishu_bot_subscriptions_enabled（feishu bot subscriptions enabled）",
+            "description": "允许群内按准确机器人身份登记消息订阅，复用原监控任务、额度、取消与投递；无订阅不轮询、不调用模型。 飞书仍须开放对应机器人群消息权限；本开关不会替部署者申请平台权限，也不放开无艾特的人类消息。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 16
+          },
+          {
+            "key": "skill_transfers_enabled",
+            "label": "skill_transfers_enabled（skill transfers enabled）",
+            "description": "开启Skill投递/一次复刻入口；双端真人确认后才复制，失败不计成功，不复制权限和秘密。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": false,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 17
+          },
+          {
+            "key": "tool_program_enabled",
+            "label": "tool_program_enabled（tool program enabled）",
+            "description": "有限只读批量计划：按需加载；最多16步/32调用，不执行代码、不允许写动作，内部仍逐工具授权和取消。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 18
+          },
+          {
+            "key": "process_session_wait_slice_seconds",
+            "label": "process_session_wait_slice_seconds（process session wait slice seconds）",
+            "description": "后台进程wait每片最多等待30秒，保留原句柄/完成事件/停止；0不加片限制，协议仍最多600秒。",
+            "type": "number",
+            "defaultValue": 30,
+            "currentValue": 30,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 19,
+            "min": 0,
+            "max": 3600
+          },
+          {
+            "key": "feishu_cloud_tools_enabled",
+            "label": "feishu_cloud_tools_enabled（feishu cloud tools enabled）",
+            "description": "飞书云资源工具开关；凭据只留在宿主，不继承管理员文档权限。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 20
+          },
+          {
+            "key": "feishu_cloud_verify_sheet_writes_enabled",
+            "label": "feishu_cloud_verify_sheet_writes_enabled（feishu cloud verify sheet writes enabled）",
+            "description": "表格写入成功后增加一次同身份只读核验；结果未知或不一致不重复写入。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 21
+          },
+          {
+            "key": "feishu_cloud_collaborator_authorization_enabled",
+            "label": "feishu_cloud_collaborator_authorization_enabled（feishu cloud collaborator authorization enabled）",
+            "description": "每次使用云资源时，允许宿主查询当前用户/群的准确协作者权限，无须管理员逐份登记。 新增官方只读网络查询；关闭后只接受原管理员准确资源授权。不能仅凭应用有权或链接文字授予权限。",
+            "type": "boolean",
+            "defaultValue": true,
+            "currentValue": true,
+            "category": "capability",
+            "categoryLabel": "能力路由",
+            "advanced": true,
+            "restartRequired": true,
+            "riskLevel": "medium",
+            "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
+            "requiresUnlock": true,
+            "source": "capability_config.yaml",
+            "order": 22
+          },
+          {
             "key": "public_capability_packages_enabled",
             "label": "public_capability_packages_enabled（public capability packages enabled）",
             "description": "普通用户可发现并按自身权限使用管理员已发布的公共内容能力包；不开放普通插件或管理员私有包。",
@@ -4390,7 +5009,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 3
+            "order": 23
           },
           {
             "key": "enable_capability_package_recommendations",
@@ -4407,7 +5026,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 4
+            "order": 24
           },
           {
             "key": "enable_capability_package_selection",
@@ -4424,7 +5043,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 5
+            "order": 25
           },
           {
             "key": "conversation_method_carry_enabled",
@@ -4441,7 +5060,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 6
+            "order": 26
           },
           {
             "key": "capability_package_selection_max_input_tokens",
@@ -4458,7 +5077,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 7,
+            "order": 27,
             "min": 0,
             "max": 200000
           },
@@ -4477,7 +5096,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 8,
+            "order": 28,
             "min": 0,
             "max": 1000000
           },
@@ -4496,7 +5115,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 9,
+            "order": 29,
             "min": 0,
             "max": 200000
           },
@@ -4515,7 +5134,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 10
+            "order": 30
           },
           {
             "key": "capability_grant_max_skills",
@@ -4532,7 +5151,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 11,
+            "order": 31,
             "min": 0,
             "max": 1000000
           },
@@ -4551,7 +5170,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 12,
+            "order": 32,
             "min": 0,
             "max": 1000000
           },
@@ -4570,7 +5189,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 13,
+            "order": 33,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4590,7 +5209,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 14,
+            "order": 34,
             "unit": "秒",
             "min": 0,
             "max": 3600
@@ -4610,7 +5229,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 15,
+            "order": 35,
             "min": 0,
             "max": 1000000
           },
@@ -4629,7 +5248,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 16
+            "order": 36
           },
           {
             "key": "subagent_failure_split_max_depth",
@@ -4646,7 +5265,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 17,
+            "order": 37,
             "min": 0,
             "max": 1000000
           },
@@ -4665,7 +5284,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 18
+            "order": 38
           },
           {
             "key": "subagent_stream_activity_interval_seconds",
@@ -4682,7 +5301,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 19,
+            "order": 39,
             "min": 0,
             "max": 3600
           },
@@ -4701,7 +5320,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 20
+            "order": 40
           },
           {
             "key": "subagent_first_token_notice_seconds",
@@ -4718,7 +5337,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 21,
+            "order": 41,
             "min": 0,
             "max": 3600
           },
@@ -4737,7 +5356,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 22,
+            "order": 42,
             "min": 0,
             "max": 3600
           },
@@ -4756,7 +5375,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 23,
+            "order": 43,
             "min": 0,
             "max": 3600
           },
@@ -4775,7 +5394,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 24
+            "order": 44
           },
           {
             "key": "subagent_input_media_enabled",
@@ -4792,7 +5411,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 25
+            "order": 45
           },
           {
             "key": "capability_pack_host_verification_enabled",
@@ -4809,7 +5428,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 26
+            "order": 46
           },
           {
             "key": "capability_pack_self_install_enabled",
@@ -4826,7 +5445,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 27
+            "order": 47
           },
           {
             "key": "plugin_self_install_enabled",
@@ -4843,7 +5462,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 28
+            "order": 48
           },
           {
             "key": "action_candidate_auto_execute_enabled",
@@ -4860,7 +5479,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 29
+            "order": 49
           },
           {
             "key": "decision_subagent_model_mode",
@@ -4877,7 +5496,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 30
+            "order": 50
           },
           {
             "key": "decision_subagent_model_candidate_profile_ids",
@@ -4894,7 +5513,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 31
+            "order": 51
           },
           {
             "key": "decision_skill_tool_context_policy",
@@ -4911,7 +5530,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 32
+            "order": 52
           },
           {
             "key": "decision_skill_tool_optional_categories",
@@ -4932,7 +5551,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 33
+            "order": 53
           },
           {
             "key": "decision_skill_tool_mode",
@@ -4949,7 +5568,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 34
+            "order": 54
           },
           {
             "key": "decision_agent_timeout_min_seconds",
@@ -4966,7 +5585,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 35,
+            "order": 55,
             "min": 0,
             "max": 3600
           },
@@ -4985,7 +5604,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 36,
+            "order": 56,
             "min": 0,
             "max": 3600
           },
@@ -5004,7 +5623,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 37
+            "order": 57
           },
           {
             "key": "admin_message_channels",
@@ -5025,7 +5644,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 38
+            "order": 58
           },
           {
             "key": "session_messaging_user_enabled",
@@ -5042,7 +5661,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 39
+            "order": 59
           },
           {
             "key": "session_task_admin_enabled",
@@ -5059,7 +5678,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 40
+            "order": 60
           },
           {
             "key": "session_task_max_chain_depth",
@@ -5076,7 +5695,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 41,
+            "order": 61,
             "min": 0,
             "max": 1000000
           },
@@ -5095,7 +5714,7 @@
             "riskWarning": "默认保护字段，修改后可能影响子代理或能力路由行为。",
             "requiresUnlock": true,
             "source": "capability_config.yaml",
-            "order": 42,
+            "order": 62,
             "min": 0,
             "max": 1000000
           }

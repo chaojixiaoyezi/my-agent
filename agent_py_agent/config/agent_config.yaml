@@ -360,6 +360,7 @@ self_learning_recommended_limit: 50
 self_learning_maintenance_mode: observe
 # 冷藏与归档的空闲秒数，0关闭对应动作；默认30天/180天仅在autonomous显式开启时生效。
 self_learning_cool_seconds: 2592000
+# 自学技能连续闲置多少秒后可归档；0关闭，仅显式autonomous且引用完整时生效，默认180天。
 self_learning_archive_seconds: 15552000
 # 是否让已完成的后台/定时任务也提交学习请求；默认关闭，开启仍受同一日预算与候选确认。
 self_learning_include_background: false

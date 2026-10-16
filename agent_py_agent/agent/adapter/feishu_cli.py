@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROTOCOL = "my-agent.feishu-cli.v1"
+# 飞书CLI标准输出最多接收的字节数，超过预算不解析为成功结果。
 MAX_BYTES = 4 * 1024 * 1024
 
 

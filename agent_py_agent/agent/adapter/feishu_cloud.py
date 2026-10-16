@@ -10,6 +10,7 @@ from ..common.authenticated_http import open_authenticated_request
 from ..common.log_redaction import redact_sensitive_value
 
 API_BASE = 'https://open.feishu.cn/open-apis'
+# 飞书云接口单次响应的字节上限，错误体也按同一预算读取。
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 

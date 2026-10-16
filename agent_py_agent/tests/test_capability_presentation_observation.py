@@ -35,7 +35,7 @@ def _entries(fixture):
 @pytest.mark.parametrize("choice", [None, "abstain"])
 def test_gateway_turn_records_one_observation_for_its_one_decision(gateway_surface, monkeypatch, choice):  # noqa: F811
     calls = provider(monkeypatch, choice=choice)
-    capture_gateway_loop(monkeypatch)
+    capture_gateway_loop(monkeypatch, gateway_surface.agent)
     request_execution._run_gateway_ask(gateway_surface.context)
     entries = _entries(gateway_surface)
     assert len(calls) == 1 and len(entries) == 1, "同一回合经过溢出重试也只有一次决策、一条观测"
@@ -58,7 +58,7 @@ def test_gateway_turn_records_one_observation_for_its_one_decision(gateway_surfa
 
 def test_failed_decision_is_observed_with_its_structured_reason(gateway_surface, monkeypatch):  # noqa: F811
     provider(monkeypatch, fail=ProviderTransientError("temporary"))
-    capture_gateway_loop(monkeypatch)
+    capture_gateway_loop(monkeypatch, gateway_surface.agent)
     request_execution._run_gateway_ask(gateway_surface.context)
     (entry,) = _entries(gateway_surface)
     assert (entry["adopted"], entry["status"], entry["reason"]) == (False, "error", "provider_failed")
@@ -67,7 +67,7 @@ def test_failed_decision_is_observed_with_its_structured_reason(gateway_surface,
 def test_no_decision_means_no_observation(gateway_surface, monkeypatch):  # noqa: F811
     patch(gateway_surface.agent, {"points.skill_tool.mode": "off"})
     calls = provider(monkeypatch)
-    capture_gateway_loop(monkeypatch)
+    capture_gateway_loop(monkeypatch, gateway_surface.agent)
     request_execution._run_gateway_ask(gateway_surface.context)
     assert calls == [] and _entries(gateway_surface) is None
 

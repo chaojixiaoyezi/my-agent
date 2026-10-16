@@ -1,4 +1,4 @@
-# LLM: 通道身份只来自宿主专有参数、子代理原记录或不可变 execution_origin；模型 attributes、最新群成员和管理员绑定不作替代来源。
+# LLM: 通道身份只来自宿主专有参数、canonical子代理祖先或不可变execution_origin；本机None须同owner/准确谱系证明，模型attrs不授身份。
 # 模块用途: 为监控、审批和子孙继承统一解析原发起人，不新增执行权、外发或身份账本。
 from __future__ import annotations
 
@@ -192,9 +192,11 @@ def current_actor_for_child(agent) -> HostChannelActor | None:
     return actor
 
 
-# LLM: 专有字段属于 canonical task；子孙必须与原 parent/root 的专有身份一致，旧 attrs 永远不作恢复依据。
-# 函数用途: 恢复子代理宿主身份并校验原谱系，允许旧工作线程按不可变来源恢复。
+# LLM: 专有字段属于canonical task；SubAgentTask原根沿原parent链核owner/root，主根仍读TaskLink/SessionTask，旧attrs不恢复身份。
+# 函数用途: 恢复子孙原发起人；结构化本机谱系允许无IM身份，不创建第二份TaskLink或放宽外部身份。
 def task_host_actor(agent, task) -> HostChannelActor | None:
+    if _load_actor_task(agent, task.root_id or task.id) is not None:
+        return _canonical_subagent_actor(agent, task)
     record = getattr(task, "host_channel_actor", None)
     thread_id = str((task.attributes or {}).get("conversation_thread_id") or "")
     if record is None:
@@ -222,6 +224,89 @@ def task_host_actor(agent, task) -> HostChannelActor | None:
         if parent is not None and (parent.root_id or parent.id) != task.root_id:
             raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
     return _validate_scope(agent, thread_id, actor)
+
+
+# LLM: 仅精确ID读取原SubAgentTask，缺失才允许调用方判为主会话根；坏记录/伪类型不得静默改走别的账。
+# 函数用途: 读取原子代理祖先，不创建文件，不从属性、目录或名称猜测身份。
+def _load_actor_task(agent, identifier):
+    from ..subagents.models import SubAgentTask
+
+    try:
+        task = agent.subagents.load(identifier)
+    except FileNotFoundError:
+        return None
+    except (DataCorruptionError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID") from exc
+    if not isinstance(task, SubAgentTask) or task.id != identifier:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    return task
+
+
+# LLM: 原parent链可在本机子树重新以父run作root，但每个root必须确在同owner祖先链；循环/缺边/跨owner均拒绝，不另写谱系。
+# 函数用途: 只读核完整子代理出处；原主根仍经现有恢复口，本机空身份必须有真实owner、agent线程和本地来源证明。
+def _canonical_subagent_actor(agent, task):
+    home = agent.home_paths
+    owner = str(getattr(home, "owner_id", "") or "")
+    chain, seen, roots = [], set(), set()
+    current = task
+    while current is not None:
+        if not current.id or current.id in seen:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        if not owner or current.owner != owner:
+            raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+        seen.add(current.id)
+        roots.add(current.root_id or current.id)
+        chain.append(current)
+        if not current.parent_id:
+            actor = HostChannelActor.from_record(current.host_channel_actor) if current.host_channel_actor is not None else None
+            break
+        if current.parent_id in seen:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        parent = _load_actor_task(agent, current.parent_id)
+        if parent is None:
+            seen.add(current.parent_id)
+            actor = background_host_actor(agent, "", current.parent_id)
+            if actor is None:
+                _local_actor_boundary(agent, current.parent_id)
+            break
+        current = parent
+    if roots - seen:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+    if actor is None and (home.owner_provider != "local" or home.owner_kind != "main"):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_REQUIRED")
+    for ancestor in chain:
+        thread, _source = _origin(agent, ancestor.agent_thread_id)
+        if thread.metadata.get("agent_run_id") != ancestor.id:
+            raise HostActorError("CHANNEL_ACTOR_SCOPE_MISMATCH")
+        record = ancestor.host_channel_actor
+        if record is not None and HostChannelActor.from_record(record) != actor:
+            raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+        thread_id = str((ancestor.attributes or {}).get("conversation_thread_id") or "")
+        if actor is None:
+            _missing_task_actor(agent, thread_id)
+        else:
+            if ancestor is not task and record is None:
+                raise HostActorError("CHANNEL_ACTOR_IDENTITY_CONFLICT")
+            _validate_scope(agent, thread_id, actor)
+    return actor
+
+
+# LLM: None只能由原主根实际来源证明本机；子代理attrs即使指向chat也不能掩盖外部TaskLink或委派发送线程。
+# 函数用途: 复核已恢复为空身份的原会话根，不写TaskLink、SessionTask或线程。
+def _local_actor_boundary(agent, identifier):
+    try:
+        link = agent.conversation_store.tasks.load(identifier)
+        if link is not None:
+            threads = (link.thread_id,)
+        else:
+            task = agent.conversation_store.session_tasks.load(identifier)
+            threads = (task.sender_thread_id, task.target_thread_id) if task is not None else ()
+    except (DataCorruptionError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID") from exc
+    if not threads or not all(threads):
+        raise HostActorError("CHANNEL_ACTOR_IDENTITY_INVALID")
+    for thread_id in threads:
+        _missing_task_actor(agent, thread_id)
 
 
 # LLM: 主根可能是原 ConversationTaskLink 而非子代理；只有准确记录及原线程归属证明才能通过，不跳过缺失根。

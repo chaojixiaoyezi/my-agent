@@ -13,6 +13,7 @@ from agent_py_agent.agent.command_arguments import (
     CommandArgumentError,
 )
 from agent_py_agent.agent.command_binding import render_action_help
+from agent_py_agent.agent.command_catalog import CommandAccessContext, render_command_help
 from agent_py_agent.agent.plugin_commands import (
     PluginCommandSpec,
     parse_plugin_command,
@@ -82,7 +83,8 @@ def test_use_card_reads_action_and_settings_declarations_without_private_values(
     assert render_action_help("/plugins@Demo", plugin.actions[0]).splitlines()[1] in card
     assert card.count("请用 Demo 插件") == 2
     assert "必填设置：token" in card and "可配置项：token、mode" in card
-    assert "使用已启用插件的动作" in CHAT_HELP_TEXT
+    assert "使用已启用插件的动作" in render_command_help(CommandAccessContext(surface="tui", is_admin=True), "plugins")
+    assert "/plugins" in CHAT_HELP_TEXT
     assert "插件使用入口（尚未开放）" not in CHAT_HELP_TEXT
 
 

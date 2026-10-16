@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
+
+from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
 
 
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
@@ -33,7 +34,7 @@ def _patch_auto_start_receipt(monkeypatch):
 def _workspace_agent(tmp_path: Path):
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
-    agent = MagicMock()
+    agent = local_mock_agent()
     agent.config.enable_subagents = True
     agent.config.max_subagents = 10
     agent.subagents = SubAgentManager(tmp_path / ".my-agent" / "subagents", workspace_root=tmp_path)

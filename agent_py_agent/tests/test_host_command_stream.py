@@ -26,6 +26,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
 from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli.chat_parts.command_interaction import CommandInteraction
@@ -47,8 +48,8 @@ def wait_until(check, timeout=10):
     pytest.fail("组件未在期限内到达预期状态")
 
 
-# LLM: 临时服务只绑定随机 loopback 端口，不启动模型或真实 Gateway 守护进程；结束恢复原进程内指针。
-# 函数用途: 将原 HTTP handler、实际插件执行与临时客户端连在一起。
+# LLM: 临时服务只绑定随机 loopback 端口；在临时 owner 原策略显式写 ask，不改部署默认，结束恢复进程内指针。
+# 函数用途: 将原 HTTP handler、插件执行与客户端连起来，测试批准/拒绝/取消和连接回收，不启动模型或真实服务。
 @contextmanager
 def plugin_host(tmp_path, monkeypatch, *, owner=None):
     service, source, command = enabled_plugin(tmp_path)
@@ -58,6 +59,7 @@ def plugin_host(tmp_path, monkeypatch, *, owner=None):
     paths = gateway_paths_from_root(tmp_path / "shared-gateway")
     base = SimpleNamespace(config=AgentConfig(auth_enabled=False, path_access_mode="full", gateway_per_user_owner_scoping=False),
                            home_paths=home_paths(service.context.owner.root))
+    execute_approval_mode_operation(base.home_paths, "set", "ask")
     ensure_local_client_credential(base.home_paths.root)
     monkeypatch.setattr(command_stream, "_HEARTBEAT_SECONDS", 0.05)
     monkeypatch.setattr(http_service, "_server_instance", None)
@@ -244,7 +246,8 @@ def test_command_approval_queue_does_not_create_or_cancel_foreground_turn():
 def test_noninteractive_request_returns_without_waiting_for_a_missing_consumer(tmp_path, monkeypatch):
     with plugin_host(tmp_path, monkeypatch) as (client, _paths, source, command):
         result = client.command(command)
-        assert result["state"] == "approval_required" and result["connection_cleanup"]["confirmed"], result
+        assert result["state"] == "rejected" and result["error_code"] == "APPROVAL_UNAVAILABLE", result
+        assert result["connection_cleanup"]["confirmed"]
         assert not source.with_suffix(".calls").exists()
 
 

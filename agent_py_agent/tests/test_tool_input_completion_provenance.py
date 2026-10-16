@@ -414,7 +414,10 @@ def test_non_source_watch_surfaces_do_not_inherit_source_worker_bindings(
 ) -> None:
     policy = build_watch_stream_runtime_policy(surface=surface)
 
-    assert policy.input_policy.trusted_parameter_bindings == ()
+    assert dict(policy.input_policy.trusted_parameter_bindings) == {
+        "__network_access_mode": TrustedParameterBinding(
+            source_refs=("write_boundary.network_access_mode",), authority="host_authoritative"),
+    }
 
 
 def test_audit_source_binding_surface_has_only_its_required_host_facts() -> None:
@@ -425,7 +428,14 @@ def test_audit_source_binding_surface_has_only_its_required_host_facts() -> None
     continuing_bindings = dict(continuing.input_policy.trusted_parameter_bindings)
     assert "watch_id" in first_bindings
     assert "url" in first_bindings
-    assert set(continuing_bindings) == {"watch_id"}
+    expected_network = TrustedParameterBinding(
+        source_refs=("write_boundary.network_access_mode",), authority="host_authoritative")
+    assert first_bindings["__network_access_mode"] == expected_network
+    assert continuing_bindings == {
+        "watch_id": TrustedParameterBinding(
+            source_refs=("run_scope.task_attributes.audit_source_watch_id",), authority="host_authoritative"),
+        "__network_access_mode": expected_network,
+    }
 
 
 @pytest.mark.parametrize(

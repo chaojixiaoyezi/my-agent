@@ -127,8 +127,9 @@ class FirstCallTap:
         self.generate = _tool_loop_service.generate_model_response
         self.parse_selection = package_selection._selected_references
 
-    # LLM: 原生成做正常输入/后端/账本；仅关闭输出流观察以免工具参数正文落盘，替换后响应不带任何工具或思考。
-    # 函数用途: 捕获第一步工具意图，交给循环固定终答，第二次请求直接报错。
+    # LLM: 原生成做正常输入/后端/账本；仅关闭输出流观察，首步停止投影沿原响应 replace 保留宿主 provenance 和新增字段。
+    #   只清工具及 assistant 内容块，避免测量器执行工具或回放私有思考；不签发来源、不绕过交付身份核验。
+    # 函数用途: 捕获第一步工具意图后交给循环测量终答，第二次请求报错，原调用身份和诊断仍保留。
     def primary(self, request):
         if self.calls:
             raise RuntimeError("BENCH_SECOND_PRIMARY_REQUEST")
@@ -137,7 +138,7 @@ class FirstCallTap:
         quiet = replace(request, params=replace(request.params, effective_on_chunk=None))
         response = self.generate(quiet)
         self.calls.append(judge([], response.tool_use_blocks))
-        return ModelResponse(text="测量结束；未执行模型工具。", backend=response.backend)
+        return replace(response, text="测量结束；未执行模型工具。", tool_use_blocks=[], assistant_content_blocks=[])
 
     # LLM: 包选择函数完全原样运行，只包装它的原严格解析接缝；不替宿主补 refs、读取、pin 或选择状态。
     # 函数用途: 记录原解析真正通过的包编号，返回未经修改的原结果。

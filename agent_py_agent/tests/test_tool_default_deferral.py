@@ -29,7 +29,7 @@ DECLARED = {
     "admin_controls", "cancel_session_task", "gateway_status",
     "manage_models", "memory_search", "package_build", "package_install", "publish_audit_update", "restart_gateway", "schedule",
     "send_message", "send_session_message", "skill_summarize", "stop_named_work", "update_persona",
-    "user_config", "watch_stream", "feishu_cloud", "feishu_auth",
+    "user_config", "watch_stream", "feishu_cloud", "feishu_auth", "skill_transfer", "tool_program",
 }
 
 # 实际生效的声明收起 = 声明集合 - 后台续跑必需（豁免）：后台回合没有用户在场，靠 tool_search

@@ -37,6 +37,8 @@ from agent_py_agent.agent.tooling.runtime_contracts import (
     ToolResult,
     ToolSuccessFacts,
 )
+from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.tests._tool_runtime_harness import (
     canonical_history_result,
     make_test_model_spec,
@@ -93,15 +95,15 @@ def snapshot(runtimes, *, owner_type="main_agent"):
 
 
 # LLM: 把 prepared 的宿主武装成“本机管理员主代理 + 开关可控 + 假权威库”；观察信封改从 result 的 handler_details 进真实归档，
-#   让 _record_tool_call 的真实 archive_tool_call_record / persist_tool_runtime_ledger 都能跑。
+#   使用真实临时 home_paths 保留部署审批期限来源，让真实归档和权威事件都能跑；不改变无效 owner 的负例。
 # 函数用途: 准备一轮可自动执行的观察调用，返回 (host, record, repo)；scope 见 _LOCAL_MAIN，决策账写在 host.root 下。
 def arm(prepared, *, enabled=True, scope=_LOCAL_MAIN, runtimes=None):
     host, record, _archive = prepared
     repo = _Repo()
     host.subagents = SimpleNamespace(runtime_db=repo)
     host.local_store = SimpleNamespace()
-    host.home_paths = SimpleNamespace(owner_provider=scope[0], owner_kind=scope[1], owner_id=scope[2],
-                                      owner_decision_outcomes_jsonl=host.root / "decision-outcomes.jsonl")
+    host.home_paths = replace(home_paths(host.root), owner_provider=scope[0], owner_kind=scope[1], owner_id=scope[2],
+                              owner_decision_outcomes_jsonl=host.root / "decision-outcomes.jsonl")
     host._capability_config_runtime_snapshot = SimpleNamespace(config=CapabilityConfig(action_candidate_auto_execute_enabled=enabled))
     object.__setattr__(record.params, "tool_runtime_snapshot", snapshot(runtimes or default_runtimes(), owner_type=scope[3]))
     record.params.archive_tool_calls.clear()
@@ -453,6 +455,7 @@ def test_switch_lives_in_capability_config_as_an_admin_boundary():
 
 def test_ask_mode_approval_carries_actor_decision_and_denial_is_recorded_once(prepared, monkeypatch):
     host, record, _repo = arm(prepared)
+    execute_approval_mode_operation(host.home_paths, "set", "ask")
     requests = []
 
     class Consumer:
@@ -480,6 +483,7 @@ def test_ask_mode_approval_carries_actor_decision_and_denial_is_recorded_once(pr
 
 def test_model_approval_requests_do_not_carry_an_actor(prepared, monkeypatch):
     host, record, _repo = arm(prepared, enabled=False)
+    execute_approval_mode_operation(host.home_paths, "set", "ask")
     requests = []
 
     class Consumer:

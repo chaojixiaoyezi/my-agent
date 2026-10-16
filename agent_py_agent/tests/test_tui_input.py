@@ -39,6 +39,7 @@ from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_transcript import TuiTranscriptModeState
 from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
 from agent_py_agent.tests._gateway_stub import plugin_command_responder
+from agent_py_agent.tests.support.ci_authenticated_gateway import seed_gateway_credential
 
 
 # LLM: 测试显式提供服务端执行 DTO，不把本地 running/job 或 activity 当作执行证据。
@@ -72,7 +73,7 @@ def test_plugin_namespace_completion_only_edits_without_path_scan(tmp_path, monk
 
 
 # LLM: G3 回归用例共用同一次 TUI 提交装配；把 setup 收成一个不可变载荷，避免每个用例重复十几行、
-#   也避免测试函数参数超过 4 个。改动提交路径或假 Gateway 协议时同步检查这里。
+#   也避免测试函数参数超过 4 个。改动提交路径、认证事实或假 Gateway 协议时同步检查这里。
 # 用途: 保存一次“插件提交”测试所需的输入框、参数、事件、假 Gateway 和输出收集器。
 @dataclass(frozen=True)
 class _PluginSubmitSetup:
@@ -98,7 +99,7 @@ class _PluginSubmitHost:
 
 
 # LLM: 只装配冻结对象与假 Gateway，不提交、不读真实配置；凭据根隔离在 tmp_path，避免读到宿主凭据。
-# 用途: 为插件提交用例准备输入框、params、假 Gateway 与输出收集器。
+# 函数用途: 为插件提交用例准备输入框、params、假 Gateway 与输出收集器；调用方按正负例决定是否生成凭据。
 def _plugin_submit_setup(host: _PluginSubmitHost, text: str) -> _PluginSubmitSetup:
     from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.settings.config import AgentConfig
@@ -166,15 +167,17 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
 
     snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
 
-    # G3 回归：mock 下移到本机假 Gateway，让真实 HTTP 传输与凭据分流（无凭据 + 开关关照常发送）参与派发。
+    # 凭据与 HTTP 均走真实实现；假 Gateway 仅替代服务端插件响应，不能凭无令牌请求宣称分派成功。
     def respond(path, headers, payload):
         assert path == "/client/plugins"
+        assert headers.get("X-Gateway-Token"), "正例必须携带当前隔离宿主凭据"
         assert headers.get("X-User-Id") == "local-agent" and headers.get("X-Channel") == "chat"
         if payload and payload.get("interactive"):
             assert payload["plugin_request_id"]
         return plugin_command_responder(lambda: snapshot)(path, headers, payload)
 
     stub = gateway_stub_factory(respond)
+    seed_gateway_credential(tmp_path)
     setup = _plugin_submit_setup(_PluginSubmitHost(tmp_path, monkeypatch, stub, mode, use_gateway), raw)
 
     tui_keybindings._submit_input_area(setup.event, setup.params)
@@ -193,37 +196,34 @@ def test_plugin_submit_uses_real_dispatch_without_chat_guidance_or_stop(
     assert setup.input_area.text == ""
 
 
-def test_plugin_submit_degrades_without_local_credential_when_switch_off(
-    tmp_path, monkeypatch, gateway_stub_factory, caplog,
+def test_plugin_submit_refuses_without_local_credential(
+    tmp_path, monkeypatch, gateway_stub_factory,
 ) -> None:
-    """G3 回归：开关关（默认）且本机凭据不存在时，/plugins 提交照常走真实派发、不带令牌、记一次 warning。"""
-    import logging
+    """缺少本机凭据必须拒绝，不能恢复已经退休的无凭据发送分支。"""
+    from agent_py_agent.cli.chat_parts.plugin_command_client import PluginCommandClient
 
-    from agent_py_agent.agent.gateway_parts import client_credentials
-    from agent_py_agent.agent.plugin_command_service import read_plugin_catalog
-    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    receipts = []
+    original = PluginCommandClient.command
 
-    snapshot = read_plugin_catalog(OwnerIdentity.local_main(), channel="chat", conversation_id="session-1")
+    def observe(client, *args, **kwargs):
+        result = original(client, *args, **kwargs)
+        receipts.append(result)
+        return result
 
-    def respond(path, headers, payload):
-        assert path == "/client/plugins"
-        return plugin_command_responder(lambda: snapshot)(path, headers, payload)
-
-    stub = gateway_stub_factory(respond)
+    monkeypatch.setattr(PluginCommandClient, "command", observe)
+    stub = gateway_stub_factory(lambda *_: pytest.fail("无凭据不能发送 HTTP"))
     setup = _plugin_submit_setup(_PluginSubmitHost(tmp_path, monkeypatch, stub), "/plugins help install")
-    # warning 去重是进程级状态；本用例先清掉本原因，保证“只记一次”的断言真实。
-    with client_credentials._CREDENTIAL_WARNINGS_LOCK:
-        client_credentials._WARNED_CREDENTIAL_REASONS.discard("LOCAL_CLIENT_CREDENTIAL_MISSING")
-    caplog.set_level(logging.WARNING, logger="agent_py_agent.agent.gateway_parts.client_credentials")
 
     tui_keybindings._submit_input_area(setup.event, setup.params)
 
-    assert len(setup.output) == 1 and "用法：/plugins install <source>" in setup.output[0]
-    assert stub.requests, "降级后请求必须照常到达假 Gateway"
-    assert all(item.headers.get_all("X-Gateway-Token") is None for item in stub.requests)
-    assert len([item for item in caplog.records if "凭据不可用" in item.message]) == 1
+    assert len(receipts) == 1 and not receipts[0]["ok"] and receipts[0]["state"] == "rejected"
+    assert receipts[0]["error_code"] == "LOCAL_CLIENT_CREDENTIAL_MISSING"
+    assert len(setup.output) == 1 and "LOCAL_CLIENT_CREDENTIAL_MISSING" in setup.output[0]
+    assert not stub.requests
     setup.blocked.assert_not_called()
     assert not setup.params.stop_event.is_set() and setup.params.pending_jobs_ref == [0]
+    assert setup.params.local_run_ref == [None] and setup.params.is_running_ref == [False]
+    assert setup.runtime.store.snapshot().queued_inputs == ()
     assert setup.input_area.text == ""
 
 

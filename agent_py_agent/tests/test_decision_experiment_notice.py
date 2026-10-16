@@ -225,15 +225,16 @@ def test_skipped_and_uncertain_receipts_are_never_announced_as_applied(tmp_path,
 
     lane = lane_at(tmp_path)
     turn = ready_turn(lane)
-    original = promotion.execute_decision_settings_operation
+    writes = []
 
-    def failed_write(agent, operation, payload, *, thread_id=""):
-        if operation == "patch":
-            raise OSError("写入结果未知")
-        return original(agent, operation, payload, thread_id=thread_id)
+    def failed_write(agent, payload, *, thread_id=""):
+        writes.append((agent, payload, thread_id))
+        raise OSError("写入结果未知")
 
-    monkeypatch.setattr(promotion, "execute_decision_settings_operation", failed_write)
+    monkeypatch.setattr(promotion, "_execute_host_decision_settings_patch", failed_write)
     finish(turn)
+    assert len(writes) == 1 and writes[0][0] is lane.host and writes[0][2] == lane.thread.thread_id
+    assert writes[0][1]["changes"] == {"points.skill_tool.mode": "apply"}
     assert stored_block(turn)["promotion"]["status"] == "uncertain"
     assert pending_host_notices(lane.host.conversation_store, lane.thread.thread_id) == ()
     assert view(lane)["effective"]["points"]["skill_tool"]["effective_mode"] == "off"

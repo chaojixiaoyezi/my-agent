@@ -18749,3 +18749,7 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 最终宽组合另定位卡片静默取消误影响泛用cancelled输入Wake；现仅卡片退休在原input行写resolution_delivery=retire。原capacity测试保持不变，普通取消继续原唤醒，静默退休保留read/arm和post-arm时序回归。
 
 2026-10-14 最终发行 `.20261014.7`：远端 import-boundary 检查发现嵌套工具派发反向依赖 agent_core；已将无副作用的分段规划器移至原 tooling 层，主执行轮和嵌套派发共用同一实现，无白名单或兼容入口。原95项定向测试及 import-boundary 检查通过，最终源码与发行包重新冻结验收。
+
+2026-10-16 上轮 main CI 基线修复：按原 215 个失败节点的 61 文件分组复现；只在真实合同已变化时更新夹具，保留 owner、原发起人、审批和零执行负例。实际产品修复包括 local user/group 身份往返、canonical 二层子代理身份、Skill 反馈操作声明，以及测量器保留原模型来源。夹具自己显式隔离 home，不依赖 pytest 进程环境。准确 focused/strict 和线上结果见 [基线交接](docs/tasks/CI_BASELINE_REPAIR_20261016.md)，未完成项不提前记绿。
+
+2026-10-16 CI 独立基线最终全仓：`PYTHONPATH=$PWD python -m pytest -q --tb=short`，33546 收集、33474 通过、72 项平台跳过或已有预期失败、零失败/错误；63 文件 focused 1394 全通过。原环境导入及 macOS canonical path 失败证据保留；详情见[基线修复](docs/tasks/CI_BASELINE_REPAIR_20261016.md)。最终严格门和线上 CI 按准确提交另记，不以本机全仓替代跨平台或正式发行。

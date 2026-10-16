@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
+
 
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
 # 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
@@ -20,7 +22,7 @@ class TestCreateSubagentsToolDelegationGuard:
         """结构化按钮约束冲突由父代理验收，不在派工入口硬拦。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.subagents.workspace_root = Path("/tmp/project")
@@ -49,7 +51,7 @@ class TestCreateSubagentsToolDelegationGuard:
         """自然语言提到按钮不再触发代码层约束，必须由结构化字段承载。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "请做家具首页，不要有失灵按钮。"
@@ -77,7 +79,7 @@ class TestCreateSubagentsToolDelegationGuard:
         """图片类专项约束也不在 create_subagents 入口硬拦。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.subagents.workspace_root = Path("/tmp/project")
@@ -110,7 +112,7 @@ class TestCreateSubagentsToolRawPromptRepair:
         """模型没传 agent_name 时，第一层 root/coordinator 使用结构化默认展示名。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -136,7 +138,7 @@ class TestCreateSubagentsToolRawPromptRepair:
         """root/coordinator 机器合同必须来自工具参数 attributes，而不是原始用户 prompt。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "用户自然语言里提到 product.html 和 depth=3 都不能被代码当事实。"
@@ -174,7 +176,7 @@ class TestCreateSubagentsToolRawPromptRepair:
         """模型写错层级前缀时，root seed 必须保留工具参数里的结构化命名合同。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "自然语言里提到小小小傻妞不应成为机器事实。"

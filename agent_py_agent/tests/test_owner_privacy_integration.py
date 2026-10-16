@@ -11,6 +11,7 @@ from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+from agent_py_agent.tests.support.ci_host_context_fixtures import bind_im_task
 
 
 def _write_skill(root: Path, name: str, description: str) -> Path:
@@ -35,7 +36,7 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
     )
     user_a = pool.get(OwnerIdentity.provider_user("feishu", "user-a"))
     user_b = pool.get(OwnerIdentity.provider_user("feishu", "user-b"))
-    group = pool.get(OwnerIdentity.provider_group("feishu", "group-1"))
+    group = pool.get(OwnerIdentity.provider_group("feishu", "oc_group_1"))
 
     user_a.persona_repository.mutate(
         PersonaMutationRequest("user", "add", content="A 私人称呼：青竹", confirmed=True)
@@ -43,9 +44,13 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
     user_b.persona_repository.mutate(
         PersonaMutationRequest("user", "add", content="B 私人称呼：白露", confirmed=True)
     )
-    group.persona_repository.mutate(
-        PersonaMutationRequest("user", "add", content="群组称呼：项目组", confirmed=True)
-    )
+    from agent_py_agent.agent.user_space.group_authorization_context import group_capability_guard
+
+    bind_im_task(group, actor_id="user-a", conversation_id="oc_group_1")
+    with group_capability_guard(group, "assistant.configure"):
+        group.persona_repository.mutate(
+            PersonaMutationRequest("user", "add", content="群组称呼：项目组", confirmed=True)
+        )
     user_a.memory.add("user", "A 私人记忆口令 alpha-only", kind="fact")
     user_b.memory.add("user", "B 私人记忆口令 beta-only", kind="fact")
     group.memory.add("user", "群组公开事实 group-only", kind="fact")

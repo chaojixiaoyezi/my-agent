@@ -91,7 +91,11 @@ def test_gateway_dispatch_reaches_the_settings_service(monkeypatch):
     seen = []
     monkeypatch.setattr(module, "execute_settings_control",
                         lambda agent, command, scope: seen.append(command.operation) or "handled")
-    assert control_service.execute_gateway_conversation_control(None, None, _settings("/settings"), None) == "handled"
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    scope = control_service.GatewayControlScope("main", "chat", "settings-dispatch",
+                                               resolved_owner=OwnerIdentity.local_main())
+    assert control_service.execute_gateway_conversation_control(None, None, _settings("/settings"), scope) == "handled"
     assert seen == ["overview"]
 
 

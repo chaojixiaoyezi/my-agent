@@ -13,6 +13,12 @@ from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.base import ProviderToolCapability, _utc_now_iso
 from agent_py_agent.agent.capability.learnpack_store import LearnpackStore
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import (
+    GatewayAskParams,
+    _process_gateway_requests,
+    gateway_paths,
+    submit_gateway_ask,
+)
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import (
@@ -94,19 +100,26 @@ def test_the_learning_skill_is_found_and_read_through_skill_search(tmp_path, mon
     assert body.ok and "learnpack-notes.md" in body.output and "package_install" in body.output
 
 
-# 类用途: 按回合出招的假模型：每个回合一串工具调用，调完就回一句话；回合按用户提问里的标记区分。
+# LLM: 脚本回合由测试宿主显式设置，不能扫描包含历史回合和工具结果的模型上下文来选当前脚本。
+# 类用途: 按明确回合标识返回一串假模型工具调用，调完后回复；只替代模型，不替代工具或授权。
 class _ScriptedTurns:
     name = "learnpack_turns_model"
 
+    # LLM: 测试脚本与计数只在本对象内存保存，开始每次入队前由夹具设置 turn_id。
+    # 函数用途: 初始化每回合独立工具脚本，不读取配置或发请求。
     def __init__(self, turns: dict[str, list[tuple[str, dict]]]) -> None:
         self.turns, self.steps = turns, dict.fromkeys(turns, 0)
+        self.turn_id = ""
 
     def probe_tool_capability(self):
         return ProviderToolCapability(provider=self.name, endpoint="local://turns", model="", stream=False,
                                       native_supported=True, evidence="test_native_tools", observed_at=_utc_now_iso())
 
+    # LLM: 用测试预先冻结的当前回合选择脚本，保留真实历史消息输入；模型输出仍经生产工具循环。
+    # 函数用途: 为当前测试回合逐项返回工具调用或结束回复，不访问网络。
     def generate(self, prompt, on_chunk=None, **kwargs):
-        key = next(key for key in self.turns if key in str(prompt) + json.dumps(kwargs.get("messages"), default=str))
+        key = self.turn_id
+        assert key in self.turns
         step = self.steps[key]
         self.steps[key] += 1
         if step < len(self.turns[key]):
@@ -122,7 +135,8 @@ def test_summarize_after_the_work_is_done_queues_that_work_once(tmp_path, monkey
                                     my_agent_owner_kind="main", my_agent_owner_id="main", enable_self_learning=True),
                         tmp_path / "project")
     thread = agent.conversation_store.threads.get_or_create(
-        {"canonical_user_id": "learnpack-user", "channel": "internal", "channel_conversation_id": "summarize"})
+        {"canonical_user_id": "local-agent", "channel": "chat", "channel_user_id": "local-agent",
+         "channel_conversation_id": "summarize"})
     # 一条她自己的正式记忆：RUN-A 的提问会召回它，"总结一下"要把它一起交给自学习。
     agent.memory.add("user", "短剧第一场先交代人物关系", kind="fact", attributes={
         "origin": "reviewed", "subject_key": "learnpack.drama.first-scene", "scope_type": "personal", "scope_key": "personal"})
@@ -136,17 +150,26 @@ def test_summarize_after_the_work_is_done_queues_that_work_once(tmp_path, monkey
                   ("skill_summarize", {"target": "current", "focus": "分场顺序"})],
     })
 
-    def ask(text):
-        agent.run(text, task_attributes={"conversation_thread_id": thread.thread_id}, source="gateway")
+    # LLM: 总结授权核验真实 claim/attempt；测试沿正式入队和 worker 执行，不用 source 字符串伪造宿主资格。
+    # 函数用途: 在同一个本机会话提交脚本模型回合，并断言生产 Gateway 确实完成。
+    def ask(turn_id, text):
+        agent.backend.turn_id = turn_id
+        paths = gateway_paths(agent)
+        _request_id, _request_path, response_path = submit_gateway_ask(paths, params=GatewayAskParams(
+            prompt=text, chat_session_id="summarize", agent=agent))
+        _process_gateway_requests(agent, paths)
+        response = json.loads(response_path.read_text(encoding="utf-8"))
+        assert response["ok"], response
 
-    ask("RUN-A 把第一场写出来")
+    ask("RUN-A", "RUN-A 把第一场写出来")
     store = agent.skill_learning.store
     assert store.pending_requests() == [], "只写了一轮工具，自动总结不够门槛"
-    ask("RUN-B 把刚才的做法总结一下")
+    ask("RUN-B", "RUN-B 把刚才的做法总结一下")
     [request] = [json.loads(path.read_text(encoding="utf-8")) for path in store.pending_requests()]
+    assert request["thread_id"] == thread.thread_id
     assert request["requested_by"] == "user" and request["user_focus"] == "分场顺序"
     assert "RUN-A" in request["user_prompt"], "先读了文件也照样总结上一次做完的活，不是说“总结一下”的这一句"
     assert any("短剧第一场先交代人物关系" in item["content"] for item in request["recalled_memories"]), "那次召回的记忆一起交"
-    ask("RUN-C 写第二场，写完顺便把做法总结一下")
+    ask("RUN-C", "RUN-C 写第二场，写完顺便把做法总结一下")
     requests = [json.loads(path.read_text(encoding="utf-8")) for path in store.pending_requests()]
     assert [item["user_prompt"][:5] for item in requests] == ["RUN-A", "RUN-C"], "边做边要总结的，在这次活收尾时入队"

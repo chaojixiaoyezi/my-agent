@@ -10,7 +10,7 @@ from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 REQUEST_OWNER_KEY = 'host_request_owner.v1'
 
 
-# LLM: 冻结记录必须完整且规范；safe_path_segment 的清洗不能默默把另一个 ID 当成原身份。
+# LLM: 冻结记录完整规范且须与认证写端同一OwnerIdentity闭包，含local/user；路径清洗不能改成另一个身份，main仍仅local/main/main。
 # 函数用途: 从宿主请求记录恢复准确 owner，损坏时失败关闭。
 def frozen_request_owner(payload: dict) -> OwnerIdentity | None:
     raw = payload.get(REQUEST_OWNER_KEY)
@@ -22,7 +22,7 @@ def frozen_request_owner(payload: dict) -> OwnerIdentity | None:
         raise DataCorruptionError('请求 owner 绑定缺少身份')
     if raw['provider'] == 'local' and raw['owner_kind'] == 'main' and raw['owner_id'] == 'main':
         result = OwnerIdentity.local_main()
-    elif raw['provider'] != 'local' and raw['owner_kind'] in {'user', 'group'}:
+    elif raw['owner_kind'] in {'user', 'group'}:
         factory = OwnerIdentity.provider_user if raw['owner_kind'] == 'user' else OwnerIdentity.provider_group
         result = factory(raw['provider'], raw['owner_id'])
     else:

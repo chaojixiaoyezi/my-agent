@@ -8286,3 +8286,5 @@ Goal scope 同时公开宿主续跑机制事实，不把 active 或单轮 final 
 状态：本地集成与非作者安全审查中。Skill沿原registry候选确认、版本CAS、采用/客观质量分离和可恢复维护，推荐50与存储配额分开；双端真人确认的定向投递/一次复刻不转移权限。受限工具编排沿原executor，只接受有界JSON数据流和原句柄，不运行动态程序。具体合同、失败反例及发行状态见 [本期实施](docs/tasks/IM_22_ITEM_IMPLEMENTATION.md)、[Skill维护](docs/tasks/SKILL_MAINTENANCE_HANDOFF.md)、[Skill迁移](docs/tasks/SKILL_TRANSFER_HANDOFF.md)、[工具编排](docs/design/TOOL_PROGRAM_EXECUTION.md)。
 
 用户追加交互卡统一取消：取消是独立安全控制，只关闭准确输入/卡，不批准也不撤销已生效值；仍校MAC、真实身份和群归属，允许免私人解锁以便止损。实际点击人/时间留原审计，本期实施入口同上。
+
+2026-10-16，已实施待严格验收：CI 修复保持结构化身份权威，canonical 子代理祖先与主会话 TaskLink/SessionTask 各守自身真相，不为恢复子孙另造 TaskLink；测量器投影用原模型响应保留 provenance。详见 [基线修复](docs/tasks/CI_BASELINE_REPAIR_20261016.md)。

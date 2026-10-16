@@ -313,7 +313,10 @@ def test_plain_subagent_keeps_existing_tool_policy(owner_home):
 
     policy = _role_policy(parent, {"goal": "普通任务"}, "普通任务", requested)
 
-    assert policy.allowed_tools == requested
+    assert policy.allowed_tools == [
+        *requested, "list_tools", "tool_search", "request_credentials", "feishu_cloud", "send_message",
+    ]
+    assert policy.allowed_tools != list(CODING_SUBAGENT_TOOLS), "普通任务不因发现工具自动升级为完整编码角色"
 
 
 def test_create_subagents_no_audit_when_parent_plain(owner_home):

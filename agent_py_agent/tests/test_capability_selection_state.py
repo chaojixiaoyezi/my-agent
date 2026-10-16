@@ -67,6 +67,8 @@ def test_absent_marker_preserves_original_task_json_bytes():
     old_payload.pop("continuation_diagnostics")
     # 新专有身份为 None 时同样不序列化；这里模拟新增字段之前的原档案，字节相等断言保持。
     old_payload.pop("host_channel_actor")
+    old_payload.pop("host_message_context")
+    old_payload.pop("input_dependency_refs")
     assert CAPABILITY_SELECTION_KEY not in link.to_dict()
     assert (json.dumps(link.to_dict(), ensure_ascii=False, sort_keys=True, indent=2).encode()
             == json.dumps(old_payload, ensure_ascii=False, sort_keys=True, indent=2).encode())

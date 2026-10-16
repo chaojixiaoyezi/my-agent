@@ -262,7 +262,9 @@ def test_real_sdk_http_dispatch_error_clears_traceback_but_keeps_response(sdk_lo
     import lark_oapi as lark
     from lark_oapi.core.model import RawRequest
     handler = lark.EventDispatcherHandler.builder('', '').build()
-    def fail(_body):
+    # SDK 版本可能额外传入解密上下文；本用例只注入原解密入口的 ValueError，不能让替身签名先产生 TypeError。
+    def fail(_body, *_dispatch_context, **_options):
+        assert _body == b'{}'
         raise ValueError(CANARY)
     handler._decrypt = fail
     request = RawRequest()

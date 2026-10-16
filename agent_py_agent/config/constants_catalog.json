@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 958,
+  "count": 971,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -68,6 +68,22 @@
       "description": "飞书卡片接口请求超时 10 秒：卡片交互要快，超时过长会让用户感觉卡顿。"
     },
     {
+      "name": "MAX_BYTES",
+      "file": "agent_py_agent/agent/adapter/feishu_cli.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "飞书CLI标准输出最多接收的字节数，超过预算不解析为成功结果。"
+    },
+    {
+      "name": "_MAX_RESPONSE_BYTES",
+      "file": "agent_py_agent/agent/adapter/feishu_cloud.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "飞书云接口单次响应的字节上限，错误体也按同一预算读取。"
+    },
+    {
       "name": "MAX_FILE_BYTES",
       "file": "agent_py_agent/agent/adapter/feishu_media.py",
       "value": 31457280,
@@ -90,6 +106,46 @@
       "unit": "秒",
       "category": "超时",
       "description": "查名网络超时 8 秒：短超时 fail-open，不让资料读取拖慢首聊热路径。"
+    },
+    {
+      "name": "MAX_VISIBLE_DEPTH",
+      "file": "agent_py_agent/agent/adapter/feishu_quoted_content.py",
+      "value": 32,
+      "unit": "层",
+      "category": "上限预算",
+      "description": "引用可见树最多遍历的层数，不递归隐藏身份或回调字段。"
+    },
+    {
+      "name": "MAX_VISIBLE_NODES",
+      "file": "agent_py_agent/agent/adapter/feishu_quoted_content.py",
+      "value": 4096,
+      "unit": "个节点",
+      "category": "上限预算",
+      "description": "引用可见树最多访问的节点数，限制复杂卡片的纯投影成本。"
+    },
+    {
+      "name": "MAX_QUOTED_TEXT_CHARS",
+      "file": "agent_py_agent/agent/adapter/feishu_quoted_media.py",
+      "value": 16000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "单条引用正文最多展示的字符数，不改变媒体或身份授权事实。"
+    },
+    {
+      "name": "MAX_QUOTED_MEMBERS",
+      "file": "agent_py_agent/agent/adapter/feishu_quoted_members.py",
+      "value": 64,
+      "unit": "个成员",
+      "category": "上限预算",
+      "description": "单次引用最多输出的已核验转发成员数，包含根消息。"
+    },
+    {
+      "name": "MAX_QUOTED_MEMBER_DEPTH",
+      "file": "agent_py_agent/agent/adapter/feishu_quoted_members.py",
+      "value": 16,
+      "unit": "层",
+      "category": "上限预算",
+      "description": "引用成员最多向下遍历的层数，根层为0。"
     },
     {
       "name": "MAX_MESSAGE_CHARS",
@@ -231,7 +287,7 @@
       "name": "_DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH",
       "file": "agent_py_agent/agent/agent_core/finalization_compact_auto.py",
       "value": 50,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "加、永不触顶。这个绝对硬顶与软顶并存：depth 到顶即强制 return，给清晰终止响应而非静默卡死。"
     },
@@ -351,7 +407,7 @@
       "name": "_DEFAULT_DEPTH",
       "file": "agent_py_agent/agent/agent_core/orchestration_tools.py",
       "value": 1,
-      "unit": "",
+      "unit": "层",
       "category": "其它",
       "description": "派生代理名里的默认层级深度，用于生成可读的系统血缘名字。"
     },
@@ -748,14 +804,6 @@
       "description": "截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。"
     },
     {
-      "name": "_DEFAULT_MAX_PARALLEL_TOOL_CALL_COUNT",
-      "file": "agent_py_agent/agent/tooling/segment_planning.py",
-      "value": 8,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "默认最大并行工具调用数。"
-    },
-    {
       "name": "_MODEL_INTERRUPT_DRAIN_SECONDS",
       "file": "agent_py_agent/agent/agent_core/tool_model_generation.py",
       "value": 1.0,
@@ -847,7 +895,7 @@
       "name": "MAX_DECISION_JSON_DEPTH",
       "file": "agent_py_agent/agent/backends/decision_protocol.py",
       "value": 16,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "决策请求 JSON 嵌套最多 16 层：防超深结构把解析撑爆，无物理单位。"
     },
@@ -903,7 +951,7 @@
       "name": "_STRICT_JSON_MAX_DEPTH",
       "file": "agent_py_agent/agent/backends/gateway_request_limits.py",
       "value": 64,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "严格 JSON 校验嵌套最多 64 层：防畸形深嵌套请求拖垮解析，无物理单位。"
     },
@@ -1839,7 +1887,7 @@
       "name": "_MAX_SCAN_DEPTH",
       "file": "agent_py_agent/agent/capability/skill_service.py",
       "value": 6,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "扫描技能目录的最大深度，防止递归过深。"
     },
@@ -1858,6 +1906,30 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "技能名最大字符数。"
+    },
+    {
+      "name": "MAX_TRANSFER_BYTES",
+      "file": "agent_py_agent/agent/capability/skill_transfer_manifest.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单次技能投递全部资源的累计字节预算，不授予接收方额外权限。"
+    },
+    {
+      "name": "MAX_TRANSFER_FILES",
+      "file": "agent_py_agent/agent/capability/skill_transfer_manifest.py",
+      "value": 128,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "单次技能投递最多包含的资源文件数，包含声明文件。"
+    },
+    {
+      "name": "MAX_TRANSFER_SKILLS",
+      "file": "agent_py_agent/agent/capability/skill_transfer_manifest.py",
+      "value": 100,
+      "unit": "个技能",
+      "category": "上限预算",
+      "description": "单次技能投递最多包含的技能数，仍由原安装确认与配额决定接收。"
     },
     {
       "name": "MAX_CAPABILITY_FILES",
@@ -2015,7 +2087,7 @@
       "name": "MAX_TRACE_DEPTH",
       "file": "agent_py_agent/agent/contracts/contract_trace.py",
       "value": 3,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "合同追踪最多展开的层数；防环状引用导致递归无限加深（无物理单位）。"
     },
@@ -2786,6 +2858,22 @@
       "unit": "个文件",
       "category": "其它",
       "description": "一次请求默认最多 8 个媒体文件：限制批量上传成本。"
+    },
+    {
+      "name": "DEFAULT_IMAGE_PIXELS",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 40000000,
+      "unit": "像素",
+      "category": "其它",
+      "description": "入站图片默认累计解码像素预算，多帧图片合计核验。"
+    },
+    {
+      "name": "MAX_IMAGE_FRAMES",
+      "file": "agent_py_agent/agent/conversation/input_media_images.py",
+      "value": 256,
+      "unit": "帧",
+      "category": "上限预算",
+      "description": "入站图片最多解码的帧数，防止动图占满处理资源。"
     },
     {
       "name": "_WAKE_FACT_DEPTH_LIMIT",
@@ -3559,7 +3647,7 @@
       "name": "_MAX_DEPTH",
       "file": "agent_py_agent/agent/ingestion/flatten.py",
       "value": 8,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "嵌套深度最多 8 层：再深的结构按叶子收敛，防止递归压平被恶意深 JSON 打爆。"
     },
@@ -3719,7 +3807,7 @@
       "name": "_MAX_PATH_DEPTH",
       "file": "agent_py_agent/agent/ingestion/source_http.py",
       "value": 16,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "字段路径最多 16 层：嵌套过深的字段按叶子收敛，防递归爆栈。"
     },
@@ -4199,7 +4287,7 @@
       "name": "_SMALL_JSON_MAX_DEPTH",
       "file": "agent_py_agent/agent/memory_archive/tokens.py",
       "value": 64,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "小 JSON 判定允许的最大嵌套深度；超过视为大对象，按大对象路径处理（无物理单位）。"
     },
@@ -4207,7 +4295,7 @@
       "name": "_SAFE_PARAMETER_MAX_DEPTH",
       "file": "agent_py_agent/agent/memory_archive/tool_output_externalizer.py",
       "value": 4,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "外置化时安全参数允许的最大嵌套深度；超过拒绝外置该参数（无物理单位）。"
     },
@@ -5815,7 +5903,7 @@
       "name": "_MAX_DISCOVERY_DEPTH",
       "file": "agent_py_agent/agent/tooling/filesystem_path_recovery.py",
       "value": 8,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "路径发现最多 8 层深度：常规项目够用，防止深层目录拖垮遍历。"
     },
@@ -5874,6 +5962,14 @@
       "unit": "秒",
       "category": "超时",
       "description": "lsof 查监听表超时 2 秒：监听状态核对不能无限等外部命令。"
+    },
+    {
+      "name": "_DISPLAY_JOIN_SECONDS",
+      "file": "agent_py_agent/agent/tooling/liveness.py",
+      "value": 0.1,
+      "unit": "秒",
+      "category": "其它",
+      "description": "展示心跳停止时最多等待的秒数，不延长工具执行或审批租约。"
     },
     {
       "name": "_DEFAULT_CONNECT_TIMEOUT_SECONDS",
@@ -6332,6 +6428,14 @@
       "description": "OCR 区域至少有百分之几的面积落在控件里就算同一个候选（按 OCR 面积算，不用 IoU：文字框比按钮、输入框小得多）"
     },
     {
+      "name": "_DEFAULT_MAX_PARALLEL_TOOL_CALL_COUNT",
+      "file": "agent_py_agent/agent/tooling/segment_planning.py",
+      "value": 8,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "默认最大并行工具调用数。"
+    },
+    {
       "name": "_CLEANUP_WARNING_PID_LIMIT_COUNT",
       "file": "agent_py_agent/agent/tooling/shell.py",
       "value": 8,
@@ -6735,7 +6839,7 @@
       "name": "_SUBAGENT_HIERARCHY_DEFAULT_MAX_DEPTH",
       "file": "agent_py_agent/cli/_hierarchy.py",
       "value": 0,
-      "unit": "",
+      "unit": "层",
       "category": "上限预算",
       "description": "参数减量第 3 批：层级创建默认深度与恢复树默认节点数不再是配置项，--max-depth / --max-nodes 仍优先。"
     },

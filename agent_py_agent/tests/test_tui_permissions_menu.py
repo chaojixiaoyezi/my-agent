@@ -8,7 +8,10 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
-from agent_py_agent.agent.user_space.approval_mode import read_permission_mode
+from agent_py_agent.agent.user_space.approval_mode import (
+    execute_approval_mode_operation,
+    read_permission_mode,
+)
 from agent_py_agent.cli.chat_parts import tui_permissions_menu
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
@@ -51,6 +54,9 @@ def test_tui_permissions_save_cancel_and_full_confirmation(tmp_path, monkeypatch
         host.config.session_workspace = str(tmp_path / "sessions")
         params.agent.config = host.config
         params.agent.home_paths = home = owner_home(tmp_path, admin=admin)
+        # 本用例验证 ask→auto→Full Access 操作；起始值显式落盘，不把宿主默认 auto 当成 ask。
+        execute_approval_mode_operation(home, "set", "ask")
+        assert read_permission_mode(home) == "ask"
         with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
             app = make_tui_app(params)
             runner = asyncio.create_task(app.run_async())

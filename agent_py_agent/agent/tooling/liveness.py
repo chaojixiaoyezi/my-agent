@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from ..common.cancellation import CancellationToken
 
+# 展示心跳停止时最多等待的秒数，不延长工具执行或审批租约。
 _DISPLAY_JOIN_SECONDS = 0.1
 
 

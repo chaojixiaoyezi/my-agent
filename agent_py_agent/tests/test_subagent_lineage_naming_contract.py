@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
+
 
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
 # 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
@@ -15,11 +17,9 @@ def _isolated_cwd(tmp_path, monkeypatch):
 
 
 def _create_agent(tmp_path):
-    from unittest.mock import MagicMock
-
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
-    agent = MagicMock()
+    agent = local_mock_agent()
     agent.config.enable_subagents = True
     agent.config.max_subagents = 10
     agent.subagents = SubAgentManager(tmp_path / ".my-agent" / "subagents", workspace_root=tmp_path)

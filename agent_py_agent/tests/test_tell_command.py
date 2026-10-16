@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.command_catalog import COMMAND_CATALOG
+from agent_py_agent.agent.command_catalog import (
+    COMMAND_CATALOG,
+    CommandAccessContext,
+    render_command_help,
+)
 from agent_py_agent.cli.chat_parts.slash_commands import (
     CHAT_HELP_TEXT,
     handle_common_slash_command,
@@ -22,7 +26,8 @@ def test_tell_and_sessions_threads_declared() -> None:
     names = {spec.name for spec in COMMAND_CATALOG}
     assert "tell" in names
     assert "/tell" in CHAT_HELP_TEXT
-    assert "/sessions threads" in CHAT_HELP_TEXT
+    assert "/sessions threads" in render_command_help(CommandAccessContext(surface="tui", is_admin=True), "sessions")
+    assert "/sessions" in CHAT_HELP_TEXT
 
 
 class _FakeThread:

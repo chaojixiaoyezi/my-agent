@@ -33,6 +33,7 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import ApprovalPolicy
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
+from agent_py_agent.tests.support.ci_authenticated_gateway import authenticated_headers
 from agent_py_agent.tests.test_plugin_event_gateway import _Handler, gateway
 from agent_py_agent.tests.test_plugin_event_hub import _Harness, _installation
 from agent_py_agent.tests.test_tool_runtime_unification import _CountingTool
@@ -202,12 +203,12 @@ def test_six_events_reach_handshake_plugin_on_real_gateway_turn(gateway, monkeyp
         harness.hub.close()
 
 
-# LLM: 只访问本测试服务绑定的随机回环端口；身份经真实 AuthMiddleware，不从请求正文选 owner。
+# LLM: 只访问本测试服务绑定的随机回环端口；凭据从隔离宿主 root 读取，身份经真实 AuthMiddleware，不从正文选 owner。
 # 函数用途: 用短连接提交或查询隔离 HTTP 服务，关闭连接且不访问生产端口。
-def _http_json(port, path, *, body=None, identity=('local-agent', 'local')):
+def _http_json(port, path, *, root, body=None, identity=('local-agent', 'local')):
     connection = HTTPConnection('127.0.0.1', port, timeout=5)
     try:
-        headers = {'Content-Type': 'application/json', 'X-User-Id': identity[0], 'X-Channel': identity[1]}
+        headers = {'Content-Type': 'application/json', **authenticated_headers(root, user=identity[0], channel=identity[1])}
         connection.request('GET' if body is None else 'POST', path,
                            body=None if body is None else json.dumps(body), headers=headers)
         response = connection.getresponse()
@@ -313,7 +314,7 @@ def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeyp
     claims, resolved = _observe_http_worker(monkeypatch)
     port = server.server.server_address[1]
     prompt = 'http-private-marker'
-    status, receipt = _http_json(port, '/ask', body={'prompt': prompt, 'conversation_id': 'http-private-marker',
+    status, receipt = _http_json(port, '/ask', root=agent.home_paths.root, body={'prompt': prompt, 'conversation_id': 'http-private-marker',
         'metadata': {'user_id': 'local-agent', 'channel': 'chat'}}, identity=identity)
     assert status == 202 and receipt['status'] == 'queued'
     request_id = receipt['request_id']
@@ -323,7 +324,7 @@ def test_real_http_worker_claim_and_prompt_owner_isolation(http_gateway, monkeyp
     workers.append(worker)
     worker.start()
     _wait_for(lambda: not worker.is_alive())
-    status, result = _http_json(port, '/result/' + request_id, identity=identity)
+    status, result = _http_json(port, '/result/' + request_id, root=agent.home_paths.root, identity=identity)
     assert status == 200 and result['ok'] and result['status'] == 'done', result
     assert len(claims) == 1 and claims[0].request_id == request_id
     assert claims[0].execution_attempt_id and claims[0].lease_epoch == 1

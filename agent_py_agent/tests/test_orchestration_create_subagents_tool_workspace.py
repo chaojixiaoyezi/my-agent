@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
 from agent_py_agent.tests.test_orchestration_create_subagents_tool import (
     _mock_create_items_agent,
     _mock_created_task,
@@ -28,7 +29,7 @@ class TestCreateSubagentsToolWorkspaceDefaults:
         """创建多个任务后默认直接开跑，下一步只建议登记非阻塞等待。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         # 后台派工的结构化前置闸要求 workspace 是真实路径类型;给 tmp 路径,
@@ -818,7 +819,7 @@ class TestCreateSubagentsToolWorkerRoles:
         """具体单文件任务保持 worker 角色。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "请派小傻妞做两个不同风格的家具品牌首页。"
@@ -849,7 +850,7 @@ class TestCreateSubagentsToolWorkerRoles:
         """用户允许多层派工时，单文件 worker 仍应保持交付角色。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "请派小傻妞来做，如果任务多，可以让小傻妞再找小小傻妞帮忙。"

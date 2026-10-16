@@ -7,31 +7,30 @@ from uuid import uuid4
 
 import pytest
 
-from agent_py_agent.agent.gateway_parts import http_handlers, model_profile_service
+from agent_py_agent.agent.gateway_parts import model_profile_service
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
 from agent_py_agent.cli.chat_parts.tui_model_menu import _request_data_sync
 from agent_py_agent.tests import test_decision_service_http as native_fixture
+from agent_py_agent.tests.support.ci_authenticated_gateway import authenticated_middleware
 from agent_py_agent.tests.test_decision_service_http import server as server
 from agent_py_agent.tests.test_model_profiles import profile
 
 
-# LLM: 本机测试容器只替代认证中间件，固定按原客户端身份头建立可信测试身份；服务及双HTTP传输仍用产品实现。
+# LLM: 本机测试容器绑定隔离数据根的真实宿主凭据；认证、owner 裁决、服务及双 HTTP 传输均用产品实现。
 # 函数用途: 启动随机端口的模型管理路由，退出回收服务线程，不使用日常配置或公共 Gateway。
 @pytest.fixture
-def gateway(tmp_path, monkeypatch):
-    monkeypatch.setattr(http_handlers, "require_trusted_source", lambda _handler: False)
-    monkeypatch.setattr(http_handlers, "_request_channel", lambda h: (h.headers["X-User-Id"], h.headers["X-Channel"]))
-    monkeypatch.setattr(http_handlers, "_request_identity", lambda h: (h.headers["X-User-Id"], None))
+def gateway(tmp_path):
+    middleware = authenticated_middleware(tmp_path)
     app = SimpleNamespace(agent=SimpleNamespace(home_paths=home_paths(tmp_path), config=AgentConfig(gateway_per_user_owner_scoping=True)))
     seen = []
 
     # LLM: 仅实现生产管理服务需要的容器接口，业务处理全部进入 handle_client_models；错误不伪造成功。
     # 类用途: 接受真实薄客户端 POST 字节并返回原服务回执。
     class Handler(BaseHTTPRequestHandler):
-        _auth_middleware = object()
+        _auth_middleware = middleware
 
         # LLM: 仅分派已知测试路由，不运行 ask、任意命令或任务队列。
         # 函数用途: 把真实请求交给原模型管理服务。

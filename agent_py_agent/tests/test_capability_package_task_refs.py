@@ -5,6 +5,7 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -46,10 +47,14 @@ from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_capability_package import content_bundle
 
 
-# LLM: 测试只在 conftest 隔离 home 创建真实安装事实；不用假摘要充当原安装校验，也不启动模型。
-# 函数用途: 装配支持两份同名内部资源的 Agent 和可停用安装；可指定大资源以覆盖原生输出归档。
+# LLM: 本夹具自身显式绑定临时home且拒绝日常数据根子树；pytest外调用也不能依赖conftest或环境回退，安装仍走原Store。
+# 函数用途: 在调用方临时目录内装配真实合成包与Agent，不读日常配置，不启动模型。
 def _agent(tmp_path, *, method_body=None):
-    agent = SimpleAgent(AgentConfig(enable_plugins=True, enable_subagents=True, prompt_files=[]), tmp_path / "repo")
+    isolated_home = (tmp_path / "home").resolve()
+    assert not isolated_home.is_relative_to((Path.home() / ".my-agent").resolve())
+    agent = SimpleAgent(AgentConfig(enable_plugins=True, enable_subagents=True, prompt_files=[],
+                                    my_agent_home=str(isolated_home)), tmp_path / "repo")
+    assert agent.home_paths.root == isolated_home
     store = PluginInstallStore(resolve_owner_home(agent.home_paths.root))
     entries = []
     for index, package_id in enumerate(("story-a", "story-b")):
@@ -172,7 +177,10 @@ def test_scheduler_preserves_activation_and_refuses_missing_or_conflicting_ident
         _normalize_skill_refs([broken])
     with pytest.raises(ScheduleValidationError):
         _normalize_skill_refs([reference, {**reference, "activation_id": "f" * 64}])
-    service = SchedulerService(SimpleNamespace(), conversation_store=agent.conversation_store, skill_snapshot_provider=agent.current_skill_snapshot)
+    from agent_py_agent.agent.scheduler.repository import SchedulerRepository
+
+    repository = SchedulerRepository(tmp_path / "scheduler", owner_provider="local", owner_kind="main", owner_id="main")
+    service = SchedulerService(repository, conversation_store=agent.conversation_store, skill_snapshot_provider=agent.current_skill_snapshot)
     assert service._skill_reference_error({"skill_refs": [reference]}) == ""
     for field in ("kind", "activation_id", "content_sha256"):
         incomplete = {key: value for key, value in reference.items() if key != field}

@@ -276,6 +276,9 @@ def test_child_continuation_keeps_exact_denials_and_isolates_other_children(tmp_
     from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
 
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    from agent_py_agent.agent.user_space.approval_mode import execute_approval_mode_operation
+
+    execute_approval_mode_operation(agent.home_paths, "set", "ask")
     prompts = []
 
     # LLM: 仅替换用户审批输入；真实子代理生命周期、工具权限和 Goal/Compact 续接照常执行。

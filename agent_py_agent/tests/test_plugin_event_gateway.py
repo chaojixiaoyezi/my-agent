@@ -388,10 +388,15 @@ class _BrokenEventFields(dict):
 
 
 @pytest.mark.parametrize('fault', ['missing_config', 'config_read', 'switch_read'])
-def test_prompt_optional_config_failure_keeps_successful_ingress(gateway, fault):
+def test_prompt_optional_config_failure_keeps_successful_ingress(gateway, monkeypatch, fault):
     _agent, paths, server, events = gateway
-    server.agent = (object() if fault == 'missing_config' else _EventConfigUnavailable()
-                    if fault == 'config_read' else SimpleNamespace(config=_EventFlagUnavailable()))
+    from agent_py_agent.agent.gateway_parts import event_points
+
+    observer_agent = (object() if fault == 'missing_config' else _EventConfigUnavailable()
+                      if fault == 'config_read' else SimpleNamespace(config=_EventFlagUnavailable()))
+    enabled = event_points._enabled_event_config
+    # 仅可选事件配置探针故障；真实 server.agent 仍保留 owner 路由所需的配置与家目录。
+    monkeypatch.setattr(event_points, '_enabled_event_config', lambda _host: enabled(observer_agent))
     handler = _Handler({'prompt': 'normal', 'conversation_id': 'c-1'})
     http_handlers.handle_ask(handler, server, lambda: 'config-fault-1')
     assert handler.replies == [(202, {'request_id': 'config-fault-1', 'status': 'queued'})]

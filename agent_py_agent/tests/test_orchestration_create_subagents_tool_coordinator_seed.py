@@ -11,6 +11,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
+
 
 # 这些用例拿 MagicMock 当 agent；建子代理时会按 agent.home_paths.owner_home_dir 写任务进度，MagicMock 当路径用时是
 # 相对路径 "MagicMock/..."。每条测试先切到自己的临时目录，免得写进仓库根（conftest 的仓库树防线会让这种测试报错）。
@@ -26,7 +28,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         """交付物标签里的斜杠不是绝对路径，不能误拦截 coordinator seed。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent.subagents.workspace_root = Path("/Users/example/my-sample_app")
@@ -57,7 +59,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         """显式 coordinator seed 只创建一个根节点。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -89,7 +91,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         """模型把 root coordinator 误写成 worker 时，工具层不从自然语言目标纠偏。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = (
@@ -122,7 +124,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         """显式给统一 child 创建工具时，工具层按结构化能力纠偏为 coordinator。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -149,7 +151,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         """用户说小傻妞可再找小小傻妞时，代码层不靠自然语言把 worker 改成 coordinator。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = (
@@ -179,7 +181,7 @@ class TestCreateSubagentsToolCoordinatorSeed:
         """用户说小傻妞必要时找小小傻妞时，role=child 不靠自然语言变 coordinator。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "请组织小傻妞协作完成；每个小傻妞如果需要，可以再找小小傻妞帮忙。"
@@ -212,7 +214,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
         """items 内显式 children 会让当前 item 成为 coordinator 计划。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "请派小傻妞研究市场；每个小傻妞可以找小小傻妞帮忙。"
@@ -249,7 +251,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
         """显式给统一 child 创建工具时，role=worker 按带队节点创建。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
         mock_agent._current_user_prompt = "请让小傻妞分别研究市场、竞争和策略。"
@@ -287,7 +289,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
         """role 是结构化字段；display name 误填到 role 时不再靠中文名字兜底纠错。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -313,7 +315,7 @@ class TestCreateSubagentsToolCoordinatorPlan:
         """正确结构是 role 放模板 ID，agent_name 放展示名。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-        mock_agent = MagicMock()
+        mock_agent = local_mock_agent()
         mock_agent.config.enable_subagents = True
         mock_agent.config.max_subagents = 10
 
@@ -875,7 +877,10 @@ class TestResourceScopePolicyNormalizationPerSeq269:
         from types import SimpleNamespace
 
         from agent_py_agent.agent.tooling.action_policy import ActionDecision
-        from agent_py_agent.agent.tooling.executor import _invoke_with_operation_policy
+        from agent_py_agent.agent.tooling.executor import (
+            ToolExecutorRequest,
+            _invoke_with_operation_policy,
+        )
         from agent_py_agent.agent.tooling.models import (
             BaseTool,
             EffectResolverPolicy,
@@ -948,6 +953,7 @@ class TestResourceScopePolicyNormalizationPerSeq269:
             source_protocol="test",
             arguments={"run_id": "r-1"},
         )
+        request = ToolExecutorRequest(call=call, **vars(request))
         outcome = _invoke_with_operation_policy(
             request,
             call,

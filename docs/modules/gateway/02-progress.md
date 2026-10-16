@@ -1712,3 +1712,5 @@ UNKNOWN恢复二次审查：结算/重开统一核验原活跃attempt、TaskRun�
 ## 2026-10-15 认证需要用户处理的后台通知
 
 认证明确拒绝的首次宿主事实独立于普通结果 `local/none` 静默：precheck、NO和后台LLM共用原 owner/thread/task/HostActor，finalization 前把义务冻结原 Wake。已有公开LLM回执可复用，否则仅走原零工具模型表达；实际外发前再核原来源、当前代次/撤销、active任务与原job状态。未发缓存重投必须在原 BackgroundClaim 内，业务和认证不重跑；已发回执只补canonical，后续换代不会重复外发。既有wake重投期限耗尽沿原quarantine及queued claim/finish CAS收失败片，不能抢其它活跃claim、复活终态、停计划或删除凭据。通知开关默认开启，关闭后原义务退休而不回落业务。详见 [模块交接](../../tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md)。
+
+2026-10-16 CI 基线：请求 owner 冻结读者与写者统一支持规范 local/user、local/group；仍拒绝未知 main、非规范路径和身份冲突。身份写入成功后不能在恢复时误报损坏；见 test_request_owner_roundtrip。

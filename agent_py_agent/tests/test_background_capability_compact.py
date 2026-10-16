@@ -7,6 +7,7 @@ import pytest
 
 from agent_py_agent.agent.conversation import background_execution as execution
 from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+from agent_py_agent.tests.support.ci_host_context_fixtures import bind_local_task
 from agent_py_agent.tests.test_decision_capability_consumer import provider
 from agent_py_agent.tests.test_decision_settings import patch
 from agent_py_agent.tests.test_subagent_capability_compact import (
@@ -22,6 +23,7 @@ from agent_py_agent.tests.test_subagent_capability_compact import (
 # 函数用途: 运行一个可复用 task 身份的后台业务片，保留完整模型和 Compact 调用用于断言。
 def run_slice(fixture, request):
     store = fixture.agent.conversation_store
+    bind_local_task(fixture.agent, request.thread_id, request.task_id)
     return execution.run_background_turn_with_compact(
         execution.BackgroundExecutionDependencies(agent=fixture.agent, store=store,
             prepare_run=partial(_run_params, request=request, agent=fixture.agent)),
@@ -74,6 +76,7 @@ def test_background_runtime_binding_preserves_original_host_rejection(capability
             bindings.append(binding)
             return False
 
+    bind_local_task(fixture.agent, request.thread_id, request.task_id)
     params = _run_params(thread.thread_id, request=request, agent=fixture.agent, thread=thread)
     params.conversation_task_binding_callback = RejectBinding()
     with pytest.raises(RuntimeError, match="执行身份无法可靠保存"):

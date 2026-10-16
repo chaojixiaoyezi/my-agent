@@ -19,6 +19,8 @@ from agent_py_agent.agent.agent_core.tool_runtime_ledger import write_boundary_w
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.registry_invoke import (
     AuthorizedToolDispatchRequest,
+    RegistryToolInvokeRequest,
+    _request_local_tool_for_invocation,
     _tool_params_with_runtime_boundary,
 )
 from agent_py_agent.agent.tooling.write_boundary import (
@@ -70,6 +72,7 @@ def test_install_key_alone_keeps_unscoped_writes_unscoped(tmp_path):
 def test_shell_and_terminal_get_install_dir_as_read_only(tmp_path):
     boundary = {
         "forbidden_write_roots": [str(tmp_path / "control")],
+        "locked_files": [str(tmp_path / "locked")],
         RUNTIME_INSTALL_ROOTS_KEY: [str(tmp_path / "runtime")],
         "allowed_write_roots": [str(tmp_path / "work")],
     }
@@ -78,7 +81,15 @@ def test_shell_and_terminal_get_install_dir_as_read_only(tmp_path):
             tool_name=tool_name, tool=SimpleNamespace(), tool_params={"action": "status"},
             workspace_root=tmp_path, write_boundary=boundary,
         ))
-        assert params["__sandbox_protected_write_paths"] == [str(tmp_path / "control"), str(tmp_path / "runtime")]
+        assert params["__sandbox_protected_write_paths"] == [str(tmp_path / "locked"), str(tmp_path / "runtime")]
+        # 普通 forbidden 根仍传给 request-local handler，不能混成不可覆盖的精确锁，也不能丢失。
+        process = SimpleNamespace(workspace_root=tmp_path)
+        tool = SimpleNamespace(shell_tool=process) if tool_name == "terminal_session" else process
+        request = RegistryToolInvokeRequest(tool_name, {}, {}, tmp_path, None, None, boundary)
+        scoped = _request_local_tool_for_invocation(tool, request=request, workspace_roots=None)
+        scoped_process = scoped.shell_tool if tool_name == "terminal_session" else scoped
+        assert scoped_process._sandbox_forbidden_write_roots == (tmp_path / "control",)
+        assert not hasattr(process, "_sandbox_forbidden_write_roots")
 
 
 def test_full_access_admin_keeps_external_writes_but_not_the_running_install(tmp_path, monkeypatch):

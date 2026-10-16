@@ -283,6 +283,8 @@ def test_streamed_thinking_completion_is_not_replayed_after_answer() -> None:
         effective_on_chunk=sink,
     )
     state = SimpleNamespace(
+        agent=SimpleNamespace(),
+        call_id="thinking-fixture",
         tools=None,
         tool_choice=None,
         messages=None,

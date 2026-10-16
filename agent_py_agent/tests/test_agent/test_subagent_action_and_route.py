@@ -537,7 +537,8 @@ def test_subagent_capability_route_turns_owner_scope_violation_into_gap_without_
 
         assert report.records[0].status == "GAP"
         assert report.records[0].reasons == ["CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE"]
-        assert report.records[0].request_scope["scope_resolution"]["rejected_paths"] == [str(host_root)]
+        # 路径裁决保存规范真实路径；macOS 的 /var 临时目录也是 /private/var 的别名。
+        assert report.records[0].request_scope["scope_resolution"]["rejected_paths"] == [str(host_root.resolve())]
         assert next(item for item in routed.capability_requests if item.id == request.id).status == "GAP"
         assert routed.capability_grants == []
         assert routed.capability_gaps[0].constraints["route_rejection_code"] == "CAPABILITY_PATH_OUTSIDE_OWNER_SCOPE"
@@ -575,7 +576,7 @@ def test_lifecycle_rejects_direct_out_of_owner_grant_as_defense_in_depth():
                 ),
             )
 
-        assert raised.value.decision.rejected_paths == (str(host_root),)
+        assert raised.value.decision.rejected_paths == (str(host_root.resolve()),)
         reloaded = agent.subagents.load(task.id)
         assert reloaded.capability_requests[0].status == "OPEN"
         assert reloaded.capability_grants == []

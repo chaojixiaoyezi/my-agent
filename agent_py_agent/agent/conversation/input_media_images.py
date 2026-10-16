@@ -6,7 +6,9 @@ import io
 
 from .input_media import InputMediaError
 
+# 入站图片默认累计解码像素预算，多帧图片合计核验。
 DEFAULT_IMAGE_PIXELS = 40_000_000
+# 入站图片最多解码的帧数，防止动图占满处理资源。
 MAX_IMAGE_FRAMES = 256
 
 

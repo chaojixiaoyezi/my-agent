@@ -2946,3 +2946,15 @@ agent_py_agent/tests/
 ```
 
 关键职责：`required_user_action` 只读取原工具记录与凭据代次，持久义务仍属于原 Wake；授权继续由原 owner/actor/root/job/origin 决定。生命周期与HTTP直接回归入口见下方凭据文件条目。
+
+本轮 CI 合同修复新增长期测试入口：
+
+```text
+agent_py_agent/tests/
+|-- support/ci_authenticated_gateway.py    # 经原Gateway凭据与会话事实构造可信客户端
+|-- support/ci_host_context_fixtures.py    # 冻结原run/owner/actor的测试宿主身份
+|-- test_recursive_host_actor.py          # canonical子孙谱系与跨owner/外部缺身份负例
+`-- test_request_owner_roundtrip.py       # 已接受owner的读写往返与拒绝式路径校验
+docs/tasks/
+`-- CI_BASELINE_REPAIR_20261016.md         # 上轮main CI失败分组、真实修复与验证边界
+```

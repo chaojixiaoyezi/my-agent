@@ -7,8 +7,12 @@ auth_enabled=false 关闭模式、gateway HTTP 中间件。
 
 from __future__ import annotations
 
-from agent_py_agent.agent.auth import Action, AuthManager, AuthMiddleware, Permission, Role
+from agent_py_agent.agent.auth import Action, AuthManager, Permission, Role
 from agent_py_agent.agent.auth.models import build_permission, infer_role
+from agent_py_agent.tests.support.ci_authenticated_gateway import (
+    authenticated_headers,
+    authenticated_middleware,
+)
 
 # ---------------------------------------------------------------------------
 # Role 推断测试
@@ -159,49 +163,50 @@ class TestAuthManagerAuthorize:
 class TestAuthMiddleware:
     """测试 HTTP 鉴权中间件。"""
 
-    def test_no_headers_defaults_to_admin(self) -> None:
+    def test_only_authenticated_host_defaults_to_admin(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
-        uid, ch = mw.extract_identity({})
+        mw = authenticated_middleware(tmp_path, mgr)
+        assert mw.extract_identity({}) == ("anonymous", "external")
+        uid, ch = mw.extract_identity(authenticated_headers(tmp_path))
         assert uid == "admin"
         assert ch == "chat"
 
-    def test_feishu_headers(self) -> None:
+    def test_feishu_headers(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
-        uid, ch = mw.extract_identity({"X-User-Id": "ou_123", "X-Channel": "feishu"})
+        mw = authenticated_middleware(tmp_path, mgr)
+        uid, ch = mw.extract_identity(authenticated_headers(tmp_path, user="ou_123", channel="feishu"))
         assert uid == "ou_123"
         assert ch == "feishu"
 
-    def test_qq_headers(self) -> None:
+    def test_qq_headers(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
-        uid, ch = mw.extract_identity({"X-User-Id": "777", "X-Channel": "qq"})
+        mw = authenticated_middleware(tmp_path, mgr)
+        uid, ch = mw.extract_identity(authenticated_headers(tmp_path, user="777", channel="qq"))
         assert uid == "777"
         assert ch == "qq"
 
-    def test_admin_header_user_in_feishu(self) -> None:
+    def test_admin_header_user_in_feishu(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
-        p = mw.get_permission({"X-User-Id": "admin", "X-Channel": "feishu"})
+        mw = authenticated_middleware(tmp_path, mgr)
+        p = mw.get_permission(authenticated_headers(tmp_path, user="admin", channel="feishu"))
         assert p.role == Role.ADMIN
 
-    def test_permission_check_allowed(self) -> None:
+    def test_permission_check_allowed(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
+        mw = authenticated_middleware(tmp_path, mgr)
         ok, perm, status, _ = mw.check_permission(
-            {"X-User-Id": "admin", "X-Channel": "feishu"},
+            authenticated_headers(tmp_path, user="admin", channel="feishu"),
             Action.READ_TASK,
             target_user_id="anyone",
         )
         assert ok is True
         assert status == 200
 
-    def test_permission_check_forbidden(self) -> None:
+    def test_permission_check_forbidden(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
+        mw = authenticated_middleware(tmp_path, mgr)
         ok, perm, status, body = mw.check_permission(
-            {"X-User-Id": "ou_123", "X-Channel": "feishu"},
+            authenticated_headers(tmp_path, user="ou_123", channel="feishu"),
             Action.WRITE_TASK,
             target_user_id="ou_456",
         )
@@ -209,30 +214,39 @@ class TestAuthMiddleware:
         assert status == 403
         assert "forbidden" in body["error"]
 
-    def test_require_admin_allowed(self) -> None:
+    def test_require_admin_allowed(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
-        ok, _, status, _ = mw.require_admin({"X-User-Id": "admin", "X-Channel": "feishu"})
+        mw = authenticated_middleware(tmp_path, mgr)
+        ok, _, status, _ = mw.require_admin(authenticated_headers(tmp_path, user="admin", channel="feishu"))
         assert ok is True
         assert status == 200
 
-    def test_require_admin_denied(self) -> None:
+    def test_require_admin_denied(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=True)
-        mw = AuthMiddleware(mgr)
-        ok, _, status, body = mw.require_admin({"X-User-Id": "ou_123", "X-Channel": "feishu"})
+        mw = authenticated_middleware(tmp_path, mgr)
+        ok, _, status, body = mw.require_admin(authenticated_headers(tmp_path, user="ou_123", channel="feishu"))
         assert ok is False
         assert status == 403
         assert "管理员权限" in body["message"]
 
-    def test_auth_disabled_bypasses_all(self) -> None:
+    def test_auth_disabled_bypasses_all(self, tmp_path) -> None:
         mgr = AuthManager(admin_user_id="admin", auth_enabled=False)
-        mw = AuthMiddleware(mgr)
+        mw = authenticated_middleware(tmp_path, mgr)
         ok, _, status, _ = mw.check_permission(
-            {"X-User-Id": "anyone", "X-Channel": "feishu"},
+            authenticated_headers(tmp_path, user="anyone", channel="feishu"),
             Action.ADMIN_QUERY,
         )
         assert ok is True
         assert status == 200
+
+
+    def test_unsigned_or_wrong_credential_cannot_claim_admin(self, tmp_path) -> None:
+        mw = authenticated_middleware(tmp_path, AuthManager(admin_user_id="admin", auth_enabled=True))
+        for headers in ({"X-User-Id": "admin", "X-Channel": "chat"},
+                        {"X-Gateway-Token": "wrong-test-token", "X-User-Id": "admin", "X-Channel": "feishu"}):
+            assert mw.extract_identity(headers, "127.0.0.1") == ("anonymous", "external")
+            allowed, _permission, status, _body = mw.require_admin(headers, "127.0.0.1")
+            assert not allowed and status == 403
 
 
 class TestMiddlewareRequireHandlerHelpers:

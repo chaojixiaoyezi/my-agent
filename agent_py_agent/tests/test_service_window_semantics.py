@@ -39,6 +39,7 @@ from agent_py_agent.agent.subagents.runner_result_state import (
     _apply_structured_failure_state,
 )
 from agent_py_agent.agent.subagents.service_window import service_window_remaining_seconds
+from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
 
 
 # LLM: 测试装配只传终态通知实际所需的四项能力；缺少的测试端口显式为 None，不添加生产兼容入口。
@@ -174,7 +175,7 @@ def test_create_tool_passes_service_window_into_created_run(monkeypatch, tmp_pat
     # 建子代理会按 agent.home_paths.owner_home_dir 写任务进度；MagicMock 当路径用时是相对路径
     # "MagicMock/..."，不切目录就会写进仓库根目录（导出目录里没有 .gitignore，架构守卫会报 MagicMock 产物）。
     monkeypatch.chdir(tmp_path)
-    mock_agent = MagicMock()
+    mock_agent = local_mock_agent()
     mock_agent.config.enable_subagents = True
     mock_agent.config.max_subagents = 10
     mock_agent.subagents.workspace_root = Path("/tmp/project")

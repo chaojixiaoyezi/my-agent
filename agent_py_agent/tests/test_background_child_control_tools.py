@@ -28,6 +28,7 @@ from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.subagents.role_templates import DIRECT_CHILD_CONTROL_TOOLS
+from agent_py_agent.tests.support.ci_host_context_fixtures import bind_local_task
 
 _CHILD_WAKE = "subagent_runner_finished"
 _CHILD_FACING_REQUESTS = {
@@ -42,14 +43,21 @@ _CHILD_FACING_REQUESTS = {
 
 
 @pytest.mark.parametrize("profile", sorted(_CHILD_FACING_REQUESTS))
-def test_child_facing_profiles_carry_every_direct_child_control(profile) -> None:
+def test_child_facing_profiles_carry_every_direct_child_control(profile, tmp_path) -> None:
     decision = background_tool_policy_decision(request=_CHILD_FACING_REQUESTS[profile])
 
     assert decision.profile == profile
     assert set(DIRECT_CHILD_CONTROL_TOOLS) <= set(decision.allowed_tools)
     assert len(decision.allowed_tools) == len(set(decision.allowed_tools))
-    # 每个可见工具都有给模型的用途说明；list_agents 的说明写明只读、不等待。
-    assert [tool for tool in decision.allowed_tools if tool not in CONTROL_ACTION_DESCRIPTIONS] == []
+    # 控制提示只描述管理动作；完整模型目录的说明由真实注册表声明，扩展工具不必重复登记控制文案。
+    assert set(DIRECT_CHILD_CONTROL_TOOLS) <= CONTROL_ACTION_DESCRIPTIONS.keys()
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"),
+        tmp_path / "workspace",
+    )
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=decision.allowed_tools)
+    assert set(DIRECT_CHILD_CONTROL_TOOLS) <= set(snapshot.available_tool_names)
+    assert all(runtime.model_spec.description for runtime in snapshot.runtimes)
     lines = background_control_action_lines(request=_CHILD_FACING_REQUESTS[profile])
     assert f"- list_agents: {CONTROL_ACTION_DESCRIPTIONS['list_agents']}" in lines
 
@@ -87,8 +95,10 @@ def test_lifecycle_wake_run_can_use_list_agents(tmp_path) -> None:
         AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), execution_mode="local_unmanaged"),
         tmp_path / "service-root",
     )
+    thread = agent.conversation_store.threads.get_or_create({"channel": "chat", "channel_conversation_id": "child-wake"})
+    bind_local_task(agent, thread.thread_id, "task-1")
     params = _run_params(
-        "thread-1", BackgroundRunRequest(thread_id="thread-1", task_id="task-1", reason=_CHILD_WAKE), agent,
+        thread.thread_id, BackgroundRunRequest(thread_id=thread.thread_id, task_id="task-1", reason=_CHILD_WAKE), agent,
     )
     snapshot = agent.tools.runtime_snapshot(allowed_tools=params.allowed_tools, run_id=params.run_id)
 

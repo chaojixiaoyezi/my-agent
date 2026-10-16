@@ -1182,6 +1182,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_CAPABILITY.value,
         recovery_hint="工具不可用；查看 ToolManifest，换可执行工具或申请能力。",
     ),
+    "SKILL_FEEDBACK_UNAVAILABLE": ErrorContract(
+        code="SKILL_FEEDBACK_UNAVAILABLE",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前方法版本、任务来源或学习存储无法核验；停止登记，按当前授权与任务状态核对，不自动确认内容。",
+    ),
     "SKILL_SNAPSHOT_UNAVAILABLE": ErrorContract(
         code="SKILL_SNAPSHOT_UNAVAILABLE",
         category="capability",

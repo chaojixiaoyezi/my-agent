@@ -15,8 +15,11 @@ from ..user_space.owner_resolver import OwnerIdentity
 from .skill_learning_store import SkillLearningStore
 from .skill_snapshot import skill_content_sha256
 
+# 单次技能投递全部资源的累计字节预算，不授予接收方额外权限。
 MAX_TRANSFER_BYTES = 8 * 1024 * 1024
+# 单次技能投递最多包含的资源文件数，包含声明文件。
 MAX_TRANSFER_FILES = 128
+# 单次技能投递最多包含的技能数，仍由原安装确认与配额决定接收。
 MAX_TRANSFER_SKILLS = 100
 
 

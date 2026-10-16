@@ -13,8 +13,13 @@ from agent_py_agent.agent.gateway_parts import plugin_command_service as module
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 from agent_py_agent.agent.plugin_management import PluginManagement
 from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_channel_identity
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+from agent_py_agent.tests.support.ci_authenticated_gateway import (
+    authenticated_headers,
+    authenticated_middleware,
+)
 from agent_py_agent.tests.test_gateway_plugin_commands import Handler
 
 
@@ -30,10 +35,21 @@ def host(tmp_path):
     return SimpleNamespace(config=AgentConfig(gateway_per_user_owner_scoping=True), home_paths=home_paths(tmp_path))
 
 
+# LLM: 这是宿主已完成 owner 解析后的内部控制 DTO，resolved_owner 是权威事实；正文 metadata 不授予管理员。
+# 函数用途: 为命令服务测试提供明确管理员或普通用户范围，保留私聊结构字段。
 def _scope(channel="feishu", admin=False):
-    owner = OwnerIdentity("local", "main", "main") if admin else OwnerIdentity(channel, "users", "alice")
+    owner = OwnerIdentity.local_main() if admin else OwnerIdentity.provider_user(channel, "alice")
     return GatewayControlScope(user_id="alice", channel=channel, conversation_id="session-a",
-                               metadata={"message_id": "im-message-1"}, resolved_owner=owner)
+                               metadata={"message_id": "im-message-1", "channel_chat_type": "p2p"}, resolved_owner=owner)
+
+
+# LLM: 保留原 Handler 的读写接口，来源验证和身份解析全部交给真实中间件；不使用总权限门替身。
+# 函数用途: 构造带当前隔离宿主凭据的内存 HTTP 请求，身份来自请求头。
+def _authenticated_handler(root, body, identity=("alice", "feishu")):
+    handler = Handler(body, user=identity[0])
+    handler._auth_middleware = authenticated_middleware(root)
+    handler.headers = authenticated_headers(root, user=identity[0], channel=identity[1])
+    return handler
 
 
 def _run(host, text, scope=None):
@@ -57,11 +73,11 @@ def test_im_routes_to_the_same_management_service_with_host_parameters(host, mon
         return {"ok": True, "message": "第一行\n第二行", "request_id": kwargs["request_id"]}
 
     monkeypatch.setattr(PluginManagement, "command", execute)
-    result = _run(host, text, _scope(channel))
+    result = _run(host, text, _scope(channel, admin=True))
     context, actual_text, kwargs = seen[0]
     assert actual_text == text
     assert (context.actor_id, context.channel, context.conversation_id) == ("alice", channel, "session-a")
-    assert context.owner.identity == _scope(channel).resolved_owner and context.is_admin is False
+    assert context.owner.identity == OwnerIdentity.local_main() and context.is_admin is True
     expected = PluginManagement(context).catalog().revision
     assert kwargs["revision"] == expected and kwargs["request_id"]
     assert result.kind == "plugins" and result.ok and result.message == "第一行\n第二行"
@@ -71,21 +87,23 @@ def test_im_routes_to_the_same_management_service_with_host_parameters(host, mon
 @pytest.mark.parametrize("text", ["/plugins install sample.zip", "/plugins configure demo -f config.json",
                                  "/plugins enable demo", "/plugins disable demo", "/plugins remove demo",
                                  "/plugins update demo sample.zip"])
-def test_non_admin_mutations_are_rejected_with_visible_and_structured_code(host, text):
+def test_non_admin_mutations_are_rejected_with_visible_and_structured_code(host, monkeypatch, text):
+    execute = Mock(side_effect=AssertionError("非管理员不能抵达插件服务"))
+    monkeypatch.setattr(PluginManagement, "command", execute)
     spoofed = replace(_scope(), metadata={"is_admin": True, "owner_id": "main", "actor": "admin"})
     result = _run(host, text, spoofed)
-    assert result.ok is False and result.error_code == "PLUGIN_PERMISSION_DENIED"
-    assert "错误码：PLUGIN_PERMISSION_DENIED" in result.message
-    assert result.to_dict()["error_code"] == "PLUGIN_PERMISSION_DENIED"
+    assert result.ok is False and result.error_code == "COMMAND_ADMIN_REQUIRED"
+    assert result.message == "当前身份或入口不能使用此命令。输入 /help 查看可用命令。"
+    assert result.to_dict()["error_code"] == "COMMAND_ADMIN_REQUIRED"
+    execute.assert_not_called()
     assert not (host.home_paths.root / "owners" / "providers" / "feishu" / "users" / "alice").exists()
 
 
 @pytest.mark.parametrize("text", ["/plugins", "/plugins help install", "/plugins list", "/plugins list --enabled",
                                  "/plugins list --bad", "/plugins@missing help"])
-def test_im_read_results_match_tui_for_the_same_action(host, monkeypatch, text):
-    im = _run(host, text)
-    handler = Handler({"conversation_id": "session-a"})
-    monkeypatch.setattr(module, "resolve_gateway_scope_owner", lambda *_: _scope().resolved_owner)
+def test_im_read_results_match_tui_for_the_same_action(host, text):
+    im = _run(host, text, _scope(admin=True))
+    handler = _authenticated_handler(host.home_paths.root, {"conversation_id": "session-a"}, ("local-agent", "chat"))
     tui_catalog = module.plugin_http_response(handler, SimpleNamespace(agent=host), handler.body)
     tui_body = {**handler.body, "catalog_revision": tui_catalog["catalog"]["revision"],
                 "plugin_request_id": im.request_id or "tui-1"}
@@ -146,11 +164,8 @@ def test_confirmation_preview_and_confirm_are_not_rewritten(host, monkeypatch):
 
 @pytest.mark.parametrize("entry", ["ask", "control"])
 def test_im_http_entries_use_durable_conversation_control_instead_of_the_old_shortcut(host, monkeypatch, entry):
-    handler = Handler({"conversation_id": "session-a", "prompt": "/plugins list",
+    handler = _authenticated_handler(host.home_paths.root, {"conversation_id": "session-a", "prompt": "/plugins list",
                        "command": "/plugins list", "metadata": {"message_id": "im-message-1"}})
-    monkeypatch.setattr(http_handlers, "require_trusted_source", lambda _: False)
-    monkeypatch.setattr(http_handlers, "_request_channel", lambda _: ("alice", "feishu"))
-    monkeypatch.setattr(http_handlers, "_request_identity", lambda _: ("alice", None))
     seen = []
 
     def persistent(_handler, _server, **kwargs):
@@ -318,18 +333,18 @@ def test_http_control_receipt_replays_plugin_text_without_resubmitting(host, tmp
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths
 
-    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=True), tmp_path)
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=True,
+                                    my_agent_home=str(tmp_path / "home")), tmp_path)
+    # 预置已完成登录的隔离绑定记录；本用例验证回执重放，不改变或绕过首次密码流程。
+    bind_admin_channel_identity(agent.home_paths.root, "feishu", "alice")
     server = SimpleNamespace(agent=agent, paths=gateway_paths(agent))
-    monkeypatch.setattr(http_handlers, "require_trusted_source", lambda _: False)
-    monkeypatch.setattr(http_handlers, "_request_channel", lambda _: ("alice", "feishu"))
-    monkeypatch.setattr(http_handlers, "_request_identity", lambda _: ("alice", None))
     execute = Mock(return_value={"ok": True, "message": "插件原服务的纯文本输出。"})
     monkeypatch.setattr(PluginManagement, "command", execute)
     body = {"conversation_id": "session-a", "command": "/plugins list", "prompt": "/plugins list",
             "metadata": {"message_id": "im-message-1", "channel_chat_type": "p2p"}}
     replies = []
     for _ in range(2):
-        handler = Handler(body)
+        handler = _authenticated_handler(agent.home_paths.root, body)
         if entry == "ask":
             http_handlers.handle_ask(handler, server, Mock(side_effect=AssertionError("不能创建模型任务")))
         else:
@@ -345,7 +360,7 @@ def test_http_control_receipt_replays_plugin_text_without_resubmitting(host, tmp
 def test_unconfirmed_service_exception_preserves_original_request_instead_of_retrying(host, monkeypatch):
     execute = Mock(side_effect=RuntimeError("private-secret-path"))
     monkeypatch.setattr(PluginManagement, "command", execute)
-    result = _run(host, "/plugins list")
+    result = _run(host, "/plugins list", _scope(admin=True))
     assert not result.ok and result.error_code == "PLUGIN_COMMAND_OUTCOME_UNKNOWN"
     assert result.request_id and f"/plugins status {result.request_id}" in result.message
     assert "private-secret" not in result.message and execute.call_count == 1

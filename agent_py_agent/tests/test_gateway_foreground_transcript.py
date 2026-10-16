@@ -41,8 +41,8 @@ def _foreground(tmp_path):
     return agent, writer, store, thread, request
 
 
-# LLM: 所有事件经真实 Gateway writer 的净化/排序入口；候选最终段保持活动，不能预写结果来掩盖去重问题。
-# 函数用途: 发出思考、过程说明、工具结果和一段尚未最终提交的回复。
+# LLM: 候选使用完整 LF 行和未完成尾段，符合累计净化仅发布安全完整行的合同；不预写 final 掩盖去重问题。
+# 函数用途: 发出真实 writer 事件，让完整候选行可见而尾段仍等待最终提交。
 def _emit_work(writer):
     writer.write_thinking_delta("先检查")
     writer.write_thinking("先检查现有文件", duration_seconds=2)
@@ -50,7 +50,7 @@ def _emit_work(writer):
     progress = {"round": 1, "call_index": 0, "tool": "read_file"}
     writer.write_progress({**progress, "phase": "started", "detail": "src/main.py"}, "")
     writer.write_progress({**progress, "phase": "completed", "ok": True, "output": "完整正文"}, "")
-    writer.write_model("最终回复的半句")
+    writer.write_model("最终回复的半句\n尚未提交的下一行")
     writer.flush()
 
 
@@ -84,7 +84,7 @@ def test_live_and_canonical_final_converge_without_duplicate_or_active_candidate
         assert _consume_gateway_background_snapshot(client, "session", runtime, [None], set(), [0])
     if live_prefix == "all":
         before = runtime.store.snapshot()
-        assert [block.text for block in before.active_blocks if block.role == "assistant"] == ["最终回复的半句"]
+        assert [block.text for block in before.active_blocks if block.role == "assistant"] == ["最终回复的半句\n"]
         assert {block.role for block in before.stable_blocks} == {"user", "thinking", "assistant", "tool"}
         assert before.stable_blocks[0].role == "user"
     rows = _commit(writer, store, thread)
@@ -131,16 +131,16 @@ def test_original_page_skips_both_live_and_committed_foreground(tmp_path):
 
 def test_steering_discards_uncommitted_candidate_and_confirms_exact_input(tmp_path):
     agent, writer, _, thread, _ = _foreground(tmp_path)
-    writer.write_model("插话前半句")
+    writer.write_model("插话前半句\n尚未提交的下一行")
     writer.flush()
     writer.begin_active_turn_input(("input-1",))
     writer.complete_active_turn_input(("input-1",), client_messages=(("input-1", "先看第二份"), ("other", "不能出现")))
-    writer.write_model("按补充要求继续")
+    writer.write_model("按补充要求继续\n尚未提交的下一行")
     writer.flush()
     runtime = TuiRuntime("observer")
     runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"])
     snap = runtime.store.snapshot()
-    assert [b.text for b in snap.active_blocks if b.role == "assistant"] == ["按补充要求继续"]
+    assert [b.text for b in snap.active_blocks if b.role == "assistant"] == ["按补充要求继续\n"]
     assert [b.text for b in snap.stable_blocks if b.role == "user"] == ["先看第二份"]
 
 

@@ -42,7 +42,7 @@ def test_two_tui_inputs_reach_running_background_before_any_compaction(tmp_path,
     GatewayTaskBindingWriter(waiting, "request-b").bind_conversation_claim(thread.thread_id)
     port = _free_port()
     client = GatewayChatClientAgent(SimpleNamespace(), SimpleNamespace(gateway_port=port), tmp_path / "ws",
-                                    [tmp_path / "ws"], SimpleNamespace())
+                                    [tmp_path / "ws"], agent.home_paths)
     ingress, wires, targets = [], [], []
 
     # LLM: 仅替换供应商生成；消息经过真 HTTP、原输入账本、后台 core 和提交确认，不改被测运行结果。

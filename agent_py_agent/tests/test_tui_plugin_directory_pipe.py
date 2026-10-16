@@ -10,6 +10,7 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
+from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.plugin_command_catalog import PluginCommandCatalog
 from agent_py_agent.cli.chat_parts import rendering
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
@@ -27,9 +28,12 @@ def test_native_keybindings_refresh_accept_stash_and_submit_original_revision(
     initial = PluginCommandCatalog("scope", plugins=(_plugin(),))
     current = initial
 
+    token = ensure_local_client_credential(tmp_path / "host-data")
+
     # G3 回归：mock 下移到本机假 Gateway，让真实 HTTP 传输与凭据分流参与目录和命令派发。
     def respond(path, headers, payload):
         assert path == "/client/plugins"
+        assert headers.get_all("X-Gateway-Token") == [token]
         return plugin_command_responder(lambda: current)(path, headers, payload)
 
     stub = gateway_stub_factory(respond)

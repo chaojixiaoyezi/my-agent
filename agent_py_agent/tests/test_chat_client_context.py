@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.tests.support.ci_authenticated_gateway import seed_gateway_credential
+
 pytestmark = pytest.mark.usefixtures("gateway_client_credential")
 
 
@@ -59,6 +61,7 @@ def test_gateway_chat_client_resolves_owner_runtime_without_full_agent(
 
     home = tmp_path / "home"
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    seed_gateway_credential(home)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
     args = SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root="")
@@ -87,6 +90,7 @@ def test_gateway_chat_clients_in_different_projects_share_one_owner_service(
     first_workspace.mkdir()
     second_workspace.mkdir()
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    seed_gateway_credential(home)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
 
@@ -127,6 +131,7 @@ def test_scoped_gateway_chat_clients_share_base_gateway_but_keep_owner_runtime(
 
     home = tmp_path / "home"
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    seed_gateway_credential(home)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
 
@@ -278,6 +283,7 @@ def test_scoped_thin_tui_idle_ask_uses_owner_identity_without_workspace_override
 
     home = tmp_path / "home"
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    seed_gateway_credential(home)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
     client = make_gateway_chat_client(

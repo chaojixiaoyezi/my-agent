@@ -230,12 +230,14 @@ def test_idle_status_uses_owner_model_choice_without_changing_active_request(mon
     assert agent.config.model_name == "gateway-placeholder"
 
 
-def test_schedule_list_honors_limit(monkeypatch):
+def test_schedule_list_honors_limit(tmp_path, monkeypatch):
     from agent_py_agent.agent.scheduler import tool as schedules
     monkeypatch.setattr(schedules, "_job_projection", lambda job, **kwargs: job)
     repository = SimpleNamespace(list_jobs=lambda: ([{"job_id": str(i)} for i in range(6)], []),
                                  active_runs_by_job=lambda: ({}, []))
-    tool = schedules.ScheduleTool.__new__(schedules.ScheduleTool)
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    tool = schedules.ScheduleTool(SimpleNamespace(home_paths=home_paths(tmp_path / "home"), _current_run_params=None))
     result = tool._execute(repository, "list", {"limit": 2})
     payload = json.loads(result.output)
     assert len(payload["jobs"]) == 2

@@ -10,7 +10,9 @@ from typing import Any, Literal
 
 from .feishu_media import extract_feishu_content, post_content_block
 
+# 引用可见树最多访问的节点数，限制复杂卡片的纯投影成本。
 MAX_VISIBLE_NODES = 4096
+# 引用可见树最多遍历的层数，不递归隐藏身份或回调字段。
 MAX_VISIBLE_DEPTH = 32
 _KNOWN_TYPES = frozenset({'text', 'post', 'image', 'file', 'audio', 'media'})
 _DISPLAY_FIELDS = frozenset({

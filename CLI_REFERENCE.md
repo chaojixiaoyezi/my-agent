@@ -302,7 +302,7 @@ Ctrl+C
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
 | `audit-log` | 查询审计日志 | `--cleanup` 时写回 | 否 |
-| `update` | 自更新:git pull 最新代码 + pip 刷依赖(像 通道运行时 update) | 否 | 否 |
+| `update` | 自更新；受管安装使用 `update --package <新包.run>`，开发源码入口按原 git/pip 更新 | 否 | 否 |
 | `config-set` | 设置一个配置项(白名单内,如飞书凭证),保留注释原子写回 | 是(写配置文件) | 否 |
 | `config-get` | 读取一个配置项当前值(敏感字段脱敏) | 否 | 否 |
 

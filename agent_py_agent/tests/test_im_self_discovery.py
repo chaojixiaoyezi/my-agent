@@ -47,12 +47,9 @@ def _discover(agent, **kwargs):
 @pytest.mark.parametrize('kind', ['main', 'user', 'group'])
 def test_modes_status_and_manifest_share_owner_authority(tmp_path, kind):
     if kind == 'group':
-        from agent_py_agent.tests.test_group_authorization import _allow
         from agent_py_agent.tests.test_group_shared_credentials import _group_case
         ctx = _group_case(tmp_path, actor='ou_actor_a')
-        agent, raw = ctx.agent, ctx.raw
-        actor = agent._current_run_params.host_channel_actor
-        _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
+        agent = ctx.agent
     else:
         agent = _agent(tmp_path, kind=kind)
     execute_approval_mode_operation(agent.home_paths, 'set', 'ask', authorization_host=agent)

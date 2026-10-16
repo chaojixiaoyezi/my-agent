@@ -3,7 +3,7 @@
 
 锁定：子代理整合续跑（subagent_integration）和其它后台 profile 的候选目录里都有 package_build、package_install，并带中文动作说明；
 本机管理员主代理按这份目录生成的续跑工具快照里两个工具都在（第 8 步那次的快照里没有，连续 TOOL_UNAVAILABLE 后回合被停）；
-续跑仍然没有 tool_search；非管理员 owner 没注册这两个工具，目录里的名字不授予任何东西；进了续跑必需集合的工具不再默认收起
+续跑继承当前主链的发现入口；非管理员 owner 没注册这两个工具，目录里的名字不授予任何东西；进了续跑必需集合的工具不再默认收起
 （已知代价），skill_summarize 仍然收起。
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ def test_the_subagent_integration_continuation_can_build_and_install(tmp_path, m
     request = BackgroundToolPolicyRequest(reason="subagent_runner_finished", config=agent.config)
     decision = background_tool_policy_decision(agent.config, request=request)
     assert decision.profile == "subagent_integration" and set(decision.allowed_tools) >= _PACKAGE_TOOLS
-    assert "tool_search" not in decision.allowed_tools, "后台续跑照旧不搜工具，所以要直接列进目录"
+    assert {"list_tools", "tool_search"} <= set(decision.allowed_tools), "续跑保留当前自我发现入口，目录本身仍不授权"
     snapshot = agent.tools.runtime_snapshot(allowed_tools=list(decision.allowed_tools))
     assert all(snapshot.runtime(name) is not None for name in _PACKAGE_TOOLS), "续跑工具快照里两个工具都在"
     lines = background_control_action_lines(agent.config, request=request)

@@ -1,4 +1,4 @@
-# LLM: 此工具只能声明当前任务采用或查本owner托管状态，不能提供human权威、修改质量、确认候选或跨owner读写。
+# LLM: 此工具只能记录当前任务采用或查本owner状态；写入沿原operation幂等/skill资源，不能提供human确认或跨owner读写。
 # 模块用途: 为模型提供结构化方法采用回执，质量结果仍由用户控制/可靠验证事实登记。
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import json
 from ..tooling.models import (
     BaseTool,
     EffectResolverPolicy,
+    IdempotencyPolicy,
+    ResourceScopePolicy,
     ToolHandlerOutcome,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -23,7 +25,14 @@ from .skill_search_tool import _snapshot_for
 class SkillFeedbackTool(BaseTool):
     model_spec = ToolModelSpec(name='skill_feedback',description='确实采用本轮已授权的自学Skill时登记adopted；此声明不会增加有效性评分。status查看本owner状态。用户结果反馈通过/skills learned feedback，正式内容确认不能由此工具执行。',
         input_schema={'type':'object','properties':{'operation':{'type':'string','enum':['adopted','status']},'skill_id':{'type':'string'}},'required':['operation','skill_id'],'additionalProperties':False})
-    runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy('mutating'))
+    # LLM: adopted会写原owner学习账，沿统一operation幂等与准确skill逻辑资源，不授内容确认或跨owner来源。
+    # 常量用途: 补全原工具写入声明，使执行器沿原操作账去重和锁定资源。
+    runtime_policy = ToolRuntimePolicy(
+        effect_resolver=EffectResolverPolicy('mutating'),
+        idempotency_policy=IdempotencyPolicy('operation'),
+        resource_scopes=ResourceScopePolicy(mode='from_arguments', parameter_names=('skill_id',),
+            parameter_kinds={'skill_id': 'logical'}, resource_domains={'skill_id': 'skill_learning'}),
+    )
 
     # LLM: 绑定owner Agent，不构造第二份存储或授权。
     # 函数用途: 保存当前宿主供每次调用核验。

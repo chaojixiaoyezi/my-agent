@@ -830,7 +830,7 @@ def test_main_and_child_request_paths_capture_forced_partition_changes(thread_ke
                             conversation_store=SimpleNamespace(threads=SimpleNamespace(load=load)))
     state = SimpleNamespace(agent=agent, params=SimpleNamespace(task_attributes={thread_key: "fixture-thread"}),
         tools=_TOOLS, messages=_two_turn_messages(None, "新轮思考"), on_chunk=None, tool_rounds=1,
-        system_instruction="稳定规则", first_token_timeout_seconds=1)
+        system_instruction="稳定规则", first_token_timeout_seconds=1, call_id="fixture-model-call")
     choices = [ToolChoice.auto(), ToolChoice.none("natural"), ToolChoice.auto(),
                ToolChoice.required(), ToolChoice.specific("read_file"), ToolChoice.auto()]
     for choice in choices:

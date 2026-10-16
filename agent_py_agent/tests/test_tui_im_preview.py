@@ -87,7 +87,7 @@ def test_group_requires_direct_bot_mention(mentions, allowed):
     adapter._resolve_bot_open_id = lambda: 'ou_bot'
     seen=[]
     adapter.on_message(seen.append)
-    payload={'event':{'message':message,'sender':{'sender_id':{'open_id':'ou_sender'}}}}
+    payload={'event':{'message':message,'sender':{'sender_type':'user','sender_id':{'open_id':'ou_sender'}}}}
     adapter._handle_feishu_event(payload)
     assert bool(seen) is allowed
     message['chat_type']='p2p'
@@ -215,5 +215,5 @@ def test_group_post_webhook_uses_provider_message_type():
     content={'zh_cn':{'title':'','content':[[{'tag':'at','user_id':'ou_bot'}, {'tag':'text','text':'测试群消息'}]]}}
     adapter._handle_feishu_event({'event':{'message':{'message_type':'post','chat_type':'group',
         'message_id':'om_post','chat_id':'oc_test','content':json.dumps(content)},
-        'sender':{'sender_id':{'open_id':'ou_test'}}}})
+        'sender':{'sender_type':'user','sender_id':{'open_id':'ou_test'}}}})
     assert len(seen)==1 and '测试群消息' in seen[0].content

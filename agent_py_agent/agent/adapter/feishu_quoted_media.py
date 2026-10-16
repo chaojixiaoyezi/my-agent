@@ -12,6 +12,7 @@ from ..command_catalog import system_slash_command_name
 from .feishu_quoted_content import extract_quoted_content
 from .protocol import IncomingMessage, provider_message_reference
 
+# 单条引用正文最多展示的字符数，不改变媒体或身份授权事实。
 MAX_QUOTED_TEXT_CHARS = 16000
 _REASONS = {
     'FEISHU_QUOTED_MEDIA_AUTH_UNAVAILABLE': '宿主飞书应用认证暂不可用，未读取引用资料。',

@@ -11,7 +11,9 @@ from typing import Any
 
 from .feishu_quoted_media import FeishuQuotedMediaError
 
+# 单次引用最多输出的已核验转发成员数，包含根消息。
 MAX_QUOTED_MEMBERS = 64
+# 引用成员最多向下遍历的层数，根层为0。
 MAX_QUOTED_MEMBER_DEPTH = 16
 
 

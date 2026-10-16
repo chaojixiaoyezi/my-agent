@@ -485,7 +485,10 @@ def test_executor_reference_reaches_real_gateway_confirmation(tmp_path, monkeypa
     params = SimpleNamespace(effective_on_chunk=SimpleNamespace(request_permission=consumer),
         request_id="integration", cancellation_token=None, runtime_rejected_actions=[],
         runtime_approved_actions=[], tool_runtime_snapshot=snapshot)
-    request = SimpleNamespace(params=params, tool_rounds=1, actor="model")
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    agent = SimpleNamespace(home_paths=home_paths(tmp_path / "home"))
+    request = SimpleNamespace(agent=agent, params=params, tool_rounds=1, actor="model")
     monkeypatch.setattr(round_execution, "_closed_admission_execution", lambda *_args: None)
     monkeypatch.setattr(round_execution, "_approval_description", lambda *_args: "gate_probe")
     monkeypatch.setattr(round_execution, "_owner_grant_key", lambda *_args: "gate_probe:mode=write")

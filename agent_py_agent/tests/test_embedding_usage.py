@@ -330,6 +330,7 @@ def _vector_views(owner_host, monkeypatch, stub):
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.gateway_parts import model_profile_service
     from agent_py_agent.agent.gateway_parts.control_service import (
+        GatewayControlScope,
         execute_gateway_conversation_control,
     )
     from agent_py_agent.cli.chat_parts.control_runtime import _command_text
@@ -345,7 +346,13 @@ def _vector_views(owner_host, monkeypatch, stub):
     im_command = parse_conversation_control("/model vector", reject_unknown_slash=True)
     tui_text = _command_text(parse_conversation_control("/model vector", reject_unknown_slash=True))
     tui_command = parse_conversation_control(tui_text, reject_unknown_slash=True)
-    return [execute_gateway_conversation_control(owner_host, None, command, None) for command in (im_command, tui_command)]
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    home = owner_host.home_paths
+    owner = (OwnerIdentity.local_main() if home.owner_provider == "local" else
+             OwnerIdentity.provider_user(home.owner_provider, home.owner_id.rsplit("/", 1)[-1]))
+    scope = GatewayControlScope("fixture-user", "chat", "vector-view", resolved_owner=owner)
+    return [execute_gateway_conversation_control(owner_host, None, command, scope) for command in (im_command, tui_command)]
 
 
 def test_admin_vector_view_shows_usage_numbers_without_any_text(host, monkeypatch, stub):  # noqa: F811  （host 是复用的 fixture）
