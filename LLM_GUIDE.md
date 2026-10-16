@@ -1,3 +1,7 @@
+2026-10-15 群监控授权按用户收敛：主用`/group 监控 @某人|全群`，全群含后续实际成员，仅监控有额外门；assistant.configure退出该门而原owner/admin/签名身份保护保持。缺名监控展示可从原完整成员投影补索引，失败不阻断。新用法待本轮发布；见[群合同](docs/design/IM_GROUP_GOVERNANCE.md)。
+
+2026-10-15 飞书原生图片输入实施中：复用TUI已有input_media与原生后端，飞书准确owner下载、真实格式/有界解码及原请求冻结后携图；后台转交沿原输入与子代理显式授权，模型卡增加模态声明。当前未发布/部署，验收与边界见[图片合同](docs/design/FEISHU_NATIVE_IMAGES.md)。
+
 2026-10-15 群凭据复用：群新卡默认本群共享，先request_credentials find准确url，有可用引用直接web_fetch；本人账号优先，认证失败不换别人，用户主动撤销后才可选群内其它凭据。旧task卡不会自动共享；本人明确要求才share。权限仍认原owner/actor/实时成员及网络边界，开关在capability配置；参见[凭据合同](docs/design/IM_CREDENTIAL_COLLECTION.md)。
 
 2026-10-15 凭据持续使用候选：新填凭据默认保存后不自动过期，可明确拒绝/主动撤销；卡片填写仍30分钟，登录Cookie/Token缓存仍有限。旧finite记录不猜原意、不静默延长，原owner/actor/root/job/origin边界不变。明确HTTP401和网络/权限失败分开，静默监控需用户处理通知沿原收尾链和原Wake/outbox接入，统一严格gate与双端工件分别保留证据；见[凭据收集合同](docs/design/IM_CREDENTIAL_COLLECTION.md)。

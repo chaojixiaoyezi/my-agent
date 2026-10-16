@@ -37,6 +37,7 @@ def test_unit_derived_from_key_suffix():
     assert unit_for_key("foo_ms") == "毫秒"
     assert unit_for_key("tool_read_max_chars") == "字符"
     assert unit_for_key("input_media_max_bytes") == "字节"
+    assert unit_for_key("input_image_max_pixels") == "像素"
     assert unit_for_key("compact_landmark_max_tokens") == "tokens"
     assert unit_for_key("memory_compact_auto_trigger_percent") == "%"
     assert unit_for_key("cli_audit_cleanup_days") == "天"
@@ -93,7 +94,7 @@ def test_readers_exclude_definition_normalization_registration_files():
     assert registry["memory_curator_interval_seconds"].reader == "agent/memory_store/curator_models"
     assert registry["memory_resume_auto_context_mode"].reader == "agent/memory_archive/resume_context"
     assert registry["log_level"].reader == "agent/settings/services/runtime_config_env"
-    assert registry["api_base"].reader == "agent/settings/model_profiles"
+    assert registry["api_base"].reader == "agent/gateway_parts/model_control_cards"
 
 
 def test_readers_do_not_depend_on_file_walk_order(monkeypatch):
@@ -108,9 +109,17 @@ def test_readers_do_not_depend_on_file_walk_order(monkeypatch):
     metadata.field_readers.cache_clear()
     try:
         assert metadata.field_readers() == forward
-        assert forward["api_base"] == ("settings", "agent/settings/model_profiles")
+        assert forward["api_base"] == ("gateway_parts", "agent/gateway_parts/model_control_cards")
     finally:
         metadata.field_readers.cache_clear()
+
+
+def test_equal_reference_counts_use_stable_path_order():
+    from agent_py_agent.agent.settings.parameter_metadata import _reader_for
+
+    rows = [("agent/zeta", 5), ("agent/alpha", 5)]
+    assert _reader_for("sample_field", {"sample_field": dict(rows)}, {}) == ("zeta", "agent/zeta")
+    assert _reader_for("sample_field", {"sample_field": dict(reversed(rows))}, {}) == ("zeta", "agent/zeta")
 
 
 def test_owner_module_is_top_level_without_slash():

@@ -1,5 +1,5 @@
-# LLM: 原生消息保存调用、时间顺序及用户输入内部身份；身份不外发，也不成为权限的第二事实源。
-# 模块用途: 定义主/子代理共用的原生历史记录类型，供后端翻译、Compact 和缓存续接使用。
+# LLM: 原生消息保存调用、顺序与用户/宿主媒体来源；source身份不外发、不授权，媒体原件仍归owner内容寻址文件。
+# 模块用途: 定义主子孙共用的原生历史与宿主事件附件，供后端翻译、Compact和缓存续接使用。
 from __future__ import annotations
 
 """Provider-neutral history containers for canonical tool calls and results.
@@ -56,14 +56,13 @@ class CompactionSummary:
     provider_compaction: str = ""
 
 
-# LLM: RuntimeFactsTurn is a chronological provider-visible input item. Unlike UserTurn it is
-# host-produced and cannot authorize work. source is an open host field, never parsed from text;
-# Compact must retain the latest surviving snapshot for each source, including the legacy empty source.
-# 类用途: 按来源保存某次调用前的运行事实；来源只用于变化比较和摘要回收，不外发或赋权。
+# LLM: 宿主事件不冒充用户原话，media仅原输入授权投影；source不外发/赋权，Compact保留带图项及各来源最新快照。
+# 类用途: 按来源保存宿主事实和准确原附件；后台任务正文仍是宿主事件，不变成用户文字。
 @dataclass(frozen=True)
 class RuntimeFactsTurn:
     text: str
     source: str = ""
+    media: tuple[dict[str, Any], ...] = ()
 
 
 # LLM: AssistantTurn 是原生工具历史的单一 assistant 事实；content_blocks 只保存后端白名单清洗后的有序块，不能直接作为用户正文。

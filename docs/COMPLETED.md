@@ -1,3 +1,5 @@
+2026-10-15 源码实现：飞书真实图片接原生媒体链、自动委派/后台/子孙原输入授权和模型卡模态声明；群额外授权只管监控，中文单入口支持准确人/全群及未来成员，缺名监控补原索引，provider失败分阶段可见。62 文件 1653 项联合回归通过，严格守卫通过，进入冻结发行，未发布或更新服务，不把真实只读群信息/姓名刷新当作视觉整链通过。见[图片合同](design/FEISHU_NATIVE_IMAGES.md)及[群合同](design/IM_GROUP_GOVERNANCE.md)。
+
 2026-10-15 首次普通 Gateway 持久输入入口（源码修复已完成，真实租户待验）：修复凭据申请未晋升 TaskLink、前台 claim 与持久 task 同值误比较及 scope 故障误报存储问题。沿原 promotion、typed writer、执行目标、RuntimeDB 和输入/Wake，冻结当前 core attempt；OAuth authorize 条件晋升，普通用户 status 只认 canonical owner 且不创建任务。作者与非作者独立复现同一 15 文件 343 项全通过，局部 Ruff/diff/strict code-size 通过；最终严格 gate、发布与真实客户端验收另记，不能将此条视为真实卡片收填或租户 OAuth 已通过。范围、Codex 参考及未修边界见 [交接](tasks/IM_CREDENTIAL_LIVE_ENTRY_HANDOFF.md)。
 
 2026-10-14 P01–P12 源码实现收口：默认auto继承、可信admin正常管理、本人止损、确认绝对截止/终态/typed回调、原TaskStore输入待办与一次Wake、子代理目录、自身能力发现、声明式私人认证以及受控飞书CLI/本人OAuth。原队列、owner/actor/资源权限仍唯一；32输入容量与状态投影沿原refs。正式发布身份与综合gate由发行记录补充，当前不声称已发布或真实租户OAuth已验。详见[实施合同](design/IM_UNATTENDED_IMPLEMENTATION.md)。

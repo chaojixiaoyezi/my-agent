@@ -195,6 +195,97 @@ def test_complete_members_exposes_optional_names_without_another_provider_query(
     assert len(paths) == 3 and not any('/contact/' in path for path in paths)
 
 
+@pytest.mark.parametrize('stage', ['chat_info', 'bot_membership', 'members'])
+@pytest.mark.parametrize('code', [99991672, 230002])
+def test_provider_failure_keeps_only_fixed_stage_and_integer_code(monkeypatch, stage, code):
+    from agent_py_agent.agent.adapter import feishu
+
+    monkeypatch.setattr(feishu, '_feishu_msg_api', lambda *_args, **_kwargs: {
+        'code': code, 'msg': 'Synthetic-Secret-Canary', 'data': {'token': 'Synthetic-Secret-Canary'}})
+    with pytest.raises(facts.FeishuProviderFactError) as failed:
+        facts._read('Synthetic-Secret-Canary', '/synthetic', stage=stage)
+    assert failed.value.provider_code == code and failed.value.stage == stage
+    assert failed.value.reason_code == ('FEISHU_PROVIDER_SCOPE_REQUIRED' if code == 99991672 else 'FEISHU_PROVIDER_READ_REJECTED')
+    assert 'Synthetic-Secret-Canary' not in str(failed.value)
+
+
+@pytest.mark.parametrize('failure,reason,code', [
+    (TimeoutError('Synthetic-Secret-Canary'), 'FEISHU_PROVIDER_TRANSPORT_UNAVAILABLE', None),
+    (ValueError('Synthetic-Secret-Canary'), 'FEISHU_PROVIDER_RESPONSE_INVALID', None),
+])
+def test_provider_transport_and_decode_failure_are_value_free(monkeypatch, failure, reason, code):
+    from agent_py_agent.agent.adapter import feishu
+
+    monkeypatch.setattr(feishu, '_feishu_msg_api', Mock(side_effect=failure))
+    with pytest.raises(facts.FeishuProviderFactError) as failed:
+        facts._read('synthetic', '/synthetic', stage='members')
+    assert (failed.value.reason_code, failed.value.provider_code, failed.value.stage) == (reason, code, 'members')
+    assert 'Synthetic-Secret-Canary' not in str(failed.value)
+
+
+def test_provider_http_failure_is_value_free(monkeypatch):
+    from urllib.error import HTTPError
+
+    from agent_py_agent.agent.adapter import feishu
+
+    monkeypatch.setattr(feishu, '_feishu_msg_api', Mock(side_effect=HTTPError(
+        'https://synthetic.invalid/secret', 403, 'Synthetic-Secret-Canary', {}, None)))
+    with pytest.raises(facts.FeishuProviderFactError) as failed:
+        facts._read('synthetic', '/synthetic', stage='chat_info')
+    assert (failed.value.reason_code, failed.value.provider_code, failed.value.stage) == ('FEISHU_PROVIDER_HTTP_REJECTED', 403, 'chat_info')
+    assert 'Synthetic-Secret-Canary' not in str(failed.value) and 'secret' not in str(failed.value)
+
+
+def test_safe_provider_diagnostics_reject_arbitrary_reason_stage_and_boolean_code():
+    failed = facts.FeishuProviderFactError('Synthetic-Secret-Canary', True, stage='Synthetic-Secret-Canary')
+    assert failed.safe_diagnostics() == {'reason_code': 'FEISHU_PROVIDER_UNAVAILABLE', 'provider_code': None, 'stage': ''}
+    assert 'Synthetic-Secret-Canary' not in str(failed)
+    failed.reason_code, failed.provider_code, failed.stage = 'Synthetic-Secret-Canary', {}, 'secret'
+    assert failed.safe_diagnostics() == {'reason_code': 'FEISHU_PROVIDER_UNAVAILABLE', 'provider_code': None, 'stage': ''}
+
+
+@pytest.mark.parametrize('field,value,reason', [
+    ('owner_id_type', None, 'FEISHU_GROUP_OWNER_UNVERIFIED'),
+    ('owner_id_type', 'union_id', 'FEISHU_GROUP_OWNER_UNVERIFIED'),
+    ('owner_id', '', 'FEISHU_GROUP_OWNER_UNVERIFIED'),
+    ('owner_id', ['owner'], 'FEISHU_GROUP_OWNER_UNVERIFIED'),
+    ('tenant_key', None, 'FEISHU_GROUP_TENANT_UNVERIFIED'),
+])
+def test_group_identity_failure_reports_phase_without_relaxing_authority(monkeypatch, field, value, reason):
+    def read(token, path, **kwargs):
+        result = provider_read(token, path, **kwargs)
+        if 'chat_mode' in result:
+            result[field] = value
+        return result
+
+    monkeypatch.setattr(facts, '_read', read)
+    with pytest.raises(facts.FeishuProviderFactError) as failed:
+        adapter().group_authority_snapshot('group')
+    assert failed.value.reason_code == reason and failed.value.stage == 'chat_info'
+
+
+@pytest.mark.parametrize('owner_clone', [False, True])
+def test_cold_registry_rest_factory_gets_group_facts_without_ws(monkeypatch, owner_clone):
+    from agent_py_agent.agent.delivery.registry import build_default_channel_registry
+    from agent_py_agent.agent.delivery.service import DeliveryService
+    from agent_py_agent.agent.owner_scoped_pool import _config_with_owner
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    config = AgentConfig(feishu_app_id='app_synthetic', feishu_app_secret='synthetic-only')
+    if owner_clone:
+        config = _config_with_owner(config, OwnerIdentity('feishu', 'group', 'oc_synthetic'))
+    service = DeliveryService(build_default_channel_registry(config))
+    monkeypatch.setattr(FeishuAdapter, '_get_tenant_access_token', lambda _self: 'synthetic-only')
+    monkeypatch.setattr(FeishuAdapter, 'start', Mock(side_effect=AssertionError('REST must not start WS')))
+    monkeypatch.setattr(facts, '_read', provider_read)
+    current = service.registry.adapter_for('feishu')
+    assert isinstance(current, FeishuAdapter)
+    assert current.group_authority_snapshot('group')['owner_id'] == 'owner'
+    assert service.registry.adapter_for('feishu') is current
+    FeishuAdapter.start.assert_not_called()
+
+
 @pytest.mark.parametrize('name', [None, '', '  ', {'untrusted': '不是姓名'}, 42])
 def test_missing_or_invalid_member_name_does_not_change_membership(monkeypatch, name):
     def read(token, path, **kwargs):

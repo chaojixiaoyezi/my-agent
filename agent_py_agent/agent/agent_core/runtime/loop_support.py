@@ -1,5 +1,5 @@
 # LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；包候选只消费 scoped 元数据与原能力配置，展示纯值经推荐接缝/回调传递，
-# 不能写入结果、Agent共享属性或扩大原快照权限；applied摘要由唯一前置投影承载，归档不重复它；禁止反向依赖Gateway。
+# 不能写入结果、Agent共享属性或扩大原快照权限；IM媒体恢复只取原输入快照或canonical子档；禁止反向依赖Gateway。
 # 模块用途: 为主链准备记忆、工具和续跑输入，恢复同源核验与清理事实，直接驱动唯一循环；回传本片展示与异常历史。
 
 from __future__ import annotations
@@ -990,7 +990,7 @@ def _native_initial_tool_ir_history(
     return history
 
 
-# LLM: 开头项只按结构化触发类型选：生命周期唤醒与会话间派活都是宿主事件（各带自己的来源标记），
+# LLM: 开头项只按结构化触发类型选：生命周期唤醒与会话间派活携已授权媒体，仍是宿主事件（各带自己的来源标记），
 #   普通回合才是用户轮（携带 typed media）。会话间派活的任务正文绝不落在用户原话位置。
 #   纯计算，不写状态、不发请求。
 # 函数用途: 生成当前回合的原生 IR 开头项；没有可放的内容时返回 None。
@@ -1002,7 +1002,8 @@ def _native_turn_opener(params: RuntimeLoopParams) -> object | None:
     trigger = getattr(params, "turn_trigger", None)
     source = _host_event_source(trigger)
     if source:
-        return RuntimeFactsTurn(current_turn_text(current, trigger), source=source)
+        return RuntimeFactsTurn(current_turn_text(current, trigger), source=source,
+            media=tuple((params.task_attributes or {}).get("input_media") or ()))
     if current:
         media = tuple((params.task_attributes or {}).get("input_media") or ())
         return UserTurn(_native_user_task_text(current), media=media)
@@ -1180,7 +1181,7 @@ def _reconstructed_native_initial_ir(
     )
 
 
-# LLM: capability 开关 subagent_input_media_enabled（capability_config_for_agent，只认 True）打开且本轮用户轮带 typed media 时，
+# LLM: capability 开关 subagent_input_media_enabled只认True；用户轮或原宿主事件带已授权media时生成相同只读清单，
 #   在当前回合初始 IR 末尾追加一条宿主事实（RuntimeFactsTurn，source=INPUT_MEDIA_MANIFEST_SOURCE），列出每个附件的
 #   media_ref=sha256。放在开头项、交接与插话之后，不改变 _current_turn_opener_count 的位置约定；主会话与子代理同一入口；
 #   关闭或没有附件时原样返回。纯计算，不读文件、不发请求。
@@ -1193,7 +1194,7 @@ def _with_input_media_manifest(agent: object, history: list[object]) -> list[obj
     from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
     from ...conversation.input_media import INPUT_MEDIA_MANIFEST_SOURCE, input_media_manifest_text
 
-    media = next((item.media for item in history if isinstance(item, UserTurn) and item.media), ())
+    media = next((item.media for item in history if isinstance(item, (UserTurn, RuntimeFactsTurn)) and item.media), ())
     text = input_media_manifest_text(media)
     return [*history, RuntimeFactsTurn(text, source=INPUT_MEDIA_MANIFEST_SOURCE)] if text else history
 
@@ -1260,21 +1261,64 @@ def _native_user_task_text(value: object) -> str:
     return f"# User Task\n{str(value or '')}"
 
 
+# LLM: 只在存在IM媒体来源或媒体声明时恢复；typed快照/原TaskLink/子档是权威，attrs只承载投影，旧无图执行不新增资格门。
+# 函数用途: 在构造原生请求前重核当前owner/root/attempt并恢复图片，不改原输入或子档。
+def _authorized_im_media_params(agent, params):
+    current = getattr(agent, "_current_run_params", None)
+    actor = getattr(current, "host_channel_actor", None)
+    if actor is None:
+        return params
+    context = getattr(current, "host_message_context", None)
+    link = None
+    if getattr(current, "source", "") != "gateway":
+        store = getattr(agent, "conversation_store", None)
+        if store is not None:
+            link = store.tasks.load(str(getattr(current, "task_id", "") or ""))
+    session_input = None
+    if link is None and getattr(current, "source", "") != "gateway" and getattr(agent, "conversation_store", None) is not None:
+        session = agent.conversation_store.session_tasks.load(str(getattr(current, "task_id", "") or ""))
+        if session is not None:
+            from ...conversation.host_message_context import CONTEXT_KEY
+
+            session_input = session.metadata.get(CONTEXT_KEY)
+    if context is None and not getattr(link, "host_message_context", None) and session_input is None and not (params.task_attributes or {}).get("input_media"):
+        return params
+    from ...conversation.host_message_context import media_for_run
+
+    media = media_for_run(agent, actor)
+    return replace(params, task_attributes={**(params.task_attributes or {}), "input_media": list(media)})
+
+
+# LLM: 视觉声明与native协议分开核验；仅明确非空不支持才拒绝，unknown不猜模型名，不发模型探测或自动换模型。
+# 函数用途: 对当前已恢复附件作确定输入检查，失败沿原InputMediaError退出，不进入模型重试。
+def _validate_native_input_media(agent, params, protocol):
+    if (params.task_attributes or {}).get("input_media") and getattr(protocol, "source_protocol", "") != "native":
+        from ...conversation.input_media import InputMediaError
+
+        raise InputMediaError("附件需要支持原生多模态消息的模型连接，当前连接未启用原生协议。")
+    media = (params.task_attributes or {}).get("input_media") or ()
+    declared = getattr(getattr(agent, "config", None), "model_input_modalities", ()) or ()
+    required = {ref["media_type"].split("/", 1)[0] for ref in media}
+    if media and declared and not required.issubset(set(declared)):
+        from ...conversation.input_media import InputMediaError
+
+        raise InputMediaError("当前模型档案明确不支持本次附件模态；请显式选择支持该模态的模型。")
+
+
 # LLM: Resume reconstruction has two projections: the complete owner archive restores budgets,
 # dedupe and effect state, while the explicit applied view hides only its own source refs.
 # Never use the bounded model projection as runtime authority. Exact rejection memory
 # remains the same host-owned list across automatic continuations, independent of model history.
 # Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
+# 媒体先恢复原授权；明确不支持和非native连接确定失败，未知模态不按模型名推断，也不触发模型重试。
 #   带 CARRIED_RUNTIME_ONLY_FIELD 的携带记录（回合已写进会话历史）只进运行时状态重建，不进本片 archive_tool_calls。
 # 函数用途: 从新权限快照及完整归档恢复执行状态；应用摘要由typed IR唯一承载，prior不重复；同进程carry保留原IR。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
-    params = seed.params
+    params = _authorized_im_media_params(agent, seed.params)
+    seed = replace(seed, params=params)
     from ...conversation.compact_carry import restore_native_compact_carry
 
-    if (params.task_attributes or {}).get("input_media") and getattr(seed.tool_protocol_snapshot, "source_protocol", "") != "native":
-        from ...conversation.input_media import InputMediaError
-
-        raise InputMediaError("附件需要支持原生多模态消息的模型连接，当前连接未启用原生协议。")
+    _validate_native_input_media(agent, params, seed.tool_protocol_snapshot)
     native_carry = restore_native_compact_carry(agent, params)
     carried_records: list[dict[str, object]] = list(params.carried_archive_tool_calls or [])
     # 已写进会话历史的回合记录（例如前台轮）只重建运行时状态，不进本片工具账、模型可见交接或压缩来源。

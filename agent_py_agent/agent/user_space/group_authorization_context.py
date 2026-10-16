@@ -1,5 +1,5 @@
 # LLM: 群能力门只组合原 HostChannelActor、实时 provider 事实与 tool_policy；临时持锁载体不保存第二身份或授权账。
-# 模块用途: 复核群授权并按原锁排序写入；同次认证成员的可选姓名仅补原展示索引，失败不改变授权。
+# 模块用途: 仅为群监控复核额外授权和原锁；普通配置保持原owner/admin门，供应商失败只投影固定诊断。
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +36,7 @@ class _GroupMutationLease:
     owner_home: object
     capability: str
     actor: HostChannelActor
-    snapshot: GroupAuthoritySnapshot
+    snapshot: GroupAuthoritySnapshot | None
     execution_identity: tuple
     active: bool = True
 
@@ -60,9 +60,11 @@ def group_authorization_required(home) -> bool:
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_UNAVAILABLE') from exc
 
 
-# LLM: 只认原registry认证事实并先核provider/chat；完整成员内的可选姓名再best-effort写原展示索引，不读模型身份或缓存权限。
-# 函数用途: 获取完整官方群事实，附带已有姓名不增加网络；展示写入失败不阻断已核授权。
+# LLM: 先核原registry的provider/chat；provider失败只经其safe_diagnostics输出固定reason/code/stage，不抄异常正文或响应。
+# 函数用途: 获取完整官方群事实并best-effort更新原姓名展示；失败保留安全可定位原因，不缓存权限。
 def current_group_authority(agent) -> GroupAuthoritySnapshot:
+    from ..adapter.feishu_provider_facts import FeishuProviderFactError
+
     home = agent.home_paths
     try:
         adapter = agent.delivery_service.registry.adapter_for(home.owner_provider)
@@ -70,6 +72,8 @@ def current_group_authority(agent) -> GroupAuthoritySnapshot:
         snapshot = GroupAuthoritySnapshot.from_mapping(raw)
         if snapshot.provider != home.owner_provider or snapshot.chat_id != group_chat_id(home):
             raise ValueError('provider scope mismatch')
+    except FeishuProviderFactError as exc:
+        raise GroupAuthorizationError('GROUP_AUTHORITY_UNAVAILABLE', diagnostics=exc.safe_diagnostics()) from None
     except GroupAuthorizationError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, AttributeError) as exc:
@@ -145,15 +149,15 @@ def group_operation_actor(agent, thread_id='', actor=None):
     return actor
 
 
-# LLM: provider 网络查询在原策略锁外；锁内重读唯一 grant 并覆盖同步业务写入，撤销先赢则零副作用。
-# 函数用途: 在群监控创建/恢复/手动运行及持久配置修改前检查能力；停止取消不调用此门。
+# LLM: 仅监控查provider/grant；配置租约只核原HostActor和目标身份，不读群授权或取网，不能当作监控权。
+# 函数用途: 复核监控授权或原配置调用身份，保持撤销CAS及同步锁，不让普通功能要求额外群授权。
 @contextmanager
 def group_capability_guard(agent, capability: str, *, thread_id: str = '', actor=None):
     home = agent.home_paths
     if not group_authorization_required(home):
         yield
         return
-    if capability not in GROUP_CAPABILITIES:
+    if capability not in GROUP_CAPABILITIES and capability != 'assistant.configure':
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
     _reject_foreign_active_lease(home)
     actual = group_operation_actor(agent, thread_id, actor)
@@ -164,13 +168,17 @@ def group_capability_guard(agent, capability: str, *, thread_id: str = '', actor
         yield
         return
     parent = _active_lease(home, actor=actual)
-    snapshot = parent.snapshot if parent is not None else current_group_authority(agent)
+    if capability in GROUP_CAPABILITIES and parent is not None and parent.snapshot is None:
+        raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
+    snapshot = ((parent.snapshot if parent is not None and parent.snapshot is not None else current_group_authority(agent))
+                if capability in GROUP_CAPABILITIES else None)
     with nullcontext() if parent is not None else locked_json_path(home.owner_tool_policy_json):
-        _data, block = read_group_authorization(home)
-        if actual.actor_id not in snapshot.member_ids:
-            raise GroupAuthorizationError('GROUP_AUTHORIZATION_MEMBER_REQUIRED')
-        if not member_has_group_capability(block, snapshot, actual, capability):
-            raise GroupAuthorizationError('GROUP_AUTHORIZATION_REQUIRED')
+        if capability in GROUP_CAPABILITIES:
+            _data, block = read_group_authorization(home)
+            if actual.actor_id not in snapshot.member_ids:
+                raise GroupAuthorizationError('GROUP_AUTHORIZATION_MEMBER_REQUIRED')
+            if not member_has_group_capability(block, snapshot, actual, capability):
+                raise GroupAuthorizationError('GROUP_AUTHORIZATION_REQUIRED')
         lease = _GroupMutationLease(home.owner_home_dir, capability, actual, snapshot, _execution_identity())
         token = _ACTIVE_LEASES.set((*_ACTIVE_LEASES.get(), lease))
         try:
@@ -180,8 +188,8 @@ def group_capability_guard(agent, capability: str, *, thread_id: str = '', actor
             _ACTIVE_LEASES.reset(token)
 
 
-# LLM: 最终仓库写入只能消费原持锁调用；它没有 provider/actor 上下文时不得从磁盘路径或名字猜身份。
-# 函数用途: 在人格等正式持久写入口检查当前调用已经过群能力门；初始化和读取不使用它。
+# LLM: 最终写入只消费同owner/当前执行身份租约；配置租约不含grant或provider权，不能借其获监控能力。
+# 函数用途: 保持原配置目标和监控事务的身份边界，不从路径或名称猜授权。
 def require_group_mutation_lease(home, capability: str) -> None:
     if group_authorization_required(home) and _active_lease(home, capability) is None:
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_REQUIRED')
@@ -208,7 +216,7 @@ def bind_group_control_host(base, host, scope, thread_id):
 
 
 # LLM: 调用方已核真实SDK actor/签名/卡来源；仅从签名准确thread的原origin唯一绑定恢复topic，歧义/跨owner拒绝，不读attrs/latest。
-# 函数用途: 为私聊模型表单恢复原群或话题发起人，仍由原配置grant锁内复核，cancel无需写权限。
+# 函数用途: 为私聊模型表单恢复原群或话题发起人，保存仍核原身份/签名，配置不再要求监控grant。
 def bind_group_interaction_host(base, host, payload, actor_id):
     host.delivery_service = getattr(base, 'delivery_service', None)
     if getattr(host.home_paths, 'owner_kind', '') != 'group':
@@ -229,8 +237,8 @@ def bind_group_interaction_host(base, host, payload, actor_id):
     return bind_group_control_host(base, host, scope, thread_id)
 
 
-# LLM: 最终人格仓库按实际目标文件的原布局逆解析 owner；扩大构造 owner_home 不能掩盖受管群文件，内容不作授权。
-# 函数用途: 直接仓库调用也消费群租约，普通本地/个人路径保持原行为，不读文件或联网。
+# LLM: 最终人格仓库按实际目标逆解析owner，消费的是原配置身份租约而非监控grant；扩大owner_home不能掩盖群目标。
+# 函数用途: 保持直接人格写入的原目标身份边界，本地/个人路径不变，不读群授权或联网。
 def require_group_persona_lease(target_path):
     from pathlib import Path
 

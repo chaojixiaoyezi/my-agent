@@ -1,3 +1,7 @@
+2026-10-15 群监控简化：/group仅额外控制监控，全群显式grant覆盖未来实际成员，原个人快照不扩大。原provider安全诊断直接给IM可见错误，创建者缺名沿当前群成员接口补索引；普通聊天/配置原边界保持。联合验收待收口，见[群合同](../../design/IM_GROUP_GOVERNANCE.md)。
+
+2026-10-15 飞书原生图片实施中：原owner媒体下载与payload_ready增加真实图片refs；坏图/超限沿原入站幂等错误结算。模型卡复用原模态声明，后台输入沿原HostMessageContext恢复；未发布，统一测试待验。见[图片合同](../../design/FEISHU_NATIVE_IMAGES.md)。
+
 2026-10-15 委派监控来源规范化（源码实施、待统一验收）：scheduler create继续以当前工作线程核HostActor，job来源复用原ExecutionOrigin指向聊天；计划执行与通知不改owner/topic/creator。可证同源旧job保持历史，只有未领取queued run可在原prepare上下文CAS中规范来源并记录原work/plan证明；暂停/取消/终态不复活。原strict来源门保留，不增加队列或投递旁路，见[执行策略](../../design/SCHEDULER_EXECUTION_POLICIES.md)。
 
 2026-10-15 姓名投影补线（源码已修复，待新包）：群授权读取的原完整members响应同时保留可选name，准确provider/chat校验后沿原provider索引仅补展示字段；未知名不擦已知、同名不重复写，索引失败仅记录无值异常类型，原授权及停止取消保持。5文件214项通过，真实姓名展示待新版验收；见[群治理](../../design/IM_GROUP_GOVERNANCE.md#创建者姓名展示2026-10-15源码已修复待新版验收)。

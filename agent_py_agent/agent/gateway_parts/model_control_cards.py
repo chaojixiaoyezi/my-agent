@@ -1,5 +1,5 @@
 # LLM: 模型控制复用原 owner 目录、线程选择、签名和 Delivery；记录仅保存控制身份，不保存密钥或另建任务。
-# 模块用途: 为飞书提供原会话模型选择卡和原操作者私人配置表单，所有写入仍走模型管理入口。
+# 模块用途: 为飞书提供原会话模型选择卡及私人连接/输入模态表单，声明沿原校验和模型管理入口保存，不探测供应商。
 from __future__ import annotations
 
 import hmac
@@ -25,6 +25,7 @@ from ..settings.model_profiles import (
     model_profiles_path,
     read_model_profiles,
 )
+from ..settings.model_provider_schema import validate_input_modalities
 from ..user_space.interaction_refs import interaction_key, sign_interaction_reference
 from ..user_space.owner_resolver import OwnerIdentity, home_paths_with_owner, resolve_owner_home
 from .owner_conversation_store import owner_conversation_store
@@ -105,21 +106,25 @@ def _button(label, reference, operation, profile_id='', *, submit=False):
     return result
 
 
-# LLM: 私人表单 scope_label 仍属原群/本人 owner；仅预填公开连接，密码空且使用官方 password input，不走聊天/模型。
-# 函数用途: 渲染仅原操作者可提交的模型表单；取消放在form外，不被必填校验拦住。
+# LLM: 私人表单仍属原群/本人 owner；公开模态只取原档案声明，空为未知，不从模型名/native工具协议推断；密码不预填。
+# 函数用途: 渲染原操作者的连接和输入模态表单；不探测模型，取消放在form外，不被必填校验拦住。
 def model_configuration_card(reference, scope_label, public=None):
     public = public or {}
     inputs = []
     for name, label in [('model_backend', '后端（openai_compatible/openai_responses/anthropic_compatible）'),
                         ('api_base', 'API 基础地址'), ('model_name', '模型名称'),
-                        ('model_context_window_tokens', '上下文窗口 tokens'), ('api_key', 'API Key（编辑留空保留）')]:
+                        ('model_context_window_tokens', '上下文窗口 tokens'),
+                        ('input_modalities', '输入模态（如 text, image；留空表示未知）'),
+                        ('api_key', 'API Key（编辑留空保留）')]:
         row = {'tag': 'input', 'name': name, 'label': {'tag': 'plain_text', 'content': label},
                'input_type': 'password' if name == 'api_key' else 'text'}
         if name != 'api_key':
-            row['default_value'] = str(public.get(name, ''))
+            row['default_value'] = (', '.join(validate_input_modalities(public.get(name)))
+                                    if name == 'input_modalities' else str(public.get(name, '')))
         inputs.append(row)
     return {'config': {'wide_screen_mode': True, 'update_multi': True, 'enable_forward': False},
-            'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': scope_label + '\n密钥不进入聊天、模型或记忆。'}},
+            'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': scope_label + '\n密钥不进入聊天、模型或记忆。'
+                         '\n请按模型实际能力声明输入模态：text 文字、image 图像、video 视频；留空表示未知，工具调用协议不代表图像能力。'}},
                          {'tag': 'form', 'name': 'model_configuration', 'elements': [*inputs, _button('保存', reference, 'save', submit=True)]},
                          {'tag':'action','actions':[_button('取消',reference,'cancel')]}]}
 
@@ -254,15 +259,16 @@ def _require_current(host, row):
         raise ValueError('模型卡版本已过期')
 
 
-# LLM: 写前复核原父卡未取消和目录代次，保护管理员向量端点；空key只保留同endpoint原凭据，不持锁做网络探测。
-# 函数用途: 原子保存一个本人模型与其连接，密钥不进入返回值。
+# LLM: 写前复核原父卡/目录代次和群授权；输入模态复用原validator，显式空清未知，尚有效的旧五字段卡不覆盖原声明。
+# 函数用途: 原子保存原owner的模型连接和显式模态；空key仅保留同endpoint原凭据，不发网络，密钥不进入返回值。
 def _save_model_form(host, row, fields):
     from .model_control_dispatch import model_form_parent_error
     parent_error=model_form_parent_error(host,row)
     if parent_error is not None:
         return parent_error
     allowed = {'model_backend', 'api_base', 'model_name', 'model_context_window_tokens', 'api_key'}
-    if set(fields) != allowed or any(not isinstance(value, str) for value in fields.values()):
+    if (set(fields) not in (allowed, allowed | {'input_modalities'})
+            or any(not isinstance(value, str) for value in fields.values())):
         raise ValueError('模型表单字段无效')
     guard = catalog_write_check(host)
     # LLM: 原目录锁内复核 frozen 版本并调用原向量保护，不靠预读授权。
@@ -273,6 +279,8 @@ def _save_model_form(host, row, fields):
         guard(before, after)
     profile_id = row['profile_id'] or str(uuid4())
     form = dict(fields)
+    if 'input_modalities' in form:
+        form['input_modalities'] = validate_input_modalities(form['input_modalities'])
     data = read_model_profiles(model_profiles_path(host.home_paths))
     if row['profile_id']:
         previous = data['profiles'].get(profile_id)

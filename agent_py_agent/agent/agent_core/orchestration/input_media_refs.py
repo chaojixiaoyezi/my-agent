@@ -1,6 +1,6 @@
 # LLM: create_subagents 的 input_media_refs 解析与校验（第 14 条，子代理带图）。引用只认 sha256（父代理从
 #   [INPUT_MEDIA_MANIFEST] 原样复制），宿主只在父级当前回合附件（task_attributes.input_media）和父级 transcript 的
-#   canonical 用户媒体块里查找，再按 owner 附件根与配置上限重验；解析结果写进 child 的 host-owned 任务属性
+#   canonical 用户媒体块里查找；IM当前输入先从typed原快照或canonical子档恢复，不信模型attrs，再按owner重验；解析结果写进child属性
 #   input_media，与主会话同一键、同一管线（runtime/loop_support 的用户轮 typed media）。开关关闭时带引用整批拒绝；
 #   未知/重复/格式错/超限整批拒绝；全部在创建任何 run 之前完成。不读正文、不按路径或文件名猜，attributes 里模型塞的
 #   同名键一律丢弃。改动须同步 create_policy.create_task_attributes、orchestration_tools/hierarchy_tools 的错误映射、
@@ -76,13 +76,20 @@ def _ref_issues(requested: list[str]) -> list[dict[str, Any]]:
     return issues
 
 
-# LLM: 先看父级当前回合的已验证附件（主会话：Gateway 写的 input_media；child：自己首轮的 input_media），
+# LLM: IM当前附件先按原root/attempt取宿主快照或canonical子档，attrs不能借权；本地仍按当前已验证attrs，
 #   没找全再按父级 transcript（child 用 agent_thread_id，主会话用 conversation_thread_id）的 canonical 行查；
 #   两处都没有就是 not_found。不查别的线程、不查 owner 附件根里的其它文件。
 # 函数用途: 按 sha256 在父会话里找到已验证的附件引用。
 def _available_parent_media(agent: object, wanted: list[str]) -> dict[str, dict[str, Any]]:
     attrs = current_conversation_task_attributes(agent)
-    found = {ref["sha256"]: dict(ref) for ref in attrs.get(INPUT_MEDIA_ATTR) or ()
+    current = getattr(agent, "_current_run_params", None)
+    actor = getattr(current, "host_channel_actor", None)
+    media = attrs.get(INPUT_MEDIA_ATTR) or ()
+    if actor is not None:
+        from ...conversation.host_message_context import media_for_run
+
+        media = media_for_run(agent, actor)
+    found = {ref["sha256"]: dict(ref) for ref in media
              if isinstance(ref, dict) and ref.get("sha256") in wanted}
     missing = [ref for ref in wanted if ref not in found]
     thread_id = str(attrs.get(AGENT_THREAD_ID_ATTR) or attrs.get("conversation_thread_id") or "").strip()

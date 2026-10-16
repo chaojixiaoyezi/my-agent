@@ -1,3 +1,5 @@
+2026-10-15 host_message_context持久输入媒体，IM委派将原sha交现有input_media_refs；loop_support恢复原授权，RuntimeFactsTurn携图并沿原native投影。首次无TaskLink仅准确queued/accepted SessionTask+RuntimeDB当前main可读，不从模型attrs借权或隐式向手动孩子给根全部图片。
+
 2026-10-14 结构：`orchestration/tool_grants.py`和`create_policy.py`沿父目录与显式角色生成准确工具集合；`role_contracts/role_templates`不再维护过时业务枚举。`tools/cancel.py`保留直接父子授权、免可选审批，`subagents/cancellation.py`沿原取消合同清理输入依赖，原身份/claim/进程清理不变。
 
 2026-10-13：`agent_core/runner/slice_closeout.py` 在原 worker lease 退出后结束可恢复片的 exact attempt，逻辑 run 保持非终态，未结/unknown 副作用不放开续跑。Owner 网络开关经父级上界传到 Shell/PTY/后台原 OS 沙箱，SandboxHostPolicy 只运输隐私与网络限制，不增加权限仓库。普通执行孩子默认可发现 request_credentials/feishu_cloud/send_message，各自仍守原 owner、资源许可及准确目标门。真实验收在隔离 Linux 进行。

@@ -1,5 +1,6 @@
 # LLM: 各配置域共用默认和校验；人格线程冻结同其它home开关归一为布尔，字符串false不能误开；须同步加载测试。
 #   IM 心跳秒数统一归一为有限数字，后台回执和群引用附件开关不能因字符串 false 而意外开启。
+#   飞书原生图片开关与解码像素预算在此统一校验，实际读取方沿原owner输入入口消费。
 # 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 意外启用工具反馈、回查提示或决策记录。
 """Domain-specific normalize services for config fields.
 
@@ -258,6 +259,7 @@ class GatewayFieldsService:
         ("gateway_port", 0, 65535),
         ("input_media_max_bytes", 1, None),
         ("input_media_max_files", 1, None),
+        ("input_image_max_pixels", 1, None),
     )
     _FLOAT_FIELD_SPECS = (("owner_agent_idle_seconds", 0.0, None),)
 
@@ -459,6 +461,7 @@ def _normalize_tool_bool_fields(out: dict[str, object], defaults: object) -> lis
             "computer_use_observation_enabled",
             "background_public_receipt_contract_enabled",
             "feishu_quoted_media_enabled",
+            "feishu_image_input_enabled",
             "feishu_quoted_text_enabled",
         ),
     )

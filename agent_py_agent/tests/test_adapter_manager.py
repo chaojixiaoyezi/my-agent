@@ -628,7 +628,12 @@ class TestChannelManagerRouteMessage:
         dummy = DummyAdapter()
         dummy.adapter_name = "feishu"
         dummy.workspace_root = Path("/tmp/wsroot")
-        dummy.fetch_media_to = MagicMock(return_value="om_1-img.png")
+        def download(_message_id, _media, destination):
+            from agent_py_agent.agent.common.nofollow_fs import write_bytes_atomic_beneath
+            from agent_py_agent.tests.test_feishu_native_images import image_bytes
+            write_bytes_atomic_beneath(destination, ('om_1-img.png',), image_bytes())
+            return 'om_1-img.png'
+        dummy.fetch_media_to = MagicMock(side_effect=download)
         manager.register_adapter(dummy)
         msg = IncomingMessage(channel="feishu", user_id="ou_1", content="[图片]",
                               message_id="om_1", metadata={"media": {"image_key": "k"}})

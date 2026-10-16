@@ -1,3 +1,7 @@
+2026-10-15 group_authorization/control保留原tool_policy与人工grantor；protocol/feishu_mentions仅将准确平台目标提及规范成member:ID。feishu_provider_facts共用完整成员分页，authority与显示快照形状分开；scheduler/creator_access只补显示、不授予代删。诊断固定字段到显式控制回执，无秘密或第二状态源。
+
+2026-10-15 图片输入接线：adapter/inbound_images.py负责本次图片预算与no-follow导入，conversation/input_media_images.py核真实格式/解码；manager/ingress仍是唯一准备和冻结状态机。原request_execution及HostMessageContext传递当前输入，model_control_cards沿原档案服务读写input_modalities，不建第二模型或图片权威。见[图片合同](../../design/FEISHU_NATIVE_IMAGES.md)。
+
 2026-10-15 委派监控来源规范化（源码实施、待统一验收）：scheduler create继续以当前工作线程核HostActor，job来源复用原ExecutionOrigin指向聊天；计划执行与通知不改owner/topic/creator。可证同源旧job保持历史，只有未领取queued run可在原prepare上下文CAS中规范来源并记录原work/plan证明；暂停/取消/终态不复活。原strict来源门保留，不增加队列或投递旁路，见[执行策略](../../design/SCHEDULER_EXECUTION_POLICIES.md)。
 
 2026-10-15 创建者姓名数据流：`adapter/feishu_provider_facts._group_authority_snapshot`只投影原完整open_id成员的可选姓名；`user_space/group_authorization_context.current_group_authority`先核provider/chat，再best-effort调用原`identity_store.remember_provider_display_names`。原索引非阻塞锁内保留字节前缀、关联及扩展字段，只追加变化展示快照；无名字不读、未变化不写，缺记录仅默认user投影。`scheduler/creator_access.creator_display_rows`继续读该唯一索引，名字不进入权限、owner路由或actor核验，既有关联解析语义保持；不增contact请求或另一身份库，见[群治理](../../design/IM_GROUP_GOVERNANCE.md#创建者姓名展示2026-10-15源码已修复待新版验收)。

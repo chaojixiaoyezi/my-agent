@@ -35,6 +35,7 @@ from .feishu_observations import FeishuObservationMixin
 from .feishu_render import build_outbound_payload, split_message, strip_markdown_to_plain_text
 from .feishu_typing import FeishuTypingMixin
 from .feishu_unlock_queue import FeishuUnlockQueue, FeishuUnlockResumeMixin
+from .inbound_images import InboundMediaInputError
 from .protocol import (
     FeishuEventDisposition,
     IncomingMessage,
@@ -305,16 +306,22 @@ def _send_feishu_file(
     )
 
 
-# LLM: 消息和资源 ID 都是独立 URL path 参数，不允许关闭路径；失败关闭响应，只记类型/数值状态，不输出正文或 token。
-# 函数用途: 沿原消息资源 API 获取入站附件，未完成返回 None，私有文件落盘仍由原下载器负责。
-def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str) -> bytes | None:
+# LLM: 原认证请求禁止重定向；实际读取有界，明确超限抛typed输入错误，暂态网络仍返回None，不输出正文/token。
+# 函数用途: 从原消息资源API下载有界附件；图片可使用本条剩余额度，普通文件保留原类型上限。
+def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str, *, max_bytes: int | None = None) -> bytes | None:
     """下载入站媒体 bytes;失败 None。"""
     req = urllib.request.Request(
         f"{_FEIHSU_API_BASE}/im/v1/messages/{quote(message_id, safe='')}/resources/{quote(key, safe='')}?type={kind}",
         headers={"Authorization": f"Bearer {token}"})
     try:
         with open_authenticated_request(req, timeout=30) as resp:
-            return resp.read()
+            limit = max_bytes if max_bytes is not None else MAX_IMAGE_BYTES if kind == 'image' else MAX_FILE_BYTES
+            data = resp.read(limit + 1)
+            if len(data) > limit:
+                raise InboundMediaInputError('附件大小超过本次输入上限，请压缩或减少附件后重新发送。')
+            return data
+    except InboundMediaInputError:
+        raise
     except Exception as exc:
         logger.warning('飞书媒体下载失败 error_type=%s http_status=%s', type(exc).__name__,
             exc.code if isinstance(exc, urllib.error.HTTPError) else 0)
@@ -323,9 +330,9 @@ def _fetch_feishu_resource(message_id: str, key: str, kind: str, token: str) -> 
         return None
 
 
-# LLM: 目录由 manager 的可信 owner 解析提供；原子私有写不跟随目标文件链接，失败保持异常给 durable worker 重试。
-# 函数用途: 获取飞书附件并按 0600 写入指定 owner 目录，返回安全文件名；不使用适配器共享 cwd。
-def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, token: str) -> str | None:
+# LLM: 目录由原owner解析，实际下载上限贯穿HTTP；原子私有写不跟随链接，路径失败不能降级为坏图回执。
+# 函数用途: 下载附件并按0600保存原owner目录，返回安全文件名；图片真实MIME随后由原生图片准备器验证。
+def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, token: str, *, max_bytes: int | None = None) -> str | None:
     """下载入站媒体落盘 dest_dir,返回文件名;无媒体/失败 None。"""
     if media.get("image_key"):
         key, kind, suffix = str(media["image_key"]), "image", ".png"
@@ -333,7 +340,10 @@ def _fetch_media_to_dir(message_id: str, media: dict[str, str], dest_dir: Path, 
         key, kind, suffix = str(media["file_key"]), "file", ".bin"
     else:
         return None
-    blob = _fetch_feishu_resource(message_id, key, kind, token)
+    options = {'max_bytes': max_bytes} if max_bytes is not None else {}
+    blob = _fetch_feishu_resource(message_id, key, kind, token, **options)
+    if blob == b'' and kind == 'image':
+        raise InboundMediaInputError('图片内容为空，请重新发送可读取的图片。')
     if not blob:
         return None
     name = safe_media_filename(message_id, media, key, suffix)
@@ -961,12 +971,14 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
             idempotency_key,
         )
 
-    # LLM: message_id 来自原当前消息或已核验的准确 parent；凭据只给资源 API，不写入 owner。
-    # 函数用途: 使用真实资源源消息下载附件到当前 owner 私有目录，返回原安全文件名。
-    def fetch_media_to(self, message_id: str, media: dict[str, str], dest_dir: Path) -> str | None:
+    supports_bounded_inbound_media = True
+
+    # LLM: message_id来自原当前或已核parent，max_bytes只承载宿主预算；不改变认证/重定向或owner边界。
+    # 函数用途: 使用原资源源消息有界下载到当前owner私有目录，返回安全文件名。
+    def fetch_media_to(self, message_id: str, media: dict[str, str], dest_dir: Path, *, max_bytes: int | None = None) -> str | None:
         """下载入站媒体到 dest_dir,返回文件名;无媒体/失败 None。"""
         token = self._get_tenant_access_token()
-        return _fetch_media_to_dir(message_id, media, dest_dir, token) if token else None
+        return _fetch_media_to_dir(message_id, media, dest_dir, token, max_bytes=max_bytes) if token else None
 
     # LLM: 只读取明确 message_id，不查历史或递归 root；caller 必须核验返回 exact ID/chat/deleted/topic 再下载。
     # 函数用途: 用宿主 token 单次查取被引用消息；认证失败只返回结构化原因，不暴露凭据。

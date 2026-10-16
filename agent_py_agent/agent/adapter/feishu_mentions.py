@@ -1,5 +1,5 @@
 # LLM: 群聊触发只消费供应商结构化 mention/post at 与可信 bot open_id；未知身份不得作为稳定未提及完成去重。
-# 模块用途: 共用 webhook/WS 提及裁决和命令寻址规范化，保留普通正文、其它用户与 @全员边界。
+# 模块用途: 共用webhook/WS提及裁决与命令寻址，将明确群监控授权的真实目标提及规范为准确ID，普通正文和@全员不授予权限。
 from __future__ import annotations
 
 import json
@@ -123,6 +123,33 @@ def normalize_mentions(value: object) -> list[dict[str, str]]:
             open_id = item.get("open_id", "")
         rows.append({"key": str(key or ""), "open_id": str(open_id or "")})
     return rows
+
+
+# LLM: 只规范显式/group监控控制命令中的准确平台提及，不能按显示名、正文ID前缀或模型参数猜目标；最终群权限/当前成员仍由控制入口复核。
+# 函数用途: 把真实@某人的授权参数转为原member:编号，方便用户无需查open_id；不写状态或自行授予权限。
+def group_monitor_command_target(text: str, message: dict[str, object], bot_open_id: str) -> str:
+    parts = text.split()
+    if len(parts) != 3 or parts[:2] != ["/group", "监控"]:
+        return text
+    target = parts[2]
+    candidates: set[str] = set()
+    mentions = normalize_mentions(message.get("mentions"))
+    for row in mentions:
+        if row["key"] == target and row["open_id"] not in {"", bot_open_id, "all", "@all", "@_all"}:
+            candidates.add(row["open_id"])
+    nodes, valid = _post_at_targets(message)
+    if valid:
+        for node in nodes:
+            if target != "@" + node or node in {"", bot_open_id, "all", "@all", "@_all"}:
+                continue
+            mapped = {row["open_id"] for row in mentions if row["key"] == node and row["open_id"]}
+            if mapped:
+                candidates.update(mapped)
+            elif not node.startswith("@"):
+                candidates.add(node)
+    if len(candidates) != 1:
+        return text
+    return "/group 监控 member:" + candidates.pop()
 
 
 # LLM: 原 bool API 只投影唯一结构化裁决；调用方要决定重投时必须读取 bot_mention_decision.verified。

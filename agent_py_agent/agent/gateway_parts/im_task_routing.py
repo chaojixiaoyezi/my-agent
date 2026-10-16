@@ -1,5 +1,5 @@
-# LLM: 只消费原入口回执冻结的策略，语义选择经原辅助模型返回结构化 kind；后台任务正文与状态沿原 SessionTaskStore/guidance。
-# 模块用途: 自动委派模式下经会话领域唯一派发入口创建独立工作项，原聊天只做接单回应。
+# LLM: 原入口策略与typed媒体/引用冻结到原SessionTask；转图关闭创建前拒绝，语义路由只取结构化kind，不新增权限来源。
+# 模块用途: 自动委派经唯一派发入口保存原输入并创建工作项，原聊天只做接单回应。
 from __future__ import annotations
 
 import hashlib
@@ -59,7 +59,7 @@ def _select_route(context, conversation, prompt: str) -> dict:
 
 
 
-# LLM: route只冻结派工选择；认证引用另经同一Gateway校验存原SessionTask，不进入模型attrs或孩子副本，重放必须同输入。
+# LLM: route冻结派工选择；消息引用/媒体在原SessionTask唯一快照，转图关闭须建任务前拒绝，重放必须同输入。
 # 函数用途: 冻结路由并派工，保存准确原输入位置，写原请求/线程策略并返回任务记录。
 def prepare_im_task_dispatch(context, conversation, prompt: str):
     snapshot = context.request.get(IM_DISPATCH_KEY)
@@ -77,6 +77,13 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
         raise DataCorruptionError("IM 任务路由与原请求不符")
     if marker["kind"] == "chat":
         return None
+    host_input = _message_context(context, conversation)
+    if host_input is not None and host_input.input_media:
+        from dataclasses import asdict
+
+        from ..conversation.host_message_context import require_subagent_media
+
+        require_subagent_media(context.agent, [asdict(ref) for ref in host_input.input_media])
     thread = ensure_execution_thread(context.agent, conversation.thread_id, context.request_id, kind="delegated",
                                      source_binding={key: snapshot[key] for key in ("channel", "conversation_id", "actor_id")})
     policy = {"mode": "delegated", "preference_revision": snapshot["preference_revision"],
@@ -96,25 +103,25 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
     config = capability_config_for_agent(context.agent) or CapabilityConfig()
     outcome = dispatch_owned_background_task(context.agent, source_thread_id=conversation.thread_id,
                                             target_thread=thread, goal=prompt, config=config,
-                                            host_message_context=_message_context(context, conversation))
+                                            host_message_context=host_input)
     if not outcome.ok:
         raise DataCorruptionError("IM 后台任务派发结果未确认")
     task_id = load_strict_json(outcome.output)["task_id"]
     return context.agent.conversation_store.session_tasks.load(task_id)
 
 
-# LLM: 只消费本请求认证metadata及scope，复用Gateway白名单解析；缺引用零快照，不能从prompt/attrs补恢复。
-# 函数用途: 在委派前冻结入站引用和原人工身份，不执行平台请求或新增持久写入。
+# LLM: 只消费本次认证metadata/scope及顶层input_media，按原owner重验；无引用但有图同样保存，模型attrs不作来源。
+# 函数用途: 委派前冻结唯一原输入与身份，不发平台请求或新增持久账。
 def _message_context(context, conversation):
-    if (context.request.get('metadata') or {}).get('quoted_message_references') is None:
+    if (context.request.get('metadata') or {}).get('quoted_message_references') is None and not context.request.get('input_media'):
         return None
     from ..conversation.host_actor import actor_from_scope
-    from ..conversation.host_message_context import HostMessageContext
+    from ..conversation.host_message_context import context_for_input
     from .request_execution import _gateway_message_references
 
     refs = _gateway_message_references(context.request, conversation)
     actor = actor_from_scope(context.agent, conversation.scope, conversation.thread_id, context.request_id)
-    return HostMessageContext(actor, refs)
+    return context_for_input(context.agent, actor, refs, context.request.get('input_media') or ())
 
 
 # LLM: 元数据写入原请求锁，保留租约、输入和执行身份；失败不得凭内存标记宣称已持久。

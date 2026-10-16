@@ -1,4 +1,4 @@
-# LLM: 只投影宿主已冻结的请求材料；不接收 agent，不读取文件或刷新状态，不做授权、探测、计数或发送。
+# LLM: 只投影已冻结材料，用户/宿主事件媒体同样参与模态与容量分类；不读取文件、不授权或发送。
 # 模块用途: 让真实工具轮与创建前容量检查共享原 PromptBuilder、原 IR 转换及精确原生 schema。
 from __future__ import annotations
 
@@ -271,7 +271,7 @@ def _native_input_modalities(items: object) -> tuple[str, ...] | None:
     return tuple(sorted(set(result)))
 
 
-# LLM: UserTurn 媒体是唯一新增模态事实；其余 IR 类型沿原跨模型文字可移植规则，不能把 assistant 媒体当用户输入能力。
+# LLM: UserTurn和宿主RuntimeFactsTurn的已授权媒体都参与模态判断，host来源不冒充用户原话；assistant不新增输入能力。
 # 函数用途: 分类一个 IR 项，返回需要的媒体模态或 unknown。
 def _ir_item_input_modalities(item: object) -> tuple[str, ...] | None:
     from ..backends.request_content import text_content_supported
@@ -283,7 +283,7 @@ def _ir_item_input_modalities(item: object) -> tuple[str, ...] | None:
         UserTurn,
     )
 
-    if isinstance(item, UserTurn):
+    if isinstance(item, (UserTurn, RuntimeFactsTurn)):
         values = tuple(_media_ref_input_modality(ref) for ref in item.media)
         return None if any(value is None for value in values) else tuple(sorted(set(values)))
     if isinstance(item, AssistantTurn):
@@ -327,16 +327,17 @@ def compact_request_source_supported(prepared: object, *, media_policy: str, all
                for item in getattr(prepared, "tool_ir_history", None) or ())
 
 
-# 函数用途: 单个 IR 项的压缩链放行规则；只有带媒体的 UserTurn 与文字计量规则不同。
+# LLM: 用户轮与宿主事件媒体复用原压缩策略，不能把host图片误判为纯文本容量。
+# 函数用途: 按原media_policy检查单项能否进入压缩链，不丢附件。
 def _compact_ir_item_supported(item: object, *, media_policy: str, allow_reasoning: bool) -> bool:
-    from ..backends.tool_ir import UserTurn
+    from ..backends.tool_ir import RuntimeFactsTurn, UserTurn
 
-    if isinstance(item, UserTurn):
+    if isinstance(item, (UserTurn, RuntimeFactsTurn)):
         return not item.media or media_policy != "off"
     return _text_ir_item_supported(item, allow_reasoning=allow_reasoning)
 
 
-# LLM: 本层只认可原IR合同，工具结果以原模型投影呈现；未知类型不可先经adapter过滤，UserTurn媒体保留但不可按refs量容量。
+# LLM: 本层只认可原IR合同，工具结果以原模型投影呈现；未知类型不可先经adapter过滤，用户/宿主媒体保留但不可按refs量容量。
 # 函数用途: 分类单个原生历史项，隔离同模型思考与跨模型签名的不同要求。
 def _text_ir_item_supported(item: object, *, allow_reasoning: bool) -> bool:
     from ..backends.request_content import text_content_supported
@@ -350,7 +351,7 @@ def _text_ir_item_supported(item: object, *, allow_reasoning: bool) -> bool:
 
     if isinstance(item, AssistantTurn):
         return text_content_supported(item.content_blocks, allow_reasoning=allow_reasoning)
-    if isinstance(item, UserTurn):
+    if isinstance(item, (UserTurn, RuntimeFactsTurn)):
         return not item.media
     if isinstance(item, (list, tuple)):
         return all(isinstance(result, ToolResult) for result in item)

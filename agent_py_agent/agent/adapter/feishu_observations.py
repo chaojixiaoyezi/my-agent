@@ -14,6 +14,12 @@ class FeishuObservationMixin:
         from .feishu_provider_facts import adapter_group_authority_snapshot
         return adapter_group_authority_snapshot(self, chat_id)
 
+    # LLM: 同一REST成员接口只给完整成员/姓名投影，不含群主或机器人证明，不能替代原授权或代删检查。
+    # 函数用途: 为当前群缺名创建者提供已有姓名，不申请新scope或启动WS。
+    def group_member_snapshot(self, chat_id: str) -> dict:
+        from .feishu_provider_facts import adapter_group_member_snapshot
+        return adapter_group_member_snapshot(self, chat_id)
+
     # LLM: callback 来自唯一宿主 manager，bot观察不进入人类命令、actor 或 /ask 入口。
     # 函数用途: 注册结构化机器人观察的持久入站消费者。
     def on_observation(self, callback) -> None:

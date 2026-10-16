@@ -1,3 +1,27 @@
+## 飞书图片与群监控增量（2026-10-15）
+
+```text
+|-- agent_py_agent/agent/adapter/inbound_images.py # 本次飞书图片预算、no-follow导入与永久输入失败
+|-- agent_py_agent/agent/conversation/input_media_images.py # 实际图片MIME、完整解码及累计像素/帧预算
+|-- agent_py_agent/tests/test_input_image_validation.py # 真图片、损坏、超像素/帧数及配置一致性
+|-- agent_py_agent/tests/test_feishu_native_images.py # 原owner下载/引用、冻结重投及永久错误结算
+|-- agent_py_agent/tests/test_feishu_vision_model_cards.py # 模型卡模态声明、保存、未知及签名边界
+|-- agent_py_agent/tests/test_im_input_media_delegation.py # 原输入持久化、后台/子孙授权和供应商真实图片字节
+|-- agent_py_agent/tests/test_group_monitor_mentions.py # 群监控目标真实提及、富文本、歧义和手打昵称拒绝
+|-- agent_py_agent/tests/test_group_monitor_authorization.py # 群级/个人监控授权、未来成员及原权限边界
+|-- agent_py_agent/tests/test_creator_display_refresh.py # 当前群缺名刷新、完整性、锁与creator不变
+|-- agent_py_agent/tests/test_feishu_member_completeness.py # 官方安全限流、总数/分页一致性及代删负面证明拒绝
+|-- docs/design/FEISHU_NATIVE_IMAGES.md # 飞书原生图片输入合同、依赖及验收边界
+|-- docs/tasks/FEISHU_VISION_ENTRY_HANDOFF.md # 图片入站交接
+|-- docs/tasks/FEISHU_VISION_DELEGATION_HANDOFF.md # 图片后台与子孙交接
+|-- docs/tasks/FEISHU_VISION_MODEL_CARD_HANDOFF.md # 模型模态卡片交接
+|-- docs/tasks/GROUP_MONITOR_AUTHORIZATION_HANDOFF.md # 第一期简明群监控授权交接
+|-- docs/tasks/GROUP_PROVIDER_DIAGNOSTICS_HANDOFF.md # 群事实失败安全诊断交接
+`-- docs/tasks/GROUP_CREATOR_DISPLAY_HANDOFF.md # 创建者姓名刷新交接
+```
+
+关键文件说明：图片仍由原input_media保存原件/refs，授权仍认原tool_policy及HostActor；新增模块不另建媒体、身份或权限权威。
+
 ## 群公共凭据增量（2026-10-15）
 
 ```text

@@ -11,7 +11,12 @@ from agent_py_agent.agent.adapter.feishu_quoted_media import (
 )
 from agent_py_agent.agent.adapter.protocol import feishu_to_incoming
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
-from agent_py_agent.tests.test_feishu_quoted_media import _event, _manager, _prepare
+from agent_py_agent.tests.test_feishu_quoted_media import (
+    _event,
+    _manager,
+    _prepare,
+    _small_png_bytes,
+)
 from agent_py_agent.tests.test_feishu_quoted_text import _quote_facts, _text_parent
 
 
@@ -38,8 +43,15 @@ def test_quoted_media_types_download_under_current_group_owner(tmp_path, monkeyp
     payload = _prepare(manager, _event(content='分析引用资料'))
     owner = resolve_owner_home(host.home_paths.root, OwnerIdentity.provider_group('feishu', 'oc_team'))
     paths = list((owner.home_dir / 'media' / 'input').iterdir())
-    assert len(paths) == 1 and paths[0].read_bytes() == b'own attachment'
-    assert paths[0].stat().st_mode & 0o777 == 0o600 and str(paths[0]) in payload['prompt']
+    if kind == 'image':
+        ref, = payload['input_media']
+        assert ref['media_type'] == 'image/png' and ref['path'].endswith('/' + ref['sha256'])
+        assert len(paths) == 2 and all(path.read_bytes() == _small_png_bytes() for path in paths)
+        assert ref['path'] in payload['prompt'] and all(path.parent == owner.home_dir / 'media' / 'input' for path in paths)
+    else:
+        assert len(paths) == 1 and paths[0].read_bytes() == b'own attachment'
+        assert str(paths[0]) in payload['prompt'] and 'input_media' not in payload
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths)
     assert resources == [('om_file', 'resource_key', 'image' if kind == 'image' else 'file')]
     assert len(gets) == 1 and payload['metadata']['user_id'] == 'ou_user'
     assert _quote_facts(payload)['coverage'] == 'complete'
@@ -63,6 +75,7 @@ def test_card_visible_code_links_images_keep_hidden_callback_values_out(tmp_path
     assert 'https://github.com/example/repo' in facts['content']
     assert 'HIDDEN_' not in payload['prompt'] and 'card_image' not in facts['content']
     assert facts['coverage'] == 'visible_only' and resources == [('om_file', 'card_image', 'image')]
+    assert len(payload['input_media']) == 1 and payload['input_media'][0]['media_type'] == 'image/png'
     assert len(gets) == 1  # 链接/代码仅资料，不在准备阶段 fetch/clone/execute。
 
 
@@ -110,7 +123,11 @@ def test_merged_forward_downloads_each_proven_member_from_its_exact_id(tmp_path,
     assert len(gets) == 1 and payload['metadata']['channel_chat_id'] == 'oc_team'
     assert payload['metadata']['user_id'] == 'ou_user'
     owner = resolve_owner_home(host.home_paths.root, OwnerIdentity.provider_group('feishu', 'oc_team'))
-    assert len(list((owner.home_dir / 'media' / 'input').iterdir())) == 2
+    paths = list((owner.home_dir / 'media' / 'input').iterdir())
+    assert len(paths) == 3  # 原下载文件、原图片下载及其唯一内容寻址图片。
+    assert len(payload['input_media']) == 1 and payload['input_media'][0]['media_type'] == 'image/png'
+    assert all(path.parent == owner.home_dir / 'media' / 'input' for path in paths)
+    assert sorted(path.read_bytes() for path in paths) == sorted([b'own attachment', _small_png_bytes(), _small_png_bytes()])
     assert not (host.home_paths.root / 'owners' / 'providers' / 'feishu' / 'groups' / 'oc_original_private').exists()
 
 
@@ -174,3 +191,4 @@ def test_disabled_text_does_not_expose_card_body_but_downloads_resource(tmp_path
     facts = _quote_facts(payload)
     assert facts['text_omitted'] is True and facts['content'] == ''
     assert 'TEXT_MUST_STAY_OFF' not in payload['prompt'] and resources == [('om_file', 'key', 'image')]
+    assert len(payload['input_media']) == 1 and payload['input_media'][0]['media_type'] == 'image/png'

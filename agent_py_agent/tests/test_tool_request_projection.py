@@ -151,6 +151,7 @@ def test_pure_projection_matches_real_outbound_payload_and_preserves_sources(req
     ))
     actual_tools = resolve_native_tools(host, params)
     _do_backend_generate(host.backend, materialized.prompt, SimpleNamespace(
+        agent=host, call_id="projection-provider-call",
         params=params, tools=actual_tools, tool_choice=choice, messages=actual_messages,
         on_chunk=None, first_token_timeout_seconds=0,
         system_instruction=provider_system_instruction(host.backend),

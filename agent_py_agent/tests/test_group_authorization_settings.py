@@ -21,7 +21,7 @@ from agent_py_agent.tests.test_group_authorization import _allow, _case
 from agent_py_agent.tests.test_model_profiles import profile
 
 
-def test_group_model_write_and_explicit_selection_require_grant_but_seed_does_not(tmp_path):
+def test_group_model_write_and_selection_need_no_extra_monitor_grant(tmp_path):
     agent, source, actor, raw, _calls = _case(tmp_path)
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -29,39 +29,30 @@ def test_group_model_write_and_explicit_selection_require_grant_but_seed_does_no
     assert thread_model_profile_id(agent, source.thread_id) == 'default'
     model_id = str(uuid4())
     payload = {'profile_id': model_id, 'profile': profile()}
-    with pytest.raises(GroupAuthorizationError):
-        execute_model_profile_operation(agent, 'add', payload, thread_id=source.thread_id)
-    assert not model_profiles_path(agent.home_paths).exists()
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     assert execute_model_profile_operation(agent, 'add', payload, thread_id=source.thread_id)['ok']
     assert thread_model_profile_id(agent, source.thread_id, select=model_id) == model_id
     agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
-    with pytest.raises(GroupAuthorizationError):
-        thread_model_profile_id(agent, source.thread_id, select='default')
-    assert thread_model_profile_id(agent, source.thread_id) == model_id
+    assert thread_model_profile_id(agent, source.thread_id, select='default') == 'default'
 
 
 def test_group_decision_patch_and_reset_both_gate_original_cas(tmp_path):
     agent, source, actor, raw, _calls = _case(tmp_path)
     current = execute_decision_settings_operation(agent, 'read', {}, thread_id=source.thread_id)
     payload = {'changes': {'enabled': True}, 'expected_revision': current['revision']}
-    with pytest.raises(GroupAuthorizationError):
-        execute_decision_settings_operation(agent, 'patch', payload, thread_id=source.thread_id)
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     saved = execute_decision_settings_operation(agent, 'patch', payload, thread_id=source.thread_id)
     agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
-    with pytest.raises(GroupAuthorizationError):
+    reset = execute_decision_settings_operation(agent, 'reset', {'fields': ['enabled'], 'expected_revision': saved['revision']},
+        thread_id=source.thread_id)
+    assert reset['revision'] != saved['revision']
+    assert execute_decision_settings_operation(agent, 'read', {}, thread_id=source.thread_id)['revision'] == reset['revision']
+    with pytest.raises(ValueError):
         execute_decision_settings_operation(agent, 'reset', {'fields': ['enabled'], 'expected_revision': saved['revision']},
             thread_id=source.thread_id)
-    assert execute_decision_settings_operation(agent, 'read', {}, thread_id=source.thread_id)['revision'] == saved['revision']
 
 
 def test_group_approval_policy_write_reuses_original_lock_and_preserves_grants(tmp_path):
     agent, _source, actor, raw, _calls = _case(tmp_path)
     assert execute_approval_mode_operation(agent.home_paths, 'get')['ok']
-    with pytest.raises(GroupAuthorizationError):
-        execute_approval_mode_operation(agent.home_paths, 'set', 'auto', authorization_host=agent)
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     assert execute_approval_mode_operation(agent.home_paths, 'set', 'auto', authorization_host=agent)['ok']
     with group_capability_guard(agent, 'assistant.configure'):
         pass
@@ -79,7 +70,6 @@ def test_direct_group_persona_repository_cannot_skip_final_lease(tmp_path):
     with pytest.raises(GroupAuthorizationError):
         repository.mutate(request)
     assert agent.home_paths.owner_agents_md.read_bytes() == before
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     with group_capability_guard(agent, 'assistant.configure'):
         assert repository.mutate(request)['entry_id']
     with pytest.raises(GroupAuthorizationError):
@@ -90,7 +80,6 @@ def test_group_user_config_legacy_yaml_set_and_reset_remain_forbidden(tmp_path):
     from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool
 
     agent, _source, actor, raw, _calls = _case(tmp_path)
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     tool = UserConfigTool(agent)
     for action in ('set', 'reset', 'revert'):
         outcome = tool.execute({'action': action, 'key': 'memory_compact_auto_trigger_percent', 'value': 80})
@@ -98,15 +87,15 @@ def test_group_user_config_legacy_yaml_set_and_reset_remain_forbidden(tmp_path):
 
 
 @pytest.mark.parametrize('topic', [False, True])
-def test_original_signed_group_model_form_rechecks_revocation_but_cancel_is_free(tmp_path, monkeypatch, topic):
+def test_original_signed_group_model_form_is_independent_of_monitor_revocation(tmp_path, monkeypatch, topic):
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.gateway_parts import model_profile_service
     from agent_py_agent.agent.user_space.group_authorization import (
+        GroupAuthoritySnapshot,
         GroupAuthorizationChange,
         change_group_authorization,
         read_group_authorization,
     )
-    from agent_py_agent.agent.user_space.group_authorization_context import current_group_authority
     from agent_py_agent.tests.test_im_model_cards import callback, setup, submit
 
     if topic:
@@ -116,19 +105,21 @@ def test_original_signed_group_model_form_rechecks_revocation_but_cancel_is_free
         monkeypatch.setattr(test_im_model_cards, 'GatewayControlScope',
             lambda **kwargs: scope_type(**{**kwargs, 'conversation_id': 'oc_group:thread:om_topic'}))
     base, _owner, scope, host, _thread = setup(tmp_path, monkeypatch, group=True)
+    snapshot = GroupAuthoritySnapshot('feishu', 'oc_group', 'synthetic-app', 'synthetic-tenant',
+        'ou_actor', frozenset({'ou_actor'}))
+    actor = host._current_run_params.host_channel_actor
+    block = change_group_authorization(host.home_paths, snapshot, actor,
+        GroupAuthorizationChange('allow', 0, 'monitors.create', group_wide=True))
     assert model_profile_service.execute_model_text_control(base, parse_conversation_control('/model'), scope).ok
     assert base.delivery_service.sent[0][0].target == 'oc_group'
     assert submit(base, callback(base))['ok']
-    block = read_group_authorization(host.home_paths)[1]
-    owner_actor = replace(host._current_run_params.host_channel_actor, actor_id='ou_fixture_owner')
-    change_group_authorization(host.home_paths, current_group_authority(host), owner_actor,
+    change_group_authorization(host.home_paths, snapshot, actor,
         GroupAuthorizationChange('revoke', block['revision'], grant_id=block['grants'][0]['grant_id']))
+    assert read_group_authorization(host.home_paths)[1]['grants'][0]['status'] == 'revoked'
     form = {'model_backend': 'openai_compatible', 'api_base': 'https://example.test/v1',
         'model_name': 'synthetic', 'model_context_window_tokens': '64000', 'api_key': 'synthetic-canary'}
-    with pytest.raises(GroupAuthorizationError):
-        submit(base, callback(base, decision='save', fields=form))
-    assert not model_profiles_path(host.home_paths).exists()
-    assert submit(base, callback(base, decision='cancel', fields={}))['ok']
+    assert submit(base, callback(base, decision='save', fields=form))['ok']
+    assert model_profiles_path(host.home_paths).exists()
 
 
 def test_topic_model_card_private_form_save_keeps_exact_signed_source(tmp_path, monkeypatch):
@@ -214,8 +205,8 @@ def test_manual_oauth_rechecks_after_network_and_does_not_hold_policy_lock(tmp_p
     from agent_py_agent.tests.test_model_oauth import setup
 
     agent, _source, actor, raw, _calls = _case(tmp_path)
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     setup(agent)
+    _allow(agent, raw, actor, subject=actor.actor_id)
     def network(_auth):
         block = read_group_authorization(agent.home_paths)[1]
         change_group_authorization(agent.home_paths, current_group_authority(agent), actor,
@@ -223,11 +214,10 @@ def test_manual_oauth_rechecks_after_network_and_does_not_hold_policy_lock(tmp_p
         return {'device_code': 'synthetic-device', 'user_code': 'ABCD', 'verification_uri': 'https://example.test',
             'interval': 1, 'expires_at': 9999999999}
     monkeypatch.setattr(model_oauth, 'start_device', network)
-    with pytest.raises(GroupAuthorizationError):
-        execute_model_profile_operation(agent, 'auth_start', {'provider_id': 'account'})
+    assert execute_model_profile_operation(agent, 'auth_start', {'provider_id': 'account'})['ok']
     import json
     data = json.loads(model_profiles_path(agent.home_paths).read_text())
-    assert 'device_code' not in data['providers']['account']['auth']['pending']
+    assert data['providers']['account']['auth']['pending']['device_code'] == 'synthetic-device'
 
 
 def test_persona_repository_parent_root_cannot_hide_actual_group_target(tmp_path):
@@ -239,7 +229,7 @@ def test_persona_repository_parent_root_cannot_hide_actual_group_target(tmp_path
         repository.mutate(PersonaMutationRequest(target='agents', action='add', content='不能绕过群写门', confirmed=True))
 
 
-def test_human_group_slash_is_explicit_and_default_target_is_exact_operator(tmp_path, monkeypatch):
+def test_human_group_slash_is_explicit_with_group_wide_scope(tmp_path, monkeypatch):
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.gateway_parts import model_profile_service
     from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
@@ -253,10 +243,10 @@ def test_human_group_slash_is_explicit_and_default_target_is_exact_operator(tmp_
     scope = GatewayControlScope(actor.actor_id, 'feishu', 'oc_source')
     assert execute_group_authorization_control(agent, parse_conversation_control('/group'), scope).ok
     assert read_group_authorization(agent.home_paths)[1]['grants'] == []
-    reply = execute_group_authorization_control(agent, parse_conversation_control('/group allow assistant.configure'), scope)
+    reply = execute_group_authorization_control(agent, parse_conversation_control('/group 监控 全群'), scope)
     assert reply.ok
     block = read_group_authorization(agent.home_paths)[1]
-    assert block['grants'][0]['subjects'] == {actor.actor_id: 0}
+    assert block['grants'][0]['subjects'] == {} and block['grants'][0]['scope'] == 'group'
     stranger = replace(scope, user_id='ou_member')
     denied = execute_group_authorization_control(agent, parse_conversation_control('/group allow monitors.create'), stranger)
     assert not denied.ok and denied.error_code == 'GROUP_AUTHORIZATION_NOT_AUTHORITY'
@@ -265,18 +255,18 @@ def test_human_group_slash_is_explicit_and_default_target_is_exact_operator(tmp_
     assert result.ok and read_group_authorization(agent.home_paths)[1]['grants'][0]['status'] == 'revoked'
 
 
-def test_group_model_and_decision_tool_rejections_keep_stable_permission_code(tmp_path):
+def test_group_model_and_decision_tools_need_no_monitor_authorization(tmp_path):
     from agent_py_agent.agent.capability.model_profile_tool import ManageModelsTool
     from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool
 
     agent, source, _actor, _raw, _calls = _case(tmp_path)
     tool = ManageModelsTool(agent)
     result = tool.execute({'action': 'add', 'profile': profile()})
-    assert not result.ok and result.error_code == 'GROUP_AUTHORIZATION_REQUIRED'
+    assert result.ok
     current = execute_decision_settings_operation(agent, 'read', {}, thread_id=source.thread_id)
     result = UserConfigTool(agent).execute({'action': 'decision_patch', 'changes': {'enabled': True},
         'expected_revision': current['revision']})
-    assert not result.ok and result.error_code == 'GROUP_AUTHORIZATION_REQUIRED'
+    assert result.ok
 
 
 def test_inherited_empty_group_thread_initialization_needs_no_manual_grant(tmp_path):
@@ -315,7 +305,6 @@ def test_approval_configuration_cannot_borrow_host_for_another_target(tmp_path, 
     )
 
     agent, _source, actor, raw, _calls = _case(tmp_path)
-    _allow(agent, raw, actor, capability='assistant.configure', subject=actor.actor_id)
     home = agent.home_paths
     if change in {'other_group', 'other_root'}:
         root = tmp_path / 'other-root' if change == 'other_root' else home.root

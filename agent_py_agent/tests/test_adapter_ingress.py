@@ -69,6 +69,16 @@ def _reset_ingress_backoff(manager: ChannelManager) -> None:
     )
 
 
+# LLM: 运输替身仍写真实可解码图片，不能只返回并不存在的png路径来证明图片准备成功。
+# 函数用途: 在测试owner目录保存合成小图，供原哈希/格式检查和重投用例使用。
+def _download_test_image(_message_id, _media, destination):
+    from agent_py_agent.agent.common.nofollow_fs import write_bytes_atomic_beneath
+    from agent_py_agent.tests.test_feishu_native_images import image_bytes
+
+    write_bytes_atomic_beneath(destination, ('image.png',), image_bytes())
+    return 'image.png'
+
+
 def test_route_persists_authenticated_ingress_before_media_or_gateway_io(
     tmp_path: Path,
 ) -> None:
@@ -81,7 +91,7 @@ def test_route_persists_authenticated_ingress_before_media_or_gateway_io(
     configure_gateway_client(manager, host)
     adapter = _register_dummy(manager)
     adapter.workspace_root = tmp_path / "workspace"
-    adapter.fetch_media_to = MagicMock(return_value="image.png")
+    adapter.fetch_media_to = MagicMock(side_effect=_download_test_image)
     message = _message(content="[图片]")
     message.metadata["media"] = {"image_key": "img-1"}
 
@@ -117,7 +127,7 @@ def test_route_persists_authenticated_ingress_before_media_or_gateway_io(
     completed = manager._delivery_worker.store.records()[0]
     assert completed.state == "completed"
     assert completed.gateway_payload == submitted_payload
-    assert submitted_payload == _gateway_ask_payload(submitted_message)
+    assert submitted_payload == _gateway_ask_payload(submitted_message, input_media=tuple(submitted_payload['input_media']))
 
 
 def test_transient_media_failure_stays_prepared_and_retries_before_post(
@@ -132,9 +142,11 @@ def test_transient_media_failure_stays_prepared_and_retries_before_post(
     configure_gateway_client(manager, host)
     adapter = _register_dummy(manager)
     adapter.workspace_root = tmp_path / "workspace"
-    adapter.fetch_media_to = MagicMock(
-        side_effect=[OSError("temporary media outage"), "image.png"]
-    )
+    def download(*args):
+        if adapter.fetch_media_to.call_count == 1:
+            raise OSError('temporary media outage')
+        return _download_test_image(*args)
+    adapter.fetch_media_to = MagicMock(side_effect=download)
     message = _message(content="[图片]")
     message.metadata["media"] = {"image_key": "img-1"}
     assert manager.route_message(message) is True

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
+from PIL import Image
 
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter, _fetch_feishu_resource
 from agent_py_agent.agent.adapter.feishu_quoted_media import (
@@ -21,6 +22,14 @@ from agent_py_agent.agent.path_access_policy import PathAccessPolicy
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_channel_identity
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+
+# LLM: 引用图片替身必须能被正式解码器完整读取，不靠关闭图片开关或伪png绕过图片入口。
+# 函数用途: 生成隔离测试用真实小PNG，普通文件仍使用原合成字节。
+def _small_png_bytes():
+    stream = BytesIO()
+    Image.new('RGB', (2, 2), color='red').save(stream, format='PNG')
+    return stream.getvalue()
 
 
 # LLM: 合成人类入口显式携带 provider sender_type；父消息不派生当前身份，不靠产品接受未知 sender 才通过测试。
@@ -39,8 +48,8 @@ def _parent(*, chat='oc_team', key='file_synthetic', name='example.txt'):
         'body': {'content': {'file_key': key, 'file_name': name}}}
 
 
-# LLM: 宿主 owner 解析、资源私有原子落盘和 durable prepare 保留生产实现；只替换实际供应商传输。
-# 函数用途: 构造已绑定宿主的管理器和飞书适配器，记录每次父查取与资源源消息。
+# LLM: 宿主owner/落盘/图片解码保留生产实现；资源替身接收原max_bytes并真实拒绝超限，不伪造图片格式。
+# 函数用途: 构造绑定宿主的管理器与适配器，记录准确源消息；图片给真实小PNG，普通文件保持原字节。
 def _manager(tmp_path, monkeypatch, response=None, enabled=True, text_enabled=False):
     root = tmp_path / 'home'
     root.mkdir()
@@ -59,9 +68,13 @@ def _manager(tmp_path, monkeypatch, response=None, enabled=True, text_enabled=Fa
             raise response
         return deepcopy(response if response is not None else {'code': 0, 'data': {'items': [_parent()]}})
 
-    def resource(message_id, key, kind, token):
+    def resource(message_id, key, kind, token, *, max_bytes=None):
         resources.append((message_id, key, kind))
-        return b'own attachment'
+        data = _small_png_bytes() if kind == 'image' else b'own attachment'
+        if max_bytes is not None and len(data) > max_bytes:
+            from agent_py_agent.agent.adapter.inbound_images import InboundMediaInputError
+            raise InboundMediaInputError('合成资源超过本次输入上限。')
+        return data
 
     monkeypatch.setattr('agent_py_agent.agent.adapter.feishu._feishu_msg_api', api)
     monkeypatch.setattr('agent_py_agent.agent.adapter.feishu._fetch_feishu_resource', resource)

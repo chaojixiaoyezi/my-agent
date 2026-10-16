@@ -1,6 +1,6 @@
 # LLM: 原目录保存同时轮换持久代次；pending 采用沿原锁复核，普通读不迁移落盘，密钥不进快照或公开投影。
 # 原选择读取的可选上下文捕获仅复用此次开关事实，退出清理；不能移动既有模型冻结点或成为配置缓存。
-# 模块用途: 管理主/子模型与决策入口，为自动增强提供可跨重启核对的原目录版本，不另建配置或请求路径。
+# 模块用途: 管理主/子模型与决策入口，提供原目录版本及含输入模态的公开列表，不另建配置或请求路径。
 
 from __future__ import annotations
 
@@ -237,14 +237,15 @@ def model_profile_generation_guard(agent: object, expected: ModelProfileGenerati
 
 
 # LLM: available 保持聊天可选语义，available_for 显式声明用途；OAuth 不暴露 token，不能误选 decision。
-#   默认行的窗口按 context_window_or_default 展示：部署配置留空时显示兜底 128000，不把 None 交给 TUI/IM 列表。
-# 函数用途: 提供模型和服务商的脱敏列表；决策配置可管理，但不会进入普通聊天的可选集合。
+#   默认行窗口按 context_window_or_default 展示；输入模态仅复制显式部署配置，空为未知，不能由型号或工具协议推导。
+# 函数用途: 提供模型和服务商的脱敏列表及原输入模态声明；决策配置可管理，但不会进入普通聊天的可选集合。
 def public_model_profiles(data: dict, config: object) -> dict:
     from .defaults import context_window_or_default
     from .model_oauth_schema import has_credential
 
     default = {key: getattr(config, key, "") for key in ("model_backend", "model_name")}
     default["model_context_window_tokens"] = context_window_or_default(config)
+    default["input_modalities"] = list(getattr(config, "model_input_modalities", ()) or ())
     configured = bool(default["model_backend"] and default["model_name"] and getattr(config, "api_base", ""))
     rows = []
     if configured or default["model_backend"] == "echo":

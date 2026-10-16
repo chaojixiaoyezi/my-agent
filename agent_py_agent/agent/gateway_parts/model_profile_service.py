@@ -1,6 +1,6 @@
 # LLM: 配置接口沿用可信 owner 与共享 owner_conversation_store；冷用户不能触发 Agent/后端/工具初始化，配置读写仍独立。
 # 文字 /model（IM 与 TUI 带编号形式）只做查看、会话选择和默认值，复用同一 owner/线程解析与同一写入口。
-# 模块用途: 为 TUI 菜单和聊天里的 /model 提供模型列表、保存和选择，不把密钥写入聊天队列或启动后台服务。
+# 模块用途: 为菜单和/model提供模型列表、保存与选择；列表展示原档案输入模态，未知不猜能力，不向聊天写入密钥或启动后台服务。
 
 from __future__ import annotations
 
@@ -249,9 +249,9 @@ def _choice_by_reference(listing: dict, reference: str) -> dict | None:
     return next((row for row in rows if row.get("id") == text), None)
 
 
-# LLM: 只渲染公开字段与稳定档案编号，方便填写固定引用；不渲染接口地址或密钥，列表序号仍仅供会话选择。
+# LLM: 只渲染公开字段与稳定档案编号；输入模态仅认原档案，缺省/空为未知，模型名和native工具协议不证明图像能力。
 #   默认行按结构化字段 default_source 标注：部署默认，或管理员指定的初始模型（普通用户）。
-# 函数用途: 把模型列表整理成聊天文字：当前会话模型、新会话默认、编号列表和用法。
+# 函数用途: 展示当前/默认模型、编号及显式输入模态，不暴露接口地址或密钥，不探测或改变模型选择。
 def render_model_choices(listing: dict) -> str:
     from ..settings.model_selection_status import render_model_execution_status
     rows = _selectable_choices(listing)
@@ -274,8 +274,9 @@ def render_model_choices(listing: dict) -> str:
                      if row.get("id") == "default" else ("（管理员共享）" if row.get("shared") else ""))
             provider_name = str(row.get("provider_name") or "")
             provider = f" · {provider_name}" if provider_name and provider_name != row.get("model_name") else ""
+            modalities = ', '.join(row.get('input_modalities') or ()) or '未知（未声明）'
             lines.append(f"{index}. {mark}{row.get('model_name')}{provider} · {row.get('model_context_window_tokens', '?')} tokens{label}"
-                         f" · 档案编号：{row.get('id')}")
+                         f" · 输入模态：{modalities} · 档案编号：{row.get('id')}")
         lines.append("用法：/model <编号> 选为本会话模型；/model default <编号> 设为新会话默认。")
     # 未选模型时投影给的是 TUI 菜单用语（“新增并选择”），聊天里改由上面的“未选择”和用法引导，不重复显示。
     if listing.get("warning") and not (current == "default" and not listing.get("selection_available")):

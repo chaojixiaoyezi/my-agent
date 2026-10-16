@@ -1,3 +1,5 @@
+2026-10-15 飞书原生图片：准确集成树281263885上建立`codex/feishu-native-images`，沿本任务已有共享树逐文件独占，全部子代理6.1-sol high。入站线独占adapter下载/准备/原ingress永久错误及直接测试；后台线独占HostMessageContext、原SessionTask/TaskLink输入恢复、IR媒体表达、自动委派与子孙授权及直接测试；模型线独占原模型卡/档案公开投影与直接测试。根独占图片解码校验、配置/依赖/全局文档、组合验收；各线不自行提交、部署或新开真实平台连接，冻结后统一非作者审阅。实施以[图片合同](design/FEISHU_NATIVE_IMAGES.md)为准。
+
 2026-10-15 群公共凭据：继续准确main集成树逐文件独占，子代理为6.1-sol high。群线独占task_credential_groups及矩阵；发现线独占原request_credentials工具及发现测试；根独占原存储/表单/HTTP/配置/全局文档与最终gate。非作者独立只读审阅，发行线仅仓外同源工件。源码冻结后统一验收；唯一生产配置/服务/部署由根串行操作。
 
 2026-10-15 凭据持续使用切片：根独占TTL/schema/tool、capability默认配置与全局文档/集成/发布；credential_live_preflight独占原HTTP/verification与test_task_credential_http_failures及模块交接；linux_group_release独占原调度/后台需用户处理通知及新回归，保持单outbox和原actor/topic；live_route_attribution只读参考/独立复核。子代理全部6.1-sol high；本轮不读生产凭据，不接新平台，不增加机器人连接。

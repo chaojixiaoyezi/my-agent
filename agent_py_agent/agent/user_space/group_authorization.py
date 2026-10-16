@@ -1,5 +1,5 @@
-# LLM: 群能力授权只存原 owner tool_policy.json；当前角色/成员来自 provider，模型、提示词与权限模式不能自行授予。
-# 模块用途: 保存人工明确授予、撤销及可信成员事件导致的失效，保持原 owner 策略字段和单一 CAS 权威。
+# LLM: 仅监控额外授权存原tool_policy；整群scope必须人工明确，旧成员快照不扩大；其它配置沿原owner/admin边界。
+# 模块用途: 管理群监控的全群或精确成员授权和撤销，保留原策略CAS及应用/群代次，不新增权限库。
 from __future__ import annotations
 
 import math
@@ -17,7 +17,8 @@ from ..common.json_io import (
 from ..conversation.host_actor import HostChannelActor
 from .owner_policy_seed_payloads import default_tool_policy_payload
 
-GROUP_CAPABILITIES = frozenset({'monitors.create', 'assistant.configure'})
+GROUP_CAPABILITIES = frozenset({'monitors.create'})
+_LEGACY_CAPABILITIES = GROUP_CAPABILITIES | {'assistant.configure'}
 GROUP_AUTHORIZATION_FIELD = 'group_authorization'
 _SCHEMA = 'group-authorization.v1'
 _ERRORS = {
@@ -34,10 +35,11 @@ _ERRORS = {
 # LLM: 拒绝只返回固定码与说明，不携带原策略、成员响应或底层异常正文。
 # 类用途: 向工具、人工控制与卡片统一报告可定位的群授权拒绝。
 class GroupAuthorizationError(ValueError):
-    # LLM: code 只能来自本模块合同，不改变策略或业务状态。
-    # 函数用途: 构造固定群授权错误。
-    def __init__(self, code: str):
+    # LLM: code来自本模块合同；diagnostics只由provider.safe_diagnostics生成，不抄异常正文或平台响应。
+    # 函数用途: 构造固定群授权错误及其安全诊断，不改变策略或业务状态。
+    def __init__(self, code: str, *, diagnostics=None):
         self.error_code = code
+        self.diagnostics = dict(diagnostics or {})
         super().__init__(_ERRORS[code])
 
 
@@ -77,7 +79,7 @@ class GroupAuthoritySnapshot:
 
 
 # LLM: 这只是已认证人工 slash 的结构化意图，构造本对象本身不授予权限，写入口仍核 provider 角色、成员和 CAS。
-# 类用途: 传递单次明确的授予或撤销操作，默认目标始终是精确成员。
+# 类用途: 传递明确的监控授予/撤销；group_wide为整群，all_current仅保留已发布快照语义，两者不可混用。
 @dataclass(frozen=True)
 class GroupAuthorizationChange:
     operation: str
@@ -86,6 +88,7 @@ class GroupAuthorizationChange:
     subject_id: str = ''
     all_current: bool = False
     grant_id: str = ''
+    group_wide: bool = False
 
 
 # LLM: 只能由已认证 provider 事件归一化生成；这些字段不暴露为模型工具参数，也不证明当前成员资格。
@@ -175,29 +178,34 @@ def _valid_policy(block):
         and isinstance(block['grants'], list) and all(_valid_grant(row) for row in block['grants']))
 
 
-# LLM: 授权必须绑定精确能力、成员失效版本与机器人群代次；展示文字不参与校验。
-# 函数用途: 拒绝损坏 grant，防止缺字段被当成广泛授权。
+# LLM: 旧八字段只认成员快照；新增明确scope=group且空subjects才代表整群未来成员，不把缺字段升级。
+# 函数用途: 严格核验原策略内两种授权范围，旧assistant配置记录仅可读/撤销，不再用于额外配置门。
 def _valid_grant(row):
-    if not isinstance(row, dict) or set(row) != {'grant_id', 'capability', 'subjects', 'group_epoch', 'granted_by', 'authority', 'status', 'created_at'}:
+    fields = {'grant_id', 'capability', 'subjects', 'group_epoch', 'granted_by', 'authority', 'status', 'created_at'}
+    if not isinstance(row, dict) or set(row) not in (fields, fields | {'scope'}):
         return False
     subjects = row['subjects']
+    group = set(row) == fields | {'scope'}
+    if group and (row['scope'] != 'group' or row['capability'] != 'monitors.create' or subjects != {}):
+        return False
     return (type(row['grant_id']) is str and bool(row['grant_id'])
-        and type(row['capability']) is str and row['capability'] in GROUP_CAPABILITIES
+        and type(row['capability']) is str and row['capability'] in _LEGACY_CAPABILITIES
         and type(row['status']) is str and row['status'] in {'active', 'revoked'}
         and type(row['authority']) is str and row['authority'] in {'group_owner', 'bot_inviter'}
         and type(row['granted_by']) is str and bool(row['granted_by']) and type(row['group_epoch']) is int
         and type(row['created_at']) in (int, float) and math.isfinite(row['created_at'])
-        and isinstance(subjects, dict) and bool(subjects)
+        and isinstance(subjects, dict) and (group or bool(subjects))
         and all(type(k) is str and k and type(v) is int and v >= 0 for k, v in subjects.items()))
 
 
-# LLM: 只比较本群、本应用当前事实与原授权；成员事件编号只使旧授权失效，不替代官方当前成员查询。
-# 函数用途: 在原锁内判断这位真实发起人是否有这项能力。
+# LLM: 整群授权仍要求当前实际成员及同应用/租户/群代次；旧快照继续逐人epoch，不继承未来成员。
+# 函数用途: 在原锁内按显式范围检查当前监控发起人，配置能力不经过这道附加授权。
 def member_has_group_capability(block, snapshot, actor, capability):
-    return (_same_application(block, snapshot) and actor.actor_id in snapshot.member_ids
+    return (capability in GROUP_CAPABILITIES and _same_application(block, snapshot) and actor.actor_id in snapshot.member_ids
         and any(row['status'] == 'active' and row['capability'] == capability
             and row['group_epoch'] == block['group_epoch']
-            and row['subjects'].get(actor.actor_id) == block['subject_epochs'].get(actor.actor_id, 0)
+            and (row.get('scope') == 'group'
+                 or row['subjects'].get(actor.actor_id) == block['subject_epochs'].get(actor.actor_id, 0))
             for row in block['grants']))
 
 
@@ -226,7 +234,7 @@ def _grantor_authority(home, block, snapshot, actor):
 
 
 # LLM: 仅认证人工控制调用此写入口；模型工具不暴露它。锁内复核角色、版本后修改原策略，保留其它 owner 字段。
-# 函数用途: 明确授予精确成员或当时全体真人快照，或按准确 grant_id 撤销，不修改任何业务任务。
+# 函数用途: 明确授予本群监控或精确成员、保留历史快照语法，按grant_id撤销；不修改任务所有权或业务任务。
 def change_group_authorization(home, snapshot, actor, request: GroupAuthorizationChange):
     if not isinstance(request, GroupAuthorizationChange) or not isinstance(snapshot, GroupAuthoritySnapshot):
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
@@ -250,13 +258,15 @@ def change_group_authorization(home, snapshot, actor, request: GroupAuthorizatio
         return updated
 
 
-# LLM: all_current 是授予时完整真人成员快照，后加入者不会自动获得；同编号离群/重入事件使旧 subject epoch 失效。
-# 函数用途: 在已授权人工事务内创建一条 grant，应用变化时建立新群主确认基线。
+# LLM: group_wide是显式本群当前/未来成员，all_current仍仅历史快照；二者互斥，均须原群主/邀请人和CAS核验。
+# 函数用途: 在原事务创建唯一策略中的监控授权，应用变化时建立新确认代次，不迁移旧grant范围。
 def _allow_group_capability(block, snapshot, actor, request, authority):
-    if request.capability not in GROUP_CAPABILITIES or type(request.all_current) is not bool:
+    if (request.capability not in GROUP_CAPABILITIES or type(request.all_current) is not bool
+            or type(request.group_wide) is not bool
+            or request.group_wide and (request.all_current or request.subject_id)):
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
-    subjects = snapshot.member_ids if request.all_current else frozenset({request.subject_id})
-    if (request.all_current and request.subject_id) or not subjects or not subjects <= snapshot.member_ids:
+    subjects = (frozenset() if request.group_wide else snapshot.member_ids if request.all_current else frozenset({request.subject_id}))
+    if (request.all_current and request.subject_id) or (not request.group_wide and not subjects) or not subjects <= snapshot.member_ids:
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_MEMBER_REQUIRED')
     if not _same_application(block, snapshot):
         block.update(app_id=snapshot.app_id, tenant_key=snapshot.tenant_key,
@@ -264,7 +274,7 @@ def _allow_group_capability(block, snapshot, actor, request, authority):
     block['grants'].append({'grant_id': str(uuid4()), 'capability': request.capability,
         'subjects': {key: block['subject_epochs'].get(key, 0) for key in sorted(subjects)},
         'group_epoch': block['group_epoch'], 'granted_by': actor.actor_id, 'authority': authority,
-        'status': 'active', 'created_at': time.time()})
+        'status': 'active', 'created_at': time.time(), **({'scope': 'group'} if request.group_wide else {})})
 
 
 # LLM: 只更新同一 tool_policy 的授权失效编号与 bot-added 证明，不保存第二成员名单，不改业务任务或赋予能力。

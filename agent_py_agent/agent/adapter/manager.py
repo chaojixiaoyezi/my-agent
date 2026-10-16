@@ -48,6 +48,7 @@ from .feishu_quoted_media import (
     quoted_media_requested,
     read_quoted_media,
 )
+from .inbound_images import InboundMediaInputError, inbound_image_preparation
 from .ingress import (
     GatewayAdapterDeliveryWorker,
     GatewayIngressAdvance,
@@ -299,9 +300,9 @@ def _gateway_ingress_submission(record: GatewayIngressRecord) -> GatewayAskSubmi
     )
 
 
-# LLM: 只投影认证入站白名单；引用映射来自已证引用读取器，模型正文与任意metadata不能补造引用或owner。
-# 函数用途: 冻结原消息的Gateway需求与通道身份，携带本请求引用；不访问网络或写入服务状态。
-def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
+# LLM: 媒体refs仅由本次成功准备显式传入，不读取消息metadata中的同名字段；引用映射仍来自已证读取器。
+# 函数用途: 冻结正文、身份与本次真实图片引用，不从下载路径文字推断附件或owner。
+def _gateway_ask_payload(msg: IncomingMessage, *, input_media: tuple[dict, ...] = ()) -> dict[str, object]:
     # 真实入站消息始终有 conversation_id；getattr 兼容旧的嵌入调用和轻量测试替身。
     conversation_id = str(getattr(msg, "conversation_id", "") or "").strip()
     incoming_metadata = getattr(msg, "metadata", {}) or {}
@@ -331,6 +332,8 @@ def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
     if conversation_id:
         payload["conversation_id"] = conversation_id
         payload["channel_conversation_id"] = conversation_id
+    if input_media:
+        payload['input_media'] = list(input_media)
     return payload
 
 
@@ -503,6 +506,7 @@ class _ChannelIngressCoordinator:
         msg = _gateway_ingress_message(record)
         adapter = self._manager._adapters.get(msg.channel)
         quoted = None
+        images: list[dict] = []
         if quoted_media_requested(adapter, msg):
             try:
                 quoted = read_quoted_media(adapter, msg)
@@ -513,10 +517,10 @@ class _ChannelIngressCoordinator:
                 append_quoted_media_failure(msg, exc)
                 return _gateway_ask_payload(msg)
         downloads_ready = self._manager._maybe_download_media(msg, retry_on_error=True,
-            quoted_media=quoted if quoted is not None and quoted.items else None)
+            quoted_media=quoted if quoted is not None and quoted.items else None, prepared_images=images)
         if quoted is not None and downloads_ready:
             append_quoted_text(msg, quoted)
-        return _gateway_ask_payload(msg)
+        return _gateway_ask_payload(msg, input_media=tuple(images))
 
     # LLM: 原持久正文提交合同不变；G3 凭据失败落安全拒绝码而非网络重试，秘密不进持久行。
     # 函数用途: 提交精确正文；本机凭据失败交给原 worker 收口并回复用户，不重试 POST。
@@ -538,8 +542,8 @@ class _ChannelIngressCoordinator:
             return {"ok": False, "kind": "credential_error", "error_code": exc.reason_code, "message": str(exc)}
         return asdict(submission)
 
-    # LLM: 原提交回执与安全失败不变；reaction 前记录精确回执的受限投影，提示失败不能改变任务受理。
-    # 函数用途: 处理原回执或本机拒绝；只对已经发送的普通消息创建占位和 watcher。
+    # LLM: 确定的凭据/输入拒绝沿原幂等回复结算，不POST或创建watcher；普通受理仍只认原提交回执。
+    # 函数用途: 处理原回执或协议拒绝，失败回执只重试投递；仅已提交的普通消息创建占位和watcher。
     def advance_submission(
         self,
         record: GatewayIngressRecord,
@@ -548,7 +552,7 @@ class _ChannelIngressCoordinator:
             if not isinstance(record.submission, dict) or record.submission.get('status') not in {'accepted', 'ignored'}:
                 raise ValueError('observation receipt is invalid')
             return GatewayIngressAdvance('completed')
-        if isinstance(record.submission, dict) and record.submission.get("kind") == "credential_error":
+        if isinstance(record.submission, dict) and record.submission.get("kind") in {"credential_error", "input_error"}:
             if not self._manager._send_gateway_reply(_gateway_ingress_message(record), record.ingress_id, record.submission["message"]):
                 raise RuntimeError("gateway credential error delivery was not accepted")
             return GatewayIngressAdvance("completed")
@@ -682,10 +686,9 @@ def _inbound_media_destination(agent: object, msg: IncomingMessage) -> Path:
     return destination
 
 
-# LLM: dest 已由当前消息解析；source_message_id 仅由准确引用核验器传入，不读取 media 自带的任意源字段。
-#   集合全部下载后才返回路径，当前附件原失败合同不变；引用资源缺失转有界事实，文件系统失败仍抛异常。
-# 函数用途: 用真实当前或引用成员 ID 下载完整附件集合，同名附件加稳定序号；不改变 owner。
-def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None):
+# LLM: dest沿原owner，source_message_id仅来自准确引用核验；图片实际读取预算在下载前传入，路径失败仍抛异常。
+# 函数用途: 下载完整附件集合，图片按真实字节导入原内容寻址目录，普通文件保留原路径；不改变owner。
+def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id=None, images=None):
     items = media.get("items") if isinstance(media.get("items"), list) else [media]
     paths = []
     for index, item in enumerate(items):
@@ -694,19 +697,25 @@ def _download_inbound_media_refs(adapter, msg, media, dest, *, source_message_id
         reference = dict(item)
         if len(items) > 1 and reference.get("file_name"):
             reference["file_name"] = f'{index + 1}-{reference["file_name"]}'
-        name = adapter.fetch_media_to(source_message_id or msg.message_id, reference, dest)
+        image = images is not None and bool(reference.get('image_key'))
+        limit = images.download_limit() if image else None
+        options = {'max_bytes': limit} if image and getattr(adapter, 'supports_bounded_inbound_media', False) is True else {}
+        name = adapter.fetch_media_to(source_message_id or msg.message_id, reference, dest, **options)
         if not name or Path(name).name != name or name in {".", ".."}:
             if source_message_id:
                 raise FeishuQuotedMediaError('FEISHU_QUOTED_MEDIA_RESOURCE_UNAVAILABLE')
             raise OSError("INBOUND_MEDIA_DOWNLOAD_INCOMPLETE")
-        paths.append(f"[已下载到: {dest / name}]")
+        path = dest / name
+        if image:
+            path = Path(images.import_download(path)['path'])
+        paths.append(f"[已下载到: {path}]")
     return paths
 
 
-# LLM: 当前附件默认取当前 source；引用必须逐项通过本次 GET 证明。集合全部成功才返回，路径由原私有下载器生成。
-# 函数用途: 组合当前与被引用附件的下载，任何一项失败都不向模型注入部分路径。
-def _download_complete_inbound_media(adapter, msg, media, dest, quoted):
-    paths = _download_inbound_media_refs(adapter, msg, media, dest) if media else []
+# LLM: 引用逐项通过本次GET证明，当前和引用图片共用一次预算；全部完成后调用方才能发布路径和refs。
+# 函数用途: 准备当前及引用附件，任一项失败不向模型提交部分路径或图片引用。
+def _download_complete_inbound_media(adapter, msg, media, dest, quoted, images=None):
+    paths = _download_inbound_media_refs(adapter, msg, media, dest, images=images) if media else []
     if quoted is not None:
         references = quoted_media_references(msg, quoted)
         for index, item in enumerate(references['items']):
@@ -714,7 +723,7 @@ def _download_complete_inbound_media(adapter, msg, media, dest, quoted):
             if len(references['items']) > 1 and reference.get('file_name'):
                 reference['file_name'] = f'{index + 1}-{reference["file_name"]}'
             paths.extend(_download_inbound_media_refs(adapter, msg, reference, dest,
-                source_message_id=item['source_message_id']))
+                source_message_id=item['source_message_id'], images=images))
     return paths
 
 
@@ -1200,15 +1209,15 @@ class ChannelManager:
         for record in records:
             adapter.clear_progress_placeholder(record.user_id, record.progress_handle)
 
-    # LLM: 当前及准确引用附件均按 /ask 当前身份落 owner 私有目录；全部下载后才注入路径。
-    #   当前附件/文件系统失败沿原 durable 硬门；返回是否完整准备，供同次引用文字决定能否附入，不复制父 sender。
-    # 函数用途: 下载完整附件集合并返回准备结果，避免把部分路径或失败时的文字当作完整用户材料。
+    # LLM: 当前及准确引用附件沿原/ask身份落owner，整组成功才发布路径/refs；确定坏图抛typed错误，路径及暂态仍原门。
+    # 函数用途: 准备整组附件并提供本次真实图片refs，引用读取失败不会泄露部分图片或复制父sender权限。
     def _maybe_download_media(
         self,
         msg: IncomingMessage,
         *,
         retry_on_error: bool = False,
         quoted_media: ValidatedQuotedMedia | None = None,
+        prepared_images: list[dict] | None = None,
     ) -> bool:
         media = (msg.metadata or {}).get("media")
         adapter = self._adapters.get(msg.channel)
@@ -1216,9 +1225,13 @@ class ChannelManager:
             return True
         try:
             dest = _inbound_media_destination(self._inbound_media_agent, msg)
-            paths = _download_complete_inbound_media(adapter, msg, media, dest, quoted_media)
-            msg.content = "\n".join([msg.content, *paths])
+            images = inbound_image_preparation(self._inbound_media_agent, msg.channel)
+            msg.content = "\n".join([msg.content, *_download_complete_inbound_media(adapter, msg, media, dest, quoted_media, images)])
+            if prepared_images is not None and images is not None:
+                prepared_images.extend(images.refs)
             return True
+        except InboundMediaInputError:
+            raise
         except FeishuQuotedMediaError as exc:
             append_quoted_media_failure(msg, exc)
         except Exception as exc:

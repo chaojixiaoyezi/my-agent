@@ -84,7 +84,7 @@ def test_creator_names_from_identity_index_never_authorize_names(tmp_path,monkey
 def test_real_member_lookup_requires_complete_bounded_official_pages(monkeypatch,mode):
     calls=[]
     clock=[0.0]
-    monkeypatch.setattr(creator_access.time,'monotonic',lambda:clock[0])
+    monkeypatch.setattr('agent_py_agent.agent.adapter.feishu_provider_facts.time.monotonic',lambda:clock[0])
     class Response:
         def __enter__(self):
             return self
@@ -95,7 +95,7 @@ def test_real_member_lookup_requires_complete_bounded_official_pages(monkeypatch
                 clock[0]=3
             if mode=='permission':
                 return b'{"code":99991672}'
-            row={'items':[{'member_id':'ou_b'}], 'has_more':mode!='complete',
+            row={'items':[{'member_id_type':'open_id','member_id':'ou_b'}], 'has_more':mode!='complete',
                 'page_token':'same' if mode=='loop' else str(len(calls))}
             if mode=='missing_more':
                 row.pop('has_more')

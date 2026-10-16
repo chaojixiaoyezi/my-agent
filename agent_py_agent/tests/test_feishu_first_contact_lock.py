@@ -7,10 +7,10 @@ from threading import Event
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter
 
 
-# LLM: 输入使用 webhook/WS 共用的飞书结构化信封；正文是合成测试数据，不授予角色或解除密码锁。
+# LLM: 普通人类样本显式声明官方sender_type=user；缺失/机器人不能由fixture暗补成人，正文不授予角色或解除锁。
 # 函数用途: 构造一个普通用户的新私聊消息，让实际入口完成归一化和锁门判定。
 def event(message_id: str, *, user_id: str = "ou_new_user", chat_type: str = "p2p"):
-    return {"event": {"sender": {"sender_id": {"open_id": user_id}}, "message": {
+    return {"event": {"sender": {"sender_id": {"open_id": user_id}, "sender_type": "user"}, "message": {
         "message_id": message_id, "chat_type": chat_type, "chat_id": "oc_test_private",
         "message_type": "text", "content": json.dumps({"text": "请计算 12 加 13"})}}}
 

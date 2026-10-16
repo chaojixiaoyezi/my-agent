@@ -1,6 +1,6 @@
 
-# LLM: 历史适配只转换原生 IR，不裁决副作用；主请求/容量/摘要共用 applied 摘要前置布局，不改变工具与推理顺序。
-# 模块用途: 在原生对话与工具历史间做协议翻译，保留调用配对，未知结果由后续执行者核实。
+# LLM: 只翻译IR不裁决副作用；用户与宿主媒体同投影user role但不混内部来源，主请求/容量/摘要共用applied布局。
+# 模块用途: 翻译原生对话、宿主附件和工具历史，保留配对与原图引用，未知结果由执行者核实。
 
 from __future__ import annotations
 
@@ -130,8 +130,8 @@ def _flush_results(messages: list[dict[str, Any]], pending_results: list[dict[st
     pending_results.clear()
 
 
-# LLM: 用户媒体与正文保持同一条 user 消息；本层只携带 refs，禁止编码或读取文件。
-# 函数用途: 将非工具结果的 IR 项追加为有序原生消息。
+# LLM: 用户输入/宿主事件媒体均投影同一user role，只携原refs不读盘；RuntimeFacts的source仍仅内部来源，不伪装用户原话。
+# 函数用途: 按typed IR顺序生成原生消息，保留宿主事件附件及其文本边界。
 def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem) -> None:
     if isinstance(item, CompactionSummary):
         if item.provider_compaction:
@@ -146,11 +146,12 @@ def _append_non_result_message(messages: list[dict[str, Any]], item: HistoryItem
             )
         return
     if isinstance(item, RuntimeFactsTurn):
+        from ..conversation.input_media import input_media_blocks
+
         text = str(item.text or "")
-        if text.strip():
-            messages.append(
-                {"role": "user", "content": [{"type": "text", "text": text}]}
-            )
+        content = ([{"type": "text", "text": text}] if text.strip() else []) + input_media_blocks(item.media)
+        if content:
+            messages.append({"role": "user", "content": content})
         return
     if isinstance(item, UserTurn):
         from ..conversation.input_media import input_media_blocks

@@ -221,16 +221,17 @@ def test_owner_explicit_exact_grant_only_enables_named_member_and_capability(tmp
     agent._current_run_params.host_channel_actor = replace(actor, actor_id='ou_member')
     with group_capability_guard(agent, 'monitors.create', thread_id=source.thread_id):
         pass
-    for capability, other in [('assistant.configure', 'ou_member'), ('monitors.create', 'ou_inviter')]:
+    for capability, other in [('monitors.create', 'ou_inviter')]:
         agent._current_run_params.host_channel_actor = replace(actor, actor_id=other)
         with pytest.raises(GroupAuthorizationError):
             with group_capability_guard(agent, capability, thread_id=source.thread_id):
                 pytest.fail('不能扩大能力或成员')
 
 
-def test_ordinary_member_cannot_grant_self_even_after_configuration_grant(tmp_path):
+def test_ordinary_member_cannot_grant_self_after_ordinary_configuration(tmp_path):
     agent, _source, actor, raw, _calls = _case(tmp_path)
-    _allow(agent, raw, actor, capability='assistant.configure')
+    with group_capability_guard(agent, 'assistant.configure'):
+        pass
     member = replace(actor, actor_id='ou_member')
     with pytest.raises(GroupAuthorizationError) as failure:
         _allow(agent, raw, member)
@@ -339,8 +340,10 @@ def test_missing_flag_on_fake_config_does_not_disable_boundary(tmp_path, monkeyp
 
 
 # LLM: 老调度测试显式建立隔离群授权前提；provider只给owner基础群，原actor可以是topic，不关闭安全开关或改身份。
-# 函数用途: 复用真实人工授权及原tool_policy锁，为creator/取消/话题卡片准备合成前提。
+# 函数用途: 为监控测试建立真实授权；配置不需附加grant，旧卡片fixture参数只保留其无授权前提。
 def grant_synthetic_group_monitor_capability(agent, actor, *, members, capability="monitors.create"):
+    if capability == 'assistant.configure':
+        return
     raw = {'provider': agent.home_paths.owner_provider, 'chat_id': group_chat_id(agent.home_paths),
         'app_id': 'app_synthetic', 'tenant_key': 'tenant_synthetic', 'owner_id': 'ou_fixture_owner',
         'member_ids': sorted(set(members) | {'ou_fixture_owner'}), 'members_complete': True, 'bot_is_member': True}

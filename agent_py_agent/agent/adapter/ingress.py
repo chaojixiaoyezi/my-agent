@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..common.json_io import locked_json_path
 from .delivery import GatewayClaimLeaseConfig, GatewayReplyDeliveryWorker
+from .inbound_images import InboundMediaInputError
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA_VERSION = 3
@@ -724,9 +725,8 @@ class GatewayAdapterDeliveryWorker:
                 return 1
         return 0
 
-    # LLM: State dispatch is closed and stage-specific. The manager callbacks receive immutable
-    # snapshots and can only return data which this worker persists through CAS.
-    # 函数用途: 执行当前阶段的外部动作并构造下一条候选状态。
+    # LLM: prepare确定的媒体错误只冻结原input_error协议回执；暂态/权限/路径错误仍原样退避，所有阶段沿原CAS。
+    # 函数用途: 推进原入站状态，坏图片不提交模型任务，也不在prepared无限重试或丢图继续文字。
     def _next_record(
         self,
         record: GatewayIngressRecord,
@@ -738,7 +738,11 @@ class GatewayAdapterDeliveryWorker:
             "next_attempt_at": 0.0,
         }
         if record.state == "prepared":
-            payload = self._prepare_payload(record)
+            try:
+                payload = self._prepare_payload(record)
+            except InboundMediaInputError as exc:
+                return replace(record, state='submitted', submission={'ok': False, 'kind': 'input_error',
+                    'error_code': exc.error_code, 'message': str(exc)}, **common)
             return replace(
                 record,
                 state="payload_ready",

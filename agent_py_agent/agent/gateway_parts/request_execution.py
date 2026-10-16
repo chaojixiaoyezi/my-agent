@@ -1,6 +1,6 @@
 # LLM: 这里只编排单个已领取请求：身份先绑定再领取车道，随后准备上下文、执行、提交历史与响应。
 # 上下文、绑定、历史、输入渲染分别归 request_context/request_binding/request_history/request_prompt；
-# 修改须联测停止、Compact、repair 与重启恢复，保持原锁、提交顺序和 typed 错误，不另建兼容执行链。
+# 修改须联测停止、Compact、repair与重启恢复；原typed输入快照只取认证入口，保持原锁和提交顺序。
 # 同turn展示及已评估事实仅由本请求局部回调持有，失效清除后本turn不再推荐，不进恢复账或结果。
 # 延迟transcript Compact沿同次恢复准备提交；原CAS后的上下文必须回传至下一溢出或最终持久化。
 # typed overflow携带原生IR与精确插话ID，下一轮重建权限/前缀，不能用归档preview替代原完整工具回执。
@@ -856,7 +856,7 @@ def _require_gateway_conversation_ready(
 
 # LLM: 模型前统一 canonical task、RuntimeDB 身份与已冻结Compact view；active Goal无目录也要从原任务表验证thread后绑定。
 # 函数用途: 构造精确运行参数，已发布的恢复身份优先，未发布时沿已经校验的活动任务或 Goal 绑定。
-# LLM: 附件先按已解析 owner 校验，仅结构化 refs 进入 run；跨 owner 或损坏附件不可退化成纯文本请求。
+# LLM: 附件先按已解析owner校验，与引用合并到同次typed输入；attrs仅执行投影，跨owner/损坏不退化文本。
 # 函数用途: 构造当前请求执行参数，并验证显式输入附件的归属与资源上限。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
@@ -890,6 +890,11 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
             raise ConversationTaskBindingError("当前请求的原会话任务不可读或不属于本线程")
         if link is not None:
             attrs = {**(attrs or {}), "conversation_task_id": task_id}
+    actor = _gateway_host_actor(context.agent, conversation, context.request_id)
+    references = _gateway_message_references(request, conversation)
+    from ..conversation.host_message_context import context_for_input
+
+    host_input = context_for_input(context.agent, actor, references, request.get('input_media') or ()) if actor is not None else None
     return RunParams(
         inject=request_prompt.gateway_injections(request, conversation),
         allowed_tools=[] if request.get("host_im_task_ack") else None,
@@ -907,8 +912,9 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         on_chunk=context.on_chunk,
         root_user_prompt=inputs.prompt,
         task_attributes=attrs,
-        host_channel_actor=_gateway_host_actor(context.agent, conversation, context.request_id),
-        host_message_references=_gateway_message_references(request, conversation),
+        host_channel_actor=actor,
+        host_message_references=references,
+        host_message_context=host_input,
         context_scope="conversation" if conversation.thread_id else "default",
         carried_archive_tool_calls=[dict(item) for item in inputs.carried_archive_tool_calls],
         carried_active_turn_user_inputs=[

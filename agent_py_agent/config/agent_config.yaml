@@ -535,9 +535,12 @@ owner_agent_idle_seconds: 60.0
 # 历史仅保存引用；同一字节上限也约束每次模型请求，较旧附件超预算时只发归档引用。
 # 模型和接口仍须支持对应模态，不自动换模型。
 input_media_max_bytes: 16777216
-# 一条消息里最多能带几个图片或视频附件（TUI 里 `/attach` 或拖入）。
+# 一条消息里最多能带几个图片或视频附件（TUI `/attach`、拖入，或飞书原生图片输入）。
 # 一般不用改；单个文件的大小上限另由 input_media_max_bytes 控制。
 input_media_max_files: 8
+# 飞书原生图片进入模型前实际解码的累计像素上限；动图逐帧累计，默认4000万像素。
+# 同时最多检查256帧，不启动外部图片解释器；超限明确拒绝，不丢掉图片继续回答。
+input_image_max_pixels: 40000000
 # owner retention 后台扫描间隔（秒，0=关）：每拍只扫 owner_agent_pool_max_agents 个
 # 规范 owner home；每个 owner 仍由 retention.json 的 maintenance_interval_seconds 日级节流。
 # 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
@@ -604,6 +607,11 @@ adapter_workspace: ""
 feishu_app_id: ""
 # 群聊只在单独 @机器人时回复，@全员或未 @不触发；私聊不受此设置影响。
 feishu_group_require_bot_mention: true
+# 将按当前用户/群归属下载且通过真实格式与解码检查的图片，直接作为原生附件交给当前模型。
+# 默认开启；会增加既有模型请求的图片传输与token消耗，不引入OCR服务或新外网域名，不自动换模型。
+# 当前/引用图片整组成功才提交，仍守群@与引用读取开关；关闭只保留既有附件路径行为。
+# 模型/接口须支持图片；自动派给子代理还须开启能力配置中的subagent_input_media_enabled。
+feishu_image_input_enabled: true
 # 群里先上传文件，再引用这条文件消息并 @机器人时，读取准确引用的同群附件，默认开启。
 # 需要飞书应用的群消息读取和资源下载权限；文件落到当前群空间，原文件发送者不改变本轮用户身份。
 # 修改后重启飞书通道生效；关闭时不读取引用消息的附件。

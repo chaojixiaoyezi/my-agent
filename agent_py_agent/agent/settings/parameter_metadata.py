@@ -58,6 +58,7 @@ _UNIT_SUFFIXES = (
     ("_hour", "小时"),
     ("_turns", "轮"),
     ("_files", "个文件"),
+    ("_pixels", "像素"),
     ("_requests", "次"),
 )
 

@@ -82,13 +82,14 @@ def world(monkeypatch):
     return state
 
 
-# LLM: 每次构建独立 store/worker 模拟重启，但外部 provider 保留同一份可见效果。
+# LLM: 每次构建原store/worker模拟重启，provider保留真实去重效果；进度用例须先冻结final未就绪事实，不能绕过final优先门。
 # 函数用途: 使用既有 worker 入口领取、发送及写回执，不手造状态文件。
-def _worker(root, provider, owner="first"):
+def _worker(root, provider, owner="first", *, progress_pending=False):
     store = GatewayReplyDeliveryStore(root)
     provider.store = store
     worker = GatewayReplyDeliveryWorker(
-        store, poll_response=lambda _record: "最终回复", deliver_response=provider.send,
+        store, poll_response=lambda record: (None if progress_pending and record.progress_cursor < 3 else "最终回复"),
+        deliver_response=provider.send,
         lease=GatewayClaimLeaseConfig(owner=owner, ttl_seconds=5),
     )
     return worker
@@ -220,10 +221,12 @@ def test_old_epoch_receipt_cannot_overwrite_new_unknown(tmp_path, world):
 def test_progress_and_final_have_distinct_durable_message_identities(tmp_path, world):
     provider = _Provider(None)
     provider.require_marker = True
-    worker = _worker(tmp_path, provider)
+    worker = _worker(tmp_path, provider, progress_pending=True)
     worker._poll_progress = lambda record: (["进度"] if record.progress_cursor == 0 else [], 3)
     worker._deliver_progress = provider.send
     _enqueue(worker)
+    assert worker.run_once() == 0
+    assert worker.store.pending()[0].progress_cursor == 3
     assert worker.run_once() == 1
     assert list(provider.messages.values()) == ["进度", "最终回复"]
     identities = [record.dispatch["message_sequence"] for record in provider.records]
@@ -285,16 +288,18 @@ def test_channel_recovery_capabilities_are_explicit_and_windowed():
 @pytest.mark.parametrize("stage", ["before_accept", "after_accept"])
 def test_progress_crash_recovery_keeps_final_independent(tmp_path, world, stage):
     provider = _Provider(None)
-    first = _worker(tmp_path, provider)
+    first = _worker(tmp_path, provider, progress_pending=True)
     first._poll_progress = lambda record: (["进度"] if record.progress_cursor == 0 else [], 3)
     first._deliver_progress = provider.send
     _enqueue(first)
     _crash(first, provider, stage)
     assert first.store.pending()[0].dispatch["message_sequence"] == "progress:0"
     world.update(now=1010.0, live=False)
-    second = _worker(tmp_path, provider, "second")
+    second = _worker(tmp_path, provider, "second", progress_pending=True)
     second._poll_progress = first._poll_progress
     second._deliver_progress = provider.send
+    assert second.run_once() == 0
+    assert second.store.pending()[0].progress_cursor == 3
     assert second.run_once() == 1
     assert list(provider.messages.values()) == ["进度", "最终回复"]
     assert provider.attempts[0] == provider.attempts[1]

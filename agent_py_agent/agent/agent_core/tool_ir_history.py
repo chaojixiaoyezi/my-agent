@@ -1,5 +1,5 @@
 
-# LLM: typed IR 是唯一历史；请求投影/发送同源；applied Compact 固定前置，普通历史只追加，工具与推理不拆对。
+# LLM: typed IR是唯一历史；宿主媒体不能被旧工具摘要退休，请求投影/发送同源，applied前置且调用/推理不拆对。
 # 模块用途: 保存工具与模型历史，提供出站投影及共用旧快照退休规则；须核对配对、缓存前缀和取消回滚。
 from __future__ import annotations
 
@@ -344,7 +344,7 @@ def _summarized_runtime_fact_indexes(history: list[Any], call_ids: set[str]) -> 
 
 
 # LLM: 位置集合必须来自调用方已证明覆盖的完整工具组；这里只看 typed 顺序，不按正文或裸调用名猜覆盖。
-# 函数用途: 为运行中及联合恢复共用连续退休前缀规则，始终保留每个来源的最新状态。
+# 函数用途: 为运行中及联合恢复共用连续退休前缀规则，始终保留每个来源的最新状态和全部带媒体的原事件，工具摘要不证明图片已被覆盖。
 def summarized_runtime_fact_indexes(history: list[Any], retired_positions: set[int]) -> set[int]:
     retired_through = -1
     for index, item in enumerate(history):
@@ -359,6 +359,7 @@ def summarized_runtime_fact_indexes(history: list[Any], retired_positions: set[i
     return {
         index for index, item in enumerate(history)
         if isinstance(item, RuntimeFactsTurn)
+        and not item.media
         and index <= retired_through
         and index != latest_by_source[item.source]
     }

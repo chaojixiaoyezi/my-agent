@@ -2,6 +2,8 @@
 
 这个目录放”可以长期长大”的模块设计文档。
 
+当前增量：[飞书原生图片输入](FEISHU_NATIVE_IMAGES.md)、[群监控授权与机器人订阅](IM_GROUP_GOVERNANCE.md)。源码/真实/发行状态各自单列。
+
 导航：
 - `LLM_GUIDE.md`：LLM 总入口，含开工前/收工后清单
 - `docs/ROADMAP.md`：待做/进行中功能清单

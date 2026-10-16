@@ -1,3 +1,5 @@
+2026-10-15 图片转交源码已完成：同源HostMessageContext沿原SessionTask/TaskLink恢复，子孙只得canonical子档授权子集；开关关闭创建前拒绝，原输入GC仍可恢复。25专项及12文件327项通过，实际真实视觉/飞书另验，见[图片合同](../../design/FEISHU_NATIVE_IMAGES.md)。
+
 2026-10-14：子代理默认工具目录改为父级真实集合与角色/owner上界交集，补正常自查和已授权业务工具；leaf不获得宿主管理或继续派工。本人取消免可选确认，真实取消链同时关闭精确输入依赖，不能因待凭据挡住父任务结算。相关focused与发布见[实施合同](../../design/IM_UNATTENDED_IMPLEMENTATION.md)。
 
 2026-10-13：真实 TUI v3 验证原父级申请/批准后第二片可续跑并产出指定文件；两 child 与 root done。IM 真实模型 v1 的改写临时目录不算通过，原 WRITE_FORBIDDEN 恢复说明改为保留目标并走父级能力裁决。

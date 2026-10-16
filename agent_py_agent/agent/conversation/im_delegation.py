@@ -1,5 +1,5 @@
-# LLM: 派工沿原ToolExecutor/G1及父当前工具上界；OPEN能力阻塞仍交原父裁决，不能把BLOCKED误当结束或自动批准。
-# 模块用途: 为IM自动委派启动有准确业务工具范围的孩子，恢复原引用，并依据真实结果或能力申请继续处理。
+# LLM: 派工沿原ToolExecutor/G1及父工具上界；原图片显式传media_refs并核开关，OPEN仍交原父裁决，不能自动批准。
+# 模块用途: 为IM启动准确工具范围并获授权原图片的孩子，恢复引用，再按真实结果或申请处理。
 from __future__ import annotations
 
 import json
@@ -163,8 +163,8 @@ def _prepare_capability_resolution(params, children):
     return replace(params, allowed_tools=["resolve_capability_requests"])
 
 
-# LLM: 仅IM自动派工显式传当前父snapshot的就绪工具，经原leaf/退休过滤及create二次authority交集；owner/资源/网络门不变。
-# 函数用途: 沿原执行账创建同owner业务孩子，避免默认coding工具集丢失父级正常业务能力；不改手工子代理默认或自动批准。
+# LLM: 自动派工显式传父工具上界与原输入媒体sha；图片仍走原create授权/开关，不借attrs或同root自动授权全部媒体。
+# 函数用途: 沿原执行账创建同owner业务孩子并转交原附件，不改手工默认或自动批准。
 def _start_child(agent, params, task, allowed):
     from ..agent_core.orchestration.create_policy import leaf_allowed_tools
     from ..agent_core.tool_loop.recovery import runtime_run_scope
@@ -175,11 +175,19 @@ def _start_child(agent, params, task, allowed):
     runtime = params.tool_runtime_snapshot.runtime("create_subagents")
     if runtime is None:
         raise DataCorruptionError("当前用户没有子代理创建权限")
+    from .host_message_context import media_for_run, require_subagent_media
+
+    current = agent._current_run_params
+    media = media_for_run(agent, current.host_channel_actor) if current.host_channel_actor is not None else ()
+    require_subagent_media(agent, media)
+    arguments = {"goal": task.goal, "allowed_skills": allowed,
+        "allowed_tools": leaf_allowed_tools(active_model_subagent_tools(sorted(params.tool_runtime_snapshot.available_tool_names)))}
+    if media:
+        arguments['input_media_refs'] = [ref['sha256'] for ref in media]
+        params = replace(params, task_attributes={**(params.task_attributes or {}), 'input_media': list(media)})
     call = ToolCall(
         call_id=f"host-delegate:{task.task_id}", tool_name="create_subagents",
-        arguments={"goal": task.goal, "allowed_skills": allowed,
-                   "allowed_tools": leaf_allowed_tools(active_model_subagent_tools(
-                       sorted(params.tool_runtime_snapshot.available_tool_names)))},
+        arguments=arguments,
         source_protocol=params.tool_protocol_snapshot.source_protocol, schema_hash=runtime.model_spec.schema_hash,
         run_id=params.run_id, turn_id=f"{params.run_id}:host-delegate", attempt_id=params.attempt_id,
     )

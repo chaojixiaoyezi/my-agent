@@ -17,7 +17,7 @@ from agent_py_agent.agent.adapter.manager import ChannelManager, GatewayAskSubmi
 from agent_py_agent.agent.adapter.protocol import FeishuEventDisposition, FeishuRetryableEventError
 
 
-# LLM: 仅构造供应商结构和合成正文，不发送网络、读取生产配置或替模型执行任务。
+# LLM: 人类样本显式携带官方sender_type=user；负例须主动移除/更改，不让fixture默认覆盖未知或bot身份。
 # 函数用途: 生成群聊富文本事件，让换行与补文字的对照只改变一个节点。
 def _payload(*, own_line=False, tail=False, message_id='om_synthetic', mentions=True):
     bot = {'tag': 'at', 'user_id': '@_user_1'}
@@ -29,18 +29,20 @@ def _payload(*, own_line=False, tail=False, message_id='om_synthetic', mentions=
                'chat_id': 'oc_synthetic', 'content': json.dumps({'zh_cn': {'title': '', 'content': rows}})}
     if mentions:
         message['mentions'] = [{'key': '@_user_1', 'id': {'open_id': 'ou_bot'}}]
-    return {'event': {'message': message, 'sender': {'sender_id': {'open_id': 'ou_user'}}}}
+    return {'event': {'message': message, 'sender': {'sender_id': {'open_id': 'ou_user'}, 'sender_type': 'user'}}}
 
 
-# LLM: SDK 只归一同一原事件，测试不调用 WS 握手或供应商接口。
+# LLM: SDK逐字段保留原sender_type和sender_id，缺类型保持空，不能把未知或机器人事件提升为人类；不连接WS/API。
 # 函数用途: 将合成 webhook 形状投影成 SDK 属性对象。
 def _sdk(payload):
     message = payload['event']['message']
     values = {key: value for key, value in message.items() if key != 'mentions'}
     values['mentions'] = [SimpleNamespace(key=row['key'], id=SimpleNamespace(**row.get('id', {})))
                           for row in message.get('mentions', [])]
+    sender = payload['event'].get('sender') or {}
     return SimpleNamespace(event=SimpleNamespace(message=SimpleNamespace(**values),
-        sender=SimpleNamespace(sender_id=SimpleNamespace(open_id='ou_user'))))
+        sender=SimpleNamespace(sender_id=SimpleNamespace(**sender.get('sender_id', {})),
+            sender_type=sender.get('sender_type', ''))))
 
 
 def _adapter(callback):
@@ -318,3 +320,23 @@ def test_concurrent_webhook_admission_reuses_original_ingress_record():
         worker.join(2)
     assert outcomes == ['accepted', 'accepted']
     assert len(manager._delivery_worker.store.records()) == 1
+
+
+@pytest.mark.parametrize('sender_type', [None, '', 'unknown', 'bot', 'app'])
+def test_missing_unknown_and_bot_sender_never_become_human_via_fixture_or_sdk(sender_type):
+    seen = []
+    adapter = _adapter(lambda message: seen.append(message) or True)
+    value = _payload()
+    if sender_type is None:
+        value['event']['sender'].pop('sender_type')
+    else:
+        value['event']['sender']['sender_type'] = sender_type
+    result = adapter._handle_feishu_event(value)
+    assert result.status == 'ignored' and not seen
+    expected = 'FEISHU_OBSERVATION_INVALID' if sender_type in {'bot', 'app'} else 'FEISHU_SENDER_TYPE_UNVERIFIED'
+    assert result.reason_code == expected
+    projected = _sdk(value)
+    assert projected.event.sender.sender_type == (sender_type or '')
+    client = FeishuWsClient(app_id='synthetic', app_secret='synthetic', on_payload=adapter._handle_feishu_event)
+    client._handle_event(projected)
+    assert not seen

@@ -1,4 +1,4 @@
-# LLM: 运行参数只携带当前身份、上下文与宿主回调；本片展示及已评估事实不进序列化结果，新工作片须重置。
+# LLM: 运行参数只携当前身份、typed原输入和宿主回调；输入快照不从模型attrs恢复，本片展示不进序列化结果。
 # 模块用途: 定义主链执行与收口参数；拒绝记忆和可选展示分别沿原宿主生命周期传递。
 
 from __future__ import annotations
@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ...capability.decision_recommendation import CapabilityPresentationSelection
     from ...conversation.host_actor import HostChannelActor
+    from ...conversation.host_message_context import HostMessageContext
 
 
-# LLM: 消息/回合/运行/尝试身份独立；引用映射仅本次认证入站专有，carry与已应用视图不作为持久权限或状态。
+# LLM: 消息/回合/运行/尝试身份独立；typed媒体/引用仅本次认证入站专有，持久源归原TaskLink/SessionTask，carry不授权。
 # 类用途: 收拢一次代理调用与宿主专有身份；模型可写属性不作认证来源，不执行模型或写文件。
 @dataclass
 class RunParams:
@@ -33,6 +34,8 @@ class RunParams:
     host_channel_actor: HostChannelActor | None = None
     # 仅当前认证入站请求的引用绑定；不写模型 attrs、不继承到新请求或子代理，不承担群授权。
     host_message_references: tuple[tuple[str, str], ...] = ()
+    # 同一次认证入站的唯一typed输入；消息引用字段仅为其原只读投影，不从模型attrs构造。
+    host_message_context: HostMessageContext | None = None
     delivery_contract: dict | None = None
     system_prompt_override: str | None = None
     source: str = "run"

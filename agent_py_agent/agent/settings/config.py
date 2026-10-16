@@ -295,8 +295,8 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: 用户默认同步随包配置；host_only 来源名仅宿主冻结，不能由用户层改写；群附件/Curator 的原授权边界不变。
-# 类用途: 汇总模型和运行配置；决策默认关闭，有限正时间只为后续请求提供默认，不管理阶段时钟。
+# LLM: 用户默认同步随包配置；host_only来源名仅宿主冻结，不能由用户层改写；飞书原生图片开关和解码预算与YAML及normalize同源，群附件/Curator授权不变。
+# 类用途: 汇总模型和运行配置；飞书图片外发有独立开关，决策默认关闭，有限正时间只提供后续请求默认，不管理阶段时钟。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
@@ -503,6 +503,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     owner_agent_idle_seconds: float = 60.0
     input_media_max_bytes: int = 16 * 1024 * 1024
     input_media_max_files: int = 8
+    # 飞书原生图片进入模型前的逐帧累计像素上限；先检查后解码，不按扩展名猜图片。
+    input_image_max_pixels: int = 40_000_000
     # owner retention 扫描控制器每拍只处理一个有界页，不创建 Agent、不调用 LLM。
     # 每个 owner 的 retention.json 另有日级执行节流；0 关闭网关自动扫描。
     owner_maintenance_scan_interval_seconds: int = 60
@@ -538,6 +540,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_ws_proxy: str = ""  # 长连可选代理(空=走 HTTPS_PROXY 环境变量;TUN/代理环境直连飞书 WS 网关是黑洞,需显式填代理)
     # 群聊只在直接 @机器人时触发；@全员不触发。
     feishu_group_require_bot_mention: bool = True
+    # 下载并核验的当前/引用图片作为真实附件交给当前模型；关闭仅保留原附件路径行为，不自动换模型。
+    feishu_image_input_enabled: bool = True
     # 群里引用文件并触发机器人时，按准确父消息读取同群附件；需要飞书消息和资源读取权限。
     feishu_quoted_media_enabled: bool = True
     # 明确引用同群文字并触发机器人时，只把正文作为外部资料；当前引用者仍决定身份和权限。

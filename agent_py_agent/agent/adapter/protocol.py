@@ -85,8 +85,8 @@ class OutgoingMessage:
 FEISHU_MESSAGE_TYPES = {"text", "post", "image", "audio", "video", "file", "sticker", "share_chat", "system"}
 
 
-# LLM: webhook/WS 共用内容解析，可信 bot 身份只用于前置提及规范化，先于敏感命令和持久化；不授予角色或决定群聊触发。
-# 函数用途: 转换飞书文本和媒体消息，保留原 chat/topic 路由供下游核验。
+# LLM: webhook/WS共用内容解析；先规范bot寻址及明确群监控授权的准确平台目标提及，再判敏感命令/落盘；目标ID不授予操作者角色或改变群触发。
+# 函数用途: 转换飞书文本、真实授权目标提及和媒体，保留原chat/topic及主体供下游权限核验。
 def feishu_to_incoming(payload: dict[str, Any], *, bot_open_id: str = "") -> IncomingMessage | None:
     try:
         event = payload.get("event", {})
@@ -98,9 +98,13 @@ def feishu_to_incoming(payload: dict[str, Any], *, bot_open_id: str = "") -> Inc
         # webhook 使用 message_type，既有 WS 归一使用 msg_type；两条入口共用同一内容解析。
         msg_type = message.get("message_type") or message.get("msg_type") or "text"
         # 按类型抽文本+媒体引用(text/post/image/file/audio/...);未知给占位、绝不丢消息
-        from .feishu_mentions import command_content_without_bot_mention
+        from .feishu_mentions import (
+            command_content_without_bot_mention,
+            group_monitor_command_target,
+        )
 
         text, media = extract_feishu_content(msg_type, command_content_without_bot_mention(message, bot_open_id))
+        text = group_monitor_command_target(text, message, bot_open_id)
         if not text.strip():
             return None
         metadata: dict[str, Any] = {

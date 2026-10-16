@@ -1360,6 +1360,8 @@ dependencies = [
     { name = "markdown-it-py" },
     { name = "openpyxl" },
     { name = "packaging" },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform != 'darwin' and sys_platform != 'linux' and extra == 'extra-8-my-agent-computer-use-observe') or extra == 'extra-8-my-agent-computer-use'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'darwin' and extra != 'extra-8-my-agent-computer-use') or (sys_platform == 'linux' and extra != 'extra-8-my-agent-computer-use') or (extra != 'extra-8-my-agent-computer-use' and extra != 'extra-8-my-agent-computer-use-observe') or (extra == 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe')" },
     { name = "prompt-toolkit" },
     { name = "pygments" },
     { name = "python-socks", extra = ["asyncio"] },
@@ -1427,6 +1429,7 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'scale'", specifier = ">=0.50b0" },
     { name = "opentelemetry-sdk", marker = "extra == 'scale'", specifier = ">=1.29" },
     { name = "packaging", specifier = ">=24.2,<27" },
+    { name = "pillow", specifier = ">=11.3,<13" },
     { name = "pillow", marker = "sys_platform == 'darwin' and extra == 'computer-use-observe'", specifier = "==12.3.0" },
     { name = "pillow", marker = "sys_platform == 'linux' and extra == 'computer-use-observe'", specifier = "==12.3.0" },
     { name = "prompt-toolkit", specifier = ">=3.0" },
@@ -1740,8 +1743,10 @@ name = "pillow"
 version = "11.3.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.11'",
-    "python_full_version < '3.11'",
+    "python_full_version >= '3.11' and sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version < '3.11' and sys_platform != 'darwin' and sys_platform != 'linux' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version >= '3.11' and extra == 'extra-8-my-agent-computer-use' and extra != 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version < '3.11' and extra == 'extra-8-my-agent-computer-use' and extra != 'extra-8-my-agent-computer-use-observe'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f3/0d/d0d6dea55cd152ce3d6767bb38a8fc10e33796ba4ba210cbab9354b6d238/pillow-11.3.0.tar.gz", hash = "sha256:3828ee7586cd0b2091b6209e5ad53e20d0649bbe87164a459d0676e035e8f523", size = 47113069, upload-time = "2025-07-01T09:16:30.666Z" }
 wheels = [
@@ -1846,12 +1851,14 @@ name = "pillow"
 version = "12.3.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'darwin'",
-    "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'darwin'",
-    "python_full_version < '3.11' and sys_platform == 'darwin'",
-    "python_full_version >= '3.14' and sys_platform == 'linux'",
-    "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and sys_platform == 'darwin' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'darwin' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version < '3.11' and sys_platform == 'darwin' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version >= '3.14' and sys_platform == 'linux' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'linux' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version < '3.11' and sys_platform == 'linux' and extra != 'extra-8-my-agent-computer-use' and extra == 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version >= '3.11' and extra != 'extra-8-my-agent-computer-use' and extra != 'extra-8-my-agent-computer-use-observe'",
+    "python_full_version < '3.11' and extra != 'extra-8-my-agent-computer-use' and extra != 'extra-8-my-agent-computer-use-observe'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz", hash = "sha256:3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce", size = 47025035, upload-time = "2026-07-01T11:56:38.965Z" }
 wheels = [
