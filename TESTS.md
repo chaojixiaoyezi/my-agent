@@ -1,3 +1,11 @@
+## 2026-10-18 旧代关闭消费中的当前责任推进（409候选）
+
+新增`test_gateway_closed_generation_progress.py`：真实原heartbeat和canonical在先的terminal归档writer，在两次原完整库存之间分别更新/退役本代processing；同代新增也应返回同一旧history。旧expected/covered/本次固定committed的删除、改写、首读缺失、初始摘要或交集冲突须拒，即使JSON改称current也不能重分类；旧history/tree/身份live或unknown、陌生旧代仍拒。
+
+406唯一成功合同红及409真实terminal红保持；新测试同字节在原385为12F14P，其中3项为合法进展被拒、7项为固定来源缺失或冲突未拒、2项只反映原全域末检与新原分类的精确拒绝reason位置差别，不把12项统称已证权限漏洞。候选26项定向通过，原generation namespace/角色生命周期/freshP2与producer封存回归另按同源focused核。
+
+本片不修改旧测试断言、原43/39分类、权限或实际样本；新26节点属于最终两OS新包pyc运行义务，后继清单按实际去重追加。单次strict snapshot不稳定仍拒，当前记录消失不等于终态/P3释放/停止。准确最终源full/包/真实验收由根另做，不能借旧full或组件数字签发行。
+
 ## 2026-10-18 用户授权撤出前端的验收范围
 
 删除已撤出产品的三份专属测试，共11个原节点；无新增skip、xfail或运行豁免。原365/373全仓与catalog说明不同步失败保持原件，不改判通过。原640运行义务、158夹具义务和native/formal义务不变；43源码专用清单仅移除被删catalog的4项，变为39，包与资源图须从新源重建。后端配置、架构守卫、发行打包与多进程focused、完整本地严格gate及新源全仓结果以同源仓外回执为准，旧源通过不能替代。

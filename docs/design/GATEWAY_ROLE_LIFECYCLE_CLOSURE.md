@@ -1,3 +1,11 @@
+## 2026-10-18 旧闭包消费与当前代责任推进（409候选，待独立复核）
+
+旧v2消费仍两次读取完整严格库存，各自执行原分类；旧expected、captured covered及本次固定committed的全额引用须首末存在、原raw/摘要不变，优先于任何current字段。固定范围之外的当前代责任可自然新增、更新或退役，各实际存在侧仅走原current分类，不重采committed、不改历史baseline；末次history完整raw及旧tree/角色/P4/身份/freshP2仍原核。
+
+原W心跳在两个完整库存之间更新processing，或原terminal writer先提交canonical再移除processing，都不应仅因此破坏旧闭包。这里不认证当前写者、终态或删除，不授P3释放、执行/重放或物理关闭权；当前责任账与原drain/idle/producer seal继续独立。单次strict snapshot自身不稳定、危险路径、固定来源缺失/变化及未知仍拒，不新增重试或reader。
+
+406原heartbeat红、409原terminal归档红及402实际失败保留；当次双raw未捕获，不指定真实变化项。新增通用运行回归须最终两OS新包pyc实跑，不能划source-only；组件绿不代真实生命周期或发行。
+
 ## 原native传输失败的安全诊断（349独审通过，已集成待真实定位）
 
 原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。

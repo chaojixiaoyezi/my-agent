@@ -1,4 +1,4 @@
-# LLM: v1只提供count；v2仅原正常producer一次封存关闭范围，消费仍需当前身份/P1/fresh P2；原P4唯一current，Count0与旧字节不变。
+# LLM: v1只提供count；v2封存仍需原完整稳定范围，消费区分immutable旧责任与本代自然推进；身份/P1/fresh P2、原P4和Count0不变。
 # 模块用途: 沿唯一generation路径保存旧count与显式关闭事实，原raw CAS/读回失败不宣称完成，不给JSON执行权。
 import hashlib
 import os
@@ -220,8 +220,8 @@ def seal_generation(runtime, token):
     return '/'.join(parts)
 
 
-# LLM: 历史不授P2；旧字节优先immutable，committed仅原controller固定writer同门raw观察，不收编JSON自称或外部无dispatch。
-# 函数用途: 对一个已封存旧代核对关闭来源，缺旧v2或任何漂移拒绝。
+# LLM: 历史不授P2；旧expected/covered及本次固定committed首末immutable，本代额外责任各存在侧仍须原分类；不重采committed或授权当前执行。
+# 函数用途: 双读核已封存旧代来源，拒旧范围漂移，容纳不属于旧闭包的本代责任自然推进。
 def require_closed_generation(paths, generation, count, current, captured=None, *, committed=(), covered=()):
     from .daemon_metadata import process_identity_is_live
 
@@ -242,9 +242,29 @@ def require_closed_generation(paths, generation, count, current, captured=None, 
                                      max_bytes=_GENERATION_METADATA_MAX_BYTES, require_dir_fd=True)
         if content is None or hashlib.sha256(content).hexdigest() != digest:
             raise ValueError('generation_tree_evidence_changed')
-    if generation_source_files(paths) != files or read_generation_metadata(paths.root, generation) != history:
+    after = generation_source_files(paths)
+    _require_closed_source_progress(closure['source_files'], files, after, current, committed, covered)
+    _require_closed_files(closure['source_files'], after, current, committed, covered)
+    if read_generation_metadata(paths.root, generation) != history:
         raise ValueError('generation_closure_sources_changed')
     return history
+
+
+# LLM: 纯字节比较不读盘；旧expected/covered/固定committed优先保全，范围外只复用原current分类，不把消失当终态、P3释放或物理停止。
+# 函数用途: 比较两份严格库存，允许本代额外责任自然增改退役，任何旧固定来源缺失或变化仍拒绝。
+def _require_closed_source_progress(expected, before, after, current, committed, covered):
+    fixed = set()
+    for sources, digests in ((expected, True), (dict(covered), True), (dict(committed), False)):
+        for name, original in sources.items():
+            if name not in before or name not in after or before[name] != after[name]:
+                raise ValueError('generation_closure_sources_changed')
+            observed = hashlib.sha256(before[name]).hexdigest() if digests else before[name]
+            if observed != original:
+                raise ValueError('generation_closure_sources_changed')
+            fixed.add(name)
+    for snapshot in (before, after):
+        for name in snapshot.keys() - fixed:
+            _require_closed_files({}, {name: snapshot[name]}, current)
 
 
 # LLM: 旧关闭范围优先逐raw摘要；额外无dispatch控制只认原固定writer登记的完整raw，观察不授业务权限或覆盖旧项。

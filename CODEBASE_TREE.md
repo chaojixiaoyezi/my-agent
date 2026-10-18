@@ -545,6 +545,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_gateway_c_state_publication.py # 原C完整state与角色双读共门、取消锁序和失源首写拒绝运行回归
 |-- agent_py_agent/tests/test_gateway_source_refusal_diagnostics.py # 角色源拒绝日志只含白名单数字与函数位置、禁止消息和凭据正文
 |-- agent_py_agent/tests/test_gateway_generation_source_namespace.py # 已发表责任与原辅助流、暂存设施的严格目录分类回归
+|-- agent_py_agent/tests/test_gateway_closed_generation_progress.py # 旧关闭固定范围与本代心跳、新增及规范归档推进的分界回归
 |-- agent_py_agent/tests/test_gateway_generation_facility_second_open.py # 原写入失败清理暂存时第二次打开自然消失的回归
 |-- agent_py_agent/tests/test_gateway_generation_facility_successful_replace.py # 原写入成功替换同内容时暂存自然消失的回归
 |-- agent_py_agent/tests/test_ready_control_receipt_source.py # 真实ready Agent固定管理回执与完整controller、来源失活拒绝回归
@@ -3557,3 +3558,5 @@ owner_resources只计算配置路径不签权；owner_services仅持原三对象
 原话备份收缩运行验证入口：`agent_py_agent/tests/test_compact_landmark_remeasure.py`，核完整投影、原容量门、单次重算与中断；修改的原landmarks节点和原mixed长路径节点同属两平台包内运行义务。
 
 原native安全诊断回归入口 `agent_py_agent/tests/test_native_transport_diagnostic.py` 覆盖固定字段、异常隐私与原ACK/责任边界，不替代真实三代或发行门。
+
+`test_gateway_closed_generation_progress.py`只用临时格式fixture及原心跳/归档writer验证旧闭包消费；固定expected/covered/committed不变、本代责任自然推进不授当前终态或关闭权，新增行为须最终双OS新包pyc实跑。

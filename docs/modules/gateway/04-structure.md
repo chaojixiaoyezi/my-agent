@@ -1,3 +1,7 @@
+## 2026-10-18 关闭范围消费结构（409候选）
+
+`multiprocess_generation_metadata.require_closed_generation`保留两次严格完整库存与原分类，新增同模块纯比较叶只保expected/covered/固定committed全额原件及集合外current分类；不读terminal、不改writer/reader/seal或新增权限状态。`test_gateway_closed_generation_progress.py`用原心跳/归档writer及临时格式fixture验证当前推进、旧固定来源和未知拒例；新行为须最终双OS新包pyc实跑。
+
 ## 待确认候选与策展派发资格（362，已实现待独审）
 
 待用户确认的候选不再单独唤醒owner或创建interval策展批次；host的auto_eligible来源资格、原候选selector和正式提交确认门保持。真实消息/审计、原pending reason、有效或旧lease恢复、原时间/日终仍按既有链处理；完整source SHA、P3/额度和停止门不变。原conservative_v1仅保留已合法触发批次中的候选处理尝试和结构化回执，manual_only跳过尝试，两者均不授自动正式发布。

@@ -1,3 +1,7 @@
+## 2026-10-18 旧闭包消费末检分界（409候选）
+
+原心跳及canonical先提交后退役processing可使两次完整库存不同；仅消费叶按固定旧范围immutable、本代集合外责任逐存在侧原current分类处理。旧history/角色/P4/身份/freshP2和本代P1/P3/drain/封存不变；402失败不追补，新组件与原生命周期focused不代实际/发行。详见角色生命周期设计本轮记录。
+
 ## 待确认候选与策展派发资格（362，已实现待独审）
 
 待用户确认的候选不再单独唤醒owner或创建interval策展批次；host的auto_eligible来源资格、原候选selector和正式提交确认门保持。真实消息/审计、原pending reason、有效或旧lease恢复、原时间/日终仍按既有链处理；完整source SHA、P3/额度和停止门不变。原conservative_v1仅保留已合法触发批次中的候选处理尝试和结构化回执，manual_only跳过尝试，两者均不授自动正式发布。

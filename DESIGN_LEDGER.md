@@ -1,3 +1,9 @@
+## 2026-10-18 旧闭包消费与本代进展分界（409候选，待410独立复核）
+
+408及408A限定仅代次元数据consumer：首末完整严格库存各走原分类，旧expected/captured covered/本次固定committed全额原件immutable优先；集合外current责任逐存在侧分类，允许原心跳/新增/归档退役，不新增终态reader或写者权限。原history末raw、身份/角色/P4/freshP2及当前P1/P3/drain/producer seal保持，单次snapshot未知不捕获为成功、无重试/新registry。
+
+406心跳与409原canonical归档交错证明原全域末等值与现有合同冲突；402真实第二代末检栈原失败保留，当次双raw缺失不指定文件。实现与新增运行回归仅候选，最终双OSpyc及独立新样本由根后验；详见[原角色生命周期合同](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
 ## 2026-10-18 前端范围撤回
 
 按用户明确要求，删除独立 `frontend/`、未接生产 Gateway 的 Python 只读仪表盘、两份前端计划及三份专属测试。TUI、CLI、飞书、Gateway API，以及 YAML/dataclass/parameter_registry 的配置权威和 owner/actor/凭据边界保持。后续前端结合用户已有方案，在多进程改造完成后另行讨论。
