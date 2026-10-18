@@ -1,3 +1,9 @@
+## 待确认候选与策展派发资格（362，已实现待独审）
+
+待用户确认的候选不再单独唤醒owner或创建interval策展批次；host的auto_eligible来源资格、原候选selector和正式提交确认门保持。真实消息/审计、原pending reason、有效或旧lease恢复、原时间/日终仍按既有链处理；完整source SHA、P3/额度和停止门不变。原conservative_v1仅保留已合法触发批次中的候选处理尝试和结构化回执，manual_only跳过尝试，两者均不授自动正式发布。
+
+语义边界：候选only也不再偶然触发已提交删除墓碑清理；原显式remember/review恢复及真实输入/日终提交后的selector保持，不新增cleanup scheduler或fallback，也不宣称所有自动恢复调度不变。组件与严格门另见TESTS；实际352失败和snapshot内部reason未知保持，不以切片回归代整体/发行验收。
+
 ## 2026-10-17 F3 最终写入闭包已整合（待统一验收）
 
 USER/SOUL沿原人格库、配额、版本CAS和恢复顺序，仅C本地写叶消费当前原source.perform；默认False原调用形状与120项默认AST保持。105独立复核发现的两个FD清理出口会盖掉失源错误，108已修且109独立1409项、原同字节两反例及112无源码origin夹具通过；固定close只尝试一次，必要FD释放不授予补偿写入。三个原调用方同bool透传，不保存source或增加异常状态。

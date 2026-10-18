@@ -146,8 +146,8 @@ memory_curator_timeout_seconds: 90
 memory_curator_workers: 2
 # 后台策展每天在 owner 当地时间的几点做每日收尾，取值 0-23。
 memory_curator_daily_finalize_hour: 23
-# 后台记忆整理时是否自动晋升够格的候选记忆。
-# 如果你希望所有候选都等自己人工确认、不让程序自动写入长期记忆，就把它改成 `manual_only`；取值 `conservative_v1` 表示只自动晋升证据精确、没有冲突的新长期事实。
+# 已有合法策展批次中的候选处理策略：`conservative_v1` 保留候选处理尝试及结构化回执，`manual_only` 跳过该尝试。
+# 两者都不以模型输出或宿主资格替代用户确认，不能自动写入正式长期记忆、人格、教训或 HOT；待确认候选本身不会触发新批次。
 memory_curator_auto_promotion_policy: "conservative_v1"
 # 普通教训晋升为长期记忆所需的最少独立观察次数。
 memory_lesson_min_occurrences: 2

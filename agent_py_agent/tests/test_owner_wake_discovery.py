@@ -616,7 +616,7 @@ def test_corrupt_curator_state_not_discovered(tmp_path) -> None:
 
 
 def test_curator_pending_review_candidate_discovered(monkeypatch, tmp_path) -> None:
-    """candidates.jsonl 有 user_explicit/tool_verified 待晋升候选 → 策展活,与晋升兜底同源。"""
+    """保留原node义务：候选only不是新可执行工作，不唤醒owner或改写候选/state。"""
     from agent_py_agent.agent import owner_wake_discovery
 
     monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
@@ -631,8 +631,12 @@ def test_curator_pending_review_candidate_discovered(monkeypatch, tmp_path) -> N
         encoding="utf-8",
     )
 
+    state_before = (home / "memory" / "curator" / "state.json").read_bytes()
+    candidate_before = (home / "memory" / "candidates.jsonl").read_bytes()
     found = discover_wake_pending_owners(owners)
-    assert [o.owner_id for o in found] == ["u-cand"]
+    assert [o.owner_id for o in found] == []
+    assert (home / "memory" / "curator" / "state.json").read_bytes() == state_before
+    assert (home / "memory" / "candidates.jsonl").read_bytes() == candidate_before
 
 
 def test_candidate_review_status_ignored(monkeypatch, tmp_path) -> None:

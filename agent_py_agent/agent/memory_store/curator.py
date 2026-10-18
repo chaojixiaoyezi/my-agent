@@ -1,5 +1,5 @@
 # LLM: 原策展只提交候选且正式内容仍需F4用户确认；入口空短核与文件短事务均消费原平台门，模型等待不持T，未结原对象不得失败清账。
-# 模块用途: 运行原按组策展并在真实请求窗口内落候选、游标和失败事实，不扩正式写权限。
+# 模块用途: 运行真实输入/原pending/日终触发的按组策展，落候选、游标和失败事实，不凭待审候选新增运行或扩大正式写权限。
 from __future__ import annotations
 
 """Gateway 正式后台主链使用的唯一 Memory Curator 服务。"""
@@ -194,8 +194,8 @@ class _CuratorLifecycleMixin:
             "requested_at": state.pending_requested_at,
         }
 
-    # LLM: 到期运行只依据配置、租约与前台资源事实；普通维护遇前台延后，pre_compact仍守原屏障。
-    # 函数用途: 按持久状态与前台资源事实调度到期批次，不从正文判断优先级。
+    # LLM: 到期运行只依据配置、租约和真实输入/日终；待确认候选不单独触发空run，普通维护遇前台延后，pre_compact仍守原屏障。
+    # 函数用途: 按原pending、输入和时间事实调度到期批次，不以候选来源资格替代当前工作或用户确认。
     # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
     # 函数用途: 在原请求仍开放时开始策展，保留既有到期调度、按组提取和用户正式确认。
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
@@ -236,14 +236,6 @@ class _CuratorLifecycleMixin:
             return self.run(reason="interval", now=current)
         if _daily_finalize_due(state, current, self.config.daily_finalize_hour):
             return self.run(reason="daily_finalize", now=current)
-        # 框架兜底:无新消息但存在【已落库、待晋升的合格候选】时,也触发晋升——否则候选落库后
-        # 若 curator 不再 run(无新消息),pending_review 的 user_explicit 候选永远不晋升
-        # (真机:longdoc 长文档提炼10条候选后 pending=[] 停摆,晋升不触发)。
-        # 纯结构化判据:只读候选账本里 pending_review 的候选数,不解析正文。
-        pending_promotable = self._pending_promotable_candidate_ids(limit=32)
-        if pending_promotable:
-            # 积压补晋升也经同一恢复/租约/提交链，不能绕过迁移互斥闸。
-            return self.run(reason="interval", now=current)
         return self._result(status="not_due", reason="interval")
 
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries

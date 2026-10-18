@@ -1,3 +1,5 @@
+<!-- 362：新增候选派发资格运行测试；只收紧两处候选only触发，不改变正式确认或恢复入口。 -->
+
 ## 2026-10-17 冷记忆C2与holder候选增量
 
 ```text
@@ -734,6 +736,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `agent_py_agent/tests/test_curator_dispatch_eligibility.py`：区分待确认候选资格与新策展工作，验证完整字节稳定和原pending/lease/输入/日终入口。
 
 - `persona_storage_io`只选择原本地IO策略，固定close不发行恢复权；原人格/版本/配额仍各守唯一算法。`coordinator_owner_management`复用原factory command/source/receipt，ExitStack维持原借用、global scope和seal至父complete/event结束，不增加第二调度或授权账。
 
@@ -2476,6 +2480,7 @@ agent_py_agent/
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_curator_dispatch_eligibility.py # 待确认候选不单独运输/策展，保pending、旧lease、新输入与日终
 |   |-- test_curator_recovery_race.py  # Curator 双进程发现/清理交错与唯一恢复执行
 |   |-- test_curator_recovery_critical_section.py # Curator manifest重验、清理审计领取持锁与异常释放
 |   |-- test_curator_thread_model_routing.py # 记忆整理按会话主代理模型分组：各调各的、失败不重复落账、坏 JSON 用默认补跑、按组熔断、路由只读

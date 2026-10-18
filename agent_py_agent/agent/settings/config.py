@@ -410,6 +410,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 记忆策展使用独立后台车道；限制并发可避免历史 owner 积压抢占主会话/子代理唤醒线程。
     memory_curator_workers: int = 2
     memory_curator_daily_finalize_hour: int = 23
+    # LLM: 仅控制已合法触发批次的候选尝试，不签正式发布或候选only派发；与YAML/Curator/原确认末门同步。
+    # 字段用途: conservative_v1保留结构化候选处理回执，manual_only跳过；两者正式提交均需用户确认。
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3

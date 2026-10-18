@@ -1,3 +1,7 @@
+## 待确认候选不单独派发策展（362，候选验证）
+
+新增 `test_curator_dispatch_eligibility.py` 18项运行行为：pending_review/approved在conservative_v1、manual_only和无callback时均不提供新curator运输候选，run_if_due返回not_due并保完整state/candidate bytes和revision；原pending/pre_compact、有效与过期lease、新输入、日终正例保留。原351同字节新文件12F6P保留；候选原10文件及新增测试、AST/原guard结果以仓外交接为准，未签整体实际或发行。原229节点首次228P1F中，旧test_curator_pending_review_candidate_discovered恰要求候选only发现；经明确批准保nodeid/原fixture/发现调用，将owner预期迁移为[]并加state/candidate完整bytes不变断言，旧红保留。旧host selector1473和人工确认/自动拒绝断言未改；新增节点必须双OS包内实际执行，不增加source-only或skip。候选only不再偶然触发删除墓碑恢复，原显式恢复与合法批次后处理保持。
+
 ## 原native传输失败的安全诊断（349独审通过，已集成待真实定位）
 
 原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。

@@ -1,3 +1,5 @@
+# LLM: owner恢复仍保pending/旧lease与真实输入/日终；待确认候选不单独成为新策展工作，修改须联测owner/curator/确认合同。
+# 模块用途: 从原owner结构事实恢复后台活跃登记，不替候选授自动执行或正式发布权。
 """磁盘级 owner 唤醒发现:治「盯守转非阻塞后睡死叫不醒」的登记表易失性。
 
 真机实锤(接手文档 §1):scoped owner 的到点唤醒(progress policy)/待处理唤醒信号
@@ -49,7 +51,6 @@ from typing import Any
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from .conversation.task_state import conversation_task_link_is_terminal
 from .gateway_parts.io import update_json_file_atomic
-from .memory_store.candidate_models import host_promotion_mode
 from .runtime_db.repository import (
     AGENT_RUN_TERMINAL_STATUSES,
     RuntimeRepository,
@@ -678,6 +679,8 @@ def _owner_memory_enabled(owner_home: Path) -> bool:
     return effective_memory_enabled(report.payload)
 
 
+# LLM: 原失败退避、pending/旧lease恢复和输入/日终时间边界保持；待用户确认的候选不单独唤醒，不删除候选或恢复责任。
+# 函数用途: 判断owner是否仍有原策展运行/输入事实，区别于候选来源资格与用户正式确认。
 def _has_pending_memory_curator_work(
     owner_home: Path,
     *,
@@ -716,8 +719,6 @@ def _has_pending_memory_curator_work(
         return False
     if state.pending_reasons or state.active_lease:
         # 非空 lease/pending 是文件事实:lease 过期与否都仍判活(旧语义),无时间边界。
-        return True
-    if _has_pending_promotable_candidates(owner_home):
         return True
     # 日终归档从「每天必挂」改为「真到期」:当天没归档且已过归档时刻(23 点)才挂。
     # 注意放 last_success 判定之前——无成功记录的 owner 也要能触发日终归档。
@@ -761,45 +762,6 @@ def _next_daily_finalize_timestamp() -> float:
     if moment <= current:
         moment = moment + timedelta(days=1)
     return moment.timestamp()
-
-
-# LLM: Candidate discovery reads only typed status/promotion fields. New records use the host-owned
-# promotion_mode; the narrow legacy fallback never inspects content and cannot grant formal authority.
-# 函数用途: 判断 owner 是否有待自主晋升或门槛重试的候选，以便 Gateway 重启后仍能唤醒策展器。
-def _has_pending_promotable_candidates(owner_home: Path) -> bool:
-    path = owner_home / "memory" / "candidates.jsonl"
-    if not path.is_file():
-        return False
-    try:
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                except (ValueError, UnicodeError):
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                if str(record.get("status") or "").strip().lower() not in {
-                    "pending_review",
-                    "approved",
-                }:
-                    continue
-                mode = str(record.get("promotion_mode") or "").strip().lower()
-                current_mode = host_promotion_mode(record)
-                if current_mode == "auto_eligible":
-                    return True
-                if mode == "manual_required":
-                    continue
-                # 升级前记录可能没有 promotion_mode。仅保留旧的明确事实来源唤醒语义；
-                # 真正权限会在 CandidateService/PromotionService 重新计算和核验。
-                origin = str(record.get("origin") or "").strip().lower()
-                if origin in {"user_explicit", "tool_verified"}:
-                    return True
-    except OSError:
-        return False
-    return False
 
 
 # LLM: mtime 只用于发现“需要 tick”的 owner；真正 cursor/due 判定仍由 CuratorService 的结构化 state 完成。

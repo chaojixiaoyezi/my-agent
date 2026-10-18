@@ -1,3 +1,9 @@
+## 待确认候选与策展派发资格（362，已实现待独审）
+
+待用户确认的候选不再单独唤醒owner或创建interval策展批次；host的auto_eligible来源资格、原候选selector和正式提交确认门保持。真实消息/审计、原pending reason、有效或旧lease恢复、原时间/日终仍按既有链处理；完整source SHA、P3/额度和停止门不变。原conservative_v1仅保留已合法触发批次中的候选处理尝试和结构化回执，manual_only跳过尝试，两者均不授自动正式发布。
+
+语义边界：候选only也不再偶然触发已提交删除墓碑清理；原显式remember/review恢复及真实输入/日终提交后的selector保持，不新增cleanup scheduler或fallback，也不宣称所有自动恢复调度不变。组件与严格门另见TESTS；实际352失败和snapshot内部reason未知保持，不以切片回归代整体/发行验收。
+
 ## 345原native失败诊断（349独审通过，已集成待真实定位）
 
 新增固定阶段/hash-only原C/W异常诊断；纯组件验证不替代实际修复、三代或发行门。ACK/pin/Future/P3/时限与no-retry全保持；336失败仍保留。精确合同见[角色生命周期说明](../../../docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
