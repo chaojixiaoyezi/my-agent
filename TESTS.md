@@ -1,3 +1,7 @@
+## 积压晋升的租约测试触发合同同步（371，待独审）
+
+`test_agents_cleanup_critical_section.py::test_backlog_promotion_also_holds_curator_lease` 保原nodeid、selector、真实Curator与三条租约/提交断言；保留原run_if_due固定时刻，仅先经原request(task_complete)登记pending再调用，并加强原因与pending消费断言。候选only不再触发空批次，原18项运行回归继续覆盖；原365/full失败和独立同字节not_due失败均保留。此为test-only前提迁移，无生产或测试预算改动，不算原full/实际/包通过。
+
 ## 待确认候选不单独派发策展（362，候选验证）
 
 新增 `test_curator_dispatch_eligibility.py` 18项运行行为：pending_review/approved在conservative_v1、manual_only和无callback时均不提供新curator运输候选，run_if_due返回not_due并保完整state/candidate bytes和revision；原pending/pre_compact、有效与过期lease、新输入、日终正例保留。原351同字节新文件12F6P保留；候选原10文件及新增测试、AST/原guard结果以仓外交接为准，未签整体实际或发行。原229节点首次228P1F中，旧test_curator_pending_review_candidate_discovered恰要求候选only发现；经明确批准保nodeid/原fixture/发现调用，将owner预期迁移为[]并加state/candidate完整bytes不变断言，旧红保留。旧host selector1473和人工确认/自动拒绝断言未改；新增节点必须双OS包内实际执行，不增加source-only或skip。候选only不再偶然触发删除墓碑恢复，原显式恢复与合法批次后处理保持。

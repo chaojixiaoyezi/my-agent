@@ -315,7 +315,7 @@ def test_curator_postcommit_promotion_must_not_overlap_migration(tmp_path, monke
 def test_backlog_promotion_also_holds_curator_lease(tmp_path, monkeypatch):
     service, conversations, _, _ = _setup(tmp_path)
     curator = _curator(tmp_path, conversations, service.candidates)
-    # 无消息、无到期触发；只隔离候选选择，真正运行租约和提交链。
+    # 只隔离积压候选选择；候选only不再触发工作，先由原显式pending入口启动合法批次，再核真实租约和提交链。
     monkeypatch.setattr(curator, "_pending_promotable_candidate_ids", lambda **kwargs: ["backlog"])
     seen = []
 
@@ -324,10 +324,13 @@ def test_backlog_promotion_also_holds_curator_lease(tmp_path, monkeypatch):
         return 1, (), ()
 
     monkeypatch.setattr(curator, "_promote_eligible", promote)
+    curator.request("task_complete")
     result = curator.run_if_due(now=datetime(2026, 10, 9, 12, tzinfo=timezone.utc))
     assert result.status == "succeeded"
     assert seen and all(seen), seen
     assert curator.state_store.load().active_lease == {}
+    assert result.reason == "task_complete"
+    assert curator.state_store.load().pending_reasons == []
 
 
 def _metadata_test_change(actual, field):
