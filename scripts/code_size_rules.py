@@ -1,4 +1,5 @@
-
+# LLM: 尺寸守卫的范围和严重级别只由本模块定义；移除产品目录时同步收起死排除，不放宽现存源码检查。
+# 模块用途: 提供代码尺寸阈值、扫描范围及问题模型，供严格尺寸门和对应测试复用。
 from __future__ import annotations
 
 """constants and finding model for the code-size governance checker."""
@@ -50,7 +51,6 @@ EXCLUDE_PARTS = {
 }
 EXCLUDE_PATH_PREFIXES = {
     "agent_py_agent/data/",
-    "frontend/",
 }
 EXCLUDE_PREFIXES = ("._",)
 EXCLUDE_SUFFIXES = {".pyc", ".pyo"}

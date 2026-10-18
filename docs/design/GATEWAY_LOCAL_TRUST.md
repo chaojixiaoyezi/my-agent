@@ -78,9 +78,7 @@
   - 派活工具 `claude-tools/myagent-dispatch`（走 `submit_gateway_ask` 和 `/control`）；
   - 切换脚本 `switch_gateway.py`（用 `/status` 加信号）——注意 `/status` 在公开白名单里、不需要凭据，但它若还调别的特权入口就要带。
   - 这些工具调 `load_local_client_credential(data_root)` 取凭据，所以这个函数必须是稳定的公开宿主接口。
-- **网页端（`frontend/`，浏览器经回环调 Gateway）**：浏览器读不到 `secrets/` 下的文件，不能照上面的办法。
-  - 现状：Web 面板（`agent/web/dashboard.py`）是独立只读服务、默认不接进生产 Gateway 控制面（我盘点时没找到生产接线），所以第一期网页端不是控制面客户端，无需凭据。
-  - 将来网页端要调控制面时：由宿主在**服务端**把凭据注入到它发出的页面/会话里（页面是宿主经回环发的，宿主读得到文件），浏览器只转发宿主给它的凭据，绝不自己去读文件。这条留给网页端接入时单独设计，本稿只定“浏览器不读文件、凭据由宿主注入”这条边界。
+- **网页端（2026-10-18 已撤出）**：按用户要求删除独立前端和未接生产 Gateway 的只读仪表盘。现有宿主客户端凭据、owner 身份及 HTTP 控制面合同保持；后续前端接入结合用户已有方案另行设计，本期不新增网页端授权入口。
 - **插件宿主 API 受影响，要单独处理**（9b 发现）：`/plugin-host/query` 现在第一道关就是 `require_trusted_source`（`plugin_host_api.py:145`），通过后才验自己的 per-activation 令牌 `X-Plugin-Host-Token`。插件进程拿得到这个令牌，但拿不到本机客户端凭据。G2b 一强制，`require_trusted_source` 要凭据，插件宿主 API 第一关就断；G2a 阶段这些请求也会被当成“不带凭据的回环”，计数永远归不了零。
   - 修法：`/plugin-host/query` 这一条路，把“持有效 `X-Plugin-Host-Token`”也当成满足可信来源——它是宿主按激活发的、模型读不到的强凭据，比通用客户端凭据更强。实现上让这条路的可信判定接受“客户端凭据 **或** 有效 host-API 令牌”二者之一（顺序上先认 host-API 令牌、它有效就放行这条路）。
   - G2a 的计数要相应排除：带有效 host-API 令牌的 `/plugin-host/query` 算“已凭据”，不计进 `uncredentialed_loopback_by_endpoint`。

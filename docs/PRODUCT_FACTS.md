@@ -1,5 +1,9 @@
 # 产品能力与边界
 
+## 2026-10-18 前端范围撤回
+
+按用户明确要求，删除独立 `frontend/`、未接生产 Gateway 的 Python 只读仪表盘、两份前端计划及三份专属测试。TUI、CLI、飞书、Gateway API，以及 YAML/dataclass/parameter_registry 的配置权威和 owner/actor/凭据边界保持。后续前端结合用户已有方案，在多进程改造完成后另行讨论。
+
 本页说明当前代码提供的功能，不把“有实现”当成所有环境均已验证。发布风险与未关闭问题以
 [STATUS](../STATUS.md) 为准，后续开发见 [ROADMAP](ROADMAP.md)，验收方法见 [TESTS](../TESTS.md)。
 旧部署现场、历史性能数据和单次成功记录不作为当前产品承诺。

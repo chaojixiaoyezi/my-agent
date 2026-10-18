@@ -1,3 +1,7 @@
+## 2026-10-18 前端范围撤回
+
+按用户明确要求，删除独立 `frontend/`、未接生产 Gateway 的 Python 只读仪表盘、两份前端计划及三份专属测试。TUI、CLI、飞书、Gateway API，以及 YAML/dataclass/parameter_registry 的配置权威和 owner/actor/凭据边界保持。后续前端结合用户已有方案，在多进程改造完成后另行讨论。
+
 ## 待确认候选与策展派发资格（362，已实现待独审）
 
 待用户确认的候选不再单独唤醒owner或创建interval策展批次；host的auto_eligible来源资格、原候选selector和正式提交确认门保持。真实消息/审计、原pending reason、有效或旧lease恢复、原时间/日终仍按既有链处理；完整source SHA、P3/额度和停止门不变。原conservative_v1仅保留已合法触发批次中的候选处理尝试和结构化回执，manual_only跳过尝试，两者均不授自动正式发布。

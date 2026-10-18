@@ -1,3 +1,7 @@
+## 2026-10-18 前端目录移除
+
+本轮删除 `frontend/`、`agent_py_agent/agent/web/`、`docs/frontend/`，以及 `test_backend_config_catalog.py`、`test_frontend_settings_labels.py`、`test_web_dashboard.py`；这些目录和测试不再属于当前文件树。保留后端配置登记、Gateway HTTP/API、CLI/TUI/IM 及业务能力包。
+
 <!-- 362：新增候选派发资格运行测试；只收紧两处候选only触发，不改变正式确认或恢复入口。 -->
 
 ## 2026-10-17 冷记忆C2与holder候选增量
@@ -2078,8 +2082,6 @@ agent_py_agent/
 |   |-- test_parameter_registry.py     # 参数中心登记表：覆盖全部字段、YAML 说明（上方注释优先，其次行尾注释）、空说明基线、安全等级、凭据脱敏、搜索排序、派生实际效果、常用层级守卫
 |   |-- test_constants_catalog.py      # 常数目录守卫（P10）：目录与源码一致、待整改白名单只短不长、协议类排除、单位/类别/扫描样例、运行时搜索
 |   |-- fixtures/constants_catalog_pending_fixes.json # 常数目录待整改白名单：无单位后缀或无上方中文说明的历史遗留（只短不长）
-|   |-- test_backend_config_catalog.py # 前端参数目录守卫（不依赖 node）：随包 YAML 键集合==目录键集合、目录说明与后端一致、restartRequired 全 true
-|   |-- test_frontend_settings_labels.py # 前端设置页守卫（不依赖 node）：设置页 label 键必须在权威键集合、store 引用的运行时配置组必须存在
 |   |-- fixtures/parameter_description_baseline.json # 说明为空的参数基线名单（按原因分组）；名单外新增或名单里已有说明/已删除都让测试失败
 |   |-- test_structured_masking.py     # 字典/列表参数结构脱敏：请求头与环境变量只留键名，任意开关后的“名字: 值/名字=值”只留名字，凭据开关、连接串与网址密码遮值，各回显与记账出口无明文
 |   |-- test_value_display_parity.py   # 回显值文字一致：8 种值（False/0/True/None/空串/空列表/空映射/凭据）在 user_config 查看/搜索/改参回执、/settings show、config get 下显示相同，聊天空值显示“（空）”，走不到的格子核对原因

@@ -1,3 +1,7 @@
+## 2026-10-18 用户授权撤出前端的验收范围
+
+删除已撤出产品的三份专属测试，共11个原节点；无新增skip、xfail或运行豁免。原365/373全仓与catalog说明不同步失败保持原件，不改判通过。原640运行义务、158夹具义务和native/formal义务不变；43源码专用清单仅移除被删catalog的4项，变为39，包与资源图须从新源重建。后端配置、架构守卫、发行打包与多进程focused、完整本地严格gate及新源全仓结果以同源仓外回执为准，旧源通过不能替代。
+
 ## 积压晋升的租约测试触发合同同步（371，待独审）
 
 `test_agents_cleanup_critical_section.py::test_backlog_promotion_also_holds_curator_lease` 保原nodeid、selector、真实Curator与三条租约/提交断言；保留原run_if_due固定时刻，仅先经原request(task_complete)登记pending再调用，并加强原因与pending消费断言。候选only不再触发空批次，原18项运行回归继续覆盖；原365/full失败和独立同字节not_due失败均保留。此为test-only前提迁移，无生产或测试预算改动，不算原full/实际/包通过。
