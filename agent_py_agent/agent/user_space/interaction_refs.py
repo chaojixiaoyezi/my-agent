@@ -1,3 +1,5 @@
+# LLM: 模型子卡可显式只读既有key签名；默认首次创建/MAC公式与原payload合同不变，不从引用派生新权限。
+# 模块用途: 保持单一交互密钥与结构化签名引用，缺失/坏密钥不在只读签名路径重建。
 # LLM: 私密交互引用只证明宿主发出的精确 owner/执行/接收者投影；验证方仍须核对当前 actor、执行代次和原账，不将引用当工具批准。
 # 模块用途: 为跨群/私聊审批及凭据卡签名，密钥留在原受保护的 owner 托管存储，不进入模型或日志。
 from __future__ import annotations
@@ -22,9 +24,10 @@ from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
 from .owner_resolver import OwnerIdentity, resolve_owner_home
 
 
+# LLM: 首次C模型菜单仅在原source内显式blocking=False尝试原key锁；默认True与create=False只读语义不变，不能用缺key证明许可。
 # LLM: 只在宿主创建密钥，已有坏记录不重置；保护目录由 owner 初始化先建，文件与目录均用原私有权限写入。
 # 函数用途: 读取单一 owner 的交互签名密钥，首次明确创建时原子落盘。
-def interaction_key(owner_home: Path, *, create: bool = False) -> bytes:
+def interaction_key(owner_home: Path, *, create: bool = False, blocking: bool = True) -> bytes:
     directory = owner_home.joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS)
     path = directory / "key.json"
     if directory.is_symlink() or path.is_symlink() or not directory.resolve().is_relative_to(owner_home.resolve()):
@@ -35,7 +38,7 @@ def interaction_key(owner_home: Path, *, create: bool = False) -> bytes:
         if not path.is_file():
             raise ValueError("私密交互密钥不可用")
         return _key_from_payload(read_json_object_report(path, context="interaction.key").payload)
-    with locked_json_path(path):
+    with locked_json_path(path, **({} if blocking else {"blocking": False})):
         report = read_json_object_report(path, context="interaction.key")
         if report.load_error:
             raise ValueError("私密交互密钥不可读")
@@ -57,12 +60,12 @@ def _key_from_payload(payload: dict[str, object]) -> bytes:
     return value
 
 
-# LLM: owner 来自宿主规范身份，payload 只是结构化引用；签名不含秘密正文，不允许调用方从 prompt 选择 owner。
+# LLM: 默认创建合同不变；已有原MAC回调派子卡显式create_key=False只读原key，缺失/坏key不得重建。owner 来自宿主规范身份，payload 只是结构化引用；签名不含秘密正文，不允许调用方从 prompt 选择 owner。
 # 函数用途: 生成原接收者可在私聊提交的精确交互引用。
-def sign_interaction_reference(owner_home: Path, payload: dict[str, object]) -> str:
+def sign_interaction_reference(owner_home: Path, payload: dict[str, object], *, create_key: bool = True) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
-    signature = hmac.new(interaction_key(owner_home, create=True), b"im-interaction-v1\0" + raw, hashlib.sha256).hexdigest()
+    signature = hmac.new(interaction_key(owner_home, create=create_key), b"im-interaction-v1\0" + raw, hashlib.sha256).hexdigest()
     return f"ir1.{encoded}.{signature}"
 
 

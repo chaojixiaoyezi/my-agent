@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -64,13 +65,14 @@ class TestResolveWorkspaceRoot:
 
     def test_resolve_workspace_root_default(self, tmp_path: Path):
         """测试默认工作区根目录。"""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import resolve_workspace_root
 
-        config = MagicMock()
+        config = AgentConfig(my_agent_home=str(tmp_path / "home"))
         config.workspace_root = ""
 
         result = resolve_workspace_root(config, str(tmp_path / "config.yaml"))
-        # 默认返回 ROOT（包目录）
+        # 默认按当前结构化 owner 返回其家目录。
         assert result is not None
 
     def test_resolve_workspace_root_from_config(self, tmp_path: Path):
@@ -80,7 +82,9 @@ class TestResolveWorkspaceRoot:
         custom_root = tmp_path / "custom_workspace"
         custom_root.mkdir(parents=True)
 
-        config = MagicMock()
+        from agent_py_agent.agent.settings import AgentConfig
+
+        config = AgentConfig(my_agent_home=str(tmp_path / "home"))
         config.workspace_root = str(custom_root)
 
         result = resolve_workspace_root(config, str(tmp_path / "config.yaml"))
@@ -88,9 +92,10 @@ class TestResolveWorkspaceRoot:
 
     def test_resolve_workspace_root_relative(self, tmp_path: Path):
         """测试相对路径解析。"""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import resolve_workspace_root
 
-        config = MagicMock()
+        config = AgentConfig(my_agent_home=str(tmp_path / "home"))
         config.workspace_root = "relative/path"
 
         config_path = tmp_path / "config" / "config.yaml"
@@ -102,9 +107,10 @@ class TestResolveWorkspaceRoot:
 
     def test_resolve_workspace_roots_list(self, tmp_path: Path):
         """workspace_root can be a list; first item remains the primary root."""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import resolve_workspace_root, resolve_workspace_roots
 
-        config = MagicMock()
+        config = AgentConfig(my_agent_home=str(tmp_path / "home"))
         config.workspace_root = ["primary", "extra"]
 
         config_path = tmp_path / "config" / "config.yaml"
@@ -136,9 +142,10 @@ class TestResolveWorkspaceRoot:
 
     def test_resolve_workspace_root_expanduser(self, tmp_path: Path):
         """测试 ~ 展开。"""
+        from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import resolve_workspace_root
 
-        config = MagicMock()
+        config = AgentConfig(my_agent_home=str(tmp_path / "home"))
         config.workspace_root = "~/my_workspace"
 
         result = resolve_workspace_root(config, str(tmp_path / "config.yaml"))
@@ -154,7 +161,7 @@ class TestMakeAgent:
         from agent_py_agent.agent.settings import AgentConfig
         from agent_py_agent.cli.common import make_agent
 
-        args = MagicMock()
+        args = Namespace(workspace_root="")
         args.config = str(tmp_path / "config.yaml")
 
         config_file = tmp_path / "config.yaml"
@@ -175,6 +182,7 @@ class TestMakeAgent:
 
                 result = make_agent(args)
                 assert result is not None
+                mock_load.assert_called_once_with(args.config)
 
     def test_make_agent_uses_explicit_workspace_root_override(self, tmp_path: Path):
         """内部后台命令传 workspace root 时，不能再被当前 cwd 污染。"""
@@ -185,7 +193,7 @@ class TestMakeAgent:
         config_file = tmp_path / "config.yaml"
         config_file.write_text("workspace_root: .\n", encoding="utf-8")
 
-        args = MagicMock()
+        args = Namespace(workspace_root="")
         args.config = str(config_file)
         args.workspace_root = str(explicit_root)
 
@@ -200,6 +208,7 @@ class TestMakeAgent:
             with patch("agent_py_agent.cli.common.SimpleAgent") as mock_agent_cls:
                 make_agent(args)
 
+        mock_load.assert_called_once_with(args.config)
         expected = explicit_root.resolve()
         assert mock_config.workspace_root == [str(expected)]
         assert mock_agent_cls.call_args.args[1] == expected

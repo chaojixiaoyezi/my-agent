@@ -1,5 +1,6 @@
 # LLM: 真实Agent认证配置与CLI共用原factory，漏middleware不得降为无鉴权；HTTP传输沿唯一结构化分发表，观察复用同一路由模板；启动先确保/绑定持久凭据，秘密不进状态、日志或环境。
-# 模块用途: 提供有界 Gateway HTTP 监听器与宿主客户端入口。
+# LLM: 正count只拥有零IO记忆holder；stop先关准入再沿原HTTP关闭，不缓存请求来源、不flush未落盘信号。
+# 模块用途: 提供有界Gateway HTTP监听器及同C领域资源寿命，C3未闭合不开放记忆写链。
 from __future__ import annotations
 
 """HTTP service for gateway using a bounded standard-library HTTP server.
@@ -29,6 +30,7 @@ from ..auth.configuration import build_gateway_auth_middleware, validate_gateway
 from ..runtime_errors import runtime_error_report
 from .bounded_http_server import GatewayBoundedHTTPServer
 from .http_handlers import (
+    _coordinator_business_wait,
     handle_admin_summary,
     handle_ask,
     handle_client_history,
@@ -49,6 +51,7 @@ from .http_handlers import (
     handle_stop,
 )
 from .io import update_json_file_atomic
+from .multiprocess_http_transport import original_http_birth, require_http_transport
 from .local_client_token import LocalClientCredentialError, ensure_local_client_credential
 from .http_routes import GATEWAY_HTTP_ROUTES as GATEWAY_HTTP_ROUTES, match_gateway_http_route
 from ..path_access_policy import agent_home_root_for_owner
@@ -65,7 +68,7 @@ if TYPE_CHECKING:
 _server_instance: GatewayHTTPServer | None = None
 
 
-# LLM: 原依赖只决定监听和认证；没有迁移开关，无中间件是显式单机无鉴权边界。
+# LLM: 原C只运输同次control/runtime，不签handler权限；认证沿main唯一factory和G1，无弱化开关，None保Count0。
 # 类用途: 绑定宿主 Agent、原认证服务和监听地址，标准启动必须准备 G1 凭据。
 @dataclass(frozen=True)
 class GatewayHTTPServerParams:
@@ -74,6 +77,9 @@ class GatewayHTTPServerParams:
     auth_middleware: AuthMiddleware | None = None
     bind_host: str = "127.0.0.1"  # 默认仅本机可达;暴露到网络须配鉴权(见 _guard_network_exposure)
     agent: SimpleAgent | None = None
+    # 原C控制面与排空Runtime由同一启动组合根注入，None保Count0，不从队列或Agent猜C身份。
+    control_plane: Any = None
+    drain_runtime: Any = None
 
 
 # 回环地址:仅本机可达。空串/0.0.0.0/::/LAN IP 一律判非回环(=暴露到网络,须鉴权)。默认仅监听回环地址。
@@ -171,8 +177,8 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._dispatch_route("POST")
 
-    # LLM: 同一个 route 决定凭据层级、处理器及有界计数；认证先于 body 读取/业务副作用，插件令牌沿独立原合同。
-    # 函数用途: 拒绝无凭据特权调用，通过后调用原处理器，公开查询保持可用。
+    # LLM: 同route先原凭据门；C历史/recent走原只读leaf，私卡与模型交各自原handler逐项守门；/control其它kind仍waiting，Count0权限不变。
+    # 函数用途: 在读body前认证，再分发C只读历史、最近记忆、受限私卡及模型处理器，不扩其它业务权限。
     def _dispatch_route(self, method: str) -> None:
         self._inject_auth_middleware()
         route = match_gateway_http_route(method, self.path)
@@ -187,6 +193,14 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
                 if require_trusted_source(self):
                     return
+        if (route.access_tier == "credential"
+                and (route.template.startswith("/client/") or route.template in {"/control", "/control-status/*"})
+                and route.template not in {"/client/history", "/client/memory", "/client/private-interaction", "/client/models", "/control", "/control-status/*"}
+                and not (route.template == "/control" and self.headers.get("X-My-Agent-Control") == "global-write-v1")):
+            waiting = _coordinator_business_wait(_server_instance)
+            if waiting:
+                self._send_json(503, waiting)
+                return
         if route.handler_module:
             module = importlib.import_module(route.handler_module, __package__)
             getattr(module, route.handler_name)(self, _server_instance)
@@ -334,11 +348,14 @@ def local_credential_data_root(agent: object) -> Path | None:
 # exposure checks before bind, preserve the module-global handler context, and stop cleanly without
 # changing request/owner serialization inside Gateway services.
 # 类用途: 启动、记录故障并关闭 Gateway 的唯一 HTTP 监听器。
+# LLM: 原服务拥有设施及零IO领域holder，Count0不新建holder；启动/认证顺序不变，关闭先撤记忆准入。
+# 类用途: 管理同一个Gateway监听器与其原资源引用，不作为owner或业务执行权限。
 class GatewayHTTPServer:
 
+    # LLM: 同次C control/runtime只保存原引用；构造不bind、不生成凭据或改全局指针，启动另核真实来源。
     # LLM: Construction stores dependencies only; it must not bind a socket or mutate the global
     # server pointer before start() passes the network exposure guard.
-    # 函数用途: 保存端口、路径、鉴权和 Agent 依赖，等待显式 start 启动监听。
+    # 函数用途: 保存端口、路径、鉴权和Agent依赖；正count只建零IO记忆holder，等待显式start监听。
     def __init__(
         self,
         port: int,
@@ -357,6 +374,13 @@ class GatewayHTTPServer:
         self.auth_middleware = server_params.auth_middleware
         self.bind_host = server_params.bind_host
         self.agent = server_params.agent
+        self.control_plane = server_params.control_plane
+        self.drain_runtime = server_params.drain_runtime
+        self.coordinator_memory_resources = None
+        if self.control_plane is not None and self.control_plane.worker_count > 0:
+            from .coordinator_memory_resources import CoordinatorMemoryResources
+
+            self.coordinator_memory_resources = CoordinatorMemoryResources(self.control_plane, self.drain_runtime, paths)
         self.server: GatewayBoundedHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -378,8 +402,10 @@ class GatewayHTTPServer:
 
     # LLM: 唯一监听启动点，原认证配置/依赖、暴露及G1检查先于bind/全局指针；漏middleware自动保护，不安全部署拒绝，
     #   拒绝发生在设置全局指针与 bind 之前；停机不删凭据。
-    # 函数用途: 检查暴露边界、准备本机凭据状态后启动 HTTP 服务线程。
+    # LLM: C设施源在认证/凭据/全局副作用前核，原controller/lease末门内保pool/listener出生；等待和关闭门外，原main鉴权/端口保护保持。
+    # 函数用途: 保留同一次真实设施来源后启动HTTP，ACK失败仍留原Runtime资源责任。
     def start(self) -> None:
+        require_http_transport(self.drain_runtime, control=self.control_plane, paths=self.paths)
         self._prepare_authentication()
         self._guard_network_exposure()  # fail-closed 必须先于任何全局副作用(拒绝时不污染 _server_instance)
         self._prepare_local_credential()
@@ -387,15 +413,28 @@ class GatewayHTTPServer:
         _server_instance = self
         self.last_error_report = None
 
-        self.server = GatewayBoundedHTTPServer(
-            (self.bind_host, self.port),
-            GatewayHTTPHandler,
-        )
-        self.server.server_version = "MyAgentGateway/1.0"
-        self.server.handler_class = GatewayHTTPHandler
-
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        group = (self.drain_runtime.prepare_pool("control", "http/requests")
+                 if self.drain_runtime is not None else None)
+        with original_http_birth(self.drain_runtime, control=self.control_plane, paths=self.paths):
+            options = {} if group is None else {
+                "request_worker_initializer": group.remember_current_thread,
+                "request_worker_failure": group.retain_fault,
+                "drain_runtime": self.drain_runtime, "drain_resource": group,
+            }
+            self.server = GatewayBoundedHTTPServer((self.bind_host, self.port), GatewayHTTPHandler, **options)
+            if group is not None:
+                group.bind_executor(self.server._request_executor)
+            self.server.server_version = "MyAgentGateway/1.0"
+            self.server.handler_class = GatewayHTTPHandler
+            self._thread = threading.Thread(target=self._serve, daemon=True)
+            listener = (self.drain_runtime.retain_thread("control", "http/listener", self._thread)
+                        if self.drain_runtime is not None else None)
+            try:
+                self._thread.start()
+            except BaseException as error:
+                if listener is not None:
+                    listener.retain_fault(error)
+                raise
         # 插件宿主只读 API 只在本服务运行时可用，地址固定为回环
         from ..plugin_host_api import set_host_api_base
 
@@ -407,32 +446,33 @@ class GatewayHTTPServer:
 
         register_gateway_bound_port(bound_port)
 
-    # LLM: 真实Agent配置是部署权威；显式传mw也不能绕过unsafe模式；缺依赖时复用原factory，None Agent不猜配置。
+    # LLM: 实际Agent或已核原C控制面的冻结配置沿main唯一build/validate入口；保原Agent缺省config读取，显式mw不能绕unsafe，C-only不降无认证。
     # 函数用途: 在原监听/凭据准备前保护受管认证，避免authTrue但调用者漏传middleware时静默开放。
     def _prepare_authentication(self) -> None:
-        if self.agent is None:
+        if self.agent is None and self.control_plane is None:
             return
-        config = getattr(self.agent, 'config', None)
+        config = getattr(self.agent if self.agent is not None else self.control_plane, "config", None)
         validate_gateway_auth_configuration(config, self.auth_middleware)
         if self.auth_middleware is None:
             self.auth_middleware = build_gateway_auth_middleware(config)
 
-    # LLM: 数据根只从真实 Agent.home_paths.owner_home_dir 经共享 canonical 推导取得；缺失属性是合同错误，None Agent 不授权队列路径写凭据。
+    # LLM: 数据根只认真实Agent或原C prepare_local_credential末门；不从队列猜根，C-only仍沿main强G1失败拒绝。
     #   受管服务准备失败即拒绝；仅无 Agent 且无认证的独立单机监听器记录 unavailable。凭据不进入状态或 env。
     # 函数用途: 准备持久本机客户端凭据，保护任务恢复前的启动边界。
     def _prepare_local_credential(self) -> None:
         try:
-            credential = prepare_local_client_credential(self.agent)
+            credential = (self.control_plane.prepare_local_credential() if self.control_plane is not None
+                          else prepare_local_client_credential(self.agent))
         except LocalClientCredentialError as exc:
             self._degrade_or_refuse(exc.reason_code)
             return
         self._apply_local_credential(credential, "ok")
 
-    # LLM: 有 Agent 或认证服务时凭据不可用必拒绝，不能因为旧配置 false 降级；不覆盖坏文件或轮换。
+    # LLM: 有Agent、认证或原C时凭据不可用必拒绝，不能因旧false/None Agent降级；不覆盖坏文件或轮换。
     # 函数用途: 保存安全原因码并拒绝受管启动，仅独立无鉴权监听器保留不可用状态。
     def _degrade_or_refuse(self, reason_code: str) -> None:
         self._apply_local_credential("", f"unavailable:{reason_code}")
-        if self.agent is not None or self.auth_middleware is not None:
+        if self.agent is not None or self.auth_middleware is not None or self.control_plane is not None:
             raise GatewayLocalCredentialRequired(reason_code)
 
     # LLM: 凭据值、公开状态与中间件绑定必须同步更新；失败时清空绑定，避免上一轮或坏文件残留可用凭据的错觉。
@@ -473,11 +513,15 @@ class GatewayHTTPServer:
                 ),
             }
 
+    # LLM: 先关同C记忆借用/末写准入，再沿原HTTP及插件关闭序；不在stop刷新pending或跨线程清理构造。
+    # 函数用途: 停止原服务，并使已有HTTP的后继记忆写失效。
     def stop(self, timeout: float = 5.0) -> None:
         global _server_instance
         from ..plugin_host_api import set_host_api_base
         from .plugin_panels_http import close_plugin_channel
 
+        if self.coordinator_memory_resources is not None:
+            self.coordinator_memory_resources.close_admission()
         set_host_api_base(None)
         # G4：停机时注销本服务登记的 Gateway 端口（在 server_close 前取端口）。
         if self.server:

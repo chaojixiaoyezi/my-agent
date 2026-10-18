@@ -221,7 +221,7 @@ def test_process_capacity_reserves_one_ordinary_call(releases, monkeypatch):
 
 
 @pytest.mark.parametrize("stage", ["context", "construction", "start"])
-def test_preparation_failure_releases_unstarted_call(stage, releases, monkeypatch):
+def test_preparation_failure_releases_only_never_attempted_call(stage, releases, monkeypatch):
     error = RuntimeError("thread setup failed")
     if stage == "context":
         monkeypatch.setattr(bounded.contextvars, "copy_context", Mock(side_effect=error))
@@ -232,7 +232,15 @@ def test_preparation_failure_releases_unstarted_call(stage, releases, monkeypatc
     with pytest.raises(RuntimeError) as caught:
         bounded.call_with_deadline(lambda: None, deadline=time.monotonic() + 2, resource_key="setup-failure")
     assert caught.value is error
-    assert "setup-failure" not in bounded._CALLS
+    if stage == "start":
+        call = bounded._CALLS["setup-failure"]
+        assert call.retained() and call.worker.ident is None
+        with pytest.raises(bounded.BoundedCallBusyError):
+            bounded.call_with_deadline(lambda: None, deadline=time.monotonic() + 2, resource_key="setup-failure")
+        # 本注入器根本未调用真实 start；只移除这一准确合成行，不把无 ACK 推广为生产未出生证明。
+        bounded._CALLS.pop("setup-failure")
+    else:
+        assert "setup-failure" not in bounded._CALLS
 
 
 def test_handle_cannot_be_reused_after_completion_or_cancellation(releases):

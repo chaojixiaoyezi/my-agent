@@ -1,3 +1,5 @@
+# LLM: 保main归档原权限收紧/错误计数；可选原callback只包逐entry chmod，扫描门外，不创建执行权。
+# 模块用途: 维护原归档存储与权限，后台调用沿同次短写门，默认入口原行为不变。
 
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import json
 import os
 import stat
 from datetime import date, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -185,11 +188,12 @@ def enforce_retention(root: str | Path, retention_days: Any, today: date | str |
     return deleted
 
 
-# LLM: 只收紧不放松：宽于 0700/0600（group/other 任一位）才 chmod；符号链接既不收紧也不进入目标；
+# LLM: None保原统计/递归，原callback逐chmod取得短门，遍历门外；不跟随链接、不把撤权计作权限失败。
+#   只收紧不放松：宽于 0700/0600（group/other 任一位）才 chmod；符号链接既不收紧也不进入目标；
 #   chmod 失败按稳定原因码计数并继续，绝不抛给调用方。返回结构化事实：收紧数（文件/目录分开）、
 #   失败数与原因码计数、跳过的符号链接数；调用方（owner 维护）原样写进维护状态。
 # 函数用途: 把 owner memory_archive 目录树里已有文件的权限收紧到 0600、目录收紧到 0700（只改权限，不改内容）。
-def tighten_memory_archive_permissions(archive: str | Path) -> dict[str, Any]:
+def tighten_memory_archive_permissions(archive: str | Path, *, commit_transition=None) -> dict[str, Any]:
     root = Path(archive)
     result: dict[str, Any] = {
         "tightened_count": 0,
@@ -201,15 +205,20 @@ def tighten_memory_archive_permissions(archive: str | Path) -> dict[str, Any]:
     }
     if root.is_symlink() or not root.is_dir():
         return result
-    _tighten_tree(root, result)
+    _tighten_tree(root, result, commit_transition=commit_transition)
     return result
 
 
-# LLM: 先收紧当前目录，再逐项处理子项；scandir 的 follow_symlinks=False 保证不进入符号链接目录、
+# LLM: 原callback只包单entry写，目录扫描不持T；None原调用，不捕获实际未结。
+#   先收紧当前目录，再逐项处理子项；scandir 的 follow_symlinks=False 保证不进入符号链接目录、
 #   也不 chmod 链接目标。计数与失败码都写进同一个 result，调用方不需要第二份账。
 # 函数用途: 递归收紧一个目录树的权限（副作用：chmod 目录与文件、累加 result 计数）。
-def _tighten_tree(directory: Path, result: dict[str, Any]) -> None:
-    _tighten_entry(directory, result, is_directory=True)
+def _tighten_tree(directory: Path, result: dict[str, Any], *, commit_transition=None) -> None:
+    operation = partial(_tighten_entry, directory, result, is_directory=True)
+    if commit_transition is None:
+        operation()
+    else:
+        commit_transition(operation)
     try:
         entries = list(os.scandir(directory))
     except OSError:
@@ -219,10 +228,14 @@ def _tighten_tree(directory: Path, result: dict[str, Any]) -> None:
             result["symlink_skipped_count"] += 1
             continue
         if entry.is_dir(follow_symlinks=False):
-            _tighten_tree(Path(entry.path), result)
+            _tighten_tree(Path(entry.path), result, commit_transition=commit_transition)
             continue
         if entry.is_file(follow_symlinks=False):
-            _tighten_entry(Path(entry.path), result, is_directory=False)
+            operation = partial(_tighten_entry, Path(entry.path), result, is_directory=False)
+            if commit_transition is None:
+                operation()
+            else:
+                commit_transition(operation)
 
 
 # LLM: 目标权限目录 0700、文件 0600；已经不比目标宽就不动（不放松更严的既有权限）。成功才计入

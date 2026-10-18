@@ -1,3 +1,4 @@
+# LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 本模块执行一轮 canonical ToolCall；仅将连续段判定交给 tooling 唯一纯规划器的窄查询，审批、并发、取消与 provider 顺序记账仍由原链负责。
 #   每个未启动调用前的顺序屏障先读本进程模型调用准入是否已关（宿主停机，contracts.model_call_ledger）：关了就不再启动
 #   任何工具，当前及后续调用记成 HOST_SHUTDOWN_TOOL_NOT_STARTED（I3：停机后才到的迟到响应里的工具不执行）；审批通过之后、
@@ -520,7 +521,8 @@ def _build_runtime_approval_request(
 # LLM: 插件引用来自执行器，算好旧ID后附加同源前缀/两选项；无 consumer/unavailable 明确拒绝，插件保留无人审批事实，普通调用不再返回 APPROVAL_REQUIRED。
 #   本进程准入读两次（_closed_admission_execution）：发审批请求前已关门的不再询问，免得停机后在 TUI/IM 多弹一张没用的审批卡
 #   （9b 复核）；批准之后、重新执行之前再读一次，等审批期间关门的不执行、不记批准绑定（I3 复审必须修）。两处都配停机结果。
-# 函数用途: 等待一条审批决定，并在批准时用原 call identity 重新执行同一工具调用。
+# LLM: 原纯退休未结同对象穿透，不写普通unavailable或批准绑定；普通同码错误仍原拒绝。
+# 函数用途: 等待原审批并只在实际批准时执行同一工具；退休责任交原请求Future。
 def _resolve_tool_approval(
     request: ToolRoundExecutionRequest,
     idx: int,
@@ -563,7 +565,12 @@ def _resolve_tool_approval(
         )
     except ModelCallAdmissionClosedError:
         raise  # 宿主安全重启仍交原耐久恢复，不能伪造成用户拒绝并清理活 claim。
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        from ...conversation.agent_tool_approval import capture_approval_retirement_call
+        from ...gateway_parts.private_approval_control import raise_private_approval_transport_error
+
+        capture_approval_retirement_call(error, approval_request, execution, agent=request.agent, params=request.params)
+        raise_private_approval_transport_error(error)
         decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
     if decision.permission_id != approval_request.permission_id:
         decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")

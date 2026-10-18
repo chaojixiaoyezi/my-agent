@@ -154,11 +154,13 @@ def _foreground_runtime_is_current(agent, thread, authority) -> bool:
         return False
 
 
-# LLM: 等待期间只比较 canonical 身份与精确 claim；读取失败等同不可继续，不能自动恢复或替换旧审批。
+# LLM: 等待期间只比原canonical/claim；actual typed未知同对象穿透，普通读取失败仍False，不能恢复或替换旧审批。
 # 函数用途: 判断挂起审批是否仍属于原执行，供中断、换轮和异常后的等待收口。
 def tool_approval_scope_is_current(agent: object, expected: ToolApprovalScope) -> bool:
     try:
         current = tool_approval_scope(agent, expected.run_id)
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        from ..gateway_parts.private_approval_control import raise_private_approval_transport_error
+        raise_private_approval_transport_error(error)
         return False
     return bool(current.active and current == expected)

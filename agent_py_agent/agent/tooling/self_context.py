@@ -1,4 +1,4 @@
-# LLM: 自身发现只投影当前宿主 owner、冻结 actor、运行快照与原权限账；禁止模型指定身份、读取宿主配置正文或产生授权。
+# LLM: 自身发现只投影宿主owner、actor与冻结边界；插件cwd读根与内置读门分别标来源，不读配置正文或产生授权。
 # 模块用途: 为 list_tools 和 /status 提供同源、无秘密的本人身份及执行边界说明。
 from __future__ import annotations
 
@@ -47,7 +47,8 @@ def registry_self_context(registry, snapshot: ToolRuntimeSnapshot, context: Tool
                       'resource_authorization': '工具就绪仍须逐次核对具体文件、网络、凭据和通道资源授权。'}}
 
 
-# LLM: composition root 绑定 agent，模型参数没有 owner/actor 入口；模式来自原策略，文件根来自本调用上下文，网络来自 owner/运行边界。
+# LLM: composition root绑定agent；文件根来自本调用上下文，read_roots明确为插件cwd范围，builtin读门只列冻结模式/数量。
+#   不新增披露exact/墙外路径，不热读currentrun重建读权；工具可见与路径裁决仍由原执行器掌握。
 # 函数用途: 为当前本人生成可公开的身份、真实审批来源、文件与网络范围及线程加载事实。
 def tool_self_context(agent, snapshot: ToolRuntimeSnapshot, context: ToolInvocationContext | None = None) -> dict[str, object]:
     home = getattr(agent, 'home_paths', None)
@@ -70,6 +71,10 @@ def tool_self_context(agent, snapshot: ToolRuntimeSnapshot, context: ToolInvocat
     read = context.workspace_read_context if context is not None else None
     write = context.workspace_write_context if context is not None else None
     roots = [str(root) for root in registry.workspace_roots]
+    frozen = context.execution_permission_context if context is not None else None
+    builtin_mode = (frozen or {}).get("builtin_read_scope_mode", "not_observed")
+    builtin_roots = (frozen or {}).get("builtin_read_roots")
+    builtin_external = (frozen or {}).get("builtin_read_external_roots")
     loaded = thread_loaded_tools(agent, current) if thread_id else set()
     loaded.intersection_update(snapshot.available_tool_names)
     states = registry_self_context(registry, snapshot, context)['tool_states']
@@ -87,6 +92,11 @@ def tool_self_context(agent, snapshot: ToolRuntimeSnapshot, context: ToolInvocat
                            'shell_access_mode': boundary.get('shell_access_mode') or getattr(getattr(agent, 'config', None), 'access_mode', 'unknown'),
                            'owner_scoped': bool(read.path_policy.owner_scope_root) if read else bool(registry.owner_scope_root),
                            'read_roots': [str(root) for root in read.read_roots] if read else _read_roots(boundary, roots),
+                           'read_roots_scope': 'plugin_workspace_context' if read else 'unbound_registry_projection',
+                           'builtin_read_scope': builtin_mode,
+                           'builtin_read_scope_source': 'frozen_executor_context' if builtin_mode in {'exact', 'policy'} else 'not_observed',
+                           'builtin_exact_read_root_count': len(builtin_roots) if isinstance(builtin_roots, tuple) else None,
+                           'builtin_external_read_root_count': len(builtin_external) if isinstance(builtin_external, tuple) else None,
                            'write_roots': [str(root) for root in write.write_roots] if write else _boundary_roots(boundary, roots),
                            'source': 'invocation_context' if context is not None else 'current_runtime'},
             'network': network_self_context(agent, boundary),

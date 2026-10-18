@@ -1,3 +1,5 @@
+# LLM: Count0原Agent资源与冷C显式输入服务共用唯一算法；owner资源工厂组装原quota/child loader/既存RuntimeDB，C每次RMW仍核原producer，不从refs或callback授信。
+# 模块用途: 将原输入行、refs、Wake和deadline事务用于无Agent的真实C入口，保部分提交回放。
 # LLM: 必要输入沿 SessionTaskStore 原目录持久化；它不是执行租约，不复制任务状态或调度队列，Wake 是唯一恢复出口。
 # 模块用途: 登记准确任务的外部输入依赖，归档后让出执行，回调或到期通过原唤醒一次恢复。
 from __future__ import annotations
@@ -22,24 +24,18 @@ from .input_dependency_index import update_task_input_refs
 
 # LLM: 路径只由原 owner SessionTaskStore 和拒绝式 ID 决定；调用方不能传任意文件位置。
 # 函数用途: 返回一条输入依赖的唯一保存位置。
+# LLM: 路径只取原Store同一实现，不从正文或scope猜owner。
+# 函数用途: 保持Agent原输入定位接口。
 def input_dependency_path(agent, input_id: str) -> Path:
-    return agent.conversation_store.session_tasks.storage.session_tasks_dir / 'inputs' / (sha256(input_id.encode()).hexdigest() + '.json')
+    return input_dependency_path_from_store(agent.conversation_store, input_id)
 
 
 # LLM: 配额锁先于TaskStore/输入锁；创建可复用外层 admission，锁内不得执行模型、网络或取得执行权。
 # 函数用途: 原子保存不含秘密的依赖，创建时与根refs容量检查处于同一原任务锁内。
+# LLM: 原Agent调用继续原quota/阻塞锁和私有字节，C使用同一领域实现逐次消费真实门。
+# 函数用途: 更新原输入行，不初始化额外服务。
 def _mutate(agent, input_id, update, *, admission=None):
-    path = input_dependency_path(agent, input_id)
-    quota = nullcontext(admission) if admission is not None else agent.owner_quota.admission()
-    with quota as admission, locked_json_path(path):
-        report = read_json_object_report(path, context='task_input.read')
-        if report.load_error:
-            raise ValueError('输入依赖记录不可读')
-        row = update(dict(report.payload or {}))
-        text = json.dumps(row, ensure_ascii=False)
-        admission.check([OwnerQuotaChange(path, len(text.encode()))])
-        write_private_text_file_atomic_unlocked(path, text)
-    return row
+    return input_dependency_access(agent).mutate(input_id, update, admission=admission)
 
 
 # LLM: child 恢复必须携带原父用户请求，不能把 child run 当成不存在的聊天消息；先读取宿主冻结属性。
@@ -95,29 +91,10 @@ def create_input_dependency(agent, scope, *, input_id, provider, expires_at, ref
 
 # LLM: 取消和终态从原 TaskLink/SessionTask/child 读取，旧 claim 不授予新执行；owner 仍由 canonical 配置核验。
 # 函数用途: 核对私人回调或恢复所需的任务输入绑定，不读取表单值。
+# LLM: 原current算法唯一位于InputDependencyAccess，actor/权限不从本返回值新建。
+# 函数用途: 核对原输入归属及活动任务。
 def input_dependency_current(agent, row):
-    if row.get('owner') != asdict(owner_identity_from_config(agent.config)):
-        return False
-    scope = row.get('scope') or {}
-    try:
-        link, error = agent.conversation_store.tasks.load_report(scope['root_task_id'])
-        if error or link is None or link.status != 'active':
-            return False
-        thread, error = agent.conversation_store.threads.load_report(scope['thread_id'])
-        if error or thread is None:
-            return False
-        if scope.get('agent_kind') == 'subagent':
-            task = agent.subagents.load(scope['run_id'])
-            if task.root_id != scope['root_task_id'] or task.agent_thread_id != scope['thread_id']:
-                return False
-            if str(task.status).upper() in {'CANCELLED', 'FAILED', 'DONE', 'TAKEN_OVER', 'SUPERSEDED'}:
-                return False
-        session_task = agent.conversation_store.session_tasks.load(scope['run_id'])
-        if session_task is not None and session_task.status in {'cancelled', 'failed', 'done'}:
-            return False
-        return True
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
-        return False
+    return input_dependency_access(agent).current(row)
 
 
 # LLM: armed只在完整归档/native配对后写；同一_mutate锁内卡片静默退休不得重臂，泛用cancelled仍按原Wake合同，原子返回终态由边界决定不等待。
@@ -130,44 +107,18 @@ def arm_input_dependency(agent, input_id):
 
 # LLM: 终态单调，重复同决定只补原 Wake；不同决定不能覆盖，超期不能接受 ready。
 # 函数用途: 保存输入完成、取消或到期事实，成功后恢复原任务一次。
+# LLM: 同原终态/期限/锁和Wake顺序，不吞部分提交失败或生成替代决定。
+# 函数用途: 沿原领域事务保存输入决定。
 def resolve_input_dependency(agent, input_id, *, status='ready', result_refs=()):
-    if status not in {'ready', 'cancelled', 'expired', 'revoked', 'failed'}:
-        raise ValueError('输入决定无效')
-    # LLM: 原终态不能被迟到或相反回调改写。
-    # 函数用途: 在锁内保存一次输入决定。
-    def resolve(row):
-        if not row:
-            return _missing()
-        if row['status'] != 'pending':
-            if row['status'] != status:
-                raise ValueError('原输入依赖已结束')
-            return row
-        if status == 'ready' and (time.time() >= row['expires_at'] or not input_dependency_current(agent, row)):
-            raise ValueError('原任务或输入期限已失效')
-        return {**row, 'status': status, 'resolved_at': time.time(), 'result_refs': list(result_refs)}
-    return _publish_resolution(agent, _mutate(agent, input_id, resolve))
+    return input_dependency_access(agent).resolve(input_id, status=status, result_refs=result_refs)
 
 
 # LLM: 仅armed终态发布原去重Wake；终态移除refs放槽，提前结果仍能在归档arming后沿canonical重放。
 # 函数用途: 回收终态等待引用，归档后把已结算依赖交原调度，不在回调里执行工作。
+# LLM: 原调用仍补同键Wake/refs/deadline；C共享同一算法并在每个RMW末核。
+# 函数用途: 发布原输入已存事实，不重复执行任务。
 def _publish_resolution(agent, row):
-    if row.get('armed') and row['status'] != 'pending' and input_dependency_current(agent, row):
-        scope = row['scope']
-        thread_id = scope['thread_id']
-        if scope['agent_kind'] == 'subagent':
-            link, _ = agent.conversation_store.tasks.load_report(scope['root_task_id'])
-            thread_id = link.thread_id
-        agent.conversation_store.wakes.raise_signal({'thread_id': thread_id,
-            'root_task_id': scope['root_task_id'], 'reason': 'task_input_resolved',
-            'source_agent_id': scope['run_id'], 'evidence_refs': row.get('result_refs', []),
-            'metadata': {'schema_version': 'task-input-event.v1', 'input_id': row['input_id'],
-                         'input_status': row['status'], 'input_provider': row['provider'],
-                         'input_run_id': scope['run_id'], 'conversation_request_id': row.get('conversation_request_id', scope['run_id'])},
-            'dedupe_key': 'task-input:' + row['input_id'], 'retain_handled': True})
-    if row['status'] != 'pending':
-        update_task_input_refs(agent, row['scope']['root_task_id'], row['input_id'], remove=True)
-        _schedule_input_deadline(agent, row['scope']['root_task_id'])
-    return row
+    return input_dependency_access(agent).publish(row)
 
 
 # LLM: 不存在的依赖是客观坏绑定，不得创建空记录或恢复其它任务。
@@ -178,19 +129,10 @@ def _missing():
 
 # LLM: 到期沿原 RuntimeDB 的任务级 wake_queue；不同输入取最近期限，不新增定时线程或第二调度队列。
 # 函数用途: 为任务的现存准确输入安排一次期限检查；仅保存查找 refs，状态由原行读取。
+# LLM: 期限仅取原refs/pending行，原repo缺失保持旧合同，不新造调度源。
+# 函数用途: 更新原任务输入deadline。
 def _schedule_input_deadline(agent, task_id):
-    link, error = agent.conversation_store.tasks.load_report(task_id)
-    if error or link is None:
-        raise ValueError('输入任务记录不可读')
-    pending = []
-    for input_id in getattr(link, 'input_dependency_refs', ()):
-        row = read_json_object_report(input_dependency_path(agent, input_id), context='task_input.deadline').payload
-        if row and row['status'] == 'pending':
-            pending.append(row['expires_at'])
-    repo = getattr(getattr(agent, 'subagents', None), 'runtime_db', None)
-    if pending and repo is not None:
-        repo.upsert_wake(root_task_id=task_id, root_thread_id=link.thread_id,
-                         next_due_at=min(pending), kind='task_input_deadline')
+    return input_dependency_access(agent).schedule(task_id)
 
 
 # LLM: 只读取一个准确任务的 refs，不全扫 owner 历史；完成记录先发布原 Wake 再移除投影，失败仍可重试。
@@ -236,9 +178,10 @@ def task_has_waiting_input(agent, task_id):
 
 # LLM: 凭据记录只桥接通用输入 ID，不把密文/表单放入依赖；原人核验在私交互入口。
 # 函数用途: 私卡提交时接受原任务持久绑定；直接存储调用也沿同一依赖。
+# LLM: 保原pending/current判据，不为C添加第二输入schema或改变既有card期限。
+# 函数用途: 核对原卡的待填输入仍可提交。
 def credential_submission_current(agent, row):
-    dependency = read_json_object_report(input_dependency_path(agent, row.get('input_id', row['credential_ref'])), context='credential.input').payload
-    return bool(dependency and dependency['status'] == 'pending' and input_dependency_current(agent, dependency))
+    return credential_submission_current_from_access(input_dependency_access(agent), row)
 
 
 # LLM: 凭据成功 refs 只是 opaque cref，取消不会给模型任何认证值；原 Wake 是唯一续跑出口。
@@ -268,3 +211,170 @@ def cancel_task_inputs(agent, task_id, *, run_id=''):
         _mutate(agent, input_id, cancel)
         update_task_input_refs(agent, task_id, input_id, remove=True)
     _schedule_input_deadline(agent, task_id)
+
+
+# LLM: 本对象只封装原输入领域的真实资源/算法，commit由原producer逐次末核；不提供Agent接口、不签claim或新scope。
+# 类用途: 让Count0与冷C共用同一输入行/refs/Wake/deadline事务，不初始化业务Agent。
+class InputDependencyAccess:
+    # LLM: owner/store/子任务reader/upsert都由调用组合根提供，路径仍由原Store计算；构造无I/O、不补库或任务。
+    # 函数用途: 保存原输入依赖所需的最小领域资源。
+    def __init__(self, store, owner, quota, load_child, upsert_wake, *, commit=None, blocking=True):
+        self.store, self.owner, self.quota = store, owner, quota
+        self.load_child, self.upsert_wake = load_child, upsert_wake
+        self.commit, self.blocking = commit, blocking
+
+    # LLM: 有commit必须每次消费原门；默认Count0直接调用，不从对象字段推断许可。
+    # 函数用途: 在本次真实提交入口中完成一个原同步RMW。
+    def perform(self, operation):
+        return operation() if self.commit is None else self.commit(operation)
+
+    # LLM: 沿原SessionTaskStore和SHA256定位，不从请求提供路径或创建目录。
+    # 函数用途: 返回原输入行唯一位置。
+    def path(self, input_id):
+        return input_dependency_path_from_store(self.store, input_id)
+
+    # LLM: quota→输入锁及原序列化/私有写不变；新C只缩短锁等待，配额扫描仍在原锁内严格执行。
+    # 函数用途: 在原owner短提交内更新一条输入记录。
+    def mutate(self, input_id, update, *, admission=None):
+        path = self.path(input_id)
+        # LLM: 回调不跨线程/网络，仅在原门内拿原quota和记录锁。
+        # 函数用途: 执行同一原输入RMW并保留读取失败。
+        def commit():
+            quota = nullcontext(admission) if admission is not None else self.quota.admission(blocking=self.blocking)
+            with quota as admitted, locked_json_path(path, blocking=self.blocking):
+                report = read_json_object_report(path, context='task_input.read')
+                if report.load_error:
+                    raise ValueError('输入依赖记录不可读')
+                row = update(dict(report.payload or {}))
+                text = json.dumps(row, ensure_ascii=False)
+                admitted.check([OwnerQuotaChange(path, len(text.encode()))])
+                write_private_text_file_atomic_unlocked(path, text)
+            return row
+        return self.perform(commit)
+
+    # LLM: current是原canonical事实校验，不授新执行；坏任务/owner/child/SessionTask继续原关闭失败。
+    # 函数用途: 核对输入是否仍绑定原活动任务。
+    def current(self, row):
+        if row.get('owner') != asdict(self.owner):
+            return False
+        scope = row.get('scope') or {}
+        try:
+            link, error = self.store.tasks.load_report(scope['root_task_id'])
+            if error or link is None or link.status != 'active':
+                return False
+            thread, error = self.store.threads.load_report(scope['thread_id'])
+            if error or thread is None:
+                return False
+            if scope.get('agent_kind') == 'subagent':
+                task = self.load_child(scope['run_id'])
+                if task.root_id != scope['root_task_id'] or task.agent_thread_id != scope['thread_id']:
+                    return False
+                if str(task.status).upper() in {'CANCELLED','FAILED','DONE','TAKEN_OVER','SUPERSEDED'}:
+                    return False
+            session_task = self.store.session_tasks.load(scope['run_id'])
+            if session_task is not None and session_task.status in {'cancelled','failed','done'}:
+                return False
+            return True
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError):
+            return False
+
+    # LLM: refs依旧原TaskStore updater/32槽规则；只传blocking，不能修改task状态或另建引用账。
+    # 函数用途: 在原门内维护同一任务的输入查找引用。
+    def update_refs(self, task_id, input_id, *, remove=False):
+        from .input_dependency_index import update_task_input_refs_from_store
+        return self.perform(lambda: update_task_input_refs_from_store(self.store, task_id, input_id,
+            remove=remove, blocking=self.blocking))
+
+    # LLM: 原row终态单调；ready仍在锁内核期限和current，成功才发布原输入，不生成新任务或执行。
+    # 函数用途: 保存原决定并补齐既有恢复投影。
+    def resolve(self, input_id, *, status='ready', result_refs=()):
+        if status not in {'ready','cancelled','expired','revoked','failed'}:
+            raise ValueError('输入决定无效')
+        # LLM: 同决定重放不改期限/结果，异决定拒绝。
+        # 函数用途: 在原记录锁内推进一次原终态。
+        def update(row):
+            if not row:
+                return _missing()
+            if row['status'] != 'pending':
+                if row['status'] != status:
+                    raise ValueError('原输入依赖已结束')
+                return row
+            if status == 'ready' and (time.time() >= row['expires_at'] or not self.current(row)):
+                raise ValueError('原任务或输入期限已失效')
+            return {**row,'status':status,'resolved_at':time.time(),'result_refs':list(result_refs)}
+        return self.publish(self.mutate(input_id, update))
+
+    # LLM: 原armed/current才去重发布；Wake成功后refs/deadline仍各自原提交，失败保部分事实供同键重放。
+    # 函数用途: 沿原唯一Wake恢复输入所属任务，不能跳过任何原投影。
+    def publish(self, row):
+        if row.get('armed') and row['status'] != 'pending' and self.current(row):
+            scope = row['scope']
+            thread_id = scope['thread_id']
+            if scope['agent_kind'] == 'subagent':
+                link, _ = self.store.tasks.load_report(scope['root_task_id'])
+                thread_id = link.thread_id
+            request = {'thread_id':thread_id, 'root_task_id':scope['root_task_id'], 'reason':'task_input_resolved',
+                'source_agent_id':scope['run_id'], 'evidence_refs':row.get('result_refs',[]),
+                'metadata':{'schema_version':'task-input-event.v1','input_id':row['input_id'],
+                    'input_status':row['status'],'input_provider':row['provider'],'input_run_id':scope['run_id'],
+                    'conversation_request_id':row.get('conversation_request_id',scope['run_id'])},
+                'dedupe_key':'task-input:'+row['input_id'],'retain_handled':True}
+            self.perform(lambda:self.store.wakes.raise_signal(request, blocking=self.blocking))
+        if row['status'] != 'pending':
+            self.update_refs(row['scope']['root_task_id'], row['input_id'], remove=True)
+            self.schedule(row['scope']['root_task_id'])
+        return row
+
+    # LLM: 只读原refs中的pending期限，写回唯一RuntimeDB wake_queue；没有第二timer/队列或新库。
+    # 函数用途: 为尚存输入保留原最近deadline。
+    def schedule(self, task_id):
+        link, error = self.store.tasks.load_report(task_id)
+        if error or link is None:
+            raise ValueError('输入任务记录不可读')
+        pending = []
+        for input_id in getattr(link,'input_dependency_refs',()):
+            row = read_json_object_report(self.path(input_id), context='task_input.deadline').payload
+            if row and row['status'] == 'pending':
+                pending.append(row['expires_at'])
+        if pending and self.upsert_wake is not None:
+            self.perform(lambda:self.upsert_wake(root_task_id=task_id, root_thread_id=link.thread_id,
+                next_due_at=min(pending), kind='task_input_deadline'))
+
+
+# LLM: 旧入口仅取原Agent依赖，不物化新对象；Count0原callback/初始化/缺repo语义保持。
+# 函数用途: 让原调用方复用唯一输入事务实现。
+def input_dependency_access(agent):
+    manager = getattr(agent,'subagents',None)
+    repo = getattr(manager,'runtime_db',None)
+    return InputDependencyAccess(agent.conversation_store, owner_identity_from_config(agent.config), getattr(agent,'owner_quota',None),
+        getattr(manager,'load',None), getattr(repo,'upsert_wake',None))
+
+
+# LLM: store/owner/路径由调用方原来源冻结；只组装既有配额、canonical child loader和existing-only RuntimeDB，不创建Agent/owner/新库；commit逐次原位验权。
+# 函数用途: 给没有业务Agent的同一owner入口组装完整输入依赖资源，保持原加载、配额和Wake算法。
+def input_dependency_owner_resources(store, owner, *, owner_home, subagent_workspace, commit, blocking):
+    from functools import partial
+
+    from ..runtime_db.repository import RuntimeRepository
+    from ..runtime_db.schema import runtime_db_path
+    from ..subagents.services.persistence.service import load_subagent_task
+    from ..user_space.owner_quota import owner_quota_enforcer_from_policy
+
+    quota = owner_quota_enforcer_from_policy(owner_home)
+    repo = RuntimeRepository(runtime_db_path(owner_home), existing_only=True)
+    access = InputDependencyAccess(store, owner, quota, partial(load_subagent_task, subagent_workspace),
+        repo.upsert_wake, commit=commit, blocking=blocking)
+    return access, repo
+
+
+# LLM: 路径公式仅此一处，Store必须来自原owner解析；无Agent/current/quota副作用。
+# 函数用途: 为原包装和显式领域服务定位同一输入行。
+def input_dependency_path_from_store(store, input_id):
+    return store.session_tasks.storage.session_tasks_dir / 'inputs' / (sha256(input_id.encode()).hexdigest()+'.json')
+
+
+# LLM: 原同一pending/current算法用于显式领域资源，读取失败不补输入或猜任务。
+# 函数用途: 核对原凭据输入仍待处理。
+def credential_submission_current_from_access(inputs, row):
+    dependency = read_json_object_report(inputs.path(row.get('input_id', row['credential_ref'])), context='credential.input').payload
+    return bool(dependency and dependency['status'] == 'pending' and inputs.current(dependency))

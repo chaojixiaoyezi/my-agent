@@ -1,3 +1,5 @@
+# LLM: 审计唯一文件账保原脱敏/字节/顺序，新增非阻塞只透传原锁，文件失败不得宣称已记录；LocalStore旁路语义保持。
+# 模块用途: 保存原审计事件，C可拒绝显式锁等待，不新建业务事务账。
 
 
 from __future__ import annotations
@@ -61,6 +63,8 @@ def _redact_audit_details(details: dict) -> dict:
     return {key: _redact_audit_value(key, value) for key, value in (details or {}).items()}
 
 
+# LLM: 原文件先于可选LocalStore；文件失败上抛、旁路失败尽力诊断，不把审计条目当业务许可或完成事实。
+# 类用途: 以原格式记录审计，按显式参数选择是否等待同一文件锁。
 class AuditLogger:
 
     def __init__(self, config: AgentConfig, local_store: LocalStore | None = None):
@@ -83,16 +87,22 @@ class AuditLogger:
 
         return f"audit_{int(time.time())}_{uuid.uuid4().hex}"
 
+    # LLM: 默认保原file→localstore写序；C仅给文件锁传False，失败仍原样抛，不把点击审计当业务完成。
+    # 函数用途: 记录同一原审计条目，可选拒绝文件锁等待。
     def log(
         self,
         params: LogParams,
+        *, blocking: bool = True,
     ) -> AuditEntry:
         if not isinstance(params, LogParams):
             raise TypeError("AuditLogger.log() requires LogParams")
         entry = self._entry_from_params(params)
         if not self.enabled:
             return entry
-        self._write_to_file(entry)
+        if blocking:
+            self._write_to_file(entry)
+        else:
+            self._write_to_file(entry,blocking=False)
         if self._local_store is not None:
             self._write_to_local_store(entry)
         return entry
@@ -115,12 +125,14 @@ class AuditLogger:
     # LLM: 审计账唯一落盘口：append_private_jsonl_records 在同一把线程锁 + fcntl 锁内追加，文件 0600、
     #   目录缺失才按 0700 新建（pdp 2026-10-03）；格式与旧裸写逐字节一致（ensure_ascii=False、不排序键、一行一条）。
     # 函数用途: 把一条审计条目以仅本人可读写权限追加进审计账文件。
-    def _write_to_file(self, entry: AuditEntry) -> None:
+    # LLM: 字节/脱敏/路径不变，只透传原append锁参数；锁忙不能假称已留审计。
+    # 函数用途: 以原格式私有追加审计事实。
+    def _write_to_file(self, entry: AuditEntry, *, blocking: bool = True) -> None:
         # H5:裸 open("a")+write 无锁,两线程/进程并发 log 会行内交错出半行 JSON。
         # 改走私有追加(threading.Lock + fcntl.flock LOCK_EX 双层不变),文件 0600、父目录 0700,
         # 已有宽权限审计文件下次写入即收紧。格式不变:ensure_ascii=False、不排序键、一行一条
         # (append_private_jsonl_records 默认 sort_keys=False),与原 json.dumps(...) 完全一致。
-        append_private_jsonl_records(self._audit_file, [entry.to_dict()], sort_keys=False)
+        append_private_jsonl_records(self._audit_file, [entry.to_dict()], sort_keys=False, blocking=blocking)
 
     def _write_to_local_store(self, entry: AuditEntry) -> None:
         try:

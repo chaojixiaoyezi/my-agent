@@ -22,7 +22,9 @@ def interaction_audit_host(root, owner):
 
 # LLM: 必须在准确原卡赢得CAS后或持其锁时调用；日志只声明已核验点击，不虚报业务已完成，返回字段可存原记录。
 # 函数用途: 读取点击人的可信展示名并记录ID/姓名/UTC时间；无姓名用稳定ID，永不以姓名授权。
-def record_interaction_actor(agent,payload,*,decision,actor):
+# LLM: 可选blocking仅传原审计文件锁；记录的是已验证点击而非业务成功，不添加第二audit账或授权。
+# 函数用途: 保留原点击者事实，C可在锁忙时明确失败。
+def record_interaction_actor(agent,payload,*,decision,actor,blocking=True):
     if not isinstance(actor,str) or not actor or decision not in {'cancel','approved','denied','confirm','decline','save','select','set','pwd_set','pwd_unlock','pwd_change'}:
         raise ValueError('点击身份或动作无效')
     channel=str(payload.get('channel') or 'feishu')
@@ -36,10 +38,14 @@ def record_interaction_actor(agent,payload,*,decision,actor):
     facts={'actor_id':actor,'actor_name':name or actor,'clicked_at':datetime.now(timezone.utc).isoformat(timespec='seconds')}
     logger=_logger_for(agent.config)
     if logger is not None:
-        logger.log(LogParams(action='IM_CARD_CLICK',user_id=actor,channel=channel,target_type='interaction',
+        params=LogParams(action='IM_CARD_CLICK',user_id=actor,channel=channel,target_type='interaction',
             target_id=str(payload.get('input_id') or payload.get('permission_id') or payload.get('control_id') or payload.get('nonce') or '')[:200],
             details={'kind':str(payload.get('kind') or ''),'owner':payload.get('owner') or {},
-                     'decision':decision,'phase':'verified_click',**facts}))
+                     'decision':decision,'phase':'verified_click',**facts})
+        if blocking:
+            logger.log(params)
+        else:
+            logger.log(params,blocking=False)
     return facts
 
 

@@ -501,7 +501,10 @@ def make_fake_store_func():
         # LLM: 与真实 LocalStore 一样由 schema 提供回填完成钩子；不调用 schema 初始化，SQL 只发往注入的假连接。
         # 类用途: 在维护单测中保留真实回填事务行为，正文、事件和连接由现有测试替身隔离。
         class FakeStore(LocalStoreSchemaMixin, LocalStoreMaintenanceMixin):
+            # LLM: 最小Store替身显式选择原False策略，不借缺字段模拟C写权；原SQL/FTS断言保持。
+            # 函数用途: 初始化默认本地测试对象，后续维护仍只用原连接与正文替身。
             def __init__(self):
+                self.coordinator_io = False
                 self._fts_available = options["fts_available"]
                 self.db_path = options["db_path"] or Path("/tmp/test.db")
                 self.files_dir = options["files_dir"] or Path("/tmp/files")

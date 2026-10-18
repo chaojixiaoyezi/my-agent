@@ -67,6 +67,42 @@ class TestBuildParser:
         with patch.dict("os.environ", {"MY_AGENT_CONFIG": "/tmp/testbox-agent.yaml"}):
             assert _get_config_path() == "/tmp/testbox-agent.yaml"
 
+    def test_default_config_path_reads_environment_at_each_call(self, monkeypatch):
+        from pathlib import Path
+
+        import agent_py_agent
+        from agent_py_agent.agent.common.config_paths import DEFAULT_CONFIG, default_config_path
+        from agent_py_agent.cli import bootstrap
+
+        assert bootstrap.default_config_path is default_config_path
+        assert bootstrap.DEFAULT_CONFIG is DEFAULT_CONFIG
+        monkeypatch.delenv("MY_AGENT_CONFIG", raising=False)
+        assert default_config_path() == Path(agent_py_agent.__file__).resolve().parent / "config" / "agent_config.yaml"
+        monkeypatch.setenv("MY_AGENT_CONFIG", "  ~/first.yaml  ")
+        assert default_config_path() == Path("~/first.yaml").expanduser()
+        monkeypatch.setenv("MY_AGENT_CONFIG", "relative/next.yaml")
+        assert default_config_path() == Path("relative/next.yaml")
+        monkeypatch.setenv("MY_AGENT_CONFIG", "   ")
+        assert default_config_path() == DEFAULT_CONFIG
+
+    def test_bootstrap_config_path_import_does_not_load_runtime(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        code = """
+import sys
+from agent_py_agent.cli import bootstrap
+from agent_py_agent.agent.common.config_paths import default_config_path
+assert bootstrap.default_config_path is default_config_path
+for module in sys.modules:
+    assert not module.startswith(('agent_py_agent.agent.settings', 'agent_py_agent.agent.core',
+                                  'agent_py_agent.agent.backends', 'agent_py_agent.agent.gateway_parts'))
+"""
+        result = subprocess.run([sys.executable, "-B", "-c", code],
+            cwd=Path.cwd(), capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+
     def test_parser_has_subparsers(self) -> None:
         """测试解析器包含子命令解析器。"""
         from agent_py_agent.cli.parser import build_parser

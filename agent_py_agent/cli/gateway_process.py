@@ -138,6 +138,8 @@ def _gateway_start_options_from_args(args, *, workspace_root: str | Path = "") -
     )
 
 
+# LLM: DTO只运输本次原CLI对象；内部control/count由持锁冷组合根注入，字段不授C或业务权，默认0不读新状态。
+# 函数用途: 为本次服务保存原Agent、路径、进程身份和可选协调者引用。
 def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayRunContext:
     args = request.args
     return GatewayRunContext(
@@ -147,6 +149,8 @@ def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayR
         log_start_offset_bytes=_gateway_log_size(request.paths.log),
         process_identity=build_process_identity(),
         process_started_at=time.time(),
+        coordinator_worker_count=getattr(args, "_gateway_worker_count", 0),
+        control_plane=getattr(args, "_gateway_control_plane", None),
     )
 
 
@@ -162,25 +166,32 @@ def _gateway_log_size(path: Path) -> int:
 
 # LLM: This is the canonical state-file projection for one live Gateway lifecycle. Keep endpoint,
 # config/model identity and log boundary here so CLI, HTTP and model tools read the same facts.
-# 函数用途: 生成 Gateway 当前运行状态文件，供健康检查和运维工具权威读取。
+# LLM: 正count只投影同代实际control配置/lease，None Agent不授ready；Count0原载荷字段保持。
+# 函数用途: 生成当前运行状态投影；权限与就绪仍由原控制器验证。
 def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "running") -> dict:
     context = request.context
     paths = context.paths
     agent = context.agent
+    config = context.control_plane.config if getattr(context, "control_plane", None) is not None else agent.config
+    coordinated = {}
+    if getattr(context, "control_plane", None) is not None:
+        from .gateway_coordinated_run import coordinated_state_fields
+
+        coordinated = coordinated_state_fields(context)
     return {
         "status": status,
         "pid": pid,
         "gateway_workspace": str(paths.root),
-        "subagent_workspace": str(agent.subagents.workspace),
+        "subagent_workspace": str(agent.subagents.workspace) if agent is not None else "",
         "task_continuation": "owner_scoped_event_driven",
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
-        "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
-        "global_inflight_limit": max(1, int(getattr(agent.config, "gateway_global_inflight_limit", 500) or 500)),
+        "user_inflight_limit": max(1, int(getattr(config, "gateway_user_inflight_limit", 8) or 8)),
+        "global_inflight_limit": max(1, int(getattr(config, "gateway_global_inflight_limit", 500) or 500)),
         "config_path": str(context.config_path),
-        "model_name": str(getattr(agent.config, "model_name", "") or ""),
+        "model_name": str(getattr(config, "model_name", "") or ""),
         "http_bind_host": str(
-            getattr(agent.config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
+            getattr(config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
         ),
         "http_port": request.http_port,
         "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
@@ -188,38 +199,47 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
         "started_at": float(context.process_started_at or time.time()),
         # 客户端用它判断自己是否与 Gateway 同一安装；只写 sys.prefix 这一结构化事实，不写版本文案。
         "runtime_prefix": sys.prefix,
+        **coordinated,
     }
+
 
 
 # LLM: The structured event mirrors the same lifecycle identity as _build_run_state; it may add
 # event-only fields but must not invent a different endpoint, model or log offset.
+# LLM: C事件仅运输同一原lease字段；Count0保持原配置/模型统计，不能从展示载荷取得业务权。
 # 函数用途: 生成 Gateway 运行事件载荷，供审计日志记录本次生命周期的同一组事实。
 def _build_run_payload(request: GatewayThreadsRequest, pid: int, extra: dict | None = None) -> dict:
     context = request.context
     agent = context.agent
+    config = context.control_plane.config if getattr(context, "control_plane", None) is not None else agent.config
     payload = {
         "status": "running",
         "pid": pid,
         "gateway_workspace": str(context.paths.root),
-        "subagent_workspace": str(agent.subagents.workspace),
+        "subagent_workspace": str(agent.subagents.workspace) if agent is not None else "",
         "task_continuation": "owner_scoped_event_driven",
         "requeued_requests": request.requeued,
         "failed_processing_requests": request.failed,
-        "user_inflight_limit": max(1, int(getattr(agent.config, "gateway_user_inflight_limit", 8) or 8)),
-        "global_inflight_limit": max(1, int(getattr(agent.config, "gateway_global_inflight_limit", 500) or 500)),
+        "user_inflight_limit": max(1, int(getattr(config, "gateway_user_inflight_limit", 8) or 8)),
+        "global_inflight_limit": max(1, int(getattr(config, "gateway_global_inflight_limit", 500) or 500)),
         "config_path": str(context.config_path),
-        "model_name": str(getattr(agent.config, "model_name", "") or ""),
+        "model_name": str(getattr(config, "model_name", "") or ""),
         "http_bind_host": str(
-            getattr(agent.config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
+            getattr(config, "gateway_bind_host", "127.0.0.1") or "127.0.0.1"
         ),
         "http_port": request.http_port,
         "log_start_offset_bytes": max(0, int(context.log_start_offset_bytes or 0)),
         "process_identity": dict(context.process_identity or {}),
         "started_at": float(context.process_started_at or time.time()),
     }
+    if getattr(context, "control_plane", None) is not None:
+        from .gateway_coordinated_run import coordinated_state_fields
+
+        payload.update(coordinated_state_fields(context))
     if extra:
         payload.update(extra)
     return payload
+
 
 
 def _clear_gateway_stop_request(paths) -> None:
@@ -424,7 +444,13 @@ def _cmd_gateway_run_setup(agent, paths):
     return requeued, pid
 
 
+# LLM: Count0保原三循环/端口顺序；实际control才走原C设施producer，不以count字符串或None Agent制造就绪。
+# 函数用途: 启动本代请求、后台和心跳循环，协调者的原资源由独立同生命周期入口保留。
 def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
+    if getattr(request.context, "control_plane", None) is not None:
+        from .gateway_coordinated_run import start_coordinated_loops
+
+        return start_coordinated_loops(request)
     context = request.context
     paths = context.paths
     agent = context.agent
@@ -475,14 +501,18 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
 # LLM: G4：绑定失败时注销 _cmd_gateway_run_threads 预登记的端口（否则漏给同进程后续的模型命令沙箱）；
 #   http_port=0（不开 HTTP）返回 None。调用方已在起线程前预登记了配置端口，这里只负责绑定与失败回滚。有副作用：绑定监听套接字。
 #   受管 G1 凭据不可用时 server.start() 抛 GatewayLocalCredentialRequired，绑定不会发生。
+# LLM: 内部C显式运输同一control/runtime，设施出生由原HTTP门核；默认不增加参数或另造鉴权。
 # 函数用途: 按配置端口启动 Gateway HTTP 服务，绑定失败时回滚端口预登记。
-def _start_gateway_http(agent, paths, http_port: int) -> GatewayHTTPServer | None:
+def _start_gateway_http(agent, paths, http_port: int, control_plane=None, drain_runtime=None) -> GatewayHTTPServer | None:
     if http_port <= 0:
         return None
+    config = control_plane.config if control_plane is not None else agent.config
+    additional = {"control_plane": control_plane, "drain_runtime": drain_runtime} if control_plane is not None else {}
     http_params = GatewayHTTPServerParams(
-        auth_middleware=_build_gateway_auth_middleware(agent.config),
-        bind_host=getattr(agent.config, "gateway_bind_host", "127.0.0.1"),
+        auth_middleware=_build_gateway_auth_middleware(config),
+        bind_host=getattr(config, "gateway_bind_host", "127.0.0.1"),
         agent=agent,
+        **additional,
     )
     try:
         return start_http_server(http_port, paths, params=http_params)
@@ -587,6 +617,10 @@ def _flush_decision_reach_counts(request: GatewayRunCleanupRequest) -> None:
 # 函数用途: Gateway 停止时收尾三条循环、结清在途模型调用、清理 pid/停止请求并写出是否完整排空的状态。
 def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
     """Drain the three gateway loops and persist whether shutdown was complete."""
+    if getattr(request.context, "control_plane", None) is not None:
+        from .gateway_coordinated_shutdown import cleanup_coordinator_resources
+
+        return cleanup_coordinator_resources(request)
     request.stop_event.set()
     _cancel_active_decisions(request)
     if request.http_server:
@@ -860,11 +894,15 @@ def _classify_gateway_service_return(
     )
 
 
+# LLM: 原服务终止分类只投影本次生命周期；C末写核原lease，Count0保持原writer/log，不从文案授终态。
+# 函数用途: 写入正式停止或异常返回事实，C-only无需伪造业务Agent。
 def _record_gateway_service_termination(
     paths: GatewayPaths,
     agent: object,
     pid: int,
     termination: _GatewayServiceTermination,
+    *,
+    context: GatewayRunContext | None = None,
 ) -> None:
     payload = {
         "status": termination.status,
@@ -880,9 +918,15 @@ def _record_gateway_service_termination(
     failed = termination.status == "failed"
     if failed:
         payload["error_code"] = "GATEWAY_SERVICE_LOOP_UNEXPECTED_RETURN"
-    write_json_file(paths.state, payload)
+    if context is not None and context.control_plane is not None:
+        from .gateway_coordinated_run import publish_coordinated_state
+
+        publish_coordinated_state(context, payload)
+    else:
+        write_json_file(paths.state, payload)
     event = "gateway_run_failed" if failed else "gateway_run_stopped"
-    log_gateway_event(agent, event, payload)
+    if agent is not None or context is None or getattr(context, "control_plane", None) is None:
+        log_gateway_event(agent, event, payload)
 
 
 def _record_gateway_drain_failure(
@@ -1001,10 +1045,15 @@ def _preflight_required_local_credential(agent) -> None:
 
 # LLM: 服务进程入口先写托管标记，再创建 Agent/线程/工具；所有子进程继承它，生命周期命令据此拒绝自停。
 #   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
-# 函数用途: 前台运行Gateway，先统一校验认证/凭据再恢复任务；保留原分类退出、收尾和安全换代。
+# 函数用途: 前台运行Gateway；内部正count先取原C锁再构造业务，默认模式保持原认证、恢复与收尾顺序。
 def cmd_gateway_run(args) -> int:
     mark_hosting_gateway_process()
-    wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
+    predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
+    count = getattr(args, "_gateway_worker_count", 0)
+    if type(count) is not int or count != 0:
+        from .gateway_coordinated_run import run_coordinated_gateway
+
+        return run_coordinated_gateway(args, predecessor_exited=predecessor_exited)
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)

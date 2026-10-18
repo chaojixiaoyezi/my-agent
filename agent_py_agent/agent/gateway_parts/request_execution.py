@@ -1,3 +1,4 @@
+# LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 这里只编排单个已领取请求：身份先绑定再领取车道，随后准备上下文、执行、提交历史与响应。
 # 上下文、绑定、历史、输入渲染分别归 request_context/request_binding/request_history/request_prompt；
 # 修改须联测停止、Compact、repair与重启恢复；原typed输入快照只取认证入口，保持原锁和提交顺序。
@@ -7,6 +8,7 @@
 # 决策实验对照记录由能力观察出口拆出写入请求记录；回合正常收尾后才补写实际工具用量并在 apply 授权内检查晋升。
 # 新晋升提示并入当轮原 host_notice 流和 final；开轮旧提示不重发，联测 test_decision_experiment_notice 与 test_host_notices。
 # 本轮工具排的提示（details.turn_request_id 是本请求）同批发布；别的来源中途到的仍留下一轮，联测 test_host_notices。
+# 内部background只消费原canonical来源；原运输或心跳/Call停止unknown上抛至claim出口，停止本线程资源但不封终态或发续跑许可。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -861,6 +863,8 @@ def _require_gateway_conversation_ready(
 # 函数用途: 构造精确运行参数，已发布的恢复身份优先，未发布时沿已经校验的活动任务或 Goal 绑定。
 # LLM: 附件先按已解析owner校验，与引用合并到同次typed输入；attrs仅执行投影，跨owner/损坏不退化文本。
 # 函数用途: 构造当前请求执行参数，并验证显式输入附件的归属与资源上限。
+# LLM: 前台source仅捕获原实际C/W invocation/Agent/claim，Count0 None零IO；媒体/actor/refs/原所有参数保持，不由运输投影创建执行身份。
+# 函数用途: 在原Gateway参数构造处接同一请求安全点，保留原执行选项和全部宿主事实。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
     context = inputs.context
@@ -898,7 +902,10 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     from ..conversation.host_message_context import context_for_input
 
     host_input = context_for_input(context.agent, actor, references, request.get('input_media') or ()) if actor is not None else None
+    from .multiprocess_active_input import pending_turn_input_source
+
     return RunParams(
+        pending_turn_input_source=pending_turn_input_source(context.agent, request, conversation.thread_id),
         inject=request_prompt.gateway_injections(request, conversation),
         allowed_tools=[] if request.get("host_im_task_ack") else None,
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
@@ -1121,11 +1128,17 @@ def _copy_final_lease_fields(response: dict, request_path: Path) -> None:
     )
 
 
-# LLM: 当前入口只执行 ask；空输入及不支持的 kind 保留原错误协议，模型结果只通过公开投影写响应。
-# 函数用途: 将队列上下文接入会话主链，并用实际运行结果更新本轮响应。
+# LLM: ask沿原会话链；内部background只消费已由原P3/P5认领的canonical来源，不从prompt分流或新增客户端kind，未知仍沿原异常出口。
+# 函数用途: 将原认领请求交给会话或后台真实消费者，用结构化运行结果更新运输响应。
 def _execute_gateway_request_body(context: dict, on_chunk) -> None:
     response = context["response"]
     kind = str(response.get("kind") or "").strip()
+    if kind == "background":
+        from .multiprocess_background_execution import execute_background_request
+
+        result = execute_background_request(context)
+        response.update(ok=True, status="done", background_result=result)
+        return
     if kind != "ask":
         response["error_code"] = "UNSUPPORTED_KIND"
         raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
@@ -1281,11 +1294,43 @@ def _gateway_turn_thread_id(agent: SimpleAgent, context: dict, on_chunk) -> str:
         return ""
 
 
+# LLM: 保原错误码/凭据清洗/供应商投影与中文提示顺序；此helper只写当前响应字典，不建立终态或改变claim。
+# 函数用途: 为普通执行异常构建原失败投影，与精确未结执行分开。
+def _apply_gateway_request_failure(agent, context, response, error):
+    from .request_errors import gateway_provider_error_projection, provider_rejection_user_notice
+
+    # LLM: 无码异常不能把类名大写当错误码泄漏给客户端；fallback_error_code 按异常类型映射到
+    #   error_taxonomy 登记码（provider timeout→PROVIDER_TIMEOUT、transient→TRANSIENT_ERROR、
+    #   RuntimeConflictError→RUNTIME_CONFLICT，其余→UNKNOWN_ERROR），已有 error_code 原样保留。
+    error_code = response.get("error_code") or fallback_error_code(error)
+    projection = gateway_provider_error_projection(error)
+    response.update(
+        {
+            "ok": False,
+            "status": "failed",
+            "error_code": error_code,
+            # rejectdiag2：error 会随 response 落盘并进审计索引，先过统一凭据清洗再入账。
+            "error": sanitize_credentials(f"{type(error).__name__}: {error}"),
+            "user_error": _gateway_user_error(agent, context["request"], error_code),
+            **projection,
+        }
+    )
+    # rejectdiag2：展示提示（user_error）是 TUI/IM/CLI 共用的失败提示字段，补上结构化拒绝摘要
+    # （原因码 + 请求编号 + 已清洗的服务端说明）；投影键集合不变，只在文案后追加。
+    response["user_error"] = provider_rejection_user_notice(
+        response.get("user_error"), projection)
+
+
+
 # LLM: 每个 claimed request 只创建一个 chunk writer；审批只读 client_capabilities 或服务端核实的管理员 IM 私聊，失败只投影 typed HTTP 事实，不把异常正文公开或用作重试依据。
 #   带续跑标记的请求在执行前经同一 writer 写一次 turn_resumed 边界；取消提前返回时不写。
 # 函数用途: 执行一条 Gateway 请求并发布开始/收口观察；提前拒绝不冒充执行，观察不改 lease 和业务响应。
 # LLM: IM writer 绑定实际 owner Agent，具体审批继续使用原 pending/private 卡入口。
 # 函数用途: IM writer 绑定实际 owner Agent，具体审批继续使用原 pending/private 卡入口。 修改需同步原控制、恢复或权限测试。
+# LLM: 精确原typed及心跳/Call出处的未知原样上抛，finally只停本线程资源；保main审批Agent/普通失败/重启合同，未知不结输入或发turn_ended。
+# LLM: 纯退休未结保同对象/原Future，finally不能写普通响应或收guidance；原canonical观察仍独立核claim。
+# LLM: 收尾沿原canonical请求kind区分输入归属；background自身事务已退后只保旧guidance拒绝，ask仍须原live来源。
+# 函数用途: 执行原请求，只有可证正常结束才完成审计、指导输入和响应投影。
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -1334,51 +1379,40 @@ def _handle_gateway_request(
     event_context = turn_started(agent, context['request'],
                                  thread_id_of=lambda: _gateway_turn_thread_id(agent, context, chunk_writer))
     failure: Exception | None = None
-    try:
-        _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
-        _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
-    except Exception as exc:
-        from .request_errors import (
-            gateway_provider_error_projection,
-            provider_rejection_user_notice,
-        )
+    uncertain = False
+    from ..conversation.agent_tool_approval import approval_retirement_request_observation
+    from .io import gateway_request_fingerprint
 
-        failure = exc
-        # LLM: 无码异常不能把类名大写当错误码泄漏给客户端；fallback_error_code 按异常类型映射到
-        #   error_taxonomy 登记码（provider timeout→PROVIDER_TIMEOUT、transient→TRANSIENT_ERROR、
-        #   RuntimeConflictError→RUNTIME_CONFLICT，其余→UNKNOWN_ERROR），已有 error_code 原样保留。
-        error_code = response.get("error_code") or fallback_error_code(exc)
-        projection = gateway_provider_error_projection(exc)
-        response.update(
-            {
-                "ok": False,
-                "status": "failed",
-                "error_code": error_code,
-                # rejectdiag2：error 会随 response 落盘并进审计索引，先过统一凭据清洗再入账。
-                "error": sanitize_credentials(f"{type(exc).__name__}: {exc}"),
-                "user_error": _gateway_user_error(agent, context["request"], error_code),
-                **projection,
-            }
-        )
-        # rejectdiag2：展示提示（user_error）是 TUI/IM/CLI 共用的失败提示字段，补上结构化拒绝摘要
-        # （原因码 + 请求编号 + 已清洗的服务端说明）；投影键集合不变，只在文案后追加。
-        response["user_error"] = provider_rejection_user_notice(
-            response.get("user_error"), projection)
-    finally:
-        _stop_gateway_request_lease(lease_stop, lease_thread)
-        chunk_writer.close()
-        restart_marker = _host_shutdown_resume_marker(failure, request_path, context["request_id"])
-        resume_marker = restart_marker if restart_marker is not None else _provider_transient_turn_resume_marker(
-            agent, context, response, chunk_writer
-        )
-        resume_field = "restart_resume" if restart_marker is not None else "provider_transient_resume"
-        # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
-        # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
-        # 留给重启/续跑的回合不收口：和进程消失一样，由恢复按死掉的 attempt 释放预留，续跑回合再认领。
-        if resume_marker is None:
-            _settle_pending_gateway_guidance(agent, context["request_id"], failure)
-        _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
-        stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
+    # 原body与catch共用只读原对象；core Params已恢复也不重挂，观察绝不授执行权。
+    with approval_retirement_request_observation(agent, request_path, context["request"],
+            gateway_request_fingerprint(context["request"], context["request_id"])) as retirement_observation:
+        try:
+            _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
+            _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
+        except Exception as exc:
+            failure = exc
+            uncertain = _observe_gateway_execution_failure(agent, context, response, exc)
+            if uncertain:
+                raise
+        finally:
+            _stop_gateway_request_lease(lease_stop, lease_thread)
+            chunk_writer.close()
+            # 原Call/心跳出处已核实的unknown在本线程清理后仍未结；source随finally失效不能反向变成可结算的普通结束。
+            cleanup_only = retirement_observation.pending_error is failure and failure is not None
+            restart_marker = None if uncertain or cleanup_only else _host_shutdown_resume_marker(failure, request_path, context["request_id"])
+            resume_marker = None if uncertain or cleanup_only else restart_marker if restart_marker is not None else _provider_transient_turn_resume_marker(
+                agent, context, response, chunk_writer
+            )
+            resume_field = "restart_resume" if restart_marker is not None else "provider_transient_resume"
+            # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
+            # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
+            # 留给重启/续跑的回合不收口：和进程消失一样，由恢复按死掉的 attempt 释放预留，续跑回合再认领。
+            if resume_marker is None and not uncertain:
+                _settle_pending_gateway_guidance(
+                    agent, context["request_id"], failure, request_kind=context["kind"]
+                )
+            _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
+            stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
     if resume_marker is not None:
         # 不写终态、不记审计：重启类原样留在 processing 等恢复；供应商故障类由 worker 收尾重排回队列
         # （request_worker._finish_claimed_gateway_request → recovery.requeue_provider_transient_processing）。
@@ -1392,6 +1426,47 @@ def _handle_gateway_request(
     _complete_gateway_request_audit(agent, context, request_path, response)
     turn_ended(event_context, response, (time.monotonic() - execution_started_mono) * 1000)
     return response
+
+
+# LLM: 实际设施未知先核原合同；pure退休只有原词法观察可写同claim未知；不恢复Params、不替换异常，普通错误沿原response。
+# 函数用途: 为原请求catch记录准确未知观察，告诉外层保同异常到原Future并跳过正常收尾。
+def _observe_gateway_execution_failure(agent, context, response, error):
+    from ..conversation.agent_tool_approval import (
+        approval_retirement_obligation,
+        find_approval_retirement_error,
+    )
+    from .request_errors import gateway_request_execution_unknown, request_resource_exit_unconfirmed
+
+    request, path = context["request"], context["request_path"]
+    expected = (context["request_id"], request.get("execution_attempt_id"), request.get("lease_epoch"))
+    retirement = approval_retirement_obligation(error) is not None
+    debt = find_approval_retirement_error(error)
+    # 真实physical/common未知优先；只有原ask未启动且原run已实际结算的纯清理才正常收口。
+    if retirement and not request_resource_exit_unconfirmed(error):
+        from ..conversation.agent_tool_approval import receive_approval_retirement
+        from .io import gateway_request_fingerprint
+
+        if receive_approval_retirement(error, agent, path, request, gateway_request_fingerprint(request, context["request_id"])):
+            _apply_gateway_request_failure(agent, context, response, error)
+            if error.obligation.decision.decision == "cancelled":
+                response.update(status="cancelled", error_code="CANCELLED")
+            return False
+    if gateway_request_execution_unknown(error, request, expected) or retirement:
+        from .logging import _report_gateway_side_effect_error
+        from .paths import gateway_paths_from_root
+        from .request_worker import _record_execution_outcome_uncertain
+
+        try:
+            _record_execution_outcome_uncertain(gateway_paths_from_root(path.parent.parent.parent), path, error,
+                expected, **({"execution_agent": agent} if retirement else {}))
+        except Exception as observation_error:
+            _report_gateway_side_effect_error("observe_execution_unknown", context["request_id"], observation_error)
+        return True
+    if request_resource_exit_unconfirmed(error) or debt is not None:
+        # 外层错误不冒充原native写诊断/收口；只保原异常链与Future，不能将清理故障洗成ordinary终态。
+        return True
+    _apply_gateway_request_failure(agent, context, response, error)
+    return False
 
 
 # LLM: I4（第 8 条②，统一续跑规则）：宿主停机准入拒绝（find_model_call_admission_error，只沿显式原因链）打断的回合不写失败终态，
@@ -1454,10 +1529,19 @@ def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk
 
 # LLM: 插话持久操作经 guidance 领域组件； 回合结束时未消费的 steer/guidance 必须收口（reject），否则残留消息占住
 # conversation lane，同一 thread 的后续请求永久排队（#7 真机实证：进行中提交的消息
-# 在回合结束后挂 processing）。收口失败留给 recovery 兜底，静默不反噬执行路径。failure 是回合抛出的异常（正常结束为 None），
+# 在回合结束后挂 processing）。只有旧reject_pending失败仍静默留recovery；新活动source收口typed必须穿透，不能假结清。failure 是回合抛出的异常（正常结束为 None），
 # 只决定会话消息这次释放计不计次（与后台片收尾同一判据，见 store_guidance_recovery.failure_counts_toward_release_limit）。
-# 函数用途: 在回合终态落账前拒绝该回合仍挂起的补充消息。
-def _settle_pending_gateway_guidance(agent: SimpleAgent, request_id: str, failure: Exception | None = None) -> None:
+# 函数用途: 仅ask在终态前封原live输入窗口，所有请求仍按原规则拒绝挂起guidance；typed新收口不吞。
+def _settle_pending_gateway_guidance(
+    agent: SimpleAgent, request_id: str, failure: Exception | None = None, *, request_kind: str = "ask"
+) -> None:
+    # LLM: 新live输入收口在旧best-effort catch之外；actual typed/忙预算未结必须到原_process出口，不能被finally静默成failed/canonical。
+    # 函数用途: 先关闭原活动运输窗口并固定未追加输入去向，Count0原None不新增IO。
+    from .multiprocess_active_input import finish_pending_turn_inputs
+
+    # canonical kind与原body分派同源；后台已由自身事务收口，不能在端口退出后借前台来源。
+    if request_kind == "ask":
+        finish_pending_turn_inputs(agent, request_id)
     store = getattr(agent, "conversation_store", None)
     if store is None or not str(request_id or "").strip():
         return

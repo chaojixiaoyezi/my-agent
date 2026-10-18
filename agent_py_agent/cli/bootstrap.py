@@ -1,26 +1,15 @@
 from __future__ import annotations
 
-# LLM: This module is the dependency-light CLI bootstrap boundary. Keep imports here limited
-# to the standard library so interactive commands can parse arguments and paint their first
-# frame before importing the agent runtime, extensions, providers, or other command families.
-# 模块用途: 提供命令行启动最早阶段所需的默认路径、终端编码设置和通用参数开关；这里不能
-# 引入智能体、模型、插件等重模块，否则会重新拖慢 TUI 首屏。
-import os
+# LLM: CLI 早期启动只依赖标准库和 common/config_paths 的纯路径实现；不能导入 settings、Agent 或其它重型运行模块。
+# 模块用途: 提供命令行启动的路径引用、终端编码设置和通用参数开关；默认配置路径由低层唯一实现负责，保持首屏轻量。
 import sys
 from pathlib import Path
 
+from ..agent.common.config_paths import DEFAULT_CONFIG as DEFAULT_CONFIG
+from ..agent.common.config_paths import default_config_path as default_config_path
+
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "config" / "agent_config.yaml"
 DEFAULT_CAPABILITY_CONFIG = ROOT / "config" / "capability_config.yaml"
-
-
-# LLM: MY_AGENT_CONFIG is the process-level default shared by interactive CLI and service
-# generation. Resolve it when building a parser, not at module import; explicit --config remains
-# argparse's final authority.
-# 函数用途: 返回本次命令默认使用的配置文件；环境未指定时回到随包发布的默认 YAML。
-def default_config_path() -> Path:
-    configured = str(os.environ.get("MY_AGENT_CONFIG") or "").strip()
-    return Path(configured).expanduser() if configured else DEFAULT_CONFIG
 
 
 # LLM: Keep this parser helper runtime-free; chat and non-chat parsers share its exact option

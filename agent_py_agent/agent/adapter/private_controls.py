@@ -29,6 +29,8 @@ def _log_control_stage(stage, *, reason_code="", kind=""):
 
 # LLM: 原typedkind与真实actor/message/chat必须匹配；诊断仅记录固定kind/阶段/错误码，表单、引用和回执正文不得进入日志。
 # 函数用途: 提交认证回环并记录安全处理阶段；cancel丢弃表单，群资格查询和回环是网络副作用。
+# LLM: 新原receipt queued/unknown只回pending提示，保原卡不伪已批准；Count0原同步完成/密码/失败投影不变。
+# 函数用途: 区分已受理点击与原执行者已提交的真正审批结果。
 def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     value = norm.get("value") or {}
     if value.get("kind") not in {"my_agent_tool_approval", "my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"}:
@@ -63,6 +65,8 @@ def tool_approval_card_action(adapter, norm: dict) -> dict | None:
         _log_control_stage("interaction", reason_code=result["error_code"])
         adapter._send_password_card(actor, "set" if result["error_code"] == "IM_PASSWORD_SETUP_REQUIRED" else "unlock")
         return {"toast": {"type": "warning", "content": result["message"]}}
+    if value["kind"] == "my_agent_tool_approval" and result.get('status') in {'queued', 'unknown'}:
+        return {'toast': {'type': 'warning', 'content': result['message']}}
     if not result.get("ok"):
         return _control_failure_toast(str(result.get("error_code") or "IM_INTERACTION_INVALID"),
                                       str(result.get("error_stage") or "interaction"))

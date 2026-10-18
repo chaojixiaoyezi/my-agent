@@ -1,3 +1,5 @@
+# LLM: 身份映射只由C/默认入口写；受限执行器仅复用既有canonical profile，原受控owner注记及展示追加不扩权。
+# 模块用途: 管理provider与规范身份的原映射和注记，拒绝W新建身份而保留原私有写格式。
 # LLM: 身份关联仍由原provider索引保存；认证来源的可选姓名只能改展示字段，不得改owner/canonical关联或授予权限。
 # 模块用途: 管理规范身份链接和原展示索引，姓名更新沿同一文件锁保留原记录，不创建用户或平台连接。
 from __future__ import annotations
@@ -138,7 +140,12 @@ class CanonicalMemoryNoteRequest:
 
 # LLM: 身份链接账本走私有写（0600/0700）；owner 内与 home 级两处账本同口径。
 # 函数用途: 把一条第三方身份链接写进两级账本。
+# LLM: provider身份链接是全局归属事实；拒门先于原私有追加，姓名展示与受控owner note不借此提权。
+# 函数用途: 阻止W改身份映射，保留原两级索引及JSONL格式。
 def link_provider_identity(home: MyAgentHomePaths, record: ProviderIdentityRecord) -> Path:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("identity_bindings")
     path = _provider_index_path(home, record.provider)
     # 私有追加：0600/0700，存量宽权限身份索引下次写入即收紧；内容逐字节不变。
     append_private_jsonl_records(path, [record.to_dict(home.root)], sort_keys=True)
@@ -216,7 +223,19 @@ def lookup_provider_identity_report(
 
 # LLM: 规范用户档案目录缺失按 0700 新建（pdp）；档案 JSON 走私有写（0600），已存在不覆盖。
 # 函数用途: 确保某个规范用户 ID 的 profile.json 存在并返回路径。
+# LLM: 新canonical身份仅C可物化；受限执行器只能复用已存在profile且不chmod；Count0原目录创建/复用与原子写保持。
+# 函数用途: 对缺失规范身份先拒绝，已有身份供原受控注记复用而不修改全局资料。
 def ensure_canonical_user_profile(home: MyAgentHomePaths, canonical_user_id: str, *, display_name: str = "") -> Path:
+    from ..common.global_write_guard import GlobalWriteInWorkerError, require_global_writer
+
+    try:
+        require_global_writer("identity_bindings")
+    except GlobalWriteInWorkerError:
+        existing = home.canonical_users_dir / safe_path_segment(canonical_user_id) / "profile.json"
+        if existing.exists():
+            return existing
+        raise
+
     canonical_id = safe_path_segment(canonical_user_id)
     profile = home.canonical_users_dir / canonical_id / "profile.json"
     ensure_private_dir(profile.parent)
@@ -235,7 +254,12 @@ def ensure_canonical_user_profile(home: MyAgentHomePaths, canonical_user_id: str
 
 # LLM: 规范身份链接走私有写（0600/0700）；JSONL 行格式不变。
 # 函数用途: 把一条规范身份链接追加进身份账本。
+# LLM: 规范身份链接仍是原全局账；拒门先于profile首建和两级追加，不把已有profile当写链接许可。
+# 函数用途: 阻止W借已有规范档案新增身份绑定，普通模式的原回执和行格式不变。
 def link_canonical_identity(home: MyAgentHomePaths, request: CanonicalIdentityLinkRequest) -> CanonicalIdentityLink:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("identity_bindings")
     canonical_id = safe_path_segment(request.canonical_user_id)
     ensure_canonical_user_profile(home, canonical_id)
     link = CanonicalIdentityLink(

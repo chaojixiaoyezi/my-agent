@@ -1,9 +1,10 @@
+# LLM: Gateway回调捕获原实际C/W execution与lifetime，原T/JSON顺序和ACK关闭规则不变；短scope只包同步文件操作，不持门等待模型/线程；联测owner/取消/复制退出。
 # LLM: Gateway 绑定与一次观察只使用宿主确认的 thread/task/run/attempt；T/JSON 锁及 claim 释放顺序不变，建议不授予执行权。
 # 模块用途: 将精确请求接到原执行车道、运行身份和观察标记，保留原原子更新与停止裁决，不复制生命周期。
 from __future__ import annotations
 
-from contextlib import nullcontext
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,7 @@ from .io import (
     read_json_file_report,
     update_json_file_atomic,
 )
+from .multiprocess_execution import check_worker_transition, current_worker_execution
 from .paths import (
     gateway_paths_from_root,
 )
@@ -196,12 +198,21 @@ class GatewayActiveTurnTransition:
     request_path: Path
     request_id: str
     execution_attempt_id: str
+    _worker_execution: object = field(default_factory=current_worker_execution, init=False, repr=False, compare=False)
 
     # LLM: Caller supplies only an in-memory mailbox operation. This method owns T, re-reads the
     # exact hot request, and applies phase-specific admission: reserve/submit require open, while
     # provider ACK/explicit rejection cleanup may finish the same attempt after stop marked closing.
+    # worker绑定在创建回调时捕获；沿原T锁复核实际Agent及冻结路由，C最终同步操作与撤权/隔离共门。
     # 函数用途: 按补充消息阶段校验精确执行代次，并与停止、终态收口串行。
     def __call__(self, phase: str, operation):
+        with self.scope(phase):
+            return operation()
+
+    # LLM: scope保持原T实读和C生命周期短门覆盖整个file-only body；W仍用原冻结binding，不签发新许可，不包网络等待。
+    # 函数用途: 为显式短事务提供原回合边界，模型提交callback继续经同一__call__。
+    @contextmanager
+    def scope(self, phase: str):
         phase_name = str(phase or "").strip().lower()
         allow_closing = phase_name in {"acknowledge", "restore", "release"}
         root = self.request_path.parent.parent.parent
@@ -224,7 +235,19 @@ class GatewayActiveTurnTransition:
                 or (paths.terminal / f"{self.request_id}.json").exists()
             ):
                 raise InterruptedError("Gateway active turn closed before provider admission")
-            return operation()
+            check_worker_transition(self._worker_execution, payload)
+            from ..user_space.owner_resolver import OwnerIdentity
+            from .multiprocess_admission import _runtime_commit_scope
+            from .multiprocess_coordinator_execution import CoordinatorExecution
+            from .multiprocess_dispatch import WorkerDispatchError
+
+            if type(self._worker_execution) is CoordinatorExecution:
+                with _runtime_commit_scope(self._worker_execution.gate, OwnerIdentity.local_main()) as rejection:
+                    if rejection is not None:
+                        raise WorkerDispatchError(rejection["reason"], "coordinator")
+                    yield
+            else:
+                yield
 
 
 # LLM: 观察标记属于原请求事实，仅准确 attempt/车道下可写；它不是模型选择、恢复权限或执行快照。

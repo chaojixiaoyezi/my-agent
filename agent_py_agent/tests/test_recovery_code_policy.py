@@ -74,6 +74,17 @@ def test_missing_authority_and_uncertain_side_effects_never_auto_retry():
         assert contract.recommended_action == action
 
 
+def test_ordinary_input_uncertainty_keeps_exact_codes_without_automatic_replay():
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+
+    for code in ("INPUT_IDENTITY_CONFLICT", "INPUT_IDENTITY_UNCONFIRMED", "INPUT_DISPOSITION_UNCONFIRMED"):
+        contract = error_contract(code)
+        assert contract.code == code and contract.category == "state"
+        assert contract.retryable is False
+        assert contract.recommended_action == RecoveryAction.MANUAL_REVIEW.value
+        assert not repairable_code(code) and not recovering_code(code)
+
+
 def test_exact_code_policy_wins_over_family_prefix():
     """精确码策略优先于家族前缀（同前缀下行为可分化）。"""
     # TARGET_COVERAGE_MISSING 精确码 -> continue；同家族其它码 -> 家族策略

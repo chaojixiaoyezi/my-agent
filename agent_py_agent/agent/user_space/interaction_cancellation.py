@@ -1,4 +1,4 @@
-# LLM: 取消仅在调用方已验签/actor/chat及原记录锁内执行；不改模型目录、有效凭据、任务状态或其它卡。
+# LLM: 取消仅在调用方已验签/actor/chat及原记录锁内执行；不改模型目录、有效凭据、任务状态或其它卡。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
 # 模块用途: 保存原卡取消终态与安全操作者回执，为原toast/就地更新共用同一事实。
 from __future__ import annotations
 
@@ -24,16 +24,17 @@ def credential_cancel_result(row):
     return cancellation_result(audit,'凭据输入')
 
 
+# LLM: C调用方须已在原T门内且持原记录锁；审计只透传同一非阻塞模式，不新建审计账。
 # LLM: 原model记录锁由调用方持有；仅active可取消，completed不撤回配置，cancelled重放不重审计、不写秘密或新任务。
 # 函数用途: 原子关闭准确原模型选择/配置卡，记录首次真实取消者。
-def cancel_model_interaction(agent,path,row,payload,actor):
+def cancel_model_interaction(agent,path,row,payload,actor,*,blocking=True):
     if row.get('status')=='cancelled':
         return row['result']
     if row.get('status') not in {'active','dispatching','dispatch_failed'} or not actor:
         return already_handled_result()
     from .interaction_actor_audit import interaction_audit_host, record_interaction_actor
     audit_host=interaction_audit_host(agent.home_paths.root,payload["owner"])
-    audit = record_interaction_actor(audit_host,payload,decision='cancel',actor=actor)
+    audit = record_interaction_actor(audit_host,payload,decision='cancel',actor=actor,**({} if blocking else {'blocking':False}))
     result = cancellation_result(audit,'模型卡')
     row.update(status='cancelled',decision='cancel',cancelled_by=audit,result=result)
     write_private_text_file_atomic_unlocked(path,json.dumps(row,ensure_ascii=False))

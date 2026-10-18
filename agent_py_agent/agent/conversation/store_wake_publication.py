@@ -170,18 +170,20 @@ def _read_existing_identity(storage: ConversationStorage, identity: str) -> Wake
 
 # LLM: 安装只重放原 prepared 内容；已被消费的信号不重建，观察追加在原去重锁下按固定 ID 幂等。
 # 函数用途: 补齐信号与观察后再保存 published，任何失败保留原发布供调用方重试。
-def _install(storage: ConversationStorage, path: Path, record: dict[str, Any]) -> tuple[ObservationEvent | None, WakeSignal]:
+# LLM: 非阻塞只透传同一原锁；prepared/installed/published顺序不变，paired半提交保原账而非假原子成功。
+# 函数用途: C可立即拒绝发布锁忙，后续仍重放原同键内容。
+def _install(storage: ConversationStorage, path: Path, record: dict[str, Any], *, blocking: bool = True) -> tuple[ObservationEvent | None, WakeSignal]:
     observation, frozen = _frozen_pair(record, record["thread_id"], record["dedupe_key"])
     installed = _installed_signal(storage, frozen)
     if installed is None:
         # 唤醒信号属宿主运行数据：私有原子写（0600/0700），存量宽权限信号下次写入即收紧；内容逐字节不变。
-        write_private_json_file_atomic(storage.wake_signal_path(frozen), frozen.to_dict())
+        write_private_json_file_atomic(storage.wake_signal_path(frozen), frozen.to_dict(), **({} if blocking else {"blocking": False}))
         installed = frozen
     if observation is not None:
         existing = _find_observation(storage, frozen.thread_id, observation.observation_id)
         if existing is None:
             # 私有追加：0600/0700，存量宽权限观察账本下次写入即收紧；内容逐字节不变。
-            append_private_jsonl_records(storage.observation_path(frozen.thread_id), [observation.to_dict()], sort_keys=True)
+            append_private_jsonl_records(storage.observation_path(frozen.thread_id), [observation.to_dict()], sort_keys=True, **({} if blocking else {"blocking": False}))
         elif existing.to_dict() != observation.to_dict():
             raise DataCorruptionError("wake publication observation conflicts with frozen content")
     write_private_json_file_atomic_unlocked(path, {**record, "phase": "published"})
@@ -190,12 +192,14 @@ def _install(storage: ConversationStorage, path: Path, record: dict[str, Any]) -
 
 # LLM: 相同键的判断、预留和安装共用原 dedupe 锁；prepared 重试永不跨代，published handled 才按策略新发。
 # 函数用途: 发布或恢复一个有稳定键的信号及观察，返回原内容，不新增后台恢复服务。
+# LLM: 非阻塞只透传同一原锁；prepared/installed/published顺序不变，paired半提交保原账而非假原子成功。
+# 函数用途: C可立即拒绝发布锁忙，后续仍重放原同键内容。
 def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observation: ObservationEvent | None = None,
-                     retain_handled: bool = False) -> tuple[ObservationEvent | None, WakeSignal]:
+                     retain_handled: bool = False, blocking: bool = True) -> tuple[ObservationEvent | None, WakeSignal]:
     if type(retain_handled) is not bool:
         raise ValueError("wake retain_handled must be boolean")
     path = storage.wake_dedupe_path(signal.thread_id, signal.dedupe_key)
-    with locked_file_transition(path):
+    with locked_file_transition(path, blocking=blocking):
         record = _read_record(path)
         if record is not None and record.get("schema_version") == _LEGACY_SCHEMA:
             record = _migrate_legacy(storage, record, signal, paired=observation is not None, retain_handled=retain_handled)
@@ -205,7 +209,7 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
             if record["retain_handled"] != retain_handled or (previous_observation is None) != (observation is None):
                 raise DataCorruptionError("wake publication retention or pair contract conflicts")
             if record["phase"] == "prepared":
-                return _install(storage, path, record)
+                return _install(storage, path, record, blocking=blocking)
             existing = _installed_signal(storage, frozen)
             if existing is None:
                 raise DataCorruptionError("published wake signal is missing")
@@ -218,7 +222,7 @@ def publish_deduped(storage: ConversationStorage, signal: WakeSignal, *, observa
             record["migration"] = migration
         _frozen_pair(record, signal.thread_id, signal.dedupe_key)
         write_private_json_file_atomic_unlocked(path, record)
-        return _install(storage, path, record)
+        return _install(storage, path, record, blocking=blocking)
 
 
 # LLM: 回执只读原子快照，不取写锁、不迁移或补安装；prepared 不算完整交付，坏账不能退化为空。

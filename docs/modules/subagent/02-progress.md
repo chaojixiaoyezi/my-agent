@@ -1,3 +1,13 @@
+## 2026-10-17 调试产物完整引用（F3候选，未发布）
+
+实际宿主详情 writer 返回值及 runner_result_file 以 Path 运输，调试编码保留完整引用；空引用仍为空串，普通正文预览 240 字符、list/dict 32 项保持。Path 仅是编码类型，不证明文件存在、可读或获准访问；不 resolve、不新增 IO、不按键名含 ref 放行文本。原调试等级、默认关闭及私有写入位置保持。
+
+128 作者与142非作者分别核对两生产路径；根146合入后的十二文件为136项普通通过、2项原有跳过，0失败/错误/xfail/XPASS，源码与模式前后相同。包括真实超过240字符的宿主路径、普通伪ref文本仍截断、空引用与阶段详情引用，不代替完整全仓或发行验收。
+
+## 2026-10-17 runner出处依赖收敛（F3候选）
+
+原Thread出生前捕获、退出异常native锚点和两个只读observer整体迁入common/runner_thread_origin；runner心跳/worker生产端、Gateway和runtime错误展示共用实际实现。Context不执行、四类原未知和原异常同对象、完整claim末核/P3保持不变，Count0原顺序不扩。8文件147普通回归通过，不代表真实物理排空或审批退休已闭合；见根TESTS。
+
 ## 2026-10-16 F4/F5 来源与可见范围（组合候选，未发布）
 
 - 学习来源由可信宿主沿子代理/孙代理 lineage 继承和标记，unknown、外部资料与自动化不升级成用户本人；来源资格只生成候选，不授子代理写 AGENTS 或批准正式记忆/Skill 的权限。
@@ -512,3 +522,20 @@ typed 停机错误及准确 request/run/attempt，不重开原调用、不伪签
 2026-10-14 必要输入取消接线：共同 `subagents/cancellation._close_projection` 在原授权与执行权关闭后，只按准确 root+run 清理该节点的输入依赖；冻结子树成员逐个清，兄弟与其它活任务保留。重复取消已 CANCELLED 节点可重试输入清理，不改 UNKNOWN 业务结果。合同覆盖真实 cancel_subagent_tree、子孙与兄弟隔离；详见 [持久输入交接](../../tasks/IM_PERSISTENT_INPUT_HANDOFF.md)。
 
 2026-10-14 自学维护本地切片：runner的lesson仅生成待确认S1提案，不再actor=auto安装；准确用户确认后按原来源/hash纳入同一learning registry，保原owner路径与stable_id。未部署；详见SKILL_AUTO_SUMMARY的后续实施追加。
+
+## 2026-10-16 F3 原child请求运输与短写（候选，未启物理W）
+
+独立原canonical child来源经既有owner/完整prepared/P3/P5交原runner，不创建另一个任务、attempt或子代理身份。原child scope复核谱系、owner与原dispatch；真实worker构造沿C原constructor roots及已有W bootstrap，home不当业务根。原canonical save/mutate/runner session、attempt/create、result文件与原RuntimeDB closeout在原T短门后进入既有业务锁，保main CAS、活动attempt、用户确认候选、可靠交接与可恢复工作片顺序。Count0无额外来源IO，模型/线程等待在门外。
+
+真实取消/换代后模型已返回也不得落result或改canonical；派发在正MP只保原待派工作，独立请求之外不直接新起进程。原kernel身份未知/TTL/PID不能授接手或裸终止许可。实际child的模型与心跳线程尚活时，transport仍保持；已退出scope不能靠复制context继续写入。原11个child节点按原体通过；新增真实供应商Bounded被普通失败catch吞掉的红经run_flow两处实际类型优先上抛关闭，child scope失效前只沿原claim/T-CAS附既有unknown，保原Call/P3/活动attempt，entered=null。活scope内main原失败进度/遥测仍可记，不等于业务结算或撤权后可写。13文件172唯一节点中170普通通过、2原有xfail，未更改原11的撤权字节断言。Count2/native/完整drain由根后续统一，原Thread.join没有通用有限期限的边界继续如实记录。
+
+
+## 2026-10-16 F3 runner线程ACK与退出未知（16，候选未发行）
+
+非作者实际Thread探针确证child11在心跳或timeout worker已经出生但start ACK抛异常时，会跳过原join，把仍活执行写成普通FAILED。独立16使两个start进入原收尾：正MP stop/interrupt和原Thread join在T外，未确认退出时保留同一原异常native锚点与捕获Context，不制造Bounded call_id或entered=False。原11冻结及两项原红保留。
+
+原scope/完整claim匹配时只在唯一processing.execution_outcome记录TASK_RESOURCE_STOP_UNCONFIRMED、entered=null及原runner run/attempt/phase；关闭scope后只读既存诊断/保守未结，不普通失败、签新终态、重放或释放P3。Count0原心跳start、状态顺序和1秒join不变。原TIMEOUT早fence完整保留：逻辑超时只撤销迟到提交，并不证明物理Thread退出；独立运输仍等原join。完整native/Count2未验。
+
+## 2026-10-17 F3 凭据输入复用原子任务读取
+
+C 私卡事务21使用 TaskPersistenceService.load 与显式 load_subagent_task 的同一 canonical task.json reader/normalizer；不初始化 manager、补任务写者或复制 owner 权限。作者665、非作者同665及额外8项通过（组合有重叠），尚不证明真实 W/native。

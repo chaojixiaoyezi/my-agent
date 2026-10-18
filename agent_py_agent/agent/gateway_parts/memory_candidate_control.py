@@ -70,13 +70,19 @@ def parse_memory_candidate_command(value):
                                       target_id=argument, valid=valid, usage=USAGE)
 
 
+# LLM: 只复用原活seal判断，不发行/消费封印或恢复HTTP权限；旧Agent与C固定consumer共用同一字段判据。
+# 函数用途: 核验当前候选操作确实由本人已消费的原入口发起。
+def memory_control_ingress_valid(scope, command):
+    evidence = scope.memory_ingress
+    return (type(evidence) is _MemoryIngress and evidence.seal is _SEAL and evidence.active
+            and evidence.used and evidence.identity == (scope.user_id, scope.channel, scope.conversation_id)
+            and evidence.raw == command.value)
+
+
 # LLM: 普通owner控制不要求全机admin；owner只沿原认证路由，拒绝模型/旧封印及跨owner参数。
 # 函数用途: 沿原持久控制执行一次候选操作，错误只返回固定原因码。
 def execute_memory_candidate_control(base, paths, command, scope):
-    evidence = scope.memory_ingress
-    if (type(evidence) is not _MemoryIngress or evidence.seal is not _SEAL or not evidence.active
-            or not evidence.used or evidence.identity != (scope.user_id, scope.channel, scope.conversation_id)
-            or evidence.raw != command.value):
+    if not memory_control_ingress_valid(scope, command):
         return memory_control_failure('MEMORY_CONTROL_NOT_USER_REQUEST')
     try:
         from ..user_space.group_authorization_context import group_capability_guard

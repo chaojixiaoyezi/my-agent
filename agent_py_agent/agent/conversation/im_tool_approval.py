@@ -1,3 +1,5 @@
+# LLM: C取消只复用原Store/审计/transition，不复活执行源；批准仍由原实际scope门负责。
+# 模块用途: 将冷C准确取消接入原私人审批账，保留Count0发布/决定/等待合同。
 # LLM: IM 是原审批账的运输与决定入口，不拥有第二份批准状态；冻结 actor 和真实卡片身份，决定仍走原 scope/request/claim/attempt。
 # 模块用途: 将后台主子审批送到原发起人私聊，并把签名引用核对回原等待记录。
 from __future__ import annotations
@@ -147,7 +149,10 @@ def im_approval_wait_live(row, now: float) -> bool:
 
 # LLM: 引用已在初始化 owner 前验证 MAC/actor/expiry；此处核对真实卡片、原 scope/请求以及本次明确决定，再写原批准记录。
 # 函数用途: 将原发起人在私人卡上的选择提交给原主子调用，不接受转发卡、他人点击或旧执行代次。
-def resolve_im_tool_approval(agent, payload: dict, *, reference: str, message_id: str, chat_id: str, decision: str) -> dict:
+# LLM: 可选C提交器只包原scope/transition/audit的真实RMW；Count0省略参数保原调用，MAC不能替代实际writer/claim/attempt。
+# 函数用途: 已发原私卡决定仍交原审批门，C本机实际Agent可显式非阻塞提交。
+def resolve_im_tool_approval(agent, payload: dict, *, reference: str, message_id: str, chat_id: str, decision: str,
+                             commit_transition=None, blocking=True) -> dict:
     from .agent_tool_approval import _approval_path, _approval_request, resolve_agent_tool_approval
     from .tool_approval_scope import tool_approval_scope
 
@@ -165,10 +170,11 @@ def resolve_im_tool_approval(agent, payload: dict, *, reference: str, message_id
         raise ValueError("卡片不是原私人请求或已失效")
     request = _approval_request(row.get("request"))
     return resolve_agent_tool_approval(agent, run_id=scope.run_id, request_value=request,
-        decision_value=ToolApprovalDecision(request.permission_id, decision), interaction_actor=payload)
+        decision_value=ToolApprovalDecision(request.permission_id, decision), interaction_actor=payload,
+        **({} if commit_transition is None and blocking else {'commit_transition': commit_transition, 'blocking': blocking}))
 
 
-# LLM: 前台 IM 与后台共用唯一 AgentToolApproval 账；不支持 TUI 的来源也必须有真实用户决定，不能直接批准。
+# LLM: 前台共用原审批账和等待线程；actual typed未知先穿透，普通失败仍unavailable，不以卡片授执行权。
 # 函数用途: 将普通用户/群聊的前台工具确认接到同一私人卡和执行代次检查。
 def request_foreground_im_permission(agent, value, *, cancellation_token=None):
     from types import SimpleNamespace
@@ -181,53 +187,74 @@ def request_foreground_im_permission(agent, value, *, cancellation_token=None):
         scope = tool_approval_scope(agent, task_id)
         sink = SimpleNamespace(agent=agent, task_id=task_id, thread_id=scope.thread_id, approval_interactive=True)
         return AgentToolApprovalSinkMixin.request_permission(sink, value, cancellation_token=cancellation_token)
-    except (ValueError, RuntimeError, OSError):
+    except (ValueError, RuntimeError, OSError) as error:
+        from ..gateway_parts.private_approval_control import raise_private_approval_transport_error
+        raise_private_approval_transport_error(error)
         from ..contracts.tool_approval import ToolApprovalDecision, ToolApprovalRequest
         request = ToolApprovalRequest.from_mapping(value)
         return ToolApprovalDecision(request.permission_id, 'unavailable').to_dict()
 
 
-# LLM: 取消只退休签名冻结的原等待，过期/失活可关闭；不读取当前新代次批准、不停止任务，CAS与确认共用原transition锁。
-# 函数用途: 幂等取消准确原审批卡并记录实际点击者，已完成决定不能被撤销。
-def _cancel_approval_card(agent,payload,reference,message_id,chat_id):
+# LLM: Count0继续原Agent审计/Store/阻塞锁；取消不读取当前新代次授予权限，真实C使用同一领域leaf。
+# 函数用途: 保留原私人审批取消入口及虚调用资源。
+def _cancel_approval_card(agent, payload, reference, message_id, chat_id):
+    from functools import partial
+
+    from ..user_space.interaction_actor_audit import record_interaction_actor
+
+    audit = partial(record_interaction_actor, agent, payload, decision='cancel', actor=payload['actor_id'])
+    return cancel_im_tool_approval(agent.conversation_store, payload,
+                                  {'reference': reference, 'message_id': message_id, 'chat_id': chat_id}, audit=audit)
+
+
+# LLM: 仅退休已MAC验证的原等待，过期/失活仍可关闭；Store不授active执行权，C必须提供同来源短RMW，审计失败保真实部分事实。
+# 函数用途: 在原transition锁内幂等取消准确卡片，不停止任务、不覆写其它决定或清P3。
+def cancel_im_tool_approval(store, payload, body, *, audit, commit_transition=None, blocking=True):
     from ..common.opaque_id import validate_opaque_id
-    from ..user_space.interaction_actor_audit import (
-        interaction_actor_text,
-        record_interaction_actor,
-    )
-    from .agent_tool_approval import (
-        _approval_path,
-        _approval_request,
-        _record_matches,
-        _transition_path,
-    )
+    from .agent_tool_approval import approval_path_for_store
     from .tool_approval_scope import ToolApprovalScope
-    identity=dict(payload['scope'])
-    validate_opaque_id(identity['run_id'],kind='run_id')
-    validate_opaque_id(identity['root_task_id'],kind='root_task_id')
-    scope=ToolApprovalScope(**identity,agent_name='',active=False)
-    path=_approval_path(agent,scope,str(payload.get('permission_id') or ''))
-    with locked_json_path(_transition_path(path)):
-        report=read_json_object_report(path,context='tool_approval.im.cancel')
-        row=report.payload or {}
+
+    identity = dict(payload['scope'])
+    validate_opaque_id(identity['run_id'], kind='run_id')
+    validate_opaque_id(identity['root_task_id'], kind='root_task_id')
+    scope = ToolApprovalScope(**identity, agent_name='', active=False)
+    path = approval_path_for_store(store, scope, str(payload.get('permission_id') or ''))
+
+    # LLM: 来源窗口必须包住原transition锁和行锁；不能仅先检查后在C门外提交，默认Count0仍直接执行。
+    # 函数用途: 原锁内复核卡片并完成这一次取消。
+    def cancel():
+        return _cancel_approval_at_path(path, scope, body, audit, blocking)
+
+    return cancel() if commit_transition is None else commit_transition(cancel)
+
+
+# LLM: 完整原schema/scope/request及运输ID在同一锁内核对；首次审计后才写取消，已取消原facts重放不再审计。
+# 函数用途: 更新唯一原审批行，所有其它任务、输入和卡片保持原状态。
+def _cancel_approval_at_path(path, scope, body, audit, blocking):
+    from ..user_space.interaction_actor_audit import interaction_actor_text
+    from .agent_tool_approval import _approval_request, _record_matches, _transition_path
+
+    with locked_json_path(_transition_path(path), **({} if blocking else {"blocking": False})):
+        report = read_json_object_report(path, context='tool_approval.im.cancel')
+        row = report.payload or {}
         if report.load_error:
             raise ValueError('审批记录不可读')
         if not row:
-            return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED'}
-        request=_approval_request(row.get('request'))
-        transport=row.get('im_control') or {}
-        if (not _record_matches(row,scope,request) or transport.get('reference')!=reference
-                or transport.get('message_id')!=message_id or transport.get('chat_id')!=chat_id):
+            return {'ok': False, 'error_code': 'IM_INTERACTION_ALREADY_HANDLED'}
+        request = _approval_request(row.get('request'))
+        transport = row.get('im_control') or {}
+        if (not _record_matches(row, scope, request) or transport.get('reference') != body['reference']
+                or transport.get('message_id') != body['message_id'] or transport.get('chat_id') != body['chat_id']):
             raise ValueError('卡片不是原审批请求')
-        if row.get('status')!='pending':
-            if (row.get('decision') or {}).get('decision')!='cancelled':
-                return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED'}
-            facts=row.get('decision_by')
+        if row.get('status') != 'pending':
+            if (row.get('decision') or {}).get('decision') != 'cancelled':
+                return {'ok': False, 'error_code': 'IM_INTERACTION_ALREADY_HANDLED'}
+            facts = row.get('decision_by')
             if not facts:
-                return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED'}
+                return {'ok': False, 'error_code': 'IM_INTERACTION_ALREADY_HANDLED'}
         else:
-            facts=record_interaction_actor(agent,payload,decision='cancel',actor=payload['actor_id'])
-            row={**row,'status':'decided','decision':ToolApprovalDecision(request.permission_id,'cancelled').to_dict(),'decision_by':facts}
-            write_json_file_atomic(path,row)
-    return {'ok':True,'decision':'cancelled','clicked_by':facts,
-            'message':interaction_actor_text(facts)+' 已取消这次确认；任务和其他卡片保持原状态。'}
+            facts = audit()
+            row = {**row, 'status': 'decided', 'decision': ToolApprovalDecision(request.permission_id, 'cancelled').to_dict(), 'decision_by': facts}
+            write_json_file_atomic(path, row, **({} if blocking else {"blocking": False}))
+    return {'ok': True, 'decision': 'cancelled', 'clicked_by': facts,
+            'message': interaction_actor_text(facts) + ' 已取消这次确认；任务和其他卡片保持原状态。'}

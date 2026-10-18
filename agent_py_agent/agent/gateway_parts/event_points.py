@@ -31,33 +31,46 @@ def _enabled_event_config(agent):
         return None
 
 
-# LLM: server 是唯一 HTTP 宿主；开关在读取路由和装配前检查，启用后先要求真实会话线程，缺失只记固定原因诊断并返回 None。
-# 函数用途: 从内存宿主事实构造发布上下文；关闭或线程未解析时不构造上下文、不发布事件。
+# LLM: 旧Agent入口仍先核严格开关再读home；显式资源叶共用原server sink，不构造Agent或按事件内容选择owner。
+# 函数用途: 从已装配业务宿主取得原事件配置与路径，关闭时不读路由或文件系统。
 def gateway_event_context(agent, routing: dict, *, server=None) -> EventPointContext | None:
-    enabled = False
+    config = _enabled_event_config(agent)
+    if config is None:
+        return None
     try:
-        config = _enabled_event_config(agent)
-        if config is None:
-            return None
-        enabled = True
+        return _gateway_event_context(config, agent.home_paths, routing, server=server)
+    except Exception:  # noqa: BLE001 观察资源读取不能影响业务
+        warn_event_assembly_failure('PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED')
+        return None
+
+
+# LLM: config/home仅宿主组合根提供，server根来自原Agent或真实ControlPlane；观察只投影同home，不签业务权限或另建hub。
+# 函数用途: 为有Agent和冷C的已落定控制构造同一个插件发布上下文，失败仅固定诊断。
+def _gateway_event_context(config, home, routing, *, server=None):
+    if getattr(config, 'plugin_events_enabled', False) is not True:
+        return None
+    try:
         thread_id = routing.get('thread_id')
         if not isinstance(thread_id, str) or not thread_id.strip():
             warn_event_assembly_failure(PLUGIN_EVENT_THREAD_UNRESOLVED)
             return None
-        thread_id = thread_id.strip()
         from . import http_service, plugin_panels_http
-
         server = server if server is not None else http_service._server_instance
-        if server is None or server.agent.home_paths.root != agent.home_paths.root:
+        if server is None:
             return None
-        owner = _EventOwner(agent.home_paths.owner_home_dir, agent.home_paths.owner_plugins_dir)
+        if server.agent is None:
+            from .control_plane import GatewayControlPlane
+            control = getattr(server, 'control_plane', None)
+            if type(control) is not GatewayControlPlane or control.home_root != home.root:
+                return None
+        elif server.agent.home_paths.root != home.root:
+            return None
+        owner = _EventOwner(home.owner_home_dir, home.owner_plugins_dir)
         return EventPointContext(config, partial(plugin_panels_http.publish_plugin_event, server, owner),
-                                 str(routing.get('channel') or ''), thread_id,
-                                 str(routing.get('actor') or 'main'),
-                                 str(routing.get('channel_conversation_id') or ''))
-    except Exception:  # noqa: BLE001 观察装配故障不能中止入队或模型执行
-        if enabled:
-            warn_event_assembly_failure('PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED')
+            str(routing.get('channel') or ''), thread_id.strip(), str(routing.get('actor') or 'main'),
+            str(routing.get('channel_conversation_id') or ''))
+    except Exception:  # noqa: BLE001 观察装配故障不能中止业务
+        warn_event_assembly_failure('PLUGIN_EVENT_GATEWAY_CONTEXT_FAILED')
         return None
 
 
@@ -122,27 +135,40 @@ def prompt_queued(server, request: dict) -> None:
         return
 
 
-# LLM: 控制回执由唯一执行服务冻结 owner；关闭零回执读取，启用后字段/装配异常仅一次固定原因日志，不改变控制结果。
-#   v2（tref2）：thread_ref 用回执里执行时解析的 conversation_thread_id（权威会话线程），
-#   渠道会话号另进 channel_conversation_ref。
-# 函数用途: 将新 completed 回执减量为命令名和状态；缺上下文不发，不带参数或错误正文。
+# LLM: 旧入口先核开关再读真实Agent资源；观察失败不改变已落定回执，冷C只用下面显式资源入口。
+# 函数用途: 保留原Agent控制事件调用与关闭短路，不从事件恢复业务权限。
 def command_completed(agent, receipt) -> None:
-    enabled = False
+    if _enabled_event_config(agent) is None:
+        return
     try:
-        if _enabled_event_config(agent) is None:
-            return
-        enabled = True
         context = gateway_event_context(agent, {'channel': receipt.channel,
             'thread_id': receipt.conversation_thread_id,
             'channel_conversation_id': receipt.conversation_id})
-        if context is None:
-            return
+        _publish_completed_command(context, receipt)
+    except Exception:  # noqa: BLE001 命令观察不能改变已落定的业务回执
+        warn_event_assembly_failure('PLUGIN_EVENT_COMMAND_ASSEMBLY_FAILED')
+
+
+# LLM: 只在新completed已耐久后调用，配置/规范home与server来自同一真实组合根；只发原白名单标量，失败不重跑业务。
+# 函数用途: 让冷C与原Agent共享命令观察投影，参数、正文和密钥不进入事件。
+def command_completed_from_resources(config, home, receipt, *, server=None) -> None:
+    if getattr(config, 'plugin_events_enabled', False) is not True:
+        return
+    try:
+        context = _gateway_event_context(config, home, {'channel': receipt.channel,
+            'thread_id': receipt.conversation_thread_id,
+            'channel_conversation_id': receipt.conversation_id}, server=server)
+        _publish_completed_command(context, receipt)
+    except Exception:  # noqa: BLE001 命令观察不能改变已落定的业务回执
+        warn_event_assembly_failure('PLUGIN_EVENT_COMMAND_ASSEMBLY_FAILED')
+
+
+# LLM: 只消费已构造的观察上下文和原completed回执；两个宿主入口共享同一白名单投影，不涉及业务写权。
+# 函数用途: 发布最小命令完成事实，没有正文、参数或密钥。
+def _publish_completed_command(context, receipt):
+    if context is not None:
         emit_event(context, 'command_executed', {'command': '/' + receipt.command_kind,
             'operation_id': receipt.operation_id, 'state': 'ok' if receipt.result.get('ok') is True else 'failed'})
-    except Exception:  # noqa: BLE001 命令观察不能改变已落定的业务回执
-        if enabled:
-            warn_event_assembly_failure('PLUGIN_EVENT_COMMAND_ASSEMBLY_FAILED')
-        return
 
 
 # LLM: 开关先于请求字段读取；thread_id_of 仅在启用后调用，解析失败由统一 context 闸门记固定原因并返回 None。

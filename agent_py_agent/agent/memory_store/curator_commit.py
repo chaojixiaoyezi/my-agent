@@ -1,3 +1,5 @@
+# LLM: 原多文件批次保main配额/CAS/恢复与F4候选语义，公开事务先T后锁，内部writer只核原窗口，未结不得包装成普通失败。
+# 模块用途: 在真实请求短事务内提交或恢复策展批次，保持state最后落盘及撤权后零业务写。
 from __future__ import annotations
 
 """Memory Curator 的可恢复多文件整批提交。"""
@@ -14,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
@@ -21,6 +24,12 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+    gateway_short_transaction,
+    gateway_transaction_writer,
+)
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import CandidateService, merge_candidate_observations
@@ -129,48 +138,61 @@ class CuratorBatchCommitter:
 
     # LLM: 先整批校验配额再写入；异常在原锁内回滚。成功清理也留在同锁内，不能与恢复者竞争删备份。
     # 函数用途: 原子提交 Curator 批次并清理事务，返回实际幂等落点。
+    # LLM: 原T/P3/P5覆盖完整文件短事务，再取既有quota/规范锁；网络和join均在门外，main候选/F4确认与state最后提交顺序不变。
+    # 函数用途: 在同一原权限窗口内提交或恢复唯一候选、Daily、审计和state批次。
     def commit(self, request: CuratorBatchCommit) -> CuratorBatchCommitResult:
-        _validate_batch_identity(request)
-        paths = self._target_paths(request)
-        with self._admissions() as admissions, _locked_paths(paths):
-            changes, daily_events, candidates = self._build_changes(request)
-            _check_admissions(admissions, changes)
-            transaction = self._prepare_transaction(request, changes)
-            try:
-                self._apply_changes(changes)
-            except CuratorStateCorruptError:
-                # state 仓库损坏不是 commit 失败: 原样冒泡, 由上层隔离留证,
-                # 不伪装成 CURATOR_COMMIT_FAILED(回滚写 state 同样会失败)。
-                raise
-            except Exception as exc:
+        with gateway_short_transaction("commit"):
+            _validate_batch_identity(request)
+            paths = self._target_paths(request)
+            with self._admissions() as admissions, _locked_paths(paths):
+                changes, daily_events, candidates = self._build_changes(request)
+                _check_admissions(admissions, changes)
+                transaction = self._prepare_transaction(request, changes)
                 try:
-                    self._restore_transaction(transaction, paths_locked=True)
-                except Exception as rollback_exc:
-                    raise CuratorCommitRecoveryError(
-                        "curator batch rollback failed"
-                    ) from rollback_exc
-                _cleanup_transaction(_transaction_directory(transaction))
-                raise CuratorBatchCommitError("curator batch commit failed") from exc
-            _cleanup_committed_best_effort(_transaction_directory(transaction))
-        return CuratorBatchCommitResult(tuple(daily_events), tuple(candidates))
+                    self._apply_changes(changes)
+                except CuratorStateCorruptError:
+                    # state 仓库损坏不是 commit 失败: 原样冒泡, 由上层隔离留证,
+                    # 不伪装成 CURATOR_COMMIT_FAILED(回滚写 state 同样会失败)。
+                    raise
+                except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                    raise
+                except Exception as exc:
+                    try:
+                        self._restore_transaction(transaction, paths_locked=True)
+                    except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                        raise
+                    except Exception as rollback_exc:
+                        raise CuratorCommitRecoveryError(
+                            "curator batch rollback failed"
+                        ) from rollback_exc
+                    _cleanup_transaction(_transaction_directory(transaction))
+                    raise CuratorBatchCommitError("curator batch commit failed") from exc
+                _cleanup_committed_best_effort(_transaction_directory(transaction))
+            return CuratorBatchCommitResult(tuple(daily_events), tuple(candidates))
 
     # LLM: 独立恢复也必须同锁复核、恢复、清理和审计；不领取租约，默认等待规范锁。
     # 函数用途: 保留独立恢复接口，返回本次真正恢复的事务数。
+    # LLM: 原T/P3/P5覆盖完整文件短事务，再取既有quota/规范锁；网络和join均在门外，main候选/F4确认与state最后提交顺序不变。
+    # 函数用途: 在同一原权限窗口内提交或恢复唯一候选、Daily、审计和state批次。
     def recover_incomplete(self, *, now: datetime | None = None) -> int:
-        plan = _recovery_plan(self, now)
-        with _recovery_section(self, plan):
-            return _recover_locked(self, plan)
+        with gateway_short_transaction("recover_incomplete"):
+            plan = _recovery_plan(self, now)
+            with _recovery_section(self, plan):
+                return _recover_locked(self, plan)
 
     # LLM: 前台服务使用这个完整接管入口；任一目标锁竞争立即 busy，不等待持锁清理的对端。
     # 函数用途: 在同一临界区恢复旧事务并领取新租约，模型执行在解锁之后。
+    # LLM: 原T/P3/P5覆盖完整文件短事务，再取既有quota/规范锁；网络和join均在门外，main候选/F4确认与state最后提交顺序不变。
+    # 函数用途: 在同一原权限窗口内提交或恢复唯一候选、Daily、审计和state批次。
     def recover_and_acquire(self, request: CuratorLeaseRequest):
-        plan = replace(_recovery_plan(self, request.now), blocking=False)
-        try:
-            with _recovery_section(self, plan):
-                _recover_locked(self, plan)
-                return self.state._acquire_unlocked(request)
-        except _CuratorRecoveryBusy:
-            return None
+        with gateway_short_transaction("recover_and_acquire"):
+            plan = replace(_recovery_plan(self, request.now), blocking=False)
+            try:
+                with _recovery_section(self, plan):
+                    _recover_locked(self, plan)
+                    return self.state._acquire_unlocked(request)
+            except _CuratorRecoveryBusy:
+                return None
 
     # LLM: Target locks cover every daily shard plus the three owner ledgers, with state sorted
     # among them but still written last by _apply_changes.
@@ -235,48 +257,51 @@ class CuratorBatchCommitter:
     # directory without a manifest is therefore safe to discard on restart.
     #   事务前镜像（before-*.txt）是记忆正文副本：在各自路径锁下按私有原子写（0600，事务目录 0700）；manifest 无正文，照旧。
     # 函数用途: 保存事务前镜像和无正文运行元数据，形成崩溃恢复点。
+    # LLM: 已持原业务锁，只核同一原短门当前线程窗口，不倒取T、不从复制context重签权限；未知先拒写并保恢复材料。
+    # 函数用途: 在原窗口内写事务材料或规范目标，丢失当前窗口时原样拒绝。
     def _prepare_transaction(
         self,
         request: CuratorBatchCommit,
         changes: dict[Path, str],
     ) -> dict[str, object]:
-        directory = self.transactions_dir / _safe_run_name(request.run_record.run_id)
-        if directory.exists():
-            raise CuratorCommitRecoveryError("curator transaction already exists")
-        # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
-        directory.mkdir(parents=True, exist_ok=False, mode=0o700)
-        targets: list[dict[str, object]] = []
-        for index, path in enumerate(changes):
-            _assert_target(path, self.memory_root)
-            existed = path.exists()
-            before = path.read_text(encoding="utf-8") if existed else ""
-            backup = directory / f"before-{index:03d}.txt"
-            with locked_json_path(backup):
-                write_private_text_file_atomic_unlocked(backup, before)
-            targets.append(
-                {
-                    "path": str(path.resolve(strict=False)),
-                    "backup": backup.name,
-                    "existed": existed,
-                    "before_sha256": _sha256(before),
-                    "after_sha256": _sha256(changes[path]),
-                }
-            )
-        record = request.run_record
-        manifest: dict[str, object] = {
-            "schema_version": CURATOR_TRANSACTION_SCHEMA_VERSION,
-            "run_id": record.run_id,
-            "lease_id": record.lease_id,
-            "reason": record.reason,
-            "provider": record.provider,
-            "model": record.model,
-            "started_at": record.started_at,
-            "prepared_at": utc_now_iso(),
-            "targets": targets,
-            "manifest_path": str((directory / "manifest.json").resolve(strict=False)),
-        }
-        write_json_file_atomic(directory / "manifest.json", manifest, sort_keys=True)
-        return manifest
+        with gateway_transaction_writer("_prepare_transaction"):
+            directory = self.transactions_dir / _safe_run_name(request.run_record.run_id)
+            if directory.exists():
+                raise CuratorCommitRecoveryError("curator transaction already exists")
+            # 目录缺失时按 0700 新建（pdp 2026-10-03：私有写只动自己建的东西；已存在的目录一律不动）。
+            directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+            targets: list[dict[str, object]] = []
+            for index, path in enumerate(changes):
+                _assert_target(path, self.memory_root)
+                existed = path.exists()
+                before = path.read_text(encoding="utf-8") if existed else ""
+                backup = directory / f"before-{index:03d}.txt"
+                with locked_json_path(backup):
+                    write_private_text_file_atomic_unlocked(backup, before)
+                targets.append(
+                    {
+                        "path": str(path.resolve(strict=False)),
+                        "backup": backup.name,
+                        "existed": existed,
+                        "before_sha256": _sha256(before),
+                        "after_sha256": _sha256(changes[path]),
+                    }
+                )
+            record = request.run_record
+            manifest: dict[str, object] = {
+                "schema_version": CURATOR_TRANSACTION_SCHEMA_VERSION,
+                "run_id": record.run_id,
+                "lease_id": record.lease_id,
+                "reason": record.reason,
+                "provider": record.provider,
+                "model": record.model,
+                "started_at": record.started_at,
+                "prepared_at": utc_now_iso(),
+                "targets": targets,
+                "manifest_path": str((directory / "manifest.json").resolve(strict=False)),
+            }
+            write_json_file_atomic(directory / "manifest.json", manifest, sort_keys=True)
+            return manifest
 
     # LLM: State is deliberately moved to the final replace; its last_committed_run_id is the
     # sole durable decision used by restart recovery.
@@ -292,49 +317,55 @@ class CuratorBatchCommitter:
     # behavior is the private atomic writer under an already-held path lock（日事件/候选等目标装记忆正文，
     #   一律 0600，已有 0644 的目标在这次替换时收紧）。
     # 函数用途: 以仅本人可读写的权限原子替换一个已持锁的事务目标。
+    # LLM: 已持原业务锁，只核同一原短门当前线程窗口，不倒取T、不从复制context重签权限；未知先拒写并保恢复材料。
+    # 函数用途: 在原窗口内写事务材料或规范目标，丢失当前窗口时原样拒绝。
     def _write_target(self, path: Path, content: str) -> None:
-        write_private_text_file_atomic_unlocked(path, content)
+        with gateway_transaction_writer("_write_target"):
+            write_private_text_file_atomic_unlocked(path, content)
 
     # LLM: Restore verifies every backup/hash and never follows a manifest target outside the
     # owner memory root. 恢复写回同样走私有原子写（0600），不把旧文件的 0644 带回来。
     # 函数用途: 将未提交事务的所有目标恢复到事务前状态。
+    # LLM: 已持原业务锁，只核同一原短门当前线程窗口，不倒取T、不从复制context重签权限；未知先拒写并保恢复材料。
+    # 函数用途: 在原窗口内写事务材料或规范目标，丢失当前窗口时原样拒绝。
     def _restore_transaction(
         self,
         manifest: dict[str, object],
         *,
         paths_locked: bool,
     ) -> None:
-        if not paths_locked:
-            raise CuratorCommitRecoveryError("curator rollback requires all target locks")
-        manifest_path = Path(str(manifest["manifest_path"]))
-        directory = manifest_path.parent
-        for item in manifest["targets"]:
-            path = Path(str(item["path"]))
-            _assert_target(path, self.memory_root)
-            backup = directory / str(item["backup"])
-            if not backup.is_file():
-                raise CuratorCommitRecoveryError("curator transaction backup is missing")
-            before = backup.read_text(encoding="utf-8")
-            if _sha256(before) != str(item["before_sha256"]):
-                raise CuratorCommitRecoveryError("curator transaction backup hash mismatch")
-            current_exists = path.exists()
-            current = path.read_text(encoding="utf-8") if current_exists else ""
-            before_matches = current_exists == bool(item["existed"]) and _sha256(
-                current
-            ) == str(item["before_sha256"])
-            before_matches = before_matches or (current_exists and _lease_metadata_only_change(
-                path, self.state.path, before, current))
-            if before_matches:
-                continue
-            after_matches = current_exists and _sha256(current) == str(item["after_sha256"])
-            if not after_matches:
-                raise CuratorCommitRecoveryError(
-                    "curator transaction target changed outside the prepared batch"
-                )
-            if bool(item["existed"]):
-                write_private_text_file_atomic_unlocked(path, before)
-            else:
-                path.unlink(missing_ok=True)
+        with gateway_transaction_writer("_restore_transaction"):
+            if not paths_locked:
+                raise CuratorCommitRecoveryError("curator rollback requires all target locks")
+            manifest_path = Path(str(manifest["manifest_path"]))
+            directory = manifest_path.parent
+            for item in manifest["targets"]:
+                path = Path(str(item["path"]))
+                _assert_target(path, self.memory_root)
+                backup = directory / str(item["backup"])
+                if not backup.is_file():
+                    raise CuratorCommitRecoveryError("curator transaction backup is missing")
+                before = backup.read_text(encoding="utf-8")
+                if _sha256(before) != str(item["before_sha256"]):
+                    raise CuratorCommitRecoveryError("curator transaction backup hash mismatch")
+                current_exists = path.exists()
+                current = path.read_text(encoding="utf-8") if current_exists else ""
+                before_matches = current_exists == bool(item["existed"]) and _sha256(
+                    current
+                ) == str(item["before_sha256"])
+                before_matches = before_matches or (current_exists and _lease_metadata_only_change(
+                    path, self.state.path, before, current))
+                if before_matches:
+                    continue
+                after_matches = current_exists and _sha256(current) == str(item["after_sha256"])
+                if not after_matches:
+                    raise CuratorCommitRecoveryError(
+                        "curator transaction target changed outside the prepared batch"
+                    )
+                if bool(item["existed"]):
+                    write_private_text_file_atomic_unlocked(path, before)
+                else:
+                    path.unlink(missing_ok=True)
 
     # LLM: 所有恢复写入也先取 owner quota admission，再按规范路径取目标锁，不能倒置。
     # 函数用途: 获取去重后的 owner quota 临界区，接管入口可在竞争时立即退出。

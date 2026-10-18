@@ -217,3 +217,34 @@ def test_combined_projection_errors_keep_calls_before_outputs(tmp_path: Path) ->
         old_source_refs(tmp_path, {"run_id": "needle/a"})
     with pytest.raises(TypeError):
         compact_apply._source_refs(compact_plan(tmp_path, {"run_id": "needle/a"}))
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_lookup_keeps_native_order_and_resolved_aliases(tmp_path: Path, monkeypatch, relative: bool) -> None:
+    root = tmp_path.joinpath(*(["deep-prefix"] * 8), "路径 with spaces", "owner")
+    for namespace, date, name in (("runs", "2026-10-17", "a-b"), ("runs", "2026-10-17", "a"),
+                                   ("tasks", "2026-10-16", "z")):
+        (root / namespace / date / name / "work/blobs/tool_outputs").mkdir(parents=True)
+    target = root / "runs/2026-10-17/a/work/blobs/tool_outputs"
+    alias = root / "runs/2026-10-17/0-alias/work/blobs/tool_outputs"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(target, target_is_directory=True)
+    expected = [root / "blobs/tool_outputs"]
+    for namespace in ("runs", "tasks"):
+        expected.extend(sorted((root / namespace).glob("*/*/work/blobs/tool_outputs")))
+    expected = tuple(dict.fromkeys(item.resolve(strict=False) for item in expected))
+    if relative:
+        monkeypatch.chdir(root.parent)
+        root = Path(root.name)
+    assert tool_output_paths.tool_output_roots_for_lookup(root) == expected
+    assert tool_output_paths.tool_output_index_paths_for_lookup(root) == tuple(item / "index.jsonl" for item in expected)
+
+
+def test_lookup_observes_directory_creation_and_removal(tmp_path: Path) -> None:
+    canonical = (tmp_path / "blobs/tool_outputs").resolve(strict=False)
+    assert tool_output_paths.tool_output_roots_for_lookup(tmp_path) == (canonical,)
+    added = tmp_path / "runs/2026-10-17/new/work/blobs/tool_outputs"
+    added.mkdir(parents=True)
+    assert tool_output_paths.tool_output_roots_for_lookup(tmp_path) == (canonical, added.resolve())
+    added.rmdir()
+    assert tool_output_paths.tool_output_roots_for_lookup(tmp_path) == (canonical,)

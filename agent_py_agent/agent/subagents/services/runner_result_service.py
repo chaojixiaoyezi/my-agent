@@ -1,8 +1,15 @@
+# LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
+# 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
 
 # LLM: 此服务是初次结果提交的依赖装配边界；runner 结果服务先核对 exact attempt，再组装并保存结果；运行账结算和父级通知交给唯一提交模块按原顺序推进。
 #   lesson 账本（record_lesson 工具写的 lessons.jsonl）在提取阶段读回并合并进 lessons；账本经验不依赖结构化输出也会记成候选。
 # 模块用途: 保存通过准入的子代理本轮结果与文件交接，调用既有可恢复收口链。
 from __future__ import annotations
+
+from ...common.request_execution_ports import (
+    gateway_short_transaction,
+    raise_if_transport_uncertain,
+)
 
 """Runner result recording and debrief persistence service."""
 
@@ -53,6 +60,8 @@ def _runner_append_debrief(task, parsed):
 #   这里只把本批已落盘Candidate交给它生成待确认提案；正式安装必须沿用户确认入口，不能由runner自动确认，
 #   确认被闸门拒绝的提案保持待确认；任何异常只变成工作日志片段，绝不影响结果保存、提交或父级通知。
 # 函数用途: 为本次lesson候选生成待用户确认的Skill提案，返回工作日志事实，不安装正式内容。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _skill_proposal_note(manager, memory_candidates: list) -> str:
     service = getattr(manager, "skill_proposals", None)
     if service is None or not memory_candidates:
@@ -61,6 +70,7 @@ def _skill_proposal_note(manager, memory_candidates: list) -> str:
         created = service.propose_from_candidates(memory_candidates)
         committed = []  # 用户确认前仅保存提案，不自动写入正式Skill。
     except Exception as exc:  # noqa: BLE001 - 可选提案失败不得影响子代理结果交付。
+        raise_if_transport_uncertain(exc)
         return f" skill_proposals_error={type(exc).__name__}"
     return f" skill_proposals={len(created)} skill_proposals_committed={sum(1 for item in committed if item.ok)}"
 
@@ -88,6 +98,8 @@ def _merge_lesson_ledger(task: SubAgentTask, extracted: _ExtractedOutput) -> Non
 # LLM: 结构化输出的 lesson/finding 仍只在解析成功时记录；账本经验来自 record_lesson 工具，自然回复（没有结构化输出）
 #   也记录。候选是结果交付后的旁支，任何异常只变成工作日志片段，不能阻断结果保存、提交与父级通知。
 # 函数用途: 按结构化输出与 lesson 账本记录本次 owner 记忆候选，返回候选列表和工作日志附注。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _record_memory_candidates(manager, task: SubAgentTask, params: _PostResultSideEffectParams) -> tuple[list, str]:
     structured = params.parsed.found and params.parsed.ok
     entries = params.lesson_ledger.entries
@@ -102,6 +114,7 @@ def _record_memory_candidates(manager, task: SubAgentTask, params: _PostResultSi
             lesson_entries=entries,
         )
     except Exception as exc:  # noqa: BLE001 - 可选候选失败不得影响子代理结果交付。
+        raise_if_transport_uncertain(exc)
         return [], f"{note} memory_candidates_error={type(exc).__name__}"
     return list(candidates), note
 
@@ -162,9 +175,15 @@ class SubAgentRunnerResultService:
                 now=ctx.now,
             )
         )
-        _write_runner_result_files(ctx.task, result, ctx.output_payload, prompt=ctx.params.prompt, response=ctx.params.response)
-        Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
+        self._persist_result_files(ctx, result)
         return result
+
+    # LLM: 只收拢main原两条文件写入，最后同T核准；不得把纯build、模型等待或其它正文变成新状态机。
+    # 函数用途: 在原执行仍开放时写已有runner结果文件，撤权后正文及canonical均不落盘。
+    def _persist_result_files(self, ctx, result):
+        with gateway_short_transaction("child_result_files"):
+            _write_runner_result_files(ctx.task, result, ctx.output_payload, prompt=ctx.params.prompt, response=ctx.params.response)
+            Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
 
     # LLM: 结构化输出是可选内容，工具账本是独立事实源；自然 final 同样交付产物与 lesson 账本经验，不要求模型复述 JSON。
     # 函数用途: 收集合规的结果字段、真实文件记录与 lesson 账本，修改 task 的交接投影但不代写业务文件。
@@ -216,6 +235,8 @@ class SubAgentRunnerResultService:
     # LLM: 结果保存后的副作用顺序固定：保存 task→debrief→统一 Memory 候选→可选 Skill 提案→工作日志→索引；
     #   候选含结构化输出与 lesson 账本两个来源；候选与 Skill 提案失败都只写工作日志，返回值仍是候选数量。
     # 函数用途: 处理子代理结果落盘后的保存、交接、候选、提案与索引副作用。
+    # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+    # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def _post_result_side_effects(
         self,
         task: SubAgentTask,
@@ -223,28 +244,29 @@ class SubAgentRunnerResultService:
         params: _PostResultSideEffectParams,
     ) -> int:
         """Handle save, debrief, unified Memory candidate and indexing side effects."""
-        output_payload = params.output_payload
-        parsed = params.parsed
-        if parsed.found and parsed.ok:
-            task.latest_summary = parsed.summary or task.latest_summary
-            if str(task.status or "").strip().upper() == TaskStatus.RUNNING.value:
-                task.current_step = parsed.status or task.status
-        for blocker in output_payload.get("blockers", []) or []:
-            text = str(blocker or "").strip()
-            if text and text not in task.blockers:
-                task.blockers.append(text)
-        self.manager.save(task)
-        if parsed.found and parsed.ok:
-            _runner_append_debrief(task, parsed)
-        memory_candidates, candidate_note = _record_memory_candidates(self.manager, task, params)
-        proposal_note = _skill_proposal_note(self.manager, memory_candidates)
-        self.manager.actions._append_task_work_log(
-            task,
-            f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
-            f"message={result.message} memory_candidates={len(memory_candidates)}{candidate_note}{proposal_note}",
-        )
-        self.manager.indexing.index_runner_result(result, output_payload)
-        return len(memory_candidates)
+        with gateway_short_transaction('child_result_side_effects'):
+            output_payload = params.output_payload
+            parsed = params.parsed
+            if parsed.found and parsed.ok:
+                task.latest_summary = parsed.summary or task.latest_summary
+                if str(task.status or "").strip().upper() == TaskStatus.RUNNING.value:
+                    task.current_step = parsed.status or task.status
+            for blocker in output_payload.get("blockers", []) or []:
+                text = str(blocker or "").strip()
+                if text and text not in task.blockers:
+                    task.blockers.append(text)
+            self.manager.save(task)
+            if parsed.found and parsed.ok:
+                _runner_append_debrief(task, parsed)
+            memory_candidates, candidate_note = _record_memory_candidates(self.manager, task, params)
+            proposal_note = _skill_proposal_note(self.manager, memory_candidates)
+            self.manager.actions._append_task_work_log(
+                task,
+                f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
+                f"message={result.message} memory_candidates={len(memory_candidates)}{candidate_note}{proposal_note}",
+            )
+            self.manager.indexing.index_runner_result(result, output_payload)
+            return len(memory_candidates)
 
     # LLM: 此处装配原 RuntimeDB、save 及只持四项必要依赖的通知器；提交和终态通知均不接收 manager；
     # 仅向准入传入原 RuntimeDB 与 canonical task；核对 exact attempt 后再落盘，提交模块按原顺序收口与通知。

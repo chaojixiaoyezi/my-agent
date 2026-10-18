@@ -58,9 +58,17 @@ class TestRuntimeMixinMemoryMethods:
         from agent_py_agent.agent.agent_core.runtime_mixin import SimpleAgentRuntimeMixin
 
         mixin = SimpleAgentRuntimeMixin()
+        # 原入口先组装真实服务引用；无效kind必须在任何候选/推广/正式写入之前拒绝。
+        mixin.memory_candidates = MagicMock()
+        mixin.memory_promotion = MagicMock()
+        mixin.memory = MagicMock()
 
         with pytest.raises(ValueError, match="fact/event/project"):
             mixin.remember("测试记忆内容", kind="note")
+        assert mixin.memory_candidates.mock_calls == []
+        assert mixin.memory_promotion.mock_calls == []
+        assert mixin.memory.mock_calls == []
+        mixin.memory.add.assert_not_called()
 
     def test_remember_default_kind(self) -> None:
         """测试 remember 默认 kind。"""

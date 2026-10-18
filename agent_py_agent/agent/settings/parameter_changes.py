@@ -1,3 +1,5 @@
+# LLM: 公开配置三个写入口在验证、读盘或新建前消费原全局拒门；owner私有档案/决策及共用账本不加此门，同步全局写边界测试。
+# 模块用途: 受限进程不能直接写公开配置；默认单进程沿原参数校验、回读恢复和记账合同。
 # LLM: 参数中心唯一的写入口：写用户配置文件（当前进程实际加载的配置，见 user_config_capability.user_config_path），
 #   以及白名单里的模型档案字段（PROFILE_FIELDS，经 model_profiles 唯一的锁内保存入口，记在该用户档案旁的 .changes.jsonl，
 #   与配置账本同一格式、同一脱敏与回滚规则）。配置写入按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config
@@ -301,7 +303,12 @@ def _failure(error: ParameterChangeError) -> dict[str, object]:
 #   capability 目标文件不存在时新建：运行时读不到配置时按默认实例走，建好文件后重启 Gateway 就能读到，
 #   所以允许从空文件开始，只写被改的键。账本统一记在用户配置（agent_config）旁，不随 capability 文件位置走。
 # 函数用途: 修改一个参数并返回结构化回执。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def set_parameter(key: object, value: object, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('global_config')
+
     try:
         spec = _writable_spec(str(key or ""))
         path = _write_target(spec, paths)
@@ -346,7 +353,12 @@ def _restore(path: Path, original: str, existed: bool) -> None:
 # LLM: 删除用户配置里的覆盖行，让参数回到随包默认；本来就没有覆盖时拒绝。capability 文件不存在 = 没有覆盖。
 #   副作用：写用户配置（或 capability 运行时文件）与账本。
 # 函数用途: 把一个参数恢复成默认值并返回结构化回执。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def reset_parameter(key: object, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('global_config')
+
     try:
         spec = _writable_spec(str(key or ""))
         path = _write_target(spec, paths)
@@ -403,7 +415,12 @@ def parameter_history(*, user_path: Path | None, key: str = "", limit: int = 20)
 #   写入沿用 set 的原文恢复规则：原值为空（原来没有覆盖）时删除覆盖行；capability 文件原本不存在且目标也是默认
 #   时按没有覆盖拒绝。副作用：写用户配置（或 capability 运行时文件）与账本。
 # 函数用途: 把某次修改撤销，恢复到那次修改之前的值。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def revert_change(change_id: str, *, paths: WritePaths, origin: ChangeOrigin) -> dict[str, object]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('global_config')
+
     try:
         user_path = paths.user_path if paths.user_path is not None else Path()
         entry = _find_change(parameter_history(user_path=user_path, limit=0), change_id)

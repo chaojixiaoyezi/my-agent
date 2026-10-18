@@ -14,6 +14,7 @@ from agent_py_agent.agent.adapter import private_controls
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter
 from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.gateway_parts import model_profile_service, private_interaction_service
+from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.tests.test_im_model_cards import callback, setup
 
 
@@ -81,7 +82,7 @@ def test_model_buttons_real_loopback_preserve_owner_and_private_lock(tmp_path,mo
         def do_POST(self):
             received.append((self.path,self.headers.get('X-Gateway-Token')))
             self._auth_middleware=SimpleNamespace(has_gateway_credential=lambda headers:headers.get('X-Gateway-Token')=='host-token')
-            private_interaction_service.handle_private_interaction(self,SimpleNamespace(agent=base))
+            private_interaction_service.handle_private_interaction(self,SimpleNamespace(agent=base, paths=gateway_paths_from_root(tmp_path / "gateway")))
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
     thread=threading.Thread(target=server.serve_forever,daemon=True)
     thread.start()
@@ -138,7 +139,7 @@ def test_missing_local_credential_does_not_send_or_accept_callback_token(tmp_pat
 
 @pytest.mark.parametrize('failure,status,code', [(OSError('secret-path'),503,'IM_INTERACTION_HOST_UNAVAILABLE'),
     (ValueError('secret-state'),403,'IM_INTERACTION_INVALID')])
-def test_gateway_control_handler_keeps_safe_failure_stage(monkeypatch,failure,status,code):
+def test_gateway_control_handler_keeps_safe_failure_stage(tmp_path,monkeypatch,failure,status,code):
     outputs=[]
     handler=SimpleNamespace(headers={'X-Channel':'feishu','X-User-Id':'ou_actor'},_read_json=lambda:{},
         _auth_middleware=SimpleNamespace(has_gateway_credential=lambda headers:True),
@@ -146,6 +147,6 @@ def test_gateway_control_handler_keeps_safe_failure_stage(monkeypatch,failure,st
     def fail(*args,**kwargs):
         raise failure
     monkeypatch.setattr(private_interaction_service,'resolve_private_interaction',fail)
-    private_interaction_service.handle_private_interaction(handler,SimpleNamespace(agent=object()))
+    private_interaction_service.handle_private_interaction(handler,SimpleNamespace(agent=object(), paths=gateway_paths_from_root(tmp_path / "gateway")))
     assert outputs[0][0]==status and outputs[0][1]['error_code']==code
     assert 'secret-' not in str(outputs)

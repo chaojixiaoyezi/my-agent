@@ -2,7 +2,8 @@ from __future__ import annotations
 
 """Memory v2 retention 计划的重验证与执行。"""
 
-# LLM: apply 只能执行刚在同一锁内生成的 typed actions；每个目标仍需 fingerprint/status/cutoff 二次核验。
+# LLM: main快照/清单引用与目标CAS保留；原callback逐写短门，实际未知/策略变化不洗成动作失败。
+#   apply 只能执行刚在同一锁内生成的 typed actions；每个目标仍需 fingerprint/status/cutoff 二次核验。
 # 模块用途: 安全删除文件、清理终态候选和快照清单；执行前重核引用与指纹，并记录可恢复回收及无正文审计。
 
 import json
@@ -12,12 +13,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     append_private_jsonl_records,
     read_json_object_report,
     write_private_json_file_atomic,
 )
 from ..common.nofollow_fs import ensure_private_dir
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.models import ConversationThread
 from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
 from .candidates import CandidateService
@@ -33,9 +40,11 @@ from .retention_scan import (
     paths_fingerprint,
     tree_fingerprint,
 )
+from .retention_transition import RetentionPolicyChangedError
 
 
-# LLM: candidate 必须一次批量删除；清单阶段只扫描一次当前引用，快照动作失败或变化时保护仍被引用的清单。
+# LLM: None保原executor；callback按原候选批次/单动作/审计短提交，扫描引用门外，四实际类型优先。
+#   candidate 必须一次批量删除；清单阶段只扫描一次当前引用，快照动作失败或变化时保护仍被引用的清单。
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # 函数用途: 执行一份已验证计划，并返回每条动作状态及结构化错误。
 def execute_retention_plan(
@@ -45,8 +54,10 @@ def execute_retention_plan(
     plan: MemoryRetentionReport,
     now: datetime,
     allowed_external_roots: tuple[Path, ...] = (),
+    commit_transition=None,
+    audit_transition=None,
 ) -> MemoryRetentionReport:
-    results, errors = _apply_candidate_phase(candidates, plan)
+    results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan), commit_transition)
     manifest_references = None
     for action in plan.actions:
         if action.operation == "candidate_delete":
@@ -54,13 +65,16 @@ def execute_retention_plan(
         try:
             if action.category == "tool_manifest" and manifest_references is None:
                 manifest_references = current_tool_manifest_references(home)
-            result = _apply_action(
+            result = _commit_step(lambda: _apply_action(
                 home=home,
                 action=action,
                 now=now,
                 allowed_external_roots=allowed_external_roots,
                 manifest_references=manifest_references,
-            )
+            ), commit_transition)
+        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError, RetentionPolicyChangedError):
+            raise
         except Exception as exc:  # noqa: BLE001 - one failed target is reported without hiding later independent targets.
             result = replace(
                 action,
@@ -90,8 +104,14 @@ def execute_retention_plan(
         policy_fingerprint=plan.policy_fingerprint,
         isolated_errors=plan.isolated_errors,
     )
-    _append_retention_audit(home, report=report, now=now)
+    _commit_step(lambda: _append_retention_audit(home, report=report, now=now), audit_transition)
     return report
+
+
+# LLM: None直接原调用不增I/O；实际callback只运输原短门，不能替代policy/目标CAS或延后借权。
+# 函数用途: 同步执行一个原保留步骤并返回原对象。
+def _commit_step(operation, transition):
+    return operation() if transition is None else transition(operation)
 
 
 # LLM: 计划里的 candidate_delete 动作必须一次批量删除（见 _apply_candidate_actions），不能与其它动作逐条交错；

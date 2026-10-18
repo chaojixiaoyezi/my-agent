@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """Memory Curator 的无工具结构化模型调用。"""
 
-# LLM: 后台模型只接收 prompt/schema；标签和关系提示均不授予写入权，有界取消复用 backends.bounded_call，缩批/游标合同仍归 Curator。
-# 模块用途: 构造非权威历史输入，复用通用有界调用执行提取并严格解析 CuratorExtraction。
+# LLM: 后台模型只接收 prompt/schema；原运输 scope 在实际 worker 发出前复核，退出未确认和原 typed 未结不能重试或改签；缩批/游标及 F2 归属保持。
+# 模块用途: 构造非权威历史输入，沿原有界调用和运输门提取并严格解析 CuratorExtraction，不新增执行或发布许可。
 
 import contextvars
 import json
@@ -16,12 +16,14 @@ from typing import TypeVar
 
 from ..backends.bounded_call import (
     BoundedCallBusyError,
+    BoundedCallExitUnconfirmedError,
     BoundedCallStillRunningError,
     BoundedCallTimeoutError,
     call_with_deadline,
 )
 from ..backends.errors import ProviderConfigurationError
 from ..backends.request_scope import provider_request_budget
+from ..common.request_execution_ports import RequestExecutionOutcomeUncertainError
 from .candidate_models import (
     CANDIDATE_TYPES,
     PROMOTION_TARGETS,
@@ -297,7 +299,9 @@ def extraction_budget_seconds(config: MemoryCuratorConfig) -> int:
 # 供应商调用阶段的 ValueError/TypeError 出口前包成 CuratorModelCallError(阶段事实),解析失败包成
 # CuratorResponseParseError(仍是 ValueError,只多带无正文响应形状)冒出;
 # 宿主会话头由调用方(curator._execute)在外层绑定,本函数不生成会话身份。
-# 函数用途: 调用后台模型并返回实际使用的输入快照与严格解析的 CuratorExtraction。
+# 原短门未结及物理退出未确认按 canonical 类型保留同一对象，不重试、不缩批，也不包装为普通超时或未进入的其它错误。
+# 最终普通异常包装仍须先认这两个实际类型，多继承 ValueError/TypeError 不能丢失其原身份。
+# 函数用途: 调用后台模型并返回实际输入快照与严格解析结果；已进入运输的未结责任直接交回原上层出口。
 def extract_with_retries(
     backend: object,
     config: MemoryCuratorConfig,
@@ -358,8 +362,11 @@ def extract_with_retries(
                 shrink_attempts=_TIMEOUT_SHRINK_LIMIT_COUNT - shrinks_left,
             )
         last_error = failure
-        # 仍在运行、被中断，或没有可用模型这类永久配置错误：同输入再试没有新信息，直接按原语义失败。
-        if isinstance(failure, (CuratorModelStillRunningError, InterruptedError, ProviderConfigurationError)):
+        # 已知永久错误保持旧语义；原短门未结与独立退出未知绝不能借同输入重试或缩批重放。
+        if isinstance(failure, (
+            CuratorModelStillRunningError, InterruptedError, ProviderConfigurationError,
+            BoundedCallExitUnconfirmedError, RequestExecutionOutcomeUncertainError,
+        )):
             break
         timed_out = is_curator_timeout_error(failure)
         smaller = (
@@ -387,6 +394,9 @@ def extract_with_retries(
             _attempt_shape_log_line(shapes),
         )
     assert last_error is not None
+    # 原 typed 身份优先于多继承的普通错误形状，不能用阶段包装抹掉原未结责任。
+    if isinstance(last_error, (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError)):
+        raise last_error
     if isinstance(last_error, (ValueError, TypeError)):
         # 阶段事实:这个异常来自供应商调用(上面的 try),不是宿主解析;保留原异常链供诊断。
         raise CuratorModelCallError(str(last_error)) from last_error
@@ -414,8 +424,8 @@ def _attempt_shape_log_line(shapes: Sequence[CuratorModelAttempt]) -> str:
     )
 
 
-# LLM: 请求预算由原 ContextVar 传入唯一通用 worker；旧 worker 或清理未退出时映射 still-running，取消不转为可重试异常。
-# 函数用途: 有界执行无工具提取；到期即返回，同 backend 的旧资源退出前拒绝叠加请求。
+# LLM: 原 ContextVar 传播 F2 owner/会话/预算；仅真实 C/W scope 选择同一期限内确认 worker/清理退出，须在 T 外调用。独立退出未知不映射成超时或未进入；Count0 保留不等待行为。
+# 函数用途: 沿同一后端资源有界提取，实际发送前核原后台运输，保留取消及未退出时禁止叠加的旧语义。
 def call_backend_with_timeout(
     backend: object,
     *,
@@ -427,17 +437,30 @@ def call_backend_with_timeout(
     if not callable(generate):
         raise TypeError("memory curator backend lacks generate_structured")
     deadline = time.monotonic() + float(timeout_seconds)
+    from ..gateway_parts.multiprocess_execution import current_worker_execution
+
+    wait_for_exit = current_worker_execution() is not None
     try:
         with provider_request_budget(timeout_seconds):
             return call_with_deadline(
-                lambda: generate(prompt, response_schema=response_schema),
+                lambda: _generate_with_original_transport(generate, prompt, response_schema),
                 deadline=deadline,
                 resource_key=_CuratorBackendResource(backend),
+                wait_for_exit=wait_for_exit,
             )
     except (BoundedCallBusyError, BoundedCallStillRunningError) as exc:
         raise CuratorModelStillRunningError("记忆模型旧请求或清理尚未退出，当前不能叠加调用") from exc
     except BoundedCallTimeoutError as exc:
         raise CuratorModelTimeoutError("memory curator model request timed out") from exc
+
+
+# LLM: 只在原 bounded worker 实际发送前复核原后台 T/P5；检查结束即释放短门，不持门等网络。无实际后台 scope 的 Count0 沿原零 I/O 检查，不构造或补执行权。
+# 函数用途: 在原运输仍可提交时调用一次既有结构化后端，所有拒绝与后端异常原样返回。
+def _generate_with_original_transport(generate, prompt, response_schema):
+    from ..gateway_parts.multiprocess_background_execution import require_background_model_admission
+
+    require_background_model_admission()
+    return generate(prompt, response_schema=response_schema)
 
 
 # LLM: 历史材料与可选标签/关系注释均是非权威上下文；关系只覆盖呈现的一对，不改变候选 schema、证据、晋升或游标。

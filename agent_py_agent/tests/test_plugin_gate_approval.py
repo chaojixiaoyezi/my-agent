@@ -89,13 +89,12 @@ def test_gateway_wait_plugin_gate_cannot_poll_autonomous_approval(tmp_path, monk
 
 def test_agent_wait_plugin_gate_cannot_poll_autonomous_approval(tmp_path, monkeypatch):
     request, token, modes = gate_request(), SimpleNamespace(cancelled=False), []
-    handle = SimpleNamespace(request=request, path=tmp_path / "pending.json", created_at=0,
-                             scope_valid=lambda: True, scope=SimpleNamespace(root_task_id="root"))
-    monkeypatch.setattr(agent_approval, "read_json_object_report",
-                        lambda *args, **kw: SimpleNamespace(load_error=None, payload={"status": "pending"}))
-    monkeypatch.setattr(agent_approval, "_record_decision", lambda *args: None)
+    from agent_py_agent.agent.conversation.tool_approval_scope import ToolApprovalScope
+    scope = ToolApprovalScope("run-gate", "root", "thread", "main", "主代理", True)
+    handle = agent_approval.AgentToolApprovalHandle(scope, tmp_path / "pending.json", request, 0, lambda: True)
+    # 使用原完整permission身份与真实tmp落盘；本测试只核插件不能轮询自主批准，不伪造退休已成功。
+    agent_approval.write_json_file_atomic(handle.path, agent_approval._pending_payload(scope, request, 0))
     monkeypatch.setattr(agent_approval, "_consumer_seen_at", lambda *args: 0)
-    monkeypatch.setattr(agent_approval, "_remove_exact_record", lambda *args: None)
     monkeypatch.setattr(agent_approval.time, "sleep", lambda interval: setattr(token, "cancelled", True))
     def provider(req):
         modes.append(req)

@@ -1,4 +1,5 @@
-# LLM: ConversationThread.model_profile_id 是有效模型唯一权威；显式选择连同单调版本和 pending 终态原子写入，不授予自动采用权限。
+# LLM: ConversationThread.model_profile_id 是有效模型唯一权威；显式选择连同单调版本和 pending 终态原子写入，不授予自动采用权限。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
+# LLM: 新会话默认引用的显式home叶与原Agent wrapper同路，只读不创建配置宿主。
 # 模块用途: 管理会话模型与覆盖事实，同值选择也记录新版本；不保存连接、永久 pin 或第二份选择索引。
 
 from __future__ import annotations
@@ -64,9 +65,15 @@ class PendingSubagentModelAdvice:
 
 
 # LLM: 默认引用只用于新会话初始化或旧记录首次显式迁移；读取没有网络副作用。
-# 函数用途: 取得当前用户为未来新会话选择的模型编号。
+# 函数用途: 委托显式home纯叶取得新会话默认模型编号，不创建配置宿主。
 def default_model_profile_id(agent: object) -> str:
-    return read_model_profiles(model_profiles_path(agent.home_paths))["selected"]
+    return default_model_profile_id_for_home(agent.home_paths)
+
+
+# LLM: 只读同owner原模型目录selected字段，不用Agent替身或创建线程；原default wrapper委托，联验thread/model默认。
+# 函数用途: 从显式home读取未来新会话的默认模型引用，不发请求或写状态。
+def default_model_profile_id_for_home(home_paths: object) -> str:
+    return read_model_profiles(model_profiles_path(home_paths))["selected"]
 
 
 # LLM: 本地 TUI 复用 chat/local-agent 的正式通道身份；必须有真实 store，不能退回 owner 全局选择。
@@ -107,9 +114,9 @@ def _require_owner(agent: object, thread: object) -> None:
             raise ModelProfileError("当前模型选择不能访问其他用户的会话。")
 
 
-# LLM: 显式群选择先持原策略锁到 canonical thread CAS；系统默认/增强物化不需手动配置 grant，不能热改运行片。
+# LLM: 显式群选择先持原策略锁到canonical thread CAS；C在外层原T门内仅非阻塞抢锁，不新增授权/热改在途运行片。
 # 函数用途: 读取或显式设置模型与覆盖事实；只在实际换模型时清除校准，不增加自动采用或确认流程。
-def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None = None, expected_revision: int | None = None) -> str:
+def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None = None, expected_revision: int | None = None, blocking: bool = True) -> str:
     store = agent.conversation_store
     thread = store.threads.load(thread_id)
     if thread is None:
@@ -145,9 +152,10 @@ def thread_model_profile_id(agent: object, thread_id: str, *, select: str | None
             model_context_usage={} if changed else latest.model_context_usage,
         )
 
-    guard = group_capability_guard(agent, "assistant.configure", thread_id=thread_id) if select is not None else nullcontext()
+    lock_options = {} if blocking else {"blocking": False}
+    guard = group_capability_guard(agent, "assistant.configure", thread_id=thread_id, **lock_options) if select is not None else nullcontext()
     with guard:
-        return store.threads.update_atomic(thread_id, update).model_profile_id
+        return store.threads.update_atomic(thread_id, update, **lock_options).model_profile_id
 
 
 # LLM: 仅宿主从原 child 冻结引用恢复空线程；不是显式切模，已有选择永不覆盖，不接受模型来源标签绕过手动门。

@@ -1,4 +1,4 @@
-# LLM: 严格二进制读取必须把require_dir_fd透传原目录入口，缺dirfd/no-follow/directory能力不回落路径读取。
+# LLM: 默认读写保持原no-follow链；显式snapshot只在原父FD内有限重读实测安全替换，硬错和缺strict能力不回落。
 # 模块用途: 统一受管FD读写；严格附件读取复用原完整平台能力核验，不另造权限或文件状态。
 """LLM: 宿主文件读写固定受信根；文本和二进制共用逐段 no-follow 原语，不能用它代替业务权限。
 
@@ -84,7 +84,7 @@ def open_readonly_file_beneath(root: str | Path, relative_parts: tuple[str, ...]
         os.close(parent_fd)
 
 
-# LLM: 与文本读取共用no-follow链；require_dir_fd透传原目录入口，缺dirfd/O_NOFOLLOW/O_DIRECTORY不得portable回落；预算限制实际读取。
+# LLM: 默认0保持原读链；显式snapshot仅strict原parent FD有限重读安全regular替换，硬路径错误不重读，预算仍限制每次实际读取。
 # 函数用途: 有界读取宿主管理的普通二进制文件，不跟随链接，也不创建目录。
 def read_bytes_beneath(
     root: str | Path,
@@ -92,10 +92,15 @@ def read_bytes_beneath(
     *,
     max_bytes: int | None = None,
     require_dir_fd: bool = False,
+    snapshot_retries: int = 0,
 ) -> bytes | None:
     _validate_relative_parts(relative_parts)
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise ValueError("managed read limit must be a nonnegative integer")
+    if type(snapshot_retries) is not int or not 0 <= snapshot_retries <= 2:
+        raise ValueError("managed snapshot retries must be an integer from zero to two")
+    if snapshot_retries:
+        return _read_snapshot_beneath(root, relative_parts, max_bytes, snapshot_retries)
     if not _supports_dir_fd():
         if require_dir_fd:
             raise NoFollowPathError("strict no-follow reading is unavailable")
@@ -115,6 +120,145 @@ def read_bytes_beneath(
         if descriptor >= 0:
             os.close(descriptor)
         os.close(parent_fd)
+
+
+# LLM: 仅显式snapshot实测A/B安全叶替换可生成；循环按真实类型判断，不能解析文案或吞硬路径/权限错误。
+# 类用途: 标记本次原目录链内可有限重读的叶身份变化，不授内容权限或写者认证。
+class _SnapshotLeafChanged(NoFollowPathError):
+    # LLM: reason只取本模块A/B固定分支，cleanup_failed只限制后续重读，不持久化或变成新状态账。
+    # 函数用途: 保存本次叶变化及清理是否仍可靠，避免清理失败后继续读。
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+        self.cleanup_failed = False
+
+
+# LLM: 只清本次暂存FD且逐个尝试一次；显式本链primary原对象优先，不从调用方外层异常猜，清理失败不得重读/成功。
+# 函数用途: 归还snapshot的目录/叶FD，不让次生关闭错误覆盖真实首因。
+def _close_snapshot_fds(descriptors, primary=None):
+    first = None
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if isinstance(primary, _SnapshotLeafChanged):
+                primary.cleanup_failed = True
+            if first is None:
+                first = error
+    if primary is None and first is not None:
+        raise first
+
+
+# LLM: 逐prefix复用原strict目录入口；只初次最终parent FD用于叶读，其它FD只是身份观察且立即归还。
+# 函数用途: 捕获本次原root和完整父链身份，初始root缺失可空，已经建立绑定后缺失硬拒。
+def _snapshot_parent(root, parts):
+    bindings, descriptors = [], []
+    try:
+        for length in range(len(parts)):
+            try:
+                descriptor = open_directory_beneath(root, parts[:length], require_dir_fd=True)
+            except FileNotFoundError:
+                if not bindings:
+                    return None, ()
+                raise
+            descriptors.append(descriptor)
+            metadata = os.fstat(descriptor)
+            bindings.append((metadata.st_dev, metadata.st_ino))
+    except BaseException as error:
+        _close_snapshot_fds(descriptors, error)
+        raise
+    parent_fd = descriptors.pop()
+    try:
+        _close_snapshot_fds(descriptors)
+    except BaseException as error:
+        _close_snapshot_fds([parent_fd], error)
+        raise
+    return parent_fd, tuple(bindings)
+
+
+# LLM: 验证FD不成为新锚；每个prefix必须仍等于本次初始身份，根/中间/parent任何缺失、链接或更换立即硬拒。
+# 函数用途: 在尝试前、候选后及返回前核完整原目录链，不能只核旧parent FD仍可用。
+def _verify_snapshot_parents(root, parts, bindings):
+    for length, identity in enumerate(bindings):
+        descriptor = open_directory_beneath(root, parts[:length], require_dir_fd=True)
+        try:
+            metadata = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != identity:
+                raise NoFollowPathError("managed snapshot directory changed")
+        except BaseException as error:
+            _close_snapshot_fds([descriptor], error)
+            raise
+        _close_snapshot_fds([descriptor])
+
+
+# LLM: 此检查只分离两种实测regular替换；before/current必须单链接普通叶，FD0link只准同before且当前不同的B丢弃分支。
+# 函数用途: 验同一parent内的before/FD/current，安全替换抛typed候选，其它变化保持硬拒。
+def _snapshot_leaf_identity(parent_fd, name, before, opened):
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or not stat.S_ISREG(opened.st_mode) or opened.st_nlink not in (0, 1)):
+        raise NoFollowPathError("managed snapshot leaf is not regular single-link")
+    if opened.st_nlink == 0:
+        if _same_identity(before, opened) and not _same_identity(before, current):
+            raise _SnapshotLeafChanged("regular_leaf_detached")
+        raise NoFollowPathError("managed snapshot detached identity is unknown")
+    if not _same_identity(before, opened):
+        if _same_identity(opened, current):
+            raise _SnapshotLeafChanged("regular_leaf_replaced")
+        raise NoFollowPathError("managed snapshot leaf changed again")
+    if not _same_identity(opened, current):
+        raise NoFollowPathError("managed snapshot current leaf differs")
+
+
+# LLM: 全文只从本次已验证FD有界读取，读前/后都核叶事实；初次不存在可None，open后或竞态后missing不洗成空。
+# 函数用途: 尝试取得一个原子发表版本，0link已读bytes只能丢弃，所有出口归还同一叶FD。
+def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing):
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise NoFollowPathError("managed snapshot leaf is not regular single-link")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+    try:
+        _snapshot_leaf_identity(parent_fd, name, before, os.fstat(descriptor))
+        content = _read_descriptor(descriptor, max_bytes)
+        _snapshot_leaf_identity(parent_fd, name, before, os.fstat(descriptor))
+    except BaseException as error:
+        _close_snapshot_fds([descriptor], error)
+        raise
+    _close_snapshot_fds([descriptor])
+    return content
+
+
+# LLM: opt-in强制原strict能力且总尝试<=3；循环只捕真实A/B类型，硬错优先，叶始终原parent FD，无sleep/portable或重捕授权。
+# 函数用途: 有限重读原子替换窗口，同时保原目录链、预算、None语义及首异常，失败仍交上层保守拒绝。
+def _read_snapshot_beneath(root, parts, max_bytes, retries):
+    parent_fd, bindings = _snapshot_parent(root, parts)
+    if parent_fd is None:
+        return None
+    try:
+        for attempt in range(retries + 1):
+            _verify_snapshot_parents(root, parts, bindings)
+            try:
+                content = _read_snapshot_leaf(parent_fd, parts[-1], max_bytes, attempt == 0)
+            except _SnapshotLeafChanged as error:
+                if error.cleanup_failed:
+                    raise
+                _verify_snapshot_parents(root, parts, bindings)
+                if attempt == retries:
+                    raise
+                continue
+            _verify_snapshot_parents(root, parts, bindings)
+            break
+    except BaseException as error:
+        _close_snapshot_fds([parent_fd], error)
+        raise
+    _close_snapshot_fds([parent_fd])
+    return content
 
 
 # LLM: Validation probes may ask only whether a bounded regular file exists. Symlinks, hardlinks,

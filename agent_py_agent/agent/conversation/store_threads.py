@@ -1,4 +1,4 @@
-# LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；模型选择变化必须逐次前进且保留显式覆盖版本，不增加状态源。
+# LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；模型选择变化必须逐次前进且保留显式覆盖版本，不增加状态源。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
 # 模块用途: 保存会话元数据与通道绑定，原子更新保留并发状态；新默认绑定记录真实初始化事实。
 from __future__ import annotations
 
@@ -85,9 +85,10 @@ def _replace_binding(
     return (*old, binding)
 
 
+# LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
 # LLM: 仅由持有同通道绑定事务锁的 store 入口调用；显式 reuse_latest 保留原语义，不按模型名猜会话。
 # 函数用途: 在短事务内查找、显式复用或创建会话并提交索引，不持有模型执行锁。
-def _get_or_create_bound_thread(store, request: dict) -> ConversationThread:
+def _get_or_create_bound_thread(store, request: dict, *, blocking: bool = True) -> ConversationThread:
     existing, binding_error = store.resolve_report(
         channel=request.get("channel", ""),
         channel_conversation_id=request.get("channel_conversation_id", ""),
@@ -96,15 +97,15 @@ def _get_or_create_bound_thread(store, request: dict) -> ConversationThread:
     if binding_error is not None:
         raise DataCorruptionError(str(binding_error))
     if existing is not None:
-        return store._bind_existing(existing.thread_id, request)
+        return store._bind_existing(existing.thread_id, request, **({} if blocking else {"blocking": False}))
     latest = None
     if request.get("reuse_latest_for_user"):
         latest, latest_error = store.latest_for_user_report(request.get("canonical_user_id", ""))
         if latest_error is not None:
             raise DataCorruptionError(str(latest_error))
     if latest is not None:
-        return store._bind_existing(latest.thread_id, request)
-    return store._create(request)
+        return store._bind_existing(latest.thread_id, request, **({} if blocking else {"blocking": False}))
+    return store._create(request, **({} if blocking else {"blocking": False}))
 
 
 # LLM: 原文件事务内校验身份与选择版本；omit_empty 的已知字段清空时移除旧键，未知扩展仍保持原样。
@@ -139,17 +140,18 @@ class ThreadStore:
         self.storage = storage
         self.model_default = model_default
 
+    # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: 通道绑定的查找与创建共用短事务锁；不能与单文件索引锁同路径，不锁模型执行或串行不同会话。
     # 函数用途: 两个窗口首次同时打开同一 session 时只生成一个 thread，避免之后模型选择和消息各走一份。
-    def get_or_create(self, request: dict) -> ConversationThread:
+    def get_or_create(self, request: dict, *, blocking: bool = True) -> ConversationThread:
         identity = _binding_key(
             request.get("channel", ""),
             request.get("channel_conversation_id", ""),
             request.get("channel_user_id", ""),
         )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        with locked_file_transition(self.storage.threads_dir / f".channel-{digest}"):
-            return _get_or_create_bound_thread(self, request)
+        with locked_file_transition(self.storage.threads_dir / f".channel-{digest}", **({} if blocking else {"blocking": False})):
+            return _get_or_create_bound_thread(self, request, **({} if blocking else {"blocking": False}))
 
     # LLM: Keep this adapter small; exact-id creation and collision checks live in
     # agent_thread_store so the channel-bound store does not absorb agent runtime policy.
@@ -202,11 +204,12 @@ class ThreadStore:
         thread_id = str(payload.get(canonical_user_id) or "")
         return self.load_report(thread_id) if thread_id else (None, None)
 
+    # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: Channel binding updates must merge into the latest durable thread atomically so a
     # delayed adapter request cannot revert compact, task indexes, or the sticky workspace.
     # initialize_workspace 仅补齐空目录，必须在同一原子更新中判断，不能覆盖并发绑定或既有执行目录。
     # 函数用途: 为同一会话增加或刷新通道绑定，同时保留其他并发更新的会话状态。
-    def bind_channel(self, request: dict) -> ConversationThread:
+    def bind_channel(self, request: dict, *, blocking: bool = True) -> ConversationThread:
         thread_id = str(request.get("thread_id") or "")
         self.require(thread_id)
         current = now(request.get("now"))
@@ -238,8 +241,9 @@ class ThreadStore:
                 ),
                 updated_at=max(latest.updated_at, current),
             ),
+            **({} if blocking else {"blocking": False}),
         )
-        self._write_binding_indexes(binding)
+        self._write_binding_indexes(binding, **({} if blocking else {"blocking": False}))
         return updated
 
     # LLM: store_threads 的持久化合同：返回按活动时间排序的线程列表，需要坏账信息时调用 list_report；修改须同步本领域调用方与存储回归。
@@ -425,21 +429,24 @@ class ThreadStore:
             raise KeyError(f"unknown conversation thread: {thread_id}")
         return thread
 
+    # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: store_threads 的持久化合同：原子保存一份已校验线程记录，调用方负责锁和身份边界；修改须同步本领域调用方与存储回归。
     # 函数用途: 原子保存一份已校验线程记录，调用方负责锁和身份边界。
-    def write(self, thread: ConversationThread) -> None:
-        write_json_file_atomic(self.storage.thread_path(thread.thread_id), thread.to_dict())
+    def write(self, thread: ConversationThread, *, blocking: bool = True) -> None:
+        write_json_file_atomic(self.storage.thread_path(thread.thread_id), thread.to_dict(), **({} if blocking else {"blocking": False}))
 
-    # LLM: Compact/设置/模型选择写回共用原文件锁；_apply_thread_update 校验身份与扩展字段，不在 updater 中联网。
+    # LLM: Compact/设置/模型选择写回共用原文件锁；_apply_thread_update校验身份与扩展字段；C显式非阻塞，默认等待合同不变。
     # 函数用途: 在原锁内保存线程和单调选择事实，避免覆盖并发状态；不因此授予模型自动采用能力。
     def update_atomic(
         self,
         thread_id: str,
         updater: Callable[[ConversationThread], ConversationThread],
+        *, blocking: bool = True,
     ) -> ConversationThread:
         path = self.storage.thread_path(thread_id)
 
-        payload = update_json_file_atomic(path, lambda value: _apply_thread_update(value, thread_id, updater), require_existing=True)
+        payload = update_json_file_atomic(path, lambda value: _apply_thread_update(value, thread_id, updater),
+                                          require_existing=True, **({} if blocking else {"blocking": False}))
         return ConversationThread.from_dict(payload)
 
     # LLM: store_threads 的持久化合同：读回通道到线程索引，损坏时返回错误，禁止静默创建替代绑定；修改须同步本领域调用方与存储回归。
@@ -453,9 +460,10 @@ class ThreadStore:
             return {}, error
         return {str(key): str(value) for key, value in payload.items()}, None
 
+    # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: store_threads 的持久化合同：把已确认的线程身份带入通道绑定更新，保持原目录更新语义；修改须同步本领域调用方与存储回归。
     # 函数用途: 把已确认的线程身份带入通道绑定更新，保持原目录更新语义。
-    def _bind_existing(self, thread_id: str, kwargs: dict) -> ConversationThread:
+    def _bind_existing(self, thread_id: str, kwargs: dict, *, blocking: bool = True) -> ConversationThread:
         return self.bind_channel(
             {
                 "thread_id": thread_id,
@@ -468,12 +476,14 @@ class ThreadStore:
                 "cwd": kwargs.get("cwd", ""),
                 "runtime_workspace_roots": kwargs.get("runtime_workspace_roots", ()),
                 "now": kwargs.get("now"),
-            }
+            },
+            **({} if blocking else {"blocking": False}),
         )
 
+    # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: 新 thread 同次保存真实默认绑定事件；没有默认引用仍为未知，既有线程不补造初始化或手动事件。
     # 函数用途: 创建会话并记录初始模型版本，再登记原通道索引；后续默认变化只影响新会话。
-    def _create(self, kwargs: dict) -> ConversationThread:
+    def _create(self, kwargs: dict, *, blocking: bool = True) -> ConversationThread:
         current = now(kwargs.get("now"))
         initial_model = self.model_default() if self.model_default is not None else ""
         thread = ConversationThread(
@@ -489,21 +499,24 @@ class ThreadStore:
             created_at=current,
             updated_at=current,
         )
-        self.write(thread)
-        return self._bind_existing(thread.thread_id, {**kwargs, "now": current})
+        self.write(thread, **({} if blocking else {"blocking": False}))
+        return self._bind_existing(thread.thread_id, {**kwargs, "now": current}, **({} if blocking else {"blocking": False}))
 
+    # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: store_threads 的持久化合同：先原子更新通道索引，再更新用户最近线程索引，保持提交顺序；修改须同步本领域调用方与存储回归。
     # 函数用途: 先原子更新通道索引，再更新用户最近线程索引，保持提交顺序。
-    def _write_binding_indexes(self, binding: ChannelBinding) -> None:
+    def _write_binding_indexes(self, binding: ChannelBinding, *, blocking: bool = True) -> None:
         key = _binding_key(
             binding.channel, binding.channel_conversation_id, binding.channel_user_id
         )
         update_json_file_atomic(
-            self.storage.bindings_path, lambda data: {**data, key: binding.thread_id}
+            self.storage.bindings_path, lambda data: {**data, key: binding.thread_id},
+            **({} if blocking else {"blocking": False}),
         )
         update_json_file_atomic(
             self.storage.user_latest_path,
             lambda data: {**data, binding.canonical_user_id: binding.thread_id},
+            **({} if blocking else {"blocking": False}),
         )
 
     # LLM: store_threads 的持久化合同：解析单个线程文件并核验身份，将读取或解析失败归入原错误报告；修改须同步本领域调用方与存储回归。

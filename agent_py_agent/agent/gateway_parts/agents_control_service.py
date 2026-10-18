@@ -12,6 +12,7 @@ from ..capability.agents_write_service import (
     USAGE,
     AgentsWriteService,
     _direct_request,
+    _raise_agents_runtime_error,
     parse_agents_value,
 )
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
@@ -69,7 +70,7 @@ def cold_owner_host(base, identity):
                            conversation_store=owner_conversation_store(base, home),
                            delivery_service=getattr(base, 'delivery_service', None))
 
-# LLM: 默认scope、普通模型参数或旧封印都不能签发用户修改权；当前群Actor仍由原冷host组合根绑定。
+# LLM: 默认scope/旧封印不能签发修改权；群Actor沿原冷host绑定；底层原源拒绝/运输未结不得洗成业务失败。
 # 函数用途: 只将原认证用户的实际AGENTS控制交给唯一预览确认服务。
 def execute_agents_control(base_agent, command, scope):
     ingress = scope.agents_ingress
@@ -85,9 +86,10 @@ def execute_agents_control(base_agent, command, scope):
             _conversation_key(scope.user_id, scope.channel, scope.conversation_id), ingress.request_id,
             guard_thread=thread.thread_id)
     except Exception as error:
+        _raise_agents_runtime_error(error)
         return _failure(getattr(error, 'code', getattr(error, 'error_code', 'AGENTS_CONTROL_UNAVAILABLE')))
 
-# LLM: actor来自当前真实入口，显式target只选择受授权仓库；群配置使用main原HostActor租约，不能借监控grant或模型文本。
+# LLM: actor来自当前真实入口，显式target只选择受授权仓库；群配置保原HostActor租约，结果交唯一纯投影，不借监控grant或模型文本。
 # 函数用途: 执行一次查看或预览确认；运输受理与details里的业务未知分别投影，不引发通用IM重放。
 def _run_for_actor(base_agent, actor, command, thread, request_id, *, guard_thread=''):
     from ..user_space.group_authorization_context import group_capability_guard
@@ -101,6 +103,12 @@ def _run_for_actor(base_agent, actor, command, thread, request_id, *, guard_thre
         admin_target_owner=target if repo.owner != actor.home_paths.owner_id else '')
     with group_capability_guard(actor, 'assistant.configure', thread_id=guard_thread):
         details = AgentsWriteService(repo).execute(request)
+    return _agents_control_result(details, request_id)
+
+
+# LLM: 只投影原AgentsWriteService结构化结果，不签权或重放；所有直接/冷C入口共用相同业务字段、nonce提示和unknown语义。
+# 函数用途: 将原规则预览或提交结果整理成一致的用户控制回执，无文件或网络副作用。
+def _agents_control_result(details, request_id):
     state = details['state']
     if state == 'preview':
         message = ('预览，尚未写入；旧版本与拟写值已绑定。\n旧CAS：'
@@ -130,7 +138,7 @@ def parse_agents_command(trailing):
     return ConversationControlCommand('agents', value=raw, operation=operation, usage=USAGE)
 
 
-# LLM: 仅终端直接控制分支调用，不注册为模型工具；请求编号取UI提交编号而非在跑模型request。
+# LLM: 仅终端直接控制，不注册模型工具；编号取UI提交；原执行拒绝/运输未结同对象外抛，不在业务层恢复。
 # 函数用途: direct TUI在相同服务执行，无需启动Gateway或读取其凭据。
 def execute_agents_direct(agent, command, session_id, message_id):
     try:
@@ -139,6 +147,7 @@ def execute_agents_direct(agent, command, session_id, message_id):
         return _run_for_actor(agent, agent, command,
                               _conversation_key('local-agent', 'chat', session_id), message_id)
     except Exception as error:
+        _raise_agents_runtime_error(error)
         return _failure(getattr(error, 'code', 'AGENTS_CONTROL_UNAVAILABLE'))
 
 
@@ -153,9 +162,16 @@ def _conversation_key(user, channel, conversation):
 # LLM: target只是用户独立选择，不可改变actor；跨owner必须先验证管理员和当前Full Access。
 # 函数用途: 安全解析显式目标并取得其已有宿主，不把path文本当权限。
 def _target_agent(base_agent, actor, target):
+    identity = _target_owner_identity(actor, target)
+    return cold_owner_host(base_agent, identity) if identity is not None else actor
+
+
+# LLM: 旧Agent和冷C共用唯一纯target解析；权限/规范owner比较算法不变，不创建目录、Store或签权。
+# 函数用途: 在原操作者上下文检查显式管理员目标，返回规范身份供实际资源组合根使用。
+def _target_owner_identity(actor, target):
     from ..user_space.owner_resolver import OwnerIdentity
     if not target or target == actor.home_paths.owner_id:
-        return actor
+        return None
     admin = is_complete_local_admin_owner(actor.home_paths)
     _, access = resolve_owner_scope_and_access(actor.home_paths, actor.config)
     if not admin or access != 'full-access':
@@ -173,7 +189,7 @@ def _target_agent(base_agent, actor, target):
     resolved = resolve_owner_home(actor.home_paths.root, identity)
     if resolved.owner_id != target:
         raise AgentsContractError('AGENTS_WRITE_BINDING_MISMATCH', 'owner')
-    return cold_owner_host(base_agent, identity)
+    return identity
 
 
 # LLM: 异常不带私人路径/正文；失败绝不转成成功回执。

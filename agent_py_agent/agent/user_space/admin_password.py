@@ -1,3 +1,5 @@
+# LLM: 仅设置/清除先消费原受限进程拒门；验证密码与失败节流保持原认证合同，不据进程门授予管理员身份。
+# 模块用途: 在派生或写入管理员密码之前拒绝Worker和受限宿主，默认CLI及验证流程不变。
 # LLM: 本模块是管理员密码与失败节流的唯一权威：config/admin-password.json 只存 scrypt 派生值和参数（0600，目录 0700），
 #   明文只在调用栈里用于一次派生；返回值、日志、异常文本都不能带密码或散列。失败节流按渠道身份持久计数，
 #   锁定期内既不校验也不加计数；拒绝文案不区分“密码错”与“被锁”，只附剩余锁定时间。改动时同步检查
@@ -84,7 +86,12 @@ def validate_admin_password(password: object) -> str:
 # LLM: 有副作用：用随机盐派生 scrypt 值后原子替换 admin-password.json（0600），并把 config 目录收紧到 0700；
 #   旧密码被整体替换，已绑定的 IM 身份和失败计数不受影响。返回值只含公开状态。
 # 函数用途: 设置或更换管理员密码，只由本机 CLI 调用。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def set_admin_password(home_root: str | Path, password: object, *, now: float | None = None) -> dict[str, object]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('admin_credential')
+
     secret = validate_admin_password(password)
     salt = secrets.token_bytes(_SALT_BYTES)
     record = {
@@ -103,7 +110,12 @@ def set_admin_password(home_root: str | Path, password: object, *, now: float | 
 
 # LLM: 有副作用：只删除密码文件，不删绑定与节流记录；返回删除前是否存在。
 # 函数用途: 清除管理员密码，之后 /admin 与 /approve 一律验证不通过。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def clear_admin_password(home_root: str | Path) -> bool:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('admin_credential')
+
     existed = admin_password_path(home_root).exists()
     unlink_file_beneath(home_root, (CONFIG_DIR_NAME, _PASSWORD_FILE))
     return existed

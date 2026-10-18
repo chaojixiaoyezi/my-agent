@@ -1,5 +1,6 @@
 # LLM: schema仍是唯一建表权威；结构摘要涵盖SQL/迁移/FTS，显式同线程批次复用连接但不合并各操作事务。
-# 模块用途: 统一管理本地SQLite表结构与连接生命周期。
+# LLM: coordinator_io只选择更严格短IO，实际scope每次借用绑定且不留source；旧默认guard/迁移/连接缓存保持。
+# 模块用途: 管理原SQLite结构与连接，C独立零等待并消费当前原提交门。
 from __future__ import annotations
 
 """owns SQLite connection setup, schema creation, and transactional context helpers.
@@ -12,6 +13,8 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from ..common.global_write_commit import execute_global_write
+from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
@@ -253,12 +256,16 @@ def _existing_fts_available(conn: sqlite3.Connection) -> bool:
 
 
 # LLM: 初始化按库内摘要跳过且恢复FTS实例状态；完整迁移与盖章同事务，有界批次只优化连接生命周期。
-# 类用途: 管理 LocalStore 地基和短连接，确保旧副本会重新迁移。
+# LLM: C仅固定初始化/事务叶复用原global scope，所有source/callback只在当前借用栈，不新增上下文或状态权威。
+# 类用途: 管理原schema与连接，确保旧库迁移和C每次末写来源都准确。
 class LocalStoreSchemaMixin:
 
     # LLM: 建目录/建表会写盘，摘要命中时只读取 FTS 状态；原正文回填仍在 schema 事务外执行。
-    # 函数用途: 首次或结构变化时迁移，重复打开时省掉 DDL 并保持检索状态。
+    # LLM: C分支只保存IO策略，实际出生/DDL依当前原scope；默认分支及完整schema guard不变。
+    # 函数用途: 首次或变化时按原schema迁移，C的扫描回填另在事务外准备。
     def _init_schema(self) -> None:
+        if self.coordinator_io:
+            return self._init_coordinator_schema()
         ensure_private_dir(self.root)
         ensure_private_dir(self.files_dir)
         ensure_private_dir(self.events_path.parent)
@@ -381,8 +388,11 @@ class LocalStoreSchemaMixin:
             _write_local_state(conn, _FTS_SCHEMA_VERSION_KEY, _FTS_SCHEMA_VERSION)
 
     # LLM: 新连接才设 PRAGMA；仅显式作用域用游标跟踪子类，作用域外保持标准库短连接。
-    # 函数用途: 打开本库并按旧契约启用 WAL、外键和忙等。
+    # LLM: 默认仍30秒/原缓存工厂；C只用当前scope内独立timeout0短连接，不混入F1连接池。
+    # 函数用途: 按实例IO策略打开原库，C出生与WAL均经实际末门。
     def _connect(self) -> sqlite3.Connection:
+        if self.coordinator_io:
+            return self._local_write(self._connect_coordinator)
         conn = sqlite3.connect(self.db_path, timeout=30.0, factory=sqlite_connection_factory())
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
@@ -395,9 +405,13 @@ class LocalStoreSchemaMixin:
         return conn
 
     # LLM: 显式批次只复用同store、同线程连接；嵌套不关闭外层，各写API原有commit/rollback边界不变，异常也释放。
-    # 函数用途: 在一次流式索引中避免逐消息打开SQLite；批次结束不保留连接。
+    # LLM: C分支仅保上下文形状、不登记或复用连接，各操作维持独立短事务，默认batch不变。
+    # 函数用途: 默认复用原线程批次连接，C不借默认30秒连接。
     @contextmanager
     def connection_batch(self):
+        if self.coordinator_io:
+            yield
+            return
         state = self._connection_local
         if getattr(state, 'connection', None) is not None:
             yield
@@ -410,9 +424,14 @@ class LocalStoreSchemaMixin:
                 del state.connection
 
     # LLM: 批次借用连接仍丢弃未提交事务；非批次操作复用当前显式SQLite作用域，否则保持默认短连接。
-    # 函数用途: 给一次存储操作取得连接，批次内省去重复Pragma和schema读取。
+    # LLM: C仅在活scope内出生短读取连接，门外读取后精确原FD rollback/close不因撤权泄漏；不授权其它mixin新DML。
+    # 函数用途: 取得原操作连接，C读取与固定写事务使用不同明确入口。
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        if self.coordinator_io:
+            with self._coordinator_read_connection() as conn:
+                yield conn
+            return
         state = getattr(self, '_connection_local', None)
         existing = getattr(state, 'connection', None)
         if existing is not None:
@@ -423,3 +442,129 @@ class LocalStoreSchemaMixin:
             return
         with scoped_connection(self.db_path, False, self._connect) as conn:
             yield conn
+
+
+    # LLM: 只消费原global scope/window；不保存callback，不给普通W/Count0无条件增加global guard。
+    # 函数用途: 将C的固定本地末writer交给当次真实来源，缺源沿原typed拒绝。
+    def _local_write(self, operation):
+        return execute_global_write(operation, require_scope=True)
+
+    # LLM: 原目录及完整schema算法照用；指纹纯计算在门外，回填仍独立事务且失败保原pending。
+    # 函数用途: 为C实例逐固定出生/DDL门初始化原库，不缓存来源或跳过旧库迁移。
+    def _init_coordinator_schema(self):
+        self._local_write(self._prepare_coordinator_directories)
+        self._fts_needs_rebuild = False
+        fingerprint = _local_schema_fingerprint(self.enable_fts)
+        self._local_write(lambda: self._initialize_coordinator_schema(fingerprint))
+        rebuild = getattr(self, "rebuild_fts", None)
+        if self._fts_needs_rebuild and self._fts_available and callable(rebuild):
+            try:
+                rebuild()
+                self._fts_needs_rebuild = False
+            except sqlite3.OperationalError:
+                pass
+
+    # LLM: 只准备原root/files/events父目录，路径来自同Store；不接任意目录或做扫描。
+    # 函数用途: 在固定初始化末门内执行原三处目录确保。
+    def _prepare_coordinator_directories(self):
+        ensure_private_dir(self.root)
+        ensure_private_dir(self.files_dir)
+        ensure_private_dir(self.events_path.parent)
+
+    # LLM: 此叶只由原短window调用；完整_ensure_schema及原guard/迁移/stamp不复制，清理不覆盖主异常。
+    # 函数用途: 用独立零等待连接执行原schema事务并回收原FD。
+    def _initialize_coordinator_schema(self, fingerprint):
+        conn = self._connect_coordinator()
+        primary = None
+        try:
+            self._ensure_schema(conn, fingerprint)
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            _retire_coordinator_connection(conn, primary)
+
+    # LLM: 调用方已在原末window；无F1 factory/cache/batch，只有原WAL/foreign_keys和零等待参数。
+    # 函数用途: 创建C的一条独立短连接，设置失败也关闭本次已打开FD。
+    def _connect_coordinator(self):
+        conn = sqlite3.connect(self.db_path, timeout=0.0)
+        primary = None
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=0")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+        except BaseException as exc:
+            primary = exc
+            _retire_coordinator_connection(conn, primary)
+            raise
+
+    # LLM: 出生由当前源核，读取在门外；退出只回收已打开同一FD，不新连/补账，撤权仍cleanup且保主异常。
+    # 函数用途: 为C门外查询或快照准备取得短读取连接。
+    @contextmanager
+    def _coordinator_read_connection(self):
+        conn = self._connect()
+        primary = None
+        try:
+            yield conn
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            _retire_coordinator_connection(conn, primary)
+
+    # LLM: operation是固定原SQL算法，所有参数/正文已准备；BEGIN/DML/event/commit/cleanup同末门，不能提交门外DML。
+    # 函数用途: 对C执行完整原单库本地事务，SQLite锁忙零等待并保真实partial。
+    def _coordinator_transaction(self, operation, *, secure_delete=False):
+        # LLM: 仅原短window执行本库固定事务，不运输连接到门外；异常先保存再原FD清理。
+        # 函数用途: 完成一次BEGIN到commit的本地事务及同连接关闭。
+        def commit():
+            conn = self._connect_coordinator()
+            primary = None
+            try:
+                if secure_delete:
+                    conn.execute("PRAGMA secure_delete=ON")
+                conn.execute("BEGIN IMMEDIATE")
+                result = operation(conn)
+                conn.commit()
+                return result
+            except BaseException as exc:
+                primary = exc
+                raise
+            finally:
+                _retire_coordinator_connection(conn, primary)
+        return self._local_write(commit)
+
+    # LLM: 原events锁先在门外取得；仅其FD准确出生入末门，flock/身份重试/close仍门外。
+    # 函数用途: 为原SQL事件追加预先持有相同JSONL双层锁。
+    def _coordinator_events_lock(self):
+        return locked_json_path(self.events_path, birth_commit=self._local_write)
+
+    # LLM: 只接受本Store固定events_path且调用方已持原锁；嵌套复用原canonical window，不重取锁或另选来源。
+    # 函数用途: 在原SQL INSERT之后按同一事件编码追加已持锁JSONL。
+    def _append_coordinator_event_records(self, path, records, *, sort_keys=True):
+        if path != self.events_path:
+            raise ValueError("local_store_event_path_changed")
+        return self._local_write(lambda: append_private_jsonl_records_unlocked(
+            self.events_path, records, sort_keys=sort_keys))
+
+
+# LLM: 只清理原已打开连接，不新连接、不新增业务DML；rollback/close全部尝试，有主异常时不覆盖其对象。
+# 函数用途: 正常或撤权退出时精确归还本次短连接，避免清理中断泄漏FD。
+def _retire_coordinator_connection(conn, primary=None):
+    cleanup_error = None
+    try:
+        if conn.in_transaction:
+            conn.rollback()
+    except BaseException as exc:
+        cleanup_error = exc
+    try:
+        conn.close()
+    except BaseException as exc:
+        cleanup_error = cleanup_error if cleanup_error is not None else exc
+    if primary is None and cleanup_error is not None:
+        raise cleanup_error

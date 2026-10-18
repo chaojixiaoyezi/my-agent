@@ -1,9 +1,10 @@
 # LLM: 自学习 S3（自动总结 Skill）的服务入口，只在 enable_self_learning 开启时由组合根装配到 agent.skill_learning。
+# 原learning FIFO与唯一registry维护共用原来源/短写门；mtime仅CAS，维护不消费新FIFO/调用模型或确认候选。
 #   收口侧 enqueue_from_finalize 只写一条有界请求；Gateway 后台记忆整理车道调用 run_pending：非阻塞运行锁、
 #   前台同端点模型在忙就顺延、每日上限、无工具结构化调用（复用记忆整理的 backend 与 call_backend_with_timeout）、
 #   严格解析、原guard、待用户确认候选、账本、删请求。模型失败最多重试 MAX_REQUEST_ATTEMPT_COUNT 次；输出不合规和闸门拒绝不重试。
 #   不给模型注册任何工具。同步检查 core.py 装配、_finalization_service.py、cli/gateway_loops.py 与 test_skill_learning*.py。
-# 模块用途: 把主代理完成的复杂任务在后台总结成 owner 的自学 Skill，全程不需要用户确认、全程留账。
+# 模块用途: 在原请求作用域生成owner学习候选，正式Skill仍由用户准确确认，不以来源权限代替确认。
 from __future__ import annotations
 
 import threading
@@ -12,8 +13,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.provider_headers import provider_session_scope
 from ..backends.request_scope import foreground_model_active
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+    gateway_short_transaction,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..memory_store.curator_backend import CuratorModelStillRunningError, call_backend_with_timeout
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .skill_learning_prompt import (
@@ -195,7 +203,7 @@ def _bounded_put(table: dict, key: str, value: object) -> None:
         table.pop(next(iter(table)))
 
 
-# LLM: 服务不持有线程或定时器；并发与顺延全靠 store 的运行锁和调用方车道。
+# LLM: 服务不持线程/定时器；FIFO和canonical registry维护共用原短写门，维护分支不消费后来FIFO或确认候选。
 # 类用途: 一个 owner 的自动总结 Skill 服务。
 class SkillLearningService:
     # LLM: 构造不创建目录、不发请求。
@@ -272,28 +280,44 @@ class SkillLearningService:
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
         return outcome
 
-    # LLM: 纯文件系统检查，供 Gateway 车道准入使用。
-    # 函数用途: 判断是否有待处理的学习请求。
+    # LLM: FIFO仍优先，registry到期只复用同一纯时间判据；Count0原文件检查顺序不变，不创建维护请求或读第二账。
+    # 函数用途: 判断原队列或自主维护是否待处理，发现只作预筛不授执行权。
     def has_pending(self) -> bool:
-        return bool(self.store.pending_requests()) or (self.settings.maintenance_mode == "autonomous" and self.store.registry_path.exists() and time.time()-self.store.registry_path.stat().st_mtime >= 86400)
+        from .skill_learning_maintenance import learning_maintenance_due
 
-    # LLM: 每次最多处理一条；前台同端点模型在忙、运行锁被占时返回 busy，请求原样保留。
+        return bool(self.store.pending_requests()) or (self.settings.maintenance_mode == "autonomous"
+            and self.store.registry_path.exists()
+            and learning_maintenance_due(self.store.registry_path.stat().st_mtime, self.settings.maintenance_mode, time.time()))
+
+    # LLM: 最早核准确Agent/原执行，FIFO路径只约束当前源；维护/候选/收尾写入重核短门，模型等待在门外。
+    #   maintenance_only只由真实registry来源内部选择，完成原维护即返回，不消费后来FIFO或调用模型；默认False保原预算/人工proposals。
     # 函数用途: 在后台处理最早的一条学习请求。
-    def run_pending(self) -> SkillLearningRunResult:
+    def run_pending(self, *, expected_request_path: Path | None = None, maintenance_only: bool = False) -> SkillLearningRunResult:
+        from ..gateway_parts.request_entry_admission import require_request_execution
+
+        require_request_execution(component=self, component_attribute="skill_learning")
+        if expected_request_path is not None:
+            pending = self.store.pending_requests()
+            if not pending:
+                return SkillLearningRunResult(STATUS_IDLE)
+            if pending[0] != expected_request_path:
+                return SkillLearningRunResult(STATUS_BUSY)
         if self.runtime.lesson_provider:
             from .skill_learning_migration import adopt_committed_lessons
-            adopt_committed_lessons(self.store,self.runtime.lesson_provider())
+            with gateway_short_transaction("skill_learning_adopt_lessons"):
+                adopt_committed_lessons(self.store,self.runtime.lesson_provider())
         if self.settings.maintenance_mode == "autonomous":
             from .skill_learning_maintenance import maintain_learning
             protection = self.runtime.protection_provider() if self.runtime.protection_provider else {'protection_complete':False}
-            maintain_learning(self.store,mode=self.settings.maintenance_mode,cool_seconds=self.settings.cool_seconds,archive_seconds=self.settings.archive_seconds,keep_versions=self.settings.keep_versions,**protection)
-        if not self.store.pending_requests():
+            with gateway_short_transaction("skill_learning_maintenance"):
+                maintain_learning(self.store,mode=self.settings.maintenance_mode,cool_seconds=self.settings.cool_seconds,archive_seconds=self.settings.archive_seconds,keep_versions=self.settings.keep_versions,**protection)
+        if maintenance_only or not self.store.pending_requests():
             return SkillLearningRunResult(STATUS_IDLE)
         if foreground_model_active(self.runtime.backend):
             return SkillLearningRunResult(STATUS_BUSY)
         try:
             with self.store.run_lock():
-                return self._run_first()
+                return self._run_first(expected_request_path=expected_request_path)
         except BlockingIOError:
             return SkillLearningRunResult(STATUS_BUSY)
         except SkillLearningStoreError as exc:
@@ -301,17 +325,20 @@ class SkillLearningService:
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return SkillLearningRunResult(EVENT_FAILED,"SKILL_LEARNING_STORAGE_LIMIT")
 
-    # LLM: 顺序固定：取最早请求→损坏即丢弃→占每日额度→材料→模型→决定→账本→删请求。
+    # LLM: 原.run锁内再核FIFO；保main候选上限、owner与部署预算，四类实际未知原对象上抛，不记失败或删源。
     # 函数用途: 在运行锁内处理一条请求。
-    def _run_first(self) -> SkillLearningRunResult:
+    def _run_first(self, *, expected_request_path: Path | None = None) -> SkillLearningRunResult:
         pending = self.store.pending_requests()
         if not pending:
             return SkillLearningRunResult(STATUS_IDLE)
         path = pending[0]
+        if expected_request_path is not None and path != expected_request_path:
+            return SkillLearningRunResult(STATUS_BUSY)
         request = self.store.read_request(path)
         if request is None:
-            self.store.discard_request(path)
-            return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
+            with gateway_short_transaction("skill_learning_drop_corrupt"):
+                self.store.discard_request(path)
+                return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
         from .skill_learning_proposals import list_learning_proposals
         if sum(row["status"]=="pending" for row in list_learning_proposals(self.store)) >= 20:
             return SkillLearningRunResult("awaiting_confirmation",request_key=str(request.get("request_key") or ""))
@@ -321,13 +348,17 @@ class SkillLearningService:
         )
         if not deployment_learning_available(self.runtime.deployment_root,self.settings.global_daily_limit):
             return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
-        if not self.store.consume_daily_call(self.settings.daily_limit):
-            return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
-        if not reserve_deployment_learning(self.runtime.deployment_root,self.settings.global_daily_limit):
-            return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
+        with gateway_short_transaction("skill_learning_reserve_call"):
+            if not self.store.consume_daily_call(self.settings.daily_limit):
+                return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
+            if not reserve_deployment_learning(self.runtime.deployment_root,self.settings.global_daily_limit):
+                return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
         material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
             response = self._call_model(material)
+        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            raise
         except CuratorModelStillRunningError:
             return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
         except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账。
@@ -348,7 +379,7 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: skip直接记账；create/update只生成待用户确认候选，不能自动写正式Skill；输出不合规与guard拒绝不重试。
+    # LLM: skip原路记账；create/update在原短门保存main待确认候选，source只是执行门，不给正式Skill发布权。
     # 函数用途: 把模型输出变成待确认候选或跳过/拒绝账本事实，不自动发布正式内容。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
@@ -365,39 +396,45 @@ class SkillLearningService:
                                  expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""))
         try:
             from .skill_learning_proposals import propose_learning
-            return propose_learning(self.store, publish)
+            with gateway_short_transaction("skill_learning_propose"):
+                return propose_learning(self.store, publish)
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:
             rejected = _request_event(EVENT_REJECTED, exc.code, request)
             return replace(rejected, skill_name=decision.name, reason=decision.reason)
 
-    # LLM: 模型失败按请求上的 attempts 计数：未到上限写回并保留，到上限丢弃并记 failed。
+    # LLM: 普通模型失败按原attempts重试；同次短T保护重写与丢弃，撤权不能消费原请求。
     # 函数用途: 处理一次模型调用失败。
     def _retry_or_drop(self, path: Path, request: dict[str, object], exc: Exception) -> SkillLearningRunResult:
-        code = CODE_MODEL_TIMEOUT if isinstance(exc, TimeoutError) else CODE_MODEL_FAILED
-        attempts = int(request.get("attempts") or 0) + 1
-        if attempts < MAX_REQUEST_ATTEMPT_COUNT:
-            self.store.rewrite_request(path, {**request, "attempts": attempts})
-            return SkillLearningRunResult(STATUS_RETRY, code, request_key=str(request.get("request_key") or ""))
-        failed = replace(_request_event(EVENT_FAILED, code, request), reason=type(exc).__name__)
-        return self._finish(path, request, failed)
+        with gateway_short_transaction("skill_learning_retry_or_drop"):
+            code = CODE_MODEL_TIMEOUT if isinstance(exc, TimeoutError) else CODE_MODEL_FAILED
+            attempts = int(request.get("attempts") or 0) + 1
+            if attempts < MAX_REQUEST_ATTEMPT_COUNT:
+                self.store.rewrite_request(path, {**request, "attempts": attempts})
+                return SkillLearningRunResult(STATUS_RETRY, code, request_key=str(request.get("request_key") or ""))
+            failed = replace(_request_event(EVENT_FAILED, code, request), reason=type(exc).__name__)
+            return self._finish(path, request, failed)
 
-    # LLM: 账本先写、请求后删：崩在两者之间最多重复处理一次（发布侧有重名/哈希闸门兜住），不会丢账。
+    # LLM: 原短T内先账本再删源，原proposals幂等与正式发布确认不变；未知不假称结束。
     # 函数用途: 记账并结束一条请求。
     def _finish(self, path: Path, request: dict[str, object], event: SkillLearningEvent) -> SkillLearningRunResult:
-        self.store.append_event(event)
-        self.store.discard_request(path)
-        return SkillLearningRunResult(event.event, event.code, event.skill_name,
-                                      str(request.get("request_key") or event.request_key))
+        with gateway_short_transaction("skill_learning_finish"):
+            self.store.append_event(event)
+            self.store.discard_request(path)
+            return SkillLearningRunResult(event.event, event.code, event.skill_name,
+                                          str(request.get("request_key") or event.request_key))
 
 
-# LLM: 快照读取失败（例如 Skill 总闸配置损坏）按空索引处理：这只会让重名检查少一层来源，
+# LLM: 实际来源未知必须原对象上抛；普通快照读取失败（例如Skill总闸配置损坏）保持原空索引降级：
 #   发布侧仍会检查 learned/<name> 目录与登记表，不会覆盖任何文件。
 # 函数用途: 取当前快照的 Skill 条目。
 def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
     try:
         snapshot = provider()
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
     except Exception:  # noqa: BLE001 - 快照不可用不能阻断学习，重名检查退回到磁盘与登记表。
         return ()
     return tuple(getattr(snapshot, "entries", ()) or ())

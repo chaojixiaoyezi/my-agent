@@ -8,10 +8,13 @@
 #   session 心跳读取持久取消事实，再在其宿主内转交精确 attempt 的中断。
 #   改动时同步检查 round_execution 轮询点、background/dispatch worker 注册、
 #   subagents/cancellation.py 接线与 tests/test_thread_interrupt.py。
-# 模块用途: 统一线程停止与阻塞连接关闭；普通控制沿原路径，精确句柄支持无等待取消及清理去重。
+# 模块用途: 统一线程停止与阻塞连接关闭；原观察身份固定且有界核物理退出，当前引用丢失或启动未知继续保留。
 from __future__ import annotations
 
+import _thread
+import math
 import threading
+import time
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -33,6 +36,127 @@ _thread_wakeups: dict[int, set[threading.Event]] = {}
 _GRACEFUL_INTERRUPT_TIMEOUT_SECONDS = 0.1
 
 
+# LLM: 只冻结同一 Thread 的出生前引用，不建立新登记或生命周期；观察字段被一起替换也不能重签原物理身份。
+# 类用途: 为 worker 与 cleanup 的退出观察保存不可变原 Thread、通知和原生句柄身份。
+@dataclass(frozen=True)
+class _ThreadExitIdentity:
+    thread: threading.Thread
+    started: threading.Event
+    native_attribute: str | None
+    native_handle: object
+
+
+# LLM: 此对象只保存同一原 Thread 的出生/内核引用，不另建登记表；worker 与 cleanup 共用观察算法，通知不是退出证明。
+# 类用途: 区分从未尝试启动、出生未知和原物理线程已退出，供有界调用及取消句柄收尾。
+class _ThreadExitObservation:
+    # LLM: 原身份一经构造不能换新，已尝试不能改回未尝试；仅保护同一观察对象的事实，不创建生命周期或登记。
+    # 函数用途: 拒绝普通字段写入替换原引用或倒退启动事实，保留可见字段供身份核验。
+    def __setattr__(self, name, value):
+        previous = self.__dict__.get(name)
+        if name in ("_identity", "_tstate_lock_origin") and previous is not None and value is not previous:
+            raise AttributeError("原线程观察身份不能替换")
+        if name == "_start_attempted" and previous is True and value is not True:
+            raise AttributeError("原线程启动尝试不能撤销")
+        object.__setattr__(self, name, value)
+
+    # LLM: 必须在 start 前冻结原 Thread/_started/可用的原生 handle；不启动线程，不把替换后的对象认作原责任。
+    # 函数用途: 给一个准确线程保存只用于退出核验的原引用。
+    def __init__(self, thread: threading.Thread) -> None:
+        self.thread = thread
+        self.started = thread._started
+        self._start_attempted = False
+        self._tstate_lock = None
+        self._tstate_lock_origin = None
+        handle_type = getattr(_thread, "_ThreadHandle", None)
+        self._native_attribute = next((name for name in ("_os_thread_handle", "_handle")
+                                      if handle_type is not None and type(getattr(thread, name, None)) is handle_type), None)
+        self._native_handle = getattr(thread, self._native_attribute) if self._native_attribute is not None else None
+        self._identity = _ThreadExitIdentity(thread, self.started, self._native_attribute, self._native_handle)
+
+    # LLM: 只读原构造时的 Thread，不让当前可见 thread 字段替换改变等待归属。
+    # 函数用途: 给所属 Call/InterruptHandle 核对最初拥有的准确线程。
+    @property
+    def original_thread(self) -> threading.Thread:
+        return self._identity.thread
+
+    # LLM: 启动尝试是单向事实，外部不能把已尝试对象改回未尝试来释放责任。
+    # 函数用途: 只读本观察对象是否已真正进入原 start 入口。
+    @property
+    def attempted(self) -> bool:
+        return self._start_attempted
+
+    # LLM: 尝试事实先于真正 start，异常不能证明未出生；finally 只采原锁，不等待 ACK 或重复启动。
+    # 函数用途: 启动一次原线程并保留启动确认异常的责任。
+    def start(self) -> None:
+        self._start_attempted = True
+        try:
+            self._identity.thread.start()
+        finally:
+            self.note_running()
+
+    # LLM: 旧版原 tstate 锁出生后只冻结一次；worker入口和start收尾采同一原锁，可见字段替换不重签，Event不是退出证明。
+    # 函数用途: 保存原线程实际出生时的退出锁，后续 Thread.join 清空字段仍能核实原锁已释放。
+    def note_running(self) -> None:
+        lock = getattr(self._identity.thread, "_tstate_lock", None)
+        if self._tstate_lock_origin is None and type(lock) is _thread.LockType:
+            self._tstate_lock_origin = self._tstate_lock = lock
+
+    # LLM: 引用替换或启动 ACK 未知均不是死亡；原生 done/原 tstate 释放才结清，旧运行时无这些引用时沿原 Thread 查询。
+    # 函数用途: 无等待观察原线程是否已退出，不回收调用或执行回调。
+    def exited(self) -> bool:
+        if not self._same_identity():
+            return False
+        if not self.attempted:
+            return True
+        if not self.started.is_set() or self.thread.ident is None:
+            return False
+        if self._native_handle is not None:
+            return self._native_handle.is_done()
+        if self._tstate_lock is not None:
+            current = getattr(self.thread, "_tstate_lock", None)
+            if current is not None and current is not self._tstate_lock:
+                return False
+            return not self._tstate_lock.locked()
+        return not self.thread.is_alive()
+
+    # LLM: 原绝对期限适用于 ACK 和真正 join 总和；锁外等待，不接受结果通知、无界 wait 或额外宽限。
+    # 函数用途: 在剩余预算内等原线程物理退出；未知出生、引用变化或到期均返回 False。
+    def wait_until(self, deadline: float) -> bool:
+        if self.exited():
+            return True
+        if not self._same_identity():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if not self.started.is_set():
+            self.started.wait(min(remaining, threading.TIMEOUT_MAX))
+        if self.exited():
+            return True
+        if not self._same_identity() or not self.started.is_set() or self.thread.ident is None:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            self.thread.join(min(remaining, threading.TIMEOUT_MAX))
+        except Exception:
+            return False
+        return self.exited()
+
+    # LLM: 可见字段与原 Thread 字段都须匹配不可变原身份；同时更换 thread/通知也不能洗掉责任，空 ident 不证明退出。
+    # 函数用途: 在观察和等待前后核对出生前冻结的准确身份。
+    def _same_identity(self) -> bool:
+        original = self._identity
+        return (self.thread is original.thread and self.started is original.started
+                and self._tstate_lock is self._tstate_lock_origin
+                and self._native_attribute == original.native_attribute
+                and self._native_handle is original.native_handle
+                and getattr(original.thread, "_started", None) is original.started
+                and (original.native_attribute is None
+                     or getattr(original.thread, original.native_attribute, None) is original.native_handle))
+
+
 # LLM: 每次回调注册独立计数，精确句柄只安排一次；不能按 callable 相等判断不同注册是否同一资源。
 # 类用途: 保存当前关闭动作及是否已交给受跟踪清理线程。
 @dataclass(eq=False)
@@ -41,10 +165,18 @@ class _InterruptCallback:
     scheduled: bool = False
 
 
-# LLM: 句柄独占一次执行，绑定/取消沿本模块同一锁；最多一个清理线程，退出前保留引用，不能重用或控制父线程。
-# 类用途: 在 worker 启动前准备准确取消身份，支持立即返回的停止请求及晚注册连接的清理。
+# LLM: 句柄独占一次执行，绑定/取消沿原锁；最多一个原清理线程，观察不另建表，有界等待不能洗掉出生未知或控制父线程。
+# 类用途: 准备准确取消身份，停止请求立即返回；宿主可在原期限内核实同一清理线程退出。
 class InterruptHandle:
-    # LLM: 构造无线程和控制副作用；取消 Event 是句柄事实，线程标志只是绑定期间的投影。
+    # LLM: cleanup出生前原观察只可由构造阶段绑定一次，不能以当前观察字段覆盖已持有的原物理责任。
+    # 函数用途: 封住原清理观察引用的替换，原有取消/线程字段写入保持原语义。
+    def __setattr__(self, name, value):
+        if (name == "_cleanup_observation_origin" and self.__dict__.get(name) is not None
+                and value is not self.__dict__[name]):
+            raise AttributeError("原清理观察身份不能替换")
+        object.__setattr__(self, name, value)
+
+    # LLM: 构造无线程副作用；原清理观察只在出生前绑定一次，可见字段丢失/替换仍持原对象，不另建登记。
     # 函数用途: 建立尚未认领的取消句柄及清理状态。
     def __init__(self) -> None:
         self._cancelled = threading.Event()
@@ -59,6 +191,8 @@ class InterruptHandle:
         self._waiters: set[threading.Event] = set()
         self._cleanup_thread: threading.Thread | None = None
         self._cleanup_attempted = False
+        self._cleanup_observation: _ThreadExitObservation | None = None
+        self._cleanup_observation_origin: _ThreadExitObservation | None = None
 
     # LLM: 认领必须在 worker 启动前，已取消或已用句柄不能成为另一次调用的身份；不清理已有取消事实。
     # 函数用途: 为通用有界调用保留一次性取消身份。
@@ -91,14 +225,42 @@ class InterruptHandle:
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
-    # LLM: completed Event 不能单独证明线程退出；未启动成功、待处理或仍存活的清理都保留占用。
-    # 函数用途: 告诉资源登记表当前是否仍需持有清理名额。
+    # LLM: completed Event 不能单独证明线程退出；原 Thread 被替换、待处理或启动未知的清理都继续占用。
+    # 函数用途: 告诉资源登记表当前是否仍需持有原清理责任，不进行等待或回收。
     @property
     def cleanup_pending(self) -> bool:
         with _lock:
-            return bool(self._pending) or not self._cleanup_done.is_set() or (
-                self._cleanup_thread is not None and self._cleanup_thread.is_alive()
-            )
+            return self._cleanup_pending_locked()
+
+    # LLM: 锁下只读原队列/通知与出生前原观察；当前观察缺失/副本/替换或内部身份漂移均不得认定退出。
+    # 函数用途: 共用清理责任判定，让无等待查询和有界等待保持同一口径。
+    def _cleanup_pending_locked(self) -> bool:
+        observation = self._cleanup_observation_origin
+        return (bool(self._pending) or not self._cleanup_done.is_set()
+                or self._cleanup_observation is not observation
+                or (observation is None and self._cleanup_thread is not None)
+                or (observation is not None and (self._cleanup_thread is not observation.original_thread or not observation.exited())))
+
+    # LLM: 锁外只等出生前原 cleanup 观察；可见观察缺失/副本不成为权威，原期限到期或身份未知为 False，不建线程或表。
+    # 函数用途: 为宿主 drain 有界等待准确清理物理退出，不把完成 Event 当成退出证明。
+    def wait_cleanup_until(self, deadline: float) -> bool:
+        try:
+            valid = type(deadline) in (int, float) and math.isfinite(deadline)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise ValueError("清理等待需要有限绝对期限")
+        with _lock:
+            if not self._cleanup_pending_locked():
+                return True
+            observation = self._cleanup_observation_origin
+            if (observation is None or self._cleanup_observation is not observation
+                    or self._cleanup_thread is not observation.original_thread):
+                return False
+        if not observation.wait_until(deadline):
+            return False
+        with _lock:
+            return not self._cleanup_pending_locked()
 
     # LLM: 仅 worker 未启动时可关闭未绑定句柄；不能用 caller 超时提前关闭仍在运行的注册。
     # 函数用途: 回收启动失败或发送前取消的句柄生命周期，不等待清理。
@@ -116,7 +278,7 @@ class InterruptHandle:
             self._pending.append(item)
             self._cleanup_wake.set()
 
-    # LLM: 每个句柄最多安排一次清理线程；构造/启动失败保留未完成事实，不能释放资源或同步运行慢回调。
+    # LLM: 每个句柄最多一次清理；出生前同批固定原观察与可见投影，构造/ACK 失败保留责任，不重试或同步跑回调。
     # 函数用途: 有清理动作时启动受跟踪线程，重复取消沿原队列处理。
     def _start_cleanup(self) -> None:
         try:
@@ -127,13 +289,17 @@ class InterruptHandle:
                 self._cleanup_done.clear()
                 worker = threading.Thread(target=self._clean, name="interrupt-handle-cleanup", daemon=True)
                 self._cleanup_thread = worker
-            worker.start()
+                observation = _ThreadExitObservation(worker)
+                self._cleanup_observation = self._cleanup_observation_origin = observation
+            observation.start()
         except Exception:
             return
 
-    # LLM: 清理线程与 worker 共用准确句柄；晚注册动作仍可入队，worker 退出且队列耗尽前不宣称全部释放。
+    # LLM: 实际出生锁只写出生前原观察，可见投影被替换不改记录归属；finally Event 只是通知，物理退出另核。
     # 函数用途: 串行执行本调用的关闭动作，直到调用注册结束并完成已排清理。
     def _clean(self) -> None:
+        if self._cleanup_observation_origin is not None:
+            self._cleanup_observation_origin.note_running()
         try:
             while True:
                 with _lock:

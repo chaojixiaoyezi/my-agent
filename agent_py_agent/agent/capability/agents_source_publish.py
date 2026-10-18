@@ -1,17 +1,19 @@
-# LLM: 默认来源的正文仅在私有准备件写入；发布只用link的排他语义，不截断任何公开文件。
-# 模块用途: 把完整正文一次发布到缺失的默认来源，并保留可验证的回滚FD。
+# LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+# 模块用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
 import os
 import secrets
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 from ..common.nofollow_fs import NoFollowPathError, _openat_directory, _openat_file
 from ._agents_contract_fields import AgentsContractError
 from .agents_source_files import _write_all
+from .persona_storage_io import _PERSONA_NATIVE_ERRORS, persona_io
 
 
-# LLM: 只持有本事务的私有准备FD和发布责任；公开叶子的身份核验及回滚必须同步检查来源发布竞争测试。
-# 类用途: 保存完整默认来源的排他发布材料，供成功收尾或失败条件撤回。
+# LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+# 类用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
 @dataclass
 class PreparedDefaultSource:
     parent: int
@@ -19,54 +21,104 @@ class PreparedDefaultSource:
     temporary: str
     descriptor: int
     published: bool = False
+    coordinator_io: bool = False
 
-    # LLM: link拒绝所有已存在目的名；成功后先记录责任，后续I/O失败也不能遗忘已发布文件。
-    # 函数用途: 完整正文公开后不再写其FD，避免覆盖并发外部编辑。
+    # LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+    # 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
     def publish(self, name: str) -> None:
+        if self.coordinator_io:
+            return persona_io(lambda: self._publish_current(name), coordinator_io=True)
+        self._publish_current(name)
+
+    # LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+    # 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
+    def _publish_current(self, name):
         os.link(self.temporary, name, src_dir_fd=self.control,
                 dst_dir_fd=self.parent, follow_symlinks=False)
         self.published = True
         self.release_private_link()
         os.fsync(self.parent)
 
-    # LLM: 仅释放本次私有准备链接；发布中途失败时restore先重试这里，公开叶子的单链接校验保持严格。
-    # 函数用途: 结束事务自己的双链接中间态，让后续回滚可以核验公开来源。
+    # LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+    # 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
     def release_private_link(self) -> None:
+        if self.coordinator_io:
+            return persona_io(self._release_current, coordinator_io=True)
+        self._release_current()
+
+    # LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+    # 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
+    def _release_current(self):
         if self.temporary:
             os.unlink(self.temporary, dir_fd=self.control)
             self.temporary = ""
             os.fsync(self.control)
 
 
-# LLM: 调用方已持配置锁和父目录FD；准备阶段对外没有空文件，正文fsync后才交回发布权。
-# 函数用途: 管理私有临时文件，不把准备失败误认成已创建公开来源。
+# LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+# 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
 @contextmanager
-def prepared_default_source(parent: int, body: bytes):
+def prepared_default_source(parent: int, body: bytes, *, coordinator_io=False):
     control = descriptor = None
     prepared = None
     temporary = ".agents-create-" + secrets.token_hex(12)
     try:
         control = _openat_directory(parent, "persona")
-        descriptor = _openat_file(control, temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
-        prepared = PreparedDefaultSource(parent, control, temporary, descriptor)
-        _write_all(descriptor, body)
-        os.fsync(descriptor)
+        descriptor = persona_io(lambda: _openat_file(control, temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600), coordinator_io=coordinator_io)
+        prepared = PreparedDefaultSource(parent, control, temporary, descriptor, **({} if not coordinator_io else {"coordinator_io": True}))
+        persona_io(lambda: _write_prepared_body(descriptor, body), coordinator_io=coordinator_io)
         yield prepared
     except (OSError, NoFollowPathError) as error:
+        if coordinator_io and isinstance(error, _PERSONA_NATIVE_ERRORS):
+            raise
         raise AgentsContractError("AGENTS_SOURCE_UNSAFE_PATH", "locator") from error
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        _close_prepared_control(control, prepared)
+        if coordinator_io:
+            _finish_prepared_source(descriptor, control, prepared, sys.exception())
+        else:
+            if descriptor is not None:
+                os.close(descriptor)
+            _close_prepared_control(control, prepared)
 
 
-# LLM: 仅清理本次随机命名的私有准备件；无论unlink是否失败都关闭目录FD，不触碰公开叶子。
-# 函数用途: 释放准备目录及未发布临时文件，保持异常路径资源收尾。
-def _close_prepared_control(control, prepared):
+# LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+# 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
+def _close_prepared_control(control, prepared, *, coordinator_io=False, primary=None):
     if control is None:
         return
     try:
+        if coordinator_io and isinstance(primary, _PERSONA_NATIVE_ERRORS):
+            return
         if prepared is not None and prepared.temporary:
-            os.unlink(prepared.temporary, dir_fd=control)
+            persona_io(lambda: os.unlink(prepared.temporary, dir_fd=control), coordinator_io=coordinator_io)
     finally:
-        os.close(control)
+        if coordinator_io:
+            active = sys.exception() or primary
+            try:
+                os.close(control)
+            except OSError:
+                if not isinstance(active, _PERSONA_NATIVE_ERRORS):
+                    raise
+        else:
+            os.close(control)
+
+
+# LLM: 默认来源算法共用，C只门控准备/发布/私有清理，不跨yield持Root；native primary时只关准确FD，不改公开对象或重包异常。
+# 函数用途: 准备完整正文再排他发布，区分私有清理权与FD回收。
+def _write_prepared_body(descriptor, body):
+    _write_all(descriptor, body)
+    os.fsync(descriptor)
+
+
+# LLM: 只供prepared_default_source的三个原FD/责任引用收尾；本词法native不授清理权，secondary close不覆盖primary。
+# 函数用途: 总是尝试关正文及control FD，并按当前来源决定私有准备件是否可清理。
+def _finish_prepared_source(descriptor, control, prepared, primary):
+    try:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                if not isinstance(primary, _PERSONA_NATIVE_ERRORS):
+                    raise
+    finally:
+        _close_prepared_control(control, prepared, coordinator_io=True, primary=primary)

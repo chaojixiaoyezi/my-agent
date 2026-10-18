@@ -1,6 +1,8 @@
 # LLM: 控制状态沿 owner/thread 和持久回执处理；首次 Goal 目录共用请求校验，不改变已有执行目录。
 # Goal 状态页只读共享 goal_clock，不持有独立计时或用量状态。
 # 整任务停止在任务锁内关闭主执行权和冻结资源；实际回收在锁外，不追随恢复轮。
+# 插话的宿主owner在原控制解析点冻结进guidance，恢复不依据新绑定或sender重新选择归属。
+# LLM: 正count普通input同key追加与原queue共持input T至末append；Count0/无ordinary ID不增加input读取，queued不能迟到active追加。
 # 模块用途: 将显式控制命令应用到当前会话，保持任务、历史、权限和中断边界。
 from __future__ import annotations
 
@@ -212,6 +214,93 @@ def _active_turn_request_id(active: _GatewayRequestRecord | None) -> str:
     if linked is not None and linked.path is not None and linked.path.exists():
         return _record_id(linked)
     return _record_id(active)
+
+
+# LLM: 原进程角色收窄所有带message_id的steer同key写者，预算只读conversation唯一叶；Count0/缺message_id不读input或增加IO，不签执行权。
+# 函数用途: 为正count同消息控制捕获唯一IO期限，无消息ID保持原路径。
+def _ordinary_input_control_deadline(paths, scope):
+    if not _steer_channel_message_id(scope):
+        return None
+    from .multiprocess_coordinator import coordinator_role_present
+    from .multiprocess_mode import current_worker_partition
+    if current_worker_partition() is None and not coordinator_role_present(paths.root, context=paths):
+        return None
+    from ..conversation.input_resource_retry import input_resource_deadline
+    return input_resource_deadline()
+
+
+# LLM: 仅比当前普通消息完整prepared/原摘要与typed owner/peer/key/goal；失败不重选target、不补写canonical，也不以None视为缺席许可。
+# 函数用途: 确认迟到control对应的正是原input receipt中的同一条消息。
+def _ordinary_input_matches(receipt, scope, payload):
+    from . import input_delivery_service as inputs
+    from .input_guidance_payload import input_scope
+    inputs._validate_prepared_request(receipt)
+    original = input_scope(receipt)
+    return (receipt.request_id == scope.metadata.get('gateway_input_request_id')
+            and receipt.client_message_id == _steer_channel_message_id(scope)
+            and receipt.client_input_digest == scope.metadata.get('client_input_digest')
+            and receipt.guidance_dedupe_key == active_turn_guidance_dedupe_key(scope)
+            and original.resolved_owner == scope.resolved_owner
+            and (original.user_id, original.channel, original.conversation_id)
+                == (scope.user_id, scope.channel, scope.conversation_id)
+            and str(receipt.prepared_request.get('goal') or '').strip() == payload['message'].strip())
+
+
+# LLM: 结果只报告原去向与未追加事实，accepted仅原queued；busy/不明不伪造guidance或执行成功，不改任何账。
+# 函数用途: 让两个原caller直接返回queued/未确认，避免把结果当GuidanceEntry继续处理。
+def _ordinary_input_control_result(scope, turn_id, *, queued=False, error_code='', input_request_id=''):
+    return ConversationControlResult('steer', queued,
+        '该消息已完整排入下一轮，未追加到当前回合。' if queued else '本次补充去向尚未确认，未重新追加；请沿同一消息ID对账。',
+        request_id=turn_id, delivery_status='accepted' if queued else 'unknown',
+        guidance_dedupe_key=active_turn_guidance_dedupe_key(scope), error_code=error_code,
+        details={'input_request_id': input_request_id or str(scope.metadata.get('gateway_input_request_id') or ''),
+                 'input_state': 'queued' if queued else 'unconfirmed', 'active_appended': False})
+
+
+# LLM: 外层持原Gateway T/turn M/task/claim；所有正count/message_id写者以原纯公式取同input T，仅try并持到append末写，既有ordinary冲突不从receipt抄摘要。
+# 函数用途: 与G0原input T→M→queue CAS互斥；queue先则不append，append先则canonical迫使G0延期。
+def _append_ordinary_input_guidance(store, paths, scope, payload, turn_id, deadline):
+    from ..common.json_io import check_io_deadline
+    from ..runtime_errors import DataCorruptionError
+    from . import input_delivery_service as inputs
+    from .http_handlers import http_input_identity
+    from .io import try_gateway_turn_transition
+
+    request_id, _identity = http_input_identity(user_id=scope.user_id, channel=scope.channel,
+        conversation_id=scope.conversation_id, message_id=_steer_channel_message_id(scope))
+    ordinary_id = str(scope.metadata.get('gateway_input_request_id') or '')
+    if not request_id or ordinary_id and ordinary_id != request_id:
+        return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_CONFLICT', input_request_id=request_id)
+    try:
+        check_io_deadline(deadline)
+        with try_gateway_turn_transition(paths, request_id) as acquired:
+            if not acquired:
+                return _ordinary_input_control_result(scope, turn_id, error_code='BlockingIOError', input_request_id=request_id)
+            check_io_deadline(deadline)
+            report = read_json_file_report(inputs.gateway_input_receipt_path(paths, request_id),
+                context='gateway.control.input_disposition.read', blocking=False, deadline=deadline)
+            inputs._raise_for_input_read_report(report, 'ordinary input disposition is unreadable')
+            if not report.payload:
+                if inputs.gateway_input_receipt_path(paths, request_id).exists() or ordinary_id:
+                    return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_UNCONFIRMED', input_request_id=request_id)
+                # LLM: 无ordinary receipt的原显式steer仍只写原guidance；同input T覆盖末提交，不创建receipt/owner或借缺席签执行权。
+                # 函数用途: 阻止同key显式writer绕过普通queue的互斥门。
+                return store.guidance.append_once(payload, dedupe_key=active_turn_guidance_dedupe_key(scope),
+                                                   blocking=False, deadline=deadline)
+            receipt = inputs.GatewayInputReceipt.from_dict(report.payload)
+            if not _ordinary_input_matches(receipt, scope, payload):
+                return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_CONFLICT', input_request_id=request_id)
+            check_io_deadline(deadline)
+            if receipt.state == 'queued':
+                return _ordinary_input_control_result(scope, turn_id, queued=True, input_request_id=request_id)
+            if receipt.state != 'pending' or receipt.target_turn_id or receipt.transport is not None:
+                return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_DISPOSITION_UNCONFIRMED', input_request_id=request_id)
+            return store.guidance.append_once(payload, dedupe_key=receipt.guidance_dedupe_key,
+                                               blocking=False, deadline=deadline)
+    except (BlockingIOError, TimeoutError) as error:
+        return _ordinary_input_control_result(scope, turn_id, error_code=type(error).__name__, input_request_id=request_id)
+    except (DataCorruptionError, ValueError):
+        return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_UNCONFIRMED', input_request_id=request_id)
 
 
 # LLM: 插话持久操作经 guidance 领域组件； Receipt lookup resolves the same owner/thread store as control routing and validates all
@@ -1709,7 +1798,7 @@ def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScop
     return bool(scope.conversation_id or (scope.all_user_access and scope.user_id))
 
 
-# LLM: 插话持久操作经 guidance 领域组件；按 T→M→task→claim 锁序复核原执行绑定，等待者及过时代次无准入资格。
+# LLM: 按T→M→task→claim复核原执行绑定；普通input再try原input T至append末提交，queued/busy结果直接返回；首次解析owner不热改属。
 # 函数用途:把用户补充写入当前 owner 的当前任务引导收件箱。
 def _steer_active_request(
     base_agent: object,
@@ -1721,6 +1810,7 @@ def _steer_active_request(
     request_id = _record_id(active)
     target_type = "task" if active.target_kind == "task" else "request"
     turn_id = _active_turn_request_id(active)
+    deadline = _ordinary_input_control_deadline(paths, scope)
     try:
         with gateway_turn_transition(paths, turn_id):
             expected_turn_id = _steer_expected_turn_id(scope)
@@ -1761,6 +1851,7 @@ def _steer_active_request(
                         live_record.target_kind,
                         live_record.linked_request,
                     )
+            scope = bind_gateway_control_scope_owner(base_agent, scope)
             owner_agent = _request_agent_for_scope(base_agent, scope)
             store = owner_agent.conversation_store
             thread_id = _control_thread_id(store, active, scope)
@@ -1786,8 +1877,10 @@ def _steer_active_request(
                             command,
                             scope,
                             thread_id,
-                            turn_id,
+                            turn_id, input_commit=(paths, deadline) if deadline is not None else None,
                         )
+                        if isinstance(entry, ConversationControlResult):
+                            return entry
                         if not _durable_task_is_current(owner_agent, active):
                             winner = _mark_control_guidance_result(store, entry, "rejected")
                             return _control_result_for_guidance_winner(winner, request_id)
@@ -1797,7 +1890,10 @@ def _steer_active_request(
                             return _execution_changed_result("steer", turn_id)
                         entry = _append_control_guidance(
                             store, target_type, request_id, command, scope, thread_id, turn_id,
+                            input_commit=(paths, deadline) if deadline is not None else None,
                         )
+                        if isinstance(entry, ConversationControlResult):
+                            return entry
     except Exception:
         return ConversationControlResult(
             "steer",
@@ -1856,8 +1952,8 @@ def _load_open_exact_turn(
     return payload
 
 
-# LLM: Gateway 控制入口以明确目标和回合写入 guidance；稳定消息 ID 决定幂等路径，联测重复控制请求。
-# 函数用途: 构造补充消息及宿主元数据，写入原插话回执和队列。
+# LLM: 共用纯payload builder保持原scope规范owner/actor/完整正文；普通input显式带同deadline与paths走原T互斥，其他调用保持原append语义。
+# 函数用途: 把补充正文、准确目标及原宿主归属写入同一guidance，供后续收口恢复使用。
 def _append_control_guidance(
     store: object,
     target_type: str,
@@ -1866,28 +1962,16 @@ def _append_control_guidance(
     scope: GatewayControlScope,
     thread_id: str,
     turn_id: str,
+    *,
+    input_commit: tuple[GatewayPaths, float] | None = None,
 ):
+    from .control_guidance_payload import control_guidance_payload
+
     channel_message_id = _steer_channel_message_id(scope)
-    payload = {
-        "target_type": target_type,
-        "target_id": request_id,
-        "message": command.value,
-        "sender": scope.user_id,
-        "priority": "high",
-        "delivery": "current_task" if target_type == "task" else "current_request",
-        "metadata": {
-            "kind": "active_turn_user_input",
-            "record_in_transcript": True,
-            "thread_id": thread_id,
-            "channel": scope.channel,
-            "conversation_id": scope.conversation_id,
-            "channel_message_id": channel_message_id,
-            "expected_turn_id": str(turn_id or "").strip(),
-            "gateway_input_request_id": str(
-                scope.metadata.get("gateway_input_request_id") or ""
-            ).strip(),
-        },
-    }
+    payload = control_guidance_payload(target_type, request_id, command, scope, thread_id, turn_id)
+    if input_commit is not None:
+        paths, deadline = input_commit
+        return _append_ordinary_input_guidance(store, paths, scope, payload, turn_id, deadline)
     if channel_message_id:
         return store.guidance.append_once(
             payload,

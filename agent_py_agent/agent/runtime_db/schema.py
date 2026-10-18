@@ -1,3 +1,5 @@
+# LLM: C existing_only不切WAL、不建库且独立零等待连接；普通/read_only/F1连接预算和schema唯一实现保持。
+# 模块用途: 在原SQLite连接入口区分现存库短提交，不增加schema或迁移分支。
 """Owner runtime.db 权威 schema（3.txt A 节主链）。
 
 表关系（A.4 主链 Task→TaskRun→AgentRun tree→AgentAttempt）：
@@ -460,16 +462,19 @@ class RuntimeSchemaMixin:
         for statement in statements:
             conn.execute(statement)
 
-    # LLM: ro 使用标准 SQLite URI 并禁止初始化/WAL 切换；缺失或旧库报错，不在只读查询时偷偷迁移。
+    # LLM: ro和C existing_only都禁初始化/WAL切换；后者mode=rw不建缺库且busy_timeout=0，不在原C短门等SQL锁。
     #   每次真实 connect 才设 PRAGMA；显式请求作用域内工厂跟踪游标，其余保持标准库连接。
     # 函数用途: 打开对应访问模式的物理连接，写模式沿既有 WAL 与外键设置。
     def _runtime_connect(self) -> sqlite3.Connection:
         read_only = getattr(self, "read_only", False)
-        address = self.db_path.resolve().as_uri() + "?mode=ro" if read_only else str(self.db_path)
-        conn = sqlite3.connect(address, timeout=30.0, uri=read_only, factory=sqlite_connection_factory())
+        existing_only = getattr(self, "existing_only", False)
+        mode = "ro" if read_only else "rw"
+        address = self.db_path.resolve().as_uri() + "?mode=" + mode if read_only or existing_only else str(self.db_path)
+        timeout = 0.0 if existing_only else 30.0
+        conn = sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=sqlite_connection_factory())
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000")
-        if not read_only:
+        conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
+        if not read_only and not existing_only:
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
             except sqlite3.OperationalError:
@@ -477,9 +482,17 @@ class RuntimeSchemaMixin:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
-    # LLM: 显式请求作用域才复用空闲连接，不自动提交；transaction() 继续独立新开/关闭，不能改其原子语义。
-    # 函数用途: 借用本库连接，操作结束时丢弃未提交事务。
+    # LLM: 原F1只按path/read_only缓存；新增C existing_only须独立短连接，不能继承或污染原30秒rw预算。
+    #   Count0/read_only及transaction原生命周期保持，不flush旧缓存，不自动提交。
+    # 函数用途: 借用原库连接，C现存库写入结束即关闭，正常请求仍用原F1作用域。
     @contextmanager
     def _runtime_connection(self) -> Iterator[sqlite3.Connection]:
+        if getattr(self, "existing_only", False):
+            conn = self._runtime_connect()
+            try:
+                yield conn
+            finally:
+                conn.close()
+            return
         with scoped_connection(self.db_path, getattr(self, "read_only", False), self._runtime_connect) as conn:
             yield conn

@@ -1,6 +1,6 @@
 # LLM: 后台执行只沿原 claims 领取、续租和结算；领取后重查精确来源，须联测取消、Compact、恢复和来源消费。
 # 不持有 Agent/完整 Store，不消费普通来源或创建执行器；共享心跳继续使用 run_claim.py。
-# 模块用途: 领取一个后台执行车道，在模型执行前重查状态，并按本次真实结果释放精确租约。
+# 模块用途: 领取原后台车道并重查状态；actual未结保原claim，其它结果沿原精确结算，不新造执行状态。
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -9,10 +9,16 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.errors import (
     is_provider_environment_fault,
     is_provider_transient_error,
 )
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..concurrency.interrupt import is_interrupted, register_interruptible
 from ..settings.thread_model_selection import is_model_configuration_unavailable
 from .background_execution import BackgroundCapacityDeferred, BackgroundCompactSliceYield
@@ -203,7 +209,9 @@ def run_claimed(
 
 
 # LLM: 领取后登记唯一 claim 中断名，旧控制不能打到同任务的新片；保留外层旧任务名与 stop→facts→finish 顺序。
-# 函数用途: 运行后台工作片，按准确租约接受中断、续租和保存结果，不把取消或压缩让出写成失败。
+# LLM: unsettled仅控制本栈finally，不是第二状态源；四actual原对象上抛且不finish原tuple，普通/取消语义不变。
+# LLM: 只延长原claim binding到finally，interrupt注册范围不变；原BG输入finish在still-live source里提交，不提前closing Gateway。
+# 函数用途: 运行原后台片并停止心跳，未结保claim，正常/取消/让出才按原结果结算。
 def run_with_heartbeat(
     dependencies: BackgroundClaimDependencies,
     claim_id: str,
@@ -221,32 +229,36 @@ def run_with_heartbeat(
     attempt_status = WAKE_CLAIM_FINISHED
     error: BaseException | None = None
     admission = ""
-    try:
-        with (
-            register_interruptible(conversation_claim_interrupt_name(claim_id)),
-            bind_claim_execution(ClaimExecutionBinding(dependencies.claims, kwargs["thread_id"], claim_id, claim_scope_id)),
-        ):
-            if is_interrupted():
-                raise InterruptedError("后台工作片已被中断")
-            return _run_once_with_bound_turn_check(dependencies, kwargs)
-    except InterruptedError:
-        # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。
-        status, attempt_status = "cancelled", WAKE_CLAIM_CANCELLED
-        return None
-    except BackgroundCompactSliceYield:
-        # 本片让出不消费原 wake/observation/policy，下片沿 canonical checkpoint 继续。
-        attempt_status = WAKE_CLAIM_YIELDED
-        return None
-    except BackgroundCapacityDeferred:
-        attempt_status, admission = WAKE_CLAIM_NOT_EXECUTED, "im_subagent_capacity"
-        return None
-    except BaseException as exc:
-        status = "failed"
-        error = exc
-        raise
-    finally:
-        heartbeat.stop()
-        _finish_slice(dependencies, kwargs, (claim_id, claim_scope_id), _SliceEnd(status, attempt_status, error, admission))
+    unsettled = False
+    with bind_claim_execution(ClaimExecutionBinding(dependencies.claims, kwargs["thread_id"], claim_id, claim_scope_id)):
+        try:
+            with register_interruptible(conversation_claim_interrupt_name(claim_id)):
+                if is_interrupted():
+                    raise InterruptedError("后台工作片已被中断")
+                return _run_once_with_bound_turn_check(dependencies, kwargs)
+        except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+            unsettled = True
+            raise
+        except InterruptedError:
+            # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。
+            status, attempt_status = "cancelled", WAKE_CLAIM_CANCELLED
+            return None
+        except BackgroundCompactSliceYield:
+            # 本片让出不消费原 wake/observation/policy，下片沿 canonical checkpoint 继续。
+            attempt_status = WAKE_CLAIM_YIELDED
+            return None
+        except BackgroundCapacityDeferred:
+            attempt_status, admission = WAKE_CLAIM_NOT_EXECUTED, "im_subagent_capacity"
+            return None
+        except BaseException as exc:
+            status = "failed"
+            error = exc
+            raise
+        finally:
+            heartbeat.stop()
+            if not unsettled:
+                _finish_slice(dependencies, kwargs, (claim_id, claim_scope_id), _SliceEnd(status, attempt_status, error, admission))
 
 
 # LLM: 只在准入码属于 _SOURCE_FINISHED_ADMISSIONS 时调用 retire_source（与 terminal_task_link 同一条结案路径，不另起 mark_handled）；
@@ -363,13 +375,15 @@ class _SliceEnd:
 
 # LLM: 结算顺序保持：先写 claim 结果（唯一持久结算），普通失败再计入策略失败账，非异常结束（完成/取消/让出）才回调尝试观察者；
 #   异常结束的尝试由调用方（唤醒车道的记账）拿异常自己记。claim 是 (claim_id, claim_scope_id)。副作用：写 claim 账、策略失败账。
-# 函数用途: 一片后台工作结束时写认领结果、记策略失败并告知尝试观察者。
+# LLM: 有actual BG输入句柄才沿原finish updater完整CAS及固定输入收口；Count0直接原finish，部分失败不伪称后继完成。
+# 函数用途: 一片后台工作结束时写认领结果、结原输入并按旧顺序记策略与通知。
 def _finish_slice(
     dependencies: BackgroundClaimDependencies, kwargs: dict, claim: tuple[str, str], end: _SliceEnd,
 ) -> None:
     claim_id, claim_scope_id = claim
-    dependencies.claims.finish(
-        {
+    from ..gateway_parts.multiprocess_background_input import finish_background_claim_inputs
+
+    request = {
             "thread_id": kwargs["thread_id"],
             "claim_scope_id": claim_scope_id,
             "claim_id": claim_id,
@@ -379,7 +393,7 @@ def _finish_slice(
             "runtime_facts": dependencies.runtime_facts(),
             "now": now(),
         }
-    )
+    finish_background_claim_inputs(dependencies.claims, request)
     if end.status == "failed" and end.error is not None and _counts_as_policy_failure(end.error):
         dependencies.record_policy_failure(kwargs)
     if end.status != "failed":

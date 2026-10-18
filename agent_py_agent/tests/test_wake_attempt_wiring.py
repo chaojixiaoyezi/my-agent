@@ -188,10 +188,24 @@ def test_ready_scan_agrees_with_the_skip_stage(tmp_path, monkeypatch) -> None:
     assert chain.threads["B"] in chain.scheduler.ready_thread_ids(now=due + 1)
 
 
-# 函数用途: 一个已经退出的子进程的身份（本机、pid 已死），用来伪造"上次在途的进程已死"。
+# LLM: 必须在真实子进程仍活且等stdin时采原完整出生身份，再正常退出；缺出生不能当作已死。同步检查与finally回收只涉及本测试子进程。
+# 函数用途: 取得一个已确认正常退出的完整进程身份，让原唤醒死亡恢复测试真正命中abandoned主链。
 def _dead_process_identity() -> dict:
-    child = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, check=True)
-    return build_process_identity(int(child.stdout.strip()))
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"], stdin=subprocess.PIPE)
+    try:
+        assert child.poll() is None
+        identity = build_process_identity(child.pid)
+        assert identity["start_time"] is not None and identity["start_time"] != ""
+        assert child.poll() is None
+        child.communicate(input=b"x", timeout=10)
+        assert child.returncode == 0
+        return identity
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+        if child.stdin is not None:
+            child.stdin.close()
 
 
 # 函数用途: 把这条唤醒的尝试账改成"有一次在途尝试，属于已死进程"（可带停机标记）。

@@ -1,4 +1,4 @@
-# LLM: 用户插话与直属孩子事件在安全点注入；按 canonical 身份隔离，窗口事实复用中性合同。
+# LLM: 用户插话与直属孩子事件在安全点注入；已注入ID共用conversation领域唯一实现，canonical隔离和原ACK合同保持。
 # 模块用途: 交付新消息和孩子的结构化交接，统一查询未确认投递并在模型接受后确认，不解析正文决定调度。
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from ...conversation.authority import (
     CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR,
     CONVERSATION_SESSION_TASK_ID_ATTR,
 )
+from ...conversation.guidance_injection import guidance_not_yet_injected, remember_injected_guidance
 from ...conversation.models import SUBAGENT_LIFECYCLE_WAKE_REASONS, WakeSignal
 from ...conversation.process_events import PROCESS_COMPLETION_REASON, reconcile_process_completions
 from ...conversation.session_messaging import (
@@ -160,10 +161,15 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
     )
 
 
-# LLM: 用户插话与父级事件沿原安全点注入；递归父级仅更新自己的直属快照，不领取根邮箱。
+# LLM: 原opaque运输source在实际安全点drain；短锁忙在事务外同deadline重试，不重发模型，typed/unknown不吞；仅真实消费轮追加，随后仍原reserve/submit/ACK，递归父级不领取根邮箱。
 # 函数用途: 给下一模型轮带入新消息与孩子结果，避免孙代理完成时仍按旧快照收尾。
 def inject_pending_turn_input(agent: object, params: object, *, now: float | None = None) -> bool:
     """Inject user steering and structured task events at one model safe point."""
+    pending_source = getattr(params, "pending_turn_input_source", None)
+    if pending_source is not None and getattr(params, "consume_pending_turn_input", True) is not False:
+        from ...conversation.input_resource_retry import run_input_safe_point
+
+        run_input_safe_point(pending_source, agent, 'drain', params)
     guidance_injected = inject_pending_guidance(agent, params, now=now)
     if _has_unseen_direct_child_result(agent, params):
         guidance_injected = refresh_runtime_direct_children_snapshot(agent, params) or guidance_injected
@@ -182,11 +188,17 @@ def inject_pending_turn_input(agent: object, params: object, *, now: float | Non
     return True
 
 
-# LLM: 未读直属结果属于结构化输入变化，不是任务质量判定；这里只读，不消费根或兄弟邮箱。
+# LLM: 先probe原运输再原guidance/直属结果，普通忙在门外有界等待；unknown不能被旧best-effort读口吞成False；无source原Count0零新增IO，不消费根或兄弟邮箱。
 # 函数用途: 孩子在模型响应期间结束时，让父级先吸收结果，避免旧响应漏掉交接。
 def has_pending_turn_input(agent: object, params: object) -> bool:
     """Return whether the active turn has newer user or runtime input."""
-    return has_pending_request_guidance(agent, params) or _has_unseen_direct_child_result(agent, params) or bool(
+    pending_source = getattr(params, "pending_turn_input_source", None)
+    transport_pending = False
+    if pending_source is not None and getattr(params, "consume_pending_turn_input", True) is not False:
+        from ...conversation.input_resource_retry import run_input_safe_point
+
+        transport_pending = run_input_safe_point(pending_source, agent, 'probe', params)
+    return transport_pending or has_pending_request_guidance(agent, params) or _has_unseen_direct_child_result(agent, params) or bool(
         _task_events_not_yet_injected(params, _pending_task_events(agent, params))
     )
 
@@ -561,7 +573,7 @@ def inject_pending_guidance(agent: object, params: object, *, now: float | None 
         return False
     request_id = str(getattr(params, "request_id", "") or "").strip()
     entries, task_id, thread_lookup_error = _pending_guidance_for_current_agent(store, params, limit=20)
-    entries = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
+    entries = guidance_not_yet_injected(params, _dedupe_guidance(entries))
     warning = _render_guidance_lookup_error(thread_lookup_error)
     turn_id = request_id or task_id
     tool_context = getattr(params, "tool_context", None)
@@ -637,7 +649,7 @@ def _inject_claimed_guidance(
             params,
             _guidance_client_message_ids(entries),
         )
-    _remember_injected_guidance(params, entries)
+    remember_injected_guidance(params, entries)
     _queue_guidance_ack(params, entries)
 
 
@@ -651,7 +663,7 @@ def has_pending_request_guidance(agent: object, params: object) -> bool:
         return False
     try:
         entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=1)
-        candidates = _guidance_not_yet_injected(params, _dedupe_guidance(entries))
+        candidates = guidance_not_yet_injected(params, _dedupe_guidance(entries))
         turn_id = request_id or task_id
         owning_task_id = session_task_id_for_params(params)
         return any(
@@ -944,32 +956,6 @@ def _task_event_payload(event: WakeSignal) -> dict[str, object]:
             "process_completion",
         ) if key in metadata},
     }
-
-
-def _guidance_not_yet_injected(params: object, entries: list[Any]) -> list[Any]:
-    state = getattr(params, "live_archive_state", None)
-    seen = state.get("_injected_guidance_ids") if isinstance(state, dict) else None
-    seen_ids = seen if isinstance(seen, set) else set()
-    return [
-        entry
-        for entry in entries
-        if str(getattr(entry, "guidance_id", "") or "") not in seen_ids
-    ]
-
-
-def _remember_injected_guidance(params: object, entries: list[Any]) -> None:
-    state = getattr(params, "live_archive_state", None)
-    if not isinstance(state, dict):
-        return
-    seen = state.get("_injected_guidance_ids")
-    if not isinstance(seen, set):
-        seen = set()
-        state["_injected_guidance_ids"] = seen
-    seen.update(
-        str(getattr(entry, "guidance_id", "") or "")
-        for entry in entries
-        if str(getattr(entry, "guidance_id", "") or "")
-    )
 
 
 def _queue_guidance_ack(params: object, entries: list[Any]) -> None:

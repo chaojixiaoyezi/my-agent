@@ -1,3 +1,5 @@
+# LLM: 新existing_only只供真实C原库写入，禁止初始化/迁移；它不借F1普通rw连接，也不成为第二RuntimeDB权威。
+# 模块用途: 在原仓储上选择只读、普通或现存库零等待模式，SQL和默认行为保持。
 # LLM: 执行权与 current CAS 共用原 RuntimeDB；查询可禁止初始化和写入，未启动收口同事务核对无操作，联测 UNKNOWN 与换代。
 #   wakes_need_attention只合并读取候选条件，不能更改或缓存实际到期、领取、回收与取消状态。
 # 模块用途: 保存任务、执行轮和委托关系，以事务领取和收回执行权，并提供不修改原账的结果查询。
@@ -465,17 +467,18 @@ class RuntimeRepository(
 ):
     """单 owner 权威库入口。每个 owner 一个实例（A.1）。"""
 
-    # LLM: 只读调用不初始化或迁移原库，连接层使用 SQLite ro；普通运行仍沿既有初始化顺序。
+    # LLM: ro与C的existing_only均不初始化/迁移；后者仅原库rw且锁忙立即报错，默认仍原schema/F1顺序。
     # 函数用途: 打开唯一 owner 运行库，管理状态查询不会因读取而建立新账本。
-    def __init__(self, db_path: str | Path, *, instance_id: str = "", read_only: bool = False):
+    def __init__(self, db_path: str | Path, *, instance_id: str = "", read_only: bool = False, existing_only: bool = False):
         self.db_path = Path(db_path)
         self.read_only = read_only
+        self.existing_only = existing_only
         # R1-03：执行权锁 holder 身份（host-pid 实例级，跨进程天然互斥，
         # 同进程多次换代视为同一 worker 续跑——compact/账本续跑轮）。
         # instance_id 可选注入：测试模拟另一进程（同进程多实例 pid 相同，
         # 默认 identity 无法区分）。
         self.instance_id = instance_id or f"{socket.gethostname()}-{os.getpid()}"
-        if not read_only:
+        if not read_only and not existing_only:
             self._init_runtime_schema()
 
     # ------------------------------------------------------------------ 事务
@@ -1840,16 +1843,22 @@ class RuntimeRepository(
             str(lock["start_token"] or ""),
         )
 
+    # LLM: 只读原run唯一exec scope原行，不按TTL判死、不转换状态或授予释放/恢复；所有caller共享原连接与scope规范。
+    # 函数用途: 为精确attempt核收读取原执行锁事实，区分旧锁与合法更高代新锁。
+    def get_agent_run_exec_lock(self, agent_run_id: str) -> sqlite3.Row | None:
+        with self._runtime_connection() as conn:
+            return conn.execute("SELECT * FROM resource_locks WHERE canonical_scope = ?",
+                                (exec_lock_scope(agent_run_id),)).fetchone()
+
+    # LLM: 活死判据仍原_lock_is_takeoverable和原now；与只读事实getter共用唯一读法，不改变异常或恢复权限。
+    # 函数用途: 查询原run是否仍有活执行锁，缺锁返回False，读取失败仍交原调用者。
     def has_active_exec_lock(self, agent_run_id: str, *, now: float | None = None) -> bool:
         """R1-03 驱动链 lease 感知：run 是否被活跃执行权锁持有。
 
         活跃 = 锁存在且持主仍存活/无法证死 → worker 在跑，
         发现层不得重复催。判定与 create_attempt 同一把尺（_lock_is_takeoverable）。
         """
-        lock = self._runtime_connect().execute(
-            "SELECT * FROM resource_locks WHERE canonical_scope = ?",
-            (exec_lock_scope(agent_run_id),),
-        ).fetchone()
+        lock = self.get_agent_run_exec_lock(agent_run_id)
         if lock is None:
             return False
         return not self._lock_is_takeoverable(

@@ -1,5 +1,5 @@
-# LLM: 版本账本整批提交，失败仅回收私有暂存；不能截断已发布账本或覆盖并发外部写入。
-# 模块用途: 原子发布人格版本记录并保留可恢复的事务边界。
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 模块用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
 """Persona版本账本的整批发布；失败只丢弃私有暂存，不截断正式账本。"""
 import os
 import stat
@@ -7,9 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .persona_storage_io import (
+    _PERSONA_NATIVE_ERRORS,
+    append_encoded_version_records,
+    encode_version_records,
     make_private_directory,
     open_file,
     parent_directory,
+    persona_io,
     remove_private,
     temporary_directory,
     transfer,
@@ -30,29 +34,37 @@ class _PublicationState:
     published: bool = False
 
 
-# LLM: 所有合作写者沿用versions路径锁；发布后退出异常保留提交事实，正式账本从不回滚截断。
-# 函数用途: 把一批版本先写完整，再核对原账本身份与字节后一次发布。
-def append_persona_versions(path: Path, records: list[dict], append_records, *, validate) -> None:
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def append_persona_versions(path: Path, records: list[dict], append_records, *, validate, coordinator_io=False) -> None:
     state = _PublicationState()
     try:
-        with versions_lock(path), temporary_directory(
+        with versions_lock(path, **({} if not coordinator_io else {'coordinator_io': True})), temporary_directory(
             prefix='.persona-ledger-', dir=path.parent, ignore_cleanup_errors=True,
+            **({} if not coordinator_io else {'coordinator_io': True}),
         ) as directory:
             before = _ledger_image(path)
             stage = Path(directory) / 'versions.jsonl'
-            _stage_versions(stage, before, records, append_records)
+            _stage_versions(stage, before, records, append_records, **({} if not coordinator_io else {'coordinator_io': True}))
             validate()
             _require_ledger_image(path, before)
-            _publish_ledger(stage, path, before, state)
+            _publish_ledger(stage, path, before, state, **({} if not coordinator_io else {'coordinator_io': True}))
     except Exception as error:
+        if coordinator_io and isinstance(error, _PERSONA_NATIVE_ERRORS):
+            raise
         if state.published:
             raise PersonaLedgerPublishedError('PERSONA_LEDGER_COMMITTED_CLEANUP_PENDING') from error
         raise
 
 
-# LLM: 临时目录私有且名称不复用；调用旧追加器以保留格式，所有可能失败的写入在正式发布之前。
-# 函数用途: 完成并刷盘整批账本，任何半写都只留在临时目录。
-def _stage_versions(stage, before, records, append_records) -> None:
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def _stage_versions(stage, before, records, append_records, *, coordinator_io=False) -> None:
+    if coordinator_io:
+        body = encode_version_records(records)
+        persona_io(lambda: _stage_preimage(stage, before), coordinator_io=True)
+        persona_io(lambda: append_encoded_version_records(stage, body), coordinator_io=True)
+        return persona_io(lambda: _sync_stage(stage), coordinator_io=True)
     fd = open_file(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     with os.fdopen(fd, 'wb') as handle:
         handle.write(before[1] if before is not None else b'')
@@ -94,14 +106,24 @@ def _identity(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-# LLM: 发布仅排他link，旧公开账本先捕获而不销毁；提交后任一错误必须保留正文和版本引用。
-# 函数用途: 避免检查到replace窗口覆盖外部记录，并区分提交与清理阶段。
-def _publish_ledger(stage, path, before, state):
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def _publish_ledger(stage, path, before, state, *, coordinator_io=False):
+    if coordinator_io:
+        return persona_io(lambda: _publish_ledger_current(stage, path, before, state, coordinator_io=True), coordinator_io=True)
+    return _publish_ledger_current(stage, path, before, state)
+
+
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def _publish_ledger_current(stage, path, before, state, *, coordinator_io=False):
     captured = _capture_ledger(path, before)
     try:
         transfer(stage, path)
         state.published = True
-    except OSError:
+    except OSError as error:
+        if coordinator_io and isinstance(error, _PERSONA_NATIVE_ERRORS):
+            raise
         _restore_ledger(path, captured)
         raise
     try:
@@ -111,6 +133,8 @@ def _publish_ledger(stage, path, before, state):
         with parent_directory(path) as descriptor:
             os.fsync(descriptor)
     except Exception as error:
+        if coordinator_io and isinstance(error, _PERSONA_NATIVE_ERRORS):
+            raise
         raise PersonaLedgerPublishedError('PERSONA_LEDGER_COMMITTED_CLEANUP_PENDING') from error
 
 
@@ -153,10 +177,10 @@ def _require_ledger_image(path, before):
         raise OSError('PERSONA_LEDGER_CHANGED: refusing to replace changed ledger')
 
 
-# LLM: 与发布共用锁读取实际旧账本；配额增量须同时覆盖新记录和保留在恢复区的旧文件。
-# 函数用途: 计算一次账本替换额外保留的字节，不把恢复文件当成免费空间。
-def retained_ledger_bytes(path: Path) -> int:
-    with versions_lock(path):
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def retained_ledger_bytes(path: Path, *, coordinator_io=False) -> int:
+    with versions_lock(path, **({} if not coordinator_io else {"coordinator_io": True})):
         before = _ledger_image(path)
         return len(before[1]) if before is not None else 0
 
@@ -191,3 +215,18 @@ def read_version_records(path):
     image = _ledger_image(path)
     frozen = _VersionReadImage(path, None if image is None else image[1])
     return read_jsonl_objects_report(frozen, context='persona_repository.history').records
+
+
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def _stage_preimage(stage, before):
+    fd = open_file(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(before[1] if before is not None else b'')
+
+
+# LLM: C编码在Root外，固定stage叶与完整capture/link事务入原门，发布后native同对象穿出；普通published错误合同保留，O(N)本地读取不称恒短。
+# 函数用途: 按原完整前像排他发布版本账本，保留提交事实和恢复材料。
+def _sync_stage(stage):
+    with os.fdopen(open_file(stage, os.O_RDONLY), 'rb') as handle:
+        os.fsync(handle.fileno())

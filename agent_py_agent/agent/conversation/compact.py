@@ -1,6 +1,6 @@
 # LLM: 单一会话压缩链保持原文、证据、尾部、检查点和游标分离；独立请求负责结算模型用量，失败形状不含正文且不改变收口。
 # 同片展示只经宿主冻结面进入摘要；完整恢复projector（若提供）是候选计量来源，其材料仅在原CAS成功后返回。
-# 联合候选绑定消息及工具分区，须同时满足输入触发线和已知输出预留；取消不提交、不计熔断。
+# 联合候选绑定消息及工具分区，须满足原输入/输出门；备份收缩只用完整同源重测裁决，不以局部相减跳测；取消不提交、不计熔断。
 # 人格缓存面只绑定本次已提交线程，不使用候选代次；与普通提示冻结共享唯一快照。
 # 模块用途: 复用可容纳主前缀，必超预算时先释放优化再沿原分段恢复；完整原文和 checkpoint/CAS 保持权威。
 
@@ -1164,10 +1164,10 @@ def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summar
     return _MeasuredSummary(summary, projection, tokens)
 
 
-# LLM: 原话备份是非权威补充，只能占用恢复目标以内的空间：候选超出目标时按超出量缩小备份（最小只剩标题、编号与
-#   回查说明）并重新计量一次，变小才采用。备份已是最小段，或缩到最小仍不低于上限（超限来自别的内容、候选照样被拒）时不重算。
+# LLM: 原话备份是非权威补充：候选超目标时按超出量缩小备份（最小只剩标题、编号与
+#   回查说明）并重新计量一次，变小才采用。只有备份已是最小段才不重算；局部备份token不能证明完整投影不可行。
 #   小窗口里整段备份可能把候选顶在上限边缘，压缩刚提交下一轮又要压缩；收缩换回余量，也免去候选被拒后再换切分、
-#   多一次摘要请求。语义摘要与机械回退正文不动，不发模型请求。
+#   多一次摘要请求。保同projector/冻结校准与原完整接受门、取消/CAS；语义摘要与机械trailing不动，不发模型请求。
 # 函数用途: 候选超出恢复目标时收缩原话备份，避免备份把压缩结果挤出目标或容量线。
 def _fit_landmarks_to_target(
     limits: _CandidateLimits,
@@ -1179,7 +1179,7 @@ def _fit_landmarks_to_target(
     if rebuild is None or measured.tokens <= limits.target:
         return measured
     minimum = rebuild.minimum_tokens()
-    if rebuild.used_tokens <= minimum or measured.tokens - rebuild.used_tokens + minimum >= limits.ceiling:
+    if rebuild.used_tokens <= minimum:
         return measured
     smaller = remeasure(rebuild.render(rebuild.used_tokens - (measured.tokens - limits.target)))
     return smaller if smaller.tokens < measured.tokens else measured

@@ -1,3 +1,4 @@
+# LLM: C仅存IO策略，原lesson/HOT验证/锁/预算/排序/渲染门外；正文→routing与HOT→demote逐原末写保partial。
 from __future__ import annotations
 
 """正式 lesson、确定性 routing index 与短小 HOT 的唯一正文仓库。"""
@@ -15,8 +16,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
+from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import jsonl_lines, locked_json_path, write_private_text_file_atomic_unlocked
 from ..common.nofollow_fs import ensure_private_dir
+from ..common.owner_write_errors import (
+    LocalControlCoordinatorUnavailable,
+    OwnerManagementIngressUnavailable,
+)
 from .candidate_models import MemoryCandidate, utc_now_iso
 from .security import scan_memory_content
 
@@ -94,15 +101,24 @@ class HotRuleRecord:
 # LLM: Repository 只接受 approved Candidate；模型和 subagent 都不能直接写 lesson 文件。lesson 正文与带正文摘录的 INDEX.md
 #   都走私有原子写（0600，目录 0700），已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # 类用途: 管理 lesson 文件及其确定性 routing/INDEX.md。
+# LLM: C只保存IO策略，正文与routing仍同原权威文件；原审查/证据/幂等和partial不可绕过。
+# 类用途: 管理原正式lesson和派生routing，C写口不新建业务入口。
 class LessonRepository:
     # LLM: 构造器绑定唯一 lesson 正文目录与派生 routing index，不扫描 long-term lesson。
     # 函数用途: 初始化正式 lesson 仓库和索引落点。
-    def __init__(self, lessons_dir: str | Path, routing_index_path: str | Path) -> None:
+    # LLM: 默认原ensure顺序；C两准确目录出生消费原scope，无source/callback字段。
+    # 函数用途: 绑定原lesson/routing路径并按原顺序准备目录。
+    def __init__(self, lessons_dir: str | Path, routing_index_path: str | Path, *, coordinator_io: bool = False) -> None:
+        self.coordinator_io = coordinator_io
         self.lessons_dir = Path(lessons_dir)
         self.routing_index_path = Path(routing_index_path)
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
-        ensure_private_dir(self.lessons_dir)
-        ensure_private_dir(self.routing_index_path.parent)
+        if self.coordinator_io:
+            _coordinator_lesson_write(lambda: ensure_private_dir(self.lessons_dir))
+            _coordinator_lesson_write(lambda: ensure_private_dir(self.routing_index_path.parent))
+        else:
+            ensure_private_dir(self.lessons_dir)
+            ensure_private_dir(self.routing_index_path.parent)
 
     # LLM: 兼容既有调用方只取正式记录；权限、幂等及写入事实仍由同一锁内实现裁决。
     # 函数用途: 创建或复用一个正式lesson并重建派生索引。
@@ -111,6 +127,8 @@ class LessonRepository:
 
     # LLM: lesson目标锁内记录实际创建事实；派生routing重建不是正式正文变更，供Promotion准确投影。
     # 函数用途: 返回lesson和本轮是否真正创建，避免重试虚增提交。
+    # LLM: C仅原锁FD和已render正文末写入门，原validate/read/collision/routing在外；正文已成功不洗后继失败。
+    # 函数用途: 正式晋升或复用lesson，再沿原链重建routing。
     def promote_with_receipt(
         self,
         candidate: MemoryCandidate,
@@ -140,12 +158,12 @@ class LessonRepository:
             updated_at=now,
             path=f"memory/lessons/{filename}",
         )
-        with locked_json_path(path):
+        with locked_json_path(path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_lesson_write})):
             changed = not path.exists()
             if not changed:
                 record = _read_lesson(path)
             else:
-                write_private_text_file_atomic_unlocked(path, _render_lesson(record))
+                _write_lesson_text(path, _render_lesson(record), **({} if not self.coordinator_io else {"coordinator_io": True}))
             if record.candidate_id != candidate.candidate_id:
                 raise RuntimeError("lesson path collision")
         _rebuild_committed_lesson_routing(self, record, changed)
@@ -184,23 +202,33 @@ class LessonRepository:
 
     # LLM: routing 完全由 lesson metadata 确定性重建，模型不能重写索引全文。索引含正文摘录（topic），按私有原子写。
     # 函数用途: 以仅本人可读写的权限更新 memory/routing/INDEX.md。
+    # LLM: 原list/render在Root外，C准确routing锁出生与现成text末写入门，普通错误仍由原caller转pending。
+    # 函数用途: 从原lesson事实确定性重建同一个routing文件。
     def rebuild_routing_index(self) -> Path:
         text = _render_routing_index(self.list())
-        with locked_json_path(self.routing_index_path):
-            write_private_text_file_atomic_unlocked(self.routing_index_path, text)
+        with locked_json_path(self.routing_index_path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_lesson_write})):
+            _write_lesson_text(self.routing_index_path, text, **({} if not self.coordinator_io else {"coordinator_io": True}))
         return self.routing_index_path
 
 
 # LLM: HOT 只能引用 LessonRepository 中已存在的 active lesson，不能从一次候选直接抄入。HOT 文件装规则正文，晋升与降级重写都走
 #   私有原子写（0600，目录 0700），已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # 类用途: 管理 memory-hot.md 中的少量短规则。
+# LLM: C只保存IO策略，原HOT预算/排序/首次写与第二demote都保持，各固定末写单独末核。
+# 类用途: 管理原HOT文件，不跳过原降级治理。
 class HotRuleRepository:
     # LLM: 构造器只绑定正式 HOT 文件；legacy 自由文本由 migration 处理而非运行时兼容。
     # 函数用途: 初始化当前 owner 的高频短规则仓库。
-    def __init__(self, path: str | Path) -> None:
+    # LLM: 默认原目录初始化；C只将准确目录出生交当前scope，不缓存来源。
+    # 函数用途: 绑定原HOT路径和可选本地IO策略。
+    def __init__(self, path: str | Path, *, coordinator_io: bool = False) -> None:
+        self.coordinator_io = coordinator_io
         self.path = Path(path)
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
-        ensure_private_dir(self.path.parent)
+        if self.coordinator_io:
+            _coordinator_lesson_write(lambda: ensure_private_dir(self.path.parent))
+        else:
+            ensure_private_dir(self.path.parent)
 
     # LLM: 旧接口只返回记录，写入门槛与真实副作用事实全部委托同一实现。
     # 函数用途: 兼容调用者把短规则绑定到正式lesson。
@@ -209,6 +237,8 @@ class HotRuleRepository:
 
     # LLM: HOT锁内识别幂等复用，返回真实写入事实；不用锁外exists或候选状态猜测副作用。
     # 函数用途: 返回短规则以及本轮是否改写了正式HOT。
+    # LLM: C不把原排序/预算包Root；HOT首次正文写与demote第二写分别核源，第二失败保第一次真实事实。
+    # 函数用途: 晋升原HOT并执行原超预算降级，不假报整段原子成功。
     def promote_with_receipt(
         self,
         candidate: MemoryCandidate,
@@ -229,15 +259,15 @@ class HotRuleRepository:
             evidence_groups=tuple(sorted(_evidence_groups(candidate))),
             promoted_at=utc_now_iso(),
         )
-        with locked_json_path(self.path):
+        with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_lesson_write})):
             existing = _read_hot_records(self.path)
             prior = next((item for item in existing if item.hot_id == hot_id), None)
             if prior is not None and (prior.candidate_id != candidate.candidate_id or prior.rule != record.rule):
                 raise RuntimeError("HOT id collision")
             if prior is not None:
                 return prior, False
-            write_private_text_file_atomic_unlocked(self.path, _render_hot([*existing, record]))
-            demoted = _demote_hot_excess_unlocked(self.path)
+            _write_lesson_text(self.path, _render_hot([*existing, record]), **({} if not self.coordinator_io else {"coordinator_io": True}))
+            demoted = _demote_hot_excess_unlocked(self.path, **({} if not self.coordinator_io else {"coordinator_io": True}))
         if demoted:
             logger.warning(
                 "HOT budget exceeded: demoted %d cold rule(s) back to lessons: %s",
@@ -253,9 +283,11 @@ class HotRuleRepository:
 
     # LLM: 降级是数据治理而非删除——lesson 正文与路由索引不变，失去的只是"每轮全量注入"资格。
     # 函数用途: 返回被降级的冷 HOT 记录（超预算时按活跃度从低到高移除）。
+    # LLM: C锁等待/读/预算/排序仍Root外，原降级条件不变，仅准确FD与末写入门。
+    # 函数用途: 按原预算移出冷HOT记录，lesson本体保持。
     def demote_cold_rules(self) -> list[HotRuleRecord]:
-        with locked_json_path(self.path):
-            return _demote_hot_excess_unlocked(self.path)
+        with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_lesson_write})):
+            return _demote_hot_excess_unlocked(self.path, **({} if not self.coordinator_io else {"coordinator_io": True}))
 
 
 # LLM: lesson 候选必须是 approved 且落点为 lesson，拒绝将长期事实换个文件名写入。
@@ -523,7 +555,9 @@ def hot_records_within_budget(
 
 # LLM: 只降级冷记录；同一批都超预算时逐条让位直到回到预算内，绝不整批清空。重写按私有原子写（0600）。
 # 函数用途: 写入后检查 HOT 总字符，超预算则按活跃度从低到高移除并重写文件；返回被降级记录。
-def _demote_hot_excess_unlocked(path: Path) -> list[HotRuleRecord]:
+# LLM: 两原caller都透传C策略，原总量/排序/逐条让位/render保持门外，只有最终raw写进门。
+# 函数用途: 保原HOT超额降级和第二次末写，不漏治理副作用。
+def _demote_hot_excess_unlocked(path: Path, *, coordinator_io: bool = False) -> list[HotRuleRecord]:
     existing = _read_hot_records(path)
     total = sum(len(record.rule or "") for record in existing)
     if total <= HOT_MAX_INJECT_CHARS:
@@ -537,7 +571,7 @@ def _demote_hot_excess_unlocked(path: Path) -> list[HotRuleRecord]:
         demoted.append(record)
     if demoted:
         kept = [record for record in existing if record not in demoted]
-        write_private_text_file_atomic_unlocked(path, _render_hot(kept))
+        _write_lesson_text(path, _render_hot(kept), **({} if not coordinator_io else {"coordinator_io": True}))
     return demoted
 
 
@@ -553,8 +587,28 @@ __all__ = [
 
 # LLM: 仅包住正式正文提交后的派生步骤；原验证错误不进入本函数，重试不重写正文。
 # 函数用途: 将routing重建失败与lesson审核门槛不满足明确区分。
+# LLM: 只在C对原scope真实四类bare raise，普通routing异常仍原LessonRoutingPendingError，正文partial保持。
+# 函数用途: 区分真实来源失效与原派生索引待恢复，避免失败后继续付费。
 def _rebuild_committed_lesson_routing(repository, record, changed):
     try:
         repository.rebuild_routing_index()
     except Exception as exc:
+        if getattr(repository, "coordinator_io", False) and isinstance(exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
+                        LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
+            raise
         raise LessonRoutingPendingError(record, changed) from exc
+
+
+# LLM: 调用方已持原目标锁且已完成验证/渲染，默认原writer调用形状；C只提交准确path的现成raw，不传任意业务callback。
+# 函数用途: 将lesson、routing或HOT原正文做一次原子末写，失败保持原partial。
+def _write_lesson_text(path, raw, *, coordinator_io=False):
+    if coordinator_io:
+        return _coordinator_lesson_write(lambda: write_private_text_file_atomic_unlocked(
+            path, raw, replace_once=True))
+    return write_private_text_file_atomic_unlocked(path, raw)
+
+
+# LLM: 每次固定本地写都消费当前原global scope，不储存source/授权或把预算、扫描、锁等待放Root。
+# 函数用途: 为C原lesson/HOT资源的准确出生与raw末写调用原同步门。
+def _coordinator_lesson_write(operation):
+    return execute_global_write(operation, require_scope=True)

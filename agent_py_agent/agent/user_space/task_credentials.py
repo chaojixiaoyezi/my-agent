@@ -1,3 +1,5 @@
+# LLM: 原Agent与显式owner领域服务共用同一卡片RMW/加密/回放，输入生成ID只有原ref+generation算法。
+# 模块用途: 接通冷C的原凭据提交/取消，不扩大群、actor、期限或工具权限。
 # LLM: 凭据唯一存于原owner私密目录；显式group按当前成员和实际填写人择取，task继续原根/监控约束，秘密仅宿主注入。
 # 模块用途: 收集并加密接口凭据，群默认复用和个人任务隔离共用原卡/存储/网络门，不向聊天或模型交明文。
 from __future__ import annotations
@@ -37,10 +39,11 @@ from .task_credential_storage import CredentialInputError, credential_stage, rea
 
 
 # LLM: 只使用已声明 cryptography 实现，缺依赖明确不可用，不自行实现加密或退回明文。
-# 函数用途: 由原 owner 主密钥派生独立用途的加密密钥。
-def _cipher(home):
+# LLM: Count0仍按原create=True读取/初始化同key；C已验原MAC只读既存key，缺失/损坏必须拒绝且不重建，派生公式不变。
+# 函数用途: 由原owner主密钥派生同一加密密钥，C不为已签旧卡新建密钥。
+def _cipher(home, *, existing_only=False):
     from cryptography.fernet import Fernet
-    key = hmac.digest(interaction_key(home, create=True), b'task-credentials.v1', 'sha256')
+    key = hmac.digest(interaction_key(home, create=not existing_only), b'task-credentials.v1', 'sha256')
     return Fernet(base64.urlsafe_b64encode(key))
 
 
@@ -169,7 +172,8 @@ def _persist_credential_request(agent, row, scope, refresh_ref):
                     previous_submitter_actor_id=previous.get('submitter_actor_id', previous['actor_id']),
                     replaces_generation=previous.get('generation', 1))
                 path = credential_path(home, row['credential_ref'])
-            row['input_id'] = row['credential_ref']+':'+str(row['generation'])
+            from .task_credential_replay import credential_input_id
+            row['input_id'] = credential_input_id(row['credential_ref'],row['generation'])
             signed_fields = {key:row[key] for key in ('kind','owner','channel','actor_id','expires_at','credential_ref','scope','generation')}
             signed_fields.update({key:row[key] for key in ('presentation','submitter_policy','access_scope',
                 'replaces_ref','replaces_generation','previous_submitter_actor_id') if key in row})
@@ -345,57 +349,20 @@ def credential_card(row):
 
 # LLM: 上游已MAC/actor/解锁；群共享关闭时不收旧group卡新值但允许取消；同卡同代终态和原期限不变。
 # 函数用途: 接受输入或取消并加密保存；填写与保存后的期限分开，明文仅在首次提交进程内存在。
-def submit_credential_card(agent,payload,body):
-    from ..capability.runtime_config_reload import capability_config_for_agent
-    capability = capability_config_for_agent(agent)
-    if body.get('decision')!='cancel' and (capability is None or not capability.im_task_credentials_enabled):
-        raise ValueError('私人凭据输入未启用')
-    home = agent.home_paths.owner_home_dir
-    path = credential_path(home,payload['credential_ref'])
-    with _credential_mutation(agent,path) as admission:
-        row = read_credential_row(path, stage='submission_read')
-        from .task_credential_forms import credential_submitter
-        from .task_credential_replay import (
-            assert_credential_callback_identity,
-            credential_callback_replay,
-        )
-        assert_credential_callback_identity(row, payload, body)
-        if (body['decision'] != 'cancel' and row.get('access_scope') == 'group'
-                and getattr(capability, 'im_group_shared_credentials_enabled', False) is not True):
-            raise ValueError('本群共享凭据已关闭，请取消原卡')
-        actor = credential_submitter(row, body)
-        if body['decision']=='cancel' and row['status'] not in {'pending','cancelled'}:
-            from .interaction_cancellation import already_handled_result
-            return already_handled_result()
-        if row['status'] != 'pending':
-            publish = False if row['status']=='cancelled' and body['decision']=='cancel' else credential_callback_replay(agent,row,body,actor)
-        else:
-            from ..conversation.input_dependencies import credential_submission_current
-            if body['decision']!='cancel' and (time.time() >= row['expires_at'] or not credential_submission_current(agent, row)):
-                raise ValueError('原任务或卡片已失效')
-            row['submitter_actor_id'] = actor
-            if body['decision']=='cancel':
-                from .interaction_actor_audit import record_interaction_actor
-                row.update(status='cancelled',cancelled_by=record_interaction_actor(agent,payload,decision='cancel',actor=actor))
-            elif body['decision']=='submit':
-                from .task_credential_forms import credential_submission_values
-                value, metadata = credential_submission_values(row, body.get('fields'), credential_origin)
-                row.update(metadata)
-                ttl = credential_seconds(row.get('ttl_seconds'), default=86400, allow_unlimited=True)
-                row.update(status='ready',ciphertext=_cipher(home).encrypt(json.dumps(value).encode()).decode(),
-                           verification_status='unverified', submitted_at=time.time(),ready_expires_at=(time.time()+ttl if ttl else 0))
-            else:
-                raise ValueError('提交动作无效')
-            _save_credential_row(admission,path,row)
-            publish = True
-    from ..conversation.input_dependencies import publish_credential_resolution
-    if row['status']=='cancelled':
-        from .task_credential_forms import retire_credential_input
-        retire_credential_input(agent,row)
-    elif publish:
-        publish_credential_resolution(agent, row)
-    from .interaction_cancellation import credential_cancel_result
-    return credential_cancel_result(row) if row['status']=='cancelled' else {'ok':True,'decision':row['status'],'message':'凭据已安全保存，尚未验证。'}
+# LLM: 原Agent只提供原capability/输入/审计和动态发布hook；算法与C共用，不改变Count0初始化或回放故障接缝。
+# 函数用途: 接受原卡提交，仍沿原库和原Wake恢复。
+def submit_credential_card(agent, payload, body):
+    from ..conversation.input_dependencies import (
+        input_dependency_access,
+        publish_credential_resolution,
+    )
+    from .interaction_actor_audit import record_interaction_actor
+    from .task_credential_forms import retire_credential_input
+    return submit_credential_card_for_owner(agent.home_paths.owner_home_dir, capability_config_for_agent(agent),
+        input_dependency_access(agent), payload, body,
+        audit=lambda actor: record_interaction_actor(agent,payload,decision='cancel',actor=actor),
+        publish=lambda row: publish_credential_resolution(agent,row),
+        retire=lambda row: retire_credential_input(agent,row))
 
 
 # LLM: 私密凭据守原根，group由同群当前成员按实际提供者择取；仅此入口解密，不能把引用作为跨群授权。
@@ -525,3 +492,72 @@ def _assert_credential_unchanged(agent, observed, current, scope):
     if (not tool_approval_scope_is_current(agent, scope)
             or any(observed.get(key) != current.get(key) for key in keys)):
         raise ValueError('凭据或执行已变化，请重新查询后操作')
+
+
+# LLM: 显式资源叶子保原卡RMW/加密/代次/TTL/重放；inputs.perform只运输原C末门，不接受JSON角色或假Agent。
+# 函数用途: 在原卡保存后补原输入投影，失败保部分事实，Count0与C共用一份实现。
+def submit_credential_card_for_owner(home, capability, inputs, payload, body, *, audit, publish=None, retire=None):
+    if body.get('decision') != 'cancel' and (capability is None or not capability.im_task_credentials_enabled):
+        raise ValueError('私人凭据输入未启用')
+    path = credential_path(home,payload['credential_ref'])
+    # LLM: 原quota→卡锁/原身分比较保持，源码/权限变化须在调用本RMW的原C末门拒绝。
+    # 函数用途: 只提交一次原卡状态，不跨门发布Wake。
+    def transition():
+        with inputs.quota.admission(blocking=inputs.blocking) as admission, locked_json_path(path,blocking=inputs.blocking):
+            row = read_credential_row(path,stage='submission_read')
+            from .task_credential_forms import credential_submitter
+            from .task_credential_replay import (
+                assert_credential_callback_identity,
+                credential_callback_replay_for_input,
+            )
+            assert_credential_callback_identity(row,payload,body)
+            if (body['decision'] != 'cancel' and row.get('access_scope') == 'group'
+                    and getattr(capability,'im_group_shared_credentials_enabled',False) is not True):
+                raise ValueError('本群共享凭据已关闭，请取消原卡')
+            from ..conversation.input_dependencies import credential_submission_current_from_access
+            actor = credential_submitter(row,body)
+            if body['decision'] == 'cancel' and row['status'] not in {'pending','cancelled'}:
+                from .interaction_cancellation import already_handled_result
+                return row, False, already_handled_result()
+            if row['status'] != 'pending':
+                should_publish = False if row['status']=='cancelled' and body['decision']=='cancel' else credential_callback_replay_for_input(inputs,row,body,actor)
+            else:
+                if body['decision'] != 'cancel' and (time.time() >= row['expires_at'] or not credential_submission_current_from_access(inputs,row)):
+                    raise ValueError('原任务或卡片已失效')
+                row['submitter_actor_id'] = actor
+                if body['decision'] == 'cancel':
+                    row.update(status='cancelled',cancelled_by=audit(actor))
+                elif body['decision'] == 'submit':
+                    from .task_credential_forms import credential_submission_values
+                    value, metadata = credential_submission_values(row,body.get('fields'),credential_origin)
+                    row.update(metadata)
+                    ttl = credential_seconds(row.get('ttl_seconds'),default=86400,allow_unlimited=True)
+                    # C资源模式仅缩小建钥资格；真实许可已由inputs.perform原末门核准，callback存在不签权。
+                    cipher = _cipher(home) if inputs.commit is None else _cipher(home,existing_only=True)
+                    row.update(status='ready',ciphertext=cipher.encrypt(json.dumps(value).encode()).decode(),
+                        verification_status='unverified',submitted_at=time.time(),ready_expires_at=(time.time()+ttl if ttl else 0))
+                else:
+                    raise ValueError('提交动作无效')
+                _save_credential_row(admission,path,row)
+                should_publish = True
+        return row, should_publish, None
+    row, should_publish, done = inputs.perform(transition)
+    if done is not None:
+        return done
+    if row['status'] == 'cancelled':
+        if retire is None:
+            from .task_credential_forms import retire_credential_input_from_access
+            retire_credential_input_from_access(inputs,row)
+        else:
+            retire(row)
+    elif should_publish:
+        if publish is None:
+            inputs.resolve(row.get('input_id',row['credential_ref']),status=row['status'],result_refs=[row['credential_ref']])
+        else:
+            publish(row)
+    from .interaction_cancellation import credential_cancel_result
+    return credential_cancel_result(row) if row['status']=='cancelled' else {'ok':True,'decision':row['status'],'message':'凭据已安全保存，尚未验证。'}
+
+
+# LLM: current只核原输入的准确owner/scope/ref/provider，调用方仍守MAC与原C每次提交。
+# 函数用途: 判断原凭据行是否仍属于当前输入。

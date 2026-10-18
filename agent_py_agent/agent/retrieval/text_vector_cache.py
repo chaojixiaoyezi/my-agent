@@ -1,3 +1,4 @@
+# LLM: C只接原缓存文件IO策略；keep/合并/编码/锁等待门外，原实例items与错误诊断不作耐久成功凭据。
 # LLM: 缓存是可重建派生数据；读取可降级但清理和写回须完整读成功，跨实例撤回按文件指纹刷新。
 # 模块用途: 缓存正文哈希向量，并在删除失败时保留可追踪的清理错误。
 """正文哈希向量缓存(派生索引,独立文件,绝不写入权威向量库)。
@@ -41,6 +42,13 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
+from ..common.global_write_guard import GlobalWriteInWorkerError
+from ..common.owner_write_errors import (
+    LocalControlCoordinatorUnavailable,
+    OwnerManagementIngressUnavailable,
+)
+
 
 @runtime_checkable
 class EmbeddingIdentity(Protocol):
@@ -51,6 +59,8 @@ class EmbeddingIdentity(Protocol):
 
 # LLM: 缓存只是派生索引，读失败/损坏一律等价于"没有缓存"（退回现嵌），检索结果不因此改变。
 # 类用途: 按正文哈希存取正文向量，与权威 memory_vectors.json 完全分离。
+# LLM: C仅存策略，原items/read_stamp/last_error是同一派生缓存；native拒绝不能当耐久成功，后继get仍按原盘代刷新。
+# 类用途: 复用原正文向量缓存，不用重建新实例规避失败。
 class TextVectorCache:
     """正文哈希 → 向量 的独立缓存文件(JSON,dict 结构)。
 
@@ -64,7 +74,10 @@ class TextVectorCache:
 
     # LLM: 构造保留原宽松读取；get的快照指纹必须独立复核，写入/清理使本实例指纹失效。
     # 函数用途: 建立派生缓存，不把启动快照永久当成磁盘现状。
-    def __init__(self, path: str | Path) -> None:
+    # LLM: 仅增默认False策略，原宽松读取与指纹保持；不保存source或增加后台flush。
+    # 函数用途: 绑定原缓存对象与本地IO策略，读取不授权后续写。
+    def __init__(self, path: str | Path, *, coordinator_io: bool = False) -> None:
+        self.coordinator_io = coordinator_io
         self._path = Path(path).expanduser()
         self._lock = threading.RLock()
         self._read_stamp = None
@@ -126,6 +139,8 @@ class TextVectorCache:
     #   `keep` 判据在**拿到跨进程文件锁之后**才算：ik 在实例锁内算完、落盘之前，别的进程/实例
     #   仍可能删掉事实（P5c）。放进文件锁内才真正把"复核 → 写入"这一段关上。
     # 函数用途: 在跨进程锁内按增量写入/删除，并在锁内复核待写键仍然有效。
+    # LLM: C保原keep/增量合并/no-change与错误诊断；准确FD/目录出生和raw写进门，真实native先同对象穿出不返回成功。
+    # 函数用途: 在原锁内合并本次缓存增量，拒绝不冒充耐久写入。
     def _flush(
         self,
         *,
@@ -139,7 +154,7 @@ class TextVectorCache:
         try:
             from ..common.json_io import locked_json_path
 
-            with locked_json_path(self._path):
+            with locked_json_path(self._path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_cache_write})):
                 if keep is not None:
                     valid = keep()
                     added = {key: vector for key, vector in added.items() if key in valid}
@@ -156,8 +171,11 @@ class TextVectorCache:
                 if on_disk == before:
                     self._items = on_disk
                     return
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                if not _write_atomic_unlocked(self._path, on_disk):
+                if self.coordinator_io:
+                    _coordinator_cache_write(lambda: self._path.parent.mkdir(parents=True, exist_ok=True))
+                else:
+                    self._path.parent.mkdir(parents=True, exist_ok=True)
+                if not _write_atomic_unlocked(self._path, on_disk, **({} if not self.coordinator_io else {"coordinator_io": True})):
                     # 拿到了锁但 rename 失败（如磁盘满）：必须留下错误（W1），否则健康状态看不出来。
                     self.last_write_error = OSError("cache write failed")
                     self._items = on_disk
@@ -167,6 +185,9 @@ class TextVectorCache:
             # 拿不到跨进程锁时**不写盘**：此时磁盘内容不可信，写回会复活别的实例已删的键（X1b）。
             # 只记错误，内存视图仍按本次增量更新，供本轮后续读取使用。
             self.last_write_error = exc
+            if self.coordinator_io and isinstance(exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
+                        LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
+                raise
             for key in removed:
                 self._items.pop(key, None)
             self._items.update(added)
@@ -259,6 +280,8 @@ class TextVectorCache:
 
     # LLM: 回收在文件锁内按磁盘现状重算；原子写返回False必须记入last_write_error，删除恢复不能误报完整。
     # 函数用途: 丢弃磁盘与内存中不满足keep判据的键，并暴露真实落盘故障。
+    # LLM: C回收判据与读/删/编码在Root外；保原items/错误事实，实际来源拒绝不吞成回收0成功。
+    # 函数用途: 从原磁盘快照回收失效键，保持跨实例删除。
     def retain_matching(self, keep_key: Callable[[str], bool]) -> int:
         with self._lock:
             try:
@@ -266,7 +289,7 @@ class TextVectorCache:
 
                 self.last_write_error = None
                 self._read_stamp = None
-                with locked_json_path(self._path):
+                with locked_json_path(self._path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_cache_write})):
                     on_disk = self._load_for_write()
                     dropped = frozenset(key for key in on_disk if not keep_key(key))
                     if not dropped and on_disk == self._items:
@@ -275,10 +298,13 @@ class TextVectorCache:
                         on_disk.pop(key, None)
                     self._items = on_disk
                     if dropped:
-                        _persist_reclaimed(self._path, on_disk)
+                        _persist_reclaimed(self._path, on_disk, **({} if not self.coordinator_io else {"coordinator_io": True}))
                     return len(dropped)
             except Exception as exc:
                 self.last_write_error = exc
+                if self.coordinator_io and isinstance(exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
+                        LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
+                    raise
                 return 0
 
     # LLM: 只读列键也复核同一文件指纹，避免另一个实例删除后诊断仍返回旧向量身份。
@@ -299,11 +325,18 @@ def _content_hash_of(key: str) -> str:
 # LLM: 正文哈希能反推记忆是否存在、向量可近似还原语义，按记忆本体同一规则落盘：替换前临时文件就是 0600、目录 0700
 #   （json_io.write_private_text_file_atomic_unlocked）。调用方负责持锁；失败返回 False，由调用方记 last_write_error。
 # 函数用途: 不加锁地原子写出整份正文哈希缓存，成功返回 True。
-def _write_atomic_unlocked(path: Path, payload: dict[str, list[float]]) -> bool:
+# LLM: C先编码后固定raw末写；普通OSError仍原False，scope四类不是磁盘IO降级，默认原调用保持。
+# 函数用途: 持原锁将完整缓存落盘，不把来源拒绝当普通写失败。
+def _write_atomic_unlocked(path: Path, payload: dict[str, list[float]], *, coordinator_io: bool = False) -> bool:
     from ..common.json_io import write_private_text_file_atomic_unlocked
 
     try:
-        write_private_text_file_atomic_unlocked(path, json.dumps(payload, ensure_ascii=False))
+        if coordinator_io:
+            raw = json.dumps(payload, ensure_ascii=False)
+            _coordinator_cache_write(lambda: write_private_text_file_atomic_unlocked(
+                path, raw, replace_once=True))
+        else:
+            write_private_text_file_atomic_unlocked(path, json.dumps(payload, ensure_ascii=False))
         return True
     except OSError:
         return False
@@ -345,7 +378,18 @@ def index_text(content: str, attributes: object) -> str:
 
 # LLM: 调用方已持缓存文件锁；复用原子写入并把False转换成错误，不隐藏删除清理欠账。
 # 函数用途: 保存回收后的缓存，失败交回retain_matching记录。
-def _persist_reclaimed(path, on_disk) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not _write_atomic_unlocked(path, on_disk):
+# LLM: 原mkdir及raw写各固定末门，普通False仍原OSError；调用方原catch保普通清理诊断。
+# 函数用途: 保存原回收缓存，C撤权不换新来源补写。
+def _persist_reclaimed(path, on_disk, *, coordinator_io=False) -> None:
+    if coordinator_io:
+        _coordinator_cache_write(lambda: path.parent.mkdir(parents=True, exist_ok=True))
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if not _write_atomic_unlocked(path, on_disk, **({} if not coordinator_io else {"coordinator_io": True})):
         raise OSError("cache reclaim write failed")
+
+
+# LLM: 原缓存仅派生事实；当次scope每次重核后执行准确目录/FD出生或准备完的raw叶，绝不包keep/scan/embedding。
+# 函数用途: 把C缓存本地副作用交给真实原同步末门，缺源拒绝而不换实例补写。
+def _coordinator_cache_write(operation):
+    return execute_global_write(operation, require_scope=True)

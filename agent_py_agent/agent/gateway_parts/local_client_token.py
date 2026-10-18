@@ -1,3 +1,5 @@
+# LLM: Gateway运输凭据的no-follow目录锁和原子写保持；ensure两入口先拒W/native，不能混同用户托管cref。
+# 模块用途: 在宿主启动时确保本机客户端凭据，读取和错误状态仍沿原私有秘密合同。
 # LLM: G1 本机客户端凭据的唯一宿主接口；只在缺失时生成，使用共用私有原子写与锁，不导出到日志/env/argv/status。
 #   读取失败只给结构化原因，不回显路径或内容；客户端统一用 load。Full Access 的模型命令可读数据根，G1 不声称挡住它。
 # 模块用途: 持久保存并安全读取本机客户端凭据，让 Gateway 重启不使已运行客户端失效。
@@ -117,7 +119,12 @@ def _check_existing_secret_directory(data_root: str | Path) -> None:
 # LLM: 只由宿主启动调用；固定 secrets 目录锁与所有文件操作都经 no-follow 原语，坏文件/权限错误保留原件并拒绝启动。
 #   目录检查、收紧和原子写入不能沿路径跟随链接；落盘后严读，不能把失败的私有写误当成功。
 # 函数用途: 确保本机客户端凭据存在并返回其值。
+# LLM: 此为Gateway运输凭据而非用户cref；受限执行器先拒，C原no-follow目录锁/原子写/坏文件保留合同保持。
+# 函数用途: 把凭据确保与轮换留在宿主启动入口，拒绝发生在目录锁前。
 def ensure_local_client_credential(data_root: str | Path) -> str:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("local_client_credential")
     try:
         _check_existing_secret_directory(data_root)
         with locked_private_directory(
@@ -134,7 +141,12 @@ def ensure_local_client_credential(data_root: str | Path) -> str:
 
 # LLM: 调用方持受信目录锁；仅 missing 可生成，其它错误不能造成轮换。写入在 data_root 下逐层 no-follow 原子提交。
 # 函数用途: 在原临界区内复用已有凭据，或私有原子写入新凭据。
+# LLM: 即使直接调用原锁内leaf也拒W/native；只missing生成、其余错误不轮换的原合同保持。
+# 函数用途: 防止跳过公开入口私自生成Gateway运输凭据，不更改读取或生成算法。
 def _ensure_credential_locked(data_root: str | Path) -> str:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("local_client_credential")
     try:
         return load_local_client_credential(data_root)
     except LocalClientCredentialError as exc:

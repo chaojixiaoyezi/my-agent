@@ -80,6 +80,10 @@ class _FailingStderr:
 # 函数用途: 用真实 tick/派发/扫描门、假执行池组一个派发者：submit 只记请求编号并置位 stop_event。
 def _stub_dispatcher(paths: GatewayPaths, claims: list[str], stop_event: threading.Event):
     dispatcher = object.__new__(gateway_loops._RequestDispatcher)
+    # 跳过构造器的fixture也保真实本实例Future持有字段，tick不绕过原完成核收。
+    dispatcher._future_gate = threading.Lock()
+    dispatcher._request_futures = {}
+    dispatcher._admission_gate = dispatcher._drain_runtime = dispatcher._drain_group = None
     dispatcher.paths = paths
     dispatcher.limits = rw.AdmissionLimits(user_inflight=4, global_inflight=8)
     dispatcher._scan_gate = rw.GatewayInboxScanGate()

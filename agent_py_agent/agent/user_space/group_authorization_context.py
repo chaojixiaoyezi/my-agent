@@ -1,4 +1,4 @@
-# LLM: 群能力门只组合原 HostChannelActor、实时 provider 事实与 tool_policy；临时持锁载体不保存第二身份或授权账。
+# LLM: 群能力门只组合原 HostChannelActor、实时 provider 事实与 tool_policy；临时持锁载体不保存第二身份或授权账。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
 # 模块用途: 仅为群监控复核额外授权和原锁；普通配置保持原owner/admin门，供应商失败只投影固定诊断。
 from __future__ import annotations
 
@@ -149,10 +149,10 @@ def group_operation_actor(agent, thread_id='', actor=None):
     return actor
 
 
-# LLM: 仅监控查provider/grant；配置租约只核原HostActor和目标身份，不读群授权或取网，不能当作监控权。
+# LLM: 仅监控查provider/grant；配置只核原HostActor/策略锁；C可给原锁FD出生传固定末门，flock等待门外，默认形状与授权不变。
 # 函数用途: 复核监控授权或原配置调用身份，保持撤销CAS及同步锁，不让普通功能要求额外群授权。
 @contextmanager
-def group_capability_guard(agent, capability: str, *, thread_id: str = '', actor=None):
+def group_capability_guard(agent, capability: str, *, thread_id: str = '', actor=None, blocking=True, birth_commit=None):
     home = agent.home_paths
     if not group_authorization_required(home):
         yield
@@ -172,7 +172,10 @@ def group_capability_guard(agent, capability: str, *, thread_id: str = '', actor
         raise GroupAuthorizationError('GROUP_AUTHORIZATION_INVALID')
     snapshot = ((parent.snapshot if parent is not None and parent.snapshot is not None else current_group_authority(agent))
                 if capability in GROUP_CAPABILITIES else None)
-    with nullcontext() if parent is not None else locked_json_path(home.owner_tool_policy_json):
+    lock_options = {} if blocking else {"blocking": False}
+    if birth_commit is not None:
+        lock_options["birth_commit"] = birth_commit
+    with nullcontext() if parent is not None else locked_json_path(home.owner_tool_policy_json, **lock_options):
         if capability in GROUP_CAPABILITIES:
             _data, block = read_group_authorization(home)
             if actual.actor_id not in snapshot.member_ids:

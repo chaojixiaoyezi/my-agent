@@ -157,6 +157,7 @@ def test_request_worker_initialization_error_is_terminalized(tmp_path, monkeypat
     )
 
     dispatcher = object.__new__(gateway_loops._RequestDispatcher)
+    dispatcher._admission_gate = dispatcher._drain_runtime = dispatcher._drain_group = None
     dispatcher.paths = paths
 
     def explode():

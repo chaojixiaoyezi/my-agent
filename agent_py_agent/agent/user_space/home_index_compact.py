@@ -1,3 +1,5 @@
+# LLM: 两遍流式与原四索引/key/锁内tail保持唯一；正C只运输原producer同步提交门，W/受限host不能改共享投影或sidecar。
+# 模块用途: 按key保留最后原字节，长扫描在门外，canonical与sidecar沿同一原C末门推进，Count0原顺序不变。
 """global_index 只追加索引的**内部按 key 压缩**（纯投影，可重建）。
 
 ## 背景
@@ -48,6 +50,35 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+
+
+# LLM: 只拒真实W或受限host，不把C角色、路径或callback当管理员许可；公开共享写入口必须在锁/tmp/文件I/O前调用。
+# 函数用途: 保持默认Count0原调用，并阻止受限执行器直接改全局索引。
+def _require_coordinator_writer():
+    from ..common.global_write_guard import require_global_writer
+    from ..gateway_parts.multiprocess_global_write import GlobalWriteError
+    from ..gateway_parts.multiprocess_mode import current_worker_partition
+
+    if current_worker_partition() is not None:
+        raise GlobalWriteError("coordinator_required", "global_index_compact")
+    require_global_writer("global_index_compact")
+
+
+# LLM: 只认原异常类型，不解析error_code或文本；聚合维护不能把真实未结/缺源/拒写吞成io_error或让后续自动重放。
+# 函数用途: 原样重抛共享写拒绝和四类执行合同错误，普通单文件失败仍沿原隔离行为。
+def _raise_index_contract_error(error):
+    from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+    from ..common.global_write_guard import GlobalWriteInWorkerError
+    from ..common.request_execution_ports import (
+        RequestExecutionContextUnavailable,
+        RequestExecutionOutcomeUncertainError,
+    )
+    from ..common.tool_write_context import ToolWriteContextUnavailable
+    from ..gateway_parts.multiprocess_global_write import GlobalWriteError
+
+    if isinstance(error, (GlobalWriteError, GlobalWriteInWorkerError, RequestExecutionContextUnavailable,
+                          RequestExecutionOutcomeUncertainError, ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError)):
+        raise error
 
 
 # LLM: 临时文件写失败必须被清掉，别在索引目录里留垃圾。
@@ -136,9 +167,10 @@ def load_compact_state(path: str | Path) -> None:
         return
 
 
-# LLM: 写失败静默（派生数据，丢了按无记录处理），但尽量原子替换。
-# 函数用途: 把当前内存里的上次压缩状态写回 sidecar。
+# LLM: sidecar是原派生冷却事实；W/受限host先于I/O拒绝，C调用沿同一次canonical提交门，普通OSError仍保持原尽力语义。
+# 函数用途: 将当前压缩大小和时间原子保存到原sidecar，不为写失败补新账。
 def save_compact_state(path: str | Path) -> None:
+    _require_coordinator_writer()
     from ..common.json_io import write_text_file_atomic_unlocked
 
     target = Path(path)
@@ -316,9 +348,10 @@ def _copy_tail(target: Path, tmp: Path, prefix_len: int) -> None:
             dst.write(chunk)
 
 
-# LLM: 两遍流式压缩，不重新序列化、不读权威源；见模块头的顺序/内存论证。
-# 函数用途: 把一份索引文件压成"每个 key 只留最后一行"，保持读取结果逐条相同。
-def compact_index_file(path: str | Path, *, now: float | None = None) -> IndexCompactResult:
+# LLM: 原两遍/LF/锁内inode与tail算法不变；长扫描在原C门外，callback仅运输唯一提交leaf而不授写权，拒绝只清本次staging并同对象上抛。
+# 函数用途: 压缩一份原索引，沿真实C同步末门提交canonical和sidecar，默认Count0保持原顺序。
+def compact_index_file(path: str | Path, *, now: float | None = None, commit_transition=None) -> IndexCompactResult:
+    _require_coordinator_writer()
     from ..common.json_io import locked_json_path
 
     target = Path(path)
@@ -344,17 +377,22 @@ def compact_index_file(path: str | Path, *, now: float | None = None) -> IndexCo
         return IndexCompactResult(target, False, "identity_changed", before_bytes=prefix_len, bad_lines=bad_lines)
 
     # 锁内会再核一次身份：rebuild 换文件能落在"上面那次核对通过 → 这里拿到锁"之间。
-    after_bytes, failure = _append_tail_and_replace(target, tmp, prefix_len, stat0)
+    # LLM: 同一原producer末门只调用该同步leaf；不保存或运行另一个Context，不把callback视为可重放许可。
+    # 函数用途: 在长扫描完成后提交原尾部、替换及冷却记录。
+    def operation():
+        return _commit_compacted_file(target, tmp, (prefix_len, stat0), now)
+
+    try:
+        after_bytes, failure = operation() if commit_transition is None else commit_transition(operation)
+    except BaseException:
+        _discard(tmp)
+        raise
     if after_bytes is None:
         _discard(tmp)
         return IndexCompactResult(target, False, failure, before_bytes=prefix_len, bad_lines=bad_lines)
 
     dropped = line_count - kept - bad_lines
 
-    current = float(now if now is not None else time.time())
-    _LAST_COMPACT_BYTES[str(target)] = after_bytes
-    _LAST_COMPACT_AT[str(target)] = current
-    save_compact_state(target)
     return IndexCompactResult(
         target,
         compacted=True,
@@ -367,22 +405,37 @@ def compact_index_file(path: str | Path, *, now: float | None = None) -> IndexCo
     )
 
 
-# LLM: 维护入口：只有 should_compact 说 due 才真压；异常不中断维护循环。
-# 函数用途: 对一份索引按阈值/冷却决定是否压缩，并返回结果。
-def compact_index_if_due(path: str | Path, *, now: float | None = None) -> IndexCompactResult:
+# LLM: 原锁内inode/tail/rename不改；canonical成功后才取时钟、更新原内存与sidecar，均在调用方同一C末门内，不能跨撤权窗口。
+# 函数用途: 完成一次短提交，保留main原Count0写入顺序和派生冷却语义。
+def _commit_compacted_file(target, tmp, source, now):
+    prefix_len, stat0 = source
+    after_bytes, failure = _append_tail_and_replace(target, tmp, prefix_len, stat0)
+    if after_bytes is not None:
+        current = float(now if now is not None else time.time())
+        _LAST_COMPACT_BYTES[str(target)] = after_bytes
+        _LAST_COMPACT_AT[str(target)] = current
+        save_compact_state(target)
+    return after_bytes, failure
+
+
+# LLM: 共享入口先拒受限执行器；原should_compact只负责大小/增长/冷却，不能成为写许可，真实typed不改成IO失败。
+# 函数用途: 对原到期索引透传同一次C提交门，普通OSError仍返回原结构化结果。
+def compact_index_if_due(path: str | Path, *, now: float | None = None, commit_transition=None) -> IndexCompactResult:
+    _require_coordinator_writer()
     reason = should_compact(path, now=now)
     if reason != "due":
         return IndexCompactResult(Path(path), False, reason)
     try:
-        return compact_index_file(path, now=now)
+        options = {} if commit_transition is None else {"commit_transition": commit_transition}
+        return compact_index_file(path, now=now, **options)
     except OSError:
         return IndexCompactResult(Path(path), False, "io_error")
 
 
-# LLM: 维护循环只调这一个入口；它遍历四份 global_index，按各自的阈值/冷却决定是否压缩。
-#   单份失败不中断其余（异常只记在结果里），绝不影响 retention 主流程。
-# 函数用途: 对 owner home 的四份 global_index 做"该压就压"，返回结构化结果列表。
-def compact_global_indexes_if_due(home: object, *, now: float | None = None) -> list[IndexCompactResult]:
+# LLM: 原四索引顺序/逐文件IO隔离保持；共享拒门在聚合catch前，五类实际合同及受限host拒绝原样上抛，不能当派生IO失败洗掉责任。
+# 函数用途: 按原阈值和冷却处理四份共享索引，透传真实C同步提交来源。
+def compact_global_indexes_if_due(home: object, *, now: float | None = None, commit_transition=None) -> list[IndexCompactResult]:
+    _require_coordinator_writer()
     results: list[IndexCompactResult] = []
     for attr in (
         "global_index_owners_jsonl",
@@ -394,8 +447,10 @@ def compact_global_indexes_if_due(home: object, *, now: float | None = None) -> 
         if target is None:
             continue
         try:
-            results.append(compact_index_if_due(target, now=now))
-        except Exception:
+            options = {} if commit_transition is None else {"commit_transition": commit_transition}
+            results.append(compact_index_if_due(target, now=now, **options))
+        except Exception as error:
+            _raise_index_contract_error(error)
             results.append(IndexCompactResult(Path(target), False, "io_error"))
     return results
 

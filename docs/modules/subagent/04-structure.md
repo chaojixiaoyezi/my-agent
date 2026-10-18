@@ -1,3 +1,11 @@
+## 2026-10-17 调试引用编码边界
+
+`agent_core/runner/stage_trace._detail_trace_payload` 只把原宿主详情 writer 返回的引用转为 Path；`subagents/debug_trace.trace_runner_result` 对原非空 runner_result_file 同样转换，空值保持空串。唯一 `_safe_payload_value` 在普通字符串预览之前编码 Path 为完整字符串，其他预算和 JSON 字段保持。此处不解析路径、不读取文件，也不承担 owner/权限判断；读取产物仍必须经过原授权入口。
+
+## 2026-10-17 runner原设施出处结构（F3候选）
+
+`common/runner_thread_origin.py`持唯一原生Thread出处类和capture/finish/只读observer实际实现；`agent_core/runner/session_pool.py`与worker继续生产原设施和原租约，Gateway只从common观察后独立核完整请求claim。该低层模块只依赖标准库，无RuntimeDB、请求JSON或Context.run；同名字段/复制异常不产生来源。停止和物理排空仍由原主链承担，不因迁移实现而新增证明。
+
 ## 2026-10-16 F4/F5 来源和只读目录结构
 
 - `conversation/learning_source.py` 定义宿主结构化来源与 lineage；原 child 创建、runner 与归档显式携带本来源。模型 attrs、role、正文和 inspected tree 不成为身份或批准源，缺值仍 unknown。
@@ -1524,3 +1532,22 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 必要输入停止沿 `cancellation._close_projection` → `conversation/input_dependencies.cancel_task_inputs(root_task_id, run_id=准确节点)`，在原 creation guard 和授权范围内清理；根主 `/stop` 在原 gateway task/control guard 确认停原任务后清整根输入。依赖状态仍属于原 SessionTaskStore，task refs 只是查找投影，不能全根删除来处理单个孩子取消。
 
 自学lesson来源仍由SkillProposalService/Candidate核验，runner_result_service不再承担确认；skill_learning_migration只把精确committed来源和未改正文登记到原SkillLearningStore，来源不明或用户改过不接管。
+
+## 2026-10-16 F3 原child请求运输与短写（候选，未启物理W）
+
+独立原canonical child来源经既有owner/完整prepared/P3/P5交原runner，不创建另一个任务、attempt或子代理身份。原child scope复核谱系、owner与原dispatch；真实worker构造沿C原constructor roots及已有W bootstrap，home不当业务根。原canonical save/mutate/runner session、attempt/create、result文件与原RuntimeDB closeout在原T短门后进入既有业务锁，保main CAS、活动attempt、用户确认候选、可靠交接与可恢复工作片顺序。Count0无额外来源IO，模型/线程等待在门外。
+
+真实取消/换代后模型已返回也不得落result或改canonical；派发在正MP只保原待派工作，独立请求之外不直接新起进程。原kernel身份未知/TTL/PID不能授接手或裸终止许可。实际child的模型与心跳线程尚活时，transport仍保持；已退出scope不能靠复制context继续写入。原11个child节点按原体通过；新增真实供应商Bounded被普通失败catch吞掉的红经run_flow两处实际类型优先上抛关闭，child scope失效前只沿原claim/T-CAS附既有unknown，保原Call/P3/活动attempt，entered=null。活scope内main原失败进度/遥测仍可记，不等于业务结算或撤权后可写。13文件172唯一节点中170普通通过、2原有xfail，未更改原11的撤权字节断言。Count2/native/完整drain由根后续统一，原Thread.join没有通用有限期限的边界继续如实记录。
+
+
+## F3 runner原Thread出处与未结消费（16）
+
+`session_pool._RunnerThreadOrigin`是原producer在start之前固定的私有内存引用：实际Thread、原_started、Context、PID和固定phase/run/attempt；不是registry、持久账或授权令牌。原stop/join未确认时一次锚定同一原异常native字典，旧error不能绑定另一Thread。`runner_thread_error_origin`只读校验精确引用，不join/reap、运行Context或判死；复制/替换/跨PID不返回可观察来源。`runner_thread_exit_unconfirmed`仅凭原异常/observer同对象保守禁止普通收口，不能授新事件。
+
+实际child scope沿现gateway_request_execution_unknown和原_original_execution_claim_matches再核current execution对象、lifetime与完整claim tuple，原T/CAS只附同一unknown诊断：TASK_RESOURCE_STOP_UNCONFIRMED、operation_entered=null、phase为child_runner_heartbeat_stop或child_runner_worker_stop，runner_run_id/runner_attempt_id取原捕获事实；无虚构Call id。父层退出后只核同claim已存诊断，不在旧Context执行或对新C补账。
+
+正MP ACK失败的迟到timeout目标先读原abort事件，未进入业务就退出；确认原Thread退出后才允许原普通启动失败收口。原TIMEOUT attempt fence仍在网络等待期及时提交，fence不等于物理退出；默认Count0顺序/预算保持原样。没有新增状态机或清理许可，root将对原真实锚点同步唯一错误taxonomy展示，普通同码RuntimeError不升级。
+
+## 2026-10-17 原子任务载荷唯一叶子
+
+persistence/service.py 的 task_from_payload 是原载荷规范化主体，旧方法仍包装同一实现；load_subagent_task 只用显式 workspace+opaque run ID 读取已有 canonical 文件。C 根从原 runtime 路径解析器取得 workspace，不接受卡片 JSON 的路径。

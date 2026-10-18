@@ -1,3 +1,5 @@
+# LLM: C可选非阻塞仍走原锁/私有writer；默认True及序列化、权限和部分写失败语义保持，不能跳过锁忙写入。
+# 模块用途: 复用原JSON和私有追加原语；显式单次replace与原deadline只限资源等待，不授写权，默认重试和字节保留。
 # LLM: JSON 共用原线程/OS 锁；非阻塞准入不另建锁名，可选展示谓词仅在原 append 锁后复核，不保存或序列化。
 # 模块用途: 提供元数据读取、原子写与共享锁；已失效展示等待不新追加，普通写保持原协议。
 
@@ -49,6 +51,13 @@ class _PathLock:
 # "历史见过的文件数"增长,根治无界泄漏(审计 #16,对照 _TEXT_LINES_CACHE 的 FIFO 上限同理)。
 _JSON_FILE_LOCKS: weakref.WeakValueDictionary[str, _PathLock] = weakref.WeakValueDictionary()
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
+
+
+# LLM: deadline仅是原调用方传入的单调时钟资源上界，不授予路径/owner/执行权；过期不启动下一IO，原source在门外处理未结。
+# 函数用途: 在固定读写步骤及最后提交前核本次预算，不等待、不吞异常或改持久状态。
+def check_io_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise BlockingIOError("local IO resource budget expired")
 
 
 # LLM: 保存显式归档根锚点和符号链接警告；同一回合的快照写入共用此结果，避免重复遍历目录链。
@@ -152,10 +161,12 @@ def write_text_file_atomic_unlocked(path: Path, content: str) -> None:
     _atomic_write_text_unlocked(path, content)
 
 
-def write_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
+# LLM: 可选blocking只选择原同一锁等待；默认True及JSON字节、权限、替换和失败语义保持，C不得绕过锁忙写入。
+# 函数用途: 在原路径锁下原子写JSON，短事务可显式非阻塞失败。
+def write_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True, blocking: bool = True) -> None:
     """Write JSON payloads via temp-file replace under a per-path lock."""
 
-    with _locked_json_path(path):
+    with _locked_json_path(path, blocking=blocking):
         write_json_file_atomic_unlocked(path, payload, sort_keys=sort_keys)
 
 
@@ -303,12 +314,14 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
 
 # LLM: 默认确保直接父目录存在（缺失按 0700 逐级新建、已存在一律不动，见 nofollow_fs.ensure_private_dir）；
 #   若调用方已完成目录链准备或要保留符号链接目标权限，可关闭该步，临时文件仍出生即 0600；路径锁仍由调用方持有。
-# 函数用途: 在既有锁内以 0600 临时文件原子替换正文，可按目录链结果跳过父目录确保步骤。
+#   replace_once仅供固定C写叶显式限制替换次数，不证明来源或权限；联验test_common_single_replace与私有写回归。
+# 函数用途: 在既有锁内以0600临时文件原子替换正文，可跳过父目录确保或在首次替换失败后立即返回原异常。
 def write_private_text_file_atomic_unlocked(
     path: Path,
     content: str,
     *,
     ensure_parent_private: bool = True,
+    replace_once: bool = False,
 ) -> None:
     if ensure_parent_private:
         ensure_private_dir(path.parent)
@@ -318,7 +331,10 @@ def write_private_text_file_atomic_unlocked(
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             os.chmod(tmp, 0o600)
             handle.write(content)
-        _replace_with_retry(tmp, path, keep_mode=False)
+        if replace_once:
+            _replace_with_retry(tmp, path, keep_mode=False, replace_once=True)
+        else:
+            _replace_with_retry(tmp, path, keep_mode=False)
     finally:
         _unlink_tmp_file(tmp)
 
@@ -382,8 +398,10 @@ def write_private_text_file_atomic(
 # LLM: 输出与 write_json_file_atomic 逐字节一致（indent=2、可选 sort_keys、尾换行），只是权限走私有；
 #   已持锁的调用方用 unlocked 版本，避免不可重入的 per-path 锁自死锁。
 # 函数用途: 以仅本人可读写的权限原子替换一个 JSON 文件（自取锁）。
-def write_private_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
-    with _locked_json_path(path):
+# LLM: 可选blocking只透传原锁，默认True和字节/权限不变；C锁忙异常不能当成未需要的写。
+# 函数用途: 让原私有写者可立即拒绝争用，仍使用同一序列化和原子落盘。
+def write_private_json_file_atomic(path: Path, payload: object, *, sort_keys: bool = True, blocking: bool = True) -> None:
+    with _locked_json_path(path, blocking=blocking):
         write_private_json_file_atomic_unlocked(path, payload, sort_keys=sort_keys)
 
 
@@ -412,19 +430,29 @@ def serialize_private_json_no_newline(payload: object, *, sort_keys: bool = True
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=sort_keys)
 
 
-# LLM: 同 write_private_json_file_atomic_no_newline；调用方须已持有 locked_json_path(path)。
-# 函数用途: 持锁场景下以仅本人可读写的权限原子替换一个 JSON 文件，不加尾换行。
+# LLM: 调用方须持原JSON锁；C固定preview可显式一次replace，False保旧重试及keyword形状，原deadline/codec/权限/清理不变。
+# 函数用途: 原子替换无尾换行私有JSON，固定C事务失败不sleep或重投；普通调用仍保原策略。
 def write_private_json_file_atomic_no_newline_unlocked(
-    path: Path, payload: object, *, sort_keys: bool = True
+    path: Path, payload: object, *, sort_keys: bool = True, deadline: float | None = None,
+    replace_once: bool = False,
 ) -> None:
+    check_io_deadline(deadline)
+    content = serialize_private_json_no_newline(payload, sort_keys=sort_keys) if deadline is not None else None
+    check_io_deadline(deadline)
     ensure_private_dir(path.parent)
+    check_io_deadline(deadline)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             os.chmod(tmp, 0o600)
-            handle.write(serialize_private_json_no_newline(payload, sort_keys=sort_keys))
-        _replace_with_retry(tmp, path, keep_mode=False)
+            check_io_deadline(deadline)
+            handle.write(content if deadline is not None else serialize_private_json_no_newline(payload, sort_keys=sort_keys))
+        check_io_deadline(deadline)
+        options = {} if deadline is None else {"deadline": deadline}
+        if replace_once:
+            options["replace_once"] = True
+        _replace_with_retry(tmp, path, keep_mode=False, **options)
     finally:
         _unlink_tmp_file(tmp)
 
@@ -448,25 +476,53 @@ def write_private_jsonl_records(path: Path, records: list[dict[str, object]], *,
 
 # LLM: 追加无法原子替换整文件；这里只保证私有：目录 0700、新文件出生 0600、已有文件先收紧再追加，
 #   锁沿用 locked_json_path；可选展示谓词在取得原锁后复核，不保存或序列化。
-# 函数用途: 私有追加文本；已失效的可选展示不新写，普通调用保留原字节和锁语义。
-def append_private_text(path: Path, content: str, *, still_current: Callable[[], bool] | None = None) -> None:
+# 函数用途: 私有追加文本；展示已失效或资源预算过期不新追加，普通调用保留原字节和锁语义。
+# LLM: 可选blocking只透传原锁，默认True和字节/权限不变；C锁忙异常不能当成未需要的写。
+# 函数用途: 让原私有写者可立即拒绝争用，仍使用同一序列化和原子落盘。
+def append_private_text(path: Path, content: str, *, still_current: Callable[[], bool] | None = None, blocking: bool = True, deadline: float | None = None) -> None:
+    check_io_deadline(deadline)
     ensure_private_dir(path.parent)
-    with _locked_json_path(path):
+    with _locked_json_path(path, blocking=blocking):
+        check_io_deadline(deadline)
         if still_current is not None and not still_current():
             return
-        _ensure_private_file(path)
-        _tighten_private_file(path)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(content)
+        check_io_deadline(deadline)
+        append_private_text_unlocked(path, content, deadline=deadline)
+
+
+# LLM: 调用方须已持原JSON双层锁；仅承接原append锁内权限与末写，不取锁、不增加目录或source，C由原活window消费。
+# 函数用途: 在已有锁内按原0600收紧规则追加文本，保留原deadline与失败字节边界。
+def append_private_text_unlocked(path: Path, content: str, *, deadline: float | None = None) -> None:
+    _ensure_private_file(path)
+    _tighten_private_file(path)
+    check_io_deadline(deadline)
+    with path.open("a", encoding="utf-8") as handle:
+        check_io_deadline(deadline)
+        handle.write(content)
+
+
+# LLM: 仅将原JSONL编码交给已有锁内append叶，调用方已准备父目录/原锁；不改sort_keys、尾换行或原异常。
+# 函数用途: 为SQL事务中原事件流提供无重复取锁的固定追加入口。
+def append_private_jsonl_records_unlocked(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True, deadline: float | None = None) -> None:
+    if not records:
+        return
+    check_io_deadline(deadline)
+    blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
+    options = {} if deadline is None else {"deadline": deadline}
+    append_private_text_unlocked(path, blob, **options)
 
 
 # LLM: 与 append_jsonl_records 同格式（每行一条、可选 sort_keys、批内一次写入），权限走私有 append。
-# 函数用途: 以仅本人可读写的权限并发安全地追加一批 JSONL 记录（空批不操作）。
-def append_private_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True) -> None:
+# 函数用途: 私有追加原JSONL；显式deadline与blocking沿同一锁到末写，空批仍不操作。
+# LLM: 可选blocking只透传原锁，默认True和字节/权限不变；C锁忙异常不能当成未需要的写。
+# 函数用途: 让原私有写者可立即拒绝争用，仍使用同一序列化和原子落盘。
+def append_private_jsonl_records(path: Path, records: list[dict[str, object]], *, sort_keys: bool = True, blocking: bool = True, deadline: float | None = None) -> None:
     if not records:
         return
+    check_io_deadline(deadline)
     blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
-    append_private_text(path, blob)
+    options = {} if deadline is None else {"deadline": deadline}
+    append_private_text(path, blob, blocking=blocking, **options)
 
 
 # LLM: 有界 append 的私有版：与 append_jsonl_capped 同一锁协议与读-改-写语义（只留最近 max_records 条、
@@ -516,28 +572,32 @@ def _path_lock(path: Path) -> _PathLock:
 
 
 # LLM: 默认仍等待原双层锁；blocking=False 任一层繁忙即失败，调用方不能因此绕开原子读改写。
-# 函数用途: 为原文件提供共用临界区，允许有期限的管理入口在竞争时立即返回。
+# LLM: birth_commit只包原lock FD open/create/chmod，等待/身份核验/close仍门外，默认None原链不变。
+# 函数用途: 取得原双层锁，可将每次准确FD出生交给当前C末门。
 @contextmanager
-def locked_json_path(path: Path, *, blocking: bool = True):
+def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
     """公开的"线程锁 + fcntl.flock(LOCK_EX)"双层临界区(与 io/jsonl.py 同手法)。
 
     供需要把 读-改-写 整段做成原子的调用方使用(如 OptimisticLock 的 CAS):
     进入即对 path 的 per-path 线程锁 + 同名 .lock 文件的 OS 排他锁双重持有,
     退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。"""
 
-    with _locked_json_path(path, blocking=blocking):
+    options = {} if birth_commit is None else {"birth_commit": birth_commit}
+    with _locked_json_path(path, blocking=blocking, **options):
         yield
 
 
 # LLM: 持有 _PathLock 强引用到释放，非阻塞失败不能释放别人的锁；文件锁失败也必须释放已取得的线程锁。
-# 函数用途: 按固定顺序取得线程锁与 OS 锁，并在所有退出路径归还。
+# LLM: 可选birth_commit沿原链透传，不缓存callback，也不把线程锁/flock等待搬进Root。
+# 函数用途: 按原顺序取线程/OS锁，全部退出归还，FD出生可固定委托。
 @contextmanager
-def _locked_json_path(path: Path, *, blocking: bool = True):
+def _locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
     handle = _path_lock(path)  # 持 _PathLock 强引用直到临界区结束 → 持锁期间弱字典绝不回收它
     if not handle.lock.acquire(blocking=blocking):
         raise BlockingIOError("共享文件线程锁繁忙")
     try:
-        with _locked_file_path(path, blocking=blocking):
+        options = {} if birth_commit is None else {"birth_commit": birth_commit}
+        with _locked_file_path(path, blocking=blocking, **options):
             yield
     finally:
         handle.lock.release()
@@ -554,10 +614,12 @@ def _locked_json_path(path: Path, *, blocking: bool = True):
 _JSON_LOCK_IDENTITY_RETRY_COUNT = 5
 
 
-# 函数用途: 在原同名锁文件上获取排他权，忙碌或异常时关闭文件句柄。
+# LLM: birth_commit只供原FD出生叶，所有flock等待与finally回收仍在原调用层。
+# 函数用途: 在原同名锁文件上获取排他权，忙碌或异常时回收同一FD。
 @contextmanager
-def _locked_file_path(path: Path, *, blocking: bool = True):
-    descriptor = _acquire_verified_lock_descriptor(path, blocking=blocking)
+def _locked_file_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
+    options = {} if birth_commit is None else {"birth_commit": birth_commit}
+    descriptor = _acquire_verified_lock_descriptor(path, blocking=blocking, **options)
     try:
         yield
     finally:
@@ -567,11 +629,13 @@ def _locked_file_path(path: Path, *, blocking: bool = True):
 
 # LLM: 取锁重试循环独立成函数（压平临界区的嵌套）：每轮"打开→取锁→核对身份"；身份不符说明锁文件
 #   被清理器换掉，关闭后重开重试；取锁本身异常时关闭描述符再冒泡；超上限抛 BlockingIOError。
-# 函数用途: 反复取锁直到 fd 与锁路径身份一致，返回已验证的锁描述符。
-def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True) -> int:
+# LLM: 每轮重开都重新调用原birth_commit；不扩大原5次身份重试、不在callback内flock或校验。
+# 函数用途: 在原最多五轮中取得同路径真实锁FD，出生来源每次重新核。
+def _acquire_verified_lock_descriptor(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None) -> int:
     lock_path = path.with_name(path.name + ".lock")
     for _ in range(_JSON_LOCK_IDENTITY_RETRY_COUNT):
-        descriptor = _open_private_lock_descriptor(lock_path)
+        descriptor = (_open_private_lock_descriptor(lock_path) if birth_commit is None
+                      else birth_commit(lambda: _open_private_lock_descriptor(lock_path)))
         try:
             _flock_descriptor(descriptor, blocking=blocking)
         except BaseException:
@@ -640,16 +704,22 @@ def _funlock_descriptor(descriptor: int) -> None:
 # LLM: 所有原子写（JSON、JSONL 账本、文本）都经这里替换；替换前先让临时文件带上目标原来的权限位，
 #   否则 600 的配置/账本每写一次就按 umask 变成 644（2026-10-02 ae 在 P18 发现生产 desktop.yaml 被放宽）。
 #   keep_mode=False 只给私有写（write_private_text_file_atomic_unlocked）：临时文件已是 0600，不能抄回旧的 0644。
-# 函数用途: 带重试地把临时文件原子替换到目标位置，默认保留目标原有权限。副作用：替换目标文件。
-def _replace_with_retry(tmp: Path, path: Path, *, keep_mode: bool = True) -> None:
+#   replace_once只缩小原资源重试，不建deadline或签权；None且默认False仍八次原sleep，联验guidance原预算及私有写清理。
+# 函数用途: 原子替换临时文件；显式单次或原deadline遇PermissionError立即抛原对象，默认仍八次重试。
+def _replace_with_retry(tmp: Path, path: Path, *, keep_mode: bool = True, deadline: float | None = None,
+                        replace_once: bool = False) -> None:
+    check_io_deadline(deadline)
     if keep_mode:
         _keep_target_mode(tmp, path)
     last_error: OSError | None = None
     for attempt in range(8):
+        check_io_deadline(deadline)
         try:
             tmp.replace(path)
             return
         except PermissionError as exc:
+            if replace_once or deadline is not None:
+                raise
             last_error = exc
             time.sleep(0.01 * (attempt + 1))
     if last_error is not None:

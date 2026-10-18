@@ -1,0 +1,87 @@
+# C 收件与前台文字运输
+
+状态：候选组件；不是正式Count2/物理排空或发行验收。
+
+原始输入仍由一个gateway_input_receipt持有完整prepared、client digest、actor/media与规范owner。v2没有transport字段时编码原样；v3仅增加完整、不可部分降级的定位投影。投影包含原Gateway请求fence、原route及原会话claim目标，不授P2/P3、工具或owner权限。
+
+C只有实际HTTP pool的finish_request区间能创建本次固定元数据source。相同handler/socket、upper/lower server、pool/executor、actual Thread/PID、control/runtime/controller/lease/Root均须同对象；退出、copy_context迟到、换同run-id对象和关闭不能续权。首次active发布沿input T→try target T→controller→lease→Root；其余固定动作沿各自原input T与Root短门。所有短窗JSON沿各自原try-lock，门内不等待目标T/M/模型/线程。单个work只保本次一个raw JSON CAS快照和typed对象快照，二者都须相同，不能靠bool/int或字典归一化跳过变化。
+
+准备参数由同文件纯数据bundle聚合，Count0原8参公共入口仍进入同一唯一load/repair实现。C仅明确选择原try-reader和原固定末writer；bundle没有写许可、路径选择或新的授权能力。HTTP已鉴权参数亦仅聚合原事实。
+
+固定动作：
+
+1. 原fresh同步创建链后才可选择首次运输，fresh不是客户端参数。只在原owner现有Store和原会话绑定内找唯一foreground claim/processing，并复核完整fence、原route/owner/peer与两次原记录；不创建Agent、线程或owner。无binding/claim或稳定canonical终态可证idle，过期running、损坏、中间态及尚未接的BG投影保持unknown。
+2. 明确不适用文字active或已证idle时完整queue_unbound，使用原materializer/完整摘要；未决target/transport不能改选下一回合，owner quarantine不拒绝收件。新媒体/原生引用、文件、inject、workspace、系统任务及不等价选项不被文字guidance吞掉，原worker继续验证与执行。
+3. 首次冻结target后，在同一target T内先写原by_turn预定位，再完整CAS提交canonical transport；预定位不设target_turn_id或ACK，不授权追加。提交前目标事实改变则按原完整prepared排队，不热改下一目标。既有v3漏定位由C原逐行扫描/重放补同一ref，保持deferred；只有共享v4纯读证据与原input/dedupe/prepared/owner/peer/目标/transport完全相同时修binding。没有ACK证明不写consumed；读错/旧版/缺证据不猜成功。
+
+foreground adapter只接受原current WorkerExecution或实际C业务CoordinatorExecution、同Agent/claim与OriginalRequestWriteSource(background=None)。冷C/HTTP source本身没有此业务执行资格；child/task-local不能继承父邮箱。opaque引用仅沿宿主RunParams参数链传递，Count0 None不增加input IO，不放入模型attrs或持久输出。
+
+probe只读取本turn原by_turn定位并逐条回读canonical/full fence，不扫描共享receipt历史或其它turn；本turn所有refs都检查，不能以固定页空值猜空。无hint只表示当前没有已发布定位，不是全域canonical空证明；旧漏ref由C补漏，不设第二cursor/注册表。drain在原Gateway短事务/T/P3之内，尝试input T而不反向阻塞，追加前后均比较完整raw receipt。原GuidanceStore.append_once负责同key重放和投影修复，binding/索引写失败保canonical guidance与原receipt欠账，不造第二次输入。输入guidance复用显式steer的纯payload builder，并把原transport作为定位metadata纳入原幂等digest；replay去除属于旧turn的该派生字段。
+
+原reserve→provider submission→ACK、失败调用退回、Compact carry与已注入ID去重均未变。probe不追加或认领；presentation-only不drain；追加不证明模型接受，Event/Future/Thread状态亦不能证明P3可释放。
+
+普通BlockingIOError在单次真实probe/drain/closeout调用内共用一个绝对deadline：最多5秒，原provider余额更短时取其小值，覆盖本次全部refs及全部retry。每次尝试退出全部T/Root后才用原interrupt等待，不重做模型/工具；已过期预算和实际typed失源沿原source同对象/保守未结出口，不能写普通failed。Count0没有source，不增加此等待或输入IO。
+
+原请求来源仍活的最终收口，在原target T/P3中置同fence的closing，再仅对本turn canonical pending、未binding且严格不存在guidance/reserve/submit/consume事实的项耐久排完整prepared。固定finish可重进自身closing；probe/drain/append始终只open。排queue不执行，不释放旧P3/claim；有任何guidance或ACK未知则不重排。新typed叶子位于旧静默异常处理之外，实际runner finally路径保unknown/P3。与C pre-ref/transport发布共用target T，正常新输入要么进入本轮观察，要么在closing后完整queue。
+
+边界：当前只foreground文本，BG定位消费、旧无transport pending显式恢复、以及旧candidate-v3漏ref晚于封口的真实P2/post恢复仍未接。C补hint不等于旧数据恢复完成；append后binding未提交必须保未知原记录，不能宣称已关闭。所有组件测试只使用合成临时数据、真实Python对象/线程和测试自身localhost HTTP/fake provider；真实W/native/Count2与日常服务由root另行统一验收。
+
+
+## repair03：预算贯穿末提交与完整guidance锁链（候选）
+
+预算不再仅在外层action入口或busy后检查：同一绝对deadline显式传到probe/drain/finish、全部本turn ref、C target观察/transport与固定queue动作，以及原JSON/JSONL writer。每个正常reader返回后、拿到原锁/短门后、序列化完成与最终replace/append前都检查；过期不启动下一副作用，不以空dict/空投影/False当成功。原source/lifetime优先验证，实际typed/MI保持同对象；W过期拒绝下一步骤并由原runner保unknown/P3。
+
+GuidanceStore.append_once新增内部可选blocking=True/deadline=None；原Count0及其它调用默认仍同原方法形状与字节。只有actual active input显式False：原dedupe transition→canonical receipt/迁移→delivered→turn/input index→queue JSONL都沿各自原锁try，资源忙退出全部Gateway门后才由同deadline原interrupt等待。原JSONL reader无新增锁，返回后核预算。reserve/submit/ACK、guidance v4、input v2/v3、原P3/source/ports validator不改。
+
+common无换行writer保唯一序列化、0600和临时文件清理，预算只作资源条件；显式bounded replace在PermissionError时不门内sleep或内部重试，保原异常对象，None仍原8次路径。若此前canonical guidance或queue已经提交，后续过期/错误保真实部分事实，重放只修原同一ID，不回滚、不推断ACK、不重复模型。单个OS syscall不能被本层抢占，合同是已知过期后不开始下一固定步骤，不是绝对墙钟抢占承诺。
+
+C的actual typed只在handle_coordinator_input最外HTTP边界投影503/status=waiting/terminal=false与原error_code/request_id；不回显正文，不标accepted/not_started/failed，不写终态或释放P3。KeyboardInterrupt/SystemExit仍穿透，Count0不进此helper。早期RemoteDisconnected原红保留为此边界补缝因果。
+
+本轮普通回归包含每层合法本人锁、正常read/serialization/replace调度延迟、多ref共预算及部分提交修投影。BG、旧漏hint晚于封口的真实P2/post恢复、native/Count2和物理排空仍未接；不能拿02的R1/R2绿或基础Count2成功代本片强合同。
+
+## 2026-10-17 独立复核待修
+
+原active01指定回归通过，但Astra合法input T持锁在真实claimed/fake模型链复现failed规范终态、输入仍pending；全域扫描有跨turn资源busy干扰。该片已在候选，未发布，审查为request_changes。下一片仅复用原by_turn、原安全点门外总预算重试与原live封口：新定位在canonical运输前发布，完整CAS才可消费；queue不开始执行、不释放P3。新发布与旧未发布candidate漏定位恢复分别验证，BG未接。原红保留，不用typed兜底代替短锁释放后的活性。
+
+
+## 2026-10-17 BG active input B1/B2（仓外未发布候选）
+
+只接实际主BG binder/原claim/core callback与原Gateway source；v2完整保存Gateway fence/route、task target及原claim_transport_reference，两组attempt严格分开。v1 request语义不变；业务by_turn是invocation，Gateway T/processing键只取gateway_claim.request_id。C按唯一reference定位，并对原TaskLink/claim/processing/thread全JSON末核，task锁只try；合法raw漂移保pending/deferred，不热选目标，锁忙才按同一预算门外重试。
+
+实际BG安全点只追加等价纯文字，沿原guidance.append_once及reserve→submit→ACK；媒体、files、inject、workspace等不扩大active范围。原ClaimExecutionBinding词法scope覆盖heartbeat.stop之后的原finish；同claim输入接受关闭由原ClaimStore.finish updater内完整expected running CAS线性化，Gateway turn_phase保持open。已成功finish后的短忙只持本栈actual terminal快照续结，不再finish、不释放P3。最终只投影原consumed事实或将严格未append的完整prepared排原inbox，未知预留/提交不重排。
+
+G0未批准、未实现：首拍unknown和旧无transport pending仍deferred，没有新的C扫描、None-as-absence或legacy迁移。late同key原control writer与queued receipt的互斥设计另审。此候选不证明整个BG/F3、物理停止、Count2/native或发布；测试与准确SHA由独立工件记录。
+
+
+## 2026-10-17 BG G0 本次新输入唯一去向（未发布候选）
+
+G0仅适用于同次实际认证HTTP在原input T内亲自从不存在创建的原fresh对象；旧pending、重启重放、半发布、完整raw心跳漂移不迁移、不热选。正常BG原claim尚未发布core/reference时，观察口给出单独unpublished类别及原current claim、active TaskLink、同owner/peer thread完整raw；类别不是准入或queue许可，读取/坏schema/中间态仍unknown。
+
+C在同input T→try原task→Root→try原claim/task/thread JSON锁内比较所有原raw，当前claim仍有效，再try原dedupe M严格读取唯一canonical guidance。只有本次fresh的完整owner/peer/key/digest/goal和原prepared摘要仍一致、canonical确实缺席，才持上述原锁把完整prepared入原inbox并CAS queued。末writer同deadline；已有guidance、原raw变化或旧pending只deferred。锁忙退出全部短门后按同一绝对deadline等待；不启动模型、不清旧P3、不创建第二queue/authority/扫描。
+
+迟到control仅在原正count角色且有同ordinary input ID时收窄：原Gateway T/turn M/task/claim门内try同input T，从strict canonical queued检查一直持到原append_once末提交。append_once显式blocking=False并使用同一次控制入口捕获的绝对deadline。完整owner/peer/key/digest/goal不一致或不可确认不追加；queued返回原ConversationControlResult的accepted+details(input_state=queued, active_appended=False)，两caller立即返回，不把它当GuidanceEntry。Count0和没有ordinary ID的显式steer不增加input IO或预算。
+
+queue-first释放全部锁后，同key迟到control仍读queued而不append；append-first留下原canonical，G0在M内见到便deferred。input T/Gateway或task的反向边只try，无门内阻塞等待。canonical先写、投影/queued末JSON后失败保真实部分事实，过期不回滚、不洗failed、不推断ACK。旧pending故障恢复与rolling旧worker边界尚未关闭，不能以G0普通测试代全BG/F3、native或发布。
+
+发布前未闭：原allow_active=False/idle/ineligible仍走旧queue_unbound，没有统一增加dedupe M缺席比较；若同消息control已先append后目标转idle，原分支可能仍排队。此为静态顺序窗口，不是本片已测通过，必须在F3发布前关闭；后继优先评估唯一queue叶子统一去向核验，同时保持cold/quarantine owner未物化时零创建、Count0与无ordinary ID显式steer边界。旧pending故障恢复与真正rolling旧writer兼容须一并短审，不凭None或文件年龄补许可。
+
+
+## 2026-10-17 同key writer与queue/pending统一（08未发布候选）
+
+正count所有带message_id的steer，包括原显式HTTP/control，在原执行门内均按http_handlers.http_input_identity唯一纯公式导出同input ID，try同input T并持到append_once末写；原HTTP输入ID与完整digest不变，不新建key命名空间。Count0和缺message_id保原路径/零新增input IO。无ordinary receipt的原合法显式追加只写原guidance，不创建receipt/owner；有receipt时完整owner/peer/key/digest/goal核验，queued/已绑定/冲突不重新append。显式operation的原receipt scope没有普通输入摘要，不能从ordinary receipt抄摘要冒充等价。
+
+所有C fresh queue分支与既存pending固定恢复共用queue_unbound/_queue_unbound_locked唯一原prepared writer。actual HTTP source/同input T/Root与_seen完整raw CAS先成立，pending必须无transport/binding；已有Store在原try dedupe M内strict读取canonical，任何合法guidance存在都deferred。Store尚未物化只纯定址读取，不mkdir owner/M/Agent；同input T排除所有当前ordinary/explicit同key writer，无transport排除FG/BG消费者，独立owner初始化不创建该key。初始化在读期间出现则转原M复核；不是用Store=None或文件年龄签排队权。已queued原冻结transport仅作审计，消费者先跳过queued；C重放只修原完整队列，不丢运输、不重绑/执行。
+
+既存pending恢复唯一callee位于原CoordinatorInputReceiptSource.prepare：load-or-prepare完成原校验并_remember后，对created=False、未绑定pending调用命名固定叶子，用本次GatewayInputPreparation认证peer/key/digest/goal及原canonical宿主冻结owner复核，再同队列叶子补去向。created仍False、_fresh不填，不热prepare owner/IM snapshot，不比较新submitted_at与旧完整host投影，也不扫描/申请P3。原inbox/processing/terminal存在时沿原materialize同ID/owner/摘要校验，不复制业务或清责任；末JSON部分发布后下一次认证重放可补queued。所有锁忙退出门外按同一次deadline等待，typed/部分事实不洗成ordinary failed。
+
+以上关闭同一新协议内append-first→原目标idle→queue与queue-first→迟到显式/ordinary追加两顺序，以及prepare/末JSON后既存pending欠账。尚不证明rolling旧Count0/W/control写者也持新T；原generation/PID只证明出生/代次，不自证代码能力。部署必须原实例真实停止/撤权与写责任收口后，由同新构建启动唯一C/W域；证据不可得保持明确unknown/发布约束，不加safe bool/registry。隔离测试实际原HTTP停机、原C lease撤权关FD、新C出生与重放，只证明该测试设施；未启动真实W/native/模型，不能代真实旧进程域退出。
+
+## 2026-10-17 全仓回归补齐输入错误分类（待最终统一验收）
+
+`INPUT_IDENTITY_CONFLICT`、`INPUT_IDENTITY_UNCONFIRMED`与`INPUT_DISPOSITION_UNCONFIRMED`沿原生产出口保持不同结构化码，统一登记为state、不可自动重试、manual_review。恢复提示只要求沿原消息ID核对身份和投递事实；不把unknown当未发送，不换编号重投、重复追加或排队。本次只补唯一错误分类表，原input T、去向判断、完整raw CAS与全部写者均未改；17项错误策略回归通过不代整个F3/全仓或发行验收。
+
+## 2026-10-17 后台请求与前台live输入收尾分域（已合候选）
+
+原认领请求的canonical kind同时用于业务分派与收尾适用范围。只有ask调用原finish_pending_turn_inputs；background已经由其原BackgroundRequestExecution事务关闭对应窗口，body退出后不能再借已经退出的ports执行前台封口。所有kind仍执行旧guidance.recovery.reject_pending原块，普通拒绝异常仍best-effort。helper默认ask保留旧直接caller，实际Gateway显式传同一context kind；不从自然语言、当前空source或异常文字猜类型，不恢复端口或扩清理权限。
+
+原19后台节点在根540组合中通过；正常ask顺序、真实前台失源、原typed同对象、BG普通失败和旧拒绝失败均保原责任。此项不证明生命周期接手、所有后台物理域或发行已通过。

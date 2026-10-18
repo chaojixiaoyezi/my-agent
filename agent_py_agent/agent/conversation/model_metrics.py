@@ -1,4 +1,4 @@
-# LLM: 这是原 ModelCallLedger 的显示投影；缓存累计与去重身份同快照保存/恢复，不建第二份账本，不改变预算/输入/任务，主子按 exact thread 隔离。
+# LLM: 原 ModelCallLedger 显示投影沿 exact thread；普通显示故障降级，原 typed 执行未知须上抛，不能吞掉、释放责任或重放，不建第二账本。
 # 模块用途: 提供原模型统计行及决策输入与成败次数，未知保留未知，后台新用量让旧显示基数失效。
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import math
 import time
 from collections.abc import Mapping
 
+from ..common.request_execution_ports import raise_if_transport_uncertain
 from ..contracts.model_call_latency import MODEL_LATENCY_FIELDS
 
 _LOGGER = logging.getLogger(__name__)
@@ -175,8 +176,8 @@ def newer_model_metrics(current: object, incoming: object) -> dict[str, object]:
     return new
 
 
-# LLM: 只读 exact thread 上的显示副本；账本仍是唯一费用权威，不读取文本历史或子代理目录。
-# 函数用途: 在空闲、重连和切入子代理页面时取回最近统计条。
+# LLM: 只读 exact thread 的显示副本，原 typed 执行未知同对象上抛；账本仍是费用权威，不读文本或子代理目录。
+# 函数用途: 在空闲、重连和切入子代理页面时取回统计条；普通读取故障返回空，执行未知仍交原请求处理。
 def model_metrics_from_thread(store: object, thread_id: str) -> dict[str, object]:
     loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     if not thread_id or not callable(loader):
@@ -184,11 +185,12 @@ def model_metrics_from_thread(store: object, thread_id: str) -> dict[str, object
     try:
         thread, error = loader(thread_id)
         return public_model_metrics(getattr(thread, "model_metrics", None)) if not error else {}
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise_if_transport_uncertain(error)
         return {}
 
 
-# LLM: 只读 exact thread 对象供同一次发布复用（持久统计副本 + 决策开关覆盖），读不到按 None；不改线程、不读历史。
+# LLM: 只读 exact thread 供同次发布复用；普通故障为 None，typed 执行未知不降级；不改线程、不读历史。
 # 函数用途: 一次发布只加载一次线程文件。
 def _display_thread(store: object, thread_id: str) -> object | None:
     loader = getattr(getattr(store, "threads", None), "load_report", None)
@@ -196,7 +198,8 @@ def _display_thread(store: object, thread_id: str) -> object | None:
         return None
     try:
         thread, error = loader(thread_id)
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise_if_transport_uncertain(error)
         return None
     return None if error else thread
 
@@ -219,7 +222,7 @@ def _decision_display_mode(agent: object, thread: object) -> str:
 
 
 # LLM: 原用量文件变更才重读事件，仅排除相同统计代次 request/run；重启旧账仍加入基数。
-# 事件读取只走 model_usage 领域；缺失能力保持既有嵌入式调用边界，不回退旧 Store 方法。
+# 事件只走 model_usage；普通读取故障保未知计数，typed 执行未知不得当空账或缓存结果，不回退旧 Store 方法。
 # 函数用途: 取得本会话以前已经落账的消耗基数，长输出的每个 token 不会触发历史扫描。
 def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_id: str) -> dict[str, object]:
     state = getattr(params, "live_archive_state", None)
@@ -244,7 +247,8 @@ def _previous_totals(agent: object, params: object, thread_id: str, usage_scope_
                 if (event.request_id, event.run_id, str(event.model_calls.get("usage_scope_id") or "")) == key[1:]:
                     continue
                 _add_usage(totals, event.model_calls)
-        except (OSError, RuntimeError, TypeError, ValueError):
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise_if_transport_uncertain(error)
             totals["totals_known"] = False
     if isinstance(state, dict):
         state["_model_metrics_baseline"] = ((key, revision), dict(totals))
@@ -313,19 +317,20 @@ def _add_usage(totals: dict[str, object], summary: Mapping[str, object]) -> None
         totals["decision_input_tokens"] = int(totals["decision_input_tokens"] or 0) + int(usage.get("input_tokens") or 0)
 
 
-# LLM: 遥测只在调用边界发布；usage_only 保留生成状态且只刷新活动显示，不等待持久会话写锁；调用方必须传原活动范围。
-# 函数用途: 更新原会话消耗及生成统计，短决策只刷新当前用量行；持久显示由下一原模型边界更新，显示异常不改变执行结果。
+# LLM: 遥测只在原调用边界发布；usage_only 不等待持久写锁；普通显示故障降级，typed 执行未知保原对象交请求收口。
+# 函数用途: 更新原会话消耗及生成统计；普通显示异常不改变结果，执行未知交原请求核实，不能假称已完成。
 def publish_model_metrics(agent: object, params: object, *, pending: bool, tool_count: int | None = None, response: object = None, call_id: str = "", usage_only: bool = False) -> dict[str, object]:
     try:
         return _publish_metrics(agent, params, pending=pending, tool_count=tool_count, response=response, call_id=call_id, usage_only=usage_only)
-    except Exception:
+    except Exception as error:
+        raise_if_transport_uncertain(error)
         # 显示故障不能让一次本来成功的模型响应或工具执行变成任务失败。
         _LOGGER.warning("模型统计显示更新失败；不影响模型与工具执行", exc_info=False)
         return {}
 
 
 # LLM: 使用原范围账本快照；决策分区不计普通轮，usage_only 不覆盖生成状态或等待写锁，异常交外层隔离。
-# 显示写入走 model_usage 的原线程更新能力；缓存累计与去重身份选同一较新快照，不能拼接不同来源。
+# 显示写走 model_usage 原线程；缓存与去重身份同源，普通显示失败降级，typed 执行未知不作普通失败或成功。
 # 函数用途: 实现一次模型边界的统计采样和发布，耗时复用当前原账范围，不在 UI 渲染线程扫描数据。
 def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count: int | None, response: object, call_id: str, usage_only: bool) -> dict[str, object]:
     if str(getattr(params, "context_scope", "") or "").lower() == "isolated":
@@ -375,7 +380,8 @@ def _publish_metrics(agent: object, params: object, *, pending: bool, tool_count
         writer = getattr(sink, "write_model_metrics", None)
         if callable(writer):
             writer(public)
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise_if_transport_uncertain(error)
         _LOGGER.warning("模型统计显示更新失败；不影响模型与工具执行", exc_info=False)
     return public
 

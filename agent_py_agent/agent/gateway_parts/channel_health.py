@@ -1,3 +1,5 @@
+# LLM: Agent与冷C共用原PID/结构化状态健康投影；C显式只读不清陈旧PID，不从缺省provider推定健康。
+# 模块用途: 为通道registry读取原daemon健康事实；默认Agent保原清理时点，paths入口可只读。
 from __future__ import annotations
 
 """Project the adapter daemon's typed lifecycle file into channel health facts."""
@@ -5,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from ..common.json_io import read_json_object_report
 from .daemon_control import get_running_pid_report
 from .io import read_json_file_report
 from .paths import gateway_paths
@@ -17,12 +20,17 @@ _HEALTH_STATES = frozenset(
 _HEARTBEAT_STALE_SECONDS = 30.0
 
 
-# LLM: 该 provider 只读取 adapter PID 和结构化状态文件；模型正文、日志文字和配置猜测都不参与健康判断。
+# LLM: 原Agent沿原路径委托唯一paths主体，保持陈旧PID清理；模型正文、日志和配置猜测不参与健康判断。
 # 函数用途: 为当前 Agent 的 channel registry 提供跨进程健康覆盖，状态缺失或损坏时安全降级。
 def adapter_runtime_health(agent: object) -> dict[str, dict[str, str]]:
-    paths = gateway_paths(agent)
+    return adapter_runtime_health_for_paths(gateway_paths(agent))
+
+
+# LLM: 只消费原GatewayPaths；False复用原common只读原子状态快照且不清PID/建锁，True保原Agent锁读；未知不授Delivery权限。
+# 函数用途: 让无Agent的C读取同一daemon健康主体；原Agent默认True保既有清理行为。
+def adapter_runtime_health_for_paths(paths, *, cleanup_stale: bool = True) -> dict[str, dict[str, str]]:
     checked_at = _utc_now_iso()
-    pid_report = get_running_pid_report(paths.adapter_pid)
+    pid_report = get_running_pid_report(paths.adapter_pid, **({} if cleanup_stale else {"cleanup_stale": False}))
     if pid_report.load_error is not None:
         return _all_channels_health(
             "unhealthy",
@@ -31,7 +39,8 @@ def adapter_runtime_health(agent: object) -> dict[str, dict[str, str]]:
         )
     pid = pid_report.pid
     alive = bool(pid and is_pid_alive(pid))
-    state_report = read_json_file_report(
+    state_reader = read_json_file_report if cleanup_stale else read_json_object_report
+    state_report = state_reader(
         paths.root / "adapter_state.json",
         context="gateway.channel_health.adapter_state.read",
     )
@@ -158,4 +167,4 @@ def _load_error_subset(load_error: object) -> dict[str, str]:
     return {key: str(load_error.get(key) or "") for key in ("category", "context")}
 
 
-__all__ = ["adapter_process_facts", "adapter_runtime_health"]
+__all__ = ["adapter_process_facts", "adapter_runtime_health", "adapter_runtime_health_for_paths"]

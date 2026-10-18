@@ -3,7 +3,7 @@ from __future__ import annotations
 """Memory v2 统一 retention Service 与旧 home 入口委托层。"""
 
 # LLM: 所有 plan/apply 调用必须进入 MemoryRetentionService；旧 home-retention 只能作为同服务 CLI alias。
-# 模块用途: 组合 typed policy 扫描、锁内重规划、执行重验证，以及正式长期记忆硬删除。
+# 模块用途: 唯一typed保留服务；默认锁内原路径，可选callback仅逐写短门，长扫描仍门外。
 
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -60,13 +60,21 @@ class MemoryRetentionService:
             now=_normalize_now(now),
         )
 
-    # LLM: apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
+    # LLM: None保原锁内plan/apply；原callback路径长plan门外，固定policy逐写T→原锁，目标指纹/隔离不变。
+    #   apply 在 owner retention 锁内重新 plan。policy 级损坏仍整份拒绝（读不懂策略就不能动任何数据）；
     #   但单棵任务的 state 损坏只保护那一棵，不连累其他类别——否则生产上会被少数坏目录永久卡住（2026-09-28
     #   dev 裁定 R4）。隔离依据是错误路径与动作路径的前缀重叠，绝不按类别名或目录名放宽。
     #   返回的 errors 仍是执行期错误加扫描期错误（旧语义）；isolated_errors 单列被隔离的扫描期错误，整份拒绝时为空。
     # 函数用途: 应用当前时刻重新验证出的 retention 计划，坏的那一棵单独保护。
-    def apply(self, *, now: datetime | None = None) -> MemoryRetentionReport:
+    def apply(self, *, now: datetime | None = None, commit_transition=None, expected_policy_fingerprint=None) -> MemoryRetentionReport:
         current = _normalize_now(now)
+        if commit_transition is not None:
+            from .retention_transition import RetentionPolicyChangedError, apply_with_transition
+
+            plan = self.plan(now=current)
+            if expected_policy_fingerprint is not None and plan.policy_fingerprint != expected_policy_fingerprint:
+                raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
+            return apply_with_transition(self, plan, current, commit_transition)
         lock_anchor = Path(self.home.owner_trash_dir) / ".memory-retention-v2"
         with locked_json_path(lock_anchor):
             plan = self.plan(now=current)
@@ -136,18 +144,22 @@ def plan_owner_retention(
     return service.plan(now=now)
 
 
-# LLM: 旧 apply 函数同样委托 v2 Service；它不是另一套运行路径。
+# LLM: 仍委托唯一v2 Service；原callback只包Candidate构造目录及实际写，None原成本/锁路径不变。
 # 函数用途: 兼容 Gateway owner maintenance 和旧 home-retention CLI。
 def apply_owner_retention(
     home: object,
     *,
     now: datetime | None = None,
+    commit_transition=None,
+    expected_policy_fingerprint=None,
 ) -> MemoryRetentionReport:
-    service = MemoryRetentionService(
-        home_paths=home,
-        candidates=CandidateService(home.owner_memory_candidates_jsonl),
-    )
-    return service.apply(now=now)
+    candidates = (CandidateService(home.owner_memory_candidates_jsonl) if commit_transition is None
+                  else commit_transition(lambda: CandidateService(home.owner_memory_candidates_jsonl)))
+    service = MemoryRetentionService(home_paths=home, candidates=candidates)
+    if commit_transition is None:
+        return service.apply(now=now)
+    return service.apply(now=now, commit_transition=commit_transition,
+                         expected_policy_fingerprint=expected_policy_fingerprint)
 
 
 # LLM: naive datetime 仅供测试并按 UTC 解释，避免本地时区让保留 cutoff 漂移。

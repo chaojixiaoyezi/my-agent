@@ -12,7 +12,10 @@ from agent_py_agent.agent.local_storage.schema import LocalStoreSchemaMixin
 class MinimalSchemaStore(LocalStoreSchemaMixin):
     """Minimal concrete store for schema testing."""
 
+    # LLM: 最小Store替身显式选择原False策略，不借缺字段模拟C写权；原SQL/FTS断言保持。
+    # 函数用途: 初始化默认本地测试对象，后续维护仍只用原连接与正文替身。
     def __init__(self, tmp_path: Path, enable_fts: bool = True):
+        self.coordinator_io = False
         self.root = tmp_path / "store"
         self.root.mkdir()
         self.files_dir = self.root / "files"

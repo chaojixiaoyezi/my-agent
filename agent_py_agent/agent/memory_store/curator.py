@@ -1,9 +1,11 @@
+# LLM: 原策展只提交候选且正式内容仍需F4用户确认；入口空短核与文件短事务均消费原平台门，模型等待不持T，未结原对象不得失败清账。
+# 模块用途: 运行原按组策展并在真实请求窗口内落候选、游标和失败事实，不扩正式写权限。
 from __future__ import annotations
 
 """Gateway 正式后台主链使用的唯一 Memory Curator 服务。"""
 
-# LLM: 所有触发、模型提取和事务提交沿同一 state/后端/校验器；恢复与领取不可拆开，避免竞争扩大。
-# 模块用途: 调度增量策展、严格模型提取、整批提交、失败审计与保守自动晋升。
+# LLM: 所有触发、提取和提交沿同一 state/后端/校验器；原运输或物理退出未结必须保原异常和租约，不落普通失败或改用默认模型。
+# 模块用途: 调度增量策展及整批提交，保留用户确认、分组游标和未结执行责任。
 # 恢复和领取使用 committer 的同一规范临界区，模型只在解锁且获得租约后执行。
 
 import json
@@ -16,10 +18,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.errors import ModelNotConfiguredError
 from ..backends.provider_headers import provider_session_scope
 from ..common.json_io import read_json_object_report
 from ..common.log_redaction import redact_sensitive_text
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+    gateway_short_transaction,
+)
 from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
 from .candidates import CandidateService, split_identity_conflicts
 from .curator_backend import (
@@ -188,8 +196,13 @@ class _CuratorLifecycleMixin:
 
     # LLM: 到期运行只依据配置、租约与前台资源事实；普通维护遇前台延后，pre_compact仍守原屏障。
     # 函数用途: 按持久状态与前台资源事实调度到期批次，不从正文判断优先级。
+    # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
+    # 函数用途: 在原请求仍开放时开始策展，保留既有到期调度、按组提取和用户正式确认。
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
 
+        from ..gateway_parts.request_entry_admission import require_request_execution
+
+        require_request_execution(component=self, component_attribute="memory_curator")
         if not self.config.enabled:
             return self._result(status="disabled", reason="interval")
         try:
@@ -257,166 +270,174 @@ class _CuratorLifecycleMixin:
     # LLM: Failure audit is appended before releasing the lease; old cursors and pending reasons
     # remain, making a later retry safe.
     # 函数用途: 记录一次持 lease 运行失败并返回稳定结果。
+    # LLM: 仅文件短操作持原T/P3/P5再业务锁；未结typed原样越过best-effort，不写失败账或补默认模型，main F4确认/分组/原pending保持。
+    # 函数用途: 在当前原执行权可核实的短窗口内更新既有策展文件，不把未知当普通失败。
     def _commit_failure(
         self,
         context: _RunContext,
         exc: BaseException,
     ) -> CuratorRunResult:
-        failure_code = _failure_code(exc)
-        finished_at = utc_now_iso()
-        state_code, breaker_warnings = _replay_breaker(self.run_log, context, failure_code)
-        provider = str(context.route.get("provider", self.provider_name))
-        model = str(context.route.get("model", self.model_name))
-        try:
-            self.run_log.append(
-                _failed_run_record(
-                    context,
-                    provider=provider,
-                    model=model,
-                    finished_at=finished_at,
-                    failure_code=failure_code,
-                    failure_diagnostic=_failure_diagnostic(exc),
-                    # 缩批/重试的形状来自本线程最后一次 extract_with_retries;失败时它是唯一能
-                    # 说明"空批失败还是大批量超时"的证据,所以必须在失败审计里落盘。
-                    # 路由警告（默认模型来源、档案退回原因）也进失败记录，总数给失败诊断留一个位置。
-                    attempt_warnings=(*breaker_warnings, *context.route.get("warnings", ()), *context.route.get("failure_warnings", ()),
-                                      *_attempt_shape_warnings(last_model_attempts()))[: RUN_WARNINGS_MAX_COUNT - 1],
+        if isinstance(exc, (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError)):
+            raise exc
+        with gateway_short_transaction("_commit_failure"):
+            failure_code = _failure_code(exc)
+            finished_at = utc_now_iso()
+            state_code, breaker_warnings = _replay_breaker(self.run_log, context, failure_code)
+            provider = str(context.route.get("provider", self.provider_name))
+            model = str(context.route.get("model", self.model_name))
+            try:
+                self.run_log.append(
+                    _failed_run_record(
+                        context,
+                        provider=provider,
+                        model=model,
+                        finished_at=finished_at,
+                        failure_code=failure_code,
+                        failure_diagnostic=_failure_diagnostic(exc),
+                        # 缩批/重试的形状来自本线程最后一次 extract_with_retries;失败时它是唯一能
+                        # 说明"空批失败还是大批量超时"的证据,所以必须在失败审计里落盘。
+                        # 路由警告（默认模型来源、档案退回原因）也进失败记录，总数给失败诊断留一个位置。
+                        attempt_warnings=(*breaker_warnings, *context.route.get("warnings", ()), *context.route.get("failure_warnings", ()),
+                                          *_attempt_shape_warnings(last_model_attempts()))[: RUN_WARNINGS_MAX_COUNT - 1],
+                    )
                 )
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                failure_code = state_code = "CURATOR_RUN_AUDIT_FAILED"
+            try:
+                self.state_store.commit_failure(
+                    lease_id=context.lease_id,
+                    failure_code=state_code,
+                    now=finished_at,
+                )
+            except CuratorStateCorruptError as exc:
+                # 失败落账阶段发现 state 损坏: 同样隔离留证, 不推进任何事实。
+                return self._corrupt_failure(context.reason, exc)
+            except CuratorLeaseLostError:
+                pass
+            return CuratorRunResult(
+                run_id=context.run_id,
+                status="failed",
+                reason=context.reason,
+                provider=provider,
+                model=model,
+                failure_code=failure_code,
             )
-        except Exception:
-            failure_code = state_code = "CURATOR_RUN_AUDIT_FAILED"
-        try:
-            self.state_store.commit_failure(
-                lease_id=context.lease_id,
-                failure_code=state_code,
-                now=finished_at,
-            )
-        except CuratorStateCorruptError as exc:
-            # 失败落账阶段发现 state 损坏: 同样隔离留证, 不推进任何事实。
-            return self._corrupt_failure(context.reason, exc)
-        except CuratorLeaseLostError:
-            pass
-        return CuratorRunResult(
-            run_id=context.run_id,
-            status="failed",
-            reason=context.reason,
-            provider=provider,
-            model=model,
-            failure_code=failure_code,
-        )
 
     # LLM: 损坏 state 的失败路径与普通失败分离: 独立错误码 CURATOR_STATE_CORRUPT(不伪装
     # CURATOR_SCHEMA_INVALID), 原子 quarantine 原文件留不可变副本, run_log 落幂等审计。
     # 哨兵存在后不再重复隔离; quarantine/哨兵写失败转 CURATOR_STATE_QUARANTINE_FAILED
     # 保持可观测, 每 tick 单次尝试, 绝不循环重试或伪造自愈成功。
     # 函数用途: 返回损坏隔离后的稳定失败结果并落无正文审计。
+    # LLM: 仅文件短操作持原T/P3/P5再业务锁；未结typed原样越过best-effort，不写失败账或补默认模型，main F4确认/分组/原pending保持。
+    # 函数用途: 在当前原执行权可核实的短窗口内更新既有策展文件，不把未知当普通失败。
     def _corrupt_failure(self, reason: str, exc: CuratorStateCorruptError) -> CuratorRunResult:
-        failure_code = "CURATOR_STATE_CORRUPT"
-        finished_at = utc_now_iso()
-        # 隔离失败退避: 同 error_class 在冷却窗口内复用上次失败审计(不新增行),
-        # 期满才再试——防 quarantine 长期失败时 run_log 无限刷屏。
-        if not self.state_store.quarantine_backoff_eligible(exc.error_class, now=finished_at):
-            return self._quarantine_backoff_reuse(reason, exc, finished_at)
-        quarantine: dict[str, object] | None = None
-        try:
-            quarantine = self.state_store.quarantine_corrupt(
-                error_class=exc.error_class,
-                now=finished_at,
-            )
-        except Exception:
-            failure_code = "CURATOR_STATE_QUARANTINE_FAILED"
-        if failure_code == "CURATOR_STATE_QUARANTINE_FAILED":
-            # 隔离写失败: 每次尝试都是独立失败事件。哨兵可能已由本次尝试半写成功,
-            # 不能用哨兵时间/派生 run_id(会与后续成功隔离的幂等记录碰撞); 用当前时刻
-            # + 一次性 run_id, 失败可观测且每次可见, 不伪造幂等。
-            run_id = "memory-curator-corrupt-" + uuid.uuid4().hex
-            record_time = finished_at
-            quarantine = {}
+        with gateway_short_transaction("_corrupt_failure"):
+            failure_code = "CURATOR_STATE_CORRUPT"
+            finished_at = utc_now_iso()
+            # 隔离失败退避: 同 error_class 在冷却窗口内复用上次失败审计(不新增行),
+            # 期满才再试——防 quarantine 长期失败时 run_log 无限刷屏。
+            if not self.state_store.quarantine_backoff_eligible(exc.error_class, now=finished_at):
+                return self._quarantine_backoff_reuse(reason, exc, finished_at)
+            quarantine: dict[str, object] | None = None
             try:
-                # 记录退避事实(含本次一次性 run_id): 冷却窗口内复用本审计, 不新增行。
-                self.state_store.record_quarantine_backoff(
-                    exc.error_class, now=finished_at, run_id=run_id
+                quarantine = self.state_store.quarantine_corrupt(
+                    error_class=exc.error_class,
+                    now=finished_at,
                 )
-            except Exception:  # noqa: BLE001 退避留痕失败不掩盖隔离失败本身
-                pass
-        else:
-            if quarantine is None:
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                failure_code = "CURATOR_STATE_QUARANTINE_FAILED"
+            if failure_code == "CURATOR_STATE_QUARANTINE_FAILED":
+                # 隔离写失败: 每次尝试都是独立失败事件。哨兵可能已由本次尝试半写成功,
+                # 不能用哨兵时间/派生 run_id(会与后续成功隔离的幂等记录碰撞); 用当前时刻
+                # + 一次性 run_id, 失败可观测且每次可见, 不伪造幂等。
+                run_id = "memory-curator-corrupt-" + uuid.uuid4().hex
+                record_time = finished_at
+                quarantine = {}
                 try:
-                    quarantine = self.state_store.corrupt_evidence() or {}
-                except Exception:
-                    quarantine = {}
-            run_id = _corrupt_run_id(quarantine)
-            # 审计时间戳用隔离时间(首次)或哨兵时间(重复 run): record_id 稳定, 幂等合并不刷屏。
-            record_time = str(quarantine.get("quarantined_at") or finished_at)
-        warnings = [
-            f"state_quarantined:{path}"
-            for path in [str(quarantine.get("quarantine_path") or "")]
-            if path
-        ]
-        record = CuratorRunRecord(
-            run_id=run_id,
-            lease_id="",
-            status="failed",
-            reason=reason,
-            provider=self.provider_name,
-            model=self.model_name,
-            started_at=record_time,
-            finished_at=record_time,
-            failure_code=failure_code,
-            warnings=tuple(warnings),
-        )
-        try:
-            self.run_log.append(record)
-        except Exception:
-            failure_code = "CURATOR_RUN_AUDIT_FAILED"
-        return CuratorRunResult(
-            run_id=run_id,
-            status="failed",
-            reason=reason,
-            provider=self.provider_name,
-            model=self.model_name,
-            failure_code=failure_code,
-        )
+                    # 记录退避事实(含本次一次性 run_id): 冷却窗口内复用本审计, 不新增行。
+                    self.state_store.record_quarantine_backoff(
+                        exc.error_class, now=finished_at, run_id=run_id
+                    )
+                except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                    raise
+                except Exception:  # noqa: BLE001 退避留痕失败不掩盖隔离失败本身
+                    pass
+            else:
+                if quarantine is None:
+                    try:
+                        quarantine = self.state_store.corrupt_evidence() or {}
+                    except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                        raise
+                    except Exception:
+                        quarantine = {}
+                run_id = _corrupt_run_id(quarantine)
+                # 审计时间戳用隔离时间(首次)或哨兵时间(重复 run): record_id 稳定, 幂等合并不刷屏。
+                record_time = str(quarantine.get("quarantined_at") or finished_at)
+            warnings = [
+                f"state_quarantined:{path}"
+                for path in [str(quarantine.get("quarantine_path") or "")]
+                if path
+            ]
+            record = CuratorRunRecord(
+                run_id=run_id,
+                lease_id="",
+                status="failed",
+                reason=reason,
+                provider=self.provider_name,
+                model=self.model_name,
+                started_at=record_time,
+                finished_at=record_time,
+                failure_code=failure_code,
+                warnings=tuple(warnings),
+            )
+            try:
+                self.run_log.append(record)
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                failure_code = "CURATOR_RUN_AUDIT_FAILED"
+            return CuratorRunResult(
+                run_id=run_id,
+                status="failed",
+                reason=reason,
+                provider=self.provider_name,
+                model=self.model_name,
+                failure_code=failure_code,
+            )
 
     # LLM: 退避窗口内不重复尝试隔离, 复用上一次失败审计: 同 run_id/时间 → append
     # 幂等合并不新增行(record_id 稳定), 失败仍可观测(上次审计在), 不伪造自愈。
     # 函数用途: 隔离失败冷却期内返回与上次一致的可观测失败结果。
+    # LLM: 仅文件短操作持原T/P3/P5再业务锁；未结typed原样越过best-effort，不写失败账或补默认模型，main F4确认/分组/原pending保持。
+    # 函数用途: 在当前原执行权可核实的短窗口内更新既有策展文件，不把未知当普通失败。
     def _quarantine_backoff_reuse(
         self,
         reason: str,
         exc: CuratorStateCorruptError,
         finished_at: str,
     ) -> CuratorRunResult:
-        marker = self.state_store.quarantine_backoff_evidence()
-        run_id = str(marker.get("run_id") or "").strip()
-        if not run_id:
-            run_id = "memory-curator-corrupt-" + uuid.uuid4().hex
-        record_time = str(marker.get("last_attempt_at") or finished_at)
-        record = CuratorRunRecord(
-            run_id=run_id,
-            lease_id="",
-            status="failed",
-            reason=reason,
-            provider=self.provider_name,
-            model=self.model_name,
-            started_at=record_time,
-            finished_at=record_time,
-            failure_code="CURATOR_STATE_QUARANTINE_FAILED",
-            warnings=(),
-        )
-        failure_code = "CURATOR_STATE_QUARANTINE_FAILED"
-        try:
-            self.run_log.append(record)  # 幂等: 同 record_id 合并不新增行
-        except Exception:
-            failure_code = "CURATOR_RUN_AUDIT_FAILED"
-        return CuratorRunResult(
-            run_id=run_id,
-            status="failed",
-            reason=reason,
-            provider=self.provider_name,
-            model=self.model_name,
-            failure_code=failure_code,
-        )
+        with gateway_short_transaction("_quarantine_backoff_reuse"):
+            marker = self.state_store.quarantine_backoff_evidence()
+            record = _quarantine_failure_record(marker, reason, self.provider_name, self.model_name, finished_at)
+            failure_code = "CURATOR_STATE_QUARANTINE_FAILED"
+            try:
+                self.run_log.append(record)  # 幂等: 同 record_id 合并不新增行
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                failure_code = "CURATOR_RUN_AUDIT_FAILED"
+            return CuratorRunResult(
+                run_id=record.run_id,
+                status="failed",
+                reason=reason,
+                provider=self.provider_name,
+                model=self.model_name,
+                failure_code=failure_code,
+            )
 
     # LLM: A recovery error before lease acquisition cannot safely mutate state or fabricate a
     # run ID; the pending durable request remains available for operator repair/retry.
@@ -498,19 +519,24 @@ class _CuratorExecutionMixin:
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
     # 函数用途: 每次执行前应用 Memory v2 迁移,返回可展示的迁移 warning。
+    # LLM: 仅文件短操作持原T/P3/P5再业务锁；未结typed原样越过best-effort，不写失败账或补默认模型，main F4确认/分组/原pending保持。
+    # 函数用途: 在当前原执行权可核实的短窗口内更新既有策展文件，不把未知当普通失败。
     def _preflight_migration(self) -> tuple[str, ...]:
-        if self.migration_service is None:
+        with gateway_short_transaction("_preflight_migration"):
+            if self.migration_service is None:
+                return ()
+            try:
+                report = self.migration_service.apply()
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception as exc:
+                return (f"memory_migration_failed:{_failure_code(exc)}",)
+            if report.applied:
+                return (
+                    f"memory_migration_applied:candidates={report.migrated_candidates},"
+                    f"daily={report.migrated_daily_events}",
+                )
             return ()
-        try:
-            report = self.migration_service.apply()
-        except Exception as exc:
-            return (f"memory_migration_failed:{_failure_code(exc)}",)
-        if report.applied:
-            return (
-                f"memory_migration_applied:candidates={report.migrated_candidates},"
-                f"daily={report.migrated_daily_events}",
-            )
-        return ()
 
     # LLM: Formal memory 走固定子预算;due 检查省略它,实际 run 包含它而不动游标契约。
     #   名单随消息来源包传入：名单会话读取前跳过（游标不动），None 表示不可读的 fail-closed。
@@ -716,17 +742,22 @@ class _CuratorExclusionMixin:
 
     # LLM: 标记同步只做结构化映射（名单会话→thread→候选 refs），失败只记 warning 不阻断策展主链。
     # 函数用途: 把名单会话的既有待定候选标记为排除，返回可展示警告。
+    # LLM: 仅文件短操作持原T/P3/P5再业务锁；未结typed原样越过best-effort，不写失败账或补默认模型，main F4确认/分组/原pending保持。
+    # 函数用途: 在当前原执行权可核实的短窗口内更新既有策展文件，不把未知当普通失败。
     def _sync_learning_exclusions(self, excluded_ids: frozenset[str]) -> tuple[str, ...]:
-        try:
-            report = sync_learning_exclusion_marks(
-                conversation_store=self.conversation_store,
-                candidate_service=self.candidate_service,
-                excluded_conversation_ids=excluded_ids,
-            )
-        except Exception:
-            return ("learning_exclusion_sync_failed",)
-        marked = int(report.get("marked") or 0)
-        return (f"learning_exclusion_marked:{marked}",) if marked else ()
+        with gateway_short_transaction("_sync_learning_exclusions"):
+            try:
+                report = sync_learning_exclusion_marks(
+                    conversation_store=self.conversation_store,
+                    candidate_service=self.candidate_service,
+                    excluded_conversation_ids=excluded_ids,
+                )
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                return ("learning_exclusion_sync_failed",)
+            marked = int(report.get("marked") or 0)
+            return (f"learning_exclusion_marked:{marked}",) if marked else ()
 
 
 # LLM: 自动晋升的候选选取与执行集中在这里：只消费持久账本与提交结果里的结构化字段，
@@ -831,7 +862,7 @@ class _CuratorPromotionMixin:
 
 # LLM: 一次触发的运行编排与按组取模型：run 按会话主代理模型分组依次跑完整运行（_run_once 负责恢复、租约和失败记账），
 #   _extract_for_route 用本组模型提取并在确定性失败时用 owner 默认模型补跑一次；本组模型此前连续连不上时直接改用默认模型。
-#   只经 _execute/_commit_failure 等原链
+#   原来源缺失或运输/物理退出未结原样上抛，不能经普通失败、默认补跑或 lease 退役放回责任；只经 _execute/_commit_failure 等原链
 #   读写账本，不直接碰 Daily/Candidate；改动同步 test_curator_thread_model_routing.py 与 test_memory_curator_v2.py。
 # 类用途: 提供 Curator 一次触发的分组运行和按组选模型的提取。
 class _CuratorRunMixin:
@@ -839,6 +870,8 @@ class _CuratorRunMixin:
     #   成功且还有组没处理才接着跑下一组，最多 CURATOR_MODEL_GROUP_MAX_COUNT 组；任何一组没成功就停在那组，
     #   已提交的组不会重复落账，那组游标不动、按原规则安全重放。没有路由时只跑一次，与改动前一致。
     # 函数用途: 显式或自动执行 Curator（可能连续处理几组会话）并返回汇总后的无正文运行摘要。
+    # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
+    # 函数用途: 在原请求仍开放时开始策展，保留既有到期调度、按组提取和用户正式确认。
     def run(
         self,
         *,
@@ -847,6 +880,9 @@ class _CuratorRunMixin:
         now: datetime | None = None,
     ) -> CuratorRunResult:
 
+        from ..gateway_parts.request_entry_admission import require_request_execution
+
+        require_request_execution(component=self, component_attribute="memory_curator")
         results: list[CuratorRunResult] = []
         remaining = 1
         while remaining and len(results) < CURATOR_MODEL_GROUP_MAX_COUNT:
@@ -856,8 +892,8 @@ class _CuratorRunMixin:
                 break
         return combined_run_result(results)
 
-    # LLM: 恢复/领取同锁；执行后持续心跳到晋升尾段结束，未配置模型和共享锁竞争口径保持不变。
-    # 函数用途: 领取租约后执行整轮 Curator，在提取、提交和晋升期间维持同一租约。
+    # LLM: 恢复/领取同锁，普通失败保持原分类；原端口缺失/运输或物理退出未结必须原样上抛，不补无租约失败审计。
+    # 函数用途: 领取并维持同一策展租约，未结来源交原宿主处理，不推进 pending 或游标。
     def _run_once(
         self,
         *,
@@ -871,6 +907,8 @@ class _CuratorRunMixin:
             acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
                 reason, self.config.revision(), _lease_seconds(self.config), now,
             ))
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
         except CuratorStateCorruptError as exc:
             # 崩溃恢复阶段也读 state: 损坏同样隔离留证, 不进无落账的 unleased 路径。
             return self._corrupt_failure(reason, exc), 0
@@ -884,8 +922,8 @@ class _CuratorRunMixin:
         with curator_lease_interruption_guard(self.state_store, context.lease_id):
             return self._run_leased(context)
 
-    # LLM: 外层守卫覆盖主体和失败审计；原生异常字典的停止未确认标记不能被子类属性屏蔽，也不能经 commit_failure 清租约。
-    # 函数用途: 执行已领取的一轮，心跳确认结束才释放；停止未确认时保留原异常与执行权。
+    # LLM: 原运输和独立物理退出未结先于普通失败处理；心跳 stop 标记仍读原异常字典，任何未确认都不能经 commit_failure 清租约。
+    # 函数用途: 执行已领取的一轮，正常收尾才释放；未结时保原对象、pending 与游标交宿主对账。
     def _run_leased(self, context: _RunContext) -> tuple[CuratorRunResult, int]:
         from .curator_lease import (
             curator_lease_heartbeat,
@@ -898,16 +936,19 @@ class _CuratorRunMixin:
                 result = self._execute(context)
             release_curator_lease(self.state_store, context.lease_id)
             return result, int(context.route.get("remaining", 0) or 0)
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
         except Exception as exc:
             if lease_exception_metadata(exc).get("lease_heartbeat_stop_error_class"):
                 raise
             return self._commit_failure(context, exc), 0
 
-    # LLM: 用本组模型提取并校验；会话自己的模型在提取/校验阶段确定性失败（CURATOR_DEFAULT_FALLBACK_CODES）且不是默认组时，
+    # LLM: 原端口/运输及物理退出未结只按 canonical 类型原样抛出，不能被 schema 分类赋予默认模型补跑资格；其余分组规则不变。
+    #   用本组模型提取并校验；会话自己的模型在提取/校验阶段确定性失败（CURATOR_DEFAULT_FALLBACK_CODES）且不是默认组时，
     #   本次运行内用 owner 默认模型补跑一次：此时还没写任何东西，幂等不受影响；成功后运行记录写实际用的默认模型并加
     #   curator_thread_model_failed:<码>，补跑也失败就按这次运行记一次失败（熔断按运行计，不按尝试计）。每组每次最多补跑一次。
     #   本组模型此前已连续连不上（_transient_fallback 判定）时，这次不再试它，直接用默认模型。
-    # 函数用途: 执行一次有界的模型提取与证据校验，必要时用默认模型补跑。
+    # 函数用途: 提取并校验当前组，只有原确定性解析失败可补跑默认模型，未结责任不重放。
     def _extract_for_route(self, context: _RunContext, batch: CuratorInputBatch):
         route = context.route
         transient = self._transient_fallback(context, batch)
@@ -915,6 +956,8 @@ class _CuratorRunMixin:
             return transient
         try:
             return self._extract_with(route.get("backend", self.backend), context, batch)
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
         except Exception as exc:
             code = _failure_code(exc)
             default = route.get("default")
@@ -1786,3 +1829,24 @@ __all__ = [
     "MemoryCuratorIdentity",
     "MemoryCuratorService",
 ]
+
+
+# LLM: 只从原backoff元数据构造同一失败审计；不读写文件、不申请运行或晋升权，缺run_id沿原规则生成一次性ID，字段口径不得变化。
+# 函数用途: 组合隔离退避复用的审计记录，实际落盘仍由原短事务和run_log唯一入口负责。
+def _quarantine_failure_record(marker, reason, provider, model, finished_at):
+    run_id = str(marker.get("run_id") or "").strip()
+    if not run_id:
+        run_id = "memory-curator-corrupt-" + uuid.uuid4().hex
+    record_time = str(marker.get("last_attempt_at") or finished_at)
+    return CuratorRunRecord(
+        run_id=run_id,
+        lease_id="",
+        status="failed",
+        reason=reason,
+        provider=provider,
+        model=model,
+        started_at=record_time,
+        finished_at=record_time,
+        failure_code="CURATOR_STATE_QUARANTINE_FAILED",
+        warnings=(),
+    )

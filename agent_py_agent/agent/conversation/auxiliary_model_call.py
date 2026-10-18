@@ -1,4 +1,4 @@
-# LLM: 普通与结构化辅助生成共享原模型账；schema 分派不执行工具，观察回调只读原记录、不复制正文或另建账。
+# LLM: 普通与结构化辅助生成共享原模型账；观察回调只读。独立用量结算只降级普通遥测故障，原 typed 执行未知同对象交原请求收口。
 # 模块用途: 记录 Compact 和结构化辅助调用，保留原载荷及统计，并返回无正文的调用观察。
 """统一记录 Compact 等非工具循环模型调用。"""
 
@@ -28,6 +28,7 @@ from ..backends import ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
 from ..backends.provider_headers import provider_runtime_scope
 from ..backends.response_completion import has_reasoning_content
+from ..common.request_execution_ports import raise_if_transport_uncertain
 from ..contracts.model_call_ledger import (
     ModelCallActivityParams,
     ModelCallFirstTokenParams,
@@ -555,8 +556,8 @@ def _record_auxiliary_cost(
         pass
 
 
-# LLM: 独立 request_id 的辅助调用提交原累计快照；store 按范围/摘要生成幂等身份，不用物理调用数猜快照版本。
-# 函数用途: 保存独立压缩或显式探测的模型消耗；只更新用量时保留当前生成状态，保存失败不改变调用结果。
+# LLM: 独立 request_id 沿原 store 范围/摘要幂等提交；普通遥测故障降级，typed 执行未知保原对象上抛，已追加事实不回滚或重做。
+# 函数用途: 保存独立压缩或探测用量；显示故障不改变模型结果，执行权未知须由原请求核实，不能假结清。
 def settle_standalone_model_usage(request: object, *, source: str = "conversation_compact", usage_only: bool = False) -> None:
     from ..agent_core.model.call_runtime import model_call_summary
     from .model_metrics import publish_model_metrics
@@ -580,7 +581,8 @@ def settle_standalone_model_usage(request: object, *, source: str = "conversatio
             live_archive_state={}, task_attributes={"conversation_thread_id": thread_id})
         # 已结束的独立压缩没有工具执行权；没有原始响应就不伪造最近缓存与速度。
         publish_model_metrics(agent, params, pending=False, tool_count=0, usage_only=usage_only)
-    except Exception:
+    except Exception as error:
+        raise_if_transport_uncertain(error)
         logging.getLogger(__name__).warning("独立模型调用用量保存失败；调用结果不受影响", exc_info=False)
 
 

@@ -1,6 +1,11 @@
+# LLM: 原审批清理债务的真实异常链保同outer交原Future；普通无债错误保持原终态路径，查链不替代canonical核收。
 
 # LLM: 单 Gateway 的请求、后台会话和维护车道编排；执行权与事件保存在原队列/会话层，重试策略独立且不落盘。
-# 模块用途: 连接请求处理、按用户公平调度、维护和心跳；不要在此新增任务状态或默认模型。
+#   C派发复用原持久gate/claim和同代execution，原线程池/Count0公平及恢复分页保持；线程返回不释放P3。
+#   C孤儿业务只走原独立来源请求，这里的旧owner扫车道不直接物化远端Agent；标志只收窄不授执行。
+#   C冷组合只运行同源metadata producer与请求盖章，心跳末写核原lease；Count0业务公平、三旧控制线程顺序不变。
+#   C输入段仅接原queued/cursor元数据源，绑定输入延期不构造foreign Agent；Count0旧receipt/guidance链保持。
+# 模块用途: 连接请求处理、按用户公平调度、维护和心跳；不在此新增任务状态、权限或默认模型。
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,7 +100,8 @@ def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
 #   打印 + gateway 事件），Exception 按原语义吞掉返回，BaseException 原样上抛。2026-09-28 生产事故：磁盘写满时 print 抛
 #   OSError 逃出 tick 的 except 块，while 外没有兜底，派发线程静默退出，pending 堆了一下午没人处理。改动须同步
 #   test_gateway_dispatcher_resilience.py。
-# 函数用途: 请求处理循环：单派发者扫描 pending，按两层限流认领后交执行池；本函数只负责起停、兜底与退出记录。
+# LLM: cold C只接原control/Root/P3元数据泵，保原pending盖章和规范终态释放；不造Agent或运行owner恢复/输入对账，healthy及Count0主体保持。
+# 函数用途: Count0及healthy C沿原派发池，cold C仅推进元数据；起停/错误记账保持，不构造虚拟业务Agent。
 def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_event: threading.Event) -> None:
     """请求处理循环:单派发者扫描 pending,按两层限流(每用户小坑+全局大坑)认领,
     交给按需扩张的执行线程池跑(池上限=全局大坑)。取代原「N 个 worker 线程各自扫描」
@@ -102,6 +109,22 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
     loop_health.mark_started()
     stage = "gateway_request_pool.initialize"
     try:
+        from ..agent.gateway_parts.multiprocess_background_discovery import (
+            coordinator_background_required,
+        )
+
+        if coordinator_background_required(getattr(context, "control_plane", None), paths,
+                getattr(context, "coordinator_worker_count", 0)):
+            _require_coordinator_loop_source(context)
+            if context.agent is None:
+                from .gateway_coordinator_request_pump import CoordinatorMetadataRequestPump
+
+                dispatcher = CoordinatorMetadataRequestPump(context, paths)
+                stage = "gateway_control_admission.run"
+                _run_request_dispatch(dispatcher, stop_event)
+                dispatcher.shutdown()
+                _record_request_loop_exit(context, "gateway_control_admission.shutdown", None)
+                return
         dispatcher = _RequestDispatcher(context, paths)
         stage = "gateway_request_loop.run"
         _run_request_dispatch(dispatcher, stop_event)
@@ -216,6 +239,8 @@ def _record_request_loop_exit(context: GatewayRunContext, stage: str, error: Bas
     )
 
 
+# LLM: 复用原执行池/分页恢复/公平扫描；C的实际gate、claim、线程和P6观察只来自本代组合根，Count0不创建MP来源。
+# 类用途: 把原队列交给同一基础Agent执行，并独立修复历史投影；不持文件门等待线程。
 class _RequestDispatcher:
     """两层限流派发者:admission(request_worker.admission)→ claim → 提交执行池。
 
@@ -224,6 +249,9 @@ class _RequestDispatcher:
     不再给每个执行线程重复构造 backend、工具表、记忆和 capability cache。
     stale lease 恢复扫描随派发节流跑(原 worker-0 职责收进派发者)。"""
 
+    # LLM: 原C正count组合根在pool ctor前供P6 initializer，真实worker进入业务前保Thread；默认0的None不新建观察/权威。
+    # LLM: 原submit Future在本实例局部保留，退休未结不能随业务线程返回丢弃；不是第二队列或审批表。
+    # 函数用途: 构造原池并保存原Future完成核收责任及本代线程观察。
     def __init__(self, context: GatewayRunContext, paths: GatewayPaths) -> None:
         self.context = context
         self.paths = paths
@@ -233,13 +261,31 @@ class _RequestDispatcher:
         # The request file and lease are authoritative.  If a provider/tool
         # call wedges during process shutdown, the next Gateway reclaims that
         # exact request; the old attempt cannot be allowed to hold Python open.
+        self._drain_runtime = getattr(context, 'drain_runtime', None)
+        self._drain_group = (self._drain_runtime.prepare_pool('foreground', 'gateway/request-pool')
+                             if self._drain_runtime is not None else None)
         self._executor = DurableDaemonThreadPoolExecutor(
-            max_workers=self.limits.global_inflight, thread_name_prefix="gw-exec"
+            max_workers=self.limits.global_inflight, thread_name_prefix="gw-exec",
+            initializer=self._drain_group.remember_current_thread if self._drain_group is not None else None,
         )
+        if self._drain_group is not None:
+            self._drain_group.bind_executor(self._executor)
+        self._request_futures = {}
+        self._future_gate = threading.Lock()
         self._scan_gate = GatewayInboxScanGate()
         self._recover_throttle = _RecoverThrottle(self.bootstrap_agent)
+        # LLM: 内部多进程模式（count>0）由 C 的持久准入门接管派发准入（预留+盖章）；默认单进程
+        #   不 import 该模块、不读状态、不建目录，进程内两层限流与线程返回释放一字不变。
+        self._admission_gate = None
+        if int(getattr(context, "coordinator_worker_count", 0) or 0) > 0:
+            from ..agent.gateway_parts.multiprocess_admission import coordinator_admission_gate
+
+            self._admission_gate = coordinator_admission_gate(self.bootstrap_agent, self.paths, context)
+            if self._drain_runtime is not None:
+                self._drain_runtime.retain_admission(self._admission_gate)
         self._next_input_reconcile_at = 0.0
         self._next_terminal_projection_at = 0.0
+        # 启动后的第一次终态投影扫描走全量（崩溃恢复保证）；之后按目录时间戳节流。
         self._terminal_projection_startup = True
         # 派发段失败与逃逸异常共用一份循环退避；三个后台修复段各自一份，失败只推迟自己的下次到期，绝不拖慢派发轮询
         #（tick 的约定：Historical projection and reconciliation scans must never sit in front of an interactive request）。
@@ -251,21 +297,30 @@ class _RequestDispatcher:
         self._lock_cleanup_backoff = LoopErrorBackoff()
         self._next_lock_cleanup_at = 0.0
 
-    # LLM: 安全重启排空期间（restart_service.restart_draining）不再认领新请求，只给它们记结构化等待事实，留给接班进程处理；
+
+    # LLM: 原P6已停止出生则不再认领；Count0/原组件缺Root只读内存默认None，安全重启仍按原结构化等待，原T/P3/恢复与终态投影不变。
     # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
     # 函数用途: 派发一轮待处理请求并执行节流的恢复/投影/调和扫描，返回本轮派发数量。
     def tick(self) -> int:
         # New work gets the first bounded slice. Historical projection and
         # reconciliation scans must never sit in front of an interactive request.
+        self._collect_request_futures()
         self.tick_failed = False
+        runtime = getattr(self, '_drain_runtime', None)
+        if runtime is not None and runtime._closing:
+            return 0
         dispatched = 0
         try:
+            # mc4-1704：派发前先回收"已有规范终态但仍 occupied"的预留，崩溃/重启遗留名额不堵新请求。
+            if self._admission_gate is not None:
+                self._admission_gate.release_settled()
             dispatched = dispatch_pending_requests(
                 self.paths,
                 self.limits,
                 self._submit,
                 scan_gate=self._scan_gate,
                 hold_reason=RESTART_DRAIN_HOLD_REASON if restart_draining() else "",
+                admission_gate=self._admission_gate,
             )
         except Exception as exc:
             # 只有派发段自己失败才让外层守卫退避（没请求可派时）；账本记在 loop "dispatcher" 下，打印按循环退避限流。
@@ -289,6 +344,7 @@ class _RequestDispatcher:
             self._next_lock_cleanup_at = now + max(_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS, delay)
         return dispatched
 
+
     # LLM: 后台修复段的统一跑法：成功清零该段退避并返回 0；失败记账（loop "dispatcher"）、按该段自己的退避限流打印，
     #   返回该段应额外推迟的秒数——只推迟这一段的下次到期，不碰派发轮询，也不置 tick_failed。
     # 函数用途: 跑一个后台修复段，返回它下次到期要额外等的秒数。
@@ -301,26 +357,64 @@ class _RequestDispatcher:
         backoff.record_success()
         return 0.0
 
-    # 函数用途: 恢复段的一次执行（stale lease 恢复扫描）。
+    # LLM: 正MP只传本dispatcher原P3门；实际P2长观察由恢复链在T外核，旧域/Runtime未知不由TTL授恢复权。
+    # 函数用途: 用本代真实准入源扫描恢复旧processing；Count0仍不创建gate或新执行账。
     def _recover_once(self) -> None:
-        recover_gateway_processing_requests(
-            self.paths,
-            startup=False,
-            max_attempts=self.bootstrap_agent.config.gateway_request_max_attempts,
-            timeout_seconds=self.bootstrap_agent.config.gateway_processing_timeout_seconds,
-            agent=self.bootstrap_agent,
-        )
+        if self._admission_gate is None:
+            recover_gateway_processing_requests(
+                self.paths,
+                startup=False,
+                max_attempts=self.bootstrap_agent.config.gateway_request_max_attempts,
+                timeout_seconds=self.bootstrap_agent.config.gateway_processing_timeout_seconds,
+                agent=self.bootstrap_agent,
+            )
+            return
+        from ..agent.gateway_parts.recovery import _non_negative_int, _RecoveryContext
 
-    # LLM: 首次强制读取原终态；随后只节流已追平的可重建投影，不改变请求派发和恢复顺序。
-    # 函数用途: 启动完整核对一次终态投影，稳态由原扫描游标控制低频重核。
+        config = self.bootstrap_agent.config
+        params = _RecoveryContext(
+            time.time(), _non_negative_int(config.gateway_request_max_attempts, default=1),
+            max(1, int(config.gateway_processing_timeout_seconds or 1)), False, self.bootstrap_agent, None,
+            admission_gate=self._admission_gate,
+        )
+        recover_gateway_processing_requests(self.paths, params=params)
+
+
+    # LLM: 终态post只能复用本dispatcher的原gate重新核Runtime/owner政策；Count0无来源查询，原分页/追平合同不变。
+    # 函数用途: 用本代准入来源补原终态欠账，启动完整核对后沿原扫描游标低频重核。
     def _project_terminals_once(self) -> None:
         startup, self._terminal_projection_startup = self._terminal_projection_startup, False
-        repair_gateway_terminal_projections(self.paths, agent=self.bootstrap_agent, limit=16, full_scan=startup)
+        recovery_context = None
+        if self._admission_gate is not None:
+            from ..agent.gateway_parts.recovery import _RecoveryContext
+
+            recovery_context = _RecoveryContext(
+                time.time(), 1, 1, False, self.bootstrap_agent, None,
+                admission_gate=self._admission_gate,
+            )
+        repair_gateway_terminal_projections(
+            self.paths, agent=self.bootstrap_agent, limit=16, full_scan=startup,
+            recovery_context=recovery_context,
+        )
 
     # LLM: 对账结果里的错误（对账抛错、带错误的终态未知）要抛给段守卫：进 loop_health 计数与限流打印，并只推迟本段自己的
     #   下次到期；不能像以前那样把 summary 丢掉让坏账回执被静默重读。
-    # 函数用途: 输入回执调和段的一次执行，有无法收口的回执就按结构化异常上报。
+    #   正C只把当前context/Root/gate交queued消费者，bound明确延期；Count0仍原完整对账，不读新角色或库。
+    # 函数用途: 输入调和段沿本代实际来源执行，失败或未支持状态参与原独立退避。
     def _reconcile_inputs_once(self) -> None:
+        gate, context = getattr(self, '_admission_gate', None), getattr(self, 'context', None)
+        if (gate is not None or getattr(context, 'control_plane', None) is not None
+                or getattr(context, 'drain_runtime', None) is not None
+                or int(getattr(context, 'coordinator_worker_count', 0) or 0) > 0):
+            from ..agent.gateway_parts.multiprocess_input_reconcile import (
+                reconcile_coordinator_queued_inputs,
+                require_coordinator_input_progress,
+            )
+
+            require_coordinator_input_progress(
+                reconcile_coordinator_queued_inputs(context, self.paths, gate)
+            )
+            return
         raise_if_input_reconcile_unsettled(
             reconcile_gateway_input_receipts(self.paths, self.bootstrap_agent, limit=64)
         )
@@ -332,9 +426,23 @@ class _RequestDispatcher:
         for directory in gateway_lock_sidecar_dirs(self.paths):
             cleanup_orphan_lock_files(directory)
 
+    # LLM: 已认领原claim提交失败保持原处理责任；P6保未知出生缺口，不把空_threads当不存在，Count0不增观察。
+    # LLM: 保存真实submit返回的原Future与原claim；不重新提交错误或复制执行source。
+    # 函数用途: 提交原请求并保留准确完成对象，提交失败仍沿原资源责任。
     def _submit(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
-        self._executor.submit(self._execute, claim, user_key, conversation_key)
+        try:
+            future = self._executor.submit(self._execute, claim, user_key, conversation_key)
+            with self._future_gate:
+                self._request_futures[future] = (claim, user_key, conversation_key)
+        except BaseException as error:
+            if self._drain_group is not None:
+                self._drain_group.retain_fault(error)
+            raise
 
+
+    # LLM: 冻结C上下文覆盖正常执行和异常终结；Count0沿原初始化失败收口，不取C来源或提前依赖bootstrap对象；finally不释放持久预留。
+    # LLM: 原native或携其债务的outer链同对象交原Future，不能吞成普通terminalize；查链不授终态，原计数释放不同于持久P3释放。
+    # 函数用途: 执行准确原claim，实际未结由原Future核收，不重新选择owner。
     def _execute(self, claim: GatewayClaim, user_key: str, conversation_key: str) -> None:
         from ..agent.observability.concurrency_metrics import gateway_worker_busy
 
@@ -342,40 +450,86 @@ class _RequestDispatcher:
         processing_path = claim.path
         gateway_worker_busy(1)
         try:
-            agent = self._thread_agent()
-            _process_claimed_gateway_request_path(
-                agent,
-                self.paths,
-                processing_path,
-                f"gw-exec-{threading.get_ident()}",
-                claim=claim,
-            )
-        except Exception as exc:
-            _print_gateway_loop_error("gateway_request_execute", processing_path.stem, exc)
-            try:
-                terminalize_unhandled_claimed_gateway_request(
-                    self.paths,
-                    processing_path,
-                    exc,
-                    agent=agent,
-                    expected_execution_attempt_id=claim.execution_attempt_id,
-                    expected_lease_epoch=claim.lease_epoch,
+            scope = nullcontext()
+            if self._admission_gate is not None:
+                from ..agent.gateway_parts.multiprocess_coordinator_execution import (
+                    coordinator_execution_scope,
                 )
-            except Exception as terminalize_exc:
-                _print_gateway_loop_error(
-                    "gateway_request_terminalize",
-                    processing_path.stem,
-                    terminalize_exc,
-                )
+
+                scope = coordinator_execution_scope(self._admission_gate, claim, self.bootstrap_agent)
+            with scope:
+                try:
+                    agent = self._thread_agent()
+                    _process_claimed_gateway_request_path(
+                        agent,
+                        self.paths,
+                        processing_path,
+                        f"gw-exec-{threading.get_ident()}",
+                        claim=claim,
+                    )
+                except Exception as exc:
+                    from ..agent.conversation.agent_tool_approval import (
+                        find_approval_retirement_error,
+                    )
+
+                    if find_approval_retirement_error(exc) is not None:
+                        raise
+                    _print_gateway_loop_error("gateway_request_execute", processing_path.stem, exc)
+                    try:
+                        terminalize_unhandled_claimed_gateway_request(
+                            self.paths,
+                            processing_path,
+                            exc,
+                            agent=agent,
+                            expected_execution_attempt_id=claim.execution_attempt_id,
+                            expected_lease_epoch=claim.lease_epoch,
+                        )
+                    except Exception as terminalize_exc:
+                        _print_gateway_loop_error(
+                            "gateway_request_terminalize",
+                            processing_path.stem,
+                            terminalize_exc,
+                        )
         finally:
             gateway_worker_busy(-1)
             admission.release(user_key, conversation_key=conversation_key)
 
+
     def _thread_agent(self) -> SimpleAgent:
         return self.bootstrap_agent
 
+    # LLM: 只关闭原executor出生；原native异常链也须保原outer对象，shutdown不等文件锁，不以线程池退出代替业务终态核收。
+    # 函数用途: 停止原请求池并核收已经返回的义务，不以线程池shutdown冒充清理完成。
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False)
+        self._collect_request_futures()
+        with self._future_gate:
+            pending = tuple(self._request_futures)
+        from ..agent.conversation.agent_tool_approval import find_approval_retirement_error
+
+        for future in pending:
+            if future.done() and find_approval_retirement_error(future.exception()) is not None:
+                raise future.exception()
+
+    # LLM: dict只持原submit Future/claim，不新建任务；锁内仅snapshot/pop，permission try与canonical只读均在锁外。
+    # 函数用途: 每轮只try原负向清理；准确canonical终态、旧attempt与claim俱已接收才移除，外层/物理未知仍保Future。
+    def _collect_request_futures(self):
+        from ..agent.conversation.agent_tool_approval import (
+            complete_approval_retirement_future,
+            find_approval_retirement_error,
+        )
+
+        with self._future_gate:
+            rows = tuple(self._request_futures.items())
+        for future, work in rows:
+            if not future.done():
+                continue
+            error = future.exception()
+            if find_approval_retirement_error(error) is not None and not complete_approval_retirement_future(error, work[0]):
+                continue
+            with self._future_gate:
+                if self._request_futures.get(future) is work:
+                    del self._request_futures[future]
 
 
 def _attach_shared_owner_registry(agent: SimpleAgent, context: GatewayRunContext) -> None:
@@ -386,7 +540,35 @@ def _attach_shared_owner_registry(agent: SimpleAgent, context: GatewayRunContext
         _print_gateway_loop_error("gateway_request_worker.owner_registry", "owner-registry", exc)
 
 
+# LLM: C信号仅拒旧inline回落；control/Root/lease/runtime仍须同原对象、PID/FD和冻结代次，缺失/复制/关闭不得从DTO重建许可。
+# 函数用途: 验证当前冷C循环确属本次真实组合根，不发模型、建线程或写业务文件。
+def _require_coordinator_loop_source(context):
+    from ..agent.gateway_parts.control_plane import GatewayControlPlane
+    from ..agent.gateway_parts.multiprocess_drain_runtime import GatewayDrainRuntime
+
+    control, runtime = getattr(context, "control_plane", None), getattr(context, "drain_runtime", None)
+    if (type(control) is not GatewayControlPlane or type(runtime) is not GatewayDrainRuntime
+            or control.paths is not context.paths or runtime.control is not control
+            or type(context.coordinator_worker_count) is not int
+            or context.coordinator_worker_count != control.worker_count):
+        raise ValueError("gateway_original_coordinator_loop_required")
+    runtime.require_original()
+    controller = control.controller()
+    if runtime._closing or controller is None or not controller.active():
+        raise ValueError("gateway_original_coordinator_loop_closed")
+
+
+# LLM: Count0原supervisor/三设施线程保序；C只接真实metadata来源，不物化远端owner Agent或执行旧inline维护，坏源不回退。
+# 函数用途: 依本次真实组合根选择既有业务循环或C来源发现循环。
 def _gateway_background_main_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
+    from ..agent.gateway_parts.multiprocess_background_discovery import (
+        coordinator_background_required,
+    )
+
+    if coordinator_background_required(getattr(context, "control_plane", None), getattr(context, "paths", None),
+            getattr(context, "coordinator_worker_count", 0)):
+        _run_coordinator_background_sources(context, stop_event)
+        return
     try:
         supervisor = _BackgroundMainSupervisor(context)
         poll_interval = supervisor.poll_interval
@@ -403,6 +585,24 @@ def _gateway_background_main_loop(context: GatewayRunContext, stop_event: thread
             supervisor,
             (reconcile_thread, maintenance_thread, scheduler_due_thread),
         )
+
+
+
+# LLM: 只复用原C发现producer的真实control/Root/lease；普通tick退避保原LoopErrorBackoff，退出不重放、释放P3或启动业务Agent。
+# 函数用途: 在同一原后台线程推进metadata来源发现，不启动三条旧业务控制线程。
+def _run_coordinator_background_sources(context, stop_event):
+    from ..agent.gateway_parts.multiprocess_background_discovery import (
+        CoordinatorBackgroundRequests,
+    )
+
+    _require_coordinator_loop_source(context)
+    sources = CoordinatorBackgroundRequests(context.control_plane, drain_runtime=context.drain_runtime)
+    backoff = LoopErrorBackoff()
+    site = _LoopSite("background-main", "gateway_background_main.sources", "background-main", _background_main_poll_interval())
+    while not stop_event.is_set():
+        wait_seconds = _supervisor_tick_survives(sources, backoff, site)
+        if wait_seconds > 0:
+            stop_event.wait(wait_seconds)
 
 
 # LLM: 后台主循环节奏与派发循环同一套：有活立刻下一拍，空闲等 poll_interval，连续出错按 LoopErrorBackoff 退避并限流打印。
@@ -1510,6 +1710,13 @@ class _GatewaySchedulerDueController:
         return announced
 
 
+# LLM: 原C组合根标志仅禁止这里直接运行业务，不替代P3/P5或租约；普通Count0无新I/O。
+# 函数用途: 判断原controller是否应让既有后台来源进入独立请求主链。
+def _coordinator_request_context(context: GatewayRunContext) -> bool:
+    return (int(getattr(context, "coordinator_worker_count", 0) or 0) > 0
+            or getattr(context, "control_plane", None) is not None)
+
+
 class _GatewayOrphanReconciler:
     """Reconcile dead runners without waiting for an LLM conversation turn.
 
@@ -1519,7 +1726,10 @@ class _GatewayOrphanReconciler:
     concurrent state changes.
     """
 
+    # LLM: 正C仅在此关闭直接扫业务，来源发现由原请求生产者负责；Count0保main真实owner池。
+    # 函数用途: 记录原组合根结构边界，不创建任何后台执行许可。
     def __init__(self, context: GatewayRunContext) -> None:
+        self._coordinator_requests = _coordinator_request_context(context)
         self._base_agent = _gateway_agent_from_context(context)
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
@@ -1568,7 +1778,11 @@ class _GatewayOrphanReconciler:
         finally:
             self._shutdown_executors()
 
+    # LLM: 正C不直接物化owner或恢复任务，避免绕过独立request/P3/P5；Count0原完整body继续执行。
+    # 函数用途: 只在原单进程车道推进监督，正C业务交给原来源运输。
     def _async_tick(self, *, now: float | None = None) -> None:
+        if self._coordinator_requests:
+            return None
         current = time.monotonic() if now is None else float(now)
         self._collect_finished_sweeps()
         self._submit_base_sweep(current)
@@ -1679,7 +1893,11 @@ class _GatewayOrphanReconciler:
 
     # LLM: 同步入口复用后台扫描的租用规则；身份发现和回收各自沿原有结构化账本。
     # 函数用途: 执行一轮同步遗留工作检查，供命令和测试调用。
+    # LLM: 正C不直接物化owner或恢复任务，避免绕过独立request/P3/P5；Count0原完整body继续执行。
+    # 函数用途: 只在原单进程车道推进监督，正C业务交给原来源运输。
     def tick(self) -> list[dict[str, object]]:
+        if self._coordinator_requests:
+            return []
         self._seed_owner_registry()
         reports = [self._sweep(self._base_agent, "base")]
         pool = self._ensure_owner_pool()
@@ -1862,24 +2080,34 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
 #   started_at 相同），否则同 PID 的上一代残留 running 无法被 status_rendering._record_is_current_generation
 #   拒绝，判据只能靠 pid+running 误判就绪。锚点在写入函数内部解析（见 _heartbeat_generation_started_at），
 #   调用方签名与发布顺序都不变：心跳循环照旧只传 status/pid，终止清理心跳也不新增参数。
-#   本函数只写心跳文件，不改 state。
+#   本函数只写心跳文件，不改state；C允许无业务Agent但必须原lease末门，撤权或替换不能回落裸写。
 # 函数用途: 写入一份 Gateway 心跳载荷（含本代 started_at），供外部判活、判就绪与诊断读取。
 def _write_gateway_heartbeat(
     paths: GatewayPaths,
-    agent: SimpleAgent,
+    agent: SimpleAgent | None,
     *,
     status: str,
     pid: int,
 ) -> None:
-    write_json_file(
-        paths.heartbeat,
+    from ..agent.common.global_write_guard import require_global_writer
+    from ..agent.gateway_parts.multiprocess_coordinator import (
+        CoordinatorUnavailable,
+        coordinator_for_root,
+    )
+
+    require_global_writer("gateway_heartbeat")
+    lease = coordinator_for_root(paths.root, context=paths)
+    if agent is None and lease is None:
+        raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
+    _commit_gateway_heartbeat(
+        paths, lease,
         {
             "status": status,
             "pid": pid,
             "started_at": _heartbeat_generation_started_at(paths, pid),
             "updated_at": time.time(),
             "gateway_workspace": str(paths.root),
-            "subagent_workspace": str(agent.subagents.workspace),
+            "subagent_workspace": str(agent.subagents.workspace) if agent is not None else "",
             "task_continuation": "owner_scoped_event_driven",
             "request_counts": gateway_request_counts(paths, include_archives=False),
             "queue_ages": gateway_queue_ages(paths),
@@ -1889,6 +2117,29 @@ def _write_gateway_heartbeat(
             **loop_health.snapshot(),
         },
     )
+
+
+
+# LLM: payload计算在原末写门外；Count0无C时沿原writer，已进入C后原lease丢失/替换一律拒写，不借TTL/心跳文件授信。
+# 函数用途: 在原C生命周期短门内写现有心跳文件，默认单进程保原写入路径。
+def _commit_gateway_heartbeat(paths, lease, payload):
+    from ..agent.gateway_parts.multiprocess_coordinator import (
+        CoordinatorUnavailable,
+        coordinator_for_root,
+        coordinator_role_present,
+    )
+
+    if lease is None:
+        if coordinator_role_present(paths.root, context=paths):
+            raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
+        write_json_file(paths.heartbeat, payload)
+        return
+    with lease._lifecycle_gate:
+        if (getattr(paths, "_coordinator_role_lease", None) is not lease
+                or lease.control_plane is None or lease.control_plane.paths is not paths
+                or coordinator_for_root(paths.root, context=paths) is not lease):
+            raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
+        write_json_file(paths.heartbeat, payload)
 
 
 # LLM: 心跳的 started_at 必须与 state 的 started_at 同源，所以先读"同 pid 的 state 记录"的 started_at

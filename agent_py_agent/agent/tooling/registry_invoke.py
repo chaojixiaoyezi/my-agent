@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 # LLM: 本模块承接 ToolExecutor 已授权的同一 ToolRuntimeSnapshot；路径上下文只能收窄，不能重选 handler 或重新冻结可用性。调整时联查 executor、action_policy 及工具作用域回归。
-# 模块用途: 准备单次工具的路径、取消和只读执行权威检查，再调用快照绑定的实现；不负责工具发现或插件装卸。
+# 模块用途: 准备单次工具的路径、取消、只读执行权威与内置读取范围事实，再调用原快照实现；不负责工具发现或插件装卸。
 """Execute an authorized registry tool after parsing and auth checks."""
 
 import json
@@ -13,7 +13,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.cancellation import ToolCancelled, bind_cancellation_token
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    raise_if_transport_uncertain,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..concurrency.interrupt import register_interrupt_callback
 from ..path_access_policy import (
     PathAccessPolicy,
@@ -34,6 +40,7 @@ from .registry_workspace import effective_registry_cwd
 from .runtime_boundary import (
     canonicalize_owner_home_arguments,
     exact_read_boundary_error,
+    exact_read_roots,
 )
 from .workspace_read_scope import build_workspace_read_context
 from .workspace_write_scope import build_workspace_write_context
@@ -231,7 +238,8 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
 
 # LLM: 读取/写入范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。
 #   写入上下文只在插件代理协商且工具声明写效果时才下发（见 PluginProxyTool._request_meta）。
-# 函数用途: 冻结本次调用的执行权、取消、文件范围与本人公开权限事实，不修改共享 handler。
+#   内置文件读门的原exact范围与墙外授权另外冻结；插件cwd读取上下文不得冒充所有文件工具的范围。
+# 函数用途: 冻结本次调用的执行权、取消、文件范围与本人公开权限事实，不修改共享 handler或增加授权。
 def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationContext:
     policy = PathAccessPolicy.from_values(mode=request.path_access_mode, dangerous_roots=request.path_dangerous_roots,
                                          owner_scope_root=request.owner_scope_root,
@@ -239,7 +247,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         execution_authority_check=request.execution_authority_check, tool_dispatch=request.tool_dispatch,
-        execution_permission_context=_execution_permission_context(request.write_boundary),
+        execution_permission_context=_execution_permission_context(request),
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
             granted_external_roots=granted_external_work_roots(request.write_boundary, request.owner_scope_root),
@@ -250,15 +258,25 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
     )
 
 
-# LLM: 只消费执行器已收紧的 write_boundary；不读取模型 args、插件内容或原配置，不把投影用于任何授权决策。
-# 函数用途: 为本人发现冻结实际网络/Shell边界的小字典，不暴露宿主内部路径或秘密。
-def _execution_permission_context(write_boundary):
-    boundary = write_boundary if isinstance(write_boundary, dict) else {}
+# LLM: 只消费执行器本次请求；builtin读字段复用原exact/granted解析并与预检工作根求交，None和空根分开。
+#   tuple/MappingProxy只运输只读事实，不改变授权；F5须另标插件cwd范围，不得热读Agent当前参数。
+# 函数用途: 冻结网络、Shell及内置文件读取范围，供本人发现准确说明本次路径门，不执行文件操作。
+def _execution_permission_context(request: RegistryToolInvokeRequest):
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    read_roots = exact_read_roots(boundary, request.workspace_root)
+    external = granted_external_work_roots(boundary, request.owner_scope_root)
+    workspace = _normalized_roots(request.workspace_root, request.workspace_roots)
+    external = tuple(dict.fromkeys(first if first.is_relative_to(second) else second
+        for first in external for second in workspace
+        if first.is_relative_to(second) or second.is_relative_to(first)))
     permissions = boundary.get("effective_permissions") or {}
     child_network = permissions.get("network_enabled", True) if isinstance(permissions, dict) else True
     raw_scope = boundary.get("network_scope")
     scope = tuple(value for value in raw_scope if isinstance(value, str)) if isinstance(raw_scope, (list, tuple)) else ()
     return MappingProxyType({
+        "builtin_read_scope_mode": "exact" if read_roots is not None else "policy",
+        "builtin_read_roots": read_roots,
+        "builtin_read_external_roots": external,
         "network_access_mode": str(boundary.get("network_access_mode") or "inherit"),
         "network_enabled": child_network is not False and boundary.get("network_access_mode") != "disabled",
         "shell_access_mode": str(boundary.get("shell_access_mode") or ""),
@@ -575,6 +593,8 @@ def _boundary_bool(boundary: dict[str, object] | None, key: str) -> bool | None:
 
 # LLM: 授权工具只有一个执行分支；controlled 命令的环境源只从冻结 handler 取，开始观察故障不能成为工具失败。
 # 函数用途: 执行已通过权限和边界门的工具，并把实现异常统一收敛为结构化失败，不将未派发调用记成工具事件。
+# LLM: 四类actual来源未结必须同对象上抛，不能洗成普通TOOL_ERROR/CANCELLED；其它取消/业务故障与执行事实保持原合同。
+# 函数用途: 调用当前已授权handler并返回普通结果；原请求或物理调用未结交原宿主收口。
 def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandlerOutcome:
     if request.invocation_context is None:
         return apply_tool_execution_facts(
@@ -614,6 +634,9 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
                 _notify_handler_started(request)
                 result = request.tool.execute_scoped(params, request.invocation_context)
     except ToolCancelled as exc:
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         result = structured_tool_error(
             request.tool_name,
             str(exc) or "cancelled",
@@ -621,6 +644,9 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             error_code="CANCELLED",
         )
     except Exception as exc:
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         result = structured_tool_error(
             request.tool_name,
             _format_tool_exception(exc),

@@ -101,6 +101,16 @@ P1-C/D 本地组件已验：原 ConcurrencyLimiter 的占用与保留量由同�
 通用有界 worker 已从 Curator 迁出复用，单进程残留安全上限为 32，可选调用保留 1 个正常后台名额；
 到期即返回时合作线程也可能暂时仍存活，Curator 据实记 still-running，退出前不能缩批重叠重试。
 
+2026-10-16 F3 候选补充：原 `_CALLS/_Call` 仍是有界调用的唯一保留源。
+`bounded_call_drain_snapshot()` 只返回其实际保留对象，不清表、取消或等待。
+默认 `wait_for_exit=False` 不增加退出等待；宿主显式设 True 时须在请求/业务锁外，
+让原 worker 和原 InterruptHandle 清理共用同一个绝对 deadline，不另加宽限。
+结果或 done 通知不是物理退出；原 Thread、出生通知、内核引用及观察对象缺失或被替换时，
+保留原责任并抛 `BoundedCallExitUnconfirmedError`（固定错误码、原安全 call_id、固定 reason、不可自动重放）。
+它不等于普通失败、未执行或门前拒绝，原请求/P3 如何保留须由实际调用链核实。
+标准库 Thread.start 自身原有的底层创建/ACK 阻塞不由此观察器替换；本次只保证 start 返回或抛错后的退出等待有界。
+独立 175 项受控线程组件通过，C/W、native 整树排空与其它 Python 版本另验。
+
 ### 避免每轮重新等一个单次期限
 
 增加最小的请求准入抑制，优先复用既有原语：某决策连接失败后短暂冷却，建议初值 30 秒；冷却期直接使用原流程。

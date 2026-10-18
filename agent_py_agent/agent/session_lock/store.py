@@ -23,12 +23,18 @@ CREATE TABLE IF NOT EXISTS private_chat_locks (
 """
 
 
+# LLM: 原密码及活跃行是唯一状态；只读模式禁止建库/迁移并拒绝显式锁等待，写方法仍由SQLite原模式拒绝。
+# 类用途: 保存或只读查询同一份个人锁，不将只读或缺库解释成解锁。
 class SessionLockStore:
-    def __init__(self, db_path: str | Path) -> None:
+    # LLM: read_only只供原状态查询，不建目录/迁移；默认初始化原样，SQLite ro继续拒任何误用的写方法。
+    # 函数用途: 打开原密码库，冷C查询不因构造额外修改共享库。
+    def __init__(self, db_path: str | Path, *, read_only: bool = False) -> None:
         self._path = str(db_path)
-        Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
         self._init_lock = threading.Lock()
-        self._init()
+        if not read_only:
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+            self._init()
 
     # LLM: 密码与输入卡状态共用原用户行；迁移只加UI nonce字段，不改旧hash/活跃事实。
     # 函数用途: 初始化原数据库并迁移卡片生命周期字段，会写数据库。
@@ -39,8 +45,11 @@ class SessionLockStore:
             from .card_control import initialize_card_columns
             initialize_card_columns(conn)
 
+    # LLM: 只读URI不创建缺库且锁忙立即拒绝；Count0仍原10秒/同一表，模式只缩小权限，不产生密码认证。
+    # 函数用途: 为原状态方法打开对应模式的连接。
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=10.0)
+        address = Path(self._path).resolve().as_uri() + '?mode=ro' if self._read_only else self._path
+        conn = sqlite3.connect(address, timeout=0.0 if self._read_only else 10.0, uri=self._read_only)
         conn.row_factory = sqlite3.Row
         return conn
 

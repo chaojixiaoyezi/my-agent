@@ -1,3 +1,5 @@
+# LLM: 共享due索引的claim和全局修复只归C；父类拒门覆盖W adapter，原owner sync/alias和Count0算法保持。
+# 模块用途: 投影owner定时任务并供协调者领取到期owner，不给W全局扫描或迁移权限。
 from __future__ import annotations
 
 """Process-wide due-owner projection for owner-local scheduler ledgers.
@@ -106,6 +108,8 @@ class SchedulerDueIndex:
             raise SchedulerDueIndexError("scheduler due index update failed") from exc
         return next_due_at
 
+    # LLM: 到期owner全局领取只归C；守原父类公开门使W adapter及直接父类均拒，sync_owner/alias受控业务保持。
+    # 函数用途: 在共享调度领取事务前拒W，不改变排序、租期或owner自身投影更新。
     def claim_due_owners(
         self,
         *,
@@ -113,6 +117,9 @@ class SchedulerDueIndex:
         limit: int = 8,
         lease_seconds: float = 30.0,
     ) -> list[DueOwner]:
+        from ..common.global_write_guard import require_global_writer
+
+        require_global_writer("scheduler_due_claim")
         current = float(time.time() if now is None else now)
         selected_limit = max(1, min(int(limit or 1), 1024))
         lease_until = current + max(1.0, float(lease_seconds or 1.0))
@@ -154,8 +161,13 @@ class SchedulerDueIndex:
             for row in rows
         ]
 
+    # LLM: 全局旧账扫描/修复只归C；拒门先于扫描和SQLite事务，不影响W原existing-only构造及owner更新。
+    # 函数用途: 阻止W修复共享到期索引，保留Count0原迁移标记和错误计数。
     def repair_legacy_owner_ledgers(self, owners_dir: str | Path) -> dict[str, int | bool]:
         """One-time projection rebuild for jobs created before this index existed."""
+        from ..common.global_write_guard import require_global_writer
+
+        require_global_writer("scheduler_due_repair")
 
         if self._migration_complete(_LEGACY_SCAN_KEY):
             return {"completed": True, "scanned": 0, "indexed": 0, "errors": 0}

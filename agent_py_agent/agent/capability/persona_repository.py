@@ -1,5 +1,5 @@
-# LLM: Owner-scoped Persona authority; keep document bytes, baseline/version snapshots,
-# quota admission, and rollback under the same typed repository contract.
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 模块用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 # 模块用途: 安全加载并按用户隔离地修改 SOUL/USER/AGENTS，同时保存首次修改前基线和后续版本。
 """Owner-scoped Persona repository with guarded loading and versioned writes."""
 
@@ -24,8 +24,8 @@ from ..user_space.owner_quota import (
 )
 from .agents_source_contract import AgentsContractError, AgentsSourceSnapshot
 from .agents_source_limits import enforce_agents_write_limit
+from .persona_storage_io import _PERSONA_NATIVE_ERRORS, persona_io, versions_lock
 from .persona_storage_io import append_version_records as append_private_jsonl_records
-from .persona_storage_io import versions_lock
 from .persona_version_ledger import _ledger_image, read_version_records
 
 _TARGET_ATTR = {
@@ -181,13 +181,13 @@ def _require_legacy_persona_target(repository, target: str) -> None:
         raise PersonaRepositoryError("AGENTS_SOURCE_NATIVE_API_REQUIRED")
 
 
-# LLM: 这是当前owner人格与版本的唯一仓库；显式AGENTS来源交同一source服务，USER/SOUL写入仍守原group lease和事务。
-# 类用途: 加载人格、核版本并提交可恢复的人格变更，避免默认路径绕过显式来源。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 类用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 class PersonaRepository:
     """Single owner-local authority for SOUL/USER/AGENTS loading and mutation."""
 
-    # LLM: 来源服务只由宿主注入；路径构造时固定为绝对词法形式，保留符号链接供后续no-follow核验。
-    # 函数用途: 组装唯一人格仓库和可选AGENTS来源服务，原USER/SOUL及版本事务不变。
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def __init__(
         self,
         *,
@@ -197,7 +197,11 @@ class PersonaRepository:
         agents_path: str | Path,
         prompt_max_chars: int = _DEFAULT_PROMPT_MAX_CHARS,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
+        coordinator_io: bool = False,
     ) -> None:
+        if coordinator_io and (quota_enforcer is None or not quota_enforcer.coordinator_io):
+            raise ValueError("C Persona requires the original coordinator quota dependency")
+        self.coordinator_io = coordinator_io
         self.owner_home = Path(owner_home).resolve(strict=False)
         self.paths = {
             "soul": Path(soul_path).absolute(),
@@ -210,6 +214,8 @@ class PersonaRepository:
         self.quota_enforcer = quota_enforcer or owner_quota_enforcer_from_policy(self.owner_home)
         self.agents_source = None
 
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     @classmethod
     def from_home_paths(
         cls,
@@ -217,6 +223,7 @@ class PersonaRepository:
         *,
         prompt_max_chars: int = _DEFAULT_PROMPT_MAX_CHARS,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
+        coordinator_io: bool = False,
     ):
         soul_path = getattr(home_paths, "owner_soul_md", "")
         user_path = getattr(home_paths, "owner_user_md", "")
@@ -236,8 +243,11 @@ class PersonaRepository:
             agents_path=agents_path,
             prompt_max_chars=prompt_max_chars,
             quota_enforcer=quota_enforcer,
+            **({} if not coordinator_io else {"coordinator_io": True}),
         )
 
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     @classmethod
     def from_owner_result(
         cls,
@@ -245,7 +255,10 @@ class PersonaRepository:
         *,
         prompt_max_chars: int = _DEFAULT_PROMPT_MAX_CHARS,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
+        coordinator_io: bool = False,
     ):
+        if coordinator_io and quota_enforcer is None:
+            raise ValueError("C Persona requires the original coordinator quota dependency")
         return cls(
             owner_home=getattr(owner, "home_dir", ""),
             soul_path=getattr(owner, "soul_md", ""),
@@ -257,6 +270,7 @@ class PersonaRepository:
                 getattr(owner, "home_dir", ""),
                 quota_path=getattr(owner, "quota_json", None),
             ),
+            **({} if not coordinator_io else {"coordinator_io": True}),
         )
 
     # LLM: 显式来源不允许旧API按默认路径读写；唯一来源授权入口在AgentsSourceRepository，默认兼容不退化。
@@ -283,8 +297,8 @@ class PersonaRepository:
     def runtime_snapshot(self) -> dict[str, object]:
         return _persona_runtime_snapshot(self)
 
-    # LLM: 普通读者与mutate/batch共用目标锁；缺失只返回该次观察，不二次绕锁读取新出现的正文。
-    # 函数用途: 只把完整版本的人格正文提供给提示词，不读取写入中间态。
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def load(self, target: str) -> PersonaDocumentSnapshot:
         if target == "agents" and self.agents_source is not None:
             return _load_agents_source_document(self)
@@ -292,16 +306,18 @@ class PersonaRepository:
             path = self.path_for(target)
             if not path.exists():
                 return _empty_persona_snapshot(target, "missing")
-            with locked_json_path(path):
+            with locked_json_path(path, **({} if not self.coordinator_io else {"birth_commit": _persona_birth_commit})):
                 return _load_persona_unlocked(self, target)
         except (PersonaSecurityError, OSError) as exc:
+            if self.coordinator_io and isinstance(exc, _PERSONA_NATIVE_ERRORS):
+                raise
             state = "security" if isinstance(exc, PersonaSecurityError) else "io"
             return PersonaDocumentSnapshot(target, "", PersonaLoadDiagnostic(target=target, state=state, detail=str(exc)))
 
-    # LLM: 条目、摘要和诊断必须在同一目标临界区读取；锁序保持target→versions。
-    # 函数用途: 为列表入口读取一份一致的人格快照。
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def list_entries(self, target: str) -> dict[str, object]:
-        with locked_json_path(self.path_for(target)):
+        with locked_json_path(self.path_for(target), **({} if not self.coordinator_io else {"birth_commit": _persona_birth_commit})):
             return self._list_entries_locked(target)
 
     # LLM: 迁移等调用者已持目标锁；再持来源读边界，防原生来源写者绕过目标锁修改正文。
@@ -328,19 +344,19 @@ class PersonaRepository:
             "diagnostic": snapshot.diagnostic.to_dict(),
         }
 
-    # LLM: 与账本发布共用路径锁；不能把rename/link中间态当作空历史重置版本。
-    # 函数用途: 在完整账本可见时读取目标历史，再供选版和基线判断使用。
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def history(self, target: str) -> list[dict[str, object]]:
         self.path_for(target)
-        with versions_lock(self.versions_path):
+        with versions_lock(self.versions_path, **({} if not self.coordinator_io else {"coordinator_io": True})):
             records = read_version_records(self.versions_path)
         return [row for row in records if str(row.get("target") or "") == target]
 
-    # LLM: 目标→来源读锁内，AGENTS摘要只消费严格来源结果；不能绕许可/身份检查重新普通open。
-    # 函数用途: 返回完整已授权正文的摘要，并保持默认来源换行归一化的旧口径。
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def current_sha256(self, target: str) -> str:
         path = self.path_for(target)
-        with locked_json_path(path), _persona_source_read_boundary(self, target):
+        with locked_json_path(path, **({} if not self.coordinator_io else {"birth_commit": _persona_birth_commit})), _persona_source_read_boundary(self, target):
             self.path_for(target)
             if target == 'agents' and self.agents_source is not None:
                 return _agents_source_sha256(self)
@@ -365,8 +381,8 @@ class PersonaRepository:
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_batch_document(self, admission, request)
 
-    # LLM: 快照按排他发布，冲突不覆盖；创建责任由当前快照事务保存。
-    # 函数用途: 保存可核验且不覆盖外部文件的版本正文。
+    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
     def _write_version_snapshot(
         self,
         target: str,
@@ -375,7 +391,7 @@ class PersonaRepository:
         content: str,
     ) -> Path:
         from .persona_snapshot_transaction import write_version_snapshot
-        return write_version_snapshot(self._version_snapshot_path(target, version, sha256), content)
+        return write_version_snapshot(self._version_snapshot_path(target, version, sha256), content, **({} if not self.coordinator_io else {"coordinator_io": True}))
 
     def _version_snapshot_path(self, target: str, version: int, sha256: str) -> Path:
         return self.backups_dir / target / f"{version:08d}-{sha256}.md"
@@ -404,8 +420,8 @@ class PersonaRepository:
         return max((int(row.get("version") or 0) for row in rows), default=0)
 
 
-# LLM: 同一目标锁内准备、配额准入并提交整个人格变更；失败只条件撤回本次拥有的正文和版本。
-# 函数用途: 保证 Persona 正文、备份和版本记录要么一起提交，要么都不改变。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _mutate_persona_document(
     repository: PersonaRepository,
     admission: OwnerQuotaAdmission,
@@ -414,7 +430,7 @@ def _mutate_persona_document(
     if request.action not in {"add", "replace", "remove", "rollback"}:
         raise ValueError(f"unsupported persona action: {request.action}")
     path = repository.path_for(request.target)
-    with locked_json_path(path):
+    with locked_json_path(path, **({} if not repository.coordinator_io else {"birth_commit": _persona_birth_commit})):
         if path.exists() and (path.is_symlink() or not path.is_file()):
             raise PersonaSecurityError("persona target must be a regular file")
         document_existed = path.exists()
@@ -426,8 +442,8 @@ def _mutate_persona_document(
     return _persona_mutation_result(request, prepared)
 
 
-# LLM: 普通入口保留 32 操作上限及 quota→目标锁；迁移已持相同锁时调用锁内版本，不重入 flock。
-# 函数用途: 获取人格目标锁后按同一套校验、配额与提交协议执行普通批次。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _mutate_persona_batch_document(
     repository: PersonaRepository,
     admission: OwnerQuotaAdmission,
@@ -435,13 +451,15 @@ def _mutate_persona_batch_document(
 ) -> dict[str, object]:
     if len(request.operations) > 32:
         raise ValueError("persona batch exceeds 32 operations")
-    with locked_json_path(repository.path_for(request.target)):
+    with locked_json_path(repository.path_for(request.target), **({} if not repository.coordinator_io else {"birth_commit": _persona_birth_commit})):
         return _mutate_persona_batch_locked(repository, admission, request)
 
 
 # LLM: 调用方必须已持 quota admission 和本目标的人格锁；仍执行完整 CAS、版本尾、内容与配额校验。
 # 普通入口的 32 操作限制留在锁外入口；可信迁移可在同一持锁区内一次提交全部已重判定删除。
 # 函数用途: 不重复取锁地准备并提交一个原子批次，返回锁内采样的账本尾。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _mutate_persona_batch_locked(
     repository: PersonaRepository,
     admission: OwnerQuotaAdmission,
@@ -463,16 +481,16 @@ def _mutate_persona_batch_locked(
     previous = path.read_text(encoding="utf-8") if document_existed else ""
     prepared = _prepare_persona_batch_mutation(repository, request, previous)
     if isinstance(prepared, dict):
-        return {**prepared, "versions_tail": versions_ledger_tail(repository.versions_path)}
+        return {**prepared, "versions_tail": versions_ledger_tail(repository.versions_path, **({} if not repository.coordinator_io else {"coordinator_io": True}))}
     _commit_persona_mutation(repository, prepared, _PersonaCommitContext(path, document_existed, admission))
-    committed_tail = versions_ledger_tail(repository.versions_path)
+    committed_tail = versions_ledger_tail(repository.versions_path, **({} if not repository.coordinator_io else {"coordinator_io": True}))
     result = _persona_batch_mutation_result(request, prepared)
     result["versions_tail"] = committed_tail
     return result
 
 
-# LLM: First batch writes keep version one for the changed document while attaching version zero.
-# 函数用途: 先在内存应用整批画像变更，并准备首次修改前基线、版本快照和审计记录。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _prepare_persona_batch_mutation(
     repository: PersonaRepository,
     request: PersonaBatchMutationRequest,
@@ -486,7 +504,7 @@ def _prepare_persona_batch_mutation(
     # LLM: 迁移的版本账本前提核对在人格锁内：计划之后任何一次写入（含「删除后重添同文」这种
     #   正文 sha 恢复原值的情况）都会改变账本尾，这里直接拒绝，要求重新空跑。
     if request.expected_versions_tail:
-        current_tail = versions_ledger_tail(repository.versions_path)
+        current_tail = versions_ledger_tail(repository.versions_path, **({} if not repository.coordinator_io else {"coordinator_io": True}))
         if current_tail != request.expected_versions_tail:
             raise PersonaConflictError(
                 "persona version ledger changed since the plan was taken"
@@ -721,8 +739,8 @@ class _PersonaCommitContext:
     admission: OwnerQuotaAdmission
 
 
-# LLM: 已持目标锁；快照/账本按双份计费，冲突件不得抵扣新增恢复量。
-# 函数用途: 按固定FD的原始字节核算整个事务，包括失败时保留的真实前像。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _admit_persona_mutation(
     repository: PersonaRepository,
     context: _PersonaCommitContext,
@@ -756,7 +774,7 @@ def _admit_persona_mutation(
     changes.append(
         OwnerQuotaChange(
             repository.versions_path,
-            2 * (len(version_blob.encode("utf-8")) + retained_ledger_bytes(repository.versions_path)),
+            2 * (len(version_blob.encode("utf-8")) + retained_ledger_bytes(repository.versions_path, **({} if not repository.coordinator_io else {"coordinator_io": True}))),
             append=True,
         )
     )
@@ -769,8 +787,8 @@ def _persona_preimage_path(repository, prepared, original):
     return repository.backups_dir / prepared.record['target'] / 'preimages' / (hashlib.sha256(original).hexdigest() + '.md')
 
 
-# LLM: 固定FD后再准入；破坏性写前保存原始前像；账本发布后不再补偿。
-# 函数用途: 提交正文和版本，让已有历史下的双重I/O故障仍可找到本次真实原文。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _commit_persona_mutation(
     repository: PersonaRepository,
     prepared: _PreparedPersonaMutation,
@@ -780,7 +798,7 @@ def _commit_persona_mutation(
     from .persona_version_ledger import PersonaLedgerPublishedError, append_persona_versions
 
     path, document_existed = context.path, context.document_existed
-    with snapshot_transaction() as snapshots, _persona_mutation_writer(
+    with snapshot_transaction(**({} if not repository.coordinator_io else {"coordinator_io": True})) as snapshots, _persona_mutation_writer(
         repository, path, prepared.previous, document_existed,
     ) as write_content:
         original = write_content.original if document_existed else b''
@@ -790,23 +808,26 @@ def _commit_persona_mutation(
             records = _write_persona_mutation_versions(repository, prepared)
             write_content(prepared.next_text)
             append_persona_versions(repository.versions_path, records, append_private_jsonl_records,
-                                    validate=lambda: _verify_persona_commit(write_content, snapshots))
+                                    validate=lambda: _verify_persona_commit(write_content, snapshots),
+                                    **({} if not repository.coordinator_io else {"coordinator_io": True}))
         except PersonaLedgerPublishedError:
             raise
         except Exception as error:
+            if repository.coordinator_io and isinstance(error, _PERSONA_NATIVE_ERRORS):
+                raise
             _note_persona_preimage(error, repository, recovery)
-            _restore_persona_mutation_files(path, prepared, (document_existed, snapshots), write_content)
+            _restore_persona_mutation_files(path, prepared, (document_existed, snapshots), write_content, **({} if not repository.coordinator_io else {"coordinator_io": True}))
             raise
 
 
-# LLM: 前像成功保存才返回引用；失败发生在正文写入前，不凭计算出的名字报告存在恢复材料。
-# 函数用途: 在任何破坏性正文写入之前保存本次真实原文。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _retain_persona_preimage(repository, prepared, original):
     if not original:
         return None
     from .persona_snapshot_transaction import write_version_snapshot
     recovery = _persona_preimage_path(repository, prepared, original)
-    write_version_snapshot(recovery, original.decode('utf-8'), retain_on_failure=True)
+    write_version_snapshot(recovery, original.decode('utf-8'), retain_on_failure=True, **({} if not repository.coordinator_io else {'coordinator_io': True}))
     return recovery
 
 
@@ -858,8 +879,10 @@ def _sha256_text(value: str) -> str:
 # LLM: 「版本账本尾」= 文件字节长度 + 最后一条非空记录的 sha256；任何一次追加（哪怕正文 sha
 #   恢复原值）都会改变它，用于迁移删除前的锁内前提核对。文件缺失返回空串（无账本可核对）。
 # 函数用途: 与发布共用路径锁计算完整账本尾部指纹，不采样发布空窗。
-def versions_ledger_tail(path: Path) -> str:
-    with versions_lock(path):
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
+def versions_ledger_tail(path: Path, *, coordinator_io=False) -> str:
+    with versions_lock(path, **({} if not coordinator_io else {"coordinator_io": True})):
         image = _ledger_image(path)
         if image is None:
             return ""
@@ -1048,14 +1071,14 @@ __all__ = [
 ]
 
 
-# LLM: 默认AGENTS复用调用方冻结存在状态，不再重新exists；两种来源writer都拥有明确restore方法。
-# 函数用途: 为Persona事务选择实际正文提交器。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 @contextmanager
 def _persona_mutation_writer(repository: PersonaRepository, path: Path, previous: str, document_existed: bool):
     source = repository.agents_source
     if source is None or path != source.default_path:
         from .persona_body_transaction import persona_body_writer
-        with persona_body_writer(path, previous, document_existed) as writer:
+        with persona_body_writer(path, previous, document_existed, **({} if not repository.coordinator_io else {"coordinator_io": True})) as writer:
             yield writer
         return
     if not document_existed:
@@ -1089,10 +1112,20 @@ def _verify_persona_commit(writer, snapshots):
     verify_snapshots(snapshots)
 
 
-# LLM: 所有正文写入器均明确登记写入责任；未写入不回滚，冲突保留而不裸unlink。
-# 函数用途: 有条件恢复正文，无论正文是否冲突都撤回自己的新增快照。
-def _restore_persona_mutation_files(path: Path, prepared: _PreparedPersonaMutation, state: tuple, write_content) -> None:
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
+def _restore_persona_mutation_files(path: Path, prepared: _PreparedPersonaMutation, state: tuple, write_content, *, coordinator_io=False) -> None:
     from .persona_snapshot_transaction import rollback_snapshots
+    if coordinator_io:
+        try:
+            write_content.restore()
+        except _PERSONA_NATIVE_ERRORS:
+            raise
+        except BaseException:
+            rollback_snapshots(state[1], coordinator_io=True)
+            raise
+        rollback_snapshots(state[1], coordinator_io=True)
+        return
     try:
         write_content.restore()
     finally:
@@ -1129,8 +1162,8 @@ def _empty_persona_snapshot(target, state, detail="", byte_count=0):
     return PersonaDocumentSnapshot(target, "", diagnostic)
 
 
-# LLM: 汇总load与版本信息，任一读取异常按原合同标为不可用。
-# 函数用途: 生成不含正文的运行时健康投影。
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
 def _persona_runtime_snapshot(self) -> dict[str, object]:
     """Project guarded Persona load health without content or private paths."""
 
@@ -1149,6 +1182,8 @@ def _persona_runtime_snapshot(self) -> dict[str, object]:
                 }
             )
     except Exception as exc:
+        if self.coordinator_io and isinstance(exc, _PERSONA_NATIVE_ERRORS):
+            raise
         return {
             "state": "unavailable",
             "health": "unavailable",
@@ -1198,3 +1233,9 @@ def _persona_source_read_boundary(repository, target):
     from .agents_source_read_lock import source_read_boundary
     with source_read_boundary(repository.owner_home):
         yield
+
+
+# LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
+# 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
+def _persona_birth_commit(operation):
+    return persona_io(operation, coordinator_io=True)

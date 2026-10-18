@@ -1,3 +1,5 @@
+# LLM: 配置解析和原子写回保持唯一读写实现；全局落盘前只查受限进程拒门，Count0与原权限复制保持。
+# 模块用途: 读取简化YAML及原子保存配置，不负责认证、参数授权或多进程来源签发。
 
 from __future__ import annotations
 
@@ -196,7 +198,12 @@ def _is_top_level_key_line(raw: str, key: str) -> bool:
 #   600 的配置写回后仍是 600。不用固定的 "<name>.tmp"：并发写会互相覆盖，同名目录或残留文件也会让写回失败。
 #   set_simple_yaml_value 与参数中心的 set_simple_yaml_raw / unset_simple_yaml_value 共用这一个写回点。
 # 函数用途: 原子写回配置文件并保留原权限，避免写一半把文件弄残。副作用：改写配置文件。
+# LLM: 原子配置写前拒绝受限W/native执行器；默认C/Count0仍守原临时文件、权限复制和replace。
+# 函数用途: 在唯一配置落盘点检查进程写资格，不改变参数校验或配置正文。
 def _write_config_lines(path: Path, lines: list[str]) -> None:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("global_config")
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(name)
     try:

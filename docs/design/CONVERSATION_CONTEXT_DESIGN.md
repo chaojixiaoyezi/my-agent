@@ -1,3 +1,9 @@
+## 2026-10-17 同一候选最小重测的测试投影合同（273，经277独立复核后根整合）
+
+本片只修原测试的view数量/位置假设，253生产逻辑与预算保持。同一候选允许一次原最小landmark完整重测，保semantic/trailing及所有来源字段，不等于新增partition或额外模型请求。测试精确验证两候选除summary全字段一致，各工具尾JSON与31原标记/未知保留项完整，较小实测仍达输入上限时必须拒绝；失败后的第4份是空材料measure_only诊断，不能提交。capacity只记一次策略，fixed值取原空串估算，不硬写0。
+
+原机械回退JSON、工具不执行、no checkpoint/noCAS/failure1/raw不变断言全部保持；旧3view断言迁为精确4并加结构验证，不使用范围len或豁免。生产所有字节/mode与254相同，本地94及pyc2仅组件证据，最终全仓、双OS包及正式发布仍根另验。详见TESTS中的273边界及原271/272诊断评审。
+
 # Ordinary Conversation Context Design
 
 ## Compact 最终数字与联合恢复旧快照（compactview，2026-10-09）
@@ -307,7 +313,7 @@ summary_text 保留，其它块原样；列表来源与可重放来源（`Compac
 
 **做法三：摘要指令**要求单列“User requirements”（用户说过的全部要求、规则、约束、偏好与决定，按时间、带确切值，后来改过的标出而不是删掉；随大段资料一起给的要求也单独列出）和“Pending user requests”。
 
-**容量保护**：原话备份是非权威补充，只能占用恢复目标以内的空间。候选超出恢复目标时，按超出量缩小备份（最小只剩标题、编号与回查说明）、重新计量一次，变小才采用。两种情况不重算：备份已是最小段；缩到最小仍不低于上限（超限来自别的内容，候选照样被拒）。多一次投影远比候选被拒后再换一种切分、多一次摘要模型调用便宜。
+**容量保护**：原话备份是非权威补充，只能占用恢复目标以内的空间。候选超出恢复目标时，按超出量缩小备份（最小只剩标题、编号与回查说明）、重新计量一次，变小才采用。只有备份已是最小段时不重算。局部备份 token 与完整校准投影没有可加性保证，不能相减推断最小候选必定超限而跳过实测；仍沿原 projector 与冻结校准有界重算一次，完整实测仍达上限时由原接受门拒绝。多一次投影远比候选被拒后再换一种切分、多一次摘要模型调用便宜。
 
 最初（`527bcdd99`）只在收缩能改变判定时才缩：会被拒而缩小后能回到上限以下，或缩到最小能达到目标。CI 暴露了这条规则的缺口：1.6 万窗口里候选约 1.43 万、离输入上限只有约 100 token，达不到目标就保留整段备份，压缩刚提交下一轮又要压缩；是否越过上限还取决于上下文里临时路径的长短，测试随路径长度确定性失败。改为超目标就缩之后，同一场景候选降到约 1.24 万，1.95 万窗口的后台用例从 1.45 万降到 1.22 万。大窗口候选通常远低于目标，不受影响。
 
@@ -583,3 +589,10 @@ F4 原 source-CAS/persona_epoch 仍由唯一 agents_source_repository 与 freeze
 可容纳、边界相等或尚不能证明超量时保留优化；增加真实摘要指令后的原完整请求精确门仍必须执行。这里不复制校准公式、不增预算参数，不创建 spool 或第二来源，不捕获并转化取消、身份、媒体和网络错误，不额外发模型调用。单一原文、工具覆盖、媒体、checkpoint/CAS 与 usage 采样绑定保持；三宿主原内存阈值及全覆盖回归不降低。
 
 明确不支持的媒体也不能让已不可用的大前缀继续驻留：在同次可覆盖前缀上只做原声明/块类型检查，丢弃正文，仅由现有 ConversationCompactProviderSurface 携原 CompactMediaDecision（默认 None、repr/compare 排除，无新 reason 或持久记录）。构造实际候选时先核 canonical media_archive_facts 及本候选实际模态，再在原视觉探针边界之前采用决定；off、无媒体、未覆盖拒绝模态、未知或现已支持均不盲套全来源结论。COMPACT_PREFIX_MEDIA_UNSUPPORTED 继续沿原 media_outcome/checkpoint 传递，媒体完整来源、覆盖和权限不变，也不多一次视觉探针。
+
+
+## guidance append 的可选短事务资源模式（repair03候选）
+
+原GuidanceStore.append_once仍是唯一幂等追加：dedupe transition内先canonical v4，再修原turn/input索引与JSONL queue，reserve→submit→ACK不变。内部可选blocking=True/deadline=None默认保留原调用形状/精确字节及迁移语义；真实Gateway active短窗才选False，把同一绝对deadline传到ledger全部必要reader/writer。普通锁忙不当空账，退出原Gateway T/Root后等原interrupt；正常读取/序列化耗时后和末提交前仍核预算。
+
+预算只是纯资源上界，不是owner/路径/执行许可。部分canonical已经提交时只保原同一guidance ID与事实，后续重放修投影，不回滚、ACK猜测或重发模型。显式bounded原私有replace不内部sleep/retry且保原PermissionError，None仍原8次重试路径；单个OS syscall不能硬抢占。原source、lifetimes、P3与取消仍由既有主链判断。完整输入运输和当前未验边界见[前台输入运输](COORDINATOR_ACTIVE_INPUT_TRANSPORT.md)。

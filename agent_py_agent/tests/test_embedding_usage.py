@@ -392,7 +392,9 @@ def test_profile_unavailable_warning_is_logged_once_per_owner_and_reason(monkeyp
         raise ModelNotConfiguredError(profile_id="p-1", profile_reason=next(reasons))
 
     monkeypatch.setattr(core, "_embedding_client", unavailable)
-    monkeypatch.setattr(core, "_PROFILE_WARNINGS_SEEN", set())
+    from agent_py_agent.agent.retrieval import embedding_factory
+
+    monkeypatch.setattr(embedding_factory, "_PROFILE_WARNINGS_SEEN", set())
 
     def build(owner):
         agent = SimpleNamespace(config=AgentConfig(memory_semantic_recall=True), home_paths=SimpleNamespace(owner_id=owner))

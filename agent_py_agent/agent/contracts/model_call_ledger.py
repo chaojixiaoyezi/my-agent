@@ -19,8 +19,8 @@ from .model_call_budget import (
 )
 from .model_call_latency import MODEL_LATENCY_FIELDS, model_call_latency_facts
 
-# LLM: 本模块是调用、累计用量及显式输入预留的唯一事实源；预算只在原锁/容器扩展，普通调用行为及首个终态保持。
-# 模块用途: 记录模型调用、真实用量与计时和传输事实，按 request/run 提供主、辅助、决策的原账统计。
+# LLM: 本模块是调用、累计用量及显式输入预留的唯一事实源；drain 仅读原弱集/记录/保留令牌，不把逻辑终态当物理退出，普通调用和首个终态保持。
+# 模块用途: 记录模型调用、真实用量与计时和传输事实，按 request/run 统计，并为宿主退出观察提供原对象快照。
 
 # 门槛2 终审边界②(steward seq1622-2): stage 合同单一事实源下沉到账本层。
 # ProviderTimeoutError 构造入口与 ModelCallLedger.timeout 写入入口共用同一
@@ -1056,6 +1056,24 @@ def model_call_inflight_snapshot() -> tuple[int, float]:
         count += ledger_count
         oldest_age = max(oldest_age, ledger_oldest_age)
     return count, oldest_age
+
+
+# LLM: 只读原 registry/ledger 锁内的准确对象；先释放 registry 锁再逐账取锁，保持原锁序。终态 retention 仍代表持有责任，不按年龄裁剪、不关闭或回收资源，不写第二账。
+# 函数用途: 为宿主停止观察返回实际账本、当前调用记录及独立保留句柄；快照本身不证明物理 worker 已退出。
+def model_call_drain_snapshot() -> tuple[
+    tuple[ModelCallLedger, ModelCallRecord, tuple[ModelCallRetention, ...]], ...
+]:
+    with _ADMISSION_REGISTRY.lock:
+        ledgers = tuple(_ADMISSION_REGISTRY.ledgers)
+    rows = []
+    for ledger in ledgers:
+        with ledger._lock:
+            rows.extend(
+                (ledger, record, tuple(ledger._retained_calls.get(record.call_id, ())))
+                for record in ledger._records
+                if record.status in {"started", "first_token"} or ledger._retained_calls.get(record.call_id)
+            )
+    return tuple(rows)
 
 
 # LLM: 只从单个原账本中过滤活动状态并计算最大年龄；不复制记录或保留第二份状态。

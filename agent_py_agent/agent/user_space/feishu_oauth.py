@@ -1,3 +1,5 @@
+# LLM: 本片只提取原OAuth cancel为显式owner/输入服务；网络、exchange、refresh和已ready授权处理均保持。
+# 模块用途: 冷C可取消原本人授权卡，不能借取消新增网络或账号权。
 # LLM: 本人授权只绑定可信 owner/actor、部署应用和准确任务，网络遵守实际调用边界；秘密密文留原私密目录，不进入模型或日志。
 # 模块用途: 管理飞书本人 OAuth 请求、回调、刷新与撤销，网络在记录锁外执行，沿原输入依赖恢复任务。
 from __future__ import annotations
@@ -132,9 +134,10 @@ def _assert_actor(agent, actor):
 
 # LLM: 文件名只由可信 actor 摘要生成，目录复用原保护；模型没有 ref/路径参数。
 # 函数用途: 定位本人密文 OAuth 记录。
+# LLM: 原Agent与显式home共用同一路径公式，actor只取已认证事实，不创建目录。
+# 函数用途: 返回原本人OAuth记录位置。
 def oauth_path(agent, actor):
-    return Path(agent.home_paths.owner_home_dir).joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS,
-        "oauth_" + hashlib.sha256(actor.encode()).hexdigest() + ".json")
+    return oauth_path_for_home(agent.home_paths.owner_home_dir, actor)
 
 
 # LLM: 官方认证请求拒绝重定向，原响应仅留宿主；错误不包含 token、URL、供应商正文或异常详情。
@@ -431,29 +434,56 @@ def oauth_status(agent, *, revoke=False):
 
 # LLM: 上游已验证MAC/原actor且cancel可过期；这里只CAS退休原pending/state，不撤销ready token，不把迟到exchange变成成功。
 # 函数用途: 关闭准确OAuth卡和原输入依赖，重放展示首次点击者，不能撤销既有有效授权。
+# LLM: 原Agent与C共用cancel-only事务；不改变网络授权/刷新/ready token，不重建owner。
+# 函数用途: 沿原输入资源取消本人准确OAuth卡。
 def cancel_oauth_card(agent,payload,body,*,actor_id):
-    from .interaction_actor_audit import interaction_actor_text, record_interaction_actor
+    from ..conversation.input_dependencies import input_dependency_access
+    from .interaction_actor_audit import record_interaction_actor
+    return cancel_oauth_card_for_owner(agent.home_paths.owner_home_dir,owner_identity_from_config(agent.config),
+        input_dependency_access(agent),payload,body,actor_id=actor_id,
+        audit=lambda actor:record_interaction_actor(agent,payload,decision='cancel',actor=actor))
+
+
+# LLM: 显式原owner/输入服务仅执行原cancel CAS；上游已验真实actor/MAC，不授网络或新工具权。
+# 函数用途: 让冷C与Count0复用同一OAuth取消实现。
+def cancel_oauth_card_for_owner(home, owner, inputs, payload, body, *, actor_id, audit):
+    from ..common.json_io import locked_json_path
+    from .interaction_actor_audit import interaction_actor_text
     if (body.get('decision')!='cancel' or actor_id!=payload.get('actor_id')
-            or payload.get('owner')!=asdict(owner_identity_from_config(agent.config))):
+            or payload.get('owner')!=asdict(owner)):
         raise ValueError('授权卡取消归属不匹配')
     actor,input_id=actor_id,payload['input_id']
-    path=oauth_path(agent,actor)
-    with _credential_mutation(agent,path) as admission:
-        row=read_json_object_report(path,context='oauth.cancel').payload
-        control=row.get('im_control') or {} if row else {}
-        if (not row or row.get('input_id')!=input_id or row.get('state')!=body['reference']
-                or control.get('message_id')!=body.get('message_id') or control.get('chat_id')!=body.get('chat_id')):
-            raise ValueError('卡片不是原本人授权请求')
-        if row.get('status')=='cancelled':
-            facts=row['cancelled_by']
-        elif row.get('status') in {'pending','exchanging'}:
-            facts=record_interaction_actor(agent,payload,decision='cancel',actor=actor)
-            _save_credential_row(admission,path,{**row,'status':'cancelled','ciphertext':'','cancelled_by':facts})
-        else:
-            return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED',
-                    'message':'原卡已处理，取消没有撤销或修改已完成的操作。'}
-    dependency=read_json_object_report(input_dependency_path(agent,input_id),context='oauth.cancel_input').payload
+    path=oauth_path_for_home(home,actor)
+    # LLM: 原卡CAS仅在同一真实C短门中执行，quota先于行锁，不在此窗口处理其它输入。
+    # 函数用途: 退休准确原OAuth行，保持ready不可取消及首次点击者。
+    def transition():
+        with inputs.quota.admission(blocking=inputs.blocking) as admission, locked_json_path(path,blocking=inputs.blocking):
+            row=read_json_object_report(path,context='oauth.cancel').payload
+            control=row.get('im_control') or {} if row else {}
+            if (not row or row.get('input_id')!=input_id or row.get('state')!=body['reference']
+                    or control.get('message_id')!=body.get('message_id') or control.get('chat_id')!=body.get('chat_id')):
+                raise ValueError('卡片不是原本人授权请求')
+            if row.get('status')=='cancelled':
+                facts=row['cancelled_by']
+            elif row.get('status') in {'pending','exchanging'}:
+                facts=audit(actor)
+                _save_credential_row(admission,path,{**row,'status':'cancelled','ciphertext':'','cancelled_by':facts})
+            else:
+                return {'ok':False,'error_code':'IM_INTERACTION_ALREADY_HANDLED',
+                        'message':'原卡已处理，取消没有撤销或修改已完成的操作。'}
+        return facts
+    facts = inputs.perform(transition)
+    if facts.get("ok") is False:
+        return facts
+    dependency=read_json_object_report(inputs.path(input_id),context='oauth.cancel_input').payload
     if dependency and dependency.get('status') in {'pending','cancelled'}:
-        resolve_input_dependency(agent,input_id,status='cancelled')
+        inputs.resolve(input_id,status='cancelled')
     return {'ok':True,'status':'cancelled','clicked_by':facts,
             'message':interaction_actor_text(facts)+' 已取消这次授权卡；既有授权和其他任务未改变。'}
+
+
+# LLM: home由唯一owner解析器给出，保原H2目录和actor哈希，不新建OAuth库。
+# 函数用途: 为冷C和原Agent定位同一已存OAuth行。
+def oauth_path_for_home(home, actor):
+    return Path(home).joinpath(*PRIVATE_INTERACTIONS_OWNER_PARTS,
+        "oauth_" + hashlib.sha256(actor.encode()).hexdigest() + ".json")

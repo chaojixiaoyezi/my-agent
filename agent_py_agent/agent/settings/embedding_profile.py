@@ -1,5 +1,6 @@
 # LLM: 嵌入服务只按 /model 档案引用解析连接，空值 = 不建客户端、只走关键词；档案失效明确失败，不回退到聊天模型。
 #   服务商凭据与端点全部来自档案，_embedding_client 不再读任何 embedding_* 平铺键。机器判断只读结构化 reason。
+# LLM: 原Agent wrapper只提取部署默认与home，显式资源解析不依赖Agent字段或第二目录。
 # 模块用途: 解析嵌入服务的固定模型档案，给设置页提供不含秘密的编号、型号与失效原因，并由嵌入客户端算向量库空间身份。
 from __future__ import annotations
 
@@ -7,21 +8,29 @@ import hashlib
 from urllib.parse import urlsplit, urlunsplit
 
 from ..backends.errors import ModelNotConfiguredError
-from .model_profiles import selected_model_config
+from .model_profiles import selected_model_config_for_resources
 from .model_provider_schema import ModelProfileError
 
 
 # LLM: 空值是唯一的"不用语义"入口，不沿用 owner 选中模型（与 curator 不同：curator 空值沿用选中，嵌入空值=关闭）；
 #   default 是部署配置而非档案编号，显式填写不能绕过存在校验；能力校验由 selected_model_config 按 embedding 用途执行。
-# 函数用途: 返回嵌入客户端所需的完整连接配置；profile_id 为空时返回 None（只走关键词）。
+# 函数用途: 从原Agent取部署默认和home后委托嵌入档案纯叶，空引用仍返回None。
 def embedding_model_config(agent: object, profile_id: str):
+    from .model_scope import deployment_model_config
+
+    return embedding_model_config_for_resources(deployment_model_config(agent), agent.home_paths, profile_id)
+
+
+# LLM: 显式config须为原部署默认，profile能力/空值/default拒绝/类型化原因都沿旧算法；不构造Agent或请求网络。
+# 函数用途: 从真实config和home解析嵌入档案，供资源组合与原Agent入口共用。
+def embedding_model_config_for_resources(config: object, home_paths: object, profile_id: str):
     profile_id = str(profile_id or "").strip()
     if not profile_id:
         return None
     try:
         if profile_id == "default":
             raise ModelProfileError("请填写已保存的模型档案编号；部署默认不是模型档案。", reason="profile_not_found")
-        return selected_model_config(agent, profile_id=profile_id, capability="embedding")
+        return selected_model_config_for_resources(config, home_paths, profile_id=profile_id, capability="embedding")
     except ModelProfileError as exc:
         raise ModelNotConfiguredError(profile_id=profile_id, profile_reason=exc.reason) from exc
     except OSError as exc:

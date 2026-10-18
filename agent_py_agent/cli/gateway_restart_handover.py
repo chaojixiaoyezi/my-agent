@@ -2,9 +2,11 @@
 # 请求/排空/标记的状态源在 agent/gateway_parts/restart_service；这里只做进程与服务管理器相关的动作，不读对话正文。
 # systemd 托管（cgroup 属于本服务单元）或 launchd 托管（XPC_SERVICE_NAME 等于本服务标签）时返回退出码 75 交给管理器拉起，
 # 否则自己拉起带 --after-pid 的接班进程。改动须同步 test_gateway_safe_restart.py 与 docs/design/GATEWAY_SAFE_RESTART.md。
-# 模块用途: 让 Gateway 在不丢回合、不撕裂工具的前提下自己换进程，并在重启后通知发起方继续工作。
+#   内部C取消固定caller必须原controller→lease，先核source再取消写，与C publisher同序；不把unsupported变成滚动重启。
+# 模块用途: 让 Gateway 安全换进程并通知发起方；内部多进程继续原拒绝和取消，元数据发表保持原锁序。
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -34,15 +36,21 @@ from .models import GatewayRunContext
 
 # 重启交接等待前任进程退出最多 60 秒，超时按异常处理
 PREDECESSOR_EXIT_WAIT_SECONDS = 60.0
+# 内部多进程滚动重启尚未实现，拒绝后保留当前服务。
+MULTIPROCESS_RESTART_ERROR_CODE = "GATEWAY_MULTIPROCESS_RESTART_UNSUPPORTED"
 
 
 # LLM: 只在服务主循环里调用；有指向本进程的请求才排空。停止请求优先于重启：排空期间收到停止请求就撤销重启，
 # 交回主循环按停止处理。排空超时取消时给发起会话写一条取消通知。成功时返回带 restart 标记的结束报告，其余返回 None 继续服务。
 # 函数用途: 发现安全重启请求时执行两段排空，并把阶段写进 Gateway 状态文件供 /status 查看。
+# LLM: 内部正count只能沿实际原C取消请求并继续服务；未实现B4滚动重启，不得进入Count0排空或接班。
 def drain_for_requested_restart(context: GatewayRunContext, process_identity: dict[str, object]) -> dict | None:
     paths = context.paths
     request = pending_restart_request(paths, pid=os.getpid())
     if request is None:
+        return None
+    if getattr(context, "coordinator_worker_count", 0) > 0:
+        _cancel_internal_restart(context, request)
         return None
     agent = context.agent
     config = agent.config
@@ -91,6 +99,42 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     return {"summary": "safe restart drained", "restart": marker}
 
 
+# LLM: 仅实际同代C按原controller→lease保护取消→state读回→publisher，首次写前核同source；不从业务隔离/closing重签或拒失败元数据。
+# 函数用途: 对尚未实现的内部多进程热重启明确拒绝，让原服务继续工作。
+def _cancel_internal_restart(context, request: dict) -> None:
+    from ..agent.gateway_parts.control_plane import GatewayControlPlane
+    from ..agent.gateway_parts.multiprocess_coordinator import CoordinatorUnavailable
+    from ..agent.gateway_parts.multiprocess_takeover_runtime import CoordinatorTakeover
+    from .gateway_coordinated_run import (
+        coordinated_state_fields,
+        coordinated_state_path,
+        publish_coordinated_state,
+    )
+
+    control = context.control_plane
+    original = getattr(control, "_coordinator_role_lease", None)
+    controller = control.controller() if type(control) is GatewayControlPlane else None
+    if (type(controller) is not CoordinatorTakeover or original is None
+            or original.controller is not controller or controller._lease is not original):
+        raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
+    facts = {"ok": False, "error_code": MULTIPROCESS_RESTART_ERROR_CODE,
+             "reason": "internal_multiprocess_unsupported", "request_id": request.get("request_id", "")}
+    with controller._mutex, original._lifecycle_gate:
+        if (context.control_plane is not control or control.controller() is not controller
+                or original.controller is not controller or controller._lease is not original
+                or controller.paths is not control.paths or controller.count != control.worker_count
+                or controller.c_run_id != control.c_run_id):
+            raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
+        coordinated_state_fields(context)
+        coordinated_state_path(context)
+        cancel_restart_request(context.paths, request, facts)
+        state = read_json_file(coordinated_state_path(context))
+        publish_coordinated_state(context, {**state, "restart_drain": {**facts, "phase": "cancelled"}})
+    if context.agent is not None:
+        log_gateway_event(context.agent, "gateway_restart_cancelled", facts)
+    print(json.dumps(facts, sort_keys=True), file=sys.stderr)
+
+
 def _publish_drain_state(paths, facts: dict[str, object]) -> None:
     try:
         update_json_file_atomic(paths.state, lambda state: {**state, "restart_drain": dict(facts)})
@@ -113,7 +157,12 @@ def service_manager_restarts_gateway() -> bool:
 
 # LLM: 只在计划内安全重启完成收尾之后调用；spawn 与 start_files 由调用方传入，保证与 gateway start 同一套启动命令和 pid 记录。
 # 函数用途: 托管时返回 75 交给服务管理器；否则拉起带 --after-pid 的接班进程并写入它的 pid 记录，返回旧进程退出码。
+# LLM: 内部正count在管理器探测/spawn前拒绝，避免原W/工具未收口时启动无锁接班；Count0原体保持。
 def hand_over_to_successor(context: GatewayRunContext, *, pid: int, command: list[str], spawn, write_start_files) -> int:
+    if getattr(context, "coordinator_worker_count", 0) > 0:
+        from .gateway_coordinated_run import coordinated_refusal
+
+        return coordinated_refusal(MULTIPROCESS_RESTART_ERROR_CODE)
     agent = context.agent
     if service_manager_restarts_gateway():
         log_gateway_event(agent, "gateway_restart_handover", {"old_pid": pid, "mode": "service_manager"})

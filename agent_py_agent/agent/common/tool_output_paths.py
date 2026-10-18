@@ -1,5 +1,6 @@
 # LLM: 本模块是工具输出归档物理布局的跨域小权威；Memory Store、Memory Archive
-# 和工具调用方只能从这里解析 owner/task 索引位置，不能互相反向导入或复制 glob 规则。
+# 和工具调用方只能从这里解析 owner/task 索引位置，不能互相反向导入或复制 glob 规则；
+# 原生路径排序完成后释放比较缓存，再做规范路径去重，保持同一读取范围与顺序。
 # 模块用途: 统一计算工具大输出根目录、历史任务目录和只读索引路径。
 
 from __future__ import annotations
@@ -15,14 +16,16 @@ def tool_output_root(root: str | Path) -> Path:
 
 
 # LLM: 查找覆盖新 runs 与原处保留的旧 tasks 索引，保持两层有界遍历；不改变归档写入身份。
-# 函数用途: 枚举 owner 内可查找的工具输出目录，不读正文；切换运行布局不能丢失旧引用。
+#   先沿原 Path 比较规则排序，再重建同值 Path，避免比较用的组件缓存与规范化结果同时驻留；
+#   不缓存目录或权限，每次重新枚举；改动需复核 tool_ref 测量、scope 与路径顺序回归。
+# 函数用途: 只读枚举 owner 的工具输出目录，保留原引用范围和顺序，并及时释放路径排序的临时缓存。
 def tool_output_roots_for_lookup(root: str | Path) -> tuple[Path, ...]:
     base = Path(root)
     roots = [tool_output_root(base)]
     for namespace in ("runs", "tasks"):
         archive_root = base / namespace
         if archive_root.is_dir():
-            roots.extend(sorted(archive_root.glob("*/*/work/blobs/tool_outputs")))
+            roots.extend(Path(str(item)) for item in sorted(archive_root.glob("*/*/work/blobs/tool_outputs")))
     return _unique_paths(roots)
 
 

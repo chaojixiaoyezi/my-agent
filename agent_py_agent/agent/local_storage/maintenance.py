@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 # LLM: 维护操作只改可重建投影与显式调用的本库事实；FTS 回填完成键须与实际回填同事务提交。
-# 模块用途: 提供本地索引维护、统计和完整性检查，不决定 owner 权限。
+# LLM: C重建只消费原scope固定本地事务，不存source或恢复账；联验原schema migration、CAS交错/partial。
+# 模块用途: 提供原索引维护与C完整重建，不决定owner权限或新增批次状态。
 
 """implements LocalStore maintenance, statistics, reset, FTS rebuild, and integrity checks.
 
@@ -10,19 +11,27 @@ from __future__ import annotations
 比如重建 FTS、清空索引准备重建、统计每种来源有多少记录，以及检查正文文件有没有丢。
 """
 
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..common.nofollow_fs import ensure_private_dir
 
 
 # LLM: 维护器通过 schema 提供的连接访问当前库，不缓存其它用户数据；显式 reset 保持旧契约。
-# 类用途: 管理可重建全文索引和本地库维护动作。
+# LLM: C仅rebuild固定叶已闭合，其它维护writer另按真实链接线，不将任意SQL标为已授权。
+# 类用途: 管理原全文索引维护，重建保同库原子事务和原恢复标记。
 class LocalStoreMaintenanceMixin:
 
     # LLM: 读取正文权威回填投影，开始即持写锁；完成键与回填同提交，中途失败不谎报已完成。
-    # 函数用途: 原子重建本库 FTS 并清除持久待回填标记。
+    # LLM: C门外准备全行/正文，BEGIN后精确CAS再原完整事务；默认原算法不变，O(N)本地门不假称恒短。
+    # 函数用途: 原子重建FTS，C仅在同库/正文快照仍准确时清pending。
     def rebuild_fts(self) -> int:
         """用 `records` 表和文件系统内容重建 FTS5 索引。"""
+
+        if self.coordinator_io:
+            return self._rebuild_fts_coordinator()
 
         if not self.fts_available:
             return 0
@@ -40,6 +49,67 @@ class LocalStoreMaintenanceMixin:
             conn.commit()
         self._fts_needs_rebuild = False
         return count
+
+    # LLM: 原快照只活于本次栈；预持事件锁后完整BEGIN/CAS/DML/event/marker/commit同门，无跨批影子状态。
+    # 函数用途: 用已准备正文原子回填C的同一个FTS库，变化则DELETE前忙退出。
+    def _rebuild_fts_coordinator(self):
+        if not self.fts_available:
+            return 0
+        snapshot = self._prepare_fts_rebuild()
+
+        # LLM: SQLite写锁已try取得，先全行/状态/正文代次CAS；不在门内重读正文或发网络。
+        # 函数用途: 验准准备快照后按原相序执行完整FTS本地事务。
+        def operation(conn):
+            self._validate_fts_rebuild(conn, snapshot)
+            conn.execute("DELETE FROM records_fts")
+            for record_id, title, content in snapshot.contents:
+                self._replace_fts_row(conn, record_id, title, content)
+            count = len(snapshot.contents)
+            self._record_event(conn, "fts_rebuilt", "", {"count": count},
+                               append_records=self._append_coordinator_event_records)
+            self._record_fts_rebuild_complete(conn)
+            return count
+        with self._coordinator_events_lock():
+            count = self._coordinator_transaction(operation)
+        self._fts_needs_rebuild = False
+        return count
+
+    # LLM: 全列/raw类型及正文读取都在Root外；原_read_content与缺失preview沿用，读取摘要只属本次准备事实。
+    # 函数用途: 从同库记录和稳定正文代次准备FTS输入，不将hash替代正文或row字段。
+    def _prepare_fts_rebuild(self):
+        identity = _rebuild_db_identity(self.db_path)
+        with self._connection() as conn:
+            columns, rows = _read_rebuild_rows(conn)
+            state = _read_rebuild_state(conn)
+        if _rebuild_db_identity(self.db_path) != identity:
+            raise BlockingIOError("local_store_rebuild_database_changed")
+        contents, versions = [], []
+        content_bytes = 0
+        for values in rows:
+            row = dict(zip(columns, values))
+            path = self._resolve_content_path(row["content_path"])
+            before = _rebuild_body_version(path)
+            content = self._read_content(row)
+            if _rebuild_body_version(path) != before:
+                raise BlockingIOError("local_store_rebuild_content_changed")
+            raw = _rebuild_content_bytes(content)
+            contents.append((row["id"], row["title"], content))
+            versions.append((path, before, hashlib.sha256(raw).hexdigest()))
+            content_bytes += len(raw)
+        return _FtsRebuildSnapshot(columns, rows, state, identity,
+                                   tuple(contents), tuple(versions), content_bytes)
+
+    # LLM: 原单txn已BEGIN，完整raw比较不只count/hash/time；代次末核守原原子正文writer边界，不声称约束任意外部原地篡改。
+    # 函数用途: 在任何FTS删除前拒绝库/记录/正文已经变化的准备快照。
+    def _validate_fts_rebuild(self, conn, snapshot):
+        columns, rows = _read_rebuild_rows(conn)
+        if (columns != snapshot.columns or not _typed_rebuild_rows_equal(rows, snapshot.rows)
+                or not _typed_rebuild_rows_equal(_read_rebuild_state(conn), snapshot.state)
+                or _rebuild_db_identity(self.db_path) != snapshot.db_identity):
+            raise BlockingIOError("local_store_rebuild_snapshot_changed")
+        for path, version, _digest in snapshot.versions:
+            if _rebuild_body_version(path) != version:
+                raise BlockingIOError("local_store_rebuild_content_changed")
 
     def reset(self, *, remove_content_files: bool = False, reset_events_file: bool = True) -> None:
         with self._connection() as conn:
@@ -123,3 +193,80 @@ class LocalStoreMaintenanceMixin:
             "record_count": record_count,
             "event_count": event_count,
         }
+
+
+# LLM: 只保存本次准确原表/正文输入，不是缓存、恢复表或权限；完成后随调用栈释放，不保存source。
+# 类用途: 将门外准备的FTS参数和完整CAS事实传入同一次本地事务。
+@dataclass(frozen=True)
+class _FtsRebuildSnapshot:
+    columns: tuple
+    rows: tuple
+    state: tuple
+    db_identity: tuple
+    contents: tuple
+    versions: tuple
+    content_bytes: int
+
+
+# LLM: SELECT全列按原唯一id排序，不归一化字段值；新列/任一字段/类型变化都会参与CAS。
+# 函数用途: 读取同库当前完整records快照，供门外准备与门内精确复核共用。
+def _read_rebuild_rows(conn):
+    cursor = conn.execute("SELECT * FROM records ORDER BY id")
+    columns = tuple(column[0] for column in cursor.description)
+    return columns, tuple(tuple(row) for row in cursor.fetchall())
+
+
+# LLM: 只复核原schema摘要/FTS版本/待回填键及真实虚表声明，不新建状态或把无关event误当records变化。
+# 函数用途: 取得这次重建所依赖的实际库内结构状态。
+def _read_rebuild_state(conn):
+    rows = conn.execute(
+        "SELECT key, value FROM metadata WHERE key IN (?, ?, ?) ORDER BY key",
+        ("sqlite_schema_fingerprint", "records_fts_schema_version", "records_fts_rebuild_pending"),
+    ).fetchall()
+    definition = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='records_fts'"
+    ).fetchall()
+    return tuple(tuple(row) for row in [*rows, *definition])
+
+
+# LLM: sqlite返回的每个标量原类型和值都比较，不将1/1.0、None、bytes/text或JSON字符串折叠。
+# 函数用途: 判断两次完整SQL读取是否精确相同。
+def _typed_rebuild_rows_equal(current, original):
+    return (len(current) == len(original) and all(
+        len(left) == len(right) and all(type(a) is type(b) and a == b for a, b in zip(left, right))
+        for left, right in zip(current, original)))
+
+
+# LLM: 仅同路径当前库文件身份用于拒绝换库，不把mtime变化或无关event当全文记录变化。
+# 函数用途: 给单次重建记录真实数据库文件身份。
+def _rebuild_db_identity(path):
+    info = path.stat()
+    return info.st_dev, info.st_ino
+
+
+# LLM: 精确捕获原子正文writer的实际代次，缺失/断链也有明确事实；不以None表示稳定正文。
+# 函数用途: 比较原读取前后及最后事务时的正文文件状态。
+def _rebuild_body_version(path: Path):
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        try:
+            link = path.lstat()
+        except FileNotFoundError:
+            return ("missing",)
+        return ("missing_target", *_rebuild_stat_generation(link))
+    return ("present", *_rebuild_stat_generation(info))
+
+
+# LLM: 文件代次只做变化否定，摘要来自实际读取；不宣称防住任意恶意恢复元数据的外部写者。
+# 函数用途: 取得原要求的dev/ino/size/mtime/ctime版本元组。
+def _rebuild_stat_generation(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+# LLM: 只统计并摘要原读取输入，不改变传给FTS的实际content值或原preview fallback类型。
+# 函数用途: 为本次测试/快照记录实际读取正文的字节数与摘要输入。
+def _rebuild_content_bytes(content):
+    if isinstance(content, bytes):
+        return content
+    return str(content).encode("utf-8", "replace")

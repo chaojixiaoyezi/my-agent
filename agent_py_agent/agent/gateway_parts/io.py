@@ -1,4 +1,7 @@
-# LLM: Gateway 原文件队列的读写和只读统计入口；不得由展示计数派生准入权或任务终态。
+# LLM: blocking=False只调用各原reader/writer的try-file-lock，抢不到显式失败；默认True及JSON字节/CAS/锁身份不变，不签执行许可。
+# 模块用途: 可选deadline只守原IO末步骤，不签权；None默认与所有原锁/序列化保持。
+# 模块用途: 供原任务refs与发布使用同一原文件事务，并可拒绝显式等待。
+# LLM: Gateway原文件队列读写和只读统计；首次prepare沿原T内单次提交，延迟callback不得越过PID/thread/退出边界，不由计数派生许可或终态。
 # 模块用途: 保持请求文件格式、原子写入和轻量目录统计，不执行业务逻辑。
 from __future__ import annotations
 
@@ -24,11 +27,15 @@ from pathlib import Path
 
 from ..common.json_io import (
     append_private_jsonl_records,
+    check_io_deadline,
     jsonl_lines,
     serialize_private_json_no_newline,
     write_private_json_file_atomic_no_newline,
     write_private_json_file_atomic_no_newline_unlocked,
     write_private_text_file_atomic,
+)
+from ..common.json_io import (
+    locked_json_path as locked_private_json_path,
 )
 from ..common.logical_reference_ids import GATEWAY_REQUEST_ID_PREFIX
 from ..common.nofollow_fs import (
@@ -156,9 +163,17 @@ def write_json_file(path: Path, payload: dict) -> None:
 # LLM: 队列文件（请求/响应/状态）都是宿主自己的运行数据，一律按私有权限落盘：目录 0700、文件出生 0600、
 #   已有宽权限文件下次写入即收紧。读写方（TUI、适配器、派活工具、后台服务）都是同一个系统用户，
 #   收紧到 0600 不影响它们；内容格式与原来逐字节一致（indent=2、sort_keys、无尾换行）。
-# 函数用途: 原子替换一个 Gateway 队列 JSON 文件（仅本人可读写）。
-def write_json_file_atomic(path: Path, payload: dict) -> None:
-    write_private_json_file_atomic_no_newline(path, payload, sort_keys=True)
+#   C显式False只尝试原common写锁及同一unlocked原语；不能因资源忙跳过锁或假写成功，默认True沿原body。
+# 函数用途: 原子替换本人JSON；可选deadline与try锁到同一末writer，原默认行为保留。
+def write_json_file_atomic(path: Path, payload: dict, *, blocking: bool = True, deadline: float | None = None) -> None:
+    check_io_deadline(deadline)
+    if blocking and deadline is None:
+        write_private_json_file_atomic_no_newline(path, payload, sort_keys=True)
+        return
+    with locked_private_json_path(path, blocking=blocking):
+        check_io_deadline(deadline)
+        options = {} if deadline is None else {"deadline": deadline}
+        write_private_json_file_atomic_no_newline_unlocked(path, payload, sort_keys=True, **options)
 
 
 # 函数用途: 尽力删除临时文件；删除失败不影响已经完成或即将重试的替换。
@@ -186,12 +201,16 @@ def read_json_file(path: Path) -> dict:
     return read_json_file_report(path).payload
 
 
-def read_json_file_report(path: Path, *, context: str = "gateway.json.read") -> GatewayJsonReadReport:
+# LLM: 可选False只透传原gateway读锁，忙仍保原lock_busy分类；默认等待、JSON校验和错误报告不变，不能把busy当缺失/损坏。
+# 函数用途: 原JSON读取仍保报告分类；可选预算在拿锁和读取后核，不把过期当空。
+def read_json_file_report(path: Path, *, context: str = "gateway.json.read", blocking: bool = True, deadline: float | None = None) -> GatewayJsonReadReport:
+    check_io_deadline(deadline)
     if not path.exists():
         return GatewayJsonReadReport({})
 
     try:
-        with _locked_json_path(path):
+        with _locked_json_path(path, blocking=blocking):
+            check_io_deadline(deadline)
             payload = json.loads(path.read_text(encoding="utf-8"))
     except (BlockingIOError, InterruptedError) as exc:
         # LLM: BlockingIOError/InterruptedError 都是 OSError 子类，必须在下面的 catch-all 之前单独
@@ -200,6 +219,7 @@ def read_json_file_report(path: Path, *, context: str = "gateway.json.read") -> 
         return GatewayJsonReadReport({}, _gateway_json_load_error(path, exc, context), lock_busy=True)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         return GatewayJsonReadReport({}, _gateway_json_load_error(path, exc, context))
+    check_io_deadline(deadline)
     if isinstance(payload, dict):
         return GatewayJsonReadReport(payload)
     return GatewayJsonReadReport(
@@ -228,22 +248,35 @@ def _gateway_json_load_error(path: Path, exc: BaseException, context: str) -> di
 #   任一不满足就照常写（存量宽权限文件仍会被收紧）；缺失/损坏/空文件/非对象根照写（保持修复语义）。
 #   force_write 供"写动作本身是可观察信号"的调用点显式退回原行为。
 # 函数用途: 在 per-path 锁内读改写一个 JSON 文件，落盘走私有原语（0600/0700）；内容与安全状态均未变时跳过写入。
+# LLM: 默认仍原阻塞/序列化/锁序；C可显式非阻塞复用原try锁，争用必须报错而不跳过半边提交。
+# 函数用途: 在同一原文件事务内可选立即拒绝锁忙，不新增writer或假成功。
+# LLM: 可选deadline在读/updater/精确去重后及replace前核；不改原版本验证或CAS，None保持原调用形状。
+# 函数用途: 在原JSON锁内更新；短窗过期不启动下一写，已提交事实不回滚。
 def update_json_file_atomic(
     path: Path,
     updater: Callable[[dict], dict],
     *,
     require_existing: bool = False,
     force_write: bool = False,
+    blocking: bool = True,
+    deadline: float | None = None,
 ) -> dict:
-    with _locked_json_path(path):
+    check_io_deadline(deadline)
+    with _locked_json_path(path, blocking=blocking):
+        check_io_deadline(deadline)
         if require_existing and not path.is_file():
             raise FileNotFoundError(path)
         current, current_readable, raw_text, read_version = _read_json_dict_unlocked_report(path)
+        check_io_deadline(deadline)
         updated = _updated_json_dict(updater, current)
+        check_io_deadline(deadline)
         skip_candidate = not force_write and current_readable and _skip_write_is_safe(path, read_version)
         if skip_candidate and _serialized_matches(updated, raw_text):
+            check_io_deadline(deadline)
             return updated
-        write_private_json_file_atomic_no_newline_unlocked(path, updated, sort_keys=True)
+        options = {} if deadline is None else {"deadline": deadline}
+        check_io_deadline(deadline)
+        write_private_json_file_atomic_no_newline_unlocked(path, updated, sort_keys=True, **options)
         return updated
 
 
@@ -310,23 +343,33 @@ def _updated_json_dict(updater: Callable[[dict], dict], current: dict) -> dict:
     return updated
 
 
+# LLM: 默认仍原阻塞/序列化/锁序；C可显式非阻塞复用原try锁，争用必须报错而不跳过半边提交。
+# 函数用途: 在同一原文件事务内可选立即拒绝锁忙，不新增writer或假成功。
 @contextmanager
-def _locked_json_path(path: Path):
+def _locked_json_path(path: Path, *, blocking: bool = True):
+    if not blocking:
+        with try_locked_file_transition(path) as acquired:
+            if not acquired:
+                raise BlockingIOError("original_file_transition_busy")
+            yield
+        return
     lock = _path_lock(path)
     with lock:
         with _locked_file_path(path):
             yield
 
 
+# LLM: 默认仍原阻塞/序列化/锁序；C可显式非阻塞复用原try锁，争用必须报错而不跳过半边提交。
+# 函数用途: 在同一原文件事务内可选立即拒绝锁忙，不新增writer或假成功。
 @contextmanager
-def locked_file_transition(path: Path):
+def locked_file_transition(path: Path, *, blocking: bool = True):
     """Serialize a logical transition spanning more than one durable file.
 
     The JSON helpers make one file atomic.  Conversation steer/stop/complete must
     order a task-link transition and its guidance ledger together, so they share a
     dedicated lock path through this small public boundary.
     """
-    with _locked_json_path(path):
+    with _locked_json_path(path, blocking=blocking):
         yield
 
 
@@ -747,10 +790,12 @@ def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
     return target
 
 
-# LLM: A stable client message id maps to one request id across HTTP response loss. The exact-turn
-# lock protects create-vs-claim/archive races; existing payload identity must match before replay.
-# 函数用途: 按稳定请求 ID 只入队一次，断线重试返回同一请求而不会复活或复制任务。
-def write_gateway_request_once(paths: GatewayPaths, payload: dict) -> tuple[Path, bool]:
+# LLM: 原T锁内允许可信来源最后复核后同步提交；cell只在本PID/thread有效一次，callback存在不授C/P1许可，退出即失效。
+#   stable id重放沿原receipt/完整摘要，不复活归档任务；修改时联测输入重放及C后台来源生命周期。
+# 函数用途: 按稳定请求ID只入队一次，可由原C生产者在同一输入事务内作最终核权。
+def write_gateway_request_once(paths: GatewayPaths, payload: dict, *, commit_transition: Callable | None = None) -> tuple[Path, bool]:
+    if commit_transition is not None and not callable(commit_transition):
+        raise TypeError("gateway_request_commit_transition_required")
     request_id = str(payload.get("id") or "").strip()
     if not request_id:
         raise ValueError("gateway request id is required")
@@ -765,7 +810,14 @@ def write_gateway_request_once(paths: GatewayPaths, payload: dict) -> tuple[Path
         queue_gateway_input_locked,
     )
 
-    with gateway_input_transition(paths, request_id):
+    window = [False, os.getpid(), threading.get_ident(), False]
+
+    # LLM: 原cell只在本次T内启用；PID/thread不符、重复或退出后先拒绝，实际C/ports来源仍由外层真实原末门复核。
+    # 函数用途: 在同一输入事务内提交一次prepare与queue，不允许保存裸写叶在稍后继续落盘。
+    def commit():
+        if not window[0] or window[1:3] != [os.getpid(), threading.get_ident()] or window[3]:
+            raise ValueError("gateway_request_commit_window_required")
+        window[3] = True
         receipt, _prepared = load_or_prepare_gateway_input_locked(
             paths,
             request_id=request_id,
@@ -774,7 +826,14 @@ def write_gateway_request_once(paths: GatewayPaths, payload: dict) -> tuple[Path
             guidance_dedupe_key="",
             prepared_request=payload,
         )
-        receipt, created = queue_gateway_input_locked(paths, receipt)
+        return queue_gateway_input_locked(paths, receipt)
+
+    with gateway_input_transition(paths, request_id):
+        window[0] = True
+        try:
+            receipt, created = commit() if commit_transition is None else commit_transition(commit)
+        finally:
+            window[0] = False
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed):
         candidate = folder / f"{request_id}.json"
         if candidate.is_file():

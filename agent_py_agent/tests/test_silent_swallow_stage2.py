@@ -126,7 +126,7 @@ class TestSilentSwallowNowLogs:
 
         manager = MagicMock()
         manager.load.side_effect = RuntimeError("store down")
-        lease = SimpleNamespace(manager=manager, run_id="run-xyz", worker_id="w", interval_seconds=5.0)
+        lease = session_pool.RunnerSessionPoolLease(manager=manager, run_id="run-xyz", worker_id="w", interval_seconds=5.0)
         with caplog.at_level(logging.WARNING):
             session_pool._record_runner_session(lease, {"session_id": "s1"}, status="running")
         assert any("session metadata save failed" in r.message for r in caplog.records)

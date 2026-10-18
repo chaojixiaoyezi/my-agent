@@ -1,5 +1,6 @@
 # LLM: owner 配额继续使用原文件和锁序；显式非阻塞准入只用于有期限管理，默认工具写入保持等待语义。
-# 模块用途: 在同一用户的文件写入前核对空间，避免插件准备和其它工具各自计算配额。
+# LLM: C可选准确FD出生门，scan仍原算法门外；只透传真实native对象，不按码名分类，默认False无新global guard。
+# 模块用途: 复用唯一owner配额和锁序，C只收紧实际出生来源。
 from __future__ import annotations
 
 import os
@@ -11,7 +12,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
+from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import locked_json_path, read_json_object_report
+from ..common.owner_write_errors import (
+    LocalControlCoordinatorUnavailable,
+    OwnerManagementIngressUnavailable,
+)
 
 _QUOTA_LOCK_BASENAME = ".owner-quota"
 # 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
@@ -123,14 +130,18 @@ class OwnerQuotaEnforcer:
     limit.
     """
 
-    def __init__(self, owner_root: str | Path, *, max_bytes: int, policy_available: bool = True):
+    # LLM: coordinator_io仅更严格IO策略，不缓存source；原quota公式/策略/扫描不改，C出生消费原scope。
+    # 函数用途: 绑定原owner配额与锁锚点，按实例选择准确FD出生门。
+    def __init__(self, owner_root: str | Path, *, max_bytes: int, policy_available: bool = True, coordinator_io: bool = False):
         self.owner_root = Path(owner_root).expanduser().resolve(strict=False)
         self.max_bytes = max(0, int(max_bytes))
         self.policy_available = bool(policy_available)
+        self.coordinator_io = coordinator_io
         self._lock_anchor = self.owner_root / _QUOTA_LOCK_BASENAME
 
     # LLM: 默认阻塞保持既有调用合同；限时准备可选择立即拒绝竞争，但仍须在同一锁内检查和执行完整写入。
-    # 函数用途: 取得一次 owner 配额临界区，供文件批次或独立环境准备共享。
+    # LLM: C只透传锁出生策略，原quota锁仍跨领域/同步embedding；max_bytes<=0不添scan或新限制。
+    # 函数用途: 持原owner配额锁供领域同一准入共享，等待在Root外。
     @contextmanager
     def admission(self, *, blocking: bool = True) -> Iterator[OwnerQuotaAdmission]:
         """Hold the owner gate while a repository computes and applies a mutation."""
@@ -140,7 +151,8 @@ class OwnerQuotaEnforcer:
         if self.max_bytes <= 0:
             yield OwnerQuotaAdmission(self, enabled=False)
             return
-        with _locked_owner_quota(self._lock_anchor, blocking=blocking):
+        options = {} if not self.coordinator_io else {"coordinator_io": True}
+        with _locked_owner_quota(self._lock_anchor, blocking=blocking, **options):
             yield OwnerQuotaAdmission(self, enabled=True)
 
     @contextmanager
@@ -354,15 +366,20 @@ def _logical_file_size(path: Path) -> int:
 
 # LLM: 沿用原 JSON 双层锁；锁竞争（BlockingIOError）与策略/存储故障分开转领域错误，
 #   不能因为立即准入失败而无锁继续（MC4-2501）。
-# 函数用途: 将配额锁的底层错误转成领域错误，退出归还同一锁。
+# LLM: 只有新birth原scope的实际native类同对象透传，普通OSError/RuntimeError仍原领域包装；不改usage scan catch。
+# 函数用途: 保原配额锁竞争/坏账语义，C出生拒绝不可洗成普通配额故障。
 @contextmanager
-def _locked_owner_quota(path: Path, *, blocking: bool = True) -> Iterator[None]:
-    manager = locked_json_path(path, blocking=blocking)
+def _locked_owner_quota(path: Path, *, blocking: bool = True, coordinator_io: bool = False) -> Iterator[None]:
+    options = {} if not coordinator_io else {"birth_commit": _coordinator_quota_birth}
+    manager = locked_json_path(path, blocking=blocking, **options)
     try:
         manager.__enter__()
     except BlockingIOError as exc:
         raise OwnerQuotaLockContention("owner quota lock is busy") from exc
     except (OSError, RuntimeError, ValueError) as exc:
+        if coordinator_io and isinstance(exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
+                                                 LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
+            raise
         raise OwnerQuotaUnavailable("owner quota lock is unavailable") from exc
     try:
         yield
@@ -381,3 +398,9 @@ __all__ = [
     "owner_quota_enforcer_from_policy",
     "owner_logical_usage_bytes",
 ]
+
+
+# LLM: 仅原lock FD出生，原scope每次重新核来源；无source缓存、无新上下文。
+# 函数用途: 为C配额锁打开/创建/收紧FD，锁等待不入Root。
+def _coordinator_quota_birth(operation):
+    return execute_global_write(operation, require_scope=True)

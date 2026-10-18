@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1008,
+  "count": 1041,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2948,6 +2948,22 @@
       "description": "入站图片最多解码的帧数，防止动图占满处理资源。"
     },
     {
+      "name": "INPUT_RESOURCE_RETRY_BUDGET_SECONDS",
+      "file": "agent_py_agent/agent/conversation/input_resource_retry.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "重试",
+      "description": "同一次输入安全点的总等待预算，provider剩余时间只能进一步缩短。"
+    },
+    {
+      "name": "INPUT_RESOURCE_RETRY_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/conversation/input_resource_retry.py",
+      "value": 0.05,
+      "unit": "秒",
+      "category": "重试",
+      "description": "事务退出后的资源忙检查间隔，等待仍可被原停止信号立即打断。"
+    },
+    {
       "name": "_WAKE_FACT_DEPTH_LIMIT",
       "file": "agent_py_agent/agent/conversation/lifecycle_wake_event.py",
       "value": 3,
@@ -3490,6 +3506,246 @@
       "unit": "秒",
       "category": "其它",
       "description": "秒；真人预览的确认窗口，重放原请求不会延期。"
+    },
+    {
+      "name": "_SOURCE_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_background_request.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单份原来源读取预算，单位字节；超限失败，不截断后冒充完整来源。"
+    },
+    {
+      "name": "_WORKER_REGISTRY_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_bootstrap_publish.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "registry 只保存身份和账本引用；读写统一限制一 MiB，超量拒绝，不截断或当空登记。"
+    },
+    {
+      "name": "_COMMIT_FRAME_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_commit_session.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "只限制控制帧资源，不截断、不筛业务记录；正常owner标识帧远小于此值。"
+    },
+    {
+      "name": "CURATOR_DAILY_QUOTA_DEFAULT_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_curator_accounting.py",
+      "value": 5000,
+      "unit": "个",
+      "category": "其它",
+      "description": "既有策展全局日上限，单位实际运行次数；此前只在CLI默认常量中声明。"
+    },
+    {
+      "name": "_WORKER_EXIT_OBSERVATION_POLL_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_drain_process.py",
+      "value": 0.01,
+      "unit": "秒",
+      "category": "其它",
+      "description": "等待只是检查节拍（秒），不作为进程死亡或释放责任的依据。"
+    },
+    {
+      "name": "_GATEWAY_RESOURCE_DRAIN_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_drain_runtime.py",
+      "value": 2.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "关闭仅使用此门外等待预算（秒），到期保留原资源，不把期限当死亡事实。"
+    },
+    {
+      "name": "_DRAIN_SOURCE_READ_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_drain_sources.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "原请求/控制可带结构化输入；完整有界读取，超限未知而不截断。"
+    },
+    {
+      "name": "_HANDOFF_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_executor_delegation.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "私有归属只含固定记录，16KiB 上限避免交接变成无界正文运输。"
+    },
+    {
+      "name": "_HANDOFF_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_executor_delegation.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "私有管道总共只等5秒；半帧和失联必须拒绝，不能无限阻塞独立host。"
+    },
+    {
+      "name": "_EXECUTOR_RECORD_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_executor_ledger.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "v1 只有固定身份与状态，16 KiB 足够完整记录；超量拒绝，不截断或当空账。"
+    },
+    {
+      "name": "_EXECUTOR_WAIT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_executor_process.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "等待垫片确认和失败回收各5秒；内部握手不依赖模型/命令耗时，超时不放行。"
+    },
+    {
+      "name": "_EXECUTOR_CONTEXT_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_executor_shim.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "上下文帧最多2MiB：覆盖操作系统常见 argv/env 总量，同时避免私有通道无界占内存。"
+    },
+    {
+      "name": "_GENERATION_METADATA_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_generation_metadata.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "比例阈值",
+      "description": "v2只保存原范围摘要与P4，不复制业务正文；完整读回上限4MiB，超限拒绝，不截断或视为缺失。"
+    },
+    {
+      "name": "_GLOBAL_WRITE_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_global_write.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单份全局写请求至多一 MiB；超过即拒绝，不截断或落盘。"
+    },
+    {
+      "name": "MAX_PAYLOAD_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_kernel_message.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "参数用途: 原生消息业务载荷上限4096字节；系统头和凭据不计入业务载荷。"
+    },
+    {
+      "name": "_KERNEL_RECEIVE_MAX_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_kernel_message.py",
+      "value": 4294967.294,
+      "unit": "秒",
+      "category": "超时",
+      "description": "参数用途: 原Mach接收超时最大4294967.294秒，按32位无符号毫秒ABI换算；保持原上限，区别业务失败分析的等待预算。"
+    },
+    {
+      "name": "_MACH_AUDIT_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_kernel_message.py",
+      "value": 52,
+      "unit": "字节",
+      "category": "其它",
+      "description": "参数用途: Mach内核AUDIT trailer固定52字节；完整性认证必须逐字节边界检查。"
+    },
+    {
+      "name": "MAX_FDS_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_kernel_message_fds.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "参数用途: 同消息最多运输16个FD副本；拒绝超限且失败关闭已接收资源。"
+    },
+    {
+      "name": "_CONTEXT_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_native_executor_client.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "参数用途: 匿名命令上下文最多16MiB字节；超限拒绝，不截断成默认参数。"
+    },
+    {
+      "name": "_RPC_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_native_executor_client.py",
+      "value": 5,
+      "unit": "秒",
+      "category": "超时",
+      "description": "参数用途: 原native RPC每次最多等待5秒；不扩大请求模型执行期限。"
+    },
+    {
+      "name": "_REPLY_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_native_linux_reference.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "原R前设施应答为同步局部内核操作；异常不回退到共享FD表。"
+    },
+    {
+      "name": "_RECLAIM_SCAN_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_native_operation_reclaim.py",
+      "value": 32,
+      "unit": "个",
+      "category": "其它",
+      "description": "参数用途: 每次机会回收最多扫描32个原短操作；只是内部资源预算，不改变授权判定。"
+    },
+    {
+      "name": "_P3_READ_LIMIT_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_native_reclaim_io.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "参数用途: 机会回收P3只读上限16384字节；超限保留原责任定位，不生成释放事实。"
+    },
+    {
+      "name": "_TERMINAL_READ_LIMIT_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_native_reclaim_io.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "参数用途: 机会回收终态只读上限16MiB字节；超限保留原责任定位，不截断事实。"
+    },
+    {
+      "name": "WORKER_HEARTBEAT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_state.py",
+      "value": 2.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "心跳周期 2 秒，允许短暂停顿；超过 15 秒只停止盖章，绝不据此接手或宣布进程死亡。"
+    },
+    {
+      "name": "WORKER_STALE_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_state.py",
+      "value": 15.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "超过 15 秒停止盖章，容忍短暂停顿；这是可用性阈值而非进程死亡证明。"
+    },
+    {
+      "name": "OWNER_RECOVERY_STOP_CHECK_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_takeover_recovery.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "关闭通知竞态的只读保底检查间隔；不重跑P2或扫描文件，正常恢复仍即时通知。"
+    },
+    {
+      "name": "_TAKEOVER_EVIDENCE_READ_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_takeover_sources.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "完整核实明细的有界读回，不截断；超限只拒绝，不把半份明细当成功。"
+    },
+    {
+      "name": "_UNRESOLVED_SOURCE_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_takeover_unresolved_source.py",
+      "value": 16384,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "P0单条记录的字节上限，与原发现入口一致；超限拒绝而不截断。"
+    },
+    {
+      "name": "WORKER_PARENT_POLL_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_worker.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "macOS 每秒确认直接父进程；同一节拍读控制，心跳仍独立保持 2 秒周期。"
     },
     {
       "name": "_APPROVAL_POLL_SECONDS",
@@ -7050,6 +7306,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。"
+    },
+    {
+      "name": "_MAINTENANCE_SOURCE_MAX_BYTES",
+      "file": "agent_py_agent/agent/user_space/owner_maintenance_transition.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "原maintenance source完整快照预算，单位字节；超限拒绝，不截断后冒称同一来源。"
     },
     {
       "name": "_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS",

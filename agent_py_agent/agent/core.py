@@ -1,7 +1,11 @@
 """composition root for SimpleAgent runtime, tools, memory, gateway, and subagents."""
 
+# LLM: C-only 可调用唯一 canonical metadata/缺端口拒绝装配，不创建 Agent 或业务许可；原六功能构造与来源消费者须同步检查。
+# W构造最早消费原bootstrap与existing-only资源；原home/secret/F4/调度业务不从来源旧实现整段覆盖，Count0初始化保持。
+# 孤儿consumer只绑定原Agent供已核canonical ref消费，不在构造中启动任务、模型或授执行权。
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
+# LLM: 记忆真实构造叶与嵌入工厂已纯提取；本模块保原字段赋值顺序、startup快照和curator后半段，不能借此接冷HTTP。
 # 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；源码和无源码发行共用工作区裁决；只读self_map沿各领域原公开读口装配。
 
 from __future__ import annotations
@@ -54,7 +58,6 @@ from .capability.config import CapabilityConfig
 from .capability.memory_search_tool import MemorySearchTool
 from .capability.memory_tool import RememberTool
 from .capability.model_profile_tool import ManageModelsTool
-from .capability.persona_repository import PersonaRepository
 from .capability.persona_tool import UpdatePersonaTool
 from .capability.runtime_config_reload import (
     capability_config_for_agent,
@@ -96,11 +99,8 @@ from .delivery import (
 from .extensions import load_extension_registry
 from .gateway_parts.channel_health import adapter_runtime_health
 from .ingestion.watch_tool import WatchStreamTool
-from .local_storage import LocalStore
 from .memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from .memory_archive.control_plane import query_tool_output_refs_for_runs
-from .memory_store import JsonlMemory
-from .memory_store.candidates import CandidateService
 from .memory_store.curator import (
     MemoryCuratorDependencies,
     MemoryCuratorIdentity,
@@ -116,15 +116,7 @@ from .memory_store.learning_exclusions import (
     curator_learning_exclusions,
     curator_learning_exclusions_revision,
 )
-from .memory_store.lessons import HotRuleRepository, LessonRepository
 from .memory_store.migration import MemoryMigrationService
-from .memory_store.promotion import (
-    ConversationMessageEvidenceVerifier,
-    LocalStoreToolEvidenceVerifier,
-    MemoryPromotionDependencies,
-    MemoryPromotionPolicy,
-    MemoryPromotionService,
-)
 from .prompting_parts import PromptBuilder
 from .runtime_context import ThreadLocalAgentAttribute, current_subagent_run_id
 from .runtime_db.operation_store_selector import select_operation_store
@@ -313,42 +305,31 @@ def _query_curator_tool_references(
 
 # LLM: 候选、正式记忆和人格从规范owner路径只装配一次；AGENTS来源共用同一实例，不覆盖主线Skill与媒体能力。
 #   同一时刻记下默认对话模型主机快照（agent.embedding_chat_host_snapshot，只读目录），供 my-agent 自配向量模型比对。
-# 函数用途: 为 composition root 接通 LocalStore 派生索引、唯一候选账本、长期记忆和 Persona 仓库。
+# 函数用途: 分阶段委托真实记忆构造叶，并在原时点记录聊天快照、接原AGENTS来源。
 def _wire_memory_authorities(
     agent: object,
     config: AgentConfig,
     paths: dict[str, object],
 ) -> None:
-    agent.local_store = LocalStore(
-        paths["local_store_path"],
-        files_dir=paths["local_store_files_dir"],
-        events_path=paths["local_store_events_path"],
-        enable_fts=config.local_store_fts_enabled,
+    from .memory_store.owner_resources import (
+        build_owner_candidates,
+        build_owner_local_store,
+        build_owner_long_term,
+        build_owner_persona,
     )
-    agent.memory_candidates = CandidateService(
-        agent.home_paths.owner_memory_candidates_jsonl,
-        quota_enforcer=agent.owner_quota,
-    )
+
+    agent.local_store = build_owner_local_store(config, paths)
+    agent.memory_candidates = build_owner_candidates(agent.home_paths, agent.owner_quota)
     semantic_status: dict[str, str] = {}
     embedder, vector_identity = _memory_semantic_channel(agent, semantic_status)
     from .settings.embedding_selection import remember_startup_chat_host
 
-    # 和嵌入客户端同一时刻记下默认对话模型主机；my-agent 自配向量模型只比对这份启动快照（be 复审 S1）。
+    # 原聊天主机快照必须仍在semantic之后、JsonlMemory之前，不随factory返回而延后。
     remember_startup_chat_host(agent)
-    agent.memory = JsonlMemory(
-        paths["memory_path"],
-        local_store=agent.local_store,
-        ops_path=getattr(agent.home_paths, "owner_memory_ops_jsonl", None),
-        candidate_service=agent.memory_candidates,
-        embedder=embedder,
-        semantic_status=semantic_status,
-        quota_enforcer=agent.owner_quota,
-        vector_identity=vector_identity,
-    )
-    agent.persona_repository = PersonaRepository.from_home_paths(
-        agent.home_paths,
-        quota_enforcer=agent.owner_quota,
-    )
+    agent.memory = build_owner_long_term(agent.home_paths, paths, agent.owner_quota,
+        local_store=agent.local_store, candidates=agent.memory_candidates, embedder=embedder,
+        semantic_status=semantic_status, vector_identity=vector_identity)
+    agent.persona_repository = build_owner_persona(agent.home_paths, agent.owner_quota)
     from .capability.agents_source_host import build_agents_source_repository
 
     agent.agents_source_repository = build_agents_source_repository(agent)
@@ -357,35 +338,21 @@ def _wire_memory_authorities(
 
 # LLM: 复用原 owner 仓库并注入仅返回临时建议的决策 callback；Curator 无模型工具权限，不创建第二 Agent 或配置库。
 #   末尾按 enable_self_learning 挂上自动总结 Skill 服务（agent.skill_learning，关闭时为 None），与 Curator 共用 backend。
-# 函数用途: 为一个已建立 ConversationStore/Memory/Persona 的 agent 接通统一后台策展链与自动总结 Skill。
+# 函数用途: 委托真实lesson/HOT/Promotion构造后，原地接通curator与自动总结Skill。
 def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
     from .memory_store.decision_curator import annotate_curator_batch
+    from .memory_store.owner_resources import (
+        OwnerMemoryResources,
+        build_owner_hot,
+        build_owner_lessons,
+        build_owner_memory_promotion,
+    )
 
-    agent.memory_lessons = LessonRepository(
-        agent.home_paths.owner_memory_lessons_dir,
-        agent.home_paths.owner_memory_routing_index_md,
-    )
-    agent.memory_hot = HotRuleRepository(agent.home_paths.owner_memory_hot_md)
-    agent.memory_promotion = MemoryPromotionService(
-        dependencies=MemoryPromotionDependencies(
-            candidates=agent.memory_candidates,
-            long_term=agent.memory,
-            persona=agent.persona_repository,
-            lessons=agent.memory_lessons,
-            hot=agent.memory_hot,
-            message_verifier=ConversationMessageEvidenceVerifier(agent.conversation_store),
-            tool_verifier=LocalStoreToolEvidenceVerifier(
-                agent.local_store,
-                owner_id=str(agent.home_paths.owner_id or "local/main"),
-                owner_root=agent.home_paths.owner_home_dir,
-            ),
-            exclusion_store=agent.conversation_store,
-        ),
-        policy=MemoryPromotionPolicy(
-            lesson_min_occurrences=config.memory_lesson_min_occurrences,
-            hot_min_occurrences=config.memory_hot_min_occurrences,
-        ),
-    )
+    agent.memory_lessons = build_owner_lessons(agent.home_paths)
+    agent.memory_hot = build_owner_hot(agent.home_paths)
+    agent.memory_promotion = build_owner_memory_promotion(config, agent.home_paths,
+        OwnerMemoryResources(agent.local_store, agent.memory_candidates, agent.memory, agent.persona_repository),
+        conversation_store=agent.conversation_store, lessons=agent.memory_lessons, hot=agent.memory_hot)
     curator_config = MemoryCuratorConfig.from_agent_config(config)
     backend, provider, model = _build_memory_curator_backend(agent, config, curator_config)
     daily_store = DailyMemoryStore(
@@ -478,7 +445,7 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
     )
 
 
-# LLM: 模型与权限依赖按执行作用域覆盖；显式子代理后端注入按派工线程隔离，存储和 owner 保持原权威。
+# LLM: 模型与权限依赖按执行作用域覆盖；W构造先核原冻结身份，子代理后端按线程隔离，存储/owner/F4仍原权威。
 # 类用途: 组装主代理，让同用户切模型、权限或并发派工不会覆盖其它会话的运行依赖。
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
@@ -504,8 +471,8 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
-    # LLM: 持久服务按 canonical owner/workspace 装配；选模型/权限视图前冻结宿主凭据来源，子孙和后台克隆不得丢失。
-    # 函数用途: 初始化代理的模型、存储、工具和能力发现服务；可能初始化用户目录，不安装或执行能力包。
+    # LLM: W在root/home写入和凭据环境冻结前核原bootstrap及C原constructor roots，仅消费C已有共享/owner资源；Count0保main初始化、secret/F4/媒体/调度控制。
+    # 函数用途: 按真实owner装配代理并接原孤儿消费者；普通入口可初始化用户目录，W不能承担共享种子或owner首建。
     def __init__(
         self,
         config: AgentConfig,
@@ -513,29 +480,21 @@ class SimpleAgent(
         workspace_roots: list[str | Path] | None = None,
         *,
         channel_runtime_health_provider: RuntimeHealthProvider | None = None,
+        worker_bootstrap=None,
     ):
         """initialize all SimpleAgent collaborators and register orchestration tools.
 
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
         最后只注册创建、查看、发消息/纠偏、中断取消和能力裁决等用户级子代理操作。
         """
-        from .settings.secret_ref import freeze_managed_secret_environment
-
-        config = freeze_managed_secret_environment(config)
-        self.config = config
-        _export_model_endpoint_env(config)
-        self.runtime_guard_policy = runtime_guard_policy()
-        # 同一 owner 的 Gateway/后台 worker 会并发共用 agent；启动时只建一份线程安全
-        # 模型调用账本，避免首次并发请求各建一份后互相覆盖。
-        self._model_call_ledger = ModelCallLedger()
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        config = _initialize_agent_construction(self, config, root, worker_bootstrap, workspace_roots)
         self.capability_config_path = default_capability_config_path(self.root)
         self._capability_config_runtime_snapshot = None
         self._orchestration_run_ids_seen: set[str] = set()
         self.workspace_roots = _normalized_workspace_roots(self.root, workspace_roots)
 
-        self.home_paths = _resolve_home_paths(config)
+        self.home_paths = (_resolve_home_paths(config) if worker_bootstrap is None
+                           else _resolve_home_paths(config, worker_bootstrap=worker_bootstrap))
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)
         # LLM: prompt 和工具必须共享同一份结构化工作区事实。所有未获 Full Access 的
         # owner（含本地管理员）都以自己的 owner home 为唯一 workspace；进程启动 cwd
@@ -591,9 +550,7 @@ class SimpleAgent(
             due_owner_id=str(getattr(config, "my_agent_owner_id", "") or "main"),
             default_timezone=str(getattr(config, "timezone", "") or ""),
             quota_enforcer=self.owner_quota,
-            due_index=SchedulerDueIndex(
-                self.home_paths.global_index_dir / "scheduler_due.sqlite3"
-            ),
+            due_index=_build_scheduler_due_index(self.home_paths, worker_bootstrap),
         )
         self.scheduler_repository.migrate_monitor_aliases()
         # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性，宽限期从配置推出。
@@ -607,6 +564,10 @@ class SimpleAgent(
             cancellation_handler=lambda run: cancel_scheduled_task(self, self.scheduler_repository, run),
         )
         self.subagents = _build_subagent_manager(self, paths)
+        configure_canonical_background_contracts()
+        from .agent_core.orchestration.dispatch.orphan_request import execute_orphan_source
+
+        self._background_orphan_consumer = partial(execute_orphan_source, self)
         # Adapter daemon health belongs to the shared gateway process, while channel binding,
         # conversations and credentials remain owner-scoped.  A scoped agent therefore inherits
         # only this read-only health provider from its composition root; it never shares a registry
@@ -803,100 +764,44 @@ def _task_matches_audit_run_epoch(task: object, expected: int | None) -> bool:
 # LLM: 嵌入服务唯一构建入口：记忆语义召回与工具语义检索共用 embedding_model_profile 一个档案引用。
 #   档案为空返回 None（只走关键词，不发请求）；档案失效抛 ModelNotConfiguredError，由调用方按结构化 reason
 #   降级。只建客户端，不发网络请求。改这里要同步 test_embedding_service 与 test_embedding_model_profile。
-# 函数用途: 按 /model 档案创建嵌入客户端，embo* 走 MiniMax 原生协议，其余走 OpenAI 兼容 /embeddings。
+# 函数用途: 从真实Agent委托唯一显式嵌入工厂，保原档案读取与客户端构造调用点。
 def _embedding_client(agent: object):
-    config = getattr(agent, "config", None)
-    profile_id = str(getattr(config, "embedding_model_profile", "") or "").strip()
-    if not profile_id:
-        return None
-    from .retrieval.embedding import MiniMaxEmbedder, OpenAICompatibleEmbedder
+    from .retrieval.embedding_factory import embedding_client_for_resources
     from .settings.embedding_profile import embedding_model_config
 
-    resolved = embedding_model_config(agent, profile_id)
-    if resolved is None:
-        return None
-    model = str(getattr(resolved, "model_name", "") or "").strip()
-    if not model:
-        raise ValueError("embedding profile resolved without model_name")
-    # 档案自带服务商端点与凭据；端点不再从聊天 api_base 推断，避免跨服务商混用。
-    api_base = str(getattr(resolved, "api_base", "") or "")
-    api_key = str(getattr(resolved, "api_key", "") or "")
-    factory = MiniMaxEmbedder if model.startswith("embo") else OpenAICompatibleEmbedder
-    return factory(api_base=api_base, model=model, api_key=api_key)
-
-
-# 本进程已经告警过“语义记忆档案不可用”的 (owner, 原因)：Gateway 每物化一个 owner 的 agent 都会建一次嵌入客户端，
-# 其它 owner 按设计（S4）退回关键词时不能每次都刷一行日志（17f 的 start.log 里有三百多行）。
-_PROFILE_WARNINGS_SEEN: set[tuple[str, str]] = set()
-_PROFILE_WARNINGS_LOCK = threading.Lock()
+    return embedding_client_for_resources(getattr(agent, "config", None), getattr(agent, "home_paths", None),
+        profile_resolver=lambda profile_id: embedding_model_config(agent, profile_id))
 
 
 # LLM: 只管日志去重：结构化诊断 status 每次照写，不受影响。owner 取 agent.home_paths.owner_id（没有就是空串）。线程安全。
-# 函数用途: 同一进程里同一 (owner, 原因) 第一次返回 True（该打日志），之后都返回 False。
+# 函数用途: 委托唯一owner/reason日志去重集合，不在core保第二缓存。
 def _first_profile_warning(agent: object, reason: str) -> bool:
-    key = (str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""), reason)
-    with _PROFILE_WARNINGS_LOCK:
-        if key in _PROFILE_WARNINGS_SEEN:
-            return False
-        _PROFILE_WARNINGS_SEEN.add(key)
-        return True
+    from .retrieval.embedding_factory import first_profile_warning_for_owner
+
+    return first_profile_warning_for_owner(
+        str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""), reason)
 
 
 # LLM: 构建失败仅影响派生向量检索；诊断必须区分未开启、未配置、档案失效和初始化失败，不记录密钥或异常正文。
 #   “档案不可用”的警告同一进程里同一 (owner, 原因) 只打一次（_first_profile_warning），诊断照旧每次写。
-# 函数用途: 创建可选记忆向量接口，向健康面板报告降级原因，不中断正式记忆读写。
+# 函数用途: 委托显式嵌入工厂填写原诊断，并保原_embedding_client调用点。
 def _build_memory_embedder(agent: object, *, diagnostics: dict[str, str] | None = None):
-    """记忆语义召回的 embedder(检索拓宽 #1):默认关 / 没配 embedding 档案 → None(纯关键词,不变)。
+    from .retrieval.embedding_factory import build_memory_embedder_for_resources
 
-    配了 memory_semantic_recall=true + embedding_model_profile 才建。
-    失败保留纯关键词召回，同时发出结构化诊断和不含凭据的警告。
-    """
-    config = getattr(agent, "config", None)
-    status = diagnostics if diagnostics is not None else {}
-    status.update(state="disabled")
-    if not getattr(config, "memory_semantic_recall", False):
-        return None
-    from .backends.errors import ModelNotConfiguredError
-
-    try:
-        embedder = _embedding_client(agent)
-    except ModelNotConfiguredError as exc:
-        status.update(state="degraded", error_code="MEMORY_EMBEDDING_PROFILE_UNAVAILABLE",
-                      profile_id=exc.profile_id, profile_reason=exc.profile_reason)
-        if _first_profile_warning(agent, str(exc.profile_reason)):
-            logging.getLogger(__name__).warning("语义记忆档案不可用（%s）；当前使用关键词召回", exc.profile_reason)
-        return None
-    except Exception as exc:
-        status.update(state="degraded", error_code="MEMORY_EMBEDDING_INIT_FAILED", error_type=type(exc).__name__)
-        logging.getLogger(__name__).warning("语义记忆初始化失败（%s）；当前使用关键词召回", type(exc).__name__)
-        return None
-    if embedder is None:
-        status.update(state="degraded", error_code="MEMORY_EMBEDDING_MODEL_MISSING")
-        logging.getLogger(__name__).warning("语义记忆已开启，但未配置 embedding 模型档案；当前使用关键词召回")
-        return None
-    status.clear()
-    status.update(state="configured")
-    return embedder
+    return build_memory_embedder_for_resources(getattr(agent, "config", None), getattr(agent, "home_paths", None),
+        diagnostics=diagnostics, client_factory=lambda: _embedding_client(agent),
+        warning_once=lambda reason: _first_profile_warning(agent, reason), logger=logging.getLogger(__name__))
 
 
 # LLM: 生产语义通道 = 客户端 + 由同一客户端算出的空间身份，二者同生同灭（P14 第 2 条）：身份建不起来就关掉通道、
 #   诊断记 MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE，绝不把"有客户端、身份为 None"交给 JsonlMemory（None 是给测试和
 #   通用组件的不管理模式）。只建对象、不发网络请求。改这里要同步 test_vector_identity 的接线用例。
-# 函数用途: 为记忆语义召回建好嵌入客户端和向量库身份；任一缺失都返回 (None, None) 并写降级诊断。
+# 函数用途: 委托同客户端identity工厂，并保原_build_memory_embedder调用点与降级。
 def _memory_semantic_channel(agent: object, status: dict[str, str]) -> tuple[object | None, dict[str, str] | None]:
-    embedder = _build_memory_embedder(agent, diagnostics=status)
-    if embedder is None:
-        return None, None
-    from .settings.embedding_profile import embedding_identity
+    from .retrieval.embedding_factory import memory_semantic_channel_for_resources
 
-    profile_id = str(getattr(getattr(agent, "config", None), "embedding_model_profile", "") or "")
-    identity = embedding_identity(profile_id, embedder)
-    if identity is None:
-        status.clear()
-        status.update(state="degraded", error_code="MEMORY_EMBEDDING_IDENTITY_UNAVAILABLE")
-        logging.getLogger(__name__).warning("语义记忆无法确定嵌入身份；当前使用关键词召回")
-        return None, None
-    return embedder, identity
+    return memory_semantic_channel_for_resources(getattr(agent, "config", None), getattr(agent, "home_paths", None), status,
+        embedder_factory=lambda: _build_memory_embedder(agent, diagnostics=status), logger=logging.getLogger(__name__))
 
 
 # LLM: 工具语义检索只守自己的开关 tool_vector_search_enabled，模型与凭据来自 embedding_model_profile 档案（与记忆共用）；
@@ -917,12 +822,55 @@ def _build_tool_embedder(agent: object):
         return None
 
 
-def _resolve_home_paths(config: AgentConfig):
+# LLM: 最早W身份与C原workspace tuple门先于所有副作用，随后沿main原secret/模型ledger/运行根顺序；不授P3/P5或启动模型/线程。
+# 函数用途: 准备Agent构造期配置与宿主运行基础，普通入口可创建root并设置原模型环境，W只消费已有root。
+def _initialize_agent_construction(agent, config: AgentConfig, root, worker_bootstrap, workspace_roots):
+    from .gateway_parts.multiprocess_worker_agent import (
+        require_worker_construction,
+        require_worker_workspace,
+    )
+    from .settings.secret_ref import freeze_managed_secret_environment
+    require_worker_construction(worker_bootstrap, config)
+    if worker_bootstrap is not None:
+        require_worker_workspace(worker_bootstrap, root, workspace_roots)
+    agent._worker_bootstrap = worker_bootstrap
+    if worker_bootstrap is not None:
+        agent._gateway_worker_partition = worker_bootstrap.launch.partition
+    config = freeze_managed_secret_environment(config)
+    agent.config = config
+    _export_model_endpoint_env(config)
+    agent.runtime_guard_policy = runtime_guard_policy()
+    # 同一 owner 的 Gateway/后台 worker 会并发共用 agent；启动时只建一份线程安全
+    # 模型调用账本，避免首次并发请求各建一份后互相覆盖。
+    agent._model_call_ledger = ModelCallLedger()
+    agent.root = Path(root)
+    if worker_bootstrap is None:
+        agent.root.mkdir(parents=True, exist_ok=True)
+    return config
+
+
+# LLM: W只消费冻结绝对根及existing-only共享/owner资源，不走ensure/register；Count0仍复用唯一home解析器及CLI05原解析快照。
+# 函数用途: 取得实际owner家目录，普通入口负责初始化，W缺C物化结果时拒绝且不补写。
+def _resolve_home_paths(config: AgentConfig, *, worker_bootstrap=None):
+    if worker_bootstrap is not None:
+        from .user_space.worker_home import initialize_worker_home
+
+        return initialize_worker_home(worker_bootstrap, config)
     root = configured_home_root(config)
     paths = ensure_my_agent_home(root)
     owner = ensure_owner_home(paths.root, owner_identity_from_config(config))
     _register_owner_ref_if_possible(paths, owner)
     return home_paths_with_owner(paths, owner)
+
+
+# LLM: W继承原scheduler索引业务，但构造/打开仅已有库，不创建schema或切journal；Count0原唯一schema构造不变。
+# 函数用途: 按真实构造来源取得共享到期索引，避免W初始化共享SQLite资源。
+def _build_scheduler_due_index(paths, worker_bootstrap):
+    if worker_bootstrap is not None:
+        from .gateway_parts.multiprocess_worker_resources import WorkerSchedulerDueIndex
+
+        return WorkerSchedulerDueIndex(worker_bootstrap, paths)
+    return SchedulerDueIndex(paths.global_index_dir / "scheduler_due.sqlite3")
 
 
 # LLM: Compatibility shim only; home_root.configured_home_root remains the sole implementation.
@@ -1185,23 +1133,14 @@ def _tool_registry_owner_type(agent: SimpleAgent) -> str:
     return owner_kind or "owner"
 
 
+# LLM: 只把真实home/policy传给唯一quota公式；不扫描、不写文件，联验原core及资源工厂。
+# 函数用途: 在原Agent初始化时构造同owner空间准入器，默认公式与坏账处理不变。
 def _build_owner_quota_enforcer(
     agent: SimpleAgent,
 ) -> OwnerQuotaEnforcer | None:
-    """Create the one owner admission gate shared by tools and repositories."""
+    from .memory_store.owner_resources import build_owner_memory_quota
 
-    owner_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "").strip()
-    if not owner_root:
-        return None
-    return OwnerQuotaEnforcer(
-        owner_root,
-        max_bytes=max(0, int(getattr(agent.owner_policy, "max_disk_mb", 0))) * 1024 * 1024,
-        policy_available=not any(
-            str(error.get("context") or "") == "owner_policy.quota"
-            for error in getattr(agent.owner_policy, "load_errors", ())
-            if isinstance(error, dict)
-        ),
-    )
+    return build_owner_memory_quota(agent.home_paths, agent.owner_policy)
 
 
 # LLM: 当前绑定只从 owner-scoped ConversationStore 的结构化 thread binding 读取；不得从 prompt 或配置猜目标。
@@ -1395,3 +1334,27 @@ __all__ = [
     "SimpleAgent",
     "TaskProgressTool",
 ]
+
+
+# LLM: C-only 与实际业务组合根共用原 canonical 规则和缺端口拒绝 producer；纯内存装配不读取来源、不创建 Agent/任务、不签发 P3/P5。
+# 函数用途: 连接业务原元数据合同与平台原短事务拒绝口；实际执行消费者仍须由自己的宿主安装。
+def configure_canonical_background_contracts():
+    from .common.canonical_source_contract import (
+        CanonicalChildSourceContract,
+        bind_canonical_child_source,
+    )
+    from .common.request_execution_ports import bind_request_context_rejection
+    from .gateway_parts.request_transactions import (
+        missing_request_context_rejection,
+        require_original_request_write_source,
+    )
+    from .subagents.canonical_source import (
+        orphan_has_work,
+        orphan_source_identity,
+        validate_orphan_payload,
+    )
+
+    bind_canonical_child_source(CanonicalChildSourceContract(
+        validate_orphan_payload, orphan_source_identity, orphan_has_work))
+    bind_request_context_rejection(
+        missing_request_context_rejection, source_validator=require_original_request_write_source)

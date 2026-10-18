@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -101,6 +102,8 @@ def _assert_uncommitted(case, *, failures: int):
     assert tuple(case.store.messages.recent(current.thread_id, limit=0)) == case.raw_rows
 
 
+# LLM: 原机械回退仍由容量门拒绝；只核253一次同源最小备份重测，保完整工具来源/未知记录及原CAS边界。
+# 函数用途: 用原fake摘要验证精确四投影和一次请求，不执行模型工具或放宽任何预算/失败断言。
 @pytest.mark.parametrize("response_kind", ["empty", "tool_call"])
 def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_request(
     mixed_case, monkeypatch, tmp_path, response_kind,
@@ -136,18 +139,42 @@ def test_mechanical_mixed_summary_keeps_every_tool_source_and_rejects_oversized_
         _compact(case, project)
 
     assert error.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
-    # 视图序列：初始投影（is_candidate=False）+ 被拒候选 + 失败诊断用的固定开销实测（空摘要、无保留）。
-    assert len(sent) == 1 and len(views) == 3
-    assert not views[0].is_candidate and views[2].summary == "" and views[2].messages == ()
+    # 精确顺序：初始、机械候选、同源最小备份重测、失败后的固定开销诊断；一次重测不新增摘要或候选策略。
+    assert len(sent) == 1 and len(views) == 4
+    assert not views[0].is_candidate and views[3].summary == "" and views[3].messages == ()
+    minimum_candidate, diagnostic = views[2], views[3]
+    assert views[1].is_candidate and minimum_candidate.is_candidate
+    assert not views[1].measure_only and not minimum_candidate.measure_only
+    assert all(getattr(views[1], field.name) == getattr(minimum_candidate, field.name)
+               for field in fields(views[1]) if field.name != "summary")
+    minimum_tokens = estimate_tokens(minimum_candidate.summary)
+    assert minimum_tokens < estimate_tokens(views[1].summary)
+    assert minimum_tokens >= ceiling
+    assert diagnostic.is_candidate and diagnostic.measure_only
+    assert diagnostic.retained_tool_records == diagnostic.retained_ir_history == ()
+    assert diagnostic.operation_evidence == diagnostic.recent_operation_evidence == diagnostic.provider_compaction == {}
+    assert (diagnostic.thread_id, diagnostic.compact_generation, diagnostic.history_token_budget) == (
+        views[1].thread_id, views[1].compact_generation, views[1].history_token_budget,
+    )
+    capacity = error.value.capacity
+    assert capacity is not None and capacity.candidates_tried == 1
+    assert capacity.candidate_tokens == capacity.summary_tokens == minimum_tokens
+    assert capacity.input_ceiling_tokens == ceiling
+    assert capacity.fixed_tokens == estimate_tokens("")
+    assert case.agent.backend.calls == 0
     supplied = sent[0].prompt + json.dumps(sources[0], ensure_ascii=False)
     candidate = views[1]
     fallback_messages = json.loads(candidate.summary.rsplit("\n\n", 1)[1])
     assert fallback_messages == [{"role": "user", "content": [{"type": "text", "text": source_text}]}]
+    assert json.loads(minimum_candidate.summary.rsplit("\n\n", 1)[1]) == fallback_messages
     for index in range(31):
         marker = f"ORIGINAL_TOOL_{index:02}_MARKER"
         assert marker in supplied and marker in candidate.summary
+        assert marker in minimum_candidate.summary
     assert "[conversation-compact-mechanical-fallback]" in candidate.summary
+    assert "[conversation-compact-mechanical-fallback]" in minimum_candidate.summary
     assert candidate.retained_tool_records == (case.records[1],)
+    assert minimum_candidate.retained_tool_records == (case.records[1],)
     assert not (tmp_path / "must-not-run.txt").exists()
     assert not case.checkpoint_path.exists()
     _assert_uncommitted(case, failures=1)

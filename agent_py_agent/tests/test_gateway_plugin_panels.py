@@ -116,6 +116,7 @@ def test_late_panel_request_after_stop_cannot_rebuild_an_open_pool():
     from agent_py_agent.agent.gateway_parts import http_service
 
     server = http_service.GatewayHTTPServer.__new__(http_service.GatewayHTTPServer)
+    server.coordinator_memory_resources = None  # 与真实Count0构造一致；不绕过stop关闭语义。
     server.server = None
     server._thread = None
     server.plugin_display = None

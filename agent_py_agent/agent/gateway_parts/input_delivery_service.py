@@ -1,19 +1,30 @@
+# LLM: 原输入回执/完整摘要是唯一归属事实；C queued只传末writer和原reader阻塞选项，默认保Count0，busy/unknown不假进度，同步终态/steer回归。
+# 模块用途: 保存并结算原普通消息的去向；处理来源失效时保原欠账，不重签输入或重放业务。
 from __future__ import annotations
 
 """LLM: Own the durable disposition of one authenticated Gateway input.
+实际C的首次owner/绑定版本在这里的完整摘要之前冻结；已有回执直接重放，不能以候选metadata覆盖摘要。
+物化与准入须比较原回执的typed owner、owner_id和完整摘要，禁止由变更队列自洽重签归属。
 
 模块用途: 把普通消息在“当前回合、下一轮队列、已消费、终态未知”之间的去向保存为
 唯一回执；按原 guidance 的请求/任务目标对账，不用同名运输请求代替持久任务状态。
 """
 
+import copy
 import hashlib
 import json
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import check_io_deadline
+from ..common.request_execution_ports import (
+    RequestExecutionOutcomeUncertainError,
+    raise_if_transport_uncertain,
+)
 from ..conversation.store_guidance_recovery import (
     CLOSEOUT_REPLAY_QUEUED,
     CLOSEOUT_REPLAY_UNAVAILABLE,
@@ -45,6 +56,7 @@ _INPUT_RECEIPT_STATES = {
 }
 
 
+# LLM: v3完整运输字段仅定位，不授执行；本记录仍唯一输入去向，v2编码不加字段；mutable快照由各原writer末CAS核。
 # LLM: This record is the sole routing authority. Inbox files and active indexes are repairable
 # projections; the original prepared request remains here so rejected input can queue without a client retry.
 # 类用途: 保存一条普通消息的固定身份、原始排队请求、当前去向和对账错误。
@@ -61,8 +73,9 @@ class GatewayInputReceipt:
     updated_at: float = 0.0
     reconcile_error: dict[str, Any] = field(default_factory=dict)
     migration: dict[str, Any] = field(default_factory=dict)
+    transport: dict[str, Any] | None = None
 
-    # LLM: Every persisted v2 receipt carries the complete recovery payload and typed state.
+    # LLM: v2无运输字段保持原编码；v3完整保存同一次冻结运输，不丢定位字段或借投影授执行权。
     # 函数用途: 把普通消息回执转换成原子 JSON 文件内容。
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -77,18 +90,29 @@ class GatewayInputReceipt:
             "target_turn_id": self.target_turn_id,
             "updated_at": self.updated_at,
         }
+        if self.transport is not None:
+            from .input_transport import validated_input_transport
+
+            payload["schema_version"] = "gateway_input_receipt.v3"
+            payload["transport"] = validated_input_transport(self.transport)
         if self.reconcile_error:
             payload["reconcile_error"] = dict(self.reconcile_error)
         if self.migration:
             payload["migration"] = dict(self.migration)
         return payload
 
-    # LLM: v1 has no prepared request and therefore migrates explicitly instead of pretending it
-    # can auto-queue. Callers may repair it only with the same digest and current canonical input.
+    # LLM: 旧v1仅显式修复；v2不得带运输，v3必须完整codec通过，坏运输不能静默降级为未绑定。
     # 函数用途: 校验并恢复普通消息回执，同时明确记录旧版字段含义的迁移决定。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayInputReceipt:
         schema = str(data.get("schema_version") or "").strip()
+        transport = None
+        if schema == "gateway_input_receipt.v3":
+            from .input_transport import validated_input_transport
+
+            transport = validated_input_transport(data.get("transport"))
+        elif "transport" in data:
+            raise DataCorruptionError("gateway input transport requires v3 receipt")
         if schema == "gateway_input_receipt.v1":
             legacy_disposition = str(data.get("disposition") or "pending").strip()
             state = {
@@ -107,7 +131,7 @@ class GatewayInputReceipt:
             guidance_key = ""
             client_message_id = ""
             target_turn_id = str(data.get("target_turn_id") or "").strip()
-        elif schema == _INPUT_RECEIPT_SCHEMA:
+        elif schema in {_INPUT_RECEIPT_SCHEMA, "gateway_input_receipt.v3"}:
             state = str(data.get("state") or "").strip()
             prepared = data.get("prepared_request")
             prepared_request = dict(prepared) if isinstance(prepared, dict) else {}
@@ -146,6 +170,7 @@ class GatewayInputReceipt:
             updated_at=updated_at,
             reconcile_error=dict(raw_error) if isinstance(raw_error, dict) else {},
             migration=migration,
+            transport=copy.deepcopy(transport),
         )
 
 
@@ -156,9 +181,29 @@ def gateway_input_receipt_path(paths: GatewayPaths, request_id: str) -> Path:
 
 
 # LLM: All state changes for one stable ingress id share the same cross-process lock.
-# 函数用途: 返回一条普通消息的原子状态转换锁。
+# LLM: 默认仍原T；恢复同期source只在其真实目标/关联receipt T取得后核controller/lease，不持C门等待T，不改变原receipt权威。
+# 函数用途: 返回普通消息原T短门，恢复仅接同一issued元数据来源。
 def gateway_input_transition(paths: GatewayPaths, request_id: str):
-    return gateway_turn_transition(paths, request_id)
+    from .multiprocess_processing_recovery import (
+        current_processing_recovery,
+        processing_metadata_scope,
+    )
+
+    if current_processing_recovery() is None:
+        return gateway_turn_transition(paths, request_id)
+    return processing_metadata_scope(paths, request_id)
+
+
+
+# LLM: 四类原canonical来源/退出未结及真实GlobalWriteError必须优先于普通坏账分支；只按实际type，不以同码字符串授信，不造claim/entered。
+# 函数用途: 在输入best-effort catch中同对象保留未结责任，Count0普通错误沿原分流。
+def _raise_input_transport_uncertain(error):
+    from .multiprocess_global_write import GlobalWriteError
+    from .multiprocess_input_reconcile import _UNCERTAIN
+
+    if isinstance(error, (*_UNCERTAIN, GlobalWriteError)):
+        raise error
+    raise_if_transport_uncertain(error)
 
 
 # LLM: 入口读失败分流：锁忙（含取锁身份核对重试耗尽）是暂时竞争，按可重试的锁失败抛出；只有
@@ -171,9 +216,10 @@ def _raise_for_input_read_report(report, corruption_message: str) -> None:
         raise DataCorruptionError(corruption_message)
 
 
-# LLM: A prepared receipt is committed before active routing or queue writes. Reusing the stable
-# id with another digest always conflicts before any downstream side effect.
-# 函数用途: 在已持有入口锁时读取或首次保存普通消息回执和完整排队请求。
+# LLM: 先读原receipt再裁决首次prepare；实际C的owner/同次绑定版本必须在完整摘要前冻结，重放不能热读绑定或重签metadata。
+#   Count0沿原请求不新增I/O；同id异digest在任何后续副作用前拒绝，原完整prepared摘要不得用候选字段回填绕过。
+#   原8参公共入口保Count0默认资源路径；C通过同文件数据bundle入口明确选择原try资源，不把数据bundle当许可。
+# 函数用途: 在原入口锁内保存首次完整输入；已有回执只复用原身份，旧版缺载荷修复才重新走可信准备。
 def load_or_prepare_gateway_input_locked(
     paths: GatewayPaths,
     *,
@@ -182,9 +228,35 @@ def load_or_prepare_gateway_input_locked(
     client_message_id: str,
     guidance_dedupe_key: str,
     prepared_request: dict[str, Any],
+    prepare_request: Callable | None = None,
 ) -> tuple[GatewayInputReceipt, bool]:
+    request = GatewayInputPreparation(request_id, client_input_digest, client_message_id,
+        guidance_dedupe_key, prepared_request, prepare_request)
+    return load_or_prepare_gateway_input_request_locked(paths, request)
+
+
+# LLM: 只聚合原准备入口的身份与完整载荷，不携写许可；C资源选项留在实际callee，不让数据对象成为来源。
+# 类用途: 将同一次输入的原身份、正文和准备回调一起传入唯一实现，保原Count0公共签名。
+@dataclass(frozen=True)
+class GatewayInputPreparation:
+    request_id: str
+    client_input_digest: str
+    client_message_id: str
+    guidance_dedupe_key: str
+    prepared_request: dict[str, Any]
+    prepare_request: Callable | None = field(default=None, repr=False, compare=False)
+
+
+# LLM: 此处是原load/repair实现，调用者持原T；C仅追加同一次固定writer与try-reader，数据bundle不授owner/执行权。
+# 函数用途: 用同一套原完整摘要校验准备或读取输入，默认资源选项保Count0原行为。
+def load_or_prepare_gateway_input_request_locked(paths: GatewayPaths, request: GatewayInputPreparation,
+        *, commit_receipt: Callable | None = None, read_blocking: bool = True) -> tuple[GatewayInputReceipt, bool]:
+    request_id, client_input_digest = request.request_id, request.client_input_digest
+    client_message_id, guidance_dedupe_key = request.client_message_id, request.guidance_dedupe_key
+    prepared_request, prepare_request = request.prepared_request, request.prepare_request
     path = gateway_input_receipt_path(paths, request_id)
-    report = read_json_file_report(path, context="gateway.input_receipt.read")
+    options = {} if read_blocking else {"blocking": False}
+    report = read_json_file_report(path, context="gateway.input_receipt.read", **options)
     _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
@@ -194,14 +266,12 @@ def load_or_prepare_gateway_input_locked(
             client_input_digest=client_input_digest,
             client_message_id=client_message_id,
             state="pending",
-            prepared_request=dict(prepared_request),
-            prepared_payload_digest=_prepared_payload_digest(prepared_request),
+            prepared_request={},
+            prepared_payload_digest="",
             guidance_dedupe_key=guidance_dedupe_key,
             updated_at=time.time(),
         )
-        _validate_prepared_request(receipt)
-        write_json_file_atomic(path, receipt.to_dict())
-        return receipt, True
+        return _commit_fresh_gateway_input(paths, receipt, prepared_request, prepare_request, commit_receipt), True
     receipt = GatewayInputReceipt.from_dict(report.payload)
     if (
         receipt.request_id != request_id
@@ -213,35 +283,68 @@ def load_or_prepare_gateway_input_locked(
         receipt = replace(
             receipt,
             client_message_id=client_message_id,
-            prepared_request=dict(prepared_request),
-            prepared_payload_digest=_prepared_payload_digest(prepared_request),
             guidance_dedupe_key=receipt.guidance_dedupe_key or guidance_dedupe_key,
             updated_at=time.time(),
         )
-        write_json_file_atomic(path, receipt.to_dict())
+        receipt = _commit_fresh_gateway_input(paths, receipt, prepared_request, prepare_request, commit_receipt)
     _validate_prepared_request(receipt)
     return receipt, False
 
 
+# LLM: 调用者持原T；真正fresh/旧缺载荷修复才进入C末门，callback只能准备宿主快照，完整摘要校验先于唯一receipt写入。
+#   可选writer仅由原HTTP固定元数据source同步使用；None完整保原Count0 writer，不在这里捕获/授予来源。
+# 函数用途: 在同一真实C来源窗口内提交首次完整输入，准备异常不留下半份回执，Count0保持原writer。
+def _commit_fresh_gateway_input(paths, receipt, payload, prepare_request, commit_receipt=None):
+    from .control_plane import prepare_coordinator_input
+
+    # LLM: 仅由上方原C/Count0同步调用；不另选owner或改摘要，写入前必须核request/client digest的完整一致性。
+    # 函数用途: 用已经冻结的完整输入原子保存唯一回执，写失败沿原异常上抛。
+    def commit(prepared):
+        updated = replace(receipt, prepared_request=dict(prepared),
+                          prepared_payload_digest=_prepared_payload_digest(prepared), updated_at=time.time())
+        _validate_prepared_request(updated)
+        if commit_receipt is None:
+            write_json_file_atomic(gateway_input_receipt_path(paths, receipt.request_id), updated.to_dict())
+            return updated
+        return commit_receipt(updated)
+
+    return prepare_coordinator_input(paths, payload, prepare_request=prepare_request, commit=commit)
+
+
 # LLM: Reads never infer delivery from queue filenames. The receipt remains the only projection
 # exposed to HTTP, TUI and adapter reconciliation.
-# 函数用途: 读取一条普通消息回执；不存在时返回 None，损坏时明确报错。
+#   C显式False只控制原JSON取锁等待；原锁忙仍是BlockingIOError，不当不存在或数据损坏，默认True不变。
+# 函数用途: 读取原消息回执；C短门不等普通锁，缺失和损坏沿原分类。
 def read_gateway_input_receipt(
     paths: GatewayPaths,
     request_id: str,
+    *,
+    blocking: bool = True,
 ) -> GatewayInputReceipt | None:
     path = gateway_input_receipt_path(paths, request_id)
-    report = read_json_file_report(path, context="gateway.input_receipt.read")
+    read_options = {} if blocking else {'blocking': False}
+    report = read_json_file_report(path, context="gateway.input_receipt.read", **read_options)
     _raise_for_input_read_report(report, "gateway input receipt is unreadable")
     if not report.payload:
         if path.exists():
             raise DataCorruptionError("gateway input receipt is empty or invalid")
         return None
-    if report.payload.get("schema_version") != _INPUT_RECEIPT_SCHEMA:
+    if report.payload.get("schema_version") not in {_INPUT_RECEIPT_SCHEMA, "gateway_input_receipt.v3"}:
         raise DataCorruptionError("legacy gateway input receipt requires same-input retry migration")
     receipt = GatewayInputReceipt.from_dict(report.payload)
     _validate_prepared_request(receipt)
     return receipt
+
+
+# LLM: 调用方已持原T；只读原InputReceipt比较不可变完整输入和typed owner，缺回执明确沿旧无receipt合同，不补账、不重签、不从队列自洽归属授权。
+# 函数用途: 在准入前核对已有原回执与队列投影；返回是否存在回执，损坏/漂移原样拒绝。
+def require_gateway_prepared_identity(paths: GatewayPaths, payload: dict[str, Any]) -> bool:
+    receipt = read_gateway_input_receipt(paths, str(payload.get("id") or ""))
+    if receipt is None:
+        return False
+    if not _prepared_input_matches(receipt, payload):
+        raise ValueError("gateway client message id was reused with different input")
+    return True
 
 
 # LLM: Active binding is written only after the exact target accepted or durably recorded the same
@@ -298,7 +401,10 @@ def queue_gateway_input_locked(
 
 # LLM: 请求终态只结算原 request guidance；task guidance 按自己的生命周期对账。邮箱锁必须先于入口锁释放。
 #   联测前后台交接及 test_steer_closeout_replay，不能因同名运输结束拒绝活动后台任务的消息。
-# 函数用途: 请求结束后按原投递目标结算消息，保留仍属持久任务的插话。
+# 带reconcile_error的unknown仍属失败欠账；逐回执 helper 只更新原计数，不能改变异常隔离或投递状态。
+# 函数用途: 请求结束后按原投递目标结算消息，保留仍属持久任务的插话与读取错误。
+# LLM: 普通坏账按原计数隔离，但同一typed运输未知须上抛给原请求/P3，不写成已完成输入结算。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def settle_gateway_inputs_for_turn(
     paths: GatewayPaths,
     *,
@@ -317,19 +423,14 @@ def settle_gateway_inputs_for_turn(
             reject_reserved=True,
             target=("request", target_turn_id),
         )
-    except Exception:
+    except Exception as exc:
+        _raise_input_transport_uncertain(exc)
         summary["errors"] += 1
-    for request_id in _turn_input_request_ids(paths, target_turn_id):
+    for request_id in _turn_input_request_ids(paths, target_turn_id, summary):
         try:
-            receipt = read_gateway_input_receipt(paths, request_id)
-            if receipt is None:
-                continue
-            state = _reconcile_bound_input(paths, conversation_store, receipt)
-            if state in summary:
-                summary[state] += 1
-            elif state:
-                summary["errors"] += 1
-        except Exception:
+            _settle_bound_input_receipt(paths, conversation_store, request_id, summary)
+        except Exception as exc:
+            _raise_input_transport_uncertain(exc)
             # A corrupt ingress receipt must remain observable as unknown, but it
             # cannot stop the request's canonical terminal response from being
             # archived and published.
@@ -338,11 +439,14 @@ def settle_gateway_inputs_for_turn(
     return summary
 
 
+
 # LLM: 没有入口请求号的插话（/steer 控制命令，IM 多是这种）在收口时被拒收，入口对账管不到它们，内容会丢
 #   （9b 2026-10-03 复审发现，不是本机制引入的）。这里补两级：能从回执里拿到可重放的结构化输入就排成
 #   “备用下一轮”，拿不到就给该会话留一条“请重新发送”的宿主提示；两条出口（TUI 灰行、IM【提示】）共用提示表。
 #   判据只看回执级标记和 scope 结构化字段，不读正文。逐条包异常：一条插话处理不了不能让整段收口失败。
 # 函数用途: 给本轮被收口拒收、又没有入口回执的插话定结局：排备用下一轮，或提示用户重发。
+# LLM: 读取和逐条结算的普通异常仍隔离；typed来源未知不能变空回执/普通错误，也不能借机排新输入。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def _settle_steer_closeout(
     paths: GatewayPaths,
     conversation_store: object,
@@ -351,11 +455,19 @@ def _settle_steer_closeout(
 ) -> None:
     if not turn_id:
         return
-    for receipt in _closeout_replay_receipts(conversation_store, turn_id):
+    try:
+        receipts = _closeout_replay_receipts(conversation_store, turn_id)
+    except Exception as exc:
+        _raise_input_transport_uncertain(exc)
+        summary["errors"] += 1
+        return
+    for receipt in receipts:
         try:
             _settle_one_steer_closeout(paths, conversation_store, receipt, summary)
-        except Exception:
+        except Exception as exc:
+            _raise_input_transport_uncertain(exc)
             summary["errors"] += 1
+
 
 
 # LLM: 可重放的判据是“回执里有会话身份与正文”之外还拿得到排队请求：原插话回执的 entry 就是排队请求的正文来源，
@@ -401,6 +513,8 @@ def _steer_replay_queue() -> SteerReplayQueue:
 #   所以重放不需要另写正文，只把它转成 Gateway 请求形状。入口只认服务端写的身份：请求号必须落在 id 上，
 #   客户端指纹也必须写进 metadata.client_input_digest（就是 identity() 算出的那个），否则回执校验不通过。
 #   只属于旧回合的派生字段（expected_turn_id、gateway_input_request_id）要去掉：重放请求是新的一轮，不绑旧回合。
+#   宿主owner仅从原guidance冻结字段经同一规范codec恢复，不从sender/路径/新绑定推断；旧Count0缺字段仍沿原显式迁移边界。
+#   gateway_input_transport与expected_turn_id同属旧turn派生定位，重排不携回旧fence/运输字段。
 # 函数用途: 把插话回执的 entry 转成可重放的 Gateway 排队请求。
 def _replay_request_payload(receipt: object, request_id: str, digest: str) -> dict[str, Any]:
     entry = getattr(receipt, "entry", None)
@@ -408,8 +522,9 @@ def _replay_request_payload(receipt: object, request_id: str, digest: str) -> di
     metadata = dict(metadata) if isinstance(metadata, dict) else {}
     metadata.pop("expected_turn_id", None)
     metadata.pop("gateway_input_request_id", None)
+    metadata.pop("gateway_input_transport", None)
     metadata["client_input_digest"] = digest
-    return {
+    payload = {
         "id": request_id,
         "request_id": request_id,
         "kind": "steer_closeout_replay",
@@ -417,6 +532,14 @@ def _replay_request_payload(receipt: object, request_id: str, digest: str) -> di
         "user_id": str(getattr(entry, "sender", "") or ""),
         "metadata": metadata,
     }
+    from dataclasses import asdict
+
+    from .request_owner_binding import REQUEST_OWNER_KEY, frozen_request_owner
+
+    owner = frozen_request_owner({REQUEST_OWNER_KEY: metadata.get(REQUEST_OWNER_KEY)})
+    if owner is not None:
+        payload[REQUEST_OWNER_KEY] = asdict(owner)
+    return payload
 
 
 # LLM: 提示要有地方送：优先用会话身份里可重放的 thread_id；重放不了的回执常常连着 thread_id 也没有，
@@ -432,10 +555,13 @@ def _receipt_thread_id(receipt: object) -> str:
 # LLM: 会话层的读取只按回执级标记挑（closeout_replay=pending），这里再包一层异常保护：
 #   会话存储读不出来时按“这一轮没有可处理的插话”继续，不影响入口对账结果。
 # 函数用途: 读出本轮被收口拒收、还没定结局的插话回执。
+# LLM: 空集合只代表原普通不可读语义，不能吞原typed权限未结；该事件仍交请求出口保责任。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def _closeout_replay_receipts(conversation_store: object, turn_id: str) -> list[object]:
     try:
         return list(conversation_store.guidance.recovery.closeout_replay_receipts(turn_id))
-    except Exception:
+    except Exception as exc:
+        _raise_input_transport_uncertain(exc)
         return []
 
 
@@ -446,6 +572,11 @@ def gateway_input_guidance_binding(
     receipt: GatewayInputReceipt,
     conversation_store: object,
 ) -> tuple[object, str] | None:
+    if receipt.transport is not None:
+        from .input_guidance_payload import original_input_guidance
+
+        row = original_input_guidance(conversation_store, receipt)
+        return (row, receipt.transport['target']['turn_id']) if row is not None else None
     guidance = None
     recovered_turn_id = ""
     if receipt.guidance_dedupe_key:
@@ -465,6 +596,8 @@ def gateway_input_guidance_binding(
 # LLM: One reconciliation reads the authoritative guidance receipt under the ingress lock. It may
 # repair a missing active binding from the precomputed key but never guesses from message text.
 # 函数用途: 对账一条普通消息；明确拒绝才排队，已认领但未确认则保持终态未知。
+# LLM: 状态迁移始终在原输入T；v3冻结运输缺guidance仍pending，不能按旧v2缺席queue；恢复关联owner/actor/thread由原source核，typed拒绝不改unknown回执。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def reconcile_gateway_input_request(
     paths: GatewayPaths,
     *,
@@ -499,9 +632,12 @@ def reconcile_gateway_input_request(
                     # between them is repaired on every successful binding read.
                     _write_active_turn_ref(paths, receipt)
         except Exception as exc:
+            _raise_input_transport_uncertain(exc)
             _write_terminal_unknown(paths, receipt, exc)
             return "terminal_unknown"
         if guidance is None:
+            if receipt.transport is not None:
+                return receipt.state
             if receipt.state == "pending" and not receipt.target_turn_id:
                 queued, _created = queue_gateway_input_locked(paths, receipt)
                 return queued.state
@@ -535,6 +671,8 @@ def reconcile_gateway_input_request(
 #   "试过但因坏账/IO 无法收口"的回执，调用方（派发者对账段）必须经 raise_if_input_reconcile_unsettled 上报；
 #   单条回执的处理在 _reconcile_unsettled_receipt。
 # 函数用途: 周期性扫描少量未完成入口回执，修复进程崩溃留下的 active 或 queued 投影，并汇总对账结果。
+# LLM: typed运输未知立即保原cursor位置并上抛，不以finally推进假进度；普通单条坏账仍沿原轮转，不让一条错误饿死后续。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def reconcile_gateway_input_receipts(
     paths: GatewayPaths,
     agent: object,
@@ -549,6 +687,7 @@ def reconcile_gateway_input_receipts(
         "last_terminal_unknown_error": {},
     }
     for path in _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1))):
+        advance_cursor = True
         try:
             receipt = read_gateway_input_receipt(paths, path.stem)
             if receipt is None:
@@ -563,13 +702,19 @@ def reconcile_gateway_input_receipts(
                 summary["consumed"] += 1
                 continue
             _reconcile_unsettled_receipt(paths, agent, receipt, summary)
-        except Exception:
+        except RequestExecutionOutcomeUncertainError:
+            advance_cursor = False
+            raise
+        except Exception as exc:
+            _raise_input_transport_uncertain(exc)
             summary["errors"] += 1
         finally:
-            try:
-                _commit_reconcile_cursor(paths, path)
-            except Exception:
-                summary["errors"] += 1
+            if advance_cursor:
+                try:
+                    _commit_reconcile_cursor(paths, path)
+                except Exception as exc:
+                    _raise_input_transport_uncertain(exc)
+                    summary["errors"] += 1
     return summary
 
 
@@ -593,11 +738,15 @@ def _reconcile_unsettled_receipt(
 
 # LLM: 目标来自已校验 guidance；按 Gateway T -> guidance M -> task 锁复查终态，再仅结算该目标。
 #   释放这些锁后才取入口锁，避免与模型提交及插话入口锁反转。读取损坏由原入口对账写出错误事实。
-# 函数用途: 周期对账和请求收尾共用同一条精确目标结算路径，写 guidance 和入口回执。
+# LLM: 目标T由原通用短锁producer取得，恢复post阶段不沿用已持旧T；M/task顺序与入口锁分段原样。
+# 函数用途: 周期对账与请求收尾结算同一原目标，先释放目标T/M再取入口T。
+# LLM: 目标T改由同一原输入/恢复producer取得；同typed未知不补绑定、不得转读失败后继续排队。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayInputReceipt) -> str:
     try:
         binding = gateway_input_guidance_binding(receipt, store)
-    except Exception:
+    except Exception as exc:
+        _raise_input_transport_uncertain(exc)
         # 下方原对账入口会持入口锁记录读取错误；此处证据不足不得先拒绝消息。
         binding = None
     entry = getattr(binding[0], "entry", None) if binding is not None else None
@@ -607,7 +756,7 @@ def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayI
     lifecycle = "unknown"
     if turn_id and target_type in {"request", "task"} and target_id:
         with ExitStack() as locks:
-            locks.enter_context(gateway_turn_transition(paths, turn_id))
+            locks.enter_context(gateway_input_transition(paths, turn_id))
             locks.enter_context(store.guidance.ledger.turn_guard(turn_id))
             if target_type == "task":
                 locks.enter_context(store.tasks.transition_guard(target_id))
@@ -622,6 +771,7 @@ def _reconcile_bound_input(paths: GatewayPaths, store: object, receipt: GatewayI
         conversation_store=store,
         target_terminal=(lifecycle == "terminal"),
     )
+
 
 
 # LLM: 只看回执里持久化的结构化 reconcile_error（error_type/category/context），不解析文字；没有错误的终态未知
@@ -690,30 +840,62 @@ def gateway_input_status_payload(receipt: GatewayInputReceipt) -> dict[str, obje
     }
 
 
-# LLM: The active index is a bounded list of ingress receipt ids for one target turn.
+# LLM: 原by_turn仅查找投影不是权限；C可在transport前显式传target，不改canonical binding/ACK；默认参数完整保Count0，固定末门只试原锁。
 # 函数用途: 保存一条活动回合到普通消息回执的索引引用。
-def _write_active_turn_ref(paths: GatewayPaths, receipt: GatewayInputReceipt) -> None:
-    turn_digest = hashlib.sha256(receipt.target_turn_id.encode("utf-8")).hexdigest()
+# LLM: 可选deadline随原reader/writer到锁后末提交，不将预ref当授权；Count0 None保持原字节。
+# 函数用途: 写原turn查找投影，过期或锁忙保原欠账。
+def _write_active_turn_ref(paths: GatewayPaths, receipt: GatewayInputReceipt, *, blocking: bool = True,
+                           target_turn_id: str | None = None, deadline: float | None = None) -> None:
+    turn_id = receipt.target_turn_id if target_turn_id is None else target_turn_id
+    turn_digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
     request_digest = hashlib.sha256(receipt.request_id.encode("utf-8")).hexdigest()
     path = paths.root / "input_receipts" / "by_turn" / turn_digest / f"{request_digest}.json"
     expected = {
         "schema_version": "gateway_input_turn_ref.v1",
         "request_id": receipt.request_id,
-        "target_turn_id": receipt.target_turn_id,
+        "target_turn_id": turn_id,
         "client_message_id": receipt.client_message_id,
     }
-    report = read_json_file_report(path, context="gateway.input_turn_ref.read")
+    check_io_deadline(deadline)
+    options = {} if blocking and deadline is None else {"blocking": blocking, **({} if deadline is None else {"deadline": deadline})}
+    report = read_json_file_report(path, context="gateway.input_turn_ref.read", **options)
     _raise_for_input_read_report(report, "gateway input turn index is unreadable")
     if report.payload and report.payload != expected:
         raise DataCorruptionError("gateway input turn index conflicts")
     if not report.payload:
-        write_json_file_atomic(path, expected)
+        write_json_file_atomic(path, expected, **options)
 
 
-# LLM: Turn refs bound terminal work to this turn only; corrupt refs are skipped and handled by the
-# bounded global reconciler instead of poisoning unrelated requests.
-# 函数用途: 读取某个精确回合关联的普通消息请求 ID 列表。
-def _turn_input_request_ids(paths: GatewayPaths, target_turn_id: str) -> tuple[str, ...]:
+# LLM: W只读取自身turn哈希目录；引用只定位canonical，不授执行；锁忙/坏结构不能当空，原Count0宽读函数不改。
+# 函数用途: 严格列出一个原回合已发布的input查找引用，不扫描共享receipt域。
+# LLM: 每个本turn ref读前后核同一纯deadline；过期抛资源忙，由原source处理，不能返回空列表。
+# 函数用途: 在原定位目录检查全部ref，普通读延迟后不越过预算。
+def transport_turn_input_references(paths: GatewayPaths, target_turn_id: str, *, deadline: float | None = None) -> tuple[dict, ...]:
+    turn_digest = hashlib.sha256(target_turn_id.encode('utf-8')).hexdigest()
+    folder = paths.root / 'input_receipts' / 'by_turn' / turn_digest
+    result = []
+    for path in sorted(folder.glob('*.json')):
+        check_io_deadline(deadline)
+        report = read_json_file_report(path, context='gateway.input_turn_ref.read', blocking=False, **({} if deadline is None else {'deadline': deadline}))
+        check_io_deadline(deadline)
+        _raise_for_input_read_report(report, 'gateway input turn index is unreadable')
+        row = report.payload
+        request_id = row.get('request_id')
+        if (set(row) != {'schema_version', 'request_id', 'target_turn_id', 'client_message_id'}
+                or row.get('schema_version') != 'gateway_input_turn_ref.v1'
+                or row.get('target_turn_id') != target_turn_id or type(request_id) is not str or not request_id
+                or '/' in request_id or '\\' in request_id or type(row.get('client_message_id')) is not str
+                or path.name != hashlib.sha256(request_id.encode('utf-8')).hexdigest() + '.json'):
+            raise DataCorruptionError('gateway input turn reference is invalid')
+        result.append(row)
+    check_io_deadline(deadline)
+    return tuple(result)
+
+
+# LLM: Turn refs只发现本回合输入，不授权执行；逐引用读取错误记入原summary，不能把发现失败当空账。
+# 函数用途: 返回精确回合的可读请求ID，并保留坏引用的补交欠账。
+# LLM: 原by_turn只是查找投影；坏行计原errors，不能因为漏读输入就宣布结算追平，不新建索引权威。
+def _turn_input_request_ids(paths: GatewayPaths, target_turn_id: str, summary: dict[str, int]) -> tuple[str, ...]:
     turn_id = str(target_turn_id or "").strip()
     if not turn_id:
         return ()
@@ -723,30 +905,38 @@ def _turn_input_request_ids(paths: GatewayPaths, target_turn_id: str) -> tuple[s
     for path in sorted(index_dir.glob("*.json")):
         report = read_json_file_report(path, context="gateway.input_turn_ref.read")
         request_id = str(report.payload.get("request_id") or "").strip()
-        if report.load_error is None and request_id and request_id not in result:
+        if report.load_error is not None or not request_id:
+            summary["errors"] += 1
+            continue
+        if request_id not in result:
             result.append(request_id)
     return tuple(result)
+
 
 
 # LLM: Queue replay accepts only hot request files or the canonical terminal record as lifecycle
 # authority. done/failed/response are projections; an orphan projection is corruption, never proof
 # that a request finished or permission to overwrite an unrelated old result.
-# 函数用途: 在入口锁内修复或创建唯一 inbox 请求，并返回本次是否新建。
+#   顶层owner与owner_id须另比原receipt，不能因原摘要未含顶层身份就接受队列自行换属。
+#   C元数据消费者可传同源末writer；只改变实际原子写边界，None保原路径，不能借参数重prepare或覆盖canonical。
+#   read_blocking只透传原候选JSON reader；C在原短门内显式不等普通文件锁，busy分类不变。
+# 函数用途: 在入口锁内修复唯一inbox；可选不等原候选读锁，不改变原摘要或canonical校验。
 def _materialize_prepared_request_locked(
     paths: GatewayPaths,
     receipt: GatewayInputReceipt,
+    *,
+    write_request: Callable | None = None,
+    read_blocking: bool = True,
 ) -> bool:
     _validate_prepared_request(receipt)
+    read_options = {} if read_blocking else {'blocking': False}
     for folder in (paths.inbox, paths.processing, paths.terminal):
         candidate = folder / f"{receipt.request_id}.json"
         if not candidate.is_file():
             continue
-        report = read_json_file_report(candidate, context="gateway.input_request.read")
+        report = read_json_file_report(candidate, context="gateway.input_request.read", **read_options)
         _raise_for_input_read_report(report, "existing gateway input request is unreadable")
-        if (
-            _prepared_request_digest(report.payload) != receipt.client_input_digest
-            or _prepared_payload_digest(report.payload) != receipt.prepared_payload_digest
-        ):
+        if not _prepared_input_matches(receipt, report.payload):
             raise ValueError("gateway client message id was reused with different input")
         return False
     orphan_projections = (
@@ -759,22 +949,43 @@ def _materialize_prepared_request_locked(
             "gateway terminal projection exists without canonical authority"
         )
     target = paths.inbox / f"{receipt.request_id}.json"
-    write_json_file_atomic(target, receipt.prepared_request)
+    writer = write_json_file_atomic if write_request is None else write_request
+    writer(target, receipt.prepared_request)
     from ..observability.concurrency_metrics import gateway_request_enqueued
 
     gateway_request_enqueued()
     return True
 
 
-# LLM: Prepared payload identity is server-authored and must match the receipt before any replay.
+# LLM: 原摘要/协议不换版；原宿主metadata断言若存在必须与顶层typed owner一致，旧无断言仍按原完整摘要验证，不补默认身份。
 # 函数用途: 校验回执里的完整排队请求属于同一个固定请求和内容指纹。
 def _validate_prepared_request(receipt: GatewayInputReceipt) -> None:
+    from .request_owner_binding import REQUEST_OWNER_KEY, frozen_request_owner
+
+    metadata = receipt.prepared_request.get("metadata")
+    if (isinstance(metadata, dict) and metadata.get(REQUEST_OWNER_KEY) is not None
+            and frozen_request_owner(receipt.prepared_request)
+            != frozen_request_owner({REQUEST_OWNER_KEY: metadata[REQUEST_OWNER_KEY]})):
+        raise DataCorruptionError("gateway input prepared owner identity is invalid")
     if (
         str(receipt.prepared_request.get("id") or "") != receipt.request_id
         or _prepared_request_digest(receipt.prepared_request) != receipt.client_input_digest
         or _prepared_payload_digest(receipt.prepared_request) != receipt.prepared_payload_digest
     ):
         raise DataCorruptionError("gateway input prepared request identity is invalid")
+
+
+# LLM: 唯一比较基准是原receipt已保存的输入；owner由main codec解码，owner_id逐类型/值核对，完整metadata/actor/media仍用原摘要，运行字段不参与。
+# 函数用途: 检查队列或终态投影是否仍属于同一原输入，不修改任何记录。
+def _prepared_input_matches(receipt: GatewayInputReceipt, payload: dict[str, Any]) -> bool:
+    from .request_owner_binding import frozen_request_owner
+
+    original = receipt.prepared_request
+    return (frozen_request_owner(payload) == frozen_request_owner(original)
+            and type(payload.get("owner_id")) is type(original.get("owner_id"))
+            and payload.get("owner_id") == original.get("owner_id")
+            and _prepared_request_digest(payload) == receipt.client_input_digest
+            and _prepared_payload_digest(payload) == receipt.prepared_payload_digest)
 
 
 # LLM: Guidance metadata is the exact-turn authority after an append-before-bind crash. Every
@@ -891,6 +1102,8 @@ def _same_reconcile_error(previous: object, current: dict[str, Any]) -> bool:
 #   task 非终态、缺失或不可读均不证明可结算，也不授予执行权；新输入准入仍由控制入口核对 claim。
 #   本函数只读；修改时联测 test_gateway_input_target_lifecycle 与 test_steer_delivery_recovery。
 # 函数用途: 分别读取原请求或持久任务的生命周期，避免前台结束误拒后台插话。
+# LLM: 普通任务账不可读仍unknown，typed原执行源未知须保持同对象上抛，不能以unknown状态吞掉请求责任。
+# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
 def _input_target_lifecycle(
     paths: GatewayPaths, store: object, target_id: str, *, target_type: str,
 ) -> str:
@@ -902,7 +1115,8 @@ def _input_target_lifecycle(
         return "unknown"
     try:
         link = store.tasks.load(target_id)
-    except Exception:
+    except Exception as exc:
+        _raise_input_transport_uncertain(exc)
         return "unknown"
     return "terminal" if link is not None and conversation_task_link_is_terminal(link.status) else "unknown"
 
@@ -963,10 +1177,12 @@ def _reconcile_receipt_paths(paths: GatewayPaths, *, limit: int) -> tuple[Path, 
 
 # LLM: Cursor advancement happens only after the selected receipt was processed. A crash may
 # repeat one idempotent transition, but it can never skip the rest of a selected page.
+#   C只传本轮原来源的末writer；延期可记examined但不是settled，typed失源调用方不推进。None沿原Count0原子写。
 # 函数用途: 在一条入口回执处理完以后，原子记录下一轮扫描起点。
-def _commit_reconcile_cursor(paths: GatewayPaths, processed_path: Path) -> None:
+def _commit_reconcile_cursor(paths: GatewayPaths, processed_path: Path, *, write_cursor: Callable | None = None) -> None:
     cursor_path = paths.root / "input_receipts" / "state" / "reconcile_cursor.json"
-    write_json_file_atomic(
+    writer = write_json_file_atomic if write_cursor is None else write_cursor
+    writer(
         cursor_path,
         {
             "schema_version": "gateway_input_reconcile_cursor.v1",
@@ -987,5 +1203,24 @@ __all__ = [
     "read_gateway_input_receipt",
     "reconcile_gateway_input_receipts",
     "reconcile_gateway_input_request",
+    "require_gateway_prepared_identity",
     "settle_gateway_inputs_for_turn",
 ]
+
+
+# LLM: 只在原终态结算循环内调用；复用原回执对账和重读，不新建投递状态。异常由外层逐条隔离。
+# 函数用途: 结算一个已绑定输入并统计未知回执的真实读取错误。
+def _settle_bound_input_receipt(paths, conversation_store, request_id, summary):
+    receipt = read_gateway_input_receipt(paths, request_id)
+    if receipt is None:
+        return
+    state = _reconcile_bound_input(paths, conversation_store, receipt)
+    if state not in summary:
+        if state:
+            summary["errors"] += 1
+        return
+    summary[state] += 1
+    if state == "terminal_unknown":
+        updated = read_gateway_input_receipt(paths, request_id)
+        if updated is None or updated.reconcile_error:
+            summary["errors"] += 1

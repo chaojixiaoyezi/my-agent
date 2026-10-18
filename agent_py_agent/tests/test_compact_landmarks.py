@@ -235,8 +235,16 @@ def test_fit_shrinks_landmarks_whenever_the_candidate_is_over_target():
     small = _Rebuild(300, minimum=150)
     fitted = _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, 1_400), [small], remeasure)
     assert small.budgets == [-100] and fitted.summary == "smaller-0" and fitted.tokens < 1_400
-    # 缩到最小仍不低于上限（超限来自别的内容）、备份已是最小段、或没有备份段：都不重算。
-    for tokens, used, minimum in ((2_000, 100, 0), (1_600, 200, 150), (1_200, 150, 150), (1_200, 0, 0)):
+    # 局部相减不能证明整体不可行：保原两组输入，恰好一次完整重测后才采用真实更小的结果。
+    for tokens, used, minimum, expected_budget in ((2_000, 100, 0, -900), (1_600, 200, 150, -400)):
+        count = len(remeasured)
+        rebuild = _Rebuild(used, minimum)
+        fitted = _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, tokens), [rebuild], remeasure)
+        assert rebuild.budgets == [expected_budget]
+        assert len(remeasured) == count + 1 and remeasured[-1] == "smaller-0"
+        assert fitted.summary == "smaller-0" and fitted.tokens == 900
+    # 备份已是最小段仍不重算；后两组原输入及其零测断言保持。
+    for tokens, used, minimum in ((1_200, 150, 150), (1_200, 0, 0)):
         count = len(remeasured)
         rebuild = _Rebuild(used, minimum)
         assert _fit_landmarks_to_target(limits, _MeasuredSummary("s", None, tokens), [rebuild], remeasure).tokens == tokens

@@ -1,4 +1,5 @@
-# LLM: 执行器身份属于 exact attempt 元数据，内存登记仅证明本进程执行区间是否仍存在。
+# LLM: 文件短事务改由common运输原平台端口，仍先原T/P3/P5再业务锁；未结typed事件不得吞，Count0不增I/O。
+# LLM: 执行器身份属于exact attempt元数据；ASK未决及HCM缺来源typed原样透传，内存登记只证明原执行区间。
 # 不按心跳、token 速度或 lease 年龄判死；状态投影和通知仍由子代理收口服务负责。
 #   启动指纹统一取自 common.heartbeat.process_start_time（跨平台字符串），比较走 start_time_matches
 #   （旧数字记录与字符串指纹双口径，不可核验不报替换）。
@@ -16,6 +17,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..common.heartbeat import process_start_time, start_time_matches
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    gateway_short_operation,
+    raise_if_transport_uncertain,
+)
 from ..scheduler.repository import _process_state
 from .operations import RuntimeConflictError
 
@@ -38,8 +44,8 @@ _SCHEMA = "attempt-executor.v1"
 _LOGGER = logging.getLogger(__name__)
 
 
-# LLM: 登记必须先于执行；finally 只写退出事实，不裁决任务质量或自动重试。写库失败时本进程登记仍能证明退出。
-# 函数用途: 给一次真实子代理执行加上可恢复的进入/退出记录；异常原样向上传播。
+# LLM: 登记先于执行；finally退出事实仍消费同source，ASK/HCM来源拒绝须typed透传，不能用日志吞掉撤权。
+# 函数用途: 记录原执行区间的出生和退出；来源丢失时保留责任并向上传播。
 @contextmanager
 def attempt_executor(repo: Any, run_id: str, attempt_id: str):
     if repo is None:
@@ -63,16 +69,26 @@ def attempt_executor(repo: Any, run_id: str, attempt_id: str):
             try:
                 _write_executor(repo, run_id, attempt_id,
                                 {**executor, "status": "exited", "ended_at": time.time()}, starting=False)
-            except Exception:
+            except RequestExecutionContextUnavailable:
+                raise
+            except Exception as error:
+                raise_if_transport_uncertain(error)
                 _LOGGER.exception("执行器退出事实写入失败: run_id=%s attempt_id=%s", run_id, attempt_id)
     finally:
         with _LOCK:
             _ACTIVE.pop(token, None)
 
 
-# LLM: 元数据更新按 current attempt 和原 token 做 CAS；退出只能更新自己的记录，不能改新执行器。
-# 函数用途: 把执行器登记写入现有 attempt，不新建队列、不改 run/工具状态。
+# LLM: 整段元数据事务由原短 callback 覆盖；current attempt/token CAS 在同窗内保持，来源拒绝不可写普通失败。
+# 函数用途: 把出生或退出事实交原平台短提交，不新建队列、不改 run/工具状态，Count0 仍直接执行。
 def _write_executor(repo, run_id: str, attempt_id: str, executor: dict, *, starting: bool) -> None:
+    return gateway_short_operation("child_executor_record",
+        lambda: _write_executor_record(repo, run_id, attempt_id, executor, starting=starting))
+
+
+# LLM: 此leaf完整在原callback短门里，原repo事务/current attempt/token CAS与退出元数据原样保持，不授任何业务权限。
+# 函数用途: 在调用者原短提交内保存同一个执行器的出生或退出记录。
+def _write_executor_record(repo, run_id, attempt_id, executor, *, starting):
     with repo.transaction() as conn:
         row = conn.execute(
             "SELECT a.metadata_json, a.status, a.agent_run_id FROM agent_attempts a "

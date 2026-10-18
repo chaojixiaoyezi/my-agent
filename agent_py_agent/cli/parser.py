@@ -149,10 +149,16 @@ def _interactive_argv(argv: Sequence[str], command: str) -> list[str]:
 
 # LLM: Dispatch interactive commands before extension/config bootstrap; all other routes preserve
 # the existing full parser and extension registration behavior. argv injection exists for tests.
-# 函数用途: 设置终端编码、选择轻量或完整解析器，并调用最终命令处理函数。
+#   内部worker须先走原dispatcher核C启动模式，再进入任何配置/扩展引导；普通命令返回None，保原Count0路径。
+# 函数用途: 先分流真实worker，再选择普通轻量或完整解析器；不以CLI参数授予worker业务权限。
 def main(argv: Sequence[str] | None = None) -> int:
     configure_stdio()
     effective_argv = list(sys.argv[1:] if argv is None else argv)
+    from .gateway_worker import dispatch_worker_entry
+
+    worker_code = dispatch_worker_entry(effective_argv)
+    if worker_code is not None:
+        return worker_code
     interactive_command = _interactive_command(effective_argv)
     if interactive_command:
         parser = build_interactive_parser()

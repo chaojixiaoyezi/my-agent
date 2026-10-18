@@ -4,6 +4,22 @@
 
 IM 新计划绑定原 ThreadStore 的独立执行线程；TUI/旧计划保留原执行线程。L 整合后可显式按次 isolated；inherit 从原布置聊天读取最新合法模型选择，fixed 保存明确档案引用，凭据不复制。见 [整合记录](../tasks/L_T_IM_INTEGRATION_HANDOFF.md)。
 `/delegate enable|disable|status` 保存逐发送者偏好，到部署时区下一零点失效；原入站回执冻结模式与版本。
+只读宿主接缝（2026-10-16，独立切片，尚未接入 F3 冷入口）：
+`capture_im_dispatch_for_owner(home_paths=..., config=..., scope=..., capability_root=..., capability_config_path=None)`
+复用原 `host_im_dispatch.v1` 字段。`capability_root` 必须由可信宿主显式传入原 Agent 构造 root；
+有实际显式覆盖时再传准确 `capability_config_path`。二者不是授权，不能从 actor、配置身份或 owner home 猜来源。
+调用方必须已经完成真实 owner 配置覆盖与宿主身份解析；`scope.resolved_owner` 缺失、非规范或与完整规范路径不符时拒绝，
+不会从角色、正文、配置或渠道名称补出 owner，也不签发执行租约。
+`delegation_preference_by_paths` 与旧 Agent 入口共用唯一偏好文件、发送者键、版本及原业务时区日界线；
+控制写仍走原原子事务，读取只取完整旧/新 JSON，不创建锁、缓存、owner、Agent 或 Store。
+能力配置与旧 Agent 的 `capability_config_path_for` 共用同一纯路径解析：实际显式路径优先，否则原构造 root 下的配置，
+该 root 对远程 owner 不一定是其 owner home；选定文件缺失仍沿原随包默认，不改去读 owner home。
+原 Agent 的 typed 缓存及更严策略继续保留，冷读不附加缓存。坏配置、owner policy 的读取错误或禁用 `create_subagents`
+都使新快照保持原模式，旧 Agent 的更严运行时策略也保留。已受理回执恢复只消费原冻结快照，不随开关、零点或路由变化重算。
+来源选择必须随本次读取结果保留：已选用户文件后读取失败，即使随后文件被移走，也返回不可用，不能根据读后二次 `exists()`
+换成默认开启配置。存在性未核实也不等于确认缺失。仅旧 Agent 本次确认用户文件缺失、随包读取又失败时保留原默认值合同；
+冷入口任何读取失败均返回不可用。读取时新文件出现也不重选本次来源，下一次读取仍按原优先级检查，不缓存缺失默认值。
+该接口不改变真实工具权限、网络策略或调度额度；F3 的实际 lease、来源和冷入口接线由其调用方验收，不能用此切片测试代替。
 开启后原辅助模型按结构化 chat/task 路由；宿主与模型工具共用 `conversation/session_task_dispatch.py` 的耐久派发，工作项进入原 SessionTaskStore/WakeStore，聊天主模型只生成接单回应。
 `/status` 的 IM 设置与孩子状态由 `conversation/im_task_status.py` 读取原事实源，Gateway 不导入核心派活工具或子代理实现；此次移位不改变 schema、权限、幂等键或任何配额；普通模型派活目标没有宿主委派标记时不写该策略，委派目标仍先绑定准确任务 ref 再发正文与 wake。
 后台主代理经真实 ToolExecutor/G1 启动子代理，复用根/owner 容量，等待孩子后由原自然回复模型汇总；孩子提出结构化能力申请时，根只获得原父级裁决工具，不代做业务。

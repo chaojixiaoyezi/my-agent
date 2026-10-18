@@ -1,3 +1,5 @@
+# LLM: 静默取消共用原输入退休实现，冷C只消费其真实输入服务末门，不新建Wake或恢复任务。
+# 模块用途: 让原Agent和冷C保持相同的凭据取消回执及输入清理。
 # LLM: 输入值与安全元数据分离；配置/重发复用原动作授权并在凭据锁外核成员，锁内仅CAS，不增加网络/管理权。
 # 模块用途: 校验原凭据卡与认证配置，群共享使用和管理保持分权，秘密只在原加密链保存。
 from __future__ import annotations
@@ -82,24 +84,11 @@ def configure_credential(agent, reference, *, authentication, auth_config=None, 
 
 # LLM: 重发仅退休准确旧输入，不产生取消Wake；新代次沿原登记/截止账本，旧卡引用不再可提交。
 # 函数用途: 在重发或精确取消后释放原待填输入槽并清理原截止调度，避免迟到或重复卡占住任务容量。
+# LLM: 静默退休规则只保留一个实现，原Agent只提供原输入依赖，不改reissue/cancel的Wake语义。
+# 函数用途: 沿原资源关闭准确待填卡。
 def retire_credential_input(agent, previous):
-    import time
-
-    from ..conversation.input_dependencies import (
-        _mutate,
-        _schedule_input_deadline,
-        update_task_input_refs,
-    )
-    input_id = previous['input_id']
-
-    # LLM: 输入锁内只退休准确pending/cancelled卡输入并标resolution_delivery=retire；不覆盖ready，泛用取消不受此静默标记影响。
-    # 函数用途: 在原输入记录上退休重发前的待填卡。
-    def retire(row):
-        return {**row,'status':'cancelled','armed':False,'resolved_at':row.get('resolved_at') or time.time(),'resolution_delivery':'retire'} if row and row['status'] in {'pending','cancelled'} else row
-
-    _mutate(agent, input_id, retire)
-    update_task_input_refs(agent, previous['scope']['root_task_id'], input_id, remove=True)
-    _schedule_input_deadline(agent,previous['scope']['root_task_id'])
+    from ..conversation.input_dependencies import input_dependency_access
+    return retire_credential_input_from_access(input_dependency_access(agent), previous)
 
 
 # LLM: group更新只放开同群管理者的新任务，仍限原请求人/填写人并核原MAC；task继续同来源线程，不读取明文。
@@ -206,3 +195,20 @@ def share_credential(agent, reference):
             _save_credential_row(admission, path, row)
     return {'credential_ref': reference, 'origin': row['origin'], 'access_scope': 'group',
             'status': row['status'], 'verification_status': row.get('verification_status', 'unverified')}
+
+
+# LLM: 原pending/cancelled输入只原位退休，refs/deadline各自消费同一原提交门；不造取消Wake或任务终态。
+# 函数用途: 为原Agent和冷C静默回收同卡输入。
+def retire_credential_input_from_access(inputs, previous):
+    import time
+
+    input_id = previous.get('input_id',previous['credential_ref'])
+
+    # LLM: 输入锁内只退休准确pending/cancelled卡输入并标resolution_delivery=retire；不覆盖ready，泛用取消不受此静默标记影响。
+    # 函数用途: 在原输入记录上退休重发前的待填卡。
+    def retire(row):
+        return {**row,'status':'cancelled','armed':False,'resolved_at':row.get('resolved_at') or time.time(),'resolution_delivery':'retire'} if row and row['status'] in {'pending','cancelled'} else row
+
+    inputs.mutate(input_id, retire)
+    inputs.update_refs(previous['scope']['root_task_id'], input_id, remove=True)
+    inputs.schedule(previous['scope']['root_task_id'])

@@ -1,3 +1,5 @@
+# LLM: 治理写入口在原管理员校验和目录/锁副作用前消费唯一全局拒门；读权限、原策略合并与失败关闭不变。
+# 模块用途: 仅协调者或默认单进程继续原管理员治理写入，拒门不增加任何owner权限。
 # LLM: 管理员对每个 owner 的控制只存于该 owner 自己的 tool_policy.json 的 admin_controls 块（owner_admin_controls.v1），
 #   与审批模式、长期授权同一文件、同一把锁；owner 自己的代理写不进（tool_policy.json 在 owner 受保护控制路径内），
 #   只有 is_permission_admin(管理员 home) 的入口（admin_controls 工具）能写。
@@ -115,7 +117,12 @@ def _validate_change(admin_home: object, target_home: object, changes: object) -
 #   基线取当前有效值（坏块时为全 False，避免修一项顺带放开其它项），再合并本次改动；块里写全部相关键和更新时间、操作者。
 #   副作用：写目标 owner 策略文件并 chmod 600。坏 JSON 或 schema 不符时拒绝写，不覆盖用户其它策略。
 # 函数用途: 管理员修改某个用户的 Jev / 审计开关，或自己的跨用户审计许可，返回修改后的控制值。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def set_owner_admin_controls(admin_home: object, target_home: object, changes: object, *, actor: str) -> dict:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('owner_admin_controls')
+
     changes = _validate_change(admin_home, target_home, changes)
     path = _policy_path(target_home)
     path.parent.mkdir(parents=True, exist_ok=True)

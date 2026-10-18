@@ -1,3 +1,5 @@
+# LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
+# 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
 # LLM: 本模块是 runner 终态收口的唯一权威入口。它解决两个真实缺口：
 #   1) 收口写库失败时只 fail-soft 返回 None，既没有记录也没有持久化待重试事实，
 #      task/wake 已经终态、runtime 仍 created 的矛盾会永久留档；
@@ -18,6 +20,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ...common.request_execution_ports import (
+    gateway_short_transaction,
+    raise_if_transport_uncertain,
+)
 from ..models import SUBAGENT_FAILURE_STATUSES, TaskStatus
 
 if TYPE_CHECKING:
@@ -127,16 +133,20 @@ def closeout_target_run_status(params: Any, result: Any, task: Any) -> str:
 # LLM: 该函数只回答"权威 run 现在是什么"，不做任何写操作；读不到就返回空串，
 # 由调用方按 fail-closed 处理，绝不把"读不到"当成"已收口"。
 # 函数用途: 读取 runtime.db 中某条 run 的当前状态。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _current_run_status(repo: Any, run_id: str) -> str:
     try:
         row = repo.agent_run_for_run_id(str(run_id or ""))
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         return ""
     if row is None:
         return ""
     try:
         return str(row["status"] or "")
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         return ""
 
 
@@ -152,80 +162,87 @@ def _error_text(exc: BaseException) -> str:
 # 的唯一判据：committed 才允许通知，retryable 才落 WAL，rejected 只留诊断。
 # 语义不变式：只在 attempt 仍是 exact current 时收口；stale/换代保护沿用 repo 的 CAS。
 # 函数用途: 按 runner 结论收口对应 run，读取失败显式记录可重试结果，无操作分支不附加隐式覆盖字段。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def settle_runtime_run_for_result(
     repo: RuntimeRepository | None,
     task: Any,
     params: Any,
     result: Any,
 ) -> dict[str, Any]:
-    if bool(getattr(params, "dry_run", False)):
-        return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "dry_run")
-    target = closeout_target_run_status(params, result, task)
-    if not target:
-        return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "non_terminal_runner_status")
-    if repo is None:
-        return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_db")
-    run_id = str(getattr(task, "id", "") or "")
-    attempt_id = str(getattr(params, "attempt_id", "") or "")
-    try:
-        authority = repo.agent_run_for_run_id(run_id)
-    except Exception as exc:  # noqa: BLE001 - 读权威行失败同样是"未收口"，必须可重试
-        return {
-            "state": CLOSEOUT_WRITE_ERROR, "reason": "authority_read_failed", "retryable": True,
-            "target_run_status": target, "run_id": run_id, "attempt_id": attempt_id,
-            "detail": _error_text(exc),
+    with gateway_short_transaction('child_settle_runtime_run_for_result_commit'):
+        if bool(getattr(params, "dry_run", False)):
+            return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "dry_run")
+        target = closeout_target_run_status(params, result, task)
+        if not target:
+            return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "non_terminal_runner_status")
+        if repo is None:
+            return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_db")
+        run_id = str(getattr(task, "id", "") or "")
+        attempt_id = str(getattr(params, "attempt_id", "") or "")
+        try:
+            authority = repo.agent_run_for_run_id(run_id)
+        except Exception as exc:  # noqa: BLE001 - 读权威行失败同样是"未收口"，必须可重试
+            raise_if_transport_uncertain(exc)
+            return {
+                "state": CLOSEOUT_WRITE_ERROR, "reason": "authority_read_failed", "retryable": True,
+                "target_run_status": target, "run_id": run_id, "attempt_id": attempt_id,
+                "detail": _error_text(exc),
+            }
+        if authority is None:
+            return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_authority")
+        agent_run_id = str(authority["agent_run_id"] or "")
+        if not agent_run_id:
+            return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_agent_run_id")
+        base = {
+            "target_run_status": target,
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "agent_run_id": agent_run_id,
         }
-    if authority is None:
-        return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_runtime_authority")
-    agent_run_id = str(authority["agent_run_id"] or "")
-    if not agent_run_id:
-        return _noop_outcome(CLOSEOUT_NOT_APPLICABLE, "no_agent_run_id")
-    base = {
-        "target_run_status": target,
-        "run_id": run_id,
-        "attempt_id": attempt_id,
-        "agent_run_id": agent_run_id,
-    }
-    try:
-        settled = repo.settle_agent_run(
-            agent_run_id=agent_run_id,
-            status=target,
-            attempt_id=attempt_id,
-            payload={
-                "status": str(getattr(result, "status", "") or getattr(task, "status", "") or ""),
-                "runner_result": True,
-                "turn_end_reason": str(getattr(params, "turn_end_reason", "") or ""),
-                "runtime_status": "error" if target != "done" else "ok",
-                "runtime_reason": str(getattr(result, "message", "") or "")[:200],
-                "runtime_source": "subagent_runner",
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 - 写库异常绝不能再被吞成 None
-        return {**base, "state": CLOSEOUT_WRITE_ERROR, "reason": "settle_failed",
-                "retryable": True, "detail": _error_text(exc)}
-    reason = str((settled or {}).get("reason") or "")
-    if bool((settled or {}).get("settled")):
-        return {**base, "state": CLOSEOUT_SETTLED, "reason": "settled", "retryable": False,
-                "event_id": str((settled or {}).get("event_id") or "")}
-    if reason == "already_terminal":
-        # 已经是终态：只有与目标一致才算幂等收口，否则是权威终态冲突（不得覆盖、不得通知成完成）。
-        observed = _current_run_status(repo, run_id)
-        if observed and observed == target:
-            return {**base, "state": CLOSEOUT_ALREADY_CONSISTENT, "reason": "already_terminal",
+        try:
+            settled = repo.settle_agent_run(
+                agent_run_id=agent_run_id,
+                status=target,
+                attempt_id=attempt_id,
+                payload={
+                    "status": str(getattr(result, "status", "") or getattr(task, "status", "") or ""),
+                    "runner_result": True,
+                    "turn_end_reason": str(getattr(params, "turn_end_reason", "") or ""),
+                    "runtime_status": "error" if target != "done" else "ok",
+                    "runtime_reason": str(getattr(result, "message", "") or "")[:200],
+                    "runtime_source": "subagent_runner",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 写库异常绝不能再被吞成 None
+            raise_if_transport_uncertain(exc)
+            return {**base, "state": CLOSEOUT_WRITE_ERROR, "reason": "settle_failed",
+                    "retryable": True, "detail": _error_text(exc)}
+        reason = str((settled or {}).get("reason") or "")
+        if bool((settled or {}).get("settled")):
+            return {**base, "state": CLOSEOUT_SETTLED, "reason": "settled", "retryable": False,
+                    "event_id": str((settled or {}).get("event_id") or "")}
+        if reason == "already_terminal":
+            # 已经是终态：只有与目标一致才算幂等收口，否则是权威终态冲突（不得覆盖、不得通知成完成）。
+            observed = _current_run_status(repo, run_id)
+            if observed and observed == target:
+                return {**base, "state": CLOSEOUT_ALREADY_CONSISTENT, "reason": "already_terminal",
+                        "retryable": False, "observed_run_status": observed}
+            return {**base, "state": CLOSEOUT_CONFLICT, "reason": "already_terminal_mismatch",
                     "retryable": False, "observed_run_status": observed}
-        return {**base, "state": CLOSEOUT_CONFLICT, "reason": "already_terminal_mismatch",
-                "retryable": False, "observed_run_status": observed}
-    if reason == "stale_attempt":
-        return {**base, "state": CLOSEOUT_STALE_ATTEMPT, "reason": "stale_attempt", "retryable": False}
-    if reason == "unknown_status":
-        return {**base, "state": CLOSEOUT_UNKNOWN_STATUS, "reason": "unknown_status", "retryable": True}
-    if reason == "no_such_run":
-        return {**base, "state": CLOSEOUT_MISSING_RUN, "reason": "no_such_run", "retryable": True}
-    if reason == "invalid_status":
-        return {**base, "state": CLOSEOUT_CONFLICT, "reason": "invalid_status", "retryable": False}
-    # 未知拒绝原因 fail-closed：不通知、不冒充完成，留待重试与诊断。
-    return {**base, "state": CLOSEOUT_UNKNOWN_STATUS, "reason": reason or "unknown_rejection",
-            "retryable": True}
+        if reason == "stale_attempt":
+            return {**base, "state": CLOSEOUT_STALE_ATTEMPT, "reason": "stale_attempt", "retryable": False}
+        if reason == "unknown_status":
+            return {**base, "state": CLOSEOUT_UNKNOWN_STATUS, "reason": "unknown_status", "retryable": True}
+        if reason == "no_such_run":
+            return {**base, "state": CLOSEOUT_MISSING_RUN, "reason": "no_such_run", "retryable": True}
+        if reason == "invalid_status":
+            return {**base, "state": CLOSEOUT_CONFLICT, "reason": "invalid_status", "retryable": False}
+        # 未知拒绝原因 fail-closed：不通知、不冒充完成，留待重试与诊断。
+        return {**base, "state": CLOSEOUT_UNKNOWN_STATUS, "reason": reason or "unknown_rejection",
+                "retryable": True}
 
 
 # LLM: 待重试事实是跨进程、跨重启的唯一恢复依据；只从结构化字段重建，不读模型正文。
@@ -244,18 +261,24 @@ def pending_closeout(task: Any) -> dict[str, Any] | None:
 
 # LLM: WAL 仅通过调用方绑定的保存入口写 canonical task，不持有 manager 或访问运行账。
 # 函数用途: 保存或移除一条收口恢复事实；保存失败显式返回 False。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _store_closeout(save_task: Callable[[SubAgentTask], object], task: Any, fact: dict[str, Any] | None) -> bool:
-    attrs = dict(getattr(task, "attributes", {}) or {})
-    if fact is None:
-        attrs.pop(RUNTIME_CLOSEOUT_ATTR, None)
-    else:
-        attrs[RUNTIME_CLOSEOUT_ATTR] = fact
-    task.attributes = attrs
-    try:
-        save_task(task)
-    except Exception:  # noqa: BLE001 - 事实落盘失败不能反过来伪造完成
-        return False
-    return True
+    with gateway_short_transaction('child__store_closeout_commit'):
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        if fact is None:
+            attrs.pop(RUNTIME_CLOSEOUT_ATTR, None)
+        else:
+            attrs[RUNTIME_CLOSEOUT_ATTR] = fact
+        task.attributes = attrs
+        try:
+            save_task(task)
+        except Exception as transport_error:  # noqa: BLE001 - 事实落盘失败不能反过来伪造完成
+            raise_if_transport_uncertain(transport_error)
+            return False
+        return True
 
 
 # LLM: 先写待重试事实再动权威账本，是"收口未提交不得冒充完成"的前置条件；
@@ -317,6 +340,8 @@ def ensure_closeout_fact(
 # LLM: 本入口仅持有显式 RuntimeDB；canonical task 写不进去时，恢复依据必须以**另一个存储域**（runtime 事件账本）留下，
 # 否则恢复链没有任何可达依据。事件带足重建 WAL 所需的精确身份与引用，恢复扫描据此重试。
 # 函数用途: 在 runtime 事件账本里落一条"收口事实未能落盘"的可达恢复事实。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def record_unpersisted_closeout(repo: RuntimeRepository | None, task: Any, params: Any, result: Any) -> bool:
     append = getattr(repo, "append_event", None)
     payload = {
@@ -338,7 +363,8 @@ def record_unpersisted_closeout(repo: RuntimeRepository | None, task: Any, param
         try:
             row = lookup(payload["run_id"])
             agent_run_id = str(row["agent_run_id"] or "") if row is not None else ""
-        except Exception:  # noqa: BLE001 - 查不到身份不阻断记录本身
+        except Exception as transport_error:  # noqa: BLE001 - 查不到身份不阻断记录本身
+            raise_if_transport_uncertain(transport_error)
             agent_run_id = ""
     payload["agent_run_id"] = agent_run_id
     if callable(append):
@@ -352,7 +378,8 @@ def record_unpersisted_closeout(repo: RuntimeRepository | None, task: Any, param
                 payload=payload,
             )
             return True
-        except Exception:  # noqa: BLE001 - 记不下来就只能响亮上报
+        except Exception as transport_error:  # noqa: BLE001 - 记不下来就只能响亮上报
+            raise_if_transport_uncertain(transport_error)
             pass
     _LOGGER.error(
         "runner 收口事实无法持久化（canonical task 与 runtime 账本都失败），已停止本片收口与通知: %s",
@@ -386,6 +413,10 @@ def clear_closeout(save_task: Callable[[SubAgentTask], object], task: Any) -> bo
 # LLM: 显式原 RuntimeDB 中的诊断事件只用于排障与监督，不改变任何状态判定；runtime.db 不可用时静默跳过，
 # 因为此时权威事实本就写不进去，事件也写不进去，不能因此改变主链语义。
 # 函数用途: 追加一条 runner 收口相关的结构化运行时事件。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def record_closeout_event(
     repo: RuntimeRepository | None,
     task: Any,
@@ -394,37 +425,42 @@ def record_closeout_event(
     params: Any,
     outcome: dict[str, Any],
 ) -> None:
-    append = getattr(repo, "append_event", None)
-    if not callable(append):
-        return
-    try:
-        append(
-            event_type=event_type,
-            attempt_id=str(getattr(params, "attempt_id", "") or ""),
-            agent_run_id=str(outcome.get("agent_run_id") or ""),
-            payload={
-                "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
-                "run_id": str(getattr(task, "id", "") or ""),
-                "state": str(outcome.get("state") or ""),
-                "reason": str(outcome.get("reason") or ""),
-                "detail": str(outcome.get("detail") or "")[:300],
-                "target_run_status": str(outcome.get("target_run_status") or ""),
-                "observed_run_status": str(outcome.get("observed_run_status") or ""),
-                "task_status": str(getattr(task, "status", "") or ""),
-            },
-        )
-    except Exception:  # noqa: BLE001 - 诊断失败不得改变主链判定
-        return
+    with gateway_short_transaction('child_record_closeout_event_commit'):
+        append = getattr(repo, "append_event", None)
+        if not callable(append):
+            return
+        try:
+            append(
+                event_type=event_type,
+                attempt_id=str(getattr(params, "attempt_id", "") or ""),
+                agent_run_id=str(outcome.get("agent_run_id") or ""),
+                payload={
+                    "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
+                    "run_id": str(getattr(task, "id", "") or ""),
+                    "state": str(outcome.get("state") or ""),
+                    "reason": str(outcome.get("reason") or ""),
+                    "detail": str(outcome.get("detail") or "")[:300],
+                    "target_run_status": str(outcome.get("target_run_status") or ""),
+                    "observed_run_status": str(outcome.get("observed_run_status") or ""),
+                    "task_status": str(getattr(task, "status", "") or ""),
+                },
+            )
+        except Exception as transport_error:  # noqa: BLE001 - 诊断失败不得改变主链判定
+            raise_if_transport_uncertain(transport_error)
+            return
 
 
 # LLM: 调用方绑定原身份与通知参数，本入口仅调用一次绑定回调。父级交付必须幂等：调用方按结构化投递结果推进 WAL，绝不按文本判断是否已通知。
 # 去重身份带 exact attempt，因此同一 attempt 重发被识别为已交付，换代后的新 attempt 不受影响。
 # "skipped"（没有可通知的父会话/状态）不是失败，不重试；"already_delivered" 由唤醒回执保证。
 # 函数用途: 把 runner 终态结果通知直属父级，并回报结构化投递结果。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def deliver_parent_wake(notify_parent: Callable[[], str]) -> str:
     try:
         outcome = notify_parent()
-    except Exception:  # noqa: BLE001 - 通知异常要落回待重试事实，不能丢
+    except Exception as transport_error:  # noqa: BLE001 - 通知异常要落回待重试事实，不能丢
+        raise_if_transport_uncertain(transport_error)
         return "failed"
     return str(outcome or "delivered")
 
@@ -453,80 +489,85 @@ def _closeout_retry_backoff_remaining(fact: dict[str, Any], now: float) -> float
 # 它必须能安全重复执行：settle 是 CAS 幂等、wake 有去重键 + 回执，因此"重复恢复"不会产生
 # 重复终态事件或重复父级唤醒；已经交付过的事实直接清账。
 # 函数用途: 推进一条待重试的收口事实；返回本次是否已彻底完成。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def advance_pending_closeout(
     repo: RuntimeRepository | None, task: SubAgentTask, fact: dict[str, Any],
     *, save_task: Callable[[SubAgentTask], object], notify_result: CloseoutNotifier,
 ) -> dict[str, Any]:
-    params = _CloseoutReplayParams(fact)
-    result = _load_persisted_runner_result(fact)
-    if result is None:
-        # runner_result 落盘缺失说明事实与持久化结果不一致：保持事实并留诊断，绝不伪造结论。
-        return {"advanced": False, "state": "runner_result_missing"}
-    remaining = _closeout_retry_backoff_remaining(fact, time.time())
-    if remaining > 0:
-        # LLM: 退避窗口内不重试、不刷新事实、不写事件——避免每 60 秒一次的无谓 settle 与
-        #   诊断洪泛；窗口到期后自然回到正常推进链，/recover 改变 run 状态后同样如此。
-        return {"advanced": False, "state": "backoff_wait",
-                "retry_after_seconds": round(remaining, 3)}
-    outcome = settle_runtime_run_for_result(repo, params=params, task=task, result=result)
-    if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
-        # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。
-        # 所以诊断只写一次，然后清账：否则每个 reconcile 周期都会重复写事件，
-        # 且 owner 会因为这条永久事实一直被当成硬事实反复扫描（无界重试 + 事件洪泛）。
-        # 权威 run/task 事实已经成立，换代后的新 attempt 会走它自己的正常收口与通知。
-        record_closeout_event(repo, task, event_type="closeout_blocked", params=params, outcome=outcome)
-        if not clear_closeout(save_task, task):
-            # 清账失败：事实仍在，下一轮会再次走到这里（仍然只诊断、不交付）；不报 advanced 成功。
-            return {"advanced": False, "state": "cleanup_failed", "rejected": True}
-        return {"advanced": False, "state": str(outcome.get("state") or ""), "rejected": True}
-    if outcome.get("state") not in COMMITTED_CLOSEOUT_STATES | {CLOSEOUT_NOT_APPLICABLE}:
-        # 仍未收口（写库失败 / 状态未知等可重试形态）：刷新事实里的诊断字段，等待下一次恢复。
-        refreshed = record_pending_closeout(
-            save_task, task, params, result, outcome,
-            delivery=str(fact.get("delivery") or _DELIVERY_PENDING),
-        )
-        # LLM: 可重试形态会一直挂着（例如 run 状态一直没被修复），所以诊断事件必须有界：
-        # 只在首个周期以及每 10 次重试时落一条，避免每个 reconcile 周期都写一条造成事件洪泛。
-        attempts = int((pending_closeout(task) or {}).get("attempts") or 0)
-        if attempts <= 1 or attempts % 10 == 0:
-            record_closeout_event(
-                repo, task, event_type="closeout_pending", params=params, outcome=outcome
+    with gateway_short_transaction('child_advance_pending_closeout_commit'):
+        params = _CloseoutReplayParams(fact)
+        result = _load_persisted_runner_result(fact)
+        if result is None:
+            # runner_result 落盘缺失说明事实与持久化结果不一致：保持事实并留诊断，绝不伪造结论。
+            return {"advanced": False, "state": "runner_result_missing"}
+        remaining = _closeout_retry_backoff_remaining(fact, time.time())
+        if remaining > 0:
+            # LLM: 退避窗口内不重试、不刷新事实、不写事件——避免每 60 秒一次的无谓 settle 与
+            #   诊断洪泛；窗口到期后自然回到正常推进链，/recover 改变 run 状态后同样如此。
+            return {"advanced": False, "state": "backoff_wait",
+                    "retry_after_seconds": round(remaining, 3)}
+        outcome = settle_runtime_run_for_result(repo, params=params, task=task, result=result)
+        if outcome.get("state") in REJECTED_CLOSEOUT_STATES:
+            # LLM: 被拒（与权威终态冲突 / 已换代）不是"以后可能成"——重试永远不会成功。
+            # 所以诊断只写一次，然后清账：否则每个 reconcile 周期都会重复写事件，
+            # 且 owner 会因为这条永久事实一直被当成硬事实反复扫描（无界重试 + 事件洪泛）。
+            # 权威 run/task 事实已经成立，换代后的新 attempt 会走它自己的正常收口与通知。
+            record_closeout_event(repo, task, event_type="closeout_blocked", params=params, outcome=outcome)
+            if not clear_closeout(save_task, task):
+                # 清账失败：事实仍在，下一轮会再次走到这里（仍然只诊断、不交付）；不报 advanced 成功。
+                return {"advanced": False, "state": "cleanup_failed", "rejected": True}
+            return {"advanced": False, "state": str(outcome.get("state") or ""), "rejected": True}
+        if outcome.get("state") not in COMMITTED_CLOSEOUT_STATES | {CLOSEOUT_NOT_APPLICABLE}:
+            # 仍未收口（写库失败 / 状态未知等可重试形态）：刷新事实里的诊断字段，等待下一次恢复。
+            refreshed = record_pending_closeout(
+                save_task, task, params, result, outcome,
+                delivery=str(fact.get("delivery") or _DELIVERY_PENDING),
             )
-        return {
-            "advanced": False,
-            "state": str(outcome.get("state") or ""),
-            "fact_persisted": refreshed,
-        }
-    if str(fact.get("delivery") or "") == _DELIVERY_DELIVERED:
-        # 已交付：只需清账。清账失败**不能**报成功——事实还在，下一轮还会看到它。
-        if not clear_closeout(save_task, task):
-            record_closeout_event(
-                repo, task, event_type="closeout_pending", params=params, outcome=outcome
+            # LLM: 可重试形态会一直挂着（例如 run 状态一直没被修复），所以诊断事件必须有界：
+            # 只在首个周期以及每 10 次重试时落一条，避免每个 reconcile 周期都写一条造成事件洪泛。
+            attempts = int((pending_closeout(task) or {}).get("attempts") or 0)
+            if attempts <= 1 or attempts % 10 == 0:
+                record_closeout_event(
+                    repo, task, event_type="closeout_pending", params=params, outcome=outcome
+                )
+            return {
+                "advanced": False,
+                "state": str(outcome.get("state") or ""),
+                "fact_persisted": refreshed,
+            }
+        if str(fact.get("delivery") or "") == _DELIVERY_DELIVERED:
+            # 已交付：只需清账。清账失败**不能**报成功——事实还在，下一轮还会看到它。
+            if not clear_closeout(save_task, task):
+                record_closeout_event(
+                    repo, task, event_type="closeout_pending", params=params, outcome=outcome
+                )
+                return {"advanced": False, "state": "cleanup_failed"}
+            return {"advanced": True, "state": "already_delivered"}
+        delivery = deliver_parent_wake(partial(
+            notify_result, task, result, _load_persisted_output(fact),
+            attempt_id=str(fact.get("attempt_id") or ""),
+        ))
+        if delivery == "failed":
+            record_pending_closeout(save_task, task, params, result, outcome, delivery=_DELIVERY_PENDING)
+            return {"advanced": False, "state": "delivery_failed"}
+        # 先持久化"已交付"，再清账：清账失败时下一轮会看到 delivered 而跳过重发，避免重复通知。
+        if not mark_closeout_delivered(save_task, task, params, result, outcome):
+            _LOGGER.error(
+                "runner 收口已交付但无法持久化交付标记（不清账、不报成功）: run_id=%s attempt_id=%s",
+                str(getattr(task, "id", "") or ""), str(fact.get("attempt_id") or ""),
             )
+            return {"advanced": False, "state": "delivery_mark_unpersisted"}
+        if not clear_closeout(save_task, task):
             return {"advanced": False, "state": "cleanup_failed"}
-        return {"advanced": True, "state": "already_delivered"}
-    delivery = deliver_parent_wake(partial(
-        notify_result, task, result, _load_persisted_output(fact),
-        attempt_id=str(fact.get("attempt_id") or ""),
-    ))
-    if delivery == "failed":
-        record_pending_closeout(save_task, task, params, result, outcome, delivery=_DELIVERY_PENDING)
-        return {"advanced": False, "state": "delivery_failed"}
-    # 先持久化"已交付"，再清账：清账失败时下一轮会看到 delivered 而跳过重发，避免重复通知。
-    if not mark_closeout_delivered(save_task, task, params, result, outcome):
-        _LOGGER.error(
-            "runner 收口已交付但无法持久化交付标记（不清账、不报成功）: run_id=%s attempt_id=%s",
-            str(getattr(task, "id", "") or ""), str(fact.get("attempt_id") or ""),
-        )
-        return {"advanced": False, "state": "delivery_mark_unpersisted"}
-    if not clear_closeout(save_task, task):
-        return {"advanced": False, "state": "cleanup_failed"}
-    return {"advanced": True, "state": delivery}
+        return {"advanced": True, "state": delivery}
 
 
 # LLM: 恢复只持有 repo/load/save，补 WAL 不执行业务或通知。持久扫描游标与消费回执分离，页尾绕回保证坏记录可重试且不挡后项。
 # exact attempt 的消费回执无窗口限制；结果文件须与事件身份一致，不能把换代后的结果绑定到旧 attempt。
 # 函数用途: 分页还原未落盘收口事实；单条损坏不拖垮本页，成功持久化后才写消费回执。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def restore_unpersisted_closeouts(
     repo: RuntimeRepository | None, *, load_task: Callable[[str], SubAgentTask],
     save_task: Callable[[SubAgentTask], object],
@@ -539,80 +580,87 @@ def restore_unpersisted_closeouts(
             CLOSEOUT_UNPERSISTED_EVENT, consumed_event_type=CLOSEOUT_RESTORED_EVENT,
             consumer=RUNTIME_CLOSEOUT_SCHEMA, limit=50,
         )
-    except Exception:  # noqa: BLE001 - 读不到就不还原，不影响其它恢复
+    except Exception as transport_error:  # noqa: BLE001 - 读不到就不还原，不影响其它恢复
+        raise_if_transport_uncertain(transport_error)
         return 0
     restored = 0
     for event in events:
         try:
             restored += _restore_closeout_event(repo, event, load_task=load_task, save_task=save_task)
-        except Exception:  # noqa: BLE001 - 读写失败保持未消费，下次轮转还会重试
+        except Exception as transport_error:  # noqa: BLE001 - 读写失败保持未消费，下次轮转还会重试
+            raise_if_transport_uncertain(transport_error)
             _LOGGER.debug("runtime closeout event restore failed", exc_info=True)
     return restored
 
 
 # LLM: 只用显式 repo/load/save 恢复 exact current 的结果引用；同身份 WAL 已存在时补消费回执，旧身份只记已淘汰，不覆盖新事实。
 # 函数用途: 还原一条事件到正式收口事实，并在成功保存后确认消费；失败会留在恢复分页中。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def _restore_closeout_event(
     repo: RuntimeRepository, event: dict[str, Any], *, load_task: Callable[[str], SubAgentTask],
     save_task: Callable[[SubAgentTask], object],
 ) -> int:
-    payload = event.get("payload")
-    if not isinstance(payload, dict) or payload.get("schema_version") != RUNTIME_CLOSEOUT_SCHEMA:
-        return 0
-    run_id = str(payload.get("run_id") or "").strip()
-    attempt_id = str(payload.get("attempt_id") or "").strip()
-    if not run_id or not attempt_id or attempt_id != event.get("attempt_id"):
-        return 0
-    authority = repo.agent_run_for_run_id(run_id)
-    if authority is None or str(authority["agent_run_id"]) != str(event.get("agent_run_id") or ""):
-        return 0
-    task = load_task(run_id)
-    existing = pending_closeout(task)
-    stale = str(authority["current_attempt_id"] or "") != attempt_id
-    restored = 0
-    if not stale and existing is None:
-        target_status = str(payload.get("target_status") or "").strip().upper()
-        fact = {
-            "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
-            "run_id": run_id,
-            "attempt_id": attempt_id,
-            "agent_run_id": str(event.get("agent_run_id") or ""),
-            "target_status": target_status,
-            "target_run_status": _RUN_STATUS_FOR_TASK_STATUS.get(target_status, ""),
-            "turn_end_reason": str(payload.get("turn_end_reason") or ""),
-            "runner_result_json": str(payload.get("runner_result_json") or ""),
-            "output_json": str(payload.get("output_json") or ""),
-            "closeout_state": CLOSEOUT_UNKNOWN_STATUS,
-            "closeout_reason": "restored_from_event",
-            "closeout_detail": "",
-            "delivery": _DELIVERY_PENDING,
-            "attempts": int((pending_closeout(task) or {}).get("attempts") or 0),
-            "created_at": float(event.get("created_at") or time.time()),
-            "updated_at": time.time(),
-        }
-        result = _load_persisted_runner_result(fact)
-        if result is None or str(result.run_id) != run_id:
+    with gateway_short_transaction('child__restore_closeout_event_commit'):
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("schema_version") != RUNTIME_CLOSEOUT_SCHEMA:
             return 0
-        if str(result.status) != target_status:
+        run_id = str(payload.get("run_id") or "").strip()
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        if not run_id or not attempt_id or attempt_id != event.get("attempt_id"):
             return 0
-        if not _store_closeout(save_task, task, fact):
+        authority = repo.agent_run_for_run_id(run_id)
+        if authority is None or str(authority["agent_run_id"]) != str(event.get("agent_run_id") or ""):
             return 0
-        restored = 1
-    elif not stale and str(existing.get("attempt_id") or "") != attempt_id:
-        return 0
-    repo.append_event(
-        event_type=CLOSEOUT_RESTORED_EVENT, attempt_id=attempt_id,
-        agent_run_id=str(event.get("agent_run_id") or ""),
-        payload={"schema_version": RUNTIME_CLOSEOUT_SCHEMA,
-                 "run_id": run_id, "attempt_id": attempt_id,
-                 "reason": "superseded" if stale else "wal_persisted"},
-    )
-    return restored
+        task = load_task(run_id)
+        existing = pending_closeout(task)
+        stale = str(authority["current_attempt_id"] or "") != attempt_id
+        restored = 0
+        if not stale and existing is None:
+            target_status = str(payload.get("target_status") or "").strip().upper()
+            fact = {
+                "schema_version": RUNTIME_CLOSEOUT_SCHEMA,
+                "run_id": run_id,
+                "attempt_id": attempt_id,
+                "agent_run_id": str(event.get("agent_run_id") or ""),
+                "target_status": target_status,
+                "target_run_status": _RUN_STATUS_FOR_TASK_STATUS.get(target_status, ""),
+                "turn_end_reason": str(payload.get("turn_end_reason") or ""),
+                "runner_result_json": str(payload.get("runner_result_json") or ""),
+                "output_json": str(payload.get("output_json") or ""),
+                "closeout_state": CLOSEOUT_UNKNOWN_STATUS,
+                "closeout_reason": "restored_from_event",
+                "closeout_detail": "",
+                "delivery": _DELIVERY_PENDING,
+                "attempts": int((pending_closeout(task) or {}).get("attempts") or 0),
+                "created_at": float(event.get("created_at") or time.time()),
+                "updated_at": time.time(),
+            }
+            result = _load_persisted_runner_result(fact)
+            if result is None or str(result.run_id) != run_id:
+                return 0
+            if str(result.status) != target_status:
+                return 0
+            if not _store_closeout(save_task, task, fact):
+                return 0
+            restored = 1
+        elif not stale and str(existing.get("attempt_id") or "") != attempt_id:
+            return 0
+        repo.append_event(
+            event_type=CLOSEOUT_RESTORED_EVENT, attempt_id=attempt_id,
+            agent_run_id=str(event.get("agent_run_id") or ""),
+            payload={"schema_version": RUNTIME_CLOSEOUT_SCHEMA,
+                     "run_id": run_id, "attempt_id": attempt_id,
+                     "reason": "superseded" if stale else "wal_persisted"},
+        )
+        return restored
 
 
 # LLM: 既有 sweep 显式提供 repo/load/save/list/notify，扫描不能反向访问其 manager；
 # 确定性零 LLM 恢复只推进已有事实，不创建新业务，也不依赖任何文本触发。
 # 函数用途: 扫描并推进所有待重试的 runner 收口事实，返回结构化汇总。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def recover_pending_closeouts(
     repo: RuntimeRepository | None, *, load_task: Callable[[str], SubAgentTask],
     save_task: Callable[[SubAgentTask], object], list_tasks: Callable[[], Iterable[SubAgentTask]] | None,
@@ -626,13 +674,15 @@ def recover_pending_closeouts(
         summary["runtime_closeouts_restored"] = restore_unpersisted_closeouts(
             repo, load_task=load_task, save_task=save_task,
         )
-    except Exception:  # noqa: BLE001 - 还原失败不影响既有事实的推进
+    except Exception as transport_error:  # noqa: BLE001 - 还原失败不影响既有事实的推进
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("runtime closeout restore failed", exc_info=True)
     if not callable(list_tasks):
         return summary
     try:
         tasks = list(list_tasks() or [])
-    except Exception:  # noqa: BLE001 - 扫描失败不得影响其它监督动作
+    except Exception as transport_error:  # noqa: BLE001 - 扫描失败不得影响其它监督动作
+        raise_if_transport_uncertain(transport_error)
         return summary
     for task in tasks:
         fact = pending_closeout(task)
@@ -640,7 +690,8 @@ def recover_pending_closeouts(
             continue
         try:
             outcome = advance_pending_closeout(repo, task, fact, save_task=save_task, notify_result=notify_result)
-        except Exception:  # noqa: BLE001 - 单条推进失败不拖垮整轮
+        except Exception as transport_error:  # noqa: BLE001 - 单条推进失败不拖垮整轮
+            raise_if_transport_uncertain(transport_error)
             summary["runtime_closeouts_pending"] += 1
             continue
         if outcome.get("advanced"):
@@ -664,13 +715,16 @@ class _CloseoutReplayParams:
 
 # LLM: 恢复只读已持久化的 runner 结果文件；读不到就保持事实并留诊断，绝不重跑 runner。
 # 函数用途: 从 runner_result.json 还原结构化 runner 结论。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _load_persisted_runner_result(fact: dict[str, Any]) -> Any | None:
     path = str(fact.get("runner_result_json") or "")
     if not path:
         return None
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - 缺失/损坏都不伪造结论
+    except Exception as transport_error:  # noqa: BLE001 - 缺失/损坏都不伪造结论
+        raise_if_transport_uncertain(transport_error)
         return None
     if not isinstance(payload, dict):
         return None
@@ -679,20 +733,24 @@ def _load_persisted_runner_result(fact: dict[str, Any]) -> Any | None:
 
         allowed = {item.name for item in SubAgentRunnerResult.__dataclass_fields__.values()}
         return SubAgentRunnerResult(**{key: value for key, value in payload.items() if key in allowed})
-    except Exception:  # noqa: BLE001
+    except Exception as transport_error:  # noqa: BLE001
+        raise_if_transport_uncertain(transport_error)
         return None
 
 
 # LLM: 交付需要 output_payload 提供产物与正文引用；读不到就给空 payload，
 # 由既有交付逻辑按缺失处理，不在这里猜测内容。
 # 函数用途: 读取本次收口对应的 output.json 交付负载。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _load_persisted_output(fact: dict[str, Any]) -> dict[str, Any]:
     path = str(fact.get("output_json") or "")
     if not path:
         return {}
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+    except Exception as transport_error:  # noqa: BLE001
+        raise_if_transport_uncertain(transport_error)
         return {}
     return payload if isinstance(payload, dict) else {}
 

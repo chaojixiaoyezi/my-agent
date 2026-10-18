@@ -286,13 +286,14 @@ def cancel_restart_request(paths: GatewayPaths, request: dict[str, object], resu
 
 
 # LLM: 新进程启动时、启动恢复之前调用一次；只在旧进程号已不存活且标记未超过 MARKER_MAX_AGE_SECONDS 时返回标记
-# （证明是刚排空完的计划内重启），读后删除标记文件；过期标记同样删除但返回 None，按普通启动处理。
-# 函数用途: 读取并消费上一次安全重启的完成标记，供启动恢复去掉等待延迟并发起续跑通知。
+# （证明是刚排空完的计划内重启）；默认仍按原时点删除标记。内部consume=False复用同一判据只读预检，不授计划重启权。
+# 函数用途: 默认消费原完成标记；不支持B4的协调者可只读确认并保留标记，不能先删除再拒绝。
 def consume_restart_marker(
     paths: GatewayPaths,
     *,
     old_pid_alive: Callable[[int], bool],
     now: float | None = None,
+    consume: bool = True,
 ) -> dict[str, object] | None:
     path = restart_completed_path(paths)
     marker = read_json_file_report(path).payload or {}
@@ -301,10 +302,11 @@ def consume_restart_marker(
     old_pid = int(marker.get("old_pid") or 0)
     if old_pid <= 0 or old_pid_alive(old_pid):
         return None
-    try:
-        path.unlink()
-    except OSError:
-        pass
+    if consume:
+        try:
+            path.unlink()
+        except OSError:
+            pass
     current = time.time() if now is None else float(now)
     if current - float(marker.get("drained_at") or 0.0) > MARKER_MAX_AGE_SECONDS:
         return None

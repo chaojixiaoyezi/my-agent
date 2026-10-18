@@ -1,5 +1,5 @@
-# LLM: 当前 owner 的配置目录唯一保存 IM 发送者临时偏好；有效期只决定新受理任务，不取消或重路由既有任务。
-# 模块用途: 保存当天自动委派开关，到下一业务零点自动失效，Gateway 停机后恢复也不延长有效期。
+# LLM: 当前 owner 的配置目录唯一保存 IM 发送者临时偏好；路径读口与 Agent 共用校验，不创建锁或缓存；控制写仍沿原原子事务。
+# 模块用途: 只读当天自动委派偏好，显式控制才写入；下一业务零点失效，不改变已受理任务。
 from __future__ import annotations
 
 import hashlib
@@ -9,9 +9,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ..common.json_io import read_json_object_report
 from ..conversation.channels import supports_transcript_delivery
-from ..gateway_parts.io import read_json_file_report, update_json_file_atomic
+from ..gateway_parts.io import update_json_file_atomic
 from ..runtime_errors import DataCorruptionError
+from ..user_space.home_layout import MyAgentHomePaths
 
 _SCHEMA = "im_user_preferences.v1"
 
@@ -19,7 +21,13 @@ _SCHEMA = "im_user_preferences.v1"
 # LLM: 地址只由宿主 home 固定，不接受用户或模型路径；调用方继续使用原 owner 授权与文件事务。
 # 函数用途: 返回当前用户 IM 偏好的唯一配置文件位置，不创建文件。
 def preference_path(agent: object) -> Path:
-    return Path(agent.home_paths.owner_home_dir) / "config" / "im_preferences.json"
+    return _preference_path(agent.home_paths)
+
+
+# LLM: 路径与原 Agent 入口共用，不创建 home；身份授权由调用方的可信 owner scope 负责。
+# 函数用途: 从规范 owner 路径取得唯一偏好文件，避免冷入口另造布局。
+def _preference_path(home_paths: MyAgentHomePaths) -> Path:
+    return Path(home_paths.owner_home_dir) / "config" / "im_preferences.json"
 
 
 # LLM: 偏好身份只接受可信入站渠道与发送者；群共享 workspace 不代表发送者开关可影响其它人。
@@ -53,20 +61,29 @@ def _validated(payload: dict, owner_id: str) -> dict:
     return payload
 
 
-# LLM: 只读无副作用；effective_enabled 根据原记录业务日和到期时刻计算，倒退到别日也不能复活上一日设置。
-# 函数用途: 返回当前 IM 发送者的偏好、版本和同一部署时区，未设置也不误显示固定 UTC；不运行模型或扫描用户。
+# LLM: Agent 与冷宿主只读同一偏好实现；不附加缓存或创建锁，不把配置时区作为权限。
+# 函数用途: 从现有 Agent 委托给规范路径读口，保持原发送者键、版本和业务日语义。
 def delegation_preference(agent: object, channel: str, actor_id: str, *, now: float | None = None) -> dict:
+    return delegation_preference_by_paths(agent.home_paths, agent.config.timezone, channel, actor_id, now=now)
+
+
+# LLM: 控制写使用 temp+replace，读取完整旧/新 JSON 即可；此处不创建锁、修复坏数据或初始化 owner。
+#   有效期仍按记录业务日/到期时刻计算，倒退到别日不能复活旧设置；接收方应持久冻结本次结果而非恢复时重读。
+# 函数用途: 无 Agent 地读取当前 IM 发送者偏好及版本，缺记录默认关闭，坏记录明确报错。
+def delegation_preference_by_paths(
+    home_paths: MyAgentHomePaths, timezone: str, channel: str, actor_id: str, *, now: float | None = None,
+) -> dict:
     key = preference_key(channel, actor_id)
-    report = read_json_file_report(preference_path(agent), context="settings.im_preferences.read")
-    if report.load_error is not None or report.lock_busy:
+    report = read_json_object_report(_preference_path(home_paths), context="settings.im_preferences.read")
+    if report.load_error is not None:
         raise DataCorruptionError("IM 偏好记录不可读")
-    payload = _validated(report.payload or {}, str(agent.home_paths.owner_id))
+    payload = _validated(report.payload or {}, str(home_paths.owner_id))
     row = payload["users"].get(key)
     if row is None:
         from ..scheduler.schedule import _canonical_zone_name
 
         return {"enabled": False, "expires_at": 0.0, "revision": 0,
-                "timezone": _canonical_zone_name(str(agent.config.timezone or ""))}
+                "timezone": _canonical_zone_name(str(timezone or ""))}
     current = time.time() if now is None else now
     day = datetime.fromtimestamp(current, ZoneInfo(row["timezone"])).date().isoformat()
     return {**row, "enabled": bool(row["enabled"] and day == row["business_day"] and current < row["expires_at"])}

@@ -1,6 +1,7 @@
 
 # LLM: 派生记录共用原写入/审计权威，索引比较只取必要列及流式正文，不另建记录或持久状态。
-# 模块用途: 管理本地记录的写入、精确比较与完整读取。
+# LLM: C仅增加原scope本地IO分支，默认body→SQL/FTS/event顺序和身份不变；联验LocalStore/源撤权及partial测试。
+# 模块用途: 管理原派生记录与正文，C末写消费同一次活来源。
 from __future__ import annotations
 
 """owns LocalStore record upsert, lookup, content-file paths, and row hydration.
@@ -18,7 +19,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import write_private_text_file_atomic
+from ..common.json_io import (
+    locked_json_path,
+    write_private_text_file_atomic,
+    write_private_text_file_atomic_unlocked,
+)
 from .models import PREVIEW_CHARS, LocalSearchResult
 
 
@@ -137,8 +142,11 @@ class _LocalStoreRecordHelpers:
 
 
 # LLM: 派生正文与SQLite记录共享原schema/连接工厂；删除只清精确canonical正文，错误必须向恢复层传播。
-# 类用途: 写入派生检索记录，并在删除或提交前崩溃后擦除对应正文。
+# LLM: coordinator_io只是策略；不存source/callback，C与默认共用原SQL/identity/返回叶。
+# 类用途: 写入或擦除原派生记录，保留正文先写的真实partial。
 class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
+    # LLM: 默认仍原正文→SQL/FTS/event→commit，C只走明确本地事务端口；结果与identity同步回归。
+    # 函数用途: 新增或更新同一原记录，C每个末写须当前原scope。
     def upsert_record(
         self,
         params: LocalRecordInput | None = None,
@@ -161,6 +169,8 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             visibility=visibility,
             record_id=record_id,
         )
+        if self.coordinator_io:
+            return self._upsert_record_coordinator(params)
         prepared = self._prepare_record(params)
 
         with self._connection() as conn:
@@ -171,27 +181,19 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             self._record_upsert_event(conn, prepared)
             conn.commit()
 
-        return self.get_record(prepared.record_id) or LocalSearchResult(
-            id=prepared.record_id,
-            source_type=prepared.source_type,
-            source_id=prepared.source_id,
-            title=prepared.title,
-            content=prepared.content,
-            metadata=prepared.metadata,
-            visibility=prepared.visibility,
-            created_at=created_at,
-            updated_at=prepared.now,
-            content_path=prepared.stored_path,
-        )
+        return self._prepared_record_result(prepared, created_at)
 
-    def _prepare_record(self, params: LocalRecordInput) -> _PreparedRecord:
+    # LLM: 默认write_content=True保原先写body时点；C仅将原字段计算提前，在固定叶写同body，不改hash/ID。
+    # 函数用途: 准备原记录参数，默认同时原子写正文，C明确分开准备与落盘。
+    def _prepare_record(self, params: LocalRecordInput, *, write_content: bool = True) -> _PreparedRecord:
         clean_source_type = params.source_type.strip() or "unknown"
         clean_source_id = params.source_id.strip() or str(uuid.uuid4())
         clean_title = params.title.strip() or clean_source_id
         clean_record_id = params.record_id or self.make_record_id(clean_source_type, clean_source_id)
         content_path = self._content_file(clean_record_id)
         # 原子写:blob 内容半写即损坏(体检实锤),统一走私有原子文本写：目录缺失按 0700 建、文件 0600。
-        write_private_text_file_atomic(content_path, params.content)
+        if write_content:
+            write_private_text_file_atomic(content_path, params.content)
         metadata = params.metadata or {}
         return _PreparedRecord(
             record_id=clean_record_id,
@@ -245,7 +247,9 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             ),
         )
 
-    def _record_upsert_event(self, conn: sqlite3.Connection, record: _PreparedRecord) -> None:
+    # LLM: 原事件构造/载荷只在_record_event一处；C仅透传同events_path已持锁append叶，默认不加keyword。
+    # 函数用途: 登记原upsert事件，不重建第二事件算法。
+    def _record_upsert_event(self, conn: sqlite3.Connection, record: _PreparedRecord, *, append_records=None) -> None:
         self._record_event(
             conn,
             "record_upserted",
@@ -257,16 +261,20 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
                 "visibility": record.visibility,
                 "content_hash": record.content_hash,
             },
+            **({} if append_records is None else {"append_records": append_records}),
         )
 
     # LLM: 删除派生记录时先清空外置正文，再在一笔 SQLite 事务中删 records/FTS 并写无正文审计。
-    # 函数用途: 彻底移除一条 LocalStore 记录；即使文件 unlink 失败也不残留原文。
+    # LLM: C显式分支保持先擦body→完整SQL→unlink/checkpoint，每个实际末叶消费当前原source。
+    # 函数用途: 移除同一派生记录，unlink失败仍保先擦正文的原契约。
     def delete_record(self, record_id: str) -> bool:
         """Delete one derived record and scrub its externalized content file."""
 
         clean_id = str(record_id or "").strip()
         if not clean_id:
             return False
+        if self.coordinator_io:
+            return self._delete_record_coordinator(clean_id)
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT content_path, content_hash, source_type, source_id FROM records WHERE id = ?",
@@ -305,18 +313,104 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
 
 
     # LLM: 无SQL行时只检查规范单组件ID对应的正文文件，不相信外部路径；擦除失败向上传递以便恢复重试。
-    # 函数用途: 收拾正文已写入、数据库提交前崩溃留下的孤立文件。
+    # LLM: C只把原wipe/unlink放当前末门，默认与原单组件ID检查不变；不接任意路径。
+    # 函数用途: 擦除原canonical孤立正文，失败保原异常与恢复事实。
     def _delete_orphan_content(self, record_id: str) -> bool:
         if record_id in {".", ".."} or any(char in record_id for char in ("/", "\\", "\x00")):
             return False
         path = self._content_file(record_id)
         if not path.exists() and not path.is_symlink():
             return False
-        write_private_text_file_atomic(path, "")
+        if self.coordinator_io:
+            self._write_coordinator_content(path, "")
+        else:
+            write_private_text_file_atomic(path, "")
         try:
-            path.unlink(missing_ok=True)
+            if self.coordinator_io:
+                self._local_write(lambda: path.unlink(missing_ok=True))
+            else:
+                path.unlink(missing_ok=True)
         except OSError:
             pass
+        return True
+
+
+    # LLM: 原返回查询/fallback只抽为共用叶，字段与get_record调用时点不变，不新建权威或写盘。
+    # 函数用途: 在原SQL提交后返回同一记录，保持原查询失败后的数据形状。
+    def _prepared_record_result(self, prepared, created_at):
+        return self.get_record(prepared.record_id) or LocalSearchResult(
+            id=prepared.record_id,
+            source_type=prepared.source_type,
+            source_id=prepared.source_id,
+            title=prepared.title,
+            content=prepared.content,
+            metadata=prepared.metadata,
+            visibility=prepared.visibility,
+            created_at=created_at,
+            updated_at=prepared.now,
+            content_path=prepared.stored_path,
+        )
+
+
+    # LLM: 原body锁在Root外且FD出生逐次核源；实际原子写仅原路径/文本，C一次replace不等PermissionError。
+    # 函数用途: 在C的固定本地末门写一条原正文或擦除空串，不缓存活来源。
+    def _write_coordinator_content(self, path, content):
+        with locked_json_path(path, birth_commit=self._local_write):
+            self._local_write(lambda: write_private_text_file_atomic_unlocked(
+                path, content, replace_once=True))
+
+    # LLM: 先原正文再单库事务，原event锁预持于门外；参数/哈希门外，原identity/FTS/event/commit不复制到其它服务。
+    # 函数用途: 按C零等待IO策略执行同一upsert算法，失败保原body先写partial。
+    def _upsert_record_coordinator(self, params):
+        prepared = self._prepare_record(params, write_content=False)
+        self._write_coordinator_content(self._content_file(prepared.record_id), prepared.content)
+
+        # LLM: 仅在已持事件锁的原短window内调用原SQL叶，不含正文读、网络或等待。
+        # 函数用途: 完成原记录/FTS/事件的单库事务内容。
+        def operation(conn):
+            created_at = self._existing_created_at(conn, prepared.record_id, prepared.now)
+            self._upsert_record_row(conn, prepared, created_at)
+            if self.fts_available:
+                self._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
+            self._record_upsert_event(conn, prepared, append_records=self._append_coordinator_event_records)
+            return created_at
+        with self._coordinator_events_lock():
+            created_at = self._coordinator_transaction(operation)
+        return self._prepared_record_result(prepared, created_at)
+
+    # LLM: 原行读/先擦body/SQL删除/commit/unlink/checkpoint相序保持；每个本地末叶重用当次scope，不能新源补偿。
+    # 函数用途: 为C删除同一派生记录并保原隐私擦除与失败事实。
+    def _delete_record_coordinator(self, clean_id):
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT content_path, content_hash, source_type, source_id FROM records WHERE id = ?",
+                (clean_id,),
+            ).fetchone()
+        if row is None:
+            return self._delete_orphan_content(clean_id)
+        content_path = self._resolve_content_path(str(row["content_path"] or ""))
+        self._write_coordinator_content(content_path, "")
+
+        # LLM: 正文已经擦除；同一原本地事务内删FTS/record并记事件，异常回滚SQL且不伪恢复body。
+        # 函数用途: 完成C删除的原SQL和无正文事件。
+        def operation(conn):
+            if self.fts_available:
+                conn.execute("DELETE FROM records_fts WHERE id = ?", (clean_id,))
+            conn.execute("DELETE FROM records WHERE id = ?", (clean_id,))
+            self._record_event(conn, "record_deleted", clean_id, {
+                "source_type": str(row["source_type"] or ""),
+                "source_id": str(row["source_id"] or ""),
+                "content_hash": str(row["content_hash"] or ""),
+            }, append_records=self._append_coordinator_event_records)
+        with self._coordinator_events_lock():
+            self._coordinator_transaction(operation, secure_delete=True)
+        try:
+            self._local_write(lambda: content_path.unlink(missing_ok=True))
+        except OSError:
+            pass
+        checkpoint = getattr(self, "_truncate_redacted_wal", None)
+        if callable(checkpoint):
+            self._local_write(checkpoint)
         return True
 
 

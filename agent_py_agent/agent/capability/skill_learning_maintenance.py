@@ -1,4 +1,5 @@
 # LLM: 维护状态只在原registry中，观察不改变发布/授权；质量只认宿主核验或显式人类结果，模型只能记录采用，热度不等于有效性。
+# 原learning FIFO与唯一registry维护共用原来源/短写门；mtime仅CAS，维护不消费新FIFO/调用模型或确认候选。
 # 模块用途: 管理自学Skill试用、推荐、冷藏和可恢复归档；保护用户固定与原任务/监控引用。
 from __future__ import annotations
 
@@ -9,6 +10,12 @@ from dataclasses import dataclass, replace
 from ..common.nofollow_fs import read_text_beneath
 from .skill_learning_publish import SkillLearningGateError, _owned_record
 from .skill_learning_store import SkillLearningEvent
+
+
+# LLM: 同一原registry修改时间决定自主维护节拍；仅到期预筛，不替代owner、来源完整性或原请求末门。
+# 函数用途: 共用原一天维护间隔，Count0和C发现都按当前真实时间判断，不缓存到期结论。
+def learning_maintenance_due(modified_at, mode, now):
+    return mode == "autonomous" and now - modified_at >= 86400
 
 
 # LLM: 由调用方宿主提供的来源事实，模型工具只构造model，human只来自已认证用户control；不从工具参数反序列化。

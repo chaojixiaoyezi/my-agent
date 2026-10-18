@@ -1,5 +1,5 @@
-# LLM: 本模块在已运行 Gateway 内执行薄客户端的 owner-scoped 记忆与历史操作；HTTP/TUI/IM 只能消费结构化结果，不能直接打开 Agent 存储。
-# 模块用途: 为终端、飞书和未来 Web 提供统一的记忆查询、显式保存与会话历史读取服务。
+# LLM: Gateway记忆仍沿原owner Agent，历史共用显式Store分页叶子；C只能传已认证owner原只读库，不能借此创建会话或写记忆。
+# 模块用途: 为终端、飞书和未来Web提供记忆操作与同一份历史显示分页，保持原配对、媒体及游标语义。
 
 from __future__ import annotations
 
@@ -99,8 +99,21 @@ def execute_gateway_client_memory(
     return GatewayClientMemoryResult(normalized, True, records=records)
 
 
-# LLM: 先解析 authenticated owner/thread，再按完整工作片向前翻页；实时游标与更早游标独立，追加竞态不跳过新消息。
-# 函数用途: 返回当前会话的一页显示和预览，让上翻能接着读取更早内容而不加载全部历史。
+# LLM: path必须来自已认证owner原runtime resolver；只读唯一JSONL叶子，limit与公开record字段复用原合同，不构造Agent/Memory或执行搜索/学习。
+# 函数用途: 为C recent返回正式长期记忆末尾记录，保原版本物化、容错和安全错误类别。
+def read_gateway_client_memory_from_path(path, *, limit: int = 5) -> GatewayClientMemoryResult:
+    from ..memory_store.jsonl import read_memory_records_from_path
+
+    try:
+        records = tuple(memory_record_payload(record)
+                        for record in read_memory_records_from_path(path)[-_bounded_limit(limit):])
+    except Exception as exc:  # noqa: BLE001 仅公开原错误类型，不泄露路径或异常正文
+        return GatewayClientMemoryResult("recent", False, error_code=type(exc).__name__)
+    return GatewayClientMemoryResult("recent", True, records=records)
+
+
+# LLM: Count0保持原owner Agent解析及失败投影；之后复用同一Store叶子，不能把C或假宿主塞进Agent解析器。
+# 函数用途: 为原业务Agent路径读取一页历史，保持原owner裁决与错误合同。
 def read_gateway_client_history(
     base_agent: object,
     *,
@@ -111,6 +124,24 @@ def read_gateway_client_history(
     try:
         owner_agent = resolve_gateway_scope_agent(base_agent, scope)
         store = owner_agent.conversation_store
+    except Exception as exc:  # noqa: BLE001 读取失败必须成为显式 typed error
+        return GatewayClientHistoryResult(False, load_errors=(_safe_load_error(exc),))
+    return read_gateway_client_history_from_store(
+        store, scope=scope, max_turns=max_turns, before_message_cursor=before_message_cursor,
+    )
+
+
+# LLM: Store必须来自已认证owner的原库；只用原绑定解析/有界页/配对/媒体投影，不创建线程或索引，不把坏账当空。
+#   前后游标保持原同次快照，显示事件不进入模型上下文；C调用方另守原lease来源。
+# 函数用途: 从已选定的会话库返回原一页显示与预览，让C与Count0使用完全同一分页实现。
+def read_gateway_client_history_from_store(
+    store: object,
+    *,
+    scope: GatewayControlScope,
+    max_turns: int,
+    before_message_cursor: int | None = None,
+) -> GatewayClientHistoryResult:
+    try:
         thread, thread_error = store.threads.resolve_report(
             channel=scope.channel,
             channel_conversation_id=scope.conversation_id,
@@ -234,5 +265,7 @@ __all__ = [
     "GatewayClientHistoryResult",
     "GatewayClientMemoryResult",
     "execute_gateway_client_memory",
+    "read_gateway_client_memory_from_path",
     "read_gateway_client_history",
+    "read_gateway_client_history_from_store",
 ]

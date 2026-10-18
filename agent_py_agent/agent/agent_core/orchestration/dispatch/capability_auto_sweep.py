@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from ....common.request_execution_ports import (
+    gateway_short_transaction,
+    raise_if_transport_uncertain,
+)
+
 # LLM: wake 端机制层兜底(编排稳定性攻坚 §5.1,与 subagents/capability_auto_grant 成对):
 #   子代理生命周期唤醒(能力申请/收尾 BLOCKED)进 LLM 整合轮【之前】,先做两件确定性工作:
 #   ①信号涉及的子代理还有 OPEN 常规申请 → 机制层自动批(兜"申请端改造前遗留 / 其他
@@ -54,6 +59,8 @@ def sweep_applies_to_reason(reason: object) -> bool:
 #   + 全量续派停滞子代理。
 #   注:可派孤儿的 durable 复活不在这条唤醒热路径上做(同步续派已覆盖同批候选),
 #   由出口回收就地复活 + 调度器周期 supervision + 定时提醒 sweep 三条常驻路兜底。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
     summary: dict[str, object] = {"auto_granted": 0, "redispatched": 0}
     manager = getattr(agent, "subagents", None)
@@ -64,7 +71,8 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
         try:
             grants = auto_grant_open_requests(manager, run_id)
             summary["auto_granted"] = len(grants)
-        except Exception:
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
             _LOGGER.warning("capability auto sweep grant failed (run_id=%s)", run_id, exc_info=True)
     try:
         if _audit_source_lifecycle_signal(signal):
@@ -75,7 +83,8 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
             summary["redispatched"] = int(auto_start_orphan_run(agent, run_id).get("started") or 0)
         else:
             summary["redispatched"] = _redispatch_stalled_subagents(agent)
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("capability auto sweep redispatch failed", exc_info=True)
     return summary
 
@@ -92,6 +101,8 @@ def _audit_source_lifecycle_signal(signal: Any) -> bool:
 #   _redispatch 拉 PLANNING 不稳,auto_start 可靠。非阻塞(不占唤醒 tick 线程),
 #   防重靠 background_start=launching + 候选判定的 launch_in_progress/心跳排除。
 # 函数用途: 把"没人管的可派孤儿"用可靠的后台派工路一次性拉起来,返回动作摘要(started 只算真派出去的,复用现存启动记 launch_reused)。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -112,7 +123,8 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
                 recovery_blocks.append(recovery_block)
                 continue
             stalled.append(task)
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("orphan revive list_runs failed", exc_info=True)
         return {"started": 0}
     if not stalled:
@@ -138,6 +150,8 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
 
 # 函数用途：在一个 runner session 已经持久化终态后，只续派指定的孤儿 run；
 # 复用统一候选判定、会话判活和 durable auto-start，不扫描或带起其他任务。started 只算真派出去的，复用现存启动记 launch_reused。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     key = str(run_id or "").strip()
@@ -156,7 +170,8 @@ def auto_start_orphan_run(agent: Any, run_id: str) -> dict[str, object]:
                 "run_ids": [],
                 "recovery_block": recovery_block,
             }
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.warning(
             "targeted orphan revive preflight failed (run_id=%s)",
             key,
@@ -217,12 +232,18 @@ def _is_stalled_dispatchable_orphan(task: Any, decision: Any = None) -> bool:
 # gate. It must never infer safety from task projection status, runner prose, or
 # retry counts; create_attempt remains the transactional last line of defence.
 # 函数用途: 在自动拉起孤儿前读取 runtime.db 权威状态，unknown 时返回结构化阻断事实。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _runtime_authority_recovery_block(
     manager: Any,
     task: Any,
 ) -> dict[str, str] | None:
     repo = getattr(manager, "runtime_db", None)
     checker = getattr(repo, "agent_run_recovery_block_for_run_id", None)
+    from ....common.executor_registration import managed_request_execution_required
+
+    if managed_request_execution_required() and (not callable(checker) or repo.agent_run_for_run_id(task.id) is None):
+        return {"run_id": task.id, "reason": "original_runtime_authority_missing"}
     if not callable(checker):
         return None
     run_id = str(getattr(task, "id", "") or "").strip()
@@ -278,6 +299,8 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
 
 # LLM: 本入口在原 owner 锁下按序巡查并装配收口恢复的必要能力；直属父级等待先于通用孤儿复活。
 # 函数用途: 在锁内修复失联 runner、释放已满足的父级等待，再复活真正的孤儿。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     summary: dict[str, object] = {
         "superseded_attempts_reconciled": 0,
@@ -304,17 +327,20 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         reconcile = getattr(repo, "reconcile_superseded_attempts", None)
         if callable(reconcile):
             summary["superseded_attempts_reconciled"] = len(reconcile() or [])
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision stale attempt reconcile failed", exc_info=True)
     try:
         parent_summary = _reconcile_conversation_parent_lifecycle(agent)
         summary.update(parent_summary)
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
     try:
         reclaimed = _reclaim_dead_running_runs(agent)
         _merge_running_reclaim_summary(summary, reclaimed)
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision running reclaim failed", exc_info=True)
     # LLM: runner 终态收口的待重试事实由这个既有关键sweep确定性推进：只补记账（settle 权威
     # run）与补通知（父级 wake），不重跑业务、不建新任务、不读任何自然语言。收口写库临时
@@ -332,7 +358,8 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
             list_tasks=manager.list_runs,
             notify_result=notifier.notify_result,
         ))
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
     summary.update(_reconcile_direct_parent_waits(agent))
     try:
@@ -342,7 +369,8 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         # wait on unrelated file locks and previously delayed an already
         # recovered source worker by another full minute.
         _merge_orphan_revive_summary(summary, auto_start_stalled_orphans(agent))
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision immediate orphan revive failed", exc_info=True)
     try:
         # Reuse this canonical periodic reconciler: one persisted Audit watch
@@ -351,7 +379,8 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
 
         source_summary = reconcile_audit_source_workers(agent)
         summary["audit_source_workers"] = source_summary
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision Audit source worker reconcile failed", exc_info=True)
     else:
         # Reconciliation may materialize a genuinely missing source position.
@@ -366,7 +395,8 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
                 revive = auto_start_stalled_orphans(agent)
                 summary["orphans_revived"] += int(revive.get("started") or 0)
                 summary["orphan_launches_reused"] += int(revive.get("launch_reused") or 0)
-            except Exception:
+            except Exception as transport_error:
+                raise_if_transport_uncertain(transport_error)
                 _LOGGER.debug(
                     "supervision reconciled source revive failed",
                     exc_info=True,
@@ -431,6 +461,8 @@ def _merge_orphan_revive_summary(
 
 # LLM: 一路等待巡检失败不停止其他监督，但必须留下独立失败计数而非零检查假健康。
 # 函数用途: 调和直属等待账，把成功扫描与读取失败分开计数并记录告警。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
     try:
         from ....subagents.direct_parent_lifecycle import reconcile_all_parent_waits
@@ -443,7 +475,8 @@ def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
             "direct_parent_waits_released": int(wait_summary.get("released") or 0),
             "direct_parent_waits_errors": int(wait_summary.get("ok") is False),
         }
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("supervision direct parent wait reconcile failed", exc_info=True)
         return {
             "direct_parent_waits_checked": 0,
@@ -469,6 +502,8 @@ def _takeover_hint_enabled(agent: Any) -> bool:
 # 函数用途: 网关重启/进程被杀后,把"看着在跑其实早死了"的 run 放回队列续命。
 # LLM: 优先处理 exact 执行器退出，再走既有来源岗位回收；无 session 不再意味着无法检查执行权。
 # 函数用途: 修复实际退出后的假运行，保留慢模型和来源岗位的既有独立生命周期。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -495,7 +530,8 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
                 if exited is not None:
                     reclaimed.append(exited)
                     continue
-        except Exception:
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
             _LOGGER.warning("executor exit recovery failed (run_id=%s)", task.id, exc_info=True)
             continue
         facts = _dead_running_reclaim_facts(
@@ -525,11 +561,14 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
                     else "requeued"
                 )
                 reclaimed.append(facts)
-        except Exception:
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
             _LOGGER.warning("supervision reclaim failed (run_id=%s)", run_id, exc_info=True)
     return reclaimed
 
 
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _dead_running_reclaim_facts(
     task: Any,
     decision: Any,
@@ -557,6 +596,10 @@ def _dead_running_reclaim_facts(
     worker_pid, worker_alive, cross_gen, proven_dead_despite_fresh_heartbeat = (
         _runner_process_reclaim_facts(session)
     )
+    from ....common.executor_registration import managed_request_execution_required
+
+    if managed_request_execution_required() and not proven_dead_despite_fresh_heartbeat:
+        return None
     # 持久心跳用于容忍慢模型、GC 和磁盘抖动，但已经退出的 OS 进程是更强的客观事实。
     # Gateway 重启后旧 in-process runner 的最后一次心跳可能仍在 45 秒新鲜窗内；若
     # exact PID 已死，就立即回收。PID 仍活（含复用）时继续等心跳过期，避免双执行。
@@ -599,12 +642,24 @@ def _dead_running_reclaim_facts(
 # LLM: OS process death may override only an explicitly shaped runner session; legacy rows with
 # no process kind stay on heartbeat freshness to avoid an unsafe eager reclaim.
 # 函数用途: 提取 runner PID、存活、跨进程代次与“新鲜心跳也可安全回收”四个客观事实。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _runner_process_reclaim_facts(
     session: dict[str, object],
 ) -> tuple[int, bool, bool, bool]:
+    from ....common.executor_registration import (
+        managed_request_execution_required as subagent_transport_required,
+    )
     from ....subagents.process_control import PROCESS_EPOCH, is_pid_alive
 
     worker_pid = _session_worker_pid(session)
+    if subagent_transport_required():
+        from ....gateway_parts.daemon_metadata import process_identity_is_live
+
+        identity = session.get("worker_process")
+        valid = type(identity) is dict and type(identity.get("pid")) is int and identity["pid"] == worker_pid
+        state = process_identity_is_live(identity) if valid else None
+        return worker_pid, state is not False, False, state is False
     worker_alive = worker_pid > 0 and is_pid_alive(worker_pid)
     session_epoch = str(session.get("process_epoch") or "")
     in_process = session.get("in_process")
@@ -699,11 +754,21 @@ def _fully_stalled_source_host_pids(tasks: list[object]) -> set[int]:
 
 
 # 函数用途: 回收已由上面全宿主判据确认的假死进程；只有终止事实明确后才允许重派。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _terminate_fully_stalled_source_hosts(
     host_pids: set[int],
 ) -> dict[int, dict[str, object]]:
     if not host_pids:
         return {}
+    from ....common.executor_registration import (
+        managed_request_execution_required as subagent_transport_required,
+    )
+
+    if subagent_transport_required():
+        # 原PID/TTL只描述旧宿主候选，不能恢复原native source/opaque namespace引用或全树停止许可。
+        return {pid: {"status": "unknown", "pid": pid, "reason_code": "native_original_actor_handle_required"}
+                for pid in sorted(host_pids)}
     from ....subagents.process_control import terminate_pid_with_escalation
 
     return {pid: dict(terminate_pid_with_escalation(pid) or {}) for pid in sorted(host_pids)}
@@ -711,6 +776,8 @@ def _terminate_fully_stalled_source_hosts(
 
 # LLM: 创建锁内复核原 attempt/session；自然终态走原 finalizer，安全封存的崩溃轮才重排，DB 事务结束后再写 canonical。
 # 函数用途: 回收已确认失联的原 runner；自然终态补齐结果，真正崩溃才改成待派状态。
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _requeue_dead_running(
     manager: Any,
     task: Any,
@@ -718,63 +785,64 @@ def _requeue_dead_running(
     *,
     reason: str,
 ) -> bool:
-    from ....subagents.runner_session_liveness import runner_session_of
+    with gateway_short_transaction('child__requeue_dead_running_commit'):
+        from ....subagents.runner_session_liveness import runner_session_of
 
-    with manager.creation_guard():
-        current = manager.load(run_id)
-        if (
-            str(getattr(current, "status", "")) != "RUNNING"
-            or str(getattr(current, "runner_active_attempt_id", "") or "")
-            != str(getattr(task, "runner_active_attempt_id", "") or "")
-            or runner_session_of(current) != runner_session_of(task)
-        ):
-            return False
-        task = current
-        attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
-        if attempt_id:
-            authority = manager.lifecycle.reconcile_dead_runner_attempt(
-                run_id,
-                attempt_id,
-                reason=f"supervision_{reason}_reclaim",
-            )
-            terminal_projection = authority.get("terminal_projection")
-            if isinstance(terminal_projection, dict):
-                return _project_runtime_terminal_result(
-                    manager,
-                    run_id,
-                    attempt_id,
-                    terminal_projection,
-                    reason=reason,
-                )
-            if not bool(authority.get("ready")):
-                _LOGGER.info(
-                    "supervision requeue deferred (run_id=%s attempt_id=%s reason=%s)",
-                    run_id,
-                    attempt_id,
-                    str(authority.get("reason") or "runtime_attempt_not_ready"),
-                )
+        with manager.creation_guard():
+            current = manager.load(run_id)
+            if (
+                str(getattr(current, "status", "")) != "RUNNING"
+                or str(getattr(current, "runner_active_attempt_id", "") or "")
+                != str(getattr(task, "runner_active_attempt_id", "") or "")
+                or runner_session_of(current) != runner_session_of(task)
+            ):
                 return False
-            manager.lifecycle.abandon_runner_attempt(
-                run_id,
-                attempt_id,
-                reason=f"supervision_{reason}_reclaim",
+            task = current
+            attempt_id = str(getattr(task, "runner_active_attempt_id", "") or "").strip()
+            if attempt_id:
+                authority = manager.lifecycle.reconcile_dead_runner_attempt(
+                    run_id,
+                    attempt_id,
+                    reason=f"supervision_{reason}_reclaim",
+                )
+                terminal_projection = authority.get("terminal_projection")
+                if isinstance(terminal_projection, dict):
+                    return _project_runtime_terminal_result(
+                        manager,
+                        run_id,
+                        attempt_id,
+                        terminal_projection,
+                        reason=reason,
+                    )
+                if not bool(authority.get("ready")):
+                    _LOGGER.info(
+                        "supervision requeue deferred (run_id=%s attempt_id=%s reason=%s)",
+                        run_id,
+                        attempt_id,
+                        str(authority.get("reason") or "runtime_attempt_not_ready"),
+                    )
+                    return False
+                manager.lifecycle.abandon_runner_attempt(
+                    run_id,
+                    attempt_id,
+                    reason=f"supervision_{reason}_reclaim",
+                )
+            refreshed = manager.load(run_id)
+            from ....ingestion.source_worker import record_source_worker_recovery
+
+            record_source_worker_recovery(refreshed, reason=reason)
+            _close_reclaimed_runner_session(refreshed, reason=reason)
+            refreshed.status = "PENDING"
+            refreshed.failure_type = ""
+            from ....subagents.process_control import reclaim_background_start
+
+            reclaim_background_start(refreshed)
+            manager.save(refreshed)
+            manager.actions._append_task_work_log(
+                refreshed,
+                f"supervision: requeued RUNNING->PENDING reason={reason}",
             )
-        refreshed = manager.load(run_id)
-        from ....ingestion.source_worker import record_source_worker_recovery
-
-        record_source_worker_recovery(refreshed, reason=reason)
-        _close_reclaimed_runner_session(refreshed, reason=reason)
-        refreshed.status = "PENDING"
-        refreshed.failure_type = ""
-        from ....subagents.process_control import reclaim_background_start
-
-        reclaim_background_start(refreshed)
-        manager.save(refreshed)
-        manager.actions._append_task_work_log(
-            refreshed,
-            f"supervision: requeued RUNNING->PENDING reason={reason}",
-        )
-        return True
+            return True
 
 
 # LLM: This crash repair deliberately reuses the canonical runner-result service,
@@ -982,6 +1050,8 @@ def _cancel_closed_parent_task(agent: Any, task: Any, decision: Any) -> bool:
     return True
 
 
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _close_inactive_parent_audit_watches(agent: Any, task: Any, decision: Any) -> None:
     from ....common.audit_activation import structured_audit_source_worker_attributes
 
@@ -995,7 +1065,8 @@ def _close_inactive_parent_audit_watches(agent: Any, task: Any, decision: Any) -
             decision.parent_task_id,
             reason="audit_parent_inactive",
         )
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.warning(
             "failed to close Audit watches for inactive parent (task_id=%s)",
             decision.parent_task_id,
@@ -1003,6 +1074,8 @@ def _close_inactive_parent_audit_watches(agent: Any, task: Any, decision: Any) -
         )
 
 
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def complete_settled_source_worker(agent: Any, task: Any) -> str:
     """Project a naturally settled source ledger to its truthful terminal state.
 
@@ -1013,108 +1086,113 @@ def complete_settled_source_worker(agent: Any, task: Any) -> str:
     non-running task.
     """
 
-    from ....common.audit_activation import (
-        AUDIT_SOURCE_OWNER_HOME_ATTR,
-        AUDIT_SOURCE_WATCH_ID_ATTR,
-        structured_audit_source_worker_attributes,
-    )
-    from ....ingestion.source_worker import (
-        clear_source_worker_lease,
-        source_worker_lifecycle_state,
-    )
-    from ....subagents.model_capabilities import capability_request_counts_as_open
-    from ....subagents.process_control import reclaim_background_start
+    with gateway_short_transaction('child_complete_settled_source_worker_commit'):
 
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        return "held"
-    run_id = str(getattr(task, "id", "") or "").strip()
-    try:
-        current = manager.load(run_id)
-    except Exception:
-        return "held"
-    attrs = dict(getattr(current, "attributes", {}) or {})
-    if (
-        not structured_audit_source_worker_attributes(attrs)
-        or source_worker_lifecycle_state(current) != "complete"
-    ):
-        return "held"
-    status = str(getattr(current, "status", "") or "").strip().upper()
-    if status == "RUNNING":
-        from ....subagents.runner_session_liveness import runner_session_of
+        from ....common.audit_activation import (
+            AUDIT_SOURCE_OWNER_HOME_ATTR,
+            AUDIT_SOURCE_WATCH_ID_ATTR,
+            structured_audit_source_worker_attributes,
+        )
+        from ....ingestion.source_worker import (
+            clear_source_worker_lease,
+            source_worker_lifecycle_state,
+        )
+        from ....subagents.model_capabilities import capability_request_counts_as_open
+        from ....subagents.process_control import reclaim_background_start
 
-        session_status = str(runner_session_of(current).get("status") or "").strip().lower()
-        if session_status not in {"completed", "failed"}:
-            # The runner-result path will mark this same task DONE/VERIFIED. If
-            # it has actually hung, the liveness reconciler fences/requeues it.
-            return "pending"
-        # The runner-result path will mark this same task DONE/VERIFIED.  If it
-        # has already ended without projecting the terminal task, it is now
-        # safe for supervision to finish the ledger-derived state below.
-    if (
-        status == "DONE"
-        and str(getattr(current, "verification_status", "") or "").strip().upper() == "VERIFIED"
-    ):
-        _sync_completed_source_worker_link(agent, run_id, expected_status="")
+        manager = getattr(agent, "subagents", None)
+        if manager is None:
+            return "held"
+        run_id = str(getattr(task, "id", "") or "").strip()
+        try:
+            current = manager.load(run_id)
+        except Exception as transport_error:
+            raise_if_transport_uncertain(transport_error)
+            return "held"
+        attrs = dict(getattr(current, "attributes", {}) or {})
+        if (
+            not structured_audit_source_worker_attributes(attrs)
+            or source_worker_lifecycle_state(current) != "complete"
+        ):
+            return "held"
+        status = str(getattr(current, "status", "") or "").strip().upper()
+        if status == "RUNNING":
+            from ....subagents.runner_session_liveness import runner_session_of
+
+            session_status = str(runner_session_of(current).get("status") or "").strip().lower()
+            if session_status not in {"completed", "failed"}:
+                # The runner-result path will mark this same task DONE/VERIFIED. If
+                # it has actually hung, the liveness reconciler fences/requeues it.
+                return "pending"
+            # The runner-result path will mark this same task DONE/VERIFIED.  If it
+            # has already ended without projecting the terminal task, it is now
+            # safe for supervision to finish the ledger-derived state below.
+        if (
+            status == "DONE"
+            and str(getattr(current, "verification_status", "") or "").strip().upper() == "VERIFIED"
+        ):
+            _sync_completed_source_worker_link(agent, run_id, expected_status="")
+            return "completed"
+        cancel_facts = attrs.get("cancel_subagents")
+        cancel_facts = cancel_facts if isinstance(cancel_facts, dict) else {}
+        legacy_false_cancel = (
+            status == "CANCELLED"
+            and str(cancel_facts.get("reason") or "")
+            == "conversation_lifecycle:audit_source_watch_complete"
+        )
+        if status in SUBAGENT_RECOVERY_CLOSED_STATUSES and not legacy_false_cancel:
+            return "held"
+
+        now = time.time()
+        active_attempt = str(getattr(current, "runner_active_attempt_id", "") or "").strip()
+        if active_attempt:
+            abandoned = list(getattr(current, "runner_abandoned_attempt_ids", None) or [])
+            if active_attempt not in abandoned:
+                abandoned.append(active_attempt)
+            current.runner_abandoned_attempt_ids = abandoned
+            current.runner_active_attempt_id = ""
+        for request in getattr(current, "capability_requests", []) or []:
+            if capability_request_counts_as_open(getattr(request, "status", "OPEN")):
+                request.status = "CLOSED"
+        if legacy_false_cancel:
+            attrs.pop("cancel_subagents", None)
+        attrs["audit_source_terminal"] = {
+            "schema_version": "audit-source-terminal.v1",
+            "reason": "watch_window_settled",
+            "previous_status": status,
+            "completed_at": now,
+        }
+        current.attributes = attrs
+        current.status = "DONE"
+        current.verification_status = "VERIFIED"
+        current.failure_type = ""
+        current.blockers = []
+        current.progress = 1.0
+        current.ended_at = now
+        current.updated_at = now
+        current.heartbeat_at = now
+        reclaim_background_start(current)
+        clear_source_worker_lease(
+            Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or "")),
+            str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
+        )
+        # 仅旧版由 watch-complete 控制事件误写成 CANCELLED 的来源 worker 可以跨过
+        # 终态单调保护；人工/管理员取消在上面的 closed-status 分支已经保持关闭。
+        manager.save(current, allow_terminal_reactivation=legacy_false_cancel)
+        _sync_completed_source_worker_link(
+            agent,
+            run_id,
+            expected_status="cancelled" if legacy_false_cancel else "active",
+        )
+        manager.actions._append_task_work_log(
+            current,
+            "supervision: source worker DONE/VERIFIED reason=watch_window_settled",
+        )
         return "completed"
-    cancel_facts = attrs.get("cancel_subagents")
-    cancel_facts = cancel_facts if isinstance(cancel_facts, dict) else {}
-    legacy_false_cancel = (
-        status == "CANCELLED"
-        and str(cancel_facts.get("reason") or "")
-        == "conversation_lifecycle:audit_source_watch_complete"
-    )
-    if status in SUBAGENT_RECOVERY_CLOSED_STATUSES and not legacy_false_cancel:
-        return "held"
-
-    now = time.time()
-    active_attempt = str(getattr(current, "runner_active_attempt_id", "") or "").strip()
-    if active_attempt:
-        abandoned = list(getattr(current, "runner_abandoned_attempt_ids", None) or [])
-        if active_attempt not in abandoned:
-            abandoned.append(active_attempt)
-        current.runner_abandoned_attempt_ids = abandoned
-        current.runner_active_attempt_id = ""
-    for request in getattr(current, "capability_requests", []) or []:
-        if capability_request_counts_as_open(getattr(request, "status", "OPEN")):
-            request.status = "CLOSED"
-    if legacy_false_cancel:
-        attrs.pop("cancel_subagents", None)
-    attrs["audit_source_terminal"] = {
-        "schema_version": "audit-source-terminal.v1",
-        "reason": "watch_window_settled",
-        "previous_status": status,
-        "completed_at": now,
-    }
-    current.attributes = attrs
-    current.status = "DONE"
-    current.verification_status = "VERIFIED"
-    current.failure_type = ""
-    current.blockers = []
-    current.progress = 1.0
-    current.ended_at = now
-    current.updated_at = now
-    current.heartbeat_at = now
-    reclaim_background_start(current)
-    clear_source_worker_lease(
-        Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or "")),
-        str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or ""),
-    )
-    # 仅旧版由 watch-complete 控制事件误写成 CANCELLED 的来源 worker 可以跨过
-    # 终态单调保护；人工/管理员取消在上面的 closed-status 分支已经保持关闭。
-    manager.save(current, allow_terminal_reactivation=legacy_false_cancel)
-    _sync_completed_source_worker_link(
-        agent,
-        run_id,
-        expected_status="cancelled" if legacy_false_cancel else "active",
-    )
-    manager.actions._append_task_work_log(
-        current,
-        "supervision: source worker DONE/VERIFIED reason=watch_window_settled",
-    )
-    return "completed"
 
 
+# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
+# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _sync_completed_source_worker_link(
     agent: Any,
     run_id: str,
@@ -1130,7 +1208,8 @@ def _sync_completed_source_worker_link(
         request["expected_status"] = expected_status
     try:
         update(request)
-    except Exception:
+    except Exception as transport_error:
+        raise_if_transport_uncertain(transport_error)
         _LOGGER.debug(
             "source worker conversation completion sync failed (run_id=%s)",
             run_id,

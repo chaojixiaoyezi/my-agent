@@ -1,3 +1,7 @@
+# LLM: 原load与显式workspace reader共用同一canonical解析/normalizer，不初始化manager、不复制任务schema或查找器。
+# 模块用途: 给无Agent的已认证领域读取原子任务，原写入和投影流程保持。
+# LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
+# 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
 # LLM: canonical 状态始终先于投影；缓存窗口内的读取只可返回当前 canonical 结果，不能入缓存，以免同时间片的旧代跨窗口复用。
 # 模块用途: 持久保存子代理任务及派生视图，并在缓存建立前确认文件时间戳已经离开粗粒度风险窗口。
 """Persistence service for SubAgentManager task records.
@@ -26,6 +30,7 @@ from ....common.json_io import (
     write_private_json_file_atomic,
 )
 from ....common.opaque_id import validate_opaque_id
+from ....common.request_execution_ports import gateway_short_transaction
 from ....common.value_parsing import sequence_strings
 from ....concurrency.exceptions import ConcurrencyConflictError
 from ....runtime_db.operations import directory_id_for_opaque
@@ -207,63 +212,15 @@ class SubAgentPersistenceService:
     def workspace(self) -> Path:
         return self.manager.workspace
 
+    # LLM: 原manager与冷C只读同一canonical reader，不初始化manager或生成投影；坏记录不能回退主任务。
+    # 函数用途: 读取精确run并沿原规范化恢复任务。
     def load(self, run_id: str) -> SubAgentTask:
-        """Load one subagent task from disk."""
+        return load_subagent_task(self.workspace, run_id)
 
-        # 3.txt B.2/B.3：run_id 是 opaque identifier，拼进路径前必须先过拒绝式
-        # 校验（拦 ../、绝对路径、控制字符等注入），再由框架按已验证 ID 计算
-        # 路径。load 是 cancel/dispatch/inspect/resume/takeover 等入口的共同
-        # 读路径，此门挡住全部 ID 路径注入。
-        run_id = validate_opaque_id(run_id, kind="run_id")
-        path = self.workspace / run_id / "task.json"
-        if not path.exists():
-            raise FileNotFoundError(f"子代理记录不存在: {run_id}")
-        data = _read_state_payload(path)
-        return self.task_from_payload(data)
-
+    # LLM: 数据规范化唯一实现位于同模块纯函数；保全部nested模型/当前schema，不把展示投影当权威。
+    # 函数用途: 为原manager恢复canonical任务。
     def task_from_payload(self, data: dict[str, Any]) -> SubAgentTask:
-        """Build a normalized task from a canonical state payload."""
-
-        data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
-        data["capability_requests"] = [
-            _normalize_nested_model(CapabilityRequest, item)
-            for item in data.get("capability_requests", [])
-            if isinstance(item, dict)
-        ]
-        data["capability_grants"] = [
-            _normalize_nested_model(CapabilityGrant, item)
-            for item in data.get("capability_grants", [])
-            if isinstance(item, dict)
-        ]
-        data["capability_gaps"] = [
-            _normalize_nested_model(CapabilityGap, item)
-            for item in data.get("capability_gaps", [])
-            if isinstance(item, dict)
-        ]
-        data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", []) if isinstance(item, dict)]
-        data["evidence_packets"] = [
-            _normalize_evidence_packet(item) for item in data.get("evidence_packets", []) if isinstance(item, dict)
-        ]
-        data["findings"] = [
-            _normalize_finding(item) for item in data.get("findings", []) if isinstance(item, dict)
-        ]
-        data["takeover_records"] = [
-            TakeoverRecord(**item) for item in data.get("takeover_records", []) if isinstance(item, dict)
-        ]
-        data["channel_checks"] = [
-            ChannelProbeCheck(**item) for item in data.get("channel_checks", []) if isinstance(item, dict)
-        ]
-        data["quality_contract"] = _normalize_quality_contract(data.get("quality_contract"))
-        data["context_manifest"] = _normalize_context_manifest(data.get("context_manifest"))
-        data["context_packs"] = _normalize_context_packs(data.get("context_packs"))
-        data["latest_status_report"] = _normalize_status_report(data.get("latest_status_report"))
-        data["inheritance_manifest"] = normalize_inheritance_manifest(data.get("inheritance_manifest"))
-        data["failure_handoff"] = normalize_failure_handoff(data.get("failure_handoff"))
-        data["security_signals"] = [
-            normalize_security_signal(item) for item in data.get("security_signals", []) if isinstance(item, dict)
-        ]
-        data["runtime_identity"] = normalize_runtime_identity(data.get("runtime_identity"))
-        return SubAgentTask(**data)
+        return task_from_payload(data)
 
     def list_runs(self) -> list[SubAgentTask]:
         """Scan the workspace for subagent task records."""
@@ -370,6 +327,8 @@ class SubAgentPersistenceService:
     # only a structured same-run continuation or lifecycle-repair caller may explicitly reopen one.
     # 文件启动凭据只可由窄 mutation 预留/消费，full save 只允许同身份单调回收。
     # 函数用途: 原子保存子代理权威状态及派生投影，并阻止旧线程把终态写回运行态。
+    # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+    # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def save(
         self,
         task: SubAgentTask,
@@ -379,28 +338,31 @@ class SubAgentPersistenceService:
     ) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
 
-        _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
-        # canonical state 有两类写者:业务状态保存与 runner-session 窄心跳。
-        # 用独立 guard 串行化；不能直接锁 canonical_state.json，因为原子写入
-        # 自己还会取该路径的非可重入锁。
-        with locked_json_path(_canonical_state_guard_path(self.workspace, task)):
-            if _restore_newer_closed_state(
-                self,
-                task,
-                allow_terminal_reactivation=allow_terminal_reactivation,
-            ):
-                return
-            _merge_concurrent_capability_and_runner_state(self, task)
-            _persist_task_inside_guard(
-                self,
-                task,
-                preserve_child_links=preserve_child_links,
-            )
+        with gateway_short_transaction('child_canonical_save'):
+            _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
+            # canonical state 有两类写者:业务状态保存与 runner-session 窄心跳。
+            # 用独立 guard 串行化；不能直接锁 canonical_state.json，因为原子写入
+            # 自己还会取该路径的非可重入锁。
+            with locked_json_path(_canonical_state_guard_path(self.workspace, task)):
+                if _restore_newer_closed_state(
+                    self,
+                    task,
+                    allow_terminal_reactivation=allow_terminal_reactivation,
+                ):
+                    return
+                _merge_concurrent_capability_and_runner_state(self, task)
+                _persist_task_inside_guard(
+                    self,
+                    task,
+                    preserve_child_links=preserve_child_links,
+                )
 
     # LLM: Reducers run against the latest canonical task while holding the same cross-process
     # guard used by save and runner-session heartbeats. Keep reducers deterministic and bounded;
     # network/model calls and unrelated filesystem work must remain outside this critical section.
     # 函数用途: 在同一把文件锁内完成“读取最新状态、结构化修改、递增版本、写回”，避免旧快照覆盖。
+    # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+    # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def mutate(
         self,
         run_id: str,
@@ -409,29 +371,32 @@ class SubAgentPersistenceService:
         expected_revision: int | None = None,
         preserve_child_links: bool = True,
     ) -> SubAgentTask:
-        normalized_run_id = validate_opaque_id(run_id, kind="run_id")
-        initial = self.load(normalized_run_id)
-        with locked_json_path(_canonical_state_guard_path(self.workspace, initial)):
-            task = self.load(normalized_run_id)
-            actual_revision = max(0, int(task.state_revision or 0))
-            if expected_revision is not None and actual_revision != int(expected_revision):
-                raise ConcurrencyConflictError(
-                    task_id=normalized_run_id,
-                    expected_version=int(expected_revision),
-                    actual_version=actual_revision,
+        with gateway_short_transaction('child_canonical_mutate'):
+            normalized_run_id = validate_opaque_id(run_id, kind="run_id")
+            initial = self.load(normalized_run_id)
+            with locked_json_path(_canonical_state_guard_path(self.workspace, initial)):
+                task = self.load(normalized_run_id)
+                actual_revision = max(0, int(task.state_revision or 0))
+                if expected_revision is not None and actual_revision != int(expected_revision):
+                    raise ConcurrencyConflictError(
+                        task_id=normalized_run_id,
+                        expected_version=int(expected_revision),
+                        actual_version=actual_revision,
+                    )
+                reducer(task)
+                _advance_granted_capability_resume_state(task)
+                _persist_task_inside_guard(
+                    self,
+                    task,
+                    preserve_child_links=preserve_child_links,
                 )
-            reducer(task)
-            _advance_granted_capability_resume_state(task)
-            _persist_task_inside_guard(
-                self,
-                task,
-                preserve_child_links=preserve_child_links,
-            )
-            return copy.deepcopy(task)
+                return copy.deepcopy(task)
 
     # LLM: Narrow runner-session persistence may update only the newest canonical payload and
     # returns False when lifecycle or the exact active attempt fences the old lease.
     # 函数用途: 轻量保存 runner 心跳；终态后拒绝旧会话继续冒充运行中。
+    # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+    # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def save_runner_session(
         self,
         run_id: str,
@@ -441,27 +406,28 @@ class SubAgentPersistenceService:
     ) -> bool:
         """Persist runner liveness without rebuilding task projections."""
 
-        run_id = validate_opaque_id(run_id, kind="run_id")
-        locator_path = self.workspace / run_id / "task.json"
-        if not locator_path.exists():
-            raise FileNotFoundError(f"子代理记录不存在: {run_id}")
-        initial_task = self.task_from_payload(_read_state_payload(locator_path))
-        with locked_json_path(_canonical_state_guard_path(self.workspace, initial_task)):
-            payload = _read_state_payload(locator_path)
-            if _runner_session_write_is_stale(payload, session):
-                return False
-            _merge_runner_session_payload(payload, session, now=now)
-            canonical_ref = _canonical_state_ref_from_payload(payload)
-            if not canonical_ref:
-                raise FileNotFoundError(f"canonical subagent state missing for runner session: {run_id}")
-            write_private_json_file_atomic(Path(canonical_ref), payload)
-            # list_runs 的文件指纹来自 locator；只刷新这个轻量文件，
-            # 让列表入口及时看到新 heartbeat，不重建其余派生投影。
-            locator = read_json_object_report(locator_path).payload
-            if locator:
-                locator["updated_at"] = now
-                write_private_json_file_atomic(locator_path, locator)
-        return True
+        with gateway_short_transaction('child_runner_session'):
+            run_id = validate_opaque_id(run_id, kind="run_id")
+            locator_path = self.workspace / run_id / "task.json"
+            if not locator_path.exists():
+                raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+            initial_task = self.task_from_payload(_read_state_payload(locator_path))
+            with locked_json_path(_canonical_state_guard_path(self.workspace, initial_task)):
+                payload = _read_state_payload(locator_path)
+                if _runner_session_write_is_stale(payload, session):
+                    return False
+                _merge_runner_session_payload(payload, session, now=now)
+                canonical_ref = _canonical_state_ref_from_payload(payload)
+                if not canonical_ref:
+                    raise FileNotFoundError(f"canonical subagent state missing for runner session: {run_id}")
+                write_private_json_file_atomic(Path(canonical_ref), payload)
+                # list_runs 的文件指纹来自 locator；只刷新这个轻量文件，
+                # 让列表入口及时看到新 heartbeat，不重建其余派生投影。
+                locator = read_json_object_report(locator_path).payload
+                if locator:
+                    locator["updated_at"] = now
+                    write_private_json_file_atomic(locator_path, locator)
+            return True
 
 
 def _canonical_state_guard_path(workspace: Path, task: SubAgentTask) -> Path:
@@ -1218,3 +1184,59 @@ def _registry_records(value: object, *, limit: int = 12) -> list[dict[str, objec
         if len(rows) >= limit:
             break
     return rows
+
+
+# LLM: 精确workspace由原runtime路径解析给出；原opaque ID/canonical reader/normalizer共用，不新建路径、Store或manager。
+# 函数用途: 给原manager和已认证冷C只读一个已存在子任务。
+def load_subagent_task(workspace: Path, run_id: str) -> SubAgentTask:
+    run_id = validate_opaque_id(run_id, kind="run_id")
+    path = Path(workspace) / run_id / "task.json"
+    if not path.exists():
+        raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+    return task_from_payload(_read_state_payload(path))
+
+# LLM: 仅原canonical载荷进入同一nested模型/运行身份规范化；本函数无初始化和写入，须与原读写回归同验。
+# 函数用途: 将原子任务载荷恢复为正式SubAgentTask，不维护第二schema。
+def task_from_payload(data: dict[str, Any]) -> SubAgentTask:
+    """Build a normalized task from a canonical state payload."""
+
+    data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
+    data["capability_requests"] = [
+        _normalize_nested_model(CapabilityRequest, item)
+        for item in data.get("capability_requests", [])
+        if isinstance(item, dict)
+    ]
+    data["capability_grants"] = [
+        _normalize_nested_model(CapabilityGrant, item)
+        for item in data.get("capability_grants", [])
+        if isinstance(item, dict)
+    ]
+    data["capability_gaps"] = [
+        _normalize_nested_model(CapabilityGap, item)
+        for item in data.get("capability_gaps", [])
+        if isinstance(item, dict)
+    ]
+    data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", []) if isinstance(item, dict)]
+    data["evidence_packets"] = [
+        _normalize_evidence_packet(item) for item in data.get("evidence_packets", []) if isinstance(item, dict)
+    ]
+    data["findings"] = [
+        _normalize_finding(item) for item in data.get("findings", []) if isinstance(item, dict)
+    ]
+    data["takeover_records"] = [
+        TakeoverRecord(**item) for item in data.get("takeover_records", []) if isinstance(item, dict)
+    ]
+    data["channel_checks"] = [
+        ChannelProbeCheck(**item) for item in data.get("channel_checks", []) if isinstance(item, dict)
+    ]
+    data["quality_contract"] = _normalize_quality_contract(data.get("quality_contract"))
+    data["context_manifest"] = _normalize_context_manifest(data.get("context_manifest"))
+    data["context_packs"] = _normalize_context_packs(data.get("context_packs"))
+    data["latest_status_report"] = _normalize_status_report(data.get("latest_status_report"))
+    data["inheritance_manifest"] = normalize_inheritance_manifest(data.get("inheritance_manifest"))
+    data["failure_handoff"] = normalize_failure_handoff(data.get("failure_handoff"))
+    data["security_signals"] = [
+        normalize_security_signal(item) for item in data.get("security_signals", []) if isinstance(item, dict)
+    ]
+    data["runtime_identity"] = normalize_runtime_identity(data.get("runtime_identity"))
+    return SubAgentTask(**data)

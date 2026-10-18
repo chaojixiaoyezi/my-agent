@@ -4,6 +4,7 @@ from __future__ import annotations
 # LLM: 默认值须与随包 YAML 一致；B5 超时同时登记规范化范围/参数边界并由征询消费，覆盖仍由原 owner/thread 保存。
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
+#   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..path_access_policy import DEFAULT_DANGEROUS_PATH_ROOTS, DEFAULT_PATH_ACCESS_MODE
+from ..user_space.home_root import ConfiguredHomeSnapshot
 from .config_io import load_simple_yaml, parse_scalar
 from .config_sources import (
     INTERNAL_RUNTIME_CONFIG_FIELDS,
@@ -156,11 +158,13 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-# LLM: owner/home开关是提示准备的唯一默认源；新增人格线程冻结只控制系统字节，不改变owner授权或晋升。
+# LLM: owner/home开关是提示准备的唯一默认源；C内部home快照由来源白名单及host_only元数据共同隔离，不进入参数中心，不改变owner授权。
 # 类用途: 保存家目录与人格上下文开关，须与YAML及HomeFieldsService布尔解析同步。
 @dataclass
 class _HomeProviderConfigFields:
     my_agent_home: str = ""
+    host_home_snapshot: ConfiguredHomeSnapshot | None = field(
+        default=None, repr=False, compare=False, metadata={"host_only": True})
     # B 切片：显式执行模式（managed / local_unmanaged）。空 = 未显式指定，
     # 挂载逻辑按有无 owner_home_dir 推断（兼容存量调用）。SimpleAgent 构造
     # 透传给 SubAgentManager（manager._attach_runtime_db 落枚举），让工具

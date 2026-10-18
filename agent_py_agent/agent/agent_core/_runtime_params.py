@@ -53,7 +53,7 @@ class FinalizeContext:
     on_chunk: object = None
 
 
-# LLM: ToolLoopExecuteParams 是工具调用的 run 级事实源；逻辑 turn/attempt 分别保留；交付复核去重只管临时建议，不控制工具或完成。
+# LLM: ToolLoopExecuteParams保存本run事实及opaque原输入source；source不序列化/不授权限，逻辑turn/attempt独立，临时复核不控制完成。
 # 类用途: 汇总本轮上下文、快照、取消和摘要范围；交付复核共用一次性请求标记，工具账和审批链保持完整。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
@@ -131,6 +131,8 @@ class ToolLoopExecuteParams:
     active_turn_user_inputs: list[dict[str, object]] = field(default_factory=list)
     # Gateway-only typed callback serializes reservation/submission with exact-turn close.
     active_turn_transition_callback: object = None
+    # 原Gateway宿主仅在实际invocation绑定；不序列化、不从task_attributes/模型恢复，不授新权限。
+    pending_turn_input_source: object = field(default=None, repr=False, compare=False)
     # Completed conversation history stays separate from the current run's tool IR. The seed is
     # immutable and already bounded/compacted by ConversationStore.
     conversation_history_seed: object = None

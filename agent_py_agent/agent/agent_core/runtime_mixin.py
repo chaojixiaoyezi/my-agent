@@ -1,7 +1,9 @@
+# LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 主代理真实 task/run/attempt 必须在模型前完成绑定并交给宿主持久保存；
 # 正常结束、异常和 Compact 续接沿用同一权威，不从会话展示编号反推执行身份。
 # 快照准入失败同样必须恢复线程临时字段，不能将失败任务的参数留给同线程下一次调用。
-# 模块用途: 执行主代理的模型工具循环、上下文续接与精确执行轮收尾，不替子代理调度另建身份。
+# LLM: 显式remember仅组装原三服务引用并调用唯一领域算法，费用/异常/锁与原资源生命周期保持。
+# 模块用途: 执行主代理的模型工具循环、上下文续接与精确执行轮收尾，显式保存委托原记忆服务，不替子代理另建身份。
 from __future__ import annotations
 
 """implements the SimpleAgent prompt/model/tool loop plus memory methods.
@@ -10,7 +12,6 @@ from __future__ import annotations
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -253,58 +254,14 @@ class SimpleAgentRuntimeMixin:
             on_chunk=rp.on_chunk,
         )
 
-    # LLM: Programmatic/admin remember must traverse the same Candidate and Promotion services as
-    # the model tool; direct JsonlMemory.add here would restore a hidden long-term write bypass.
-    # 函数用途: 将本地用户明确确认的具体事实、事件或项目知识审核并晋升，返回正式记录。
+    # LLM: 显式保存只传原三个服务引用到唯一remember算法；候选审核/正式写/原embedding费用和异常保持，修改须同验owner_services与client调用方。
+    # 函数用途: 将本地用户明确保存交给原Candidate与Promotion服务，返回同一正式记忆记录。
     def remember(self, content: str, *, kind: str = "fact"):
-        from ..memory_store.candidate_models import CandidateObservation, MemoryScope
+        from ..memory_store.owner_services import ExplicitRememberServices, remember_explicit
 
-        normalized_kind = str(kind or "fact").strip().lower()
-        type_map = {
-            "fact": "long_term_fact",
-            "event": "event",
-            "project": "project",
-        }
-        if normalized_kind not in type_map:
-            raise ValueError(
-                "remember kind 只允许 fact/event/project；人格偏好请使用 update_persona"
-            )
-        text = str(content or "").strip()
-        if not text:
-            raise ValueError("remember content 不能为空")
-        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:20]
-        candidate = self.memory_candidates.observe(
-            CandidateObservation(
-                candidate_type=type_map[normalized_kind],
-                content=text,
-                subject_key=f"manual.{normalized_kind}.{digest}",
-                scope=MemoryScope("personal", "personal", "本地用户明确保存", ""),
-                origin="reviewed",
-                confidence=1.0,
-                proposed_action="add",
-                promotion_target="long_term",
-                observation_id=f"manual-remember:{digest}",
-            )
-        )
-        if candidate.status == "pending_review":
-            candidate = self.memory_promotion.review(
-                candidate.candidate_id,
-                approved=True,
-                reviewer="local-user-explicit",
-                note="本地 remember 命令显式确认。",
-            )
-        result = self.memory_promotion.promote(
-            candidate.candidate_id,
-            reviewer="local-user-explicit",
-            confirmed=True,
-        )
-        if not result.promoted:
-            raise RuntimeError(f"remember promotion failed: {result.reason_code}")
-        entry_id = result.promotion_ref.rsplit("#", 1)[-1]
-        for record in self.memory.all():
-            if record.entry_id == entry_id:
-                return record
-        raise RuntimeError("remember promotion succeeded without a formal memory record")
+        return remember_explicit(ExplicitRememberServices(
+            candidates=self.memory_candidates, promotion=self.memory_promotion, long_term=self.memory,
+        ), content, kind=kind)
 
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
@@ -759,7 +716,8 @@ def _log_run_stage(
 
 
 # LLM: 原执行片为已验证候选保留依赖到 finalization；所有异常仍结算真实 attempt/用量，清理不得热改 Agent 或猜补消耗。
-# 函数用途: 执行模型工具循环及原收尾，typed overflow向宿主交回同次冻结IR，其它结束仍按实际消耗和终态处理。
+# LLM: 原审批退休native义务保同异常到原请求Future，用量照实结算而不写ordinary终态；普通错误/容量与现资源未知规则不扩。
+# 函数用途: 执行原循环与收尾，准确未结不冒充failed或完成，原Params按词法范围恢复。
 def _run_once_with_params(agent, user_prompt: str, params: RunParams):
     _run_stage_started = time.monotonic()
     _log_run_stage("run_started", params)
@@ -809,6 +767,11 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             FinalizationService(agent).settle_model_usage(params)
         except Exception:
             logging.getLogger(__name__).error("模型用量收口失败，保留原任务错误；请核对用量账", exc_info=False)
+        from ..conversation.agent_tool_approval import approval_retirement_obligation
+
+        if approval_retirement_obligation(exc) is not None:
+            _settle_approval_retirement_run(agent, params, exc)
+            raise
         # 会话运行时 在 task spawn 边界统一调用 on_task_finished；这里等价地覆盖
         # 已绑定 attempt 后的所有入口，包括 skill/tool snapshot、provider
         # capability probe、上下文准备、模型循环和 finalization。任何一步抛错
@@ -819,6 +782,30 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
             update_runtime_fact_terminal_if_enabled(agent, params, exc)
         _settle_main_agent_run_exception(agent, params, exc)
         raise
+
+
+# LLM: 真实ask已证明本调用未入handler，才沿原实际Params异常生命周期结算；既有活动操作/物理未知不收口，清理债务仍原对象上抛。
+# 函数用途: 分开运行失败或取消与permission清理债务，并读回原CAS结果，失败不伪称已释放锁。
+def _settle_approval_retirement_run(agent, params, error):
+    from ..conversation.agent_tool_approval import (
+        approval_retirement_obligation,
+        approval_retirement_run_matches,
+        record_approval_retirement_run,
+    )
+
+    if not approval_retirement_run_matches(error, agent, params):
+        return False
+    repo = agent.subagents.runtime_db
+    if repo.unsettled_attempt_operations(params.attempt_id):
+        return False
+    fact = approval_retirement_obligation(error)
+    # 主Agent取消沿原cancelled；child原failure出口固定FAILED，先保持其RuntimeDB同口径，不能冲突后用拒收回执冒充canonical已结。
+    # 对外仍保同一个清理错误，不重开批准能力。
+    closeout = (InterruptedError("原审批调用已取消")
+                if fact.decision.decision == "cancelled" and fact.scope.agent_kind == "main" else error)
+    update_runtime_fact_terminal_if_enabled(agent, params, closeout)
+    _settle_main_agent_run_exception(agent, params, closeout)
+    return record_approval_retirement_run(error, agent, params)
 
 
 def _compact_auto_continue_params(

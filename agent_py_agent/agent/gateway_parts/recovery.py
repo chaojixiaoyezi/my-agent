@@ -4,6 +4,7 @@
 # (TURN_RESUME_LIMIT_EXCEEDED). Terminal commit releases exact request-affine claims; failed
 # cleanup stays retryable without re-execution. Check heartbeat/terminal/owner tests on changes.
 # 中断展示事件直接使用 paths/stream_writer，不通过请求执行器反向导入，也不改变终态写账顺序。
+# LLM: 多进程恢复核同期P2/P3/原owner RuntimePolicy；当前主线分页、精确CAS、媒体、终态和Count0合同保留。
 # 模块用途: 恢复 Gateway 中断的请求，分清服务重启和真正卡死，并保证同一回合只有一个终态和执行者。
 from __future__ import annotations
 
@@ -55,6 +56,8 @@ TURN_RESUME_LIMIT_ERROR_CODE = "TURN_RESUME_LIMIT_EXCEEDED"
 MAX_UNPLANNED_RESUME_COUNT = 3
 
 
+# LLM: context只保存原预算/时间和宿主注入的实际P3门，不从JSON构造gate；None只有Count0可走原路，正MP保责任。
+# 类用途: 固定一轮恢复扫描输入，dispatcher可附同本代真实准入来源。
 @dataclass(frozen=True)
 class _RecoveryContext:
     now: float
@@ -65,6 +68,8 @@ class _RecoveryContext:
     lease_stale_seconds: int | None
     # 安全重启排空后的接班启动：旧进程已确认退出，续跑不需要防崩溃循环的等待延迟。
     planned_restart: bool = False
+    # 仅实际dispatcher注入原P3门；None在正MP只保留责任，不能创建影子gate。
+    admission_gate: object | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +168,8 @@ def recover_gateway_processing_requests(
     ).summary
 
 
+# LLM: 原故障边界可只读核canonical已提交事实，但仍返回原错误/欠账，不据此续跑或释放原P3。
+# 函数用途: 扫描原processing并报告实际动作与补交故障，计数不代替终态权威。
 def recover_gateway_processing_requests_report(
     paths: GatewayPaths,
     *,
@@ -188,19 +195,29 @@ def recover_gateway_processing_requests_report(
     max_attempts = _non_negative_int(max_attempts, default=1)
     timeout_seconds = max(1, int(timeout_seconds or 1))
     context = params or _RecoveryContext(
-        now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds,
+        now,
+        max_attempts,
+        timeout_seconds,
+        startup,
+        agent,
+        lease_stale_seconds,
         planned_restart=bool(startup and planned_restart),
     )
     for request_path in sorted(paths.processing.glob("*.json")):
         summary["checked"] += 1
-        payload_report = read_json_file_report(request_path, context="gateway.recovery.processing.read")
+        payload_report = read_json_file_report(
+            request_path, context="gateway.recovery.processing.read"
+        )
         if payload_report.load_error is not None:
             load_errors.append(payload_report.load_error)
         try:
             action = _recover_one_processing_request(paths, request_path, context, payload_report)
         except Exception as exc:
-            report = runtime_error_report(exc, context="gateway.recovery.request")
-            report["path"] = str(request_path)
+            committed, report = _recovery_failure_observation(
+                paths, request_path, payload_report.payload, exc
+            )
+            if committed:
+                summary[committed] += 1
             load_errors.append(report)
             continue
         if action in summary:
@@ -231,7 +248,14 @@ def _recover_one_processing_request(
     context: _RecoveryContext,
     payload_report,
 ) -> str:
+    from .multiprocess_processing_recovery import (
+        processing_recovery_required,
+        recover_stale_processing,
+    )
+
     if payload_report.load_error is not None:
+        if processing_recovery_required(context):
+            raise DataCorruptionError("processing recovery source is unreadable; original responsibility retained")
         return _fail_unreadable_processing(paths, request_path, payload_report.load_error, context)
     payload = payload_report.payload or {"id": request_path.stem, "kind": "unknown", "created_at": 0}
     request_id = request_path.stem
@@ -240,20 +264,16 @@ def _recover_one_processing_request(
         raise DataCorruptionError(
             f"gateway processing filename and payload id conflict: {request_id}"
         )
+    # 原metadata含MP专属版本；剥标签必须被原完整指纹发现，不以普通owner字段猜模式或查新P3。
+    validated_gateway_request_fingerprint(payload, request_id)
     if (
         (paths.terminal / f"{request_id}.json").exists()
         or payload.get("schema_version") == "gateway_terminal_request.v1"
     ):
-        return _recover_committed_terminal_processing(
-            paths,
-            request_path,
-            request_id,
-            payload=payload,
-            agent=context.agent,
-        )
+        return recover_stale_processing(paths, request_path, payload, context, _settle_committed_terminal)
     if not _processing_request_stale(payload, request_path, context):
         return ""
-    return _settle_stale_processing(paths, request_path, payload, context)
+    return recover_stale_processing(paths, request_path, payload, context, _settle_stale_processing)
 
 
 # LLM: 已确认过期的请求三选一，只读结构化计数、不读 last_error 文本：服务内租约过期累计 processing_failure_count，
@@ -324,6 +344,7 @@ def _non_negative_int(value: object, *, default: int) -> int:
 # LLM: 插话持久操作经 guidance 领域组件； A canonical archive always wins over a leftover hot record. Legacy sealed processing rows
 # are committed without re-running the provider. Exact request-affine claim cleanup precedes
 # the same canonical commit, so a cleanup I/O failure remains a commit retry, not a model retry.
+# LLM: 原issued源内只锁内封存，跨输入T的结算交同issuer后段，缺来源不改执行归属。
 # 函数用途: 补交已封口的答复和执行权释放，不重跑模型；随后修复用户可见投影。
 def _recover_committed_terminal_processing(
     paths: GatewayPaths,
@@ -333,8 +354,13 @@ def _recover_committed_terminal_processing(
     payload: dict,
     agent: SimpleAgent | None,
 ) -> str:
-    conversation_store = None
-    with gateway_turn_transition(paths, request_id):
+    from .multiprocess_processing_recovery import (
+        current_processing_recovery,
+        processing_metadata_scope,
+    )
+
+    conversation_store, settlement_ok = None, True
+    with processing_metadata_scope(paths, request_id):
         canonical = paths.terminal / f"{request_id}.json"
         canonical_committed = canonical.exists()
         if canonical_committed:
@@ -360,37 +386,9 @@ def _recover_committed_terminal_processing(
                 f"gateway terminal archive is incomplete: {request_id}"
             )
         conversation_store = _recovery_conversation_store(agent, terminal_payload)
-        if conversation_store is not None:
-            try:
-                mailbox_summary = _settle_turn_guidance(conversation_store, request_id, terminal_response)
-                if not canonical_committed:
-                    _apply_limit_settlement(terminal_response, mailbox_summary)
-                if mailbox_summary.get("errors") and not canonical_committed:
-                    terminal_response["input_settlement_errors"] = int(
-                        mailbox_summary.get("errors") or 0
-                    )
-                    terminal_payload = _terminal_gateway_request_payload(
-                        request_id,
-                        terminal_payload,
-                        terminal_response,
-                    )
-            except Exception as exc:
-                if canonical_committed:
-                    _report_gateway_side_effect_error(
-                        "gateway_recovery_guidance_settlement",
-                        request_id,
-                        exc,
-                    )
-                else:
-                    terminal_response["input_settlement_error"] = runtime_error_report(
-                        exc,
-                        context="gateway.recovery.guidance_settlement",
-                    )
-                    terminal_payload = _terminal_gateway_request_payload(
-                        request_id,
-                        terminal_payload,
-                        terminal_response,
-                    )
+        terminal_payload, settlement_ok = _settle_recovered_guidance(
+            request_id, terminal_payload, terminal_response, conversation_store, canonical_committed,
+        )
         if not canonical_committed:
             terminal_payload = _terminal_gateway_request_payload(
                 request_id,
@@ -407,9 +405,18 @@ def _recover_committed_terminal_processing(
             terminal_payload,
         )
 
+        source = current_processing_recovery()
+        if source is not None:
+            source.defer_terminal_projection(request_id, conversation_store, settlement_ok)
+            # 原输入结算须在当前T外；先记pending，后段同issuer负责幂等补交。
+            marker = _terminal_projection_marker_path(paths, request_id)
+            previous = read_json_file_report(marker).payload
+            write_json_file_atomic(marker, {**previous, "settlement_pending": True})
+            return "archived"
+
     from .input_delivery_service import settle_gateway_inputs_for_turn
 
-    settle_gateway_inputs_for_turn(
+    summary = settle_gateway_inputs_for_turn(
         paths,
         target_turn_id=request_id,
         conversation_store=conversation_store,
@@ -417,18 +424,21 @@ def _recover_committed_terminal_processing(
     repair_gateway_chunk_projection(paths, request_id, terminal_response)
     write_json_file_atomic(gateway_response_path(paths, request_id), terminal_response)
     append_gateway_history_once(paths, terminal_response)
-    mark_gateway_terminal_projection_complete(paths, request_id, terminal_response)
+    mark_gateway_terminal_projection_complete(paths, request_id, terminal_response,
+                                              settlement_pending=not settlement_ok or bool(summary.get("errors")))
     return "archived"
 
 
 # LLM: The canonical terminal archive remains the sole completion authority. This marker is only
 # a rebuildable acknowledgement that every derived projection was checked once for the exact
 # canonical file version; changing or deleting a projection invalidates the fast path.
-# 函数用途: 记录某个终态请求的展示目录和 response 已完整落盘，避免后台永久重复修复。
+# LLM: marker仅为投影与原结算欠账，不授完成/释放权；展示补交不能清掉已存在的pending。
+# 函数用途: 记录原终态展示版本，保留未结输入等待下轮准确补交。
 def mark_gateway_terminal_projection_complete(
     paths: GatewayPaths,
     request_id: str,
     terminal_response: dict,
+    *, settlement_pending: bool | None = None,
 ) -> Path:
     selected = str(request_id or "").strip()
     if not selected:
@@ -473,12 +483,16 @@ def mark_gateway_terminal_projection_complete(
             f"gateway terminal response projection is incomplete: {selected}"
         )
     marker = _terminal_projection_marker_path(paths, selected)
+    if settlement_pending is None:
+        # 旧无字段标记沿原Count0合同；已有未结事实不能被展示发布清掉。
+        settlement_pending = read_json_file_report(marker).payload.get("settlement_pending", False) is not False
     write_json_file_atomic(
         marker,
         {
             "schema_version": _TERMINAL_PROJECTION_MARKER_SCHEMA,
             "request_id": selected,
             "projection_folder": target.name,
+            "settlement_pending": settlement_pending is not False,
             "canonical_stamp": _terminal_projection_file_stamp(canonical),
             "projection_stamp": _terminal_projection_file_stamp(projection),
             "response_stamp": _terminal_projection_file_stamp(response_path),
@@ -490,7 +504,8 @@ def mark_gateway_terminal_projection_complete(
 
 # LLM: A marker may skip expensive conversation/history reconciliation only while all three exact
 # files still match the versions observed after the successful projection transaction.
-# 函数用途: 快速判断终态投影是否仍完整；任何损坏、缺失或版本变化都回到正常修复路径。
+# LLM: 未结输入标记不构成追平，旧无字段仍沿Count0原合同；快照不授owner写权。
+# 函数用途: 检查原终态展示与结算欠账，变化后回原幂等修复。
 def _terminal_projection_marker_matches(paths: GatewayPaths, canonical: Path) -> bool:
     marker_report = read_json_file_report(
         _terminal_projection_marker_path(paths, canonical.stem),
@@ -513,6 +528,7 @@ def _terminal_projection_marker_matches(paths: GatewayPaths, canonical: Path) ->
     response_path = gateway_response_path(paths, canonical.stem)
     return bool(
         marker.get("schema_version") == _TERMINAL_PROJECTION_MARKER_SCHEMA
+        and marker.get("settlement_pending", False) is False
         and str(marker.get("request_id") or "").strip() == canonical.stem
         and marker.get("canonical_stamp")
         == _terminal_projection_file_stamp(canonical)
@@ -612,13 +628,15 @@ def _write_terminal_projection_cursor(
 # 窗口内时直接跳过（不再每轮 glob+sort 全部历史终态）；未追平（积压多于每轮上限）时继续推进，
 # 保证任何崩溃场景最终补齐。启动全扫由调用方传 full_scan=True；运行中被外部改坏的投影由
 # _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS 到期的全量复核兜住。
-# 函数用途: 分批补齐原终态投影并节流已追平扫描；失败欠账继续轮转，永不重做业务。
+# LLM: 正多进程只消费dispatcher传入的原gate，缺来源保原pending；不得削弱当前分页/finite/CAS合同。
+# 函数用途: 分批补原终态投影；保持原追平与目录代次，未知不重放业务。
 def repair_gateway_terminal_projections(
     paths: GatewayPaths,
     *,
     agent: SimpleAgent | None,
     limit: int = 16,
     full_scan: bool = False,
+    recovery_context: _RecoveryContext | None = None,
 ) -> tuple[int, list[dict]]:
     projected = 0
     errors: list[dict] = []
@@ -682,9 +700,10 @@ def repair_gateway_terminal_projections(
             errors.append(failure)
             continue
         try:
-            _recover_committed_terminal_processing(
-                paths, canonical, request_id, payload=report.payload, agent=agent,
-            )
+            from .multiprocess_processing_recovery import recover_stale_processing
+
+            context = recovery_context or _RecoveryContext(time.time(), 1, 1, False, agent, None)
+            recover_stale_processing(paths, canonical, report.payload, context, _settle_committed_terminal)
         except Exception as exc:
             failure = runtime_error_report(
                 exc,
@@ -863,6 +882,7 @@ def _commit_stale_processing_failure(context: dict, failure_context: dict, respo
     conversation_store = _recovery_conversation_store(
         context.get("agent"),
         context["payload"],
+        terminal_response=response,
     )
     try:
         terminalize_gateway_request_file(
@@ -890,7 +910,13 @@ def _commit_stale_processing_failure(context: dict, failure_context: dict, respo
     except OSError as exc:
         _report_gateway_side_effect_error("archive_gateway_failed_request", request_path.stem, exc)
         return ""
-    _publish_gateway_failure_response(paths, failure_context, response)
+    from .multiprocess_processing_recovery import current_processing_recovery
+
+    source = current_processing_recovery()
+    if source is not None:
+        source.defer_failure_projection(failure_context, response)
+    else:
+        _publish_gateway_failure_response(paths, failure_context, response)
     return "failed"
 
 
@@ -907,58 +933,15 @@ def _requeue_cause(context: _RecoveryContext) -> str:
 # consume that budget or reset earlier failures. The resume marker carries unplanned_resume_count
 # forward (_active_turn_recovery_marker). This does not start/restart the Gateway itself.
 # 函数用途: 精确重排原回合；服务重启沿用原任务，卡死单独计数，保留启动退避及旧副作用保护。
-def _requeue_stale_processing(
-    paths: GatewayPaths,
-    request_path: Path,
-    payload: dict,
-    context: _RecoveryContext,
-) -> str:
+def _requeue_stale_processing(paths, request_path, payload, context) -> str:
+    from .multiprocess_processing_recovery import processing_metadata_scope
+
     try:
-        request_id = request_path.stem
-        with gateway_turn_transition(paths, request_id):
-            fresh = _fresh_matching_stale_payload(request_path, payload, context)
-            if fresh is None:
-                return ""
-            dead_attempt_id = str(fresh.get("execution_attempt_id") or "").strip()
-            _release_dead_attempt_guidance(
-                _recovery_conversation_store(context.agent, fresh),
-                request_id,
-                dead_attempt_id=dead_attempt_id,
-            )
-            requeued = dict(fresh)
-            if context.startup and not context.planned_restart:
-                requeued["not_before_at"] = context.now + 10
-            requeued.update(
-                {
-                    "status": "pending",
-                    "priority": "recovery",
-                    "source": str(fresh.get("source") or "gateway_recovery"),
-                    "requeued_at": context.now,
-                    "processing_failure_count": (
-                        _gateway_processing_failure_count(fresh) + (0 if context.startup else 1)
-                    ),
-                    "active_turn_recovery": _active_turn_recovery_marker(request_id, dead_attempt_id, fresh, context),
-                    "last_error": (
-                        "gateway restarted before request completed"
-                        if context.startup
-                        else f"gateway processing timeout after {context.timeout_seconds}s"
-                    ),
-                }
-            )
-            for key in (
-                "execution_attempt_id",
-                "lease_owner",
-                "lease_started_at",
-                "lease_heartbeat_at",
-                "lease_process_identity",
-            ):
-                requeued.pop(key, None)
-            write_json_file_atomic(request_path, requeued)
-            request_path.replace(paths.inbox / request_path.name)
+        with processing_metadata_scope(paths, request_path.stem):
+            return _requeue_stale_processing_locked(paths, request_path, payload, context)
     except OSError as exc:
         _report_gateway_side_effect_error("requeue_gateway_request", request_path.stem, exc)
         return ""
-    return "requeued"
 
 
 # LLM: 供应商故障自动续跑的输入载体：次数、错误码与调用方会话存储收在一起，保持主函数参数不增长
@@ -1194,7 +1177,8 @@ def _build_gateway_failure_response(context: dict) -> dict:
 # LLM: This projection runs only after the terminal archive contains the full response. A crash
 # before or during projection can therefore be repaired from that archive without rerunning a model.
 # 流终态经 stream_writer 直接投影，不加载请求执行器；显示失败不改变已归档终态。
-# 函数用途: 在终态归档成功后写 response、history 和诊断日志。
+# LLM: 冷C没有业务LocalStore，末段只跳过其可选索引；原context来源、终态/投影顺序和真实Agent同对象路由必须保留。
+# 函数用途: 在终态归档成功后写 response、history 和流事件，仅向实际业务宿主写原索引。
 def _publish_gateway_failure_response(
     paths: GatewayPaths,
     context: dict,
@@ -1225,8 +1209,10 @@ def _publish_gateway_failure_response(
             )
     except Exception:  # noqa: BLE001 - 终态事件是增强, 失败不影响 recovery 本身
         pass
+    from .control_plane import GatewayControlPlane
+
     agent = context.get("agent")
-    if agent:
+    if agent and type(agent) is not GatewayControlPlane:
         log_gateway_payload(
             agent,
             {**response, "prompt": payload.get("prompt", "")},
@@ -1438,7 +1424,8 @@ def _finish_gateway_conversation_claim(
 
 # LLM: 插话持久操作经 guidance 领域组件； Sole terminal transition seals the response before exact claim/guidance cleanup. Failed
 # cleanup leaves a sealed hot record for startup commit repair, never another model invocation.
-# 函数用途: 保存完整答复，释放原请求执行权、收口补充消息并移动到终态目录；失败可幂等补交。
+# LLM: 有原恢复source时复用同期T短门并推迟跨T输入投影；Count0保main原顺序，退出后不借旧source写入。
+# 函数用途: 原终态只提交一次，实际输入欠账留原marker重试，不重放业务。
 def terminalize_gateway_request_file(
     paths: GatewayPaths,
     path: Path,
@@ -1464,100 +1451,120 @@ def terminalize_gateway_request_file(
         raise DataCorruptionError(
             "gateway terminal transition path conflicts with exact request id"
         )
-    terminal_payload: dict = {}
-    with gateway_turn_transition(paths, turn_id):
-        canonical = canonical_path
-        path_exists = path.is_file()
-        request_report = (
-            read_json_file_report(
-                path,
-                context="gateway.terminalize.request.read",
-            )
-            if path_exists
-            else None
-        )
-        if request_report is not None:
-            _require_expected_gateway_execution_attempt(
-                request_report.payload,
-                turn_id,
-                expected_execution_attempt_id=expected_execution_attempt_id,
-                expected_lease_epoch=expected_lease_epoch,
-                expected_lease_heartbeat_at=expected_lease_heartbeat_at,
-                expected_request_status=expected_request_status,
-                expected_turn_phase=expected_turn_phase,
-                expected_cancel_requested=expected_cancel_requested,
-            )
-        if not path_exists:
-            canonical_report = read_json_file_report(
-                canonical,
-                context="gateway.terminalize.missing_processing.read",
-            )
-            canonical_response = canonical_report.payload.get("terminal_response")
-            if (
-                canonical_report.load_error is not None
-                or canonical_report.payload.get("schema_version")
-                != "gateway_terminal_request.v1"
-                or str(canonical_report.payload.get("id") or "").strip() != turn_id
-                or not isinstance(canonical_response, dict)
-                or not canonical_response
-            ):
-                raise FileNotFoundError(
-                    f"gateway processing and canonical terminal request are missing: {turn_id}"
-                )
-            if terminal_response is not None and canonical_response != terminal_response:
-                raise DataCorruptionError(
-                    f"gateway terminal replay conflicts with canonical outcome: {turn_id}"
-                )
-            terminal_payload = dict(canonical_report.payload)
-        elif terminal_response is not None:
-            _prepare_gateway_chunk_projection(paths, target_dir, turn_id, terminal_response)
-            assert request_report is not None
-            if request_report.load_error is not None:
-                terminal_response.setdefault(
-                    "final_request_load_error",
-                    request_report.load_error,
-                )
-            terminal_payload = _terminal_gateway_request_payload(
-                turn_id,
-                request_report.payload,
-                terminal_response,
-            )
-            # Seal the full provider result in the hot record before any
-            # cross-ledger settlement. Startup recovery recognizes this schema
-            # and can finish the commit without invoking the model again.
-            write_json_file_atomic(path, terminal_payload)
-        else:
-            assert request_report is not None
-            if request_report.load_error is not None or not request_report.payload:
-                raise RuntimeError(f"gateway terminal request is unreadable: {turn_id}")
-            terminal_payload = dict(request_report.payload)
-        if conversation_store is not None and _settle_terminal_guidance(
-            conversation_store, turn_id, terminal_response, terminal_response is not None and path_exists,
-        ):
-            terminal_payload = _terminal_gateway_request_payload(turn_id, terminal_payload, terminal_response)
-        if terminal_response is not None and path.is_file():
-            write_json_file_atomic(path, terminal_payload)
-        _finish_gateway_conversation_claim(terminal_payload, turn_id, conversation_store)
-        archived = _commit_gateway_terminal_request(
-            paths,
-            path if path_exists else canonical,
-            target_dir,
-            turn_id,
-            terminal_payload,
-        )
-    from .input_delivery_service import settle_gateway_inputs_for_turn
+    from .multiprocess_processing_recovery import (
+        current_processing_recovery,
+        processing_metadata_scope,
+    )
 
-    try:
-        settle_gateway_inputs_for_turn(
-            paths,
-            target_turn_id=turn_id,
-            conversation_store=conversation_store,
+    expected = {
+        "expected_execution_attempt_id": expected_execution_attempt_id,
+        "expected_lease_epoch": expected_lease_epoch,
+        "expected_lease_heartbeat_at": expected_lease_heartbeat_at,
+        "expected_request_status": expected_request_status,
+        "expected_turn_phase": expected_turn_phase,
+        "expected_cancel_requested": expected_cancel_requested,
+    }
+    with processing_metadata_scope(paths, turn_id):
+        archived, settlement_ok = _terminalize_gateway_request_locked(
+            paths, path, target_dir, turn_id, conversation_store, terminal_response, expected,
         )
-    except Exception:
-        # The archived terminal response is the canonical completion fact. An
-        # ingress reconciliation failure remains retryable and must not hide it.
-        pass
+        source = current_processing_recovery()
+        if source is not None:
+            source.defer_terminal_projection(turn_id, conversation_store, settlement_ok)
+            marker = _terminal_projection_marker_path(paths, turn_id)
+            previous = read_json_file_report(marker).payload
+            write_json_file_atomic(marker, {**previous, "settlement_pending": True})
+            return archived
+    _complete_gateway_terminal_projection(paths, turn_id, conversation_store, settlement_ok)
     return archived
+
+
+# LLM: 调用方确持原T及可选issued短门，保持main原热封存→guidance→claim→canonical顺序和精确CAS。
+# 函数用途: 执行原终态锁内事务，返回原归档与实际结算观察，不启动模型或释放P3。
+def _terminalize_gateway_request_locked(paths, path, target_dir, turn_id, conversation_store, terminal_response, expected):
+    canonical_path = paths.terminal / f"{turn_id}.json"
+    terminal_payload, settlement = {}, []
+    canonical = canonical_path
+    path_exists = path.is_file()
+    request_report = (
+        read_json_file_report(
+            path,
+            context="gateway.terminalize.request.read",
+        )
+        if path_exists
+        else None
+    )
+    if request_report is not None:
+        _require_expected_gateway_execution_attempt(
+            request_report.payload,
+            turn_id,
+            expected_execution_attempt_id=expected["expected_execution_attempt_id"],
+            expected_lease_epoch=expected["expected_lease_epoch"],
+            expected_lease_heartbeat_at=expected["expected_lease_heartbeat_at"],
+            expected_request_status=expected["expected_request_status"],
+            expected_turn_phase=expected["expected_turn_phase"],
+            expected_cancel_requested=expected["expected_cancel_requested"],
+        )
+    if not path_exists:
+        canonical_report = read_json_file_report(
+            canonical,
+            context="gateway.terminalize.missing_processing.read",
+        )
+        canonical_response = canonical_report.payload.get("terminal_response")
+        if (
+            canonical_report.load_error is not None
+            or canonical_report.payload.get("schema_version")
+            != "gateway_terminal_request.v1"
+            or str(canonical_report.payload.get("id") or "").strip() != turn_id
+            or not isinstance(canonical_response, dict)
+            or not canonical_response
+        ):
+            raise FileNotFoundError(
+                f"gateway processing and canonical terminal request are missing: {turn_id}"
+            )
+        if terminal_response is not None and canonical_response != terminal_response:
+            raise DataCorruptionError(
+                f"gateway terminal replay conflicts with canonical outcome: {turn_id}"
+            )
+        terminal_payload = dict(canonical_report.payload)
+    elif terminal_response is not None:
+        _prepare_gateway_chunk_projection(paths, target_dir, turn_id, terminal_response)
+        assert request_report is not None
+        if request_report.load_error is not None:
+            terminal_response.setdefault(
+                "final_request_load_error",
+                request_report.load_error,
+            )
+        terminal_payload = _terminal_gateway_request_payload(
+            turn_id,
+            request_report.payload,
+            terminal_response,
+        )
+        # Seal the full provider result in the hot record before any
+        # cross-ledger settlement. Startup recovery recognizes this schema
+        # and can finish the commit without invoking the model again.
+        write_json_file_atomic(path, terminal_payload)
+    else:
+        assert request_report is not None
+        if request_report.load_error is not None or not request_report.payload:
+            raise RuntimeError(f"gateway terminal request is unreadable: {turn_id}")
+        terminal_payload = dict(request_report.payload)
+    if conversation_store is not None and _settle_terminal_guidance(
+        conversation_store, turn_id, terminal_response, terminal_response is not None and path_exists,
+        settlement_observation=settlement,
+    ):
+        terminal_payload = _terminal_gateway_request_payload(turn_id, terminal_payload, terminal_response)
+    if terminal_response is not None and path.is_file():
+        write_json_file_atomic(path, terminal_payload)
+    _finish_gateway_conversation_claim(terminal_payload, turn_id, conversation_store)
+    archived = _commit_gateway_terminal_request(
+        paths,
+        path if path_exists else canonical,
+        target_dir,
+        turn_id,
+        terminal_payload,
+    )
+    return archived, all(settlement)
 
 
 # LLM: 只认终态答复的结构化错误码：TURN_RESUME_LIMIT_EXCEEDED 只在启动恢复（提交插话的进程已证明死亡）里产生，所以只有它
@@ -1596,15 +1603,23 @@ def _apply_limit_settlement(response: dict, summary: dict) -> bool:
 
 # LLM: terminalize 在回合锁内、热记录封存之后调用的插话收口（分流见 _settle_turn_guidance）。mutable（有新答复且热记录还在）时把结算失败、坏账数和上限计数写进答复，调用方据返回值重新封存；
 #   不可改时只结算、吞掉异常（终态归档才是完成权威，收口失败留给入口对账重试）。
-# 函数用途: 回合收尾时结算本回合插话，必要时改写答复，返回答复是否被改动。
-def _settle_terminal_guidance(conversation_store: object, turn_id: str, response: dict | None, mutable: bool) -> bool:
+# LLM: 可选观察只携带本次原操作的结构化成功，不授许可；typed源未知上抛，原changed返回合同保留。
+# 函数用途: 结算原插话并保留原改答复语义，供恢复记录实际结算欠账。
+def _settle_terminal_guidance(conversation_store: object, turn_id: str, response: dict | None, mutable: bool, *, settlement_observation: list | None = None) -> bool:
     try:
         summary = _settle_turn_guidance(conversation_store, turn_id, response)
     except Exception as exc:
+        from ..common.request_execution_ports import raise_if_transport_uncertain
+
+        raise_if_transport_uncertain(exc)
+        if settlement_observation is not None:
+            settlement_observation.append(False)
         if not mutable:
             return False
         response["input_settlement_error"] = runtime_error_report(exc, context="gateway.terminalize.guidance_settlement")
         return True
+    if settlement_observation is not None:
+        settlement_observation.append(not summary.get("errors"))
     if not mutable:
         return False
     changed = _apply_limit_settlement(response, summary)
@@ -1766,10 +1781,18 @@ def _terminal_gateway_request_payload(
     return payload
 
 
-# LLM: Recovery must resolve the same owner store as normal execution before terminalizing. A
-# missing/corrupt owner scope returns None and never falls back to another user's store.
-# 函数用途: 为恢复收口查找请求所属会话存储；解析失败时保持权限边界并跳过回执扫描。
-def _recovery_conversation_store(agent: SimpleAgent | None, payload: dict) -> object | None:
+# LLM: 真实恢复只消费同期issued source的冷Store与原Runtime绑定；Count0继续原owner resolver，不补当前身份。
+# 函数用途: 从原冻结owner取得会话账，未知保留欠账，不跨用户回落。
+def _recovery_conversation_store(agent: SimpleAgent | None, payload: dict, *, terminal_response: dict | None = None) -> object | None:
+    from .multiprocess_processing_recovery import current_processing_recovery
+
+    source = current_processing_recovery()
+    if source is not None:
+        source.require_writer("processing_recovery.conversation_store")
+        store = source.conversation_store
+        if terminal_response is not None:
+            terminal_response["owner_id"] = source.home.owner_id
+        return store
     if agent is None:
         return None
     try:
@@ -1778,3 +1801,229 @@ def _recovery_conversation_store(agent: SimpleAgent | None, payload: dict) -> ob
         return _resolve_request_agent(agent, payload).conversation_store
     except Exception:
         return None
+
+
+# LLM: 仅当前原执行者明确返回可重排后调用；原T/P5与精确lease CAS保护原processing→pending，非终态不释放P3或改request ID。
+# 函数用途: 将已经让出执行的原请求按结构化到期时间回到同一队列，不把陈旧回执当恢复许可。
+def requeue_current_processing_request(paths, claim, transition, *, not_before_at):
+    from .queue_service import GatewayClaim
+    from .request_binding import GatewayActiveTurnTransition
+
+    if (type(claim) is not GatewayClaim or type(transition) is not GatewayActiveTurnTransition
+            or claim.path != paths.processing / (claim.request_id + ".json")
+            or transition.request_path != claim.path or transition.request_id != claim.request_id
+            or transition.execution_attempt_id != claim.execution_attempt_id
+            or type(not_before_at) not in (int, float) or not math.isfinite(not_before_at)
+            or not_before_at < time.time()):
+        raise DataCorruptionError("current processing requeue identity is invalid")
+    return transition("requeue", lambda: _requeue_current_processing_locked(paths, claim, not_before_at))
+
+
+
+# LLM: 原T已持有，transition已实读P5；再次核完整lease且不覆盖任何pending/terminal，异常不自动重放或制造释放回执。
+# 函数用途: 在精确执行代次仍一致时更新原运输状态并移动回pending。
+def _requeue_current_processing_locked(paths, claim, not_before_at):
+    report = read_json_file_report(claim.path, context="gateway.recovery.current_requeue.read")
+    fresh = report.payload
+    if (report.load_error is not None or fresh.get("id") != claim.request_id
+            or fresh.get("status") != "processing" or fresh.get("execution_attempt_id") != claim.execution_attempt_id
+            or fresh.get("lease_epoch") != claim.lease_epoch or fresh.get("lease_owner") != claim.lease_owner):
+        raise DataCorruptionError("current processing requeue lease changed")
+    target = paths.inbox / claim.path.name
+    if target.exists() or (paths.terminal / claim.path.name).exists():
+        raise DataCorruptionError("current processing requeue target already exists")
+    requeued = dict(fresh, status="pending", priority="background", requeued_at=time.time(), not_before_at=not_before_at)
+    for key in ("execution_attempt_id", "lease_owner", "lease_started_at", "lease_heartbeat_at",
+                "lease_process_identity", "runtime_authority", "turn_phase", "conversation_claim"):
+        requeued.pop(key, None)
+    write_json_file_atomic(claim.path, requeued)
+    claim.path.replace(target)
+    return True
+
+
+
+# LLM: 调用方确持原T；保持原attempt/epoch/heartbeat CAS及guidance→写入→rename顺序；source属原指纹，缺省也不得补值，不以TTL取得停止权。
+# 函数用途: 在原短门内重排同一个已核准停止的请求，不创建新执行或释放P3。
+def _requeue_stale_processing_locked(paths, request_path, payload, context):
+    request_id = request_path.stem
+    fresh = _fresh_matching_stale_payload(request_path, payload, context)
+    if fresh is None:
+        return ""
+    dead_attempt_id = str(fresh.get("execution_attempt_id") or "").strip()
+    _release_dead_attempt_guidance(
+        _recovery_conversation_store(context.agent, fresh),
+        request_id,
+        dead_attempt_id=dead_attempt_id,
+    )
+    requeued = dict(fresh)
+    if context.startup and not context.planned_restart:
+        requeued["not_before_at"] = context.now + 10
+    requeued.update(
+        {
+            "status": "pending",
+            "priority": "recovery",
+            "requeued_at": context.now,
+            "processing_failure_count": (
+                _gateway_processing_failure_count(fresh) + (0 if context.startup else 1)
+            ),
+            "active_turn_recovery": _active_turn_recovery_marker(request_id, dead_attempt_id, fresh, context),
+            "last_error": (
+                "gateway restarted before request completed"
+                if context.startup
+                else f"gateway processing timeout after {context.timeout_seconds}s"
+            ),
+        }
+    )
+    for key in (
+        "execution_attempt_id",
+        "lease_owner",
+        "lease_started_at",
+        "lease_heartbeat_at",
+        "lease_process_identity",
+    ):
+        requeued.pop(key, None)
+    write_json_file_atomic(request_path, requeued)
+    request_path.replace(paths.inbox / request_path.name)
+    return "requeued"
+
+
+
+# LLM: 同一原terminal动作适配原恢复pipeline，不授P5、不重新预算/模型/任务；Count0仍调用旧顺序。
+# 函数用途: 在已签发恢复来源中补交原canonical的热收尾和待投影记录。
+def _settle_committed_terminal(paths, path, payload, context):
+    return _recover_committed_terminal_processing(
+        paths, path, path.stem, payload=payload, agent=context.agent,
+    )
+
+
+
+# LLM: 必须在终态原T退出后调用，InputReceipt可自行取目标T与入口T；marker另在原source短门内写，结算错误仍保原欠账。
+# 函数用途: 结算原非空输入回执并保存投影欠账，不重放模型或改canonical答复。
+def _complete_gateway_terminal_projection(paths, turn_id, conversation_store, settlement_ok):
+    from .input_delivery_service import settle_gateway_inputs_for_turn
+
+    try:
+        summary = settle_gateway_inputs_for_turn(
+            paths, target_turn_id=turn_id, conversation_store=conversation_store,
+        )
+        settlement_ok = settlement_ok and not summary.get("errors")
+    except Exception as exc:
+        from ..common.request_execution_ports import raise_if_transport_uncertain
+
+        raise_if_transport_uncertain(exc)
+        settlement_ok = False
+    # 原投影marker只保存补交欠账提示，不创建第二完成/执行权威。后续展示写入不得清掉它。
+    from .multiprocess_processing_recovery import current_processing_recovery
+
+    source = current_processing_recovery()
+    if source is None:
+        marker = _terminal_projection_marker_path(paths, turn_id)
+        previous = read_json_file_report(marker).payload
+        write_json_file_atomic(marker, {**previous, "settlement_pending": not settlement_ok})
+    else:
+        with source.short_scope("processing_recovery.projection_marker"):
+            marker = _terminal_projection_marker_path(paths, turn_id)
+            previous = read_json_file_report(marker).payload
+            write_json_file_atomic(marker, {**previous, "settlement_pending": not settlement_ok})
+    return settlement_ok
+
+
+
+# LLM: 原current source短门已实际持T/controller/lease；只读原canonical响应后重建展示，不缓存结算许可或改变响应权威。
+# 函数用途: 在真实metadata区间补齐chunk/response/history和幂等投影marker。
+def _project_recovered_terminal_response(paths, turn_id, settlement_ok):
+    report = read_json_file_report(paths.terminal / (turn_id + ".json"), context="gateway.recovery.post.canonical")
+    response = report.payload.get("terminal_response")
+    if report.load_error is not None or not isinstance(response, dict):
+        raise DataCorruptionError("canonical recovery response is unavailable")
+    repair_gateway_chunk_projection(paths, turn_id, response)
+    write_json_file_atomic(gateway_response_path(paths, turn_id), response)
+    append_gateway_history_once(paths, response)
+    mark_gateway_terminal_projection_complete(paths, turn_id, response, settlement_pending=not settlement_ok)
+
+
+
+# LLM: 调用方持原T；只复用main原guidance结算和首次热封存规则，canonical不改写；typed未知不能伪作普通收尾错误。
+# 函数用途: 返回原结算实际结果供投影记欠账，失败不重做模型或更换owner。
+def _settle_recovered_guidance(request_id, terminal_payload, terminal_response, conversation_store, canonical_committed):
+    settlement_ok = True
+    if conversation_store is not None:
+        try:
+            mailbox_summary = _settle_turn_guidance(conversation_store, request_id, terminal_response)
+            settlement_ok = not mailbox_summary.get("errors")
+            if not canonical_committed:
+                _apply_limit_settlement(terminal_response, mailbox_summary)
+            if mailbox_summary.get("errors") and not canonical_committed:
+                terminal_response["input_settlement_errors"] = int(
+                    mailbox_summary.get("errors") or 0
+                )
+                terminal_payload = _terminal_gateway_request_payload(
+                    request_id,
+                    terminal_payload,
+                    terminal_response,
+                )
+        except Exception as exc:
+            from ..common.request_execution_ports import raise_if_transport_uncertain
+
+            raise_if_transport_uncertain(exc)
+            settlement_ok = False
+            if canonical_committed:
+                _report_gateway_side_effect_error(
+                    "gateway_recovery_guidance_settlement",
+                    request_id,
+                    exc,
+                )
+            else:
+                terminal_response["input_settlement_error"] = runtime_error_report(
+                    exc,
+                    context="gateway.recovery.guidance_settlement",
+                )
+                terminal_payload = _terminal_gateway_request_payload(
+                    request_id,
+                    terminal_payload,
+                    terminal_response,
+                )
+    return terminal_payload, settlement_ok
+
+
+# LLM: 只读原canonical完成事实并核同ID/完整指纹/响应身份，投影或错误文案不能证明已提交；观察不修账、不授P3释放。
+# 函数用途: 原终态已提交但后段补交失败时，保留故障和欠账并准确计数，避免假称没有完成任何提交。
+def _recovery_failure_observation(paths, request_path, payload, error):
+    report = runtime_error_report(error, context="gateway.recovery.request")
+    report["path"] = str(request_path)
+    try:
+        canonical_path = paths.terminal / request_path.name
+        if not canonical_path.is_file():
+            return "", report
+        canonical = read_json_file_report(canonical_path, context="gateway.recovery.failure.canonical")
+        row = canonical.payload
+        response = row.get("terminal_response")
+        if (
+            canonical.load_error is not None
+            or row.get("schema_version") != "gateway_terminal_request.v1"
+            or row.get("turn_phase") != "closed"
+            or not isinstance(response, dict)
+            or response.get("id") != request_path.stem
+            or type(response.get("ok")) is not bool
+            or row.get("ok") is not response["ok"]
+            or not _same_gateway_request_identity(payload, row, request_id=request_path.stem)
+        ):
+            return "", report
+        marker_path = _terminal_projection_marker_path(paths, request_path.stem)
+        marker = (
+            read_json_file_report(marker_path, context="gateway.recovery.failure.marker")
+            if marker_path.is_file()
+            else None
+        )
+        report["terminal_committed"] = True
+        report["settlement_pending"] = (
+            marker.payload.get("settlement_pending")
+            if marker is not None and marker.load_error is None
+            else None
+        )
+        return (
+            "failed" if row.get("status") == "failed" and response["ok"] is False else "archived"
+        ), report
+    except OSError:
+        # 观测读取失败不替换原故障，也不能据不完整事实计数、结算或释放资源。
+        return "", report

@@ -42,7 +42,9 @@ _PROD_TIMEOUT = dict(
 )
 
 
-def _agent(*, protocol: str = "native") -> SimpleNamespace:
+# LLM: 每个预算测试明确传本pytest tmp_path，最小审计与锁真实落同一owner；save=False、工具计数与全部预算断言不变。
+# 函数用途: 构造只用临时持久化根的预算测试Agent，生命周期覆盖原同步audit写入。
+def _agent(*, root: Path, protocol: str = "native") -> SimpleNamespace:
     return SimpleNamespace(
         backend=SimpleNamespace(name="anthropic_compatible", max_tokens=8192),
         config=SimpleNamespace(
@@ -53,7 +55,7 @@ def _agent(*, protocol: str = "native") -> SimpleNamespace:
             tool_output_preview_chars=160,
             **_PROD_TIMEOUT,
         ),
-        root=Path("."),
+        root=root,
         tools=SimpleNamespace(),
     )
 
@@ -129,9 +131,9 @@ PROMPT = "请继续处理项目并产出最终报告。" * 30
 
 # ---------------------------------------------------------------- 口径恒等/对齐
 
-def test_start_record_text_identity_with_ir_rounds() -> None:
+def test_start_record_text_identity_with_ir_rounds(tmp_path: Path) -> None:
     """text 协议: 多轮 IR 后记账仍等于真实 system + user 出站面。"""
-    agent = _agent(protocol="text")
+    agent = _agent(root=tmp_path, protocol="text")
     params = _params(protocol="text", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
     expected = estimate_tokens(
@@ -143,9 +145,9 @@ def test_start_record_text_identity_with_ir_rounds() -> None:
     assert _recorded_input_tokens(agent, params, PROMPT) == expected
 
 
-def test_start_record_native_accounting_matches_unified() -> None:
+def test_start_record_native_accounting_matches_unified(tmp_path: Path) -> None:
     """native 协议: 记账口径 == 统一可见口径(同输入同输出, 修复核心)。"""
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=20, body_chars=2000)
     recorded = _recorded_input_tokens(agent, params, PROMPT)
@@ -160,7 +162,7 @@ def test_start_record_persists_live_context_total_for_subagent(tmp_path: Path) -
     from agent_py_agent.agent.conversation.store import ConversationStore
     from agent_py_agent.agent.subagents.manager import SubAgentManager
 
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     manager = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path)
     task = manager.create_run(goal="实现核心玩法", thought="", plan=["执行"])
     task.status = "RUNNING"
@@ -181,26 +183,26 @@ def test_start_record_persists_live_context_total_for_subagent(tmp_path: Path) -
     assert "model_visible_context_usage" not in manager.load(task.id).attributes
 
 
-def test_start_record_native_accounting_scales_with_ir() -> None:
+def test_start_record_native_accounting_scales_with_ir(tmp_path: Path) -> None:
     """native 协议: IR 轮次累积计入记账(rounds 0 vs 20 显著差异)。"""
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     empty_params = _params(protocol="native", prompt=PROMPT)
     base = _recorded_input_tokens(agent, empty_params, PROMPT)
 
-    agent2 = _agent(protocol="native")
+    agent2 = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent2, params, rounds=20, body_chars=2000)
     grown = _recorded_input_tokens(agent2, params, PROMPT)
     assert grown > base * 1.5  # IR messages 计入记账
 
 
-def test_start_record_compact_resume_forwarded_guidance_no_double_count() -> None:
+def test_start_record_compact_resume_forwarded_guidance_no_double_count(tmp_path: Path) -> None:
     """compact/resume: 已转发 guidance 不重复计入(seen 跨轮持有), 且两种
     状态下记账都 == 统一口径(无 IR 重复计数/漏计)。"""
     from dataclasses import replace
 
     guidance = ["护栏：进度已保存", "提示：继续处理剩余文件"]
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT, tool_context=guidance)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
 
@@ -216,9 +218,9 @@ def test_start_record_compact_resume_forwarded_guidance_no_double_count() -> Non
     assert forwarded < unforwarded  # 已转发条目不重复堆叠
 
 
-def test_start_record_first_token_budget_uses_corrected_input() -> None:
+def test_start_record_first_token_budget_uses_corrected_input(tmp_path: Path) -> None:
     """gate1 修正后, 首 token 预算按出站可见量估计(大 IR 不再被 min clamp 掩盖)。"""
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=20, body_chars=2000)
 
@@ -226,7 +228,7 @@ def test_start_record_first_token_budget_uses_corrected_input() -> None:
     _, _, estimate = start_model_call_record(request)
     assert estimate.timeout_seconds > 30.0  # 超过 min clamp: 大 IR 预算被正确抬高
 
-    small_agent = _agent(protocol="native")
+    small_agent = _agent(root=tmp_path, protocol="native")
     small_params = _params(protocol="native", prompt=PROMPT)
     _, _, small_estimate = start_model_call_record(
         SimpleNamespace(prompt=PROMPT, agent=small_agent, params=small_params)
@@ -234,13 +236,13 @@ def test_start_record_first_token_budget_uses_corrected_input() -> None:
     assert small_estimate.timeout_seconds == pytest.approx(30.0)  # 小输入仍 min clamp
 
 
-def test_native_accounting_close_to_outbound_serialization() -> None:
+def test_native_accounting_close_to_outbound_serialization(tmp_path: Path) -> None:
     """native 记账/统一口径与最终出站序列化近似(无 IR 重复计数, <30 token 差)。"""
     from agent_py_agent.agent.agent_core.tool_model_generation import (
         _native_provider_messages,
     )
 
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=20, body_chars=2000)
     recorded = _recorded_input_tokens(agent, params, PROMPT)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ...runtime_context import current_subagent_run_id
@@ -426,6 +427,8 @@ def _float_value(value: object) -> float:
         return 0.0
 
 
+# LLM: 只有原宿主detail writer返回的ref转Path运输；完整编码不是读取许可，正文preview/等级/私有写入沿原规则。
+# 函数用途: 收集有界阶段预览和完整详情文件引用，不让普通文本截断破坏定位。
 def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundle) -> dict[str, Any]:
     if not bundle.detail_payload:
         return {}
@@ -454,5 +457,5 @@ def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundl
             )
         )
         if detail_ref:
-            payload[f"{label}_detail_ref"] = detail_ref
+            payload[f"{label}_detail_ref"] = Path(detail_ref)
     return payload

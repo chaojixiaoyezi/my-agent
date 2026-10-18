@@ -1,3 +1,5 @@
+# LLM: 共享模型发布沿原管理员和随机代次合同；仅共享落盘点拒受限进程，owner私有目录与OAuth不可共享边界保持。
+# 模块用途: 读取与发布管理员共享的模型引用和初始模型，不保存另一份秘密或模型权威。
 # LLM: 共享目录只存显式发布引用、可选的「其他用户初始模型」及随机代次；来源目录先于发布目录加原锁，凭据始终只在管理员私有文件。
 #   初始模型必须是已发布的共享引用，撤销该共享时同次清除；改动须同步 test_shared_initial_model。
 # 模块用途: 管理共享模型的发布和撤销版本，以及管理员给其他用户指定的初始模型，不复制密钥或自动开放已有配置。
@@ -102,7 +104,12 @@ def _shared_source(home: object, profile_id: str) -> tuple[dict, dict]:
 
 # LLM: 只在持有原共享目录锁的事务调用；发布内容与随机代次同次 replace，失败不能提前改内存版本。
 # 函数用途: 原子保存共享引用并轮换发布版本，复用原文件不保存凭据。
+# LLM: 共享发布落盘前拒绝受限执行器；原目录随机代次、发布引用与写后内存更新顺序保持。
+# 函数用途: 只给共享模型目录加进程拒门，不限制owner私有模型读写。
 def _save_catalog(home: object, catalog: dict) -> None:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("shared_model_catalog")
     saved = {"schema": _SCHEMA, "profiles": catalog["profiles"], "catalog_generation": uuid4().hex}
     if catalog.get("initial_profile") in catalog["profiles"]:
         saved["initial_profile"] = catalog["initial_profile"]

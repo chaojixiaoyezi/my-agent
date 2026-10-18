@@ -1,16 +1,19 @@
-# LLM: 版本快照必须排他发布且绑定原身份；失败只撤回本次创建件，不删除外部冲突文件。
-# 模块用途: 准备人格版本快照并提供条件回滚材料。
+# LLM: C仅固定stage/link/登记/清理或capture恢复叶入门；原_ACTIVE_SNAPSHOTS身份和关闭规则保持，native阻止后继补偿。
+# 模块用途: 保存不可覆盖的人格版本快照，C失源时保材料和原异常。
 """Exclusive version snapshots and identity-owned rollback; never unlink public conflicts."""
 import os
+import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from .persona_storage_io import (
+    _PERSONA_NATIVE_ERRORS,
     make_private_directory,
     open_file,
     parent_directory,
+    persona_io,
     remove_private,
     temporary_directory,
     transfer,
@@ -31,25 +34,28 @@ class _PinnedSnapshot:
     retain_on_failure: bool = False
 
 
-# LLM: ContextVar限定当前同步事务，不跨线程共享；调用者决定提交或回滚，本层只持创建FD。
-# 函数用途: 保存本轮快照创建凭据，并保证结束后关闭文件描述符。
+# LLM: 原ContextVar/token/创建责任不变，C只在native退出时保primary并逐件关闭原FD，不新增scope或状态。
+# 函数用途: 管理原快照FD生命周期，失源仍关闭且不继续改盘。
 @contextmanager
-def snapshot_transaction():
+def snapshot_transaction(*, coordinator_io=False):
     created = []
     token = _ACTIVE_SNAPSHOTS.set(created)
     try:
         yield created
     finally:
         _ACTIVE_SNAPSHOTS.reset(token)
-        for snapshot in created:
-            os.close(snapshot.descriptor)
+        if coordinator_io:
+            _close_transaction_snapshots(created, sys.exception())
+        else:
+            for snapshot in created:
+                os.close(snapshot.descriptor)
 
 
-# LLM: 旧快照按身份和完整字节复用；新快照排他link；真实前像可声明失败时原位保留。
-# 函数用途: 创建不可覆盖的版本或恢复快照，并保留FD核验依据。
-def write_version_snapshot(path: Path, text: str, *, retain_on_failure=False) -> Path:
+# LLM: C仅固定stage/link/登记/清理或capture恢复叶入门；原_ACTIVE_SNAPSHOTS身份和关闭规则保持，native阻止后继补偿。
+# 函数用途: 保存不可覆盖的人格版本快照，C失源时保材料和原异常。
+def write_version_snapshot(path: Path, text: str, *, retain_on_failure=False, coordinator_io=False) -> Path:
     body = text.encode('utf-8')
-    with parent_directory(path, create=True):
+    with parent_directory(path, create=True, **({} if not coordinator_io else {'coordinator_io': True})):
         pass
     before = _ledger_image(path)
     if before is not None:
@@ -57,14 +63,16 @@ def write_version_snapshot(path: Path, text: str, *, retain_on_failure=False) ->
             raise OSError('PERSONA_SNAPSHOT_CONFLICT')
         _pin_existing(path, body, before)
         return path
-    with temporary_directory(prefix='.persona-snapshot-', dir=path.parent) as directory:
-        _publish_snapshot(path, Path(directory) / 'staged', body, retain_on_failure=retain_on_failure)
+    with temporary_directory(prefix='.persona-snapshot-', dir=path.parent, **({} if not coordinator_io else {'coordinator_io': True})) as directory:
+        _publish_snapshot(path, Path(directory) / 'staged', body, retain_on_failure=retain_on_failure, **({} if not coordinator_io else {'coordinator_io': True}))
     return path
 
 
-# LLM: link成功立即登记创建和保留责任；之后的unlink/fsync失败不能遗忘恢复材料。
-# 函数用途: 发布已刷盘快照，刷目录并保留原始打开文件身份。
-def _publish_snapshot(path, stage, body, *, retain_on_failure=False):
+# LLM: C仅固定stage/link/登记/清理或capture恢复叶入门；原_ACTIVE_SNAPSHOTS身份和关闭规则保持，native阻止后继补偿。
+# 函数用途: 保存不可覆盖的人格版本快照，C失源时保材料和原异常。
+def _publish_snapshot(path, stage, body, *, retain_on_failure=False, coordinator_io=False):
+    if coordinator_io:
+        return persona_io(lambda: _publish_snapshot(path, stage, body, retain_on_failure=retain_on_failure), coordinator_io=True)
     descriptor = open_file(stage, os.O_RDWR | os.O_CREAT | os.O_EXCL)
     retained = False
     try:
@@ -85,24 +93,28 @@ def _publish_snapshot(path, stage, body, *, retain_on_failure=False):
             os.close(descriptor)
 
 
-# LLM: 每件独立回滚；真实前像必须原位保留，任一冲突不能阻止其它本轮件收尾。
-# 函数用途: 撤回当前事务的临时版本快照，但不撤回唯一的恢复前像。
-def rollback_snapshots(created):
+# LLM: C仅固定stage/link/登记/清理或capture恢复叶入门；原_ACTIVE_SNAPSHOTS身份和关闭规则保持，native阻止后继补偿。
+# 函数用途: 保存不可覆盖的人格版本快照，C失源时保材料和原异常。
+def rollback_snapshots(created, *, coordinator_io=False):
     errors = []
     for snapshot in reversed(created):
         if not snapshot.created or snapshot.retain_on_failure:
             continue
         try:
-            _withdraw_snapshot(snapshot.path, snapshot.descriptor, snapshot.body)
+            _withdraw_snapshot(snapshot.path, snapshot.descriptor, snapshot.body, **({} if not coordinator_io else {'coordinator_io': True}))
         except OSError as error:
+            if coordinator_io and isinstance(error, _PERSONA_NATIVE_ERRORS):
+                raise
             errors.append(error)
     if errors:
         raise OSError('PERSONA_SNAPSHOT_ROLLBACK_CONFLICT') from errors[0]
 
 
-# LLM: 先核归属再rename捕获，并再次核验实际捕获物；即便正确捕获也保留文件以保护已打开的外部FD。
-# 函数用途: 将自己的失败快照移到恢复区，不直接unlink可能被换身的公开名字。
-def _withdraw_snapshot(path, descriptor, body):
+# LLM: C仅固定stage/link/登记/清理或capture恢复叶入门；原_ACTIVE_SNAPSHOTS身份和关闭规则保持，native阻止后继补偿。
+# 函数用途: 保存不可覆盖的人格版本快照，C失源时保材料和原异常。
+def _withdraw_snapshot(path, descriptor, body, *, coordinator_io=False):
+    if coordinator_io:
+        return persona_io(lambda: _withdraw_snapshot(path, descriptor, body), coordinator_io=True)
     current = _ledger_image(path)
     if current is None:
         return
@@ -151,3 +163,14 @@ def _pin_existing(path, body, before):
 def verify_snapshots(snapshots):
     for snapshot in snapshots:
         _require_owned(_ledger_image(snapshot.path), snapshot.descriptor, snapshot.body)
+
+
+# LLM: 只关闭原_ACTIVE_SNAPSHOTS本事务已持FD，原token先reset；native primary不因secondary close改类，仍逐件尝试close。
+# 函数用途: 原快照事务失源退出时归还准确FD，不改盘或发行清理权。
+def _close_transaction_snapshots(created, primary):
+    for snapshot in created:
+        try:
+            os.close(snapshot.descriptor)
+        except OSError:
+            if not isinstance(primary, _PERSONA_NATIVE_ERRORS):
+                raise

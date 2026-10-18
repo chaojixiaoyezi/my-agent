@@ -1,3 +1,4 @@
+# LLM: C仅存coordinator_io策略；原锁/reload/身份/编码门外，准确FD出生及固定快照raw末写逐次消费原scope。
 # LLM: 向量身份和正式记录删除分别守原合同；损坏库不能被当作空库报告删除成功，保留唯一原子存储。
 # 模块用途: 保存并检索正式向量，为精确删除提供可确认的清理结果。
 """暴力 cosine 向量库(Phase 2,纯 Python,零外部依赖)。
@@ -31,6 +32,8 @@ from agent_py_agent.agent.common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from agent_py_agent.agent.retrieval.embedding import cosine
+
+from ..common.global_write_commit import execute_global_write
 
 # 快照文件 schema 版本；不是这个版本的 JSON 对象按 P14 之前的旧格式（整份就是 id→条目、没有身份）读入。
 VECTOR_STORE_SCHEMA_VERSION = "my-agent.memory-vectors.v2"
@@ -129,6 +132,8 @@ def _item(vector: list[float], text: str, metadata: dict[str, object] | None) ->
 #   先读最新快照再整份原子替换，读取按文件指纹发现换代就重载。identity=None 是不管理身份的通用模式（测试与通用检索），
 #   生产记忆语义通道必须带身份（core._memory_semantic_channel 保证）。
 # 类用途: id → (向量, 文本, 元数据) 的暴力 cosine 库，单文件原子快照、跨实例跨进程一致。
+# LLM: C只保存IO策略且沿原RLock/同path文件锁，无source/第二投影；身份、维度和原缓存发布保持。
+# 类用途: 管理唯一原向量快照，C末写仍与原实例算法共用。
 class VectorStore:
     """id → (向量, 文本, 元数据) 的暴力 cosine 库。JSON 持久化,原子写。
 
@@ -145,7 +150,10 @@ class VectorStore:
 
     # LLM: 构造只读文件、不写盘；身份在实例生命周期内固定。
     # 函数用途: 绑定快照路径与当前空间身份，并加载一次现有快照。
-    def __init__(self, path: str | Path, identity: dict[str, object] | None = None) -> None:
+    # LLM: coordinator_io默认False仅纯策略字段，原读取/身份不变，不在构造保存活来源。
+    # 函数用途: 绑定原向量快照和IO策略，启动只读现有文件。
+    def __init__(self, path: str | Path, identity: dict[str, object] | None = None, *, coordinator_io: bool = False) -> None:
+        self.coordinator_io = coordinator_io
         self._path = Path(path).expanduser()
         self._lock = threading.RLock()  # 同实例的读写在进程内串行；跨实例、跨进程的写由 locked_json_path 串行
         self._identity = _normalized_identity(identity)
@@ -154,6 +162,13 @@ class VectorStore:
         self._readable = True
         self._stamp: tuple[int, int, int] | None = None
         self._reload()
+
+    # LLM: 默认原locked_json_path调用形状；C只交准确FD出生，锁等待与所有向量裁决仍在Root外。
+    # 函数用途: 取得本快照原跨进程锁，不保存或复用请求来源。
+    def _locked_snapshot(self):
+        if self.coordinator_io:
+            return locked_json_path(self._path, birth_commit=_coordinator_vector_write)
+        return locked_json_path(self._path)
 
     # LLM: 同一个文件句柄取指纹和内容，二者必然同代；文件不存在是确定的空库，其它读错误记为读不了。
     # 函数用途: 从磁盘重新加载快照到实例缓存。
@@ -218,6 +233,8 @@ class VectorStore:
     # LLM: 调用方必须已持有 self._lock 与 locked_json_path。代次每次新生成；落盘后在锁内 stat 记下新指纹，
     #   本实例不必重读整份文件。副作用：原子替换快照文件（目录不存在会创建）。
     # 函数用途: 把一份完整快照原子写盘，并更新实例缓存。
+    # LLM: C编码/代次在Root外，准确原raw末replace_once进门；真正写成功后才原缓存/指纹发布。
+    # 函数用途: 写同一个完整向量快照并在成功后更新实例事实。
     def _write_snapshot(self, items: dict[str, dict[str, object]], identity: dict[str, str] | None, dim: int | None) -> None:
         header: dict[str, object] = {
             "schema_version": VECTOR_STORE_SCHEMA_VERSION,
@@ -226,7 +243,12 @@ class VectorStore:
             "generation": uuid.uuid4().hex,
             "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        write_private_text_file_atomic_unlocked(self._path, json.dumps({**header, "items": items}, ensure_ascii=False))
+        if self.coordinator_io:
+            raw = json.dumps({**header, "items": items}, ensure_ascii=False)
+            _coordinator_vector_write(lambda: write_private_text_file_atomic_unlocked(
+                self._path, raw, replace_once=True))
+        else:
+            write_private_text_file_atomic_unlocked(self._path, json.dumps({**header, "items": items}, ensure_ascii=False))
         self._header, self._items, self._readable = header, items, True
         self._stamp = _file_stamp(self._path.stat())
 
@@ -265,12 +287,14 @@ class VectorStore:
     # LLM: 增量写在跨进程锁内"刷新 → 裁决 → 整份写回"，裁决失败抛 VectorIdentityError 且不落盘。不管理身份的写入
     #   会把快照头身份置空（它无法为新向量担保），之后带身份的读者会得到 VECTOR_META_MISSING。空 id 的行跳过。
     # 函数用途: 批量写入或覆盖向量，只落盘一次。
+    # LLM: C仅锁FD出生进原scope，等待/reload/身份/维度/合并仍Root外，原行过滤和一次写保持。
+    # 函数用途: 批量写原向量，保唯一快照与原跨实例一致性。
     def upsert_many(self, rows: list[tuple[str, list[float], str, dict[str, object]]]) -> None:
         """批量 upsert(只 flush 一次,省 IO)。rows: [(id, vector, text, metadata), ...]。"""
         rows = [row for row in rows if row[0]]
         if not rows:
             return
-        with self._lock, locked_json_path(self._path):
+        with self._lock, self._locked_snapshot():
             self._refresh()
             dim = self._writable_dim(rows)
             items = dict(self._items)
@@ -280,19 +304,23 @@ class VectorStore:
     # LLM: 重建专用：用完整新快照整体替换旧库，身份取本实例、维度取这批向量，不看旧快照——这正是管理员修复失配的
     #   入口。与增量写共用同一把跨进程锁；维度不一致抛 VECTOR_DIMENSION_MISMATCH，旧库原样保留。
     # 函数用途: 原子替换整个向量库，返回写入条数。
+    # LLM: C只接准确FD出生与原末writer，完整维度/内容准备Root外，原重建身份算法不变。
+    # 函数用途: 替换原向量快照，不另造恢复库或跨请求来源。
     def replace_all(self, rows: list[tuple[str, list[float], str, dict[str, object]]]) -> int:
         rows = [row for row in rows if row[0]]
         dim = _rows_dim(rows) if self._identity is not None else None
         items = {id: _item(vector, text, metadata) for id, vector, text, metadata in rows}
-        with self._lock, locked_json_path(self._path):
+        with self._lock, self._locked_snapshot():
             self._write_snapshot(items, self._identity, dim)
         return len(items)
 
     # LLM: 删除只去掉精确 id，保留快照头的身份与维度（删向量不引入不可信数据），也不做身份裁决——硬删除的隐私清理
     #   不能被身份失配挡住。坏文件必须报告清理未确认，不能当成不存在；精确 id 不存在才返回 False 且不写盘。
     # 函数用途: 删除一条向量并原子落盘。
+    # LLM: C保持原坏库拒绝/不存在不写；锁等待、刷新和裁决Root外，失败不发布删除成功。
+    # 函数用途: 删除精确向量并确认原快照落盘，保原身份。
     def remove(self, id: str) -> bool:
-        with self._lock, locked_json_path(self._path):
+        with self._lock, self._locked_snapshot():
             self._refresh()
             if not self._readable:
                 raise VectorIdentityError("VECTOR_STORE_UNREADABLE")
@@ -360,3 +388,9 @@ class VectorStore:
         with self._lock:
             self._refresh()
             return list(self._items.keys())
+
+
+# LLM: 只消费当前global scope，缺源沿原GlobalWriteCommitUnavailable，不缓存来源或把向量算法放入末门。
+# 函数用途: 为本地向量快照的准确出生和raw末写调用原同步写门。
+def _coordinator_vector_write(operation):
+    return execute_global_write(operation, require_scope=True)

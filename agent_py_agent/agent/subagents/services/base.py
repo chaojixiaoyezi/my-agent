@@ -1,3 +1,5 @@
+# LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
+# 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
 
 # LLM: 准备沿同一 canonical task；init-only 模型建议只写新 thread，不是权限/采用证明，正式创建仍走原 owner 锁和持久入口。
 # 模块用途: 复用原身份准备和创建子代理，将可选待验证建议交给其独立线程，不建立预览任务。
@@ -11,6 +13,8 @@ SubAgentManager 通过当前服务组合调用这里。
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from ...common.request_execution_ports import gateway_short_transaction
 
 if TYPE_CHECKING:
     from agent_py_agent.agent.subagents.model_task import TakeoverRecord
@@ -466,6 +470,8 @@ class SubAgentBaseService:
 
     # LLM: 原创建锁串行线程/DB/canonical 发布但不提供跨存储回滚；同一对象的建议和包首资格只初始化新 thread，锁内复核权限。
     # 函数用途: 创建孩子及独立会话，传递宿主首次准备材料；复用准备时拒绝输入、父代次、权限或对象漂移。
+    # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+    # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
     def create_run(
         self,
         *,
@@ -473,18 +479,19 @@ class SubAgentBaseService:
         prepared: PreparedSubagentRun | None = None,
     ) -> SubAgentTask:
         """Create one explicit subagent task record."""
-        with self.manager.creation_guard():
-            prepared = (
-                self.prepare_run(params=params)
-                if prepared is None
-                else self._validated_prepared_run(params, prepared)
-            )
-            task = prepared.task
-            self._materialize_agent_thread(task, model_advice=prepared.model_advice,
-                                           package_entry_initialization=prepared.package_entry_initialization)
-            write_create_run_authority(self.manager, task, prepared.params)
-            _finalize_created_task(self.manager, task, prepared.params.parent_id)
-            return task
+        with gateway_short_transaction('child_create_run_commit'):
+            with self.manager.creation_guard():
+                prepared = (
+                    self.prepare_run(params=params)
+                    if prepared is None
+                    else self._validated_prepared_run(params, prepared)
+                )
+                task = prepared.task
+                self._materialize_agent_thread(task, model_advice=prepared.model_advice,
+                                               package_entry_initialization=prepared.package_entry_initialization)
+                write_create_run_authority(self.manager, task, prepared.params)
+                _finalize_created_task(self.manager, task, prepared.params.parent_id)
+                return task
 
     # LLM: 只读原角色、父任务和 owner 事实并分配正式待提交身份，不写 task/thread/DB；调用方在原创建锁内取得一致快照，锁外等待后仍由 create_run 复核。
     # 函数用途: 准备之后会原样提交的子代理对象；复制嵌套输入，避免预览或调用方修改意外污染原规格。

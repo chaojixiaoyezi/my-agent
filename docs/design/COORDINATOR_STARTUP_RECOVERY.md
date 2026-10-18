@@ -1,0 +1,15 @@
+# 协调者启动恢复
+
+状态：F3本地候选，未由组件测试外推正式Count2、原生进程或停止/接手验收。
+
+正式正数入口在原C/Root建立后、HTTP/W/循环出生前，调用原`recover_gateway_processing_requests_report`及同一`_RecoveryContext(startup=True)`。宿主是实际`GatewayControlPlane`，不构造foreign Agent，不把首次周期tick等同启动，不改原P2/P3、RuntimePolicy或canonical提交规则。启动gate由同一Root保留，后续仅规范终态可释放原P3；恢复摘要不证明物理退出。
+
+原启动规则完整保留：实际仍存活的lease进程不恢复；旧身份已确认不可用才进入原恢复链。非计划启动保持已有processing_failure_count，按原active_turn_recovery推进unplanned_resume_count和10秒退避；周期租约超时仍沿原不同规则计数，不能互换。
+
+B4多进程滚动重启不在本批。原`consume_restart_marker`增加内部`consume=False`只读预检，复用相同schema、旧进程存活及年龄判据，默认True的原删除顺序不变。有效计划标记存在时，本入口明确拒绝`GATEWAY_MULTIPROCESS_RESTART_UNSUPPORTED`且不消费标记/旧processing，不假装已发送requester continuation。普通Count0仍由原主链消费并通知。
+
+恢复产生部分结果或load_errors时保留原canonical/P3/输入事实；启动状态仅运输原requeued/failed计数，错误数写结构化日志，不把可被下一运行状态覆盖的瞬时字段当持久诊断权威。不为错误另造队列或恢复许可。独立input对账、cold日志的业务LocalStore与完整原生生命周期仍由其它片闭合。
+
+验证以实际临时C/原Store/P3/RuntimeDB为准，不启动W、模型或外部服务。旧身份使用测试自有claim中的准确缺席PID事实；另保实际当前PID不得恢复负例。最初测试误把当前pytest PID当成已退出旧执行者的失败记录保留，修正fixture后必须重跑原产品前像，不能放宽存活门或修改产品预算。
+
+建议下一步：独立复验正式_prepare的恢复先后、原预算/退避、当前PID拒恢复与原标记默认消费；与周期consumer组合后再做完整普通场景。网络安全及历史P6拒绝边界不改变。

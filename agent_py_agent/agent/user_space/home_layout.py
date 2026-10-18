@@ -1,6 +1,6 @@
 """Canonical my-agent Home layout and safe owner initialization."""
 
-# LLM: This module defines canonical owner-home paths; legacy Memory directories must not return as runtime fallbacks.
+# LLM: 本模块持唯一Home布局；共享初始化只由原默认/C消费，W existing-only入口独立，私有owner种子不能合并到全局拒门。
 # 模块用途: 解析、创建和播种每个 owner 的规范 Home、Memory、Persona 与运行目录。
 
 from __future__ import annotations
@@ -187,9 +187,12 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
     }
 
 
-# LLM: Initialization creates empty v2 authorities and never seeds unreviewed lessons/HOT or migrates legacy user data.
-# 函数用途: 创建缺失的 Home 目录与安全空种子，并返回规范路径集合。
+# LLM: 共享Home同时涉及原共享种子/索引与local/main；只能由原默认/C初始化，W需消费worker_home既有资源。
+# 函数用途: 在解析/建目录前拒绝受限写者，Count0原播种与迁移顺序保持。
 def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("shared_home_initialization")
     paths = home_paths(root)
     paths.root.mkdir(parents=True, exist_ok=True)
     for directory in _HOME_DIRECTORIES(paths):
@@ -289,7 +292,12 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     )
 
 
+# LLM: 本叶子只属于Home共享初始化；owner_resolver/run_workspace的私有同名函数独立，不得合并或按路径绕过。
+# 函数用途: 不存在时写原Home种子；受限actor先拒，已有内容不覆盖。
 def _write_seed_file(path: Path, content: str) -> None:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("shared_home_initialization")
     if not path.exists():
         path.write_text(content, encoding="utf-8")
 
@@ -311,10 +319,12 @@ def _upgrade_one_stub(path: Path, stub: str, template: str) -> None:
         pass
 
 
-# LLM: 种子文件只在「不存在」时创建；存在性检查与写入之间的竞态窗口用 O_EXCL 兜底，
-#   并发 append（如学习排除名单）先创建文件时放弃写入，绝不覆盖（mc4-3107）。
-# 函数用途: 不存在时写入种子 JSON（O_EXCL 防并发覆盖）。
+# LLM: 原Home种子受同一拒门，守住O_EXCL/0600/并发先创建不覆盖；不能扩大到owner私有种子。
+# 函数用途: 先拒受限写者，再按原独占创建合同写缺失JSON。
 def _write_seed_json(path: Path, payload: Mapping[str, object]) -> None:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("shared_home_initialization")
     if path.exists():
         return
     content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

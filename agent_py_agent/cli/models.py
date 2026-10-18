@@ -1,4 +1,5 @@
 # LLM: CLI DTO 只表达边界输入，后台身份与展示备注分离，修改须核对解析和业务适配。
+#   可选C/control/drain引用只运输同代原对象，默认Count0；字段和config property自身不授ready、准入或执行权。
 # 模块用途: 保存命令行请求的具名字段，方便发现遗漏或错误运输。
 from __future__ import annotations
 
@@ -53,7 +54,9 @@ class GatewayStartOptions:
 
 # LLM: This immutable value follows one exact Gateway process generation from setup through
 # cleanup. Identity/start time scope stop markers; the log byte offset scopes diagnostics.
-# 类用途: 保存一次 Gateway 运行的进程身份、启动时刻、配置和日志边界，防止快速重启串代。
+#   内部 C 数量由调用方冻结，默认 0，不开放 CLI/用户配置；安全重启消费它拒绝未经实现的内部接班。
+# LLM: P6可选runtime只持本代原C资源引用，None保持Count0；不从DTO字段授信，原collector核同control/lease。
+# 类用途: 保存一次Gateway身份、配置和可选原资源观察，避免清理丢掉实际责任。
 @dataclass(frozen=True)
 class GatewayRunContext:
 
@@ -63,8 +66,20 @@ class GatewayRunContext:
     log_start_offset_bytes: int = 0
     process_identity: dict[str, object] = field(default_factory=dict)
     process_started_at: float = 0.0
+    coordinator_worker_count: int = 0
+    control_plane: Any = None
+    drain_runtime: Any = None
+
+    # LLM: 内部C独立保存配置，agent可以未获P2许可；默认单进程仍直接消费实际agent配置。
+    # 函数用途: 返回本次启动的可信配置，不借假Agent填充接口。
+    @property
+    def config(self):
+        return self.control_plane.config if self.control_plane is not None else self.agent.config
 
 
+
+# LLM: 只运输原context、HTTP与停止事件；None保持Count0，不从DTO签业务或设施出生权。
+# 类用途: 保存启动循环所需的原资源，协调者可复用已经绑定的HTTP实例。
 @dataclass(frozen=True)
 class GatewayThreadsRequest:
 
@@ -72,8 +87,12 @@ class GatewayThreadsRequest:
     requeued: int
     failed: int
     http_port: int
+    http_server: Any | None = None
+    stop_event: Any | None = None
 
 
+# LLM: 可选workers只保本代真实组合对象，默认None；停止不得从列表、PID或空快照重建退出证明。
+# 类用途: 将服务的原线程、HTTP与worker引用交给唯一收尾入口。
 @dataclass(frozen=True)
 class GatewayRunCleanupRequest:
 
@@ -86,6 +105,7 @@ class GatewayRunCleanupRequest:
     http_server: Any | None
     termination_status: str = "stopped"
     termination_reason: str = ""
+    coordinator_workers: Any | None = None
 
 
 @dataclass(frozen=True)

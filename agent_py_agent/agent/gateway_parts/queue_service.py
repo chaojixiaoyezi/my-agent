@@ -1,3 +1,4 @@
+# LLM: Gateway原claim的T锁覆盖P3/P5快照末检、rename与fence；缺W来源拒绝旧入口，默认Count0原路径不增I/O；修改联测认领/恢复/取消。
 # LLM: Gateway 队列与租约的结构化状态是唯一调度事实；类型导入不能引入运行时循环依赖。
 # 模块用途: 扫描持久队列、领取与恢复请求，协调租约和文件状态，不从展示文案推断任务状态。
 """Queue iteration and state management for gateway processing.
@@ -59,6 +60,7 @@ class GatewayIndexRebuildReport:
 
 # LLM: A claimed path is insufficient because request ids are reused after recovery. This value
 # carries the immutable execution fence from the T-locked claim into worker and error closeout.
+#   coordinator_snapshot仅保留原准入同对象快照，不授执行或重建claim；原五字段默认格式保持。
 # 类用途: 保存一次 Gateway 认领的文件、执行 ID、租约代次和所有者，防止旧 worker 误收口。
 @dataclass(frozen=True)
 class GatewayClaim:
@@ -67,6 +69,7 @@ class GatewayClaim:
     execution_attempt_id: str
     lease_epoch: int
     lease_owner: str
+    coordinator_snapshot: object = None
 
     @property
     def stem(self) -> str:
@@ -277,16 +280,30 @@ def ensure_gateway_folders(paths: GatewayPaths) -> None:
     paths.responses.mkdir(parents=True, exist_ok=True)
 
 
-def claim_request(paths: GatewayPaths, request_path: Path) -> GatewayClaim | None:
+# LLM: 原T内先比真实P3/P5全量快照再rename/fence，C末门覆盖实际写入；缺scope不回落原Count0入口，不变更原损坏/回滚/计数语义。
+# 函数用途: 领取原队列请求并返回同一执行围栏；默认无snapshot保留原路径，W或C只消费各自已冻结来源。
+def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=None, coordinator_snapshot=None) -> GatewayClaim | None:
+    from contextlib import ExitStack
+
     from .logging import _report_gateway_side_effect_error
 
     processing_path = paths.processing / request_path.name
     claim: GatewayClaim | None = None
     with _CLAIM_LOCK:
-        with gateway_turn_transition(paths, request_path.stem):
+        with gateway_turn_transition(paths, request_path.stem), ExitStack() as claim_scopes:
             canonical = paths.terminal / request_path.name
             if not request_path.exists() or processing_path.exists() or canonical.exists():
                 return None
+            from .multiprocess_mode import current_worker_partition
+
+            if worker_snapshot is not None or current_worker_partition() is not None:
+                from .multiprocess_queue import require_worker_claim_locked
+
+                require_worker_claim_locked(paths, request_path, worker_snapshot)
+            if coordinator_snapshot is not None:
+                from .multiprocess_coordinator_claim import coordinator_claim_scope
+
+                claim_scopes.enter_context(coordinator_claim_scope(paths, request_path, coordinator_snapshot))
             try:
                 request_path.replace(processing_path)
             except OSError as exc:
@@ -334,6 +351,7 @@ def claim_request(paths: GatewayPaths, request_path: Path) -> GatewayClaim | Non
                     ).strip(),
                     lease_epoch=_gateway_claim_epoch(claimed_payload),
                     lease_owner=str(claimed_payload.get("lease_owner") or "").strip(),
+                    coordinator_snapshot=coordinator_snapshot,
                 )
     from ..observability.concurrency_metrics import gateway_request_claimed
 

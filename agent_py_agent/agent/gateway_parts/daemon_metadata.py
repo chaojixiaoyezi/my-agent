@@ -1,9 +1,12 @@
+# LLM: 保原PID身份字段与Count0 observer，只在MP选择同源kernel出生；异来源/不可见只保持未知，不从TTL或PID猜死。
+# 模块用途: 为原Gateway租约和旧执行恢复提供同源进程身份观察，不改变停止或权限。
 
 from __future__ import annotations
 
 """Gateway daemon metadata helpers shared by PID, lock, and status modules."""
 
 import ctypes
+import errno
 import functools
 import hashlib
 import json
@@ -128,39 +131,62 @@ def _macos_platform_uuid() -> str:
     return str(uuid.UUID(bytes=buffer.raw[:16])).upper()
 
 
-# LLM: 进程身份由 host_id+pid+start_time 组成，避免只凭 PID 在复用后误认旧执行者仍存活。
-# 函数用途: 为当前或指定进程构造可持久化、可核验的运行身份。
+# LLM: 原字段的结构只选择同源OS观测，不解析自然文案/猜新身份，旧PS在MP保持未知；检查Count0与原kernel跨模式回归。
+# 函数用途: 让进程出生值按原producer来源核验，不以格式或不可见事实授恢复权。
+def _darwin_kernel_birth_format(value: object) -> bool:
+    import re
+
+    return type(value) is str and re.fullmatch(r"[1-9][0-9]*:[0-9]{6}", value) is not None
+
+# LLM: 原字段的结构只选择同源OS观测，不解析自然文案/猜新身份，旧PS在MP保持未知；检查Count0与原kernel跨模式回归。
+# 函数用途: 让进程出生值按原producer来源核验，不以格式或不可见事实授恢复权。
+def _process_start_observation(pid: int, recorded_start: object = None) -> int | str | None:
+    from ..common.executor_registration import managed_request_execution_required
+    from .multiprocess_executor_identity import process_birth
+
+    managed = managed_request_execution_required()
+    if sys.platform == "darwin":
+        if _darwin_kernel_birth_format(recorded_start) or (recorded_start is None and managed):
+            return process_birth(pid)
+        if managed:
+            return None
+    elif managed:
+        return process_birth(pid)
+    return _get_process_start_time(pid)
+
+# LLM: host_id/pid/start_time仍为原唯一身份；正MP只读原kernel，Count0原observer不变，不造新字段/账本或补权限。
+# 函数用途: 用原同源出生观测生产进程身份，不启动外部探针。
 def build_process_identity(pid: int | None = None) -> dict[str, object]:
     process_id = os.getpid() if pid is None else int(pid)
     return {
         "host_id": process_host_id(),
         "pid": process_id,
-        "start_time": _get_process_start_time(process_id),
+        "start_time": _process_start_observation(process_id),
     }
 
 
-# LLM: 返回 None 表示跨进程域或字段不足，调用方必须按 TTL fail-safe；只有同域且能证明
-# PID 已死或 start_time 不符时才返回 False，绝不能把“看不见”当成“已死”。
-# 函数用途: 核验一个持久化进程身份现在是否仍代表同一个活进程。
+# LLM: 仅同来源ESRCH/精确出生不同可判死；EPERM/字段不足/PS-kernel异来源均未知，未知不授TTL接手，Count0原生产来源保留。
+# 函数用途: 只读核验原进程身份，不发停止信号、启动进程或补执行许可。
 def process_identity_is_live(identity: object) -> bool | None:
     if not isinstance(identity, dict):
         return None
     host_id = str(identity.get("host_id") or "").strip()
     if not host_id or host_id != process_host_id():
         return None
-    try:
-        pid = int(identity.get("pid") or 0)
-    except (TypeError, ValueError):
-        return None
-    if pid <= 0:
-        return None
-    from .process_control import is_pid_alive
-
-    if not is_pid_alive(pid):
-        return False
+    pid = identity.get("pid")
     recorded_start = identity.get("start_time")
-    current_start = _get_process_start_time(pid)
-    if recorded_start is not None and current_start is not None and recorded_start != current_start:
+    if type(pid) is not int or pid <= 0 or type(recorded_start) not in (int, str) or recorded_start == "":
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError as error:
+        return False if error.errno == errno.ESRCH else None
+    current_start = _process_start_observation(pid, recorded_start)
+    if current_start is None:
+        return None
+    if type(recorded_start) is not type(current_start):
+        return None
+    if recorded_start != current_start:
         return False
     return True
 

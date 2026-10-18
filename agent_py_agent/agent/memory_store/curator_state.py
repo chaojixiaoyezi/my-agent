@@ -1,3 +1,5 @@
+# LLM: 公开状态变更先T后业务锁，内部writer仅核原窗口；Count0原语义与F4候选/游标/租约唯一权威保持。
+# 模块用途: 在原Gateway短事务内更新策展状态，撤权或退出后不得推进游标或释放租约。
 from __future__ import annotations
 
 """Memory Curator 每 owner 的 durable request、cursor 和 lease 仓库。"""
@@ -17,10 +19,17 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
     write_json_file_atomic_unlocked,
+)
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+    gateway_short_transaction,
+    gateway_transaction_writer,
 )
 from ..gateway_parts.daemon_metadata import build_process_identity
 from .candidate_models import normalize_iso_time, utc_now_iso
@@ -96,27 +105,32 @@ class MemoryCuratorStateStore:
     # LLM: Every request advances its reason generation so a same-reason trigger arriving under
     # an active lease cannot be consumed by the older run; output idempotency remains ledger-based.
     # 函数用途: 耐久登记 pre-compact/close/turn/admin 等请求，并区分租约期间到达的同类新触发。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def request(self, reason: str, *, requested_at: str = "") -> MemoryCuratorState:
-        normalized_reason = _reason(reason)
-        now = normalize_iso_time(requested_at, default=utc_now_iso(), allow_empty=False)
-        with locked_json_path(self.path):
-            current = self._load_unlocked()
-            reasons = list(current.pending_reasons)
-            if normalized_reason not in reasons:
-                reasons.append(normalized_reason)
-            generations = dict(current.pending_reason_generations)
-            generations[normalized_reason] = generations.get(normalized_reason, 0) + 1
-            updated = replace(
-                current,
-                pending_reasons=reasons,
-                pending_reason_generations=generations,
-                pending_requested_at=now,
-            )
-            self._write_unlocked(updated)
-            return updated
+        with gateway_short_transaction("request"):
+            normalized_reason = _reason(reason)
+            now = normalize_iso_time(requested_at, default=utc_now_iso(), allow_empty=False)
+            with locked_json_path(self.path):
+                current = self._load_unlocked()
+                reasons = list(current.pending_reasons)
+                if normalized_reason not in reasons:
+                    reasons.append(normalized_reason)
+                generations = dict(current.pending_reason_generations)
+                generations[normalized_reason] = generations.get(normalized_reason, 0) + 1
+                updated = replace(
+                    current,
+                    pending_reasons=reasons,
+                    pending_reason_generations=generations,
+                    pending_requested_at=now,
+                )
+                self._write_unlocked(updated)
+                return updated
 
     # LLM: 普通调用方自行持 state 锁；恢复方已持全部目标锁时走同一锁内领取实现，不嵌套 flock。
     # 函数用途: 原子获取后台策展租约并固定请求代次，仍保留既有独立领取接口。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def acquire(
         self,
         *,
@@ -125,9 +139,10 @@ class MemoryCuratorStateStore:
         lease_seconds: int,
         now: datetime | None = None,
     ) -> tuple[MemoryCuratorState, dict[str, object]] | None:
-        request = CuratorLeaseRequest(reason, config_revision, lease_seconds, now)
-        with locked_json_path(self.path):
-            return self._acquire_unlocked(request)
+        with gateway_short_transaction("acquire"):
+            request = CuratorLeaseRequest(reason, config_revision, lease_seconds, now)
+            with locked_json_path(self.path):
+                return self._acquire_unlocked(request)
 
     # LLM: 调用方必须已持 state 锁；在恢复/清理之后重新读权威状态，不能复用锁前的租约判断。
     # 函数用途: 在完整接管临界区末尾写新租约；活租约冲突时不改文件。
@@ -149,9 +164,12 @@ class MemoryCuratorStateStore:
 
     # LLM: 只有 daily/candidate/run audit 全部成功后调用；这里是 cursor 唯一推进点。
     # 函数用途: 原子提交成功游标、累计计数并释放 lease。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def commit_success(self, commit: CuratorSuccessCommit) -> MemoryCuratorState:
-        with locked_json_path(self.path):
-            return self._commit_success_unlocked(commit)
+        with gateway_short_transaction("commit_success"):
+            with locked_json_path(self.path):
+                return self._commit_success_unlocked(commit)
 
     # LLM: Only the multi-file committer may call this while it already holds the state path
     # lock; ordinary callers use commit_success to preserve locking.
@@ -167,6 +185,8 @@ class MemoryCuratorStateStore:
 
     # LLM: 失败释放 lease 但保留 pending reasons 和旧 cursor，保证之后安全重试不漏经历。
     # 函数用途: 记录稳定失败码和失败时间。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def commit_failure(
         self,
         *,
@@ -174,18 +194,19 @@ class MemoryCuratorStateStore:
         failure_code: str,
         now: str = "",
     ) -> MemoryCuratorState:
-        failed_at = normalize_iso_time(now, default=utc_now_iso(), allow_empty=False)
-        with locked_json_path(self.path):
-            current = self._load_unlocked()
-            _require_lease(current, lease_id)
-            updated = replace(
-                current,
-                last_failure_at=failed_at,
-                last_failure_code=str(failure_code or "CURATOR_FAILED").strip(),
-                active_lease={},
-            )
-            self._write_unlocked(updated)
-            return updated
+        with gateway_short_transaction("commit_failure"):
+            failed_at = normalize_iso_time(now, default=utc_now_iso(), allow_empty=False)
+            with locked_json_path(self.path):
+                current = self._load_unlocked()
+                _require_lease(current, lease_id)
+                updated = replace(
+                    current,
+                    last_failure_at=failed_at,
+                    last_failure_code=str(failure_code or "CURATOR_FAILED").strip(),
+                    active_lease={},
+                )
+                self._write_unlocked(updated)
+                return updated
 
     # LLM: read hook 便于测试注入，生产读取仍走同一严格 parser。
     # 函数用途: 在持锁临界区读取 state。
@@ -214,33 +235,34 @@ class MemoryCuratorStateStore:
     # 顺序: 先写哨兵再 rename —— 哨兵写失败时原文件未动; rename 失败时哨兵已存在,
     # 后续调用凭哨兵补做隔离, 状态机闭合, 无「已隔离但文件未移」的死角。
     # 函数用途: 原子隔离损坏 state.json 并登记哨兵; 已隔离返回 None(不重复执行)。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def quarantine_corrupt(
         self,
         *,
         error_class: str,
         now: str = "",
     ) -> dict[str, object] | None:
-        backoff = self._backoff_path()
-        try:
-            result = self._quarantine_corrupt_unlocked(error_class=error_class, now=now)
-            backoff.unlink(missing_ok=True)  # 隔离成功: 清除失败退避(环境已恢复)
-            return result
-        except Exception:
-            # 隔离写失败: 记录退避事实, 冷却窗口内不再重复尝试(防 run_log 无限刷屏)。
+        with gateway_short_transaction("quarantine_corrupt"):
+            backoff = self._backoff_path()
             try:
-                attempt_count = 1
-                if backoff.exists():
-                    try:
-                        prior = json.loads(backoff.read_text(encoding="utf-8"))
-                        attempt_count = int(prior.get("attempt_count") or 0) + 1
-                    except (OSError, UnicodeError, ValueError, TypeError):
-                        attempt_count = 1
-                self.record_quarantine_backoff(
-                    error_class, now=now, attempt_count=attempt_count
-                )
-            except Exception:  # noqa: BLE001 退避留痕失败不掩盖原始隔离错误
-                pass
-            raise
+                result = self._quarantine_corrupt_unlocked(error_class=error_class, now=now)
+                backoff.unlink(missing_ok=True)  # 隔离成功: 清除失败退避(环境已恢复)
+                return result
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception:
+                # 隔离写失败: 记录退避事实, 冷却窗口内不再重复尝试(防 run_log 无限刷屏)。
+                try:
+                    attempt_count = _quarantine_attempt_count(backoff)
+                    self.record_quarantine_backoff(
+                        error_class, now=now, attempt_count=attempt_count
+                    )
+                except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                    raise
+                except Exception:  # noqa: BLE001 退避留痕失败不掩盖原始隔离错误
+                    pass
+                raise
 
     def _quarantine_corrupt_unlocked(
         self,
@@ -300,27 +322,30 @@ class MemoryCuratorStateStore:
     # LLM: 恢复是运维显式动作: 先原子写回重建 state, 再删哨兵(最后一步)。
     # 删哨兵失败时哨兵仍在 → 下次恢复幂等重试; 哨兵已不在 → 拒绝重复执行。
     # 函数用途: 在人工恢复校验通过后, 原子落回恢复 state 并移除隔离哨兵。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def restore_after_recovery(
         self,
         state: MemoryCuratorState,
         *,
         sentinel_evidence: dict[str, object],
     ) -> MemoryCuratorState:
-        with locked_json_path(self.path):
-            if not self._sentinel_path().exists():
-                raise CuratorStateCorruptError(
-                    "no quarantine marker: nothing to recover",
-                    error_class="recover_noop",
-                )
-            current = _read_sentinel_payload(self._sentinel_path())
-            if current.get("original_sha256") != sentinel_evidence.get("original_sha256"):
-                raise CuratorStateCorruptError(
-                    "quarantine evidence changed during recovery",
-                    error_class="recover_evidence_changed",
-                )
-            self._write_unlocked(state)
-            self._sentinel_path().unlink(missing_ok=False)
-            return state
+        with gateway_short_transaction("restore_after_recovery"):
+            with locked_json_path(self.path):
+                if not self._sentinel_path().exists():
+                    raise CuratorStateCorruptError(
+                        "no quarantine marker: nothing to recover",
+                        error_class="recover_noop",
+                    )
+                current = _read_sentinel_payload(self._sentinel_path())
+                if current.get("original_sha256") != sentinel_evidence.get("original_sha256"):
+                    raise CuratorStateCorruptError(
+                        "quarantine evidence changed during recovery",
+                        error_class="recover_evidence_changed",
+                    )
+                self._write_unlocked(state)
+                self._sentinel_path().unlink(missing_ok=False)
+                return state
 
     # LLM: 隔离写失败不能无限刷 run_log: marker 存在即进入冷却窗口(与 error_class 无关),
     # 复用上一次失败审计(append 幂等, 不新增行), 冷却期满才再试一条新审计。
@@ -360,6 +385,8 @@ class MemoryCuratorStateStore:
     # LLM: 退避 marker 只记结构化失败事实; 隔离成功后必须清除, 否则冷却窗口
     # 会把后续真实损坏误判为退避(隔离成功即证明环境已恢复)。
     # 函数用途: 记录隔离失败的最后尝试时间/次数/分类/一次性审计 run_id。
+    # LLM: 先原T/P3/P5短门再取原state锁；Count0无端口零新增I/O，保原pending代次/游标/配额和隔离合同，不以异常补权。
+    # 函数用途: 在原请求仍可核实的短事务内更新唯一策展状态，不持门等待供应商。
     def record_quarantine_backoff(
         self,
         error_class: str,
@@ -368,16 +395,17 @@ class MemoryCuratorStateStore:
         attempt_count: int = 1,
         run_id: str = "",
     ) -> None:
-        payload = {
-            "schema": "memory-curator-quarantine-backoff.v1",
-            "error_class": str(error_class or "unreadable"),
-            "last_attempt_at": normalize_iso_time(
-                now, default=utc_now_iso(), allow_empty=False
-            ),
-            "attempt_count": max(1, int(attempt_count)),
-            "run_id": str(run_id or "").strip(),
-        }
-        write_json_file_atomic_unlocked(self._backoff_path(), payload, sort_keys=True)
+        with gateway_short_transaction("record_quarantine_backoff"):
+            payload = {
+                "schema": "memory-curator-quarantine-backoff.v1",
+                "error_class": str(error_class or "unreadable"),
+                "last_attempt_at": normalize_iso_time(
+                    now, default=utc_now_iso(), allow_empty=False
+                ),
+                "attempt_count": max(1, int(attempt_count)),
+                "run_id": str(run_id or "").strip(),
+            }
+            write_json_file_atomic_unlocked(self._backoff_path(), payload, sort_keys=True)
 
     # 函数用途: 定位损坏隔离哨兵路径(与 state.json 同目录)。
     def _sentinel_path(self) -> Path:
@@ -389,8 +417,11 @@ class MemoryCuratorStateStore:
 
     # LLM: 所有 state mutation 都用原子 replace，禁止裸 write_text 截断游标文件。
     # 函数用途: 在已持锁状态写回 state。
+    # LLM: 调用方已持state锁，仅核原同线程持T窗口，不在锁内倒取T；失效/复制窗口原typed拒绝，不能改租约或游标。
+    # 函数用途: 在原短事务内部原子写入同一state，外层没有真实窗口时拒绝落盘。
     def _write_unlocked(self, state: MemoryCuratorState) -> None:
-        write_json_file_atomic_unlocked(self.path, state.to_dict(), sort_keys=True)
+        with gateway_transaction_writer("_write_unlocked"):
+            write_json_file_atomic_unlocked(self.path, state.to_dict(), sort_keys=True)
 
 
 # LLM: 只投影新租约状态；死亡、过期和请求代次沿原共享判据，不在这里读写文件。
@@ -686,3 +717,15 @@ __all__ = [
     "build_success_state",
     "stale_lease_reclaimable",
 ]
+
+
+# LLM: 只读原quarantine backoff计数；本helper不写state、不授隔离许可，坏旧计数保持原首次尝试口径。
+# 函数用途: 原隔离失败时计算下次退避的尝试次数。
+def _quarantine_attempt_count(backoff):
+    if not backoff.exists():
+        return 1
+    try:
+        prior = json.loads(backoff.read_text(encoding="utf-8"))
+        return int(prior.get("attempt_count") or 0) + 1
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return 1

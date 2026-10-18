@@ -1,3 +1,5 @@
+# LLM: C显式IO只收紧原目录/锁出生/raw末写，默认False保持原身份/状态/字节；联验原promotion/quota/候选回归。
+# 模块用途: 为唯一候选服务保原算法并接当前C同步末门。
 from __future__ import annotations
 
 """Owner 级唯一记忆候选仓库和状态机。"""
@@ -13,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.global_write_commit import execute_global_write
 from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
@@ -77,19 +80,26 @@ class CandidateStateChangedError(RuntimeError):
 
 
 # LLM: Service 只接收结构化 observation/review；不解析聊天正文或相似文本。
-# 类用途: 管理一个 owner 的 memory/candidates.jsonl。
+# LLM: C只给原目录/锁FD/raw末写接当前scope；所有状态机/merge/CAS/配额原算法保持，同步锁不缩短。
+# 类用途: 管理原owner唯一候选源，不创建第二状态或保存活来源。
 class CandidateService:
     # LLM: 构造器只绑定 owner 规范路径和可选 quota；创建目录不读取或迁移旧候选源。
-    # 函数用途: 初始化当前 owner 的唯一候选仓库。
+    # LLM: coordinator_io只存策略，目录出生消费原scope；quota与唯一候选身份不变，不存source/callback。
+    # 函数用途: 绑定唯一候选仓库，C按当前原门准备原父目录。
     def __init__(
         self,
         path: str | Path,
         *,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
+        coordinator_io: bool = False,
     ) -> None:
         self.path = Path(path)
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
-        ensure_private_dir(self.path.parent)
+        self.coordinator_io = coordinator_io
+        if self.coordinator_io:
+            _coordinator_candidate_write(lambda: ensure_private_dir(self.path.parent))
+        else:
+            ensure_private_dir(self.path.parent)
         self.quota_enforcer = quota_enforcer
 
     # LLM: 重放同一 observation key 只更新时间和 refs，不增加 occurrence_count。
@@ -99,39 +109,45 @@ class CandidateService:
 
     # LLM: Batch observations validate completely before one locked replacement; callers must not emulate atomicity with loops.
     # 函数用途: 原子写入一批候选，任一条非法时整个批次不改变 candidates.jsonl。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def observe_many(
         self,
         observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
     ) -> list[MemoryCandidate]:
         with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
+            with self._locked_candidates():
                 candidates = self._load_unlocked()
                 candidates, committed = merge_candidate_observations(
                     candidates,
                     observations,
                 )
-                _write_candidates_unlocked(self.path, candidates, admission=admission)
+                _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
                 return committed
 
     # LLM: 结构已校验；好观察先原子合并，坏观察只可新建阻塞行而绝不修改同ID旧行，全批只落盘一次。
     # 函数用途: 保留首次缺证据候选的可修复回执，同时禁止借证据与坏操作污染。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def observe_evidence_batch(self, observations: list, failures: list[str]) -> list:
         from .evidence_admission import assemble_evidence_batch
 
-        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
             rows, results = assemble_evidence_batch(self._load_unlocked(), observations, failures)
-            _write_candidates_unlocked(self.path, rows, admission=admission)
+            _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return results
 
     # LLM: 读取同样严格解析全部行；状态/内容过滤只在完整事实集验证后执行。
     # 函数用途: 列出候选，可按状态过滤并保留确定性创建顺序。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def list(
         self,
         *,
         statuses: set[str] | frozenset[str] | None = None,
         limit: int = 0,
     ) -> list[MemoryCandidate]:
-        with locked_json_path(self.path):
+        with self._locked_candidates():
             records = self._load_unlocked()
         if statuses is not None:
             records = [item for item in records if item.status in statuses]
@@ -149,9 +165,11 @@ class CandidateService:
 
     # LLM: 调用方已持quota→policy；候选锁覆盖快照核对和正式写入，期间不能合并/审核该候选。
     # 函数用途: 为最终提交锁定已验证的完整候选快照。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     @contextmanager
     def locked_snapshot(self, expected: MemoryCandidate) -> Iterator[MemoryCandidate]:
-        with candidate_commit_lock(self.path):
+        with candidate_commit_lock(self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
             rows = self._load_unlocked()
             current = next((row for row in rows if row.candidate_id == expected.candidate_id), None)
             if current != expected:
@@ -160,11 +178,13 @@ class CandidateService:
 
     # LLM: 只补尚未指定的长期落点；调用方已用统一目标政策判断，完整快照CAS先于任何字段写入。
     # 函数用途: 同状态下持久化默认目标，不放开通用状态机或改写终态候选。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def fill_long_term_target(self, expected: MemoryCandidate, reviewer: str) -> MemoryCandidate:
         actor = str(reviewer or "").strip()
         if not actor:
             raise ValueError("candidate reviewer is required")
-        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
             rows = self._load_unlocked()
             index = _candidate_index(rows, expected.candidate_id)
             current = rows[index]
@@ -177,11 +197,13 @@ class CandidateService:
             rows[index] = replace(current, promotion_target="long_term", updated_at=now,
                 status_history=[*current.status_history,
                     _status_event(current.status, actor=actor, note="default_long_term_target", at=now)])
-            _write_candidates_unlocked(self.path, rows, admission=admission)
+            _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return rows[index]
 
     # LLM: 字符串保持旧审核入口；传完整候选则锁内CAS后转换，改目标ID仍清除旧版本，不新增授权来源。
     # 函数用途: 推进候选状态并可补充替换目标、冲突和晋升落点。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def transition(
         self,
         candidate_id: str | MemoryCandidate,
@@ -201,7 +223,7 @@ class CandidateService:
         if not actor:
             raise ValueError("candidate reviewer is required")
         with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
+            with self._locked_candidates():
                 candidates = self._load_unlocked()
                 index = _candidate_index(candidates, candidate_id)
                 current = candidates[index]
@@ -252,7 +274,7 @@ class CandidateService:
                     ],
                 )
                 candidates[index] = updated
-                _write_candidates_unlocked(self.path, candidates, admission=admission)
+                _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
                 return updated
 
     # LLM: 正式落点提交成功后才能标 promoted；失败时保留 approved 供安全重试。
@@ -271,11 +293,13 @@ class CandidateService:
 
     # LLM: 晋升提交复用准入/候选锁；remove终态与同hash正文脱敏必须在同一次原子替换中落盘。
     # 函数用途: 提交不会留下“已晋升但未脱敏”中间状态的候选终态。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def mark_promoted_admitted(self, candidate_id, admission, review: tuple[str, str, str]):
         ref = str(review[1] or "").strip()
         if not ref:
             raise ValueError("promotion_ref is required")
-        with candidate_redaction_lock(self.path):
+        with candidate_redaction_lock(self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
             candidates = self._load_unlocked()
             index = _candidate_index(candidates, candidate_id)
             current = candidates[index]
@@ -283,7 +307,7 @@ class CandidateService:
             if current.status == "promoted" and current.proposed_action != "remove":
                 return current
             rows = _promoted_rows(candidates, index, review)
-            _write_candidates_unlocked(self.path, rows, admission=admission)
+            _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return rows[index]
 
     # LLM: Hard delete 清正文但保留 hash/id/status 审计，不得改写 ConversationStore 原话。
@@ -303,6 +327,8 @@ class CandidateService:
 
     # LLM: 晋升硬删除传入外层准入，普通入口自行准入；同一候选写入协议不再 policy→quota 重入。
     # 函数用途: 按已有准入或普通配额通道清除候选正文，保留身份与审计。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def redact_content_admitted(self, admission: OwnerQuotaAdmission | None, options: dict) -> int:
         if admission is None:
             with _quota_admission(self.quota_enforcer) as acquired:
@@ -312,7 +338,7 @@ class CandidateService:
         if not hashes:
             return 0
         now = utc_now_iso()
-        with candidate_redaction_lock(self.path):
+        with candidate_redaction_lock(self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
             candidates = self._load_unlocked()
             replacements = [
                 _redacted_candidate(item, hashes=hashes, excluded=excluded,
@@ -322,12 +348,14 @@ class CandidateService:
             changed = sum(item is not None for item in replacements)
             if changed:
                 rows = [new if new is not None else old for old, new in zip(candidates, replacements, strict=True)]
-                _write_candidates_unlocked(self.path, rows, admission=admission)
+                _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
     # LLM: 排除标记只按精确 candidate_id 写结构化原因码，不改状态、不写状态历史、不看正文；
     #   幂等：同值重复标记不产生写入，状态机与人工审核路径都不受影响。
     # 函数用途: 给一批候选写排除自动晋升的持久原因码，返回实际变化条数。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def mark_promotion_excluded(
         self,
         candidate_ids: list[str] | tuple[str, ...],
@@ -338,11 +366,11 @@ class CandidateService:
         code = str(reason or "").strip()
         if not ids or not code:
             return 0
-        with _quota_admission(self.quota_enforcer) as admission, locked_json_path(self.path):
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
             candidates = self._load_unlocked()
             changed = _mark_excluded_candidates(candidates, ids, code, utc_now_iso())
             if changed:
-                _write_candidates_unlocked(self.path, candidates, admission=admission)
+                _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
     # LLM: retention 只按结构化 rejected/expired/superseded 状态和 updated_at 删除。
@@ -359,12 +387,14 @@ class CandidateService:
 
     # LLM: 精确ID且仅retention终态；带版本绑定的行必须脱敏留约束，不能硬删后重新授权旧证据。
     # 函数用途: 清理终态候选正文与引用，返回本次实际清理条数。
+    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
+    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def delete_terminal(self, candidate_ids: list[str] | tuple[str, ...]) -> int:
         ids = set(normalize_string_list(candidate_ids))
         if not ids:
             return 0
         with _quota_admission(self.quota_enforcer) as admission:
-            with locked_json_path(self.path):
+            with self._locked_candidates():
                 candidates = self._load_unlocked()
                 for item in candidates:
                     if item.candidate_id in ids and item.status not in {
@@ -377,7 +407,7 @@ class CandidateService:
                         )
                 retained, deleted = _retention_records(candidates, ids)
                 if deleted:
-                    _write_candidates_unlocked(self.path, retained, admission=admission)
+                    _write_candidates_unlocked(self.path, retained, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
                 return deleted
 
     # LLM: 健康统计不返回正文、路径或用户引用。
@@ -395,6 +425,12 @@ class CandidateService:
             "by_status": dict(sorted(statuses.items())),
             "by_type": dict(sorted(types.items())),
         }
+
+    # LLM: 只返回原同path锁，C透传准确FD出生，不缓存活来源或缩短锁内业务；默认调用形状不加False。
+    # 函数用途: 给候选原读写算法取得相同双层锁，等待与全文件读取都门外。
+    def _locked_candidates(self):
+        options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
+        return locked_json_path(self.path, **options)
 
     # LLM: 内部读取必须在 path lock 内调用，任一坏行都阻断下一次覆盖。
     # 函数用途: 严格加载当前候选文件。
@@ -643,19 +679,24 @@ def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
 
 # LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。候选装记忆正文，走私有原子写（0600，目录 0700），
 #   已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
-# 函数用途: 通过 quota 后以仅本人可读写的权限原子替换 candidates.jsonl。
+# LLM: serialize/admission.check仍持原领域锁在Root外；C只把准备好的raw replace_once交原scope，默认字节/调用形状不变。
+# 函数用途: 原容量核验成功后替换同一候选文件，C末核失败保原当前态。
 def _write_candidates_unlocked(
     path: Path,
     candidates: list[MemoryCandidate],
     *,
     admission: Any,
+    coordinator_io: bool = False,
 ) -> None:
     text = "".join(
         json.dumps(item.to_record(), ensure_ascii=False, sort_keys=True) + "\n"
         for item in candidates
     )
     admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
-    write_private_text_file_atomic_unlocked(path, text)
+    if coordinator_io:
+        _coordinator_candidate_write(lambda: write_private_text_file_atomic_unlocked(path, text, replace_once=True))
+    else:
+        write_private_text_file_atomic_unlocked(path, text)
 
 
 # LLM: 排除标记只按结构化 candidate_id 命中；已带同原因码的条目跳过，写回由调用方在锁内一次性完成。
@@ -1033,3 +1074,9 @@ def _is_binding_tombstone(item: MemoryCandidate) -> bool:
         and not any((item.content, item.evidence_refs, item.source_message_refs,
             item.source_tool_refs, item.source_artifact_refs, item.source_task_ids,
             item.source_run_ids, item.learning_source, item.learning_source_coverage)))
+
+
+# LLM: 本函数不持source，仅消费原global scope；原candidate锁已由调用方持有，不能包merge/scan/embedding。
+# 函数用途: 在C的当前真实末门执行一次准确目录/FD出生或已准备raw写。
+def _coordinator_candidate_write(operation):
+    return execute_global_write(operation, require_scope=True)

@@ -1,5 +1,6 @@
-# LLM: 原目录保存同时轮换持久代次；pending 采用沿原锁复核，普通读不迁移落盘，密钥不进快照或公开投影。
+# LLM: 原目录保存同时轮换持久代次；pending 采用沿原锁复核，普通读不迁移落盘，密钥不进快照或公开投影。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
 # 原选择读取的可选上下文捕获仅复用此次开关事实，退出清理；不能移动既有模型冻结点或成为配置缓存。
+# LLM: 显式config/home解析叶与原Agent wrapper共用默认/共享/凭据算法；修改须联验embedding与thread默认。
 # 模块用途: 管理主/子模型与决策入口，提供原目录版本及含输入模态的公开列表，不另建配置或请求路径。
 
 from __future__ import annotations
@@ -297,8 +298,10 @@ def _with_point_diagnostics(agent: object, result: dict) -> dict:
 
 # LLM: 手动群目录写入先持原群授权策略锁；自动 seed/增强物化不走此手动门。select 只改 thread，set_default 只改未来默认，set_shared 只改管理员发布引用，
 #   set_initial 只改共享目录里的初始模型；select 可携带 expected_revision 原线程 CAS，save_profile 显式编辑独立连接；add_models 按连接批量新增。
+# LLM: blocking=False只由原C完整逻辑事务在T外层传入；同一目录/群/线程锁和原CAS不改，不授予新的操作或网络权限。
 # 函数用途: 管理模型与决策设置；决策操作不初始化生成选择，网络只在显式认证/目录/连接测试时发生，回执不含令牌。
-def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "") -> dict:
+def execute_model_profile_operation(agent: object, operation: str, payload: dict, *, thread_id: str = "", blocking: bool = True) -> dict:
+    lock_options = {} if blocking else {"blocking": False}
     decision_operations = {"decision_read": "read", "decision_patch": "patch", "decision_reset": "reset"}
     if operation in decision_operations:
         from .decision_settings import execute_decision_settings_operation
@@ -320,14 +323,14 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     if thread_id:
         from .thread_model_selection import thread_model_profile_id
 
-        thread_model_profile_id(agent, thread_id)
+        thread_model_profile_id(agent, thread_id, **lock_options)
     if operation == "select":
         from .thread_model_selection import thread_model_profile_id
 
         if not thread_id:
             raise ModelProfileError("选择模型需要当前会话；修改新会话默认值请使用 set_default。")
         thread_model_profile_id(agent, thread_id, select=str(payload.get("profile_id") or ""),
-                                expected_revision=payload.get("expected_revision"))
+                                expected_revision=payload.get("expected_revision"), **lock_options)
         operation = "list"
     if operation == "set_shared":
         set_shared_profile(agent, payload.get("profile_id"), payload.get("enabled"))
@@ -336,7 +339,7 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
         set_initial_profile(agent, payload.get("profile_id"))
         operation = "list"
     if operation == "list":
-        return _model_selection_projection(agent, read_model_profiles(path), thread_id)
+        return _model_selection_projection(agent, read_model_profiles(path), thread_id, **lock_options)
     if operation in {"auth_start", "auth_poll", "auth_status", "auth_parameters", "auth_cancel", "auth_logout",
                      "auth_browser_start", "auth_browser_complete"}:
         from .model_oauth import execute_oauth
@@ -351,7 +354,7 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     added = None
-    with group_capability_guard(agent, "assistant.configure", thread_id=thread_id), locked_json_path(path):
+    with group_capability_guard(agent, "assistant.configure", thread_id=thread_id, **lock_options), locked_json_path(path, **lock_options):
         data = read_model_profiles(path)
         check = _WRITE_CHECK.get()
         before = deepcopy(data) if check is not None else None
@@ -364,13 +367,14 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
         if check is not None:
             check(before, data)
         _save_profiles(path, data)
-    result = _model_selection_projection(agent, data, thread_id)
+    result = _model_selection_projection(agent, data, thread_id, **lock_options)
     return {**result, "added_models": added} if operation == "add_models" else result
 
 
+# LLM: 列表可能沿原线程选择懒物化；C复用原非阻塞模式，不能把展示误当无副作用。
 # LLM: 列表只含私有及管理员显式发布的公开字段；inventory_status 只标原读口完成/失败，不解析警告或扩大共享。
 # 函数用途: 为菜单和只读自我目录说明会话、默认、共享及来源完整性，不显示其它用户私有模型。
-def _model_selection_projection(agent: object, data: dict, thread_id: str) -> dict:
+def _model_selection_projection(agent: object, data: dict, thread_id: str, *, blocking: bool = True) -> dict:
     from ..user_space.approval_mode import is_permission_admin
 
     result = public_model_profiles(data, agent.config)
@@ -397,7 +401,7 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str) -> di
     if thread_id:
         from .thread_model_selection import thread_model_profile_id
 
-        result["selected"] = thread_model_profile_id(agent, thread_id)
+        result["selected"] = thread_model_profile_id(agent, thread_id, **({} if blocking else {"blocking": False}))
     result["selection_available"] = any(row["id"] == result["selected"] and row.get("available", True)
                                         for row in result["profiles"])
     if not result["selection_available"]:
@@ -423,21 +427,29 @@ def _use_initial_default(result: dict, shared: list[dict], initial: str) -> None
 # LLM: provider/model/secret/protocol 仍按原引用整组冻结；可选宿主捕获仅复制本次已读公开选择与决策设置，不另读目录。
 #   捕获记录的是选择引用本身（default 仍记 default）；普通用户的 default 在管理员指定初始模型时解析为该共享引用。
 #   capability 显式声明用途（agentic/embedding/decision），决定档案能力校验，默认 agentic 保持现有消费者行为不变。
-# 函数用途: 以部署默认解析选定档案，片内切换也不继承旧档案的可选覆盖；失效引用明确报错。
+# 函数用途: 从原Agent取部署默认和home后委托唯一解析叶，片内覆盖不会污染默认值。
 def selected_model_config(agent: object, *, profile_id: str | None = None, capability: str = "agentic"):
     from .model_scope import deployment_model_config
 
-    base_config = deployment_model_config(agent)
-    data = read_model_profiles(model_profiles_path(agent.home_paths))
+    return selected_model_config_for_resources(
+        deployment_model_config(agent), agent.home_paths, profile_id=profile_id, capability=capability,
+    )
+
+
+# LLM: 部署默认由调用方显式给出；目录、捕获、共享与凭据仍沿唯一原算法，不接Agent形状、不建后端或写目录。
+# 函数用途: 从真实配置和owner home解析指定用途的模型档案，保持默认选择与读取捕获语义。
+def selected_model_config_for_resources(base_config: object, home_paths: object, *,
+                                        profile_id: str | None = None, capability: str = "agentic"):
+    data = read_model_profiles(model_profiles_path(home_paths))
     selected = data["selected"] if profile_id is None else profile_id
     captured = _SELECTED_MODEL_READ.get()
     if captured is not None and not captured:
         captured.append(SelectedModelRead(selected, deepcopy(data["decision_settings"])))
     if selected == "default":
-        selected = _default_for_owner(agent)
+        selected = _default_for_owner_for_home(home_paths)
         if selected == "default":
             return base_config
-    row = _resolved_profile(agent, data, selected, capability=capability)
+    row = _resolved_profile_for_home(home_paths, data, selected, capability=capability)
     # 模型档案的窗口必填，写进 model_context_window_tokens 即显式容量；档案带温度就发送，没带沿用部署的 temperature（空 = 不发）。
     config = replace(base_config, **row, api_key_env="")
     # 输出上限不在这里夹取（后端工厂按 effective_max_output_tokens 统一处理）；max_tokens 仍按模型档案优先级冻结，
@@ -451,25 +463,37 @@ def selected_model_config(agent: object, *, profile_id: str | None = None, capab
 
 # LLM: 管理员（local/main）的 default 始终是部署配置；普通用户在管理员指定初始模型时得到该共享引用。
 #   撤销共享会同次清除初始模型（回到部署配置）；原模型被删时由共享解析明确报错。共享目录损坏同样报错，不猜。只读。
-# 函数用途: 返回某个用户的"默认模型"实际对应的引用：管理员初始模型，或 default（部署配置）。
+# 函数用途: 从原Agent委托显式home纯叶，保管理员初始模型和部署默认的原判断。
 def _default_for_owner(agent: object) -> str:
+    return _default_for_owner_for_home(agent.home_paths)
+
+
+# LLM: owner默认只读原admin/initial共享引用；不从配置或模型正文重判身份，旧Agent入口委托此唯一纯叶。
+# 函数用途: 为显式home保留管理员部署默认和普通用户初始共享模型的原选择规则。
+def _default_for_owner_for_home(home_paths: object) -> str:
     from ..user_space.approval_mode import is_permission_admin
 
-    if is_permission_admin(agent.home_paths):
+    if is_permission_admin(home_paths):
         return "default"
-    return initial_profile_key(agent.home_paths) or "default"
+    return initial_profile_key(home_paths) or "default"
 
 
 # LLM: 解析本 owner 或已授权共享的指定用途；不存在给出结构化原因，OAuth 路径由可信 home 生成，不接受客户端指定。
-# 函数用途: 将模型编号解析成连接字段，默认只供生成消费者；决策用途必须显式传入。
+# 函数用途: 将原Agent的home交给唯一档案解析叶，保能力校验和OAuth路径。
 def _resolved_profile(agent: object, data: dict, selected: str, *, capability: str = "agentic") -> dict:
+    return _resolved_profile_for_home(agent.home_paths, data, selected, capability=capability)
+
+
+# LLM: 本地和共享引用共用原能力/凭据解析，model_auth_ref仍锚定真实owner目录；不写目录或回退模型。
+# 函数用途: 用明确home解析一个已有档案，保持共享授权与OAuth引用路径。
+def _resolved_profile_for_home(home_paths: object, data: dict, selected: str, *, capability: str = "agentic") -> dict:
     if shared_profile_key(selected):
-        return resolve_shared_model(agent.home_paths, selected, capability=capability)
+        return resolve_shared_model(home_paths, selected, capability=capability)
     if selected not in data["profiles"]:
         raise ModelProfileError("任务原模型配置已不存在，不能静默换成其它模型。", reason="profile_not_found")
     row = resolved_model(data, selected, capability=capability)
     if row.get("model_auth_ref"):
-        row["model_auth_ref"]["path"] = str(model_profiles_path(agent.home_paths))
+        row["model_auth_ref"]["path"] = str(model_profiles_path(home_paths))
     return row
 
 

@@ -100,7 +100,7 @@ def _done_result(text: str):
 def _spy_closeout(monkeypatch):
     calls = {"guidance": [], "audit": []}
     monkeypatch.setattr(request_execution, "_settle_pending_gateway_guidance",
-                        lambda _agent, request_id, failure=None: calls["guidance"].append(request_id))
+                        lambda _agent, request_id, failure=None, *, request_kind="ask": calls["guidance"].append(request_id))
     monkeypatch.setattr(request_execution, "_complete_gateway_request_audit",
                         lambda _agent, context, _path, _response: calls["audit"].append(context["request_id"]))
     return calls

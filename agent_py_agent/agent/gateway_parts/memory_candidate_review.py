@@ -1,8 +1,8 @@
-# LLM: 原control预览回执是唯一nonce记录，正式内容仍只由CandidateService/PromotionService持有；不新增正式库或权限。
+# LLM: 显式服务只运输原候选/晋升/owner，C固定preview端口保双T/fullraw CAS，默认Agent仍原writer/捕获；原control预览回执是唯一nonce记录，正式内容仍只由CandidateService/PromotionService持有；不新增正式库或权限。
 # 模块用途: 绑定候选完整版本和目标CAS，先耐久消费再准确审核提交；候选预览期限独立于规则文件确认，未知永不重放。
 import json
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from hashlib import sha256
 
 from ..common.log_redaction import redact_sensitive_text
@@ -10,6 +10,17 @@ from ..conversation.channels import project_user_reply, redact_host_absolute_pat
 from ..conversation.control_commands import ConversationControlResult
 from ..memory_store.promotion import _promotion_target
 from .memory_candidate_control import memory_control_failure
+
+
+# LLM: 默认仍三个原服务字段；C可附同holder实际domain引用，仅在live精确预览耐久消费后取其唯一Promotion，不保存source/actor/callback或另设缓存。
+# 类用途: 将原候选、晋升服务和规范owner身份显式交给同一审核算法，终态查询不冷构造晋升资源。
+@dataclass(frozen=True, repr=False)
+class MemoryCandidateServices:
+    candidates: object
+    promotion: object
+    owner_id: str
+    owner_resources: object = None
+
 
 # 秒；真人预览的确认窗口，重放原请求不会延期。
 _MEMORY_CANDIDATE_PREVIEW_SECONDS = 600
@@ -44,8 +55,8 @@ def candidate_display(candidate):
 
 # LLM: 列表仅投影编号和结构化状态，不展示正文或把候选误报正式记忆；原memory搜索仍保持不变。
 # 函数用途: 分页查看本人唯一候选库，并给出可复制的精确预览命令。
-def _list_candidates(host, command):
-    rows = host.memory_candidates.list(limit=0)
+def _list_candidates(services, command):
+    rows = services.candidates.list(limit=0)
     offset = int(command.target_id or 0)
     items = [{'candidate_id': row.candidate_id, 'status': row.status, 'candidate_type': row.candidate_type,
               'promotion_target': _promotion_target(row)} for row in rows[offset:offset + 20]]
@@ -60,10 +71,10 @@ def _list_candidates(host, command):
 
 # LLM: nonce沿原control操作ID，只引用唯一预览回执；同请求重试由原once返回，不能延长预览有效期。
 # 函数用途: 冻结用户实际看到的完整候选版本、内容SHA和目标CAS，不改变候选或正式库。
-def _preview(host, paths, command, scope, thread_id):
+def _preview(services, paths, command, scope, thread_id):
     from .control_operation_service import gateway_control_operation_identity
 
-    candidate = host.memory_candidates.get(command.target_id)
+    candidate = services.candidates.get(command.target_id)
     value, error = candidate_display(candidate)
     if error:
         message = ('该目标必须使用 /agents 显式预览确认。' if error == 'MEMORY_CONTROL_USE_AGENTS'
@@ -76,7 +87,7 @@ def _preview(host, paths, command, scope, thread_id):
     if command.operation == 'preview':
         nonce = gateway_control_operation_identity(scope, '/memory ' + command.value)[0]
         now = time.time()
-        details.update(schema=_SCHEMA, state='preview', nonce=nonce, owner=host.home_paths.owner_id,
+        details.update(schema=_SCHEMA, state='preview', nonce=nonce, owner=services.owner_id,
             actor=scope.user_id, channel=scope.channel, conversation_id=scope.conversation_id,
             thread_id=thread_id, issued_at=now, expires_at=now + _MEMORY_CANDIDATE_PREVIEW_SECONDS)
         for action in ('confirm', 'reject', 'cancel', 'receipt'):
@@ -101,20 +112,26 @@ def _save_receipt(paths, receipt, details, *, error=''):
     from .control_operation_service import gateway_control_operation_path
     from .io import write_json_file_atomic
 
-    state = details['state']
-    message = {'consumed_unknown': '操作结果未确认，禁止重放；请查询原候选和正式记忆。',
-               'completed': '已按预览确认正式保存。', 'rejected': '已拒绝该候选，未提交正式内容。',
-               'cancelled': '已取消本次预览，候选保持原状态。',
-               'not_committed': '正式内容未提交，请核对原因后重新预览。'}[state]
-    result = _result(state != 'consumed_unknown' and not error, message, details, error)
+    result = _preview_receipt_result(details, error=error)
     updated = replace(receipt, result=result.to_dict(), updated_at=time.time())
     write_json_file_atomic(gateway_control_operation_path(paths, receipt.operation_id), updated.to_dict())
     return result
 
 
+# LLM: 纯投影原业务状态/文案，不改transport或写文件；默认旧writer与C固定transaction共用，不能由文案推导授权。
+# 函数用途: 为同一预览取消、消费和实际晋升结果生成原控制回执。
+def _preview_receipt_result(details, *, error=''):
+    state = details['state']
+    message = {'consumed_unknown': '操作结果未确认，禁止重放；请查询原候选和正式记忆。',
+               'completed': '已按预览确认正式保存。', 'rejected': '已拒绝该候选，未提交正式内容。',
+               'cancelled': '已取消本次预览，候选保持原状态。',
+               'not_committed': '正式内容未提交，请核对原因后重新预览。'}[state]
+    return _result(state != 'consumed_unknown' and not error, message, details, error)
+
+
 # LLM: 原receipt的身份必须与当前实际owner/actor/channel/conversation/thread全部一致；记录损坏不恢复默认值。
 # 函数用途: 拒绝跨用户、跨群、跨owner及非预览控制编号，未知记录不被当作待确认。
-def _bound_preview(receipt, host, scope, thread_id):
+def _bound_preview(receipt, services, scope, thread_id):
     if receipt is None or receipt.state != 'completed' or receipt.command_kind != 'memory':
         raise ValueError('preview unavailable')
     from ..conversation.control_commands import parse_conversation_control
@@ -126,7 +143,7 @@ def _bound_preview(receipt, host, scope, thread_id):
             or (receipt.user_id, receipt.channel, receipt.conversation_id)
             != (scope.user_id, scope.channel, scope.conversation_id)):
         raise ValueError('preview origin mismatch')
-    expected = {'schema': _SCHEMA, 'owner': host.home_paths.owner_id, 'actor': scope.user_id,
+    expected = {'schema': _SCHEMA, 'owner': services.owner_id, 'actor': scope.user_id,
                 'channel': scope.channel, 'conversation_id': scope.conversation_id, 'thread_id': thread_id,
                 'nonce': receipt.operation_id}
     if any(details.get(key) != value for key, value in expected.items()):
@@ -137,6 +154,13 @@ def _bound_preview(receipt, host, scope, thread_id):
 # LLM: 授权记录复用原control schema和路径，仅读取方式复用公共严格no-follow；有界实际读且坏文件不成为预览。
 # 函数用途: 安全取回唯一原预览回执，不跟随链接、不接受同名路径替身。
 def _read_preview(paths, nonce):
+    receipt, _raw = _read_preview_raw(paths, nonce)
+    return receipt
+
+
+# LLM: 同一128KiB/no-follow/原codec读取叶；C仅额外保实际完整raw做CAS，缺失仍是None而非空授权。
+# 函数用途: 一次取回原预览及其真实字节，不新建锁或第二记录。
+def _read_preview_raw(paths, nonce):
     from ..common.nofollow_fs import read_bytes_beneath
     from .control_operation_service import (
         GatewayControlOperationReceipt,
@@ -147,16 +171,18 @@ def _read_preview(paths, nonce):
     raw = read_bytes_beneath(paths.root, path.relative_to(paths.root).parts,
                              max_bytes=128 * 1024, require_dir_fd=True)
     if raw is None:
-        return None
+        return None, raw
     receipt = GatewayControlOperationReceipt.from_dict(json.loads(raw))
     if receipt.operation_id != nonce:
         raise ValueError('receipt identity mismatch')
-    return receipt
+    return receipt, raw
 
 
 # LLM: 当前确认的控制锁之外只尝试原preview锁，永不相互等待；消费先耐久，崩溃或异常后只允许读原回执。
 # 函数用途: 对准确预览进行确认、拒绝或取消；所有nonce重放保持原终态。
-def _resolve_preview(host, paths, command, scope, thread_id):
+def _resolve_preview(services, paths, command, scope, thread_id, *, preview_transaction=None):
+    if preview_transaction is not None:
+        return _resolve_preview_transaction(services, paths, command, scope, thread_id, preview_transaction)
     from .control_operation_service import (
         gateway_control_operation_identity,
         try_gateway_control_operation_transition,
@@ -171,7 +197,7 @@ def _resolve_preview(host, paths, command, scope, thread_id):
             return memory_control_failure('MEMORY_PREVIEW_BUSY')
         receipt = _read_preview(paths, nonce)
         try:
-            details = dict(_bound_preview(receipt, host, scope, thread_id))
+            details = dict(_bound_preview(receipt, services, scope, thread_id))
         except ValueError:
             return memory_control_failure('MEMORY_PREVIEW_BINDING_MISMATCH')
         if details['state'] != 'preview' or command.operation == 'receipt':
@@ -180,45 +206,104 @@ def _resolve_preview(host, paths, command, scope, thread_id):
             return memory_control_failure('MEMORY_PREVIEW_EXPIRED')
         if command.operation == 'cancel':
             return _save_receipt(paths, receipt, details | {'state': 'cancelled'})
-        candidate = host.memory_candidates.get(details['candidate_id'])
-        if candidate_version(candidate) != details['version']:
-            return memory_control_failure('MEMORY_CANDIDATE_VERSION_CHANGED')
-        value, error = candidate_display(candidate)
-        if (error or value != details.get('value')
-                or sha256(candidate.content.encode('utf-8')).hexdigest() != details.get('content_sha256')):
-            return memory_control_failure('MEMORY_PREVIEW_BINDING_MISMATCH')
+        candidate, error = _candidate_for_preview(services, details)
+        if error:
+            return memory_control_failure(error)
         details.update(state='consumed_unknown', consumed_request_id=str(scope.metadata['message_id']))
         _save_receipt(paths, receipt, details, error='MEMORY_CONTROL_RESULT_UNKNOWN')
-        return _apply_review(host, paths, receipt, details, candidate, command.operation)
+        return _apply_review(services, paths, receipt, details, candidate, command.operation)
 
 
-# LLM: review与promote复用原唯一候选及目标锁/CAS；精确快照传入两步，模型或来源更新不能替换用户所见内容。
+# LLM: 原完整candidate版本/value/content SHA判据唯一；只读候选，不把同状态或同正文替代全字段快照。
+# 函数用途: 为默认与C预览确认取回用户确实见过的候选。
+def _candidate_for_preview(services, details):
+    candidate = services.candidates.get(details['candidate_id'])
+    if candidate_version(candidate) != details['version']:
+        return None, 'MEMORY_CANDIDATE_VERSION_CHANGED'
+    value, error = candidate_display(candidate)
+    if (error or value != details.get('value')
+            or sha256(candidate.content.encode('utf-8')).hexdigest() != details.get('content_sha256')):
+        return None, 'MEMORY_PREVIEW_BINDING_MISMATCH'
+    return candidate, ''
+
+
+# LLM: C的preview T已由固定transaction持有；不能回调旧resolver再锁同nonce，消费成功才进原审核晋升。
+# 函数用途: 在原固定端口中投影终态、取消或耐久消费精确预览。
+def _resolve_preview_transaction(services, paths, command, scope, thread_id, transaction):
+    transaction.require_binding(services, paths, command, scope, thread_id)
+    details, receipt = transaction.details, transaction.receipt
+    if details['state'] != 'preview' or command.operation == 'receipt':
+        return _result(receipt.result['ok'], receipt.result['message'], details, receipt.result.get('error_code', ''))
+    if not details['issued_at'] <= time.time() < details['expires_at']:
+        return memory_control_failure('MEMORY_PREVIEW_EXPIRED')
+    if command.operation == 'cancel':
+        return transaction.cancel()
+    candidate, error = _candidate_for_preview(services, details)
+    if error:
+        return memory_control_failure(error)
+    transaction.consume(candidate)
+    return _apply_review(services, paths, transaction.receipt, transaction.details, candidate,
+                         command.operation, preview_transaction=transaction)
+
+
+# LLM: C实际native先同对象穿透，默认ordinary捕获保持；review与promote复用原唯一候选及目标锁/CAS；精确快照传入两步，模型或来源更新不能替换用户所见内容。
 # 函数用途: 按当前人工动作审核并提交，失败保留已消费事实而不自动再执行。
-def _apply_review(host, paths, receipt, details, candidate, action):
+def _apply_review(services, paths, receipt, details, candidate, action, *, preview_transaction=None):
     try:
+        if services.owner_resources is not None:
+            services = _services_for_review(services)
         if candidate.status == 'observed':
-            candidate = host.memory_candidates.transition(candidate, 'pending_review', reviewer=details['actor'])
-        approved = host.memory_promotion.review(candidate, approved=action == 'confirm',
+            candidate = services.candidates.transition(candidate, 'pending_review', reviewer=details['actor'])
+        approved = services.promotion.review(candidate, approved=action == 'confirm',
             reviewer=details['actor'], note='当前用户已核验精确预览：' + details['nonce'])
         if action == 'reject':
+            if preview_transaction is not None:
+                return preview_transaction.finish(approved)
             return _save_receipt(paths, receipt, details | {'state': 'rejected'})
-        result = host.memory_promotion.promote(approved.candidate_id, automatic=False, confirmed=True,
+        result = services.promotion.promote(approved.candidate_id, automatic=False, confirmed=True,
             reviewer=details['actor'], expected_candidate=approved)
         finished = details | {'state': 'completed' if result.promoted else 'not_committed',
             'promotion': {key: getattr(result, key) for key in
                 ('candidate_id', 'promoted', 'status', 'reason_code', 'formal_memory_changed')}}
+        if preview_transaction is not None:
+            return preview_transaction.finish(approved, result)
         return _save_receipt(paths, receipt, finished, error='' if result.promoted else result.reason_code)
-    except Exception:
+    except Exception as error:
+        if preview_transaction is not None:
+            from .coordinator_owner_management import MANAGEMENT_SOURCE_ERRORS
+            if isinstance(error, MANAGEMENT_SOURCE_ERRORS):
+                raise
         # 任一步可能已提交；保留原耐久unknown，不在错误出口重新读写候选或暴露异常正文。
         return _result(False, '操作结果未确认，禁止重放；请查询原候选和正式记忆。',
                        details, 'MEMORY_CONTROL_RESULT_UNKNOWN')
 
 
+# LLM: C只从同holder实际domain取唯一Promotion，不收factory/callback或缓存第二份；默认Agent已有service不走此叶，source/policy/封印仍由原producer守门。
+# 函数用途: 在完整预览已耐久消费后才惰性装配真实晋升服务，回执投影/取消/过期/坏版本不触发此构造。
+def _services_for_review(services):
+    if services.promotion is not None:
+        return services
+    from .coordinator_client_memory import _OwnerMemoryDomain, ensure_owner_memory_promotion
+
+    resources = services.owner_resources
+    if (type(resources) is not _OwnerMemoryDomain or resources.authorities.candidates is not services.candidates
+            or resources.home.owner_id != services.owner_id or resources.promotion is not services.promotion):
+        raise ValueError('original memory review resources changed')
+    return MemoryCandidateServices(services.candidates, ensure_owner_memory_promotion(resources), services.owner_id)
+
+
 # LLM: 仅认证直接控制组合根调用；所有读写保持同owner，错误不能把候选改成成功或回退到模型。
 # 函数用途: 分派列表、完整预览和单次人工确认。
 def run_memory_candidate_control(host, paths, command, scope, thread_id):
+    services = MemoryCandidateServices(host.memory_candidates, host.memory_promotion, host.home_paths.owner_id)
+    return run_memory_candidate_control_from_services(services, paths, command, scope, thread_id)
+
+
+# LLM: 只接真实三引用束；原7动作、分页/显示/TTL/默认writer不变，C只能传本栈固定transaction，不接受writer callback。
+# 函数用途: 让原Agent与C同holder资源执行完全相同的候选审核算法。
+def run_memory_candidate_control_from_services(services, paths, command, scope, thread_id, *, preview_transaction=None):
     if command.operation == 'list':
-        return _list_candidates(host, command)
+        return _list_candidates(services, command)
     if command.operation in {'show', 'preview'}:
-        return _preview(host, paths, command, scope, thread_id)
-    return _resolve_preview(host, paths, command, scope, thread_id)
+        return _preview(services, paths, command, scope, thread_id)
+    return _resolve_preview(services, paths, command, scope, thread_id, preview_transaction=preview_transaction)

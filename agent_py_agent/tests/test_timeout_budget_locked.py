@@ -76,7 +76,9 @@ _PROD_TIMEOUT = dict(
 )
 
 
-def _agent(*, protocol: str = "native", backend: object | None = None) -> SimpleNamespace:
+# LLM: 每个预算测试明确传本pytest tmp_path，最小审计与锁真实落同一owner；save=False、工具计数与全部预算断言不变。
+# 函数用途: 构造只用临时持久化根的预算测试Agent，生命周期覆盖原同步audit写入。
+def _agent(*, root: Path, protocol: str = "native", backend: object | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         backend=backend or SimpleNamespace(name="anthropic_compatible", max_tokens=8192),
         config=SimpleNamespace(
@@ -87,7 +89,7 @@ def _agent(*, protocol: str = "native", backend: object | None = None) -> Simple
             tool_output_preview_chars=160,
             **_PROD_TIMEOUT,
         ),
-        root=Path("."),
+        root=root,
         tools=SimpleNamespace(),
     )
 
@@ -148,9 +150,9 @@ PROMPT = "请继续处理项目并产出最终报告。" * 30
 
 # ---------------------------------------------------------------- 1. 口径恒等/低估
 
-def test_text_protocol_ledger_matches_unified() -> None:
+def test_text_protocol_ledger_matches_unified(tmp_path: Path) -> None:
     """text 协议: 记账口径包含真实出站的 system instruction 与用户 prompt。"""
-    agent = _agent(protocol="text")
+    agent = _agent(root=tmp_path, protocol="text")
     params = _params(protocol="text", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
     expected = estimate_tokens(
@@ -165,7 +167,7 @@ def test_text_protocol_ledger_matches_unified() -> None:
 @pytest.mark.xfail(
     reason="存量债: 记账与统一口径 59 token 漂移(疑似 model_visible_context_tokens 跨调用非确定成分); 恒等锚点待产品侧核对"
 )
-def test_native_protocol_unified_counts_ir() -> None:
+def test_native_protocol_unified_counts_ir(tmp_path: Path) -> None:
     """native 协议: 记账口径 == 统一口径(门槛1 后 IR messages 计入记账)。
 
     修复前(A 阶段锁定事实): 记账仅 estimate_tokens(prompt), 大 IR 下
@@ -173,7 +175,7 @@ def test_native_protocol_unified_counts_ir() -> None:
     门槛1 已把记账切到 model_visible_context_tokens, 本测试由「低估锚点」
     升级为「记账==统一口径」恒等锚点(门槛1 验收)。
     """
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=20, body_chars=2000)
     unified = model_visible_context_tokens(agent, params, PROMPT)
@@ -189,9 +191,9 @@ def test_native_protocol_unified_counts_ir() -> None:
     assert estimate_tokens(PROMPT) * 5 <= unified
 
 
-def test_native_small_ir_uses_full_visible_context_for_first_event_budget() -> None:
+def test_native_small_ir_uses_full_visible_context_for_first_event_budget(tmp_path: Path) -> None:
     """即使总请求预算仍由 base 托底，首包估算也必须随真实 IR 变大。"""
-    agent = _agent(protocol="native")
+    agent = _agent(root=tmp_path, protocol="native")
     params = _params(protocol="native", prompt=PROMPT)
     _record_ir_rounds(agent, params, rounds=8, body_chars=400)
     options = first_token_timeout_options(agent)
@@ -210,7 +212,7 @@ def test_native_small_ir_uses_full_visible_context_for_first_event_budget() -> N
     assert unified_budget >= ledger_budget
 
 
-def test_effective_timeout_is_max_of_base_and_dynamic() -> None:
+def test_effective_timeout_is_max_of_base_and_dynamic(tmp_path: Path) -> None:
     """effective = max(base=240, dynamic)。output_generation 使 dynamic>base 时用 dynamic。"""
     options = FirstTokenTimeoutOptions(
         safety_margin=2.0, min_timeout_seconds=30.0, max_timeout_seconds=600.0
@@ -220,30 +222,31 @@ def test_effective_timeout_is_max_of_base_and_dynamic() -> None:
     )
     # 分支 1: 小 max_tokens(512) -> output_gen=17s -> dynamic=47 < base 240 -> effective=240
     small = _agent(
+        root=tmp_path,
         backend=SimpleNamespace(name="plain", max_tokens=512, stream_enabled=False, stream_timeout_is_idle=False)
     )
     assert effective_model_request_timeout_seconds(small, estimate.timeout_seconds) == pytest.approx(240.0)
     # 分支 2: 慢模型按 20 token/s 估算，8192 输出约 410s，dynamic≈440s。
-    prod = _agent(protocol="text")
+    prod = _agent(root=tmp_path, protocol="text")
     assert effective_model_request_timeout_seconds(prod, estimate.timeout_seconds) == pytest.approx(439.6, abs=0.2)
 
 
 # ---------------------------------------------------------------- 2. stream 墙钟守卫不参与
 
-def test_stream_backend_defers_wall_guard() -> None:
+def test_stream_backend_defers_wall_guard(tmp_path: Path) -> None:
     """stream + stream_timeout_is_idle -> transport_owns_timeout=True(墙钟守卫不参与)。"""
     stream_backend = SimpleNamespace(
         name="gateway", max_tokens=8192, stream_enabled=True, stream_timeout_is_idle=True
     )
-    assert _transport_owns_stream_idle_timeout(_agent(backend=stream_backend)) is True
+    assert _transport_owns_stream_idle_timeout(_agent(root=tmp_path, backend=stream_backend)) is True
 
 
-def test_non_stream_backend_keeps_wall_guard() -> None:
+def test_non_stream_backend_keeps_wall_guard(tmp_path: Path) -> None:
     """非 stream 后端 -> transport_owns_timeout=False(墙钟守卫仍参与)。"""
     plain_backend = SimpleNamespace(
         name="plain", max_tokens=8192, stream_enabled=False, stream_timeout_is_idle=False
     )
-    assert _transport_owns_stream_idle_timeout(_agent(backend=plain_backend)) is False
+    assert _transport_owns_stream_idle_timeout(_agent(root=tmp_path, backend=plain_backend)) is False
 
 
 # ---------------------------------------------------------------- 3. SSE idle 掐断行为

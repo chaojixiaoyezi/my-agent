@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from ...conversation.host_message_context import HostMessageContext
 
 
-# LLM: 消息/回合/运行/尝试身份独立；typed媒体/引用仅本次认证入站专有，持久源归原TaskLink/SessionTask，carry不授权。
+# LLM: 消息/回合/运行/尝试身份独立；typed媒体/引用及opaque输入source仅本次宿主专有，source不持久化/不继承子任务，原TaskLink/SessionTask仍权威。
 # 类用途: 收拢一次代理调用与宿主专有身份；模型可写属性不作认证来源，不执行模型或写文件。
 @dataclass
 class RunParams:
@@ -66,6 +66,8 @@ class RunParams:
     # Gateway injects one exact-turn transition callback. Runtime invokes it at
     # reservation and provider-submission edges; generic/local runs leave it empty.
     active_turn_transition_callback: object = None
+    # 原Gateway宿主仅在实际invocation绑定；不序列化、不从task_attributes/模型恢复，不授新权限。
+    pending_turn_input_source: object = field(default=None, repr=False, compare=False)
     # Gateway/direct 宿主回调发布本消息实际选择的 task/run/attempt；不是 prompt 或持久任务属性，
     # 沿 dataclasses.replace 续轮保留，发布失败必须在模型/工具开始前收口；callable 接口仍确认原 Store 的任务晋升。
     conversation_task_binding_callback: object = None
@@ -121,7 +123,7 @@ class RuntimeContextRequest:
     task_attributes: dict | None = None
 
 
-# LLM: 已解析参数保留宿主回调/拒绝与逻辑turn；临时IR carry和Compact视图不授权，不替代本次工具/权限快照或完整archive。
+# LLM: 已解析参数保留原opaque source/宿主回调/拒绝与逻辑turn；source不授权/不序列化，临时carry不替代原工具/权限快照或archive。
 # 类用途: 将准备后的会话、展示、原生接续材料交给唯一工具循环；异常与展示仍分别沿原宿主出口回传。
 @dataclass
 class RuntimeLoopParams:
@@ -153,6 +155,8 @@ class RuntimeLoopParams:
     turn_trigger: object | None = None
     runtime_rejected_actions: list[dict[str, str]] = field(default_factory=list)
     active_turn_transition_callback: object = None
+    # 原Gateway宿主仅在实际invocation绑定；不序列化、不从task_attributes/模型恢复，不授新权限。
+    pending_turn_input_source: object = field(default=None, repr=False, compare=False)
     tool_runtime_snapshot: object = None
     tool_protocol_snapshot: object = None
     conversation_history_seed: object = None

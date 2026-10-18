@@ -1,3 +1,7 @@
+## 2026-10-17 内部C取消与state publisher锁序（204候选）
+
+内部正count仍明确unsupported并取消请求、继续服务，不新增滚动重启。固定`_cancel_internal_restart`从同原actual control/controller/lease捕获来源，统一controller→lease门序；首次取消写之前核原canonical state路径，再保原cancel_request→state read→publisher顺序，publisher可重入同两把RLock。不得lease后再争controller，也不得失源后先取消再失败。Count0排空/接班原AST与所有错误码不变；closing/隔离并非原元数据禁写条件，撤权仍由原lease门拒绝。
+
 # Gateway 安全重启与代理自助重启
 
 状态：第一期已实现（2026-09-26）；终端 `gateway restart`（第二批）与 TUI 续跑边界、确认框作废（第三批）已实现，

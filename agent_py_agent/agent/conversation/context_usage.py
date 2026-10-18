@@ -1,10 +1,12 @@
-# LLM: 这里只持久/投影模型 preflight 的数值；采样绑定沿内存载体传递，不从迟到 fresh-load 重签版本；不参与预算、计费、完成或恢复决策。
+# LLM: 这里只持久/投影模型 preflight 数值；原采样绑定不重签，普通遥测故障降级，原 typed 执行未知须同对象上抛给请求收口，不代判完成或恢复。
 # 模块用途: 保存空闲与重连的上下文数字，压缩或模型切换后的迟到快照不得覆盖新状态。
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+
+from ..common.request_execution_ports import raise_if_transport_uncertain
 
 _LOGGER = logging.getLogger(__name__)
 _SCHEMA = "model_visible_context_usage.v1"
@@ -35,7 +37,7 @@ def _context_usage_thread_id(params: object) -> str:
 
 
 # LLM: 只能在实际估算开始前调用；已绑定模型仍用原选择版本，不给旧工作片绑定新的线程 revision。
-#   只读原 store，不创建线程；缺失、错代或坏记录仅弃持久遥测，不中断模型，也不影响数值估算。
+#   只读原 store，不创建线程；缺失、错代或普通读取故障仅弃遥测，原执行权未知必须交原请求处理，不能降格或重签。
 # 函数用途: 在采样点冻结准确 store/线程及两种代次，供迟到保存时沿原 CAS 检查。
 def capture_context_usage_binding(agent: object, params: object) -> ContextUsageBinding | None:
     from ..settings.model_scope import current_model_selection
@@ -58,7 +60,8 @@ def capture_context_usage_binding(agent: object, params: object) -> ContextUsage
                 and selection.selection_source == "thread" and selection.revision != revision):
             return None
         return ContextUsageBinding(store, thread_id, generation, revision)
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise_if_transport_uncertain(error)
         _LOGGER.warning("context usage binding could not be captured", exc_info=False)
         return None
 
@@ -125,7 +128,7 @@ def record_model_context_usage(
 
 
 # LLM: preflight/Compact共用已解析的owner线程和两种捕获代次；迟到遥测不得越过压缩或模型选择CAS，不改历史/费用。
-# model_usage领域通过原线程锁更新；选择revision不进公开数值协议，读取失败只拒绝遥测，不猜代次或阻断进度。
+# model_usage领域通过原线程锁更新；普通读写失败仅弃遥测，typed执行未知保持原对象抛出，不猜代次、释放责任或重放。
 # 函数用途: 主子调用和压缩预检查共用一个数值保存入口；旧代或属性读取失败不写回，仅记录无内部明细告警。
 def save_context_usage_snapshot(store: object, thread: object, usage: object) -> bool:
     updater = getattr(getattr(store, "model_usage", None), "update_context_usage", None)
@@ -138,6 +141,7 @@ def save_context_usage_snapshot(store: object, thread: object, usage: object) ->
         updated = updater(thread.thread_id, {**public, "model_selection_revision": revision}, expected_compact_generation=generation)
         return (updated.compact_generation == generation and updated.model_selection_revision == revision
                 and context_usage_from_thread(updated) == public)
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+        raise_if_transport_uncertain(error)
         _LOGGER.warning("context usage telemetry could not be saved", exc_info=False)
         return False

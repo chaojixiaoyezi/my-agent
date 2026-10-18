@@ -1,6 +1,10 @@
+# LLM: 原审批债务及其真实outer异常链只同对象运输和严格核收；finish在原native活except内执行，普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 本模块负责 Gateway 请求入队、claim 和 worker 调度；文件 payload 的会话身份与客户端能力必须保持结构化且可审计。
+# 原runner Thread只凭native异常/Context原锚点观察同claim未知，无Call id；失活后只保留既存诊断，不新增终态或释放。
 #   owner 解析另认已用管理员密码绑定的 IM 私聊，判据只有结构化渠道身份与绑定表的精确匹配。
 #   SQLite复用仅在已解析owner的请求范围内启用，结束时回收，不改变独立事务和终态提交。
+#   正count派发只消费原宿主owner和原P3准入/claim来源，后台pending仅重排同claim且保P3；Count0原公平链保持。
+#   Call/心跳停止未知只在活原claim记录既有unknown；退出后保留原P3，不从marker/晚到异常签发新来源或终态。
 # 模块用途: 接收 Gateway 请求、写入队列并驱动后台 worker 可靠处理。
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ from .recovery import (
     _gateway_request_attempts,
     gateway_terminal_projection_folder,
 )
+from .request_binding import gateway_turn_transition
 from .request_client import GatewayAskParams, submit_gateway_ask
 from .request_errors import (
     gateway_owner_scope_error_response,
@@ -62,6 +67,7 @@ from .request_errors import (
     gateway_unhandled_worker_error_response,
 )
 from .request_execution import _handle_gateway_request
+from .request_owner_binding import REQUEST_OWNER_KEY
 from .response_renderer import read_gateway_terminal_response_file
 
 if TYPE_CHECKING:
@@ -237,19 +243,26 @@ def request_user_key(payload: dict) -> str:
     return "anonymous"
 
 
+# LLM: 顺序键与准入会话投影共用原三元组，保持既有分隔符和strip/回退字节，不读线程或物化owner。
+# 函数用途: 返回原会话顺序键，无外部会话时保持空键。
 def request_conversation_key(payload: dict) -> str:
-    """同一用户在同一渠道会话中的顺序键；没有结构化会话时不额外串行。"""
+    return "\x1f".join(request_conversation_parts(payload))
+
+
+# LLM: 仅从当前结构化会话提取原顺序键边界；准入不得拆已拼接的字符串，也不得加载远端线程补身份。
+# 函数用途: 让顺序调度与新准入摘要复用同一套用户、渠道和外部会话字段。
+def request_conversation_parts(payload: dict) -> tuple[str, ...]:
     conversation = (payload or {}).get("conversation")
     if not isinstance(conversation, dict):
-        return ""
+        return ()
     channel_conversation_id = str(conversation.get("channel_conversation_id") or "").strip()
     if not channel_conversation_id:
-        return ""
+        return ()
     channel = str(conversation.get("channel") or "gateway").strip() or "gateway"
     canonical_user_id = str(conversation.get("canonical_user_id") or "").strip()
     channel_user_id = str(conversation.get("channel_user_id") or "").strip()
     user_key = canonical_user_id or channel_user_id or request_user_key(payload)
-    return "\x1f".join((user_key, channel, channel_conversation_id))
+    return user_key, channel, channel_conversation_id
 
 
 # LLM: 合法排队的结构化信号。请求因为准入限流(或恢复退避)留在 inbox 时,worker 每次扫描都
@@ -298,16 +311,18 @@ def dispatch_pending_requests(
     submit: Callable[[GatewayClaim, str, str], None],
     scan_gate: GatewayInboxScanGate | None = None,
     hold_reason: str = "",
+    admission_gate: object = None,
 ) -> int:
     """两层限流的派发扫描:按 (recovery, created_at) 顺序认领在限内的请求并交给 submit;
     超限的留在 pending(排队),被限流数入探针。返回本轮认领数。
 
     公平性:单用户小坑满后扫描继续走到后面用户的请求——先到先服务但不许独吞;
-    坑释放后下一轮扫描按同一顺序补位,任何用户至多再等一个空位周期,不会饿死。"""
+    坑释放后下一轮扫描按同一顺序补位,任何用户至多再等一个空位周期,不会饿死。
+    内部多进程模式由 admission_gate 接管准入(持久预留+盖章);默认 None 时进程内两层限流一字不变。"""
     ensure_gateway_folders(paths)
     if hold_reason:
         for request in _iter_pending_requests(paths):
-            _record_admission_wait(request, reason=hold_reason)
+            _record_admission_wait(request, reason=hold_reason, paths=paths if admission_gate is not None else None, admission_gate=admission_gate)
         return 0
     if scan_gate is not None and not scan_gate.should_scan(paths.inbox):
         return 0
@@ -318,9 +333,9 @@ def dispatch_pending_requests(
         if _request_deferred_until_later(request):
             deferred_present = True
             # 恢复退避也是合法排队:同样发结构化等待信号(原因码区分),客户端不按超时误判。
-            _record_admission_wait(request, reason="retry_backoff")
+            _record_admission_wait(request, reason="retry_backoff", paths=paths if admission_gate is not None else None, admission_gate=admission_gate)
             continue
-        outcome = _admit_and_submit(paths, request, (limits, submit))
+        outcome = _admit_and_submit(paths, request, (limits, submit, admission_gate))
         claimed += 1 if outcome == "claimed" else 0
         blocked += 1 if outcome == "blocked" else 0
     if scan_gate is not None:
@@ -332,12 +347,18 @@ def dispatch_pending_requests(
     return claimed
 
 
+
+# LLM: 只按组合根是否提供原持久gate分流；Count0保持原计数/claim/失败退槽，C/W不使用内存slot或submit失败清P3。
+# 函数用途: 让原派发算法消费对应的唯一准入门，不新增排队状态。
 def _admit_and_submit(
     paths: GatewayPaths,
     request: _PendingGatewayRequest,
-    lane: tuple[AdmissionLimits, Callable[[GatewayClaim, str, str], None]],
+    lane: tuple[AdmissionLimits, Callable[[GatewayClaim, str, str], None], object],
 ) -> str:
-    limits, submit = lane
+    gate = lane[2] if len(lane) > 2 else None
+    if gate is not None:
+        return _admit_and_submit_durable(paths, request, lane)
+    limits, submit = lane[0], lane[1]
     user_key = request_user_key(request.payload)
     conversation_key = request_conversation_key(request.payload)
     blocked_reason = admission.try_acquire_report(
@@ -363,37 +384,20 @@ def _admit_and_submit(
     return "claimed"
 
 
-# LLM: 只改"等待事实"字段,绝不碰 status/lease/模型进展字段;写入前先做节流判断,读-改-写
-# 走既有原子更新原语(与其它请求文件写者同一把文件锁语义),因此并发扫描不会互相覆盖。
+
+# LLM: 只提交等待原因/码/时间候选，原T→JSON内重读并节流；C显式携同gate走原生命周期末门，不触碰status/lease/模型进展。
 # 只按节流窗口决定是否再写一次,不按累计等待时长停止:停止续期等价于"前台报失败、后台照常执行",
 # 那是隐式语义。权威收口由取消/终态/真实失活负责。
 # 函数用途: 在被准入限流的排队请求上记录一次结构化"合法等待"信号(只做节流,不做累计上限)。
-def _record_admission_wait(request: _PendingGatewayRequest, *, reason: str) -> None:
-    now = time.time()
-    payload = request.payload or {}
-    waited_since = _admission_wait_since(payload, request.path)
-    try:
-        last_signal = float(payload.get("admission_wait_at") or 0.0)
-    except (TypeError, ValueError):
-        last_signal = 0.0
-    if last_signal and now - last_signal < _ADMISSION_WAIT_REFRESH_SECONDS:
-        return
-    try:
-        count = max(0, int(payload.get("admission_wait_count") or 0))
-    except (TypeError, ValueError):
-        count = 0
-    fields: dict[str, object] = {
-        "admission_wait_at": now,
+def _record_admission_wait(request: _PendingGatewayRequest, *, reason: str, error_code: str = "", paths: GatewayPaths | None = None, admission_gate=None) -> None:
+    fields = {
+        "admission_wait_at": time.time(),
         "admission_wait_reason": str(reason or ""),
-        "admission_wait_count": count + 1,
-        "admission_wait_since": waited_since or now,
     }
-    if waited_since and not _has_queue_order_timestamp(payload):
-        # 老请求/旁路生产者可能没有任何进队时间戳,此时排序回退用文件 mtime;我们改写文件会把
-        # 它一直往后挤(等于自己制造饥饿)。第一次写等待信号时把"改写前的 mtime"钉成 created_at,
-        # 顺序从此稳定,不再随等待信号漂移。
-        fields["created_at"] = waited_since
-    _write_admission_wait_field(request.path, fields)
+    if paths is not None:
+        fields["admission_wait_error_code"] = str(error_code or "")
+    _write_admission_wait_field(request.path, fields, expected_payload=request.payload, paths=paths, admission_gate=admission_gate)
+
 
 
 # 函数用途: 判断请求是否已经带有进队顺序时间戳(created_at/submitted_at/requeued_at)。
@@ -422,18 +426,41 @@ def _admission_wait_since(payload: dict, request_path: Path) -> float:
         return 0.0
 
 
-# 函数用途: 用原子读-改-写把等待字段写进队列请求文件;失败只放弃本次信号,不影响扫描。
-def _write_admission_wait_field(request_path: Path, fields: dict[str, object]) -> bool:
+# LLM: 内部C显式传冻结paths及原gate，原T→controller→lease在JSON之前；退出C不再写等待。默认0仍只原JSON，已认领/移动/取消/终态不能复活。
+# 函数用途: 锁内复读当前排队记录再写等待，失败仅放弃信号，不产生执行许可。
+def _write_admission_wait_field(request_path: Path, fields: dict[str, object], *, expected_payload: dict | None = None, paths: GatewayPaths | None = None, admission_gate=None) -> bool:
+    identity_keys = ("id", "request_id", "kind", "user_id", REQUEST_OWNER_KEY, "owner_id", "metadata", "route", "execution_attempt_id", "lease", "cancel_requested")
+    # LLM: 原JSON锁内再次核完整归属和claim未动；只增等候投影，不能借旧扫描覆盖新身份或复活取消。
+    # 函数用途: 从当前同一排队记录计算节流后等待事实。
     def apply(current: dict) -> dict:
-        updated = dict(current or {})
-        updated.update(fields)
-        return updated
+        if not current or current.get("cancel_requested") or current.get("execution_attempt_id"):
+            raise ValueError("queue request is unreadable or cancelled")
+        if expected_payload is not None and any(current.get(key) != expected_payload.get(key) for key in identity_keys):
+            raise ValueError("queue request identity or claim changed")
+        signal = {key: fields[key] for key in ("admission_wait_at", "admission_wait_reason", "admission_wait_error_code") if key in fields}
+        return {**current, **_current_admission_wait_fields(current, request_path, signal)}
 
     try:
-        update_json_file_atomic(request_path, apply, require_existing=True)
+        if paths is None:
+            update_json_file_atomic(request_path, apply, require_existing=True)
+            return True
+        if request_path.parent != paths.inbox:
+            return False
+        with gateway_turn_transition(paths, request_path.stem):
+            if any((folder / request_path.name).exists() for folder in (paths.processing, paths.terminal, paths.done, paths.failed)):
+                return False
+            from .multiprocess_admission import _runtime_commit_scope
+
+            if admission_gate is None or admission_gate.paths is not paths:
+                return False
+            with _runtime_commit_scope(admission_gate) as rejection:
+                if rejection is not None:
+                    return False
+                update_json_file_atomic(request_path, apply, require_existing=True)
         return True
     except (OSError, ValueError):
         return False
+
 
 
 # LLM: Synchronous worker callers wait on the immutable canonical terminal record. A response
@@ -556,8 +583,44 @@ class OwnerScopeUnavailableError(RuntimeError):
     error_code = "OWNER_SCOPE_UNAVAILABLE"
 
 
-# LLM: Ordinary Gateway requests resolve owner once from structured ingress facts. Durable
-# operation receipts use the paired exact-owner helper so later config cannot reroute recovery.
+# LLM: 把同一次已读权威队列记录传给拒绝门，避免门内重读或另推队列根。
+# 类用途: 保存一次路由拒绝所需的调用上下文。
+@dataclass(frozen=True)
+class _WorkerRouteCheck:
+    agent: object
+    paths: GatewayPaths
+    path: Path
+    payload: dict
+
+
+
+# LLM: C/W上下文均由原执行组合根提供，默认单进程为空；拒绝后不得解析新owner或降级main。
+# 函数用途: 在创建owner Agent前核验冻结归属，单进程保持原有解析。
+def _frozen_worker_owner(agent, request_payload: dict):
+    from ..user_space.owner_resolver import OwnerIdentity
+    from .multiprocess_mode import current_worker_partition
+    from .multiprocess_route import validate_worker_route
+
+    partition = getattr(agent, "_gateway_worker_partition", None) or current_worker_partition()
+    if partition is None:
+        from .multiprocess_coordinator_execution import (
+            check_coordinator_transition,
+            current_coordinator_execution,
+        )
+        from .multiprocess_dispatch import WorkerDispatchError
+
+        try:
+            return check_coordinator_transition(current_coordinator_execution(), request_payload)
+        except WorkerDispatchError as error:
+            raise OwnerRouteMismatchError(error.reason) from error
+    result = validate_worker_route(request_payload, partition)
+    if not result["ok"]:
+        raise OwnerRouteMismatchError(result["reason"])
+    return OwnerIdentity(*result["owner"])
+
+
+
+# LLM: C/W只能消费原execution和冻结路由，拒绝后不能热解析owner；普通Count0仍使用main唯一hostowner与原owner池。
 # 函数用途: 为普通请求解析并取得当前实际 owner-scoped Agent。
 def _resolve_request_agent(agent, request_payload: dict):
     """按请求 owner 取作用域 agent(多用户飞书 per-用户隔离)。
@@ -566,14 +629,28 @@ def _resolve_request_agent(agent, request_payload: dict):
     owner 作用域的 agent 上,home/记忆/数据/成本/审计天然隔离；远程身份缺失或 owner agent
     建立失败必须 fail-closed，绝不回退到共享 main agent 串户。
     """
-    owner = _resolve_request_owner_identity(agent, request_payload)
+    from .multiprocess_execution import check_worker_transition, current_worker_execution
+
+    execution = current_worker_execution()
+    if execution is not None:
+        check_worker_transition(execution, request_payload)
+        return execution.agent
+    owner = _frozen_worker_owner(agent, request_payload) or _resolve_request_owner_identity(agent, request_payload)
     return _resolve_request_agent_for_owner(agent, owner)
 
 
-# LLM: 首次入口沿认证通道解析，已落盘请求读取准确宿主 owner；不会随管理员身份解绑或配置变化重绑执行 owner。
-# 已绑定管理员的 IM 私聊（admin_channel_identity_for_request）先于逐用户路由解析为 base owner；控制作用域经同一函数，结果一致。
+# LLM: Agent与无业务Agent的C共用下方唯一解析实现；已落盘host owner先于热配置和绑定查询，不能因重放换归属。
 # 函数用途: 按当前可信请求事实解析本次实际使用的唯一 owner 身份，但不创建作用域 Agent。
 def _resolve_request_owner_identity(agent, request_payload: dict):
+    return _resolve_request_owner_from_config(
+        getattr(agent, "config", None), request_payload,
+        getattr(getattr(agent, "home_paths", None), "root", None),
+    )
+
+
+# LLM: 首次认证入口与原C控制面共用当前main规则；冻结owner优先，C可传同次原安全读快照，默认查询不新增读取。
+# 函数用途: 用可信配置和数据根解析owner，不创建业务Agent、用户目录或会话。
+def _resolve_request_owner_from_config(config, request_payload: dict, home_root=None, *, binding_snapshot=None):
     from ..user_space.owner_resolver import owner_identity_from_config
     from .request_owner_binding import frozen_request_owner
 
@@ -581,13 +658,13 @@ def _resolve_request_owner_identity(agent, request_payload: dict):
     if fixed is not None:
         return fixed
 
-    base_owner = owner_identity_from_config(getattr(agent, "config", None))
-    if not bool(getattr(getattr(agent, "config", None), "gateway_per_user_owner_scoping", False)):
+    base_owner = owner_identity_from_config(config)
+    if not bool(getattr(config, "gateway_per_user_owner_scoping", False)):
         return base_owner
-    if admin_channel_identity_for_request(agent, request_payload) is not None:
+    if _admin_channel_identity_from_config(config, home_root, request_payload, binding_snapshot=binding_snapshot) is not None:
         # 已用管理员密码绑定的 IM 私聊按本机主用户运行；精确匹配只在 base owner 为 local/main 时成立。
         return base_owner
-    owner = _owner_from_request(agent, request_payload)
+    owner = _owner_from_request(None, request_payload)
     if owner is None:
         if _is_remote_channel_request(request_payload):
             raise OwnerScopeUnavailableError(
@@ -701,28 +778,47 @@ def private_channel_identity(request_payload: dict) -> tuple[str, str] | None:
     return channel, user_id
 
 
-# LLM: 开关读显式配置，基础 owner 必须正是 local/main；否则“绑定到管理员”没有可信目标，整体停用。
+# LLM: 仅适配Agent的真实配置到同一管理员目标门，不创建Agent或读取绑定文件。
 # 函数用途: 判断本 Gateway 是否允许 IM 私聊通过管理员密码成为本机管理员。
 def admin_channel_identity_enabled(agent) -> bool:
+    return _admin_channel_identity_enabled_for_config(getattr(agent, "config", None))
+
+
+# LLM: 开关读显式配置，基础owner必须正是local/main；C与Agent不能各自推导另一管理员目标。
+# 函数用途: 在不物化Agent时复用原管理员私聊启用条件。
+def _admin_channel_identity_enabled_for_config(config) -> bool:
     from ..user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
 
-    config = getattr(agent, "config", None)
     if not bool(getattr(config, "admin_channel_identity_enabled", False)):
         return False
     return owner_identity_from_config(config) == OwnerIdentity.local_main()
 
 
-# LLM: 授权入口：私聊身份与 home/config 绑定文件做 (channel, user_id) 精确匹配，绑定文件损坏按未绑定处理（fail-closed）。
-#   只读文件，不创建 Agent；owner 解析、控制作用域和 Gateway 审批开关都必须经这里，不能各自另判。
+# LLM: Agent查询与C查询共用唯一安全绑定读；此适配只传真实配置/根，不从请求或模型声明构造宿主。
 # 函数用途: 返回本请求命中的管理员 IM 身份绑定；不是已绑定的管理员私聊时返回 None。
 def admin_channel_identity_for_request(agent, request_payload: dict):
+    return _admin_channel_identity_from_config(
+        getattr(agent, "config", None), getattr(getattr(agent, "home_paths", None), "root", None), request_payload,
+    )
+
+
+# LLM: 只认原私聊字段及当前local/main管理员目标；C快照须是原typed只读载体，默认沿原find读取，不以角色、群或版本补权限。
+# 函数用途: 供C和原Agent同源匹配管理员私聊，不创建业务目录，沿原安全读取次数与权限门。
+def _admin_channel_identity_from_config(config, home_root, request_payload: dict, *, binding_snapshot=None):
     identity = private_channel_identity(request_payload) if isinstance(request_payload, dict) else None
-    if identity is None or not admin_channel_identity_enabled(agent):
+    if identity is None or not _admin_channel_identity_enabled_for_config(config):
         return None
-    home_root = getattr(getattr(agent, "home_paths", None), "root", None)
     if not home_root:
         return None
-    from ..user_space.admin_channel_identity import find_admin_channel_identity
+    from ..user_space.admin_channel_identity import (
+        AdminChannelIdentitySnapshot,
+        find_admin_channel_identity,
+    )
+
+    if binding_snapshot is not None:
+        if type(binding_snapshot) is not AdminChannelIdentitySnapshot:
+            raise ValueError("admin_binding_snapshot_required")
+        return next((item for item in binding_snapshot.identities if (item.channel, item.user_id) == identity), None)
 
     return find_admin_channel_identity(home_root, *identity)
 
@@ -817,8 +913,9 @@ def _process_gateway_request_path(
         gateway_worker_busy(-1)
 
 
-# LLM: 请求从owner解析到结果落账一直租用同一实例；已解析后才按配置进入SQLite scope，退出回收连接且不改变持久任务恢复合同。
-# 函数用途: 处理一个已认领请求，在所有结束路径保留 owner 隔离并释放运行资源。
+# LLM: 原C/W冻结路由在取消/owner物化之前核；实际handler与结果落账复用同一原事务端口，SQLite/owner租用保持main区间，退出不释放P3。
+# LLM: 同词法pending槽涵盖handler后收尾；已有cause保持，finish或读回失败不签接收，原Future继续持同outer债务。
+# 函数用途: 处理准确已认领请求和原终态投影，短写只消费同源执行门，异常保留原claim与清理责任。
 def _process_claimed_gateway_request_path(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -868,8 +965,15 @@ def _process_claimed_gateway_request_path(
             expected_lease_epoch=expected_lease_epoch,
         )
         return True
+    if _reject_worker_route(_WorkerRouteCheck(agent, paths, processing_path, request_payload)):
+        return True
+    from .multiprocess_execution import check_worker_transition, current_worker_execution
+    from .request_transactions import request_transaction_ports_scope
+
+    check_worker_transition(current_worker_execution(), request_payload)
     if bool(request_payload.get("cancel_requested")):
-        with register_interruptible(conversation_request_interrupt_name(request_id)):
+        with (register_interruptible(conversation_request_interrupt_name(request_id)),
+              request_transaction_ports_scope(agent)):
             response = _handle_gateway_request(
                 agent,
                 processing_path,
@@ -906,31 +1010,114 @@ def _process_claimed_gateway_request_path(
         return True
     pool = getattr(agent, "_owner_pool", None)
     lease = pool.pin(request_agent) if pool is not None and request_agent is not agent else nullcontext()
+    from ..conversation.agent_tool_approval import (
+        ApprovalRetirementUnconfirmedError,
+        accept_approval_retirement_terminal,
+        approval_retirement_request_observation,
+    )
+    from .io import gateway_request_fingerprint
+
     with (lease, register_interruptible(conversation_request_interrupt_name(request_id)),
-          sqlite_connection_scope(bool(getattr(agent.config, "sqlite_connection_reuse", False)))):
-        response = _process_claimed_gateway_request(
-            _ClaimedGatewayRequestContext(
-                request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
-                processing_path,
-                request_payload,
-                request_id,
-                str(
-                    (claim.lease_owner if claim is not None else "")
-                    or request_payload.get("lease_owner")
-                    or worker_id
-                ),
-            )
-        )
-        _finish_claimed_gateway_request(
-            paths,
-            processing_path,
-            request_id,
-            response,
-            conversation_store=request_agent.conversation_store,
-            expected_execution_attempt_id=expected_attempt_id,
-            expected_lease_epoch=expected_lease_epoch,
-        )
+          request_transaction_ports_scope(request_agent),
+          sqlite_connection_scope(bool(getattr(agent.config, "sqlite_connection_reuse", False))),
+          approval_retirement_request_observation(request_agent, processing_path, request_payload,
+              gateway_request_fingerprint(request_payload, request_id), receiver=True) as retirement_observation):
+        try:
+            try:
+                response = _process_claimed_gateway_request(
+                    _ClaimedGatewayRequestContext(
+                        request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
+                        processing_path,
+                        request_payload,
+                        request_id,
+                        str(
+                            (claim.lease_owner if claim is not None else "")
+                            or request_payload.get("lease_owner")
+                            or worker_id
+                        ),
+                    )
+                )
+            except Exception as error:
+                _raise_with_pending_approval_retirement(error, retirement_observation)
+            try:
+                if retirement_observation.pending_error is not None:
+                    raise retirement_observation.pending_error
+            except ApprovalRetirementUnconfirmedError:
+                _finish_claimed_gateway_request(
+                    paths,
+                    processing_path,
+                    request_id,
+                    response,
+                    conversation_store=request_agent.conversation_store,
+                    execution_agent=request_agent,
+                    expected_execution_attempt_id=expected_attempt_id,
+                    expected_lease_epoch=expected_lease_epoch,
+                )
+                accept_approval_retirement_terminal(retirement_observation, response, request_agent.conversation_store)
+                # finish与严格读回全部成功才可核收；新的outer仍携原native，交同一Future，不重放旧业务。
+                raise
+            else:
+                _finish_claimed_gateway_request(
+                    paths,
+                    processing_path,
+                    request_id,
+                    response,
+                    conversation_store=request_agent.conversation_store,
+                    execution_agent=request_agent,
+                    expected_execution_attempt_id=expected_attempt_id,
+                    expected_lease_epoch=expected_lease_epoch,
+                )
+        except Exception as error:
+            from .request_errors import gateway_request_execution_unknown
+
+            expected = (request_id, expected_attempt_id, expected_lease_epoch)
+            if gateway_request_execution_unknown(error, request_payload, expected):
+                try:
+                    _record_execution_outcome_uncertain(paths, processing_path, error, expected)
+                except Exception as observation_error:
+                    from .logging import _report_gateway_side_effect_error
+
+                    _report_gateway_side_effect_error("observe_execution_unknown", request_id, observation_error)
+            raise
     return True
+
+
+# LLM: 仅原仍current的词法观察可将已有native债务保到同outer；无写入/签收，不改cause、运行旧Context或授执行权。
+# 函数用途: 保住handler接收后收尾失败的异常链，物理未知及已有链仍为原实际对象。
+def _raise_with_pending_approval_retirement(error, observation):
+    from ..conversation.agent_tool_approval import (
+        ApprovalRetirementUnconfirmedError,
+        approval_retirement_obligation,
+        find_approval_retirement_error,
+    )
+
+    pending = observation.pending_error
+    if (not observation.current() or approval_retirement_obligation(pending) is None
+            or find_approval_retirement_error(error) is not None):
+        raise error
+    try:
+        raise pending
+    except ApprovalRetirementUnconfirmedError:
+        # 让Python在原native活except里记录context；显式from会覆盖outer已经有的cause。
+        raise error  # noqa: B904 - 保留同outer既有cause和自然context。
+
+
+# LLM: 在取消/owner 解析之前调用；失败仅经现有规范终态归档写网关文件，不传 conversation_store。
+# 函数用途: 把错配请求终结为结构化失败，杜绝取消分支绕过路由门。
+def _reject_worker_route(check: _WorkerRouteCheck) -> bool:
+    request = check.payload
+    try:
+        _frozen_worker_owner(check.agent, request)
+    except OwnerRouteMismatchError as exc:
+        response = gateway_owner_scope_error_response(check.path, request, exc, request_id=check.path.stem)
+        _finish_claimed_gateway_request(
+            check.paths, check.path, check.path.stem, response,
+            expected_execution_attempt_id=str(request.get("execution_attempt_id") or ""),
+            expected_lease_epoch=_request_lease_epoch(request),
+        )
+        return True
+    return False
+
 
 
 def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> dict:
@@ -1052,6 +1239,8 @@ def _settle_fallback_turn_guidance(conversation_store: object | None, request_id
         pass
 
 
+# LLM: 只有原后台消费者明确pending才经当前同Agent/claim短门重排，P3保留；其它响应沿main终态/重启/供应商续跑，不引入业务continuation旁路。
+# 函数用途: 将已认领请求的真实结果归档，后台尚未消费的同一来源让出执行槽后原请求稍后重领。
 def _finish_claimed_gateway_request(
     paths: GatewayPaths,
     processing_path: Path,
@@ -1059,6 +1248,7 @@ def _finish_claimed_gateway_request(
     response: dict,
     *,
     conversation_store: object | None = None,
+    execution_agent: SimpleAgent | None = None,
     expected_execution_attempt_id: str = "",
     expected_lease_epoch: int = 0,
 ) -> None:
@@ -1067,6 +1257,11 @@ def _finish_claimed_gateway_request(
         raise DataCorruptionError(
             "gateway terminal response identity conflicts with the claimed request"
         )
+    if response.get("kind") == "background":
+        from .multiprocess_background_execution import requeue_pending_background_request
+
+        if requeue_pending_background_request(response, execution_agent):
+            return
     if isinstance(response.get("provider_transient_resume"), dict):
         if _requeue_provider_transient_resume(paths, processing_path, response, conversation_store):
             # 供应商临时故障自动续跑：回合不写终态，请求重排回队列（退避与累计次数在 recovery 里写）。
@@ -1119,6 +1314,9 @@ def _finish_claimed_gateway_request(
         _report_gateway_side_effect_error("archive_gateway_terminal_marker", request_id, exc)
 
 
+# LLM: 普通异常沿main终态；精确typed/Call/心跳/runner出处保processing/P3，退出后仅既存观察或保守未结，不授重放。
+# LLM: 原native及真实outer链未结不得普通FAILED/finish；查链仅保原Future债务，持久UNKNOWN仍须实际producer另核。
+# 函数用途: 只结清普通初始化失败，实际未结由原Future和准确canonical事实承担。
 def terminalize_unhandled_claimed_gateway_request(
     paths: GatewayPaths,
     processing_path: Path,
@@ -1131,11 +1329,16 @@ def terminalize_unhandled_claimed_gateway_request(
     """Fail closed when a claimed request raises before its normal handler.
 
     The dispatcher has already removed the request from the inbox.  Every exit
-    path must therefore create one terminal response and move the claim out of
-    ``processing``; otherwise a Python/runtime initialization error becomes a
+    ordinary path creates one terminal response and moves the claim out of
+    ``processing``; exact typed unknown retains the original claim and P3.
+    Otherwise a Python/runtime initialization error becomes a
     false hour-long running task.
     """
 
+    from ..conversation.agent_tool_approval import find_approval_retirement_error
+
+    if find_approval_retirement_error(error) is not None:
+        return
     report = read_json_file_report(
         processing_path,
         context="gateway.worker.unhandled_request.read",
@@ -1146,6 +1349,29 @@ def terminalize_unhandled_claimed_gateway_request(
     else:
         request = report.payload
         request_id = str(request.get("id") or processing_path.stem)
+        from .request_errors import gateway_request_execution_unknown
+
+        expected = (processing_path.stem, expected_execution_attempt_id, expected_lease_epoch)
+        if gateway_request_execution_unknown(error, request, expected):
+            _record_execution_outcome_uncertain(paths, processing_path, error, expected)
+            return
+        from .request_errors import (
+            recorded_bounded_request_unknown,
+            recorded_heartbeat_request_unknown,
+            recorded_runner_request_unknown,
+            request_resource_exit_unconfirmed,
+        )
+
+        if (recorded_bounded_request_unknown(error, request, expected)
+                or recorded_heartbeat_request_unknown(error, request, expected)
+                or recorded_runner_request_unknown(error, request, expected)):
+            return
+        if request_resource_exit_unconfirmed(error):
+            from .logging import _report_gateway_side_effect_error
+
+            # 来源已失效或未能原位观察时仅保守未结；不从旧Call/心跳或相同错误码补事件、终态或释放许可。
+            _report_gateway_side_effect_error("unattributed_resource_execution_unknown", request_id, error)
+            return
         response = gateway_unhandled_worker_error_response(
             processing_path,
             request,
@@ -1165,6 +1391,78 @@ def terminalize_unhandled_claimed_gateway_request(
         expected_execution_attempt_id=expected_execution_attempt_id,
         expected_lease_epoch=expected_lease_epoch,
     )
+
+
+# LLM: 原T内再核typed/原Call、心跳或common唯一runner出处与活execution/claim；保持status/route/P3/lease，资源entered=null，不伪造False或重放许可。
+# LLM: 原审批观察只在原handler词法catch活时写同claim未知，Count0仅原T，C/W还保原source末门；纯退休不覆盖物理未知。
+# 函数用途: 保存原canonical未结观察供Future只读核收，不签终态、重放或释放许可。
+def _record_execution_outcome_uncertain(paths, path, error, expected, *, execution_agent=None):
+    from ..conversation.agent_tool_approval import (
+        approval_retirement_diagnostic,
+        approval_retirement_obligation,
+        approval_retirement_request_matches,
+    )
+    from .io import gateway_request_fingerprint
+    from .request_errors import gateway_request_execution_unknown, request_resource_exit_unconfirmed
+
+    # LLM: JSON最新态再匹配原claim，common与真实资源分别保未进入/退出未知；runner只读common原锚点，来源或生命周期失效不写。
+    # 函数用途: 为仍未结的这一轮附加结构化观察。
+    def observe(current):
+        actual = gateway_request_execution_unknown(error, current, expected)
+        retirement = approval_retirement_request_matches(error, path, current,
+            gateway_request_fingerprint(current, path.stem), agent=execution_agent)
+        # 原同对象若也带物理退出未知，必须优先保原观察，不能用纯退休覆盖设施责任。
+        if not actual and (not retirement or request_resource_exit_unconfirmed(error)):
+            return current
+        from .request_errors import request_execution_outcome_uncertain
+
+        observation = {"schema_version": "gateway_execution_outcome.v1", "status": "unknown",
+                       "request_id": current["id"], "execution_attempt_id": current["execution_attempt_id"],
+                       "lease_epoch": current["lease_epoch"], "lease_owner": current["lease_owner"]}
+        if not actual:
+            observation.update(error_code=error.error_code, phase="approval_retirement", operation_entered=None)
+        elif request_execution_outcome_uncertain(error, current, expected):
+            observation.update(error_code=error.error_code, phase=error.phase, operation_entered=False)
+        else:
+            from .request_errors import heartbeat_request_execution_outcome_uncertain
+
+            if heartbeat_request_execution_outcome_uncertain(error, current, expected):
+                from ..memory_store.curator_lease import lease_heartbeat_error_origin
+
+                observation.update(error_code="TASK_RESOURCE_STOP_UNCONFIRMED", phase="curator_lease_heartbeat_stop",
+                                   operation_entered=None, lease_id=lease_heartbeat_error_origin(error)[1])
+            else:
+                from .request_errors import runner_request_execution_outcome_uncertain
+
+                if runner_request_execution_outcome_uncertain(error, current, expected):
+                    from ..common.runner_thread_origin import runner_thread_error_origin
+
+                    origin = runner_thread_error_origin(error)
+                    observation.update(error_code="TASK_RESOURCE_STOP_UNCONFIRMED", phase=origin[1], operation_entered=None,
+                                       runner_run_id=origin[2], runner_attempt_id=origin[3])
+                else:
+                    observation.update(error_code=error.error_code, phase="bounded_call_exit", operation_entered=None,
+                                       call_id=error.call_id, reason=error.reason)
+        diagnostic = approval_retirement_diagnostic(error)
+        previous = current.get("execution_outcome")
+        if retirement or (diagnostic is not None and type(previous) is dict
+                and previous.get("schema_version") == "gateway_execution_outcome.v1"
+                and previous.get("approval_retirement") == diagnostic):
+            # 外层仍可原位重记同设施unknown；保同native退休引用，不覆盖物理phase或另签来源。
+            observation["approval_retirement"] = diagnostic
+        return {**current, "execution_outcome": observation}
+
+    if approval_retirement_obligation(error) is not None:
+        from ..common.request_execution_ports import gateway_short_operation
+        from .multiprocess_execution import current_worker_execution
+
+        if current_worker_execution() is not None:
+            # 实际C/W仍沿原source的T/P3/P5/生命周期末门，不把只读观察当写许可。
+            gateway_short_operation("approval_retirement_unknown", lambda: update_json_file_atomic(path, observe, require_existing=True))
+            return
+    with gateway_turn_transition(paths, path.stem):
+        update_json_file_atomic(path, observe, require_existing=True)
+
 
 
 # LLM: Terminalization may need the owner-scoped ConversationStore, but owner resolution failure
@@ -1207,3 +1505,130 @@ def _archive_gateway_chunk_stream(
         report["target_path"] = str(target)
         return None, report
     return target, None
+
+
+# LLM: 继承现有 owner 拒绝链，沿用规范失败归档，不建立另一个恢复状态机。
+# 类用途: 标识进程 worker 路由错配，不能按共享主用户继续执行。
+class OwnerRouteMismatchError(OwnerScopeUnavailableError):
+    error_code = "OWNER_ROUTE_MISMATCH"
+
+
+
+# LLM: C 只准入盖章；W 路由保留 pending 给冻结分区认领，只有 C 路由进入本地 claim/submit。
+#   预留只由规范终态释放：claim 失败/回退、submit 失败都不动预留（A3 屏障点），
+#   进程内字典计数在 count>0 时完全不参与（C 本地与各 worker 共用一个持久全局上限）。
+# 函数用途: 为请求完成持久派发，返回 dispatched/claimed/blocked/raced，不抢 worker 的任务。
+def _admit_and_submit_durable(
+    paths: GatewayPaths,
+    request: _PendingGatewayRequest,
+    lane: tuple[AdmissionLimits, Callable[[GatewayClaim, str, str], None], object],
+) -> str:
+    from .multiprocess_admission import session_scope_for_request
+
+    limits, submit, gate = lane
+    user_key = request_user_key(request.payload)
+    conversation_key = request_conversation_key(request.payload)
+    try:
+        owner = _durable_request_owner(gate, request.payload)
+    except OwnerRouteMismatchError as error:
+        _record_admission_wait(request, reason=str(error), error_code=error.error_code, paths=paths, admission_gate=gate)
+        return "blocked"
+    except OwnerScopeUnavailableError:
+        _record_admission_wait(request, reason="owner_scope_unavailable", paths=paths, admission_gate=gate)
+        return "blocked"
+    # mc4-1706：锁外扫描到的请求正文作为快照交给准入，锁内会用同一投影核对归属输入未漂移。
+    decision = gate.admit(
+        request.path,
+        (owner, session_scope_for_request(request.payload)),
+        limits,
+        snapshot=request.payload,
+    )
+    status = str(decision.get("status") or "")
+    if status == "blocked":
+        _record_admission_wait(request, reason=str(decision.get("reason") or "admission_blocked"), error_code=str(decision.get("error_code") or ""), paths=paths, admission_gate=gate)
+        return "blocked"
+    if status != "admitted":
+        return "raced"
+    if decision["request"]["route"]["worker"] != "C":
+        return "dispatched"
+    from .multiprocess_coordinator_claim import freeze_coordinator_claim
+    from .multiprocess_dispatch import WorkerDispatchError
+
+    try:
+        claim = claim_request(paths, request.path, coordinator_snapshot=freeze_coordinator_claim(gate, decision))
+    except WorkerDispatchError as error:
+        _record_admission_wait(request, reason=error.reason, error_code=error.error_code, paths=paths, admission_gate=gate)
+        return "blocked"
+    if claim is None:
+        return "raced"
+    submit(claim, user_key, conversation_key)
+    gate.observe("claim_moved", {"request_id": request.path.stem})
+    return "claimed"
+
+
+
+# LLM: C只恢复main原冻结宿主owner，不按当前热配置重派；background须同owner canonical ref，typed源换代仅保原运输结清，不能消费新源。
+# 函数用途: 为C准入恢复唯一owner，禁止把后台源声明或热配置当已盖章权限。
+def _durable_request_owner(gate, payload):
+    from ..user_space.owner_resolver import OwnerIdentity
+    from .multiprocess_route import validate_published_route
+    from .request_owner_binding import frozen_request_owner
+
+    if "route" in payload:
+        checked = validate_published_route(payload, gate.count, gate.c_run_id)
+        if not checked["ok"]:
+            raise OwnerRouteMismatchError(checked["reason"])
+        return OwnerIdentity(*checked["owner"])
+    try:
+        owner = frozen_request_owner(payload)
+        if owner is None:
+            raise OwnerRouteMismatchError("request_owner_required")
+        if payload.get("kind") == "background":
+            from .control_plane import GatewayControlPlane
+            from .multiprocess_background_request import (
+                BackgroundSourceChanged,
+                read_source,
+                source_owner,
+                validate_source_ref,
+            )
+
+            ref = validate_source_ref(payload.get("metadata", {}).get("background_source"))
+            if source_owner(ref["owner"]) != owner:
+                raise OwnerRouteMismatchError("background_source_owner_mismatch")
+            root = gate.agent.home_root if type(gate.agent) is GatewayControlPlane else gate.agent.home_paths.root
+            try:
+                read_source(root, ref)
+            except BackgroundSourceChanged:
+                pass  # 原运输仍走同一claim/终态，业务入口会再次核此ref，不消费新源。
+        return owner
+    except (OSError, ValueError, TypeError, AttributeError, DataCorruptionError) as error:
+        raise OwnerRouteMismatchError("request_owner_unavailable") from error
+
+
+# LLM: 只在原T→JSON锁内按当前正文计算等待计数；原因/码变化立即刷新，同对才节流。
+# 函数用途: 从现存队列记录算本次等待字段，不借旧扫描覆盖新计数或进队时间。
+def _current_admission_wait_fields(payload: dict, path: Path, fields: dict) -> dict:
+    now = float(fields["admission_wait_at"])
+    waited_since = _admission_wait_since(payload, path)
+    try:
+        last_signal = float(payload.get("admission_wait_at") or 0.0)
+    except (TypeError, ValueError):
+        last_signal = 0.0
+    same = all(str(payload.get(key) or "") == str(fields.get(key) or "")
+               for key in ("admission_wait_reason", "admission_wait_error_code"))
+    if same and last_signal and now - last_signal < _ADMISSION_WAIT_REFRESH_SECONDS:
+        return {}
+    try:
+        count = max(0, int(payload.get("admission_wait_count") or 0))
+    except (TypeError, ValueError):
+        count = 0
+    updated = {**fields,
+        "admission_wait_count": count + 1,
+        "admission_wait_since": waited_since or now,
+    }
+    if waited_since and not _has_queue_order_timestamp(payload):
+        # 老请求/旁路生产者可能没有任何进队时间戳,此时排序回退用文件 mtime;我们改写文件会把
+        # 它一直往后挤(等于自己制造饥饿)。第一次写等待信号时把"改写前的 mtime"钉成 created_at,
+        # 顺序从此稳定,不再随等待信号漂移。
+        updated["created_at"] = waited_since
+    return updated

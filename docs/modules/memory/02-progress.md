@@ -1,3 +1,52 @@
+## 2026-10-17 F3 最终写入闭包已整合（待统一验收）
+
+USER/SOUL沿原人格库、配额、版本CAS和恢复顺序，仅C本地写叶消费当前原source.perform；默认False原调用形状与120项默认AST保持。105独立复核发现的两个FD清理出口会盖掉失源错误，108已修且109独立1409项、原同字节两反例及112无源码origin夹具通过；固定close只尝试一次，必要FD释放不授予补偿写入。三个原调用方同bool透传，不保存source或增加异常状态。
+
+最后接通原冷C记忆候选dispatcher：与原factory共用同一command对象，七动作共用原真人seal、source、完整raw CAS和回执；原ExitStack覆盖耐久completed和单次事件发布，退出后才归还同holder借用和global scope。103独立158项及真实HTTP寿命/未知/重放复核通过；Count0、原父未知收口、跨owner和群actor权限不变。冷search/remember、候选确认与人格写叶现已在候选树接齐，不再以旧not-ready回执充数。
+
+固定后台启动入口同时已恢复并支持同包.py/.pyc。当前仍未提交、部署或发包；最终focused、全仓、严格gate、双平台同源包及真实任务结果另记，不能从切片数字外推。公开启动仍保持默认Count0，正count沿原内部验收入口，未新增用户配置或扩大网络/权限。详见[冷记忆闭包](../../design/COORDINATOR_CLIENT_MEMORY_CLOSURE.md)与[人格IO合同](../../design/PERSONA_COORDINATOR_IO.md)。
+
+2026-10-17 根104：原候选服务接口81和实际binder首故障修复99已精确合候选，100独核419项通过；正式分派/Persona/发行入口后继尚未闭合，非端到端或已发布。
+
+2026-10-17 根90：冷C search/remember五路径已按独立复核77合入候选；原默认和部分失败事实保留，候选确认及USER/SOUL闭包仍待后继，不作为完整F3/发行通过。
+
+## 2026-10-17 冷记忆C2与holder借用修复已合候选
+
+根83按精确前像合61组件及76修复：server唯一有界owner holder、原source固定client模式、严格访问snapshot成功后清理。Astra74实证的构造发布/借用登记竞态，由原condition内先预留borrower、同finally归还解决；Astra82独立339项与5项退出边界通过，旧同字节反例1红转1绿。原默认Count0、recent、管理写源不变；holder不保存请求/source/actor，不代其它用户flush。J3装配及候选管理尚未全部接通，search/remember当前仍旧未就绪回执，不宣称F3完成。
+
+根80将J1/J2合当前工作树后403项通过（0F/E/skip、7.542秒，完整输入不变）。1839原组合中的一次审批SQLite锁竞争仍保留定位记录；此处不称最终组合或发布已验收。
+
+## 2026-10-17 冷记忆J2写叶已合候选
+
+Astra78独立311项、原调用方反例1项及额外3项通过后，根80精确合四生产hunk：VectorStore成功后发布、TextVectorCache原乐观增量与诊断、lesson正文→routing/HOT→demote原partial保持；原Promotion唯一ValueError catch在C分支先透传实际来源类。默认138函数AST已独核。实例仅保存IO策略，不持请求/来源。J3和候选管理、人格写叶尚未全部闭合，未提交/部署/打包，不能称端到端已完成。详见[投影写叶合同](../../design/MEMORY_J2_PROJECTION_WRITE_PORTS.md)。
+
+## 2026-10-17 冷记忆J1六写叶已合候选
+
+Astra72独立189项与两项实际SQLite回滚边界通过后，根78按精确前像合候选/quota/policy锁、原候选/operations单次raw写及原账本脱敏六路径；没有重套67或覆盖其它网关变更。默认136函数AST已独核，C只保IO策略bool并消费原当前scope。扫描/序列化/embedding仍在Root外，formal→index→mark→condense与原partial保持，完整raw CAS和O(N)本地事务不称恒短。后继J2、JSONL/builder和HTTP仍待闭合，不能据切片绿称整项可用。详见[写叶合同](../../design/MEMORY_J1_WRITE_PORTS.md)。
+
+根70组合1839项中1838通过、1项审批并发SQLite锁竞争失败，已保留原账和测试结果，正在定位，尚未提交、发布或部署。C2另有独立复核发现的holder借用预留竞态，修复另片进行。
+
+## 片A：显式remember真实服务提取（待评审）
+
+## 2026-10-17 C1 记忆资源纯提取候选（未发布）
+
+解决冷C没有显式真实资源构造入口、而直接创建完整Agent会加载无关运行能力的问题。本片仅把原记忆构造与嵌入解析提成真实config/home/paths/领域对象的纯装配叶；core仍按LocalStore→Candidate→semantic→原startup聊天快照→JsonlMemory→Persona→原AGENTS次序赋值，Curator后半段原地不变。默认模型/共享/凭据/能力解析、唯一日志去重与embedding用量不变，无新增配置开关、请求、缓存或关闭政策。
+
+本地原7文件132项与新增真实构造/引用/显式profile用例已验证，完整source map、XML及规范化AST对照在本片独立工件，实际冻结结果以该REPORT为准。C1只消除依赖障碍，`/memory candidates`和client search/remember的冷入口尚未接通，不能称F3 ready。C2的pending容量进展与C3实际末writer仍待单独裁决，不在本片增加容器、source、HTTP、timeout或typed政策。
+
+建议下一步：由非作者先复核六路径默认等价与构造时点，再按函数集成；其他agent可并行只读准备C2/C3，禁止并改core/profile和真实服务。
+
+
+ExplicitRememberServices仅携原CandidateService、MemoryPromotionService、JsonlMemory三对象引用；remember_explicit保存原校验/digest/observe→review→promote→formal查询与异常。原RuntimeMixin.remember委托，recall/core/embedding解析/锁/费用/资源寿命不改。新增普通/群真实服务及fake外部embedding用例；结果见片A报告，未接冷client与候选入口。
+
+## 2026-10-16 F3 模型排空与 Curator 未结出口（仓外切片，待组合）
+
+组①在原 model_call_ledger 弱集、记录及 retention 上新增只读 drain 快照，不另建模型账或把逻辑终态当物理退出。Curator 通过原 bounded worker 在发送前复核真实后台 claim；F2 owner/session/预算与 Count0 默认及时返回保持。独立 139 合同通过只覆盖该局部运输，不表示完整排空或 P3/native 终态已验。
+
+本片让 `_run_once`、`_run_leased`、`_extract_for_route` 及原 lease interruption guard 优先原样抛出 canonical 缺端口、运输未结与独立物理退出未确认。不能把它们写成普通失败、换默认模型补跑或退役活租约；pending 代次、游标与原 Call/lease 责任保留。心跳按原流程停止，停止未确认的原异常元数据保护仍在。普通错误与合法解析 fallback 保持，未结不增加正式内容批准或自动晋升能力。
+
+范围仅三函数和精确 lease guard；最终请求 unknown/P3、原句柄 drain 和恢复由 F3 宿主组合根负责。未验 Count2、真实模型/网络、原生进程或完整取消后物理资源释放；后续必须沿原 canonical claim/终态核验，不能凭快照为空或本片通过放行。
+
 ## 2026-10-16 正式包同时间片缓存与最新快照修复（待统一验收）
 
 Linux 实际出现五字段 stat 相同而正文已变的消息/审计文件，定位缓存会吞掉原缺 cursor 错误。现复用原两秒信任窗口，近期文件不写、不用 hint；原持久游标、分片错误和 owner 隔离不改。持续写入可能冷扫，稳态读取成绩只适用于真实已稳定文件。旧实现因果负例全红，修后分平台定向通过；完整组合与新包另见根 TESTS，不把历史正式包失败视为通过。
@@ -605,3 +654,21 @@ error_self` 的提前返回只是快速路径，语义上不改变结果（错�
 - 性能（与 50b87f934 同场两遍取小）：任务书建议的单正则（字面量|\u|\/）实测 home 2.75s / home_ascii 2.89s，不达标；两段式后 home 0.51 → 0.52s、home_ascii 0.55 → 1.41s；matched=572 不变。
 - MC4-1302（3a 接受）：错误合同有意变化——工具引用读取只依赖工具输出索引，无关账本损坏不再连带失败；注释与测试已写明；mc4 两条旧合同红测保持红。
 - 测试：新文件 38 条 + v2 56 条全过；29 文件 639 条全过；变异 3/3（去 `\u00`、去 `\/`、去布尔/数字排除，均 rc=1）。
+
+## 2026-10-16 F3 Curator 原请求短事务（组件）
+
+Curator `run/run_if_due` 先沿当前实际 Agent/原 claim 做空短准入，长模型等待继续在 T 门外。StateStore 的公开变更、批次 commit/recover 与失败/隔离/迁移/排除标记沿 common `gateway_short_transaction`，先原 T/P3/P5 再 quota/业务锁；内部 state 与事务材料/规范目标 writer 只核当前真实同线程窗口，不在锁内倒取 T。原 candidate、Daily、run audit、state 仍是唯一批次，state 最后提交；分组、pending 代次、cursor、配额/CAS 和 F4 用户正式确认不变。
+
+租约 renew/retire/release 同样先 T 后 state。原心跳线程用固定来源已验证的 copy_context 运输同一原 source；复制不是新权，每次续租仍核原 execution/lifetime/PID 并进入 fresh T。原 scope 退出使 cell 共同失效，复制活事务窗口到其它线程不能写。common/Bounded 未结对象优先穿过失败处理，不追加普通失败审计、清 lease 或转默认模型。
+
+启动原心跳的 start 也纳入既有 try/finally：ACK 异常保同一 Thread 做 stop/join，确认退出后才能按普通启动失败处理。停止或 join 未确认仍把 `lease_heartbeat_stop_error_class` 写入原异常原生字典，保留 executing lease 和原异常；此字段仅是停止诊断，没有伪造 BoundedCall 身份，也不代表业务未进入。原 Thread 仍经异常 traceback 的 heartbeat 局部对象可达，不是持久 receipt 句柄。该普通 marker 如何经最终真实请求出口保留 P3，仍须平台组合片核验；本组件不声称物理排空或完整多进程可用。
+
+独立准确 X 加 30 个冻结前置：原 BG 六节点 4 绿 2 红变为 6 绿；新增真实续租/撤权/退出 cell/跨线程 writer 五例原全红变绿；ACK 后真实出生与正常/未知 join 两例原红变绿。原外层 186 例保留，最终 16 文件 221 唯一普通通过、零失败/错误/skip。仅假供应商与受控 Python 线程；未运行实际子进程 recovery_race、临时 HTTP、native/Count2、真实模型或服务。
+
+## 2026-10-16 F3 owner 维护原请求边界（候选）
+
+原维护/retention、archive权限收紧、rcb补收口逐个实际写消费同一短回调，T先于业务锁，原RuntimePolicy及完整maintenance状态CAS变化后拒写；长扫描不持T，既有部分效果不重放。独立182普通通过，状态仍唯一owner-maintenance.v1；不替代正式后台来源、Count2或物理排空验收。详见STORAGE_RETENTION与TESTS顶部当前记录。
+
+## 2026-10-17 C正式记忆recent同一只读叶子
+
+`read_memory_records_from_path`不构造会mkdir的JsonlMemory，只共用原唯一事件scanner与版本/删除/过期物化。原`all→self._read_memory_file→self._read_memory_events`虚方法链和坏行容错保持；C调用方另核认证、owner、runtime memory_path及原控制面读前后来源。只读recent不读候选、写访问/向量缓存或触发晋升，同群仍为原群owner共享；search/remember未借此开放。详见[客户端记忆只读](../../design/GATEWAY_CLIENT_MEMORY_READONLY.md)。

@@ -1,5 +1,5 @@
-# LLM: 后台单片不拥有 wake/Goal/租约或投递；同 conversation_turn_id 的 Compact 保留展示与已评估事实，新片清零，历史/CAS/取消仍沿原合同。
-# 模块用途: 执行后台模型工作片并压缩重试；复用本轮展示，失效清除后不重发推荐，也不保存第二份状态。
+# LLM: 原BG binder在同T内发布claim运输定位，Count0仍原publisher；后台单片不拥有wake/Goal/租约，Compact/历史/CAS/取消沿原合同。
+# 模块用途: 执行后台模型与Compact；仅组合已认领原RunParams短门，actual未结不释放输入或伪报失败。
 from __future__ import annotations
 
 import logging
@@ -9,6 +9,12 @@ from functools import partial
 from typing import Protocol
 
 from ..agent_core.runtime.loop_models import RunParams
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..concurrency.interrupt import is_interrupted
 from ..turn_end import result_turn_end_reason, should_continue_task
 from .agent_activity import BackgroundMainActivitySink
@@ -86,7 +92,7 @@ class BackgroundCapacityDeferred(RuntimeError):
     pass
 
 
-# LLM: 复用本地调用的原身份发布句柄，先尊重已有宿主回调；不按 task 查询猜 run，不从展示载体恢复执行权。
+# LLM: 先原callback再本地身份，确切BG producer在原T内发布同claim定位；不按task猜run，不从投影恢复执行权。
 # 类用途: 接收后台实际执行身份，让 Compact 使用 core 已绑定的 run/attempt，同时保留原任务确认回调。
 class _BackgroundRunControl(LocalRunControl):
     # LLM: 每次 agent.run 创建独立句柄，只保存本调用的发布投影；不跨片持久化或变更任务状态。
@@ -95,7 +101,7 @@ class _BackgroundRunControl(LocalRunControl):
         super().__init__(request_id)
         self._previous = previous
 
-    # LLM: 原回调和本地身份均核对后投影到原 claim；CAS 失败由 core 收口 attempt，旧片不能更新新租约。
+    # LLM: 原回调和本地身份先核；只有确切BG binding在原T内发布同claim运输定位，普通路径保原publisher与零新增I/O。
     # 函数用途: 在模型前发布 RuntimeDB 已决定的身份，供后台控制准确定位 Compact 后的新尝试。
     def bind_runtime_authority(self, binding: dict[str, str]) -> bool:
         self.check_admission()
@@ -103,7 +109,12 @@ class _BackgroundRunControl(LocalRunControl):
         if callable(publish) and publish(binding) is not True:
             return False
         accepted = super().bind_runtime_authority(binding)
-        publish_claim_runtime_authority(binding)
+        from ..gateway_parts.multiprocess_background_execution import BackgroundRuntimeBinding
+
+        if type(self._previous) is BackgroundRuntimeBinding:
+            self._previous.publish_claim_runtime_authority(binding)
+        else:
+            publish_claim_runtime_authority(binding)
         return accepted
 
     # LLM: 任务晋升仍交原宿主确认；无原回调时只确认本调用尚未关闭，不新增持久任务或权限。
@@ -117,14 +128,19 @@ class _BackgroundRunControl(LocalRunControl):
 
 
 # LLM: 只回填 core 已发布的身份；异常退出沿原账释放该 attempt 的提交前预留，submitted 未知仍保留，正常 Compact 保持原恢复路径。
-# 函数用途: 执行后台模型尝试，将身份交给Compact；完成协议失败先保存内部结果再沿原失败结算，防止业务重跑。
+# LLM: bind_background_run_params只组合原live来源；无scope同对象，control保resolved原回调；actual未结不释放预留。
+# 函数用途: 执行原后台尝试并发布真实身份；保完成协议内部结果、Compact与原宿主权限。
 def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
     from ..agent_core.runtime.run_params import run_params_with_request_id
+    from ..gateway_parts.multiprocess_background_execution import bind_background_run_params
 
-    resolved = run_params_with_request_id(params)
-    control = _BackgroundRunControl(resolved.request_id, params.conversation_task_binding_callback)
+    resolved = bind_background_run_params(agent, run_params_with_request_id(params))
+    control = _BackgroundRunControl(resolved.request_id, resolved.conversation_task_binding_callback)
     try:
         result = agent.run(prompt, params=replace(resolved, conversation_task_binding_callback=control))
+    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+            RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+        raise
     except Exception:
         _release_failed_attempt_inputs(agent, resolved.request_id, control.runtime_authority())
         raise
@@ -141,7 +157,8 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
 
 # LLM: agent.run 已退出，只有 core 正式发布的精确 attempt 能证明其预留可释放；原提交批次先修复，不释放 submitted。
 #   恢复失败记录结构化身份，不输出消息正文，也不能遮盖原异常；后续恢复器仍能读取原账。
-# 函数用途: 后台异常或 Esc 退出后恢复尚未提交的插话，允许同一任务的合法后继再次认领。
+# LLM: 辅助恢复抛actual来源未结必须原对象交回，普通恢复错误仍只记录；不能伪造已释放。
+# 函数用途: 仅在普通异常或Esc后恢复未提交插话，actual未知不提前释放原责任。
 def _release_failed_attempt_inputs(agent: object, turn_id: str, binding: dict[str, str]) -> None:
     attempt_id = binding.get("attempt_id", "")
     if not attempt_id:
@@ -150,6 +167,9 @@ def _release_failed_attempt_inputs(agent: object, turn_id: str, binding: dict[st
         summary = agent.conversation_store.guidance.recovery.release_reserved(turn_id, dead_attempt_id=attempt_id)
         if summary.get("errors"):
             raise RuntimeError("guidance reservation recovery incomplete")
+    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+            RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+        raise
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "后台插话预留恢复未完成：turn_id=%s attempt_id=%s error_type=%s",
@@ -159,7 +179,8 @@ def _release_failed_attempt_inputs(agent: object, turn_id: str, binding: dict[st
 
 # LLM: 调用方已冻结模型作用域与提示；执行保持同一请求和活动 sink，异常/取消不提交伪造 final。
 #   turn_trigger 是调用方按唤醒信封构造的回合触发类型（None 为普通回合），原样交给每次模型尝试。
-# 函数用途: 运行一片后台模型并整理显示快照，Compact 公平让出与真实错误分别收尾。
+# LLM: actual未结不调用sink.fail伪报普通失败；不包住模型等待，原F6/CAS/媒体与静默通知保持。
+# 函数用途: 运行原后台片并整理显示，未结原样退出，Compact/容量/普通错误保既有边界。
 def invoke_background_turn(
     execution: BackgroundExecutionDependencies,
     thread: ConversationThread,
@@ -186,6 +207,9 @@ def invoke_background_turn(
             activity_sink=activity_sink,
             turn_trigger=turn_trigger,
         )
+    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+            RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+        raise
     except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
         activity_sink.finish()
         raise

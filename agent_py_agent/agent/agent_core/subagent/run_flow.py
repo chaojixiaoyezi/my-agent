@@ -1,3 +1,6 @@
+# LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
+# LLM: 原child工作片仍走main唯一模型/attempt与收口，原运输未结不转普通失败或模型重放。
+# 模块用途: 运行原子代理模型轮并保持精确执行来源，撤权后不保存迟到提示或结果。
 # LLM: 同一 child turn 的 Compact 重试保留展示与已评估事实，下一 Goal turn 清零；拒绝记忆仍属原 attempt，失败沿原生命周期。
 # 模块用途: 执行子代理并保存结果；overflow来源延迟到完整请求准备后压缩，同轮展示失效后不复活。
 
@@ -9,6 +12,13 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
+from ...backends.bounded_call import BoundedCallExitUnconfirmedError
+from ...common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+    gateway_short_transaction,
+)
+from ...common.tool_write_context import ToolWriteContextUnavailable
 from ...concurrency.interrupt import is_interrupted
 from ...conversation.agent_thread import (
     AgentThreadTurnInput,
@@ -135,19 +145,22 @@ def _probe_subagent_channel(lifecycle, options: SubagentRunParams, active_attemp
     )
 
 
+# LLM: 原child prompt属于已受理attempt；只在原短事务门内写文件，撤权后不得落盘迟到提示。
+# 函数用途: 模型执行前保存本次原提示，保持原路径和缺省无文件行为。
 def _persist_runner_prompt_before_model(agent, run_id: str, prompt: str) -> None:
-    task = agent.subagents.load(run_id)
-    prompt_file = str(getattr(task, "runner_prompt_file", "") or "")
-    if not prompt_file:
-        return
-    path = Path(prompt_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(prompt, encoding="utf-8")
+    with gateway_short_transaction("child_prompt_persist"):
+        task = agent.subagents.load(run_id)
+        prompt_file = str(getattr(task, "runner_prompt_file", "") or "")
+        if not prompt_file:
+            return
+        path = Path(prompt_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(prompt, encoding="utf-8")
 
 
-# LLM: One attempt binds its exact child thread before entering runner-local context. Any
-# transcript/Compact failure is recorded through the same lifecycle failure path as model errors.
-# 函数用途: 在子代理运行上下文中执行模型轮，并把成功或失败交给统一生命周期收口。
+# LLM: 同一attempt绑定原child线程；四类实际运输/来源异常同对象上抛，不按code/文本升级，普通Count0错误仍走原生命周期。
+# LLM: 原审批退休异常在准备/执行两个catch保同对象，不能生成普通runner_result或重排。
+# 函数用途: 在原子代理上下文执行模型轮，未结交原父请求Future，正常/普通失败沿原链。
 def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
     agent = lifecycle.agent
     options = bundle.options
@@ -157,7 +170,18 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
         thread = ensure_subagent_thread(agent.subagents, task_for_attrs)
         if thread is None:
             raise RuntimeError("subagent ConversationStore is unavailable")
+    except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
+            BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable):
+        raise
     except Exception as exc:
+        from ...conversation.agent_tool_approval import find_approval_retirement_error
+        from ...gateway_parts.request_errors import request_resource_exit_unconfirmed
+
+        if request_resource_exit_unconfirmed(exc):
+            raise
+        if find_approval_retirement_error(exc) is not None:
+            _settle_subagent_approval_retirement(lifecycle, bundle, exc)
+            raise
         return lifecycle.handle_run_failure(
             SubagentRunFailureParams(
                 options.run_id,
@@ -193,7 +217,18 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
             task=task_for_attrs,
             attempt_id=bundle.active_attempt_id,
         )
+    except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
+            BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable):
+        raise
     except Exception as exc:
+        from ...conversation.agent_tool_approval import find_approval_retirement_error
+        from ...gateway_parts.request_errors import request_resource_exit_unconfirmed
+
+        if request_resource_exit_unconfirmed(exc):
+            raise
+        if find_approval_retirement_error(exc) is not None:
+            _settle_subagent_approval_retirement(lifecycle, bundle, exc)
+            raise
         return lifecycle.handle_run_failure(
             SubagentRunFailureParams(
                 options.run_id,
@@ -215,6 +250,32 @@ def _run_and_finalize_subagent(lifecycle, bundle: SubagentModelTurnBundle):
             bundle.prompt,
         )
     )
+
+
+# LLM: 仅本child/孙子原scope与原canonical attempt相同且其真实core运行已结时走原failure生命周期；不借父scope、旧Context或同码异常结束其它任务。
+# 函数用途: 把子代理负向调用失败与permission清理债务分开，原结果落盘后仍向原Future传同一错误。
+def _settle_subagent_approval_retirement(lifecycle, bundle, error):
+    from ...conversation.agent_tool_approval import (
+        approval_retirement_obligation,
+        approval_retirement_runs_closed,
+    )
+    from ...gateway_parts.request_errors import request_resource_exit_unconfirmed
+
+    fact = approval_retirement_obligation(error)
+    if (fact is None or request_resource_exit_unconfirmed(error) or fact.scope.agent_kind != "subagent"
+            or fact.scope.run_id != bundle.options.run_id or fact.scope.execution_attempt_id != bundle.active_attempt_id
+            or not approval_retirement_runs_closed(error)):
+        return False
+    task = lifecycle.agent.subagents.load(bundle.options.run_id)
+    if task.runner_active_attempt_id != bundle.active_attempt_id:
+        return False
+    closeout = InterruptedError("原审批调用已取消") if fact.decision.decision == "cancelled" else error
+    lifecycle.handle_run_failure(SubagentRunFailureParams(bundle.options.run_id, bundle.active_attempt_id,
+        closeout, bundle.context, bundle.prompt))
+    current = lifecycle.agent.subagents.load(bundle.options.run_id)
+    return (not current.runner_active_attempt_id and current.id == bundle.options.run_id
+            and current.status == "FAILED" and bool(current.runner_result_file) and current.ended_at > 0
+            and approval_retirement_runs_closed(error))
 
 
 # LLM: Goal persistence reuses the exact runner, permission scope and rejection list; fresh attempts allocate their own list.

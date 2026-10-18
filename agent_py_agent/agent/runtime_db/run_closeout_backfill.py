@@ -17,7 +17,7 @@
 #   随后追加 run_closeout.backfilled 审计事件（字段 run_id/旧状态/新状态/依据的结构化原因），
 #   最后对涉及的 task_run 用树终态 CAS 补关（link 闸留给发现层——本模块没有会话存储访问）。
 #   预览函数只读打开（RuntimeRepository(read_only=True)，SQLite URI mode=ro），不改任何字节。
-# 模块用途: 把历史悬挂的 agent_run/task_run 按结构化判定补到终态，一次执行、可审计、可预览。
+# 模块用途: 保留原幂等历史补收口，原callback仅逐写短门，扫描/预览不取门，不新造自动恢复。
 from __future__ import annotations
 
 import json
@@ -26,6 +26,12 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from .operations import AGENT_RUN_TERMINAL_STATUSES, ATTEMPT_STATUS_RECOVERED
 from .repository import _QUIESCENT_ATTEMPT_STATUSES, RuntimeRepository
 
@@ -167,7 +173,8 @@ def _apply_candidate(repo: RuntimeRepository, row: Any, decision: tuple[str, str
     return True, event_written
 
 
-# LLM: 审计事件与收口分开两个事务（settle 自带事务不可嵌套）：失败只记日志并返回 False，
+# LLM: 四实际类型必须透传，已有settle不回滚也不伪造未执行；普通事件故障仍原统计。
+#   审计事件与收口分开两个事务（settle 自带事务不可嵌套）：失败只记日志并返回 False，
 #   由调用方计入 event_write_errors，绝不影响已提交的收口。
 # 函数用途: 为一条补收口追加 run_closeout.backfilled 结构化事件。
 def _write_backfilled_event(repo: RuntimeRepository, row: Any, decision: tuple[str, str], *, now: float) -> bool:
@@ -190,6 +197,9 @@ def _write_backfilled_event(repo: RuntimeRepository, row: Any, decision: tuple[s
                 },
             )
         return True
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
     except Exception:  # noqa: BLE001 审计事件失败不反噬已收口的运行
         _LOGGER.warning(
             "run_closeout.backfilled 事件写入失败（run 已收口）：agent_run_id=%s",
@@ -198,11 +208,12 @@ def _write_backfilled_event(repo: RuntimeRepository, row: Any, decision: tuple[s
         return False
 
 
-# LLM: 迁移主入口：先查 metadata 幂等键（已完成即空操作），再扫描→逐条分类→补收口→
+# LLM: None保原rcb；callback逐候选/树收口/迁移记录短写，扫描分类门外，实际未知不假记迁移完成。
+#   迁移主入口：先查 metadata 幂等键（已完成即空操作），再扫描→逐条分类→补收口→
 #   对涉及的 task_run 补关，最后写迁移记录。重复调用是空操作；中途崩溃后重跑只补剩余
 #   （处理幂等），结果计数如实写进迁移记录与返回值。
 # 函数用途: 对一个 owner 的 runtime.db 执行一次历史悬挂补收口迁移。
-def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = None) -> dict[str, Any]:
+def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = None, commit_transition=None) -> dict[str, Any]:
     current = float(now if now is not None else time.time())
     if _migration_record(repo) is not None:
         return {"executed": False, "reason": "already_migrated", "migration_id": RUN_CLOSEOUT_BACKFILL_KEY}
@@ -219,7 +230,8 @@ def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = 
         if not target:
             skipped[skip_reason] = skipped.get(skip_reason, 0) + 1
             continue
-        settled, event_written = _apply_candidate(repo, row, (target, runtime_reason), now=current)
+        settled, event_written = _commit_step(
+            lambda: _apply_candidate(repo, row, (target, runtime_reason), now=current), commit_transition)
         if not settled:
             skipped["settle_rejected"] = skipped.get("settle_rejected", 0) + 1
             continue
@@ -231,7 +243,7 @@ def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = 
         task_run_id = str(row["task_run_id"] or "")
         if task_run_id and task_run_id not in touched_task_runs:
             touched_task_runs.append(task_run_id)
-    task_runs_closed = _close_touched_task_runs(repo, touched_task_runs)
+    task_runs_closed = _close_touched_task_runs(repo, touched_task_runs, commit_transition=commit_transition)
     record = {
         "migration_id": RUN_CLOSEOUT_BACKFILL_KEY,
         "executed_at": current,
@@ -243,19 +255,30 @@ def apply_run_closeout_backfill(repo: RuntimeRepository, *, now: float | None = 
         "task_runs_closed": task_runs_closed,
         "event_write_errors": event_write_errors,
     }
-    _write_migration_record(repo, record)
+    _commit_step(lambda: _write_migration_record(repo, record), commit_transition)
     return {"executed": True, **record}
 
 
-# LLM: 涉及的 task_run 用现有树终态 CAS 补关（根 run 已收口后树即终态）；单条失败只记日志，
+# LLM: None保原调用成本，callback同步消费本次原短门，不创建执行身份或改写CAS结果。
+# 函数用途: 在原维护提交窗口运行一段已有rcb写者。
+def _commit_step(operation, transition):
+    return operation() if transition is None else transition(operation)
+
+
+# LLM: callback逐原树CAS取得短门，实际未知原样停止；普通失败原日志/计数不变。
+#   涉及的 task_run 用现有树终态 CAS 补关（根 run 已收口后树即终态）；单条失败只记日志，
 #   不阻断其余 task_run 与迁移记录。link 闸不在本模块做（没有会话存储访问），
 #   活跃 link 的 task_run 由发现层的补关通道按原口径处理。
 # 函数用途: 对本次补收口涉及的 task_run 尝试关闭，返回实际关掉的条数。
-def _close_touched_task_runs(repo: RuntimeRepository, task_run_ids: list[str]) -> int:
+def _close_touched_task_runs(repo: RuntimeRepository, task_run_ids: list[str], *, commit_transition=None) -> int:
     closed = 0
     for task_run_id in task_run_ids:
         try:
-            result = repo.settle_task_run_if_agent_tree_terminal(task_run_id=task_run_id)
+            result = _commit_step(
+                lambda: repo.settle_task_run_if_agent_tree_terminal(task_run_id=task_run_id), commit_transition)
+        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            raise
         except Exception:  # noqa: BLE001 单条 task_run 失败不影响迁移记录
             _LOGGER.warning("task_run 补关失败：task_run_id=%s", task_run_id, exc_info=True)
             continue

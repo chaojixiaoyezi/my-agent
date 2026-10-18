@@ -1,5 +1,5 @@
 # LLM: 提供插话入队、认领和读取；修改须核对 Gateway、主子运行循环与精确回合隔离测试。
-# 模块用途: 提供插话入队、认领和读取。
+# 模块用途: 提供原插话协议；append可显式try-lock/纯deadline，默认与reserve/submit/ACK不变。
 from __future__ import annotations
 
 import time
@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import append_private_jsonl_records, check_io_deadline
 from ..gateway_parts.io import (
     locked_file_transition,
     read_json_file_report,
@@ -96,7 +96,7 @@ def _is_task_body(metadata: dict[str, Any]) -> bool:
 
 
 # LLM: 提供插话入队、认领和读取；修改须核对 Gateway、主子运行循环与精确回合隔离测试。
-# 类用途: 提供插话入队、认领和读取。
+# 类用途: 保持原插话协议；追加可显式选try锁/纯deadline，认领/提交/确认默认不变。
 class GuidanceStore:
     # LLM: 所有组件共用原 storage；仅确认组件获得消息幂等追加能力，不新增持久目录或转发旧 API。
     # 函数用途: 组装插话接收、提交、确认和恢复能力，构造期间不读写消息。
@@ -129,20 +129,30 @@ class GuidanceStore:
 
     # LLM: GuidanceStore：回执锁内先写权威回执再修队列及索引；同键异文报错，重试必须返回原消息身份。
     # 函数用途: 按稳定消息 ID 只追加一次补充消息，进程崩溃后重试也会返回同一条记录。
+    # LLM: 只有调用方显式选择try-lock/同一deadline才非阻塞；所有原回执/投影步骤透传，无任意writer，不将部分提交回滚或误认ACK。
+    # 函数用途: 按原幂等键追加；短窗资源忙立即退出原锁，默认调用保原语义。
     def append_once(
         self,
         request: dict[str, Any],
         *,
         dedupe_key: str,
+        blocking: bool = True,
+        deadline: float | None = None,
     ) -> GuidanceEntry:
+        check_io_deadline(deadline)
+        options = {} if blocking and deadline is None else {"blocking": blocking, **({} if deadline is None else {"deadline": deadline})}
         key = str(dedupe_key or "").strip()
         if not key:
             raise ValueError("guidance dedupe_key is required")
         digest = _guidance_input_digest(request)
         receipt_path = self.storage.guidance_dedupe_path(key)
         transition = receipt_path.with_name(f".{receipt_path.name}.transition")
-        with locked_file_transition(transition):
-            receipt = self.ledger.read_receipt(receipt_path)
+        check_io_deadline(deadline)
+        lock_options = {} if blocking else {"blocking": False}
+        with locked_file_transition(transition, **lock_options):
+            check_io_deadline(deadline)
+            receipt = self.ledger.read_receipt(receipt_path, **options)
+            check_io_deadline(deadline)
             if receipt is not None:
                 # 旧回执按写入时的口径比对（见 guidance_receipt_input_matches），同键重试必须回到同一条。
                 if receipt.dedupe_key != key or not guidance_receipt_input_matches(receipt, request):
@@ -150,7 +160,8 @@ class GuidanceStore:
                         f"conversation guidance dedupe key reused with different input: {key}"
                     )
                 if receipt.status in {"pending", "reserved", "submitted"}:
-                    self.ledger.repair_projections(receipt)
+                    self.ledger.repair_projections(receipt, **options)
+                check_io_deadline(deadline)
                 return receipt.entry
             metadata = request.get("metadata")
             prepared_request = {
@@ -169,8 +180,10 @@ class GuidanceStore:
                 updated_at=time.time(),
                 input_digest_version=GUIDANCE_INPUT_DIGEST_VERSION,
             )
-            write_json_file_atomic(receipt_path, receipt.to_dict())
-            self.ledger.repair_projections(receipt)
+            check_io_deadline(deadline)
+            write_json_file_atomic(receipt_path, receipt.to_dict(), **options)
+            self.ledger.repair_projections(receipt, **options)
+            check_io_deadline(deadline)
             return entry
 
     # LLM: GuidanceStore：回执锁内读取并修投影；缺失不代表已消费，坏账显式失败，Gateway 超时对账使用此入口。

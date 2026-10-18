@@ -228,23 +228,23 @@ def _wait_for(predicate, timeout=10):
         pause.wait(min(0.01, remaining))
 
 
-# LLM: 探针原样转交 claim 和 owner 解析，只记录返回事实，不手工搬队列、不伪造 attempt 或终态。
+# LLM: 探针原样转交claim及受理/worker共用的真实owner叶子，只记返回事实；原两次身份复核断言保持，不手工搬队列或伪造终态。
 # 函数用途: 保留真实请求 worker 的认领和 owner 证据，供 HTTP 组合断言核对。
 def _observe_http_worker(monkeypatch):
     claims, resolved = [], []
     original_claim = request_worker.claim_request
-    original_resolve = request_worker._resolve_request_agent
+    original_resolve = request_worker._resolve_request_agent_for_owner
     def claim_probe(*args):
         result = original_claim(*args)
         if result is not None:
             claims.append(result)
         return result
-    def resolve_probe(agent, payload):
-        result = original_resolve(agent, payload)
+    def resolve_probe(agent, owner):
+        result = original_resolve(agent, owner)
         resolved.append(owner_identity_from_config(result.config))
         return result
     monkeypatch.setattr(request_worker, 'claim_request', claim_probe)
-    monkeypatch.setattr(request_worker, '_resolve_request_agent', resolve_probe)
+    monkeypatch.setattr(request_worker, '_resolve_request_agent_for_owner', resolve_probe)
     return claims, resolved
 
 

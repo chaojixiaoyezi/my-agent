@@ -1,6 +1,10 @@
+# LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
+# 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
 # LLM: 子代理换轮在原创建锁内使用 canonical run/attempt；插话只按已确认失效身份改绑，联测恢复资格与 UNKNOWN。
 # 模块用途: 协调执行轮的领取、恢复和精确放弃，保持运行账本、任务与插话身份一致。
 from __future__ import annotations
+
+from ...common.request_execution_ports import gateway_short_transaction
 
 """Runner attempt lifecycle helpers for subagent runs."""
 
@@ -24,66 +28,69 @@ from .recovery.strategy import (
 
 # LLM: 原创建锁覆盖 canonical 复读、准确激活和投影；文件消费与活动指针同次 mutate，先核对身份才可恢复链接与 Goal。
 # 函数用途: 在同一短事务里准备新执行轮和恢复目标，避免取消或插话在换代中间插入。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def prepare_runner_attempt(
     manager: object, run_id: str, *, retry_reason: str = "",
     expected_attempt_id: str | None = None,
 ) -> SubAgentTask:
-    with manager.creation_guard():
-        task = manager.load(run_id)
-        resumable_user_stop = user_stopped_run_is_resumable(task)
-        _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
-        previous = f"{task.status}/{task.failure_type or 'none'}"
-        strategy = build_subagent_recovery_strategy(
-            SubagentRecoveryStrategyRequest(task=task)
-        )
-        attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task, expected_attempt_id)
-        if resumable_user_stop:
-            _reactivate_user_stopped_conversation_link(manager, task)
-        if not attempt_id:
-            attempt_id = _framework_new_id("attempt_id")
-        _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
-        now = time.time()
-
-        # LLM: reducer 只更新启动所属字段，不覆盖并发授权；文件接纳在锁内复验并与 RUNNING 一起落盘。
-        # 函数用途: 在最新任务上发布准确执行轮，保留准备期间产生的其它状态。
-        def activate(current: SubAgentTask) -> None:
-            _assert_runner_attempt_start_allowed(current, resumable_user_stop=resumable_user_stop)
-            if manager.runtime_db is None:
-                from ..file_runner_start import activate_file_runner_start
-
-                activate_file_runner_start(current, expected_attempt_id, attempt_id, now)
-            guidance = (task.attributes or {}).get("guidance_recovery")
-            if isinstance(guidance, dict) and guidance.get("recovered_attempt_id") == attempt_id:
-                current.attributes = {**dict(current.attributes or {}), "guidance_recovery": guidance}
-            current.status = "RUNNING"
-            current.verification_status = "UNVERIFIED"
-            current.failure_type = ""
-            current.ended_at = 0.0
-            current.runner_active_attempt_id = attempt_id
-            current.runner_last_attempt_at = current.updated_at = current.heartbeat_at = now
-            _record_runner_recovery_preflight(current, strategy, previous)
-            if runtime_task_id:
-                _persist_runtime_task_id(current, runtime_task_id)
-
-        task = manager.mutate(run_id, activate)
-        if (
-            not task_status_in(task.status, {TaskStatus.RUNNING.value})
-            or task.runner_active_attempt_id != attempt_id
-        ):
-            raise RuntimeError(
-                f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
+    with gateway_short_transaction('child_attempt_prepare'):
+        with manager.creation_guard():
+            task = manager.load(run_id)
+            resumable_user_stop = user_stopped_run_is_resumable(task)
+            _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
+            previous = f"{task.status}/{task.failure_type or 'none'}"
+            strategy = build_subagent_recovery_strategy(
+                SubagentRecoveryStrategyRequest(task=task)
             )
-        if resumable_user_stop:
-            from ...conversation.goal_delegation import transition_delegated_goal
+            attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task, expected_attempt_id)
+            if resumable_user_stop:
+                _reactivate_user_stopped_conversation_link(manager, task)
+            if not attempt_id:
+                attempt_id = _framework_new_id("attempt_id")
+            _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
+            now = time.time()
 
-            transition_delegated_goal(manager, task, expected_status="paused", status="active")
-        suffix = f" retry_reason={retry_reason}" if retry_reason else ""
-        manager.actions._append_task_work_log(
-            task,
-            f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
-            f"attempt_id={attempt_id}{suffix}",
-        )
-        return task
+            # LLM: reducer 只更新启动所属字段，不覆盖并发授权；文件接纳在锁内复验并与 RUNNING 一起落盘。
+            # 函数用途: 在最新任务上发布准确执行轮，保留准备期间产生的其它状态。
+            def activate(current: SubAgentTask) -> None:
+                _assert_runner_attempt_start_allowed(current, resumable_user_stop=resumable_user_stop)
+                if manager.runtime_db is None:
+                    from ..file_runner_start import activate_file_runner_start
+
+                    activate_file_runner_start(current, expected_attempt_id, attempt_id, now)
+                guidance = (task.attributes or {}).get("guidance_recovery")
+                if isinstance(guidance, dict) and guidance.get("recovered_attempt_id") == attempt_id:
+                    current.attributes = {**dict(current.attributes or {}), "guidance_recovery": guidance}
+                current.status = "RUNNING"
+                current.verification_status = "UNVERIFIED"
+                current.failure_type = ""
+                current.ended_at = 0.0
+                current.runner_active_attempt_id = attempt_id
+                current.runner_last_attempt_at = current.updated_at = current.heartbeat_at = now
+                _record_runner_recovery_preflight(current, strategy, previous)
+                if runtime_task_id:
+                    _persist_runtime_task_id(current, runtime_task_id)
+
+            task = manager.mutate(run_id, activate)
+            if (
+                not task_status_in(task.status, {TaskStatus.RUNNING.value})
+                or task.runner_active_attempt_id != attempt_id
+            ):
+                raise RuntimeError(
+                    f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
+                )
+            if resumable_user_stop:
+                from ...conversation.goal_delegation import transition_delegated_goal
+
+                transition_delegated_goal(manager, task, expected_status="paused", status="active")
+            suffix = f" retry_reason={retry_reason}" if retry_reason else ""
+            manager.actions._append_task_work_log(
+                task,
+                f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
+                f"attempt_id={attempt_id}{suffix}",
+            )
+            return task
 
 
 # LLM: 终态资格只是接纳前提，不代替 DB 精确 pending 检查；拒绝使用冲突类型，旧 worker 不发布结果。
@@ -153,6 +160,8 @@ def _reactivate_user_stopped_conversation_link(
 
 # LLM: 原创建锁与准备/控制共用；canonical mutate 只放弃显式旧 attempt，不能用旧快照清掉后来激活的 ID。
 # 函数用途: 登记一个执行轮已放弃，仅当它仍是当前轮时清空指针，保留其它并发状态。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def abandon_runner_attempt(
     manager: object,
     run_id: str,
@@ -160,27 +169,28 @@ def abandon_runner_attempt(
     *,
     reason: str = "",
 ) -> SubAgentTask:
-    normalized = str(attempt_id or "").strip()
-    with manager.creation_guard():
-        if not normalized:
-            return manager.load(run_id)
+    with gateway_short_transaction('child_attempt_abandon'):
+        normalized = str(attempt_id or "").strip()
+        with manager.creation_guard():
+            if not normalized:
+                return manager.load(run_id)
 
-        # LLM: reducer 只操作最新 task 的 attempt 字段；不能在 canonical 锁里重新读取或获取 creation 锁。
-        # 函数用途: 合并旧轮废弃记录，同时保护已经换代的新活动轮。
-        def abandon(task: SubAgentTask) -> None:
-            if normalized not in task.runner_abandoned_attempt_ids:
-                task.runner_abandoned_attempt_ids.append(normalized)
-            if task.runner_active_attempt_id == normalized:
-                task.runner_active_attempt_id = ""
-            task.updated_at = time.time()
+            # LLM: reducer 只操作最新 task 的 attempt 字段；不能在 canonical 锁里重新读取或获取 creation 锁。
+            # 函数用途: 合并旧轮废弃记录，同时保护已经换代的新活动轮。
+            def abandon(task: SubAgentTask) -> None:
+                if normalized not in task.runner_abandoned_attempt_ids:
+                    task.runner_abandoned_attempt_ids.append(normalized)
+                if task.runner_active_attempt_id == normalized:
+                    task.runner_active_attempt_id = ""
+                task.updated_at = time.time()
 
-        task = manager.mutate(run_id, abandon)
-        if reason:
-            manager.actions._append_task_work_log(
-                task,
-                f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
-            )
-        return task
+            task = manager.mutate(run_id, abandon)
+            if reason:
+                manager.actions._append_task_work_log(
+                    task,
+                    f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
+                )
+            return task
 
 
 # LLM: Dead-runner supervision must reconcile the exact runtime.db attempt before
@@ -189,6 +199,8 @@ def abandon_runner_attempt(
 # never treated as permission to rerun; recovery-generated terminal events stay
 # requeueable. Keep create_attempt's duplicate/UNKNOWN fences intact.
 # 函数用途: 核对子代理旧执行轮是否已安全封存；自然完成的轮次交给任务投影补写，真正崩溃的轮次才允许重新排队。
+# LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
+# 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def reconcile_dead_runner_attempt(
     manager: object,
     run_id: str,
@@ -196,94 +208,95 @@ def reconcile_dead_runner_attempt(
     *,
     reason: str = "",
 ) -> dict[str, object]:
-    repo = getattr(manager, "runtime_db", None)
-    normalized_attempt_id = str(attempt_id or "").strip()
-    if repo is None or not normalized_attempt_id:
-        return {"ready": True, "reason": "legacy_unmanaged"}
-    run = repo.agent_run_for_run_id(str(run_id or "").strip())
-    if run is None:
-        return {"ready": True, "reason": "legacy_unregistered"}
-    current_attempt_id = str(run["current_attempt_id"] or "").strip()
-    if current_attempt_id != normalized_attempt_id:
+    with gateway_short_transaction('child_dead_attempt_reconcile'):
+        repo = getattr(manager, "runtime_db", None)
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if repo is None or not normalized_attempt_id:
+            return {"ready": True, "reason": "legacy_unmanaged"}
+        run = repo.agent_run_for_run_id(str(run_id or "").strip())
+        if run is None:
+            return {"ready": True, "reason": "legacy_unregistered"}
+        current_attempt_id = str(run["current_attempt_id"] or "").strip()
+        if current_attempt_id != normalized_attempt_id:
+            return {
+                "ready": False,
+                "reason": "runtime_attempt_mismatch",
+                "current_attempt_id": current_attempt_id,
+            }
+        recovery_block = repo.agent_run_recovery_block_for_run_id(run_id)
+        if recovery_block is not None:
+            return {
+                "ready": False,
+                "reason": str(
+                    recovery_block.get("reason") or "authority_recovery_blocked"
+                ),
+                "recovery_block": recovery_block,
+            }
+        attempt = repo.get_attempt(normalized_attempt_id)
+        status = str(attempt["status"] or "").strip() if attempt is not None else ""
+        terminal_projection = _runtime_terminal_projection_fact(
+            repo,
+            normalized_attempt_id,
+            run_status=str(run["status"] or "").strip(),
+            attempt_status=status,
+        )
+        if terminal_projection is not None:
+            return {
+                "ready": False,
+                "reason": "runtime_terminal_projection_required",
+                "status": status,
+                "terminal_projection": terminal_projection,
+            }
+        safe_statuses = {"pending", "done", "failed", "cancelled", "recovered"}
+        if status in safe_statuses:
+            return {"ready": True, "reason": "runtime_attempt_safe", "status": status}
+        if status != "running":
+            return {
+                "ready": False,
+                "reason": "runtime_attempt_not_reclaimable",
+                "status": status,
+            }
+        result = repo.reclaim_orphaned_attempt(
+            normalized_attempt_id,
+            operator="subagent-supervision",
+            reason=str(reason or "dead_runner_recovery"),
+        )
+        recovery_block = repo.agent_run_recovery_block_for_run_id(run_id)
+        if recovery_block is not None:
+            return {
+                "ready": False,
+                "reason": str(
+                    recovery_block.get("reason") or "authority_recovery_blocked"
+                ),
+                "recovery_block": recovery_block,
+                "reclaim": result,
+            }
+        current = repo.agent_run_for_run_id(run_id)
+        current_id = (
+            str(current["current_attempt_id"] or "").strip()
+            if current is not None
+            else ""
+        )
+        if current_id != normalized_attempt_id:
+            return {
+                "ready": False,
+                "reason": "runtime_attempt_changed_during_reclaim",
+                "current_attempt_id": current_id,
+                "reclaim": result,
+            }
+        attempt = repo.get_attempt(normalized_attempt_id)
+        status = str(attempt["status"] or "").strip() if attempt is not None else ""
+        ready = status in safe_statuses
         return {
-            "ready": False,
-            "reason": "runtime_attempt_mismatch",
-            "current_attempt_id": current_attempt_id,
-        }
-    recovery_block = repo.agent_run_recovery_block_for_run_id(run_id)
-    if recovery_block is not None:
-        return {
-            "ready": False,
-            "reason": str(
-                recovery_block.get("reason") or "authority_recovery_blocked"
+            "ready": ready,
+            "reason": (
+                "runtime_attempt_safe"
+                if ready
+                else str(result.get("reason") or "runtime_attempt_busy")
             ),
-            "recovery_block": recovery_block,
-        }
-    attempt = repo.get_attempt(normalized_attempt_id)
-    status = str(attempt["status"] or "").strip() if attempt is not None else ""
-    terminal_projection = _runtime_terminal_projection_fact(
-        repo,
-        normalized_attempt_id,
-        run_status=str(run["status"] or "").strip(),
-        attempt_status=status,
-    )
-    if terminal_projection is not None:
-        return {
-            "ready": False,
-            "reason": "runtime_terminal_projection_required",
             "status": status,
-            "terminal_projection": terminal_projection,
-        }
-    safe_statuses = {"pending", "done", "failed", "cancelled", "recovered"}
-    if status in safe_statuses:
-        return {"ready": True, "reason": "runtime_attempt_safe", "status": status}
-    if status != "running":
-        return {
-            "ready": False,
-            "reason": "runtime_attempt_not_reclaimable",
-            "status": status,
-        }
-    result = repo.reclaim_orphaned_attempt(
-        normalized_attempt_id,
-        operator="subagent-supervision",
-        reason=str(reason or "dead_runner_recovery"),
-    )
-    recovery_block = repo.agent_run_recovery_block_for_run_id(run_id)
-    if recovery_block is not None:
-        return {
-            "ready": False,
-            "reason": str(
-                recovery_block.get("reason") or "authority_recovery_blocked"
-            ),
-            "recovery_block": recovery_block,
             "reclaim": result,
         }
-    current = repo.agent_run_for_run_id(run_id)
-    current_id = (
-        str(current["current_attempt_id"] or "").strip()
-        if current is not None
-        else ""
-    )
-    if current_id != normalized_attempt_id:
-        return {
-            "ready": False,
-            "reason": "runtime_attempt_changed_during_reclaim",
-            "current_attempt_id": current_id,
-            "reclaim": result,
-        }
-    attempt = repo.get_attempt(normalized_attempt_id)
-    status = str(attempt["status"] or "").strip() if attempt is not None else ""
-    ready = status in safe_statuses
-    return {
-        "ready": ready,
-        "reason": (
-            "runtime_attempt_safe"
-            if ready
-            else str(result.get("reason") or "runtime_attempt_busy")
-        ),
-        "status": status,
-        "reclaim": result,
-    }
 
 
 # LLM: RuntimeDB terminal rows alone are not enough to close a logical child:

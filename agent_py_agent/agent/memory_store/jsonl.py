@@ -1,4 +1,9 @@
+# LLM: C仅存IO策略，原资源/锁/费用算法共用；formal成功比较清旧pending、archive与全部client清理末叶闭合，实际native先透传再到下一付费。
+# LLM: 新C snapshot flush只在成功search后由原活scope显式调用，锁出生及固定formal一次replace沿原末门；失败保pending，默认flush/apply_batch不变。
+# LLM: 本片只修原cache回收catch的四实际类型优先，原authority/记忆/删除/派生算法与权限保持不变。
+# 模块用途: 实现唯一JSONL长期记忆主链；原可选回收短门不把未结降级成零回收成功。
 
+# LLM: C recent显式path只读与原Agent虚方法链共用唯一scanner/materializer，不构造仓库或增加写权。
 # LLM: 记忆权威链保持原schema/path；后台缓存回收只把最终派生缓存改写接原claim短门，完整keep扫描在T外。
 # 模块用途: 管理版本化正式记忆与派生检索缓存，原读写策略和Count0副作用不变。
 from __future__ import annotations
@@ -18,6 +23,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.global_write_commit import execute_global_write
 from ..common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
@@ -39,7 +45,7 @@ def _memory_record_from_obj(obj: dict) -> MemoryRecord | None:
     except (TypeError, ValueError):
         return None
 
-from ._jsonl_indexing import JsonlMemoryIndexMixin
+from ._jsonl_indexing import _NATIVE_MEMORY_ERRORS, JsonlMemoryIndexMixin
 from .operations import (
     append_memory_operation_events,
     append_memory_purge_event,
@@ -211,10 +217,26 @@ class MemorySubjectConflict(ValueError):
             f"memory subject {subject_key!r} already exists as {entry_id}; "
             "list and replace the stable entry_id"
         )
+# LLM: 唯一真实JSONL依赖DTO只聚合原七个引用/配置和IO bool；不签权、不持source/callback、不管理生命周期。
+# 类用途: 让原constructor和C显式factory共用同一初始化输入，避免增加第九个展开参数。
+@dataclass(frozen=True)
+class JsonlMemoryDependencies:
+    local_store: LocalStore | None = None
+    ops_path: str | Path | None = None
+    candidate_service: CandidateService | None = None
+    embedder: object | None = None
+    semantic_status: dict[str, str] | None = None
+    quota_enforcer: OwnerQuotaEnforcer | None = None
+    vector_identity: dict[str, object] | None = None
+    coordinator_io: bool = False
+
+
 
 
 # LLM: This mixin owns authoritative JSONL mutations; recall/index behavior is composed separately below.
 # 类用途: 初始化长期记忆并实现新增、替换、删除、批量提交和 legacy 清除。
+# LLM: C仅保存IO bool，不保存source/callback；原正式事实、缓存与pending仍同实例，构造次序保持。
+# 类用途: 绑定唯一JSONL和原检索依赖，不增加另一记忆状态。
 class _JsonlMemoryIdentityMixin:
     """JSONL-backed memory store with optional LocalStore indexing.
 
@@ -228,6 +250,8 @@ class _JsonlMemoryIdentityMixin:
 
     # LLM: 构造器只绑定唯一 authority/ops/Candidate/index/quota；不得增加 legacy 双读路径。
     # 函数用途: 初始化当前 owner 正式长期记忆仓库及可选派生服务。
+    # LLM: 原八参constructor只聚合默认False依赖DTO，初始化由同一叶完成；明确C另走from_dependencies，不后置改策略。
+    # 函数用途: 准备原正式记忆对象及可选C本地IO策略。
     def __init__(
         self,
         path: str | Path,
@@ -253,12 +277,38 @@ class _JsonlMemoryIdentityMixin:
 
         副作用说明:
         会创建 path 的父目录；不会创建 LocalStore，也不会调用模型。"""
+
+        self._init_from_dependencies(path, JsonlMemoryDependencies(
+            local_store=local_store,
+            ops_path=ops_path,
+            candidate_service=candidate_service,
+            embedder=embedder,
+            semantic_status=semantic_status,
+            quota_enforcer=quota_enforcer,
+            vector_identity=vector_identity,
+        ))
+
+    # LLM: 原constructor与明确C factory共用唯一字段/目录初始化叶；dependencies是纯真实引用，不保存source，不复制算法。
+    # 函数用途: 按原顺序初始化正式记忆，IO策略在第一次目录出生前已确定。
+    def _init_from_dependencies(self, path, dependencies):
+        local_store = dependencies.local_store
+        ops_path = dependencies.ops_path
+        candidate_service = dependencies.candidate_service
+        embedder = dependencies.embedder
+        semantic_status = dependencies.semantic_status
+        quota_enforcer = dependencies.quota_enforcer
+        vector_identity = dependencies.vector_identity
+        coordinator_io = dependencies.coordinator_io
+        self.coordinator_io = coordinator_io
         self.path = Path(path)
         self.local_store = local_store
         self.ops_path = Path(ops_path) if ops_path is not None else None
         self.candidate_service = candidate_service
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
-        ensure_private_dir(self.path.parent)
+        if self.coordinator_io:
+            _coordinator_memory_write(lambda: ensure_private_dir(self.path.parent))
+        else:
+            ensure_private_dir(self.path.parent)
         self._embedder = embedder  # 配了 → 记忆召回加一路语义向量(检索拓宽 #1);None → 纯关键词
         self._semantic_status = dict(semantic_status or {"state": "configured" if embedder is not None else "disabled"})
         self._semantic_errors: dict[str, str] = {}
@@ -268,6 +318,17 @@ class _JsonlMemoryIdentityMixin:
         self.quota_enforcer = quota_enforcer
         # 访问信号缓冲:命中先累积内存,随下一次写原子落盘,避免每次召回都写一次文件。
         self._pending_access: dict[str, float] = {}
+
+
+    # LLM: 仅实际JsonlMemory的明确依赖factory；不借此绕自定义子类初始化，不制造Agent/source或后置改策略。
+    # 函数用途: 分配同一个真实JSONL仓库后调用唯一初始化叶，失败不发布半构造对象。
+    @classmethod
+    def from_dependencies(cls, path, dependencies):
+        if cls is not JsonlMemory or type(dependencies) is not JsonlMemoryDependencies:
+            raise TypeError("explicit memory construction requires JsonlMemory dependencies")
+        memory = cls.__new__(cls)
+        memory._init_from_dependencies(path, dependencies)
+        return memory
 
     # LLM: add 仍走 add_record/apply_batch 唯一权威提交链；attributes 只承载结构化来源等元数据。
     # 函数用途: 便捷新增一条长期记忆，并返回实际写入或已存在的稳定记录。
@@ -398,6 +459,8 @@ class _JsonlMemoryIdentityMixin:
 
 # LLM: 公共输入规范化后才执行持锁配额变更；迁移只精确清理已有legacy记录，不能扫描跨owner内容。
 # 类用途: 原子提交长期记忆批次，并为迁移精确清除已有 legacy 记录。
+# LLM: C原quota与formal锁跨业务仍在Root外，成功比较清旧pending，正式/索引/候选责任顺序保持。
+# 类用途: 提交原批量记忆事实并保原删除清理partial。
 class _JsonlMemoryMutationMixin:
     # LLM: 删除证据仍来自同一精确墓碑；布尔入口保留兼容，不能用其它来源或版本补证。
     # 函数用途: 判断指定正式删除是否已提交。
@@ -425,6 +488,8 @@ class _JsonlMemoryMutationMixin:
 
     # LLM: 锁内全量验证并原子替换；同一准入内脱敏，正式删除提交后的必要清理失败单独报告且保留墓碑。
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
+    # LLM: C原扫描/配额/编码/脱敏门外，formal准确一次末写成功才compare-delete本次pending；ops/清理仍原顺序且native不洗成功。
+    # 函数用途: 沿唯一原批量算法落正式事实，失败保真实已写与待落访问信号。
     def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
 
@@ -437,7 +502,7 @@ class _JsonlMemoryMutationMixin:
             raise ValueError("memory operations list is empty")
         committed: list[MemoryRecord]
         with _quota_admission(self.quota_enforcer, _admission) as admission:
-            with locked_json_path(self.path):
+            with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
                 current_events = self._read_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)
                 active = {record.entry_id: record for record in working}
@@ -478,17 +543,26 @@ class _JsonlMemoryMutationMixin:
                     record for record in current_events if record.entry_id not in final_removed_ids
                 ]
                 # 访问信号:本次写事务顺带落盘累积的 touch 事件(原子,不额外开锁)。
-                touch_events = _touch_events({key: stamp for key, stamp in self._pending_access.items() if key in active})
+                if self.coordinator_io:
+                    pending_snapshot = dict(self._pending_access)
+                    touch_events = _touch_events({key: stamp for key, stamp in pending_snapshot.items() if key in active})
+                else:
+                    touch_events = _touch_events({key: stamp for key, stamp in self._pending_access.items() if key in active})
                 next_events = [*retained_events, *persisted, *touch_events]
                 next_text = "".join(
                     json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
                     for record in next_events
                 )
-                self._pending_access.clear()
+                if not self.coordinator_io:
+                    self._pending_access.clear()
                 _check_memory_quota(admission, self, persisted, next_text)
                 _check_learning_library_write_cap(before_chars, active, committed)
                 self._redact_local_tool_ledgers(removed_contents)
-                write_private_text_file_atomic_unlocked(self.path, next_text)
+                if self.coordinator_io:
+                    _write_coordinator_memory_raw(self.path, next_text)
+                    _consume_pending_snapshot(self, pending_snapshot)
+                else:
+                    write_private_text_file_atomic_unlocked(self.path, next_text)
         from ._jsonl_indexing import removal_cleanup_phase
 
         with removal_cleanup_phase(formal_memory_changed=True, enabled=bool(final_removed_ids)):
@@ -507,8 +581,9 @@ class _JsonlMemoryMutationMixin:
                     self.ops_path,
                     entry_ids=final_removed_ids,
                     content_hashes=removed_content_hashes,
+                    **({} if not self.coordinator_io else {"coordinator_io": True}),
                 )
-            append_memory_operation_events(self.ops_path, persisted)
+            append_memory_operation_events(self.ops_path, persisted, **({} if not self.coordinator_io else {"coordinator_io": True}))
             self._after_commit_indexes(persisted)
             # 已删除取全部历史版本；replace仅取被覆盖版本，新正文缓存不在清理范围内。
             self._forget_cached_vectors(
@@ -609,6 +684,8 @@ class _JsonlMemoryMutationMixin:
 
 # LLM: 检索投影与生命周期治理分离:Search 只消费 active JSONL 并返回不含陈旧索引正文的召回。
 # 类用途: 提供关键词/语义融合与 scope 内确定性召回。
+# LLM: C只在实际embedding前复用原scope纯当前校验；实际native先同对象穿出，不重搜/重嵌，原排序保持。
+# 类用途: 复用原JSONL与派生融合检索，显式访问flush归HTTP调用方。
 class _JsonlMemorySearchMixin:
     # LLM: 每个向量命中必须按 active entry ID 和正文逐字复核，旧向量不能复活历史内容；
     #   身份不一致、没有身份、维度不符或库读不了时，把已有向量当作不存在（退回关键词），不静默混用两个向量空间。
@@ -617,6 +694,8 @@ class _JsonlMemorySearchMixin:
     #   嵌入请求按“召回”计入进程用量（S7，embedding_usage）。第二个返回值是这一次语义臂的降级原因（空串表示语义检索做成了，
     #   零命中也算做成），给 _fuse_semantic 记召回方式用，口径同 HybridRetriever：嵌入失败 embedding_failed，身份不符用身份原因码。
     # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果和降级原因，失败保留可观察降级状态。
+    # LLM: C在原identity检查后、query embedding前做已批准纯当前校验；实际scope/physical native先抛，普通降级不变。
+    # 函数用途: 执行同一次原语义召回，保持费用和active二次核验。
     @counted_as("memory_recall")
     def _semantic_records_report(self, query: str, top_k: int) -> tuple[list[MemoryRecord], str]:
         from ..retrieval.vector_store import VectorIdentityError
@@ -628,6 +707,8 @@ class _JsonlMemorySearchMixin:
             ok, reason = store.identity_status()
             if not ok:
                 raise VectorIdentityError(reason)
+            if self.coordinator_io:
+                _coordinator_memory_write(lambda: None)
             with embedding_input_type("query"):
                 query_vector = self._embedder.embed([query])[0]
             hits = store.search(query_vector, top_k=top_k)
@@ -635,6 +716,8 @@ class _JsonlMemorySearchMixin:
             self._record_semantic_health("identity", exc)
             return [], str(getattr(exc, "reason", "") or "vector_identity_mismatch")
         except Exception as exc:
+            if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
             self._record_semantic_health("search", exc)
             return [], "embedding_failed"
         self._record_semantic_health("identity")
@@ -810,6 +893,8 @@ class _JsonlMemorySearchMixin:
     #   竞态收口：写回前用 active 身份复核每个 id，索引文本变了或记录已不在 active，
     #   一律不回写（P5：否则已删事实的向量会被检索回写复活）。
     # 函数用途: 把本次检索中现嵌得到的向量补进正文哈希缓存。
+    # LLM: C原cache/keep算法不变，准确写叶由73闭合；真实native先抛，不能只健康诊断后继续下一付费。
+    # 函数用途: 保存本轮原新嵌向量，保原同实例缓存与跨实例删除语义。
     def _remember_cached_vectors(
         self,
         docs: list[tuple[str, str]],
@@ -843,6 +928,8 @@ class _JsonlMemorySearchMixin:
             if reported:
                 self._record_semantic_health("cache_write", reported)
         except Exception as exc:
+            if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
             self._record_semantic_health("cache_write", exc)
 
     # LLM: 锁内复核判据必须是最新 active 状态；只返回当前仍有效的缓存键集合。
@@ -852,6 +939,8 @@ class _JsonlMemorySearchMixin:
 
     # LLM: replace/remove后统一按正式活跃文本回收所有模型指纹，不能误删其它同文事实的共享键。
     # 函数用途: 清理已无活跃引用的文本向量，保留当前仍有效的缓存。
+    # LLM: C原清理native优先同对象抛，普通故障仍健康诊断；不因禁用embedding跳旧磁盘正文清理。
+    # 函数用途: 沿原active事实回收正文缓存，保清理未结。
     def _forget_cached_vectors(self, contents: Iterable[tuple[str, object]]) -> None:
         from ._jsonl_indexing import _purge_text_vector_orphans
 
@@ -859,6 +948,8 @@ class _JsonlMemorySearchMixin:
             _purge_text_vector_orphans(self)
             self._record_semantic_health("cache_purge")
         except Exception as exc:
+            if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
             self._record_semantic_health("cache_purge", exc)
 
     # LLM: 指纹与正文哈希的组合只有一个实现，读/写/清理三处共用，避免键口径再次分叉。
@@ -924,6 +1015,10 @@ class _JsonlMemorySearchMixin:
 
 # LLM: 生命周期治理与检索投影分离:Lifecycle 只做访问信号、总量闸与健康快照,不直接召回。
 # 类用途: 提供访问记录、flush、condense、过期视图与运行快照。
+# LLM: C专用snapshot flush仅追加同source固定末写；不改变普通维护或Count0的原flush策略。
+# 类用途: 管理原记忆访问与维护生命周期，明确区分C成功访问的显式落盘。
+# LLM: C仍原condense/访问算法，archive先提交的partial保留，不新建恢复表或改变user_explicit保留。
+# 类用途: 管理原长期记忆访问元数据与配额治理。
 class _JsonlMemoryLifecycleMixin:
     # LLM: all 只 materialize 当前 active、未过期的正式记忆，绝不合并 Daily/Candidate/ops。
     # 函数用途: 读取当前 owner 可召回的全部长期事实。
@@ -991,9 +1086,44 @@ class _JsonlMemoryLifecycleMixin:
             write_private_text_file_atomic_unlocked(self.path, next_text)
         return len(pending)
 
+    # LLM: 只给当前owner实际HTTP长scope使用；原formal锁在Root外持有，锁出生/固定一次replace各消费同source末门，失败保完整snapshot。
+    #   只在成功search后显式调用，不在finally补写；原默认flush/apply_batch不变，C3-J另负责其它写链。
+    # 函数用途: 一次冲刷本实例访问信号，成功后仅删仍等于本次时间戳的旧内存键。
+    def flush_access_events_from_source(self) -> int:
+        from ..common.global_write_commit import execute_global_write
+        from ._jsonl_maintenance import read_maintenance_objects, require_maintenance_event
+
+        snapshot = dict(self._pending_access)
+        if not snapshot:
+            return 0
+
+        # LLM: 仅将原lock FD出生或固定formal writer交给当前活source，不持有新callback、不接受外部path。
+        # 函数用途: 要求本次C末门存在，缺源不得按Count0回退。
+        def commit(operation):
+            return execute_global_write(operation, require_scope=True)
+
+        with locked_json_path(self.path, birth_commit=commit):
+            payloads, _opened = read_maintenance_objects(self.path, require_source=True)
+            current_events = []
+            for payload in payloads:
+                record = _memory_record_from_obj(payload)
+                require_maintenance_event(record)
+                current_events.append(_with_legacy_identity(record))
+            active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
+            pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
+            next_text = "".join(json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
+                for record in [*current_events, *_touch_events(pending)])
+            commit(lambda: write_private_text_file_atomic_unlocked(self.path, next_text, replace_once=True))
+        for key, stamp in snapshot.items():
+            if self._pending_access.get(key) == stamp:
+                del self._pending_access[key]
+        return len(pending)
+
     # LLM: 总量闸只淘汰"非用户明确要求"的冷条目;user_explicit 永不因用量淘汰(用户显式记忆
     # 是硬事实),且单次最多移除 25%——冷启动后仍有渐进收缩空间,不一次性清空。
     # 函数用途: 超总量上限时,把最久未被访问的非 user_explicit 条目移入 archive 并移除。
+    # LLM: C仅archive锁FD出生及现成raw末写入Root，原选择/比例/顺序不变；archive成功后formal失败保真实partial。
+    # 函数用途: 保原归档后删除治理，不跳过旧非explicit条目。
     def condense(
         self,
         *,
@@ -1026,14 +1156,17 @@ class _JsonlMemoryLifecycleMixin:
             return []
         # 先入 archive 账本,再在主文件移除——archive 多写一次无害,主文件移除失败可下次重试。
         archive_path = self.path.with_name(self.path.name + ".archive.jsonl")
-        with locked_json_path(archive_path):
+        with locked_json_path(archive_path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
             archived_text = "".join(
                 json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
                 for record in to_remove
             )
             if archive_path.exists():
                 archived_text = archive_path.read_text(encoding="utf-8") + archived_text
-            write_private_text_file_atomic_unlocked(archive_path, archived_text)
+            if self.coordinator_io:
+                _write_coordinator_memory_raw(archive_path, archived_text)
+            else:
+                write_private_text_file_atomic_unlocked(archive_path, archived_text)
         self.apply_batch(
             [
                 {
@@ -1140,13 +1273,17 @@ def _scoped_retrieval_facts(
 #   索引文本逐字相同的向量（写入与重建都按 index_text 嵌入并存这段文本，旧条目只要文本不同就不复用）。维度由检索器再核。
 #   memory 是检索 mixin 所在的 JsonlMemory；放在模块级是为了不撑大检索 mixin。
 # 函数用途: 从 memory_vectors.json 取出能直接复用的文档向量。
+# LLM: C实际native不可吞成没有缓存后付费重嵌；普通读取降级保持，仍只逐字相同文档复用。
+# 函数用途: 按原空间身份读取既有文档向量。
 def _stored_vectors_for(memory: object, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
     if not docs:
         return {}
     try:
         store = memory._vector_store()
         stored = store.stored_vectors(doc_id for doc_id, _text in docs) if store is not None else {}
-    except Exception:
+    except Exception as exc:
+        if getattr(memory, "coordinator_io", False) and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+            raise
         return {}
     texts = dict(docs)
     return {doc_id: vector for doc_id, (vector, text) in stored.items() if text == texts.get(doc_id)}
@@ -1156,6 +1293,8 @@ def _stored_vectors_for(memory: object, docs: list[tuple[str, str]]) -> dict[str
 #   懒建缓存必须放进 try：构造缓存时会读盘，读错误不能冒出检索路径（模块合同：读失败等价于没有缓存，检索结果不变）。
 #   放在模块级是为了不撑大检索 mixin。
 # 函数用途: 按正文哈希取出已缓存的向量。
+# LLM: C真实native在下一embedding前同对象抛，普通cache读错仍原空集合/诊断；不造第二cache。
+# 函数用途: 读取原正文哈希向量缓存，保持原费用复用。
 def _text_cache_vectors_for(memory: object, docs: list[tuple[str, str]]) -> dict[str, list[float]]:
     try:
         cache = memory._text_vector_cache()
@@ -1169,6 +1308,8 @@ def _text_cache_vectors_for(memory: object, docs: list[tuple[str, str]]) -> dict
         memory._record_semantic_health("cache_read", cache.last_read_error)
         return {doc_id: found[key] for doc_id, key in keys.items() if isinstance(found.get(key), list)}
     except Exception as exc:
+        if getattr(memory, "coordinator_io", False) and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+            raise
         memory._record_semantic_health("cache_read", exc)
         return {}
 
@@ -1186,6 +1327,8 @@ def _semantic_unavailable_reason(semantic_status: dict[str, str]) -> str:
 
 # LLM: 此层只读active权威并维护可重建检索投影；派生索引和缓存都不成为正式记忆权威。
 # 类用途: 从 active JSONL 读取并执行关键词、FTS 与可选向量召回。
+# LLM: C各client可达writer/lock出生接当前scope，native先传播；未接管理维护接口不据此称可执行。
+# 类用途: 复用原正式召回与投影，不赋予索引独立权威。
 class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixin, JsonlMemoryIndexMixin):
     # LLM: 按操作独立记录派生错误；只有该操作成功才清除，无embedder时不能覆盖禁用/配置故障原因。
     #   带 reason 属性的异常（如 VectorIdentityError）以 reason 码作为错误码，保证结构一致。
@@ -1209,6 +1352,8 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
 
     # LLM: 向量库位于当前 owner memory 根且仅是 lazy projection；无 embedder 时必须完全关闭。
     # 函数用途: 获取当前 owner 的可重建向量索引实例。
+    # LLM: C原lazy字段保存同一73向量对象，只有内部策略透传，无source字段或新registry。
+    # 函数用途: 返回原同owner语义向量实例，默认身份/禁用语义保持。
     def _vector_store(self):
         """本地 per-owner 向量库(memory_vectors.json,在 owner home 内)。无 embedder 返回 None。
 
@@ -1220,7 +1365,7 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         if self._vector_store_cache is None:
             from ..retrieval.vector_store import VectorStore
 
-            self._vector_store_cache = VectorStore(self._vector_store_path(), identity=self._vector_identity)
+            self._vector_store_cache = VectorStore(self._vector_store_path(), identity=self._vector_identity, **({} if not self.coordinator_io else {"coordinator_io": True}))
         return self._vector_store_cache
 
     # LLM: 向量库固定在正式记忆 JSONL 同目录的 memory_vectors.json；状态预览和语义通道必须指向同一文件。
@@ -1231,6 +1376,8 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
     # LLM: 正文哈希缓存独立成文件（memory_text_vectors.json），检索路径永不重写含明文向量库；
     #   无 embedder 时必须完全关闭。它只是派生数据，丢了按"没有缓存"重算。
     # 函数用途: 获取当前 owner 的正文哈希向量缓存实例。
+    # LLM: C原lazy字段只保存73真实缓存引用，True仅透传IO策略，原指纹/实例寿命不变。
+    # 函数用途: 复用同一个正文向量缓存，不靠重建假装命中。
     def _text_vector_cache(self):
         """本地 per-owner 正文哈希缓存(memory_text_vectors.json)。无 embedder 返回 None。"""
         if self._embedder is None:
@@ -1238,13 +1385,15 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
         if self._text_vector_cache_obj is None:
             from ..retrieval.text_vector_cache import TextVectorCache
 
-            self._text_vector_cache_obj = TextVectorCache(self.path.parent / "memory_text_vectors.json")
+            self._text_vector_cache_obj = TextVectorCache(self.path.parent / "memory_text_vectors.json", **({} if not self.coordinator_io else {"coordinator_io": True}))
         return self._text_vector_cache_obj
 
     # LLM: 向量写失败不改变权威提交；metadata 仍需携带可与 active JSONL 复核的完整身份。
     #   身份不一致时拒绝写入（不把新模型的向量混进旧库），降级状态可见，等重建修正。
     #   嵌入请求按“记忆写入”计入进程用量（S7，embedding_usage）。
     # 函数用途: 尽力把一条正式记忆写入向量索引，失败进入健康诊断，不回滚正式记忆。
+    # LLM: C实际native先抛；上一叶成功后在原document embedding前纯当前校验，网络和原领域锁仍Root外，普通降级保持。
+    # 函数用途: 按原文本/身份/费用给已提交记忆写向量投影。
     @counted_as("memory_write")
     def _index_vector(self, record: MemoryRecord) -> None:
         try:
@@ -1257,17 +1406,23 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
             from ..retrieval.text_vector_cache import index_text
 
             text = index_text(record.content, record.attributes)
+            if self.coordinator_io:
+                _coordinator_memory_write(lambda: None)
             vector = self._embedder.embed([text])[0]
             if self._write_current_vector(store, record, (vector, text)):
                 self._record_semantic_health("index")
         except Exception as exc:
+            if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
             self._record_semantic_health("index", exc)
 
     # LLM: 网络embedding不占权威锁；真正落盘时持锁复核至写完，删除或替换先提交则拒绝旧正文。
     # 函数用途: 原子核对并写入仍然属于当前事实的向量投影。
+    # LLM: C仅formal锁FD出生进门，原版本核对和等待在外，73实际向量writer再末核同source。
+    # 函数用途: 在原删除互斥锁内保存仍然有效的向量。
     def _write_current_vector(self, store, record, embedded) -> bool:
         vector, text = embedded
-        with locked_json_path(self.path):
+        with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
             if not self._projection_is_current(record):
                 return False
             store.upsert(_record_vec_id(record), vector, text=text, metadata=_record_payload(record))
@@ -1343,7 +1498,9 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
     #   否则维护状态天天写 `reclaimed: 0`，看起来像"跑过、没孤儿"，实际是没跑成——
     #   这正是上一轮被复审抓到的"假的结构化事实"。失败时返回错误说明由调用方带进维护状态。
     # 函数用途: 回收孤儿键；返回 (回收条数, 错误说明)，无错误时说明为空串。
-    # LLM: 可选原claim短门只覆盖cache最终改写；原keep集合长读取在T外，撤权typed不作0回收成功。
+    # LLM: 可选原claim短门只覆盖cache最终改写；原keep集合长读取在T外，四实际类型原对象透传不作0成功。
+    # LLM: C当前scope/source native同对象优先，原physical四类透传仍保；keep扫描门外，不把回收0当落盘成功。
+    # 函数用途: 按原active文本清理孤儿缓存并保普通错误诊断。
     def reclaim_text_cache_orphans(self, *, commit_transition=None) -> tuple[int, str]:
         cache = self._text_vector_cache_for_reclaim()
         if cache is None:
@@ -1362,8 +1519,16 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
                 return cache.retain_content_hashes(keep_hashes)
             dropped = operation() if commit_transition is None else commit_transition(operation)
         except Exception as exc:
-            from ..gateway_parts.request_errors import RequestExecutionOutcomeUncertainError
-            if isinstance(exc, RequestExecutionOutcomeUncertainError):
+            if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
+            from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+            from ..common.request_execution_ports import (
+                RequestExecutionContextUnavailable,
+                RequestExecutionOutcomeUncertainError,
+            )
+            from ..common.tool_write_context import ToolWriteContextUnavailable
+            if isinstance(exc, (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+                                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError)):
                 raise
             return 0, f"{type(exc).__name__}: {exc}"
         # 键被成功清点但没删掉任何东西，也可能是"读不出缓存、拿不到锁"——两种情况
@@ -1375,12 +1540,20 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
 
     # LLM: 回收只需要缓存文件本身，不需要 embedder；这里给出一条不经过 _text_vector_cache() 的取用路径。
     # 函数用途: 取得用于孤儿回收的正文哈希缓存实例（无 embedder 也返回）。
+    # LLM: C即使无embedder也复用原cache字段并透传73策略；默认原构造形状不变，真实native不吞成None。
+    # 函数用途: 获取同owner原孤儿回收缓存，不漏禁用embedding后的旧文件。
     def _text_vector_cache_for_reclaim(self):
         try:
             from ..retrieval.text_vector_cache import TextVectorCache
 
+            if self.coordinator_io:
+                if self._text_vector_cache_obj is None:
+                    self._text_vector_cache_obj = TextVectorCache(self.path.parent / "memory_text_vectors.json", coordinator_io=True)
+                return self._text_vector_cache_obj
             return TextVectorCache(self.path.parent / "memory_text_vectors.json")
-        except Exception:
+        except Exception as exc:
+            if self.coordinator_io and isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
             return None
 
     # LLM: 文件读取先 materialize 版本事件并过滤删除/过期，供正常召回使用。
@@ -1388,20 +1561,10 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
     def _read_memory_file(self, path: Path) -> list[MemoryRecord]:
         return _materialize_memory_events(self._read_memory_events(path))
 
-    # LLM: 原始事件读取保留 version/tombstone 语义；坏行由上层 report 暴露而非变成事实。
-    # 函数用途: 读取一个长期记忆 JSONL 的全部可解析版本事件。
+    # LLM: 保留self虚方法链，原scanner仅下移到同一显式path叶子；覆写事件读取仍影响all，版本/坏行容错不变。
+    # 函数用途: 沿唯一只读叶子读取JSONL事件，不创建目录或派生索引。
     def _read_memory_events(self, path: Path) -> list[MemoryRecord]:
-        if not path.exists():
-            return []
-        # 逐行容错:坏 JSON 行跳过并上报(复用 json_io 健壮读取器),未知顶层字段过滤——
-        # 单坏行/旧版本写的新字段记录不再崩掉整条记忆召回(审计 #11,多版本滚动升级的数据可用性)。
-        report = read_jsonl_objects_report(path, context="memory_store.read_memory_file")
-        records: list[MemoryRecord] = []
-        for obj in report.records:
-            record = _memory_record_from_obj(obj)
-            if record is not None:
-                records.append(_with_legacy_identity(record))
-        return records
+        return _read_memory_events_from_path(path)
 
 
 # LLM: 向量投影的管理动作（状态预览、全量重建）与日常召回分开：只读写可重建的 memory_vectors.json，不碰 memory.jsonl
@@ -1640,6 +1803,28 @@ def _normalized_new_record(record: MemoryRecord) -> MemoryRecord:
     record.version = max(1, int(record.version or 1))
     record.tags = list(record.tags or [])
     return record
+
+
+# LLM: 显式path不授owner权限；C调用方须先核原认证/owner/lease，读取只用原scanner与materializer，不构造带mkdir的仓库。
+# 函数用途: 只读物化现有正式JSONL，供原Agent读取与已核C recent共享同一版本/删除/过期规则。
+def read_memory_records_from_path(path: str | Path) -> list[MemoryRecord]:
+    return _materialize_memory_events(_read_memory_events_from_path(Path(path)))
+
+
+# LLM: 这是原_read_memory_events唯一scanner，下移原字节逻辑；缺失/坏行/读取report语义保持，不能合并候选或触碰缓存。
+# 函数用途: 读取一个明确JSONL路径的原版本事件，无目录、锁文件、索引或访问计数写入。
+def _read_memory_events_from_path(path: Path) -> list[MemoryRecord]:
+    if not path.exists():
+        return []
+    # 逐行容错:坏 JSON 行跳过并上报(复用 json_io 健壮读取器),未知顶层字段过滤——
+    # 单坏行/旧版本写的新字段记录不再崩掉整条记忆召回(审计 #11,多版本滚动升级的数据可用性)。
+    report = read_jsonl_objects_report(path, context="memory_store.read_memory_file")
+    records: list[MemoryRecord] = []
+    for obj in report.records:
+        record = _memory_record_from_obj(obj)
+        if record is not None:
+            records.append(_with_legacy_identity(record))
+    return records
 
 
 # LLM: materialization 只按 entry/version/action/expiry 计算当前态，新时间不会替代不同 entry 的事实。
@@ -2124,3 +2309,23 @@ def _dedupe_memory_records(records: list[MemoryRecord]) -> list[MemoryRecord]:
         seen.add(key)
         deduped.append(record)
     return deduped
+
+
+# LLM: 只消费当次真实scope；准确目录/FD出生及已批准付费前纯当前校验复用此门，不储存callback。
+# 函数用途: 为C原JSONL固定本地叶逐次核对来源，网络/扫描/锁等待不入Root。
+def _coordinator_memory_write(operation):
+    return execute_global_write(operation, require_scope=True)
+
+
+# LLM: 仅由本实例formal/archive调用方传原目标和现成raw，调用方已持原领域锁；默认writer不走这里。
+# 函数用途: 将C原正式或归档JSONL做一次准确原子末写，不补重试。
+def _write_coordinator_memory_raw(path, raw):
+    return _coordinator_memory_write(lambda: write_private_text_file_atomic_unlocked(path, raw, replace_once=True))
+
+
+# LLM: 仅原writer已成功后比较删除本次旧快照；新时间戳和任何失败保留原pending，不建第二账。
+# 函数用途: 清除已经耐久随formal写入的旧访问信号。
+def _consume_pending_snapshot(memory, snapshot):
+    for key, stamp in snapshot.items():
+        if memory._pending_access.get(key) == stamp:
+            del memory._pending_access[key]

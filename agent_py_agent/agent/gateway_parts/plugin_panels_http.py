@@ -133,7 +133,7 @@ def plugin_event_hub(server):
             raise PluginChannelRevoked("插件通道已随 Gateway 停机关闭")
         hub = getattr(server, "plugin_event_hub", None)
         if hub is None:
-            sandbox = bool(getattr(getattr(server.agent, "config", None), "plugin_process_sandbox", False))
+            sandbox = bool(getattr(_server_plugin_config(server), "plugin_process_sandbox", False))
             # 直接复用取/建逻辑，不能再取 _SERVICE_LOCK（本函数已持有，非可重入锁会死锁）
             pool = _locked_shared_pool(server, sandbox)
             server.plugin_channel_pool = pool
@@ -177,7 +177,7 @@ def _locked_shared_pool(server, process_sandbox: bool | None):
         raise PluginChannelRevoked("插件通道已随 Gateway 停机关闭")
     pool = getattr(server, "plugin_channel_pool", None)
     if pool is None:
-        config = getattr(getattr(server, "agent", None), "config", None)
+        config = _server_plugin_config(server)
         if process_sandbox is None:
             process_sandbox = bool(getattr(config, "plugin_process_sandbox", False))
         pool = PluginChannelPool(client_factory=partial(plugin_display_client, process_sandbox=process_sandbox,
@@ -248,3 +248,14 @@ def _owner_sessions(base, scope):
                  "channel": item.last_active_channel, "current": item.session_id == current} for item in sessions]
 
     return read
+
+
+# LLM: 原server是唯一资源来源，冷C只读真实control.config；不是配置fallback或权限裁决，不创建业务Agent/连接。
+# 函数用途: 让同一插件池在冷C时保留实际沙箱与受管凭据配置，已有Agent行为不变。
+def _server_plugin_config(server):
+    agent = getattr(server, 'agent', None)
+    if agent is not None:
+        return agent.config
+    from .control_plane import GatewayControlPlane
+    control = getattr(server, 'control_plane', None)
+    return control.config if type(control) is GatewayControlPlane else None

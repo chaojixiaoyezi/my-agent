@@ -1,3 +1,5 @@
+# LLM: C仅添加原scope的policy锁出生与真实native透传，原quota→policy→candidate→formal/index/mark及condense不拆。
+# 模块用途: 保唯一晋升算法，C不缓存source、不将长业务或费用搬进Root。
 from __future__ import annotations
 
 """统一候选证据审核、冲突裁决和正式晋升服务。"""
@@ -22,7 +24,13 @@ from ..capability.persona_repository import (
     _mutate_persona_document,
     persona_entry_id,
 )
+from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
+from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import locked_json_path
+from ..common.owner_write_errors import (
+    LocalControlCoordinatorUnavailable,
+    OwnerManagementIngressUnavailable,
+)
 from ..common.tool_index_stream import (
     InvalidToolIndexObject,
     iter_decoded_tool_index_objects,
@@ -165,7 +173,8 @@ class LocalStoreToolEvidenceVerifier:
 
     # LLM: Candidate status/effect fields are advisory. Exact ledger evidence wins; the archive
     # fallback requires one unique run/call/tool identity plus typed succeeded operation facts.
-    # 函数用途: 核验一条工具引用，仅真实成功终态通过。
+    # LLM: C实际LocalStore连接出生native不得被宽catch变成缺证据，普通读取失败仍原fallback，不新增证据状态。
+    # 函数用途: 核验原工具终态，保实际来源拒绝对象与原档案回退边界。
     def verify(self, ref: dict[str, object]) -> VerifiedToolEvidence | None:
         owner_id = str(ref.get("owner_id") or "").strip()
         run_id = str(ref.get("run_id") or "").strip()
@@ -177,7 +186,11 @@ class LocalStoreToolEvidenceVerifier:
         if operation_id and callable(reader):
             try:
                 record = reader(run_id=run_id, operation_id=operation_id)
-            except Exception:
+            except Exception as exc:
+                if getattr(self.ledger_store, "coordinator_io", False) and isinstance(
+                        exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
+                                                 LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
+                    raise
                 record = None
         if record is not None:
             return _verified_runtime_gate_record(self.owner_id, ref, record)
@@ -697,13 +710,15 @@ def _promotion_target(candidate: MemoryCandidate) -> str:
     return effective_promotion_target(candidate.promotion_target, candidate.origin, candidate.candidate_type)
 
 
-# 函数用途: 返回提交期 policy 锁上下文（未接线时为空）。
+# LLM: C只把同原policy锁FD出生交活scope，锁等待和原名单读取仍Root外，默认未接线/Count0不变。
+# 函数用途: 持有原policy锁覆盖候选/formal同步提交，不创建第二名单状态。
 @contextmanager
 def _learning_exclusion_scope(service: MemoryPromotionService) -> Iterator[None]:
     if service.exclusion_store is None:
         yield
         return
-    with locked_json_path(service.persona.owner_home / "memory_policy.json"):
+    options = {} if not service.coordinator_io else {"birth_commit": _coordinator_policy_birth}
+    with locked_json_path(service.persona.owner_home / "memory_policy.json", **options):
         yield
 
 
@@ -740,6 +755,7 @@ def _learning_exclusion_block(
 
 
 # LLM: 提交失败已落状态迁移的载体；只把冲突/门槛失败转稳定码，其他异常照常外抛。
+# LLM: C的原OwnerManagementIngressUnavailable也是ValueError，须先同对象穿出；普通lesson/HOT门槛错误仍原包装。
 # 函数用途: 提交目标并把失败转 _PromotionBlocked 供主流程返回。
 def _commit_target_blocked(
     service: MemoryPromotionService,
@@ -749,6 +765,8 @@ def _commit_target_blocked(
     try:
         return service._commit_target(candidate, context)
     except ValueError as exc:
+        if service.coordinator_io and isinstance(exc, OwnerManagementIngressUnavailable):
+            raise
         # lesson/HOT 重复证据门槛不满足(lessons.py:_validate_lesson_candidate):
         # 自动路径保持原状态干净失败,不崩溃——候选留在 approved,证据凑齐后下次再晋升;
         # 稳定原因码供 curator 兜底与 CLI 显示。其他 target 的 ValueError 照常外抛。
@@ -804,13 +822,16 @@ def _promotion_precheck_code(candidate: MemoryCandidate, automatic: bool) -> str
 class MemoryPromotionService(_PromotionCommitMixin):
     # LLM: Construction accepts one authority bundle and one policy object, preventing partial
     # alternative wiring while preserving rejecting verifier defaults.
-    # 函数用途: 初始化唯一 Candidate 晋升服务。
+    # LLM: coordinator_io仅原policy锁出生/实际native透传策略，不保存source，不改review/promote/condense/费用或锁序。
+    # 函数用途: 用真实领域对象装配原晋升服务，C每次末写仍靠当次原scope。
     def __init__(
         self,
         *,
         dependencies: MemoryPromotionDependencies,
         policy: MemoryPromotionPolicy | None = None,
+        coordinator_io: bool = False,
     ) -> None:
+        self.coordinator_io = coordinator_io
         thresholds = policy or MemoryPromotionPolicy()
         self.candidates = dependencies.candidates
         self.long_term = dependencies.long_term
@@ -934,7 +955,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
 
     # LLM: 总量闸:long_term 写成功后顺带治理(超上限按访问信号浓缩,user_explicit 不淘汰)。
     # 放在 promote 成功路径,任何写入口(remember/curator)都自动触发,无需单独 cron。
-    # 函数用途: 使用提交锁内返回的终态快照生成回执，不再依赖提交后的候选读取。
+    # LLM: C只让真实末写native同对象越过旧宽catch，普通condense失败仍原诊断；不禁治理或洗partial成功。
+    # 函数用途: 沿原condense后返回真实晋升结果，C来源失效不可变成成功。
     def _finalize_promotion(
         self,
         candidate: MemoryCandidate,
@@ -944,7 +966,10 @@ class MemoryPromotionService(_PromotionCommitMixin):
         try:
             if str(candidate.promotion_target or "").strip().lower() in {"", "none", "long_term"}:
                 self.long_term.condense()
-        except Exception:
+        except Exception as exc:
+            if self.coordinator_io and isinstance(exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
+                                                 LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
+                raise
             pass  # 治理失败不影响本次晋升本身
         return MemoryPromotionResult(
             candidate.candidate_id,
@@ -1287,3 +1312,9 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
             exc.reason_code,
         )
     return service._finalize_promotion(promoted, reviewer, outcome)
+
+
+# LLM: 只准确policy锁FD出生，原scope每次核当前来源；不保存callback或扩大权限。
+# 函数用途: 为C名单锁出生调用原同步末门，等待仍门外。
+def _coordinator_policy_birth(operation):
+    return execute_global_write(operation, require_scope=True)

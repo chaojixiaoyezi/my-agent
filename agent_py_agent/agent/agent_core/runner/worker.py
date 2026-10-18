@@ -1,16 +1,17 @@
 
 from __future__ import annotations
 
-# LLM: 子代理执行器复用原 attempt、权限与心跳；退出后只读同 run 最新 canonical 决定接续，旧 result 仅保留历史；联测授权收口交错、超时及准确启动。
+# LLM: 子代理复用原attempt/权限/心跳；正MP原timeout Thread ACK也须原stop/join，未知不ordinary结果，原roots/可恢复片/Count0保留。
 # 模块用途: 启动和收口子代理工作片，线程内绑定可信排队 owner，并把新结果交回直属父级。
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
 from ...backends.provider_headers import provider_agent_owner_scope
+from ...common.runner_thread_origin import _capture_runner_thread, _finish_original_runner_thread
 from ...runtime_db.operations import RuntimeConflictError
 from ...settings import AgentConfig
 from ...settings.services.runtime_config_task import apply_task_runtime_config_overlay
@@ -20,7 +21,11 @@ from ...subagents.models import FailureType, SubAgentRunnerResult
 from ...subagents.runner_control import runner_attempt_cancelled
 from ..subagent.params import SubagentRunParams
 from .activity_diagnostics import observe_runner_activity
-from .session_pool import RunnerSessionPoolLease, runner_session_lease
+from .session_pool import (
+    RunnerSessionPoolLease,
+    _raise_transport_unknown,
+    runner_session_lease,
+)
 from .slice_closeout import settle_resumable_worker_slice
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,7 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 _RUNNER_SESSION_HEARTBEAT_SECONDS = 5.0
 
 
-# LLM: expected_attempt_id 固定宿主接纳身份；None 只用于直接同步入口，后台已接纳路径必须显式传入。
+# LLM: expected_attempt_id固定原宿主接纳；request_transport只来自当前独立child来源，不能序列化/构造scope补权；Count0默认None。
 # 类用途: 为一个 worker 保存不可变启动参数，等待期间不重新选取执行轮。
 @dataclass(frozen=True)
 class RunSubagentWorkerParams:
@@ -44,6 +49,7 @@ class RunSubagentWorkerParams:
     local_store: object | None = None
     backend_override: object | None = None
     expected_attempt_id: str | None = None
+    request_transport: object | None = None
 
 
 # LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
@@ -56,6 +62,17 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     if (refusal := _admission_closed_refusal(params)) is not None:
         return refusal
     worker = _build_worker_agent(SimpleAgent, params)
+    from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
+
+    if params.request_transport is not None:
+        params = replace(params, request_transport=replace(params.request_transport, worker_agent=worker))
+    with child_worker_scope(params.request_transport, worker):
+        return _run_bound_subagent_worker(worker, params)
+
+
+# LLM: builder已核原dispatch与canonical child，原激活/配置/租约/结果/可恢复片收口顺序保main；只有原请求短门授写，模型等待不持T。
+# 函数用途: 执行当前准确归属的子代理工作片，未结沿原异常出口保留责任。
+def _run_bound_subagent_worker(worker, params):
     attempt_id = ""
     launch_id = ""
     if not params.dry_run:
@@ -86,6 +103,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
                 activity_observer=partial(observe_runner_activity, worker, params.run_id),
                 attempt_id=attempt_id,
                 launch_id=launch_id,
+                request_transport=params.request_transport,
             )
         ):
             if params.dry_run:
@@ -106,6 +124,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     except InterruptedError:
         raise
     except Exception as exc:
+        _raise_transport_unknown(exc)
         if params.dry_run:
             raise
         # 首次租约发布失败也要沿原结果门释放已领取的执行权，不能留下活进程持有的空运行轮。
@@ -210,10 +229,10 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
         )
 
 
-# LLM: 先做 owner/dispatch 授权，再恢复创建时模型引用；这里只构造依赖，激活前不得发布旧 overlay 到新执行轮。
+# LLM: 保原owner/dispatch授权与模型引用；仅实际child沿同roots/W bootstrap构造后冻结原dispatch receipt，不从task字段补来源，激活前不发旧overlay。
 # 函数用途: 构造子代理依赖并恢复正确模型配置，元数据在准确激活后才条件保存。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
-    worker = simple_agent_cls(params.config, params.root)
+    worker = _construct_transported_worker(simple_agent_cls, params, params.config)
     _attach_worker_runtime(worker, params)
     # 3.txt B.4：dispatch/resume 执行阶段过统一授权查询门。系统驱动（调度器）
     # 无 requester run_id——只做 owner 一致性 + ID 形态 + 存在性；owner 不
@@ -233,11 +252,29 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
         task,
         workspace_root=worker.subagents.workspace_root,
     )
-    if effective_config is params.config:
-        return worker
-    worker = simple_agent_cls(effective_config, params.root)
-    _attach_worker_runtime(worker, params)
+    if effective_config is not params.config:
+        worker = _construct_transported_worker(simple_agent_cls, params, effective_config)
+        _attach_worker_runtime(worker, params)
+    if params.request_transport is not None:
+        from ...gateway_parts.multiprocess_child_execution_binding import (
+            capture_original_child_dispatch,
+        )
+
+        capture_original_child_dispatch(params.request_transport, worker, task)
     return worker
+
+
+# LLM: 无运输保main构造签名；真实child仅复用原scope实际Agent的constructor roots及W bootstrap，不从task/请求补根或更换owner。
+# 函数用途: 构造同来源子代理依赖，W不能借普通Agent初始化旁路绕过原资源门。
+def _construct_transported_worker(simple_agent_cls, params, config):
+    if params.request_transport is None:
+        return simple_agent_cls(config, params.root)
+    original = params.request_transport.scope.execution.agent
+    options = {"workspace_roots": original.workspace_roots}
+    frozen = getattr(original, "_worker_bootstrap", None)
+    if frozen is not None:
+        options["worker_bootstrap"] = frozen
+    return simple_agent_cls(config, params.root, **options)
 
 
 # LLM: 每个建好的 worker（含按有效配置重建的那个）都经这里。它的模型调用账本在构造时已登记进进程准入表
@@ -253,30 +290,33 @@ def _attach_worker_runtime(worker, params: RunSubagentWorkerParams) -> None:
 # LLM: 激活后在 C 内按原 attempt 窄更新；不以锁外 load/save 覆盖停止或换代后的任务。
 # 函数用途: 记录本轮实际配置来源，迟到 worker 不能改写新轮元数据。
 def _record_effective_config_overlay(worker, run_id: str, task, *, attempt_id: str) -> None:
-    identity = getattr(task, "runtime_identity", None)
-    overlay_ref = str(getattr(identity, "config_overlay_ref", "") or "").strip()
-    if not overlay_ref:
-        return
-    overlay = {
-        "schema_version": "runtime_config_overlay.v1",
-        "overlay_ref": overlay_ref,
-        "scope": str(getattr(identity, "config_scope", "") or "run"),
-        "config_sources": getattr(worker.config, "config_sources", {}),
-        "config_layers": list(getattr(worker.config, "config_layers", []) or []),
-        "warnings": list(getattr(worker.config, "config_warnings", []) or []),
-    }
+    from ...common.request_execution_ports import gateway_short_transaction
 
-    # LLM: 同一 canonical mutation 再核准确执行轮；异常不写入，不重建整个旧任务快照。
-    # 函数用途: 只保存本次负责的配置诊断字段。
-    def record(current):
-        if current.runner_active_attempt_id != attempt_id or current.status != "RUNNING":
-            raise RuntimeConflictError("配置元数据的原执行轮已失效")
-        current.attributes = {**(current.attributes or {}), "runtime_config_overlay": overlay}
+    with gateway_short_transaction("child_config_overlay_commit"):
+        identity = getattr(task, "runtime_identity", None)
+        overlay_ref = str(getattr(identity, "config_overlay_ref", "") or "").strip()
+        if not overlay_ref:
+            return
+        overlay = {
+            "schema_version": "runtime_config_overlay.v1",
+            "overlay_ref": overlay_ref,
+            "scope": str(getattr(identity, "config_scope", "") or "run"),
+            "config_sources": getattr(worker.config, "config_sources", {}),
+            "config_layers": list(getattr(worker.config, "config_layers", []) or []),
+            "warnings": list(getattr(worker.config, "config_warnings", []) or []),
+        }
 
-    with worker.subagents.creation_guard():
-        if runner_attempt_cancelled(worker.subagents, run_id, attempt_id):
-            raise RuntimeConflictError("配置元数据的原执行权已关闭")
-        worker.subagents.mutate(run_id, record)
+        # LLM: 同一 canonical mutation 再核准确执行轮；异常不写入，不重建整个旧任务快照。
+        # 函数用途: 只保存本次负责的配置诊断字段。
+        def record(current):
+            if current.runner_active_attempt_id != attempt_id or current.status != "RUNNING":
+                raise RuntimeConflictError("配置元数据的原执行轮已失效")
+            current.attributes = {**(current.attributes or {}), "runtime_config_overlay": overlay}
+
+        with worker.subagents.creation_guard():
+            if runner_attempt_cancelled(worker.subagents, run_id, attempt_id):
+                raise RuntimeConflictError("配置元数据的原执行权已关闭")
+            worker.subagents.mutate(run_id, record)
 
 
 def _attach_worker_local_store(worker, local_store: object | None) -> None:
@@ -314,7 +354,7 @@ def _run_subagent_worker_interruptibly(
         )
 
 
-# LLM: 仅执行显式 timeout；线程内绑定 exact attempt 与已解析 worker 的排队 owner，退出复位，不改原取消/收口。
+# LLM: 显式timeout线程绑定原attempt/owner/child source；正MP的start ACK也进门外stop/join，unknown同原出处上抛，Count0原序保持。
 # 函数用途: 为有时间预算的子代理启动准确身份的执行线程，到期按原合同收口。
 def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *, attempt_id: str):
     from ...concurrency.interrupt import (
@@ -329,11 +369,15 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *
     payload: dict[str, object] = {}
     timeout_requested = threading.Event()
 
-    # LLM: 新线程不自动继承 ContextVar；本地 scope 只读取 worker.home_paths，异常退出也复位 owner。
+    # LLM: 新线程不隐式继承ContextVar；原transport显式重入，ACK失败的原abort事件先于业务，不把迟到出生变新模型调用。
     # 函数用途: 执行可中断的子代理调用，把真实结果或异常交回原超时收口。
     def _target() -> None:
         try:
-            with register_interruptible(interrupt_name), provider_agent_owner_scope(worker):
+            if params.request_transport is not None and timeout_requested.is_set():
+                raise InterruptedError("原worker启动确认失败，停止未进入的业务")
+            from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
+
+            with child_worker_scope(params.request_transport, worker), register_interruptible(interrupt_name), provider_agent_owner_scope(worker):
                 if runner_attempt_cancelled(worker.subagents, params.run_id, attempt_id):
                     raise InterruptedError("原子代理执行轮已停止")
                 # Close the registration race: a very short timeout may fire
@@ -356,46 +400,84 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams, *
             payload["error"] = exc
 
     thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    try:
-        task = worker.subagents.load(params.run_id)
-    except (AttributeError, OSError, TypeError, ValueError):
-        task = None
-    if _uses_inactivity_timeout(task):
-        _join_until_inactive(
-            worker,
-            params.run_id,
-            thread,
-            idle_timeout_seconds=params.timeout_seconds,
-        )
-    else:
-        thread.join(params.timeout_seconds)
-    if thread.is_alive():
-        timeout_message = f"runner timed out after {params.timeout_seconds:.2f}s"
-        timeout_result = worker.subagents.runner_result.record_runner_result(
-            RecordRunnerResultParams(
-                run_id=params.run_id,
-                attempt_id=attempt_id,
-                dry_run=False,
-                ok=False,
-                message=timeout_message,
-                status="TIMEOUT",
-                verification_status="UNVERIFIED",
-                failure_type=FailureType.RUNNER_TIMEOUT.value,
-            )
-        )
-        worker.subagents.lifecycle.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)
-        # The durable timeout/attempt fence above is authoritative.  Now ask
-        # the old execution thread to close a blocking provider transport or
-        # stop at its next tool-loop safe point.  If user code is truly wedged,
-        # the daemon thread cannot delay process exit and its stale attempt can
-        # no longer commit.
+    origin = (_capture_runner_thread(thread, "child_runner_worker_stop", params.run_id, attempt_id)
+              if params.request_transport is not None else None)
+    if origin is None:
+        thread.start()
+    primary = None
+
+    # LLM: 只停止原设施，event同时关闭ACK失败后尚未进入的目标；不修改canonical、claim或新线程。
+    # 函数用途: 在门外请求原timeout worker退出，并覆盖中断注册前的窗口。
+    def stop_original_worker():
         timeout_requested.set()
         interrupt_by_name(interrupt_name)
-        return timeout_result
-    if "error" in payload:
-        raise payload["error"]  # type: ignore[misc]
-    return payload["result"]  # type: ignore[return-value]
+
+    try:
+        if origin is not None:
+            thread.start()
+        try:
+            task = worker.subagents.load(params.run_id)
+        except (AttributeError, OSError, TypeError, ValueError):
+            task = None
+        if _uses_inactivity_timeout(task):
+            _join_until_inactive(
+                worker,
+                params.run_id,
+                thread,
+                idle_timeout_seconds=params.timeout_seconds,
+            )
+        else:
+            thread.join(params.timeout_seconds)
+        if thread.is_alive():
+            return _close_timed_out_worker(worker, params, attempt_id, thread, timeout_requested, interrupt_name)
+        if "error" in payload:
+            raise payload["error"]  # type: ignore[misc]
+        return payload["result"]  # type: ignore[return-value]
+
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        if origin is not None:
+            _finish_original_runner_thread(origin, stop_original_worker, primary)
+
+
+# LLM: 原TIMEOUT先持久fence再中断，未确认原线程退出不能让独立child运输封口；join只在T/业务锁外，Count0仍即时返回，不声称任意线程可强制终止。
+# 函数用途: 保存原超时事实并让运输等原实际执行线程退出，避免提前释放P3。
+def _close_timed_out_worker(worker, params, attempt_id, thread, timeout_requested, interrupt_name):
+    from ...concurrency.interrupt import interrupt_by_name
+
+    if params.request_transport is None:
+        result = _record_original_timeout(worker, params, attempt_id)
+        timeout_requested.set()
+        interrupt_by_name(interrupt_name)
+        return result
+    try:
+        return _record_original_timeout(worker, params, attempt_id)
+    finally:
+        timeout_requested.set()
+        interrupt_by_name(interrupt_name)
+        thread.join()
+
+
+# LLM: 原runner_result/abandon顺序与字段保持main，短写由原末门核；不能把物理未结伪造成未进入或重放许可。
+# 函数用途: 保存同一attempt的超时结果并撤销迟到提交权限。
+def _record_original_timeout(worker, params, attempt_id):
+    timeout_message = f"runner timed out after {params.timeout_seconds:.2f}s"
+    result = worker.subagents.runner_result.record_runner_result(
+        RecordRunnerResultParams(
+            run_id=params.run_id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=False,
+            message=timeout_message,
+            status="TIMEOUT",
+            verification_status="UNVERIFIED",
+            failure_type=FailureType.RUNNER_TIMEOUT.value,
+        )
+    )
+    worker.subagents.lifecycle.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)
+    return result
 
 
 def _uses_inactivity_timeout(task: object) -> bool:

@@ -1,3 +1,5 @@
+# LLM: 精确资源治理写入先消费原全局拒门；读取及真实资源裁决保持原owner策略，不从进程模式签权。
+# 模块用途: 拦截受限进程直接登记/撤销资源许可，默认管理员身份、准确资源及锁内合并保持。
 # LLM: 受管外部资源授权复用 owner 的 tool_policy.json、管理员身份和原文件锁；正文、URL 和模型角色不能授予权限。
 # 模块用途: 管理员为用户登记准确的外部资源和操作，宿主工具每次执行前读取，不复制密钥。
 from __future__ import annotations
@@ -54,7 +56,12 @@ def resource_operation_allowed(home: object, provider: str, resource_type: str, 
 
 # LLM: 调用方先沿原 owner resolver 选择目标；锁内只改 resource_grants，其它审批/控制字段原样保存，写入为 600。
 # 函数用途: 管理员登记或撤销准确资源授权，普通用户不能为自己加权限。
+# LLM: 必须在任何验证、读取、目录或锁副作用前拒绝受限进程；门通过后原权限和事务正文不变，同步检查全局写边界回归。
+# 函数用途: 先阻止Worker/受限宿主直接修改本入口的治理事实，默认单进程继续原校验与写入。
 def set_resource_grant(admin_home: object, target_home: object, value: object, *, revoke: bool = False) -> list[dict]:
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('owner_resource_grants')
+
     if not is_permission_admin(admin_home):
         raise PermissionError('只有管理员能登记外部资源授权。')
     grant = normalized_resource_grant(value)

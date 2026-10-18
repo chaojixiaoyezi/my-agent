@@ -1,3 +1,133 @@
+## 2026-10-17 原话备份收缩使用完整投影实测（253候选）
+
+完整候选与局部备份 token 不保证可相减；移除据此跳过收缩实测的估算门。候选超目标且备份尚可收缩时，保原带符号预算，只沿同 projector 与冻结校准重算一次，严格变小才采用；最小备份及无备份仍零重算。原容量接受门、保护材料、取消、CAS 和摘要模型调用次数不变。原140字符临时路径 mixed 失败留档；新增真实投影、未变小不采用、仍超限拒绝和中断传播回归。两OS新包须实际执行相关运行节点，43旧source-only不扩；候选不代表整体全仓、真实任务或发行验收通过。
+
+## 2026-10-17 精确设施自然消失窗口（243后继，待独立复核）
+
+仅在237原generation显式投影的设施比较叶收紧：同名设施两轮实际identity均非None才比较是否替换；None仍只来自精确设施的FileNotFound。原writer成功同字节replace或失败finally自然清stage不再误判source变化。两轮实际身份替换、危险形状/多link、未知名、canonical缺失、责任raw/名字集合、完整root父链及旧expected摘要仍原样拒；不加重试、cleanup或权限。237其余实现/默认P6完整AST继承不动，不重复计作新实现。
+
+新增两原writer运行反例保原断言，须最终双OS新包pyc实际执行；237原78运行义务和43source-only分类保持。原237/241及243原两红完整保留，组件通过不代实际220/full/发行验收。
+
+## 2026-10-17 ready固定receipt writer（238候选待独审）
+
+原实际Agent+正count lease无controller是已有ready组合，固定回执现按原factory/T/lease/Agent-owner事实单独落盘并完整读回，不造增量/P2。fullcontroller原CAS和记账、cold/client与perform的完整来源要求保持；232旧红保留、原Memory确认/重放测试不改。晚引用/closed/pin/假Agent拒绝及既有cold/私卡/steer/Count0定向回归由两OS包pyc另履行，真实后继与发行仍由根验收。
+
+## 2026-10-17 generation规范责任库存投影（237候选，待独立复核）
+
+generation显式读取原四类已发表责任；原processing多条chunks JSONL、固定.commands/.approvals设施和原writer精确UUID/token暂存不再作为单JSON责任读取。分类在同一原父FD的首末完整列名及raw之前，设施仍核nofollow真实类型/单链接，重复观察身份替换、未知名、责任变化和root/父链变化继续拒绝；无重试、按内容猜测或新写者权限。默认original_directory_snapshot及P6完整names/raw消费不变，旧closure expected完整集合/全raw摘要和原codec/角色/fresh P2门不投影、不补封。
+
+本片仅临时组件、原writer和受控线程；公开归档JSONL匹配Extra data类别，但当次220首badraw未留，不能据组件绿宣称该次根因已确认。0B暂存为另一独立库存缺口。新增runtime测试必须最终两OS新包pyc实际执行，原43 source-only不扩；真实服务/全仓/发行仍根另验。
+
+## 2026-10-17 来源拒绝安全日志（228候选，待独审）
+
+只增强原拒绝后的定位：尾12函数:行与实际JSONDecodeError严格数值位置/doc字符数。零正文和异常文字，logger/属性失败不改变首异常或隔离；无reader/authority/临时名过滤改动，不声称修复220未存raw的首因。新增合同待最终双OS包pyc实跑。
+
+## 2026-10-17 C state与来源双读共门（204候选待独审）
+
+正常C publisher原仅持lease，循环已start后running发表可撞后台首quota对账的controller角色双读。本片只用原controller→lease串行化publisher及restart取消固定caller，首取消写前核同源canonical目标；C完整raw reader/P4/旧closure/unknown及194均不改。失败/closing元数据不借业务隔离门拒写，真实后继与包验仍由根另验。
+
+## 2026-10-17 ordinary准入与停止共门（194候选）
+
+只把原ordinary新建/同代补齐末发表接入已登记实际Root的_gate，A1+A2同窗；原quota准备门外，T/controller/lease顺序保持。terminal/release/ack/recovery/takeover默认不接closing拒绝。190停止后新增pending P3的窗口是本片目标，停止前occupied无终态仍保incomplete/no closure；真实后继及发行待根验证。
+
+## 2026-10-17 原子发表snapshot读窗口（186，待独立复核）
+
+177首请求在执行前仍隔离，准确栈变为nofollow叶stat/open/fstat窗口，旧failed home/请求保持、不重投。原writer合法同父目录replace足以触发该合并拒绝，实际当次未存三份stat，不宣称已证具体替换。
+
+只在原read_bytes_beneath加显式snapshot_retries，默认0沿原读写/锁/portable形状；角色snapshot固定2次重读（总最多3）。每次仍原strict目录入口逐prefix比较本次初始身份，叶始终最初parent FD。只有完整A（before单link A、FD/current单link B）或B（FD为原A但0link、current不同单link B）事实可丢弃有限重读，读后B也丢已读bytes。硬类型/链接/多link/根父链/权限/缺能力/超限/清理错误不洗成竞态；初次缺叶可None，已见存在或重读后missing拒绝。清理显式保本链primary并各FD只尝试一次，不能受调用方外层异常影响。172的current-W五动态分界及旧closure/C/P4/名字集合完整raw不放宽；snapshot不授ready/写者认证/物理证明。新增回归须最终两OS包pyc实际执行，不列source-only。
+
+## 2026-10-17 当前W心跳与旧代关闭范围分界（172，待独立复核）
+
+169首次真实请求在执行前被 OWNER_PARTITION_QUARANTINED 拒绝，原失败保留且不重投。来源栈定位角色首末全raw比较；原W每2秒合法更新足以使该门永久隔离。实际当次两份raw未保存，不能声称已证只变化timestamp或指定W。
+
+本片只从原bootstrap ready纯提完整schema/current_generation/P4实例匹配，原健康与端口门保持。角色双读仅对同一首末完整P4绑定的当前规范W，允许updated_at/inflight/ready/loop_health/readiness五个原producer字段变化；全部其它字段、名字集合、C state、旧代marker、P4完整raw仍严格。未知schema/额外字段/缺entry/身份变化继续拒绝，不新增活issuer门、registry、重试、权限或旧代追补。新回归复用原guard/P4/心跳producer与既有受控物理端点，不启动真实服务/模型/native。组件结果不能代真实生命周期或双平台验收。
+
+## 2026-10-17 原ready本机审批回执收口（154候选，待复核）
+
+原既有ready-actualAgent本机审批两测试在136及154早期同红，根保留该合法能力。只将原PrivateInteractionTransaction.perform内prepared/executing/settlement固定写接入同完整raw叶，原tool_approval/local_main/实际同owner Agent及签卡op/digest/action逐次精确核；不构造Agent，不借model权限。GET仅原private reconcile返回变化时，把expected与actual typed updated送固定对账叶，保unknown错误更新及实际决定后的completed，普通commit FSM不放开。Count0 source=None、远端dispatch、W、permission/input和原首异常收口保持。
+
+无actual、假Agent、错owner仍原503/COORDINATOR_BUSINESS_NOT_READY且不写控制账；合法ready Agent沿原P3/claim/waiter，不能因为正式冷C当前agent=None就删除原合同。新增插话/私卡回归均为runtime，最终两OS新包pyc必须执行。
+
+## 2026-10-17 本机插话原对账修复（154候选，待独立复核）
+
+原插话callee返回非None结构化结果后，实际本机source将完整expected receipt及原ConversationControlResult送固定对账写叶，由叶派生updated；同source/controller/lease/op/T/完整raw CAS/readback和原增量仍逐次核。普通commit状态图不放开，投递accepted/rejected/unknown均保原值，wrapper completed不代表投递成功。None不写，不新增token/schema/registry或HTTP/model/私卡权限；Count0继续原直接写。
+
+152原同字节反例及136/154原红保留，新增行为回归必须在最终Mac/Linux新包pyc实际执行；正式正count C本机server.agent=None的私卡仍业务未就绪，非local沿原远端分派，未借构造Agent扩大来源。真实服务/包/整体F3结果另验，详见[生命周期合同](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+## 2026-10-17 后继生命周期关闭修复（136候选，待复核）
+
+原typed管理/model/local source在同C/lease/op原锁窗写控制回执，完整raw CAS/readback只登记本项增量，P1/P3/role旧基线不刷新。整体封存需合法v2完整角色与本次fresh P2，原v1局部恢复不加门；同closing成功观察仅消费一次native close，失败不得回退再assess。旧控制由本次核过的captured真实producer v2完整原件做纯责任传递分类，默认空仍拒，不推导祖代角色或替代物理证明。
+
+多代非空P1、原W控制及实际固定来源链仅在受控组件验证；新增五份生命周期行为回归必须随最终两OS新包pyc实跑。129原红、OLD03默认拒绝及开发中源码变化批次保留，最终同源真实行为与发包尚未通过；详见[生命周期合同](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+## 2026-10-17 F3 最终写入闭包已整合（待统一验收）
+
+USER/SOUL沿原人格库、配额、版本CAS和恢复顺序，仅C本地写叶消费当前原source.perform；默认False原调用形状与120项默认AST保持。105独立复核发现的两个FD清理出口会盖掉失源错误，108已修且109独立1409项、原同字节两反例及112无源码origin夹具通过；固定close只尝试一次，必要FD释放不授予补偿写入。三个原调用方同bool透传，不保存source或增加异常状态。
+
+最后接通原冷C记忆候选dispatcher：与原factory共用同一command对象，七动作共用原真人seal、source、完整raw CAS和回执；原ExitStack覆盖耐久completed和单次事件发布，退出后才归还同holder借用和global scope。103独立158项及真实HTTP寿命/未知/重放复核通过；Count0、原父未知收口、跨owner和群actor权限不变。冷search/remember、候选确认与人格写叶现已在候选树接齐，不再以旧not-ready回执充数。
+
+固定后台启动入口同时已恢复并支持同包.py/.pyc。当前仍未提交、部署或发包；最终focused、全仓、严格gate、双平台同源包及真实任务结果另记，不能从切片数字外推。公开启动仍保持默认Count0，正count沿原内部验收入口，未新增用户配置或扩大网络/权限。详见[冷记忆闭包](../../design/COORDINATOR_CLIENT_MEMORY_CLOSURE.md)与[人格IO合同](../../design/PERSONA_COORDINATOR_IO.md)。
+
+## 2026-10-17 固定后台入口已合候选（发行待验）
+
+补回固定来源的两个executor/native host bootstrap，原main完整AST、FD、身份校验及失败退出125不变；两个launcher沿既有Landlock的固定字面模块find_spec.origin定位同包.py/.pyc，native只提取纯argv函数，Count0先于发现及进程效果。没有任意模块参数或源码备用入口。
+
+来源闭包原5参数断言绑定实际agent_py_agent包根，保留隔离home与原身份检查。Astra110独立144项及7项只读边界通过，上一版发行Python仅用于临时只读.pyc发现/125解析检查；这些不代真正后台业务验收。旧缺入口、独立bytecode路径和包外QA失败分别保留。最终同源新包还须实跑后台、停止和控制；本机服务尚未切换，详见[集成设计](../../design/SEVEN_FEATURE_INTEGRATION.md)。
+
+2026-10-17 根104：原候选服务接口81和实际binder首故障修复99已精确合候选，100独核419项通过；正式分派/Persona/发行入口后继尚未闭合，非端到端或已发布。
+
+## 2026-10-17 审批只读SQLite暂忙窄修已合候选
+
+根96按87准确前像合一生产与四直接测试，Astra92独立157项与2项取消/extended BUSY边界通过；旧源同实际WAL锁反例仍在原五回执断言失败并保留。仅W提交前的完整只读签卡/身份校验可对真实结构化SQLITE_BUSY最多尝试三次，原interruptible等待5/10ms；权限每次重新校验，input/决定/工具动作不重试。默认C/Count0、Root消费、ro0数据库与unknown/P3不变；15ms只是退避等待和，不承诺硬实时。历史现场具体锁持有者尚未知，最终组合、全仓及发行另验。
+
+2026-10-17 根90：冷C search/remember五路径已按独立复核77合入候选；原默认和部分失败事实保留，候选确认及USER/SOUL闭包仍待后继，不作为完整F3/发行通过。
+
+## 2026-10-17 冷记忆C2与holder借用修复已合候选
+
+根83按精确前像合61组件及76修复：server唯一有界owner holder、原source固定client模式、严格访问snapshot成功后清理。Astra74实证的构造发布/借用登记竞态，由原condition内先预留borrower、同finally归还解决；Astra82独立339项与5项退出边界通过，旧同字节反例1红转1绿。原默认Count0、recent、管理写源不变；holder不保存请求/source/actor，不代其它用户flush。J3装配及候选管理尚未全部接通，search/remember当前仍旧未就绪回执，不宣称F3完成。
+
+根80将J1/J2合当前工作树后403项通过（0F/E/skip、7.542秒，完整输入不变）。1839原组合中的一次审批SQLite锁竞争仍保留定位记录；此处不称最终组合或发布已验收。
+
+## 2026-10-17 冷记忆J1六写叶已合候选
+
+Astra72独立189项与两项实际SQLite回滚边界通过后，根78按精确前像合候选/quota/policy锁、原候选/operations单次raw写及原账本脱敏六路径；没有重套67或覆盖其它网关变更。默认136函数AST已独核，C只保IO策略bool并消费原当前scope。扫描/序列化/embedding仍在Root外，formal→index→mark→condense与原partial保持，完整raw CAS和O(N)本地事务不称恒短。后继J2、JSONL/builder和HTTP仍待闭合，不能据切片绿称整项可用。详见[写叶合同](../../design/MEMORY_J1_WRITE_PORTS.md)。
+
+根70组合1839项中1838通过、1项审批并发SQLite锁竞争失败，已保留原账和测试结果，正在定位，尚未提交、发布或部署。C2另有独立复核发现的holder借用预留竞态，修复另片进行。
+
+## 2026-10-17 群配置锁出生末门修复70（候选）
+
+记忆接线核对发现原assistant.configure虽不查额外群监控授权，仍会取得原tool_policy文件锁；冷规则入口此前未给锁文件出生传当前资源写门。现仅给原group_capability_guard增加默认None的birth_commit，默认调用形状与身份/群监控语义保持；实际冷规则使用已绑定本人owner_home的原writer partial。FD创建/chmod在原owner P2/Root短门，线程/OS锁等待在Root外，不把整业务包Root。
+
+旧A43实际HTTP两用例复现2失败，修后2项通过，核实际policy锁inode对应FD、出生持准确群owner P2、flock门外，以及出生前拒绝不打开锁、不completed、不重放。中间首次裸writer遗漏owner_home keyword的TypeError已保留，准确partial后通过，非放宽权限。统一原群/规则/存储组合及非作者复核另记；F3尚未发行。
+
+## 2026-10-17 冷C规则管理A43已合候选，记忆链仍待闭合
+
+A43经过Astra63独立189项及额外5项边界通过，按函数hunk合当前F，保D33/C1与当前main功能；本地、普通飞书与群规则查看/预览/准确nonce确认、重放、显式管理员target分别沿原actor/target P2。领域原执行拒绝/运输未结不再被消费未知回执洗成completed；普通IO partial仍保原事实。原事件在completed耐久后由当前server单发。旧红保留，根组合仍待本次实跑，不代最终发行。
+
+原LocalControlCoordinatorUnavailable及OwnerManagementIngressUnavailable仅将类定义搬到common/owner_write_errors.py，Gateway公开导入保持同class；原AST/基类/构造/错误属性不变，不增加slot/码/授权。__module__自然变化已记录，3个fresh进程导入顺序通过。底层领域可依赖common真实类型传播，禁止反向依赖Gateway或按异常文字判定。记忆C2/C3仍由独占副本实施，尚未就绪、未发布/部署。详见[冷C合同](../../design/COORDINATOR_COLD_REQUEST_PUMP.md)。
+
+## 片A：原owner资源纯解析提取（根非作者复核通过，已组合）
+
+owner_resources.resolve_owner_resource_configuration承接原配置/HomePaths/runtime_paths算法；私卡原内部入口仅委托，_resources及卡片/model来源/writer不改。本人/foreign和零创建用例及原私卡相邻focused结果见片A报告。没有新C来源、seal、HTTP或预算变更，冷管理缺口保持待闭合。
+
+## 2026-10-17 审批未结候选与第19轮组合
+
+根组合89份完整测试1693普通通过/4既有xfail，0失败/错误，源码未变；不代替最终全仓/严格发行门。D28/D29与D30A已叠加，原v5私卡批准交真实等待线程，纯负向退休不取operation锁，permission/JSON忙保native同对象未结，已批准不覆盖。错误展示APPROVAL_RETIREMENT_UNCONFIRMED登记state/不可盲重试/manual_review，22项相邻合同回归通过；同码普通异常不能取得清理权。
+
+D30B仍在原Future/实际Agent生命周期补齐；canonical未结接收不能证明后续消息可处理。原恢复链尚不读该诊断就可能重排，需沿原claim和结构化状态核对，不能假terminal或直接放P3。后台B1/B2已冻结待独立Astra复核，G0与冷C控制POST仍开放；本轮未部署或发行。
+
+## 2026-10-17 F3低耦合回归修复（独立候选，待根组合）
+
+worker默认配置路径已直接复用common纯解析器，保显式config_path优先及bootstrap/home冻结顺序；原18个授权旧红已按真实fixture修正，17份完整文件及必要相邻回归412项普通通过。冷C矩阵分别验证history200、合法不存在receipt404、非法ID503与缺凭据403，并保整home零写、零foreign Agent与零模型调用。未运行真实模型/服务或D24/P6，未修改HTTP主链、身份判死或wake恢复算法；最终组合与发行仍归根。
+
+## 2026-10-17 冷C普通控制POST候选
+
+实际HTTP→固定coordinator_control_transport→原operation builder/codec→完整raw CAS→原WorkerControlPump→实际OwnerScopedAgentPool.get/pin Agent→原领域已接通。只有cold None正count非model非C管理分支进入；主owner仍waiting，model/私卡v5/活seal、GET、ready、Count0不改。原op T在Root外try，Root内JSON只try，同deadline贯穿target读与common末writer；typed同对象和部分prepared不重发。普通验收与已发布管理/记忆必须闭合缺口见[合同](../../design/COORDINATOR_COLD_REQUEST_PUMP.md#冷c普通控制post候选2026-10-17)。
+
+## 2026-10-17 F3服务入口与领域依赖（候选）
+
+普通C输入外层改显式字段，内部prepare接原GatewayInputPreparation；原摘要/actor/media/完整CAS、同一次资源预算和typed503保持。已注入集合/固定预算实际实现归conversation，runner native出处归common，原旧定义和反向core导入删除。私卡的quota/child loader/既存repo由输入依赖领域工厂组装，原owner、输入current、commit末门和单Wake不变。定向结果分别为180普通+4既有xfail、147普通、136普通，不相加，不代替新全仓或真实入口；原失败见根TESTS。
+
 ## 2026-10-16 F6/F7 正式组合候选（未发行、未部署）
 
 在准确 R2 候选上顺序组合 F6、迟到遥测 P2、typed 旧夹具与 F7。冻结前缀只在容量可容纳时采用；本地 typed 超窗在模型发送前复用原完整来源与分段，保留小窗口可用性、媒体与单一 checkpoint/CAS。首次完整空摘要有界补一次；真实采样先捕获 generation/revision，迟到保存不得重新签版本。
@@ -1742,3 +1872,332 @@ UNKNOWN恢复二次审查：结算/重开统一核验原活跃attempt、TaskRun�
 三宿主旧历史释放回归揭示冻结前缀仍在摘要栈持有完整投影。恢复解绑边界与自动 preflight 现先用原请求 token/输出预留/校准规则求可覆盖前缀的保守容量下界；确定必超原预算时不发布优化，原 tool_source 原样进入主线分段链。可容纳或未知仍交后续完整请求精确门，取消/身份/媒体/网络错误不转容量回退；无新配置、网络调用、持久状态或权限变化。原三宿主内存阈值与覆盖/首业务请求断言保持，最终证据随该修复交接，不能沿用旧 FINAL_02 全仓结果代替修改后验收。
 
 同批覆盖“大正文加明确不支持的历史图片”：仅将既有 typed CompactMediaDecision 沿当前 provider surface 传入，解绑前释放不可用前缀；在探针前按候选自己的 canonical 媒体事实/类型复核，保留原 COMPACT_PREFIX_MEDIA_UNSUPPORTED、归档 refs 和单 checkpoint，不把全来源的 video 拒绝套到只含已支持 image 的较小候选，off 和未知声明保持原链。
+## 2026-10-16 F3-a 纯合同子批（Count0，未启用多进程）
+
+在六项功能提交 `b4f5fbac0` 上新增记录 TypedDict/版本字段及纯路由盖章、校验合同。路由只投影原 `host_request_owner.v1`，缺失、损坏、跨 owner、旧代与内容篡改均拒绝；未添加生产消费者、配置或启动入口。新 73 项纯合同与当前 Count0 相邻回归分开留证，不把分区样本中的正 count 当作实际 C/W 启动。
+
+后续 B1 保留全部 codec、v1/v2、取消及终态校验，再按真实依赖逐批接 bootstrap、准入、执行登记与终态；当前不启动 Count2、模型或服务。原 IM/凭据/媒体、F4 确认、F5 可见面与 F6/F7 表面保持，网络安全仍只记录。
+
+### B1 完整纯记录闭包（同日，仍为 Count0）
+
+记录入口现保留全部 11 个版本分支、严格 JSON、固定 v1 golden、显式 v2、执行者状态迁移与规范终态释放；registry/heartbeat、namespace 执行域、会话摘要和取消格式只作纯校验。取消校验从来源运行模块完整移到唯一 `multiprocess_stop_schema`，未来 stop 运行消费者须复用同一函数；巨大时间整数溢出沿原 `invalid_stop_time/observed_at` 结构拒绝，不放宽数字或身份。
+
+原来源中依赖 coordinator、ready、真实 ledger 和未来 `request_conversation_parts` 的混合节点仍待对应运行批，不用空模块或跳过验证器制造闭包。本片只用当前真实会话顺序键核纯摘要，并保留相同坏 heartbeat 字段的 codec 拒绝；这不算原 ready/ledger 或 Count2 验收通过。首轮红及准确纯闭包/Count0 结果分开留仓外证据，原六功能产品接线未改。
+
+执行域的 creator 若传入另一种合法记录，现在先核原 process-identity 版本再读 pid，沿原结构错误拒绝，避免 KeyError 逃离合同。固定 v1 字节与原身份、分区、取消和终态反例不变；本片最终 426 项组合与错误码单节点复验通过，真实多进程仍未启动。
+
+### B2 启动载体与拒绝门组件（候选，仍为 Count0）
+
+完整接入原 `multiprocess_mode`、`multiprocess_bootstrap` 及其纯内存 `executor_registration`、`global_write_guard` 依赖；环境只和可信启动载体逐字段比较，冻结后再核同一分区。执行登记只调用已注入的真实 launcher，缺失、冲突、复制进程上下文或无效 call-id 不回落裸执行；全局写门只限制受限主体，不签发协调者或管理员权限。组件测试不启动 C/W，不证明父出生、共享资源、端口或 ready。
+
+认证 prepare 的管理员版本须先和 owner 取自同一次原安全绑定读取，再进入完整 immutable 摘要；固定来源后补 metadata 并在比较时回填原值的旁路不移植。当前尚未接真实 C 作用域或正 count CLI，Count0 不增加绑定表读取；原 actor、媒体和完整 metadata 摘要门保持。
+
+### B2 真实协调者来源与首次输入（实施中，未启正数入口）
+
+原 C lease/controller 已在临时文件系统合同中实际建立；首次 owner 与版本复用绑定模块同一次 no-follow 安全读取，Count0 列表/查询仍沿原一次读口。原 prepared 回执先于任何 fresh 准备读取，已有 v2 重放完全沿原输入；route/admission 只投影既有冻结版本，不改完整 metadata、actor、媒体或原指纹。准备期间撤权的原红已保存，写前原来源末检与原 receipt writer 同门，不把 callback 存在当作执行许可。
+
+HTTP 的可信 host 准备延后到 fresh 分支，重复 client digest 仍先核原 actor/metadata/media；旧随机 ID 路径继续原私有 writer。IO once 的可选最终提交只允许原 T/PID/thread 一次消费；guidance 保存原宿主 owner 后，steer 恢复不按当前管理员表重新分组。既有普通/群/子身份、学习人工确认、凭据和媒体门保持。
+
+这些是实际输入子链和真实 C 对象的合同回归，不等于完成进程启动、P1/ports/native 或排空验收。114 个固定来源新模块仅作真实依赖输入，70 个既有前沿逐函数适配；IM 冷读取必须另保原 constructor root/config 优先级，未闭合全部消费者前不接正 count CLI。无日常 home、真实模型或外网；临时 loopback HTTP fixture 与 fake LLM 如被测试调用会在仓外命令记录中明确，不能误记为生产服务验收。
+
+IM03 继续使用 IM02 的原 constructor root 与显式 capability override 接口；选源结果连同本次 `selected_user` 事实流转，读取失败后不再二次 `exists()` 改选默认。IM02 的独立选源竞争红由 IM03 修正；IM02 的 109 项与 IM03 作者 123 项、独立复核各按原时点记录，不沿用旧结果宣称新来源合同已验收。
+
+telemetry03 在原八处 best-effort 捕获前先原样上抛同一 typed 短事务未知错误，包括辅助用量结算外层；原事件已追加后遇未知仍保留原事件，不误记普通失败或再次结算。原 ContextUsageBinding、采样前代次绑定与 CAS 不变。根独立 11 文件 220 项通过只覆盖该接缝，不证明完整 C/W、P3 保留或终态排空。
+
+首次 C 准备遇已由原宿主冻结的 owner（如原 guidance 派生重放）仍保持原身份；新管理员版本只是本次受理观察，不给旧 owner 重签当前绑定权限。HTTP 仅按认证 context 建顶层 user/channel/owner，丢弃客户端顶层宿主字段，metadata 自报 owner 只作冲突断言。已有 v2 receipt 不重新观察或改属。原 IO writer 是宿主内部入口，其后台 typed source/ref 生产者仍须单独闭合，不由裸字典授信。
+
+CLI 的 C 冷准备与 `make_agent` 已共用原 owner 权限模式、配置和工作区校验；业务 factory 捕获本次选中配置及实际 constructor roots，原认证部署门先于 C 凭据副作用。临时真实 lease 的构造合同及 Count0 相邻五文件 94 项通过；此时尚未接完整 C/W 资源、ready 与请求消费者，正数启动入口保持未开放。
+
+原 `queue_service.claim_request` 现可消费准确 W/P5 或 C 准入快照；完整快照末检、原 rename 和执行 fence 仍在同一 T 内，缺 W 快照不能回落单进程领取。`GatewayActiveTurnTransition` 捕获原 execution/lifetime，短 `scope` 复用原实读与 C 生命周期末门；原停止后 ACK 可收尾、新 submit 拒绝，scope 退出后复制上下文也不能延寿。临时真实 C/W claim 与后台 admission 的 11 个直接合同通过，不含实际进程出生、模型或完整 P3 终态验收。
+
+独立反例发现原 prepared 摘要未覆盖顶层 owner，队列单独改属仍可自洽。首次 C 现把同一 canonical owner 写入已有 metadata 宿主断言后再生成原完整摘要；物化与准入比较原 InputReceipt 的 typed owner、owner_id 和原摘要，route 只核已有断言与顶层一致，不从变化队列重签身份。原两红与新准入/损坏回执反例保留；八直接及八文件 135 项相邻合同通过。旧无 receipt/无 metadata 断言仍是明确旧合同，不被当作新 C 完整身份的证明；无新账、摘要版本、权限或重放业务。
+
+CLI 冷组合另修已解析 home 在延后 factory 中被环境重选的问题：包括空配置和实际路径恰好等于历史默认别名的情形。C 唯一 producer 保存原解析 Path/同份配置关联的内部 typed 快照，原 home 读口消费它；普通 CLI 无快照仍沿原优先级。内部字段不接受用户 YAML/覆盖注入，dataclass replace 与真实 Echo Agent 仍使用原 home，改配置 home 却保旧快照会拒绝。两个阶段原红保留，11 文件 199 项配置/Count0 组合通过；没有放宽 WorkspaceOnly 或改全局 home 优先级。
+
+原派发循环现能消费本代真实 P3 gate：C 请求按原准入结果冻结快照后领取，W 请求保留 pending 给原分区；不走 Count0 内存 slot。submit 失败保留原 claim/P3，等待信号锁内重算，并在原 T→controller→lease 末门确认；旧 C 关闭或归属改变不能刷新等待。GatewayRunContext 仅运输原 control/drain 引用，Count0 不构造 MP 来源，初始化错误仍沿 main 原规范失败出口。八文件 101 项直接/相邻合同通过；原两个绕过构造器的测试 helper 只补 Count0 的 None 初值，断言未改。CLI 正数入口、完整输入结算与 unknown/P3、真实 C/W/native 仍未完成，不能由本片外推。
+
+输入恢复的实际短写现消费原 processing source：关联 actor、目标与 thread 回执仍由原来源门核，退出或换源不能重排输入。精确 typed unknown 原样上抛且不推进输入扫描游标；普通坏 by-turn 索引进入原 errors 计数，不伪报清账。dispatcher 终态投影携同一原 gate 重新核 owner/Runtime 政策，Count0 不新增来源查询。六文件 42 项直接合同和三类终态政策/相邻循环 28 项通过；97 项整合首轮四红原样保留，其中 gate 透传已关闭一红，三类外来输入的 post 报告计数仍由根裁决。实际 canonical 已 failed、pending 标记与 P3 occupied 均保留，外来回执未写，不能把报告计数当终态或排空证明。
+
+请求执行已在原 invocation 安装同源短写端口，C/W 先核冻结路由与原 claim，再接原 owner/SQLite/审批资源；普通 Count0 行为保持。精确 common unknown 保留“短操作未进入”，有界线程退出未知则只从原 Call 的同次 Context、当前同对象 execution、完整 claim 与活生命周期核出处，`operation_entered` 为 null 未知。两者在 scope 关闭前沿原 T/CAS 写同一 `processing.execution_outcome`，原异常同对象上抛，不发普通失败、指导输入结算、turn_ended 或续跑标记。首次已核 unknown 不会因 finally 清理使来源失效而变成普通结束；外层只保原未结责任，不给已 reap/伪造旧 Call 补当前事件或释放 P3。该观察不是新执行或恢复权限；CLI 正数入口、原生进程与完整排空仍未验收。
+
+输入恢复在根 report03 后的准确组合为九文件 109 项通过：严格 canonical 身份证明后只补终态计数，原 typed/state/manual_review 错误与 pending 欠账保留；外来输入、by-turn 索引与 P3 保护断言未删。新报告不等于重跑或排空授权，07 原三红和单函数断言跟随片分开留证。
+
+W 构造已接原 SimpleAgent/owner 池：bootstrap 在 root/home 首写和宿主凭据冻结前核验；W 只消费 C 已有共享种子、索引及 owner 家目录，缺失拒绝而不补建。缓存与被动 peek 前后都核原分区和对象真实 home；Future/LRU/pin、main secret 来源、F4 学习/Skill 与原 scheduler 迁移/取消语义保持。原 18 个实际 Echo 构造节点及六个 Count0/home/F4 整文件合计 117 项通过；原 W8 factory/native-client 运输节点待其真实生产者合入，不计本片通过，无物理 W/native 或 Count2 结论。
+
+## 2026-10-16 F3 后台原入口 10a（候选，未启物理W）
+
+内部规范后台来源经原host owner冻结、完整prepared摘要、P3与C/W claim进入真实消费者；公共HTTP仍仅接受原ask/session_lifecycle。暂忙只重排同请求并保P3、receipt与原来源，不建立continuation或新任务。Curator正常提交和source漂移运输已直接验证；撤权后真实提交器尚缺短写门的两条红保留，独立writer片负责关闭，不能据入口已接称后台链已完成。原Count0、F4候选确认与六项功能不变。
+
+## 2026-10-16 F3 W 构造工作根跟随 10（未启动物理W）
+
+C沿原CLI一次解析并校验的constructor roots以原tuple进入控制面和WorkerLaunch，再由内部argv/环境同载荷核对；W原bootstrap、真实池和最早SimpleAgent构造只消费该tuple。home只定位数据，不补作业务root；缺失/换序/替换/非法载体在构造副作用前拒绝。原owner effective workspace权限墙、F5路径事实和cwd语义继续由main原逻辑裁决，构造根不是新增授权。旧空roots的纯launch合同不代表可实际构造；原09延后native-client透传节点在真实factory合入后纳入本片，仍非实际native通信验收。
+
+## 2026-10-16 F3 心跳停止未知原请求收口 12（候选，未启物理W）
+
+Curator原心跳停止异常只从producer的同一原异常/heartbeat/Thread/Context/PID锚点读取出处与构造lease_id；marker、错误文案和复制异常均不成为来源。request_errors复用原Call的同对象C/W、活lifetime和完整claim核验，原handler在T/CAS内写同一processing.execution_outcome：TASK_RESOURCE_STOP_UNCONFIRMED、operation_entered=null、原lease_id；不伪造Bounded call_id或未进入事实。原异常同对象上抛，P3/租约/pending保留；finally关闭scope后只维持已存观察，已失效原来源不补新事件或普通终态。构造lease_id只作诊断，不查询新租约或增加权限。
+
+真实C/W和后台原入口17项先为7红10绿，接线后同测试字节全部通过；包含原线程仍活、跨claim/复制/伪造marker/退出后晚到负例。与原bounded/common unknown、Curator撤权、输入与重排的相邻合同一起验证，10a原两条撤权红在独立writer组合下保持原体通过。旧10a来源漂移测试只把新trigger生产调用改为真实C/原端口，保所有source_changed和P3断言，独立fixture跟随片留证。Thread.join原无期限是继承边界，未由TTL假称排空；原生进程、完整drain、Count2和发行验收仍未完成。
+
+## 2026-10-16 F3 原进程身份同源跟随 13（候选，只读身份）
+
+main旧PS出生字符串与F3原kernel出生值不能混比；真实当前活PID因此误判死亡的红已保留。daemon_metadata仅在原MP生产/核验选择同kernel来源，Darwin强kernel格式跨模式仍读kernel，旧PS/缺出生/异类型/EPERM保持unknown；只有精确ESRCH或同来源出生不同才证明旧身份已死。原host_id/pid/start_time字段与Count0的_get_process_start_time主体保持，不新增身份账或停止权，不启动探针子进程。25项前像22红3绿，C来源/claim/roots与原host回归6文件104普通通过；无物理进程启动、停止信号或Count2结论。
+
+## 2026-10-16 F3 原child入口与runner跟随 11（候选，未启物理W）
+
+原canonical orphan ref进入唯一独立request/P3/P5，core只接实际consumer；原runner保main授权、attempt、可恢复工作片、直属父级和F4候选确认。canonical/结果/closeout短写按T→原业务锁，取消或换代后即使模型已返回也不写迟到结果；Count0原行为保留。原Call未知在实际child scope退出前写原processing观察，父层不重绑旧Call、不发终态或释放P3，operation_entered保持null；同错误码普通异常仍走原失败。工作与设施线程实际未退出时运输不冒称排空，原kernel同源身份由独立13片提供，不从TTL/裸PID授接手/终止许可。
+
+原11节点全部原体通过，含模型等待后撤权完整canonical字节、迟到scope、真实超时与心跳线程生命周期；新增原Call/普通同码负例与Count0 runner/持久化/closeout相邻共13files172唯一节点，170普通通过、2既有xfail。所有原红及新probe过强‘活scope全字节冻结’断言红均保留，最终只要求真实责任/活动轮不变，保main合法进度遥测。CLI/完整drain/Count2/native/full仍待整链验收。
+
+
+## 2026-10-16 F3 无FIFO学习维护来源（14，候选未发行）
+
+C发现学习工作改用main原`pending_requests()`首条FIFO；无FIFO且用户开启自主维护时，沿唯一`data/skill_learning/registry.json`发现原一天维护。原learning运输kind复用，registry完整SHA和同一个严格no-follow fd捕获的mtime_ns构成来源CAS代次，不造FIFO请求或新增维护账。FIFO、registry原schema解析与owner/原claim仍各自核验。
+
+实际registry消费者只以内部门`maintenance_only=True`执行原维护段，返回前不消费后来FIFO、不请求模型、不确认候选。原pending候选/正式Skill用户确认边界、每日预算与Count0运行顺序保留。关闭原C后末写拒绝、保持processing/P3未结；失活门不能补造unknown观察或终态。测试与准确SHA交接见仓外LEARNING_DISCOVERY_FOLLOWUP_14，完整C/W/native/Count2仍待统一验收。
+
+
+## 2026-10-16 F3 C-only循环接线（15，候选未发行）
+
+冷C请求线程沿真实control/Root/lease等待，不构造业务dispatcher；该等待并非已接通请求准入泵，冷C metadata 准入仍待后续片。已有实际baseAgent的健康C继续原_RequestDispatcher，不属于这条冷等待。C后台线程只运行原CoordinatorBackgroundRequests metadata producer，不启动Count0会话supervisor与孤儿/维护/调度三旧业务车道。实际control、paths、runtime、count、PID/FD和代次必须同源，缺失/复制/关闭不会回落旧业务。Count0原supervisor全体实现与公平顺序未改。
+
+原心跳载荷保留代际/队列/限流/loop_health字段，冷C允许agent为空，但写前在原lease短门核准确paths标记与control.paths同对象；丢标记、复制paths、替换或撤权均拒绝，不能按root跟随新C。Count0无C沿原writer。只完成合同与临时C组件验证，正式CLI/HTTP组合、native与Count2仍由root验收。
+
+
+## 2026-10-16 F3 runner线程ACK与退出未知（16，候选未发行）
+
+非作者实际Thread探针确证child11在心跳或timeout worker已经出生但start ACK抛异常时，会跳过原join，把仍活执行写成普通FAILED。独立16使两个start进入原收尾：正MP stop/interrupt和原Thread join在T外，未确认退出时保留同一原异常native锚点与捕获Context，不制造Bounded call_id或entered=False。原11冻结及两项原红保留。
+
+原scope/完整claim匹配时只在唯一processing.execution_outcome记录TASK_RESOURCE_STOP_UNCONFIRMED、entered=null及原runner run/attempt/phase；关闭scope后只读既存诊断/保守未结，不普通失败、签新终态、重放或释放P3。Count0原心跳start、状态顺序和1秒join不变。原TIMEOUT早fence完整保留：逻辑超时只撤销迟到提交，并不证明物理Thread退出；独立运输仍等原join。完整native/Count2未验。
+# 2026-10-16 F3 冷C历史只读跟随18（候选，未发行）
+
+`/client/history`仅在原credential认证后进入冷C只读分支；其他client能力继续原waiting/503。原HTTP身份头、scope、默认会话和游标校验不变，C直接复用唯一owner解析与原canonical Store，禁止物化Agent、foreign pool或创建冷owner、线程、索引。
+
+Count0 wrapper与冷C共用原分页、完整工作片、final问答配对和native/媒体显示投影。缺目录或绑定仍原空结果，坏索引、线程、消息或不可读明确load_errors，不回退到基础owner。读前后均核原runtime/control/paths/lease；关闭或替代来源不能返回本次已读正文。只涉及临时C和原Store合同，正式CLI/Count2/native与整链验收仍由root统一。
+
+## 2026-10-16 F3 原共享索引压缩签名闭包（19，候选未发行）
+
+原C后台tick已真实传入commit_transition，但main聚合压缩签名缺失，实际TypeError与W/受限host五共享写入口未拒的原红均保留。现按固定S职责适配两生产模块：原四索引global→if_due→file透传同一实际producer callback，canonical锁内inode/tail替换及原冷却内存/sidecar在同一原C末门内完成。长扫描不持该门，撤权/停producer后只清本次私有staging，不更新canonical或sidecar；原异常同对象上抛。
+
+main两遍流式/LF原字节、key注册表、锁内身份与并发tail、sidecar/cooldown和Count0成功替换后取时钟的顺序保持。整体rebuild共享写在锁/tmp/cache前拒W/host；纯预览、读取及原受控owner register追加保留。GlobalWriteError与四类执行typed（含有界退出未知）及host拒写不被io_error吞掉，普通同码异常仍是原单文件隔离。只闭合这条共享压缩真实consumer，不代表HTTP/C admission泵、Count2/native或正式运行已接通。
+
+## 2026-10-16 F3 正式入口与共享种子末门（候选，未发行）
+
+正数模式由正式 CLI 持有原协调者租约，在同一 Root 下按序建立冷控制面、HTTP、业务主体和原设施线程；Count0 不导入该组合模块。部分启动失败沿原资源集合结算，来源失配不回落另一 Agent。C 状态写入先由原租约确定 canonical state Path，并只写该捕获值；可变传输 DTO 换路径不能改变目标。原 B4 多进程自动 restart/stop_for_update 尚不支持，明确拒绝并保持现有服务，不假报重启。该两片原 107 项、原独立反例七项和额外三项通过，但不构成物理 Count2 验收。
+
+共享 Home 初始化、内置资源镜像和 Skill/declarative 派生索引共六入口在原副作用前拒绝 W/受限执行宿主；原 Count0 顺序、既有共享资源读取和受控 owner 追加保持。独立重建后 153 项普通通过，未借读取入口补建全局资源，也未对 owner 私有同名 helper 整体加拒门。冷 C 准入、卡片领域事务、真实 C/W 与物理退出仍须独立闭合。
+
+## 2026-10-16 F3 健康C历史跟随20（候选未发行）
+
+健康C即使已有实际baseAgent，历史接口仍必须走18的原只读Store叶子；不能因此再构造foreign Agent或登记新owner。control/runtime任一存在即核完整原来源，部分缺失、复制或读中closing拒绝，不回退Count0。原认证、群内actor隔离、媒体展示、完整工作片与字节游标保持。准确冻结前置下独立140项普通通过（含18原126项）；不外推其他卡片/记忆接口或实际Count2。
+
+## 2026-10-17 F3 冷C准入/周期恢复与正式记忆只读（候选未发行）
+
+冷C请求循环现接真实CoordinatorMetadataRequestPump，先原canonical终态释放，再原公平派发/P3盖章；健康C的原Dispatcher与Count0不改。实际ControlPlane不准领取C业务，允许的W请求仍pending；quota只从同源config/home_root投影。原独立204项通过。
+
+冷C恢复读取不再依赖Agent.home_paths，复用typed控制面原home/config和同一Store路径；原P2/P3/RuntimePolicy/CAS及initialize=False保持，独立227项通过。后续consumer在同gate接原周期恢复与terminal投影，派发优先、各修复域独立退避；原408项及额外10个typed/同码普通边界通过，不推进独立input cursor。正式startup、private卡片及cold日志另片，不由这组组件测试宣称已完成。
+
+C的/client/memory仅recent复用原JSONL scanner/materializer与公开字段，不构造Memory/Agent或索引；原all虚方法链与坏行容错保留，同群仍共享原群owner记忆。认证、owner和原C来源读前后核，失源拒绝；search/remember在C明确不可用，不能foreign fallback。独立123项通过；只读history、private callback和F4原封印不扩权。
+
+## 2026-10-17 F3 正式C启动恢复（候选未发行）
+
+正式C在原Root建立后、HTTP/W/循环出生前沿原P3门和startup=True处理旧processing，不以首个周期tick猜启动预算。活PID原门保留；准确旧身份退出时保原failure_count、unplanned_resume_count与10秒退避。B4有效计划标记按原资格判据只读预检后明确拒绝且保留，Count0默认消费/删除顺序不变；不假报requester continuation。新5项同字节原产品全红后转绿，18文件238项普通通过。临时fixture中活PID及错误字段期待的失败均保留并修正夹具，未放宽产品门。组件不证明Count2/native或独立input已完成。
+
+## 2026-10-17 F3 冷C私卡真实事务（21，候选未发行）
+
+原 `/client/private-interaction` 仅为凭据 submit/cancel 和本人 OAuth cancel 放行冷C；认证仍先于读取正文，原SDK actor、MAC、owner、消息/群、个人锁、代次、期限及任务绑定逐次核验。模型卡与审批保持 waiting，不物化 foreign Agent，也不把凭据、权限或卡片正文放入请求/命令账。
+
+D0复用同一原资源：SessionLockStore 新只读模式不建库/迁移、锁忙零等待；原 RuntimeDB 新 existing_only 模式只开现存库、零等待、不初始化，且不借 F1 的普通30秒连接。原 Count0 初始化、密码库10秒、RuntimeDB30秒及 F1 缓存保持。原子代理载荷恢复、输入路径、refs、Wake和deadline均由原唯一实现提供，不建第二scanner、调度源或状态库。
+
+D1在真实 HTTP/control/runtime/paths/lease/controller 同对象来源中，按目标owner逐次进入原 C 末门。原配额→卡锁/输入锁/refs/Wake/SQL顺序保持，各段已提交事实不会因后段失败回滚。文件锁及C专用SQL竞争立即失败；严格配额检查仍在原配额锁内真实扫描，不承诺磁盘I/O常数或硬实时。网络、模型和Delivery不进入此门。
+
+同卡同决定重放只补原输入、原去重Wake、refs与deadline；取消保原静默退休语义，OAuth ready取消不撤销已处理授权。审计仍沿原脱敏文件先写，文件忙明确失败；既有 LocalStore 尽力旁路未改，不把该旁路成功当成卡片事务完成。实际typed未结对象保持，不签发新claim、终态或重放许可。
+
+合成私有凭据行若把input_id改成同owner另一原卡，现以原 ref+generation 生成算法校对并拒绝；旧双方均无generation/input字段的明确缺省仍沿原ref回放。此为私有账损坏防护，未证明外部可修改该行，不据此宣称外部可利用。正文秘密仅经原加密库保存，不进入请求、Wake、审计或聊天。
+
+本片只证明隔离临时C/fake运输及原Count0相邻合同；不代表正式服务、真实凭据/OAuth网络、W/native、Count2或完整F3已验收。
+
+C凭据加密只读原MAC已核验的同一既存key，复用原interaction_key(create=False)，不等原key创建锁、也不在末核后缺钥时重建。Count0仍原create=True，Fernet派生公式不变；该内部资源选择只缩小创建行为，不签权限。
+
+### 2026-10-17：F3 C queued/cursor 元数据闭包
+
+冷C与healthy `_RequestDispatcher` 的输入段改用同一原C/Root/retained gate来源，仅修原queued队列投影与轮转cursor。queue/input T和cursor事务分别在controller→lease→Root末门内提交，原两个叶子以可选writer做原子写前复核；Count0 None仍沿原完整receipt/guidance链。queued不因owner quarantine被误当业务执行，不新占P3或要求旧W停止；原owner/actor/media与完整prepared摘要不重签。active/bound/terminal_unknown只examined+deferred并轮转，整页延期独立退避，不取foreign Agent/Store或改正文；原typed未知同对象保故障行cursor，普通坏行保原轮转。详见[冷请求泵](../../design/COORDINATOR_COLD_REQUEST_PUMP.md)。本片不外推active运输、startup组合、native/Count2或物理排空。
+
+### 2026-10-17：C queued普通JSON资源忙退出
+
+在完整冻结候选+原queued片上，C短门内receipt/candidate reader与queue/cursor末writer改为只尝试各自原JSON锁。默认True保持Count0；busy仍是原BlockingIOError、该行不推进，原segment独立退避，不当权限或业务unknown。真实受控普通持锁线程保留原等待对照，修后锁仍持有时Root可关闭；不涉及active/BG来源、native/Count2或日常服务。
+
+## 2026-10-17 D22 模型卡逻辑提交候选
+
+本片相对准确X+47+21，冷C只新增原已签名模型卡的select/set_default/save/cancel逻辑提交。原G1、SDK/MAC、私人锁、管理员绑定及群HostActor依旧在先；模型能力开关关闭仍可取消。模型host只复用原home/config/Store，不构造Agent或foreign pool。
+
+完整非网络逻辑先取原C/owner T末门，再沿原群策略→card→catalog/thread锁链。ThreadStore.update_atomic、group_capability_guard与原模型操作仅透传可选blocking=True；C明确False，Count0默认调用形状与等待语义不变。卡/目录/线程/群锁忙立即失败，不把失败当成功或补另一账。目录代次、管理员/共享代次、线程CAS、选择清F6观测/usage、同提交HMAC重放、同endpoint空key以及取消首次点击审计保持原算法。
+
+本片没有闭合首次/model菜单、/client/models或add/edit私人表单Delivery；这些冷C入口依然waiting。不能把本片callback通过称为整个模型卡端到端。D3/D4、memory、W运输、Count2/native、真实模型/网络/日常服务均不包含。
+
+全局TREE只需登记新增test_coordinator_model_card_transactions.py；TESTS可记录本片原红→绿及准确最终命令，最终数字以FINAL_RESULT.json/XML为准。后续Delivery需唯一paths健康reader（C不清PID），显式原registry+Delivery依赖，准备/外发/active/finish分段且不持T发网络。
+
+建议下一步：非作者从PREPARATION准确重建复验本片，再串行接真实菜单与Delivery；可并行只读核对原caller，不能并行改这8个产品前沿或把waiting免成授权。
+
+## 2026-10-17 D23 无Agent通道健康只读叶子（候选）
+
+原Agent的adapter_runtime_health仍用原Gateway路径、原带锁状态读取和默认陈旧PID清理；唯一健康计算主体提取为adapter_runtime_health_for_paths。冷C未来显式cleanup_stale=False：PID仅读且原adapter_state.json原子发布快照使用既有common.read_json_object_report，不创建state锁或清PID。真实PID、30秒陈旧判据、坏JSON/目录/PID复用/缺失均沿原安全健康投影，不把缺provider当健康；没有第二健康状态、Agent或新IO API。
+
+本片仅开放资源显式读取leaf，尚未接首次模型菜单、/client/models或Delivery；原registry+Delivery后续必须传这个真实provider且门外构造/发送。原两个reader均Path.read_text，未新增或宣称绕过no-follow合同。只用隔离pytest，未执行真实模型、网络、日常服务、W/native或Count2。
+
+建议下一步：非作者复验纯提取后，再由root确认首次菜单/控制入口同源producer与原receipt闭包；不得用现成MAC卡回调来源伪装首次菜单，不能并发覆盖D22冻结锁链。
+
+## 2026-10-17 D24 模型卡完整签名投影一致性
+
+相对冻结D22的独立followup，不改D22/D23。原模型卡行是原MAC payload加生产writer实际添加的9个运行/运输字段；新纯投影只剔除这9项。提交、取消、completed重放和dispatch prepare前，原锁内完整JSON投影必须与原验签payload一致；dispatch finish比较同次已验证prepare捕获的投影。包含owner/actor/thread/mode/profile/目录与选择版本/parent/expiry及未知签名扩展，不只核profile，也不补猜缺省字段或重新签名。原逻辑HMAC、签名公式、行字段、目录/CAS和取消竞争不变。
+
+原合成私有行目标漂移P2来自非作者既有证据；未证外部写私有row路径。该探针被自动审核以possible cybersecurity risk拦下，本片不重跑、不复制到其它位置执行、不新增同类损坏探针。只保留原红引用与SHA，不能记修后该探针通过；验证为静态调用/投影证明及普通合法模型选择、保存、取消、同参数重放和原相邻回归。
+
+没有新增schema/摘要账/授权类型；未触首次菜单、Delivery、D3/D4/网络/native/Count2。全局TREE新增test_model_control_signed_projection.py，TESTS记准确普通合法回归与受限验证未执行，由root统一。
+
+建议下一步：非作者静态核对完整投影与合法回归；明确保留受限探针未重跑限制，再在独立新片串行接已批准add/edit分段Delivery，不能拿正常通过声称整个/model端到端。
+
+## 2026-10-17 D25 已有模型卡分段投递候选
+
+本节覆盖D22“已有选择卡add/edit尚未接”的限定，首次/model菜单和/client/models仍未闭合。基底是准确X+51：原D22、D23只读健康及D24完整签名投影；D24叠D23仅两模块docs上下文适配，生产/测试仍原冻结字节。
+
+已有MAC/SDK actor/原thread选择卡，在同一原21 producer/lifetime下完成prepare dispatching→列表/签名准备→门外原registry+Delivery→active发布→同dispatch_id finish。C每次RMW先原T再原非阻塞锁；门外明确require_current，Delivery不持T/card/catalog锁。ModelCardDelivery只保存原service/perform/require_current三个引用，不带owner/role/许可/第二账，不能自行授权或延长原来源。
+
+原模型host只含home/config/Store，原签名payload与完整不可变投影保持，群HostActor/assistant.configure仍不查询成员网络或授监控权。C明确使用原daemon只读健康provider，不把None假作健康；registry/Delivery只在门外构造和发送。已有MAC子卡只读原key签名，key缺失即拒不重建；Count0签名默认create=True/原八参数send虚调用缝保持。新函数拆分按真实职责，不涨尺寸baseline。
+
+成功外发后才原active行，parent保持原dispatch_id/逻辑HMAC/parent_control_id与取消赢先；已失败或未知同dispatch不重发，child保存仍核原父决定。实际四类common/Bounded/Tool异常穿过Delivery及dispatch同对象上抛；C实际GlobalWriteError也直接上抛，禁止失活后用finish(None)制造第二个拒绝或普通failed。已外发但C关闭保parent dispatching、不晚写active/finish，不能回滚外部事实。
+
+投递失败保原ControlCardDeliveryReceipt结构事实：明确未发送保原error_code/安全provider_code/effect_outcome=not_started，真正运输unknown保持unknown，均同dispatch_id不自动重发。原Count0消费同一receipt；直接发送函数仍ValueError族失败，不把忽略返回值的原菜单调用变成假成功。只在原result中投影，不增加状态schema、队列或副作用协议。
+
+D22旧未接功能测试只在D25副本一个函数适配：缺adapter确为not_started、原错误码CHANNEL_ADAPTER_UNAVAILABLE、parent dispatch_failed、完整签名投影/消息身份不变、零子卡且重放不发送。保原75两红；原D22/23/24目录零写。原FOCUSED中“明确未发送被抹为未确认”的继承行为已经本片修正，没有把它称为实际物理unknown。
+
+受限D24 row目标改写探针继续未重跑；本片只做正常功能、取消竞争、源退出与原合同回归，无模型/外网/日常服务/native/Count2。全局TREE登记test_coordinator_model_card_delivery.py；TESTS与主导航由root统一，实际最终数字见FINAL_RESULT。
+
+建议下一步：非作者按PREPARATION准确复验本片，重点原receipt事实、门外Delivery和同source末门；root顺序收片后再接首次/model与client/models真实HTTP scope来源/ThreadStore构造。可并行只读核对首次入口，不在缺源时补Agent、伪MAC或新会话队列。
+
+### 2026-10-17：原正式 worker 入口与部分启动排空
+
+CLI 在普通解析前消费原内部 worker dispatcher；Count0 普通入口保持。worker home 比较复用原 canonical resolver，拒真实异根而允许同根别名。正式隔离 Echo 的双 Worker 空载 ready/退出已验，业务/后台仍待。未完成 native 握手时原 collector 缺 session 明确报 unavailable，由原 runtime 保留排空阻塞，不吞原启动错误或假造空执行树。两条原失败先复现，fixture 的 blocker 原因仍按原异常类型。
+
+### 2026-10-17：C HTTP原pool工作区间（薄组件）
+
+原bounded HTTP的实际pool worker仅在`finish_request`同步区间安装原current-work；捕获同一server/runtime/control/controller/lease、原executor和已登记actual Thread，首绑同socket的handler，finally失效。查询不授业务权；receipt/模型等固定元数据源仍要在自己末门require原work。区间不持Root门跨handler，关闭立即拒晚写。Count0原分支不创建source/无新增IO，原HTTP异常/关闭策略保持；不涉及active文本或BG实现，物理Count2另验。
+
+
+### 2026-10-17：BG 原会话 claim 运输定位补缝
+
+沿 formal4124 完整冻结候选已有 BG caller，只修改原桥、后台 control 和 claim publisher。原 Gateway authority 发布→LocalRunControl 确认顺序不变；确切 BackgroundRuntimeBinding 再持原短 T，同原 claim CAS 完整写入 core authority 与 gateway_transport_reference。原 task guard 不移动，嵌套复用原当前 T 窗口；Count0 无新字段、查询或额外 claim 写。定位取原 C.claim/W.binding.claim 和当前 processing authority，不从 invocation 或最新 claim 猜 fence；Compact 仅换 core attempt。原四实际 typed 保同对象、claim/P3 未结责任不清。普通本地 fake/replay 收口后另独立复验，C 消费侧、两次 authority 中间态 unknown、真实 Count2/native 留主线分片。
+
+### F3 D26：首次模型菜单的真实C领域来源（候选，未部署）
+
+首次 `/model` 的 view/select/set_default 与 `/client/models` 的原非网络 owner 目录操作共用本次真实 HTTP work、原 control/runtime/paths/controller/lease 与21同一 transaction.perform/close。没有原私卡的首菜单从实际 G1 header/scope和唯一配置 owner 解析取源，不伪造 MAC、Agent、current execution 或会话队列；已有卡仍按 D24完整签名载荷与 D25分段外发。
+
+首次线程沿原 ThreadStore get_or_create→create/write/bind/index链，默认模型 callback仍取原目录，F4 learning_source与原选择CAS均保。C只显式非阻塞抢原锁，原Count0默认True、调用形状和初始化次序不变。原io trylock02及HTTP current-work片作为准确前置；C短门不等待模型/网络/Delivery，不声称同步文件系统操作硬实时。
+
+文字入口继续使用原control receipt/schema/operation_id/完整摘要及prepared→executing→completed/terminal_unknown；同消息重放不重发卡。首次交互key只在实际source门内沿原create=True/trylock建立；后续签名只读。registry健康使用D23 canonical paths、cleanup_stale=False，Delivery在门外，成功后同原source发布active。已知not_started与真实unknown沿原ControlCardDeliveryReceipt安全字段保存，unknown/typed拒绝不得自动重发。实际五类typed在领域producer同对象上抛，最终HTTP仅固定503，原executing/部分事实保留，不能伪造完成或签发恢复权。
+
+本片不开放/client/models中的OAuth、连接探测、embedding/decision或共享全局设置；其它/control kind仍等待。Count0原领域与虚调用缝保留。原两真实HTTP503红和后续普通focused证据在仓外交接；没有真实模型、外网、日常数据、W/native/完整Count2验收，受限私有row探针未执行。
+
+原 `/control-status/<operation_id>` 对model回执只做实际work/Root前后核、严格schema/ID与原完整ACL的纯读，不reconcile、不创建.lock或冷owner目录；实际unknown仍unknown。正count即使已有业务Agent也走同一model producer，避免foreign pool；状态投影仅复用已加载事实，冷运行不猜W当前状态。其它控制与Count0默认reader/虚调用仍沿原分支。
+
+### F3 D27：冷C签名审批取消（候选，未部署）
+
+冷C的原 `/client/private-interaction` 现在只为 `tool_approval + cancel` 增加真实领域接线。原MAC/操作者/个人锁/admin先行，在本次实际HTTP work、同control/Root/controller/lease与owner末门中，复用原ConversationStore、permission哈希路径、transition锁及首次点击审计。允许关闭原过期/失活等待；取消不停止任务、不批准当前执行、不释放P3，不改其它卡片或凭据输入。重复取消只回原点击事实，已批准/拒绝不能被取消覆盖。
+
+Count0原Agent wrapper、审批路径虚调用缝和阻塞锁默认保留；新的Store leaf只定位原账，不成为执行权限。原JSON原子写增加 `blocking=True` 内部可选参数，C显式False抢原同一锁，锁忙按实际不可用返回，释放后仍走原绑定重放。实际typed异常原样上抛；来源关闭后不落取消行。无新配置开关、无新审批账/队列。
+
+本片先保真实503未接线原红；定向验收/准确输入见仓外交接D27。批准/拒绝仍未接本片：前台必须复核原typed writer/current RunParams/RuntimeDB，child必须原canonical active attempt，后台必须原claim；私卡JSON和MAC不能替代这些事实。后续不能把另一条 `/approve` permission-chunk 通路误认成当前私卡消费者。未运行真实平台、模型、外网、W/native/Count2或受限row探针。
+
+
+### 2026-10-17：C receipt 固定CAS与前台文字安全点（候选组件，未发行）
+
+实际HTTP pool work之后，冷/healthy C都按同一handler/server/runtime/control/controller/lease/Root保存输入。原input T先取得，末写在controller→lease→Root短窗；JSON读写仅尝试原锁，完整raw JSON与同次typed快照双核，避免类型归一或嵌套dict改写掩盖CAS。首次身份准备仍仅一次，重放不重读管理员绑定或重签。三个固定动作是首次冻结运输、确定无active目标/不等价时排完整prepared、由原v4证据修binding；不接任意writer/predicate/phase自授权，不另取P3 gate。owner quarantine仍可耐久queue。
+
+v2无运输字段保持原编码；真实C首次冻结运输才v3，完整Gateway fence/原route/会话claim目标参与CAS。缺失、坏账、过期running、BG未接投影和半发布保持unknown；只有无原claim或稳定原canonical finished/failed/cancelled才可证idle。媒体/引用、prompt_files、inject、workspace、系统任务及非等价行为选项沿完整prepared queue，native权限仍原worker检查，不降为纯文字。
+
+真实foreground C业务或W通过原OriginalRequestWriteSource(background=None)捕获opaque source，RunParams→RuntimeLoopParams→ToolLoopExecuteParams只传同一引用，不进attrs/模型/序列化/child任务。probe只读本turn原by_turn定位并回核全部canonical，不再读共享历史；新C在同target T内pre-ref→完整transport CAS，drain经原T/P3窗口追加原guidance，input T仅try，完整receipt末CAS后补原binding。guidance使用原control同一payload builder并保完整transport定位参与原digest，最终reserve→submit→ACK/Compact去重全留原链，追加不是消费确认。既有v3尚无guidance绝不按旧v2的miss逻辑擅自queue。
+
+Count0无source维持原行为/默认writer与零新增输入IO；原owner/actor/媒体/学习源/取消/approval入口未重构。候选仅验合同、真实临时Agent/Store/C-W对象及原P3/claim、可控线程和测试localhost HTTP/fake provider，不是实际W进程、native/Count2或物理drain通过。BG locator消费、无transport旧pending显式恢复及完整发行门仍需单独组合；不以组件绿清理未知责任。详见[前台输入运输](../../design/COORDINATOR_ACTIVE_INPUT_TRANSPORT.md)。
+
+
+### 冷C失败发布的可选业务索引
+
+原失败归档后的 `recovery._publish_gateway_failure_response` 先写 response、history 和 request_aborted 流事件，再做 LocalStore 搜索索引。真实 `GatewayControlPlane` 不是业务Agent，没有 LocalStore；这里只显式跳过该原C对象的末段可选索引，不改整个恢复 context.agent、不创建Agent/Store，也不把请求正文转到控制日志。其它业务宿主仍按原同一对象进入原logger，索引失败仍保留原副作用诊断。
+
+原canonical、claim/CAS、P2/P3、恢复预算及发布顺序不变；部分投影失败由原归档修复，跳过索引不代表终止执行或释放责任。仓外普通回归用原queue/claim/canonical producer、真实冷C单例/控制器及实际Echo Agent证明接缝：原版可复现 `gateway_request_processing_failed → log_gateway_payload → AttributeError(local_store)`；这不是对旧线上日志同因的判定。无新增配置、权限、队列或fallback；不改通用logging策略。
+
+
+### 2026-10-17：前台输入普通锁忙与正常封口补齐（候选，待独立评审）
+
+普通资源busy不再直接把已跑一次模型的请求终结failed。真实安全点/最终收口使用单次共用绝对deadline（最多5秒，原provider预算更短则取小），全部refs/retry共预算；每次退出原T/Root后才等待原interrupt，短锁释放后原地续同一输入，不重新发送首轮模型。实际typed失源/提交未知原样穿透；到期沿原source拒绝下一retry，实际finally出口仍保unknown、原processing与P3。Count0原无source、虚调用缝和零新增输入IO保留。
+
+W/C业务只消费本turn原by_turn定位，逐条完整canonical/fence/owner/peer/route校验，超过64条自身refs也不截页；其它turn的合法锁与历史不进入观察。C首次发布在原input T→try target T→Root内先定位后canonical，未提交定位不授权；原C扫描仅补既有运输漏hint并保持deferred。
+
+正常原来源仍活时，最终收口在同target T/P3置closing并只把严格从未追加/预留/提交/消费的完整prepared耐久queue；排队不执行、不释放旧P3。固定finish可重进同closing，probe/drain/append不放宽。实际临时claimed/fake-model链验证短锁后done/consumed且首轮未重发；收口短锁后完整queue、到期unknown无canonical都有直接因果回归。BG定位消费者、旧无transport pending、旧candidate-v3漏ref晚于封口的P2/post恢复和真实native验收仍是独立剩余，不能由本片普通组件绿代算。
+
+
+### 2026-10-17：repair03 同次预算与guidance原锁链（待独立复核）
+
+02已关闭的普通busy→failed与共享域扫描仍保，但独立复核又发现4个已过期末写与1个继承dedupe阻塞原红；准确4809重放5红均保留。03把同一个deadline显式贯穿每ref、正常读后、原锁后、序列化及canonical replace/append前；只有纯资源条件，不签新source/owner/claim。W原来源过期保typed unknown/P3，C原typed在真实HTTP最外边界固定503 waiting，不把部分提交称未执行。
+
+GuidanceStore/ledger必要append链现在可选try-lock，原dedupe/receipt/delivered/index/queue JSONL锁身份不变；Count0默认True/None、精确JSON字节、F1 skip-write与展示still_current保留，reserve/submit/ACK未扩。显式bounded replace不门内sleep，None保原重试。普通合法锁与部分提交重放已直接验证；数字以最终仓外XML为准。单syscall不承诺硬抢占；BG/旧漏hint封口后P2-post/native继续独立。
+
+2026-10-17 cold控制状态候选：实际原HTTP工作片与原ACL支持正count普通/control-status纯读，不创建Agent、不reconcile或写状态；Count0及ready的显式v5私审批证据对账保原入口。新普通8读用例旧红，连同原模型/控制/HTTP组合9文件129项通过；cold POST与原生整链不在该结果范围。
+
+2026-10-17 control-status02：按独立评审保原公开GLOBAL_WRITE_REJECTED错误码；只回退两处generic work ValueError的展示码，不调用模型授权源。新增普通HTTP失效一红转绿，九文件130普通通过；D28组合与最终Git严格gate仍由根验收。
+
+
+## 2026-10-17 BG active input B1/B2（仓外未发布候选）
+
+只接实际主BG binder/原claim/core callback与原Gateway source；v2完整保存Gateway fence/route、task target及原claim_transport_reference，两组attempt严格分开。v1 request语义不变；业务by_turn是invocation，Gateway T/processing键只取gateway_claim.request_id。C按唯一reference定位，并对原TaskLink/claim/processing/thread全JSON末核，task锁只try；合法raw漂移保pending/deferred，不热选目标，锁忙才按同一预算门外重试。
+
+实际BG安全点只追加等价纯文字，沿原guidance.append_once及reserve→submit→ACK；媒体、files、inject、workspace等不扩大active范围。原ClaimExecutionBinding词法scope覆盖heartbeat.stop之后的原finish；同claim输入接受关闭由原ClaimStore.finish updater内完整expected running CAS线性化，Gateway turn_phase保持open。已成功finish后的短忙只持本栈actual terminal快照续结，不再finish、不释放P3。最终只投影原consumed事实或将严格未append的完整prepared排原inbox，未知预留/提交不重排。
+
+G0未批准、未实现：首拍unknown和旧无transport pending仍deferred，没有新的C扫描、None-as-absence或legacy迁移。late同key原control writer与queued receipt的互斥设计另审。此候选不证明整个BG/F3、物理停止、Count2/native或发布；测试与准确SHA由独立工件记录。
+
+
+### BG G0 fresh-only 接合（仓外未发布）
+
+本次actual HTTP亲自创建的fresh输入，在正常BG尚未发布core/reference时，沿同input T、原current claim/task/thread完整raw与dedupe M严格canonical缺席排完整prepared。原control在同ordinary-input完整合同及原角色域内持同input T跨queued检查至nonblocking append_once末提交，关闭queue后迟到同key追加。Count0/无ordinary ID零新增input IO；raw漂移、未知/旧pending继续deferred。准确普通测试/前后SHA见独立工件，不代表旧行恢复、native或整体F3闭环。
+
+
+### 同key queue与pending恢复08（仓外候选，待独立复核）
+
+正count/message_id显式steer也取原纯公式input T，原ordinary receipt冲突/queued/已绑定不append；Count0/缺message_id不变。所有C fresh queue和prepare后created=False未绑定pending固定恢复共用同canonical去向核验，已有Store原M、未物化Store不创建owner/M。原idle反向顺序窗口与普通pending欠账由新合同覆盖，准确普通事实见08工件；旧rolling writer退出仍需原物理/代次证据，不据候选测试放行F3发布。
+
+### D30A 原等待方纯负向退休（候选，尚未完整验收）
+
+D29 非作者在真实已受理 input 与另一线程合法持 operation 锁时，确认原 wait 普通返回 cancelled 却留下 pending permission、并关闭唯一批准 callback。D30A 将纯 cancelled/unavailable、denied＋APPROVAL_TIMEOUT 与批准路径分离：只取原 permission transition→JSON 的 try 锁，完整核对原 scope/request；不取 operation、Root 或业务写门，也不授执行权。四种结果明确区分 no_input（同锁内已完成精确删除）、prior_decided（保原决定）、committed（原负向已落盘）、unconfirmed（未确认）。真实取消仍返回 cancelled，不能因为历史 approved 而继续工具。
+
+带 input 的负向决定原子增加可选 decision_origin=waiter_retirement，operation_id/input_digest 与旧行不改。原 poll 仅对账同一事实：executing 可以完成负向处理；terminal_unknown 加纯退休事实仍为 unknown，不把历史副作用解释为已确认。旧用户决定、v1-v4 金样与普通 Count0 hook 保留。
+
+permission/JSON 锁忙立即抛局部 ApprovalRetirementUnconfirmedError，持不可变原负向结果、scope/path/request/input refs 及同原对象出处；不含批准 callback、writer、Call ID、新事件、全局表或队列。finally 只关闭批准能力。裸 wait 的准确未结出口尚不代表原请求 Future 已接收责任；D30B 的 runtime/父子/宿主命令传播与原 Future 完成点接收仍待实施，D29 的整链 request_changes 不因 A 的定向通过撤销。未宣称重启耐久恢复、物理 W/native/Count2 或真实平台验收。
+
+### D30B 原请求观察与 Future 核收（候选，未发行）
+
+纯审批退休未确认沿原插件、宿主命令、主 Agent.run、子代理外层及原请求 Future 同对象上抛，普通同码 RuntimeError 不升级。Agent.run 仍先完成原模型 usage 结算，不能把该清理义务写成普通 failed 后丢失。原 Gateway handler 在词法有效区间只捕获原 Agent、路径、完整 claim、请求指纹、PID/Thread 与当前指针，Params 恢复后不重挂旧运行对象；该载体只能观察原未结责任，不能批准、签发 writer 或补造执行来源。
+
+同原 T 末写保持 gateway_execution_outcome.v1 的 unknown/operation_entered=null，附加 approval_retirement={permission_id,negative_digest} 白名单诊断。C/W 保原真实 source、P3/P5 与生命周期末门。原 Count0 executor 和 WorkerRequestPump 只在本实例保留真实 submit Future/claim，每轮对原负向退休尝试一次；准确原 canonical 已接收同 claim/指纹/负向摘要且退休真完成，才删除 Future。permission/JSON 仍忙不阻塞独立控制、不重投 input、工具或模型。原异常若同时持有真实 common/Bounded/心跳/runner 物理未知，优先保留原设施诊断和 Future；许可退休成功不能证明线程退出。
+
+本片的真实 Agent.run 证据仍显示 attempt running、活 PID exec 资源锁保留；原请求 processing/unknown 及会话 claim/P3 也未被强行释放。Future 可回收不等于后续同 thread 已恢复，更不代表“群卡死已彻底解决”。原 recovery 的 stale fail/requeue 与未知观察兼容、原 run 安全 failed/cancelled 与资源释放仍待后续独立生命周期裁决；不得以 TTL、缺行、普通 cancelled、清锁或改断言替代。没有新增持久事件、队列、全局 registry、审批状态 schema 或模型调用；完整 Count2/native/平台验收仍未覆盖。
+
+### D32 审批清理债务与实际业务生命周期（候选，未发布）
+
+D31 非作者复核否决了 D30B“processing/unknown 已接收就能去 Future”的完成口径。D32 只在真实 ToolExecutor ask 消费点确认当前调用未进入 handler，原等待 callback 已关闭，才在本次真实 Agent 参数栈按原失败／取消入口结算；主 Agent 的负向取消沿 cancelled，child 维持原 FAILED 与运行账一致。原异常仍作为清理债务保留，模型／工具不重投。普通同码、未经过真实消费者的裸 wait、跨 run 错误以及实际物理未结都不能借此关闭业务。
+
+原 request_worker 的词法观察覆盖实际 source 与原 finish 区间：handler 返回原失败／取消响应，原 finish 完成 canonical、会话 claim 后，严格读回完整 claim/FP、实际响应、准确 run/current attempt 终态、ended、任务运行归属与原 exec 锁释放，才记录内存核收槽。原公开响应不携异常对象，Future 不放行 P3。旧许可清理每轮只 try 一次；后来同 run 的更高代执行已合法开始时，必须保持旧 attempt 不可变且新锁准确属于新 current 代次，清旧债务不得触碰新锁。读取错误、旧锁残留或错代均不签收。
+
+Count0 原 HTTP→Dispatcher→Agent.run 同 thread 后继和 C prepared→P3/P5→W 原 Future 均用临时数据、Echo／假模型环验证；W 的 P3 只经原 C 读取精确终态后释放，再处理同 thread 新请求。原 assistant 工具轮归档及后继 provider messages/IR 只读核验工具配对，不由开发者补结果。实际 common／Call／heartbeat／runner 未知优先；外层异常链只定位原 native 债务并保原 Future，不能借 wrapper 结算或释放。裸 wait 与手工 Params 的旧测试继续保未结，不再把清理成功写成业务完成。
+
+本机实际 child／孙子仅结束自身准确运行，孙子的终态不得替仍在运行的父级结算。HostCommand 复用原资源退出后的 no-tool-operation CAS，合法审批／取消与原未启动回归保留；本片未伪造 Host 的 Agent/active scope，不把无真实 publisher 的跨 run native 运输测试算作 Host 正向审批闭环。原外层或物理未知及无核收源的清理仍可能需要后续正式恢复；本片未改 recovery、未做物理 W/native/Count2、真实 IM 或模型验收，没有新增状态库、队列、常驻线程、配置或权限。
+
+### 2026-10-17 D33 原审批清理债务的收尾异常运输（独立候选，未集成／未部署）
+
+原审批等待方已返回负向事实且关掉批准回调后，业务生命周期正常失败／取消与 permission 清理债务仍分别核收。真实 handler 接收的同一 native 债务保存在原请求词法观察中；finish 和严格 canonical 读回在该原异常的活 except 区间执行，收尾故障自然保留 Python context，实际 outer 对象、类型及已有 cause 均不改写。handler 的 finally／审计等接收后窗口也只沿仍活的原观察保同一债务，不能新签来源、执行或终态。
+
+Dispatcher 和 unhandled terminalizer 对原 native 异常链只做保债防御，不能将 outer IO 故障吞成普通失败。原 Future 的清理仍只 try 原负向决定；即使 permission 已退休，缺准确 canonical／完整 claim／旧 attempt 终态核收或仍有实际物理未知，也不得删除 Future、释放 P3 或重放旧业务。已提交 canonical 但 projection 失败的责任继续由原 Future 保留，本片不新增 projection repair／recovery 接口。正常 Count0／W 的核收与后继消息、owner／actor／F4 确认和原 Count0 普通错误路径不变。
+
+验证记录见本轮仓外 D33 HANDOFF：保留 D32 600 及 Astra39 四条同字节原红；新增实际 HTTP／W 收尾故障、cause 保留与 physical/common outer 对照。普通 focused 不能代替完整 F3／Count2／native／平台验收。
+
+## 正Count原角色关闭范围候选（127，待复核）
+
+沿原generation唯一历史路径显式v2保存完整原C/W关闭范围，先原producer完整collector/W waitstatus/native close，再历史raw CAS/读回，最后原C marker raw CAS。新C保原角色/旧责任完整绑定，非空P1仍fresh P2；旧v1/旧93不追补，Count0/B4拒绝不变。两份新增运行测试支持同包pyc，真实native/同源stop后再起仍由root串行后置。合同见[生命周期关闭](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。

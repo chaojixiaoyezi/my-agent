@@ -826,3 +826,56 @@ def _read_debug_detail(path_text: str) -> str:
     from pathlib import Path
 
     return Path(path_text).read_text(encoding="utf-8")
+
+
+def test_actual_host_paths_stay_complete_while_ordinary_fake_refs_stay_bounded(tmp_path):
+    from agent_py_agent.agent.common.json_io import write_private_text_file_atomic
+    from agent_py_agent.agent.subagents.debug_trace import (
+        SubAgentDebugDetailRequest,
+        SubAgentDebugTraceRequest,
+        SubAgentRunnerTraceRequest,
+        trace_runner_result,
+        write_subagent_debug_detail,
+        write_subagent_debug_trace,
+    )
+
+    root = tmp_path / ("long  path-" + "a" * 100) / ("b" * 100)
+    manager = SimpleNamespace(workspace=root, debug_trace_level=5)
+    result_path = root / "output" / "RUNNER_RESULT.md"
+    write_private_text_file_atomic(result_path, "actual host result")
+    task = SimpleNamespace(id="actual-host-run", runner_result_file=str(result_path))
+    detail = write_subagent_debug_detail(SubAgentDebugDetailRequest(
+        manager, task, "actual-stage", "content", "actual private detail"
+    ))
+    assert len(str(result_path)) > 240 and len(detail) > 240
+    trace_runner_result(SubAgentRunnerTraceRequest(
+        manager, task, SimpleNamespace(ok=True), SimpleNamespace(dry_run=False)
+    ))
+    fake_ref = "ordinary-untrusted-ref-" + "x" * 400
+    write_subagent_debug_trace(SubAgentDebugTraceRequest(manager, 5, "fixed-ref-encoding", task,
+        {"actual_path": Path(detail), "fake_detail_ref": fake_ref,
+         "items": list(range(40)), "fields": {str(i): i for i in range(40)}}))
+    runner, encoded = _trace_records(root)
+    assert runner["runner_result_ref"] == str(result_path)
+    assert Path(runner["runner_result_ref"]).read_text() == "actual host result"
+    assert encoded["actual_path"] == detail
+    assert Path(encoded["actual_path"]).read_text() == "actual private detail"
+    assert result_path.stat().st_mode & 0o777 == 0o600
+    assert Path(detail).stat().st_mode & 0o777 == 0o600
+    assert len(encoded["fake_detail_ref"]) == 240 and encoded["fake_detail_ref"].endswith("...")
+    assert len(encoded["items"]) == len(encoded["fields"]) == 32
+
+
+@pytest.mark.parametrize("empty", [None, ""])
+def test_empty_host_runner_ref_keeps_original_empty_json_string(tmp_path, empty):
+    from agent_py_agent.agent.subagents.debug_trace import (
+        SubAgentRunnerTraceRequest,
+        trace_runner_result,
+    )
+
+    manager = SimpleNamespace(workspace=tmp_path, debug_trace_level=2)
+    task = SimpleNamespace(id="empty-host-ref", runner_result_file=empty)
+    trace_runner_result(SubAgentRunnerTraceRequest(
+        manager, task, SimpleNamespace(ok=True), SimpleNamespace(dry_run=False)
+    ))
+    assert _trace_records(tmp_path)[0]["runner_result_ref"] == ""

@@ -1,5 +1,5 @@
-# LLM: 控制副作用之前先冻结 owner、输入和版本化摘要；显式目录进入 v3，旧回执不能承载未签名字段。
-# 模块用途: 保存唯一控制回执并处理安全重试，目录、目标或命令变化不能借用原消息编号执行。
+# LLM: 原builder/codec唯一；cold固定HTTP源只try原op T并准备原回执，既存全状态只读；v5/claimed/活封印及默认本地执行不变。
+# 模块用途: 原私卡action仅扩同一回执v5，旧slash和v1-v4字节不变；保存唯一控制回执并处理安全重试，目录、目标或命令变化不能借用原消息编号执行。
 from __future__ import annotations
 
 """LLM: Persist one authenticated slash-control operation before any side effect.
@@ -45,6 +45,7 @@ _CONTROL_INPUT_DIGEST_LEGACY_VERSION = 1
 _CONTROL_INPUT_DIGEST_TARGET_VERSION = 2
 _CONTROL_INPUT_DIGEST_CURRENT_VERSION = 4
 _CONTROL_INPUT_DIGEST_VERSIONS = {
+    5,  # 仅原签名私卡决定action；正常slash仍选择原v1-v4。
     _CONTROL_INPUT_DIGEST_LEGACY_VERSION,
     _CONTROL_INPUT_DIGEST_TARGET_VERSION,
     3,
@@ -52,6 +53,7 @@ _CONTROL_INPUT_DIGEST_VERSIONS = {
 }
 _CONTROL_OPERATION_STATES = {
     "prepared",
+    "claimed",
     "executing",
     "completed",
     "terminal_unknown",
@@ -86,7 +88,7 @@ class GatewayControlOperationConflict(ValueError):
 # turn or manual-Compact target when present; command-specific stores remain effect authority and
 # ``terminal_unknown`` never claims that an effect failed.
 # 显式 workspace 与命令一起冻结并签入 v3 摘要，不能由重试或当前 HTTP 请求替换。
-# 类用途: 保存控制命令的固定身份、精确目标、执行阶段、结果和无法确认的错误事实。
+# 类用途: 保存原控制身份、精确目标和分派阶段；私卡action不是执行许可，完整回执校验先于执行。
 @dataclass(frozen=True)
 class GatewayControlOperationReceipt:
     operation_id: str
@@ -115,9 +117,11 @@ class GatewayControlOperationReceipt:
     conversation_thread_id: str = ""
     workspace: object = None
     expected_execution: object = None
+    dispatch: object = None
+    private_approval: object = None
 
     # LLM: 保存固定身份、可选目录与摘要版本；准备后执行和对账只能读回执，不重读当前 HTTP 输入。
-    # 函数用途: 把控制操作回执转换为可原子写入的 JSON 字典。
+    # 函数用途: 保存规范控制回执及可选私卡action/分派事实，不序列化AGENTS、Memory封印、RunParams或writer。
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "schema_version": _CONTROL_OPERATION_SCHEMA,
@@ -151,10 +155,14 @@ class GatewayControlOperationReceipt:
             payload["workspace"] = self.workspace
         if self.expected_execution is not None:
             payload["expected_execution"] = self.expected_execution
+        if self.dispatch is not None:
+            payload["dispatch"] = self.dispatch
+        if self.private_approval is not None:
+            payload["private_approval"] = self.private_approval
         return payload
 
     # LLM: 读取时重算身份与对应版本的摘要；目录篡改或旧版未签名目录都必须当作账本损坏拒绝。
-    # 函数用途: 从磁盘字典恢复并完整校验一条控制操作回执。
+    # 函数用途: 恢复完整控制输入与可选原私卡动作、分派绑定及claimed执行者，拒绝缺来源的认领。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayControlOperationReceipt:
         if str(data.get("schema_version") or "").strip() != _CONTROL_OPERATION_SCHEMA:
@@ -207,6 +215,8 @@ class GatewayControlOperationReceipt:
             updated_at=_control_operation_timestamp(data.get("updated_at")),
             workspace=data.get("workspace"),
             expected_execution=data.get("expected_execution"),
+            dispatch=data.get("dispatch"),
+            private_approval=data.get("private_approval"),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -274,6 +284,7 @@ def gateway_control_operation_identity(
 # /admin、/approve 的密码在写回执、算摘要之前就换成脱敏正文；明文只随内存中的 command 交给执行服务一次。
 # 事件中心（B6 观察计数）由调用方放进 scope.event_hub 带进来；它是只读展示依赖，不落盘、不参与身份判定。
 # 函数用途: 幂等执行一条控制命令，并把崩溃边界保存为 completed 或 terminal_unknown。
+# LLM: 可选model_transaction仅来自当前真实HTTP模型producer；沿原receipt身份/状态机，原Count0和其它kind参数缺省时完全走原调用。
 def execute_gateway_control_operation(
     agent: object,
     paths: GatewayPaths,
@@ -281,8 +292,13 @@ def execute_gateway_control_operation(
     scope: GatewayControlScope,
     *,
     command_text: str,
+    model_transaction=None,
 ) -> GatewayControlOperationReceipt:
-    scope = bind_gateway_control_scope_owner(agent, scope)
+    if model_transaction is not None:
+        from .model_metadata_transaction import require_model_control_source
+        require_model_control_source(model_transaction, command, scope, command_text)
+    else:
+        scope = bind_gateway_control_scope_owner(agent, scope)
     command_text = persisted_control_command_text(command, command_text)
     operation_id, input_digest = gateway_control_operation_identity(scope, command_text)
     with try_gateway_control_operation_transition(paths, operation_id) as acquired:
@@ -295,6 +311,7 @@ def execute_gateway_control_operation(
                 command=command,
                 scope=scope,
                 command_text=command_text,
+                **({} if model_transaction is None else {"model_transaction": model_transaction}),
             )
         observed = read_gateway_control_operation(paths, operation_id)
         if observed is not None:
@@ -313,13 +330,12 @@ def execute_gateway_control_operation(
             command=command,
             scope=scope,
             command_text=command_text,
+                **({} if model_transaction is None else {"model_transaction": model_transaction}),
         )
 
 
-# LLM: 只有原控制锁首次执行者可先记executing再调用副作用；AGENTS/Memory活封印仅本轮透传，重放只读原结果。
-# effect and is the only path allowed to invoke the command service.
-#   event_hub 随 scope 带下来（HTTP 入口从 server 取到）；回执里不存 hub，恢复 scope 时由调用方再传。
-# 函数用途: 在已持控制操作锁时推进 prepared、执行一次副作用并保存 completed/unknown；新 completed 提交后才发布观察，重放不重复发。
+# LLM: 原op锁首次执行者冻结同一控制；实际local/model source仅传固定receipt叶，远端仍原分派，Count0无source保持原调用。
+# 函数用途: 在原操作锁内准备同一控制；远端只分派，本机沿唯一副作用入口执行并记原回执。
 def _execute_gateway_control_operation_locked(
     agent: object,
     paths: GatewayPaths,
@@ -329,18 +345,42 @@ def _execute_gateway_control_operation_locked(
     command: ConversationControlCommand,
     scope: GatewayControlScope,
     command_text: str,
+    model_transaction=None,
 ) -> GatewayControlOperationReceipt:
     receipt = _load_or_prepare_control_operation_locked(
-        paths,
+        agent, paths,
         operation_id=operation_id,
         input_digest=input_digest,
         command=command,
         scope=scope,
         command_text=command_text,
+        **({} if model_transaction is None else {"model_transaction": model_transaction}),
     )
+    if model_transaction is not None:
+        return _execute_local_control_operation_locked(agent, paths, receipt, command, scope, model_transaction=model_transaction)
+    from .multiprocess_control_forward import prepare_remote_control
+    from .multiprocess_local_control import local_control_operation_scope
+
+    forwarded = prepare_remote_control(agent, paths, receipt)
+    if forwarded is not None:
+        return forwarded
+    with local_control_operation_scope(agent, paths, receipt) as source:
+        return _execute_local_control_operation_locked(agent, paths, receipt, command, scope,
+            **({} if source is None else {'owner_management_source': source}))
+
+
+# LLM: 原op锁与同一C生命周期内执行；当次HTTP/model/local来源不落盘，每个回执状态沿固定写叶，重放不重复业务。
+# 函数用途: 保留本机控制的唯一副作用与终态路径，以原来源完成准备、执行和末态写入。
+def _execute_local_control_operation_locked(agent, paths, receipt, command, scope, *, model_transaction=None, owner_management_source=None):
+    operation_id = receipt.operation_id
     if receipt.state in {"completed", "terminal_unknown"}:
-        return _reconcile_control_operation_locked(agent, paths, receipt)
-    receipt = _with_control_conversation_thread(agent, receipt, scope)
+        return _reconcile_control_operation_locked(agent, paths, receipt,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}))
+    if model_transaction is None:
+        receipt = _with_control_conversation_thread(agent, receipt, scope)
+    elif receipt.state != "executing":
+        from .model_metadata_transaction import model_control_thread_id
+        receipt = replace(receipt, conversation_thread_id=model_control_thread_id(model_transaction, _receipt_scope(receipt, scope.event_hub)))
     if receipt.state == "executing":
         uncertain = replace(
             receipt,
@@ -351,15 +391,20 @@ def _execute_gateway_control_operation_locked(
             },
             updated_at=time.time(),
         )
-        write_json_file_atomic(
+        _write_control_operation_json(
             gateway_control_operation_path(paths, operation_id),
             uncertain.to_dict(),
+            model_transaction=model_transaction,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}),
         )
-        return _reconcile_control_operation_locked(agent, paths, uncertain)
+        return _reconcile_control_operation_locked(agent, paths, uncertain,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}))
     executing = replace(receipt, state="executing", updated_at=time.time())
-    write_json_file_atomic(
+    _write_control_operation_json(
         gateway_control_operation_path(paths, operation_id),
         executing.to_dict(),
+        model_transaction=model_transaction,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}),
     )
     effect_scope = _receipt_scope(receipt, scope.event_hub)
     if command.kind == "agents":
@@ -369,24 +414,32 @@ def _execute_gateway_control_operation_locked(
         from .memory_candidate_control import bind_memory_effect_scope
         effect_scope = bind_memory_effect_scope(scope, effect_scope, command)
     try:
-        result = execute_gateway_conversation_control(
-            agent,
-            paths,
-            command,
-            effect_scope,
-        )
+        if model_transaction is None:
+            result = execute_gateway_conversation_control(agent, paths, command, effect_scope)
+        else:
+            from .model_profile_service import execute_model_text_control
+            result = execute_model_text_control(None, command, effect_scope, metadata_source=model_transaction)
     except Exception as exc:  # noqa: BLE001 - any partial command effect must remain unknown.
+        if model_transaction is not None:
+            from .model_metadata_transaction import raise_model_transport_error
+            raise_model_transport_error(exc)
         uncertain = replace(
             executing,
             state="terminal_unknown",
             error=runtime_error_report(exc, context="gateway.control_operation.execute"),
             updated_at=time.time(),
         )
-        write_json_file_atomic(
+        _write_control_operation_json(
             gateway_control_operation_path(paths, operation_id),
             uncertain.to_dict(),
+            model_transaction=model_transaction,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}),
         )
-        return _reconcile_control_operation_locked(agent, paths, uncertain)
+        return _reconcile_control_operation_locked(agent, paths, uncertain,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}))
+    if model_transaction is not None:
+        from .model_metadata_transaction import model_control_thread_id
+        executing = replace(executing, conversation_thread_id=model_control_thread_id(model_transaction, effect_scope))
     completed = replace(
         executing,
         state="completed",
@@ -394,12 +447,31 @@ def _execute_gateway_control_operation_locked(
         error={},
         updated_at=time.time(),
     )
-    write_json_file_atomic(
+    _write_control_operation_json(
         gateway_control_operation_path(paths, operation_id),
         completed.to_dict(),
+        model_transaction=model_transaction,
+            **({} if owner_management_source is None else {"owner_management_source": owner_management_source}),
     )
     command_completed(agent, completed)
     return completed
+
+
+# LLM: Count0默认原写口；管理/model/local仅透传实际source给固定receipt叶，同op/owner/raw CAS/readback后登记原增量，不扫描收编。
+# 函数用途: 使模型prepare/executing/完成写与原C关闭互斥，网络不在这里执行。
+def _write_control_operation_json(path, payload, *, model_transaction=None, owner_management_source=None):
+    if owner_management_source is not None:
+        from .multiprocess_local_control import _LocalControlWriteSource
+        if (type(owner_management_source) is not _LocalControlWriteSource or model_transaction is not None
+                or path != gateway_control_operation_path(owner_management_source.paths, owner_management_source.receipt.operation_id)):
+            raise ValueError("control receipt source binding is invalid")
+        owner_management_source.commit_control_receipt(payload)
+        return
+    if model_transaction is None:
+        write_json_file_atomic(path, payload)
+        return
+    from .multiprocess_local_control import _write_original_control_receipt
+    model_transaction.perform(lambda: _write_original_control_receipt(model_transaction, path, payload))
 
 
 # LLM: v2（tref2）：命令事件要用权威会话线程（与工具事件同源）。新执行的回执在写盘前按冻结的渠道
@@ -411,6 +483,12 @@ def _with_control_conversation_thread(
 ) -> GatewayControlOperationReceipt:
     if receipt.conversation_thread_id:
         return receipt
+    if isinstance(receipt.dispatch, dict) and "execution" in receipt.dispatch:
+        from .execution_target import GatewayExecutionTarget
+
+        target = GatewayExecutionTarget.from_dict(receipt.dispatch["execution"])
+        if target is not None:
+            return replace(receipt, conversation_thread_id=target.thread_id)
     thread_id = _control_operation_thread_id(agent, scope)
     return replace(receipt, conversation_thread_id=thread_id) if thread_id else receipt
 
@@ -444,9 +522,8 @@ def _control_operation_agent(agent: object, scope: GatewayControlScope):
         return agent
 
 
-# LLM: GET/status reconciliation is read-only with respect to control effects. Only the existing
-# `/btw` guidance receipt may advance a completed/unknown delivery projection.
-# 函数用途: 查询并对账一条控制操作；不会重新执行停止、压缩或持续任务等副作用。
+# LLM: 查询不重放控制副作用；正count原local来源仅包住现有回执对账写，Count0仍原链，源失效返回原观察。
+# 函数用途: 查询并对账一条控制操作，不重新执行停止、压缩或持续任务。
 def reconcile_gateway_control_operation(
     agent: object,
     paths: GatewayPaths,
@@ -455,37 +532,74 @@ def reconcile_gateway_control_operation(
     observed = read_gateway_control_operation(paths, operation_id)
     if observed is None:
         return None
+    from .multiprocess_control_forward import read_remote_control_status
+    from .multiprocess_local_control import (
+        LocalControlCoordinatorUnavailable,
+        local_control_operation_scope,
+    )
+
+    forwarded = read_remote_control_status(paths, observed, agent=agent)
+    if forwarded is not None:
+        return forwarded
     with try_gateway_control_operation_transition(paths, operation_id) as acquired:
         if not acquired:
             return observed
-        receipt = read_gateway_control_operation(paths, operation_id)
-        if receipt is None:
-            return None
-        if receipt.state == "executing":
-            receipt = replace(
-                receipt,
-                state="terminal_unknown",
-                error={
-                    "error_code": "CONTROL_OPERATION_INTERRUPTED",
-                    "message": "the prior control attempt crossed an unknown side-effect boundary",
-                },
-                updated_at=time.time(),
-            )
-            write_json_file_atomic(
-                gateway_control_operation_path(paths, operation_id),
-                receipt.to_dict(),
-            )
-        return _reconcile_control_operation_locked(agent, paths, receipt)
+        try:
+            with local_control_operation_scope(agent, paths, observed) as source:
+                return _reconcile_local_control_operation_locked(agent, paths, operation_id,
+                    **({} if source is None else {'owner_management_source': source}))
+        except LocalControlCoordinatorUnavailable:
+            return observed
+
+
+# LLM: 原op锁私卡先读原permission实际callee；变化才将expected/actual updated送固定本机对账叶，Count0原写，GET不重投输入或业务。
+# 函数用途: 结算本机旧executing及插话回执；每次原状态更新保持完整来源和原件检查。
+def _reconcile_local_control_operation_locked(agent, paths, operation_id, *, owner_management_source=None):
+    receipt = read_gateway_control_operation(paths, operation_id)
+    if receipt is None:
+        return None
+    if receipt.private_approval is not None:
+        from .private_approval_control import reconcile_private_approval_locked
+        updated = reconcile_private_approval_locked(paths, receipt, agent=agent)
+        if updated != receipt:
+            if owner_management_source is None:
+                _write_control_operation_json(gateway_control_operation_path(paths, operation_id), updated.to_dict())
+            else:
+                from .multiprocess_local_control import (
+                    _commit_original_private_approval_reconciliation,
+                )
+                _commit_original_private_approval_reconciliation(owner_management_source, receipt, updated)
+        return updated
+    if receipt.state == "executing":
+        receipt = replace(
+            receipt,
+            state="terminal_unknown",
+            error={
+                "error_code": "CONTROL_OPERATION_INTERRUPTED",
+                "message": "the prior control attempt crossed an unknown side-effect boundary",
+            },
+            updated_at=time.time(),
+        )
+        _write_control_operation_json(gateway_control_operation_path(paths, operation_id), receipt.to_dict(),
+            **({} if owner_management_source is None else {'owner_management_source': owner_management_source}))
+    return _reconcile_control_operation_locked(agent, paths, receipt,
+        **({} if owner_management_source is None else {"owner_management_source": owner_management_source}))
 
 
 # LLM: Reads distinguish an absent row from an empty/corrupt row and validate the filename anchor.
 # 函数用途: 读取并校验一条控制操作回执，不存在时返回 None。
+# LLM: C模型状态显式read_only=True只读原原子发布JSON，不创建.lock/修账；默认False保Count0原gateway reader，schema/ID校验仍共用。
 def read_gateway_control_operation(
     paths: GatewayPaths,
     operation_id: str,
+    *, read_only: bool = False,
 ) -> GatewayControlOperationReceipt | None:
     path = gateway_control_operation_path(paths, operation_id)
-    report = read_json_file_report(path, context="gateway.control_operation.read")
+    if read_only:
+        from ..common.json_io import read_json_object_report
+        report = read_json_object_report(path, context="gateway.control_operation.read")
+    else:
+        report = read_json_file_report(path, context="gateway.control_operation.read")
     if report.load_error is not None:
         raise DataCorruptionError("gateway control operation receipt is unreadable")
     if not report.payload:
@@ -519,7 +633,7 @@ def gateway_control_operation_status_payload(
                 if key in receipt.result
             }
         )
-    elif receipt.state in {"prepared", "executing"}:
+    elif receipt.state in {"prepared", "claimed", "executing"}:
         payload.update(
             {
                 "kind": receipt.command_kind,
@@ -549,12 +663,13 @@ def gateway_control_operation_status_payload(
     return payload
 
 
-# LLM: This helper runs only while the operation lock is held; it never creates a guidance row.
-# 函数用途: 用已有 `/btw` 回执刷新投递结果，其他命令保持原终态不动。
+# LLM: 原op锁内唯一callee非None结果与expected receipt送固定本机对账叶；三投递态保持，Count0原直接写，不创建guidance或发新权。
+# 函数用途: 用已有插话回执刷新投递结果，其他命令保持原终态，不重做控制副作用。
 def _reconcile_control_operation_locked(
     agent: object,
     paths: GatewayPaths,
     receipt: GatewayControlOperationReceipt,
+    *, owner_management_source=None,
 ) -> GatewayControlOperationReceipt:
     if receipt.command_kind != "steer":
         return receipt
@@ -572,6 +687,9 @@ def _reconcile_control_operation_locked(
     )
     if result is None:
         return receipt
+    if owner_management_source is not None:
+        from .multiprocess_local_control import _commit_original_steer_reconciliation
+        return _commit_original_steer_reconciliation(owner_management_source, receipt, result)
     updated = replace(
         receipt,
         state="completed",
@@ -579,18 +697,14 @@ def _reconcile_control_operation_locked(
         error={},
         updated_at=time.time(),
     )
-    write_json_file_atomic(
-        gateway_control_operation_path(paths, receipt.operation_id),
-        updated.to_dict(),
-    )
+    write_json_file_atomic(gateway_control_operation_path(paths, receipt.operation_id), updated.to_dict())
     return updated
 
 
-# LLM: Prepare validates a same-id retry before any effect. This function is called only under
-# the operation transition and writes exactly one canonical receipt file.
-# 目录声明与命令共同冻结，显式目录使用 v3，其余输入保留 v2 重试身份。
-# 函数用途: 读取或首次写入 prepared 控制回执，并拒绝同 ID 不同命令。
+# LLM: 原op锁内先验证同id完整输入；首次沿原factory冻结目标，正count实际local/model来源固定写prepared，不补选未来任务。
+# 函数用途: 原子准备唯一规范控制回执，原消息重试只读同输入，不新增来源或业务重投。
 def _load_or_prepare_control_operation_locked(
+    agent: object,
     paths: GatewayPaths,
     *,
     operation_id: str,
@@ -598,6 +712,7 @@ def _load_or_prepare_control_operation_locked(
     command: ConversationControlCommand,
     scope: GatewayControlScope,
     command_text: str,
+    model_transaction=None,
 ) -> GatewayControlOperationReceipt:
     existing = read_gateway_control_operation(paths, operation_id)
     if existing is not None:
@@ -606,11 +721,35 @@ def _load_or_prepare_control_operation_locked(
                 "gateway control message id was reused with different input"
             )
         return existing
-    receipt = GatewayControlOperationReceipt(
+    receipt = _new_control_operation_receipt(scope, command.kind, command_text, operation_id, input_digest)
+    _validate_control_operation_receipt(receipt)
+    if model_transaction is not None:
+        _write_control_operation_json(gateway_control_operation_path(paths, operation_id), receipt.to_dict(), model_transaction=model_transaction)
+        return receipt
+    from .multiprocess_control_forward import prepare_remote_control
+    from .multiprocess_local_control import local_control_operation_scope
+
+    # 目标和路由随首次prepared一起写入，重试不得补选未来任务。
+    forwarded = prepare_remote_control(agent, paths, receipt, fresh=True)
+    if forwarded is not None:
+        return forwarded
+    with local_control_operation_scope(agent, paths, receipt) as source:
+        if source is None:
+            write_json_file_atomic(gateway_control_operation_path(paths, operation_id), receipt.to_dict())
+        else:
+            _write_control_operation_json(gateway_control_operation_path(paths, operation_id), receipt.to_dict(),
+                                          owner_management_source=source)
+    return receipt
+
+
+# LLM: 普通命令与私卡决定共用原owner/identity/时间字段公式；action只选v5摘要，不从JSON恢复执行源。
+# 函数用途: 创建唯一原控制回执的规范初值，旧slash调用不携新字段。
+def _new_control_operation_receipt(scope, command_kind, command_text, operation_id, input_digest, *, private_approval=None):
+    return GatewayControlOperationReceipt(
         operation_id=operation_id,
         input_digest=input_digest,
         command_text=str(command_text or "").strip(),
-        command_kind=str(command.kind or "").strip(),
+        command_kind=str(command_kind or "").strip(),
         user_id=str(scope.user_id or "").strip(),
         channel=str(scope.channel or "").strip(),
         conversation_id=str(scope.conversation_id or "").strip(),
@@ -630,19 +769,63 @@ def _load_or_prepare_control_operation_locked(
         all_user_access=bool(scope.all_user_access),
         workspace=scope.workspace,
         expected_execution=scope.metadata.get("expected_execution"),
-        input_digest_version=_control_input_version(scope),
+        input_digest_version=5 if private_approval is not None else _control_input_version(scope),
+        private_approval=private_approval,
         state="prepared",
         updated_at=time.time(),
     )
-    _validate_control_operation_receipt(receipt)
-    write_json_file_atomic(gateway_control_operation_path(paths, operation_id), receipt.to_dict())
+
+
+# LLM: 只有本次真实冷HTTP固定producer可调用；op T在Root外只try，既存同ID全状态只读，不进本地reconcile/effect或重新挑目标。
+# 函数用途: 复用原identity、builder和codec为冷C准备一次远端控制，忙时保原事实。
+def prepare_coordinator_control_operation(source):
+    from .coordinator_control_transport import _CoordinatorControlTransport
+    from .multiprocess_control_forward import read_control_operation_raw
+    from .multiprocess_global_write import GlobalWriteError
+
+    if type(source) is not _CoordinatorControlTransport:
+        raise GlobalWriteError('control_http_source_required', 'control_transport')
+    source.require_current()
+    with try_gateway_control_operation_transition(source.paths, source.operation_id) as acquired:
+        raw = read_control_operation_raw(source.paths, source.operation_id, deadline=source.deadline)
+        existing = _coordinator_control_receipt(source, raw)
+        if existing is not None:
+            return existing
+        if not acquired:
+            raise GlobalWriteError('control_operation_busy', 'control_transport')
+        receipt = _new_control_operation_receipt(source.scope, source.command.kind, source.command_text,
+            source.operation_id, source.input_digest)
+        _validate_control_operation_receipt(receipt)
+        return source.publish(receipt, raw)
+
+
+# LLM: 原完整raw只由固定原路径读取；不可读/非法/身份不符必须拒绝，不能默认{}修复或丢未知字段后回写。
+# 函数用途: 沿原严格codec读取冷运输看到的既存回执，同ID输入冲突仍报原冲突。
+def _coordinator_control_receipt(source, raw):
+    source.require_current()
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeError) as error:
+        raise DataCorruptionError('gateway control operation receipt is unreadable') from error
+    receipt = GatewayControlOperationReceipt.from_dict(payload)
+    if receipt.operation_id != source.operation_id:
+        raise DataCorruptionError('gateway control operation id does not match its path')
+    if receipt.input_digest != source.input_digest:
+        raise GatewayControlOperationConflict('gateway control message id was reused with different input')
     return receipt
 
 
 # LLM: 从已校验回执恢复首次身份、目录和目标，供执行及只读对账；当前 HTTP 输入不能重定向旧操作。
 #   event_hub 是只读展示依赖、不落盘，恢复时从本次调用传进来（缺省 None→展示“暂无记录”）。
-# 函数用途: 从控制回执恢复最小、固定的 Gateway 控制作用域。
-def _receipt_scope(receipt: GatewayControlOperationReceipt, event_hub: object | None = None) -> GatewayControlScope:
+# 函数用途: 投影原控制作用域或已验证分派目标，保留v4空目标存在性，不从JSON恢复封印。
+def _receipt_scope(
+    receipt: GatewayControlOperationReceipt, event_hub: object | None = None, *, dispatched_execution: bool = False
+) -> GatewayControlScope:
+    execution = receipt.expected_execution
+    if dispatched_execution and isinstance(receipt.dispatch, dict) and "execution" in receipt.dispatch:
+        execution = receipt.dispatch["execution"]
     return GatewayControlScope(
         user_id=receipt.user_id,
         channel=receipt.channel,
@@ -653,7 +836,7 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt, event_hub: object | 
             "target_control_message_id": receipt.target_control_message_id,
             "channel_chat_type": receipt.channel_chat_type,
             "channel_chat_id": receipt.channel_chat_id,
-            **({"expected_execution": receipt.expected_execution} if receipt.expected_execution is not None else {}),
+            **({"expected_execution": execution} if receipt.input_digest_version >= 4 or execution is not None else {}),
         },
         all_user_access=receipt.all_user_access,
         resolved_owner=_receipt_owner_identity(receipt),
@@ -665,7 +848,7 @@ def _receipt_scope(receipt: GatewayControlOperationReceipt, event_hub: object | 
 # LLM: Every read recomputes the versioned id/digest used at prepare time and enforces state/result
 # invariants. Rows written before exact Compact targets existed may use legacy digest v1 only when
 # the target remains empty；v3 之前不能携带未签名的 workspace，字段扩展不能削弱旧账防篡改。
-# 函数用途: 检查控制回执身份、版本化摘要、时间和终态字段，并返回匹配的摘要版本。
+# 函数用途: 核对原身份摘要与分派/认领完整性；私卡v5完整签入点击输入，不恢复执行身份。
 def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt) -> int:
     if not all(
         (
@@ -684,6 +867,14 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
         )
     ):
         raise DataCorruptionError("gateway control operation identity is incomplete")
+    if receipt.private_approval is not None:
+        from .private_approval_control import require_private_approval_action
+        require_private_approval_action(receipt.private_approval)
+        if (receipt.input_digest_version != 5 or receipt.command_kind != 'private_tool_approval'
+                or receipt.command_text != 'private_tool_approval'):
+            raise DataCorruptionError("private approval action identity is invalid")
+    elif receipt.input_digest_version == 5 or receipt.command_kind == 'private_tool_approval':
+        raise DataCorruptionError("private approval action is missing")
     scope = _receipt_scope(receipt)
     identity = _control_operation_identity_payload(scope, receipt.client_message_id)
     expected_id = "gwctl-msg-" + hashlib.sha256(
@@ -709,6 +900,7 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
             scope,
             receipt.command_text,
             version=version,
+            **({"private_approval": receipt.private_approval} if version == 5 else {}),
         ):
             matched_digest_version = version
             break
@@ -717,11 +909,18 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     owner = _receipt_owner_identity(receipt)
     if receipt.owner_ref_digest != _owner_ref_digest(owner):
         raise DataCorruptionError("gateway control operation owner digest is invalid")
-    parsed = parse_conversation_control(receipt.command_text, reject_unknown_slash=True)
-    if parsed is None or parsed.kind != receipt.command_kind:
-        raise DataCorruptionError("gateway control operation command kind is invalid")
-    if receipt.state in {"prepared", "executing"} and (receipt.result or receipt.error):
+    if receipt.private_approval is None:
+        parsed = parse_conversation_control(receipt.command_text, reject_unknown_slash=True)
+        if parsed is None or parsed.kind != receipt.command_kind:
+            raise DataCorruptionError("gateway control operation command kind is invalid")
+    if receipt.state in {"prepared", "claimed", "executing"} and (receipt.result or receipt.error):
         raise DataCorruptionError("unfinished gateway control operation has terminal fields")
+    if receipt.dispatch is not None:
+        from .multiprocess_control_forward import validate_control_dispatch
+
+        validate_control_dispatch(receipt)
+    elif receipt.state == "claimed":
+        raise DataCorruptionError("claimed gateway control operation lacks dispatch")
     if receipt.state == "completed":
         if not receipt.result or receipt.error:
             raise DataCorruptionError("completed gateway control operation is invalid")
@@ -774,12 +973,13 @@ def _control_operation_identity_payload(
 
 
 # LLM: v1 不含 Compact 目标，v2 签入目标，v3 签入 workspace，v4 签入真实执行绑定；旧版本签名不可改变。
-# 函数用途: 按指定合同版本计算控制输入摘要，保证升级后仍能读旧账且新字段不能被篡改。
+# 函数用途: v1-v4原字节保持，仅v5签入完整私卡action；摘要不产生执行权。
 def _control_operation_input_digest(
     scope: GatewayControlScope,
     command_text: str,
     *,
     version: int,
+    private_approval=None,
 ) -> str:
     if version not in _CONTROL_INPUT_DIGEST_VERSIONS:
         raise ValueError("gateway control operation digest version is unsupported")
@@ -802,6 +1002,8 @@ def _control_operation_input_digest(
         operation_input["workspace"] = scope.workspace
     if version >= 4:
         operation_input["expected_execution"] = scope.metadata.get("expected_execution")
+    if version >= 5:
+        operation_input['private_approval'] = private_approval
     return hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
 
 

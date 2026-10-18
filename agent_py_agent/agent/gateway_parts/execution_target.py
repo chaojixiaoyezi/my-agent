@@ -1,4 +1,4 @@
-# LLM: 活动目标只投影原会话 claim、请求绑定和 task link；无新持久状态。控制入口必须在执行前复核同一身份。
+# LLM: 活动目标只投影原claim/请求/task；可选blocking/deadline仅约束foreground原读锁，默认算法不变，不授执行权。
 # 模块用途: 区分实际执行者与等待请求，供 TUI、IM 和 Gateway 的插话/停止共用精确目标。
 from __future__ import annotations
 
@@ -54,22 +54,33 @@ class GatewayExecutionTarget:
 
 # LLM: 调用方已按认证 owner 解析 store/thread；只读原账两次核对 claim，单有 processing、task active 或预绑定均不够。
 #   失败不创建线程、不抢 claim、不发模型请求。多进程沿同一 owner/thread 原账读取，不创造 worker 身份。
+#   显式资源约束在每段原读取之间核同一deadline；claims/task原只读不取锁，foreground仅原JSON读锁可显式try。
 # 函数用途: 找到当前会话真正持有执行车道的前台请求或后台任务。
 def read_gateway_execution_target(
-    paths: GatewayPaths, store: object, thread_id: str,
+    paths: GatewayPaths, store: object, thread_id: str, *, blocking: bool = True, deadline: float | None = None,
 ) -> GatewayExecutionTarget | None:
+    from ..common.json_io import check_io_deadline
     try:
+        check_io_deadline(deadline)
         claim = store.claims.load(thread_id)
+        check_io_deadline(deadline)
         if not _claim_is_current(claim, thread_id):
             return None
         if claim.get("reason") == "gateway_foreground_turn":
-            target = _foreground_target(paths, claim, thread_id)
+            options = {} if blocking and deadline is None else {'blocking': blocking, 'deadline': deadline}
+            target = _foreground_target(paths, claim, thread_id, **options)
         else:
             target = _background_target(store, claim, thread_id)
+        check_io_deadline(deadline)
         current = store.claims.load(thread_id)
+        check_io_deadline(deadline)
         if not _claim_is_current(current, thread_id) or current.get("claim_id") != claim.get("claim_id"):
             return None
         return target
+    except (BlockingIOError, InterruptedError):
+        if not blocking or deadline is not None:
+            raise
+        return None
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
         return None
 
@@ -111,8 +122,9 @@ def _claim_is_current(claim: object, thread_id: str) -> bool:
 
 
 # LLM: gateway:<request_id> 是原前台 claim 协议；同时核对请求中 write-ahead 绑定，等待者不能借别人的 claim。
+#   显式资源参数仅透传同一原JSON读锁；默认调用形状和目标选择不变，忙不能伪装为target缺失。
 # 函数用途: 从真实前台租约读取对应请求代次和 core 已发布的运行绑定，不枚举或读取任务内容。
-def _foreground_target(paths: GatewayPaths, claim: dict, thread_id: str) -> GatewayExecutionTarget | None:
+def _foreground_target(paths: GatewayPaths, claim: dict, thread_id: str, *, blocking=True, deadline=None) -> GatewayExecutionTarget | None:
     from .request_binding import gateway_runtime_authority
 
     task_id = str(claim.get("task_id") or "")
@@ -123,7 +135,10 @@ def _foreground_target(paths: GatewayPaths, claim: dict, thread_id: str) -> Gate
         return None
     if (paths.terminal / f"{request_id}.json").exists():
         return None
-    report = read_json_file_report(paths.processing / f"{request_id}.json", context="gateway.execution_target.request")
+    options = {} if blocking and deadline is None else {'blocking': blocking, 'deadline': deadline}
+    report = read_json_file_report(paths.processing / f"{request_id}.json", context="gateway.execution_target.request", **options)
+    if (not blocking or deadline is not None) and report.lock_busy:
+        raise BlockingIOError('gateway execution target request is busy')
     payload = report.payload
     if report.load_error or payload.get("id") != request_id:
         return None

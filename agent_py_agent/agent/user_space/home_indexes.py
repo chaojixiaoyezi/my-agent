@@ -2,6 +2,7 @@
 # LLM: Global index files are disposable lookup projections over canonical owner
 # homes. Runtime writes are change-only and rebuild replaces them with compact
 # snapshots; no caller may treat duplicate JSONL history as machine authority.
+# 共享整体替换先核原模式拒门；owner受控追加与纯读取不受该门扩大，仍各守原调用权限。
 # 模块用途: 维护跨用户任务和子代理的轻量索引，避免相同状态反复追加导致磁盘与内存膨胀。
 
 from __future__ import annotations
@@ -238,7 +239,8 @@ def _append_changed_index_record(
 # LLM: A rebuild is a projection compaction, not an event append. Each file is
 # replaced atomically under the same sidecar lock used by appenders, then the
 # in-process change cache is reseeded from the new snapshot.
-# 函数用途: 用磁盘上的权威用户目录重新生成四份紧凑索引，清掉历史重复行和损坏旧行。
+#   原模式拒门先于锁、临时文件和写缓存；不将worker可追加自己owner引用扩成整体重建权限。
+# 函数用途: 默认模式按原四索引顺序替换紧凑投影，受限worker/host在共享写副作用前拒绝。
 def replace_home_index_snapshots(
     home: MyAgentHomePaths,
     *,
@@ -247,6 +249,9 @@ def replace_home_index_snapshots(
     run_refs: tuple[RunIndexRef, ...],
     agent_refs: tuple[AgentIndexRef, ...],
 ) -> None:
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("global_index")
     snapshots = (
         (
             home.global_index_owners_jsonl,

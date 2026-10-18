@@ -1,3 +1,4 @@
+# LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 宿主命令只复用原 ToolApproval 合同与 ToolExecutor；等待期间不更换 call、handler、快照或执行归属。
 # 模块用途: 将明确命令的审批决定接回原调用，拒绝、取消和无消费者都不执行业务工具。
 
@@ -18,7 +19,8 @@ from ..tooling.runtime_contracts import ToolFailureFacts, ToolResult
 
 
 # LLM: consumer 与可调期限由已鉴权宿主注入，有限正整数冻结原请求 expires_at；无人接收/非法答复写未启动终态，取消优先。
-# 函数用途: 消费一次有界确认，明确拒绝后不再保留可重询 APPROVAL_REQUIRED，批准后重核原执行器全部权限。
+# LLM: 实际运输或纯退休未结必须保同对象，不形成普通拒绝回执；原handler权限与取消/截止不变。
+# 函数用途: 消费原确认并将未结交原执行Future，明确拒绝才收口原工具。
 def resolve_host_command_approval(prepared: ToolExecutorRequest, execution: ToolExecution, *,
                                   request_id: str, consumer: Callable | None, timeout_seconds: int | None = None) -> ToolExecution:
     if execution.decision.status != "ask":
@@ -38,7 +40,12 @@ def resolve_host_command_approval(prepared: ToolExecutorRequest, execution: Tool
                    reason_code="APPROVAL_UNAVAILABLE"))
         decision = (raw if isinstance(raw, ToolApprovalDecision) else ToolApprovalDecision.from_mapping(raw)
                     if isinstance(raw, Mapping) else ToolApprovalDecision(request.permission_id, "unavailable"))
-    except Exception:  # noqa: BLE001 审批运输失败发生在 handler 前，只保留未启动，不能猜批准或执行
+    except Exception as error:  # noqa: BLE001 普通运输失败仍原未启动；实际未结交原Future而非覆盖为拒绝
+        from ..conversation.agent_tool_approval import capture_approval_retirement_call
+        from ..gateway_parts.private_approval_control import raise_private_approval_transport_error
+
+        capture_approval_retirement_call(error, request, execution)
+        raise_private_approval_transport_error(error)
         decision = ToolApprovalDecision(request.permission_id, "unavailable")
     if prepared.cancellation_token is not None and prepared.cancellation_token.cancelled:
         decision = ToolApprovalDecision(request.permission_id, "cancelled")

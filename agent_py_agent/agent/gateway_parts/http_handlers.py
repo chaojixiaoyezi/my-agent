@@ -1,6 +1,10 @@
+# LLM: cold None正count普通POST仅运输原receipt到原W；model/C管理活封印、ready/Count0和G1/global-write-v1拒绝保持，client memory仍仅recent可读。
 # LLM: HTTP handlers preserve authenticated owner/thread boundaries and raw HTTPMessage header copies before identity checks;
 # process stream identity affects only display cursors, never model requests or authorization.
+# 原C等待只投影同prepared来源，隔离202须原T耐久确认；main认证/HostActor/media/摘要与F4活封印不变，B2服务缺失严格503。
 # 控制 workspace 沿持久输入保存，共用宿主权限门；HTTP 投影不自行判定目录权限。
+# 首次受理在完整prepared摘要之前冻结owner/IM快照；已有回执重放不热读绑定，C只沿原lease和constructor配置来源。
+# 冷C历史仅复用认证owner的原只读Store与同一分页叶子；读取前后核原HTTP来源，不扩其他client或补业务Agent。
 # 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
 from __future__ import annotations
 
@@ -30,7 +34,13 @@ from ..auth.middleware import (
     require_admin_handler,
     require_trusted_source,
 )
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.http import unaccounted_probe_attempt_count
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.agent_activity import (
     ConversationAgentActivity,
     conversation_agent_activity,
@@ -91,6 +101,7 @@ from .input_delivery_service import (
 )
 from .io import gateway_request_counts, write_json_file_atomic
 from .loop_health import loop_health
+from .multiprocess_global_write import GlobalWriteError
 from .paths import GatewayPaths, gateway_chunk_path, gateway_chunk_path_candidates
 from .progress_reader import read_progress_lines
 from .request_client import GatewayAskExecutionOptions
@@ -113,6 +124,14 @@ class _AskRequestContext:
     request_id: str
     user_id: str
     channel: str
+
+
+# LLM: 只限制已由启动门核过的C缺业务Agent状态，不签角色/owner或加载Agent；调用方须先原认证拒门，Count0 None保持原契约。
+# 函数用途: 让尚未接通的C业务入口明确返回等待，避免冒充未初始化崩溃或自动创建业务资源。
+def _coordinator_business_wait(server) -> dict[str, Any]:
+    if getattr(server, "control_plane", None) is not None and getattr(server, "agent", None) is None:
+        return {"error_code": "COORDINATOR_BUSINESS_NOT_READY", "status": "waiting", "terminal": False}
+    return {}
 
 
 # LLM: 原HTTPMessage的重复字段必须交同一middleware裁决，不能先dict折叠而把冲突变成本机管理员；无mw只属合法单机。
@@ -269,6 +288,8 @@ def _state_load_error(state_path, exc: BaseException) -> dict[str, Any]:
     return report
 
 
+# LLM: 原canonical终态优先及原owner ACL保持；pending等待只沿同次server传入，不往原权限DTO塞新身份或修队列。
+# 函数用途: 返回当前用户可见的原请求结果，仍在队列时附只读C隔离等待。
 def handle_result(handler, server) -> None:
     request_id = handler.path[len("/result/"):]
     if server is None:
@@ -286,9 +307,9 @@ def handle_result(handler, server) -> None:
         repair_response_projection=True,
     ):
         return
-    if _send_pending_state(handler, server.paths.processing, "processing", access):
+    if _send_pending_state(handler, server.paths.processing, "processing", access, server=server):
         return
-    if _send_pending_state(handler, server.paths.inbox, "queued", access):
+    if _send_pending_state(handler, server.paths.inbox, "queued", access, server=server):
         return
     # 终态可能在两次热队列检查之间提交，再读一次 canonical；独立 response
     # 或 done/failed 投影永远不能把请求提升为完成。
@@ -305,6 +326,8 @@ def handle_result(handler, server) -> None:
 # LLM: Input delivery status is authorized from the stored authenticated prepared request, not
 # caller-supplied owner fields. It exposes the stable ingress state without creating a model job.
 # 函数用途: 返回一条普通消息是在活动回合等待、已消费、已排队还是终态未知。
+# LLM: 先按原receipt的认证owner ACL，再只读原C等待；GET不补接收、不执行任务或确认权限。
+# 函数用途: 查询原输入回执及当前隔离原因，consumed不再附等待。
 def handle_input_status(handler, server) -> None:
     request_id = handler.path[len("/input-status/") :]
     if server is None:
@@ -328,7 +351,10 @@ def handle_input_status(handler, server) -> None:
     if not _can_read_payload(receipt.prepared_request, user_id, permission):
         handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": request_id}))
         return
-    handler._send_json(200, gateway_input_status_payload(receipt))
+    from .control_plane import server_wait_projection
+
+    wait = server_wait_projection(server, receipt.prepared_request) if receipt.state != "consumed" else {}
+    handler._send_json(202 if wait else 200, {**gateway_input_status_payload(receipt), **wait})
 
 
 # LLM: Terminal archives contain the canonical full response. This lazy repair makes /result survive
@@ -555,7 +581,9 @@ def _public_permission_request_event(row: dict, channel: str) -> dict[str, objec
     return {"kind": "permission_requested", "tool": tool, "summary": summary}
 
 
-def _send_pending_state(handler, folder, status: str, access: _ResultAccessContext) -> bool:
+# LLM: 原ACL/坏JSON拒门先于等待投影；原权限DTO不含server，须由handle_result运输同次server；无payload不猜owner，不修队列。
+# 函数用途: 将仍在排队或处理的原请求状态与同源C等待返回已获准客户端。
+def _send_pending_state(handler, folder, status: str, access: _ResultAccessContext, *, server=None) -> bool:
     request_path = folder / f"{access.request_id}.json"
     if not request_path.exists():
         return False
@@ -569,6 +597,10 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
         handler._send_json(403, _denial_body(handler, {"error": "forbidden", "request_id": access.request_id}))
         return True
     response = {"status": status, "request_id": access.request_id}
+    if payload and request_load_error is None:
+        from .control_plane import server_wait_projection
+
+        response.update(server_wait_projection(server, payload))
     if request_load_error:
         response["request_load_error"] = request_load_error
     handler._send_json(202, response)
@@ -701,8 +733,10 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
     return report
 
 
-# LLM: 鉴权后所有会话命令（含插件）共用持久控制回执；独立 TUI 插件目录仍走 /client/plugins，普通请求沿原作用域绑定。
+# LLM: 原认证门之后命令沿持久控制回执；普通输入的owner/IM准备只在首次提交前，legacy写者也守原C末门，不从body授信。
 # 函数用途: 接收消息与命令，原入队前冻结真实 owner；参数错误不成为任务，提示只在成功入队后发布。
+# LLM: main认证/HostActor/media/完整摘要与receipt-first保持；隔离仅原私有队列耐久后202，不物化Agent/活插话或发布提示。
+# 函数用途: 接收同一真实用户输入，先保存原宿主事实，再明确展示可恢复的等待。
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if require_trusted_source(handler):
         return  # 不可信来源(远程无 token)拒绝派工:已发 403(回环本机/单机放行,渠道用户经适配器可提交)
@@ -752,7 +786,9 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         command = parse_conversation_control(goal, reject_unknown_slash=True)
         if command is not None:
             if server.agent is None:
-                handler._send_json(500, {"error": "server control service not initialized"})
+                waiting = _coordinator_business_wait(server)
+                handler._send_json(503 if waiting else 500,
+                                   waiting or {"error": "server control service not initialized"})
                 return
             if not command.valid:
                 payload = ConversationControlResult(
@@ -821,31 +857,44 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     request_id = request_id_factory()
     request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     try:
-        from .im_dispatch_policy import IM_DISPATCH_KEY, capture_im_dispatch
+        from .control_plane import prepare_coordinator_input
 
-        snapshot = capture_im_dispatch(server.agent, _gateway_control_scope(handler, body, user_id=user_id, channel=channel))
-        if snapshot is not None:
-            request_data[IM_DISPATCH_KEY] = snapshot
-        from .request_owner_binding import bind_request_owner
-
-        request_data = bind_request_owner(server.agent, request_data)
+        scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
         pending_path = server.paths.inbox / f"{request_id}.json"
-        # 旧 /ask 无幂等 ID 路径：提示词正文写进 inbox 队列，必须私有落盘——目录 0700、文件出生 0600、
-        # 原子替换（半写不留残档）。输出格式与原来逐字节一致：indent=2、不排序、无尾换行。
-        write_private_json_file_atomic_no_newline(pending_path, request_data, sort_keys=False)
+
+        # LLM: 原随机ID入口仍用同一私有writer；C身份/偏好准备与写入须在原lease末门内，不能保存callback延寿。
+        # 函数用途: 原子写入已冻结输入，保持旧JSON格式与队列路径，不产生另一份receipt。
+        def commit(prepared):
+            write_private_json_file_atomic_no_newline(pending_path, prepared, sort_keys=False)
+            return prepared
+
+        request_data = prepare_coordinator_input(
+            server.paths, request_data,
+            prepare_request=lambda prepared: _prepare_http_gateway_input(server, scope, prepared), commit=commit,
+        )
         from ..observability.concurrency_metrics import gateway_request_enqueued
 
         gateway_request_enqueued()
+        from .control_plane import server_wait_projection
+
+        wait = server_wait_projection(server, request_data)
+        if wait:
+            from .wait_acceptance import confirm_wait_acceptance
+
+            confirm_wait_acceptance(server.paths, request_id, wait)
     except (DataCorruptionError, ValueError, OSError) as exc:
         handler._send_json(500, {"error": f"failed to write request: {exc}"})
         return
-    prompt_queued(server, request_data)
-    handler._send_json(202, {"request_id": request_id, "status": "queued"})
+    if not wait:
+        prompt_queued(server, request_data)
+    handler._send_json(202, {"request_id": request_id, "status": "queued", **wait})
 
 
-# LLM: One stable ingress receipt decides active-turn versus queued disposition before any retry
-# reruns routing. The receipt lock is outside the exact active-turn lock, giving one lock order.
-# 函数用途: 幂等接收消息并冻结首次 owner，重送不随管理员绑定改变归属；首次入队才发布提示。
+# LLM: 原client digest先核actor/metadata/media；原T内先读receipt，fresh才准备host owner/IM快照，重放不读新role/绑定/偏好。
+#   原完整prepared摘要和活动回合锁序不变，route不得后补字段；既有回执只有原恢复/排队能推进。
+# LLM: 原receipt-first后才读等待；隔离只排原pending/同步原回执与队列，不重排active_pending/terminal_unknown、不热绑owner。
+#   实际C冷/健康均接同HTTP work的固定receipt末门；Count0保持原body，不调用foreign Agent选活动目标。
+# 函数用途: 幂等保存原完整输入，隔离时耐久确认后返回等待，重送复用原身份与处置。
 def _handle_idempotent_ordinary_ask(
     handler,
     server,
@@ -878,16 +927,18 @@ def _handle_idempotent_ordinary_ask(
         user_id=user_id,
         channel=channel,
     )
-    from .im_dispatch_policy import IM_DISPATCH_KEY, capture_im_dispatch
+    from .im_dispatch_policy import IM_DISPATCH_KEY
+    from .request_owner_binding import frozen_request_owner
 
     guidance_key = active_turn_guidance_dedupe_key(scope)
-    try:
-        snapshot = capture_im_dispatch(server.agent, scope)
-        if snapshot is not None:
-            prepared_request[IM_DISPATCH_KEY] = snapshot
-        from .request_owner_binding import bind_request_owner
+    if getattr(server, 'control_plane', None) is not None or getattr(server, 'drain_runtime', None) is not None:
+        from .http_input_receipt import CoordinatorInputRequest, handle_coordinator_input
 
-        prepared_request = bind_request_owner(server.agent, prepared_request)
+        handle_coordinator_input(handler, server, CoordinatorInputRequest(prepared_request=prepared_request, scope=scope,
+            request_id=request_id, client_input_digest=client_input_digest, client_message_id=client_message_id,
+            guidance_key=guidance_key, allow_active_turn=allow_active_turn))
+        return
+    try:
         with gateway_input_transition(server.paths, request_id):
             receipt, created = load_or_prepare_gateway_input_locked(
                 server.paths,
@@ -896,15 +947,20 @@ def _handle_idempotent_ordinary_ask(
                 client_message_id=client_message_id,
                 guidance_dedupe_key=guidance_key,
                 prepared_request=prepared_request,
+                prepare_request=lambda prepared: _prepare_http_gateway_input(server, scope, prepared),
             )
+            from .control_plane import server_wait_projection
+
+            wait = server_wait_projection(server, receipt.prepared_request) if receipt.state != "consumed" else {}
             delegated = (receipt.prepared_request.get(IM_DISPATCH_KEY) or {}).get("mode") == "delegated"
-            if created and receipt.state == "pending" and allow_active_turn and not delegated:
+            if created and receipt.state == "pending" and allow_active_turn and not delegated and not wait:
                 active_turn = _route_ask_to_active_turn(
                     server,
                     body=routed_body,
                     goal=goal,
                     user_id=user_id,
                     channel=channel,
+                    resolved_owner=frozen_request_owner(receipt.prepared_request),
                 )
                 if active_turn is None or active_turn.delivery_status == "rejected":
                     receipt, _created = queue_gateway_input_locked(server.paths, receipt)
@@ -963,7 +1019,19 @@ def _handle_idempotent_ordinary_ask(
     except OSError as exc:
         handler._send_json(500, {"error": f"failed to persist input disposition: {exc}"})
         return
-    if receipt.state in {"pending", "active_pending", "terminal_unknown"}:
+    wait = server_wait_projection(server, receipt.prepared_request) if receipt.state != "consumed" else {}
+    if wait:
+        from .wait_acceptance import confirm_wait_acceptance
+
+        try:
+            receipt = confirm_wait_acceptance(server.paths, request_id, wait, receipt=receipt)
+        except (OSError, DataCorruptionError) as exc:
+            handler._send_json(503, {"error": "input acceptance durability is unconfirmed",
+                                    "error_code": type(exc).__name__, "request_id": request_id, "terminal": False})
+            return
+        if receipt.state == "consumed":
+            wait = {}
+    if receipt.state in {"pending", "active_pending", "terminal_unknown"} and not wait:
         try:
             from .request_worker import _resolve_request_agent
 
@@ -977,9 +1045,47 @@ def _handle_idempotent_ordinary_ask(
             receipt = read_gateway_input_receipt(server.paths, request_id) or receipt
         except Exception:
             pass
-    if created and receipt.state == 'queued':
+    if created and receipt.state == 'queued' and not wait:
         prompt_queued(server, receipt.prepared_request)
-    handler._send_json(202, gateway_input_status_payload(receipt))
+    handler._send_json(202, {**gateway_input_status_payload(receipt), **wait})
+
+
+# LLM: Count0复用原bind/capture但只在首次prepare调用；C只消费原lease控制对象、同owner配置和准确constructor root，不物化Agent。
+# 函数用途: 读取受理时IM偏好并附加原host快照，配置/来源失败不伪装成有效委派。
+def _prepare_http_gateway_input(server, scope, payload):
+    from . import multiprocess_coordinator as coordinator
+    from .control_plane import GatewayControlPlane
+    from .im_dispatch_policy import IM_DISPATCH_KEY, capture_im_dispatch
+    from .multiprocess_route import OwnerRouteMismatchError
+    from .request_owner_binding import bind_request_owner, frozen_request_owner
+
+    lease = coordinator.coordinator_for_root(server.paths.root, context=server.paths)
+    if lease is None:
+        if coordinator.coordinator_role_present(server.paths.root, context=server.paths):
+            raise OwnerRouteMismatchError("coordinator_input_source_changed")
+        prepared = bind_request_owner(server.agent, payload)
+        snapshot = capture_im_dispatch(server.agent, replace(scope, resolved_owner=frozen_request_owner(prepared)))
+    else:
+        from ..owner_scoped_pool import _config_with_owner
+        from ..user_space.home_layout import home_paths
+        from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+        from .im_dispatch_policy import capture_im_dispatch_for_owner
+
+        control = lease.control_plane
+        owner = frozen_request_owner(payload)
+        if (type(control) is not GatewayControlPlane or owner is None
+                or control.agent_root is None or not Path(control.agent_root).is_absolute()):
+            raise OwnerRouteMismatchError("coordinator_input_source_required")
+        home = home_paths_with_owner(home_paths(control.home_root), resolve_owner_home(control.home_root, owner))
+        prepared = payload
+        snapshot = capture_im_dispatch_for_owner(
+            home_paths=home, config=_config_with_owner(control.config, owner),
+            scope=replace(scope, resolved_owner=owner), capability_root=control.agent_root,
+            capability_config_path=control.capability_config_path,
+        )
+    if snapshot is not None:
+        prepared[IM_DISPATCH_KEY] = snapshot
+    return prepared
 
 
 # LLM: Lifecycle 请求只接受 close/reset 枚举且不进入模型队列；owner 仍由已认证 scope 解析。
@@ -1024,8 +1130,7 @@ def _handle_session_lifecycle_signal(
     handler._send_json(202, payload)
 
 
-# LLM: The busy-turn decision is based only on authenticated scope plus durable runtime state;
-# the prompt body is never inspected for task/chat intent.
+# LLM: 活动判断只用认证scope与原prepared owner；不在首输入已冻结后重新查绑定，不读正文决定路由。
 # 函数用途：把同一 owner/thread 运行期间的新普通输入交给当前轮；无活跃轮时保持普通入队。
 def _route_ask_to_active_turn(
     server,
@@ -1034,6 +1139,7 @@ def _route_ask_to_active_turn(
     goal: str,
     user_id: str,
     channel: str,
+    resolved_owner=None,
 ):
     agent = getattr(server, "agent", None)
     if agent is None:
@@ -1049,16 +1155,24 @@ def _route_ask_to_active_turn(
             channel=channel,
             conversation_id=_http_conversation_id(body),
             metadata=metadata,
+            resolved_owner=resolved_owner,
         ),
     )
 
 
 # LLM: 插件和其它会话命令先鉴权再进入同一持久控制分派；不另开无幂等回执的插件旁路，参数归共享插件服务。
 # 函数用途: 接收明确控制命令，让 IM 重送同一消息时只读原回执，不重复插件副作用。
+# LLM: 现有控制仍沿main认证/持久operation与F4活HTTP封印；内部B2服务缺失固定503，不从版本头、config或Home伪造实例。
+# 函数用途: 接收原正式控制，未接通的内部全局写协议不得落入普通命令。
+# LLM: cold管理只接唯一真实HTTP source重放，fresh领域未接仍503且不写假受理；普通运输/模型/ready/Count0及global-write拒绝保持。
 def handle_control(handler, server) -> None:
     if require_trusted_source(handler):
         return
-    if server is None or server.agent is None:
+    # B2原服务未接入；版本头不授任何权，当前只拒绝且不读正文或把信封降成普通控制。
+    if (getattr(handler, "headers", None) or {}).get("X-My-Agent-Control") == "global-write-v1":
+        handler._send_json(503, {"error_code": "GLOBAL_WRITE_SERVICE_UNAVAILABLE"})
+        return
+    if server is None or server.agent is None and getattr(server, "control_plane", None) is None:
         handler._send_json(500, {"error": "server control service not initialized"})
         return
     try:
@@ -1087,6 +1201,47 @@ def handle_control(handler, server) -> None:
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
+    from .model_metadata_transaction import coordinator_model_server
+    model_coordinator = coordinator_model_server(server) and command.kind == 'model'
+    from .owner_management_control import is_owner_management_control
+    if server.agent is None and coordinator_model_server(server) and is_owner_management_control(command.kind):
+        from .coordinator_owner_management import (
+            MANAGEMENT_SOURCE_ERRORS,
+            execute_coordinator_owner_management,
+        )
+        try:
+            observed = execute_coordinator_owner_management(handler, server, body)
+        except MANAGEMENT_SOURCE_ERRORS as error:
+            handler._send_json(503, {'ok': False, 'error_code': getattr(error, 'error_code', 'GLOBAL_WRITE_REJECTED')})
+            return
+        except GatewayControlOperationIdentityRequired as error:
+            handler._send_json(400, {'error': str(error), 'error_code': 'CONTROL_OPERATION_ID_REQUIRED'})
+            return
+        except GatewayControlOperationConflict as error:
+            handler._send_json(409, {'error': str(error), 'error_code': 'IDEMPOTENCY_CONFLICT'})
+            return
+        except DataCorruptionError as error:
+            handler._send_json(503, {'error': str(error), 'error_code': 'CONTROL_OPERATION_RECEIPT_CORRUPT'})
+            return
+        except (ValueError, OSError):
+            handler._send_json(503, {'ok': False, 'error_code': 'COORDINATOR_BUSINESS_NOT_READY'})
+            return
+        if observed is None:
+            handler._send_json(503, {'ok': False, 'status': 'waiting', 'error_code': 'COORDINATOR_BUSINESS_NOT_READY', 'terminal': False})
+        else:
+            payload = gateway_control_operation_status_payload(observed)
+            status = 202 if observed.state != 'completed' or payload.get('delivery_status') == 'unknown' else 200
+            handler._send_json(status, payload)
+        return
+    if (server.agent is None and coordinator_model_server(server) and command.kind != 'model'
+            and not is_owner_management_control(command.kind)):
+        _handle_coordinator_control_operation(handler, server, body)
+        return
+    if server.agent is None or model_coordinator:
+        from .model_metadata_transaction import model_metadata_supported
+        if not model_metadata_supported(handler, body):
+            handler._send_json(503, {"ok": False, "status": "waiting", "error_code": "COORDINATOR_BUSINESS_NOT_READY", "terminal": False})
+            return
     _handle_persistent_control_operation(
         handler,
         server,
@@ -1098,7 +1253,41 @@ def handle_control(handler, server) -> None:
             user_id=user_id,
             channel=channel,
         ),
+        **({"model_body": body} if model_coordinator else {}),
     )
+
+
+# LLM: 只服务cold None正count非model POST；typed源错误在HTTP最外层映射，receipt层同对象上抛，不伪记completed/unknown或影响ready/Count0。
+# 函数用途: 发布一次冷控制原回执并返回原状态投影，业务仍由原Worker执行。
+def _handle_coordinator_control_operation(handler, server, body):
+    from .coordinator_control_transport import execute_coordinator_control
+    try:
+        receipt = execute_coordinator_control(handler, server, body)
+    except (GlobalWriteError, RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
+            BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable) as error:
+        handler._send_json(503, {'ok': False, 'error_code': error.error_code, 'error_stage': 'execution',
+                                 **({'reason': error.reason, 'field': error.field} if isinstance(error, GlobalWriteError) else {}),
+                                 'message': '控制宿主暂不可用，原已存状态保持。'})
+        return
+    except GatewayControlOperationIdentityRequired as error:
+        handler._send_json(400, {'error': str(error), 'error_code': 'CONTROL_OPERATION_ID_REQUIRED'})
+        return
+    except GatewayControlOperationConflict as error:
+        handler._send_json(409, {'error': str(error), 'error_code': 'IDEMPOTENCY_CONFLICT'})
+        return
+    except DataCorruptionError as error:
+        handler._send_json(503, {'error': str(error), 'error_code': 'CONTROL_OPERATION_RECEIPT_CORRUPT'})
+        return
+    except OSError as error:
+        handler._send_json(503, {'error': 'failed to persist control operation', 'error_code': type(error).__name__})
+        return
+    if receipt is None:
+        handler._send_json(503, {'ok': False, 'status': 'waiting',
+            'error_code': 'COORDINATOR_BUSINESS_NOT_READY', 'terminal': False})
+        return
+    payload = gateway_control_operation_status_payload(receipt)
+    status = 202 if receipt.state != 'completed' or str(payload.get('delivery_status') or '') == 'unknown' else 200
+    handler._send_json(status, payload)
 
 
 # LLM: HTTP控制先准备原持久操作再执行；AGENTS及记忆候选只在当前认证栈封印实际命令，丢响应不重复副作用。
@@ -1106,6 +1295,7 @@ def handle_control(handler, server) -> None:
 #   事件中心（B6 观察计数）只有一个来源：本处从 server 取到后放进 scope.event_hub 沿控制链带下去；
 #   绝不从 server.agent 取，也不为了展示新建 hub。
 # 函数用途: 持久、幂等地执行一条 HTTP 控制命令，并返回独立 operation_id 供客户端对账。
+# LLM: model_body只由当前冷C模型handler传入，首次菜单仍沿原receipt/schema/响应，不将它当MAC或泛化控制许可。
 def _handle_persistent_control_operation(
     handler,
     server,
@@ -1113,6 +1303,7 @@ def _handle_persistent_control_operation(
     command: ConversationControlCommand,
     command_text: str,
     scope: GatewayControlScope,
+    model_body=None,
 ) -> None:
     try:
         from contextlib import nullcontext
@@ -1130,9 +1321,20 @@ def _handle_persistent_control_operation(
         factory = {"agents": agents_http_ingress, "memory": memory_http_ingress}.get(command.kind)
         boundary = factory(prepared, command, permission) if factory else nullcontext(prepared)
         with boundary as issued_scope:
-            receipt = execute_gateway_control_operation(
-                server.agent, server.paths, command, issued_scope, command_text=command_text,
-            )
+            if model_body is None:
+                receipt = execute_gateway_control_operation(
+                    server.agent, server.paths, command, issued_scope, command_text=command_text,
+                )
+            else:
+                from .model_metadata_transaction import execute_coordinator_model_metadata
+                receipt = execute_coordinator_model_metadata(handler, server, model_body, command=command)
+    except (GlobalWriteError, RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
+            BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable) as exc:
+        if model_body is None:
+            raise
+        handler._send_json(503, {"ok": False, "error_code": exc.error_code, "error_stage": "execution",
+                                 "message": "模型设置宿主暂不可用，原已存状态保持。"})
+        return
     except GatewayControlOperationIdentityRequired as exc:
         handler._send_json(
             400,
@@ -1180,15 +1382,30 @@ def _handle_persistent_control_operation(
 # LLM: Polling authenticates against the receipt owner before read-only reconciliation. A GET can
 # refresh an existing `/btw` receipt but cannot execute any control effect.
 # 函数用途: 返回一条持久控制操作的结果或投递三态，供 TUI、IM 和 Web 断线后继续对账。
+# LLM: 正count普通控制沿actual work/原ACL只读原receipt，不seal或reconcile写；私卡v5已接领域在ready时保原对账，Count0不变。
 def handle_control_status(handler, server) -> None:
     if require_trusted_source(handler):
         return
-    if server is None or server.agent is None:
+    from .model_metadata_transaction import coordinator_model_server
+    from .multiprocess_http_transport import capture_http_handler_work, require_http_handler_work
+    coordinator = coordinator_model_server(server)
+    if server is None or server.agent is None and not coordinator:
         handler._send_json(500, {"error": "server control service not initialized"})
         return
     operation_id = handler.path.split("?", 1)[0].removeprefix("/control-status/").strip()
+    work = None
+    if coordinator:
+        try:
+            work = capture_http_handler_work(handler, server)
+        except (GlobalWriteError, ValueError) as exc:
+            code = exc.error_code if isinstance(exc, GlobalWriteError) else GlobalWriteError.error_code
+            handler._send_json(503, {"ok": False, "error_code": code})
+            return
     try:
-        receipt = read_gateway_control_operation(server.paths, operation_id)
+        receipt = read_gateway_control_operation(server.paths, operation_id, **({"read_only": True} if coordinator else {}))
+    except GlobalWriteError as exc:
+        handler._send_json(503, {"ok": False, "error_code": exc.error_code})
+        return
     except (DataCorruptionError, ValueError) as exc:
         handler._send_json(
             503,
@@ -1203,6 +1420,22 @@ def handle_control_status(handler, server) -> None:
         return
     if not _can_read_control_operation(handler, receipt):
         handler._send_json(403, {"error": "forbidden"})
+        return
+    private_approval = (receipt.input_digest_version == 5
+                        and getattr(receipt, 'private_approval', None) is not None)
+    if coordinator and (not private_approval or server.agent is None):
+        try:
+            require_http_handler_work(work, handler, server)
+        except GlobalWriteError as exc:
+            handler._send_json(503, {"ok": False, "error_code": exc.error_code})
+            return
+        except ValueError:
+            handler._send_json(503, {"ok": False, "error_code": GlobalWriteError.error_code})
+            return
+        handler._send_json(200, gateway_control_operation_status_payload(receipt))
+        return
+    if server.agent is None:
+        handler._send_json(503, {"ok": False, "status": "waiting", "error_code": "COORDINATOR_BUSINESS_NOT_READY", "terminal": False})
         return
     try:
         receipt = reconcile_gateway_control_operation(
@@ -1711,10 +1944,13 @@ def _gateway_agent_permission_requests(
 
 
 
+# LLM: 原凭据/scope先行；正count只将search/remember接真实C资源，source首native/完整退出先于安全HTTP投影；recent/unknown/Count0原路径保持，不造readiness或Agent fallback。
+# 函数用途: 从实际C原scope搜索或显式保存当前owner记忆，其它操作保持原只读与业务合同。
 def handle_client_memory(handler, server) -> None:
     if require_trusted_source(handler):
         return
-    if server is None or server.agent is None:
+    if server is None or (server.agent is None and getattr(server, "control_plane", None) is None
+            and getattr(server, "drain_runtime", None) is None):
         handler._send_json(500, {"error": "server client service not initialized"})
         return
     try:
@@ -1726,29 +1962,83 @@ def handle_client_memory(handler, server) -> None:
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
-    result = execute_gateway_client_memory(
-        server.agent,
-        scope=_gateway_control_scope(
-            handler,
-            body,
-            user_id=user_id,
-            channel=channel,
-        ),
-        operation=str(body.get("operation") or ""),
-        query=str(body.get("query") or ""),
-        content=str(body.get("content") or ""),
-        kind=str(body.get("kind") or "fact"),
-        limit=_request_limit(body, default=5),
-    )
+    if (getattr(server, "control_plane", None) is not None
+            or getattr(server, "drain_runtime", None) is not None):
+        operation = str(body.get("operation") or "").strip().lower()
+        if (getattr(getattr(server, "control_plane", None), "worker_count", 0) > 0
+                and operation in {"search", "remember"}):
+            from .client_service import GatewayClientMemoryResult
+            from .coordinator_client_memory import execute_coordinator_client_memory
+
+            try:
+                result = execute_coordinator_client_memory(handler, server, body)
+            except Exception as exc:  # noqa: BLE001 已完整退出原source后才沿原HTTP安全错误投影
+                result = GatewayClientMemoryResult(operation, False, error_code=type(exc).__name__)
+        else:
+            result = _read_coordinator_client_memory(
+                server, _gateway_control_scope(handler, body, user_id=user_id, channel=channel),
+                operation=str(body.get("operation") or ""), limit=_request_limit(body, default=5),
+            )
+    else:
+        result = execute_gateway_client_memory(
+            server.agent,
+            scope=_gateway_control_scope(
+                handler,
+                body,
+                user_id=user_id,
+                channel=channel,
+            ),
+            operation=str(body.get("operation") or ""),
+            query=str(body.get("query") or ""),
+            content=str(body.get("content") or ""),
+            kind=str(body.get("kind") or "fact"),
+            limit=_request_limit(body, default=5),
+        )
     handler._send_json(200, result.to_dict())
 
 
-# LLM: 历史 API 只读取 authenticated owner/thread；可选字节游标不能变成路径、身份或无界查询。
-# 函数用途: 返回最近或更早的一页聊天历史，非法游标显式拒绝而不是回到最新页。
+# LLM: 只消费本次原HTTP control/runtime/paths/lease，读前后重核；原scope/owner与memory_path resolver唯一，配置不签权，不建foreign Agent/owner/索引。
+# 函数用途: 为C仅读本owner已有正式记忆，search/remember返回结构化未就绪；错误只公开安全类型。
+def _read_coordinator_client_memory(server, scope, *, operation, limit):
+    from ..user_space.home_layout import home_paths
+    from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
+    from ..user_space.runtime_paths import resolve_runtime_paths_for_agent
+    from .client_service import GatewayClientMemoryResult, read_gateway_client_memory_from_path
+    from .control_plane import GatewayControlPlane
+    from .control_service import _scope_request_payload
+    from .multiprocess_http_transport import require_http_transport
+    from .request_worker import _resolve_request_owner_from_config
+
+    normalized = str(operation or "").strip().lower()
+    try:
+        control, runtime, paths = server.control_plane, server.drain_runtime, server.paths
+        if type(control) is not GatewayControlPlane:
+            raise ValueError("http_original_control_required")
+        require_http_transport(runtime, control=control, paths=paths)
+        if normalized not in {"recent", "search", "remember"}:
+            result = GatewayClientMemoryResult(normalized, False, error_code="UNSUPPORTED_OPERATION")
+        elif normalized != "recent":
+            result = GatewayClientMemoryResult(normalized, False, error_code="COORDINATOR_BUSINESS_NOT_READY")
+        else:
+            owner = _resolve_request_owner_from_config(control.config, _scope_request_payload(scope), control.home_root)
+            base_home = home_paths(control.home_root)
+            scoped_home = home_paths_with_owner(base_home, resolve_owner_home(control.home_root, owner))
+            path = resolve_runtime_paths_for_agent(control.config, scoped_home.owner_home_dir, scoped_home).paths["memory_path"]
+            result = read_gateway_client_memory_from_path(path, limit=limit)
+        if server.control_plane is not control or server.drain_runtime is not runtime or server.paths is not paths:
+            raise ValueError("http_original_control_required")
+        require_http_transport(runtime, control=control, paths=paths)
+        return result
+    except Exception as exc:  # noqa: BLE001 不输出记忆、路径或异常正文，Count0原错误策略不变
+        return GatewayClientMemoryResult(normalized, False, error_code=type(exc).__name__)
+
+
+# LLM: 历史先守原认证/scope/游标；C control/runtime任一存在都进原只读leaf，缺失/坏/撤权来源不得回退base或foreign Agent；两者None的Count0原wrapper保持。
+# 函数用途: 为冷/健康C读取同owner/actor原分页，拒绝复制/失活来源且不构造foreign写者，不扩其他client权限。
 def handle_client_history(handler, server) -> None:
     if require_trusted_source(handler):
         return
-    if server is None or server.agent is None:
+    if server is None or (server.agent is None and getattr(server, "control_plane", None) is None):
         handler._send_json(500, {"error": "server client service not initialized"})
         return
     try:
@@ -1764,18 +2054,65 @@ def handle_client_history(handler, server) -> None:
     if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 0):
         handler._send_json(400, {"error": "invalid history cursor"})
         return
-    result = read_gateway_client_history(
-        server.agent,
-        scope=_gateway_control_scope(
-            handler,
-            body,
-            user_id=user_id,
-            channel=channel,
-        ),
-        max_turns=_request_limit(body, default=20),
-        before_message_cursor=before,
-    )
+    scope = _gateway_control_scope(handler, body, user_id=user_id, channel=channel)
+    if (getattr(server, "control_plane", None) is not None
+            or getattr(server, "drain_runtime", None) is not None):
+        result = _read_coordinator_client_history(
+            server, scope, max_turns=_request_limit(body, default=20), before=before,
+        )
+    else:
+        result = read_gateway_client_history(
+            server.agent, scope=scope, max_turns=_request_limit(body, default=20), before_message_cursor=before,
+        )
     handler._send_json(200, result.to_dict())
+
+
+# LLM: 只消费原HTTP runtime/control/paths/lease，读前后均复核；config和canonical home不授写权，也不借替代C继续返回正文。
+#   foreign只清空原runtime解析器列出的覆盖字段，与原Agent wrapper一致；不猜目录、不建Agent/池/线程/索引。
+# 函数用途: 为冷C按原认证scope打开已有owner历史，任何读取或来源错误仍返回原安全load_errors。
+def _read_coordinator_client_history(server, scope, *, max_turns, before):
+    from dataclasses import replace
+
+    from ..user_space.home_layout import home_paths
+    from ..user_space.owner_resolver import (
+        home_paths_with_owner,
+        owner_identity_from_config,
+        resolve_owner_home,
+    )
+    from ..user_space.runtime_paths import resolve_runtime_paths_for_agent
+    from .client_service import (
+        GatewayClientHistoryResult,
+        _safe_load_error,
+        read_gateway_client_history_from_store,
+    )
+    from .control_plane import GatewayControlPlane
+    from .control_service import _scope_request_payload
+    from .multiprocess_http_transport import require_http_transport
+    from .owner_conversation_store import owner_conversation_store_from_config
+    from .request_worker import _resolve_request_owner_from_config
+
+    try:
+        control, runtime, paths = server.control_plane, server.drain_runtime, server.paths
+        if type(control) is not GatewayControlPlane:
+            raise ValueError("http_original_control_required")
+        require_http_transport(runtime, control=control, paths=paths)
+        owner = _resolve_request_owner_from_config(control.config, _scope_request_payload(scope), control.home_root)
+        base_home = home_paths(control.home_root)
+        scoped_home = home_paths_with_owner(base_home, resolve_owner_home(control.home_root, owner))
+        config = control.config
+        if owner != owner_identity_from_config(config):
+            fields = resolve_runtime_paths_for_agent(config, base_home.owner_home_dir, base_home).paths
+            config = replace(config, **{name: "" for name in fields if hasattr(config, name)})
+        store = owner_conversation_store_from_config(config, scoped_home, initialize=False)
+        result = read_gateway_client_history_from_store(
+            store, scope=scope, max_turns=max_turns, before_message_cursor=before,
+        )
+        if (server.control_plane is not control or server.drain_runtime is not runtime or server.paths is not paths):
+            raise ValueError("http_original_control_required")
+        require_http_transport(runtime, control=control, paths=paths)
+        return result
+    except Exception as exc:  # noqa: BLE001 历史读取只公开固定错误类别，不泄露路径或异常原文
+        return GatewayClientHistoryResult(False, load_errors=(_safe_load_error(exc),))
 
 
 # LLM: 前端数量只作为资源上限，非法值不能变成无限查询或改变 owner 路由。
@@ -1874,6 +2211,22 @@ def _ask_body_has_execution_options(body: dict[str, Any]) -> bool:
     )
 
 
+# LLM: 普通HTTP与正count显式steer共用这一个纯身份公式；认证scope四字段决定原ID，正文只进另一个digest，不创建receipt/owner或授权。
+# 函数用途: 生成稳定普通输入ID及同一规范身份数据，保持既有HTTP编码和值不变。
+def http_input_identity(*, user_id: str, channel: str, conversation_id: str, message_id: str):
+    if not str(message_id or '').strip():
+        return '', {}
+    identity = {
+        "user_id": str(user_id or "").strip(),
+        "channel": str(channel or "").strip(),
+        "conversation_id": str(conversation_id or "").strip(),
+        "message_id": str(message_id or "").strip(),
+    }
+    identity_json = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "gwreq-msg-" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:32], identity
+
+
+# LLM: 身份公式只调用http_input_identity；当前digest内容与Count0返回不变。
 # LLM: Stable request identity uses authenticated scope plus the opaque client message id. The
 # separate input digest includes canonical content, so reusing that id for other input fails closed.
 # 函数用途: 为可重试普通消息生成固定 Gateway 请求 ID 和服务端计算的内容指纹。
@@ -1890,19 +2243,8 @@ def _http_idempotent_request_identity(
     if not message_id:
         return "", ""
     conversation_id = _http_conversation_id(body)
-    identity = {
-        "user_id": str(user_id or "").strip(),
-        "channel": str(channel or "").strip(),
-        "conversation_id": conversation_id,
-        "message_id": message_id,
-    }
-    identity_json = json.dumps(
-        identity,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    request_id = "gwreq-msg-" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:32]
+    request_id, identity = http_input_identity(user_id=user_id, channel=channel,
+        conversation_id=conversation_id, message_id=message_id)
     canonical_metadata = {
         key: value
         for key, value in metadata.items()

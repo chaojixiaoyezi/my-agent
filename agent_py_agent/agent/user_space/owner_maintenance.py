@@ -2,7 +2,7 @@
 #   status/last_success_at 是旧汇总口径（有任何错误就 policy_unavailable）；「到底执行了没有」看 apply_outcome，
 #   被隔离的路径级错误看 isolated_error_count，最近一次真正执行看 last_applied_at。改动联测 test_owner_maintenance
 #   与 test_gateway_owner_maintenance。
-# 模块用途: 按 owner 到期跑保留、向量缓存回收与 global_index 压缩，并把结构化结果写进维护状态文件。
+# 模块用途: 保留Count0原维护；真实后台按原claim逐写私有状态，W不压shared索引，不新增维护账。
 from __future__ import annotations
 
 import time
@@ -11,11 +11,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..common.json_io import (
     locked_json_path,
     read_json_object_report,
     write_json_file_atomic_unlocked,
 )
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from .home_layout import MyAgentHomePaths
 from .home_retention import OwnerRetentionPlan, apply_owner_retention
 
@@ -73,15 +79,33 @@ def owner_maintenance_due(
     return last_attempt <= 0 or current - last_attempt >= interval
 
 
-# LLM: 维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
+# LLM: 最早核原请求/owner；Count0 None保原维护成本，正W不写shared；callback逐写T→业务锁，扫描门外。
+#   维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
 #   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
 # 函数用途: owner 到期时跑一轮维护并写结构化状态；没到期直接返回 not_due。
 def run_owner_retention_if_due(
     home: MyAgentHomePaths,
     *,
     now: float | None = None,
+    include_global_indexes: bool = True,
+    commit_transition=None,
+    expected_policy_fingerprint=None,
+    expected_state_fingerprint=None,
 ) -> OwnerMaintenanceResult:
+    from ..gateway_parts.multiprocess_mode import current_worker_partition
+    from ..gateway_parts.request_entry_admission import require_request_execution
+
+    require_request_execution(home=home)
+    include_global_indexes = include_global_indexes and current_worker_partition() is None
     current = float(now if now is not None else time.time())
+    if commit_transition is not None:
+        if include_global_indexes:
+            raise ValueError("maintenance_transition_requires_private_indexes")
+        from .owner_maintenance_transition import run_with_transition
+
+        return run_with_transition(home, current, commit_transition,
+            expected_policy_fingerprint=expected_policy_fingerprint,
+            expected_state_fingerprint=expected_state_fingerprint)
     if not owner_maintenance_due(home.owner_home_dir, now=current):
         return OwnerMaintenanceResult(False, "not_due")
     state_path = _maintenance_state_path(home.owner_home_dir)
@@ -98,7 +122,8 @@ def run_owner_retention_if_due(
         dropped_cache_keys, reclaim_error = _reclaim_text_vector_cache_orphans(home)
         # global_index 四份只追加索引在这里按 key 内部压缩（纯投影，不读权威源）。
         # 单份失败不中断维护；成功与"试了但失败"分开汇总进维护状态，便于观察是否真的压过。
-        compacted, compact_failed = _compact_global_indexes(home, now=current)
+        compacted, compact_failed = (_compact_global_indexes(home, now=current)
+                                     if include_global_indexes else ([], []))
         # memory_archive 的已有文件靠 S2/S3 的"下次写入收紧"覆盖不到，挂进这里在 owner 维护
         # （默认每天一次）里收口；只收紧不放松、不跟随符号链接，结果原样写进维护状态。
         permissions = _tighten_archive_permissions(home)
@@ -109,29 +134,22 @@ def run_owner_retention_if_due(
             state_path,
             context="owner_maintenance.state",
         ).payload
-        fields = _outcome_fields(retention, previous, current)
-        payload = {
-            "schema_version": "owner-maintenance.v1",
-            "last_attempt_at": current,
-            **fields,
-            "load_errors": list(retention.load_errors),
-            "legal_hold": retention.legal_hold,
-            "text_vector_cache_reclaimed": dropped_cache_keys,
-            # 非空表示"这次没能真的回收"（建缓存/读记忆失败），0 不等于"没有孤儿"。
-            "text_vector_cache_reclaim_error": reclaim_error,
-            "indexes_compacted": compacted,
-            # "试了但失败"（io_error / identity_changed）单列，免得跟"没到期"混成一片。
-            "indexes_compact_failed": compact_failed,
-            # 归档目录树已有文件的收紧回执：收紧数（文件/目录分开）、失败数与原因码、跳过符号链接数。
-            "memory_archive_permissions": permissions,
-            # rcb 迁移回执：executed/reason/分类计数；无库、已迁移、失败都在这里说清。
-            "run_closeout_backfill": run_closeout_backfill,
-        }
-        write_json_file_atomic_unlocked(state_path, payload)
-        return OwnerMaintenanceResult(
-            True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
-            isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"],
-        )
+        effects = {"text_vector_cache_reclaimed": dropped_cache_keys,
+                   "text_vector_cache_reclaim_error": reclaim_error,
+                   "indexes_compacted": compacted, "indexes_compact_failed": compact_failed,
+                   "memory_archive_permissions": permissions, "run_closeout_backfill": run_closeout_backfill}
+        return _write_maintenance_result(state_path, retention, previous, current, effects)
+
+
+# LLM: caller已持原maintenance锁；仍写原唯一schema/状态口径，不把局部成功变成新许可或第二账。
+# 函数用途: 用原保留回执和附加维护事实更新同一个maintenance.json。
+def _write_maintenance_result(state_path, retention, previous, current, effects):
+    fields = _outcome_fields(retention, previous, current)
+    payload = {"schema_version": "owner-maintenance.v1", "last_attempt_at": current, **fields,
+               "load_errors": list(retention.load_errors), "legal_hold": retention.legal_hold, **effects}
+    write_json_file_atomic_unlocked(state_path, payload)
+    return OwnerMaintenanceResult(True, fields["status"], retention, apply_outcome=fields["apply_outcome"],
+        isolated_error_count=fields["isolated_error_count"], failed_action_count=fields["failed_action_count"])
 
 
 # LLM: 维护状态里描述「这轮结果」的字段只在这里算：旧口径 status / last_success_at 含义不变；新增的 apply_outcome /
@@ -155,11 +173,12 @@ def _outcome_fields(retention: OwnerRetentionPlan, previous: dict[str, Any], cur
     }
 
 
-# LLM: 回收只读 active 记忆算出保留集合，不加载嵌入模型、不联网；失败只记 0，绝不影响保留策略结果。
+# LLM: 原callback只包构造目录与最后cache写，active集合长读门外，四类实际未知原对象上抛；Count0 None原调用不变。
+#   回收只读 active 记忆算出保留集合，不加载嵌入模型、不联网；失败只记 0，绝不影响保留策略结果。
 #   路径必须用 canonical 字段（owner_memory_long_term_jsonl），此前手拼 `memory/memory.jsonl` 在生产布局下
 #   文件根本不存在，于是每天写一个假的 `text_vector_cache_reclaimed: 0`——看起来像"跑过、没有孤儿"。
 # 函数用途: 在 owner 维护里回收正文哈希缓存中不属于任何 active 记忆的键。
-def _reclaim_text_vector_cache_orphans(home: MyAgentHomePaths) -> tuple[int, str]:
+def _reclaim_text_vector_cache_orphans(home: MyAgentHomePaths, *, commit_transition=None) -> tuple[int, str]:
     """返回 (回收数, 错误码)。错误码为空表示这次真的跑过；非空表示"0 不是因为没孤儿"。"""
     try:
         from ..memory_store.jsonl import JsonlMemory
@@ -168,13 +187,20 @@ def _reclaim_text_vector_cache_orphans(home: MyAgentHomePaths) -> tuple[int, str
         if not memory_path.exists():
             return 0, "memory_file_missing"
         # 回收不需要 embedder：保留集合按 active 记录的正文哈希算（见 reclaim_text_cache_orphans）。
-        memory = JsonlMemory(memory_path)
+        memory = (JsonlMemory(memory_path) if commit_transition is None
+                  else commit_transition(lambda: JsonlMemory(memory_path)))
         # 回收自己也会遇到"读不了缓存 / 拿不到锁"，它把错误说明交回来（V5），不能再被当成空串。
-        return memory.reclaim_text_cache_orphans()
+        if commit_transition is None:
+            return memory.reclaim_text_cache_orphans()
+        return memory.reclaim_text_cache_orphans(commit_transition=commit_transition)
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
     except Exception as exc:
         # 建缓存/读记忆失败也返回 0，但与"确实没有孤儿"必须分得开——否则又是一条假的结构化事实。
         return 0, f"{type(exc).__name__}: {exc}"
-# LLM: 压缩是派生数据的整理，失败绝不能影响 retention 结果；这里只回传计数与坏行数。
+# LLM: 四类实际未知不能降级为空成功；Count0原派生整理故障仍保原回执。
+#   压缩是派生数据的整理，失败绝不能影响 retention 结果；这里只回传计数与坏行数。
 #   "试了但失败"（io_error / identity_changed）必须与"没到期"分开记：
 #   只记 compacted=True 的话，maintenance.json 分不出"没到期"和"压失败了"，
 #   失败会被静默吞掉——这正是本轮修掉的那类假结构化事实。
@@ -186,6 +212,9 @@ def _compact_global_indexes(
         from .home_index_compact import compact_global_indexes_if_due
 
         results = compact_global_indexes_if_due(home, now=now)
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
     except Exception:
         return [], []
     compacted: list[dict[str, object]] = []
@@ -202,14 +231,21 @@ def _compact_global_indexes(
     return compacted, failed
 
 
-# LLM: 收紧动作本身不做 IO 之外的判断；memory_archive 不存在时返回全零（还没建归档属正常）。
+# LLM: 原callback逐chmod重核scope；四类实际未知透传，默认路径原统计/故障语义不变。
+#   收紧动作本身不做 IO 之外的判断；memory_archive 不存在时返回全零（还没建归档属正常）。
 #   导入或整体失败只记 error 字符串，维护状态照写，绝不让归档收紧拖垮 retention 主流程。
 # 函数用途: 收紧本 owner memory_archive 目录树的权限，返回可直接写进维护状态的结构化事实。
-def _tighten_archive_permissions(home: MyAgentHomePaths) -> dict[str, Any]:
+def _tighten_archive_permissions(home: MyAgentHomePaths, *, commit_transition=None) -> dict[str, Any]:
     try:
         from ..memory_archive.storage import tighten_memory_archive_permissions
 
-        return tighten_memory_archive_permissions(Path(home.owner_home_dir) / "memory_archive")
+        archive = Path(home.owner_home_dir) / "memory_archive"
+        if commit_transition is None:
+            return tighten_memory_archive_permissions(archive)
+        return tighten_memory_archive_permissions(archive, commit_transition=commit_transition)
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -248,11 +284,12 @@ def _maintenance_state_path(owner_home: Path) -> Path:
     return owner_home / "data" / "maintenance.json"
 
 
-# LLM: rcb 迁移的维护侧入口：只接 owner home，自己定位 runtime.db（延迟导入 runtime_db，
+# LLM: 原callback覆盖repo构造与逐条rcb写；候选扫描门外，四类实际未知不降级或写假迁移完成。
+#   rcb 迁移的维护侧入口：只接 owner home，自己定位 runtime.db（延迟导入 runtime_db，
 #   保持本模块加载面不变）；无库、库坏或迁移失败都返回结构化回执（error_type），
 #   绝不让迁移拖垮 retention 主流程。
 # 函数用途: 在 owner 维护里对当前 owner 的 runtime.db 执行一次历史悬挂补收口迁移。
-def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float) -> dict[str, Any]:
+def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float, commit_transition=None) -> dict[str, Any]:
     try:
         from ..runtime_db.repository import RuntimeRepository
         from ..runtime_db.run_closeout_backfill import apply_run_closeout_backfill
@@ -261,7 +298,13 @@ def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float) -> dict[str, Any]
         db_path = runtime_db_path(Path(home.owner_home_dir))
         if not db_path.exists():
             return {"executed": False, "reason": "no_runtime_db"}
-        return apply_run_closeout_backfill(RuntimeRepository(db_path), now=now)
+        if commit_transition is None:
+            return apply_run_closeout_backfill(RuntimeRepository(db_path), now=now)
+        repo = commit_transition(lambda: RuntimeRepository(db_path))
+        return apply_run_closeout_backfill(repo, now=now, commit_transition=commit_transition)
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
     except Exception as exc:  # noqa: BLE001 迁移失败不反噬保留主流程
         return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
 

@@ -6,7 +6,7 @@
 # 能力事件开始的工作片也可能完成任务，公开交付须读当前任务状态，不能仅凭原唤醒原因永久静默。
 # 原 wake 队列在预扫及领取后重查；历史失败不能绕过已接续子代理的当前状态与未读完成信封。
 # 合法冻结交付须先于普通终态工作过滤恢复；任务结束不确认欠发回复，取消抑制和去重仍归原交付层。
-# 模块用途: 编排后台唤醒和工作片，并组装执行、交付、路由、租约、恢复、策略及上下文。
+# 模块用途: 编排后台唤醒和工作片；actual未结保原来源与租约，不改模型/通知/历史及原权限主链。
 from __future__ import annotations
 
 import json
@@ -19,10 +19,16 @@ from typing import Any
 
 from ..agent_core.agent_tree.status import agent_tree_status_payload
 from ..agent_core.orchestration.coordinator_policy import coordinator_tool_boundary_text
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.errors import (
     is_provider_transient_error,
     is_provider_usage_limit_error,
 )
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..concurrency.interrupt import is_interrupted
 from ..runtime_errors import compact_error_message, fallback_error_code
 from ..settings.config import DEFAULT_EXECUTION_PERSISTENCE
@@ -800,7 +806,7 @@ def _complete_background_slice(
 
 
 # LLM: 唤醒准备与投递共用唯一 store；执行委托独立工作片模块，修改时核对历史和外发事务回归。
-# 类用途: 连接一次后台请求、模型执行与原有收口投递，不拥有调度租约。
+# 类用途: 连接原后台请求、执行与收口投递；不拥有调度租约，actual未结不改作普通失败。
 class BackgroundMainAgentRuntime:
     # LLM: 绑定唯一会话存储，可能更新 Agent 的 store 引用；不能在执行/投递时另建状态源。
     # 函数用途: 装配后台编排所需的 Agent、会话账和渠道投递能力。
@@ -997,7 +1003,7 @@ class BackgroundMainAgentRuntime:
         )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
-    # 函数用途: 准备冻结上下文并调用独立执行器，以具名字段交接工具、产物与显示结果。
+    # 函数用途: 准备冻结上下文并执行；actual未结原样退出不收输入，其它工具/历史/显示沿原结果。
     def _run_agent(
         self,
         thread,
@@ -1020,6 +1026,9 @@ class BackgroundMainAgentRuntime:
                 resolved_goal_context,
                 (proactive_delivery_available, transcript_delivery_available),
             )
+        except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+            raise
         except (BackgroundCompactSliceYield, BackgroundCapacityDeferred):
             raise
         except Exception as exc:
@@ -1075,7 +1084,8 @@ def _finalize_background_execution(
 #   failure 是这一片抛出的异常，只决定这次释放计不计次（与前台终态同一判据 failure_counts_toward_release_limit：
 #   只有会让回合崩溃的失败计次，超时、连接、环境故障、中断不计次）。
 #   收尾失败只吞掉，不能盖住原异常；回执留在原状态。副作用：写补充消息回执、删回合索引。
-# 函数用途: 后台片异常结束时，把它认领了但没消费的补充消息按统一规则收尾（会话消息退回给下一回合或重跑回合）。
+# LLM: 辅助收尾自身的actual来源拒绝也必须原对象上抛，不改为尽力成功；普通收尾故障仍保原失败。
+# 函数用途: 仅普通失败收尾补充消息；actual未结由调用方绕过，持久责任不提前清掉。
 def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundRunRequest, failure: Exception) -> None:
     turn_id = _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request)
     store = getattr(agent, "conversation_store", None)
@@ -1086,6 +1096,9 @@ def _settle_unconsumed_background_turn_input(agent: object, request: BackgroundR
             turn_id, reject_reserved=True, release_task_body=not _session_task_turn_was_cancelled(agent, request),
             failure=failure,
         )
+    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+            RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+        raise
     except Exception:  # noqa: BLE001 - 与前台收尾同口径：收尾失败不阻断原异常上抛
         pass
 
@@ -1148,7 +1161,8 @@ def _session_task_turn_was_cancelled(agent: object, request: BackgroundRunReques
 #   不在派活回合、任务已终态、或读账失败都安静返回（不改任何状态、不影响交付）。
 #   摘要取本回合的最终答复（结构化字段 response），让发送方的回报带上"目标到底说了什么"，
 #   不解析正文、不复制任务正文；答复为空时留空，回报照样发出。
-# 函数用途: 按本次后台请求收口真正完成的会话任务；等待孩子的 unfinished 片保留原任务。
+# LLM: 收口回调若抛actual未知不得吞掉；不由确认文案或一般error_code补成功。
+# 函数用途: 收口真正完成的任务，等待孩子及actual未结保原责任，普通附加回报失败仍沿原边界。
 def _close_out_session_task_turn(
     agent: object,
     request: BackgroundRunRequest,
@@ -1175,6 +1189,9 @@ def _close_out_session_task_turn(
                 summary=str(getattr(execution, "response", "") or "").strip(),
             ),
         )
+    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+            RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+        raise
     except Exception:  # noqa: BLE001 - 回报属于附加交付，不能让回合本身失败
         return
 
@@ -3954,7 +3971,8 @@ class _BackgroundSchedulerWakeMixin:
     # LLM: 正常返回先在 finally 停外层心跳，再结束定时 claim 与来源；异常分支仍先按 typed 分类处理 claim。
     #   额度分路只读会话层的唯一判定 is_provider_quota_failure（直接的额度错误或压缩包装的额度错误），与车道、策略失败账、
     #   毒丸同口径；其它异常照旧走 _handle_nonquota_wake_error。
-    # 函数用途: 消费一条已选唤醒，沿原租约执行并结算，不把 Goal 暂停当成当前回合中断。
+    # LLM: actual未结不能交普通失败/额度分路结claim或毒丸；原heartbeat仍停止，来源由原恢复控制。
+    # 函数用途: 消费已选唤醒；四类未结原对象上抛，取消/额度/普通错误保原结算。
     def _run_wake_signal(
         self, signal: WakeSignal, *, now: float
     ) -> BackgroundMainAgentReport | None:
@@ -3980,6 +3998,9 @@ class _BackgroundSchedulerWakeMixin:
             if execution.terminal:
                 return None
             report = execution.report
+        except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
+            raise
         except Exception as exc:
             _note_wake_error(self, signal, exc)
             if is_provider_quota_failure(exc):

@@ -4,7 +4,7 @@
 #   批大小；不读错误文案或模型正文，不做 IO、不读配置。常量是防死循环的安全兜底，不进用户配置。
 #   未知 admission 与未知异常类型默认计数（宁可多等几轮后停下，也不无限重试）；瞬时类与环境级故障只按类型或
 #   结构化状态码排除（环境级故障由 Gateway 后台车道按环境暂停，见 cli/gateway_lane_retry）。时间只往前走，时钟回拨时账照样读得回来。改动时联查 docs/design/WAKE_POISON_PILL.md、store_wake_attempts 与 test_wake_poison。
-# 模块用途: 判断同一条后台唤醒是否在以同一原因反复失败，给出下次最早可再试的时间，以及何时该结案不再领取。
+# 模块用途: 按原阈值判断后台重复失败；actual未结仅不累计失败，不补成功、恢复权或自动重放。
 from __future__ import annotations
 
 import math
@@ -428,10 +428,20 @@ def _error_reason_code(error: Exception) -> str:
 #   401/402/403/404/407，以及 ProviderConfigurationError 基类（含 ProviderConnectionError），但请求被拒
 #   （ProviderRequestRejectedError）且不是这几个状态时属于请求本身的问题，照样计数。
 #   新增类型要在这里显式加，不能靠消息匹配。
-# 函数用途: 判断一个异常是否属于不计数的瞬时类或环境级故障。
+# LLM: 四类actual来源/物理未结不表示工作有毒；只停失败累计，不补成功/重放或签恢复权，同码普通异常不升级。
+# 函数用途: 为原尝试账排除actual未结、瞬时与环境故障，原阈值和普通失败分类保持。
 def _is_uncounted(error: Exception) -> bool:
+    from ..backends.bounded_call import BoundedCallExitUnconfirmedError
     from ..backends.errors import is_provider_environment_fault
+    from ..common.request_execution_ports import (
+        RequestExecutionContextUnavailable,
+        RequestExecutionOutcomeUncertainError,
+    )
+    from ..common.tool_write_context import ToolWriteContextUnavailable
 
+    if isinstance(error, (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                          RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+        return True
     return is_provider_environment_fault(error) or _is_transient(error)
 
 

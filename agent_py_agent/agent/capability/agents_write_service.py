@@ -165,7 +165,7 @@ class AgentsWriteService:
                ('owner', 'actor', 'thread_id', 'admin_target_owner')):
             raise AgentsContractError('AGENTS_WRITE_BINDING_MISMATCH', 'owner')
 
-    # LLM: 先经原file commit耐久消费未知再调用A、再commit完成；任何撤权/写失败不恢复preview或自动重放。
+    # LLM: 先经原file commit耐久消费未知再调用A；原执行拒绝/运输未结同对象外抛，普通写失败沿原消费未知，不恢复preview或重放。
     # 函数用途: 为当前直接确认发行精确授权，执行最多一次并耐久记录结果。
     def _confirm(self, record, request):
         if record['state'] != 'preview':
@@ -201,12 +201,13 @@ class AgentsWriteService:
             record.update(state='completed', result=result.to_dict())
             self.repository.commit_file(lambda: save_record(self.repository.owner_home, record))
         except Exception as error:
+            _raise_agents_runtime_error(error)
             # 不假定A抛错前没有副作用；保留消费未知，诊断保存失败也不能成功。
             record.update(state='consumed_unknown', error_code=getattr(error, 'code', 'AGENTS_WRITE_RESULT_UNKNOWN'))
             try:
                 self.repository.commit_file(lambda: save_record(self.repository.owner_home, record))
-            except Exception:
-                pass
+            except Exception as diagnostic_error:
+                _raise_agents_runtime_error(diagnostic_error)
             return self._receipt(record)
         return self._receipt(record)
 
@@ -226,3 +227,16 @@ class AgentsWriteService:
         if state == 'consumed_unknown':
             result['error_code'] = record.get('error_code', 'AGENTS_WRITE_RESULT_UNKNOWN')
         return result
+
+
+# LLM: 业务未知回执不得吞掉原执行源拒绝或运输未结；只依据原异常类型同对象抛出，不解析文案或伪造成功/恢复。
+# 函数用途: 让底层无法确认的执行状态沿原请求出口处理，普通文件失败仍保留原消费未知策略。
+def _raise_agents_runtime_error(error):
+    from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+    from ..common.global_write_commit import GlobalWriteCommitUnavailable
+    from ..common.global_write_guard import GlobalWriteInWorkerError
+    from ..common.request_execution_ports import raise_if_transport_uncertain
+
+    raise_if_transport_uncertain(error)
+    if isinstance(error, (BoundedCallExitUnconfirmedError, GlobalWriteCommitUnavailable, GlobalWriteInWorkerError)):
+        raise error

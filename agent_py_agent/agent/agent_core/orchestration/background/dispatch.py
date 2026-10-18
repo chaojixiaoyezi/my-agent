@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-# LLM: 后台派工只传任务身份与显式注入；生产模型由 child thread 引用恢复，不能捕获共享宿主的当前连接。
+# LLM: 后台派工只传原任务身份；正MP只留canonical待派并交独立request/P3/P5，不裸起新runner，Count0保持原进程/线程派发。
 # 模块用途: 将子代理交给原进程或线程执行，绑定可信排队 owner 并保存原启动回执、失败与结果。
 import os
 import subprocess
@@ -46,7 +46,8 @@ class _ProcessStartupFailureRequest:
 # LLM: expected_attempt_ids 只接受宿主关键字，不能从模型 request_params 读取；进程启动在 creation 锁外。
 #   宿主停机已关闭本进程模型调用准入时（J17 栅栏，见 _host_shutdown_refusal）一律不启动：session 收尾续派、孤儿复活、
 #   卡住扫描、控制入口和建子代理的自动启动都经这里，run 保持原状态，重启后由新进程照常续派。
-# 函数用途: 自动启动可执行孩子，并沿用控制入口已经预留的准确执行轮。
+# LLM: 原受限C/W只保canonical工作待独立child来源运输，不在该请求内另生后台进程；Count0仍原派工/预留语义。
+# 函数用途: 自动启动可执行孩子，受限请求将其留给原canonical来源发现，不借当前请求派生新执行权。
 def auto_start_tasks(
     agent, tasks: list, request_params: dict[str, object], *,
     expected_attempt_ids: dict[str, str] | None = None,
@@ -54,6 +55,11 @@ def auto_start_tasks(
     skipped_run_ids = [_safe_task_id(task) for task in tasks if _safe_task_id(task)]
     if (refusal := _host_shutdown_refusal(skipped_run_ids)) is not None:
         return refusal
+    from ....common.executor_registration import managed_request_execution_required
+
+    if managed_request_execution_required():
+        return {"status": "deferred", "run_ids": skipped_run_ids,
+                "reason_code": "gateway_child_request_required"}
     dispatchable = dispatchable_tasks(tasks)
     if _bool_param(request_params.get("defer_start"), default=False):
         run_ids = [_safe_task_id(task) for task in dispatchable if _safe_task_id(task)]

@@ -322,3 +322,12 @@ SkillsService只为准确registry归属、canonical路径和hash一致的自学�
 ### 全owner手动总结
 
 `skill_summarize` 不再限制首期local admin，普通用户和群沿各自owner的 `enable_self_learning` 及原TaskLink/claim/attempt申请总结。工具核对服务store的精确owner位置，运行scope与准确thread/root；previous也只读当前已授权thread的原有最近完成缓存。配置管理与正式候选确认仍由原人类control权限控制。成功只登记当前owner待确认候选，不能模型自批或跨owner读取。晚到验证回执必须call.run_id与当前run一致才能反馈质量。
+
+
+### F3 原请求消费者（候选，未部署）
+
+学习运输使用main唯一v1请求schema与request_key；完整源字节仍由原read_source核，不要求来源旧v2的pending_generation，不增加第二套draft/FIFO。run_pending先核准确Agent与原claim，可选expected_request_path在维护前和原运行锁内核同FIFO；不能因队首变化消费邻项。原lesson纳管、维护、owner/部署日预算与main人工proposals保持。
+
+模型等待不持Gateway T；维护、额度保留、候选保存、失败重写及终账/删源在原短事务重核。实际来源未知保持同一异常对象，普通同码异常仍按原规则重试/降级。只给真实后台service入口加门，不能给原store/publisher加无条件request-only门而破坏当前C人工确认路径。单独C/writer来源不等于用户确认，不自动发布正式Skill。
+
+当前学习/F4相邻128项通过，非作者复核另记。正多进程无FIFO时自主维护来源发现仍在接线，不能把此组件验证说成该功能已完成；完整W/native/停止接手另验。

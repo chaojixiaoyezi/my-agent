@@ -129,10 +129,14 @@ class RuntimeErrorTemplate:
 
 # LLM: 分类优先遵循异常类型；请求拒绝必须在配置父类前处理，本地形状错误（请求拒绝的子类）又在请求拒绝之前；
 #   宿主停机准入拒绝（异常本身或显式原因链里）最先判，报 host_stopping，不能掉进 programmer_bug 兜底；
-#   调用方不得从 model_message 推断重试或执行结果。
-# 函数用途: 生成主代理、子代理和运行账共用的小型错误报告，不推测服务端未返回的拒绝原因。
+#   类型化运输拒绝使用唯一错误合同，不签发恢复权；同错误码普通异常不得冒充原来源。
+#   调用方不得从 model_message 推断重试或执行结果，改动时联查 runtime_error_reports 与 recovery_committed_report。
+# 函数用途: 生成主子代理共用的小型错误报告，保留已执行与未结事实，不推测服务端未返回的原因。
 def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, Any]:
     """Return the canonical small report for model-visible recoverable errors."""
+    transport = _execution_transport_report(exc, context=context)
+    if transport is not None:
+        return transport
     admission = find_model_call_admission_error(exc)
     if admission is not None:
         return _host_stopping_report(exc, admission, context=context)
@@ -176,7 +180,9 @@ def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, 
     if isinstance(exc, ModelNotConfiguredError):
         return _report(
             exc,
-            _template("model_not_configured", str(exc), "model has not been configured", recoverable=False),
+            _template(
+                "model_not_configured", str(exc), "model has not been configured", recoverable=False
+            ),
             context=context,
         )
     if isinstance(exc, ProviderConfigurationError):
@@ -413,3 +419,49 @@ def _is_subagent_ledger_context(context: str) -> bool:
 
 def _is_guidance_context(context: str) -> bool:
     return any(context.startswith(prefix) for prefix in _GUIDANCE_CONTEXT_PREFIXES)
+
+
+# LLM: 只接受四个实际内部类型或common原runner异常native锚点的只读query；不join/运行Context，诊断白名单不含原对象，合同表仍唯一分类。
+#   复制异常、普通同码或替换Thread/Context不能升级；展示不授claim、停止、补账或释放权。
+# 函数用途: 报告原请求/工具短门拒绝和物理退出未知，普通同码异常保持原分类。
+def _execution_transport_report(exc: BaseException, *, context: str) -> dict[str, Any] | None:
+    from .backends.bounded_call import BoundedCallExitUnconfirmedError
+    from .common.request_execution_ports import (
+        RequestExecutionContextUnavailable,
+        RequestExecutionOutcomeUncertainError,
+    )
+    from .common.tool_write_context import ToolWriteContextUnavailable
+    from .contracts.error_taxonomy import error_contract
+
+    classes = (
+        RequestExecutionOutcomeUncertainError,
+        RequestExecutionContextUnavailable,
+        ToolWriteContextUnavailable,
+        BoundedCallExitUnconfirmedError,
+    )
+    actual = next((kind for kind in classes if isinstance(exc, kind)), None)
+    if actual is None:
+        from .common.runner_thread_origin import runner_thread_error_origin
+
+        original = runner_thread_error_origin(exc)
+        if original is None:
+            return None
+        _, phase, run_id, attempt_id = original
+        code = "TASK_RESOURCE_STOP_UNCONFIRMED"
+        details = {"phase": phase, "runner_run_id": run_id, "runner_attempt_id": attempt_id,
+                   "operation_entered": None}
+    else:
+        code = actual.error_code
+        fields = (("request_id", "execution_attempt_id", "lease_epoch", "lease_owner",
+                   "operation_entered", "phase") if actual is RequestExecutionOutcomeUncertainError
+                  else ("call_id", "reason") if actual is BoundedCallExitUnconfirmedError else ())
+        details = {key: getattr(exc, key) for key in fields}
+    contract = error_contract(code)
+    report = _report(
+        exc,
+        _template(contract.category, contract.recovery_hint, contract.code, recoverable=False),
+        context=context,
+    )
+    report.update(error_code=contract.code, recommended_action=contract.recommended_action)
+    report.update(details)
+    return report

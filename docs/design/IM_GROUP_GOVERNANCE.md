@@ -149,3 +149,9 @@ Gateway请求文件回收后仍可从准确原输入恢复；不把引用复制�
 `.12`补丁在原监控策略guard退出后，才将自身成功结构化JSON.job交同一creator展示；list/get/metadata_only不重做，
 失败、无job的run/recover与全部副作用字段保持原样。不在群策略写锁内发姓名网络请求。
 用户服务器截图的具体provider失败仍缺现场分阶段码，不能用测试群成功归因为“缺权限”或声称已复现。
+
+## 2026-10-17 群配置锁出生末门修复70（候选）
+
+记忆接线核对发现原assistant.configure虽不查额外群监控授权，仍会取得原tool_policy文件锁；冷规则入口此前未给锁文件出生传当前资源写门。现仅给原group_capability_guard增加默认None的birth_commit，默认调用形状与身份/群监控语义保持；实际冷规则使用已绑定本人owner_home的原writer partial。FD创建/chmod在原owner P2/Root短门，线程/OS锁等待在Root外，不把整业务包Root。
+
+旧A43实际HTTP两用例复现2失败，修后2项通过，核实际policy锁inode对应FD、出生持准确群owner P2、flock门外，以及出生前拒绝不打开锁、不completed、不重放。中间首次裸writer遗漏owner_home keyword的TypeError已保留，准确partial后通过，非放宽权限。统一原群/规则/存储组合及非作者复核另记；F3尚未发行。

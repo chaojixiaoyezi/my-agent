@@ -1,3 +1,5 @@
+# LLM: 原事件构造/SQL/JSONL仍唯一；C只替换已持锁固定append叶，不改事件身份或事务次序。
+# 模块用途: 持久化原本地事件，支持C在SQL事务内无重复取锁追加。
 
 from __future__ import annotations
 
@@ -17,6 +19,8 @@ from ..common.json_io import append_private_jsonl_records
 from .models import LocalStoreEvent, LocalTimelineItem
 
 
+# LLM: 原默认自取锁不变；append_records只由同Store内部C路径提供，必须固定原events_path/已持原锁。
+# 类用途: 统一构造和登记原事件，不复制第二审计状态。
 class LocalStoreEventMixin:
 
     def timeline(
@@ -75,13 +79,16 @@ class LocalStoreEventMixin:
         return event
 
     # LLM: 事件先落 SQLite、再私有追加 JSONL（0600/0700）；两条通道用同一 event 构造，JSONL 失败不静默。
-    # 函数用途: 在给定连接内登记一条事件并追加进事件流水文件。
+    # LLM: append_records仅内部同events_path原已持锁叶；默认仍原自取锁追加，SQL INSERT→JSONL→调用方commit顺序不变。
+    # 函数用途: 用同一原事件构造登记SQL并追加JSONL，C只替换重复取锁的末叶。
     def _record_event(
         self,
         conn: sqlite3.Connection,
         event_type: str,
         record_id: str,
         payload: dict[str, Any],
+        *,
+        append_records=None,
     ) -> LocalStoreEvent:
         event = LocalStoreEvent(
             event_id=str(uuid.uuid4()),
@@ -99,7 +106,7 @@ class LocalStoreEventMixin:
             (event.event_id, event.event_type, event.record_id, payload_json, event.created_at),
         )
         # 私有追加：0600/0700，存量宽权限事件流水下次写入即收紧；内容逐字节不变。
-        append_private_jsonl_records(
+        (append_private_jsonl_records if append_records is None else append_records)(
             self.events_path,
             [{
                 "event_id": event.event_id,

@@ -1,3 +1,187 @@
+## 2026-10-17 F3统一集成与最终验收约束（根254）
+
+已整合已发表责任与辅助流/原子暂存的严格区分、自然消失窗口、ready实际Agent固定管理回执，以及完整投影的原话备份重测；原Count0默认、owner/actor/凭据、完整角色历史及未知副作用边界保持。独立复核仅批准各准确切片，不授整体发行通过。正常进度/最终回答仍由模型依结构化事实生成。
+
+213完整全仓为37,783普通通过、2失败、0错误，旧89条件skip、32xfail、5XPASS分别保留；两失败对应本次已独审的管理回执和压缩误拒，原失败不改绿。最终组合必须重新验收，555项双平台运行义务、原43源码专用及native/formal分别核真实阶段；通过数、准确commit、包与部署以最终同源发行回执为准。旧home不重投/重置/补封，网络安全只记录。
+
+F5真实数量与文件操作正确，名称/用途漏答仍是模型遵循限制，不称真实任务全部通过；没有为该样例增加任务专用硬门。实现6.1-sol，Astra独立复核，根单点整合、真实服务与发行。
+
+## 2026-10-17 原话备份收缩使用完整投影实测（253候选）
+
+完整候选与局部备份 token 不保证可相减；移除据此跳过收缩实测的估算门。候选超目标且备份尚可收缩时，保原带符号预算，只沿同 projector 与冻结校准重算一次，严格变小才采用；最小备份及无备份仍零重算。原容量接受门、保护材料、取消、CAS 和摘要模型调用次数不变。原140字符临时路径 mixed 失败留档；新增真实投影、未变小不采用、仍超限拒绝和中断传播回归。两OS新包须实际执行相关运行节点，43旧source-only不扩；候选不代表整体全仓、真实任务或发行验收通过。
+
+## 2026-10-17 精确设施自然消失窗口（243后继，待独立复核）
+
+仅在237原generation显式投影的设施比较叶收紧：同名设施两轮实际identity均非None才比较是否替换；None仍只来自精确设施的FileNotFound。原writer成功同字节replace或失败finally自然清stage不再误判source变化。两轮实际身份替换、危险形状/多link、未知名、canonical缺失、责任raw/名字集合、完整root父链及旧expected摘要仍原样拒；不加重试、cleanup或权限。237其余实现/默认P6完整AST继承不动，不重复计作新实现。
+
+新增两原writer运行反例保原断言，须最终双OS新包pyc实际执行；237原78运行义务和43source-only分类保持。原237/241及243原两红完整保留，组件通过不代实际220/full/发行验收。
+
+## 2026-10-17 ready Agent固定控制回执分界（238候选）
+
+原真实ready Agent可持正count lease而未创建cold control-plane/controller。固定receipt writer保留此原组合：仅原factory活栈、原操作T/lease门、实际Agent及owner/home/config一致时保存自身回执；controller捕获引用防full来源晚None降级。冷C/client及通用perform无None兜底，fullcontroller原raw CAS/增量门保持。原Memory HTTP认证、确认与重放断言不改，Count0沿原路径。新增运行合同须最终两OS包pyc实际call passed，旧43source-only不扩；本片从213独立重建，不包含228诊断。
+
+## 2026-10-17 generation规范责任库存投影（237候选，待独立复核）
+
+generation显式读取原四类已发表责任；原processing多条chunks JSONL、固定.commands/.approvals设施和原writer精确UUID/token暂存不再作为单JSON责任读取。分类在同一原父FD的首末完整列名及raw之前，设施仍核nofollow真实类型/单链接，重复观察身份替换、未知名、责任变化和root/父链变化继续拒绝；无重试、按内容猜测或新写者权限。默认original_directory_snapshot及P6完整names/raw消费不变，旧closure expected完整集合/全raw摘要和原codec/角色/fresh P2门不投影、不补封。
+
+本片仅临时组件、原writer和受控线程；公开归档JSONL匹配Extra data类别，但当次220首badraw未留，不能据组件绿宣称该次根因已确认。0B暂存为另一独立库存缺口。新增runtime测试必须最终两OS新包pyc实际执行，原43 source-only不扩；真实服务/全仓/发行仍根另验。
+
+## 2026-10-17 来源拒绝安全诊断（228候选，非失败修复）
+
+只延长原拒绝日志为尾12函数:行，并对实际JSONDecodeError记录严格数值位置与doc字符数；正文、异常文字、参数、locals和filename不进日志。日志失败不影响原拒绝，reader/旧raw/P4/owner/unknown及Count0不变。220第二代公开首拒为JSON解析错误，当次raw未存，0B暂存文件的组件实证不等于该次精确根因；本片不增加临时名过滤或恢复权。新增运行合同须最终两OS新包pyc实跑，不能source-only；真实后继另由根新home单次验收。
+
+## 2026-10-17 F3统一源冻结与最终发行验收入口（根213）
+
+F3生产改动已统一整合，根206固定组合728项普通通过、零失败/错误/跳过，五项严格门全0；207独立复核两C状态发表路径，209批准正式425项双OS运行义务。当前默认Count0及既有owner/actor/凭据边界保持，新增内部协调运行不由展示或JSON授予权限。最终通过数、准确commit、包字节与部署结论以同源发行的结构化验收回执为准，不从分片通过数推导整体完成；未通过最终全仓、包验与实际链路前不发布。
+
+205新普通首请求及子代理实际完成：task与全部agent/attempt/tool规范终态、wake/入站/processing/P1/活动target空；原后台session为exited/0。观察器把原合法.launches目录当普通元数据文件导致ValueError，属于QA库存形状错误，原失败保留、不改产品迎合。根核原spec已删、只原规范0字节锁残留后，沿精确PID/出生身份targeted-stop正常收尾，C/W三身份false，原producer自然产生v2完整closure；零直接信号/强杀，无手工补封、重投、重置或把失败改绿。三代验收仍未通过，修正只读观察器后用独立新home另验。
+
+旧111全仓失败及169/177/190/195失败仍留档；最终全仓将在此冻结源上单次完整运行，普通通过、原XPASS/xfail/skip分开记录，不加新豁免。最终两OS新包pyc须实际执行425个mandatory节点及原native/formal义务，原43source-only不扩。F5真实数量及文件操作正确，名称/用途漏答仍是模型遵循限制，不称真实任务全部通过。网络安全只记录；日常配置和旧失败home保持。实施6.1-sol，Astra独立复核，根单点服务/合并/发行。
+
+## 2026-10-17 当前C状态发表锁序修复已合（根206，待最终验收）
+
+207非作者按准确198正反重建204，独立同字节两原失败到364项普通通过；根逐一合入两生产函数、一运行测试及八文档，完整4918文件后像一致。正常C state发表与完整角色双读共原controller→lease，取消内部重启同序并在首取消写前核原canonical目标；原atomic写叶和取消→读→发表顺序保持。C/旧角色/P4完整raw、当前W五动态、186严格snapshot、194准入关闭、Count0和v2末封不变，closing/隔离/recheck停止仍可保存失败元数据。
+
+195真实首请求的完整raw误隔离失败保留；当次两raw未捕获，不能推断具体字段变化。原精确targeted-stop已收起自有三身份，零直接信号/强杀；旧queued与无closure不重投、不重置、不补封。新15运行用例及194十正夹具158旧节点须最终两OS新包pyc实际call passed，43旧source-only不扩。下一步新home正常普通生命周期、最终全仓及严格gate、同源双平台包与本机部署均另验；当前尚未提交/推送/部署/发包。F5真实名称/用途漏答仍是模型遵循限制，网络安全只记录。
+
+## 2026-10-17 当前C完整state发表与角色双读共门（204候选）
+
+195首条业务执行前仍隔离，准确原因为角色完整raw分支132；公开after-stop三规范角色全本代，日志来源失败早于running打印，但当次双raw未存，不能声称具体字段变化。202/203源证据核明：原三循环先start后发表running，后台首quota对账会触发controller门下双读，而正常C publisher原只持lease。
+
+仅原publisher与内部restart取消固定caller改同controller→lease顺序，锁内核同actual control/controller/lease/path/count/gen；payload准备门外、原atomic writer与取消→state读回→publisher顺序保持，取消首次写前核canonical目标。C/旧role完整raw、P4/名字集合及W原五动态分界均不改，隔离/Root closing/recheck停止不是元数据禁写条件；撤权仍拒绝。Count0、194 ordinary closing及v2末封不扩。新增组件行为须两OS新包pyc运行，不列source-only；真实新home及整体发行仍根另验，旧queued/无closure保持。
+
+## 2026-10-17 普通准入关闭末门已合（根198，待最终验收）
+
+200非作者按准确194正反重建、默认AST及原断言核验，旧版同字节两例失败到候选独立358项通过后，根按20路径准确合入。新责任只在原ordinary末发表持同一实际Root关闭门跨预留和路由；配额准备在门外，原终态、释放、恢复、takeover及后台入队不改。新16运行回归与10原正夹具登记变化须最终双平台包pyc实跑，43旧source-only不扩。
+
+190第一次真实后台计时和回读已完成并有7条实际记录，但新的维护预约使正常关闭失败，原失败、occupied和无closure保留；不能把该轮算成正常重启通过。源代码上的停止后新准入窗口已修，接下来新home普通生命周期和最终全仓、同源双平台发行另验。停止前已admitted但无规范终态的占用仍按原合同incomplete，不补终态或旧closure，不声称解决所有忙态关闭。194中间混合输入与并行尺寸报告QA报错保留，最终固定源矩阵及静态门另记；网络安全只记录，F5真实名称/用途漏答仍为模型遵循限制。
+
+## 2026-10-17 普通准入末发表与关闭共门（194，待独立复核）
+
+190普通后台计时和回读实际完成，但正常关闭仍因新的curator pending占位失败，原失败/无closure保留。仅在原ordinary准入新建及同代补齐的A1预留/A2路由末发表，复用retain_admission登记的实际Root及原tuple引用，与stop_producers共用原_gate；原quota等待与准备在Root门外，既有T→controller→lease锁序不变。
+
+缺/错实际绑定和closing拒绝新责任，不全局改变commit scope；terminal、release、ack、recovery及takeover原链保持。停止前已经admitted但未claim且无canonical终态的occupied仍拒绝排空和封存，不声称全部忙态关闭已修。只用临时组件与受控线程及原loopback测试，新增行为和正夹具登记变化须最终两OS包pyc实际执行，旧43source-only分类不扩。最终源码、正式协议、真实生命周期及发行仍由根另验。
+
+## 2026-10-17 原子发表读取竞争修复已合（根191，待最终验收）
+
+188非作者独立复核准确186两生产路径：原同字节交错反例1失败到212项通过，默认读写/锁及31原定义AST保持；根按10路径准确合入，保留全部当前心跳、角色关闭与审批修复。角色快照只在原strict目录和同一父FD内有限重读已证安全的原子叶替换；硬链接、目录变化、权限和清理失败继续拒绝，新31项须两OS新包pyc实跑。
+
+177真实首请求的nofollow窗口隔离失败保留：没有重投、重置或补封；原精确目标正常stop-request收起自有三进程，零直接信号/强杀/P1。169旧隔离失败、168根QA驱动失败与167系统解释器缓存误用均保留，不能计通过。接下来以新的规范完整导出进行普通业务三代正常生命周期及最终全仓、同源双平台发行；这些尚待验收。F5名称/用途漏答仍是模型遵循限制，不称全部通过。网络安全只记录；根单点整合与真实服务，实施6.1-sol、Astra独立复核。
+
+## 2026-10-17 原子发表snapshot读窗口（186，待独立复核）
+
+177首请求在执行前仍隔离，准确栈变为nofollow叶stat/open/fstat窗口，旧failed home/请求保持、不重投。原writer合法同父目录replace足以触发该合并拒绝，实际当次未存三份stat，不宣称已证具体替换。
+
+只在原read_bytes_beneath加显式snapshot_retries，默认0沿原读写/锁/portable形状；角色snapshot固定2次重读（总最多3）。每次仍原strict目录入口逐prefix比较本次初始身份，叶始终最初parent FD。只有完整A（before单link A、FD/current单link B）或B（FD为原A但0link、current不同单link B）事实可丢弃有限重读，读后B也丢已读bytes。硬类型/链接/多link/根父链/权限/缺能力/超限/清理错误不洗成竞态；初次缺叶可None，已见存在或重读后missing拒绝。清理显式保本链primary并各FD只尝试一次，不能受调用方外层异常影响。172的current-W五动态分界及旧closure/C/P4/名字集合完整raw不放宽；snapshot不授ready/写者认证/物理证明。新增回归须最终两OS包pyc实际执行，不列source-only。
+
+## 2026-10-17 当前工作进程心跳误隔离修复已合（根179，待最终验收）
+
+178非作者以准确172重建，原合法心跳交错同字节反例1失败到170通过、默认ready内联AST等价后，根准确合入两生产、一运行测试与七文档路径。当前W只经原完整schema及同一P4身份匹配区分五项原心跳投影；C state、旧代角色、完整registry、名字集合及其它身份字段仍严格，原健康/准入/租约门不变。新增23项运行回归必须在最终双平台新包pyc实际执行，不能归source-only。
+
+根168组合4185项：4181普通通过、1原XPASS、2原skip、1 QA驱动失败；失败是驱动缺少main保护导致spawn在测试前创建既存PHASES文件，175标准pytest入口同字节原节点单次1通过，产品锁和测试未改，原失败留档。真实169首条请求仍记执行前隔离失败，未重投；原精确身份正常stop-request收起三进程，零强杀/P1，原v2关闭范围仍空，不补封。随后只读元数据诊断误用系统解释器产生的源导出附加缓存另记QA问题；后继验收仅新规范文件完整导出和项目Python3.12-B，不清旧现场充通过。旧111、129、152及169失败均保留。
+
+最终全仓、修复后的普通业务/正常关闭重启、双平台发行和本机部署仍另验，当前不能称完成或已发布。F5真实能力名称/用途漏答仍是已记录模型遵循限制，未增加提示词专项硬门；网络安全只记录。根独占生产整合和真实服务，6.1-sol实施、Astra独立复核。
+
+## 2026-10-17 当前W心跳与旧代关闭范围分界（172，待独立复核）
+
+169首次真实请求在执行前被 OWNER_PARTITION_QUARANTINED 拒绝，原失败保留且不重投。来源栈定位角色首末全raw比较；原W每2秒合法更新足以使该门永久隔离。实际当次两份raw未保存，不能声称已证只变化timestamp或指定W。
+
+本片只从原bootstrap ready纯提完整schema/current_generation/P4实例匹配，原健康与端口门保持。角色双读仅对同一首末完整P4绑定的当前规范W，允许updated_at/inflight/ready/loop_health/readiness五个原producer字段变化；全部其它字段、名字集合、C state、旧代marker、P4完整raw仍严格。未知schema/额外字段/缺entry/身份变化继续拒绝，不新增活issuer门、registry、重试、权限或旧代追补。新回归复用原guard/P4/心跳producer与既有受控物理端点，不启动真实服务/模型/native。组件结果不能代真实生命周期或双平台验收。
+
+## 2026-10-17 生命周期与审批回执修复已统一合入（根162，待最终验收）
+
+156独立复核限定批准127+136+154准确组合；根以三十路径hunk合入当前候选，生产和测试后像逐项一致，共4914规范文件。三个共享文档只追加准确前缀，保留128前台/后台输入适用范围、134路径索引内存、135输入身份错误分类及146其余回归修复。正常关闭沿原角色历史v2、完整责任账与当次物理事实；固定写叶只登记本次已核回执完整raw增量，不能刷新原权限或角色基线。原本机插话对账、ready实际Agent审批回执沿原合法入口恢复，冷C未就绪、假Agent、错owner、来源不符和普通未知状态跃迁继续拒绝。
+
+旧111全仓失败、129原拒绝反例和152原对账失败记录保留，不追补旧93/117角色证明。组件和独立复核不等于最终全仓、真实关闭重启或双平台发行通过；尚未提交、部署、打包。F5真实复测已正确读写和回答能力数量，但名称/用途仍漏答，属于模型遵循缺口，不能写成全部通过。下一步由根执行准确冻结源的组合、全仓、正常三代业务及同源双平台验收；实施用6.1-sol，关键独立复核可用Astra，真实服务单一负责人。网络安全只记录，旧受拒探针不重跑。
+
+## 2026-10-17 原ready本机审批回执收口（154候选，待复核）
+
+原既有ready-actualAgent本机审批两测试在136及154早期同红，根保留该合法能力。只将原PrivateInteractionTransaction.perform内prepared/executing/settlement固定写接入同完整raw叶，原tool_approval/local_main/实际同owner Agent及签卡op/digest/action逐次精确核；不构造Agent，不借model权限。GET仅原private reconcile返回变化时，把expected与actual typed updated送固定对账叶，保unknown错误更新及实际决定后的completed，普通commit FSM不放开。Count0 source=None、远端dispatch、W、permission/input和原首异常收口保持。
+
+无actual、假Agent、错owner仍原503/COORDINATOR_BUSINESS_NOT_READY且不写控制账；合法ready Agent沿原P3/claim/waiter，不能因为正式冷C当前agent=None就删除原合同。新增插话/私卡回归均为runtime，最终两OS新包pyc必须执行。
+
+## 2026-10-17 本机插话原对账修复（154候选，待独立复核）
+
+原插话callee返回非None结构化结果后，实际本机source将完整expected receipt及原ConversationControlResult送固定对账写叶，由叶派生updated；同source/controller/lease/op/T/完整raw CAS/readback和原增量仍逐次核。普通commit状态图不放开，投递accepted/rejected/unknown均保原值，wrapper completed不代表投递成功。None不写，不新增token/schema/registry或HTTP/model/私卡权限；Count0继续原直接写。
+
+152原同字节反例及136/154原红保留，新增行为回归必须在最终Mac/Linux新包pyc实际执行；正式正count C本机server.agent=None的私卡仍业务未就绪，非local沿原远端分派，未借构造Agent扩大来源。真实服务/包/整体F3结果另验，详见[生命周期合同](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+## 2026-10-17 角色生命周期后继修复候选（136，待复核）
+
+实际HTTP管理/model/local固定source只在原末写锁窗登记本项完整raw增量，P1/P3/role原基线不刷新。整体封存须原v2完整范围与本次fresh P2，v1局部P1/P3恢复不加新门；本closing完整assess观察只消费一次close_native，失败或晚变不再assess回落。多代来源/证据完整保留，运行回归必须由最终两OS新包pyc实际执行。129原红按132分界保留，尚不称F3完成、真实native通过或已发行。详见[生命周期合同](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+## 2026-10-17 正Count角色关闭范围候选（127，待复核）
+
+原正常关闭沿同一路径显式generation v2一次封存，原runtime完整collector/W waitstatus/native关闭后才提交；历史CAS严格读回后再CAS发表完整C末态。新C消费完整旧角色/责任字节和当次物理身份，非空P1仍走fresh P2。旧v1、旧93无closure和P4独留角色继续拒绝；Count0及B4拒绝不变。运行行为两文件必须随最终Mac/Linux包pyc实跑，组件正例仅N1/N2零域，不外推真实native整树或F3发布。详见[生命周期合同](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+## 2026-10-17 首批全仓回归已收口，整体仍待验收
+
+全仓首轮90失败和工作树意外审计原件保留；首批根组合539通过、1原XPASS，现有input/source权限及unknown责任未放宽。后台canonical请求kind只决定是否执行前台live输入收口，原背景事务和guidance拒绝各守原职责。正常多进程重启闭包还在实施，未合main、部署或发包。F5真实复测仍漏列能力名称/用途，软提示到达不等于回答完整；准确边界见[测试记录](TESTS.md)。
+
+## 2026-10-17 F3 最终写入闭包已整合（待统一验收）
+
+USER/SOUL沿原人格库、配额、版本CAS和恢复顺序，仅C本地写叶消费当前原source.perform；默认False原调用形状与120项默认AST保持。105独立复核发现的两个FD清理出口会盖掉失源错误，108已修且109独立1409项、原同字节两反例及112无源码origin夹具通过；固定close只尝试一次，必要FD释放不授予补偿写入。三个原调用方同bool透传，不保存source或增加异常状态。
+
+最后接通原冷C记忆候选dispatcher：与原factory共用同一command对象，七动作共用原真人seal、source、完整raw CAS和回执；原ExitStack覆盖耐久completed和单次事件发布，退出后才归还同holder借用和global scope。103独立158项及真实HTTP寿命/未知/重放复核通过；Count0、原父未知收口、跨owner和群actor权限不变。冷search/remember、候选确认与人格写叶现已在候选树接齐，不再以旧not-ready回执充数。
+
+固定后台启动入口同时已恢复并支持同包.py/.pyc。当前仍未提交、部署或发包；最终focused、全仓、严格gate、双平台同源包及真实任务结果另记，不能从切片数字外推。公开启动仍保持默认Count0，正count沿原内部验收入口，未新增用户配置或扩大网络/权限。详见[冷记忆闭包](docs/design/COORDINATOR_CLIENT_MEMORY_CLOSURE.md)与[人格IO合同](docs/design/PERSONA_COORDINATOR_IO.md)。
+
+## 2026-10-17 固定后台入口已合候选（发行待验）
+
+补回固定来源的两个executor/native host bootstrap，原main完整AST、FD、身份校验及失败退出125不变；两个launcher沿既有Landlock的固定字面模块find_spec.origin定位同包.py/.pyc，native只提取纯argv函数，Count0先于发现及进程效果。没有任意模块参数或源码备用入口。
+
+来源闭包原5参数断言绑定实际agent_py_agent包根，保留隔离home与原身份检查。Astra110独立144项及7项只读边界通过，上一版发行Python仅用于临时只读.pyc发现/125解析检查；这些不代真正后台业务验收。旧缺入口、独立bytecode路径和包外QA失败分别保留。最终同源新包还须实跑后台、停止和控制；本机服务尚未切换，详见[集成设计](docs/design/SEVEN_FEATURE_INTEGRATION.md)。
+
+## 2026-10-17 冷候选接口与首故障修复已合候选（入口待激活）
+
+根104按81准确六路径接口与99单方法修复顺序合入。Astra94原实际ingress失效反例保留，100独立419项及原同字节反例红转绿通过；binder现在沿原资格保存同一个实际OwnerManagementIngressUnavailable，事实恢复不洗成completed，父issuer/current/未知收口和其它29函数保持。MemoryCandidateServices仍原真实引用，只有原实际审核点才惰性装配同holder Promotion；preview完整raw CAS、双T try锁、耐久consume及正式partial沿原账。
+
+正式F仍未接memory dispatcher，USER/SOUL写叶及两处发行bootstrap正在后继收口；不能称完整F3或已部署。合入前最后根统一166文件2367项全通过（0F/E/skip，3原linux_admission显式未选），该结果不外推为104新片或最终全仓。当前日常安装仍上一版。详见[冷记忆合同](docs/design/COORDINATOR_CLIENT_MEMORY_CLOSURE.md)。
+
+## 2026-10-17 冷记忆J3已合候选，候选控制与人格写入仍在收口
+
+根90按77准确五生产hunk及两处原未就绪断言接通正worker配置的HTTP search/remember。Astra89独立复跑870项及3项真实临时HTTP撤权/策略末核通过，126默认函数AST和完整双向字节/模式已核；默认Count0与recent保持原链。原holder、当前policy/quota、正式写入和访问snapshot共用原实例，不缓存权限；下一次付费前及每末写都重核当前来源，原首个来源失败不变成成功回执。
+
+JsonlMemory原八参构造与C依赖DTO共用唯一初始化叶，依赖仅原引用/配置及IO策略。USER/SOUL及冷候选确认仍待后继闭合，不把search/remember可用外推为F3全功能或新版发行已通过。根组合与真实同源验收另记；详见[闭包合同](docs/design/COORDINATOR_CLIENT_MEMORY_CLOSURE.md)。
+
+## 2026-10-17 F5用户可见说明补充（待真实复测）
+
+上一真实单prompt已读取准确self_map总览并先回复能力数量、完成文件读写回读，但把未展示的技能称作“见上方列表”，且没有读取skills明细。本轮仅在已有可关闭的SELF_MAP_GUIDANCE增加通用软提示：能力清单需读取原items并在面向用户的回复说明名称/用途；工具回执不等于用户已见。没有解析问题、任务专用合同、自动加载全部正文或新的权限/验收门。普通与Compact继续同一指引，原enable_self_map关闭时同时消失；最终同源真实复测另记，不把文案变化当模型一定遵循的证明。
+
+## 2026-10-17 冷记忆C2与holder借用修复已合候选
+
+根83按精确前像合61组件及76修复：server唯一有界owner holder、原source固定client模式、严格访问snapshot成功后清理。Astra74实证的构造发布/借用登记竞态，由原condition内先预留borrower、同finally归还解决；Astra82独立339项与5项退出边界通过，旧同字节反例1红转1绿。原默认Count0、recent、管理写源不变；holder不保存请求/source/actor，不代其它用户flush。J3装配及候选管理尚未全部接通，search/remember当前仍旧未就绪回执，不宣称F3完成。
+
+根80将J1/J2合当前工作树后403项通过（0F/E/skip、7.542秒，完整输入不变）。1839原组合中的一次审批SQLite锁竞争仍保留定位记录；此处不称最终组合或发布已验收。
+
+## 2026-10-17 冷记忆J2写叶已合候选
+
+Astra78独立311项、原调用方反例1项及额外3项通过后，根80精确合四生产hunk：VectorStore成功后发布、TextVectorCache原乐观增量与诊断、lesson正文→routing/HOT→demote原partial保持；原Promotion唯一ValueError catch在C分支先透传实际来源类。默认138函数AST已独核。实例仅保存IO策略，不持请求/来源。J3和候选管理、人格写叶尚未全部闭合，未提交/部署/打包，不能称端到端已完成。详见[投影写叶合同](docs/design/MEMORY_J2_PROJECTION_WRITE_PORTS.md)。
+
+## 2026-10-17 冷记忆J1六写叶已合候选
+
+Astra72独立189项与两项实际SQLite回滚边界通过后，根78按精确前像合候选/quota/policy锁、原候选/operations单次raw写及原账本脱敏六路径；没有重套67或覆盖其它网关变更。默认136函数AST已独核，C只保IO策略bool并消费原当前scope。扫描/序列化/embedding仍在Root外，formal→index→mark→condense与原partial保持，完整raw CAS和O(N)本地事务不称恒短。后继J2、JSONL/builder和HTTP仍待闭合，不能据切片绿称整项可用。详见[写叶合同](docs/design/MEMORY_J1_WRITE_PORTS.md)。
+
+根70组合1839项中1838通过、1项审批并发SQLite锁竞争失败，已保留原账和测试结果，正在定位，尚未提交、发布或部署。C2另有独立复核发现的holder借用预留竞态，修复另片进行。
+
+## 2026-10-17 冷C存储60已合候选（非完整记忆链）
+
+Astra66在项目Python3.12独立292项及2项事务边界通过后，根69按精确前像合七生产路径、三测试；J0一次replace分支已含在60，不能重复覆盖其锁出生/append提取。C实例仅保存coordinator_io策略，复用原global scope当次source.perform，连接零等待、原body→SQL/FTS/event→commit及必要FD清理保持；FTS全行/状态/正文代次CAS在DELETE前，完整本地事务O(N)，不称恒定短门。默认106原函数AST已独核兼容。LedgerRedaction完整擦账及其它未改mixins仍需后继闭合，不因连接出生已有门就声称所有SQL安全。
+
+先前A43+67根组合1290唯一项通过（0F/E/skip、279.349秒）；本次追加60的统一组合结果另记。C2/C3-J候选/quota/formal/vector与冷memory candidates仍未全部就绪，未提交、部署或发包。详细合同见[LocalStore协调IO](docs/design/LOCAL_STORE_COORDINATOR_IO.md)。
+
+## 2026-10-17 冷C规则管理A43已合候选，记忆链仍待闭合
+
+A43经过Astra63独立189项及额外5项边界通过，按函数hunk合当前F，保D33/C1与当前main功能；本地、普通飞书与群规则查看/预览/准确nonce确认、重放、显式管理员target分别沿原actor/target P2。领域原执行拒绝/运输未结不再被消费未知回执洗成completed；普通IO partial仍保原事实。原事件在completed耐久后由当前server单发。旧红保留，根组合仍待本次实跑，不代最终发行。
+
+原LocalControlCoordinatorUnavailable及OwnerManagementIngressUnavailable仅将类定义搬到common/owner_write_errors.py，Gateway公开导入保持同class；原AST/基类/构造/错误属性不变，不增加slot/码/授权。__module__自然变化已记录，3个fresh进程导入顺序通过。底层领域可依赖common真实类型传播，禁止反向依赖Gateway或按异常文字判定。记忆C2/C3仍由独占副本实施，尚未就绪、未发布/部署。详见[冷C合同](docs/design/COORDINATOR_COLD_REQUEST_PUMP.md)。
+
+2026-10-17 F3根记忆纯提取54：六生产与三测试C1准确合入，九路径SHA等于作者45；非作者51独立192通过，原18提取/12实际绑定/67定义保持。core保startup原时点与Curator后半，不新增HTTP来源、缓存或费用政策；C2/C3未闭合，未提交/发行/部署。
+
+2026-10-17 F3低耦合回归修复（独立候选，待根组合）：默认配置路径唯一实现归 `agent/common/config_paths.py`，CLI早期启动不加载settings；内部home快照保持非公开字段。旧夹具改用真实配置/路径/租约及完整死亡身份，原owner双检查与wake收口断言保留。范围见[统一设计](docs/design/SEVEN_FEATURE_INTEGRATION.md#2026-10-17-f3低耦合回归修复候选)与TESTS；本片不修改恢复或身份判死算法。
+
+2026-10-17 冷C普通控制POST独立候选：基础owner隔离且无业务Agent时，健康远端控制从实际HTTP工作片，经原回执与完整raw CAS进入原W控制泵；C不创建Agent或执行业务。原Count0/ready、model、私卡v5和管理活seal不改；agents/memory冷管理及search/remember仍是F3必须闭合的缺口，不能称整项完成。详见[冷C合同](docs/design/COORDINATOR_COLD_REQUEST_PUMP.md#冷c普通控制post候选2026-10-17)。
+
 2026-10-16 F6/F7 独立组合候选（未发行/部署）：冻结同次主历史前缀仅作容量可容纳时优化，本地 typed 超窗沿 main 完整来源/分段主链，不额外发失败调用；历史/当前宿主图及 F4/F5/F2 接缝保留。迟到上下文显示须携真实采样前捕获绑定，禁止为旧采样 fresh-load 重签。F7 复用原缓存与物理/用途/耗时指标，本地前缀相同不等于 provider 命中。见[会话合同](docs/design/CONVERSATION_CONTEXT_DESIGN.md)与本轮 TESTS，根最终验收另记。
 
 2026-10-16 F4/F5 当前合同（独立组合候选，未发布）：AGENTS 正式修改只走本人 `/agents` 预览确认，普通/群 IM 记忆候选通过 `/memory candidates preview <候选ID>` 后准确 nonce 确认；普通自然语言、模型 confirmed 和学习来源都不签权。自动学习只产候选，正式 Skill 保留 main 用户确认/CAS。self_map 默认开启，只聚合原公开读口和当前 owner/HostActor/父快照权限；关闭后入口及普通/Compact 指引同时消失，不创建第二清单或授权源。保留 main 凭据、群、订阅、媒体、零查询和工具渐进加载设计；完整用法见[命令参考](CLI_REFERENCE.md#人工规则与记忆候选控制组合候选未发布)，投影合同见[自我目录](docs/design/SELF_MAP.md)。bwrap 挂载次序与 CLI 定义顺序后续已用准确补充修复并完成非作者离线复核；最终组合、真实 Linux 内核及发行验收另记，以下旧阶段说明保留为历史。

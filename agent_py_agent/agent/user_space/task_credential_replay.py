@@ -17,20 +17,32 @@ def assert_credential_callback_identity(row, payload, body):
         raise ValueError('原卡代次或任务不匹配')
     if row.get('access_scope', 'task') != payload.get('access_scope', 'task'):
         raise ValueError('原卡凭据使用范围不匹配')
+    expected = (row['credential_ref'] if 'generation' not in row and 'generation' not in payload
+                else credential_input_id(payload['credential_ref'],payload.get('generation', row.get('generation'))))
+    if row.get('input_id',row['credential_ref']) != expected:
+        raise ValueError('原卡输入绑定不匹配')
 
 
 # LLM: 同终态/同实际提交者才确认，fields从不参与重放；原输入pending只在原任务活跃且未过期时继续发布。
 # 函数用途: 判断已保存决定能否恢复原发布；已过期但输入已结算的卡只确认旧事实，不产生Wake。
+# LLM: Count0保原动态输入/任务事实，C与原包装共享同一重放判据，不接受fields覆盖已存秘密。
+# 函数用途: 沿原Agent资源核对一次已保存的决定。
 def credential_callback_replay(agent, row, body, actor):
-    from ..conversation.input_dependencies import input_dependency_current, input_dependency_path
+    from ..conversation.input_dependencies import input_dependency_access
+    return credential_callback_replay_for_input(input_dependency_access(agent), row, body, actor)
+
+
+# LLM: 输入服务只提供原canonical读取；同scope/owner/ref/provider/input/实际提交者与原期限全部核验，不签新权限。
+# 函数用途: 为原Agent和C判断同卡是否只需补既有投影。
+def credential_callback_replay_for_input(inputs, row, body, actor):
     expected = {'ready':'submit', 'cancelled':'cancel'}.get(row.get('status'))
     if not expected or body.get('decision') != expected or row.get('submitter_actor_id') != actor:
         raise ValueError('原卡决定或提交者不匹配')
-    dependency = read_credential_row(input_dependency_path(agent, row['input_id']), stage='input_replay_read')
+    dependency = read_credential_row(inputs.path(row.get('input_id',row['credential_ref'])), stage='input_replay_read')
     same_scope = all(dependency.get('scope', {}).get(key) == value for key, value in row.get('scope', {}).items())
     if (not dependency or dependency.get('owner') != row.get('owner') or not same_scope
             or dependency.get('reference') != row['credential_ref'] or dependency.get('provider') != 'credential'
-            or dependency.get('input_id') != row['input_id'] or not input_dependency_current(agent, dependency)):
+            or dependency.get('input_id') != row.get('input_id',row['credential_ref']) or not inputs.current(dependency)):
         raise ValueError('原任务或输入绑定已失效')
     status = dependency.get('status')
     if status not in {'pending', row['status']}:
@@ -39,3 +51,9 @@ def credential_callback_replay(agent, row, body, actor):
     if status == 'pending' and expired:
         raise ValueError('原卡已过期，不能恢复新工作')
     return not expired
+
+
+# LLM: 唯一规范原样来自persist的ref+generation；旧双方均缺代次的ref缺省只在identity门显式处理，不补写/重选。
+# 函数用途: 让原生成与回调比较使用同一个输入ID算法。
+def credential_input_id(reference, generation):
+    return reference+':'+str(generation)

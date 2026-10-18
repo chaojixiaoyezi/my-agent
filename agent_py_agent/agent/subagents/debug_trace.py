@@ -1,3 +1,5 @@
+# LLM: 调试正文只作有界预览；原宿主产物用Path运输完整ref，编码语义不证明可用、可读或授权，同步runner stage追踪测试。
+# 模块用途: 按显式等级记录子代理内部调试事实，默认关闭，不用文本推断机器状态。
 
 from __future__ import annotations
 
@@ -106,10 +108,13 @@ def trace_task_created(manager: Any, task: Any) -> Path | None:
     )
 
 
+# LLM: 路径来自原宿主task产物引用，只按Path编码保完整；不是读取、解析权限或新增IO，空引用仍空串。
+# 函数用途: 记录runner结构化结果和完整产物定位，正文仍沿原预览限制。
 def trace_runner_result(request: SubAgentRunnerTraceRequest) -> Path | None:
     task = request.task
     result = request.result
     params = request.params
+    runner_result_file = str(getattr(task, "runner_result_file", "") or "")
     return write_subagent_debug_trace(
         SubAgentDebugTraceRequest(
             manager=request.manager,
@@ -121,7 +126,7 @@ def trace_runner_result(request: SubAgentRunnerTraceRequest) -> Path | None:
                 "dry_run": bool(getattr(params, "dry_run", False)),
                 "backend": str(getattr(params, "backend", "") or ""),
                 "tool_rounds": int(getattr(params, "tool_rounds", 0) or 0),
-                "runner_result_ref": str(getattr(task, "runner_result_file", "") or ""),
+                "runner_result_ref": Path(runner_result_file) if runner_result_file else "",
             },
         )
     )
@@ -185,9 +190,13 @@ def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+# LLM: 仅实际Path按结构化ref保完整；普通字符串即使键名含ref也仍截断，list/dict32不变，不resolve或读文件授予权限。
+# 函数用途: 给调试JSON编码有界文本与原宿主路径，保持原JSON字段形状。
 def _safe_payload_value(value: Any) -> Any:
     if isinstance(value, bool) or value is None or isinstance(value, int | float):
         return value
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, str):
         return _preview(value)
     if isinstance(value, list):

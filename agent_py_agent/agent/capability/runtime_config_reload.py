@@ -1,5 +1,5 @@
 
-# LLM: 能力配置的文件快照、agent 缓存读取和显式重载共用本模块；缓存须为 CapabilityConfig，失败不伪造配置。
+# LLM: 路径只读、Agent 缓存和显式重载共用优先级；本次选源事实在失败时仍保留，冷路径不写缓存或初始化 owner。
 #   agent 读取会缓存快照，显式重载可能更新 router.config；改动须复核编排、Compact 与运行配置测试。
 # 模块用途: 读取并按文件版本重载能力配置，保持真实配置优先级，不让占位对象意外开启可选能力。
 
@@ -58,15 +58,20 @@ def resolve_capability_config_path(user_path: Path | None = None, *, root: str |
     return bundled if bundled.exists() else (user if user is not None else bundled)
 
 
-# LLM: 参数中心写入口与展示层要写/读的就是这份文件：agent 上有 capability_config_path 用它的，否则按
-#   agent.root 用 default_capability_config_path（与 capability_config_for_agent 同一逻辑），不能拿
+# LLM: 参数中心、Agent 与冷宿主共用同一纯路径选择：有真实 capability_config_path 用它的，否则按
+#   原构造 root 用 default_capability_config_path，不能拿
 #   agent_config 用户文件同目录猜——两者目录不同（owner home 与用户配置目录是两回事，2026-10-01 评审抓出）。
 # 函数用途: 返回运行时实际读取的 capability 配置文件路径（按 agent 对象解析，没有 agent 信息时给默认路径）。
 def capability_config_path_for(agent: object) -> Path:
-    return Path(
-        str(getattr(agent, "capability_config_path", "") or "")
-        or default_capability_config_path(getattr(agent, "root", "."))
+    return _capability_user_path(
+        root=getattr(agent, "root", "."), user_path=getattr(agent, "capability_config_path", ""),
     )
+
+
+# LLM: 原 Agent 显式路径优先于构造 root 的默认位置；root 可以与 owner home 不同，不从配置身份或 actor 猜路径。
+# 函数用途: 统一既有 Agent 与冷读取的文件选择，不创建文件或附加缓存。
+def _capability_user_path(*, root: str | Path, user_path: str | Path | None) -> Path:
+    return Path(str(user_path or "") or default_capability_config_path(root))
 
 
 # LLM: "从 agent 对象取 capability 配置"的唯一权威入口：优先 agent 上的运行时快照
@@ -76,7 +81,7 @@ def capability_config_path_for(agent: object) -> Path:
 #   用户位置不存在是常态（生产 Gateway 的 owner home 下通常没有这份配置）：回落读随包默认
 #   （只读、不缓存），值与 dataclass 默认一致；这样“建好用户文件后下一次调用就能读到”，
 #   不必重启，也保证展示层 running_value 与运行时看到同一组默认值。
-#   只有读取失败或格式错误才返回 None，限流类调用方仍要自己落到默认值。
+#   本次已选用户文件后读取失败必须返回 None；仅本次确认缺用户文件且随包读取失败保留原默认合同，不能读后二次 exists 改选来源。
 #   旧候选位置（<root>/agent_py_agent/config/capability_config.yaml）不再当用户配置读：
 #   那里存在非随包默认文件时给结构化告警（配置告警里能看到），不静默合并。
 #   新增运行时读 capability 配置的地方应一律走这里，不要从 agent.config 或 capability_router.config 上找。
@@ -88,28 +93,44 @@ def capability_config_for_agent(agent: object):
     if isinstance(config, CapabilityConfig):
         return config
     root = getattr(agent, "root", None)
-    user_path = Path(
-        str(getattr(agent, "capability_config_path", "") or "")
-        or default_capability_config_path(root or ".")
+    user_path = _capability_user_path(
+        root=root or ".", user_path=getattr(agent, "capability_config_path", ""),
     )
-    if user_path.exists():
-        try:
-            snapshot = load_capability_config_snapshot(user_path)
-        except (OSError, TypeError, ValueError):
-            return None
-        _attach_legacy_location_warning(snapshot.config, root)
+    loaded, snapshot, selected_user = _read_capability_config(user_path, root)
+    if snapshot is not None:
         try:
             agent._capability_config_runtime_snapshot = snapshot
         except AttributeError:
             pass
-        return snapshot.config
-    # 用户位置缺失：读随包默认（只读、不缓存），之后建好用户文件时下一次调用就能读到。
-    try:
-        loaded = load_capability_config(bundled_capability_config_path())
-    except (OSError, TypeError, ValueError):
+    # 只消费本次已确认的来源；读取中移走/新建文件都不能重选，存在性未知也不能冒充缺用户文件。
+    if loaded is None and selected_user is False:
         return CapabilityConfig()
-    _attach_legacy_location_warning(loaded, root)
     return loaded
+
+
+# LLM: 只接受可信宿主显式提供的原构造 root/准确覆盖路径；这不是授权，也不能默认换成 owner home。缺文件沿原随包默认，不创建锁或缓存。
+# 函数用途: 无 Agent 地按原路径优先级读取能力开关；坏配置返回 None，由调用方关闭可选能力。
+def capability_config_for_paths(*, root: str | Path, user_path: str | Path | None = None) -> CapabilityConfig | None:
+    if not isinstance(root, (str, Path)) or not str(root):
+        raise ValueError("能力配置要求可信宿主提供原构造 root")
+    config, _snapshot, _selected_user = _read_capability_config(_capability_user_path(root=root, user_path=user_path), root)
+    return config
+
+
+# LLM: 唯一来源选择随结果保留，失败也不能丢；selected_user 的 False 仅表示本次确认缺文件，None 表示未核实，不能补默认开启。
+# 函数用途: 只读能力配置、可选用户快照及本次选源事实；调用方不再用读后的文件状态改变失败合同。
+def _read_capability_config(
+    user_path: Path, root: object,
+) -> tuple[CapabilityConfig | None, CapabilityConfigSnapshot | None, bool | None]:
+    selected_user = None
+    try:
+        selected_user = user_path.exists()
+        snapshot = load_capability_config_snapshot(user_path) if selected_user else None
+        loaded = snapshot.config if snapshot is not None else load_capability_config(bundled_capability_config_path())
+    except (OSError, TypeError, ValueError):
+        return None, None, selected_user
+    _attach_legacy_location_warning(loaded, root)
+    return loaded, snapshot, selected_user
 
 
 # LLM: 旧候选 <root>/agent_py_agent/config/capability_config.yaml 只在“不是随包默认文件”时告警：

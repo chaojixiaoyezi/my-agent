@@ -1,5 +1,5 @@
 # LLM: 原操作协调器持有副作用领取与结算；终态只读重放复用原结果投影，不能重新取得执行权。
-# 模块用途: 执行、保存和重放工具操作，保留未知副作用与原始诊断。
+# 模块用途: 执行、保存和重放工具操作；原请求或工具来源未结时保原异常与实际账本责任，不改签为未执行。
 from __future__ import annotations
 
 """Authoritative execution lifecycle for side-effecting tools.
@@ -15,12 +15,20 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from contextvars import copy_context
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
+    raise_if_transport_uncertain,
+)
+from ..common.tool_write_context import ToolWriteContextUnavailable, tool_write_claim_scope
 from ..concurrency.restart_gate import tool_execution_admission
 from ..local_storage import (
     TOOL_OPERATION_FAILED,
@@ -167,6 +175,8 @@ def _operation_store_available(store: object | None) -> bool:
     )
 
 
+# LLM: 原store可能已部分领取再丢回执；四类实际来源错误须先抛，不得重试或补not_started，普通冲突保持原预算。
+# 函数用途: 通过唯一操作账本领取执行权并保留原holder/generation；来源未知由宿主收口。
 def _claim_operation(
     request: ToolOperationExecutionRequest,
 ) -> _ToolOperationClaimAttempt | ToolHandlerOutcome:
@@ -199,6 +209,9 @@ def _claim_operation(
             conflict_error = None  # 重试成功：清除之前记录的冲突
             break
         except RuntimeConflictError as exc:
+            raise_if_transport_uncertain(exc)
+            if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+                raise
             # S-D1: 锁冲突是瞬态并发语义——有界短重试（0.5s/1s/2s），
             # 重试耗尽才映射为 BUSY_CONFLICT（高频派工不再整批失败）。
             conflict_error = exc
@@ -206,6 +219,9 @@ def _claim_operation(
                 break
             time.sleep(_BUSY_RETRY_DELAYS[attempt])
         except Exception as exc:  # noqa: BLE001 - authoritative store failures fail closed
+            raise_if_transport_uncertain(exc)
+            if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+                raise
             authority_missing = isinstance(exc, AuthorityContextMissing)
             result = _operation_error(
                 request.tool_name,
@@ -317,6 +333,8 @@ def _resolve_claim(
 
 # LLM: 核对在原独占claim中执行；跨attempt只读标记禁止safe_to_retry重开，只有带证据的终态可结算。
 # 函数用途: 调用原工具有界核对并CAS保存终态，UNKNOWN和失败核对不触发重执行。
+# LLM: 原claim内核对，reconciliation_only仍禁重做；实际来源错误先抛并保UNKNOWN/核对租约，不按异常码推断安全。
+# 函数用途: 按原证据核对未知操作，来源未核实时不释放后偷偷重开。
 def _reconcile_unknown_operation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
@@ -332,6 +350,9 @@ def _reconcile_unknown_operation(
     try:
         reconciliation = request.reconcile(claim.record)
     except Exception as exc:  # noqa: BLE001 - reconciliation is read-only and must fail closed
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
@@ -389,6 +410,8 @@ def _reconcile_unknown_operation(
 # LLM: A terminal reconciliation result becomes authoritative only after the same exact
 # reconciliation holder/generation settles the operation store. Persistence failure stays UNKNOWN.
 # 函数用途: 校验核对结果并把已证明的成功或失败终态写回权威操作账本。
+# LLM: 终态仍由原holder/generation CAS决定；实际typed来源故障不能被普通失败清理或回退回执掩盖。
+# 函数用途: 将有证据的核对终态写入原账本，未结传播且不伪造结算。
 def _settle_reconciled_operation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
@@ -440,6 +463,9 @@ def _settle_reconciled_operation(
             )
         )
     except Exception as exc:  # noqa: BLE001 - unknown remains authoritative on any store race
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         _release_unknown_reconciliation(request, attempt)
         return _unknown_claim_result(
             request,
@@ -460,6 +486,8 @@ def _settle_reconciled_operation(
 # operation. A store without this atomic contract must fail closed instead of falling back to an
 # in-process mutex that cannot protect two Gateways/TUIs.
 # 函数用途: 通过权威 operation store 原子领取未知副作用的核对权。
+# LLM: 沿原独占核对claim携authority_attempt/task/tool/args；实际typed失败保原对象和未知，不新造回执或授权。
+# 函数用途: 用原账本领取UNKNOWN的只读核对权，不以进程锁替代跨进程事实。
 def _claim_unknown_reconciliation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
@@ -479,6 +507,9 @@ def _claim_unknown_reconciliation(
     try:
         claimed = claim_reconciliation(claim_request)
     except Exception as exc:  # noqa: BLE001 - claim authority failure leaves UNKNOWN unchanged
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         return _unknown_claim_result(
             request,
             attempt.claim,
@@ -500,6 +531,8 @@ def _claim_unknown_reconciliation(
 # LLM: Only the exact reconciliation holder/generation may release. A release race is diagnostic;
 # it never grants execution and never replaces a terminal fact written by another process.
 # 函数用途: 核对仍无终态或异常时尽力释放权威核对租约。
+# LLM: 普通释放故障仍尽力记录；实际四类来源拒绝直接上抛，保原UNKNOWN和真实租约，不伪称已释放。
+# 函数用途: 按原holder/generation释放核对权，来源未结交由原宿主处理。
 def _release_unknown_reconciliation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
@@ -509,7 +542,10 @@ def _release_unknown_reconciliation(
         return
     try:
         release(_reconciliation_claim_request(attempt, request))
-    except Exception:  # noqa: BLE001 - UNKNOWN and lease expiry remain the safe fallback
+    except Exception as exc:  # noqa: BLE001 - UNKNOWN and lease expiry remain the safe fallback
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         logger.warning("tool operation reconciliation release failed", exc_info=True)
 
 
@@ -532,6 +568,8 @@ def _reconciliation_claim_request(
     )
 
 
+# LLM: 仅原证据和CAS可重开；来源typed异常不能包装为普通失败再诱发重试，reconciliation_only上界仍在调用方。
+# 函数用途: 依原核对结论尝试重开同一业务操作，不为未知补新权限。
 def _reopen_unknown_operation(
     request: ToolOperationExecutionRequest,
     attempt: _ToolOperationClaimAttempt,
@@ -566,6 +604,9 @@ def _reopen_unknown_operation(
             )
         )
     except Exception as exc:  # noqa: BLE001 - a competing reconciliation must win atomically
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         return _unknown_claim_result(
             request,
             attempt.claim,
@@ -693,11 +734,14 @@ def _claim_block_contract(action: str) -> tuple[str, str, str]:
 
 # LLM: invoke 后的提供方结果只有在权威 operation store 持久化终态后才可作为成功事实。
 # 函数用途: 执行已占位的副作用工具、保存终态；保存失败时返回未知且不允许自动重做。
+# LLM: 仅在原execute领取后运输request/claim共同寿命，长handler不持短写门；typed未结不finish/清责任，终态仍由原store接受。
+# 函数用途: 执行一次已领取工具并保存结果；原短写回调在handler返回后失效。
 def _execute_claimed_operation(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
 ) -> ToolHandlerOutcome:
-    result = _invoke_with_lease_renewal(request, claim)
+    with tool_write_claim_scope(request, claim):
+        result = _invoke_with_lease_renewal(request, claim)
     operation_status = _operation_status_for_result(result)
     unknown_reason = ""
     if operation_status == TOOL_OPERATION_UNKNOWN:
@@ -733,6 +777,9 @@ def _execute_claimed_operation(
             )
         )
     except Exception as exc:  # noqa: BLE001 - effect already happened; never invite retry
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         # LLM: 工具返回值只是提供方报告；权威账本没有保存终态时，成功与否都必须降级为 unknown，
         # 否则模型会把“提供方说成功”误当成可恢复、可收口的机器事实。
         # 函数用途: 返回不可自动重试的未知结果，同时只保留原结果的安全结构化旁证。
@@ -761,6 +808,8 @@ def _execute_claimed_operation(
 # LLM: Recovery cleanup is strictly downstream of authoritative terminal persistence. Hook
 # failures are private maintenance debt and must never rewrite a result that is already durable.
 # 函数用途: 尽力通知工具“操作账本已经结算”，用于清掉 shell 等工具的临时恢复清单。
+# LLM: 只在真实终态已持久化后通知；普通清理故障尽力记录，actual来源错误可报告但绝不回滚或重复settle。
+# 函数用途: 通知工具清理已结操作的恢复资料，保留原账本终态。
 def _notify_operation_settled(
     request: ToolOperationExecutionRequest,
     *,
@@ -786,7 +835,10 @@ def _notify_operation_settled(
                 replayed=replayed,
             )
         )
-    except Exception:  # noqa: BLE001 - terminal operation authority is already persisted
+    except Exception as exc:  # noqa: BLE001 - terminal operation authority is already persisted
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
+            raise
         logger.warning("tool operation settlement cleanup failed", exc_info=True)
 
 
@@ -825,6 +877,8 @@ def _completion_persistence_unknown_result(
     )
 
 
+# LLM: 续租线程只运输同一活context/claim；actual异常槽只回传原对象，不是状态账；handler已有typed优先保原物理身份，否则原join后抛槽，普通故障不改结果。
+# 函数用途: 执行长handler并沿原周期续租；不因线程或来源未知清掉原操作责任。
 def _invoke_with_lease_renewal(
     request: ToolOperationExecutionRequest,
     claim: ToolOperationClaim,
@@ -834,8 +888,9 @@ def _invoke_with_lease_renewal(
     长 handler（进程执行/等待）阻塞超过 lease 时，另一请求会按 lease 过期把
     本 EXECUTING 行标 UNKNOWN 并释放锁 → 竞态抢锁。续租线程在 lease 过半前
     滚动续租（holder CAS + workspace_epoch CAS 由 store 原语保证），invoke
-    一返回立即停止——handler 结果与续租成败无关（续不动 = 锁自然过期，
-    行为不劣化）。LOCAL store 无续租契约（结构化信号）→ 行为不变。
+    一返回立即停止。普通续租失败仍只让锁自然过期；四类实际来源未结
+    必须交回宿主，handler 自身已报未结时保其原对象和物理身份。LOCAL store
+    无续租契约（结构化信号）→ 行为不变。
     """
     renew = getattr(request.store, "renew_tool_operation_lease", None)
     if not callable(renew):
@@ -844,7 +899,10 @@ def _invoke_with_lease_renewal(
     remaining = max(0.0, float(record.lease_expires_at or 0) - time.time())
     interval = max(0.5, remaining / 2.0)
     stop = threading.Event()
+    uncertain_errors = []
 
+    # LLM: actual类型在同一次原handler寿命内回传；无关续租异常仍只停线程，不按error_code分类。
+    # 函数用途: 在捕获的原上下文续租，保存精确未结对象供原调用者处理。
     def renew_loop() -> None:
         while not stop.wait(interval):
             try:
@@ -855,17 +913,34 @@ def _invoke_with_lease_renewal(
                     owner_id=record.owner_id,
                     run_id=record.run_id,
                 )
-            except Exception:  # noqa: BLE001 - 续租失败只停线程，不影响 handler
+            except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+                    RequestExecutionContextUnavailable, ToolWriteContextUnavailable) as error:
+                uncertain_errors.append(error)
+                return
+            except Exception:  # noqa: BLE001 - 普通续租失败只停线程，不影响 handler
                 logger.warning("tool operation lease renewal stopped", exc_info=True)
                 return
 
-    thread = threading.Thread(target=renew_loop, daemon=True)
+    context = copy_context()
+    thread = threading.Thread(target=context.run, args=(renew_loop,), daemon=True)
     thread.start()
+    primary_uncertain = None
     try:
         return request.invoke()
+    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+            RequestExecutionContextUnavailable, ToolWriteContextUnavailable) as error:
+        # handler已有原未结时保其对象，尤其不能丢物理call_id而改报续租的门前拒绝。
+        primary_uncertain = error
+        raise
     finally:
         stop.set()
         thread.join(timeout=5)
+        if uncertain_errors:
+            if primary_uncertain is None:
+                raise uncertain_errors[0]
+            # secondary只作异常链旁证，保已有链和原handler类型/物理身份，不变成新的拒绝或完成事实。
+            if primary_uncertain.__context__ is None and uncertain_errors[0] is not primary_uncertain:
+                primary_uncertain.__context__ = uncertain_errors[0]
 
 
 def _operation_status_for_result(result: ToolHandlerOutcome) -> str:

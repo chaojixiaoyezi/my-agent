@@ -1,3 +1,5 @@
+# LLM: 本模块的共享镜像/索引写者消费原globalguard；Skill读取和owner私有初始化不在本门，默认原指纹与完整镜像合同保持。
+# 模块用途: 同步共享内置Skill及管理员派生索引，不替代运行时SkillsService。
 """把 skill 同步进 home,让内置和用户自定义 skill 都自动可见、可被检索。
 
 两类 skill:
@@ -65,8 +67,13 @@ def _index_record(skill_dir: Path, source: str) -> dict[str, object]:
     }
 
 
+# LLM: 镜像只改shared/builtin；删除/重建前必须核原globalguard，读Skill/包与owner私有写不经此入口。
+# 函数用途: 在原删除复制之前拒绝受限写者，默认模式保持完整镜像。
 def _mirror_builtin(src: Path, shared_builtin_dir: Path) -> None:
     """全量镜像源码内置 skill 到 shared/builtin(清旧重建)。只动 shared/builtin。"""
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("shared_builtin_skills")
     if shared_builtin_dir.exists():
         shutil.rmtree(shared_builtin_dir, ignore_errors=True)
     shared_builtin_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +88,8 @@ def _count_index_lines(skills_index_jsonl: Path) -> int:
     return sum(1 for line in jsonl_lines(skills_index_jsonl.read_text(encoding="utf-8")) if line.strip())
 
 
+# LLM: 本入口写共享镜像/索引/fingerprint，受限actor在读取快路前拒绝；运行时SkillsService不调用它。
+# 函数用途: 由原默认/C同步共享Skill派生索引，Count0原指纹幂等与字节保持。
 def sync_skill_index(
     shared_builtin_dir: Path,
     shared_skills_dir: Path,
@@ -93,6 +102,9 @@ def sync_skill_index(
     任一改动才重建,fingerprint 写 fingerprint_file(cache,不进 skill 目录)。半成品(中途
     被打断)不写 fingerprint,下次启动自动重建。
     """
+    from ..common.global_write_guard import require_global_writer
+
+    require_global_writer("shared_skill_index")
     src = _BUILTIN_SRC
     fingerprint = _fingerprint([src, shared_skills_dir])
     if fingerprint_file.is_file() and fingerprint_file.read_text(encoding="utf-8").strip() == fingerprint:

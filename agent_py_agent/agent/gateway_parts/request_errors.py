@@ -1,4 +1,6 @@
 # LLM: 客户端只接收结构化错误码对应的安全文案；保留模型截断事实，不公开内部异常或把思考当正文。
+# 原请求短事务unknown仅重导出common唯一typed类，operation_entered=False；不能混同旧恢复异常或已进入线程的退出未知。
+# 原Call/心跳/runner Thread退出未知只在原出处/lifetime有效时附请求诊断；失效后不重绑或普通失败清账。
 # 模块用途: 统一 Gateway 请求失败与输入附件错误，区分模型连接、长度限制、会话读写和执行结果未确认。
 from __future__ import annotations
 
@@ -15,6 +17,9 @@ from ..backends.errors import (
 )
 from ..backends.rejection_diagnostics import public_rejection_diagnostic
 from ..backends.reply_diagnostics import public_user_reply_diagnostic
+from ..common.request_execution_ports import (
+    RequestExecutionOutcomeUncertainError as RequestExecutionOutcomeUncertainError,
+)
 from ..runtime_errors import runtime_error_report
 from ..turn_end import result_turn_end_reason
 
@@ -36,6 +41,159 @@ class ConversationTaskBindingError(RuntimeError):
 class ActiveTurnOutcomeUncertainError(ConversationPersistenceError):
     error_code = "ACTIVE_TURN_OUTCOME_UNCERTAIN"
 
+
+# LLM: 只认common唯一typed事件及原request/attempt/lease严格类型；错误码、文本与别的请求不能阻止当前执行正常收口。
+# 函数用途: 核实短操作未进入的事件是否确属当前仍在processing的原执行。
+def request_execution_outcome_uncertain(error, payload, expected):
+    request_id, attempt, epoch = expected
+    if type(error) is not RequestExecutionOutcomeUncertainError or error.operation_entered is not False:
+        return False
+    identity = {"id": error.request_id, "execution_attempt_id": error.execution_attempt_id,
+                "lease_epoch": error.lease_epoch, "lease_owner": error.lease_owner}
+    return (all(type(actual) is type(value) and actual == value for actual, value in zip(
+                (request_id, attempt, epoch), (error.request_id, error.execution_attempt_id, error.lease_epoch), strict=True))
+            and payload.get("status") == "processing"
+            and all(type(payload.get(key)) is type(value) and payload.get(key) == value for key, value in identity.items()))
+
+
+# LLM: 只读取原Call的Context，不运行旧Context；同current C/W对象、PID、活lifetime与完整claim tuple同时匹配才认出处，不证明未执行或退出。
+# 函数用途: 把真实有界线程退出未知关联回原请求，拒绝复制错误、旧调用和跨执行重绑。
+def bounded_request_execution_outcome_uncertain(error, payload, expected):
+    from ..backends.bounded_call import bounded_call_error_origin
+
+    context = bounded_call_error_origin(error)
+    return context is not None and _original_execution_claim_matches(context, payload, expected)
+
+
+# LLM: 原心跳observer只证出处，lease_id仅诊断；活当前C/W原对象和完整claim仍由同一内存核验，不能运行旧Context或补新scope。
+# 函数用途: 核实心跳退出未知确属当前原执行，拒绝复制异常、旧scope和跨请求重绑。
+def heartbeat_request_execution_outcome_uncertain(error, payload, expected):
+    from ..memory_store.curator_lease import lease_heartbeat_error_origin
+
+    origin = lease_heartbeat_error_origin(error)
+    return origin is not None and _original_execution_claim_matches(origin[0], payload, expected)
+
+
+
+# LLM: common唯一runner Thread锚点只证出处，Context仍须同current原execution/lifetime/完整claim；不按phase/code或run_id字段授权。
+# 函数用途: 核实本次runner设施退出未知可由当前原请求观察。
+def runner_request_execution_outcome_uncertain(error, payload, expected):
+    from ..common.runner_thread_origin import runner_thread_error_origin
+
+    origin = runner_thread_error_origin(error)
+    return origin is not None and _original_execution_claim_matches(origin[0], payload, expected)
+
+# LLM: Call与心跳共用原同对象/PID/lifetime/claim核验；这是观察资格，不证明退出或签发任何持久写权，最终写仍在原T内再核。
+# 函数用途: 对原设施捕获的Context执行只读身份比较，不重新读取或生成执行来源。
+def _original_execution_claim_matches(context, payload, expected):
+    import os
+
+    from . import multiprocess_coordinator_execution as coordinator
+    from . import multiprocess_execution as worker
+    from .multiprocess_execution_lifetime import ExecutionScopeLifetime
+    from .queue_service import GatewayClaim
+
+    execution = context.get(worker._EXECUTION) or context.get(coordinator._EXECUTION)
+    if (type(execution) not in (worker.WorkerExecution, coordinator.CoordinatorExecution)
+            or execution is not worker.current_worker_execution() or execution.creator_pid != os.getpid()
+            or type(execution.lifetime) is not ExecutionScopeLifetime):
+        return False
+    try:
+        execution.lifetime.require_original(execution)
+    except ValueError:
+        return False
+    claim = execution.claim if type(execution) is coordinator.CoordinatorExecution else execution.binding.claim
+    if type(claim) is not GatewayClaim or claim.path.stem != claim.request_id:
+        return False
+    identity = {"id": claim.request_id, "execution_attempt_id": claim.execution_attempt_id,
+                "lease_epoch": claim.lease_epoch, "lease_owner": claim.lease_owner}
+    return (all(type(actual) is type(value) and actual == value for actual, value in zip(
+                expected, (claim.request_id, claim.execution_attempt_id, claim.lease_epoch), strict=True))
+            and payload.get("status") == "processing"
+            and all(type(payload.get(key)) is type(value) and payload.get(key) == value for key, value in identity.items()))
+
+
+# LLM: 仅原Bounded类型或原心跳/common runner native锚点可保守阻止普通结算；不从字符串/复制marker或失活来源新增unknown事件。
+# 函数用途: 识别有真实出处的资源退出未确认，使清理后仍维持原请求未结。
+def request_resource_exit_unconfirmed(error):
+    from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+    from ..common.runner_thread_origin import runner_thread_exit_unconfirmed
+    from ..memory_store.curator_lease import lease_heartbeat_error_origin
+
+    return (type(error) is BoundedCallExitUnconfirmedError or lease_heartbeat_error_origin(error) is not None
+            or runner_thread_exit_unconfirmed(error))
+
+
+# LLM: common是未进入短门，Call/心跳/runner是原线程退出未知；各守原typed/同对象出处，同错误码不能互换语义。
+# 函数用途: 给请求执行与claim出口提供同一精确未知判定，不写账或授予恢复许可。
+def gateway_request_execution_unknown(error, payload, expected):
+    return (request_execution_outcome_uncertain(error, payload, expected)
+            or bounded_request_execution_outcome_uncertain(error, payload, expected)
+            or heartbeat_request_execution_outcome_uncertain(error, payload, expected)
+            or runner_request_execution_outcome_uncertain(error, payload, expected))
+
+
+# LLM: 既存诊断只用于保持当前原tuple未结，不证明Call仍活/已退出或授新写权；没有原位证据也不能为退出未知编造事件。
+# 函数用途: 在scope关闭或Call被reap后识别同一请求已有的退出未知观察，避免普通失败覆盖。
+def recorded_bounded_request_unknown(error, payload, expected):
+    from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+
+    observation = payload.get("execution_outcome")
+    if type(error) is not BoundedCallExitUnconfirmedError or type(observation) is not dict:
+        return False
+    identity = {"id": observation.get("request_id"), "execution_attempt_id": observation.get("execution_attempt_id"),
+                "lease_epoch": observation.get("lease_epoch"), "lease_owner": observation.get("lease_owner")}
+    return (observation.get("schema_version") == "gateway_execution_outcome.v1"
+            and observation.get("status") == "unknown" and payload.get("status") == "processing"
+            and observation.get("phase") == "bounded_call_exit" and observation.get("operation_entered", False) is None
+            and observation.get("error_code") == BoundedCallExitUnconfirmedError.error_code
+            and observation.get("call_id") == error.call_id and observation.get("reason") == error.reason
+            and all(type(actual) is type(value) and actual == value for actual, value in zip(
+                expected, (identity["id"], identity["execution_attempt_id"], identity["lease_epoch"]), strict=True))
+            and all(type(payload.get(key)) is type(value) and payload.get(key) == value for key, value in identity.items()))
+
+
+# LLM: 只核已有原claim的心跳unknown诊断和原observer捕获lease_id，不重新核租约/授权或创建事件，scope退出不把未知洗成普通失败。
+# 函数用途: 在原心跳已清理后维持同一持久未结事实，不为晚到异常补签身份。
+def recorded_heartbeat_request_unknown(error, payload, expected):
+    from ..memory_store.curator_lease import lease_heartbeat_error_origin
+
+    origin = lease_heartbeat_error_origin(error)
+    observation = payload.get("execution_outcome")
+    if origin is None or type(observation) is not dict:
+        return False
+    identity = {"id": observation.get("request_id"), "execution_attempt_id": observation.get("execution_attempt_id"),
+                "lease_epoch": observation.get("lease_epoch"), "lease_owner": observation.get("lease_owner")}
+    return (observation.get("schema_version") == "gateway_execution_outcome.v1"
+            and observation.get("status") == "unknown" and payload.get("status") == "processing"
+            and observation.get("phase") == "curator_lease_heartbeat_stop" and observation.get("operation_entered", False) is None
+            and observation.get("error_code") == "TASK_RESOURCE_STOP_UNCONFIRMED"
+            and type(observation.get("lease_id")) is str and observation["lease_id"] == origin[1]
+            and all(type(actual) is type(value) and actual == value for actual, value in zip(
+                expected, (identity["id"], identity["execution_attempt_id"], identity["lease_epoch"]), strict=True))
+            and all(type(payload.get(key)) is type(value) and payload.get(key) == value for key, value in identity.items()))
+
+
+
+# LLM: 仅核同claim已有unknown和common原error锚点诊断，不在失活Context中执行/签权；清理后仍保原P3，不能为旧异常新增事件。
+# 函数用途: 让父层维持原child设施已经原位记下的未结事实。
+def recorded_runner_request_unknown(error, payload, expected):
+    from ..common.runner_thread_origin import runner_thread_error_origin
+
+    origin = runner_thread_error_origin(error)
+    observation = payload.get("execution_outcome")
+    if origin is None or type(observation) is not dict:
+        return False
+    identity = {"id": observation.get("request_id"), "execution_attempt_id": observation.get("execution_attempt_id"),
+                "lease_epoch": observation.get("lease_epoch"), "lease_owner": observation.get("lease_owner")}
+    return (observation.get("schema_version") == "gateway_execution_outcome.v1"
+            and observation.get("status") == "unknown" and payload.get("status") == "processing"
+            and observation.get("phase") == origin[1] and observation.get("operation_entered", False) is None
+            and observation.get("error_code") == "TASK_RESOURCE_STOP_UNCONFIRMED"
+            and observation.get("runner_run_id") == origin[2] and observation.get("runner_attempt_id") == origin[3]
+            and all(type(actual) is type(value) and actual == value for actual, value in zip(
+                expected, (identity["id"], identity["execution_attempt_id"], identity["lease_epoch"]), strict=True))
+            and all(type(payload.get(key)) is type(value) and payload.get(key) == value for key, value in identity.items()))
 
 # LLM: 错误码和交付语义不变；仅附白名单诊断，Gateway失败投影必须同步保留且不能重试。
 # 类用途: 表示没有可安全交付的回复，同时携带无正文的最后调用与循环事实。

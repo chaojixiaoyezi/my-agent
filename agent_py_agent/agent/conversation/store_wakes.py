@@ -209,7 +209,9 @@ class WakeStore:
 
     # LLM: 稳定键沿原发布锁冻结信号，显式 retain_handled 控制已消费重发；无键仍直接发布。
     # 函数用途: 创建或恢复一个信号，普通 Goal 在上一代处理后仍能正常继续。
-    def raise_signal(self, request: dict) -> WakeSignal:
+    # LLM: blocking默认True保原发布；C只给原锁传False，原去重/信号/paired半提交仍由同一发布账重放。
+    # 函数用途: 原唤醒可选择锁忙立即报错，不跳过信号或伪称发布完成。
+    def raise_signal(self, request: dict, *, blocking: bool = True) -> WakeSignal:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         kwargs = {
@@ -228,9 +230,17 @@ class WakeStore:
         signal = _wake_signal(thread.thread_id, now(request.get("now")), kwargs)
         if signal.dedupe_key:
             return publish_deduped(
-                self.storage, signal, retain_handled=request.get("retain_handled", False),
+                self.storage, signal, retain_handled=request.get("retain_handled", False), blocking=blocking,
             )[1]
-        write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
+        if not blocking:
+            from ..common.json_io import (
+                locked_json_path,
+                write_private_json_file_atomic_no_newline_unlocked,
+            )
+            with locked_json_path(self.storage.wake_signal_path(signal), blocking=False):
+                write_private_json_file_atomic_no_newline_unlocked(self.storage.wake_signal_path(signal), signal.to_dict())
+        else:
+            write_json_file_atomic(self.storage.wake_signal_path(signal), signal.to_dict())
         return signal
 
     # LLM: 保留调用方只取结果的原接口，严格错误处理须调用 pending_report。

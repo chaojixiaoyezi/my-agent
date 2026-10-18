@@ -1,4 +1,5 @@
 # LLM: owner 池只管理进程内实例，唯一身份及持久工作沿既有 owner/thread 合同；空闲回收不删除用户资料。
+# W仅运输原bootstrap并在构造/命中前后核分区及实际home，不复制池/配置/执行权；普通主线LRU、Future和凭据来源保持。
 # 模块用途: 按用户隔离资源、合并首次构建，并向 Gateway 提供带在途保护的空闲回收入口。
 """按 owner 隔离的 agent 池(多用户飞书 per-用户隔离 + 审计 #2/#13)。
 
@@ -46,6 +47,8 @@ def _config_with_owner(base_config: Any, owner: Any) -> Any:
     )
 
 
+# LLM: owner只由原池提供；W运输原bootstrap到最早构造门，构造后核真实home，保main secret克隆与默认自动称呼语义。
+# 函数用途: 为原owner构造唯一Agent，W不能用热配置改变冻结根或返回另一owner实例。
 def build_owner_scoped_agent(
     base_config: Any,
     root: Any,
@@ -53,16 +56,23 @@ def build_owner_scoped_agent(
     workspace_roots: Any,
     *,
     channel_runtime_health_provider: RuntimeHealthProvider | None = None,
+    worker_bootstrap=None,
 ) -> Any:
     """按 owner 建一个作用域 SimpleAgent(独立 home/记忆/local_store)。延迟导入防循环。"""
     from .core import SimpleAgent
 
+    worker_options = {} if worker_bootstrap is None else {"worker_bootstrap": worker_bootstrap}
     agent = SimpleAgent(
         _config_with_owner(base_config, owner),
         root,
         workspace_roots=workspace_roots,
         channel_runtime_health_provider=channel_runtime_health_provider,
+        **worker_options,
     )
+    if worker_bootstrap is not None:
+        from .gateway_parts.multiprocess_agent_contract import require_agent_home
+
+        require_agent_home(worker_bootstrap, owner, agent.home_paths)
     _maybe_seed_feishu_call_name(base_config, owner, agent)  # 飞书首聊自动称呼,best-effort 永不抛
     # J17：作用域 agent 的模型调用账本在构造时已登记进进程准入表，Gateway 停机时一并关门结清（弱引用，逐出回收后自动消失）。
     return agent
@@ -98,7 +108,7 @@ def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> No
         pass  # 绝不因 auto-name 失败影响 agent 创建
 
 
-# LLM: 同 owner 并发构建合流；缓存、活动租用和持久任务是不同寿命，调用者必须完成租用。
+# LLM: 同owner合流、缓存/租用/持久任务寿命分离；W每次消费核原bootstrap与实际home而不从热配置换属，默认池不新增检查I/O。
 # 类用途: 复用用户智能体，减少并发首次访问重复初始化和历史用户常驻。
 class OwnerScopedAgentPool:
     """按 OwnerIdentity get-or-create 作用域 agent;有界 LRU、线程安全、锁外构建。
@@ -109,7 +119,7 @@ class OwnerScopedAgentPool:
     池满不进,且被后来的硬 owner 逐出——软活可以等,硬活不能饿死。请求路/盯守路默认
     硬(用户正在交互),后台 seed 路按发现的事实类别显式传 hard。"""
 
-    # LLM: 初始化只创建进程内容器，不加载用户；容量与空闲策略由 Gateway 配置和调用者统一应用。
+    # LLM: 初始化仅原容器，可选W bootstrap是同次构造载体不是执行许可；容量/惰性/合流/租用仍原池，不额外加载owner。
     # 函数用途: 绑定构建依赖并准备有界缓存、首次构建协调和活动租用计数。
     def __init__(
         self,
@@ -119,10 +129,12 @@ class OwnerScopedAgentPool:
         workspace_roots: Any = None,
         max_agents: int | None = None,
         channel_runtime_health_provider: RuntimeHealthProvider | None = None,
+        worker_bootstrap=None,
     ) -> None:
         self._base_config = base_config
         self._root = root
         self._workspace_roots = workspace_roots
+        self._worker_bootstrap = worker_bootstrap
         # 显式入参 > config owner_agent_pool_max_agents > 兜底常量(千并发调参入口)。
         if max_agents is None:
             max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENT_COUNT)
@@ -133,6 +145,8 @@ class OwnerScopedAgentPool:
             build_owner_scoped_agent,
             channel_runtime_health_provider=channel_runtime_health_provider,
         )
+        if worker_bootstrap is not None:
+            self._builder = partial(self._builder, worker_bootstrap=worker_bootstrap)
         self._hard_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._soft_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
@@ -140,9 +154,10 @@ class OwnerScopedAgentPool:
         self._pins: dict[int, int] = {}
         self._building: dict[tuple, Future] = {}
 
-    # LLM: 同一 owner 首次构建合流；真实入口刷新空闲时刻，后台扫描 touch=False 不伪造使用。
+    # LLM: W命中缓存前后都核原分区/实际home；同owner合流/LRU/租用保main，touch=False不伪造活动事实。
     # 函数用途: 复用或创建唯一用户实例，等待同身份初始化时不重复加载工具和记忆。
     def get(self, owner: Any, *, hard: bool = True, touch: bool = True) -> Any | None:
+        self._require_worker_owner(owner)
         key = (owner.provider, owner.owner_kind, owner.owner_id)
         hit = self._get_cached(key, hard=hard)
         if hit is None:
@@ -152,7 +167,32 @@ class OwnerScopedAgentPool:
         with self._lock:
             if hit is not None and touch:
                 self._last_used[key] = time.monotonic()
+        self._require_worker_owner(owner, hit)
         return hit
+
+    # LLM: 每次消费核原C home/constructor roots，命中后核实际home与原始根而非热config或effective权限投影；不额外派生工作区权限。
+    # 函数用途: 阻止跨分区/管理员或已漂移对象进入worker池消费路径。
+    def _require_worker_owner(self, owner, agent=None):
+        if self._worker_bootstrap is None:
+            return
+        from .gateway_parts.multiprocess_agent_contract import (
+            AgentConstruction,
+            require_agent_constructor,
+            require_agent_home,
+        )
+        from .gateway_parts.multiprocess_worker_agent import (
+            require_worker_config,
+            require_worker_workspace,
+        )
+
+        frozen = self._worker_bootstrap
+        home = require_worker_config(frozen, self._base_config)
+        require_worker_workspace(frozen, self._root, self._workspace_roots)
+        require_agent_constructor(frozen, owner, AgentConstruction(home, owner))
+        if agent is not None:
+            require_agent_home(frozen, owner, agent.home_paths)
+            require_worker_workspace(frozen, agent.root, agent.workspace_roots)
+
 
     # LLM: Future 只表示同 owner 初始化，不持久化；失败传播给所有等待者，完成后删除临时槽。
     # 函数用途: 防止多个请求同时首次访问同一用户时重复构造重量级实例。
@@ -230,10 +270,15 @@ class OwnerScopedAgentPool:
     # create, promote, or LRU-touch an Agent. Real ingress/control paths continue
     # to use get(); otherwise idle clients can keep cold owners resident forever.
     # 函数用途: 只查看池里已经存在的用户 Agent；空闲状态刷新不会因此加载整套工具和记忆。
+    # LLM: 被动查询仍不物化或touch；W必须先核原冻结分区，再核命中对象实际home，缺失仍返回None。
+    # 函数用途: 只查看原池缓存，拒绝旧W代次或归属漂移的实例。
     def peek(self, owner: Any) -> Any | None:
+        self._require_worker_owner(owner)
         key = (owner.provider, owner.owner_kind, owner.owner_id)
         with self._lock:
-            return self._hard_agents.get(key) or self._soft_agents.get(key)
+            agent = self._hard_agents.get(key) or self._soft_agents.get(key)
+        self._require_worker_owner(owner, agent)
+        return agent
 
     def _room_for_soft(self) -> bool:
         """锁内判断软 agent 是否有落点:软表非空可逐软腾位,或总容量未满。"""

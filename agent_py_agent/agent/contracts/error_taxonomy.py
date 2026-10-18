@@ -1,4 +1,5 @@
 # LLM: 本模块是工具/合同错误码到恢复动作的唯一分类表；控制流读取 code，不得解析用户或模型错误文案。
+# LLM: 审批退休未结仅登记展示与恢复建议；原异常native出处才可承接责任，错误码不能授予清理或重放权。
 #   Persona CAS 冲突保留原错误码；分类表不证明是否写入，副作用事实必须由实际 handler 提供。
 #   回合结果未知和父级授权快照缺失不可自动重放或补授权，必须分别核实事实或报告阻塞。
 #   删除恢复文案只指向可发现的真实工具和既有 grant；不能把内部回收流程当工具或授予权限。
@@ -11,12 +12,15 @@
 #   入站附件无效是确定的用户输入失败：不能去掉附件改发纯文字，也不能原样重放，只能请用户重新添加。
 #   IM 管理员密码错误与失败锁定共用一个码，不暴露差别；没有待决审批时不得重复批准或替用户重试密码。
 #   执行目标换片或结束后不得把旧控制自动重放到新目标，必须先核对准确身份。
+#   普通输入的身份冲突和去向未确认沿原消息ID对账，分类表不得把unknown变为可自动追加或重排。
 #   业务写权限被拒绝时保留用户目标，子代理沿原能力申请申请准确范围，不鼓励改落临时目录后声称完成。
 #   云资源、私人卡和禁网保持明确恢复码；未知写入不重放，结构化条件未满足不当成模型故障。
 #   群任务主体只接受宿主冻结事实；缺失、冲突与越权分别拒绝，不从模型属性补人或改用管理员。
 #   群能力及机器人来源失败保留固定码；没有人工授权或准确原消息证明时不能反复调用或降级绕过。
 #   规则来源HTTP读取失败不自动删除约束或反复请求；来源保护事实不可核验时保留拒写，不扩大权限。
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
+#   多进程记录、分区和预留拒绝保留原责任，不自动重放、补造记录或用投影释放占用。
+#   有界调用退出未确认独立于业务失败和未发送；保留原调用及清理责任，不因超时清表或自动重跑。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -49,6 +53,206 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "GATEWAY_PREDECESSOR_TIMEOUT": ErrorContract(
+        code="GATEWAY_PREDECESSOR_TIMEOUT", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="等待前任退出超时，未初始化 Agent 或进入恢复；先核对前任真实生命周期，不凭超时或陈旧心跳判死。",
+    ),
+    "COORDINATOR_PLATFORM_OR_MODE_UNSUPPORTED": ErrorContract(
+        code="COORDINATOR_PLATFORM_OR_MODE_UNSUPPORTED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="内部协调者模式的参数或平台条件不满足，未启动业务；核对真实启动参数，不改成其它模式或绕过原单例门。",
+    ),
+    "GLOBAL_WRITE_SERVICE_UNAVAILABLE": ErrorContract(
+        code="GLOBAL_WRITE_SERVICE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原协调者没有可用的全局写服务，本次请求未交给该写者；由部署者核对原入口接线，不改用直接写入或补造授权。",
+    ),
+    "COORDINATOR_BUSINESS_NOT_READY": ErrorContract(
+        code="COORDINATOR_BUSINESS_NOT_READY", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原协调者控制面仍可服务，但业务实例尚未获原接手门准入；查看原等待原因，不新建替身 Agent 或绕过隔离。",
+    ),
+    "MEMORY_RETENTION_POLICY_CHANGED": ErrorContract(
+        code="MEMORY_RETENTION_POLICY_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原维护计划的策略快照已变化，停止后续提交；已经完成的局部副作用仍保留，核对原来源与实际结果，不按旧计划自动重放。",
+    ),
+    "GATEWAY_MULTIPROCESS_RESTART_UNSUPPORTED": ErrorContract(
+        code="GATEWAY_MULTIPROCESS_RESTART_UNSUPPORTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="内部多进程尚不支持可信滚动接班；已拒绝重启，不生成无锁接班命令，不自动改回单进程。",
+    ),
+    "WORKER_PLATFORM_UNSUPPORTED": ErrorContract(
+        code="WORKER_PLATFORM_UNSUPPORTED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="此平台不支持内部 worker 入口；Windows 保持默认单进程，不绕过平台拒绝门。",
+    ),
+    "WORKER_NOT_READY": ErrorContract(
+        code="WORKER_NOT_READY", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前代 C 身份或沙箱端口登记读回未通过；查看心跳的结构化原因，不盖章、不把不就绪或心跳超时当死亡证明。",
+    ),
+    "BOUNDED_CALL_EXIT_UNCONFIRMED": ErrorContract(
+        code="BOUNDED_CALL_EXIT_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原调用或取消清理尚未确认退出；核对原请求、调用编号、实际副作用及退出回执，确认前保留责任，不清空占用、不把它当未执行或自动重放。",
+    ),
+    "CONTROL_EXECUTION_TARGET_REQUIRED": ErrorContract(
+        code="CONTROL_EXECUTION_TARGET_REQUIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="未能固定原执行目标，控制未入队；读取原任务的结构化执行编号后由明确操作选择目标，不自动改投其它回合。",
+    ),
+    "COORDINATOR_ALREADY_RUNNING": ErrorContract(
+        code="COORDINATOR_ALREADY_RUNNING", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="内部多进程协调者未取得单例锁，未进入恢复和派发；核对原 C 的生命周期，不删除锁文件或自动接手。",
+    ),
+    "EXECUTION_CONTEXT_REQUIRED": ErrorContract(
+        code="EXECUTION_CONTEXT_REQUIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前进程缺少原请求执行上下文，本次短操作未进入；由宿主核对入口来源，不自动重试、不补造claim或权限。",
+    ),
+    "GLOBAL_WRITE_REJECTED": ErrorContract(
+        code="GLOBAL_WRITE_REJECTED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="全局写的认证、身份、资源或原操作合同未满足；占位或结清失败时可能已写入，核对C原请求及操作回执，不自动重放、不补造新键或权限。",
+    ),
+    "NATIVE_EXECUTION_DOMAIN_UNAVAILABLE": ErrorContract(
+        code="NATIVE_EXECUTION_DOMAIN_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原内核执行域能力或引用不可用；核对原预留、创建窗口与清理回执，不扩大运行权限、不退回未约束的进程启动。",
+    ),
+    "WORKER_COMMIT_REJECTED": ErrorContract(
+        code="WORKER_COMMIT_REJECTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原执行者提交或结清门无法确认；保留原请求、claim、预留与未知责任，核对实际回执，不自动重放或补造新代次。",
+    ),
+    "WORKER_PEER_UNAVAILABLE": ErrorContract(
+        code="WORKER_PEER_UNAVAILABLE", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="实际连接的内核peer无法核验；保留原责任并检查平台能力与端点，不用调用方PID、环境或JSON补授权。",
+    ),
+    "CONTROL_EXECUTOR_DEAD": ErrorContract(
+        code="CONTROL_EXECUTOR_DEAD", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原控制目标执行者已结束，未向其它执行者改投；读取原任务的当前结构化状态，由用户明确选择仍需进行的操作，不自动重放旧控制。",
+    ),
+    "EXECUTOR_COORDINATOR_DELEGATE_UNAVAILABLE": ErrorContract(
+        code="EXECUTOR_COORDINATOR_DELEGATE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前原协调者没有可用的受管执行委托，启动未放行；核对原请求和实际委托端口，不伪造委托、回退裸进程或自动重放。",
+    ),
+    "EXECUTOR_NATIVE_CLIENT_REQUIRED": ErrorContract(
+        code="EXECUTOR_NATIVE_CLIENT_REQUIRED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前执行缺少原生宿主客户端，未放行本次启动；由宿主核对原请求端口，不补造客户端或回退其它启动路径。",
+    ),
+    "EXECUTOR_NATIVE_PARENT_MISMATCH": ErrorContract(
+        code="EXECUTOR_NATIVE_PARENT_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原生宿主客户端的父执行身份与当前请求不一致；保留原绑定并核对当前来源，不更换父身份、跨执行者调用或自动重放。",
+    ),
+    "EXECUTOR_SCOPE_SOURCE_CHANGED": ErrorContract(
+        code="EXECUTOR_SCOPE_SOURCE_CHANGED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="捕获的原执行来源已改变或失效，本次操作被拒绝；核对原请求与来源生命周期，不重新包装旧引用、补造身份或自动重放。",
+    ),
+    "EXECUTOR_SCOPE_SOURCE_INVALID": ErrorContract(
+        code="EXECUTOR_SCOPE_SOURCE_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="执行来源不是当前受信类型或完整绑定不合法；核对原宿主构造链，不从请求参数、磁盘记录或角色声明补造权限。",
+    ),
+    "EXECUTOR_TOOL_CALL_REQUIRED": ErrorContract(
+        code="EXECUTOR_TOOL_CALL_REQUIRED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="本次执行缺少原 ToolExecutor 冻结的工具调用编号；核对规范调用绑定，不从命令文本或临时参数生成身份后重放。",
+    ),
+    "WORKER_BOOTSTRAP_INVALID": ErrorContract(
+        code="WORKER_BOOTSTRAP_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="冻结启动的模式、根、分区或代次不一致；拒绝 Agent 和 owner 初始化，核对 C 的原启动合同，不改回普通模式。",
+    ),
+    "WORKER_SHARED_RESOURCE_INVALID": ErrorContract(
+        code="WORKER_SHARED_RESOURCE_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="共享资源缺失、归属、权限或路径不符；保留结构化资源名，由 C 在初始化阶段处理，worker 不创建、不播种、不修权限。",
+    ),
+    "WORKER_READY_REJECTED": ErrorContract(
+        code="WORKER_READY_REJECTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="心跳未匹配当前 registry 的代次、实例、出生身份或实际端口；不盖章、不据此判死，核对原登记与当前启动实例。",
+    ),
+    "WORKER_REGISTRY_REJECTED": ErrorContract(
+        code="WORKER_REGISTRY_REJECTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="登记发布或读回未确认，写后异常可能已经提交；保留原 registry 并核对完整记录，不盲目覆盖、回滚或自动重放启动。",
+    ),
+    "GLOBAL_WRITE_IN_WORKER": ErrorContract(
+        code="GLOBAL_WRITE_IN_WORKER", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="该事实只能由原协调者管理入口写入；worker直接写已在副作用前拒绝，保留原权限与审批，不重试裸写、不伪造C或管理员身份。",
+    ),
+    "GLOBAL_WRITE_IN_EXECUTOR": ErrorContract(
+        code="GLOBAL_WRITE_IN_EXECUTOR", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="托管执行器不能直接修改协调者全局事实；原动作在副作用前拒绝，交原C管理入口处理，不借worker或管理员身份绕行。",
+    ),
+    "WORKER_MODE_REQUIRED": ErrorContract(
+        code="WORKER_MODE_REQUIRED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="缺少 C 传入的内部 worker 模式事实；未初始化 owner，不用请求或 CLI 参数补造启动授权。",
+    ),
+    "WORKER_MODE_INVALID": ErrorContract(
+        code="WORKER_MODE_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="内部启动参数与 C 冻结的环境事实不一致或格式无效；核对原启动信封，不自行改分区、根路径或代次。",
+    ),
+    "EXECUTOR_CONTEXT_REQUIRED": ErrorContract(
+        code="EXECUTOR_CONTEXT_REQUIRED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前受管执行缺少同一进程的原启动上下文；在副作用前拒绝，核对原请求与登记入口，不补造身份、不回退裸执行或自动重放。",
+    ),
+    "EXECUTOR_CONTEXT_CONFLICT": ErrorContract(
+        code="EXECUTOR_CONTEXT_CONFLICT", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原 worker 分区与宿主注入的执行上下文冲突；核对同一请求和启动代次，不改分区、冒充其它执行者或自动重放。",
+    ),
+    "EXECUTOR_TOOL_CALL_INVALID": ErrorContract(
+        code="EXECUTOR_TOOL_CALL_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前工具调用编号不是规范的非空编号或超过上限；核对原 ToolExecutor 绑定，不用工具参数或临时编号补造执行身份。",
+    ),
+    "EXECUTOR_PLATFORM_UNSUPPORTED": ErrorContract(
+        code="EXECUTOR_PLATFORM_UNSUPPORTED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前内部登记执行模式不支持此平台；保留原请求和拒绝事实，不回退其它 shell、裸进程或自动重放。",
+    ),
+    "OWNER_ROUTE_MISMATCH": ErrorContract(
+        code="OWNER_ROUTE_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="请求的冻结 owner、分区、代次或 binding 不匹配，模型和工具未执行；核对原请求与 C 盖章，不回退 main 或按新配置重路由。",
+    ),
+    "MULTIPROCESS_RECORD_INVALID": ErrorContract(
+        code="MULTIPROCESS_RECORD_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="多进程记录的版本、字段、绑定或状态迁移无效；保留原事实并报告字段原因，不回退默认记录或改写原预留。",
+    ),
+    "OWNER_PARTITION_QUARANTINED": ErrorContract(
+        code="OWNER_PARTITION_QUARANTINED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="旧执行树仍活或无法证明停止，该 owner 分区保持隔离和原准入占用；核对真实整树证明，不凭心跳、PID 或线程返回接手。",
+    ),
+    "EXECUTOR_RESERVATION_FAILED": ErrorContract(
+        code="EXECUTOR_RESERVATION_FAILED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="执行者预留、登记或放行收尾未得到可信完整回执，命令可能已经执行；保留原预留及unknown事实并核对创建窗口，禁止自动重放或先执行再补账。",
+    ),
+    "ADMISSION_RESERVATION_CONFLICT": ErrorContract(
+        code="ADMISSION_RESERVATION_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原准入预留与请求、会话或冻结路由冲突；核对原预留和规范终态，不枚举目录重算占用、不补造新预留或投影释放。",
+    ),
     "AGENTS_SOURCE_HTTP_FAILED": ErrorContract(
         code="AGENTS_SOURCE_HTTP_FAILED", category="network", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
@@ -414,6 +618,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
             "不清空历史、不猜测归属、不自动重放；确认绑定后由原控制入口显式恢复。"
         ),
     ),
+    "APPROVAL_RETIREMENT_UNCONFIRMED": ErrorContract(
+        code="APPROVAL_RETIREMENT_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint=(
+            "原审批等待已退出，但取消、超时或失活的负向记录尚未确认保存；保留原执行和清理责任。"
+            "只沿原完成器重核同一记录，不重新批准、重放工具、假称任务已取消或直接释放执行占用。"
+        ),
+    ),
     "TASK_RESOURCE_STOP_UNCONFIRMED": ErrorContract(
         code="TASK_RESOURCE_STOP_UNCONFIRMED", category="state", retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
@@ -509,6 +721,21 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="原工作片已有操作但终态未确认；先核对原操作回执与外部事实，不得重复执行整个任务。",
+    ),
+    "INPUT_IDENTITY_CONFLICT": ErrorContract(
+        code="INPUT_IDENTITY_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="本次补充的身份与原输入记录冲突；核对原消息ID、owner和会话，不换编号重投或重新追加。",
+    ),
+    "INPUT_IDENTITY_UNCONFIRMED": ErrorContract(
+        code="INPUT_IDENTITY_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原输入身份或回执无法完整核实；沿同一消息ID查询原投递事实，不把缺失或坏记录当作未发送。",
+    ),
+    "INPUT_DISPOSITION_UNCONFIRMED": ErrorContract(
+        code="INPUT_DISPOSITION_UNCONFIRMED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原输入的排队或追加去向尚未确认；核对同一消息ID的输入状态，未确认前不重复排队、追加或执行。",
     ),
     "GATEWAY_RESTART_NOT_HOSTED": ErrorContract(
         code="GATEWAY_RESTART_NOT_HOSTED",
