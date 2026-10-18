@@ -584,6 +584,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_curator_uncertain_outcome.py # Curator实际未知出口与原lease/pending/cursor责任保留
 |-- agent_py_agent/tests/test_host_command_short_ports.py # 原宿主命令领取、审批时限、未知责任与退出后拒写
 |-- agent_py_agent/tests/test_model_call_drain_snapshot.py # 原模型账本的在途/保留对象只读快照
+|-- agent_py_agent/tests/test_native_transport_diagnostic.py # 原native阶段与Future安全诊断、hash关联及不改变责任的纯组件回归
 `-- agent_py_agent/tests/test_curator_original_transport.py # 同原C/W来源、取消与线程物理退出组件回归
 ```
 
@@ -3547,3 +3548,5 @@ owner_resources只计算配置路径不签权；owner_services仅持原三对象
 当前新增运行验证：角色源只读取规范责任，辅助JSONL和精确暂存仍核实际FD与目录身份；ready管理回执不扩普通perform权限。上列五测试入口属于最终两平台包内运行义务，不能归入源码专用或用组件结果替代实际验收。
 
 原话备份收缩运行验证入口：`agent_py_agent/tests/test_compact_landmark_remeasure.py`，核完整投影、原容量门、单次重算与中断；修改的原landmarks节点和原mixed长路径节点同属两平台包内运行义务。
+
+原native安全诊断回归入口 `agent_py_agent/tests/test_native_transport_diagnostic.py` 覆盖固定字段、异常隐私与原ACK/责任边界，不替代真实三代或发行门。

@@ -1,5 +1,5 @@
 # LLM: C只消费同一次native receive的内核sender，原issuer/lease/P0/P4核验仍是唯一责任来源；ACK不是W写许可。
-# 模块用途: 把逐消息原生传输接到既有begin/finish责任门，不伪装datagram为stream，不新增P1/P3或准入名额。
+# 模块用途: 把逐消息原生传输接到原责任门，并附固定安全阶段诊断；不新增P1/P3、准入或重试。
 import json
 import os
 import threading
@@ -12,7 +12,7 @@ from .multiprocess_worker_commit import WorkerCommitIssuer, WorkerCommitRejected
 
 
 # LLM: 只在原C内使用；handles仅引用原pin，定位地址/正文PID/序号/ACK均无授权作用。
-# 类用途: 处理真实原W逐消息责任，保留断线或发送失败后的未结责任。
+# 类用途: 处理真实原W逐消息责任；失败仅安全诊断，保留断线或发送失败后的未结责任。
 class NativeCommitSession:
     # LLM: 受信组合根交原issuer与本C创建的两个endpoint；构造不为owner准入、不读取body声明的身份。
     # 函数用途: 固定原对象、创建进程和一个串行消息消费门。
@@ -83,24 +83,47 @@ class NativeCommitSession:
             self._operations[candidate.identifier] = candidate
             return candidate.identifier
 
-    # LLM: 每条packet独立核真实sender/原W；无FD信封先拒异常，分派helper在本门内运行，apply只在原C/T短门执行；同步native commit测试。
-    # 函数用途: 处理一次完整无FD责任或C短提交并实际回发；closing仍可精确finish。
+    # LLM: 每条packet仍独立核同次sender与原T；异常仅固定阶段/hash诊断后bare raise，不新增ACK、释放或重试；同步native诊断和commit测试。
+    # 函数用途: 处理原消息并回发；异常只附安全阶段诊断后原样传播，closing仍可精确finish。
     def serve_once(self, *, timeout=5):
-        self._require_original()
-        with self._lock:
-            if self._closed:
-                raise WorkerCommitRejected('native_session_closed')
-            issuer, receiver, sender = self._sources
-            payload, peer_pid = receive_control_packet(receiver, timeout=timeout)
-            # 不能先解析body或选handle再借首次连接PID；这个PID来自刚完成的同一次native receive。
-            issuer._require_worker(peer_pid)
-            request = _decode_packet(payload)
-            seq, op = _native_request_identity(request, self._last_seq)
-            self._last_seq = seq
-            result = self._dispatch_request(request, peer_pid, seq, op)
-            # 发送失败保留已经记录的原责任；不重放begin，不将本地处理称W已接收。
-            KernelMessageSender.send(sender, json.dumps(result, separators=(',', ':')).encode(), timeout=timeout)
-            return result
+        stage = 'original_source'
+        diagnostic_op = diagnostic_seq = diagnostic_request = diagnostic_attempt = None
+        try:
+            stage = 'original_source'
+            self._require_original()
+            with self._lock:
+                if self._closed:
+                    raise WorkerCommitRejected('native_session_closed')
+                issuer, receiver, sender = self._sources
+                stage = 'receive'
+                payload, peer_pid = receive_control_packet(receiver, timeout=timeout)
+                # 不能先解析body或选handle再借首次连接PID；这个PID来自刚完成的同一次native receive。
+                stage = 'authenticate'
+                issuer._require_worker(peer_pid)
+                stage = 'decode'
+                request = _decode_packet(payload)
+                stage = 'identity'
+                seq, op = _native_request_identity(request, self._last_seq)
+                diagnostic_op, diagnostic_seq = op, seq
+                if op == 'materialize':
+                    diagnostic_request, diagnostic_attempt = request['request_id'], request['execution_attempt_id']
+                self._last_seq = seq
+                stage = 'dispatch'
+                result = self._dispatch_request(request, peer_pid, seq, op)
+                # 发送失败保留已经记录的原责任；不重放begin，不将本地处理称W已接收。
+                stage = 'send'
+                KernelMessageSender.send(sender, json.dumps(result, separators=(',', ':')).encode(), timeout=timeout)
+                return result
+
+        except BaseException as error:
+            try:
+                from .logging import report_native_transport_diagnostic
+
+                report_native_transport_diagnostic(stage, error, op=diagnostic_op, seq=diagnostic_seq,
+                    request_id=diagnostic_request, execution_attempt_id=diagnostic_attempt)
+            except BaseException:
+                pass
+            raise
 
     # LLM: caller持原session门且已经同次认证sender/推进seq；仅分派现有C短操作/责任，不给W写权，finish沿原issuer。
     # 函数用途: 拆平四种原责任消息的处理，保持未知回执和精确finish。

@@ -1,3 +1,9 @@
+## 原native传输失败的安全诊断（349独审通过，已集成待真实定位）
+
+原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。
+
+共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError只展示(resource_unsafe_path,owner_home)固定pair。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
+
 ## 2026-10-17 普通观察与忙态停止的边界补记
 
 262第三代在healthy ready后立即关闭，自动curator刚发表的原P3仍为occupied；原drain按合同拒绝、v2不封closure是正确保守结果，所有已观察C/W退出不代替责任结清。仓外QA后继以同一绝对预算等待完整已物化owner/队列/P3/控制/curator事实稳定收口；它不改变产品的准入、未知或排空门，也不能保证最后采样与SIGTERM之间不再有新责任。

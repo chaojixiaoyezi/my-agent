@@ -1,3 +1,9 @@
+## 原native传输失败的安全诊断（349独审通过，已集成待真实定位）
+
+原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。
+
+共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError只展示(resource_unsafe_path,owner_home)固定pair。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
+
 ## 2026-10-18 包内测试来源与隔离依赖修正（根310，待最终同源验收）
 
 原d82候选Mac包验发现测试把子进程PYTHONPATH误作业务根、隔离子进程缺显式pytest依赖；旧失败保留。只改两份测试：审批生命周期helper核实际canonical包与精确模块file/spec/相对叶一致；闭包测试在先绑定只读pyc后显式传parent测试依赖根，末核业务模块均来自copyroot。产品、QA子进程桥、运行库依赖和43源码专用分类不变，原生命周期/七项闭包行为断言完整保留。

@@ -1,3 +1,9 @@
+## 原native传输失败的安全诊断（349独审通过，已集成待真实定位）
+
+原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。
+
+共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError只展示(resource_unsafe_path,owner_home)固定pair。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
+
 ## 2026-10-17 原话备份收缩使用完整投影实测（253候选）
 
 完整候选与局部备份 token 不保证可相减；移除据此跳过收缩实测的估算门。候选超目标且备份尚可收缩时，保原带符号预算，只沿同 projector 与冻结校准重算一次，严格变小才采用；最小备份及无备份仍零重算。原容量接受门、保护材料、取消、CAS 和摘要模型调用次数不变。原140字符临时路径 mixed 失败留档；新增真实投影、未变小不采用、仍超限拒绝和中断传播回归。两OS新包须实际执行相关运行节点，43旧source-only不扩；候选不代表整体全仓、真实任务或发行验收通过。

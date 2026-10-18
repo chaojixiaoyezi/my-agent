@@ -1,3 +1,9 @@
+## 原native传输失败的安全诊断（349独审通过，已集成待真实定位）
+
+原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。
+
+共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError只展示(resource_unsafe_path,owner_home)固定pair。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
+
 ## 2026-10-18 测试来源权威与隔离依赖（根310，已实现待同源验收）
 
 测试与运行时各守来源边界：业务来源取实际canonical包file/spec与精确模块叶，不将PYTHONPATH搜索入口当权威；隔离子进程只以明确argv接纯测试依赖，业务pyc先绑定、依赖后附加并末核，不能往runtime装测试工具或回退开发业务源码。两处最小test-only修正保原行为断言和43源码专用分类，受影响16项追加双OS运行义务；原d82包失败与旧全仓证据保持。最终源/包/实际验收另绑定，不能以组件或旧source通过替代。详见TESTS及最终发行回执。

@@ -1,6 +1,6 @@
 # LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: W只消费C已准入pending；原池绑定出生观察，保actualThread和submit故障；坏时间须结构化拒绝，不从_threads清表猜退出，不重排/释放预留，同步原槽数和P5消费者测试。
-# 模块用途: 把实际worker队列扫描、原claim和原业务执行接在一起，并如实保留未结清的执行。
+# 模块用途: 把实际worker队列扫描、原claim和业务执行接在一起；异常只记claim摘要，仍保留未结执行。
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +17,7 @@ from .queue_service import claim_request
 
 
 # LLM: poll/stop/close由worker主循环串行调用；执行线程只运行原请求，不修改调度表或准入权威。
-# 类用途: 以有限槽位把本分区排队任务交给真实执行链，心跳线程不被模型调用阻塞。
+# 类用途: 用原有限槽位执行本分区任务；核收失败附安全摘要，心跳/未结Future与责任保持。
 class WorkerRequestPump:
     # LLM: 先核P4冻结事实；原request池增加纯出生观察，不新增池/槽，actualworker进入业务前保存引用；控制独立槽/合法认领pool.get不变。
     # 函数用途: 保存本次worker的队列根、owner池和本地执行槽。
@@ -108,7 +108,7 @@ class WorkerRequestPump:
 
     # LLM: future异常向组合根传播；不删异常责任或把初始化失败写成业务成功，processing原件保留。
     # LLM: D32每轮只try原负向清理，忙继续controls；只有真实canonical终态/fullclaim与旧attempt已核收才删除，outer实际异常链仅保债。
-    # 函数用途: 核收原Future，清理完成不等于请求正常完成或物理排空。
+    # 函数用途: 核收原Future；传播前仅输出本claim的安全hash诊断，不删失败责任或改变退休分支。
     def _reap(self):
         from ..conversation.agent_tool_approval import (
             complete_approval_retirement_future,
@@ -123,8 +123,18 @@ class WorkerRequestPump:
                 if complete_approval_retirement_future(error, claim):
                     del self._active[future]
                 continue
-            if future.result() is not True:
-                raise RuntimeError("worker_request_not_processed")
+            try:
+                if future.result() is not True:
+                    raise RuntimeError("worker_request_not_processed")
+            except BaseException as error:
+                try:
+                    from .logging import report_native_transport_diagnostic
+
+                    report_native_transport_diagnostic('worker_future_result', error,
+                        request_id=claim.request_id, execution_attempt_id=claim.execution_attempt_id)
+                except BaseException:
+                    pass
+                raise
             del self._active[future]
 
     # LLM: 前台及控制单向停止认领，不中断当前执行；六类排空仍由上层P6负责。
