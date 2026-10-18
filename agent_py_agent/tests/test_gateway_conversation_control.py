@@ -1,3 +1,5 @@
+# LLM: 网关会话控制回归；stop子进程仅在测试侧以私有阶段事实区分准备和原行为5秒，不改变产品或原停止断言。
+# 模块用途: 验证会话插话、停止、压缩与HTTP控制；修改子进程fixture时同时核异常/清理负例。
 from __future__ import annotations
 
 import json
@@ -4660,13 +4662,145 @@ def test_manual_compact_reports_typed_failure_instead_of_generic_retry(tmp_path)
     assert "请稍后重试" not in result.message
 
 
-# LLM: 子解释器业务仍由原 sys.executable 加载；只显式挂当前测试资源和已加载 pytest 依赖，不搜索开发环境或往包内补源码。
-# 若旧 worker 泄漏，只终止测试子进程；原异常、非 daemon 线程清理和 5 秒截止必须保持。
-# 函数用途: 在原stop正例关键入口注入失败，要求预期异常仍存在且没有非daemon线程阻塞解释器退出。
+# LLM: 仅测试侧子进程合同错误；stage先记录原失败阶段，清理不得把超时或异常改签为成功。
+# 类用途: 保留启动/行为门失败、原stderr和自有child是否回收，供回归断言与pytest报告核对。
+class _StopFixtureChildFailure(AssertionError):
+    # LLM: 不执行IO或操作进程；字段是测试观察事实，不成为产品状态或停止权限。
+    # 函数用途: 创建能保留原失败阶段和清理结果的测试异常。
+    def __init__(self, stage):
+        super().__init__(stage)
+        self.stage = stage
+        self.stdout = b""
+        self.stderr = b""
+        self.child_returncode = None
+        self.child_reaped = False
+        self.cleanup_error = None
+
+
+# LLM: 只读本次私有握手目录中的有界普通叶；身份错、链接、格式错直接失败，不从文本猜就绪。
+# 函数用途: 核对同一child的ready/start/entered结构化事实；缺叶只表示尚未发表。
+def _read_stop_fixture_phase(path, *, token, pid, phase):
+    import stat
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+        raise ValueError("子进程握手叶不是有界普通文件")
+    with path.open("rb") as stream:
+        raw = stream.read(4097)
+    if len(raw) > 4096 or json.loads(raw) != {"token": token, "pid": pid, "phase": phase}:
+        raise ValueError("子进程握手身份不匹配")
+    return True
+
+
+# LLM: 只写本次私有握手目录，atomic replace发表一个固定阶段；不得写产品目录或复用其它child事实。
+# 函数用途: 让父子进程互相确认同一pid/token的准备、放行与进入事实。
+def _write_stop_fixture_phase(directory, *, token, pid, phase):
+    target = directory / (phase + ".json")
+    if target.exists():
+        raise FileExistsError("拒绝覆盖子进程阶段事实")
+    pending = directory / (phase + ".tmp")
+    pending.write_text(json.dumps({"token": token, "pid": pid, "phase": phase}), encoding="utf-8")
+    pending.replace(target)
+
+
+# LLM: 仅原fresh-child模块导入完成后调用；有界等待parent的同身份start，不执行entry或启动观察线程。
+# 函数用途: 发表ready，收到准确放行后发表entered；原entry及退出仍受parent单一5秒行为门约束。
+def _await_stop_fixture_child_start():
+    import os
+
+    directory = Path(sys.argv[-3])
+    token = sys.argv[-2]
+    deadline = time.monotonic() + float(sys.argv[-1])
+    pid = os.getpid()
+    _write_stop_fixture_phase(directory, token=token, pid=pid, phase="ready")
+    while not _read_stop_fixture_phase(directory / "start.json", token=token, pid=pid, phase="start"):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("子进程等待entry放行超时")
+        time.sleep(min(0.01, remaining))
+    _write_stop_fixture_phase(directory, token=token, pid=pid, phase="entered")
+
+
+# LLM: 仅测试侧启动/回收本次Popen；准备默认30秒，放行entry到清理及解释器真实退出总5秒，不累计放大。
+# 函数用途: 用私有文件握手分开冷导入与原行为门；stdout/stderr进临时文件避免pipe塞满，不建观察线程。
+def _run_stop_fixture_child(script, arguments, *, cwd, environment, handshake_root,
+                            startup_timeout=30.0, behavior_timeout=5.0):
+    import math
+    import subprocess
+    import tempfile
+    import uuid
+
+    if any(not math.isfinite(value) or value <= 0 for value in (startup_timeout, behavior_timeout)):
+        raise ValueError("测试预算必须是有限正数")
+    with tempfile.TemporaryDirectory(dir=handshake_root, prefix="stop-child-", ignore_cleanup_errors=True) as name:
+        directory = Path(name)
+        token = uuid.uuid4().hex
+        command = [sys.executable, "-B", "-c", script, *arguments, str(directory), token, str(startup_timeout)]
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            started = time.monotonic()
+            process = subprocess.Popen(command, cwd=cwd, env=environment, stdout=stdout, stderr=stderr)
+            stage = "startup"
+            try:
+                deadline = started + startup_timeout
+                while not _read_stop_fixture_phase(directory / "ready.json", token=token, pid=process.pid, phase="ready"):
+                    if process.poll() is not None:
+                        raise _StopFixtureChildFailure("startup_exit")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise _StopFixtureChildFailure("startup_timeout")
+                    time.sleep(min(0.01, remaining))
+                if time.monotonic() > deadline:
+                    raise _StopFixtureChildFailure("startup_timeout")
+                if process.poll() is not None:
+                    raise _StopFixtureChildFailure("startup_exit")
+                stage = "behavior"
+                deadline = time.monotonic() + behavior_timeout
+                _write_stop_fixture_phase(directory, token=token, pid=process.pid, phase="start")
+                try:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired as error:
+                    raise _StopFixtureChildFailure("behavior_timeout") from error
+                if time.monotonic() > deadline:
+                    raise _StopFixtureChildFailure("behavior_timeout")
+                if process.returncode != 0:
+                    raise _StopFixtureChildFailure("behavior_exit")
+                if not _read_stop_fixture_phase(directory / "entered.json", token=token, pid=process.pid, phase="entered"):
+                    raise _StopFixtureChildFailure("behavior_not_entered")
+            except BaseException as error:
+                failure = error if isinstance(error, _StopFixtureChildFailure) else _StopFixtureChildFailure(stage + "_error")
+                try:
+                    if process.poll() is None:
+                        try:
+                            process.kill()
+                        except OSError:
+                            if process.poll() is None:
+                                raise
+                    process.wait(timeout=5)
+                except BaseException as cleanup_error:
+                    failure.cleanup_error = repr(cleanup_error)
+                stdout.seek(0)
+                stderr.seek(0)
+                failure.stdout, failure.stderr = stdout.read(), stderr.read()
+                failure.child_returncode = process.poll()
+                failure.child_reaped = process.poll() is not None
+                failure.args = (failure.stage + ": " + failure.stderr.decode("utf-8", "replace"),)
+                if not isinstance(error, Exception) or failure is error:
+                    raise
+                raise failure from error
+            stdout.seek(0)
+            stderr.seek(0)
+            return subprocess.CompletedProcess(command, process.returncode, stdout.read(), stderr.read())
+
+
+# LLM: 子解释器业务仍由原sys.executable加载；只显式挂原测试资源/pytest依赖；准备30秒与entry+cleanup+退出总5秒分开。
+# 原异常注入、非daemon枚举及所有业务断言保持；超时只回收本次child，不签原full或发行通过。
+# 函数用途: 在原stop正例关键入口注入失败，要求预期异常仍存在且无非daemon线程阻塞退出。
 @pytest.mark.parametrize('case', ['http', 'slow_close'])
 def test_stop_fixture_exception_path_never_leaves_a_live_worker(tmp_path, case):
     import os
-    import subprocess
 
     script = r'''
 import importlib.util
@@ -4691,6 +4825,7 @@ assert spec is not None and spec.loader is not None
 controls = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = controls
 spec.loader.exec_module(controls)
+controls._await_stop_fixture_child_start()
 error = HTTPError('http://127.0.0.1/owned-test', 403, 'synthetic rejection', {}, None) if case == 'http' else RuntimeError('synthetic control failure')
 entry = controls.test_http_ask_routes_stop_to_live_window_interrupt if case == 'http' else controls.test_stop_ack_is_bounded_when_provider_transport_close_blocks
 patch_name = '_http_host_headers' if case == 'http' else 'execute_gateway_conversation_control'
@@ -4705,10 +4840,127 @@ assert not [thread for thread in threading.enumerate() if thread is not threadin
 '''
     environment = {'PATH': os.defpath, 'HOME': str(tmp_path / 'host-home'),
         'MY_AGENT_HOME': str(tmp_path / 'host-home' / '.my-agent'), 'PYTHONDONTWRITEBYTECODE': '1'}
-    try:
-        result = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'work'), case,
-            str(Path(__file__).resolve()), str(Path(pytest.__file__).resolve().parent.parent)],
-            cwd=Path(__file__).resolve().parents[2], env=environment, capture_output=True, timeout=5)
-    except subprocess.TimeoutExpired:
-        pytest.fail('原测试worker在异常后阻塞解释器退出')
+    result = _run_stop_fixture_child(script, [str(tmp_path / 'work'), case,
+        str(Path(__file__).resolve()), str(Path(pytest.__file__).resolve().parent.parent)],
+        cwd=Path(__file__).resolve().parents[2], environment=environment, handshake_root=tmp_path)
     assert result.returncode == 0, result.stderr.decode('utf-8', 'replace')
+
+
+# LLM: 仅生成小型合成child，真实写私有ready/start/entered事实；不导入产品或替代原两个fixture。
+# 函数用途: 给失败合同负例提供独立子进程数据，避免用mock把回收或行为期限测绿。
+def _stop_fixture_probe_script(body, *, wrong_identity=False, enter=True):
+    return r"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+directory = Path(sys.argv[-3])
+token = sys.argv[-2]
+pid = os.getpid()
+# LLM: Synthetic child only; atomically publish its private protocol leaf.
+# 函数用途: 负例子进程写本次私有阶段事实，不触碰产品数据。
+def write(phase, use_token):
+    pending = directory / (phase + '.tmp')
+    pending.write_text(json.dumps({'token': use_token, 'pid': pid, 'phase': phase}))
+    pending.replace(directory / (phase + '.json'))
+write('ready', TOKEN_VALUE)
+deadline = time.monotonic() + float(sys.argv[-1])
+while not (directory / 'start.json').exists():
+    if time.monotonic() >= deadline:
+        raise TimeoutError('probe start deadline')
+    time.sleep(0.01)
+ENTER_STATEMENT
+""".replace('TOKEN_VALUE', "'wrong-token'" if wrong_identity else 'token').replace(
+        'ENTER_STATEMENT', "write('entered', token)" if enter else '') + body
+
+
+# LLM: 只启动本次临时合成child；参数、HOME和工作目录全部属于当前测试，不接真实产品配置。
+# 函数用途: 为负例提供原helper的最小调用，预算由用例显式收紧，不修改正式30+5默认值。
+def _run_stop_fixture_probe(tmp_path, script, *, startup_timeout=2.0, behavior_timeout=0.2):
+    import os
+
+    environment = {'PATH': os.defpath, 'HOME': str(tmp_path / 'home'), 'MY_AGENT_HOME': str(tmp_path / 'home/my-agent'),
+        'PYTHONDONTWRITEBYTECODE': '1'}
+    return _run_stop_fixture_child(script, [], cwd=tmp_path, environment=environment, handshake_root=tmp_path,
+        startup_timeout=startup_timeout, behavior_timeout=behavior_timeout)
+
+
+def test_stop_fixture_startup_deadline_never_ready_reaps_own_child(tmp_path, record_property):
+    with pytest.raises(_StopFixtureChildFailure) as caught:
+        _run_stop_fixture_probe(tmp_path, 'import time; time.sleep(60)', startup_timeout=0.2)
+    assert caught.value.stage == 'startup_timeout'
+    assert caught.value.child_reaped and caught.value.child_returncode is not None
+    assert caught.value.cleanup_error is None
+    record_property('failure_stage', caught.value.stage)
+    record_property('child_reaped', caught.value.child_reaped)
+
+
+def test_stop_fixture_behavior_deadline_stuck_entry_keeps_failure(tmp_path, record_property):
+    with pytest.raises(_StopFixtureChildFailure) as caught:
+        _run_stop_fixture_probe(tmp_path, _stop_fixture_probe_script('time.sleep(60)'))
+    assert caught.value.stage == 'behavior_timeout'
+    assert caught.value.child_reaped and caught.value.child_returncode is not None
+    assert caught.value.cleanup_error is None
+    record_property('failure_stage', caught.value.stage)
+    record_property('child_reaped', caught.value.child_reaped)
+
+
+def test_stop_fixture_child_exception_is_preserved_after_reap(tmp_path, record_property):
+    with pytest.raises(_StopFixtureChildFailure) as caught:
+        _run_stop_fixture_probe(tmp_path, _stop_fixture_probe_script("raise RuntimeError('original-child-error')"))
+    assert caught.value.stage == 'behavior_exit'
+    assert b'RuntimeError: original-child-error' in caught.value.stderr
+    assert caught.value.child_reaped and caught.value.child_returncode != 0
+    record_property('failure_stage', caught.value.stage)
+    record_property('child_reaped', caught.value.child_reaped)
+
+
+def test_stop_fixture_wrong_ready_identity_cannot_start_entry(tmp_path, record_property):
+    with pytest.raises(_StopFixtureChildFailure) as caught:
+        _run_stop_fixture_probe(tmp_path, _stop_fixture_probe_script('time.sleep(60)', wrong_identity=True))
+    assert caught.value.stage == 'startup_error'
+    assert caught.value.child_reaped and caught.value.child_returncode is not None
+    record_property('failure_stage', caught.value.stage)
+    record_property('child_reaped', caught.value.child_reaped)
+
+
+def test_stop_fixture_ready_exit_without_entry_is_not_success(tmp_path, record_property):
+    with pytest.raises(_StopFixtureChildFailure) as caught:
+        _run_stop_fixture_probe(tmp_path, _stop_fixture_probe_script('pass', enter=False))
+    assert caught.value.stage == 'behavior_not_entered'
+    assert caught.value.child_reaped and caught.value.child_returncode == 0
+    record_property('failure_stage', caught.value.stage)
+    record_property('child_reaped', caught.value.child_reaped)
+
+
+def test_stop_fixture_default_startup30_and_behavior5_remain_explicit():
+    import inspect
+
+    parameters = inspect.signature(_run_stop_fixture_child).parameters
+    assert parameters['startup_timeout'].default == 30.0
+    assert parameters['behavior_timeout'].default == 5.0
+
+
+# LLM: 只延迟parent对真实ready叶的读回，child仍受真实Popen管理；不得把迟到观察签成startup通过。
+# 函数用途: 用真实child和窄预算覆盖read返回已过截止的调度窗口，保留失败阶段及回收断言。
+def test_stop_fixture_late_ready_observation_cannot_pass_startup(tmp_path, monkeypatch, record_property):
+    original_read = _read_stop_fixture_phase
+
+    # LLM: 只给本负例制造parent读回延后，不修改child或原测试预算。
+    # 函数用途: 在真实ready已经读到后延迟返回，使末门必须重新核deadline。
+    def delayed_read(path, **identity):
+        ready = original_read(path, **identity)
+        if ready and identity["phase"] == "ready":
+            time.sleep(0.25)
+        return ready
+
+    monkeypatch.setattr(sys.modules[__name__], "_read_stop_fixture_phase", delayed_read)
+    script = _stop_fixture_probe_script("pass").replace(
+        "time.monotonic() + float(sys.argv[-1])", "time.monotonic() + 2.0")
+    with pytest.raises(_StopFixtureChildFailure) as caught:
+        _run_stop_fixture_probe(tmp_path, script, startup_timeout=0.2)
+    assert caught.value.stage == "startup_timeout"
+    assert caught.value.child_reaped and caught.value.child_returncode is not None
+    record_property("failure_stage", caught.value.stage)
+    record_property("child_reaped", caught.value.child_reaped)

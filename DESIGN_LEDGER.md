@@ -1,3 +1,11 @@
+## 2026-10-18 stop测试的准备与行为期限分界（428仓外候选，未合）
+
+状态：仅测试文件helper与文档候选，未改产品、33发行helpers或canonical。解决原5秒总child截止混入冷导入而把所有超时叫worker泄漏的问题；425两原参数2F保留，import-only约4.371秒不等于原full归因或通过。
+
+准备阶段以同一私有目录/pid/token的ready为事实，有界30秒；parent先建立原5秒截止再发表start，child收到后发表entered并执行原entry/异常注入/清理/非daemon断言，parent必须在同一5秒内核真正进程退出及进入事实。ready/完成消息、退出0但未entry不能替代原行为证据；不建观察线程、无限readline、产品状态或专项生产合同。任一阶段失败只回收本次Popen并保原stage，清理完成不改签成功。
+
+相关原两参数及合成负例必须定向验证；最终是否采用须root核原full longrepr后单点决定。候选与425诊断都不能代full/actual/双OS/安装权限或发行验收；后续精确commit/source map和义务清单只在根批准合入后另绑定。
+
 ## 2026-10-18 旧闭包消费与本代进展分界（409候选，待410独立复核）
 
 408及408A限定仅代次元数据consumer：首末完整严格库存各走原分类，旧expected/captured covered/本次固定committed全额原件immutable优先；集合外current责任逐存在侧分类，允许原心跳/新增/归档退役，不新增终态reader或写者权限。原history末raw、身份/角色/P4/freshP2及当前P1/P3/drain/producer seal保持，单次snapshot未知不捕获为成功、无重试/新registry。

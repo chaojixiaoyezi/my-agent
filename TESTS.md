@@ -1,3 +1,11 @@
+## 2026-10-18 stop子进程准备与行为期限（428仓外候选，未合）
+
+解决问题：原fresh child的整模块冷导入、fixture初始化与worker退出共用5秒，TimeoutExpired文案不能证明worker泄漏。425原两参数2F完整保留；一次import-only约4.371秒，未超过5秒且未运行entry，不代完整full结果。
+
+仅原会话控制测试文件新增标准库Popen/私有ready-start-entered握手：准备默认30秒有限等待，parent放行前起单一5秒行为期限，包含原entry、finally清理和解释器实际退出。输出到临时文件，无观察线程或无限readline；失败仅kill/wait本次Popen，保原failure-stage/stdout/stderr及回收事实。原HTTPError/RuntimeError注入、异常断言、非daemon枚举和两个参数均保留，不扩大行为5秒、不skip/xfail或daemon化。
+
+候选须跑原两个参数及启动未ready、entry卡住、异常保留、错就绪身份、ready无entry退出、迟到ready观察和默认期限负例；新增回归属于运行义务，不能source-only。focused结果只覆盖候选测试合同，原full最终trace仍待root决策，不授予full/actual/双OS/发行通过。
+
 ## 2026-10-18 旧代关闭消费中的当前责任推进（409候选）
 
 新增`test_gateway_closed_generation_progress.py`：真实原heartbeat和canonical在先的terminal归档writer，在两次原完整库存之间分别更新/退役本代processing；同代新增也应返回同一旧history。旧expected/covered/本次固定committed的删除、改写、首读缺失、初始摘要或交集冲突须拒，即使JSON改称current也不能重分类；旧history/tree/身份live或unknown、陌生旧代仍拒。
