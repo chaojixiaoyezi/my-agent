@@ -129,7 +129,11 @@ def test_actual_pyc_entry_without_handoff_exits_125(readonly_bytecode_package, t
     assert not (tmp_path / "explicit-home").exists()
 
 
+# LLM: 隔离子进程只读取显式测试依赖；产品先绑定只读pyc，末核不得借依赖目录回补业务模块。
+# 函数用途: 用parent实际pytest依赖执行原七项闭包断言，不向runtime安装测试工具或放宽隔离。
 def test_original_source_closure_assertions_bind_separate_bytecode_package(readonly_bytecode_package, tmp_path):
+    dependencies = Path(pytest.__file__).resolve().parent.parent
+    assert Path(pytest.__spec__.origin).resolve() == Path(pytest.__file__).resolve()
     original = Path(__file__).with_name("test_gateway_coordinator_source_closure.py")
     # 正式QA保留独立测试源码；业务模块只能来自实际无源码包，原home/身份断言完整运行。
     qa = tmp_path / "qa"
@@ -144,12 +148,22 @@ sys.path.insert(0, sys.argv[1])
 import agent_py_agent
 assert pathlib.Path(agent_py_agent.__file__).suffix == '.pyc'
 assert pathlib.Path(agent_py_agent.__file__).is_relative_to(pathlib.Path(sys.argv[1]))
+dependencies = pathlib.Path(sys.argv[4]).resolve()
+sys.path.insert(1, str(dependencies))
 import pytest
-raise SystemExit(pytest.main(['-q', '--tb=short', '-p', 'no:cacheprovider',
- '--basetemp', str(pathlib.Path(sys.argv[2]).parent/'pytest-temp'), '-c', sys.argv[3], sys.argv[2]]))
+pytest_file = pathlib.Path(pytest.__file__).resolve()
+assert pathlib.Path(pytest.__spec__.origin).resolve() == pytest_file
+assert pytest_file == dependencies/'pytest/__init__.py'
+code = pytest.main(['-q', '--tb=short', '-p', 'no:cacheprovider',
+ '--basetemp', str(pathlib.Path(sys.argv[2]).parent/'pytest-temp'), '-c', sys.argv[3], sys.argv[2]])
+for name, module in tuple(sys.modules.items()):
+ if name in {'agent', 'agent_py_agent'} or name.startswith(('agent.', 'agent_py_agent.')):
+  path = pathlib.Path(module.__file__).resolve()
+  assert path.is_relative_to(pathlib.Path(sys.argv[1])) and path.suffix == '.pyc'
+raise SystemExit(code)
 """
     result = subprocess.run([sys.executable, "-I", "-B", "-c", program,
-                             str(readonly_bytecode_package), str(copied), str(config)],
+                             str(readonly_bytecode_package), str(copied), str(config), str(dependencies)],
                             env=_child_environment(tmp_path), cwd=tmp_path,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

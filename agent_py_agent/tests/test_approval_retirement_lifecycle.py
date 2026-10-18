@@ -19,15 +19,33 @@ from agent_py_agent.tests.test_host_command_operation_replay import _CountingToo
 from agent_py_agent.tests.test_tool_approval_foreground_scope import _foreground
 
 
-# LLM: 只替模型循环产出合成call，原Agent.run/参数绑定/ToolExecutor ask/原审批发布等待均真执行；不造写源。
-# 函数用途: 在真实run里触发一次尚未进handler的审批取消，故障仅为另一线程持原文件锁。
+# LLM: 只核本测试实际canonical包与runtime_mixin的file/spec/精确相对叶一致，支持同包.py或.pyc；整个包的外部身份仍由源冻结/包QA来源门核验，不消费PYTHONPATH或扩展测试namespace。
+# 函数用途: 在安装合成审批loop前确认补丁目标属于当前业务包；只读真实模块文件，不构造Agent或改变导入环境。
+def _assert_original_runtime_mixin_origin():
+    from pathlib import Path
+
+    import agent_py_agent
+
+    package_file = Path(agent_py_agent.__file__).resolve(strict=True)
+    package_spec = agent_py_agent.__spec__
+    assert package_spec is not None and agent_py_agent.__name__ == package_spec.name == "agent_py_agent"
+    assert package_file.is_file() and package_file.name in {"__init__.py", "__init__.pyc"}
+    assert Path(package_spec.origin).resolve(strict=True) == package_file
+    expected_name = "agent_py_agent.agent.agent_core.runtime_mixin"
+    mixin_spec = runtime_mixin.__spec__
+    assert mixin_spec is not None and runtime_mixin.__name__ == mixin_spec.name == expected_name
+    mixin_file = Path(runtime_mixin.__file__).resolve(strict=True)
+    assert mixin_file.is_file() and Path(mixin_spec.origin).resolve(strict=True) == mixin_file
+    assert mixin_file == package_file.parent / "agent" / "agent_core" / ("runtime_mixin" + package_file.suffix)
+
+
+# LLM: 先核canonical业务模块来源再只替模型循环产出合成call；原Agent.run/参数绑定/ToolExecutor ask/审批发布等待及handler零调用断言保持，不把子进程PYTHONPATH当业务根。
+# 函数用途: 确认同包补丁目标后，在真实run触发尚未进handler的审批取消；故障仍仅为另一线程持原文件锁。
 def install_original_approval_loop(world, monkeypatch, lock_kind, seen):
     tool = _CountingTool()
     tool.runtime_policy = replace(tool.runtime_policy, approval_policy=ApprovalPolicy('always'), promotes_task=True)
 
-    import os
-    from pathlib import Path
-    assert Path(runtime_mixin.__file__).resolve().is_relative_to(Path(os.environ["PYTHONPATH"]).resolve())
+    _assert_original_runtime_mixin_origin()
     original_loop = runtime_mixin._execute_runtime_loop
 
     def fake_loop(agent, loop_params):
