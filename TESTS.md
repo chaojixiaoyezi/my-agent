@@ -19516,3 +19516,14 @@ test_gateway_ask_control_parity.py通过既有临时HTTP/G1/C与原model/card/ow
 `test_admin_self_gateway_diagnostics.py` 的纯标准库命令在Linux从 `os.defpath` 选择沙箱系统底图中的Python3，缺失明确报测试环境错误；其它平台保留原解释器。两处合成命令不再假定安装目录中的宿主解释器对普通owner可见。原34断言、5装饰器、五档正例及两项托管日志拒绝保留，不改变生产沙箱或允许根。
 
 619合成对照确认四档普通范围内包解释器启动返回127，而系统解释器成功；Full Access两者均成功。622作者及非作者五完整文件均190项通过，root在只读原Q05业务pyc及原Linux镜像的新组件中运行原整文件16项通过。这是测试夹具修正，旧Q05失败不回写，不新增节点、source-only、skip或权限。
+
+
+## 控制同步结果与 claimed 回送闭包
+
+`test_control_receipt_delivery_closure.py` 使用原 SimpleAgent/Count0 规范控制生产者、持久回执codec、状态投影、ChannelManager轮询与durable投递worker，provider/HTTP仅作IO替身。`/delegate enable/status`及`/help`、`/status`、`/schedule`、`/model`、`/group`与无活动任务`/stop`均验证同步成功或明确拒绝的结果能回送一次；业务ok=False不等于运输rejected。
+
+另沿原C generation/dispatch、W bootstrap/内核出生登记生成真实claimed，冻结执行调度仅用于观察等待窗口；领域观察替身返回原DTO默认未声明状态，不直接制造accepted。规范claimed不隔离、不提前发送，随后原W producer完成同一operation才可回送。显式空/None/未知/坏值、steer未声明状态、空结果与操作/回执/目标/kind冲突保留原硬门。全部新增节点为普通双平台runtime；不新增source-only、skip、xfail或发送豁免。
+
+### 最终控制回执补丁的根验收范围
+
+根focused使用83个完整测试文件：本次59个实际消费者、原42源码专用节点所在完整文件及最近活动图标／角色快照／接单表达／包夹具等集成文件的去重并集，并运行五项原严格检查；最终全仓另完整执行，覆盖原387文件清单及其余仓库测试。原source-only/fixture/native/formal分类不变，不能用源码通过代替包内实际运行。新增39普通节点追加到原6856运行义务，最终6895；包选择由914追加一个完整文件为915。旧失败现场、夹具错误和非普通结果保留，最终结果以同源实际记录为准，本文不预先签署通过。

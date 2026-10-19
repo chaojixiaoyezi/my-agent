@@ -612,9 +612,9 @@ def read_gateway_control_operation(
     return receipt
 
 
-# LLM: HTTP/TUI/adapter consume one typed projection. Target turn id remains ``request_id`` for
-# compatibility, while ``operation_id`` is the independent receipt key used for polling.
-# 函数用途: 把控制操作回执转换成客户端可展示和对账的状态字典。
+# LLM: HTTP/TUI/adapter共用此投影；operation_id仍是独立轮询身份，request_id只标目标回合。
+#   仅completed非steer完整结果未声明投递状态时补accepted（可回送，不等于业务ok或provider已sent）；显式值/未知不改。
+# 函数用途: 投影原控制回执并闭合同步领域结果的运输语义，不改原账本、领域成功或发送门。
 def gateway_control_operation_status_payload(
     receipt: GatewayControlOperationReceipt,
 ) -> dict[str, Any]:
@@ -633,6 +633,9 @@ def gateway_control_operation_status_payload(
                 if key in receipt.result
             }
         )
+        if (receipt.state == "completed" and receipt.command_kind != "steer"
+                and "delivery_status" not in receipt.result):
+            payload["delivery_status"] = "accepted"
     elif receipt.state in {"prepared", "claimed", "executing"}:
         payload.update(
             {

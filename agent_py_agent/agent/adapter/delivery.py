@@ -31,7 +31,7 @@ _PENDING_WATCH_KINDS = frozenset(
     {"input_receipt", "request_result", "control_receipt"}
 )
 _CONTROL_RECEIPT_STATES = frozenset(
-    {"prepared", "executing", "completed", "terminal_unknown"}
+    {"prepared", "claimed", "executing", "completed", "terminal_unknown"}
 )
 # LLM: 隔离类别是结构化字段：manager 在生成隔离时按 HTTP 状态码 + 服务端 error_code 判定，delivery 只读它，
 #   不再拿原因字符串做正则匹配（AGENTS.md：机器判断只用结构化事实）。`auth` 才给用户可见回复。
@@ -985,7 +985,7 @@ class _GatewayReplyReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
 # 类用途: 集中处理控制操作轮询、目标绑定和明确终态投递，不创建线程或第二份状态源。
 class _GatewayControlReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
     # LLM: Unknown control delivery is reconciled only through its independent operation receipt.
-    # Prepared/executing/unknown remain WAIT; only completed accepted/rejected may reach provider IO.
+    # Prepared/claimed/executing/unknown remain WAIT; only completed accepted/rejected may reach provider IO.
     # 函数用途: 轮询 `/btw` 等控制操作的稳定回执，并在明确终态后更新原占位消息。
     def _process_control_receipt(self, record: PendingGatewayReply) -> int:
         if self._poll_control_receipt is None:
@@ -1046,7 +1046,7 @@ class _GatewayControlReceiptWorkerMixin(_GatewayQuarantineTerminalizeMixin):
                 epoch=record.claim_epoch,
             )
             return 0
-        if result.control_state in {"prepared", "executing"}:
+        if result.control_state in {"prepared", "claimed", "executing"}:
             self.store.release_claim(
                 record,
                 owner=self._claim_owner,

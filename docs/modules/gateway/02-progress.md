@@ -1,3 +1,9 @@
+## 2026-10-19 同步控制回执与claimed回送闭包（633候选）
+
+在既有状态投影内，仅对完整completed、非steer且规范结果没有delivery_status键的同步结果补accepted，含明确业务拒绝；它不等于provider已sent，也不改持久领域结果。显式空/None/坏值/unknown、空结果和steer缺失保持原门。adapter原五阶段补齐claimed：提交、watcher、typed结果和WAIT一致，原accepted/rejected发送与身份/幂等门不变。
+
+新增功能回归覆盖实际领域结果经耐久回执、轮询、投递store到fake provider，并用原C/W登记与出生观察claimed后同op一次完成。离线组件与完整消费者验证不替代真实628、全仓、双平台发行或真实provider验收；原失败现场保留。详见[结构合同](04-structure.md)与TESTS。
+
 ## 2026-10-19 closed角色中间读取补齐strict snapshot（已独审合入本地候选）
 
 只将当前role第三次校验接入既有snapshot_retries=2，解决原正常heartbeat原子发表落入stat/open窗口被永久隔离；默认CountNone kwargs与旧角色/P4/raw首末核验保持。原591同一真实atomic新节点1F后修绿，六文件153项通过；安全路径和原3次上限不放宽，不改底层reader。新增运行回归须最终双OS新包pyc实际执行，原608失败/未知leaf仍保留；详细见角色关闭合同。

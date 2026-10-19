@@ -589,6 +589,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_recovery_committed_report.py # 原终态计数、实际typed分类与观察读失败保护
 |-- agent_py_agent/tests/test_f3_worker_error_contracts.py # worker启动错误唯一分类合同
 |-- agent_py_agent/tests/test_control_producer_receipts.py # 原控制分派、claimed身份与精确目标
+|-- agent_py_agent/tests/test_control_receipt_delivery_closure.py # 同步领域结果到真实投递链及claimed等待/隔离边界
 |-- agent_py_agent/tests/test_control_producer_memory_ingress.py # C中保留普通用户Memory活封印与确认
 |-- agent_py_agent/tests/test_gateway_multiprocess_control_forward.py # C唯一初始化新owner、W只读控制与回执重放
 |-- agent_py_agent/tests/test_tool_coordinator_execution_ports.py # 原工具claim短scope与实际未结异常传播
@@ -3630,3 +3631,5 @@ closed角色第三次读取验证入口：`agent_py_agent/tests/test_gateway_rol
 ```
 
 关键文件说明：`test_im_dispatch_ack_presentation.py` 经原接单及自然回复入口验证表达角色、任务延续、缺接单与已有 pending 优先级；不依赖仓外QA，不替代真实模型验收。
+
+`test_control_receipt_delivery_closure.py`贯穿原领域生产者、规范回执与通道投递；仅IO替身，不绕过身份或显式终态发送门。

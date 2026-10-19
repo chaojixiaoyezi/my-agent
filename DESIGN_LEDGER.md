@@ -8752,3 +8752,9 @@ G0后继发布阻断：普通control先append、目标后转idle时，原idle/�
 ## 2026-10-19 合成Shell测试的可见工具（已独审合入，待组合验收）
 
 测试使用的宿主包解释器是否可见，与普通owner是否可读自己的日志是两个事实。纯标准库探针选择原系统沙箱可见的真实解释器，不能通过扩大安装目录读权或切换Full Access让测试通过。实现只在测试夹具，原生产权限与执行路径不变，验证见TESTS同条。
+
+## 2026-10-19 同步控制回执的跨进程投递闭合（已独审合入，待最终同源验收）
+
+真实飞书验收中，控制操作已完成而结果省略投递态，导致正确的通道外发门将其隔离。复用唯一 `gateway_control_operation_status_payload`：仅已验证 completed、非 steer、非空且未声明该键的同步结果明确 `accepted`；它表示服务器有确定回执，不依赖业务 `ok`、不表示 provider sent。显式空值、unknown、坏值与 steer 原样受原门限制。既有 claimed 同步到 adapter 校验、watcher 分类与等待集合，不新增状态、权限或投递旁路。
+
+作者与非作者功能回归、旧代码反例及原消费者已核；早先真实失败保持失败，修正版真实链路、最终源码全仓、安装包及本机部署分别验收，不能互相替代。详见[网关进展](docs/modules/gateway/02-progress.md)与[网关结构](docs/modules/gateway/04-structure.md)。

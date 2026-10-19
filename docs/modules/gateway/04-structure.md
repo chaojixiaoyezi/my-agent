@@ -3526,3 +3526,10 @@ writer.write_model必须保留以消费原ToolBoundaryChunkFilter优先接口，
 ### /ask 与 /control 合法控制的唯一分派（588候选）
 
 http_handlers的两个入口保各自认证、原语法和正文权威，合法控制统一进入_dispatch_parsed_conversation_control；_handle_cold_owner_management_control只容纳原管理服务的错误/回执投影。冷管理、model元数据和普通远端仍消费各自原来源，ready管理及Count0复用原persistent入口。model_metadata_transaction按实际route分别取/ask goal优先prompt、/control command优先prompt；文本只view/select/set_default，不能借/client/models操作或vector进入模型元数据。原C唯一物化/W existing-only及owner/lease/Root事实不移位。
+
+
+### 同步控制结果的运输投影
+
+规范控制回执仍唯一保存prepared、claimed、executing、completed、terminal_unknown。`gateway_control_operation_status_payload`是HTTP/TUI/adapter唯一结果投影：仅完整非空result、completed且非steer，并且原result严格没有`delivery_status`键时，补`accepted`表示同步控制回执可回送；不改持久结果，不推导命令ok或provider已sent。显式空、None、坏值、unknown和steer未声明状态一律不补。无活动任务stop的原DTO显式空会被既有to_dict省略，归入这个已验证同步结果合同。
+
+adapter提交验证、watcher选择、typed结果schema与投递WAIT均接受原claimed阶段；prepared/claimed/executing只等待同operation。completed仍必须通过原accepted/rejected与非空正文发送门，provider成功后才写schema8 sent；权限、原owner/actor/目标绑定、幂等、unknown语义不变。

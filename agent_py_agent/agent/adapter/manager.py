@@ -460,7 +460,7 @@ def _gateway_denial_user_message(denial_code: str) -> str:
 
 # LLM: A control watcher is anchored by the independent operation receipt. The target turn remains
 # request_id and must never be reused as the durable polling/deduplication key.
-# 函数用途: 校验 Gateway 返回的控制回执身份和阶段，防止把目标回合 ID 当成操作回执 ID。
+# 函数用途: 校验含claimed的原五阶段和回执身份，防止把目标回合ID当作操作回执ID。
 def _validate_control_receipt_submission(submission: GatewayAskSubmission) -> None:
     operation_id = str(submission.operation_id or "").strip()
     receipt_id = str(submission.receipt_id or "").strip()
@@ -473,6 +473,7 @@ def _validate_control_receipt_submission(submission: GatewayAskSubmission) -> No
         raise ValueError("gateway control receipt reuses target request_id")
     if control_state not in {
         "prepared",
+        "claimed",
         "executing",
         "completed",
         "terminal_unknown",
@@ -481,11 +482,12 @@ def _validate_control_receipt_submission(submission: GatewayAskSubmission) -> No
 
 
 # LLM: Any control operation whose transport/effect boundary remains unknown must enter the durable
-# operation receipt watcher. Command kind changes closeout behavior but not stable identity.
+# operation receipt watcher, including canonical claimed. Command kind changes closeout behavior but not stable identity.
 # 函数用途: 判断控制提交是否需要创建占位并通过 operation ID 后续对账。
 def _control_submission_needs_watcher(submission: GatewayAskSubmission) -> bool:
     return submission.delivery_status == "unknown" or submission.control_state in {
         "prepared",
+        "claimed",
         "executing",
         "terminal_unknown",
     }
