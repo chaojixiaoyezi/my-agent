@@ -53,6 +53,14 @@ Gateway 重启或执行超时后，接班进程按原请求号续跑同一回合
 续跑回合的工具轮号可能与被打断的那一轮同号，所以续跑代次的工具卡与审批块号追加 `:resume<代次>`；首代块号不变。
 旧版 TUI 不认识该 kind 时按未知事件忽略，不显示也不报错。细节见 [Gateway 安全重启](GATEWAY_SAFE_RESTART.md) 文末第三批。
 
+## 前台活动展示空窗
+
+前台turn仍为typed `running/interrupting`、但上一思考与工具块已终态且下一次模型显示事件尚未到达时，消息尾部保留一条纯展示活动行；不创建thinking、工具、后台任务或执行状态。原私有raw模型输出仍只计量，不为活动提示公开正文。`assistant_completed`只冻结一个显示段，只有原turn终态才结束前台运行提示。
+
+审批面板、显式压缩/参数进度、正在显示的助手正文及现有主后台活动沿原替代显示，避免两个Working；仅排队、blocked/waiting与真实终态不凭空显示运行。补位行最多一行，按显示列宽裁剪，最窄一列仍保留glyph。活动思考已有正文但暂时没有新token时，整帧缓存仍依据可见动画时钟更新；空闲仍不周期重排历史。此修复不证明模型仍在计算，也不把客户端等待签作后端成功。
+
+确定性回归见`test_tui_working_indicator.py`，覆盖工具/完整thinking/私有计量空窗、4Hz fakeclock、审批/压缩/正文/后台去重、队列与终态及最小终端。组件通过不替代具体安装版本的原生TUI验收。
+
 ## 实现入口
 
 - `agent_py_agent/cli/chat_parts/tui_events.py`、`tui_view_model.py`：事件信封和 reducer。

@@ -1,3 +1,9 @@
+## 2026-10-19 closed角色第三次读取的strict snapshot接线（已独审合入本地候选）
+
+首末_role_snapshot既有原snapshot_retries=2不变；closed分支对当前role的第三次_check_role_marker也显式传2，保留该次读取。默认CountNone不传新kwargs，仍用原默认0读取；16384上限、旧代/PID、完整schema/P4/instance/count、W五动态分界和C/旧role/registry全raw双快照不变。只复用186原strict同parent FD、typed A/B安全单链接替换机制，最多3次叶尝试；不改nofollow底层，不捕获异常文字作retry，不重捕授权或认证writer。
+
+symlink/hardlink/FIFO/非普通、root/中间/parent身份变化、能力/权限/超限及清理错误保持拒绝。原producer确定性stat/open原子发表节点在准确591上1F、修复同测试绿；六文件153组件通过不代真实生命周期。608当次具体leaf/写者没有捕获，不能据此补判根因或closure。新增运行回归须最终两OS新包pyc实跑，已独审合入，待root统一最终验收。
+
 ## 2026-10-18 旧闭包消费与当前代责任推进（409候选，待独立复核）
 
 旧v2消费仍两次读取完整严格库存，各自执行原分类；旧expected、captured covered及本次固定committed的全额引用须首末存在、原raw/摘要不变，优先于任何current字段。固定范围之外的当前代责任可自然新增、更新或退役，各实际存在侧仅走原current分类，不重采committed、不改历史baseline；末次history完整raw及旧tree/角色/P4/身份/freshP2仍原核。

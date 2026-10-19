@@ -1,5 +1,5 @@
 # LLM: 本模块是 TuiViewSnapshot 到 prompt_toolkit formatted lines 的唯一 block renderer；不得读取原始模型文本猜工具、权限或生命周期。
-# 模块用途: 生成消息和提示，复用有界稳定前缀及已净化行组；快照失败仍明确提示，不用缓存掩盖状态变化。
+# 模块用途: 生成消息与typed活动提示，复用有界稳定前缀及已净化行组；活动行和动画缓存保持一致，不用缓存掩盖状态变化。
 
 from __future__ import annotations
 
@@ -318,8 +318,8 @@ class TuiRenderContext:
         object.__setattr__(self, "focused_agent_failure_label", str(self.focused_agent_failure_label or "").strip())
 
 
-# LLM: frame provider 必须复用 renderer 的可见上下文规则；Todo 的时钟只在 snapshot.has_active_work 时进入 key。
-# 函数用途: 生成完整画面的缓存键，刷新健康变化必须重绘，避免恢复连接后仍显示旧警告。
+# LLM: frame provider 必须复用renderer的可见活动规则；所有可见思考和前台补位行的动画时钟进入key，终态不引入周期刷新。
+# 函数用途: 生成完整画面的缓存键，既刷新活动动画，也避免恢复连接后仍显示旧警告。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -337,13 +337,14 @@ def tui_render_context_key(
     )
     # 已经有正文的思考属于真实 transcript，按 created_seq 留在对应 assistant
     # 前面；只有尚无正文的等待 spinner 固定在底部。
-    active_activity = tuple(
-        block for block in active_thinking if not (block.text or block.detail)
-    )
-    visible_activity = _visible_activity_blocks(snapshot, active_activity)
+    visible_activity = _visible_activity_blocks(snapshot, active_thinking)
     thinking_animation = tuple(
         (block.block_id, _thinking_animation_key(block, context))
         for block in visible_activity
+    )
+    foreground_animation = (
+        context.spinner_index % len(SPINNER_GLYPHS)
+        if _foreground_activity_visible(snapshot) else None
     )
     background_animation = tuple(
         (block.block_id, _background_animation_key(block, context))
@@ -405,6 +406,7 @@ def tui_render_context_key(
         context.agent_view_depth,
         connection_animation,
         thinking_animation,
+        foreground_animation,
         background_animation,
         compact_animation,
         tool_input_animation,
@@ -573,8 +575,8 @@ class TuiBlockRenderCache:
         return TuiRenderCacheStats(self._hits, self._misses, len(self._entries))
 
 # LLM: render_tui_snapshot 只组合 typed block/order；缓存前缀止于首个活动块之前，余下按原顺序合流，不改写 reducer。
-# 终端交互's SpinnerWithVerb 位于消息区末尾，因此 main 活动从 background block 单独放到 transcript 末尾。
-# 函数用途: 复用稳定历史布局并渲染变化尾部，输出同一组正文锚点；不读取历史或执行任务。
+# 主活动从规范background块或typed前台状态的纯展示补位行置于消息末尾；不将补位写进历史。
+# 函数用途: 复用稳定历史布局并渲染变化尾部；活动回合无其它可见指示时补纯展示行，不创建执行块或修改状态。
 def render_tui_snapshot(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -622,6 +624,8 @@ def render_tui_snapshot(
     for block in visible_activity:
         rendered = cache.render(block, context) if cache is not None else _render_block(block, context)
         _append_block(lines, rendered)
+    if _foreground_activity_visible(snapshot):
+        _append_block(lines, _render_foreground_activity(snapshot, context))
     background = next(
         (
             block
@@ -706,9 +710,8 @@ def _sanitize_formatted_line(line: FormattedLine) -> FormattedLine:
     return SafeFormattedLine(line)
 
 
-# LLM: Empty waiting spinners follow 终端交互 and disappear behind a visible assistant stream;
-# explicit thinking text stays in chronological transcript order and is never removed/reinserted.
-# 函数用途: 选择本帧应显示在可滚动正文末尾的前台思考活动块。
+# LLM: 空等待动画遇到可见正文即隐藏，已有思考正文仍按原位置显示；renderer和整帧缓存共用这个可见规则。
+# 函数用途: 选择本帧真正可见的思考块，非空思考也必须保留动画缓存时钟。
 def _visible_activity_blocks(
     snapshot: TuiViewSnapshot,
     activity_blocks: tuple[TuiBlock, ...],
@@ -725,9 +728,33 @@ def _visible_activity_blocks(
         and bool(block.text or block.detail)
         for block in snapshot.active_blocks
     )
-    if has_visible_assistant_stream:
-        return ()
-    return tuple(block for block in activity_blocks if block.role == "thinking")
+    return tuple(block for block in activity_blocks if block.role == "thinking"
+                 and (not has_visible_assistant_stream or bool(block.text or block.detail)))
+
+
+# LLM: 只读原typed turn phase及已有块可见性；不从正文语义、工具结果或队列推断执行状态，也不创建第二活动权威。
+# 函数用途: 回合仍运行但工具或思考已收口时补位，已有审批、压缩、参数、正文或后台活动则去重。
+def _foreground_activity_visible(snapshot: TuiViewSnapshot) -> bool:
+    if snapshot.status.phase not in {"running", "interrupting"} or snapshot.permission is not None:
+        return False
+    for block in snapshot.active_blocks:
+        if block.phase in TERMINAL_RENDER_PHASES:
+            continue
+        if block.role in {"connection", "thinking", "compact", "tool_input", "background"}:
+            return False
+        if block.role == "assistant" and (block.text or block.detail):
+            return False
+    return True
+
+
+# LLM: 此行只投影原turn状态，不进入store、历史或模型；glyph时钟与frame key同周期，单行按原显示列宽裁剪，最窄仍保glyph。
+# 函数用途: 在消息末尾显示前台正在处理或中断，填补相邻工具和模型展示事件之间的空窗。
+def _render_foreground_activity(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
+    label = "正在中断…" if snapshot.status.phase == "interrupting" else "处理中…"
+    glyph = SPINNER_GLYPHS[context.spinner_index % len(SPINNER_GLYPHS)]
+    prefix = glyph + (" " if context.width > 1 else "")
+    label = _truncate_text(label, max(0, context.width - display_width_text(prefix)))
+    return ((("class:tui-spinner-highlight", prefix), ("class:tui-thinking", label)),)
 
 
 # LLM: block dispatch 只读取 reducer role/kind/phase，未知角色显式降为 system 样式而不透传 payload。

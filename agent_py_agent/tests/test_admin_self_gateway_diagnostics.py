@@ -1,7 +1,9 @@
-# LLM: 所有路径、运行和claim均在pytest临时Home中真实创建；只读合成日志，不启动Gateway/模型/网络或替换授权门。
+# LLM: 路径/运行/claim均在临时Home真实创建；合成stdlib命令只选原sandbox可见解释器，不启动Gateway/模型/网络或替换授权门。
 # 模块用途: 经原生产SimpleAgent和ToolExecutor验证管理员诊断入口与文件/Shell边界。
 import json
+import os
 import shlex
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -121,18 +123,33 @@ def test_self_diagnostics_keep_canonical_authority_and_original_boundaries(tmp_p
         assert 'gateway_status' not in case.agent.tools.tools
 
 
+# LLM: 仅合成纯stdlib Shell测试选择原sandbox系统读根中的真实解释器；不授予/build读取权，不替代父进程pyc业务导入或放宽任何profile。
+# 函数用途: Linux包内sys.executable可能在owner墙外，用系统默认搜索路径的Python读取合成日志；其它平台保原解释器，缺依赖明确失败。
+def _sandbox_stdlib_python() -> str:
+    if sys.platform != 'linux':
+        return sys.executable
+    executable = shutil.which('python3', path=os.defpath)
+    if executable is None:
+        raise RuntimeError('合成Shell只读测试需要原系统可见路径中的Python3，不能回退沙箱外的包解释器')
+    return executable
+
+
+# LLM: 沿原五profile的真实工具/运行账和原权限读取own日志，解释器选择不改变允许根或业务导入来源。
+# 函数用途: 验自身合成日志原本可读，避免将包解释器不可见误判为普通用户读权限缺陷。
 @pytest.mark.parametrize('profile', PROFILES)
 def test_real_shell_can_read_only_synthetic_own_log_under_original_mode(tmp_path, profile):
     case = diagnostic_case(tmp_path, profile)
-    command = shlex.join([sys.executable, '-c', 'from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())', str(case.own_log)])
+    command = shlex.join([_sandbox_stdlib_python(), '-c', 'from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())', str(case.own_log)])
     result = invoke(case, 'run_command', {'command': command})
     assert result.result.ok and _BODY in result.result.output
 
 
+# LLM: 同一可见stdlib解释器仍必须被原托管日志门拒绝；不能靠解释器本身启动失败凑出安全负例。
+# 函数用途: 保持Full Access及普通管理员对Gateway托管日志的真实拒读断言。
 @pytest.mark.parametrize('profile', ['admin-full', 'admin-auto'])
 def test_real_shell_does_not_read_managed_gateway_queue_log(tmp_path, profile):
     case = diagnostic_case(tmp_path, profile)
-    command = shlex.join([sys.executable, '-c', 'from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())', str(case.paths.log)])
+    command = shlex.join([_sandbox_stdlib_python(), '-c', 'from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())', str(case.paths.log)])
     result = invoke(case, 'run_command', {'command': command})
     assert not result.result.ok and _BODY not in result.result.output
 

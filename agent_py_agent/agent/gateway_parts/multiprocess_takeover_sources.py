@@ -1,4 +1,4 @@
-# LLM: P1不是停止证明；generation metadata只定位旧N，P2仍实际核实；角色集合只取规范wN.json，正常心跳temp/lock不属于角色源，逐份原nofollow/旧代拒绝不变。
+# LLM: P1不是停止证明；规范角色集合/旧代拒绝不变，closed第三次读复用原有界strict snapshot，默认CountNone仍原nofollow读链。
 # 模块用途: 发现原旧域及角色缺口；v2完整关闭范围可解除角色拒绝，非空P1仍需fresh P2，缺旧历史不补封或授信。
 import hashlib
 import json
@@ -44,10 +44,11 @@ def _role_marker_names(root) -> list[str]:
             if re.fullmatch(r"w(0|[1-9][0-9]*)\.json", name)]
 
 
-# LLM: 严格有界nofollow只读；字段缺失/旧代一律unknown，C当前PID不能由其它进程冒领。
-# 函数用途: 查单个角色标记是否仍需独立的主体/历史树覆盖证明。
-def _check_role_marker(root, parts, current_c_run_id) -> None:
-    content = read_bytes_beneath(root, parts, max_bytes=16384, require_dir_fd=True)
+# LLM: 默认0保原读取kwargs；closed显式2仅复用原strict安全叶snapshot，硬路径/父链变化仍拒，字段/旧代/C PID检查不变。
+# 函数用途: 只读核单个角色标记；避免正常atomic发表与closed重读竞争，不新增写者认证或关闭证明。
+def _check_role_marker(root, parts, current_c_run_id, *, snapshot_retries=0) -> None:
+    content = read_bytes_beneath(root, parts, max_bytes=16384, require_dir_fd=True,
+                                 **({"snapshot_retries": snapshot_retries} if snapshot_retries else {}))
     if content is None:
         return
     value = json.loads(content)
@@ -57,8 +58,8 @@ def _check_role_marker(root, parts, current_c_run_id) -> None:
         raise ValueError("old_role_lifecycle_unproven")
 
 
-# LLM: 只消费原v2完整范围及controller固定writer raw观察；当前W双读复用原P4身份，仅容原producer动态投影，旧责任/P2不变。
-# 函数用途: 在新C覆盖state前及每次刷新核完整旧角色，缺历史/活身份/源变化保持拒绝。
+# LLM: 原v2/固定writer及角色首末全核不变；当前role第三次读显式原snapshot2，不重捕授权，当前W仍原P4/五动态分界。
+# 函数用途: 刷新时核完整旧角色并安全读当前标记；保留全部三次读取、旧责任/fresh P2与未知拒绝。
 def _closed_role_coverage(paths, current, count, captured, committed=()):
     from .multiprocess_generation_metadata import (
         captured_generation_sources,
@@ -102,7 +103,7 @@ def _closed_role_coverage(paths, current, count, captured, committed=()):
     for name, content in roles.items():
         value = json.loads(content)
         if value.get('c_run_id') == current:
-            _check_role_marker(paths.root, tuple(name.split('/')), current)
+            _check_role_marker(paths.root, tuple(name.split('/')), current, snapshot_retries=2)
         elif value.get('c_run_id') not in generations:
             raise ValueError('old_role_lifecycle_unproven')
     latest = _role_snapshot(paths.root)

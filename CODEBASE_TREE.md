@@ -398,6 +398,7 @@
 |-- agent_py_agent/tests/test_gateway_safe_native_diagnostics.py # 当前代native诊断、有限资源枚举及拒绝边界
 |-- agent_py_agent/tests/test_admin_self_gateway_diagnostics.py # 真实主身份与工具链的自身日志诊断和权限回归
 |-- agent_py_agent/tests/test_tui_decision_menu_sink_lifecycle.py # 测试helper输出资源的嵌套与失败恢复回归
+|-- agent_py_agent/tests/test_tui_working_indicator.py # typed活动空窗、真实帧动画缓存与终态去重回归
 |-- agent_py_agent/tests/test_tui_local_candidate_commit_boundary.py # 未提交候选隔离及本地工具提交显示回归
 `-- agent_py_agent/tests/test_committed_stream_public_boundary.py # writer、IM档位、失败关闭和旧候选重放回归
 ```
@@ -603,6 +604,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_gateway_worker_runtime.py # 空/重复/迟到callback和原租约/P4组件回归
 |-- agent_py_agent/tests/test_gateway_admission_closing.py # ordinary末发表与stop同门、原责任收尾及错源拒绝运行回归
 |-- agent_py_agent/tests/test_nofollow_atomic_snapshot.py # 原atomic writer安全A/B有限重读、父链/硬错/FD首因运行回归
+|-- agent_py_agent/tests/test_gateway_role_marker_snapshot.py # closed第三次role原atomic窗口、默认kwargs及危险叶运行回归
 |-- agent_py_agent/tests/test_gateway_role_heartbeat_stability.py # 当前W原producer动态双读与身份/旧代全raw拒绝运行回归
 |-- agent_py_agent/tests/test_gateway_role_lifecycle_closure.py # 原producer一次关闭封存、同home角色消费和未知保留
 |-- agent_py_agent/tests/test_gateway_role_lifecycle_publication.py # 完整raw CAS、写后未知和晚变来源运行回归
@@ -3619,3 +3621,12 @@ owner_resources只计算配置路径不签权；owner_services仅持原三对象
 ### /ask与/control控制一致性回归入口
 
 `agent_py_agent/tests/test_gateway_ask_control_parity.py`使用原临时HTTP/G1/C、模型卡和管理领域验证两个入口共享合法分派；普通消息不改路由，Count0和来源权限不借C扩大。仅测试运输为既有fake，真实飞书及发行另验。
+
+closed角色第三次读取验证入口：`agent_py_agent/tests/test_gateway_role_marker_snapshot.py`，复用原producer/P4与受控端点，核原stat/open窗口、同parent FD三次上限及默认CountNone/危险叶边界；须最终两OS新包pyc实跑，不代表真实关闭或608根因证明。
+## 2026-10-19 委派接单表达回归
+
+```text
+|-- agent_py_agent/tests/test_im_dispatch_ack_presentation.py # 原接单通用事实经两协议serializer进入wire，保零工具及任务状态
+```
+
+关键文件说明：`test_im_dispatch_ack_presentation.py` 经原接单及自然回复入口验证表达角色、任务延续、缺接单与已有 pending 优先级；不依赖仓外QA，不替代真实模型验收。

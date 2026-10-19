@@ -1832,6 +1832,8 @@ def test_assistant_frame_lines_stay_byte_identical_after_render_fast_paths() -> 
             {"text": "\n".join(f"第 {i} 行正文内容" for i in range(1, 301))},
         )
     )
+    # 最终正文golden必须显式结束回合，稳定assistant本身不代表执行终态。
+    store.publish(seq.emit("turn_completed", "completed", "turn"))
     frame = render_tui_snapshot(store.snapshot(), TuiRenderContext(width=80))
     lines = frame.transcript_lines
 

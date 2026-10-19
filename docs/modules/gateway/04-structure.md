@@ -1,3 +1,7 @@
+## 2026-10-19 closed角色读取接线
+
+`multiprocess_takeover_sources._check_role_marker`新增内部keyword-only snapshot_retries=0，默认时保原reader kwargs；仅_closed_role_coverage当前role第三次读显式2。实际有界重读仍唯一归common/nofollow_fs原strict机制，不新增reader、registry或writer权限。首末_role_snapshot与原完整身份/schema/P4/raw校验不变；`test_gateway_role_marker_snapshot.py`补原producer真实stat/open窗口、三次上限、默认kwargs及危险叶运行回归。
+
 ## 2026-10-19 原Gateway在线安全诊断（587候选）
 
 原 `gateway_status` 继续限local/main管理员主代理。`gateway_log_diagnostics`保原当前生命周期与64KiB尾读，复用纯 `native_diagnostic_projection` 验证原 `gateway_native_diagnostic.v1`：每行4KiB、准确字段/enum、拒重复键/非有限数/动态正文，最多返回末8条固定stage/op/type/code/reason/field，不返回raw、request/attempt/hash/owner/路径。未知保持未知，metadata_only仍不读日志；统计不反向改变健康、任务或权限。

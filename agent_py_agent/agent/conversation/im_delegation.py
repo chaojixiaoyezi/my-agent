@@ -1,5 +1,5 @@
-# LLM: 派工沿原ToolExecutor/G1及父工具上界；原图片显式传media_refs并核开关，OPEN仍交原父裁决，不能自动批准。
-# 模块用途: 为IM启动准确工具范围并获授权原图片的孩子，恢复引用，再按真实结果或申请处理。
+# LLM: 派工沿原ToolExecutor/G1及父工具上界；原图片显式传media_refs并核开关，OPEN仍交原父裁决，不能自动批准；接单表达只补既有presentation_only事实，不改工具权或任务状态。
+# 模块用途: 为IM启动准确工具范围并获授权原图片的孩子，恢复引用并按真实结果或申请处理；接单回执沿原零工具表达入口。
 from __future__ import annotations
 
 import json
@@ -15,8 +15,8 @@ from .execution_threads import (
 )
 
 
-# LLM: 接单事实来自宿主耐久SessionTask；无工具只是本片表达角色，不证明孩子缺能力或执行失败，正文不是完成依据。
-# 函数用途: 为已排队任务登记模型短回执及尚未观察结果的事实，避免主聊天重复执行或误报能力失败。
+# LLM: 接单事实来自宿主耐久SessionTask；沿原pending状态登记通用turn_execution.presentation_only，无工具只是本片表达角色，不推测孩子工具或结果，不改路由及任务状态；须同查natural_user_reply与两协议wire回归。
+# 函数用途: 有宿主接单且无待表达回复时，在原live_archive_state登记短回执事实，明确本表达轮故意无工具；无接单或已有回复时保持原样。
 def prepare_dispatch_ack(params):
     from ..agent_core.tool_loop.natural_user_reply import (
         pending_natural_user_reply,
@@ -27,6 +27,7 @@ def prepare_dispatch_ack(params):
     if ack and not pending_natural_user_reply(params):
         queue_natural_user_reply(params, kind="background_dispatch", facts={
             **ack, "current_user_request": params.user_prompt, "reply_is_interim": True,
+            "turn_execution": {"presentation_only": True},
             "task_continues_without_more_user_input": ack["status"] not in {"done", "failed", "cancelled"},
             "current_turn_role": "dispatch_acknowledgement",
             "worker_execution_outcome": "not_observed_in_this_turn",

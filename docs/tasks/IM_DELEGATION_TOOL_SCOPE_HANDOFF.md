@@ -41,3 +41,8 @@
 ## 统一门旧夹具校准
 
 61文件首轮的15红来自两份原MagicMock创建用例，准确b3ff基线15/15同样失败；假对象的动态属性不构成宿主身份。仅将local测试上下文显式化并补裸Mock仍拒绝的阴性，保留原行为断言，不放宽生产actor门或删测试。最终gate及同版发行另记。
+## 2026-10-19 接单表达事实同步
+
+`prepare_dispatch_ack` 向原 `background_dispatch` facts 补唯一 `turn_execution.presentation_only=true`。主轮业务与孩子执行仍沿原权威，不填未知工具数或孩子结果；queued/accepted 的继续标记为 true，done/failed/cancelled 为 false，缺接单或已有 pending 时不新增状态。原自然表达 guidance 已消费该字段，两协议 serializer 的合成出站回归覆盖全部五种状态。
+
+612 离线 wire 证明原来缺项；602 真实初回执曾误述能力，但实际 wire 未保存，不能据此认定因果或宣称真实模型遵循已修复。原唯一主发言、工具权限和采样次数不变。

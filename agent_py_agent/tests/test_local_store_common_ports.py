@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from contextvars import copy_context
-from threading import Thread
+from threading import Event, Thread, get_ident
 
 import pytest
 
@@ -149,16 +149,89 @@ def test_lock_birth_revoke_on_reopen_does_not_reuse_old_fd(tmp_path, monkeypatch
 
 def test_lock_default_keeps_original_five_attempts(tmp_path, monkeypatch):
     calls = []
+    target_lock_path = tmp_path / "data.json.lock"
     original = json_io._open_private_lock_descriptor
+    original_matches = json_io._descriptor_matches_lock_path
     def opened(path):
-        calls.append(path)
+        if path == target_lock_path:
+            calls.append(path)
         return original(path)
+    def matches(descriptor, path):
+        # 只让本次目标锁身份失配；同进程外来锁必须保持原核验和功能。
+        return False if path == target_lock_path else original_matches(descriptor, path)
     monkeypatch.setattr(json_io, "_open_private_lock_descriptor", opened)
-    monkeypatch.setattr(json_io, "_descriptor_matches_lock_path", lambda *args: False)
+    monkeypatch.setattr(json_io, "_descriptor_matches_lock_path", matches)
     with pytest.raises(BlockingIOError):
         with json_io.locked_json_path(tmp_path / "data.json"):
             pytest.fail("unverified lock")
     assert len(calls) == 5
+
+
+def test_default_lock_retry_observation_does_not_capture_foreign_thread(tmp_path, monkeypatch):
+    """外来锁首个FD先出生，再与目标测试交错；不让目标观测或mismatch影响其它锁。"""
+    target_path = tmp_path / "data.json"
+    foreign_path = tmp_path / "foreign.json"
+    foreign_lock_path = tmp_path / "foreign.json.lock"
+    first_foreign_open, release_foreign, foreign_finished = Event(), Event(), Event()
+    main_thread = get_ident()
+    foreign_acquired, foreign_errors, foreign_opens, foreign_identity_checks = [], [], [], []
+    original_open = json_io._open_private_lock_descriptor
+    original_matches = json_io._descriptor_matches_lock_path
+
+    # LLM: 只安排合成本地锁的实际FD与原目标测试交错；异常时仍回收本次已打开FD，不起业务或网络线程。
+    # 函数用途: 固定外来首open在目标hook之前，其余步骤在目标hook安装之后，避免依赖调度碰巧复现。
+    def interleaved_open(path):
+        descriptor = original_open(path)
+        try:
+            if path == foreign_lock_path:
+                foreign_opens.append(path)
+                if not first_foreign_open.is_set():
+                    first_foreign_open.set()
+                    assert release_foreign.wait(5), "目标测试未释放外来锁"
+            elif path == target_path.with_name("data.json.lock") and get_ident() == main_thread:
+                release_foreign.set()
+                assert foreign_finished.wait(5), "外来锁未按期结束"
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    # LLM: 外来锁身份必须交原callee实际核验；此spy只记布尔结果，不替代文件系统事实。
+    # 函数用途: 证明目标mismatch只拦目标，外来锁仍首轮按原inode身份进入临界区。
+    def observed_matches(descriptor, path):
+        matches = original_matches(descriptor, path)
+        if path == foreign_lock_path:
+            foreign_identity_checks.append(matches)
+        return matches
+
+    # LLM: 线程只获取这把合成本地锁；错误回主测试，finally显式通知，不能留下后台写者。
+    # 函数用途: 用原locked_json_path检验外来锁功能，收尾由当前测试明确join。
+    def foreign_lock():
+        try:
+            with json_io.locked_json_path(foreign_path):
+                foreign_acquired.append(True)
+        except BaseException as error:
+            foreign_errors.append(error)
+        finally:
+            foreign_finished.set()
+
+    monkeypatch.setattr(json_io, "_open_private_lock_descriptor", interleaved_open)
+    monkeypatch.setattr(json_io, "_descriptor_matches_lock_path", observed_matches)
+    worker = Thread(target=foreign_lock)
+    worker.start()
+    try:
+        assert first_foreign_open.wait(5), "外来锁首FD未出生"
+        with monkeypatch.context() as target_patch:
+            # 直接运行原目标断言，旧全局hook确定性混入另外四次open，不能用镜像实现替代它。
+            test_lock_default_keeps_original_five_attempts(tmp_path, target_patch)
+    finally:
+        release_foreign.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert foreign_errors == []
+    assert foreign_acquired == [True]
+    assert foreign_opens == [foreign_lock_path]
+    assert foreign_identity_checks == [True]
 
 
 def test_unlocked_jsonl_preserves_original_bytes_permissions_and_does_not_lock(tmp_path, monkeypatch):

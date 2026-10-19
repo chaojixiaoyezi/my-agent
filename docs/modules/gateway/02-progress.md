@@ -1,3 +1,7 @@
+## 2026-10-19 closed角色中间读取补齐strict snapshot（已独审合入本地候选）
+
+只将当前role第三次校验接入既有snapshot_retries=2，解决原正常heartbeat原子发表落入stat/open窗口被永久隔离；默认CountNone kwargs与旧角色/P4/raw首末核验保持。原591同一真实atomic新节点1F后修绿，六文件153项通过；安全路径和原3次上限不放宽，不改底层reader。新增运行回归须最终双OS新包pyc实际执行，原608失败/未知leaf仍保留；详细见角色关闭合同。
+
 ## 2026-10-19 原Gateway在线安全诊断（587候选）
 
 原 `gateway_status` 继续限local/main管理员主代理。`gateway_log_diagnostics`保原当前生命周期与64KiB尾读，复用纯 `native_diagnostic_projection` 验证原 `gateway_native_diagnostic.v1`：每行4KiB、准确字段/enum、拒重复键/非有限数/动态正文，最多返回末8条固定stage/op/type/code/reason/field，不返回raw、request/attempt/hash/owner/路径。未知保持未知，metadata_only仍不读日志；统计不反向改变健康、任务或权限。

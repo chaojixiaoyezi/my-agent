@@ -1,3 +1,17 @@
+## 2026-10-19 TUI 活动展示与角色快照读口
+
+TUI 仅按原 typed turn phase 和可见块补活动提示，覆盖工具结束、下一段可见正文到来前的空窗；非空思考的动画也进入原整帧缓存键。原状态、正文提交和权限不变。`test_tui_working_indicator.py` 新增 31 个普通节点；原最终正文 golden 只补 `turn_completed` 前提，252 条原断言保持。独立复核 23 个完整直接及相关消费者共 624 项普通通过，包括无新 token 的真实 frame provider、敏感 raw 不公开和窄屏回归。
+
+closed 角色第三次读取在正 count 分支显式复用原 `snapshot_retries=2`；默认 CountNone 的调用参数与 nofollow 底层不变。`test_gateway_role_marker_snapshot.py` 新增 7 个普通节点，使用原 producer/P4 及真实原子替换窗口；准确旧源同节点失败，候选六完整文件 153 项普通通过。原三次尝试上限、危险叶、父链、完整角色及旧代校验保持。
+
+两片已经独立复核并合入本地候选，最终同源组合、真实 TUI/生命周期和双平台包另验。新增 38 个节点均须在 Mac/Linux 新包内普通运行，不增 source-only 或跳过豁免。608 当次具体叶及写者未捕获，旧失败保留，不能将确定性窗口修复追认成当次根因证明。
+
+## 2026-10-19 本地锁重试测试的观测隔离
+
+591 冻结源完整运行实际为 38,729 普通通过、1 失败、0 错误；另有原 89 skip、32 xfail、5 XPASS，逐项身份与前次完整运行相同。唯一失败是五次重试测试的全局 hook 混计其它后台线程的锁，实际计到九次；原全仓日志与 XML 保留，不将后继定向绿回写成全仓通过。
+
+该测试只对准确目标锁记录 open 并制造身份失配，其它锁委托原实现。新增确定性交错用例直接执行原五次断言：旧 hook 精确复现 `9 != 5`，修复后目标仍五次，外来锁按真实文件身份首轮进入临界区，线程明确 join。没有修改生产重试常量、权限或后台采集器生命周期。七个完整相关文件 78 项普通通过；新增节点仍须在 Mac/Linux 包内普通运行，不加 source-only 或跳过豁免，最终同源验收另记。
+
 ## 2026-10-19 后继完整运行与真实 CLI 的准确结果
 
 568 冻结源的完整运行实际为 38,526 普通通过、1 失败、0 错误；另保留原 5 XPASS、32 xfail、89 skip。失败是 TUI 测试 helper 未恢复输出资源，原全仓日志与 XML 保留；后继 helper 修复及定向通过不改写这次全仓结果。三个原上下文压缩内存阈值节点均通过，未提高阈值。
@@ -19486,3 +19500,19 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 test_gateway_ask_control_parity.py通过既有临时HTTP/G1/C与原model/card/owner-management组件验证：同原身份、metadata和正文的冷首次/model、/agents show、/memory candidates在585为/control三P、/ask三F503，588共享合法分派后六P。新增冷/ready、用户/群完整完成回执、原模型选择/默认、规则预览/确认及记忆预览/取消、同ID跨入口重放/冲突、goal/prompt与command/prompt各自优先级、缺凭据/缺稳定ID零控制与业务写入、原不支持vector及client-only字段不借权。仅Feishu运输使用原fixture替身，不mock领域分派或权限/source，不启真实模型、adapter或外网。
 
 585 test_ask_special_or_invalid_slash_keeps_original_boundary八既有新节点只在588明确迁移model/管理冷503预期：改真实HTTP完成/owner/dispatch为空/重放字节不变，非法slash冷503、ready语法拒绝继续原边界。585冻结证据与所有中间QA失败保留；新测试初稿误用receipt.actor_id、误拒原default会话、把profile编号probe误当网络、群公开菜单误当私密表单，均只纠正新测试合同假设，未迁就它们修改生产。完整闭包实际结果、三阶段及来源SHA以588独立工件为准；不代表full、真实飞书或两OS包通过。
+## 2026-10-19 委派接单表达的两协议回归
+
+`test_im_dispatch_ack_presentation.py` 新增14个普通 runtime 节点，覆盖五个任务状态乘两种 provider、缺接单输入和已有 pending 的优先级。沿原接单 producer、自然回复参数、主循环及实际 Anthropic/Chat serializer，仅 fake HTTP 返回，核完整事实包、零工具、一次请求和原归档根。
+
+最终测试字节在原生产代码重现10F4P，补齐既有表达事实后，四完整文件135项普通通过、4项原 xfail；非作者独立复现一致。旧测试字节不改。新增节点须纳入两OS包实际运行义务，不转 source-only；实际模型、IM及最终组合另验。
+
+## 2026-10-19 安装包测试夹具与公开资源
+
+提示词测试以实际导入的运行包定位代码，两份部署夹具逐字节复制该包的源码或pyc，并由隔离子进程验证全部agent模块确实来自各自副本；原固定前缀、工具schema、部署尾部和PID断言保留。616作者及非作者在准确源码和Q05业务pyc组件各运行五个完整文件，均134项通过、1项原Node样例条件skip，原14项资源或夹具失败均有逐项call通过记录；没有生产权限变更。
+
+发行测试输入另补六份治理文档及event-watch、rm-guard两个公开插件目录。原资源守卫支持单文件根的准确等值，仍核同commit、完整集合、SHA及非链接；不新增source-only或skip。最终资源摘要须从最终源码刷新，新安装包仍须完整运行原双平台链，组件验证不补签原Q05失败。
+## 2026-10-19 Linux合成Shell测试的解释器
+
+`test_admin_self_gateway_diagnostics.py` 的纯标准库命令在Linux从 `os.defpath` 选择沙箱系统底图中的Python3，缺失明确报测试环境错误；其它平台保留原解释器。两处合成命令不再假定安装目录中的宿主解释器对普通owner可见。原34断言、5装饰器、五档正例及两项托管日志拒绝保留，不改变生产沙箱或允许根。
+
+619合成对照确认四档普通范围内包解释器启动返回127，而系统解释器成功；Full Access两者均成功。622作者及非作者五完整文件均190项通过，root在只读原Q05业务pyc及原Linux镜像的新组件中运行原整文件16项通过。这是测试夹具修正，旧Q05失败不回写，不新增节点、source-only、skip或权限。

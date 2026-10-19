@@ -1,3 +1,5 @@
+closed角色核验的第三次读取已补齐原strict snapshot接线（已独审合入本地候选）：仅正count闭分支显式复用原snapshot_retries=2；默认CountNone读取kwargs、首末完整角色/P4/raw及危险路径拒绝不变。原producer在stat/open窗口原子发表的同字节回归已由原591准确1F转绿，六文件153项通过；组件结果不代真实生命周期或发行，608具体leaf/写者仍未知，详见[角色合同](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
 ## 2026-10-18 F3、主会话沟通与凭据表单实现边界
 
 ## 主会话沟通与原同次正文提交

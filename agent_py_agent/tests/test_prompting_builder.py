@@ -223,7 +223,10 @@ class TestPromptBuilderInit:
 
         assert "# my-agent 自身代码" in rendered
         assert f"开发工作树: {worktree}（" in rendered
-        running = Path(__file__).resolve().parents[1]
+        import agent_py_agent
+
+        # 测试资源不等于运行代码；源码与pyc均以真实导入包定位。
+        running = Path(agent_py_agent.__file__).resolve().parent
         assert f"正在运行的代码: {running}。" in rendered
         assert "不推送远端" in rendered and "user_config" in rendered
         assert "集成者在任务里明确指定了别的工作树时，就在那个工作树里做" in rendered
@@ -322,14 +325,21 @@ def test_deployment_context_keeps_existing_qualification(tmp_path, access, provi
     assert "# 当前部署" not in builder.build(request=PromptBuildRequest("继续", []))
 
 
-# LLM: 新解释器从各自真实包副本导入，捕获模块导入时取值；仅构造注册器/提示，不执行工具或接触生产资源。
-# 常量用途: 为两次隔离导入导出同源前缀和工具声明，并校验文本分支只消费冻结路径。
+# LLM: 新解释器用-I-B隔离QA引导后仅显式加入逐字节核验的真实运行包副本；不绕过产品身份或执行工具。
+# 常量用途: 核验无预载agent、全部实际模块来自各自部署，再导出前缀和工具声明及纯渲染事实。
 _DEPLOYMENT_PROCESS_PROBE = """
 import json, os, sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+deployment_root = Path(sys.argv[2]).resolve()
+assert sys.flags.isolated and sys.dont_write_bytecode
+assert not any(name == 'agent_py_agent' or name.startswith('agent_py_agent.') for name in sys.modules)
+sys.path.insert(0, str(deployment_root))
+import agent_py_agent
+assert Path(agent_py_agent.__file__).resolve().parent == deployment_root / 'agent_py_agent'
+assert Path(agent_py_agent.__file__).suffix in {'.py', '.pyc'}
 sys.executable = str(Path.cwd() / 'python')
 from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, PromptBuildRequest, ToolSections, render_prepared_prompt, _builtin_prompt_root
 from agent_py_agent.agent.prompting_parts.cache_layout import prompt_cache_layout
@@ -349,37 +359,56 @@ with patch('agent_py_agent.agent.prompting_parts.builder._builtin_prompt_root', 
     text = render_prepared_prompt(replace(prepared, native_tool_use=False, task_and_transcript='固定任务记录'))
 assert text.index('固定任务记录') < text.index('# 当前部署')
 assert text.count(package_root) == 1
-print(json.dumps({'pid': os.getpid(), 'root': package_root, 'prefix': layout.stable_prefix,
+origins = {name: str(Path(module.__file__).resolve()) for name, module in sys.modules.items()
+    if (name == 'agent_py_agent' or name.startswith('agent_py_agent.')) and getattr(module, '__file__', None)}
+assert origins
+assert all(Path(path).is_relative_to(deployment_root / 'agent_py_agent') and Path(path).suffix in {'.py', '.pyc'}
+    for path in origins.values())
+print(json.dumps({'origins': origins, 'pid': os.getpid(), 'root': package_root, 'prefix': layout.stable_prefix,
     'deployment': dict(layout.volatile_sections)['prompt.deployment'],
     'tools': [(spec.name, spec.description, spec.input_schema) for spec in registry.specs()],
     'details': [spec.render_detail_entry(max_chars=16000) for spec in registry.specs()]}, ensure_ascii=False))
 """
 
 
-# LLM: 不仅替换一个函数；相同源码放在不同物理部署目录，用独立进程/TMPDIR排除导入缓存掩盖路径或PID泄漏。
-# 函数用途: 在合成部署中核对真实基础工具目录、Schema、固定系统前缀相同，尾巴含各自路径。
+# LLM: 从真实导入包复制源码或pyc，逐字节核对代码；子进程-I-B不加载QA sitecustomize，全部agent模块必须来自明确副本。
+# 函数用途: 在两份真实运行包副本核对工具Schema和固定前缀，保留部署路径只在动态尾巴及原资格门的断言。
 def test_fresh_deployments_preserve_prefix_and_tool_schemas(tmp_path):
+    import hashlib
     import json
     import shutil
     import subprocess
     import sys
 
+    import agent_py_agent
+
+    package = Path(agent_py_agent.__file__).resolve().parent
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / ".git").mkdir()
     snapshots = []
     for name in ("deployment-a", "deployment-b"):
         root = tmp_path / name
-        shutil.copytree(Path(__file__).resolve().parents[1], root / "agent_py_agent",
+        clone = root / "agent_py_agent"
+        shutil.copytree(package, clone,
                         ignore=shutil.ignore_patterns("tests", "__pycache__", ".pytest_cache"))
+        code = [path for path in clone.rglob("*") if path.is_file() and path.suffix in {".py", ".pyc"}]
+        assert code
+        for path in code:
+            assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256((package / path.relative_to(clone)).read_bytes()).digest()
         temporary = root / "temp"
         temporary.mkdir()
         completed = subprocess.run(
-            [sys.executable, "-c", _DEPLOYMENT_PROCESS_PROBE, str(workspace)], cwd=root,
+            [sys.executable, "-I", "-B", "-c", _DEPLOYMENT_PROCESS_PROBE, str(workspace), str(root)], cwd=root,
             env={"PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(temporary)},
             capture_output=True, text=True, check=True, timeout=60,
         )
-        snapshots.append(json.loads(completed.stdout))
+        snapshot = json.loads(completed.stdout)
+        for origin in snapshot["origins"].values():
+            path = Path(origin)
+            assert path.is_relative_to(clone)
+            assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256((package / path.relative_to(clone)).read_bytes()).digest()
+        snapshots.append(snapshot)
     assert snapshots[0]["root"] != snapshots[1]["root"]
     assert snapshots[0]["pid"] != snapshots[1]["pid"]
     for key in ("prefix", "tools", "details"):
