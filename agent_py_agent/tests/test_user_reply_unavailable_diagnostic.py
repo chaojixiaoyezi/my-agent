@@ -85,17 +85,39 @@ def test_incomplete_reason_is_raw_and_does_not_change_provider_terminal(monkeypa
 
 def test_failure_diagnostic_uses_canonical_compaction_time_without_body(monkeypatch, tmp_path):
     result, _ = run_real_loop(monkeypatch, tmp_path, reasoning_endings())
-    context = SimpleNamespace(agent=SimpleNamespace(conversation_store=SimpleNamespace(
-        threads=SimpleNamespace(load=lambda _id: SimpleNamespace(compact_updated_at=40.0)))))
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.native_history import (
+        canonical_native_messages_from_metadata,
+    )
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayAskRunContext,
+        GatewayConversationContext,
+    )
+
+    # 新的失败前partial落账义务需要原store/context；保留原精确诊断断言，并核实空carrier保存真实native。
+    agent, paths = _make_agent(tmp_path / "gateway")
+    thread = agent.conversation_store.threads.get_or_create({"canonical_user_id": "local-agent", "channel": "chat"})
+    agent.conversation_store.threads.write(replace(thread, compact_updated_at=40.0))
+    context = GatewayAskRunContext(agent=agent, request={"metadata": {"channel": "chat"}}, request_id="diagnostic-partial",
+        request_path=paths.processing / "diagnostic-partial.json", response_path=paths.responses / "diagnostic-partial.json", on_chunk=None)
     monkeypatch.setattr(request_history, "time", SimpleNamespace(time=lambda: 160.0), raising=False)
     with pytest.raises(UserReplyUnavailableError) as caught:
-        request_history.persist_gateway_assistant_result(context, SimpleNamespace(thread_id="t"), result)
+        request_history.persist_gateway_assistant_result(context, GatewayConversationContext(thread_id=thread.thread_id), result)
     diagnostic = getattr(caught.value, "user_reply_diagnostic", None)
     assert diagnostic is not None
     assert diagnostic["seconds_since_last_compaction"] == 120.0
     assert set(diagnostic) == {"last_model_call", "empty_text_repairs", "empty_text_repair_limit",
                                "tool_rounds", "seconds_since_last_compaction"}
     assert "PRIVATE" not in json.dumps(diagnostic)
+    rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
+    assert len(rows) == 1 and rows[0].content == ""
+    assert canonical_native_messages_from_metadata(rows[0].metadata)
+    assert rows[0].metadata["turn_end_reason"] == "error"
+    assert not getattr(result, "conversation_persist_degraded", False)
+    with pytest.raises(UserReplyUnavailableError):
+        request_history.persist_gateway_assistant_result(context, GatewayConversationContext(thread_id=thread.thread_id), result)
+    assert len(agent.conversation_store.messages.recent(thread.thread_id, limit=0)) == 1
 
 
 def test_gateway_empty_reply_failure_persists_diagnostic_in_response_and_terminal(monkeypatch, tmp_path):

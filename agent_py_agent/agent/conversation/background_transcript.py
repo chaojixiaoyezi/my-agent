@@ -235,6 +235,9 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         self._thinking_delta_batcher = _ThinkingDeltaBatcher()
         self._model_text = ""
         self._committed_commentary: list[str] = []
+        self._committed_model_calls: set[str] = set()
+        self._terminal_model_call = ""
+        self._published_model_final = ""
         self._tool_blocks: set[str] = set()
         self._tool_attempt = 0
         self._retry_index = 0
@@ -284,6 +287,11 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         if not value:
             return
         self._model_text += value
+
+    # LLM: 仅已验同次response提交；复用原正文净化和显示环，call身份幂等，不由文本相等去重或向IM直发。
+    # 函数用途: 为后台与子代理补齐非流式过程正文，并用终态全文替换候选。
+    def commit_model_response(self, payload: dict) -> None:
+        _commit_model_response(self, payload)
 
     # LLM: Provider thinking deltas are explicit public thinking, not hidden
     # reasoning. Each accepted piece is host-path-redacted and bounded before it
@@ -550,21 +558,10 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
             {"text": content, "process": True},
         )
 
-    # LLM: The canonical AgentRunResult text is the only terminal source. A
-    # tool preamble already promoted as commentary must not be emitted twice;
-    # exact normalized equality is display dedupe only and never affects state.
-    # 函数用途: 将子代理本轮正式回复追加到详情页；若同文已在工具前展示则跳过重复卡片。
+    # LLM: canonical结果仍是终答权威；typed提交按原call身份去重，不因不同消息同文吞final；旧无来源路径保持原展示合同。
+    # 函数用途: 将子代理正式回复追加到详情页，已提交调用不重复发布，过程说明不替代不同终答。
     def _publish_final_response(self, text: str) -> None:
-        content = public_background_transcript_text(text, limit=0, channel=self.channel)
-        if not content or content in self._committed_commentary:
-            return
-        self._assistant_index += 1
-        self._event(
-            "assistant_completed",
-            "completed",
-            f"{self.request_id}:assistant:{self._assistant_index}",
-            {"text": content, "process": False},
-        )
+        _publish_committed_final(self, text)
 
     # LLM: 工具身份来自本工作片的 attempt/round/call_index；不同执行批次同号工具不能合并。
     # 函数用途: 生成后台工具卡片稳定编号，正文或输出不能参与判重。
@@ -984,3 +981,40 @@ __all__ = [
     "public_background_transcript_text",
     "read_background_transcript_events",
 ]
+
+
+# LLM: 只由原sink方法调用，同一实例状态保存原call幂等和显示档位；拆出以保持类尺寸，不新增账或入口。
+# 函数用途: 将已净化的完整响应提交到原后台详情页，丢弃旧候选并复用原通道净化。
+def _commit_model_response(sink: BackgroundTranscriptSink, payload: dict) -> None:
+    from ..gateway_parts.stream_events import committed_model_events
+
+    events = committed_model_events(payload, delivery_channel=sink.channel)
+    call_id = (payload.get("source") or {}).get("call_id")
+    if not events or call_id in sink._committed_model_calls:
+        return
+    sink._committed_model_calls.add(call_id)
+    sink._model_text = ""
+    for event in events:
+        if event["kind"] == "assistant_commentary":
+            sink._model_text = event["text"]
+            sink._flush_model_commentary()
+        else:
+            sink._terminal_model_call = call_id
+
+
+# LLM: 与原finish/commit共用同一实例来源；仅按本次真实call幂等，旧无来源路径保原兼容显示，不发IM或改任务。
+# 函数用途: 在原后台详情页发布最终正文，避免过程同文吞掉不同来源终答。
+def _publish_committed_final(sink: BackgroundTranscriptSink, text: str) -> None:
+    content = public_background_transcript_text(text, limit=0, channel=sink.channel)
+    if not content or (not sink._terminal_model_call and content in sink._committed_commentary):
+        return
+    if sink._terminal_model_call and sink._published_model_final == sink._terminal_model_call:
+        return
+    sink._published_model_final = sink._terminal_model_call
+    sink._assistant_index += 1
+    sink._event(
+        "assistant_completed",
+        "completed",
+        f"{sink.request_id}:assistant:{sink._assistant_index}",
+        {"text": content, "process": False},
+    )

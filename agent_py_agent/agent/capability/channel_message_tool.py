@@ -207,7 +207,7 @@ class SendMessageTool(BaseTool):
             source_ref=f"channel_capability:{provider}:provider_idempotency.v1",
         )
 
-    # LLM: 外部副作用前必须先完成 owner target、registry、真实路径和 hash 四层校验。
+    # LLM: 外部副作用前核原委派当前runner/attempt及origin禁止抢话，再沿owner target、registry、真实路径/hash；其它真实获准业务目标不扩权。
     # 函数用途: 执行一次发给当前用户的文字/附件发送，并返回不含服务器路径的回执。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         message = str(params.get("message") or "").strip()
@@ -235,6 +235,8 @@ class SendMessageTool(BaseTool):
         )
         if target_error:
             return _error("没有唯一且已授权的消息接收身份；请检查管理员绑定和渠道配置", target_error)
+        if _delegated_origin_send_blocked(self.agent, provider, target):
+            return _error("委派结果须交回原主会话通知", "CHANNEL_TARGET_OUT_OF_SCOPE")
         capabilities = self._delivery.registry.capabilities_for(provider)
         if not capabilities.proactive or not target or owner_root is None:
             return _error("当前 owner 没有可用的外部消息通道", "CHANNEL_ADAPTER_UNAVAILABLE")
@@ -304,6 +306,18 @@ class SendMessageTool(BaseTool):
             payload,
             evidence_refs=evidence_refs,
         )
+
+
+# LLM: 当前runner/attempt身份只由原委派链读取；损坏或未知来源必须保留异常，不能降为普通外送。
+# 函数用途: 在实际发送前判断是否抢占原主会话的通知目标；其它目标仍走原权限门。
+def _delegated_origin_send_blocked(agent, provider, target):
+    from ..conversation.im_delegation_delivery import (
+        current_delegated_delivery_task,
+        delegated_origin_target,
+    )
+
+    task = current_delegated_delivery_task(agent)
+    return task is not None and (provider, target) == delegated_origin_target(agent, task)
 
 
 # LLM: 原tool-call/idempotency键只引用既有操作，事件根由宿主task树取得；原job CAS准入先于实际运输，只有明确未准入才报告not_started。

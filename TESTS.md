@@ -1,3 +1,55 @@
+## 2026-10-18 主会话沟通与凭据表单的准确回归范围
+
+P2 REV02独立协议复核241个唯一逻辑节点通过；根公开展示19完整文件及4个后继探针379项通过，C13/C15八完整文件另256项通过，均无失败、错误或跳过；这些范围有重叠，不能相加当作全仓数量。4867规范文件集合、字节及模式前后保持。原529展示三红和530索引红保留；后继只将候选前置查找改为active+stable，最终同ID、唯一stable、全文校正、零active及不可重放断言保留。原字段缺失不伪造索引，非空terminal仍权威；commentary-only、pending上限、整段净化与主会话唯一发送者均沿原合同。
+
+新增四个阶段/显示测试文件的实际节点、修改的诊断fixture及其旧assert由准确collect和manifest登记。原528后台夹具仍在组合focused中完整执行，不能用上述窄范围替代。所有新增行为须纳入双OS包内普通运行义务；不增加source-only、skip或其它豁免。
+
+凭据卡新增`test_credential_card_validation.py`实际51节点：Count0与正Count的字段/新URL错误、改正同卡、单Wake、旧卡终态重放、原身份/代次/期限/owner/成员门、无预填/唯一控件名，以及adapter实际回环和未知HTTP错误码类型。原33节点17红到全绿；adapter原15节点6红到全绿，原失败不覆写。非作者后继相关矩阵123通过、1个既有8420端口占用跳过；新51节点全部通过，不将该既有条件skip扩为新豁免。测试只用临时owner和合成输入，未证明截图当次根因、客户端自动预填或真实租户通过。
+
+最终源码focused、五项严格门、完整pytest、真实CLI/Gateway TUI/飞书/图片、双平台包与部署分别由同源发行回执记录；准确集合、SHA及XML不能从以上切片数字推导。真实任务仍只给一次普通需求并观察被测对象自己的执行与产物，不代写、补跑或重投。网络安全只记录。
+
+## 2026-10-18 宿主身份测试的真实执行阶段（516隔离后继，待统一验收）
+
+## 普通后台进度退避夹具的真实事实源（528，本地候选）
+
+489后原后台claim末门会沿同一agent.conversation_store核对是否为委派交付；普通进度策略没有委派标记，也必须有真实线程事实源。test_due_policy_backs_off_on_no_progress_rounds_and_recovers原_FakeRuntime.agent=None在准入阶段报AttributeError，并非退避策略或P2阶段合同失败。
+
+本片只在该测试函数体创建原SimpleAgent并绑定同一ConversationStore，假runtime仍仅返回可控进度报告。不增加TaskLink、typed RunParams或委派权威，不改生产None处理和共享helper。10条原assert AST保持：60→120/240/480封顶、持续无进展不停机、只读成功不算物质推进、物质进度恢复60秒均沿原断言。
+
+独立普通副本、项目Python3.12 -B、隔离HOME/TMP、禁pyc/cache：原同节点1F到修后1P，整test_background_main_agent_runtime.py实际收集204节点并204普通通过，零失败/错误/跳过。定向Ruff、strict code-size与原evaluate_sync通过。所有运行后完整4861规范源bytes/mode/set不变；生产文件与其它测试函数AST保持。不修改P2作者负责的diagnostic fixture，不声明P2/full/实际模型/双OS包或发行已通过。
+
+## 2026-10-18 主会话沟通 P1 与原始显示证据（本地候选）
+
+P1 独立切片覆盖 `test_config_layers.py`、`test_prompting_builder.py`、`test_parameter_registry.py`、`test_config_field_readers.py`，213 项通过；含 YAML/dataclass 默认和显式布尔、配置来源、主 scope／override、隔离范围、稳定前缀、原生效语义及真实读取方。根集成后仍需同源组合严格门，未签整体发布通过。
+
+原发布版本在独立空白 owner 工作区接收一次普通 CSV 实现需求，77.35 秒结束；原始 canonical 消息有四段可见中途说明，CLI 未显示四段，只显示工具状态与最终回复。原生工具回执记录两次执行成功；测试和示例由被测对象自己运行，测试者未代写或补跑。前一 QA 工作区不合法在模型调用前失败，保留且不作为沟通基线。
+
+P2 必须同时覆盖流／非流、提交后正文、最终去重、阶段与历史、Compact、拒绝内容不复活、取消／EOF／工具次数不变及协议出口隔离，再做少量真实 CLI/TUI 验收。心跳、工具名称或隐藏思考均不算模型进度说明。
+
+原505的 `test_scheduler_host_actor.py` 59节点有19个旧fixture失败，独立同字节40P19F与512六依赖失败集合完全一致，原红保留。`managed_child` 只在自身经原main authority绑定、TaskLink晋升及claim进入创建阶段，不改共享 `group_case`、`select_child` 或生产门；补普通群/话题两节点核对真实main/attempt、原根及claim。原首片恢复在明确 `promote_root=False` 下先核无link/actor，再进入派工阶段；原12参数恢复负例仅 `bad_root` 需要已晋升TaskLink，其余保无link/无claim，继续验证原SessionTask owner/actor/policy来源。全部旧assert/decorator保留，不删断言或伪造authority。后继完整六文件及新增2节点须同源重跑；所有受影响节点仍属两OS包内普通运行义务，不加source-only或豁免。该修复不替代真实IM/模型或最终全仓与发行验收。
+
+## 2026-10-18 IM媒体夹具的首片与派工阶段（512隔离候选，待统一验收）
+
+`runtime_fixture` 默认仍沿原晋升与真实claim装配派工执行片；明确的 `promote_root=False` 只保留原SessionTask及RuntimeDB当前main，不先建TaskLink/claim再删除。原无link首片两类测试共5节点保留前置与负例断言；两个provider节点先核无link原生IR携图，再沿同一晋升/claim helper进入派工阶段，三provider精确图片字节和无UserTurn断言保持。
+
+原请求GC后创建未点名媒体孩子的测试局部沿原 `prepare_runner_attempt`、当前runner/attempt作用域及 `_subagent_model_run_params` 建立真实执行轮，退出恢复临时身份；共享 `select_child` 不变。另补晋升/未晋升两种夹具前提和missing/stale runner两项拒绝回归，保生产来源门、子代不自动继承图片及原6F证据。修改共享夹具后须完整运行IM媒体、IM委派runtime、host_message_context、scheduler_host_actor、scheduler_delegated_origin及单发话人六份文件；所有新增和受影响节点属于双OS新包普通运行义务，不能改作source-only。候选focused及静态门不替代最终同源全仓、真实IM/模型或发行验收。
+
+## 2026-10-18 本地创建合同的 typed fixture 对齐（511仓外候选）
+
+新委派交付末门沿真实 `RunParams` 的 `default` / `isolated` 非会话域识别普通本地调用；只含属性的 `SimpleNamespace` 不能代表当前运行身份。本次仅将 `test_subagent_input_media.py::_bind_current_turn` 和 `test_orchestration_create_subagents_tool.py` 的 audit 来源绑定正例恢复为 typed 本地参数，不构造会话线程、HostActor、claim、后台或 IM 授权，也不调整生产门。
+
+准确组合旧夹具独立复现六个原节点全部失败，均为进入角色末门时缺 `run_id`；更换夹具后六节点全部普通通过，两份完整测试文件 48 项普通通过。原开关、媒体未知/重复/格式拒绝、零创建、图片字节、首请求模态/压缩事实及 audit 精确来源绑定断言完整保留；原失败证据保留，不能据此改写根505失败或宣称完整组合、真实 IM、包及发行通过。
+
+## 2026-10-18 图片委派拒绝的公开解释（503本地候选）
+
+`test_gateway_request_runtime_errors.py::test_media_delegation_rejection_has_safe_actionable_public_error` 通过真实结构错误码、原公开文案与HTTP白名单投影，分别核关闭转交和无效引用的行动提示，且不泄露内部哈希/路径或建议丢图继续。原实现同节点两失败保存在仓外503；组合原IM媒体零创建、子代理媒体、飞书原生图片测试验证。该测试不替代真实飞书资源/API与provider图片载荷验收。
+
+## 2026-10-18 首次远端控制的C侧owner物化（487仓外候选，待独审/集成）
+
+真实新home的首次群控制曾在Worker原只读构造报`WorkerSharedResourceError/resource_missing`；原失败及unknown责任保留。普通业务请求已有C-native物化，控制首次发表缺少对应步骤。候选将cold/ready正Count普通远端HTTP控制统一到原固定HTTP producer，冻结ready Agent同一对象/根/控制面，在原source、controller owner门、Root及receipt首次raw CAS内复用原native规范owner物化叶，再发表原prepared+dispatch；不创建业务Agent、模型或管理员，不让W初始化。
+
+GET、相同消息重放、全部既存回执状态和拒绝目标不补建owner；原Count0、本机owner、管理/model、私卡及legacy非HTTP转发合同保持。该物化只保存规范目录和种子，不授跨owner、业务工具或配置写权。离线组件回放与定向门不能替代真实新home/双OS包/生命周期或发行验收；根集成后另验。
+
 ## 2026-10-18 stop子进程准备与行为期限（428仓外候选，未合）
 
 解决问题：原fresh child的整模块冷导入、fixture初始化与worker退出共用5秒，TimeoutExpired文案不能证明worker泄漏。425原两参数2F完整保留；一次import-only约4.371秒，未超过5秒且未运行entry，不代完整full结果。
@@ -19341,3 +19393,40 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 ## 2026-10-17 发行源码检查与运行检查分离
 
 `test_gateway_multiprocess_schema` 的原 AST 节点保留全部源码依赖检查；原两条实际模块导出断言原样拆入 `test_schema_import_exports_no_record_validators`，必须在无源码包内运行。仅纯 AST 节点可在最终源码 XML 唯一通过后列入精确源码检查名单；不得把字段、导出、权限或实际行为一起排除。产品实现和权限未变化，最终包清单及结果另记。
+
+## 2026-10-18 管理员 Full Access 普通 MCP 候选验证
+
+`agent_py_agent/tests/test_admin_full_access_mcp.py` 使用真实 registry、普通 MCP/插件代理和离线供应商，覆盖当前管理员 full 真正执行、撤回模式后重新询问、普通/群/非full、有效 child 墙、插件/其它 always、伪造模型/恢复字段、禁用工具/非法参数及坏策略。生产 SimpleAgent 构造回归还沿原 RuntimeRepository 登记当前 run/attempt，保留 ManagedOperationStore、真实 operation claim 和权威门，实际调用假供应商并核 SUCCEEDED；attempt 换代后同旧调用不得再进 handler。初次测试夹具缺run身份、群写策略未带群lease以及生产探针缺执行权威的失败记录保留在仓外501证据，未放宽产品门。
+
+候选 focused 命令：`python3 -m pytest agent_py_agent/tests/test_admin_full_access_mcp.py agent_py_agent/tests/test_owner_approval_mode.py agent_py_agent/tests/test_mcp_operation_outcomes.py agent_py_agent/tests/test_plugin_tool_gate_execution.py -q --tb=short`。严格门、准确通过数和旧版同字节反例见仓外501 handoff；无真实 MCP/网络服务验收。
+
+
+### 489 委派唯一主sender离线候选
+
+新增`test_im_delegation_single_speaker.py`沿完整生产worker、G1创建、实际run_subagent和原后台scheduler，只替供应商HTTP与IM adapter。验首次主model ack一次、主可继续聊天、后台/child不另发、精确原sender model最终及同key consumed；群后来human不换收件人/复制actor。另用原W快照/P3/P5与真实owner pool Agent验证报告写时claim/source仍活；普通部分发布/重复wake/空结果/原quota等待、目录及最终消息门守恒。原进度测试的真正委派不再开额外窗口，原scheduler通知/在途编辑收回/foreground草稿保持。准确结果与前后SHA只认489工件，未跑真实服务/模型/native，非整体验收。
+
+489 另含同sender两个终态结果的普通顺序：primary已由忙主消费而sibling仍pending，以及两条均pending；断言不同key不合批、模型facts覆盖本轮全部实际注入结果、逐条submit/ACK。手工child默认保守回归使用普通未委派Agent，避免把未绑定的委派主fixture当普通来源。
+
+489 本地域兼容：current child与原claim/BG运输先核；仅原typed RunParams default/isolated、无会话thread、无host actor是普通本地范围，不需要Conversation TaskLink。conversation域丢attrs仍查canonical，缺child根/缺claim的BG运输不降普通。真实SimpleAgent本地两域及原创建幂等普通邻例回归；旧SimpleNamespace测试明确使用原RunParams域，不伪造权限。
+
+506 补齐缺运行参数的拒绝边界：复用真实W/P3/后台运输组件，在原claim保留及暂时清空两种情况下，均不得因params缺失降为普通身份。原489冻结同节点两失败保留；只前移原claim/BG读取及缺参拒绝，不新增身份源。根组合结果和发行/真实结果分开记录。
+
+
+### 能力授权范围与父级唤醒回归
+
+`test_resolve_capability_requests_tool.py` 新增命令-only 不附赠写工具、command/network/budget/constraints/request_scope 完整运输、目录-only 复用有效既有工具，以及 child 缺失/撤销、父撤销工具和 urgent 协议回归。原目录解锁用例预期不变。测试使用 echo、隔离 home 与原 lifecycle，不调用模型/网络或启动 runner。命令参数灵活性仍是设计项，以上测试不声明已经支持。
+
+
+504后继窄修：显式裁决的目录候选保持 write_roots→path_scope→cwd_scope 优先序，合法 cwd-only 范围不再被空值覆盖；所有 cwd 同样经过原 owner/父目录安全门。新增合法/越界 cwd-only 两例，命令路径仍不附赠写工具。
+
+## 2026-10-18 MCP 会话批准跨 sink 候选
+
+`test_mcp_approval_sink_reuse.py` 用真实临时owner、canonical child/currentattempt和原MCP capability grant，只fake用户审批运输，核同范围重建sink只publish一次、旧attempt/新scope/模式/失源/取消/过期/单次批准/拒绝/插件不借缓存。`test_background_tool_approval.py` 原换attempt测试从猴子补scope改为真实canonical child，旧attempt真实settle后再启动新attempt，保原断言；主claim与取消旧覆盖保留；该会话夹具补真实owner、生产后台control/core binder和原claim publisher，不能用active claim代替实际运行权限。新增main缺参/错参/旧attempt/失原control/claim投影异常负例及前台、后台完整原来源正例。无真实服务/网络，不把合同测试作为飞书验收。准确旧红、QA夹具失败与最终focused/guard记录在仓外F3_MCP_APPROVAL_REUSE_501。
+
+## 2026-10-18 能力申请既有授权复用候选
+
+`test_capability_grant_reuse_501.py`沿真实SimpleAgent/lifecycle/临时canonical状态，覆盖已明确父工作目录、同实际grant的措辞变化及目录内输出名变化；过期/撤销/缺grant/错run/终态分别含同signature与改措辞反例。额外核工具、MCP、Skill、命令、路径/cwd、符号链接、网络、预算、限制及原grant字段漏失；parsed结果消费同canonical grant规则；普通用户/群不能取得宿主或foreign根。命令完整文本只作保守结构覆盖，不宣称已提供参数灵活授权。原同节点旧红和最终聚焦/guard见仓外501 handoff；无真实模型、MCP、飞书或网络。
+
+501目录复核补充：原候选漏测grant根及祖先被替换为symlink、声明祖先根包住home两类；独立原红保留。修正版新增根/祖先漂移、foreign/config/secrets目标拒绝、普通外部目标及原窄声明根正例，不依赖最终文件工具门代替grant分区正确性。
+
+501授权复用还复用真实runner工具投影验证普通/MCP enabled/disabled四节点：禁用后allowed_tools虽保留，实际runner已无该工具，必须新OPEN；原正例仍GRANTED。

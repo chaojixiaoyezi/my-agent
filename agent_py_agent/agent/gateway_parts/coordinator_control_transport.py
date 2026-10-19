@@ -1,5 +1,5 @@
-# LLM: 冷C普通控制只消费当前真实HTTP工作片并发布原receipt；本来源不执行领域、创建Agent、授P3或接受通用写回调。
-# 模块用途: 在基础业务未加载时，把健康远端owner的原控制交给既有Worker控制泵。
+# LLM: C普通远端控制只消费当前真实HTTP工作片并发布原receipt；本来源不执行领域、创建Agent、授P3或接受通用写回调。
+# 模块用途: 把冷或ready C的健康远端owner原控制交给既有Worker控制泵。
 from __future__ import annotations
 
 import hashlib
@@ -49,10 +49,10 @@ def _request_input(handler, server, body):
 
 
 # LLM: 精确类型/origin/PID/thread/lifetime和原work共同约束一次固定producer；没有perform(callback)或可持久化writer。
-# 类用途: 保存原HTTP、C租约与固定控制输入，最后短门只允许发布这一条原回执。
+# 类用途: 保存原HTTP、C租约、ready Agent引用与固定控制输入，最后短门只允许发布这一条原回执。
 class _CoordinatorControlTransport:
-    # LLM: 实际handler/upper/lower/control同源才捕获；pin只记录本次责任，不授权owner或创建Agent。
-    # 函数用途: 固定一次冷控制的原对象与预算，不写业务状态。
+    # LLM: 实际handler/upper/lower/control同源才捕获；ready Agent须原控制面同根同引用，pin不授权owner或创建Agent。
+    # 函数用途: 固定冷或ready首次远端控制的原对象及预算，不写业务状态。
     def __init__(self, handler, server, body):
         from .control_operation_service import gateway_control_operation_identity
         from .control_plane import GatewayControlPlane
@@ -60,9 +60,15 @@ class _CoordinatorControlTransport:
         from .owner_management_control import is_owner_management_control
 
         if (not isinstance(handler, GatewayHTTPHandler) or type(server) is not GatewayHTTPServer
-                or type(server.control_plane) is not GatewayControlPlane or server.control_plane.worker_count <= 0
-                or server.agent is not None):
+                or type(server.control_plane) is not GatewayControlPlane or server.control_plane.worker_count <= 0):
             raise GlobalWriteError('control_http_source_required', 'control_transport')
+        self.agent = server.agent
+        if self.agent is not None:
+            from ..core import SimpleAgent
+            if (not isinstance(self.agent, SimpleAgent)
+                    or self.agent.home_paths.root != server.control_plane.home_root
+                    or getattr(self.agent, '_gateway_control_plane', None) is not server.control_plane):
+                raise GlobalWriteError('control_http_source_required', 'control_transport')
         self.handler, self.server, self.body = handler, server, body
         try:
             self.work = capture_http_handler_work(handler, server)
@@ -84,15 +90,15 @@ class _CoordinatorControlTransport:
         self.lifetime.bind_original(self)
         self._lifetime = self.lifetime
         self._refs = (self.work, self.control, self.runtime, self.paths, self.lease, self.controller,
-                      self.middleware, self.control.config, self.owner)
+                      self.middleware, self.control.config, self.owner, self.agent)
         self._home, self._generation = self.control.home_root, self.lease.c_run_id
         self.deadline = input_resource_deadline()
         self._closed = False
         self.pin = self._pin = pin_coordinator_commit(self.lease,
             ('control_transport', owner_digest(self.owner), self.operation_id))
 
-    # LLM: 同一次scope/work/credential及C引用必须在最后门内重核；预算不签写权，关闭或复制source不能借新C续用。
-    # 函数用途: 在读取原事实和发布前确认本次固定来源仍有效。
+    # LLM: 同次scope/work/credential及C/ready Agent引用和home/control绑定须在最后门重核；预算不签写权，关闭或复制source不能续权。
+    # 函数用途: 在读取原事实和发布前确认同一冷或ready来源、Agent及规范根均未漂移。
     def require_current(self):
         if (type(self) is not _CoordinatorControlTransport or self.origin is not self
                 or self.pid != os.getpid() or self.thread != threading.get_ident()
@@ -105,13 +111,16 @@ class _CoordinatorControlTransport:
             raise GlobalWriteError('control_http_source_unavailable', 'control_transport') from error
         current = (self.work, self.server.control_plane, self.server.drain_runtime, self.server.paths,
                    coordinator_for_root(self.paths.root, context=self.control), self.control.controller(),
-                   getattr(self.handler, '_auth_middleware', None), self.control.config, self.scope.resolved_owner)
-        if (any(a is not b for a, b in zip(current, self._refs)) or self.server.agent is not None
+                   getattr(self.handler, '_auth_middleware', None), self.control.config, self.scope.resolved_owner, self.server.agent)
+        if (any(a is not b for a, b in zip(current, self._refs)) or self.server.agent is not self.agent
                 or self.pin is not self._pin or self.pin not in self.lease._commit_pins
                 or self.control.home_root != self._home or self.lease.c_run_id != self._generation
                 or _body_binding(self.body) != self.binding
                 or not self.middleware.has_gateway_credential(dict(self.handler.headers))
                 or _request_input(self.handler, self.server, self.body) != (self.command, self.command_text, self.scope)):
+            raise GlobalWriteError('control_http_source_changed', 'control_transport')
+        if self.agent is not None and (self.agent.home_paths.root != self._home
+                or getattr(self.agent, '_gateway_control_plane', None) is not self.control):
             raise GlobalWriteError('control_http_source_changed', 'control_transport')
         check_io_deadline(self.deadline)
 
@@ -133,7 +142,7 @@ class _CoordinatorControlTransport:
             self._closed = True
 
 
-# LLM: 仅实际冷HTTP分支使用；所有层保原typed对象，finally只收本次来源，不补发或执行领域。
+# LLM: 仅实际正Count普通远端HTTP分支使用；所有层保原typed对象，finally只收本次来源，不补发或执行领域。
 # 函数用途: 为本次普通控制准备原幂等回执，完成后关闭来源。
 def execute_coordinator_control(handler, server, body):
     from .control_operation_service import prepare_coordinator_control_operation

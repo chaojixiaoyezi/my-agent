@@ -428,20 +428,23 @@ def _last_turn_marker(history: list[Any]) -> tuple[int, AssistantTurn] | None:
     return None
 
 
-# LLM: 删除任何 tool_use 都会破坏原厂 thinking 签名与块完整性，因此重写后的 turn 必须退回 text+剩余 canonical calls，不能保留旧 content_blocks。
-# 函数用途: 从一轮 assistant 历史中删除指定工具调用，并在发生结构变化时清掉失效的厂商原生块。
+# LLM: 工具摘除使thinking签名失效；保原安全text/source，工具仍从剩余canonical calls重建，联测Compact与阶段回放。
+# 函数用途: 删除指定工具调用及失效推理，同时保留正文的消息边界和来源。
 def _assistant_turn_without(turn: AssistantTurn, call_ids: set[str]) -> AssistantTurn:
     kept = [call for call in turn.tool_calls if call.call_id not in call_ids]
     if len(kept) == len(turn.tool_calls):
         return turn
+    from ..backends.assistant_messages import text_only_blocks
+
+    safe_blocks = text_only_blocks(turn.content_blocks)
     if isinstance(turn, _MarkedAssistantTurn):
         return _MarkedAssistantTurn(
             text=turn.text,
             tool_calls=kept,
-            content_blocks=[],
+            content_blocks=safe_blocks,
             _tool_round=turn._tool_round,
         )
-    return AssistantTurn(text=turn.text, tool_calls=kept, content_blocks=[])
+    return AssistantTurn(text=turn.text, tool_calls=kept, content_blocks=safe_blocks)
 
 
 # LLM: thinking-only assistant turn 仍是有效协议历史，不能因没有可见文字或工具调用被 compact 当空项删除。

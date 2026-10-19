@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
 
 
@@ -534,8 +534,10 @@ def _idempotency_pack(key: str, *scope_refs: str) -> dict[str, object]:
     }
 
 
-def _run_params(run_id: str, *, source: str) -> SimpleNamespace:
-    return SimpleNamespace(
+# LLM: 普通本地参数测试明确使用原typed非会话域，无IM actor或Conversation线程；不伪造委派权限。
+# 函数用途: 保留原本地创建幂等参数，只显式声明真实RunParams域。
+def _run_params(run_id: str, *, source: str) -> RunParams:
+    return RunParams(
         run_id=run_id,
         request_id=run_id,
         task_id=run_id,

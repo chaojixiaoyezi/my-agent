@@ -1,4 +1,4 @@
-# LLM: 转发共用原控制回执；冷HTTP只发布完整raw CAS的prepared+dispatch，不物化owner；原ready/Count0入口及v5私卡保持。
+# LLM: 转发共用原控制回执；cold/ready HTTP在完整raw CAS及原owner门内先物化规范owner再发布prepared+dispatch；Count0/legacy及v5私卡保持。
 # 模块用途: 为远端控制保存一次固定分区和代次，重试/状态只读原操作。
 import time
 from dataclasses import replace
@@ -11,7 +11,7 @@ from .multiprocess_route import _digest, owner_digest, owner_worker
 
 
 # LLM: 路径只由原operation_id校验器给出；读原字节/缺失事实，不加锁或修复坏内容，最终提交仍须原同路径try锁及完整字节CAS。
-# 函数用途: 捕获冷运输的规范回执原件，不把不可读当空文件。
+# 函数用途: 捕获固定HTTP运输的规范回执原件，不把不可读当空文件。
 def read_control_operation_raw(paths, operation_id, *, deadline):
     from ..common.json_io import check_io_deadline
     from .control_operation_service import gateway_control_operation_path
@@ -26,7 +26,7 @@ def read_control_operation_raw(paths, operation_id, *, deadline):
 
 
 # LLM: 仅固定真实HTTP源持原op T调用；目标慢读在Root外，同门只try末核，prepared与dispatch一次原writer发布；已有raw任何变化只返回严格原事实。
-# 函数用途: 给冷C首次远端控制完成原目标、分区和完整回执的原子提交。
+# 函数用途: 给cold/ready C首次远端控制完成原目标、分区和完整回执的原子提交。
 def prepare_coordinator_remote_control(source, receipt, expected_raw):
     from ..common.json_io import (
         locked_json_path,
@@ -59,8 +59,8 @@ def prepare_coordinator_remote_control(source, receipt, expected_raw):
         validate_control_dispatch(forwarded)
     results = []
 
-    # LLM: 原controller在mutex/lease短门同步调用，Root内无领域/网络/等待；JSON只try、末writer用同一个deadline，失败不补发。
-    # 函数用途: 最后复核原HTTP来源、目标和完整原件，再一次发布规范回执。
+    # LLM: 原controller在mutex/lease短门同步调用；Root内仅规范owner初始化及回执本地写，无领域/网络/等待，JSON只try并保同一deadline。
+    # 函数用途: 最后复核原HTTP来源、目标和完整原件，先由C初始化该owner再一次发布规范回执。
     def commit():
         with source.runtime._gate:
             source.require_current()
@@ -77,6 +77,10 @@ def prepare_coordinator_remote_control(source, receipt, expected_raw):
                 if targeted and freeze_control_execution(None, source.paths, receipt, **target_options) != execution:
                     raise GlobalWriteError('control_execution_target_changed', 'control_transport')
                 source.require_current()
+                if forwarded.dispatch is not None:
+                    from .multiprocess_native_materialize import materialize_coordinator_owner_home
+                    materialize_coordinator_owner_home(source.control.home_root, source.owner)
+                    source.require_current()
                 write_private_json_file_atomic_no_newline_unlocked(path, forwarded.to_dict(),
                     sort_keys=True, deadline=source.deadline)
                 results.append(forwarded)

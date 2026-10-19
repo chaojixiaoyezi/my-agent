@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from ..backends.assistant_messages import message_projection
 from ..common.value_parsing import non_negative_int
 from ..conversation.channels import (
     project_host_paths_for_channel,
@@ -93,6 +94,42 @@ def public_model_text(text: object, *, max_chars: int, delivery_channel: str, id
     head = max_chars * 2 // 3
     tail = max_chars - head
     return f"{content[:head]}\n…（内容过长，已省略）…\n{content[-tail:]}"
+
+
+# LLM: 输入只来自已验响应提交；整段安全投影不等于分段时合并显示并标记降级，不制造provider phase或执行许可。
+# 函数用途: 将一次完整模型正文转换为可校正候选的原显示事件，不输出隐藏推理。
+def committed_model_events(payload: dict, *, delivery_channel: str = "", identifiers: tuple = ()) -> list[dict]:
+    source = payload.get("source")
+    if (payload.get("schema") != "assistant_messages.v1" or not isinstance(source, dict)
+            or not source.get("call_id") or payload.get("boundary") not in {"tools", "terminal"}):
+        return []
+    rows = payload.get("messages")
+    if not isinstance(rows, list):
+        return []
+    rows = [row for row in rows if isinstance(row, dict)]
+    rows, full, separable = message_projection(rows, lambda text: public_model_text(
+        text, max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers))
+    events = []
+    final_known = any(row.get("phase") == "final_answer" for row in rows)
+    if not separable:
+        # 安全上下文跨消息时只发送原整段的安全投影；阶段资格仍由原结构决定，不给合并段伪造消息身份。
+        final_eligible = final_known or any(row.get("phase") != "commentary" for row in rows)
+        if full:
+            events.append({"kind": "assistant_final" if payload["boundary"] == "terminal" and final_eligible else "assistant_commentary",
+                           "text": full, "model_source": source, "projection": "full_response_security_context"})
+    else:
+        for row in rows:
+            process = payload["boundary"] == "tools" or row.get("phase") == "commentary" or (final_known and row.get("phase") != "final_answer")
+            if process and row["text"]:
+                events.append({"kind": "assistant_commentary", "text": row["text"], "model_source": source,
+                               "message_source": {key: row.get(key) for key in ("protocol", "message_id", "output_index", "phase", "source_type")}})
+        if payload["boundary"] == "terminal":
+            final = public_model_text(payload.get("final_text"), max_chars=0, delivery_channel=delivery_channel, identifiers=identifiers)
+            if final:
+                events.append({"kind": "assistant_final", "text": final, "model_source": source})
+    for index, event in enumerate(events):
+        event["replace_candidate"] = index == 0
+    return events
 
 
 # LLM: Sanitize the full thinking before preview clipping and archive through the bound

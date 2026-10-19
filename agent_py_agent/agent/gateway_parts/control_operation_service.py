@@ -1,4 +1,4 @@
-# LLM: 原builder/codec唯一；cold固定HTTP源只try原op T并准备原回执，既存全状态只读；v5/claimed/活封印及默认本地执行不变。
+# LLM: 原builder/codec唯一；cold/ready固定HTTP源只try原op T并准备原回执，既存全状态只读；v5/claimed/活封印及默认本地执行不变。
 # 模块用途: 原私卡action仅扩同一回执v5，旧slash和v1-v4字节不变；保存唯一控制回执并处理安全重试，目录、目标或命令变化不能借用原消息编号执行。
 from __future__ import annotations
 
@@ -776,8 +776,8 @@ def _new_control_operation_receipt(scope, command_kind, command_text, operation_
     )
 
 
-# LLM: 只有本次真实冷HTTP固定producer可调用；op T在Root外只try，既存同ID全状态只读，不进本地reconcile/effect或重新挑目标。
-# 函数用途: 复用原identity、builder和codec为冷C准备一次远端控制，忙时保原事实。
+# LLM: 只有本次真实cold/ready HTTP固定producer可调用；op T在Root外只try，既存同ID全状态只读，不进本地reconcile/effect或重新挑目标。
+# 函数用途: 复用原identity、builder和codec为C准备一次远端控制，忙时保原事实。
 def prepare_coordinator_control_operation(source):
     from .coordinator_control_transport import _CoordinatorControlTransport
     from .multiprocess_control_forward import read_control_operation_raw
@@ -800,7 +800,7 @@ def prepare_coordinator_control_operation(source):
 
 
 # LLM: 原完整raw只由固定原路径读取；不可读/非法/身份不符必须拒绝，不能默认{}修复或丢未知字段后回写。
-# 函数用途: 沿原严格codec读取冷运输看到的既存回执，同ID输入冲突仍报原冲突。
+# 函数用途: 沿原严格codec读取固定HTTP运输看到的既存回执，同ID输入冲突仍报原冲突。
 def _coordinator_control_receipt(source, raw):
     source.require_current()
     if raw is None:

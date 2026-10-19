@@ -1,6 +1,7 @@
 # LLM: 客户端只接收结构化错误码对应的安全文案；保留模型截断事实，不公开内部异常或把思考当正文。
 # 原请求短事务unknown仅重导出common唯一typed类，operation_entered=False；不能混同旧恢复异常或已进入线程的退出未知。
 # 原Call/心跳/runner Thread退出未知只在原出处/lifetime有效时附请求诊断；失效后不重绑或普通失败清账。
+# 子代理媒体转交拒绝只公开结构码对应的行动提示，不泄露引用/路径、不建议丢图继续任务。
 # 模块用途: 统一 Gateway 请求失败与输入附件错误，区分模型连接、长度限制、会话读写和执行结果未确认。
 from __future__ import annotations
 
@@ -224,7 +225,7 @@ class SystemCommandRoutingError(RuntimeError):
 # PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED 是回合层自动重试到总时长上限的收口码：文案说明本轮已停止、
 #   可稍后重试或换模型，不写"系统会自动重试"（那时已不会再有自动重试）。
 # COMPACT_OSERROR 表示恢复记录的读取/校验失败，不能向用户承诺换更大窗口可以解决。
-# 函数用途: 区分尚未配置、压缩、截断、持久化、请求拒绝与发送前结构检查失败，不把未知 400 归咎密钥或建议不安全重放。
+# 函数用途: 区分尚未配置、压缩、截断、持久化、媒体转交与请求结构错误，不公开内部细节或建议不安全重放。
 def gateway_client_error_message(error_code: object) -> str:
     code = str(error_code or "").strip().upper()
     if code == "COMPACT_REQUEST_NON_TEXT":
@@ -298,6 +299,13 @@ def gateway_client_error_message(error_code: object) -> str:
             "请查看运行诊断后再恢复。"
         ),
         "INPUT_MEDIA_INVALID": "附件无效、已改变或超过限制，请重新添加图片/视频。",
+        "SUBAGENT_INPUT_MEDIA_DISABLED": (
+            "当前未开启向子代理转交图片/视频，本次未创建子代理。"
+            "请联系管理员检查附件转交设置后再继续。"
+        ),
+        "SUBAGENT_INPUT_MEDIA_INVALID": (
+            "图片/视频的转交引用无效或无法读取，本次未创建子代理。请重新添加原附件后再试。"
+        ),
         "CONVERSATION_TASK_BINDING_CONFLICT": (
             "当前任务的状态与执行绑定不一致，本轮未继续；不是聊天记录丢失。"
             "请核对运行诊断；确认旧执行已经停止后，可用 /goal resume 显式恢复目标。"

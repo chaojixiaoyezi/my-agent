@@ -145,6 +145,8 @@ def _turn_skill_snapshot(agent):
     return provider(workspace)
 
 
+# LLM: 主运行链沿原服务生命周期构造loop/finalize参数；响应来源身份必须显式贯穿，不能从正文或持久元数据恢复信任。
+# 类用途: 为SimpleAgent连接运行入口、工具循环及最终收口，参数变更须联测CLI/Gateway和sealed来源。
 class SimpleAgentRuntimeMixin:
     _services: _RuntimeServices | None = None
 
@@ -217,6 +219,8 @@ class SimpleAgentRuntimeMixin:
             with foreground_model_scope(self.backend):
                 return _run_with_params(self, user_prompt, params)
 
+    # LLM: 原run参数是收口身份唯一来源；attempt显式透传供sealed响应核验，不从response补猜，联测拒绝与最终投影。
+    # 函数用途: 冻结本轮最终保存和公开说明的原请求范围与已采纳结果。
     def _build_finalize_context(self, params: FinalizeParams):
         rp = params.run_params
         return FinalizeContext(
@@ -233,6 +237,7 @@ class SimpleAgentRuntimeMixin:
             compression_snapshot_path=params.compression_snapshot_path,
             compression_applied=params.compression_applied,
             request_id=rp.request_id,
+            attempt_id=rp.attempt_id,
             run_id=rp.run_id,
             task_id=rp.task_id,
             source=rp.source,

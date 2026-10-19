@@ -107,6 +107,11 @@ class BackgroundMainActivitySink:
         self._transcript.write_model(text)
         self._publish("responding", "正在生成回复")
 
+    # LLM: 只转发原同源已验响应，不拼业务文案或打开第二IM投递路径；主发言权仍归原会话。
+    # 函数用途: 将后台主代理的完整模型说明提交给既有正文显示接收器。
+    def commit_model_response(self, payload: dict) -> None:
+        self._transcript.commit_model_response(payload)
+
     # LLM: Streaming thinking is forwarded only through the explicit typed
     # provider callback; the scalar activity row remains a content-free liveness hint.
     # 函数用途: 实时显示后台主代理的显式思考增量，同时更新 main 活动行。

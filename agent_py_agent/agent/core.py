@@ -6,6 +6,7 @@
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
 # LLM: 记忆真实构造叶与嵌入工厂已纯提取；本模块保原字段赋值顺序、startup快照和curator后半段，不能借此接冷HTTP。
+# LLM: 普通 MCP 的管理员全盘免确认只在 registry 每调用读取原 owner 模式并核当前有效边界，不从配置字符串独自签权。
 # 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；源码和无源码发行共用工作区裁决；只读self_map沿各领域原公开读口装配。
 
 from __future__ import annotations
@@ -981,14 +982,14 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
-# LLM: ToolRegistry 唯一装配入口；凭据与自身能力来源均绑定宿主身份，B5 owner/来源与原 B2 征询合同不变。
+# LLM: ToolRegistry 唯一装配入口；凭据与自身能力来源均绑定宿主身份，审批读取器每次返回原 owner 结构化模式，不持久第二权限源。B5 owner/来源与原 B2 征询合同不变。
 # 函数用途: 按身份和工作区组合工具、只读自身状态和来源声明，主代理与同进程子代理共用权限接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
     from .settings.secret_ref import managed_secret_environment_names
     from .tooling.self_context import tool_self_context
-    from .user_space.approval_mode import read_approval_mode
+    from .user_space.approval_mode import read_approval_mode, read_permission_state
 
     workspace_root = agent.effective_workspace_root
     workspace_roots = agent.effective_workspace_roots
@@ -1074,6 +1075,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
                 getattr(agent.home_paths, "owner_id", "") or "local/main"
             ),
             approval_mode_reader=partial(read_approval_mode, agent.home_paths),
+            permission_state_reader=partial(read_permission_state, agent.home_paths),
             self_context_provider=partial(tool_self_context, agent),
             plugin_gate_reviewer=_build_plugin_gate_reviewer(agent, config),
         )

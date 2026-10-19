@@ -29,6 +29,11 @@ def _work(tmp_path, *, interval=120):
         'canonical_user_id':'ou_test','owner_id':agent.home_paths.owner_id,'owner_home':str(agent.home_paths.owner_home_dir)})
     work=ensure_execution_thread(agent,source.thread_id,'synthetic-progress',kind='delegated')
     store.threads.update_atomic(work.thread_id,lambda t:replace(t,metadata={**t.metadata,IM_TASK_EXECUTION_KEY:{'mode':'delegated'}}))
+    from agent_py_agent.agent.conversation.execution_threads import bind_delegated_task
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskDraft
+    task=store.session_tasks.create(SessionTaskDraft(sender_thread_id=source.thread_id,
+        target_thread_id=work.thread_id,goal='合成后台工作',dedupe_key='ordinary-progress'))
+    bind_delegated_task(store,work.thread_id,task.task_id)
     store.tasks.bind({'thread_id':work.thread_id,'task_id':'synthetic-root','goal':'合成后台工作','status':'active'})
     claim=store.claims.acquire({'thread_id':work.thread_id,'task_id':'synthetic-root','reason':'thread_goal_continue'})
     sent,edits=[],[]
@@ -38,37 +43,28 @@ def _work(tmp_path, *, interval=120):
     return agent,work,claim,sent,edits
 
 
-def test_background_reuses_same_window_limit_and_stops_before_final(tmp_path):
+def test_delegated_work_never_opens_an_extra_im_progress_window(tmp_path):
     agent,work,claim,sent,edits=_work(tmp_path)
     observer=BackgroundIMProgress(agent,'synthetic-root')
-    try:
-        assert observer.thread is not None and observer.interval==120
-        observer.update('执行命令 '+('合成内容'*80))
-        observer._deliver()
-        observer._deliver()
-        observer.close()
-        assert len(sent)==1 and len(edits)==2
-        assert all(len(text)<=100 and '更新于 ' in text for _,text in edits)
-        assert all(message_id=='om_progress' for message_id,_ in edits)
-        assert '本轮已结束' in edits[-1][1]
-        assert not observer.thread.is_alive()
-    finally:
-        observer.close()
+    assert observer.thread is None
+    observer.update('合成工具等待')
+    observer.close()
+    assert not sent and not edits
 
 
-def test_cancelled_claim_does_not_emit_new_heartbeat_or_overwrite_next_attempt(tmp_path):
+def test_cancelled_delegate_does_not_emit_or_overwrite_any_message(tmp_path):
     agent,work,claim,sent,edits=_work(tmp_path)
     observer=BackgroundIMProgress(agent,'synthetic-root')
-    observer._deliver()
     agent.conversation_store.claims.finish({'thread_id':work.thread_id,'claim_id':claim['claim_id']})
     observer.close()
-    assert len(sent)==1 and not edits
+    assert not sent and not edits
 
 
 def test_final_close_waits_for_inflight_provider_edit_even_past_short_join_timeout(tmp_path, monkeypatch):
     import threading
 
-    agent,work,claim,sent,edits=_work(tmp_path,interval=.01)
+    agent,work,_job,_run,sent,edits=_scheduled_followup(tmp_path,{'mode':'origin','reply_policy':'always'})
+    agent.config.im_stream_heartbeat_seconds=.01
     sending, release=threading.Event(),threading.Event()
     adapter=agent.channel_registry.adapter_for('feishu')
     original=adapter.start_progress_message
@@ -77,7 +73,8 @@ def test_final_close_waits_for_inflight_provider_edit_even_past_short_join_timeo
         assert release.wait(2)
         return original(target,text,**kwargs)
     adapter.start_progress_message=slow_send
-    observer=BackgroundIMProgress(agent,'synthetic-root')
+    observer=BackgroundIMProgress(agent, _run['run_id'])
+    assert observer.thread is not None
     assert sending.wait(2)
     join=observer.thread.join
     # 保持真实线程与网络在途顺序；只缩短旧 15 秒超时，避免回归要等整整 15 秒。

@@ -683,14 +683,15 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             phase="started",
         )
 
-    # LLM: delta 必须命中现有 active block，不能凭迟到正文自动创建第二块。
-    # 函数用途: 将 text/detail 增量合并到活动块。
+    # LLM: delta须命中active；显式assistant replace_text只替该活动正文，stable仍拒绝，普通/思考delta保追加。
+    # 函数用途: 追加活动文本或用同源完整候选替换当前半句，不提前冻结或修改稳定历史。
     def _handle_block_delta(self, event: TuiEvent) -> None:
         block = self.active_blocks.get(event.block_id)
         if block is None:
             self.record_diagnostic("DELTA_WITHOUT_ACTIVE_BLOCK", event)
             return
-        text = block.text + str(event.payload.get("text") or "")
+        value = str(event.payload.get("text") or "")
+        text = value if event.kind == "assistant_delta" and event.payload.get("replace_text") is True else block.text + value
         detail = block.detail + str(event.payload.get("detail") or "")
         self.active_blocks[event.block_id] = replace(
             block,

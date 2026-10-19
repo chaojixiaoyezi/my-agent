@@ -1023,3 +1023,117 @@ def test_capability_request_wake_carries_parent_tool_authority_and_separate_appr
         assert authority["all_requested_tools_grantable"] is True
         assert authority["capability_resolution_requires_user_approval"] is False
         assert authority["dangerous_tool_call_approval_is_separate"] is True
+
+
+# LLM: 只创建隔离echo宿主及canonical申请，不调用模型、网络或启动runner；范围字段使用合成值供原grant writer传输验证。
+# 函数用途: 为504的命令-only和已有工具目录解锁构造一条独立申请。
+def _scope_transport_request(tmp_path, *, tools, kind='shell', commands=None):
+    agent = SimpleAgent(AgentConfig(model_backend='echo', enable_tools=True,
+        subagent_workspace='subs'), tmp_path)
+    task = agent.subagents.create_run(goal='合成范围授权', thought='验证原结构字段',
+                                      plan=['申请', '等待'], allowed_tools=tools)
+    root = str((Path(task.task_workspace_dir)/'authorized-A').resolve())
+    request = agent.subagents.lifecycle.record_capability_request(task.id,
+        RecordCapabilityRequestParams(problem='合成权限缺口', needed_capability='synthetic-scope',
+            capability_type=kind, requested_tools=tools if commands else [],
+            requested_commands=commands or [], path_scope=[root],
+            network_scope=['https://scope.invalid'] if commands else [],
+            output_budget={'max_stdout_bytes': 4096} if commands else {}, risk_level='low',
+            constraints={'synthetic_constraint': 'kept'}, alternatives_attempted=['synthetic-alternative'],
+            escalation_target='parent'))
+    return agent, task, request, root
+
+
+def test_command_only_path_grant_never_adds_filesystem_edit_tools(tmp_path):
+    agent, task, request, _root = _scope_transport_request(tmp_path, tools=['run_command'], commands=['printf synthetic'])
+    result = _tool(agent).execute({'run_id':task.id,'request_id':request.id,'decision':'grant','reason':'命令范围原样授予'})
+    assert result.ok, result.output
+    grant = agent.subagents.load(task.id).capability_grants[0]
+    assert grant.tools == ['run_command']
+    assert not {'write_file','edit_file','apply_patch'} & set(grant.tools)
+    assert agent.subagents.runner_context._build_write_boundary(agent.subagents.load(task.id))['capability_write_roots'] == []
+
+
+def test_explicit_grant_preserves_original_command_network_budget_and_request_snapshot(tmp_path):
+    from agent_py_agent.agent.subagents.capability_scope import (
+        request_scope_snapshot,
+        scoped_constraints,
+    )
+
+    agent, task, request, root = _scope_transport_request(tmp_path, tools=['run_command'], commands=['printf synthetic'])
+    result = _tool(agent).execute({'run_id':task.id,'request_id':request.id,'decision':'grant','reason':'保留原范围'})
+    assert result.ok, result.output
+    grant = agent.subagents.load(task.id).capability_grants[0]
+    assert grant.command_allowlist == ['printf']
+    assert grant.network_scope == request.network_scope
+    assert grant.output_budget == request.output_budget
+    assert grant.constraints == scoped_constraints(request)
+    assert grant.risk_level == request.risk_level
+    assert grant.path_scope == [root]
+    assert grant.reason == '保留原范围'
+    for key,value in request_scope_snapshot(request).items():
+        assert grant.request_scope[key] == value
+    assert grant.request_scope['resolved_by'] == 'resolve_capability_requests'
+    assert grant.request_scope['parent_tool_authority'] == json.loads(result.output)['resolved'][0]['parent_tool_authority']
+
+
+def test_directory_only_reuses_exact_existing_effective_file_tool(tmp_path):
+    agent, task, request, root = _scope_transport_request(tmp_path, tools=['write_file'], kind='filesystem')
+    result = _tool(agent).execute({'run_id':task.id,'request_id':request.id,'decision':'grant','reason':'解锁目录不新增工具'})
+    assert result.ok, result.output
+    current = agent.subagents.load(task.id)
+    assert current.capability_grants[0].tools == ['write_file']
+    assert set(current.allowed_tools) == set(task.allowed_tools)
+    assert agent.subagents.runner_context._build_write_boundary(agent.subagents.load(task.id))['capability_write_roots'] == [root]
+
+
+@pytest.mark.parametrize('blocked', ['child_never_had_file_tool', 'child_disabled', 'parent_revoked'])
+def test_directory_only_never_restores_missing_or_revoked_file_tools(tmp_path, blocked):
+    agent, task, request, _root = _scope_transport_request(tmp_path,
+        tools=['read_file'] if blocked == 'child_never_had_file_tool' else ['write_file'], kind='filesystem')
+    if blocked == 'child_disabled':
+        current = agent.subagents.load(task.id)
+        current.effective_permissions = {**current.effective_permissions, 'disabled_tools':['write_file']}
+        agent.subagents.save(current)
+    elif blocked == 'parent_revoked':
+        agent.tools.disabled_tool_names.add('write_file')
+    result = _tool(agent).execute({'run_id':task.id,'request_id':request.id,'decision':'grant','reason':'目录授权不恢复撤销工具'})
+    assert result.ok, result.output
+    current = agent.subagents.load(task.id)
+    assert current.capability_grants[0].tools == []
+    assert agent.subagents.runner_context._build_write_boundary(agent.subagents.load(task.id))['capability_write_roots'] == []
+
+
+def test_capability_open_wake_uses_exact_canonical_urgent_value():
+    from agent_py_agent.agent.conversation.store_layout import wake_urgency
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+    from agent_py_agent.agent.subagents.runner_completion_wake import _capability_open_signal
+
+    request = CapabilityRequest('synthetic-request', 'synthetic-child', 'p', 'n')
+    task = SimpleNamespace(id='synthetic-child', parent_id='synthetic-parent', root_id='synthetic-root')
+    signal = _capability_open_signal(SimpleNamespace(thread_id='synthetic-thread'), task, request, object())
+    assert signal['urgency'] == 'urgent'
+    assert wake_urgency(signal['urgency']) == 'urgent'
+    assert signal['dedupe_key'] == 'capability-open:synthetic-child:synthetic-request'
+
+
+@pytest.mark.parametrize('outside_owner', [False, True])
+def test_command_only_cwd_scope_uses_original_safe_directory_gate(tmp_path, outside_owner):
+    agent, task, _request, root = _scope_transport_request(tmp_path, tools=['run_command'], commands=['printf synthetic'])
+    cwd = str((tmp_path / 'outside-owner').resolve()) if outside_owner else root
+    request = agent.subagents.lifecycle.record_capability_request(task.id,
+        RecordCapabilityRequestParams(problem='合成cwd-only缺口', needed_capability='synthetic-cwd',
+            capability_type='shell', requested_tools=['run_command'], requested_commands=['printf synthetic'],
+            cwd_scope=[cwd]))
+    result = _tool(agent).execute({'run_id':task.id,'request_id':request.id,'decision':'grant','reason':'原目录门核cwd'})
+    current = agent.subagents.load(task.id)
+    if outside_owner:
+        assert not result.ok, result.output
+        assert json.loads(result.output)['errors'][0]['error_code'] == 'PATH_OUTSIDE_WORKSPACE'
+        assert not current.capability_grants
+        assert next(item for item in current.capability_requests if item.id == request.id).status == 'OPEN'
+    else:
+        assert result.ok, result.output
+        assert current.capability_grants[0].path_scope == [cwd]
+        assert current.capability_grants[0].tools == ['run_command']
+        assert current.capability_grants[0].request_scope['cwd_scope'] == [cwd]

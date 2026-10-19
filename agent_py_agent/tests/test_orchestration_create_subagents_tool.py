@@ -363,6 +363,7 @@ class TestCreateSubagentsToolExecute:
         from agent_py_agent.agent.agent_core.orchestration_tools import (
             CreateSubagentsTool,
         )
+        from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
         from agent_py_agent.agent.common.audit_activation import (
             AUDIT_ATTR,
             AUDIT_SOURCE_BINDING_PENDING_ATTR,
@@ -375,7 +376,8 @@ class TestCreateSubagentsToolExecute:
         audit_id = "audit-create-first-turn-scope"
         mock_agent = _mock_create_items_agent(task_count=1)
         mock_agent.config.lease_stale_without_heartbeat_seconds = 300
-        mock_agent._current_run_params = SimpleNamespace(
+        # 这里只测本地 audit 来源绑定；typed 默认上下文不声明会话或 IM 宿主身份。
+        mock_agent._current_run_params = RunParams(
             source="request",
             task_id=audit_id,
             request_id=audit_id,

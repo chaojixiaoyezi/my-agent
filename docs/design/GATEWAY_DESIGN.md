@@ -385,3 +385,12 @@ invite:
 - 用户层不暴露底层 tick 参数；普通用户只说目标和可选规模限制。
 - 高级用户可以在配置里调策略：任务规模默认 0 表示不设硬上限，runner 并发/启动速率默认 `auto`；runner 外层总超时默认 `off`，需要压测或自动抢救卡死 runner 时再显式设成 `auto` 或固定秒数。
 - 并发自动值以当前配置和运行实现为准，不沿用早期固定容量的假设。
+
+
+## 首次远端控制与只读Worker的owner初始化
+
+正Count下普通远端HTTP控制，无论C业务Agent是否已ready，都消费同一个固定HTTP来源。ready来源额外冻结原Agent引用、canonical home与原控制面；替换、撤销、关闭或正文/凭据变化不能继续首次写。原op T在外，controller/lease→Root→receipt try锁内先核原raw仍不存在；只有可发表dispatch时才复用native原规范owner目录/种子初始化，再末核同source并发表原回执。物化不是业务执行，允许失败后留下已合法初始化的目录，但不回滚或补发未知控制。
+
+W继续只读消费C已物化的共享及owner资源；缺失仍报原结构化错误，不能自行seed、chmod或绕过owner/分区/出生身份。既存prepared/claimed/executing/completed/terminal_unknown只读原事实，GET、重放及目标拒绝均不借此补目录。Count0、本机owner、管理/model和原私卡来源保持原路径；legacy非HTTP API不因持久receipt获得新增首写授权。普通成员权限不会因共享宿主模型/应用连接而变成管理员。
+
+离线回归使用明确fake的HTTP工作片与合成鉴权，不开监听器、不调用模型；C规范物化、回执、W原pool/P0及delegate偏好执行保持真实组件。它只能证明修复接缝，不能宣称真实群或完整生命周期已通过。

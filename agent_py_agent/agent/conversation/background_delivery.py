@@ -60,7 +60,7 @@ _ROUTE_UNDECLARED = "undeclared"
 # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
 # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
 # 已外发的冻结回执只补canonical，不受新准入否决而再次外发；未外发事件仍须原generation与开始CAS。
-# 函数用途: 处理渠道投递与唯一会话提交；正常结果保持原静默，已核认证义务可通知，发送前仍复核原记录。
+# 函数用途: 委派只留原执行线程内部结果，其余沿原渠道/冻结回执提交；主sender的模型通知仍走原外发门。
 def record_background_response(
     delivery: BackgroundDeliveryDependencies,
     request: BackgroundDeliveryRequest,
@@ -80,6 +80,38 @@ def record_background_response(
 ) -> BackgroundDeliveryCommit:
     # 内部协议仍交给真实 DeliveryService 做主动消息抑制，但普通 transcript/report
     # 只能保存用户投影，否则下一轮 compact 和 owner-local 搜索会被机器协议污染。
+    if (internal := _record_delegated_internal_response(
+        delivery, request, delivery_context, internal_content, delivery_artifacts=delivery_artifacts,
+        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot, frozen_retry=frozen_retry
+    )) is not None:
+        return internal
+    return _record_background_owner_response(
+        delivery, request, delivery_context, internal_content, public_receipt=public_receipt,
+        delivery_artifacts=delivery_artifacts, operation_verification=operation_verification,
+        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot,
+        deliver=deliver, delivery_reason=delivery_reason, route_supports_transcript=route_supports_transcript,
+        frozen_retry=frozen_retry, local_transcript_only=local_transcript_only)
+
+
+# LLM: 原owner信封提交保留冻结回执、代次、渠道与canonical的完整顺序；仅由上层排除未外发委派内部结果。
+# 函数用途: 执行普通后台通知或已外发回执补账，保持附件、历史和失败重投原语义。
+def _record_background_owner_response(
+    delivery: BackgroundDeliveryDependencies,
+    request: BackgroundDeliveryRequest,
+    delivery_context: DeliveryContext,
+    internal_content: str,
+    *,
+    public_receipt: dict[str, object] | None = None,
+    delivery_artifacts: tuple[dict[str, object], ...] = (),
+    operation_verification: dict[str, object] | None = None,
+    assistant_commentaries: tuple[str, ...] = (),
+    display_snapshot: dict[str, object] | None = None,
+    deliver: bool,
+    delivery_reason: str,
+    route_supports_transcript: bool | None = None,
+    frozen_retry: FrozenOwnerDelivery | None = None,
+    local_transcript_only: bool = False,
+) -> BackgroundDeliveryCommit:
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
                                               has_attachments=bool(_channel_attachments(delivery_artifacts)), frozen_retry=frozen_retry):
@@ -164,6 +196,27 @@ def record_background_response(
         ),
     )
     return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
+
+
+# LLM: 仅固定委派内部留档，canonical scheduler与已external_sent重投返回原路径；不发送、换owner或冒充主sender，不创建第二队列。
+# 函数用途: 保存执行线程自己的模型结果；终态回报与主会话通知由原SessionTask/guidance/wake负责。
+def _record_delegated_internal_response(delivery, request, context, content, *,
+        delivery_artifacts, assistant_commentaries, display_snapshot, frozen_retry):
+    if frozen_retry is not None and frozen_retry.external_sent:
+        return None
+    from .im_delegation_delivery import delegated_delivery_task
+
+    delegated = delegated_delivery_task(delivery.agent, request.thread_id, task_id=request.task_id)
+    if delegated is None:
+        return None
+    internal_context = replace(context, channel="internal", target="", thread_id=request.thread_id)
+    return _commit_background_response(delivery, request, internal_context,
+        receipt=SimpleNamespace(content=content), delivery_status="local_only",
+        committed_content=project_user_reply(content).content,
+        canonical_record=True, transcript_route=True, evidence_refs=(),
+        message_metadata={"session_task_id": delegated.task_id, "delivery_reason": "delegated_internal_result",
+                          "delivery_artifacts": list(delivery_artifacts)},
+        assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot)
 
 
 # LLM: 已external_sent冻结事实只授权canonical收尾，未外发信封仍核当前代次且实际运输另走begin CAS；普通任务仅只读。

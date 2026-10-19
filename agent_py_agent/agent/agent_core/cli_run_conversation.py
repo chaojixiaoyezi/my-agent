@@ -151,8 +151,8 @@ def bind_cli_run_conversation(agent: object, params: object, user_prompt: str):
     return replace(bound, partial_turn_callback=partial(persist_cli_run_assistant, agent, bound))
 
 
-# LLM: 正常和异常出口共用请求幂等键；原生历史保留，空正文异常只写 metadata，不制造用户回复。
-# 函数用途: 保存 CLI 回复及工具历史；中断也能继续查证，保存失败明确标记降级。
+# LLM: 原幂等键及native envelope不变；已提交commentary按结构化part序号保留，空final不伪造正文，联测reload与中断。
+# 函数用途: 保存CLI模型说明、最终回复及工具历史，失败明确标记降级。
 def persist_cli_run_assistant(agent: object, params: object, result: object) -> bool:
     """Append the final public CLI reply exactly once; degrade only this trailing write."""
 
@@ -180,6 +180,14 @@ def persist_cli_run_assistant(agent: object, params: object, result: object) -> 
         getattr(result, "operation_verification", None)
     )
     try:
+        for index, text in enumerate(getattr(result, "assistant_commentary_messages", ()) or (), start=1):
+            content = project_user_reply(str(text or "")).content
+            if content:
+                store.messages.append_once(
+                    {"thread_id": thread_id, "role": "assistant", "content": content, "channel": _CLI_RUN_CHANNEL,
+                     "metadata": {**_message_metadata(params), "assistant_part_id": f"commentary:{index}"}},
+                    dedupe_key=f"{_dedupe_key(request_id, 'assistant')}:commentary:{index}",
+                )
         entry = store.messages.append_once(
             {
                 "thread_id": thread_id,

@@ -52,10 +52,13 @@ def _normalize_anthropic_message(message: dict[str, Any]) -> dict[str, Any]:
     return {**message, "content": blocks}
 
 
-# LLM: 键序按 _BLOCK_KEY_ORDER 里的声明重建，声明外的键追加在后面并保持相对顺序，
+# LLM: 键序按原声明重建，先显式剥内部逐消息元数据；其余声明外键保持顺序，联测跨协议及缓存重载。
 #   保证新增字段不会被丢掉；input 与 tool_result 的嵌套结构按各自语义处理。
 # 函数用途: 规范化一个 Anthropic 消息块，返回键序固定的新 dict。
 def _normalize_anthropic_block(block: dict[str, Any]) -> dict[str, Any]:
+    from .assistant_messages import without_message_metadata
+
+    block = without_message_metadata(block)
     block_type = str(block.get("type") or "")
     order = _BLOCK_KEY_ORDER.get(block_type)
     if order is None:

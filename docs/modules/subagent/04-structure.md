@@ -1551,3 +1551,17 @@ token 口径尚无完整证据，不能将文本/native 样本扩写为全部首
 ## 2026-10-17 原子任务载荷唯一叶子
 
 persistence/service.py 的 task_from_payload 是原载荷规范化主体，旧方法仍包装同一实现；load_subagent_task 只用显式 workspace+opaque run ID 读取已有 canonical 文件。C 根从原 runtime 路径解析器取得 workspace，不接受卡片 JSON 的路径。
+
+
+### 显式父级授权运输
+
+`agent_core/orchestration/tools/capability.py` 的 `_mark_grant` 分别核目录与工具，明确目录-only 时 `_existing_directory_tools` 重建 child 有效执行上下文并取父 authority 交集；`_persist_grants` 复用 `capability_scope.scoped_grant_params`，覆盖本次已核工具/目录并合并父来源，然后沿原 lifecycle 原子结清。`runner_completion_wake._capability_open_signal` 保持原 run/request 去重与路由，只使用 wake 协议已有的 `urgent`。不修改 runner_context 权威、申请账、父子路由或命令末门。
+
+
+504后继窄修：显式裁决的目录候选保持 write_roots→path_scope→cwd_scope 优先序，合法 cwd-only 范围不再被空值覆盖；所有 cwd 同样经过原 owner/父目录安全门。新增合法/越界 cwd-only 两例，命令路径仍不附赠写工具。
+
+能力申请复用：`capability_request_identity.py`只读当前canonical task/grants核完整覆盖，`services/lifecycle.py`与`result_structured.py`在原写事务消费同一规则；`capability_scope.py`只消费既有声明目录，manager宽workspace不能替代授权。无新增authority/队列/期限状态。
+
+路径复核仍只在原两处：`capability_scope`逐墙外target复用原继承过滤，`capability_request_identity`核持久grant根未因symlink漂移而改绑；不借新账或最终工具拒绝代替grant匹配。
+
+`capability_request_identity`只读复用原`services/runner_context_service._runner_allowed_tools`，与真实runner共用canonical disabled/audit工具投影；不改runner实现。

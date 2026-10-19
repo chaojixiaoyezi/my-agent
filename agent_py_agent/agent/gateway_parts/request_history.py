@@ -104,6 +104,8 @@ def persist_gateway_assistant_result(
     if delivery_projection.internal_signal:
         raise _unavailable_reply_error(context, conversation, result, "任务只返回了运行时内部信号，没有生成可交付给用户的回复")
     if not delivery_projection.content and not gateway_model_response_error_projection(result):
+        persist_gateway_partial_result(context, conversation, result, end_reason="error")
+        _persist_gateway_assistant_commentaries(context, conversation, result)
         raise _unavailable_reply_error(context, conversation, result, "模型没有生成可安全交付的自然回复")
     channel_delivery = delivery_projection.to_dict()
     # 整条最终回复走整条消息出口：对外通道脱敏过宿主绝对路径时末尾附一次说明（之后投递服务不会再附）。
@@ -215,13 +217,14 @@ def _take_host_notices(
 
 
 # LLM: 回调在异常栈退出前使用宿主冻结的 owner/thread/request；不重新取当前会话，不发频道消息，也不调模型。
-# 函数用途: 将中断或异常前的原生工具历史写进原会话；沿用正常 final 的幂等和 repair，停止提示不写正文。
-def persist_gateway_partial_result(context, conversation, result) -> None:
+#   已确定USER_REPLY_UNAVAILABLE时显式携原host error结束事实，避免completed空carrier被原追加门拒绝；不改provider终态。
+# 函数用途: 将中断、异常或空公开回复前的原生历史写进原会话；原final幂等和repair不变，不生成替代正文。
+def persist_gateway_partial_result(context, conversation, result, *, end_reason: str = "") -> None:
     if not getattr(result, "canonical_native_messages", None):
         return
     turn = GatewayAssistantTurn(
         native_messages=result.canonical_native_messages,
-        end_reason=result_turn_end_reason(result),
+        end_reason=end_reason or result_turn_end_reason(result),
         display_snapshot=context.on_chunk.prepare_display_history()
         if isinstance(context.on_chunk, BufferedChunkStreamWriter) else None,
     )

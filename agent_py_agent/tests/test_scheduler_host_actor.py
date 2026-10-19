@@ -161,8 +161,8 @@ def test_missing_background_actor_cannot_make_group_approval_or_monitor(tmp_path
     assert actor.actor_id == "ou_a"
 
 
-# LLM: 使用真正 SimpleAgent、创建服务、ThreadTaskLink 和序列化；只给一次合成 root 绑定，不替 runner 做任务。
-# 函数用途: 验证主根不是 SubAgentTask 时仍能创建/恢复孩子，且孙级沿原专有字段继承。
+# LLM: 只在本helper沿原main authority、晋升和claim入口进入真实工具阶段；保owner/actor原根，不改group_case或以模型attrs造权。
+# 函数用途: 在临时owner登记主执行轮和TaskLink后创建孩子，供主子孙身份/反例复用，不启动runner或网络。
 def managed_child(tmp_path, *, conversation_id='oc_group'):
     agent = _agent(tmp_path, group="oc_group")
     source = agent.conversation_store.threads.get_or_create({"channel": "feishu", "channel_conversation_id": conversation_id,
@@ -170,8 +170,14 @@ def managed_child(tmp_path, *, conversation_id='oc_group'):
         "owner_home": str(agent.home_paths.owner_home_dir)})
     actor = actor_from_scope(agent, SimpleNamespace(channel="feishu", channel_user_id="ou_one",
         channel_conversation_id=conversation_id), source.thread_id, "gwreq-one")
-    agent._current_run_params = RunParams(request_id="gwreq-one", task_id="gwreq-one",
-        task_attributes={"conversation_thread_id": source.thread_id}, host_channel_actor=actor)
+    from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
+    from agent_py_agent.tests.test_im_delegation_runtime import promote_runtime_fixture_root
+
+    agent._current_run_params = _bind_main_agent_authority(agent, RunParams(
+        request_id="gwreq-one", run_id="gwreq-one", task_id="gwreq-one", source="gateway",
+        context_scope="conversation", root_user_prompt="合成主任务",
+        task_attributes={"conversation_thread_id": source.thread_id}, host_channel_actor=actor))
+    promote_runtime_fixture_root(agent, agent._current_run_params)
     from agent_py_agent.tests.test_group_authorization import (
         grant_synthetic_group_monitor_capability,
     )
@@ -334,11 +340,15 @@ def test_first_delegated_session_task_restores_actor_before_main_root_promotion(
     from agent_py_agent.agent.conversation.im_delegation import prepare_delegated_execution
     from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
 
-    agent, params, task, context, source = runtime_fixture(tmp_path, monkeypatch)
+    agent, params, task, context, source = runtime_fixture(tmp_path, monkeypatch, promote_root=False)
     assert agent.conversation_store.tasks.load(task.task_id) is None
     actor = background_host_actor(agent, task.target_thread_id, task.task_id)
     assert actor == agent._current_run_params.host_channel_actor
     assert actor.source_thread_id == source.thread_id and actor.entry_request_id == context.request_id
+    assert agent.conversation_store.tasks.load(task.task_id) is None
+    from agent_py_agent.tests.test_im_delegation_runtime import promote_runtime_fixture_root
+
+    promote_runtime_fixture_root(agent, agent._current_run_params)
     prepare_delegated_execution(agent, params)
     assert agent.conversation_store.tasks.load(task.task_id).host_channel_actor == actor.to_record()
     children = agent.conversation_store.threads.require(task.target_thread_id).metadata[IM_TASK_EXECUTION_KEY]["child_run_ids"]
@@ -351,7 +361,15 @@ def test_delegated_restore_requires_original_task_target_source_policy_and_owner
     from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
     from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
 
-    agent, _, task, _, source = runtime_fixture(tmp_path, monkeypatch, conversation_id=conversation_id)
+    # bad_root专测已晋升TaskLink损坏；其余反例必须仍走原无link SessionTask来源恢复门。
+    agent, _, task, _, source = runtime_fixture(tmp_path, monkeypatch, conversation_id=conversation_id,
+        promote_root=invalid == "bad_root")
+    link = agent.conversation_store.tasks.load(task.task_id)
+    if invalid == "bad_root":
+        assert link is not None
+    else:
+        assert link is None
+        assert agent.conversation_store.claims.load(task.target_thread_id) == {}
     thread_id = task.target_thread_id
     if invalid == "wrong_target":
         thread_id = source.thread_id
@@ -548,3 +566,19 @@ def test_local_new_request_can_create_monitor_before_task_root_promotion(tmp_pat
     assert result.ok, (result.error_code, result.output)
     job = agent.scheduler_repository.get_job(json.loads(result.output)["job"]["job_id"])
     assert job["creator"] == {"local": True} and job["thread_id"] == "thread-1"
+
+
+@pytest.mark.parametrize('conversation_id', ['oc_group', 'oc_group:thread:om_topic'])
+def test_managed_child_creation_uses_real_current_main_and_promoted_claim(tmp_path, conversation_id):
+    agent, source, actor, child = managed_child(tmp_path, conversation_id=conversation_id)
+    current = agent._current_run_params
+    run = agent.subagents.runtime_db.main_agent_run_for_task(child.root_id)
+    assert run['run_id'] == current.run_id
+    assert run['current_attempt_id'] == current.attempt_id
+    assert agent.subagents.runtime_db.task_id_for_run_id(current.run_id) == child.root_id
+    link = agent.conversation_store.tasks.load(child.root_id)
+    assert link.task_id == current.task_id and link.thread_id == source.thread_id
+    assert link.host_channel_actor == child.host_channel_actor == actor.to_record()
+    claim = agent.conversation_store.claims.load(source.thread_id)
+    assert claim['task_id'] == child.root_id and claim['status'] == 'running'
+    assert task_host_actor(agent, child) == actor

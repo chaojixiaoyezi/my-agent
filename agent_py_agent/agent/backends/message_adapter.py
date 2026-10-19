@@ -180,7 +180,7 @@ def _assistant_message(turn: AssistantTurn) -> dict[str, Any] | None:
     return {"role": "assistant", "content": content}
 
 
-# LLM: 保存块最后白名单保留各协议 typed 原生块；Responses reasoning 仅由其适配器消费，canonical ToolCall 仍是唯一工具事实。
+# LLM: 保存块白名单保留逐消息来源和各协议原生块；来源只供回放不授权，canonical ToolCall仍是唯一工具事实，联测reload/Compact。
 # 函数用途: 清洗并按原顺序回放 assistant content blocks，同时补齐未出现在保存块里的真实工具调用。
 def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]]:
     raw_blocks = turn.content_blocks
@@ -200,7 +200,10 @@ def _replay_assistant_content_blocks(turn: AssistantTurn) -> list[dict[str, Any]
                 replayed.append({"type": "responses_reasoning", "model": raw["model"], "item": item})
             continue
         if block_type == "text":
-            replayed.append({"type": "text", "text": str(raw.get("text") or "")})
+            from .assistant_messages import MESSAGE_METADATA, message_metadata
+
+            meta = message_metadata(raw)
+            replayed.append({"type": "text", "text": str(raw.get("text") or ""), **({MESSAGE_METADATA: meta} if meta else {})})
             continue
         if block_type == "thinking":
             block = {"type": "thinking", "thinking": str(raw.get("thinking") or "")}

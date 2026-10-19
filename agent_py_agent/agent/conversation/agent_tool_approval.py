@@ -1,3 +1,4 @@
+# LLM: 会话许可只存原Agent级有界缓存；每次以真实canonical owner/run/thread/claim/attempt和有效权限重核scope，重建展示sink不丢许可，旧attempt/插件不得借用。
 # LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 主/子后台共用原审批账；纯退休只写原permission负向事实、不取op或恢复执行权，忙保native未结；插件/claim/原schema保持。
 # 模块用途: 将当次插件确认交给用户，批准、拒绝、取消和失联仍回原调用；C取消仅复用原Store路径，不另建状态源。
@@ -503,13 +504,15 @@ def _approval_retirement_transport_run_closed(error, payload, agent):
 
 # LLM: 主/子共用精确审批入口；后台默认不可交互，前台须由宿主显式启用，群禁止剩余人工审批；缓存不跨 claim/attempt。
 # 类用途: 在已有权限内自动续跑，剩余确认只在交互前台发布原会话审批账。
+# LLM: sink只负责审批运输，approved_session归原Agent有界缓存；每次凭当前canonical执行/权限生成scope，不能从展示对象保存授权事实。
+# 类用途: 给主/子后台回合提供同一审批入口，重建展示对象时保留准确会话许可。
 class AgentToolApprovalSinkMixin:
     agent: object
     thread_id: str
     task_id: str
     approval_interactive: bool = False
 
-    # LLM: 插件禁缓存/provider，后台和群剩余确认仍拒；actual typed未知先同对象上抛，不得在旧best-effort边界洗为unavailable。
+    # LLM: 插件禁缓存/provider；会话许可复用原Agent缓存，scope仅由当前canonical执行与权限生成；后台/群剩余确认仍拒，typed未知原样传播。
     # 函数用途: 自动续跑已有权限内操作，交互前台才上送精确确认。
     def request_permission(
         self,
@@ -527,9 +530,12 @@ class AgentToolApprovalSinkMixin:
             if time.time() >= approval_deadline(request):
                 return ToolApprovalDecision(request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT").to_dict()
             scope = _request_scope(self.agent, self.task_id, self.thread_id, request)
-            session_key = () if forced else (scope.run_id, scope.claim_id, scope.execution_attempt_id, _approval_session_key(request))
-            approved_keys = getattr(self, "_approved_session_keys", set())
-            if session_key and session_key in approved_keys:
+            from ..gateway_parts.approval_session import agent_tool_approval_session_cache
+
+            session_key = "" if forced else _approval_session_key(request)
+            session_scope = "" if forced else _agent_approval_session_scope(self.agent, scope)
+            cache = agent_tool_approval_session_cache(self.agent) if session_scope else None
+            if session_key and cache is not None and cache.is_approved(session_scope, session_key):
                 return ToolApprovalDecision(
                     request.permission_id,
                     "approved",
@@ -560,10 +566,10 @@ class AgentToolApprovalSinkMixin:
                 cancellation_token=cancellation_token,
                 options=ToolApprovalWaitOptions(mode_decision_provider=partial(autonomous_tool_decision, self.agent)),
             )
-            if decision.decision == "approved_session" and session_key:
-                approved_keys = set(approved_keys)
-                approved_keys.add(session_key)
-                self._approved_session_keys = approved_keys
+            if decision.decision == "approved_session" and session_key and cache is not None:
+                # 等待期间发生权限/attempt变化时不保存旧许可；用户决定仍交原消费链复核。
+                if _agent_approval_session_scope(self.agent, scope) == session_scope:
+                    cache.approve(session_scope, session_key)
             if decision.decision == "approved_owner" and grant_key:
                 record_owner_operation_grant(self.agent.home_paths, grant_key, source="agent_tool_approval")
         except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError) as error:
@@ -1056,7 +1062,94 @@ def _cancelled(token: object | None) -> bool:
     return bool(checker()) if callable(checker) else bool(getattr(token, "cancelled", False))
 
 
-# LLM: 缓存沿前台的精确工具名与参数哈希，并由调用方加 run/claim 隔离；不跨 sink、执行或参数扩权。
+# LLM: 只读真实owner、canonical child/currentattempt或main claim及当前ToolRegistry；不读sink attrs、模型参数或恢复JSON。缺失/漂移拒缓存，不退成宽scope。
+# 函数用途: 生成同一准确执行和有效权限下的有界会话缓存作用域，供展示sink重建后安全复用。
+def _agent_approval_session_scope(agent, scope):
+    from ..gateway_parts.approval_session import tool_approval_session_scope
+    from ..tooling.registry import ToolRegistry
+    from ..user_space.approval_mode import read_permission_state
+
+    try:
+        home, tools, config = agent.home_paths, agent.tools, agent.config
+        owner_id = str(home.owner_id or "")
+        if (not owner_id or not isinstance(tools, ToolRegistry)
+                or not tool_approval_scope_is_current(agent, scope)):
+            return ""
+        permissions = {"owner_scope": tools.owner_scope_root, "workspace_roots": tuple(map(str, tools.workspace_roots)),
+                       "disabled_tools": sorted(tools.disabled_tool_names), "permission": read_permission_state(home)}
+        if scope.agent_kind == "subagent":
+            task = agent.subagents.load(scope.run_id)
+            if (task.owner != owner_id or task.agent_thread_id != scope.thread_id
+                    or not scope.execution_attempt_id or task.runner_active_attempt_id != scope.execution_attempt_id):
+                return ""
+            context = agent.subagents.runner_context.build_execution_context(scope.run_id)
+            if context.run_id != scope.run_id:
+                return ""
+            permissions.update(tools=sorted(context.allowed_tools), skills=sorted(context.allowed_skills),
+                               boundary=context.write_boundary)
+            cwd = str(context.write_boundary.get("execution_cwd") or "")
+        else:
+            projection = _main_approval_session_projection(agent, scope)
+            if projection is None:
+                return ""
+            boundary, execution = projection
+            permissions.update(boundary=boundary, execution=execution)
+            cwd = str(boundary.get("execution_cwd") or tools.workspace_root)
+        if not cwd or not tool_approval_scope_is_current(agent, scope):
+            return ""
+        base = tool_approval_session_scope(owner_id=owner_id, thread_id=scope.thread_id,
+            conversation_id=scope.root_task_id, cwd=cwd, access_mode=config.access_mode,
+            path_access_mode=config.path_access_mode)
+        if not base:
+            return ""
+        payload = (base, scope.run_id, scope.claim_id, scope.execution_attempt_id, permissions)
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return "agent-approval-session:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    except (AttributeError, FileNotFoundError, OSError, TypeError, ValueError):
+        return ""
+
+
+# LLM: main 必须有宿主 typed Params 和同原 claim 的实际执行链；后台还核 native LocalRunControl，JSON 只能核对不能签权。同步主车道缺参/错参、旧 attempt 和原 publisher 测试。
+# 函数用途: 只读核实主代理当前权限的出处；来源缺失时关闭会话缓存，保留原准确单次审批。
+def _main_approval_session_projection(agent, scope):
+    from ..agent_core.runtime.loop_models import RunParams
+    from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from .local_run_control import LocalRunControl
+    from .tool_approval_scope import _foreground_runtime_is_current
+
+    current = getattr(agent, "_current_run_params", None)
+    if not isinstance(current, RunParams) or current.task_id != scope.root_task_id:
+        return None
+    store = agent.conversation_store
+    thread = store.threads.load(scope.thread_id)
+    if thread is None:
+        return None
+    run = agent.subagents.runtime_db.agent_run_for_run_id(current.run_id)
+    if run is None:
+        return None
+    execution = {"task_id": current.task_id, "run_id": current.run_id,
+                 "attempt_id": current.attempt_id, "agent_run_id": run["agent_run_id"]}
+    if not _foreground_runtime_is_current(agent, thread, execution):
+        return None
+    if scope.execution_attempt_id:
+        if scope.execution_attempt_id != current.attempt_id:
+            return None
+    else:
+        control = current.conversation_task_binding_callback
+        if (not isinstance(control, LocalRunControl) or control.runtime_authority() != execution
+                or control.request_id != current.request_id or not LocalRunControl.__call__(control, None)):
+            return None
+        claim = store.claims.load(scope.thread_id)
+        authority = claim.get("runtime_authority")
+        if (not isinstance(authority, dict) or authority.get("schema_version") != "conversation_claim_execution.v1"
+                or authority.get("claim_id") != scope.claim_id
+                or authority.get("invocation_run_id") != current.request_id
+                or any(authority.get(key) != value for key, value in execution.items())):
+            return None
+    return write_boundary_with_runtime_ledger(agent, current), execution
+
+
+# LLM: 缓存沿前台的精确工具名与参数哈希；原Agent缓存另以canonical执行和权限scope隔离，不能跨执行或参数扩权。
 # 函数用途: 生成本次执行内“始终允许同一调用”的参数缓存键。
 def _approval_session_key(request: ToolApprovalRequest) -> str:
     tool_name = str(request.binding.get("tool_name") or "").strip()

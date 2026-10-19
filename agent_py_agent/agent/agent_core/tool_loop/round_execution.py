@@ -1408,7 +1408,13 @@ def _persistent_compact_enabled(agent: object, params: object) -> bool:
 # LLM: Typed sink methods are the primary progress protocol; plain callable text
 # callbacks are legacy fallback only. Display failures must never fail tool execution.
 # 函数用途: 将一次工具阶段发送给结构化 TUI/子代理事件接收器，旧文本 callback 仅作兼容。
+# LLM: started来自原工具准入边界；先提交同次已验response再发布工具状态，取消/延后不确认候选，联测nonstream与来源。
+# 函数用途: 在原工具进度出口顺序显示模型说明和工具状态，不改变工具执行与计数。
 def _emit_tool_progress(event: ToolProgressEvent) -> None:
+    if event.phase == "started":
+        from ..model.visible_response import commit_visible_response
+
+        commit_visible_response(event.request.params, event.request.response, boundary="tools")
     on_chunk = getattr(event.request.params, "effective_on_chunk", None)
     tool_name = event.call.tool_name or "unknown"
     detail = _payload_progress_detail(event.call)

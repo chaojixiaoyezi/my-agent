@@ -419,7 +419,7 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
 #   开轮先发布待送达提示；收尾新晋升提示沿同一出口追加并并入当轮提交，不重发开轮提示，不捎带其它后台新提示。
 #   用户消息落账成功后清零持续目标的空片计数（与 ChannelMessageRuntime.receive、CLI 入口同口径：保留熔断暂停原因）；
 #   Goal 自动续跑片走后台 wake，不经过这里，所以不会被这次重置清零。改动同步 test_gateway_goal_fuse_reset.py。
-# 函数用途: 配置流和审批并执行会话；明确系统命令及历史写入失败均阻止模型副作用。
+# 函数用途: 配置流和审批；真实派工后短受理轮只发model final，系统命令/历史或派工失败不制造成功ack。
 def _execute_gateway_conversation_turn(
     context: request_context.GatewayAskRunContext,
     prompt: str,
@@ -453,6 +453,9 @@ def _execute_gateway_conversation_turn(
     dispatched = prepare_im_task_dispatch(context, conversation, prompt)
     if dispatched is not None:
         context.request["host_im_task_ack"] = {"task_id": dispatched.task_id, "status": dispatched.status}
+        final_only = getattr(context.on_chunk, "set_final_only", None)
+        if callable(final_only):
+            final_only()
     result, conversation = _run_gateway_turn_with_conversation_compact(
         context,
         prompt,

@@ -9,7 +9,7 @@
 #   实际使用值，如 max_tokens 按窗口夹取、推理强度在不支持的模型上不发送）在 _APPLIED_RULES 登记派生函数，公式本身仍只在原权威位置；
 #   修改回执经 applied_value_with 按新值给出同一派生结果。常用层级（COMMON_KEYS，/settings 默认只列这些）是封闭的产品决策名单，
 #   登记为 ParameterSpec.common；只影响展示与推荐顺序，不参与任何放行判断。
-#   capability 现读开关的时机只从 self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS 取，不复制名单。
+#   capability 现读开关的时机只从 self_install_switches.CAPABILITY_FRESH_SWITCH_KEYS 取，不复制名单；assistant沟通参数只归展示分类，生效仍沿原配置链。
 # 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效、实际用的是多少”，是参数中心的唯一登记来源。
 from __future__ import annotations
 
@@ -86,6 +86,7 @@ COMMON_KEYS = (
     "timezone", "tui_mouse_capture_default",
 )
 _CATEGORIES = (
+    (("assistant_",), "沟通与展示"),
     (("max_tokens", "model_", "temperature", "top_p", "request_timeout", "stream_", "reasoning_", "anthropic_", "embedding_"),
      "模型请求"),
     (("memory_", "compact_"), "记忆与压缩"),

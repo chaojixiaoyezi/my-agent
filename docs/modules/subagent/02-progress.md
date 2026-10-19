@@ -539,3 +539,19 @@ typed 停机错误及准确 request/run/attempt，不重开原调用、不伪签
 ## 2026-10-17 F3 凭据输入复用原子任务读取
 
 C 私卡事务21使用 TaskPersistenceService.load 与显式 load_subagent_task 的同一 canonical task.json reader/normalizer；不初始化 manager、补任务写者或复制 owner 权限。作者665、非作者同665及额外8项通过（组合有重叠），尚不证明真实 W/native。
+
+
+### 2026-10-18 显式授权范围与申请唤醒
+
+已修复父级裁决丢失原命令/网络/预算/约束/申请快照，以及目录路径无条件附赠全部写工具的问题。明确目录-only 保留 child 有效写工具与父当前实际工具上界交集；命令-only 不推导文件写权限。父级 OPEN 申请沿现有 wake 使用准确 `urgent`，不新增队列，也不据此宣称真实响应时延达标。命令参数灵活范围尚未实现。
+
+
+504后继窄修：显式裁决的目录候选保持 write_roots→path_scope→cwd_scope 优先序，合法 cwd-only 范围不再被空值覆盖；所有 cwd 同样经过原 owner/父目录安全门。新增合法/越界 cwd-only 两例，命令路径仍不附赠写工具。
+
+## 2026-10-18 既有工作根与完整grant复用候选
+
+原owner分区允许本task已声明且通过通用继承过滤的工作根，父路径/工具上界仍保留。lifecycle与parsed结果共用一次canonical grant完整覆盖判断，同目录内输出名或描述变化不重排；过期/撤销/缺字段不能复用旧GRANTED。目录/命令新语义、resolver漏字段及父wake由后继独立片处理，候选尚未集成/部署。详见[权限合同](../../design/OWNER_HOME_PERMISSION_REVIEW.md#2026-10-18-能力申请目录上界与既有授权复用候选)。
+
+501后继修正保原canonical根身份并逐target过滤声明墙外范围；grant根/祖先symlink漂移与声明祖先包home的foreign/宿主目标有正式负例，候选仍待独立复核。
+
+授权覆盖工具集合消费原runner纯投影，ordinary/MCP disabled撤销拒旧GRANTED；原enabled正例保持，不另建权限框架。

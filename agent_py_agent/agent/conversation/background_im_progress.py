@@ -1,5 +1,5 @@
 # LLM: 只观察原委派任务的真实 claim/attempt，时间从执行进程产生；原 DeliveryService 编辑同条消息，线程元数据只保存运输 ID。
-# 模块用途: 为后台委派/子代理的长等待提供同条短状态窗口，终态或失去执行权后停止，无模型心跳请求。
+# 模块用途: 原调度进度复用同条窗口并在终态停更；实际委派后台不再独立向IM发进度。
 from __future__ import annotations
 
 import threading
@@ -30,7 +30,7 @@ def _scheduled_progress_allowed(agent, root_task_id, thread_id):
 # LLM: 一个观察者只绑定一个实际工作片；启动、发送失败不改变任务，关闭必须在原 final 投递前调用。
 # 类用途: 周期展示结构化等待阶段，后台聊天任务与执行互不占用车道。
 class BackgroundIMProgress:
-    # LLM: 只有显式委派线程可启动，原调度run冻结local/none/explicit禁止提前外发；配置0禁用，普通交互时间不变。
+    # LLM: 有原SessionTask的委派仅回主sender，不开外部进度；其它原进度仍核scope及调度run冻结策略，配置0禁用。
     # 函数用途: 冻结原身份和回送绑定，启动可停止的轻量观察线程。
     def __init__(self,agent,task_id):
         self.agent=agent
@@ -44,7 +44,11 @@ class BackgroundIMProgress:
         self.execution=agent.conversation_store.threads.require(link.thread_id)
         if not self.scope.active or IM_TASK_EXECUTION_KEY not in self.execution.metadata:
             return
+        from .im_delegation_delivery import delegated_delivery_task
+
         if not _scheduled_progress_allowed(agent, self.scope.root_task_id, self.execution.thread_id):
+            return
+        if delegated_delivery_task(agent, self.execution.thread_id, task_id=self.scope.root_task_id) is not None:
             return
         interval=float(agent.config.im_stream_heartbeat_seconds)
         if interval<=0:

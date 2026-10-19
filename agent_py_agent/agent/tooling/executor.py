@@ -1,3 +1,4 @@
+# LLM: 管理员全盘事实默认 False，仅运输 registry 的当次只读裁决，不从模型或恢复 JSON 取得。
 # LLM: 共用唯一执行状态机；来源/征询和 guarded 展示均由宿主注入，观察有界收口，不扩大权限或模型参数。
 # 模块用途: 统一工具校验、授权、执行和结果记录，区分未执行、已执行与副作用未知。
 from __future__ import annotations
@@ -82,6 +83,8 @@ class ToolExecution:
 
 # LLM: 模型参数与宿主配置分离；审批、事件身份、调用来源和征询回调只由可信调用方设置，来源默认 model，不能从 ToolCall 参数提权。
 # 类用途: 汇总本次调用与取消上下文；typed guarded/单参观察回调只择一，不改变权限或工具结果。
+# LLM: 管理员 Full Access 仅由 registry 当次原 owner 与有效权限投影注入，默认 False；工具模型参数和归档不得提供。联查 ActionPolicyRequest 与 registry。
+# 类用途: 保存唯一执行器本次调用与宿主权限快照，不执行副作用。
 @dataclass(frozen=True)
 class ToolExecutorRequest:
     call: ToolCall
@@ -113,6 +116,7 @@ class ToolExecutorRequest:
     allow_nested_dispatch: bool = True
     call_origin: str = "model"
     plugin_gate_reviewer: Callable | None = None
+    admin_full_access: bool = False
 
 
 # LLM: 同一授权裁决、输入来源和计时沿执行和前置失败出口共用；成组传递避免另建授权或多参数接口。
@@ -201,6 +205,7 @@ class ToolExecutor:
                 write_boundary=request.write_boundary,
                 runtime_guard_policy=request.runtime_guard_policy,
                 approval_mode=request.approval_mode,
+                admin_full_access=request.admin_full_access,
                 required_action=request.required_action,
                 require_model_visibility=request.require_model_visibility,
             )

@@ -1760,7 +1760,7 @@ def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) ->
 
 # LLM: 本入口直接调用既有采样、工具和记账函数；每次调用独占计数与 params，只从模型轮具名结果显式换用采用后的参数。
 # 裁决顺序须同步核对中断、续跑和工具循环测试；返回具名结果，调用方从 result.params 取最终参数。
-#   收口时只读取当前空正文预算形成诊断；不改response_decision策略或向模型历史注入遥测。
+#   收口时只读取当前空正文预算形成诊断；原待输入失效上限清除公开text/工具，保留原块与pending事实，不加采样。
 # 函数用途: 执行主子共用工具循环并带出只读诊断，仍按原响应、中断和预算推进。
 def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult:
     from ..conversation.task_rejected_actions import sync_task_rejected_actions
@@ -1803,6 +1803,9 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
             # 到上限就用结构化原因收尾（绝不无限重来）。
             if _pending_turn_input_invalidation_exhausted(params):
                 params.live_archive_state["turn_end_reason"] = PENDING_TURN_INPUT_LIMIT_REASON
+                # 达到原失效上限也不能把过期候选确认给用户；保留原块供审计，后续出口只认清空后的text。
+                final_response = replace(final_response, text="", tool_use_blocks=[], runtime_status="failed",
+                    runtime_reason=PENDING_TURN_INPUT_LIMIT_REASON, runtime_source="tool_loop", turn_end_reason="error")
                 break
             continue
         natural_reply_verdict, final_response = _natural_user_reply_step(agent, params, final_response)

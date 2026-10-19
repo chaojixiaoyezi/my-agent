@@ -1,3 +1,17 @@
+## 2026-10-18 凭据表单类型化出口（已实现，发行验收另记）
+
+`user_space/task_credential_forms.py::CredentialFormValidationError`只承载固定码、提示和
+fields/target_url字段枚举；由原卡授权后的parser产生。`private_interaction_service`
+先捕获该实际类型返回400，原503/403分类及Count0/C事务门不变。
+`adapter/private_controls.py`仅把新固定码映射form和静态toast，丢弃任意HTTP消息，
+失败不替换原卡。`task_credentials.py::credential_card`按精确username展示text，其余
+凭据password、不预填，内部form/button name以下划线开头避免自定义字段冲突。
+`test_credential_card_validation.py`覆盖两链错误后改正、原硬门先行、单Wake/终态重放、
+恶意HTTP正文丢弃及adapter实际回环；不新增权限、恢复状态或第二凭据存储。
+
+538后继在adapter读取HTTP错误码后先核字符串类型，未知类型沿原HTTP固定失败；
+新增15节点保持536原反例函数文本，533原36节点和断言结构不变。
+
 ## 2026-10-18 关闭范围消费结构（409候选）
 
 `multiprocess_generation_metadata.require_closed_generation`保留两次严格完整库存与原分类，新增同模块纯比较叶只保expected/covered/固定committed全额原件及集合外current分类；不读terminal、不改writer/reader/seal或新增权限状态。`test_gateway_closed_generation_progress.py`用原心跳/归档writer及临时格式fixture验证当前推进、旧固定来源和未知拒例；新行为须最终双OS新包pyc实跑。
@@ -3436,3 +3450,35 @@ Dispatcher 和 unhandled terminalizer 对原 native 异常链只做保债防御�
 ## 正Count原角色关闭范围候选（127，待复核）
 
 沿原generation唯一历史路径显式v2保存完整原C/W关闭范围，先原producer完整collector/W waitstatus/native close，再历史raw CAS/读回，最后原C marker raw CAS。新C保原角色/旧责任完整绑定，非空P1仍fresh P2；旧v1/旧93不追补，Count0/B4拒绝不变。两份新增运行测试支持同包pyc，真实native/同源stop后再起仍由root串行后置。合同见[生命周期关闭](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+
+## 2026-10-18 首次远端控制owner物化（487仓外候选）
+
+cold/ready正Count普通远端HTTP控制统一使用原固定HTTP producer；ready保存并末核同一Agent、home与控制面。首次raw CAS确认为缺失且可发表dispatch后，在原controller owner门/lease/Root内复用native规范owner初始化，再发表原回执，W只读资源合同不变。全部既存状态、GET、重放与拒目标不补建；Count0、本机、管理/model、私卡和legacy非HTTP入口保持。离线回归仅fake HTTP工作片/鉴权，无真实服务或模型；原486失败保留，待独审、根集成及同源真实验收，不能签发行。
+
+## 2026-10-18 普通 MCP 的当次 full 投影
+
+`core._build_tool_registry` 通过默认None的新只读 `permission_state_reader` 绑定原owner状态；旧 `approval_mode_reader` 保持字符串协议，展示与选包调用方原样。`tooling.registry` 每调用读取一次原状态并核有效边界；`ToolExecutorRequest` 与 `ActionPolicyRequest` 只运输默认False的当次宿主事实。`ActionPolicy` 仅准确普通MCPProxyTool免always，插件子类及后续PluginToolGate仍守原合同。模型参数和恢复JSON不是此字段来源，未新增权限表。
+
+
+### 委派主sender单发话489（本地候选）
+
+真实host派工后主session仅model final受理；后台/child内部汇总由原SessionTask终态guidance+同key wake回主sender自身模型最终通知，主忙只沿同key原ACK/consumed判据，不抢claim。原claimed scope下终态欠账只补元数据，失败保原wake；原SendMessage目录和末门收紧origin，普通scheduler canonical run不因旧work标记被静默。未启动真实服务/模型，边界和配方见IM_TASK_EXECUTION_POLICY与489工件。
+
+## 2026-10-18 原 Agent 缓存与后台 sink
+
+`conversation.agent_tool_approval.AgentToolApprovalSinkMixin` 统一复用 `gateway_parts.approval_session` 原缓存；`_agent_approval_session_scope`只从canonical scope、真实registry和原执行上下文生成摘要。无效源不缓存，等待结束重核后才保存approved_session，sink私有set退出授权链。旧pending记录与运输/退休来源合同不改。
+
+会话缓存来源补充：主代理只有typed RunParams、原宿主control/writer及RuntimeDB当前执行链一致才生成缓存scope；缺失时保留单次审批，不从claim投影恢复批准。
+
+
+## 2026-10-18 已采纳响应的显示接缝（515 P2）
+
+`agent_core/model/visible_response.py` 只在原已验边界将同一 sealed call 投影交给 sink；`backends/assistant_messages.py` 保存原逐消息元数据及保守阶段投影，不拥有循环决定。`gateway_parts/stream_events.committed_model_events` 使用既有 public_model_text，整段安全上下文与分段不一致时合并投影，不制造 provider 消息身份。writer、foreground_transcript、TUI 和后台 transcript 沿原块 replace/commit；CLI 候选仍私有而确认过程可见。`request_history` 空终答失败前走原 partial/commentary 持久化；canonical 回放不重复展示段，F3 final_only 与唯一主发言人仍由原出口控制。协议和安全降级详情见 [出站协议合同](../../design/PROVIDER_WIRE_CONTRACT.md) 与 [上下文设计](../../design/CONVERSATION_CONTEXT_DESIGN.md)。
+
+输入失效上限补充：原上限分支保留原失效计数和待输入记录，清空旧公开text/工具调用并以既有failed/error收口，原blocks仍可审计但不能复活。空公开回复已确定抛原USER_REPLY_UNAVAILABLE时，partial carrier显式携host error使原空终态追加门可保存；provider completed/stop和native原文不改，不生成替代回复。新测试 `test_pending_input_public_boundary.py` 已在准确pre-P2源码红、候选绿；诊断旧测试改用真实GatewayAskRunContext/会话库，原精确诊断断言全保留并增加partial断言。
+
+
+### 515 P2 REV02：唯一冻结边界
+
+foreground_transcript._consume_event的typed final保原candidate_id并发active-only全文更新；prepare_final原live_final_block_id继续由canonical历史接替。TUI reducer只给当前active assistant_delta的显式replace_text替换能力，stable重放门不变；本地/Gateway延后显示均由原adapter守住。Responses done真实索引仅在原collector内部typed属性运输，不进provider JSON或新状态源。

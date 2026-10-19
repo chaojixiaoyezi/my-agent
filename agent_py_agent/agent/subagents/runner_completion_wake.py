@@ -1,4 +1,5 @@
 # LLM: 终态通知器只接收明确 Store 与 task 读写能力；历史 BLOCKED 发布后复读 canonical 修正关联，避免盖掉并发授权；精确完成交给原发布锁保留 handled，联测授权收口与直属父级。
+#   未决能力申请使用原wake协议的urgent优先级；不另建队列，不承诺模型或claim实际处理时延。
 # 模块用途: 可靠发送父级通知、去重并记录投递错误，保持后台 wake 和前台续轮读取同一交接内容。
 from __future__ import annotations
 
@@ -534,9 +535,8 @@ def _capability_open_observation(
     }
 
 
-# LLM: The wake signal mirrors the durable observation and dedupes by exact run/request id. Its
-# metadata is advisory model context; canonical request/grant state remains the machine authority.
-# 函数用途: 构造高优先级且可去重的能力申请 wake，唤醒直属 main 处理同一条申请。
+# LLM: wake沿原run/request去重，使用原wake_urgency准确urgent值，不能把high落入normal；metadata仅上下文，canonical申请/grant仍唯一权威。
+# 函数用途: 构造使用原urgent优先级且可去重的申请wake，仍由原claim车道消费，不另建通知主链。
 def _capability_open_signal(
     thread: Any,
     task: Any,
@@ -550,7 +550,7 @@ def _capability_open_signal(
     return {
         "thread_id": thread.thread_id,
         "observation": observation,
-        "urgency": "high",
+        "urgency": "urgent",
         "reason": "subagent_capability_request_open",
         "source_agent_id": run_id,
         "parent_agent_id": str(getattr(task, "parent_id", "") or ""),

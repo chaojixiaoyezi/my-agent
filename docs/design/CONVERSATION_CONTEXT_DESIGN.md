@@ -6,6 +6,16 @@
 
 # Ordinary Conversation Context Design
 
+## 主会话执行中沟通软引导（2026-10-18，P1 本地候选）
+
+解决复杂执行任务连续调用工具却少有模型说明的问题：`PromptBuilder.prepare_render_input` 在原稳定 system 追加点读取唯一开关 `assistant_progress_updates_enabled`（默认开启），包含 system override 的普通 `default/conversation` 主路径均可触达。复用原 `_is_isolated_scope` 排除 `task_local/control_plane/isolated`，不扩展子代理或辅助表达职责。
+
+指导要求模型依据真实上下文说明第一步、新发现、方向变化及重要编辑/验证；连续探索有正常采样机会时，以约 30–60 秒为软沟通目标。短问答、单次小读取或用户要求少说时可省略，不逐工具机械播报。仍需推进时，说明后同轮继续真实工具，不能把进度句当最终交付。
+
+这只是固定提示，不新增采样、计时器、进度账本或机器完成门。既有 `model_delta/assistant_commentary/assistant_final`、F3 短受理 final-only 与委派唯一主发言人保持原合同；供应商阶段保留、纯正文结束和历史/Compact 不由该开关决定。开关关闭只退出新增指导，配置生效沿原 Gateway 重启/CLI 下次启动语义。
+
+定向验证覆盖默认/显式布尔、真实配置来源、主路径/override、隔离范围、稳定缓存前缀和参数读取方；它不能代替真实模型执行中沟通验收。消息阶段、晚到终态校正及缺 final 的闭合设计属于后续 P2，当前未实施。
+
 ## Compact 最终数字与联合恢复旧快照（compactview，2026-10-09）
 
 原生压缩复用 `compact_calibration` 的冻结请求校准器，不另做显示比例；完成数字在 CAS 同范围视图刷新、方法补带、代次运行事实就位后重算。最终 raw/校准值重建 provider observation 的 compact_candidate 基线，后续 Context 沿同一追加量规则增长。无校准时失效旧 provider 观测并保持 raw 口径。
@@ -596,3 +606,19 @@ F4 原 source-CAS/persona_epoch 仍由唯一 agents_source_repository 与 freeze
 原GuidanceStore.append_once仍是唯一幂等追加：dedupe transition内先canonical v4，再修原turn/input索引与JSONL queue，reserve→submit→ACK不变。内部可选blocking=True/deadline=None默认保留原调用形状/精确字节及迁移语义；真实Gateway active短窗才选False，把同一绝对deadline传到ledger全部必要reader/writer。普通锁忙不当空账，退出原Gateway T/Root后等原interrupt；正常读取/序列化耗时后和末提交前仍核预算。
 
 预算只是纯资源上界，不是owner/路径/执行许可。部分canonical已经提交时只保原同一guidance ID与事实，后续重放修投影，不回滚、ACK猜测或重发模型。显式bounded原私有replace不内部sleep/retry且保原PermissionError，None仍原8次重试路径；单个OS syscall不能硬抢占。原source、lifetimes、P3与取消仍由既有主链判断。完整输入运输和当前未验边界见[前台输入运输](COORDINATOR_ACTIVE_INPUT_TRANSPORT.md)。
+
+
+## 2026-10-18 模型过程说明的同响应提交（515 P2，本地候选）
+
+原生成出口签发的 sealed call 是显示来源，正文与 phase 不授予执行、续跑或授权。`agent_core.model.visible_response` 在原工具 started 边界（pending input、取消、来源及预算检查之后）提交同次已采纳正文，在 FinalizationService 收口提交已采纳终态；`FinalizeContext.attempt_id` 显式沿原 RunParams 传递，不能从响应或历史反推身份。plain callable 仍是候选回调；支持 `commit_model_response` 的原 CLI/TUI/Gateway/后台 sink 才消费这份 typed 提交，不多一次模型请求、不增线程或计时门。
+
+CLI 的 write_model 仍只缓存候选；同次工具响应的已净化说明先于原工具状态打印，最终正文由原结果出口打印一次。TUI/Gateway 以原候选块编号 replace→commit，非空 terminal 更正旧正文和晚到 phase；同 call 重复提交不双发，不同 message/call 即使正文相同也不按内容丢弃。普通 IM 的原首次过程限制、F3 `final_only` 和委派主 sender 唯一发话继续由原 writer/投递门守住，后台/child transcript 不另向 IM 发话。
+
+已确认说明沿原 assistant_part_id 和 append_once 进入原会话持久化；canonical native envelope 仍为 provider replay 唯一来源，不把展示 commentary 再拼入原生历史。commentary-only 的空 canonical partial carrier 可以沿原路径保存，但不含伪造的非空 final。Compact/archive 与跨协议 reload 继续消费同一原块元数据和工具配对；拒绝或当前 text 改写后不得末端从块恢复旧正文。跨消息安全上下文无法分离时保守整段净化，详细边界见 [出站协议合同](PROVIDER_WIRE_CONTRACT.md#2026-10-18-逐助手消息阶段与公开正文候选515-p2本地候选)。
+
+输入失效上限补充：原上限分支保留原失效计数和待输入记录，清空旧公开text/工具调用并以既有failed/error收口，原blocks仍可审计但不能复活。空公开回复已确定抛原USER_REPLY_UNAVAILABLE时，partial carrier显式携host error使原空终态追加门可保存；provider completed/stop和native原文不改，不生成替代回复。新测试 `test_pending_input_public_boundary.py` 已在准确pre-P2源码红、候选绿；诊断旧测试改用真实GatewayAskRunContext/会话库，原精确诊断断言全保留并增加partial断言。
+
+
+### 515 P2 REV02：候选到终态一次冻结
+
+typed final仍是已采纳模型正文，但公开summary/canonical最终收口前只保原active候选。复用assistant_delta的显式replace_text=True仅全文替换当前active正文，stable不可改和普通追加delta合同不变；原summary/canonical唯一freeze，后续公开净化可更正同活动ID而不双发。TUI直接提交和Gateway事件的commentary/final均守原defer_assistant_display，show-prompt的prompt先落屏；确认commentary仍可进入原持久化读口，不在延后模式提前造assistant块。前台同会话第二窗口也仅active更新，原live_final_block_id由canonical最终正文接替；普通后台/child策略、取消、IM final_only和主发言权不变。原529三条红证据保留；经根裁决，后继反例只把提交后前置状态改为active+stable候选，保同ID、唯一stable、最终更正、0active并增加无TERMINAL_BLOCK_REPLAY断言，不放宽reducer稳定历史门。

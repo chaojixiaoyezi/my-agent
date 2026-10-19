@@ -1815,6 +1815,8 @@ class TuiTurnEventAdapter:
         self._assistant_block_id = ""
         self._assistant_text = ""
         self._terminal_response_text = ""
+        self._committed_model_calls: set[str] = set()
+        self._committed_commentary: list[str] = []
         self._submitted_input_boundaries: set[tuple[str, tuple[str, ...]]] = set()
         self._output_chars = 0
         self._output_bytes = 0
@@ -1958,6 +1960,27 @@ class TuiTurnEventAdapter:
             self._assistant_text += text
             self._record_output_metrics(text)
         return bool(text.strip())
+
+    # LLM: 仅同次已验response提交；复用Gateway事件适配器校正当前候选，不按正文去重或扩大原工具/控制语义。
+    # 函数用途: 为本地TUI显示流式或非流式模型确认消息，并防同调用重复提交。
+    def commit_model_response(self, payload: dict) -> None:
+        from ...agent.gateway_parts.stream_events import committed_model_events
+
+        events = committed_model_events(payload)
+        call_id = (payload.get("source") or {}).get("call_id")
+        with self._lock:
+            if not events or call_id in self._committed_model_calls:
+                return
+            self._committed_model_calls.add(call_id)
+            for event in events:
+                if event["kind"] == "assistant_commentary":
+                    self._committed_commentary.append(event["text"])
+                self.on_gateway_event(event)
+
+    # LLM: 只读返回已验提交的模型说明；候选和工具状态不进入canonical会话。
+    # 函数用途: 为本地TUI最终持久化提供完整过程正文。
+    def assistant_commentary_messages(self) -> tuple[str, ...]:
+        return tuple(self._committed_commentary)
 
     # LLM: This callback is invoked only at the runtime's real guidance-injection boundary. It
     # closes any preceding assistant segment, then promotes the exact correlated client ids.
@@ -2374,6 +2397,8 @@ class TuiTurnEventAdapter:
 
     # LLM: committed final 采用 summary 完整正文覆盖 active delta；无 active 时创建并立即冻结新 segment。
     # 函数用途: 发布最终助手正文且不产生重复块。
+    # LLM: typed final只停留active候选，原summary唯一freeze；已stable终态仍不可重写，联测show-prompt与完整终答更正。
+    # 函数用途: 在原summary边界以权威终答固定同一活动块，不提前冻结或绕过stable重放门。
     def _finalize_assistant_text(self, text: str) -> None:
         if self._terminal_response_text == str(text):
             return
@@ -2482,17 +2507,8 @@ def _consume_gateway_turn_event(
     if kind == "model_delta":
         adapter.write_model(str(payload.get("text") or ""))
         return True
-    if kind == "assistant_commentary":
-        # 新 Gateway 已实时流式 model_delta，此事件只是真实工具边界的冻结标记：
-        # 把当前候选段归为可折叠过程。兼容旧 Gateway（无 model_delta 事件）时，
-        # 无活动块说明正文整段尚未到达，仍需按旧契约落地全文。
-        with adapter._lock:
-            if adapter._assistant_block_id:
-                adapter._complete_active_assistant(process=True)
-            else:
-                adapter.write_model(str(payload.get("text") or ""))
-                adapter._complete_active_assistant(process=True)
-        return True
+    if kind in {"assistant_commentary", "assistant_final"}:
+        return _consume_committed_assistant_event(adapter, payload)
     if kind == "assistant_thinking":
         # 完整 thinking 事件：冻结流式增量块（若有），否则按旧契约一次性建块。
         return adapter.finalize_thinking(
@@ -2508,14 +2524,6 @@ def _consume_gateway_turn_event(
     if kind == "tool_input_reset":
         with adapter._lock:
             return bool(adapter._tool_input_projector.clear())
-    if kind == "assistant_final":
-        final_text = str(payload.get("text") or "")
-        adapter.write_model(final_text)
-        with adapter._lock:
-            if not adapter._defer_assistant_display:
-                adapter._complete_active_assistant()
-                adapter._terminal_response_text = final_text
-        return True
     if kind == "runtime_progress":
         return adapter._publish_runtime_progress(payload)
     if kind == "active_turn_input_submitted":
@@ -2970,3 +2978,41 @@ __all__ = ["TuiRuntime", "TuiTurnEventAdapter", "TuiTurnSummary"]
 # 函数用途: 告诉调用方这个 TUI runtime 现在有没有待用户决定的审批。
 def runtime_has_active_permission(runtime: TuiRuntime) -> bool:
     return runtime._permission_coordinator.active_controller() is not None
+
+
+# LLM: typed两入口共用原defer；完整final仅active替换待summary唯一freeze，不能覆写stable，旧事件保原追加。
+# 函数用途: 将确认过程和终答落到原TUI块，终态summary可更正同一final块而不双发。
+def _consume_committed_assistant_event(adapter: TuiTurnEventAdapter, payload: dict[str, Any]) -> bool:
+    kind = str(payload.get("kind") or "")
+    if adapter._defer_assistant_display:
+        return True
+    if kind == "assistant_commentary":
+        # 新 Gateway 已实时流式 model_delta，此事件只是真实工具边界的冻结标记：
+        # 把当前候选段归为可折叠过程。兼容旧 Gateway（无 model_delta 事件）时，
+        # 无活动块说明正文整段尚未到达，仍需按旧契约落地全文。
+        with adapter._lock:
+            if payload.get("replace_candidate") is True:
+                adapter._ensure_assistant_started()
+                adapter._assistant_text = str(payload.get("text") or "")
+            if adapter._assistant_block_id:
+                adapter._complete_active_assistant(process=True)
+            else:
+                adapter.write_model(str(payload.get("text") or ""))
+                adapter._complete_active_assistant(process=True)
+        return True
+    if kind == "assistant_final":
+        final_text = str(payload.get("text") or "")
+        if "model_source" in payload:
+            with adapter._lock:
+                adapter._ensure_assistant_started()
+                adapter._assistant_text = final_text
+                adapter.runtime._publish("assistant_delta", "updated", adapter._assistant_block_id,
+                    {"text": final_text, "replace_text": True}, request_id=adapter.request_id)
+            return True
+        adapter.write_model(final_text)
+        with adapter._lock:
+            if not adapter._defer_assistant_display:
+                adapter._complete_active_assistant()
+                adapter._terminal_response_text = final_text
+        return True
+    return False

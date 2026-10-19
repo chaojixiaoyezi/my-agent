@@ -322,3 +322,18 @@ owner 统一拒绝，且在写 guidance、派活账和 wake 前返回。明确�
 限额语义：`session_pair_hourly_limit` 按「发送会话 → 接收会话」分桶，小时窗口固定、跨窗口归零；
 模型发起的发送与派活在投递前判断，超限返回 `SESSION_TASK_RATE_LIMIT` 且不投递、不占配额；
 宿主自动发出的任务回报与取消通知**不会被拒**，但同样计入配额（避免回报绕过限额）。
+
+
+## 2026-10-18 委派主session唯一发话（489本地候选，未发布）
+
+用户开启/delegate后，原host_im_dispatch/host_im_task_routing受理快照和SessionTask/WakeStore派工不变。主sender的短回合只沿原零工具模型生成一次final；原宿主确认派工后才设置本request的final-only普通IM投影，不发送该ack的draft/progress，不影响下一个聊天请求或rich内部记录。排队/派发未确认不制造成功ack。
+
+独立后台work会话与child只执行及向原父交结果，最终摘要保原SessionTask终态/refs；后台普通片只在自身线程内部留档，不把work模型记录冒充sender。原session_task_result:task:status键的guidance先耐久追加，再同key原session_message wake；主sender忙时沿原安全点reserve→submit→ACK，精确同key已consumed才跳过wake，空闲时沿主sender自身claim/model零工具汇总为最终IM通知。后台actor/child执行权不复制给主sender；群后来新发言者不能替换原结果群目标。原取消、actual typed、deadline/P3责任保持。
+
+终态后guidance/wake半提交只在原来源重入补同task/status，不重做模型或业务、不再扣配对额度；accepted未能推进、回报写/读忙不能按已交接确认原wake。原完成root的准入仅给这条无模型metadata补账入口保留路径。空摘要/仅refs按真实终态与完整guidance/wake发布事实收口，不造正文。已external_sent的旧冻结信封仍只补canonical，不重发或重新执行。
+
+共享只读im_delegation_delivery核原current claim对象/同claims、已发布runtime_authority、当前runner/attempt、root TaskLink、owner与原binding；坏链/缺根不降普通。原创建目录最终做本人send_message减法，末消息工具另核同一实际来源并拒绝向origin抢话；其它明确获准的外部业务动作仍走原权限，不扩大收件人。普通child/非delegate及原canonical scheduler execution_run保持既有目录/通知，包括合法旧work线程的schedule followup；不能只见线程旧标记便吞掉调度通知。
+
+额度fallback对真正委派保原quota等待/wake，不由后台发固定通知、不假称主sender模型成功；原额度恢复仍需原控制事实。此候选没有新增队列、存储schema、registry或新执行源。准确普通离线测试/输入SHA/未闭点在489工件；未启动真实服务、模型、Feishu或native，不能代root真实Count2验收。
+
+489 多结果边界：不同原session_message消息键不能合批后只按primary消费判据退休；仍逐原wake准入。主sender表达轮从本轮原reserve实际注入条目逐一回核canonical SessionTask/key/sender，将所有已注入委派结果放入事实包，原submit→ACK逐条确认；不得只说primary却消费sibling。

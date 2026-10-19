@@ -100,6 +100,17 @@ def test_common_parameters_all_have_descriptions():
     assert not undocumented, f"这些常用参数没有中文说明：{undocumented}"
 
 
+def test_progress_guidance_parameter_has_one_typed_config_and_real_reader():
+    spec = parameter_registry()["assistant_progress_updates_enabled"]
+    assert spec.default is True and spec.value_type == "bool"
+    assert spec.category == "沟通与展示"
+    assert spec.safety == SAFETY_FREE and spec.writable
+    assert spec.effect == "restart_gateway"
+    assert spec.owner_module == "prompting_parts"
+    assert spec.reader == "agent/prompting_parts/builder"
+    assert "只控制" in spec.description and "软引导" in spec.description
+
+
 def test_reasoning_effort_applied_value_says_whether_the_model_supports_it():
     unsupported = SimpleNamespace(model_reasoning_effort="max", **_OPENCODE)
     value, rule = applied_value("model_reasoning_effort", unsupported)

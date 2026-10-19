@@ -203,3 +203,23 @@ opencode Go 通道的 `/responses` 用同一把 key 可以调 GPT 模型（`gpt-
 - 三个后端出口的注释。
 
 新增规则前先用真实服务或公开规范确认"确定拒收"，不能按单个样例加专项分支。
+
+
+## 2026-10-18 逐助手消息阶段与公开正文候选（515 P2，本地候选）
+
+`backends.assistant_messages` 将 Responses 原消息的 `id`、`output_index`、`content_index`、原样 `phase` 和 `output_text/refusal` 来源附在原 text 块的 `assistant_message` 元数据中。`ModelResponse.text` 继续兼容全体正文拼接，不给整次响应打单一 phase，也不从正文或位置猜 final。IR、canonical envelope、reload 与工具摘除保留安全 text 来源；摘除工具仍丢失效 thinking/signature。Responses 出站只发官方已知 `commentary/final_answer`，未知 phase 原样留内部历史但不发送；Chat 和 Anthropic（含 prompt cache）显式剥离这份内部元数据，不向 user 或其它供应商强加字段。
+
+SSE 候选仍走原回调；同真实消息 id 的 done 更正原位置，不按正文去重。非空 terminal.output 是唯一最终权威，覆盖 done 与旧 delta；空 output 才用已完成条目，EOF/failed/预算语义保持。
+
+最终正文只在本次原 sealed call 范围、已采纳正常响应、全体 text 块（包括 refusal）与当前受验 text 严格一致时分阶段：有明确 final 只取 final；无 final 时 unknown/no-phase 沿旧终答资格，明确 commentary 排除。拒绝清空、来源拒绝、宿主替文与超时双段合成发生后，不从旧块重建正文，当前 text 保持权威；一致门失败是保守不应用阶段投影，不能声称所有转换后仍精确分离。commentary-only completed/no tools 沿原终态停止，零额外采样，保留过程和 canonical/partial 后使用原 `USER_REPLY_UNAVAILABLE`，不伪造终答或引入 phase 续采。
+
+公开净化必须保留整次 response 上下文：先比较既有整段投影与逐消息投影。两者不同（包括跨消息/phase 拆开的敏感标签）时，显示事件合并使用整段既有净化结果，标记 `projection=full_response_security_context`；终答原结构有资格才保守使用安全整段，commentary-only 仍无终答。合并投影不伪造 provider phase/id，不改 canonical 原文，不新增凭据判据。该安全降级可能保留过程文字在安全整段中。
+
+离线合同：`test_assistant_message_phases.py` 覆盖消息级阶段、unknown、refusal、工具交错历史、跨协议/cache、terminal 校正及跨消息净化；`test_committed_model_messages.py` 覆盖实际 fake-loop CLI 流/非流、同调用提交、拒绝不复活、超时双段与来源/取消。真实网络和服务验收由根组合执行，离线通过不替代真实显示验证。
+
+输入失效上限补充：原上限分支保留原失效计数和待输入记录，清空旧公开text/工具调用并以既有failed/error收口，原blocks仍可审计但不能复活。空公开回复已确定抛原USER_REPLY_UNAVAILABLE时，partial carrier显式携host error使原空终态追加门可保存；provider completed/stop和native原文不改，不生成替代回复。新测试 `test_pending_input_public_boundary.py` 已在准确pre-P2源码红、候选绿；诊断旧测试改用真实GatewayAskRunContext/会话库，原精确诊断断言全保留并增加partial断言。
+
+
+### 515 P2 REV02：done来源索引的归一化修正
+
+SSE和WebSocket继续共用原collector。终态output为空时，done集合按原event.output_index对已知项排序，未知项保观察锚点且index仍未知；同真实ID/index更正同条，冲突工具call_id仍沿原malformed门，不能靠去重放行。内部dict兼容载体的typed属性仅供collector→response_fields归一化消费，不加provider JSON字段、不出站到其它协议。非空terminal.output仍以原字典及其原数组位置为权威；EOF合成text的index未知，incomplete/零tool不变。无真实id/index的块不猜同消息而吞掉另一phase，保原块及原phase，不造ordinal、身份或位置。修复实际乱序 `index1 final→index0 commentary` 后输出次序为commentary0→final1；缺索引和稀疏索引分别保持None和真实值。

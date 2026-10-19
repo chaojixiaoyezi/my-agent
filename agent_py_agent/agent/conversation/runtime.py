@@ -720,7 +720,7 @@ def _background_goal_delivery_mode(
 
 # LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余交给独立交付入口完成
 # canonical 落账与冻结重投；唤醒确认只读结构化提交事实。禁止在这里新增按渠道名的分支。
-# 函数用途: 把一片后台模型产出交付给 owner，并返回结构化报告。
+# 函数用途: 普通片交付owner；委派只留执行线程内部记录并确认已完成原sender结果交接，不把后台模型冒充主sender。
 def _complete_background_slice(
     runtime: BackgroundMainAgentRuntime,
     plan: _BackgroundSlicePlan,
@@ -776,6 +776,14 @@ def _complete_background_slice(
         canonical_record=bool(plan.route_supports_transcript or plan.route_ownership != ROUTE_EXTERNAL),
         commit=commit,
     )
+    from .im_delegation_delivery import delegated_delivery_task
+
+    delegated = delegated_delivery_task(runtime.agent, request.thread_id, task_id=request.task_id)
+    if delegated is not None:
+        from .session_task_report import delegated_result_report_pending
+
+        wake_handled = (not delegated_result_report_pending(runtime.agent, request.thread_id, task_id=request.task_id)
+                        if delegated.status in {"done", "failed"} else commit.persisted)
     tool_call_count, tool_success_count, material_progress_count = plan.counters
     # 续跑回合交付 final 后，把「最终回复在哪个消息」的结构化指向写回原请求；写失败不影响交付主链路。
     from .continuation_refs import ContinuationDelivery, record_continuation_ref
@@ -1004,6 +1012,8 @@ class BackgroundMainAgentRuntime:
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
     # 函数用途: 准备冻结上下文并执行；actual未结原样退出不收输入，其它工具/历史/显示沿原结果。
+    # LLM: 原claim活范围内先补canonical委派终态交接，补账绝不重新调用模型/业务；正常执行、typed及取消路径保持。
+    # 函数用途: 执行一片后台主模型，或在同源重入时只修原sender结果回报。
     def _run_agent(
         self,
         thread,
@@ -1013,6 +1023,11 @@ class BackgroundMainAgentRuntime:
         proactive_delivery_available: bool | None = None,
         transcript_delivery_available: bool | None = None,
     ) -> BackgroundExecutionResult:
+        from .session_task_report import recover_delegated_result
+
+        recovered = recover_delegated_result(self.agent, thread.thread_id, task_id=request.task_id)
+        if recovered is not None:
+            return recovered
         resolved_goal_context = goal_context or _goal_runtime_context(
             self.agent,
             self.store,
@@ -1162,7 +1177,7 @@ def _session_task_turn_was_cancelled(agent: object, request: BackgroundRunReques
 #   摘要取本回合的最终答复（结构化字段 response），让发送方的回报带上"目标到底说了什么"，
 #   不解析正文、不复制任务正文；答复为空时留空，回报照样发出。
 # LLM: 收口回调若抛actual未知不得吞掉；不由确认文案或一般error_code补成功。
-# 函数用途: 收口真正完成的任务，等待孩子及actual未结保原责任，普通附加回报失败仍沿原边界。
+# 函数用途: 收口真正完成的任务；委派终态必须补原sender回报，失败保原wake，不重执业务；普通附加回报仍沿原边界。
 def _close_out_session_task_turn(
     agent: object,
     request: BackgroundRunRequest,
@@ -1180,6 +1195,9 @@ def _close_out_session_task_turn(
     resolved_turn_id = str(turn_id or "").strip() or str(getattr(request, "task_id", "") or "").strip()
     if not resolved_turn_id:
         return
+    from .im_delegation_delivery import delegated_delivery_task
+
+    delegated = delegated_delivery_task(agent, request.thread_id, task_id=request.task_id)
     try:
         close_out_turn(
             agent,
@@ -1187,12 +1205,24 @@ def _close_out_session_task_turn(
             TaskTurnOutcome(
                 ok=not bool(getattr(execution, "error", None)) and execution.runtime_status not in {"failed", "error"},
                 summary=str(getattr(execution, "response", "") or "").strip(),
+                result_refs=tuple(str(item['path']) for item in getattr(execution, 'delivery_artifacts', ())
+                                  if isinstance(item.get('path'), str)),
             ),
         )
-    except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+        from .session_task_report import delegated_result_report_pending
+
+        if delegated is not None:
+            current = delegated_delivery_task(agent, request.thread_id, task_id=request.task_id)
+            if current.status == "cancelled":
+                raise InterruptedError("委派任务已取消")
+            if current.status not in {"done", "failed"} or delegated_result_report_pending(agent, request.thread_id, task_id=request.task_id):
+                raise BackgroundCapacityDeferred('delegated_result_report_pending')
+    except (InterruptedError, BackgroundCapacityDeferred, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
             RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
         raise
-    except Exception:  # noqa: BLE001 - 回报属于附加交付，不能让回合本身失败
+    except Exception:  # noqa: BLE001 - 普通附加回报仍沿旧边界；委派失败保留原wake重试。
+        if delegated is not None:
+            raise BackgroundCapacityDeferred('delegated_result_report_pending') from None
         return
 
 
@@ -2373,6 +2403,7 @@ def _background_task_attributes(
     sampled_subagent_phase: str = "",
     thread: ConversationThread | None = None,
 ) -> dict[str, object] | None:
+    # 原session_message键仅定位主sender本轮结果，消费与权限仍读canonical guidance及原claim。
     attributes: dict[str, object] = {}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     metadata = wake.get("metadata") if isinstance(wake.get("metadata"), dict) else {}
@@ -2392,6 +2423,10 @@ def _background_task_attributes(
     if thread_id and (task_id or scheduler_run_id or session_task_run_id or session_message_run_id):
         attributes["conversation_thread_id"] = str(thread_id).strip()
     _apply_background_wake_attributes(attributes, request, agent)
+    if lifecycle_reason == "session_message":
+        from .session_messaging import SESSION_MESSAGE_KEY_FIELD
+
+        attributes["host_session_message_key"] = str(metadata.get(SESSION_MESSAGE_KEY_FIELD) or "")
     # 会话间派活：本回合由哪条任务触发，只从唤醒信封的结构化 metadata 取；链深守卫据此回溯上级任务。
     session_task_id = _session_task_id_from_wake(request)
     if session_task_id:
@@ -3055,7 +3090,7 @@ def _select_successful_completion_batch(
 
 
 # LLM: 只读同任务的结构化事件类型；审计专属批次及已冻结交付沿各自路径，不按正文合并。
-# 函数用途: 判断普通唤醒能否共同消费，避免把重投或无关事件混进一个工作片。
+# 函数用途: 判断普通唤醒能否共同消费；消息键不同分别准入，避免已消费primary吞未消费sibling。
 def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
     reason = str(primary.reason or "").strip().lower()
     if (
@@ -3069,6 +3104,11 @@ def _same_reason_wake_batch(primary: WakeSignal, sibling: WakeSignal) -> bool:
         or cached_owner_delivery(sibling) is not None
     ):
         return False
+    if reason == "session_message":
+        from .session_messaging import SESSION_MESSAGE_KEY_FIELD
+
+        if (primary.metadata or {}).get(SESSION_MESSAGE_KEY_FIELD) != (sibling.metadata or {}).get(SESSION_MESSAGE_KEY_FIELD):
+            return False
     return not _typed_audit_finding_signal(primary) and not _typed_audit_finding_signal(sibling)
 
 
@@ -4511,6 +4551,8 @@ def _channel_supports_proactive(
         return False
 
 
+# LLM: 真委派的额度阻塞仍留原wake，不准后台代主sender说话；原scheduler/其它通知保既有投递及真实回执。
+# 函数用途: 按原额度路线通知普通任务，委派等待明确恢复，不伪造模型回复或已交付。
 def _deliver_quota_fallback(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -4521,6 +4563,10 @@ def _deliver_quota_fallback(
     target: str,
     supports_proactive: bool,
 ) -> tuple[str, bool]:
+    from .im_delegation_delivery import delegated_delivery_task
+
+    if delegated_delivery_task(scheduler.runtime.agent, signal.thread_id, task_id=signal.root_task_id) is not None:
+        return "suppressed", False  # 原额度恢复门保留同wake；不代替主sender发固定后台通知。
     if not supports_proactive:
         return "recorded", True
     receipt = scheduler.runtime.channels.deliver(
@@ -5370,7 +5416,7 @@ def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
 
 
 # LLM: claim 后重查精确任务；自然收尾后的受管进程补报与队列筛选共用权威校验，不复活停止任务。
-# 函数用途: 拦截过期后台工作，同时保留已经核实但尚欠用户的命令结束通知。
+# 函数用途: 拦截过期工作；精确委派终态仅保留无模型的原结果补账，命令通知仍沿原来源。
 def _claimed_background_task_is_terminal(
     agent: object,
     store: object,
@@ -5382,7 +5428,10 @@ def _claimed_background_task_is_terminal(
     if not thread_id or not task_id:
         return False
     from .process_events import process_completion_delivery_state
+    from .session_task_report import delegated_result_report_pending
 
+    if delegated_result_report_pending(agent, thread_id, task_id=task_id):
+        return False  # 原claim只进入metadata补账入口，recover_delegated_result在模型前返回。
     signal = kwargs.get("wake_signal")
     if (isinstance(signal, WakeSignal)
         and signal.thread_id == thread_id and signal.root_task_id == task_id

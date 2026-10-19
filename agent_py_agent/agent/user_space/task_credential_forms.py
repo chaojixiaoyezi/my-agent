@@ -1,25 +1,49 @@
 # LLM: 静默取消共用原输入退休实现，冷C只消费其真实输入服务末门，不新建Wake或恢复任务。
 # 模块用途: 让原Agent和冷C保持相同的凭据取消回执及输入清理。
-# LLM: 输入值与安全元数据分离；配置/重发复用原动作授权并在凭据锁外核成员，锁内仅CAS，不增加网络/管理权。
+# LLM: 输入值与安全元数据分离；表单typed错误仅由原授权后的parser产生，固定字段/文案不携明文；配置/重发仍用原动作授权。
 # 模块用途: 校验原凭据卡与认证配置，群共享使用和管理保持分权，秘密只在原加密链保存。
 from __future__ import annotations
 
 
-# LLM: 只接收原卡明确字段，名称备注不充当身份；缺目标时仅从这次表单绑定，既有目标不得静默改写。
-# 函数用途: 将提交拆成待加密秘密和可保存元数据，拒绝内嵌密码 URL 与额外字段。
+# LLM: 仅原卡授权后的parser可抛此类型；字段和文案来自固定枚举，不保存表单、URL或底层异常，HTTP与适配器须同步保留安全分类。
+# 类用途: 把可改正的表单错误与身份、期限或任务失效分开，不读取或写入任何存储。
+class CredentialFormValidationError(ValueError):
+    code = 'CREDENTIAL_FORM_INVALID'
+    stage = 'form'
+
+    # LLM: 调用方只传fields/target_url固定枚举；未知值用固定错误拒绝，不复制参数到异常。
+    # 函数用途: 保存安全字段和对应提示，供HTTP返回可重试原卡的事实。
+    def __init__(self, field):
+        messages = {'fields':'表单内容无效，请检查必填项和字段格式后重新提交原卡。',
+                    'target_url':'目标链接无效，请填写完整的 HTTP 或 HTTPS 链接后重新提交原卡。'}
+        if not isinstance(field, str) or field not in messages:
+            raise ValueError('表单错误字段无效')
+        self.field = field
+        self.message = messages[field]
+        super().__init__(self.message)
+
+
+# LLM: 只接收原卡明确字段且必须由调用方先验授权；typed错误仅覆盖本次fields及新目标，既有目标错误不转表单错误，不泄露输入。
+# 函数用途: 将提交拆成待加密秘密和可保存元数据；可改正的字段或新链接错误保留原待填卡。
 def credential_submission_values(row, fields, origin_for):
     names = {field['name'] for field in row['fields']}
     optional = {'credential_name', 'credential_note'}
     needs_url = not row.get('target_url', row.get('origin'))
     required = names | ({'target_url'} if needs_url else set())
     if not isinstance(fields, dict) or not required <= set(fields) or set(fields) - required - optional:
-        raise ValueError('输入字段无效')
+        raise CredentialFormValidationError('fields')
     if any(not isinstance(value, str) or len(value) > (8192 if name in names else 2048)
            or '\r' in value or '\n' in value or (name in required and not value)
            for name, value in fields.items()):
-        raise ValueError('输入字段无效')
+        raise CredentialFormValidationError('fields')
     target = fields['target_url'] if needs_url else row.get('target_url', row['origin'])
-    metadata = {'target_url': target, 'origin': origin_for(target)}
+    try:
+        origin = origin_for(target)
+    except ValueError:
+        if not needs_url:
+            raise
+        raise CredentialFormValidationError('target_url') from None
+    metadata = {'target_url': target, 'origin': origin}
     metadata.update({name: fields[name] for name in optional if name in fields})
     return {name: fields[name] for name in names}, metadata
 

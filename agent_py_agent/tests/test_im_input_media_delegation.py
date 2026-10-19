@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -19,9 +20,9 @@ _PNG = base64.b64decode(
 )
 
 
-# LLM: 只为真实临时agent建立已验证的原请求附件，dispatch/SessionTask/RuntimeDB均不替换；开关来自原能力配置。
-# 函数用途: 复用既有后台装配fixture，在入站派发前放入合成图片，不创建平台连接或后台进程。
-def media_case(tmp_path, monkeypatch, *, enabled=True, conversation_id="oc_a"):
+# LLM: 原请求附件、dispatch/SessionTask/RuntimeDB不替换；仅显式首片测试保留未晋升阶段，默认真实TaskLink/claim与原能力开关保持。
+# 函数用途: 在临时owner导入合成图片，再按指定晋升阶段装配后台fixture，不连接平台或启动后台进程。
+def media_case(tmp_path, monkeypatch, *, enabled=True, conversation_id="oc_a", promote_root=True):
     from agent_py_agent.agent.gateway_parts.im_task_routing import prepare_im_task_dispatch
     from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
     from agent_py_agent.tests.test_subagent_input_media import _enable_input_media
@@ -41,8 +42,36 @@ def media_case(tmp_path, monkeypatch, *, enabled=True, conversation_id="oc_a"):
         return prepare_im_task_dispatch(context, SimpleNamespace(thread_id=conversation.thread_id, scope=scope), prompt)
 
     monkeypatch.setattr('agent_py_agent.tests.test_im_delegation_runtime.prepare_im_task_dispatch', dispatch)
-    case = runtime_fixture(tmp_path, monkeypatch, conversation_id=conversation_id)
+    case = runtime_fixture(tmp_path, monkeypatch, conversation_id=conversation_id, promote_root=promote_root)
     return (*case, captured['ref'])
+
+
+# LLM: 仅给需要派工的局部媒体测试沿原生命周期激活runner；当前参数和作用域必须同attempt，退出恢复，不修改共享select_child。
+# 函数用途: 写临时子档/RuntimeDB的真实执行轮并进入该身份，供手工子代创建检查使用，不发请求或启动进程。
+@contextmanager
+def active_media_child(agent, child):
+    from agent_py_agent.agent.agent_core.subagent.run_flow import _subagent_model_run_params
+    from agent_py_agent.agent.conversation.host_actor import task_host_actor
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+
+    active = agent.subagents.lifecycle.prepare_runner_attempt(child.id)
+    previous_params = agent._current_run_params
+    previous = set_current_subagent_context(agent, run_id=active.id,
+        attempt_id=active.runner_active_attempt_id, task_attributes=active.attributes)
+    try:
+        iteration = SimpleNamespace(current=SimpleNamespace(injection='', history_seed=[], compact_context=None),
+            carried_archive_tool_calls=[], carried_active_turn_user_inputs=[], runtime_rejected_actions=[], transcript_sink=None)
+        agent._current_run_params = _subagent_model_run_params(
+            context=agent.subagents.runner_context.build_execution_context(active.id), prompt=active.goal,
+            attempt_id=active.runner_active_attempt_id, task_attributes=active.attributes,
+            iteration=iteration, host_channel_actor=task_host_actor(agent, active))
+        yield active
+    finally:
+        agent._current_run_params = previous_params
+        restore_current_subagent_context(agent, previous)
 
 
 @pytest.mark.parametrize("conversation_id", ["oc_a", "oc_a:thread:om_topic"])
@@ -98,10 +127,16 @@ def test_root_media_survives_request_gc_but_manual_child_does_not_inherit_unrequ
     agent.conversation_store = ConversationStore(agent.conversation_store.storage.root)
     assert media_for_run(agent, actor) == (ref,)
     child = agent.subagents.list_runs()[0]
-    select_child(agent, child)
-    assert media_for_run(agent, actor) == (ref,)
-    raw = {'goal': '不请求原图的孩子'}
-    manual = agent.subagents.create_run(params=create_run_params(agent, raw, raw['goal'], ['read_file']))
+    with active_media_child(agent, child) as active:
+        from agent_py_agent.agent.conversation.im_delegation_delivery import (
+            current_delegated_delivery_task,
+        )
+
+        assert agent._current_run_params.attempt_id == active.runner_active_attempt_id
+        assert current_delegated_delivery_task(agent) == agent.conversation_store.session_tasks.load(task.task_id)
+        assert media_for_run(agent, actor) == (ref,)
+        raw = {'goal': '不请求原图的孩子'}
+        manual = agent.subagents.create_run(params=create_run_params(agent, raw, raw['goal'], ['read_file']))
     select_child(agent, manual)
     assert not media_for_run(agent, actor)
 
@@ -179,9 +214,14 @@ def test_background_native_event_and_three_provider_projections_get_exact_image_
     from agent_py_agent.agent.conversation.im_delegation import prepare_delegated_execution
     from agent_py_agent.agent.conversation.input_media import provider_media_messages
 
-    agent, params, _, _, _, ref = media_case(tmp_path, monkeypatch)
+    agent, params, _, _, _, ref = media_case(tmp_path, monkeypatch, promote_root=False)
     assert agent.conversation_store.tasks.load(params.task_id) is None
     loop = native_loop(agent, trigger=TurnTrigger(kind=kind, reason=kind))
+    assert agent.conversation_store.tasks.load(params.task_id) is None
+    # 先验证真实未晋升首片携图；后续派工在原晋升和claim阶段执行，不能借首片读取权代替执行来源。
+    from agent_py_agent.tests.test_im_delegation_runtime import promote_runtime_fixture_root
+
+    promote_runtime_fixture_root(agent, agent._current_run_params)
     prepare_delegated_execution(agent, params)
     first = loop.tool_ir_history[0]
     assert isinstance(first, RuntimeFactsTurn) and first.media == (ref,)
@@ -345,7 +385,7 @@ def test_unpromoted_session_input_requires_exact_active_main_and_original_actor(
     from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
     from agent_py_agent.agent.runtime_db.managed_operation_store import AuthorityContextMissing
 
-    agent, params, task, _, _, _ = media_case(tmp_path, monkeypatch)
+    agent, params, task, _, _, _ = media_case(tmp_path, monkeypatch, promote_root=False)
     assert agent.conversation_store.tasks.load(task.task_id) is None
     if fault == 'cancelled_session':
         agent.conversation_store.session_tasks.advance(task.task_id, SessionTaskUpdate(status='cancelled'))
@@ -372,3 +412,59 @@ def test_typed_media_snapshot_rejects_nested_fields_and_cross_owner_paths(tmp_pa
     with pytest.raises(InputMediaError):
         context_for_input(agent, agent._current_run_params.host_channel_actor,
             input_media=[{**ref, 'path': str(tmp_path / 'foreign-owner' / ref['sha256'])}])
+
+
+@pytest.mark.parametrize('promote_root', [False, True])
+def test_media_fixture_explicit_promotion_preserves_main_and_claim_stage(tmp_path, monkeypatch, promote_root):
+    agent, params, task, _, _, ref = media_case(tmp_path, monkeypatch, promote_root=promote_root)
+    current = agent._current_run_params
+    run = agent.subagents.runtime_db.main_agent_run_for_task(task.task_id)
+    assert run['run_id'] == current.run_id == params.run_id
+    assert run['current_attempt_id'] == current.attempt_id == params.attempt_id
+    assert task.metadata[CONTEXT_KEY]['input_media'] == [ref]
+    assert not agent.subagents.list_runs()
+    link = agent.conversation_store.tasks.load(task.task_id)
+    claim = agent.conversation_store.claims.load(task.target_thread_id)
+    if promote_root:
+        assert link.task_id == task.task_id and link.thread_id == task.target_thread_id
+        assert claim['task_id'] == task.task_id and claim['status'] == 'running'
+    else:
+        assert link is None and claim == {}
+
+
+@pytest.mark.parametrize('fault', ['missing_attempt', 'stale_attempt'])
+def test_manual_media_child_creation_rejects_missing_or_stale_runner_attempt(tmp_path, monkeypatch, fault):
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
+    from agent_py_agent.agent.conversation.im_delegation import prepare_delegated_execution
+    from agent_py_agent.agent.conversation.im_delegation_delivery import (
+        current_delegated_delivery_task,
+    )
+    from agent_py_agent.agent.runtime_context import (
+        current_subagent_run_id,
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    agent, params, task, _, _, _ = media_case(tmp_path, monkeypatch)
+    prepare_delegated_execution(agent, params)
+    child = agent.subagents.list_runs()[0]
+    original_params = agent._current_run_params
+    with active_media_child(agent, child) as active:
+        assert current_delegated_delivery_task(agent) == agent.conversation_store.session_tasks.load(task.task_id)
+        attempt_id = ''
+        if fault == 'stale_attempt':
+            record = agent.subagents.runtime_db.agent_run_for_run_id(child.id)
+            attempt = agent.subagents.runtime_db.create_attempt(record['agent_run_id'])
+            attempt_id = attempt['attempt_id']
+            assert attempt_id != active.runner_active_attempt_id
+        previous = set_current_subagent_context(agent, run_id=child.id, attempt_id=attempt_id)
+        try:
+            raw = {'goal': '缺少准确当前轮不能创建'}
+            with pytest.raises(DataCorruptionError, match='当前委派孩子执行轮不一致'):
+                create_run_params(agent, raw, raw['goal'], ['read_file'])
+            assert [run.id for run in agent.subagents.list_runs()] == [child.id]
+        finally:
+            restore_current_subagent_context(agent, previous)
+    assert agent._current_run_params is original_params
+    assert not current_subagent_run_id(agent)

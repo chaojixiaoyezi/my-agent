@@ -285,7 +285,7 @@ def _current_published_audit_bindings(
 
 # LLM: The structured role snapshot decides whether direct-child controls exist;
 # goal prose and display names never grant a recursive management surface. 父当轮快照再收紧所有默认业务工具。
-# 函数用途: 组合角色目录并取直属父级真实快照交集；普通 leaf 不获得下级控制或默认宿主管理工具。
+# 函数用途: 原角色/父快照交集后，真实委派链剔除本人通知工具；普通child默认和其它已授权业务动作不改。
 def _role_policy(
     agent,
     raw_params: dict[str, object],
@@ -304,6 +304,10 @@ def _role_policy(
     else:
         allowed_tools = leaf_allowed_tools(allowed_tools)
     allowed_tools = _within_parent_tool_authority(agent, allowed_tools)
+    from ...conversation.im_delegation_delivery import current_delegated_delivery_task
+
+    if current_delegated_delivery_task(agent) is not None:
+        allowed_tools = [name for name in allowed_tools if name != "send_message"]
     return RolePolicy(role=role, allowed_tools=allowed_tools)
 
 

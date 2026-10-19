@@ -50,6 +50,24 @@ def test_task_progress_closeout_guidance_config_defaults_and_override(tmp_path) 
     assert load_config(disabled_path).task_progress_closeout_guidance_enabled is False
 
 
+def test_assistant_progress_guidance_config_defaults_and_typed_override(tmp_path) -> None:
+    shipped_path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
+    assert AgentConfig().assistant_progress_updates_enabled is True
+    assert load_config(shipped_path).assistant_progress_updates_enabled is True
+
+    config_path = tmp_path / "agent_config.yaml"
+    for enabled in (False, True):
+        config_path.write_text(
+            f"model_backend: echo\nassistant_progress_updates_enabled: {str(enabled).lower()}\n",
+            encoding="utf-8",
+        )
+        config = load_config(config_path)
+        assert config.assistant_progress_updates_enabled is enabled
+        assert config.config_source_for("assistant_progress_updates_enabled") == {
+            "source": str(config_path.resolve()), "priority": 20,
+        }
+
+
 def test_merge_config_layers_tracks_winning_source() -> None:
     effective = merge_config_layers(
         [

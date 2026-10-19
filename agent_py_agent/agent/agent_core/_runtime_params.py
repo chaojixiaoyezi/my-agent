@@ -15,6 +15,8 @@ from ..concurrency.interrupt import is_interrupted
 MAX_PROTOCOL_REPAIRS = 2
 
 
+# LLM: 最终收口仅携原run参数与已采纳结果；attempt必须沿构造点显式传递，不从响应正文或来源反推身份。
+# 类用途: 冻结最终归档和公开消息所需的原请求、尝试、运行与会话范围。
 @dataclass(frozen=True)
 class FinalizeContext:
     user_prompt: str
@@ -51,6 +53,7 @@ class FinalizeContext:
     canonical_native_messages: list[dict[str, object]] = field(default_factory=list)
     # Typed sink used only to retrieve tool-boundary-confirmed assistant parts.
     on_chunk: object = None
+    attempt_id: str = ""
 
 
 # LLM: ToolLoopExecuteParams保存本run事实及opaque原输入source；source不序列化/不授权限，逻辑turn/attempt独立，临时复核不控制完成。

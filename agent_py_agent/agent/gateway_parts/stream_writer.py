@@ -90,6 +90,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _buffer_chars: int = 0
     _last_flush_at: float = field(default_factory=time.monotonic)
     _verbose_level: str = "off"
+    _final_only: bool = field(default=False, init=False)
     _im_preview_max_chars: int = 100
     _display_timezone: str = ""
     im_approval_agent: object | None = field(default=None, repr=False)
@@ -97,6 +98,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _model_delta_buffer: list[str] = field(default_factory=list)
     _model_delta_chars: int = 0
     _model_delta_published: str = ""
+    _committed_model_calls: set[str] = field(default_factory=set)
     _last_im_draft_at: float = 0.0
     _last_model_delta_flush_at: float = field(default_factory=time.monotonic)
     _commentary_emitted: bool = False
@@ -163,6 +165,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
             if _stream_flush_due(text, self._model_delta_chars, self._last_model_delta_flush_at, self.flush_chars, self.flush_interval_seconds):
                 self._flush_model_deltas()
 
+    # LLM: 仅原已采纳响应提交此入口；终态全文替换本次候选，幂等键来自真实call而非正文，IM档位和final-only仍由原出口守门。
+    # 函数用途: 确认流式或非流式模型说明并复用原事件，丢弃未确认增量而不重放工具。
+    def commit_model_response(self, payload: dict) -> None:
+        _commit_model_response(self, payload)
+
     # LLM: 详细级别及字符上限消费本请求有效配置，只投影展示，不裁剪内部候选、工具正文或最终结果。
     # 函数用途: 固定本请求的过程档位、短窗口上限和用户时区，随事件传给 IM 投递端。
     def set_verbose_level(self, level: str, *, preview_max_chars: int = 100, timezone: str = "") -> None:
@@ -170,6 +177,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._verbose_level = normalized if normalized in {"off", "on", "full", "stream"} else "off"
         self._im_preview_max_chars = max(1, min(8000, int(preview_max_chars)))
         self._display_timezone = timezone
+
+    # LLM: 只由原宿主派工确认后设置；仅普通IM候选/进度静默，不改变rich记录、模型或最终response事实。
+    # 函数用途: 让短受理轮只由原最终回复watcher外送一次。
+    def set_final_only(self) -> None:
+        self._final_only = True
 
     # LLM: Binding happens only after canonical owner/thread/cwd resolution and before the model
     # can call tools. Request payload prose or tool arguments must never choose this scope.
@@ -534,12 +546,16 @@ class BufferedChunkStreamWriter(StreamLiveness):
         _flush_model_delta_events(self, complete=complete)
 
 
-# LLM: 同一公开事件净化一次后先落原 chunk，再依次投影实时 sink；每个出口重核原 still_current，不影响执行参数。
+# LLM: 宿主已确认的短接单轮不向普通IM发候选/进度；其余事件净化一次后落原chunk/sink，每个出口核still_current，不影响执行。
 # 函数用途: 发布 writer 的安全事件与展示时刻，sink 故障不改变任务结果，不创建第二发送路径。
 def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
     from ..common.log_redaction import redact_sensitive_value
 
     if still_current is not None and not still_current():
+        return
+    if writer._final_only and not writer.rich_transcript and event.get("kind") in {
+        "runtime_progress", "tool_progress", "assistant_commentary", "model_draft", "model_liveness", "tool_liveness",
+    }:
         return
     event = redact_sensitive_value(event)
     if writer._verbose_level == "stream" and not writer.rich_transcript:
@@ -632,3 +648,28 @@ def request_stream_permission(writer,request,cancellation_token):
         return request_foreground_im_permission(writer.im_approval_agent,request,cancellation_token=cancellation_token)
     return writer._approval.request(request,options=StreamApprovalRequestOptions(
         writer.interactive_approvals,writer.approval_mode_decision_provider,cancellation_token))
+
+
+# LLM: 只由原sink方法调用，同一实例状态保存原call幂等和显示档位；拆出以保持类尺寸，不新增账或入口。
+# 函数用途: 将已净化的完整响应提交到原显示段，丢弃旧候选并保留原final-only/通道策略。
+def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> None:
+    from .stream_events import committed_model_events
+
+    events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
+    call_id = (payload.get("source") or {}).get("call_id")
+    if not events or call_id in writer._committed_model_calls or getattr(writer, "_liveness_closed", False):
+        return
+    writer._committed_model_calls.add(call_id)
+    writer._model_segment.clear()
+    writer._model_delta_buffer.clear()
+    writer._model_delta_chars = 0
+    writer._model_delta_published = ""
+    for event in events:
+        if event["kind"] == "assistant_commentary":
+            writer._committed_commentary.append(event["text"])
+            if writer._commentary_emitted and not writer.rich_transcript and writer._verbose_level != "stream":
+                continue
+            writer._commentary_emitted = True
+            writer._write_event(event)
+        elif writer.rich_transcript:
+            writer._write_event(event)

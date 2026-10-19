@@ -171,6 +171,8 @@ class ToolRegistryParams:
     gateway_port: int | None = None
     # B5 征询提供方来自组合根，权限视图共用它；模型不能传入提供方或改变来源。
     plugin_gate_reviewer: Callable | None = None
+    # 原 owner 权限状态的当次只读投影；不持久权限，缺省不获得管理员 Full Access。
+    permission_state_reader: Callable[[], dict[str, object]] | None = None
 
 
 # LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。
@@ -438,7 +440,7 @@ def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]
 # 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
     # LLM: 保存唯一构造配置与宿主 B5 提供方，权限视图共用共用池接线；不从模型参数赋予来源或另建连接。
-    # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器，运行时按同一注册表完成授权与调用。
+    # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器；权限状态读取器只读同一 owner 事实，运行时按同一注册表完成授权与调用。
     def __init__(
         self,
         params: ToolRegistryParams,
@@ -781,7 +783,7 @@ class ToolRegistry:
         )
 
     # LLM: Every gate and handler in one invocation must receive the same host-authored effective
-    # cwd/root set. 审批模式沿 owner 唯一策略，读失败不放行；调用来源只能由宿主参数指定，不能从模型参数提权。
+    # cwd/root set. 审批模式与管理员 Full Access 只读原 owner 策略并核本次有效墙；读失败不放行，不能从模型参数或恢复 JSON 提权。
     # 函数用途: 统一工作目录与授权执行；guarded 展示回调只从宿主上下文传给原执行器，不读取模型参数。
     def execute_tool(
         self,
@@ -814,7 +816,7 @@ class ToolRegistry:
                 owner_scope_root=effective_owner_scope,
                 write_boundary=write_boundary,
                 runtime_guard_policy=self.runtime_guard_policy,
-                approval_mode=_registry_approval_mode(self),
+                **_registry_approval_state(self, effective_owner_scope, runtime_snapshot.owner_type),
                 operation_store=self.operation_store,
                 operation_store_required=self.operation_store_required,
                 operation_owner_id=self.operation_owner_id,
@@ -833,13 +835,30 @@ class ToolRegistry:
         )
 
 
-# LLM: 原审批读取语义独立于事件观察；保持错误时 unavailable，不让拆分改变授权或扩大异常吞并范围。
-# 函数用途: 在工具边界读取唯一审批模式，将读取失败原样交给执行器保守拒绝。
-def _registry_approval_mode(registry):
+# LLM: 新读口每调用只读一次原 owner 模式；坏型/失败不回退旧模式。旧 str 回调保持原 ask/auto，永不签发管理员事实。full 还核本次主代理、有效空墙及原装配 access/path；不读模型参数或恢复 JSON。
+# 函数用途: 读取同一份当次审批模式与管理员全盘事实，任何读取失败都让原执行器保守拒绝。
+def _registry_approval_state(registry, effective_owner_scope, runtime_owner_type):
     try:
-        return registry.approval_mode_reader() if registry.approval_mode_reader else "ask"
+        reader = registry._construction_params.permission_state_reader
+        if reader is None:
+            mode = registry.approval_mode_reader() if registry.approval_mode_reader else "ask"
+            return {"approval_mode": mode, "admin_full_access": False}
+        value = reader()
     except (OSError, ValueError):
-        return "unavailable"
+        return {"approval_mode": "unavailable", "admin_full_access": False}
+    if not isinstance(value, dict):
+        return {"approval_mode": "unavailable", "admin_full_access": False}
+    mode, permission, admin = value.get("approval_mode"), value.get("mode"), value.get("is_admin")
+    if (type(mode) is not str or mode not in {"ask", "auto"}
+            or type(permission) is not str or permission not in {"ask", "auto", "full-access"}
+            or type(admin) is not bool or (permission == "full-access" and not admin)
+            or mode != ("ask" if permission == "ask" else "auto")):
+        return {"approval_mode": "unavailable", "admin_full_access": False}
+    full = (value.get("is_admin") is True and value.get("mode") == "full-access"
+            and mode == "auto" and not effective_owner_scope
+            and registry.owner_type == runtime_owner_type == "main_agent" and registry.path_access_mode == "full"
+            and registry._construction_params.access_mode == "full-access")
+    return {"approval_mode": mode, "admin_full_access": full}
 
 
 # LLM: 只接宿主装配的严格类型观察对象；读取或导入异常只关闭观察，不从工具参数找身份，不包住执行器或权限门。

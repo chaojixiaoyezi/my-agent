@@ -1,5 +1,5 @@
 # LLM: 原Agent与显式owner领域服务共用同一卡片RMW/加密/回放，输入生成ID只有原ref+generation算法。
-# 模块用途: 接通冷C的原凭据提交/取消，不扩大群、actor、期限或工具权限。
+# 模块用途: 共用原凭据提交/取消和无预填表单，账号控件只按结构name展示，不扩大群、actor、期限或工具权限。
 # LLM: 凭据唯一存于原owner私密目录；显式group按当前成员和实际填写人择取，task继续原根/监控约束，秘密仅宿主注入。
 # 模块用途: 收集并加密接口凭据，群默认复用和个人任务隔离共用原卡/存储/网络门，不向聊天或模型交明文。
 from __future__ import annotations
@@ -326,16 +326,17 @@ def _save_credential_row(admission,path,row):
     write_private_text_file_atomic_unlocked(path,text)
 
 
-# LLM: 展示只能读取已签名access_scope，group presentation不是授权；提交仍走原MAC/当前成员，不显示秘密。
-# 函数用途: 在原表单说明群共享或原任务用途，保留取消与原输入控件。
+# LLM: 展示只读原access_scope和结构字段；username为text，其它凭据password且无default，show_icon不控制明文眼睛；提交仍经原MAC/成员门。
+# 函数用途: 在原表单说明使用范围；账号为普通文本、其它凭据遮蔽且从不预填，内部控件名不与业务字段冲突。
 def credential_card(row):
-    inputs = [{'tag':'input','name':field['name'],'input_type':'password','show_icon':True,
+    inputs = [{'tag':'input','name':field['name'],
+        **({'input_type':'text'} if field['name']=='username' else {'input_type':'password','show_icon':True}),
         'label':{'tag':'plain_text','content':field['label']}} for field in row.get('fields', credential_fields(row['authentication']))]
     if not row.get('target_url', row.get('origin')):
         inputs.insert(0, {'tag':'input','name':'target_url','label':{'tag':'plain_text','content':'目标链接'}})
     inputs.extend({'tag':'input','name':name,'required':False,'label':{'tag':'plain_text','content':label}}
                   for name,label in [('credential_name','名称（可选）'),('credential_note','备注（可选）')])
-    submit = {'tag':'button','name':'submit','action_type':'form_submit','type':'primary',
+    submit = {'tag':'button','name':'_credential_submit','action_type':'form_submit','type':'primary',
         'text':{'tag':'plain_text','content':'保存并供本群助手使用' if row.get('access_scope') == 'group' else '仅供此任务使用'}, 'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'submit'}}
     cancel = {'tag':'button','text':{'tag':'plain_text','content':'取消'},
         'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'cancel'}}
@@ -344,7 +345,7 @@ def credential_card(row):
              if row.get('access_scope') == 'group' else '仅限原发起人的当前任务或已绑定监控。')
     return {'config':{'wide_screen_mode':True,'update_multi':True},'elements':[
         {'tag':'div','text':{'tag':'plain_text','content':f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n{usage}\n输入不进入聊天、模型或记忆。"}},
-        {'tag':'form','name':'credentials','elements':[*inputs,submit]}, {'tag':'action','actions':[cancel]}]}
+        {'tag':'form','name':'_credential_form','elements':[*inputs,submit]}, {'tag':'action','actions':[cancel]}]}
 
 
 # LLM: 上游已MAC/actor/解锁；群共享关闭时不收旧group卡新值但允许取消；同卡同代终态和原期限不变。

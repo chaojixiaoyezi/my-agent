@@ -1,5 +1,5 @@
-# LLM: 宿主材料采集与纯渲染分开；self_map读取和用户可见说明只沿原开关/工具资格作软指引，不解析用户文本或授新权限；请求/容量同源，渲染不读盘刷新。
-# 模块用途: 冻结主子代理提示材料并生成模型输入；能力清单仍由模型读取原事实后向用户说明。
+# LLM: 宿主材料采集与纯渲染分开；主会话沟通和self_map沿原开关作软指导，不解析正文或授新权限；请求/容量同源，渲染不读盘刷新。
+# 模块用途: 冻结主子代理提示材料并生成模型输入；普通主会话可追加沟通指导，能力清单仍由模型读取事实后说明。
 from __future__ import annotations
 
 """主智能体使用的 prompt 拼装器。
@@ -46,6 +46,15 @@ if TYPE_CHECKING:
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
+# 沟通节奏只交给主模型判断；不创建计时器、额外采样或机器完成门，也不要求逐工具重复说明。
+_ASSISTANT_PROGRESS_GUIDANCE = (
+    "执行中沟通：复杂执行任务开始时，用一两句说明第一步；有新发现、调整方向或重要编辑、验证前，"
+    "简短说明已确认的发现和下一步。连续探索中，有正常模型采样机会时，以约 30–60 秒为软目标给出有信息的新进展；"
+    "不为汇报额外请求模型，不机械地每个工具前说一句，不重复空话。"
+    "说明只能基于真实上下文，不把工具名、计时心跳或内部思考当作过程说明。"
+    "仍有可推进的工作时，说明后在同一轮继续调用相应工具，不把进度句当作最终交付。"
+    "普通短问答或单次小读取不强制过程说明；用户要求安静或少说时尊重其要求。"
+)
 # 静态入口指引只要求模型读取真实事实并向用户说明，不解析问题或据此裁决权限；普通与Compact共用且随原开关关闭。
 SELF_MAP_GUIDANCE = (
     "关于自己的目录、能力、模型、权限或工作状态，先用 self_map 无参数看总览，再按 section/item 读取。"
@@ -225,7 +234,8 @@ class PromptBuilder:
     # LLM: canonical system 包括 override 共用可关闭的查询复查软指导；保持文件、persona、Skill、时钟原采集顺序，
     #   self_map只追加固定入口指引，必须开关与本次实际可用资格同时成立，不读取目录；动态库存不进system。
     #   注入列表复制为元组，部署路径只采集到动态事实；纯投影只消费返回值，回合触发类型原样冻结。
-    # 函数用途: 冻结材料与当前部署位置；线程人格按已提交断点保存，部署路径不进入固定前缀。
+    #   主会话沟通只在既有非隔离范围按配置追加固定软指导，保留override且不改变子代理/辅助表达职责或执行终态。
+    # 函数用途: 冻结材料与当前部署位置；主会话可追加沟通指导，线程人格按已提交断点保存，部署路径不进入固定前缀。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         from ..tooling.query_evidence import query_zero_result_guidance
@@ -234,6 +244,8 @@ class PromptBuilder:
             system_prompt += "\n\n" + SELF_MAP_GUIDANCE
         if query_guidance := query_zero_result_guidance(self.config):
             system_prompt += "\n\n" + query_guidance
+        if not _is_isolated_scope(request.context_scope) and self.config.assistant_progress_updates_enabled:
+            system_prompt += "\n\n" + _ASSISTANT_PROGRESS_GUIDANCE
         task_local = _is_task_local_context(request.context_scope)
         memory_text = _memory_text([] if task_local else request.memories)
         owner_scope = _owner_scope_text(self)

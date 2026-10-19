@@ -43,23 +43,30 @@ def register_owner_materialization(session, request):
     # LLM: 原controller短门同步调用；所有目录/种子物理写都在原C，返回值仅报告完成，不授权后续W写。
     # 函数用途: 按原布局初始化当前用户，不补建共享资源或管理员。
     def materialize():
-        from ..user_space.owner_resolver import (
-            _owner_directories,
-            _owner_home_dir,
-            _owner_home_result,
-            ensure_owner_home,
-        )
-        from ..user_space.worker_home import _require_existing_owner_path
-
-        root = issuer._source_origin[0].owner_root
-        projected = _owner_home_result(root, owner, _owner_home_dir(root, owner))
-        targets = {value for value in vars(projected).values() if isinstance(value, Path)}
-        targets.update(_owner_directories(projected))
-        for target in targets:
-            _require_existing_owner_path(root, target)
-        actual = ensure_owner_home(root, owner)
-        if actual != projected:
-            raise WorkerCommitRejected('original_native_owner_home_required')
-        return {'owner': [owner.provider, owner.owner_kind, owner.owner_id]}
+        return materialize_coordinator_owner_home(issuer._source_origin[0].owner_root, owner)
 
     return session.register_short_operation(owner, transition, 'owner_materialize', materialize)
+
+
+# LLM: 仅原C的native短操作或控制首次发表门同步调用；原全局拒门先挡W/受限宿主，调用方仍须核原source/owner/P2/lease，拒门不授写权。
+# 函数用途: 复用唯一规范owner布局及nofollow前缀核验创建目录和种子，不构造Agent、模型或管理员。
+def materialize_coordinator_owner_home(root, owner):
+    from ..common.global_write_guard import require_global_writer
+    require_global_writer('owner_materialization')
+    from ..user_space.owner_resolver import (
+        _owner_directories,
+        _owner_home_dir,
+        _owner_home_result,
+        ensure_owner_home,
+    )
+    from ..user_space.worker_home import _require_existing_owner_path
+
+    projected = _owner_home_result(root, owner, _owner_home_dir(root, owner))
+    targets = {value for value in vars(projected).values() if isinstance(value, Path)}
+    targets.update(_owner_directories(projected))
+    for target in targets:
+        _require_existing_owner_path(root, target)
+    actual = ensure_owner_home(root, owner)
+    if actual != projected:
+        raise WorkerCommitRejected('original_native_owner_home_required')
+    return {'owner': [owner.provider, owner.owner_kind, owner.owner_id]}

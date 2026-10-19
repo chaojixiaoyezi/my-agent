@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-# LLM: 默认值须与随包 YAML 一致；B5 超时同时登记规范化范围/参数边界并由征询消费，覆盖仍由原 owner/thread 保存。
+# LLM: 默认值须与随包 YAML 一致；主会话沟通开关仅供提示构造消费，B5 超时同步规范化/参数边界，覆盖仍由原 owner/thread 保存。
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 #   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
@@ -303,8 +303,8 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: 用户默认同步随包配置；host_only来源名仅宿主冻结，不能由用户层改写；飞书原生图片开关和解码预算与YAML及normalize同源，群附件/Curator授权不变。
-# 类用途: 汇总模型和运行配置；飞书图片外发有独立开关，决策默认关闭，有限正时间只提供后续请求默认，不管理阶段时钟。
+# LLM: 用户默认同步随包配置；沟通软引导只影响主会话提示，联测builder与参数登记；host_only仅宿主冻结，媒体预算和群附件/Curator授权不变。
+# 类用途: 汇总模型和运行配置；沟通指导可关闭，图片外发有独立开关，有限正时间只提供后续请求默认，不管理阶段时钟。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
@@ -345,6 +345,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。
     tui_mouse_capture_default: bool = True
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    # 只给普通主会话追加执行中沟通软引导，不额外采样、不改变历史或执行终态。
+    assistant_progress_updates_enabled: bool = True
     workspace_root: str | list[str] = ""
     # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
     model_backend: str = ""

@@ -9,13 +9,14 @@
 #   子代理聚合记录与 docs/audits/R4-goattack-20260611.md。
 #   裁决后的排队必须在原 creation guard 内复读控制终态，不能由旧快照复活已停止的孩子。
 #   wake 账本只经 canonical mutate 窄写自身字段，不能用裁决前快照覆盖 runner/session；联测授权与退出交错。
-# 模块用途: 子代理 capability_request 的显式、结构化、可审计处理入口。
+#   目录与工具独立授权：明确目录-only只沿child有效工具与父当前上界交集；原scope builder无损运输命令、网络、预算及申请快照。
+# 模块用途: 子代理 capability_request 的显式、结构化、可审计处理入口，落账完整授权范围且不附赠工具。
 from __future__ import annotations
 
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,7 @@ from ....subagents.capability_scope import (
     direct_parent_tool_authority,
     partition_capability_paths_by_owner,
     resolve_capability_scope_path,
+    scoped_grant_params,
 )
 from ....subagents.model_capabilities import capability_request_requires_parent_resolution
 from ....subagents.models import (
@@ -37,7 +39,6 @@ from ....subagents.models import (
     task_status_in,
 )
 from ....subagents.runner_session_liveness import has_fresh_runner_session
-from ....subagents.services.lifecycle import RecordCapabilityGrantParams
 from ....tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -202,37 +203,30 @@ class ResolveCapabilityRequestsTool(BaseTool):
             errors.append({"request_id": getattr(request, "id", ""), "error_code": "TOOL_ERROR", **report})
             return None
 
-    # 函数用途: 把标记通过的 grant 逐条写进任务（副作用：record_capability_grant 落盘）。
+    # LLM: 只运输原scoped_grant_params的命令/网络/预算/约束与申请快照；已核工具/目录和父权限来源覆盖在同一原grant，不新建账本。
+    # 函数用途: 完整保存父级本次授权范围，合并审计来源并通过原lifecycle原子结清申请。
     def _persist_grants(self, ctx: _ResolveContext, pending_grants: list[tuple[Any, dict[str, object]]]) -> None:
         for request, record in pending_grants:
+            params = scoped_grant_params(request, routed_skills=list(record.get("skills") or []),
+                routed_tools=list(record.get("tools") or []),
+                selected_cards=list(record.get("capability_cards") or []), hit_count=0)
+            scope = {**dict(params.request_scope or {}), "resolved_by": "resolve_capability_requests",
+                     "parent_tool_authority": dict(record.get("parent_tool_authority") or {})}
             grant = self.agent.subagents.lifecycle.record_capability_grant(
-                ctx.task.id,
-                RecordCapabilityGrantParams(
-                    request_id=request.id,
-                    grant_type=str(getattr(request, "capability_type", "") or "generic"),
-                    tools=list(record.get("tools") or []),
-                    mcp_tools=list(record.get("mcp_tools") or []),
-                    skills=list(record.get("skills") or []),
-                    capability_cards=list(record.get("capability_cards") or []),
-                    reason=ctx.reason,
-                    path_scope=list(record.get("path_scope") or []),
-                    request_scope={
-                        "resolved_by": "resolve_capability_requests",
-                        "parent_tool_authority": dict(
-                            record.get("parent_tool_authority") or {}
-                        ),
-                    },
-                ),
-            )
+                ctx.task.id, replace(params, tools=list(record.get("tools") or []),
+                    mcp_tools=list(record.get("mcp_tools") or []), reason=ctx.reason,
+                    path_scope=list(record.get("path_scope") or []), request_scope=scope))
             record["grant_id"] = grant.id
 
-    # LLM: Grant judgment is side-effect free. write_roots and direct-parent ToolRuntimeSnapshot
-    # are objective hard boundaries; request status and grant commit together later.
+    # LLM: 目录与工具权限独立；普通申请不因path_scope旁生文件工具，明确目录-only只运输child有效文件工具与父当前权限交集，落账仍原子。
     # 每条拒绝都带错误码登记表里的码（越界目录 PATH_OUTSIDE_WORKSPACE，工具/Skill 超出父级 MISSING_CAPABILITY），
     # 供 _resolution_outcome 给出确定的拒绝码；不新造分类。
+    #   roots沿原scope builder的path_scope→cwd_scope优先序，显式write_roots仍优先；cwd-only也必须通过同一owner/父目录门。
     # 函数用途: 校验目录、工具和 Skill 上限并生成裁决记录，真正结清申请由后续原子落账完成。
     def _mark_grant(self, ctx: _ResolveContext, request: Any) -> dict[str, object]:
-        requested_roots = _string_list(ctx.params.get("write_roots")) or _string_list(getattr(request, "path_scope", []))
+        requested_roots = (_string_list(ctx.params.get("write_roots"))
+                           or _string_list(getattr(request, "path_scope", []))
+                           or _string_list(getattr(request, "cwd_scope", [])))
         allowed_roots, rejected_roots = self._partition_safe_roots(ctx.task, requested_roots)
         if requested_roots and not allowed_roots:
             return _refusal(request.id, "PATH_OUTSIDE_WORKSPACE",
@@ -242,6 +236,10 @@ class ResolveCapabilityRequestsTool(BaseTool):
             getattr(request, "requested_tools", [])
         )
         mcp_tools = _string_list(getattr(request, "requested_mcp_tools", []))
+        if (allowed_roots and not tools and not mcp_tools
+                and str(getattr(request, "capability_type", "") or "").strip().lower() == "filesystem"
+                and not getattr(request, "requested_commands", []) and not getattr(request, "requested_skills", [])):
+            tools = self._existing_directory_tools(ctx.task)
         requested_tool_names = list(dict.fromkeys([*tools, *mcp_tools]))
         authority = direct_parent_tool_authority(
             self.agent,
@@ -258,8 +256,6 @@ class ResolveCapabilityRequestsTool(BaseTool):
         )
         if skill_error:
             return _refusal(request.id, "MISSING_CAPABILITY", skill_error)
-        if allowed_roots:
-            tools = list(dict.fromkeys([*tools, *_FILESYSTEM_WRITE_TOOLS]))
         record: dict[str, object] = {
             "ok": True,
             "request_id": request.id,
@@ -274,6 +270,14 @@ class ResolveCapabilityRequestsTool(BaseTool):
         if rejected_roots:
             record["rejected_write_roots"] = rejected_roots
         return record
+
+    # LLM: 仅明确filesystem目录-only请求调用；重建child实际上下文及父原authority，不把raw allowed_tools或目录存在当工具授权。
+    # 函数用途: 保留已有文件工具的目录解锁语义，只取child有效工具与父当前可授工具交集，不附赠新工具。
+    def _existing_directory_tools(self, task: Any) -> list[str]:
+        context = self.agent.subagents.runner_context.build_execution_context(task.id)
+        held = set(context.allowed_tools or [])
+        tools = [name for name in _FILESYSTEM_WRITE_TOOLS if name in held]
+        return list(direct_parent_tool_authority(self.agent, task, tools).grantable_tools)
 
     # LLM: The owner wall is evaluated before broader task/agent roots. Any owner violation rejects
     # the whole requested path set, preventing a misleading partial grant and retry loop.

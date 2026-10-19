@@ -38,9 +38,9 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
-# LLM: 原主执行身份和线程/task 都通过正式入口建立，后台唤醒不启动真实 subprocess；不伪造 provider tool 往返。
-# 函数用途: 准备一个管理员 IM 的独立任务和可以执行创建服务的本片参数。
-def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a'):
+# LLM: 原主执行身份和线程/task 均走正式入口；默认晋升并领取真实claim，首片测试须显式关闭晋升，不能删账或伪造authority。
+# 函数用途: 在临时目录准备管理员IM任务；按测试阶段决定是否写TaskLink/claim，不启动进程或伪造provider往返。
+def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a', promote_root=True):
     agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False,
                                   my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
     source = agent.conversation_store.threads.get_or_create({
@@ -73,8 +73,22 @@ def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a'):
         tool_protocol_snapshot=make_test_protocol_snapshot(run_id=authority.run_id, source_protocol="native"),
     )
     agent._current_run_params = authority
+    # 已晋升执行片与真实后台一样建立TaskLink/claim；未晋升首片保留原SessionTask与当前main身份。
+    if promote_root:
+        promote_runtime_fixture_root(agent, authority)
     monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *_: {"status": "test-deferred"})
     return agent, params, task, context, source
+
+
+# LLM: 阶段推进只调用原晋升和claim入口；调用前必须已有当前main authority，不删已有账或补字段绕过来源门。
+# 函数用途: 为已通过首片输入检查的临时任务建立真实TaskLink和执行claim，不启动模型、进程或网络。
+def promote_runtime_fixture_root(agent, authority):
+    from agent_py_agent.agent.conversation.task_promotion import promote_conversation_task_for_run
+
+    root = promote_conversation_task_for_run(agent, authority)
+    assert agent.conversation_store.claims.acquire({'thread_id': root.thread_id,
+        'task_id': root.task_id, 'reason': 'thread_goal_continue', 'lease_seconds': 60}) is not None
+    return root
 
 
 def test_real_executor_creates_one_child_and_reentry_does_not_create_again(tmp_path, monkeypatch):
@@ -265,7 +279,9 @@ def test_real_group_child_schedule_visibility_does_not_bypass_actor_grant(tmp_pa
 def test_manual_child_default_stays_conservative(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
-    agent, _, _, _, _ = runtime_fixture(tmp_path, monkeypatch)
+    agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False,
+        my_agent_home=str(tmp_path / "home")), tmp_path / "workspace")
+    monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *_: {"status": "test-deferred"})
     result = CreateSubagentsTool(agent).execute({'goal': '合成手工任务'})
     assert result.ok, result.output
     assert 'schedule' not in agent.subagents.list_runs()[0].allowed_tools

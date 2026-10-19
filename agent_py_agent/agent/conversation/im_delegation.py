@@ -90,8 +90,10 @@ def _prepare_root(agent, params, policy):
 
 
 # LLM: 宿主创建仍走原冻结授权及operation账；只有活跃或BLOCKED孩子的OPEN申请可交直属父裁决，GAP/其它终态不复活。
-# 函数用途: 创建或恢复孩子并处理真实能力等待；BLOCKED+OPEN先裁决，其余结束状态按实际结果汇总。
+# 函数用途: 原主sender先表达精确结果回报；独立委派线程创建/恢复孩子并沿原能力等待和终态汇总。
 def prepare_delegated_execution(agent, params):
+    if _prepare_sender_result_reply(agent, params):
+        return
     resolved = _execution_policy(agent, params)
     if resolved is None:
         return
@@ -143,6 +145,74 @@ def prepare_delegated_execution(agent, params):
     })
 
 
+# LLM: 只接受原sender本轮session_message键对应的canonical结果；复制后台attrs/actor不签权，当前主session用零工具表达原事实，消费仍沿原guidance ACK。
+# 函数用途: 在原主会话模型轮汇总本次实际注入的真实委派结果，不创建汇总会话或转发后台正文。
+def _prepare_sender_result_reply(agent, params):
+    if current_subagent_run_id(agent):
+        return False
+    attrs = params.task_attributes or {}
+    key = attrs.get("host_session_message_key")
+    if not key:
+        return False
+    store = agent.conversation_store
+    receipt = store.guidance.receipt(key)
+    if receipt is None:
+        return False
+    metadata = receipt.entry.metadata
+    task = store.session_tasks.load(metadata.get("session_task_id", ""))
+    if task is None or task.status not in {"done", "failed"}:
+        return False
+    from .im_delegation_delivery import delegated_delivery_task
+    from .session_task_report import result_report_key
+
+    canonical = delegated_delivery_task(agent, task.target_thread_id)
+    if canonical is None:
+        return False
+    if (canonical != task or task.sender_thread_id != attrs.get("conversation_thread_id")
+            or receipt.entry.target_id != task.sender_thread_id
+            or key != result_report_key(task)):
+        raise DataCorruptionError("委派结果与原主会话不一致")
+    from ..agent_core.runtime.guidance import inject_pending_guidance
+    from ..agent_core.tool_loop.natural_user_reply import queue_natural_user_reply
+
+    inject_pending_guidance(agent, params)
+    results = _injected_sender_results(agent, params)
+    queue_natural_user_reply(params, kind="delegated_result", facts={
+        "delegated_results": results,
+        "reply_is_interim": False, "task_continues_without_more_user_input": False,
+    })
+    return True
+
+
+# LLM: 仅读取本轮原reserve实际注入的条目；每个结果重核原SessionTask/key/sender，不把primary代表其它已注入结果。
+# 函数用途: 给主会话模型提供本轮全部真实委派结果，原ACK仍逐guidance确认，不新增批次或存储。
+def _injected_sender_results(agent, params):
+    from .im_delegation_delivery import delegated_delivery_task
+    from .session_task_report import result_report_key
+
+    entries = (params.live_archive_state or {}).get("_guidance_ack_entries", {})
+    results = []
+    for entry in entries.values():
+        task_id = entry.metadata.get("session_task_id", "")
+        task = agent.conversation_store.session_tasks.load(task_id) if task_id else None
+        if task is None or task.status not in {"done", "failed"}:
+            continue
+        canonical = delegated_delivery_task(agent, task.target_thread_id)
+        if canonical is None:
+            continue
+        receipt = agent.conversation_store.guidance.receipt(result_report_key(task))
+        if (canonical != task or receipt is None or receipt.entry != entry
+                or entry.target_id != task.sender_thread_id
+                or task.sender_thread_id != params.task_attributes.get("conversation_thread_id")):
+            raise DataCorruptionError("已注入委派结果与原主会话不一致")
+        results.append({"current_user_request": task.goal, "session_task_id": task.task_id,
+            "status": task.status, "result": task.summary, "result_refs": list(task.result_refs),
+            "failure_code": task.failure_code})
+    if not results:
+        raise DataCorruptionError("本轮没有实际注入的委派结果")
+    return results
+
+
 # LLM: OPEN 仅从 canonical 直属孩子读取；保持原父级 resolve 工具的授权上界，不自动批准，不暴露业务工具或模型自报申请。
 # 函数用途: 把缺能力的孩子交给后台主代理裁决，避免纯汇总视图让真实申请永远无人处理。
 def _prepare_capability_resolution(params, children):
@@ -163,7 +233,7 @@ def _prepare_capability_resolution(params, children):
     return replace(params, allowed_tools=["resolve_capability_requests"])
 
 
-# LLM: 自动派工显式传父工具上界与原输入媒体sha；图片仍走原create授权/开关，不借attrs或同root自动授权全部媒体。
+# LLM: 自动派工显式传父工具上界与原输入媒体sha；原本人send_message留主sender通知，其它获准业务工具/图片沿原G1，不借attrs扩大权限。
 # 函数用途: 沿原执行账创建同owner业务孩子并转交原附件，不改手工默认或自动批准。
 def _start_child(agent, params, task, allowed):
     from ..agent_core.orchestration.create_policy import leaf_allowed_tools

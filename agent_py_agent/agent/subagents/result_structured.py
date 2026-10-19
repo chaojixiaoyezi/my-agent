@@ -1,4 +1,5 @@
 
+# LLM: 请求复用只查同canonical task实际grant与完整结构范围，不从模型描述生成授权；与lifecycle同一身份函数。
 # LLM: 模型结构化结果仅补充事实；不再通过交付映射静默复制业务文件。
 # 模块用途: 合并子代理结果字段、工具记录与证据，文件操作仍由正式工具执行。
 from __future__ import annotations
@@ -89,6 +90,8 @@ def _create_evidence_from_parsed(parsed, now):
     return count
 
 
+# LLM: 只消费同canonical task的真实grants复用权限；模型结果文字不能创建批准，联查lifecycle入口同去重合同。
+# 函数用途: 将解析出的申请登记到当前任务，已经真实授权的相同完整范围不因措辞变化再次排队。
 def _create_capability_requests_from_parsed(task, parsed, now):
     count = 0
     created_ids = []
@@ -120,7 +123,7 @@ def _create_capability_requests_from_parsed(task, parsed, now):
             escalation_target=str(item.get("escalation_target", "") or ""),
             created_at=now,
         )
-        if existing := find_equivalent_capability_request(task.capability_requests, request):
+        if existing := find_equivalent_capability_request(task.capability_requests, request, task=task):
             created_ids.append(existing.id)
             count += 1
             continue

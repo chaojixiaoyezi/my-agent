@@ -55,9 +55,13 @@ class FinalizationService:
         self._agent = agent
 
     # LLM: 原后台首次认证拒绝在关任务前冻结同wake义务；交付确认前不关闭active TaskLink，不复活终态，其余归档/用量/记忆合同不变。
-    # 函数用途: 收口模型事实，先保留必要通知资格，再按真实终态登记任务完成和原后台学习请求。
+    #   已采纳同源正文先交原显示出口；原取消/拒绝或改写正文不从blocks复活，联测阶段投影与partial持久化。
+    # 函数用途: 收口模型事实与可见消息，保留通知资格，再按真实终态登记任务和原后台学习请求。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
+        from .model.visible_response import commit_visible_response
+
+        commit_visible_response(ctx, ctx.final_response, boundary="terminal")
         from ..conversation.required_user_action import defer_required_action_completion
         if _conversation_turn_is_terminal(ctx) and not defer_required_action_completion(self._agent, ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
@@ -283,8 +287,8 @@ class FinalizationService:
             "active": _active_context_tokens(input_tokens, output_tokens, prompt_tokens),
         }
 
-    # LLM: 最终结果只透传循环已形成的无正文诊断；不重新读取模型、不修改回复或结束事实。
-    # 函数用途: 将最终模型回复与运行账组装成结果，让Gateway失败路径仍能取得真实循环计数。
+    # LLM: 原受验text始终权威；仅完整同源块一致时分离phase，拒绝/净化/双段合成后保当前text，缺final沿原不可交付终态。
+    # 函数用途: 将最终回复投影与运行账组装成结果，保留完整模型正文、过程和失败诊断。
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
         from .model.response_provenance import response_provenance_projection
 
@@ -308,10 +312,15 @@ class FinalizationService:
         # LLM: 会话运行时 式自然收口保留模型原文；宿主只单独记录 turn_end_reason，
         # 不再把机器验收结论包装成“任务未完成”用户文案。
         honest_text = str(ctx.final_response.text or "").rstrip()
+        from .model.visible_response import accepted_final_text
+
+        public_text = accepted_final_text(ctx, ctx.final_response).rstrip()
+        if honest_text and not public_text and runtime_status == "ok":
+            runtime_status, runtime_reason, runtime_source = "user_reply_unavailable", "USER_REPLY_UNAVAILABLE", "tool_loop"
         return AgentRunResult(
             prompt=ctx.final_prompt,
             response=redact_executed_operation_labels(
-                honest_text,
+                public_text,
                 operation_verification,
             ),
             backend=ctx.final_response.backend,

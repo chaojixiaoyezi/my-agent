@@ -1,5 +1,5 @@
 # LLM: Count0原锁/admin callbacks保持懒调用；C显式同源config只读wrapper共用唯一前缀，typed来源故障不是无效用户卡。
-# 模块用途: 为原Agent与冷C校验同一卡片，保G1先于读body及其它卡片waiting。
+# 模块用途: 为原Agent与冷C校验同一卡片，保G1先于读body；只有授权后表单typed错误返回可改正分类。
 # LLM: 跨 owner 卡片入口必须先核对宿主凭据、SDK actor、签名和个人解锁，再初始化引用 owner；引用不是批准。
 # 模块用途: 接受原 IM 适配器验证后的私人卡回调，将精确决定交给原工具审批记录。
 from __future__ import annotations
@@ -12,6 +12,7 @@ from ..session_lock.service import UnlockService
 from ..session_lock.store import SessionLockStore
 from ..user_space.interaction_refs import verify_interaction_reference
 from ..user_space.owner_resolver import OwnerIdentity
+from ..user_space.task_credential_forms import CredentialFormValidationError
 from .multiprocess_global_write import GlobalWriteError
 from .request_worker import _resolve_request_agent_for_owner, admin_channel_identity_for_request
 
@@ -69,8 +70,8 @@ def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_i
         chat_id=str(body["chat_id"]), decision=str(body["decision"]))
 
 
-# LLM: 新跨 owner 控制必须有实际宿主凭据，即使 G2a 旧回环兼容仍开；模型不能靠 localhost 或复制签名引用代人批准。
-# 函数用途: 校验适配器来源后处理控制卡；区分身份/版本拒绝和宿主执行故障，只返回固定码与阶段，不暴露原请求。
+# LLM: 跨owner控制仍须实际宿主凭据；仅授权后parser的实际typed错误可返回form，原身份/期限/任务拒绝不降级，须同步adapter固定出口。
+# 函数用途: 校验适配器来源后处理控制卡；原授权后的typed表单错误允许改正原卡，身份/版本和宿主故障仍沿原分类，不暴露输入。
 def handle_private_interaction(handler, server) -> None:
     middleware = getattr(handler, "_auth_middleware", None)
     if middleware is None or not middleware.has_gateway_credential(dict(handler.headers)):
@@ -92,6 +93,10 @@ def handle_private_interaction(handler, server) -> None:
             if server.agent is None:
                 raise ValueError("服务不可用")
             result = resolve_private_interaction(server.agent,body,channel=channel,actor_id=actor_id,approval_paths=server.paths)
+    except CredentialFormValidationError as error:
+        handler._send_json(400, {'ok':False, 'error_code':error.code, 'error_stage':error.stage,
+                                 'error_field':error.field, 'message':error.message})
+        return
     except (OSError, RuntimeError, sqlite3.Error, GlobalWriteError):
         handler._send_json(503, {"ok": False, "error_code": "IM_INTERACTION_HOST_UNAVAILABLE",
                                  "error_stage": "execution", "message": "宿主暂时无法处理卡片，请稍后重试。"})

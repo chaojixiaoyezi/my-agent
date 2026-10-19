@@ -133,3 +133,55 @@
 最终在隔离 Linux 安装中用官方 MiniMax-M2.7 分别验证真实 TUI 和真实 IM：IM 场景保持 TUI 未启动，开启 `/delegate enable`，普通用户、管理员非 full-access、管理员 full-access 各给一次普通任务，观察后台主/子工具账、审批流、产物及回送；测试者只作正常用户控制和审批，不代替模型补文件，不改线上现有任务。IM 平台未接通时可完成替身/replay，但必须把真实 IM 验收留为未完成。
 
 建议下一步：优先贯通自动委派的后台主子权限与审批，先修自身工作区和 Shell 一致性并补齐锁保护，再沿原父级通知、审批桥和 IM 控制验证无 TUI 的完整链路。安装更新与 IM 帮助展示可以独立并行；路径编译、运行边界合并和审批执行者各保持单一修改负责人。当前等待实施指令，不合并、不推送、不打包。
+
+## 2026-10-18 管理员 Full Access 的普通 MCP 确认修复候选
+
+本节实现状态与下述新增授权粒度设计分开验收，普通 MCP 修复不代表命令范围和父级及时续跑均已完成。
+
+解决问题：用户已在正式权限入口选择管理员 Full Access，普通 MCP 的宿主 `tool_approvals: always` 仍逐次询问。原审批读口会将 full-access 压成 auto，统一工具门又保留 always，因此不能仅改展示或关闭 IM 发卡。
+
+候选在每次 registry 调用中经独立只读 `permission_state_reader` 读取原 owner 权限状态（原 `approval_mode_reader` 字符串协议不变；新读口坏型/失败不得回退放行），并与当前有效 owner 墙、原装配 access/path 模式及主代理类型复核；只有已核管理员、当前显式 full-access、空有效墙与 full 路径同时满足，才免普通 MCPProxyTool 的逐次 always。该布尔只为当次宿主投影，默认 False，不写第二份权限或恢复状态。插件继承代理、其它 always、普通/群、非 full 管理员及受限子代理保留原确认；参数、可见性、owner/path、执行权威及插件 deny 仍走原门。
+
+本片只处理新调用；旧 pending 缺本次有效 child/main 边界，不按父 agent.full 猜权或清票据。父 capability_request 的正式状态为 OPEN/GRANTED/GAP/CLOSED，与 human tool approval 的 APPROVED 分属原有协议。日志权限仅定位源码，未读取真实日志或改挂载。未发布、未部署、未连接真实 MCP/飞书，实际运行链由根后续统一验收。
+
+参考先查本机 Codex 合同索引 `codex_contract_code_files.xlsx` sheet2 行 41/43/49 的权限模块，再沿源码 `codex-rs/core/src/tools/orchestrator.rs:142-168` 观察原 permission profile 与单一审批执行门。这里只复用已解析权限与执行门分离的模式，不引入其权限框架。
+
+## 管理员在线诊断入口（审计中）
+
+不新增root模式，优先让现有管理员full-access能读取本机服务日志、进程和资源状况，沿原受控审计查询其它owner任务、调度与权限失败。普通/群不继承管理员资格；操作系统账号权限仍适用，诊断权限不隐式变成sudo。
+
+当前`audit_records`已有`topic=requests`与`scope=all_owners`，只读请求状态、错误码、耗时和归属，不读对话或记忆正文；原`admin_controls`可显式管理`cross_owner_audit_allowed`，默认仍关闭。该工具只允许主代理使用。是否应在full模式下减少额外诊断前置、是否缺具体owner筛选与运行/调度诊断投影仍在审计；不能用解除私密存储整目录保护代替诊断入口。自身日志的离线权限回归与线上真实错误分别记录，尚未据此判定用户现场原因。
+
+## 子代理授权粒度与及时续跑（设计核对中）
+
+目录授权允许子代理在父代理现有权限上界内，对指定目录读写、创建文件并正常运行脚本，不反复申请相同目录。它不扩大到目录外、其它owner或宿主凭据，不绕过工具禁用和原网络限制。命令授权绑定目录与获准命令，不能因为命令需要一个工作目录就附赠该目录的任意写工具。
+
+参数变化按是否扩大已批准范围判断，不按字符串是否逐字相同判断。更换查询词、时间窗及已授权目录内输出名等无扩权变化应继续；新命令、新工具、新目录、额外执行动作或越出父权限上界应重新裁决。尚未证明现有仅按可执行程序名的allowlist可以表达此合同；实施前需复用已有命令解析与结构化范围，不能靠自然语言说明或黑白关键词猜测授权。
+
+本次任务内已有有效grant必须持久沿用，申请措辞变化或接收对象重建不能制造重复确认。父级申请通知、决策与批准后续跑必须沿原事件及canonical状态，不能依赖主代理在摘要里记得处理；仍需核对真实执行延迟来源。提示缓存是性能目标，不能作为授权事实。当前为设计与差距核对，未增加配置、协议状态或新的权限账。
+
+## 2026-10-18 会话批准跨展示 sink 复用候选
+
+解决问题：孩子同一canonical run/current attempt内，普通MCP的同工具同参数已选“本会话允许”，重建BackgroundTranscriptSink仍再次发卡。旧许可仅存sink私有set；本片复用既有Agent级ToolApprovalSessionCache，不新建权限表、期限或队列。
+
+缓存scope只由当前原owner/thread/run/claim/attempt、真实registry、原owner模式和canonical执行上下文中的完整有效工具/Skill/读写边界生成。孩子须核同owner、线程及当前attempt；主车道必须有宿主typed RunParams与同owner/thread/task/run/currentattempt的原RuntimeDB链；前台继续核原writer/队列/claim，后台同时核生产LocalRunControl内存绑定与原claim发布投影一致。JSON单独不能签权，缺运行参数或原控制来源不缓存。原write_boundary完整投影及core运行代次共同进入scope。缺字段、读取失败或漂移只关闭缓存，不回退成共享宽scope。键仍为准确工具与参数哈希；只记录用户approved_session，单次批准、拒绝、取消和插件强制门均不提升。等待后再次核scope才记缓存，旧attempt/新权限不得继承。
+
+本片不解释参数变化是否扩权，不把MCP always免审当成已处理重复批准；不用模型文字签权。正式目录/命令两类授权与字段漏失属于另一切片。全盘诊断及跨owner安全投影继续独立审计，未新建root模式。
+
+已以真实临时canonical child/currentattempt及原MCP工具授权复现旧版2次publish→新版1次，另覆盖新attempt、权限改变、过期请求、取消、单次批准、拒绝、插件与失源。独审发现初版main缺参仍产生缓存键，原失败及冻结件保留；修正版新增真实后台claim的缺参、鸭子参数、错task/run/owner、旧attempt、无原control、伪control、未发布/已关闭control及claim投影漂移反例，并保原publisher和前台writer正例。只替换用户审批运输等待，无真实MCP/飞书网络；准确结果见501后继handoff，尚未发布/部署。
+
+## 2026-10-18 能力申请目录上界与既有授权复用候选
+
+旧底座两处已用真实临时SimpleAgent复现：父admin full-access已明确项目工作根，孩子也已持久化该根，能力分区仍只认owner根而拒绝；另一处同task、同工具和绝对目录已经真实GRANTED，仅needed措辞变化仍新建OPEN。
+
+四生产候选只复用既有路径过滤与canonical grant：目录分区允许owner自身及本task已声明、经通用继承过滤的根，最终resolver仍核父当前工作区和工具上界，宽manager workspace不是权限。已GRANTED必须同request/run实际grant尚有效且task未终态、工具/Skill未撤，路径/cwd在真实grant子树且无符号链接逃逸，命令、网络、预算、限制均有实际字段覆盖。请求描述、needed、risk文案不签权；A内输出名变化可在原工具权限内复用，A外不覆盖。
+
+非空命令须真实grant保有完整request_scope.requested_commands及原exe门；缺任一字段不借旧申请文字补权。这里仅保守比较完整命令，不解释参数变化是否扩权。新目录/命令两类灵活授权的完整合同属于后继设计；命令许可不能顺带变任意目录写权。现resolver `_mark_grant`因目录补全写工具、`_persist_grants`丢command/network/budget/constraints/request_scope已交独立P0片；本候选不忽略缺字段来制造通过。
+
+只匹配并返回既有GRANTED，不新增grant、授权状态、队列或配置；lifecycle与结构化结果只消费同canonical规则。过期、撤销、无真实grant即使完全同signature也要重新OPEN。父通知、耐久wake、GRANTED后实际模型/工具继续及失败终态未在此片改动；主代理不能靠自然语言声称“已批准”替代原状态。普通/群、foreign私密、宿主凭据、网络及工具禁用边界保持，真实日志/服务/配置零读写。
+
+本片明确保留原OPEN去重协议：原signature按exe名归一命令，故OPEN中的参数变化可能合入旧pending；本轮不引入新命令执行合同。已GRANTED分支才执行本片完整实际grant覆盖。试收紧OPEN曾触发原工具/parsed同申请去重回归失败，原失败留档后按scope撤回；不能宣称两类授权UX或参数智能授权已实现。
+
+独审边界修正：授权时已冻结的绝对canonical grant根，其当前resolve必须仍等于原持久路径，根或祖先被换成symlink即拒绝旧覆盖，不保存inode或改绑旧许可。墙外目录的声明root与每个target都复用原继承过滤，避免合法宽工作根恰包住agent home时穿透foreign/config；原owner内分区保持。初候选及三条独审失败保留，不能把原聚焦通过等同完整安全验收。
+
+有效工具不能只读task.allowed_tools声明：GRANTED覆盖复用原_runner_allowed_tools纯投影，canonical effective_permissions.disabled_tools撤销普通/MCP工具时拒旧许可。未改变runner执行或新增工具门，enabled正例保留。

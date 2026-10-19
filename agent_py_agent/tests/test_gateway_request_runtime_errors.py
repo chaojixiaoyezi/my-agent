@@ -49,6 +49,29 @@ def test_request_rejection_does_not_guess_credentials_or_deny_prior_work():
         assert "密钥" not in text
 
 
+@pytest.mark.parametrize("code, explanation", [
+    ("SUBAGENT_INPUT_MEDIA_DISABLED", "未开启向子代理转交图片/视频"),
+    ("SUBAGENT_INPUT_MEDIA_INVALID", "转交引用无效或无法读取"),
+])
+def test_media_delegation_rejection_has_safe_actionable_public_error(code, explanation):
+    from agent_py_agent.agent.agent_core.orchestration.input_media_refs import (
+        SubagentInputMediaError,
+    )
+    from agent_py_agent.agent.gateway_parts.http_handlers import _public_result
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
+    from agent_py_agent.agent.runtime_errors import fallback_error_code
+
+    error = SubagentInputMediaError(code, {"requested_media_refs": ["f" * 64], "path": "/synthetic/private/input.png"})
+    assert fallback_error_code(error) == code
+    notice = gateway_client_error_message(code)
+    public = _public_result({"ok": False, "status": "failed", "error_code": code,
+                             "error": str(error), "user_error": notice})
+    assert public["error_code"] == code and public["error"] == notice
+    assert explanation in public["error"] and "未创建子代理" in public["error"]
+    assert "任务处理失败" not in public["error"] and "去掉" not in public["error"]
+    assert "f" * 64 not in public["error"] and "/synthetic/private" not in public["error"]
+
+
 @pytest.mark.parametrize("status", [400, 401, 422, 0, True, "400", 900])
 def test_rejection_projection_exposes_only_typed_http_status(status):
     from agent_py_agent.agent.backends.errors import ProviderRequestRejectedError

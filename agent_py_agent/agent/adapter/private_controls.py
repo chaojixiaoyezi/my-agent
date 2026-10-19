@@ -1,5 +1,5 @@
 # LLM: SDK actor/真实卡身份和表单只交认证宿主回环；群凭据逐次查成员，私人控制仍核对个人锁，表单不进聊天队列。
-# 模块用途: 固定回环认证HTTP拒绝跳转； 处理私人工具审批卡，返回原卡片的就地回执；需要首设/解锁时复用原密码卡。
+# 模块用途: 固定回环认证HTTP拒绝跳转；私人卡表单错误只回固定提示并保原卡，未知错误码类型走原固定失败，成功就地更新。
 from __future__ import annotations
 
 import base64
@@ -151,8 +151,8 @@ def _current_group_member(adapter, chat_id, actor):
     raise GroupMembershipError("IM_GROUP_MEMBERSHIP_BUDGET_EXCEEDED")
 
 
-# LLM: 展示和日志共用固定码/阶段白名单，不复制HTTP正文、异常、表单或未知错误值；不得放宽私人锁。
-# 函数用途: 返回可追踪的失败回执并记录安全错误码，让真实点击与宿主故障可以对应。
+# LLM: 展示和日志共用固定码/阶段白名单，form只说明原卡可改正；不复制HTTP正文、异常、表单或未知值，不放宽私人锁。
+# 函数用途: 返回固定失败提示并记录安全码；表单错误提示改正原卡，不复制HTTP正文或替换待填卡。
 def _control_failure_toast(code, stage):
     messages = {
         "IM_CONTROL_CREDENTIAL_UNAVAILABLE": "宿主认证凭据不可用，请检查适配器与Gateway使用同一数据根和配置。",
@@ -163,6 +163,7 @@ def _control_failure_toast(code, stage):
         "IM_CONTROL_RESPONSE_INVALID": "Gateway回调响应格式无效，请检查端口与运行版本。",
         "IM_INTERACTION_HOST_UNAVAILABLE": "宿主暂时无法处理卡片，请检查存储和服务状态后重试。",
         "IM_INTERACTION_INVALID": "这张卡片的身份、版本或原会话已失效，请重新打开原控制入口。",
+        "CREDENTIAL_FORM_INVALID": "表单内容无效，请检查必填项和目标链接后重新提交原卡，请勿在聊天中发送密码。",
         "IM_INTERACTION_IN_PROGRESS": "原卡正在准备私人表单，请稍后重试；也可以取消原卡。",
         "IM_INTERACTION_DISPATCH_UNCONFIRMED": "私人表单投递结果尚未确认，请关闭原卡并重新打开模型入口。",
         "IM_INTERACTION_ALREADY_HANDLED": "这张卡片已处理，取消没有撤销或修改已完成的操作。",
@@ -170,14 +171,14 @@ def _control_failure_toast(code, stage):
     }
     if code not in messages:
         code = "IM_CONTROL_PREPARATION_FAILED"
-    if stage not in {"prepare", "credential", "http", "transport", "response", "interaction", "execution"}:
+    if stage not in {"prepare", "credential", "http", "transport", "response", "interaction", "execution", "form"}:
         stage = "interaction"
     _log_control_stage(stage, reason_code=code)
     return {"toast": {"type": "error", "content": messages.get(code, "卡片请求未完成，请检查宿主回调配置。") + f"（{code}/{stage}）"}}
 
 
-# LLM: 端口/数据根/配置token由原宿主传入；请求只发一次且不跟随跳转，超时未知不可自动重放写操作。
-# 函数用途: 发送认证卡片回调并将HTTP/凭据/格式故障转成安全固定事实，不返回底层异常或秘密。
+# LLM: 端口/数据根/token来自原宿主；HTTP仅字符串固定code映射stage，未知类型走原固定失败，不信任任意message/字段，超时未知不自动重放。
+# 函数用途: 发送一次认证卡片回调且不跟随跳转；HTTP错误码先查类型再查白名单，不返回任意正文或秘密，表单错误保原卡可编辑。
 def _submit_control_request(adapter, actor, body):
     try:
         credentials = GatewayClientCredentials(Path(adapter.my_agent_home), getattr(adapter, "_gateway_auth_token", ""))
@@ -196,8 +197,11 @@ def _submit_control_request(adapter, actor, body):
         code = "IM_CONTROL_HTTP_AUTH_REJECTED" if exc.code in {401, 403} else "IM_CONTROL_HTTP_ROUTE_MISSING" if exc.code == 404 else "IM_CONTROL_TRANSPORT_UNAVAILABLE"
         try:
             result = json.loads(exc.read(65537).decode("utf-8"))
-            if isinstance(result, dict) and result.get("error_code") in {"IM_INTERACTION_INVALID", "LOCAL_CREDENTIAL_REQUIRED", "IM_INTERACTION_HOST_UNAVAILABLE"}:
-                return {"ok": False, "error_code": result["error_code"], "error_stage": "interaction" if result["error_code"] == "IM_INTERACTION_INVALID" else "credential" if result["error_code"] == "LOCAL_CREDENTIAL_REQUIRED" else "execution"}
+            provider_code = result.get('error_code') if isinstance(result, dict) else None
+            stages = {'IM_INTERACTION_INVALID':'interaction', 'LOCAL_CREDENTIAL_REQUIRED':'credential',
+                      'IM_INTERACTION_HOST_UNAVAILABLE':'execution', 'CREDENTIAL_FORM_INVALID':'form'}
+            if isinstance(provider_code, str) and provider_code in stages:
+                return {'ok':False, 'error_code':provider_code, 'error_stage':stages[provider_code]}
         except (OSError, UnicodeError, ValueError):
             pass
         finally:

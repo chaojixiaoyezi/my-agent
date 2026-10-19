@@ -43,8 +43,8 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 return
             self._consume_event(event)
 
-    # LLM: 调用方持显示锁；长思考只沿用 writer 已保存的引用与缺失事实，不把裁后预览再次归档成全文。
-    # 函数用途: 分派公开事件并透传完整原文引用；未知种类保持忽略，不处理控制或动态工具参数。
+    # LLM: 调用方持锁；typed final仅同ID活动候选全文更新，原canonical唯一freeze；不能提前stable或改普通后台/child策略。
+    # 函数用途: 分派公开过程与完整候选，最终canonical正文接替同一活动段并随原快照恢复。
     def _consume_event(self, event: dict[str, object]) -> None:
         kind = event.get("kind")
         text_writer = {"thinking_delta": self.write_thinking_delta, "model_delta": self.write_model}.get(kind)
@@ -74,6 +74,13 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
         if kind == "assistant_commentary":
             self._model_text = str(event.get("text") or "")
             self._flush_model_commentary()
+            return
+        if kind == "assistant_final" and isinstance(event.get("model_source"), dict):
+            if not self._candidate_id:
+                self.write_model(str(event.get("text") or ""))
+            self._model_text = str(event.get("text") or "")
+            self._event("assistant_delta", "updated", self._candidate_id,
+                        {"text": self._model_text, "replace_text": True})
             return
         if kind == "tool_input_reset":
             self._clear_tool_input_progress()

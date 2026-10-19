@@ -385,6 +385,24 @@
 
 ## Tree
 
+```text
+|-- agent_py_agent/agent/backends/assistant_messages.py # 原正文块的逐消息来源、阶段及整段安全投影
+|-- agent_py_agent/agent/agent_core/model/visible_response.py # 在原采纳边界向既有出口提交同次模型正文
+|-- agent_py_agent/tests/test_assistant_message_phases.py # 阶段、跨协议历史与整段净化回归
+|-- agent_py_agent/tests/test_committed_model_messages.py # 同次已采纳正文的CLI/TUI/Gateway显示回归
+|-- agent_py_agent/tests/test_pending_input_public_boundary.py # 原输入失效上限不发布旧正文
+|-- agent_py_agent/tests/test_progress_message_revision.py # 真实输出索引与活动候选唯一终态冻结
+`-- agent_py_agent/tests/test_credential_card_validation.py # 两种执行入口的表单改正、原权限门与固定回执
+```
+
+```text
+`-- agent_py_agent/tests/test_mcp_approval_sink_reuse.py # 实际canonical范围的会话批准复用与失源负例
+```
+
+```text
+`-- agent_py_agent/tests/test_admin_full_access_mcp.py # 真实注册表下管理员普通MCP确认与普通/群/子代理负例
+```
+
 人格写入和正式冷候选入口的长期验证：
 
 ```text
@@ -742,6 +760,15 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 
 ## 关键文件说明
 
+- `agent_py_agent/agent/backends/assistant_messages.py`：逐消息来源保存在原正文块，阶段不授执行或续跑权；完整当前正文和整段净化上下文成立时才分段显示。Responses收集器的真实索引只在内部归一化，不伪造缺失索引或泄入其它协议。
+- `agent_py_agent/agent/agent_core/model/visible_response.py`：只在原工具开始或最终采纳边界核同次sealed调用，再提交可见正文；生成中增量、被拒正文或历史块不能成为公开回复。
+- `test_assistant_message_phases.py`、`test_committed_model_messages.py`、`test_pending_input_public_boundary.py`、`test_progress_message_revision.py`：分别维护阶段/历史、显示采纳、失效上限、真实索引和TUI活动到canonical唯一冻结合同。
+- `test_credential_card_validation.py`：使用临时owner、原签名/输入账及实际回环核Count0/正Count和adapter；表单错误可改正，原身份/期限/重放门、密文保存和单Wake不变。
+
+- `agent_py_agent/tests/test_mcp_approval_sink_reuse.py`：验证原Agent有界缓存跨sink复用同范围approved_session，保新attempt/权限/插件与失源边界。
+
+- `agent_py_agent/tests/test_admin_full_access_mcp.py`：离线供应商验证当前管理员Full Access仅免普通MCP确认，不扩大子代理、插件或宿主执行权限。
+
 - `agent_py_agent/tests/test_curator_dispatch_eligibility.py`：区分待确认候选资格与新策展工作，验证完整字节稳定和原pending/lease/输入/日终入口。
 
 - `persona_storage_io`只选择原本地IO策略，固定close不发行恢复权；原人格/版本/配额仍各守唯一算法。`coordinator_owner_management`复用原factory command/source/receipt，ExitStack维持原借用、global scope和seal至父complete/event结束，不增加第二调度或授权账。
@@ -905,6 +932,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/agent/agent_core/model/response_provenance.py  # 原模型调用出口签发与核对响应来源
 |-- agent_py_agent/agent/agent_core/tool_loop/background_public_receipt.py  # 显式后台完成协议、内部结果与公开内容分离
 |-- agent_py_agent/agent/conversation/im_delegation.py  # 宿主真实派工、等待和主模型汇总
+|-- agent_py_agent/agent/conversation/im_delegation_delivery.py # 原claim/runner/owner与主sender单发话只读判据
 |-- agent_py_agent/agent/scheduler/execution_policy.py  # 新 IM 计划隔离线程策略
 |-- agent_py_agent/agent/settings/im_task_preferences.py  # 每发送者当日偏好及到期解析
 |-- agent_py_agent/agent/gateway_parts/im_dispatch_policy.py  # 入站回执冻结执行方式
@@ -912,6 +940,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/agent/gateway_parts/delegation_control.py  # 当日委派显式命令
 |-- agent_py_agent/tests/test_im_delegation_ingress.py  # 真实 HTTP 排队、重送和关闭快照
 |-- agent_py_agent/tests/test_im_delegation_runtime.py  # 原创建服务、G1、恢复及收口组合
+|-- agent_py_agent/tests/test_im_delegation_single_speaker.py # 完整离线worker/child/主sender、原W回报与终态重放
 |-- agent_py_agent/tests/test_im_delegation_preferences.py  # 零点、DST、重启和发送者隔离
 |-- agent_py_agent/tests/test_im_execution_threads.py  # 调度、线程和投递来源隔离
 |-- agent_py_agent/tests/test_public_capability_packages.py  # 公共发现、授权、升级与撤销
@@ -3560,3 +3589,14 @@ owner_resources只计算配置路径不签权；owner_services仅持原三对象
 原native安全诊断回归入口 `agent_py_agent/tests/test_native_transport_diagnostic.py` 覆盖固定字段、异常隐私与原ACK/责任边界，不替代真实三代或发行门。
 
 `test_gateway_closed_generation_progress.py`只用临时格式fixture及原心跳/归档writer验证旧闭包消费；固定expected/covered/committed不变、本代责任自然推进不授当前终态或关闭权，新增行为须最终双OS新包pyc实跑。
+
+
+委派交付原来源核验统一读`conversation/im_delegation_delivery.py`；单发话及欠账恢复回归见`tests/test_im_delegation_single_speaker.py`。无新持久目录或schema。
+
+会话审批缓存回归补充：`test_mcp_approval_sink_reuse.py`同时检查真实主claim的缺失/错配运行来源和原后台publisher、前台writer正例；只fake审批运输。
+
+能力申请回归入口：`agent_py_agent/tests/test_capability_grant_reuse_501.py`使用真实临时canonical任务/grant，覆盖显式工作根、同授权复用和完整结构权限负例。
+
+能力授权覆盖回归补充：同入口检查持久grant根/祖先symlink漂移，以及已声明宽祖先根包含home时每个foreign/宿主目标的独立拒绝。
+
+同回归入口额外核普通/MCP工具canonical禁用后不能复用旧GRANTED，enabled原正例保留。

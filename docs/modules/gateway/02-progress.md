@@ -1,3 +1,15 @@
+## 2026-10-18 凭据表单错误与原卡重试（已实现，发行验收另记）
+
+Count0和正Count继续共用原凭据保存叶。只有原授权后的本次表单/新链接错误使用
+类型化固定码`CREDENTIAL_FORM_INVALID/form`，原HTTP400和adapter固定toast贯通；
+原403身份/期限/代次/任务拒绝及503宿主故障保持。表单错误保留pending原卡，改正后
+仅一个Wake；终态重放不重新解析fields。账号text、其它凭据password且无预填，内部
+控件name避开业务字段。离线独立反例、两链和adapter原回环验证不等于真实租户验收，
+见[凭据合同](../../design/IM_CREDENTIAL_COLLECTION.md)。
+
+538后继先核HTTP错误码为字符串，再查固定码白名单；未知类型保持原固定HTTP失败，
+不抛出成员查询TypeError，不复制任意错误码或message。533原冻结与失败记录保留。
+
 ## 2026-10-18 旧闭包消费末检分界（409候选）
 
 原心跳及canonical先提交后退役processing可使两次完整库存不同；仅消费叶按固定旧范围immutable、本代集合外责任逐存在侧原current分类处理。旧history/角色/P4/身份/freshP2和本代P1/P3/drain/封存不变；402失败不追补，新组件与原生命周期focused不代实际/发行。详见角色生命周期设计本轮记录。
@@ -2215,3 +2227,33 @@ Dispatcher 和 unhandled terminalizer 对原 native 异常链只做保债防御�
 ## 正Count原角色关闭范围候选（127，待复核）
 
 沿原generation唯一历史路径显式v2保存完整原C/W关闭范围，先原producer完整collector/W waitstatus/native close，再历史raw CAS/读回，最后原C marker raw CAS。新C保原角色/旧责任完整绑定，非空P1仍fresh P2；旧v1/旧93不追补，Count0/B4拒绝不变。两份新增运行测试支持同包pyc，真实native/同源stop后再起仍由root串行后置。合同见[生命周期关闭](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+
+## 2026-10-18 首次远端控制owner物化（487仓外候选）
+
+cold/ready正Count普通远端HTTP控制统一使用原固定HTTP producer；ready保存并末核同一Agent、home与控制面。首次raw CAS确认为缺失且可发表dispatch后，在原controller owner门/lease/Root内复用native规范owner初始化，再发表原回执，W只读资源合同不变。全部既存状态、GET、重放与拒目标不补建；Count0、本机、管理/model、私卡和legacy非HTTP入口保持。离线回归仅fake HTTP工作片/鉴权，无真实服务或模型；原486失败保留，待独审、根集成及同源真实验收，不能签发行。
+
+## 2026-10-18 管理员 Full Access 普通 MCP 候选
+
+原工具审批与owner权限读口接线保留单一owner事实；当次effective墙、access/path和主代理范围共同确认后，只免普通MCP逐次always。已做离线真实registry/代理回归，尚待非作者与根组合。旧pending、父能力申请与线上日志拒绝不在该完成范围，见[权限合同](../../design/OWNER_HOME_PERMISSION_REVIEW.md#2026-10-18-管理员-full-access-的普通-mcp-确认修复候选)。
+
+
+### 委派主sender单发话489（本地候选）
+
+真实host派工后主session仅model final受理；后台/child内部汇总由原SessionTask终态guidance+同key wake回主sender自身模型最终通知，主忙只沿同key原ACK/consumed判据，不抢claim。原claimed scope下终态欠账只补元数据，失败保原wake；原SendMessage目录和末门收紧origin，普通scheduler canonical run不因旧work标记被静默。未启动真实服务/模型，边界和配方见IM_TASK_EXECUTION_POLICY与489工件。
+
+## 2026-10-18 会话审批缓存单点候选
+
+同canonical child/currentattempt的approved_session不随展示sink重建丢失；复用原Agent级有界缓存并核完整权限scope，不加期限或新队列。旧attempt及强制插件门不复用；main无当前typed Params或无原后台control/writer绑定时不缓存，原claim JSON只能核对。独审旧缺参红保留，修正版待非作者与根组合。见[权限合同](../../design/OWNER_HOME_PERMISSION_REVIEW.md#2026-10-18-会话批准跨展示-sink-复用候选)。
+
+
+## 2026-10-18 已采纳模型过程正文提交（515 P2，本地候选）
+
+原 `BufferedChunkStreamWriter` 增加同次已验响应提交，修复 text+tool_use 已生成却仅私藏候选的问题，流式/非流式共用；调用来源、终态全文、逐 message phase 由原 response 运输，显示失败不重试工具或采样。公开过程和终答复用原事件/净化，terminal 更正同候选段；敏感上下文跨消息时保守整段净化并标记投影降级，原 native 不改。`request_history` 在原空公开回复错误前保存 canonical partial 与已提交过程，仍抛 `USER_REPLY_UNAVAILABLE`。原 final_only、IM 档位、取消、预算及主 sender 单发话合同保持。离线用例见新增 `test_committed_model_messages.py` 和 `test_assistant_message_phases.py`，真实组合验收待根执行。
+
+输入失效上限补充：原上限分支保留原失效计数和待输入记录，清空旧公开text/工具调用并以既有failed/error收口，原blocks仍可审计但不能复活。空公开回复已确定抛原USER_REPLY_UNAVAILABLE时，partial carrier显式携host error使原空终态追加门可保存；provider completed/stop和native原文不改，不生成替代回复。新测试 `test_pending_input_public_boundary.py` 已在准确pre-P2源码红、候选绿；诊断旧测试改用真实GatewayAskRunContext/会话库，原精确诊断断言全保留并增加partial断言。
+
+
+### 515 P2 REV02：前台第二窗口保活动候选
+
+前台typed assistant_final与本地TUI同规，仅以原assistant_delta的active-only replace_text更新完整候选，等待原canonical final唯一freeze。真实writer→共享显示→observer→canonical合成反例先证提前stable红，修复不加stable更正例外，不改普通后台/child或IM发言策略。

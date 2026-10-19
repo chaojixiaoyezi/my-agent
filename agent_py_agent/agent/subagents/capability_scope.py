@@ -1,8 +1,8 @@
 
-# LLM: Capability routing may narrow a child request but never widen the manager's owner wall
+# LLM: Capability routing may narrow a child request but never widen the manager's owner wall beyond already-persisted explicit work roots.
 # or the direct parent's effective tool snapshot. Keep path/tool authority decisions here so
 # explicit, semantic, and lifecycle grant paths consume one structured rule instead of prose.
-# 模块用途: 汇总能力申请范围，并保证任何子代理授权都不能越过当前用户目录或直属父级工具上限。
+# 模块用途: 汇总能力申请范围，仅消费当前用户或既有声明工作根，并保持直属父级工具上限。
 from __future__ import annotations
 
 import shlex
@@ -333,9 +333,8 @@ def _direct_parent_available_tools(
     return available, source, error_code
 
 
-# LLM: owner_scope_root is a hard multi-tenant upper bound. Relative capability paths resolve from
-# the exact child task workspace, never from the Gateway process cwd.
-# 函数用途: 把申请目录分成用户自己家内可继续判断的路径和越过用户边界的拒绝路径。
+# LLM: 墙外只消费本task既有工作根；根和每个墙外target都过原继承过滤，宽祖先根不得穿透foreign/宿主。owner内原语义不变，manager宽workspace不是授权，路径沿准确child cwd。
+# 函数用途: 区分用户自有目录、既有声明工作根与越界目标，防止宽祖先根带入foreign或宿主路径。
 def partition_capability_paths_by_owner(
     manager: Any,
     task: SubAgentTask,
@@ -351,11 +350,19 @@ def partition_capability_paths_by_owner(
         owner_root = Path(owner_text).expanduser().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
         return CapabilityPathScopeDecision((), cleaned, owner_text)
+    from ..path_access_policy import inheritable_declared_work_roots
+
+    declared = tuple(Path(root) for root in inheritable_declared_work_roots(
+        getattr(task, "allowed_write_roots", ()), owner_home=owner_root))
     allowed: list[str] = []
     rejected: list[str] = []
     for raw in cleaned:
         target = resolve_capability_scope_path(manager, task, raw)
-        bucket = allowed if target is not None and _path_is_within(target, owner_root) else rejected
+        own = target is not None and _path_is_within(target, owner_root)
+        external = (target is not None
+            and bool(inheritable_declared_work_roots([str(target)], owner_home=owner_root))
+            and any(_path_is_within(target, root) for root in declared))
+        bucket = allowed if own or external else rejected
         bucket.append(raw)
     return CapabilityPathScopeDecision(tuple(allowed), tuple(rejected), str(owner_root))
 

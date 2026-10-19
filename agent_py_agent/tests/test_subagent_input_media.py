@@ -28,6 +28,7 @@ from agent_py_agent.agent.agent_core.orchestration.input_media_refs import (
     bind_subagent_input_media,
 )
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.runtime.loop_support import _with_input_media_manifest
 from agent_py_agent.agent.backends.tool_ir import RuntimeFactsTurn, UserTurn
 from agent_py_agent.agent.capability.config import CapabilityConfig
@@ -73,9 +74,10 @@ def _import_image(agent: SimpleAgent, tmp_path: Path, name: str = "chart.png", d
     return import_input_media(source, input_media_root(agent))
 
 
-# 函数用途: 模拟主会话本轮的运行参数：Gateway 已把附件引用写进 task_attributes.input_media。
+# LLM: 普通本地媒体合同使用真实 typed 运行参数；不伪造 conversation_thread_id、HostActor 或 IM 执行权。
+# 函数用途: 给本地父代理当前回合绑定已验证附件；保持 default 非会话域，不代替 Gateway 授权测试。
 def _bind_current_turn(agent: SimpleAgent, refs: list[dict], **extra) -> None:
-    agent._current_run_params = SimpleNamespace(task_attributes={"input_media": list(refs), **extra})
+    agent._current_run_params = RunParams(task_attributes={"input_media": list(refs), **extra})
 
 
 def test_manifest_lists_media_refs_without_paths():

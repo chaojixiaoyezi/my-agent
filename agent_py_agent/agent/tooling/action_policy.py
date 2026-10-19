@@ -94,7 +94,7 @@ class ActionDecision:
 
 
 # LLM: approval_mode 与 require_model_visibility 只能由宿主组装；显式管理可调用隐藏工具，其他权限不变，修改时同步 ToolExecutorRequest。
-# 类用途: 保存本次工具裁决所需的调用、工作目录、安全边界和用户审批选择。
+# 类用途: 保存本次工具裁决所需的调用、工作目录、安全边界与宿主当次管理员全盘投影；模型不能提供授权。
 @dataclass(frozen=True)
 class ActionPolicyRequest:
     call: ToolCall
@@ -110,6 +110,7 @@ class ActionPolicyRequest:
     required_action: object | None = None
     now: float = 0.0
     require_model_visibility: bool = True
+    admin_full_access: bool = False
 
 
 # LLM: 先执行客观安全门，再考虑可选确认；返回结构化事实供唯一执行器消费，不在这里运行 handler。
@@ -439,7 +440,7 @@ def _task_boundary_decision(
     return None
 
 
-# LLM: auto 只免去当前权限内的可选确认；always 的宿主 effect 声明只排除明确只读变体，命中的本人确认不可绕过。
+# LLM: auto 只免去当前权限内的可选确认；宿主当次已核管理员 Full Access 仅免普通 MCP 的逐工具 always，插件及其他 always 仍本人确认。身份、路径、网络和插件 deny 不在此免除。
 # 第二个返回值只在精确批准 binding 匹配时为 True（用户确实批准过这次调用），沙箱内自动执行、策略不要求、auto 模式都为 False；执行器据此决定批准后是否再复核。
 # 函数用途: 结合用户审批选择、工具策略和精确批准记录决定是否需要弹窗，不把自主模式变成 Full Access。
 def _approval_decision(
@@ -468,7 +469,7 @@ def _approval_decision(
     )
     if not required:
         return None, False
-    if request.approval_mode == "auto" and mode != "always":
+    if request.approval_mode == "auto" and (mode != "always" or _admin_full_access_mcp(request, runtime)):
         return None, False
     boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
     approved = boundary.get("approved_actions")
@@ -498,6 +499,14 @@ def _approval_decision(
         evidence={"gate": decision.to_dict()},
         approval_kind="tool_action",
     ), False
+
+
+# LLM: 仅承认宿主 bool 的准确 True 与原普通 MCP 实现；插件继承类、名字前缀和描述均不能签权。前置硬门及后续 PluginToolGate 仍执行。
+# 函数用途: 判断本次是否可免普通 MCP 的逐次确认，不扩展任何路径或工具可见范围。
+def _admin_full_access_mcp(request: ActionPolicyRequest, runtime: ToolRuntime) -> bool:
+    from .mcp_registration import MCPProxyTool
+
+    return request.admin_full_access is True and type(runtime.handler) is MCPProxyTool
 
 
 def _guardrail_decision(

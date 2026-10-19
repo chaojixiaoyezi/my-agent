@@ -1164,7 +1164,7 @@ def _route_ask_to_active_turn(
 # 函数用途: 接收明确控制命令，让 IM 重送同一消息时只读原回执，不重复插件副作用。
 # LLM: 现有控制仍沿main认证/持久operation与F4活HTTP封印；内部B2服务缺失固定503，不从版本头、config或Home伪造实例。
 # 函数用途: 接收原正式控制，未接通的内部全局写协议不得落入普通命令。
-# LLM: cold管理只接唯一真实HTTP source重放，fresh领域未接仍503且不写假受理；普通运输/模型/ready/Count0及global-write拒绝保持。
+# LLM: cold管理仍接原真实HTTP source；普通远端cold/ready同固定HTTP运输后交W，本机/模型/Count0及global-write拒绝保持。
 def handle_control(handler, server) -> None:
     if require_trusted_source(handler):
         return
@@ -1233,10 +1233,10 @@ def handle_control(handler, server) -> None:
             status = 202 if observed.state != 'completed' or payload.get('delivery_status') == 'unknown' else 200
             handler._send_json(status, payload)
         return
-    if (server.agent is None and coordinator_model_server(server) and command.kind != 'model'
+    if (coordinator_model_server(server) and command.kind != 'model'
             and not is_owner_management_control(command.kind)):
-        _handle_coordinator_control_operation(handler, server, body)
-        return
+        if _handle_coordinator_control_operation(handler, server, body) is not False:
+            return
     if server.agent is None or model_coordinator:
         from .model_metadata_transaction import model_metadata_supported
         if not model_metadata_supported(handler, body):
@@ -1257,8 +1257,8 @@ def handle_control(handler, server) -> None:
     )
 
 
-# LLM: 只服务cold None正count非model POST；typed源错误在HTTP最外层映射，receipt层同对象上抛，不伪记completed/unknown或影响ready/Count0。
-# 函数用途: 发布一次冷控制原回执并返回原状态投影，业务仍由原Worker执行。
+# LLM: 正Count普通远端POST统一消费原HTTP源；typed错误原映射，ready本机owner返回False续原本机入口，cold本机仍waiting，Count0不调用。
+# 函数用途: 冷或ready C都经同一首次发表门初始化远端owner并发布原回执，业务仍由Worker执行。
 def _handle_coordinator_control_operation(handler, server, body):
     from .coordinator_control_transport import execute_coordinator_control
     try:
@@ -1282,6 +1282,8 @@ def _handle_coordinator_control_operation(handler, server, body):
         handler._send_json(503, {'error': 'failed to persist control operation', 'error_code': type(error).__name__})
         return
     if receipt is None:
+        if server.agent is not None:
+            return False
         handler._send_json(503, {'ok': False, 'status': 'waiting',
             'error_code': 'COORDINATOR_BUSINESS_NOT_READY', 'terminal': False})
         return

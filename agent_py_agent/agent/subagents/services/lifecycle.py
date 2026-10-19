@@ -1,3 +1,4 @@
+# LLM: 请求去重消费本事务最新canonical grants，已授权同权限范围不因描述变化重复排队；无grant或过期仍OPEN。
 # LLM: 生命周期修改复用原状态协议；启动标记在本服务按 launch/attempt 条件写入，CLI 不反向导入领域实现。
 # 模块用途: 组织子代理授权、状态与执行轮操作，集中保存准确启动记录，保留各写入口的原事务顺序。
 from __future__ import annotations
@@ -145,7 +146,7 @@ class SubAgentLifecycleService:
         self.manager = manager
 
     # LLM: Equivalent capability requests are deduplicated against the latest canonical state in
-    # one mutate transaction; request prose never acts as lifecycle authority beyond identity data.
+    # one mutate transaction; GRANTED only reuses the actual canonical grant in full scope, never prose.
     # 相对范围先沿工具可信 cwd 冻结为绝对路径，再比较幂等身份；不按 Gateway 进程目录猜授权目标。
     # 函数用途: 原子登记准确路径的能力申请，复用已经存在的等价申请避免重复排队。
     def record_capability_request(
@@ -157,14 +158,14 @@ class SubAgentLifecycleService:
 
         # LLM: Equivalence and append must observe the latest canonical request list under one
         # guard; otherwise two simultaneous tool calls can create duplicate OPEN requests.
-        # 函数用途: 在权威锁内复用等价能力申请，确实没有时才新增一条。
+        # 函数用途: 在权威锁内复用等价OPEN或同task真实grant完整覆盖的GRANTED申请，确实没有时才新增一条。
         def _request_reducer(task: SubAgentTask) -> None:
             from dataclasses import replace
 
             frozen = replace(params,
                 path_scope=normalized_capability_paths(self.manager, task, params.path_scope),
                 cwd_scope=normalized_capability_paths(self.manager, task, params.cwd_scope))
-            request = find_equivalent_capability_request(task.capability_requests, frozen)
+            request = find_equivalent_capability_request(task.capability_requests, frozen, task=task)
             if request is None:
                 request = build_capability_request(run_id, frozen)
                 task.capability_requests.append(request)

@@ -1,3 +1,32 @@
+## 2026-10-18 主会话执行中沟通（实现已集成，发行回执另记）
+
+- P1：唯一 `assistant_progress_updates_enabled` 默认开启，只追加普通主会话稳定 system 的软指导；沿原隔离 scope 排除子代理与辅助表达。关闭只退出指导，不改变阶段、工具、预算或终态，不增加定时采样、线程或第二进度账。配置按原 Gateway 重启／CLI 下次启动生效。
+- P0：独立发布版本 CLI 实测中，五个主模型回合的前四回合已有可见说明与工具调用，但界面只展示工具状态及最终回答。已确认原本地 writer 把模型 delta 保留至最终提交；并非仅模型不作说明。真实失败与配置作用范围分别留证，不能把 P1 定向绿当显示问题修好。
+- P2：已实现并独立复核原采纳边界的同次正文提交、逐消息阶段、跨协议历史与Compact。原独审发现的真实索引丢失、延后展示绕过和过早冻结在REV02修正：缺索引保持未知，typed final保持活动候选，由原canonical/summary唯一固定，stable不可改。沿现有IR／回调／投影，不由自然语言或commentary-only强制新增调用；拒绝内容不得因重投影复活。
+- 模块入口：[会话上下文](docs/design/CONVERSATION_CONTEXT_DESIGN.md)、[供应商协议](docs/design/PROVIDER_WIRE_CONTRACT.md)、[参数中心](docs/design/PARAMETER_CENTER.md)。定向、真实CLI/TUI、严格门与发行结果由同源回执分别记录。
+
+## 2026-10-18 凭据卡表单校验（实现已集成，真实客户端另验）
+
+本次表单/新链接错误使用固定类型码和可改正原卡的回执；身份、owner、群成员、代次、期限和任务校验先行，错误不消费输入、不保存秘密、不发Wake。两种执行入口共用原保存叶，adapter只映射固定码，不回显任意HTTP内容或异常，未知错误码类型沿原固定失败。账号text、其它凭据password、无预填，内部控件name避开业务字段；不使用未文档化属性关闭密码眼睛。机制复现不等于截图当次具体根因，自动预填未证。见[凭据合同](docs/design/IM_CREDENTIAL_COLLECTION.md)。
+
+## 2026-10-18 管理员全盘诊断入口（审计中，不新增root模式）
+
+用户希望管理员在线检查自身、其他用户和系统问题，无需反复拖日志。优先复用full-access、原日志/进程读门及`audit_records`跨owner结构化审计，保持普通/群身份隔离，不增加含义重叠的root模式。已有跨用户审计显式开关、主代理限定、只读与无正文投影需逐项核验；不能把通用文件全盘模式等同系统sudo或假称所有诊断已可用。见[权限模块](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#管理员在线诊断入口审计中)。
+
+## 2026-10-18 子代理目录与命令授权口径（设计核对中）
+
+用户要求减少重复申请并及时处理父级授权：目录授权覆盖父代理原权限内的指定目录读写及正常运行；命令授权覆盖指定目录中的批准命令，不附赠任意目录写权。参数变化不一律重新授权，查询词、时间窗及已授权目录内输出名等未扩大权限的变化可继续，新工具/命令/目录或额外执行动作需新授权。现有字段与执行门是否能准确表达这两种范围正在核对，不能把现存exe名称allowlist宣称为完整命令范围。复用原canonical请求、grant、事件和续跑，不另建授权账，不因描述措辞或接收对象重建丢许可，也不为缓存命中率放松owner/凭据/工具及网络上界。见[权限模块](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#子代理授权粒度与及时续跑设计核对中)。
+
+## 2026-10-18 图片委派拒绝的公开解释（503本地候选）
+
+状态：修复原结构码的公开文案，不改变媒体权限、转交开关、图片refs或路由。关闭子代理媒体转交和无效引用分别明确解释，本次不创建子代理；不建议去图执行。离线已定位原通用错误缺口，真实飞书图片入站及provider含图仍需另验，不能以文案修复宣称识图已修好。见[媒体合同](docs/design/FEISHU_NATIVE_IMAGES.md#后台与子代理)。
+
+## 2026-10-18 首次远端控制的C侧owner物化（487仓外候选，待独审/集成）
+
+真实新home的首次群控制曾在Worker原只读构造报`WorkerSharedResourceError/resource_missing`；原失败及unknown责任保留。普通业务请求已有C-native物化，控制首次发表缺少对应步骤。候选将cold/ready正Count普通远端HTTP控制统一到原固定HTTP producer，冻结ready Agent同一对象/根/控制面，在原source、controller owner门、Root及receipt首次raw CAS内复用原native规范owner物化叶，再发表原prepared+dispatch；不创建业务Agent、模型或管理员，不让W初始化。
+
+GET、相同消息重放、全部既存回执状态和拒绝目标不补建owner；原Count0、本机owner、管理/model、私卡及legacy非HTTP转发合同保持。该物化只保存规范目录和种子，不授跨owner、业务工具或配置写权。离线组件回放与定向门不能替代真实新home/双OS包/生命周期或发行验收；根集成后另验。
+
 ## 2026-10-18 stop测试的准备与行为期限分界（428仓外候选，未合）
 
 状态：仅测试文件helper与文档候选，未改产品、33发行helpers或canonical。解决原5秒总child截止混入冷导入而把所有超时叫worker泄漏的问题；425两原参数2F保留，import-only约4.371秒不等于原full归因或通过。
@@ -8657,3 +8686,32 @@ G0后继发布阻断：普通control先append、目标后转idle时，原idle/�
 ## 2026-10-17 BG queue/pending统一08（未发布候选，待独立复核）
 
 状态：按07设计与根授权实施3prod窄片。显式正count/message_id共原纯input ID公式和input T；Count0/缺消息ID不增IO。原唯一queue叶子统一canonical去向，prepare load/_seen后created=False固定恢复既存pending；未物化owner零mkdir/M，不能凭None/年龄签权。覆盖原append-first后idle窗口与部分提交重放，详见[活动输入合同](docs/design/COORDINATOR_ACTIVE_INPUT_TRANSPORT.md#2026-10-17-同key-writer与queuepending统一08未发布候选)。旧rolling写者缺新T合同仍需原退出/撤权/域收口证据，未知即发布约束，不新增authority。
+
+## 2026-10-18 管理员 Full Access 普通 MCP 候选
+
+状态：独立候选，待根集成与非作者复核；未发布/部署。原 owner 权限读投影与当前有效主代理路径上界共同确认 full，只免普通 MCP 的逐工具 always；插件及其它 always、普通/群、child 隔离和执行硬门保持。旧 pending、父 capability grant 与线上日志拒绝仍待独立定位，不以本片宣称全部修复。见[权限评估](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#2026-10-18-管理员-full-access-的普通-mcp-确认修复候选)。
+
+
+- 2026-10-18：用户明确/delegate由canonical主sender统一受理及最终发话。489本地候选复用原SessionTask/guidance/WakeStore与真实scope，后台/child只交结果；不新增队列/schema，终态半提交只补元数据。原quota等待不伪用户回复，真实Count2/发布待root单点验收。详见[IM任务合同](docs/design/IM_TASK_EXECUTION_POLICY.md)。
+
+
+## 2026-10-18 能力授权范围运输与父级唤醒（已实现窄修；命令参数规则待设计）
+
+显式父级裁决复用 `scoped_grant_params` 和原 grant 原子写入，保留命令、网络、输出预算、约束及申请快照，合并直属父级 authority。目录与工具独立：命令-only 的 cwd/path 不附赠写工具；明确 filesystem 目录-only 只保留子代理当前有效写工具与父当前工具上界交集，不能恢复被撤销或原本没有的工具。父级未决申请沿原 wake 的 `urgent` 值，不新增通知账或队列；该修复没有证明真实处理时延。
+
+待设计：目录 A 的授权只扩已获工具的路径范围；参数灵活的命令授权须在原 grant 的结构化约束中表达可变参数角色与固定执行动作，并接原解析器/末门。当前 `command_allowlist` 只取命令名，不足以表示该合同；本轮未实现“同命令任意参数自动放行”。查询词、时间窗及 A 内输出名等是否不扩权应按结构规则判断，新增命令/工具/目录/执行动作仍需授权。网络仅完整运输既有字段，未新增出口设计或做安全测试。
+
+
+504后继窄修：显式裁决的目录候选保持 write_roots→path_scope→cwd_scope 优先序，合法 cwd-only 范围不再被空值覆盖；所有 cwd 同样经过原 owner/父目录安全门。新增合法/越界 cwd-only 两例，命令路径仍不附赠写工具。
+
+## 2026-10-18 会话批准不随展示 sink 丢失候选
+
+状态：独立单生产候选，待非作者及根集成。原Agent有界缓存复用approved_session，scope每次沿canonical执行与有效权限核验；main必须有当前typed Params与原宿主执行来源，缺参/错配关闭缓存，原claim JSON不能独立签权；sink不再保存第二set。旧attempt、插件强制门、取消/拒绝/过期及失源不复用，目录/命令合同和admin诊断不外推。见[权限合同](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#2026-10-18-会话批准跨展示-sink-复用候选)。
+
+## 2026-10-18 子代理既有工作根与授权覆盖复用候选
+
+状态：独立4生产候选，待非作者复核和根集成。原owner路径分区消费本task已声明工作根，仍经统一foreign/宿主过滤与父级上界；已GRANTED申请只有同canonical有效grant完整覆盖才复用，不按描述文字重排。缺命令完整request_scope、限制、网络或预算不能靠旧申请补回。目录/命令参数灵活授权及resolver字段漏失、父wake/继续执行仍另片，不新增状态或配置。详见[权限合同](docs/design/OWNER_HOME_PERMISSION_REVIEW.md#2026-10-18-能力申请目录上界与既有授权复用候选)。
+
+501后继独审修正：原持久canonical grant根发生symlink漂移不再覆盖；墙外声明目录的每个target再次复用原继承过滤，不能因祖先根包住home穿透foreign/宿主。原冻结及失败保留，修正版待复核，未新增路径/权限状态。
+
+501实际工具修正：GRANTED覆盖消费原runner纯工具reader，canonical disabled撤销普通/MCP工具后不再复用旧许可；runner执行与OPEN协议不改。

@@ -21,6 +21,36 @@ from agent_py_agent.agent.settings import AgentConfig
 
 
 class TestPromptBuilderInit:
+    @pytest.mark.parametrize("override", [None, "当前会话专用指令"])
+    @pytest.mark.parametrize("scope", ["default", "conversation"])
+    def test_progress_guidance_is_optional_in_the_stable_main_prompt(self, tmp_path, override, scope):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+        request = dict(user_prompt="检查现有实现并修好问题", memories=[], context_scope=scope,
+                       system_prompt_override=override, tools=ToolSections(native_tool_use=True))
+        enabled = prompt_cache_layout(builder.build(**request))
+
+        builder.config.assistant_progress_updates_enabled = False
+        disabled = prompt_cache_layout(builder.build(**request))
+
+        assert enabled is not None and disabled is not None
+        assert "执行中沟通：" in enabled.stable_prefix
+        assert "执行中沟通：" not in disabled.stable_prefix
+        assert enabled.stable_user_prefix == disabled.stable_user_prefix
+        assert "执行中沟通：" not in enabled.volatile_suffix
+        assert "普通短问答或单次小读取不强制过程说明" in enabled.stable_prefix
+        assert "用户要求安静或少说时尊重其要求" in enabled.stable_prefix
+        assert "有正常模型采样机会时" in enabled.stable_prefix
+        assert "不为汇报额外请求模型" in enabled.stable_prefix
+        assert "同一轮继续调用相应工具" in enabled.stable_prefix
+        if override:
+            assert override in enabled.stable_prefix and override in disabled.stable_prefix
+
+    @pytest.mark.parametrize("scope", ["task_local", "isolated", "control_plane"])
+    def test_progress_guidance_does_not_change_task_local_speech_scope(self, tmp_path, scope):
+        builder = PromptBuilder(AgentConfig(prompt_files=[]), tmp_path)
+        rendered = builder.build("检查自己的分工", [], context_scope=scope)
+        assert "执行中沟通：" not in rendered
+
     def test_init_with_valid_config_and_root(self):
         config = AgentConfig()
         root = Path("/tmp/test")

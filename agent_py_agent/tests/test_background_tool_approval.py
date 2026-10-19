@@ -27,22 +27,30 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 
 
-def test_child_session_cache_requires_new_decision_after_attempt_changes(background, monkeypatch):
+def test_child_session_cache_requires_new_decision_after_attempt_changes(tmp_path, monkeypatch):
     from agent_py_agent.agent.conversation import agent_tool_approval as bridge
-    from agent_py_agent.agent.conversation.tool_approval_scope import ToolApprovalScope
+    from agent_py_agent.agent.conversation.background_transcript import BackgroundTranscriptSink
+    from agent_py_agent.tests.test_gateway_agent_control_service import (
+        _bound_agent_tree,
+        _child_approval_request,
+    )
 
-    ctx = background
-    current = [ToolApprovalScope(ctx.task_id, ctx.task_id, ctx.thread.thread_id, "subagent", "孩子", True,
-                                 execution_attempt_id="execution-a")]
+    agent, _, child = _bound_agent_tree(tmp_path)
+    request = _child_approval_request(child.id)
+    sink = BackgroundTranscriptSink(agent, thread_id=child.agent_thread_id, task_id=child.id,
+                                    event_writer=lambda *_args, **_kwargs: None)
+    sink.approval_interactive = True
     published = []
-    monkeypatch.setattr(bridge, "_request_scope", lambda *_args: current[0])
-    monkeypatch.setattr(bridge, "publish_agent_tool_approval", lambda *_args, **_kwargs: published.append(current[0]) or object())
+    monkeypatch.setattr(bridge, "publish_agent_tool_approval", lambda *_args, **_kwargs: published.append(child.id) or object())
     monkeypatch.setattr(bridge, "wait_for_agent_tool_approval", lambda *_args, **_kwargs:
-        ToolApprovalDecision(ctx.request.permission_id, "approved_session" if len(published) == 1 else "denied"))
-    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "approved_session"
-    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "approved"
-    current[0] = replace(current[0], execution_attempt_id="execution-b")
-    assert ctx.sink.request_permission(ctx.request.to_dict())["decision"] == "denied"
+        ToolApprovalDecision(request.permission_id, "approved_session" if len(published) == 1 else "denied"))
+    assert sink.request_permission(request.to_dict())["decision"] == "approved_session"
+    assert sink.request_permission(request.to_dict())["decision"] == "approved"
+    repo = agent.subagents.runtime_db
+    row = repo.agent_run_for_run_id(child.id)
+    assert repo.settle_agent_attempt(agent_run_id=row["agent_run_id"], attempt_id=child.runner_active_attempt_id)["settled"]
+    agent.subagents.lifecycle.prepare_runner_attempt(child.id)
+    assert sink.request_permission(request.to_dict())["decision"] == "denied"
     assert len(published) == 2
 
 
@@ -55,7 +63,7 @@ def background(tmp_path):
     execute_approval_mode_operation(agent.home_paths, "set", "ask")
     store = agent.conversation_store
     thread = store.threads.get_or_create({
-        "canonical_user_id": "local-agent", "channel": "chat",
+        "canonical_user_id": "local-agent", "channel": "chat", "owner_id": agent.home_paths.owner_id,
         "channel_conversation_id": "session-main", "channel_user_id": "local-agent",
     })
     task_id = "root-work"
@@ -80,14 +88,33 @@ def background(tmp_path):
         assert not ctx.waiter.is_alive()
 
 
+# LLM: 使用生产后台 control、core binder 和原 claim publisher；真实 RuntimeDB 决定运行代次，不从测试 JSON 或展示 sink 授权。
+# 函数用途: 为需要会话复用的后台主代理测试建立完整原宿主来源，普通单次审批夹具保持缺参反例。
+def _bind_background_authority(ctx):
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
+    from agent_py_agent.agent.conversation.background_execution import _BackgroundRunControl
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+    )
+
+    control = _BackgroundRunControl("main-source", None)
+    with bind_claim_execution(ClaimExecutionBinding(ctx.store.claims, ctx.thread.thread_id, ctx.claim["claim_id"], "")):
+        params = _bind_main_agent_authority(ctx.agent, RunParams(request_id="main-source", run_id="main-core",
+            task_id=ctx.task_id, task_attributes={"conversation_thread_id": ctx.thread.thread_id,
+                "conversation_task_id": ctx.task_id}, conversation_task_binding_callback=control))
+    ctx.agent._current_run_params = params
+    return params
+
+
 # LLM: 接收能力通过真实 notices 入口续租；等待观察 canonical pending，不以 UI 文案代替发布成功。
-# 函数用途: 在受控线程挂起原审批调用，返回服务端投影给 TUI 的精确请求。
+# 函数用途: 在测试线程用原prompt scope挂宿主已绑定参数，返回TUI精确请求，不伪造实际运行身份。
 def _pending_request(ctx):
     assert callable(getattr(ctx.sink, "request_permission", None))
     read_gateway_client_notices(ctx.agent, scope=ctx.scope, after=0, interactive_approvals=True)
-    ctx.waiter = threading.Thread(target=lambda: ctx.response.update(
-        ctx.sink.request_permission(ctx.request.to_dict(), cancellation_token=ctx.token)
-    ))
+    params = getattr(ctx.agent, "_current_run_params", None)
+    ctx.waiter = threading.Thread(target=lambda: _wait_background_approval(ctx, params))
     ctx.waiter.start()
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
@@ -96,6 +123,15 @@ def _pending_request(ctx):
             return rows
         time.sleep(.01)
     raise AssertionError("后台审批未发布到会话账本")
+
+
+# LLM: 只用于测试线程，参数必须来自调用方当前已绑定宿主；生产仍在自己的原模型/工具线程读取权限，不增加跨线程授权入口。
+# 函数用途: 通过原current_prompt_scope保留真实运行来源，审批结束后恢复测试线程临时状态。
+def _wait_background_approval(ctx, params):
+    from agent_py_agent.agent.agent_core.runtime_mixin import current_prompt_scope
+
+    with current_prompt_scope(ctx.agent, "离线审批回归", params=params):
+        ctx.response.update(ctx.sink.request_permission(ctx.request.to_dict(), cancellation_token=ctx.token))
 
 
 @pytest.mark.parametrize("decision", ["approved", "denied"])
@@ -129,7 +165,7 @@ def test_paused_goal_does_not_cancel_current_approval(background):
 def test_other_conversation_cannot_approve_background_call(background):
     ctx = background
     _pending_request(ctx)
-    ctx.store.threads.get_or_create({"canonical_user_id": "local-agent", "channel": "chat",
+    ctx.store.threads.get_or_create({"canonical_user_id": "local-agent", "channel": "chat", "owner_id": ctx.agent.home_paths.owner_id,
                                     "channel_conversation_id": "session-other", "channel_user_id": "local-agent"})
     with pytest.raises(AgentControlError):
         resolve_agent_permission(ctx.agent, scope=GatewayControlScope("local-agent", "chat", "session-other"),
@@ -218,6 +254,7 @@ def test_canonical_child_read_error_cannot_fall_back_to_main_claim(background, m
 
 def test_main_session_approval_cannot_cross_claim_or_cancellation(background):
     ctx = background
+    _bind_background_authority(ctx)
     _pending_request(ctx)
     resolve_agent_permission(ctx.agent, scope=ctx.scope, run_id=ctx.task_id, request=ctx.request.to_dict(),
                              decision=ToolApprovalDecision(ctx.request.permission_id, "approved_session").to_dict())

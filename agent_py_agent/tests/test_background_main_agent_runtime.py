@@ -7639,6 +7639,8 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
     from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
 
     store = ConversationStore(tmp_path / "conversations")
+    policy_agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path="memory.jsonl"), tmp_path)
+    policy_agent.conversation_store = store
     thread = store.threads.get_or_create(
         {
             "canonical_user_id": "user-1",
@@ -7659,8 +7661,10 @@ def test_due_policy_backs_off_on_no_progress_rounds_and_recovers(tmp_path) -> No
         }
     )
 
+    # LLM: 普通进度策略只读同一真实store确认非委派；只替身运行报告，不伪造TaskLink、委派来源或执行身份。
+    # 类用途: 用可控物质进度计数验证退避，agent保留原调度准入所需的规范事实源。
     class _FakeRuntime:
-        agent = None
+        agent = policy_agent
 
         def __init__(self) -> None:
             self.tool_success_count = 0
