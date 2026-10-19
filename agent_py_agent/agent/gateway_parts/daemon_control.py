@@ -1,8 +1,10 @@
-
+# LLM: PID发现只沿原记录来源观测；身份不可核验不清理、不冒充未运行，启动调用仍由原固定码阻断；同步readiness/启动与daemon回归。
+# 模块用途: 管理原PID记录、后台化、锁与停止请求；本模块不从展示或未知身份签发同代控制权。
 from __future__ import annotations
 
 """Daemon control: background fork, PID files, graceful shutdown, and scoped locks."""
 
+import errno
 import json
 import os
 import signal
@@ -11,16 +13,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ..common.heartbeat import _start_fingerprint, start_time_relation
 from ..runtime_errors import runtime_error_report
 from .daemon_metadata import (
     _build_pid_record,
+    _darwin_kernel_birth_format,
     _flocked_sidecar,
     _get_process_start_time,
+    _process_start_observation,
     _read_json_file,
     _scope_hash,
     _utc_now_iso,
     _write_json_file,
     build_process_identity,
+    process_host_id,
 )
 from .process_control import is_pid_alive as _is_pid_alive
 from .process_control import wait_for_pid_exit as _wait_for_pid_exit
@@ -33,6 +39,8 @@ from .scoped_locks import (
     release_all_scoped_locks,
     release_scoped_lock,
 )
+
+_PID_IDENTITY_UNVERIFIABLE = "GATEWAY_PID_IDENTITY_UNVERIFIABLE"
 
 # Exit code to signal service manager should restart (长期助手: EX_TEMPFAIL = 75)
 GATEWAY_SERVICE_RESTART_EXIT_CODE = 75
@@ -142,10 +150,17 @@ def _pid_record_load_error(pid_path: Path, exc: BaseException) -> dict:
     return report
 
 
+# LLM: 启动/setup沿此兼容发现口；仅本模块新身份不可核验码阻止把未知当空槽，旧JSON读取错误行为不改；不清理或授权停止。
+# 函数用途: 返回已发现的活服务PID；明确foreign-host或OS探测未知时拒绝重复启动，提示保留原记录排查。
 def get_running_pid(pid_path: Path, *, cleanup_stale: bool = True) -> int | None:
-    return get_running_pid_report(pid_path, cleanup_stale=cleanup_stale).pid
+    report = get_running_pid_report(pid_path, cleanup_stale=cleanup_stale)
+    if report.load_error is not None and report.load_error.get("error_code") == _PID_IDENTITY_UNVERIFIABLE:
+        raise RuntimeError("无法核验原 Gateway 进程身份，已保留 PID 记录；请检查同主机权限后重试，勿重复启动。")
+    return report.pid
 
 
+# LLM: reader复用producer原出生来源；POSIX仅ESRCH或同来源同格式different可清理，foreign-host与OS未知保记录并报告固定码；legacy缺birth/Win兼容不授同代控制。
+# 函数用途: 安全读取活Gateway发现事实；确认活但出生不可读仍保原PID投影，未知liveness阻止启动且不让TUI误ready。
 def get_running_pid_report(pid_path: Path, *, cleanup_stale: bool = True) -> RunningPidReport:
     record_report = read_pid_record_report(pid_path)
     if record_report.load_error is not None:
@@ -156,23 +171,46 @@ def get_running_pid_report(pid_path: Path, *, cleanup_stale: bool = True) -> Run
         return RunningPidReport(None)
 
     pid = _pid_from_record(record)
-    if pid is None:
+    if pid is None or pid <= 0:
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
         return RunningPidReport(None)
 
-    # while macOS/Linux keep the POSIX liveness path.
-    if not _is_pid_alive(pid):
-        _cleanup_stale_pid_file(pid_path, cleanup_stale)
-        return RunningPidReport(None)
+    unknown = "foreign_host" if record.get("host_id") not in (None, process_host_id()) else ""
+    if not unknown and not _is_pid_alive(pid):
+        if os.name == "nt":
+            # Windows仍沿原OpenProcess/GetExitCodeProcess；不能用os.kill(pid,0)模拟只读探测。
+            _cleanup_stale_pid_file(pid_path, cleanup_stale)
+            return RunningPidReport(None)
+        try:
+            os.kill(pid, 0)
+        except OSError as error:
+            if error.errno == errno.ESRCH:
+                _cleanup_stale_pid_file(pid_path, cleanup_stale)
+                return RunningPidReport(None)
+            unknown = "liveness_unverifiable"
+    if unknown:
+        return RunningPidReport(None, {
+            "context": "gateway.pid_identity.read", "error_code": _PID_IDENTITY_UNVERIFIABLE, "reason": unknown,
+        })
 
-    # Check start_time to detect PID reuse
     recorded_start = record.get("start_time")
-    current_start = _get_process_start_time(pid)
-    if recorded_start is not None and current_start is not None and current_start != recorded_start:
-        # PID was reused by another process
+    current_start = _process_start_observation(pid, recorded_start)
+    try:
+        relation = start_time_relation(recorded_start, current_start)
+    except OverflowError:
+        relation = "unverifiable"
+    # different已保证两侧同kind且非空；只给text追加来源格式证明，数字沿原唯一正规化规则。
+    if relation == "different" and all(_start_fingerprint(value)[0] == "text" for value in (recorded_start, current_start)):
+        kernel_pair = _darwin_kernel_birth_format(recorded_start) and _darwin_kernel_birth_format(current_start)
+        if not kernel_pair:
+            try:
+                for value in (recorded_start, current_start):
+                    time.strptime(value, "%a %b %d %H:%M:%S %Y")
+            except (ValueError, OverflowError):
+                relation = "unverifiable"
+    if relation == "different":
         _cleanup_stale_pid_file(pid_path, cleanup_stale)
         return RunningPidReport(None)
-
     return RunningPidReport(pid)
 
 

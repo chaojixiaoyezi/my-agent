@@ -3533,3 +3533,11 @@ http_handlers的两个入口保各自认证、原语法和正文权威，合法�
 规范控制回执仍唯一保存prepared、claimed、executing、completed、terminal_unknown。`gateway_control_operation_status_payload`是HTTP/TUI/adapter唯一结果投影：仅完整非空result、completed且非steer，并且原result严格没有`delivery_status`键时，补`accepted`表示同步控制回执可回送；不改持久结果，不推导命令ok或provider已sent。显式空、None、坏值、unknown和steer未声明状态一律不补。无活动任务stop的原DTO显式空会被既有to_dict省略，归入这个已验证同步结果合同。
 
 adapter提交验证、watcher选择、typed结果schema与投递WAIT均接受原claimed阶段；prepared/claimed/executing只等待同operation。completed仍必须通过原accepted/rejected与非空正文发送门，provider成功后才写schema8 sent；权限、原owner/actor/目标绑定、幂等、unknown语义不变。
+
+## 2026-10-19 PID发现按原出生来源读取（候选）
+
+`daemon_control.get_running_pid_report`复用原`daemon_metadata._process_start_observation(pid, recorded_start)`，先选同来源，再沿既有`heartbeat.start_time_relation`区分same/different/unverifiable；仅text/text的different追加双方canonical kernel或原PS格式可解析证明，number沿原唯一`_start_fingerprint`正规化，不另复制数值规则。Darwin正count的kernel冒号指纹不能和PS日期、heartbeat点号互换。仅确证同来源different或POSIX ESRCH可清旧PID；已确认活但缺/不可读birth保留原发现PID，Win原OpenProcess兼容保持，不把发现投影当同代stop/identity许可。
+
+显式foreign host及POSIX权限/IO等未知保留原记录，report返回None及固定`GATEWAY_PID_IDENTITY_UNVERIFIABLE`；原`get_running_pid`只对该新增结构码拒绝启动，避免caller将未知当空槽。旧bad JSON/read_error返回与强stop/身份门不改。start继承原exist_ok目录准备，但三启动caller在此拒绝后不spawn、不write_pid、不产生业务效果；不声明start零mkdir。
+
+本片只修共享PID消费者，不手补pid、不改readiness/UI/状态/配置/模型或控制协议。离线76新普通节点覆盖真实写者到readiness、原平台/未知/复用及启动边界，并验证text同格式证明和原number kind不同处理；实际服务、整源、双平台包与发行须根重绑新commit另验，662原失败不改绿。

@@ -498,6 +498,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_curator_heartbeat_error_origin.py # 原心跳异常来源、复制拒绝与只读诊断
 |-- agent_py_agent/tests/test_gateway_heartbeat_request_unknown.py # 原请求心跳停止未结的保守出口
 |-- agent_py_agent/tests/test_gateway_background_process_identity.py # 内核出生身份与权限错误不判死
+|-- agent_py_agent/tests/test_gateway_pid_record_identity.py # PID发现同来源出生及未知不清理/不重启回归
 |-- agent_py_agent/tests/test_gateway_learning_discovery.py # 原registry自主维护与迟到FIFO隔离
 |-- agent_py_agent/tests/test_runner_thread_start_boundary.py # 子代理真实Thread ACK异常、原来源及未结P3
 |-- agent_py_agent/tests/test_gateway_coordinator_loops.py # 冷C元数据循环和心跳原lease末核
@@ -770,6 +771,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `agent_py_agent/tests/test_gateway_pid_record_identity.py`：共享PID发现者的producer/readiness/启动caller运行合同；fake OS与临时文件不替代真实服务验收。
 
 - `agent_py_agent/agent/gateway_parts/native_diagnostic_projection.py`：只验证原safe producer的有限schema与公开literal，不读文件、不授权限，返回六项固定诊断字段。
 - `agent_py_agent/tests/test_gateway_safe_native_diagnostics.py`、`test_admin_self_gateway_diagnostics.py`：分别验证有界无正文投影和完整HomePaths／当前main attempt／claim／ToolExecutor链；新增普通回归须双平台包内实际执行。

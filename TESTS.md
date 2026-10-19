@@ -19527,3 +19527,7 @@ test_gateway_ask_control_parity.py通过既有临时HTTP/G1/C与原model/card/ow
 ### 最终控制回执补丁的根验收范围
 
 根focused使用83个完整测试文件：本次59个实际消费者、原42源码专用节点所在完整文件及最近活动图标／角色快照／接单表达／包夹具等集成文件的去重并集，并运行五项原严格检查；最终全仓另完整执行，覆盖原387文件清单及其余仓库测试。原source-only/fixture/native/formal分类不变，不能用源码通过代替包内实际运行。新增39普通节点追加到原6856运行义务，最终6895；包选择由914追加一个完整文件为915。旧失败现场、夹具错误和非普通结果保留，最终结果以同源实际记录为准，本文不预先签署通过。
+
+## 2026-10-19 Gateway PID读取器来源回归（候选）
+
+新增`agent_py_agent/tests/test_gateway_pid_record_identity.py`共76普通运行节点，无平台skip/source-only。最终同字节新文件在准确B643 daemon_control前像52F24P，候选76P；四个核心managed Darwin反例覆盖readonly/default cleanup和thin/managed reader。中间36/64节点版本与QA错误独立保留，不覆盖失败。未知文本/canonical kernel/locale矩阵及number str/int/float same/different/cleanup保原kind覆盖齐备。全为临时文件/fake OS，真实write_pid_record、统一readiness与三启动caller仍执行；Count0旧来源、缺birth/Win、同源复用/ESRCH、权限/IO未知、foreign host及旧读错误精确断言。原start前置exist_ok mkdir保留，只承诺拒绝后零spawn/write_pid/业务效果。直接消费者完整文件与静态门另存精确XML/阶段账，片通过不授整源/包/actual/release；两OS新包必须实际普通call passed，不能移source-only。

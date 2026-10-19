@@ -8758,3 +8758,7 @@ G0后继发布阻断：普通control先append、目标后转idle时，原idle/�
 真实飞书验收中，控制操作已完成而结果省略投递态，导致正确的通道外发门将其隔离。复用唯一 `gateway_control_operation_status_payload`：仅已验证 completed、非 steer、非空且未声明该键的同步结果明确 `accepted`；它表示服务器有确定回执，不依赖业务 `ok`、不表示 provider sent。显式空值、unknown、坏值与 steer 原样受原门限制。既有 claimed 同步到 adapter 校验、watcher 分类与等待集合，不新增状态、权限或投递旁路。
 
 作者与非作者功能回归、旧代码反例及原消费者已核；早先真实失败保持失败，修正版真实链路、最终源码全仓、安装包及本机部署分别验收，不能互相替代。详见[网关进展](docs/modules/gateway/02-progress.md)与[网关结构](docs/modules/gateway/04-structure.md)。
+
+## 2026-10-19 Gateway PID出生来源一致性（候选，待独审/根集成）
+
+共享PID读取器必须按原producer来源读回出生事实，未知不能当死亡清理，也不能让启动者把明确身份未知当空槽。只复用原selector/三态和RunningPidReport.load_error；不新建身份账或状态。Count0/legacy发现兼容、strong stop/owner权限不变。详见[Gateway结构合同](docs/modules/gateway/04-structure.md#2026-10-19-pid发现按原出生来源读取候选)。76新ordinary须两OS新包pyc实际执行，非source-only；662真实失败保留，未确认该文件实际删除时点。

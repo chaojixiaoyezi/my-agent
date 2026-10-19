@@ -2314,3 +2314,11 @@ Feishu普通控制实际从`/ask`进入，原分支绕过`/control`已有的C先
 585普通远端首次owner链已接回，但model/agents/memory专用控制仍在/ask冷态waiting。588只抽取原handle_control合法解析后的分派，让/ask沿自己原goal/prompt进入相同C模型元数据、冷规则/记忆管理和普通远端运输；ready管理仍沿原活ingress。model_metadata_supported按真实/ask路径读原goal优先prompt，仅原view/select/set_default可用，client-only/vector不扩大。原G1、source/work/lease/Root、原owner和T/CAS不变，不重读正文或改handler，不增权限/配置/状态。
 
 原6真实HTTP对照在585为3P3F（/ask全部503），新候选6P。585自增special冷503预期在588明确迁移；非法语法、Count0及原585普通远端/身份400仍保。新普通节点与完整受影响闭包、原失败和前后SHA由588工件冻结，真实飞书及最终发行仍待根同源验收。
+
+## 2026-10-19 PID发现按原出生来源读取（候选）
+
+`daemon_control.get_running_pid_report`复用原`daemon_metadata._process_start_observation(pid, recorded_start)`，先选同来源，再沿既有`heartbeat.start_time_relation`区分same/different/unverifiable；仅text/text的different追加双方canonical kernel或原PS格式可解析证明，number沿原唯一`_start_fingerprint`正规化，不另复制数值规则。Darwin正count的kernel冒号指纹不能和PS日期、heartbeat点号互换。仅确证同来源different或POSIX ESRCH可清旧PID；已确认活但缺/不可读birth保留原发现PID，Win原OpenProcess兼容保持，不把发现投影当同代stop/identity许可。
+
+显式foreign host及POSIX权限/IO等未知保留原记录，report返回None及固定`GATEWAY_PID_IDENTITY_UNVERIFIABLE`；原`get_running_pid`只对该新增结构码拒绝启动，避免caller将未知当空槽。旧bad JSON/read_error返回与强stop/身份门不改。start继承原exist_ok目录准备，但三启动caller在此拒绝后不spawn、不write_pid、不产生业务效果；不声明start零mkdir。
+
+本片只修共享PID消费者，不手补pid、不改readiness/UI/状态/配置/模型或控制协议。离线76新普通节点覆盖真实写者到readiness、原平台/未知/复用及启动边界，并验证text同格式证明和原number kind不同处理；实际服务、整源、双平台包与发行须根重绑新commit另验，662原失败不改绿。
