@@ -1,3 +1,25 @@
+## 2026-10-19 后继完整运行与真实 CLI 的准确结果
+
+568 冻结源的完整运行实际为 38,526 普通通过、1 失败、0 错误；另保留原 5 XPASS、32 xfail、89 skip。失败是 TUI 测试 helper 未恢复输出资源，原全仓日志与 XML 保留；后继 helper 修复及定向通过不改写这次全仓结果。三个原上下文压缩内存阈值节点均通过，未提高阈值。
+
+586 官方 MiniMax-M2.7 的一次普通 CLI 任务实际显示了六次模型中途说明，并继续执行真实工具，最终回复只有一次；这是候选源的沟通观察。模型自行改为忽略所有非数字金额，未完整满足原“坏数据报告行号”需求，因此业务仍为部分完成，不算最终发行验收，也不为 CSV 样例增加专项规则。584 的真实飞书连接成功，但首条控制因新 owner 目录未物化失败，业务需求未发送；保留失败现场，修复控制主链路后以新隔离环境另验。
+
+## 2026-10-19 管理员自身Gateway诊断与原IM审批状态勘误（587候选）
+
+本轮只用568规范普通副本、合成日志、完整HomePaths、真实RuntimeDB main/current attempt、原running claim、ToolExecutor及真实本机Shell，不读实际日志或凭据，不启Gateway、网络或模型。权限原状12节点通过：自身owner_logs文件可读，托管服务原日志继续拒读，gateway_status可返回安全统计；普通／群无该工具，凭据和foreign原边界不放宽。原4完整文件与该12节点合194通过只证明既有权限可用，不能据此宣称在线诊断需求完成。
+
+随后确认原safe native JSON不被诊断计入、资源缺失机器字段被省略。准确原源及同正式测试51节点为33失败／18通过；候选同51全部通过，原红保留。新安全reader只消费当前生命周期原64KiB尾读，每行4KiB上限、严格schema拒绝未知字段／值／重复键／非有限数，最多公开8条固定机器记录，不返ID／hash／owner／路径／正文。资源字段仅来自原固定26项目录枚举与owner_home，原logger拒绝literal集合原样共用，不增加重试、权限或日志账。
+
+最终新增58个普通节点：保原12完整工具回归，补名称／中文日志发现、真实管理工具对native错误的公开回执，覆盖原全部阶段、exact错误分类、未知／恶意形状、有界尾读、跨生命周期、原空receive poll静默。需纳入双平台包内实际运行，不能划source-only或加skip。原5完整依赖文件（Gateway状态／运行错误、owner审批、宿主文件保护、native producer）与新2文件共287普通通过；准确最终源哈希、XML和命令以本片冻结证据为准，不相加多次回归数字。
+
+当前gateway_status仍为local/main管理员主代理专属；全局native观察不证明具体owner归属或C未执行，具体用户的请求事实仍走audit_records原scope及显式跨owner许可。最终真实服务、用户现场原权限原因、全仓、包和发布均另验。仅IM审批旧“待实施”段落按已有私人卡／无TUI等待／精确scope决定和实际HTTP组件回归勘误，不改其它设计；真实IM仍须另验。
+
+## 2026-10-19 TUI 测试输出资源生命周期
+
+568完整全仓运行曾在 `test_plain_local_candidate_waits_commit_and_keeps_full_security_context` 失败；旧全仓现场保留，不把后继定向绿改写成旧全仓通过。隔离副本按原 external-material TUI 节点→原 plain 节点复现1通过／1失败：TUI helper退出后遗留原同一全局sink，后续公开投影正文送入已退出界面，stdout仅有工具行；原秘密防护断言未改。
+
+`test_tui_decision_menu.running` 只在测试层恢复进入前的输出sink，保留原Application退出和等待异常；嵌套上下文恢复外层资源。新 `test_tui_decision_menu_sink_lifecycle.py` 9个普通运行节点覆盖无原sink、有原sink、嵌套、工厂／setup／正文／exit／await异常，不加skip、xfail或source-only豁免。原两节点及新9节点定向通过；helper所属文件、5个直接复用文件、原公开投影文件及新增文件均完整执行，准确节点与结果由本次冻结XML登记。产品源码、公开投影断言和既有测试装饰器均保持；最终同源全仓与双平台包内普通运行义务仍须另验。
+
 ## 2026-10-18 全仓后继诊断与身份夹具适配（待最终组合）
 
 冻结542的完整pytest实际为38,121普通通过、173失败、0错误；另有5个原XPASS、32个原xfail和89个条件skip，原XML、逐阶段记录和失败现场保留。542的定向3024通过及严格门通过不能替代这次失败的全仓结果，也不能作为发行完成依据。
@@ -19449,3 +19471,18 @@ Linux 第一轮 bwrap 被 Ubuntu 24.04 AppArmor 用户命名空间限制拒绝�
 新增合成回归覆盖两个原红及闭合对照、公开正文原入口、单/双引号、转义/异种引号/真实换行、普通前后字段/内嵌与重复秘密、EOF孤立反斜杠、普通字段/空值/变量引用/source模式、完整与截断多种PEM标签；六种长输入复用原ReDoS预算和墙钟兜底。原全部断言/装饰器保持，未增加skip/xfail。独立普通副本相关九完整文件397普通通过、0失败/错误/跳过（7.43秒）：test_log_redaction、test_log_redaction_variable_refs、test_audit_redaction、test_im_path_redaction_note、test_im_credential_public_redaction、test_provider_rejection_diagnostics、test_gateway_request_runtime_errors、test_ledger_redaction_coordinator、test_ledger_redaction_review_outer。准确命令/XML与源SHA在572仓外冻结证据。
 
 本片仅合成批次脱敏候选，原失败与542冻结源保留；不代表任意秘密识别、真实流式/模型/飞书、全仓或发行通过。全部新增节点为普通双平台runtime义务，原source-only/native/formal分类不扩。根在最终同源集成后另审完整运行集合和真实验收。
+
+
+## 2026-10-19 /ask 首次新owner slash 的C物化回归（585候选）
+
+`test_gateway_multiprocess_control_forward.py`新增运行节点覆盖group/user、cold/ready、prompt/goal和`/delegate enable`、`/delegate status`、`/status`、`/schedule`：目标owner初始不存在，原C完成规范初始化后原W existing-only构造及控制实际终态通过；同消息重放不改原回执和owner文件。补失work/凭据/Root关闭/owner隔离/Agent归属/链接拒绝、body.command不能覆盖goal/prompt、model/管理/非法slash、主owner、目标拒绝及Count0原执行边界。
+
+原32场景在未改生产源上真实32F：ready为原W缺owner共享资源错误，cold为原503；完整失败账保留。新增冷失源夹具一次误将control_plane摘除却预期503，旧500响应合理，该93P1F QA失败保留；候选改为无效ready Agent来源拒绝，未改生产错误映射。所有新增行为是两OS普通runtime，不新增source-only/skip/xfail。完整消费者选择、真实XML/三阶段账、前后bytes/mode和原旧断言AST保全由585独立工件绑定；真实Feishu和最终发行另验，不从fake场景推导通过。
+
+根明确批准仅迁移`test_c_business_wait_follows_original_credential_gate[case4]`的缺ID响应优先级：/ask与/control同样返回400 CONTROL_OPERATION_ID_REQUIRED，cold/ready均不执行；原503不再把不可重试的身份缺失伪装为临时等待。原400断言、403凭据拒绝、零模型/owner/home/queue断言全保，并加强control_operations全部字节不变。原879P1F1skip记录保留；隔离PATH补回本机原Node路径后重新实跑，不改skip逻辑或添加回退。
+
+## 2026-10-19 /ask 与 /control 真实领域一致性回归（588候选）
+
+test_gateway_ask_control_parity.py通过既有临时HTTP/G1/C与原model/card/owner-management组件验证：同原身份、metadata和正文的冷首次/model、/agents show、/memory candidates在585为/control三P、/ask三F503，588共享合法分派后六P。新增冷/ready、用户/群完整完成回执、原模型选择/默认、规则预览/确认及记忆预览/取消、同ID跨入口重放/冲突、goal/prompt与command/prompt各自优先级、缺凭据/缺稳定ID零控制与业务写入、原不支持vector及client-only字段不借权。仅Feishu运输使用原fixture替身，不mock领域分派或权限/source，不启真实模型、adapter或外网。
+
+585 test_ask_special_or_invalid_slash_keeps_original_boundary八既有新节点只在588明确迁移model/管理冷503预期：改真实HTTP完成/owner/dispatch为空/重放字节不变，非法slash冷503、ready语法拒绝继续原边界。585冻结证据与所有中间QA失败保留；新测试初稿误用receipt.actor_id、误拒原default会话、把profile编号probe误当网络、群公开菜单误当私密表单，均只纠正新测试合同假设，未迁就它们修改生产。完整闭包实际结果、三阶段及来源SHA以588独立工件为准；不代表full、真实飞书或两OS包通过。

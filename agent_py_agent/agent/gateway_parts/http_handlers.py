@@ -1,4 +1,4 @@
-# LLM: cold None正count普通POST仅运输原receipt到原W；model/C管理活封印、ready/Count0和G1/global-write-v1拒绝保持，client memory仍仅recent可读。
+# LLM: /ask与/control合法控制共用唯一领域分派，模型元数据/管理/普通远端各守原HTTP来源；正文各取原词法权威，Count0及G1拒绝保持。
 # LLM: HTTP handlers preserve authenticated owner/thread boundaries and raw HTTPMessage header copies before identity checks;
 # process stream identity affects only display cursors, never model requests or authorization.
 # 公开progress只接原已确认模型过程；退休raw draft不能因再次batch净化而恢复公开资格，原chunk/native不改。
@@ -6,7 +6,7 @@
 # 控制 workspace 沿持久输入保存，共用宿主权限门；HTTP 投影不自行判定目录权限。
 # 首次受理在完整prepared摘要之前冻结owner/IM快照；已有回执重放不热读绑定，C只沿原lease和constructor配置来源。
 # 冷C历史仅复用认证owner的原只读Store与同一分页叶子；读取前后核原HTTP来源，不扩其他client或补业务Agent。
-# 模块用途: 接收 Gateway HTTP 请求并转给正式会话、控制与展示入口，统一返回结构化结果。
+# 模块用途: 接收Gateway HTTP输入；两控制入口共用C模型元数据、管理和远端分派，普通远端先由C初始化owner再转W，会话与展示保持原结构化结果。
 from __future__ import annotations
 
 from ..common.json_io import write_private_json_file_atomic_no_newline
@@ -734,10 +734,8 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
     return report
 
 
-# LLM: 原认证门之后命令沿持久控制回执；普通输入的owner/IM准备只在首次提交前，legacy写者也守原C末门，不从body授信。
-# 函数用途: 接收消息与命令，原入队前冻结真实 owner；参数错误不成为任务，提示只在成功入队后发布。
-# LLM: main认证/HostActor/media/完整摘要与receipt-first保持；隔离仅原私有队列耐久后202，不物化Agent/活插话或发布提示。
-# 函数用途: 接收同一真实用户输入，先保存原宿主事实，再明确展示可恢复的等待。
+# LLM: main认证/HostActor/media/完整摘要与receipt-first保持；合法/ask控制接共用C元数据/管理/远端分派，body.command不得覆盖goal/prompt，Count0不借C权限。
+# 函数用途: 一次读取消息或命令；控制按原词法进入正式分派，普通任务仍先保存宿主事实并展示可恢复等待，非法命令不成为业务输入。
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if require_trusted_source(handler):
         return  # 不可信来源(远程无 token)拒绝派工:已发 403(回环本机/单机放行,渠道用户经适配器可提交)
@@ -786,12 +784,12 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if task_command is None:
         command = parse_conversation_control(goal, reject_unknown_slash=True)
         if command is not None:
-            if server.agent is None:
-                waiting = _coordinator_business_wait(server)
-                handler._send_json(503 if waiting else 500,
-                                   waiting or {"error": "server control service not initialized"})
-                return
             if not command.valid:
+                if server.agent is None:
+                    waiting = _coordinator_business_wait(server)
+                    handler._send_json(503 if waiting else 500,
+                                       waiting or {'error': 'server control service not initialized'})
+                    return
                 payload = ConversationControlResult(
                     command.kind,
                     False,
@@ -800,18 +798,9 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
                 payload.update({"status": "control", "disposition": "system_command"})
                 handler._send_json(200, payload)
                 return
-            _handle_persistent_control_operation(
-                handler,
-                server,
-                command=command,
-                command_text=goal,
-                scope=_gateway_control_scope(
-                    handler,
-                    body,
-                    user_id=user_id,
-                    channel=channel,
-                ),
-            )
+            # goal优先于prompt；body.command不得覆盖/ask词法结果，原正文对象与handler路径均保持。
+            _dispatch_parsed_conversation_control(handler, server, {**body, 'command': goal},
+                                                  command, goal, user_id, channel)
             return
         request_id, client_input_digest = _http_idempotent_request_identity(
             body,
@@ -1161,11 +1150,8 @@ def _route_ask_to_active_turn(
     )
 
 
-# LLM: 插件和其它会话命令先鉴权再进入同一持久控制分派；不另开无幂等回执的插件旁路，参数归共享插件服务。
-# 函数用途: 接收明确控制命令，让 IM 重送同一消息时只读原回执，不重复插件副作用。
-# LLM: 现有控制仍沿main认证/持久operation与F4活HTTP封印；内部B2服务缺失固定503，不从版本头、config或Home伪造实例。
-# 函数用途: 接收原正式控制，未接通的内部全局写协议不得落入普通命令。
-# LLM: cold管理仍接原真实HTTP source；普通远端cold/ready同固定HTTP运输后交W，本机/模型/Count0及global-write拒绝保持。
+# LLM: /control保main认证、global-write-v1缺服务拒绝及command优先prompt；合法控制与/ask共用分派，所有写仍须原HTTP/work/owner/lease来源。
+# 函数用途: 一次读取明确控制并解析原语法，把冷C模型元数据、规则/记忆管理与远端控制交给各自原领域，重送只读同一回执。
 def handle_control(handler, server) -> None:
     if require_trusted_source(handler):
         return
@@ -1202,60 +1188,69 @@ def handle_control(handler, server) -> None:
     if not _http_conversation_id(body):
         handler._send_json(400, {"error": "conversation_id is required"})
         return
-    from .model_metadata_transaction import coordinator_model_server
-    model_coordinator = coordinator_model_server(server) and command.kind == 'model'
+    _dispatch_parsed_conversation_control(handler, server, body, command, command_text, user_id, channel)
+
+
+# LLM: 两entry各保认证/一次正文读取和自己的词法权威，本叶只选择已解析合法控制；实际source仍原HTTP path/work/owner/lease/Root，Count0不借C权限。
+# 函数用途: 为/ask和/control共用唯一领域分派，不重读JSON、不改handler/body；cold管理、model元数据和普通远端控制各走原正式入口。
+def _dispatch_parsed_conversation_control(handler, server, body, command, command_text, user_id, channel):
+    from .model_metadata_transaction import coordinator_model_server, model_metadata_supported
     from .owner_management_control import is_owner_management_control
-    if server.agent is None and coordinator_model_server(server) and is_owner_management_control(command.kind):
-        from .coordinator_owner_management import (
-            MANAGEMENT_SOURCE_ERRORS,
-            execute_coordinator_owner_management,
-        )
-        try:
-            observed = execute_coordinator_owner_management(handler, server, body)
-        except MANAGEMENT_SOURCE_ERRORS as error:
-            handler._send_json(503, {'ok': False, 'error_code': getattr(error, 'error_code', 'GLOBAL_WRITE_REJECTED')})
-            return
-        except GatewayControlOperationIdentityRequired as error:
-            handler._send_json(400, {'error': str(error), 'error_code': 'CONTROL_OPERATION_ID_REQUIRED'})
-            return
-        except GatewayControlOperationConflict as error:
-            handler._send_json(409, {'error': str(error), 'error_code': 'IDEMPOTENCY_CONFLICT'})
-            return
-        except DataCorruptionError as error:
-            handler._send_json(503, {'error': str(error), 'error_code': 'CONTROL_OPERATION_RECEIPT_CORRUPT'})
-            return
-        except (ValueError, OSError):
-            handler._send_json(503, {'ok': False, 'error_code': 'COORDINATOR_BUSINESS_NOT_READY'})
-            return
-        if observed is None:
-            handler._send_json(503, {'ok': False, 'status': 'waiting', 'error_code': 'COORDINATOR_BUSINESS_NOT_READY', 'terminal': False})
-        else:
-            payload = gateway_control_operation_status_payload(observed)
-            status = 202 if observed.state != 'completed' or payload.get('delivery_status') == 'unknown' else 200
-            handler._send_json(status, payload)
+
+    coordinator = coordinator_model_server(server)
+    if server.agent is None and not coordinator:
+        handler._send_json(500, {'error': 'server control service not initialized'})
         return
-    if (coordinator_model_server(server) and command.kind != 'model'
-            and not is_owner_management_control(command.kind)):
+    if coordinator and not _http_conversation_id(body):
+        handler._send_json(400, {'error': 'conversation_id is required'})
+        return
+    model_coordinator = coordinator and command.kind == 'model'
+    if server.agent is None and coordinator and is_owner_management_control(command.kind):
+        _handle_cold_owner_management_control(handler, server, body)
+        return
+    if coordinator and command.kind != 'model' and not is_owner_management_control(command.kind):
         if _handle_coordinator_control_operation(handler, server, body) is not False:
             return
     if server.agent is None or model_coordinator:
-        from .model_metadata_transaction import model_metadata_supported
         if not model_metadata_supported(handler, body):
-            handler._send_json(503, {"ok": False, "status": "waiting", "error_code": "COORDINATOR_BUSINESS_NOT_READY", "terminal": False})
+            handler._send_json(503, {'ok': False, 'status': 'waiting', 'error_code': 'COORDINATOR_BUSINESS_NOT_READY', 'terminal': False})
             return
-    _handle_persistent_control_operation(
-        handler,
-        server,
-        command=command,
-        command_text=str(body.get("command", body.get("prompt", "")) or ""),
-        scope=_gateway_control_scope(
-            handler,
-            body,
-            user_id=user_id,
-            channel=channel,
-        ),
-        **({"model_body": body} if model_coordinator else {}),
+    _handle_persistent_control_operation(handler, server, command=command, command_text=command_text,
+        scope=_gateway_control_scope(handler, body, user_id=user_id, channel=channel),
+        **({'model_body': body} if model_coordinator else {}))
+
+
+# LLM: 只由共用合法控制分派选择cold原管理域；实际HTTP source、G1/owner、T/CAS和错误投影原样，不构造Agent或代签来源。
+# 函数用途: 调用已实现的C规则/记忆管理并返回原回执，复用/control原错误边界。
+def _handle_cold_owner_management_control(handler, server, body):
+    from .coordinator_owner_management import (
+        MANAGEMENT_SOURCE_ERRORS,
+        execute_coordinator_owner_management,
     )
+    try:
+        observed = execute_coordinator_owner_management(handler, server, body)
+    except MANAGEMENT_SOURCE_ERRORS as error:
+        handler._send_json(503, {'ok': False, 'error_code': getattr(error, 'error_code', 'GLOBAL_WRITE_REJECTED')})
+        return
+    except GatewayControlOperationIdentityRequired as error:
+        handler._send_json(400, {'error': str(error), 'error_code': 'CONTROL_OPERATION_ID_REQUIRED'})
+        return
+    except GatewayControlOperationConflict as error:
+        handler._send_json(409, {'error': str(error), 'error_code': 'IDEMPOTENCY_CONFLICT'})
+        return
+    except DataCorruptionError as error:
+        handler._send_json(503, {'error': str(error), 'error_code': 'CONTROL_OPERATION_RECEIPT_CORRUPT'})
+        return
+    except (ValueError, OSError):
+        handler._send_json(503, {'ok': False, 'error_code': 'COORDINATOR_BUSINESS_NOT_READY'})
+        return
+    if observed is None:
+        handler._send_json(503, {'ok': False, 'status': 'waiting', 'error_code': 'COORDINATOR_BUSINESS_NOT_READY', 'terminal': False})
+    else:
+        payload = gateway_control_operation_status_payload(observed)
+        status = 202 if observed.state != 'completed' or payload.get('delivery_status') == 'unknown' else 200
+        handler._send_json(status, payload)
+    return
 
 
 # LLM: 正Count普通远端POST统一消费原HTTP源；typed错误原映射，ready本机owner返回False续原本机入口，cold本机仍waiting，Count0不调用。

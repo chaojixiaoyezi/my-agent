@@ -1,3 +1,11 @@
+## 2026-10-19 管理员在线自诊断（587候选，真实服务另验）
+
+管理员排查自身Gateway应先调用原 `gateway_status`，无需反复下载或用文件工具打开受保护的原始队列日志。当前生命周期的64KiB尾读保留，新增严格 `gateway_native_diagnostic.v1` 投影，最多返回最近8条原native阶段、操作、固定错误码及有限资源分类；记录不含正文、路径、owner、原ID或指纹。未知schema／字段／动态值和超过4KiB的行不公开，未知仍为未知，不能据未收录诊断断言无故障。`metadata_only`仍不读日志。
+
+原producer只为exact资源异常增加 `resource_missing` 与 `owner_home`、原 `_owner_directories` 固定26项对应的 `owner_directory_0`至`owner_directory_25`机器事实。其它资源名、路径、异常正文与子类不借此公开；原ACK、重试、停止、执行及权限不变。此观察能区分native阶段与owner目录缺失，不能把全局同时间错误归给某个用户或证明C未执行。具体请求归属继续用 `audit_records` 原scope及显式跨owner审计许可，不新增root模式、权限表或第二日志。
+
+原 `owner_logs_dir` 自身日志可经文件和Shell原门读取；规范Gateway日志位于受保护的 `workspace/runtime/services`，可能含多owner正文，Full Access也不开放该整目录。`gateway_status`仍只注册给原local/main管理员主代理，普通/群无该工具；管理员非full保原owner墙、宿主凭据和托管存储保护。工具原deferred目录补明确日志/native关键词，并验证原 `tool_search` 的名称及中文日志查询能发现它。合成临时Home、真实主RunParams/claim与ToolExecutor回归不是用户现场原因确证，也不代表线上真实服务验收。
+
 # 主子代理家目录权限与审批评估
 
 日期：2026-10-12。状态：评估及隔离探针完成，未修改产品代码，待实施。
@@ -91,7 +99,7 @@
 
 <a id="background-delegation-permissions-review"></a>
 
-### 6.1 自动委派后台链路与主子审批（R06/R07，待实施）
+### 6.1 自动委派后台链路与主子审批（R06/R07，历史目标；接线状态见下方勘误）
 
 基于原 [IM 自动委派策略](IM_TASK_EXECUTION_POLICY.md#4-当天自动委派) 补齐接线与验证，不新增执行模式、权限开关或另一套任务系统：
 
@@ -102,6 +110,8 @@
 5. **模式和生命周期不混淆。** 非 full-access 按有效 ask/auto 等策略执行；合法 full-access 沿原实际规则减少询问，不额外人为增加普通文件操作审批。`/delegate disable` 和零点重置只改变新任务，已受理工作仍沿原任务和权限链执行；撤权、取消、main claim/child attempt 换代及 Gateway 恢复继续重新校验，旧批准不能跨到另一轮。已发生副作用沿原操作账去重，不能为续跑重新派一份任务。
 
 这里的“主代理审批”既包含主代理对孩子能力申请的裁决，也包含主代理自身向用户申请具体操作批准；实施与验收必须分别记录，不能用其中一条通过代替另一条。
+
+2026-10-19 状态勘误：上述“待实施”是历史目标，不代表当前缺少IM工具审批入口。当前 `conversation/im_tool_approval.py` 已接原私人卡发布、`im_approval_wait_live` 无TUI等待和原scope决定；`agent_tool_approval.py` 在原pending发布后接入该入口，`gateway_parts/private_interaction_transaction.py` 将正Count批准／拒绝交原 `private_approval_control`，取消仍沿原退休门。`test_im_tool_approval.py` 覆盖无TUI原waiter、子孙当前attempt、错误actor／旧claim及真实HTTP回原等待；这些仍是临时组件与替身运输证据。最终新源真实IM的送达、个人锁、用户决定、原执行恢复和主声道交付仍须分别验收，不能把capability grant当成human tool approval，也不能把现有入口宣称为灵活命令参数授权已经完成。
 
 ## 7. 验证记录及实施验收
 

@@ -394,6 +394,10 @@
 |-- agent_py_agent/tests/test_progress_message_revision.py # 真实输出索引与活动候选唯一终态冻结
 |-- agent_py_agent/tests/test_credential_card_validation.py # 两种执行入口的表单改正、原权限门与固定回执
 |-- agent_py_agent/tests/test_final_response_projection_roles.py # 内部正文和跨段安全上下文的公开出口回归
+|-- agent_py_agent/agent/gateway_parts/native_diagnostic_projection.py # 原native日志的有限安全schema及无正文投影
+|-- agent_py_agent/tests/test_gateway_safe_native_diagnostics.py # 当前代native诊断、有限资源枚举及拒绝边界
+|-- agent_py_agent/tests/test_admin_self_gateway_diagnostics.py # 真实主身份与工具链的自身日志诊断和权限回归
+|-- agent_py_agent/tests/test_tui_decision_menu_sink_lifecycle.py # 测试helper输出资源的嵌套与失败恢复回归
 |-- agent_py_agent/tests/test_tui_local_candidate_commit_boundary.py # 未提交候选隔离及本地工具提交显示回归
 `-- agent_py_agent/tests/test_committed_stream_public_boundary.py # writer、IM档位、失败关闭和旧候选重放回归
 ```
@@ -550,6 +554,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_coordinator_model_card_delivery.py # 原门外投递、同ID幂等和副作用事实
 |-- agent_py_agent/agent/gateway_parts/model_metadata_transaction.py # C首次模型菜单与原control receipt、模型资源事务
 |-- agent_py_agent/tests/test_coordinator_model_menu.py # 冷/健康C原模型目录、选择及同回执状态读
+|-- agent_py_agent/tests/test_gateway_ask_control_parity.py # /ask与/control真实C模型/管理领域、原来源及重放一致性
 |-- agent_py_agent/tests/test_model_control_signed_projection.py # 原不可变签名投影的合法载荷回归
 |-- agent_py_agent/tests/test_channel_health_paths.py # 原路径健康快照及C不清PID/不建锁
 |-- docs/design/COORDINATOR_STARTUP_RECOVERY.md # 原startup恢复门、预算与B4拒绝边界
@@ -584,7 +589,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_f3_worker_error_contracts.py # worker启动错误唯一分类合同
 |-- agent_py_agent/tests/test_control_producer_receipts.py # 原控制分派、claimed身份与精确目标
 |-- agent_py_agent/tests/test_control_producer_memory_ingress.py # C中保留普通用户Memory活封印与确认
-|-- agent_py_agent/tests/test_gateway_multiprocess_control_forward.py # C远端只分派、不物化owner与重放
+|-- agent_py_agent/tests/test_gateway_multiprocess_control_forward.py # C唯一初始化新owner、W只读控制与回执重放
 |-- agent_py_agent/tests/test_tool_coordinator_execution_ports.py # 原工具claim短scope与实际未结异常传播
 |-- agent_py_agent/cli/gateway_worker.py # 内部worker命令解析与冻结启动运输
 |-- agent_py_agent/agent/gateway_parts/multiprocess_worker.py # 原W组合根、轮询与停机句柄
@@ -762,6 +767,12 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `agent_py_agent/agent/gateway_parts/native_diagnostic_projection.py`：只验证原safe producer的有限schema与公开literal，不读文件、不授权限，返回六项固定诊断字段。
+- `agent_py_agent/tests/test_gateway_safe_native_diagnostics.py`、`test_admin_self_gateway_diagnostics.py`：分别验证有界无正文投影和完整HomePaths／当前main attempt／claim／ToolExecutor链；新增普通回归须双平台包内实际执行。
+
+
+- `agent_py_agent/tests/test_tui_decision_menu_sink_lifecycle.py`：验证真实测试TUI helper退出后归还进入前的全局输出sink，覆盖嵌套及工厂、setup、正文、exit、await异常；9节点属于普通双平台运行义务。
 
 - `agent_py_agent/agent/backends/assistant_messages.py`：逐消息来源保存在原正文块，阶段不授执行或续跑权；完整当前正文和整段净化上下文成立时才分段显示。Responses收集器的真实索引只在内部归一化，不伪造缺失索引或泄入其它协议。
 - `agent_py_agent/agent/agent_core/model/visible_response.py`：只在原工具开始或最终采纳边界核同次sealed调用，再提交可见正文；生成中增量、被拒正文或历史块不能成为公开回复。
@@ -3604,3 +3615,7 @@ owner_resources只计算配置路径不签权；owner_services仅持原三对象
 能力授权覆盖回归补充：同入口检查持久grant根/祖先symlink漂移，以及已声明宽祖先根包含home时每个foreign/宿主目标的独立拒绝。
 
 同回归入口额外核普通/MCP工具canonical禁用后不能复用旧GRANTED，enabled原正例保留。
+
+### /ask与/control控制一致性回归入口
+
+`agent_py_agent/tests/test_gateway_ask_control_parity.py`使用原临时HTTP/G1/C、模型卡和管理领域验证两个入口共享合法分派；普通消息不改路由，Count0和来源权限不借C扩大。仅测试运输为既有fake，真实飞书及发行另验。

@@ -202,7 +202,7 @@ def test_real_source_closes_during_first_prepare_without_queue_commit(tmp_path, 
     ('POST', '/client/history', {'conversation_id': 'synthetic-http-private'}, 'history'),
     ('GET', '/control-status/gwctl-msg-' + '0' * 32, None, 'absent'),
     ('GET', '/control-status/not-present', None, 'invalid'),
-    ('POST', '/ask', {'goal': '/status', 'conversation_id': 'synthetic-http-private'}, 'waiting'),
+    ('POST', '/ask', {'goal': '/status', 'conversation_id': 'synthetic-http-private'}, 'identity-required'),
 ])
 def test_c_business_wait_follows_original_credential_gate(tmp_path, monkeypatch, case):
     from agent_py_agent.agent.core import SimpleAgent
@@ -213,6 +213,7 @@ def test_c_business_wait_follows_original_credential_gate(tmp_path, monkeypatch,
     with c_http(tmp_path, monkeypatch) as (_agent, backend, gate, control, _runtime, server, _close):
         queued = set(gate.paths.inbox.glob('*.json'))
         before = snapshot(control.home_root)
+        before_operations = {p.name: p.read_bytes() for p in (gate.paths.root/'control_operations').glob('*.json')}
 
         def forbidden(*_args, **_kwargs):
             pytest.fail('冷C的认证、等待与只读查询不能构造业务Agent或foreign pool')
@@ -242,6 +243,7 @@ def test_c_business_wait_follows_original_credential_gate(tmp_path, monkeypatch,
                               'error_code': 'CONTROL_OPERATION_RECEIPT_CORRUPT'}
         assert set(gate.paths.inbox.glob('*.json')) == queued and backend.calls == 0
         assert snapshot(control.home_root) == before
+        assert {p.name: p.read_bytes() for p in (gate.paths.root/'control_operations').glob('*.json')} == before_operations
 
 
 def test_count_zero_without_agent_keeps_original_control_none_contract(tmp_path):

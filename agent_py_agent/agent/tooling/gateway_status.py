@@ -5,7 +5,7 @@ from __future__ import annotations
 # LLM: 当前模型只读调用者冻结的 config/backend，不能读 Gateway 启动默认值或后来切换的 owner 选择。This surface reuses Gateway state,
 # heartbeat, validated PID records and lifecycle-bounded diagnostics; never fall back to ps/ss,
 # guessed ports, raw logs, request bodies, or credentials.
-# 模块用途: 让本机管理员主代理直接读取唯一 Gateway 的权威健康事实，避免靠 shell 猜进程和端口。
+# 模块用途: 让本机管理员主代理直接读唯一Gateway健康事实与本代有限安全诊断，日志受保护时仍可自查而不开放原文。
 
 import json
 from typing import Any
@@ -36,6 +36,8 @@ class GatewayStatusTool(BaseTool):
             "读取当前 my-agent 唯一 Gateway 的权威运行状态。检查 Gateway 健康、真实监听端口、"
             "本次调用模型、配置来源、队列或日志噪声时必须优先使用本工具；不要用 ps/ss 猜端口，"
             "也不要把 /health 当作状态端点，HTTP 状态端点由结果中的 status_path 给出。"
+            "诊断日志读取被保护、native物化或执行异常时仍用本工具：返回本代最多8条安全阶段、错误码和有限资源分类，"
+            "不读出原始正文；具体用户请求归属用audit_records及原跨用户审计授权核验，不从全局日志猜归属。"
             "本次模型只看 caller_model.model_name，不使用训练记忆或旧历史回答当前模型名称。"
             "模型名是请求配置，不是供应商内部模型身份的独立鉴定；不要改写版本号。"
         ),
@@ -46,7 +48,7 @@ class GatewayStatusTool(BaseTool):
                     "type": "boolean",
                     "description": (
                         "是否统计本次 Gateway 生命周期的异常签名；默认 true。"
-                        "只返回计数，不返回原始日志。"
+                        "返回计数及最多8条安全native机器诊断；native记录不含原始日志、ID、路径或正文。"
                     ),
                 },
                 "metadata_only": {"type": "boolean", "description": "仅返回进程、队列、模型选择和状态元数据；不读日志诊断，不返回路径、地址或原始错误。"},
@@ -79,7 +81,7 @@ class GatewayStatusTool(BaseTool):
                 '{"tool":"gateway_status","include_log_diagnostics":false}',
             ),
             default_deferred=True,
-            deferred_summary="查看 Gateway 运行状态、监听端口、当前模型和配置来源（不要用 ps/ss 猜）",
+            deferred_summary="查Gateway健康、日志/native阶段错误码与资源缺失诊断（不读raw；不用ps/ss猜）",
         ),
     )
     runtime_policy = ToolRuntimePolicy(

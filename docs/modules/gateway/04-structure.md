@@ -1,3 +1,9 @@
+## 2026-10-19 原Gateway在线安全诊断（587候选）
+
+原 `gateway_status` 继续限local/main管理员主代理。`gateway_log_diagnostics`保原当前生命周期与64KiB尾读，复用纯 `native_diagnostic_projection` 验证原 `gateway_native_diagnostic.v1`：每行4KiB、准确字段/enum、拒重复键/非有限数/动态正文，最多返回末8条固定stage/op/type/code/reason/field，不返回raw、request/attempt/hash/owner/路径。未知保持未知，metadata_only仍不读日志；统计不反向改变健康、任务或权限。
+
+producer/reader共用原已审拒绝literal集合；原exact资源异常只加resource_missing与owner_home及原26项目录枚举，目录0是规范owner根，其它名称/路径/子类不公开。原服务队列目录不开放，具体请求归属仍走audit_records原scope及跨owner显式许可。新正式回归含真实主RunParams/claim/ToolExecutor、名称与中文工具发现、安全形状/界限/原producer，须在双OS包内普通运行；真实服务与现场原因另验。原IM私人审批入口已有实现与组件证据，旧待实施状态仅作勘误，真实送达与原执行恢复不代验。
+
 ## 2026-10-18 最终正文投影入口（554候选）
 
 `backends.assistant_messages` 共用阶段选择与独立安全可分性判据；
@@ -40,7 +46,7 @@ fields/target_url字段枚举；由原卡授权后的parser产生。`private_int
 
 原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。
 
-共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError只展示(resource_unsafe_path,owner_home)固定pair。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
+共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError保留(resource_unsafe_path,owner_home)，587后继另仅公开resource_missing与owner_home及原26项目录机器枚举；未知资源/路径/子类仍省略。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
 
 ## 2026-10-17 原话备份收缩使用完整投影实测（253候选）
 
@@ -3505,3 +3511,14 @@ local on_chunk与Gateway旧model_delta均只计量；只有原完整committed as
 writer.write_model必须保留以消费原ToolBoundaryChunkFilter优先接口，不能删除后让raw落回write/runtime_progress；raw缓存、草稿、增量flush和边界commentary支路均退休。原commit_visible_response仍从已验工具准入与最终收口提交同sealed-call payload；不新增同义门或provider phase。
 
 /progress原白名单只接已确认commentary；IM renderer拒退休draft/delta且poll不再以draft截断合法前文；CLI _emit_chunk_line在typed callback之前消费退休行并正常推进游标；foreground sink不再将raw delta写同会话显示。原native/chunk私档、canonical消息、断连游标与未知未来事件语义不改。main_activity只投影阶段、control /status只给固定文案，没有额外正文出口。
+
+
+## /ask 与 /control 的唯一远端控制物化链
+
+`http_handlers.handle_ask`只在原合法普通远端slash选择点适配原goal/prompt为既有控制运输输入，不能让body.command改变已解析命令。`coordinator_control_transport`仍唯一绑定实际HTTP work、认证scope与原C依赖；`multiprocess_control_forward.prepare_coordinator_remote_control`仍在原controller owner门及完整回执CAS内先调用`multiprocess_native_materialize.materialize_coordinator_owner_home`。原`prepare_remote_control`无新增资源创建权。`user_space.worker_home.initialize_worker_home`仍只消费C已建目录/种子，缺失或不安全路径失败关闭；`WorkerControlPump`原claim/terminal_unknown/异常传播保留。
+
+控制身份仍唯一由control_operation_service.gateway_control_operation_identity检查；/ask不新增缺ID回退。缺稳定message_id沿原typed异常映射400，cold/ready相同，保持凭据先拒绝及零owner/dispatch副作用；这是显式错误优先级迁移。
+
+### /ask 与 /control 合法控制的唯一分派（588候选）
+
+http_handlers的两个入口保各自认证、原语法和正文权威，合法控制统一进入_dispatch_parsed_conversation_control；_handle_cold_owner_management_control只容纳原管理服务的错误/回执投影。冷管理、model元数据和普通远端仍消费各自原来源，ready管理及Count0复用原persistent入口。model_metadata_transaction按实际route分别取/ask goal优先prompt、/control command优先prompt；文本只view/select/set_default，不能借/client/models操作或vector进入模型元数据。原C唯一物化/W existing-only及owner/lease/Root事实不移位。

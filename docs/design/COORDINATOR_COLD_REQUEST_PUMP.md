@@ -108,3 +108,22 @@ F4/F5已发布的`/agents`、`/memory candidates`以及client memory search/reme
 记忆接线核对发现原assistant.configure虽不查额外群监控授权，仍会取得原tool_policy文件锁；冷规则入口此前未给锁文件出生传当前资源写门。现仅给原group_capability_guard增加默认None的birth_commit，默认调用形状与身份/群监控语义保持；实际冷规则使用已绑定本人owner_home的原writer partial。FD创建/chmod在原owner P2/Root短门，线程/OS锁等待在Root外，不把整业务包Root。
 
 旧A43实际HTTP两用例复现2失败，修后2项通过，核实际policy锁inode对应FD、出生持准确群owner P2、flock门外，以及出生前拒绝不打开锁、不completed、不重放。中间首次裸writer遗漏owner_home keyword的TypeError已保留，准确partial后通过，非放宽权限。统一原群/规则/存储组合及非作者复核另记；F3尚未发行。
+
+
+## /ask 首次远端控制与 /control 共用原C物化（2026-10-19，585候选）
+
+Feishu适配器的普通slash由`/ask`提交；只修`/control`会遗漏ready C的原persistent分支，新owner在W只读构造时仍会因缺目录报`resource_missing`。合法正count、非model/非C管理的`/ask`控制现复用原`coordinator_control_transport`，同一真实HTTP work、认证scope、owner、controller、lease、Root与完整operation原件CAS下，先由C调用唯一`materialize_coordinator_owner_home`创建规范owner目录/种子，再发布原prepared+dispatch。`/ask`命令仍只取原goal优先、其次prompt；运输适配不让body.command覆盖已解析命令，也不改入站body。
+
+不在无来源的`prepare_remote_control`补owner创建，不构造管理员或业务Agent，不给W增加ensure/fallback。原W registry/出生/claim/typed scope与existing-only共享资源检查不变；资源缺失仍是启动安全故障，原`terminal_unknown`和Future向组合根上抛责任保留，不能据回执unknown伪造W存活或正常closure。Count0、主owner、model/C管理、非法slash及普通任务保持原入口；目标拒绝、已存回执重放/状态只读仍不补建owner。
+
+离线回归使用普通临时C租约、原控制回执及真实W控制泵/owner池，仅HTTP工作片与认证为明确fake，不预mkdir目标owner。原新群ready失败与cold waiting记录保留；修后新增精确普通runtime与完整相关消费者闭包另在585工件中记录。它们不代根真实Feishu新home复验、完整full、生命周期、最终源或两OS包验收。
+
+/ask与/control既然共用唯一控制身份合同，缺稳定metadata.message_id统一沿原CONTROL_OPERATION_ID_REQUIRED返回400，冷/ready均不得执行。此为根显式批准的API错误优先级迁移，原冷/ask 503 waiting不再适用缺ID控制输入；不增加wait_missing_identity开关、无来源默认回退或临时operation ID。原凭据拒绝仍先于身份错误，零owner/dispatch/业务副作用均验证，旧失败证据保持。
+
+## /ask 与 /control 的原领域分派一致性（2026-10-19，588候选）
+
+585接回了普通远端控制，但适配器全部slash实际都POST /ask，原model、规则与记忆管理仍被/ask冷态503截断；/control已具备的原领域因而不可达。588把合法已解析控制后的分派从handle_control抽为唯一共用函数。两个入口各保原认证、一次JSON读取及自己的文本权威：/ask取goal优先prompt，/control取command优先prompt。/ask仅把已解析文本写入独立body副本的command，原handler.path、正文对象、HTTP work和来源身份都不改；不伪造_read_json、Root或source。
+
+冷C规则/记忆仍调用原coordinator_owner_management及其原错误映射；ready仍走原persistent ingress封印。模型元数据合同仅允许真实/ask与/control上的原view/select/set_default词法，client-only目录操作与vector不由文本借权。model_request_scope和每次末核继续按实际route及原正文权威检查；模型profile、ThreadStore、原卡和门外Delivery复用原实现。普通远端仍走585的C唯一owner初始化与原W只读执行；Count0、本机、任务命令、普通输入、全局写服务拒绝与G1权限门均保持。
+
+585新增的special冷503预期在本片明确迁移为原领域实际完成和更强回执/owner/重放断言，非法slash旧cold/ready语法边界不迁移；585冻结红绿记录保留。相同认证/metadata/body的真实临时HTTP原6节点在585为/control三通过、/ask三失败503，新候选全通过。补冷/ready、用户/群、模型选择/默认、规则预览与确认、记忆候选预览/取消、缺凭据/缺稳定ID零写、字段优先级及跨入口同操作重放/冲突。完整消费者选择和实际XML另绑588仓外证据，不以collect或fake证明真实飞书、full或包通过。

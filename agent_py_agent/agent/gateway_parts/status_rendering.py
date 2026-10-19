@@ -12,6 +12,7 @@ from __future__ import annotations
 #   墙钟跳变不能延长或缩短配置的时间上限。
 # 模块用途: 提供 Gateway 存活、启动阶段与就绪的统一判据，以及状态展示；交互界面通过这里
 #   判断是否可以开始发送请求，启动失败时靠结构化 state/reason 分型而不是靠文案。
+#   native日志只作有界安全观察，不能反向修改上述健康判据、权限或任务终态。
 
 """Gateway status and liveness rendering helpers."""
 
@@ -280,9 +281,8 @@ def _gateway_runtime_base_snapshot(
     }
 
 
-# LLM: 日志扫描必须从状态文件记录的本生命周期字节偏移开始，且只返回错误签名计数；
-#   不能把原始日志、请求正文、密钥或用户消息复制进模型上下文。
-# 函数用途: 有界统计当前 Gateway 生命周期新增日志中的异常类型和噪声规模。
+# LLM: 原生命周期与64KiB尾读不扩大；native仅展示严格schema六项有限字段，最多末8条，不返回raw/ID/owner或授予跨owner权限。
+# 函数用途: 统计本代日志噪声并公开原native安全机器诊断，不从日志改变健康、执行或权限事实。
 def gateway_log_diagnostics(
     path: Path,
     *,
@@ -328,9 +328,13 @@ def gateway_log_diagnostics(
             exception_counts[key] = exception_counts.get(key, 0) + 1
         if line.startswith("[gateway-loop-error]"):
             loop_error_count += 1
+    from .native_diagnostic_projection import native_diagnostic_record
+
+    native_rows = [record for line in raw.decode("utf-8", "replace").splitlines()
+                   if (record := native_diagnostic_record(line)) is not None]
     signature_total = sum(exception_counts.values()) + loop_error_count
     lifecycle_bytes = max(0, size - lifecycle_start)
-    if signature_total or traceback_count:
+    if signature_total or traceback_count or native_rows:
         status = "noise_observed"
     elif lifecycle_bytes == 0:
         status = "no_new_log_bytes"
@@ -350,6 +354,9 @@ def gateway_log_diagnostics(
         "traceback_count": traceback_count,
         "gateway_loop_error_count": loop_error_count,
         "exception_counts": dict(sorted(exception_counts.items())),
+        "native_diagnostics": native_rows[-8:],
+        "native_diagnostic_count": len(native_rows),
+        "native_diagnostics_omitted": max(0, len(native_rows) - 8),
         "raw_log_included": False,
     }
 

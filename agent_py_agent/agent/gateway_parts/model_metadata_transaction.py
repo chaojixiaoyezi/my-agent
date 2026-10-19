@@ -1,5 +1,5 @@
 # LLM: 首次模型菜单只消费原HTTP work/C同对象领域来源；通用观察器不签领域权，wrapper保原错误映射，所有写仍进21原perform，网络Delivery门外。
-# 模块用途: 给冷C的/client/models与/model共用原owner配置、ThreadStore和模型目录，不构造Agent、队列或第二许可。
+# 模块用途: 给冷/ready C的/client/models与两个真实文本入口共用原owner配置、ThreadStore和模型目录，不构造Agent、队列或第二许可。
 from __future__ import annotations
 
 from dataclasses import replace
@@ -25,15 +25,17 @@ def coordinator_model_server(server):
     return type(control) is GatewayControlPlane and control.worker_count > 0
 
 
-# LLM: 仅结构化路由/命令决定本领域是否已接；不能把未知操作降为默认list，也不解析普通用户文字授权限。
-# 函数用途: 判断本片支持的模型元数据入口，其余仍由原handler明确等待。
+# LLM: 仅实际HTTP路由及原解析命令决定元数据接线；/ask仍取goal优先prompt，/control取command优先prompt，不接受未知operation或借文本授权限。
+# 函数用途: 让两个真实文本入口共用原view/select/set_default元数据合同，client-only与vector仍不开放到文本路径。
 def model_metadata_supported(handler, body):
     if urlsplit(handler.path).path == '/client/models':
         return body.get('operation') in _MODEL_OPERATIONS
-    if urlsplit(handler.path).path != '/control':
+    route = urlsplit(handler.path).path
+    if route not in {'/control', '/ask'}:
         return False
     from ..conversation.control_commands import parse_conversation_control
-    command = parse_conversation_control(str(body.get('command', body.get('prompt', '')) or ''), reject_unknown_slash=True)
+    text = body.get('goal', body.get('prompt', '')) if route == '/ask' else body.get('command', body.get('prompt', ''))
+    command = parse_conversation_control(str(text or ''), reject_unknown_slash=True)
     return command is not None and command.valid and command.kind == 'model' and command.operation in {'view', 'select', 'set_default'}
 
 

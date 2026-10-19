@@ -1,4 +1,4 @@
-# LLM: 原索引副作用保持；native诊断只固定stderr hash/类型/已审码，不作权限/重试/终态事实。
+# LLM: 原索引副作用保持；native诊断共用有限schema，追加原资源缺失枚举但不回显路径/正文，不作权限/重试/终态事实。
 # 模块用途: 镜像Gateway记录并输出安全失败诊断，诊断失败绝不覆盖原执行异常。
 
 from __future__ import annotations
@@ -224,63 +224,16 @@ def _report_gateway_side_effect_error(operation: str, request_id: str, exc: Exce
         pass
 
 
-# LLM: 只展示已审生产literal reason；读取原生args描述符，不调用异常str/repr/属性hook，值不参与授权或执行。
+# LLM: 与原reader共用同一已审literal集合；读取原生args描述符，不调用异常str/repr/属性hook，值不参与授权或执行。
 # 函数用途: 对exact WorkerCommitRejected筛选固定原因；未知内容一律省略，绝不输出任意args。
 def _native_rejection_reason(error):
-    allowed = {
-        'commit_connection_eof', 'commit_connection_unconfirmed', 'commit_frame_duplicate_key',
-        'commit_frame_invalid', 'commit_frame_size_invalid', 'commit_owner_invalid',
-        'commit_request_invalid', 'executor_source_observer_invalid', 'kernel_stream_state_unavailable',
-        'native_bootstrap_invalid', 'native_client_closed', 'native_consumer_stop_unconfirmed',
-        'native_control_fds_unexpected', 'native_executor_consumer_not_stopped', 'native_executor_consumer_stop_unconfirmed',
-        'native_executor_context_fd_invalid', 'native_executor_context_fd_required', 'native_executor_context_invalid',
-        'native_executor_context_size_invalid', 'native_executor_context_timeout', 'native_executor_delivery_unknown',
-        'native_executor_request_binding_required', 'native_executor_stdio_invalid', 'native_executor_text_invalid',
-        'native_host_bootstrap_invalid', 'native_host_consumer_stop_unconfirmed', 'native_namespace_pidfd_abi_unavailable',
-        'native_namespace_pidfd_instance_unconfirmed', 'native_namespace_reap_instance_changed', 'native_namespace_reap_observation_gap',
-        'native_namespace_reference_birth_changed', 'native_namespace_reference_observation_gap', 'native_namespace_reference_unavailable',
-        'native_namespace_signal_observation_gap', 'native_operation_consumed', 'native_operation_unavailable',
-        'native_pid_namespace_pre_release_unconfirmed', 'native_reply_invalid', 'native_reply_unconfirmed',
-        'native_session_closed', 'original_channel_eof', 'original_channel_peer_required',
-        'original_channel_pin_required', 'original_channel_process_required', 'original_channel_stream_required',
-        'original_commit_handle_required', 'original_commit_issuer_required', 'original_commit_lease_required',
-        'original_commit_pin_required', 'original_coordinator_context_required', 'original_coordinator_executor_binding_required',
-        'original_coordinator_executor_callback_required', 'original_coordinator_executor_effect_required', 'original_coordinator_executor_pin_required',
-        'original_coordinator_executor_source_changed', 'original_coordinator_executor_source_required', 'original_coordinator_executor_source_unavailable',
-        'original_coordinator_executor_submission_required', 'original_coordinator_message_required', 'original_coordinator_native_host_process_required',
-        'original_coordinator_native_host_required', 'original_coordinator_native_host_source_required', 'original_coordinator_parent_required',
-        'original_coordinator_process_required', 'original_executor_effect_required', 'original_executor_owner_required',
-        'original_executor_process_required', 'original_executor_reap_unconfirmed', 'original_executor_request_required',
-        'original_executor_source_changed', 'original_executor_source_required', 'original_executor_source_unavailable',
-        'original_executor_submission_required', 'original_idle_worker_required', 'original_namespace_reference_required',
-        'original_native_admission_required', 'original_native_client_required', 'original_native_command_attempt_required',
-        'original_native_consumer_already_started', 'original_native_endpoint_required', 'original_native_executor_client_required',
-        'original_native_executor_consumer_already_started', 'original_native_executor_domain_pending', 'original_native_executor_lane_already_bound',
-        'original_native_executor_lane_required', 'original_native_executor_lane_retired', 'original_native_executor_lane_source_required',
-        'original_native_executor_lane_unbound', 'original_native_executor_process_required', 'original_native_executor_responsibility_pending',
-        'original_native_host_admission_required', 'original_native_host_already_connected', 'original_native_host_authority_required',
-        'original_native_host_binding_required', 'original_native_host_completion_unconfirmed', 'original_native_host_exit_observation_required',
-        'original_native_host_kernel_instance_required', 'original_native_host_lane_required', 'original_native_host_lane_retired',
-        'original_native_host_not_connected', 'original_native_host_process_required', 'original_native_host_reaped_before_completion',
-        'original_native_host_responsibility_pending', 'original_native_host_source_required', 'original_native_host_start_pin_required',
-        'original_native_host_start_required', 'original_native_lane_already_bound', 'original_native_lane_required',
-        'original_native_lane_retired', 'original_native_lane_source_required', 'original_native_lane_unbound',
-        'original_native_namespace_attempt_required', 'original_native_namespace_fact_required', 'original_native_namespace_pin_required',
-        'original_native_namespace_process_required', 'original_native_namespace_reference_required', 'original_native_namespace_registration_required',
-        'original_native_namespace_required', 'original_native_namespace_source_required', 'original_native_operation_conflict',
-        'original_native_operation_required', 'original_native_owner_home_required', 'original_native_responsibility_pending',
-        'original_native_session_required', 'original_native_singleton_domain_required', 'original_native_source_required',
-        'original_native_waiting_singleton_required', 'original_peer_channel_required', 'original_worker_launch_required',
-        'original_worker_process_required', 'original_worker_registry_required', 'original_worker_responsibility_pending',
-        'original_worker_source_conflict', 'original_worker_source_required', 'original_worker_sources_changed',
-        'owner_commit_unavailable', 'owner_executor_commit_unavailable', 'owner_partition_mismatch',
-    }
+    from .native_diagnostic_projection import NATIVE_REJECTION_REASONS
     args = BaseException.args.__get__(error)
-    return args[0] if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in allowed else None
+    return args[0] if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in NATIVE_REJECTION_REASONS else None
 
 
 # LLM: 只认准确已审异常类型；原生实例字典和固定集合禁止未知类/子类借error_code或资源路径泄漏正文。
-# 函数用途: 生成不含message/args/owner/path的固定诊断字段，资源只允许原物化拒绝literal pair。
+# 函数用途: 生成不含message/args/owner/path的固定字段；资源缺失只接受原owner目录有限枚举，未知字段省略。
 def _native_error_fields(error):
     from .multiprocess_bootstrap_resources import WorkerSharedResourceError
     from .multiprocess_kernel_message import KernelMessageError
@@ -300,7 +253,8 @@ def _native_error_fields(error):
         fields['error_code'] = 'WORKER_SHARED_RESOURCE_INVALID'
         values = BaseException.__dict__['__dict__'].__get__(error)
         reason, field = values.get('reason'), values.get('field')
-        if type(reason) is str and type(field) is str and (reason, field) == ('resource_unsafe_path', 'owner_home'):
+        from .native_diagnostic_projection import native_resource_pair_is_public
+        if native_resource_pair_is_public(reason, field):
             fields.update(reason=reason, field=field)
     return fields
 

@@ -1,3 +1,9 @@
+## 2026-10-19 原Gateway在线安全诊断（587候选）
+
+原 `gateway_status` 继续限local/main管理员主代理。`gateway_log_diagnostics`保原当前生命周期与64KiB尾读，复用纯 `native_diagnostic_projection` 验证原 `gateway_native_diagnostic.v1`：每行4KiB、准确字段/enum、拒重复键/非有限数/动态正文，最多返回末8条固定stage/op/type/code/reason/field，不返回raw、request/attempt/hash/owner/路径。未知保持未知，metadata_only仍不读日志；统计不反向改变健康、任务或权限。
+
+producer/reader共用原已审拒绝literal集合；原exact资源异常只加resource_missing与owner_home及原26项目录枚举，目录0是规范owner根，其它名称/路径/子类不公开。原服务队列目录不开放，具体请求归属仍走audit_records原scope及跨owner显式许可。新正式回归含真实主RunParams/claim/ToolExecutor、名称与中文工具发现、安全形状/界限/原producer，须在双OS包内普通运行；真实服务与现场原因另验。原IM私人审批入口已有实现与组件证据，旧待实施状态仅作勘误，真实送达与原执行恢复不代验。
+
 ## 2026-10-18 最终阶段正文与公开投影分责（554候选）
 
 原已采纳 `ModelResponse.text` 与 `AgentRunResult.model_response` 保整次当前正文，
@@ -2285,3 +2291,16 @@ cold/ready正Count普通远端HTTP控制统一使用原固定HTTP producer；rea
 原sealed-call工具边界commit及时显示模型过程说明，原terminal commit/summary正常交付最终回复；IM首段/stream多段、final_only、call幂等、数字model_metrics、工具状态和原等待心跳保持。原私有native与chunk原档不改，公开/progress、IM渲染、CLI共用chunk分派和同会话前台投影都不再公开退休model_delta/model_draft。未知future kind沿原语义，不把kind当作已确认来源。
 
 未添加词法regex、模型请求、线程或状态账。通用batch对终态仍未闭合凭据的识别是独立原合同问题，本片不声称seal可净化任意无效结构。新增test_committed_stream_public_boundary.py使用真实SimpleAgent+fake backend→真实writer→原/progress reader→IM render和rich事件，核每次调用及时提交、流/非流、各档位/短ack、失败/取消close与旧raw重放；不代表真实渠道已验收。
+
+
+## 2026-10-19 新owner首次 /ask slash 复用C物化（585候选）
+
+Feishu普通控制实际从`/ask`进入，原分支绕过`/control`已有的C先物化owner路径，导致W既有资源检查失败。合法正count普通远端slash现接回同一个原HTTP source、controller/lease/Root及receipt CAS，C先规范初始化该owner，再把原prepared交W。不在无source转发叶或W增加mkdir，不借管理员，不改变Claim/typed身份、业务工具权限和失败unknown责任。Count0/model/C管理/主owner和非法输入的专用边界保留；既存回执及目标拒绝不补物化。候选完整消费者及原红记录在585工件，实际新群/full/两OS新包另验。
+
+根显式批准缺ID响应优先级统一：合法控制文本缺稳定message_id时，冷/ready /ask与/control均为400 CONTROL_OPERATION_ID_REQUIRED；G1拒绝仍优先，不创建owner或dispatch。只迁移原cold /ask case4的该预期并增强control_operations全部字节不变，原503差异失败留档。
+
+## 2026-10-19 /ask 控制复用全部原C领域（588候选）
+
+585普通远端首次owner链已接回，但model/agents/memory专用控制仍在/ask冷态waiting。588只抽取原handle_control合法解析后的分派，让/ask沿自己原goal/prompt进入相同C模型元数据、冷规则/记忆管理和普通远端运输；ready管理仍沿原活ingress。model_metadata_supported按真实/ask路径读原goal优先prompt，仅原view/select/set_default可用，client-only/vector不扩大。原G1、source/work/lease/Root、原owner和T/CAS不变，不重读正文或改handler，不增权限/配置/状态。
+
+原6真实HTTP对照在585为3P3F（/ask全部503），新候选6P。585自增special冷503预期在588明确迁移；非法语法、Count0及原585普通远端/身份400仍保。新普通节点与完整受影响闭包、原失败和前后SHA由588工件冻结，真实飞书及最终发行仍待根同源验收。

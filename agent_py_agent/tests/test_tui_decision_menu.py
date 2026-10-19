@@ -1,4 +1,4 @@
-# LLM: 真实 pipe 和原配置服务验证设置合同；按界面就绪事实有界等待，不用固定延迟代替异步确认。
+# LLM: 真实 pipe 和原配置服务验证设置合同；按界面就绪事实有界等待，复用 helper 必须归还进入前输出资源且不吞原收尾异常。
 # 模块用途: 在本地 Gateway stub 上测试决策菜单，不发模型请求，不改产品事件循环或设置行为。
 """真实 prompt_toolkit pipe 驱动决策菜单，使用原临时配置与 Gateway stub。"""
 import asyncio
@@ -19,6 +19,7 @@ from agent_py_agent.agent.settings.model_profiles import (
     ModelProfileError,
     execute_model_profile_operation,
 )
+from agent_py_agent.cli.chat_parts import rendering
 from agent_py_agent.cli.chat_parts.tui_decision_menu import (
     _GENERAL,
     _POINTS,
@@ -133,32 +134,36 @@ async def press(ui, keys):
                   and (after[0] != before[0] if transition else after != before))
 
 
-# LLM: 原 make_tui_app / model 浮层处理按键，after_render 只观察已绘制状态；只替换 Gateway 运输，退出必回收 Application。
-# 函数用途: 启动真实 TUI 并保留绘制事实、聊天任务队列和模型显示，供操作等待与隔离断言。
+# LLM: 原 make_tui_app / model 浮层处理按键，after_render 只观察；原 exit/await 异常不吞，工厂/setup/正文/收尾均恢复进入前 sink，嵌套恢复外层所有权。
+# 函数用途: 仅替换 Gateway 运输启动真实 TUI，回收 Application 后归还全局输出资源，避免后续测试写入已退出界面。
 @asynccontextmanager
 async def running(tmp_path, gateway):
-    runtime = TuiRuntime("decision-menu")
-    runtime.publish_session(version="test", model="ordinary-main", workspace=str(tmp_path))
-    params = _app_params(tmp_path, runtime)
-    params.agent.gateway_client_only = True
-    params.agent.request_models = gateway.request_models
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
-        app = make_tui_app(params)
-        ui = SimpleNamespace(app=app, pipe=pipe, runtime=runtime, params=params, rendered_state=None)
+    previous_sink = rendering._TUI_OUTPUT_SINK
+    try:
+        runtime = TuiRuntime("decision-menu")
+        runtime.publish_session(version="test", model="ordinary-main", workspace=str(tmp_path))
+        params = _app_params(tmp_path, runtime)
+        params.agent.gateway_client_only = True
+        params.agent.request_models = gateway.request_models
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            app = make_tui_app(params)
+            ui = SimpleNamespace(app=app, pipe=pipe, runtime=runtime, params=params, rendered_state=None)
 
-        # LLM: 仅记录已绘制的原浮层，不触发输入或变更产品状态。
-        # 函数用途: 给后续按键提供明确的控件就绪证据。
-        def rendered(current):
-            ui.rendered_state = ready_state(current)
+            # LLM: 仅记录已绘制的原浮层，不触发输入或变更产品状态。
+            # 函数用途: 给后续按键提供明确的控件就绪证据。
+            def rendered(current):
+                ui.rendered_state = ready_state(current)
 
-        app.after_render += rendered
-        task = asyncio.create_task(app.run_async(set_exception_handler=False))
-        try:
-            await wait_ui(ui, lambda: app.is_running and ui.rendered_state is not None)
-            yield ui
-        finally:
-            app.exit()
-            await asyncio.wait_for(task, timeout=3)
+            app.after_render += rendered
+            task = asyncio.create_task(app.run_async(set_exception_handler=False))
+            try:
+                await wait_ui(ui, lambda: app.is_running and ui.rendered_state is not None)
+                yield ui
+            finally:
+                app.exit()
+                await asyncio.wait_for(task, timeout=3)
+    finally:
+        rendering.set_tui_output_sink(previous_sink)
 
 
 async def open_scope(ui, *, thread=False):

@@ -412,3 +412,196 @@ def test_extracted_c_owner_materializer_rejects_restricted_actors_without_writes
         assert failure.value.resource == 'owner_materialization'
         assert not case.target.exists()
         assert {p.relative_to(case.home): p.read_bytes() for p in case.home.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('text', ['/delegate enable', '/delegate status', '/status', '/schedule'])
+@pytest.mark.parametrize('field', ['prompt', 'goal'])
+@pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
+@pytest.mark.parametrize('group', [True, False], ids=['group', 'user'])
+def test_first_ask_slash_materializes_same_owner_before_worker(first_owner, monkeypatch, text, field, ready, group):
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.settings.im_task_preferences import delegation_preference
+
+    with first_owner(ready=ready, group=group, command=text) as case:
+        case.body.pop('command')
+        case.body[field] = text
+        monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
+        assert not case.target.exists(), 'fixture must not initialize the incoming owner'
+        http_handlers.handle_ask(case.handler, case.server, lambda: 'ordinary-request-must-not-be-created')
+        status, result = case.responses[-1]
+        assert status == 202 and result['control_state'] == 'prepared', case.responses
+        receipt, actual = _consume_first_owner(case, monkeypatch, result['operation_id'])
+        assert receipt.state == 'completed' and receipt.result['ok'], receipt.to_dict()
+        assert receipt.owner_provider == case.owner.provider
+        assert receipt.owner_kind == case.owner.owner_kind
+        assert receipt.owner_id == case.owner.owner_id
+        assert actual.home_paths.owner_home_dir == case.target
+        assert case.target.is_dir()
+        assert delegation_preference(actual, 'feishu', 'member')['enabled'] is (text == '/delegate enable')
+        assert not delegation_preference(actual, 'feishu', 'other-member')['enabled']
+        original = ops.gateway_control_operation_path(case.paths, receipt.operation_id).read_bytes()
+        before = {p.relative_to(case.target): p.read_bytes() for p in case.target.rglob('*') if p.is_file()}
+        http_handlers.handle_ask(case.handler, case.server, lambda: 'ordinary-request-must-not-be-created')
+        assert case.responses[-1][0] == 200
+        assert ops.gateway_control_operation_path(case.paths, receipt.operation_id).read_bytes() == original
+        assert {p.relative_to(case.target): p.read_bytes() for p in case.target.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('failure', ['work', 'credential', 'root_closing', 'quarantine', 'home', 'link'])
+@pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
+def test_ask_slash_rejects_lost_authority_before_owner_or_dispatch(first_owner, monkeypatch, failure, ready):
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.multiprocess_bootstrap_resources import (
+        WorkerSharedResourceError,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_route import owner_digest
+
+    with first_owner(ready=ready) as case:
+        case.body['prompt'] = case.body.pop('command')
+        monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
+        if failure == 'work':
+            case.active[0] = False
+        elif failure == 'credential':
+            case.handler.headers.clear()
+        elif failure == 'root_closing':
+            case.runtime._closing = True
+        elif failure == 'quarantine':
+            case.controller._unproven_owners.add(owner_digest(case.owner))
+        elif failure == 'home':
+            if ready:
+                case.agent.home_paths = SimpleNamespace(root=case.home/'foreign')
+            else:
+                case.server.agent = object()
+        else:
+            outside = case.home.parent/'outside'
+            outside.mkdir()
+            case.target.parent.mkdir(parents=True)
+            case.target.symlink_to(outside, target_is_directory=True)
+        if failure == 'link':
+            with pytest.raises(WorkerSharedResourceError):
+                http_handlers.handle_ask(case.handler, case.server, lambda: 'unused')
+            assert not list(outside.iterdir())
+        else:
+            http_handlers.handle_ask(case.handler, case.server, lambda: 'unused')
+            assert case.responses[-1][0] == 503
+            assert not case.target.exists()
+        assert not list((case.paths.root/'control_operations').glob('*.json'))
+
+
+@pytest.mark.parametrize('field', ['prompt', 'goal'])
+def test_ask_slash_preserves_goal_prompt_authority_over_body_command(first_owner, monkeypatch, field):
+    from agent_py_agent.agent.gateway_parts import http_handlers
+
+    with first_owner(ready=True) as case:
+        case.body['command'] = '/model'
+        case.body['prompt'] = '/delegate enable' if field == 'prompt' else '/delegate disable'
+        if field == 'goal':
+            case.body['goal'] = '/delegate enable'
+        before = dict(case.body)
+        monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
+        http_handlers.handle_ask(case.handler, case.server, lambda: 'unused')
+        assert case.responses[-1][0] == 202
+        receipt = ops.read_gateway_control_operation(case.paths, case.responses[-1][1]['operation_id'], read_only=True)
+        assert receipt.command_text == '/delegate enable' and receipt.command_kind == 'delegate'
+        assert (receipt.owner_provider, receipt.owner_kind, receipt.owner_id) == ('feishu', 'group', 'new-room')
+        assert case.body == before, 'transport adaptation must not rewrite the incoming body'
+
+
+@pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
+@pytest.mark.parametrize('text', ['/model', '/agents', '/memory candidates', '/delegate invalid'])
+def test_ask_special_or_invalid_slash_keeps_original_boundary(tmp_path, monkeypatch, ready, text):
+    # 588明确迁移585新增的special冷503预期；真实领域/回执重放替代selector mock，不改变非法语法的旧边界。
+    from agent_py_agent.tests.test_coordinator_model_card_delivery import delivery_case
+    from agent_py_agent.tests.test_coordinator_model_menu import post_model
+    from agent_py_agent.tests.test_gateway_ask_control_parity import control_files, parity_request
+
+    with delivery_case(tmp_path, monkeypatch) as (case, delivered):
+        agent, _host, _path, row, _body, server, _runtime, _sent = case
+        body = parity_request(case, ready=ready, text=text)
+        before = control_files(server)
+        status, result = post_model(server, body, route='/ask', actor=row['actor_id'])
+        if text == '/delegate invalid':
+            assert status == (200 if ready else 503) and not result.get('ok')
+            assert control_files(server) == before and not delivered
+        else:
+            assert status == 200 and result['ok'] and result['control_state'] == 'completed', result
+            receipt = ops.read_gateway_control_operation(server.paths, result['operation_id'], read_only=True)
+            assert receipt.state == 'completed' and receipt.dispatch is None and receipt.command_text == text
+            assert (receipt.owner_provider, receipt.owner_kind, receipt.owner_id) == ('feishu', 'user', row['actor_id'])
+            after = control_files(server)
+            assert post_model(server, body, route='/ask', actor=row['actor_id']) == (status, result)
+            assert control_files(server) == after
+            assert len(delivered) == (1 if text == '/model' else 0)
+        assert server.agent is (agent if ready else None)
+
+
+@pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
+def test_ask_main_owner_never_materializes_remote_owner(first_owner, monkeypatch, ready):
+    from agent_py_agent.agent.gateway_parts import http_handlers
+
+    with first_owner(ready=ready) as case:
+        case.body['prompt'] = case.body.pop('command')
+        case.handler._auth_middleware.extract_identity = lambda headers, peer: ('local-agent', 'local')
+        calls = []
+        monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
+        monkeypatch.setattr(http_handlers, '_handle_persistent_control_operation', lambda *a, **k: calls.append(True))
+        http_handlers.handle_ask(case.handler, case.server, lambda: 'unused')
+        assert calls == ([True] if ready else [])
+        if not ready:
+            assert case.responses[-1][0] == 503
+        assert not case.target.exists()
+
+
+@pytest.mark.parametrize('ready', [False, True], ids=['cold', 'ready'])
+def test_ask_target_refusal_never_materializes_owner(first_owner, monkeypatch, ready):
+    from agent_py_agent.agent.gateway_parts import http_handlers
+
+    with first_owner(ready=ready, command='/stop') as case:
+        case.body['prompt'] = case.body.pop('command')
+        monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
+        http_handlers.handle_ask(case.handler, case.server, lambda: 'unused')
+        assert case.responses[-1][0] == 200
+        receipt = ops.read_gateway_control_operation(case.paths, case.responses[-1][1]['operation_id'], read_only=True)
+        assert receipt.state == 'completed' and receipt.dispatch is None and not receipt.result['ok']
+        assert not case.target.exists()
+
+
+@pytest.mark.parametrize('text', ['/delegate enable', '/delegate status', '/status', '/schedule'])
+def test_single_process_first_ask_slash_keeps_original_execution(tmp_path, monkeypatch, text):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPHandler,
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+
+    home, root = (tmp_path/'home').resolve(), (tmp_path/'repo').resolve()
+    monkeypatch.setenv('MY_AGENT_HOME', str(home))
+    config = AgentConfig(my_agent_home=str(home), model_backend='echo', enable_plugins=False,
+                         gateway_per_user_owner_scoping=True, enable_subagents=True)
+    agent = SimpleAgent(config, root)
+    paths = gateway_paths_from_root(tmp_path/'gateway')
+    server = GatewayHTTPServer(0, paths, params=GatewayHTTPServerParams(agent=agent))
+    handler = object.__new__(GatewayHTTPHandler)
+    handler.headers = {'X-Gateway-Token': 'synthetic-control-credential'}
+    handler.client_address = ('127.0.0.1', 1)
+    handler._auth_middleware = _OfflineControlAuth()
+    body = {'prompt': text, 'conversation_id': 'new-room', 'metadata': {'message_id': 'single-control',
+            'channel_chat_type': 'group', 'channel_chat_id': 'new-room'}}
+    responses = []
+    handler._read_json = lambda: dict(body)
+    handler._send_json = lambda status, payload: responses.append((status, payload))
+    monkeypatch.setattr(http_handlers, 'require_trusted_source', lambda h: False)
+    monkeypatch.setattr(http_handlers, '_handle_coordinator_control_operation',
+                        lambda *args, **kwargs: pytest.fail('Count0 entered the C transport'))
+    target = resolve_owner_home(home, OwnerIdentity.provider_group('feishu', 'new-room')).home_dir
+    assert not target.exists()
+    http_handlers.handle_ask(handler, server, lambda: 'unused')
+    assert responses[-1][0] == 200
+    receipt = ops.read_gateway_control_operation(paths, responses[-1][1]['operation_id'], read_only=True)
+    assert receipt.state == 'completed' and receipt.result['ok'] and receipt.dispatch is None
+    assert (receipt.owner_provider, receipt.owner_kind, receipt.owner_id) == ('feishu', 'group', 'new-room')
+    assert target.is_dir()

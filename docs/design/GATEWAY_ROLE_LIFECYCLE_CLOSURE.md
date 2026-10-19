@@ -10,7 +10,7 @@
 
 原C `NativeCommitSession.serve_once`只附original_source/receive/authenticate/decode/identity/dispatch/send固定阶段；identity成功后才有op/有限seq，materialize定位仅SHA256与字符/字节长度。认证/identity前全null。原W `_reap`只在原Future异常出口绑定本轮原claim摘要并bare raise。空receive的exact KernelMessageError TIMEOUT静默；dispatch/send同码记录。
 
-共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError只展示(resource_unsafe_path,owner_home)固定pair。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
+共用安全logger不调用runtime_error_report、异常str/repr/to_payload或通用args展开；exact WorkerCommitRejected仅已审生产literal reason展示，未知及子类省略。exact WorkerSharedResourceError保留(resource_unsafe_path,owner_home)，587后继另仅公开resource_missing与owner_home、原固定26项owner目录机器枚举；任意路径、未知字段或子类仍省略。原gateway_status沿同一64KiB生命周期尾读以严格schema最多展示8条安全native记录，不公开ID/hash/owner/路径/正文，也不从日志反向改变健康或责任事实。所有编码/日志失败只能省诊断。原ACK、pins、futures、P3、5秒RPC、unknown/no-retry/恢复合同全不变；日志不授权、不证明C未执行，不把336失败改判通过。新测试是纯fake，运行义务仍属于双OS包内普通case，不能划source-only。
 
 ## 2026-10-17 普通观察与忙态停止的边界补记
 
