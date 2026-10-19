@@ -1,3 +1,22 @@
+## 2026-10-18 最终阶段正文与公开投影分责（554候选）
+
+原已采纳 `ModelResponse.text` 与 `AgentRunResult.model_response` 保整次当前正文，
+`AgentRunResult.response` 继续内部最终段职责：无 phase/未知 phase 不因用户投影剥除内部
+协议而改写宿主完成事实。只有同源、完整正文一致且结构化 commentary-only 缺最终候选，
+才沿原 `USER_REPLY_UNAVAILABLE` 收口；不额外采样或续跑。
+
+同一个阶段选择函数的渲染 `project` 可为内部 identity，安全可分性始终使用原完整 rows
+及 `project_user_reply`。跨消息/phase 标签不可分时，内部保整次原文交公开门；默认公开
+投影仍保原整段安全降级，不能丢前缀后发送秘密后缀或从旧 blocks 恢复已拒正文。
+
+CLI run 最终去重、TUI summary、plain 最终/展开与 scenario direct 均在原显示入口完整
+净化后显示。local plain/TUI 候选等原同 call 提交才显示过程，Gateway 沿同一完整响应提交。TUI
+仅暂存完整committed正文的当前 active segment，整段复核后沿原 delta/active-only replace 校正，
+工具、输入、续跑和终态清除候选；不进入状态、权限、历史 authority 或新持久账。
+
+前台缺可交付回复可保空 `error` final carrier 与原 native，它不等于可见/成功前台终答，
+不阻断后续后台汇总、单 Wake 和消息页投递。原真实失败与原断言证据保留，fake 不代真实验收。
+
 ## 2026-10-18 凭据表单错误与原卡重试（已实现，发行验收另记）
 
 Count0和正Count继续共用原凭据保存叶。只有原授权后的本次表单/新链接错误使用
@@ -2257,3 +2276,12 @@ cold/ready正Count普通远端HTTP控制统一使用原固定HTTP producer；rea
 ### 515 P2 REV02：前台第二窗口保活动候选
 
 前台typed assistant_final与本地TUI同规，仅以原assistant_delta的active-only replace_text更新完整候选，等待原canonical final唯一freeze。真实writer→共享显示→observer→canonical合成反例先证提前stable红，修复不加stable更正例外，不改普通后台/child或IM发言策略。
+
+
+### 554 REV03：正文只沿完整已采纳响应提交
+
+完整前缀batch脱敏不构成prefix-safe承诺：JSON闭引号、URL userinfo的@、多行私钥END和known-key最短长度到达前可能暂未识别。Gateway writer保留write_model方法消费未提交raw，避免callback退回宿主write后泄露，但不缓存或发布raw。原raw delta/draft/工具边界flush链与缓存删除，审批、Compact、错误或取消close都不会把raw变成公开正文。
+
+原sealed-call工具边界commit及时显示模型过程说明，原terminal commit/summary正常交付最终回复；IM首段/stream多段、final_only、call幂等、数字model_metrics、工具状态和原等待心跳保持。原私有native与chunk原档不改，公开/progress、IM渲染、CLI共用chunk分派和同会话前台投影都不再公开退休model_delta/model_draft。未知future kind沿原语义，不把kind当作已确认来源。
+
+未添加词法regex、模型请求、线程或状态账。通用batch对终态仍未闭合凭据的识别是独立原合同问题，本片不声称seal可净化任意无效结构。新增test_committed_stream_public_boundary.py使用真实SimpleAgent+fake backend→真实writer→原/progress reader→IM render和rich事件，核每次调用及时提交、流/非流、各档位/短ack、失败/取消close与旧raw重放；不代表真实渠道已验收。

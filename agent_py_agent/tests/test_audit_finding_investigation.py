@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
+
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
+from agent_py_agent.tests.support.ci_host_context_fixtures import bind_local_task
 
 
+# LLM: 发现归属与当前会话均读真实Store；当前主执行沿原TaskLink、RuntimeDB和claim入口建立，不把会话降为本地域。
+# 函数用途: 写临时Store中的发现、主执行与claim，不调用模型或网络，保原owner错配负例。
 def _agent_with_finding(tmp_path, *, finding_owner: str | None = None):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -58,16 +63,22 @@ def _agent_with_finding(tmp_path, *, finding_owner: str | None = None):
             },
         }
     )
-    agent._current_run_params = SimpleNamespace(
+    bind_local_task(agent, thread.thread_id, "foreground-a")
+    agent._current_run_params = _bind_main_agent_authority(agent, RunParams(
         task_id="foreground-a",
         run_id="foreground-a",
         request_id="foreground-a",
         source="background_main_agent",
+        context_scope="conversation",
         task_attributes={
             "conversation_thread_id": thread.thread_id,
             "conversation_task_id": "foreground-a",
         },
-    )
+    ))
+    assert agent.conversation_store.claims.acquire({
+        "thread_id": thread.thread_id, "task_id": "foreground-a",
+        "reason": "thread_goal_continue", "lease_seconds": 60,
+    }) is not None
     return agent, thread, audit_id
 
 

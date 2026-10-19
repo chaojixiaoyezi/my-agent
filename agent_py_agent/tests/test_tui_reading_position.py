@@ -102,11 +102,11 @@ def test_gateway_submission_closes_previous_response_before_inserted_input():
     runtime = TuiRuntime("reading-steer")
     runtime.enqueue_prompt("request", "开始", queued=False)
     turn = runtime.begin_turn("request")
-    turn.write_model("插话前的回答")
+    turn.on_gateway_event({"kind": "assistant_final", "text": "插话前的回答", "model_source": {"call_id": "before-input"}})
     runtime.enqueue_active_turn_input("input", "用户补充")
     event = {"kind": "active_turn_input_submitted", "client_message_ids": ["input"], "provider_call_id": "call-2"}
     turn.on_gateway_event(event)
-    turn.write_model("收到补充后的回答")
+    turn.on_gateway_event({"kind": "assistant_final", "text": "收到补充后的回答", "model_source": {"call_id": "after-input"}})
     turn.on_gateway_event(event)  # 重复回执不能把同一段回答再切开。
     turn.on_gateway_event({"kind": "active_turn_input_consumed", "client_message_ids": ["input"]})
     turn.finalize(TuiTurnSummary(response_text="收到补充后的回答", ok=True))

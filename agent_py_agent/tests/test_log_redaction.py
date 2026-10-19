@@ -282,3 +282,128 @@ def test_authorization_value_stops_before_next_authorization_key() -> None:
     safe = redact_sensitive_text("Authorization: Basic FIRSTSECRET01 Proxy-Authorization: Token SECONDSECRET02")
     assert "FIRSTSECRET01" not in safe and "SECONDSECRET02" not in safe
     assert "Proxy-Authorization: Token" in safe
+
+
+# LLM: 完整批次也可能止于未闭合JSON或PEM；仅用合成值同时守共用脱敏和原公开正文入口，不依赖sealed来源代替脱敏。
+# 函数用途: 钉住两个原漏遮尾部和闭合对照；失败仅报告合成标记是否隐藏，不打印原正文。
+@pytest.mark.parametrize("kind", ["json", "pem"])
+@pytest.mark.parametrize("closed", [False, True])
+def test_explicit_secret_batch_truncation_masked(kind: str, closed: bool) -> None:
+    from agent_py_agent.agent.gateway_parts.stream_events import public_model_text
+
+    marker = "synthetic-only-secret-batch572"
+    if kind == "json":
+        text = '{"api_key":"' + marker + ('"}' if closed else '')
+    else:
+        text = '-----BEGIN PRIVATE KEY-----\n' + marker + ('\n-----END PRIVATE KEY-----' if closed else '')
+    common_hidden = marker not in redact_sensitive_text(text)
+    public_hidden = marker not in public_model_text(text, max_chars=0, delivery_channel="tui", identifiers=())
+    assert common_hidden, "synthetic_common_marker_hidden=False"
+    assert public_hidden, "synthetic_public_marker_hidden=False"
+
+
+# LLM: 明确凭据键沿原词表和引号边界遮蔽，EOF不等于合法闭引号；转义、异种引号与换行不能漏掉尾段。
+# 函数用途: 用不同终止形状和labels模式验证整段秘密不会残留，普通前后字段保持。
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize("labels", [False, True])
+@pytest.mark.parametrize("ending", ["closed", "eof", "backslash_eof"])
+@pytest.mark.parametrize("value_kind", ["plain", "opposite_quote", "escaped_quote", "multiline"])
+def test_batch_json_secret_value_boundaries(quote, labels, ending, value_kind) -> None:
+    marker = "synthetic-only-secret-boundary572"
+    other = "'" if quote == '"' else '"'
+    body = {"plain": marker, "opposite_quote": "prefix" + other + marker,
+            "escaped_quote": "prefix\\" + quote + marker,
+            "multiline": "prefix\n" + marker + "\nlast"}[value_kind]
+    end = quote + ', "ordinary_after": "after"}' if ending == "closed" else ("\\" if ending == "backslash_eof" else "")
+    text = '{"ordinary_before":"before", ' + quote + 'db_password' + quote + ': ' + quote + body + end
+    safe = redact_sensitive_text(text, redact_assignment_labels=labels)
+    hidden = marker not in safe
+    assert hidden, "synthetic_boundary_marker_hidden=False"
+    assert '"ordinary_before":"before"' in safe
+    if ending == "closed":
+        assert '"ordinary_after": "after"' in safe
+    elif not labels:
+        assert safe.endswith(quote + "<redacted>"), "EOF不得被伪造为完整JSON"
+
+
+# LLM: 普通key不消费扩展值体；内部明确凭据标签或后续真实字段仍须由同一个凭据规则处理。
+# 函数用途: 防止为了EOF扩展普通外层匹配，反而吞掉需要遮蔽的内嵌或重复秘密。
+@pytest.mark.parametrize("shape", ["after", "inside_single", "inside_double", "repeated", "nested"])
+def test_batch_json_ordinary_fields_do_not_swallow_credentials(shape) -> None:
+    marker = "synthetic-only-secret-nested572"
+    texts = {
+        "after": '{"note":"before", "api_key":"' + marker,
+        "inside_single": '{"note":"before \'api_key\': \'' + marker + '\' after", "other":"kept"}',
+        "inside_double": "{'note':'before \"api_key\": \"" + marker + "\" after', 'other':'kept'}",
+        "repeated": '{"api_key":"' + marker + '","note":"kept","api_key":"' + marker,
+        "nested": '{"note":{"password_hint":"kept", "nested":{"client_secret":"' + marker,
+    }
+    safe = redact_sensitive_text(texts[shape])
+    hidden = marker not in safe
+    assert hidden, "synthetic_nested_marker_hidden=False"
+    assert "note" in safe
+    if shape != "after":
+        assert "kept" in safe
+
+
+# LLM: 本片不改变完整键后缀、纯全大写变量引用和source-only调用方选择；普通值即使截断也不能被当秘密。
+# 函数用途: 保持误伤边界、原变量引用及源码显式模式。
+@pytest.mark.parametrize("key", ["max_tokens", "token_count", "password_hint", "secretary", "note"])
+@pytest.mark.parametrize("ending", ['"}', "", "\\"])
+def test_batch_json_non_secret_keys_remain_unchanged(key, ending) -> None:
+    text = '{"' + key + '": "ordinary-value' + ending
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize("value", ["$TOKEN", "${TOKEN}"])
+@pytest.mark.parametrize("ending", ['"}', ""])
+def test_batch_json_variable_references_keep_original_contract(value, ending) -> None:
+    text = '{"api_key":"' + value + ending
+    assert redact_sensitive_text(text) == text
+
+
+def test_batch_source_mode_and_url_authority_contract_unchanged() -> None:
+    source = '{"api_key":"synthetic-source-reference572'
+    assert redact_sensitive_text(source, code_file=True) == source
+    for text in ('{"api_key":""}', '{"api_key":"', 'https://host:8420/path',
+                 'url = f"postgres://{user}:{password}@{host}/db"'):
+        assert redact_sensitive_text(text, code_file=True) == text
+    assert redact_sensitive_text('{"api_key":""}') == '{"api_key":""}'
+
+
+# LLM: PEM沿原大写BEGIN/END形状与原固定marker；缺END保守遮到EOF，普通前缀/完整块后的正文不吞。
+# 函数用途: 验证不同私钥标签在普通和源码模式中的完整与截断边界。
+@pytest.mark.parametrize("label", ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize("code_file", [False, True])
+def test_batch_pem_begin_masks_until_end_or_eof(label, closed, code_file) -> None:
+    marker = "synthetic-only-secret-pem572"
+    text = "before\n-----BEGIN " + label + "-----\n" + marker
+    if closed:
+        text += "\n-----END " + label + "-----\nafter"
+    safe = redact_sensitive_text(text, code_file=code_file, redacted_marker="CUSTOM")
+    hidden = marker not in safe
+    assert hidden, "synthetic_pem_marker_hidden=False"
+    assert safe == "before\n<redacted-private-key>" + ("\nafter" if closed else "")
+
+
+# LLM: 扩展边界仍是互斥字符分支，不能回退成嵌套量词；复用既有墙钟兜底和原0.1秒宽松预算。
+# 函数用途: 钉住长截断值、尾反斜杠、普通key和重复伪END不会带来灾难回溯。
+@pytest.mark.parametrize("shape", ["json_eof", "backslashes", "ordinary_key", "decoy_keys", "pem_eof", "pem_decoy_end"])
+def test_batch_truncated_redaction_retains_linear_budget(shape) -> None:
+    from agent_py_agent.tests.test_log_redaction_variable_refs import _assert_redacts_within_budget
+
+    text = {
+        "json_eof": '{"api_key":"' + "x" * 20000,
+        "backslashes": '{"api_key":"' + "\\" * 20001,
+        "ordinary_key": '{"' + "x" * 20000 + '":"' + "v" * 20000,
+        "decoy_keys": '"password_hint":"x" ' * 2000,
+        "pem_eof": "-----BEGIN PRIVATE KEY-----\n" + "x" * 50000,
+        "pem_decoy_end": "-----BEGIN PRIVATE KEY-----\n" + "-----END INVALID-----\n" * 2000,
+    }[shape]
+    _assert_redacts_within_budget(shape, text)
+
+
+def test_batch_unrelated_pem_and_port_urls_remain_unchanged() -> None:
+    for text in ("-----BEGIN PUBLIC KEY-----\nordinary-public-material", "-----BEGIN CERTIFICATE-----\nordinary-certificate", "https://host:8420/path", "postgres://host:5432/db"):
+        assert redact_sensitive_text(text) == text

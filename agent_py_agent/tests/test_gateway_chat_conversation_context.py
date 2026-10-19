@@ -121,6 +121,7 @@ from agent_py_agent.agent.task_progress import (
 from agent_py_agent.agent.user_space.home_indexes import latest_task_refs
 from agent_py_agent.tests._gateway_history_helpers import context_history, history_source_of
 from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 
 
 def _promote_work_tool(
@@ -424,10 +425,8 @@ def test_gateway_final_persists_typed_model_failure_including_repair(tmp_path, m
         assert snapshot and snapshot["complete"] is True
         assert snapshot["gateway_request_id"] == "req-length"
         assert snapshot["events"][0]["payload"]["text"] == "先检查现有文件"
-        if body:
-            assert snapshot["live_final_block_id"].startswith(snapshot["request_id"] + ":assistant:")
-        else:
-            assert "live_final_block_id" not in snapshot
+        # 错误响应前raw候选未被提交；原canonical错误正文/native仍完整保存。
+        assert "live_final_block_id" not in snapshot
     before = store.storage.message_path(thread.thread_id).read_bytes()
     request_history.persist_gateway_assistant_result(context, conversation, result)
     assert store.storage.message_path(thread.thread_id).read_bytes() == before
@@ -1116,6 +1115,7 @@ def test_gateway_stream_commentary_uses_same_structured_identifier_redaction(tmp
         (("oc_stream_private_456", "当前会话"), ("req_stream_private_789", "当前请求"))
     )
     writer.write_model("正在处理 oc_stream_private_456，对应 req_stream_private_789。")
+    _commit_writer_fixture(writer, "正在处理 oc_stream_private_456，对应 req_stream_private_789。", call_id="test_gateway_stream_commentary_uses_same_structured_identifier_redaction:0")
     writer.write_progress({"phase": "started"}, "开始")
     writer.close()
 
@@ -1170,6 +1170,7 @@ def test_scoped_local_tui_preserves_paths_in_final_stream_and_history(tmp_path, 
     writer.set_identifier_redactions((("providers/sample-provider/users/example-user", "当前空间"),
                                      ("example-user", "当前用户"), ("req-path-test", "当前请求")))
     writer.write_model(raw)
+    _commit_writer_fixture(writer, raw, call_id="test_scoped_local_tui_preserves_paths_in_final_stream_and_history:0")
     writer.write_progress({"phase": "started"}, "开始")
     writer.close()
     chunks = [json.loads(line) for line in (tmp_path / "chunks.jsonl").read_text().splitlines()]

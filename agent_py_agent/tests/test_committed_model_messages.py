@@ -22,6 +22,13 @@ def _payload(messages, *, call_id="call-display", boundary="terminal", final="�
             "messages": messages, "boundary": boundary, "final_text": final}
 
 
+# LLM: 仅纯writer/展示映射单测可构造已验输入；真实Agent接线必须由原core sealed-call提交，禁止该helper介入。
+# 函数用途: 给纯显示单测完整响应及不同call身份并写原临时chunk，不能把raw flush冒充公开资格。
+def _commit_writer_fixture(writer, text, *, call_id, boundary="tools"):
+    writer.commit_model_response(_payload([{"text": text}], call_id=call_id,
+                                        boundary=boundary, final=text if boundary == "terminal" else ""))
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_cli_fake_tool_loop_commits_text_before_tool_and_keeps_final(tmp_path, capsys, stream):
     agent = _agent(tmp_path)

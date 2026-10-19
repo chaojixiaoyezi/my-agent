@@ -16,6 +16,7 @@ from agent_py_agent.agent.agent_core.runner.worker import (
     _reconcile_audit_source_binding_slice,
     _reconcile_audit_source_worker_slice,
 )
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
     _audit_source_worker_tool_scope_result,
 )
@@ -96,6 +97,8 @@ from agent_py_agent.agent.subagents.runner_result_state import (
 )
 
 
+# LLM: 纯本地Audit合同只携typed当前参数与原属性；source标签不签发后台运输、claim或会话身份，真实会话用例自行绑定原Store。
+# 函数用途: 只在临时目录准备本地manager状态与参数，不创建模型、网络、会话授权或TaskLink。
 def _agent(tmp_path: Path, *, audit_id: str = "audit-source-test", max_subagents: int = 20):
     owner_home = tmp_path / "owner"
     manager = SubAgentManager(
@@ -119,7 +122,7 @@ def _agent(tmp_path: Path, *, audit_id: str = "audit-source-test", max_subagents
         subagents=manager,
         conversation_store=None,
         tools=SimpleNamespace(specs=lambda: []),
-        _current_run_params=SimpleNamespace(
+        _current_run_params=RunParams(
             source="background_main_agent",
             task_id=audit_id,
             request_id=audit_id,
@@ -1078,6 +1081,9 @@ def test_generic_audit_child_is_not_adopted_as_a_source_worker(
     )
     audit_id = "audit-generic-child-not-adopted"
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
+    # 本例进入真实child作用域，沿原Store入口绑定其根；不能把缺根解释成普通本地调用。
+    _bind_audit_workspace(agent, owner_home, audit_id, tmp_path)
+    agent.subagents.conversation_store = agent.conversation_store
     state = _watch(owner_home, audit_id, 1)
     attrs = {
         AUDIT_ATTR: True,
@@ -1094,13 +1100,11 @@ def test_generic_audit_child_is_not_adopted_as_a_source_worker(
         allowed_tools=["run_command", "write_file"],
         attributes=attrs,
     )
-    generic.status = TaskStatus.RUNNING.value
-    generic.runner_active_attempt_id = "attempt-generic"
-    agent.subagents.save(generic)
+    generic = agent.subagents.lifecycle.prepare_runner_attempt(generic.id)
     previous = set_current_subagent_context(
         agent,
         run_id=generic.id,
-        attempt_id="attempt-generic",
+        attempt_id=generic.runner_active_attempt_id,
         task_attributes=dict(attrs),
     )
     try:

@@ -19,6 +19,7 @@ from agent_py_agent.agent.delivery import (
     ReplyEnvelope,
 )
 from agent_py_agent.agent.delivery.progress import ProgressDeliveryReceipt
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 
 
 class Adapter:
@@ -290,24 +291,45 @@ def test_feishu_draft_keeps_text_type_when_content_becomes_markdown(monkeypatch)
     assert json.loads(calls[1][2]["content"])["text"].startswith("**检查完成**")
 
 
-def test_long_model_draft_keeps_latest_window_after_complete_redaction(monkeypatch):
-    from types import SimpleNamespace
+def test_long_model_draft_keeps_latest_window_after_complete_redaction(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import stream_events
+    from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 
-    from agent_py_agent.agent.gateway_parts import stream_writer
+    content = '旧内容' * 3000 + '最新结果'
+    observed = []
 
-    events=[]
-    content='旧内容'*3000+'最新结果'
-    observed=[]
     def public(text, *, max_chars, **kwargs):
-        observed.append((len(text),max_chars))
-        return text.replace('旧内容','已脱敏')
-    monkeypatch.setattr(stream_writer,'public_model_text',public)
-    writer=SimpleNamespace(_last_im_draft_at=0,_model_segment=[content],delivery_channel='feishu',
-        _identifier_redactions=(),_write_event=events.append)
-    stream_writer._write_im_draft(writer)
-    assert observed==[(len(content),0)]
-    assert len(events[0]['text'])==8000
+        observed.append((len(text), max_chars))
+        return text.replace('旧内容', '已脱敏')
+
+    monkeypatch.setattr(stream_events, 'public_model_text', public)
+    writer = BufferedChunkStreamWriter(tmp_path / 'committed.jsonl')
+    writer.set_verbose_level('stream', preview_max_chars=8000)
+    _commit_writer_fixture(writer, content, call_id='long-committed')
+    import json
+
+    events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
+    assert observed == [(len(content), 0), (len(content), 0)]
+    # 原raw草稿8K裁剪退休；已确认全文完整留在原chunk，展示上限仍由原投递配置消费。
+    assert events[0]['text'] == content.replace('旧内容', '已脱敏')
+    assert events[0]['preview_max_chars'] == 8000
     assert events[0]['text'].endswith('最新结果')
+    from agent_py_agent.agent.adapter.progress_draft import send_gateway_draft
+
+    store = GatewayReplyDeliveryStore(tmp_path / 'delivery')
+    provider = Adapter()
+    registry = ChannelAdapterRegistry()
+    registry.register_adapter('feishu', provider, capabilities=ChannelCapabilities(edit_progress=True))
+    service = DeliveryService(registry)
+    worker = GatewayReplyDeliveryWorker(store, poll_response=lambda _: None,
+        deliver_response=lambda *_: False,
+        poll_progress=lambda _: GatewayProgressBatch((events[0]['text'],), 1, 'stream', True, 8000),
+        deliver_progress=lambda row, text: send_gateway_draft(service, row, text))
+    worker.enqueue(PendingGatewayReply(request_id='long-committed', channel='feishu', user_id='user', message_id='message'))
+    worker.run_once()
+    delivered = store.pending()[0].progress_draft['content']
+    assert len(delivered) == 8000
+    assert delivered.endswith('最新结果')
 
 
 def test_failed_edit_recovers_same_id_and_uses_latest_content(tmp_path, monkeypatch):

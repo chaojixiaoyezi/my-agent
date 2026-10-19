@@ -70,13 +70,13 @@ def _agent(tmp_path, *, method_body=None):
     return agent, store, entries
 
 
-# LLM: 主任务使用真实会话/任务库与可信回合属性；不把输出文案当成任务身份。
-# 函数用途: 为包首次读取建立可在重新装配 Agent 后恢复的任务关联。
+# LLM: 主任务使用真实会话/任务库与 typed 当前运行；run_id 精确对应同一 TaskLink，不以缺失运行身份绕过委派来源读取。
+# 函数用途: 为包首次读取和原工具派工建立可在重新装配 Agent 后恢复的任务关联；不签发外部 actor 或执行租约。
 def _bind_main_task(agent, task_id="main-task"):
     thread = agent.conversation_store.threads.get_or_create({"canonical_user_id": "local/main", "channel": "cli", "channel_conversation_id": "test-chat"})
     agent.conversation_store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "整理长篇内容"})
     attrs = {"conversation_thread_id": thread.thread_id, "conversation_task_id": task_id}
-    agent._current_run_params = RunParams(task_id=task_id, task_attributes=attrs)
+    agent._current_run_params = RunParams(task_id=task_id, run_id=task_id, task_attributes=attrs)
     return attrs
 
 

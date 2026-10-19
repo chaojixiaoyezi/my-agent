@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 
 
 def _agent(max_subagents: int = 10) -> MagicMock:
@@ -49,13 +50,15 @@ def _create_run_sequence(mock_agent):
     return create_run
 
 
+# LLM: 此计划夹具是无通道的typed本地主运行；保留原run/task及工作区字段，不用缺失身份触发委派降级。
+# 函数用途: 为现有计划和covers回归建立本地父参数及临时计划账，不能模拟IM授权或后台claim。
 def _planned_agent(tmp_path) -> MagicMock:
     workspace = tmp_path / "project"
     workspace.mkdir()
     mock_agent = _agent()
     mock_agent.home_paths = None
     mock_agent.root = tmp_path / "owner-home"
-    mock_agent._current_run_params = SimpleNamespace(
+    mock_agent._current_run_params = RunParams(
         run_id="plan-root",
         task_id="plan-root",
         context_scope="default",

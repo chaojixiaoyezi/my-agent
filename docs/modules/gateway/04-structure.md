@@ -1,3 +1,17 @@
+## 2026-10-18 最终正文投影入口（554候选）
+
+`backends.assistant_messages` 共用阶段选择与独立安全可分性判据；
+`model.visible_response` 保原 sealed 来源门并传递渲染方式。
+`FinalizationService` 保内部结果及整次 model_response，不从公开净化结果反推失败。
+`cli.run_output`、`tui_runtime`、`plain_ui` 与 `scenario` 原公开入口负责完整净化；
+TUI 的完整committed候选随原 active 生命周期清除，local TUI/plain callback 均等同 call 提交。
+原 Gateway `request_history`/`stream_events` 的公开投影、空投影权威及部分事实收口不变。
+
+`test_final_response_projection_roles.py` 覆盖无 phase 内部原文、跨 phase 安全上下文、
+真实 CLI/TUI/plain/scenario 出口、实时拆标签和原边界/取消/超时后的当前正文。
+`test_background_reply_after_foreground_failure` 明确空 error carrier 的原请求/native 身份，
+后续后台汇总、Wake 与消息页原断言保持。
+
 ## 2026-10-18 凭据表单类型化出口（已实现，发行验收另记）
 
 `user_space/task_credential_forms.py::CredentialFormValidationError`只承载固定码、提示和
@@ -3482,3 +3496,12 @@ cold/ready正Count普通远端HTTP控制统一使用原固定HTTP producer；rea
 ### 515 P2 REV02：唯一冻结边界
 
 foreground_transcript._consume_event的typed final保原candidate_id并发active-only全文更新；prepare_final原live_final_block_id继续由canonical历史接替。TUI reducer只给当前active assistant_delta的显式replace_text替换能力，stable重放门不变；本地/Gateway延后显示均由原adapter守住。Responses done真实索引仅在原collector内部typed属性运输，不进provider JSON或新状态源。
+
+
+### 554 REV03：唯一已确认正文入口与退休candidate消费
+
+local on_chunk与Gateway旧model_delta均只计量；只有原完整committed assistant_commentary/final或summary进入正文。committed consumer在defer之后复用原thinking完成/late标记，保持active-only替换与summary唯一freeze，不借raw结束展示生命周期。
+
+writer.write_model必须保留以消费原ToolBoundaryChunkFilter优先接口，不能删除后让raw落回write/runtime_progress；raw缓存、草稿、增量flush和边界commentary支路均退休。原commit_visible_response仍从已验工具准入与最终收口提交同sealed-call payload；不新增同义门或provider phase。
+
+/progress原白名单只接已确认commentary；IM renderer拒退休draft/delta且poll不再以draft截断合法前文；CLI _emit_chunk_line在typed callback之前消费退休行并正常推进游标；foreground sink不再将raw delta写同会话显示。原native/chunk私档、canonical消息、断连游标与未知未来事件语义不改。main_activity只投影阶段、control /status只给固定文案，没有额外正文出口。

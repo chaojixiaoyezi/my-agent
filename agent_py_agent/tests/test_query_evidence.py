@@ -125,7 +125,8 @@ def test_domain_filtered_zero_preserves_provider_observation():
 @pytest.mark.parametrize('native', [False, True])
 @pytest.mark.parametrize('owner_kind', ['main', 'user', 'group'])
 def test_canonical_system_override_and_all_owners_share_switch(tmp_path, native, owner_kind):
-    config = AgentConfig(prompt_files=[])
+    # 此用例只核查询开关，独立的执行中沟通指导由共同启用用例覆盖。
+    config = AgentConfig(prompt_files=[], assistant_progress_updates_enabled=False)
     config.query_zero_result_review_enabled = True
     home = SimpleNamespace(owner_provider='local' if owner_kind == 'main' else 'feishu', owner_kind=owner_kind, owner_id='owner')
     builder = PromptBuilder(config, tmp_path, home_paths=home)

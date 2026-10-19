@@ -23,6 +23,7 @@ from agent_py_agent.cli.chat_parts.tui_threading import (
     _consume_gateway_background_snapshot,
     _publish_background_notice_row,
 )
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 
 
 # LLM: 使用真实 writer、显示 mapper 和临时 canonical store，不启用模型或业务工具。
@@ -47,10 +48,12 @@ def _emit_work(writer):
     writer.write_thinking_delta("先检查")
     writer.write_thinking("先检查现有文件", duration_seconds=2)
     writer.write_model("我来读取文件。")
+    _commit_writer_fixture(writer, "我来读取文件。", call_id="foreground-tools")
     progress = {"round": 1, "call_index": 0, "tool": "read_file"}
     writer.write_progress({**progress, "phase": "started", "detail": "src/main.py"}, "")
     writer.write_progress({**progress, "phase": "completed", "ok": True, "output": "完整正文"}, "")
     writer.write_model("最终回复的半句\n尚未提交的下一行")
+    _commit_writer_fixture(writer, "最终回复的半句\n尚未提交的下一行", call_id="foreground-final", boundary="terminal")
     writer.flush()
 
 
@@ -84,7 +87,7 @@ def test_live_and_canonical_final_converge_without_duplicate_or_active_candidate
         assert _consume_gateway_background_snapshot(client, "session", runtime, [None], set(), [0])
     if live_prefix == "all":
         before = runtime.store.snapshot()
-        assert [block.text for block in before.active_blocks if block.role == "assistant"] == ["最终回复的半句\n"]
+        assert [block.text for block in before.active_blocks if block.role == "assistant"] == ["最终回复的半句\n尚未提交的下一行"]
         assert {block.role for block in before.stable_blocks} == {"user", "thinking", "assistant", "tool"}
         assert before.stable_blocks[0].role == "user"
     rows = _commit(writer, store, thread)
@@ -136,11 +139,12 @@ def test_steering_discards_uncommitted_candidate_and_confirms_exact_input(tmp_pa
     writer.begin_active_turn_input(("input-1",))
     writer.complete_active_turn_input(("input-1",), client_messages=(("input-1", "先看第二份"), ("other", "不能出现")))
     writer.write_model("按补充要求继续\n尚未提交的下一行")
+    _commit_writer_fixture(writer, "按补充要求继续\n尚未提交的下一行", call_id="foreground-steered", boundary="terminal")
     writer.flush()
     runtime = TuiRuntime("observer")
     runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"])
     snap = runtime.store.snapshot()
-    assert [b.text for b in snap.active_blocks if b.role == "assistant"] == ["按补充要求继续\n"]
+    assert [b.text for b in snap.active_blocks if b.role == "assistant"] == ["按补充要求继续\n尚未提交的下一行"]
     assert [b.text for b in snap.stable_blocks if b.role == "user"] == ["先看第二份"]
 
 

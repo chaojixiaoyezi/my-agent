@@ -4,7 +4,7 @@
 USER_REPLY_UNAVAILABLE 诚实失败；之后子代理结束，父级后台续跑写完报告、TaskRun 以 done 关闭。当时没记录这条后台回复
 是否送到用户。隔离网关加脚本化假模型复现确认已送达；这里用真实 echo Gateway、真实工具循环、真实后台调度器和
 agent 自己的 delivery_service 钉住：
-1. 前台只有思考没有正文 → 请求以 USER_REPLY_UNAVAILABLE 失败，线程里没有前台的助手回复；
+1. 前台只有思考没有正文 → 请求以 USER_REPLY_UNAVAILABLE 失败，只保空error/partial载体及原native，没有可见/成功前台终答；
 2. 子代理结束的 wake 由后台调度器跑出父级最终回复：投递原因 root_subagents_terminal、落到 canonical 会话记录，
    并出现在 TUI 轮询的后台消息页（read_background_response_page，Gateway 的后台通知接口读的就是它）。
 """
@@ -20,6 +20,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentScheduler,
 )
 from agent_py_agent.agent.conversation.message_stream import read_background_response_page
+from agent_py_agent.agent.conversation.native_history import canonical_native_messages_from_metadata
 from agent_py_agent.agent.conversation.runtime import COMPLETION_COALESCE_WINDOW_SECONDS
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import (
@@ -72,7 +73,18 @@ def test_background_completion_after_failed_foreground_reaches_the_tui(gateway, 
     thread_id = store.threads.resolve(channel="chat", channel_conversation_id=_SESSION,
                                       channel_user_id="local-agent").thread_id
     rows, cursor, _errors = store.messages.page_after_offset_report(thread_id, after=0)
-    assert not [row for row in rows if row.role == "assistant" and (row.metadata or {}).get("assistant_part_id") == "final"]
+    foreground_finals = [row for row in rows if row.role == "assistant" and (row.metadata or {}).get("assistant_part_id") == "final"]
+    # 原partial保留失败前native事实；final是幂等carrier身份，空error不等于成功/可见前台答复。
+    assert not [row for row in foreground_finals if row.content or row.metadata.get("turn_end_reason") == "completed"]
+    assert len(foreground_finals) == 1 and foreground_finals[0].content == ""
+    partial = foreground_finals[0]
+    assert partial.metadata["turn_end_reason"] == "error"
+    assert partial.thread_id == thread_id
+    assert partial.metadata["gateway_request_id"] == partial.metadata["conversation_request_id"] == request_id
+    native = canonical_native_messages_from_metadata(partial.metadata)
+    assert native
+    assert any(block.get("type") == "thinking" and block.get("thinking") == "还在等子代理，先不回复。"
+               for item in native if item.get("role") == "assistant" for block in item.get("content", []) if isinstance(block, dict))
 
     # 真机里前台派了子代理，请求因此升格成会话任务（任务关联存在、状态 active）；子代理在前台失败后才结束。
     # 这里按同一结构登记：没调工具的失败请求本身不建关联，所以显式登记 active 关联，再让子代理 DONE、发出结束 wake。

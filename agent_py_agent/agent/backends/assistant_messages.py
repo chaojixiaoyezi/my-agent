@@ -59,14 +59,36 @@ def message_projection(rows: list[dict], project: Callable[[str], str]) -> tuple
     return projected, full, full == "".join(row["text"] for row in projected)
 
 
-# LLM: 只从当前合法且一致的正文选阶段；整段安全上下文不闭合时保留净化整段，commentary-only仍无终答；不控制采样。
-# 函数用途: 生成最终用户正文投影，保留模型响应text和原内容块不变。
-def final_response_text(response: object) -> str:
+# LLM: 阶段资格只来自原逐消息metadata；未知/no-phase沿原资格，不能从正文或投影是否为空反推宿主状态。
+# 函数用途: 选出明确final，或没有明确final时排除commentary，供内部正文和公开显示共用。
+def _final_messages(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if row.get("phase") == "final_answer"] or [
+        row for row in rows if row.get("phase") != "commentary"]
+
+
+# LLM: 完整当前text一致且全为commentary才缺最终候选；拒绝/转换后的fallback行没有phase，不能复活原块或改成阶段失败。
+# 函数用途: 为宿主缺终答收口提供结构化阶段判据，不读取公开净化后的文案。
+def commentary_only_response(response: object) -> bool:
+    rows = response_messages(response)
+    return bool(rows) and not _final_messages(rows)
+
+
+# LLM: 只包装原公开安全合同，不改消息来源、状态或内部正文；可分性必须始终用此投影，不能随渲染project改成identity。
+# 函数用途: 为完整响应和逐消息使用同一凭据/内部协议净化。
+def _public_message_text(text: str) -> str:
     from ..conversation.channels import project_user_reply
 
-    rows, full, separable = message_projection(response_messages(response), lambda text: project_user_reply(text).content)
-    finals = [row["text"] for row in rows if row.get("phase") == "final_answer"]
-    selected = "".join(finals or [row["text"] for row in rows if row.get("phase") != "commentary"])
+    return project_user_reply(text).content
+
+
+# LLM: 渲染project与安全可分性分离；core可取identity原文，但跨段标签不可分时保整次原文交公开门，不丢前文再发后缀。
+# 函数用途: 共用一份阶段选择生成内部最终段或默认公开正文，commentary-only无终答且不控制采样。
+def final_response_text(response: object, *, project: Callable[[str], str] | None = None) -> str:
+    original = response_messages(response)
+    safe_rows, safe_full, separable = message_projection(original, _public_message_text)
+    rows = safe_rows if project is None else [{**row, "text": project(str(row["text"]))} for row in original]
+    full = safe_full if project is None else project("".join(str(row["text"]) for row in original))
+    selected = "".join(row["text"] for row in _final_messages(rows))
     return selected if separable or not selected else full
 
 

@@ -1,4 +1,4 @@
-# LLM: 日志、公开投递与模型工具输出共用脱敏；PASS/短口令/完整引号值均遮蔽，源码专用模式由调用方显式指定。
+# LLM: 日志、公开投递与模型工具输出共用脱敏；明确秘密字段和PEM即使终态截断也遮蔽，源码专用模式与纯变量引用由原合同保持。
 # 模块用途: 在公开输出前隐藏秘密，并避免把源码变量引用和行尾语法误当成密钥删掉。
 from __future__ import annotations
 
@@ -127,13 +127,12 @@ _SECRET_QUOTED_ASSIGNMENT_RE = re.compile(
     rf"(?i)(^|[^\w.-])((?:[A-Za-z0-9_.-]*[_.-])?(?:{_CREDENTIAL_KEY_NAMES}))(\s*[:=]\s*)([\"'])"
     r"((?:\\[\s\S]|(?!\4)[^\\])*)(\4|$)"
 )
-# LLM: 与文本赋值规则（_SECRET_ASSIGNMENT_RE）同口径：正则只用不嵌套的单量词取出整段带引号键名，
-#   是不是凭据键交给回调里的 _is_credential_key_name 判（同一份词表、同一套末尾片段规则）。
-#   原来这里是精确字段名枚举，`{"db_password": ...}`、`{"api-token": ...}` 这类带前缀的 JSON 键
-#   一律不打码，与文本规则口径不一致（9b 建议 2 记账的那处差异）。
-# 常量用途: 匹配"带引号键名: 带引号值"，键名由回调按完整末尾片段决定是否打码。
+# LLM: 键名先沿同一凭据词表限定完整末尾片段，回调仍复核原判定；普通字段不能消费扩展值体，免得吞掉内部待遮秘密。
+#   值体各分支互斥：完整转义、EOF孤立反斜杠、非同种引号字符；缺闭引号时只消费到绝对EOF，不伪造JSON修复。
+# 常量用途: 遮住明确凭据JSON字段的非空完整或截断引号值，保留原分组、变量引用与源码模式合同。
 _SECRET_JSON_FIELD_RE = re.compile(
-    r"(?i)([\"'])([A-Za-z0-9_.-]+)(\1\s*:\s*)([\"'])([^\"'\r\n]{1,})(\4)"
+    rf"(?i)([\"'])((?:[A-Za-z0-9_.-]*[_.-])?(?:{_CREDENTIAL_KEY_NAMES}))(\1\s*:\s*)([\"'])"
+    r"((?:\\[\s\S]|\\\Z|(?!\4)[^\\])+)(\4|\Z)"
 )
 _URL_PASSWORD_RE = re.compile(
     rf'(\b[A-Za-z][A-Za-z0-9+.-]*://(?:{_SOURCE_URL_SLOT}|{_NOT_SOURCE_URL_SLOT}[^:/?\#\s\"\'`@])+:)'
@@ -148,8 +147,10 @@ _KNOWN_SECRET_RE = re.compile(
     r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}|"
     r"pypi-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{10,})(?![A-Za-z0-9_-])"
 )
+# LLM: 明确的PEM私钥BEGIN即建立秘密边界；完整块沿原END结束，终态缺END则保守遮到绝对EOF，不推断任意正文。
+# 常量用途: 隐藏完整或被截断的私钥块，普通文本和原私钥标记不变。
 _PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
+    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END[A-Z ]*PRIVATE KEY-----|\Z)"
 )
 # LLM: 打码要隐藏的是秘密本身；变量引用不是秘密，只是"值在别处"的写法。整段恰好是一个纯变量引用
 #   时保留原文，否则复审会看到 <redacted> 而误判正确的脚本"没带凭据"，模型照抄还可能把字面量
@@ -195,8 +196,8 @@ def _redact_assignment(match: re.Match[str], marker: str, labels_only: bool) -> 
     return match.group(1) + match.group(2) + match.group(3) + match.group(4) + _mask_secret_value(match.group(5), marker) + match.group(6)
 
 
-# LLM: JSON 字段规则与文本赋值规则同口径：正则只取整段带引号键名，凭据判定交给同一个
-#   _is_credential_key_name。分组为 1=键名开引号、2=键名、3=引号+冒号、4=值开引号、5=值、6=闭引号。
+# LLM: JSON 字段与文本赋值共用原凭据末尾片段判定；正则先限凭据键，避免普通外层字段吞掉内部秘密。
+#   分组为1=键名开引号、2=键名、3=引号+冒号、4=值开引号、5=值、6=闭引号或EOF空串；不补造闭引号。
 #   非凭据键原样返回（`{"max_tokens": 4096}` 这类不能被误伤）；值仍是带美元符号的纯变量引用时，
 #   _mask_secret_value 会照 rdv2 的口径保留原文。
 # 函数用途: 判一条 "键": "值" 要不要打码；要打就把值遮住，不要就原样返回。

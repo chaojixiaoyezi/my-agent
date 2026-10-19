@@ -1,5 +1,5 @@
 # LLM: Gateway 流出口组合请求缓冲、公开投影、审批和等待 mixin；执行权及最终结果由调用方提交，等待关闭只拦展示。
-# 事件先写原 chunk 再投影，模型候选与确认消息必须区分；修改时同步 streaming、审批、插话和重连回归。
+# 事件先写原chunk再投影，raw候选只消费不留存；正文唯一来自原sealed-call commit，修改时同步审批、插话和重连回归。
 # 模块用途: 将模型、工具、排队与控制过程按原顺序写给客户端，保留权限、脱敏和迟到读取边界。
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ from .stream_events import (
     provider_retry_event,
     public_context_compaction_payload,
     public_context_usage_payload,
-    public_model_text,
     thinking_event,
 )
 from .stream_liveness import StreamLiveness
@@ -78,10 +77,10 @@ def _write_provider_queue_event(writer, value: object) -> None:
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
 # 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；审批模式提供者由宿主绑定，显示故障不能中止请求。
-# 类用途: 缓冲模型/工具事件，发布白名单排队事实并组合 IM 等待接口；公开投影复核原等待资格。
+# 类用途: 缓冲宿主/工具事件，提交完整模型公开正文并组合IM等待接口；不发布未提交raw候选。
 @dataclass
 class BufferedChunkStreamWriter(StreamLiveness):
-    """Buffer model deltas and persist typed user-visible stream events."""
+    """Persist committed model replies and typed host/tool events."""
 
     chunk_path: Path
     flush_interval_seconds: float = _CHUNK_STREAM_FLUSH_INTERVAL_SECONDS
@@ -94,13 +93,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _im_preview_max_chars: int = 100
     _display_timezone: str = ""
     im_approval_agent: object | None = field(default=None, repr=False)
-    _model_segment: list[str] = field(default_factory=list)
-    _model_delta_buffer: list[str] = field(default_factory=list)
-    _model_delta_chars: int = 0
-    _model_delta_published: str = ""
     _committed_model_calls: set[str] = field(default_factory=set)
-    _last_im_draft_at: float = 0.0
-    _last_model_delta_flush_at: float = field(default_factory=time.monotonic)
     _commentary_emitted: bool = False
     _committed_commentary: list[str] = field(default_factory=list)
     _tool_input_active: bool = False
@@ -121,11 +114,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def __post_init__(self) -> None:
         self._approval = StreamApproval(self.chunk_path, self._write_event, self._prepare_permission_request)
 
-    # LLM: 真实等待前按原次序排空增量、确认工具前说明；命中缓存或不支持交互时不调用。
-    # 函数用途: 在审批请求发布之前收起模型候选，使客户端保持一致的事件顺序。
+    # LLM: 真实等待前按原次序刷新宿主进度；模型说明已由原工具准入前sealed-call hook提交，不从审批边界确认raw。
+    # 函数用途: 在审批请求发布之前排空宿主缓冲，使客户端保持原事件顺序。
     def _prepare_permission_request(self) -> None:
         self.flush()
-        self._write_model_commentary_at_boundary()
 
     # LLM: Gateway writer 的 callable 接口沿 write 的原缓冲，不建立另一条发送路径。
     # 函数用途: 让既有文本回调调用者继续使用同一流出口。
@@ -137,33 +129,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def _write_event(self, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
         _publish_writer_event(self, event, still_current=still_current)
 
-    # LLM: rich transcript 逐模型轮暂存 commentary，普通客户端仍只保留首段；任何暂存段都只能在真实工具边界公开。
-    # 函数用途: 接收供应商可见文本增量，等待工具边界确认它是过程说明。
-    # LLM: 普通 IM 候选仍在边界确认；显式 stream 只增加一秒一次的完整脱敏草稿，终态不从候选推断。
-    # 函数用途: 收集同一模型流，按客户端和明确档位发布展示增量，不另生成用户回复。
+    # LLM: 保留原sink方法消费未提交raw，防止ToolBoundaryChunkFilter退回write后公开正文；不保存或发布，数字计量仍走原write_model_metrics。
+    # 函数用途: 接收并丢弃供应商候选，公开正文只由同sealed-call commit_model_response提交。
     def write_model(self, text: str) -> None:
-        """Keep one tentative model segment and stream rich-client deltas live.
-
-        A provider delta is not yet an accepted user reply: the same generation
-        may go on to call a tool, be invalidated by steering, or be replaced by
-        the final structured response.  Only the sanitized commentary emitted
-        at a real tool boundary and the terminal response file are public.
-
-        Rich clients (TUI) additionally receive ``model_delta`` events in real
-        time so the candidate reply appears while it is being generated.  The
-        Redaction uses the cumulative candidate, publishing complete sanitized
-        lines until a structured boundary confirms the remaining suffix. A
-        credential label and value split across batches cannot bypass it.
-        """
-        if not text:
-            return
-        if self.rich_transcript or self._verbose_level == "stream" or not self._commentary_emitted:
-            self._model_segment.append(text)
-        if self.rich_transcript or self._verbose_level == "stream":
-            self._model_delta_buffer.append(text)
-            self._model_delta_chars += len(text)
-            if _stream_flush_due(text, self._model_delta_chars, self._last_model_delta_flush_at, self.flush_chars, self.flush_interval_seconds):
-                self._flush_model_deltas()
+        return None
 
     # LLM: 仅原已采纳响应提交此入口；终态全文替换本次候选，幂等键来自真实call而非正文，IM档位和final-only仍由原出口守门。
     # 函数用途: 确认流式或非流式模型说明并复用原事件，丢弃未确认增量而不重放工具。
@@ -197,7 +166,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._approval.configure(cache, scope_provider, grant_recorder)
 
 
-    # LLM: steering 只清空未确认段并重开普通客户端首段额度；同会话公开投影在同一 typed 边界丢弃候选。
+    # LLM: steering重开普通客户端首段额度，显示sink在同一typed边界清当前公开段；writer不再保未确认raw。
     # 函数用途: 补充输入进入活动回合后建立新分段，不让旧半句混入后续回答。
     def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
         """Allow one new model-authored commentary after live user steering.
@@ -206,10 +175,6 @@ class BufferedChunkStreamWriter(StreamLiveness):
         real user message arriving during the active turn opens exactly one new
         segment so the same run can answer without waiting for final closeout.
         """
-        self._model_segment.clear()
-        self._model_delta_buffer.clear()
-        self._model_delta_chars = 0
-        self._model_delta_published = ""
         self._commentary_emitted = False
         begin = getattr(self.transcript_sink, "begin_active_turn_input", None)
         if callable(begin):
@@ -275,12 +240,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
         if _stream_flush_due(text, self._buffer_chars, self._last_flush_at, self.flush_chars, self.flush_interval_seconds):
             self.flush()
 
-    # LLM: 增量在冻结边界前落到原 chunk；共用 main 投影只观察相同已清洗事件，不改变分段顺序。
-    # 函数用途: 先发尚未送出的模型增量，再发累计的运行过程，避免工具边界前漏字。
+    # LLM: 仅原宿主缓冲落chunk，模型正文另由同call commit提交，任何flush都不授raw公开资格。
+    # 函数用途: 排空累计运行过程，保工具/审批/Compact边界原顺序。
     def flush(self) -> None:
-        # Live model deltas must reach the chunk file before any boundary event
-        # that freezes the segment (commentary/progress/permission/compact).
-        self._flush_model_deltas()
         if not self._buffer:
             return
         text = "".join(self._buffer)
@@ -297,7 +259,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
 
     # LLM: rich transcript 可保留已脱敏的 output/display；真实 tool start 先
     # 清 provider 参数临时行。普通客户端继续按 verbose 合同裁剪，display 一律不外发。
-    # 函数用途: 在工具边界收起参数进度、冻结模型说明，并写入结构化工具事件。
+    # 函数用途: 在工具边界收起参数进度并发布原结构化状态，模型说明沿此前的sealed-call提交。
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
         try:
             observed_round = int(event.get("round") or 0)
@@ -307,7 +269,6 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self.flush()
         if event.get("phase") == "started":
             self._reset_tool_input_progress()
-            self._write_model_commentary_at_boundary()
         progress = dict(event)
         if not self.rich_transcript:
             progress.pop("display", None)
@@ -333,7 +294,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
         if payload:
             self._write_event(payload)
 
-    # LLM: thinking_delta 是流式思考的展示级增量，只做路径/标识脱敏（同 model_delta，
+    # LLM: thinking_delta 保原独立思考展示合同，只做路径/标识脱敏，
     # 不做 project_user_reply——那会把未完成思考当终稿投影）；canonical assistant_thinking
     # 始终全量脱敏并覆盖流式内容。
     # 函数用途: 实时转发 provider 流式思考增量（rich 客户端，思考期间即可见）。
@@ -455,14 +416,13 @@ class BufferedChunkStreamWriter(StreamLiveness):
     ) -> dict[str, object]:
         return request_stream_permission(self, request_value, cancellation_token)
 
-    # LLM: compact boundary 只能由 canonical conversation generation 前进触发；它是显示事件，不复制摘要正文或建立第二会话状态。
+    # LLM: compact boundary只由canonical generation前进触发；刷新宿主事件但不确认raw，不复制摘要或建立第二会话状态。
     # 函数用途: 在同一 Gateway chunk 流中公布一次上下文压缩代际边界。
     def write_compact_boundary(self, generation: int) -> None:
         normalized_generation = max(0, int(generation or 0))
         if normalized_generation <= 0:
             return
         self.flush()
-        self._write_model_commentary_at_boundary()
         self._write_event(
             {
                 "kind": "conversation_compacted",
@@ -484,12 +444,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先拒绝等待新发布，再刷新非等待事件；在途外部回调不可撤销，原时间/生命周期继续供消费者裁决。
+    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件；close不释放raw，在途外部回调仍不可撤销。
     # 函数用途: 收口显示并拒绝迟到等待事件，不把流关闭当作工具或任务成功。
     def close(self) -> None:
         self._liveness_closed = True
         self.flush()
-        self._flush_model_deltas(complete=True)
         for sink in (self.main_activity_sink, self.transcript_sink):
             closer = getattr(sink, "close", None)
             if callable(closer):
@@ -498,11 +457,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
                 except (OSError, RuntimeError, TypeError, ValueError):
                     pass
 
-    # LLM: 在 final 持久化前排空增量并冻结同片显示；失败不改变模型结果，也不新增第二份持久正文。
+    # LLM: 在final持久化前刷新宿主事件并准备已确认显示快照，不因收口flush确认raw；失败不改变模型结果。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替。
     def prepare_display_history(self) -> dict:
         self.flush()
-        self._flush_model_deltas(complete=True)
         prepare = getattr(self.transcript_sink, "prepare_final", None)
         if not callable(prepare):
             return {}
@@ -517,36 +475,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def assistant_commentary_messages(self) -> tuple[str, ...]:
         return tuple(self._committed_commentary)
 
-    # LLM: rich transcript 每个真实工具边界都可发布一段；普通客户端仍严格限制为首段，
-    # 但已确认正文必须完整保留并进入 canonical history，末轮正文留给 final response。
-    # 函数用途: 脱敏、记录并发布当前已经由工具边界确认的模型过程说明。
-    def _write_model_commentary_at_boundary(self) -> None:
-        if (self._commentary_emitted and not self.rich_transcript and self._verbose_level != "stream") or not self._model_segment:
-            return
-        self._flush_model_deltas(complete=True)
-        raw = "".join(self._model_segment)
-        self._model_segment.clear()
-        self._model_delta_published = ""
-        content = public_model_text(raw, max_chars=0, delivery_channel=self.delivery_channel, identifiers=self._identifier_redactions)
-        if not content:
-            return
-        self._commentary_emitted = True
-        self._committed_commentary.append(content)
-        self._write_event(
-            {
-                "kind": "assistant_commentary",
-                **({"verbose_level": "stream"} if self._verbose_level == "stream" else {}),
-                "text": content,
-            },
-        )
-
-    # LLM: 完整候选统一净化，未完成行只在明确模型/工具边界释放；不能按单批文本忘掉前一批凭据键。
-    # 函数用途: 发布尚未发送的安全行，终态或工具边界可确认剩余后缀，不改变模型和工具输入。
-    def _flush_model_deltas(self, *, complete: bool = False) -> None:
-        _flush_model_delta_events(self, complete=complete)
 
 
-# LLM: 宿主已确认的短接单轮不向普通IM发候选/进度；其余事件净化一次后落原chunk/sink，每个出口核still_current，不影响执行。
+
+# LLM: 短接单轮仍不向普通IM发过程；正文已由原commit门提交，退休raw kind无producer，其余事件净化落原chunk/sink并逐出口核still_current。
 # 函数用途: 发布 writer 的安全事件与展示时刻，sink 故障不改变任务结果，不创建第二发送路径。
 def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
     from ..common.log_redaction import redact_sensitive_value
@@ -554,13 +486,13 @@ def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, ob
     if still_current is not None and not still_current():
         return
     if writer._final_only and not writer.rich_transcript and event.get("kind") in {
-        "runtime_progress", "tool_progress", "assistant_commentary", "model_draft", "model_liveness", "tool_liveness",
+        "runtime_progress", "tool_progress", "assistant_commentary", "model_liveness", "tool_liveness",
     }:
         return
     event = redact_sensitive_value(event)
     if writer._verbose_level == "stream" and not writer.rich_transcript:
         event = {**event, "preview_max_chars": writer._im_preview_max_chars}
-    if not writer.rich_transcript and event.get("kind") in {"tool_progress", "assistant_commentary", "model_draft", "model_liveness"}:
+    if not writer.rich_transcript and event.get("kind") in {"tool_progress", "assistant_commentary", "model_liveness"}:
         event = {**event, "updated_at": display_now(writer._display_timezone).isoformat(timespec="seconds")}
     if still_current is None:
         write_chunk_event(writer.chunk_path, event)
@@ -596,48 +528,8 @@ def write_host_notice_events(writer: BufferedChunkStreamWriter, notices: Iterabl
         writer._write_event({"kind": "host_notice", "notice": notice.to_dict()})
 
 
-# LLM: 流式 IM 快照至多一秒一次，仅消费模型候选并按原脱敏合同生成有界文本；不合成普通进度文案。
-# 函数用途: 发布同一条草稿的最新内容，防止逐 token 快照把事件文件和 IM 请求撑大。
-def _write_im_draft(writer: BufferedChunkStreamWriter) -> None:
-    now = time.monotonic()
-    if now - writer._last_im_draft_at < 1.0:
-        return
-    writer._last_im_draft_at = now
-    preview = public_model_text("".join(writer._model_segment), max_chars=0,
-        delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
-    if preview:
-        # 先完整脱敏再裁末尾，长输出仍能更新最新窗口，不会暴露被截开的路径前缀。
-        writer._write_event({"kind": "model_draft", "verbose_level": "stream", "text": preview[-8000:]})
 
 
-# LLM: TUI 与 IM 都从累计候选净化；完整安全行单调追加，尚未完成行保留到结构化边界，不能跨批泄露赋值。
-# 函数用途: 排空刷新计数，发布安全增量或原 IM 快照；候选仍由原 final/commentary 收口。
-def _flush_model_delta_events(writer: BufferedChunkStreamWriter, *, complete: bool = False) -> None:
-    if not writer._model_delta_buffer and not complete:
-        return
-    writer._model_delta_buffer.clear()
-    writer._model_delta_chars = 0
-    writer._last_model_delta_flush_at = time.monotonic()
-    if not writer.rich_transcript:
-        if writer._verbose_level == "stream":
-            _write_im_draft(writer)
-        return
-    raw = "".join(writer._model_segment)
-    content = public_model_text(raw, max_chars=0, delivery_channel=writer.delivery_channel,
-                                identifiers=writer._identifier_redactions)
-    visible = content if complete else content[:content.rfind("\n") + 1]
-    if not visible.startswith(writer._model_delta_published):
-        return
-    delta = visible[len(writer._model_delta_published):]
-    if not delta:
-        return
-    writer._model_delta_published = visible
-    writer._write_event(
-        {
-            "kind": "model_delta",
-            "text": delta,
-        },
-    )
 
 
 # LLM: 私人卡只用于宿主准确 feishu 渠道；恢复标记不是渠道授权，TUI 是否交互仍认原 client capability，不从展示支持猜 IM。
@@ -650,7 +542,7 @@ def request_stream_permission(writer,request,cancellation_token):
         writer.interactive_approvals,writer.approval_mode_decision_provider,cancellation_token))
 
 
-# LLM: 只由原sink方法调用，同一实例状态保存原call幂等和显示档位；拆出以保持类尺寸，不新增账或入口。
+# LLM: 只由原sink完整响应提交调用，保原call幂等和显示档位；无raw缓存可flush，不新增账或入口。
 # 函数用途: 将已净化的完整响应提交到原显示段，丢弃旧候选并保留原final-only/通道策略。
 def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> None:
     from .stream_events import committed_model_events
@@ -660,10 +552,6 @@ def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> 
     if not events or call_id in writer._committed_model_calls or getattr(writer, "_liveness_closed", False):
         return
     writer._committed_model_calls.add(call_id)
-    writer._model_segment.clear()
-    writer._model_delta_buffer.clear()
-    writer._model_delta_chars = 0
-    writer._model_delta_published = ""
     for event in events:
         if event["kind"] == "assistant_commentary":
             writer._committed_commentary.append(event["text"])

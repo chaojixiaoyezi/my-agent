@@ -139,7 +139,7 @@ python3 -m agent_py_agent chat --gateway
 /goal pause|resume     暂停或恢复同一持续目标
 /goal edit <目标>      修改目标；保留原任务和工作区
 /goal clear            清除持续目标；不删除普通聊天和已有成果
-/verbose [off|on|full] 查看或设置当前会话的过程显示档位
+/verbose [off|on|full|stream] 查看或设置当前会话的过程显示档位
 /audit help            查看当前真正支持的 Audit 命令
 /audit <名称> prepare <内容> 在准确 Audit 工作区中讨论、读样例、试接口或准备修改
 /audit <时长> <名称> <任务> 启动一个可与其他命名 Audit 并存的审计

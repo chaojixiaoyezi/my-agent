@@ -2,6 +2,7 @@
 #   秘密不进记录、日志或模型；显式控制与自然任务仍使用同一原身份/入站账。
 #   受限诊断只投影原 ingress/submission；False 传回运输重投，reaction 不决定请求是否受理。
 #   群引用文字/附件只在 durable prepare 读取准确 parent；文字作外部资料，当前 actor/owner 不从父消息继承。
+#   原已确认模型过程顺序保留，退休raw draft/delta不渲染也不再作为截断前文的快照。
 # 模块用途: 管理 IM 提交与对账、准备当前群的引用资料；凭据失败拒绝，敏感命令一次性提交不落盘。
 from __future__ import annotations
 
@@ -122,11 +123,13 @@ def _utc_now_iso() -> str:
 
 
 # LLM: 只渲染 Gateway /progress 的结构化事件；permission_requested 只提示可发送的控制命令，既不代表批准，
-#   也不是最终回复（最终正文仍由原请求结果 watcher 发送）；提示只含工具名与 Gateway 已脱敏的摘要。
+#   也不是最终回复（最终正文仍由原请求结果 watcher 发送）；退休model_draft不渲染，提示只含工具名与已确认摘要。
 # 函数用途: 渲染 IM 过程和模型请求等待时长，不宣称业务进展；工具待确认时提示控制命令。
 def _render_gateway_progress(event: dict[str, object]) -> str:
     kind = str(event.get("kind") or "")
-    if kind in {"assistant_commentary", "model_draft"}:
+    if kind in {"model_draft", "model_delta"}:
+        return ""
+    if kind == "assistant_commentary":
         return str(event.get("text") or "").strip()
     if kind == "permission_requested":
         summary = str(event.get("summary") or event.get("tool") or "一个工具操作").strip()
@@ -751,8 +754,8 @@ class _GatewayReplyPollClient:
         self._gateway_port = int(gateway_port)
         self.credentials = GatewayClientCredentials(home_paths().root)
 
-    # LLM: 原游标/用户身份/宿主凭据不变；缺凭据在请求前失败，认证HTTP拒绝任何重定向。
-    # 函数用途: 只读拉取原进度快照，保持原游标/档位/等待状态，不输出秘密。
+    # LLM: 原游标/身份/凭据不变；退休draft不截断合法committed事件，缺凭据在请求前失败，认证HTTP拒绝重定向。
+    # 函数用途: 只读拉取原进度，保持合法committed事件顺序、游标/档位/等待状态，退休draft不再截断前文。
     def poll_progress(self, pending: PendingGatewayReply) -> tuple[list[str], int]:
         import urllib.error
         import urllib.request
@@ -778,11 +781,9 @@ class _GatewayReplyPollClient:
             ) from exc
         events = body.get("events") if isinstance(body, dict) else []
         source_events = events if isinstance(events, list) else []
-        snapshot_indices = [i for i, event in enumerate(source_events) if isinstance(event, dict) and event.get("kind") == "model_draft"]
-        rendered_events = source_events[snapshot_indices[-1]:] if snapshot_indices else source_events
         messages = [
             rendered
-            for event in rendered_events
+            for event in source_events
             if isinstance(event, dict) and (rendered := _render_gateway_progress(event))
         ]
         from .progress_draft import GatewayProgressBatch
@@ -792,7 +793,7 @@ class _GatewayReplyPollClient:
                   and type(event.get("preview_max_chars")) is int and 1 <= event["preview_max_chars"] <= 8000]
         updates = [event.get("updated_at") for event in source_events if isinstance(event, dict) and isinstance(event.get("updated_at"), str)]
         return GatewayProgressBatch(tuple(messages), max(pending.progress_cursor, int(body.get("next") or 0)), mode,
-                                    bool(snapshot_indices) or any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
+                                    any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
                                     limits[-1] if limits else None, updates[-1] if updates else "")
 
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
 
 
@@ -489,7 +490,8 @@ def test_background_turn_without_declared_outputs_keeps_output_contract_empty(tm
     agent = _mock_workspace_agent(tmp_path)
     task_root = tmp_path / "tasks" / "2026-07-19" / "background-continuation"
     agent._current_run_task_workspace = ""
-    agent._current_run_params = SimpleNamespace(
+    # 沿local_mock_agent的无通道typed本地域，仅保留原后台工作区载体，不伪造会话或claim来源。
+    agent._current_run_params = RunParams(
         task_attributes={
             "run_workspace": {
                 "task_root": str(task_root),

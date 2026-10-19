@@ -287,8 +287,8 @@ class FinalizationService:
             "active": _active_context_tokens(input_tokens, output_tokens, prompt_tokens),
         }
 
-    # LLM: 原受验text始终权威；仅完整同源块一致时分离phase，拒绝/净化/双段合成后保当前text，缺final沿原不可交付终态。
-    # 函数用途: 将最终回复投影与运行账组装成结果，保留完整模型正文、过程和失败诊断。
+    # LLM: response保内部最终段、model_response保整次当前text；公开净化归显示/投递门，只有结构化commentary-only缺候选才改缺终答状态。
+    # 函数用途: 组装内部运行结果与宿主账，保原无phase正文/归档及全部拒绝、超时转换后的当前text权威。
     def _build_agent_run_result(self, params: BuildAgentRunResultParams):
         from .model.response_provenance import response_provenance_projection
 
@@ -312,15 +312,16 @@ class FinalizationService:
         # LLM: 会话运行时 式自然收口保留模型原文；宿主只单独记录 turn_end_reason，
         # 不再把机器验收结论包装成“任务未完成”用户文案。
         honest_text = str(ctx.final_response.text or "").rstrip()
+        from ..backends.assistant_messages import commentary_only_response
         from .model.visible_response import accepted_final_text
 
-        public_text = accepted_final_text(ctx, ctx.final_response).rstrip()
-        if honest_text and not public_text and runtime_status == "ok":
+        final_text = accepted_final_text(ctx, ctx.final_response, project=lambda text: text).rstrip()
+        if honest_text and not final_text and runtime_status == "ok" and commentary_only_response(ctx.final_response):
             runtime_status, runtime_reason, runtime_source = "user_reply_unavailable", "USER_REPLY_UNAVAILABLE", "tool_loop"
         return AgentRunResult(
             prompt=ctx.final_prompt,
             response=redact_executed_operation_labels(
-                public_text,
+                final_text,
                 operation_verification,
             ),
             backend=ctx.final_response.backend,

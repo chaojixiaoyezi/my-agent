@@ -1,6 +1,6 @@
 
 # LLM: 本模块执行 plain chat 的 Gateway/direct 路径；Gateway 历史只能由服务端 ConversationStore 注入，避免上下文重复。
-# 模块用途: 处理普通终端中的单轮聊天、流式输出、计时和会话历史更新。
+# 模块用途: 处理普通终端单轮聊天与历史；local正文等同call确认，Gateway沿既有公开流，原执行/控制身份不变。
 
 from __future__ import annotations
 
@@ -106,8 +106,8 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     return response_text, terminal_response_streamed
 
 
-# LLM: direct 保留单次历史注入；先核对原句柄，再把现有 binding callback 交给 core，模型前发布真实身份。
-# 函数用途: 不经过 Gateway 直接执行一轮普通终端聊天并显示结果。
+# LLM: direct保留原句柄/绑定和单次历史注入；显示callback明确local候选未公开，真实response提交后才显示过程。
+# 函数用途: 沿原agent调用模型及保存会话，完整终答走plain_ui公开门，候选不算已显示。
 def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     from ...agent.agent_core.runtime.loop_models import RunParams
 
@@ -118,6 +118,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         ctx.agent.config.agent_name,
         _next_message_id(ctx),
         preview_chars=_CHAT_COLLAPSE_PREVIEW_CHARS,
+        committed_model_only=True,
     )
     attrs = conversation_task_attributes(ctx.job.system_task)
     if not ctx.job.system_task:

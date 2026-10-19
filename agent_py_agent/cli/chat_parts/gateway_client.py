@@ -1,6 +1,7 @@
 
 
 # LLM: 本模块是 chat 客户端与 Gateway 文件协议的边界；typed row 可旁路 legacy 文本投影，但不能改变 Gateway 业务事实或授权。
+# 退休raw candidate kind必须在typed callback前消费且正常推进游标；保私有原档和未知future kind原语义。
 # 模块用途: 提交聊天请求、增量读取 Gateway chunk/response 文件，并把结构化事件或兼容文本交给调用方。
 
 from __future__ import annotations
@@ -317,8 +318,8 @@ def _readable_chunk_path(chunk_path: Path) -> Path | None:
     return None
 
 
-# LLM: typed consumer 返回 True 表示已接管该 object；回调异常仅记录诊断并继续 legacy 投影，不能打断业务请求。
-# 函数用途: 解码一行 Gateway JSON，优先分发结构化事件，否则投影为兼容文本。
+# LLM: 未提交candidate kind在任何callback前退休并正常推进游标；其它typed consumer异常仍沿原legacy投影，未知kind语义不变。
+# 函数用途: 解码原chunk并只把合法公开事件交消费者，不改私有原档或断连恢复计数。
 def _emit_chunk_line(
     cline: str,
     on_chunk: callable,
@@ -333,6 +334,8 @@ def _emit_chunk_line(
         return 1, 0
     if not isinstance(cobj, dict):
         print("gateway chat chunk load_error category=non_object_root", file=sys.stderr)
+        return 1, 0
+    if cobj.get("kind") in ("model_delta", "model_draft"):
         return 1, 0
     if callable(on_event):
         try:

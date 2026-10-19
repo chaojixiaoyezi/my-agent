@@ -313,8 +313,7 @@ def _params_like(task):
 
 
 def test_declared_parent_workspace_is_granted_to_child_and_precheck_agrees(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
     from agent_py_agent.agent.conversation.authority import (
         CONVERSATION_EXECUTION_CWD_ATTR,
         CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
@@ -326,8 +325,8 @@ def test_declared_parent_workspace_is_granted_to_child_and_precheck_agrees(tmp_p
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("print('ok')", encoding="utf-8")
     outside = _outside_worktree(tmp_path)
-    # 宿主为本轮会话下发的结构化工作目录：子代理按原规则继承为墙外已授权根。
-    agent._current_run_params = SimpleNamespace(
+    # 本例无通道/TaskLink，使用原 typed 本地参数声明目录；不冒充 IM 来源或跳过正式权限门。
+    agent._current_run_params = RunParams(
         task_attributes={
             CONVERSATION_EXECUTION_CWD_ATTR: str(project),
             CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR: [str(project)],

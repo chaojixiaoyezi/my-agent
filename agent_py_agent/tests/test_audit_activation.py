@@ -21,6 +21,7 @@ from agent.agent_core.orchestration.create_policy import (
     create_task_attributes,
 )
 from agent.agent_core.orchestration.tool_grants import CODING_SUBAGENT_TOOLS
+from agent.agent_core.runtime.loop_models import RunParams
 from agent.common.audit_activation import (
     AUDIT_ATTR,
     AUDIT_DEADLINE_ATTR,
@@ -283,7 +284,7 @@ def test_create_subagents_inherits_audit_window_without_overriding_child_value(o
 
 def test_create_subagents_inherits_audit_deadline_without_replacing_parent_scope(owner_home):
     parent = SimpleNamespace(
-        _current_run_params=SimpleNamespace(
+        _current_run_params=RunParams(
             task_attributes={
                 AUDIT_ATTR: True,
                 AUDIT_DEADLINE_ATTR: 12345.5,
@@ -306,7 +307,7 @@ def test_create_subagents_inherits_audit_deadline_without_replacing_parent_scope
 
 def test_plain_subagent_keeps_existing_tool_policy(owner_home):
     parent = SimpleNamespace(
-        _current_run_params=SimpleNamespace(task_attributes={}),
+        _current_run_params=RunParams(task_attributes={}),
         subagents=None,
     )
     requested = ["read_file", "run_command"]

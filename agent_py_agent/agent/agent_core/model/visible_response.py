@@ -2,18 +2,20 @@
 # 模块用途: 在原工具边界或最终收口，把模型可见正文交给现有显示接收器，不另开模型请求或投递账。
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ...backends.assistant_messages import final_response_text, response_messages
 from ...common.cancellation import CancellationToken
 from ...concurrency.interrupt import is_interrupted
 from .response_provenance import response_provenance_error, response_provenance_projection
 
 
-# LLM: 末端只在本次sealed来源和正常状态成立时选阶段；所有拒绝/宿主转换都保持当前text权威，不恢复rawblocks。
-# 函数用途: 为最终结果提供经过原来源门的正文投影，不写状态或调用模型。
-def accepted_final_text(params: object, response: object) -> str:
+# LLM: 同一sealed来源门供core identity和显示默认投影；拒绝/宿主转换保持当前text权威，不恢复rawblocks或靠投影改状态。
+# 函数用途: 提供已采纳响应的最终阶段正文，渲染方式由内部结果或公开提交调用方明确传入。
+def accepted_final_text(params: object, response: object, *, project: Callable[[str], str] | None = None) -> str:
     if response_provenance_error(params, response, purposes=("main", "natural_user_reply", "background_receipt_repair")):
         return str(getattr(response, "text", "") or "")
-    return final_response_text(response)
+    return final_response_text(response, project=project)
 
 
 # LLM: 只能由原已验工具轮和最终收口调用；源、状态和完整text一致性各守自己的门，sink失败不改执行结果。

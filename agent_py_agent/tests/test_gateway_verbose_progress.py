@@ -38,6 +38,7 @@ from agent_py_agent.agent.gateway_parts.request_execution import _handle_gateway
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._gateway_history_helpers import context_history
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 
 
 def _conversation(user: str = "ou_alice", chat: str = "oc_one") -> dict[str, str]:
@@ -167,11 +168,13 @@ def test_rich_transcript_keeps_each_commentary_tool_display_and_thinking(tmp_pat
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path, rich_transcript=True)
     writer.write_model("先看文件。")
+    _commit_writer_fixture(writer, "先看文件。", call_id="test_rich_transcript_keeps_each_commentary_tool_display_and_thinking:0")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "开始"},
         "legacy-1",
     )
     writer.write_model("再运行检查。")
+    _commit_writer_fixture(writer, "再运行检查。", call_id="test_rich_transcript_keeps_each_commentary_tool_display_and_thinking:1")
     writer.write_progress(
         {
             "tool": "run_command",
@@ -339,11 +342,14 @@ def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
         "我先检查 /root/private/project/main.py。\n"
         '[TOOL_CALL]\n{"name":"read_file"}\n[/TOOL_CALL]\n'
     )
+    _commit_writer_fixture(writer, "我先检查 /root/private/project/main.py。\n"
+        '[TOOL_CALL]\n{"name":"read_file"}\n[/TOOL_CALL]\n', call_id="test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary:0")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
         "legacy-1",
     )
     writer.write_model("接下来再检查测试。\n")
+    _commit_writer_fixture(writer, "接下来再检查测试。\n", call_id="test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary:1")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
         "legacy-2",
@@ -359,19 +365,24 @@ def test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary(
     updated_at = commentary[0]['updated_at']
     assert datetime.fromisoformat(updated_at).tzinfo is not None
     assert commentary == [
-        {"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。", 'updated_at': updated_at}
+        {"t": commentary[0]["t"], "kind": "assistant_commentary", "text": "我先检查 main.py。", 'updated_at': updated_at,
+         'model_source': {'call_id': 'test_first_real_model_segment_becomes_sanitized_commentary_at_tool_boundary:0',
+                          'request_id': 'req-display', 'run_id': 'run-display'},
+         'message_source': {'protocol': None, 'message_id': None, 'output_index': None, 'phase': None, 'source_type': None},
+         'replace_candidate': True}
     ]
     assert events == [{"kind": "assistant_commentary", "text": "我先检查 main.py。", 'updated_at': updated_at}]
     assert _render_gateway_progress(events[0]) == "我先检查 main.py。"
     assert cursor == len(rows)
     assert "接下来" not in json.dumps(commentary, ensure_ascii=False)
-    assert writer._model_segment == []
+    assert not hasattr(writer, '_model_segment')
 
 
 def test_live_user_input_opens_one_new_model_commentary_segment(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path)
     writer.write_model("我先检查项目。\n")
+    _commit_writer_fixture(writer, "我先检查项目。\n", call_id="test_live_user_input_opens_one_new_model_commentary_segment:0")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
         "legacy-1",
@@ -379,11 +390,13 @@ def test_live_user_input_opens_one_new_model_commentary_segment(tmp_path) -> Non
     writer.write_model("这段旧工具轮文字不能发出。\n")
     writer.begin_active_turn_input(("steer-client-1",))
     writer.write_model("记得，原任务要输出 JSON 和 Markdown。\n")
+    _commit_writer_fixture(writer, "记得，原任务要输出 JSON 和 Markdown。\n", call_id="test_live_user_input_opens_one_new_model_commentary_segment:2")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
         "legacy-2",
     )
     writer.write_model("同一条用户消息不能反复打开回复。\n")
+    _commit_writer_fixture(writer, "同一条用户消息不能反复打开回复。\n", call_id="test_live_user_input_opens_one_new_model_commentary_segment:3")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "任意展示文字"},
         "legacy-3",
@@ -687,9 +700,11 @@ def test_rich_writer_streams_live_model_deltas(tmp_path) -> None:
     writer.write_model("第一段")
     assert not any(row["kind"] == "model_delta" for row in _rows(path))
     writer.write_model("，继续")
+    assert _rows(path) == []
+    _commit_writer_fixture(writer, "第一段，继续", call_id="terminal-complete", boundary="terminal")
     writer.close()
 
-    deltas = [row for row in _rows(path) if row.get("kind") == "model_delta"]
+    deltas = [row for row in _rows(path) if row.get("kind") == "assistant_final"]
     assert [row["text"] for row in deltas] == ["第一段，继续"]
     commentary = [row for row in _rows(path) if row.get("kind") == "assistant_commentary"]
     assert commentary == []
@@ -699,6 +714,7 @@ def test_non_rich_writer_never_emits_model_delta(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path)
     writer.write_model("普通客户端正文")
+    _commit_writer_fixture(writer, "普通客户端正文", call_id="test_non_rich_writer_never_emits_model_delta:0")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "开始"},
         "legacy",
@@ -714,6 +730,7 @@ def test_model_deltas_flush_before_commentary_boundary(tmp_path) -> None:
     path = tmp_path / "request.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path, rich_transcript=True, flush_chars=8)
     writer.write_model("先看文件。")
+    _commit_writer_fixture(writer, "先看文件。", call_id="test_model_deltas_flush_before_commentary_boundary:0")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "开始"},
         "legacy-1",
@@ -721,8 +738,8 @@ def test_model_deltas_flush_before_commentary_boundary(tmp_path) -> None:
     writer.close()
 
     kinds = [row["kind"] for row in _rows(path)]
-    assert kinds.index("model_delta") < kinds.index("assistant_commentary")
-    assert kinds.index("model_delta") < kinds.index("tool_progress")
+    assert "model_delta" not in kinds
+    assert kinds.index("assistant_commentary") < kinds.index("tool_progress")
 
 
 def test_full_thinking_precedes_pending_assistant_delta(tmp_path) -> None:
@@ -736,10 +753,11 @@ def test_full_thinking_precedes_pending_assistant_delta(tmp_path) -> None:
     )
     writer.write_model("最终正文")
     writer.write_thinking("先核对事实", duration_seconds=2.0)
+    _commit_writer_fixture(writer, "最终正文", call_id="thinking-before-final", boundary="terminal")
     writer.close()
 
     kinds = [row["kind"] for row in _rows(path)]
-    assert kinds.index("assistant_thinking") < kinds.index("model_delta")
+    assert kinds.index("assistant_thinking") < kinds.index("assistant_final")
 
 
 def test_committed_commentary_is_not_clipped_by_display_limit(tmp_path) -> None:
@@ -748,6 +766,7 @@ def test_committed_commentary_is_not_clipped_by_display_limit(tmp_path) -> None:
     writer = BufferedChunkStreamWriter(path, rich_transcript=True)
     commentary = "阶段报告" + "甲" * 20_000 + "完整结尾"
     writer.write_model(commentary)
+    _commit_writer_fixture(writer, commentary, call_id="test_committed_commentary_is_not_clipped_by_display_limit:0")
     writer.write_progress(
         {"tool": "read_file", "phase": "started", "status": "开始"},
         "legacy",
@@ -761,9 +780,10 @@ def test_model_deltas_are_redacted_and_steering_clears_pending(tmp_path) -> None
     writer = BufferedChunkStreamWriter(path, rich_transcript=True, flush_chars=4)
     writer.set_identifier_redactions((("om_secret_conversation", "当前会话"),))
     writer.write_model("检查 /root/private/secret 与 om_secret_conversation")
+    _commit_writer_fixture(writer, "检查 /root/private/secret 与 om_secret_conversation", call_id="test_model_deltas_are_redacted_and_steering_clears_pending:0")
     writer.close()
 
-    deltas = [row for row in _rows(path) if row.get("kind") == "model_delta"]
+    deltas = [row for row in _rows(path) if row.get("kind") == "assistant_commentary"]
     assert deltas
     assert "om_secret_conversation" not in deltas[-1]["text"]
     assert "/root/private/secret" not in deltas[-1]["text"]
@@ -773,13 +793,14 @@ def test_model_deltas_are_redacted_and_steering_clears_pending(tmp_path) -> None
     steered.write_model("旧候选")
     steered.begin_active_turn_input(("client-1",))
     steered.write_model("新候选的说明")
+    _commit_writer_fixture(steered, "新候选的说明", call_id="test_model_deltas_are_redacted_and_steering_clears_pending:2")
     steered.write_progress(
         {"tool": "read_file", "phase": "started", "status": "开始"},
         "legacy",
     )
     steered.close()
 
-    steered_deltas = [row for row in _rows(steered_path) if row.get("kind") == "model_delta"]
+    steered_deltas = [row for row in _rows(steered_path) if row.get("kind") == "assistant_commentary"]
     assert [row["text"] for row in steered_deltas] == ["新候选的说明"]
 
 

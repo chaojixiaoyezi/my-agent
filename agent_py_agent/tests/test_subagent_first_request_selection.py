@@ -700,7 +700,15 @@ def test_create_jev_advice_automatically_reaches_first_business_model(tmp_path, 
         if effort_mode == "explicit":
             request["effort"] = "low"
     agent.conversation_store.tasks.bind({"thread_id": source.thread_id, "task_id": "parent-task", "goal": "读取材料", "status": "active"})
-    agent._current_run_params = RunParams(request_id="parent-request", task_id="parent-task", task_attributes={"conversation_thread_id": source.thread_id})
+    # 该会话已经有父任务；沿真实 managed 主运行入口补齐同任务的当前 attempt，不能用空 run_id 冒充执行上下文。
+    agent._current_run_params = runtime_mixin._bind_main_agent_authority(agent, RunParams(
+        request_id="parent-request", run_id="parent-task", task_id="parent-task",
+        context_scope="conversation", task_attributes={"conversation_thread_id": source.thread_id},
+    ))
+    assert agent.conversation_store.claims.acquire({
+        "thread_id": source.thread_id, "task_id": "parent-task",
+        "reason": "thread_goal_continue", "lease_seconds": 60,
+    }) is not None
     monkeypatch.setattr(orchestration_tools, "publish_created_subagents", lambda _: SimpleNamespace(
         auto_start={"status": "not_attempted"}, conversation_bind_errors=[],
     ))

@@ -15,6 +15,7 @@ from agent_py_agent.agent.common.json_io import jsonl_lines
 from agent_py_agent.agent.gateway_parts import progress_reader
 from agent_py_agent.agent.gateway_parts.http_handlers import _read_public_progress_events
 from agent_py_agent.agent.gateway_parts.progress_reader import read_progress_lines
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 
 
 @pytest.fixture(autouse=True)
@@ -310,6 +311,7 @@ def test_real_writer_commentary_over_one_mib_survives_projection(tmp_path) -> No
     path = tmp_path / "req.chunks.jsonl"
     writer = BufferedChunkStreamWriter(path, delivery_channel="feishu")
     writer.write_model("x" * (1_048_576 + 100))
+    _commit_writer_fixture(writer, "x" * (1_048_576 + 100), call_id="test_real_writer_commentary_over_one_mib_survives_projection:0")
     writer.write_progress({"tool": "read_file", "phase": "started", "status": "开始"}, "start")
     writer.close()
 

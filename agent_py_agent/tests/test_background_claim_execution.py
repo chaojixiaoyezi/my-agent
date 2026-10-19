@@ -28,8 +28,8 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 
 
-# LLM: 使用原准入与来源消费函数，假领域仅记录调用和模拟领取间隙的状态改变；迁移时只改入口绑定。
-# 函数用途: 为竞态、错误分类和顺序断言提供可控依赖，不启动模型、线程或真实持久任务。
+# LLM: 使用原runtime构造器同store绑定及原准入/来源消费；普通canonical线程同时供load_report/require，假领域不得绕过委派门。
+# 函数用途: 为竞态、错误分类和顺序断言装配可控依赖；只替换业务执行，不启动真实模型或持久任务。
 def _claim_fixture(monkeypatch):
     trace = []
     records = {"acquire": [], "finish": [], "policy": [], "retire": []}
@@ -108,9 +108,13 @@ def _claim_fixture(monkeypatch):
         def stop(self):
             event("stop")
 
+    # 原普通线程只建一次；新增委派读口必须读取同一canonical对象，不能另造策略或绕过身份检查。
+    thread = ConversationThread(thread_id="thread", canonical_user_id="user")
     store = SimpleNamespace(
-        # 原线程在此明确是普通工作；委派身份读取不能由测试缺少权威接口迫使产品降级。
-        threads=SimpleNamespace(load_report=lambda _: (ConversationThread(thread_id="thread", canonical_user_id="user"), None)),
+        threads=SimpleNamespace(
+            load_report=lambda _: (thread, None),
+            require=lambda thread_id: {thread.thread_id: thread}[thread_id],
+        ),
         claims=SimpleNamespace(acquire=acquire, finish=finish),
         tasks=SimpleNamespace(list_report=links),
         wakes=SimpleNamespace(mark_handled=retire, pending_one=lambda _wake_id: None),
@@ -123,8 +127,11 @@ def _claim_fixture(monkeypatch):
     agent = SimpleNamespace(subagents=SimpleNamespace(
         load=load_child, runtime_db=SimpleNamespace(main_agent_recovery_block_for_task=recovery),
     ))
+    # 原构造器绑定agent.conversation_store到同store；只替换业务执行替身，保留真实身份读取和claim门。
+    runtime = runtime_module.BackgroundMainAgentRuntime(agent=agent, store=store)
+    runtime.run_once = run_once
     scheduler = runtime_module.BackgroundMainAgentScheduler({
-        "runtime": SimpleNamespace(agent=agent, run_once=run_once), "store": store,
+        "runtime": runtime, "store": store,
         "claim_ttl_seconds": 7, "claim_heartbeat_interval_seconds": 0.1,
     })
     scheduler._runtime_facts = facts
@@ -370,8 +377,11 @@ def test_real_heartbeat_renews_while_run_is_blocked_and_prevents_takeover(tmp_pa
 
     monkeypatch.setattr(store.claims, "renew", renew)
     monkeypatch.setattr(store.claims, "finish", finish)
+    # heartbeat沿真实runtime装配读取同一会话库；受控run_once只提供阻塞窗口，不签发或替代身份。
+    runtime = runtime_module.BackgroundMainAgentRuntime(agent=SimpleNamespace(), store=store)
+    runtime.run_once = run_once
     scheduler = runtime_module.BackgroundMainAgentScheduler({
-        "runtime": SimpleNamespace(agent=SimpleNamespace(), run_once=run_once), "store": store,
+        "runtime": runtime, "store": store,
         "claim_ttl_seconds": 1, "claim_heartbeat_interval_seconds": 0.05,
     })
     scheduler._runtime_facts = lambda: {}

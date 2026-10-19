@@ -168,8 +168,15 @@ def test_wake_settled_elsewhere_drops_its_ledger(tmp_path, monkeypatch) -> None:
 
 
 def test_batch_failure_isolates_members_without_counting(tmp_path, monkeypatch) -> None:
-    """两条同批的唤醒一起失败：不计数，只记批次失败；下一次各自单独执行，才按单条计数。"""
-    chain, wakes = _chain_with_message_wake(tmp_path, monkeypatch, count=2)
+    """同一消息的两条合法通知一起失败：先记批次失败，再分开计数；不同消息不得合批。"""
+    chain, (first,) = _chain_with_message_wake(tmp_path, monkeypatch)
+    # 不同消息必须分开准入；这里经原发布入口重发同一消息的通知，保留真实消息身份与来源。
+    second = chain.agent.conversation_store.wakes.raise_signal({
+        **first.to_dict(), "dedupe_key": first.dedupe_key + ":second-notification",
+    })
+    wakes = _b_wakes(chain)
+    assert len(wakes) == 2 and first.wake_signal_id != second.wake_signal_id
+    assert first.metadata[SESSION_MESSAGE_KEY_FIELD] == second.metadata[SESSION_MESSAGE_KEY_FIELD]
     _inject_admission(monkeypatch, "host_delivery_consumed")
     chain.scheduler.tick(now=time.time() + 1)
     states = [_state(chain, wake) for wake in wakes]

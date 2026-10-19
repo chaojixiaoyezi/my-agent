@@ -12,15 +12,19 @@ from agent_py_agent.agent.agent_core.orchestration.decision_subagent import (
 )
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime_mixin import _bind_main_agent_authority
 from agent_py_agent.agent.backends.decision_protocol import DecisionInputError
 from agent_py_agent.agent.backends.errors import ProviderTransientError
 from agent_py_agent.agent.backends.typesafe_decision_wire import parse_typesafe_response
 from agent_py_agent.agent.conversation import decision_model_call as calls
 from agent_py_agent.agent.conversation import decision_service
+from agent_py_agent.agent.scheduler.repository import SchedulerRepository
 from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 from agent_py_agent.agent.settings.model_provider_schema import ModelProfileError
 from agent_py_agent.agent.settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+from agent_py_agent.tests.support.ci_host_context_fixtures import bind_local_task
 from agent_py_agent.tests.test_decision_model_profiles import decision
 from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 from agent_py_agent.tests.test_decision_settings import host_at, patch
@@ -28,11 +32,14 @@ from agent_py_agent.tests.test_model_profiles import add
 from agent_py_agent.tests.test_orchestration_create_subagents_items import _agent
 
 
-# LLM: 配置、manager/thread 持久化真实；只替换模型网络/发布，guard_depth 证明 Jev 锁外，完整请求容量保持生产未知。
-# 函数用途: 验证权限、身份、pending 绑定和显式优先，不能据此宣称自动改选已闭合。
+# LLM: 原Host的root/config/owner不变，owner home沿原resolver显式补齐；manager必须managed并真写同owner RuntimeDB，不能把_bind调用当实权证据。
+# 函数用途: 在临时owner目录登记真实main/attempt/claim，验证pending与显式优先，只替换模型网络/发布而不启动真实进程。
 @pytest.fixture
 def prepared(tmp_path, monkeypatch):
     host = host_at(tmp_path)
+    host.home_paths.owner_home_dir = resolve_owner_home(host.home_paths.root, OwnerIdentity(
+        provider=host.home_paths.owner_provider, owner_kind=host.home_paths.owner_kind,
+        owner_id=host.home_paths.owner_id)).home_dir
     a, _ = add(host, model_name="small", model_context_window_tokens=250_000)
     b, _ = add(host, model_name="large", model_context_window_tokens=1_000_000)
     key, _ = decision(host)
@@ -48,12 +55,24 @@ def prepared(tmp_path, monkeypatch):
     agent.home_paths = host.home_paths
     agent.backend = host.backend
     agent.conversation_store = host.conversation_store
+    # 真实空调度账本表示本例没有调度run，避免MagicMock动态生成伪run触发错线程保护。
+    agent.scheduler_repository = SchedulerRepository(tmp_path / "scheduler",
+        owner_provider=host.home_paths.owner_provider, owner_kind=host.home_paths.owner_kind,
+        owner_id=host.home_paths.owner_id)
     agent.capability_config = host.capability_config
     agent._model_profile_backends = {}
-    agent._current_run_params = RunParams(request_id="request", run_id="", task_id="",
-        task_attributes={"conversation_thread_id": thread.thread_id})
-    agent.subagents = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path)
+    agent.subagents = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path,
+        owner_id=host.home_paths.owner_id, owner_home_dir=host.home_paths.owner_home_dir,
+        execution_mode="managed")
     agent.subagents.conversation_store = host.conversation_store
+    bind_local_task(agent, thread.thread_id, "request")
+    agent._current_run_params = _bind_main_agent_authority(agent, RunParams(
+        request_id="request", run_id="request", task_id="request", context_scope="conversation",
+        task_attributes={"conversation_thread_id": thread.thread_id}))
+    assert agent.conversation_store.claims.acquire({
+        "thread_id": thread.thread_id, "task_id": "request",
+        "reason": "thread_goal_continue", "lease_seconds": 60,
+    }) is not None
     manager_guard = agent.subagents.creation_guard
     depth = [0]
 

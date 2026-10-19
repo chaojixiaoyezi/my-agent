@@ -1,5 +1,5 @@
 # LLM: CLI 场景目录与合法参数共用注册表；删除场景须同步 suite、命令帮助和离线脚本。
-# 模块用途: 路由隔离诊断场景，并实现默认 happy 流程；这些结果不能替代真实 TUI 验收。
+# 模块用途: 路由隔离诊断场景，direct模型正文仍走公开净化；场景结果不能替代真实TUI验收。
 from __future__ import annotations
 
 """routes scenario-test CLI cases and implements the happy-path full-flow scenario.
@@ -71,6 +71,8 @@ def _cmd_scenario_validate_args(args) -> bool:
     return True
 
 
+# LLM: 场景仅原显式用户命令执行；direct结果是内部正文，打印前复用原公开门，不从正文改变验收或权限。
+# 函数用途: 沿原agent/Gateway执行、写场景产物并安全显示回复，不为公开投影增加模型请求。
 def _cmd_scenario_happy_path(args, paths):
     print("MY-AGENT SCENARIO TEST")
     print(f"run_root={paths.run_root}")
@@ -85,7 +87,9 @@ def _cmd_scenario_happy_path(args, paths):
         print_scenario_step(1, "主代理聊天派工（direct agent.run）")
         agent = load_scenario_agent(paths.config)
         result = agent.run(prompt, save=False)
-        print(result.response)
+        from ..agent.gateway_parts.stream_events import public_model_text
+
+        print(public_model_text(result.response, max_chars=0, delivery_channel="", identifiers=()))
         print(f"[backend={result.backend}; tool_rounds={result.tool_rounds}]")
     else:
         print_scenario_step(1, "主代理聊天派工（gateway ask）")

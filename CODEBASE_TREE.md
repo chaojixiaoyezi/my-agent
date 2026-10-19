@@ -392,7 +392,10 @@
 |-- agent_py_agent/tests/test_committed_model_messages.py # 同次已采纳正文的CLI/TUI/Gateway显示回归
 |-- agent_py_agent/tests/test_pending_input_public_boundary.py # 原输入失效上限不发布旧正文
 |-- agent_py_agent/tests/test_progress_message_revision.py # 真实输出索引与活动候选唯一终态冻结
-`-- agent_py_agent/tests/test_credential_card_validation.py # 两种执行入口的表单改正、原权限门与固定回执
+|-- agent_py_agent/tests/test_credential_card_validation.py # 两种执行入口的表单改正、原权限门与固定回执
+|-- agent_py_agent/tests/test_final_response_projection_roles.py # 内部正文和跨段安全上下文的公开出口回归
+|-- agent_py_agent/tests/test_tui_local_candidate_commit_boundary.py # 未提交候选隔离及本地工具提交显示回归
+`-- agent_py_agent/tests/test_committed_stream_public_boundary.py # writer、IM档位、失败关闭和旧候选重放回归
 ```
 
 ```text
@@ -764,6 +767,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `agent_py_agent/agent/agent_core/model/visible_response.py`：只在原工具开始或最终采纳边界核同次sealed调用，再提交可见正文；生成中增量、被拒正文或历史块不能成为公开回复。
 - `test_assistant_message_phases.py`、`test_committed_model_messages.py`、`test_pending_input_public_boundary.py`、`test_progress_message_revision.py`：分别维护阶段/历史、显示采纳、失效上限、真实索引和TUI活动到canonical唯一冻结合同。
 - `test_credential_card_validation.py`：使用临时owner、原签名/输入账及实际回环核Count0/正Count和adapter；表单错误可改正，原身份/期限/重放门、密文保存和单Wake不变。
+- `test_final_response_projection_roles.py`、`test_tui_local_candidate_commit_boundary.py`、`test_committed_stream_public_boundary.py`：以原内部正文、完整安全投影及sealed-call提交验证CLI／TUI／Gateway／IM真实公开出口，覆盖未提交片段、取消、失败关闭、旧草稿重放及合法工具／心跳；新增133节点为普通双平台运行义务。
 
 - `agent_py_agent/tests/test_mcp_approval_sink_reuse.py`：验证原Agent有界缓存跨sink复用同范围approved_session，保新attempt/权限/插件与失源边界。
 

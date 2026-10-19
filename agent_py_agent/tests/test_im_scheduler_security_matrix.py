@@ -67,8 +67,8 @@ def test_schedule_control_refuses_other_actor_exact_id_without_mutation(tmp_path
     assert agent.scheduler_repository.store_path.read_bytes() == before
 
 
-# LLM: 两个准确 owner 共享隔离数据根，只从本测试可信通道入口冻结当前 actor；不从模型字段挑目录或目标。
-# 函数用途: 为跨 owner 猜编号建立真实用户/群 Agent、原 ThreadStore 与 schedule 工具。
+# LLM: 两个准确 owner 共享隔离数据根，可信通道 actor 与 typed 当前运行绑定同一原 TaskLink；不从模型字段挑目录或目标。
+# 函数用途: 为跨 owner 猜编号及锁定期间通知建立真实用户/群 Agent、线程和任务关联；不替用户解锁或签发管理员身份。
 def _external_owner(tmp_path, identity):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
         my_agent_owner_provider=identity.provider, my_agent_owner_kind=identity.owner_kind,
@@ -79,7 +79,10 @@ def _external_owner(tmp_path, identity):
         "owner_id": agent.home_paths.owner_id, "owner_home": str(agent.home_paths.owner_home_dir)})
     actor = actor_from_scope(agent, SimpleNamespace(channel="feishu", channel_user_id="ou_actor",
         channel_conversation_id=conversation), source.thread_id, "gwreq-" + identity.owner_id)
+    agent.conversation_store.tasks.bind({"thread_id": source.thread_id,
+        "task_id": actor.entry_request_id, "goal": "隔离通知与监控身份验证"}, host_channel_actor=actor)
     agent._current_run_params = RunParams(request_id=actor.entry_request_id,
+        task_id=actor.entry_request_id, run_id=actor.entry_request_id,
         task_attributes={"conversation_thread_id": source.thread_id}, host_channel_actor=actor)
     if identity.owner_kind == "group":
         from agent_py_agent.tests.test_group_authorization import (

@@ -127,6 +127,8 @@ def provider_recoverable_cli_report(agent, exc: ProviderRecoverableError) -> str
     )
 
 
+# LLM: 内部response可含原协议和秘密标签；完整公开投影先于streamed比较，model_response只用于安全同文去重，不能复活拒绝正文。
+# 函数用途: 取得尚未上屏的安全终答，保原最终正文与宿主附加字段的结构边界。
 def _unstreamed_final_response(result: object, streamed_text: str) -> str:
     """Return only the committed final text not already delivered by streaming.
 
@@ -137,18 +139,20 @@ def _unstreamed_final_response(result: object, streamed_text: str) -> str:
     final-item state and 长期助手' prefix-only stream matching without inspecting
     what the prose says.
     """
-    response = str(getattr(result, "response", "") or "")
+    from ..agent.gateway_parts.stream_events import public_model_text
+
+    response = public_model_text(getattr(result, "response", ""), max_chars=0, delivery_channel="", identifiers=())
     if not response:
         return ""
-    model_response = str(getattr(result, "model_response", "") or "").rstrip()
-    delivered = str(streamed_text or "").rstrip()
+    model_response = public_model_text(getattr(result, "model_response", ""), max_chars=0, delivery_channel="", identifiers=()).rstrip()
+    delivered = public_model_text(streamed_text, max_chars=0, delivery_channel="", identifiers=()).rstrip()
     if (
         model_response
         and delivered.endswith(model_response)
         and response.startswith(model_response)
     ):
         return response[len(model_response) :].lstrip("\n")
-    return "" if response in streamed_text else response
+    return "" if response in delivered else response
 
 
 def _print_compact_suggestion(result) -> None:

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.tests.support.ci_host_context_fixtures import local_mock_agent
 from agent_py_agent.tests.test_orchestration_create_subagents_tool import (
     _mock_create_items_agent,
@@ -622,7 +623,8 @@ class TestCreateSubagentsToolOutputAuthority:
         from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
-        agent._current_run_params = SimpleNamespace(run_id="run-main", task_id="task-main")
+        # 原本地lineage字段必须由真实RunParams承载；不凭替身缺字段猜测会话权限。
+        agent._current_run_params = RunParams(run_id="run-main", task_id="task-main")
 
         params = create_run_params(agent, {"role": "worker"}, "分析子项目", ["read_file"])
 
@@ -636,7 +638,8 @@ class TestCreateSubagentsToolOutputAuthority:
         from agent_py_agent.agent.settings import AgentConfig
 
         agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), subagent_workspace="subs"), tmp_path)
-        agent._current_run_params = SimpleNamespace(run_id="run-main", task_id="task-main")
+        # 原本地lineage字段必须由真实RunParams承载；不凭替身缺字段猜测会话权限。
+        agent._current_run_params = RunParams(run_id="run-main", task_id="task-main")
 
         params = create_run_params(
             agent,

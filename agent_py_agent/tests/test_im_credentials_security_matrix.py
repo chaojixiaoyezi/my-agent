@@ -29,6 +29,7 @@ from agent_py_agent.agent.gateway_parts.private_interaction_service import (
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 from agent_py_agent.agent.user_space.task_credentials import credential_path
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 from agent_py_agent.tests.test_im_progress_draft import Adapter
 from agent_py_agent.tests.test_ingestion_task_credential_scope import (
     _SECRET,
@@ -376,21 +377,29 @@ def test_fragmented_rich_credentials_across_flush_preserve_safe_content_at_bound
         writer.flush()
         persisted = path.read_text() if path.exists() else ''
         assert all(secret not in persisted and secret not in json.dumps(live) for secret in secret_parts)
+    if boundary != 'close':
+        _commit_writer_fixture(writer, ''.join(parts), call_id='credential-boundary',
+                               boundary='tools' if boundary == 'tool' else 'terminal')
     if boundary == 'tool':
         writer.write_progress({'tool': 'read_file', 'phase': 'started', 'status': '开始'}, '工具开始')
     elif boundary == 'final':
         writer.prepare_display_history()
     else:
         writer.close()
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    public = ''.join(row.get('text', '') for row in rows if row.get('kind') == 'model_delta')
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    public = ''.join(row.get('text', '') for row in rows if row.get('kind') in {'assistant_commentary', 'assistant_final'})
     assert all(secret not in public and secret not in json.dumps(live) for secret in secret_parts)
-    assert all(text in public for text in ordinary)
-    assert public == project_user_reply(''.join(parts)).content
+    if boundary != 'close':
+        assert all(text in public for text in ordinary)
+        assert public == project_user_reply(''.join(parts)).content
+        assert all(row['model_source']['call_id'] == 'credential-boundary' for row in rows
+                   if row.get('kind') in {'assistant_commentary', 'assistant_final'})
+    else:
+        assert public == ''
     if boundary != 'close':
         writer.close()
         settled = [json.loads(line) for line in path.read_text().splitlines()]
-        assert ''.join(row.get('text', '') for row in settled if row.get('kind') == 'model_delta') == public
+        assert ''.join(row.get('text', '') for row in settled if row.get('kind') in {'assistant_commentary', 'assistant_final'}) == public
 
 
 @pytest.mark.parametrize('boundary', ['tool', 'final', 'close'])
@@ -403,11 +412,15 @@ def test_rich_unfinished_ordinary_line_is_held_until_structured_boundary(tmp_pat
     writer.write_model('说明的完整后缀')
     writer.flush()
     assert not live and not path.exists()
+    if boundary != 'close':
+        _commit_writer_fixture(writer, '普通说明的完整后缀', call_id='ordinary-boundary',
+                               boundary='tools' if boundary == 'tool' else 'terminal')
     if boundary == 'tool':
         writer.write_progress({'tool': 'read_file', 'phase': 'started', 'status': '开始'}, '工具开始')
     elif boundary == 'final':
         writer.prepare_display_history()
     else:
         writer.close()
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
-    assert ''.join(row.get('text', '') for row in rows if row.get('kind') == 'model_delta') == '普通说明的完整后缀'
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    assert ''.join(row.get('text', '') for row in rows if row.get('kind') in {'assistant_commentary', 'assistant_final'}) == (
+        '普通说明的完整后缀' if boundary != 'close' else '')

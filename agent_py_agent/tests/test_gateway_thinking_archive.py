@@ -11,6 +11,7 @@ from agent_py_agent.agent.conversation.display_checkpoint import display_checkpo
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts.foreground_transcript import GatewayForegroundTranscriptSink
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 
 
 # LLM: The fixture connects the actual foreground writer/sink/archive/checkpoint chain in a
@@ -90,6 +91,7 @@ def test_long_commentary_is_already_complete_at_gateway_tool_boundary(tmp_path):
     agent, _store, thread, writer = _writer(tmp_path)
     text = "\n".join(f"第{index}段：完整模型正文" for index in range(2000))
     writer.write_model(text)
+    _commit_writer_fixture(writer, text, call_id="test_long_commentary_is_already_complete_at_gateway_tool_boundary:0")
     writer.write_progress({"phase": "started", "tool": "read_file", "round": 1, "call_index": 1}, "")
     events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
     assert next(event for event in events if event["kind"] == "assistant_commentary")["text"] == text

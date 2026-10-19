@@ -1,6 +1,7 @@
 # LLM: cold None正count普通POST仅运输原receipt到原W；model/C管理活封印、ready/Count0和G1/global-write-v1拒绝保持，client memory仍仅recent可读。
 # LLM: HTTP handlers preserve authenticated owner/thread boundaries and raw HTTPMessage header copies before identity checks;
 # process stream identity affects only display cursors, never model requests or authorization.
+# 公开progress只接原已确认模型过程；退休raw draft不能因再次batch净化而恢复公开资格，原chunk/native不改。
 # 原C等待只投影同prepared来源，隔离202须原T耐久确认；main认证/HostActor/media/摘要与F4活封印不变，B2服务缺失严格503。
 # 控制 workspace 沿持久输入保存，共用宿主权限门；HTTP 投影不自行判定目录权限。
 # 首次受理在完整prepared摘要之前冻结owner/IM快照；已有回执重放不热读绑定，C只沿原lease和constructor配置来源。
@@ -484,7 +485,7 @@ def handle_progress(handler, server) -> None:
 
 # LLM: /progress 只公开白名单事件：模型过程说明、请求尚未返回的数值等待、按档位的工具进度和工具审批（只含工具名与已脱敏摘要，
 #   不含 binding、选项或参数原文）。审批事件只是提示，授权仍只能经 /approve、/deny 控制写入精确决定文件。
-#   读取复用有界增量位置索引，半行不消费，超限只投影行号和字节数；main 的等待/草稿/时间与脱敏保持。
+#   旧model_draft未提交正文不再公开；读取复用有界增量位置索引，半行不消费，超限只投影行号和字节数，等待/时间仍保留。
 # 函数用途: 按行游标公开过程及真实模型/工具等待，不发送思考或请求正文。
 def _read_public_progress_events(
     path, since: int, *, channel: str = ""
@@ -498,7 +499,7 @@ def _read_public_progress_events(
             continue
         if not isinstance(row, dict):
             continue
-        if row.get("kind") in {"assistant_commentary", "model_draft"}:
+        if row.get("kind") == "assistant_commentary":
             # Model commentary is safe at every verbose level only after the
             # same user-facing projection used by final channel delivery.
             # 本机私有通道保留宿主绝对路径（用户要能直接复制），外部通道仍收敛成 basename。

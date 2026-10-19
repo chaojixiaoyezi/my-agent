@@ -1,4 +1,5 @@
 # LLM: 本模块消费已清洗的前台 chunk，复用会话公开过程映射；精确请求来自宿主，不拥有审批、模型或任务状态。
+# 退休model_delta不能写同会话公开片；完整committed正文和canonical归档保持原来源。
 # 模块用途: 把前台思考、工具和候选回复同步给同会话窗口，最终快照随 canonical final 保存。
 
 from __future__ import annotations
@@ -43,11 +44,11 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
                 return
             self._consume_event(event)
 
-    # LLM: 调用方持锁；typed final仅同ID活动候选全文更新，原canonical唯一freeze；不能提前stable或改普通后台/child策略。
-    # 函数用途: 分派公开过程与完整候选，最终canonical正文接替同一活动段并随原快照恢复。
+    # LLM: 调用方持锁；旧model_delta不再公开，完整committed final仅同ID活动段更新并等canonical唯一freeze，普通后台/child不变。
+    # 函数用途: 分派已确认过程和完整终答候选，保原快照恢复且不重放旧未提交raw。
     def _consume_event(self, event: dict[str, object]) -> None:
         kind = event.get("kind")
-        text_writer = {"thinking_delta": self.write_thinking_delta, "model_delta": self.write_model}.get(kind)
+        text_writer = {"thinking_delta": self.write_thinking_delta}.get(kind)
         if text_writer is not None:
             text_writer(str(event.get("text") or ""))
             return

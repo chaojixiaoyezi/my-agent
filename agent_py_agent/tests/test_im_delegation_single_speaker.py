@@ -33,6 +33,7 @@ from agent_py_agent.agent.settings.im_task_preferences import set_delegation_pre
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli.gateway_loops import _build_background_scheduler
 from agent_py_agent.tests.test_channel_message_tool import _RecordingAdapter
+from agent_py_agent.tests.test_committed_model_messages import _commit_writer_fixture
 from agent_py_agent.tests.test_im_delegation_runtime import runtime_fixture
 from agent_py_agent.tests.test_session_task_real_chain import ScriptedWire, _ready_gateway_paths
 
@@ -338,19 +339,22 @@ def test_ack_final_only_does_not_leak_into_next_request_or_rich_transcript(tmp_p
     one.set_verbose_level("stream")
     one.set_final_only()
     one.write_model("已受理")
+    _commit_writer_fixture(one, "已受理", call_id="test_ack_final_only_does_not_leak_into_next_request_or_rich_transcript:0")
     one.write("模型等待过程")
     one.flush()
     assert not one.chunk_path.exists()
     following = BufferedChunkStreamWriter(tmp_path / "chat.jsonl")
     following.set_verbose_level("stream")
     following.write_model("普通后续聊天")
+    _commit_writer_fixture(following, "普通后续聊天", call_id="test_ack_final_only_does_not_leak_into_next_request_or_rich_transcript:1")
     following.flush()
     rows = [json.loads(line) for line in following.chunk_path.read_text().splitlines()]
-    assert any(row["kind"] == "model_draft" for row in rows)
+    assert any(row["kind"] == "assistant_commentary" for row in rows)
+    assert not any(row["kind"] in {"model_delta", "model_draft"} for row in rows)
     rich = BufferedChunkStreamWriter(tmp_path / "rich.jsonl", rich_transcript=True)
     rich.set_final_only()
     rich.write_model("富客户端内部过程\n")
-    rich._flush_model_deltas(complete=True)
+    _commit_writer_fixture(rich, "富客户端内部过程\n", call_id="test_ack_final_only_does_not_leak_into_next_request_or_rich_transcript:2")
     assert rich.chunk_path.exists()
 
 

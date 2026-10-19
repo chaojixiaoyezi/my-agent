@@ -61,6 +61,8 @@ def test_direct_turn_stream_tool_and_final_keep_order_and_no_duplicate() -> None
     runtime.enqueue_prompt("request-1", "hello", queued=False)
     turn = runtime.begin_turn("request-1")
     turn.write_model("I will check.")
+    turn.commit_model_response({"schema": "assistant_messages.v1", "source": {"call_id": "local-check"},
+                               "boundary": "tools", "messages": [{"text": "I will check."}], "final_text": ""})
     turn.write_progress(
         {"round": 1, "call_index": 1, "tool": "run_command", "phase": "started"}
     )
@@ -119,6 +121,8 @@ def test_multiple_provider_thinking_blocks_keep_chronological_order() -> None:
 
     turn.write_thinking_delta("先检查")
     turn.write_model("准备读文件。")
+    turn.commit_model_response({"schema": "assistant_messages.v1", "source": {"call_id": "local-read"},
+                               "boundary": "tools", "messages": [{"text": "准备读文件。"}], "final_text": ""})
     turn.write_progress(
         {"round": 1, "call_index": 1, "tool": "read_file", "phase": "started"}
     )
@@ -651,7 +655,10 @@ def test_turn_activity_survives_stream_and_tools_until_structured_terminal() -> 
     runtime.enqueue_prompt("request-activity", "go", queued=False)
     turn = runtime.begin_turn("request-activity")
 
+    # 本用例核宿主公开流的活动展示；local raw资格由专门的commit合同覆盖。
     turn.write_model("你好abc")
+    assert not [block for block in runtime.store.snapshot().active_blocks if block.role == "assistant"]
+    turn.on_gateway_event({"kind": "assistant_final", "text": "你好abc", "model_source": {"call_id": "active-accepted"}})
     streaming = runtime.store.snapshot()
     assert {block.role for block in streaming.active_blocks} == {"assistant"}
     assert streaming.status.output_tokens >= 3
@@ -1190,6 +1197,8 @@ def test_gateway_model_delta_streams_into_live_assistant_block() -> None:
 
     assert turn.on_gateway_event({"kind": "model_delta", "text": "第一"})
     assert turn.on_gateway_event({"kind": "model_delta", "text": "段。"})
+    assert not [block for block in runtime.store.snapshot().active_blocks if block.role == "assistant"]
+    assert turn.on_gateway_event({"kind": "assistant_final", "text": "第一段。", "model_source": {"call_id": "accepted-first"}})
 
     active = [
         block for block in runtime.store.snapshot().active_blocks
@@ -1238,6 +1247,8 @@ def test_local_tool_progress_freezes_commentary_as_process() -> None:
     turn = runtime._turns["request-local"]
 
     turn.write_model("先检查")
+    turn.commit_model_response({"schema": "assistant_messages.v1", "source": {"call_id": "local-process"},
+                               "boundary": "tools", "messages": [{"text": "先检查"}], "final_text": ""})
     turn.write_progress({"tool": "read_file", "phase": "started", "status": "开始"}, "legacy")
 
     assistant = _assistant_blocks(runtime)
@@ -1470,6 +1481,7 @@ def test_gateway_turn_resumed_freezes_live_blocks_and_keeps_new_reply_separate()
         "percent": 5,
     }
     assert turn.on_gateway_event({"kind": "model_delta", "text": "旧的半段回复"})
+    assert turn.on_gateway_event({"kind": "assistant_final", "text": "旧的半段回复", "model_source": {"call_id": "before-resume"}})
     assert turn.on_gateway_event({"kind": "thinking_delta", "text": "旧的思考"})
     assert turn.on_gateway_event(
         {
@@ -1507,6 +1519,7 @@ def test_gateway_turn_resumed_freezes_live_blocks_and_keeps_new_reply_separate()
 
     assert turn.on_gateway_event({"kind": "thinking_delta", "text": "新的思考"})
     assert turn.on_gateway_event({"kind": "model_delta", "text": "新的回复"})
+    assert turn.on_gateway_event({"kind": "assistant_final", "text": "新的回复", "model_source": {"call_id": "after-resume"}})
     assert turn.on_gateway_event(
         {"kind": "conversation_compaction_progress", "compact_progress": {**compact, "operation_id": "transcript:compact-3-retry"}}
     ), "续跑代次的新 Compact 操作要能照常显示"
