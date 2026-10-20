@@ -1,4 +1,4 @@
-"""只验证重试分流/取消叶，不创建Agent、执行来源或审批权限。"""
+"""用SQLite固定协议码验证重试/取消叶，兼容Python3.10；不创建Agent或审批权限。"""
 
 import sqlite3
 from pathlib import Path
@@ -14,7 +14,7 @@ from agent_py_agent.agent.gateway_parts import private_interaction_service as in
 def test_real_interrupt_wait_stops_before_second_validation(monkeypatch):
     calls = []
     error = sqlite3.OperationalError("controlled busy")
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorcode = 5  # SQLite固定协议主码BUSY。
 
     def read(*args, **kwargs):
         calls.append(True)
@@ -38,7 +38,7 @@ def test_extended_busy_primary_code_revalidates_same_inputs(monkeypatch):
     body = {}
     config = object()
     error = sqlite3.OperationalError("controlled extended busy")
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY_RECOVERY
+    error.sqlite_errorcode = 261  # SQLite固定扩展码BUSY_RECOVERY，其低8位仍是BUSY=5。
 
     def read(root, cfg, value, **kwargs):
         assert root == Path(".") and cfg is config and value is body

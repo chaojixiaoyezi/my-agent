@@ -1,4 +1,4 @@
-# LLM: 私卡只运输原点击；W仅重试提交前只读校验的真实SQLITE_BUSY，禁止重投input/业务，UNKNOWN仍不因退休变completed。
+# LLM: SQLite结果码读取兼容Python3.10，缺真实错误码仍拒绝重试；私卡只运输原点击；W仅重试提交前只读校验的真实SQLITE_BUSY，禁止重投input/业务，UNKNOWN仍不因退休变completed。
 # 模块用途: 签卡点击接回原执行者；实际本机源的固定receipt写完整raw观察，Count0/W不变，沿唯一控制账保幂等/unknown，不新Agent。
 from __future__ import annotations
 
@@ -204,7 +204,7 @@ def _submit_approval_input(agent, receipt, *, retry_read_busy=False):
 
 
 # LLM: 仅W提交前的纯只读完整校验可重试实际primary SQLITE_BUSY；每次重核MAC/expiry/密码/admin，不包input写或Root内消费。
-# 函数用途: 短暂等待原个人锁库恢复可读，最多三次与5/10ms等待；耗尽及其它错误保持原异常，默认C/Count0不等待。
+# 函数用途: 仅凭真实整数错误码短暂等待原个人锁库恢复可读，Python3.10缺属性时原样失败，最多三次与5/10ms等待；耗尽及其它错误保持原异常，默认C/Count0不等待。
 def _validated_approval_input(agent, receipt, body, *, retry_read_busy=False):
     import sqlite3
 
@@ -220,7 +220,8 @@ def _validated_approval_input(agent, receipt, body, *, retry_read_busy=False):
                 channel=receipt.channel, actor_id=receipt.user_id)
         except sqlite3.OperationalError as error:
             code = getattr(error, 'sqlite_errorcode', None)
-            if type(code) is not int or code & 0xff != sqlite3.SQLITE_BUSY or attempt == len(delays) - 1:
+            # SQLite固定协议码BUSY=5；Python3.10未导出模块常量，不能按错误文字或版本补造异常码。
+            if type(code) is not int or code & 0xff != 5 or attempt == len(delays) - 1:
                 raise
 
 

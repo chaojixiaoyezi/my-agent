@@ -1,3 +1,9 @@
+## 2026-10-20 Python 3.10 的 SQLite 只读错误码兼容
+
+线上3.10 collection暴露sqlite3模块未导出结果码常量。原审批只读重试现在直接比较SQLite固定协议主码BUSY=5；错误码仍须来自真实异常的严格int属性并取低8位。Python3.10原生异常没有sqlite_errorcode时，保持原对象失败、只校验一次、零等待，不按异常文字或版本补码。不改变三次及5/10ms预算、默认C/Count0、权限复核、input写入或Root消费边界，无新配置/依赖/兜底。
+
+原两测试文件节点保持：合成结构化5/261继续验证重试与中断，真实WAL物理锁按本次原异常是否带码验证；无码时证明该operation无input写，其余合法控制保持，重新个人锁定仍全部拒绝。没有skip/xfail，也没有给真实物理异常补code。写后故障注入仅作用于原受锁operation，不能把其异常移嫁给其它合法控制。完整准确解释器、JUnit及现有依赖来源留在仓外候选交接；远端CI仍需根重新验证。
+
 ## 2026-10-20 普通与必要通知共用回复槽的focused验证
 
 新增`test_required_notice_reply_slot.py`用真实SimpleAgent/Registry/Executor/归档/调度，只有模型、HTTP末端和渠道运输为合成替身。覆盖normal与required同槽正例、owner/home/请求/线程/actor/target破坏、canonical failed/unknown/未执行/信封失配、仅旧flag、原工作attempt不可替换，以及外发成功后canonical追加故障→原业务键只补账。独立复核追加normal/required纯附件整封镜像两节点，确认附件和工具原evidence_refs均进入canonical，空正文不触发重复通知。通知新轮与原工作attempt不同仍可合法镜像；原同因退避/累计预算、owner/凭据/取消不扩。

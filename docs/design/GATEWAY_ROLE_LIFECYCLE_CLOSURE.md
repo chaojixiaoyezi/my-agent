@@ -249,3 +249,11 @@ W 仅在原 `materialize_owner` 词法调用里，用同 client/self/creator/seq
 仅显式 generation 已发表责任快照中，原 strict reader 返回 `None` 时暂记该名字，继续读取其它责任并核末次完整链、设施、名称；只有缺叶确实不再列于末次名字集、且集合变化时才转原 typed 名称冲突，丢弃整轮并沿固定原 FD/首链/设施最多三轮重读。末次仍列同名、reader 自身异常、未知名称、硬路径/链/设施变化立即拒绝，不按异常文字或记录内容猜合法归档。默认 P6 和原旧 closure expected 全集合/完整 raw 门不变，不补来源、封存或执行权，不清隔离。
 
 683 公开栈只证实首读 `None` 分支；本片受控原 `archive_request` 成功终态后、首 stat 前的交错复现同分支，不反推683具体 leaf/writer，也不撤销其 P6 incomplete。新源码真实业务与正常关闭必须另验，旧失败原样保留。
+
+## 2026-10-20 Python 3.10 的 SQLite 只读错误码兼容
+
+线上3.10 collection暴露sqlite3模块未导出结果码常量。原审批只读重试现在直接比较SQLite固定协议主码BUSY=5；错误码仍须来自真实异常的严格int属性并取低8位。Python3.10原生异常没有sqlite_errorcode时，保持原对象失败、只校验一次、零等待，不按异常文字或版本补码。不改变三次及5/10ms预算、默认C/Count0、权限复核、input写入或Root消费边界，无新配置/依赖/兜底。
+
+原两测试文件节点保持：合成结构化5/261继续验证重试与中断，真实WAL物理锁按本次原异常是否带码验证；无码时证明该operation无input写，其余合法控制保持，重新个人锁定仍全部拒绝。没有skip/xfail，也没有给真实物理异常补code。完整准确解释器、JUnit及现有依赖来源留在仓外候选交接；远端CI仍需根重新验证。
+
+协议依据：[SQLite结果码](https://www.sqlite.org/rescode.html)规定既有数值固定、低8位为主码；[Python sqlite3异常属性](https://docs.python.org/3.11/library/sqlite3.html#sqlite3.Error.sqlite_errorcode)从3.11新增。5/6/8/11/261是既有协议编码，不新增可调常量，因此无需扩常量目录。未新增/移动生产文件，CODEBASE_TREE入口保持。

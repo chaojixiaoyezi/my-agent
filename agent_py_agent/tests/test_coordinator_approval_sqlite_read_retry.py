@@ -1,4 +1,4 @@
-"""W只读校验真实物理锁红绿；原五回执断言、Agent、pool和权限链保持。"""
+"""W只读校验真实物理锁；原生错误码存在才证明重试，Python3.10无码时验证原样拒绝，原权限链保持。"""
 import gc
 import json
 import sqlite3
@@ -38,7 +38,9 @@ def _physical_five(tmp_path, monkeypatch, *, transient, post_input_error=False, 
             op = value['decision_input']['operation_id']
             captured['writes'][op] = captured['writes'].get(op, 0) + 1
         result = original_write(path, value, **kwargs)
-        if post_input_error and isinstance(value, dict) and value.get('decision_input') and not captured.get('post_input_raised'):
+        if (post_input_error and isinstance(value, dict) and value.get('decision_input')
+                and value['decision_input']['operation_id'] == captured.get('operation_id')
+                and not captured.get('post_input_raised')):
             captured['post_input_raised'] = True
             raise captured['errors'][0]
         return result
@@ -109,20 +111,48 @@ def _physical_five(tmp_path, monkeypatch, *, transient, post_input_error=False, 
     monkeypatch.setattr(json_io, 'write_json_file_atomic', observe_write)
     monkeypatch.setattr(interactions, 'validated_private_interaction_from_config', observe_validation)
     monkeypatch.setattr(private, '_submit_approval_input', wrapped_submit)
-    if transient and not post_input_error and not relock:
+    original_failed = False
+    try:
         original_five(tmp_path, monkeypatch)
-    else:
-        with pytest.raises(AssertionError):
-            original_five(tmp_path, monkeypatch)
+    except AssertionError:
+        original_failed = True
+    # 能力只来自本次真实物理锁异常；不按Python版本判断，也不向原生异常补写sqlite_errorcode。
+    captured['native_errorcode'] = bool(captured['errors']) and all(
+        type(getattr(error, 'sqlite_errorcode', None)) is int for error in captured['errors'])
+    assert original_failed == (not captured['native_errorcode'] or not transient or post_input_error or relock)
     rows = [json.loads(path.read_text()) for path in (tmp_path / 'gateway/control_operations').glob('*.json')]
     assert len(rows) == 5
-    assert all(type(error.sqlite_errorcode) is int and error.sqlite_errorcode & 255 == sqlite3.SQLITE_BUSY
-               for error in captured['errors'])
+    assert captured['errors']
+    if captured['native_errorcode']:
+        assert all(error.sqlite_errorcode & 255 == 5 for error in captured['errors'])
+    else:
+        assert all(getattr(error, 'sqlite_errorcode', None) is None for error in captured['errors'])
     return captured, rows
+
+
+# LLM: 真实解释器缺SQLite异常码时只验证同一物理锁的保守结果，不把其它AssertionError或模拟补码算通过。
+# 函数用途: 核准原受影响operation零等待/零写，其余四操作保持原能力；已重新个人锁定则全部不授输入权。
+def _assert_native_errorcode_unavailable(captured, rows, *, relock=False):
+    operation_id = captured['operation_id']
+    assert captured['calls'][operation_id] == 1
+    assert len(captured['errors']) == 1 and not hasattr(captured['errors'][0], 'sqlite_errorcode')
+    assert captured['waits'] == [] and operation_id not in captured['writes']
+    assert not captured.get('post_input_raised', False)
+    selected = [row for row in rows if row['operation_id'] == operation_id]
+    assert len(selected) == 1 and selected[0]['state'] == 'terminal_unknown'
+    if relock:
+        assert not captured['writes']
+        assert all(row['state'] == 'terminal_unknown' for row in rows)
+    else:
+        assert len(captured['writes']) == 4 and set(captured['writes'].values()) == {1}
+        assert sum(row['state'] == 'executing' for row in rows) == 4
 
 
 def test_transient_real_wal_busy_keeps_all_five_original_controls_executing(tmp_path, monkeypatch):
     captured, rows = _physical_five(tmp_path, monkeypatch, transient=True)
+    if not captured['native_errorcode']:
+        _assert_native_errorcode_unavailable(captured, rows)
+        return
     assert captured['errors'] and len(captured['errors']) == 1
     assert captured['waits'] == [0.005]
     assert captured['calls'][captured['operation_id']] == 2
@@ -132,6 +162,9 @@ def test_transient_real_wal_busy_keeps_all_five_original_controls_executing(tmp_
 
 def test_persistent_real_wal_busy_exhausts_and_never_republishes_input(tmp_path, monkeypatch):
     captured, rows = _physical_five(tmp_path, monkeypatch, transient=False)
+    if not captured['native_errorcode']:
+        _assert_native_errorcode_unavailable(captured, rows)
+        return
     assert captured['calls'][captured['operation_id']] == 3
     assert len(captured['errors']) == 3
     assert captured['waits'] == [0.005, 0.010]
@@ -140,7 +173,7 @@ def test_persistent_real_wal_busy_exhausts_and_never_republishes_input(tmp_path,
     assert len(captured['writes']) == 4 and set(captured['writes'].values()) == {1}
 
 
-@pytest.mark.parametrize('code', [sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_READONLY, sqlite3.SQLITE_CORRUPT, None, '5', True])
+@pytest.mark.parametrize('code', [6, 8, 11, None, '5', True])
 def test_only_actual_integer_primary_busy_is_retryable(monkeypatch, code):
     error = sqlite3.OperationalError('synthetic boundary error')
     if code is not None:
@@ -164,7 +197,7 @@ def test_only_actual_integer_primary_busy_is_retryable(monkeypatch, code):
 def test_default_path_does_not_retry_busy(monkeypatch):
     from types import SimpleNamespace
     error = sqlite3.OperationalError('synthetic boundary busy')
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorcode = 5  # SQLite固定协议主码BUSY；不是给真实物理异常补码。
     calls = []
     def fail(*_args, **_kwargs):
         calls.append(True)
@@ -181,7 +214,7 @@ def test_default_path_does_not_retry_busy(monkeypatch):
 def test_full_validation_repeats_and_stops_when_current_authority_changes(monkeypatch, result):
     from types import SimpleNamespace
     error = sqlite3.OperationalError('synthetic boundary busy')
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorcode = 5  # SQLite固定协议主码BUSY；不是给真实物理异常补码。
     terminal = ValueError('synthetic original validation expired') if result == 'expired' else InterruptedError('synthetic cancellation')
     calls, waits = [], []
     def validate(*_args, **_kwargs):
@@ -207,6 +240,9 @@ def test_full_validation_repeats_and_stops_when_current_authority_changes(monkey
 
 def test_real_busy_after_durable_input_is_never_retried(tmp_path, monkeypatch):
     captured, rows = _physical_five(tmp_path, monkeypatch, transient=True, post_input_error=True)
+    if not captured['native_errorcode']:
+        _assert_native_errorcode_unavailable(captured, rows)
+        return
     assert captured['post_input_raised'] is True
     assert captured['calls'][captured['operation_id']] == 2
     assert len(captured['writes']) == 5 and set(captured['writes'].values()) == {1}
@@ -215,6 +251,9 @@ def test_real_busy_after_durable_input_is_never_retried(tmp_path, monkeypatch):
 
 def test_real_personal_lock_change_during_backoff_is_read_again_and_not_authorized(tmp_path, monkeypatch):
     captured, rows = _physical_five(tmp_path, monkeypatch, transient=True, relock=True)
+    if not captured['native_errorcode']:
+        _assert_native_errorcode_unavailable(captured, rows, relock=True)
+        return
     assert captured['calls'][captured['operation_id']] == 2
     assert len(captured['errors']) == 1
     assert not captured['writes']
