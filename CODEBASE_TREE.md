@@ -3690,6 +3690,7 @@ agent_py_agent/tests/
 |-- agent_py_agent/tests/test_scheduler_user_action_notice.py # 静默监控认证拒绝、来源隔离、取消和原outbox重投
 |-- agent_py_agent/tests/test_background_result_identity.py # 任意业务结果、宿主精确身份交接与Compact末次attempt回归
 |-- agent_py_agent/tests/test_required_notice_reply_slot.py # 普通与必要通知共同canonical槽、精确工作身份及补账故障窗
+|-- agent_py_agent/tests/test_background_reply_candidates.py # 来源工具回执候选筛选、无候选零读取actor及有候选原身份/来源拒绝
 |-- docs/tasks/CREDENTIAL_HTTP_FAILURE_HANDOFF.md # HTTP认证失败分类与同代单次拒绝记录的交接
 `-- docs/tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md # 原后台通知主链、测试证据与边界交接
 ```
@@ -3887,3 +3888,5 @@ agent_py_agent/
 关键文件说明：`test_required_notice_reply_slot.py`是normal/required共同回复槽的真实本地管线回归入口，合成运输不代表真实飞书验收。
 
 关键文件说明：`agent_py_agent/tests/test_background_result_identity.py`验证业务结果与宿主执行身份分离，关闭发布后冻结及未发表拒绝；合成测试不代表包验或真实服务。
+
+关键文件说明：`agent_py_agent/tests/test_background_reply_candidates.py`验证来源工具回执先按结构化形状筛候选，无候选不读取actor或触发来源认领，有候选保持原身份/目标/attempt与canonical操作门。

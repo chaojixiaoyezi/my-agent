@@ -62,3 +62,13 @@
 真实模型内容相关性、真实飞书外发和长期监控仍需最终验收；本切片的合成运输不能充当真实外发证据。
 
 `.20261013.7` 候选的独立 MiniMax-M2.7 合成验收已确认完整完成合同进入真实原生请求，模型返回合法四字段 `internal_only` 信封，但用单一 `json` 代码围栏包装。原直接 `json.loads` 把包装误判为 `BACKGROUND_RECEIPT_CONTRACT_INVALID`，该运行已正式失败且没有外发。此缺陷由上述完整包装解码修复，保留原失败证据；不重跑原已失败业务、不修改产物，修后候选由主线程另行做同需求的独立验收。这一结果不证明模型永远不会偏题。
+
+## 2026-10-20：来源工具回复候选与普通收口分界
+
+`committed_source_replies`只回答“本轮是否已有可由原工具账证明的来源回复”。先按原结构化字段筛选同渠道的sent回执候选（现行schema、source_owner_delivery、receipt、非空正文或附件及reply_binding.operation_id）；没有候选直接返回空集，不读取HostActor，也不调用调度来源校验。普通模型回复、会话消息/派活唤醒和委派内部结果仍沿原收口、主sender及运输合同，不因一次没有工具回执的查询提前认领外部身份。候选筛选不授权发送，不创建状态或读取正文含义。
+
+存在候选时，原owner/home、request/run/task/attempt、执行及来源线程、entry/conversation/actor、目标、当前来源和canonical send_message成功操作及完整信封核验保持；身份损坏仍抛原错误，来源失效仍不能占槽。没有候选不代表已经送达，也不解除必要通知义务。
+
+原事件取消屏障E11仍用真实scheduler/Agent，只替模型和运输；validate后pause已提交时，真正运输入口的begin CAS必须拒绝，原无运输断言不改。候选查询不再给无候选普通收口多执行一次validate；真正正常投递仍自行执行原validate及运输CAS，不能缓存一次true跨越pause。
+
+验证保留远端3b1d的33失败和本地准确7bb副本33F；新候选边界测试修复前8F/3P分别保留。精确33节点与共槽50/新候选11/原事件效果文件另做定向核验，不把切片结果作为真实服务、全仓或发行通过。参考已读OpenClaw合同索引及`subagent-announce-dispatch.ts`、`channels/turn/delivery-result.ts`、`durable-delivery.ts`，沿用按结构化交付事实分流、实际效果边界独立核验的原则，不引入其自然语言或fallback路径。

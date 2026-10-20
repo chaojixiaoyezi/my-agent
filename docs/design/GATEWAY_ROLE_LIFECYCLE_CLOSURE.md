@@ -274,3 +274,7 @@ W 仅在原 `materialize_owner` 词法调用里，用同 client/self/creator/seq
 条件完整才抛原regular_leaf_detached typed冲突，原同parent FD丢弃本轮bytes，完整父链复核后在原最多三次尝试内重读。不重开或换锚，不根据异常文案、内容、角色名或不同inode泛化重试；旧inode rename到旁名仍nlink1、fresh fstat失败、元数据漂移、危险current/多链接、父链变化、预算与cleanup失败均原拒。原B已采样0link分支不改，默认snapshot_retries=0和领域authority不变。
 
 原始F6b56的真实FD私有逐字副本用os.replace与原write_bytes_atomic_beneath均稳定复现两个窗口210硬错；新40节点基线9F31P→候选40P，六直接文件138P。没有伪造stat_result或安全异常，不以组件反推B687当时精确leaf/writer。新增节点必须最终两OS新包实际执行；旧失败、全域隔离、旧closure/责任未知不补签，实际新home和发行由root另验。
+
+## 2026-10-20 来源缺叶回归与已批准离名合同对齐
+
+旧`test_generation_missing_published_leaf_is_not_an_empty_snapshot`在首列名后实际删除叶，末次也不再列名，却仍要求`FileNotFoundError`；该预期与上文已批准的“责任首读前离名窗口”冲突。本次保留旧精确失败证据，不改generation产品实现：原节点现以真实unlink使原reader返回None，再经原atomic writer同名重新发表，证明末次仍列名时必须硬拒且不重读。原确认离名刺激移入独立回归，核原parent FD不换、整轮丢弃后幸存叶重新读取，以及旧expected完整责任门仍拒绝缺失来源。有限名称重读不等于空快照关闭许可，默认P6、原三次预算、父链/设施与任意硬异常门均不变。

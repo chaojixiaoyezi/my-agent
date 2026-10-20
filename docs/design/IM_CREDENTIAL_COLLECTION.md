@@ -1,3 +1,13 @@
+## 2026-10-20 凭据配置幂等、结构化拒绝与定时/发现轮 web_fetch 可见性（B690 修复候选）
+
+`configure_credential` 仅用于将 `collected` 状态升级为 HTTP 认证配置：
+- 若目标凭据已配置为相同 `authentication`、`auth_config` 与 `header_name`，幂等返回成功回执（`already_configured=True`、`authentication_configured=True`），不重写凭据记录。
+- 若目标凭据已配置为其他方案或不同配置，抛出结构化 `CredentialInputError("CREDENTIAL_BINDING_INVALID", ..., stage="record_management", diagnostic={"reason": "authentication_already_configured", "current_authentication": ...})`，不再落入 `RequestCredentialsTool.execute` 顶层 `except ValueError` 被错误标为 `stage="preflight"`。
+- 若 `authentication="collected"`，抛出 `TOOL_INVALID_ARGUMENTS`（`reason="authentication_target_collected"`）。
+- `request`、`update`、`status`、`revoke`、`find`、`list` 回执与摘要统一公开 `authentication` 与 `authentication_configured`。
+
+后台完整目录运行（`source == "background_main_agent" and allowed_tools is None`）首轮预加载 `BACKGROUND_CONTINUATION_REQUIRED_TOOLS`（含 `web_fetch`）；工具回执信封含结构化 `credential` 或 `credential_discovery` 字典时，当前循环、线程持久化和 Compact 重建自动并入 `web_fetch`；`run_command` 的 `avoid_when` 明确提示需要 `credential_ref` 的 HTTP/API 请求必须使用 `web_fetch`。
+
 ## 2026-10-20 原输入结算工作轮的通用软指导（候选，待新源真实复验）
 
 `task_input_resolved`继续沿原typed Wake/TurnTrigger进入工作轮的Host Event，原input_id/provider/status/result_available、origin refs及权限不变。只在共用`current_turn_text`中将此事件从“子代理变化”准确说明为输入状态结算，并提醒模型：已经执行过的一次申请不是再申请/自动续期授权，不能把历史原要求当本次新请求；ready且有结果才表示可沿原授权继续，expired不等于cancelled，不能把用户的旧叙述说成自己本片执行了取消。缺失或未知事实仍未确认，不因此授予新请求。

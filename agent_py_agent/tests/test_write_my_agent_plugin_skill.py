@@ -476,8 +476,11 @@ def test_python_version_selection_remains_structural(extensions, expected):
 
 def test_builtin_seed_keeps_templates_and_references(author_workspace, monkeypatch, skill_catalog_factory):
     from agent_py_agent.agent.capability import builtin_seed
+    from agent_py_agent.agent.common.nofollow_fs import ensure_private_dir
 
     root = author_workspace / "seed"
+    # 独立调用镜像器的测试负责先从已有作者工作区建立准确私有根，生产Home入口已承担同一责任。
+    ensure_private_dir(root, canonical_root=author_workspace)
     monkeypatch.setattr(builtin_seed, "_BUILTIN_SRC", SKILL.parent)
     builtin_seed.sync_skill_index(root / "builtin", root / "shared", root / "indexes/skills.jsonl", root / "cache/fingerprint")
     seeded = root / "builtin/write-my-agent-plugin"

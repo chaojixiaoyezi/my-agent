@@ -1,5 +1,5 @@
-# LLM: 临时Store隔离真实owner；正式搜索信封经原子线程账本恢复，不依赖携带正文或推断。
-# 模块用途: 锁住跨轮工具展示、线程隔离、旧记录兼容与权限过滤。
+# LLM: 临时Store隔离真实owner；正式搜索/凭据信封经同源投影及原子线程账本恢复，不依赖正文或推断。
+# 模块用途: 锁住跨轮及凭据工具展示、后台首轮、前台不变、线程隔离与权限过滤。
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -112,3 +112,110 @@ def test_compact_cas_preserves_discovery_written_during_summary(tmp_path, monkey
     assert result.compacted and current.compact_generation == 1
     assert current.loaded_tool_names == ("read_file",)
     assert current.compact_checkpoint_id == result.thread.compact_checkpoint_id
+
+
+@pytest.mark.parametrize("envelope_key", ["credential", "credential_discovery"])
+@pytest.mark.parametrize("consumer", ["loop", "thread", "compact"])
+def test_credential_envelopes_load_web_fetch_for_all_consumers(tmp_path, monkeypatch, envelope_key, consumer):
+    from agent_py_agent.agent.agent_core._tool_loop_service import _load_discovered_tools
+    from agent_py_agent.agent.tooling.tool_search_state import pending_carried_loaded_tool_names
+
+    agent, thread, _, _ = _setup(tmp_path, monkeypatch, False)
+    agent.tools.catalog_deferred_categories = ["web"]
+    params = SimpleNamespace(task_attributes={"conversation_thread_id": thread.thread_id}, loaded_tool_names=set())
+    record = {"tool": "request_credentials", "tool_round": 1, "ok": True,
+              "tool_result_envelope": {envelope_key: {}}}
+    assert "web_fetch" not in {spec.name for spec in agent.tools.model_visible_specs()}
+    if consumer == "loop":
+        _load_discovered_tools(params, record)
+        loaded = params.loaded_tool_names
+    elif consumer == "thread":
+        persist_discovered_tools(agent, params, record)
+        loaded = thread_loaded_tools(agent, params)
+        assert agent.conversation_store.threads.load(thread.thread_id).loaded_tool_names == ("web_fetch",)
+    else:
+        loaded = pending_carried_loaded_tool_names([record, {"tool_round": 2, "output": "synthetic"}])
+    assert loaded == {"web_fetch"}
+    assert "web_fetch" in {spec.name for spec in agent.tools.model_visible_specs(loaded_tool_names=loaded)}
+    assert {spec.name for spec in agent.tools.model_visible_specs(
+        loaded_tool_names=loaded, allowed_tools=["read_file"],
+    )} == {"read_file"}
+    assert record["tool_result_envelope"] == {envelope_key: {}}
+
+
+@pytest.mark.parametrize("source,allowed_tools,background", [
+    ("background_main_agent", None, True), ("user", None, False),
+    ("background_main_agent", ["read_file"], False), ("background_main_agent", [], False),
+])
+def test_initial_loop_loaded_tools_preserve_foreground_and_explicit_limits(
+    tmp_path, monkeypatch, source, allowed_tools, background,
+):
+    from agent_py_agent.agent.agent_core.runtime import loop_support
+    from agent_py_agent.agent.conversation.background_tool_policy import (
+        BACKGROUND_CONTINUATION_REQUIRED_TOOLS,
+    )
+
+    agent, thread, _, _ = _setup(tmp_path, monkeypatch, False)
+    agent.tools.catalog_deferred_categories = ["web"]
+    params = SimpleNamespace(source=source, allowed_tools=allowed_tools,
+                             task_attributes={"conversation_thread_id": thread.thread_id})
+    seed = SimpleNamespace(effective_contract_snapshot=None)
+    reconstructed = SimpleNamespace(loaded_tool_names=set())
+    initial = getattr(loop_support, "_initial_loop_loaded_tool_names", None)
+    assert callable(initial), "初始加载名应由独立辅助函数统一计算"
+    loaded = initial(agent, params, seed, reconstructed)
+    assert ("web_fetch" in loaded) is background
+    assert loaded == (set(BACKGROUND_CONTINUATION_REQUIRED_TOOLS) if background else set())
+    visible = {spec.name for spec in agent.tools.model_visible_specs(
+        loaded_tool_names=loaded, allowed_tools=allowed_tools,
+    )}
+    assert ("web_fetch" in visible) is background
+    assert params.allowed_tools is allowed_tools
+    assert reconstructed.loaded_tool_names == set()
+    assert agent.conversation_store.threads.load(thread.thread_id).loaded_tool_names == ()
+
+
+def test_initial_loop_loaded_tools_keep_reconstruction_open_actions_and_thread(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.runtime import loop_support
+
+    agent, thread, _, records = _setup(tmp_path, monkeypatch, False)
+    params = SimpleNamespace(source="user", allowed_tools=None,
+                             task_attributes={"conversation_thread_id": thread.thread_id})
+    persist_discovered_tools(agent, params, records[0])
+    seed = SimpleNamespace(effective_contract_snapshot=SimpleNamespace(required_actions=(
+        SimpleNamespace(status="open", allowed_tools=("read_artifact",)),
+        SimpleNamespace(status="done", allowed_tools=("web_fetch",)),
+    )))
+    reconstructed = SimpleNamespace(loaded_tool_names={"search_text"})
+    initial = getattr(loop_support, "_initial_loop_loaded_tool_names", None)
+    assert callable(initial), "初始加载名应由独立辅助函数统一计算"
+    assert initial(agent, params, seed, reconstructed) == {"read_file", "read_artifact", "search_text"}
+    assert reconstructed.loaded_tool_names == {"search_text"}
+
+
+@pytest.mark.parametrize("envelope", [
+    None, {}, {"credential": []}, {"credential_discovery": "web_fetch"},
+    {"credential": None, "credential_discovery": False},
+])
+def test_invalid_credential_envelopes_do_not_load_tools(envelope):
+    from agent_py_agent.agent.tooling.tool_search_state import _carried_loaded_tool_names
+
+    assert _carried_loaded_tool_names({"tool_result_envelope": envelope}) == set()
+    assert _carried_loaded_tool_names({"output": str({"credential": {}})}) == set()
+
+
+@pytest.mark.parametrize("search", [None, {}, {"loaded_tool_names": "read_file"},
+                                         {"loaded_tool_names": [None, 1, " read_file ", ""]}])
+def test_credential_loading_preserves_tool_search_normalization(search):
+    from agent_py_agent.agent.tooling.tool_search_state import _carried_loaded_tool_names
+
+    record = {"tool_result_envelope": {"credential": {}, "tool_search": search}}
+    expected = {"web_fetch", "read_file"} if search and isinstance(search.get("loaded_tool_names"), list) else {"web_fetch"}
+    assert _carried_loaded_tool_names(record) == expected
+
+
+def test_shell_hints_direct_host_credentials_to_web_fetch():
+    from agent_py_agent.agent.tooling.shell import _build_shell_tool_model_spec
+
+    spec = _build_shell_tool_model_spec("full", 240, 16000)
+    assert "需要宿主凭据（credential_ref）的 HTTP/API 请求必须使用 web_fetch，禁止用 curl/shell 拼接占位账号或探测受保护接口。" in spec.hints.avoid_when

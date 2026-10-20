@@ -58,6 +58,7 @@ def test_fresh_public_agent_prepares_private_home_before_default_workspace(tmp_p
 def test_public_external_workspace_retains_original_creation_and_existing_permissions(tmp_path, monkeypatch):
     workspace = tmp_path / "user-workspace/new"
     workspace.parent.mkdir(mode=0o755)
+    workspace.parent.chmod(0o755)
     home, args = _arguments(tmp_path, monkeypatch, external=str(workspace))
     previous = os.umask(0o002)
     try:

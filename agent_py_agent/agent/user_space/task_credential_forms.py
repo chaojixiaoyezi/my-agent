@@ -1,6 +1,6 @@
 # LLM: 静默取消共用原输入退休实现，冷C只消费其真实输入服务末门，不新建Wake或恢复任务。
 # 模块用途: 让原Agent和冷C保持相同的凭据取消回执及输入清理。
-# LLM: 输入值与安全元数据分离；表单typed错误仅由原授权后的parser产生，固定字段/文案不携明文；配置/重发仍用原动作授权。
+# LLM: 输入值与安全元数据分离；表单typed错误仅由原授权后的parser产生，configure仅从collected升级且已配置同三元组幂等、异配置返回结构化冲突。
 # 模块用途: 校验原凭据卡与认证配置，群共享使用和管理保持分权，秘密只在原加密链保存。
 from __future__ import annotations
 
@@ -63,8 +63,32 @@ def credential_submitter(row, body):
     return actor
 
 
-# LLM: 配置仅供原请求人/实际提供者，群授权检查在锁外；锁内复读代次和授权事实，不因共享使用取得管理权。
-# 函数用途: 给已保存凭据绑定声明式认证，保持准确origin和原秘密字段，不在锁内请求飞书。
+# LLM: 只按当前row构造已配置绑定的结构化错误，不读取存储、不复制秘密；错误码保持error_taxonomy已注册的绑定无效。
+# 函数用途: 统一不同认证方案或不同auth_config/header_name时的文案与诊断，避免两条拒绝分支漂移。
+def _credential_already_configured_error(row):
+    from .task_credentials import CredentialInputError
+    return CredentialInputError(
+        'CREDENTIAL_BINDING_INVALID',
+        f"凭据已配置为 {row['authentication']} 认证，直接交 web_fetch 使用即可；若需更换认证方式请重新申请或更新。",
+        stage='record_management',
+        effect_outcome='not_started',
+        diagnostic={'reason': 'authentication_already_configured', 'current_authentication': row['authentication']},
+    )
+
+
+# LLM: 只按当前row投影公开配置结果，不读取存储或秘密；already_configured 仅由幂等分支置真。
+# 函数用途: 统一 configure 成功回执字段，避免两条返回分支漂移。
+def _configured_credential_result(reference, row, *, already_configured=False):
+    result = {'credential_ref': reference, 'status': row['status'], 'origin': row['origin'],
+              'authentication': row['authentication'], 'authentication_configured': True,
+              'verification_status': row.get('verification_status', 'unverified')}
+    if already_configured:
+        result['already_configured'] = True
+    return result
+
+
+# LLM: 配置仅供原请求人/实际提供者，群授权检查在锁外；锁内复读代次和授权事实，不因共享使用取得管理权；collected不是可配置目标，同方案重复configure幂等不写盘，已配置其他方案返回结构化绑定错误。
+# 函数用途: 给已保存凭据绑定声明式认证，保持准确origin和原秘密字段，不在锁内请求飞书；已就绪的凭据直接复用，不改密文或代次。
 def configure_credential(agent, reference, *, authentication, auth_config=None, header_name='Authorization'):
     from ..common.json_io import read_json_object_report
     from ..conversation.tool_approval_scope import (
@@ -77,6 +101,7 @@ def configure_credential(agent, reference, *, authentication, auth_config=None, 
         credential_header_name,
     )
     from .task_credentials import (
+        CredentialInputError,
         _assert_credential_scope,
         _assert_credential_unchanged,
         _credential_mutation,
@@ -94,16 +119,40 @@ def configure_credential(agent, reference, *, authentication, auth_config=None, 
     with _credential_mutation(agent, path) as admission:
         row = read_json_object_report(path, context='credentials.configure').payload
         _assert_credential_unchanged(agent, observed, row, scope)
-        if row['authentication'] != 'collected' or authentication == 'collected':
-            raise ValueError('仅待配置凭据可以绑定认证方式')
+        if authentication == 'collected':
+            raise CredentialInputError(
+                'TOOL_INVALID_ARGUMENTS',
+                'configure 必须指定具体认证方案（basic/bearer/header/signature/login），不能设为 collected。',
+                stage='record_management',
+                effect_outcome='not_started',
+                diagnostic={'reason': 'authentication_target_collected'},
+            )
+        if row['authentication'] != 'collected':
+            if row['authentication'] != authentication:
+                raise _credential_already_configured_error(row)
+            try:
+                fields = credential_fields(authentication, row['fields'])
+                config = credential_auth_config(authentication, auth_config, fields)
+                normalized_header = credential_header_name(header_name)
+            except (ValueError, KeyError, TypeError):
+                raise _credential_already_configured_error(row) from None
+            if row.get('auth_config', {}) == config and row.get('header_name', 'Authorization').lower() == normalized_header.lower():
+                return _configured_credential_result(reference, row, already_configured=True)
+            raise _credential_already_configured_error(row)
         fields = credential_fields(authentication, row['fields'])
         config = credential_auth_config(authentication, auth_config, fields)
+        normalized_header = credential_header_name(header_name)
         if authentication == 'login' and credential_origin(config['url']) != row['origin']:
-            raise ValueError('登录地址必须属于同一接口 origin')
-        row.update(authentication=authentication, auth_config=config, header_name=credential_header_name(header_name))
+            raise CredentialInputError(
+                'CREDENTIAL_BINDING_INVALID',
+                '登录地址必须属于同一接口 origin。',
+                stage='record_management',
+                effect_outcome='not_started',
+                diagnostic={'reason': 'login_origin_mismatch'},
+            )
+        row.update(authentication=authentication, auth_config=config, header_name=normalized_header)
         _save_credential_row(admission, path, row)
-    return {'credential_ref':reference, 'status':row['status'], 'origin':row['origin'],
-            'authentication':authentication, 'verification_status':row.get('verification_status', 'unverified')}
+    return _configured_credential_result(reference, row)
 
 
 # LLM: 重发仅退休准确旧输入，不产生取消Wake；新代次沿原登记/截止账本，旧卡引用不再可提交。

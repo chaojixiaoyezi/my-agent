@@ -1,7 +1,7 @@
 
 
-# LLM: execute_tool_loop 是主子共用的唯一入口；交付复核只消费原验证/写入信封并改共享展示，native IR、Compact 与收口权威不变。
-# 模块用途: 装配采样、工具和窄收口及最终校准计量；保持输入账、取消和持久提交边界，核对共享展示测试。
+# LLM: execute_tool_loop 是主子共用的唯一入口；发现复用正式搜索/凭据投影，交付复核只消费原验证/写入信封，native IR、Compact 与收口权威不变。
+# 模块用途: 装配采样、工具展示、窄收口及最终校准计量；保持输入账、取消和持久提交边界，核对共享展示测试。
 from __future__ import annotations
 
 import json
@@ -2648,20 +2648,12 @@ def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: 
     return "".join("\n" + hint for hint in hints if hint)
 
 
-# LLM: 正式搜索信封更新当前循环展示集合；持久化在原归档/IR之后，权限不由加载名授予。
-# 函数用途: 让工具加载跨当前Compact和下一回合保留。
+# LLM: 复用线程/Compact的正式搜索与凭据信封投影，只更新当前循环展示集合；不授予权限或写线程账。
+# 函数用途: 在下一次模型调用前展示刚发现的工具及凭据消费工具 web_fetch，与跨轮持久化规则同源。
 def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object]) -> None:
+    from ..tooling.tool_search_state import _carried_loaded_tool_names
 
-    envelope = archive_record.get("tool_result_envelope")
-    if not isinstance(envelope, dict):
-        return
-    search = envelope.get("tool_search")
-    if not isinstance(search, dict):
-        return
-    names = search.get("loaded_tool_names")
-    if not isinstance(names, list):
-        return
-    params.loaded_tool_names.update(item.strip() for item in names if isinstance(item, str) and item.strip())
+    params.loaded_tool_names.update(_carried_loaded_tool_names(archive_record))
 
 
 # LLM: Native history must carry the reducer output, never the raw executor projection; otherwise

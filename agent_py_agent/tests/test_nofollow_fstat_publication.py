@@ -3,6 +3,7 @@
 import errno
 import os
 import stat
+import threading
 
 import pytest
 
@@ -27,12 +28,16 @@ def replace_leaf(root, payload=b'new'):
 def at_fstat(monkeypatch, root, window, action, *, every=False, before_sample=None, fresh_error=None):
     original_fstat, original_leaf, original_read = os.fstat, fs._read_snapshot_leaf, fs._read_descriptor
     target = 1 if window == 'before_read' else 2
+    owner_thread = threading.get_ident()
     state = {'attempts': 0, 'parents': [], 'events': [], 'reads': [], 'leaf_fds': set(),
+             'leaf_identities': set(),
              'active': False, 'sample': 0, 'injected': False, 'ever': False, 'error_raised': False}
 
     # LLM: 只标记当前原leaf调用，所有参数/异常原样转发；parent FD不替换或重捕。
     # 函数用途: 观察原三次预算的实际使用，不用计数代替真实读取。
     def reading_leaf(*args):
+        if threading.get_ident() != owner_thread:
+            return original_leaf(*args)
         state['attempts'] += 1
         state['parents'].append(args[0])
         state.update(active=True, sample=0, injected=False)
@@ -45,9 +50,10 @@ def at_fstat(monkeypatch, root, window, action, *, every=False, before_sample=No
     # 函数用途: 固定OS采样完成到下一次current stat之间的窗口。
     def sampling(descriptor):
         value = original_fstat(descriptor)
-        if not state['active'] or not stat.S_ISREG(value.st_mode):
+        if threading.get_ident() != owner_thread or not state['active'] or not stat.S_ISREG(value.st_mode):
             return value
         state['leaf_fds'].add(descriptor)
+        state['leaf_identities'].add((value.st_dev, value.st_ino))
         if state['injected'] and fresh_error is not None and not state['error_raised']:
             state['error_raised'] = True
             raise fresh_error
@@ -68,7 +74,8 @@ def at_fstat(monkeypatch, root, window, action, *, every=False, before_sample=No
     # 函数用途: 观察实际读取版本，不提供替代bytes。
     def reading(*args):
         content = original_read(*args)
-        state['reads'].append(content)
+        if threading.get_ident() == owner_thread:
+            state['reads'].append(content)
         return content
 
     monkeypatch.setattr(os, 'fstat', sampling)
@@ -77,13 +84,17 @@ def at_fstat(monkeypatch, root, window, action, *, every=False, before_sample=No
     return state
 
 
-# LLM: 检查每个真实叶FD已归还，不通过仅计close次数伪造释放。
+# LLM: 检查每个真实叶FD已归还，或即使整进程其它线程复用了该整数FD也不再指向原叶inode。
 # 函数用途: 验证异常和重读路径没有叶FD泄漏。
 def assert_closed(state):
+    assert state['leaf_fds']
     for descriptor in state['leaf_fds']:
-        with pytest.raises(OSError) as caught:
-            os.fstat(descriptor)
-        assert caught.value.errno == errno.EBADF
+        try:
+            current = os.fstat(descriptor)
+        except OSError as caught:
+            assert caught.errno == errno.EBADF
+        else:
+            assert (current.st_dev, current.st_ino) not in state['leaf_identities']
 
 
 @pytest.mark.parametrize('window', ['before_read', 'after_read'])

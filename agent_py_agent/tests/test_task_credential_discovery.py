@@ -424,7 +424,8 @@ def test_saved_reference_status_remains_authorized_metadata_not_discovery(tmp_pa
     payload = json.loads(result.output)
     assert payload['credential_ref'] == reference and payload['status'] == 'ready'
     assert payload['origin'] == 'https://example.com:443'
-    assert set(payload) == {'credential_ref', 'status', 'origin', 'expires_at', 'verification_status', 'replaces_ref'}
+    assert set(payload) == {'credential_ref', 'status', 'origin', 'expires_at', 'authentication', 'authentication_configured', 'verification_status', 'replaces_ref'}
+    assert payload['authentication'] == 'bearer' and payload['authentication_configured'] is True
     assert _SECRET not in result.output and 'ciphertext' not in result.output
     assert path.read_bytes() == before
 

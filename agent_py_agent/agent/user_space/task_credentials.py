@@ -1,6 +1,6 @@
 # LLM: 原Agent与显式owner领域服务共用同一卡片RMW/加密/回放，输入生成ID只有原ref+generation算法。
 # 模块用途: 共用原凭据提交/取消和无预填表单，账号控件只按结构name展示，不扩大群、actor、期限或工具权限。
-# LLM: 凭据唯一存于原owner私密目录；显式group按当前成员和实际填写人择取，task继续原根/监控约束，秘密仅宿主注入。
+# LLM: 凭据唯一存于原owner私密目录；显式group按当前成员和实际填写人择取，status/revoke安全公开authentication与authentication_configured，秘密仅宿主注入。
 # 模块用途: 收集并加密接口凭据，群默认复用和个人任务隔离共用原卡/存储/网络门，不向聊天或模型交明文。
 from __future__ import annotations
 
@@ -456,8 +456,8 @@ def credential_rejection_current(agent, reference, generation):
         return False
 
 
-# LLM: 群成员/管理资格在原凭据锁外核验，锁内比较原授权事实和current scope；撤销只清准确引用，不替他人取消。
-# 函数用途: 查询或撤销凭据，群提供者可跨自己的新任务管理，返回值不含秘密。
+# LLM: 群成员/管理资格在原凭据锁外核验，锁内比较原授权事实和current scope；撤销只清准确引用，不替他人取消；回执投影当前认证方式与是否已配置，不暴露秘密。
+# 函数用途: 查询或撤销凭据，群提供者可跨自己的新任务管理，返回值不含秘密但可判断是否还需configure。
 def manage_credential(agent, reference, *, operation):
     current = agent._current_run_params
     scope = tool_approval_scope(agent,str(current.run_id or current.task_id))
@@ -481,6 +481,8 @@ def manage_credential(agent, reference, *, operation):
         status = 'expired'
     return {'credential_ref':reference,'status':status,'origin':row['origin'],
             'expires_at':row.get('ready_expires_at',row['expires_at']),
+            'authentication':row.get('authentication','collected'),
+            'authentication_configured':row.get('authentication') in ('basic','bearer','header','signature','login'),
             'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref','')}
 
 

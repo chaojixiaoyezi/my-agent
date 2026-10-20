@@ -1,4 +1,4 @@
-# LLM: 普通与必要通知共核原canonical工具及工作attempt，已外发在canonical前冻结；后台交付沿原来源、canonical和整封冻结顺序；首次认证拒绝的宿主义务独立于普通结果静默，不能扩大owner/actor或重执业务。
+# LLM: 普通与必要通知先筛原结构化工具回执候选，再共核canonical工具及工作attempt；无候选不触发来源认领，原回复/运输路径仍自行核权，已外发在canonical前冻结，不能扩大owner/actor或重执业务。
 # 模块用途: 维护后台回复和必要失败提醒的原投递、发送前代次复核与冻结重投，回执仍唯一证明外发。
 from __future__ import annotations
 
@@ -738,8 +738,8 @@ def _record_transcript_audit_refs(
     )
 
 
-# LLM: normal与required必须复读同一原操作/信封/owner/目标及工作attempt；通知轮身份不能替代原工作身份，正文不作匹配。
-# 函数用途: 筛选已经真实回到本次来源会话的工具回复，假字典和其它合法目标均不能阻止宿主通知。
+# LLM: normal与required只对结构化回执候选复读原操作/信封/owner/目标及工作attempt；无候选不读取actor或调度来源，不免除后续正常投递的核权；通知轮不能替代工作身份，正文不作匹配。
+# 函数用途: 筛选真实回到本次来源会话的工具回复；先排除没有工具回复的收口，假字典和其它目标仍不能阻止宿主通知。
 def committed_source_replies(agent, request, context, deliveries, *, execution_identity=None):
     from ..local_storage.tool_operations import ToolOperationStateError
     from ..runtime_db.managed_operation_store import ManagedOperationStore
@@ -749,6 +749,13 @@ def committed_source_replies(agent, request, context, deliveries, *, execution_i
 
     identity = execution_identity or {}
     if not identity or not all(identity.get(key) for key in ('request_id', 'run_id', 'task_id', 'attempt_id')):
+        return ()
+    candidates = tuple(item for item in deliveries if isinstance(item, dict)
+        and isinstance(item.get('reply_binding'), dict) and item['reply_binding'].get('operation_id')
+        and item.get('schema_version') == 'message_tool_delivery.v1' and item.get('delivery_status') == 'sent'
+        and item.get('source_owner_delivery') is True and item.get('channel') == context.channel
+        and item.get('receipt_id') and (str(item.get('content') or '').strip() or item.get('attachments')))
+    if not candidates:
         return ()
     actor = background_host_actor(agent, request.thread_id, request.task_id)
     if actor is None or not validate_delivery_origin(agent, request, context):
@@ -763,13 +770,9 @@ def committed_source_replies(agent, request, context, deliveries, *, execution_i
     if identity['request_id'] != expected['request_id'] or identity['task_id'] != expected['task_id']:
         return ()
     verified = []
-    for item in deliveries:
-        binding = item.get('reply_binding') if isinstance(item, dict) else None
-        if (not isinstance(binding, dict) or any(binding.get(key) != value for key, value in expected.items())
-                or not binding.get('operation_id') or item.get('schema_version') != 'message_tool_delivery.v1'
-                or item.get('delivery_status') != 'sent' or item.get('source_owner_delivery') is not True
-                or item.get('channel') != context.channel or not item.get('receipt_id')
-                or not (str(item.get('content') or '').strip() or item.get('attachments'))):
+    for item in candidates:
+        binding = item['reply_binding']
+        if any(binding.get(key) != value for key, value in expected.items()):
             continue
         evidence = {**item, 'reply_binding': {key: value for key, value in binding.items() if key != 'operation_id'}}
         try:

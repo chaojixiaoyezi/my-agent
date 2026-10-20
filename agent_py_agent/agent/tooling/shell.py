@@ -1,9 +1,9 @@
-# LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；命令长度不是权限边界，不再额外卡短脚本。
+# LLM: 普通 shell 关闭宿主 stdin，交互归独立 PTY；命令长度不是权限边界，宿主凭据请求仅提示转 web_fetch，不新增执行硬门。
 # 捕获全文与模型预览分离，展示归档不得拿裁剪预览充全文；修改执行入口需联测参数、危险命令和 owner 沙箱。
 # 输出行数按采集正文的 LF 分隔计算，模型回执、截断说明与展示事实必须共用口径。
 # 后台访问身份由 process_scope 规范，不能拿其会话回退值推断任务执行归属。
 # 前台从启动保留出生身份，普通退出先清理原组再回收组长；命令结果和清理未知分开，不影响显式后台。
-# 模块用途: 在用户权限内执行命令、收回前台资源并整理输出及产物记录，保留原退出码和真实清理缺口。
+# 模块用途: 在用户权限内执行命令并说明凭据请求边界，收回前台资源、整理输出及产物记录，保留原退出码和真实清理缺口。
 from __future__ import annotations
 
 import hashlib
@@ -846,11 +846,11 @@ def _record_background_job(
         pass
 
 
-# LLM: 模型与执行使用同一 Schema；持久进程走结构化 run_in_background，命令不设人为字符上限。
+# LLM: 模型与执行使用同一 Schema；持久进程走结构化 run_in_background，宿主凭据 HTTP 软提示走 web_fetch，不改执行策略。
 # 安全策略、后台归属和时间预算各自保持，修改时联测模型快照与真实执行入口。
 #   owner_sandbox_hint 只在 owner 隔离且开关 shell_sandbox_boundary_facts 打开时为真：多一条静态的沙箱边界提示（不含具体路径，
 #   具体允许目录只在失败结果的 [runtime-sandbox-facts] 里给）。
-# 函数用途: 描述 Shell 工具可接受的参数，避免 Schema 提前挡住合法长脚本而与执行能力冲突。
+# 函数用途: 描述 Shell 参数及使用边界，保留合法长脚本，并提示宿主凭据请求不能由占位账号 curl/shell 替代。
 def _build_shell_tool_model_spec(
     access_mode: str, default_timeout: int, max_output_chars: int, owner_sandbox_hint: bool = False,
 ) -> ToolModelSpec:
@@ -917,7 +917,7 @@ def _build_shell_tool_model_spec(
                 "Avoid for interactive terminal workflows.",
                 "Never append shell '&' or use 'nohup ... &' for a service; remove those wrappers, set run_in_background=true, then use process_session to wait, inspect, or stop it.",
                 "Do not append '; echo $?' or another successful command to inspect status; run_command already reports the final return_code, and such suffixes hide earlier failures.",
-                "Prefer write_file for file changes instead of shell redirection.",
+                "Prefer write_file for file changes instead of shell redirection.", "需要宿主凭据（credential_ref）的 HTTP/API 请求必须使用 web_fetch，禁止用 curl/shell 拼接占位账号或探测受保护接口。",
                 "Do not use rm/rmdir/unlink. Delete one text file with apply_patch; route directory or bulk deletion through task_trash.",
                 "Files written under /tmp inside the owner-scoped sandbox are kept in the task workspace .sandbox-tmp directory and survive across tool calls and requests; still keep final deliverables in the selected workspace, not in /tmp.",
                 "Do not run sleep or polling commands for subagent progress; end the turn and let the host lifecycle event resume the direct parent.",

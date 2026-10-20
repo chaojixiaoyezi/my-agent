@@ -1,8 +1,8 @@
-# LLM: 工具发现状态只从结构化工具结果恢复；主、子、Gateway与Compact共用，不导入执行编排层或改变授权。
+# LLM: 工具发现状态只从结构化搜索/凭据工具结果恢复；主、子、Gateway与Compact共用，不导入执行编排层或改变授权。
 #   10-08（前缀纪律）：线程内已加载的工具只增不减。此前只保留最新一轮加载的名字，下一回合工具表就缩回去，
 #   工具表一变整段缓存前缀失效（.16 真机：加载/撤回各一次全量未命中）；现在同一线程里加载过的工具一直可见，
 #   工具表只会追加，压缩面（gateway_compact_context）与主请求走同一条规则。
-# 模块用途: 找回本线程已加载、下一次模型调用仍要可见的累计工具名称，避免恢复时丢工具或工具表来回抖动。
+# 模块用途: 找回本线程累计工具名称，并在凭据回执后展示 web_fetch，避免恢复时丢工具或工具表来回抖动。
 
 from __future__ import annotations
 
@@ -26,16 +26,19 @@ def _carried_tool_round(record: dict[str, object]) -> int | None:
     return max(0, value)
 
 
-# LLM: 只消费tool_result_envelope.tool_search.loaded_tool_names，不解析用户或模型文本，也不授予工具执行权限。
-# 函数用途: 从工具搜索正式信封取字符串名称集合；损坏/缺失字段不转造名称。
+# LLM: 只消费正式搜索加载名和dict型凭据信封；后者仅补web_fetch展示，不解析正文或授予执行权限，无副作用。
+# 函数用途: 从结构化回执取累计工具名，让单轮循环、线程持久化及Compact共用同一恢复规则。
 def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
     envelope = record.get("tool_result_envelope")
     if not isinstance(envelope, dict):
         return set()
+    loaded = {"web_fetch"} if (
+        isinstance(envelope.get("credential"), dict) or isinstance(envelope.get("credential_discovery"), dict)
+    ) else set()
     search = envelope.get("tool_search")
     if not isinstance(search, dict):
-        return set()
+        return loaded
     names = search.get("loaded_tool_names")
     if not isinstance(names, list):
-        return set()
-    return {item.strip() for item in names if isinstance(item, str) and item.strip()}
+        return loaded
+    return loaded | {item.strip() for item in names if isinstance(item, str) and item.strip()}

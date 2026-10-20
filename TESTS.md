@@ -1,3 +1,11 @@
+## 2026-10-20 凭据配置幂等与定时/凭据轮 web_fetch 可见性定向回归（B690 修复）
+
+`test_task_credential_forms.py` 与 `test_task_credential_discovery.py` 新增同方案幂等配置（不重写文件）、跨方案配置结构化拒绝、`authentication=collected` 参数拒绝，以及状态/摘要中 `authentication` 与 `authentication_configured` 字段断言。`test_thread_tool_discovery.py` 新增 `credential` 与 `credential_discovery` 信封在单轮、线程持久化、Compact 重建中的 `web_fetch` 可见性，后台完整目录首轮预加载、普通前台及显式 `allowed_tools` 不变、损坏信封与权限过滤负例，以及 `shell` 的 `avoid_when` 提示回归。所有新增节点纳入双平台包内普通运行义务，不扩 source-only。
+
+## 2026-10-20 后台回复候选筛选与共享 Skill / generation 回归（CI33 + CI7 整合）
+
+新增 `test_background_reply_candidates.py`（11 节点），与 `test_required_notice_reply_slot.py`、`test_scheduler_event_effects.py` 及 CI33 列表定向验证无候选零读取 actor、有候选原身份/来源拒绝及 E11 pause 后零运输断言。`test_builtin_seed.py`、`test_write_my_agent_plugin_skill.py` 与 `test_gateway_generation_source_namespace.py` 新增 7 节点，验证共享 Skill 可信根初始化及 generation 末次确认离名与末次仍列名分界。
+
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
 实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。

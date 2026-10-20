@@ -1,5 +1,5 @@
-# LLM: 本模块的共享镜像/索引写者消费原globalguard；Skill读取和owner私有初始化不在本门，默认原指纹与完整镜像合同保持。
-# 模块用途: 私有重建共享内置Skill及管理员派生索引；受管root/父目录no-follow，不替代运行时SkillsService。
+# LLM: 本模块消费原globalguard及调用者已建立的准确共享父根；正式Home初始化负责rooted创建，禁止镜像器猜祖先或放宽no-follow。
+# 模块用途: 在已有规范共享根内重建内置Skill及管理员派生索引；不负责初始化Home，不替代运行时SkillsService。
 """把 skill 同步进 home,让内置和用户自定义 skill 都自动可见、可被检索。
 
 两类 skill:
@@ -68,8 +68,8 @@ def _index_record(skill_dir: Path, source: str) -> dict[str, object]:
     }
 
 
-# LLM: 镜像只改shared/builtin；原globalguard后先核root/父目录no-follow，再原删除/完整复制；新受管目录0700，copy2源权限不变。
-# 函数用途: 安全重建共享内置Skill镜像，拒绝受管链接，不chmod用户目录或放宽W只读门。
+# LLM: 调用者须先建立shared_builtin_dir.parent准确规范根；原globalguard后核root/父目录no-follow，再原删除/完整复制，不上探祖先补根。
+# 函数用途: 在已有共享父根内重建私有Skill镜像；新目录0700、copy2源权限及既有权限不变，受管链接与W写入仍拒绝。
 def _mirror_builtin(src: Path, shared_builtin_dir: Path) -> None:
     """全量镜像源码内置 skill 到 shared/builtin(清旧重建)。只动 shared/builtin。"""
     from ..common.global_write_guard import require_global_writer
@@ -92,8 +92,8 @@ def _count_index_lines(skills_index_jsonl: Path) -> int:
     return sum(1 for line in jsonl_lines(skills_index_jsonl.read_text(encoding="utf-8")) if line.strip())
 
 
-# LLM: 本入口写共享镜像/索引/fingerprint，受限actor在读取快路前拒绝；运行时SkillsService不调用它。
-# 函数用途: 由原默认/C同步共享Skill派生索引，Count0原指纹幂等与字节保持。
+# LLM: 本入口消费调用者已建立的共享父根并写镜像/索引/fingerprint；正式ensure_my_agent_home先按准确Home根初始化，受限actor仍在快路前拒绝。
+# 函数用途: 由原默认/C同步共享Skill派生索引；独立调用者负责可信根初始化，Count0原指纹幂等与字节保持。
 def sync_skill_index(
     shared_builtin_dir: Path,
     shared_skills_dir: Path,

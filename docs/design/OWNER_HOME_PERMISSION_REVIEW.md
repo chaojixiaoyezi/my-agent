@@ -1,3 +1,9 @@
+## 2026-10-20 共享Skill镜像的规范父根前置事实
+
+`ensure_my_agent_home`先建立选定Home，再从同一准确根逐段创建`shared/builtin`等规范目录，之后才调用`sync_skill_index`。镜像入口消费已经存在的`shared_builtin_dir.parent`作为canonical root；独立调用者也必须先从自己已拥有的准确根建立该目录。镜像器不猜最近祖先、不跟随受管链接，不补建未知根或修改既有权限；原全局写者拒门仍先于任何副作用。运行时Skill发现仍由SkillsService负责，派生索引不授读取或执行权。
+
+CI的6个旧seed失败来自独立测试遗漏父根初始化，而非正式Home入口漏建。测试现在从pytest根或隔离作者工作区显式rooted创建私有根，原镜像内容、模板/引用完整字节、指纹幂等及删除同步断言保持。新增缺根、非目录及链接父根零写入拒绝，并在三种umask下核新目录0700且既有目录权限不动；现有真实Home、W/受限执行者拒绝及链接负例继续验证。产品实现AST不变，仅澄清调用合同；本片不是新服务或发行验收。
+
 ## 2026-10-20 公开构造最早父链创建顺序（候选）
 
 私有Home/owner初始化必须先于普通请求工作区创建。原`SimpleAgent._initialize_agent_construction`的早期`root.mkdir(parents=True)`会从默认owner根连带创建Home/owners；新顺序保持原`_resolve_home_paths`和返回的同一对象，然后仅非W执行原工作区mkdir。resolver不依赖工作区已存在，配置、owner选择、显式Home根符号链接既有解析规则及外置用户工作区规则保持，不新增归属猜测。

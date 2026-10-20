@@ -187,3 +187,48 @@ def test_secret_schema_cannot_overlap_plain_metadata(name):
     from agent_py_agent.agent.user_space.task_credential_schema import credential_fields
     with pytest.raises(ValueError):
         credential_fields('collected', [{'name':name,'label':'秘密'}])
+
+
+# LLM: 只建合成临时凭据并提交，不读秘密或访问网络；认证配置与幂等/结构化错误由真实工具入口验证。
+# 函数用途: 为configure回归准备一张已保存的collected或已声明basic凭据。
+def _ready_collected_card(background, *, secret='synthetic-password', authentication='collected'):
+    ref, _ = request_credential_card(background.agent, url='https://example.com/api', authentication=authentication)
+    path = credential_path(background.agent.home_paths.owner_home_dir, ref)
+    row = read_json_object_report(path, context='test').payload
+    body = {key: row[key] for key in ('reference', 'message_id', 'chat_id')}
+    body.update(decision='submit', fields={'username': 'synthetic-user', 'secret': secret})
+    submit_credential_card(background.agent, row, body)
+    return ref, path
+
+
+def test_configure_same_scheme_is_idempotent_and_other_schemes_are_structured_errors(background):
+    from agent_py_agent.agent.tooling.task_credential_tool import RequestCredentialsTool
+    _card(background)
+    ref, path = _ready_collected_card(background)
+    configure_credential(background.agent, ref, authentication='basic')
+    before = path.read_bytes()
+    before_inode = path.stat().st_ino
+    tool = RequestCredentialsTool(background.agent)
+    same = tool.execute({'operation': 'configure', 'credential_ref': ref, 'authentication': 'basic', 'header_name': 'authorization'})
+    assert same.ok
+    assert same.result_envelope['credential']['already_configured'] is True
+    assert same.result_envelope['credential']['authentication_configured'] is True
+    assert path.read_bytes() == before and path.stat().st_ino == before_inode
+    same_scheme_diff_cfg = tool.execute({'operation': 'configure', 'credential_ref': ref, 'authentication': 'basic', 'auth_config': {'unused': True}})
+    assert not same_scheme_diff_cfg.ok and same_scheme_diff_cfg.error_code == 'CREDENTIAL_BINDING_INVALID'
+    assert same_scheme_diff_cfg.result_envelope['credential_error']['stage'] == 'record_management'
+    assert same_scheme_diff_cfg.result_envelope['credential_error']['diagnostic']['reason'] == 'authentication_already_configured'
+    direct_ref, direct_path = _ready_collected_card(background, authentication='basic')
+    direct_before = direct_path.read_bytes()
+    direct_same = tool.execute({'operation': 'configure', 'credential_ref': direct_ref, 'authentication': 'basic'})
+    assert direct_same.ok and direct_same.result_envelope['credential']['already_configured'] is True
+    assert direct_path.read_bytes() == direct_before
+    changed = tool.execute({'operation': 'configure', 'credential_ref': ref, 'authentication': 'bearer'})
+    assert not changed.ok and changed.error_code == 'CREDENTIAL_BINDING_INVALID'
+    error = changed.result_envelope['credential_error']
+    assert error['stage'] == 'record_management'
+    assert error['diagnostic']['reason'] == 'authentication_already_configured'
+    assert error['diagnostic']['current_authentication'] == 'basic'
+    target_collected = tool.execute({'operation': 'configure', 'credential_ref': ref, 'authentication': 'collected'})
+    assert not target_collected.ok and target_collected.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert target_collected.result_envelope['credential_error']['diagnostic']['reason'] == 'authentication_target_collected'

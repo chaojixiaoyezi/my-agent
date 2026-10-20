@@ -3,6 +3,7 @@
 import errno
 import os
 import stat
+import threading
 
 import pytest
 
@@ -29,11 +30,15 @@ def copyout_model(monkeypatch, root, window, *, every=False, retained=False, cur
     monkeypatch.setattr(fs, '_supports_dir_fd', lambda: supported)
     original_stat, original_fstat = os.stat, os.fstat
     original_leaf, original_read, original_open = fs._read_snapshot_leaf, fs._read_descriptor, os.open
+    owner_thread = threading.get_ident()
     state = {'attempts': 0, 'parents': [], 'reads': [], 'samples': [], 'leaf_fds': set(),
+             'leaf_identities': set(),
              'active': False, 'calls': 0, 'ever': False, 'probing': False, 'opens': 0}
     target = {'initial': 1, 'before_read': 2, 'after_read': 3}[window]
 
     def leaf(*args):
+        if threading.get_ident() != owner_thread:
+            return original_leaf(*args)
         state['attempts'] += 1
         state['parents'].append(args[0])
         state.update(active=True, calls=0)
@@ -44,14 +49,16 @@ def copyout_model(monkeypatch, root, window, *, every=False, retained=False, cur
 
     def opening(name, flags, mode=0o777, **kwargs):
         descriptor = original_open(name, flags, mode, **kwargs)
-        if state['active'] and name == 'leaf' and flags & os.O_ACCMODE == os.O_RDONLY:
+        if threading.get_ident() == owner_thread and state['active'] and name == 'leaf' and flags & os.O_ACCMODE == os.O_RDONLY:
             state['opens'] += 1
             state['leaf_fds'].add(descriptor)
+            meta = original_fstat(descriptor)
+            state['leaf_identities'].add((meta.st_dev, meta.st_ino))
         return descriptor
 
     def sample(name, *args, **kwargs):
         value = original_stat(name, *args, **kwargs)
-        if not state['active'] or name != 'leaf' or 'dir_fd' not in kwargs:
+        if threading.get_ident() != owner_thread or not state['active'] or name != 'leaf' or 'dir_fd' not in kwargs:
             return value
         state['calls'] += 1
         if state['calls'] != target or (state['ever'] and not every):
@@ -78,13 +85,14 @@ def copyout_model(monkeypatch, root, window, *, every=False, retained=False, cur
         return zero
 
     def probing(descriptor):
-        if state['probing'] and state['active'] and descriptor in state['leaf_fds'] and probe_error is not None:
+        if threading.get_ident() == owner_thread and state['probing'] and state['active'] and descriptor in state['leaf_fds'] and probe_error is not None:
             raise probe_error
         return original_fstat(descriptor)
 
     def reading(*args):
         value = original_read(*args)
-        state['reads'].append(value)
+        if threading.get_ident() == owner_thread:
+            state['reads'].append(value)
         return value
 
     monkeypatch.setattr(fs, '_read_snapshot_leaf', leaf)
@@ -97,9 +105,12 @@ def copyout_model(monkeypatch, root, window, *, every=False, retained=False, cur
 
 def closed(state, original_fstat):
     for descriptor in state['leaf_fds']:
-        with pytest.raises(OSError) as caught:
-            original_fstat(descriptor)
-        assert caught.value.errno == errno.EBADF
+        try:
+            current = original_fstat(descriptor)
+        except OSError as exc:
+            assert exc.errno == errno.EBADF
+        else:
+            assert (current.st_dev, current.st_ino) not in state['leaf_identities']
 
 
 @pytest.mark.parametrize('window', ['initial', 'before_read', 'after_read'])

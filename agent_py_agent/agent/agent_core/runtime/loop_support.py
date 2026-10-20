@@ -1,6 +1,7 @@
 # LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；包候选只消费 scoped 元数据与原能力配置，展示纯值经推荐接缝/回调传递，
 # 不能写入结果、Agent共享属性或扩大原快照权限；IM媒体恢复只取原输入快照或canonical子档；禁止反向依赖Gateway。
-# 模块用途: 为主链准备记忆、工具和续跑输入，恢复同源核验与清理事实，直接驱动唯一循环；回传本片展示与异常历史。
+#   后台完整目录只补初始展示加载名，不改变 allowed_tools；前台仍沿原恢复、合同及线程并集。
+# 模块用途: 为主链准备记忆、工具和续跑输入（含后台首轮必需工具），恢复同源核验与清理事实，直接驱动唯一循环。
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from ...conversation.active_turn_input import (
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
 )
+from ...conversation.background_tool_policy import BACKGROUND_CONTINUATION_REQUIRED_TOOLS
 from ...conversation.tool_discovery import thread_loaded_tools
 from ...memory_archive import build_auto_resume_context
 from ...memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
@@ -1332,7 +1334,8 @@ def _validate_native_input_media(agent, params, protocol):
 # Skill presentation travels with this seed only; it cannot mutate the original grant or loaded-tool facts.
 # 媒体先恢复原授权；明确不支持和非native连接确定失败，未知模态不按模型名推断，也不触发模型重试。
 #   带 CARRIED_RUNTIME_ONLY_FIELD 的携带记录（回合已写进会话历史）只进运行时状态重建，不进本片 archive_tool_calls。
-# 函数用途: 从新权限快照及完整归档恢复执行状态；应用摘要由typed IR唯一承载，prior不重复；同进程carry保留原IR。
+#   初始展示名统一交给 _initial_loop_loaded_tool_names，不改原权限快照或 allowed_tools。
+# 函数用途: 从新权限快照及完整归档恢复执行状态与初始工具表；应用摘要由typed IR唯一承载，同进程carry保留原IR。
 def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = _authorized_im_media_params(agent, seed.params)
     seed = replace(seed, params=params)
@@ -1380,12 +1383,6 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     live_archive_state = _live_archive_state_from_carried_archive_tool_calls(archive_tool_calls)
     if native_carry is not None:
         live_archive_state["_forwarded_runtime_guidance"] = set(native_carry.forwarded_guidance)
-    required_tool_names = {
-        name
-        for action in tuple(getattr(seed.effective_contract_snapshot, "required_actions", ()) or ())
-        if str(getattr(action, "status", "") or "") == "open"
-        for name in tuple(getattr(action, "allowed_tools", ()) or ())
-    }
     from ...capability.method_carry import prompt_method_ids
 
     # 构造值对象时复制逐 run 冻结名单，实际渲染和 Compact 纯投影使用同一身份与顺序。
@@ -1434,10 +1431,27 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
         conversation_history_seed=params.conversation_history_seed,
         compact_context=params.compact_context,
         context_scope=params.context_scope,
-        loaded_tool_names={*reconstructed.loaded_tool_names, *required_tool_names, *thread_loaded_tools(agent, params)},
+        loaded_tool_names=_initial_loop_loaded_tool_names(agent, params, seed, reconstructed),
         workspace_context_snapshot=_workspace_context_snapshot(agent, params),
         max_protocol_repairs=MAX_PROTOCOL_REPAIRS,
     )
+
+
+# LLM: 纯展示并集沿原恢复/未完成动作/线程事实；仅后台主代理完整目录补续跑必需名，不更改权限或持久化状态。
+# 函数用途: 为工具循环计算首轮已加载工具，让定时唤醒直见必需工具，前台及显式名单保持原行为。
+def _initial_loop_loaded_tool_names(
+    agent, params: RuntimeLoopParams, seed: RuntimeToolLoopSeed, reconstructed: _ReconstructedRuntimeState,
+) -> set[str]:
+    required_tool_names = {
+        name
+        for action in tuple(getattr(seed.effective_contract_snapshot, "required_actions", ()) or ())
+        if str(getattr(action, "status", "") or "") == "open"
+        for name in tuple(getattr(action, "allowed_tools", ()) or ())
+    }
+    loaded = {*reconstructed.loaded_tool_names, *required_tool_names, *thread_loaded_tools(agent, params)}
+    if params.source == "background_main_agent" and params.allowed_tools is None:
+        loaded.update(BACKGROUND_CONTINUATION_REQUIRED_TOOLS)
+    return loaded
 
 
 def _required_action_contract_snapshot(

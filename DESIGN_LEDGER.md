@@ -1,3 +1,13 @@
+## 2026-10-20 凭据配置幂等、结构化拒绝与定时/发现轮 web_fetch 可见性（B690 修复候选）
+
+`configure_credential` 仅用于将 `collected` 升级为 HTTP 认证配置；已配置同方案、同 `auth_config` 与 `header_name` 时幂等返回 `already_configured=True` 且不重写记录，已配置为其他方案或不同配置时抛 `CREDENTIAL_BINDING_INVALID`（`stage=record_management`，`reason=authentication_already_configured`），目标为 `collected` 时抛 `TOOL_INVALID_ARGUMENTS`。`request`/`update`/`status`/`revoke`/`find`/`list` 摘要公开 `authentication` 与 `authentication_configured`。`RequestCredentialsTool.execute` 对其余 `ValueError/KeyError` 补齐 `stage=execution`、`effect_outcome=not_started` 与结构化异常类型诊断。
+
+后台完整目录运行（`source == "background_main_agent" and allowed_tools is None`，如 `scheduled_job_due`）首轮预加载 `BACKGROUND_CONTINUATION_REQUIRED_TOOLS`（含 `web_fetch`，在后台完整目录下同样越过类别折叠），不改 `allowed_tools` 或前台渐进披露；当工具回执信封含结构化 `credential` 或 `credential_discovery` 字典时，当前循环、线程持久化和 Compact 重建均自动并入 `web_fetch`。`run_command` 的 `avoid_when` 明确提示需要 `credential_ref` 的 HTTP/API 请求必须使用 `web_fetch`。
+
+## 2026-10-20 来源工具回执候选预筛与共享 Skill / generation 测试合同对齐（CI 修复整合）
+
+来源工具回执先按原结构化形状筛候选；无候选不读取 actor 或触发来源认领，正常收口和运输继续独立核权；有候选的身份、目标、attempt 和 canonical 操作门原样保持。共享 Skill 独立调用者从准确可信根初始化，正式 Home 先建根；generation 原缺叶测试区分末次确认离名与末次仍列名，产品实现不变。详情见[后台公开回执合同](docs/design/BACKGROUND_PUBLIC_RECEIPT_CONTRACT.md)、[权限合同](docs/design/OWNER_HOME_PERMISSION_REVIEW.md)与[角色生命周期](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
 实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。

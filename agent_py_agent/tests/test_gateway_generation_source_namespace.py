@@ -541,20 +541,60 @@ def test_generation_missing_published_leaf_is_not_an_empty_snapshot(paths, monke
     paths.processing.mkdir(parents=True)
     path = paths.processing / 'legacy.json'
     path.write_bytes(b'{}')
-    original = sources._generation_source_names
-    observations = []
+    original = sources.read_bytes_beneath
+    observations, reads = [], []
 
-    def disappearing(root, parts, descriptor):
-        result = original(root, parts, descriptor)
-        if parts == ('requests', 'processing') and not observations:
-            observations.append(result[0])
+    def republished(root, parts, **kwargs):
+        if parts == ('requests', 'processing', 'legacy.json'):
             path.unlink()
-        return result
+            content = original(root, parts, **kwargs)
+            observations.append(content)
+            json_io.write_private_json_file_atomic_no_newline_unlocked(path, {'version': 2})
+            reads.append(parts)
+            return content
+        return original(root, parts, **kwargs)
 
-    monkeypatch.setattr(sources, '_generation_source_names', disappearing)
+    monkeypatch.setattr(sources, 'read_bytes_beneath', republished)
     with pytest.raises(FileNotFoundError):
         history.generation_source_files(paths)
-    assert observations == [('legacy.json',)] and not path.exists()
+    assert observations == [None] and reads == [('requests', 'processing', 'legacy.json')]
+    assert path.read_bytes() == b'{\n  "version": 2\n}'
+
+
+def test_generation_confirmed_departure_discards_whole_round_with_same_parent(paths, monkeypatch):
+    paths.processing.mkdir(parents=True)
+    path = paths.processing / 'legacy.json'
+    path.write_bytes(b'{}')
+    survivor = paths.processing / 'survivor.json'
+    survivor.write_bytes(b'{}')
+    original_names, original_read = sources._generation_source_names, sources.read_bytes_beneath
+    observations, parents, reads = [], [], []
+
+    def disappearing(root, parts, descriptor):
+        result = original_names(root, parts, descriptor)
+        if parts == ('requests', 'processing'):
+            observations.append(result[0])
+            parents.append(descriptor)
+            if len(observations) == 1:
+                path.unlink()
+        return result
+
+    def reading(root, parts, **kwargs):
+        reads.append(parts)
+        return original_read(root, parts, **kwargs)
+
+    monkeypatch.setattr(sources, '_generation_source_names', disappearing)
+    monkeypatch.setattr(sources, 'read_bytes_beneath', reading)
+    files = history.generation_source_files(paths)
+    assert observations == [('legacy.json', 'survivor.json'), ('survivor.json',),
+                            ('survivor.json',), ('survivor.json',)]
+    assert len(set(parents)) == 1 and not path.exists()
+    assert reads.count(('requests', 'processing', 'legacy.json')) == 1
+    assert reads.count(('requests', 'processing', 'survivor.json')) == 2
+    assert files == {'requests/processing/survivor.json': b'{}'}
+    with pytest.raises(ValueError):
+        history._require_closed_files({'requests/processing/legacy.json': hashlib.sha256(b'{}').hexdigest()},
+                                      files, 'new-c')
 
 
 def test_generation_continuous_atomic_replacement_exhausts_original_three_attempts(paths, monkeypatch):

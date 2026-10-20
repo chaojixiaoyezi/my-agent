@@ -5,11 +5,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.capability import builtin_seed
 from agent_py_agent.agent.capability.builtin_seed import sync_skill_index
+from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError, ensure_private_dir
 
 
 def _make_skill(root, category, name, *, desc="测试技能"):
@@ -22,9 +27,12 @@ def _make_skill(root, category, name, *, desc="测试技能"):
     return skill_dir
 
 
+# LLM: 调用者拥有已存在的pytest根；与正式Home初始化一样，先从该准确根建立私有shared，再调用仅消费既有规范父根的镜像器。
+# 函数用途: 准备隔离Home的共享根及索引路径，不让seed测试跳过正式调用方负责的根初始化。
 def _paths(tmp_path):
     """(shared_builtin_dir, shared_skills_dir, skills_index_jsonl, fingerprint_file)。"""
     shared = tmp_path / "home" / "shared"
+    ensure_private_dir(shared, canonical_root=tmp_path)
     return (
         shared / "builtin",
         shared / "skills",
@@ -122,6 +130,53 @@ def test_full_resync_removes_deleted_builtin(tmp_path, monkeypatch):
     shutil.rmtree(skill_b)
     assert sync_skill_index(builtin_dir, skills_dir, index, fingerprint) == 1
     assert not (builtin_dir / "security" / "b").exists()  # 镜像也删
+
+
+@pytest.mark.parametrize("parent_kind", ["missing", "file", "symlink"])
+def test_sync_requires_existing_canonical_parent_without_mutation(tmp_path, monkeypatch, parent_kind):
+    src = tmp_path / "src_builtin"
+    _make_skill(src, "meta", "writing")
+    monkeypatch.setattr(builtin_seed, "_BUILTIN_SRC", src)
+    shared = tmp_path / "shared"
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    (external / "sentinel").write_bytes(b"untouched")
+    if parent_kind == "file":
+        shared.write_bytes(b"not a directory")
+    elif parent_kind == "symlink":
+        shared.symlink_to(external, target_is_directory=True)
+    before = shared.lstat() if parent_kind != "missing" else None
+    expected = FileNotFoundError if parent_kind == "missing" else NoFollowPathError
+    with pytest.raises(expected):
+        sync_skill_index(shared / "builtin", shared / "skills", tmp_path / "indexes/skills.jsonl",
+                         tmp_path / "cache/fingerprint")
+    assert sorted(path.name for path in external.iterdir()) == ["sentinel"]
+    assert (external / "sentinel").read_bytes() == b"untouched"
+    assert not (tmp_path / "indexes").exists() and not (tmp_path / "cache").exists()
+    if before is None:
+        assert not shared.exists()
+    else:
+        after = shared.lstat()
+        assert (after.st_ino, after.st_mode) == (before.st_ino, before.st_mode)
+        if parent_kind == "file":
+            assert shared.read_bytes() == b"not a directory"
+
+
+@pytest.mark.parametrize("mask", [0o000, 0o022, 0o077])
+def test_fixture_establishes_private_root_without_changing_existing_mode(tmp_path, mask):
+    home = tmp_path / "home"
+    home.mkdir(mode=0o755)
+    home.chmod(0o755)
+    before = home.stat()
+    previous = os.umask(mask)
+    try:
+        builtin, _, _, _ = _paths(tmp_path)
+    finally:
+        os.umask(previous)
+    after = home.stat()
+    assert (after.st_ino, after.st_mode) == (before.st_ino, before.st_mode)
+    assert stat.S_IMODE(builtin.parent.stat().st_mode) == 0o700
+    assert not builtin.exists()
 
 
 def test_real_builtin_smoke():

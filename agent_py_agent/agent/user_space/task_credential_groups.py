@@ -1,5 +1,5 @@
-# LLM: 群共享只读取原私密凭据row；当前typed actor、完整实时成员和显式access_scope共同授权，不创建索引、别名或权限缓存。
-# 模块用途: 按实际填写人优先解析本群凭据；本人未撤销的不可用记录不自动降到别人，主动撤销后才允许共享候选。
+# LLM: 群共享只读取原私密凭据row；当前typed actor、完整实时成员和显式access_scope共同授权，摘要安全公开authentication与authentication_configured，不创建索引或缓存。
+# 模块用途: 按实际填写人优先解析本群凭据并返回含认证状态的安全摘要；本人未撤销的不可用记录不自动降到别人，主动撤销后才允许共享候选。
 from __future__ import annotations
 
 import json
@@ -333,14 +333,15 @@ def _origin(url):
         _denied('接口地址格式无效。')
 
 
-# LLM: 只投影明确公开的标量；名称属于用户非秘密标签，其余任意metadata不透传。
-# 函数用途: 为群成员展示引用、origin、可用状态与本人/管理资格，不暴露账号或密文。
+# LLM: 只投影明确公开的标量；名称属于用户非秘密标签，其余任意metadata不透传；认证方式仅放行已知枚举，未知记录标unknown。
+# 函数用途: 为群成员展示引用、origin、可用状态、认证方式与本人/管理资格，不暴露账号或密文。
 def _summary(row, actor_id, *, superseded=False):
     name = row.get('credential_name', '')
     return {'credential_ref': row['credential_ref'], 'access_scope': _access_scope(row), 'origin': row['origin'],
         'name': name[:128] if isinstance(name, str) else '',
         'status': row.get('status') if row.get('status') in ('pending', 'ready', 'expired', 'revoked', 'cancelled', 'failed') else 'unknown',
         'verification_status': row.get('verification_status') if row.get('verification_status') in ('unverified', 'verified', 'rejected') else 'unknown',
+        'authentication': row.get('authentication') if row.get('authentication') in ('collected', 'basic', 'bearer', 'header', 'signature', 'login') else 'unknown',
         'authentication_configured': row.get('authentication') in ('basic', 'bearer', 'header', 'signature', 'login'),
         'usable': _access_scope(row) == 'group' and not superseded and _usable(row), 'own': row.get('submitter_actor_id') == actor_id,
         'superseded': superseded, 'can_manage': actor_id in (row.get('actor_id'), row.get('submitter_actor_id'))}

@@ -1,5 +1,5 @@
-# LLM: 原工具元数据前置安全新卡能力，仍只作模型软上下文；实际填写人/群范围/送达由原宿主裁决，find与ref冲突仍由原schema/execute拒绝。
-# 模块用途: 发现可复用的群凭据引用或明确请求新卡，保留原状态/输入等待/运输确认；HTTP秘密只在原宿主注入。
+# LLM: 原工具元数据前置安全新卡与认证就绪说明，仍只作模型软上下文；实际填写人/群范围/送达由原宿主裁决，回执显式公开认证配置事实。
+# 模块用途: 发现可复用的群凭据引用或明确请求新卡，保留原状态/输入等待/运输确认与结构化错误阶段；HTTP秘密只在原宿主注入。
 from __future__ import annotations
 
 import json
@@ -31,11 +31,11 @@ from .models import (
 # LLM: 工具始终绑定当前 owner Agent；开关在 capability 配置，运输确认只读宿主记录，失败/取消不能变成完成或聊天凭据收集。
 # 类用途: 返回原授权候选、共享本人旧群卡或明确发新卡；管理权交原宿主，不等待、不调用模型、不公开秘密。
 class RequestCredentialsTool(BaseTool):
-    # LLM: 新卡说明与检索词不改变注册/展开/Schema/运行策略；仅宿主confirmed可说送达，原status/find/ref和owner/actor权限保持。
-    # 函数用途: 说明真实安全输入卡及凭据发现用法，避免用聊天表格代替宿主交互；参数与执行合同保持。
+    # LLM: 新卡与configure说明不改变注册/展开/Schema/运行策略；仅宿主confirmed可说送达，已声明认证方案无需再configure，原status/find/ref和权限保持。
+    # 函数用途: 说明真实安全输入卡、认证就绪状态及凭据发现用法，避免用聊天表格代替宿主交互或对已就绪引用重复configure。
     def __init__(self,agent):
         self.agent = agent
-        self.model_spec = ToolModelSpec(name='request_credentials', description='用户要新的账号密码或秘密输入界面时，用operation=request申请真实安全输入卡，常规账号密码用collection_mode=username_password。默认authentication=collected仅收集时可不传url，目标链接由用户在卡片里填写；发卡本身不访问目标网站，无需先搜索模板或历史。聊天表格、Markdown下划线或口头描述不能替代宿主安全表单，也不能要求用户在普通聊天中填写秘密。只有工具回执request_delivery.status=confirmed才可说卡片已发出；waiting_input只表示等待填写，不表示已提交或保存。已有credential_ref需确认填写或保存状态时，用operation=status和原引用；返回安全元信息，不读取秘密。find仅按真实URL的同origin发现，不能传credential_ref或编造占位URL；空匹配不表示某个引用未填写。群内需要认证的站点先 operation=find 传准确url，或用list查看本群已授权凭据；find的selected_credential_ref由宿主按实际填写人本人账号优先、否则本群固定顺序选择，已有可用引用直接交web_fetch。本人账号401/403或失败不能静默改用他人账号；用户明确撤销自己的引用后可重新find使用本群其他可用账号。旧task群卡不会自动共享；仅用户明确要求共享本人旧群卡时，可用operation=share把shareable_credentials中的本人旧卡原位共享，再find，无须重填。只有确实缺失或用户明确新增/换账号才用operation=request发新卡；request始终明确申请，不因别人已有凭据隐式复用。群新卡默认本群共享，个人来源仅本人任务；可显式access_scope=task。无需先选认证协议；collected只保存，使用前configure原引用与准确方案，再由web_fetch宿主注入秘密。可用job_id绑定已有本人的监控。',
+        self.model_spec = ToolModelSpec(name='request_credentials', description='用户要新的账号密码或秘密输入界面时，用operation=request申请真实安全输入卡，常规账号密码用collection_mode=username_password。默认authentication=collected仅收集时可不传url，目标链接由用户在卡片里填写；发卡本身不访问目标网站，无需先搜索模板或历史。聊天表格、Markdown下划线或口头描述不能替代宿主安全表单，也不能要求用户在普通聊天中填写秘密。只有工具回执request_delivery.status=confirmed才可说卡片已发出；waiting_input只表示等待填写，不表示已提交或保存。已有credential_ref需确认填写或保存状态时，用operation=status和原引用；返回安全元信息，不读取秘密。find仅按真实URL的同origin发现，不能传credential_ref或编造占位URL；空匹配不表示某个引用未填写。群内需要认证的站点先 operation=find 传准确url，或用list查看本群已授权凭据；find的selected_credential_ref由宿主按实际填写人本人账号优先、否则本群固定顺序选择，已有可用引用直接交web_fetch。本人账号401/403或失败不能静默改用他人账号；用户明确撤销自己的引用后可重新find使用本群其他可用账号。旧task群卡不会自动共享；仅用户明确要求共享本人旧群卡时，可用operation=share把shareable_credentials中的本人旧卡原位共享，再find，无须重填。只有确实缺失或用户明确新增/换账号才用operation=request发新卡；request始终明确申请，不因别人已有凭据隐式复用。群新卡默认本群共享，个人来源仅本人任务；可显式access_scope=task。无需先选认证协议；request时若已指定basic/bearer等认证方式则保存后已就绪，直接交web_fetch使用，无须再configure；仅authentication=collected只保存，使用前configure原引用与准确方案，再由web_fetch宿主注入秘密。可用job_id绑定已有本人的监控。',
             input_schema={'type':'object','properties':{'url':{'type':'string','description':'find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
             'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string'},'job_id':{'type':'string'},
             'fields':{'type':'array','description':'需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。', 'items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},
@@ -64,48 +64,20 @@ class RequestCredentialsTool(BaseTool):
             idempotency_policy=IdempotencyPolicy(scope='operation'),timeout_policy=TimeoutPolicy(seconds=30),
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
-    # LLM: 查询只转交宿主选择结果，不重排/不换账号；find+ref字段冲突及条件必填在副作用前拒绝，不自动转status；发卡后读失败保持unknown，原输入依赖与取消不变。
-    # 函数用途: 查找已授权凭据或明确管理/申请原卡；模型仅获安全摘要、引用及准确状态，不读取秘密。
+    # LLM: 查询只转交宿主选择结果，不重排/不换账号；参数前置校验与既有引用动作分发分离，request/update公开认证配置状态，执行期绑定异常返回execution阶段结构化诊断。
+    # 函数用途: 查找已授权凭据或明确管理/申请原卡；模型仅获安全摘要、引用、认证配置状态及准确状态，不读取秘密。
     def execute(self, params):
-        from ..user_space.task_credentials import manage_credential
         config = capability_config_for_agent(self.agent)
         if config is None or not config.im_task_credentials_enabled:
             return _credential_error('TOOL_UNAVAILABLE', '当前未启用私人凭据输入。')
         operation = params.get('operation', 'request')
-        if operation == 'find' and 'credential_ref' in params:
-            return _credential_error('TOOL_INVALID_ARGUMENTS',
-                'find 按真实 URL 发现，不能同时携带 credential_ref；查询原引用保存状态请用 operation=status。')
-        required = ('credential_ref',) if operation in {'status', 'revoke', 'configure', 'share'} else ()
-        if operation == 'configure':
-            required += ('authentication',)
-        if operation == 'update':
-            required += ('credential_ref',)
-        if operation == 'find':
-            required += ('url',)
-        if any(not isinstance(params.get(name), str) or not params[name].strip() for name in required):
-            return _credential_error('TOOL_INVALID_ARGUMENTS', '凭据参数缺失：' + '、'.join(required) + '；未发送卡片。')
+        invalid = _invalid_operation_arguments(operation, params)
+        if invalid is not None:
+            return invalid
         try:
-            if operation in {'list', 'find'}:
-                from ..user_space.task_credential_groups import discover_group_credentials
-                result = discover_group_credentials(self.agent, url=params.get('url', ''),
-                    name=params.get('credential_name', ''), operation=operation)
-                return ToolHandlerOutcome('request_credentials', True, json.dumps(result, ensure_ascii=False),
-                    result_envelope={'credential_discovery': result})
-            if operation == 'share':
-                from ..user_space.task_credential_forms import share_credential
-                result = share_credential(self.agent, params['credential_ref'])
-                return ToolHandlerOutcome('request_credentials', True, json.dumps(result, ensure_ascii=False),
-                    result_envelope={'credential': result})
-            if operation == 'configure':
-                from ..user_space.task_credential_forms import configure_credential
-                result = configure_credential(self.agent, params['credential_ref'], authentication=params.get('authentication'), auth_config=params.get('auth_config'), header_name=params.get('header_name','Authorization'))
-                return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope={'credential':result})
-            if operation in {'status', 'revoke'}:
-                with credential_stage('record_management', effect_outcome='not_started' if operation == 'status' else 'unknown'):
-                    result = manage_credential(self.agent, params['credential_ref'], operation=operation)
-                return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope={'credential': result})
-            if operation not in {'request', 'update'}:
-                raise ValueError('凭据动作无效')
+            handled = _dispatch_existing_credential_operation(self.agent, operation, params)
+            if handled is not None:
+                return handled
             reference, _scope = request_credential_card(self.agent, url=params.get('url',''), authentication=params.get('authentication','collected'),
                 header_name=params.get('header_name','Authorization'), job_id=params.get('job_id',''),
                 call_id=str(params.get('__tool_call_id') or ''), options=CredentialCardOptions(fields=params.get('fields'),
@@ -118,6 +90,8 @@ class RequestCredentialsTool(BaseTool):
                 raise CredentialInputError('CREDENTIAL_RECORD_INVALID', '已发送卡片的原记录不可读取，请先核对原操作。',
                     stage='result_read', effect_outcome='unknown')
             result = {'credential_ref': reference, 'origin': row['origin'], 'status': row['status'], 'expires_at': row.get('ready_expires_at', row['expires_at']),
+                'authentication': row.get('authentication', 'collected'),
+                'authentication_configured': row.get('authentication') in ('basic', 'bearer', 'header', 'signature', 'login'),
                 'verification_status':row.get('verification_status','unverified'), 'replaces_ref':row.get('replaces_ref',''),
                 'request_delivery': _request_delivery(row), 'access_scope': row.get('access_scope', 'task')}
             envelope = {'credential': result}
@@ -137,11 +111,61 @@ class RequestCredentialsTool(BaseTool):
         except (ValueError, KeyError) as exc:
             from ..conversation.host_actor import HostActorError
             code = exc.error_code if isinstance(exc, HostActorError) else 'CREDENTIAL_BINDING_INVALID'
-            return _credential_error(code, '凭据参数或原发起人/任务绑定无法核验，未完成卡片操作。')
+            return _credential_error(code, '凭据参数或原发起人/任务绑定无法核验，未完成卡片操作。',
+                stage='execution', effect_outcome='not_started',
+                diagnostic={'operation': str(operation), 'exception_type': type(exc).__name__})
         except (OSError, RuntimeError) as exc:
             return _credential_error('CREDENTIAL_STORAGE_UNAVAILABLE', '凭据前置检查不可用，未发送卡片。',
                 stage='preflight', effect_outcome='not_started', diagnostic={'exception_type': type(exc).__name__,
                     **({'errno': exc.errno} if isinstance(exc, OSError) and isinstance(exc.errno, int) else {})})
+
+
+# LLM: 仅按声明检查模型参数组合，不读存储、不碰凭据；动作不在枚举内沿用原ValueError处理的绑定错误，缺参与find冲突保持原安全文案。
+# 函数用途: 在副作用前返回参数错误回执，避免把缺参混报成发卡结果未知。
+def _invalid_operation_arguments(operation, params):
+    if operation not in {'request', 'update', 'status', 'revoke', 'configure', 'share', 'list', 'find'}:
+        return _credential_error('CREDENTIAL_BINDING_INVALID', '凭据参数或原发起人/任务绑定无法核验，未完成卡片操作。',
+            stage='execution', effect_outcome='not_started',
+            diagnostic={'operation': str(operation), 'exception_type': 'ValueError'})
+    if operation == 'find' and 'credential_ref' in params:
+        return _credential_error('TOOL_INVALID_ARGUMENTS',
+            'find 按真实 URL 发现，不能同时携带 credential_ref；查询原引用保存状态请用 operation=status。')
+    required = ('credential_ref',) if operation in {'status', 'revoke', 'configure', 'share'} else ()
+    if operation == 'configure':
+        required += ('authentication',)
+    if operation == 'update':
+        required += ('credential_ref',)
+    if operation == 'find':
+        required += ('url',)
+    if any(not isinstance(params.get(name), str) or not params[name].strip() for name in required):
+        return _credential_error('TOOL_INVALID_ARGUMENTS', '凭据参数缺失：' + '、'.join(required) + '；未发送卡片。')
+    return None
+
+
+# LLM: 只分发已存在引用的管理动作，不新建卡；find/list转宿主选择，configure幂等与结构化错误由forms返回，status/revoke保留原副作用阶段。
+# 函数用途: 让执行入口保持简短；request/update返回None交回原发卡路径，未知动作同样交回以便原错误处理拒绝。
+def _dispatch_existing_credential_operation(agent, operation, params):
+    from ..user_space.task_credentials import manage_credential
+    if operation in {'list', 'find'}:
+        from ..user_space.task_credential_groups import discover_group_credentials
+        result = discover_group_credentials(agent, url=params.get('url', ''),
+            name=params.get('credential_name', ''), operation=operation)
+        return ToolHandlerOutcome('request_credentials', True, json.dumps(result, ensure_ascii=False),
+            result_envelope={'credential_discovery': result})
+    if operation == 'share':
+        from ..user_space.task_credential_forms import share_credential
+        result = share_credential(agent, params['credential_ref'])
+        return ToolHandlerOutcome('request_credentials', True, json.dumps(result, ensure_ascii=False),
+            result_envelope={'credential': result})
+    if operation == 'configure':
+        from ..user_space.task_credential_forms import configure_credential
+        result = configure_credential(agent, params['credential_ref'], authentication=params.get('authentication'), auth_config=params.get('auth_config'), header_name=params.get('header_name','Authorization'))
+        return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope={'credential':result})
+    if operation in {'status', 'revoke'}:
+        with credential_stage('record_management', effect_outcome='not_started' if operation == 'status' else 'unknown'):
+            result = manage_credential(agent, params['credential_ref'], operation=operation)
+        return ToolHandlerOutcome('request_credentials', True, json.dumps(result), result_envelope={'credential': result})
+    return None
 
 
 # LLM: 只读已由原凭据宿主验证的记录，不接收模型参数；missing/非法状态一律 unknown，pending/armed 不证明卡片送达。
