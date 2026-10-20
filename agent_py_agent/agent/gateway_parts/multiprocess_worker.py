@@ -24,8 +24,8 @@ WORKER_PARENT_POLL_SECONDS = 1.0
 _WORKER_PARENT_DEATH_PRCTL_CODE = 1
 
 
-# LLM: 原P4/逐消息native握手先于owner池；轮询先保存lane再start，ACK异常仍持原线程收尾；退出先收泵再关闭原客户端，未知不冒充排空。
-# 函数用途: 运行worker消费循环，保留启动异常中的原轮询线程，关闭本地槽位并恢复信号处理。
+# LLM: 原P4/native握手先于owner池；全部原pump/native清理及信号恢复成功后才发表stopped，reason保原outcome；清理异常传播，不签P6排空。
+# 函数用途: 运行worker消费循环并收起原资源；区分退出原因与真实关闭阶段，避免正常返回0却留下not_ready/drained末心跳。
 def run_worker(launch: WorkerLaunch, on_heartbeat=None, *, config_path=None) -> int:
     stop = threading.Event()
     previous = _install_stop_handlers(stop)
@@ -61,9 +61,6 @@ def run_worker(launch: WorkerLaunch, on_heartbeat=None, *, config_path=None) -> 
         _publish_heartbeat(launch, {"ready": False, "reason": outcome, "loop_health": "stopping",
                                    "inflight": pump.inflight}, on_heartbeat)
         pump.close()
-        _publish_heartbeat(launch, {"ready": False, "reason": outcome, "loop_health": outcome,
-                                   "inflight": pump.inflight}, on_heartbeat)
-        return 0
     except Exception as error:
         _publish_heartbeat(launch, {"ready": False, "reason": "worker_runtime_failed",
                                    "error_code": getattr(error, "error_code", type(error).__name__),
@@ -85,6 +82,9 @@ def run_worker(launch: WorkerLaunch, on_heartbeat=None, *, config_path=None) -> 
                     native_client.close()
             finally:
                 _restore_stop_handlers(previous)
+    _publish_heartbeat(launch, {"ready": False, "reason": outcome, "loop_health": "stopped",
+                               "inflight": pump.inflight}, on_heartbeat)
+    return 0
 
 
 # LLM: 首次启动允许C在spawn后发布登记；只有原P4校验成功才物化owner，超时或停止失败关闭。

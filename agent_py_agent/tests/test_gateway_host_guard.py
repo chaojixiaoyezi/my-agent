@@ -17,11 +17,19 @@ from agent_py_agent.cli.gateway_host_guard import (
 _HOST_PID = 43210
 
 
+# LLM: CLI公开入口先冻结真实YAML；本夹具仅提供等值Count0配置，不替换freeze或托管自停闸，原进程/stop/spawn仍由各测试控制。
+# 函数用途: 准备临时配置与旧Agent替身，避免不存在的示例文件抢先遮住原自停拒绝断言。
 def _agent_and_paths(tmp_path):
+    (tmp_path / "c.yaml").write_text(
+        "model_backend: echo\ngateway_worker_process_count: 0\ngateway_stop_timeout: 5\ngateway_port: 0\n"
+        + f"my_agent_home: {tmp_path / 'home'}\n",
+        encoding="utf-8",
+    )
     agent = MagicMock()
     agent.config = SimpleNamespace(gateway_stop_timeout=5, gateway_port=0)
     paths = MagicMock()
     paths.root, paths.pid, paths.stop_request = tmp_path, tmp_path / "gateway.pid", tmp_path / "stop.json"
+    paths.state = tmp_path / "gateway_state.json"
     return agent, paths
 
 
@@ -48,7 +56,7 @@ def test_refuses_only_the_exact_hosting_gateway(monkeypatch, capsys):
 def test_stop_and_restart_refuse_before_any_stop_request(monkeypatch, tmp_path):
     monkeypatch.setenv(HOSTING_GATEWAY_PID_ENV, str(_HOST_PID))
     agent, paths = _agent_and_paths(tmp_path)
-    args = SimpleNamespace(config="c.yaml", reason="", timeout=None, kill=True, ready_timeout=None)
+    args = SimpleNamespace(config=str(tmp_path / "c.yaml"), reason="", timeout=None, kill=True, ready_timeout=None)
     with patch.object(gateway_process, "make_agent", return_value=agent), \
          patch.object(gateway_process, "gateway_paths", return_value=paths), \
          patch.object(gateway_process, "get_running_pid", return_value=_HOST_PID), \
@@ -71,7 +79,7 @@ def test_forced_start_refuses_to_replace_the_hosting_gateway(monkeypatch, tmp_pa
          patch.object(gateway_process, "is_pid_alive", return_value=True), \
          patch.object(gateway_process, "_write_gateway_stop_request") as stop_request, \
          patch.object(gateway_process, "_spawn_gateway_process") as spawn:
-        assert gateway_process.cmd_gateway_start(SimpleNamespace(config="c.yaml", force=True, ready_timeout=None)) == 2
+        assert gateway_process.cmd_gateway_start(SimpleNamespace(config=str(tmp_path / "c.yaml"), force=True, ready_timeout=None)) == 2
     stop_request.assert_not_called()
     spawn.assert_not_called()
 
@@ -79,7 +87,7 @@ def test_forced_start_refuses_to_replace_the_hosting_gateway(monkeypatch, tmp_pa
 def test_other_gateway_is_still_stoppable_from_a_hosted_tool(monkeypatch, tmp_path):
     monkeypatch.setenv(HOSTING_GATEWAY_PID_ENV, str(_HOST_PID))
     agent, paths = _agent_and_paths(tmp_path)
-    args = SimpleNamespace(config="c.yaml", reason="", timeout=1, kill=False)
+    args = SimpleNamespace(config=str(tmp_path / "c.yaml"), reason="", timeout=1, kill=False)
     with patch.object(gateway_process, "make_agent", return_value=agent), \
          patch.object(gateway_process, "gateway_paths", return_value=paths), \
          patch.object(gateway_process, "get_running_pid", return_value=_HOST_PID + 7), \

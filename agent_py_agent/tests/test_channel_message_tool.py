@@ -177,7 +177,8 @@ def test_send_message_uses_task_registry_and_native_attachment_api(tmp_path: Pat
             }
         ]
     )
-    assert _message_tool_deliveries(ctx) == [evidence]
+    # 无真实Agent/canonical/工作attempt的旧fixture只能保留工具发送事实，不能认领后台回复槽。
+    assert _message_tool_deliveries(ctx) == []
     assert (
         second.metadata["handler_details"]["delivery_evidence"]["deduplicated"]
         is True

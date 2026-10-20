@@ -1,10 +1,14 @@
 # LLM: Count0原锁/admin callbacks保持懒调用；C显式同源config只读wrapper共用唯一前缀，typed来源故障不是无效用户卡。
 # 模块用途: 为原Agent与冷C校验同一卡片，保G1先于读body；只有授权后表单typed错误返回可改正分类。
+# LLM: 原503仅附有界安全异常元数据；不读异常正文/args/请求字段，不改响应、写门或部分提交事实。
 # LLM: 跨 owner 卡片入口必须先核对宿主凭据、SDK actor、签名和个人解锁，再初始化引用 owner；引用不是批准。
 # 模块用途: 接受原 IM 适配器验证后的私人卡回调，将精确决定交给原工具审批记录。
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
+import sys
 from pathlib import Path
 
 from ..conversation.im_tool_approval import resolve_im_tool_approval
@@ -72,6 +76,7 @@ def resolve_private_interaction(base_agent, body: dict, *, channel: str, actor_i
 
 # LLM: 跨owner控制仍须实际宿主凭据；仅授权后parser的实际typed错误可返回form，原身份/期限/任务拒绝不降级，须同步adapter固定出口。
 # 函数用途: 校验适配器来源后处理控制卡；原授权后的typed表单错误允许改正原卡，身份/版本和宿主故障仍沿原分类，不暴露输入。
+# LLM: 原503捕获仅附安全诊断，诊断失败不影响原回执；不能据此推断未写入或重放决定。
 def handle_private_interaction(handler, server) -> None:
     middleware = getattr(handler, "_auth_middleware", None)
     if middleware is None or not middleware.has_gateway_credential(dict(handler.headers)):
@@ -97,7 +102,8 @@ def handle_private_interaction(handler, server) -> None:
         handler._send_json(400, {'ok':False, 'error_code':error.code, 'error_stage':error.stage,
                                  'error_field':error.field, 'message':error.message})
         return
-    except (OSError, RuntimeError, sqlite3.Error, GlobalWriteError):
+    except (OSError, RuntimeError, sqlite3.Error, GlobalWriteError) as error:
+        _report_private_interaction_failure(error)
         handler._send_json(503, {"ok": False, "error_code": "IM_INTERACTION_HOST_UNAVAILABLE",
                                  "error_stage": "execution", "message": "宿主暂时无法处理卡片，请稍后重试。"})
         return
@@ -157,3 +163,39 @@ def validated_private_interaction_from_config(home_root, config, body, *, channe
         lock_error=lambda: private_interaction_lock_error_from_config(home_root,config,actor_id,read_only=True),
         admin_identity=lambda: _admin_channel_identity_from_config(config,home_root,
             {"channel":channel,"user_id":actor_id,"metadata":{"channel":channel,"channel_chat_type":"p2p"}}))
+
+
+# LLM: 仅复用原native/source诊断的固定stderr、有界标识和失败省略模式；不调用其会读args的分类器，不读message/locals/filename/HTTP数据。
+# 函数用途: 在原503分支记录类型、固定机器码、整数errno及尾12函数行号；任何诊断故障均不影响原响应或已有提交。
+def _report_private_interaction_failure(error):
+    try:
+        error_type = type.__getattribute__(type(error), '__name__')
+        if type(error_type) is not str or re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,95}', error_type) is None:
+            error_type = None
+        code = None
+        # 只接受宿主已知机器码；未知类的任意同格式字符串也不能进入日志。
+        for base in type.__getattribute__(type(error), '__mro__'):
+            values = type.__getattribute__(base, '__dict__')
+            if 'error_code' in values:
+                code = values['error_code']
+                break
+        if (type(code) is not str or re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code) is None
+                or code not in {'GLOBAL_WRITE_REJECTED', 'EXECUTION_CONTEXT_REQUIRED', 'ACTIVE_TURN_OUTCOME_UNCERTAIN'}):
+            code = None
+        number = OSError.errno.__get__(error) if isinstance(error, OSError) else None
+        trace = BaseException.__traceback__.__get__(error)
+        origins = []
+        while trace is not None:
+            name, line = trace.tb_frame.f_code.co_name, trace.tb_lineno
+            if (type(name) is str and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,95}', name) is not None
+                    and type(line) is int and 0 < line < 2**31):
+                origins.append({'function': name, 'line': line})
+                origins = origins[-12:]
+            trace = trace.tb_next
+        payload = {'schema_version': 'private_interaction_diagnostic.v1', 'error_type': error_type,
+            'error_code': code, 'errno': number if type(number) is int else None, 'origin': origins}
+        sys.stderr.write('[gateway-private-interaction-diagnostic] '
+            + json.dumps(payload, ensure_ascii=False, separators=(',', ':')) + '\n')
+        sys.stderr.flush()
+    except BaseException:
+        pass

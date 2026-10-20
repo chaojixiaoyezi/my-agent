@@ -115,6 +115,10 @@ def test_dispatch_presentation_fact_reaches_native_wire_without_business_executi
     assert not captured[0].get("tools")
     packets = _wire_fact_packets(captured[0])
     assert len(packets) == 1
+    wire_text = "\n".join(_message_texts(captured[0]["messages"]))
+    assert "这是已由宿主耐久派工后的接单回执" in wire_text
+    assert "不要让用户等待本回执下一轮获得工具" in wire_text
+    assert "不能据此声称后台已经启动、正在执行或任务已经成功" in wire_text
     assert packets[0]["reply_kind"] == "background_dispatch"
     assert packets[0]["facts"] == expected
     assert phase["facts"] == expected

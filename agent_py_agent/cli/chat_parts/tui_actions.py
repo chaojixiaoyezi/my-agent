@@ -1,3 +1,4 @@
+# LLM: 新job保原slash输入与显示摘要分离，HTTP宿主仍从原命令解析任务，不授客户端system_task权限。
 # LLM: 本模块是 TUI 按键处理器的副作用边界：Gateway 网络请求、后台线程、控制/补充消息持久对账器与
 #   本地执行队列投递都在这里；tui_keybindings 只做按键注册与分派并显式导入这些入口。本模块运行时禁止
 #   导入 tui_keybindings（避免循环），TuiCreateKeybindingsParams 仅作类型注解在 TYPE_CHECKING 下导入。
@@ -117,8 +118,8 @@ def _tui_execution_options(
     )
 
 
-# LLM: 用户块与 queue 状态必须先发布到同一 TuiRuntime，再把同 request_id job 放入唯一执行队列。
-# 函数用途: 构造含媒体 refs 的聊天任务、显示原草稿并按当前运行快照排队。
+# LLM: 用户块先于job进入唯一执行队列；原输入在slash解析前冻结，display_text只供显示，HTTP宿主仍重解析原命令。
+# 函数用途: 构造含媒体refs和原始命令的任务，显示草稿并按当前快照排队，不让显示摘要成为机器来源。
 def _tui_enqueue_job(
     params: TuiCreateKeybindingsParams,
     text: str,
@@ -133,6 +134,7 @@ def _tui_enqueue_job(
     options = execution_options or _tui_execution_options(params)
     visible_text = str(display_text if display_text is not None else text)
     show_prompt, text = is_show_prompt_command(text)
+    original_prompt = text
     task_command = parse_conversation_task_command(text)
     system_task: dict[str, object] = {}
     if task_command is not None and task_command.valid:
@@ -145,6 +147,7 @@ def _tui_enqueue_job(
         prompt_files=list(options.prompt_files),
         request_id=new_id("chat"),
         system_task=system_task,
+        original_prompt=original_prompt,
         display_text=visible_text,
         save=options.save,
         resume_context=options.resume_context,

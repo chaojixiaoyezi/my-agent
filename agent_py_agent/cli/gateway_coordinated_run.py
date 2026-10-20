@@ -1,4 +1,4 @@
-# LLM: 仅内部正count启动原C，先只读定位再原生命周期锁/接手门；不以配置、DTO、JSON或None Agent签业务权，Count0不导入本模块。
+# LLM: 公开正count来自真实YAML，原private入参仅保内部QA；冷路径解析供两种拓扑共用，不以配置、DTO或JSON签业务权。
 #   C state原publisher与角色双读按同controller→lease共门，失败/closing元数据不借业务许可过滤；同步restart取消固定caller锁序。
 # 模块用途: 把多进程协调者接到正式CLI启动、原资源准备和精确停止回执，保持完整元数据发表与来源双读互斥。
 from __future__ import annotations
@@ -26,22 +26,25 @@ from .models import GatewayRunCleanupRequest, GatewayThreadsRequest
 
 # LLM: 拒绝只输出已登记结构码，不写状态、建owner或从异常文案猜恢复；调用方保原生命周期责任。
 # 函数用途: 对内部启动条件不满足返回退出码2，不启动业务。
-def coordinated_refusal(code: str, *, reason: str = "") -> int:
-    print(json.dumps({"ok": False, "error_code": code, "reason": reason}, sort_keys=True), file=sys.stderr)
+def coordinated_refusal(code: str, *, reason: str = "", action: str = "", ref: str = "") -> int:
+    extra = {"action": action, "source_ref": ref} if action else {}
+    print(json.dumps({"ok": False, "error_code": code, "reason": reason, **extra}, sort_keys=True), file=sys.stderr)
     return 2
 
 
 # LLM: 仅冷读同CLI配置/规范路径，不构造Agent、Home或登记；原C锁取得后仍由build_control_plane复核同根。
-# 函数用途: 在业务构造前定位本安装的原协调者锁目录。
+# 函数用途: 在业务构造前定位两种拓扑共用的canonical生命周期锁目录。
 def _cold_gateway_paths(args):
     from .common import apply_runtime_config_environment, load_config
     from .workspace_resolution import runtime_paths_for_config
 
-    config = apply_runtime_config_environment(load_config(args.config))
+    frozen = getattr(args, "_gateway_frozen_config", None)
+    config = copy.deepcopy(frozen) if frozen is not None else apply_runtime_config_environment(load_config(args.config))
     return gateway_paths_from_root(runtime_paths_for_config(config)["gateway_workspace"])
 
 
-# LLM: 正count仅内部Namespace，校验先于配置/目录；完整原coordinator_guard包围真实准备、服务和收尾，原P2决定owner物化。
+# LLM: 正式公开入口只运输已按YAML冻结的派生count；原直接Namespace仅保既有非公开QA入口，不接受请求JSON。
+#   完整原coordinator_guard包围真实准备、服务和收尾，原P2决定owner物化。
 # 函数用途: 在等待前任成功后争取原C单例，再运行本次真正的多进程生命周期。
 def run_coordinated_gateway(args, *, predecessor_exited: bool) -> int:
     count = getattr(args, "_gateway_worker_count", 0)
@@ -54,10 +57,11 @@ def run_coordinated_gateway(args, *, predecessor_exited: bool) -> int:
         with coordinator_guard(paths.root, count):
             return _construct_coordinated_gateway(args, paths)
     except CoordinatorUnavailable as error:
-        return coordinated_refusal(error.error_code)
+        return coordinated_refusal(error.error_code, reason=getattr(error, "reason", ""),
+                                   action=getattr(error, "action", ""), ref=getattr(error, "ref", ""))
 
 
-# LLM: 只有实际持锁C调用原接手controller和冷控制组合；冻结args为本次副本，不覆盖外部调用者或用假Agent填接口。
+# LLM: 实际持锁C先以同一冷配置核接班及standalone来源，再建控制面；冻结args为本次副本，不覆盖外部调用者或造Agent接口。
 # 函数用途: 固定本代控制面与配置，业务factory继续由原P2门决定是否执行。
 def _construct_coordinated_gateway(args, paths) -> int:
     from ..agent.gateway_parts.multiprocess_takeover_runtime import prepare_coordinator_takeover
@@ -65,7 +69,11 @@ def _construct_coordinated_gateway(args, paths) -> int:
     from .gateway_control_plane import build_control_plane
 
     generation = getattr(args, "_gateway_c_run_id", "") or uuid.uuid4().hex
-    controller = prepare_coordinator_takeover(paths, args._gateway_worker_count, generation)
+    from .common import agent_configuration
+
+    config, _roots = agent_configuration(args)
+    controller = prepare_coordinator_takeover(paths, args._gateway_worker_count, generation,
+                                              config=config, config_path=args.config)
     if controller is None:
         return coordinated_refusal("COORDINATOR_ALREADY_RUNNING", reason="coordinator_context_unavailable")
     control = build_control_plane(args, paths, controller, api.make_agent)
@@ -110,7 +118,7 @@ def coordinated_state_path(context):
     return target
 
 
-# LLM: payload仍门外准备；原controller→lease与完整角色双读共门，末核同实际source才原子写，不以隔离/Root closing/recheck停止拒绝失败元数据。
+# LLM: payload仍门外准备；原controller→lease短门保持。standalone首publish核完整旧raw/责任/配置并留版本化原像及CAS；之后沿原C writer，不以旧来源替执行权。
 # 函数用途: 串行发表本代完整state，避免合法启动投影撞双读；撤权、换控制器/代次或错路径仍拒绝旧writer。
 def publish_coordinated_state(context, payload) -> None:
     from ..agent.gateway_parts.control_plane import GatewayControlPlane
@@ -130,7 +138,14 @@ def publish_coordinated_state(context, payload) -> None:
             raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
         target = coordinated_state_path(context)
         fields = coordinated_state_fields(context)
-        write_json_file_atomic(target, {**payload, **fields})
+        from ..agent.gateway_parts.standalone_migration import current_standalone_migration
+
+        migration = current_standalone_migration(controller)
+        if migration is not None and not migration._committed:
+            migration.publish_first(context, {**payload, **fields})
+            return
+        extra = {"standalone_migration_ref": migration.reference} if migration is not None else {}
+        write_json_file_atomic(target, {**payload, **fields, **extra})
 
 
 # LLM: 仅原C/Root在任何设施出生前调用一次；用同一原P3门和startup=True恢复，不从cold/首次tick猜预算。

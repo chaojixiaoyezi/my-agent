@@ -13,6 +13,15 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 
+# LLM: 公开Gateway现在总读真实YAML；旧命令fake须显式补该依赖，不能给生产加missing-config兜底。
+# 函数用途: 给旧fake场景创建无网络的最小宿主配置，保留原动作与断言。
+def _write_public_gateway_config(args, tmp_path):
+    if not isinstance(args.config, (str, Path)):
+        args.config = str(tmp_path / "config.yaml")
+    Path(args.config).write_text(f'model_backend: echo\nmy_agent_home: "{tmp_path / "home"}"\ngateway_worker_process_count: 0\n')
+    args.workspace_root = None
+
+
 class TestCmdGatewayStart:
     """测试 cmd_gateway_start 命令。"""
 
@@ -36,6 +45,7 @@ class TestCmdGatewayStart:
         mock_paths.stop_request = tmp_path / "stop.json"
         mock_paths.log = tmp_path / "gateway.log"
 
+        _write_public_gateway_config(args, tmp_path)
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=12345), \
@@ -66,6 +76,7 @@ class TestCmdGatewayStart:
         mock_process = MagicMock()
         mock_process.pid = 99999
 
+        _write_public_gateway_config(args, tmp_path)
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=12345), \
@@ -294,7 +305,8 @@ class TestCmdGatewayStatus:
 class TestCmdGatewayRestart:
     """测试 cmd_gateway_restart 命令。"""
 
-    def test_gateway_restart_starts_background_gateway(self):
+    def test_gateway_restart_starts_background_gateway(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
         """--force restart should stop first, then return after starting the background gateway."""
         from agent_py_agent.cli.gateway_process import cmd_gateway_restart
 
@@ -304,6 +316,7 @@ class TestCmdGatewayRestart:
             force=True,
         )
 
+        _write_public_gateway_config(args, tmp_path)
         with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0) as mock_stop, \
              patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as mock_start:
             result = cmd_gateway_restart(args)
@@ -338,6 +351,7 @@ class TestCmdGatewayRestart:
         mock_paths.state.exists = MagicMock(return_value=False)
         mock_paths.heartbeat.exists = MagicMock(return_value=False)
 
+        _write_public_gateway_config(args, tmp_path)
         with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
@@ -660,6 +674,8 @@ class TestCmdSupervisorStatus:
         args.config = str(tmp_path / "config.yaml")
 
         mock_agent = MagicMock()
+        mock_agent.config.config_path = args.config
+        mock_agent.config.gateway_worker_process_count = 0
 
         mock_paths = MagicMock()
         mock_paths.root = tmp_path
@@ -667,6 +683,9 @@ class TestCmdSupervisorStatus:
         mock_paths.state = tmp_path / "state.json"
         mock_paths.heartbeat = tmp_path / "heartbeat.json"
 
+        mock_paths.supervisor_pid = tmp_path / "supervisor.pid"
+        mock_paths.pid = tmp_path / "gateway.pid"
+        mock_paths.heartbeat = tmp_path / "heartbeat.json"
         # 不创建 supervisor.pid 文件
 
         with patch("agent_py_agent.cli.supervisor.make_agent", return_value=mock_agent), \
@@ -730,6 +749,8 @@ class TestCmdStartAll:
         args.adapter_channel = "none"  # 使用 none 避免 adapter 启动
 
         mock_agent = MagicMock()
+        mock_agent.config.config_path = args.config
+        mock_agent.config.gateway_worker_process_count = 0
 
         mock_paths = MagicMock()
         mock_paths.root = tmp_path
@@ -738,7 +759,7 @@ class TestCmdStartAll:
         with patch("agent_py_agent.cli.supervisor.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.supervisor.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.supervisor.is_supervisor_running", return_value=True), \
-             patch("agent_py_agent.cli.supervisor.gateway_running", return_value=(12345, True)):
+             patch("agent_py_agent.cli.supervisor._wait_for_gateway_ready", return_value=(12345, True)):
             result = cmd_start_all(args)
             assert result == 0
 
@@ -753,6 +774,7 @@ class TestCmdGatewayInstall:
         args = MagicMock()
         args.force = False
 
+        _write_public_gateway_config(args, tmp_path)
         with patch("agent_py_agent.cli.gateway_process.install_service", return_value=True):
             result = cmd_gateway_install(args)
             assert result == 0
@@ -784,7 +806,9 @@ class TestGatewayServiceWorkingDirectory:
 
         home = tmp_path / "agent-home"
         monkeypatch.setenv("MY_AGENT_HOME", str(home))
-        monkeypatch.setattr(gateway_service, "_get_config_path", lambda: str(tmp_path / "missing.yaml"))
+        config = tmp_path / "agent.yaml"
+        config.write_text("model_backend: echo\n")
+        monkeypatch.setattr(gateway_service, "_get_config_path", lambda: str(config))
 
         assert gateway_service._service_working_directory() == home / "service-cwd"
 
@@ -792,7 +816,9 @@ class TestGatewayServiceWorkingDirectory:
         from agent_py_agent.cli import gateway_service
 
         service_cwd = tmp_path / "agent-home" / "service-cwd"
-        with patch.object(gateway_service, "_service_working_directory", return_value=service_cwd):
+        config = tmp_path / "agent.yaml"
+        config.write_text("model_backend: echo\n")
+        with patch.object(gateway_service, "_get_config_path", return_value=str(config)), patch.object(gateway_service, "_service_working_directory", return_value=service_cwd):
             systemd = gateway_service.generate_systemd_unit_text()
             launchd = gateway_service.generate_launchd_plist_text()
 
@@ -1089,6 +1115,7 @@ def test_cmd_gateway_start_failure_keeps_exit_code_two_with_typed_reason(tmp_pat
     args = SimpleNamespace(config=str(tmp_path / "config.yaml"), force=False)
     mock_process = _FakeSpawnedProcess(99999, exit_code=1)
 
+    _write_public_gateway_config(args, tmp_path)
     with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=agent), \
          patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=paths), \
          patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=None), \
@@ -1107,16 +1134,19 @@ def test_cmd_gateway_start_failure_keeps_exit_code_two_with_typed_reason(tmp_pat
 # 旧实现把 start 段永远钉在配置默认值（3s），冷启动稍慢就会被报成“启动失败”（exit 2），
 # 而进程其实正在起来。这里锁住优先级链，避免再次回归。
 # 函数用途: 验证 cmd_gateway_restart 把就绪预算透传给 start 段。
-def test_gateway_restart_forwards_ready_timeout_to_start():
+def test_gateway_restart_forwards_ready_timeout_to_start(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     from agent_py_agent.cli.gateway_process import cmd_gateway_restart
 
     explicit = MagicMock(config="cfg.yaml", timeout=10.0, ready_timeout=42.0, force=True)
+    _write_public_gateway_config(explicit, tmp_path)
     with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0), \
          patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as start:
         assert cmd_gateway_restart(explicit) == 0
     assert start.call_args.args[0].ready_timeout == 42.0
 
     fallback = MagicMock(config="cfg.yaml", timeout=17.0, ready_timeout=None, force=True)
+    _write_public_gateway_config(fallback, tmp_path)
     with patch("agent_py_agent.cli.gateway_process.cmd_gateway_stop", return_value=0), \
          patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0) as start:
         assert cmd_gateway_restart(fallback) == 0

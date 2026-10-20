@@ -1,6 +1,7 @@
 """原canonical child事实与C metadata生产入口，不用locator或模型正文替代工作身份。"""
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,7 +32,7 @@ def test_original_canonical_orphan_has_production_source_without_c_owner_agent_b
     base, owner, scoped = _scoped_restart_fixture(tmp_path)
     task = scoped.subagents.create_run(goal="原孤儿合同", thought="实际待派工作", plan=["运行"], depth=1)
     discovery = SimpleNamespace(control=SimpleNamespace(home_root=base.home_paths.root,
-        config=SimpleNamespace(memory_curator_enabled=False, enable_self_learning=False)), _source_cursors={})
+        config=replace(base.config, memory_curator_enabled=False, enable_self_learning=False)), _source_cursors={})
     refs = list(CoordinatorBackgroundRequests._owner_sources(discovery,
         SimpleNamespace(identity=owner, home_dir=scoped.home_paths.owner_home_dir)))
     assert any(ref["kind"] == "orphan" and ref["source_id"] == task.id for ref in refs), "canonical_child_must_enter_original_p3_p5_transport"

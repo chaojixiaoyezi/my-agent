@@ -1,4 +1,4 @@
-# LLM: 原BG binder在同T内发布claim运输定位，Count0仍原publisher；后台单片不拥有wake/Goal/租约，Compact/历史/CAS/取消沿原合同。
+# LLM: 原control关闭发布后固定工作身份供共同回复槽核验；原BG binder在同T内发布claim运输定位，Count0仍原publisher；后台单片不拥有wake/Goal/租约，Compact/历史/CAS/取消沿原合同。
 # 模块用途: 执行后台模型与Compact；仅组合已认领原RunParams短门，actual未结不释放输入或伪报失败。
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class BackgroundExecutionDependencies:
     prepare_run: BackgroundRunPreparation
 
 
-# LLM: 字段均由同一片 AgentRunResult 和显示快照投影；结果不代表 Goal 完成或投递成功。
+# LLM: execution_identity仅来自本次control原发布身份，跨通知新轮保持原工作attempt；字段均由同一片 AgentRunResult 和显示快照投影；结果不代表 Goal 完成或投递成功。
 # 类用途: 用具名字段交接执行产出，防止计数、附件和显示历史因元组位置错位。
 @dataclass(frozen=True)
 class BackgroundExecutionResult:
@@ -78,6 +78,7 @@ class BackgroundExecutionResult:
     runtime_reason: str = ""
     internal_response: str = ""
     public_receipt: dict[str, object] | None = None
+    execution_identity: dict[str, str] | None = None
 
 
 # LLM: 仅在同片八次 Compact 都推进 canonical 代次后让出；调度器必须单独处理，不将其记为失败。
@@ -129,7 +130,7 @@ class _BackgroundRunControl(LocalRunControl):
 
 # LLM: 只回填 core 已发布的身份；异常退出沿原账释放该 attempt 的提交前预留，submitted 未知仍保留，正常 Compact 保持原恢复路径。
 # LLM: bind_background_run_params只组合原live来源；无scope同对象，control保resolved原回调；actual未结不释放预留。
-# 函数用途: 执行原后台尝试并发布真实身份；保完成协议内部结果、Compact与原宿主权限。
+# 函数用途: 执行原后台尝试并固定本次control身份供回复槽核验；保完成协议内部结果、Compact与原宿主权限。
 def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
     from ..agent_core.runtime.run_params import run_params_with_request_id
     from ..gateway_parts.multiprocess_background_execution import bind_background_run_params
@@ -147,6 +148,11 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     finally:
         control.finish()
     binding = control.runtime_authority()
+    # 原句柄已关发布门，固定工作身份后才能交付；不从后来通知轮或工具回执反推。
+    result.source_reply_execution_identity = {
+        'request_id': resolved.request_id,
+        **{key: binding.get(key, '') for key in ('run_id', 'task_id', 'attempt_id')},
+    }
     from .background_receipt_contract import raise_background_receipt_failure
 
     raise_background_receipt_failure(result, persist_result=params.partial_turn_callback)
@@ -485,7 +491,7 @@ def public_result_operation_verification(result: object) -> dict[str, object]:
 
 
 # LLM: 在模型作用域退出后按原顺序投影结果；工具事实来自原始执行账，公开核验沿唯一投影入口。
-# 函数用途: 把执行回执与显示快照归为具名结果，供原收口与投递事务消费。
+# 函数用途: 把原control固定工作身份、执行回执与显示快照归为具名结果，供原收口与投递事务消费。
 def collect_background_execution_result(
     agent: object, result: object, display_snapshot: dict[str, object],
 ) -> BackgroundExecutionResult:
@@ -509,4 +515,5 @@ def collect_background_execution_result(
         runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
         internal_response=str(getattr(result, "internal_response", "") or ""),
         public_receipt=getattr(result, "public_receipt", None),
+        execution_identity=dict(getattr(result, "source_reply_execution_identity", None) or {}),
     )

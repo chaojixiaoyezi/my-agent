@@ -1,3 +1,4 @@
+# LLM: 排队job保存slash解析前用户原输入供HTTP重解析，显示与机器权限分责，不能按摘要重建命令。
 # LLM: 普通终端只分派输入和控制快照；运行绑定从原 worker 句柄取得，不根据界面文本选择资源。
 # 模块用途: 驱动普通聊天输入、共享命令与队列。
 from __future__ import annotations
@@ -69,8 +70,11 @@ def _handle_shared_slash_command(cfg: PlainHandleCommandConfig) -> bool:
     )
 
 
+# LLM: slash解析前保留original_prompt；只运输原输入，任务权威仍由Gateway原解析，不以display_text重建。
+# 函数用途: 冻结一条plain队列任务及原始命令，供本地或Gateway worker消费，不执行模型或控制。
 def _plain_enqueue_job(params: PlainEnqueueParams) -> ChatJob:
     show_prompt, text = is_show_prompt_command(params.user)
+    original_prompt = text
     task_command = parse_conversation_task_command(text)
     system_task: dict[str, object] = {}
     if task_command is not None and task_command.valid:
@@ -83,6 +87,7 @@ def _plain_enqueue_job(params: PlainEnqueueParams) -> ChatJob:
         prompt_files=list(params.prompt_files),
         request_id=new_id("chat"),
         system_task=system_task,
+        original_prompt=original_prompt,
     )
     with params.state_lock:
         params.pending_jobs_ref[0] += 1

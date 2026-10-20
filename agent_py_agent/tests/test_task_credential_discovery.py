@@ -378,3 +378,139 @@ def test_optional_shareable_metadata_is_preserved_without_implicit_mutation(disc
     assert result.ok and json.loads(result.output)['shareable_credentials'] == facts['shareable_credentials']
     assert len(calls) == 1
     assert result.result_envelope.get('input_dependency') is None
+
+
+@pytest.mark.parametrize('reference', ['cred_synthetic', '', None])
+def test_find_reference_conflict_is_rejected_before_host_discovery(discovery_tool, reference):
+    tool, calls, _ = discovery_tool
+    params = {'operation': 'find', 'url': 'https://example.com/api', 'credential_ref': reference}
+    assert not validate_tool_input(params, tool.model_spec.input_schema).ok
+    result = tool.execute(params)
+    assert not result.ok and result.error_code == 'TOOL_INVALID_ARGUMENTS'
+    assert result.effect_outcome == 'not_started'
+    assert calls == []
+    assert 'status' in result.output and 'credential_ref' in result.output
+
+
+def test_tool_catalog_distinguishes_reference_status_from_origin_discovery():
+    spec = RequestCredentialsTool(SimpleNamespace()).model_spec
+    assert '已有credential_ref' in spec.description and 'operation=status' in spec.description
+    assert '空匹配不表示' in spec.description
+    assert '占位' in spec.input_schema['properties']['url']['description']
+    assert '不透明' in spec.input_schema['properties']['credential_ref']['description']
+    assert any('status' in hint for hint in spec.hints.use_cases)
+
+
+@pytest.mark.parametrize('kind', ['group', 'user'])
+def test_saved_reference_status_remains_authorized_metadata_not_discovery(tmp_path, kind, monkeypatch):
+    from agent_py_agent.agent.user_space.task_credentials import credential_path
+    from agent_py_agent.tests.test_ingestion_task_credential_scope import (
+        _SECRET,
+        _active,
+        _agent,
+        _credential,
+    )
+    agent = _agent(tmp_path, kind)
+    _active(agent)
+    reference = _credential(agent, 'https://example.com/api')
+    path = credential_path(agent.home_paths.owner_home_dir, reference)
+    before = path.read_bytes()
+    monkeypatch.setattr('agent_py_agent.agent.user_space.task_credential_groups.discover_group_credentials',
+        lambda *_a, **_kw: {'credentials': [], 'selected_credential_ref': ''})
+    empty, _ = _credential_operation(agent, {'operation': 'find', 'url': 'https://other.example/api'})
+    assert empty.ok and json.loads(empty.output)['credentials'] == []
+    result, _ = _credential_operation(agent, {'operation': 'status', 'credential_ref': reference})
+    assert result.ok and result.handler_executed
+    payload = json.loads(result.output)
+    assert payload['credential_ref'] == reference and payload['status'] == 'ready'
+    assert payload['origin'] == 'https://example.com:443'
+    assert set(payload) == {'credential_ref', 'status', 'origin', 'expires_at', 'verification_status', 'replaces_ref'}
+    assert _SECRET not in result.output and 'ciphertext' not in result.output
+    assert path.read_bytes() == before
+
+
+# LLM: 合成冷群会话只启原词法工具检索，禁止可选embedding外发；原注册/活动任务/权限照常装配，不接真实通道。
+# 函数用途: 为安全发卡的名卡、搜索与出站Schema回归准备普通临时Agent。
+def _cold_card_agent(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.tests.test_ingestion_task_credential_scope import _active
+    agent = SimpleAgent(AgentConfig(model_backend='echo',enable_plugins=False,tool_vector_search_enabled=False,
+        my_agent_home=str(tmp_path/'home'),my_agent_owner_provider='feishu',my_agent_owner_kind='group',
+        my_agent_owner_id='oc_synthetic'),tmp_path/'workspace')
+    _active(agent)
+    return agent
+
+
+def test_cold_card_metadata_explains_real_collection_before_saved_reference_lookup():
+    spec = RequestCredentialsTool(SimpleNamespace()).model_spec
+    lead = spec.description.split('已有credential_ref',1)[0]
+    assert 'operation=request' in lead and '账号密码' in lead and '安全输入卡' in lead
+    assert '不传url' in lead and '不访问目标网站' in lead and '模板或历史' in lead
+    assert 'confirmed' in lead and '聊天表格' in lead
+    assert any('安全输入卡' in case and 'request' in case for case in spec.hints.use_cases)
+    assert {'账号密码','输入卡','安全表单'} <= set(spec.hints.keywords)
+    assert any('聊天表格' in note for note in spec.hints.avoid_when)
+    assert validate_tool_input({'operation':'request','collection_mode':'username_password'},spec.input_schema).ok
+    assert not validate_tool_input({'operation':'find','url':'https://example.com','credential_ref':'cred_synthetic'},spec.input_schema).ok
+
+
+@pytest.mark.parametrize('query',['新的账号密码输入卡','安全表单收集认证信息','申请凭据卡'])
+def test_cold_card_natural_search_recovers_only_current_authorized_schema(tmp_path,query):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+    agent = _cold_card_agent(tmp_path)
+    snapshot = replace(agent.tools.runtime_snapshot(),presentation_deferred_names=frozenset({'request_credentials'}))
+    assert 'request_credentials' not in {s.name for s in agent.tools.model_visible_specs(runtime_snapshot=snapshot)}
+    result = agent.tools.tools['tool_search'].execute_scoped({'query':query},ToolInvocationContext(snapshot))
+    tools = json.loads(result.output)['tools']
+    found = next(tool for tool in tools if tool['name']=='request_credentials')
+    assert found['input_schema'] == agent.tools.tools['request_credentials'].model_spec.input_schema
+    assert 'operation=request' in found['description'] and '安全输入卡' in found['description']
+    loaded = set(result.result_envelope['tool_search']['loaded_tool_names'])
+    assert 'request_credentials' in loaded
+    assert 'request_credentials' in {s.name for s in agent.tools.model_visible_specs(runtime_snapshot=snapshot,loaded_tool_names=loaded)}
+
+
+@pytest.mark.parametrize('provider',['anthropic','chat'])
+def test_cold_card_metadata_reaches_original_provider_payload_without_schema_changes(provider):
+    from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+    spec = RequestCredentialsTool(SimpleNamespace()).model_spec
+    backend_type = AnthropicCompatibleBackend if provider=='anthropic' else OpenAICompatibleBackend
+    backend = backend_type(BackendOptions(api_base='https://example.com',api_key='synthetic',model_name='synthetic',stream_enabled=False))
+    payload = backend.project_generate_payload('申请一个安全输入界面，不访问网站。',tools=[{
+        'name':spec.name,'description':spec.description,'input_schema':spec.input_schema}])
+    tool = payload['tools'][0] if provider=='anthropic' else payload['tools'][0]['function']
+    assert tool['name']==spec.name and tool['description']==spec.description
+    assert tool['input_schema' if provider=='anthropic' else 'parameters']==spec.input_schema
+    assert 'confirmed' in tool['description'] and '不访问目标网站' in tool['description']
+    assert not spec.hints.default_deferred
+
+
+def test_cold_card_search_cannot_restore_hidden_tool_authority(tmp_path):
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+    agent = _cold_card_agent(tmp_path)
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=['tool_search'])
+    result = agent.tools.tools['tool_search'].execute_scoped({'query':'账号密码输入卡'},ToolInvocationContext(snapshot))
+    assert result.ok and json.loads(result.output)['tools']==[]
+    assert result.result_envelope['tool_search']['loaded_tool_names']==[]
+
+
+def test_cold_card_real_registry_request_without_url_sends_only_host_form(tmp_path):
+    from agent_py_agent.agent.delivery import ChannelCapabilities
+    from agent_py_agent.tests.test_im_credential_card_preflight import _invoke
+    agent = _cold_card_agent(tmp_path)
+    sent = []
+    agent.channel_registry.register_adapter('feishu',SimpleNamespace(send_control_card=lambda target,card,**kwargs:
+        sent.append((target,card)) or {'message_id':'om_synthetic','chat_id':'oc_synthetic'}),
+        capabilities=ChannelCapabilities(control_cards=True,proactive=True))
+    result,boundary = _invoke(agent,{'operation':'request','collection_mode':'username_password'})
+    assert result.ok and result.handler_executed and len(sent)==1
+    assert boundary['network_access_mode']=='disabled'
+    facts = result.metadata['handler_details']['credential']
+    assert facts['status']=='waiting_input' and facts['request_delivery']['status']=='confirmed'
+    assert facts['origin']==''
+    assert {'target_url','username','secret'} <= {item.get('name') for item in sent[0][1]['elements'][1]['elements']}

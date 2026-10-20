@@ -46,7 +46,7 @@ def _agent_process_root(agent: object) -> Path | None:
     return process_session_store_root(workspace or owner, owner)
 
 
-# LLM: 宿主周期tick与前台安全点共用；配置仅控制初步目录内容读取，发通知前仍核原status/target并持久去重，不缓存通知结论。
+# LLM: Count0保原循环/锁顺序，MP仅共用单会话发表叶；宿主周期tick与前台安全点共用；配置仅控制初步目录内容读取，发通知前仍核原status/target并持久去重，不缓存通知结论。
 # 仅任务的自然 exited 可唤醒，共享激活不通知；starting/unknown 不通知，明确停止只结算；写回重读原 ID。
 # 函数用途: 自动收割已结束后台命令并通知所属主会话；一个损坏记录不会阻塞其它会话。
 def reconcile_process_completions(agent: object) -> int:
@@ -86,22 +86,29 @@ def reconcile_process_completions(agent: object) -> int:
             current = report.record
             if not current or current.get("completion_notice_id") or current["status"] not in PROCESS_TERMINAL_STATUSES:
                 continue
-            notice_id = "explicit_stop"
-            if current["status"] == "exited" and not current.get("stop_requested"):
-                facts = {key: current[key] for key in ("session_id", "status", "exit_code", "output_file") if key in current}
-                signal = store.wakes.raise_signal({
-                    "thread_id": target["thread_id"], "root_task_id": target["task_id"],
-                    "source_agent_id": target["run_id"], "reason": PROCESS_COMPLETION_REASON,
-                    "urgency": "normal", "dedupe_key": f"process-exit:{payload['session_id']}",
-                    "summary": "受管后台命令已结束，请按退出状态核对产物并继续相关工作。",
-                    "metadata": {"process_completion": facts},
-                })
-                notice_id = signal.wake_signal_id
-                sent += 1
+            notice_id = publish_process_completion(store, current)
+            sent += int(current["status"] == "exited" and not current.get("stop_requested"))
             _record_completion_notice(authority, current, notice_id)
         except Exception:
             _LOG.exception("PROCESS_COMPLETION_RETRY session=%s", payload["session_id"])
     return sent
+
+
+# LLM: 单条已核终态共用原Wake reason/facts/dedupe；调用者负责原owner/target/状态与写门，不能据本函数授执行权。
+# 函数用途: 为自然结束的原会话发布一次去重完成信号，明确停止只返回原收口标记。
+def publish_process_completion(store, current):
+    if current["status"] != "exited" or current.get("stop_requested"):
+        return "explicit_stop"
+    target = current["completion_target"]
+    facts = {key: current[key] for key in ("session_id", "status", "exit_code", "output_file") if key in current}
+    signal = store.wakes.raise_signal({
+        "thread_id": target["thread_id"], "root_task_id": target["task_id"],
+        "source_agent_id": target["run_id"], "reason": PROCESS_COMPLETION_REASON,
+        "urgency": "normal", "dedupe_key": f"process-exit:{current['session_id']}",
+        "summary": "受管后台命令已结束，请按退出状态核对产物并继续相关工作。",
+        "metadata": {"process_completion": facts},
+    })
+    return signal.wake_signal_id
 
 
 # LLM: 发布后只重读同一 session，终态或停止改变不重发 wake；不强换旧 revision 覆盖新记录。

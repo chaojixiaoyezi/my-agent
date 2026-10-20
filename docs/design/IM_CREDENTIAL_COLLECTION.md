@@ -1,3 +1,11 @@
+## 2026-10-20 原输入结算工作轮的通用软指导（候选，待新源真实复验）
+
+`task_input_resolved`继续沿原typed Wake/TurnTrigger进入工作轮的Host Event，原input_id/provider/status/result_available、origin refs及权限不变。只在共用`current_turn_text`中将此事件从“子代理变化”准确说明为输入状态结算，并提醒模型：已经执行过的一次申请不是再申请/自动续期授权，不能把历史原要求当本次新请求；ready且有结果才表示可沿原授权继续，expired不等于cancelled，不能把用户的旧叙述说成自己本片执行了取消。缺失或未知事实仍未确认，不因此授予新请求。
+
+这是工作轮文本/native IR/cache共用的软指导，不是凭据专项分支或工具硬拦；不改事件JSON/状态/期限/调度/模型次数，也不删除历史或原root_user_prompt。此前input_wait表达指导仍在工具之后，不能用表达轮指导冒称已经约束了本片工具决策。旧ordinary、child与session-task渲染字节保持。
+
+675原期限已消费，但模型恢复后再次request创建新卡且误述取消，原失败保留；未取得当次实际wire，不能称全部facts确到或丢失。新35项只证明原producer到RunParams/IR/text及两协议fake HTTP接线和原事实矩阵；新源模型遵循及正常停止仍由根实际复验，先源码实际功能、最后统一严格总门和一次包验。
+
 ## 2026-10-18 原凭据卡输入校验（已实现，发行验收另记）
 
 原卡MAC、actor、群当前成员、owner、真实消息、代次、期限和任务门仍先于表单解析。
@@ -197,3 +205,48 @@
 - `background_user_action_notice_enabled`默认true；新认证拒绝的需处理事实沿原任务、调度run、模型表达和冻结outbox通知原来源，与正常巡检结果静默分开。LLM、NO-LLM和precheck三路均复用原TaskLink、原Wake和原冻结owner_delivery；重投只投已冻结文本，不重跑业务或认证。明确取消、换代、撤销、停用/删除监控或来源变化阻止新的外发；既有已sent回执只补canonical账，不伪造新发送。通知表达由原模型按结构事实生成，不把普通回复文字当授权或机器事实。
 
 验证只使用临时owner、合成凭据、fake工具/模型和本机测试服务；不修改真实平台密码或读取生产秘密。生命周期与HTTP直接回归已由作者和非作者独立验证；通知与最终统一严格门、双端pyc/原生验收、提交和部署证据分层记录，不能把旧版本成功外推本次。尚未对真实外部平台改密码再登录，不宣称平台所有非标准业务错误均已识别。
+
+
+## 2026-10-19 准确引用状态与站点发现分责（源码修复，真实复验另记）
+
+已有`credential_ref`时，用`request_credentials(operation=status, credential_ref=...)`查询原授权引用的保存状态。此入口仍核当前owner/actor/task及原锁，只返回状态、origin、期限、verification和replacement元信息，不解密或返回凭据内容。`find`仅用于真实URL的同origin发现；空匹配只说明该发现条件未选出凭据，不说明其它引用没有填写。不得编造占位URL代查原引用。
+
+`find`分支复用原`x-exclusive-argument-groups`声明URL与引用互斥；因为URL为必填，存在任何`credential_ref`字段（含空串/null）都拒绝。原execute也在发现调用前返回`TOOL_INVALID_ARGUMENTS`，不忽略引用、不自动转status、不发送新卡。原scope默认、本人优先、群成员、权限、审批与存储保持。
+
+输入等待的既有软指导区分：发卡成功不等于提交；pending/waiting_input且result_available=false仍未收到该项输入；ready+result_available=true才能说已提交。不透明引用不是账号或密码，不能替代填写值，也不能虚构本地文件或卡片副本已保存。指导只影响模型表达，不通过关键词判断状态、不增加请求或固定回复。真实673证明出现了find+ref被忽略及错误推断，canonical原记录不是独立provider wire；本修复仍需新源真实复测。
+
+
+## 2026-10-19 原输入期限与执行账闭包（源码候选，真实验收另记）
+
+必要输入沿唯一InputDependencyAccess登记/对账。pending为空时，仅按观察整行CAS退休同root的task_input_deadline，schema/id/owner/root/status等不能核验时不删除；其它业务kind与其它任务不动。原RuntimeDB字条重排claimed时回pending并清旧lease，新期限不等待旧lease。Count0和W的complete/release以及实际expire/文件Wake效果均核完整claim；旧代不能先产生效果再靠最后删除CAS拒绝。
+
+MP原C在既有owner页显式read_only+existing_only以零等待独立连接读取runtime.db到期行，来源摘要仅绑定该行，不hash SQLite/WAL；通过原background_source/P3/P5到准确owner W。W只领冻结行，复用Count0单行算法生成原task_input_resolved，规范文件Wake继续走原主链；不造Agent于coldC、不造队列/线程/定时状态、不额外调用模型。其它业务kind仍按原wake_queue_due处理。
+
+卡片静默取消原resolution_delivery=retire，不发业务Wake、不取消TaskLink或父兄弟。若等待片已返回，原callback和attempt完成边共同调用会话层唯一判据：归档input_id只查找原行，必须匹配run/current attempt、已结束输入等待事件，无其它pending输入、活动树/锁或UNKNOWN。最终SQL事务核整树run/attempt/operation，不让terminal run掩盖UNKNOWN操作；仅本次执行账cancelled，持久TaskLink仍active。原已终态/缺Link的普通收口规则不放宽。
+
+隔离回归不能替代真实租户/物理Worker生命周期验收。673公开元数据证实残留deadline与created运行账，不把它改写成通过；新源须根按普通卡片主链复测。
+
+
+## 2026-10-19 冷会话安全新卡说明（源码软指导，真实复测另记）
+
+request_credentials的原ToolModelSpec前置真实安全输入卡能力：明确新申请用request，默认collected仅收集可不传URL、由卡片填写目标，发卡本身不访问站点，也无需搜索模板或历史。聊天表格不能替代宿主交互，只有request_delivery.status=confirmed才可说明已发卡；waiting_input不表示用户已提交。原status/ref安全元信息、find真实同origin与ref互斥、本人优先、群范围和权限不变。
+
+这只是工具自身description/hints/检索词，不改系统通用协议、加载策略、参数Schema、执行器、状态或模型调用数。674冷会话实际未调用发卡工具却声称发卡，原失败保留；本地真实Registry对三种自然查询原本就能命中，故不将此描述为检索算法故障或工具不可用。无当次wire，不能断言模型实际收到何种Schema。离线检索、两协议出站投影和fake通道发卡不等于模型遵循已真实验收。
+
+
+## 2026-10-19 后台主片准确attempt与输入退休候选
+
+后台core在调用模型/工具前已经发布原claim.runtime_authority，并把准确RunParams置于本栈。工具/输入共用的ToolApprovalScope必须冻结这个非空attempt；不能因为非foreground清空，也不能从DB current补一个。hot入口核真实RunParams和仍开放的LocalRunControl与发布值相等，再经原只读authority检查owner、thread、root任务、current attempt/generation；cold审批展示/决定只核显式发布值及相同DB链。未发布且current无attempt的legacy保原单次空attempt语义，冲突不退legacy。前台typed writer、child原canonical范围与scope schema保持。会话缓存按实际typed callback区分前台/后台，scope有attempt不能跳过后台control/claim。
+
+main审批scope.run_id继续表示长期会话任务，实际RuntimeDB run可不同。取消收口仅以输入已经冻结的非空attempt→原AgentAttempt.agent_run_id→AgentRun/TaskRun定位；仍要求current/generation、main无parent及同owner/thread/root，或child原canonical run/attempt，且可选完成边的run/attempt须完全一致。最后原TaskStore短门与SQL复读CAS、整树UNKNOWN/活动/锁/等待结束事实均保留；只取消本次执行账，TaskLink仍active。缺空attempt、错误或旧绑定不补猜、不改权限，不新增字段/状态/队列。
+
+675第三卡原后台恢复输入为空attempt而严格收口拒绝，失败证据保持。合成模型、输入和私卡回调验证仅证明通用接线，真实恢复/取消与物理生命周期由根在新源另验；不从canonical history推定provider wire。
+
+
+## 2026-10-20 后台认证拒绝通知的真实热阶段
+
+通知事实仍仅来自已执行 typed 工具首次认证拒绝与原 wake。宿主工具轮结束后不得用空 attempt 的 `_run_params` 校验，也不能恢复旧 control；原 claim 内的新通知阶段用同 invocation/root 经 core 发布准确新 attempt。首次 freeze、freshness、可选原零工具表达、外发末门与缓存未 sent 重投共用一个阶段，原凭据代次、owner/actor/group、来源与 current claim 每次照常复核。MP 先绑定原 BackgroundRuntimeBinding，control.previous 保原 T/fence。
+
+两个同域小模块仅复用现成生命周期和词法句柄。Context 副本、跨线程、对象/参数/主体替换或已关闭 control 不可借用；词法检查不授执行权。四类 actual 未结原对象穿透，通知层不将它们转 suppressed 或普通失败结算；finish 不代表 native/DB 清结。绑定前原 core 自有未启动失败清理保持。
+
+通知阶段 done 表示该阶段正常返回，不改变原业务失败、TaskLink abandoned、计划 active 或失败公开回执。没有义务/配置关闭/已 sent 不新增 core 轮；已有正文与未 sent 重投不新增模型/认证/业务工具。普通失败、取消/撤销、late generation 与来源拒绝仍原协议。此修复没有新增配置或定时采样，原 S05 失败留档；合同/fake 通过不冒称实际通知或发行完成。

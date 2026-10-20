@@ -55,7 +55,7 @@ def preflight_control_credential(control):
 
 
 # LLM: 原PID/state仅投影当前C，不覆盖角色未知作为授权；不消费restart/恢复processing或attempt，不物化owner，调用方须仍持原C租约并接完整收尾。
-# LLM: 初始state也复用原C规范目标末门，不从可变paths.state取得写入位置；PID/请求目录仍沿原启动流程。
+# LLM: 初始state也复用原C规范目标末门；仅pending standalone在PID/目录写前先由同一publisher执行准确迁移CAS，fresh/MP准备顺序不变。
 # 函数用途: 创建原C控制运行目录与PID状态，业务恢复明确延期；这些文件不证明ready或旧树退出。
 def setup_control_run(context):
     from .gateway_coordinated_run import coordinated_state_path, publish_coordinated_state
@@ -66,6 +66,14 @@ def setup_control_run(context):
     existing = get_running_pid(paths.pid)
     if existing and existing != pid:
         raise RuntimeError(f"gateway already running pid={existing}")
+    from ..agent.gateway_parts.standalone_migration import current_standalone_migration
+
+    migration = current_standalone_migration(context.control_plane.controller())
+    if migration is not None and not migration._committed:
+        # 首次CAS先于PID/运行目录写入，不能让本代准备污染准确旧来源。仍沿同一原publisher。
+        publish_coordinated_state(context, {"status": "starting", "pid": pid,
+            "gateway_workspace": str(paths.root), "subagent_workspace": "",
+            "owner_recovery_deferred": True, "owner_business_ready": False, "started_at": time.time()})
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
     write_pid_record(paths.pid)

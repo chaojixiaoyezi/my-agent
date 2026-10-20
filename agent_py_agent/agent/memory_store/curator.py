@@ -1,3 +1,4 @@
+# LLM: 时区/日终/间隔纯判据由curator_due共用，真实batch、busy/lease、not_due和消费结果保持。
 # LLM: 原策展只提交候选且正式内容仍需F4用户确认；入口空短核与文件短事务均消费原平台门，模型等待不持T，未结原对象不得失败清账。
 # 模块用途: 运行真实输入/原pending/日终触发的按组策展，落候选、游标和失败事实，不凭待审候选新增运行或扩大正式写权限。
 from __future__ import annotations
@@ -16,7 +17,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.errors import ModelNotConfiguredError
@@ -45,6 +45,18 @@ from .curator_commit import (
     CuratorBatchCommitError,
     CuratorBatchCommitter,
     CuratorCommitRecoveryError,
+)
+from .curator_due import (
+    daily_finalize_due as _daily_finalize_due,
+)
+from .curator_due import (
+    interval_elapsed,
+)
+from .curator_due import (
+    localized_now as _localized_now,
+)
+from .curator_due import (
+    parse_time as _parse_time,
 )
 from .curator_formal import FormalMemorySource
 from .curator_inputs import (
@@ -1730,6 +1742,7 @@ def _pending_reason(reasons: list[str]) -> str:
     return next((reason for reason in _REASON_PRIORITY if reason in reasons), "")
 
 
+# LLM: Interval elapsed共用curator_due纯时间窗；这里仍要求真实batch输入，metadata mtime不能替代采集。
 # LLM: Interval due requires actual unprocessed message/audit input and uses a timezone-aware
 # durable success timestamp. 被整窗排除的 audit 窗口只剩 skipped_audit_cursor 作输入证据，也
 # 必须算「有输入」：否则游标停摆，只能等每日收尾才越过（mc4-3105）。
@@ -1742,19 +1755,7 @@ def _interval_due(
 ) -> bool:
     if not batch.messages and not batch.audit_events and not batch.skipped_audit_cursor:
         return False
-    last_success = _parse_time(state.last_success_at)
-    return last_success is None or (now - last_success).total_seconds() >= interval_seconds
-
-
-# LLM: Daily finalize uses structured hour/date state in the owner timezone and does not inspect
-# conversation words.
-# 函数用途: 判断今日每日收尾是否到期。
-def _daily_finalize_due(
-    state: MemoryCuratorState,
-    now: datetime,
-    finalize_hour: int,
-) -> bool:
-    return now.hour >= finalize_hour and state.last_daily_finalize_date != now.date().isoformat()
+    return interval_elapsed(state, now, interval_seconds)
 
 
 # LLM: Finalize date is written only by a successful daily_finalize transaction and derives from the acquired run clock.
@@ -1785,32 +1786,6 @@ def _annotation_deadline(context: _RunContext, config: MemoryCuratorConfig) -> f
     remaining = min((expires - now).total_seconds(), (expires - acquired).total_seconds())
     spare = max(0.0, remaining - extraction_budget_seconds(config))
     return started + spare / 2
-
-
-# LLM: Owner timezone affects scheduling/date sharding only and never fact truth or ledger order.
-# 函数用途: 将当前或测试时间转换到 owner 时区。
-def _localized_now(value: datetime | None, timezone_name: str) -> datetime:
-    current = value or datetime.now().astimezone()
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    if not timezone_name:
-        return current.astimezone()
-    return current.astimezone(ZoneInfo(timezone_name))
-
-
-# LLM: Bad/naive durable timestamps are treated as absent, never as a future time that silently
-# disables maintenance.
-# 函数用途: 解析 Curator state 中的带时区 ISO 时间。
-def _parse_time(value: str) -> datetime | None:
-    if not str(value or "").strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc)
 
 
 __all__ = [

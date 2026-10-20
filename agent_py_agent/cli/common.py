@@ -71,6 +71,23 @@ def make_agent(args) -> SimpleAgent:
     return SimpleAgent(config, roots[0], workspace_roots=roots)
 
 
+
+# LLM: 仅公开Gateway运行入口调用；原YAML/显式工作区解析一次后冻结，外来private Namespace不能覆盖部署数量。
+# 函数用途: 给原协调入口运输同源配置与派生数量；不启动Agent、读业务账或授予执行身份。
+def frozen_gateway_arguments(args):
+    from ..agent.settings.gateway_topology import validate_gateway_worker_process_count
+
+    public = copy.copy(args)
+    if hasattr(public, "_gateway_frozen_config"):
+        delattr(public, "_gateway_frozen_config")
+    config, roots = agent_configuration(public)
+    frozen = copy.copy(args)
+    frozen._gateway_frozen_config = config
+    frozen._gateway_worker_count = validate_gateway_worker_process_count(config.gateway_worker_process_count)
+    frozen.workspace_root = [str(root) for root in roots]
+    return frozen
+
+
 def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: list[str] | None):
     service = getattr(agent, "skills_service", None)
     router = getattr(agent, "capability_router", None)

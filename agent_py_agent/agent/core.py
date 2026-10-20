@@ -2,6 +2,7 @@
 
 # LLM: C-only 可调用唯一 canonical metadata/缺端口拒绝装配，不创建 Agent 或业务许可；原六功能构造与来源消费者须同步检查。
 # W构造最早消费原bootstrap与existing-only资源；原home/secret/F4/调度业务不从来源旧实现整段覆盖，Count0初始化保持。
+# 普通构造必须先用原Home/owner私有初始化，再创建请求工作区；不修复已有权限，也不让W补目录。
 # 孤儿consumer只绑定原Agent供已核canonical ref消费，不在构造中启动任务、模型或授执行权。
 # LLM: core.py 只装配 SimpleAgent 的当前主链；拆出的私有 helper 必须由所属
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
@@ -472,8 +473,8 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
-    # LLM: W在root/home写入和凭据环境冻结前核原bootstrap及C原constructor roots，仅消费C已有共享/owner资源；Count0保main初始化、secret/F4/媒体/调度控制。
-    # 函数用途: 按真实owner装配代理并接原孤儿消费者；普通入口可初始化用户目录，W不能承担共享种子或owner首建。
+    # LLM: W在root/home写入和凭据环境冻结前核原bootstrap及C原constructor roots，仅消费C已有共享/owner资源；普通入口先经唯一Home/owner初始化，再创建请求工作区，避免默认root的普通mkdir抢先造宽权限父链。
+    # 函数用途: 按真实owner装配代理并接原孤儿消费者；新受管目录由原私有初始化负责，显式用户工作区仍沿原mkdir，W不补建。
     def __init__(
         self,
         config: AgentConfig,
@@ -496,6 +497,8 @@ class SimpleAgent(
 
         self.home_paths = (_resolve_home_paths(config) if worker_bootstrap is None
                            else _resolve_home_paths(config, worker_bootstrap=worker_bootstrap))
+        if worker_bootstrap is None:
+            self.root.mkdir(parents=True, exist_ok=True)
         self.owner_policy = resolve_effective_owner_policy(self.home_paths)
         # LLM: prompt 和工具必须共享同一份结构化工作区事实。所有未获 Full Access 的
         # owner（含本地管理员）都以自己的 owner home 为唯一 workspace；进程启动 cwd
@@ -823,8 +826,8 @@ def _build_tool_embedder(agent: object):
         return None
 
 
-# LLM: 最早W身份与C原workspace tuple门先于所有副作用，随后沿main原secret/模型ledger/运行根顺序；不授P3/P5或启动模型/线程。
-# 函数用途: 准备Agent构造期配置与宿主运行基础，普通入口可创建root并设置原模型环境，W只消费已有root。
+# LLM: 最早W身份与C原workspace tuple门先于所有副作用，随后沿main原secret/模型ledger/运行根顺序；root创建留给唯一Home初始化之后，不授P3/P5或启动模型/线程。
+# 函数用途: 准备Agent构造期配置与宿主运行基础并设置原模型环境；只保存请求root，避免在规范Home/owner私有初始化前创建其父链。
 def _initialize_agent_construction(agent, config: AgentConfig, root, worker_bootstrap, workspace_roots):
     from .gateway_parts.multiprocess_worker_agent import (
         require_worker_construction,
@@ -845,8 +848,6 @@ def _initialize_agent_construction(agent, config: AgentConfig, root, worker_boot
     # 模型调用账本，避免首次并发请求各建一份后互相覆盖。
     agent._model_call_ledger = ModelCallLedger()
     agent.root = Path(root)
-    if worker_bootstrap is None:
-        agent.root.mkdir(parents=True, exist_ok=True)
     return config
 
 

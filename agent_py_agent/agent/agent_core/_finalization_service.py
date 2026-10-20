@@ -364,7 +364,7 @@ class FinalizationService:
             turn_end_reason=turn_end_reason,
             conversation_task_completed=conversation_task_completed(ctx.task_attributes),
             delivery_artifacts=_structured_delivery_artifacts(ctx),
-            message_tool_deliveries=_message_tool_deliveries(ctx),
+            message_tool_deliveries=_message_tool_deliveries(ctx, agent=self._agent),
             operation_verification=operation_verification,
             tool_runtime_evidence=dict(ctx.tool_runtime_evidence or {}),
             pack_verifications=_pack_verification_facts(self._agent, ctx),
@@ -601,9 +601,9 @@ def _structured_delivery_artifacts(ctx: FinalizeContext) -> list[dict[str, objec
     return selected
 
 
-# LLM: send_message 已送达事实只认工具结果 envelope；不要从模型正文、工具名出现次数或日志猜。
-# 函数用途: 从本轮 archive 中提取并按 receipt 去重的当前 owner 消息交付证据。
-def _message_tool_deliveries(ctx: FinalizeContext) -> list[dict[str, object]]:
+# LLM: 实际Agent输出须复读原canonical操作与本ctx；不从模型/MCP字典或正文认领回复槽，纯投影调用不授执行权。
+# 函数用途: 提取同轮成功直发事实，按receipt去重并验证真实owner、尝试及来源绑定。
+def _message_tool_deliveries(ctx: FinalizeContext, *, agent: object = None) -> list[dict[str, object]]:
     deliveries: list[dict[str, object]] = []
     seen: set[str] = set()
     for record in list(ctx.archive_tool_calls or []):
@@ -624,9 +624,48 @@ def _message_tool_deliveries(ctx: FinalizeContext) -> list[dict[str, object]]:
         receipt_id = str(evidence.get("receipt_id") or "").strip()
         if not receipt_id or receipt_id in seen:
             continue
+        binding = _verified_reply_binding(agent, ctx, record, evidence)
+        if not binding:
+            continue
         seen.add(receipt_id)
-        deliveries.append(dict(evidence))
+        deliveries.append({**evidence, 'reply_binding': binding})
     return deliveries
+
+
+# LLM: 原工具账和本次归档必须同时成功且精确同attempt；任意模型/MCP字典或旧回执不能占当前owner回复槽。
+# 函数用途: 从真实send_message操作复读已提交身份，向后台只投影当前发送的规范回执。
+def _verified_reply_binding(agent, ctx, record, evidence):
+    from ..capability.channel_message_tool import SendMessageTool
+    from ..local_storage.tool_operations import ToolOperationStateError
+    from ..runtime_db.managed_operation_store import ManagedOperationStore
+
+    binding = evidence.get('reply_binding')
+    if not isinstance(binding, dict) or agent is None:
+        return {}
+    if not isinstance(getattr(getattr(agent, 'tools', None), 'tools', {}).get('send_message'), SendMessageTool):
+        return {}
+    scope = record.get('run_scope', {})
+    keys = ('request_id', 'run_id', 'task_id', 'attempt_id')
+    if (record.get('handler_executed') is not True or record.get('tool_operation_status') != 'succeeded'
+            or any(binding.get(key) != getattr(ctx, key, None) or binding.get(key) != scope.get(key) for key in keys)
+            or binding.get('thread_id') != scope.get('session_id')
+            or binding.get('owner_id') != agent.home_paths.owner_id
+            or binding.get('owner_home') != str(agent.home_paths.owner_home_dir)):
+        return {}
+    operation_id = str(record.get('operation_id') or '')
+    if not operation_id:
+        return {}
+    try:
+        operation = ManagedOperationStore(agent.subagents.runtime_db).get_tool_operation(
+            owner_id=binding['owner_id'], run_id=binding['run_id'], task_id=binding['task_id'],
+            attempt_id=binding['attempt_id'], operation_id=operation_id, tool_name='send_message')
+    except ToolOperationStateError:
+        return {}
+    if (operation is None or operation.status != 'succeeded' or operation.unknown_reason
+            or operation.result.get('ok') is not True or operation.result.get('handler_executed') is not True
+            or operation.result.get('result_envelope', {}).get('delivery_evidence') != evidence):
+        return {}
+    return {**binding, 'operation_id': operation_id}
 
 
 def _declared_delivery_targets(task_attributes: object) -> tuple[tuple[Path, ...], frozenset[Path]]:

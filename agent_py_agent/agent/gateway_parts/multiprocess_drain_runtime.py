@@ -78,7 +78,7 @@ class GatewayDrainRuntime:
         self._workers = self._workers_origin = workers
 
     # LLM: 保存实际dispatcher原P3gate和同一原tuple引用，ordinary末写只消费该Root绑定；不从文件/newlease重建，不另立closing状态。
-    # 函数用途: 保留原规范终态释放消费者，让停止之后仍能完成既有P3收尾。
+    # 函数用途: 保留原规范终态释放消费者及首个原对象定位，让停止之后仍能完成既有P3收尾。
     def retain_admission(self, gate):
         from .multiprocess_admission import PersistentAdmission
         self.require_original()
@@ -93,6 +93,8 @@ class GatewayDrainRuntime:
             original = (gate, gate.paths, gate.agent, gate.count, gate.c_run_id)
             self._admission_origins.append(original)
             gate._ordinary_admission_origin = (self, original)
+            # 仅保首个原gate的定位引用；消费方仍须反查本Root/原tuple逐is核验，不能借新指针签权。
+            vars(self.controller).setdefault('_native_terminal_admission_origin', gate)
 
     # LLM: 停止只是不可逆关闭producer登记/submit；仍活请求保原claim可原terminal，不能先撤lease或持T/controller等join。
     # 函数用途: 停止本root的新资源出生，并保留实际池等待收尾。
@@ -321,8 +323,8 @@ def _local_call_items(scope):
     return tuple(items)
 
 
-# LLM: 只检查本次原完整W出生/观察与当前P4/规范心跳，已确认waitstatus是必要条件但不能替代P1/P2。
-# 函数用途: 拒绝漏W、错身份/instance/代次、仍ready或观察者被替换的封存。
+# LLM: 原W/P4/观察者身份与完整P1/P2不减；正常退出仍要stopped/notready，原已reap非零waitstatus才容纳来不及终止心跳的异常W，保旧raw不伪写。
+# 函数用途: 区分原W正常停止与已确认异常退出，所有未结资源和错身份仍拒绝封存。
 def _require_generation_roles(runtime, registry, roles, origins, *, closing=False):
     from ..common.strict_json import load_strict_json
     from .daemon_metadata import process_host_id
@@ -358,8 +360,22 @@ def _require_generation_roles(runtime, registry, roles, origins, *, closing=Fals
                 or serialize_record(row['process_identity']) != observer.identity_bytes
                 or heartbeat['process_identity'] != row['process_identity'] or heartbeat['instance_id'] != row['instance_id']
                 or heartbeat['c_run_id'] != runtime.scope.c_run_id or heartbeat['worker'] != index
-                or heartbeat['of'] != runtime.scope.count or heartbeat['ready'] or heartbeat['loop_health'] != 'stopped'):
+                or heartbeat['of'] != runtime.scope.count
+                or ((heartbeat['ready'] or heartbeat['loop_health'] != 'stopped')
+                    and not _original_abnormal_worker_exit(observer))):
             raise ValueError('generation_original_worker_exit_required')
+
+
+# LLM: 仅原精确观察者消费已保存waitid/reap及未污染cache的非零码；不从PID/心跳/TTL签退出，外部native和责任仍归完整P6/P2。
+# 函数用途: 识别W未能发表stopped之前发生的真实异常退出，不写心跳或降低其它关闭门。
+def _original_abnormal_worker_exit(observer):
+    from .multiprocess_drain_process import OriginalWorkerExitObservation
+
+    if (type(observer) is not OriginalWorkerExitObservation or not observer.confirmed
+            or type(observer.process.returncode) is not int):
+        return False
+    code = observer._returncode()
+    return type(code) is int and code != 0
 
 
 # LLM: 只摘原完整tree observation里的已验证内容寻址引用，不序列化活验证对象或将历史证据再授新权。

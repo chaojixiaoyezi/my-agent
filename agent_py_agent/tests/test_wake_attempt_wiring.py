@@ -417,6 +417,7 @@ def test_shutdown_marks_in_flight_attempts_and_isolates_write_failures(tmp_path,
 
 def test_supervisor_shutdown_marks_in_flight_attempts_before_closing_the_pools(monkeypatch) -> None:
     """C6：后台 supervisor 停机时先打停机标记，再关两个执行池。"""
+    from agent_py_agent.agent.conversation.background_shutdown import BackgroundShutdown
     from agent_py_agent.cli import gateway_loops
 
     order: list[str] = []
@@ -427,6 +428,8 @@ def test_supervisor_shutdown_marks_in_flight_attempts_before_closing_the_pools(m
             order.append("pool")
 
     supervisor = object.__new__(gateway_loops._BackgroundMainSupervisor)
+    supervisor._shutdown_control = BackgroundShutdown()
+    supervisor._shutdown_control.bind(supervisor)
     supervisor._executor, supervisor._curator_executor = _Pool(), _Pool()
     supervisor.shutdown()
     assert order == ["mark", "pool", "pool"]

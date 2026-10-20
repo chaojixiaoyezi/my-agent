@@ -1,3 +1,4 @@
+# LLM: 宿主拓扑范围只展示非负整数，实际拒绝由gateway_topology唯一判据负责，不开放写权限。
 # LLM: 参数登记表的元数据推导（单位、范围、归属模块、读取方），只读、纯函数、进程内缓存一次。
 #   单位与范围按结构化规则从键名和现有校验规格推导，读取方用与 test_config_field_readers 同一套
 #   属性访问/字符串键正则扫产品代码；推不出的一律留空，绝不手工抄一份或硬猜。改动须同步
@@ -79,6 +80,7 @@ def unit_for_key(key: str) -> str:
 
 # 其它 Service 的整数/浮点范围（ModelFields、Subagent 组），来源是 settings/services/_normalize.py 的字面量。
 _EXTRA_INT_RANGES = {
+    "gateway_worker_process_count": (0, None),
     "request_timeout": (1, 600),
     "max_tokens": (1, None),
     "model_context_window_tokens": (1, None),

@@ -221,7 +221,7 @@ def share_credential(agent, reference):
             'status': row['status'], 'verification_status': row.get('verification_status', 'unverified')}
 
 
-# LLM: 原pending/cancelled输入只原位退休，refs/deadline各自消费同一原提交门；不造取消Wake或任务终态。
+# LLM: 原pending/cancelled输入原位退休；已结束等待片共用精确执行账收口，仍不造取消Wake或TaskLink终态，running/UNKNOWN保留。
 # 函数用途: 为原Agent和冷C静默回收同卡输入。
 def retire_credential_input_from_access(inputs, previous):
     import time
@@ -236,3 +236,5 @@ def retire_credential_input_from_access(inputs, previous):
     inputs.mutate(input_id, retire)
     inputs.update_refs(previous['scope']['root_task_id'], input_id, remove=True)
     inputs.schedule(previous['scope']['root_task_id'])
+    from ..conversation.task_run_closeout import settle_retired_input_run
+    settle_retired_input_run(inputs, inputs.runtime_db, input_id)

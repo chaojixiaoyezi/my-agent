@@ -1,3 +1,4 @@
+# LLM: Gateway部署数量使用严格原类型校验，不走int强转或错误回默认。
 # LLM: 各配置域共用默认和校验；人格线程冻结同其它home开关归一为布尔，字符串false不能误开；须同步加载测试。
 #   IM 心跳秒数统一归一为有限数字，后台回执和群引用附件开关不能因字符串 false 而意外开启。
 #   飞书原生图片开关与解码像素预算在此统一校验，实际读取方沿原owner输入入口消费。
@@ -249,6 +250,8 @@ class ModelFieldsService:
 
 # LLM: Gateway 限额和空闲寿命都在本入口归一，0 秒明确关闭回收；不得让非法数字进入维护循环。
 # 类用途: 统一队列、连接、实例寿命和媒体数量/字节预算的数值校验。
+# LLM: Gateway部署数量严格拒绝非法类型，其它既有数值仍沿原规范化；新增部署键须同步YAML/dataclass和公开启动。
+# 类用途: 归一网关配置，不允许无效工作进程数量悄悄回落单进程。
 class GatewayFieldsService:
     _INT_FIELD_SPECS = (
         ("gateway_stop_timeout", 1, None),
@@ -264,9 +267,16 @@ class GatewayFieldsService:
     )
     _FLOAT_FIELD_SPECS = (("owner_agent_idle_seconds", 0.0, None),)
 
+    # LLM: 纯计算，不启动服务；部署数量只接严格非bool整数，其它字段沿原告警与默认合同。
+    # 函数用途: 校验宿主拓扑后归一原Gateway参数。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
+        from ..gateway_topology import validate_gateway_worker_process_count
+
+        out["gateway_worker_process_count"] = validate_gateway_worker_process_count(
+            out.get("gateway_worker_process_count", defaults.gateway_worker_process_count)
+        )
         warnings = _apply_int_fields(out, defaults, GatewayFieldsService._INT_FIELD_SPECS)
         warnings.extend(_apply_float_fields(out, defaults, GatewayFieldsService._FLOAT_FIELD_SPECS))
         return out, warnings

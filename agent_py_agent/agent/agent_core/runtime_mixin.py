@@ -506,9 +506,8 @@ def _task_local_continuation_keeps_attempt_open(agent, params: RunParams, result
     return bool(task.agent_thread_id and active_delegated_goal_after_turn(agent, task, result) is not None)
 
 
-# LLM: This closeout owns standalone/main terminalization, but a delegated authoritative
-# ConversationThread Compact/active Goal boundary remains inside the same authorized runner.
-# 函数用途: 真正结束时收口权威 run/attempt；子代理压缩和 Goal 下一轮不提前收口。
+# LLM: 原主片收口后仅用原archive input ID查canonical退休事实，精确同attempt才补取消账；不据旧archive取消新片，task_local/Compact/Goal原边界保持。
+# 函数用途: 真正结束时收口权威run/attempt；等待片结束后按原归档ID补精确退休收口，子代理压缩/Goal不提前收口。
 def _settle_main_agent_run(agent, params: RunParams, result) -> None:
     """正常返回路径收口：runtime_status=='ok' → 'done'，否则透传终态。
 
@@ -539,6 +538,17 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
             tool_rounds=int(getattr(result, "tool_rounds", 0) or 0),
         ),
     )
+    if str(getattr(result, 'runtime_source', '') or '') == 'input_dependency':
+        from ..conversation.input_dependencies import input_dependency_access
+        from ..conversation.task_run_closeout import settle_retired_input_run
+
+        inputs = input_dependency_access(agent)
+        for record in getattr(result, 'archive_tool_calls', None) or []:
+            envelope = record.get('tool_result_envelope', {}) if isinstance(record, dict) else {}
+            dependency = envelope.get('input_dependency', {}) if isinstance(envelope, dict) else {}
+            if isinstance(dependency, dict) and isinstance(dependency.get('input_id'), str):
+                settle_retired_input_run(inputs, inputs.runtime_db, dependency['input_id'],
+                    run_id=params.run_id, attempt_id=params.attempt_id)
     _settle_terminal_conversation_task_run(agent, params)
 
 

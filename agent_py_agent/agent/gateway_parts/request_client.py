@@ -1,5 +1,5 @@
-# LLM: 本模块是所有薄客户端提交 Gateway 请求的唯一写入合同；导入时不得加载 worker、Agent、模型、工具或后台调度。
-# 模块用途: 规范聊天请求、生成结构化队列载荷并原子入队，供 TUI、CLI、飞书和未来 Web 复用。
+# LLM: 本模块是Gateway ask共用提交合同；正式本地调用显式交HTTP callable，host owner只由宿主准备。受控内部队列不作网络失败fallback；导入不加载worker/Agent/模型。
+# 模块用途: 统一请求快照、提交前显示登记与原受控队列写入；本地CLI/TUI经认证HTTP，保留同ID观察未知结果。
 
 from __future__ import annotations
 
@@ -102,8 +102,8 @@ def _media_tuple(value: object) -> tuple[dict, ...]:
     return tuple(dict(item) for item in value)
 
 
-# LLM: GatewayAskParams 只声明客户端真实支持的交互能力；审批与富 transcript 都必须显式 opt-in，服务端不能按 source 或终端形态猜测。
-# 类用途: 描述一次 Gateway ask 请求及其会话、附件引用、持久化和客户端能力。
+# LLM: 参数保存执行快照和原用户输入运输事实；original_prompt必须与既有typed任务匹配，client_message_id只作幂等，不授owner/路由权。审批和富transcript仍显式opt-in。
+# 类用途: 描述一次请求及原始命令、会话、附件引用和交互能力，避免UI剥slash后丢失任务语义。
 @dataclass
 class GatewayAskParams:
     prompt: str
@@ -125,19 +125,26 @@ class GatewayAskParams:
     input_media: tuple[dict, ...] = ()
     workspace_root: str = ""
     workspace_roots: list[str] | None = None
+    original_prompt: str | None = None
+    client_message_id: str = ""
 
 
 _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
 
 
-# LLM: 入队前回调只登记宿主分配的显示关联，不能改 ID/载荷；回调失败不得入队，执行权仍由 admission 决定。
-# 函数用途: 校验正文并保留结构化附件，先通知调用页真实编号，再原子入队，防止观察流比本地登记先到。
+# LLM: 显式submit_request走原认证HTTP，callback取得与宿主公式相同ID且先于POST；异常零POST，未知不改走文件。未给callable仅供原受控内部队列，执行权仍归admission。
+# 函数用途: 校验请求快照后先登记显示，再沿调用方明确的原提交入口写入；不由agent有无或自然语言猜运输方式。
 def submit_gateway_ask(
     paths: GatewayPaths,
     *,
     params: GatewayAskParams,
     on_request_allocated: Callable[[str], None] | None = None,
+    submit_request: Callable[[dict], tuple[int, dict]] | None = None,
 ) -> tuple[str, Path, Path]:
+    if submit_request is not None:
+        from .request_http_client import submit_authenticated_ask
+
+        return submit_authenticated_ask(paths, params, submit_request, on_request_allocated)
     prompt, system_task = _normalized_gateway_prompt(params)
     request_id = new_gateway_request_id()
     payload = {

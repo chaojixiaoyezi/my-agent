@@ -22,7 +22,7 @@ class PrecheckToolFailure(RuntimeError):
         self.required_user_action = required_action_from_result(result)
 
 
-# LLM: 调用时已持 scheduler 与后台 claim，停止与心跳均已注册；同 run 已有观察原样复用，不重跑预检。
+# LLM: 持原scheduler/BG claim；typed拒绝后通知热轮覆盖冻结和外发，已有观察不重跑预检，普通无义务不新建执行轮。
 # 函数用途: 决定继续工作、原失败收口或仅表达认证通知；通知不重做工具也不推进检查点。
 def admit_prechecked_work(agent, service, claim, signal, *, run_kwargs: dict, now: float, notify=None):
     spec = normalize_precheck(claim.run.get("precheck"))
@@ -36,10 +36,13 @@ def admit_prechecked_work(agent, service, claim, signal, *, run_kwargs: dict, no
         return True
     failed = observation["status"] == "failed"
     if failed and observation.get('required_user_action') is not None and notify is not None:
+        from ..conversation.host_notification_scope import notification_scope
         from ..conversation.required_user_action import freeze_request_notice
         from ..conversation.runtime import _run_request
-        if freeze_request_notice(agent, _run_request(run_kwargs), [observation['required_user_action']]):
-            return notify(run_kwargs)
+        request = _run_request(run_kwargs)
+        with notification_scope(agent, request):
+            if freeze_request_notice(agent, request, [observation['required_user_action']]):
+                return notify(run_kwargs)
     service.conversation_store.tasks.update_status({
         "task_id": claim.run_id, "status": "abandoned" if failed else "completed", "expected_status": "active", "now": now,
     })

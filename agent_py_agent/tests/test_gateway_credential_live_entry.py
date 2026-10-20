@@ -81,6 +81,9 @@ def _assert_input_reply_execution(backend, tool, kind='input_wait'):
     assert content.startswith('# User Task\n[natural-user-reply]\n')
     payload, _ = json.JSONDecoder().raw_decode(content.split('[natural-user-reply]\n', 1)[1])
     assert payload['reply_kind'] == kind
+    assert '发卡操作成功不等于用户已经提交' in content
+    assert '不透明引用不是账号、密码或其它已填写内容' in content
+    assert '不得虚构已经生成或保存文件' in content
     facts = payload['facts']
     execution = facts['turn_execution']
     assert execution['presentation_only'] is True

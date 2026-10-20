@@ -111,7 +111,7 @@ def test_refresh_keeps_original_quarantine_and_false_result(monkeypatch, caplog,
     original = _extra_data_error()
     controller = SimpleNamespace(active=lambda: True, _all_quarantined=False, paths=object(),
                                  c_run_id='synthetic-current', count=2, _closed_role_sources=(),
-                                 _bootstrap_sources=None)
+                                 _bootstrap_sources=None, _standalone_migration=None, _standalone_origin=None)
 
     def refuse(*_args, **_kwargs):
         raise original
@@ -153,7 +153,7 @@ def test_exception_attribute_failure_keeps_original_refusal(monkeypatch):
     original = BrokenJSONError('SECRET_MESSAGE', '{"SECRET_DOC":1}', 0)
     controller = SimpleNamespace(active=lambda: True, _all_quarantined=False, paths=object(),
                                  c_run_id='synthetic-current', count=2, _closed_role_sources=(),
-                                 _bootstrap_sources=None)
+                                 _bootstrap_sources=None, _standalone_migration=None, _standalone_origin=None)
 
     def refuse(*_args, **_kwargs):
         raise original

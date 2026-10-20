@@ -1,6 +1,6 @@
 # LLM: 原BG claim定位投影须在同一短T内发布；只组合原P3/P5，窗口只认原lifetime当前同对象token，同步事务/claim/撤权测试。
 # 原learning FIFO与唯一registry维护共用原来源/短写门；mtime仅CAS，维护不消费新FIFO/调用模型或确认候选。
-# 模块用途: 在原请求执行域内调用后台业务，并把精确Gateway运输身份接到原模型提交及RuntimeDB身份发布。
+# 模块用途: 在原请求执行域内调用后台业务或精确DB字条消费；期限事务无模型，运输身份仍接原短门。
 from __future__ import annotations
 
 import os
@@ -339,7 +339,7 @@ def bind_background_run_params(agent, params):
         active_turn_transition_callback=BackgroundRequestTransition(current.transition, params.active_turn_transition_callback, current.lifetime))
 
 
-# LLM: 原请求kind来自已冻结P5；原source bytes/owner/store必须重核，来源漂移只结清运输，不消费新来源或构造模型prompt。
+# LLM: ProcessSession完成源只发布原Wake；原请求kind来自已冻结P5；原source bytes/owner/store必须重核，来源漂移只结清运输，不消费新来源或构造模型prompt。
 # 函数用途: 从原Gateway请求调用精确owner的原后台消费者，并返回结构化结果事实。
 def execute_background_request(context):
     agent = context["agent"]
@@ -354,6 +354,10 @@ def execute_background_request(context):
             read_source(home.root, ref)
         except BackgroundSourceChanged:
             return {"source_kind": ref["kind"], "source_id": ref["source_id"], "outcome": "source_changed"}
+        if ref['kind'] == 'process_completion':
+            return _execute_process_completion(agent, ref)
+        if ref['kind'] == 'runtime_wake':
+            return _execute_runtime_wake(agent, ref)
         require_background_model_admission()
         if ref["kind"] in {"wake", "policy", "observation"}:
             return _execute_wake(agent, ref)
@@ -463,3 +467,49 @@ def requeue_pending_background_request(response, agent):
     transition = GatewayActiveTurnTransition(claim.path, claim.request_id, claim.execution_attempt_id)
     paths = gateway_paths_from_root(claim.path.parent.parent.parent)
     return requeue_current_processing_request(paths, claim, transition, not_before_at=time.time() + 1.0)
+
+
+# LLM: 原P5/短T先于ProcessSession事务；完整snapshot仍匹配才发布原Wake和notice，自写revision不反当外来源漂移。
+# 函数用途: 在真实owner提交域消费一个原后台命令完成来源，不运行模型或命令。
+def _execute_process_completion(agent, ref):
+    from .process_completion_source import consume_process_completion
+
+    with background_short_scope("process_completion_publication"):
+        outcome = consume_process_completion(agent, ref)
+    return {"source_kind": "process_completion", "source_id": ref["source_id"],
+            "outcome": outcome}
+
+
+# LLM: 仅当前P5准确owner消费冻结DBrow，claim后用自己的新claim CAS，不能再把旧来源摘要当新claim；不运行prepare_tick/模型或其它owner队列。
+# 函数用途: 将原DB到期字条交同一单行算法，保同id重排和失败的原责任。
+def _execute_runtime_wake(agent, ref):
+    from ..conversation.input_dependencies import input_dependency_access
+    from ..conversation.runtime import BackgroundMainAgentRuntime, BackgroundMainAgentScheduler
+    from ..conversation.runtime_wake import consume_runtime_wake
+
+    if Path(agent.conversation_store.storage.root).relative_to(agent.home_paths.owner_home_dir).as_posix() != ref['store_ref']:
+        raise ValueError('background_source_store_mismatch')
+    now = time.time()
+    try:
+        snapshot = read_source(agent.home_paths.root,ref)
+    except BackgroundSourceChanged:
+        return {'source_kind':'runtime_wake','source_id':ref['source_id'],'outcome':'source_changed'}
+    inputs = input_dependency_access(agent)
+    inputs.commit = lambda operation: background_short_operation('runtime_wake_input',operation)
+    inputs.blocking = False
+    repo = inputs.runtime_db
+    claim = background_short_operation('runtime_wake_claim',lambda:repo.claim_runtime_wake(snapshot,now=now))
+    if claim is None:
+        return {'source_kind':'runtime_wake','source_id':ref['source_id'],'outcome':'source_changed'}
+    runtime = BackgroundMainAgentRuntime(agent=agent,store=agent.conversation_store,channels=agent.delivery_service)
+    scheduler = BackgroundMainAgentScheduler({'runtime':runtime,'store':agent.conversation_store})
+    try:
+        consumed = consume_runtime_wake(inputs,claim,now=now,
+            complete=lambda:background_short_operation('runtime_wake_complete',lambda:repo.settle_runtime_wake(claim)),
+            task_link_status=scheduler._task_link_status)
+        if not consumed:
+            return {'source_kind':'runtime_wake','source_id':ref['source_id'],'outcome':'source_changed'}
+    except Exception:
+        background_short_operation('runtime_wake_release',lambda:repo.settle_runtime_wake(claim,retry_after=now+5.0))
+        raise
+    return {'source_kind':'runtime_wake','source_id':ref['source_id'],'outcome':'handled'}

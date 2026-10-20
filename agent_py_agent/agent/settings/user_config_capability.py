@@ -1,3 +1,4 @@
+# LLM: gateway_worker_process_count属于宿主部署边界，模型和普通用户设置均不可写。
 # LLM: 本模块是"哪些配置项模型/用户可以自助改"的**唯一权威**，CLI(`config-set`)与模型工具都从这里取名单、
 #   校验和生效语义，不得各自维护第二份。安全边界（权限模式、危险根、凭据、模型密钥、宿主控制面路径）
 #   永不进白名单：不是"暂时没开放"，而是结构上不允许模型自行改变。
@@ -188,6 +189,7 @@ BOUNDARY_KEYS: dict[str, str] = {
     "capability_pack_host_verification_enabled": "决定宿主是否自动运行能力包里的检查程序（执行包内代码，属于安全边界）；仅用户经 /settings 修改，模型不能改",
     "capability_pack_self_install_enabled": "决定她能否不经确认自己装上她做的能力包（learnpack，装不装由用户决定）；仅用户经 /settings 修改，模型不能改",
     "plugin_self_install_enabled": "决定她能否不经确认自己装上并启用她造的插件（插件会运行程序，装不装由用户决定）；仅用户经 /settings 修改，模型不能改",
+    "gateway_worker_process_count": "Gateway部署拓扑，只能在宿主配置文件修改；不由模型或聊天切换",
     "my_agent_home": "宿主数据根，属于宿主控制面",
     "my_agent_owner_provider": "owner 身份解析，属于宿主控制面",
     "my_agent_owner_kind": "owner 身份解析，属于宿主控制面",

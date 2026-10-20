@@ -262,12 +262,13 @@ def test_mid_snapshot_change_preserves_source_and_namespace_rejection(paths, mon
     path.write_bytes(b'{}')
     facility = paths.processing / 'legacy.chunks.jsonl'
     facility.write_bytes(b'{}\n')
-    original = sources._descriptor_child_bytes
+    original = sources.read_bytes_beneath
     fired = False
 
-    def altered(fd, name):
+    def altered(root, parts, **kwargs):
+        name = parts[-1]
         nonlocal fired
-        raw = original(fd, name)
+        raw = original(root, parts, **kwargs)
         if not fired and name == path.name:
             fired = True
             if change == 'add':
@@ -300,18 +301,27 @@ def test_mid_snapshot_change_preserves_source_and_namespace_rejection(paths, mon
         return raw
 
     if change == 'raw':
-        read = sources._read_descriptor
+        read = nofollow_fs._read_descriptor
 
         def changing_read(fd, limit):
             content = read(fd, limit)
             path.write_bytes(b'{"changed":true}')
             return content
 
-        monkeypatch.setattr(sources, '_read_descriptor', changing_read)
+        monkeypatch.setattr(nofollow_fs, '_read_descriptor', changing_read)
     else:
-        monkeypatch.setattr(sources, '_descriptor_child_bytes', altered)
-    with pytest.raises((ValueError, OSError)):
-        history.generation_source_files(paths)
+        monkeypatch.setattr(sources, 'read_bytes_beneath', altered)
+    if change in ('add', 'remove', 'rename_to_chunk'):
+        # 名称集可整次稳定重读；原旧责任缺失/无合法来源的新责任仍由完整历史门拒绝。
+        files = history.generation_source_files(paths)
+        expected = {'requests/processing/legacy.json': b'{}', 'requests/processing/new.json': b'{}'} if change == 'add' else {}
+        assert files == expected
+        reason = 'generation_closed_source_added' if change == 'add' else 'generation_closed_source_changed'
+        with pytest.raises(ValueError, match=reason):
+            history._require_closed_files({'requests/processing/legacy.json': hashlib.sha256(b'{}').hexdigest()}, files, 'new-c')
+    else:
+        with pytest.raises((ValueError, OSError)):
+            history.generation_source_files(paths)
 
 
 @pytest.mark.parametrize('change', ['birth', 'delete', 'append'])
@@ -322,10 +332,11 @@ def test_exact_auxiliary_lifecycle_does_not_change_responsibility_set(paths, mon
     chunk = paths.processing / 'legacy.chunks.jsonl'
     if change != 'birth':
         chunk.write_bytes(b'{}\n')
-    original = sources._descriptor_child_bytes
+    original = sources.read_bytes_beneath
 
-    def altered(fd, name):
-        raw = original(fd, name)
+    def altered(root, parts, **kwargs):
+        name = parts[-1]
+        raw = original(root, parts, **kwargs)
         if name == canonical.name:
             if change == 'delete':
                 chunk.unlink()
@@ -334,7 +345,7 @@ def test_exact_auxiliary_lifecycle_does_not_change_responsibility_set(paths, mon
                     stream.write(b'{}\n')
         return raw
 
-    monkeypatch.setattr(sources, '_descriptor_child_bytes', altered)
+    monkeypatch.setattr(sources, 'read_bytes_beneath', altered)
     assert history.generation_source_files(paths) == {'requests/processing/legacy.json': b'{}'}
 
 
@@ -412,10 +423,11 @@ def test_repeated_fixed_directory_identity_is_checked_without_freezing_internal_
     path.write_bytes(b'{}')
     directory = paths.processing / '.commands'
     directory.mkdir()
-    original = sources._descriptor_child_bytes
+    original = sources.read_bytes_beneath
 
-    def altered(fd, name):
-        content = original(fd, name)
+    def altered(root, parts, **kwargs):
+        name = parts[-1]
+        content = original(root, parts, **kwargs)
         if change == 'grow':
             (directory / 'synthetic-child').mkdir()
         else:
@@ -423,7 +435,7 @@ def test_repeated_fixed_directory_identity_is_checked_without_freezing_internal_
             directory.mkdir()
         return content
 
-    monkeypatch.setattr(sources, '_descriptor_child_bytes', altered)
+    monkeypatch.setattr(sources, 'read_bytes_beneath', altered)
     if change == 'replace':
         with pytest.raises(ValueError, match='generation_source_facility_changed'):
             history.generation_source_files(paths)
@@ -439,7 +451,7 @@ def test_original_writer_publication_during_snapshot_changes_responsibility_name
     canonical = paths.processing / 'new.json'
     entered, resume, published = threading.Event(), threading.Event(), threading.Event()
     serialize = json_io.serialize_private_json_no_newline
-    read = sources._descriptor_child_bytes
+    read = sources.read_bytes_beneath
 
     def paused(payload, **kwargs):
         entered.set()
@@ -452,16 +464,116 @@ def test_original_writer_publication_during_snapshot_changes_responsibility_name
         finally:
             published.set()
 
-    def interleaved(fd, name):
-        content = read(fd, name)
+    def interleaved(root, parts, **kwargs):
+        name = parts[-1]
+        content = read(root, parts, **kwargs)
         if name == anchor.name:
             resume.set()
             assert published.wait(5)
         return content
 
     monkeypatch.setattr(json_io, 'serialize_private_json_no_newline', paused)
-    monkeypatch.setattr(sources, '_descriptor_child_bytes', interleaved)
+    monkeypatch.setattr(sources, 'read_bytes_beneath', interleaved)
     with writing(write, entered, resume):
-        with pytest.raises(ValueError, match='drain_namespace_changed'):
-            history.generation_source_files(paths)
+        files = history.generation_source_files(paths)
+    assert files == {'requests/processing/anchor.json': b'{}', 'requests/processing/new.json': b'{\n  "id": "new"\n}'}
+    # 稳定读取并不为新责任授代次；该合成writer正文没有合法route，原完整历史门仍拒绝。
+    with pytest.raises(ValueError, match='generation_closed_source_added'):
+        history._require_closed_files({'requests/processing/anchor.json': hashlib.sha256(b'{}').hexdigest()}, files, 'new-c')
     assert canonical.read_bytes() == b'{\n  "id": "new"\n}'
+
+
+@pytest.mark.parametrize('namespace', ['admission', 'processing', 'control', 'executor'])
+@pytest.mark.parametrize('window', ['A', 'B', 'after_read'])
+def test_generation_canonical_leaf_reads_stable_original_atomic_replacement(paths, monkeypatch, namespace, window):
+    supported = nofollow_fs._supports_dir_fd()
+    monkeypatch.setattr(nofollow_fs, '_supports_dir_fd', lambda: supported)
+    parent, name = {
+        'admission': (paths.root / 'admission/reservations', 'legacy.json'),
+        'processing': (paths.processing, 'legacy.json'),
+        'control': (paths.root / 'control_operations', 'gwctl-msg-' + 'a' * 32 + '.json'),
+        'executor': (paths.root / 'workers/executors/w0', 'a' * 64 + '.json'),
+    }[namespace]
+    parent.mkdir(parents=True)
+    path = parent / name
+    old = {'route': {'c_run_id': 'new-c'}, 'c_run_id': 'new-c', 'version': 1}
+    new = {**old, 'version': 2}
+    json_io.write_private_json_file_atomic_no_newline_unlocked(path, old)
+    original_open, original_read = os.open, nofollow_fs._read_descriptor
+    attempts, reads = [], []
+    fired = False
+
+    def publish():
+        nonlocal fired
+        fired = True
+        json_io.write_private_json_file_atomic_no_newline_unlocked(path, new)
+
+    def opening(child, flags, mode=0o777, **kwargs):
+        target = child == name and flags & os.O_ACCMODE == os.O_RDONLY
+        if target:
+            attempts.append(child)
+            if window == 'A' and not fired:
+                publish()
+        fd = original_open(child, flags, mode, **kwargs)
+        if target and window == 'B' and not fired:
+            publish()
+        return fd
+
+    def reading(fd, limit):
+        content = original_read(fd, limit)
+        if os.fstat(fd).st_ino == path.stat().st_ino or not fired:
+            reads.append(content)
+            if window == 'after_read' and not fired:
+                publish()
+        return content
+
+    monkeypatch.setattr(os, 'open', opening)
+    monkeypatch.setattr(nofollow_fs, '_read_descriptor', reading)
+    monkeypatch.setattr(sources, '_read_descriptor', reading)
+    files = history.generation_source_files(paths)
+    assert fired and files == {path.relative_to(paths.root).as_posix(): path.read_bytes()}
+    assert b'"version": 2' in next(iter(files.values()))
+    assert len(attempts) == 2
+    history._require_closed_files({}, files, 'new-c')
+
+
+def test_generation_missing_published_leaf_is_not_an_empty_snapshot(paths, monkeypatch):
+    paths.processing.mkdir(parents=True)
+    path = paths.processing / 'legacy.json'
+    path.write_bytes(b'{}')
+    original = sources._generation_source_names
+    observations = []
+
+    def disappearing(root, parts, descriptor):
+        result = original(root, parts, descriptor)
+        if parts == ('requests', 'processing') and not observations:
+            observations.append(result[0])
+            path.unlink()
+        return result
+
+    monkeypatch.setattr(sources, '_generation_source_names', disappearing)
+    with pytest.raises(FileNotFoundError):
+        history.generation_source_files(paths)
+    assert observations == [('legacy.json',)] and not path.exists()
+
+
+def test_generation_continuous_atomic_replacement_exhausts_original_three_attempts(paths, monkeypatch):
+    supported = nofollow_fs._supports_dir_fd()
+    monkeypatch.setattr(nofollow_fs, '_supports_dir_fd', lambda: supported)
+    paths.processing.mkdir(parents=True)
+    path = paths.processing / 'legacy.json'
+    path.write_bytes(b'{}')
+    original = os.open
+    attempts, parents = [], []
+
+    def opening(name, flags, mode=0o777, **kwargs):
+        if name == path.name and flags & os.O_ACCMODE == os.O_RDONLY:
+            attempts.append(name)
+            parents.append(kwargs.get('dir_fd'))
+            json_io.write_private_json_file_atomic_no_newline_unlocked(path, {'version': len(attempts)})
+        return original(name, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, 'open', opening)
+    with pytest.raises(nofollow_fs.NoFollowPathError):
+        history.generation_source_files(paths)
+    assert attempts == [path.name] * 3 and len(set(parents)) == 1

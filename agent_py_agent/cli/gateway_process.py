@@ -1,3 +1,4 @@
+# LLM: Count0 cleanup须核原后台执行片与物理模型责任，循环已退不能单独签排空；原任务与独立资源不取消。
 
 
 from __future__ import annotations
@@ -166,7 +167,7 @@ def _gateway_log_size(path: Path) -> int:
 
 # LLM: This is the canonical state-file projection for one live Gateway lifecycle. Keep endpoint,
 # config/model identity and log boundary here so CLI, HTTP and model tools read the same facts.
-# LLM: 正count只投影同代实际control配置/lease，None Agent不授ready；Count0原载荷字段保持。
+# LLM: 正count只投影同代实际control配置/lease，None Agent不授ready；Count0数量只从本次context投影，不能用配置目标冒认live事实。
 # 函数用途: 生成当前运行状态投影；权限与就绪仍由原控制器验证。
 def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "running") -> dict:
     context = request.context
@@ -181,6 +182,7 @@ def _build_run_state(request: GatewayThreadsRequest, pid: int, status: str = "ru
     return {
         "status": status,
         "pid": pid,
+        "worker_count": context.coordinator_worker_count,
         "gateway_workspace": str(paths.root),
         "subagent_workspace": str(agent.subagents.workspace) if agent is not None else "",
         "task_continuation": "owner_scoped_event_driven",
@@ -615,19 +617,29 @@ def _flush_decision_reach_counts(request: GatewayRunCleanupRequest) -> None:
 #   决策取消、账本结清或计数落盘出错只记异常类型事件，不能中断后续清理。改动须同步 test_gateway_decision_shutdown_cancel.py、
 #   test_gateway_model_call_shutdown_settlement.py 与 Gateway 停止相关回归。
 # 函数用途: Gateway 停止时收尾三条循环、结清在途模型调用、清理 pid/停止请求并写出是否完整排空的状态。
+# LLM: Count0必须同时核原loop、准确后台片finally与物理模型退出；两秒耗尽保incomplete，不关闭TaskLink或独立资源。
+# 函数用途: 汇总本次真实服务收尾，后台未退或未结时不能仅凭循环结束签排空。
 def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, object]:
-    """Drain the three gateway loops and persist whether shutdown was complete."""
+    """Drain original loops and owned execution slices without cancelling durable tasks."""
     if getattr(request.context, "control_plane", None) is not None:
         from .gateway_coordinated_shutdown import cleanup_coordinator_resources
 
         return cleanup_coordinator_resources(request)
+    background = getattr(request.context, "background_shutdown", None)
+    if background is not None:
+        background.stop()
     request.stop_event.set()
     _cancel_active_decisions(request)
     if request.http_server:
         request.http_server.stop()
     alive_threads = _join_gateway_loops(request)
-    drain_complete = not alive_threads
+    background_blockers = background.wait() if background is not None else []
+    drain_complete = not alive_threads and not background_blockers
     interrupted_model_calls = _settle_interrupted_model_calls(request, drain_complete=drain_complete)
+    from ..agent.conversation.background_shutdown import model_shutdown_blockers
+
+    background_blockers.extend(model_shutdown_blockers())
+    drain_complete = not alive_threads and not background_blockers
     host_shutdown_executors = _mark_host_shutdown_executors(request)
     surviving_background_sessions = _record_surviving_background_sessions(request)
     _flush_decision_reach_counts(request)
@@ -654,6 +666,7 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest) -> dict[str, obj
         "termination_reason": request.termination_reason,
         "drain_complete": drain_complete,
         "alive_threads": alive_threads,
+        "background_blockers": background_blockers,
         "interrupted_model_calls": interrupted_model_calls,
         "host_shutdown_executors": host_shutdown_executors,
         "surviving_background_sessions": surviving_background_sessions,
@@ -894,8 +907,8 @@ def _classify_gateway_service_return(
     )
 
 
-# LLM: 原服务终止分类只投影本次生命周期；C末写核原lease，Count0保持原writer/log，不从文案授终态。
-# 函数用途: 写入正式停止或异常返回事实，C-only无需伪造业务Agent。
+# LLM: 两种拓扑终态均保存本次context原身份与启动时间；C末写仍核原lease，不读旧state或P4补身份。
+# 函数用途: 写入正式停止或异常返回事实，避免正count终态丢出生事实而无法由冷监护核验原封存。
 def _record_gateway_service_termination(
     paths: GatewayPaths,
     agent: object,
@@ -918,11 +931,16 @@ def _record_gateway_service_termination(
     failed = termination.status == "failed"
     if failed:
         payload["error_code"] = "GATEWAY_SERVICE_LOOP_UNEXPECTED_RETURN"
+    if context is not None:
+        payload.update(process_identity=dict(context.process_identity),
+                       started_at=context.process_started_at)
     if context is not None and context.control_plane is not None:
         from .gateway_coordinated_run import publish_coordinated_state
 
         publish_coordinated_state(context, payload)
     else:
+        if context is not None:
+            payload.update(worker_count=0)
         write_json_file(paths.state, payload)
     event = "gateway_run_failed" if failed else "gateway_run_stopped"
     if agent is not None or context is None or getattr(context, "control_plane", None) is None:
@@ -968,8 +986,13 @@ def _record_gateway_run_failed(paths, agent, pid: int, exc: Exception) -> None:
 # ---------------------------------------------------------------------------
 
 
+# LLM: 公开安装先按真实YAML校验拓扑，再沿原服务安装器保存同一config argv；不另存worker count。
+# 函数用途: 为用户所选配置安装服务，非法数量在写unit/plist之前拒绝。
 def cmd_gateway_install(args) -> int:
-    success = install_service(force=args.force)
+    from .common import frozen_gateway_arguments
+
+    args = frozen_gateway_arguments(args)
+    success = install_service(force=args.force, config_path=Path(args.config))
     return 0 if success else 1
 
 
@@ -978,13 +1001,24 @@ def cmd_gateway_uninstall(args) -> int:
     return 0 if success else 1
 
 
-# LLM: 已在运行且带 --force 时，先经托管自停闸再写停止请求；托管自己的工具进程不能借 --force 自停。
+# LLM: 公开数量只读真实YAML；已运行拓扑不同先拒绝，数量相同且force才沿原托管自停门。
 # 函数用途: 启动后台 Gateway；--force 时先停掉正在运行的实例再启动新进程，并等待就绪。
 def cmd_gateway_start(args) -> int:
+    from .common import frozen_gateway_arguments
+
+    args = frozen_gateway_arguments(args)
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
     pid = get_running_pid(paths.pid)
+    if pid and is_pid_alive(pid):
+        configured = args._gateway_worker_count
+        observed = read_json_file(paths.state).get("worker_count", 0)
+        if type(observed) is not int or observed != configured:
+            print(json.dumps({"ok": False, "error_code": "GATEWAY_TOPOLOGY_CHANGE_REQUIRED",
+                "configured_worker_process_count": configured,
+                "observed_worker_process_count": observed}, ensure_ascii=False), file=sys.stderr)
+            return 2
     if pid and is_pid_alive(pid) and not args.force:
         record = read_pid_record(paths.pid)
         print(f"gateway 已在运行 pid={pid}")
@@ -1045,15 +1079,41 @@ def _preflight_required_local_credential(agent) -> None:
 
 # LLM: 服务进程入口先写托管标记，再创建 Agent/线程/工具；所有子进程继承它，生命周期命令据此拒绝自停。
 #   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
-# 函数用途: 前台运行Gateway；内部正count先取原C锁再构造业务，默认模式保持原认证、恢复与收尾顺序。
+# 函数用途: 从公开YAML选择拓扑；两种模式均先持同一生命周期锁，再构造业务和启动服务。
 def cmd_gateway_run(args) -> int:
+    from .common import frozen_gateway_arguments
+
+    args = frozen_gateway_arguments(args)
     mark_hosting_gateway_process()
     predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
-    count = getattr(args, "_gateway_worker_count", 0)
-    if type(count) is not int or count != 0:
+    count = args._gateway_worker_count
+    if count != 0:
         from .gateway_coordinated_run import run_coordinated_gateway
 
         return run_coordinated_gateway(args, predecessor_exited=predecessor_exited)
+    from ..agent.gateway_parts.standalone_lifecycle import (
+        StandaloneLifecycleUnavailable,
+        standalone_lifecycle_guard,
+    )
+    from .gateway_coordinated_run import _cold_gateway_paths, coordinated_refusal
+
+    if not predecessor_exited:
+        return coordinated_refusal("GATEWAY_PREDECESSOR_TIMEOUT")
+    try:
+        paths = _cold_gateway_paths(args)
+        with standalone_lifecycle_guard(paths.root) as lifecycle:
+            from ..agent.gateway_parts.standalone_sources import require_standalone_sources
+
+            require_standalone_sources(paths, lifecycle)
+            return _run_standalone_gateway(args, lifecycle)
+    except StandaloneLifecycleUnavailable as exc:
+        return coordinated_refusal(exc.error_code, reason=str(exc))
+
+
+# LLM: 正常停止末端同锁记录stop-v1，先显式准备SQLite读取设施再双读责任；不自证physicalquiet，旧宿主死亡由后继fresh核。
+# LLM: 原单进程生命周期整体在canonical锁内执行，正常终止后仅发布有限观察；不能据此签全责任quiet或MP迁移。
+# 函数用途: 保持原认证、恢复、循环与收尾顺序，并保存本代真实身份。
+def _run_standalone_gateway(args, lifecycle) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -1083,7 +1143,7 @@ def cmd_gateway_run(args) -> int:
         termination_status = termination.status
         termination_reason = termination.reason
         exit_code = termination.exit_code
-        _record_gateway_service_termination(paths, agent, pid, termination)
+        _record_gateway_service_termination(paths, agent, pid, termination, context=run_context)
         if exit_code:
             print(termination.reason, file=sys.stderr)
     except KeyboardInterrupt:
@@ -1119,6 +1179,13 @@ def cmd_gateway_run(args) -> int:
         exit_code = 2
     if cleanup_report.get("surviving_background_sessions"):
         _record_surviving_background_sessions_state(paths, cleanup_report)
+    if termination_status == "stopped" and exit_code == 0:
+        from ..agent.gateway_parts.standalone_lifecycle import record_standalone_stop_observation
+
+        record_standalone_stop_observation(lifecycle, run_context, cleanup_report)
+        from ..agent.gateway_parts.standalone_stop import record_standalone_stop
+
+        record_standalone_stop(run_context, lifecycle, cleanup_report)
     if termination_kind == "planned_restart":
         command = _gateway_start_command(_gateway_start_options_from_args(args, workspace_root=agent.root))
         exit_code = hand_over_to_successor(
@@ -1131,6 +1198,8 @@ def cmd_gateway_run(args) -> int:
     return exit_code
 
 
+# LLM: status分别展示实际配置和已读state拓扑，未知保持unknown；这些展示字段不改变原存活/就绪判据。
+# 函数用途: 查看Gateway运行事实与配置目标，避免把改YAML说成运行拓扑已切换。
 def cmd_gateway_status(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -1144,6 +1213,12 @@ def cmd_gateway_status(args) -> int:
     state_status = _gateway_state_status_for_display(running, state)
     print(f"gateway status={status} pid={pid_record.get('pid') if pid_record else 'none'} state={state_status}")
     print(f"  workspace={paths.root}")
+    configured = getattr(agent.config, "gateway_worker_process_count", None)
+    observed = state.get("worker_count", 0) if state and "c_run_id" not in state else state.get("worker_count")
+    print("  拓扑=" + json.dumps({
+        "configured_worker_process_count": configured if type(configured) is int and configured >= 0 else None,
+        "observed_state_worker_count": observed if type(observed) is int and observed >= 0 else None,
+    }, ensure_ascii=False))
     if state_report.load_error:
         print("  state_load_error=" + json.dumps(state_report.load_error, ensure_ascii=False, sort_keys=True))
     if http_port > 0:
@@ -1309,7 +1384,7 @@ def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
     return True
 
 
-# LLM: restart 是"排水 + 冷启动"两段，预算必须端到端可见：--ready-timeout 显式优先；
+# LLM: restart只读真实YAML；运行拓扑不同时force也不先停旧服务。同拓扑仍是"排水 + 冷启动"两段，预算必须端到端可见：--ready-timeout 显式优先；
 # 没给就用 --timeout（用户把 --timeout 理解成"整个重启最多等多久"），都没给才落配置默认值。
 # 禁止让 start 段永远只等内置 3 秒——那会把"仍在启动"误报成启动失败。
 # 函数用途: 重启 gateway，并把就绪等待预算透传给 start 段。
@@ -1317,6 +1392,20 @@ def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
 #   --force 保持原来的先停后起（停止超时强制终止）。改动须同步 test_gateway_commands.py 与 test_gateway_safe_restart.py。
 # 函数用途: 终端重启 Gateway：默认先排空再换进程，--force 立即先停后起。
 def cmd_gateway_restart(args) -> int:
+    from .common import frozen_gateway_arguments
+
+    args = frozen_gateway_arguments(args)
+    from .gateway_coordinated_run import _cold_gateway_paths
+
+    paths = _cold_gateway_paths(args)
+    pid = get_running_pid(paths.pid)
+    if pid and is_pid_alive(pid):
+        observed = read_json_file(paths.state).get("worker_count", 0)
+        if type(observed) is not int or observed != args._gateway_worker_count:
+            print(json.dumps({"ok": False, "error_code": "GATEWAY_TOPOLOGY_CHANGE_REQUIRED",
+                              "configured_worker_count": args._gateway_worker_count,
+                              "running_worker_count": observed}, ensure_ascii=False), file=sys.stderr)
+            return 2
     if not getattr(args, "force", False):
         agent = make_agent(args)
         safe_code = safe_restart_from_cli(agent, gateway_paths(agent))

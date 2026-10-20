@@ -341,10 +341,18 @@ def test_gateway_recovery_ignores_orphan_response_projection():
 
 
 def test_file_adapter_writes_gateway_response_to_outbox():
+    from dataclasses import replace
+
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
+
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
             model_backend="echo",
+            my_agent_home=str(root / "home"),
             gateway_workspace="gateway",
             adapter_workspace="adapter",
             local_store_path="local_store/local.db",
@@ -371,14 +379,25 @@ def test_file_adapter_writes_gateway_response_to_outbox():
             target=_process_gateway_once_when_inbox_ready,
             args=(agent, gpaths),
         )
-        thread.start()
-        processed = process_file_adapter_once(
-            agent,
-            gateway_paths_obj=gpaths,
-            adapter_paths_obj=apaths,
-            timeout=5,
-        )
-        thread.join(timeout=5)
+        # 原正式HTTP负责生成本次G1并冻结owner；不手写凭据、不在测试侧补host owner。
+        server = GatewayHTTPServer(0, gpaths, params=GatewayHTTPServerParams(agent=agent))
+        server.start()
+        agent.config = replace(agent.config, gateway_port=server.server.server_address[1])
+        try:
+            thread.start()
+            processed = process_file_adapter_once(
+                agent,
+                gateway_paths_obj=gpaths,
+                adapter_paths_obj=apaths,
+                timeout=5,
+            )
+            thread.join(timeout=5)
+
+        finally:
+            server.stop()
+            if thread.is_alive():
+                thread.join(timeout=5)
+        assert not thread.is_alive()
 
         assert processed == 1
         output = json.loads((apaths.outbox / "msg-1.json").read_text(encoding="utf-8"))

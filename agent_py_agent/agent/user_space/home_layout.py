@@ -1,7 +1,7 @@
 """Canonical my-agent Home layout and safe owner initialization."""
 
 # LLM: 本模块持唯一Home布局；共享初始化只由原默认/C消费，W existing-only入口独立，私有owner种子不能合并到全局拒门。
-# 模块用途: 解析、创建和播种每个 owner 的规范 Home、Memory、Persona 与运行目录。
+# 模块用途: 解析并私有创建规范Home/种子；原W只读消费，受管子目录no-follow，已有目录不chmod。
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..common.json_io import write_private_json_file_atomic
+from ..common.nofollow_fs import create_private_file_beneath, ensure_private_dir
 from .home_layout_v2 import v2_home_directories, v2_home_path_fields, v2_seed_files, v2_seed_jsons
 from .home_memory_seeds import (
     default_memory_hot_md,
@@ -188,24 +189,25 @@ def _root_home_path_fields(home: Path) -> dict[str, Path]:
 
 
 # LLM: 共享Home同时涉及原共享种子/索引与local/main；只能由原默认/C初始化，W需消费worker_home既有资源。
-# 函数用途: 在解析/建目录前拒绝受限写者，Count0原播种与迁移顺序保持。
+# LLM: 规范子目录显式rooted no-follow创建0700，种子FD排他0600；不chmod已有目录，不改变用户选择根或W权限。
+# 函数用途: 在解析/建目录前拒绝受限写者，随后安全创建缺失受管目录与种子，Count0原迁移顺序保持。
 def ensure_my_agent_home(root: str | Path | None = None) -> MyAgentHomePaths:
     from ..common.global_write_guard import require_global_writer
 
     require_global_writer("shared_home_initialization")
     paths = home_paths(root)
-    paths.root.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(paths.root)
     for directory in _HOME_DIRECTORIES(paths):
-        directory.mkdir(parents=True, exist_ok=True)
-    _write_seed_file(paths.soul_md, SOUL_TEMPLATE)
-    _write_seed_file(paths.user_md, USER_TEMPLATE)
-    _write_seed_file(paths.agents_md, AGENTS_TEMPLATE)
+        ensure_private_dir(directory, canonical_root=paths.root)
+    _write_seed_file(paths.soul_md, SOUL_TEMPLATE, canonical_root=paths.root)
+    _write_seed_file(paths.user_md, USER_TEMPLATE, canonical_root=paths.root)
+    _write_seed_file(paths.agents_md, AGENTS_TEMPLATE, canonical_root=paths.root)
     _upgrade_default_persona_templates(paths)  # 存量部署:旧空壳根模板升级为新模板(管理员自定义的不动)
-    _write_seed_file(paths.memory_md, default_memory_md())
-    _write_seed_file(paths.memory_hot_md, default_memory_hot_md())
-    _write_seed_file(paths.owner_memory_routing_index_md, default_memory_route_index_md())
+    _write_seed_file(paths.memory_md, default_memory_md(), canonical_root=paths.root)
+    _write_seed_file(paths.memory_hot_md, default_memory_hot_md(), canonical_root=paths.root)
+    _write_seed_file(paths.owner_memory_routing_index_md, default_memory_route_index_md(), canonical_root=paths.root)
     for path, content in v2_seed_files(paths):
-        _write_seed_file(path, content)
+        _write_seed_file(path, content, canonical_root=paths.root)
     for path, payload in v2_seed_jsons(paths):
         _write_seed_json(path, payload)
     _upgrade_default_quota_policy(paths)
@@ -292,14 +294,19 @@ def _HOME_DIRECTORIES(paths: MyAgentHomePaths) -> tuple[Path, ...]:
     )
 
 
-# LLM: 本叶子只属于Home共享初始化；owner_resolver/run_workspace的私有同名函数独立，不得合并或按路径绕过。
-# 函数用途: 不存在时写原Home种子；受限actor先拒，已有内容不覆盖。
-def _write_seed_file(path: Path, content: str) -> None:
+# LLM: 本叶子只属于Home共享初始化；拒门先于I/O，原规范根内FD排他创建0600，已有普通内容不覆盖；不借owner种子绕共享拒门。
+# 函数用途: 只写本次确实新建的Home文本种子，拒绝链接/特殊叶；FD关闭后返回，不改已有权限。
+def _write_seed_file(path: Path, content: str, *, canonical_root: Path | None = None) -> None:
     from ..common.global_write_guard import require_global_writer
 
     require_global_writer("shared_home_initialization")
-    if not path.exists():
-        path.write_text(content, encoding="utf-8")
+    root = canonical_root if canonical_root is not None else path.parent
+    try:
+        descriptor = create_private_file_beneath(root, path.relative_to(root).parts)
+    except FileExistsError:
+        return
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
 
 
 def _upgrade_default_persona_templates(paths: MyAgentHomePaths) -> None:

@@ -1,5 +1,5 @@
-# LLM: 默认读写保持原no-follow链；显式snapshot只在原父FD内有限重读实测安全替换，硬错和缺strict能力不回落。
-# 模块用途: 统一受管FD读写；严格附件读取复用原完整平台能力核验，不另造权限或文件状态。
+# LLM: 默认读写保持原no-follow链；显式snapshot只有限重读安全替换，同inode元数据漂移硬拒，硬错和缺strict能力不回落。
+# 模块用途: 统一受管FD读写；规范Home可显式rooted创建私有目录/排他种子，默认链与严格附件能力不降级。
 """LLM: 宿主文件读写固定受信根；文本和二进制共用逐段 no-follow 原语，不能用它代替业务权限。
 
 模块用途: 当模型或 shell 能修改工作区目录时，宿主通过受信根逐段拒绝符号链接地读写内部账本，
@@ -191,8 +191,8 @@ def _verify_snapshot_parents(root, parts, bindings):
         _close_snapshot_fds([descriptor])
 
 
-# LLM: 此检查只分离两种实测regular替换；before/current必须单链接普通叶，FD0link只准同before且当前不同的B丢弃分支。
-# 函数用途: 验同一parent内的before/FD/current，安全替换抛typed候选，其它变化保持硬拒。
+# LLM: 只分离原A/B regular替换；同inode的mode/size/mtime/ctime读前后必须稳定，权限变化不能仅依赖时间戳精度，漂移硬拒且不得变typed重读。
+# 函数用途: 核同一parent内的before/FD/current与读版本，原子替换可有限重读，同一文件被原地改动立即拒绝。
 def _snapshot_leaf_identity(parent_fd, name, before, opened):
     current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
@@ -208,6 +208,10 @@ def _snapshot_leaf_identity(parent_fd, name, before, opened):
         raise NoFollowPathError("managed snapshot leaf changed again")
     if not _same_identity(opened, current):
         raise NoFollowPathError("managed snapshot current leaf differs")
+    fields = ("st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(opened, field) or getattr(opened, field) != getattr(current, field)
+           for field in fields):
+        raise NoFollowPathError("managed snapshot same-inode content changed")
 
 
 # LLM: 全文只从本次已验证FD有界读取，读前/后都核叶事实；初次不存在可None，open后或竞态后missing不洗成空。
@@ -395,8 +399,17 @@ def split_existing_anchor(path: str | Path) -> tuple[Path, tuple[str, ...]]:
 #   已存在的目录一律不动；最近已存在祖先是有效符号链接时跟随一次，断链/指向文件保持拒绝。Python 不支持 dir_fd 的平台
 #   （Windows：os.open 打不开目录）与本模块其它原语一样走 _portable_directory（逐级 lstat，拒绝链接与非目录），不再
 #   打开目录描述符（CI 修复，2026-10-07：Windows 上子代理建任务目录全部 PermissionError）。
-# 函数用途: 确保一个宿主私有目录存在；缺失则逐级按 0700 新建，已存在（含符号链接）则完全不动。
-def ensure_private_dir(directory: str | Path) -> None:
+# LLM: canonical_root仅由规范Home初始化显式传入；此分支从原根逐段no-follow，不接受内部链接；默认锚点规则不变。
+# 函数用途: 缺失目录按0700逐级新建，既有权限不动；显式规范根时拒绝受管子目录链接。
+def ensure_private_dir(directory: str | Path, *, canonical_root: str | Path | None = None) -> None:
+    if canonical_root is not None:
+        root = Path(os.path.abspath(canonical_root))
+        parts = Path(os.path.abspath(directory)).relative_to(root).parts
+        if not _supports_dir_fd():
+            _portable_directory(root, parts, create=True)
+        else:
+            os.close(open_directory_beneath(root, parts, create=True))
+        return
     anchor, parts = split_existing_anchor(Path(os.path.abspath(directory)))
     if not parts:
         return
@@ -405,6 +418,29 @@ def ensure_private_dir(directory: str | Path) -> None:
         _portable_directory(root, parts, create=True)
         return
     os.close(open_directory_beneath(root, parts, create=True))
+
+
+# LLM: 只供宿主规范种子创建；沿已开parent FD排他新建0600普通单链接叶，已有普通文件不打开不覆盖，危险叶拒绝。
+#   portable沿原目录校验但不承诺POSIX父链竞态强度；FileExistsError绝不回退打开已有文件，不取得锁或写锁账。
+# 函数用途: 返回一个刚创建的私有文件描述符，由调用方写内容并关闭；并发创建者已成功则原样抛已存在。
+def create_private_file_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> int:
+    _validate_relative_parts(relative_parts)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if not _supports_dir_fd():
+        target = _portable_path(root, relative_parts, create=True)
+        try:
+            metadata = target.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise NoFollowPathError("managed seed is not a regular single-link file")
+        return os.open(target, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    parent_fd = open_directory_beneath(root, relative_parts[:-1], create=True)
+    try:
+        return _openat_file(parent_fd, relative_parts[-1], flags, 0o600)
+    finally:
+        os.close(parent_fd)
 
 
 # LLM: 永久锁仅允许单链接普通文件；先排他创建，已存在再打开，避免并发非排他创建的歧义；调用方关闭 fd。
@@ -803,6 +839,7 @@ __all__ = [
     "NoFollowPathError",
     "append_text_beneath",
     "ensure_private_dir",
+    "create_private_file_beneath",
     "resolve_existing_symlink_anchor",
     "split_existing_anchor",
     "open_private_lock_beneath",

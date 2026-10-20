@@ -1,3 +1,9 @@
+## 2026-10-20 公开构造最早父链创建顺序（候选）
+
+私有Home/owner初始化必须先于普通请求工作区创建。原`SimpleAgent._initialize_agent_construction`的早期`root.mkdir(parents=True)`会从默认owner根连带创建Home/owners；新顺序保持原`_resolve_home_paths`和返回的同一对象，然后仅非W执行原工作区mkdir。resolver不依赖工作区已存在，配置、owner选择、显式Home根符号链接既有解析规则及外置用户工作区规则保持，不新增归属猜测。
+
+受管子链接由既有rooted初始化在任何工作区mkdir之前拒绝，避免提前向外部写目录；已有0775保持原状并由W拒绝，不能以本修复修复历史Home或证明整个初始化无竞态。组件反例不是新Linux真实启动通过；旧失败保留，后继按准确新源另验。
+
 ## 2026-10-19 管理员在线自诊断（587候选，真实服务另验）
 
 管理员排查自身Gateway应先调用原 `gateway_status`，无需反复下载或用文件工具打开受保护的原始队列日志。当前生命周期的64KiB尾读保留，新增严格 `gateway_native_diagnostic.v1` 投影，最多返回最近8条原native阶段、操作、固定错误码及有限资源分类；记录不含正文、路径、owner、原ID或指纹。未知schema／字段／动态值和超过4KiB的行不公开，未知仍为未知，不能据未收录诊断断言无故障。`metadata_only`仍不读日志。

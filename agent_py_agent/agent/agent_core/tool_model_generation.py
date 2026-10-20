@@ -1,3 +1,4 @@
+# LLM: 后台片如有原宿主观察，只追加同一wall-worker出生前退出观察；默认启动/超时/模型请求保持原样。
 # LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；真实估算前捕获遥测CAS版本，保持冻结身份、中断、排队及原 IR 提交时机；瞬断重试共用原输入投递判据。
 # 模块用途: 统一模型调用、超时、排队展示与流输出；重试仍共用原输入判据，模型、原生消息和停止准确进入请求线程。
 from __future__ import annotations
@@ -1157,6 +1158,7 @@ def _restore_failed_call_turn_input(state: _ModelGenerationState) -> None:
 
 
 # LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
+# LLM: 当前后台片如有原宿主观察，出生前保同一Thread真实退出；默认无观察者仍原start，不改超时或模型请求。
 # 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
 def _generate_through_wall_guard(
     request: ModelGenerateParams,
@@ -1181,7 +1183,9 @@ def _generate_through_wall_guard(
 
     execution_context = copy_context()
     worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard", daemon=True)
-    worker.start()
+    from ..conversation.background_shutdown import start_background_model_worker
+
+    start_background_model_worker(worker)
     with register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
         return _wait_for_generation_result(request, state, results, worker, timeout)
 

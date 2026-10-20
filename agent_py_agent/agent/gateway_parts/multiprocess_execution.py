@@ -99,7 +99,7 @@ def execute_worker_transition(execution, payload, operation):
     return operation()
 
 
-# LLM: 消费原claim及P4池；C物化/finish在T外完成，ACK不授W写许可，消费前重新实读原fence，终态不释放P3。
+# LLM: 消费原claim/P4池；只在materialize词法catch核同次token与原canonical FAILED，才按原True核收Future；不签输入/P6、不在W释放P3。
 # 函数用途: 把W认领的请求交给现有业务链，不重新创建请求、车道、执行代次或释放预留。
 def execute_worker_claim(snapshot, claim, pool):
     from .io import read_json_file
@@ -116,7 +116,17 @@ def execute_worker_claim(snapshot, claim, pool):
     owner = require_execution_binding(binding, payload)
     native_client = getattr(pool, 'native_client', None)
     if native_client is not None:
-        materialized = native_client.materialize_owner(claim.request_id, claim.execution_attempt_id)
+        from .multiprocess_native_commit_client import NativeCommitNotStarted
+        from .multiprocess_native_refusal_consume import consume_first_refusal
+
+        call_origin = object()
+        try:
+            materialized = native_client.materialize_owner(claim.request_id, claim.execution_attempt_id,
+                                                          call_origin=call_origin)
+        except NativeCommitNotStarted as error:
+            if consume_first_refusal(binding, payload, native_client, error, call_origin):
+                return True
+            raise
         native_client.finish(materialized['handle'])
         owner = require_execution_binding(binding, read_json_file(claim.path))
     agent = pool.get(owner)

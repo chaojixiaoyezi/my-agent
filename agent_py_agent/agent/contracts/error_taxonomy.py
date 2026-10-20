@@ -21,6 +21,7 @@
 # LLM: B5 插件拒绝和无人审批保留独立权限错误，均不可原样重试，不得归成 UNKNOWN_ERROR。
 #   多进程记录、分区和预留拒绝保留原责任，不自动重放、补造记录或用投影释放占用。
 #   有界调用退出未确认独立于业务失败和未发送；保留原调用及清理责任，不因超时清表或自动重跑。
+#   单进程生命周期及拓扑迁移拒绝须核原锁、来源和结构化原因；分类不能签发接手许可或重放业务。
 # 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
 
 from __future__ import annotations
@@ -53,6 +54,26 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "GATEWAY_LIFECYCLE_UNAVAILABLE": ErrorContract(
+        code="GATEWAY_LIFECYCLE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="Gateway 生命周期锁争用或原持锁身份失效，未取得启动或末写权限；核对原持有者和锁来源，不删除锁文件或自动启动第二实例。",
+    ),
+    "GATEWAY_STANDALONE_SOURCE_UNPROVEN": ErrorContract(
+        code="GATEWAY_STANDALONE_SOURCE_UNPROVEN", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="单进程启动的原状态、角色或文件来源无法确认；保留原记录并核对结构化拒绝原因，不清空目录、补造身份或将未知当作首次启动。",
+    ),
+    "GATEWAY_REVERSE_MIGRATION_UNSUPPORTED": ErrorContract(
+        code="GATEWAY_REVERSE_MIGRATION_UNSUPPORTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="已存在多进程代次，不支持直接改为单进程启动；保持原拓扑并核对原完整关闭与支持的迁移路径，不删除角色记录或自动改回数量0。",
+    ),
+    "GATEWAY_STANDALONE_MIGRATION_REJECTED": ErrorContract(
+        code="GATEWAY_STANDALONE_MIGRATION_REJECTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="单进程迁移的原责任、正常停止或来源证明未通过；读取本次结构化reason、action及ref，沿原入口处理，不重放业务、不补封旧记录或绕过接手门。",
+    ),
     "GATEWAY_PREDECESSOR_TIMEOUT": ErrorContract(
         code="GATEWAY_PREDECESSOR_TIMEOUT", category="state", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,

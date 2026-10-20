@@ -6,7 +6,7 @@
 # 能力事件开始的工作片也可能完成任务，公开交付须读当前任务状态，不能仅凭原唤醒原因永久静默。
 # 原 wake 队列在预扫及领取后重查；历史失败不能绕过已接续子代理的当前状态与未读完成信封。
 # 合法冻结交付须先于普通终态工作过滤恢复；任务结束不确认欠发回复，取消抑制和去重仍归原交付层。
-# 模块用途: 编排后台唤醒和工作片；actual未结保原来源与租约，不改模型/通知/历史及原权限主链。
+# 模块用途: 编排后台唤醒和工作片、共同工具回复槽与已外发补账恢复；actual未结保原来源与租约，不改模型/通知/历史及原权限主链。
 from __future__ import annotations
 
 import json
@@ -55,6 +55,7 @@ from .background_context import (
 from .background_delivery import (
     ROUTE_EXTERNAL,
     BackgroundDeliveryDependencies,
+    _delivery_satisfies_request,
     audit_finding_payload_delivery_refs,
     audit_finding_report_event,
     background_delivery_evidence_refs,
@@ -63,9 +64,9 @@ from .background_delivery import (
     background_route_ownership,
     cached_owner_delivery,
     channel_supports_transcript,
+    committed_source_replies,
     frozen_owner_delivery,
     message_tool_delivery_reason,
-    message_tool_delivery_satisfied,
     mirror_message_tool_deliveries,
     record_background_response,
 )
@@ -659,6 +660,7 @@ class _BackgroundSlicePlan:
     route_ownership: str = ""
     delivery_artifacts: tuple[dict[str, object], ...] = ()
     message_tool_deliveries: tuple[dict[str, object], ...] = ()
+    execution_identity: dict[str, str] | None = None
     operation_verification: dict[str, object] | None = None
     assistant_commentaries: tuple[str, ...] = ()
     display_snapshot: dict[str, object] | None = None
@@ -720,31 +722,22 @@ def _background_goal_delivery_mode(
 
 # LLM: 交付收口只有一条路径：能自己外发的走 message-tool 直投镜像，其余交给独立交付入口完成
 # canonical 落账与冻结重投；唤醒确认只读结构化提交事实。禁止在这里新增按渠道名的分支。
-# 函数用途: 普通片交付owner；委派只留执行线程内部记录并确认已完成原sender结果交接，不把后台模型冒充主sender。
+# 函数用途: 普通片共核原工作attempt/目标后沿冻结出口镜像真实工具回复；委派只留执行线程内部记录并确认已完成原sender结果交接，不把后台模型冒充主sender。
 def _complete_background_slice(
     runtime: BackgroundMainAgentRuntime,
     plan: _BackgroundSlicePlan,
 ) -> BackgroundMainAgentReport:
     request = plan.request
-    if message_tool_delivery_satisfied(request, plan.message_tool_deliveries):
-        # 通道运行时's cron runner treats committed message-tool delivery as the
-        # source reply and skips its announce fallback. Mirror the payload into
-        # the same transcript, but never call the channel a second time.
-        reported_content = mirror_message_tool_deliveries(
-            runtime.store,
-            request,
-            plan.delivery_context,
-            plan.message_tool_deliveries,
-        )
-        delivery_status = "sent"
+    verified = tuple(item for item in committed_source_replies(
+        runtime.agent, request, plan.delivery_context, plan.message_tool_deliveries, execution_identity=plan.execution_identity)
+        if _delivery_satisfies_request(request, item))
+    if verified:
         delivery_reason = message_tool_delivery_reason(request)
-        commit = BackgroundDeliveryCommit(
-            content=reported_content,
-            delivery_status=delivery_status,
-            persisted=False,
-            commit_kind="external_delivery",
-            transcript_route=plan.route_supports_transcript,
-        )
+        commit = mirror_message_tool_deliveries(
+            BackgroundDeliveryDependencies(runtime.agent, runtime.store, runtime.channels,
+                partial(_background_task_link_status, runtime.agent, store=runtime.store)),
+            request, plan.delivery_context, verified, delivery_reason=delivery_reason)
+        reported_content, delivery_status = commit.content, commit.delivery_status
     else:
         commit = record_background_response(
             BackgroundDeliveryDependencies(
@@ -904,6 +897,7 @@ class BackgroundMainAgentRuntime:
                 public_receipt=execution_result.public_receipt,
                 delivery_artifacts=execution_result.delivery_artifacts,
                 message_tool_deliveries=execution_result.message_tool_deliveries,
+                execution_identity=execution_result.execution_identity,
                 operation_verification=execution_result.operation_verification,
                 assistant_commentaries=execution_result.assistant_commentaries,
                 display_snapshot=execution_result.display_snapshot,
@@ -922,7 +916,7 @@ class BackgroundMainAgentRuntime:
             ),
         )
 
-    # LLM: 只重投原冻结信封；认证新发送仍复核原active claim/代次，已sent仅补canonical不再外发，不运行模型/业务。
+    # LLM: 未sent必要通知沿同claim新热轮核freshness/末门；已sent只补canonical零新core，普通缓存/模型/业务不变。
     # 函数用途: 为原唤醒补投或落账，必要通知交付后结束defer的失败工作片。
     def redeliver_cached_wake(
         self,
@@ -966,49 +960,54 @@ class BackgroundMainAgentRuntime:
             settle_notice_task,
         )
         notice = required_notice(self.agent, request)
-        if notice is not None and not frozen.external_sent and not notice_is_current(self.agent, request):
-            return _undelivered_report(self.agent, request, 'required_action_superseded')
-        commit = record_background_response(
-            BackgroundDeliveryDependencies(
-                agent=self.agent, store=self.store, channels=self.channels,
-                task_status=partial(_background_task_link_status, self.agent, store=self.store),
-            ),
-            request,
-            delivery_context,
-            frozen.content,
-            delivery_artifacts=frozen.delivery_artifacts,
-            assistant_commentaries=frozen.assistant_commentaries,
-            deliver=True,
-            delivery_reason="cached_owner_delivery_retry",
-            route_supports_transcript=route_supports_transcript,
-            frozen_retry=frozen,
-        )
-        wake_handled = background_owner_delivery_committed(
-            request,
-            target=target,
-            ownership=ownership,
-            canonical_record=bool(route_supports_transcript or ownership != ROUTE_EXTERNAL),
-            commit=commit,
-        )
-        if notice is not None and wake_handled:
-            settle_notice_task(self.agent, request)
-        return BackgroundMainAgentReport(
-            thread_id=signal.thread_id,
-            task_id=signal.root_task_id,
-            reason=signal.reason,
-            response=commit.content,
-            route_channel=channel,
-            route_target=target,
-            created_at=now,
-            delivery_status=commit.delivery_status,
-            delivery_reason="cached_owner_delivery_retry",
-            wake_handled=wake_handled,
-            goal_continuation_allowed=frozen.message_metadata.get("goal_continuation_allowed") is True,
-            task_status=_background_task_link_status(self.agent, request, store=self.store),
-            commit_kind=commit.commit_kind,
-            message_id=commit.message_id,
-            route_ownership=ownership,
-        )
+        from contextlib import nullcontext
+
+        from .host_notification_scope import notification_scope
+        scope = notification_scope(self.agent, request) if notice is not None and not frozen.external_sent else nullcontext()
+        with scope:
+            if notice is not None and not frozen.external_sent and not notice_is_current(self.agent, request):
+                return _undelivered_report(self.agent, request, 'required_action_superseded')
+            commit = record_background_response(
+                BackgroundDeliveryDependencies(
+                    agent=self.agent, store=self.store, channels=self.channels,
+                    task_status=partial(_background_task_link_status, self.agent, store=self.store),
+                ),
+                request,
+                delivery_context,
+                frozen.content,
+                delivery_artifacts=frozen.delivery_artifacts,
+                assistant_commentaries=frozen.assistant_commentaries,
+                deliver=True,
+                delivery_reason="cached_owner_delivery_retry",
+                route_supports_transcript=route_supports_transcript,
+                frozen_retry=frozen,
+            )
+            wake_handled = background_owner_delivery_committed(
+                request,
+                target=target,
+                ownership=ownership,
+                canonical_record=bool(route_supports_transcript or ownership != ROUTE_EXTERNAL),
+                commit=commit,
+            )
+            if notice is not None and wake_handled:
+                settle_notice_task(self.agent, request)
+            return BackgroundMainAgentReport(
+                thread_id=signal.thread_id,
+                task_id=signal.root_task_id,
+                reason=signal.reason,
+                response=commit.content,
+                route_channel=channel,
+                route_target=target,
+                created_at=now,
+                delivery_status=commit.delivery_status,
+                delivery_reason="cached_owner_delivery_retry",
+                wake_handled=wake_handled,
+                goal_continuation_allowed=frozen.message_metadata.get("goal_continuation_allowed") is True,
+                task_status=_background_task_link_status(self.agent, request, store=self.store),
+                commit_kind=commit.commit_kind,
+                message_id=commit.message_id,
+                route_ownership=ownership,
+            )
 
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
     # 函数用途: 准备冻结上下文并执行；actual未结原样退出不收输入，其它工具/历史/显示沿原结果。
@@ -3805,6 +3804,8 @@ class _BackgroundSchedulerTickMixin:
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake lease reclaim scan failed", exc_info=True)
 
+    # LLM: Count0沿原索引认领/lease/退避，单行与MP W共用整行claim CAS；旧消费者不能删/退避新重排字条，正常行为和其它准备保持。
+    # 函数用途: 消费当前owner到期字条，发布原会话Wake或结算准确输入期限。
     def _consume_due_wake_queue(self, *, now: float) -> None:
         """热层: 到期字条 → 核档案 → 唤醒/结算。
 
@@ -3825,49 +3826,17 @@ class _BackgroundSchedulerTickMixin:
                 if not task_id or not wake_id:
                     continue
                 try:
-                    if wake.get('kind') == 'task_input_deadline':
-                        from .input_dependencies import (
-                            _schedule_input_deadline,
-                            reconcile_input_dependencies,
-                        )
-                        reconcile_input_dependencies(agent, task_id=task_id, now=now, schedule=False)
-                        repo.complete_wake(wake_id)
-                        _schedule_input_deadline(agent, task_id)
-                        continue
-                    thread = self.store.tasks.thread_for(task_id)
-                    if thread is None:
-                        # 档案没了(任务已终结/未挂线程) → 清字条, 不唤醒
-                        repo.complete_wake(wake_id)
-                        continue
-                    link_status = self._task_link_status(thread.thread_id, task_id)
-                    if link_status in {"terminal", "missing"}:
-                        # DESIGN_LEDGER 铁律: 排队的定时/生命周期 wake 在任务
-                        # 终态后直接作废, 不能复活任务。
-                        repo.complete_wake(wake_id)
-                        continue
-                    self.store.wakes.raise_signal(
-                        {
-                            "thread_id": thread.thread_id,
-                            "urgency": "normal",
-                            "reason": "wake_queue_due",
-                            "root_task_id": task_id,
-                            "source_agent_id": "wake-queue",
-                            "summary": task_id,
-                            "dedupe_key": f"wake-queue:{task_id}",
-                        }
-                    )
-                    repo.complete_wake(wake_id)
+                    from .input_dependencies import input_dependency_access
+                    from .runtime_wake import consume_runtime_wake
+
+                    consume_runtime_wake(input_dependency_access(agent),wake,now=now,
+                        complete=lambda:repo.settle_runtime_wake(wake),task_link_status=self._task_link_status)
                 except Exception:
                     _HEARTBEAT_LOGGER.warning(
                         "wake queue consume failed task=%s", task_id, exc_info=True
                     )
                     # WK-INT: 失败不丢 wake——回 pending 5 秒后重试
-                    if callable(getattr(repo, "release_wake", None)):
-                        repo.release_wake(
-                            wake_id,
-                            retry_after=float(now) + 5.0,
-                            last_error="consume_failed",
-                        )
+                    repo.settle_runtime_wake(wake, retry_after=float(now) + 5.0)
         except Exception:
             _HEARTBEAT_LOGGER.warning("wake queue consume scan failed", exc_info=True)
 
@@ -4304,7 +4273,7 @@ def _quota_wake_report_after_error(
 
 
 # LLM: 本地缺模型保留原 wake/Goal，由 Gateway 配置依赖退避；原错误分类后才调用目标组件，显式恢复语义不变。
-# 函数用途: 关闭或释放失败的调度 claim；不能把暂缺模型配置误作任务已受阻并吃掉恢复事件。
+# 函数用途: 已外发补账失败保留原冻结wake并释放claim，其余关闭或释放失败的调度claim；不能把暂缺模型配置误作任务已受阻并吃掉恢复事件。
 def _handle_nonquota_wake_error(
     scheduler: BackgroundMainAgentScheduler,
     signal: WakeSignal,
@@ -4315,6 +4284,13 @@ def _handle_nonquota_wake_error(
 ) -> None:
     observed_at = time.time()
     if is_model_configuration_unavailable(error):
+        if claim is not None:
+            scheduler.scheduler_service.release(claim, now=observed_at)
+        return
+    pending = scheduler.store.wakes.pending_one(signal.wake_signal_id)
+    cached = cached_owner_delivery(pending) if pending is not None else None
+    if cached is not None and frozen_owner_delivery(cached).external_sent:
+        # 外发已发生、canonical未提交时保原wake；下一片只补账，不把业务失败关闭吞掉冻结回执。
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=observed_at)
         return

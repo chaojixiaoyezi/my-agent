@@ -214,9 +214,12 @@ def test_original_start_callers_block_new_identity_unknown_before_business_effec
     monkeypatch.setattr(control, 'write_pid_record', forbidden)
     monkeypatch.setattr(coordinated, 'publish_coordinated_state', forbidden)
     if caller == 'start':
+        config_path = tmp_path / 'gateway-start.yaml'
+        config_path.write_text('model_backend: echo\ngateway_worker_process_count: 0\n'
+                               + f'my_agent_home: {tmp_path / "config-home"}\n', encoding='utf-8')
         monkeypatch.setattr(gateway, 'make_agent', lambda _args: SimpleNamespace())
         monkeypatch.setattr(gateway, 'gateway_paths', lambda _agent: paths)
-        invoke = partial(gateway.cmd_gateway_start, SimpleNamespace(force=False))
+        invoke = partial(gateway.cmd_gateway_start, SimpleNamespace(config=str(config_path), force=False))
     elif caller == 'count0_setup':
         invoke = partial(gateway._cmd_gateway_run_setup, SimpleNamespace(), paths)
     else:

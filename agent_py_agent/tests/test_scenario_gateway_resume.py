@@ -3,6 +3,7 @@ from __future__ import annotations
 """scenario-test gateway resume regressions."""
 
 import os
+import socket
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,9 @@ from agent_py_agent.cli.scenario_cases.real_model_recovery_case import (
 )
 
 
-def _write_echo_config(tmp_path: Path) -> Path:
+# LLM: 默认0保其它离线场景原配置；真实Gateway ask场景显式给本机临时端口，不替换HTTP运输或权限门。
+# 函数用途: 写隔离echo输入配置，调用方决定是否需要正式本地Gateway监听。
+def _write_echo_config(tmp_path: Path, *, gateway_port: int = 0) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "workspace"\n'
@@ -26,7 +29,7 @@ def _write_echo_config(tmp_path: Path) -> Path:
         
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
-        "gateway_port: 0\n"
+        f"gateway_port: {gateway_port}\n"
         'memory_path: ".my_agent/memory.jsonl"\n'
         'local_store_path: ".my_agent/local_store/local.db"\n'
         'local_store_files_dir: ".my_agent/local_store/files"\n'
@@ -95,11 +98,15 @@ def _run_offline_scenario_case(tmp_path: Path, capsys, case: str) -> str:
 def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, capsys):
     """The scenario case should prove real gateway ask facts can be resumed across days."""
 
+    # 该场景用正式认证HTTP ask；先选本机可用端口，仅写入此次临时配置。
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        gateway_port = listener.getsockname()[1]
     parser = build_parser()
     args = parser.parse_args(
         [
             "--config",
-            str(_write_echo_config(tmp_path)),
+            str(_write_echo_config(tmp_path, gateway_port=gateway_port)),
             "scenario-test",
             "--case",
             "gateway-cross-day-resume",

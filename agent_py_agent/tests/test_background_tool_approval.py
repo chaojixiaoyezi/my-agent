@@ -266,7 +266,8 @@ def test_main_session_approval_cannot_cross_claim_or_cancellation(background):
     ctx.token.cancelled = False
     ctx.store.claims.finish({"thread_id": ctx.thread.thread_id, "claim_id": ctx.claim["claim_id"],
                             "task_id": ctx.task_id, "status": "completed"})
-    ctx.store.claims.acquire({"thread_id": ctx.thread.thread_id, "task_id": ctx.task_id, "reason": "thread_goal_continue"})
+    ctx.claim = ctx.store.claims.acquire({"thread_id": ctx.thread.thread_id, "task_id": ctx.task_id, "reason": "thread_goal_continue"})
+    _bind_background_authority(ctx)
     ctx.response = {}
     _pending_request(ctx)
     assert ctx.response == {}

@@ -1,3 +1,4 @@
+# LLM: 普通输入的auto/queue意图仅选择原活跃路由或排队；认证、C准备及内容摘要共原入口。
 # LLM: /ask与/control合法控制共用唯一领域分派，模型元数据/管理/普通远端各守原HTTP来源；正文各取原词法权威，Count0及G1拒绝保持。
 # LLM: HTTP handlers preserve authenticated owner/thread boundaries and raw HTTPMessage header copies before identity checks;
 # process stream identity affects only display cursors, never model requests or authorization.
@@ -100,6 +101,7 @@ from .input_delivery_service import (
     read_gateway_input_receipt,
     reconcile_gateway_input_request,
 )
+from .input_identity import http_input_identity
 from .io import gateway_request_counts, write_json_file_atomic
 from .loop_health import loop_health
 from .multiprocess_global_write import GlobalWriteError
@@ -734,8 +736,8 @@ def _payload_load_error(path, exc: BaseException, context: str) -> dict[str, Any
     return report
 
 
-# LLM: main认证/HostActor/media/完整摘要与receipt-first保持；合法/ask控制接共用C元数据/管理/远端分派，body.command不得覆盖goal/prompt，Count0不借C权限。
-# 函数用途: 一次读取消息或命令；控制按原词法进入正式分派，普通任务仍先保存宿主事实并展示可恢复等待，非法命令不成为业务输入。
+# LLM: 原认证/HostActor/media/receipt-first不变；delivery_intent只选原auto/queue分派，坏值零准备，queue两Count禁活动追加且纳入digest。任务只由原goal/prompt解析，客户端system_task不授信。
+# 函数用途: 接受一次原消息或命令，经宿主准备冻结owner后提交；明确新排队不误投已有回合，未指定仍沿原auto语义。
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     if require_trusted_source(handler):
         return  # 不可信来源(远程无 token)拒绝派工:已发 403(回环本机/单机放行,渠道用户经适配器可提交)
@@ -745,6 +747,10 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         handler._send_json(400, {"error": f"invalid JSON: {exc}"})
         return
     body = dict(body)
+    delivery_intent = body.get("delivery_intent", "auto")
+    if not isinstance(delivery_intent, str) or delivery_intent not in {"auto", "queue"}:
+        handler._send_json(400, {"error": "delivery_intent必须是auto或queue。"})
+        return
     body.pop("system_task", None)
     kind = body.get("kind", "ask")
     if kind == "session_lifecycle":
@@ -818,7 +824,7 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
                 channel=channel,
                 request_id=request_id,
                 client_input_digest=client_input_digest,
-                allow_active_turn=True,
+                allow_active_turn=delivery_intent != "queue",
             )
             return
     else:
@@ -2209,22 +2215,7 @@ def _ask_body_has_execution_options(body: dict[str, Any]) -> bool:
     )
 
 
-# LLM: 普通HTTP与正count显式steer共用这一个纯身份公式；认证scope四字段决定原ID，正文只进另一个digest，不创建receipt/owner或授权。
-# 函数用途: 生成稳定普通输入ID及同一规范身份数据，保持既有HTTP编码和值不变。
-def http_input_identity(*, user_id: str, channel: str, conversation_id: str, message_id: str):
-    if not str(message_id or '').strip():
-        return '', {}
-    identity = {
-        "user_id": str(user_id or "").strip(),
-        "channel": str(channel or "").strip(),
-        "conversation_id": str(conversation_id or "").strip(),
-        "message_id": str(message_id or "").strip(),
-    }
-    identity_json = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "gwreq-msg-" + hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:32], identity
-
-
-# LLM: 身份公式只调用http_input_identity；当前digest内容与Count0返回不变。
+# LLM: 身份公式只调用唯一http_input_identity；queue进入内容摘要防同ID切意图，省略/auto保持原摘要字节和重放合同。
 # LLM: Stable request identity uses authenticated scope plus the opaque client message id. The
 # separate input digest includes canonical content, so reusing that id for other input fails closed.
 # 函数用途: 为可重试普通消息生成固定 Gateway 请求 ID 和服务端计算的内容指纹。
@@ -2256,6 +2247,9 @@ def _http_idempotent_request_identity(
         "workspace": body.get("workspace") if isinstance(body.get("workspace"), dict) else {},
         "execution_options": GatewayAskExecutionOptions.from_payload(body).to_payload(),
     }
+    # 省略/auto保原digest字节；显式queue绑定同ID语义，重放不能切换为活动插话。
+    if body.get("delivery_intent", "auto") != "auto":
+        canonical_input["delivery_intent"] = body["delivery_intent"]
     input_json = json.dumps(
         canonical_input,
         ensure_ascii=False,

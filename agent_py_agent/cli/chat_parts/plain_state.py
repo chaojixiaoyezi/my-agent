@@ -1,3 +1,4 @@
+# LLM: job原始输入只作运输事实，typed任务与原输入必须一致；无新任务模式/owner权威。
 # LLM: 本模块集中定义 plain chat 的共享 DTO、任务对象和有界历史 helper；TUI 复用 ChatJob 时不得另造不兼容任务协议。
 # 模块用途: 保存普通终端聊天所需的参数束、队列任务、历史常量和小型状态辅助函数。
 
@@ -154,6 +155,7 @@ def resume_context_override(args) -> str | None:
 
 # LLM: ChatJob 是 plain/TUI worker 队列中的唯一任务对象；user 是模型正文，display_text 只保存用户原始输入用于队列编辑投影。
 # 类用途: 携带一次待执行聊天输入、注入、附件 refs、请求身份和结构化系统任务。
+# LLM: original_prompt是本次原用户输入运输事实，不授任务状态或owner；编辑重新建job，显示摘要绝不替代原命令。
 class ChatJob:
 
     __slots__ = (
@@ -163,6 +165,7 @@ class ChatJob:
         "prompt_files",
         "request_id",
         "system_task",
+        "original_prompt",
         "display_text",
         "gateway_request_id",
         "client_message_id",
@@ -174,7 +177,7 @@ class ChatJob:
         "input_media",
     )
 
-    # LLM: display_text 缺省回落到 user，只影响可编辑队列显示；request_id/system_task 仍是执行与控制的机器事实。
+    # LLM: display_text只显示；original_prompt保slash解析前输入而不授状态或权限，HTTP宿主仍重解析；request_id/system_task沿原执行合同。
     # 函数用途: 创建一条可由 plain 或 TUI worker 串行消费的聊天任务，冻结附件 refs。
     def __init__(
         self,
@@ -185,6 +188,7 @@ class ChatJob:
         prompt_files: list[str],
         request_id: str,
         system_task: dict[str, object] | None = None,
+        original_prompt: str | None = None,
         display_text: str = "",
         gateway_request_id: str = "",
         client_message_id: str = "",
@@ -201,6 +205,7 @@ class ChatJob:
         self.prompt_files = prompt_files
         self.request_id = request_id
         self.system_task = dict(system_task or {})
+        self.original_prompt = original_prompt
         self.display_text = str(display_text or user)
         self.gateway_request_id = str(gateway_request_id or "")
         self.client_message_id = str(client_message_id or "")

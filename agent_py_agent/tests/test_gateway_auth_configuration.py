@@ -87,14 +87,21 @@ def test_explicit_no_auth_single_local_preserves_original_boundary(tmp_path):
     dict(auth_enabled=True, gateway_per_user_owner_scoping=False, qq_app_id='SYNTHETIC_APP')])
 def test_cli_rejects_unsafe_auth_configuration_before_recovery_or_threads(tmp_path, monkeypatch, capsys, values):
     agent = _agent(tmp_path, **values)
+    config_path = tmp_path / 'unsafe-cli.yaml'
+    config_path.write_text(
+        'model_backend: echo\nenable_plugins: false\nenable_subagents: false\ngateway_worker_process_count: 0\n'
+        + f'my_agent_home: {tmp_path / "home"}\n'
+        + ''.join(f'{key}: {str(value).lower() if isinstance(value, bool) else value}\n' for key, value in values.items()),
+        encoding='utf-8',
+    )
     monkeypatch.setattr(gateway_process, 'make_agent', lambda _: agent)
     monkeypatch.setattr(gateway_process, 'mark_hosting_gateway_process', lambda: None)
-    monkeypatch.setattr(gateway_process, 'wait_for_predecessor_exit', lambda _: None)
+    monkeypatch.setattr(gateway_process, 'wait_for_predecessor_exit', lambda _: True)
     def must_not_run(*_):
         pytest.fail('配置不安全时不允许启动恢复或线程')
     monkeypatch.setattr(gateway_process, '_cmd_gateway_run_setup', must_not_run)
     monkeypatch.setattr(gateway_process, '_cmd_gateway_run_threads', must_not_run)
-    assert gateway_process.cmd_gateway_run(SimpleNamespace(config='', after_pid=0)) == 2
+    assert gateway_process.cmd_gateway_run(SimpleNamespace(config=str(config_path), after_pid=0)) == 2
     assert 'AUTH_CONFIGURATION_UNSAFE' in capsys.readouterr().err
     assert not (agent.home_paths.root/'secrets/gateway-local-client-token').exists()
 

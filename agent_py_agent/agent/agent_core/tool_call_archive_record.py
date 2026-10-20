@@ -823,6 +823,8 @@ def _compact_tool_execution(value: object) -> dict[str, object]:
     return compact
 
 
+# LLM: 原发送回执只带有界安全身份，不读正文猜槽位；来源绑定留给finalizer与canonical操作账核验。
+# 函数用途: 保留原成功投递内容、附件及真实回复来源，供本回合通知去重。
 def _compact_delivery_evidence(value: object) -> dict[str, object]:
     """Keep only the typed current-owner delivery facts needed by finalization."""
     if not isinstance(value, dict):
@@ -840,6 +842,12 @@ def _compact_delivery_evidence(value: object) -> dict[str, object]:
         "receipt_id": str(value.get("receipt_id") or ""),
         "deduplicated": value.get("deduplicated") is True,
     }
+    binding = value.get("reply_binding")
+    fields = ('owner_id', 'owner_home', 'request_id', 'run_id', 'task_id', 'attempt_id',
+              'thread_id', 'source_thread_id', 'entry_request_id', 'conversation_id', 'actor_id', 'channel', 'target')
+    if isinstance(binding, dict) and set(binding) == set(fields) and all(
+            isinstance(binding[key], str) and binding[key] for key in fields):
+        evidence['reply_binding'] = dict(binding)
     attachments = value.get("attachments")
     if isinstance(attachments, list):
         evidence["attachments"] = [

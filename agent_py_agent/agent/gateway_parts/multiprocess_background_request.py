@@ -1,6 +1,7 @@
+# LLM: curator冻结可接C显式时间配置作资格筛选，ref/schema/读取默认语义不变，配置不成为运输授权。
 # LLM: 后台运输原ref/摘要与同步末门；长读在门外，原输入T先取，生产C/lease/Root只包短写；P3/P5唯一，callback不成新许可。
 # 原learning FIFO与唯一registry维护共用原来源/短写门；mtime仅CAS，维护不消费新FIFO/调用模型或确认候选。
-# 模块用途: 只读冻结唤醒和策展来源，按原输入幂等合同提交后台请求；源正文从不复制成模型prompt。
+# 模块用途: 只读冻结原文件或RuntimeDB行来源，按原输入幂等合同提交后台请求；不复制正文作模型prompt。
 from __future__ import annotations
 
 import hashlib
@@ -58,7 +59,7 @@ def source_owner(value):
     return owner
 
 
-# LLM: refs限定既有owner canonical源位置；不接受绝对路径、点段、别名或任意文件作后台权限事实。
+# LLM: refs限定既有owner canonical文件、原ProcessSession或runtime.db行；DB摘要只绑定该行，不接受任意路径、文件hash或模型字段授后台权。
 # 函数用途: 校验路径形状与源引用的精确字段。
 def validate_source_ref(value):
     if type(value) is not dict or set(value) != _FIELDS or value["schema_version"] != _SCHEMA:
@@ -75,6 +76,14 @@ def validate_source_ref(value):
     parts = Path(value["source_ref"]).parts
     if not parts or Path(value["source_ref"]).is_absolute() or Path(value["source_ref"]).as_posix() != value["source_ref"] or any(p in {".", "..", ""} for p in parts):
         raise ValueError("background_source_path_invalid")
+    if value['kind'] == 'process_completion':
+        from .process_completion_source import validate_process_completion_ref
+        validate_process_completion_ref(value)
+        return value
+    if value['kind'] == 'runtime_wake':
+        from .runtime_wake_source import validate_runtime_wake_ref
+        validate_runtime_wake_ref(value)
+        return value
     if value["kind"] == "learning":
         _validate_learning_ref(value, parts)
         return value
@@ -156,10 +165,16 @@ def _validate_wake_ref(value, parts):
         raise ValueError("background_source_path_invalid")
 
 
-# LLM: C/W读取共用逐段no-follow合同；registry同fd核完整字节和mtime，缺失/损坏/漂移均拒绝，不创建owner或修复原状态。
+# LLM: 文件/ProcessSession沿原no-follow合同；runtime_wake只读原owner DB整行摘要，来源漂移拒旧运输，不能用DB文件变化否定别的行。
 # 函数用途: 重读并验证一份精确原来源，返回业务层现存载荷。
 def read_source(home_root, ref):
     validate_source_ref(ref)
+    if ref['kind'] == 'process_completion':
+        from .process_completion_source import read_process_completion_source
+        return read_process_completion_source(home_root, ref)
+    if ref['kind'] == 'runtime_wake':
+        from .runtime_wake_source import read_runtime_wake_source
+        return read_runtime_wake_source(home_root, ref)
     owner_home = _owner_home_dir(Path(home_root), source_owner(ref["owner"]))
     if ref["kind"] == "learning" and ref["source_ref"] == "data/skill_learning/registry.json":
         from .multiprocess_background_sources import learning_registry_snapshot
@@ -270,9 +285,9 @@ def _validate_learning_payload(ref, value):
             or value.get("request_key") != ref["source_id"]):
         raise ValueError("background_source_identity_changed")
 
-# LLM: 仅可信C从已发现owner原文件调用；registry用同fd完整SHA/mtime，随后精确复核，不取不完整数据或伪造FIFO。
+# LLM: C策展发现显式传原实际时间配置，freeze只是候选引用不授提交权；registry仍同fd SHA/mtime，后继提交重新核来源与资格。
 # 函数用途: 从已有wake或策展状态冻结一个只读运输引用。
-def freeze_source(home_root, owner, path, kind):
+def freeze_source(home_root, owner, path, kind, *, curator_config=None, timezone_name=""):
     source_owner(asdict(owner))
     home = _owner_home_dir(Path(home_root), owner)
     relative = Path(path).relative_to(home)
@@ -282,7 +297,7 @@ def freeze_source(home_root, owner, path, kind):
     if kind == "curator":
         from ..owner_wake_discovery import _has_pending_memory_curator_work
 
-        if not _has_pending_memory_curator_work(home):
+        if not _has_pending_memory_curator_work(home,curator_config=curator_config,timezone_name=timezone_name):
             raise ValueError("background_source_not_due")
     value = {} if raw is None or kind == "observation" else load_strict_json(raw)
     ref = {"schema_version": _SCHEMA, "kind": kind, "owner": asdict(owner),

@@ -119,14 +119,13 @@ def defer_required_action_completion(agent, context):
     return freeze_notice(agent, request, actions)
 
 
-# LLM: 每次新发送/未发送重投仍须当前原claim；RunParams只由原TaskLink/HostActor装配，不能传模型scope或恢复已结束attempt。
+# LLM: 每次新发送/未发送重投只读本栈真实通知轮并重核原claim/凭据；不重建空params或恢复已结束attempt。
 # 函数用途: 在原后台领取上下文复核凭据版本，晚到新代、撤销、跨owner与取消都不能新发通知。
 def notice_is_current(agent, request):
-    from ..agent_core.runtime_mixin import current_prompt_scope
     from ..user_space.task_credentials import credential_rejection_current
-    from .runtime import _run_params
+    from .host_notification_scope import current_notification_turn
 
-    if not notice_enabled(agent):
+    if not notice_enabled(agent) or current_notification_turn(agent, request) is None:
         return False
     notice = required_notice(agent, request)
     if notice is None:
@@ -142,9 +141,7 @@ def notice_is_current(agent, request):
     origin, channel, target = resolve_delivery(agent, thread, request, request.route_channel, request.route_target)
     if not validate_delivery_origin(agent, request, DeliveryContext(channel=channel, target=target, thread_id=origin.thread_id, task_id=request.task_id)):
         return False
-    params = _run_params(request.thread_id, request, agent, thread=thread)
-    with current_prompt_scope(agent, '', params):
-        return any(credential_rejection_current(agent, item['credential_ref'], item['generation']) for item in notice['actions'])
+    return any(credential_rejection_current(agent, item['credential_ref'], item['generation']) for item in notice['actions'])
 
 
 # LLM: 原宿主工具已退出执行scope但后台claim仍在；重新绑定的参数只由原TaskLink/HostActor生成，不从工具参数猜权限。
@@ -154,15 +151,12 @@ def freeze_tool_notice(agent, request, result):
     return freeze_request_notice(agent, request, [action]) if action is not None else False
 
 
-# LLM: actions仅来自原typed结果或已落账precheck观察；外部scope不接收，读取失败不伪造身份。
+# LLM: actions仅来自typed结果/原预检；沿原claim进入通知热身份，外层freeze→notify可复用同轮，不猜旧attempt。
 # 函数用途: 给宿主工作失败复用原后台参数复核，再冻结同一wake的通知事实。
 def freeze_request_notice(agent, request, actions):
-    from ..agent_core.runtime_mixin import current_prompt_scope
-    from .runtime import _run_params
+    from .host_notification_scope import notification_scope
 
-    thread = agent.conversation_store.threads.require(request.thread_id)
-    params = _run_params(request.thread_id, request, agent, thread=thread)
-    with current_prompt_scope(agent, '', params):
+    with notification_scope(agent, request):
         return freeze_notice(agent, request, actions)
 
 
@@ -187,35 +181,51 @@ def _undelivered_report(agent, request, reason):
         runtime_status='failed', runtime_reason='PERMISSION_BLOCKED')
 
 
-# LLM: 正文只沿原模型零工具表达或本片已有公开回复；准确来源/凭据代次先核，冻结重投仍原owner_delivery，不重跑业务。
-# 函数用途: 对首次拒绝向原用户投一次必要提醒，失败冻结，已过期或表达失败沿原终态收口。
+# LLM: 首次/恢复通知在真实热轮内完成全部freshness和末门；已有正文不采样，actual未知交原claim原样处理。
+# 函数用途: 固定原工作身份后为必要提醒进入同一宿主通知阶段，再调用原冻结投递流程。
 def deliver_required_notice(runtime, request, execution=None):
+    from .host_notification_scope import notification_scope
+
+
+    identity = getattr(execution, 'execution_identity', None) or {}
+    with notification_scope(runtime.agent, request):
+        return _deliver_required_notice(runtime, request, execution, execution_identity=identity)
+
+
+# LLM: 原同槽工具已提交则仅补canonical；其它正文仍沿原模型表达，来源/代次先核，冻结重投不重跑业务。
+# 函数用途: 对首次拒绝向原用户投一次必要提醒，已发送则完整保留正文/附件/引用仅补账，失败冻结，已过期或表达失败沿原终态收口。
+def _deliver_required_notice(runtime, request, execution=None, *, execution_identity=None):
     from dataclasses import replace
 
+    from ..agent_core.host_turn_scope import UNSETTLED_HOST_ERRORS
     from ..agent_core.tool_only_execution import express_required_user_action
     from ..scheduler.execution import resolve_delivery
     from .background_delivery import (
         BackgroundDeliveryDependencies,
+        FrozenOwnerDelivery,
         _background_delivery_route,
         background_delivery_idempotency_key,
         background_owner_delivery_committed,
         record_background_response,
     )
     from .channels import DeliveryContext
+    from .host_notification_scope import current_notification_turn
     from .models import BackgroundMainAgentReport
-    from .runtime import _run_params
 
     agent, store = runtime.agent, runtime.store
     if not notice_is_current(agent, request):
         return _undelivered_report(agent, request, 'required_action_superseded')
     thread = store.threads.require(request.thread_id)
     origin, channel, target = resolve_delivery(agent, thread, request, request.route_channel, request.route_target)
-    text = str(getattr(execution, 'response', '') or '')
+    committed = _committed_source_reply(agent, request, execution, origin, channel, target, execution_identity=execution_identity)
+    text = str(committed.get('content') if committed else getattr(execution, 'response', '') or '')
     receipt = getattr(execution, 'public_receipt', None)
-    if not text.strip() or (isinstance(receipt, dict) and receipt.get('notification_intent') == 'internal_only'):
-        params = _run_params(request.thread_id, request, agent, thread=thread)
+    if not committed and (not text.strip() or (isinstance(receipt, dict) and receipt.get('notification_intent') == 'internal_only')):
+        turn = current_notification_turn(agent, request)
         try:
-            response = express_required_user_action(agent, params, required_action_public_facts())
+            response = express_required_user_action(agent, turn.params, required_action_public_facts(), execution=turn)
+        except UNSETTLED_HOST_ERRORS:
+            raise
         except InterruptedError:
             raise
         except Exception:  # noqa: BLE001 - 表达失败不重跑业务、不伪造文字/送达，原失败可由原状态查询
@@ -225,10 +235,14 @@ def deliver_required_notice(runtime, request, execution=None):
         text = response.text
     context = DeliveryContext(channel=channel, target=target, thread_id=origin.thread_id,
         task_id=request.task_id, mode='proactive', idempotency_key=background_delivery_idempotency_key(request))
+    artifacts = tuple(dict(item) for item in committed.get('attachments', ()) if isinstance(item, dict)) if committed else ()
+    refs = tuple(str(ref) for ref in committed.get('evidence_refs', ()) if str(ref).strip()) if committed else ()
     commit = record_background_response(BackgroundDeliveryDependencies(agent, store, runtime.channels,
         lambda _request: store.tasks.load(request.task_id).status), request, context, text,
         public_receipt={'schema': 'background-result.v1', 'notification_intent': 'publish'},
-        deliver=True, delivery_reason='required_user_action')
+        deliver=True, delivery_reason='required_user_action', delivery_artifacts=artifacts,
+        frozen_retry=(FrozenOwnerDelivery(content=text, external_sent=True,
+            receipt_id=committed['receipt_id'], delivery_artifacts=artifacts, evidence_refs=refs) if committed else None))
     route = _background_delivery_route(runtime.channels, context)
     handled = background_owner_delivery_committed(request, target=target,
         ownership=route.ownership, canonical_record=route.canonical_record, commit=commit)
@@ -240,3 +254,15 @@ def deliver_required_notice(runtime, request, execution=None):
         wake_handled=handled, task_status=store.tasks.load(request.task_id).status,
         runtime_status='failed', runtime_reason='PERMISSION_BLOCKED')
     return replace(result, tool_call_count=getattr(execution, 'tool_call_count', 0))
+
+
+# LLM: 必要通知复用normal同一canonical/来源判据；execution_identity在新通知attempt之前读取，不能从item重建。
+# 函数用途: 选择已回原会话的实际工具回复，让必要通知只补canonical、不二次发。
+def _committed_source_reply(agent, request, execution, origin, channel, target, *, execution_identity=None):
+    from .background_delivery import committed_source_replies
+    from .channels import DeliveryContext
+
+    replies = committed_source_replies(agent, request, DeliveryContext(channel=channel, target=target,
+        thread_id=origin.thread_id, task_id=request.task_id),
+        getattr(execution, 'message_tool_deliveries', ()) or (), execution_identity=execution_identity)
+    return replies[0] if replies else None

@@ -589,3 +589,92 @@ def test_ready_wake_requires_original_typed_result_refs(refs):
             'input_provider': 'provider', 'input_status': 'ready'}}, [])
     assert json.loads(trigger.event_facts)['input_dependency']['result_available'] is False
     assert 'Synthetic-Secret-Canary' not in trigger.event_facts
+
+
+from agent_py_agent.tests.test_background_tool_approval import background
+
+_INPUT_FIXTURES = (background,)
+
+
+@pytest.mark.parametrize('provider', ['anthropic', 'openai'])
+@pytest.mark.parametrize('status', ['ready', 'expired', 'cancelled', 'revoked', 'failed'])
+def test_input_resolution_work_guidance_reaches_real_provider_payload(background, monkeypatch, provider, status):
+    import copy
+    import time
+
+    from agent_py_agent.agent.agent_core.runtime.loop_models import PreparedRuntimeContext
+    from agent_py_agent.agent.agent_core.runtime.loop_support import _runtime_loop_params
+    from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.message_adapter import project_native_history_messages
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+    from agent_py_agent.agent.conversation.input_dependencies import (
+        arm_input_dependency,
+        create_input_dependency,
+        resolve_input_dependency,
+    )
+    from agent_py_agent.agent.conversation.tool_approval_scope import tool_approval_scope
+    from agent_py_agent.tests.test_im_dispatch_ack_presentation import _message_texts
+
+    agent = background.agent
+    objective = '请申请一次安全输入界面，先等我填写。'
+    background.store.messages.append({'thread_id': background.thread.thread_id, 'role': 'user',
+        'content': objective, 'metadata': {'conversation_request_id': background.task_id}})
+    scope = tool_approval_scope(agent, background.task_id)
+    row = create_input_dependency(agent, scope, input_id='opaque-once-input', provider='generic-provider',
+                                  expires_at=time.time()+180)
+    arm_input_dependency(agent, row['input_id'])
+    resolve_input_dependency(agent, row['input_id'], status=status,
+                             result_refs=('opaque-result',) if status == 'ready' else ())
+    [signal] = background.store.wakes.pending(limit=0)
+    assert signal.reason == 'task_input_resolved'
+    request = BackgroundRunRequest(thread_id=background.thread.thread_id, task_id=background.task_id,
+                                   reason=signal.reason, wake_signal=signal.to_dict())
+    user_prompt, injections, trigger = _background_model_inputs(request, task_objective=objective,
+                                                              wake_prompt='原结构化输入结算')
+    params = _run_params(background.thread.thread_id, request, agent, thread=background.thread)
+    params.turn_trigger = trigger  # 与run_background_turn_with_compact原赋值点一致，仅运输本片trigger。
+    allowed = list(params.allowed_tools or [])
+    prepared = PreparedRuntimeContext(memories=[], runtime_injections=injections, routed_context=None,
+                                      resume_context_result=None, resume_context_section='')
+    loop_params = _runtime_loop_params(user_prompt, prepared, params)
+    assert loop_params.turn_trigger is trigger and params.turn_trigger is trigger
+    ir = _native_initial_tool_ir_history(loop_params, carried_handoff='', carried_user_inputs=[])
+    assert len(ir) == 1 and isinstance(ir[0], RuntimeFactsTurn)
+    assert ir[0].source == HOST_EVENT_FACTS_SOURCE
+    facts = json.loads(trigger.event_facts)
+    assert facts['input_dependency'] == {'input_id': row['input_id'], 'provider': 'generic-provider',
+        'status': status, 'result_available': status == 'ready', 'user_input_required': False}
+    assert not any(isinstance(item, UserTurn) for item in ir)
+    rendered = []
+    for native in [False, True]:
+        prompt = render_prepared_prompt(agent.prompts.prepare_render_input(PromptBuildRequest(
+            user_prompt=user_prompt, memories=[], tools=ToolSections(native_tool_use=native), turn_trigger=trigger)))
+        assert ir[0].text in prompt and '# User Task\n' + objective not in prompt
+        rendered.append(prompt)
+    options = BackendOptions(api_base='https://synthetic.invalid/v1', api_key='synthetic-only',
+                             model_name='synthetic-model', max_tokens=128, stream_enabled=False)
+    backend = AnthropicCompatibleBackend(options) if provider == 'anthropic' else OpenAICompatibleBackend(options)
+    captured = []
+
+    # LLM: 只替换provider HTTP叶，保原generate/serializer，不发网络、执行工具或预写用户最终回复。
+    # 函数用途: 捕获合成payload以验证工作轮事实和软指导实际进入两种协议。
+    def request_json(path, payload, headers):
+        del path, headers
+        captured.append(copy.deepcopy(payload))
+        if provider == 'anthropic':
+            return {'content': [{'type': 'text', 'text': '已了解当前输入状态。'}], 'stop_reason': 'end_turn',
+                    'usage': {'input_tokens': 1, 'output_tokens': 1}}
+        return {'choices': [{'message': {'content': '已了解当前输入状态。'}, 'finish_reason': 'stop'}],
+                'usage': {'prompt_tokens': 1, 'completion_tokens': 1}}
+    monkeypatch.setattr(backend, 'request_json', request_json)
+    response = backend.generate(rendered[1], messages=project_native_history_messages(ir))
+    assert len(captured) == 1 and not response.tool_use_blocks
+    text = '\n'.join(_message_texts(captured[0]['messages']))
+    assert ir[0].text in text
+    assert '这是已登记输入的状态结算，不是新的用户请求' in text
+    assert '已经执行过的一次输入申请，不是再次申请或自动续期的授权' in text
+    assert 'expired是到期，不等于cancelled' in text
+    assert '只有ready且result_available=true才表示已有可用输入结果' in text
+    assert list(params.allowed_tools or []) == allowed
+    assert len(background.store.wakes.pending(limit=0)) == 1

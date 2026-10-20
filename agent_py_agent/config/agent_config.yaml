@@ -488,6 +488,13 @@ model_speed_profile_path: ""
 # - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
 # - 留空时固定落在 owner workspace/runtime/services/gateway；多个不同 cwd 的 TUI 共用这一处。
 # - 显式绝对路径原样使用；显式相对路径以 owner workspace 解析，不以启动 TUI 的 cwd 解析。
+# Gateway唯一宿主拓扑配置。0保持原单进程；正整数启用独立工作进程，不是请求并发数。
+# 只能在宿主配置文件修改；保存后正常重启生效。旧home切换必须具备迁移事实，不能以新home验收替代。
+# 旧Count0需用支持版保持0正常运行/停止一次，留下本次身份与责任来源，再改正数启动。
+# 后继只接受准确旧实例已死及稳定已结责任；缺birth/未知native/混MP应沿原入口恢复，不能删标记或补闭封。
+# MP→0与MP改数量仍不支持；配置保存不等于拓扑已经生效。
+gateway_worker_process_count: 0
+# Gateway运行目录；留空使用当前owner规范工作区，显式相对路径也按该工作区解析。
 gateway_workspace: ""
 # 停止后台服务时最多等它多久自己退出，超时就强制结束。
 # 任务都跑得比较久、希望停止时更温和，可以调大。

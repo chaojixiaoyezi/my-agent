@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1041,
+  "count": 1039,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2434,6 +2434,14 @@
       "unit": "秒",
       "category": "上限预算",
       "description": "后台进度失败退避封顶 3600 秒（1 小时）：防止等待无限拉长。"
+    },
+    {
+      "name": "SHUTDOWN_WAIT_SECONDS",
+      "file": "agent_py_agent/agent/conversation/background_shutdown.py",
+      "value": 2.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "停止原已提交后台片的有界等待秒数；超时保留未确认责任，不取消长期任务或宣称排空。"
     },
     {
       "name": "BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS",
@@ -5066,30 +5074,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "单 owner 默认最多并行的代理数；防止一个 owner 占满全部线程资源。"
-    },
-    {
-      "name": "_CURATOR_FAILURE_BACKOFF_SECONDS",
-      "file": "agent_py_agent/agent/owner_wake_discovery.py",
-      "value": 300,
-      "unit": "秒",
-      "category": "其它",
-      "description": "分页种回登记表占工位(真机:占满 64 容量池,真活 user-a 被逐出饿死)。"
-    },
-    {
-      "name": "_CURATOR_INTERVAL_SECONDS",
-      "file": "agent_py_agent/agent/owner_wake_discovery.py",
-      "value": 10800,
-      "unit": "秒",
-      "category": "其它",
-      "description": "发现层不引配置避免循环依赖,只保证「到期」语义一致(真到期,非每天必挂/对话即挂)。"
-    },
-    {
-      "name": "_DAILY_FINALIZE_HOUR",
-      "file": "agent_py_agent/agent/owner_wake_discovery.py",
-      "value": 23,
-      "unit": "",
-      "category": "其它",
-      "description": "每日定稿触发的小时点（24 小时制）；到点把当日 wake 事实收口（无物理单位）。"
     },
     {
       "name": "_EXEC_LOCK_REPROBE_SECONDS",

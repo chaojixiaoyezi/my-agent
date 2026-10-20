@@ -560,16 +560,18 @@ def _write_curator_state(
     )
 
 
-class _FrozenUTC:
-    """固定 UTC 时刻的 datetime 替身:测 daily「白天不挂 / 23 点后挂」不依赖真实跑测时刻。"""
+# LLM: 仅这四个UTC资格场景使用同一instant，time与实际datetime同源；显式传原timezone参数，不依赖或修改宿主TZ。
+# 函数用途: 冻结策展发现时钟，并将原UTC测试场景运输给新增的时间配置入口。
+def _freeze_curator_utc(monkeypatch, discovery, iso_ts):
+    instant = datetime.fromisoformat(iso_ts)
+    monkeypatch.setattr(discovery.time, "time", instant.timestamp)
+    pending = discovery._has_pending_memory_curator_work
 
-    fromisoformat = staticmethod(datetime.fromisoformat)  # 发现层解析 state 时间戳也用 datetime
-
-    def __init__(self, iso_ts: str) -> None:
-        self._dt = datetime.fromisoformat(iso_ts)
-
-    def now(self, tz=None) -> datetime:  # noqa: ARG002 - 测试替身,忽略时区参数
-        return self._dt
+    # LLM: 只替测试中策展predicate的timezone输入，其余参数与完整原函数保持，不模拟资格结果或吞异常。
+    # 函数用途: 明确这四条原测试使用UTC场景，而非真实宿主时区。
+    def utc_pending(home, **kwargs):
+        return pending(home, **{**kwargs, "timezone_name": "UTC"})
+    monkeypatch.setattr(discovery, "_has_pending_memory_curator_work", utc_pending)
 
 
 def test_curator_daily_finalize_missing_does_not_hang_before_hour(monkeypatch, tmp_path) -> None:
@@ -585,7 +587,7 @@ def test_curator_daily_finalize_missing_does_not_hang_before_hour(monkeypatch, t
         home,
         last_daily_finalize_date=(datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat(),
     )
-    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC(f"{today}T14:00:00+00:00"))
+    _freeze_curator_utc(monkeypatch, owner_wake_discovery, f"{today}T14:00:00+00:00")
 
     assert discover_wake_pending_owners(owners) == []
 
@@ -600,7 +602,7 @@ def test_curator_daily_finalize_due_after_hour(monkeypatch, tmp_path) -> None:
         home,
         last_daily_finalize_date=(datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat(),
     )
-    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC(f"{today}T23:30:00+00:00"))
+    _freeze_curator_utc(monkeypatch, owner_wake_discovery, f"{today}T23:30:00+00:00")
 
     found = discover_wake_pending_owners(owners)
     assert [o.owner_id for o in found] == ["u-daily"]
@@ -619,7 +621,7 @@ def test_curator_pending_review_candidate_discovered(monkeypatch, tmp_path) -> N
     """保留原node义务：候选only不是新可执行工作，不唤醒owner或改写候选/state。"""
     from agent_py_agent.agent import owner_wake_discovery
 
-    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
+    _freeze_curator_utc(monkeypatch, owner_wake_discovery, "2026-08-08T14:00:00+00:00")
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "users" / "u-cand"
     _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat())
@@ -643,7 +645,7 @@ def test_candidate_review_status_ignored(monkeypatch, tmp_path) -> None:
     """非 pending_review(如 user_rejected)不算策展活;model_inferred 来源不算(发现层只认结构化)。"""
     from agent_py_agent.agent import owner_wake_discovery
 
-    monkeypatch.setattr(owner_wake_discovery, "datetime", _FrozenUTC("2026-08-08T14:00:00+00:00"))
+    _freeze_curator_utc(monkeypatch, owner_wake_discovery, "2026-08-08T14:00:00+00:00")
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "users" / "u-cand-skip"
     _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat())

@@ -372,3 +372,65 @@ def test_unrelated_outer_exception_cannot_hide_this_snapshot_close_error(tmp_pat
             fs.read_bytes_beneath(tmp_path, ('leaf',), snapshot_retries=2)
     assert caught.value is failures[0]
     assert not active and all(row['closed'] == 1 for row in records)
+
+
+@pytest.mark.parametrize('window', ['before_open', 'after_read'])
+@pytest.mark.parametrize('change', ['size', 'mtime', 'ctime'])
+def test_snapshot_same_inode_metadata_change_is_hard_refusal_without_retry(tmp_path, monkeypatch, window, change):
+    supported = fs._supports_dir_fd()
+    monkeypatch.setattr(fs, '_supports_dir_fd', lambda: supported)
+    leaf = tmp_path / 'leaf'
+    leaf.write_bytes(b'old')
+    initial = leaf.stat()
+    attempts, reads = [], []
+    original_open, original_read = os.open, fs._read_descriptor
+
+    def mutate():
+        if change == 'size':
+            leaf.write_bytes(b'changed-size')
+        elif change == 'mtime':
+            os.utime(leaf, ns=(initial.st_atime_ns, initial.st_mtime_ns + 1000000000))
+        else:
+            leaf.chmod(0o640 if initial.st_mode & 0o777 != 0o640 else 0o600)
+        assert leaf.stat().st_ino == initial.st_ino
+
+    def opening(name, flags, mode=0o777, **kwargs):
+        if name == 'leaf' and flags & os.O_ACCMODE == os.O_RDONLY:
+            attempts.append(name)
+            if window == 'before_open' and len(attempts) == 1:
+                mutate()
+        return original_open(name, flags, mode, **kwargs)
+
+    def reading(fd, limit):
+        content = original_read(fd, limit)
+        reads.append(content)
+        if window == 'after_read' and len(reads) == 1:
+            mutate()
+        return content
+
+    monkeypatch.setattr(os, 'open', opening)
+    monkeypatch.setattr(fs, '_read_descriptor', reading)
+    with pytest.raises(fs.NoFollowPathError):
+        fs.read_bytes_beneath(tmp_path, ('leaf',), max_bytes=64, require_dir_fd=True, snapshot_retries=2)
+    assert attempts == ['leaf']
+    assert len(reads) == (0 if window == 'before_open' else 1)
+
+
+@pytest.mark.parametrize('initial_mode,new_mode', [(0o664, 0o640), (0o600, 0o644)])
+def test_snapshot_permission_change_is_refused_even_when_timestamps_are_equal(monkeypatch, initial_mode, new_mode):
+    import stat
+    from types import SimpleNamespace
+
+    before = SimpleNamespace(st_dev=1, st_ino=2, st_nlink=1, st_mode=stat.S_IFREG | initial_mode,
+                             st_size=3, st_mtime_ns=100, st_ctime_ns=100)
+    opened = SimpleNamespace(**{**vars(before), 'st_mode': stat.S_IFREG | new_mode})
+    original_stat = os.stat
+
+    def observed_stat(path, *args, **kwargs):
+        if path == 'leaf' and kwargs.get('dir_fd') == 0:
+            return opened
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs.os, 'stat', observed_stat)
+    with pytest.raises(fs.NoFollowPathError):
+        fs._snapshot_leaf_identity(0, 'leaf', before, opened)

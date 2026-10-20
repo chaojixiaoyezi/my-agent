@@ -1,0 +1,31 @@
+# Gateway后台执行片停机与真实排空
+
+## 合同
+
+Count0停止服务只关闭本进程新片接纳，不取消TaskLink、父/兄弟任务、未来输入或跨Gateway生存的独立受管进程。
+
+原后台supervisor和cleanup共用GatewayRunContext的进程内BackgroundShutdown对象。对象只保存原future、claim与worker引用/停止事实，没有持久状态、执行权、后台线程或计时任务。
+
+停止顺序：原wake stopping标记→关闭本代提交门→按同栈原claim_id的conversation-claim名字中断→原executor取消尚未开始的提交→在第一次停止采样的两秒绝对预算内等原工作finally。停止早于worker/claim登记时保留原停止事实，领取写前拒后续片。
+
+核收同时要求原future返回、准确claim由原finally结束、已发布的同task/run/attempt绑定及原attempt终态/操作结果/执行锁可读且已结。RuntimeDB查询复用原reader与终态集合，read_only+existing_only零等待；读取失败/UNKNOWN/错绑定只成为blocker，不写恢复状态或删除锁。未来pending输入本身不是活执行。
+
+模型保护Thread在出生前复用原ThreadExitObservation；原模型future返回或逻辑调用failed不能代替物理退出。当前后台片没有观察者时保持原Thread.start路径。cleanup还读取原model_call_drain_snapshot/bounded_call_drain_snapshot的真实保留责任。
+
+工作未退、claim/attempt未结或模型/清理仍保留时，cleanup.drain_complete=false并提供background_blockers；原服务收尾据此返回incomplete，不能只凭heartbeat/request/background三个调度循环退出签成功。不新增模型请求、自动重投、自然语言状态判断或权限变化。
+
+## 676失败与恢复边界
+
+676原Count0服务已实际退出，但其task_input_resolved后台第3次attempt仍running/有执行锁；原cleanup只等循环而写drain_complete=true，stop-v1仍诚实留下runtime_attempt_unsettled，故迁移拒绝正确。该现场和M3 529失败均保留；本修复不回写它们、不把死PID改done。
+
+后继仅沿原canonical claim/真实runner birth/操作账与显式恢复门处理；runtime-stale-attempts只覆盖无runner身份，不能用来洗本例。真正UNKNOWN副作用不得自动结算。未实施新的owner恢复入口，普通重启能否续接要按原来源实际核验。
+
+## 验证与交付
+
+新test_gateway_background_slice_shutdown.py使用真实SimpleAgent/scheduler/claim/core与fake provider：协作停止准确收本片、非协作/晚退wallworker真实incomplete、未来输入保持、另一owner及独立managed进程不误停、排队/登记竞态、UNKNOWN与锁只读拒绝。原停机账本/decision及真实并发消费者定向复验；无真实服务或模型。
+
+先源码+隔离home/Gateway/TUI/飞书真实功能验收，成功后统一严格gate/full及最终一次发行构建；包只负责依赖、pyc资源、安装升级一致性，不作为每个功能bug调试前置。远端前AGENTS严格gate仍必须。新增运行节点应在最终Mac/Linux包内普通执行，不归source-only或新增skip。
+
+参考本地固定OpenHuman core/shutdown.rs的‘停止信号后等待实际cleanup hook’模式，未拉取更新；本仓库保留自身原claim/取消/退出观察与耐久恢复合同。
+
+建议下一步：非作者核准确小片，根逐hunk整合后用新source验证正常卡/输入恢复与停止；不回填676，不与角色supervisor作者并写同叶。

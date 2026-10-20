@@ -1,3 +1,9 @@
+## 2026-10-20 后台通知共用原回复槽（源码候选，待独审及实际复验）
+
+解决问题：同一后台工作已用消息工具回原会话，普通或需用户处理的收尾仍可能再次发送。两个出口现共核原成功操作、执行信封、owner/home、执行及来源线程、发起人、渠道/目标与准确 request/run/task/attempt；失败、UNKNOWN、未执行、旧标志及其它目标不能占槽。原control关闭发布后固定末次工作身份，通知新轮不能覆盖它。审计事件继续要求原schema/资格与完整evidence_refs，正文不参与去重。
+
+已发生外发沿原FrozenOwnerDelivery/external_sent只补canonical；追加前冻结原wake整封回执，补账异常保留原wake并释放原claim，异常及原有界退避/隔离记账保留。无新队列、权限账、模型参数或配置开关。此处仅源码候选；真实飞书复验、根集成、最终严格门及发行由根另验，不把切片focused写成整体通过。
+
 closed角色核验的第三次读取已补齐原strict snapshot接线（已独审合入本地候选）：仅正count闭分支显式复用原snapshot_retries=2；默认CountNone读取kwargs、首末完整角色/P4/raw及危险路径拒绝不变。原producer在stat/open窗口原子发表的同字节回归已由原591准确1F转绿，六文件153项通过；组件结果不代真实生命周期或发行，608具体leaf/写者仍未知，详见[角色合同](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
 
 ## 2026-10-18 F3、主会话沟通与凭据表单实现边界
@@ -1195,3 +1201,13 @@ def example(...):
 决策实验晋升提示 J6（2026-10-01，已上线 step17a，main de222698b，2026-10-02）：只从新写入的 applied 回执生成提示，沿原 host_notice 队列、当轮流、canonical final
 和 IM DeliveryService 送达，不开第二条通道；原 promotion 是唯一幂等账。回执冻结规则与 promotion_id，设置撤销走 /model 本会话逐字段恢复继承。
 隔离链路、TUI renderer 与三项变异有证据，真实终端/飞书收信未验证；改动时联测晋升、host_notices 与 adapter_manager，见 TESTS 的 J6 节。
+
+
+监护CLI健康读取已在独立候选修复Agent运输：`supervisor-status`与`start-all`沿一次make_agent原对象、配置及paths核Count0/Count2，不使用占位对象或默认N。2个旧caller准确AttributeError红转绿；4个新合同与2个必要旧合同普通通过，无服务验收，待根精确集成。
+
+
+## 2026-10-20 generation 责任首读前离名窗口（独立候选）
+
+仅显式 generation 已发表责任快照中，原 strict reader 返回 `None` 时暂记该名字，继续读取其它责任并核末次完整链、设施、名称；只有缺叶确实不再列于末次名字集、且集合变化时才转原 typed 名称冲突，丢弃整轮并沿固定原 FD/首链/设施最多三轮重读。末次仍列同名、reader 自身异常、未知名称、硬路径/链/设施变化立即拒绝，不按异常文字或记录内容猜合法归档。默认 P6 和原旧 closure expected 全集合/完整 raw 门不变，不补来源、封存或执行权，不清隔离。
+
+683 公开栈只证实首读 `None` 分支；本片受控原 `archive_request` 成功终态后、首 stat 前的交错复现同分支，不反推683具体 leaf/writer，也不撤销其 P6 incomplete。新源码真实业务与正常关闭必须另验，旧失败原样保留。

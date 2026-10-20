@@ -1,3 +1,4 @@
+# LLM: bg-owner宿主停止复用准确claim中断与原job观察，共用原两秒预算；未退/未结交cleanup保持incomplete。
 # LLM: 原审批清理债务的真实异常链保同outer交原Future；普通无债错误保持原终态路径，查链不替代canonical核收。
 
 # LLM: 单 Gateway 的请求、后台会话和维护车道编排；执行权与事件保存在原队列/会话层，重试策略独立且不落盘。
@@ -25,6 +26,7 @@ from ..agent.conversation import (
     BackgroundMainAgentRuntime,
     BackgroundMainAgentScheduler,
 )
+from ..agent.conversation.background_shutdown import BackgroundShutdown
 from ..agent.core import SimpleAgent
 from ..agent.delivery import DeliveryService
 from ..agent.gateway_parts import (
@@ -874,6 +876,7 @@ class _BackgroundThreadLaneSupervisorMixin:
 
     # LLM: Candidate submission uses the already-bounded executor and never
     # changes durable source status before the worker acquires its run claim.
+    # LLM: 停机关闭同一进程内提交门；已入队但未进入的job仍由原观察入口拒绝。
     # 函数用途: 按 owner 轮询把候选会话填入剩余全局工位。
     def _submit_thread_candidates(
         self,
@@ -881,8 +884,10 @@ class _BackgroundThreadLaneSupervisorMixin:
         *,
         available: int,
     ) -> None:
+        if self._shutdown_control.stopping:
+            return
         executor = self._get_executor()
-        while available > 0 and any(rows for _key, _scheduler, rows in candidates):
+        while not self._shutdown_control.stopping and available > 0 and any(rows for _key, _scheduler, rows in candidates):
             for owner_key, scheduler, rows in candidates:
                 if available <= 0:
                     break
@@ -910,6 +915,7 @@ class _BackgroundThreadLaneSupervisorMixin:
 
     # LLM: Metrics count real conversation model lanes; durable thread claims remain
     # the final duplicate-execution fence across processes.
+    # LLM: 同一job携带本片停止观察，原claim后绑定；停止后不接新片，finally核原账而非另写终态。
     # 函数用途: 运行一条会话后台车道并更新并发指标。
     def _counted_thread_tick(
         self,
@@ -919,7 +925,11 @@ class _BackgroundThreadLaneSupervisorMixin:
     ) -> list[object]:
         background_tick_inflight(1)
         try:
-            return self._safe_thread_tick(scheduler, label, thread_id)
+            repo = getattr(getattr(scheduler.runtime.agent, "subagents", None), "runtime_db", None)
+            with self._shutdown_control.observe(repo):
+                return self._safe_thread_tick(scheduler, label, thread_id)
+        except InterruptedError:
+            return []
         finally:
             background_tick_inflight(-1)
 
@@ -937,11 +947,13 @@ class _BackgroundThreadLaneSupervisorMixin:
     # durable conversation and curator sources remain pending for restart recovery.
     # 关池之前先给本进程在途的唤醒尝试打停机标记（C6，mark_inflight_attempts_stopping 内部逐条吞掉写失败，不会让停机失败），
     # 下次 preflight 按不计数的 attempt:gateway_stopped 补记，部署重启不给在途唤醒计失败。
+    # LLM: 主会话已运行future沿准确claim中断并共用两秒绝对预算核收，未退/未结必须交cleanup为incomplete。
     # 函数用途: 停止主会话与记忆策展线程池，不删除任何持久任务或记忆游标；会给在途唤醒尝试写停机标记。
     def shutdown(self) -> None:
         from ..agent.conversation.wake_attempt_tracking import mark_inflight_attempts_stopping
 
         mark_inflight_attempts_stopping(now=time.time())
+        self._shutdown_control.stop()
         executors = (
             getattr(self, "_executor", None),
             getattr(self, "_curator_executor", None),
@@ -951,8 +963,10 @@ class _BackgroundThreadLaneSupervisorMixin:
         for executor in executors:
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
+        self._shutdown_control.wait()
 
     # LLM: 异常由 typed 退避组件隔离，不能终止 supervisor、消费事件或修改 Goal；慢流中的执行不经过此门。
+    # LLM: 仅本宿主关闭期间的typed中断不计业务失败；其它异常仍沿原退避与结构化诊断。
     # 函数用途: 安全运行一个工作片；成功清除旧冷却，失败记录原诊断并等待对应恢复条件。
     def _safe_thread_tick(
         self,
@@ -965,6 +979,8 @@ class _BackgroundThreadLaneSupervisorMixin:
             self._lane_retry.succeeded(label, thread_id)
             return result
         except Exception as exc:
+            if isinstance(exc, InterruptedError) and self._shutdown_control.stopping:
+                return []
             self._record_thread_failure(label, thread_id, exc)
             return []
 
@@ -977,9 +993,12 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
     """单 Gateway 的 owner/thread 后台调度入口，渠道交付沿原 DeliveryService。"""
 
     # LLM: 复用组合根和 owner 池；进程内执行池/退避不替代 durable claim，初始化不发模型请求。
+    # LLM: 原context的停止观察与此supervisor一次绑定，不能用新对象替换在途责任。
     # 函数用途: 接线后台会话与维护资源，并建立可随进程退出回收的调度状态。
     def __init__(self, context: GatewayRunContext) -> None:
         self._base_agent = _gateway_agent_from_context(context)
+        self._shutdown_control = getattr(context, "background_shutdown", None) or BackgroundShutdown()
+        self._shutdown_control.bind(self)
         self._channels = self._base_agent.delivery_service
         self._base_scheduler = _build_background_scheduler(self._base_agent, self._channels)
         self.poll_interval = _background_main_poll_interval()

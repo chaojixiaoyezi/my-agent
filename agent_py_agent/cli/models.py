@@ -1,3 +1,4 @@
+# LLM: background_shutdown默认对象仅运输同代原supervisor/片观察，无I/O、任务状态或执行权限。
 # LLM: CLI DTO 只表达边界输入，后台身份与展示备注分离，修改须核对解析和业务适配。
 #   可选C/control/drain引用只运输同代原对象，默认Count0；字段和config property自身不授ready、准入或执行权。
 # 模块用途: 保存命令行请求的具名字段，方便发现遗漏或错误运输。
@@ -14,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from ..agent.conversation.background_shutdown import BackgroundShutdown
 
 
 @dataclass
@@ -54,8 +57,9 @@ class GatewayStartOptions:
 
 # LLM: This immutable value follows one exact Gateway process generation from setup through
 # cleanup. Identity/start time scope stop markers; the log byte offset scopes diagnostics.
-#   内部 C 数量由调用方冻结，默认 0，不开放 CLI/用户配置；安全重启消费它拒绝未经实现的内部接班。
+#   数量由公开YAML冻结，默认0；直接private字段只供原内部QA；安全重启仍拒绝未经实现的MP接班。
 # LLM: P6可选runtime只持本代原C资源引用，None保持Count0；不从DTO字段授信，原collector核同control/lease。
+#   background_shutdown只持原进程内片观察，不成为任务状态/执行许可，cleanup必须核原future和claim。
 # 类用途: 保存一次Gateway身份、配置和可选原资源观察，避免清理丢掉实际责任。
 @dataclass(frozen=True)
 class GatewayRunContext:
@@ -69,6 +73,7 @@ class GatewayRunContext:
     coordinator_worker_count: int = 0
     control_plane: Any = None
     drain_runtime: Any = None
+    background_shutdown: BackgroundShutdown = field(default_factory=BackgroundShutdown)
 
     # LLM: 内部C独立保存配置，agent可以未获P2许可；默认单进程仍直接消费实际agent配置。
     # 函数用途: 返回本次启动的可信配置，不借假Agent填充接口。

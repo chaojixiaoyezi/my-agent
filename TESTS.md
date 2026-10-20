@@ -1,3 +1,99 @@
+## 2026-10-20 普通与必要通知共用回复槽的focused验证
+
+新增`test_required_notice_reply_slot.py`用真实SimpleAgent/Registry/Executor/归档/调度，只有模型、HTTP末端和渠道运输为合成替身。覆盖normal与required同槽正例、owner/home/请求/线程/actor/target破坏、canonical failed/unknown/未执行/信封失配、仅旧flag、原工作attempt不可替换，以及外发成功后canonical追加故障→原业务键只补账。独立复核追加normal/required纯附件整封镜像两节点，确认附件和工具原evidence_refs均进入canonical，空正文不触发重复通知。通知新轮与原工作attempt不同仍可合法镜像；原同因退避/累计预算、owner/凭据/取消不扩。
+
+旧`test_scheduler_runtime`普通正例与`test_background_main_agent_runtime`审计正例的flat receipt迁移为真实操作fixture，保留原输出断言；`test_channel_message_tool`无agent旧证据投影改为明确不能认领槽，实际工具发送及附件断言保持。候选只跑最后直接相关focused与目标文件Ruff/尺寸定位，不重跑160/1297/全仓。准确节点、JUnit、失败历史及字节清单随仓外候选交接；这些结果不代根的真实飞书、最终严格门或发行验收。
+
+## 2026-10-20 角色history负例的准确locator（646 test-only后继）
+
+S10 Linux原focused中该负例误用glob首文件，实际追加空格到当前successor-c metadata，而非旧fixture-c闭包。原tmp两份canonical名、摘要和原history_unchanged=true已保留，原1294P3F不改。测试仅显式运输原closing.scope.c_run_id，经原generation_metadata_parts定位旧代；同一空格刺激、全部原assert/deco及生产代码保持。只补原1节点与同function其它参数，不能视作全focused重跑或实际业务通过。
+
+## 2026-10-20 旧W首次当前发表定向回归（646候选）
+
+`test_gateway_closed_worker_publication.py`新增16普通运行节点：原P6完整封存→后继原guard/control/P4→原当前W心跳，在N1/N2首末角色读间的精确交错；稳定无交错；同轮symlink/hardlink/后续未知marker/C raw硬错；跨轮P4、旧history、C raw、root/workers身份替换；精确typed最多三轮、同文普通异常及子类不重读。受控物理边界不代表真实OS/native/模型通过。原C双向锁屏障及旧W全raw/当前W固定字段/默认CountNone关键节点保持。新增16必须最终两OS新包普通执行，不归source-only；682旧失败与严格P6失败不改绿。
+
+## 2026-10-20 native明确拒绝回执定向验证
+
+`test_native_commit_rejection_receipt.py`新46普通节点覆盖：原begin/short-operation可证未入与一次性_used；apply/materialize；同seq唯一负帧；默认非native异常；旧/嵌套token、错误issuer/peer/浅复制；commit已入、pin/effect后与四类原unknown对象/出处保持；auth/坏帧/重复键/FD/父出生硬拒；ACK/NACK发送失败不补第二帧；乱序回执归属及原deadline；finish/released/pending不得消债；原_reap仍传播并保留Future/claim。
+
+准确最终测试字节的三枚原反例为3F，候选新46+原ACK/dispatch/send关键3为49普通P，无skip/xfail。只使用真实原方法与fake端点/OS/同步controller，不启动服务或实际模型，不冒充真实C授权/native平台通过。原diagnostic fixture仅增加显式keyword参数承接dispatch身份，原测试函数、断言与装饰器均保持。追加运行义务须最终两平台实际执行，不扩source-only。
+
+## 2026-10-20 公开CLI首次Home初始化顺序
+
+`test_public_agent_home_initialization_order.py`使用真实`make_agent`、外部YAML、临时Home与离线echo：0002/0022/0077下Home/owners/owner根先私有创建，再经原冻结启动合同和真实W池消费；显式外置工作区保持原模式；三处内部symlink在外部目录创建前被原no-follow门拒绝；已有0775不chmod且原W父链仍拒绝。原测试断言及W实现不改，新增普通节点须两平台实际运行，不扩source-only。这里没有启动服务、调用模型、发网络请求或真实进程故障演练。
+
+最终同字节八原新测试函数基线5F3P→候选8P；追加既有0775 W父门负例1P，原default/W-bypass/readonly消费三节点3P。首次装配0077缺显式冻结home及shell退出码记录错误独立保留，不作为产品反例。
+
+## 2026-10-20 现网角色事故验收补充（尚未通过）
+
+角色启动／单例／异常退出、准确健康身份、僵尸运行出口、持久幂等、并发写、独立采集存活与24–48小时实际内存长跑按[补充清单](docs/design/GATEWAY_ROLE_INCIDENT_ACCEPTANCE_2026-10-20.md)逐项对照。先复用已有focused回归并补准确缺口，再由根在隔离实例实际故障演练；短跑与fake／源码证据不签真实systemd或长跑通过，线上报告数值也不当本机结果。最终统一严格／全仓与最后打包仍在功能全部完成后执行。
+
+## 2026-10-20 迁移run未知与停止摘要窄后继（待非作者复核）
+
+原只读责任核对补用`RUN_STATUS_LEGACY_CREATED`与`AGENT_RUN_TERMINAL_STATUSES`，task_runs/agent_runs未知协议状态拒绝；原空串/created和done/failed/cancelled不因状态本身被判物理busy，TaskLink active/future输入继续保留。后继当前完整责任摘要必须等于正常stop-v1的sources.digest，再沿原本次snapshot/首publisher CAS，不能用停止后变化的新来源替换旧摘要。原2个UNKNOWN+done准确反例复用，原冻结不改；没有补terminal或改deadline。
+
+建议下一步：独审这两生产叶精确后继；根仅增量合并后以支持版0桥接再N，原卡deadline过期也保持事实，不人工延长或重发业务。
+
+## 2026-10-20 Count0→N迁移的定向合同回归
+
+新增`test_gateway_standalone_migration.py`：一条包含历史、已结native和future输入的贯通正链，加旧实例alive/unknown、缺身份、混MP、未结责任/UNKNOWN op、危险路径、native redo/orphan、完整来源漂移、source复制/原origin替换、prepared中断、原state CAS冲突与SQLite缺设施零新文件拒绝。所有刺激位于临时home；原假身份观察不充真实物理退出，原Store写入仅组装夹具。原SQLite只读API曾在初稿冷库创建辅助文件并导致首末不等，失败保留；当前两阶段准备由真实停止writer承担，不宣称stop全程零写。原旧测试assert/deco不改；必要直接消费者结果以仓外同源XML为准，不重跑全仓/201组，不替代根真实验收。
+
+## 2026-10-20 Count0原handle身份定向回归
+
+新增`test_gateway_standalone_handle_origin.py`六个普通节点：同inode替换（原句柄存活/已关）、原句柄预先关闭的收尾、只释放原capture、closed替换与异inode替换。同字节新例在旧S1为3F3P，后继6P；原74新节点保持原文件字节，必要组合共80节点，准确结果以仓外XML为准。不重跑201/full，不代真实服务或迁移验收。
+
+## 2026-10-20 公开拓扑与单进程生命周期（独立候选，S2/S3未完成）
+
+宿主YAML的`gateway_worker_process_count`是唯一公开数量来源，默认`0`；只接非布尔、非负整数。公开start/run/install/restart、监护者及接班子进程使用同一实际配置文件；不新增数量命令行参数，外来private Namespace不能覆盖YAML。模型工具、聊天请求和用户自助配置不能改该部署键。原`run_coordinated_gateway`直接private入参仅保留内部QA回归，不代表公开配置实际验收。
+
+Count0在创建Agent、凭据和恢复前持原`coordinator.lock`，不登记C/W或构造MP scope。冷读原state、worker登记/角色/代次及P3来源；规范MP、混代、坏/危险/未知源一律拒绝逆迁移。新home和真实旧Count0投影可运行。正常停止保存context启动时的真实身份；cleanup之后只在原state事务内CAS追加有限观察，`complete=false`，不把三条循环join、后台扫描或模型账本结清当完整责任排空。
+
+该片不实现旧Count0→N迁移、不支持MP→0或混代恢复、不补旧死producer身份或旧MP closure。后继S2/S3须复用本次实际执行者与原canonical责任源，按待迁移责任边界补观察和受控迁移；不能把本片有限状态投影当准入能力，也不应扩成所有producer历史never-born证明。详见[公开拓扑及Count0迁移分片](docs/design/GATEWAY_PUBLIC_TOPOLOGY_AND_STANDALONE.md)。尚未合入运行源、真实公开配置验收、strict/full、打包或发行。
+
+## 2026-10-20 原输入结算工作轮的通用软指导（候选，待新源真实复验）
+
+`test_lifecycle_wake_host_event.py::test_input_resolution_work_guidance_reaches_real_provider_payload`新增10普通节点（五terminal状态×Anthropic/Chat）。真实InputDependencyAccess原producer发布Wake，原历史用户消息、`_background_model_inputs→RunParams→_runtime_loop_params`运输后进入RuntimeFactsTurn/text，再由真实backend serializer经合成HTTP叶捕获payload；不发网络、不调用模型服务，不把fake回复当真实语义遵循。原status/result10、unknown5、readyrefs5、child/ordinary/native等5节点一并定向35P，原全部assert/deco保留。新10必须两OS普通执行，不source-only或新增skip。
+
+准确旧分支同字节10F到实际payload后仅缺工作轮指导；初始fixture未存原历史用户导致DataCorruption的10F另存，曾一次命令cwd错误使准备脚本未运行并重复该准备失败，均非产品red，记录保留。没有放宽缺原输入拒绝，最终fixture沿规范store保存原输入。675真实失败与缺wire限制不变，实际先行后统一strict/full与最后发行验收。
+
+## 策展同源时钟的旧夹具迁移（2026-10-20，test-only后继）
+
+`test_owner_wake_discovery.py` 的四条UTC白天/日终/候选only测试，原 `_FrozenUTC` 只有now/fromisoformat，不能供新实际fromtimestamp入口使用。仅换成同一instant的time.time与真实datetime，并由薄测试wrapper向原predicate显式传timezone_name=UTC；不改任何原业务数据、刺激、断言或装饰器，不改生产函数或吞AttributeError，原4F保留。
+
+新增18节点的 `_curator_clock` 在有tzset的Mac/Linux仍实际设置/恢复本进程宿主TZ；无该API时通过原纯clock显式模拟fixture声明zone，不skip，也不声称实际Windows系统时区已验证。原18断言/参数刺激/真实C门保持，资格对照在无tzset时显式用同zone。必要定向仅22（新18+旧4），不重复39/整file/full；本次发行双OS仍Mac/Linux普通运行义务。旧4251冻件及18绿/4红均保留，生产五路径字节不动。
+
+## 策展发现与执行时间一致性（2026-10-20，候选）
+
+`agent_py_agent/tests/test_curator_dispatch_eligibility.py` 新增18个普通运行节点：两宿主时区与consumer同源、实际interval/hour、空/显式timezone跨DST、相同配置失败退避、真实C提交短门内time/config/source/unknown变化、有效幂等/禁用零写、普通ValueError不降not_due。无 source-only、平台skip或新模型请求；最终双OS包内仍应普通执行。新增节点准确ID由本片收集记录提供。
+
+原18节点的唯一 `_curator_sources` helper 由 SimpleNamespace 配置换成等值真实 AgentConfig（原三开关值与本fixture consumer显式UTC）；所有原测试函数/断言/装饰器保持。旧10F8P因可信owner解析要求dataclass而失败，原记录保留；不得以产品fallback解决。另保原interval/day、失败退避、同端点busy三个定向consumer合同。中间两正向case错误地在缺请求端口时调用service写入口的失败也保留，最终以规范临时输入经真实提交链验证。
+
+先在隔离源码/home完成真实功能与正常停止，之后统一strict/full与最后一次发行构建；本片离线通过不代671实际通过或最终发行。
+
+## 2026-10-19 派工接单表达的角色软指导（待新源真实复测）
+
+既有`background_dispatch`回执在`_reply_guidance`中明确区分宿主耐久派工受理与当前只写确认的表达片：按queued/accepted及continues事实说明已交后台自行继续，不把本回执零工具范围说成后台缺工具或等待下一轮；没有执行证据时不承诺worker已启动、正在执行或成功。只调整该原结构化kind的软指导，其它kind输出字节不变；不新增采样、工具权限、正文关键词硬门、重派或状态。
+
+673同轮后台真实DONE/TaskLink completed且主final唯一成功，但初始接单文案误导，原事实保留。公开canonical native context是原业务存档，不能证明真实wire遗漏facts；现有request_surface只含请求链摘要/数量，purpose可区分表达用途但不能单独证明该kind。14fake验证原producer→两协议serializer的事实/角色指导传输，不证明真实模型遵循；新源必须由根真实复测接单表达，继续源码实际功能先行、最终统一strict/full与一次包验。
+
+本片继续使用`test_im_dispatch_ack_presentation.py`既有14节点身份、完整原facts/断言及零业务/零schema约束；增加真实Anthropic/Chat出站文本中的角色指导断言。同字节断言在旧指导10F4P，修后结果另记，不把fake固定回复“收到。”算真实语义通过。非派工kind逐字节保持由仓外静态比较记录，不新增source-only/skip。
+
+## 本地ask消费者旧夹具接线（2026-10-19）
+
+新认证HTTP主链的三个旧失败仅迁移测试setup：file adapter limit单测隔离原per-message叶以验证原数量循环；两个旧roundtrip启动真实临时Count0 HTTP/G1，保原worker、outbox和全部旧断言，不补owner、不放宽凭据、不恢复file fallback。另TUI补全测试用例恢复进入前全局output sink，避免已退出app吞掉后续plain公开正文；原安全投影测试一字不改。
+
+原四节点单跑3F1P与最小补全前序→plain的1P1F均保留；候选只改测试资源装配和本文记录，生产与冻结源码不变。此修复不代真实功能验收或最终全仓/发行通过，继续先隔离源码真实功能跑通、再统一strict/full和最终一次包验。
+
+## 2026-10-19 本地ask共用宿主owner准备（独立候选，待复核）
+
+普通TUI/plain、独立`gateway ask`和文件适配器统一经过原认证`POST /ask`，由原宿主/C `prepare_input`冻结owner并进入原队列/lease/CAS；客户端不填host owner，W不回退main。内部受控队列API仍仅供原内部用途，HTTP拒绝或未知结果不走文件旁路。
+
+本地新job显式`delivery_intent=queue`复用原`allow_active_turn=False`，与旧HTTP默认`auto`区分；意图加入原内容摘要，稳定消息ID不能改意图重放。原ID公式抽到纯模块共用，显示登记先于一次POST；只在原同ID排队回执确认后接原终态观察，未知受理显式结束本地等待并保留ID查询，不自动GET、重送或取消宿主。`original_prompt`保存slash解析前用户原输入并核与typed任务一致，宿主按原命令重解析，不信任客户端system_task或显示摘要。
+
+开发先在新源码与隔离home/Gateway/TUI/飞书完成真实功能验收，跑通后统一构建发行；包验负责最终依赖、pyc/资源、安装升级一致性，不能作为每个功能bug的调试前置。远端前本地严格gate和最终包内验收义务保持。此候选fake/合同结果不代表原668实际通过或已发行。
+
+本片新增`agent_py_agent/tests/test_local_ask_owner_transport.py`：真实薄CLI/原本机HTTP/原C lease与Root的owner准入，Count0/2同owner与跨owner活跃回合新排队、旧auto、幂等意图冲突、错误认证、callback前effect、丢响应同ID观察，以及TUI/plain原slash保真。只用临时home和fake后端，不读取真实配置或调用模型。新普通运行节点必须进入后继双OS包运行义务，不列source-only；准确列表与最终结果随候选freeze登记。
+
 ## 2026-10-19 TUI 活动展示与角色快照读口
 
 TUI 仅按原 typed turn phase 和可见块补活动提示，覆盖工具结束、下一段可见正文到来前的空窗；非空思考的动画也进入原整帧缓存键。原状态、正文提交和权限不变。`test_tui_working_indicator.py` 新增 31 个普通节点；原最终正文 golden 只补 `turn_completed` 前提，252 条原断言保持。独立复核 23 个完整直接及相关消费者共 624 项普通通过，包括无新 token 的真实 frame provider、敏感 raw 不公开和窄屏回归。
@@ -19531,3 +19627,280 @@ test_gateway_ask_control_parity.py通过既有临时HTTP/G1/C与原model/card/ow
 ## 2026-10-19 Gateway PID读取器来源回归（候选）
 
 新增`agent_py_agent/tests/test_gateway_pid_record_identity.py`共76普通运行节点，无平台skip/source-only。最终同字节新文件在准确B643 daemon_control前像52F24P，候选76P；四个核心managed Darwin反例覆盖readonly/default cleanup和thin/managed reader。中间36/64节点版本与QA错误独立保留，不覆盖失败。未知文本/canonical kernel/locale矩阵及number str/int/float same/different/cleanup保原kind覆盖齐备。全为临时文件/fake OS，真实write_pid_record、统一readiness与三启动caller仍执行；Count0旧来源、缺birth/Win、同源复用/ESRCH、权限/IO未知、foreign host及旧读错误精确断言。原start前置exist_ok mkdir保留，只承诺拒绝后零spawn/write_pid/业务效果。直接消费者完整文件与静态门另存精确XML/阶段账，片通过不授整源/包/actual/release；两OS新包必须实际普通call passed，不能移source-only。
+
+
+## 凭据引用查询与输入等待表达回归（2026-10-19）
+
+`test_task_credential_discovery.py`新增6个普通节点：find+ref（普通/空串/null）在schema及execute拒绝且零发现调用、工具目录说明，以及group/user原签名卡提交后的Registry状态查询。状态正例验证真实空find不改变ready引用，返回准确6项安全元字段且原密文记录字节不变，不返回秘密。原合法发现、成员/权限与选择断言保留。
+
+`test_gateway_credential_live_entry.py`沿真实零工具表达native上下文加强软指导检查，原facts/操作计数/恢复Wake/取消断言保留；同时复跑`test_im_dispatch_ack_presentation.py`，不改后台接单原14节点。fake固定正文只证明合同与指导到达，不证明真实模型遵循；新增节点须两OS包普通执行，不归source-only。先用新源码+隔离home完成TUI/飞书真实功能复测，跑通后统一严格门与最后一次发行构建；不把包作为日常功能调试前置，远端前AGENTS严格门和最终包内验收不减。
+
+
+## 原输入期限与静默执行账回归（2026-10-19）
+
+新增完整普通runtime文件`agent_py_agent/tests/test_runtime_input_deadline_bridge.py`：DB-only冷C只读发现→原P3/P5消费者与真实typed W/owner Agent分路验证；原最后输入期限退休、callback/等待片收尾竞态、同id重排后新期限及时认领、旧claim在expire/publish/complete/release各边失权，以及实际SQL并发窗口。schema/owner/root/id/unknown坏输入不退役/收口，UNKNOWN run/attempt/op、活动child/后继attempt和并行必要输入保持。所有新节点两OS普通执行，不移source-only/fixture、不新skip。
+
+直接旧回归包括task_input_cancel_deadline、persistent_task_input、gateway_credential_live_entry、wake_queue/state_machine、coordinator_private_credential事务/边界、gateway后台生命周期/原C循环，以及TaskRun缺Link/静止child/UNKNOWN恢复。原测试断言与数据不改；源码组件/fake通过不等于实际Feishu、物理W、全量或发行。先新源码隔离实际功能跑通，再统一最终strict/full与最后一次包内/依赖/安装升级验收；不把打包当调试前置，远端前严格门不减。
+
+
+### 冷会话安全输入卡元数据回归（2026-10-19）
+
+`test_task_credential_discovery.py`新增cold_card八个ordinary节点：新卡能力前置、三种自然查询经原Registry展开、Anthropic/Chat原出站Schema、无权限不恢复工具、无URL且网络禁用下原工具发宿主表单。只改工具软元数据，原schema/status/find/ref/权限断言保留；检索测试关闭可选embedding仅为离线隔离，不改产品默认或证明向量排序。八节点需要最终两OS普通执行，不划source-only、不新增skip。先隔离新源码真实一条普通需求验证实际卡与模型措辞，再统一最终strict/包验；不以fake通过替代真实674红，也不让用户点工具名绕过冷发现。
+
+
+## 2026-10-20 generation责任leaf原子窗口与同inode稳定性
+
+新增普通运行节点位于原`test_nofollow_atomic_snapshot.py`与`test_gateway_generation_source_namespace.py`：6个同inode size/mtime/ctime读前/读后变化硬拒且只1次，12个四namespace×A/B/after_read原atomic writer替换取得稳定新版本，另missing不当空与持续替换最多3次保持拒绝。原18同测试在旧准确生产分支18F，修后18P；最终最小三完整文件含`test_gateway_closed_generation_progress.py`实际统计以仓外XML为准，不拼接通过数。
+
+4个既有generation测试仅因替换读叶而迁移故障注入点，全部旧assert/decorator/业务刺激保留；raw仍真实同inode写且拒绝。默认P6、旧expected/covered/committed缺失或改写、危险路径/设施/父链/FD/超限负例保留。新增节点须最终Mac/Linux包内pyc普通执行，不列source-only、不加skip。初次os.open monkeypatch意外改变平台能力探测的QA失败保留，固定真实能力快照后才形成正式红。
+
+675原排空失败保留，不能因fake通过声称具体leaf/writer已知或实际drain成功。先源码隔离真实复验，功能跑通后统一严格gate/full与最后一次包/安装验收。
+
+
+### 后台main身份到输入退休的定向回归（2026-10-19）
+
+新增`test_background_main_scope_attempt.py`：原core/claim publisher绑定、cold审批展示/决定、hot Params/control/owner/thread/root/current generation冲突、legacy不补猜、filled attempt仍核后台原control，及真实fake模型工具→输入保存→原卡取消→执行账cancelled/TaskLink active。run与task故意不同，已冻结attempt反向定位；跨task/thread/owner、旧attempt、child错绑、UNKNOWN与后继树均拒。child原canonical run/attempt正负不取消父。全部ordinary runtime节点，双平台最终义务不能改成source-only或skip。
+
+`test_mcp_approval_sink_reuse`仅显式迁移一处旧hot冲突断言：核更改前已冻结scope.active，新增fresh冲突inactive；缺Params的cold仍按已发布claim核实。旧刺激、最后缓存拒绝断言及前台/child原断言不变。定向fake与准确旧源反例不等于真实675失败补绿、全仓/严格门或包验收；功能真实完成后再统一最终验收。
+
+
+### 真实死W的P6角色结束定向回归
+
+新增`test_dead_worker_role_closure.py`：4枚原完整producer反例覆盖非零退出+仍healthy/ready的原heartbeat，不改其字节且后继按原v2消费；8枚负例覆盖正常0/stale、缓存污染（含bool伪装1）、错P4/instance、未知设施、复制/未确认观察。另3枚真实本机子进程以原waitid/WNOWAIT/reap验证0/3/SIGKILL，明确不是fake native当真机全角色。原平台不支持准确waitid时只走原拒绝分支，不声称有内核观察；本次Mac/Linux均要求普通执行，无新增skip/xfail。原normal-stop与原生产者安全门断言及所有旧测试字节保持。
+
+这些测试只覆盖结束判据，不等于supervisor健康、W自愈、未知在途重放或s01原实际失败变绿；最终源码功能真实完成后再统一全仓/严格门，包最后一次。
+
+
+## 2026-10-20 服务环境与监护角色回归
+
+新增`agent_py_agent/tests/test_gateway_service_role_identity.py`为普通双OS运行义务，不属于source-only/skip：真实原YAML/registry路径与JSON reader配fake OS/Popen边界，覆盖配置/home优先级、空格/XML/百分号/美元/引号/反斜线运输、独立角色状态、同代healthy/未知拒绝、startup timeout、stop→restart和expected_identity换代拒绝。相邻消费者为`test_supervisor.py`、`test_gateway_public_topology.py`、`test_gateway_commands.py`及`test_daemon_control.py`。
+
+旧健康阳性夹具补原Gateway PIDrecord/state/dispatcher元数据；旧路径Mock显式给新增规范属性/参数，缺配置夹具改提供真实YAML。I01初稿误把WorkingDirectory当可去引号字段，原207组件绿不证明原生unit有效；当前断言恢复原单路径字段值，目录值与其它assert/decorator保持。fake不代表systemd/launchd实际启动、角色故障自愈或24–48小时长跑。先隔离新源码+home真实功能验收，再统一strict与最后一次包内依赖/pyc/安装升级验收，不把打包当调试前置。
+
+
+## 2026-10-20 WorkingDirectory原生字段后继
+
+只修`gateway_service._format_systemd_unit_section`的工作目录编码：`WorkingDirectory`直接路径文本，百分号双写，禁止CR/LF/NUL；普通内部空格、引号、反斜线保原值。`ExecStart`/`Environment`仍沿其原word/unquote语法，不用同一个假解析器代替systemd验收。新增既有testfile内5普通节点（两路径+三注入），旧cwd夹具只移除错误shlex去引号、旧neutral断言恢复单路径形式，原执行/身份/权限测试不扩。真实Linux使用原renderer生成unit，原生verify与WorkingDirectory属性roundtrip；不启动Gateway来掩盖bad-setting，原失败留档。Mac本地只签组件边界，未把这5枚等同Linux原生或服务真实通过。
+
+
+## 2026-10-20 长期错误退避溢出
+
+`test_gateway_dispatcher_resilience.py`增加1100／4811／4913／50000次连续故障与零基数场景，原实现五项均OverflowError；同一入口修复后，两份相关循环文件28项通过。原限流、循环错误事实、封顶和成功后再次运行均保留。这是确定性合同回归，不代真实角色恢复或24–48小时内存长跑。
+
+## 后台执行片停止回归（2026-10-20候选）
+
+`agent_py_agent/tests/test_gateway_background_slice_shutdown.py`新增普通运行节点，覆盖真实scheduler/claim/core与fake provider的准确中断、原finally收口、future已回但wallworker晚退、两秒未结、未来输入保持、另一owner/独立collector不误停、队列/claim登记竞态及UNKNOWN/操作/锁只读拒。原Gateway模型停机账本、decision停机与双会话调度消费者同批定向核验；676原失败和本轮所有中间QA失败保留，不作为实际排空通过。新增节点须最终Mac/Linux包pyc普通执行，不增source-only/skip。先源码隔离真实功能跑通，最后统一严格gate/full及发行/安装升级一致性验收，不把打包作为bug调试前置。
+
+
+## 2026-10-20 监护当前配置与Count0来源预核后继
+
+监护启动不再只读缓存Agent数量：沿原load_config/runtime环境解析当前选定YAML，首末核原字节，要求当前N等缓存/本次Observed N、configured_home_root与实际spawn的MY_AGENT_HOME一致、原owner运行路径解析所得Gateway根等同本监护路径。显式变更N/home/root必须先重新解析正确监护对象；不把新raw摘要当旧C启动历史，也不修改用户配置。
+
+正N冷start若没有P4但已有state，只复用原S2 `_validate_stop`与strict单进程来源双读作负向预核：准确支持版Count0正常stop才允许继续原公开CLI启动尝试，缺stop或混MP拒绝。父supervisor不造controller/lease/variant，不检查并宣称Count0完整quiet已通过；真实旧PID死亡、native/SQL责任双读、digest、持原锁capture和首次publisher CAS仍由子C唯一原S2入口完成。已有MP仍严格完整P6关闭，未知/源漂移不补封、不重放。
+
+本片只追加8个配置/来源运行节点与必要2旧正常节点；原65不重复执行。原49组件测试只在新后继显式补YAML/home_paths/规范Gateway根装配，全部业务assert/decorator保持；原冻件与独审失败证据不改。旧helper同最终新测试的N/home/root反例和支持版preflight正例形成窄红绿，不等于真实迁移或发行通过。
+
+
+## 2026-10-20 监护整代恢复（候选，待同源实机验收）
+
+监护保留原次数、冷却、连续失败与公开 Gateway run/stop 入口。Count0 沿原 C 角色门；正 N 健康还须当前 P4 全 N 个实例、同 C 代次与出生、每个 W 的真实出生和原 15 秒 ready/端口读回，首末 C/P4 不变。新鲜 C 心跳不能掩盖死 W。15 秒是健康窗口，不是死亡证明；不承诺故障发生瞬间即发现。
+
+正 N 恢复先冻结本次原 C/P4 和配置原字节，再把准确 C birth 运输给原 targeted-stop；换代后的新 C 不能被旧恢复动作停止。旧代必须真实物理死亡、原完整 v2 closure/全角色/全责任来源/整树证据首末稳定，才可沿同配置的公开入口尝试新 C；新代须不同 c_run_id/真实身份且同 N，仍经完整健康门。冷监护首次 start 也不能绕过旧代关闭门。未知、缺封存、原责任或配置漂移均零新 spawn，不补旧封存、不伪造 stopped 心跳、不重放未知责任。
+
+原 W 异常退出仅在原 Popen 出生与 WNOWAIT/实际 reap 精确一致时，可由既有 P6 接受非零退出事实；正常零退出仍需原终止心跳。该窄修不绕任何 native/责任/UNKNOWN 门。同 C 换 slot 和历史扩展不在本片；R01 多进程 planned restart 拒绝保持，普通监护 stop 不创建 planned marker。配置原字节只约束本次恢复窗口，不反推旧 C 启动时未保存的配置 hash；owner 路由继续原 owner digest 合同。
+
+实现读口为 `gateway_parts/supervisor_generation.py`，只读原 P4/P6，内存 ObservedGeneration 不持久化、不授 C/owner 执行权。原 PID 门与 CLI coordinator_guard 继续守 Gateway 单例；监护自身单例/I10 预算独立问题不顺带修复。受控组件与实机结果分开：旧 1.4 W0 故障后 30 秒无补位、原 stop drain incomplete/closure null 保留，不能由本片组件绿回填。
+
+
+本监护者在实际 spawn 返回后立即保留原 Popen 和出生观察，readiness 超时也不丢弃仍活 child；ready 另核同 PID/birth。原 stop 对该准确直接 child 用 Popen.poll 实际 reap，仍须原身份已死才作目标退出事实；其它 C 继续原 OS 等待。此内存对象不是新执行权，不按 PID 重建 Popen，不依赖 subprocess._active，也不以回收自身 child 替代完整 P6。真实 POSIX 子进程微例分别证明正常/非零退出的僵尸回收和错误 child/复制引用/冲突出生拒绝；它不是整代服务验收。1.18 当次未留 waitid，故本片不冒认该实际唯一原因。
+
+
+## 监护CLI实际Agent运输（2026-10-20，候选验证）
+
+`test_supervisor_cli_agent_binding.py`两caller先复现2个准确AttributeError，修复后Count0/Count2共4普通P；原commands两必要节点2P。健康role/state/heartbeat/worker走原实现，仅OS与spawn边界fake，原状态字节不变且无新spawn/第二Agent。不代表实际服务或整代恢复通过。
+
+
+## 单进程来源读取尺寸整理（2026-10-20）
+
+`standalone_sources._worker_sources`只将既有设施目录分支提取到`_require_empty_worker_directory`，降低嵌套以符合严格尺寸门；完整codec、generation文件名绑定、空目录允许和旧MP/未知责任拒绝语义不变，不添加迁移或执行权限。原`test_gateway_standalone_sources.py`定向回归通过；此处是结构整理，不替代真实迁移验收。
+
+
+## 2026-10-20 正count终态保留原生命周期身份（600候选）
+
+`_record_gateway_service_termination` 在 Count0 与正 N 两种拓扑都从本次原 `GatewayRunContext` 写入 `process_identity`、`started_at`，覆盖 details 中同名值；Count0 仍显式 `worker_count=0`，正 N 仍由原 lease publisher 写同代次和数量。无 context 的原调用不变，不从旧 state/P4 推断身份，不修改 schema、权限或关闭门。
+
+1.4 source-s02 一次 W0 故障后，原完整 P6 已关闭且旧 S/C/W 全死，但监护冷启动因终态 state 缺 identity 拒绝，整代恢复仍为失败。组件准确复现 writer→P6→cold capture 的拒绝；本候选只修写者，不放宽完整 P4/P6、全责任来源或 UNKNOWN。真实恢复须根合入准确新源后在新 case 唯一故障验收，不能回填旧失败，也不宣称模型、图片或发行通过。
+
+`test_gateway_terminal_identity.py` 新增5个普通运行节点：原终态 writer 经真实原 P4/P6 封存后冷 capture；stopped/failed 均保 context 原身份而非 details；Count0 两终态字段精确不变。沿既有受控 W/native 物理边界，不启动服务/模型。另保必要原 Count0 S2 正链与无 context planned-restart 投影回归。新节点原源3F2P，后继结果以本次准确报告为准。
+
+
+## 2026-10-20 W末心跳的关闭阶段与退出原因（600候选）
+
+`run_worker` 只在原正常体首次 `pump.close()`、原 finally 再次 pump/control 关闭、native client 关闭和信号恢复全部成功后，发表 `loop_health=stopped` 并返回0；`reason` 保留原 `not_ready`/`drained`/`stopped` 等运行退出原因。原两次 close 不去重，不吞 finally 异常；启动早拒仍原 return2。末心跳是本 W 设施生命周期事实，不是完整 P6、native 整树、责任排空或物理死亡证明。
+
+P6 仍要求原精确内核退出与完整全域证据，正常0不得把 not_ready/drained 当 stopped 别名；pump/native 任意关闭失败不得发布 stopped。C终态发布时间、http_port、超时、P4/P6 reader及 UNKNOWN 均不改。本片不混原 cleanup 失败诊断字段，C-only 内部首拒未保存仍是已知诊断缺口。
+
+1.4 S03 唯一故障的旧代完整关闭、新代51.23秒ready是实证；最终新代正常stop的 closure=null/drain_incomplete 与全部物理消失并存，仍整体验收失败。末W0 not_ready与原零返回路径机制可复现，但内部首拒未保存，不把组件结果补签 S03 或称唯一现场原因已证。下一次先准确新源/新case单纯正常stop，全closure通过后才另作唯一故障。
+
+
+## 2026-10-20 最终源码守卫的目录与错误合同补齐
+
+最终源码守卫发现常数目录未随模块提取同步、已删除的 `_DAILY_FINALIZE_HOUR` 仍在待整改清单，以及后台关闭等待常数缺相邻中文说明。沿原生成器重建 `constants_catalog.json`，只删除已不存在的白名单项并补说明；数值、超时和扫描规则不变，不扩大白名单。
+
+单进程生命周期、来源未确认、逆迁移不支持和迁移拒绝四个原固定错误码补入唯一 `ERROR_CONTRACTS`，按状态阻塞、不可自动重试呈现；恢复建议指向原锁、来源、结构化 reason/action/ref，不能据分类补身份、删锁或重放业务。原失败 XML 保留，修复后重跑原守卫与相关错误合同。执行、权限、P4/P6 和迁移准入不改。
+
+
+## 2026-10-20 后台公平调度夹具显式停机协议（600）
+
+`test_background_main_wake_recall` 两个阻塞车道公平性用例继续使用原事件刺激、1秒启动等待、5秒释放等待与全部原断言。它们通过 `object.__new__` 绕过真实构造器，现显式建立并绑定真实 `BackgroundShutdown`；三个调度器替身提供原公开 `runtime.agent` 协议，`subagents=None`明确仅线程编排、没有已发表RuntimeDB/claim。生产不加None fallback，不伪造执行身份/持久账，不改变并发、停止或时间预算。
+
+精确S04原两节点本地2F，首异常tick提交缺_shutdown_control，finally shutdown重复同缺字段；尚不能拿本地trace替代原Linux full未完的longrepr，但此夹具缺口已独立复现。原shutdown片39旧消费者只选本文件真实constructor的并发正例，没有这两个手工构造夹具；窄覆盖不等于全文件兼容已验。本次补相关整个23节点为定向验证，原full四机仍用S04继续，任何后来通过均独立新test-only源/证据，不覆盖原红。
+
+## 2026-10-20 后台审批换claim测试装配补齐
+
+`test_background_tool_approval.py::test_main_session_approval_cannot_cross_claim_or_cancellation` 换claim后保存原acquire返回，并复用原core binder/LocalRunControl/claim publisher建立当前执行来源，再核原会话许可不可跨claim。原请求、缓存键、取消/拒绝断言和两秒观察预算保持；不修改生产授权或给缺身份fallback。原s04精确单节点1F保留，仓外候选定向结果另附；不据此声称原全仓已绿或真实发行通过。
+
+
+## 2026-10-20 canonical orphan 发现测试配置装配（600）
+
+原 canonical orphan 发现测试在 runtime.db 分支沿原 owner 配置解析进入 dataclasses.replace；旧 SimpleNamespace 不满足原 AgentConfig 合同，尚未到 orphan 业务断言即 TypeError。测试仅用 dataclasses.replace(base.config, memory_curator_enabled=False, enable_self_learning=False) 继承原 fixture 的真实配置、home 与路径，同时保持原两个关闭开关及全部业务断言。生产 resolver、owner 来源、P3/P5、工作库与权限均不改。
+
+原准确单节点红保留，后继只核该节点与同文件必要 C 无 owner Agent 构造、原 child P3/P5 及取消／换代拒绝；组件结果不代 Linux full、真实角色或最终发行。三个 worker 文件本机首节点通过，不据此推定 Linux 约31个失败同因；仍等原 trace。根负责 hunk 集成与真实服务，外部候选不改 F 或四机。
+
+## 2026-10-20 Gateway原安全测试的真实配置装配
+
+公开run/start/restart先沿原YAML冻结拓扑，安全测试不得只替代make_agent后传不存在的示例配置。host_guard提供与原替身等值的echo/Count0/home临时YAML，原空workspace沿canonical owner默认解析；unsafe_auth参数化把原不安全认证值逐项写入同一真实配置。原无前代stub按after_pid=0协议返回True；host_guard的state指向真实临时缺失路径，避免MagicMock被当路径。原托管自停拒绝、零stop/terminate/spawn和认证拒绝/零恢复线程/G1断言与预算保持。此为测试前置迁移，生产门无变化；原s04失败与候选定向结果分开保存，不替代原full结果。
+
+## 2026-10-20 G1与PID启动负链夹具的真实配置前置
+
+`test_gateway_local_trust_enforcement.py`四条CLI预检复用原`_write_require_config`真实空YAML（默认Count0），原受控Agent仍提供坏G1/生成0600/已配token/退休false刺激；不改变认证门或mock配置冻结。`test_gateway_pid_record_identity.py`只给caller=start的原两负例补echo/Count0/隔离home真实YAML及args.config，保原gateway_paths seam、身份未知RuntimeError、零runtime effects、原pid bytes与mkdir断言。原6F与候选6P/两文件105P分别留存，生产零diff、无新增或豁免节点；不替代原full结果。
+
+## 2026-10-20 时钟测试夹具恢复与跨时区前置
+
+策展最后写门的时间交错在内层 monkeypatch.context 内调用原 operation，退出立即恢复该层时钟，随后外围冻结时钟恢复真实进程时钟；不再由较外层 fixture teardown 把冻结时间重新装回。新增同原调用及 teardown 后的 time.time 身份回归。原整分片审批等待被此测试污染而卡住；准确原单节点本身通过但全局时钟未恢复的证据保留。审批生产循环、期限、权限与终态不改。
+
+候选 only 的安静策展夹具按 UTC 创建当天状态，直接发现查询也显式使用同一 UTC；避免本机日界与 UTC 日界不同而误触日终资格。原真实本地日界与 DST 参数化不变。原 Linux 中断不得改成自然全量通过；后继只覆盖未执行节点与相关回归，并分别记录原失败和新源结果。
+
+
+## 2026-10-20 规范Home创建权限与只读W消费（600候选）
+
+C/默认初始化与只读W沿同一资源合同：新缺失受管目录以0700逐级创建，文本种子以O_EXCL/0600只建缺失、不覆盖已有普通内容。显式`canonical_root`只用于规范Home子目录，复用原POSIX no-follow目录FD和portable逐级校验；common默认私有目录锚点/既有符号链接语义保持。文本种子从同一已开parent FD创建叶，链接、特殊文件与多硬链接拒绝，竞争FileExists不回退打开。portable沿原no-follow预检，不能声称具备POSIX的父链替换竞态强度。
+
+内置Skill完整镜像会删除重建`shared/builtin`，因此删除前后根与目标父目录都须同样rooted私有创建；copytree/copy2仍保原源资源权限，不靠末尾chmod修补。既有0775不自动迁移、不chmod，W的权限/属主/完整父链/资源/来源门继续拒绝；既有普通0755与自定义种子保持原内容和权限。用户显式Home根仍由原解析器选择，不改变全局umask、不chmod用户workspace，不扩W共享写权。
+
+原S04/Linux umask0002探针证明C新目录0775、七个必读文本0664导致W `resource_permissions`；SQLite0644/JSON0600不属该首拒。另纯tmp反例证明受管templates链接在W之前已向外新增五个种子，故本片显式rooted预先拒绝，不能把W事后拒绝当作零副作用。组件及原full失败分别留存；此候选不代签Linux全仓、真实模型或最终发行，也不宣称所有其它C写路径竞态已完成加固。
+
+新增`test_home_initializer_permissions.py`：三种umask0002/0022/0077下真实SimpleAgent初始化→原冻结worker→原pool/owner消费；既有0755/自定义seed保留、0775仍原W拒绝、目录/种子链接不外写、portable默认锚点与排他竞争、builtin根/共享父/分类父链接负例。必要小集合17新+3原worker首消费者+3原private-dir默认合同，共23 ordinary P、零F/E/skip；不重跑31相似失败。原12合同6F6P、第一版3prod11P1F（builtin重建0775）和最初symlink1F均保留，不能补签原S04 full或机器失败。
+
+## 2026-10-20 唤醒停机顺序测试的真实停止控制
+
+`test_wake_attempt_wiring`的停机顺序夹具仍用原两池替身与原`mark,pool,pool`断言；只为绕过构造函数的supervisor装配并绑定真实`BackgroundShutdown`，保持正式初始化合同。原Linux缺字段失败留档，生产停止与等待预算不改；该原节点另作定向验证。
+
+
+## 2026-10-20 委派运行测试的真实后台身份装配（600）
+
+`test_im_delegation_runtime.runtime_fixture`在原core binder之前装配正式`_BackgroundRunControl`，由core决定并保存准确身份；原晋升/claim acquire后，在该task的原transition guard及短`bind_claim_execution`词法窗调用control原publisher，将同一身份发表到该准确claim。不从当前DB猜attempt，不写runtime_authority JSON、不mock scope。其它未持本fixture真实control的原helper caller不补猜身份；未晋升首片不借有效claim。
+
+plain test helper仅用`monkeypatch.setattr(monkeypatch, 'undo', named_cleanup)`管理本测试control寿命：先finish，finally原公开undo；嵌套两control及finish抛错仍全部清理并恢复原undo。它是测试装配，不是生产hook、autouse桥或新执行器。原所有测试函数完整AST/业务断言及decorator保持；只有helper中acquire断言等价拆为保留返回值的赋值+原非空判据，另加强原publisher返回True校验。
+
+原Linux19委派+11单speaker的UNKNOWN首因是缺已发布claim authority，原scope正确拒绝；本机S04原首node准确同红保留。后继精准34普通P（原30、未晋升媒体→晋升两节点、嵌套清理两节点），零F/E/skip，生产零改。未改预算、权限、投递、UNKNOWN或真实服务，不把原full结果回填通过。
+
+## 2026-10-20 Gateway参数说明归属
+
+`gateway_workspace`恢复紧邻的中文运行目录说明，避免新增拓扑参数后文档提取把旧说明归给上一项；YAML值、dataclass默认值与运行语义均不改。原参数注册文档守卫另作定向检查。
+
+## 2026-10-20 快照权限位不依赖时间戳精度
+
+Linux原叶观察已确认同inode权限0664变0640时，size、mtime_ns、ctime_ns可能全部相同；原只比较三个字段会漏检。显式snapshot的同inode稳定核验增加st_mode，变化仍为原NoFollowPathError硬拒，不进入原子替换重读。默认read、角色/P4/P6、名字集合和其它来源门不变，不增加重试、sleep或放宽危险权限。
+
+原Linux两个ctime参数失败与透明stat诊断分别保留；新合同用相同时间戳覆盖权限收紧与放宽，两准确反例在修复前失败。原真实chmod六参数、原子替换及no-follow负链随同文件复核。此片修的是客观元数据观察，不把测试改成等待更久或重复赌绿。
+
+
+## 2026-10-20 原full余下输入/拒绝诊断夹具的正式API装配（515）
+
+本片仅测试装配：两个coordinator拒绝诊断fake按真实ctor补`_standalone_migration=None`与`_standalone_origin=None`，不改变原quarantine/日志/异常断言。OAuth与凭据fake LLM的真实agent.run片从已领取的准确claim进入原`bind_claim_execution`和`_run_background_model_attempt`，由该适配器的正式`_BackgroundRunControl`接core原身份并经原publisher发表；不猜DB/current、不写authority JSON、不改原RunParams业务内容或权限。输入等待仍只允许一次申请、一次零工具表达和一个归档配对。
+
+定时删除测试的输入登记前，显式RunParams补同scheduler root的`run_id`，保原`expires_at=time.time()+300`、原legacy无core-attempt单次作用域及原子孙/其它树取消范围。生产、scope门、等待预算和所有原断言/decorator均不变。四类代表原S04准确4F；六个原失败节点6P，另五个原权限/已结束claim/ready回放边界5P，分轮记录，不冒充整四文件/full或真实任务通过。原Linux失败保留。
+
+建议下一步：根仅hunk叠加四测试及本文档追加，下一同源必要回归覆盖既有节点；真实功能仍先用隔离源码验收，跑通后才统一严格gate与最终发行构建，不以打包作为调试前置。
+
+
+## 2026-10-20 监护CLI真实Agent单向装配
+
+`test_supervisor_layer_binding.py` 新增11个普通运行节点：真实 `make_agent` 在 Count0/Count2 各只构造一次，run/start/stop 运输同 Agent/路径，缺失/冲突/构造callback拒绝，已绑定路径不重新读取配置。进程循环、spawn和信号边界受控，未启动实际服务或模型。原 `test_supervisor_cli_agent_binding.py` 四节点逐字节保留；四个既有测试文件仅显式适配必传 Agent/Paths API，旧断言和装饰器保持。
+
+原导入边界节点准确1F（三条runtime→CLI）留档；最终31节点普通通过，加实际使用迁移fixture的两个原节点2P。初轮新增测试误用规范 owner workspace 外路径而10F、21P，原权限门正确拒绝；改测试装配为同home规范 owner workspace 后绿，未增加权限fallback或修改产品门。新11节点仍属运行义务，不新增source-only/skip/xfail；本轮未跑全仓或打包。
+
+
+## 2026-10-20 cross-day scenario临时HTTP配置夹具（515）
+
+`test_scenario_gateway_cross_day_resume_uses_real_gateway_process`仍经真实CLI gateway start/ask/stop与原memory-resume事实恢复，原一次prompt、30秒预算及全部恢复断言不变。正式local ask已统一认证HTTP，原echo输入显式gateway_port=0禁止监听，导致请求在发送前拒绝；测试现仅在该场景为临时YAML选择一个可用的127.0.0.1合法端口，原scenario config generator照常运输它。其它echo场景helper默认仍0，不把CLI换成文件队列/旁路client、不改权限或恢复合同。原准确node1F→候选1ordinaryP，原stop0/piddead失败现场保留；无新节点。
+
+同轮scheduler_user_action_notice原20失败先保留：真实预检已经发表claim身份，但通知复核重建缺control/attempt的RunParams，被当前scope正确拒绝，已有纯fake结构证据；这是待裁生产身份接缝，不通过改fixture或mock freshness伪绿，本片未改该测试/生产。
+
+建议下一步：根先hunk合本测试及文档追加；通知生产原因另按正式claim/control生命周期裁最窄修复，保持权限、no-auto通知、原失败与预算。源码功能先验收，统一最终gate后才发行构建。
+
+
+## 2026-10-20 宿主通知热执行范围回归（仓外候选）
+
+`test_host_notification_scope.py` 与 `test_host_notification_transport.py` 是双平台普通运行义务，不归 source-only。覆盖原 claim/core 亲发 attempt、freeze→freshness→可选零工具表达→外发末门同轮复用；已 sent 重投不再绑定，缓存/已有正文不增加模型或认证请求；同线程 Context 副本、跨线程、旧句柄、主体替换和四类 actual 未结责任保持拒绝。MP 测试沿原 C/W 的 BackgroundRuntimeBinding、T 与 claim CAS；不得用 notice metadata、DB 猜测或手拼 authority 装配权限。
+
+原通知20节点与取消/普通预检7节点断言不改。通知轮的 done 只表示宿主通知阶段结束，原 scheduler 失败、TaskLink abandoned、公开失败回执不改写成业务成功。关闭能力、无通知、普通工作和已 sent 路径不新增 core/model/业务请求。先合同/fake 窄验及新源码隔离功能复验，再统一最终 gate/发行；打包不是调试前置。旧 S05 失败不回填通过。
+
+
+## 2026-10-20 公开监护首启私有设施回归
+
+`test_supervisor_first_start.py` 新11普通节点覆盖公开parser→真实配置/make_agent→原log打开及显式绝对service override；只在Popen/等待边界受控，不启动服务。fresh Count0/2、umask0002新目录0700、已有目录权限不变、runtime/services/gateway子链symlink拒绝无外写、配置拒绝与已有未知监护记录零spawn/零设施准备。原测试/预算/身份与P4/P6门不改；新增11须最终两OS包普通运行，不归source-only。原S06真实首启失败保留，fake通过不代表实际启动/角色故障恢复已验收。
+
+本入口在原配置/身份预核之后、目录准备之前拒绝service路径的`..`组件，提示使用无上级跳转的规范绝对服务目录；不静默resolve或改common normalize。filesystem anchor仅为原可信配置路径的no-follow准备起点，不认证owner、不新增路径权限；普通绝对override保留，链接拒绝，不修改其它启动入口。
+
+## 2026-10-20 generation 名称集有限重读
+
+新增 `agent_py_agent/tests/test_generation_source_stable_names.py` 的 20 普通运行节点，须两 OS 包内真实执行，不归 source-only。原 `test_gateway_generation_source_namespace.py` 保留 92 节点身份：add/remove/rename 与原 writer 发布四个名称预期明确迁移为稳定集合读取，并继续断言旧缺失/无合法代次的新责任被完整历史门拒；其它硬拒断言/刺激保持。最终同字节新 20 的 S07 基线为 10F/10P；候选两完整文件为 112P/0F/E/skip。原 8F7P 首轮、旧预期 4F88P 和全部日志保留，不拼接为整体 gate。
+
+仅本机合成目录/原 writer/fake 交错，无服务或模型。源码隔离真实功能先行，最终统一 strict/full 与一次发行验收；681 原实际失败不改绿，已隔离来源不自动重置。
+
+
+## 首次 native 物化拒绝终态的定向义务
+
+`test_native_first_materialize_refusal.py` 使用真实临时 C/Root/P3/claim/terminal writer 和受控 kernel peer/P4 边界，验证首拒 FAILED、P3、原 response/history、pending marker 与原 Future 核收；含 fullclaim/旧 attempt、registry/P1/pin、原 gate/复制/撤权、canonical/release/send 故障窗和 strict source 链接/FIFO负例。原 wire46、Count0/C scope 与 ACK 关键节点保持，不以扩超时/skip/修改旧断言洗红。实际 native 与双平台发行仍须独立执行；旧 FIFO 探针中断及旧 681 失败保留。
+
+
+## 首拒完整lease pin回归增量
+
+`test_native_refusal_lease_pin_ownership.py`为独立评审原1F probe的准确原字节；`test_native_refusal_lease_pin_guard.py`补2个unknown foreign-looking、已登记另一W foreign正例、当前W同owner及来源重绑拒绝，共6新增普通节点。原50有序义务原样继承，后继仅6新+原foreign/P1与首拒正例2=8P；不重复全99或原wire46。输入/P6、unknown、pending和FIFO继承边界保持，不迁source-only/skip。
+
+
+## 2026-10-20 native诊断测试fake协议迁移（600）
+
+S10两个原native诊断测试fake显式接受原dispatch的keyword-only rejection_origin，仅迁移测试协议签名；保全部原刺激、断言、装饰器和预算。独立S10原两例同首拒TypeError 2F，补签名后两例加原ACK、同seqNACK及wire-only保债共5P；生产/运输/终态门未变，旧Linux失败保留，不代native或发行通过。
+
+
+## 2026-10-20 私卡宿主失败安全诊断（600）
+
+私卡原503安全诊断新增12普通合同：原四类catch回执不变、synthetic秘密/异常hook/未知机器码不泄露、stdio/json/控制流诊断失败仍返回原503、原400/403/200不产诊断。原无日志2F→同测试新12+原卡锁/typed边界2共14P；不是683根因修复，不重放真实卡。
+
+
+## 2026-10-20 generation 责任首读前离名窗口（独立候选）
+
+仅显式 generation 已发表责任快照中，原 strict reader 返回 `None` 时暂记该名字，继续读取其它责任并核末次完整链、设施、名称；只有缺叶确实不再列于末次名字集、且集合变化时才转原 typed 名称冲突，丢弃整轮并沿固定原 FD/首链/设施最多三轮重读。末次仍列同名、reader 自身异常、未知名称、硬路径/链/设施变化立即拒绝，不按异常文字或记录内容猜合法归档。默认 P6 和原旧 closure expected 全集合/完整 raw 门不变，不补来源、封存或执行权，不清隔离。
+
+683 公开栈只证实首读 `None` 分支；本片受控原 `archive_request` 成功终态后、首 stat 前的交错复现同分支，不反推683具体 leaf/writer，也不撤销其 P6 incomplete。新源码真实业务与正常关闭必须另验，旧失败原样保留。
+
+新增 `test_generation_source_missing_publication.py` 十个普通 runtime 节点：原终态 writer 贯通及旧 expected 缺失、同名仍列的 None、后续三类 reader 异常、末链/设施/未知名、默认 P6 与原三轮上限。须最终两OS包内执行，非 source-only。
+
+原 `test_generation_source_stable_names.py::test_leaf_missing_on_later_complete_attempt_is_still_hard_failure` 单夹具显式迁移：第二轮不再真 unlink，而是模拟 reader None 且末次同名仍列；保原 FileNotFoundError 断言。原 calls 从 a/a 改为 a/a/z，准确表达缺叶后仍完整核其它责任；其它19节点及原断言/装饰器保持。原旧版新正例1F、迁移初稿29P1F均保留，不冒称原断言全部未改。
+
+## 2026-10-20 MP受管进程完成源（515候选）
+
+新增 `agent_py_agent/tests/test_multiprocess_process_completion.py` 为普通运行测试，须进入双OS包完整文件与mandatory节点，不归source-only。使用真实临时owner/ProcessSession v4/ConversationStore/C来源发现/P3 claim及WorkerBootstrap+owner Agent原消费者；仅进程终态是合成记录，无模型/网络/真实命令。覆盖自然退出只一条原Wake、精确收件身份、旧revision/停止/既有notice、坏schema/链接、关闭开关、发表/回执失败原dedupe及四actual原对象。原 `test_process_completion_events.py` 全文件与Count0默认循环保留。
+
+真实683原记录已退出但notice空，不能把模型口头等待或其它observation终态算成完成通知通过。先新源隔离TUI一prompt自然完成后的自主回读，再统一总gate/最终包；不对旧现场补Wake、补产物或重放命令。
+
+### 完成通知回执安装边界
+
+新增 `test_process_completion_receipt_install.py` 原两反例与一个普通已提交redo I/O正例，共三个普通运行节点；原独审probe全文另存并同bytes运行；规范测试仅整理imports/fixture显式引用，原测试body/断言不弱化。原27节点文件byte不改，新增3节点必须追加双OSmandatory及完整新file；只定向验原两红→绿与原pending/P3/相同dedupe故障窗，不重复46或扩source-only。
+
+## 2026-10-20 本次验收时长范围
+
+用户明确取消本次 24–48 小时稳定性长跑，后续由实际使用反馈持续改进；它不再作为本次发行阻断条件。仍须完成与改动直接相关的功能、普通用户/群权限、凭据隔离、生命周期恢复、真实五分钟 TUI 组合任务和飞书卡片链路验收，以及最终同源严格 gate 与一次发行验收。未执行长跑不能写成已通过。

@@ -27,6 +27,7 @@ def diagnostic_rows(capsys):
             if line.startswith('[gateway-native-diagnostic] ')]
 
 
+# LLM: 新dispatch归属keyword只运输测试调用身份，fake不使用它授信；原刺激、诊断及断言全部保持。
 @pytest.fixture
 def session(monkeypatch):
     value = native.NativeCommitSession.__new__(native.NativeCommitSession)
@@ -41,7 +42,7 @@ def session(monkeypatch):
     def receive(receiver, *, timeout):
         receives.append(timeout)
         return encode(request).encode(), 17
-    def dispatch(message, peer, seq, op):
+    def dispatch(message, peer, seq, op, *, rejection_origin=None):
         value._handles[seq] = 'original-fake-pin-retained'
         return {'op': 'applied', 'seq': seq, 'handle': seq}
     monkeypatch.setattr(native, 'receive_control_packet', receive)
@@ -268,7 +269,7 @@ def test_begin_dispatch_failure_never_logs_owner_or_invent_request(session, caps
     session.request.clear()
     session.request.update(op='begin', seq=1, owner={'provider': 'synthetic', 'owner_kind': 'user', 'owner_id': SECRET})
     error = WorkerCommitRejected('original_native_admission_required')
-    def fail(*a):
+    def fail(*a, rejection_origin=None):
         raise error
     session.value._dispatch_request = fail
     with pytest.raises(WorkerCommitRejected) as caught:
@@ -297,7 +298,7 @@ def test_kernel_code_exact_type_only_no_empty_poll_spoof(capsys, shape):
 def test_seq_display_bound_does_not_change_original_sequence_admission(session, capsys):
     session.request['seq'] = 2**80
     error = RuntimeError(SECRET)
-    def fail(*a):
+    def fail(*a, rejection_origin=None):
         raise error
     session.value._dispatch_request = fail
     with pytest.raises(RuntimeError) as caught:

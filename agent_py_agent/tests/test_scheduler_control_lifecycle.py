@@ -270,7 +270,8 @@ def test_delete_stops_descendants_and_waiting_inputs_without_touching_other_tree
     agent._current_run_params = RunParams(request_id='other', task_attributes={'conversation_thread_id': source.thread_id})
     unrelated = agent.subagents.create_run(goal='无关合成', thought='测试', plan=['读资料'],
         attributes={'conversation_thread_id': source.thread_id})
-    agent._current_run_params = RunParams(task_id=run['run_id'], request_id=run['run_id'],
+    # 当前输入登记属于准确scheduler root；没有实际core attempt的旧单次scope仍须明确同run身份。
+    agent._current_run_params = RunParams(run_id=run['run_id'], task_id=run['run_id'], request_id=run['run_id'],
         task_attributes={'conversation_thread_id': source.thread_id, 'conversation_task_id': run['run_id']})
     background = agent.conversation_store.claims.acquire({'thread_id': source.thread_id, 'task_id': run['run_id'],
         'reason': 'scheduled_job_due', 'lease_seconds': 300})

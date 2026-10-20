@@ -1,3 +1,76 @@
+## 2026-10-20 规范Home私有创建回归
+
+```text
+`-- agent_py_agent/tests/test_home_initializer_permissions.py # 宿主umask、原C/W消费、排他种子及受管链接边界
+```
+
+关键文件说明：`agent/common/nofollow_fs.py`的显式canonical_root目录创建与排他私有文件FD由原Home/owner/builtin producer复用；不替代领域权限或W严格只读资源门。
+
+
+## 2026-10-20 服务上下文与监护角色回归
+
+```text
+`-- agent_py_agent/tests/test_gateway_service_role_identity.py # 原YAML环境运输、独立角色与同代健康/停止fake回归
+```
+
+关键文件：`gateway_parts/paths.py`只派生独立监护PID/state位置；`supervisor.py`共用原Gateway角色读门，不能以监护存活或心跳新鲜签业务ready。
+
+## 2026-10-20 迁移摘要窄后继
+
+```text
+`-- agent_py_agent/tests/test_gateway_standalone_status_digest.py # 原run协议状态及stop后责任漂移回归
+```
+
+关键文件：原standalone_runtime_inventory只读核原run状态常量；standalone_migration比较stop-v1完整责任摘要，不添加新来源或执行权限。
+
+## 2026-10-20 Count0原handle来源回归
+
+```text
+`-- agent_py_agent/tests/test_gateway_standalone_handle_origin.py # 原scope handle/FD绑定与只释放原资源回归
+```
+
+关键文件：`standalone_lifecycle.py`只从实际guard登记的原capture核身份，属性替换不能改锁来源；未新增执行者或迁移权限。
+
+## 2026-10-20 公开拓扑与Count0候选增量
+
+```text
+|-- agent_py_agent/agent/settings/gateway_topology.py # 宿主worker数量唯一严格类型校验
+|-- agent_py_agent/agent/gateway_parts/standalone_lifecycle.py # Count0同锁及有限真实身份停机观察
+|-- agent_py_agent/agent/gateway_parts/standalone_sources.py # 原MP/未知来源的Count0冷启动纯拒绝
+|-- agent_py_agent/tests/test_gateway_public_topology.py # 公开YAML权威及服务配置argv回归
+|-- agent_py_agent/tests/test_gateway_standalone_lifecycle.py # 原锁互斥、身份、CAS和不冒称complete
+|-- agent_py_agent/tests/test_gateway_standalone_sources.py # 原MP/危险/未知拒绝和旧Count0正例
+`-- docs/design/GATEWAY_PUBLIC_TOPOLOGY_AND_STANDALONE.md # S1与有限S2实现、完整迁移缺口
+```
+
+关键文件：`standalone_lifecycle.py`不登记MP角色或业务权；`standalone_sources.py`只拒绝、不认证JSON能力。完整责任quiet/迁移尚未完成。
+
+## 本地ask宿主准入补齐（独立候选）
+
+|-- agent_py_agent/agent/gateway_parts/input_identity.py # HTTP与本地提交唯一纯消息ID公式
+|-- agent_py_agent/agent/gateway_parts/request_http_client.py # 原认证本地ask运输及受理未确认显式收口
+`-- agent_py_agent/tests/test_local_ask_owner_transport.py # 两Count真实宿主准备及本地输入合同回归
+
+### 关键文件说明
+
+- `agent_py_agent/tests/test_native_refusal_lease_pin_ownership.py`：独立原pin API同owner漏读反例，保持评审原字节。
+- `agent_py_agent/tests/test_native_refusal_lease_pin_guard.py`：完整lease未知来源、已登记foreign及same-owner/source重绑合同。
+
+- `gateway_parts/multiprocess_native_refusal_source.py`：反查原 admission gate/Root 与首次完整 claim/P1/pin 来源，不构造权限。
+- `gateway_parts/multiprocess_native_refusal_terminal.py`：原锁内 FAILED/P3 与 T 外固定响应投影，输入 marker 始终保 pending。
+- `gateway_parts/multiprocess_native_refusal_consume.py`：原 W materialize 词法拒绝的同 client/token/canonical 核收，不写账或清输入。
+- `agent_py_agent/tests/test_native_first_materialize_refusal.py`：首拒出口、fullclaim/来源负链及故障窗组件合同，不代 native 通过。
+
+- `agent_py_agent/tests/test_native_commit_rejection_receipt.py`：验证严格负回执不变成权限、自动重试或claim终态；wire-only仍保原Future未结事实。
+
+- `agent_py_agent/tests/test_public_agent_home_initialization_order.py`：覆盖真实CLI配置/构造顺序、三类umask、原W父链门与外置工作区，不替代原生服务验收。
+
+`standalone_stop`只保存本次正常停止来源，SQLite设施准备不是quiet。`standalone_inventory/runtime_inventory`不恢复/刷新/结算，`standalone_migration`只在原真实C/lease内消费来源并CAS，磁盘prepared原像不授权；具体边界见公开拓扑合同。
+
+- `agent_py_agent/agent/memory_store/curator_due.py`：纯时间判据，无I/O或执行权；实际batch/lease与C可信配置/来源末门仍由原调用方维护。
+
+`request_http_client.py`只运输原输入和执行快照，不构造业务Agent或签发host owner；`input_identity.py`只编码已认证scope和不透明message_id，不授执行权。HTTP宿主仍唯一准备/准入。
+
 ## 2026-10-18 前端目录移除
 
 本轮删除 `frontend/`、`agent_py_agent/agent/web/`、`docs/frontend/`，以及 `test_backend_config_catalog.py`、`test_frontend_settings_labels.py`、`test_web_dashboard.py`；这些目录和测试不再属于当前文件树。保留后端配置登记、Gateway HTTP/API、CLI/TUI/IM 及业务能力包。
@@ -371,6 +444,8 @@
 |-- agent_py_agent/tests/test_im_self_discovery.py # 实际工具目录、权限及子代理上界
 |-- agent_py_agent/tests/test_persistent_task_input.py # 真工具/假模型/后台claim与一次恢复
 |-- agent_py_agent/tests/test_task_input_cancel_deadline.py # 真停止入口、兄弟隔离与1001队列输入期限
+|-- agent_py_agent/tests/test_runtime_input_deadline_bridge.py # DB-only C/W原运输、迟到claim及静默取消竞态
+|-- agent_py_agent/tests/test_background_main_scope_attempt.py # 原后台绑定、cold审批与准确输入attempt取消闭包
 |-- agent_py_agent/tests/test_task_input_capacity.py # 原TaskStore锁内并发32容量和拒绝回滚
 |-- agent_py_agent/tests/test_im_task_input_status.py # 同源状态区分运行、待输入和子阻塞
 |-- agent_py_agent/tests/test_task_credential_http.py # 引用登录、CSRF、签名和同源边界
@@ -386,6 +461,40 @@
 ## Tree
 
 ```text
+|-- agent_py_agent/tests/test_native_refusal_lease_pin_ownership.py # 原独审同owner pin反例
+`-- agent_py_agent/tests/test_native_refusal_lease_pin_guard.py # 完整lease pin来源增量合同
+```
+
+```text
+|-- agent_py_agent/agent/gateway_parts/multiprocess_native_refusal_source.py # 原首拒完整出处读门
+|-- agent_py_agent/agent/gateway_parts/multiprocess_native_refusal_terminal.py # 原FAILED/P3与pending投影
+|-- agent_py_agent/agent/gateway_parts/multiprocess_native_refusal_consume.py # 原W词法核收
+`-- agent_py_agent/tests/test_native_first_materialize_refusal.py # 首拒出口正负及故障窗
+```
+
+```text
+`-- agent_py_agent/tests/test_native_commit_rejection_receipt.py # 本次pre-pin typed NACK、同seq/父身份与未知保债运行合同
+```
+
+```text
+`-- agent_py_agent/tests/test_public_agent_home_initialization_order.py # 公开构造私有Home先行、原W消费及内部链接零外建
+```
+
+### Count0→N候选增量
+
+```text
+|-- agent_py_agent/agent/gateway_parts/standalone_stop.py # 原Count0正常停止writer的版本化真实来源
+|-- agent_py_agent/agent/gateway_parts/standalone_inventory.py # 规范owner/会话/native的无恢复读取组合
+|-- agent_py_agent/agent/gateway_parts/standalone_runtime_inventory.py # 原ro事务的完整规范责任行/ref摘要
+|-- agent_py_agent/agent/gateway_parts/standalone_migration.py # 原接班内的准确来源variant及首publisher CAS
+|-- agent_py_agent/agent/gateway_parts/standalone_migration_errors.py # 固定原因与可行动恢复错误
+`-- agent_py_agent/tests/test_gateway_standalone_migration.py # 历史/native/future贯通与必要硬拒绝
+```
+
+
+```text
+|-- docs/design/GATEWAY_BACKGROUND_SLICE_SHUTDOWN.md # 原后台片停止、物理退出和真实排空边界
+|-- docs/design/GATEWAY_ROLE_INCIDENT_ACCEPTANCE_2026-10-20.md # 现网十二类角色事故、故障演练与长跑验收边界
 |-- agent_py_agent/agent/backends/assistant_messages.py # 原正文块的逐消息来源、阶段及整段安全投影
 |-- agent_py_agent/agent/agent_core/model/visible_response.py # 在原采纳边界向既有出口提交同次模型正文
 |-- agent_py_agent/tests/test_assistant_message_phases.py # 阶段、跨协议历史与整段净化回归
@@ -567,12 +676,15 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_approval_waiter_retirement.py # 原等待线程退休及已决定/资源忙保持
 |-- agent_py_agent/tests/test_coordinator_private_credential_transactions.py # C私卡原认证、输入及幂等事务
 |-- agent_py_agent/tests/test_coordinator_private_credential_boundaries.py # 实际锁竞争、typed未知与密钥边界
+|-- agent_py_agent/tests/test_private_interaction_safe_diagnostic.py # 原503安全异常元数据、秘密与异常hook隔离及回执不变回归
 |-- agent_py_agent/tests/test_coordinator_approval_cancel.py # C原签名审批取消、同锁幂等与失活来源
 |-- agent_py_agent/cli/gateway_coordinated_shutdown.py # 部分启动与停止共用原资源收尾、unknown保留
 |-- agent_py_agent/tests/test_gateway_coordinated_entry.py # 正式内部count、先取锁和默认入口保持
 |-- agent_py_agent/tests/test_gateway_c_state_publication.py # 原C完整state与角色双读共门、取消锁序和失源首写拒绝运行回归
 |-- agent_py_agent/tests/test_gateway_source_refusal_diagnostics.py # 角色源拒绝日志只含白名单数字与函数位置、禁止消息和凭据正文
 |-- agent_py_agent/tests/test_gateway_generation_source_namespace.py # 已发表责任与原辅助流、暂存设施的严格目录分类回归
+|-- agent_py_agent/tests/test_generation_source_stable_names.py # 名称集有限整次重读、跨轮固定身份与旧完整来源硬门回归
+|-- agent_py_agent/tests/test_generation_source_missing_publication.py # 原终态writer在首读前移走责任及末名称/硬错误优先级回归
 |-- agent_py_agent/tests/test_gateway_closed_generation_progress.py # 旧关闭固定范围与本代心跳、新增及规范归档推进的分界回归
 |-- agent_py_agent/tests/test_gateway_generation_facility_second_open.py # 原写入失败清理暂存时第二次打开自然消失的回归
 |-- agent_py_agent/tests/test_gateway_generation_facility_successful_replace.py # 原写入成功替换同内容时暂存自然消失的回归
@@ -607,6 +719,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_gateway_admission_closing.py # ordinary末发表与stop同门、原责任收尾及错源拒绝运行回归
 |-- agent_py_agent/tests/test_nofollow_atomic_snapshot.py # 原atomic writer安全A/B有限重读、父链/硬错/FD首因运行回归
 |-- agent_py_agent/tests/test_gateway_role_marker_snapshot.py # closed第三次role原atomic窗口、默认kwargs及危险叶运行回归
+|-- agent_py_agent/tests/test_gateway_closed_worker_publication.py # 原旧代封存后首次当前W发表的有界整组读、跨轮固定来源及硬拒绝运行回归
 |-- agent_py_agent/tests/test_gateway_role_heartbeat_stability.py # 当前W原producer动态双读与身份/旧代全raw拒绝运行回归
 |-- agent_py_agent/tests/test_gateway_role_lifecycle_closure.py # 原producer一次关闭封存、同home角色消费和未知保留
 |-- agent_py_agent/tests/test_gateway_role_lifecycle_publication.py # 完整raw CAS、写后未知和晚变来源运行回归
@@ -677,6 +790,9 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 2026-10-17 BG 原 claim 运输定位补缝：
 
 ```text
+|-- agent_py_agent/tests/test_supervisor_first_start.py # 公开监护首启私有设施、危险父链与预核零副作用回归。
+|-- agent_py_agent/tests/test_host_notification_scope.py # 宿主通知真实热轮、词法隔离、取消及未结责任回归。
+|-- agent_py_agent/tests/test_host_notification_transport.py # 通知阶段沿原C/W、T/fence与claim CAS运输回归。
 `-- agent_py_agent/tests/test_background_claim_transport_reference.py # 原C/W、会话claim、core callback与同T发布的普通本地回归。
 ```
 
@@ -771,6 +887,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `docs/design/GATEWAY_ROLE_INCIDENT_ACCEPTANCE_2026-10-20.md`：区分报告线索与本机证据，记录启动、身份、状态出口、去重、故障恢复和真实长跑验收；不授权清除未知责任或绕过owner权限。
 
 - `agent_py_agent/tests/test_gateway_pid_record_identity.py`：共享PID发现者的producer/readiness/启动caller运行合同；fake OS与临时文件不替代真实服务验收。
 
@@ -1577,7 +1695,8 @@ agent_py_agent/
 |   |   |-- decision_planning.py        # 原 Todo read 的当前未完成项精确优先级软建议
 |   |   |-- cli_run_conversation.py     # 一次性 CLI 的权威 user/assistant transcript、幂等身份与失败分级
 |   |   |-- tool_request_capture.py    # 从真实运行参数共用捕获完整请求，不重复目录或上下文准备
-|   |   |-- tool_only_execution.py     # 宿主只读工具工作片，沿原身份、权限、取消令牌和收口
+|   |   |-- host_turn_scope.py         # 宿主工具和有界表达共用的原core轮生命周期与未结责任。
+|   |   |-- tool_only_execution.py     # 显式工具工作和零工具表达，沿原身份、权限、取消令牌和收口
 |   |   |-- compact_request_recovery.py # 三宿主一次准备、完整候选计量和原CAS后同次发送
 |   |   |-- compact_transcript_prefix.py # 同次主请求连续历史前缀与受保护事实边界验证
 |   |   |-- compact_active_projection.py # 精确保留IR与归档交接投影，保留原工具账和媒体插话
@@ -1676,6 +1795,7 @@ agent_py_agent/
 |   |   |-- candidate_models.py       # Candidate v2 Schema、来源/scope/状态枚举与稳定 ID
 |   |   |-- candidates.py             # owner candidates.jsonl 唯一候选账本和唯一状态机
 |   |   |-- curator.py                # 后台策展统一 Service、reason、lease、增量 cursor 与有界重试
+|   |   |-- curator_due.py            # consumer与发现共用本地日终、间隔和DST时间边界的纯判据
 |   |   |-- curator_backend.py        # 无工具辅助模型调用适配；只返回严格结构化结果
 |   |   |-- decision_recall.py        # 原预算后重排长期事实或追加同范围补充查询，复核来源并复用本轮上下文
 |   |   |-- decision_curator.py       # 可选用户后台分类/优先级标注，失败保留原批次且不拥有记忆写权限
@@ -1699,6 +1819,7 @@ agent_py_agent/
 |   |-- memory_archive/                # compact、audit、tool output artifact、task workspace refs
 |   |-- local_storage/                 # SQLite/FTS/文件事实源；ledger_redaction.py 精确擦除已删事实但保留幂等身份
 |   |-- runtime_db/                     # SQLite 运行事实源：Task 身份、TaskRun/AgentRun/Attempt 生命周期、wake 与投递账本
+|   |   |-- input_lifecycle.py          # 原wake整行CAS、效果验权与输入静默退休SQL收口
 |   |   |-- run_creation.py             # 普通代理及宿主命令共用的同连接运行树创建
 |   |   |-- host_commands.py            # 显式宿主请求与原始 pending 运行的唯一绑定及严格回读
 |   |   |-- host_command_execution.py   # 原 pending 精确执行、原运行收口和不重跑的只读查询
@@ -1712,6 +1833,8 @@ agent_py_agent/
 |   |   |-- owner_recovery.py           # /recover owner：空 thread 历史 unknown 只读投影、集合确认码、批量共享 CAS 与幂等回执
 |   |   `-- executor_liveness.py        # exact attempt 执行区间和 OS 退出事实；慢模型不按时长判死
 |   |-- gateway_parts/                 # gateway request/worker/lease/http/renderer
+|   |   |-- process_completion_source.py # 原受管命令终态的C只读来源与W原Wake/notice交接
+|   |   |-- runtime_wake_source.py       # C只读DB行快照进入原P3/P5，不复制SQLite/WAL作来源
 |   |   |-- execution_target.py        # T 候选：原 claim/request/task 的实际执行投影与代次复核
 |   |   |-- execution_control.py       # T 候选：前后台共用的插话和停止目标解析
 |   |   |-- local_client_token.py       # G1：本机客户端持久凭据，缺则私有生成、宿主严格读取，不进模型环境
@@ -1772,7 +1895,8 @@ agent_py_agent/
 |   |   |-- message_selection.py        # 固定EOF两遍来源校验与逐行范围/覆盖筛选，无第二消息存储
 |   |   |-- message_replay.py           # 固定原文件身份及行地址/hash的只读消息重放，切片不驻留正文
 |   |   |-- store_tasks.py              # 任务关联、活动索引、工作区状态投影及终态进度关闭
-|   |   |-- task_run_closeout.py        # TaskRun 收口唯一判定：根已终态＋会话任务关联终态或确实不存在＋整棵树终态/静止
+|   |   |-- task_run_closeout.py        # TaskRun唯一领域收口；准确输入退休仅cancelled执行账，未知和活动树保持
+|   |   |-- runtime_wake.py             # Count0/W共用原DB单行到期效果，quota与claim窗口保护
 |   |   |-- capability_selection_state.py # 原任务内的一次选包标记校验，不另建账
 |   |   |-- store_audits.py             # Audit 准备、发布修订、终态重开与运行代提交
 |   |   |-- store_guidance.py           # 插话入队、精确认领、权威回执查询与组件组装
@@ -1878,6 +2002,7 @@ agent_py_agent/
 |   |   |-- background_goal.py          # 后台 Goal 异常结算与续跑裁决，只持有精确领域和回调能力
 |   |   |-- goal_progress_fuse.py       # Goal 续跑只按工具账、Goal/任务结构快照累计连续空片并复用 host notice 提示
 |   |   |-- background_routing.py       # 线程及 owner 投递地址的只读选择，不消费来源或执行发送
+|   |   |-- background_shutdown.py      # 原后台片的准确claim中断与物理退出/只读收口观察
 |   |   |-- background_claim.py         # 后台执行领取、最终准入、共享心跳与精确 claim 结算
 |   |   |-- background_recovery.py      # 按次查询权威恢复阻断，只去重日志、不缓存执行资格
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
@@ -1885,6 +2010,7 @@ agent_py_agent/
 |   |   |-- background_history_seed.py  # 后台范围与应用视图冻结、精确消息覆盖、种子及压缩来源
 |   |   |-- background_compact_context.py # 后台范围选择与同视图上下文投影
 |   |   |-- background_compact_recovery.py # 后台完整候选纯投影及公共恢复器接线
+|   |   |-- host_notification_scope.py # 原claim内通知的活身份、词法复用与后台运输接线。
 |   |   |-- background_execution.py     # 后台单片执行、Compact 重试、原生历史保存与具名结果
 |   |   |-- lifecycle_wake_event.py     # 子代理生命周期唤醒的宿主事件：从唤醒信封字段确定性投影成回合触发类型
 |   |   |-- background_delivery.py      # 后台投递、canonical 回复提交、整封冻结与耐久去重
@@ -2229,6 +2355,7 @@ agent_py_agent/
 |   |-- test_decision_delivery_stale.py # 成功写入 stale、单焦点不请求、共享去重、失效、observe 和归档/worker 离线接线
 |   |-- test_decision_curator_plugin_concurrency.py # 后台 curator 与前台 skill_tool 同连接并发：互不拖住、撤销命中对应点、超时只冷却本点而连接故障冷却全部、关闭一起取消
 |   |-- test_gateway_decision_shutdown_cancel.py # Gateway 停止时主动取消在途决策：回原方案、不进冷却、关闭后不再联网、收尾顺序与失败隔离
+|   |-- test_gateway_background_slice_shutdown.py # 后台片停止、物理晚退/UNKNOWN与独立资源不误停回归
 |   |-- test_gateway_model_call_shutdown_settlement.py # Gateway 停止排空后把仍在途的模型调用记为被停机中断、未结算，并写结构化停机事件
 |   |-- test_late_response_tool_fence.py # 停机关门后迟到的模型响应里的工具不启动，记 HOST_SHUTDOWN_TOOL_NOT_STARTED，原因码与账本同源；关门后不再弹审批卡，档案/索引共用清洗（I3）
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
@@ -2555,6 +2682,8 @@ agent_py_agent/
 |   |-- test_process_unknown_reason_codes.py # 后台进程/终端会话结果未知时带出具体原因码，工具操作账 unknown_reason 可归因
 |   |-- test_process_activation_scope.py # 共享激活归属、旧 v2 恢复、任务隔离及退出证据保留
 |   |-- test_background_stdio.py       # 实际字节管道、EOF、交接失败及精确资源隔离组件验证
+|   |-- test_process_completion_receipt_install.py # 原receipt安装器的typed硬错/actual同对象回归
+|   |-- test_multiprocess_process_completion.py # 原C/W完成源、收件身份、去重与故障窗
 |   |-- test_process_completion_events.py # 后台完成通知的重启补发、去重和停止边界
 |   |-- test_cache_diagnostics.py       # 请求前缀诊断、无正文存储与线程隔离
 |   |-- test_gateway_status_tool.py    # Gateway 权威身份、端点与生命周期日志诊断回归
@@ -2996,7 +3125,7 @@ docs/
 - `agent_py_agent/agent/runtime_db/host_command_execution.py`：只领取原 pending，强制原操作 Store，终态沿原运行收口；查询不初始化数据库，UNKNOWN 不重跑。
 - `agent_py_agent/agent/runtime_db/host_command_approval.py`：只在原执行区间等待精确批准，回到原 ToolExecutor 重新核验；拒绝、取消或无消费者都不启动 handler。
 - `docs/design/HOST_COMMAND_EXECUTION.md`：显式宿主请求的登记、终态只读重放、UNKNOWN 和现有执行器接线边界。
-- `agent_py_agent/agent/conversation/task_run_closeout.py`：TaskRun 收口的唯一判定（D3 规则）。执行收口边经 `runtime_mixin` 委托调用，网关 `/recover` 子代理分支直接调用；只经 `settle_task_run_if_agent_tree_terminal` 写，缺存储、空身份、关联读坏或未终态都保持打开。
+- `agent_py_agent/agent/conversation/task_run_closeout.py`：TaskRun 收口的唯一判定（D3 规则）。执行收口边经 `runtime_mixin` 委托调用，网关 `/recover` 子代理分支直接调用；普通完成只经 `settle_task_run_if_agent_tree_terminal` 写；准确输入静默退休可经同领域判据取消本次执行账，最终SQL拒未知/活动，TaskLink不被取消。
 - `agent_py_agent/agent/conversation/task_resources.py`：主链身份适配与整任务固定清单；热请求带正式绑定，无热请求才读取唯一主链，组合原子树后锁外清理，不重新选择资源。
 - `agent_py_agent/agent/subagents/cancellation.py`：原创建事务内选择后代、关闭原权限并冻结资源；模型和用户控制共用，业务终态与资源退出分别保留。
 - `agent_py_agent/agent/subagents/cancellation_hosts.py`：精确 attempt 中断及冻结宿主身份的只读观察；PID/launch 不构成整棵进程树的取消许可。
@@ -3551,6 +3680,7 @@ agent_py_agent/tests/
 ```text
 |-- agent_py_agent/agent/conversation/required_user_action.py # 原后台任务的需用户处理事实、表达与投递前资格核验
 |-- agent_py_agent/tests/test_scheduler_user_action_notice.py # 静默监控认证拒绝、来源隔离、取消和原outbox重投
+|-- agent_py_agent/tests/test_required_notice_reply_slot.py # 普通与必要通知共同canonical槽、精确工作身份及补账故障窗
 |-- docs/tasks/CREDENTIAL_HTTP_FAILURE_HANDOFF.md # HTTP认证失败分类与同代单次拒绝记录的交接
 `-- docs/tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md # 原后台通知主链、测试证据与边界交接
 ```
@@ -3636,3 +3766,113 @@ closed角色第三次读取验证入口：`agent_py_agent/tests/test_gateway_rol
 关键文件说明：`test_im_dispatch_ack_presentation.py` 经原接单及自然回复入口验证表达角色、任务延续、缺接单与已有 pending 优先级；不依赖仓外QA，不替代真实模型验收。
 
 `test_control_receipt_delivery_closure.py`贯穿原领域生产者、规范回执与通道投递；仅IO替身，不绕过身份或显式终态发送门。
+
+
+### 输入期限与静默执行账关键文件
+
+- `agent_py_agent/agent/runtime_db/input_lifecycle.py`：原运行库整行claim、效果窗口和迟到complete/release CAS；新的active-Link例外在最终SQL核整树UNKNOWN/活动。
+- `agent_py_agent/agent/gateway_parts/runtime_wake_source.py`：canonical owner DB行的只读来源快照，不新建业务Agent。
+- `agent_py_agent/agent/conversation/runtime_wake.py`：Count0与P5 W共用单行算法；只有当前claim可expire或发布原Wake。
+- `agent_py_agent/tests/test_runtime_input_deadline_bridge.py`：对应普通runtime回归，覆盖字段绑定、重排/取消时序，非真实服务验收。
+
+
+后台输入身份关键职责：`conversation/tool_approval_scope.py`只读原claim和实际执行代次；`task_run_closeout.py`仅以输入冻结attempt反查真实run，scope任务编号不改。`test_background_main_scope_attempt.py`覆盖main run与task不同及child原canonical边界，不新增执行器或持久账。
+
+
+角色收口回归补充：
+
+```text
+|-- agent_py_agent/tests/test_dead_worker_role_closure.py # 原producer异常W退出、未知拒绝与真实waitid子进程
+```
+
+关键职责：`multiprocess_drain_runtime`仅在原已核W物理退出时区分非零退出与正常心跳，仍由完整P6封存；该测试不提供新执行器或自动恢复入口。
+
+- `agent_py_agent/agent/conversation/background_shutdown.py`：只保存同Gateway原future/claim/worker引用；停止服务不取消持久业务，未退/未结交原cleanup为incomplete。
+- `docs/design/GATEWAY_BACKGROUND_SLICE_SHUTDOWN.md`：后台片停机顺序、真实退出与676失败/恢复边界。
+
+
+### 监护当前配置预核回归
+
+```text
+agent_py_agent/
+|-- agent/gateway_parts/supervisor_generation.py  # 原配置N/home/Gateway根与S2正常来源的负向预核；不授迁移许可
+`-- tests/test_supervisor_current_configuration.py  # 当前YAML漂移零spawn和支持版Count0来源分界
+```
+
+
+### 监护整代恢复只读接缝
+
+```text
+agent_py_agent/
+|-- agent/gateway_parts/supervisor_generation.py  # 原P4健康及完整P6关闭的只读恢复门，不创建执行者或关闭账
+`-- tests/test_supervisor_generation_recovery.py  # 受控OS/start边界的整代恢复正负合同，不代真实服务
+```
+
+关键文件：`supervisor.py`仍唯一负责原有界监护循环及公开启动/准确停止；`multiprocess_drain_runtime.py`只接受原精确异常退出事实，完整来源/原树关闭边界不变。
+
+
+## 监护CLI配置运输回归补充（2026-10-20）
+
+`agent_py_agent/tests/test_supervisor_cli_agent_binding.py`：覆盖status/start-all沿已解析Agent核Count0与完整Count2健康，不重复构造Agent或改状态。
+
+
+## 终态身份合同测试补充（2026-10-20）
+
+```text
+agent_py_agent/tests/
+`-- test_gateway_terminal_identity.py  # 原终态writer、P6与冷监护的身份运输及Count0字段回归
+```
+
+关键文件说明：`test_gateway_terminal_identity.py` 沿原context/publisher/P4/P6测试终态身份不丢失；不替代真实整代恢复验收。
+
+
+## W末心跳合同测试补充（2026-10-20）
+
+```text
+agent_py_agent/tests/
+`-- test_worker_terminal_heartbeat.py  # 原run_worker/实际pump关闭和native受控端点的末心跳时序回归
+```
+
+关键文件说明：`test_worker_terminal_heartbeat.py` 通过原执行循环/线程池和原关闭路径区分退出原因与关闭阶段，覆盖首次/第二次pump.close及native.close失败不发表stopped；不构造P6许可或真实服务。
+
+
+## 2026-10-20 监护装配层次补充
+
+```text
+agent_py_agent/
+|-- cli/supervisor.py  # 唯一实际Agent组合根，运输同配置/规范GatewayPaths
+|-- agent/gateway_parts/supervisor.py  # 消费必传Agent/Paths的原监护生命周期，不反向导入CLI
+`-- tests/test_supervisor_layer_binding.py  # 真实配置/Agent的单次装配及缺失/冲突拒绝运行合同
+```
+
+关键文件说明：`test_supervisor_layer_binding.py` 以隔离home和echo配置验证CLI→runtime单向装配；原进程、身份、Count0/正N及P4/P6门继续由现有模块负责。
+
+
+## 2026-10-20 宿主通知阶段文件职责
+
+- `agent_core/host_turn_scope.py`：共用原core绑定、当前prompt与准确attempt结算，四actual不伪结。
+- `conversation/host_notification_scope.py`：同原claim/owner/actor的通知热范围；不是权限或第二状态账。
+- `test_host_notification_scope.py`、`test_host_notification_transport.py`：双平台普通运行，覆盖词法隔离、成本、原通知、C/W运输与来源失效。
+
+
+- `test_supervisor_first_start.py`：公开parser与原make_agent的fresh启动父目录责任；Popen受控，不能替代真实角色生命周期。
+
+## 已发表目录稳定名称回归入口
+
+`agent_py_agent/tests/test_generation_source_stable_names.py`：合成发表交错验证 generation 有限完整重读，不授关闭/来源权；默认 P6 与完整历史拒绝保持。
+
+旧W首次当前发表验证入口：`agent_py_agent/tests/test_gateway_closed_worker_publication.py`，原关闭producer和后继P4/心跳受控交错；16普通runtime义务，不是source-only或真实682根因证明。
+
+
+## 私卡503诊断回归入口
+
+`agent_py_agent/tests/test_private_interaction_safe_diagnostic.py`仅在隔离fake中核原HTTP回执和安全日志，不代真实凭据提交成功或故障根因确认。
+
+`agent_py_agent/tests/test_generation_source_missing_publication.py`：原归档事务受控交错验证首读前离名，保末names仍在、reader异常、链/设施/未知名、三轮预算、默认P6与旧expected拒绝。
+
+- `agent_py_agent/agent/gateway_parts/process_completion_source.py`：MP原ProcessSession只读来源与单会话完成通知，不新进程账。
+- `agent_py_agent/tests/test_multiprocess_process_completion.py`：对应双OS普通运行义务，非真实模型验收。
+
+- `agent_py_agent/tests/test_process_completion_receipt_install.py`：MP通知原redo安装硬错与actual传播，双OS普通运行义务。
+
+关键文件说明：`test_required_notice_reply_slot.py`是normal/required共同回复槽的真实本地管线回归入口，合成运输不代表真实飞书验收。

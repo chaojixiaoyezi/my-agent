@@ -1,5 +1,5 @@
 # LLM: C只消费同一次native receive的内核sender，原issuer/lease/P0/P4核验仍是唯一责任来源；ACK不是W写许可。
-# 模块用途: 把逐消息原生传输接到原责任门，并附固定安全阶段诊断；不新增P1/P3、准入或重试。
+# 模块用途: 把原生传输接到原责任门；同次producer可证pre-pin拒绝回一次strict NACK，其它失败保未知，不新增P1/P3、准入或重试。
 import json
 import os
 import threading
@@ -8,11 +8,15 @@ from weakref import WeakValueDictionary
 from .multiprocess_commit_session import _request_identity, _unique_object, _wire_owner
 from .multiprocess_kernel_message import KernelMessageReceiver, KernelMessageSender
 from .multiprocess_native_control_receive import receive_control_packet
-from .multiprocess_worker_commit import WorkerCommitIssuer, WorkerCommitRejected
+from .multiprocess_worker_commit import (
+    WorkerCommitIssuer,
+    WorkerCommitNotStarted,
+    WorkerCommitRejected,
+)
 
 
 # LLM: 只在原C内使用；handles仅引用原pin，定位地址/正文PID/序号/ACK均无授权作用。
-# 类用途: 处理真实原W逐消息责任；失败仅安全诊断，保留断线或发送失败后的未结责任。
+# 类用途: 处理原W逐消息责任及可证未登记的负回执；失败仍诊断/传播，保留断线或发送失败后的责任。
 class NativeCommitSession:
     # LLM: 受信组合根交原issuer与本C创建的两个endpoint；构造不为owner准入、不读取body声明的身份。
     # 函数用途: 固定原对象、创建进程和一个串行消息消费门。
@@ -45,7 +49,7 @@ class NativeCommitSession:
         receiver._check_creator()
         sender._check_creator()
 
-    # LLM: 只由可信C组合根注册原T/owner/callback；同原C/原W/request/attempt/phase共用原对象，跨facade不能重造回调。
+    # LLM: 原registry只给同request首次owner_materialize留首像标记；仍共用原T/owner/callback和同原对象，跨facade/旧phase不能重签。
     # 函数用途: 登记C内一次性短提交的定位引用，正文不能注册操作或声明其权限。
     def register_short_operation(self, owner, transition, phase, operation):
         from .multiprocess_native_operation_reclaim import reclaim_terminal_operations
@@ -79,12 +83,14 @@ class NativeCommitSession:
                         raise WorkerCommitRejected('original_native_operation_conflict')
                     candidate = original
             else:
+                candidate._first_materialize_origin = (phase == 'owner_materialize'
+                    and not any(previous[2] == transition.request_path for previous in registry))
                 registry[key] = candidate
             self._operations[candidate.identifier] = candidate
             return candidate.identifier
 
-    # LLM: 每条packet仍独立核同次sender与原T；异常仅固定阶段/hash诊断后bare raise，不新增ACK、释放或重试；同步native诊断和commit测试。
-    # 函数用途: 处理原消息并回发；异常只附安全阶段诊断后原样传播，closing仍可精确finish。
+    # LLM: 同次sender/strict seq之后仅原producer的pre-pin事件回一次精确NACK；普通/未知/pin后异常不回。send失败不补回执，原异常仍安全诊断后传播，不释放或重试。
+    # 函数用途: 处理原消息并回发；明确未登记不再伪装运输超时，closing仍可精确finish，NACK不结算请求。
     def serve_once(self, *, timeout=5):
         stage = 'original_source'
         diagnostic_op = diagnostic_seq = diagnostic_request = diagnostic_attempt = None
@@ -109,7 +115,19 @@ class NativeCommitSession:
                     diagnostic_request, diagnostic_attempt = request['request_id'], request['execution_attempt_id']
                 self._last_seq = seq
                 stage = 'dispatch'
-                result = self._dispatch_request(request, peer_pid, seq, op)
+                rejection_origin = object()
+                try:
+                    result = self._dispatch_request(request, peer_pid, seq, op, rejection_origin=rejection_origin)
+                except WorkerCommitNotStarted as error:
+                    if (type(error) is not WorkerCommitNotStarted or seq in self._handles
+                            or not error.matches_request(issuer, peer_pid, rejection_origin)):
+                        raise
+                    self._require_original()
+                    rejection = {'op': 'rejected', 'seq': seq, 'error_code': 'WORKER_COMMIT_REJECTED'}
+                    stage = 'send'
+                    KernelMessageSender.send(sender, json.dumps(rejection, separators=(',', ':')).encode(), timeout=timeout)
+                    stage = 'dispatch'
+                    raise
                 # 发送失败保留已经记录的原责任；不重放begin，不将本地处理称W已接收。
                 stage = 'send'
                 KernelMessageSender.send(sender, json.dumps(result, separators=(',', ':')).encode(), timeout=timeout)
@@ -127,17 +145,18 @@ class NativeCommitSession:
 
     # LLM: caller持原session门且已经同次认证sender/推进seq；仅分派现有C短操作/责任，不给W写权，finish沿原issuer。
     # 函数用途: 拆平四种原责任消息的处理，保持未知回执和精确finish。
-    def _dispatch_request(self, request, peer_pid, seq, op):
+    def _dispatch_request(self, request, peer_pid, seq, op, *, rejection_origin=None):
         issuer = self._sources[0]
         if op == 'materialize':
             from .multiprocess_native_materialize import register_owner_materialization
 
             identifier = register_owner_materialization(self, request)
-            result = self._apply_short_operation({'seq': seq, 'operation': identifier}, peer_pid)
+            result = self._apply_short_operation({'seq': seq, 'operation': identifier}, peer_pid,
+                                                 rejection_origin=rejection_origin)
         elif op == 'apply':
-            result = self._apply_short_operation(request, peer_pid)
+            result = self._apply_short_operation(request, peer_pid, rejection_origin=rejection_origin)
         elif op == 'begin':
-            pin = issuer.begin(_wire_owner(request['owner']), peer_pid=peer_pid)
+            pin = issuer.begin(_wire_owner(request['owner']), peer_pid=peer_pid, rejection_origin=rejection_origin)
             self._handles[seq] = (issuer, pin)
             result = {'op': 'begun', 'seq': seq, 'handle': seq}
         else:
@@ -153,7 +172,7 @@ class NativeCommitSession:
 
     # LLM: 只从本session注册表拿原C回调；记录原pin早于实际I/O，异常或reply失败都保留它。
     # 函数用途: 运行一份精确短提交并把原pin接到同一个finish关联表。
-    def _apply_short_operation(self, request, peer_pid):
+    def _apply_short_operation(self, request, peer_pid, *, rejection_origin=None):
         identifier = request['operation']
         operation = self._operations.get(identifier) if type(identifier) is str else None
         if operation is None:
@@ -165,7 +184,7 @@ class NativeCommitSession:
         def remember(pin):
             self._handles[seq] = (operation._sources[0], pin)
 
-        result = operation.apply(peer_pid, remember)
+        result = operation.apply(peer_pid, remember, rejection_origin=rejection_origin)
         return {'op': 'applied', 'seq': seq, 'handle': seq, 'result': result}
 
     # LLM: 不自动放弃handles，不允许C收尾先停接收而留下pin；只能在责任已精确结清后关闭原endpoint。

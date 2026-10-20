@@ -157,7 +157,7 @@ class _PrivateInteractionTransaction:
         self._paths = (host.home_paths.owner_home_dir, host.conversation_store.storage.root)
 
     # LLM: 不从新C/新callback补许可；重核原handler credential/SDK字段，私卡再核MAC/锁/admin，首次模型核原scope/work，审批取消核原work；配置仅作资源事实。
-    # 函数用途: 在每次卡行、目录、线程或输入/refs/Wake/deadline写前验证同一个活来源。
+    # 函数用途: 在卡行及输入事务写前验证同一活来源和原runtime_db资源，不能换repo借旧许可。
     def require_current(self):
         from .private_interaction_service import validated_private_interaction_from_config
 
@@ -231,6 +231,7 @@ class _PrivateInteractionTransaction:
         )
         if (
             inputs.store is not store
+            or inputs.runtime_db is not repo
             or inputs.quota is not quota
             or inputs.load_child is not load_child
             or inputs.upsert_wake is not upsert

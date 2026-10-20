@@ -1,6 +1,6 @@
 # LLM: 当前 owner 的原生消息发送工具。目标身份只取可信 owner 结构，不接受模型提供任意用户 ID；
 #   附件必须命中 owner artifact registry、状态 ready、hash 未漂移且真实路径仍在 owner 根内。
-#   真发送统一复用 DeliveryService，修改时同步 delivery/、conversation/channels.py 和测试。
+#   真发送统一复用 DeliveryService，成功回执附真实回复来源但不授机器权限；同步归档、后台收口和测试。
 # 模块用途: 让已连接飞书的 Agent 能把文字和已有产物直接发回自己的用户，而不是只会在服务器写文件。
 from __future__ import annotations
 
@@ -305,7 +305,30 @@ class SendMessageTool(BaseTool):
             attachments,
             payload,
             evidence_refs=evidence_refs,
+            reply_binding=_source_reply_binding(self.agent, scope, delivery_context),
         )
+
+
+# LLM: 仅捕获实际宿主参数及运输目标，不读模型metadata；不完整旧调用仍可发送，但不能认领当前回复槽。
+# 函数用途: 给成功发送绑定原owner、执行线程和来源会话，供原后台收口核对同一回合。
+def _source_reply_binding(agent, scope, context):
+    from ..conversation.host_actor import HostChannelActor
+
+    params = getattr(agent, '_current_run_params', None)
+    actor = getattr(params, 'host_channel_actor', None)
+    if not isinstance(actor, HostChannelActor):
+        return {}
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    values = {key: str(scope.get(key) or '') for key in ('request_id', 'run_id', 'task_id', 'attempt_id')}
+    if (any(not value or value != getattr(params, key, '') for key, value in values.items())
+            or scope.get('session_id') != attrs.get('conversation_thread_id')
+            or actor.owner_id != agent.home_paths.owner_id):
+        return {}
+    return {**values, 'owner_id': agent.home_paths.owner_id,
+            'owner_home': str(agent.home_paths.owner_home_dir),
+            'thread_id': attrs['conversation_thread_id'], 'source_thread_id': actor.source_thread_id,
+            'entry_request_id': actor.entry_request_id, 'conversation_id': actor.conversation_id,
+            'actor_id': actor.actor_id, 'channel': context.channel, 'target': context.target}
 
 
 # LLM: 当前runner/attempt身份只由原委派链读取；损坏或未知来源必须保留异常，不能降为普通外送。
@@ -575,7 +598,7 @@ def _success_payload(
 
 # LLM: 成功外发必须同时返回一份结构化 delivery evidence，供本轮唯一回复出口判断是否还需自动发送；
 #   不能让上层从模型最终正文或日志文本猜测“是不是已经发过”。
-# 函数用途: 构造带当前 owner 已送达事实的工具结果，同时保持公开 output 不暴露 owner 路径。
+# 函数用途: 构造带真实owner回复来源的成功工具结果；绑定仅内部归档，公开output不暴露owner路径。
 def _success_result(
     provider: str,
     message: str,
@@ -583,6 +606,7 @@ def _success_result(
     payload: dict[str, Any],
     *,
     evidence_refs: list[str],
+    reply_binding: dict[str, str] | None = None,
 ) -> ToolHandlerOutcome:
     output = dict(payload)
     return ToolHandlerOutcome(
@@ -594,6 +618,7 @@ def _success_result(
                 "schema_version": "message_tool_delivery.v1",
                 "delivery_status": "sent",
                 "source_owner_delivery": True,
+                **({"reply_binding": reply_binding} if reply_binding else {}),
                 "channel": provider,
                 "content": project_message_paths_for_channel(
                     project_user_reply(message).content, provider

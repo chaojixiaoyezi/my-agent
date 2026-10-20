@@ -1,3 +1,4 @@
+# LLM: 主代理缓存按原typed callback分前后台；后台scope携准确attempt也不免除LocalRunControl与同claim发布核验。
 # LLM: 会话许可只存原Agent级有界缓存；每次以真实canonical owner/run/thread/claim/attempt和有效权限重核scope，重建展示sink不丢许可，旧attempt/插件不得借用。
 # LLM: 原审批纯退休未结只同对象传播和核收；普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 主/子后台共用原审批账；纯退休只写原permission负向事实、不取op或恢复执行权，忙保native未结；插件/claim/原schema保持。
@@ -1109,11 +1110,12 @@ def _agent_approval_session_scope(agent, scope):
         return ""
 
 
-# LLM: main 必须有宿主 typed Params 和同原 claim 的实际执行链；后台还核 native LocalRunControl，JSON 只能核对不能签权。同步主车道缺参/错参、旧 attempt 和原 publisher 测试。
+# LLM: main按实际typed callback区分前后台，不以scope有attempt代替前台来源；后台仍核LocalRunControl/原claim，JSON只核对不能签权。
 # 函数用途: 只读核实主代理当前权限的出处；来源缺失时关闭会话缓存，保留原准确单次审批。
 def _main_approval_session_projection(agent, scope):
     from ..agent_core.runtime.loop_models import RunParams
     from ..agent_core.tool_runtime_ledger import write_boundary_with_runtime_ledger
+    from ..gateway_parts.request_binding import GatewayTaskBindingWriter
     from .local_run_control import LocalRunControl
     from .tool_approval_scope import _foreground_runtime_is_current
 
@@ -1131,13 +1133,15 @@ def _main_approval_session_projection(agent, scope):
                  "attempt_id": current.attempt_id, "agent_run_id": run["agent_run_id"]}
     if not _foreground_runtime_is_current(agent, thread, execution):
         return None
-    if scope.execution_attempt_id:
-        if scope.execution_attempt_id != current.attempt_id:
+    control = current.conversation_task_binding_callback
+    if isinstance(control, GatewayTaskBindingWriter):
+        if not scope.execution_attempt_id or scope.execution_attempt_id != current.attempt_id:
             return None
     else:
-        control = current.conversation_task_binding_callback
         if (not isinstance(control, LocalRunControl) or control.runtime_authority() != execution
                 or control.request_id != current.request_id or not LocalRunControl.__call__(control, None)):
+            return None
+        if scope.execution_attempt_id and scope.execution_attempt_id != current.attempt_id:
             return None
         claim = store.claims.load(scope.thread_id)
         authority = claim.get("runtime_authority")

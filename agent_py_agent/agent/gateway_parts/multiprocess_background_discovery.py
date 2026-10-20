@@ -1,4 +1,5 @@
-# LLM: 原C同backgroundThread只读分页发现；请求T先行再C/lease/Root末门入唯一队列，共享quota/index同Root，默认0不构造，不造remoteAgent或第二账。
+# LLM: 策展按原owner实际配置/本地时钟发现，在_submit重采与原commit门内末核；失格不新造队列或消费状态。
+# LLM: 原C同backgroundThread只读分页发现文件源和RuntimeDB到期行；明确ro且无Agent，T/C/lease/Root末门仍入唯一P3/P5。
 # 原learning FIFO与唯一registry维护共用原来源/短写门；mtime仅CAS，维护不消费新FIFO/调用模型或确认候选。
 # 模块用途: 将原会话、调度、学习、维护与watch来源接到生产请求泵，C撤权时停止新提交，原来源保留。
 from __future__ import annotations
@@ -65,6 +66,30 @@ def _owner_only_blocked(controller, owner_sha, decision):
             and not controller._all_quarantined
             and (owner_sha in controller._unproven_owners or any(key[-1] == owner_sha for key in controller._quarantined))
             and _sources_unchanged(controller, controller._bootstrap_sources))
+
+
+# LLM: 只代表当前同步C提交的时间资格失效，不是JSON状态/权限或source损坏；严禁按相同异常文字捕获其它错误。
+# 类用途: 安全退出尚未产生队列效果的一次策展提交。
+class _CuratorNotDue(Exception):
+    pass
+
+
+# LLM: 仅原C调用，入口可按当前配置重新资格采样；expected之后必须语义配置和timezone相同，原source/hash/revision每次完整重读。
+# 函数用途: 在发现或真正提交窗口核对原owner的策展时间资格，不构造业务Agent。
+def _curator_submission_config(control, owner, ref, *, expected=None):
+    from ..memory_store.curator_models import MemoryCuratorConfig, MemoryCuratorState
+    from ..owner_wake_discovery import curator_work_is_due
+    from .owner_resources import resolve_owner_resource_configuration
+
+    home, config, _ = resolve_owner_resource_configuration(control,owner)
+    timing = (MemoryCuratorConfig.from_agent_config(config),str(getattr(config,'timezone','') or '').strip())
+    if expected is not None and timing != expected:
+        raise BackgroundSourceChanged()
+    value = read_source(control.home_root,ref)
+    if not curator_work_is_due(home.owner_home_dir,MemoryCuratorState.from_dict(value),
+            curator_config=timing[0],timezone_name=timing[1]):
+        raise _CuratorNotDue()
+    return timing
 
 
 # LLM: 原control/Root/lease同源且持续有效才发现/提交；游标仅查询，owner局部blocked不扩散成健康owner禁令，全域失源仍停止，不建权限账。
@@ -155,12 +180,26 @@ class CoordinatorBackgroundRequests:
                 count += int(self._submit(ref))
         return count
 
-    # LLM: 全部路径从原owner_home推导并no-follow；learning优先原FIFO，空时只发现到期canonical registry，不补种子/修改原账。
+    # LLM: ProcessSession只读规范目录冻结原终态；owner配置由原control纯解析，策展用实际interval/dayhour/timezone粗筛不代真实batch；DB仍ro零等待，learning沿原FIFO/registry。
     # 函数用途: 为一个现存owner列出有限的原后台工作引用。
     def _owner_sources(self, target):
         owner, home = target.identity, target.home_dir
         if owner.owner_kind not in {"user", "group"} and owner != OwnerIdentity.local_main():
             return
+        from .owner_conversation_store import owner_conversation_store_from_config
+        from .owner_resources import resolve_owner_resource_configuration
+        from .runtime_wake_source import freeze_runtime_wake, runtime_wake_reader
+
+        if (home / 'runtime.db').is_file():
+            scoped_home, config, _ = resolve_owner_resource_configuration(self.control, owner)
+            store = owner_conversation_store_from_config(config, scoped_home, initialize=False)
+            for row in runtime_wake_reader(home).due_runtime_wakes(now=time.time()):
+                yield freeze_runtime_wake(home, owner, store, row)
+        from ..tooling.process_session_store import process_session_store_root
+        from .process_completion_source import discover_process_completions
+
+        process_paths = _source_page(self, process_session_store_root(home, home), "bg-*.json")
+        yield from discover_process_completions(self.control, owner, process_paths)
         candidates = []
         if float(getattr(self.control.config, "owner_maintenance_scan_interval_seconds", 60.0)) > 0:
             candidates.append(("maintenance", home / "data" / "maintenance.json"))
@@ -169,8 +208,14 @@ class CoordinatorBackgroundRequests:
         scheduler = home / "data" / "scheduler" / "store.json"
         if scheduler.is_file():
             candidates.append(("scheduler", scheduler))
-        if getattr(self.control.config, "memory_curator_enabled", True) and _has_pending_memory_curator_work(home):
-            candidates.append(("curator", home / "memory" / "curator" / "state.json"))
+        if getattr(self.control.config, "memory_curator_enabled", True):
+            from ..memory_store.curator_models import MemoryCuratorConfig
+
+            _, curator_owner_config, _ = resolve_owner_resource_configuration(self.control,owner)
+            curator_config = MemoryCuratorConfig.from_agent_config(curator_owner_config)
+            timezone_name = str(getattr(curator_owner_config,'timezone','') or '').strip()
+            if _has_pending_memory_curator_work(home,curator_config=curator_config,timezone_name=timezone_name):
+                candidates.append(("curator", home / "memory" / "curator" / "state.json"))
         if getattr(self.control.config, "enable_self_learning", False):
             from ..capability.skill_learning_store import SkillLearningStore
 
@@ -188,7 +233,8 @@ class CoordinatorBackgroundRequests:
                 candidates.extend(("policy", path) for path in _source_page(self, root / "progress_policies", "*.json"))
         for kind, path in candidates:
             try:
-                ref = freeze_source(self.control.home_root, owner, path, kind)
+                options = {'curator_config':curator_config,'timezone_name':timezone_name} if kind == 'curator' else {}
+                ref = freeze_source(self.control.home_root, owner, path, kind, **options)
                 if kind == "learning" and ref["source_ref"] == "data/skill_learning/registry.json":
                     from ..capability.skill_learning_maintenance import learning_maintenance_due
 
@@ -247,11 +293,15 @@ class CoordinatorBackgroundRequests:
         finally:
             live[0] = False
 
-    # LLM: refs只提供运输幂等键；源完整读取先于T，原T内callback最后核原C/lease/Root，closed/replay不新发请求执行权。
+    # LLM: ref不含配置权；策展在_submit入口重采实际配置/source资格并冻结本次预期，原T→controller/lease/runtime门内再核同配置及当下资格，W/Count0协议不变。
     # 函数用途: 沿唯一输入回执提交一次后台来源，重复发现返回原请求。
     def _submit(self, ref):
         self.require_original()
         owner = target_owner(ref)
+        try:
+            timing = _curator_submission_config(self.control,owner,ref) if ref['kind'] == 'curator' else None
+        except _CuratorNotDue:
+            return False
         frozen_digest = source_digest(ref)
         live = [True, os.getpid(), threading.get_ident()]
 
@@ -262,11 +312,19 @@ class CoordinatorBackgroundRequests:
                 raise ValueError("background_original_commit_window_required")
             if source_digest(ref) != frozen_digest:
                 raise BackgroundSourceChanged()
-            return self.commit(owner, operation)
+            # LLM: 真正controller/lease/runtime门等待后再核时钟/配置/source；回调必须返回原IO tuple，失格仅抛本私有控制流。
+            # 函数用途: 在最后队列写入之前拒绝已经过期的候选资格。
+            def guarded_operation():
+                if timing is not None:
+                    _curator_submission_config(self.control,owner,ref,expected=timing)
+                return operation()
+            return self.commit(owner, guarded_operation)
 
         try:
             return enqueue_source(self.control.paths, self.control.home_root, ref,
                                   commit_transition=transition)[1]
+        except _CuratorNotDue:
+            return False
         except _OwnerBackgroundBlocked as blocked:
             if blocked.owner_sha != owner_digest(owner):
                 raise

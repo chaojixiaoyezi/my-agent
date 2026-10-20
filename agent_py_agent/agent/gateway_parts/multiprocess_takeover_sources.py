@@ -1,9 +1,10 @@
-# LLM: P1不是停止证明；规范角色集合/旧代拒绝不变，closed第三次读复用原有界strict snapshot，默认CountNone仍原nofollow读链。
+# LLM: P1不是停止证明；默认CountNone不变。仅原闭包旧W到固定当前P4的完整发表可typed整组最多三读，根/父链/C/P4/旧闭包跨轮固定，其它变化硬拒。
 # 模块用途: 发现原旧域及角色缺口；v2完整关闭范围可解除角色拒绝，非空P1仍需fresh P2，缺旧历史不补封或授信。
 import hashlib
 import json
 import os
 import re
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 from ..common.nofollow_fs import list_names_beneath, open_directory_beneath, read_bytes_beneath
@@ -24,11 +25,12 @@ from .multiprocess_takeover_unresolved_source import (
 _TAKEOVER_EVIDENCE_READ_MAX_BYTES = 4 * 1024 * 1024
 
 
-# LLM: 默认调用保持原角色拒绝；正count消费原v2关闭范围，旧role/C/P4完整raw双读，当前W只容原五动态字段，不由stopped/PID授信。
+# LLM: 默认调用保持原角色拒绝；正count消费原v2关闭或真实当前C捕获的standalone variant，后者只剔除准确旧state，所有MP角色/P4与双读不变。
 # 函数用途: 查完整规范角色覆盖，拒绝旧角色和读取期间的角色增删，避免正常心跳发表临时名造成永久隔离。
-def require_role_coverage(paths, current_c_run_id, *, count=None, captured=(), committed=()):
+def require_role_coverage(paths, current_c_run_id, *, count=None, captured=(), committed=(), standalone=None):
     if count is not None:
-        return _closed_role_coverage(paths, current_c_run_id, count, captured, committed)
+        return _closed_role_coverage(paths, current_c_run_id, count, captured, committed,
+                                     **({"standalone": standalone} if standalone is not None else {}))
     _check_role_marker(paths.root, ("gateway_state.json",), current_c_run_id)
     names = _role_marker_names(paths.root)
     for name in names:
@@ -58,15 +60,74 @@ def _check_role_marker(root, parts, current_c_run_id, *, snapshot_retries=0) -> 
         raise ValueError("old_role_lifecycle_unproven")
 
 
-# LLM: 原v2/固定writer及角色首末全核不变；当前role第三次读显式原snapshot2，不重捕授权，当前W仍原P4/五动态分界。
-# 函数用途: 刷新时核完整旧角色并安全读当前标记；保留全部三次读取、旧责任/fresh P2与未知拒绝。
-def _closed_role_coverage(paths, current, count, captured, committed=()):
+# LLM: 仅本模块完整核旧闭包后判定的旧W到当前P4发表使用此类型；同文普通ValueError、C变化或未知记录不能进入重读。
+# 类用途: 标识本轮完整角色快照跨过一次已核的工作进程代次发表。
+class _ClosedWorkerPublished(ValueError):
+    pass
+
+
+# LLM: 只读打开原root及workers；首轮retain保原FD到整组结束且由原ExitStack全释放，复核只比较身份，缺目录与空设施分开，不创建或resolve。
+# 函数用途: 为整组有限重读固定相同规范目录锚点。
+def _role_directory_anchors(root, *, retain=None):
+    result = []
+    for parts in ((), ('workers',)):
+        try:
+            descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+        except FileNotFoundError:
+            result.append(None)
+            continue
+        if retain is not None:
+            retain.callback(os.close, descriptor)
+        try:
+            info = os.fstat(descriptor)
+            result.append((info.st_dev, info.st_ino))
+        finally:
+            if retain is None:
+                os.close(descriptor)
+    return tuple(result)
+
+
+# LLM: 只丢弃准确typed整轮，最多三轮；首次root/workers、C raw、P4和已核闭包原件固定，硬异常不重读，不刷新controller基线或清隔离。
+# 函数用途: 在合法旧W首次当前发表窗口内重新完整核角色，持续变化仍拒绝。
+def _closed_role_coverage(paths, current, count, captured, committed=(), *, standalone=None):
+    if count == 0:
+        return _closed_role_coverage_once(paths, current, count, captured, committed,
+                                          standalone=standalone, frozen=[])
+    with ExitStack() as retained:
+        anchors, frozen = _role_directory_anchors(paths.root, retain=retained), []
+        for attempt in range(3):
+            if _role_directory_anchors(paths.root) != anchors:
+                raise ValueError('generation_role_sources_changed')
+            try:
+                result = _closed_role_coverage_once(paths, current, count,
+                    frozen[0][3] if frozen else captured, committed, standalone=standalone, frozen=frozen)
+            except _ClosedWorkerPublished as error:
+                if (type(error) is not _ClosedWorkerPublished or attempt == 2
+                        or _role_directory_anchors(paths.root) != anchors):
+                    raise
+                continue
+            if _role_directory_anchors(paths.root) != anchors:
+                raise ValueError('generation_role_sources_changed')
+            return result
+
+# LLM: standalone首末核原scope；原v2/P4/叶snapshot2、旧死亡/责任及三次role读保持，跨轮仅接受首次完整核验的相同C/P4/闭包，不混拼行。
+# 函数用途: 完成一轮原完整角色核验，并在末门分类准确旧W发表。
+def _closed_role_coverage_once(paths, current, count, captured, committed=(), *, standalone=None, frozen):
     from .multiprocess_generation_metadata import (
         captured_generation_sources,
         require_closed_generation,
     )
 
+    if standalone is not None:
+        from .standalone_migration import StandaloneMigration
+
+        if type(standalone) is not StandaloneMigration:
+            raise ValueError("standalone_original_source_required")
+        standalone.require_role_scope(paths, current, count)
     roles = _role_snapshot(paths.root)
+    if standalone is not None:
+        standalone.require_unchanged()
+        roles = standalone.filter_roles(roles)
     registry = _discovery_registry(paths.root)
     if registry is not None and registry[0]['c_run_id'] == current:
         from .multiprocess_executor_identity import process_birth
@@ -107,15 +168,24 @@ def _closed_role_coverage(paths, current, count, captured, committed=()):
         elif value.get('c_run_id') not in generations:
             raise ValueError('old_role_lifecycle_unproven')
     latest = _role_snapshot(paths.root)
+    if standalone is not None:
+        standalone.require_unchanged()
+        latest = standalone.filter_roles(latest)
     if _discovery_registry(paths.root) != registry:
         raise ValueError('generation_role_sources_changed')
-    _require_stable_roles(roles, latest, registry, current, count)
+    binding = (registry, roles.get('gateway_state.json'), tuple(sorted(roles)), tuple(sorted(generations.items())))
+    if frozen and binding != frozen[0]:
+        raise ValueError('generation_role_sources_changed')
+    if not frozen:
+        frozen.append(binding)
+    _require_stable_roles(roles, latest, registry, current, count, closed=tuple(generations))
     return tuple(sorted(generations.items()))
 
 
-# LLM: C及旧role仍按完整raw；当前规范W的两份完整schema均须匹配同一P4，仅原producer五字段可变，集合变化拒绝。
-# 函数用途: 区分正常心跳发表与角色/旧代来源漂移，不查活issuer、不把分类结果当ready或关闭授权。
-def _require_stable_roles(before, after, registry, current, count):
+# LLM: C/旧role完整raw和当前W五动态门不变；仅已核闭包旧W到同P4完整当前W先记候选，所有其它marker硬门检查完才抛typed，不能遮住未知或危险变化。
+# 函数用途: 分类一次合法工作进程代次发表，结果不授ready、准入、关闭或执行权。
+def _require_stable_roles(before, after, registry, current, count, *, closed=()):
+    published = False
     if set(before) != set(after):
         raise ValueError('generation_role_sources_changed')
     for name, content in before.items():
@@ -130,7 +200,14 @@ def _require_stable_roles(before, after, registry, current, count):
             if first != last:
                 raise ValueError('generation_role_sources_changed')
         elif content != after[name]:
-            raise ValueError('generation_role_sources_changed')
+            latest = json.loads(after[name])
+            if (match is None or value.get('c_run_id') not in closed or registry is None
+                    or type(latest) is not dict or latest.get('c_run_id') != current):
+                raise ValueError('generation_role_sources_changed')
+            _current_worker_role(registry[0], latest, WorkerPartition(int(match[1]), count, current))
+            published = True
+    if published:
+        raise _ClosedWorkerPublished('generation_role_sources_changed')
 
 
 # LLM: 先经原完整版本/schema/PID/出生/instance/count/gen核验，再剔除producer确切五动态字段；未知新键仍由原schema拒绝。

@@ -1,3 +1,4 @@
+# LLM: 本地新提交统一认证HTTP，先同ID显示登记，原owner由C准备；已有附着job只观察不重投。
 # LLM: 本模块是 Gateway TUI 的轻量执行边界；导入时不得加载本地 SimpleAgent、模型后端、工具注册表或 Conversation runtime。
 # 模块用途: 提交并轮询 Gateway 聊天请求，区分请求交付成功和模型回复完整；与本地 TUI 共用长度限制提示。
 
@@ -10,7 +11,7 @@ from typing import Any
 from .tui_runtime import TuiTurnSummary
 
 
-# LLM: 已有 gateway_request_id 表示持久提交成功，必须沿原终态信封等待，不能因重启瞬间 PID 不可见丢弃回执或重新提交。
+# LLM: 已有gateway_request_id只接原已确认输入的同ID观察；本次HTTP未确认在prepare抛错，不进入无限续等，也不重投。
 # 未提交请求仍检查服务；观察超时不是任务终态，页面存活时保留同一请求与流游标，不重提业务。
 # 函数用途: 持续等原请求的真实终态；长时间无活动只提示，退出页面及时停止观察，不取消服务端任务。
 def _worker_gateway_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
@@ -81,8 +82,9 @@ def _submit_gateway_job(ctx: Any):
     return _submit_new_gateway_job(ctx.cfg, ctx.job, ctx.turn_inject)
 
 
-# LLM: 入队前只登记显示去重 ID；运行/停止快照仍在 durable submit 成功后发布，不让未提交编号获得控制权。
+# LLM: POST前只登记显示去重ID；只在原同ID排队回执确认后保存job绑定，未确认抛错交原finally清理本地等待。
 # 函数用途: 提交含附件 refs 的 TUI 请求，保持真实工作目录，并防止自己的正文经同会话观察流再显示一次。
+# LLM: 新提交透传原输入和既有client_message_id/request_id，同canonical ID在HTTP effect前登记；不自填宿主owner或未发布expected_turn_id。
 def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
     from .gateway_client import ChatRequestContent, submit_chat_request
 
@@ -98,6 +100,8 @@ def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
             resume_context=job.resume_context,
             chat_session_id=cfg.current_session_id,
             system_task=job.system_task,
+            original_prompt=getattr(job, "original_prompt", None),
+            client_message_id=str(getattr(job, "client_message_id", "") or getattr(job, "request_id", "")),
             interactive_approvals=job.tool_approval,
             rich_transcript=job.rich_transcript,
         ),
@@ -110,7 +114,7 @@ def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
     return request_id, chunk_path, cfg.paths.terminal / f"{request_id}.json"
 
 
-# LLM: stop/control 必须指向 Gateway 返回的真实 request id；更新只发生在提交成功之后。
+# LLM: stop/control只携带同canonical公式的请求ID作目标提示；执行权限仍由原宿主门核验，已知ID不证明已经受理。
 # 函数用途: 将运行快照中的请求 id 切换为 Gateway canonical id。
 def _publish_gateway_request_id(ctx: Any, request_id: str) -> None:
     with ctx.cfg.state_lock:

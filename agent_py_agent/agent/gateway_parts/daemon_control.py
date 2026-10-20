@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,7 @@ from .daemon_metadata import (
     _write_json_file,
     build_process_identity,
     process_host_id,
+    process_identity_is_live,
 )
 from .process_control import is_pid_alive as _is_pid_alive
 from .process_control import wait_for_pid_exit as _wait_for_pid_exit
@@ -304,9 +306,8 @@ def _stop_request_is_new_enough(payload: dict[str, object], process_started_at: 
     return requested_at >= process_started_at
 
 
-# LLM: All external Gateway stop writers use one atomic target-bound contract. The caller may
-# supply the already-resolved PID, but the persisted identity always includes PID/start-time/host.
-# 函数用途: 原子写入只对指定 Gateway 进程生效的停止请求，并返回落盘内容供日志复用。
+# LLM: 默认调用保持原目标停止合同；显式expected_identity只在原PID锁内同record/role/真实birth完全一致时写，换代/未知拒绝，不借TTL签停止权。
+# 函数用途: 原子写发给准确Gateway代次的停止请求，可保守绑定调用方已冻结的旧身份。
 def write_targeted_gateway_stop_request(
     pid_path: Path,
     stop_request_path: Path,
@@ -314,19 +315,28 @@ def write_targeted_gateway_stop_request(
     reason: str,
     target_pid: int | None = None,
     source: str = "",
+    expected_identity: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
-    identity = gateway_process_identity(pid_path, target_pid)
-    if identity is None:
-        return None
-    payload: dict[str, object] = {
-        "requested_at": time.time(),
-        "reason": reason,
-        "target_process": identity,
-    }
-    if source:
-        payload["source"] = source
-    _write_json_file(stop_request_path, payload)
-    return payload
+    with _flocked_sidecar(pid_path) if expected_identity is not None else nullcontext():
+        identity = gateway_process_identity(pid_path, target_pid)
+        if identity is None:
+            return None
+        if expected_identity is not None:
+            report = read_pid_record_report(pid_path)
+            record = report.payload or {}
+            recorded = {key: record.get(key) for key in ("host_id", "pid", "start_time")}
+            if (report.load_error is not None or record.get("kind") != "my-agent-gateway"
+                    or identity != expected_identity or recorded != expected_identity
+                    or process_identity_is_live(expected_identity) is not True):
+                return None
+        payload: dict[str, object] = {
+            "requested_at": time.time(), "reason": reason, "target_process": identity,
+        }
+        if source:
+            payload["source"] = source
+        _write_json_file(stop_request_path, payload)
+        return payload
+
 
 
 # LLM: Cleanup must compare and unlink under the same sidecar lock used by atomic writers. An old

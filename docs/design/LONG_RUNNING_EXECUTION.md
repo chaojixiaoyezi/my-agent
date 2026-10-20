@@ -247,3 +247,11 @@ CSV 工具 16 项测试独立重跑通过；另一正常窗口日志工具独立
 累计三个工作片继续读文件、运行测试并终态 DONE。主代理接回、Compact 一次并公开最终结果，无需用户发送继续。
 普通 tester 角色首轮没有实际派孙代理，仅作为父子协作样本，不混作递归恢复证据。
 新增单路慢模型后续请求已经过服务槽位确认长预填充并正常开始生成，但再次重复成功命令，验收仍未通过。
+
+## 2026-10-20 多进程受管命令完成源补齐（候选）
+
+MP原来只消费已存在的Wake/observation，而ProcessSession完成Wake只在Count0 prepare_tick/活动模型安全点生产，导致模型已返回后自然退出无人唤醒。C现从原owner canonical受保护进程目录只读终态记录，冻结整raw/revision、原owner与completion_target；不调用Store load/list/redo、不造业务Agent。原MP来源引用只运输session定位，实际目录从owner规范函数计算，不信任target作为读取根。
+
+owner消费者沿原P3/P5/shortscope，先T/C再process事务，锁内重核整record/目标，复用原`process-exit:<session>`去重Wake及notice。自己的notice revision变化不当外来漂移；停止只记explicit_stop，running/unknown/activation不发自然完成。Wake或notice本地I/O失败仍保原pending运输，原去重补齐；原actual异常不转成功，不取消TaskLink或重跑命令。Count0原默认循环与安全点不扩。
+
+683原exited0/target完整/notice空为原实际失败；本片组件通过不能代替新源真实完成后的模型回读及业务验收。

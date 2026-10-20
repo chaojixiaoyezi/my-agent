@@ -1,3 +1,4 @@
+# LLM: 原宿主停止观察只接精确claim，领取前拒早停、原finally后只读核收；不取消TaskLink或独立资源。
 # LLM: 后台执行只沿原 claims 领取、续租和结算；领取后重查精确来源，须联测取消、Compact、恢复和来源消费。
 # 不持有 Agent/完整 Store，不消费普通来源或创建执行器；共享心跳继续使用 run_claim.py。
 # 模块用途: 领取原后台车道并重查状态；actual未结保原claim，其它结果沿原精确结算，不新造执行状态。
@@ -125,10 +126,15 @@ def _host_delivery_bound_turn(kwargs: dict) -> str:
 
 # LLM: 领取前登记中断身份，直到本片结算后释放；控制与恢复先裁决，过期来源只关闭 claim，不消费其它信封。
 # 函数用途: 防止排队期间已停止、待恢复或已被处理的工作开始副作用，忙碌车道不启动心跳或模型。
+# LLM: 当前后台宿主已停时在领取写前拒绝，不将后继claim造出再取消；没有观察者的原路径不变。
+# 函数用途: 沿原领取与准入运行一片，停服务不等于取消持久业务。
 def run_claimed(
     dependencies: BackgroundClaimDependencies,
     kwargs: dict,
 ) -> BackgroundMainAgentReport | None:
+    from .background_shutdown import check_background_admission
+
+    check_background_admission()
     task_id = str(kwargs.get("task_id") or "").strip()
     if dependencies.bound_delivery_turn is not None:
         bound = dependencies.bound_delivery_turn(str(kwargs.get("thread_id") or ""))
@@ -211,6 +217,7 @@ def run_claimed(
 # LLM: 领取后登记唯一 claim 中断名，旧控制不能打到同任务的新片；保留外层旧任务名与 stop→facts→finish 顺序。
 # LLM: unsettled仅控制本栈finally，不是第二状态源；四actual原对象上抛且不finish原tuple，普通/取消语义不变。
 # LLM: 只延长原claim binding到finally，interrupt注册范围不变；原BG输入finish在still-live source里提交，不提前closing Gateway。
+# LLM: 宿主观察仅接同栈已登记的准确claim中断名；早停拒后续片，不取消TaskLink或独立资源。
 # 函数用途: 运行原后台片并停止心跳，未结保claim，正常/取消/让出才按原结果结算。
 def run_with_heartbeat(
     dependencies: BackgroundClaimDependencies,
@@ -233,6 +240,10 @@ def run_with_heartbeat(
     with bind_claim_execution(ClaimExecutionBinding(dependencies.claims, kwargs["thread_id"], claim_id, claim_scope_id)):
         try:
             with register_interruptible(conversation_claim_interrupt_name(claim_id)):
+                from .background_shutdown import observe_background_claim
+                from .claim_execution_binding import current_claim_execution
+
+                observe_background_claim(current_claim_execution())
                 if is_interrupted():
                     raise InterruptedError("后台工作片已被中断")
                 return _run_once_with_bound_turn_check(dependencies, kwargs)
@@ -259,6 +270,10 @@ def run_with_heartbeat(
             heartbeat.stop()
             if not unsettled:
                 _finish_slice(dependencies, kwargs, (claim_id, claim_scope_id), _SliceEnd(status, attempt_status, error, admission))
+            from .background_shutdown import finish_background_claim
+            from .claim_execution_binding import current_claim_execution
+
+            finish_background_claim(current_claim_execution())
 
 
 # LLM: 只在准入码属于 _SOURCE_FINISHED_ADMISSIONS 时调用 retire_source（与 terminal_task_link 同一条结案路径，不另起 mark_handled）；

@@ -1,4 +1,4 @@
-# LLM: 后台交付沿原来源、canonical和整封冻结顺序；首次认证拒绝的宿主义务独立于普通结果静默，不能扩大owner/actor或重执业务。
+# LLM: 普通与必要通知共核原canonical工具及工作attempt，已外发在canonical前冻结；后台交付沿原来源、canonical和整封冻结顺序；首次认证拒绝的宿主义务独立于普通结果静默，不能扩大owner/actor或重执业务。
 # 模块用途: 维护后台回复和必要失败提醒的原投递、发送前代次复核与冻结重投，回执仍唯一证明外发。
 from __future__ import annotations
 
@@ -163,6 +163,14 @@ def _record_background_owner_response(
     )
     # 投递服务执行最终脱敏，历史保存其回执正文；缺少正文的既有替身保留已净化投影。
     committed_content = str(getattr(receipt, "content", projection.content) or "")
+    freeze = _OwnerDeliveryFreeze(request=request, content=committed_content,
+        delivery_artifacts=delivery_artifacts, assistant_commentaries=assistant_commentaries,
+        evidence_refs=evidence_refs, message_metadata=message_metadata, delivery_status=delivery_status,
+        receipt_id=str(getattr(receipt, 'receipt_id', '') or ''), target=delivery_context.target,
+        ownership=route.ownership, canonical_record=route.canonical_record or delivery_status == 'sent', persisted=False)
+    if delivery_status == 'sent':
+        # 原外发已发生，先保存已有wake的整封回执；canonical失败后只能补账，不能重执模型或运输。
+        _freeze_pending_owner_delivery(delivery.store, freeze)
     commit = _commit_background_response(
         delivery,
         request,
@@ -178,23 +186,7 @@ def _record_background_owner_response(
         display_snapshot=display_snapshot,
         audit_refs_settled=bool(frozen_retry is not None and frozen_retry.external_sent),
     )
-    frozen_now = _freeze_pending_owner_delivery(
-        delivery.store,
-        _OwnerDeliveryFreeze(
-            request=request,
-            content=projection.content,
-            delivery_artifacts=delivery_artifacts,
-            assistant_commentaries=assistant_commentaries,
-            evidence_refs=evidence_refs,
-            message_metadata=message_metadata,
-            delivery_status=delivery_status,
-            receipt_id=str(getattr(receipt, "receipt_id", "") or ""),
-            target=delivery_context.target,
-            ownership=route.ownership,
-            canonical_record=route.canonical_record,
-            persisted=commit.persisted,
-        ),
-    )
+    frozen_now = _freeze_pending_owner_delivery(delivery.store, replace(freeze, persisted=commit.persisted))
     return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
 
 
@@ -746,13 +738,52 @@ def _record_transcript_audit_refs(
     )
 
 
-# LLM: message-tool 回执须满足本请求的结构化交付规则；模型口头宣称发送不能抑制宿主交付。
-# 函数用途: 判断本片是否已有可复用的直接消息投递，避免再次向用户发送。
-def message_tool_delivery_satisfied(
-    request: BackgroundDeliveryRequest,
-    deliveries: tuple[dict[str, object], ...],
-) -> bool:
-    return any(_delivery_satisfies_request(request, item) for item in deliveries)
+# LLM: normal与required必须复读同一原操作/信封/owner/目标及工作attempt；通知轮身份不能替代原工作身份，正文不作匹配。
+# 函数用途: 筛选已经真实回到本次来源会话的工具回复，假字典和其它合法目标均不能阻止宿主通知。
+def committed_source_replies(agent, request, context, deliveries, *, execution_identity=None):
+    from ..local_storage.tool_operations import ToolOperationStateError
+    from ..runtime_db.managed_operation_store import ManagedOperationStore
+    from ..scheduler.execution import validate_delivery_origin
+    from .host_actor import background_host_actor
+    from .runtime import _scheduler_run_id, _session_message_run_id, _session_task_run_id
+
+    identity = execution_identity or {}
+    if not identity or not all(identity.get(key) for key in ('request_id', 'run_id', 'task_id', 'attempt_id')):
+        return ()
+    actor = background_host_actor(agent, request.thread_id, request.task_id)
+    if actor is None or not validate_delivery_origin(agent, request, context):
+        return ()
+    expected = {'owner_id': agent.home_paths.owner_id, 'owner_home': str(agent.home_paths.owner_home_dir),
+        'request_id': _scheduler_run_id(request) or _session_task_run_id(request) or _session_message_run_id(request) or request.task_id,
+        'run_id': identity['run_id'], 'attempt_id': identity['attempt_id'],
+        'task_id': request.task_id, 'thread_id': request.thread_id,
+        'source_thread_id': context.thread_id, 'entry_request_id': actor.entry_request_id,
+        'conversation_id': actor.conversation_id, 'actor_id': actor.actor_id,
+        'channel': context.channel, 'target': context.target}
+    if identity['request_id'] != expected['request_id'] or identity['task_id'] != expected['task_id']:
+        return ()
+    verified = []
+    for item in deliveries:
+        binding = item.get('reply_binding') if isinstance(item, dict) else None
+        if (not isinstance(binding, dict) or any(binding.get(key) != value for key, value in expected.items())
+                or not binding.get('operation_id') or item.get('schema_version') != 'message_tool_delivery.v1'
+                or item.get('delivery_status') != 'sent' or item.get('source_owner_delivery') is not True
+                or item.get('channel') != context.channel or not item.get('receipt_id')
+                or not (str(item.get('content') or '').strip() or item.get('attachments'))):
+            continue
+        evidence = {**item, 'reply_binding': {key: value for key, value in binding.items() if key != 'operation_id'}}
+        try:
+            operation = ManagedOperationStore(agent.subagents.runtime_db).get_tool_operation(
+                owner_id=expected['owner_id'], run_id=expected['run_id'], task_id=expected['task_id'],
+                attempt_id=expected['attempt_id'], operation_id=binding['operation_id'], tool_name='send_message')
+        except ToolOperationStateError:
+            continue
+        if (operation is None or operation.status != 'succeeded' or operation.unknown_reason
+                or operation.result.get('ok') is not True or operation.result.get('handler_executed') is not True
+                or operation.result.get('result_envelope', {}).get('delivery_evidence') != evidence):
+            continue
+        verified.append(item)
+    return tuple(verified)
 
 
 # LLM: 报告资格只读精确事件类型、schema、发现编号和交付引用；准备、投递和唤醒确认共用此判据。
@@ -860,61 +891,22 @@ def message_tool_delivery_reason(request: BackgroundDeliveryRequest) -> str:
     return "scheduled_message_tool_delivery"
 
 
-# LLM: 仅镜像已经验证的真实发送回执，按 receipt_id 向原 store 幂等追加，不再调用渠道。
-# 函数用途: 把工具直接发出的正文和附件写入用户会话，重放时避免双写。
-def mirror_message_tool_deliveries(
-    store: ConversationStore,
-    request: BackgroundDeliveryRequest,
-    delivery_context: DeliveryContext,
-    deliveries: tuple[dict[str, object], ...],
-) -> str:
-    rendered: list[str] = []
-    for item in deliveries:
-        if not _delivery_satisfies_request(request, item):
-            continue
-        receipt_id = str(item.get("receipt_id") or "").strip()
-        if not receipt_id:
-            continue
-        content = str(item.get("content") or "")
-        attachments = [
-            dict(ref)
-            for ref in (
-                item.get("attachments") if isinstance(item.get("attachments"), list) else []
-            )
-            if isinstance(ref, dict)
-        ]
-        store.messages.append_once(
-            {
-                "thread_id": request.thread_id,
-                "role": "assistant",
-                "content": content,
-                "channel": str(item.get("channel") or delivery_context.channel),
-                "metadata": {
-                    "reason": request.reason,
-                    "task_id": request.task_id,
-                    "delivery_artifacts": attachments,
-                    "background_delivery_reason": message_tool_delivery_reason(request),
-                    "evidence_refs": [
-                        str(ref).strip()
-                        for ref in (
-                            item.get("evidence_refs")
-                            if isinstance(item.get("evidence_refs"), list)
-                            else []
-                        )
-                        if str(ref).strip()
-                    ],
-                    "message_tool_delivery": {
-                        "receipt_id": receipt_id,
-                        "delivery_status": "sent",
-                        "deduplicated": item.get("deduplicated") is True,
-                    },
-                },
-            },
-            dedupe_key=f"message_tool_delivery:{receipt_id}",
-        )
-        if content.strip():
-            rendered.append(content)
-    return "\n\n".join(rendered)
+# LLM: 调用方只传共核后且满足原reason/refs的回执；沿原external_sent冻结出口补canonical，失败重入不再次外发。
+# 函数用途: 把同槽工具正文、附件和原证据引用整封保存到原来源会话，返回实际提交事实并保留原回执metadata。
+def mirror_message_tool_deliveries(delivery, request, context, deliveries, *, delivery_reason):
+    content = "\n\n".join(str(item.get('content') or '') for item in deliveries)
+    artifacts = tuple(dict(ref) for item in deliveries for ref in item.get('attachments', ()) if isinstance(ref, dict))
+    first = deliveries[0]
+    refs = tuple(dict.fromkeys(str(ref) for item in deliveries for ref in item.get('evidence_refs', ()) if str(ref).strip()))
+    metadata = _background_owner_message_metadata(request, delivery_reason=delivery_reason,
+        projection_status='public', delivery_artifacts=artifacts,
+        evidence_refs=refs, operation_verification=None, frozen_retry=None)
+    metadata['message_tool_delivery'] = {'receipt_id': first['receipt_id'], 'delivery_status': 'sent',
+        'deduplicated': first.get('deduplicated') is True}
+    return record_background_response(delivery, request, context, content,
+        delivery_artifacts=artifacts, deliver=True, delivery_reason=delivery_reason,
+        frozen_retry=FrozenOwnerDelivery(content=content, external_sent=True,
+            receipt_id=first['receipt_id'], message_metadata=metadata, evidence_refs=refs))
 
 
 # LLM: 原产物只提供引用/hash/size；owner_root 由当前已验证宿主另行提供，不能从序列化JSON重建权限或内容。

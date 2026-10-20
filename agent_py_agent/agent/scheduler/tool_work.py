@@ -6,7 +6,7 @@ import json
 import time
 
 
-# LLM: 调用方已 mark_run_running 且持有原租约，中断沿原后台路径传播；工具失败与通知失败分别记录。
+# LLM: 原租约与工具不变；只有typed认证义务才进入通知热轮，普通NO失败零新增core/model，actual未结不伪结。
 # 函数用途: 运行NO工具并保存结果；准确认证拒绝交原通知表达，普通业务保持零模型与原TaskLink收口。
 def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None):
     from ..agent_core.runtime.loop_models import RunParams
@@ -24,9 +24,16 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     execution, output = execute_tool_work(agent, params, tool_name=action['name'], arguments=action['arguments'])
     ok = execution.result.ok
     if not ok and notify is not None:
-        from ..conversation.required_user_action import freeze_tool_notice
-        if freeze_tool_notice(agent, _run_request(kwargs), execution.result):
-            return notify(kwargs)
+        from ..conversation.required_user_action import (
+            freeze_tool_notice,
+            required_action_from_result,
+        )
+        if required_action_from_result(execution.result) is not None:
+            from ..conversation.host_notification_scope import notification_scope
+            request = _run_request(kwargs)
+            with notification_scope(agent, request):
+                if freeze_tool_notice(agent, request, execution.result):
+                    return notify(kwargs)
     if ok:
         try:
             value = json.loads(output)

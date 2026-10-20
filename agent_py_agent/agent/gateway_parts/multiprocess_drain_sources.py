@@ -1,4 +1,4 @@
-# LLM: 默认P6完整目录/raw合同不变；仅generation显式投影原已发表责任，固定设施仍核nofollow形状，旧expected不迁移，同步namespace/六类held测试。
+# LLM: 默认P6完整目录/raw不变；generation仅完整末核证实的typed名称集冲突可有限重读；首读None须确认名称已离开，叶异常/旧expected仍硬拒。
 # 模块用途: 读取停止持久责任，并为generation区分原辅助流/暂存；两者均不授C/W、物理或封存权。
 import hashlib
 import os
@@ -10,6 +10,7 @@ from ..common.nofollow_fs import (
     _openat_file,
     _read_descriptor,
     open_directory_beneath,
+    read_bytes_beneath,
 )
 from ..common.strict_json import load_strict_json
 from .multiprocess_records import deserialize_record
@@ -175,8 +176,51 @@ def _generation_directory_chain(root, parts):
     return tuple(identities)
 
 
-# LLM: 显式generation同原FD读责任raw；设施只在两轮实际身份都存在时比替换，None仅原精确设施FileNotFound；责任/全prefix/expected不松，无重试，默认P6不调用。
-# 函数用途: 容纳原writer成功replace或失败finally自然清暂存，仍拒可见设施替换、未知、危险形状及责任漂移。
+# LLM: 仅本模块完整读取后证实的名称集冲突可触发有界重读；链/设施/叶异常不能转成此类型，也不授来源权。
+# 类用途: 区分普通并发发表造成的名称变化与不可重读的安全或完整性失败。
+class _PublishedNamesChanged(ValueError):
+    pass
+
+
+# LLM: 同次观察跨全部重读累积，消失不能擦除已见身份；自然设施生灭仍可接受，但同名再次出现必须原identity。
+# 函数用途: 比较并记住本次快照中观察到的设施身份，不把重读当作新的设施授权基线。
+def _remember_generation_facilities(observed, current):
+    for name, identity in current.items():
+        if identity is None:
+            continue
+        if name in observed and observed[name] != identity:
+            raise ValueError('generation_source_facility_changed')
+        observed[name] = identity
+
+
+# LLM: 同原FD/首全链读取；仅reader返回None延后到末核，硬异常不捕；缺叶仍列名硬拒，确认离开才typed重读，旧expected不变。
+# 函数用途: 完整核其它责任、链及设施后区分合法归档窗口；名称变化丢弃本轮全部字节，不混拼或补造责任。
+def _published_source_rows(root, parts, descriptor, chain, facilities):
+    if _generation_directory_chain(root, parts) != chain:
+        raise ValueError('drain_namespace_changed')
+    names, current_facilities = _generation_source_names(root, parts, descriptor)
+    _remember_generation_facilities(facilities, current_facilities)
+    rows, missing = [], []
+    for name in names:
+        content = read_bytes_beneath(root, (*parts, name), max_bytes=_DRAIN_SOURCE_READ_MAX_BYTES,
+                                     require_dir_fd=True, snapshot_retries=2)
+        if content is None:
+            missing.append(name)
+        else:
+            rows.append((name, content))
+    after, current_facilities = _generation_source_names(root, parts, descriptor)
+    if _generation_directory_chain(root, parts) != chain:
+        raise ValueError('drain_namespace_changed')
+    _remember_generation_facilities(facilities, current_facilities)
+    if any(name in after for name in missing):
+        raise FileNotFoundError(next(name for name in missing if name in after))
+    if after != names:
+        raise _PublishedNamesChanged('drain_namespace_changed')
+    return tuple(rows)
+
+
+# LLM: generation只捕完整末核的typed名称冲突，最多3读；首次链/设施不刷新，同名仍在的None及reader异常/同inode/raw硬拒，默认P6不调用。
+# 函数用途: 在固定原目录身份下有限重读并发发表，持续变化仍拒绝，不清隔离、改账或绕旧历史来源校验。
 def _published_directory_snapshot(root, parts):
     _generation_namespace(parts)
     try:
@@ -189,16 +233,15 @@ def _published_directory_snapshot(root, parts):
         chain = _generation_directory_chain(root, parts)
         if chain[-1] != identity:
             raise ValueError('drain_namespace_changed')
-        names, facilities = _generation_source_names(root, parts, descriptor)
-        rows = tuple((name, _descriptor_child_bytes(descriptor, name)) for name in names)
-        after, current_facilities = _generation_source_names(root, parts, descriptor)
-        if after != names or _generation_directory_chain(root, parts) != chain:
-            raise ValueError('drain_namespace_changed')
-        if any(facilities[name] is not None and current_facilities[name] is not None
-               and facilities[name] != current_facilities[name]
-               for name in facilities.keys() & current_facilities.keys()):
-            raise ValueError('generation_source_facility_changed')
-        return identity, rows
+        facilities = {}
+        for attempt in range(3):
+            try:
+                rows = _published_source_rows(root, parts, descriptor, chain, facilities)
+            except _PublishedNamesChanged:
+                if attempt == 2:
+                    raise
+                continue
+            return identity, rows
     finally:
         os.close(descriptor)
 

@@ -1,3 +1,71 @@
+## 2026-10-20 后台通知共用原回复槽（源码候选，待独审及实际复验）
+
+解决问题：同一后台工作已用消息工具回原会话，普通或需用户处理的收尾仍可能再次发送。两个出口现共核原成功操作、执行信封、owner/home、执行及来源线程、发起人、渠道/目标与准确 request/run/task/attempt；失败、UNKNOWN、未执行、旧标志及其它目标不能占槽。原control关闭发布后固定末次工作身份，通知新轮不能覆盖它。审计事件继续要求原schema/资格与完整evidence_refs，正文不参与去重。
+
+已发生外发沿原FrozenOwnerDelivery/external_sent只补canonical；追加前冻结原wake整封回执，补账异常保留原wake并释放原claim，异常及原有界退避/隔离记账保留。无新队列、权限账、模型参数或配置开关。此处仅源码候选；真实飞书复验、根集成、最终严格门及发行由根另验，不把切片focused写成整体通过。
+
+## 2026-10-20 旧W首次当前发表读窗口（646候选，待独审）
+
+在独立S09普通副本收口角色reader：只有已核旧闭包W→同固定当前P4的完整W发表可typed整组最多三轮。原root/workers FD、C raw、P4和旧闭包来源固定；其它变化硬拒，原reader/publisher锁关系、权限与最终P6不变。新增16定向普通节点；原682失败保留，不签真实恢复/包或release通过。
+
+## 2026-10-20 native明确pre-pin负回执（wire候选，非恢复完成）
+
+原已认证控制消息严格seq接受后，C的begin若原同步commit从未进入、decision明确blocked且无pin，可产生专用原producer事件。纯内存dispatch token沿原短操作显式运输，仅绑定本次issuer/peer/调用，不授执行权、不写新ledger。原sender同seq发送一次严格`op=rejected/seq/error_code=WORKER_COMMIT_REJECTED`无FD帧，然后原异常仍诊断/传播；旧token、source读异常、pin/effect后及发送失败不转成明确未执行。默认非native begin沿原异常。
+
+W仅在原父kernel身份/出生、唯一键与精确在途begun/applied seq均匹配时接受负回执，清除该RPC phantom并抛本地typed拒绝。乱序拒绝归原seq，不转给当前调用或延长deadline；finish、已释放、已存在pin、坏/重seq仍拒绝。ACK、P3/claim、操作_used、四类原unknown出处、原native资源和未知保债门保持，不自动finish、重发或重排。
+
+这是wire纠正，不是业务失败/成功终态。materialize在Agent/scope之前，原_reap仍会传播Future异常；本片不声称W因此存活或请求已结清。永久占槽不是最终恢复方案，调用方须另审原C有出处的拒绝/代际核收，不可自行清账。原真实失败保留，真实服务、最终组合和发行另验。
+
+## 2026-10-20 迁移run未知与停止摘要窄后继（待非作者复核）
+
+原只读责任核对补用`RUN_STATUS_LEGACY_CREATED`与`AGENT_RUN_TERMINAL_STATUSES`，task_runs/agent_runs未知协议状态拒绝；原空串/created和done/failed/cancelled不因状态本身被判物理busy，TaskLink active/future输入继续保留。后继当前完整责任摘要必须等于正常stop-v1的sources.digest，再沿原本次snapshot/首publisher CAS，不能用停止后变化的新来源替换旧摘要。原2个UNKNOWN+done准确反例复用，原冻结不改；没有补terminal或改deadline。
+
+建议下一步：独审这两生产叶精确后继；根仅增量合并后以支持版0桥接再N，原卡deadline过期也保持事实，不人工延长或重发业务。
+
+## 2026-10-20 Count0正常停止与精确迁移候选
+
+在原同锁/真实身份之上，原停止writer明确准备SQLite读取设施后双读规范责任，保存stop-v1而不自证物理quiet。后继fresh确认准确旧实例dead，严格只读原owner RuntimeDB与native完整退出证据，保留历史created/active和未来待填意图。原takeover的standalone variant只剔除准确旧state，原publisher保完整preimage并CAS首个真实新C；prepared磁盘记录自身不授权，不造旧P4/closure或改旧状态。缺birth、alive/unknown、混MP、坏源或漂移行动拒绝。默认0及逆迁移拒绝保持。
+
+SQLite仅在真实0停止设施准备阶段允许原API创建WAL/SHM，不改业务行；后继缺设施拒绝，不使用immutable或忽略WAL。详见[最小合同](../../design/GATEWAY_PUBLIC_TOPOLOGY_AND_STANDALONE.md)。这是独立源码候选，定向fake不代表真实0→N、未来卡恢复或发行通过。
+
+## 2026-10-20 S1原handle来源窄后继
+
+已在独立后继中固定scope真实handle/FD身份；同inode的替换句柄拒绝，原capture已关闭时收尾不重复unlock。只修内部对象生命周期，原S1冻结/失败保留，S2/S3未实现，尚待非作者复核。
+
+## 2026-10-20 公开拓扑S1及Count0同锁/身份候选
+
+公开YAML唯一数量、严格类型与模型不可写边界已接线；Count0同锁和正常停止真实身份已接线，有限观察明确complete=false。逆迁移冷读只拒绝，不替代P2/P4或补旧closure。S2完整quiet和S3迁移尚未完成，内部Count2真实测试不作为公开YAML实测。
+
+## 2026-10-20 原输入结算工作轮的通用软指导（候选，待新源真实复验）
+
+`task_input_resolved`继续沿原typed Wake/TurnTrigger进入工作轮的Host Event，原input_id/provider/status/result_available、origin refs及权限不变。只在共用`current_turn_text`中将此事件从“子代理变化”准确说明为输入状态结算，并提醒模型：已经执行过的一次申请不是再申请/自动续期授权，不能把历史原要求当本次新请求；ready且有结果才表示可沿原授权继续，expired不等于cancelled，不能把用户的旧叙述说成自己本片执行了取消。缺失或未知事实仍未确认，不因此授予新请求。
+
+这是工作轮文本/native IR/cache共用的软指导，不是凭据专项分支或工具硬拦；不改事件JSON/状态/期限/调度/模型次数，也不删除历史或原root_user_prompt。此前input_wait表达指导仍在工具之后，不能用表达轮指导冒称已经约束了本片工具决策。旧ordinary、child与session-task渲染字节保持。
+
+675原期限已消费，但模型恢复后再次request创建新卡且误述取消，原失败保留；未取得当次实际wire，不能称全部facts确到或丢失。新35项只证明原producer到RunParams/IR/text及两协议fake HTTP接线和原事实矩阵；新源模型遵循及正常停止仍由根实际复验，先源码实际功能、最后统一严格总门和一次包验。
+
+## 2026-10-20 策展发现与执行的时间/配置一致性（独立候选，待真实复验）
+
+策展 consumer 与 owner 发现共用 `memory_store/curator_due.py` 的纯本地时间、日终和间隔判据。C 从原 owner 配置解析实际 interval、daily_finalize_hour 与 timezone；空 timezone 继续使用宿主本地时区，未来日界重新按该日期的时区规则计算，避免当前固定 offset 跨 DST。失败退避基数与 consumer 同为 `max(30,min(300,interval_seconds))`，原特殊失败码一小时不变。mtime 仍只是来源粗筛，不代表真实 batch、排除名单或 turn_threshold 已满足。
+
+引用本身不携带配置授权：`_submit` 入口按当前可信配置重读完整原来源并重新判资格，冻结本次预期；原 T→controller/lease→runtime 短门内部，在实际 queue 写入前再核完整配置及 timezone、source/hash/input_revision 和当前时间资格。单纯时间失格/禁用以私有同步控制流退出本次未写提交，不增加耐久状态；配置/来源变化及未知仍原拒绝。W/Count0 的 `read_source`、原 busy/not_due 结果、pending 重排、P3 和停止合同均不改。
+
+671 的 pending 细分结果未保存，不能把静态 UTC/配置分叉直接认定为那次 drain 失败的确切原因；本片不清旧 pending、不把 not_due 改 handled、不释放 P3。源码隔离真实功能先行，最终统一 strict/full 与一次发行验收；本地 fake/时间矩阵不代实际停止通过。
+
+## 2026-10-19 派工接单表达的角色软指导（待新源真实复测）
+
+既有`background_dispatch`回执在`_reply_guidance`中明确区分宿主耐久派工受理与当前只写确认的表达片：按queued/accepted及continues事实说明已交后台自行继续，不把本回执零工具范围说成后台缺工具或等待下一轮；没有执行证据时不承诺worker已启动、正在执行或成功。只调整该原结构化kind的软指导，其它kind输出字节不变；不新增采样、工具权限、正文关键词硬门、重派或状态。
+
+673同轮后台真实DONE/TaskLink completed且主final唯一成功，但初始接单文案误导，原事实保留。公开canonical native context是原业务存档，不能证明真实wire遗漏facts；现有request_surface只含请求链摘要/数量，purpose可区分表达用途但不能单独证明该kind。14fake验证原producer→两协议serializer的事实/角色指导传输，不证明真实模型遵循；新源必须由根真实复测接单表达，继续源码实际功能先行、最终统一strict/full与一次包验。
+
+## 2026-10-19 本地ask共用宿主owner准备（独立候选，待复核）
+
+普通TUI/plain、独立`gateway ask`和文件适配器统一经过原认证`POST /ask`，由原宿主/C `prepare_input`冻结owner并进入原队列/lease/CAS；客户端不填host owner，W不回退main。内部受控队列API仍仅供原内部用途，HTTP拒绝或未知结果不走文件旁路。
+
+本地新job显式`delivery_intent=queue`复用原`allow_active_turn=False`，与旧HTTP默认`auto`区分；意图加入原内容摘要，稳定消息ID不能改意图重放。原ID公式抽到纯模块共用，显示登记先于一次POST；只在原同ID排队回执确认后接原终态观察，未知受理显式结束本地等待并保留ID查询，不自动GET、重送或取消宿主。`original_prompt`保存slash解析前用户原输入并核与typed任务一致，宿主按原命令重解析，不信任客户端system_task或显示摘要。
+
+开发先在新源码与隔离home/Gateway/TUI/飞书完成真实功能验收，跑通后统一构建发行；包验负责最终依赖、pyc/资源、安装升级一致性，不能作为每个功能bug的调试前置。远端前本地严格gate和最终包内验收义务保持。此候选fake/合同结果不代表原668实际通过或已发行。
+
 ## 2026-10-19 同步控制回执与claimed回送闭包（633候选）
 
 在既有状态投影内，仅对完整completed、非steer且规范结果没有delivery_status键的同步结果补accepted，含明确业务拒绝；它不等于provider已sent，也不改持久领域结果。显式空/None/坏值/unknown、空结果和steer缺失保持原门。adapter原五阶段补齐claimed：提交、watcher、typed结果和WAIT一致，原accepted/rejected发送与身份/幂等门不变。
@@ -75,7 +143,7 @@ Count0和正Count继续共用原凭据保存叶。只有原授权后的本次表
 
 ## 2026-10-17 generation规范责任库存投影（237候选，待独立复核）
 
-generation显式读取原四类已发表责任；原processing多条chunks JSONL、固定.commands/.approvals设施和原writer精确UUID/token暂存不再作为单JSON责任读取。分类在同一原父FD的首末完整列名及raw之前，设施仍核nofollow真实类型/单链接，重复观察身份替换、未知名、责任变化和root/父链变化继续拒绝；无重试、按内容猜测或新写者权限。默认original_directory_snapshot及P6完整names/raw消费不变，旧closure expected完整集合/全raw摘要和原codec/角色/fresh P2门不投影、不补封。
+generation显式读取原四类已发表责任；原processing多条chunks JSONL、固定.commands/.approvals设施和原writer精确UUID/token暂存不再作为单JSON责任读取。分类在同一原父FD的首末完整列名及raw之前，设施仍核nofollow真实类型/单链接，重复观察身份替换、未知名、责任变化和root/父链变化继续拒绝；仅责任leaf显式复用strict snapshot对安全原子替换最多重读2次，不重试同inode漂移或其它硬错、不按内容猜测或授新写者权限。默认original_directory_snapshot及P6完整names/raw消费不变，旧closure expected完整集合/全raw摘要和原codec/角色/fresh P2门不投影、不补封。
 
 本片仅临时组件、原writer和受控线程；公开归档JSONL匹配Extra data类别，但当次220首badraw未留，不能据组件绿宣称该次根因已确认。0B暂存为另一独立库存缺口。新增runtime测试必须最终两OS新包pyc实际执行，原43 source-only不扩；真实服务/全仓/发行仍根另验。
 
@@ -2322,3 +2390,142 @@ Feishu普通控制实际从`/ask`进入，原分支绕过`/control`已有的C先
 显式foreign host及POSIX权限/IO等未知保留原记录，report返回None及固定`GATEWAY_PID_IDENTITY_UNVERIFIABLE`；原`get_running_pid`只对该新增结构码拒绝启动，避免caller将未知当空槽。旧bad JSON/read_error返回与强stop/身份门不改。start继承原exist_ok目录准备，但三启动caller在此拒绝后不spawn、不write_pid、不产生业务效果；不声明start零mkdir。
 
 本片只修共享PID消费者，不手补pid、不改readiness/UI/状态/配置/模型或控制协议。离线76新普通节点覆盖真实写者到readiness、原平台/未知/复用及启动边界，并验证text同格式证明和原number kind不同处理；实际服务、整源、双平台包与发行须根重绑新commit另验，662原失败不改绿。
+
+
+### 凭据保存查询合同收紧（2026-10-19）
+
+原凭据工具明确按ref查status、按真实URL查find；find携带ref由原schema及execute共同拒绝，不自动重写或猜URL。输入等待只补发卡/提交与不透明引用的通用表达指导，原ACK指导和状态/恢复/权限不变。隔离合同验证与真实源验收分开，真实卡提交后的查询表达须根用新源码复验；不预签租户或发行通过。详见[凭据合同](../../design/IM_CREDENTIAL_COLLECTION.md#2026-10-19-准确引用状态与站点发现分责源码修复真实复验另记)。
+
+
+### 原DB输入期限接入MP（2026-10-19，源码候选）
+
+C原backgroundThread显式只读发现canonical RuntimeDB到期行，经原P3/P5交owner W，不需预先存在文件Wake。W与Count0共用单行对账，整行claim保护实际效果和complete/release；重排claimed回pending、旧lease失权。输入静默取消只收已结束且精确绑定的执行账，原TaskLink、父兄弟及UNKNOWN保持。无新增模型/线程/队列，真实新源验收与最终发行另记。
+
+
+### 2026-10-19 后台输入显式执行代次候选
+
+后台main的scope沿原claim发布与真实Params/control保存准确attempt，cold审批仍可只读显式claim+DB；缓存按实际typed callback区分来源。输入退休用已冻结attempt反查真实run，审批任务编号保持原语义；最终原current/tree/UNKNOWN/锁/CAS与TaskLink边界不减。该片不修改curator来源、P1/P2、停止或迁移合同，不解释675 curator unknown。新旧原fake回归及源码真实复验分开，675第三卡失败保留。详见[输入合同](../../design/IM_CREDENTIAL_COLLECTION.md#2026-10-19-后台主片准确attempt与输入退休候选)。
+
+
+### 异常退出W的严格P6收口候选
+
+仅原角色生产门区分真实非零waitstatus与正常终止心跳，保heartbeat raw和所有原关闭/UNKNOWN门。1.4 s01原故障未自愈及drain失败保留，候选不称现场唯一首因；W健康与整代supervisor恢复另片。详见[角色生命周期](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md#已确认异常退出w的p6角色结束候选真实整代恢复待验)。
+
+
+### 2026-10-20 I01/I02：服务环境及监护角色健康（实现候选，待实机）
+
+服务文件与监护拉起的Gateway显式运输原解析的绝对`MY_AGENT_CONFIG`和`MY_AGENT_HOME`；systemd的参数/环境/工作目录转义及launchd XML转义保原值。渲染不建home，坏配置不回落另一默认配置；安装渲染与cwd共用同一次解析。
+
+`GatewayPaths.supervisor_pid/supervisor_state`是监护者独立位置；监护者不再覆盖`gateway.pid/gateway_state.json`。健康只读核原`my-agent-gateway`角色、PID/出生身份、同代state/heartbeat的pid与started_at、原ready及活dispatcher；Count0与MP C共用。新鲜心跳或监护者活着不足以ready。旧数字监护PID仍保守阻止重复启动，但展示身份未确认；本平台/旧记录无法核birth时也不伪签同代。状态读取不清PID，已有活/未知资料不视空槽。
+
+重启保原次数/冷却预算；原Gateway停止失败不得spawn。共同targeted stop writer仅在显式expected_identity时持原PID锁核同record/role/真实birth，再写原停止协议；普通调用默认语义不变，TERM前再核原代次。原120秒启动预算超时不返回Popen.pid冒成功。监护者自身singleton锁/重试预算、whole-generation故障恢复、RSS限制与实机自愈不属于本片；无服务/真实业务通过声明。
+
+
+### 2026-10-20 WorkingDirectory字段窄修
+
+I01初稿在1.18原生systemd255被拒为非绝对路径：WorkingDirectory不对外加JSON引号执行unquote。该字段使用原绝对路径文本，仅将`%`编码为`%%`并拒绝CR/LF/NUL；内部空格、引号和反斜线直接保留。原ExecStart/Environment转义与所有其它unit行保持逐字节。假夹具原错误去引号与1条引号assert准确迁移，新增两路径/三注入普通回归；真实renderer的原生verify和属性roundtrip另留独立证据，不等于服务实际通过。
+
+依据：[systemd.exec工作目录](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#WorkingDirectory=)、[systemd.syntax仅对允许字段应用quoting](https://www.freedesktop.org/software/systemd/man/latest/systemd.syntax.html)、[v255原生解析器](https://github.com/systemd/systemd/blob/v255/src/core/load-fragment.c)。原JSON编码器仍用于原允许去引号的参数/环境，不通过改坏ExecStart或Environment来绕过本缺陷。
+
+## 2026-10-20 后台执行片停止（候选，待独审/真实验收）
+
+Count0原bg-owner通过准确claim中断并有界等待原finally及wallworker物理退出；cleanup同时核future/claim/attempt/操作/锁和原模型drain，未结不再只凭循环退出签true。无新执行状态或任务取消，未来输入/TaskLink/独立collector保持。676原失败不回填。详见[后台片停机合同](../../design/GATEWAY_BACKGROUND_SLICE_SHUTDOWN.md)。
+
+
+## 2026-10-20 监护当前配置与Count0来源预核后继
+
+监护启动不再只读缓存Agent数量：沿原load_config/runtime环境解析当前选定YAML，首末核原字节，要求当前N等缓存/本次Observed N、configured_home_root与实际spawn的MY_AGENT_HOME一致、原owner运行路径解析所得Gateway根等同本监护路径。显式变更N/home/root必须先重新解析正确监护对象；不把新raw摘要当旧C启动历史，也不修改用户配置。
+
+正N冷start若没有P4但已有state，只复用原S2 `_validate_stop`与strict单进程来源双读作负向预核：准确支持版Count0正常stop才允许继续原公开CLI启动尝试，缺stop或混MP拒绝。父supervisor不造controller/lease/variant，不检查并宣称Count0完整quiet已通过；真实旧PID死亡、native/SQL责任双读、digest、持原锁capture和首次publisher CAS仍由子C唯一原S2入口完成。已有MP仍严格完整P6关闭，未知/源漂移不补封、不重放。
+
+本片只追加8个配置/来源运行节点与必要2旧正常节点；原65不重复执行。原49组件测试只在新后继显式补YAML/home_paths/规范Gateway根装配，全部业务assert/decorator保持；原冻件与独审失败证据不改。旧helper同最终新测试的N/home/root反例和支持版preflight正例形成窄红绿，不等于真实迁移或发行通过。
+
+
+## 2026-10-20 监护整代恢复（候选，待同源实机验收）
+
+监护保留原次数、冷却、连续失败与公开 Gateway run/stop 入口。Count0 沿原 C 角色门；正 N 健康还须当前 P4 全 N 个实例、同 C 代次与出生、每个 W 的真实出生和原 15 秒 ready/端口读回，首末 C/P4 不变。新鲜 C 心跳不能掩盖死 W。15 秒是健康窗口，不是死亡证明；不承诺故障发生瞬间即发现。
+
+正 N 恢复先冻结本次原 C/P4 和配置原字节，再把准确 C birth 运输给原 targeted-stop；换代后的新 C 不能被旧恢复动作停止。旧代必须真实物理死亡、原完整 v2 closure/全角色/全责任来源/整树证据首末稳定，才可沿同配置的公开入口尝试新 C；新代须不同 c_run_id/真实身份且同 N，仍经完整健康门。冷监护首次 start 也不能绕过旧代关闭门。未知、缺封存、原责任或配置漂移均零新 spawn，不补旧封存、不伪造 stopped 心跳、不重放未知责任。
+
+原 W 异常退出仅在原 Popen 出生与 WNOWAIT/实际 reap 精确一致时，可由既有 P6 接受非零退出事实；正常零退出仍需原终止心跳。该窄修不绕任何 native/责任/UNKNOWN 门。同 C 换 slot 和历史扩展不在本片；R01 多进程 planned restart 拒绝保持，普通监护 stop 不创建 planned marker。配置原字节只约束本次恢复窗口，不反推旧 C 启动时未保存的配置 hash；owner 路由继续原 owner digest 合同。
+
+实现读口为 `gateway_parts/supervisor_generation.py`，只读原 P4/P6，内存 ObservedGeneration 不持久化、不授 C/owner 执行权。原 PID 门与 CLI coordinator_guard 继续守 Gateway 单例；监护自身单例/I10 预算独立问题不顺带修复。受控组件与实机结果分开：旧 1.4 W0 故障后 30 秒无补位、原 stop drain incomplete/closure null 保留，不能由本片组件绿回填。
+
+
+本监护者在实际 spawn 返回后立即保留原 Popen 和出生观察，readiness 超时也不丢弃仍活 child；ready 另核同 PID/birth。原 stop 对该准确直接 child 用 Popen.poll 实际 reap，仍须原身份已死才作目标退出事实；其它 C 继续原 OS 等待。此内存对象不是新执行权，不按 PID 重建 Popen，不依赖 subprocess._active，也不以回收自身 child 替代完整 P6。真实 POSIX 子进程微例分别证明正常/非零退出的僵尸回收和错误 child/复制引用/冲突出生拒绝；它不是整代服务验收。1.18 当次未留 waitid，故本片不冒认该实际唯一原因。
+
+
+## 单进程来源读取尺寸整理（2026-10-20）
+
+`standalone_sources._worker_sources`只将既有设施目录分支提取到`_require_empty_worker_directory`，降低嵌套以符合严格尺寸门；完整codec、generation文件名绑定、空目录允许和旧MP/未知责任拒绝语义不变，不添加迁移或执行权限。原`test_gateway_standalone_sources.py`定向回归通过；此处是结构整理，不替代真实迁移验收。
+
+
+## 2026-10-20 正count终态保留原生命周期身份（600候选）
+
+`_record_gateway_service_termination` 在 Count0 与正 N 两种拓扑都从本次原 `GatewayRunContext` 写入 `process_identity`、`started_at`，覆盖 details 中同名值；Count0 仍显式 `worker_count=0`，正 N 仍由原 lease publisher 写同代次和数量。无 context 的原调用不变，不从旧 state/P4 推断身份，不修改 schema、权限或关闭门。
+
+1.4 source-s02 一次 W0 故障后，原完整 P6 已关闭且旧 S/C/W 全死，但监护冷启动因终态 state 缺 identity 拒绝，整代恢复仍为失败。组件准确复现 writer→P6→cold capture 的拒绝；本候选只修写者，不放宽完整 P4/P6、全责任来源或 UNKNOWN。真实恢复须根合入准确新源后在新 case 唯一故障验收，不能回填旧失败，也不宣称模型、图片或发行通过。
+
+
+## 2026-10-20 W末心跳的关闭阶段与退出原因（600候选）
+
+`run_worker` 只在原正常体首次 `pump.close()`、原 finally 再次 pump/control 关闭、native client 关闭和信号恢复全部成功后，发表 `loop_health=stopped` 并返回0；`reason` 保留原 `not_ready`/`drained`/`stopped` 等运行退出原因。原两次 close 不去重，不吞 finally 异常；启动早拒仍原 return2。末心跳是本 W 设施生命周期事实，不是完整 P6、native 整树、责任排空或物理死亡证明。
+
+P6 仍要求原精确内核退出与完整全域证据，正常0不得把 not_ready/drained 当 stopped 别名；pump/native 任意关闭失败不得发布 stopped。C终态发布时间、http_port、超时、P4/P6 reader及 UNKNOWN 均不改。本片不混原 cleanup 失败诊断字段，C-only 内部首拒未保存仍是已知诊断缺口。
+
+1.4 S03 唯一故障的旧代完整关闭、新代51.23秒ready是实证；最终新代正常stop的 closure=null/drain_incomplete 与全部物理消失并存，仍整体验收失败。末W0 not_ready与原零返回路径机制可复现，但内部首拒未保存，不把组件结果补签 S03 或称唯一现场原因已证。下一次先准确新源/新case单纯正常stop，全closure通过后才另作唯一故障。
+
+
+## 2026-10-20 最终源码守卫的目录与错误合同补齐
+
+最终源码守卫发现常数目录未随模块提取同步、已删除的 `_DAILY_FINALIZE_HOUR` 仍在待整改清单，以及后台关闭等待常数缺相邻中文说明。沿原生成器重建 `constants_catalog.json`，只删除已不存在的白名单项并补说明；数值、超时和扫描规则不变，不扩大白名单。
+
+单进程生命周期、来源未确认、逆迁移不支持和迁移拒绝四个原固定错误码补入唯一 `ERROR_CONTRACTS`，按状态阻塞、不可自动重试呈现；恢复建议指向原锁、来源、结构化 reason/action/ref，不能据分类补身份、删锁或重放业务。原失败 XML 保留，修复后重跑原守卫与相关错误合同。执行、权限、P4/P6 和迁移准入不改。
+
+
+## 2026-10-20 监护Agent装配分层修复（仓外候选，待主线整合）
+
+原生产导入边界检查在 `gateway_parts/supervisor.py` 检出三处 runtime→CLI 反向依赖。现在只有 `cli/supervisor.py` 沿原 `make_agent` 解析实际 Agent；`GatewaySupervisor`/`run_supervisor` 必须显式接收同 Agent 和相符配置路径，延迟路径读取只投影这个对象。监护选项不再携带第二工作区解析字段；`is_supervisor_running`/`stop_supervisor` 只消费 CLI 同 Agent 的 `GatewayPaths`，不重建 Agent、不接 factory/callback。
+
+原 Count0/正 N、当前 YAML/home 预核、角色身份、P4/P6、准确 Popen 回收、换代拒停、重启预算和停止门保持。缺失 Agent 或配置路径冲突拒绝；组件 metadata 夹具显式装配，产品唯一 CLI 仍使用真实 Agent。未新增边界豁免或导入 facade；原 S04 全仓的三项 findings 保留，候选定向绿不回填旧源，也不代表服务、全仓、双平台包或发行通过。
+
+
+## 2026-10-20 必需通知热身份接线候选
+
+S05 原通知义务在宿主工作轮退出后重建基础参数，原凭据 freshness 正确拒绝无活 attempt，导致未表达即 suppressed。现在首次 freeze、freshness、零工具表达与最终外送沿原 claim 开启一次通知轮并共享其活身份；未 sent 冻结重投仅新建通知阶段，已 sent 仅 canonical 收尾。普通工作/关闭配置不新增阶段，已有正文和缓存不新增模型或认证请求；scheduler 工作失败和 TaskLink abandoned 保留。
+
+Count0 与 C/W 使用同一通知入口，MP 保留原 previous/T/fence，四 actual 责任原对象穿透，不用 finish 代替账/native 结清。旧 S05 红保留，本片只窄合同/fake 验证，实际功能由根新源码复验，随后最终统一验收与打包。
+
+
+## 2026-10-20 监护公开首启缺目录修复候选
+
+原S06 fresh native supervisor-start在gateway.log.open前缺规范父目录，FileNotFound真实失败保留。公开入口现在在make_agent/监护身份预核后、原spawn前沿原可信service路径的文件系统锚点复用私有no-follow目录准备，兼容原gateway_workspace及外置workspace；不手补实际fixture。新11纯fake公开CLI节点与原层次绑定回归不替代真实native重验，也不授P4/P6或发行通过。
+
+本入口在原配置/身份预核之后、目录准备之前拒绝service路径的`..`组件，提示使用无上级跳转的规范绝对服务目录；不静默resolve或改common normalize。filesystem anchor仅为原可信配置路径的no-follow准备起点，不认证owner、不新增路径权限；普通绝对override保留，链接拒绝，不修改其它启动入口。
+
+## 2026-10-20 已发表目录名称暂态冲突
+
+generation 的 published-source reader 对准确 typed 名称集冲突最多整次三读；首目录链及已见设施身份跨轮固定，硬错、默认 P6 和旧完整 raw/expected 门不变。原 681 失败仍保留，具体 namespace/写者未知；本修复不清既有隔离，也不代表新源实际排空通过。详见角色生命周期合同。
+
+
+## 2026-10-20 首次 native 明确拒绝终态（仓外候选）
+
+原 pre-pin typed NACK 仅证明本 RPC；新增原 first/fullclaim/registry/P1/pin/P3/C/W 来源核验后，才沿原锁内 FAILED/P3 与 T 外固定展示写叶收口。原 gate locator 必须反查原 Root/tuple/lease，首引用不可覆盖；W 只核本词法 materialize 的同 client/seq/token/canonical，不改 `_reap` 或输入权限。无 Store 始终保原 settlement_pending，不把 prepared receipt 当欠账或签 P6。仅支持新 claim，不覆盖旧 681 epoch5、未准入 pending 或实际未知。详见[角色生命周期合同](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。组件结果待独立复核，真实服务由根新源另验，旧失败不补签。
+
+
+## 2026-10-20 首拒pin来源后继（待独立复核）
+
+首拒的no-pin前提改为原lease完整对象集，而非当前W issuer子集。仅同原source引用、当前C/lease/launch/Popen及固定W scope证明的其它owner pin可保留；同owner、C-short/旧facade/未知来源一律拒，不按标签授信、不清pin或增加registry。原first/fullclaim、FAILED/P3/输入pending和W词法核收不改；原50义务保留再追加6新节点，后继必要8P不冒称99重跑或实际通过。旧独审1F和测试装配中断均保留，最终准确组合由根另验。
+
+
+### 2026-10-20 已发表责任在首读前离名（候选）
+
+仅generation显式快照将reader返回None记到末次完整names/chain/facilities核验；缺名确实离开才沿原同FD/固定链最多三轮整读。同名仍列、reader自身异常及其它硬错误保持拒绝，默认P6和旧expected完整raw门不变。原终态writer受控红例及10新/20旧节点另存仓外，683原现场未清隔离或补封，真实后继由根另验。见[角色生命周期](../../design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md)。
+
+## 2026-10-20 MP后台命令完成Wake漏接候选
+
+683实际暴露原ProcessSession已自然退出、completion_target已登记却notice空。候选在原C只读发现/P3/P5/owner消费者链补单会话来源，复用原完成Wake与notice去重；C不进业务，不新timer/queue，Count0/config默认不变。终态与目标/完整revision在短T之后原process事务中末核；本地发表/回执失败保原pending责任，actual未知不吞。先最小组件红绿与独审，再由根新源真实TUI验证自主回读；旧失败保留。
+
+### MP完成通知receipt安装后继
+
+原Store的CommitPending仅证明redo已发表，不能把其底层四actual/硬路径权限拒绝概括为普通pending。MP消费叶仅按原typed cause保原对象，原Store/Count0不动；普通本地I/O原pending运输和P3/Wake去重保持。原两独审红与原冻结保留，后继组件不代实际683通过。

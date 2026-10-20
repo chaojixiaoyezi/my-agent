@@ -382,6 +382,26 @@ def test_loop_error_backoff_delay_and_print_policy() -> None:
     assert backoff.record_failure("k") is True and backoff.delay() == 0.2
 
 
+@pytest.mark.parametrize("failures", [1100, 4811, 4913, 50000])
+def test_long_error_streak_keeps_backoff_and_can_recover(failures) -> None:
+    backoff = LoopErrorBackoff()
+    for _ in range(failures):
+        backoff.record_failure("persistent_io_error")
+    assert backoff.delay() == 30.0
+    assert backoff.consecutive_failures == failures
+    backoff.record_success()
+    assert backoff.delay() == 0.0
+    assert backoff.record_failure("persistent_io_error") is True
+    assert backoff.delay() == 0.2
+
+
+def test_disabled_error_delay_stays_zero_after_long_error_streak() -> None:
+    backoff = LoopErrorBackoff(base_seconds=0, cap_seconds=30)
+    for _ in range(4913):
+        backoff.record_failure("persistent_io_error")
+    assert backoff.delay() == 0.0
+
+
 def test_loop_health_error_records_are_redacted() -> None:
     loop_health.note_loop_error("dispatcher", "gateway_request_dispatch.tick", RuntimeError("upstream api_key=sk-live-123456 rejected"))
     record = loop_health.snapshot()["last_dispatch_tick_error"]

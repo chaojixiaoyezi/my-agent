@@ -101,15 +101,28 @@ def test_gateway_job_is_durably_submitted_before_running_snapshot(monkeypatch) -
 
 
 def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeypatch) -> None:
-    """Initial TUI submission must not lose cwd when the audit Agent is intentionally absent."""
-    from agent_py_agent.agent.gateway_parts import request_client
+    """正式HTTP提交前显示登记已完成；原项目cwd/roots沿宿主准备后持久化。"""
+    from dataclasses import replace
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
+    )
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.cli.chat_parts.tui_worker_paths import _submit_new_gateway_job
 
     project = tmp_path / "project"
     project.mkdir()
     paths = gateway_paths_from_root(tmp_path / "gateway")
+    host = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path/"home"), model_backend="echo"), project)
+    server = GatewayHTTPServer(0, paths, params=GatewayHTTPServerParams(agent=host))
+    server.start()
     client = SimpleNamespace(
+        config=replace(host.config, gateway_port=server.server.server_address[1]),
+        home_paths=host.home_paths,
         gateway_client_only=True,
         root=project,
         workspace_roots=[project],
@@ -120,15 +133,15 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
         current_session_id="session-project",
         tui_runtime=TuiRuntime("session-project"),
     )
-    write_request = request_client.write_gateway_request
+    prepare_request = http_handlers._prepare_http_gateway_input
 
-    def inspect_before_admission(target, payload):
+    def inspect_before_admission(target, scope, payload):
         assert payload["id"] in cfg.tui_runtime._owned_gateway_requests
         assert job.gateway_request_id == ""
         assert "on_request_allocated" not in payload
-        return write_request(target, payload)
+        return prepare_request(target, scope, payload)
 
-    monkeypatch.setattr(request_client, "write_gateway_request", inspect_before_admission)
+    monkeypatch.setattr(http_handlers, "_prepare_http_gateway_input", inspect_before_admission)
     job = SimpleNamespace(input_media=(),
         user="创建项目",
         prompt_files=[],
@@ -141,7 +154,10 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
         gateway_request_id="",
     )
 
-    request_id, _chunk_path, _terminal_path = _submit_new_gateway_job(cfg, job, [])
+    try:
+        request_id, _chunk_path, _terminal_path = _submit_new_gateway_job(cfg, job, [])
+    finally:
+        server.stop()
 
     payload = json.loads((paths.inbox / f"{request_id}.json").read_text(encoding="utf-8"))
     assert payload["workspace"] == {

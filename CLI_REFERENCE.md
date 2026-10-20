@@ -1626,6 +1626,14 @@ my-agent scenario-test --direct --count 10 --max-runners 10 --runner-concurrency
 
 ## `gateway`
 
+宿主配置中的`gateway_worker_process_count`控制公开启动拓扑，默认`0`为原单进程，正整数走原多进程入口。数量只在YAML修改，不能通过聊天、HTTP参数或private Namespace覆盖；`true`、负数、小数、字符串和空值均拒绝。`--config`选定文件也随`gateway install`进入原服务argv，监护和接班仍读同一文件。
+
+运行中数量与配置不同，`start`和`restart`（含`--force`）先以`GATEWAY_TOPOLOGY_CHANGE_REQUIRED`拒绝，不把“旧进程已运行”称为新拓扑生效。停机后发现MP事实，Count0以`GATEWAY_REVERSE_MIGRATION_UNSUPPORTED`或`GATEWAY_STANDALONE_SOURCE_UNPROVEN`拒绝，不能删marker、补身份或改JSON绕过。旧Count0→N的版本化迁移尚未实现；现有home不能仅改正数就宣称已开启。先等待受支持的迁移片验收，保留原文件。
+
+`gateway status`分别展示`configured_worker_process_count`与`observed_state_worker_count`；后者仅是已读state投影，未知为null，不能把配置目标当已运行数量或就绪证明。
+
+Count0现在也持canonical生命周期锁；停机state保留真实启动身份和有限观察，`standalone_shutdown_observation.complete=false`不等于MP closure或迁移许可。原三循环`drain_complete`的历史口径未扩大。此处为候选语义说明，不代表真实公开配置或发行已通过。
+
 ```powershell
 my-agent gateway start
 my-agent gateway status

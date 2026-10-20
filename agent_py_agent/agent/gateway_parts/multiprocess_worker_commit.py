@@ -1,5 +1,5 @@
 # LLM: 仅C内使用原Popen、P0出生、P4登记、原controller及lease；peer_pid必须由后续内核传输适配器提供。
-# 模块用途: 为一个真实W记录精确在途提交责任；不是JSON授权或已经接通的native通道。
+# 模块用途: 为真实W记录原在途责任；仅本次native调用可取得未进入/无pin的明确拒绝事实，不授JSON权限或重试。
 import os
 import subprocess
 
@@ -21,6 +21,32 @@ from .multiprocess_route import owner_digest, owner_worker
 # 类用途: 表示不能证实原W提交或精确结清。
 class WorkerCommitRejected(RuntimeError):
     error_code = 'WORKER_COMMIT_REJECTED'
+
+
+_PRE_BEGIN_PROOF = object()
+
+
+# LLM: 只由begin内真实同步callback未进入、原decision明确blocked且无pin的分支产生；不是请求未执行、P3释放或重试许可。
+# 类用途: 保存原issuer/同次peer的明确未登记责任事实，供native通道回同seq负回执。
+class WorkerCommitNotStarted(WorkerCommitRejected):
+    # LLM: 私有proof只在原producer分支使用；普通同文异常、复制或跨issuer事件不能替代此来源。
+    # 函数用途: 捕获原producer事件，不读取或修改claim、pin及持久责任。
+    def __init__(self, issuer, peer_pid, request_origin, *, proof):
+        if proof is not _PRE_BEGIN_PROOF:
+            raise WorkerCommitRejected('original_commit_rejection_required')
+        self._origin, self._creator = self, os.getpid()
+        self._producer, self._peer = issuer, peer_pid
+        self._request_origin = request_origin
+        super().__init__('owner_commit_unavailable')
+
+    # LLM: 此检查只认证本次已发生的producer事实；不重新借owner写门，隔离后仍可沿原端点报告明确拒绝。
+    # 函数用途: 核同一原issuer、进程及已认证消息peer，拒绝跨对象或复制事件。
+    def matches_request(self, issuer, peer_pid, request_origin):
+        return (type(self) is WorkerCommitNotStarted and self._origin is self
+                and self._creator == os.getpid() and self._producer is issuer
+                and type(peer_pid) is int and self._peer == peer_pid
+                and request_origin is not None and self._request_origin is request_origin
+                and issuer._issuer_origin is issuer and issuer._creator_pid == self._creator)
 
 
 # LLM: 仅可信launcher交原Popen；本对象不由文件重建，不物化owner，不跨fork运输。
@@ -51,19 +77,22 @@ class WorkerCommitIssuer:
 
         bind_current_worker_source(self._controller, self)
 
-    # LLM: 出生核验在生命周期门外；原P2 writer短门内再次核原登记/句柄，只有同lease可增加pin。
-    # 函数用途: 先核原worker、owner桶及隔离，再登记本次真实责任，不持gate跑远端业务。
-    def begin(self, owner, *, peer_pid):
+    # LLM: 出生核验在生命周期门外；原P2 writer短门内再次核原登记/句柄，只有同lease可增加pin。仅callback从未进入的明确blocked产typed未登记事件，未知或pin后仍原拒绝。
+    # 函数用途: 核原worker/owner并登记责任；最早同步边界记录entered，不按异常文字推断无副作用。
+    def begin(self, owner, *, peer_pid, rejection_origin=None):
         self._require_current()
         self._require_worker(peer_pid)
         if owner_worker(owner, self.launch.partition.count) != self.launch.partition.index:
             raise WorkerCommitRejected('owner_partition_mismatch')
         digest = owner_digest(owner)
         pinned = []
+        entered = False
 
         # LLM: 原controller.launch_owner_writer最终门内再次核同一W出生/代次，pin只加入原lease和issuer集合，不授另一请求许可。
         # 函数用途: 在真实worker开始短提交前登记准确责任，异常由原调用方保留未知状态。
         def commit():
+            nonlocal entered
+            entered = True
             self._require_current()
             self._require_worker(peer_pid)
             pin = pin_coordinator_commit(self._lease, (self.control.c_run_id, 'W',
@@ -73,6 +102,9 @@ class WorkerCommitIssuer:
 
         decision = self._controller.launch_owner_writer(digest, commit)
         if decision.get('status') != 'started' or not pinned:
+            if (rejection_origin is not None and type(decision) is dict
+                    and decision.get('status') == 'blocked' and not entered and not pinned):
+                raise WorkerCommitNotStarted(self, peer_pid, rejection_origin, proof=_PRE_BEGIN_PROOF)
             raise WorkerCommitRejected('owner_commit_unavailable')
         return pinned[0]
 

@@ -1,4 +1,4 @@
-"""正式CLI按内部count选择原C入口；不启动worker、HTTP或真实模型。"""
+"""原内部QA按private count选择原C入口，公开YAML另有专门回归；不启动worker、HTTP或真实模型。"""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -9,6 +9,7 @@ from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import current_
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.cli import common, gateway_process
+from agent_py_agent.cli.gateway_coordinated_run import run_coordinated_gateway
 from agent_py_agent.cli.workspace_resolution import runtime_paths_for_config
 from agent_py_agent.tests.test_gateway_control_plane_frozen_home import _args
 
@@ -51,7 +52,7 @@ def test_positive_count_holds_original_c_before_business_factory(tmp_path, monke
     monkeypatch.setattr(gateway_process, "make_agent", factory)
     monkeypatch.setattr(gateway_process, "_start_gateway_http", no_http)
     with pytest.raises(FactoryObserved):
-        gateway_process.cmd_gateway_run(args)
+        run_coordinated_gateway(args, predecessor_exited=True)
     assert len(observed) == 1
     assert current_coordinator(paths.root, 2) is None
 
@@ -66,15 +67,21 @@ def test_default_count_does_not_acquire_c_or_prepare_home_before_factory(tmp_pat
 
     def factory(actual):
         assert current_coordinator(paths.root, 2) is None
-        assert not home.exists()
+        assert (paths.root / "coordinator.lock").is_file()
+        owner = resolve_owner_home(home)
+        assert not owner.permissions_json.exists()
+        assert not owner.agents_md.exists()
+        assert not owner.curator_state_json.exists()
         calls.append(actual)
         raise FactoryObserved
 
     monkeypatch.setattr(gateway_process, "make_agent", factory)
     with pytest.raises(FactoryObserved):
         gateway_process.cmd_gateway_run(args)
-    assert calls == [args]
-    assert not home.exists()
+    assert len(calls) == 1
+    assert calls[0]._gateway_worker_count == 0
+    assert calls[0].config == args.config
+    assert (paths.root / "coordinator.lock").is_file()
 
 
 def test_positive_count_predecessor_timeout_refuses_before_config_or_factory(tmp_path, monkeypatch, capsys):
@@ -84,7 +91,7 @@ def test_positive_count_predecessor_timeout_refuses_before_config_or_factory(tmp
     args = SimpleNamespace(config=str(tmp_path / "missing.yaml"), after_pid=123, _gateway_worker_count=2)
     monkeypatch.setattr(gateway_process, "wait_for_predecessor_exit", lambda _pid: False)
     monkeypatch.setattr(gateway_process, "make_agent", lambda _args: calls.append(True) or (_ for _ in ()).throw(FactoryObserved()))
-    assert gateway_process.cmd_gateway_run(args) == 2
+    assert run_coordinated_gateway(args, predecessor_exited=False) == 2
     assert calls == [] and not home.exists()
     assert "GATEWAY_PREDECESSOR_TIMEOUT" in capsys.readouterr().err
 
@@ -96,7 +103,7 @@ def test_invalid_internal_count_refuses_without_business_initialization(tmp_path
     args = SimpleNamespace(config=str(tmp_path / "missing.yaml"), _gateway_worker_count=count)
     calls = []
     monkeypatch.setattr(gateway_process, "make_agent", lambda _args: calls.append(True) or (_ for _ in ()).throw(FactoryObserved()))
-    assert gateway_process.cmd_gateway_run(args) == 2
+    assert run_coordinated_gateway(args, predecessor_exited=True) == 2
     assert calls == [] and not home.exists()
     assert "COORDINATOR_PLATFORM_OR_MODE_UNSUPPORTED" in capsys.readouterr().err
 

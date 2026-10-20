@@ -38,7 +38,7 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
 
 
-# LLM: 原主执行身份和线程/task 均走正式入口；默认晋升并领取真实claim，首片测试须显式关闭晋升，不能删账或伪造authority。
+# LLM: 原core先向本片真实control发布身份，晋升后沿原claim publisher绑定；首片关闭晋升时不借claim，teardown只结束本测试control。
 # 函数用途: 在临时目录准备管理员IM任务；按测试阶段决定是否写TaskLink/claim，不启动进程或伪造provider往返。
 def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a', promote_root=True):
     agent = SimpleAgent(AgentConfig(prompt_files=[], enable_plugins=False,
@@ -60,8 +60,12 @@ def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a', promote_ro
     # 使用真实后台装配入口：首片只有 SessionTask，之后晋升 TaskLink，再把原 actor 交给创建服务。
     background = _run_params(thread.thread_id, BackgroundRunRequest(thread_id=thread.thread_id,
         reason="session_task", host_session_task_id=task.task_id), agent=agent, thread=thread)
+    from agent_py_agent.agent.conversation.background_execution import _BackgroundRunControl
+
+    control = _BackgroundRunControl(background.request_id, background.conversation_task_binding_callback)
+    bind_fixture_control_cleanup(monkeypatch, control)
     authority = _bind_main_agent_authority(agent, replace(background, run_id="delegate-root",
-        attempt_id="delegate-attempt", root_user_prompt=task.goal))
+        attempt_id="delegate-attempt", root_user_prompt=task.goal, conversation_task_binding_callback=control))
     attrs = authority.task_attributes
     params = ToolLoopExecuteParams(
         user_prompt=task.goal, root_user_prompt=task.goal, memories=[], runtime_injections=[], prompt_files=[],
@@ -80,15 +84,46 @@ def runtime_fixture(tmp_path, monkeypatch, *, conversation_id='oc_a', promote_ro
     return agent, params, task, context, source
 
 
-# LLM: 阶段推进只调用原晋升和claim入口；调用前必须已有当前main authority，不删已有账或补字段绕过来源门。
+# LLM: 原晋升/claim后，仅本fixture真实control持有的core身份经原publisher短词法窗发表；其它caller不补猜身份，不写runtime_authority JSON。
 # 函数用途: 为已通过首片输入检查的临时任务建立真实TaskLink和执行claim，不启动模型、进程或网络。
 def promote_runtime_fixture_root(agent, authority):
     from agent_py_agent.agent.conversation.task_promotion import promote_conversation_task_for_run
 
     root = promote_conversation_task_for_run(agent, authority)
-    assert agent.conversation_store.claims.acquire({'thread_id': root.thread_id,
-        'task_id': root.task_id, 'reason': 'thread_goal_continue', 'lease_seconds': 60}) is not None
+    claim = agent.conversation_store.claims.acquire({'thread_id': root.thread_id,
+        'task_id': root.task_id, 'reason': 'thread_goal_continue', 'lease_seconds': 60})
+    assert claim is not None
+    from agent_py_agent.agent.conversation.background_execution import _BackgroundRunControl
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+    )
+
+    control = authority.conversation_task_binding_callback
+    if type(control) is _BackgroundRunControl:
+        binding = {'invocation_run_id': authority.request_id, **control.runtime_authority()}
+        with agent.conversation_store.tasks.transition_guard(root.task_id), bind_claim_execution(
+            ClaimExecutionBinding(agent.conversation_store.claims, root.thread_id,
+                                  claim['claim_id'], str(claim.get('claim_scope_id') or '')),
+        ):
+            assert control.bind_runtime_authority(binding) is True
     return root
+
+
+# LLM: plain测试helper没有pytest request；只包传入MonkeyPatch的公开undo，嵌套时逐个finish原control再保证原undo执行。
+# 函数用途: 管理本测试装配的control寿命，失败也恢复原patch；这不是生产hook或额外执行授权。
+def bind_fixture_control_cleanup(monkeypatch, control):
+    original_undo = monkeypatch.undo
+
+    # LLM: 原undo在patch前捕获，避免递归；finish失败也不能漏掉外层control及其它测试patch恢复。
+    # 函数用途: 结束当前测试control并调用原pytest清理。
+    def finish_fixture_control_and_undo():
+        try:
+            control.finish()
+        finally:
+            original_undo()
+
+    monkeypatch.setattr(monkeypatch, 'undo', finish_fixture_control_and_undo)
 
 
 def test_real_executor_creates_one_child_and_reentry_does_not_create_again(tmp_path, monkeypatch):
@@ -407,3 +442,35 @@ def test_cancel_delegated_task_uses_original_root_stop_and_keeps_chat(tmp_path, 
     assert agent.conversation_store.session_tasks.load(task.task_id).status == "cancelled"
     assert all(agent.subagents.load(run_id).status == "CANCELLED" for run_id in fixed["child_run_ids"])
     assert agent.conversation_store.threads.require(source.thread_id).status == "active"
+
+
+@pytest.mark.parametrize('fail_second_finish', [False, True], ids=['normal', 'finish_failure'])
+def test_fixture_controls_finish_and_restore_undo_when_nested(fail_second_finish):
+    from agent_py_agent.agent.conversation.background_execution import _BackgroundRunControl
+
+    patch = pytest.MonkeyPatch()
+    original_undo = patch.undo
+    first = _BackgroundRunControl('first-fixture-control', None)
+    second = _BackgroundRunControl('second-fixture-control', None)
+    error = RuntimeError('synthetic-finish-failure')
+    try:
+        bind_fixture_control_cleanup(patch, first)
+        if fail_second_finish:
+            original_finish = second.finish
+
+            def fail_after_finish():
+                original_finish()
+                raise error
+
+            patch.setattr(second, 'finish', fail_after_finish)
+        bind_fixture_control_cleanup(patch, second)
+        if fail_second_finish:
+            with pytest.raises(RuntimeError) as caught:
+                patch.undo()
+            assert caught.value is error
+        else:
+            patch.undo()
+        assert not first(None) and not second(None)
+        assert patch.undo == original_undo
+    finally:
+        original_undo()

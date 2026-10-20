@@ -1,3 +1,5 @@
+# 模块用途: 提交独立Gateway ask并显示原回执/终态；未确认即明确报错，不误报queued。
+# LLM: 独立ask经原认证HTTP交宿主准备owner，原回执/终态观察不变，不能将未知运输结果当未受理重投。
 
 from __future__ import annotations
 
@@ -282,10 +284,13 @@ def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
     return 2
 
 
-# LLM: The standalone Gateway client submits its typed project cwd/roots with the request while
-# locating the daemon exclusively through the owner-level service paths supplied by `paths`.
-# 函数用途: 将命令行 ask、会话选项和当前项目目录一次写入唯一 Gateway 队列。
+# LLM: 独立ask沿同一认证HTTP提交原slash和项目cwd/roots，宿主按原规则解析/冻结owner；paths只用于同ID结果观察，不作HTTP失败写队列旁路。
+# 函数用途: 提交一次命令行输入与执行选项，保原回执观察及超时语义，不额外请求模型。
 def _submit_gateway_ask(args, agent, paths) -> GatewaySubmittedAsk:
+    from functools import partial
+
+    from ..agent.gateway_parts.request_http_client import post_gateway_ask
+
     request_id, request_path, response_path = submit_gateway_ask(
         paths,
         params=GatewayAskParams(
@@ -303,6 +308,7 @@ def _submit_gateway_ask(args, agent, paths) -> GatewaySubmittedAsk:
                 if str(item or "").strip()
             ],
         ),
+        submit_request=partial(post_gateway_ask, agent),
     )
     return GatewaySubmittedAsk(request_id, request_path, response_path)
 

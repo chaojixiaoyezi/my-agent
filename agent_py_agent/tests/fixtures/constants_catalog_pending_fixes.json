@@ -19,7 +19,6 @@
         "_BM25_B",
         "_BM25_K1",
         "_CHARS_PER_TOKEN_WINDOW",
-        "_DAILY_FINALIZE_HOUR",
         "_DATA_MODE",
         "_EXECUTABLE_MODE",
         "_FICLONE",

@@ -157,3 +157,15 @@ proactive 能力，因此只回 `not_applicable`，不会误发。
 - 1.10 真实 Feishu 主动文本 API 已返回成功；真实客户端新入站、引用回复和附件仍需继续复验。
 - typed `assistant_commentary` 候选已通过 sanitization、runtime notice 隔离、顺序与失败不阻塞最终回复的
   回归；尚未部署，因此还不是 1.10 的生产证明。
+
+## 后台来源回复槽的统一消费（2026-10-20 源码候选）
+
+`channel_message_tool`只从原RunParams/HostChannelActor和真实运输目标保存reply_binding；工具归档保留有界字段。finalizer必须复读原ManagedOperationStore的同operation、同ctx、同attempt、succeeded、handler_executed及完整delivery_evidence，失败不再留下可认领的弱sent/receipt。
+
+`background_execution._run_background_model_attempt`在原control.finish关闭发布门后固定request/task/run/attempt，沿原执行结果交给收口；这是宿主投影，模型输出不能覆盖。`background_delivery.committed_source_replies`是normal与required唯一来源槽判据，复读同canonical操作并核原owner/home、执行线程、原source线程、entry/conversation/actor及实际channel/target。required进入新通知轮前使用原工作结果身份，不能要求通知attempt等于原工作attempt，也不能从回执字典猜原工作身份。普通scheduled与audit原因门保留；audit还要原schema与完整证据引用。
+
+两条出口均沿原FrozenOwnerDelivery(external_sent=True)完整镜像正文、附件与工具原evidence_refs；纯附件的空正文仍是合法已交付信封。保留required失败/metadata和原source canonical归属。真实外发后在canonical追加前保存已有wake的整封载荷，追加失败保留原pending冻结值并释放精确claim；原异常继续抛出，原wake attempt的5次同因/12次累计预算及退避/隔离不改变。重入只补canonical，不调用模型或渠道，也不借旧attempt领新槽。工具正文与最终正文可以不同，不设关键词、正文hash或时间窗去重。
+
+成熟参考只读核对：OpenClaw `src/infra/outbound/source-delivery-plan.ts`的`resolveSourceDeliveryOutcome`统一目标匹配与消息工具可见事实，及`src/infra/outbound/delivery-completion.ts`按原operation/scope先完成owner状态再ack。借鉴共享出口与明确成功/unknown分界；本候选复用仓内原wake/outbox，不引入参考队列。
+
+定向回归入口：`test_required_notice_reply_slot.py`；旧普通/audit正fixture迁移为真实Registry/Executor/canonical，原内容、证据和不再外发断言保持。工具原无agent的flat投影改为拒绝断言，真实正例转由完整管线覆盖。真实服务、模型及飞书外发不属于这些合成测试结果。

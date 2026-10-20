@@ -1,7 +1,7 @@
 # LLM: 回合触发类型是宿主结构化事实，只由 conversation 运行时按唤醒原因和唤醒信封构造。kind 决定当前回合在模型输入里
 #   用“用户任务”还是“宿主事件”开头、推荐节用检索还是固定短名单、哪些宿主快照不进后续重放；event_facts 只是给模型看的
 #   确定性投影，宿主不解析它做任何决策。None 表示普通用户轮，行为与改动前一致。改动时同步 test_lifecycle_wake_host_event。
-# 模块用途: 定义回合触发类型、宿主事件的固定开头与渲染入口，供原生 IR、文本 prompt、推荐节和原生历史保存共用。
+# 模块用途: 定义回合触发类型与宿主事件渲染；输入结算指导同源进入原生IR和文本，不将历史一次申请当新指令。
 from __future__ import annotations
 
 import json
@@ -109,11 +109,25 @@ def session_task_turn_trigger(wake_signal: object) -> TurnTrigger | None:
 
 # LLM: 生命周期唤醒以固定标题和固定首句开头，后接确定性事实；首句只按 origin_task_attached 在两句固定文字里选，
 #   原任务不在历史里时不声称它在历史里。普通用户轮保持原“# User Task”格式与字节。
-#   会话间派活同样是宿主事件，首句写明来源会话，绝不让任务正文落在用户原话位置。纯计算。
+#   会话间派活同样是宿主事件；task_input_resolved只按typed reason补通用输入结算软指导，不解析facts/用户正文授新请求或改变状态。纯计算。
 # 函数用途: 生成当前回合在模型输入里的开头文字，原生 IR、文本 prompt 和缓存布局共用。
 def current_turn_text(user_prompt: object, trigger: object) -> str:
     wake = lifecycle_wake_trigger(trigger)
     if wake is not None:
+        if wake.reason == "task_input_resolved":
+            origin = ("原任务见下方origin_task，历史请求只作为原任务背景。"
+                      if wake.origin_task_attached else "原任务是此前历史里的那一条，历史不是新的用户请求。")
+            guidance = (
+                "宿主生命周期事件：这是已登记输入的状态结算，不是新的用户请求。"
+                "已经执行过的一次输入申请，不是再次申请或自动续期的授权；不要把本次结算当成重做旧申请的指令。"
+                "没有尚未执行的新请求或明确持续授权时，不要自动重新申请输入或延长期限。"
+                "expired是到期，不等于cancelled；cancelled、revoked、failed各按原状态说明，不可互称。"
+                "用户此前说过取消，不代表你在当前片执行了取消；只有真实操作结果才能声称自己已取消。"
+                "只有ready且result_available=true才表示已有可用输入结果，可沿原授权继续，但不代表认证已验证；"
+                "其它终态不表示收到输入，应如实说明当前状态和缺口，不能虚构填写内容。"
+                "输入事实缺失或未知时保持未确认，不能据此推定状态或获得新的申请授权。"
+            )
+            return f"{HOST_EVENT_HEADING}\n{guidance}\n{origin}\n{wake.event_facts}"
         first_line = HOST_EVENT_FIRST_LINE_ORIGIN_TASK if wake.origin_task_attached else HOST_EVENT_FIRST_LINE
         return f"{HOST_EVENT_HEADING}\n{first_line}\n{wake.event_facts}"
     session_task = session_task_trigger(trigger)

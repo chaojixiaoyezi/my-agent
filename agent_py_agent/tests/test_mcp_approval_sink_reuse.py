@@ -251,9 +251,13 @@ def test_main_missing_or_mismatched_source_disables_session_cache(main_backgroun
                 return {key: value for key, value in claim.items() if key != "runtime_authority"}
             return {**claim, "runtime_authority": {**claim["runtime_authority"], "attempt_id": "other-attempt"}}
         update_json_file_atomic(ctx.store.storage.background_claim_path(ctx.thread.thread_id), alter, require_existing=True)
-    # 后台 claim 可保持 active；缓存还必须核对实际运行权限，不能把 active 当批准来源。
+    # 原冻结scope仍active；hot显式冲突现在连fresh资格也拒，cold缺Params只读原已发布claim。
     if fault != "foreign_params":
-        assert tool_approval_scope(ctx.agent, ctx.task_id).active
+        assert scope.active
+        if fault == "none":
+            assert tool_approval_scope(ctx.agent, ctx.task_id).active
+        else:
+            assert not tool_approval_scope(ctx.agent, ctx.task_id).active
     assert _agent_approval_session_scope(ctx.agent, scope) == ""
 
 

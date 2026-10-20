@@ -1,5 +1,5 @@
 # LLM: owner 身份与路径沿同一 v2 布局解析，插件安装不能自行指定归属；纯解析不创建文件或初始化 Agent。
-# 模块用途: 解析各用户的规范目录，显式初始化时才创建目录与种子文件。
+# 模块用途: 解析各用户规范目录；显式初始化时从规范根私有创建目录/种子，拒子链接，不给W补建权限。
 from __future__ import annotations
 
 import json
@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.nofollow_fs import create_private_file_beneath, ensure_private_dir
 from ..common.path_segments import safe_path_segment
 from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
 from .home_layout import MyAgentHomePaths
@@ -110,12 +111,15 @@ def resolve_owner_home(root: str | Path, identity: OwnerIdentity | None = None) 
     return _owner_home_result(home, resolved, owner_home)
 
 
+# LLM: 仅原C/默认owner物化者调用；规范根内子目录显式no-follow新建0700，种子排他0600，既有目录不chmod，不给W补建能力。
+# 函数用途: 初始化可信owner的缺失目录与种子，拒绝受管子链接，不修改其它owner或用户工作区。
 def ensure_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -> OwnerHomeResult:
     result = resolve_owner_home(root, identity)
+    ensure_private_dir(result.root)
     for directory in _owner_directories(result):
-        directory.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(directory, canonical_root=result.root)
     for path, content in _owner_seed_files(result):
-        _write_seed_file(path, content)
+        _write_seed_file(path, content, canonical_root=result.root)
     _upgrade_untouched_group_persona(result)
     for path, payload in _owner_seed_jsons(result):
         _write_seed_json(path, payload)
@@ -335,9 +339,16 @@ def _owner_id(identity: OwnerIdentity) -> str:
     return f"providers/{identity.provider}/{bucket}/{identity.owner_id}"
 
 
-def _write_seed_file(path: Path, content: str) -> None:
-    if not path.exists():
-        path.write_text(content, encoding="utf-8")
+# LLM: owner文本种子沿同规范根FD排他新建；只负责私有owner种子，不调用共享初始化或替W授写权。
+# 函数用途: 以0600写缺失种子，已有普通文件不覆盖，链接/特殊叶直接拒绝。
+def _write_seed_file(path: Path, content: str, *, canonical_root: Path | None = None) -> None:
+    root = canonical_root if canonical_root is not None else path.parent
+    try:
+        descriptor = create_private_file_beneath(root, path.relative_to(root).parts)
+    except FileExistsError:
+        return
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
 
 
 def _upgrade_untouched_group_persona(result: OwnerHomeResult) -> None:

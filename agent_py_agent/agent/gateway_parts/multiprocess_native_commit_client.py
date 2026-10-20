@@ -1,5 +1,5 @@
 # LLM: 原W只读取原父进程的同次kernel reply；返回值报告C已完成的事，绝不授权W侧文件/工具副作用。
-# 模块用途: 为原生责任及C短提交提供无自动重试的W客户端，保留未知交付状态。
+# 模块用途: 提供无重试的W客户端；strict原父同seq负回执只清本RPC phantom，未知交付及业务责任保持。
 import json
 import os
 import threading
@@ -12,6 +12,22 @@ from .multiprocess_executor_identity import process_birth
 from .multiprocess_kernel_message import KernelMessageReceiver, KernelMessageSender
 from .multiprocess_native_control_receive import receive_control_packet
 from .multiprocess_worker_commit import WorkerCommitRejected
+
+_REJECTED_REPLY_PROOF = object()
+
+
+# LLM: 只由原父kernel消息、strict形状和本RPC seq关联成功后产生；不运输C实际异常对象，不释放claim/P3或允许自动重试。
+# 类用途: 报告本次native RPC已被明确pre-pin拒绝，与超时或效果未知区分。
+class NativeCommitNotStarted(WorkerCommitRejected):
+    # LLM: proof限本模块实际receive路径；origin/client/seq用于调用方准确定位，不是业务授权。
+    # 函数用途: 保存本地已认证的负回执，普通同文异常不可代替。
+    def __init__(self, client, seq, *, proof):
+        if proof is not _REJECTED_REPLY_PROOF:
+            raise WorkerCommitRejected('native_reply_unconfirmed')
+        self._origin, self._creator, self._client = self, os.getpid(), client
+        self.seq = seq
+        self._materialize_origin = None
+        super().__init__('native_commit_not_started')
 
 
 # LLM: 原endpoint仅定位传输；creator/父P0/kernel sender分别核验，父身份与ACK不授予W写权限。
@@ -38,6 +54,7 @@ class NativeCommitClient:
         self._inflight = {}
         self._finish_seq = {}
         self._completed_finishes = {}
+        self._rejections = {}
         self._closed = False
 
     # LLM: self/creator必须在继承锁之前；真实父出生持续相同也不是业务授权，只用于拒错对端。
@@ -66,11 +83,18 @@ class NativeCommitClient:
             raise WorkerCommitRejected('original_native_operation_required')
         return self._request({'op': 'apply', 'operation': operation}, 'applied', timeout)
 
-    # LLM: 固定wire只引用原request/attempt；C实读原路由物化，ACK不能用于W侧写入。
+    # LLM: 固定wire只引用原request/attempt；call_origin仅本次词法调用内运输拒绝归属，不入wire/账、不授执行或结算权。
     # 函数用途: 请求原C物化owner，不接受路径、owner声明或W回调。
-    def materialize_owner(self, request_id, execution_attempt_id, *, timeout=5):
-        return self._request({'op': 'materialize', 'request_id': request_id,
-                              'execution_attempt_id': execution_attempt_id}, 'applied', timeout)
+    def materialize_owner(self, request_id, execution_attempt_id, *, timeout=5, call_origin=None):
+        try:
+            return self._request({'op': 'materialize', 'request_id': request_id,
+                                  'execution_attempt_id': execution_attempt_id}, 'applied', timeout)
+        except NativeCommitNotStarted as error:
+            if (type(error) is NativeCommitNotStarted and error._origin is error
+                    and error._creator == os.getpid() and error._client is self
+                    and error.seq == self._seq and call_origin is not None):
+                error._materialize_origin = (call_origin, request_id, execution_attempt_id)
+            raise
 
     # LLM: 未知finish保留原seq；再次调用只等原结果，不重发可能已成功的物理结清操作。
     # 函数用途: 精确收尾原handle，失败不假定释放，迟到ACK可继续消费。
@@ -106,11 +130,13 @@ class NativeCommitClient:
                                      separators=(',', ':')).encode(), timeout=timeout)
             return self._await_reply(seq, timeout)
 
-    # LLM: 每个接收独立核原父sender及精确关联；意外FD先清理并拒绝，不洗未知；旧ACK分别归属，等待共用原预算。
-    # 函数用途: 严格消费无FD控制回复并更新原责任，不自动重试业务或把资源当许可。
+    # LLM: 每个接收独立核原父及精确seq；strict NACK仅移除该begun/applied的phantom，不碰其它责任。乱序拒绝归原seq，当前等待共原预算，FD/finish/未知仍硬拒。
+    # 函数用途: 消费无FD ACK或明确pre-pin拒绝，不自动重试或把回执当业务结算。
     def _await_reply(self, seq, timeout):
         deadline = time.monotonic() + timeout
         while True:
+            if seq in self._rejections:
+                raise self._rejections.pop(seq)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('native_reply_timeout')
@@ -123,6 +149,18 @@ class NativeCommitClient:
             if type(reply_seq) is not int or reply_seq not in self._inflight:
                 raise WorkerCommitRejected('native_reply_unconfirmed')
             expected, handle, released = self._inflight[reply_seq]
+            if type(value) is dict and value.get('op') == 'rejected':
+                if (set(value) != {'op', 'seq', 'error_code'} or value['error_code'] != 'WORKER_COMMIT_REJECTED'
+                        or expected not in ('begun', 'applied') or handle != reply_seq or released
+                        or handle in self._pending or handle in self._finish_seq):
+                    raise WorkerCommitRejected('native_reply_unconfirmed')
+                error = NativeCommitNotStarted(self, reply_seq, proof=_REJECTED_REPLY_PROOF)
+                del self._inflight[reply_seq]
+                self._uncertain.discard(handle)
+                if reply_seq == seq:
+                    raise error
+                self._rejections[reply_seq] = error
+                continue
             result = _reply(raw, expected, reply_seq, handle)
             del self._inflight[reply_seq]
             if expected == 'finished':

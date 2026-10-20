@@ -1,3 +1,11 @@
+## 2026-10-20 策展发现与执行的时间/配置一致性（独立候选，待真实复验）
+
+策展 consumer 与 owner 发现共用 `memory_store/curator_due.py` 的纯本地时间、日终和间隔判据。C 从原 owner 配置解析实际 interval、daily_finalize_hour 与 timezone；空 timezone 继续使用宿主本地时区，未来日界重新按该日期的时区规则计算，避免当前固定 offset 跨 DST。失败退避基数与 consumer 同为 `max(30,min(300,interval_seconds))`，原特殊失败码一小时不变。mtime 仍只是来源粗筛，不代表真实 batch、排除名单或 turn_threshold 已满足。
+
+引用本身不携带配置授权：`_submit` 入口按当前可信配置重读完整原来源并重新判资格，冻结本次预期；原 T→controller/lease→runtime 短门内部，在实际 queue 写入前再核完整配置及 timezone、source/hash/input_revision 和当前时间资格。单纯时间失格/禁用以私有同步控制流退出本次未写提交，不增加耐久状态；配置/来源变化及未知仍原拒绝。W/Count0 的 `read_source`、原 busy/not_due 结果、pending 重排、P3 和停止合同均不改。
+
+671 的 pending 细分结果未保存，不能把静态 UTC/配置分叉直接认定为那次 drain 失败的确切原因；本片不清旧 pending、不把 not_due 改 handled、不释放 P3。源码隔离真实功能先行，最终统一 strict/full 与一次发行验收；本地 fake/时间矩阵不代实际停止通过。
+
 ## 待确认候选与策展派发资格（362，已实现待独审）
 
 待用户确认的候选不再单独唤醒owner或创建interval策展批次；host的auto_eligible来源资格、原候选selector和正式提交确认门保持。真实消息/审计、原pending reason、有效或旧lease恢复、原时间/日终仍按既有链处理；完整source SHA、P3/额度和停止门不变。原conservative_v1仅保留已合法触发批次中的候选处理尝试和结构化回执，manual_only跳过尝试，两者均不授自动正式发布。

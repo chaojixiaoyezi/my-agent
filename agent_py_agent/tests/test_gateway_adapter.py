@@ -241,7 +241,7 @@ class TestProcessFileAdapterOnce:
 
         assert result == 0
 
-    def test_limit_parameter(self, tmp_path: Path):
+    def test_limit_parameter(self, tmp_path: Path, monkeypatch):
         """验证 limit 参数限制处理数量。"""
         from agent_py_agent.agent.gateway_parts.adapter import process_file_adapter_once
 
@@ -252,6 +252,10 @@ class TestProcessFileAdapterOnce:
         _write_adapter_messages(adapter_paths, 3)
 
         mock_agent = MagicMock()
+        processed_paths = []
+        # 本例只验原loop的limit；消息处理叶由真实HTTP roundtrip另验，不让MagicMock冒充宿主来源。
+        monkeypatch.setattr("agent_py_agent.agent.gateway_parts.adapter._process_claimed_adapter_message",
+            lambda _agent, _options, path: processed_paths.append(path))
 
         result = process_file_adapter_once(
             mock_agent,
@@ -262,6 +266,9 @@ class TestProcessFileAdapterOnce:
         )
 
         assert result == 1
+        assert len(processed_paths) == 1
+        assert len(list(adapter_paths.inbox.glob("*.json"))) == 2
+        assert list(adapter_paths.processing.glob("*.json")) == processed_paths
 
     def test_bad_json_reports_message_load_error(self, tmp_path: Path):
         """坏 adapter 消息文件不能被误判成用户发了空 prompt。"""

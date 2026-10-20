@@ -5,6 +5,7 @@ from __future__ import annotations
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 #   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
+# LLM: gateway_worker_process_count是宿主唯一拓扑，YAML/直接构造都严格核非bool非负int，不接受聊天参数覆盖。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
 """智能体配置加载工具。
 
@@ -34,6 +35,7 @@ from .defaults import (
     DEFAULT_COMMAND_ACCESS_MODE,
     DEFAULT_MODEL_MAX_TOKENS,
 )
+from .gateway_topology import validate_gateway_worker_process_count
 from .memory import normalize_agent_memory_config
 from .normalize import (
     _coerce_bool_config,
@@ -305,8 +307,15 @@ class _RuntimeBudgetConfigFields:
 
 # LLM: 用户默认同步随包配置；沟通软引导只影响主会话提示，联测builder与参数登记；host_only仅宿主冻结，媒体预算和群附件/Curator授权不变。
 # 类用途: 汇总模型和运行配置；沟通指导可关闭，图片外发有独立开关，有限正时间只提供后续请求默认，不管理阶段时钟。
+# LLM: 宿主拓扑默认0，__post_init__与YAML规范化共用严格判据，replace不得绕过。
+# 类用途: 保存同一配置权威的运行参数；部署拓扑不能由模型或用户会话改写。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
+
+    # LLM: 程序构造、dataclass replace与YAML加载共用严格拓扑校验；不从bool/字符串补猜工作进程数量。
+    # 函数用途: 创建配置时拒绝非法部署数量，避免非YAML入口绕过同一规则。
+    def __post_init__(self):
+        validate_gateway_worker_process_count(self.gateway_worker_process_count)
 
     # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
     decision_enabled: bool = False
@@ -492,6 +501,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     runner_timeout_by_role: dict[str, object] = field(default_factory=dict)
     # 子代理 runner 普通失败后最多自动重跑几次（唯一的家；原 runner_failure_policy 与守卫文件的两个重派上限已并入）；0 = 不自动重跑。
     runner_failure_retry_limit: int = 1
+    # 宿主唯一拓扑配置；0保留单进程，正数使用独立工作进程，不是请求线程数或并发上限。
+    gateway_worker_process_count: int = 0
     gateway_workspace: str = ""
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300

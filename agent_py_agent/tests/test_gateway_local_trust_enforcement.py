@@ -275,8 +275,8 @@ def test_plugin_token_loopback_peer_passes_with_both_role_modes(monkeypatch, aut
 # --- TUI 启动预检：所有客户端缺凭据都在 HTTP 前拒绝，与 IM 适配器同口径 ---
 
 
-# LLM: 凭据已非配置开关；隔离配置不带退休字段，不能改变 G1 门。
-# 函数用途: 写最小临时配置，让真实 TUI 客户端沿当前配置接口加载。
+# LLM: 凭据已非配置开关；客户端与Gateway公开配置前门共用真实空YAML（Count0默认），不带退休字段、不改变G1或冻结门。
+# 函数用途: 写最小临时配置，供TUI客户端和受控CLI预检沿当前真实配置入口加载。
 def _write_require_config(tmp_path) -> str:
     path = tmp_path / "credential-client.yaml"
     path.write_text("{}\n", encoding="utf-8")
@@ -386,7 +386,7 @@ def test_gateway_run_preflight_refuses_before_any_startup_side_effect(tmp_path, 
     monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", lambda *a: calls.__setitem__("setup", calls["setup"] + 1))
     monkeypatch.setattr(gateway_process, "_cmd_gateway_run_threads",
                         lambda *a: calls.__setitem__("threads", calls["threads"] + 1))
-    exit_code = gateway_process.cmd_gateway_run(SimpleNamespace(config="", workspace_root="", after_pid=0))
+    exit_code = gateway_process.cmd_gateway_run(SimpleNamespace(config=_write_require_config(tmp_path), workspace_root="", after_pid=0))
     assert exit_code == 2
     assert calls == {"setup": 0, "threads": 0}
 
@@ -414,7 +414,7 @@ def test_gateway_run_preflight_generates_missing_credential_and_reaches_setup(tm
     monkeypatch.setattr(gateway_process, "gateway_paths", lambda a: gateway_paths_from_root(tmp_path / "queue"))
     monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", stop_at_setup)
     with pytest.raises(_ReachedSetup):
-        gateway_process.cmd_gateway_run(SimpleNamespace(config="", workspace_root="", after_pid=0))
+        gateway_process.cmd_gateway_run(SimpleNamespace(config=_write_require_config(tmp_path), workspace_root="", after_pid=0))
     assert calls["setup"] == 1
     path = local_client_credential_path(root)
     assert path.is_file() and (path.stat().st_mode & 0o777) == 0o600
@@ -436,7 +436,7 @@ def test_gateway_run_preflight_refuses_even_with_configured_token(tmp_path, monk
     monkeypatch.setattr(gateway_process, "make_agent", lambda args: agent)
     monkeypatch.setattr(gateway_process, "gateway_paths", lambda a: gateway_paths_from_root(tmp_path / "queue"))
     monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", lambda *a: calls.__setitem__("setup", calls["setup"] + 1))
-    exit_code = gateway_process.cmd_gateway_run(SimpleNamespace(config="", workspace_root="", after_pid=0))
+    exit_code = gateway_process.cmd_gateway_run(SimpleNamespace(config=_write_require_config(tmp_path), workspace_root="", after_pid=0))
     assert exit_code == 2
     assert calls["setup"] == 0
 
@@ -450,5 +450,5 @@ def test_gateway_run_preflight_old_false_cannot_bypass_invalid_data_root(tmp_pat
     monkeypatch.setattr(gateway_process, "make_agent", lambda args: _run_agent(root, False))
     monkeypatch.setattr(gateway_process, "gateway_paths", lambda agent: gateway_paths_from_root(tmp_path / "queue"))
     monkeypatch.setattr(gateway_process, "_cmd_gateway_run_setup", lambda *_a: calls.__setitem__("setup", calls["setup"] + 1))
-    assert gateway_process.cmd_gateway_run(SimpleNamespace(config="", workspace_root="", after_pid=0)) == 2
+    assert gateway_process.cmd_gateway_run(SimpleNamespace(config=_write_require_config(tmp_path), workspace_root="", after_pid=0)) == 2
     assert calls == {"setup": 0}

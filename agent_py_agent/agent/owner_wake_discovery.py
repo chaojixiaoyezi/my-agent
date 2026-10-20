@@ -1,3 +1,4 @@
+# LLM: 策展时间判断复用consumer纯判据；C调用显式可信配置，mtime仍仅候选而非消费许可。
 # LLM: owner恢复仍保pending/旧lease与真实输入/日终；待确认候选不单独成为新策展工作，修改须联测owner/curator/确认合同。
 # 模块用途: 从原owner结构事实恢复后台活跃登记，不替候选授自动执行或正式发布权。
 """磁盘级 owner 唤醒发现:治「盯守转非阻塞后睡死叫不醒」的登记表易失性。
@@ -69,15 +70,6 @@ _STORE_ROOT_PATTERNS = (
     "conversations",
     "data/conversations",
 )
-# 策展发现常量:与 config.CuratorConfig(interval_seconds=10_800)/daily_finalize_hour=23 对齐,
-# 发现层不引配置避免循环依赖,只保证「到期」语义一致(真到期,非每天必挂/对话即挂)。
-_CURATOR_INTERVAL_SECONDS = 10_800
-# 每日定稿触发的小时点（24 小时制）；到点把当日 wake 事实收口（无物理单位）。
-_DAILY_FINALIZE_HOUR = 23
-# 策展失败退避窗口:与 curator._run_pending_when_due 的 retry_after 上限(300s)对齐——
-# 失败后的 pending owner 在窗口内不被发现层判活,避免 215 个失败 curator owner 每轮
-# 分页种回登记表占工位(真机:占满 64 容量池,真活 user-a 被逐出饿死)。
-_CURATOR_FAILURE_BACKOFF_SECONDS = 300
 _PROVIDER_BUCKET_KINDS = {"users": "user", "groups": "group"}
 OwnerWakeCursor = tuple[str, str, str]
 
@@ -685,17 +677,19 @@ def _has_pending_memory_curator_work(
     owner_home: Path,
     *,
     deadline_out: list[float] | None = None,
+    curator_config=None,
+    timezone_name: str = "",
 ) -> bool:
     """策展软事实判定。
 
     LLM: ``deadline_out`` 可选收集"结论可能因时间改变"的最早墙钟时刻(退避到期、interval 到期、
-    下一个 23:00 日终窗口),供判定缓存决定有效期;不传参时行为与旧实现逐字一致。
+    实际本地日终窗口),供缓存决定有效期；C显式传可信配置，默认使用原配置默认值和服务器本地时区。
     """
-    if not _owner_memory_enabled(owner_home):
+    if (curator_config is not None and not curator_config.enabled) or not _owner_memory_enabled(owner_home):
         return False  # 总闸关闭:curator 软活不判活(不占登记表工位,对称 skill 空快照)
     state_path = owner_home / "memory" / "curator" / "state.json"
     try:
-        from .memory_store.curator_models import MemoryCuratorState, curator_failure_retry_seconds
+        from .memory_store.curator_models import MemoryCuratorState
 
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -707,34 +701,45 @@ def _has_pending_memory_curator_work(
     except (OSError, UnicodeError, ValueError, TypeError):
         # 坏 state 不能证明有活;CuratorService 运行时会以结构化错误暴露,发现层不据此占工位
         return False
+    return curator_work_is_due(owner_home,state,curator_config=curator_config,
+        timezone_name=timezone_name,deadline_out=deadline_out)
+
+
+# LLM: state须由原canonical reader提供，配置来自宿主；mtime仍只是候选粗筛，原service保batch/排除/turn_threshold，结果不授P3或执行。
+# 函数用途: 用consumer同源clock和实际配置判断已读state的时间资格。
+def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name="", deadline_out=None):
+    from .memory_store.curator_due import (
+        daily_finalize_due,
+        interval_elapsed,
+        localized_now,
+        next_local_boundary,
+        parse_time,
+    )
+    from .memory_store.curator_models import MemoryCuratorConfig, curator_failure_retry_seconds
+
+    config = MemoryCuratorConfig() if curator_config is None else curator_config
+    if not config.enabled or not _owner_memory_enabled(owner_home):
+        return False
     now = time.time()
-    # 失败退避:刚失败的 pending owner 不判活(curator 层 _run_pending_when_due 同窗口 300s)。
-    # 否则失败后的 curator 软活每轮分页都被种回登记表占工位,硬事实 owner 反而被挤(真机实锤)。
-    last_failure = _curator_success_timestamp(state.last_failure_at)
-    # 没配模型的失败用更长的同源退避(curator_failure_retry_seconds),不按维护周期反复重建 owner 实例。
-    backoff = curator_failure_retry_seconds(state.last_failure_code, _CURATOR_FAILURE_BACKOFF_SECONDS)
-    if last_failure > 0 and now - last_failure < backoff:
-        # 退避到期这一刻结论可能翻转(还需新输入,新输入由消息/审计 mtime 签名覆盖)。
-        _add_deadline(deadline_out, last_failure + backoff)
+    current = localized_now(datetime.fromtimestamp(now,timezone.utc),timezone_name)
+    failure = parse_time(state.last_failure_at)
+    backoff = curator_failure_retry_seconds(state.last_failure_code,max(30,min(300,config.interval_seconds)))
+    if state.last_failure_code and failure is not None and now-failure.timestamp() < backoff:
+        _add_deadline(deadline_out,failure.timestamp()+backoff)
         return False
     if state.pending_reasons or state.active_lease:
-        # 非空 lease/pending 是文件事实:lease 过期与否都仍判活(旧语义),无时间边界。
         return True
-    # 日终归档从「每天必挂」改为「真到期」:当天没归档且已过归档时刻(23 点)才挂。
-    # 注意放 last_success 判定之前——无成功记录的 owner 也要能触发日终归档。
-    if state.last_daily_finalize_date != datetime.now(timezone.utc).date().isoformat():
-        if datetime.now(timezone.utc).hour >= _DAILY_FINALIZE_HOUR:
-            # 日终窗口内的"挂起"跨过 UTC 零点就不再成立(日期滚动),所以边界是下一个零点。
-            _add_deadline(deadline_out, _next_utc_midnight_timestamp())
-            return True
-        _add_deadline(deadline_out, _next_daily_finalize_timestamp())
-    last_success = _curator_success_timestamp(state.last_success_at)
-    if last_success <= 0:
-        return _curator_input_newer_than(owner_home, 0.0)
-    # interval 兜底:距上次成功 >= interval 且期间有新输入才挂(对话即挂收敛为真到期)
-    if now - last_success >= _CURATOR_INTERVAL_SECONDS:
-        return _curator_input_newer_than(owner_home, last_success)
-    _add_deadline(deadline_out, last_success + _CURATOR_INTERVAL_SECONDS)
+    if daily_finalize_due(state,current,config.daily_finalize_hour):
+        _add_deadline(deadline_out,next_local_boundary(current,timezone_name,0,next_day=True))
+        return True
+    if state.last_daily_finalize_date != current.date().isoformat():
+        _add_deadline(deadline_out,next_local_boundary(current,timezone_name,config.daily_finalize_hour))
+    success = parse_time(state.last_success_at)
+    if success is None:
+        return _curator_input_newer_than(owner_home,0.0)
+    if interval_elapsed(state,current,config.interval_seconds):
+        return _curator_input_newer_than(owner_home,success.timestamp())
+    _add_deadline(deadline_out,success.timestamp()+config.interval_seconds)
     return False
 
 
@@ -742,26 +747,6 @@ def _add_deadline(deadline_out: list[float] | None, moment: float) -> None:
     """记录一个"结论可能因时间改变"的墙钟时刻(可选出口;None 表示调用方不需要)。"""
     if deadline_out is not None:
         deadline_out.append(float(moment))
-
-
-def _next_utc_midnight_timestamp() -> float:
-    """下一个 UTC 零点(日期滚动会让"当天未归档"的判定换一天)。"""
-    current = datetime.now(timezone.utc)
-    moment = current.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    return moment.timestamp()
-
-
-def _next_daily_finalize_timestamp() -> float:
-    """下一个 UTC 日终归档时刻(当天 23:00;已过则次日 23:00)。
-
-    LLM: 走模块级 ``datetime`` 的 now() 而不是 fromtimestamp——发现层的日终判定本来就以
-    ``datetime.now(timezone.utc)`` 为唯一时钟,测试用冻结时钟替换该名字时必须同时生效。
-    """
-    current = datetime.now(timezone.utc)
-    moment = current.replace(hour=_DAILY_FINALIZE_HOUR, minute=0, second=0, microsecond=0)
-    if moment <= current:
-        moment = moment + timedelta(days=1)
-    return moment.timestamp()
 
 
 # LLM: mtime 只用于发现“需要 tick”的 owner；真正 cursor/due 判定仍由 CuratorService 的结构化 state 完成。
@@ -778,18 +763,6 @@ def _curator_input_newer_than(owner_home: Path, timestamp: float) -> bool:
         except OSError:
             return True
     return False
-
-
-# LLM: 坏 last_success_at 不能让 owner 永久沉睡；返回零使 discovery 保守唤醒后由严格 state parser 报错。
-# 函数用途: 将 Curator UTC ISO 时间转换成发现层比较时间。
-def _curator_success_timestamp(value: str) -> float:
-    try:
-        parsed = datetime.fromisoformat(str(value or ""))
-    except ValueError:
-        return 0.0
-    if parsed.tzinfo is None:
-        return 0.0
-    return parsed.astimezone(timezone.utc).timestamp()
 
 
 def _has_due_scheduler_fact(

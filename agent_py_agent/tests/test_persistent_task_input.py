@@ -360,10 +360,20 @@ def test_real_tool_fake_model_archives_pair_then_only_generates_no_tools_reply(b
                 'name':'request_credentials','input':{'url':'https://example.com/api','authentication':'bearer'}}])
     backend = Backend()
     background.agent.backend = backend
-    result = background.agent.run('读取原接口，必要时向我申请凭据。', params=RunParams(save=False,
-        source='background_main_agent', run_id=background.task_id, task_id=background.task_id,
-        allowed_tools=['request_credentials'], task_attributes={'conversation_thread_id':background.thread.thread_id,
-                                                              'conversation_task_id':background.task_id}))
+    from agent_py_agent.agent.conversation.background_execution import _run_background_model_attempt
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+    )
+
+    # 复用后台正式适配器与原claim publisher；模型仍经真实agent.run，scope不从测试JSON或当前指针补猜。
+    with bind_claim_execution(ClaimExecutionBinding(
+        background.store.claims, background.thread.thread_id, background.claim['claim_id'], '',
+    )):
+        result, _bound = _run_background_model_attempt(background.agent, '读取原接口，必要时向我申请凭据。', RunParams(save=False,
+            source='background_main_agent', run_id=background.task_id, task_id=background.task_id,
+            allowed_tools=['request_credentials'], task_attributes={'conversation_thread_id':background.thread.thread_id,
+                                                                  'conversation_task_id':background.task_id}))
     assert result.runtime_reason == 'TASK_INPUT_WAIT'
     assert result.runtime_status == 'needs_user_input'
     assert result.response == '请填写已发出的凭据卡，提交后继续原任务。'

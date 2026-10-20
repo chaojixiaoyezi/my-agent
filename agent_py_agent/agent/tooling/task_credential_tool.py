@@ -1,4 +1,4 @@
-# LLM: 原工具只转交当前owner的凭据发现/管理；实际填写人优先和群范围由宿主helper裁决，不重排、不从文本授权或失败换号。
+# LLM: 原工具元数据前置安全新卡能力，仍只作模型软上下文；实际填写人/群范围/送达由原宿主裁决，find与ref冲突仍由原schema/execute拒绝。
 # 模块用途: 发现可复用的群凭据引用或明确请求新卡，保留原状态/输入等待/运输确认；HTTP秘密只在原宿主注入。
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import logging
 
 from ..capability.runtime_config_reload import capability_config_for_agent
+from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
 from ..conversation.tool_approval_scope import ToolApprovalScopeUnavailable
 from ..user_space.task_credential_storage import credential_stage, read_credential_row
 from ..user_space.task_credentials import (
@@ -30,37 +31,40 @@ from .models import (
 # LLM: 工具始终绑定当前 owner Agent；开关在 capability 配置，运输确认只读宿主记录，失败/取消不能变成完成或聊天凭据收集。
 # 类用途: 返回原授权候选、共享本人旧群卡或明确发新卡；管理权交原宿主，不等待、不调用模型、不公开秘密。
 class RequestCredentialsTool(BaseTool):
-    # LLM: Registry维持原任务晋升；list/find仅声明只读且仍由原owner/actor验权，软发现提示不赋予群共享或管理权限。
-    # 函数用途: 声明凭据发现、显式新卡和持续使用参数，保留原输入等待和有限期限选项。
+    # LLM: 新卡说明与检索词不改变注册/展开/Schema/运行策略；仅宿主confirmed可说送达，原status/find/ref和owner/actor权限保持。
+    # 函数用途: 说明真实安全输入卡及凭据发现用法，避免用聊天表格代替宿主交互；参数与执行合同保持。
     def __init__(self,agent):
         self.agent = agent
-        self.model_spec = ToolModelSpec(name='request_credentials', description='群内需要认证的站点先 operation=find 传准确url，或用list查看本群已授权凭据；find的selected_credential_ref由宿主按实际填写人本人账号优先、否则本群固定顺序选择，已有可用引用直接交web_fetch。本人账号401/403或失败不能静默改用他人账号；用户明确撤销自己的引用后可重新find使用本群其他可用账号。旧task群卡不会自动共享；仅用户明确要求共享本人旧群卡时，可用operation=share把shareable_credentials中的本人旧卡原位共享，再find，无须重填。只有确实缺失或用户明确新增/换账号才用operation=request发新卡；request始终明确申请，不因别人已有凭据隐式复用。群新卡默认本群共享，个人来源仅本人任务；可显式access_scope=task。无需先选认证协议；collected只保存，使用前configure原引用与准确方案，再由web_fetch宿主注入秘密。可用job_id绑定已有本人的监控。',
-            input_schema={'type':'object','properties':{'url':{'type':'string'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
+        self.model_spec = ToolModelSpec(name='request_credentials', description='用户要新的账号密码或秘密输入界面时，用operation=request申请真实安全输入卡，常规账号密码用collection_mode=username_password。默认authentication=collected仅收集时可不传url，目标链接由用户在卡片里填写；发卡本身不访问目标网站，无需先搜索模板或历史。聊天表格、Markdown下划线或口头描述不能替代宿主安全表单，也不能要求用户在普通聊天中填写秘密。只有工具回执request_delivery.status=confirmed才可说卡片已发出；waiting_input只表示等待填写，不表示已提交或保存。已有credential_ref需确认填写或保存状态时，用operation=status和原引用；返回安全元信息，不读取秘密。find仅按真实URL的同origin发现，不能传credential_ref或编造占位URL；空匹配不表示某个引用未填写。群内需要认证的站点先 operation=find 传准确url，或用list查看本群已授权凭据；find的selected_credential_ref由宿主按实际填写人本人账号优先、否则本群固定顺序选择，已有可用引用直接交web_fetch。本人账号401/403或失败不能静默改用他人账号；用户明确撤销自己的引用后可重新find使用本群其他可用账号。旧task群卡不会自动共享；仅用户明确要求共享本人旧群卡时，可用operation=share把shareable_credentials中的本人旧卡原位共享，再find，无须重填。只有确实缺失或用户明确新增/换账号才用operation=request发新卡；request始终明确申请，不因别人已有凭据隐式复用。群新卡默认本群共享，个人来源仅本人任务；可显式access_scope=task。无需先选认证协议；collected只保存，使用前configure原引用与准确方案，再由web_fetch宿主注入秘密。可用job_id绑定已有本人的监控。',
+            input_schema={'type':'object','properties':{'url':{'type':'string','description':'find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
             'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string'},'job_id':{'type':'string'},
             'fields':{'type':'array','description':'需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。', 'items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},
             'auth_config':{'type':'object'},'ttl_seconds':{'type':'integer','anyOf':[{'const':0},{'minimum':60,'maximum':31536000}], 'description':'保存后有效秒数；0持续复用直到认证拒绝或撤销，缺省使用能力配置（默认0）。不改变卡片填写期限。'},
-            'operation':{'type':'string','enum':['request','status','update','configure','revoke','list','find','share']},'credential_ref':{'type':'string'},
+            'operation':{'type':'string','enum':['request','status','update','configure','revoke','list','find','share']},'credential_ref':{'type':'string','description':'宿主返回的不透明引用，不是账号、密码或其它内容；查询原卡保存状态用status。find不能携带本字段。'},
             'credential_name':{'type':'string','description':'find可选名称筛选；名称只是查找元数据，不能扩大权限或绕过本人账号优先。'},
             'access_scope':{'type':'string','enum':['group','task'],'description':'新卡使用范围；省略由原宿主决定：群新卡默认group本群共享，个人仅task。个人来源不能选group。'}},
             'anyOf':[
                 {'properties':{'operation':{'enum':['list']}},'required':['operation']},
-                {'properties':{'operation':{'enum':['find']},'url':{'minLength':1}},'required':['operation','url']},
+                {'properties':{'operation':{'enum':['find']},'url':{'minLength':1},'credential_ref':{'type':'string'}},'required':['operation','url'],EXCLUSIVE_ARGUMENT_GROUPS_KEY:[['url','credential_ref']]},
                 {'properties':{'operation':{'enum':['request']}},'required':[]},
                 {'properties':{'operation':{'enum':['update']}},'required':['operation','credential_ref']},
                 {'properties':{'operation':{'enum':['configure']}},'required':['operation','credential_ref','authentication']},
                 {'properties':{'operation':{'enum':['status','revoke','share']}},'required':['operation','credential_ref']},
             ],'additionalProperties':False},
             hints=ToolModelHints(category='orchestration',
-                use_cases=('群内需认证站点先用find查当前授权引用，有可用引用直接复用；list查看本群已保存候选。',
+                use_cases=('明确要新的账号密码、输入卡或安全表单时，用request申请宿主安全输入卡；默认仅收集可不传URL，发卡不访问网站，无须先找模板或历史。',
+                    '已有引用查保存状态用status；find仅用于真实URL同origin发现，空匹配不能推断原引用未填写。',
+                    '群内需认证站点先用find查当前授权引用，有可用引用直接复用；list查看本群已保存候选。',
                     '旧task群卡不会自动共享；用户明确要求共享本人旧群卡时才share，再find，无须重新填写；新增或换账号仍明确request。',
                     '本人认证失败由用户决定，不静默换他人账号；明确撤销本人引用后再find本群其它账号。'),
-                keywords=('凭据', '已保存账号', '群共享', '认证', 'credential', '复用账号'),
-                avoid_when=('不得索要或在工具参数中传密码、API Key明文，也不能从文件或记忆搜秘密。',)))
+                keywords=('凭据', '已保存账号', '群共享', '认证', 'credential', '复用账号', '账号密码', '输入卡', '安全表单', '凭据卡'),
+                avoid_when=('不得索要或在工具参数中传密码、API Key明文，也不能从文件或记忆搜秘密。',
+                    '不得用聊天表格或文本模板冒充安全输入卡；没有宿主confirmed回执不得声称已发卡，发卡成功也不等于用户已提交。',)))
         self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("operation", (("list", "read_only"), ("find", "read_only"))),)), promotes_task=True,
             idempotency_policy=IdempotencyPolicy(scope='operation'),timeout_policy=TimeoutPolicy(seconds=30),
             input_policy=ToolInputPolicy(internal_parameters=('__tool_call_id',), metadata_url_parameters=('url',)))
 
-    # LLM: 查询只转交宿主选择结果，不重排/不换账号；条件必填在副作用前核验，发卡后读失败保持unknown，原输入依赖与取消不变。
+    # LLM: 查询只转交宿主选择结果，不重排/不换账号；find+ref字段冲突及条件必填在副作用前拒绝，不自动转status；发卡后读失败保持unknown，原输入依赖与取消不变。
     # 函数用途: 查找已授权凭据或明确管理/申请原卡；模型仅获安全摘要、引用及准确状态，不读取秘密。
     def execute(self, params):
         from ..user_space.task_credentials import manage_credential
@@ -68,6 +72,9 @@ class RequestCredentialsTool(BaseTool):
         if config is None or not config.im_task_credentials_enabled:
             return _credential_error('TOOL_UNAVAILABLE', '当前未启用私人凭据输入。')
         operation = params.get('operation', 'request')
+        if operation == 'find' and 'credential_ref' in params:
+            return _credential_error('TOOL_INVALID_ARGUMENTS',
+                'find 按真实 URL 发现，不能同时携带 credential_ref；查询原引用保存状态请用 operation=status。')
         required = ('credential_ref',) if operation in {'status', 'revoke', 'configure', 'share'} else ()
         if operation == 'configure':
             required += ('authentication',)

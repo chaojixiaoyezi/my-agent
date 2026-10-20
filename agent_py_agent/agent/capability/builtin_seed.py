@@ -1,5 +1,5 @@
 # LLM: 本模块的共享镜像/索引写者消费原globalguard；Skill读取和owner私有初始化不在本门，默认原指纹与完整镜像合同保持。
-# 模块用途: 同步共享内置Skill及管理员派生索引，不替代运行时SkillsService。
+# 模块用途: 私有重建共享内置Skill及管理员派生索引；受管root/父目录no-follow，不替代运行时SkillsService。
 """把 skill 同步进 home,让内置和用户自定义 skill 都自动可见、可被检索。
 
 两类 skill:
@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 
 from ..common.json_io import jsonl_lines
+from ..common.nofollow_fs import ensure_private_dir
 
 # capability/builtin_seed.py -> parents[2] = agent_py_agent
 _BUILTIN_SRC = Path(__file__).resolve().parents[2] / "skills" / "builtin"
@@ -67,18 +68,21 @@ def _index_record(skill_dir: Path, source: str) -> dict[str, object]:
     }
 
 
-# LLM: 镜像只改shared/builtin；删除/重建前必须核原globalguard，读Skill/包与owner私有写不经此入口。
-# 函数用途: 在原删除复制之前拒绝受限写者，默认模式保持完整镜像。
+# LLM: 镜像只改shared/builtin；原globalguard后先核root/父目录no-follow，再原删除/完整复制；新受管目录0700，copy2源权限不变。
+# 函数用途: 安全重建共享内置Skill镜像，拒绝受管链接，不chmod用户目录或放宽W只读门。
 def _mirror_builtin(src: Path, shared_builtin_dir: Path) -> None:
     """全量镜像源码内置 skill 到 shared/builtin(清旧重建)。只动 shared/builtin。"""
     from ..common.global_write_guard import require_global_writer
 
     require_global_writer("shared_builtin_skills")
+    ensure_private_dir(shared_builtin_dir, canonical_root=shared_builtin_dir.parent)
     if shared_builtin_dir.exists():
         shutil.rmtree(shared_builtin_dir, ignore_errors=True)
-    shared_builtin_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(shared_builtin_dir, canonical_root=shared_builtin_dir.parent)
     for skill_dir in _skill_dirs(src):
-        shutil.copytree(skill_dir, shared_builtin_dir / skill_dir.relative_to(src))
+        target = shared_builtin_dir / skill_dir.relative_to(src)
+        ensure_private_dir(target.parent, canonical_root=shared_builtin_dir)
+        shutil.copytree(skill_dir, target)
 
 
 def _count_index_lines(skills_index_jsonl: Path) -> int:

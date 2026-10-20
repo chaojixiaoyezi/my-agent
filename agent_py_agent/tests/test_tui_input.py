@@ -542,14 +542,18 @@ def test_input_completer_blank_or_completed_token_never_scans_paths(tmp_path, mo
 # 09-30 用户反馈：/model 没打完时下拉里高亮着候选，打完就没了。完整命令的候选文本自带结尾空格，
 # prompt_toolkit 不再把它当作"接受后文本不变"的唯一候选丢掉；Tab 接受后仍是 "/model "。
 @pytest.mark.parametrize("typed", ["/mo", "/model"])
-def test_fully_typed_command_keeps_its_completion_highlighted(tmp_path, typed) -> None:
+def test_fully_typed_command_keeps_its_completion_highlighted(tmp_path, typed, monkeypatch) -> None:
     from prompt_toolkit.application import create_app_session
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
+    from agent_py_agent.cli.chat_parts import rendering
     from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
     from agent_py_agent.tests.test_tui_decision_menu import wait_app
     from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
+
+    # 工厂登记的是本临时app的全局输出资源；pytest撤销时恢复进入前身份，不能把后续plain正文吞入已退出app。
+    monkeypatch.setattr(rendering, "_TUI_OUTPUT_SINK", rendering._TUI_OUTPUT_SINK)
 
     def shown(buffer):
         return [item.display_text for item in getattr(buffer.complete_state, "completions", ())]

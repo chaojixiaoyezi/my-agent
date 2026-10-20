@@ -61,6 +61,7 @@ from .host_commands import (
     read_host_command,
     read_host_command_by_operation,
 )
+from .input_lifecycle import RuntimeInputLifecycleMixin
 from .operations import (
     _ATTEMPT_TERMINAL_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
@@ -460,7 +461,10 @@ def _uncertain_attempt_mutation_ids(
 # 长期 Task 身份与可停止、失败、恢复的 TaskRun/AgentRun/Attempt 执行状态。
 # wake合并探针只读取原WHERE条件，提交与取消仍走现有事务。
 # 类用途: 为 Gateway、主代理和恢复器提供同一份 SQLite 运行事实源；只读wake探针不能替代领取和回收事务。
+# LLM: 原runtime库复用精确输入生命周期mixin；默认事务和旧收口规则不变，新增例外仍在最终SQL拒UNKNOWN与换代。
+# 类用途: 提供同一owner运行账读写，包含原字条和准确输入退休执行账事务。
 class RuntimeRepository(
+    RuntimeInputLifecycleMixin,
     RuntimeSchemaMixin,
     RuntimeOperationsMixin,
     RuntimeDeliveryMixin,
@@ -2922,6 +2926,8 @@ class RuntimeRepository(
     # 每任务一行待醒字条(upsert 幂等); hot tick 只 pop 到期行(索引查询);
     # 事件(用户消息/子代理完成)可提前置醒; woke 后由消费者核任务档案再拉
     # 起, 档案证明已终结 → 清行(僵尸即清, 不累积)。
+    # LLM: 同id重排claimed字条显式撤回旧lease并回pending；旧消费者必须整行CAS complete/release，不能删新责任。
+    # 函数用途: 保存任务原唯一唤醒字条，使新安排不用等待旧消费者lease。
     def upsert_wake(
         self,
         *,
@@ -2942,7 +2948,9 @@ class RuntimeRepository(
             if row is not None:
                 conn.execute(
                     "UPDATE wake_queue SET next_due_at = ?, kind = ?, "
-                    "root_run_id = ?, root_thread_id = ?, updated_at = ? "
+                    "root_run_id = ?, root_thread_id = ?, updated_at = ?, "
+                    "status = CASE WHEN status='claimed' THEN 'pending' ELSE status END, "
+                    "lease_until = CASE WHEN status='claimed' THEN 0 ELSE lease_until END "
                     "WHERE wake_id = ?",
                     (
                         float(next_due_at), str(kind), str(root_run_id),

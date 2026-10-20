@@ -1,3 +1,4 @@
+# LLM: plain与TUI共用认证HTTP提交原输入/消息ID；原同ID终态观察和模型公开净化仍唯一。
 
 # LLM: 本模块执行 plain chat 的 Gateway/direct 路径；Gateway 历史只能由服务端 ConversationStore 注入，避免上下文重复。
 # 模块用途: 处理普通终端单轮聊天与历史；local正文等同call确认，Gateway沿既有公开流，原执行/控制身份不变。
@@ -52,8 +53,8 @@ class PlainJobContext:
     local_run: object | None = None
 
 
-# LLM: Gateway handler 只发送当前 prompt、style 和显式附件；服务端负责 canonical thread 历史与持久化。
-# 函数用途: 通过运行中的 Gateway 执行一轮普通终端聊天并显示结果。
+# LLM: plain与TUI共用认证HTTP，原输入和消息ID只作运输事实；未知显式收口不重投，确认后原canonical终态负责正文。
+# 函数用途: 提交一轮普通终端输入并显示原结果，未确认时保ID说明而不无限等待或宣称业务失败。
 def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
@@ -74,6 +75,8 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             resume_context=resume_context_override(ctx.args),
             chat_session_id=ctx.current_session_id,
             system_task=ctx.job.system_task,
+            original_prompt=getattr(ctx.job, "original_prompt", None),
+            client_message_id=str(getattr(ctx.job, "client_message_id", "") or getattr(ctx.job, "request_id", "")),
         ),
         agent=ctx.agent,
     )

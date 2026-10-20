@@ -1,3 +1,5 @@
+# LLM: 文件通道正式提交经认证HTTP，owner由宿主冻结；未确认异常保原processing，不重投、不伪outbox。
+# 模块用途: 将文件消息提交Gateway并在原确认结果后写outbox，异常不代表宿主业务失败。
 
 from __future__ import annotations
 
@@ -6,7 +8,7 @@ from __future__ import annotations
 外部聊天工具或 TUI 可以往 adapter inbox 丢 JSON。
 这个文件负责取走这些消息，转成 gateway ask，请求完成后再把回复写到 outbox。
 它是外部文件协议和内部 gateway 协议之间的转换层。
-gateway ask 入口直接来自 request_worker，不再经过 runtime 聚合层。
+普通输入经request_client共用认证HTTP交宿主准备，worker不接收客户端自填owner。
 """
 
 import time
@@ -133,12 +135,18 @@ def _message_load_error_adapter_response(
     }
 
 
+# LLM: 文件通道读出的普通输入也经原认证HTTP，owner/准入在宿主；未知运输结果只观察同ID，不补写队列。
+# 函数用途: 把原文件消息选项提交给Gateway，不自行执行业务或构造宿主owner。
 def _submit_adapter_gateway_request(
     agent: SimpleAgent,
     gateway_paths_obj: GatewayPaths,
     payload: dict,
     prompt: str,
 ) -> tuple[str, Path, Path]:
+    from functools import partial
+
+    from .request_http_client import post_gateway_ask
+
     return submit_gateway_ask(
         gateway_paths_obj,
         params=GatewayAskParams(
@@ -149,6 +157,7 @@ def _submit_adapter_gateway_request(
             include_prompt=bool(payload.get("include_prompt", False)),
             agent=agent,
         ),
+        submit_request=partial(post_gateway_ask, agent),
     )
 
 

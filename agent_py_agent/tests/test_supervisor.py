@@ -11,13 +11,24 @@ import subprocess
 import sys
 import tempfile
 import time
+from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from agent_py_agent.agent.gateway_parts import supervisor as sv
 from agent_py_agent.agent.gateway_parts.daemon_control import RunningPidReport
+
+
+# LLM: 监护状态入口现在复用正式CLI配置解析；这里显式补真实YAML，不给生产增加dummy路径兼容。
+# 函数用途: 给原PID/stop fake创建无网络宿主配置，原刺激及断言保持。
+def _public_supervisor_config(tmp_path):
+    path = tmp_path / "agent.yaml"
+    path.write_text(f'model_backend: echo\nmy_agent_home: "{tmp_path / "home"}"\ngateway_worker_process_count: 0\n')
+    return str(path)
+
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
@@ -28,11 +39,11 @@ def mock_agent_and_paths(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     config_file = config_dir / "agent_config.yaml"
-    config_file.write_text("user_id: test\n", encoding="utf-8")
+    config_file.write_text(f'user_id: test\nmodel_backend: echo\nmy_agent_home: "{tmp_path / "home"}"\ngateway_worker_process_count: 0\n', encoding="utf-8")
 
     # 创建 workspace
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+    workspace = tmp_path / "home/owners/local/main/workspace"
+    workspace.mkdir(parents=True)
 
     return config_file, workspace
 
@@ -45,10 +56,12 @@ def supervisor_instance(tmp_path, mock_agent_and_paths):
     # 临时日志路径
     log_path = tmp_path / "supervisor.log"
 
+    from agent_py_agent.cli.common import make_agent
+
+    agent = make_agent(Namespace(config=str(config_file), workspace_root=str(workspace)))
     supervisor = sv.GatewaySupervisor(
-        config_path=str(config_file),
+        config_path=str(config_file), agent=agent,
         options=sv.SupervisorConfig(
-            workspace_root=str(workspace),
             heartbeat_timeout=30.0,
             check_interval=1.0,
             max_restart_attempts=3,
@@ -74,7 +87,7 @@ def test_supervisor_daemon_cmd_includes_gateway():
 
 def test_supervisor_init_defaults():
     """测试 GatewaySupervisor 默认参数初始化。"""
-    supervisor = sv.GatewaySupervisor("dummy_config.yaml")
+    supervisor = sv.GatewaySupervisor("dummy_config.yaml", agent=SimpleNamespace(config=SimpleNamespace(config_path="dummy_config.yaml")))
     assert supervisor.heartbeat_timeout == 120.0
     assert supervisor.check_interval == 10.0
     assert supervisor.max_restart_attempts == 5
@@ -84,7 +97,7 @@ def test_supervisor_init_defaults():
 def test_supervisor_init_custom_params():
     """测试 GatewaySupervisor 自定义参数初始化。"""
     supervisor = sv.GatewaySupervisor(
-        config_path="test.yaml",
+        config_path="test.yaml", agent=SimpleNamespace(config=SimpleNamespace(config_path="test.yaml")),
         options=sv.SupervisorConfig(
             heartbeat_timeout=60.0,
             check_interval=5.0,
@@ -100,7 +113,7 @@ def test_supervisor_init_custom_params():
 
 def test_supervisor_internal_state():
     """测试 GatewaySupervisor 内部状态初始化。"""
-    supervisor = sv.GatewaySupervisor("test.yaml")
+    supervisor = sv.GatewaySupervisor("test.yaml", agent=SimpleNamespace(config=SimpleNamespace(config_path="test.yaml")))
     assert supervisor._supervisor_pid == os.getpid()
     assert supervisor._gateway_pid is None
     assert supervisor._restart_count == 0
@@ -221,18 +234,22 @@ def test_is_gateway_healthy_no_pid(mock_get_pid, supervisor_instance):
 
 def test_is_gateway_healthy_with_heartbeat(supervisor_instance, tmp_path):
     """测试有心跳且未过期时网关健康。"""
-    heartbeat_file = tmp_path / "heartbeat.json"
-    heartbeat_data = {"updated_at": time.time() - 10}  # 10秒前更新，未超过30秒超时
-    heartbeat_file.write_text(json.dumps(heartbeat_data), encoding="utf-8")
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    paths = gateway_paths_from_root(tmp_path)
+    now = time.time()
+    identity = {"host_id": "test-host", "pid": 12345, "start_time": "12345"}
+    paths.pid.write_text(json.dumps({**identity, "kind": "my-agent-gateway"}))
+    paths.state.write_text(json.dumps({"pid": 12345, "process_identity": identity,
+                                      "started_at": now - 20, "status": "running"}))
+    paths.heartbeat.write_text(json.dumps({"pid": 12345, "started_at": now - 20,
+        "updated_at": now - 10, "status": "running", "dispatcher_alive": True, "dispatcher_state": "running"}))
+    from types import SimpleNamespace
 
-    mock_paths = MagicMock()
-    mock_paths.pid = Path("/pid")
-    mock_paths.heartbeat = heartbeat_file
-    supervisor_instance._paths = mock_paths
-
-    with patch.object(sv, "get_running_pid", return_value=12345), \
-         patch.object(sv, "is_pid_alive", return_value=True), \
-         patch.object(sv.time, "time", return_value=time.time()):
+    supervisor_instance._paths = paths
+    supervisor_instance._agent = SimpleNamespace(config=SimpleNamespace(gateway_worker_process_count=0))
+    with patch.object(sv, "get_running_pid_report", return_value=RunningPidReport(12345)), \
+         patch.object(sv, "process_identity_is_live", return_value=True), \
+         patch.object(sv.time, "time", return_value=now):
         result = supervisor_instance._is_gateway_healthy()
     assert result is True
 
@@ -375,28 +392,28 @@ def test_handle_signal_sets_stop_requested(supervisor_instance):
 
 # ── is_supervisor_running 测试 ────────────────────────────────────────────
 
-def test_is_supervisor_running_no_pid_file():
+def test_is_supervisor_running_no_pid_file(tmp_path):
+    config_path = _public_supervisor_config(tmp_path)
     """测试无 PID 文件时返回未运行。"""
-    mock_gp = MagicMock(root=Path("/tmp"))
+    mock_gp = MagicMock(root=Path(config_path).parent, supervisor_pid=Path(config_path).parent / "supervisor.pid")
     with patch.object(sv, "read_pid_file", return_value=None), \
          patch.object(sv, "is_pid_alive", return_value=False), \
          patch("agent_py_agent.agent.core.SimpleAgent"), \
-         patch("agent_py_agent.agent.settings.load_config"), \
          patch("agent_py_agent.agent.gateway_parts.gateway_paths", return_value=mock_gp):
-        result = sv.is_supervisor_running("dummy.yaml")
+        result = sv.is_supervisor_running(mock_gp)
     assert result is False
 
 
 @patch.object(sv, "read_pid_file", return_value=12345)
 @patch.object(sv, "is_pid_alive", return_value=True)
 def test_is_supervisor_running_alive(mock_alive, mock_read, tmp_path):
+    config_path = _public_supervisor_config(tmp_path)
     """测试 supervisor 进程存活时返回运行中。"""
     (tmp_path / "supervisor.pid").write_text("12345", encoding="utf-8")
     with patch("agent_py_agent.agent.core.SimpleAgent"), \
-         patch("agent_py_agent.agent.settings.load_config"), \
          patch.object(sv, "gateway_paths") as mock_gp:
-        mock_gp.return_value = MagicMock(root=tmp_path)
-        result = sv.is_supervisor_running("dummy.yaml")
+        mock_gp.return_value = MagicMock(root=tmp_path, supervisor_pid=tmp_path / "supervisor.pid")
+        result = sv.is_supervisor_running(mock_gp.return_value)
     assert result is True
 
 
@@ -404,13 +421,13 @@ def test_is_supervisor_running_alive(mock_alive, mock_read, tmp_path):
 
 @patch.object(sv, "read_pid_file", return_value=None)
 @patch.object(sv, "is_pid_alive", return_value=False)
-def test_stop_supervisor_not_running(mock_alive, mock_read):
+def test_stop_supervisor_not_running(mock_alive, mock_read, tmp_path):
+    config_path = _public_supervisor_config(tmp_path)
     """测试 supervisor 未运行时返回成功。"""
     with patch("agent_py_agent.agent.core.SimpleAgent"), \
-         patch("agent_py_agent.agent.settings.load_config"), \
          patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
-        mock_gp.return_value = MagicMock(root=Path("/tmp"))
-        result = sv.stop_supervisor("dummy.yaml")
+        mock_gp.return_value = MagicMock(root=Path(config_path).parent, supervisor_pid=Path(config_path).parent / "supervisor.pid")
+        result = sv.stop_supervisor(mock_gp.return_value)
     assert result is True
 
 

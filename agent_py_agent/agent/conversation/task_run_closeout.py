@@ -1,11 +1,6 @@
-# LLM: TaskRun（一条会话任务的整棵执行总账）收口的唯一判定位置（D3 + O1，2026-09-30）。两个调用方：
-#   agent_core/runtime_mixin._settle_terminal_conversation_task_run（根/子代理执行收口边）与 gateway_parts/turn_recovery_control
-#   （/recover 处置子代理之后）。放在会话层是因为判定只依赖会话任务关联与运行库，且网关按分层边界不能导入 agent_core。
-#   规则：根代理已终态；会话任务关联已终态，或关联文件确实不存在（D3：从未升格成会话任务的请求）；再由
-#   RuntimeRepository.settle_task_run_if_agent_tree_terminal 证明整棵树终态或静止（unknown 不算静止）。缺存储、空任务身份、
-#   关联读坏或未终态都保持打开；之后 create_attempt 会重新打开已关的 TaskRun。改口径同步
-#   test_task_run_close_without_conversation_task.py 与 test_turn_recovery_child_unknown.py。
-# 模块用途: 判断一条任务执行总账能不能关，能关就用同一个树终态 CAS 关掉；不能关时什么也不写。
+# LLM: 输入取消仅消费原冻结attempt定位真实执行，审批task编号不当DB run；最终原SQL/树/UNKNOWN与持久TaskLink边界不变。
+# LLM: 会话层是执行TaskRun收口的唯一领域判据。普通完成仍需根终态、TaskLink终态或确实缺失、原树CAS；输入静默退休例外复读准确行/等待结束事实，并在新SQL最终事务拒全树活动/UNKNOWN。
+# 模块用途: 结束有证据的执行账，不把输入取消或本次执行结束变成长久TaskLink终态；callback和原完成边共同防race。
 from __future__ import annotations
 
 from typing import Any
@@ -68,3 +63,109 @@ def _task_run_closeout_reason(link: object) -> tuple[str, str] | None:
     if not conversation_task_link_is_terminal(link_status):
         return None
     return "conversation-runtime", f"conversation_task_{link_status}"
+
+
+# LLM: callback与等待片完成边共用；archive ID只是lookup，quota→task锁内复读canonical原输入/refs，最终SQL再核current和全树UNKNOWN。
+# 函数用途: 精确输入静默退休后结束已完成的等待执行账，不发Wake、不结束TaskLink。
+def settle_retired_input_run(inputs, repo, input_id, *, run_id='', attempt_id=''):
+    if repo is None or inputs.runtime_db is not repo:
+        return False
+
+    # LLM: 逐次消费原owner短门，quota先于task/输入/SQL；不缓存授权或无锁收口。
+    # 函数用途: 为同一次原来源完成精确取消核验。
+    def settle():
+        with inputs.quota.admission(blocking=inputs.blocking):
+            return _settle_retired_input_locked(inputs,repo,input_id,run_id,attempt_id)
+    return inputs.perform(settle)
+
+
+# LLM: 调用方已持quota；先以输入冻结attempt核真实run，再于原TaskStore锁内复读准确输入归属/有界refs并持锁到最终SQL，不允许新输入在判空后挤入。
+# 函数用途: 区分原审批任务编号与执行编号，核验输入及剩余引用后调用唯一执行账SQL收口。
+def _settle_retired_input_locked(inputs,repo,input_id,run_id,attempt_id):
+    from ..common.json_io import locked_json_path
+
+    try:
+        row = inputs.read(input_id)
+    except ValueError:
+        return False
+    scope = row['scope']
+    if row['status'] != 'cancelled' or row.get('resolution_delivery') != 'retire':
+        return False
+    selected_run = _retired_input_runtime_run(inputs,repo,scope,run_id,attempt_id)
+    selected_attempt = scope.get('execution_attempt_id')
+    if selected_run is None:
+        return False
+    task_id = scope['root_task_id']
+    with locked_json_path(inputs.store.tasks.storage.task_path(task_id),blocking=inputs.blocking):
+        link,error = inputs.store.tasks.load_report(task_id)
+        if error or link is None or link.status != 'active':
+            return False
+        if not _retired_input_thread_matches(inputs,scope,link):
+            return False
+        if not _retired_input_refs_settled(inputs,link):
+            return False
+        return repo.settle_retired_input_execution(task_id=task_id,run_id=selected_run,attempt_id=selected_attempt)
+
+
+# LLM: 仅从输入已冻结非空attempt反向定位原run，DB current只核相等不补空；main审批run语义仍是task，child仍核原canonical run/attempt，最终SQL原CAS不变。
+# 函数用途: 区分审批任务编号与实际执行编号，防同任务不同运行名使准确取消永久悬挂。
+def _retired_input_runtime_run(inputs, repo, scope, callback_run, callback_attempt):
+    from pathlib import Path
+
+    from ..user_space.owner_resolver import _owner_home_result
+
+    selected = scope.get('execution_attempt_id')
+    if not isinstance(selected,str) or not selected or (callback_attempt and callback_attempt != selected):
+        return None
+    attempt = repo.get_attempt(selected)
+    run = repo.get_agent_run(attempt['agent_run_id']) if attempt is not None else None
+    task_run = repo.get_task_run(run['task_run_id']) if run is not None else None
+    task = repo.get_task(scope['root_task_id'])
+    thread,error = inputs.store.threads.load_report(scope['thread_id'])
+    owner_id = _owner_home_result(Path('/'),inputs.owner,Path('/')).owner_id
+    if (run is None or task_run is None or task is None or error or thread is None
+            or run['current_attempt_id'] != selected
+            or attempt['attempt_generation'] != run['current_attempt_generation']
+            or task_run['task_id'] != scope['root_task_id'] or task['owner_id'] != owner_id
+            or thread.owner_id != owner_id
+            or (callback_run and callback_run != run['run_id'])):
+        return None
+    if scope['agent_kind'] == 'main':
+        if (scope['run_id'] != scope['root_task_id'] or task['thread_id'] != scope['thread_id']
+                or run['role'] != 'main' or run['parent_agent_run_id']):
+            return None
+    elif scope['agent_kind'] == 'subagent' and inputs.load_child is not None:
+        if run['run_id'] != scope['run_id']:
+            return None
+        child = inputs.load_child(scope['run_id'])
+        if (child.id != run['run_id']
+                or child.root_id != scope['root_task_id'] or child.agent_thread_id != scope['thread_id']
+                or child.runner_active_attempt_id != selected):
+            return None
+    else:
+        return None
+    return run['run_id']
+
+
+# LLM: 主片绑定原TaskLink线程，子片只读原canonical child谱系；错误来源不能借根任务取消父/兄弟。
+# 函数用途: 核对输入所属的准确执行线程。
+def _retired_input_thread_matches(inputs,scope,link):
+    if scope['agent_kind'] == 'main':
+        return link.thread_id == scope['thread_id']
+    if scope['agent_kind'] != 'subagent' or inputs.load_child is None:
+        return False
+    child = inputs.load_child(scope['run_id'])
+    return child.root_id == scope['root_task_id'] and child.agent_thread_id == scope['thread_id']
+
+
+# LLM: refs只作有界查找，所有行仍核schema/id/owner/root和已知状态；未知或pending都阻断，不把读错变空。
+# 函数用途: 判断本任务是否确实没有其它待填必要输入。
+def _retired_input_refs_settled(inputs,link):
+    for ref in link.input_dependency_refs:
+        try:
+            candidate = inputs.read(ref,task_id=link.task_id)
+        except ValueError:
+            return False
+        if candidate['status'] == 'pending':
+            return False
+    return True

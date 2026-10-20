@@ -273,7 +273,7 @@ def test_scoped_thin_tui_idle_ask_uses_owner_identity_without_workspace_override
     tmp_path,
     monkeypatch,
 ) -> None:
-    """The file-queue ask path must match the scoped client's HTTP identity contract."""
+    """正式认证HTTP提交仍保原scoped身份和零workspace覆盖；宿主冻结owner后才入队。"""
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
     from agent_py_agent.cli.chat_parts.gateway_client import (
@@ -293,21 +293,37 @@ def test_scoped_thin_tui_idle_ask_uses_owner_identity_without_workspace_override
         )
     )
     paths = gateway_paths_from_root(tmp_path / "gateway")
-    request_id, _chunk_path, _response_path = submit_chat_request(
-        paths,
-        ChatRequestContent(
-            prompt="隔离请求",
-            inject=[],
-            prompt_files=[],
-            save=True,
-            show_prompt=False,
-            resume_context=None,
-            chat_session_id="same-session",
-        ),
-        client,
-        workspace_root=client.root,
-        workspace_roots=client.workspace_roots,
+    from dataclasses import replace
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts.http_service import (
+        GatewayHTTPServer,
+        GatewayHTTPServerParams,
     )
+    from agent_py_agent.agent.settings import AgentConfig
+
+    host = SimpleAgent(AgentConfig(my_agent_home=str(home), model_backend="echo"), tmp_path)
+    server = GatewayHTTPServer(0, paths, params=GatewayHTTPServerParams(agent=host))
+    server.start()
+    client.config = replace(client.config, gateway_port=server.server.server_address[1])
+    try:
+        request_id, _chunk_path, _response_path = submit_chat_request(
+            paths,
+            ChatRequestContent(
+                prompt="隔离请求",
+                inject=[],
+                prompt_files=[],
+                save=True,
+                show_prompt=False,
+                resume_context=None,
+                chat_session_id="same-session",
+            ),
+            client,
+            workspace_root=client.root,
+            workspace_roots=client.workspace_roots,
+        )
+    finally:
+        server.stop()
     payload = json.loads((paths.inbox / f"{request_id}.json").read_text(encoding="utf-8"))
 
     assert "workspace" not in payload

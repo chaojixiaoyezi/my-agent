@@ -135,3 +135,12 @@ workspace/runtime/workspaces/<workspace-scope>/
 - 同一正向边界同时进入文件工具和进程工具。对子代理，owner home 在 bwrap 中只读，只有
   `allowed_write_roots` 精确列出的 task/output/work 根可写；`run_command`、后台命令、PTY 与 LSP
   不能借 shell 重定向或长驻进程写到 sibling task、owner 根项目或其他未授权目录。
+
+
+## 2026-10-20 规范Home创建权限与只读W消费（600候选）
+
+C/默认初始化与只读W沿同一资源合同：新缺失受管目录以0700逐级创建，文本种子以O_EXCL/0600只建缺失、不覆盖已有普通内容。显式`canonical_root`只用于规范Home子目录，复用原POSIX no-follow目录FD和portable逐级校验；common默认私有目录锚点/既有符号链接语义保持。文本种子从同一已开parent FD创建叶，链接、特殊文件与多硬链接拒绝，竞争FileExists不回退打开。portable沿原no-follow预检，不能声称具备POSIX的父链替换竞态强度。
+
+内置Skill完整镜像会删除重建`shared/builtin`，因此删除前后根与目标父目录都须同样rooted私有创建；copytree/copy2仍保原源资源权限，不靠末尾chmod修补。既有0775不自动迁移、不chmod，W的权限/属主/完整父链/资源/来源门继续拒绝；既有普通0755与自定义种子保持原内容和权限。用户显式Home根仍由原解析器选择，不改变全局umask、不chmod用户workspace，不扩W共享写权。
+
+原S04/Linux umask0002探针证明C新目录0775、七个必读文本0664导致W `resource_permissions`；SQLite0644/JSON0600不属该首拒。另纯tmp反例证明受管templates链接在W之前已向外新增五个种子，故本片显式rooted预先拒绝，不能把W事后拒绝当作零副作用。组件及原full失败分别留存；此候选不代签Linux全仓、真实模型或最终发行，也不宣称所有其它C写路径竞态已完成加固。

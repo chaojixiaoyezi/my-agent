@@ -5,6 +5,8 @@
 # 模块用途: 防止 tick 持续出错时每 0.2 秒打一条错误日志把磁盘再写满（2026-09-28 事故链的后半段）。
 from __future__ import annotations
 
+import math
+
 # 连续出错的退避：0.2 秒起步翻倍，封顶 30 秒；打印限流：同种错误第 1 次打，之后每 10 次打 1 次。
 LOOP_ERROR_BACKOFF_BASE_SECONDS = 0.2
 # 网关主循环连续出错的退避封顶 30 秒
@@ -46,12 +48,16 @@ class LoopErrorBackoff:
         self._consecutive = 0
         self._seen.clear()
 
-    # LLM: 纯函数式读取，不改状态；第 k 次连续失败对应 base·2^(k-1)，用 cap 封顶，调用方把它直接交给 stop_event.wait。
-    # 函数用途: 当前该等多久；没有连续失败时是 0。
+    # LLM: 纯读取，保原指数与封顶；用浮点缩放避免数千次失败后巨大整数转换溢出，再次杀死错误处理循环。
+    # 函数用途: 计算当前等待时间；无失败或零基数返回零，超过浮点范围直接沿原上限等待。
     def delay(self) -> float:
-        if self._consecutive <= 0:
+        if self._consecutive <= 0 or self._base == 0:
             return 0.0
-        return min(self._base * (2 ** (self._consecutive - 1)), self._cap)
+        try:
+            scaled = math.ldexp(self._base, self._consecutive - 1)
+        except OverflowError:
+            return self._cap
+        return min(scaled, self._cap)
 
     # LLM: 只读投影，不是账本；真实错误次数以 loop_health 为准，这里只反映当前退避档位。
     # 函数用途: 当前连续失败次数（测试与状态展示用）。

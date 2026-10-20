@@ -465,59 +465,33 @@ def test_scheduled_run_waits_for_same_task_terminal_before_history_close(tmp_pat
 
 
 def test_scheduled_message_tool_delivery_is_mirrored_once_without_fallback_send(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
-    agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
-        tmp_path,
-    )
-    store = agent.conversation_store
-    thread = store.threads.get_or_create(
-        {
-            "canonical_user_id": "user-1",
-            "channel": "feishu",
-            "channel_conversation_id": "chat-1",
-            "channel_user_id": "ou-user-1",
-            "now": 900.0,
-        }
-    )
-    delivery = {
-        "schema_version": "message_tool_delivery.v1",
-        "delivery_status": "sent",
-        "source_owner_delivery": True,
-        "channel": "feishu",
-        "content": "提醒到啦：检查索引备份。",
-        "receipt_id": "receipt-one",
-        "deduplicated": False,
-        "attachments": [],
-    }
+    from agent_py_agent.agent.capability import channel_message_tool
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+    from agent_py_agent.tests.test_required_notice_reply_slot import reply_slot_case
 
-    def run(*_args, **_kwargs):
-        return SimpleNamespace(
-            response="模型最终又说了一遍，但这段不应再次外发。",
-            archive_tool_calls=[{"tool": "send_message", "ok": True}],
-            delivery_artifacts=[],
-            message_tool_deliveries=[delivery],
-        )
+    # 原flat flag不能代表生产操作；夹具改为真实Registry/Executor/canonical及原工作identity，断言保持。
+    original_payload = channel_message_tool._success_payload
 
-    agent.run = run
+    def payload(*args, **kwargs):
+        return {**original_payload(*args, **kwargs), 'receipt_id': 'receipt-one'}
+
+    monkeypatch.setattr(channel_message_tool, '_success_payload', payload)
+    case = reply_slot_case(tmp_path, monkeypatch, notice=False, message='提醒到啦：检查索引备份。')
     channels = FakeDeliveryService()
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=channels)
-    request = {
-        "thread_id": thread.thread_id,
-        "reason": "scheduled_job_due",
-        "wake_signal": {
-            "metadata": {
-                "scheduler_job_id": "job-1",
-                "scheduler_run_id": "srun-1",
-                "scheduler_prompt": "提醒我检查索引备份",
-            }
-        },
-        "now": 1_000.0,
-    }
+    case.scheduler.runtime.channels = channels
+    store, thread = case.store, case.thread
+    reports = []
+    complete = runtime_module._complete_background_slice
 
-    first = runtime.run_once(request)
-    second = runtime.run_once(request)
+    def replay_same_business_key(runtime, plan):
+        reports.extend((complete(runtime, plan), complete(runtime, plan)))
+        return reports[0]
+
+    monkeypatch.setattr(runtime_module, '_complete_background_slice', replay_same_business_key)
+    case.scheduler.tick(now=case.now)
+    first, second = reports
 
     assert first.delivery_status == second.delivery_status == "sent"
     assert first.delivery_reason == second.delivery_reason == "scheduled_message_tool_delivery"

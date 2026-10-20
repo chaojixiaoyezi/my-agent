@@ -405,9 +405,19 @@ def test_real_tool_fake_llm_uses_input_archive_boundary_once(ctx):
                 'id': 'oauth-private-input', 'name': 'feishu_auth', 'input': {'action': 'authorize'}}])
     backend = Backend()
     ctx.agent.backend = backend
-    result = ctx.agent.run('读取本人已授权的云文档，缺本人授权时向我申请。', params=RunParams(
-        source='background_main_agent', save=False, run_id=ctx.task_id, task_id=ctx.task_id, allowed_tools=['feishu_auth'],
-        task_attributes={'conversation_thread_id': ctx.thread.thread_id, 'conversation_task_id': ctx.task_id}))
+    from agent_py_agent.agent.conversation.background_execution import _run_background_model_attempt
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+    )
+
+    # 复用后台正式适配器与原claim publisher；模型仍经真实agent.run，scope不从测试JSON或当前指针补猜。
+    with bind_claim_execution(ClaimExecutionBinding(
+        ctx.store.claims, ctx.thread.thread_id, ctx.claim['claim_id'], '',
+    )):
+        result, _bound = _run_background_model_attempt(ctx.agent, '读取本人已授权的云文档，缺本人授权时向我申请。', RunParams(
+            source='background_main_agent', save=False, run_id=ctx.task_id, task_id=ctx.task_id, allowed_tools=['feishu_auth'],
+            task_attributes={'conversation_thread_id': ctx.thread.thread_id, 'conversation_task_id': ctx.task_id}))
     assert result.runtime_status == 'needs_user_input'
     assert result.runtime_reason == 'TASK_INPUT_WAIT' and result.turn_end_reason == 'blocked'
     assert len(result.archive_tool_calls) == 1 and len(backend.prompts) == 2

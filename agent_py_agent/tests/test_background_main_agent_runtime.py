@@ -4299,69 +4299,21 @@ def test_audit_finding_message_tool_delivery_is_mirrored_once_with_evidence(
     tmp_path,
     monkeypatch,
 ) -> None:
-    agent = SimpleAgent(
-        AgentConfig(enable_tools=False, memory_path="memory.jsonl"),
-        tmp_path,
-    )
-    store = agent.conversation_store
-    thread = store.threads.get_or_create(
-        {
-            "canonical_user_id": "owner-a",
-            "channel": "feishu",
-            "channel_conversation_id": "chat-a",
-            "channel_user_id": "owner-a",
-        }
-    )
-    store.tasks.bind(
-        {
-            "thread_id": thread.thread_id,
-            "task_id": "audit-1",
-            "goal": "持续研判",
-            "work_kind": "audit",
-            "work_name": "安全审计",
-        }
-    )
-    channels = FakeDeliveryService()
-    runtime = BackgroundMainAgentRuntime(
-        agent=agent,
-        store=store,
-        channels=channels,
-    )
-    request = {
-        "thread_id": thread.thread_id,
-        "task_id": "audit-1",
-        "reason": "audit_finding",
-        "wake_signal": {
-            "wake_signal_id": "wake-af-1",
-            "root_task_id": "audit-1",
-            "evidence_refs": ["audit://watch-1/candidate/1:0"],
-            "metadata": {
-                "schema_version": "audit-finding-event.v1",
-                "audit_id": "audit-1",
-                "watch_id": "watch-1",
-                "finding_id": "af-1",
-                "requires_llm_report": True,
-                "delivery_evidence_refs": ["audit://watch-1/candidate/1:0"],
-            },
-        },
-        "now": 20.0,
-    }
+    from agent_py_agent.tests.test_required_notice_reply_slot import reply_slot_case
 
-    monkeypatch.setattr(
-        runtime,
-        "_run_agent",
-        lambda *_args, **_kwargs: execution_module.BackgroundExecutionResult(
-            response='这段内部收口文字不能成为第二条用户消息。',
-            tool_call_count=0,
-            tool_success_count=0,
-            material_progress_count=0,
-            delivery_artifacts=(),
-            message_tool_deliveries=({'schema_version': 'message_tool_delivery.v1', 'delivery_status': 'sent', 'source_owner_delivery': True, 'channel': 'feishu', 'content': '发现一项明确事件，证据已保留。', 'receipt_id': 'receipt-af-1', 'evidence_refs': ['audit://watch-1/candidate/1:0'], 'deduplicated': False, 'attachments': []},),
-            operation_verification={},
-            assistant_commentaries=(),
-            display_snapshot={},
-        ),
-    )
+    # 原flat回执改为真实执行器和canonical发送；审计资格/原引用与全部输出断言保留。
+    case = reply_slot_case(tmp_path, monkeypatch, notice=False, message='发现一项明确事件，证据已保留。')
+    store, thread = case.store, case.thread
+    store.tasks.bind({'thread_id': thread.thread_id, 'task_id': 'audit-1', 'goal': '持续研判',
+        'work_kind': 'audit', 'work_name': '安全审计'}, host_channel_actor=case.actor)
+    channels = FakeDeliveryService()
+    runtime = BackgroundMainAgentRuntime(agent=case.agent, store=store, channels=channels)
+    request = {'thread_id': thread.thread_id, 'task_id': 'audit-1', 'reason': 'audit_finding',
+        'wake_signal': {'wake_signal_id': 'wake-af-1', 'root_task_id': 'audit-1',
+            'evidence_refs': ['audit://watch-1/candidate/1:0'],
+            'metadata': {'schema_version': 'audit-finding-event.v1', 'audit_id': 'audit-1',
+                'watch_id': 'watch-1', 'finding_id': 'af-1', 'requires_llm_report': True,
+                'delivery_evidence_refs': ['audit://watch-1/candidate/1:0']}}, 'now': case.now}
     sent = runtime.run_once(request)
 
     assert sent.delivery_status == "sent"

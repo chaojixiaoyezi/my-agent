@@ -1,3 +1,5 @@
+# LLM: Gateway与supervisor各有独立规范PID/状态定位，属性只派生路径不授角色或创建文件；同步CLI/监护读取。
+# 模块用途: 集中定义Gateway、监护者及adapter的文件位置，禁止共享角色状态或另猜home。
 
 from __future__ import annotations
 
@@ -15,6 +17,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: 新角色位置用只读属性派生，保原构造字段兼容；任何路径不等于执行身份。
+# 类用途: 保存同一Gateway根的规范文件地址，监护状态独立于业务状态。
 @dataclass
 class GatewayPaths:
 
@@ -31,6 +35,18 @@ class GatewayPaths:
     failed: Path
     responses: Path
     history: Path
+
+    # LLM: 只定位原独立supervisor.pid，不得作为Gateway本体或ready来源。
+    # 函数用途: 返回监护者自己的进程记录位置。
+    @property
+    def supervisor_pid(self) -> Path:
+        return self.root / "supervisor.pid"
+
+    # LLM: 监护生命周期不得覆盖gateway_state.json，CLI仅只读该投影。
+    # 函数用途: 返回监护者自己的状态位置。
+    @property
+    def supervisor_state(self) -> Path:
+        return self.root / "supervisor_state.json"
 
     # LLM: Terminal request authority is derived from the Gateway root so existing constructors
     # remain compatible; done/failed directories are only outcome projections.

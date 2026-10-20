@@ -52,6 +52,9 @@ class CoordinatorTakeover:
         self._condition = threading.Condition(self._mutex)
         self._bootstrap_sources = None
         self._closed_role_sources = ()
+        # 仅真实当前接班捕获；磁盘原像不能重建此活对象或原lease绑定。
+        self._standalone_migration = None
+        self._standalone_origin = None
         # 只保存原C已捕获的Popen/issuer活对象；不是从P1或P4文件重建的权限账。
         self._current_workers = {}
         # 首绑定原引用独立捕获；issuer公开字段的替换不能改变原进程或责任作用域。
@@ -279,9 +282,9 @@ def _prepare_request_authority(controller, gate, path, ownership, *, recovery=Fa
         return None, (authority, target, result, frozen)
 
 
-# LLM: 默认0立即返回；先冻结当前锁代次再只读发现P1并调用P2，坏目录整体隔离，不能先启动owner写者。
+# LLM: 默认0立即返回；先冻结当前锁代次。正式配置只为准确Count0正常停止捕获variant，fresh/MP原P1/P2及隔离保持，不先启动owner写者。
 # 函数用途: 在持锁C启动中建立接手控制器并核实全部旧执行域，不创建Agent。
-def prepare_coordinator_takeover(paths, count, c_run_id):
+def prepare_coordinator_takeover(paths, count, c_run_id, *, config=None, config_path=None):
     if count == 0 or current_coordinator(paths.root, count) is None:
         return None
     lease = bind_coordinator_generation(paths.root, count, c_run_id)
@@ -289,6 +292,10 @@ def prepare_coordinator_takeover(paths, count, c_run_id):
         return lease.controller
     controller = CoordinatorTakeover(paths, count, c_run_id)
     lease.controller = controller
+    if config is not None:
+        from .standalone_migration import capture_standalone_migration
+
+        capture_standalone_migration(controller, config, config_path)
     with controller._mutex:
         _refresh_targets(controller)
         for target in controller.targets:
@@ -595,15 +602,21 @@ def original_drain_sources(controller):
     return workers, sources, roots
 
 
-# LLM: 每次先核捕获的原角色关闭字节及当前规范集合，再发现完整P1/旧N；丢源/漂移整体拒，不清未知或以历史替fresh P2。
+# LLM: 每次先核准确standalone来源或原角色关闭字节，再发现完整P1/旧N；丢源/漂移整体拒，不清未知或以历史替fresh P2。
 # 函数用途: 更新原P1/P3及旧count未知责任，保持原末检和隔离，并在原异常被捕获后记录类型及代码位置。
 def _refresh_targets(controller) -> bool:
     if not controller.active() or controller._all_quarantined:
         return False
     try:
+        from .standalone_migration import current_standalone_migration
+
+        migration = current_standalone_migration(controller)
+        if migration is not None:
+            migration.require_unchanged()
         controller._closed_role_sources = require_role_coverage(
             controller.paths, controller.c_run_id, count=controller.count, captured=controller._closed_role_sources,
-            committed=_current_receipt_sources(controller))
+            committed=_current_receipt_sources(controller),
+            **({"standalone": migration} if migration is not None else {}))
         before = takeover_namespace_state(controller.paths)
         if controller._namespaces is not None and any(
             old is not None and (new is None or old[:2] != new[:2])
@@ -619,7 +632,8 @@ def _refresh_targets(controller) -> bool:
             raise ValueError("takeover_namespace_changed")
         controller._closed_role_sources = require_role_coverage(
             controller.paths, controller.c_run_id, count=controller.count, captured=controller._closed_role_sources,
-            committed=_current_receipt_sources(controller))
+            committed=_current_receipt_sources(controller),
+            **({"standalone": migration} if migration is not None else {}))
         previous = [_authority_bytes(target.scope) for target in controller.targets]
         controller.targets, controller._unproven_owners, controller._namespaces = targets, owners, before
         for target in (value for value in targets if _authority_bytes(value.scope) not in previous):
@@ -699,12 +713,16 @@ def _log_source_refusal(stage, error=None):
         pass
 
 
-# LLM: 完整P1/P3、未知旧N与捕获的v2关闭原字节均入原末检；历史范围不等于P2或新执行权。
+# LLM: 完整P1/P3、未知旧N、v2关闭及本次standalone固定签名入原末检；首publish后签名稳定，旧历史不授新执行权。
 # 函数用途: 冻结原完整目标、缺源owner与限制来源，供同次短门末检。
 def _source_snapshot(controller) -> tuple:
-    return (_target_signature(controller.targets), frozenset(controller._unproven_owners),
-            tuple(source.signature() for source in controller._unresolved_sources), controller._closed_role_sources,
-            _current_receipt_sources(controller))
+    from .standalone_migration import current_standalone_migration
+
+    migration = current_standalone_migration(controller)
+    result = (_target_signature(controller.targets), frozenset(controller._unproven_owners),
+              tuple(source.signature() for source in controller._unresolved_sources), controller._closed_role_sources,
+              _current_receipt_sources(controller))
+    return result + (migration.signature(),) if migration is not None else result
 
 
 # LLM: 含完整范围和每份canonical摘要，不能只比较owner/ID而忽略源内容漂移。

@@ -1,6 +1,6 @@
 
 
-# LLM: 本模块是 chat 客户端与 Gateway 文件协议的边界；typed row 可旁路 legacy 文本投影，但不能改变 Gateway 业务事实或授权。
+# LLM: chat提交统一走认证HTTP让宿主冻结owner；文件只观察原chunk/terminal，typed row不改变业务事实或授权。
 # 退休raw candidate kind必须在typed callback前消费且正常推进游标；保私有原档和未知future kind原语义。
 # 模块用途: 提交聊天请求、增量读取 Gateway chunk/response 文件，并把结构化事件或兼容文本交给调用方。
 
@@ -25,7 +25,7 @@ from ...agent.gateway_parts.response_renderer import (
 
 
 # LLM: ChatRequestContent 声明当前 CLI 表面真实可消费的交互能力；只有 TUI 主链开启审批和富 transcript，plain/其它调用保持最小输出。
-# 类用途: 汇总一次聊天请求正文、附件引用、上下文、会话和交互能力。
+# 类用途: 汇总正文、附件、执行快照及原始命令运输事实；显示摘要不替代用户原输入。
 @dataclass
 class ChatRequestContent:
     prompt: str
@@ -39,6 +39,8 @@ class ChatRequestContent:
     interactive_approvals: bool = False
     rich_transcript: bool = False
     input_media: tuple[dict, ...] = ()
+    original_prompt: str | None = None
+    client_message_id: str = ""
 
 
 # LLM: GatewayChunkPollRequest carries the canonical terminal path as the only completion fact;
@@ -80,8 +82,8 @@ class ChunkFilePollRequest:
     on_event: object | None = None
 
 
-# LLM: submit 保留可信身份/工作区；可选分配回调在原子入队前登记显示关联，不改变权限、请求正文或模型配置。
-# 函数用途: 原样传递附件 refs 并提交请求，返回真实编号，让发起页提前识别后到的同源消息。
+# LLM: 正式薄/完整客户端统一HTTP提交，传原身份/工作区/原始命令，owner由宿主决定；callback在POST前登记同canonical ID，网络未知不回退文件队列。
+# 函数用途: 传递附件refs与输入快照，先关联显示再请求Gateway；chunk/终态仍沿原文件观察，不在客户端执行任务。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -91,6 +93,10 @@ def submit_chat_request(
     workspace_roots: object = None,
     on_request_allocated: Callable[[str], None] | None = None,
 ) -> tuple[str, Path, Path]:
+    from functools import partial
+
+    from ...agent.gateway_parts.request_http_client import post_gateway_ask
+
     identity = _gateway_submit_identity(agent)
     workspace = _gateway_submit_workspace(
         agent,
@@ -113,17 +119,16 @@ def submit_chat_request(
             canonical_user_id=identity["user_id"],
             channel_chat_type=identity.get("channel_chat_type", ""),
             channel_chat_id=identity.get("channel_chat_id", ""),
-            agent=(
-                None
-                if getattr(agent, "gateway_client_only", False) is True
-                else agent
-            ),
+            agent=agent,
+            original_prompt=content.original_prompt,
+            client_message_id=content.client_message_id,
             system_task=content.system_task,
             interactive_approvals=content.interactive_approvals,
             rich_transcript=content.rich_transcript,
             workspace_root=str(workspace.get("cwd") or ""),
             workspace_roots=[str(item) for item in workspace.get("roots", [])],
         ),
+        submit_request=partial(post_gateway_ask, agent),
         **({"on_request_allocated": on_request_allocated} if on_request_allocated is not None else {}),
     )
     chunk_path = gateway_chunk_path(paths, request_id)

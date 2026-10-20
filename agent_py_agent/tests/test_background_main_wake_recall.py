@@ -21,6 +21,7 @@ from agent_py_agent.agent.conversation import (
     BackgroundMainAgentRuntime,
     ConversationStore,
 )
+from agent_py_agent.agent.conversation.background_shutdown import BackgroundShutdown
 from agent_py_agent.agent.conversation.models import (
     ChannelBinding,
     ConversationThread,
@@ -360,6 +361,9 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
     preparation_modes: list[bool] = []
 
     class BlockingBaseScheduler:
+        # 仅线程编排替身：显式提供原公开runtime.agent协议；无claim/RuntimeDB，不构造产品Agent。
+        runtime = SimpleNamespace(agent=SimpleNamespace(subagents=None))
+
         def prepare_tick(self, *, now=None, include_orphan_supervision=True):
             preparation_modes.append(include_orphan_supervision)
             return None
@@ -373,6 +377,9 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
             return []
 
     class OwnerScheduler:
+        # 仅线程编排替身：显式提供原公开runtime.agent协议；无claim/RuntimeDB，不构造产品Agent。
+        runtime = SimpleNamespace(agent=SimpleNamespace(subagents=None))
+
         def prepare_tick(self, *, now=None, include_orphan_supervision=True):
             preparation_modes.append(include_orphan_supervision)
             return None
@@ -385,6 +392,9 @@ def test_blocked_base_tick_does_not_starve_scoped_owner_tick() -> None:
             return []
 
     supervisor = object.__new__(_BackgroundMainSupervisor)
+    # 绕过真实构造器的夹具也要绑定本实例原停止控制，不在生产补None兜底。
+    supervisor._shutdown_control = BackgroundShutdown()
+    supervisor._shutdown_control.bind(supervisor)
     supervisor._base_agent = SimpleNamespace(
         config=SimpleNamespace(
             background_owner_workers=2,
@@ -430,6 +440,9 @@ def test_blocked_thread_does_not_starve_sibling_thread_for_same_owner() -> None:
     sibling_ran = threading.Event()
 
     class TwoThreadScheduler:
+        # 仅线程编排替身：显式提供原公开runtime.agent协议；无claim/RuntimeDB，不构造产品Agent。
+        runtime = SimpleNamespace(agent=SimpleNamespace(subagents=None))
+
         def prepare_tick(self, *, now=None, include_orphan_supervision=True):
             assert include_orphan_supervision is False
             return None
@@ -446,6 +459,9 @@ def test_blocked_thread_does_not_starve_sibling_thread_for_same_owner() -> None:
             return []
 
     supervisor = object.__new__(_BackgroundMainSupervisor)
+    # 绕过真实构造器的夹具也要绑定本实例原停止控制，不在生产补None兜底。
+    supervisor._shutdown_control = BackgroundShutdown()
+    supervisor._shutdown_control.bind(supervisor)
     supervisor._base_agent = SimpleNamespace(
         config=SimpleNamespace(
             background_owner_workers=2,
