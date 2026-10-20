@@ -1,3 +1,9 @@
+## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
+
+实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。
+
+新增`test_nofollow_zero_link_copyout.py`明确是确定性stat-copyout模型：使用真实脱链FD的原metadata，在准确观察点交入，不能替代另存的原生OS故障证据。覆盖三观察点、整轮bytes废弃、原三次预算、父链、原身份/元数据硬拒、附着旁名及探测/清理错误。旧40节点、全部旧fixture及断言保持；候选组件通过不代表真实生命周期、双平台包或关闭通过，B689失败原件保留。
+
 ## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
 
 私有候选组件：新增test_nofollow_fstat_publication.py的40普通节点，连同原nofollow atomic/binary/tree、role marker snapshot与heartbeat六文件138P，零F/E/skip。原test_nofollow_atomic_snapshot.py仅两参数用例的直接helper调用补必传descriptor，原节点/assert保持。当前F、B687与候选包未改；独审和root最终同源严格/真实验收尚待完成。新增运行测试须Mac/Linux包实际执行，不列source-only。

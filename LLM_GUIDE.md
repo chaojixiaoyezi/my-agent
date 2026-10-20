@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
+
+实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。
+
 ## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
 
 正常原子发表可能发生于真实fstat完成与current stat之间。显式snapshot现只在原attached样本四字段稳定、current不同普通单链接、补采同原FD确已0link且mode/size/mtime未漂移时，复用原typed替换重读；fresh ctime只容unlink本身变化。默认读、原B分支、父链、原三次预算、权限及cleanup硬门不变，不认证写者或重捕authority。新增真实FD回归40项，连同原五相关文件138P；独审、整合及新源真实验收另做，B687失败保持。

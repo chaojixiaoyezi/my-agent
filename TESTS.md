@@ -1,3 +1,9 @@
+## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
+
+实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。
+
+新增`test_nofollow_zero_link_copyout.py`明确是确定性stat-copyout模型：使用真实脱链FD的原metadata，在准确观察点交入，不能替代另存的原生OS故障证据。覆盖三观察点、整轮bytes废弃、原三次预算、父链、原身份/元数据硬拒、附着旁名及探测/清理错误。旧40节点、全部旧fixture及断言保持；候选组件通过不代表真实生命周期、双平台包或关闭通过，B689失败原件保留。
+
 ## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
 
 新增test_nofollow_fstat_publication.py使用真实FD、未改stat_result和两种真实atomic writer，确定性调度于读前/读后fstat完成之后；原位写与before/fresh采样元数据漂移、旧inode旁名仍attached、symlink/hardlink/FIFO/目录、父链变更、两已观察版本更换、三次预算、fresh fstat与cleanup异常均独立断言。无skip/xfail/平台条件。基线同文件9F31P，候选40P；最终6文件138P。原权限精度测试仅适配helper必传descriptor，参数和断言不动。最终双平台新包须实际执行这些运行节点，不扩source-only。

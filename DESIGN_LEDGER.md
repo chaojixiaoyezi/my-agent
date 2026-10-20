@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
+
+实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。
+
 ## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
 
 状态：源码候选，待非作者复核及新源实际验收。沿原generic nofollow snapshot复采准确原FD，补齐attached stat缓存与current新inode的真实交错；只有原样本稳定、fresh同inode且0link并保持mode/size/mtime才进入既有typed冲突。fresh ctime容unlink事实，不放宽原attached阶段四字段稳定或既有B分支。无新配置、依赖、authority、reader fallback或controller异常豁免。详细边界见[角色生命周期](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md#2026-10-20-fd采样后current-stat前的原子发表)。

@@ -1,5 +1,5 @@
-# LLM: 默认读写保持原no-follow链；显式snapshot只有限重读已证脱链的安全替换，补采原FD不能放宽元数据/目录/清理硬门。
-# 模块用途: 统一受管FD读写；规范Home可显式rooted创建私有目录/排他种子，默认链与严格附件能力不降级。
+# LLM: 默认读写保持原no-follow链；显式snapshot有限废弃安全替换或零链接copyout，绝不接收0link正文，原FD/元数据/目录/清理硬门保持。
+# 模块用途: 统一受管FD读写；规范Home可显式rooted创建私有目录/排他种子，零链接观察仅耗原重读预算，默认链与严格附件能力不降级。
 """LLM: 宿主文件读写固定受信根；文本和二进制共用逐段 no-follow 原语，不能用它代替业务权限。
 
 模块用途: 当模型或 shell 能修改工作区目录时，宿主通过受信根逐段拒绝符号链接地读写内部账本，
@@ -191,13 +191,37 @@ def _verify_snapshot_parents(root, parts, bindings):
         _close_snapshot_fds([descriptor])
 
 
-# LLM: 只分离原A/B regular替换；fstat后发表仅补采准确原FD证脱链，attached样本四字段稳定、fresh仅容unlink本身ctime变化，硬错不重试。
-# 函数用途: 核同一parent内的before/FD/current；缓存nlink1不能误拒合法脱链，也不能把原位改动或仍有名字的旧FD当安全替换。
+# LLM: 仅在current为regular0且原类型门已通过时调用；保原A/B身份拒绝、已观察元数据和准确原FD脱链证明，只抛原typed废弃，不能授权任何bytes。
+# 函数用途: 将stat copyout时已脱链的整轮样本丢弃；复采原FD，不接受旁名仍附着、多版本或原位变化，fstat异常交原清理链。
+def _discard_zero_link_snapshot(before, opened, current, descriptor):
+    if opened.st_nlink == 0 and not _same_identity(before, opened):
+        raise NoFollowPathError("managed snapshot detached identity is unknown")
+    if not _same_identity(before, opened) and not _same_identity(opened, current):
+        raise NoFollowPathError("managed snapshot leaf changed again")
+    fields = ("st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if _same_identity(before, opened):
+        stable_fields = fields if opened.st_nlink == 1 else fields[:-1]
+        if any(getattr(before, field) != getattr(opened, field) for field in stable_fields):
+            raise NoFollowPathError("managed snapshot same-inode content changed")
+    if _same_identity(opened, current):
+        if any(getattr(opened, field) != getattr(current, field) for field in fields[:-1]):
+            raise NoFollowPathError("managed snapshot same-inode content changed")
+    fresh = os.fstat(descriptor)
+    if (not stat.S_ISREG(fresh.st_mode) or fresh.st_nlink != 0 or not _same_identity(opened, fresh)
+            or any(getattr(opened, field) != getattr(fresh, field) for field in fields[:-1])):
+        raise NoFollowPathError("managed snapshot current leaf differs")
+    raise _SnapshotLeafChanged("regular_leaf_detached")
+
+
+# LLM: current1保原A/B语义；current0仅经原危险门及准确原FD核验废弃整轮，附着阶段四字段漂移仍硬拒；同步snapshot回归。
+# 函数用途: 核同一parent内before/FD/current，有限丢弃已脱链观察，不把零链接正文、原位改动或旁名旧FD当安全版本。
 def _snapshot_leaf_identity(parent_fd, name, before, opened, descriptor):
     current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink not in (0, 1)
             or not stat.S_ISREG(opened.st_mode) or opened.st_nlink not in (0, 1)):
         raise NoFollowPathError("managed snapshot leaf is not regular single-link")
+    if current.st_nlink == 0:
+        _discard_zero_link_snapshot(before, opened, current, descriptor)
     if opened.st_nlink == 0:
         if _same_identity(before, opened) and not _same_identity(before, current):
             raise _SnapshotLeafChanged("regular_leaf_detached")
@@ -219,8 +243,8 @@ def _snapshot_leaf_identity(parent_fd, name, before, opened, descriptor):
         raise NoFollowPathError("managed snapshot same-inode content changed")
 
 
-# LLM: 全文只从本次已验证FD有界读取，读前/后身份核对传同一原descriptor供精确复采；初次不存在可None，已观察竞态后missing仍硬拒。
-# 函数用途: 尝试取得一个原子发表版本，0link已读bytes只能丢弃，所有出口归还同一叶FD。
+# LLM: 初始regular0在open前丢弃，读前后0link均不授bytes；同一原FD有界读/复采及清理保持，初次缺叶可None，重读后missing硬拒。
+# 函数用途: 尝试取得完整单链接版本；零链接copyout只耗既有预算，未打开时不读正文，已打开的所有出口归还原叶FD。
 def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing):
     try:
         before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -228,8 +252,10 @@ def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing):
         if allow_missing:
             return None
         raise
-    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink not in (0, 1):
         raise NoFollowPathError("managed snapshot leaf is not regular single-link")
+    if before.st_nlink == 0:
+        raise _SnapshotLeafChanged("regular_leaf_detached")
     flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
     descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
     try:
@@ -243,7 +269,7 @@ def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing):
     return content
 
 
-# LLM: opt-in强制原strict能力且总尝试<=3；循环只捕真实A/B类型，硬错优先，叶始终原parent FD，无sleep/portable或重捕授权。
+# LLM: opt-in强制原strict能力且总尝试<=3；只捕原typed的A/B或零链接废弃，硬错/清理优先，原parent FD与父链不刷新，无sleep/portable或重捕授权。
 # 函数用途: 有限重读原子替换窗口，同时保原目录链、预算、None语义及首异常，失败仍交上层保守拒绝。
 def _read_snapshot_beneath(root, parts, max_bytes, retries):
     parent_fd, bindings = _snapshot_parent(root, parts)

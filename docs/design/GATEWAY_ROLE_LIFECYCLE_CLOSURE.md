@@ -1,3 +1,11 @@
+## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
+
+实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。
+
+current0先拒所有已观察非regular或nlink不在0/1的样本。opened0且before不同仍unknown；before/opened不同且opened/current也不同仍多版本硬拒。before/opened同inode时，opened仍附着须四字段稳定，opened已0仅比较mode/size/mtime；current/opened同inode也核该三字段。最后复采准确原descriptor，同inode、regular0及三字段稳定才抛原typed冲突；原FD仍有旁名、任何探测错误或已观察字段漂移不重试。初始regular0不打开叶；所有typed候选仍完整父链复核且耗原预算，cleanup_failed禁重试。
+
+新增`test_nofollow_zero_link_copyout.py`明确是确定性stat-copyout模型：使用真实脱链FD的原metadata，在准确观察点交入，不能替代另存的原生OS故障证据。覆盖三观察点、整轮bytes废弃、原三次预算、父链、原身份/元数据硬拒、附着旁名及探测/清理错误。旧40节点、全部旧fixture及断言保持；候选组件通过不代表真实生命周期、双平台包或关闭通过，B689失败原件保留。
+
 ## 2026-10-20 旧闭包W到当前P4首次发表（646候选）
 
 682公开日志准确落在`_require_stable_roles`的非当前W全raw比较，但具体marker/writer及当时两raw未留，不能从现态还原。原producer完整封存→原新C/control/P4→首当前W合法心跳的受控交错，已证明同一硬拒绝窗口存在；这不是对682实际writer的认定。

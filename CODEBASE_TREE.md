@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
+
+新增`agent_py_agent/tests/test_nofollow_zero_link_copyout.py`：确定性copyout模型与原身份、元数据、目录和FD清理边界；产品实现仍集中common/nofollow_fs.py，不新增状态源。
+
 ## 2026-10-20 规范Home私有创建回归
 
 ```text
@@ -721,6 +725,7 @@ BG G0 新增 `agent_py_agent/tests/test_gateway_background_fresh_queue.py`：真
 |-- agent_py_agent/tests/test_gateway_admission_closing.py # ordinary末发表与stop同门、原责任收尾及错源拒绝运行回归
 |-- agent_py_agent/tests/test_nofollow_atomic_snapshot.py # 原atomic writer安全A/B有限重读、父链/硬错/FD首因运行回归
 |-- agent_py_agent/tests/test_nofollow_fstat_publication.py # 真实FD采样后原子发表及元数据/链接/父链/清理边界
+|-- agent_py_agent/tests/test_nofollow_zero_link_copyout.py  # 零链接copyout废弃、预算及原身份安全门回归
 |-- agent_py_agent/tests/test_gateway_role_marker_snapshot.py # closed第三次role原atomic窗口、默认kwargs及危险叶运行回归
 |-- agent_py_agent/tests/test_gateway_closed_worker_publication.py # 原旧代封存后首次当前W发表的有界整组读、跨轮固定来源及硬拒绝运行回归
 |-- agent_py_agent/tests/test_gateway_role_heartbeat_stability.py # 当前W原producer动态双读与身份/旧代全raw拒绝运行回归
