@@ -202,7 +202,7 @@ def test_front_and_background_entrypoints_use_exact_thread(tmp_path, monkeypatch
     monkeypatch.setattr(request_execution, "_run_gateway_ask_with_model", lambda context, **_kwargs: context.agent.config.model_name)
     context = SimpleNamespace(agent=host, request={"prompt": "继续"}, request_id="req", on_chunk=None)
     assert request_execution._run_gateway_ask(context) == "A"
-    monkeypatch.setattr(runtime, "_invoke_background_main_agent_with_model", lambda rt, *args: rt.agent.config.model_name)
+    monkeypatch.setattr(runtime, "_invoke_background_main_agent_with_model", lambda rt, *args, **kwargs: rt.agent.config.model_name)
     assert runtime._invoke_background_main_agent(SimpleNamespace(agent=host), thread, None, None, (None, None)) == "A"
     execute_local_model_operation(host, "s", "select", {"profile_id": b})
     # 已加载的旧 thread 参数不能压过 store 中的新选择。

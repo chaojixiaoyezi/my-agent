@@ -1012,7 +1012,7 @@ class BackgroundMainAgentRuntime:
     # LLM: GoalRuntimeContext 是唯一采样；返回的显示快照只供 final 持久化，不能注入模型或改变 child phase。
     # 函数用途: 准备冻结上下文并执行；actual未结原样退出不收输入，其它工具/历史/显示沿原结果。
     # LLM: 原claim活范围内先补canonical委派终态交接，补账绝不重新调用模型/业务；正常执行、typed及取消路径保持。
-    # 函数用途: 执行一片后台主模型，或在同源重入时只修原sender结果回报。
+    # 函数用途: 执行后台主模型并局部捕获末次工作身份；同源重入只修原sender回报，不从结果字典授权。
     def _run_agent(
         self,
         thread,
@@ -1032,6 +1032,14 @@ class BackgroundMainAgentRuntime:
             self.store,
             request,
         )
+        execution_identity: dict[str, str] = {}
+
+        # LLM: 只捕获本次执行器交回的正式身份副本；不读业务结果、显示快照或任务latest投影。
+        # 函数用途: 在原工作范围保存最终尝试身份，通知新轮不能覆盖它。
+        def retain_completed_run(params: RunParams) -> None:
+            execution_identity.update({key: getattr(params, key) for key in (
+                "request_id", "run_id", "task_id", "attempt_id")})
+
         try:
             result, display_snapshot = _invoke_background_main_agent(
                 self,
@@ -1039,6 +1047,7 @@ class BackgroundMainAgentRuntime:
                 request,
                 resolved_goal_context,
                 (proactive_delivery_available, transcript_delivery_available),
+                completed_run_callback=retain_completed_run,
             )
         except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
                 RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
@@ -1049,7 +1058,8 @@ class BackgroundMainAgentRuntime:
             _settle_unconsumed_background_turn_input(self.agent, request, exc)
             raise
         # 模型调用返回后统一收尾（取消兜底、收集执行结果、回报会话任务），见 _finalize_background_execution。
-        return _finalize_background_execution(self.agent, request, result, display_snapshot)
+        return _finalize_background_execution(
+            self.agent, request, result, display_snapshot, execution_identity=execution_identity)
 
 
 # LLM: 后台片正常返回模型调用结果后，取消可能在本片进入模型调用之后才到；调用返回时这一片的答复
@@ -1060,16 +1070,18 @@ class BackgroundMainAgentRuntime:
 #   只能读持久的结构化事实：这条会话任务是否已被取消（cancelled 是终态，跨线程可见、不会被撤销）。
 #   判据按任务号读（不按绑定反查），所以开跑后、第一次认领正文之前到的取消（任务还没绑定回合）也在这里兜住：
 #   那一次没有正文的模型调用已经发生（已知代价），答复在这里丢弃，随后按同一判据结案唤醒。
-# 函数用途: 收尾一次正常结束的后台执行：取消兜底、收集执行结果、回报会话任务发送方，返回执行结果。
+# 函数用途: 收尾正常后台执行，结合宿主显式身份收集结果；保取消兜底和会话任务回报副作用。
 def _finalize_background_execution(
     agent: object,
     run_request: BackgroundRunRequest,
     result: object,
     display_snapshot: object,
+    *, execution_identity: dict[str, str] | None = None,
 ) -> BackgroundExecutionResult:
     if _session_task_turn_was_cancelled(agent, run_request):
         raise InterruptedError("后台回合在交付前发现任务已取消")
-    execution = collect_background_execution_result(agent, result, display_snapshot)
+    execution = collect_background_execution_result(
+        agent, result, display_snapshot, execution_identity=execution_identity)
     # LLM: 会话间派活：本次回合若属于某条会话任务，就在这里推进到终态并把结构化结果回报给发送方。
     #   只读结构化字段（唤醒信封的回合号 + 任务记录里的绑定），不解析正文；回报失败不影响本回合交付。
     #   回合号必须与注入正文时用的同一个，所以按与 _run_params 相同的来源算，而不是另取一路。
@@ -1225,7 +1237,7 @@ def _close_out_session_task_turn(
         return
 
 
-# LLM: 后台从原 run 解析固定/继承来源，再用原模型依赖生命周期；不改输入、控制和 typed turn-end。
+# LLM: 后台从原run解析固定/继承来源；完成回调仅在同宿主范围交接精确RunParams，不修改业务结果或typed turn-end。
 # 函数用途: 为普通与定时后台工作绑定模型，继承模型在安全请求边界采用显式变更。
 def _invoke_background_main_agent(
     runtime: BackgroundMainAgentRuntime,
@@ -1233,14 +1245,17 @@ def _invoke_background_main_agent(
     request: BackgroundRunRequest,
     goal_context: GoalRuntimeContext,
     delivery_availability: tuple[bool | None, bool | None],
+    *, completed_run_callback: Callable[[RunParams], None] | None = None,
 ) -> tuple[object, dict[str, object]]:
     from ..scheduler.execution import scheduled_model_scope
 
     with scheduled_model_scope(runtime.agent, thread, request):
-        return _invoke_background_main_agent_with_model(runtime, thread, request, goal_context, delivery_availability)
+        return _invoke_background_main_agent_with_model(
+            runtime, thread, request, goal_context, delivery_availability,
+            completed_run_callback=completed_run_callback)
 
 
-# LLM: 后台整片复用模型快照；已核实的 Goal/调度任务来源透传宿主事件，不新建线程或伪造用户输入。
+# LLM: 后台整片复用模型快照；精确完成身份沿宿主回调透传，不进模型参数；已核实Goal/调度来源仍透传宿主事件。
 #   _background_model_inputs 给出的回合触发类型原样交给执行层，每次模型尝试都写进本片 RunParams。
 # 函数用途: 用当前选定模型继续后台主代理，子代理仍从创建时的配置继承。
 def _invoke_background_main_agent_with_model(
@@ -1249,6 +1264,7 @@ def _invoke_background_main_agent_with_model(
     request: BackgroundRunRequest,
     goal_context: GoalRuntimeContext,
     delivery_availability: tuple[bool | None, bool | None],
+    *, completed_run_callback: Callable[[RunParams], None] | None = None,
 ) -> tuple[object, dict[str, object]]:
     proactive_delivery_available, transcript_delivery_available = delivery_availability
     wake_prompt = background_prompt(
@@ -1278,7 +1294,7 @@ def _invoke_background_main_agent_with_model(
         execution, thread, request, user_prompt=user_prompt,
         continuation_injection=continuation_injection,
         proactive_delivery_available=proactive_delivery_available,
-        turn_trigger=turn_trigger,
+        turn_trigger=turn_trigger, completed_run_callback=completed_run_callback,
     )
 
 

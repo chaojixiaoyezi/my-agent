@@ -1,3 +1,7 @@
+## 后台宿主完成回调（2026-10-20，源码候选）
+
+`conversation/background_execution.py`保持原`(result, RunParams)`及上层二项返回，完成回调只交最后真实RunParams；`conversation/runtime.py`在本次调用局部保存身份并显式交collector。业务结果属性和显示字典不能提供权限，没有全局scope、持久状态或模型字段。未发表绑定的run/task/attempt为空；`test_background_result_identity.py`覆盖不可变结果、末次Compact身份和异常零交接。候选修复r02包验暴露的AttributeError，包验失败不改绿，后续由根重验。
+
 ## 2026-10-20 Python 3.10 的 SQLite 只读错误码兼容
 
 线上3.10 collection暴露sqlite3模块未导出结果码常量。原审批只读重试现在直接比较SQLite固定协议主码BUSY=5；错误码仍须来自真实异常的严格int属性并取低8位。Python3.10原生异常没有sqlite_errorcode时，保持原对象失败、只校验一次、零等待，不按异常文字或版本补码。不改变三次及5/10ms预算、默认C/Count0、权限复核、input写入或Root消费边界，无新配置/依赖/兜底。

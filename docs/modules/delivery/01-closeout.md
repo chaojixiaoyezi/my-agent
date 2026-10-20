@@ -1,3 +1,7 @@
+## 后台结果交接的宿主身份边界（2026-10-20）
+
+`agent.run`的任意业务结果不承担权限，也不能强制追加属性。后台执行器在原control关闭发布后读取真实绑定，经原返回RunParams与完成回调送到runtime局部身份副本，再显式交给具名结果收集器；未发布绑定不使用输入run/task/attempt。只有最后正常非溢出尝试交接，异常、取消和中间Compact不交接；详见[通道投递设计](../../design/CHANNEL_DELIVERY_DESIGN.md)。共同回复槽仍复读完整canonical操作与原owner/actor/source/attempt，缺身份不能认领。
+
 # Task Completion and Goal Closeout
 
 本文描述当前主代理任务完成边界。旧的 `delivery_closeout`、目录扫描验收器和

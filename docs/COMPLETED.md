@@ -1,3 +1,9 @@
+## 2026-10-20 后台业务结果与宿主执行身份分离（源码候选）
+
+解决问题：后台工作返回合法的字符串或整数时，给业务结果追加身份属性会抛异常。现在保留任意原始结果；原control在finally关闭发布门后读取已发表绑定，只通过原返回RunParams及本栈完成回调交接。未发表的run/task/attempt为空，不借输入参数、结果同名属性、显示快照或latest任务记录授予回复槽。
+
+完成回调仅在最后非overflow尝试正常返回且原生历史保存后调用；Compact中间尝试、取消和actual未结不交接。normal/required的原owner、actor、source、精确attempt及canonical操作门保持。无新scope、持久账、模型参数或配置。原str/int与异常测试的值和断言保留，仅内部替身签名承接新增宿主keyword；新增回归见`test_background_result_identity.py`。本片不代表整体源码、双平台包或真实服务已通过，原r02包验失败证据保留。
+
 ## 2026-10-20 Python 3.10 的 SQLite 只读错误码兼容
 
 线上3.10 collection暴露sqlite3模块未导出结果码常量。原审批只读重试现在直接比较SQLite固定协议主码BUSY=5；错误码仍须来自真实异常的严格int属性并取低8位。Python3.10原生异常没有sqlite_errorcode时，保持原对象失败、只校验一次、零等待，不按异常文字或版本补码。不改变三次及5/10ms预算、默认C/Count0、权限复核、input写入或Root消费边界，无新配置/依赖/兜底。

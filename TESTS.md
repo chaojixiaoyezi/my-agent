@@ -1,3 +1,9 @@
+## 2026-10-20 后台任意结果与精确身份交接
+
+`test_background_result_identity.py`验证原str/int/tuple/frozen结果不变、finish关闭后才读取绑定且拒绝迟到发表、结果伪属性不授信、未发表的输入身份不授信、真实Compact仅交接末次attempt及取消/actual异常零完成回调。保留原`test_background_claim_transport_reference.py`与`test_background_execution_ports.py`全部结果、P3/claim、失效回调与原异常断言；仅内部调用替身接收新增宿主keyword。`test_thread_model_selection.py`的替身同步该签名，其模型选择断言不变。
+
+定向验收覆盖新增callback各调用入口及monkeypatch所在原测试文件，准确文件/节点、JUnit与日志随仓外交接冻结；同时保留`test_required_notice_reply_slot.py`的normal/required身份和故障窗。不改分类、跳过或缩小双平台运行义务；不在修复期重跑全仓或包链。
+
 ## 2026-10-20 Python 3.10 的 SQLite 只读错误码兼容
 
 线上3.10 collection暴露sqlite3模块未导出结果码常量。原审批只读重试现在直接比较SQLite固定协议主码BUSY=5；错误码仍须来自真实异常的严格int属性并取低8位。Python3.10原生异常没有sqlite_errorcode时，保持原对象失败、只校验一次、零等待，不按异常文字或版本补码。不改变三次及5/10ms预算、默认C/Count0、权限复核、input写入或Root消费边界，无新配置/依赖/兜底。

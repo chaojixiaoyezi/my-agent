@@ -1,8 +1,9 @@
-# LLM: 原control关闭发布后固定工作身份供共同回复槽核验；原BG binder在同T内发布claim运输定位，Count0仍原publisher；后台单片不拥有wake/Goal/租约，Compact/历史/CAS/取消沿原合同。
+# LLM: 原control关闭发布后捕获正式身份，沿宿主完成回调交接而不修改业务结果；原BG binder在同T内发布claim运输定位，Count0仍原publisher；后台单片不拥有wake/Goal/租约，Compact/历史/CAS/取消沿原合同。
 # 模块用途: 执行后台模型与Compact；仅组合已认领原RunParams短门，actual未结不释放输入或伪报失败。
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from functools import partial
@@ -130,7 +131,7 @@ class _BackgroundRunControl(LocalRunControl):
 
 # LLM: 只回填 core 已发布的身份；异常退出沿原账释放该 attempt 的提交前预留，submitted 未知仍保留，正常 Compact 保持原恢复路径。
 # LLM: bind_background_run_params只组合原live来源；无scope同对象，control保resolved原回调；actual未结不释放预留。
-# 函数用途: 执行原后台尝试并固定本次control身份供回复槽核验；保完成协议内部结果、Compact与原宿主权限。
+# 函数用途: 原样返回任意业务结果，并在关闭发布门后捕获本次control身份；未发布不回退输入身份。
 def _run_background_model_attempt(agent: object, prompt: str, params: RunParams) -> tuple[object, RunParams]:
     from ..agent_core.runtime.run_params import run_params_with_request_id
     from ..gateway_parts.multiprocess_background_execution import bind_background_run_params
@@ -148,17 +149,12 @@ def _run_background_model_attempt(agent: object, prompt: str, params: RunParams)
     finally:
         control.finish()
     binding = control.runtime_authority()
-    # 原句柄已关发布门，固定工作身份后才能交付；不从后来通知轮或工具回执反推。
-    result.source_reply_execution_identity = {
-        'request_id': resolved.request_id,
-        **{key: binding.get(key, '') for key in ('run_id', 'task_id', 'attempt_id')},
-    }
     from .background_receipt_contract import raise_background_receipt_failure
 
     raise_background_receipt_failure(result, persist_result=params.partial_turn_callback)
     return result, replace(params, request_id=resolved.request_id,
-        run_id=binding.get("run_id", resolved.run_id), task_id=binding.get("task_id", resolved.task_id),
-        attempt_id=binding.get("attempt_id", resolved.attempt_id))
+        run_id=binding.get("run_id", ""), task_id=binding.get("task_id", ""),
+        attempt_id=binding.get("attempt_id", ""))
 
 
 # LLM: agent.run 已退出，只有 core 正式发布的精确 attempt 能证明其预留可释放；原提交批次先修复，不释放 submitted。
@@ -183,7 +179,7 @@ def _release_failed_attempt_inputs(agent: object, turn_id: str, binding: dict[st
         )
 
 
-# LLM: 调用方已冻结模型作用域与提示；执行保持同一请求和活动 sink，异常/取消不提交伪造 final。
+# LLM: 调用方已冻结模型作用域与提示；宿主完成回调只接原RunParams，不进入模型参数或业务结果，异常/取消不交接身份。
 #   turn_trigger 是调用方按唤醒信封构造的回合触发类型（None 为普通回合），原样交给每次模型尝试。
 # LLM: actual未结不调用sink.fail伪报普通失败；不包住模型等待，原F6/CAS/媒体与静默通知保持。
 # 函数用途: 运行原后台片并整理显示，未结原样退出，Compact/容量/普通错误保既有边界。
@@ -196,6 +192,7 @@ def invoke_background_turn(
     continuation_injection: list[str],
     proactive_delivery_available: bool | None,
     turn_trigger: object | None = None,
+    completed_run_callback: Callable[[RunParams], None] | None = None,
 ) -> tuple[object, dict[str, object]]:
     activity_sink = BackgroundMainActivitySink(
         execution.agent,
@@ -212,6 +209,7 @@ def invoke_background_turn(
             proactive_delivery_available=proactive_delivery_available,
             activity_sink=activity_sink,
             turn_trigger=turn_trigger,
+            completed_run_callback=completed_run_callback,
         )
     except (RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
             RequestExecutionContextUnavailable, ToolWriteContextUnavailable):
@@ -231,7 +229,7 @@ def invoke_background_turn(
     return result, snapshot
 
 
-# LLM: 本片冻结摘要范围、覆盖和首次解析的请求身份；后续准备复用该 request_id，run/attempt 仍由原绑定。
+# LLM: 本片冻结摘要范围、覆盖和首次解析的请求身份；仅最终非溢出尝试将原RunParams交宿主回调，run/attempt仍由原绑定。
 #   回合触发类型每次尝试都写进新准备的 RunParams，压缩续跑与首次尝试用同一个；携带记录及其是否读全按首次尝试冻结。
 # 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，成功提交计入公平让出预算。
 def run_background_turn_with_compact(
@@ -244,6 +242,7 @@ def run_background_turn_with_compact(
     proactive_delivery_available: bool | None,
     activity_sink: BackgroundMainActivitySink,
     turn_trigger: object | None = None,
+    completed_run_callback: Callable[[RunParams], None] | None = None,
 ) -> object:
     current = thread
     carried_archive_tool_calls: list[dict[str, object]] | None = None
@@ -319,6 +318,8 @@ def run_background_turn_with_compact(
             committed_generations += 1
         if str(getattr(result, "runtime_status", "") or "").strip().lower() != ("context_overflow"):
             _persist_background_native_turn(execution.store, request, result)
+            if completed_run_callback is not None:
+                completed_run_callback(run_params)
             return result
         native_compact_carry, carried_archive_tool_calls, carried_active_turn_user_inputs = _next_overflow_carry(
             result, carried_archive_tool_calls, carried_active_turn_user_inputs,
@@ -490,10 +491,11 @@ def public_result_operation_verification(result: object) -> dict[str, object]:
     return projected
 
 
-# LLM: 在模型作用域退出后按原顺序投影结果；工具事实来自原始执行账，公开核验沿唯一投影入口。
+# LLM: 在模型作用域退出后按原顺序投影结果；身份只接宿主显式参数，忽略业务结果同名属性；工具事实及公开核验沿原入口。
 # 函数用途: 把原control固定工作身份、执行回执与显示快照归为具名结果，供原收口与投递事务消费。
 def collect_background_execution_result(
     agent: object, result: object, display_snapshot: dict[str, object],
+    *, execution_identity: dict[str, str] | None = None,
 ) -> BackgroundExecutionResult:
     calls = [item for item in (getattr(result, "archive_tool_calls", None) or []) if isinstance(item, dict)]
     successes = sum(1 for item in calls if item.get("ok") is True)
@@ -515,5 +517,5 @@ def collect_background_execution_result(
         runtime_reason=str(getattr(result, "runtime_reason", "") or ""),
         internal_response=str(getattr(result, "internal_response", "") or ""),
         public_receipt=getattr(result, "public_receipt", None),
-        execution_identity=dict(getattr(result, "source_reply_execution_identity", None) or {}),
+        execution_identity=dict(execution_identity or {}),
     )

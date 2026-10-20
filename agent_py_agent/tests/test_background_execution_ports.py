@@ -105,7 +105,7 @@ def test_model_attempt_does_not_release_inputs_for_actual_unknown(case,unknown,m
 
 def test_runtime_unknown_does_not_reject_original_inputs(case,unknown,monkeypatch):
     _gate,_claim,agent,store,thread,request=case
-    def fail(*_): raise unknown
+    def fail(*_, **_kwargs): raise unknown
     monkeypatch.setattr(runtime,'_invoke_background_main_agent',fail)
     settled=[]
     monkeypatch.setattr(runtime,'_settle_unconsumed_background_turn_input',lambda *_:settled.append(True))
@@ -277,7 +277,7 @@ def test_original_c_scope_through_three_leaf_layers_keeps_p3_and_claim(case,unkn
         calls.append(params)
         raise unknown
     agent.run=run
-    def invoke(*_args):
+    def invoke(*_args, **_kwargs):
         result,_params=execution._run_background_model_attempt(agent,'合成任务',RunParams(request_id='ports-turn'))
         return result,{}
     monkeypatch.setattr(runtime,'_invoke_background_main_agent',invoke)
