@@ -17,6 +17,7 @@ from ..tooling.process_session_records import (
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 from ..user_space.owner_resolver import _owner_home_dir, _owner_home_result
 
+# 单条进程完成记录的读取上限为 1 MiB，防止损坏记录造成无界内存占用。
 _MAX_RECORD_BYTES = 1_048_576
 
 

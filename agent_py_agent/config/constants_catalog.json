@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1039,
+  "count": 1040,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3762,6 +3762,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。"
+    },
+    {
+      "name": "_MAX_RECORD_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/process_completion_source.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条进程完成记录的读取上限为 1 MiB，防止损坏记录造成无界内存占用。"
     },
     {
       "name": "_ANCHOR_STRIDE_LINE_COUNT",
