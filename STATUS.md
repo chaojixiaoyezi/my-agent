@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+私有候选组件：新增test_nofollow_fstat_publication.py的40普通节点，连同原nofollow atomic/binary/tree、role marker snapshot与heartbeat六文件138P，零F/E/skip。原test_nofollow_atomic_snapshot.py仅两参数用例的直接helper调用补必传descriptor，原节点/assert保持。当前F、B687与候选包未改；独审和root最终同源严格/真实验收尚待完成。新增运行测试须Mac/Linux包实际执行，不列source-only。
+
 ## 2026-10-20 后台业务结果与宿主执行身份分离（源码候选）
 
 解决问题：后台工作返回合法的字符串或整数时，给业务结果追加身份属性会抛异常。现在保留任意原始结果；原control在finally关闭发布门后读取已发表绑定，只通过原返回RunParams及本栈完成回调交接。未发表的run/task/attempt为空，不借输入参数、结果同名属性、显示快照或latest任务记录授予回复槽。

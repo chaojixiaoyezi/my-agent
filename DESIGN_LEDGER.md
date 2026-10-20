@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+状态：源码候选，待非作者复核及新源实际验收。沿原generic nofollow snapshot复采准确原FD，补齐attached stat缓存与current新inode的真实交错；只有原样本稳定、fresh同inode且0link并保持mode/size/mtime才进入既有typed冲突。fresh ctime容unlink事实，不放宽原attached阶段四字段稳定或既有B分支。无新配置、依赖、authority、reader fallback或controller异常豁免。详细边界见[角色生命周期](docs/design/GATEWAY_ROLE_LIFECYCLE_CLOSURE.md#2026-10-20-fd采样后current-stat前的原子发表)。
+
 ## 2026-10-20 后台业务结果与宿主执行身份分离（源码候选）
 
 解决问题：后台工作返回合法的字符串或整数时，给业务结果追加身份属性会抛异常。现在保留任意原始结果；原control在finally关闭发布门后读取已发表绑定，只通过原返回RunParams及本栈完成回调交接。未发表的run/task/attempt为空，不借输入参数、结果同名属性、显示快照或latest任务记录授予回复槽。

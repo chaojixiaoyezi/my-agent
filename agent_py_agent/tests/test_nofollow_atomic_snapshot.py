@@ -433,4 +433,4 @@ def test_snapshot_permission_change_is_refused_even_when_timestamps_are_equal(mo
 
     monkeypatch.setattr(fs.os, 'stat', observed_stat)
     with pytest.raises(fs.NoFollowPathError):
-        fs._snapshot_leaf_identity(0, 'leaf', before, opened)
+        fs._snapshot_leaf_identity(0, 'leaf', before, opened, 0)

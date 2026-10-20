@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+本轮只在common/nofollow_fs.py两个原函数补FD采样后原子发表的typed分类，Gateway角色reader和controller不改。新40节点与原五直接文件138P；B687准确内核写者未单独留证，只证明同型错误可由合法原writer确定性产生。待独审/root新源实际验收，不清旧全域隔离或责任账。
+
 ## 后台宿主完成回调（2026-10-20，源码候选）
 
 `conversation/background_execution.py`保持原`(result, RunParams)`及上层二项返回，完成回调只交最后真实RunParams；`conversation/runtime.py`在本次调用局部保存身份并显式交collector。业务结果属性和显示字典不能提供权限，没有全局scope、持久状态或模型字段。未发表绑定的run/task/attempt为空；`test_background_result_identity.py`覆盖不可变结果、末次Compact身份和异常零交接。候选修复r02包验暴露的AttributeError，包验失败不改绿，后续由根重验。

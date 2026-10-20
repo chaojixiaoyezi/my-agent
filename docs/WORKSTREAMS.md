@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+release_prepare仅在独占普通源码副本实施通用nofollow一叶修复、两测试文件和必要文档；notice_review只读独审安全边界/精确patch，notice_fix等待冻结后准备发布输入。root单写F/Git、真实服务与包/部署；所有旧候选、B687失败和运行现场保留。定向组件不代后续真实验收，各新节点仍保双平台运行义务。
+
 ## 2026-10-20 native拒绝wire片（600独立S07副本）
 
 600只在仓外S07普通副本改原issuer/session/client/short-operation四叶、新增wire测试及原diagnostic fake签名；515并行source snapshot，646独占机器及Home独审，根单写F/Git/真实服务。pure内存token只做本次dispatch归属，不授权限/不持久化。consumer未获实现授权，永久_active占槽方案不实施；本片冻结后只读核原C精确终态/代际核收。旧失败、真实现场不变。

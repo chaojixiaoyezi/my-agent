@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+正常原子发表可能发生于真实fstat完成与current stat之间。显式snapshot现只在原attached样本四字段稳定、current不同普通单链接、补采同原FD确已0link且mode/size/mtime未漂移时，复用原typed替换重读；fresh ctime只容unlink本身变化。默认读、原B分支、父链、原三次预算、权限及cleanup硬门不变，不认证写者或重捕authority。新增真实FD回归40项，连同原五相关文件138P；独审、整合及新源真实验收另做，B687失败保持。
+
 ## 2026-10-20 后台业务结果与宿主执行身份分离（源码候选）
 
 解决问题：后台工作返回合法的字符串或整数时，给业务结果追加身份属性会抛异常。现在保留任意原始结果；原control在finally关闭发布门后读取已发表绑定，只通过原返回RunParams及本栈完成回调交接。未发表的run/task/attempt为空，不借输入参数、结果同名属性、显示快照或latest任务记录授予回复槽。

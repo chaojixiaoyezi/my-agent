@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+common/nofollow_fs._snapshot_leaf_identity接收_read_snapshot_leaf的同一准确descriptor；只在既有current-diff硬拒位置精确复采已知原FD，条件不足仍原硬拒。复用原_SnapshotLeafChanged、_close_snapshot_fds与_verify_snapshot_parents，叶/父目录FD、重读预算和领域权限来源不变。测试入口test_nofollow_fstat_publication.py覆盖读前/后采样窗口；原role/P4/closure/raw校验不变。
+
 ## 后台宿主完成回调（2026-10-20，源码候选）
 
 `conversation/background_execution.py`保持原`(result, RunParams)`及上层二项返回，完成回调只交最后真实RunParams；`conversation/runtime.py`在本次调用局部保存身份并显式交collector。业务结果属性和显示字典不能提供权限，没有全局scope、持久状态或模型字段。未发表绑定的run/task/attempt为空；`test_background_result_identity.py`覆盖不可变结果、末次Compact身份和异常零交接。候选修复r02包验暴露的AttributeError，包验失败不改绿，后续由根重验。

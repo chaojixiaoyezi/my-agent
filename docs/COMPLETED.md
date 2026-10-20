@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+组件已落地：nofollow snapshot仅为已证明的原FD脱链补齐采样窗口，仍沿原typed预算丢弃本轮重读。真实os.replace与原atomic writer覆盖读前/读后窗口；旧inode仍attached、同inode元数据变化、危险current、父链更换、连续三次发表、fresh fstat原异常和cleanup失败仍拒。新40节点基线9F31P→候选40P，六文件138P；此条不是实际生命周期或发行通过，根另验。
+
 ## 2026-10-20 后台业务结果与宿主执行身份分离（源码候选）
 
 解决问题：后台工作返回合法的字符串或整数时，给业务结果追加身份属性会抛异常。现在保留任意原始结果；原control在finally关闭发布门后读取已发表绑定，只通过原返回RunParams及本栈完成回调交接。未发表的run/task/attempt为空，不借输入参数、结果同名属性、显示快照或latest任务记录授予回复槽。

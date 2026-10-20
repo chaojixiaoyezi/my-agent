@@ -257,3 +257,12 @@ W 仅在原 `materialize_owner` 词法调用里，用同 client/self/creator/seq
 原两测试文件节点保持：合成结构化5/261继续验证重试与中断，真实WAL物理锁按本次原异常是否带码验证；无码时证明该operation无input写，其余合法控制保持，重新个人锁定仍全部拒绝。没有skip/xfail，也没有给真实物理异常补code。完整准确解释器、JUnit及现有依赖来源留在仓外候选交接；远端CI仍需根重新验证。
 
 协议依据：[SQLite结果码](https://www.sqlite.org/rescode.html)规定既有数值固定、低8位为主码；[Python sqlite3异常属性](https://docs.python.org/3.11/library/sqlite3.html#sqlite3.Error.sqlite_errorcode)从3.11新增。5/6/8/11/261是既有协议编码，不新增可调常量，因此无需扩常量目录。未新增/移动生产文件，CODEBASE_TREE入口保持。
+
+
+## 2026-10-20 FD采样后current stat前的原子发表
+
+源码候选：原reader的fstat结果可仍为已知旧inode/nlink1，随后正常原atomic writer发表新inode，current stat才看到新文件。现仅在before==opened、两attached样本mode/size/mtime_ns/ctime_ns全稳定、current普通单链接但不同inode时，补采同一个仍打开的原FD。fresh必须同原inode、regular、0link，且mode/size/mtime_ns与原样本一致；unlink自身可改变fresh ctime，不能据此把合法脱链误当原位写。已观察attached阶段ctime变化仍硬拒。
+
+条件完整才抛原regular_leaf_detached typed冲突，原同parent FD丢弃本轮bytes，完整父链复核后在原最多三次尝试内重读。不重开或换锚，不根据异常文案、内容、角色名或不同inode泛化重试；旧inode rename到旁名仍nlink1、fresh fstat失败、元数据漂移、危险current/多链接、父链变化、预算与cleanup失败均原拒。原B已采样0link分支不改，默认snapshot_retries=0和领域authority不变。
+
+原始F6b56的真实FD私有逐字副本用os.replace与原write_bytes_atomic_beneath均稳定复现两个窗口210硬错；新40节点基线9F31P→候选40P，六直接文件138P。没有伪造stat_result或安全异常，不以组件反推B687当时精确leaf/writer。新增节点必须最终两OS新包实际执行；旧失败、全域隔离、旧closure/责任未知不补签，实际新home和发行由root另验。

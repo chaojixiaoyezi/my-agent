@@ -1,3 +1,7 @@
+## 2026-10-20 strict snapshot 的FD采样后发表窗口（源码候选）
+
+新增test_nofollow_fstat_publication.py使用真实FD、未改stat_result和两种真实atomic writer，确定性调度于读前/读后fstat完成之后；原位写与before/fresh采样元数据漂移、旧inode旁名仍attached、symlink/hardlink/FIFO/目录、父链变更、两已观察版本更换、三次预算、fresh fstat与cleanup异常均独立断言。无skip/xfail/平台条件。基线同文件9F31P，候选40P；最终6文件138P。原权限精度测试仅适配helper必传descriptor，参数和断言不动。最终双平台新包须实际执行这些运行节点，不扩source-only。
+
 ## 2026-10-20 后台任意结果与精确身份交接
 
 `test_background_result_identity.py`验证原str/int/tuple/frozen结果不变、finish关闭后才读取绑定且拒绝迟到发表、结果伪属性不授信、未发表的输入身份不授信、真实Compact仅交接末次attempt及取消/actual异常零完成回调。保留原`test_background_claim_transport_reference.py`与`test_background_execution_ports.py`全部结果、P3/claim、失效回调与原异常断言；仅内部调用替身接收新增宿主keyword。`test_thread_model_selection.py`的替身同步该签名，其模型选择断言不变。
