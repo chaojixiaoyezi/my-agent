@@ -2,6 +2,7 @@
 # 模块用途: 消费CLI显式装配的同Agent/路径，管理原Gateway健康与重启；不反向依赖CLI或改变责任/安全接班。
 from __future__ import annotations
 
+import json
 import math
 import os
 import signal
@@ -30,16 +31,58 @@ from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .status_rendering import gateway_readiness
 
 
+# LLM: CLI维护意图原子发布；有限TTL最少一秒，不授予停止进程或绕过身份检查的权限。
+# 函数用途: 写入带有效期、原因和操作者的维护锁。
+def write_maintenance_lock(paths: GatewayPaths, *, reason: str, actor: str = "cli", ttl_seconds: float = 1800.0) -> dict:
+    ttl = float(ttl_seconds)
+    if not math.isfinite(ttl):
+        raise ValueError("维护锁TTL必须是有限秒数")
+    now = time.time()
+    lock = {"schema": "my-agent.maintenance-lock.v1", "reason": str(reason), "actor": str(actor),
+            "created_at": now, "expires_at": now + max(1.0, ttl), "pid": os.getpid()}
+    write_json_file_atomic(paths.maintenance_lock, lock)
+    return lock
+
+
+# LLM: 原子替换允许无副作用读取；缺失、坏JSON、非法有效期均不构成活动锁，不清理过期记录。
+# 函数用途: 只读取得尚未到期的维护锁，显式now=0也有效。
+def read_maintenance_lock(paths: GatewayPaths, *, now: float | None = None) -> dict | None:
+    try:
+        lock = json.loads(paths.maintenance_lock.read_text(encoding="utf-8"))
+        expires = lock.get("expires_at") if isinstance(lock, dict) else None
+        if type(expires) not in (int, float) or not math.isfinite(expires):
+            return None
+    except (OSError, ValueError, OverflowError):
+        return None
+    return lock if expires > (time.time() if now is None else now) else None
+
+
+# LLM: 只删除所选Gateway的维护文件；不存在是幂等成功，不吞掉权限/IO错误。
+# 函数用途: 解除维护暂停并报告是否确实删除了锁。
+def clear_maintenance_lock(paths: GatewayPaths) -> bool:
+    try:
+        paths.maintenance_lock.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+# LLM: payload与读取错误分列，未知不能当作健康或启动授权。
+# 类用途: 承载监护读取结果及结构化错误。
 @dataclass(frozen=True)
 class SupervisorPayloadReport:
     payload: dict | None
     load_error: dict | None = None
 
 
+# LLM: 兼容字典投影；需要区分损坏的调用方应读report接口。
+# 函数用途: 读取适配器状态，不存在或失败返回空字典。
 def read_adapter_state(state_path: Path) -> dict:
     return read_adapter_state_report(state_path).payload or {}
 
 
+# LLM: 复用原JSON读口及错误报告，不将坏记录标作running。
+# 函数用途: 获取适配器状态和读取失败信息。
 def read_adapter_state_report(state_path: Path) -> SupervisorPayloadReport:
     if not state_path.exists():
         return SupervisorPayloadReport(None)
@@ -47,6 +90,8 @@ def read_adapter_state_report(state_path: Path) -> SupervisorPayloadReport:
     return SupervisorPayloadReport(report.payload if report.payload else None, report.load_error)
 
 
+# LLM: 只投影原心跳文件，存在性不代表角色健康。
+# 函数用途: 读取Gateway心跳并保留解析错误。
 def read_gateway_heartbeat_report(heartbeat_path: Path) -> SupervisorPayloadReport:
     if not heartbeat_path.exists():
         return SupervisorPayloadReport(None)
@@ -54,6 +99,8 @@ def read_gateway_heartbeat_report(heartbeat_path: Path) -> SupervisorPayloadRepo
     return SupervisorPayloadReport(report.payload if report.payload else None, report.load_error)
 
 
+# LLM: 仅追加本轮诊断并记录日志，不据错误修补身份或清PID。
+# 函数用途: 保存健康检查读取失败原因。
 def record_health_load_error(
     load_errors: list[dict],
     load_error: dict,
@@ -72,6 +119,8 @@ def record_health_load_error(
 # 函数用途: 确认可启动后创建原Gateway子进程，并有界等其真实角色就绪。
 def start_gateway(supervisor) -> int | None:
     supervisor._resolve_agent_and_paths()
+    if read_maintenance_lock(supervisor._paths) is not None:
+        return None
     report = get_running_pid_report(supervisor._paths.pid, cleanup_stale=False)
     if report.pid is not None or report.load_error is not None:
         supervisor._log_error("Gateway已有进程或身份无法确认；请先用原Gateway状态/停止入口核验，不重复启动。")
@@ -96,6 +145,8 @@ def start_gateway(supervisor) -> int | None:
     return _wait_for_gateway_start(supervisor, process)
 
 
+# LLM: 沿平台原脱离终端方式创建子进程，不提升权限。
+# 函数用途: 返回Windows创建标志或POSIX新会话开关。
 def _gateway_process_flags() -> tuple[int, bool]:
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -191,6 +242,9 @@ def _write_supervisor_stop_request(supervisor, pid: int, expected_identity: dict
 # LLM: 保留原次数/冷却预算；正N先冻结原C/P4/config，停止须同birth且完整P6双读结清才走公开新C，不走R01或同C换slot。
 # 函数用途: 在原有界策略内完成整代恢复；未知责任/配置漂移不新启动、不重放。
 def restart_gateway(supervisor) -> bool:
+    supervisor._resolve_agent_and_paths()
+    if read_maintenance_lock(supervisor._paths) is not None:
+        return False
     if supervisor._restart_count >= supervisor.max_restart_attempts:
         supervisor._log_error(
             f"Max restart attempts ({supervisor.max_restart_attempts}) reached. "
@@ -253,7 +307,9 @@ def run_supervisor_loop(supervisor) -> int:
     supervisor._resolve_agent_and_paths()
     supervisor_pid_path = supervisor._paths.supervisor_pid
     _prepare_supervisor_run(supervisor, supervisor_pid_path)
-    if not supervisor._is_gateway_healthy():
+    if read_maintenance_lock(supervisor._paths) is not None:
+        supervisor._log_info("Supervisor paused: maintenance lock active")
+    elif not supervisor._is_gateway_healthy():
         supervisor._start_gateway()
     _log_supervisor_active(supervisor)
     _monitor_until_stopped(supervisor)
@@ -280,6 +336,8 @@ def _write_supervisor_state(supervisor, identity: dict, status: str) -> None:
     })
 
 
+# LLM: 只展示监护节奏，不将active日志作为Gateway就绪证明。
+# 函数用途: 记录当前健康检查与恢复选项。
 def _log_supervisor_active(supervisor) -> None:
     supervisor._log_info(
         f"Supervisor active: check_interval={supervisor.check_interval}s, "
@@ -288,6 +346,8 @@ def _log_supervisor_active(supervisor) -> None:
     )
 
 
+# LLM: 健康检查由原间隔驱动；维护判断留在每次检查入口，不缓存锁状态。
+# 函数用途: 在收到退出信号前周期检查服务。
 def _monitor_until_stopped(supervisor) -> None:
     last_check = time.time()
     consecutive_failures = 0
@@ -300,10 +360,17 @@ def _monitor_until_stopped(supervisor) -> None:
         consecutive_failures = _run_health_check(supervisor, consecutive_failures)
 
 
+# LLM: 维护先于所有健康检查和自动恢复；清锁/到期后复用原Gateway三次失败门及Adapter意图。
+# 函数用途: 维护时清零失败次数，正常时分别监护Gateway和有启动意图的适配器。
 def _run_health_check(supervisor, consecutive_failures: int) -> int:
+    supervisor._resolve_agent_and_paths()
+    if read_maintenance_lock(supervisor._paths) is not None:
+        return 0
     healthy = supervisor._is_gateway_healthy()
     adapter_healthy = supervisor._check_adapter_health()
     if healthy:
+        if not adapter_healthy and read_adapter_state(supervisor._paths.root / "adapter_state.json").get("state") == "running":
+            supervisor._restart_adapter()
         return 0
     consecutive_failures += 1
     supervisor._log_warn(
@@ -318,6 +385,44 @@ def _run_health_check(supervisor, consecutive_failures: int) -> int:
     return consecutive_failures
 
 
+# LLM: 仅恢复明确running且PID已死/缺失的Adapter；未知PID读错误拒绝，单调时钟确保失败尝试也至少间隔30秒。
+# 函数用途: 用同一配置/home环境拉起原通道，不杀进程、不改用户停止意图。
+def restart_adapter(supervisor) -> bool:
+    supervisor._resolve_agent_and_paths()
+    if read_maintenance_lock(supervisor._paths) is not None:
+        return False
+    state = read_adapter_state(supervisor._paths.root / "adapter_state.json")
+    if state.get("state") != "running":
+        return False
+    report = get_running_pid_report(supervisor._paths.adapter_pid, cleanup_stale=False)
+    if report.pid is not None or report.load_error is not None:
+        return False
+    now = time.monotonic()
+    if now - supervisor._last_adapter_restart_at < 30.0:
+        return False
+    supervisor._last_adapter_restart_at = now
+    cmd = [sys.executable, "-m", "agent_py_agent", "--config", supervisor.config_path,
+           "adapter", "start", "--daemon", "--channel", _adapter_restart_channel(state)]
+    try:
+        _spawn_gateway_process(supervisor, cmd, *_gateway_process_flags())
+    except OSError as error:
+        supervisor._log_error(f"Adapter子进程启动失败：{type(error).__name__}")
+        return False
+    return True
+
+
+# LLM: requested_channel优先，只有单个合法通道才采用列表；不把任意状态值运输成CLI选项。
+# 函数用途: 从上次启动记录恢复feishu、qq或all范围。
+def _adapter_restart_channel(state: dict) -> str:
+    requested = state.get("requested_channel")
+    if requested in ("feishu", "qq", "all"):
+        return requested
+    channels = state.get("channels")
+    if isinstance(channels, list) and len(channels) == 1 and channels[0] in ("feishu", "qq"):
+        return channels[0]
+    return "all"
+
+
 # LLM: 收尾只移除自己持有的supervisor PID并写独立状态；Gateway stop结果不伪造成功或覆盖Gateway失败事实。
 # 函数用途: 停止监护前请求原Gateway退出，保留其自身终态与排空信息。
 def _finish_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
@@ -328,6 +433,8 @@ def _finish_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
     supervisor._log_info("Supervisor stopped")
 
 
+# LLM: 仅生成状态投影时间，不作为进程身份或租约。
+# 函数用途: 返回UTC时区的ISO时间文本。
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -377,6 +484,7 @@ class GatewaySupervisor:
         self._gateway_child = self._gateway_child_origin = None
         self._restart_count: int = 0
         self._last_restart_at: float = 0.0
+        self._last_adapter_restart_at: float = float("-inf")
         self._stop_requested: bool = False
         self._agent = agent
         self._paths = None
@@ -388,12 +496,16 @@ class GatewaySupervisor:
         if self._paths is None:
             self._paths = gateway_paths(self._agent)
 
+    # LLM: 统一日志格式并可选追加文件；日志不充当运行状态权威。
+    # 函数用途: 输出一条带时间和级别的监护日志。
     def _log(self, level: str, msg: str) -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] [{level}] {msg}"
         print(line, flush=True)
         self._append_log_file(line)
 
+    # LLM: 文件日志失败不改变监护生命周期，保留原尽力写策略。
+    # 函数用途: 把监护日志追加到可选文件。
     def _append_log_file(self, line: str) -> None:
         if not self.log_path:
             return
@@ -404,18 +516,28 @@ class GatewaySupervisor:
         except OSError:
             pass
 
+    # LLM: 仅转发INFO级别，不建立业务状态。
+    # 函数用途: 记录普通监护信息。
     def _log_info(self, msg: str) -> None:
         self._log("INFO", msg)
 
+    # LLM: 仅转发WARN级别，不据日志触发重试。
+    # 函数用途: 记录监护告警。
     def _log_warn(self, msg: str) -> None:
         self._log("WARN", msg)
 
+    # LLM: 仅转发ERROR级别，不吞掉调用方失败结果。
+    # 函数用途: 记录监护错误。
     def _log_error(self, msg: str) -> None:
         self._log("ERROR", msg)
 
+    # LLM: 兼容payload投影，完整健康判定仍检查report错误。
+    # 函数用途: 返回当前Gateway心跳字典。
     def _read_gateway_heartbeat(self) -> dict | None:
         return self._read_gateway_heartbeat_report().payload
 
+    # LLM: 只沿已绑定Agent的规范路径读取，不创建第二配置权威。
+    # 函数用途: 读取当前Gateway心跳及错误。
     def _read_gateway_heartbeat_report(self) -> SupervisorPayloadReport:
         self._resolve_agent_and_paths()
         return read_gateway_heartbeat_report(self._paths.heartbeat)
@@ -477,6 +599,8 @@ class GatewaySupervisor:
                                        "message": "Gateway身份或就绪资料未确认，请核原配置对应状态后正常重启。"})
         return False
 
+    # LLM: 每轮诊断只写本实例列表及日志，不修改服务身份。
+    # 函数用途: 留存本次健康读取错误。
     def _record_health_load_error(self, load_error: dict) -> None:
         record_health_load_error(
             self._last_health_load_errors,
@@ -494,6 +618,8 @@ class GatewaySupervisor:
             return False
         return now - updated_at <= self.heartbeat_timeout
 
+    # LLM: 复用原PID/state读取；活进程不被自动恢复重启，坏记录保留诊断。
+    # 函数用途: 检查适配器进程是否仍在运行。
     def _check_adapter_health(self) -> bool:
         self._resolve_agent_and_paths()
 
@@ -520,6 +646,8 @@ class GatewaySupervisor:
 
         return True  # PID alive, assume healthy if no state file
 
+    # LLM: 委托同一维护与原代际启动门，不额外创建进程。
+    # 函数用途: 尝试启动并等待Gateway就绪。
     def _start_gateway(self) -> int | None:
         return start_gateway(self)
 
@@ -528,14 +656,25 @@ class GatewaySupervisor:
     def _stop_gateway(self, timeout: float = 20.0, *, expected_identity: dict | None = None) -> bool:
         return stop_gateway(self, timeout=timeout, expected_identity=expected_identity)
 
+    # LLM: 保留同一维护/冷却/代际关闭门，不旁路原停止流程。
+    # 函数用途: 请求恢复故障Gateway。
     def _restart_gateway(self) -> bool:
         return restart_gateway(self)
 
+    # LLM: 始终委托同一维护/意图/PID/冷却读门，不另造启动渠道。
+    # 函数用途: 尝试恢复崩溃的适配器并返回是否发起启动。
+    def _restart_adapter(self) -> bool:
+        return restart_adapter(self)
+
+    # LLM: 信号只设置退出意图，实际收尾由原主循环完成。
+    # 函数用途: 收到终止信号后让监护循环有序退出。
     def _handle_signal(self, signum, frame) -> None:
         sig_name = signal.Signals(signum).name
         self._log_info(f"Received {sig_name}, initiating graceful shutdown...")
         self._stop_requested = True
 
+    # LLM: 入口委托原循环，PID和Gateway角色记录仍分离。
+    # 函数用途: 开始监护并返回退出码。
     def run(self) -> int:
         return run_supervisor_loop(self)
 
@@ -606,10 +745,14 @@ def stop_supervisor(paths: GatewayPaths, timeout: float = 10.0) -> bool:
     return wait_for_pid_exit(pid, timeout)
 
 
+# LLM: 仅保留旧路径投影接口，不据workspace授予角色或配置权威。
+# 函数用途: 返回规范候选列表中的首个工作目录。
 def _primary_workspace_root(raw_root: object, default: Path) -> Path:
     return _workspace_roots(raw_root, default)[0]
 
 
+# LLM: 仅规范化并去重输入，不创建路径或解析业务配置。
+# 函数用途: 把单个或多个工作目录转换为稳定列表。
 def _workspace_roots(raw_root: object, default: Path) -> list[Path]:
     if isinstance(raw_root, list):
         values = raw_root or [default]

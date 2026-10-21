@@ -33,14 +33,20 @@ from .gateway_process import (
 )
 from .scenario import cmd_scenario_test, scenario_case_choices
 from .supervisor import (
+    cmd_maintenance_lock,
+    cmd_maintenance_unlock,
     cmd_start_all,
+    cmd_supervisor_install_service,
     cmd_supervisor_run,
     cmd_supervisor_start,
     cmd_supervisor_status,
     cmd_supervisor_stop,
+    cmd_supervisor_uninstall_service,
 )
 
 
+# LLM: 仅声明能力配置参数，解析阶段不读取或运行配置。
+# 函数用途: 添加能力路由配置选项。
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--capability-config",
@@ -49,6 +55,8 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
+# LLM: 只注册原daemon参数与handler，不启动调度器。
+# 函数用途: 把常驻调度命令加入解析器。
 def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
     daemon = sub.add_parser("daemon", help="按配置启动前台常驻调度")
     _add_capability_config_arg(daemon)
@@ -107,6 +115,8 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 
 
 
+# LLM: 原Gateway启停选项保持不变，注册不触及进程。
+# 函数用途: 添加Gateway启动、停止、重启和日志命令。
 def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
@@ -155,6 +165,8 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_logs.set_defaults(func=cmd_gateway_logs)
 
 
+# LLM: 内部接班参数只注册，执行仍由原run处理器核验。
+# 函数用途: 添加Gateway前台运行和状态命令。
 def _add_gateway_run_subcommand(gateway_sub):
     gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 服务")
     gateway_run.add_argument("--workspace-root", default="", help=argparse.SUPPRESS)
@@ -166,6 +178,8 @@ def _add_gateway_run_subcommand(gateway_sub):
     gateway_status.set_defaults(func=cmd_gateway_status)
 
 
+# LLM: 只声明原请求与结果读取选项，解析不投递任务。
+# 函数用途: 注册Gateway问答和结果命令。
 def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_ask = gateway_sub.add_parser(
         "ask",
@@ -196,7 +210,10 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_result.set_defaults(func=cmd_gateway_result)
 
 
+# LLM: 注册不运行服务；监护参数与安装维护入口分别保持原handler归属。
+# 函数用途: 注册监护的启动、停止、状态及维护命令。
 def _add_gateway_supervisor_subcommands(gateway_sub):
+    _add_gateway_maintenance_subcommands(gateway_sub)
     supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
     supervisor_start.set_defaults(func=cmd_supervisor_start)
 
@@ -216,6 +233,26 @@ def _add_gateway_supervisor_subcommands(gateway_sub):
     supervisor_run.set_defaults(func=cmd_supervisor_run)
 
 
+# LLM: 只声明参数和处理器，无文件/进程副作用；unit和TTL在执行时校验。
+# 函数用途: 把服务安装与维护锁四个入口加入Gateway CLI。
+def _add_gateway_maintenance_subcommands(gateway_sub):
+    install = gateway_sub.add_parser("supervisor-install-service", help="安装用户级systemd看门狗服务")
+    install.add_argument("--unit", default="my-agent-gw-supervisor.service")
+    install.add_argument("--no-start", action="store_true", help="仅安装，不启用服务")
+    install.set_defaults(func=cmd_supervisor_install_service)
+    uninstall = gateway_sub.add_parser("supervisor-uninstall-service", help="卸载用户级systemd看门狗服务")
+    uninstall.add_argument("--unit", default="my-agent-gw-supervisor.service")
+    uninstall.set_defaults(func=cmd_supervisor_uninstall_service)
+    lock = gateway_sub.add_parser("maintenance-lock", help="暂停看门狗自动恢复直至解锁或到期")
+    lock.add_argument("--reason", default="maintenance")
+    lock.add_argument("--ttl", type=float, default=1800.0)
+    lock.set_defaults(func=cmd_maintenance_lock)
+    unlock = gateway_sub.add_parser("maintenance-unlock", help="解除看门狗维护锁")
+    unlock.set_defaults(func=cmd_maintenance_unlock)
+
+
+# LLM: 原Gateway服务安装器与新supervisor用户服务分离，不互相替代。
+# 函数用途: 注册Gateway一键启动及原系统服务命令。
 def _add_gateway_service_subcommands(gateway_sub):
     start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
     start_all.add_argument(
@@ -234,6 +271,8 @@ def _add_gateway_service_subcommands(gateway_sub):
     gateway_uninstall.set_defaults(func=cmd_gateway_uninstall)
 
 
+# LLM: 组合参数注册，不在命令解析时创建Agent或操作文件。
+# 函数用途: 注册完整Gateway命令树。
 def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
     gateway_sub = gateway.add_subparsers(dest="gateway_command")
@@ -246,6 +285,8 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_gateway_service_subcommands(gateway_sub)
 
 
+# LLM: 适配器原参数语义不变，守护进程只在handler执行时创建。
+# 函数用途: 注册适配器文件协议与通道生命周期命令。
 def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
     adapter = sub.add_parser("adapter", help="外部聊天工具 / TUI 适配器")
     adapter_sub = adapter.add_subparsers(dest="adapter_command")

@@ -661,7 +661,7 @@ def _sandbox_roots(
 #   都经 AttemptExecutionSandbox 网关（Linux bwrap / macOS Seatbelt），只能
 #   返回沙箱 argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell
 #   fallback（3.txt E.6/E.7）。单租户走 full_access 档：文件语义不变，网关
-#   统一 + 进程隔离 + readiness 检查仍生效（E.8 不取消 sandbox）。
+#   统一 + 进程隔离 + readiness 检查仍生效（E.8 不取消 sandbox）。宿主清单已锚定真实Owner，缺失项不重复realpath；任务保护仍完整解析。
 # 函数用途: 为命令选择跨平台 attempt 沙箱执行参数；普通范围按最具体路径生效，精确保护最后覆盖，返回 (argv, shell=False)。
 def _sandbox_exec(
     command: str,
@@ -720,8 +720,9 @@ def _sandbox_exec(
         public_read_roots=tuple(Path(r).expanduser().resolve(strict=False) for r in (read_roots or ())),
         protected_write_paths=tuple(
             Path(r).expanduser().resolve(strict=False)
-            for r in (*protection.absolute_paths, *host_readonly_paths_for(owner_text, persona_text))
-        ),
+            for r in protection.absolute_paths
+        ) + tuple(path.resolve(strict=False) if path.exists() or path.is_symlink() else path
+                  for path in host_readonly_paths_for(owner_text, persona_text)),
         write_scope_denied_roots=protection.denied_roots,
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,

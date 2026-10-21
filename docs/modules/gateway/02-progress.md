@@ -1,6 +1,6 @@
-## 2026-10-21 插件宿主扩展接口、一等公民资产门面与定时0-Token工作流直调（plugin_broker_api / scheduler）
+## 2026-10-21 三层看门狗维护锁、Adapter崩溃自愈与插件宿主扩展接口（supervisor / paths / plugin_broker_api）
 
-新增 `gateway_parts/plugin_broker_api.py`，向插件宿主与内部网关提供 Owner 隔离、敏感字段脱敏的一等公民资产（`Skill`/`Script`/`Workflow`/`Monitor`）、自由组合拓扑、任务调用链（`TaskCallInspector`，含自动模型轮与 Token 投影）、工具耗时账本（`ToolTelemetryLedger`）及主动工具/脚本/工作流执行与断点续跑门面；`scheduler/tool_work.py` 支持 `use_llm=False` 规则零 Token 直接调度工作流与脚本，并在断点挂起（`paused_for_resume` / `needs_repair=True`）时持久化结构化结果、触发下游修复规则或上抛通知。详见 [插件宿主接口](../../design/PLUGIN_HOST_API.md)。
+新增 `gateway_parts/paths.py` 的 `maintenance_lock` 与 `supervisor_service` 路径属性；`gateway_parts/supervisor.py` 支持结构化 `maintenance_lock.json`（含 TTL 到期与坏锁防守）在离线升级或管理员维护期暂停自动拉起，并在 Gateway 健康且 Adapter 具有 `running` 意图而原 PID 死亡/缺失时按 30 秒单调冷却自动拉起 Adapter。同时新增 `gateway_parts/plugin_broker_api.py`，向插件宿主与内部网关提供 Owner 隔离、敏感字段脱敏的一等公民资产（`Skill`/`Script`/`Workflow`/`Monitor`）、自由组合拓扑、任务调用链（`TaskCallInspector`，含自动模型轮与 Token 投影）、工具耗时账本（`ToolTelemetryLedger`）及主动工具/脚本/工作流执行与断点续跑门面；`scheduler/tool_work.py` 支持 `use_llm=False` 规则零 Token 直接调度工作流与脚本，并在断点挂起（`paused_for_resume` / `needs_repair=True`）时持久化结构化结果、触发下游修复规则或上抛通知。详见 [插件宿主接口](../../design/PLUGIN_HOST_API.md)。
 
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 

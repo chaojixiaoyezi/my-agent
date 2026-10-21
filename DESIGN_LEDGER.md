@@ -1,3 +1,13 @@
+## 2026-10-21 管理员三层看门狗治理与日常脚本边界（P3源码候选）
+
+- `runtime_governance.status`只读投影三层：OS用户服务的原登记及Linux `systemctl --user is-active`结果；Supervisor独立PID/state及维护锁；Gateway/Adapter原PID/state/heartbeat。所有输出复用`redact_bearer_values`，记录存在不等于服务ready。
+- 私有发行只从解释器/模块祖先或宿主准确prefix的安装器标记识别，显示`prefix/current_version/installed_versions`；当前磁盘版本不能证明所有在途进程已经切换。
+- `maintenance_lock.json`由管理员明确授权设置/清除：`reason/actor/created_at/ttl_seconds/expires_at`，时间为Unix秒，默认1800秒、正整数、最多7天。此切片完成文件生产与期限展示，不修改监护/CLI/安装器；是否暂停重启必须由读端后续集成验证，不能仅凭锁已写入宣布监护暂停。
+- `.run --update`的无痛升级清理流程：先只读查看本安装未受管进程，区分交互TUI与非交互遗留进程；管理员逐次确认准确目标后，工具重新核验同UID、发行exe、出生时间和服务PID排除，使用pidfd发送TERM，短等未退出才KILL并核退出。缺pidfd安全支持时明确拒绝，不回退名字批杀或裸数字PID信号。本切片不自动清理、不改安装器升级流程。
+- 四个写动作均保留原宿主危险审批，同时须可信管理员主代理和参数`admin_authorized is True`。子代理、普通外部用户、缺确认或真假值混淆都不能借父工具对象控制运行时。systemd配置只生成`~/.config/systemd/user/<unit_name>`及`supervisor_service.json`，优先稳定`<prefix>/bin/my-agent`，否则当前解释器`-m agent_py_agent`；不执行enable/start/restart。
+- **一等公民Script资产**只针对Workflow、Monitor、Skill复用场景：标准描述、IO合同、零Token直接调度和按需修复。**普通ad-hoc脚本**仍是日常任务的自由实现方式，100%不受本工具新增注册、资产化、提取Key或调度合同限制；不把`Script`资产门强加给普通写脚本/执行脚本任务。原有宿主安全、路径和审批边界保持，不因“不限制普通脚本”而取消。
+- 验收边界：临时磁盘及受控proc/pidfd/systemctl测试只验证工具逻辑，不等价于真实Linux内核、用户systemd、维护锁读端或发行升级端到端通过。
+
 ## 2026-10-21 可组合工作流与固化脚本一等公民 + 插件宿主封装接口（已实现，已完成复核）
 
 围绕用户提出的两大底座支柱，在不提前建设前端页面的前提下完成通用后端底座与主干接线：

@@ -391,14 +391,17 @@ def _append_allowlist_symlink_aliases(argv: list[str], spec: SandboxSpec) -> Non
         argv += ["--symlink", str(target), str(alias)]
 
 
-# LLM: 别名是否已被父级挂载覆盖按字符串路径层级检查，不解析 alias，否则 symlink 会被误认成目标自身。
-# 函数用途: 判断一个挂载路径是否在另一个目录挂载之下。
+# LLM: 只比较POSIX词法字符串，不resolve别名，不通过高频ValueError判断普通不包含。
+# 函数用途: 快速判断挂载路径层级，区分兄弟前缀、相对路径和双斜杠根。
 def _lexically_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+    sp, sr = str(path), str(root)
+    if sr == '/':
+        return sp.startswith('/') and not sp.startswith('//')
+    if sr == '//':
+        return sp.startswith('//')
+    if sr == '.':
+        return not path.is_absolute()
+    return sp == sr or sp.startswith(sr + '/')
 
 
 # LLM: 整根只读后再挂新的 /dev、/proc，最后逐个可写绑定 write_roots；受保护只读路径最后覆盖。不挂私有 /tmp：
@@ -537,19 +540,36 @@ def _append_write_scope_mounts(
             argv += ["--bind" if writable else "--ro-bind", str(root), str(root)]
 
 
-# LLM: 精确宿主保护在普通写范围之后挂载，不能被更窄 allow 覆盖；保持缺失路径的既有行为并同步进程保护测试。
-# 函数用途: 将存在的绝对保护路径只读覆盖到沙箱。
+# LLM: 缺失项不挂载也不重复realpath；同源只读及其子视图都未被后发挂载改变时才去重，不跨调用缓存权限。
+# 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略仍生效的重复挂载。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
     seen: set[Path] = set()
+    mounts = _mount_snapshot(argv)
     for raw in paths:
         try:
-            path = Path(raw).expanduser().resolve(strict=False)
+            path = Path(raw).expanduser()
+            if not path.exists() and not path.is_symlink():
+                continue
+            path = path.resolve(strict=False)
         except (OSError, RuntimeError):
             continue
         if path in seen or not path.exists():
             continue
         seen.add(path)
-        argv += ["--ro-bind", str(path), str(path)]
+        arguments = ('--ro-bind', str(path), str(path))
+        if _readonly_mount_unchanged(path, arguments, mounts):
+            continue
+        argv.extend(arguments)
+        mounts += (_MountProjection(path, path, arguments=arguments),)
+
+
+# LLM: 父目录本身仍只读不足以去重：后发子RW、异源RO或空覆盖也改变整树，必须重施原精确保护。
+# 函数用途: 逆序核对同次挂载，确认一个精确只读覆盖及其子视图都没有后来变化。
+def _readonly_mount_unchanged(path: Path, arguments: tuple[str, ...], mounts: tuple[_MountProjection, ...]) -> bool:
+    for mount in reversed(mounts):
+        if _lexically_within(mount.target, path) or _lexically_within(path, mount.target):
+            return mount.target == path and mount.arguments == arguments
+    return False
 
 
 # LLM: H2：宿主托管存储对模型命令隐藏。只盖已存在的目录（宿主按 owner 布局列出），排在所有挂载之后才能压过可写父目录；
@@ -936,7 +956,7 @@ def _append_persona_namespace_ancestors(
             _append_mount_preserving_children(argv, ("--bind", str(source), str(parent)))
 
 
-# LLM: 元数据权威由入口在底图前冻结；所有名称从最终mount反投影，canonical祖先仅同源自绑定，缺省控制根已拒写时不创建占位。
+# LLM: 元数据权威由入口冻结；共享祖先先去重再核原写位和来源，不改变任何名称投影或配置身份复核。
 #   身份/配置代次返回前复核，路径argv仍不消除最后核验到内核bind的竞争；普通同级业务写位保持原权限。
 # 函数用途: 按同次来源和全部有效namespace别名保护人格及必要名称祖先，未知或不安全链失败关闭。
 def _append_persona_readonly_mounts(
@@ -960,8 +980,8 @@ def _append_persona_readonly_mounts(
         sources = dict(projection)
         paths = tuple(path for path in sources if sources[path].exists() or path.name != "persona"
                       or _persona_parent_writable(path.parent, mounts_snapshot))
-        ancestors = {parent for _, canonical in projection for parent in canonical.parents
-                     if parent != Path("/") and _persona_parent_writable(parent, mounts_snapshot)
+        candidate_parents = {parent for _, canonical in projection for parent in canonical.parents if parent != Path('/')}
+        ancestors = {parent for parent in candidate_parents if _persona_parent_writable(parent, mounts_snapshot)
                      and _persona_projected_source(parent, mounts_snapshot) == parent}
         identities = {item.path: item.identity for item in snapshot if item.identity is not None}
         _append_persona_ancestors(argv, ancestors)
@@ -1046,15 +1066,45 @@ def _persona_parent_writable(path: Path, mounts: tuple[_MountProjection, ...]) -
     raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: namespace alias cycle")
 
 
-# LLM: 祖先挂载会遮住已发子mount；只重放同次最终仍有效的严格子覆盖，原顺序保留B7隐藏后的明确读/写重挂。
-#   这是现有argv组合，不读取新授权；persona节点也一起保留，不能让普通deny重施擦掉名称链的防rename节点。
-# 函数用途: 加固一个祖先挂载时恢复原视图的精确子边界，避免更宽bind重新露出秘密或抹掉合法业务写根。
+# LLM: 逆序单次遍历挂载，用已覆盖的路径前缀排除影子项；成本随总路径段数增长，不逐项重扫挂载表。
+# 函数用途: 取得保持原顺序的最终有效挂载，保留异名、空覆盖和嵌套写根。
+def _effective_mounts(mounts: tuple[_MountProjection, ...]) -> tuple[_MountProjection, ...]:
+    covered: set[tuple[str, tuple[str, ...]]] = set()
+    effective = []
+    for mount in reversed(mounts):
+        parts, anchor = mount.target.parts, mount.target.anchor
+        if any((anchor, parts[:end]) in covered for end in range(len(parts), -1, -1)):
+            continue
+        covered.add((anchor, parts))
+        effective.append(mount)
+    return tuple(reversed(effective))
+
+
+# LLM: 只删除将被新父挂载覆盖且随后按原参数恢复的子挂载；非挂载选项与同目标挂载保留。
+# 函数用途: 从argv清掉旧子挂载的影子副本，空挂载与紧邻的remount-ro成组移除。
+def _remove_shadowed_mount_arguments(argv: list[str], arguments: set[tuple[str, ...]]) -> None:
+    removed: set[int] = set()
+    for index, flag in enumerate(argv):
+        if flag in {'--bind', '--ro-bind', '--dev-bind', '--symlink'}:
+            entry = tuple(argv[index:index + 3])
+        elif flag in {'--tmpfs', '--proc', '--dev'}:
+            entry = _empty_mount_arguments(argv, index)
+        else:
+            continue
+        if entry in arguments:
+            removed.update(range(index, index + len(entry)))
+    argv[:] = [value for index, value in enumerate(argv) if index not in removed]
+
+
+# LLM: 父挂载之后只重放同次有效子覆盖，并移除其旧影子项；不读取新授权，不改变B7及人格防rename语义。
+# 函数用途: 线性筛选并压缩重挂子边界，避免多层祖先造成平方CPU与重复挂载膨胀。
 def _append_mount_preserving_children(argv: list[str], arguments: tuple[str, ...]) -> None:
     target = Path(arguments[2])
     mounts = _mount_snapshot(argv)
-    descendants = [mount for mount in mounts if mount.target != target
-                   and _lexically_within(mount.target, target)
-                   and _effective_mount(mount.target, mounts) is mount]
+    shadowed = {mount.arguments for mount in mounts if mount.target != target and _lexically_within(mount.target, target)}
+    descendants = [mount for mount in _effective_mounts(mounts)
+                   if mount.target != target and _lexically_within(mount.target, target)]
+    _remove_shadowed_mount_arguments(argv, shadowed)
     argv.extend(arguments)
     for mount in descendants:
         argv.extend(mount.arguments)

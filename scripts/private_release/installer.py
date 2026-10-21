@@ -1,17 +1,20 @@
-# LLM: 私有离线发行的安装器；只管理显式 prefix 下的版本、入口和初始化数据，升级不覆盖数据。
-# 模块用途: 用发行包自带 Python 完成校验、首次安装和原子版本切换，不依赖登录 HOME 或网络。
+# LLM: 仅管理显式prefix的安装与维护；进程清理限定同uid、无tty及已核出生身份，不覆盖数据或改动其它安装。
+# 模块用途: 离线校验和原子升级，先暂停守望与排空服务，再精准清理本安装遗留脚本，最后恢复原服务。
 from __future__ import annotations
 
 import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SCHEMA = "my-agent.private-release.v1"
@@ -49,11 +52,15 @@ def verify(root: Path) -> dict:
     return manifest
 
 
-# LLM: 只查看本安装目录所属进程的 exe/cwd 身份；不读取命令行、任务正文或其它应用状态。
-# 函数用途: 阻止活动进程期间切换版本，避免新 TUI 连接旧 Gateway；不杀进程。
+# LLM: 只按本安装releases下真实exe发现PID；stat或命令行不可读也不能绕过最后安装阻断，不发信号。
+# 函数用途: 兼容返回排序PID集合；无proc的平台没有Linux观察结果。
 def active_processes(prefix: Path) -> list[int]:
     running = []
-    for entry in Path("/proc").iterdir():
+    try:
+        entries = list(Path('/proc').iterdir())
+    except FileNotFoundError:
+        return running
+    for entry in entries:
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
@@ -63,6 +70,138 @@ def active_processes(prefix: Path) -> list[int]:
         if executable.is_relative_to(prefix / "releases"):
             running.append(int(entry.name))
     return sorted(running)
+
+
+# LLM: 只消费本prefix exe发现结果；读不到stat的PID不猜为后台，最后active_processes仍拒绝版本切换。
+# 函数用途: 返回按PID排序的父进程、终端与完整命令行诊断，不发信号。
+def inspect_active_processes(prefix: Path) -> list[dict]:
+    rows = [_process_details(pid) for pid in active_processes(prefix)]
+    return sorted((row for row in rows if row is not None), key=lambda row: row['pid'])
+
+
+# LLM: cmdline仅供诊断，不能作为安装身份；读失败为空，NUL分隔按proc协议转空格，不读取环境或文件内容。
+# 函数用途: 读取一个进程公开的命令参数以展示遗留脚本来源。
+def _process_cmdline(pid):
+    try:
+        return Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode('utf-8', errors='replace').strip()
+    except OSError:
+        return ''
+
+
+# LLM: stat从comm的最后右括号取内核位置；无法读出的样本不当无终端，父命令行可缺失。
+# 函数用途: 取得一条公开进程详情，供安装诊断与脚本父进程检查。
+def _process_details(pid):
+    try:
+        state = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        ppid, tty = int(state[1]), int(state[4])
+    except (OSError, ValueError, IndexError):
+        return None
+    return {'pid': pid, 'ppid': ppid, 'tty_nr': tty, 'interactive': tty != 0,
+        'cmdline': _process_cmdline(pid), 'parent_cmdline': _process_cmdline(ppid)}
+
+
+# LLM: 出生时间、exe、uid与tty一起固定，comm可含右括号；发送和升级前均重核，缺证据不发信号。
+# 函数用途: 捕获Linux进程的准确一代身份，退出或不可核验时返回None。
+def _process_identity(pid):
+    try:
+        entry = Path(f'/proc/{pid}')
+        state = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        return (entry.stat().st_uid, str((entry / 'exe').resolve(strict=True)), state[19], int(state[4]))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+# LLM: 只解析不带命令串/输入选项的shell首个脚本参数；绝对位置或cwd解析后须是本prefix的真实文件。
+# 函数用途: 证明包装脚本归属，不把共享批处理或普通.sh参数当成本安装专用脚本。
+def _wrapper_identity(pid, prefix):
+    if pid <= 1 or pid in (os.getpid(), os.getppid()):
+        return None
+    identity = _process_identity(pid)
+    if identity is None or identity[0] != os.getuid() or identity[3] != 0 or Path(identity[1]).name not in ('bash', 'sh', 'dash'):
+        return None
+    try:
+        arguments = [value.decode('utf-8') for value in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')[1:] if value]
+        while arguments and re.fullmatch(r'-[euxv]+', arguments[0]):
+            arguments.pop(0)
+        if arguments and arguments[0] == '--':
+            arguments.pop(0)
+        if not arguments or arguments[0].startswith('-'):
+            return None
+        script = Path(arguments[0])
+        if not script.is_absolute():
+            script = Path(f'/proc/{pid}/cwd').resolve(strict=True) / script
+        script = script.resolve(strict=True)
+    except OSError:
+        return None
+    return identity if script.is_relative_to(prefix) and script.is_file() else None
+
+
+# LLM: 原观察须仍属同uid本prefix且无tty，父子关系在父身份捕获前后重核；旧PPID不授予停止权。
+# 函数用途: 汇总本安装遗留子进程及可确认的shell父进程，不扩展到整进程组。
+def _orphan_targets(prefix, rows):
+    targets = {}
+    for row in rows:
+        identity = _process_identity(row['pid'])
+        if (identity is None or identity[0] != os.getuid() or identity[3] != 0
+                or not Path(identity[1]).is_relative_to(prefix / 'releases')):
+            continue
+        current = _process_details(row['pid'])
+        parent = _wrapper_identity(row['ppid'], prefix) if current and current['ppid'] == row['ppid'] else None
+        after = _process_details(row['pid'])
+        if parent is not None and after and after['ppid'] == row['ppid'] and _process_identity(row['pid']) == identity:
+            targets.setdefault(row['ppid'], parent)
+        targets[row['pid']] = identity
+    return targets
+
+
+# LLM: 仅用pidfd绑定进程并重核身份后发送，缺安全句柄拒绝自动清理；不回落存在复用竞态的裸PID信号。
+# 函数用途: 给原一代进程发TERM或KILL，退出/换代无信号，旧平台保留诊断而不误杀。
+def _signal_process(pid, identity, sig):
+    if _process_identity(pid) != identity:
+        return
+    try:
+        if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+            raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')
+        descriptor = os.pidfd_open(pid)
+        try:
+            if _process_identity(pid) == identity:
+                signal.pidfd_send_signal(descriptor, sig)
+        finally:
+            os.close(descriptor)
+    except ProcessLookupError:
+        pass
+
+
+# LLM: 单调时钟有界等待已固定身份消失，PID复用不是原进程仍活；不借等待扩大清理集合。
+# 函数用途: 为优雅退出和强制退出各留出调用方指定的超时窗口。
+def _wait_for_processes(targets, timeout):
+    deadline = time.monotonic() + timeout
+    while any(_process_identity(pid) == identity for pid, identity in targets.items()):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.05, remaining))
+
+
+# LLM: 仅在原服务stop成功后调用；先同uid无tty包装器再子进程，超时才KILL，未退出不谎报成功。
+# 函数用途: 清理本安装残留旧解释器并打印PID/PPID/命令行，返回原诊断供更新回执使用。
+def cleanup_orphan_background_processes(prefix: Path, *, timeout: float = 5.0) -> list[dict]:
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
+        raise ValueError('进程清理超时必须是非负有限数')
+    prefix = prefix.resolve()
+    rows = [row for row in inspect_active_processes(prefix) if not row['interactive']]
+    targets = _orphan_targets(prefix, rows)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid, identity in targets.items():
+            _signal_process(pid, identity, sig)
+        _wait_for_processes(targets, timeout)
+    remaining = [pid for pid, identity in targets.items() if _process_identity(pid) == identity]
+    if remaining:
+        raise ValueError(f'遗留后台进程清理未完成，活动 PID: {remaining}')
+    cleaned = [row for row in rows if row['pid'] in targets]
+    for row in cleaned:
+        print(f"已清理遗留后台进程：PID {row['pid']} PPID {row['ppid']} ({row['cmdline'] or 'unknown'})")
+    return cleaned
 
 
 # LLM: 启动入口固定解析安装记录；数据与配置是持久路径，-B 显式禁止隔离解释器在不可变版本写缓存。
@@ -117,8 +256,8 @@ def initialize_data(prefix: Path, release: Path) -> None:
     config.chmod(0o600)
 
 
-# LLM: 修改范围限于经过标记的安装目录；版本冲突、校验失败及活动进程均在切换前失败。
-# 函数用途: 安装不可变版本，保留旧版本及用户数据，最后原子切换 current。
+# LLM: 修改范围限于标记安装目录；校验、版本冲突及活动PID均在切换前拒绝，新增详情不改变旧错误前缀。
+# 函数用途: 保留数据并原子切换不可变版本；阻断时展示PID/PPID/命令以定位遗留脚本。
 def install(bundle: Path, prefix: Path) -> dict:
     manifest = verify(bundle)
     prefix = prefix.expanduser().resolve()
@@ -133,7 +272,9 @@ def install(bundle: Path, prefix: Path) -> dict:
     with (prefix / ".install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if pids := active_processes(prefix):
-            raise ValueError(f"请先退出本安装的 TUI 并停止 Gateway 后重试；活动 PID: {pids}")
+            details = '; '.join(f"PID {row['pid']} PPID {row['ppid']} ({row['cmdline'] or 'unknown'})"
+                for row in inspect_active_processes(prefix))
+            raise ValueError(f"请先退出本安装的 TUI 并停止 Gateway 后重试；活动 PID: {pids}；详情: {details}")
         record = {"schema": SCHEMA, "prefix": str(prefix), "data": str(prefix / "data"), "workspace": str(workspace_path(prefix)), "owner_uid": os.getuid()}
         if marker.exists() and json.loads(marker.read_text(encoding="utf-8")) != record:
             raise ValueError("安装记录与目标路径不一致，请不要直接搬移运行中的安装目录")
@@ -219,13 +360,9 @@ def resolve_install_prefix(requested: Path | None, *, roots=None) -> Path:
     return found[0] if found else Path('/app/.my-agent')
 
 
-# LLM: 使用原 owner/runtime 路径合同和 CLI 停止/恢复准确实例；不依赖安装器的 HOME/env，不按名字 kill python。
-# 函数用途: 更新前保存原后台服务状态，沿既有命令停止，切换成功或失败后恢复原来开启的服务。
-def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None) -> tuple[bool,bool,str]:
-    import subprocess
-
-    from agent_py_agent.agent.gateway_parts import is_pid_alive
-    from agent_py_agent.agent.gateway_parts.daemon_control import get_running_pid
+# LLM: 仅复用原owner/runtime解析器，安装器环境不覆盖持久prefix；不创建第二套服务目录。
+# 函数用途: 找到准确安装的Gateway服务路径，供维护锁、原服务与Supervisor共用。
+def _update_service_paths(prefix):
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.agent.settings import load_config
     from agent_py_agent.agent.user_space.home_layout import home_paths
@@ -237,36 +374,145 @@ def update_services(prefix: Path, *, restore: tuple[bool,bool,str] | None = None
     )
     from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
 
-    launcher = str(prefix / 'bin' / 'my-agent-preview')
     config = load_config(prefix / 'data' / 'config' / 'agent_config.yaml')
     base = home_paths(configured_home_root(config, env={'MY_AGENT_HOME': str(prefix / 'data')}))
     owner = resolve_owner_home(base.root, owner_identity_from_config(config))
     scoped = home_paths_with_owner(base, owner)
-    paths = gateway_paths_from_root(runtime_paths_for_agent(config, owner.home_dir, scoped)['gateway_workspace'])
-    # LLM: PID 是原服务记录，只用生存事实，不以状态文案猜服务是否运行。
-    # 函数用途: 核对原实例当前服务 PID。
-    def alive(path):
-        pid = get_running_pid(path)
-        return bool(pid and is_pid_alive(pid))
-    adapter_alive=alive(paths.adapter_pid) if restore is None else restore[1]
-    channel='all'
-    if restore is None and adapter_alive:
-        state=json.loads((paths.root / 'adapter_state.json').read_text(encoding='utf-8'))
-        channel=restore_channel(state)
-    original = restore if restore is not None else (alive(paths.pid), adapter_alive, channel)
-    commands = ([['gateway','start','--ready-timeout','60']] if original[0] else []) + ([['adapter','start','--daemon','--channel',original[2]]] if original[1] else [])
-    if restore is None:
-        release = json.loads((prefix / 'current' / 'release.json').read_text(encoding='utf-8'))
-        drain = ['--drain'] if (release.get('protocols') or {}).get('offline_update') == 'drain.v1' else []
-        commands = ([['adapter','stop']] if original[1] else []) + [['gateway','stop',*drain,'--stop-background','--background-timeout','30']]
+    return gateway_paths_from_root(runtime_paths_for_agent(config, owner.home_dir, scoped)['gateway_workspace'])
+
+
+# LLM: 只读原PID记录及内核生存事实，复用原身份检查，不从状态文案猜活进程。
+# 函数用途: 确认更新前某个准确服务是否在运行。
+def _service_alive(path):
+    from agent_py_agent.agent.gateway_parts import is_pid_alive
+    from agent_py_agent.agent.gateway_parts.daemon_control import get_running_pid
+
+    pid = get_running_pid(path)
+    return bool(pid and is_pid_alive(pid))
+
+
+# LLM: 维护锁原子发表，固定schema/TTL；恢复先撤锁，不把服务启动失败伪装成成功或永久维护。
+# 函数用途: 让守望进程在离线更新期间暂停，恢复时忽略原锁已不存在。
+def _maintenance_lock(root, *, remove=False):
+    target = root / 'maintenance_lock.json'
+    if remove:
+        target.unlink(missing_ok=True)
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    payload = {'schema': 'my-agent.maintenance-lock.v1', 'reason': 'offline_update', 'actor': 'installer',
+        'created_at': now, 'expires_at': now + 1800, 'pid': os.getpid()}
+    temporary = root / f'.maintenance-lock-{os.getpid()}.tmp'
     try:
-        for arguments in commands:
-            result = subprocess.run([launcher,*arguments], timeout=6000, check=False)
-            if result.returncode:
-                raise ValueError('原实例服务控制未完成：' + ' '.join(arguments[:2]))
-    except (OSError,ValueError,subprocess.SubprocessError):
-        if restore is None:
-            update_services(prefix, restore=original)
+        temporary.write_text(json.dumps(payload) + '\n', encoding='utf-8')
+        temporary.chmod(0o600)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+# LLM: systemd单元名仅来自对象元数据或固定默认，写锁/停服务前拒绝坏类型；无systemctl不尝试用户服务。
+# 函数用途: 读取Supervisor安装单元名，并查询本用户单元是否活动。
+def _supervisor_unit_state(root):
+    record = root / 'supervisor_service.json'
+    unit = _update_json_object(record).get('unit_name', 'my-agent-gw-supervisor.service') if record.exists() else 'my-agent-gw-supervisor.service'
+    if not isinstance(unit, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@:-]*\.service', unit):
+        raise ValueError('Supervisor systemd单元名无效')
+    active = shutil.which('systemctl') is not None and subprocess.run(
+        ['systemctl', '--user', 'is-active', '--quiet', unit], timeout=30, check=False,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    return active, unit
+
+
+# LLM: 更新控制只接受JSON对象，不将数组/标量变成默认状态；在任何服务停止前校验。
+# 函数用途: 读取发行协议和Supervisor控制元数据，坏记录明确拒绝。
+def _update_json_object(path):
+    value = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(value, dict):
+        raise ValueError('更新元数据必须是JSON对象：' + str(path))
+    return value
+
+
+# LLM: 仅控制已确认属于原Supervisor的用户单元，任何停启失败都阻止把升级称为成功。
+# 函数用途: 沿systemctl暂停或恢复更新前已运行的守望服务。
+def _control_supervisor_unit(action, unit):
+    result = subprocess.run(['systemctl', '--user', action, unit], timeout=60, check=False)
+    if result.returncode:
+        raise ValueError('Supervisor用户服务控制未完成：' + action + ' ' + unit)
+
+
+# LLM: 原gateway/adapter控制失败仍硬拒绝；仅supervisor-stop允许旧CLI无此命令，后续清理和安装核验不放宽。
+# 函数用途: 串行执行准确安装启动器的服务动作，不使用shell或按名字杀进程。
+def _run_update_commands(prefix, commands):
+    launcher = str(prefix / 'bin' / 'my-agent-preview')
+    for arguments in commands:
+        result = subprocess.run([launcher, *arguments], timeout=6000, check=False)
+        if result.returncode and arguments[:2] != ['gateway', 'supervisor-stop']:
+            raise ValueError('原实例服务控制未完成：' + ' '.join(arguments[:2]))
+        if result.returncode:
+            print('Supervisor停止命令未成功，继续原服务排空与遗留进程核验（旧发行可能不支持该命令）')
+
+
+# LLM: 独立尝试每个原活跃组件，收集错误后一起报；准确维护根由停止调用栈或当前原路径解析传入。
+# 函数用途: 先撤维护锁再恢复原连接和守望，一个组件失败不丢掉其它恢复义务。
+def _restore_update_services(prefix, root, original):
+    _maintenance_lock(root, remove=True)
+    commands = ([['gateway', 'start', '--ready-timeout', '60']] if original[0] else []) + (
+        [['adapter', 'start', '--daemon', '--channel', original[2]]] if original[1] else [])
+    operations = [('cli', arguments) for arguments in commands]
+    if len(original) > 3:
+        supervisor_alive, unit_active, unit = original[3:]
+        if unit_active:
+            operations.append(('systemd', unit))
+        elif supervisor_alive:
+            operations.append(('cli', ['gateway', 'supervisor-start']))
+    errors = []
+    for kind, value in operations:
+        try:
+            if kind == 'systemd':
+                _control_supervisor_unit('start', value)
+            else:
+                _run_update_commands(prefix, [value])
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            errors.append(str(error))
+    if errors:
+        raise ValueError('原实例服务恢复未完成：' + '；'.join(errors))
+    return original
+
+
+# LLM: 原三元组兼容；Supervisor活跃才扩展六元组，配置先验、锁先于stop；任意中断沿原已捕获root恢复，不重解析权限。
+# 函数用途: 暂停本安装守望与服务，清理遗留进程；失败仍撤维护锁并尝试所有原恢复义务。
+def update_services(prefix: Path, *, restore: tuple | None = None) -> tuple:
+    paths = _update_service_paths(prefix)
+    if restore is not None:
+        return _restore_update_services(prefix, paths.root, restore)
+    adapter_alive = _service_alive(paths.adapter_pid)
+    channel = restore_channel(json.loads((paths.root / 'adapter_state.json').read_text(encoding='utf-8'))) if adapter_alive else 'all'
+    original = (_service_alive(paths.pid), adapter_alive, channel)
+    supervisor_alive = _service_alive(paths.root / 'supervisor.pid')
+    unit_active, unit = _supervisor_unit_state(paths.root)
+    release = _update_json_object(prefix / 'current' / 'release.json')
+    protocols = release.get('protocols')
+    if protocols is None:
+        protocols = {}
+    if not isinstance(protocols, dict):
+        raise ValueError('发行包protocols必须是JSON对象')
+    if supervisor_alive or unit_active:
+        original = (*original, supervisor_alive, unit_active, unit)
+    _maintenance_lock(paths.root)
+    try:
+        if unit_active:
+            _control_supervisor_unit('stop', unit)
+        drain = ['--drain'] if protocols.get('offline_update') == 'drain.v1' else []
+        commands = ([['gateway', 'supervisor-stop']] if supervisor_alive else []) + (
+            [['adapter', 'stop']] if adapter_alive else []) + [['gateway', 'stop', *drain, '--stop-background', '--background-timeout', '30']]
+        _run_update_commands(prefix, commands)
+        cleanup_orphan_background_processes(prefix)
+    except BaseException as error:
+        try:
+            _restore_update_services(prefix, paths.root, original)
+        except (OSError, ValueError, subprocess.SubprocessError) as restore_error:
+            raise ValueError(f'更新停止未完成：{error}；恢复亦未完成：{restore_error}') from error
         raise
     return original
 
@@ -288,8 +534,8 @@ def restore_channel(state: dict) -> str:
     return names[0] if len(names) == 1 else 'all'
 
 
-# LLM: 安装切换复用原目录/服务排空；任何 subprocess 超时必须作为安装错误返回，恢复路径仍由原服务控制负责。
-# 函数用途: 校验离线包、更新原实例并恢复连接，对超时或状态异常给出明确失败，不能宣称更新成功。
+# LLM: 安装切换沿原服务排空；主失败与恢复失败必须同时报告，中断亦尝试原恢复，不将超时/未知签成功。
+# 函数用途: 校验并更新原实例，恢复原连接；保留安装首因且不掩盖恢复欠账。
 def main() -> int:
     parser = argparse.ArgumentParser(description="my-agent 临时离线安装 / 更新")
     parser.add_argument("--prefix", type=Path, help="省略时识别原实例并更新；首装默认 /app/.my-agent")
@@ -309,7 +555,14 @@ def main() -> int:
                 assert_interactive_processes_exited(prefix)
                 services = update_services(prefix)
             result = install(bundle, prefix)
-        finally:
+        except BaseException as error:
+            if services is not None:
+                try:
+                    update_services(prefix, restore=services)
+                except (OSError, ValueError, subprocess.SubprocessError) as restore_error:
+                    raise ValueError(f'安装未完成：{error}；服务恢复亦未完成：{restore_error}') from error
+            raise
+        else:
             if services is not None:
                 update_services(prefix, restore=services)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
@@ -323,16 +576,12 @@ def main() -> int:
 
 
 
-# LLM: 只读本安装 PID 的 tty 事实，不读取任务正文或向终端发送退出键；确认失败在停服务之前拒绝更新。
-# 函数用途: 要求 TUI/交互进程先退出，避免自动更新途中误关正在输入的用户。
+# LLM: 仅本安装进程的tty决定交互阻断，cmdline只补诊断；不向交互进程发信号或输入退出键。
+# 函数用途: 更新停服务前要求TUI退出，保留原PID错误前缀供旧调用方识别。
 def assert_interactive_processes_exited(prefix):
-    for pid in active_processes(prefix):
-        try:
-            state=Path(f'/proc/{pid}/stat').read_text().split(')',1)[1].split()
-            if int(state[4])!=0:
-                raise ValueError(f'请先退出本安装 TUI/交互进程再更新：PID {pid}')
-        except (FileNotFoundError,ProcessLookupError):
-            continue
+    for row in inspect_active_processes(prefix):
+        if row['interactive']:
+            raise ValueError(f"请先退出本安装 TUI/交互进程再更新：PID {row['pid']} ({row['cmdline'] or 'unknown'})")
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -1,12 +1,16 @@
+# LLM: 安装测试只在临时prefix和合成proc运行，服务命令与信号全部可控，不更新本机真实安装。
+# 模块用途: 验证离线安装数据保留、更新服务维护、详细诊断和遗留进程清理边界。
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 import py_compile
+import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -244,3 +248,410 @@ def test_update_channel_uses_structured_old_and_current_state(state, expected):
             installer.restore_channel(state)
     else:
         assert installer.restore_channel(state) == expected
+
+
+# LLM: proc目录是普通临时文件；exe仅指向测试文件，不执行二进制，stat保留ppid/tty/starttime位置。
+# 函数用途: 建立一条可复查的Linux进程观察样本。
+def _proc_entry(root, pid, executable, *, ppid=1, tty=0, argv=()):
+    entry = root / str(pid)
+    entry.mkdir()
+    (entry / 'exe').symlink_to(executable)
+    fields = ['S', str(ppid), '0', '0', str(tty), *(['0'] * 14), str(pid)]
+    (entry / 'stat').write_text(f'{pid} (synthetic process) ' + ' '.join(fields))
+    (entry / 'cmdline').write_bytes('\0'.join(argv).encode() + b'\0')
+    return entry
+
+
+# LLM: 只重定位安装器自己的/proc读口；标准Path和宿主真实proc不改动。
+# 函数用途: 提供可模拟退出、PID复用及父子关系的隔离进程树。
+@pytest.fixture
+def fake_install_proc(tmp_path, monkeypatch):
+    proc = tmp_path / 'proc'
+    proc.mkdir()
+    prefix = tmp_path / 'install'
+    executable = prefix / 'releases/test/runtime/bin/python3'
+    executable.parent.mkdir(parents=True)
+    executable.write_text('synthetic executable')
+
+    # LLM: 仅路由精确/proc根和其子路径，其它文件保留真实临时Path。
+    # 函数用途: 将安装器的Linux观察点映射为本例临时样本。
+    def mapped_path(value='.'):
+        text = str(value)
+        return proc if text == '/proc' else proc / text[6:] if text.startswith('/proc/') else Path(value)
+
+    monkeypatch.setattr(installer, 'Path', mapped_path)
+    handles = {}
+
+    # LLM: 普通临时文件FD模拟pidfd，映射本例合成PID；真实os.close负责关闭描述符。
+    # 函数用途: 验证安全句柄发信号分支，不依赖测试主机的Linux版本。
+    def pidfd_open(pid):
+        descriptor = os.open(proc / str(pid) / 'exe', os.O_RDONLY)
+        handles[descriptor] = pid
+        return descriptor
+
+    monkeypatch.setattr(installer.os, 'pidfd_open', pidfd_open, raising=False)
+    monkeypatch.setattr(installer.signal, 'pidfd_send_signal', lambda descriptor, sig:
+        installer.os.kill(handles[descriptor], sig), raising=False)
+    return SimpleNamespace(proc=proc, prefix=prefix, executable=executable)
+
+
+def test_inspect_installed_processes_reports_sorted_tty_and_parent(fake_install_proc):
+    case = fake_install_proc
+    parent = case.proc.parent / 'bash'
+    parent.write_text('shell')
+    _proc_entry(case.proc, 701, parent, argv=['bash', 'tools/hourly_loop.sh'])
+    _proc_entry(case.proc, 703, case.executable, ppid=701, argv=['python3', 'tools/fetch.py'])
+    _proc_entry(case.proc, 702, case.executable, tty=34816, argv=['python3', '-m', 'agent_py_agent'])
+    _proc_entry(case.proc, 704, parent, argv=['bash', 'unrelated.sh'])
+    rows = installer.inspect_active_processes(case.prefix)
+    assert rows == [
+        {'pid': 702, 'ppid': 1, 'tty_nr': 34816, 'interactive': True,
+         'cmdline': 'python3 -m agent_py_agent', 'parent_cmdline': ''},
+        {'pid': 703, 'ppid': 701, 'tty_nr': 0, 'interactive': False,
+         'cmdline': 'python3 tools/fetch.py', 'parent_cmdline': 'bash tools/hourly_loop.sh'}]
+    assert installer.active_processes(case.prefix) == [702, 703]
+
+
+def test_interactive_update_error_preserves_prefix_and_adds_command(fake_install_proc):
+    case = fake_install_proc
+    _proc_entry(case.proc, 702, case.executable, tty=34816, argv=['python3', '-m', 'agent_py_agent'])
+    with pytest.raises(ValueError, match='请先退出本安装 TUI/交互进程再更新：PID 702') as error:
+        installer.assert_interactive_processes_exited(case.prefix)
+    assert '(python3 -m agent_py_agent)' in str(error.value)
+
+
+def test_busy_installation_keeps_exact_prefix_and_adds_process_details(tmp_path, monkeypatch):
+    prefix = tmp_path / 'install'
+    monkeypatch.setattr(installer, 'active_processes', lambda _: [])
+    installer.install(_bundle(tmp_path / 'first'), prefix)
+    monkeypatch.setattr(installer, 'active_processes', lambda _: [703])
+    monkeypatch.setattr(installer, 'inspect_active_processes', lambda _: [
+        {'pid': 703, 'ppid': 701, 'tty_nr': 0, 'interactive': False, 'cmdline': 'python3 tools/fetch.py', 'parent_cmdline': 'bash loop.sh'}], raising=False)
+    with pytest.raises(ValueError) as error:
+        installer.install(_bundle(tmp_path / 'second', 'test.2'), prefix)
+    text = str(error.value)
+    assert text.startswith('请先退出本安装的 TUI 并停止 Gateway 后重试；活动 PID: [703]')
+    assert 'PPID 701' in text and 'python3 tools/fetch.py' in text
+    assert (prefix / 'current').resolve().name == 'test.1'
+
+
+@pytest.mark.parametrize('stubborn', [False, True])
+def test_orphan_cleanup_terminates_wrapper_and_child_not_tty(fake_install_proc, monkeypatch, capsys, stubborn):
+    case = fake_install_proc
+    parent = case.proc.parent / 'bash'
+    parent.write_text('shell')
+    parent_entry = _proc_entry(case.proc, 701, parent, argv=['bash', 'tools/hourly_loop.sh'])
+    (parent_entry / 'cwd').symlink_to(case.prefix)
+    script = case.prefix / 'tools/hourly_loop.sh'
+    script.parent.mkdir()
+    script.write_text('synthetic loop')
+    _proc_entry(case.proc, 703, case.executable, ppid=701, argv=['python3', 'tools/fetch.py'])
+    _proc_entry(case.proc, 702, case.executable, tty=34816, argv=['python3', '-m', 'agent_py_agent'])
+    sent = []
+
+    # LLM: 捕获信号且只改合成exe链接模拟退出；不能把信号发给真实主机PID。
+    # 函数用途: 模拟TERM退出或必须KILL的遗留脚本。
+    def kill(pid, sig):
+        sent.append((pid, sig))
+        if sig == signal.SIGKILL or not stubborn:
+            (case.proc / str(pid) / 'exe').unlink(missing_ok=True)
+
+    monkeypatch.setattr(installer.os, 'kill', kill)
+    cleaned = installer.cleanup_orphan_background_processes(case.prefix, timeout=0)
+    assert isinstance(cleaned, list)
+    assert [row['pid'] for row in cleaned] == [703]
+    assert sent[:2] == [(701, signal.SIGTERM), (703, signal.SIGTERM)]
+    assert (703, signal.SIGKILL) in sent if stubborn else all(sig != signal.SIGKILL for _, sig in sent)
+    assert all(pid != 702 for pid, _ in sent)
+    text = capsys.readouterr().out
+    assert 'PID 703' in text and 'PPID 701' in text and 'python3 tools/fetch.py' in text
+
+
+# LLM: 服务路径来自原owner合同；真实安装只写临时数据，服务命令由每例显式拦截。
+# 函数用途: 为维护锁和Supervisor更新创建空白安装与准确服务目录。
+@pytest.fixture
+def update_installation(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, 'active_processes', lambda _: [])
+    monkeypatch.setattr(installer.shutil, 'which', lambda _: None)
+    prefix = tmp_path / 'install'
+    installer.install(_bundle(tmp_path / 'bundle'), prefix)
+    service = installer.workspace_path(prefix) / 'workspace/runtime/services/gateway'
+    service.mkdir(parents=True)
+    return SimpleNamespace(prefix=prefix, service=service)
+
+
+@pytest.mark.parametrize('systemd', [False, True])
+def test_update_maintenance_lock_supervisor_stop_restore_and_order(update_installation, monkeypatch, systemd):
+    from agent_py_agent.agent.gateway_parts.daemon_control import write_pid_record
+
+    case = update_installation
+    for name in ('gateway.pid', 'adapter.pid', 'supervisor.pid'):
+        write_pid_record(case.service / name)
+    (case.service / 'adapter_state.json').write_text(json.dumps({'channels': [{'name': 'qq'}]}))
+    (case.service / 'supervisor_service.json').write_text(json.dumps({'unit_name': 'custom-agent-supervisor.service'}))
+    lock = case.service / 'maintenance_lock.json'
+    commands = []
+    original_run = subprocess.run
+    if systemd:
+        monkeypatch.setattr(installer.shutil, 'which', lambda name: '/usr/bin/systemctl' if name == 'systemctl' else None)
+
+    # LLM: 观察原服务命令前的维护锁，返回码不制造真实停启行为。
+    # 函数用途: 捕获CLI/systemd顺序并证明锁先于任何停止命令。
+    def run(command, **kwargs):
+        if command[0] not in ('systemctl', str(case.prefix / 'bin/my-agent-preview')):
+            return original_run(command, **kwargs)
+        if 'stop' in command or 'supervisor-stop' in command:
+            row = json.loads(lock.read_text())
+            assert row['schema'] == 'my-agent.maintenance-lock.v1' and row['reason'] == 'offline_update'
+            assert row['actor'] == 'installer' and row['pid'] == os.getpid()
+            assert row['expires_at'] - row['created_at'] == 1800
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    # LLM: 代替杀进程，只检查stop全部完成后才进入清理。
+    # 函数用途: 验证清理阶段的调用时机与维护锁仍然存在。
+    def cleanup(prefix):
+        assert prefix == case.prefix and lock.is_file()
+        assert commands[-1][1:3] == ['gateway', 'stop']
+        commands.append(['cleanup'])
+        return []
+
+    monkeypatch.setattr(installer.subprocess, 'run', run)
+    monkeypatch.setattr(installer, 'cleanup_orphan_background_processes', cleanup, raising=False)
+    original = installer.update_services(case.prefix)
+    assert lock.is_file()
+    assert any(command[1:3] == ['gateway', 'supervisor-stop'] for command in commands)
+    assert commands[-1] == ['cleanup']
+    commands.clear()
+    installer.update_services(case.prefix, restore=original)
+    assert not lock.exists()
+    expected = ['systemctl', '--user', 'start', 'custom-agent-supervisor.service'] if systemd else [
+        str(case.prefix / 'bin/my-agent-preview'), 'gateway', 'supervisor-start']
+    assert commands[-1] == expected
+    assert commands[0][1:3] == ['gateway', 'start']
+    assert commands[1][1:] == ['adapter', 'start', '--daemon', '--channel', 'qq']
+
+
+def test_legacy_restore_tuple_always_removes_maintenance_lock(update_installation, monkeypatch):
+    case = update_installation
+    lock = case.service / 'maintenance_lock.json'
+    lock.write_text('{}')
+    commands = []
+    monkeypatch.setattr(installer.subprocess, 'run', lambda command, **kwargs:
+        commands.append(command) or subprocess.CompletedProcess(command, 0))
+    assert installer.update_services(case.prefix, restore=(True, False, 'feishu')) == (True, False, 'feishu')
+    assert not lock.exists() and commands == [[str(case.prefix / 'bin/my-agent-preview'), 'gateway', 'start', '--ready-timeout', '60']]
+
+
+@pytest.mark.parametrize('failed_component', ['gateway', 'adapter'])
+def test_restore_attempts_all_components_after_one_start_failure(update_installation, monkeypatch, failed_component):
+    case = update_installation
+    lock = case.service / 'maintenance_lock.json'
+    lock.write_text('{}')
+    commands = []
+
+    # LLM: 只对一个恢复命令返回失败，记录其它原组件是否仍被尝试启动。
+    # 函数用途: 复现首个组件失败导致Supervisor永久未恢复的问题。
+    def run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, int(command[1:3] == [failed_component, 'start']))
+
+    monkeypatch.setattr(installer.subprocess, 'run', run)
+    state = (True, True, 'qq', True, True, 'my-agent-gw-supervisor.service')
+    with pytest.raises(ValueError, match='服务'):
+        installer.update_services(case.prefix, restore=state)
+    assert not lock.exists()
+    assert [command[1:3] for command in commands[:2]] == [['gateway', 'start'], ['adapter', 'start']]
+    assert commands[-1] == ['systemctl', '--user', 'start', 'my-agent-gw-supervisor.service']
+
+
+@pytest.mark.parametrize('filename,payload', [
+    ('supervisor_service.json', []), ('release.json', []), ('release.json', {'protocols': 'invalid'}),
+    ('release.json', {'protocols': []}), ('release.json', {'protocols': False})])
+def test_update_rejects_bad_object_metadata_without_leaving_maintenance(update_installation, monkeypatch, filename, payload):
+    case = update_installation
+    target = case.prefix / 'current/release.json' if filename == 'release.json' else case.service / filename
+    target.write_text(json.dumps(payload))
+    commands = []
+    monkeypatch.setattr(installer.subprocess, 'run', lambda command, **kwargs:
+        commands.append(command) or subprocess.CompletedProcess(command, 0))
+    with pytest.raises(ValueError):
+        installer.update_services(case.prefix)
+    assert not (case.service / 'maintenance_lock.json').exists()
+    assert not commands
+
+
+def test_proc_stat_right_parenthesis_in_name_does_not_hide_tty(fake_install_proc):
+    case = fake_install_proc
+    entry = _proc_entry(case.proc, 702, case.executable, ppid=701, tty=34816, argv=['python3'])
+    stat = entry / 'stat'
+    stat.write_text(stat.read_text().replace('(synthetic process)', '(worker) helper)'))
+    rows = installer.inspect_active_processes(case.prefix)
+    assert len(rows) == 1 and rows[0]['tty_nr'] == 34816 and rows[0]['ppid'] == 701
+
+
+def test_cleanup_without_safe_pid_handle_does_not_use_bare_kill(fake_install_proc, monkeypatch):
+    case = fake_install_proc
+    _proc_entry(case.proc, 703, case.executable, argv=['python3', 'tools/fetch.py'])
+    monkeypatch.delattr(installer.os, 'pidfd_open', raising=False)
+    sent = []
+    monkeypatch.setattr(installer.os, 'kill', lambda *args: sent.append(args))
+    with pytest.raises(ValueError, match='pidfd'):
+        installer.cleanup_orphan_background_processes(case.prefix, timeout=0)
+    assert not sent
+
+
+# LLM: 仅第一参数确认为本安装脚本才允许停止shell，不把任意.sh参数或共享任务当专用包装器。
+# 函数用途: 锁住跨安装父脚本及旧PPID复用边界；子解释器仍可精准清理。
+@pytest.mark.parametrize('parent_case', ['shared', 'argument', 'reparented'])
+def test_cleanup_does_not_signal_unowned_or_old_parent(fake_install_proc, monkeypatch, parent_case):
+    case = fake_install_proc
+    shell = case.proc.parent / 'bash'
+    shell.write_text('shell')
+    shared = case.proc.parent / 'shared-job'
+    shared.write_text('synthetic shared task')
+    parent = _proc_entry(case.proc, 701, shell, argv=['bash', str(shared), 'config.sh'])
+    (parent / 'cwd').symlink_to(case.prefix)
+    child = _proc_entry(case.proc, 703, case.executable, ppid=701, argv=['python3'])
+    if parent_case == 'shared':
+        (parent / 'cmdline').write_bytes(f'bash\0{shared}.sh\0'.encode())
+    if parent_case == 'reparented':
+        script = case.prefix / 'loop.sh'
+        script.write_text('synthetic dedicated wrapper')
+        (parent / 'cmdline').write_bytes(f'bash\0{script}\0'.encode())
+        snapshots = installer.inspect_active_processes(case.prefix)
+        stat = child / 'stat'
+        stat.write_text(stat.read_text().replace('S 701 ', 'S 1 '))
+        monkeypatch.setattr(installer, 'inspect_active_processes', lambda _: snapshots)
+    sent = []
+
+    # LLM: 本例只模拟所选PID退出，不允许任何信号到达主机。
+    # 函数用途: 检查旧父进程或共享父脚本不会被清理。
+    def kill(pid, sig):
+        sent.append(pid)
+        (case.proc / str(pid) / 'exe').unlink(missing_ok=True)
+
+    monkeypatch.setattr(installer.os, 'kill', kill)
+    installer.cleanup_orphan_background_processes(case.prefix, timeout=0)
+    assert 701 not in sent and 703 in sent
+
+
+def test_install_failure_and_restore_failure_both_reach_error_report(update_installation, monkeypatch, capsys):
+    case = update_installation
+    monkeypatch.setattr(sys, 'argv', ['installer', '--update'])
+    monkeypatch.setattr(installer, 'resolve_install_prefix', lambda _: case.prefix)
+    monkeypatch.setattr(installer, 'verify', lambda _: {'version': 'synthetic'})
+    monkeypatch.setattr(installer, 'assert_interactive_processes_exited', lambda _: None)
+
+    # LLM: 仅制造两次不同阶段错误，不调用真实服务控制。
+    # 函数用途: 证明恢复错误不能掩盖最初安装失败原因。
+    def update(prefix, *, restore=None):
+        if restore is not None:
+            raise ValueError('synthetic restore failure')
+        return (True, False, 'feishu')
+
+    # LLM: 只在安装入口抛合成错误，不修改发行版本或用户数据。
+    # 函数用途: 重现切换失败后恢复也失败的报告路径。
+    def install(*args):
+        raise ValueError('synthetic install failure')
+
+    monkeypatch.setattr(installer, 'update_services', update)
+    monkeypatch.setattr(installer, 'install', install)
+    assert installer.main() == 1
+    error = capsys.readouterr().err
+    assert 'synthetic install failure' in error and 'synthetic restore failure' in error
+
+
+def test_pidfd_identity_change_skips_signal_and_closes_handle(fake_install_proc, monkeypatch):
+    from unittest.mock import Mock
+
+    case = fake_install_proc
+    entry = _proc_entry(case.proc, 703, case.executable, argv=['python3'])
+    identity = installer._process_identity(703)
+    original_open = installer.os.pidfd_open
+    handles = []
+
+    # LLM: 在句柄捕获后改变合成出生时间，模拟PID复用；真实文件FD必须仍关闭。
+    # 函数用途: 证明发信号前复核失败时不向新进程发送TERM。
+    def changed_open(pid):
+        descriptor = original_open(pid)
+        handles.append(descriptor)
+        stat = entry / 'stat'
+        stat.write_text(stat.read_text().rsplit(' ', 1)[0] + ' 9999')
+        return descriptor
+
+    sender = Mock(side_effect=AssertionError('不能给新进程发信号'))
+    monkeypatch.setattr(installer.os, 'pidfd_open', changed_open)
+    monkeypatch.setattr(installer.signal, 'pidfd_send_signal', sender)
+    installer._signal_process(703, identity, signal.SIGTERM)
+    sender.assert_not_called()
+    with pytest.raises(OSError):
+        os.fstat(handles[0])
+
+
+def test_foreign_uid_interpreter_is_not_automatically_stopped(fake_install_proc, monkeypatch):
+    case = fake_install_proc
+    _proc_entry(case.proc, 703, case.executable, argv=['python3'])
+    identity = installer._process_identity(703)
+    monkeypatch.setattr(installer, '_process_identity', lambda _: (identity[0] + 1, *identity[1:]))
+    sent = []
+    monkeypatch.setattr(installer.os, 'kill', lambda *args: sent.append(args))
+    assert installer.cleanup_orphan_background_processes(case.prefix, timeout=0) == []
+    assert not sent
+
+
+def test_stop_failure_restores_all_from_captured_paths(update_installation, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.daemon_control import write_pid_record
+
+    case = update_installation
+    for name in ('gateway.pid', 'adapter.pid', 'supervisor.pid'):
+        write_pid_record(case.service / name)
+    (case.service / 'adapter_state.json').write_text(json.dumps({'channels': [{'name': 'feishu'}]}))
+    paths = installer._update_service_paths(case.prefix)
+    calls = []
+    commands = []
+    original_run = subprocess.run
+
+    # LLM: 停止阶段仅第一次能解析路径；回滚必须消费已捕获的准确root。
+    # 函数用途: 防止失败后重新读取损坏配置让维护锁留在原目录。
+    def resolve(prefix):
+        assert not calls
+        calls.append(prefix)
+        return paths
+
+    # LLM: Gateway停止失败，其余停启回执成功；不执行真实CLI。
+    # 函数用途: 验证失败回滚不会遗漏Adapter或Supervisor。
+    def run(command, **kwargs):
+        if command[0] != str(case.prefix / 'bin/my-agent-preview'):
+            return original_run(command, **kwargs)
+        commands.append(command)
+        return subprocess.CompletedProcess(command, int(command[1:3] == ['gateway', 'stop']))
+
+    monkeypatch.setattr(installer, '_update_service_paths', resolve)
+    monkeypatch.setattr(installer.subprocess, 'run', run)
+    with pytest.raises(ValueError, match='服务控制未完成'):
+        installer.update_services(case.prefix)
+    assert not (case.service / 'maintenance_lock.json').exists()
+    assert [command[1:3] for command in commands[-3:]] == [
+        ['gateway', 'start'], ['adapter', 'start'], ['gateway', 'supervisor-start']]
+
+
+def test_installer_maintenance_pauses_real_supervisor_health_entry(update_installation, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import supervisor
+
+    case = update_installation
+    monkeypatch.setattr(installer.subprocess, 'run', lambda command, **kwargs: subprocess.CompletedProcess(command, 0))
+    paths = installer._update_service_paths(case.prefix)
+    checked = []
+    watcher = SimpleNamespace(_paths=paths, _resolve_agent_and_paths=lambda: None,
+        _is_gateway_healthy=lambda: checked.append('gateway') or True,
+        _check_adapter_health=lambda: checked.append('adapter') or True)
+    state = installer.update_services(case.prefix)
+    lock = supervisor.read_maintenance_lock(paths)
+    assert lock['actor'] == 'installer' and lock['reason'] == 'offline_update'
+    assert supervisor._run_health_check(watcher, 2) == 0
+    assert not checked
+    installer.update_services(case.prefix, restore=state)
+    assert supervisor.read_maintenance_lock(paths) is None
+    assert supervisor._run_health_check(watcher, 2) == 0
+    assert checked == ['gateway', 'adapter']

@@ -48,6 +48,18 @@ class GatewayPaths:
     def supervisor_state(self) -> Path:
         return self.root / "supervisor_state.json"
 
+    # LLM: 维护锁仅从同一Gateway根派生，不创建文件或更改进程权限。
+    # 函数用途: 返回维护期间暂停自动恢复的结构化锁地址。
+    @property
+    def maintenance_lock(self) -> Path:
+        return self.root / "maintenance_lock.json"
+
+    # LLM: 服务安装回执独立于Gateway和supervisor的运行状态，不代表已启动。
+    # 函数用途: 返回OS看门狗服务安装记录地址。
+    @property
+    def supervisor_service(self) -> Path:
+        return self.root / "supervisor_service.json"
+
     # LLM: Terminal request authority is derived from the Gateway root so existing constructors
     # remain compatible; done/failed directories are only outcome projections.
     # 函数用途: 返回按请求 ID 唯一保存完整最终答复的终态目录。
@@ -56,6 +68,8 @@ class GatewayPaths:
         return self.root / "requests" / "terminal"
 
 
+# LLM: 纯路径容器不创建文件；适配器队列不与Gateway请求目录混用。
+# 类用途: 保存适配器文件协议的各目录位置。
 @dataclass
 class AdapterPaths:
 
@@ -67,6 +81,8 @@ class AdapterPaths:
     outbox: Path
 
 
+# LLM: 路径来自已解析Agent及其配置，不另选home或初始化业务。
+# 函数用途: 取得当前Agent的Gateway规范路径。
 def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
     return gateway_paths_from_root(agent.root / agent.config.gateway_workspace)
 
@@ -106,10 +122,14 @@ def claimed_request_chunk_path(request_path: Path, request_id: str) -> Path:
     return request_path.with_name(f"{request_id}.chunks.jsonl")
 
 
+# LLM: 仅拼接processing投影地址，不验证或授予请求权限。
+# 函数用途: 返回正在处理请求的进度文件位置。
 def gateway_chunk_path(paths: GatewayPaths, request_id: str) -> Path:
     return paths.processing / f"{request_id}.chunks.jsonl"
 
 
+# LLM: 仅枚举同队列归档候选；存在性和终态仍由调用方核验。
+# 函数用途: 请求移动后同时查找原进度和完成/失败目录。
 def gateway_chunk_path_candidates(chunk_path: Path) -> tuple[Path, ...]:
     if chunk_path.parent.name != "processing":
         return (chunk_path,)
@@ -121,6 +141,8 @@ def gateway_chunk_path_candidates(chunk_path: Path) -> tuple[Path, ...]:
     )
 
 
+# LLM: 根目录只沿同Agent配置派生；不创建目录或切换执行身份。
+# 函数用途: 取得适配器收发文件目录合同。
 def adapter_paths(agent: SimpleAgent) -> AdapterPaths:
 
     root = agent.root / agent.config.adapter_workspace

@@ -1,3 +1,13 @@
+## 2026-10-21 管理员运行治理（P3源码候选）
+
+```text
+|-- agent_py_agent/agent/tooling/runtime_governance_tool.py # 三层看门狗只读观察、双授权维护锁、准确pidfd孤儿清理和用户unit配置
+|-- agent_py_agent/agent/agent_core/self_map_bootstrap.py # 保留普通脚本/工作流注册，另仅装配可信管理员治理工具
+`-- agent_py_agent/tests/test_runtime_governance_tool.py # 临时安装/proc/systemd夹具、双授权拒绝、PID重用与角色保护回归
+```
+
+关键边界：`runtime_governance`不拦截普通脚本；服务配置只写文件，不启用或重启。维护锁的监护消费和真实Linux/systemd验收属于集成责任，不以工具侧记录替代。
+
 ## 2026-10-21 可组合工作流/固化脚本一等公民与插件遥测 Broker
 
 ```text

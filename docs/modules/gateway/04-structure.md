@@ -1,6 +1,6 @@
-## 2026-10-21 插件宿主扩展接口门面与定时工作流断点挂接（plugin_broker_api / tool_work）
+## 2026-10-21 三层看门狗维护锁、Adapter自愈与插件宿主扩展接口（paths / supervisor / plugin_broker_api）
 
-`gateway_parts/plugin_broker_api.py` 封装 `PluginBrokerService`，按冻结 `owner_id` / `owner_home` 隔离挂载 `assets.*`、`telemetry.*` 与 `execute.*` 主题（含 `patched_step_output` / `updated_data_sources` 续跑参数），并与 `plugins/plugin_host_api.py`、`plugins/plugin_host_broker_topics.py` 对齐；`scheduler/tool_work.py::execute_scheduled_tool` 对 `workflows`/`scripts` 的 `paused_for_resume` / `needs_repair=True` 返回做结构化 `record_rule_result` 写入并在配置 `prompt` 时调用 `notify`。
+`gateway_parts/paths.py` 提供 `maintenance_lock` 与 `supervisor_service` 只读属性；`gateway_parts/supervisor.py` 实现 `write_maintenance_lock` / `read_maintenance_lock` / `clear_maintenance_lock` 与 `_check_and_recover_adapter`（仅在无有效维护锁、Gateway 健康且 `adapter_state.json` 记录 `running` 意图但原 PID 不存活时按单调时钟冷却恢复）。`gateway_parts/plugin_broker_api.py` 封装 `PluginBrokerService`，按冻结 `owner_id` / `owner_home` 隔离挂载 `assets.*`、`telemetry.*` 与 `execute.*` 主题（含 `patched_step_output` / `updated_data_sources` 续跑参数），并与 `plugins/plugin_host_api.py`、`plugins/plugin_host_broker_topics.py` 对齐；`scheduler/tool_work.py::execute_scheduled_tool` 对 `workflows`/`scripts` 的 `paused_for_resume` / `needs_repair=True` 返回做结构化 `record_rule_result` 写入并在配置 `prompt` 时调用 `notify`。
 
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
