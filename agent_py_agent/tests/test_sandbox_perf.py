@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -64,7 +67,7 @@ def test_multi_owner_has_no_uncovered_duplicate_readonly_mounts(multi_owner_spec
     mounts = sandbox._mount_snapshot(sandbox.build_bwrap_argv(multi_owner_spec))
     previous = {}
     for index, mount in enumerate(mounts):
-        if mount.arguments[:1] != ('--ro-bind',):
+        if mount.arguments[:1] not in {('--ro-bind',), ('--ro-bind-try',)}:
             continue
         key = mount.arguments
         if key in previous:
@@ -91,9 +94,10 @@ def test_lexical_contains_does_not_raise_for_normal_misses(monkeypatch, path, ro
 
 # LLM: 参照原完整重放语义比较最终覆盖，优化只能删除影子副本，不能改变隐藏、异名或嵌套写根。
 # 函数用途: 核对一次父挂载压缩前后的有效子挂载及非挂载参数。
-def test_parent_remount_compacts_without_changing_effective_children():
+@pytest.mark.parametrize('readonly_flag', ['--ro-bind', '--ro-bind-try'])
+def test_parent_remount_compacts_without_changing_effective_children(readonly_flag):
     original = ['bwrap', '--bind', '/', '/', '--setenv', 'NAME', 'literal', '--ro-bind', '/src', '/tree',
-        '--ro-bind', '/old', '/tree/secret', '--tmpfs', '/tree/secret', '--remount-ro', '/tree/secret',
+        readonly_flag, '/old', '/tree/secret', '--tmpfs', '/tree/secret', '--remount-ro', '/tree/secret',
         '--bind', '/business', '/tree/open', '--symlink', '/business', '/tree/alias']
     mounts = sandbox._mount_snapshot(original)
     descendants = [m for m in mounts if m.target != Path('/tree') and Path('/tree') in m.target.parents
@@ -109,8 +113,11 @@ def test_parent_remount_compacts_without_changing_effective_children():
 
 # LLM: 只读去重必须考虑中间父覆盖；后续父RW覆盖后仍需重新发精确保护。
 # 函数用途: 验证连续重复只读挂载被省略，但父覆盖后的保护不会被缓存吞掉。
-def test_readonly_mount_dedup_rechecks_later_parent(tmp_path):
-    leaf = tmp_path / 'protected'
+@pytest.mark.parametrize(('name', 'flag'), [('protected', '--ro-bind'),
+    ('runtime.db-wal', '--ro-bind-try'), ('runtime.db-shm', '--ro-bind-try'),
+    ('runtime.db-journal', '--ro-bind-try'), ('state.json.lock', '--ro-bind-try')])
+def test_readonly_mount_dedup_rechecks_later_parent(tmp_path, name, flag):
+    leaf = tmp_path / name
     leaf.write_text('state')
     argv = ['bwrap', '--bind', str(tmp_path), str(tmp_path)]
     sandbox._append_readonly_mounts(argv, (leaf,))
@@ -119,7 +126,7 @@ def test_readonly_mount_dedup_rechecks_later_parent(tmp_path):
     assert argv == once
     argv += ['--bind', str(tmp_path), str(tmp_path)]
     sandbox._append_readonly_mounts(argv, (leaf,))
-    assert sandbox._effective_mount(leaf, sandbox._mount_snapshot(argv)).arguments == ('--ro-bind', str(leaf), str(leaf))
+    assert sandbox._effective_mount(leaf, sandbox._mount_snapshot(argv)).arguments == (flag, str(leaf), str(leaf))
 
 
 # LLM: 只替换最终Attempt构参出口以观察真实shell收集结果，不启动平台沙箱；缺失路径仍须保留保护声明。
@@ -172,10 +179,101 @@ def test_readonly_mounts_skip_realpath_for_missing_entries(tmp_path, monkeypatch
 
 # LLM: 独立复核反例：目录本身只读不代表后来子挂载未开写，绝对保护必须覆盖整个子树。
 # 函数用途: 验证只读去重不保留后发子写根或异源只读子挂载。
-@pytest.mark.parametrize('flag', ['--bind', '--ro-bind'])
+@pytest.mark.parametrize('flag', ['--bind', '--ro-bind', '--ro-bind-try'])
 def test_readonly_parent_reapplied_after_later_child_mount(tmp_path, flag):
     child = tmp_path / 'child'
     child.mkdir()
     argv = ['bwrap', '--ro-bind', str(tmp_path), str(tmp_path), flag, '/other-source', str(child)]
     sandbox._append_readonly_mounts(argv, (tmp_path,))
     assert sandbox._effective_mount(child, sandbox._mount_snapshot(argv)).arguments == ('--ro-bind', str(tmp_path), str(tmp_path))
+
+
+# LLM: 真实临时文件驱动生产构参；仅瞬时侧车允许源缺失，持久文件/目录必须仍是硬只读绑定。
+# 函数用途: 锁住SQLite侧车、锁文件和持久路径的精确挂载参数。
+@pytest.mark.parametrize(('name', 'flag'), [('runtime.db-wal', '--ro-bind-try'),
+    ('runtime.db-shm', '--ro-bind-try'), ('runtime.db-journal', '--ro-bind-try'),
+    ('state.json.lock', '--ro-bind-try'), ('runtime.db', '--ro-bind'), ('AGENTS.md', '--ro-bind'),
+    ('config', '--ro-bind'), ('runtime.db-wal.backup', '--ro-bind'), ('file.locked', '--ro-bind')])
+def test_readonly_sidecar_flags_preserve_persistent_mounts(tmp_path, name, flag):
+    path = tmp_path / name
+    if name == 'config':
+        path.mkdir()
+    else:
+        path.write_text('original')
+    argv = ['bwrap']
+    sandbox._append_readonly_mounts(argv, (path,))
+    assert argv == ['bwrap', flag, str(path), str(path)]
+    mount, = sandbox._mount_snapshot(argv)
+    assert mount.source == path and mount.target == path and mount.writable is False
+
+
+# LLM: 只读投影必须认try-bind；普通bind/dev-bind仍可写，不因新分支改变旧标志的语义。
+# 函数用途: 单独核验四类bind的源、目标、写位及原始参数。
+@pytest.mark.parametrize(('flag', 'writable'), [('--bind', True), ('--dev-bind', True),
+                                               ('--ro-bind', False), ('--ro-bind-try', False)])
+def test_mount_snapshot_recognizes_readonly_try(flag, writable):
+    argv = ['bwrap', flag, '/source', '/target']
+    mounts = sandbox._mount_snapshot(argv)
+    assert len(mounts) == 1
+    mount = sandbox._effective_mount(Path('/target/child'), mounts)
+    assert mount.source == Path('/source') and mount.target == Path('/target')
+    assert mount.arguments == (flag, '/source', '/target') and mount.writable is writable
+
+
+# LLM: 压缩必须成组三参数移除try-bind，不能让已失效的源在祖先重挂前残留并触发bwrap失败。
+# 函数用途: 验证只删除指定影子挂载，保留非挂载选项。
+def test_remove_shadowed_readonly_try_arguments():
+    arguments = ('--ro-bind-try', '/gone-wal', '/tree/runtime.db-wal')
+    argv = ['bwrap', '--setenv', 'KEY', 'literal', *arguments, '--bind', '/src', '/other']
+    sandbox._remove_shadowed_mount_arguments(argv, {arguments})
+    assert argv == ['bwrap', '--setenv', 'KEY', 'literal', '--bind', '/src', '/other']
+
+
+# LLM: 父挂载后重放的try-bind必须保持只读，且旧副本只能留下一个，避免参数与安全覆盖回归。
+# 函数用途: 核验try-bind子覆盖随父挂载压缩和恢复。
+@pytest.mark.parametrize('parent_flag', ['--bind', '--ro-bind', '--ro-bind-try'])
+def test_parent_remount_preserves_readonly_try_child(parent_flag):
+    child = ('--ro-bind-try', '/sidecar-wal', '/tree/runtime.db-wal')
+    argv = ['bwrap', '--bind', '/old-tree', '/tree', *child, '--setenv', 'KEY', 'value']
+    sandbox._append_mount_preserving_children(argv, (parent_flag, '/new-tree', '/tree'))
+    assert argv[-3:] == list(child) and argv.count('--ro-bind-try') == (2 if parent_flag == '--ro-bind-try' else 1)
+    mounts = sandbox._mount_snapshot(argv)
+    mount = sandbox._effective_mount(Path(child[2]), mounts)
+    assert mount.arguments == child and mount.writable is False
+    assert argv[1:4] == ['--bind', '/old-tree', '/tree']
+    assert argv[4:7] == ['--setenv', 'KEY', 'value']
+
+
+# LLM: 仅Linux真实bwrap验证源在exec前删除的窗口；其他平台明确跳过，不用模拟器宣称内核保护通过。
+# 函数用途: 对照侧车存在时拒写、消失时启动成功，并确认父目录实际可写。
+@pytest.mark.skipif(not sys.platform.startswith('linux') or shutil.which('bwrap') is None,
+                    reason='requires Linux and real bubblewrap')
+@pytest.mark.parametrize('name', ['runtime.db-wal', 'runtime.db-shm', 'runtime.db-journal', 'state.json.lock'])
+@pytest.mark.parametrize('disappear', [False, True])
+def test_real_bwrap_readonly_sidecar_survives_exec_race(tmp_path, name, disappear):
+    leaf = tmp_path / name
+    leaf.write_text('original')
+    argv = [shutil.which('bwrap'), '--ro-bind', '/', '/', '--bind', str(tmp_path), str(tmp_path)]
+    sandbox._append_readonly_mounts(argv, (leaf,))
+    assert argv[-3:] == ['--ro-bind-try', str(leaf), str(leaf)]
+    if disappear:
+        leaf.unlink()
+    code = '''import errno, sys
+from pathlib import Path
+leaf, disappear = Path(sys.argv[1]), sys.argv[2] == 'True'
+(leaf.parent / 'parent-write-control').write_text('writable')
+if disappear:
+    assert not leaf.exists()
+else:
+    try:
+        leaf.write_text('must not write')
+    except OSError as error:
+        assert error.errno == errno.EROFS, error
+    else:
+        raise AssertionError('sidecar unexpectedly writable')
+'''
+    result = subprocess.run([*argv, sys.executable, '-B', '-c', code, str(leaf), str(disappear)],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert (tmp_path / 'parent-write-control').read_text() == 'writable'
+    assert not leaf.exists() if disappear else leaf.read_text() == 'original'

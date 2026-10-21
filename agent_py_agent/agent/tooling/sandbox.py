@@ -29,6 +29,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..path_access_policy import (
+    HOST_STATE_LOCK_SUFFIX,
+    SQLITE_SIDECAR_SUFFIXES,
     AgentsSourceProtectionError,
     persona_process_protection_snapshot,
     persona_sandbox_root,
@@ -540,7 +542,13 @@ def _append_write_scope_mounts(
             argv += ["--bind" if writable else "--ro-bind", str(root), str(root)]
 
 
-# LLM: 缺失项不挂载也不重复realpath；同源只读及其子视图都未被后发挂载改变时才去重，不跨调用缓存权限。
+# LLM: 只按宿主策略的瞬时后缀判定；try-bind仅容忍源在exec前消失，存在时仍必须只读，不扩大持久路径例外。
+# 函数用途: 识别SQLite侧车和宿主锁文件，避免删除竞态中止整个bwrap启动。
+def _is_ephemeral_readonly_sidecar(path: Path) -> bool:
+    return path.name.endswith((*SQLITE_SIDECAR_SUFFIXES, HOST_STATE_LOCK_SUFFIX))
+
+
+# LLM: 缺失项快跳；瞬时侧车try-bind容忍exec前删除，持久路径仍硬RO；有效同源只读才去重，不跨调用缓存权限。
 # 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略仍生效的重复挂载。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
     seen: set[Path] = set()
@@ -556,7 +564,8 @@ def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
         if path in seen or not path.exists():
             continue
         seen.add(path)
-        arguments = ('--ro-bind', str(path), str(path))
+        flag = '--ro-bind-try' if _is_ephemeral_readonly_sidecar(path) else '--ro-bind'
+        arguments = (flag, str(path), str(path))
         if _readonly_mount_unchanged(path, arguments, mounts):
             continue
         argv.extend(arguments)
@@ -836,13 +845,13 @@ class _MountProjection:
     arguments: tuple[str, ...] = ()
 
 
-# LLM: 只解析本模块已生成argv；同次原参数用于祖先重挂后的精确恢复，不从spec/别名新增授权或模拟内核成功。
+# LLM: 只解析本模块argv，ro-bind及ro-bind-try同为RO；原参数供祖先重挂恢复，不从别名新增授权或模拟内核成功。
 # 函数用途: 冻结底图源、目标、写位和必要的空视图只读参数，供投影及挂载次序保护共用。
 def _mount_snapshot(argv: list[str]) -> tuple[_MountProjection, ...]:
     mounts: list[_MountProjection] = []
     for index, flag in enumerate(argv):
-        if flag in {"--bind", "--ro-bind", "--dev-bind"}:
-            mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), flag != "--ro-bind",
+        if flag in {"--bind", "--ro-bind", "--ro-bind-try", "--dev-bind"}:
+            mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), flag not in {"--ro-bind", "--ro-bind-try"},
                                            arguments=tuple(argv[index:index + 3])))
         elif flag == "--symlink":
             mounts.append(_MountProjection(Path(argv[index + 1]), Path(argv[index + 2]), alias=True,
@@ -1080,12 +1089,12 @@ def _effective_mounts(mounts: tuple[_MountProjection, ...]) -> tuple[_MountProje
     return tuple(reversed(effective))
 
 
-# LLM: 只删除将被新父挂载覆盖且随后按原参数恢复的子挂载；非挂载选项与同目标挂载保留。
+# LLM: 只移除随后恢复的子挂载影子，ro-bind-try与ro-bind同组三参数处理；非挂载选项与同目标挂载保留。
 # 函数用途: 从argv清掉旧子挂载的影子副本，空挂载与紧邻的remount-ro成组移除。
 def _remove_shadowed_mount_arguments(argv: list[str], arguments: set[tuple[str, ...]]) -> None:
     removed: set[int] = set()
     for index, flag in enumerate(argv):
-        if flag in {'--bind', '--ro-bind', '--dev-bind', '--symlink'}:
+        if flag in {'--bind', '--ro-bind', '--ro-bind-try', '--dev-bind', '--symlink'}:
             entry = tuple(argv[index:index + 3])
         elif flag in {'--tmpfs', '--proc', '--dev'}:
             entry = _empty_mount_arguments(argv, index)
